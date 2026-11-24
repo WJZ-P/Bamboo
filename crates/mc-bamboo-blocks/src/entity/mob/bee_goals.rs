@@ -1078,28 +1078,47 @@ fn grown_state(state: BlockState) -> Option<BlockState> {
 
 /// `Command::BeeEnterHive` 的落地：存进巢、发进巢声，然后把自己丢掉。
 pub fn apply_enter_hive(me: &mut Entity, world: &mut World, hive: BlockPos) {
+    let bee_has_flower = me
+        .kind
+        .mob()
+        .is_some_and(|mob| mob.bee.saved_flower_pos.is_some());
     let row = me.clone().split();
     let stored = world.with_block_entity::<BeehiveEntity, _>(hive, |entity, world| {
-        entity.add_bee(&row, world.random().next_boolean())
+        if entity.is_full() {
+            return false;
+        }
+        // 官方 `BeehiveBlockEntity.addOccupant`：蜂和巢都有记住的花时才抽 `nextBoolean()`。
+        // Vanilla `addOccupant`: draw `nextBoolean()` only when both bee and hive have a flower.
+        let keep_flower = bee_has_flower
+            && (entity.saved_flower_pos().is_none() || world.random().next_boolean());
+        entity.add_bee(&row, keep_flower)
     });
     if stored == Some(true) {
+        world.play_sound(
+            Vec3::new(f64::from(hive.x), f64::from(hive.y), f64::from(hive.z)),
+            mc_bamboo_data::sounds::sound_event("minecraft:block.beehive.enter"),
+            mc_bamboo_data::sounds::BLOCKS,
+            1.0,
+            1.0,
+            false,
+        );
         me.removed = true;
     }
 }
 
-/// `Bee.tick` 的花蜜粒子：官方先 `nextFloat() < 0.05`，再 `nextInt(2)+1` 次
-/// 两发 `level.random.nextDouble()`。这里只做取数，粒子包未建。
+/// `Bee.tick` 的花蜜粒子：官方先 `nextFloat() < 0.05`，再在循环条件里每次重算
+/// `i < random.nextInt(2) + 1`，每次循环抽两发 `level.random.nextDouble()`。
 pub fn nectar_particles(me: &mut Entity, mob: &Mob, ctx: &mut dyn EntityCtx) {
     if !mob.bee.has_nectar() || mob.bee.crops_grown >= 10 || me.random.next_float() >= 0.05 {
         return;
     }
-    let count = me.random.next_int_bounded(2) + 1;
-    ctx.emit(
-        Command::BeeNectarParticles {
-            count: count as usize,
-        },
-        me,
-    );
+    let mut count = 0_usize;
+    while (count as i32) < me.random.next_int_bounded(2) + 1 {
+        count += 1;
+    }
+    if count > 0 {
+        ctx.emit(Command::BeeNectarParticles { count }, me);
+    }
 }
 
 /// 蜜蜂用到的 POISON 效果 ID（对拍状态列会读）。

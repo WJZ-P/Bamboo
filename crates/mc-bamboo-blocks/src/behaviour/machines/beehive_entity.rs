@@ -213,6 +213,9 @@ impl BeehiveEntity {
 
     /// `addOccupant(Bee)`：把一只真的蜜蜂收进巢，返回成功后调用方可以丢弃它。
     pub fn add_bee(&mut self, row: &EntityRow, keep_flower: bool) -> bool {
+        if self.is_full() {
+            return false;
+        }
         let Some(occupant) = Occupant::of(row) else {
             return false;
         };
@@ -391,6 +394,7 @@ impl BeehiveEntity {
             f64::from(self.pos.y) + 0.5 - f64::from(height) / 2.0,
             f64::from(self.pos.z) + 0.5 + offset * f64::from(dz),
         );
+        entity.old_position = entity.position;
         world.play_block_sound(
             self.pos,
             sounds::sound_event("minecraft:block.beehive.exit"),
@@ -398,6 +402,14 @@ impl BeehiveEntity {
             1.0,
         );
         let id = world.spawn_entity(entity);
+        // `Entity.snapTo`：同步旧朝向，使下一刻 `yRotO` / `xRotO` 与出生朝向一致。
+        // `Entity.snapTo`: sync old rotations so next-tick `yRotO`/`xRotO` match spawn rotation.
+        world.with_entity_mut(id, &mut |e| {
+            e.with_mob(|me, mob| {
+                mob.y_rot_o = me.y_rot;
+                mob.x_rot_o = mob.x_rot;
+            });
+        });
         let _ = player_pos;
         Some(id)
     }
