@@ -751,6 +751,14 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     player.health.health = (player.health.health + amount).min(max);
                 }
             }
+            Effect::GuardianElderEffect { target, silent } => {
+                use mc_bamboo_protocol::packet::play::GameEvent;
+                let packet = GameEvent {
+                    event: GameEvent::GUARDIAN_ELDER_EFFECT,
+                    param: if silent { 0.0 } else { 1.0 },
+                };
+                region.links.send(crate::inbound::PlayerId(target), &packet);
+            }
             Effect::SleepInBed {
                 pos,
                 set_spawn,

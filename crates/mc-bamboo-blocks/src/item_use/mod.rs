@@ -162,6 +162,12 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         _ if ctx.item == items::DROWNED_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Drowned)
         }
+        _ if ctx.item == items::GUARDIAN_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Guardian)
+        }
+        _ if ctx.item == items::ELDER_GUARDIAN_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::ElderGuardian)
+        }
         _ if ctx.item == items::WITCH_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Witch)
         }

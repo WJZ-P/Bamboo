@@ -150,6 +150,26 @@ pub enum Goal {
         look_at: Option<EntityUid>,
         look_time: i32,
     },
+    /// `LookAtPlayerGoal(mob, <type>.class, distance, probability)`：按种类看最近的生物。
+    /// 守卫者的「看守卫者」用这个变体；运行名仍是 `"LookAtPlayerGoal"`。
+    ///
+    /// `LookAtPlayerGoal(mob, <type>.class, distance, probability)`: watch the nearest
+    /// mob of a given kind. The guardian's "watch guardians" goal uses this variant;
+    /// its running name stays `"LookAtPlayerGoal"`.
+    LookAtMob {
+        kind: super::MobType,
+        look_distance: f32,
+        probability: f32,
+        look_at: Option<EntityUid>,
+        look_time: i32,
+    },
+    /// `Guardian.GuardianAttackGoal`：激光蓄力、元数据写入、实体事件 21 与两次伤害。
+    /// `attackTime` 存在 [`super::guardian::GuardianState::attack_time`]。
+    ///
+    /// `Guardian.GuardianAttackGoal`: laser charge-up, metadata write, entity event 21
+    /// and the two hits. `attackTime` lives in
+    /// [`super::guardian::GuardianState::attack_time`].
+    GuardianAttack,
     RandomLookAround {
         rel_x: f64,
         rel_z: f64,
@@ -579,6 +599,12 @@ pub enum TargetType {
     ///
     /// The snow golem's hostile-mob target: `instanceof Enemy` (creepers included).
     SnowGolemPrey,
+    /// `Guardian.GuardianAttackSelector`：玩家 / 鱿鱼（含发光鱿鱼）/ 美西螈，
+    /// 且到守卫者的距离平方 > 9。
+    ///
+    /// `Guardian.GuardianAttackSelector`: players, squid (including glow squid) and
+    /// axolotls, at squared distance greater than 9 from the guardian.
+    GuardianPrey,
 }
 
 impl TargetType {
@@ -695,7 +721,8 @@ impl Goal {
             | Self::OcelotAttack { .. }
             | Self::RandomLookAround { .. } => &[Flag::Move, Flag::Look],
             Self::FollowParent { .. } => &[],
-            Self::LookAtPlayer { .. } => &[Flag::Look],
+            Self::LookAtPlayer { .. } | Self::LookAtMob { .. } => &[Flag::Look],
+            Self::GuardianAttack => &[Flag::Move, Flag::Look],
             Self::Unavailable(_)
             | Self::RandomStand { .. }
             | Self::SkeletonTrap
@@ -790,6 +817,7 @@ impl Goal {
                 | Self::SquidFlee { .. }
                 | Self::RandomStand { .. }
                 | Self::RangedAttack { .. }
+                | Self::GuardianAttack
                 | Self::DrownedTridentAttack { .. }
                 | Self::TurtleLayEgg { .. }
                 | Self::TurtleGoToWater { .. }
@@ -826,7 +854,8 @@ impl Goal {
             Self::FollowParent { .. } => "FollowParentGoal",
             Self::Stroll { probability, .. } if *probability < 0.0 => "RandomStrollGoal",
             Self::Stroll { .. } => "WaterAvoidingRandomStrollGoal",
-            Self::LookAtPlayer { .. } => "LookAtPlayerGoal",
+            Self::LookAtPlayer { .. } | Self::LookAtMob { .. } => "LookAtPlayerGoal",
+            Self::GuardianAttack => "GuardianAttackGoal",
             Self::RandomLookAround { .. } => "RandomLookAroundGoal",
             Self::Unavailable(name) => name,
             Self::SkeletonTrap => "SkeletonTrapGoal",
@@ -1808,6 +1837,14 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             force_trigger,
             ..
         } => {
+            // `GuardianAttackGoal.stop` 的 `randomStrollGoal.trigger()`：标记转成
+            // `force_trigger`，会一直保留到游走真的启动。
+            // `randomStrollGoal.trigger()` from `GuardianAttackGoal.stop`: the flag
+            // becomes `force_trigger` and stays until the stroll actually starts.
+            if mob.guardian.stroll_triggered {
+                *force_trigger = true;
+                mob.guardian.stroll_triggered = false;
+            }
             // `RandomStrollGoal.canUse` 的第一句：有控制乘客就当场返回，不抽随机数。
             // `RandomStrollGoal.canUse`: a controlling passenger returns early, no draw.
             if has_controlling_passenger(mob, ctx) {
@@ -1895,6 +1932,28 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             // `FoxLookAtPlayerGoal`：趴倒或者感兴趣时不看人。
             // `FoxLookAtPlayerGoal`: no looking while faceplanted or interested.
             look_at.is_some() && !super::fox::blocks_look(mob)
+        }
+        Goal::LookAtMob {
+            probability,
+            look_distance,
+            look_at,
+            kind,
+            ..
+        } => {
+            if me.random.next_float() >= *probability {
+                return false;
+            }
+            // 官方 `canUse` 无条件按 `lookAtType` 找最近实体（中间给 `getTarget()`
+            // 的赋值随后就被覆盖）。
+            // Vanilla `canUse` always searches by `lookAtType`; the interim
+            // `getTarget()` assignment is overwritten.
+            *look_at = nearest_look_mob(me, mob, ctx, f64::from(*look_distance), *kind);
+            look_at.is_some()
+        }
+        Goal::GuardianAttack => {
+            // `GuardianAttackGoal.canUse`：`getTarget() != null && isAlive()`。
+            // `GuardianAttackGoal.canUse`: `getTarget() != null && isAlive()`.
+            combat_target(mob, ctx).is_some()
         }
         Goal::RandomLookAround { .. } => me.random.next_float() < 0.02,
         Goal::Unavailable(_) => false,
@@ -2124,6 +2183,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 // `AbstractSchoolingFish`：鳕鱼 / 鲑鱼 / 热带鱼，河豚不是成群鱼。
                 // `AbstractSchoolingFish`: cod, salmon and tropical fish; pufferfish is not.
                 TargetType::Fish => nearest_mob_target(me, mob, ctx, is_schooling_fish),
+                // `Guardian.GuardianAttackSelector`：玩家 / 鱿鱼（含发光鱿鱼）/ 美西螈，
+                // 且 `distanceToSqr(guardian) > 9`。
+                // `Guardian.GuardianAttackSelector`: players, squid (glow squid included)
+                // and axolotls with `distanceToSqr(guardian) > 9`.
+                TargetType::GuardianPrey => nearest_guardian_target(me, mob, ctx),
                 TargetType::Player | TargetType::GuardedPlayer | TargetType::AngerPlayer => {
                     nearest_attackable(me, mob, ctx, *kind)
                 }
@@ -2497,6 +2561,31 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             }
             *look_time > 0 && !super::fox::blocks_look(mob)
         }
+        Goal::LookAtMob {
+            look_distance,
+            look_at,
+            look_time,
+            ..
+        } => {
+            let Some((target, alive)) = look_at.and_then(|uid| target_view(ctx, uid)) else {
+                return false;
+            };
+            if !alive {
+                return false;
+            }
+            let limit = f64::from(*look_distance * *look_distance);
+            me.position.distance_to_sqr(target.position) <= limit && *look_time > 0
+        }
+        Goal::GuardianAttack => {
+            // `Goal.canContinueToUse()`（基类 = canUse） && (远古 || 目标距离平方 > 9)。
+            // `Goal.canContinueToUse()` (base = canUse) && (elder || distSqr > 9).
+            let Some(target) = combat_target(mob, ctx) else {
+                return false;
+            };
+            mob.mob_type == super::MobType::ElderGuardian
+                || me.position.distance_to_sqr(target.position)
+                    > super::guardian::MIN_TARGET_DISTANCE_SQR
+        }
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
         Goal::Float
         | Goal::Swell { .. }
@@ -2803,8 +2892,20 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         }
         Goal::PufferfishPuff => super::fish::puff_start(mob),
         Goal::FollowFlock { time_to_recalc, .. } => *time_to_recalc = 0,
-        Goal::LookAtPlayer { look_time, .. } => {
+        Goal::LookAtPlayer { look_time, .. } | Goal::LookAtMob { look_time, .. } => {
             *look_time = reduced_tick_delay(40 + me.random.next_int_bounded(40));
+        }
+        Goal::GuardianAttack => {
+            // `GuardianAttackGoal.start`：`attackTime = -10`、停导航、看向目标、needsSync。
+            // `GuardianAttackGoal.start`: `attackTime = -10`, stop navigation, look at the
+            // target, needsSync.
+            mob.guardian.attack_time = -10;
+            mob.navigation.stop();
+            if let Some(target) = combat_target(mob, ctx) {
+                let eye = target.eye_position();
+                mob.look.set_look_at(eye.x, eye.y, eye.z, 90.0, 90.0);
+            }
+            mob.needs_sync = true;
         }
         Goal::RandomLookAround {
             rel_x,
@@ -3040,7 +3141,14 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::TurtleTravel { .. } => mob.turtle.travel_pos = None,
         Goal::PufferfishPuff => super::fish::puff_stop(mob),
         Goal::FollowFlock { .. } => super::fish::flock_stop(mob, ctx, me),
-        Goal::LookAtPlayer { look_at, .. } => *look_at = None,
+        Goal::LookAtPlayer { look_at, .. } | Goal::LookAtMob { look_at, .. } => *look_at = None,
+        Goal::GuardianAttack => {
+            // `GuardianAttackGoal.stop`：清元数据、清目标、`randomStrollGoal.trigger()`。
+            // `GuardianAttackGoal.stop`: clear metadata and target, trigger the stroll.
+            mob.guardian.attack_target = 0;
+            mob.target = None;
+            mob.guardian.stroll_triggered = true;
+        }
         Goal::Swell { target } => *target = None,
         Goal::Float
         | Goal::RabbitRaid(_)
@@ -3447,6 +3555,91 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 max_head_x_rot(mob),
             );
             *look_time -= 1;
+        }
+        Goal::LookAtMob {
+            look_at, look_time, ..
+        } => {
+            let Some((target, alive)) = look_at.and_then(|uid| target_view(ctx, uid)) else {
+                return;
+            };
+            if !alive {
+                return;
+            }
+            let eye = target.eye_position();
+            mob.look.set_look_at(
+                eye.x,
+                eye.y,
+                eye.z,
+                super::control::HEAD_ROT_SPEED as f32,
+                max_head_x_rot(mob),
+            );
+            *look_time -= 1;
+        }
+        Goal::GuardianAttack => {
+            // `GuardianAttackGoal.tick`。
+            let Some(target) = combat_target(mob, ctx) else {
+                return;
+            };
+            mob.navigation.stop();
+            let eye = target.eye_position();
+            mob.look.set_look_at(eye.x, eye.y, eye.z, 90.0, 90.0);
+            let uid = target.uid;
+            if !living::has_line_of_sight(me, mob, ctx.blocks(), uid, eye) {
+                mob.target = None;
+                return;
+            }
+            mob.guardian.attack_time += 1;
+            if mob.guardian.attack_time == 0 {
+                // `setActiveAttackTarget(target.getId())`，非静音广播实体事件 21。
+                // `setActiveAttackTarget(target.getId())`, broadcast entity event 21
+                // unless silent.
+                mob.guardian.attack_target = uid;
+                if !mob.silent {
+                    mob.events.push(super::MobEvent::EntityEvent { event: 21 });
+                }
+            } else if mob.guardian.attack_time
+                >= super::guardian::attack_duration(mob.mob_type)
+            {
+                // 伤害基值 1，困难 +2，远古 +2。
+                // Base damage 1, +2 on hard, +2 for the elder guardian.
+                let damage = super::guardian::laser_damage(
+                    mob.mob_type == super::MobType::ElderGuardian,
+                    ctx.blocks().difficulty() == 3,
+                );
+                // 第一次伤害：`damageSources().indirectMagic(guardian, guardian)`。
+                // First hit: `damageSources().indirectMagic(guardian, guardian)`.
+                let mut source =
+                    super::DamageSource::environment(super::DamageKind::IndirectMagic)
+                        .with_non_player_cause(true);
+                source.attacker = Some(me.id);
+                source.direct = Some(me.id);
+                source.attacker_uuid = Some(mob.uuid);
+                source.position = Some(me.position);
+                if player_by_uid(ctx.blocks(), uid).is_some() {
+                    ctx.emit(
+                        Command::HurtPlayer {
+                            target: uid,
+                            source,
+                            amount: damage,
+                        },
+                        me,
+                    );
+                } else {
+                    ctx.emit(
+                        Command::HurtMob {
+                            target: uid,
+                            source,
+                            amount: damage,
+                            on_hit: None,
+                        },
+                        me,
+                    );
+                }
+                // 第二次伤害：`Mob.doHurtTarget`，用近战攻击力。
+                // Second hit: `Mob.doHurtTarget`, using the melee attack damage.
+                living::do_hurt_target(me, mob, ctx, uid);
+                mob.target = None;
+            }
         }
         Goal::RandomLookAround {
             rel_x,
@@ -4044,6 +4237,144 @@ fn nearest_look_target(
     found
 }
 
+/// `LookAtPlayerGoal.canUse` 的非玩家分支：`getEntitiesOfClass(<type>.class,
+/// bb.inflate(d, 3, d))` 里过了 `lookAtContext`（`d` 格、看得见）的最近一只，
+/// 距离从它的脚量到自己的眼睛。
+///
+/// The non-player branch of `LookAtPlayerGoal.canUse`: the nearest mob of the
+/// given kind in `bb.inflate(d, 3, d)` passing `lookAtContext` (`d` blocks, in
+/// sight), measured from its feet to this mob's eyes.
+fn nearest_look_mob(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    range: f64,
+    kind: super::MobType,
+) -> Option<EntityUid> {
+    let eye = Vec3::new(me.position.x, living::eye_y(me, mob), me.position.z);
+    let mut candidates: Vec<(EntityUid, Vec3)> = Vec::new();
+    ctx.for_each_other_in(me.bounding_box().inflate(range, 3.0, range), &mut |other| {
+        if let KindPublic::Mob(public) = &other.kind
+            && public.mob_type == kind
+            && !other.removed
+            && public.is_alive()
+        {
+            candidates.push((other.uid, other.position));
+        }
+    });
+    let limit = mth::java_max(range, 2.0);
+    let mut best = -1.0_f64;
+    let mut found = None;
+    for (uid, position) in candidates {
+        if me.position.distance_to_sqr(position) > limit * limit {
+            continue;
+        }
+        let Some((target, _)) = target_view(ctx, uid) else {
+            continue;
+        };
+        if !living::has_line_of_sight(me, mob, ctx.blocks(), uid, target.eye_position()) {
+            continue;
+        }
+        let distance = position.distance_to_sqr(eye);
+        if best == -1.0 || distance < best {
+            best = distance;
+            found = Some(uid);
+        }
+    }
+    found
+}
+
+/// `Guardian.GuardianAttackSelector` + `NearestAttackableTargetGoal.findTarget`：
+/// 玩家 / 鱿鱼（含发光鱿鱼）/ 美西螈里，距离平方 > 9 且在跟随距离内、看得见的最近一只。
+/// 选择器在 `TargetingConditions.test` 里先于距离和视线检查。
+///
+/// `Guardian.GuardianAttackSelector` + `NearestAttackableTargetGoal.findTarget`: the
+/// nearest player / squid (glow squid included) / axolotl with squared distance > 9,
+/// within follow range and in sight. The selector runs before the range and sight
+/// checks in `TargetingConditions.test`.
+fn nearest_guardian_target(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Option<EntityUid> {
+    let view = ctx.blocks();
+    // `TargetingConditions.test` 的和平难度闸门：不打玩家。
+    // The peaceful gate of `TargetingConditions.test`: no player targets.
+    if view.difficulty() == 0 {
+        return None;
+    }
+    let range = mob
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
+    let eye = Vec3::new(
+        me.position.x,
+        me.position.y + f64::from(mob.eye_height),
+        me.position.z,
+    );
+    let mut best = f64::MAX;
+    let mut found = None;
+
+    // `instanceof Player` 恒真；`distanceToSqr(guardian) > 9.0`。
+    // `instanceof Player` always holds; `distanceToSqr(guardian) > 9.0`.
+    view.for_each_player(&mut |player| {
+        if player.creative
+            || me.position.distance_to_sqr(player.position)
+                <= super::guardian::MIN_TARGET_DISTANCE_SQR
+        {
+            return;
+        }
+        if !allied(mob, view, player) && targeting_test(me, mob, view, player, range, true) {
+            // `getNearestEntity` 按目标脚下到生物眼睛的距离排名。
+            // `getNearestEntity` ranks the target's feet against the mob's eye point.
+            let distance = player.position.distance_to_sqr(eye);
+            if distance < best {
+                best = distance;
+                found = Some(player.uid);
+            }
+        }
+    });
+
+    // `instanceof Squid`（含 GlowSquid）或 `instanceof Axolotl`；`distanceToSqr > 9.0`。
+    // `instanceof Squid` (GlowSquid included) or `instanceof Axolotl`; squared distance > 9.
+    let area = me.bounding_box().inflate(range, range, range);
+    let mut candidates: Vec<(EntityUid, Vec3, f32)> = Vec::new();
+    ctx.for_each_other_in(area, &mut |other| {
+        let KindPublic::Mob(public) = &other.kind else {
+            return;
+        };
+        if other.uid == me.id
+            || other.removed
+            || !public.is_alive()
+            || !matches!(
+                public.mob_type,
+                super::MobType::Squid | super::MobType::GlowSquid | super::MobType::Axolotl
+            )
+            || me.position.distance_to_sqr(other.position)
+                <= super::guardian::MIN_TARGET_DISTANCE_SQR
+        {
+            return;
+        }
+        let (_, _, eye_height) = public.mob_type.dimensions(public.baby);
+        candidates.push((other.uid, other.position, eye_height));
+    });
+    let limit = mth::java_max(range, 2.0);
+    for (uid, position, target_eye_height) in candidates {
+        if me.position.distance_to_sqr(position) > limit * limit {
+            continue;
+        }
+        let target_eye = Vec3::new(
+            position.x,
+            position.y + f64::from(target_eye_height),
+            position.z,
+        );
+        if !living::has_line_of_sight(me, mob, view, uid, target_eye) {
+            continue;
+        }
+        let distance = position.distance_to_sqr(eye);
+        if distance < best {
+            best = distance;
+            found = Some(uid);
+        }
+    }
+    found
+}
+
 /// `TemptGoal.canUse` 里的 `getNearestPlayer(targetingConditions.range(TEMPT_RANGE), mob)`。
 pub(super) fn nearest_tempting_player(
     me: &Entity,
@@ -4355,6 +4686,12 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
         && super::infested::is_compatible_host_block(view.block_state(pos.below()))
     {
         return 10.0;
+    }
+    // `Guardian.getWalkTargetValue`：水格给 `10 + 光照代价`，其余走怪物那一支。
+    // `Guardian.getWalkTargetValue`: water cells get `10 + light cost`, else the monster
+    // branch.
+    if super::guardian::is_guardian(mob.mob_type) {
+        return super::guardian::walk_target_value(view, pos);
     }
     if mob.mob_type.is_monster() {
         return monster_walk_target_value(view, pos);
@@ -4878,6 +5215,10 @@ pub(super) fn target_goal_can_continue(me: &Entity, mob: &Mob, ctx: &dyn EntityC
 pub(super) fn max_head_x_rot(mob: &Mob) -> f32 {
     if mob.mob_type == super::MobType::Wolf {
         super::wolf::max_head_x_rot(mob)
+    } else if super::guardian::is_guardian(mob.mob_type) {
+        // `Guardian.getMaxHeadXRot()` = 180。
+        // `Guardian.getMaxHeadXRot()` = 180.
+        180.0
     } else {
         super::control::MAX_HEAD_X_ROT as f32
     }

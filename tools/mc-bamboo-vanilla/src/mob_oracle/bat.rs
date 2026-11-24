@@ -79,6 +79,8 @@ pub(super) fn player_view(uid: i32, [x, y, z]: [f64; 3]) -> PlayerView {
         gaze_disguise: false,
         alive: true,
         spectator: false,
+        game_mode: 0,
+        mining_fatigue: None,
         creative: false,
         sneaking: false,
         sprinting: false,

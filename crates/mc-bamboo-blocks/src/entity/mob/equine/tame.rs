@@ -170,6 +170,8 @@ mod tests {
             gaze_disguise: false,
             alive: true,
             spectator: false,
+            game_mode: 0,
+            mining_fatigue: None,
             creative: false,
             sneaking: false,
             sprinting: false,
