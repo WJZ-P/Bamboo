@@ -10403,6 +10403,12 @@ public final class MobOracle {
         for (int tick = 0; tick <= ticks; tick++) {
             if (tick > 0) {
                 world.gameTime++;
+                // 官方 `ServerPlayer.doTick` / `LivingEntity.baseTick` 每刻递减这两个计时器。
+                // Vanilla decrements these two timers every tick.
+                if (player != null) {
+                    player.hurtTime = Math.max(0, player.hurtTime - 1);
+                    player.damageCooldownTime = Math.max(0, player.damageCooldownTime - 1);
+                }
                 if (!guardian.isRemoved()) {
                     guardian.checkDespawn();
                     guardian.commonTick();
@@ -10423,8 +10429,11 @@ public final class MobOracle {
             if (tick != 0) frames.append(',');
             frames.append("{\"guardian\":").append(guardianFrame(guardian))
                     .append(",\"playerHealth\":")
-                    .append(thorns && player != null
-                            ? Float.floatToRawIntBits(player.getHealth()) : "0")
+                    .append(player == null ? "0" : Float.floatToRawIntBits(player.getHealth()))
+                    .append(",\"playerHurtTime\":")
+                    .append(player == null ? "0" : player.hurtTime)
+                    .append(",\"playerDamageCooldown\":")
+                    .append(player == null ? "0" : player.damageCooldownTime)
                     .append('}');
         }
         frames.append(']');

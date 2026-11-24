@@ -8,12 +8,9 @@
 //! flopping. Vanilla constructs the guardian in a fake level; the replay uses the
 //! same blocks and seeds and compares raw bits.
 
-use mc_bamboo_blocks::{
-    Effect,
-    entity::{
-        Entity, JavaRandom,
-        mob::{DamageKind, DamageSource, MobType},
-    },
+use mc_bamboo_blocks::entity::{
+    Entity, JavaRandom,
+    mob::{DamageKind, DamageSource, MobType},
 };
 use mc_bamboo_core::Vec3;
 
@@ -90,8 +87,15 @@ struct GuardianSetup {
 #[serde(rename_all = "camelCase")]
 struct GuardianFrameLine {
     guardian: GuardianFrame,
+    /// 玩家血量的原始位。
     #[serde(default)]
     player_health: i32,
+    /// `LivingEntity.hurtTime`（受伤动画计时）。
+    #[serde(default)]
+    player_hurt_time: i32,
+    /// `LivingEntity.damageCooldownTime`（受伤无敌计时）。
+    #[serde(default)]
+    player_damage_cooldown: i32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -191,7 +195,28 @@ impl GuardianCase {
                 })
                 .into_iter()
                 .collect(),
-            game: None,
+            game: self.player.as_ref().map(|setup| {
+                let position = Vec3::new(
+                    f64::from_bits(setup.position[0] as u64),
+                    f64::from_bits(setup.position[1] as u64),
+                    f64::from_bits(setup.position[2] as u64),
+                );
+                // 走 `mc-bamboo-game` 的真实玩家受伤链路：`ReplayPlayers::hurt`
+                // → `hurt_player_by_mob` → `rules::hurt`，含官方的
+                // `damageCooldownTime > 10` 只补 `damage - lastHurt` 差额。
+                mc_bamboo_game::ReplayPlayers::new(
+                    self.difficulty,
+                    &[mc_bamboo_game::ReplayPlayerSetup {
+                        id: setup.uid,
+                        uuid: (1_u128 << 64) | 2,
+                        name: "GuardianTarget".to_owned(),
+                        position,
+                        health: f32::from_bits(setup.health as u32),
+                        seed: 42002,
+                        creative: false,
+                    }],
+                )
+            }),
             inhabited: Default::default(),
             mob_teams: Default::default(),
             wrong_was_hurt: false,
@@ -316,19 +341,6 @@ fn frame_of(level: &MobLevel, id: i32) -> GuardianFrame {
     }
 }
 
-/// 收集这一刻的 `Effect::HurtPlayer`，累计到玩家血量（oracle 里的玩家是静态
-/// 视图，伤害通过效果表达）。
-///
-/// Fold this tick's `Effect::HurtPlayer` effects into the player's health (the
-/// oracle player is a static view; damage is expressed through effects).
-fn apply_player_hurts(world: &mut World<'_>, player_health: &mut f32) {
-    for effect in world.drain_effects() {
-        if let Effect::HurtPlayer { amount, .. } = effect {
-            *player_health -= amount;
-        }
-    }
-}
-
 impl Report {
     pub(super) fn replay_guardian(&mut self, case: &GuardianCase) {
         self.cases += 1;
@@ -336,17 +348,17 @@ impl Report {
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
         let guardian = case.spawn(&mut level, &mut ticks, self.break_test.as_deref());
-        let mut player_health = case
-            .player
-            .as_ref()
-            .map_or(0.0, |setup| f32::from_bits(setup.health as u32));
         let player_uid = case.player.as_ref().map_or(-1, |setup| setup.uid);
         for (tick, expected) in case.frames.iter().enumerate() {
             if tick != 0 {
                 ticks.set_time(1000 + tick as i64);
+                // `ServerPlayer.doTick` / `LivingEntity.baseTick` 每刻递减受伤计时器。
+                // Vanilla decrements the hurt timers at the start of each tick.
+                if let Some(game) = level.game.as_mut() {
+                    game.tick_cooldowns();
+                }
                 let mut world = World::new(&mut level, &mut ticks);
                 world.tick_entities();
-                apply_player_hurts(&mut world, &mut player_health);
             }
             // 尖刺场景：这一刻让玩家近战（或 generic）打守卫者，Bamboo 侧的
             // `Guardian.hurtServer` 会 emit `Command::HurtPlayer`（反伤）。
@@ -384,33 +396,38 @@ impl Report {
                 }
                 let mut world = World::new(&mut level, &mut ticks);
                 world.hurt_mob(guardian, source, hurt.amount);
-                apply_player_hurts(&mut world, &mut player_health);
             }
             let ours = frame_of(&level, guardian);
+            // 玩家状态直接读游戏层真实玩家（含 cooldown / lastHurt 的落地结果）。
+            // Player state comes from the real game-layer player.
+            let player = level
+                .game
+                .as_ref()
+                .map_or([0; 5], |game| game.state(player_uid));
+            let ours_player_health = player[0] as i32;
+            let ours_damage_cooldown = player[1] as i32;
+            let ours_hurt_time = player[2] as i32;
             let label = format!("{} tick {tick}", case.name);
             if expected.guardian.removed == 1 {
                 if ours.removed != 1 {
                     self.mismatch(format!("{label}: official removed, bamboo still present"));
                 }
-            } else {
-                // 玩家血量只在尖刺场景比（激光场景的玩家受伤由 player_hurt 场景
-                // 覆盖，这里只比守卫者一侧）。
-                // Player health is only compared in thorns scenes (laser player
-                // damage is covered by player_hurt scenes; here only the guardian
-                // side is compared).
-                let tracked = if case.hurt.is_some() {
-                    player_health.to_bits() as i32
-                } else {
-                    0
-                };
-                if !guardian_frames_match(&expected.guardian, &ours)
-                    || expected.player_health != tracked
-                {
-                    self.mismatch(format!(
-                        "{label}: official {:?}/player {}, bamboo {:?}/player {}",
-                        expected.guardian, expected.player_health, ours, tracked
-                    ));
-                }
+            } else if !guardian_frames_match(&expected.guardian, &ours)
+                || expected.player_health != ours_player_health
+                || expected.player_hurt_time != ours_hurt_time
+                || expected.player_damage_cooldown != ours_damage_cooldown
+            {
+                self.mismatch(format!(
+                    "{label}: official {:?}/player({}, {}, {}), bamboo {:?}/player({}, {}, {})",
+                    expected.guardian,
+                    expected.player_health,
+                    expected.player_hurt_time,
+                    expected.player_damage_cooldown,
+                    ours,
+                    ours_player_health,
+                    ours_hurt_time,
+                    ours_damage_cooldown
+                ));
             }
             self.steps += 1;
             if self.mismatches.len() >= self.show {
