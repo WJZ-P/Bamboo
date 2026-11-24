@@ -569,6 +569,7 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 except_initiator,
                 seed,
             } => {
+                region.sound_effects.push(*effect);
                 let except = initiator.filter(|_| except_initiator);
                 let packet = Sound {
                     sound,

@@ -21,6 +21,17 @@ impl ItemUseStats {
     /// 和 `ServerStatsCounter.sendStats` 一样，只发送变过的累计计数。
     ///
     /// Like `ServerStatsCounter.sendStats`, sends only changed cumulative counts.
+    /// 当前累计值（物品 ID 升序），对拍里比较 `ITEM_USED` 用；不清脏标记。
+    ///
+    /// Current cumulative values (item id order) for oracle comparison; does
+    /// not clear the dirty flags.
+    pub(crate) fn values(&self) -> Vec<(i32, i32)> {
+        self.items
+            .iter()
+            .map(|(&item, &(value, _))| (item, value))
+            .collect()
+    }
+
     pub(crate) fn take_dirty(&mut self) -> Vec<(i32, i32)> {
         self.items
             .iter_mut()
