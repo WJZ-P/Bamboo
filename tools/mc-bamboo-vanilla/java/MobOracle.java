@@ -6001,6 +6001,13 @@ public final class MobOracle {
             scenes.add(new NaturalScene("zombie_night_" + difficulty.getId(), EntityTypes.ZOMBIE, "plains",
                     difficulty.getId(), 15, 0, 11, false, -32, 0, 289, true, false));
         }
+        // 僵尸村民在群系刷怪表里有 5 权重；只挑它一条跑整条自然刷怪流程。
+        // Zombie villagers have weight 5 in the biome table; isolate that entry
+        // and run the whole natural-spawn path for it.
+        scenes.add(new NaturalScene("zombie_villager_night", EntityTypes.ZOMBIE_VILLAGER, "plains",
+                2, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("zombie_villager_day", EntityTypes.ZOMBIE_VILLAGER, "plains",
+                2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("husk_night", EntityTypes.HUSK, "desert", 2, 15, 0, 11, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("skeleton_day", EntityTypes.SKELETON, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("skeleton_torch", EntityTypes.SKELETON, "plains", 2, 0, 1, 11, false, -32, 0, 289, true, false));

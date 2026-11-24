@@ -579,6 +579,7 @@ impl MobType {
             Self::Zombie
                 | Self::Husk
                 | Self::Drowned
+                | Self::ZombieVillager
                 | Self::Witch
                 | Self::Pillager
                 | Self::Creeper
