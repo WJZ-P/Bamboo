@@ -553,7 +553,10 @@ pub struct PoiTypeFact {
     pub max_tickets: i32,
     #[serde(rename = "validRange")]
     pub valid_range: i32,
-    /// 全部匹配方块状态的全局 ID，顺序照官方 `matchingStates()` 的迭代顺序。
+    /// 全部匹配方块状态的全局 ID；官方 `matchingStates()` 的迭代顺序不稳定，生成文件时按 ID 排序。
+    ///
+    /// Global IDs of all matching block states; `matchingStates()` order is unstable, so the
+    /// generator sorts them by id.
     pub states: Vec<u32>,
 }
 
@@ -1008,6 +1011,14 @@ pub struct ProjectileFacts {
     pub arrow_pierce: u8,
     pub arrow_in_ground: u8,
     pub arrow_color: u8,
+    /// `ThrownTrident.ID_LOYALTY` 的元数据索引。
+    ///
+    /// The metadata index of `ThrownTrident.ID_LOYALTY`.
+    pub trident_loyalty: u8,
+    /// `ThrownTrident.ID_FOIL` 的元数据索引。
+    ///
+    /// The metadata index of `ThrownTrident.ID_FOIL`.
+    pub trident_foil: u8,
     pub skeleton_eye_height: f32,
     pub rabbit_eye_height: f32,
     pub rabbit_baby_width: f32,

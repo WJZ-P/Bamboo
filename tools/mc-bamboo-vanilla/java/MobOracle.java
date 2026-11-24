@@ -286,6 +286,11 @@ public final class MobOracle {
                 play(official, out, scene);
                 cases++;
             }
+            // 溺尸瞄准公式先用官方私有实现逐位校验一次（自带临时世界，不污染场景）。
+            // Verify the drowned aim formula against the official private method once.
+            if (only == null || "trident_drowned".startsWith(only)) {
+                OracleDrowned.checkAim(official);
+            }
             for (String name : List.of("arrow_hits_player", "arrow_hits_wall", "arrow_block_overlaps_flight",
                     "arrow_no_gravity", "arrow_despawn", "arrow_flame_hit", "arrow_flame_rejected",
                     "arrow_piercing_hit", "arrow_piercing_rejected",
@@ -293,7 +298,11 @@ public final class MobOracle {
                     "skeleton_bow_normal", "skeleton_bow_hard",
                     "stray_bow_normal", "bogged_bow_normal", "bogged_bow_hard",
                     "skeleton_freeze", "bogged_shear",
-                    "pillager_crossbow_normal", "pillager_crossbow_hard", "pillager_crossbow_multishot")) {
+                    "pillager_crossbow_normal", "pillager_crossbow_hard", "pillager_crossbow_multishot",
+                    "trident_stick", "trident_loyalty", "trident_owner_offline",
+                    "trident_owner_dead", "trident_spectator",
+                    "trident_channeling_mob", "trident_channeling_rod",
+                    "trident_drowned", "trident_drowned_hard")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
@@ -516,7 +525,15 @@ public final class MobOracle {
                     "guardian_thorns_static", "guardian_thorns_moving",
                     "guardian_thorns_arrow",
                     "laser_mob_victim_squid", "laser_mob_victim_axolotl",
-                    "laser_interrupt_close")) {
+                    "laser_interrupt_close", "laser_interrupt_wall",
+                    "laser_interrupt_kill", "laser_interrupt_creative",
+                    "elder_fatigue_survival", "elder_fatigue_adventure",
+                    "elder_fatigue_creative", "elder_fatigue_spectator",
+                    "elder_fatigue_dist_4999", "elder_fatigue_dist_5000",
+                    "elder_fatigue_dist_5001", "elder_fatigue_existing_1199",
+                    "elder_fatigue_existing_1200", "elder_fatigue_higher",
+                    "elder_fatigue_silent",
+                    "elder_home_far")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playGuardian(official, out, name);
                 cases++;
@@ -5545,6 +5562,88 @@ public final class MobOracle {
     }
 
     /**
+     * 溺尸远程投掷对拍用的溺尸：`performRangedAttack` 照官方 `Drowned` 的字节码逐字重现
+     * （`getY(1/3)`、`dy + horizontal*0.20000000298023224`、`power 1.6`、
+     * `uncertainty = rangedAttackUncertainty(level)` = `14 - 4*difficulty`、`DROWNED_SHOOT`），
+     * 只是把生成的 `ThrownTrident` 换成岛种子源重播种（官方实体的随机源不带种子），让散布
+     * 的三次 `triangle` 取数两侧一致；`tridentSoundFilter` 只放行 `item.trident.*` 世界音效，
+     * 所以 `entity.drowned.shoot`（实体事件音）不进 `sounds` 逐刻比较。`checkAim` 用反射调
+     * 官方私有实现在不确定度 0 时逐位校验这里的瞄准向量，防止手写公式和官方漂移。
+     *
+     * The drowned for the ranged-trident tick parity: `performRangedAttack` follows
+     * vanilla `Drowned` bytecode verbatim (`getY(1/3)`, `dy + horizontal*0.2`, `power 1.6`,
+     * `uncertainty = 14 - 4*difficulty`, `DROWNED_SHOOT`), only reseeding the spawned
+     * `ThrownTrident` from the island seed source (vanilla entity random has no seed) so the
+     * three spread `triangle` draws line up. `tridentSoundFilter` keeps only `item.trident.*`
+     * world sounds, so `entity.drowned.shoot` (an entity-event sound) stays out of the per-tick
+     * `sounds` compare. `checkAim` invokes the official private aim at zero uncertainty to
+     * verify the transcribed aim bit-for-bit.
+     */
+    private static final class OracleDrowned extends net.minecraft.world.entity.monster.zombie.Drowned {
+        OracleDrowned(FakeLevel level) {
+            super(EntityTypes.DROWNED, level);
+        }
+
+        static Vec3 aim(Entity drowned, Entity trident, LivingEntity target) {
+            double xd = target.getX() - drowned.getX();
+            double yd = target.getY(0.3333333333333333) - trident.getY();
+            double zd = target.getZ() - drowned.getZ();
+            double yo = Math.sqrt(xd * xd + zd * zd) * 0.20000000298023224;
+            return new Vec3(xd, yd + yo, zd);
+        }
+
+        @Override
+        public void performRangedAttack(LivingEntity target, float power) {
+            FakeLevel world = (FakeLevel) level();
+            ItemStack held = getMainHandItem();
+            ItemStack weapon = held.is(Items.TRIDENT) ? held : new ItemStack(Items.TRIDENT);
+            var trident = new net.minecraft.world.entity.projectile.arrow.ThrownTrident(world, this, weapon);
+            setRandom(trident, world.entitySeeds.nextLong());
+            trident.setUUID(Mth.createInsecureUUID(trident.getRandom()));
+            Vec3 aim = aim(this, trident, target);
+            net.minecraft.world.entity.projectile.Projectile.spawnProjectileUsingShoot(
+                    trident, world, weapon, aim.x, aim.y, aim.z, 1.6F, rangedAttackUncertainty(world));
+            if (!isSilent()) {
+                playSound(net.minecraft.sounds.SoundEvents.DROWNED_SHOOT, 1.0F,
+                        1.0F / (getRandom().nextFloat() * 0.4F + 0.8F));
+            }
+        }
+
+        /**
+         * 用官方 `Drowned.performRangedAttack`（不覆写的普通溺尸）在不确定度 0 时生成一支
+         * 三叉戟；`triangle(0,0)` 恒为 0、不取散布随机，故速度方向就是 `aim` 的归一化。
+         * 把这里手抄的 `aim` 归一化后按官方速度的模长缩放，逐位比对，防止抄写公式和官方漂移。
+         * 用一个临时世界，避免污染场景。
+         *
+         * Uses the official `Drowned.performRangedAttack` (a plain, non-overriding drowned)
+         * at zero uncertainty: `triangle(0,0)` is always 0 and no spread is drawn, so the
+         * velocity direction is exactly the normalized `aim`. The transcribed `aim` is
+         * normalized and scaled to the official velocity's length, then compared bit-for-bit
+         * to guard against formula drift. A throwaway world keeps the scene clean.
+         */
+        static void checkAim(Official official) throws Exception {
+            FakeLevel world = FakeLevel.create(official);
+            ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+            var drowned = new net.minecraft.world.entity.monster.zombie.Drowned(EntityTypes.DROWNED, world);
+            drowned.setRangedAttackUncertainty(0.0F);
+            drowned.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            drowned.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.TRIDENT));
+            var target = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            target.setPos(7.25, 63.5, -3.75);
+            drowned.performRangedAttack(target, 1.6F);
+            Entity shot = world.spawned.getLast();
+            Vec3 velocity = shot.getDeltaMovement();
+            // `getMovementToShoot` 在不确定度 0 时就是 `aim.normalize().scale(power)`。
+            // At zero uncertainty `getMovementToShoot` is exactly `aim.normalize().scale(power)`.
+            Vec3 expected = aim(drowned, shot, target).normalize().scale(1.6F);
+            if (!expected.equals(velocity)) {
+                throw new IllegalStateException("drowned trident aim differs: " + expected
+                        + " vs " + velocity);
+            }
+        }
+    }
+
+    /**
      * 射箭对拍用的掠夺者：`performRangedAttack` 照 `CrossbowAttackMob.performCrossbowAttack`
      * 原样走，只是 `performShooting` 用一把带种子的 `CrossbowItem`（`SeedCrossbow`），让箭的
      * 随机源和 UUID 可重放。装填、射击向量、耐久、音效都是官方代码。
@@ -8040,10 +8139,38 @@ public final class MobOracle {
         boolean water = name.startsWith("arrow_water_");
         boolean waterTail = name.equals("arrow_water_after_pierce");
         boolean rejected = name.endsWith("_rejected");
+        // 三叉戟逐刻场景：飞行插地、命中生物、忠诚返回、引雷、溺尸远程。
+        // Trident tick-by-tick scenes: stick / hit mob / loyalty / channeling / drowned.
+        boolean trident = name.startsWith("trident_");
+        // 主人下线（owner == null）→ 外层短路不掉落；主人死亡 / 旁观 → 掉落并丢弃。
+        // Offline owner (owner == null) short-circuits with no drop; dead / spectator
+        // owner drops the pickup item and discards the trident.
+        boolean ownerDead = name.equals("trident_owner_dead");
+        boolean ownerOffline = name.equals("trident_owner_offline");
+        boolean ownerSpectator = name.equals("trident_spectator");
+        boolean ownerDrop = ownerDead || ownerSpectator;
+        // 引雷：`_mob` 命中牛（post_attack，雷雨+露天）召唤闪电；`_rod` 命中避雷针
+        // （hit_block，还需 `#lightning_rods`）。两者都播 item.trident.thunder。
+        // Channeling: `_mob` hits a cow (post_attack, thunderstorm + open sky);
+        // `_rod` hits a lightning rod (hit_block, needs `#lightning_rods` too).
+        // Both play item.trident.thunder.
+        boolean channelingMob = name.equals("trident_channeling_mob");
+        boolean channelingRod = name.equals("trident_channeling_rod");
+        boolean channeling = name.startsWith("trident_channeling");
+        // 溺尸远程投掷：`_hard` 走困难难度，校准 `uncertainty = 14 - 4*difficulty`
+        // （普通 6 / 困难 2），怪物三叉戟 pickup=DISALLOWED 玩家捡不到。
+        // Drowned ranged throw: `_hard` uses HARD difficulty to calibrate
+        // `uncertainty = 14 - 4*difficulty` (6 normal / 2 hard); a mob trident
+        // has pickup=DISALLOWED so the player cannot pick it up.
+        boolean drowned = name.startsWith("trident_drowned");
         // 药水箭插在墙里，中途把 inGroundTime 拨到 597，三刻后褪色。
         // A tipped arrow stuck in the wall; inGroundTime jumps to 597 and it fades three ticks later.
         boolean fade = name.equals("arrow_tipped_fade");
-        boolean hasWall = wall || noGravity || despawn || waterTail || fade;
+        // 只有插地场景需要 (7,65,0) 的墙；忠诚返回要让路径干净、别撞墙。
+        // Only the stick scene needs the wall at (7,65,0); the loyalty return
+        // needs a clear flight path.
+        boolean hasWall = wall || noGravity || despawn || waterTail || fade
+                || name.equals("trident_stick");
         Difficulty difficulty = name.endsWith("_hard") ? Difficulty.HARD : Difficulty.NORMAL;
         FakeLevel world = FakeLevel.create(official);
         world.injectedBrightOutside = false;
@@ -8061,6 +8188,11 @@ public final class MobOracle {
         }
         BlockPos obstacle = new BlockPos(7, 65, 0);
         if (hasWall) world.blocks.put(obstacle.asLong(), Blocks.STONE.defaultBlockState());
+        if (channelingRod) {
+            // 避雷针：`hit_block` 的 `location_check` 要求 #minecraft:lightning_rods。
+            // A lightning rod: `hit_block`'s `location_check` needs #lightning_rods.
+            world.blocks.put(obstacle.asLong(), Blocks.LIGHTNING_ROD.weathering().unaffected().defaultBlockState());
+        }
         if (water) {
             world.blocks.put(BlockPos.asLong(waterTail ? 4 : 3, 65, 0), Blocks.WATER.defaultBlockState());
             world.projectileExtinguishes = new ArrayList<>();
@@ -8083,12 +8215,36 @@ public final class MobOracle {
             // The shearing table starts from fresh random sequences, like a fresh Bamboo case.
             official.server.sequences = new RandomSequences();
         }
+        if (trident) {
+            // 逐刻比全部音效（落地、命中、忠诚返回、引雷雷声、溺尸投掷）。
+            // Compare every sound per tick (land, hit, loyalty return, thunder, drowned shoot).
+            world.soundLog = new ArrayList<>();
+        }
+        if (channeling) {
+            // 雷雨 + 露天：`weather_check(thundering)` 走 isThundering()，
+            // `location_check.can_see_sky` / entity_properties 走 canSeeSky()。
+            // A thunderstorm + open sky: `weather_check(thundering)` calls
+            // isThundering(); `can_see_sky` calls canSeeSky().
+            world.injectedThundering = true;
+            world.injectedRaining = true;
+            world.injectedCanSeeSky = true;
+            world.tridentSoundFilter = true;
+        }
+        if (drowned) {
+            // 只比 `item.trident.*` 世界音效；`entity.drowned.shoot` 是实体事件音（Bamboo 侧
+            // 走 MobEvent::Sound 实体包，不在 world `sounds` 里），跳过以免两侧通道不一致。
+            // Compare only `item.trident.*` world sounds; `entity.drowned.shoot` is an entity
+            // event sound (Bamboo sends it as a MobEvent::Sound packet, not a world `sounds`
+            // entry), so skip it to keep the two channels symmetric.
+            world.tridentSoundFilter = true;
+        }
         String blocks = blockArray(world.blocks);
         int playerId = FIRST_ID + 1024;
         ServerPlayer player = new ServerPlayer(official.server, world,
                 new GameProfile(new UUID(1L, 2L), "ArrowOracle"), ClientInformation.createDefault());
         player.setId(playerId);
-        double playerX = effectHit ? 18.5 : skeleton ? 11.5 : (waterTail || piercing) ? 2.0 : hasWall ? 18.5 : 6.5;
+        double playerX = (effectHit || channeling) ? 18.5 : skeleton ? 11.5
+                : (waterTail || piercing) ? 2.0 : hasWall ? 18.5 : 6.5;
         player.setPos(playerX, 64.0, 0.5);
         setRandom(player, ENTITY_RANDOM_SEED);
         player.setYRot(0.0F);
@@ -8099,6 +8255,17 @@ public final class MobOracle {
             player.setTicksFrozen(80);
         }
         player.getAbilities().invulnerable = rejected || passive;
+        if (ownerDead) {
+            // `LivingEntity.isAlive()` = !isRemoved && health > 0；血量归零即视为死亡。
+            // `LivingEntity.isAlive()`: !isRemoved && health > 0; zero health is dead.
+            player.setHealth(0.0F);
+        }
+        if (ownerSpectator) {
+            // 直接改 `ServerPlayerGameMode.gameModeForPlayer`，避开 setGameMode 发包。
+            // Set the game-mode field directly to avoid setGameMode sending packets.
+            put(net.minecraft.server.level.ServerPlayerGameMode.class, player.gameMode,
+                    "gameModeForPlayer", GameType.SPECTATOR);
+        }
         Bytes playerSink = new Bytes(official.registries);
         RecordingListener connection = allocate(RecordingListener.class);
         put(ServerGamePacketListenerImpl.class, connection, "player", player);
@@ -8129,6 +8296,90 @@ public final class MobOracle {
             }
             shooter.setItemInHand(InteractionHand.MAIN_HAND, weapon);
             world.tracked.add(shooter);
+        } else if (drowned) {
+            // 固定初态触发：用一个带种子的官方 `OracleDrowned` 在 setup 走一次
+            // `performRangedAttack`（官方瞄准 / power 1.6 / uncertainty / 散布取数），
+            // 产出的怪物三叉戟从 `world.spawned` 搬到 arrows/tracked，id 对齐 Bamboo 的 firstId。
+            // 不驱动 goal，避免 `see_time`/`attack_time`/夜间选目标等时序不确定。
+            //
+            // Controlled trigger: run a seeded official `OracleDrowned.performRangedAttack`
+            // once at setup (official aim / power 1.6 / uncertainty / spread draws), then
+            // move the spawned mob trident from `world.spawned` into arrows/tracked with its
+            // id aligned to Bamboo's firstId. We deliberately do not drive the goal so that
+            // `see_time`/`attack_time`/night-only targeting cannot shift the shot tick.
+            OracleDrowned drownedShooter = new OracleDrowned(world);
+            setRandom(drownedShooter, 42L);
+            drownedShooter.setUUID(new UUID(0L, 1L));
+            // 独立的真实 id：既是 add-entity 包的 `data`（主人 id），也让 Bamboo 能把
+            // 主人解析成一只真实生物。官方 `getOwner()` 是非玩家 LivingEntity，困难
+            // 难度下 `scalesWithDifficulty()` 会把伤害 ×1.5；Bamboo 只有真实生物主人
+            // 才缩放，故给幽灵射手一个不与三叉戟冲突的 id，两侧都按官方对齐。
+            // A distinct real id: it is the add-entity `data` (owner id) and lets
+            // Bamboo resolve the owner as a real Mob. Vanilla's `getOwner()` is a
+            // non-player LivingEntity, so HARD scales damage ×1.5; Bamboo scales
+            // only for a real Mob owner, so give the phantom shooter an id that
+            // does not collide with the trident's FIRST_ID.
+            drownedShooter.setId(FIRST_ID + 1);
+            drownedShooter.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            drownedShooter.setYHeadRot(0.0F);
+            drownedShooter.setYBodyRot(0.0F);
+            drownedShooter.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.TRIDENT));
+            drownedShooter.performRangedAttack(player, 1.6F);
+            for (Entity entity : new ArrayList<>(world.spawned)) {
+                if (entity instanceof net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow) {
+                    arrow.setId(FIRST_ID);
+                    arrows.add(arrow);
+                    world.tracked.add(arrow);
+                }
+            }
+            world.spawned.clear();
+        } else if (trident) {
+            // 三叉戟从显式初态出发：和 Rust 侧 `configured_trident` 一样读物品堆
+            // 的附魔（忠诚 / 引雷），再走官方 `shoot`。初态本身已由 `shot_trident`
+            // 单独对拍，这里逐刻比 `AbstractArrow.tick` 与 `ThrownTrident.tick`。
+            // A trident from an explicit state: read the enchantments from the
+            // stack like Rust's `configured_trident`, then use the official
+            // `shoot`. The throw's initial state is already covered by
+            // `shot_trident`; here we compare the per-tick flight.
+            boolean loyalty = name.startsWith("trident_loyalty") || name.startsWith("trident_owner")
+                    || name.startsWith("trident_spectator");
+            ItemStack stack = new ItemStack(Items.TRIDENT);
+            if (loyalty) enchant(official, stack, Enchantments.LOYALTY, 3);
+            if (name.startsWith("trident_channeling")) enchant(official, stack, Enchantments.CHANNELING, 1);
+            var arrow = new net.minecraft.world.entity.projectile.arrow.ThrownTrident(
+                    world, 0.5, 65.5, 0.5, stack);
+            setRandom(arrow, world.entitySeeds.nextLong());
+            arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
+            arrow.setPos(0.5, 65.5, 0.5);
+            arrow.shoot(1.0, 0.0, 0.0, 1.6F, 0.0F);
+            if (loyalty || channeling) {
+                // 主人是场景玩家：引雷的 post_attack / hit_block 效果上下文需要
+                // 一个 LivingEntity attacker（伤害源的 getEntity()）。
+                // The owner is the scene player: channeling's post_attack /
+                // hit_block context needs a LivingEntity attacker (the damage
+                // source's getEntity()).
+                arrow.setOwner(player);
+            }
+            if (loyalty) {
+                // 忠诚返回：主人是场景玩家，`dealtDamage` 预置成「已命中」，
+                // 于是 `tick()` 第一刻就按 (dealtDamage || isNoPhysics) 进入返回分支。
+                // Loyalty: the owner is the scene player and `dealtDamage` starts
+                // as "already hit", so `tick()` enters the return branch on its
+                // very first tick via (dealtDamage || isNoPhysics).
+                arrow.pickup = net.minecraft.world.entity.projectile.arrow.AbstractArrow.Pickup.ALLOWED;
+                putBoolean(net.minecraft.world.entity.projectile.arrow.ThrownTrident.class,
+                        arrow, "dealtDamage", true);
+            }
+            if (ownerOffline) {
+                // 主人下线：`getOwner()` 解析成 null，`tick()` 外层 `owner != null`
+                // 短路，既不掉落也不返回，只走 `super.tick()` 的正常飞行。
+                // Offline owner: `getOwner()` resolves to null, so the outer
+                // `owner != null` guard short-circuits — no drop, no return,
+                // just `super.tick()`'s normal flight.
+                put(net.minecraft.world.entity.projectile.Projectile.class, arrow, "owner", null);
+            }
+            arrows.add(arrow);
+            world.tracked.add(arrow);
         } else {
             net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow;
             if (enchanted) {
@@ -8180,6 +8431,15 @@ public final class MobOracle {
             effectTarget.setNoAi(true);
             world.tracked.add(effectTarget);
         }
+        // 引雷 post_attack 的受害者：一只静止的牛，闪电落在它自己的位置。
+        // The channeling post_attack victim: a still cow, the bolt lands on it.
+        Cow channelingVictim = null;
+        if (channelingMob) {
+            channelingVictim = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            channelingVictim.setPos(6.5, 64.0, 0.5);
+            channelingVictim.setNoAi(true);
+            world.tracked.add(channelingVictim);
+        }
         var effectType = spectral ? MobEffects.GLOWING : MobEffects.POISON;
 
         var frames = new StringBuilder("[");
@@ -8192,6 +8452,7 @@ public final class MobOracle {
         int sheared = 0;
         int embeds = 0;
         int extinguishes = 0;
+        int totalTridentDrops = 0;
         Bytes arrowEvents = new Bytes(official.registries);
         int[] puffs = {0};
         if (fade) {
@@ -8204,6 +8465,14 @@ public final class MobOracle {
         }
         for (int tick = 0; tick <= ticks; tick++) {
             var arrowPackets = new ArrayList<String>();
+            // 忠诚三叉戟主人不可接受时掉出来的物品实体：物品、数量、坐标原始位。
+            // Item entities dropped when a loyal trident's owner is unacceptable:
+            // item, count and raw position bits.
+            var tridentDrops = new ArrayList<String>();
+            // 引雷召唤的闪电：x/y/z 坐标原始位、cause 玩家 ID（无则 -1）。
+            // Channeling-summoned lightning: raw x/y/z bits and cause player id
+            // (-1 when none).
+            var lightningBolts = new ArrayList<String>();
             // 剪蘑菇那一刻的结果：是否消耗动作、剪刀耐久损耗、掉出来的物品实体。
             // The shearing result of this tick: consumed, shears damage and the dropped items.
             String shearing = null;
@@ -8266,8 +8535,30 @@ public final class MobOracle {
                     }
                 }
                 if (effectTarget != null) effectTarget.tick();
+                if (channelingVictim != null) channelingVictim.tick();
                 world.tracked.removeIf(Entity::isRemoved);
                 for (Entity entity : world.spawned) {
+                    if (channeling && entity instanceof net.minecraft.world.entity.LightningBolt bolt) {
+                        // 召唤的闪电：位置原始位 + cause 玩家 ID（`setCause` 只给 ServerPlayer）。
+                        // Summoned bolt: raw position bits + cause player id (`setCause`
+                        // is only set for a ServerPlayer owner).
+                        Vec3 at = bolt.position();
+                        var cause = bolt.getCause();
+                        lightningBolts.add("[" + Double.doubleToRawLongBits(at.x) + ","
+                                + Double.doubleToRawLongBits(at.y) + ","
+                                + Double.doubleToRawLongBits(at.z) + ","
+                                + (cause == null ? -1 : cause.getId()) + "]");
+                    }
+                    if (trident && entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                        // 忠诚三叉戟主人不可接受时掉落的物品：物品、数量、坐标原始位。
+                        // The pickup item dropped for an unacceptable loyal-trident owner.
+                        Vec3 at = item.position();
+                        tridentDrops.add("[" + BuiltInRegistries.ITEM.getId(item.getItem().getItem()) + ","
+                                + item.getItem().getCount() + ","
+                                + Double.doubleToRawLongBits(at.x) + ","
+                                + Double.doubleToRawLongBits(at.y) + ","
+                                + Double.doubleToRawLongBits(at.z) + "]");
+                    }
                     if (entity instanceof net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow) {
                         arrows.add(arrow);
                         world.tracked.add(arrow);
@@ -8352,6 +8643,57 @@ public final class MobOracle {
                         .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
                 world.projectileExtinguishes.clear();
             }
+            if (channeling) {
+                // 引雷逐刻：召唤的闪电（位置+cause）、受害者牛的血量位。
+                // Channeling per tick: summoned bolts (position + cause) and the
+                // victim cow's health bits.
+                frames.append(",\"lightning\":[").append(String.join(",", lightningBolts)).append("]");
+                if (channelingVictim != null) {
+                    frames.append(",\"victim\":").append(Float.floatToRawIntBits(channelingVictim.getHealth()));
+                }
+            }
+            if (trident) {
+                totalTridentDrops += tridentDrops.size();
+                frames.append(",\"drops\":[").append(String.join(",", tridentDrops)).append("]");
+                // 主人逐刻状态：存活 / 旁观。下线时主人解析为 null。
+                // Owner state per tick: alive / spectator; resolves to null when offline.
+                frames.append(",\"owner\":[").append(player.isAlive() ? 1 : 0).append(',')
+                        .append(player.isSpectator() ? 1 : 0).append(']');
+                frames.append(",\"sounds\":").append(world.soundLog.stream()
+                        .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
+                world.soundLog.clear();
+                if (drowned) {
+                    // 怪物三叉戟 pickup 恒为 DISALLOWED(0)：玩家碰到也捡不起来，逐刻比这个状态。
+                    // A mob trident's pickup is always DISALLOWED(0): the player cannot pick it
+                    // up. Compare this state each tick.
+                    net.minecraft.world.entity.projectile.arrow.AbstractArrow liveArrow = null;
+                    for (var arrow : arrows) {
+                        if (!arrow.isRemoved()) { liveArrow = arrow; break; }
+                    }
+                    frames.append(",\"pickup\":")
+                            .append(liveArrow == null ? -1 : liveArrow.pickup.ordinal());
+                }
+                // 忠诚返回逐刻状态：dealtDamage / noPhysics / 返回计数 / inGroundTime。
+                // Loyalty return state: dealtDamage / noPhysics / return count / inGroundTime.
+                frames.append(",\"trident\":");
+                net.minecraft.world.entity.projectile.arrow.AbstractArrow live = null;
+                for (var arrow : arrows) {
+                    if (!arrow.isRemoved()) { live = arrow; break; }
+                }
+                if (live == null) {
+                    frames.append("null");
+                } else {
+                    var t = (net.minecraft.world.entity.projectile.arrow.ThrownTrident) live;
+                    frames.append('[')
+                            .append(getBoolean(net.minecraft.world.entity.projectile.arrow.ThrownTrident.class,
+                                    t, "dealtDamage") ? 1 : 0).append(',')
+                            .append(t.isNoPhysics() ? 1 : 0).append(',')
+                            .append(t.clientSideReturnTridentTickCount).append(',')
+                            .append(getInt(net.minecraft.world.entity.projectile.arrow.AbstractArrow.class,
+                                    t, "inGroundTime"))
+                            .append(']');
+                }
+            }
             if (enchanted) {
                 Vec3 delta = player.getDeltaMovement();
                 frames.append(",\"playerMotion\":[")
@@ -8389,6 +8731,14 @@ public final class MobOracle {
                 || despawn && (embeds < 2 || !arrows.getFirst().isRemoved())
                 || fade && (puffs[0] != 1 || ((net.minecraft.world.entity.projectile.arrow.Arrow) arrows.getFirst()).getColor() != -1)) {
             throw new IllegalStateException("projectile scenario failed to exercise " + name);
+        }
+        // 死亡 / 旁观主人必须掉出一件拾取物；下线主人外层短路，一件都不能掉。
+        // A dead / spectator owner must drop the pickup; an offline owner
+        // short-circuits and must drop nothing.
+        if (ownerDrop && totalTridentDrops == 0
+                || ownerOffline && totalTridentDrops != 0) {
+            throw new IllegalStateException("trident owner scene missed the expected drop: " + name
+                    + " drops=" + totalTridentDrops);
         }
         if (flame && (player.getTicksFrozen() != 0
                 || player.getRemainingFireTicks() != (rejected ? 1 : 100)
@@ -10511,21 +10861,39 @@ public final class MobOracle {
         boolean thorns = name.startsWith("guardian_thorns_");
         boolean mobVictim = name.startsWith("laser_mob_victim_");
         boolean interrupt = name.startsWith("laser_interrupt_");
+        boolean fatigue = name.startsWith("elder_fatigue_");
+        boolean home = name.startsWith("elder_home_");
         int difficulty = name.contains("hard") ? 3 : 2;
         // 尖刺场景聚焦反伤判定本身（hurt 在 tick 5，再比一刻）；
         // 之后长时间的游走位移受 java.lang.Math.sin/cos 平台末位差影响。
         // Thorns scenes focus on the reflection itself (hurt at tick 5 plus one
         // tick); longer wandering motion is subject to Math.sin/cos platform diffs.
-        int ticks = thorns ? 6 : (laser || mobVictim || interrupt ? 100 : 200);
-        double[] guardianAt = flop ? new double[] {0.5, 61.0, 0.5}
+        int ticks = thorns || fatigue ? 6 : (home ? 40
+                : (laser || mobVictim || interrupt ? 100 : 200));
+        double[] guardianAt = home ? new double[] {30.5, 62.0, 0.5}
+                : flop ? new double[] {0.5, 61.0, 0.5}
                 : new double[] {0.5, 62.0, 0.5};
+        // 疲劳场景：距离、游戏模式、已有效果、静音、相位。
+        double fatigueDistance = name.contains("dist_4999") ? 49.99
+                : name.contains("dist_5000") ? 50.0
+                : name.contains("dist_5001") ? 50.01 : 8.5;
+        int fatigueMode = name.contains("adventure") ? 2
+                : name.contains("creative") ? 1
+                : name.contains("spectator") ? 3 : 0;
+        int existingDuration = name.contains("existing_1199") ? 1199
+                : name.contains("existing_1200") ? 1200
+                : name.contains("higher") ? 3000 : -1;
+        int existingAmplifier = name.contains("higher") ? 3 : 2;
+        boolean fatigueSilent = name.contains("silent");
         FakeLevel world = FakeLevel.create(official);
         world.getRandom().setSeed(9100L);
         world.injectedSeaLevel = -63;
         ((TickingLevelData) world.levelData).difficulty = Difficulty.values()[difficulty];
         // 一片 17×17 的水池，底是石头；守卫者泡在 y=62。
         // A 17x17 pool of water over stone; the guardian sits at y=62.
-        for (int x = -8; x <= 8; x++) {
+        // 回家场景的家在原点、守卫者在 x=30，水池要覆盖这段。
+        int poolMax = home ? 32 : 8;
+        for (int x = -8; x <= poolMax; x++) {
             for (int z = -8; z <= 8; z++) {
                 world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
                 // 扑腾场景抽干水，守卫者站在石头地板上。
@@ -10552,6 +10920,20 @@ public final class MobOracle {
         guardian.setYHeadRot(0.0F);
         guardian.setYBodyRot(0.0F);
         guardian.setPos(guardianAt[0], guardianAt[1], guardianAt[2]);
+        // `(tickCount + id) % 1200 == 0`：把相位挪到 tick 3，短场景就能命中。
+        // 官方 `Entity.commonTick` 每刻先 +1，再 `tick` 里的 customServerAiStep。
+        // Shift the phase to tick 3 so the short scene hits the 1200 multiple.
+        if (home) {
+            // 官方 `ElderGuardian.customServerAiStep` 只在 !hasHome() 时设家；
+            // 这里显式给一个家（原点、半径 16），守卫者放在范围外。
+            guardian.setHomeTo(new BlockPos(0, 62, 0), 16);
+        }
+        int fatiguePhase = -1;
+        if (fatigue) {
+            fatiguePhase = (1200 - ((guardian.getId() + 3) % 1200)) % 1200;
+            guardian.tickCount = fatiguePhase;
+            if (fatigueSilent) guardian.setSilent(true);
+        }
         world.tracked.add(guardian);
         // 生物目标场景：一名鱿鱼 / 美西螈目标（`GuardianAttackSelector` 认这两类）。
         // Mob-victim scenes: a squid / axolotl target (both accepted by the selector).
@@ -10582,9 +10964,12 @@ public final class MobOracle {
         // guardian's state is compared.
         // 玩家的初始位置：中途动作会改 player.position()，但 setup 要给初始位置。
         // The player's initial position; mid-scene actions move player.position().
-        double[] playerAt = {thorns ? 1.5 : 8.5, 61.0, 0.5};
+        double[] playerAt = fatigue
+                ? new double[] {0.5 + fatigueDistance, 62.0, 0.5}
+                : new double[] {thorns ? 1.5 : 8.5, 61.0, 0.5};
         ServerPlayer player = null;
-        if (laser || thorns || interrupt) {
+        Bytes playerSink = null;
+        if (laser || thorns || interrupt || fatigue) {
             GameProfile profile = new GameProfile(new UUID(1L, 2L), "GuardianTarget");
             player = new ServerPlayer(official.server, world, profile,
                     ClientInformation.createDefault());
@@ -10609,7 +10994,23 @@ public final class MobOracle {
             put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection,
                     "connection", new Connection(PacketFlow.CLIENTBOUND));
             connection.bytes = sink;
+            playerSink = sink;
             put(ServerPlayer.class, player, "connection", connection);
+            if (fatigue) {
+                // `ServerPlayerGameMode.isSurvival()` 只看 gameModeForPlayer；
+                // 直接反射设字段，避开 `setGameMode` 碰假世界里 null 的 sleepStatus。
+                // `ServerPlayer.setGameMode` NPEs on the fake level's null sleepStatus.
+                put(net.minecraft.server.level.ServerPlayerGameMode.class, player.gameMode,
+                        "gameModeForPlayer",
+                        net.minecraft.world.level.GameType.values()[fatigueMode]);
+                if (existingDuration >= 0) {
+                    player.addEffect(new MobEffectInstance(
+                            net.minecraft.world.effect.MobEffects.MINING_FATIGUE,
+                            existingDuration, existingAmplifier));
+                    // 初始化发的 UpdateMobEffect 包不参与逐刻比较。
+                    sink.take();
+                }
+            }
             // `NearestAttackableTargetGoal<LivingEntity>` 走 `getEntitiesOfClass`，
             // 所以玩家除了进玩家表也要进假世界的实体表，官方才会把它当目标。
             // `NearestAttackableTargetGoal<LivingEntity>` uses `getEntitiesOfClass`,
@@ -10666,7 +11067,11 @@ public final class MobOracle {
                     // Move the target within 3 blocks.
                     player.setPos(2.5, 61.0, 0.5);
                 } else if (name.contains("kill")) {
-                    player.setHealth(0.0F);
+                    // 走真实受伤流程：Bamboo 侧 `game.hurt` 会设 hurtTime=10、
+                    // damageCooldownTime=20，直接 setHealth(0) 两边计时器会对不上。
+                    // Use the real hurt path: Bamboo's game.hurt sets hurtTime=10
+                    // and damageCooldownTime=20, which setHealth(0) would miss.
+                    player.hurtServer(world, player.damageSources().generic(), 100.0F);
                 } else if (name.contains("creative")) {
                     // 直接设创造能力：`ServerPlayer.setGameMode` 会碰假世界里为 null
                     // 的 `sleepStatus`，`isCreative()` 只看 abilities.instabuild。
@@ -10687,6 +11092,10 @@ public final class MobOracle {
                     .append(player == null ? "0" : player.damageCooldownTime)
                     .append(",\"victimHealth\":")
                     .append(victim == null ? "0" : Float.floatToRawIntBits(victim.getHealth()))
+                    .append(",\"playerEffects\":")
+                    .append(fatigue ? playerEffectsJson(official, player) : "[]")
+                    .append(",\"elderPackets\":")
+                    .append(fatigue && playerSink != null ? elderPacketsJson(playerSink) : "[]")
                     .append('}');
         }
         frames.append(']');
@@ -10702,7 +11111,14 @@ public final class MobOracle {
                 // which keeps the per-tick random draws aligned.
                 + ",\"skyDarken\":0"
                 + ",\"guardian\":" + guardianSetup(elder, guardianAt, 42001L)
-                + ",\"player\":" + (player == null ? "null" : guardianPlayerSetup(player, playerAt))
+                + ",\"player\":" + (player == null ? "null"
+                        : guardianPlayerSetup(player, playerAt, fatigue ? fatigueMode : 0))
+                + ",\"home\":" + (home ? "{\"position\":[0,62,0],\"radius\":16}" : "null")
+                + ",\"fatigue\":" + (fatigue ? "{\"tickCount\":" + fatiguePhase
+                        + ",\"gameMode\":" + fatigueMode
+                        + ",\"existing\":" + (existingDuration < 0 ? "null"
+                                : "[" + existingDuration + "," + existingAmplifier + "]")
+                        + ",\"silent\":" + fatigueSilent + "}" : "null")
                 + ",\"interrupt\":" + (interrupt ? "{\"tick\":30,\"kind\":\""
                         + name.substring(name.lastIndexOf('_') + 1) + "\"}" : "null")
                 + ",\"victim\":" + (victim == null ? "null"
@@ -10716,14 +11132,68 @@ public final class MobOracle {
                 + ",\"frames\":" + frames + "}\n");
     }
 
-    private static String guardianPlayerSetup(ServerPlayer player, double[] at) {
+    private static String guardianPlayerSetup(ServerPlayer player, double[] at, int gameMode) {
         // 用初始位置，不用 player.position()：中途动作可能已经把它挪走了。
         // Use the initial position: mid-scene actions may have moved the player.
         return "{\"uid\":" + player.getId()
                 + ",\"position\":[" + Double.doubleToRawLongBits(at[0]) + ','
                 + Double.doubleToRawLongBits(at[1]) + ',' + Double.doubleToRawLongBits(at[2]) + ']'
                 + ",\"health\":" + Float.floatToRawIntBits(20.0F)
-                + ",\"gameMode\":0}";
+                + ",\"gameMode\":" + gameMode + "}";
+    }
+
+    /** 玩家身上的效果，按注册表 ID 排序（HashMap 迭代序不稳定）。 */
+    private static String playerEffectsJson(Official official, ServerPlayer player) {
+        var registry = official.registries.lookupOrThrow(Registries.MOB_EFFECT);
+        var effects = new java.util.ArrayList<>(player.getActiveEffects());
+        effects.sort(java.util.Comparator.comparingInt(
+                e -> registry.getId(e.getEffect().value())));
+        var out = new StringBuilder("[");
+        boolean first = true;
+        for (var e : effects) {
+            if (!first) out.append(',');
+            first = false;
+            out.append('[').append(registry.getId(e.getEffect().value()));
+            out.append(',').append(e.getDuration()).append(',').append(e.getAmplifier()).append(']');
+        }
+        return out.append(']').toString();
+    }
+
+    /** `MoveTowardsRestrictionGoal.wantedX/Y/Z`：`getPosTowards` 选中的落点。 */
+    private static String homeTargetJson(net.minecraft.world.entity.monster.Guardian guardian)
+            throws Exception {
+        var type = net.minecraft.world.entity.ai.goal.MoveTowardsRestrictionGoal.class;
+        for (var wrapped : guardian.getGoalSelector().getAvailableGoals()) {
+            if (!wrapped.getGoal().getClass().equals(type)) {
+                continue;
+            }
+            var fx = type.getDeclaredField("wantedX");
+            var fy = type.getDeclaredField("wantedY");
+            var fz = type.getDeclaredField("wantedZ");
+            fx.setAccessible(true);
+            fy.setAccessible(true);
+            fz.setAccessible(true);
+            var goal = wrapped.getGoal();
+            return "[" + Double.doubleToRawLongBits(fx.getDouble(goal)) + ','
+                    + Double.doubleToRawLongBits(fy.getDouble(goal)) + ','
+                    + Double.doubleToRawLongBits(fz.getDouble(goal)) + ']';
+        }
+        return "[0,0,0]";
+    }
+
+    /** 这一刻的 `GUARDIAN_ELDER_EFFECT` 游戏事件包（clientbound 包 ID 39），base64。 */
+    private static String elderPacketsJson(Bytes sink) {
+        var out = new StringBuilder("[");
+        boolean first = true;
+        for (String b64 : sink.take()) {
+            byte[] body = java.util.Base64.getDecoder().decode(b64);
+            // `mc_bamboo_data::packets::play::clientbound::GAME_EVENT` = 39。
+            if (body.length == 0 || (body[0] & 0xFF) != 39) continue;
+            if (!first) out.append(',');
+            first = false;
+            out.append(jsonString(b64));
+        }
+        return out.append(']').toString();
     }
 
     /** `Guardian.DATA_ID_ATTACK_TARGET` 的整数值（私有静态字段，反射读）。 */
@@ -10768,7 +11238,8 @@ public final class MobOracle {
                 + ",\"moving\":" + (g.isMoving() ? 1 : 0)
                 + guardianLook(g)
                 + ",\"randomState\":" + guardianRandomState(g)
-                + ",\"noActionTime\":" + g.getNoActionTime() + '}';
+                + ",\"noActionTime\":" + g.getNoActionTime()
+                + ",\"homeTarget\":" + homeTargetJson(g) + '}';
     }
 
     /** `LegacyRandomSource.seed`（AtomicLong），和 Bamboo `JavaRandom.state()` 逐位比。 */
@@ -15602,8 +16073,12 @@ public final class MobOracle {
 
     private static final class FakeLevel extends ServerLevel {
         List<long[]> projectileExtinguishes;
-        /** 末影珍珠场景：这一刻 `playSound` 的原始参数（音效 ID、音源、坐标位、音量位、音高位）。 */
+        /** 末影珍珠 / 三叉戟场景：这一刻 `playSound` 的原始参数（音效 ID、音源、坐标位、音量位、音高位）。 */
         List<long[]> soundLog;
+        /** 引雷场景：只记录 `item.trident.*` 的世界音效，跳过受害者叫声（那是实体事件包）。 */
+        /// Channeling scenes: log only `item.trident.*` level sounds, skipping the
+        /// victim's voice (an entity event packet on the Bamboo side).
+        boolean tridentSoundFilter;
         DifficultyInstance spawnDifficulty;
         NaturalScene naturalScene;
         boolean worldGenRegion;
@@ -15633,6 +16108,10 @@ public final class MobOracle {
         int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
         boolean injectedCanSeeSky;
+        /** 引雷场景：雷暴（`weather_check(thundering:true)` 走 `isThundering()`）。 */
+        /// Channeling scenes: a thunderstorm (`weather_check(thundering:true)`
+        /// calls `isThundering()`).
+        boolean injectedThundering;
         /** 傀儡场景没有 POI 管理器，用这个开关让村庄目标走没有村庄的真实路径。 */
         boolean golemFixture;
         /** 僵尸场景的真实时间模式：时钟、雨强由场景给，天色由官方环境属性系统算。 */
@@ -15756,6 +16235,7 @@ public final class MobOracle {
 
         @Override
         public boolean isThundering() {
+            if (injectedThundering) return true;
             return naturalScene == null ? super.isThundering() : naturalScene.thunder();
         }
 
@@ -16284,14 +16764,17 @@ public final class MobOracle {
                         sound, source, x, y, z, volume, pitch, seed));
             }
             if (soundLog != null) {
-                soundLog.add(new long[] {
-                        net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT.getId(sound.value()),
-                        source.ordinal(),
-                        Double.doubleToRawLongBits(x),
-                        Double.doubleToRawLongBits(y),
-                        Double.doubleToRawLongBits(z),
-                        Float.floatToRawIntBits(volume),
-                        Float.floatToRawIntBits(pitch)});
+                boolean trident = sound.value().location().getPath().startsWith("item.trident.");
+                if (!tridentSoundFilter || trident) {
+                    soundLog.add(new long[] {
+                            net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT.getId(sound.value()),
+                            source.ordinal(),
+                            Double.doubleToRawLongBits(x),
+                            Double.doubleToRawLongBits(y),
+                            Double.doubleToRawLongBits(z),
+                            Float.floatToRawIntBits(volume),
+                            Float.floatToRawIntBits(pitch)});
+                }
             }
             if (projectileExtinguishes != null && sound.value() == net.minecraft.sounds.SoundEvents.GENERIC_EXTINGUISH_FIRE) {
                 projectileExtinguishes.add(new long[] {Double.doubleToRawLongBits(x),

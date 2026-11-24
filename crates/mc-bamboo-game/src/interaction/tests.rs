@@ -95,6 +95,20 @@ fn ack(sequence: i32) -> Frame {
     frame_of(&BlockChangedAck { sequence })
 }
 
+/// 收包时去掉每 20 刻一次的 `SET_TIME`：一些测试要连续 tick 很多次，时间同步包会落在
+/// 哪一刻取决于起始刻数（加载模式和普通模式不同），断言只关心交互本身回的包。
+///
+/// Takes frames without the periodic `SET_TIME` (sent every 20 ticks). Loops that tick
+/// many times can hit that boundary depending on the starting tick (loaded and plain
+/// test modes differ); the assertions only care about the interaction's own packets.
+fn take_frames_without_time(client: &Client) -> Vec<Frame> {
+    client
+        .take_frames()
+        .into_iter()
+        .filter(|frame| frame.id != clientbound::SET_TIME)
+        .collect()
+}
+
 fn build_limit(key: &str, limit: i32) -> Frame {
     let content = Component::translate(key, [limit.into()]).color(Color::Red);
     frame_of(&SystemChat {
@@ -312,7 +326,7 @@ fn items_that_cannot_destroy_send_the_block_back() {
 
         assert_eq!(block_at(&mut server, GROUND), Some(blocks::GRASS_BLOCK));
         assert_eq!(
-            client.take_frames(),
+            take_frames_without_time(&client),
             [update(GROUND, blocks::GRASS_BLOCK), ack(1)]
         );
     }

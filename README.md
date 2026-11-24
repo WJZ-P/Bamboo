@@ -1546,6 +1546,14 @@ cargo run -p mc-bamboo-vanilla -- generate <server.jar>
 `game_event` 等表在 26.3 的官方顺序里 `entity_action` 在 `entity_place` 之后、`resonate_1..15` 在末尾，
 和字典序不同。存档里的振动事件只按名字查注册过的条目，不依赖数字 ID，顺序只影响常量取值。
 
+`generated/` 下的文件（以及 `crates/mc-bamboo-worldgen/src/structure/post_process/jungle_temple_ops.rs`）全部由
+`tools/mc-bamboo-vanilla` 的生成器产出，不要直接编辑。要改生成数据——新增常量、修正数值、调整顺序——
+一律改生成器（`java/Extractor.java`、`src/extract.rs`、`src/generate.rs`）再重跑导出；只改生成文件不改生成器，
+下次全量重跑就会被冲掉。官方有些集合（例如 POI 的 `matchingStates()`）是 `HashSet`，迭代顺序每次 JVM 运行
+都不同，生成器必须显式排序，保证全量重跑逐字节可重复。`tools/check-generated.sh` 用现有的报告全量重跑两遍
+导出，并断言生成文件没变；改完生成器就跑它，确保提交里的生成文件和生成器一致（前提是先跑过一次 `generate`
+让 `target/vanilla` 里有报告）。
+
 然后启动 Bamboo，用官方网络代码让三个客户端走一遍进服、移动、建造、聊天和开关箱子，检查收到的每个包。
 区块包里的方块和流体计数、高度图都由官方代码从解出来的方块重算，再和收到的值逐段比较：
 

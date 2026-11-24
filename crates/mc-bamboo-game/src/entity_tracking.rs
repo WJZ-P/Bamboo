@@ -1010,8 +1010,14 @@ impl KindData {
                 if arrow.no_gravity {
                     data.push(EntityData::NoGravity(true));
                 }
-                if arrow.critical {
-                    data.push(EntityData::ArrowFlags(1));
+                // `AbstractArrow.ID_FLAGS`：crit 是 bit 0，noPhysics 是 bit 1
+                // （`setNoPhysics` 用 setFlag(2, ...)）。忠诚返回时两者都要同步。
+                // `AbstractArrow.ID_FLAGS`: crit is bit 0, noPhysics is bit 1
+                // (`setNoPhysics` uses setFlag(2, ...)); both must be synced
+                // while a loyal trident returns.
+                let flags = u8::from(arrow.critical) | (u8::from(arrow.no_physics) << 1);
+                if flags != 0 {
+                    data.push(EntityData::ArrowFlags(flags));
                 }
                 if arrow.pierce != 0 {
                     data.push(EntityData::ArrowPierce(arrow.pierce));

@@ -1010,6 +1010,14 @@ pub enum Command {
     DropItem {
         stack: ItemStack,
     },
+    /// `ThrownTrident` 主人不可接受时的 `spawnAtLocation(stack, 0.1f)`：比通用
+    /// `DropItem` 多抬高 0.1 格（`(double) 0.1f`）。
+    ///
+    /// `ThrownTrident`'s `spawnAtLocation(stack, 0.1f)` for an unacceptable
+    /// owner: 0.1 above the entity (`(double) 0.1f`), unlike the plain `DropItem`.
+    DropTridentItem {
+        stack: ItemStack,
+    },
     /// `Entity.playSound(TRIDENT_RETURN, 10, 1)`：忠诚三叉戟第一刻的返回音效。
     ///
     /// `Entity.playSound(TRIDENT_RETURN, 10, 1)`: the first-tick return sound of a
@@ -1503,6 +1511,12 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
+        }
+        Command::DropTridentItem { stack } => {
+            world.spawn_at_location(
+                me.position.add(Vec3::new(0.0, f64::from(0.1_f32), 0.0)),
+                stack,
+            );
         }
         Command::TridentReturnSound { position } => {
             world.play_sound(

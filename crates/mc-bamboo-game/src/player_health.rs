@@ -327,7 +327,14 @@ mod tests {
         let mut state = PlayerHealth::default();
         let first = DamageSource::environment(DamageKind::IndirectMagic);
         let outcome = state
-            .hurt(5.0, first, 2, ArmorValues::default(), Vec3::default(), 20.0)
+            .hurt(
+                5.0,
+                first,
+                2,
+                ArmorValues::default(),
+                Vec3::default(),
+                rules::MAX_HEALTH,
+            )
             .unwrap();
         assert_eq!(outcome.health, 15.0, "第一下 5 点全额");
         assert_eq!(outcome.damage_cooldown, 20);
@@ -343,7 +350,7 @@ mod tests {
                 2,
                 ArmorValues::default(),
                 Vec3::default(),
-                20.0,
+                rules::MAX_HEALTH,
             )
             .unwrap();
         // cooldown 20 > 10，6 > lastHurt 5 → 只补 1 点，总伤害 6 点。
@@ -364,7 +371,7 @@ mod tests {
                     2,
                     ArmorValues::default(),
                     Vec3::default(),
-                    20.0
+                    rules::MAX_HEALTH
                 )
                 .is_none()
         );
