@@ -170,6 +170,14 @@ pub enum Goal {
     /// and the two hits. `attackTime` lives in
     /// [`super::guardian::GuardianState::attack_time`].
     GuardianAttack,
+    /// `MoveTowardsRestrictionGoal(1.0)`：不在家范围内时找落点走回家。
+    ///
+    /// `MoveTowardsRestrictionGoal(1.0)`: pick a spot towards the home while outside
+    /// its restriction.
+    MoveTowardsRestriction {
+        speed: f64,
+        wanted: Vec3,
+    },
     RandomLookAround {
         rel_x: f64,
         rel_z: f64,
@@ -722,7 +730,7 @@ impl Goal {
             | Self::RandomLookAround { .. } => &[Flag::Move, Flag::Look],
             Self::FollowParent { .. } => &[],
             Self::LookAtPlayer { .. } | Self::LookAtMob { .. } => &[Flag::Look],
-            Self::GuardianAttack => &[Flag::Move, Flag::Look],
+            Self::GuardianAttack | Self::MoveTowardsRestriction { .. } => &[Flag::Move, Flag::Look],
             Self::Unavailable(_)
             | Self::RandomStand { .. }
             | Self::SkeletonTrap
@@ -856,6 +864,7 @@ impl Goal {
             Self::Stroll { .. } => "WaterAvoidingRandomStrollGoal",
             Self::LookAtPlayer { .. } | Self::LookAtMob { .. } => "LookAtPlayerGoal",
             Self::GuardianAttack => "GuardianAttackGoal",
+            Self::MoveTowardsRestriction { .. } => "MoveTowardsRestrictionGoal",
             Self::RandomLookAround { .. } => "RandomLookAroundGoal",
             Self::Unavailable(name) => name,
             Self::SkeletonTrap => "SkeletonTrapGoal",
@@ -956,11 +965,37 @@ pub struct WrappedGoal {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct GoalSelector {
     pub goals: Vec<WrappedGoal>,
+    /// 官方 `Goal.setFlags` 的覆盖（按目标下标）；空表示用 `Goal::flags()`。
+    /// 守卫者注册时把 `RandomStrollGoal` 的标志位从 MOVE 覆盖成 MOVE|LOOK，
+    /// 这样不会改动其它生物的 `Stroll`。
+    ///
+    /// Overrides for vanilla `Goal.setFlags` (by goal index); empty means use
+    /// `Goal::flags()`. Guardians override the `RandomStrollGoal` flags from MOVE
+    /// to MOVE|LOOK without touching other mobs' `Stroll`.
+    flag_overrides: Vec<Option<&'static [Flag]>>,
     locked: [Option<usize>; 4],
     disabled: [bool; 4],
 }
 
 impl GoalSelector {
+    /// 官方 `Goal.setFlags(...)`：只覆盖这一个目标的标志位。
+    ///
+    /// Vanilla `Goal.setFlags(...)`: override the flags of this one goal.
+    pub fn set_flags(&mut self, index: usize, flags: &'static [Flag]) {
+        self.flag_overrides.resize(self.goals.len(), None);
+        self.flag_overrides[index] = Some(flags);
+    }
+
+    /// 读一个目标真正生效的标志位。
+    ///
+    /// The flags that actually apply to a goal.
+    pub(crate) fn flags(&self, index: usize) -> &'static [Flag] {
+        self.flag_overrides
+            .get(index)
+            .and_then(|override_| *override_)
+            .unwrap_or_else(|| self.goals[index].goal.flags())
+    }
+
     /// 按 `(优先级, 目标)` 建一个选择器，调用顺序就是官方的 `addGoal` 顺序。
     ///
     /// Builds a selector from `(priority, goal)` pairs in vanilla `addGoal` order.
@@ -974,8 +1009,7 @@ impl GoalSelector {
                     goal,
                 })
                 .collect(),
-            locked: [None; 4],
-            disabled: [false; 4],
+            ..Self::default()
         }
     }
 
@@ -1064,8 +1098,7 @@ impl GoalSelector {
                     goal,
                 })
                 .collect(),
-            locked: [None; 4],
-            disabled: [false; 4],
+            ..Self::default()
         }
     }
 
@@ -1123,8 +1156,7 @@ impl GoalSelector {
         ];
         Self {
             goals,
-            locked: [None; 4],
-            disabled: [false; 4],
+            ..Self::default()
         }
     }
 
@@ -1267,8 +1299,7 @@ impl GoalSelector {
                 // `Turtle.BABY_ON_LAND_SELECTOR`, with `mustSee=true`.
                 wrap(5, Goal::nearest_target(TargetType::BabyTurtleOnLand)),
             ],
-            locked: [None; 4],
-            disabled: [false; 4],
+            ..Self::default()
         }
     }
 
@@ -1363,16 +1394,14 @@ impl GoalSelector {
     }
 
     fn contains_disabled(&self, index: usize) -> bool {
-        self.goals[index]
-            .goal
-            .flags()
+        self.flags(index)
             .iter()
             .any(|flag| self.disabled[*flag as usize])
     }
 
     fn can_replace_all(&self, index: usize) -> bool {
         let priority = self.goals[index].priority;
-        self.goals[index].goal.flags().iter().all(|flag| {
+        self.flags(index).iter().all(|flag| {
             // `NO_GOAL` 的优先级是 `Integer.MAX_VALUE`。
             // `WrappedGoal.canBeReplacedBy`：占着的目标可打断、而且优先级更低。
             // `WrappedGoal.canBeReplacedBy`: the holder is interruptable and lower priority.
@@ -1415,7 +1444,10 @@ impl GoalSelector {
             {
                 continue;
             }
-            for &flag in self.goals[index].goal.flags() {
+            // `flags` 是 `&'static [Flag]`，不借用 self，循环里才能可变借用 self。
+            // `flags` is `&'static [Flag]`, so the loop body may mutably borrow self.
+            let flags = self.flags(index);
+            for &flag in flags {
                 if let Some(old) = self.locked[flag as usize] {
                     self.stop(old, me, mob, ctx);
                 }
@@ -1640,6 +1672,17 @@ fn light_dependent_magic(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> f32 {
     let raw =
         view.max_local_raw_brightness(BlockPos::containing(eye), view.sky_darken()) as f32 / 15.0;
     raw / (4.0 - 3.0 * raw)
+}
+
+/// `Guardian.getAttackDuration()`，允许场景级改坏确认覆盖。
+///
+/// `Guardian.getAttackDuration()` with a scene-level break-self-test override.
+fn guardian_attack_duration(mob: &Mob) -> i32 {
+    if mob.guardian.attack_duration_override != 0 {
+        mob.guardian.attack_duration_override
+    } else {
+        super::guardian::attack_duration(mob.mob_type)
+    }
 }
 
 fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
@@ -1954,6 +1997,37 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             // `GuardianAttackGoal.canUse`：`getTarget() != null && isAlive()`。
             // `GuardianAttackGoal.canUse`: `getTarget() != null && isAlive()`.
             combat_target(mob, ctx).is_some()
+        }
+        Goal::MoveTowardsRestriction { wanted, .. } => {
+            // `MoveTowardsRestrictionGoal.canUse`：`isWithinHome()` 时直接返回假；
+            // 否则用 `DefaultRandomPos.getPosTowards(mob, 16, 7,
+            // Vec3.atBottomCenterOf(getHomePosition()), PI/2)` 找落点。
+            // `MoveTowardsRestrictionGoal.canUse`: false when inside the home;
+            // otherwise pick a spot with `DefaultRandomPos.getPosTowards(..., PI/2)`.
+            if within_home(mob, me.block_position()) {
+                return false;
+            }
+            let Some((home, _)) = mob.home else {
+                return false;
+            };
+            let towards = Vec3::new(
+                f64::from(home.x) + 0.5,
+                f64::from(home.y),
+                f64::from(home.z) + 0.5,
+            );
+            let Some(pos) = default_random_pos_towards(
+                me,
+                mob,
+                ctx.blocks(),
+                16,
+                7,
+                towards,
+                std::f64::consts::FRAC_PI_2 as f32,
+            ) else {
+                return false;
+            };
+            *wanted = pos;
+            true
         }
         Goal::RandomLookAround { .. } => me.random.next_float() < 0.02,
         Goal::Unavailable(_) => false,
@@ -2586,6 +2660,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                 || me.position.distance_to_sqr(target.position)
                     > super::guardian::MIN_TARGET_DISTANCE_SQR
         }
+        Goal::MoveTowardsRestriction { .. } => !mob.navigation.is_done(),
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
         Goal::Float
         | Goal::Swell { .. }
@@ -2890,6 +2965,11 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
         }
+        Goal::MoveTowardsRestriction { speed, wanted } => {
+            // `MoveTowardsRestrictionGoal.start`：`navigation.moveTo(wanted, speed)`。
+            let nav = living::nav_mob(me, mob, ctx.blocks());
+            mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
+        }
         Goal::PufferfishPuff => super::fish::puff_start(mob),
         Goal::FollowFlock { time_to_recalc, .. } => *time_to_recalc = 0,
         Goal::LookAtPlayer { look_time, .. } | Goal::LookAtMob { look_time, .. } => {
@@ -3149,6 +3229,9 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             mob.target = None;
             mob.guardian.stroll_triggered = true;
         }
+        // `MoveTowardsRestrictionGoal` 不覆写 `stop`。
+        // `MoveTowardsRestrictionGoal` does not override `stop`.
+        Goal::MoveTowardsRestriction { .. } => {}
         Goal::Swell { target } => *target = None,
         Goal::Float
         | Goal::RabbitRaid(_)
@@ -3597,9 +3680,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 if !mob.silent {
                     mob.events.push(super::MobEvent::EntityEvent { event: 21 });
                 }
-            } else if mob.guardian.attack_time
-                >= super::guardian::attack_duration(mob.mob_type)
-            {
+            } else if mob.guardian.attack_time >= guardian_attack_duration(mob) {
                 // 伤害基值 1，困难 +2，远古 +2。
                 // Base damage 1, +2 on hard, +2 for the elder guardian.
                 let damage = super::guardian::laser_damage(
@@ -3693,6 +3774,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             ctx.emit(crate::entity::ctx::Command::SkeletonTrap(command), me);
         }
         Goal::Unavailable(_)
+        | Goal::MoveTowardsRestriction { .. }
         | Goal::GolemStroll { .. }
         | Goal::GolemBackToVillage { .. }
         | Goal::MoveTowardsTarget { .. }

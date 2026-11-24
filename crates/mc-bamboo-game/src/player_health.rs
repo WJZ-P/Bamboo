@@ -312,6 +312,51 @@ impl PlayerHealth {
 mod tests {
     use super::*;
 
+    /// 官方 `GuardianAttackGoal`：同一刻先 `indirectMagic` 再 `doHurtTarget`，
+    /// 第二下落在 `damageCooldownTime > 10` 里，只补 `damage - lastHurt` 的差额。
+    /// 这是所有生物「连续两次伤害」共用的玩家受伤链路。
+    ///
+    /// Vanilla `GuardianAttackGoal`: `indirectMagic` followed by `doHurtTarget` in
+    /// the same tick; the second hit lands inside `damageCooldownTime > 10` and
+    /// only applies the excess over `lastHurt`. All mobs share this player-hurt
+    /// path for consecutive hits.
+    #[test]
+    fn consecutive_laser_hits_only_apply_the_excess() {
+        use mc_bamboo_blocks::entity::mob::{DamageKind, DamageSource, damage::ArmorValues};
+
+        let mut state = PlayerHealth::default();
+        let first = DamageSource::environment(DamageKind::IndirectMagic);
+        let outcome = state
+            .hurt(5.0, first, 2, ArmorValues::default(), Vec3::default())
+            .unwrap();
+        assert_eq!(outcome.health, 15.0, "第一下 5 点全额");
+        assert_eq!(outcome.damage_cooldown, 20);
+        assert_eq!(outcome.hurt_time, 10);
+        assert!(outcome.full_hit);
+        assert_eq!(state.last_hurt, 5.0);
+
+        let second = DamageSource::environment(DamageKind::MobAttack);
+        let outcome = state
+            .hurt(6.0, second, 2, ArmorValues::default(), Vec3::default())
+            .unwrap();
+        // cooldown 20 > 10，6 > lastHurt 5 → 只补 1 点，总伤害 6 点。
+        assert_eq!(outcome.damage, 1.0, "冷却期内只补差额");
+        assert_eq!(outcome.health, 14.0, "总扣血等于较强的那一下");
+        assert_eq!(outcome.damage_cooldown, 20, "冷却时间不重置");
+        assert_eq!(outcome.hurt_time, 10, "受伤动画计时不变");
+        assert_eq!(state.last_hurt, 6.0);
+        assert!(!outcome.full_hit);
+
+        // 更弱的一下在冷却期内被完全挡下。
+        let weaker = DamageSource::environment(DamageKind::MobAttack);
+        assert!(
+            state
+                .hurt(4.0, weaker, 2, ArmorValues::default(), Vec3::default())
+                .is_none()
+        );
+        assert_eq!(state.health, 14.0);
+    }
+
     #[test]
     fn defaults_match_the_official_new_player() {
         let state = PlayerHealth::default();
