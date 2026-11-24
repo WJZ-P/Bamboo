@@ -201,6 +201,13 @@ struct Case {
     first_id: i32,
     start_time: i64,
     blocks: Vec<[i32; 4]>,
+    /// 0 号生物靴子槽的附魔（注册名、等级）；空串表示没有。
+    ///
+    /// Enchantment on mob 0's boots (registry name, level); empty means none.
+    #[serde(default)]
+    boot_enchantment: String,
+    #[serde(default)]
+    boot_enchantment_level: i32,
     cows: Vec<CowSetup>,
     players: Vec<PlayerSetup>,
     /// 马科场景：让这名玩家骑上 0 号生物，-1 表示没人骑。
@@ -875,6 +882,36 @@ struct ZombieFacts {
     bees_stay: Option<bool>,
     /// 热群系 / 下界场景注入的 `SNOW_GOLEM_MELTS`。
     snow_golem_melts: bool,
+}
+
+/// 给生物穿上带指定附魔的靴子，和官方场景的 `ItemStack.enchant` 一致。
+fn set_enchanted_boots(
+    mob: &mut mc_bamboo_blocks::entity::mob::Mob,
+    enchantment: &str,
+    level: i32,
+) {
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+    let id = mc_bamboo_data::registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:enchantment")
+        .and_then(|registry| {
+            registry
+                .entries
+                .iter()
+                .position(|entry| *entry == enchantment)
+        })
+        .expect("scene enchantment exists") as i32;
+    let mut stack = ItemStack::new(mc_bamboo_data::items::DIAMOND_BOOTS, 1);
+    let mut patch = ComponentPatch::from_opaque(&stack).unwrap_or_default();
+    patch.put(
+        mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+        PatchEntry::Set(ComponentValue::Enchantments(vec![(id, level)])),
+    );
+    let (added, removed) = patch.to_opaque();
+    stack.added = added;
+    stack.removed = removed;
+    mob.equipment
+        .set(mc_bamboo_protocol::packet::play::EquipmentSlot::Feet, stack);
 }
 
 /// 假世界：方块表、玩家表、世界随机源。和 `entity-oracle` 的那个同一个做法。
@@ -1950,6 +1987,26 @@ impl Report {
                     entity.random = JavaRandom::new(cow.seed);
                     entity.y_rot = yaw;
                     entity.old_position = position;
+                    // 改坏确认 `frost_radius`：不给 0 号生物穿靴子，结冰格子必须全对不上。
+                    // Break check `frost_radius`: no boots means no frozen cells.
+                    if !case.boot_enchantment.is_empty()
+                        && index == 0
+                        && break_test != Some("frost_radius")
+                    {
+                        // 官方场景给 0 号生物穿附魔靴子并设 onGround；同种子、
+                        // 同装备才能让 location_changed 效果逐刻对齐。
+                        entity.on_ground = true;
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            // 改坏确认 `frost_level`：等级一律按 1 算，2 级场景的
+                            // 外圈格子必须报不一致。
+                            let level = if break_test == Some("frost_level") {
+                                1
+                            } else {
+                                case.boot_enchantment_level
+                            };
+                            set_enchanted_boots(mob, &case.boot_enchantment, level);
+                        }
+                    }
                     if let Some(mob) = entity.kind.mob_mut() {
                         // 和官方一侧一样，场景里的牛 UUID 是 (0, 下标 + 1)。
                         mob.uuid = (index as u128 + 1).to_be_bytes();

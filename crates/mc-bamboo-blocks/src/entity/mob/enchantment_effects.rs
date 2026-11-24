@@ -403,7 +403,7 @@ impl ActiveLocationEffects {
         self.bits & id.bit() != 0
     }
 
-    fn set(&mut self, id: EffectId, active: bool) {
+    pub fn set(&mut self, id: EffectId, active: bool) {
         if active {
             self.bits |= id.bit();
         } else {

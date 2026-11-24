@@ -567,6 +567,9 @@ public final class MobOracle {
     static final class Scene {
         final String name;
         final Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+        /** 靴子槽的附魔（名字、等级）；冰霜行者 / 灵魂疾行场景用。 */
+        String bootEnchantment = "";
+        int bootEnchantmentLevel;
         final List<double[]> cows = new ArrayList<>();
         final List<Long> seeds = new ArrayList<>();
         final List<float[]> yaws = new ArrayList<>();
@@ -786,6 +789,13 @@ public final class MobOracle {
 
         Scene(String name) {
             this.name = name;
+        }
+
+        /** 给 0 号生物的靴子槽附魔；只用于 location_changed 场景。 */
+        Scene boots(String enchantment, int level) {
+            this.bootEnchantment = enchantment;
+            this.bootEnchantmentLevel = level;
+            return this;
         }
 
         void set(int x, int y, int z, BlockState state) {
@@ -3451,9 +3461,23 @@ public final class MobOracle {
             scene.fill(-radius, 63, -radius, radius, 63, radius, GRASS);
         }
 
+        /** 冰霜行者：穿附魔靴子的牛站在水面上方，逐刻比结冰格子。 */
+        static void frostWalkerScenes(List<Scene> scenes) {
+            for (int level : new int[] {1, 2}) {
+                Scene scene = new Scene("frost_walker_" + level).ticks(2)
+                        .boots("minecraft:frost_walker", level);
+                // 水面在 y=63，牛脚底 y=64；上方全是空气。
+                scene.fill(-6, 63, -6, 6, 63, 6, WATER);
+                scene.fill(-6, 62, -6, 6, 62, 6, DIRT);
+                scene.cow(0.5, 64.0, 0.5, 0.0F, 701L + level);
+                scenes.add(scene);
+            }
+        }
+
         static List<Scene> all() {
             List<Scene> scenes = new ArrayList<>();
             long[] seeds = {1L, 42L, 9001L, -7L};
+            frostWalkerScenes(scenes);
             farmScenes(scenes);
             miscScenes(scenes);
             creeperScenes(scenes);
@@ -4913,6 +4937,15 @@ public final class MobOracle {
             cow.snapTo(at[0], at[1], at[2], scene.yaws.get(i)[0], 0.0F);
             cow.setYHeadRot(scene.yaws.get(i)[0]);
             cow.setYBodyRot(scene.yaws.get(i)[0]);
+            if (!scene.bootEnchantment.isEmpty() && i == 0) {
+                // 冰霜行者 / 灵魂疾行场景：靴子附魔，站在水面上方。
+                ItemStack boots = new ItemStack(Items.DIAMOND_BOOTS);
+                var registry = official.registries.lookupOrThrow(Registries.ENCHANTMENT);
+                boots.enchant(registry.get(Identifier.parse(scene.bootEnchantment)).orElseThrow(),
+                        scene.bootEnchantmentLevel);
+                cow.setItemSlot(net.minecraft.world.entity.EquipmentSlot.FEET, boots);
+                cow.setOnGround(true);
+            }
             if (scene.fireTicks > 0) {
                 cow.setRemainingFireTicks(scene.fireTicks);
             }
@@ -4968,6 +5001,8 @@ public final class MobOracle {
         line.append(",\"playerIdBase\":").append(playerIds);
         line.append(",\"startTime\":").append(START_TIME);
         line.append(",\"blocks\":").append(blockArray(scene.blocks));
+        line.append(",\"bootEnchantment\":\"").append(scene.bootEnchantment).append('"');
+        line.append(",\"bootEnchantmentLevel\":").append(scene.bootEnchantmentLevel);
         line.append(",\"cows\":[");
         for (int i = 0; i < cows.size(); i++) {
             if (i > 0) line.append(',');
@@ -5030,8 +5065,9 @@ public final class MobOracle {
         line.append("],\"steps\":[");
         line.append(stepJson(cows));
         // 吃草场景逐刻比场景方块的状态：草方块变没变泥土、矮草在不在。
-        // Grazing scenes compare the scene blocks every tick: grass to dirt, short grass gone.
-        StringBuilder blockSteps = scene.name.startsWith("sheep_eat") ? new StringBuilder("[") : null;
+        // Grazing / frost walker scenes compare the scene blocks every tick.
+        StringBuilder blockSteps = scene.name.startsWith("sheep_eat")
+                || scene.name.startsWith("frost_walker_") ? new StringBuilder("[") : null;
         if (blockSteps != null) {
             blockSteps.append(blockStates(scene.blocks, level));
         }
@@ -15771,6 +15807,12 @@ public final class MobOracle {
         @Override
         public boolean setBlock(BlockPos pos, BlockState state, int flags, int limit) {
             BlockState old = getBlockState(pos);
+            // 假世界不跑 `onPlace`；霜冰的 `onPlace` 用世界随机源抽融化延迟。
+            // The fake level skips `onPlace`; frosted ice draws its melt delay
+            // from the level random there, so draw it here as well.
+            if (state.is(Blocks.FROSTED_ICE)) {
+                getRandom().nextInt(60, 120);
+            }
             // 假世界不跑 `onPlace`；蛙卵的 `onPlace` 用世界随机源抽孵化延迟，这里照样抽一次。
             // The fake level skips `onPlace`; frogspawn's draws its hatch delay from the
             // level random there, so draw it here as well.

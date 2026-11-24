@@ -10,11 +10,13 @@
 //!    自定义 `block_break_speed`、方块，逐位比对 `Player.getDestroySpeed`；
 //! 3. 双向线上解码并比对进服全量、速度 II 脏同步、效率 V + 创造 + 疾跑脏同步三份
 //!    `UpdateAttributes` 包；
-//! 4. `--break-self-test` 跑 4 处改坏确认（效率附魔、挖掘疲劳、漏发脏同步包、修饰符运算类型）。
+//! 4. 灵魂疾行 III 激活时的 `location_changed` 属性效果脏同步包；
+//! 5. `--break-self-test` 跑 5 处改坏确认（效率附魔、挖掘疲劳、漏发脏同步包、
+//!    修饰符运算类型、漏掉灵魂疾行修饰符）。
 //!
 //! Official 26.3 oracle for player attributes, real `Player.getDestroySpeed`,
-//! and `ClientboundUpdateAttributesPacket` wire parity, including four
-//! deliberate break-it checks.
+//! and `ClientboundUpdateAttributesPacket` wire parity, including an active
+//! soul-speed packet and five deliberate break-it checks.
 
 use std::{
     io::{BufRead, BufReader, Write},
@@ -25,7 +27,7 @@ use mc_bamboo_blocks::mining::{Miner, destroy_speed};
 use mc_bamboo_data::registries::mob_effect;
 use mc_bamboo_game::{
     ReplayAttrEntry, ReplayAttrScene, ReplayAttrSlot, replay_player_attributes,
-    replay_speed_sync_packets,
+    replay_soul_speed_sync_packet, replay_speed_sync_packets,
 };
 use serde_json::{Value, json};
 
@@ -427,6 +429,40 @@ fn check_sync_packets(
     Ok((checks, failures))
 }
 
+/// 灵魂疾行 III 的脏属性同步包：Bamboo 侧按 `location_changed` 效果挂两个临时修饰符，
+/// 官方侧用真实的 `AttributeMap` 和 `ClientboundUpdateAttributesPacket` 构造期望包。
+/// `omit_soul_speed` 是改坏确认（漏掉 location 效果）。
+fn check_soul_speed_packet(
+    stdin: &mut impl Write,
+    stdout: &mut BufReader<std::process::ChildStdout>,
+    logs: &std::sync::mpsc::Receiver<Vec<String>>,
+    omit_soul_speed: bool,
+) -> Result<(usize, Vec<String>), String> {
+    let body = encode_base64(&replay_soul_speed_sync_packet(omit_soul_speed));
+    let resp = exchange(
+        stdin,
+        stdout,
+        &json!({"command": "soul-speed-packet", "soulSpeed": body}),
+        logs,
+    )?;
+    let section = &resp["soulSpeed"];
+    let equal = section["equal"].as_bool().unwrap_or(false);
+    let failures = if equal {
+        Vec::new()
+    } else {
+        vec![format!(
+            "soul speed sync packet mismatch ({}): bamboo={} vanilla={}",
+            section
+                .get("decodeError")
+                .and_then(Value::as_str)
+                .unwrap_or("snapshot mismatch"),
+            section["bamboo"],
+            section["vanilla"]
+        )]
+    };
+    Ok((1, failures))
+}
+
 pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
     let opts = parse_options(args)?;
     let mut child = command
@@ -484,12 +520,15 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
     let (mining_checks, mining_failures) =
         check_mining_cases(mining_cases, efficiency_id, aqua_affinity_id, false, false)?;
     let (sync_checks, sync_failures) = check_sync_packets(&mut stdin, &mut stdout, &logs, false)?;
+    let (soul_checks, soul_failures) =
+        check_soul_speed_packet(&mut stdin, &mut stdout, &logs, false)?;
 
-    let total_checks = attr_checks + mining_checks + sync_checks;
+    let total_checks = attr_checks + mining_checks + sync_checks + soul_checks;
     let mut all_failures = Vec::new();
     all_failures.extend(attr_failures);
     all_failures.extend(mining_failures);
     all_failures.extend(sync_failures);
+    all_failures.extend(soul_failures);
 
     if opts.break_self_test {
         let mut break_results = Vec::new();
@@ -528,6 +567,13 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
             !b_op.is_empty(),
             format!("attr_failures={}", b_op.len()),
         ));
+        // 5. 改坏灵魂疾行属性同步（漏掉两个 location_changed 修饰符）。
+        let (_, b_soul) = check_soul_speed_packet(&mut stdin, &mut stdout, &logs, true)?;
+        break_results.push((
+            "soul-speed",
+            !b_soul.is_empty(),
+            format!("sync_failures={}", b_soul.len()),
+        ));
 
         drop(stdin);
         let status = child.wait().map_err(|e| format!("wait java: {e}"))?;
@@ -554,10 +600,11 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
             ));
         }
         println!(
-            "player-attributes oracle (--break-self-test): all {} deliberate breaks caught; baseline {total_checks} checks passed ({} attr cases, {} mining cases, {sync_checks} sync packets)",
+            "player-attributes oracle (--break-self-test): all {} deliberate breaks caught; baseline {total_checks} checks passed ({} attr cases, {} mining cases, {} sync packets, {soul_checks} soul speed packet)",
             break_results.len(),
             opts.attr_cases,
-            opts.mining_cases
+            opts.mining_cases,
+            sync_checks
         );
         return Ok(());
     }
@@ -574,7 +621,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
     }
     if all_failures.is_empty() {
         println!(
-            "player-attributes oracle: {total_checks} checks passed ({} attr cases / {attr_checks} checks, {} real getDestroySpeed cases / {mining_checks} checks, {sync_checks} sync packets)",
+            "player-attributes oracle: {total_checks} checks passed ({} attr cases / {attr_checks} checks, {} real getDestroySpeed cases / {mining_checks} checks, {sync_checks} sync packets, {soul_checks} soul speed packet)",
             opts.attr_cases, opts.mining_cases
         );
         Ok(())

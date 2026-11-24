@@ -3495,3 +3495,98 @@ pub fn replay_speed_sync_packets(omit_dirty: bool) -> (Vec<u8>, Vec<u8>, Vec<u8>
 
     (full_body, speed_body, complex_body)
 }
+
+/// 供 `mc-bamboo-vanilla player-attributes` 对拍灵魂疾行激活时的
+/// `UpdateAttributes` 脏同步包体：玩家穿灵魂疾行 III 靴子站在灵魂沙上，
+/// 按官方 `location_changed` 属性效果挂两个临时修饰符，再发脏同步包。
+/// `omit_soul_speed = true` 用于改坏确认（漏掉 location 效果）。
+///
+/// Replay the dirty `UpdateAttributes` payload for an active soul-speed III
+/// enchantment; `omit_soul_speed` is a deliberate break check.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_soul_speed_sync_packet(omit_soul_speed: bool) -> Vec<u8> {
+    use mc_bamboo_blocks::entity::mob::enchantment_effects::EffectId;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::{
+        items, packets::play::clientbound, registries::data_component_type as kinds,
+    };
+    use mc_bamboo_protocol::{
+        codec::decode_varint,
+        components::{ComponentPatch, ComponentValue, PatchEntry},
+        frame::{MAX_FRAME_LEN, find_frame},
+        item::ItemStack,
+        packet::play::ClientInformation,
+    };
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl inbound::PlayerSink for Capture {
+        fn send(&mut self, frames: outgoing::Outgoing) -> bool {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(frames.to_raw_bytes());
+            true
+        }
+        fn close(&mut self) {}
+    }
+
+    let capture = Capture::default();
+    let mut region = region::Region::new(2, 20, false);
+    let id = inbound::PlayerId(42);
+    let player = player::Player::new(
+        id,
+        uuid::Uuid::from_u128(42),
+        "Soul".to_owned(),
+        mc_bamboo_protocol::packet::play::GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    region.links.add(id, Box::new(capture.clone()));
+    region.insert_player(player);
+    let soul_speed_id = mc_bamboo_data::registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|r| r.name == "minecraft:enchantment")
+        .and_then(|r| r.entries.iter().position(|e| *e == "minecraft:soul_speed"))
+        .expect("soul_speed exists") as i32;
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        kinds::ENCHANTMENTS,
+        PatchEntry::Set(ComponentValue::Enchantments(vec![(soul_speed_id, 3)])),
+    );
+    let (added, removed) = patch.to_opaque();
+    region.players.get_mut(&id).expect("player").inventory.slots[8] = ItemStack {
+        item: items::DIAMOND_BOOTS,
+        count: 1,
+        added,
+        removed,
+    };
+    player_attributes::send_full_to_self(&mut region, id);
+    region.links.flush();
+    // 丢掉进服全量包，只留这一刻的脏包。
+    let _ = std::mem::take(&mut *capture.0.lock().unwrap());
+    if !omit_soul_speed {
+        // 官方 location_changed 的 attribute 效果在玩家属性表里加两个临时修饰符。
+        let player = region.players.get_mut(&id).expect("player");
+        let mut active = player.location_effects;
+        active.set(EffectId::SoulSpeedAttributes, true);
+        player.location_effects = active;
+        player.soul_speed_level = 3;
+    }
+    player_attributes::rebuild(&mut region);
+    player_attributes::sync_dirty(&mut region);
+    region.links.flush();
+    let bytes = std::mem::take(&mut *capture.0.lock().unwrap());
+    let mut rest = bytes.as_slice();
+    while let Some(bounds) = find_frame(rest, MAX_FRAME_LEN).ok().flatten() {
+        let payload = &rest[bounds.header_len..bounds.header_len + bounds.payload_len];
+        rest = &rest[bounds.header_len + bounds.payload_len..];
+        if let Ok((packet_id, consumed)) = decode_varint(payload)
+            && packet_id == clientbound::UPDATE_ATTRIBUTES
+        {
+            return payload[consumed..].to_vec();
+        }
+    }
+    Vec::new()
+}
