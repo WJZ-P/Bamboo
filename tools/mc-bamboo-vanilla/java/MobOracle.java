@@ -9756,7 +9756,9 @@ public final class MobOracle {
         int[] wallBox = null;
         switch (name) {
             case "attack_target_zombie_villager" -> {
-                difficulty = 1; // EASY: no zombie-villager conversion, no conversion draw.
+                // 简单难度官方不转化僵尸村民、也不消耗转化随机数。
+                // EASY: no zombie-villager conversion and no conversion draw.
+                difficulty = 1;
                 ticks = 200;
             }
             case "attack_target_zombie_villager_sight" -> {
