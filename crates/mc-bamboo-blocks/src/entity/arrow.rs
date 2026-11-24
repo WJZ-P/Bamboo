@@ -471,26 +471,147 @@ fn at_point(pos: Vec3, radius: f64) -> Aabb {
 }
 
 pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
+    // 三叉戟的忠诚返回在 `super.tick()` 之前，可能改速度；这之后取 movement
+    // 才和官方 `AbstractArrow.tick()` 开头读到的 `getDeltaMovement()` 一致。
+    // A loyal trident's return runs before `super.tick()` and may change the
+    // velocity, so `movement` is read afterwards to match vanilla's read.
+    if trident_tick(me, ctx) {
+        return;
+    }
     let movement = me.delta;
-    trident_tick(me);
     if !tick_or_check_ground(me, ctx) {
         fly(me, ctx, movement);
     }
 }
 
-/// `ThrownTrident.tick` 里 `super.tick()` 之前的那半：连续插地超过 4 刻后不再命中实体。
-/// 忠诚飞回需要向世界发命令（音效、掉落、丢弃），留给命令落地那一层。
+/// `getOwner()` 解析出来的、忠诚返回要用到的主人信息。
 ///
-/// The half of `ThrownTrident.tick` before `super.tick()`: after more than four
-/// consecutive ticks in the ground it stops hitting entities. Flying back to the
-/// owner emits world commands (sound, drop, discard) and is handled separately.
-fn trident_tick(me: &mut Entity) {
-    let EntityKind::Arrow(arrow) = &mut me.kind else {
-        return;
-    };
-    if arrow.variant.is_trident() && arrow.in_ground_time > 4 {
-        arrow.dealt_damage = true;
+/// The owner facts a returning trident needs, resolved from `getOwner()`.
+struct ReturnOwner {
+    eye: Vec3,
+    width: f64,
+    alive: bool,
+    spectator: bool,
+    is_player: bool,
+}
+
+fn return_owner(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<ReturnOwner> {
+    if let Some(player) = ctx.player(uid) {
+        return Some(ReturnOwner {
+            eye: Vec3::new(
+                player.position.x,
+                player.position.y + f64::from(player.eye_height),
+                player.position.z,
+            ),
+            width: 0.6,
+            alive: player.alive,
+            spectator: player.spectator,
+            is_player: true,
+        });
     }
+    let public = ctx.other(uid)?;
+    let (width, height) = public.kind.dimensions();
+    Some(ReturnOwner {
+        eye: Vec3::new(
+            public.position.x,
+            public.position.y + f64::from(height) * 0.85,
+            public.position.z,
+        ),
+        width: f64::from(width),
+        alive: !public.removed,
+        spectator: false,
+        is_player: false,
+    })
+}
+
+/// `ThrownTrident.tick` 里 `super.tick()` 之前的那一半：插地超过 4 刻置
+/// `dealtDamage`，然后按忠诚度飞回主人。返回 `true` 表示官方那句
+/// `discard(); return;`（非玩家主人已经很近），这一刻不再跑 `AbstractArrow.tick()`。
+///
+/// The half of `ThrownTrident.tick` before `super.tick()`: mark `dealtDamage`
+/// after four ground ticks, then fly back to the owner by loyalty. Returns
+/// `true` for vanilla's `discard(); return;` (a close non-player owner), which
+/// skips the rest of `AbstractArrow.tick()` this tick.
+fn trident_tick(me: &mut Entity, ctx: &mut dyn EntityCtx) -> bool {
+    {
+        let EntityKind::Arrow(arrow) = &mut me.kind else {
+            return false;
+        };
+        if !arrow.variant.is_trident() {
+            return false;
+        }
+        if arrow.in_ground_time > 4 {
+            arrow.dealt_damage = true;
+        }
+    }
+    let (loyalty, dealt_damage, no_physics, pickup, owner, owner_uuid, return_ticks, pickup_item) = {
+        let EntityKind::Arrow(arrow) = &me.kind else {
+            return false;
+        };
+        (
+            arrow.loyalty,
+            arrow.dealt_damage,
+            arrow.no_physics,
+            arrow.pickup,
+            arrow.owner,
+            arrow.owner_uuid,
+            arrow.client_side_return_trident_tick_count,
+            arrow.pickup_item.clone(),
+        )
+    };
+    // `loyalty > 0 && (!dealtDamage || isNoPhysics()) && owner != null`。
+    if loyalty == 0 || (dealt_damage && !no_physics) {
+        return false;
+    }
+    let owner_uid = owner.or_else(|| owner_uuid.and_then(|uuid| resolve_owner(ctx, uuid)));
+    let Some(uid) = owner_uid else {
+        return false;
+    };
+    let Some(owner) = return_owner(ctx, uid) else {
+        return false;
+    };
+    // `!isAcceptibleReturnOwner()`：主人死了或旁观 -> 掉成物品并丢弃。
+    // `!isAcceptibleReturnOwner()`: owner dead or spectating -> drop and discard.
+    if !owner.alive || (owner.is_player && owner.spectator) {
+        if pickup == Pickup::Allowed {
+            ctx.emit(Command::DropItem { stack: pickup_item }, me);
+        }
+        me.removed = true;
+        return false;
+    }
+    // 非玩家主人：进到 `bbWidth + 1` 以内就丢弃并提前返回。
+    // Non-player owner: within `bbWidth + 1` -> discard and return.
+    if !owner.is_player && me.position.distance_to_sqr(owner.eye).sqrt() < owner.width + 1.0 {
+        me.removed = true;
+        return true;
+    }
+    // 返回主人：`setPosRaw` 的 y 偏移、`delta * 0.95 + toOwner.normalize() * 0.05*L`。
+    // Return: the `setPosRaw` y offset and `delta * 0.95 + normalize(toOwner) * 0.05*L`.
+    let to_owner = Vec3::new(
+        owner.eye.x - me.position.x,
+        owner.eye.y - me.position.y,
+        owner.eye.z - me.position.z,
+    );
+    let loyalty_f = f64::from(loyalty);
+    let new_y = me.position.y + to_owner.y * 0.015 * loyalty_f;
+    let speed = 0.05 * loyalty_f;
+    let delta = me.delta.scale(0.95).add(to_owner.normalize().scale(speed));
+    me.position = Vec3::new(me.position.x, new_y, me.position.z);
+    me.delta = delta;
+    if let EntityKind::Arrow(arrow) = &mut me.kind {
+        arrow.no_physics = true;
+        arrow.needs_sync = true;
+        arrow.client_side_return_trident_tick_count = return_ticks.saturating_add(1);
+    }
+    if return_ticks == 0 {
+        ctx.emit(
+            Command::TridentReturnSound {
+                position: me.position,
+            },
+            me,
+        );
+    }
+    false
 }
 
 fn tick_or_check_ground(me: &mut Entity, ctx: &mut dyn EntityCtx) -> bool {
@@ -612,6 +733,14 @@ fn fly(me: &mut Entity, ctx: &mut dyn EntityCtx, movement: Vec3) {
     let blocks = ctx.blocks();
     let position = me.position;
     let collision = me.collision_context();
+    // `AbstractArrow.tick()` 里 `flag = !isNoPhysics()`：noPhysics 时整段
+    // clip / 命中 / 移动物理都跳过，位置只按速度推进（忠诚返回中的三叉戟）。
+    // `AbstractArrow.tick()`'s `flag = !isNoPhysics()`: with no physics the whole
+    // clip / hit / move section is skipped and only the position advances.
+    if matches!(&me.kind, EntityKind::Arrow(arrow) if arrow.no_physics) {
+        me.position = position.add(movement);
+        return;
+    }
     let EntityKind::Arrow(arrow) = &mut me.kind else {
         return;
     };
@@ -1093,8 +1222,28 @@ fn hit_entity_trident(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHi
     } else {
         hurt_mob(world, hit.uid, source, damage)
     };
-    if accepted && !hit.player {
-        apply_punch_knockback(world, hit.uid, &source);
+    if accepted {
+        if !hit.player {
+            apply_punch_knockback(world, hit.uid, &source);
+        }
+        // `channeling` 的 `post_attack`：伤害成功之后才召唤闪电。
+        // `channeling`'s `post_attack`: summon only after a successful hurt.
+        let (stack, owner_uid) = {
+            let EntityKind::Arrow(arrow) = &me.kind else {
+                unreachable!()
+            };
+            (arrow.pickup_item.clone(), arrow.owner)
+        };
+        let victim = victim_position(world, hit);
+        channeling_strike(
+            world,
+            &stack,
+            victim,
+            BlockPos::containing(victim),
+            owner_uid,
+            false,
+            BlockState(0),
+        );
     }
     if let EntityKind::Arrow(arrow) = &mut me.kind {
         arrow.dealt_damage = true;
@@ -1142,6 +1291,75 @@ fn victim_is_aquatic(world: &World<'_>, uid: EntityUid) -> bool {
         .entity(uid)
         .and_then(|entity| entity.kind.mob().map(|mob| mob.mob_type))
         .is_some_and(|mob_type| mob_type.in_entity_tag("minecraft:aquatic"))
+}
+
+/// 命中目标的位置（`summon_entity` / `can_see_sky` 用的是目标实体自己的位置，
+/// 不是射线接触点）；查不到时退回接触点。
+///
+/// The victim entity's own position (used by `summon_entity` / `can_see_sky`,
+/// not the ray contact point); falls back to the contact point.
+fn victim_position(world: &World<'_>, hit: ArrowEntityHit) -> Vec3 {
+    if !hit.player
+        && let Some(entity) = world.entity(hit.uid)
+    {
+        return entity.position;
+    }
+    if hit.player {
+        let mut found = None;
+        world.level().for_each_player(&mut |player| {
+            if player.uid == hit.uid {
+                found = Some(player.position);
+            }
+        });
+        if let Some(position) = found {
+            return position;
+        }
+    }
+    hit.contact
+}
+
+/// `channeling` 的 `post_attack` / `hit_block` 效果：雷暴、露天（命中方块还要
+/// 是 `#minecraft:lightning_rods`）时召唤一道闪电并播 `item.trident.thunder`。
+/// 闪电的 `cause` 是投掷者。
+///
+/// The `channeling` `post_attack` / `hit_block` effect: during a thunderstorm,
+/// with open sky (and a `#minecraft:lightning_rods` block for the block hit),
+/// summon a lightning bolt and play `item.trident.thunder`. The bolt's `cause`
+/// is the thrower.
+fn channeling_strike(
+    world: &mut World<'_>,
+    stack: &ItemStack,
+    position: Vec3,
+    sky_pos: BlockPos,
+    cause: Option<i32>,
+    require_rod: bool,
+    state: BlockState,
+) {
+    if enchantment_level(stack, "minecraft:channeling") <= 0 {
+        return;
+    }
+    if !world.is_thundering() {
+        return;
+    }
+    if require_rod && !state.is_tagged(mc_bamboo_data::tags::block_tags::LIGHTNING_RODS) {
+        return;
+    }
+    if !world.level().can_see_sky(sky_pos) {
+        return;
+    }
+    let mut bolt = crate::entity::lightning::entity(position, false);
+    if let EntityKind::LightningBolt(data) = &mut bolt.kind {
+        data.cause = cause;
+    }
+    world.spawn_entity(bolt);
+    world.play_sound(
+        position,
+        sounds::sound_event("minecraft:item.trident.thunder"),
+        sounds::NEUTRAL,
+        5.0,
+        1.0,
+        false,
+    );
 }
 
 fn me_owner(me: &Entity, world: &World<'_>) -> Option<crate::entity::EntityPublic> {
@@ -1516,6 +1734,17 @@ fn hit_block(me: &mut Entity, world: &mut World<'_>, hit: BlockHit) {
         && !arrow.variant.is_trident()
     {
         arrow.sound = arrow_hit_sound();
+    }
+    // `channeling` 的 `hit_block`：命中的方块是避雷针、雷暴且露天时召唤闪电。
+    // `channeling`'s `hit_block`: a lightning-rod block in a thunderstorm under
+    // open sky summons a bolt.
+    if let EntityKind::Arrow(arrow) = &me.kind
+        && arrow.variant.is_trident()
+    {
+        let stack = arrow.pickup_item.clone();
+        let owner_uid = arrow.owner;
+        let state = world.block_state(hit.pos);
+        channeling_strike(world, &stack, hit.location, hit.pos, owner_uid, true, state);
     }
 }
 
@@ -2243,5 +2472,216 @@ mod tests {
             _ => panic!("expected arrow state"),
         };
         assert!(state.dealt_damage);
+    }
+
+    fn loyal_trident(owner_uid: i32, position: Vec3, loyalty: u8) -> Entity {
+        let mut entity = Entity::trident(position);
+        if let EntityKind::Arrow(arrow) = &mut entity.kind {
+            arrow.loyalty = loyalty;
+            arrow.owner = Some(owner_uid);
+            arrow.owner_uuid = Some([1; 16]);
+            arrow.pickup = Pickup::Allowed;
+        }
+        entity
+    }
+
+    fn return_player(uid: i32, position: Vec3, alive: bool) -> crate::entity::ctx::PlayerView {
+        crate::entity::ctx::PlayerView {
+            uid,
+            uuid: Some([1; 16]),
+            position,
+            delta: Vec3::default(),
+            eye_height: 1.62,
+            health: 20.0,
+            look_direction: Vec3::default(),
+            gaze_disguise: false,
+            alive,
+            spectator: false,
+            creative: false,
+            sneaking: false,
+            sprinting: false,
+            swimming: false,
+            invisible: false,
+            armor_cover: 0.0,
+            main_hand: 0,
+            off_hand: 0,
+            team: None,
+            combat: Default::default(),
+            effects: Default::default(),
+            yaw: 0.0,
+            pitch: 0.0,
+        }
+    }
+
+    /// 忠诚三叉戟第一刻朝主人加速、置 noPhysics、记返回计数并播返回音效。
+    #[test]
+    fn a_loyal_trident_accelerates_toward_its_owner_and_plays_the_return_sound() {
+        let mut level = crate::testing::TestLevel::new();
+        let owner = return_player(7, Vec3::new(3.5, 64.0, 0.5), true);
+        level.players.push(owner);
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3));
+        world.tick_entities();
+        {
+            let trident = world.entity(id).expect("still returning");
+            let EntityKind::Arrow(arrow) = &trident.kind else {
+                panic!("expected a trident");
+            };
+            assert!(arrow.no_physics);
+            assert_eq!(arrow.client_side_return_trident_tick_count, 1);
+            // `delta = old * 0.95 + normalize(toOwner) * 0.05*L`（初速为 0）。
+            let to_owner = Vec3::new(3.0, (64.0 + 1.62) - 65.0, 0.0);
+            let expected = to_owner.normalize().scale(0.05 * 3.0);
+            assert!(
+                (trident.delta.x - expected.x).abs() < 1.0e-9
+                    && (trident.delta.y - expected.y).abs() < 1.0e-9,
+                "delta accelerates toward the owner: {:?} vs {:?}",
+                trident.delta,
+                expected
+            );
+            // `setPosRaw` 的 y 偏移加上 super.tick 的位移，都让 y 前进。
+            assert!(trident.position.y > 65.0);
+        }
+        let effects = world.drain_effects();
+        let sound = i32::from(sounds::sound_event("minecraft:item.trident.return"));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, crate::level::Effect::Sound { sound: s, .. } if *s == sound)),
+            "the return sound plays on the first returning tick"
+        );
+    }
+
+    /// 主人死了：掉落成物品并丢弃，不再返回。
+    #[test]
+    fn a_loyal_trident_drops_and_discards_when_its_owner_is_dead() {
+        let mut level = crate::testing::TestLevel::new();
+        let owner = return_player(7, Vec3::new(3.5, 64.0, 0.5), false);
+        level.players.push(owner);
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3));
+        world.tick_entities();
+        assert!(world.entity(id).is_none(), "the trident is discarded");
+        let mut items = 0;
+        let area = Aabb::new(-1.0, 63.0, -1.0, 5.0, 67.0, 2.0);
+        world
+            .level()
+            .for_each_entity_in_section_order(area, &mut |public| {
+                if matches!(public.kind, crate::entity::KindPublic::Item { .. }) {
+                    items += 1;
+                }
+            });
+        assert_eq!(items, 1, "the pickup item is dropped");
+    }
+
+    /// 第二刻返回音效不再播，计数继续加。
+    #[test]
+    fn the_return_sound_plays_only_once() {
+        let mut level = crate::testing::TestLevel::new();
+        let owner = return_player(7, Vec3::new(3.5, 64.0, 0.5), true);
+        level.players.push(owner);
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3));
+        world.tick_entities();
+        let _ = world.drain_effects();
+        world.tick_entities();
+        let trident = world.entity(id).expect("still returning");
+        let EntityKind::Arrow(arrow) = &trident.kind else {
+            panic!("expected a trident");
+        };
+        assert_eq!(arrow.client_side_return_trident_tick_count, 2);
+        let sound = i32::from(sounds::sound_event("minecraft:item.trident.return"));
+        let effects = world.drain_effects();
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, crate::level::Effect::Sound { sound: s, .. } if *s == sound)),
+            "no return sound on the second tick"
+        );
+    }
+
+    fn channeling_trident(with_channeling: bool) -> Entity {
+        let mut entity = Entity::trident(Vec3::new(0.5, 65.0, 0.5));
+        if let EntityKind::Arrow(arrow) = &mut entity.kind {
+            arrow.pickup_item = if with_channeling {
+                enchanted_trident("minecraft:channeling", 1)
+            } else {
+                ItemStack::new(item::TRIDENT, 1)
+            };
+            arrow.owner = Some(1 << 24);
+        }
+        entity.delta = Vec3::new(1.0, 0.0, 0.0);
+        entity
+    }
+
+    /// 命中一头牛，返回（闪电实体数、有没有播雷声、闪电的 cause）。
+    fn channeling_hit(thundering: bool, with_channeling: bool) -> (usize, bool, Option<i32>) {
+        let mut level = crate::testing::TestLevel::new();
+        if thundering {
+            level.weather = crate::weather::BlockWeather {
+                rain_level: 1.0,
+                thunder_level: 1.0,
+            };
+        }
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let target = world.spawn_entity(Entity::by_mob_type(
+            crate::entity::mob::MobType::Cow,
+            Vec3::new(2.0, 64.0, 0.5),
+        ));
+        let mut trident = channeling_trident(with_channeling);
+        let end = trident.position.add(trident.delta);
+        impact(
+            &mut trident,
+            &mut world,
+            vec![ArrowEntityHit {
+                uid: target,
+                contact: Vec3::new(1.7, 65.0, 0.5),
+                player: false,
+            }],
+            None,
+            end,
+        );
+        let effects = world.drain_effects();
+        let thunder = i32::from(sounds::sound_event("minecraft:item.trident.thunder"));
+        let has_sound = effects
+            .iter()
+            .any(|effect| matches!(effect, crate::level::Effect::Sound { sound, .. } if *sound == thunder));
+        let area = Aabb::new(-1.0, 63.0, -1.0, 5.0, 67.0, 2.0);
+        let mut bolts = 0;
+        let mut bolt_uid = None;
+        world
+            .level()
+            .for_each_entity_in_section_order(area, &mut |public| {
+                if matches!(public.kind, crate::entity::KindPublic::LightningBolt(_)) {
+                    bolts += 1;
+                    bolt_uid = Some(public.uid);
+                }
+            });
+        let cause = bolt_uid.and_then(|uid| {
+            world.entity(uid).and_then(|entity| match &entity.kind {
+                EntityKind::LightningBolt(data) => data.cause,
+                _ => None,
+            })
+        });
+        (bolts, has_sound, cause)
+    }
+
+    #[test]
+    fn channeling_summons_a_caused_bolt_in_a_thunderstorm() {
+        let (bolts, sound, cause) = channeling_hit(true, true);
+        assert_eq!(bolts, 1, "one lightning bolt is summoned");
+        assert!(sound, "the thunder sound plays");
+        assert_eq!(cause, Some(1 << 24), "the bolt's cause is the thrower");
+    }
+
+    #[test]
+    fn channeling_needs_the_enchantment_and_the_thunderstorm() {
+        assert_eq!(channeling_hit(true, false).0, 0, "no enchantment");
+        assert_eq!(channeling_hit(false, true).0, 0, "no thunderstorm");
+        assert_eq!(channeling_hit(false, false).0, 0, "neither");
     }
 }

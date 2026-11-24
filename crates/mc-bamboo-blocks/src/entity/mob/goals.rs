@@ -255,6 +255,17 @@ pub enum Goal {
         attack_time: i32,
         see_time: i32,
     },
+    /// `Drowned.DrownedTridentAttackGoal`（`RangedAttackGoal(this, 1.0, 40, 10.0f)`）：
+    /// 也是 `RangedAttackGoal` 的变体，额外要求主手是三叉戟。
+    ///
+    /// `Drowned.DrownedTridentAttackGoal` (`RangedAttackGoal(this, 1.0, 40, 10.0f)`):
+    /// another `RangedAttackGoal` variant that additionally requires a trident
+    /// in the main hand.
+    DrownedTridentAttack {
+        target: Option<EntityUid>,
+        attack_time: i32,
+        see_time: i32,
+    },
     /// `Llama.LlamaHurtByTargetGoal`：`HurtByTargetGoal`，吐过口水就停。
     ///
     /// `Llama.LlamaHurtByTargetGoal`: a `HurtByTargetGoal` that stops after a spit.
@@ -643,9 +654,10 @@ impl Goal {
             | Self::GolemBackToVillage { .. } => &[Flag::Move],
             Self::OfferFlower { .. } => &[Flag::Move, Flag::Look],
             Self::RunAroundLikeCrazy { .. } => &[Flag::Move],
-            Self::MeleeAttack { .. } | Self::Bow(_) | Self::RangedAttack { .. } => {
-                &[Flag::Move, Flag::Look]
-            }
+            Self::MeleeAttack { .. }
+            | Self::Bow(_)
+            | Self::RangedAttack { .. }
+            | Self::DrownedTridentAttack { .. } => &[Flag::Move, Flag::Look],
             Self::HurtByTarget { .. }
             | Self::NearestAttackableTarget { .. }
             | Self::LlamaHurtByTarget { .. } => &[Flag::Target],
@@ -727,6 +739,7 @@ impl Goal {
                 | Self::SquidFlee { .. }
                 | Self::RandomStand { .. }
                 | Self::RangedAttack { .. }
+                | Self::DrownedTridentAttack { .. }
                 | Self::TurtleLayEgg { .. }
                 | Self::TurtleGoToWater { .. }
                 | Self::BreakDoor
@@ -797,6 +810,7 @@ impl Goal {
             Self::RandomStand { .. } => "RandomStandGoal",
             Self::RunAroundLikeCrazy { .. } => "RunAroundLikeCrazyGoal",
             Self::RangedAttack { .. } => "RangedAttackGoal",
+            Self::DrownedTridentAttack { .. } => "DrownedTridentAttackGoal",
             Self::LlamaHurtByTarget { .. } => "LlamaHurtByTargetGoal",
             Self::EatBlock { .. } => "EatBlockGoal",
             Self::CubeFloat => "CubeMobFloatGoal",
@@ -1993,6 +2007,22 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             }
             alive.is_some()
         }
+        // `DrownedTridentAttackGoal.canUse`：先走 `RangedAttackGoal.canUse`，再要求
+        // 主手是三叉戟。
+        // `DrownedTridentAttackGoal.canUse`: `RangedAttackGoal.canUse` plus a
+        // trident in the main hand.
+        Goal::DrownedTridentAttack { target, .. } => {
+            let alive = mob.target.filter(|&uid| alive_target(ctx, uid).is_some());
+            if alive.is_some() {
+                *target = alive;
+            }
+            alive.is_some()
+                && mob
+                    .equipment
+                    .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
+                    .item
+                    == mc_bamboo_data::items::TRIDENT
+        }
         Goal::NearestAttackableTarget {
             kind,
             interval,
@@ -2540,7 +2570,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
 
             *unseen_ticks <= reduced_tick_delay(60)
         }
-        Goal::RangedAttack { target, .. } => {
+        Goal::RangedAttack { target, .. } | Goal::DrownedTridentAttack { target, .. } => {
             let stored = *target;
             can_use(goal, me, mob, ctx)
                 || (stored.is_some_and(|uid| alive_target(ctx, uid).is_some())
@@ -2652,6 +2682,13 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::Bee(goal) => goal.start(me, mob, ctx),
         Goal::LeapAtTarget { yd } => leap_start(me, mob, ctx, *yd),
         Goal::Bow(_) => mob.aggressive = true,
+        // `DrownedTridentAttackGoal.start`：`setAggressive(true)` + 主手开始使用物品。
+        // `DrownedTridentAttackGoal.start`: `setAggressive(true)` and start using
+        // the main-hand item.
+        Goal::DrownedTridentAttack { .. } => {
+            mob.aggressive = true;
+            mob.using_item_flags |= 1;
+        }
         Goal::Panic { speed, target, .. } => {
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *target, *speed);
@@ -3010,6 +3047,21 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             *target = None;
             *see_time = 0;
             *attack_time = -1;
+        }
+        // `DrownedTridentAttackGoal.stop`：清目标，`setAggressive(false)` +
+        // `stopUsingItem()`。
+        // `DrownedTridentAttackGoal.stop`: clear the target, `setAggressive(false)`
+        // and `stopUsingItem()`.
+        Goal::DrownedTridentAttack {
+            target,
+            attack_time,
+            see_time,
+        } => {
+            *target = None;
+            *see_time = 0;
+            *attack_time = -1;
+            mob.aggressive = false;
+            mob.using_item_flags &= !1;
         }
         Goal::NearestAttackableTarget { found, .. } => {
             super::enderman::set_target(me, mob, None);
@@ -3424,6 +3476,22 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             // Vanilla ticks on off ticks too without re-checking that the target lives.
             if let Some((target, _)) = target.and_then(|uid| target_view(ctx, uid)) {
                 super::equine::ranged_attack_tick(me, mob, ctx, target, attack_time, see_time);
+            }
+        }
+        Goal::DrownedTridentAttack {
+            target,
+            attack_time,
+            see_time,
+        } => {
+            if let Some((target, _)) = target.and_then(|uid| target_view(ctx, uid)) {
+                super::drowned::ranged_attack_tick(
+                    me,
+                    mob,
+                    ctx,
+                    target,
+                    attack_time,
+                    see_time,
+                );
             }
         }
         Goal::MeleeAttack {
