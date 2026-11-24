@@ -771,8 +771,11 @@ fn add_unreachable_target(cx: &mut Cx, target: EntityUid) {
     if should_add {
         list.push(target);
     }
-    cx.memories
-        .set_with_ttl(UnreachableTongueTargets, MemoryValue::Entities(list), 100);
+    cx.memories.set_with_ttl(
+        UnreachableTongueTargets,
+        MemoryValue::Entities(list.into()),
+        100,
+    );
 }
 
 /// `ShootTongue.checkExtraStartConditions`：先看走不走得到（路径终点离目标不到 1.75），
@@ -967,23 +970,27 @@ pub(super) fn has_tongue_target(mob: &Mob, ctx: &dyn EntityCtx) -> bool {
 ///
 /// `Frog.BRAIN_PROVIDER`: five sensors in vanilla order and `FrogAi.getActivities()`.
 pub(super) fn brain() -> Brain {
-    Brain::new(
-        &[
-            SensorKind::NearestLivingEntities,
-            SensorKind::HurtBy,
-            SensorKind::FrogAttackables,
-            SensorKind::FrogTemptations,
-            SensorKind::IsInWater,
-        ],
-        vec![
-            core_activity(),
-            idle_activity(),
-            swim_activity(),
-            lay_spawn_activity(),
-            tongue_activity(),
-            long_jump_activity(),
-        ],
-    )
+    use crate::entity::mob::brain::{BrainTemplate, TemplateCache, template_cache};
+    static TEMPLATE: TemplateCache = template_cache();
+    Brain::cached(&TEMPLATE, || {
+        BrainTemplate::new(
+            &[
+                SensorKind::NearestLivingEntities,
+                SensorKind::HurtBy,
+                SensorKind::FrogAttackables,
+                SensorKind::FrogTemptations,
+                SensorKind::IsInWater,
+            ],
+            vec![
+                core_activity(),
+                idle_activity(),
+                swim_activity(),
+                lay_spawn_activity(),
+                tongue_activity(),
+                long_jump_activity(),
+            ],
+        )
+    })
 }
 
 fn look_at_player_sometimes() -> Kind {
@@ -1237,7 +1244,8 @@ pub(super) fn sense_is_in_water(cx: &mut Cx) {
 /// `FrogAi.updateActivity`.
 pub(super) fn custom_server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if let Some(mut brain) = mob.brain.take() {
-        brain.tick(me, mob, ctx);
+        let gap = ctx.throttle_plan().decision_gap;
+        brain.tick_by(me, mob, ctx, gap);
         brain.set_active_activity_to_first_valid(&[
             Activity::Tongue,
             Activity::LaySpawn,

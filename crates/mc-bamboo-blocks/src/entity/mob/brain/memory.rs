@@ -9,9 +9,11 @@
 //! `getTimeUntilExpiry` also reports for empty slots. Unregistered memories read as
 //! absent and ignore writes, like vanilla's `getMemorySlotIfPresent` returning `null`.
 
+use std::sync::Arc;
+
 use mc_bamboo_core::{BlockPos, Vec3};
 
-use super::super::DamageSource;
+use super::super::{DamageSource, MobType};
 use crate::entity::EntityUid;
 
 /// `MemorySlot.NEVER_EXPIRE`。
@@ -190,6 +192,13 @@ impl MemoryType {
     const fn index(self) -> usize {
         self as usize
     }
+
+    /// 这个记忆在 `u64` 位掩码里的位，给行为入口条件预编译用。
+    ///
+    /// This memory's bit in a `u64` mask, for precompiled behaviour preconditions.
+    pub const fn bit(self) -> u64 {
+        1_u64 << (self as usize)
+    }
 }
 
 /// `MemoryStatus`。
@@ -284,23 +293,76 @@ impl WalkTarget {
 }
 
 /// `NearestVisibleLivingEntities`：附近的活体按距离排好，视线判定第一次问到时才算，
-/// 算过的记下来。
+/// 算过的记下来。实体表用共享切片，`NearestLivingEntities` 和这条记忆共用同一份数据。
+/// 每项另存一份实体种类，供村民传感器按类型预筛，不用逐项再回查实体表。
 ///
 /// `NearestVisibleLivingEntities`: nearby living entities by distance; the visibility
-/// test runs lazily the first time each one is asked about and is then cached.
+/// test runs lazily the first time each one is asked about and is then cached. The uid
+/// list is a shared slice so `NearestLivingEntities` and this memory share one
+/// allocation. Each entry also carries its mob type so villager sensors can prefilter
+/// by type without looking the entity up again.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct NearestVisible {
-    pub entities: Vec<EntityUid>,
-    /// 和 `entities` 对齐的缓存，`None` 是还没算过。
+    pub entities: Arc<[EntityUid]>,
+    /// 和 `entities` 对齐的实体种类；玩家 / 非生物为 `None`。
     ///
-    /// A cache aligned with `entities`; `None` means not tested yet.
+    /// Mob type aligned with `entities`; `None` for players and non-mob entities.
+    pub mob_types: Vec<Option<MobType>>,
+    /// 列表里有没有敌对类型。`VillagerHostilesSensor` 没有敌对类型时可直接擦记忆，
+    /// 不必逐项测距离。当前用 `MobType::is_enemy` 作保守超集：官方精确集合
+    /// `ACCEPTABLE_DISTANCE_FROM_HOSTILES` 的多数灾厄 / 僵尸类生物期 3 才建模，
+    /// 超集只会少做早退、不会误擦；精确的判定走 [`Self::has_type`]。
+    ///
+    /// Whether the list contains a hostile type. `VillagerHostilesSensor` can erase
+    /// its memory at once when there is none, without a per-entry distance test.
+    /// Currently a conservative superset via `MobType::is_enemy`: most of vanilla's
+    /// exact `ACCEPTABLE_DISTANCE_FROM_HOSTILES` set is modelled only in phase 3, and
+    /// a superset only skips the early-out (never wrongly erases). Precise checks
+    /// go through [`Self::has_type`].
+    pub has_hostile_type: bool,
+    /// 和 `entities` 对齐的视线缓存，`None` 是还没算过。
+    ///
+    /// A visibility cache aligned with `entities`; `None` means not tested yet.
     pub visible: Vec<Option<bool>>,
 }
 
 impl NearestVisible {
-    pub fn new(entities: Vec<EntityUid>) -> Self {
-        let visible = vec![None; entities.len()];
-        Self { entities, visible }
+    /// `mob_types` 与 `entities` 等长；玩家 / 非生物用 `None`。
+    ///
+    /// `mob_types` is aligned with `entities`; `None` for players / non-mob entities.
+    pub fn new(entities: Arc<[EntityUid]>, mob_types: Vec<Option<MobType>>) -> Self {
+        let len = entities.len();
+        let has_hostile_type = mob_types.iter().flatten().any(|ty| ty.is_enemy());
+        let visible = vec![None; len];
+        Self {
+            entities,
+            mob_types,
+            has_hostile_type,
+            visible,
+        }
+    }
+
+    /// 按实体类型预筛，保持列表顺序，返回匹配项的 (下标, uid)。未来的
+    /// `VillagerBabiesSensor` 先用它筛出村民，再逐项读实时幼年状态。
+    ///
+    /// Prefilters by mob type, keeping list order, returning `(index, uid)` for each
+    /// match. A future `VillagerBabiesSensor` uses it to pick villagers before reading
+    /// each one's live baby status.
+    pub fn prefilter(&self, accept: impl Fn(Option<MobType>) -> bool) -> Vec<(usize, EntityUid)> {
+        self.entities
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(index, _)| accept(self.mob_types.get(*index).copied().flatten()))
+            .collect()
+    }
+
+    /// 列表里有没有满足类型条件的实体（[`Self::has_hostile_type`] 的通用形式）。
+    ///
+    /// Whether any entry satisfies the type predicate (the general form of
+    /// [`Self::has_hostile_type`]).
+    pub fn has_type(&self, accept: impl Fn(Option<MobType>) -> bool) -> bool {
+        self.mob_types.iter().any(|ty| accept(*ty))
     }
 }
 
@@ -316,7 +378,7 @@ pub enum MemoryValue {
     Long(i64),
     Vec3(Vec3),
     Entity(EntityUid),
-    Entities(Vec<EntityUid>),
+    Entities(Arc<[EntityUid]>),
     Visible(NearestVisible),
     Walk(WalkTarget),
     Look(PositionTracker),
@@ -332,24 +394,47 @@ impl MemoryValue {
     }
 }
 
-/// `MemorySlot`。
+/// `MemorySlot`。值用 `Box` 装着：官方 `MemorySlot` 里值是对象引用，这里
+/// `MemoryValue` 有 184 字节，装进槽里会让 32 个槽白白占 6400 字节。装箱后
+/// 空槽只有一个空指针，大对象只在真正写入记忆时才分配。
 ///
-/// `MemorySlot`.
+/// `MemorySlot`. The value is boxed: vanilla holds an object reference, while
+/// `MemoryValue` is 184 bytes and embedding it would waste 6400 bytes on 32 slots.
+/// An empty slot is now just a null pointer; the big object is allocated only when a
+/// memory is actually set.
 #[derive(Debug, Clone, PartialEq)]
 struct Slot {
-    registered: bool,
-    value: Option<MemoryValue>,
+    value: Option<Box<MemoryValue>>,
     ttl: i64,
 }
 
 impl Default for Slot {
     fn default() -> Self {
         Self {
-            registered: false,
             value: None,
             ttl: NEVER_EXPIRE,
         }
     }
+}
+
+/// 一个记忆种类在位掩码里的位。`MemoryType::COUNT` 是 32，正好落进 `u64`。
+///
+/// The bit of a memory type in the masks. `MemoryType::COUNT` is 32, fitting a `u64`.
+const fn bit(kind: MemoryType) -> u64 {
+    kind.bit()
+}
+
+/// 记忆状态的三组位掩码，给行为入口条件做纯位运算判定。
+///
+/// The three bit masks of memory state, for bit-only behaviour precondition checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryMasks {
+    /// 有值的记忆。
+    pub present: u64,
+    /// 登记过但没有值的记忆。
+    pub absent: u64,
+    /// 登记过的记忆。
+    pub registered: u64,
 }
 
 /// 一只生物的全部记忆槽。
@@ -358,6 +443,12 @@ impl Default for Slot {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Memories {
     slots: [Slot; MemoryType::COUNT],
+    /// 登记过的记忆位。
+    registered: u64,
+    /// 有值的记忆位（`registered` 的子集）。
+    present: u64,
+    /// 有值且会过期（`ttl != NEVER_EXPIRE`）的位，`tick` 只遍历这些。
+    expiring: u64,
 }
 
 impl Memories {
@@ -365,40 +456,93 @@ impl Memories {
     ///
     /// `Brain.registerMemory`.
     pub fn register(&mut self, kind: MemoryType) {
-        self.slots[kind.index()].registered = true;
+        self.registered |= bit(kind);
+    }
+
+    /// 一次登记整张模板算好的记忆集合（构造大脑时省掉逐条 `register`）。
+    ///
+    /// Registers a whole precomputed memory set at once (avoids per-type `register`
+    /// calls when building a brain).
+    pub fn register_mask(&mut self, mask: u64) {
+        self.registered |= mask;
+    }
+
+    /// 已登记记忆的位掩码（模板构造时读出来，供实例复用）。
+    ///
+    /// The registered-memory bit mask (read when building a template, reused by instances).
+    pub fn registered_mask(&self) -> u64 {
+        self.registered
     }
 
     pub fn is_registered(&self, kind: MemoryType) -> bool {
-        self.slots[kind.index()].registered
+        self.registered & bit(kind) != 0
     }
 
-    /// `Brain.forgetOutdatedMemories` → `MemorySlot.tick`。
+    /// `Brain.checkMemory`：用位掩码判定，不碰槽里的值。
     ///
-    /// `Brain.forgetOutdatedMemories` → `MemorySlot.tick`.
-    pub fn tick(&mut self) {
-        for slot in &mut self.slots {
-            if slot.value.is_some() && slot.ttl != NEVER_EXPIRE {
-                if slot.ttl <= 0 {
-                    slot.value = None;
-                    slot.ttl = NEVER_EXPIRE;
-                } else {
-                    slot.ttl -= 1;
-                }
-            }
+    /// `Brain.checkMemory`: a bit-mask test that never touches the slot values.
+    pub fn check(&self, kind: MemoryType, status: MemoryStatus) -> bool {
+        let b = bit(kind);
+        if self.registered & b == 0 {
+            return false;
+        }
+        match status {
+            MemoryStatus::Registered => true,
+            MemoryStatus::ValuePresent => self.present & b != 0,
+            MemoryStatus::ValueAbsent => self.present & b == 0,
         }
     }
 
-    /// `Brain.checkMemory`。
+    /// 给行为入口条件用的三组掩码。
     ///
-    /// `Brain.checkMemory`.
-    pub fn check(&self, kind: MemoryType, status: MemoryStatus) -> bool {
-        let slot = &self.slots[kind.index()];
-        slot.registered
-            && match status {
-                MemoryStatus::Registered => true,
-                MemoryStatus::ValuePresent => slot.value.is_some(),
-                MemoryStatus::ValueAbsent => slot.value.is_none(),
+    /// The three masks a behaviour checks its entry conditions against.
+    pub fn masks(&self) -> MemoryMasks {
+        MemoryMasks {
+            present: self.present,
+            absent: self.registered & !self.present,
+            registered: self.registered,
+        }
+    }
+
+    /// `Brain.forgetOutdatedMemories` → `MemorySlot.tick`：只遍历「有值且会过期」的位，
+    /// 不再每刻扫全部 32 个槽。
+    ///
+    /// `Brain.forgetOutdatedMemories` → `MemorySlot.tick`: iterate only the filled slots
+    /// with a finite expiry, instead of scanning all 32 slots every tick.
+    pub fn tick(&mut self) {
+        self.tick_by(1);
+    }
+
+    /// 一次按 `gap` 刻推进记忆过期（降频后大脑跳刻用，`gap <= 1` 等价于单刻 [`Self::tick`]）。
+    ///
+    /// 逐刻语义下 `ttl == 0` 在第 1 刻清空、`ttl == k` 在第 `k + 1` 刻清空，
+    /// 所以连续跑 `step` 刻等价于：`ttl < step` 清空，否则 `ttl -= step`。
+    ///
+    /// Advances memory expiry by `gap` ticks at once (for throttled brain ticks;
+    /// `gap <= 1` matches single-tick [`Self::tick`]). Under per-tick rules a slot with
+    /// `ttl == k` clears on tick `k + 1`, so `step` ticks clear iff `ttl < step`,
+    /// otherwise subtract `step`.
+    pub fn tick_by(&mut self, gap: i64) {
+        let step = gap.max(1);
+        let mut bits = self.expiring;
+        while bits != 0 {
+            let index = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let b = 1_u64 << index;
+            let slot = &mut self.slots[index];
+            let cleared = if slot.ttl < step {
+                slot.value = None;
+                slot.ttl = NEVER_EXPIRE;
+                true
+            } else {
+                slot.ttl -= step;
+                false
+            };
+            if cleared {
+                self.present &= !b;
+                self.expiring &= !b;
             }
+        }
     }
 
     /// `Brain.hasMemoryValue`。
@@ -412,18 +556,16 @@ impl Memories {
     ///
     /// `Brain.getMemory`; vanilla throws for unregistered types, here they read as empty.
     pub fn get(&self, kind: MemoryType) -> Option<&MemoryValue> {
-        let slot = &self.slots[kind.index()];
-        if slot.registered {
-            slot.value.as_ref()
+        if self.registered & bit(kind) != 0 {
+            self.slots[kind.index()].value.as_deref()
         } else {
             None
         }
     }
 
     pub fn get_mut(&mut self, kind: MemoryType) -> Option<&mut MemoryValue> {
-        let slot = &mut self.slots[kind.index()];
-        if slot.registered {
-            slot.value.as_mut()
+        if self.registered & bit(kind) != 0 {
+            self.slots[kind.index()].value.as_deref_mut()
         } else {
             None
         }
@@ -450,16 +592,31 @@ impl Memories {
     ///
     /// `Brain.setMemoryWithExpiry`.
     pub fn set_with_ttl(&mut self, kind: MemoryType, value: MemoryValue, ttl: i64) {
-        let slot = &mut self.slots[kind.index()];
-        if !slot.registered {
+        let b = bit(kind);
+        if self.registered & b == 0 {
             return;
         }
-        if value.is_empty_collection() {
-            slot.value = None;
-            slot.ttl = NEVER_EXPIRE;
+        let empty = value.is_empty_collection();
+        {
+            let slot = &mut self.slots[kind.index()];
+            if empty {
+                slot.value = None;
+                slot.ttl = NEVER_EXPIRE;
+            } else {
+                slot.value = Some(Box::new(value));
+                slot.ttl = ttl;
+            }
+        }
+        if empty {
+            self.present &= !b;
+            self.expiring &= !b;
         } else {
-            slot.value = Some(value);
-            slot.ttl = ttl;
+            self.present |= b;
+            if ttl == NEVER_EXPIRE {
+                self.expiring &= !b;
+            } else {
+                self.expiring |= b;
+            }
         }
     }
 
@@ -467,11 +624,15 @@ impl Memories {
     ///
     /// `Brain.eraseMemory`.
     pub fn erase(&mut self, kind: MemoryType) {
-        let slot = &mut self.slots[kind.index()];
-        if slot.registered {
-            slot.value = None;
-            slot.ttl = NEVER_EXPIRE;
+        let b = bit(kind);
+        if self.registered & b == 0 {
+            return;
         }
+        let slot = &mut self.slots[kind.index()];
+        slot.value = None;
+        slot.ttl = NEVER_EXPIRE;
+        self.present &= !b;
+        self.expiring &= !b;
     }
 
     /// `Brain.clearMemories`：全部槽清空，登记保留。
@@ -482,23 +643,41 @@ impl Memories {
             slot.value = None;
             slot.ttl = NEVER_EXPIRE;
         }
+        self.present = 0;
+        self.expiring = 0;
     }
 
     /// `Brain.getTimeUntilExpiry`：空槽也返回 `Long.MAX_VALUE`。
     ///
     /// `Brain.getTimeUntilExpiry`; empty slots report `Long.MAX_VALUE` as well.
     pub fn time_until_expiry(&self, kind: MemoryType) -> i64 {
-        self.slots[kind.index()].ttl
+        let slot = &self.slots[kind.index()];
+        if slot.value.is_some() {
+            slot.ttl
+        } else {
+            NEVER_EXPIRE
+        }
     }
 
     /// 有值的槽：（种类，值，过期时间；不过期时为 `None`）。存档和对拍用。
     ///
     /// The filled slots as (type, value, time to live or `None`), for saving and oracles.
-    pub fn filled(&self) -> impl Iterator<Item = (MemoryType, &MemoryValue, Option<i64>)> {
-        MemoryType::ALL.into_iter().filter_map(|kind| {
-            let slot = &self.slots[kind.index()];
-            let value = slot.value.as_ref()?;
-            Some((kind, value, (slot.ttl != NEVER_EXPIRE).then_some(slot.ttl)))
+    pub fn filled(&self) -> impl Iterator<Item = (MemoryType, &MemoryValue, Option<i64>)> + '_ {
+        let mut bits = self.present;
+        std::iter::from_fn(move || {
+            while bits != 0 {
+                let index = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let slot = &self.slots[index];
+                if let Some(value) = slot.value.as_deref() {
+                    return Some((
+                        MemoryType::ALL[index],
+                        value,
+                        (slot.ttl != NEVER_EXPIRE).then_some(slot.ttl),
+                    ));
+                }
+            }
+            None
         })
     }
 
@@ -532,7 +711,7 @@ impl Memories {
 
     pub fn entities(&self, kind: MemoryType) -> Option<&[EntityUid]> {
         match self.get(kind) {
-            Some(MemoryValue::Entities(list)) => Some(list),
+            Some(MemoryValue::Entities(list)) => Some(list.as_ref()),
             _ => None,
         }
     }
@@ -599,12 +778,12 @@ mod tests {
         memories.register(MemoryType::NearestLivingEntities);
         memories.set(
             MemoryType::NearestLivingEntities,
-            MemoryValue::Entities(vec![3]),
+            MemoryValue::Entities(Arc::from([3])),
         );
         assert!(memories.has(MemoryType::NearestLivingEntities));
         memories.set(
             MemoryType::NearestLivingEntities,
-            MemoryValue::Entities(Vec::new()),
+            MemoryValue::Entities(Arc::default()),
         );
         assert!(!memories.has(MemoryType::NearestLivingEntities));
     }
@@ -639,5 +818,37 @@ mod tests {
             MemoryType::by_name("minecraft:unreachable_tongue_targets"),
             Some(MemoryType::UnreachableTongueTargets)
         );
+    }
+
+    /// 可见列表按类型预筛、保持顺序；敌对类型位是保守超集。
+    ///
+    /// The visible list prefilters by type in order; the hostile bit is a conservative
+    /// superset.
+    #[test]
+    fn nearest_visible_prefilters_by_type_and_tracks_hostiles() {
+        let entities: Arc<[EntityUid]> = Arc::from([10, 11, 12]);
+        let mob_types = vec![None, Some(MobType::Cow), Some(MobType::Zombie)];
+        let visible = NearestVisible::new(entities, mob_types);
+        assert!(visible.has_hostile_type);
+        assert_eq!(
+            visible.prefilter(|ty| ty == Some(MobType::Cow)),
+            vec![(1, 11)]
+        );
+        assert_eq!(
+            visible.prefilter(|ty| ty.is_some_and(|m| m.is_enemy())),
+            vec![(2, 12)]
+        );
+        assert!(
+            visible
+                .prefilter(|ty| ty == Some(MobType::Villager))
+                .is_empty()
+        );
+        assert!(visible.has_type(|ty| ty == Some(MobType::Zombie)));
+        assert!(!visible.has_type(|ty| ty == Some(MobType::Villager)));
+
+        // 只有玩家和非敌对生物时，敌对类型位为假。
+        // Only players and non-hostile mobs: the hostile bit is false.
+        let benign = NearestVisible::new(Arc::from([20, 21]), vec![None, Some(MobType::Cow)]);
+        assert!(!benign.has_hostile_type);
     }
 }

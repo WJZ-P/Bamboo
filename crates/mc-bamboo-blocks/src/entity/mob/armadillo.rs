@@ -266,16 +266,20 @@ fn pick_next_peek_timer(me: &mut Entity) -> i32 {
 ///
 /// `Armadillo.BRAIN_PROVIDER`: five sensors and the core, idle and panic activities.
 pub(super) fn brain() -> Brain {
-    Brain::new(
-        &[
-            SensorKind::NearestLivingEntities,
-            SensorKind::HurtBy,
-            SensorKind::FoodTemptations,
-            SensorKind::NearestAdult,
-            SensorKind::ArmadilloScareDetected,
-        ],
-        vec![core_activity(), idle_activity(), panic_activity()],
-    )
+    use crate::entity::mob::brain::{BrainTemplate, TemplateCache, template_cache};
+    static TEMPLATE: TemplateCache = template_cache();
+    Brain::cached(&TEMPLATE, || {
+        BrainTemplate::new(
+            &[
+                SensorKind::NearestLivingEntities,
+                SensorKind::HurtBy,
+                SensorKind::FoodTemptations,
+                SensorKind::NearestAdult,
+                SensorKind::ArmadilloScareDetected,
+            ],
+            vec![core_activity(), idle_activity(), panic_activity()],
+        )
+    })
 }
 
 fn core_activity() -> ActivityData {
@@ -504,7 +508,8 @@ pub(super) fn sense_scare(cx: &mut Cx) {
 /// and scute shedding.
 pub(super) fn custom_server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if let Some(mut brain) = mob.brain.take() {
-        brain.tick(me, mob, ctx);
+        let gap = ctx.throttle_plan().decision_gap;
+        brain.tick_by(me, mob, ctx, gap);
         brain.set_active_activity_to_first_valid(&[Activity::Panic, Activity::Idle]);
         mob.brain = Some(brain);
     }

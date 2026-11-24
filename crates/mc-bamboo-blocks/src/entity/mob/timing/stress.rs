@@ -16,6 +16,10 @@ use std::{collections::BTreeMap, time::Instant};
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{blocks, registries, spawning};
 use mc_bamboo_protocol::item::ItemStack;
+use mc_bamboo_world::{
+    light::SectionPos,
+    poi::{Occupancy, PoiStore},
+};
 
 use super::imp::{self, PARTS};
 use crate::{
@@ -31,6 +35,7 @@ use crate::{
         view::{BlockSource, SourceView, ViewFacts},
     },
     level::EquipTarget,
+    state::{BED_PART, BedPart},
 };
 
 /// 每个场景、每个线程数跑几轮；报告取每轮中位数再取三轮中位数。
@@ -51,12 +56,25 @@ const PART_NAMES: [&str; PARTS] = [
     "goals",
     "navigation",
     "path",
+    "brain-sensors",
+    "brain-behaviors",
+    "poi",
 ];
 
-/// 一段平地 / 障碍地形：按格查表的方块源，带玩家名单和 O(1) 高度图。
+/// 把 `Level` / `BlockSource` 的 `occupancy: u8` 字节映回 `PoiStore` 的 `Occupancy`。
+fn poi_occupancy(code: u8) -> Option<Occupancy> {
+    match code {
+        0 => Some(Occupancy::HasSpace),
+        1 => Some(Occupancy::IsOccupied),
+        2 => Some(Occupancy::Any),
+        _ => None,
+    }
+}
+
+/// 一段平地 / 障碍地形：按格查表的方块源，带玩家名单、真实 `PoiStore` 和 O(1) 高度图。
 ///
 /// 精确驱动读 `StressLevel`（同一份数据），并行驱动的算阶段读 `StressSource`。
-/// 两者对 `block_state`、玩家名单和游戏规则给出完全一样的答案。
+/// 两者对 `block_state`、POI 表、玩家名单和游戏规则给出完全一样的答案。
 #[derive(Clone)]
 struct Terrain {
     /// 每格一个状态；只存非默认（地面、墙、坑）的格子，其余按 `default` 给。
@@ -70,6 +88,12 @@ struct Terrain {
     floor_y: i32,
     /// 区块 → quart 群系格（真地形场景用；其余场景为空，按平原查表）。
     biomes: BTreeMap<(i32, i32), Vec<u32>>,
+    /// 真实 POI 存储：摆地形和写方块时按 `on_block_state_change` 同步登记。
+    poi: PoiStore,
+    /// 场景起始游戏刻（白天村庄 2000、夜间村庄 13000，既有场景 0）。
+    base_clock: i64,
+    /// 天色暗度（既有场景 4 让僵尸不烧；白天村庄 0、夜间村庄 4）。
+    sky_darken: i32,
     /// 玩家表和并行只读视图共用一份；绕圈走时两边每一刻看到同一个位置。
     players: std::sync::Arc<std::sync::Mutex<Vec<PlayerView>>>,
     rules: BlockGameRules,
@@ -82,6 +106,9 @@ impl Terrain {
             default: blocks::AIR,
             surface: BTreeMap::new(),
             biomes: BTreeMap::new(),
+            poi: PoiStore::new(),
+            base_clock: 0,
+            sky_darken: 4,
             implicit_floor: true,
             floor_y,
             players: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -90,12 +117,21 @@ impl Terrain {
     }
 
     fn set(&mut self, pos: BlockPos, state: u32) {
-        self.cells.insert(pos, state);
+        let old = self.cells.insert(pos, state).unwrap_or(self.default);
+        let _ = self.poi.on_block_state_change(pos, old, state);
         let key = (pos.x, pos.z);
         if state != blocks::AIR {
             let entry = self.surface.entry(key).or_insert(self.floor_y);
             *entry = (*entry).max(pos.y + 1);
         }
+    }
+
+    /// 放一张红床（脚部在 `foot`，头部在 `head`，头部带 `PART=HEAD` 以登记 `home` POI）。
+    fn place_bed(&mut self, foot: BlockPos, head: BlockPos) {
+        let bed_foot = BlockState(blocks::RED_BED).with(BED_PART, BedPart::Foot).0;
+        let bed_head = BlockState(blocks::RED_BED).with(BED_PART, BedPart::Head).0;
+        self.set(foot, bed_foot);
+        self.set(head, bed_head);
     }
 
     /// 铺一块 `radius × radius` 的平地（`y = floor_y - 1` 草方块，`floor_y` 是站的高度）。
@@ -260,13 +296,56 @@ impl Level for StressLevel {
     fn can_see_sky(&self, _pos: BlockPos) -> bool {
         false
     }
-    /// 夜里：`sky_darken` 4 让 `isBrightOutside` 为假，僵尸不烧，追玩家场景
-    /// 全程保持 200 只（否则白天会烧到只剩 128 只）。
+    /// 天色暗度：既有场景 4（僵尸不烧），白天村庄 0、夜间村庄 4。
     fn sky_darken(&self) -> i32 {
-        4
+        self.terrain.sky_darken
     }
     fn monsters_burn(&self) -> bool {
         false
+    }
+    fn poi_type_at(&self, pos: BlockPos) -> Option<u8> {
+        super::span!(Poi);
+        super::record_poi_query!();
+        self.terrain.poi.get_type(pos)
+    }
+    fn poi_count_in_range(&self, center: BlockPos, radius: i32, kind: u8, occupancy: u8) -> usize {
+        super::span!(Poi);
+        super::record_poi_query!();
+        let Some(occupancy) = poi_occupancy(occupancy) else {
+            return 0;
+        };
+        self.terrain
+            .poi
+            .get_count_in_range(|found| found == kind, center, radius, occupancy)
+    }
+    fn poi_find_closest(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        kind: u8,
+        occupancy: u8,
+        position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        super::span!(Poi);
+        super::record_poi_query!();
+        let occupancy = poi_occupancy(occupancy)?;
+        self.terrain.poi.find_closest(
+            |found| found == kind,
+            position_filter,
+            center,
+            radius,
+            occupancy,
+        )
+    }
+    fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
+        super::span!(Poi);
+        super::record_poi_query!();
+        self.terrain.poi.sections_to_village(SectionPos::of(pos))
+    }
+    fn poi_is_close_to_village(&self, pos: BlockPos, sections: i32) -> bool {
+        super::span!(Poi);
+        super::record_poi_query!();
+        self.terrain.poi.is_close_to_village(pos, sections)
     }
     fn biome_id(&self, pos: BlockPos) -> i32 {
         let chunk = (pos.x >> 4, pos.z >> 4);
@@ -337,17 +416,68 @@ impl BlockSource for StressSource {
     }
 
     fn facts(&self) -> ViewFacts {
+        let clock = self.clock.load(std::sync::atomic::Ordering::Relaxed);
         ViewFacts {
             min_y: -64,
             max_y: 319,
             rules: self.terrain.rules,
             sky_brightness: 0,
             block_brightness: 0,
-            sky_darken: 4,
+            sky_darken: self.terrain.sky_darken,
             monsters_burn: false,
-            game_time: self.clock.load(std::sync::atomic::Ordering::Relaxed),
+            game_time: clock,
+            clock_ticks: self.terrain.base_clock + clock,
             ..ViewFacts::default()
         }
+    }
+
+    fn poi_type_at(&self, pos: BlockPos) -> Option<u8> {
+        super::span!(Poi);
+        super::record_poi_query!();
+        self.terrain.poi.get_type(pos)
+    }
+
+    fn poi_count_in_range(&self, center: BlockPos, radius: i32, kind: u8, occupancy: u8) -> usize {
+        super::span!(Poi);
+        super::record_poi_query!();
+        let Some(occupancy) = poi_occupancy(occupancy) else {
+            return 0;
+        };
+        self.terrain
+            .poi
+            .get_count_in_range(|found| found == kind, center, radius, occupancy)
+    }
+
+    fn poi_find_closest(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        kind: u8,
+        occupancy: u8,
+        position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        super::span!(Poi);
+        super::record_poi_query!();
+        let occupancy = poi_occupancy(occupancy)?;
+        self.terrain.poi.find_closest(
+            |found| found == kind,
+            position_filter,
+            center,
+            radius,
+            occupancy,
+        )
+    }
+
+    fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
+        super::span!(Poi);
+        super::record_poi_query!();
+        self.terrain.poi.sections_to_village(SectionPos::of(pos))
+    }
+
+    fn poi_is_close_to_village(&self, pos: BlockPos, sections: i32) -> bool {
+        super::span!(Poi);
+        super::record_poi_query!();
+        self.terrain.poi.is_close_to_village(pos, sections)
     }
 
     fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
@@ -378,10 +508,24 @@ enum Scene {
     Mixed,
     /// 玩家附近少、远处多：2000 头牛铺在半径 128 格内，一名玩家在中心。
     Distant2000,
+    /// 40 只村民的常规村庄（床、工作站、钟、1 名玩家，白天）。
+    Village40,
+    /// 200 只村民的大型村庄（床、工作站、4 口钟、1 名玩家，白天）。
+    Village200,
+    /// 100 只村民的 1×1 交易大厅（双排隔间 + 工作站 + 床 + 1 名玩家，白天）。
+    Hall100,
+    /// 可调规模的 1×1 交易大厅（`MOB_STRESS_HALL_N`，缺省 250 只）。
+    HallN,
+    /// 100 只村民挤在 5×5 石墙繁殖舱内（周边摆床，关挤压伤害以测稳定负载）。
+    Pod100,
+    /// 60 只失业村民争夺 12 个工作站（60 张床 + 1 口钟 + 12 个工作站）。
+    Unemployed60,
+    /// 100 只村民的夜间村庄（`base_clock=13000`, `sky_darken=4`, 110 张床 + 工作站 + 钟）。
+    NightVillage100,
 }
 
 impl Scene {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 16] = [
         Self::Pasture500,
         Self::Pasture2000,
         Self::Chase,
@@ -391,6 +535,13 @@ impl Scene {
         Self::Tower3x3,
         Self::Mixed,
         Self::Distant2000,
+        Self::Village40,
+        Self::Village200,
+        Self::Hall100,
+        Self::HallN,
+        Self::Pod100,
+        Self::Unemployed60,
+        Self::NightVillage100,
     ];
 
     fn name(self) -> &'static str {
@@ -404,7 +555,183 @@ impl Scene {
             Self::Tower3x3 => "tower-3x3",
             Self::Mixed => "mixed-natural",
             Self::Distant2000 => "distant-2000",
+            Self::Village40 => "village-40",
+            Self::Village200 => "village-200",
+            Self::Hall100 => "hall-100",
+            Self::HallN => "hall-n",
+            Self::Pod100 => "pod-100",
+            Self::Unemployed60 => "unemployed-60",
+            Self::NightVillage100 => "night-village-100",
         }
+    }
+
+    const WORKSTATIONS: [u32; 13] = [
+        blocks::COMPOSTER,
+        blocks::LECTERN,
+        blocks::BARREL,
+        blocks::BLAST_FURNACE,
+        blocks::SMOKER,
+        blocks::CARTOGRAPHY_TABLE,
+        blocks::BREWING_STAND,
+        blocks::FLETCHING_TABLE,
+        blocks::CAULDRON,
+        blocks::STONECUTTER,
+        blocks::LOOM,
+        blocks::SMITHING_TABLE,
+        blocks::GRINDSTONE,
+    ];
+
+    /// 村庄通用搭法：`count` 只村民、中心钟、若干张床和工作站、1 名玩家。
+    fn village(count: usize, workstations: usize, night: bool) -> (Terrain, Vec<(MobType, Vec3)>) {
+        let floor = 64;
+        let mut terrain = Terrain::new(floor);
+        terrain.base_clock = if night { 13_000 } else { 2_000 };
+        terrain.sky_darken = if night { 4 } else { 0 };
+        let half = if count >= 150 { 80 } else { 48 };
+        terrain.flat(half);
+        // 中心广场放钟，大型村庄四象限各加一口钟。
+        terrain.set(BlockPos::new(0, floor, 0), blocks::BELL);
+        if count >= 150 {
+            for (bx, bz) in [(-28, -28), (28, -28), (-28, 28), (28, 28)] {
+                terrain.set(BlockPos::new(bx, floor, bz), blocks::BELL);
+            }
+        }
+        // 环形屋区摆床（略多于村民数）和工作站。
+        let beds = count + (count / 10).max(4);
+        let bed_cols = (beds as f64).sqrt().ceil() as i32;
+        for i in 0..beds {
+            let gx = (i as i32 % bed_cols) - bed_cols / 2;
+            let gz = (i as i32 / bed_cols) - bed_cols / 2;
+            let x = gx * 5 + 3;
+            let z = gz * 5 + 3;
+            terrain.place_bed(BlockPos::new(x, floor, z), BlockPos::new(x, floor, z + 1));
+        }
+        let ws_cols = (workstations.max(1) as f64).sqrt().ceil() as i32;
+        for i in 0..workstations {
+            let gx = (i as i32 % ws_cols) - ws_cols / 2;
+            let gz = (i as i32 / ws_cols) - ws_cols / 2;
+            let x = gx * 5 + 1;
+            let z = gz * 5 + 1;
+            if x == 0 && z == 0 {
+                continue;
+            }
+            terrain.set(
+                BlockPos::new(x, floor, z),
+                Self::WORKSTATIONS[i % Self::WORKSTATIONS.len()],
+            );
+        }
+        terrain.add_player(1, Vec3::new(0.5, f64::from(floor), 6.5));
+        let side = (count as f64).sqrt().ceil() as i32;
+        let mut mobs = Vec::with_capacity(count);
+        for i in 0..count {
+            let gx = (i as i32 % side) - side / 2;
+            let gz = (i as i32 / side) - side / 2;
+            mobs.push((
+                MobType::Villager,
+                Vec3::new(
+                    f64::from(gx * 4) + 2.5,
+                    f64::from(floor),
+                    f64::from(gz * 4) + 2.5,
+                ),
+            ));
+        }
+        (terrain, mobs)
+    }
+
+    /// 交易大厅：两排 `count/2` 个 1×1 石墙隔间，面前 1 个工作站、身后 1 张床，玩家在过道里。
+    fn hall(count: usize) -> (Terrain, Vec<(MobType, Vec3)>) {
+        let floor = 64;
+        let mut terrain = Terrain::new(floor);
+        terrain.base_clock = 2_000;
+        terrain.sky_darken = 0;
+        let per_row = count.div_ceil(2) as i32;
+        let half = (per_row + 16).max(32);
+        terrain.flat(half);
+        terrain.set(BlockPos::new(0, floor, 0), blocks::BELL);
+        let mut mobs = Vec::with_capacity(count);
+        for i in 0..count {
+            let row = (i % 2) as i32;
+            let col = (i / 2) as i32 - per_row / 2;
+            let x = col * 2;
+            let stall_z = if row == 0 { -3 } else { 3 };
+            let ws_z = if row == 0 { -2 } else { 2 };
+            let bed_z = if row == 0 { -5 } else { 5 };
+            // 隔间左右和后方砌两格高石墙，把村民关在 1×1 格里。
+            for dx in [-1, 1] {
+                for y in floor..floor + 2 {
+                    terrain.set(BlockPos::new(x + dx, y, stall_z), blocks::STONE);
+                }
+            }
+            for y in floor..floor + 2 {
+                terrain.set(
+                    BlockPos::new(x, y, stall_z + if row == 0 { -1 } else { 1 }),
+                    blocks::STONE,
+                );
+            }
+            terrain.set(
+                BlockPos::new(x, floor, ws_z),
+                Self::WORKSTATIONS[i % Self::WORKSTATIONS.len()],
+            );
+            terrain.place_bed(
+                BlockPos::new(x, floor, bed_z),
+                BlockPos::new(x, floor, bed_z + if row == 0 { -1 } else { 1 }),
+            );
+            mobs.push((
+                MobType::Villager,
+                Vec3::new(
+                    f64::from(x) + 0.5,
+                    f64::from(floor),
+                    f64::from(stall_z) + 0.5,
+                ),
+            ));
+        }
+        terrain.add_player(1, Vec3::new(0.5, f64::from(floor), 0.5));
+        (terrain, mobs)
+    }
+
+    /// 繁殖舱 / 刷铁机密闭舱：100 只村民挤在 5×5 石墙内，四周摆 100 张床，关挤压伤害保数量稳定。
+    fn pod(count: usize) -> (Terrain, Vec<(MobType, Vec3)>) {
+        let floor = 64;
+        let mut terrain = Terrain::new(floor);
+        terrain.base_clock = 2_000;
+        terrain.sky_darken = 0;
+        terrain.flat(32);
+        terrain.rules.max_entity_cramming = 0;
+        let side = 5;
+        for x in -1..=side {
+            for z in [-1, side] {
+                for y in floor..floor + 3 {
+                    terrain.set(BlockPos::new(x, y, z), blocks::STONE);
+                }
+            }
+        }
+        for z in -1..=side {
+            for x in [-1, side] {
+                for y in floor..floor + 3 {
+                    terrain.set(BlockPos::new(x, y, z), blocks::STONE);
+                }
+            }
+        }
+        terrain.set(BlockPos::new(side + 3, floor, 2), blocks::BELL);
+        for i in 0..count {
+            let bx = (i as i32 % 10) * 2 - 10;
+            let bz = (i as i32 / 10) * 3 + side + 4;
+            terrain.place_bed(
+                BlockPos::new(bx, floor, bz),
+                BlockPos::new(bx, floor, bz + 1),
+            );
+        }
+        terrain.add_player(1, Vec3::new(f64::from(side) + 4.5, f64::from(floor), 2.5));
+        let mut mobs = Vec::with_capacity(count);
+        for i in 0..count {
+            let x = (i as i32) % side;
+            let z = (i as i32 / side) % side;
+            mobs.push((
+                MobType::Villager,
+                Vec3::new(f64::from(x) + 0.5, f64::from(floor), f64::from(z) + 0.5),
+            ));
+        }
+        (terrain, mobs)
     }
 
     /// 牧场四种动物混养，围栏里按网格摆开；玩家站在旁边。
@@ -672,6 +999,39 @@ impl Scene {
                 let (terrain, mobs) = Self::distant(2000);
                 (terrain, mobs, false)
             }
+            Self::Village40 => {
+                let (terrain, mobs) = Self::village(40, 40, false);
+                (terrain, mobs, false)
+            }
+            Self::Village200 => {
+                let (terrain, mobs) = Self::village(200, 200, false);
+                (terrain, mobs, false)
+            }
+            Self::Hall100 => {
+                let (terrain, mobs) = Self::hall(100);
+                (terrain, mobs, false)
+            }
+            Self::HallN => {
+                let n = std::env::var("MOB_STRESS_HALL_N")
+                    .ok()
+                    .and_then(|raw| raw.parse::<usize>().ok())
+                    .filter(|&n| n > 0)
+                    .unwrap_or(250);
+                let (terrain, mobs) = Self::hall(n);
+                (terrain, mobs, false)
+            }
+            Self::Pod100 => {
+                let (terrain, mobs) = Self::pod(100);
+                (terrain, mobs, false)
+            }
+            Self::Unemployed60 => {
+                let (terrain, mobs) = Self::village(60, 12, false);
+                (terrain, mobs, false)
+            }
+            Self::NightVillage100 => {
+                let (terrain, mobs) = Self::village(100, 100, true);
+                (terrain, mobs, false)
+            }
         }
     }
 }
@@ -898,6 +1258,10 @@ fn summarize(scene: Scene, threads: usize, rounds: Vec<Sample>) -> String {
     let mut path_stats = Vec::new();
     let mut push = Vec::new();
     let mut cramming = Vec::new();
+    let mut brain_ticks = Vec::new();
+    let mut sensor_scans = Vec::new();
+    let mut behavior_starts = Vec::new();
+    let mut poi_queries = Vec::new();
     let mut band_ticks = Vec::new();
     let mut band_ms = Vec::new();
     let mut kinds: BTreeMap<i32, Vec<f64>> = BTreeMap::new();
@@ -927,6 +1291,10 @@ fn summarize(scene: Scene, threads: usize, rounds: Vec<Sample>) -> String {
         ]);
         push.push(sample.counters.push_commands as f64 / MEASURE as f64);
         cramming.push(sample.counters.cramming_hits as f64 / MEASURE as f64);
+        brain_ticks.push(sample.counters.brain_ticks as f64 / MEASURE as f64);
+        sensor_scans.push(sample.counters.sensor_scans as f64 / MEASURE as f64);
+        behavior_starts.push(sample.counters.behavior_starts as f64 / MEASURE as f64);
+        poi_queries.push(sample.counters.poi_queries as f64 / MEASURE as f64);
         band_ticks.push(
             sample
                 .counters
@@ -1032,6 +1400,13 @@ fn summarize(scene: Scene, threads: usize, rounds: Vec<Sample>) -> String {
         line(&mut push),
         line(&mut cramming)
     );
+    out += &format!(
+        "brain-poi/tick: brain-ticks={} sensor-scans={} behavior-starts={} poi-queries={}\n",
+        line(&mut brain_ticks),
+        line(&mut sensor_scans),
+        line(&mut behavior_starts),
+        line(&mut poi_queries),
+    );
     for band in 0..3 {
         let mut count = band_ticks
             .iter()
@@ -1093,10 +1468,12 @@ fn mob_stress() {
     );
     println!("uptime: {}", uptime());
     for scene in Scene::ALL {
-        if only
-            .as_deref()
-            .is_some_and(|prefix| !scene.name().starts_with(prefix))
-        {
+        if only.as_deref().is_some_and(|raw| {
+            !raw.split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .any(|prefix| scene.name().starts_with(prefix))
+        }) {
             continue;
         }
         let natural = scene == Scene::Mixed;
@@ -1211,4 +1588,93 @@ fn uptime() -> String {
         .ok()
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
         .unwrap_or_else(|| "unavailable".to_owned())
+}
+
+/// 非 `#[ignore]` 冒烟：确认 7 个村民压测场景都接了真 `PoiStore`（床 / 钟 / 工作站
+/// 登记正确、精确和并行只读视图读到同一份 POI 结果），并且精确 / 并行都能正常跑刻。
+#[test]
+fn villager_stress_scenarios_register_real_pois_and_tick_cleanly() {
+    use crate::entity::ctx::BlockView;
+    use mc_bamboo_data::poi::poi_type_id;
+
+    let home = poi_type_id("minecraft:home").expect("home poi");
+    let meeting = poi_type_id("minecraft:meeting").expect("meeting poi");
+    let scenes = [
+        Scene::Village40,
+        Scene::Village200,
+        Scene::Hall100,
+        Scene::HallN,
+        Scene::Pod100,
+        Scene::Unemployed60,
+        Scene::NightVillage100,
+    ];
+    for scene in scenes {
+        let (terrain, mobs, _) = scene.build();
+        assert!(!mobs.is_empty(), "{} must spawn villagers", scene.name());
+        assert!(
+            mobs.iter().all(|(kind, _)| *kind == MobType::Villager),
+            "{} only spawns villagers",
+            scene.name()
+        );
+        let center = BlockPos::new(0, 64, 0);
+        let homes = terrain
+            .poi
+            .get_count_in_range(|k| k == home, center, 160, Occupancy::Any);
+        let bells = terrain
+            .poi
+            .get_count_in_range(|k| k == meeting, center, 160, Occupancy::Any);
+        assert!(
+            homes >= 40,
+            "{}: expected >=40 home POIs, got {homes}",
+            scene.name()
+        );
+        assert!(
+            bells >= 1,
+            "{}: expected >=1 bell POI, got {bells}",
+            scene.name()
+        );
+
+        let mut level = StressLevel {
+            terrain: terrain.clone(),
+            random: LevelRandom::new(7),
+            entities: Entities::with_next_id(2),
+            redstone: RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+        };
+        let source = SourceView::new(StressSource::new(terrain));
+        assert_eq!(
+            level.poi_count_in_range(center, 160, home, 2),
+            source.poi_count_in_range(center, 160, home, 2),
+            "{}: StressLevel and StressSource must agree on POI counts",
+            scene.name()
+        );
+        assert_eq!(
+            level.poi_sections_to_village(center),
+            source.poi_sections_to_village(center),
+            "{}: StressLevel and StressSource must agree on village distance",
+            scene.name()
+        );
+        // 精确 + 并行各跑 2 刻验证无 panic 且探针不崩。
+        let mut ticks = BlockTicks::new();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            for (kind, pos) in mobs.iter().take(8) {
+                world.spawn_entity(Entity::by_mob_type(*kind, *pos));
+            }
+        }
+        for t in 0..2 {
+            ticks.set_time(t);
+            source
+                .0
+                .clock
+                .store(t, std::sync::atomic::Ordering::Relaxed);
+            let mut world = World::new(&mut level, &mut ticks);
+            if t == 0 {
+                world.tick_entities();
+            } else {
+                let _ = tick_entities_parallel_timed(&source, &mut world, &InlineExecutor);
+            }
+        }
+    }
 }

@@ -59,7 +59,11 @@
   `NEAREST_LIVING_ENTITIES`、`NEAREST_PLAYERS`、`NEAREST_ITEMS`、`NEAREST_BED`、
   `HURT_BY`、`VILLAGER_HOSTILES`、`VILLAGER_BABIES`、`SECONDARY_POIS`、`GOLEM_DETECTED`。
   各 `scanRate`：`SecondaryPoiSensor` 40、`GolemSensor` 200、`NearestBedSensor` 20、
-  其余默认 20（`Sensor.<init>(int)` / `Sensor.<init>()`）。`GolemSensor.requires()` =
+  其余默认 20（`Sensor.<init>(int)` / `Sensor.<init>()`）。其中 **`NearestBedSensor`
+  只在幼年村民上跑**（`doTick` 入口 `if (!mob.isBaby()) return;`；成年村民直接早退零开销；
+  幼年村民按 `BATCH_SIZE = 5`、`CACHE_TIMEOUT = 40` 取 `HOME` POI 并经
+  `AcquirePoi.findPathToPois` 做一次多目标 A\* 寻路写 `NEAREST_BED`）。
+  `GolemSensor.requires()` =
   `{MOBS, GOLEM_DETECTED_RECENTLY}`，命中给 599 刻的 `GOLEM_DETECTED_RECENTLY`。
   `VillagerHostilesSensor` 是 `NearestVisibleLivingEntitySensor` 子类，`isHostile` 用
   `ACCEPTABLE_DISTANCE_FROM_HOSTILES` 的 11 项表（drowned / husk / vex / zombie /
@@ -151,7 +155,7 @@
 | `Activity` 变体 | 只有 Core/Idle/Panic/LongJump/Ram/Swim/LaySpawn/Tongue/PlayDead/Fight | **新加** Work/Play/Rest/Meet/Raid/PreRaid/Hide/Celebrate（含 `java_hash` 测试） |
 | `MemoryValue::GlobalPos` + 约 20 种 POI / 村庄记忆 | `MemoryType::COUNT = 32`，无 `GlobalPos` | **新加**（`HOME`、`JOB_SITE`、`POTENTIAL_JOB_SITE`、`MEETING_POINT`、`SECONDARY_JOB_SITE`、`NEAREST_BED`、`LAST_SLEPT`、`LAST_WOKEN`、`LAST_WORKED_AT_POI`、`HEARD_BELL_TIME`、`GOLEM_DETECTED_RECENTLY`、`VISIBLE_VILLAGER_BABIES`、`BREED_TARGET`、`INTERACTION_TARGET`、`NEAREST_HOSTILE`、`NEAREST_VISIBLE_WANTED_ITEM`…；已有 `BreedTarget` / `NearestVisibleWantedItem` 等要换值类型）；追加在枚举末尾保住既有下标 |
 | 9 个传感器中已有的 `NearestLivingEntities` / `NearestPlayers` / `NearestItems` / `HurtBy` | `SensorKind` 已有 4 个 | 复用 |
-| `NearestBed` / `VillagerHostiles` / `VillagerBabies` / `SecondaryPois` / `GolemDetected` | 无 | **新做**（含 `requires()`、`class_name()`、`scan_rate()`） |
+| `NearestBed` / `VillagerHostiles` / `VillagerBabies` / `SecondaryPois` / `GolemDetected` | 无 | **新做**（含 `requires()`、`class_name()`、`scan_rate()`；`NearestBed` 仅幼年村民跑，成年早退，复用 `AcquirePoi.findPathToPois` 多目标 A\*） |
 | `schedule` 字段 + `updateActivityFromSchedule` + timeline / 环境属性 | 无 | **新做**；Bamboo 已有 `Global::sky_darken` 用 `day.json` 的 `sky_light_level` 关键帧，可照同一思路加一个「按主世界时钟查 `villager_schedule` 两条 track」的 `GlobalView` 字段，避免引入完整 `EnvironmentAttributeSystem` |
 | 约 40 个村民专用行为 | 无 | **新做**；先按「结构表占位 + 少数真逻辑」分批（§4 期 3） |
 | `Brain::refresh` / `pack → new`（换职业、长大） | `Brain::new` 有，`stop_all` 有 | **补一个** `rebuild(provider)` 或让村民侧重建 |
@@ -288,10 +292,15 @@ PoiRecord.Packed  = { "pos": BlockPos(int array / codec), "type": "minecraft:xxx
   在死亡 / 记忆清除时 `PoiManager.release(globalPos.pos())`。
 - **获取工作站**：`AcquirePoi.create(typePredicate, memoryType,
   [secondaryMemoryType,] jobSiteForBabyFlag, Optional<Byte> eventId, biPredicate)`。
-  每 20 刻一次（`gameTime + 20 + nextInt(20)` 抖动），从
-  `PoiManager.findAllClosestFirstWithType(..., HAS_SPACE, 半径)` 里按
-  `JitteredLinearRetry`（最多 5 次尝试、间隔 20 刻的线性退避）挑一个，
-  `take(...)` 扣票、写 `GlobalPos(dimension, pos)` 到目标记忆、发实体事件。
+  首次触发（`nextScheduledStart == 0`）只设 `gameTime + nextInt(20)` 返回假；此后每
+  `20 + nextInt(20)` 刻清理超过 400 刻的旧重试条目，从
+  `PoiManager.findAllClosestFirstWithType(..., retryFilter, blockPos, 48, HAS_SPACE)`
+  取**最近 5 个候选**（`.limit(5)` 再过 `biPredicate` 收成 `Set`），调
+  `AcquirePoi.findPathToPois` 做**一次多目标 A\* 寻路**（`navigation.createPath(Set<BlockPos>, max(1, max(validRange)))`，**并非逐候选分别寻路**）。
+  若路径可达（`path != null && path.canReach()`），对 `path.getTarget()` 查类型后
+  `PoiManager.take(..., target, 1)` 扣票、写 `GlobalPos(dimension, target)`、发可选实体事件并清空重试表；
+  若不可达，才按这批候选逐一在 `batchCache` 中建 `JitteredLinearRetry`
+  （每次失败 `currentDelay = min(currentDelay + 40 + nextInt(40), 400)`，400 刻后过期）。
   `getCorePackage` 里三个 `AcquirePoi` 分别对应 `POTENTIAL_JOB_SITE`（职业可获取）、
   `HOME`、`MEETING_POINT`。
 - **认领职业**：`AssignProfessionFromJobSite.create()` 的 OneShot 触发器要
@@ -957,7 +966,7 @@ meeting + beehive + lightning_rod，跨 3 个高度段 / 多个区块，含拆�
 
 ### 期 4：职业与工作站
 
-- 真实现 `AcquirePoi`（含 `JitteredLinearRetry`）、`ValidateNearbyPoi`、
+- 真实现 `AcquirePoi`（最近 5 候选 + 一次多目标 A\* `createPath(Set<BlockPos>, int)` + 失败按候选建 `JitteredLinearRetry`）、`ValidateNearbyPoi`、
   `GoToPotentialJobSite`、`YieldJobSite`、`AssignProfessionFromJobSite`、
   `ResetProfession`、`PoiCompetitorScan`、`SecondaryPoiSensor`、
   `GoToWantedItem` / `wantsToPickUp` / `InventoryCarrier` 的拾取。
@@ -1042,7 +1051,7 @@ meeting + beehive + lightning_rod，跨 3 个高度段 / 多个区块，含拆�
 | 1（拆合） | 现有 `island_split` 单测加 POI 断言：拆岛后两岛各自只含自己区块的段，并岛后无重复、无丢失；`poi/` 脏块集合跟 `region/` 脏块集合一致 | 段归属、脏标记 | 拆岛时不搬 `IslandPart::Poi` |
 | 2 | `chunk-content` oracle 新建村民存档：`VillagerData/level/type/profession`、`Offers`、`Gossips`、`Xp`、`LastRestock`… 与官方 `saveWithFullMetadata` 逐键比；`entity_oracle` 比 `set_entity_data` 的三个元数据字节和 `entity_type` 注册表 ID；数据导出用「jar 内 json → 生成表」的逐文件哈希比对单测 | NBT 键顺序 / 默认值、元数据序列化器 ID、导出表完整性 | 把 `level` 缺省写成 0 / 漏 `trade_set` 的一个文件 |
 | 3 | 扩 `mob-oracle --only villager_brain`：Java 侧用 `MobOracle.Brain.dump`（`getActiveActivities` / `getRunningBehaviors` / `brain.forEach(Visitor)`）每刻转储；Bamboo 侧复用 `oracle/brain.rs::dump` + `water_mob.rs::brain_table` 的结构表（传感器类名 / scanRate / requires、行为优先级 / 活动 / 类名、进入条件、退出清记忆）。场景：固定 `gameTime` 跨 10 / 2000 / 9000 / 11000 / 12000 五个关键帧，成年 / 幼年各一套，另跑 24000 刻长场景比 `lastScheduleUpdate` 的 20 刻节流 | 活动切换时刻、结构表逐字一致、记忆名 / ttl、随机源 | `--break-self-test villager_sensors`（延迟各 +1）、`villager_shuffle`（洗牌种子 +1）、把 `work` 关键帧改成 2001 |
-| 4 | `--only villager_job`：场景 = 空地放 1 个工作站 + 1 个失业村民，跑 200–600 刻，逐刻比 `JOB_SITE / POTENTIAL_JOB_SITE` 记忆、`VillagerData.profession / level`、POI `free_tickets`、工作站被拆后 `ResetProfession` 的时机；再跑 `rewardTradeXp` 的纯函数用例（阈值 10/70/150/250） | `AcquirePoi` 的 20 刻抖动、`AssignProfession` 的 2 格判定、清 offers、refreshBrain 后记忆保留 | 故意把 `closerToCenterThan(...,2.0)` 改成 3.0 / 不 `release` POI |
+| 4 | `--only villager_job`：场景 = 空地放 1 个工作站 + 1 个失业村民，跑 200–600 刻，逐刻比 `JOB_SITE / POTENTIAL_JOB_SITE` 记忆、`VillagerData.profession / level`、POI `free_tickets`、工作站被拆后 `ResetProfession` 的时机；再跑 `rewardTradeXp` 的纯函数用例（阈值 10/70/150/250） | `AcquirePoi` 的 20 刻抖动、最近 5 候选一次多目标 A\* 与失败 `JitteredLinearRetry`、`AssignProfession` 的 2 格判定、清 offers、refreshBrain 后记忆保留 | 故意把 `closerToCenterThan(...,2.0)` 改成 3.0 / 不 `release` POI |
 | 5 | 新 `trade-oracle`（或扩 `menu` oracle，现有 `tools/mc-bamboo-vanilla/src/menu.rs`）：Java 侧构造 `Villager` + 指定 `VillagerData`，`getOffers()` 后导出 `MerchantOffers.CODEC` 的 SNBT 和 `ClientboundMerchantOffersPacket` 的字节；Bamboo 侧同种子跑 `updateTrades`，逐条比 `buy/buyB/sell/uses/maxUses/rewardExp/specialPrice/demand/priceMultiplier/xp`。再跑补货 / 需求 / 折扣的逐题用例：给定 `demand/uses/priceMultiplier/specialPriceDiff/reputation/amplifier` 算 `getCostA().count`；最后跑 `notifyTrade → restock → shouldRestock` 的时间线（含跨游戏日） | 交易表挑选取数（`random_sequence`）、offer 字段、包字节、价格公式、补货次数 | 把 `updateDemand` 写成 `demand += uses` / 漏英雄效果的 `max(1, …)` / 包里少写 `canRestock` |
 | 6 | `mob-oracle --only villager_gossip / villager_breed / villager_golem`：八卦逐题比 `add/decay/transferFrom/getReputation` 的整数表和 CODEC（用 `GossipContainer.CODEC` 导出）；繁殖比 `canBreed`、275+nextInt(50) 倒计时、床位扣还、幼崽品种（三种来源）与 `Age`；铁傀儡比 `wantsToSpawnGolem` 的 `LAST_SLEPT < 24000`、`GOLEM_DETECTED_RECENTLY` 599 刻、3 / 5 人数门槛、成功后的生成实体与落点 | 加权抽样的随机源、`decay` 的 `<2` 删除、`VillagerMakeLove` 时长、生成原因 `MOB_SUMMONED` | `--break-self-test villager_gossip`（改 weight）、把 `24000` 改成 `12000`、漏 `giveBedToChild` |
 | 7 | 扩现有 `--only patrol` 的框架做 `--only cat_spawner` / `wandering_trader`：长场景（几十万刻）比 `nextTick`、每次 `spawnDelay/spawnChance`、随机玩家偏移、生成实体的类型 / 坐标 / 持久化 / `despawnDelay` / `wanderTarget`，以及结束时世界随机源种子（现有 patrol oracle 已这么做）。转化用 `--only villager_conversion`：逐刻比 `villagerConversionTime`、1% 加速扫描取数、搬过去的 `VillagerData/Offers/Gossips/Xp`、声望变化；雷击用现有雷击随机刻场景加一个村民 | 刷怪器在主世界顺序（phantom→patrol→cat→siege→trader）里对世界随机源的取数位置、难度分支、存档键 | 把 CatSpawner 挪到巡逻队之前 / 改 `nextInt(10)` 门槛 / 漏 `ConversionPlayer` |
