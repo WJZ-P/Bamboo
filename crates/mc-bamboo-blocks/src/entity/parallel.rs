@@ -615,6 +615,14 @@ impl BlockView for ParallelBlockView<'_> {
         self.inner.sky_darken()
     }
 
+    fn villager_activity(&self) -> crate::entity::mob::brain::Activity {
+        self.inner.villager_activity()
+    }
+
+    fn baby_villager_activity(&self) -> crate::entity::mob::brain::Activity {
+        self.inner.baby_villager_activity()
+    }
+
     fn difficulty(&self) -> i32 {
         self.inner.difficulty()
     }

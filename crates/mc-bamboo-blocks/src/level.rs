@@ -1300,6 +1300,23 @@ pub trait Level: LevelSideState + LevelEntities {
         !self.dimension_has_fixed_time() && crate::sky::monsters_burn(self.clock_ticks())
     }
 
+    /// `EnvironmentAttributes.VILLAGER_ACTIVITY`：主控按主世界时钟和
+    /// `villager_schedule.json` 关键帧发布给各岛，和 `sky_darken` 走同一条路径。
+    ///
+    /// `EnvironmentAttributes.VILLAGER_ACTIVITY`: published by the master from the
+    /// overworld clock and `villager_schedule.json` keyframes, on the same path as
+    /// `sky_darken`.
+    fn villager_activity(&self) -> crate::entity::mob::brain::Activity {
+        crate::sky::villager_activity(self.clock_ticks())
+    }
+
+    /// `EnvironmentAttributes.BABY_VILLAGER_ACTIVITY`：幼年村民的日程活动。
+    ///
+    /// `EnvironmentAttributes.BABY_VILLAGER_ACTIVITY`: the baby villager schedule activity.
+    fn baby_villager_activity(&self) -> crate::entity::mob::brain::Activity {
+        crate::sky::baby_villager_activity(self.clock_ticks())
+    }
+
     /// `EnvironmentAttributes.SNOW_GOLEM_MELTS`：按这一格的群系查生成的表。
     /// 夹具可以覆盖它，模拟热群系或下界。
     ///

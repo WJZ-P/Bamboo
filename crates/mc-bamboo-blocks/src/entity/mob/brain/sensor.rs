@@ -7,8 +7,9 @@
 
 use std::sync::Arc;
 
-use mc_bamboo_core::{Aabb, Vec3, mth};
-use mc_bamboo_data::registries::attribute;
+use mc_bamboo_core::{Aabb, BlockPos, Vec3, mth};
+use mc_bamboo_data::{blocks, registries::attribute, villager as villager_data};
+use mc_bamboo_protocol::components::value::GlobalPos;
 
 use super::{
     super::{MobPublic as KindPublicMob, MobType, camel, goals, living},
@@ -52,6 +53,26 @@ pub enum SensorKind {
     ///
     /// `AxolotlAttackablesSensor` (a `NearestVisibleLivingEntitySensor` subclass).
     AxolotlAttackables,
+    /// `NearestBedSensor`（仅幼年村民扫描 48 格内最近的床 POI）。
+    ///
+    /// `NearestBedSensor` (scans for the nearest bed POI within 48 blocks for baby villagers).
+    NearestBed,
+    /// `VillagerHostilesSensor`（`NearestVisibleLivingEntitySensor` 子类，按 11 种敌对距离表筛选）。
+    ///
+    /// `VillagerHostilesSensor` (`NearestVisibleLivingEntitySensor` subclass using the 11-entry distance table).
+    VillagerHostiles,
+    /// `VillagerBabiesSensor`（从 `NEAREST_VISIBLE_LIVING_ENTITIES` 筛选可见幼年村民）。
+    ///
+    /// `VillagerBabiesSensor` (collects visible baby villagers from `NEAREST_VISIBLE_LIVING_ENTITIES`).
+    VillagerBabies,
+    /// `SecondaryPoiSensor`（40 刻扫描，农民在 9×5×9 范围找耕地）。
+    ///
+    /// `SecondaryPoiSensor` (40-tick scan; farmers collect nearby farmland in a 9×5×9 box).
+    SecondaryPois,
+    /// `GolemSensor`（200 刻扫描，附近有铁傀儡时写 `GOLEM_DETECTED_RECENTLY`，TTL 599）。
+    ///
+    /// `GolemSensor` (200-tick scan; writes `GOLEM_DETECTED_RECENTLY` with TTL 599 if an iron golem is nearby).
+    GolemDetected,
 }
 
 impl SensorKind {
@@ -61,6 +82,8 @@ impl SensorKind {
     pub const fn scan_rate(self) -> i32 {
         match self {
             Self::ArmadilloScareDetected => 5,
+            Self::SecondaryPois => 40,
+            Self::GolemDetected => 200,
             _ => 20,
         }
     }
@@ -110,6 +133,17 @@ impl SensorKind {
                 MemoryType::NearestAttackable,
                 MemoryType::HuntingCooldown,
             ],
+            Self::NearestBed => &[MemoryType::NearestBed],
+            Self::VillagerHostiles => &[
+                MemoryType::NearestHostile,
+                MemoryType::NearestVisibleLivingEntities,
+            ],
+            Self::VillagerBabies => &[MemoryType::VisibleVillagerBabies],
+            Self::SecondaryPois => &[MemoryType::SecondaryJobSite],
+            Self::GolemDetected => &[
+                MemoryType::NearestLivingEntities,
+                MemoryType::GolemDetectedRecently,
+            ],
         }
     }
 
@@ -128,6 +162,11 @@ impl SensorKind {
             Self::FrogAttackables => "FrogAttackablesSensor",
             Self::IsInWater => "IsInWaterSensor",
             Self::AxolotlAttackables => "AxolotlAttackablesSensor",
+            Self::NearestBed => "NearestBedSensor",
+            Self::VillagerHostiles => "VillagerHostilesSensor",
+            Self::VillagerBabies => "VillagerBabiesSensor",
+            Self::SecondaryPois => "SecondaryPoiSensor",
+            Self::GolemDetected => "GolemSensor",
         }
     }
 }
@@ -180,6 +219,11 @@ impl Sensor {
             SensorKind::FrogTemptations => sense_temptations(cx),
             SensorKind::IsInWater => super::super::frog::sense_is_in_water(cx),
             SensorKind::AxolotlAttackables => super::super::axolotl::sense_attackables(cx),
+            SensorKind::NearestBed => sense_nearest_bed(cx),
+            SensorKind::VillagerHostiles => sense_villager_hostiles(cx),
+            SensorKind::VillagerBabies => sense_villager_babies(cx),
+            SensorKind::SecondaryPois => sense_secondary_pois(cx),
+            SensorKind::GolemDetected => sense_golem_detected(cx),
         }
     }
 }
@@ -623,4 +667,259 @@ fn sense_items(cx: &mut Cx) {
         MemoryType::NearestVisibleWantedItem,
         found.map(|(_, uid, _)| MemoryValue::Entity(uid)),
     );
+}
+
+/// 官方 `VillagerHostilesSensor.ACCEPTABLE_DISTANCE_FROM_HOSTILES` 完整 11 项表。
+///
+/// The full 11-entry `VillagerHostilesSensor.ACCEPTABLE_DISTANCE_FROM_HOSTILES` table.
+pub const ACCEPTABLE_DISTANCE_FROM_HOSTILES: [(&str, f32); 11] = [
+    ("minecraft:drowned", 8.0),
+    ("minecraft:evoker", 12.0),
+    ("minecraft:husk", 8.0),
+    ("minecraft:illusioner", 12.0),
+    ("minecraft:pillager", 15.0),
+    ("minecraft:ravager", 12.0),
+    ("minecraft:vex", 8.0),
+    ("minecraft:vindicator", 10.0),
+    ("minecraft:zoglin", 10.0),
+    ("minecraft:zombie", 8.0),
+    ("minecraft:zombie_villager", 8.0),
+];
+
+/// 按已建模的 [`MobType`] 查 `ACCEPTABLE_DISTANCE_FROM_HOSTILES`，不在表里返回 `None`。
+///
+/// Looks up a modelled [`MobType`] in `ACCEPTABLE_DISTANCE_FROM_HOSTILES`, returning
+/// `None` if it is not a villager hostile.
+pub const fn villager_hostile_distance(mob_type: MobType) -> Option<f32> {
+    match mob_type {
+        MobType::Drowned | MobType::Husk | MobType::Zombie => Some(8.0),
+        MobType::Pillager => Some(15.0),
+        _ => None,
+    }
+}
+
+/// `NearestBedSensor.doTick`：只对幼年村民生效，先从世界随机源抽 `nextInt(20)` 记刷新时刻，
+/// 再在 48 格内找床（`PoiTypes.HOME`，`Occupancy.ANY`）。
+///
+/// `NearestBedSensor.doTick`: baby villagers only; draws `level.random.nextInt(20)` for
+/// the batch timeout, then looks for a bed POI within 48 blocks.
+fn sense_nearest_bed(cx: &mut Cx) {
+    if !cx.mob.is_baby() {
+        return;
+    }
+    let _last_update = cx.time + i64::from(cx.level_next_int(20));
+    const OCCUPANCY_ANY: u8 = 2;
+    let Some(home_kind) = mc_bamboo_data::poi::poi_type_id("minecraft:home") else {
+        return;
+    };
+    let origin = cx.me.block_position();
+    let Some(bed) = cx
+        .ctx
+        .blocks()
+        .poi_find_closest(origin, 48, home_kind, OCCUPANCY_ANY, &|_| true)
+    else {
+        return;
+    };
+    let nav = living::nav_mob(cx.me, cx.mob, cx.ctx.blocks());
+    if let Some(path) = cx.mob.navigation.create_path(cx.ctx.blocks(), &nav, bed, 1)
+        && path.reached
+    {
+        cx.memories
+            .set(MemoryType::NearestBed, MemoryValue::BlockPos(bed));
+    }
+}
+
+/// `VillagerHostilesSensor.doTick`（`NearestVisibleLivingEntitySensor` 子类）：
+/// 找最近的可见敌对生物，距离判定 `target.distanceToSqr(self) <= (r * r) as f64`。
+///
+/// `VillagerHostilesSensor.doTick` (`NearestVisibleLivingEntitySensor` subclass):
+/// finds the nearest visible hostile within `ACCEPTABLE_DISTANCE_FROM_HOSTILES`.
+fn sense_villager_hostiles(cx: &mut Cx) {
+    let has_hostile = match cx.memories.get(MemoryType::NearestVisibleLivingEntities) {
+        Some(MemoryValue::Visible(visible)) => visible.has_hostile_type,
+        _ => {
+            cx.memories.erase(MemoryType::NearestHostile);
+            return;
+        }
+    };
+    if !has_hostile {
+        cx.memories.erase(MemoryType::NearestHostile);
+        return;
+    }
+    let self_pos = cx.me.position;
+    let found = find_closest_visible(cx, &mut |view| {
+        let Some(limit) = view.mob_type.and_then(villager_hostile_distance) else {
+            return false;
+        };
+        view.position.distance_to_sqr(self_pos) <= f64::from(limit * limit)
+    });
+    cx.memories
+        .set_or_erase(MemoryType::NearestHostile, found.map(MemoryValue::Entity));
+}
+
+/// `VillagerBabiesSensor.doTick`：从可见活体列表里收集所有幼年村民，空表则清空记忆。
+///
+/// `VillagerBabiesSensor.doTick`: collects every visible baby villager from
+/// `NEAREST_VISIBLE_LIVING_ENTITIES`; an empty list clears the memory.
+fn sense_villager_babies(cx: &mut Cx) {
+    let candidates = match cx.memories.get(MemoryType::NearestVisibleLivingEntities) {
+        Some(MemoryValue::Visible(visible)) => {
+            visible.prefilter(|ty| ty == Some(MobType::Villager))
+        }
+        _ => Vec::new(),
+    };
+    let mut babies = Vec::new();
+    for (index, uid) in candidates {
+        let Some(view) = living(cx, uid) else {
+            continue;
+        };
+        if view.baby && visible_at(cx, index, &view) {
+            babies.push(uid);
+        }
+    }
+    cx.memories.set(
+        MemoryType::VisibleVillagerBabies,
+        MemoryValue::Entities(babies.into()),
+    );
+}
+
+/// `SecondaryPoiSensor.doTick`（扫描间隔 40 刻）：非农民的 `secondary_poi` 为空，直接清空；
+/// 农民按官方 `x∈[-4..4], y∈[-2..2], z∈[-4..4]` 顺序收集 `farmland`。
+///
+/// `SecondaryPoiSensor.doTick` (40-tick scan): non-farmers have an empty `secondary_poi`
+/// set and immediately erase; farmers scan `x∈[-4..4], y∈[-2..2], z∈[-4..4]` for farmland.
+fn sense_secondary_pois(cx: &mut Cx) {
+    let secondary = villager_data::profession(cx.mob.villager.profession)
+        .map_or(&[][..], |entry| entry.secondary_poi);
+    if secondary.is_empty() {
+        cx.memories.erase(MemoryType::SecondaryJobSite);
+        return;
+    }
+    let origin = cx.me.block_position();
+    let blocks_view = cx.ctx.blocks();
+    let only_farmland = secondary == ["minecraft:farmland"];
+    let mut found = Vec::new();
+    for dx in -4..=4 {
+        for dy in -2..=2 {
+            for dz in -4..=4 {
+                let pos = BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz);
+                let state = blocks_view.block_state(pos);
+                let matches = if only_farmland {
+                    state.is(blocks::FARMLAND)
+                } else {
+                    let block_name = state.block().name;
+                    secondary.contains(&block_name)
+                };
+                if matches {
+                    found.push(GlobalPos {
+                        dimension: "minecraft:overworld".to_owned(),
+                        pos,
+                    });
+                }
+            }
+        }
+    }
+    if found.is_empty() {
+        cx.memories.erase(MemoryType::SecondaryJobSite);
+    } else {
+        cx.memories.set(
+            MemoryType::SecondaryJobSite,
+            MemoryValue::GlobalPosList(found),
+        );
+    }
+}
+
+/// `GolemSensor.doTick`（扫描间隔 200 刻）：`NEAREST_LIVING_ENTITIES` 里有铁傀儡就记
+/// `GOLEM_DETECTED_RECENTLY = true`（TTL 599）；没发现时不主动擦除，等 TTL 自然过期。
+///
+/// `GolemSensor.doTick` (200-tick scan): if `NEAREST_LIVING_ENTITIES` contains an iron
+/// golem, writes `GOLEM_DETECTED_RECENTLY = true` with TTL 599; does not erase otherwise.
+fn sense_golem_detected(cx: &mut Cx) {
+    if let Some(MemoryValue::Visible(visible)) =
+        cx.memories.get(MemoryType::NearestVisibleLivingEntities)
+    {
+        if visible.has_type(|ty| ty == Some(MobType::IronGolem)) {
+            cx.memories.set_with_ttl(
+                MemoryType::GolemDetectedRecently,
+                MemoryValue::Bool(true),
+                599,
+            );
+        }
+        return;
+    }
+    let Some(list) = cx.memories.entities(MemoryType::NearestLivingEntities) else {
+        return;
+    };
+    let ids: Vec<EntityUid> = list.to_vec();
+    let has_golem = ids
+        .into_iter()
+        .any(|uid| living(cx, uid).is_some_and(|view| view.mob_type == Some(MobType::IronGolem)));
+    if has_golem {
+        cx.memories.set_with_ttl(
+            MemoryType::GolemDetectedRecently,
+            MemoryValue::Bool(true),
+            599,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 5 个村民传感器的扫描间隔、类名、必需记忆和敌对距离表与官方字节码逐条一致。
+    #[test]
+    fn villager_sensors_metadata_and_hostile_table_match_vanilla() {
+        assert_eq!(SensorKind::NearestBed.scan_rate(), 20);
+        assert_eq!(SensorKind::NearestBed.class_name(), "NearestBedSensor");
+        assert_eq!(SensorKind::NearestBed.requires(), &[MemoryType::NearestBed]);
+
+        assert_eq!(SensorKind::VillagerHostiles.scan_rate(), 20);
+        assert_eq!(
+            SensorKind::VillagerHostiles.class_name(),
+            "VillagerHostilesSensor"
+        );
+        assert_eq!(
+            SensorKind::VillagerHostiles.requires(),
+            &[
+                MemoryType::NearestHostile,
+                MemoryType::NearestVisibleLivingEntities
+            ]
+        );
+
+        assert_eq!(SensorKind::VillagerBabies.scan_rate(), 20);
+        assert_eq!(
+            SensorKind::VillagerBabies.class_name(),
+            "VillagerBabiesSensor"
+        );
+        assert_eq!(
+            SensorKind::VillagerBabies.requires(),
+            &[MemoryType::VisibleVillagerBabies]
+        );
+
+        assert_eq!(SensorKind::SecondaryPois.scan_rate(), 40);
+        assert_eq!(SensorKind::SecondaryPois.class_name(), "SecondaryPoiSensor");
+        assert_eq!(
+            SensorKind::SecondaryPois.requires(),
+            &[MemoryType::SecondaryJobSite]
+        );
+
+        assert_eq!(SensorKind::GolemDetected.scan_rate(), 200);
+        assert_eq!(SensorKind::GolemDetected.class_name(), "GolemSensor");
+        assert_eq!(
+            SensorKind::GolemDetected.requires(),
+            &[
+                MemoryType::NearestLivingEntities,
+                MemoryType::GolemDetectedRecently
+            ]
+        );
+
+        assert_eq!(ACCEPTABLE_DISTANCE_FROM_HOSTILES.len(), 11);
+        assert_eq!(villager_hostile_distance(MobType::Zombie), Some(8.0));
+        assert_eq!(villager_hostile_distance(MobType::Husk), Some(8.0));
+        assert_eq!(villager_hostile_distance(MobType::Drowned), Some(8.0));
+        assert_eq!(villager_hostile_distance(MobType::Pillager), Some(15.0));
+        assert_eq!(villager_hostile_distance(MobType::Creeper), None);
+        assert_eq!(villager_hostile_distance(MobType::Cow), None);
+    }
 }

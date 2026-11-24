@@ -734,6 +734,8 @@ impl Region {
             block_rules: entity_rules,
             block_weather: self.global.block_weather,
             sky_darken: self.global.sky_darken,
+            villager_activity: self.global.villager_activity,
+            baby_villager_activity: self.global.baby_villager_activity,
             clock_ticks: self.global.clock.total_ticks,
             scoreboard: &self.global.scoreboard,
             world_seed: self.global.seed,

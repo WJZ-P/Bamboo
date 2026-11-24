@@ -9,6 +9,7 @@
 
 use super::{
     super::Mob,
+    Activity, ActivityState,
     memory::{Memories, MemoryMasks, MemoryStatus, MemoryType},
 };
 use crate::entity::{Entity, JavaRandom, ctx::EntityCtx};
@@ -16,16 +17,17 @@ use crate::entity::{Entity, JavaRandom, ctx::EntityCtx};
 pub use super::behaviors::{BodyPredicate, Kind, MoveToTargetSink, Speed, Trigger};
 
 /// 行为跑一刻时能碰到的一切：自己（实体和生物，大脑已经取出来）、上下文、记忆、
-/// 世界时钟（`level.getGameTime()`，也就是行为的 `timestamp`）。
+/// 活动切换控制、世界时钟（`level.getGameTime()`，也就是行为的 `timestamp`）。
 ///
 /// Everything a behaviour can touch in one tick: itself (entity and mob, with the brain
-/// taken out), the context, the memories and the game time (`level.getGameTime()`, the
-/// behaviours' `timestamp`).
+/// taken out), the context, the memories, the activity controller and the game time
+/// (`level.getGameTime()`, the behaviours' `timestamp`).
 pub struct Cx<'a> {
     pub me: &'a mut Entity,
     pub mob: &'a mut Mob,
     pub ctx: &'a mut dyn EntityCtx,
     pub memories: &'a mut Memories,
+    pub(super) activity: ActivityState<'a>,
     pub time: i64,
 }
 
@@ -35,6 +37,38 @@ impl Cx<'_> {
     /// `level.getRandom().nextInt(bound)`.
     pub fn level_next_int(&self, bound: i32) -> i32 {
         self.ctx.blocks().level_random_int(bound)
+    }
+
+    /// `Brain.isActive`。
+    ///
+    /// `Brain.isActive`.
+    pub fn is_active(&self, activity: Activity) -> bool {
+        self.activity.is_active(activity)
+    }
+
+    /// `Brain.setDefaultActivity`。
+    ///
+    /// `Brain.setDefaultActivity`.
+    pub fn set_default_activity(&mut self, activity: Activity) {
+        self.activity.set_default_activity(activity);
+    }
+
+    /// `Brain.setActiveActivityIfPossible`：条件满足则切过去，否则退回默认活动。
+    ///
+    /// `Brain.setActiveActivityIfPossible`: switches if requirements hold, else uses
+    /// the default activity.
+    pub fn set_active_activity_if_possible(&mut self, activity: Activity) {
+        self.activity
+            .set_active_activity_if_possible(self.memories, activity);
+    }
+
+    /// `Brain.updateActivityFromSchedule`：20 刻节流（`time - last > 20`）。
+    ///
+    /// `Brain.updateActivityFromSchedule`: 20-tick throttle (`time - last > 20`).
+    pub fn update_activity_from_schedule(&mut self) {
+        let blocks = self.ctx.blocks();
+        self.activity
+            .update_activity_from_schedule(self.memories, blocks, self.time);
     }
 }
 

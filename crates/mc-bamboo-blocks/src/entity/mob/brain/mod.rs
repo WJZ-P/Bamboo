@@ -83,6 +83,17 @@ pub enum Activity {
     /// The axolotl's play-dead and fight activities (`Activity.PLAY_DEAD / FIGHT`).
     PlayDead,
     Fight,
+    /// 村民的日程和袭击活动（`Activity.WORK / PLAY / REST / MEET / RAID / PRE_RAID / HIDE / CELEBRATE`）。
+    ///
+    /// Villager schedule and raid activities (`Activity.WORK / PLAY / REST / MEET / RAID / PRE_RAID / HIDE / CELEBRATE`).
+    Work,
+    Play,
+    Rest,
+    Meet,
+    Raid,
+    PreRaid,
+    Hide,
+    Celebrate,
 }
 
 impl Activity {
@@ -101,6 +112,42 @@ impl Activity {
             Self::Tongue => "tongue",
             Self::PlayDead => "play_dead",
             Self::Fight => "fight",
+            Self::Work => "work",
+            Self::Play => "play",
+            Self::Rest => "rest",
+            Self::Meet => "meet",
+            Self::Raid => "raid",
+            Self::PreRaid => "pre_raid",
+            Self::Hide => "hide",
+            Self::Celebrate => "celebrate",
+        }
+    }
+
+    /// 按注册名（可带 `minecraft:`）找活动。
+    ///
+    /// Finds an activity by registry name, with or without `minecraft:`.
+    pub fn by_name(name: &str) -> Option<Self> {
+        let path = name.strip_prefix("minecraft:").unwrap_or(name);
+        match path {
+            "core" => Some(Self::Core),
+            "idle" => Some(Self::Idle),
+            "panic" => Some(Self::Panic),
+            "long_jump" => Some(Self::LongJump),
+            "ram" => Some(Self::Ram),
+            "swim" => Some(Self::Swim),
+            "lay_spawn" => Some(Self::LaySpawn),
+            "tongue" => Some(Self::Tongue),
+            "play_dead" => Some(Self::PlayDead),
+            "fight" => Some(Self::Fight),
+            "work" => Some(Self::Work),
+            "play" => Some(Self::Play),
+            "rest" => Some(Self::Rest),
+            "meet" => Some(Self::Meet),
+            "raid" => Some(Self::Raid),
+            "pre_raid" => Some(Self::PreRaid),
+            "hide" => Some(Self::Hide),
+            "celebrate" => Some(Self::Celebrate),
+            _ => None,
         }
     }
 
@@ -276,6 +323,139 @@ impl BrainTemplate {
     }
 }
 
+/// 官方 `Brain.schedule` 引用的环境属性日程：成年村民和幼年村民各一条。
+///
+/// The environment-attribute schedule referenced by `Brain.schedule`: adult and baby
+/// villager tracks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivitySchedule {
+    /// `EnvironmentAttributes.VILLAGER_ACTIVITY`。
+    Villager,
+    /// `EnvironmentAttributes.BABY_VILLAGER_ACTIVITY`。
+    BabyVillager,
+}
+
+/// `Brain.lastScheduleUpdate` 的官方初始值（`Brain.java`）。
+///
+/// Vanilla's initial value for `Brain.lastScheduleUpdate` (`Brain.java`).
+const INITIAL_LAST_SCHEDULE_UPDATE: i64 = -9999;
+
+/// `Brain.SCHEDULE_UPDATE_DELAY`：每过 20 刻（严格大于 20）才重新按日程切活动。
+///
+/// `Brain.SCHEDULE_UPDATE_DELAY`: re-evaluates the schedule only after strictly more
+/// than 20 ticks.
+const SCHEDULE_UPDATE_DELAY: i64 = 20;
+
+/// 行为在 `Brain.tick` 中途读写活动集合与日程的借用视图。
+///
+/// Borrowed view allowing behaviours running inside `Brain.tick` to query and switch
+/// activities or trigger schedule updates.
+pub(super) struct ActivityState<'a> {
+    template: &'a BrainTemplate,
+    active: &'a mut Vec<Activity>,
+    start_bucket: &'a mut Vec<usize>,
+    default_activity: &'a mut Activity,
+    schedule: &'a mut Option<ActivitySchedule>,
+    last_schedule_update: &'a mut i64,
+    switched: bool,
+}
+
+impl ActivityState<'_> {
+    pub(super) fn is_active(&self, activity: Activity) -> bool {
+        self.active.contains(&activity)
+    }
+
+    pub(super) fn set_default_activity(&mut self, activity: Activity) {
+        *self.default_activity = activity;
+    }
+
+    fn requirements_met(&self, memories: &Memories, activity: Activity) -> bool {
+        self.template
+            .requirements
+            .iter()
+            .find(|(owner, _)| *owner == activity)
+            .is_some_and(|(_, conditions)| {
+                conditions
+                    .iter()
+                    .all(|&(memory, status)| memories.check(memory, status))
+            })
+    }
+
+    fn set_active_activity(&mut self, memories: &mut Memories, activity: Activity) {
+        if self.is_active(activity) {
+            return;
+        }
+        for old in self.active.clone() {
+            if old == activity {
+                continue;
+            }
+            if let Some((_, to_erase)) = self
+                .template
+                .erase_when_stopped
+                .iter()
+                .find(|(owner, _)| *owner == old)
+            {
+                for &memory in to_erase {
+                    memories.erase(memory);
+                }
+            }
+        }
+        self.active.clear();
+        self.active.push(Activity::Core);
+        if activity != Activity::Core {
+            self.active.push(activity);
+        }
+        rebuild_start_bucket(self.template, self.active, self.start_bucket);
+        self.switched = true;
+    }
+
+    pub(super) fn set_active_activity_if_possible(
+        &mut self,
+        memories: &mut Memories,
+        activity: Activity,
+    ) {
+        if self.requirements_met(memories, activity) {
+            self.set_active_activity(memories, activity);
+        } else {
+            let default = *self.default_activity;
+            self.set_active_activity(memories, default);
+        }
+    }
+
+    pub(super) fn update_activity_from_schedule(
+        &mut self,
+        memories: &mut Memories,
+        blocks: &dyn crate::entity::ctx::BlockView,
+        game_time: i64,
+    ) {
+        if game_time - *self.last_schedule_update > SCHEDULE_UPDATE_DELAY {
+            *self.last_schedule_update = game_time;
+            let activity = match *self.schedule {
+                Some(ActivitySchedule::Villager) => blocks.villager_activity(),
+                Some(ActivitySchedule::BabyVillager) => blocks.baby_villager_activity(),
+                None => Activity::Idle,
+            };
+            if !self.is_active(activity) {
+                self.set_active_activity_if_possible(memories, activity);
+            }
+        }
+    }
+}
+
+fn rebuild_start_bucket(
+    template: &BrainTemplate,
+    active: &[Activity],
+    start_bucket: &mut Vec<usize>,
+) {
+    start_bucket.clear();
+    for (activity, indices) in &template.buckets {
+        if active.contains(activity) {
+            start_bucket.extend_from_slice(indices);
+        }
+    }
+    start_bucket.sort_unstable();
+}
+
 /// 一只生物的大脑：只存记忆、传感器倒计时、每个行为的运行态、活动集合和两个下标表；
 /// 大结构放在 [`BrainTemplate`] 里用 `Arc` 共享。
 ///
@@ -306,6 +486,18 @@ pub struct Brain {
     /// Indices of running behaviours, in priority order, persistent across ticks. The
     /// tick phase walks it directly instead of allocating a fresh `Vec` each tick.
     running: Vec<usize>,
+    /// `Brain.defaultActivity`：默认 `Activity::Idle`，袭击时可被 `SetRaidStatus` 改写。
+    ///
+    /// `Brain.defaultActivity`: defaults to `Activity::Idle`; `SetRaidStatus` can override it.
+    default_activity: Activity,
+    /// `Brain.schedule`：生物绑定的日程（村民 / 幼年村民），其余生物为 `None`。
+    ///
+    /// `Brain.schedule`: the mob's activity schedule (villager / baby villager), or `None`.
+    schedule: Option<ActivitySchedule>,
+    /// `Brain.lastScheduleUpdate`：初始 `-9999`，按 20 刻节流。
+    ///
+    /// `Brain.lastScheduleUpdate`: starts at `-9999`, throttled to every > 20 ticks.
+    last_schedule_update: i64,
 }
 
 impl Brain {
@@ -344,9 +536,93 @@ impl Brain {
             active: Vec::new(),
             start_bucket: Vec::new(),
             running: Vec::new(),
+            default_activity,
+            schedule: None,
+            last_schedule_update: INITIAL_LAST_SCHEDULE_UPDATE,
         };
         brain.set_active_activity(default_activity);
         brain
+    }
+
+    /// `Brain.setSchedule`。
+    ///
+    /// `Brain.setSchedule`.
+    pub fn set_schedule(&mut self, schedule: Option<ActivitySchedule>) {
+        self.schedule = schedule;
+    }
+
+    /// 当前绑定的日程。
+    ///
+    /// The currently configured activity schedule.
+    pub fn schedule(&self) -> Option<ActivitySchedule> {
+        self.schedule
+    }
+
+    /// `Brain.setDefaultActivity`。
+    ///
+    /// `Brain.setDefaultActivity`.
+    pub fn set_default_activity(&mut self, activity: Activity) {
+        self.default_activity = activity;
+    }
+
+    /// `Brain.useDefaultActivity`。
+    ///
+    /// `Brain.useDefaultActivity`.
+    pub fn use_default_activity(&mut self) {
+        self.set_active_activity(self.default_activity);
+    }
+
+    /// `Brain.setActiveActivityIfPossible`：条件满足就切过去，否则退回默认活动。
+    ///
+    /// `Brain.setActiveActivityIfPossible`: switches if requirements hold, else uses
+    /// the default activity.
+    pub fn set_active_activity_if_possible(&mut self, activity: Activity) {
+        if self.requirements_met(activity) {
+            self.set_active_activity(activity);
+        } else {
+            self.use_default_activity();
+        }
+    }
+
+    /// `Brain.updateActivityFromSchedule(attrs, gameTime, pos)`：每过 20 刻（`game_time -
+    /// last_schedule_update > 20`）才读日程并按需切换活动。
+    ///
+    /// `Brain.updateActivityFromSchedule(attrs, gameTime, pos)`: checks the schedule only
+    /// when `game_time - last_schedule_update > 20` and switches if not already active.
+    pub fn update_activity_from_schedule(
+        &mut self,
+        blocks: &dyn crate::entity::ctx::BlockView,
+        game_time: i64,
+    ) {
+        if game_time - self.last_schedule_update > SCHEDULE_UPDATE_DELAY {
+            self.last_schedule_update = game_time;
+            let activity = match self.schedule {
+                Some(ActivitySchedule::Villager) => blocks.villager_activity(),
+                Some(ActivitySchedule::BabyVillager) => blocks.baby_villager_activity(),
+                None => Activity::Idle,
+            };
+            if !self.is_active(activity) {
+                self.set_active_activity_if_possible(activity);
+            }
+        }
+    }
+
+    /// 从旧大脑打包可保留的记忆并放进当前新大脑，对应官方 `Brain.pack()` → `new Brain(..., packed)`。
+    /// 照官方 `Brain$1` 只拷 `canSerialize() == true` 的记忆，并按新大脑已登记的槽位过滤。
+    ///
+    /// Copies packed memories from an old brain into this fresh brain, matching vanilla's
+    /// `Brain.pack()` → `new Brain(..., packed)`. Per `Brain$1`, only memories with
+    /// `canSerialize() == true` are copied, filtered by the new brain's registered slots.
+    pub fn copy_packed_memories_from(&mut self, old: &Brain) {
+        for (kind, value, ttl) in old.memories.filled() {
+            if !kind.serializable() {
+                continue;
+            }
+            match ttl {
+                Some(ttl) => self.memories.set_with_ttl(kind, value.clone(), ttl),
+                None => self.memories.set(kind, value.clone()),
+            }
+        }
     }
 
     /// `Sensor.randomlyDelayStart`：每个传感器按登记顺序取一次 `nextInt(scanRate)`。
@@ -416,14 +692,7 @@ impl Brain {
     /// current activity bucket, ascending by priority (index). Called only on a switch,
     /// never per tick.
     fn rebuild_start_bucket(&mut self) {
-        let mut bucket = Vec::new();
-        for (activity, indices) in &self.template.buckets {
-            if self.active.contains(activity) {
-                bucket.extend_from_slice(indices);
-            }
-        }
-        bucket.sort_unstable();
-        self.start_bucket = bucket;
+        rebuild_start_bucket(&self.template, &self.active, &mut self.start_bucket);
     }
 
     /// `Brain.activityRequirementsAreMet`：没有登记过的活动不满足。
@@ -475,18 +744,31 @@ impl Brain {
         self.memories.tick_by(step);
         let time = ctx.blocks().game_time();
         let Self {
+            template,
             memories,
             sensors,
             nodes,
+            active,
             start_bucket,
             running,
-            ..
+            default_activity,
+            schedule,
+            last_schedule_update,
         } = self;
         let mut cx = Cx {
             me,
             mob,
             ctx,
             memories,
+            activity: ActivityState {
+                template,
+                active,
+                start_bucket,
+                default_activity,
+                schedule,
+                last_schedule_update,
+                switched: false,
+            },
             time,
         };
         {
@@ -496,18 +778,33 @@ impl Brain {
             }
         }
         // `startEachNonRunning`：只遍历核心 + 当前活动桶，按优先级顺序。新启动的行为
-        // 按序插进持久的 running 表，保持官方遍历顺序。
-        // `startEachNonRunning`: only the core + current activity buckets, in priority
-        // order. Newly started behaviours are inserted into the persistent running list
-        // in order, preserving vanilla iteration order.
+        // 按序插进持久的 running 表，保持官方遍历顺序；若某个行为在启动时切换了活动
+        // （如 `VillagerPanicTrigger` / `VillagerCalmDown`），立刻按新桶定位到下一个
+        // 排在当前下标之后的行为，与官方 `TreeMap`/`HashMap` 遍历一致。
+        // `startEachNonRunning`: walk only the core + current activity buckets in priority
+        // order. Newly started behaviours are inserted into the persistent running list in
+        // order; if a behaviour switches activities during `tryStart` (e.g.
+        // `VillagerPanicTrigger` / `VillagerCalmDown`), jump into the rebuilt bucket right
+        // after `index`, matching vanilla's `TreeMap`/`HashMap` loop.
         {
             crate::entity::mob::timing::span!(BrainBehaviors);
-            for &index in start_bucket.iter() {
+            let mut pos = 0;
+            while pos < cx.activity.start_bucket.len() {
+                let index = cx.activity.start_bucket[pos];
+                cx.activity.switched = false;
                 let node = &mut nodes[index];
                 if node.status == Status::Stopped && node.try_start(&mut cx) {
                     crate::entity::mob::timing::record_behavior_start!();
                     let at = running.partition_point(|&other| other < index);
                     running.insert(at, index);
+                }
+                if cx.activity.switched {
+                    pos = cx
+                        .activity
+                        .start_bucket
+                        .partition_point(|&other| other <= index);
+                } else {
+                    pos += 1;
                 }
             }
             // `tickEachRunning`：直接遍历持久下标表，不再每刻分配 Vec 或全表筛选；停掉的移除。
@@ -532,13 +829,30 @@ impl Brain {
     pub fn stop_all(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         let time = ctx.blocks().game_time();
         let Self {
-            memories, nodes, ..
+            template,
+            memories,
+            nodes,
+            active,
+            start_bucket,
+            default_activity,
+            schedule,
+            last_schedule_update,
+            ..
         } = self;
         let mut cx = Cx {
             me,
             mob,
             ctx,
             memories,
+            activity: ActivityState {
+                template,
+                active,
+                start_bucket,
+                default_activity,
+                schedule,
+                last_schedule_update,
+                switched: false,
+            },
             time,
         };
         for node in nodes.iter_mut() {
@@ -721,19 +1035,19 @@ mod tests {
 
     /// 钉住关键结构的大小。优化前 `Brain=6528`、`Memories=6400`（32 个槽每个都内联
     /// 184 字节的 `MemoryValue`）；把值装箱、把整张结构表挪进 `Arc<BrainTemplate>` 后
-    /// `Brain=664`、`Memories=536`。这些数字变了就说明有人又把大对象塞回了实例。
+    /// 32 槽时 `Brain=664`、`Memories=536`，期 3 扩到 49 槽（+17×16 = +272）加日程字段后
+    /// `Memories=808`、`Brain=952`。这些数字变了就说明有人又把大对象塞回了实例。
     ///
-    /// Pins the key struct sizes. Before: `Brain=6528`, `Memories=6400` (32 slots each
-    /// inlining a 184-byte `MemoryValue`); after boxing values and moving the whole
-    /// structure table into `Arc<BrainTemplate>`: `Brain=664`, `Memories=536`. A change
-    /// here means someone put a big object back into the instance.
+    /// Pins the key struct sizes. After boxing values and moving the structure table into
+    /// `Arc<BrainTemplate>`: 32 slots had `Brain=664`, `Memories=536`; phase 3 grows to 49
+    /// slots (+272) plus schedule fields (`Memories=808`, `Brain=952`).
     #[test]
     fn brain_and_memory_sizes_stay_small() {
         use crate::entity::mob::brain::behavior::Node;
         use crate::entity::mob::brain::memory::{Memories, MemoryValue};
         assert_eq!(std::mem::size_of::<MemoryValue>(), 184);
-        assert_eq!(std::mem::size_of::<Memories>(), 536);
-        assert_eq!(std::mem::size_of::<Brain>(), 664);
+        assert_eq!(std::mem::size_of::<Memories>(), 808);
+        assert_eq!(std::mem::size_of::<Brain>(), 952);
         assert_eq!(std::mem::size_of::<Node>(), 136);
         assert_eq!(std::mem::size_of::<Sensor>(), 16);
         assert_eq!(std::mem::size_of::<Entry>(), 144);
@@ -790,11 +1104,120 @@ mod tests {
         assert_eq!(Activity::Swim.java_hash(), 3_543_688);
         assert_eq!(Activity::LaySpawn.java_hash(), -1_834_472_160);
         assert_eq!(Activity::Tongue.java_hash(), -868_095_228);
+        assert_eq!(Activity::Work.java_hash(), 3_655_441);
+        assert_eq!(Activity::Play.java_hash(), 3_443_508);
+        assert_eq!(Activity::Rest.java_hash(), 3_496_916);
+        assert_eq!(Activity::Meet.java_hash(), 3_347_527);
+        assert_eq!(Activity::Raid.java_hash(), 3_492_746);
+        assert_eq!(Activity::PreRaid.java_hash(), -1_294_762_074);
+        assert_eq!(Activity::Hide.java_hash(), 3_202_370);
+        assert_eq!(Activity::Celebrate.java_hash(), 1_432_511_431);
         assert_eq!(Activity::Swim.name(), "swim");
         assert_eq!(Activity::LaySpawn.name(), "lay_spawn");
         assert_eq!(Activity::Tongue.name(), "tongue");
+        for activity in [
+            Activity::Work,
+            Activity::Play,
+            Activity::Rest,
+            Activity::Meet,
+            Activity::Raid,
+            Activity::PreRaid,
+            Activity::Hide,
+            Activity::Celebrate,
+        ] {
+            assert_eq!(Activity::by_name(activity.name()), Some(activity));
+            assert_eq!(
+                Activity::by_name(&format!("minecraft:{}", activity.name())),
+                Some(activity)
+            );
+        }
         assert_eq!(hash_map_capacity(12), 16);
         assert_eq!(hash_map_capacity(13), 32);
+    }
+
+    /// `Brain::update_activity_from_schedule` 遵循 20 刻节流（`time - last > 20`，严格大于），
+    /// 且目标活动不满足进入条件时退回默认活动 `IDLE`。
+    #[test]
+    fn schedule_update_throttles_every_20_ticks_and_falls_back_to_idle() {
+        use crate::{BlockTicks, World, testing::TestLevel};
+
+        let mut brain = Brain::new(
+            &[],
+            vec![
+                ActivityData::sequential(
+                    Activity::Core,
+                    0,
+                    vec![Kind::DoNothing { min: 10, max: 10 }],
+                ),
+                ActivityData::sequential(
+                    Activity::Idle,
+                    0,
+                    vec![Kind::DoNothing { min: 10, max: 10 }],
+                ),
+                ActivityData::sequential(
+                    Activity::Work,
+                    0,
+                    vec![Kind::DoNothing { min: 10, max: 10 }],
+                )
+                .when(vec![(MemoryType::JobSite, MemoryStatus::ValuePresent)]),
+                ActivityData::sequential(
+                    Activity::Rest,
+                    0,
+                    vec![Kind::DoNothing { min: 10, max: 10 }],
+                ),
+            ],
+        );
+        brain.memories.register(MemoryType::JobSite);
+        brain.set_schedule(Some(ActivitySchedule::Villager));
+
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+
+        // 0 刻：lastScheduleUpdate = -9999，0 - (-9999) > 20 → 更新为 Rest。
+        level.clock_ticks = 0;
+        {
+            let world = World::new(&mut level, &mut ticks);
+            brain.update_activity_from_schedule(&world, 0);
+        }
+        assert_eq!(brain.active_names(), vec!["core", "rest"]);
+
+        // 20 刻（差值 == 20，不满足严格大于）：仍在节流内，不切到 Idle。
+        level.clock_ticks = 20;
+        {
+            let world = World::new(&mut level, &mut ticks);
+            brain.update_activity_from_schedule(&world, 20);
+        }
+        assert_eq!(brain.active_names(), vec!["core", "rest"]);
+
+        // 21 刻（差值 == 21 > 20）：切到 Idle。
+        level.clock_ticks = 21;
+        {
+            let world = World::new(&mut level, &mut ticks);
+            brain.update_activity_from_schedule(&world, 21);
+        }
+        assert_eq!(brain.active_names(), vec!["core", "idle"]);
+
+        // 2000 刻（Work 窗口），但没有 JOB_SITE → 退回默认活动 Idle。
+        level.clock_ticks = 2000;
+        {
+            let world = World::new(&mut level, &mut ticks);
+            brain.update_activity_from_schedule(&world, 100);
+        }
+        assert_eq!(brain.active_names(), vec!["core", "idle"]);
+
+        // 写上 JOB_SITE 后过 21 刻：成功切到 Work。
+        brain.memories.set(
+            MemoryType::JobSite,
+            memory::MemoryValue::GlobalPos(mc_bamboo_protocol::components::value::GlobalPos {
+                dimension: "minecraft:overworld".to_owned(),
+                pos: mc_bamboo_core::BlockPos::new(1, 64, 1),
+            }),
+        );
+        {
+            let world = World::new(&mut level, &mut ticks);
+            brain.update_activity_from_schedule(&world, 121);
+        }
+        assert_eq!(brain.active_names(), vec!["core", "work"]);
     }
 
     /// 洗牌种子不取数、可复现，不同闸门不同。

@@ -229,6 +229,8 @@ pub(crate) fn parallel_entity_ticks(
             rules: entity_rules,
             difficulty: global.difficulty as i32,
             sky_darken: global.sky_darken,
+            villager_activity: global.villager_activity,
+            baby_villager_activity: global.baby_villager_activity,
             game_time,
             weather: global.block_weather,
             clock_ticks: global.clock.total_ticks,
