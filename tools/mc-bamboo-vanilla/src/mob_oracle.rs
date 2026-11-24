@@ -39,6 +39,7 @@ mod attack_target;
 mod bat;
 mod bee;
 mod bee_ai;
+mod bee_full;
 mod bee_locate;
 mod bee_release;
 mod brain;
@@ -147,6 +148,7 @@ enum Line {
     UndeadHorseDeath(undead_horse::UndeadHorseDeathCase),
     Bee(Box<bee::BeeCase>),
     BeeAi(Box<bee_ai::BeeAiCase>),
+    BeeFull(Box<bee_full::BeeFullCase>),
     BeeLocate(Box<bee_locate::BeeLocateCase>),
     BeeRelease(Box<bee_release::BeeReleaseCase>),
     Golem(Box<golem::GolemCase>),
@@ -1724,6 +1726,7 @@ impl Report {
                 Line::UndeadHorseDeath(case) => self.replay_undead_horse_death(&case),
                 Line::Bee(case) => self.replay_bee(&case),
                 Line::BeeAi(case) => self.replay_bee_ai(&case),
+                Line::BeeFull(case) => self.replay_bee_full(&case),
                 Line::BeeLocate(case) => self.replay_bee_locate(&case),
                 Line::BeeRelease(case) => self.replay_bee_release(&case),
                 Line::Golem(case) => self.replay_golem(&case),
