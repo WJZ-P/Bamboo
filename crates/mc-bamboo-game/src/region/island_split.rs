@@ -548,6 +548,7 @@ impl Region {
             player_grid,
             links,
             pending_triggers: Vec::new(),
+            sound_effects: Vec::new(),
             chunks: new_chunks,
             poi,
             tick_levels,
@@ -771,6 +772,7 @@ impl Region {
             sleep: _,
             phantom_spawner: _,
             pending_triggers,
+            sound_effects: _,
         } = other;
         let identity = IslandIdentity {
             random,

@@ -140,6 +140,19 @@ struct ProjectileFrame {
     /// Drowned scenes: the mob trident's pickup ordinal (DISALLOWED=0, player cannot
     /// pick it up); -1 once the trident has been removed.
     pickup: Option<i32>,
+    /// 激流逐刻：`[自旋剩余刻数, 生物标志位字节]`（标志位含使用物品位 0/1 与自旋位 4）。
+    ///
+    /// Riptide tick state: `[spin ticks left, living flags byte]` (the byte has
+    /// the using-item bits 0/1 and the spin-attack bit 4).
+    spin: Option<[i64; 2]>,
+    /// 激流逐刻：`ITEM_USED` 累计值 `[物品 ID, 值]`。
+    ///
+    /// Riptide cumulative `ITEM_USED` stats as `[item id, value]`.
+    item_used: Option<Vec<[i64; 2]>>,
+    /// 激流自旋攻击受害者（牛）的血量位。
+    ///
+    /// The riptide spin-attack victim (cow) health bits.
+    spin_victim: Option<i64>,
 }
 
 /// 一次剪刀右键：是否消耗动作，以及掉出来的物品实体（物品、数量、位置和速度的原始位）。
@@ -376,7 +389,7 @@ impl ProjectileCase {
     }
 
     fn open_sky(&self) -> bool {
-        self.name == "trident_channeling_mob" || self.name == "trident_channeling_rod"
+        self.name.starts_with("trident_channeling")
     }
 
     fn channeling(&self) -> bool {
@@ -384,7 +397,16 @@ impl ProjectileCase {
     }
 
     fn channeling_mob(&self) -> bool {
-        self.name == "trident_channeling_mob"
+        self.name == "trident_channeling_mob" || self.name == "trident_channeling_covered"
+    }
+
+    /// 受害者头顶被盖住：`can_see_sky` 只有牛脚下这个坐标看不见天，逐刻确认
+    /// `channeling_strike` 取的正是 `BlockPos::containing(victim)`。
+    ///
+    /// Covered victim: `can_see_sky` is false only at the cow's feet, tick by
+    /// tick confirming `channeling_strike` samples `BlockPos::containing(victim)`.
+    fn covered_sky(&self) -> bool {
+        self.name == "trident_channeling_covered"
     }
 
     /// 溺尸远程投掷（普通 / 困难）：怪物三叉戟 pickup=Disallowed，玩家捡不到。
@@ -393,6 +415,21 @@ impl ProjectileCase {
     /// the player cannot pick it up.
     fn drowned(&self) -> bool {
         self.name.starts_with("trident_drowned")
+    }
+
+    /// 激流 / 自旋逐刻场景（没有投射物，只有玩家动作与包）。
+    ///
+    /// Riptide / auto-spin tick scenes (no projectile, only player actions
+    /// and packets).
+    fn riptide(&self) -> bool {
+        self.name.starts_with("trident_riptide")
+    }
+
+    /// 不放牛：自旋计时自然走到 0，覆盖清标志位的那一帧。
+    ///
+    /// No cow: the spin timer runs out naturally, covering the flag-clear frame.
+    fn riptide_no_hit(&self) -> bool {
+        self.name.ends_with("_no_hit")
     }
 
     fn level(&self) -> MobLevel {
@@ -413,6 +450,7 @@ impl ProjectileCase {
                 raining: self.thundering(),
                 thundering: self.thundering(),
                 can_see_sky: self.open_sky(),
+                covered_sky_pos: self.covered_sky().then(|| BlockPos::new(6, 64, 0)),
                 ..ZombieFacts::default()
             },
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
@@ -704,9 +742,218 @@ impl ProjectileCase {
 }
 
 impl Report {
-    pub(super) fn replay_projectile(&mut self, case: &ProjectileCase) {
+    /// 激流逐刻对拍：玩家蓄力松手、自旋攻击撞牛、生物标志位 / `ITEM_USED`
+    /// 同步包。官方一侧的 `playRiptide` 逐刻驱动同样的服务端效果。
+    ///
+    /// Riptide tick parity: charge and release, spin-attack contact damage,
+    /// living flags / `ITEM_USED` sync packets. The official `playRiptide`
+    /// drives the same server-side effects tick by tick.
+    fn replay_riptide(&mut self, case: &ProjectileCase) {
         self.cases += 1;
         let mut level = case.level();
+        {
+            let game = level.game.as_mut().unwrap();
+            game.set_raining(true);
+            // `TridentItem.use` 的门槛也要水 / 雨，先注入再开始使用。
+            // `TridentItem.use` also needs water / rain; inject it first.
+            let mut item = ItemStack::new(mc_bamboo_data::items::TRIDENT, 1);
+            let registry = mc_bamboo_data::registries::SYNCED_REGISTRIES
+                .iter()
+                .find(|registry| registry.name == "minecraft:enchantment")
+                .unwrap();
+            let id = registry
+                .entries
+                .iter()
+                .position(|entry| *entry == "minecraft:riptide")
+                .unwrap() as i32;
+            // 改坏确认 `trident_riptide`：把激流等级改成 0，松手就变成普通投掷，
+            // 自旋计时、标志位、音效和受害者血量都必须报不一致。
+            // Break self-test `trident_riptide`: clear riptide so release
+            // becomes an ordinary throw; spin ticks, flags, sounds and victim
+            // health must all diverge.
+            let level_value = if self.break_test.as_deref() == Some("trident_riptide") {
+                0
+            } else {
+                1
+            };
+            let mut patch = mc_bamboo_protocol::components::ComponentPatch::new();
+            patch.put(
+                mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+                mc_bamboo_protocol::components::PatchEntry::Set(
+                    mc_bamboo_protocol::components::ComponentValue::Enchantments(vec![(
+                        id,
+                        level_value,
+                    )]),
+                ),
+            );
+            let (added, removed) = patch.to_opaque();
+            item.added = added;
+            item.removed = removed;
+            assert!(game.start_use(case.player_id, item));
+            if !case.riptide_no_hit() {
+                // 牛放在玩家身边，落在自旋扫掠盒里；`Player.attack` 的伤害
+                // 走正式入口，官方一侧的牛在 (7.0,64,0.5)。
+                // A cow beside the player, inside the spin sweep box.
+                // `Player.attack` runs the production damage path.
+                let mut cow = Entity::by_mob_type(MobType::Cow, Vec3::new(7.0, 64.0, 0.5));
+                cow.with_mob(|_, mob| mob.no_ai = true);
+                game.add_spin_target(cow);
+            }
+        }
+        let mut victim_uid = None;
+        // 自旋目标在区域实体表里是第一个实体，id 由 `Entities::spawn` 分配。
+        // The spin target is the first entity in the region store.
+        if !case.riptide_no_hit() {
+            victim_uid = level.game.as_ref().unwrap().first_mob_uid();
+        }
+        for (tick, expected) in case.frames.iter().enumerate() {
+            let mut sounds: Vec<[i64; 7]> = Vec::new();
+            if tick > 0 {
+                let game = level.game.as_mut().unwrap();
+                if tick == 1 {
+                    game.release(case.player_id, 10);
+                } else {
+                    game.spin_tick();
+                }
+                game.request_stats(case.player_id);
+                // 自旋扫掠期间区域实体表的伤害落在世界实体上；这里把区域的
+                // 生物表当作受害者，音效由 `send_effects` 直接发给玩家连接。
+                // Damage lands in the region entity table; sounds are sent
+                // straight to the player's capture sink.
+                let effects = game.take_sound_effects();
+                sounds.extend(effects.iter().filter_map(|effect| {
+                    let mc_bamboo_blocks::Effect::Sound {
+                        sound,
+                        source,
+                        x,
+                        y,
+                        z,
+                        volume,
+                        pitch,
+                        ..
+                    } = effect
+                    else {
+                        return None;
+                    };
+                    Some([
+                        i64::from(*sound),
+                        i64::from(source.id()),
+                        x.to_bits() as i64,
+                        y.to_bits() as i64,
+                        z.to_bits() as i64,
+                        i64::from(volume.to_bits()),
+                        i64::from(pitch.to_bits()),
+                    ])
+                }));
+            }
+            let game = level.game.as_ref().unwrap();
+            let label = format!("{} tick {tick}", case.name);
+            if let Some(theirs) = expected.spin {
+                let ours = game.spin_state(case.player_id);
+                if ours != theirs {
+                    self.mismatch(format!(
+                        "{label} spin ticks/living flags: official {theirs:?}, bamboo {ours:?}"
+                    ));
+                }
+            }
+            if let Some(theirs) = &expected.item_used {
+                // 官方的 `ServerStatsCounter` 里零值统计项也算一个条目；
+                // Bamboo 的映射只在真正 award 过之后才有条目，tick0 补一个零值。
+                // The official `ServerStatsCounter` holds a zero-valued entry;
+                // Bamboo's map only has entries after an award, so add the
+                // tick-0 zero baseline.
+                let mut ours: Vec<[i64; 2]> = game
+                    .item_used_stats(case.player_id)
+                    .into_iter()
+                    .map(|(item, value)| [i64::from(item), i64::from(value)])
+                    .collect();
+                if ours.is_empty() {
+                    ours.push([i64::from(mc_bamboo_data::items::TRIDENT), 0]);
+                }
+                if *theirs != ours {
+                    self.mismatch(format!(
+                        "{label} ITEM_USED stats: official {theirs:?}, bamboo {ours:?}"
+                    ));
+                }
+            }
+            if let Some(theirs) = expected.spin_victim {
+                let ours = victim_uid.and_then(|uid| game.spin_target_health(uid));
+                if Some(theirs) != ours {
+                    self.mismatch(format!(
+                        "{label} spin victim health: official {theirs}, bamboo {ours:?}"
+                    ));
+                }
+            }
+            if let Some(theirs) = &expected.sounds
+                && *theirs != sounds
+            {
+                self.mismatch(format!(
+                    "{label} sounds: official {theirs:?}, bamboo {sounds:?}"
+                ));
+            }
+            let game = level.game.as_mut().unwrap();
+            let state = game.state(case.player_id);
+            if state != case.player_states[tick] {
+                self.mismatch(format!(
+                    "{label} player: official {:?}, bamboo {state:?}",
+                    case.player_states[tick]
+                ));
+            }
+            // `startUsingItem` / 松手 / 自旋清标志这些当刻的脏元数据由
+            // `sync_once` 在 tick0 与每刻末尾发出，和官方 `sendChanges`
+            // 的时序一致。`award_stats` 的条目顺序是官方 HashMap 的哈希序，
+            // 累计值由 `itemUsed` 字段精确比对，这里不比它的字节。
+            // Dirty metadata from `startUsingItem`, release and the spin-flag
+            // clear is sent by `sync_once` on tick 0 and at each tick end,
+            // matching the official `sendChanges` timing. `award_stats`
+            // entries follow the official HashMap order, so their cumulative
+            // values are compared exactly by `itemUsed` instead of bytes.
+            if tick <= 1 {
+                // tick>=2 的 `spin_tick` 已经跑过一轮同步。
+                // `spin_tick` on tick>=2 already ran a sync round.
+                game.sync_once();
+            }
+            let player_packets: Vec<_> = game
+                .take_packets(case.player_id)
+                .into_iter()
+                .filter(|body| matches!(body.first(), Some(101 | 43 | 67 | 68 | 69 | 106)))
+                .collect();
+            compare_packet_list(
+                &mut self.mismatches,
+                &self.show,
+                &format!("{} player", case.name),
+                tick,
+                &player_packets,
+                &case.player_packets[tick],
+            );
+            self.steps += 1;
+        }
+        let health = f32::from_bits(level.game.as_ref().unwrap().state(case.player_id)[0] as u32);
+        println!(
+            "{}: {} ticks, riptide spin parity, final player health {health}",
+            case.name,
+            case.frames.len()
+        );
+    }
+}
+
+impl Report {
+    pub(super) fn replay_projectile(&mut self, case: &ProjectileCase) {
+        if case.riptide() {
+            self.replay_riptide(case);
+            return;
+        }
+        self.cases += 1;
+        let mut level = case.level();
+        // 改坏确认 `trident_sky_sample`：把「头顶被盖住」的坐标挪开一格，
+        // `channeling_strike` 取的采样点就会看见天、错误地召出闪电，逐刻的
+        // lightning / sounds 必须报不一致。
+        // Break self-test `trident_sky_sample`: move the covered coordinate
+        // one block away. `channeling_strike`'s sample then sees the sky and
+        // wrongly summons a bolt, so lightning / sounds must diverge.
+        if self.break_test.as_deref() == Some("trident_sky_sample") && case.covered_sky() {
+            level.facts.covered_sky_pos = Some(BlockPos::new(7, 64, 0));
+        }
         // 改坏确认 `trident_channeling`：关掉露天条件，引雷就不该召唤闪电、
         // 也不该播雷声；逐刻的 lightning / sounds 必须报不一致。
         // Break self-test `trident_channeling`: turn off open sky so channeling

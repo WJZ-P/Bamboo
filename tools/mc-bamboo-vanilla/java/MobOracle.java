@@ -291,6 +291,13 @@ public final class MobOracle {
             if (only == null || "trident_drowned".startsWith(only)) {
                 OracleDrowned.checkAim(official);
             }
+            // 激流场景的玩家用一份干净的统计表：别的场景共用同一份
+            // `ServerStatsCounter`，ITEM_USED 会沿用到这里。
+            // Riptide scenes use a fresh stats counter: other scenes share
+            // one `ServerStatsCounter`, whose ITEM_USED would leak here.
+            stats = new ServerStatsCounter(official.server, Path.of("mob-oracle-riptide-stats.json"));
+            put(net.minecraft.server.players.PlayerList.class,
+                    official.server.getPlayerList(), "stats", new java.util.HashMap<>());
             for (String name : List.of("arrow_hits_player", "arrow_hits_wall", "arrow_block_overlaps_flight",
                     "arrow_no_gravity", "arrow_despawn", "arrow_flame_hit", "arrow_flame_rejected",
                     "arrow_piercing_hit", "arrow_piercing_rejected",
@@ -302,9 +309,18 @@ public final class MobOracle {
                     "trident_stick", "trident_loyalty", "trident_owner_offline",
                     "trident_owner_dead", "trident_spectator",
                     "trident_channeling_mob", "trident_channeling_rod",
-                    "trident_drowned", "trident_drowned_hard")) {
+                    "trident_channeling_covered", "trident_drowned", "trident_drowned_hard")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
+                cases++;
+            }
+            // 激流 / 自旋攻击：逐刻比使用物品与生物标志位、ITEM_USED 统计、
+            // 音效、受害者血量和同步包。`_no_hit` 只跑计时到结束。
+            // Riptide / auto-spin: per-tick using-item and living flags,
+            // ITEM_USED stats, sounds, victim health and sync packets.
+            for (String name : List.of("trident_riptide", "trident_riptide_no_hit")) {
+                if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
+                playRiptide(official, out, name);
                 cases++;
             }
             if (only == null || "equine".startsWith(only)) {
@@ -8071,6 +8087,229 @@ public final class MobOracle {
         out.flush();
     }
 
+    /**
+     * 激流逐刻：玩家拿着带激流的三叉戟蓄力、松手进入自旋攻击，撞到牛时走
+     * `Player.attack`，再每刻收生物标志位 / 使用物品 / `ITEM_USED` 的同步包。
+     *
+     * 推出 / 起跳的位移是客户端权威、服务端不模拟；这里只驱动官方服务端一侧的
+     * `TridentItem.releaseUsing`、`LivingEntity.tick` 的自旋段和
+     * `SynchedEntityData.packDirty` / `ServerStatsCounter.sendStats`。
+     *
+     * Riptide tick parity: the player charges a riptide trident, releases into
+     * an auto-spin attack, hits a cow through `Player.attack`, and emits the
+     * living-flag / using-item / `ITEM_USED` sync packets each tick. The push
+     * and hop motion is client-authoritative and not simulated here; only the
+     * official server-side effects run.
+     */
+    private static void playRiptide(Official official, Writer out, String name) throws Exception {
+        // 每个场景一份干净的统计表：两个激流场景共用一份会把 ITEM_USED
+        // 累加过去，逐刻基线就不再是 0。
+        // A fresh stats counter per scene: sharing one across both riptide
+        // scenes would carry ITEM_USED over and break the tick-0 baseline.
+        stats = new ServerStatsCounter(official.server, Path.of("mob-oracle-riptide-stats.json"));
+        boolean noHit = name.endsWith("_no_hit");
+        int ticks = 24;
+        FakeLevel world = FakeLevel.create(official);
+        world.injectedBrightOutside = false;
+        world.injectedMonstersBurn = false;
+        world.injectedRaining = true;
+        world.injectedCanSeeSky = true;
+        world.soundLog = new ArrayList<>();
+        // 自旋命中的攻击音效走 PLAYERS 声源；只放行 `item.trident.*` 与
+        // `entity.player.attack.*`，跳过牛的叫声等实体事件音。
+        // Spin hits play attack sounds on the PLAYERS source; keep only
+        // `item.trident.*` / `entity.player.attack.*`, skipping mob voices.
+        world.tridentSoundFilter = true;
+        var attributes = EnvironmentAttributeSystem.builder().addStaticLayers(world)
+                .addConstantLayer(net.minecraft.world.attribute.EnvironmentAttributes.MONSTERS_BURN, v -> false)
+                .build();
+        official.attributes = attributes;
+        put(ServerLevel.class, world, "environmentAttributes", attributes);
+        for (int x = -18; x <= 20; x++) {
+            for (int z = -12; z <= 12; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        int playerId = FIRST_ID + 1024;
+        ServerPlayer player = new ServerPlayer(official.server, world,
+                new GameProfile(new UUID(1L, 2L), "ArrowOracle"), ClientInformation.createDefault());
+        player.setId(playerId);
+        player.setPos(6.5, 64.0, 0.5);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        player.setGameMode(GameType.SURVIVAL);
+        Bytes self = new Bytes(official.registries);
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "connection",
+                new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = self;
+        put(ServerPlayer.class, player, "connection", connection);
+        world.playersList().add(player);
+        world.tracked.add(player);
+        world.nextId = FIRST_ID;
+        // 主手的激流三叉戟；`releaseUsing` 要水或雨，`isRainingAt` 已注入为下雨。
+        // A riptide trident in the main hand; `releaseUsing` needs water or rain,
+        // and `isRainingAt` is injected as raining.
+        ItemStack weapon = new ItemStack(Items.TRIDENT);
+        enchant(official, weapon, Enchantments.RIPTIDE, 1);
+        player.setItemInHand(InteractionHand.MAIN_HAND, weapon);
+        // `detectEquipmentUpdates` 把三叉戟的 ATTACK_SPEED / ATTACK_DAMAGE
+        // 属性装到玩家身上；官方自旋攻击的充能系数按它算。
+        // `detectEquipmentUpdates` installs the trident's ATTACK_SPEED /
+        // ATTACK_DAMAGE attributes; the official spin attack's charge scale
+        // is derived from them.
+        var detect = net.minecraft.world.entity.LivingEntity.class.getDeclaredMethod("detectEquipmentUpdates");
+        detect.setAccessible(true);
+        detect.invoke(player);
+        Cow victim = null;
+        if (!noHit) {
+            victim = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            victim.setPos(7.0, 64.0, 0.5);
+            victim.setNoAi(true);
+            world.tracked.add(victim);
+        }
+        var frames = new StringBuilder("[");
+        var playerStates = new StringBuilder("[");
+        var playerPackets = new StringBuilder("[");
+        float[] lastSentHealth = {-1.0e8F};
+        // `startUsingItem` 把 `useItemRemaining` 置 72000；直接拨到「已蓄力 10 刻」，
+        // 下一刻松手正好过 `THROW_THRESHOLD_TIME`。
+        // `startUsingItem` sets `useItemRemaining` to 72000; jump to ten ticks
+        // held so releasing on the next tick passes `THROW_THRESHOLD_TIME`.
+        // 真实服务端进服时 `sendAllPlayerInfo` 已发过构造函数的初始脏项
+        // （index 9 的血量 20）；假世界没做进服配对，开局先清掉，
+        // 让 tick0 只发 `startUsingItem` 的生物标志位。
+        // A real server sends the constructor's initial dirty entries
+        // (index 9 health 20) during `sendAllPlayerInfo`; the fake world
+        // skips login pairing, so flush them before tick 0.
+        player.getEntityData().packDirty();
+        player.startUsingItem(InteractionHand.MAIN_HAND);
+        putInt(net.minecraft.world.entity.LivingEntity.class, player, "useItemRemaining", 72000 - 10);
+        var release = net.minecraft.world.entity.LivingEntity.class.getDeclaredMethod("releaseUsingItem");
+        release.setAccessible(true);
+        var checkSpin = net.minecraft.world.entity.LivingEntity.class.getDeclaredMethod(
+                "checkAutoSpinAttack", net.minecraft.world.phys.AABB.class, net.minecraft.world.phys.AABB.class);
+        checkSpin.setAccessible(true);
+        var livingFlags = (net.minecraft.network.syncher.EntityDataAccessor<Byte>) readStatic(
+                net.minecraft.world.entity.LivingEntity.class, "DATA_LIVING_ENTITY_FLAGS");
+        var tridentUsed = net.minecraft.stats.Stats.ITEM_USED.get(Items.TRIDENT);
+        // 官方共享的统计表可能被前面的场景标脏；场景开局先发一次清掉。
+        // The shared stats counter may be dirty from earlier scenes; flush
+        // once at scene start so the tick-0 baseline is clean.
+        player.getStats().sendStats(player);
+        self.takeRaw();
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                world.gameTime++;
+                if (tick == 1) {
+                    release.invoke(player);
+                } else if (getInt(net.minecraft.world.entity.LivingEntity.class, player, "autoSpinAttackTicks") > 0) {
+                    // `LivingEntity.tick` 的 push 段：先减计时再用前后盒并集查实体。
+                    // The push section of `LivingEntity.tick`: decrement, then
+                    // query the union of the old and new boxes.
+                    putInt(net.minecraft.world.entity.LivingEntity.class, player, "autoSpinAttackTicks",
+                            getInt(net.minecraft.world.entity.LivingEntity.class, player, "autoSpinAttackTicks") - 1);
+                    var box = player.getBoundingBox();
+                    checkSpin.invoke(player, box, box);
+                }
+                // `ServerEntity.sendChanges` 把脏元数据发给观察者 + 自己，
+                // 假世界里玩家自己的连接就是观察者。
+                // `ServerEntity.sendChanges` sends dirty metadata to trackers
+                // and self; here the player's connection is the only listener.
+                var packed = player.getEntityData().packDirty();
+                if (packed != null && !packed.isEmpty()) {
+                    self.add(new net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket(
+                            player.getId(), packed));
+                }
+                // 客户端 `RequestStats` 之后每刻收一次累计统计。
+                // One cumulative-stats packet per tick after `RequestStats`.
+                player.getStats().sendStats(player);
+            }
+            if (tick > 0) {
+                frames.append(',');
+            }
+            byte flags = player.getEntityData().get(livingFlags);
+            frames.append("{\"arrows\":[],\"packets\":[]");
+            frames.append(",\"spin\":[").append(getInt(net.minecraft.world.entity.LivingEntity.class,
+                    player, "autoSpinAttackTicks")).append(',').append(flags & 0xFF).append(']');
+            frames.append(",\"itemUsed\":[[").append(BuiltInRegistries.ITEM.getId(Items.TRIDENT))
+                    .append(',').append(player.getStats().getValue(tridentUsed)).append("]]");
+            if (victim != null) {
+                frames.append(",\"spinVictim\":").append(Float.floatToRawIntBits(victim.getHealth()));
+            }
+            frames.append(",\"sounds\":").append(world.soundLog.stream()
+                    .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            world.soundLog.clear();
+            frames.append('}');
+            riptidePlayerStep(player, self, playerStates, playerPackets, lastSentHealth, tick == 0);
+        }
+        out.write("{\"type\":\"projectile\",\"name\":" + jsonString(name)
+                + ",\"difficulty\":2,\"wall\":false,\"skeleton\":false"
+                + ",\"firstId\":" + FIRST_ID + ",\"playerId\":" + playerId
+                + ",\"playerX\":6.5,\"blocks\":" + blockArray(world.blocks)
+                + ",\"shots\":0,\"embeds\":0,\"frames\":" + frames + "]"
+                + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
+        out.flush();
+    }
+
+    /** 激流场景：玩家状态同 `zombiePlayerStep`，包里额外比 `set_entity_data` / `award_stats`。 */
+    /** Riptide scenes: the zombie player state plus `set_entity_data` / `award_stats` packets. */
+    private static void riptidePlayerStep(ServerPlayer player, Bytes sink, StringBuilder states,
+            StringBuilder packets, float[] lastSentHealth, boolean first) {
+        float health = player.getHealth();
+        if (!first && Float.floatToRawIntBits(health) != Float.floatToRawIntBits(lastSentHealth[0])) {
+            lastSentHealth[0] = health;
+            sink.add(new net.minecraft.network.protocol.game.ClientboundSetHealthPacket(
+                    health, player.getFoodData().getFoodLevel(),
+                    player.getFoodData().getSaturationLevel()));
+        }
+        if (first) {
+            lastSentHealth[0] = health;
+            // `startUsingItem` 在 tick0 之前已经把生物标志位置 1；官方的
+            // `ServerEntity.sendChanges` 当刻才会发，这里按同样的字节补上。
+            // `startUsingItem` set the using-item flag before tick 0;
+            // `ServerEntity.sendChanges` emits it on that tick.
+            var packed = player.getEntityData().packDirty();
+            if (packed != null && !packed.isEmpty()) {
+                sink.add(new net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket(
+                        player.getId(), packed));
+            }
+        }
+        if (!first) {
+            states.append(',');
+            packets.append(',');
+        }
+        states.append('[').append(Float.floatToRawIntBits(health))
+                .append(',').append(player.damageCooldownTime)
+                .append(',').append(player.hurtTime)
+                .append(',').append(player.isAlive() ? 0 : 1)
+                .append(',').append(player.getRemainingFireTicks()).append(']');
+        packets.append('[');
+        boolean comma = false;
+        var raw = sink.takeRaw();
+        for (byte[] body : raw) {
+            int id = body.length == 0 ? -1 : body[0] & 0xFF;
+            // `set_entity_data` 的包 ID 101 是单字节 VarInt（0x65）；
+            // 生物标志位 / 使用物品位的同步包必须逐刻比字节。`award_stats`
+            // 的条目顺序是官方 HashMap 的哈希序，累计值由 `itemUsed` 字段
+            // 精确比对，这里不比它的字节。
+            // `set_entity_data` id 101 is a one-byte VarInt (0x65);
+            // compare its living-flag / using-item sync bytes every tick.
+            // `award_stats` entries follow the official HashMap order, so
+            // their cumulative values are checked via `itemUsed` instead.
+            if (!(id == 101 || ZOMBIE_SELF_PACKETS.contains(id))) continue;
+            if (comma) packets.append(',');
+            packets.append('"').append(Base64.getEncoder().encodeToString(body)).append('"');
+            comma = true;
+        }
+        packets.append(']');
+    }
+
     private static void playProjectile(Official official, Writer out, String name) throws Exception {
         boolean enchanted = name.equals("arrow_power_punch_hit");
         boolean tipped = name.equals("arrow_tipped_hit");
@@ -8120,6 +8359,12 @@ public final class MobOracle {
         // Both play item.trident.thunder.
         boolean channelingMob = name.equals("trident_channeling_mob");
         boolean channelingRod = name.equals("trident_channeling_rod");
+        // 受害者头顶被盖住：`post_attack` 的 `can_see_sky` 在受害者所在方块
+        // 取样，失效后不该召唤闪电。把取样坐标钉死成牛脚下的 (6,64,0)。
+        // Covered victim: `post_attack`'s `can_see_sky` samples the victim's
+        // block position; with that sample covered, no bolt should be summoned.
+        // Pin the sample to the cow's feet at (6,64,0).
+        boolean channelingCovered = name.equals("trident_channeling_covered");
         boolean channeling = name.startsWith("trident_channeling");
         // 溺尸远程投掷：`_hard` 走困难难度，校准 `uncertainty = 14 - 4*difficulty`
         // （普通 6 / 困难 2），怪物三叉戟 pickup=DISALLOWED 玩家捡不到。
@@ -8193,6 +8438,14 @@ public final class MobOracle {
             world.injectedRaining = true;
             world.injectedCanSeeSky = true;
             world.tridentSoundFilter = true;
+            if (channelingCovered) {
+                // 牛在 (6.5,64,0.5)，`BlockPos.containing(victim)` = (6,64,0)。
+                // 只有这个坐标看不见天；两侧若取了别的采样点就会召雷。
+                // The cow is at (6.5,64,0.5), so `BlockPos.containing(victim)`
+                // is (6,64,0). Only that position cannot see the sky; a
+                // different sample on either side would still summon a bolt.
+                world.injectedCanSeeSkyExcept = new BlockPos(6, 64, 0);
+            }
         }
         if (drowned) {
             // 只比 `item.trident.*` 世界音效；`entity.drowned.shoot` 是实体事件音（Bamboo 侧
@@ -8398,7 +8651,7 @@ public final class MobOracle {
         // 引雷 post_attack 的受害者：一只静止的牛，闪电落在它自己的位置。
         // The channeling post_attack victim: a still cow, the bolt lands on it.
         Cow channelingVictim = null;
-        if (channelingMob) {
+        if (channelingMob || channelingCovered) {
             channelingVictim = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
             channelingVictim.setPos(6.5, 64.0, 0.5);
             channelingVictim.setNoAi(true);
@@ -8417,6 +8670,7 @@ public final class MobOracle {
         int embeds = 0;
         int extinguishes = 0;
         int totalTridentDrops = 0;
+        int totalChannelingBolts = 0;
         Bytes arrowEvents = new Bytes(official.registries);
         int[] puffs = {0};
         if (fade) {
@@ -8512,6 +8766,7 @@ public final class MobOracle {
                                 + Double.doubleToRawLongBits(at.y) + ","
                                 + Double.doubleToRawLongBits(at.z) + ","
                                 + (cause == null ? -1 : cause.getId()) + "]");
+                        totalChannelingBolts++;
                     }
                     if (trident && entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
                         // 忠诚三叉戟主人不可接受时掉落的物品：物品、数量、坐标原始位。
@@ -8703,6 +8958,13 @@ public final class MobOracle {
                 || ownerOffline && totalTridentDrops != 0) {
             throw new IllegalStateException("trident owner scene missed the expected drop: " + name
                     + " drops=" + totalTridentDrops);
+        }
+        // 露天场景必须真的召过雷；头顶被盖住的场景一次都不能召。
+        // Open-sky scenes must summon a bolt; the covered victim must not.
+        if (channeling && ((totalChannelingBolts > 0) != (name.equals("trident_channeling_mob")
+                || name.equals("trident_channeling_rod")))) {
+            throw new IllegalStateException("channeling scene missed the expected bolts: " + name
+                    + " bolts=" + totalChannelingBolts);
         }
         if (flame && (player.getTicksFrozen() != 0
                 || player.getRemainingFireTicks() != (rejected ? 1 : 100)
@@ -16072,6 +16334,10 @@ public final class MobOracle {
         int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
         boolean injectedCanSeeSky;
+        /** 引雷对拍：只有这个坐标看不到天，用来钉死 `canSeeSky` 的采样点。 */
+        /// Channeling parity: only this position cannot see the sky, pinning down
+        /// the `canSeeSky` sample position.
+        BlockPos injectedCanSeeSkyExcept;
         /** 引雷场景：雷暴（`weather_check(thundering:true)` 走 `isThundering()`）。 */
         /// Channeling scenes: a thunderstorm (`weather_check(thundering:true)`
         /// calls `isThundering()`).
@@ -16220,7 +16486,7 @@ public final class MobOracle {
 
         @Override
         public boolean canSeeSky(BlockPos pos) {
-            return injectedCanSeeSky;
+            return injectedCanSeeSky && !pos.equals(injectedCanSeeSkyExcept);
         }
 
         /** 真实时间模式：下雨且看得见天（场景的地面都在高度图之下，平原的降水是雨）。 */
@@ -16722,7 +16988,9 @@ public final class MobOracle {
                         sound, source, x, y, z, volume, pitch, seed));
             }
             if (soundLog != null) {
-                boolean trident = sound.value().location().getPath().startsWith("item.trident.");
+                String path = sound.value().location().getPath();
+                boolean trident = path.startsWith("item.trident.")
+                        || path.startsWith("entity.player.attack.");
                 if (!tridentSoundFilter || trident) {
                     soundLog.add(new long[] {
                             net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT.getId(sound.value()),

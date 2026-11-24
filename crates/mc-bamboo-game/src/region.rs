@@ -204,6 +204,12 @@ pub(crate) struct Region {
     /// 这一刻里方块侧 / 实体侧记下的进度触发事件，在玩家 tick 末尾统一 dispatch。
     /// 借用被拆开的地方（比如 `HurtParts`）只往这里压事件，不另起一套事件系统。
     pub(crate) pending_triggers: Vec<crate::advancement_triggers::PendingEvent>,
+    /// 这一刻发出去的音效效果，对拍回放逐刻取走比较。正式驱动不读它，
+    /// 每刻由 `send_effects` 累加、由回放清空。
+    ///
+    /// Sound effects emitted this tick; the oracle replay drains them for
+    /// per-tick comparison. The production driver does not read it.
+    pub(crate) sound_effects: Vec<mc_bamboo_blocks::Effect>,
     pub(crate) chunks: ChunkStore,
     /// POI 段：`SectionPos → PoiSection`，按 `ChunkPos` 分脏。和 `chunks` 平级，
     /// 改动不进 `ChunkRevision`，也不进区块包缓存；单独存到 `poi/`。
@@ -437,6 +443,7 @@ impl Region {
             player_grid: PlayerGrid::default(),
             links: Links::default(),
             pending_triggers: Vec::new(),
+            sound_effects: Vec::new(),
             tick_levels: TickLevels::new(chunks.is_loaded_mode()),
             chunks,
             poi: PoiStore::new(),
