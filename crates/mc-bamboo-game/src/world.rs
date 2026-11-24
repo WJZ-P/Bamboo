@@ -3628,6 +3628,11 @@ fn run_island_simulation(
     // before mining, attack, effects and sync read them, like vanilla's entity
     // tick running `detectEquipmentUpdates` first.
     crate::player_attributes::rebuild(region);
+    // `LivingEntity.baseTick` 的 `tickEffects`、`collectEquipmentChanges` 和
+    // `onChangedBlock`：TICK 组件、换靴子停机/立即重跑、跨格重跑 location 效果。
+    // 官方 `commonTick` 在 `ServerPlayer.tick` 之前推 `tickCount`，这里比
+    // `player_hurt::tick` 的自增早一刻，模块内自行加一。
+    crate::player_enchantments::tick(region);
     // 玩家自己每 tick 的挖掘进度。官方在实体 tick 里跑 `ServerPlayerGameMode.tick`，
     // 这里跟着玩家 tick 放在随机刻之后。
     interaction::tick_mining(region);

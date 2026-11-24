@@ -103,7 +103,18 @@ pub(crate) fn reset_after_respawn(region: &mut Region, id: PlayerId, keep_invent
     }
     player.attributes = fresh_attributes;
     player.sync.sent_attributes.clear();
+    // 新实体没有上一刻的 location 效果；靴子快照也要和（可能清空的）物品栏一致。
+    // A fresh entity has no active location effects; the boots snapshot must
+    // match the possibly cleared inventory.
+    player.location_effects = Default::default();
+    player.soul_speed_level = 0;
+    player.last_location_pos = None;
     transfer_inventory_xp_and_score(player, keep);
+    player.last_location_boots = player
+        .inventory
+        .equipment(mc_bamboo_protocol::packet::play::EquipmentSlot::Feet)
+        .cloned()
+        .unwrap_or_else(mc_bamboo_protocol::item::ItemStack::empty);
     crate::player_attributes::rebuild_player(player, false);
     let max_health = player
         .attributes
