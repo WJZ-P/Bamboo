@@ -302,7 +302,7 @@ public final class MobOracle {
                     "trident_stick", "trident_loyalty", "trident_owner_offline",
                     "trident_owner_dead", "trident_spectator",
                     "trident_channeling_mob", "trident_channeling_rod",
-                    "trident_drowned", "trident_drowned_hard")) {
+                    "trident_channeling_covered", "trident_drowned", "trident_drowned_hard")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
@@ -8112,6 +8112,12 @@ public final class MobOracle {
         // Both play item.trident.thunder.
         boolean channelingMob = name.equals("trident_channeling_mob");
         boolean channelingRod = name.equals("trident_channeling_rod");
+        // 受害者头顶被盖住：`post_attack` 的 `can_see_sky` 在受害者所在方块
+        // 取样，失效后不该召唤闪电。把取样坐标钉死成牛脚下的 (6,64,0)。
+        // Covered victim: `post_attack`'s `can_see_sky` samples the victim's
+        // block position; with that sample covered, no bolt should be summoned.
+        // Pin the sample to the cow's feet at (6,64,0).
+        boolean channelingCovered = name.equals("trident_channeling_covered");
         boolean channeling = name.startsWith("trident_channeling");
         // 溺尸远程投掷：`_hard` 走困难难度，校准 `uncertainty = 14 - 4*difficulty`
         // （普通 6 / 困难 2），怪物三叉戟 pickup=DISALLOWED 玩家捡不到。
@@ -8185,6 +8191,14 @@ public final class MobOracle {
             world.injectedRaining = true;
             world.injectedCanSeeSky = true;
             world.tridentSoundFilter = true;
+            if (channelingCovered) {
+                // 牛在 (6.5,64,0.5)，`BlockPos.containing(victim)` = (6,64,0)。
+                // 只有这个坐标看不见天；两侧若取了别的采样点就会召雷。
+                // The cow is at (6.5,64,0.5), so `BlockPos.containing(victim)`
+                // is (6,64,0). Only that position cannot see the sky; a
+                // different sample on either side would still summon a bolt.
+                world.injectedCanSeeSkyExcept = new BlockPos(6, 64, 0);
+            }
         }
         if (drowned) {
             // 只比 `item.trident.*` 世界音效；`entity.drowned.shoot` 是实体事件音（Bamboo 侧
@@ -8390,7 +8404,7 @@ public final class MobOracle {
         // 引雷 post_attack 的受害者：一只静止的牛，闪电落在它自己的位置。
         // The channeling post_attack victim: a still cow, the bolt lands on it.
         Cow channelingVictim = null;
-        if (channelingMob) {
+        if (channelingMob || channelingCovered) {
             channelingVictim = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
             channelingVictim.setPos(6.5, 64.0, 0.5);
             channelingVictim.setNoAi(true);
@@ -8409,6 +8423,7 @@ public final class MobOracle {
         int embeds = 0;
         int extinguishes = 0;
         int totalTridentDrops = 0;
+        int totalChannelingBolts = 0;
         Bytes arrowEvents = new Bytes(official.registries);
         int[] puffs = {0};
         if (fade) {
@@ -8504,6 +8519,7 @@ public final class MobOracle {
                                 + Double.doubleToRawLongBits(at.y) + ","
                                 + Double.doubleToRawLongBits(at.z) + ","
                                 + (cause == null ? -1 : cause.getId()) + "]");
+                        totalChannelingBolts++;
                     }
                     if (trident && entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
                         // 忠诚三叉戟主人不可接受时掉落的物品：物品、数量、坐标原始位。
@@ -8695,6 +8711,13 @@ public final class MobOracle {
                 || ownerOffline && totalTridentDrops != 0) {
             throw new IllegalStateException("trident owner scene missed the expected drop: " + name
                     + " drops=" + totalTridentDrops);
+        }
+        // 露天场景必须真的召过雷；头顶被盖住的场景一次都不能召。
+        // Open-sky scenes must summon a bolt; the covered victim must not.
+        if (channeling && ((totalChannelingBolts > 0) != (name.equals("trident_channeling_mob")
+                || name.equals("trident_channeling_rod")))) {
+            throw new IllegalStateException("channeling scene missed the expected bolts: " + name
+                    + " bolts=" + totalChannelingBolts);
         }
         if (flame && (player.getTicksFrozen() != 0
                 || player.getRemainingFireTicks() != (rejected ? 1 : 100)
@@ -15943,6 +15966,10 @@ public final class MobOracle {
         int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
         boolean injectedCanSeeSky;
+        /** 引雷对拍：只有这个坐标看不到天，用来钉死 `canSeeSky` 的采样点。 */
+        /// Channeling parity: only this position cannot see the sky, pinning down
+        /// the `canSeeSky` sample position.
+        BlockPos injectedCanSeeSkyExcept;
         /** 引雷场景：雷暴（`weather_check(thundering:true)` 走 `isThundering()`）。 */
         /// Channeling scenes: a thunderstorm (`weather_check(thundering:true)`
         /// calls `isThundering()`).
@@ -16091,7 +16118,7 @@ public final class MobOracle {
 
         @Override
         public boolean canSeeSky(BlockPos pos) {
-            return injectedCanSeeSky;
+            return injectedCanSeeSky && !pos.equals(injectedCanSeeSkyExcept);
         }
 
         /** 真实时间模式：下雨且看得见天（场景的地面都在高度图之下，平原的降水是雨）。 */

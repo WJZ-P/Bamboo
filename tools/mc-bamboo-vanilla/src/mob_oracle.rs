@@ -865,6 +865,13 @@ struct ZombieFacts {
     /// `InhabitedTime` 场景：逐刻按候选区块集合累加，并输出区域难度 `ed`。
     accumulates_inhabited: bool,
     can_see_sky: bool,
+    /// 引雷对拍：只有这个坐标看不到天，用来钉死 `can_see_sky` 的采样点。
+    /// 缺省时全部坐标都按 `can_see_sky` 返回。
+    ///
+    /// Channeling parity: only this position cannot see the sky, pinning down
+    /// the `can_see_sky` sample position. When unset every position uses the
+    /// global `can_see_sky` value.
+    covered_sky_pos: Option<BlockPos>,
     sky_darken: i32,
     difficulty: i32,
     bright_outside: bool,
@@ -1204,8 +1211,8 @@ impl Level for MobLevel {
             },
         }
     }
-    fn can_see_sky(&self, _pos: BlockPos) -> bool {
-        self.facts.can_see_sky
+    fn can_see_sky(&self, pos: BlockPos) -> bool {
+        self.facts.can_see_sky && self.facts.covered_sky_pos != Some(pos)
     }
 
     fn is_raining_at(&self, _pos: BlockPos) -> bool {
@@ -1774,6 +1781,7 @@ impl Report {
                 inhabited_time: 0,
                 accumulates_inhabited: case.name.starts_with("zombie_inhabited_"),
                 can_see_sky: case.monsters_burn,
+                covered_sky_pos: None,
                 snow_golem_melts: false,
                 sky_darken: case.sky_darken,
                 difficulty: case.difficulty,

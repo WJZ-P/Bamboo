@@ -376,7 +376,7 @@ impl ProjectileCase {
     }
 
     fn open_sky(&self) -> bool {
-        self.name == "trident_channeling_mob" || self.name == "trident_channeling_rod"
+        self.name.starts_with("trident_channeling")
     }
 
     fn channeling(&self) -> bool {
@@ -384,7 +384,16 @@ impl ProjectileCase {
     }
 
     fn channeling_mob(&self) -> bool {
-        self.name == "trident_channeling_mob"
+        self.name == "trident_channeling_mob" || self.name == "trident_channeling_covered"
+    }
+
+    /// 受害者头顶被盖住：`can_see_sky` 只有牛脚下这个坐标看不见天，逐刻确认
+    /// `channeling_strike` 取的正是 `BlockPos::containing(victim)`。
+    ///
+    /// Covered victim: `can_see_sky` is false only at the cow's feet, tick by
+    /// tick confirming `channeling_strike` samples `BlockPos::containing(victim)`.
+    fn covered_sky(&self) -> bool {
+        self.name == "trident_channeling_covered"
     }
 
     /// 溺尸远程投掷（普通 / 困难）：怪物三叉戟 pickup=Disallowed，玩家捡不到。
@@ -413,6 +422,7 @@ impl ProjectileCase {
                 raining: self.thundering(),
                 thundering: self.thundering(),
                 can_see_sky: self.open_sky(),
+                covered_sky_pos: self.covered_sky().then(|| BlockPos::new(6, 64, 0)),
                 ..ZombieFacts::default()
             },
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
@@ -707,6 +717,15 @@ impl Report {
     pub(super) fn replay_projectile(&mut self, case: &ProjectileCase) {
         self.cases += 1;
         let mut level = case.level();
+        // 改坏确认 `trident_sky_sample`：把「头顶被盖住」的坐标挪开一格，
+        // `channeling_strike` 取的采样点就会看见天、错误地召出闪电，逐刻的
+        // lightning / sounds 必须报不一致。
+        // Break self-test `trident_sky_sample`: move the covered coordinate
+        // one block away. `channeling_strike`'s sample then sees the sky and
+        // wrongly summons a bolt, so lightning / sounds must diverge.
+        if self.break_test.as_deref() == Some("trident_sky_sample") && case.covered_sky() {
+            level.facts.covered_sky_pos = Some(BlockPos::new(7, 64, 0));
+        }
         // 改坏确认 `trident_channeling`：关掉露天条件，引雷就不该召唤闪电、
         // 也不该播雷声；逐刻的 lightning / sounds 必须报不一致。
         // Break self-test `trident_channeling`: turn off open sky so channeling
