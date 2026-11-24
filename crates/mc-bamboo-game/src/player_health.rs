@@ -296,9 +296,13 @@ impl PlayerHealth {
         Some(outcome)
     }
 
-    /// 把官方存盘字段写进运行时。
-    pub fn restore(&mut self, data: &PlayerData) {
-        self.health = data.health.clamp(0.0, rules::MAX_HEALTH);
+    /// 把官方存盘字段写进运行时。血量按当前 `MAX_HEALTH` 夹取（官方先读 `attributes`
+    /// 再读 `Health`，所以高于 20 的最大生命不会被截断）。
+    ///
+    /// Restores the saved fields into runtime state, clamping health to the
+    /// resolved `MAX_HEALTH` (vanilla reads `attributes` before `Health`).
+    pub fn restore(&mut self, data: &PlayerData, max_health: f32) {
+        self.health = data.health.clamp(0.0, max_health.max(1.0));
         // 官方 `LivingEntity.readAdditionalSaveData` 走 `internalSetAbsorptionAmount`，
         // 不夹到属性上限；`setAbsorptionAmount` 的夹取只发生在效果变化那一路上。
         self.absorption = data.absorption.max(0.0);
@@ -368,7 +372,7 @@ mod tests {
         assert_eq!(data.absorption, 3.0);
         assert_eq!(data.food_tick_timer, 42);
         let mut restored = PlayerHealth::default();
-        restored.restore(&data);
+        restored.restore(&data, rules::MAX_HEALTH);
         assert_eq!(restored.health, 7.5);
         assert_eq!(restored.absorption, 3.0);
         assert_eq!(restored.hurt_time, 6);

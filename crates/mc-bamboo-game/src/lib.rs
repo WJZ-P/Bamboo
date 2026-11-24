@@ -371,6 +371,100 @@ pub fn replay_health_save(
     ]
 }
 
+/// 玩家属性运行时存盘往返对拍：修改基础值、挂三种永久修饰符和临时修饰符，
+/// 走正式的 `runtime_player_data` -> gzip -> `restore_inventory`，返回读回后的
+/// `(max_health_value, health_bits, has_perm_modifiers, had_transient_on_disk)`。
+///
+/// Runtime player-attribute save round-trip for the player-data oracle.
+#[doc(hidden)]
+pub fn replay_attributes_save() -> (u64, u32, bool, bool) {
+    use mc_bamboo_blocks::entity::mob::{
+        attributes::{Modifier, Operation},
+        effects::EffectInstance,
+    };
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::registries::{attribute, mob_effect};
+    use mc_bamboo_protocol::packet::play::{ClientInformation, ENTITY_FLAG_SPRINTING, GameMode};
+    use mc_bamboo_storage::player_data::PlayerData;
+
+    let mut player = player::Player::new(
+        inbound::PlayerId(1),
+        uuid::Uuid::nil(),
+        String::new(),
+        GameMode::Creative,
+        ClientInformation::default(),
+        Vec3::default(),
+    );
+    if let Some(inst) = player.attributes.instance(attribute::MAX_HEALTH) {
+        inst.base = 24.0;
+        inst.modifiers.push(Modifier {
+            id: "minecraft:oracle_add".to_owned(),
+            amount: 6.0,
+            operation: Operation::AddValue,
+            permanent: true,
+        });
+    }
+    if let Some(inst) = player.attributes.instance(attribute::ATTACK_DAMAGE) {
+        inst.modifiers.push(Modifier {
+            id: "minecraft:oracle_base".to_owned(),
+            amount: 0.5,
+            operation: Operation::AddMultipliedBase,
+            permanent: true,
+        });
+        inst.modifiers.push(Modifier {
+            id: "minecraft:oracle_total".to_owned(),
+            amount: 0.25,
+            operation: Operation::AddMultipliedTotal,
+            permanent: true,
+        });
+    }
+    player
+        .effects
+        .add(EffectInstance::with_amplifier(mob_effect::SPEED, 200, 0));
+    player.sync.shared_flags |= ENTITY_FLAG_SPRINTING;
+    player_attributes::rebuild_player(&mut player, false);
+    player.health.health = 28.5;
+
+    let data = player_save::runtime_player_data(&player);
+    let gzip = data.to_gzip().expect("player attributes gzip");
+    let loaded = PlayerData::from_gzip(&gzip).expect("player attributes decode");
+    let serialized = format!("{:?}", loaded.attributes);
+    let had_transient_on_disk = serialized.contains("minecraft:sprinting")
+        || serialized.contains("minecraft:effect.speed")
+        || serialized.contains("minecraft:creative_mode_block_range");
+
+    let mut restored = player::Player::new(
+        inbound::PlayerId(1),
+        uuid::Uuid::nil(),
+        String::new(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::default(),
+    );
+    player_save::restore_inventory(&mut restored, &loaded);
+    let has_perm = restored
+        .attributes
+        .get(attribute::MAX_HEALTH)
+        .and_then(|a| a.modifier("minecraft:oracle_add"))
+        .is_some_and(|m| m.permanent && m.amount == 6.0)
+        && restored
+            .attributes
+            .get(attribute::ATTACK_DAMAGE)
+            .and_then(|a| a.modifier("minecraft:oracle_base"))
+            .is_some_and(|m| m.permanent && m.amount == 0.5)
+        && restored
+            .attributes
+            .get(attribute::ATTACK_DAMAGE)
+            .and_then(|a| a.modifier("minecraft:oracle_total"))
+            .is_some_and(|m| m.permanent && m.amount == 0.25);
+    (
+        restored.attributes.value(attribute::MAX_HEALTH).to_bits(),
+        restored.health.health.to_bits(),
+        has_perm,
+        had_transient_on_disk,
+    )
+}
+
 /// 供 `mc-bamboo-vanilla entity-oracle` 对拍 `ExperienceOrb.playerTouch`：
 /// 输入经验球的值、count、冷却、主手剑的 damage、有没有经验修补，以及玩家经验三字段；
 /// 返回逐刻的 `[level, progress 原始位, total, score, delay, count, removed, take, damage]`。
