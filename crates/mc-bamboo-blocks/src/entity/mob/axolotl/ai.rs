@@ -65,21 +65,25 @@ const SPEED_CHASE: Speed = Speed::WaterOrLand {
 ///
 /// `Axolotl.BRAIN_PROVIDER`: five sensors in vanilla order and `AxolotlAi.getActivities()`.
 pub(in crate::entity::mob) fn brain() -> Brain {
-    Brain::new(
-        &[
-            sensor::SensorKind::NearestLivingEntities,
-            sensor::SensorKind::NearestAdult,
-            sensor::SensorKind::HurtBy,
-            sensor::SensorKind::AxolotlAttackables,
-            sensor::SensorKind::FoodTemptations,
-        ],
-        vec![
-            core_activity(),
-            idle_activity(),
-            fight_activity(),
-            play_dead_activity(),
-        ],
-    )
+    use crate::entity::mob::brain::{BrainTemplate, TemplateCache, template_cache};
+    static TEMPLATE: TemplateCache = template_cache();
+    Brain::cached(&TEMPLATE, || {
+        BrainTemplate::new(
+            &[
+                sensor::SensorKind::NearestLivingEntities,
+                sensor::SensorKind::NearestAdult,
+                sensor::SensorKind::HurtBy,
+                sensor::SensorKind::AxolotlAttackables,
+                sensor::SensorKind::FoodTemptations,
+            ],
+            vec![
+                core_activity(),
+                idle_activity(),
+                fight_activity(),
+                play_dead_activity(),
+            ],
+        )
+    })
 }
 
 /// `Axolotl.customServerAiStep` 的前半：跑大脑，再跑 `AxolotlAi.updateActivity`。

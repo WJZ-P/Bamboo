@@ -970,23 +970,27 @@ pub(super) fn has_tongue_target(mob: &Mob, ctx: &dyn EntityCtx) -> bool {
 ///
 /// `Frog.BRAIN_PROVIDER`: five sensors in vanilla order and `FrogAi.getActivities()`.
 pub(super) fn brain() -> Brain {
-    Brain::new(
-        &[
-            SensorKind::NearestLivingEntities,
-            SensorKind::HurtBy,
-            SensorKind::FrogAttackables,
-            SensorKind::FrogTemptations,
-            SensorKind::IsInWater,
-        ],
-        vec![
-            core_activity(),
-            idle_activity(),
-            swim_activity(),
-            lay_spawn_activity(),
-            tongue_activity(),
-            long_jump_activity(),
-        ],
-    )
+    use crate::entity::mob::brain::{BrainTemplate, TemplateCache, template_cache};
+    static TEMPLATE: TemplateCache = template_cache();
+    Brain::cached(&TEMPLATE, || {
+        BrainTemplate::new(
+            &[
+                SensorKind::NearestLivingEntities,
+                SensorKind::HurtBy,
+                SensorKind::FrogAttackables,
+                SensorKind::FrogTemptations,
+                SensorKind::IsInWater,
+            ],
+            vec![
+                core_activity(),
+                idle_activity(),
+                swim_activity(),
+                lay_spawn_activity(),
+                tongue_activity(),
+                long_jump_activity(),
+            ],
+        )
+    })
 }
 
 fn look_at_player_sometimes() -> Kind {

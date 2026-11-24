@@ -66,15 +66,19 @@ pub(super) fn attributes() -> Attributes {
 ///
 /// `Tadpole.BRAIN_PROVIDER`: four sensors and `TadpoleAi.getActivities()`.
 pub(super) fn brain() -> Brain {
-    Brain::new(
-        &[
-            SensorKind::NearestLivingEntities,
-            SensorKind::NearestPlayers,
-            SensorKind::HurtBy,
-            SensorKind::FrogTemptations,
-        ],
-        vec![core_activity(), idle_activity()],
-    )
+    use crate::entity::mob::brain::{BrainTemplate, TemplateCache, template_cache};
+    static TEMPLATE: TemplateCache = template_cache();
+    Brain::cached(&TEMPLATE, || {
+        BrainTemplate::new(
+            &[
+                SensorKind::NearestLivingEntities,
+                SensorKind::NearestPlayers,
+                SensorKind::HurtBy,
+                SensorKind::FrogTemptations,
+            ],
+            vec![core_activity(), idle_activity()],
+        )
+    })
 }
 
 /// `TadpoleAi.initCoreActivity`。

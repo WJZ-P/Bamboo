@@ -459,6 +459,21 @@ impl Memories {
         self.registered |= bit(kind);
     }
 
+    /// 一次登记整张模板算好的记忆集合（构造大脑时省掉逐条 `register`）。
+    ///
+    /// Registers a whole precomputed memory set at once (avoids per-type `register`
+    /// calls when building a brain).
+    pub fn register_mask(&mut self, mask: u64) {
+        self.registered |= mask;
+    }
+
+    /// 已登记记忆的位掩码（模板构造时读出来，供实例复用）。
+    ///
+    /// The registered-memory bit mask (read when building a template, reused by instances).
+    pub fn registered_mask(&self) -> u64 {
+        self.registered
+    }
+
     pub fn is_registered(&self, kind: MemoryType) -> bool {
         self.registered & bit(kind) != 0
     }

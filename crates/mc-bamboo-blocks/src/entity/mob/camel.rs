@@ -346,15 +346,19 @@ impl Behavior {
 /// `Camel.BRAIN_PROVIDER`: four sensors, core and idle activities; `initMemories` is empty
 /// and draws nothing.
 pub(super) fn brain() -> Brain {
-    Brain::new(
-        &[
-            SensorKind::NearestLivingEntities,
-            SensorKind::HurtBy,
-            SensorKind::FoodTemptations,
-            SensorKind::NearestAdult,
-        ],
-        vec![core_activity(), idle_activity()],
-    )
+    use crate::entity::mob::brain::{BrainTemplate, TemplateCache, template_cache};
+    static TEMPLATE: TemplateCache = template_cache();
+    Brain::cached(&TEMPLATE, || {
+        BrainTemplate::new(
+            &[
+                SensorKind::NearestLivingEntities,
+                SensorKind::HurtBy,
+                SensorKind::FoodTemptations,
+                SensorKind::NearestAdult,
+            ],
+            vec![core_activity(), idle_activity()],
+        )
+    })
 }
 
 fn core_activity() -> ActivityData {
