@@ -4,13 +4,17 @@
 //! 调用这一格的 `randomTick` 和它的流体的 `randomTick`。挑格子用的是 `Level.randValue` 那个线性同余，
 //! 方块自己的逻辑用 `Level.random`，两个都在 [`LevelRandom`](crate::random::LevelRandom) 里。
 
-use mc_bamboo_core::{BlockPos, ChunkPos};
-use mc_bamboo_data::{BlockAncestor, blocks};
+use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
+use mc_bamboo_data::{BlockAncestor, blocks, tags::block_tags};
 
 use crate::{
+    entity::{Entity, mob::MobType},
     fluid,
     interact::{InteractionResult, Outcome, finish},
     level::Level,
+    lightning_rod::LIGHTNING_ROD_RADIUS,
+    shape::Aabb,
+    sky,
     state::{BlockState, LAYERS, LEVEL_CAULDRON},
     ticks::BlockTicks,
     weather::Precipitation,
@@ -63,23 +67,98 @@ pub fn tick_chunk(
 
 /// `ServerLevel.tickThunder(chunk)`：打雷时每个实体 ticking 区块掷一次骰子。
 ///
-/// 官方命中后取落点、看 `isRainingAt`，再按 `SPAWN_MOBS` 取一次 `nextDouble()` 决定
-/// 是不是骷髅陷阱，最后生成实体。Bamboo 不生成闪电实体和陷阱马，但随机数照取：
-/// 落点的 `getBlockRandomPos`、`getEntitiesOfClass` 列表里选实体时的
-/// `nextInt(list.size())`（没有生活实体时不取）、以及 `nextDouble()`。
+/// 命中后按 `findLightningTargetAround` 选落点：高度图、避雷针 POI、附近能看见天的活物。
+/// 然后按 `SPAWN_MOBS` 和区域难度决定是不是骷髅陷阱，最后生成陷阱马和闪电。
+/// 取数顺序照官方：`block_random_pos` → 没有避雷针且有活物时 `nextInt(list.size())` →
+/// `nextDouble()`；新实体的构造随机数来自实体自己的随机源，不碰 `level.random`。
 pub fn tick_thunder(level: &mut dyn Level, ticks: &mut BlockTicks, chunk: ChunkPos) -> Outcome {
-    let world = World::new(level, ticks);
+    let mut world = World::new(level, ticks);
     if world.is_raining() && world.is_thundering() {
         let origin = BlockPos::new(chunk.x << 4, 0, chunk.z << 4);
         if world.random().next_int(LIGHTNING_CHANCE) == 0 {
-            // `findLightningTargetAround`：Bamboo 没有 POI 和生活实体，落点就是这一格。
-            let target = world.block_random_pos(origin, SECTION_Y_MASK);
-            if world.is_raining_at(target) && world.block_game_rules().spawn_mobs {
-                let _trap_roll = world.random().next_double();
+            let rolled = world.block_random_pos(origin, SECTION_Y_MASK);
+            let target = lightning_target_around(&world, rolled);
+            if world.is_raining_at(target) {
+                let effective = effective_difficulty(&world, target);
+                let trap = if world.block_game_rules().spawn_mobs {
+                    let roll = world.random().next_double();
+                    roll < f64::from(effective) * 0.01
+                        && !world
+                            .block_state(target.below())
+                            .is_tagged(block_tags::LIGHTNING_RODS)
+                } else {
+                    false
+                };
+                if trap {
+                    let position = Vec3::new(
+                        f64::from(target.x),
+                        f64::from(target.y),
+                        f64::from(target.z),
+                    );
+                    let mut horse = Entity::by_mob_type(MobType::SkeletonHorse, position);
+                    horse.with_mob(|_, mob| {
+                        crate::entity::mob::skeleton_horse::set_trap(mob, true);
+                        mob.age = 0;
+                    });
+                    world.spawn_entity(horse);
+                }
+                let position = Vec3::new(
+                    f64::from(target.x) + 0.5,
+                    f64::from(target.y),
+                    f64::from(target.z) + 0.5,
+                );
+                let bolt = crate::entity::lightning::entity(position, trap);
+                world.spawn_entity(bolt);
             }
         }
     }
     finish(world, InteractionResult::Pass)
+}
+
+/// `ServerLevel.findLightningTargetAround`：`MOTION_BLOCKING` 高度图 → 避雷针 POI →
+/// 3 格外扩的竖直盒里随机挑一个活着的、能看见天的生活实体 → 高度图落点。
+pub fn lightning_target_around(world: &World, rolled: BlockPos) -> BlockPos {
+    let mut top = BlockPos::new(rolled.x, world.level().heightmap_y(rolled), rolled.z);
+    if let Some(rod) = world.level().lightning_rod_near(top, LIGHTNING_ROD_RADIUS) {
+        return rod;
+    }
+    let sky_top = BlockPos::new(top.x, world.max_y() + 1, top.z);
+    let area = Aabb::new(
+        f64::from(top.x) - 3.0,
+        f64::from(top.y) - 3.0,
+        f64::from(top.z) - 3.0,
+        f64::from(sky_top.x + 1) + 3.0,
+        f64::from(sky_top.y + 1) + 3.0,
+        f64::from(sky_top.z + 1) + 3.0,
+    );
+    // `getEntitiesOfClass(LivingEntity, box, predicate)`：按实体分区顺序收候选，
+    // 之后 `nextInt(list.size())` 挑一个。只有生物（`LivingEntity`）在列表里。
+    let mut candidates: Vec<BlockPos> = Vec::new();
+    world
+        .level()
+        .for_each_entity_in_section_order(area, &mut |public| {
+            if public.removed || !matches!(public.kind, crate::entity::KindPublic::Mob(_)) {
+                return;
+            }
+            let pos = public.block_position();
+            if world.level().can_see_sky(pos) {
+                candidates.push(pos);
+            }
+        });
+    if !candidates.is_empty() {
+        let index = world.random().next_int(candidates.len() as i32) as usize;
+        return candidates[index.min(candidates.len() - 1)];
+    }
+    if top.y == world.min_y() - 1 {
+        top = top.above().above();
+    }
+    top
+}
+
+/// `DifficultyInstance.getEffectiveDifficulty()`：`ServerLevel.getCurrentDifficultyAt`。
+fn effective_difficulty(world: &World, _pos: BlockPos) -> f32 {
+    let clock = world.level().clock_ticks();
+    sky::effective_difficulty(world.difficulty_id(), clock, 0, sky::moon_brightness(clock))
 }
 
 /// `tickChunk` 开头的 `tickPrecipitation`：骰子掷中时挑一格看要不要结冰、积雪。
@@ -221,4 +300,32 @@ pub fn random_tick(level: &mut dyn Level, ticks: &mut BlockTicks, pos: BlockPos)
     let mut world = World::new(level, ticks);
     tick_one(&mut world, pos);
     finish(world, InteractionResult::Pass)
+}
+
+#[cfg(test)]
+mod thunder_tests {
+    use super::*;
+    use crate::{BlockTicks, testing::TestLevel};
+    use mc_bamboo_data::blocks;
+
+    /// 有避雷针时 `findLightningTargetAround` 直接返回，不取活物列表的 `nextInt`；
+    /// 雷击那一次只消耗 `nextInt(100000)`、`block_random_pos` 和 `nextDouble()`。
+    #[test]
+    fn rod_skips_the_living_entity_draw() {
+        let mut level = TestLevel::new();
+        level.set(BlockPos::new(0, 63, 0), BlockState(blocks::LIGHTNING_ROD));
+        let before = level.random().source().seed();
+        let mut ticks = BlockTicks::new();
+        let world = World::new(&mut level, &mut ticks);
+        let top = BlockPos::new(0, 64, 0);
+        assert_eq!(
+            world.level().lightning_rod_near(top, LIGHTNING_ROD_RADIUS),
+            Some(BlockPos::new(0, 64, 0))
+        );
+        let _ = world.random().next_int(LIGHTNING_CHANCE);
+        let _ = world.block_random_pos(BlockPos::new(0, 0, 0), SECTION_Y_MASK);
+        let _ = world.random().next_double();
+        let expected = world.level().random().source().seed();
+        assert_ne!(before, expected);
+    }
 }

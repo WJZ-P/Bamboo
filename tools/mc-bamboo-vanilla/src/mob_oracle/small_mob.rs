@@ -310,23 +310,26 @@ pub(super) struct SmallMobDeathCase {
 }
 
 /// 复合标签的键按名字排序，便于和官方的哈希表顺序比较。
-fn canonical(tag: &mc_bamboo_nbt::Tag) -> mc_bamboo_nbt::Tag {
+pub(super) fn canonical_tag(tag: &mc_bamboo_nbt::Tag) -> mc_bamboo_nbt::Tag {
     use mc_bamboo_nbt::Tag;
     match tag {
         Tag::Compound(entries) => {
             let mut sorted: Vec<_> = entries
                 .iter()
-                .map(|(name, value)| (name.clone(), canonical(value)))
+                .map(|(name, value)| (name.clone(), canonical_tag(value)))
                 .collect();
             sorted.sort_by(|a, b| a.0.cmp(&b.0));
             Tag::Compound(sorted)
         }
-        Tag::List(items) => Tag::List(items.iter().map(canonical).collect()),
+        Tag::List(items) => Tag::List(items.iter().map(canonical_tag).collect()),
         other => other.clone(),
     }
 }
 
-fn field<'a>(tag: &'a mc_bamboo_nbt::Tag, key: &str) -> Option<&'a mc_bamboo_nbt::Tag> {
+pub(super) fn save_field<'a>(
+    tag: &'a mc_bamboo_nbt::Tag,
+    key: &str,
+) -> Option<&'a mc_bamboo_nbt::Tag> {
     match tag {
         mc_bamboo_nbt::Tag::Compound(entries) => entries
             .iter()
@@ -385,8 +388,8 @@ impl Report {
             }
         };
         for key in SAVE_KEYS {
-            let expected = field(&reloaded, key).map(canonical);
-            let actual = field(&ours, key).map(canonical);
+            let expected = save_field(&reloaded, key).map(canonical_tag);
+            let actual = save_field(&ours, key).map(canonical_tag);
             if expected != actual {
                 self.mismatch(format!(
                     "{label} {key}: official {expected:?}, bamboo {actual:?}"

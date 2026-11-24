@@ -680,6 +680,14 @@ public final class MovementOracle {
     private static void put(Class<?> owner, Object target, String name, Object value) {
         try {
             Field field = owner.getDeclaredField(name);
+            if (field.getType().isPrimitive()
+                    || (value != null && !field.getType().isInstance(value))) {
+                // `Unsafe.putObject` 按偏移写引用，类型不对会悄悄写坏堆。
+                // `Unsafe.putObject` writes a reference by offset; a wrong type corrupts the heap.
+                throw new IllegalStateException(owner.getName() + "." + name + ": field is "
+                        + field.getType().getName() + ", value is "
+                        + (value == null ? "null" : value.getClass().getName()));
+            }
             UNSAFE.putObject(target, UNSAFE.objectFieldOffset(field), value);
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);

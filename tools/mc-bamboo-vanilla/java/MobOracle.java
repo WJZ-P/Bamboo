@@ -447,6 +447,18 @@ public final class MobOracle {
             if (only == null || "arrow_pickup".equals(only)) {
                 cases += playArrowPickups(official, out);
             }
+            if (only == null || only.startsWith("lightning") || only.startsWith("trap")) {
+                cases += playLightning(official, out, only);
+            }
+            if (only == null || only.startsWith("trap_gear")) {
+                cases += playTrapGear(official, out);
+            }
+            if (only == null || only.startsWith("thunder_target") || only.startsWith("thunder_hit")) {
+                cases += playThunder(official, out, only);
+            }
+            if (only == null || only.startsWith("undead_horse")) {
+                cases += playUndeadHorse(official, out, only);
+            }
             if (only == null || "skeleton_death".startsWith(only)) {
                 cases += playSkeletonDeaths(official, out);
             }
@@ -10528,7 +10540,7 @@ public final class MobOracle {
                 // Players do not tick here, so the fluid scan never sets
                 // `wasTouchingWater`; the drowned reads it in `okTarget` and
                 // `wantsToSwim`, so wet scenes set it by hand.
-                put(net.minecraft.world.entity.Entity.class, player, "wasTouchingWater", true);
+                putBoolean(net.minecraft.world.entity.Entity.class, player, "wasTouchingWater", true);
             }
             if (scene.name.startsWith("slime_") || scene.name.startsWith("witch_drink_")) {
                 // 玩家的实体 ID 和 0 号生物撞在一起（都是 `FIRST_ID`）；死亡消息按 ID 找攻击者，
@@ -12406,9 +12418,25 @@ public final class MobOracle {
         return out.append('}').toString();
     }
 
+    /**
+     * `Unsafe` 按偏移直接写字段，不查类型。宽度或类型写错会悄悄写坏堆，等 G1 并发标记
+     * 碰巧扫到才崩（`G1SATBMarkQueueSet::filter` 里的 SIGSEGV），所以每次写之前先核对。
+     *
+     * `Unsafe` writes by offset without type checks. A wrong width or type silently
+     * corrupts the heap and only crashes when G1 concurrent marking happens to scan it
+     * (a SIGSEGV in `G1SATBMarkQueueSet::filter`), so check the type before every write.
+     */
+    private static void requireFieldType(Field field, Class<?> expected) {
+        if (field.getType() != expected) {
+            throw new IllegalStateException(field.getDeclaringClass().getName() + "." + field.getName()
+                    + ": field is " + field.getType().getName() + ", write is " + expected.getName());
+        }
+    }
+
     private static void putInt(Class<?> owner, Object target, String name, int value) {
         try {
             Field field = owner.getDeclaredField(name);
+            requireFieldType(field, int.class);
             UNSAFE.putInt(target, UNSAFE.objectFieldOffset(field), value);
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
@@ -12867,6 +12895,17 @@ public final class MobOracle {
         return hash;
     }
 
+    private static long seedOf(Entity entity) {
+        try {
+            RandomSource random = entity.getRandom();
+            Field field = random.getClass().getDeclaredField("seed");
+            field.setAccessible(true);
+            return ((AtomicLong) field.get(random)).get();
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
     private static long levelSeed(Level level) throws Exception {
         RandomSource random = level.getRandom();
         Field field = random.getClass().getDeclaredField("seed");
@@ -12993,6 +13032,7 @@ public final class MobOracle {
     private static void putFloat(Class<?> owner, Object target, String name, float value) {
         try {
             Field field = owner.getDeclaredField(name);
+            requireFieldType(field, float.class);
             UNSAFE.putFloat(target, UNSAFE.objectFieldOffset(field), value);
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
@@ -13002,6 +13042,7 @@ public final class MobOracle {
     private static void putBoolean(Class<?> owner, Object target, String name, boolean value) {
         try {
             Field field = owner.getDeclaredField(name);
+            requireFieldType(field, boolean.class);
             UNSAFE.putBoolean(target, UNSAFE.objectFieldOffset(field), value);
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
@@ -13011,7 +13052,31 @@ public final class MobOracle {
     private static void put(Class<?> owner, Object target, String name, Object value) {
         try {
             Field field = owner.getDeclaredField(name);
-            UNSAFE.putObject(target, UNSAFE.objectFieldOffset(field), value);
+            Class<?> type = field.getType();
+            long offset = UNSAFE.objectFieldOffset(field);
+            // 基本类型字段按自己的宽度写；传进来的必须是对应的包装类。
+            // Primitive fields are written at their own width; the value must be the matching box.
+            if (type == int.class && value instanceof Integer number) {
+                UNSAFE.putInt(target, offset, number);
+            } else if (type == boolean.class && value instanceof Boolean flag) {
+                UNSAFE.putBoolean(target, offset, flag);
+            } else if (type == float.class && value instanceof Float number) {
+                UNSAFE.putFloat(target, offset, number);
+            } else if (type == double.class && value instanceof Double number) {
+                UNSAFE.putDouble(target, offset, number);
+            } else if (type == long.class && value instanceof Long number) {
+                UNSAFE.putLong(target, offset, number);
+            } else if (type == short.class && value instanceof Short number) {
+                UNSAFE.putShort(target, offset, number);
+            } else if (type == byte.class && value instanceof Byte number) {
+                UNSAFE.putByte(target, offset, number);
+            } else if (!type.isPrimitive() && (value == null || type.isInstance(value))) {
+                UNSAFE.putObject(target, offset, value);
+            } else {
+                throw new IllegalStateException("put " + owner.getName() + "." + name + ": field is "
+                        + type.getName() + ", value is "
+                        + (value == null ? "null" : value.getClass().getName()));
+            }
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
         }
@@ -13186,6 +13251,576 @@ public final class MobOracle {
                 sounds.accept(cast);
             }
         }
+    }
+
+    /** 闪电自己对拍：构造、逐刻的 life / flashes / 实体随机源，以及第一刻引火后场景方块。 */
+    private static int playLightning(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        List<String> names = List.of("lightning_fire", "lightning_visual", "lightning_copper",
+                "lightning_rod", "trap_near", "trap_far");
+        for (String name : names) {
+            if (only != null && !name.startsWith(only)) continue;
+            boolean trap = name.startsWith("trap");
+            FakeLevel level = FakeLevel.create(official);
+            ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+            level.nextId = FIRST_ID;
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            level.spawned = new ArrayList<>();
+            level.tracked = new ArrayList<>();
+            Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+            // 落点在 (0.5, 64, 0.5)。草地给火一个落脚点；铜场景放一块生锈的铜。
+            for (int x = -2; x <= 2; x++) {
+                for (int z = -2; z <= 2; z++) {
+                    blocks.put(BlockPos.asLong(x, 63, z), Blocks.GRASS_BLOCK.defaultBlockState());
+                }
+            }
+            if (name.equals("lightning_rod")) {
+                blocks.put(BlockPos.asLong(0, 64, 0), Blocks.LIGHTNING_ROD.weathering().unaffected().defaultBlockState());
+            }
+            if (name.equals("lightning_copper")) {
+                blocks.put(BlockPos.asLong(0, 63, 0), Blocks.COPPER_BLOCK.weathering().oxidized().defaultBlockState());
+            }
+            level.blocks.putAll(blocks);
+            long[] keys = blocks.keySet().toLongArray();
+            Arrays.sort(keys);
+            StringBuilder blockJson = new StringBuilder("[");
+            for (int i = 0; i < keys.length; i++) {
+                if (i > 0) blockJson.append(',');
+                BlockPos pos = BlockPos.of(keys[i]);
+                blockJson.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',')
+                        .append(pos.getZ()).append(',').append(Block.getId(blocks.get(keys[i]))).append(']');
+            }
+            blockJson.append(']');
+            int ticks = 40;
+            Entity subject;
+            if (trap) {
+                net.minecraft.world.entity.animal.equine.SkeletonHorse horse =
+                        EntityTypes.SKELETON_HORSE.create(level, EntitySpawnReason.EVENT);
+                horse.setTrap(true);
+                horse.setAge(0);
+                horse.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+                level.entitySeeds.nextLong();
+                setRandom(horse, 7L);
+                horse.setUUID(new UUID(0L, 1L));
+                horse.setId(FIRST_ID);
+                level.tracked.add(horse);
+                subject = horse;
+            } else {
+                net.minecraft.world.entity.LightningBolt bolt =
+                        EntityTypes.LIGHTNING_BOLT.create(level, EntitySpawnReason.EVENT);
+                bolt.setVisualOnly(name.equals("lightning_visual"));
+                bolt.snapTo(0.5, 64.0, 0.5);
+                level.entitySeeds.nextLong();
+                setRandom(bolt, 7L);
+                RandomSource random = bolt.getRandom();
+                random.nextLong();
+                random.nextInt(3);
+                put(net.minecraft.world.entity.LightningBolt.class, bolt, "seed", Long.valueOf(0L));
+                putInt(net.minecraft.world.entity.LightningBolt.class, bolt, "flashes", 1);
+                putInt(net.minecraft.world.entity.LightningBolt.class, bolt, "life", 2);
+                bolt.setId(FIRST_ID);
+                level.tracked.add(bolt);
+                subject = bolt;
+            }
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    if (name.equals("trap_near") && tick == 4) {
+                        ServerPlayer player = new ServerPlayer(official.server, level,
+                                new GameProfile(new UUID(1L, 2L), "TrapOracle"), ClientInformation.createDefault());
+                        player.setId(FIRST_ID + 2);
+                        player.setPos(2.5, 64.0, 0.5);
+                        setRandom(player, ENTITY_RANDOM_SEED);
+                        level.playersList().add(player);
+                        level.tracked.add(player);
+                    }
+                    for (Entity entity : new ArrayList<>(level.tracked)) {
+                        if (entity.isRemoved() || entity instanceof ServerPlayer) continue;
+                        entity.commonTick();
+                        entity.tick();
+                    }
+                    for (Entity born : level.spawned) {
+                        if (!(born instanceof net.minecraft.world.entity.animal.equine.SkeletonHorse)
+                                && !(born instanceof net.minecraft.world.entity.monster.skeleton.Skeleton)
+                                && !(born instanceof net.minecraft.world.entity.LightningBolt)) continue;
+                        if (!level.tracked.contains(born)) level.tracked.add(born);
+                        setRandom(born, level.entitySeeds.nextLong());
+                    }
+                    level.spawned.clear();
+                }
+                if (tick > 0) frames.append(',');
+                if (trap) {
+                    var horse = (net.minecraft.world.entity.animal.equine.SkeletonHorse) subject;
+                    long bolts = level.tracked.stream().filter(
+                            e -> e instanceof net.minecraft.world.entity.LightningBolt).count();
+                    frames.append('[').append(horse.isTrap() ? 1 : 0).append(',')
+                            .append(horse.isTamed() ? 1 : 0).append(',')
+                            .append(randomSeed(subject)).append(',')
+                            .append(level.tracked.size()).append(',').append(bolts).append(',')
+                            .append(randomSeed(level.getRandom())).append(']');
+                } else {
+                    var bolt = (net.minecraft.world.entity.LightningBolt) subject;
+                    int life = (int) getInt(net.minecraft.world.entity.LightningBolt.class, bolt, "life");
+                    int flashes = (int) getInt(net.minecraft.world.entity.LightningBolt.class, bolt, "flashes");
+                    frames.append('[').append(life).append(',').append(flashes).append(',')
+                            .append(randomSeed(subject)).append(',')
+                            .append(randomSeed(level.getRandom())).append(",0]");
+                }
+            }
+            frames.append(']');
+            StringBuilder finalBlocks = new StringBuilder("[");
+            for (int i = 0; i < keys.length; i++) {
+                if (i > 0) finalBlocks.append(',');
+                finalBlocks.append(Block.getId(level.getBlockState(BlockPos.of(keys[i]))));
+            }
+            finalBlocks.append(']');
+            if (trap) {
+                out.write("{\"type\":\"skeletonTrap\",\"name\":" + jsonString(name)
+                        + ",\"firstId\":" + FIRST_ID + ",\"start\":[0.5,64.0,0.5],\"player\":"
+                        + (name.equals("trap_near") ? "[2.5,64.0,0.5]" : "null")
+                        + ",\"playerTick\":4,\"frames\":" + frames + "}\n");
+            } else {
+                out.write("{\"type\":\"lightning\",\"name\":" + jsonString(name)
+                        + ",\"firstId\":" + FIRST_ID + ",\"seed\":7,\"start\":[0.5,64.0,0.5],\"visual\":"
+                        + name.equals("lightning_visual") + ",\"blocks\":" + blockJson
+                        + ",\"frames\":" + frames + ",\"finalBlocks\":" + finalBlocks + "}\n");
+            }
+            cases++;
+        }
+        return cases;
+    }
+
+    /** 陷阱骑士的装备与附魔：`createSkeleton` 的 `finalizeSpawn` + 两次 provider。
+     *  用四个固定种子显式建骷髅（官方 `EntityType.create` 的随机源不带种子，
+     *  夹具按岛种子源替换），再按 `createSkeleton` 的顺序调官方方法，逐位比装备。 */
+    private static int playTrapGear(Official official, Writer out) throws Exception {
+        int cases = 0;
+        Method enchantMethod = net.minecraft.world.entity.animal.equine.SkeletonTrapGoal.class
+                .getDeclaredMethod("enchant",
+                        net.minecraft.world.entity.monster.skeleton.Skeleton.class,
+                        net.minecraft.world.entity.EquipmentSlot.class,
+                        net.minecraft.world.DifficultyInstance.class);
+        enchantMethod.setAccessible(true);
+        var goal = allocate(net.minecraft.world.entity.animal.equine.SkeletonTrapGoal.class);
+        var difficulty = new DifficultyInstance(Difficulty.NORMAL, 0L, 0L, 0.0F);
+        for (long seed : new long[] {1L, 7L, 42L, 12345L}) {
+            FakeLevel level = FakeLevel.create(official);
+            ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+            level.nextId = FIRST_ID;
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            level.spawned = new ArrayList<>();
+            level.tracked = new ArrayList<>();
+            level.getRandom().setSeed(seed);
+            level.spawnDifficulty = difficulty;
+            StringBuilder seedsJson = new StringBuilder("[");
+            StringBuilder gear = new StringBuilder("[");
+            for (int i = 0; i < 4; i++) {
+                // 官方 `EntityType.create`：构造后立刻换成确定种子，再跑 `finalizeSpawn`。
+                var knight = (net.minecraft.world.entity.monster.skeleton.Skeleton)
+                        EntityTypes.SKELETON.create(level, EntitySpawnReason.TRIGGERED);
+                long entitySeed = level.entitySeeds.nextLong();
+                setRandom(knight, entitySeed);
+                if (i > 0) { seedsJson.append(','); gear.append(','); }
+                seedsJson.append(seedOf(knight));
+                knight.finalizeSpawn(level, difficulty, EntitySpawnReason.TRIGGERED, null);
+                knight.setInvulnerableTime(60);
+                knight.setPersistenceRequired();
+                if (knight.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.HEAD).isEmpty()) {
+                    knight.setItemSlot(net.minecraft.world.entity.EquipmentSlot.HEAD,
+                            new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.IRON_HELMET));
+                }
+                for (var slot : new net.minecraft.world.entity.EquipmentSlot[] {
+                        net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                        net.minecraft.world.entity.EquipmentSlot.HEAD }) {
+                    enchantMethod.invoke(goal, knight, slot, difficulty);
+                }
+                gear.append('[');
+                for (var slot : new net.minecraft.world.entity.EquipmentSlot[] {
+                        net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                        net.minecraft.world.entity.EquipmentSlot.FEET,
+                        net.minecraft.world.entity.EquipmentSlot.LEGS,
+                        net.minecraft.world.entity.EquipmentSlot.CHEST,
+                        net.minecraft.world.entity.EquipmentSlot.HEAD }) {
+                    var stack = knight.getItemBySlot(slot);
+                    var enchants = stack.getOrDefault(
+                            net.minecraft.core.component.DataComponents.ENCHANTMENTS,
+                            net.minecraft.world.item.enchantment.ItemEnchantments.EMPTY);
+                    var levels = new java.util.ArrayList<String>();
+                    enchants.entrySet().forEach(entry -> levels.add(
+                            entry.getKey().getRegisteredName() + "@" + entry.getIntValue()));
+                    levels.sort(String::compareTo);
+                    gear.append(jsonString(BuiltInRegistries.ITEM.getId(stack.getItem())
+                            + ":{" + String.join(",", levels) + "}")).append(',');
+                }
+                gear.append(jsonString(knight.isLeftHanded() ? "1" : "0")).append(']');
+            }
+            out.write("{\"type\":\"trapGear\",\"name\":\"trap_gear_" + seed + "\""
+                    + ",\"seed\":" + seed + ",\"seeds\":" + seedsJson.append(']')
+                    + ",\"gear\":" + gear.append(']') + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    /** 骷髅马 / 僵尸马的逐刻、存档和死亡掉落。 */
+    private static int playUndeadHorse(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        boolean all = only == null || only.equals("undead_horse");
+        if (all || only.startsWith("undead_horse_tick")) {
+            cases += playUndeadHorseTick(official, out);
+        }
+        if (all || only.startsWith("undead_horse_save")) {
+            cases += playUndeadHorseSave(official, out);
+        }
+        if (all || only.startsWith("undead_horse_death")) {
+            cases += playUndeadHorseDeath(official, out);
+        }
+        return cases;
+    }
+
+    private static net.minecraft.world.entity.animal.equine.AbstractHorse undeadHorse(
+            FakeLevel level, boolean skeleton, long seed) {
+        var horse = (net.minecraft.world.entity.animal.equine.AbstractHorse)
+                (skeleton ? EntityTypes.SKELETON_HORSE : EntityTypes.ZOMBIE_HORSE)
+                        .create(level, EntitySpawnReason.COMMAND);
+        setRandom(horse, seed);
+        horse.setUUID(new UUID(0L, 1L));
+        horse.setId(FIRST_ID);
+        horse.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        horse.setNoAi(true);
+        level.tracked.add(horse);
+        return horse;
+    }
+
+    private static int playUndeadHorseTick(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean skeleton : new boolean[] {true, false}) {
+            for (int variant = 0; variant < 3; variant++) {
+                FakeLevel level = FakeLevel.create(official);
+                ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+                level.nextId = FIRST_ID;
+                level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+                level.spawned = new ArrayList<>();
+                level.tracked = new ArrayList<>();
+                boolean water = variant == 0;
+                boolean tamed = variant == 1;
+                boolean player = variant == 2;
+                for (int x = -2; x <= 2; x++) {
+                    for (int z = -2; z <= 2; z++) {
+                        if (water) {
+                            level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                            for (int y = 64; y <= 66; y++) {
+                                level.blocks.put(BlockPos.asLong(x, y, z), Blocks.WATER.defaultBlockState());
+                            }
+                        } else {
+                            level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.GRASS_BLOCK.defaultBlockState());
+                        }
+                    }
+                }
+                long[] keys = level.blocks.keySet().toLongArray();
+                Arrays.sort(keys);
+                StringBuilder blockJson = new StringBuilder("[");
+                for (int i = 0; i < keys.length; i++) {
+                    if (i > 0) blockJson.append(',');
+                    BlockPos pos = BlockPos.of(keys[i]);
+                    blockJson.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',')
+                            .append(pos.getZ()).append(',').append(Block.getId(level.blocks.get(keys[i]))).append(']');
+                }
+                blockJson.append(']');
+                var horse = undeadHorse(level, skeleton, 7L);
+                if (tamed) horse.setTamed(true);
+                // 交互拒绝场景用幼年马：`AbstractHorse.mobInteract` 早退到
+                // `Animal.mobInteract`（空手 PASS），不会走 `doPlayerRide` 需要连接的那支。
+                if (player) horse.setAge(-24000);
+                ServerPlayer actor = null;
+                if (player) {
+                    actor = new ServerPlayer(official.server, level,
+                            new GameProfile(new UUID(1L, 2L), "HorseOracle"), ClientInformation.createDefault());
+                    actor.setId(FIRST_ID + 8);
+                    actor.setPos(2.5, 64.0, 0.5);
+                    level.playersList().add(actor);
+                    // 假玩家不进 tracked，免得它自己也 tick。
+                }
+                StringBuilder frames = new StringBuilder("[");
+                for (int tick = 0; tick <= 6; tick++) {
+                    if (tick > 0) {
+                        horse.commonTick();
+                        horse.tick();
+                    }
+                    if (tick > 0) frames.append(',');
+                    int interaction = 0;
+                    if (player) {
+                        var result = horse.mobInteract(actor, InteractionHand.MAIN_HAND);
+                        interaction = switch (result.getClass().getSimpleName()) {
+                            case "Pass" -> 0;
+                            case "Success" -> 1;
+                            case "SuccessServer" -> 2;
+                            case "Consume" -> 3;
+                            case "Fail" -> 4;
+                            default -> 5;
+                        };
+                    }
+                    boolean trap = skeleton
+                            && ((net.minecraft.world.entity.animal.equine.SkeletonHorse) horse).isTrap();
+                    frames.append('[').append(Float.floatToRawIntBits(horse.getHealth())).append(',')
+                            .append(horse.getAirSupply()).append(',')
+                            .append(horse.getRemainingFireTicks()).append(',')
+                            .append(horse.isTamed() ? 1 : 0).append(',')
+                            .append(trap ? 1 : 0).append(',')
+                            .append(interaction).append(',')
+                            .append(levelSeed(level)).append(']');
+                }
+                frames.append(']');
+                String name = "undead_horse_tick_" + (skeleton ? "skeleton" : "zombie") + "_" + variant;
+                out.write("{\"type\":\"undeadHorse\",\"name\":" + jsonString(name)
+                        + ",\"firstId\":" + FIRST_ID + ",\"seed\":7,\"skeleton\":" + skeleton
+                        + ",\"blocks\":" + blockJson + ",\"tamed\":" + tamed
+                        + ",\"player\":" + player + ",\"frames\":" + frames + "}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
+    private static int playUndeadHorseSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean skeleton : new boolean[] {true, false}) {
+            for (boolean trap : new boolean[] {false, true}) {
+                FakeLevel world = FakeLevel.create(official);
+                var horse = undeadHorse(world, skeleton, 7L);
+                horse.setTamed(true);
+                horse.setAge(-24000);
+                if (skeleton && trap) {
+                    ((net.minecraft.world.entity.animal.equine.SkeletonHorse) horse).setTrap(true);
+                }
+                var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                horse.saveWithoutId(output);
+                var copy = (net.minecraft.world.entity.animal.equine.AbstractHorse)
+                        (skeleton ? EntityTypes.SKELETON_HORSE : EntityTypes.ZOMBIE_HORSE)
+                                .create(world, EntitySpawnReason.LOAD);
+                copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries, output.buildResult()));
+                var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                copy.saveWithoutId(again);
+                String name = "undead_horse_save_" + (skeleton ? "skeleton" : "zombie") + "_" + trap;
+                out.write("{\"type\":\"undeadHorseSave\",\"name\":" + jsonString(name)
+                        + ",\"skeleton\":" + skeleton + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                        + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
+    private static int playUndeadHorseDeath(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean skeleton : new boolean[] {true, false}) {
+            for (boolean byPlayer : new boolean[] {true, false}) {
+                official.server.sequences = new RandomSequences();
+                FakeLevel world = FakeLevel.create(official);
+                ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+                world.spawned = new ArrayList<>();
+                world.tracked = new ArrayList<>();
+                var horse = undeadHorse(world, skeleton, 7L);
+                ServerPlayer player = null;
+                if (byPlayer) {
+                    player = new ServerPlayer(official.server, world,
+                            new GameProfile(new UUID(1L, 2L), "HorseDeath"), ClientInformation.createDefault());
+                    player.setId(FIRST_ID + 8);
+                    player.setPos(2.5, 64.0, 0.5);
+                    world.playersList().add(player);
+                }
+                DamageSource source = byPlayer ? world.damageSources().playerAttack(player)
+                        : world.damageSources().generic();
+                horse.hurtServer(world, source, 100.0F);
+                for (int tick = 0; tick < 25; tick++) {
+                    world.gameTime++;
+                    if (!horse.isRemoved()) {
+                        horse.commonTick();
+                        horse.tick();
+                    }
+                }
+                List<String> items = new ArrayList<>();
+                for (Entity entity : world.spawned) {
+                    if (entity instanceof net.minecraft.world.entity.item.ItemEntity item && !item.getItem().isEmpty()) {
+                        items.add(BuiltInRegistries.ITEM.getKey(item.getItem().getItem()) + "x" + item.getItem().getCount());
+                    }
+                }
+                items.sort(String::compareTo);
+                String name = "undead_horse_death_" + (skeleton ? "skeleton" : "zombie") + "_" + byPlayer;
+                out.write("{\"type\":\"undeadHorseDeath\",\"name\":" + jsonString(name)
+                        + ",\"skeleton\":" + skeleton + ",\"byPlayer\":" + byPlayer
+                        + ",\"removed\":" + horse.isRemoved()
+                        + ",\"items\":" + items.stream().map(MobOracle::jsonString)
+                                .collect(java.util.stream.Collectors.joining(",", "[", "]")) + "}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
+    /** 雷击落点（多活物的实体分区顺序）与 `thunderHit` 的逐刻对拍。 */
+    private static int playThunder(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        if (only == null || only.startsWith("thunder_target")) {
+            cases += playThunderTarget(official, out);
+        }
+        if (only == null || only.startsWith("thunder_hit")) {
+            cases += playThunderHit(official, out, only);
+        }
+        return cases;
+    }
+
+    /** `findLightningTargetAround` 的活物列表顺序：四头牛在三个不同实体段里。 */
+    private static int playThunderTarget(Official official, Writer out) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.nextId = FIRST_ID;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        level.spawned = new ArrayList<>();
+        level.tracked = new ArrayList<>();
+        level.injectedCanSeeSky = true;
+        level.getRandom().setSeed(1L);
+        for (int x = -8; x <= 24; x++) {
+            for (int z = -8; z <= 8; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.GRASS_BLOCK.defaultBlockState());
+            }
+        }
+        long[] keys = level.blocks.keySet().toLongArray();
+        Arrays.sort(keys);
+        StringBuilder blockJson = new StringBuilder("[");
+        for (int i = 0; i < keys.length; i++) {
+            if (i > 0) blockJson.append(',');
+            BlockPos pos = BlockPos.of(keys[i]);
+            blockJson.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',')
+                    .append(pos.getZ()).append(',').append(Block.getId(level.blocks.get(keys[i]))).append(']');
+        }
+        blockJson.append(']');
+        // 三头牛分处三个 16³ 实体段；用同一种生物避免类序遍历的差。
+        double[][] at = {{0.5, 64.0, 0.5}, {1.5, 64.0, 0.5}, {17.5, 64.0, 0.5}, {18.5, 64.0, 0.5}};
+        StringBuilder mobs = new StringBuilder("[");
+        for (int i = 0; i < at.length; i++) {
+            if (i > 0) mobs.append(',');
+            Cow cow = EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
+            cow.setUUID(new UUID(0L, i + 1));
+            cow.setId(FIRST_ID + i);
+            setRandom(cow, 900L + i);
+            cow.snapTo(at[i][0], at[i][1], at[i][2], 0.0F, 0.0F);
+            cow.setNoAi(true);
+            level.tracked.add(cow);
+            mobs.append('[').append(Double.doubleToRawLongBits(at[i][0])).append(',')
+                    .append(Double.doubleToRawLongBits(at[i][1])).append(',')
+                    .append(Double.doubleToRawLongBits(at[i][2])).append(",0,")
+                    .append(900L + i).append(",0]");
+        }
+        mobs.append(']');
+        // `findLightningTargetAround` 是 protected，用反射调。 rolled 是 chunk (0,0) 的一格。
+        Method find = ServerLevel.class.getDeclaredMethod("findLightningTargetAround", BlockPos.class);
+        find.setAccessible(true);
+        BlockPos rolled = new BlockPos(8, 64, 0);
+        BlockPos target = (BlockPos) find.invoke(level, rolled);
+        int candidates = 0;
+        for (double[] one : at) {
+            if (Math.abs(one[0] - 8.5) <= 4.0 && Math.abs(one[2] - 0.5) <= 4.0) candidates++;
+        }
+        out.write("{\"type\":\"thunderTarget\",\"name\":\"thunder_target_sections\""
+                + ",\"firstId\":" + FIRST_ID + ",\"seed\":1,\"rolled\":[8,64,0]"
+                + ",\"blocks\":" + blockJson + ",\"mobs\":" + mobs
+                + ",\"target\":[" + target.getX() + "," + target.getY() + "," + target.getZ() + "]"
+                + ",\"randomSeed\":" + levelSeed(level) + ",\"candidates\":" + candidates + "}\n");
+        return 1;
+    }
+
+    /** `thunderHit`：苦力怕带电、海龟掉碗、牛着火受伤。 */
+    private static int playThunderHit(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        List<String> names = List.of("thunder_hit_creeper", "thunder_hit_turtle", "thunder_hit_cow");
+        for (String name : names) {
+            if (only != null && !name.startsWith(only)) continue;
+            FakeLevel level = FakeLevel.create(official);
+            // 简单难度不跑 `spawnFire`：火只来自 `thunderHit`，逐刻数值才干净。
+            ((TickingLevelData) level.levelData).difficulty = Difficulty.EASY;
+            level.nextId = FIRST_ID;
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            level.spawned = new ArrayList<>();
+            level.tracked = new ArrayList<>();
+            level.injectedCanSeeSky = false;
+            level.getRandom().setSeed(1L);
+            official.server.sequences = new RandomSequences();
+            for (int x = -4; x <= 4; x++) {
+                for (int z = -4; z <= 4; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.GRASS_BLOCK.defaultBlockState());
+                }
+            }
+            long[] keys = level.blocks.keySet().toLongArray();
+            Arrays.sort(keys);
+            StringBuilder blockJson = new StringBuilder("[");
+            for (int i = 0; i < keys.length; i++) {
+                if (i > 0) blockJson.append(',');
+                BlockPos pos = BlockPos.of(keys[i]);
+                blockJson.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',')
+                        .append(pos.getZ()).append(',').append(Block.getId(level.blocks.get(keys[i]))).append(']');
+            }
+            blockJson.append(']');
+            Mob victim = switch (name) {
+                case "thunder_hit_creeper" -> new net.minecraft.world.entity.monster.Creeper(EntityTypes.CREEPER, level);
+                case "thunder_hit_turtle" -> EntityTypes.TURTLE.create(level, EntitySpawnReason.COMMAND);
+                default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
+            };
+            victim.setUUID(new UUID(0L, 1L));
+            victim.setId(FIRST_ID);
+            setRandom(victim, 7L);
+            victim.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            victim.setNoAi(true);
+            level.tracked.add(victim);
+            net.minecraft.world.entity.LightningBolt bolt =
+                    EntityTypes.LIGHTNING_BOLT.create(level, EntitySpawnReason.EVENT);
+            bolt.setVisualOnly(false);
+            bolt.snapTo(0.5, 64.0, 0.5);
+            bolt.setId(FIRST_ID + 1);
+            setRandom(bolt, 7L);
+            putInt(net.minecraft.world.entity.LightningBolt.class, bolt, "flashes", 0);
+            putInt(net.minecraft.world.entity.LightningBolt.class, bolt, "life", 2);
+            level.tracked.add(bolt);
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= 6; tick++) {
+                if (tick > 0) {
+                    for (Entity entity : new ArrayList<>(level.tracked)) {
+                        if (entity.isRemoved()) continue;
+                        entity.commonTick();
+                        entity.tick();
+                    }
+                }
+                if (tick > 0) frames.append(',');
+                boolean powered = false;
+                int radius = 0;
+                if (victim instanceof net.minecraft.world.entity.monster.Creeper creeper) {
+                    powered = creeper.isPowered();
+                    radius = getInt(net.minecraft.world.entity.monster.Creeper.class, creeper, "explosionRadius");
+                }
+                int bowls = 0;
+                for (Entity e : level.spawned) {
+                    if (e instanceof net.minecraft.world.entity.item.ItemEntity item
+                            && item.getItem().is(net.minecraft.world.item.Items.BOWL)) {
+                        bowls += item.getItem().getCount();
+                    }
+                }
+                frames.append('[').append(Float.floatToRawIntBits(victim.getHealth())).append(',')
+                        .append(victim.getRemainingFireTicks()).append(',')
+                        .append(powered ? 1 : 0).append(',').append(radius).append(',')
+                        .append(bowls * net.minecraft.core.registries.BuiltInRegistries.ITEM.getId(
+                                net.minecraft.world.item.Items.BOWL)).append(',')
+                        .append(levelSeed(level)).append(']');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"thunderHit\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID + ",\"seed\":7,\"start\":[0.5,64.0,0.5]"
+                    + ",\"blocks\":" + blockJson + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        return cases;
     }
 
     private static final class Official {
@@ -13488,6 +14123,28 @@ public final class MobOracle {
         }
     }
 
+    /** `findLightningRod` 用的空 POI：`allocate` 不跑构造器，覆写 `findClosest` 直接返回空。 */
+    private static final class EmptyPoi extends net.minecraft.world.entity.ai.village.poi.PoiManager {
+        @SuppressWarnings("unused")
+        EmptyPoi() { super(null, null, null, false, null, null, null); }
+
+        @Override
+        public java.util.Optional<BlockPos> findClosest(
+                java.util.function.Predicate<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> type,
+                java.util.function.Predicate<BlockPos> pos, BlockPos center, int radius,
+                net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy occupancy) {
+            return java.util.Optional.empty();
+        }
+
+        @Override
+        public java.util.Optional<BlockPos> findClosest(
+                java.util.function.Predicate<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> type,
+                BlockPos center, int radius,
+                net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy occupancy) {
+            return java.util.Optional.empty();
+        }
+    }
+
     private static final class FakeLevel extends ServerLevel {
         List<long[]> projectileExtinguishes;
         DifficultyInstance spawnDifficulty;
@@ -13506,6 +14163,8 @@ public final class MobOracle {
         private TickRateManager tickRate;
         private LevelData levelData;
         private List<Entity> tracked;
+        /** 空 POI 表；延迟到 `create`（`System.setOut` 重定向之后）再建，免得日志绑错流。 */
+        private net.minecraft.world.entity.ai.village.poi.PoiManager emptyPoi;
         private long gameTime;
         private int nextId;
         /** Bamboo 的岛实体种子源，按生成先后取数。 */
@@ -13570,6 +14229,7 @@ public final class MobOracle {
             // `allocate` 不跑字段初始值，显式给超平坦默认海平面 -63。
             // `allocate` skips field initializers; set superflat's default sea level -63 explicitly.
             level.injectedSeaLevel = -63;
+            level.emptyPoi = allocate(EmptyPoi.class);
             return level;
         }
 
@@ -14077,6 +14737,18 @@ public final class MobOracle {
         @Override
         public TickRateManager tickRateManager() {
             return tickRate;
+        }
+
+        /** 假世界没有 POI 索引表；`findLightningRod` 查不到避雷针，走活物列表。 */
+        @Override
+        public net.minecraft.world.entity.ai.village.poi.PoiManager getPoiManager() {
+            return emptyPoi;
+        }
+
+        /** 假世界没有玩家地图；`canSpreadFireAround` 按 Bamboo 的恒真实现短路。 */
+        @Override
+        public boolean canSpreadFireAround(BlockPos pos) {
+            return true;
         }
 
         @Override

@@ -770,6 +770,123 @@ CODEC 键 `spawn_delay`（默认 24000）/ `spawn_chance`（默认 25）。
   `isCloseToVillage(pos, sections)` 可被查询。
 - **不引入村民、大脑、交易**。
 
+#### 期 1 实际做法（已完成）
+
+**导出。** `Extractor.java::poiTypes()` 从官方 `BuiltInRegistries.POINT_OF_INTEREST_TYPE`
+按注册表 ID 导出 21 种类型（`maxTickets` / `validRange` / `matchingStates` 的全局状态
+ID），`generate.rs::poi_types_file` 写成 `mc-bamboo-data/src/generated/poi.rs`：
+`POI_TYPES`、`STATE_POI_TYPE`（按状态 ID 索引的 `forState`）、`poi_type_id`。
+`#minecraft:village` 标签（13 个工作站 + `home` + `meeting`）从官方标签表导出成
+`village` 位。21 种共 496 个匹配状态；`home` 是 16 色床的 `PART=HEAD`（128 个状态），
+`meeting` 32 个状态、`lightning_rod` 192 个。单测钉住 21 / 496 / 32 / 128 / 15。
+`cargo run -p mc-bamboo-vanilla --no-default-features -- extract` 可重跑。
+
+**存储。** `mc-bamboo-world/src/poi.rs::PoiStore` 与 `ChunkStore` 平级挂在 `Region`
+上（不塞进 `ChunkStore` 内部，POI 改动不碰 `ChunkRevision`、不重发区块包；
+`world::tests::block_logic_registers_poi_without_bumping_the_chunk_revision` 验证）。
+段内表 `records: BTreeMap<u16, PoiRecord>` + `by_type` 两层索引；`PoiRecord` 实现
+`acquireTicket` / `releaseTicket` / `hasSpace` / `isOccupied`；`Occupancy` 三态。
+查询族 `exists` / `getType` / `getFreeTickets` / `getCountInRange` /
+`getInSquare` / `getInRange` / `findAll` / `findAllClosestFirstWithType` /
+`findClosest(WithType)` / `take` / `getRandom` / `release` 都实现。
+
+**遍历顺序（对拍钉住）。** 官方的次序由三处哈希容器决定，Bamboo 逐层复刻：
+
+| 层 | 官方 | Bamboo |
+|---|---|---|
+| 区块环 | `ChunkPos.rangeClosed(center, radius/16+1)`，z 外层、x 内层升序 | `chunk_range_closed` |
+| 段 y | `IntStream.rangeClosed(minSectionY, maxSectionY)` 升序 | `MIN_SECTION_Y..=MAX_SECTION_Y` |
+| `byType` | `HashMap<Holder.Reference, …>` | 按 POI 注册表 ID 升序（见下「偏差」） |
+| `HashSet<PoiRecord>` | Java `HashMap` 桶序，键是 `Vec3i.hashCode()` = `(y + z*31)*31 + x` | `java_set_order`：Java `hash()` + 16 起步的 0.75 扩容 |
+| `records.values().stream()`（存档 `pack()`） | fastutil `Short2ObjectOpenHashMap`：槽 = `HashCommon.mix(段内下标) & (n-1)`，冲突线性探测，n 从 32 起；stream 按槽升序遍历 | `fastutil_record_order`（`forEach` 是倒序，stream 是正序，两者不同） |
+
+`findClosest` 用 `Stream.min`（并列取遍历序第一个），`findAllClosestFirstWithType`
+用稳定排序；`take` 是 `HAS_SPACE` 里 `findFirst` 后 `acquireTicket`；
+`getRandom` 复刻 `Util.shuffle`（从后往前 `nextInt(i)`）。
+
+**存档。** `mc-bamboo-storage/src/poi_nbt.rs` 编出 `{Sections:{<y>:{Valid,Records}},
+DataVersion}`；`Valid` 缺省 false，`free_tickets` 是 `optionalFieldOf(…, 0)`，
+**值为 0 时官方不写这个键**。`pos` 是 3 元 `IntArray`。读盘：坏键 / 坏段 / 坏记录
+跳过（官方 `resultOrPartial`），新版本报错，旧版本标 `version_changed`。
+`ChunkIo` 的 `Request::Write` / `Reply::Read` 加第三格 `poi`，IO worker 的
+`Cache` 加 `kind=2 → WorldDir::poi_dir()`；三份文件共用同一条队列、同一道 `flush`
+栅栏（`chunk_io::tests::poi_writes_share_the_queue_and_land_in_the_poi_dir`）。
+`PackedChunk` 的进程内线格式从 MAGIC 1 升到 2（加第三个 blob）；它只用于
+IO 线程 ↔ 岛 / 计算池 ↔ 世界线程之间，不落盘（`disk_upper_bytes` 只是内存
+`BTreeMap`，重启不复用），磁盘上仍是三份官方文件。
+
+**方块登记。** 主线程和岛线程共用的写方块入口是
+`mc-bamboo-game/src/interaction/level.rs::RegionLevel::write_block`（`mc_bamboo_blocks::Level::write_block`
+的实现），`/setblock` / `/fill` / `/clone`、玩家放 / 挖方块、活塞、爆炸、方块逻辑
+的连锁更新都经过它；在这里同刻比对旧 / 新 `PoiTypes.forState` 并应用
+`PoiStore::on_block_state_change`。`bench.rs` 的直接写路径也补了同一个钩子。
+世界生成阶段（`chunk_jobs.rs`）是往尚未交付的 `Chunk` 里写方块，交付时由
+`Region::deliver_column → PoiStore::check_loaded_column` 按调色板
+（`ChunkStore::section_may_have_poi`）跳过空段、逐格扫 16³ 重建无效段；
+官方 `PoiSection.refresh` 的「保留同位置记录的 `freeTickets`」也照做。
+其余 `ChunkStore::set_block` 调用点都是测试夹具或剖析辅助，不进生产链路。
+
+> **与官方的已知差异**：官方 `ServerLevel.updatePOIOnBlockStateChange` 把
+> `remove` / `add` 丢进 `MinecraftServer.execute` 异步回主线程；Bamboo 单世界线程
+> + 多岛并行，在同一次 `write_block` 里同步应用。对拍场景按同一顺序逐步执行，
+> 结果逐项相同；差异只在「同一刻内查询与登记的可见顺序」。
+
+**拆合 / 卸载 / 存盘编排。** POI 段是 `RegionColumn` 的第十个字段
+（`PoiColumn`，按 `SectionPos.y` 分组），`IslandPart::Poi` 是第 26 类；
+`PoiStore::split_off` / `absorb` 跟区块一起搬段、脏标记、已装载登记。
+`take_columns` / `insert_column` 同批取放；`island_split_tests::misplaced()` 加
+`Poi` 断言，指纹里逐段列记录（含票数），26 类「漏搬一类」的改坏确认全过。
+`drain_save_changes` 把 `PoiStore::take_dirty_chunks()` 并进 `changes.content`，
+和 `region/` / `entities/` 一起判脏、编码、排队、等 `Written` 回执；
+写失败由主控的 `retry_dirty` 重新标脏。卸载时 `take_column` 先把段装进盒子
+（存盘快照读它），再丢掉内存里的条目和脏标记。
+
+**村庄距离。** `DistanceTracker` 每次查询按当前已加载段重算最小不动点：
+源段 = 有 `#minecraft:village` 类型且 `IS_OCCUPIED` 的 POI（不是「有 meeting」，
+也不是「钟被登记过」——钟有 32 张票，没被扣过票时 `freeTickets == maxTickets`，
+不算被占用）。图的边是 3×3×3 的 26 邻段。
+
+> **修正方案里的简化描述**：官方 `SectionTracker.checkNeighborsAfterUpdate` 在
+> 「级别下降且 `level >= levelCount-2 = 5`」时直接返回，所以从 5 级段不再扩散，
+> `sectionsToVillage` 的实际最大值是 **5**，6 级段返回缺省 7。
+> 用 JVM 探针实测 0..5 逐级、6 起为 7，Bamboo 照此实现；`isCloseToVillage(pos, n)`
+> 超过 6 直接假（官方同款短路）。
+
+**查询接口。** `mc_bamboo_blocks::Level`、`entity::ctx::BlockView`、
+`entity::view::BlockSource` / `SourceView` 都加了 `poi_type_at` /
+`poi_count_in_range` / `poi_find_closest` / `poi_sections_to_village` /
+`poi_is_close_to_village`，精确驱动（`RegionLevel`）和并行驱动
+（`ReadOnlyWorld`）转发到同一份 `PoiStore`，不会分叉（§6.2 风险 3 已消）。
+`mc-bamboo-game/src/poi_query.rs` 另给两个上层便捷函数
+（`find_lightning_rod_near`、`bee_homes_in_range`）。
+
+**对拍。** 新命令
+`cargo run --release -p mc-bamboo-vanilla -- poi-oracle java`
+在临时目录构造官方 `PoiManager`，按同一组方块变化（13 个工作站 + home +
+meeting + beehive + lightning_rod，跨 3 个高度段 / 多个区块，含拆除、换类型、
+扣票 / 还票）逐步执行，逐步比 11127 项：查询族逐项（含顺序、票数）、
+`take()` 的选择、`poi/r.0.0.mca` 根标签逐键逐值、codec 读回再编码、
+`sectionsToVillage` 一片 12×6×6 网格。**0 不一致**。
+`--break-self-test tickets|meeting|remove` 三处改坏（`free_tickets` 初值写 0、
+漏登记 `meeting`、拆方块只 add 不 remove）分别被抓到 2788 / 478 / 22 项差异。
+
+> **偏差 / 已知限制**
+> 1. `byType` 的键是官方 `Holder.Reference`（identity hash），多类型段的键序
+>    每次 JVM 都不同、本身不可复现。Bamboo 按 POI 注册表 ID 升序；单类型谓词
+>    下（村民行为、`findLightningRod`、绝大多数查询）只走一个 `HashSet`，与官方
+>    逐项相同；`poi-oracle` 的 `take` 用单类型谓词，其余查询都带类型谓词。
+>    多类型谓词 + 同一段时的键序是**不可复现的官方行为**，不做逐位保证。
+> 2. `DistanceTracker` 用「每次查询重算不动点」代替官方的增量优先队列；
+>    最小解唯一，结果逐段相同，但没有增量更新的性能特性（本期没有村民实体，
+>    查询量可忽略；期 4 接入 `AcquirePoi` 前可按需换成增量版）。
+> 3. `checkConsistencyWithBlocks` 在区块**交付**时跑，而不是官方的
+>    `ensureLoadedAndValid` 在每次查询前预取周边区块；Bamboo 的岛间隔 ≥128 格、
+>    POI 查询半径 ≤128，本岛内已加载的段就是查询能看到的全部。
+> 4. `getRandom` 由调用方提供与官方同种子、同取数顺序的随机源；本期没有调用方。
+> 5. POI 的旧 `DataVersion` 只标 `version_changed` 并重建无效段，没有接官方
+>    `DataFixer` 的 POI 专用修复链（`PoiTypeRenameFix` 等）；26.3 之前的旧档
+>    需要先由官方服务端升级。
+
 ### 期 2：数据导出 + 村民实体骨架
 
 - 导出到 `mc-bamboo-data`：`trade_set` 68 个、`villager_trade` 391 个、
@@ -978,7 +1095,8 @@ CODEC 键 `spawn_delay`（默认 24000）/ `spawn_chance`（默认 25）。
 |---|---|---|
 | `PoiManager` / `SectionStorage` | `mc-bamboo-world/src/store.rs::ChunkStore`、`storage/chunk_io.rs`、`storage/world_dir.rs:167` | 新建平级的 `PoiStore`；`poi_dir()` 已存在；`SaveSession` 要多收一份脏块；`RegionColumn` / `IslandPart` 加字段 |
 | `Level.setBlock` → `updatePOIOnBlockStateChange` | `mc-bamboo-world/src/store.rs:447::ChunkStore::set_block` | 唯一写入口；产 `PoiDelta`，不要改 `ChunkStore` 的公开签名（可加一个 `poi_delta: &mut Vec<…>` 出参或返回 `PoiDelta`） |
-| `ServerLevel.isCloseToVillage` / `sectionsToVillage` | `game/interaction.rs` 的 `BlockView` / `entity/ctx.rs::EntityCtx` | 加只读 `poi_count_in_range` / `sections_to_village`；并行 `SourceView`（`entity/view.rs`）也要给同一份快照，否则精确模式会分叉（现有 `is_raining_at` 的已知坑） |
+| `ServerLevel.isCloseToVillage` / `sectionsToVillage` | `game/interaction.rs` 的 `BlockView` / `entity/ctx.rs::EntityCtx` | 加只读 `poi_count_in_range` / `sections_to_village`；并行 `SourceView`（`entity/view.rs`）也要给同一份快照，否则精确模式会分叉（现有 `is_raining_at` 的已知坑）。**期 1 已做**：`Level` / `BlockView` / `BlockSource` / `SourceView` 上的 `poi_*` 五个方法，`RegionLevel` 与 `ReadOnlyWorld` 都转发到本岛 `PoiStore` |
+| `lightning` / `bees` 两个在用「按区块段调色板扫描」的临时分支（尚未合进 main） | `Level` 上叫 `*_near` 之类的方法 | **期 1 不改它们**（分支还没合进 main）。以后替换时：避雷针用 `poi_query::find_lightning_rod_near(&region.poi, center, filter)`（`filter` 由 `WORLD_SURFACE - 1` 高度图给出，返回官方 `map(above())` 后的位置）；蜂巢用 `poi_query::bee_homes_in_range(&region.poi, center, radius)`（一次查 `beehive` + `bee_nest` 两种类型，按官方遍历序返回）。若调用点在实体 / 方块逻辑里，改走 `Level::poi_find_closest` / `BlockView::poi_count_in_range`（`occupancy = 2 = ANY`），不要直接读 `Region.poi`，这样精确 / 并行两种驱动都拿到同一份答案。跨岛：查询半径 128 内只认本岛已加载的段，`PoiStore` 本来按本岛的段索引，天然不跨岛 |
 | `Brain.Provider` / `ActivityData` | `brain/mod.rs`、`brain/behavior.rs`、`brain/behaviors.rs` | 复用；加 `Activity` 变体、`rebuild`、`schedule`；`Cx` 要能查 POI、开菜单、生成实体 |
 | `MemoryModuleType(GlobalPos)` | `brain/memory.rs`（`COUNT=32`、`ALL`、`MemoryValue`） | 追加枚举项（**末尾追加**保住 `filled()` 顺序与存档下标）、加 `GlobalPos` 值和 codec 判定；`brain/nbt.rs` 已有 `{value, ttl}` 框架 |
 | `timeline/villager_schedule.json` | `game/global.rs::Global::sky_darken` / `GlobalView`、`mc-bamboo-blocks/src/sky.rs` | 照 `sky_light_level` 关键帧的做法加两个 `Activity` 快照字段；**不要**引入完整 `EnvironmentAttributeSystem` |

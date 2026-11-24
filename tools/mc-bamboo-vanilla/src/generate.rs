@@ -40,6 +40,7 @@ const PARTICLE_TYPE_REGISTRY: &str = "minecraft:particle_type";
 pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     // 这几个文件带校验。先生成好，校验失败时不留下写了一半的目录。
     let blocks = blocks_file(data)?;
+    let poi = poi_types_file(data)?;
     let items = items_file(data)?;
     let states = states_file(data)?;
     let shapes = shapes_file(data)?;
@@ -60,6 +61,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "version.rs", &version_file(data))?;
     write_file(output_dir, "packets.rs", &packets_file(data))?;
     write_file(output_dir, "blocks.rs", &blocks)?;
+    write_file(output_dir, "poi.rs", &poi)?;
     write_file(
         output_dir,
         "command_argument_types.rs",
@@ -1198,6 +1200,7 @@ pub mod light;
 pub mod loot;
 pub mod mob_spawns;
 pub mod packets;
+pub mod poi;
 pub mod potions;
 pub mod recipes;
 pub mod registries;
@@ -1212,6 +1215,113 @@ pub mod villager;
 pub mod worldgen;
 "
     .to_owned()
+}
+
+/// 官方 `PoiTypes.bootstrap` 注册的全部 POI 类型。
+///
+/// `POI_TYPES` 的下标就是注册表 ID；`STATE_POI_TYPE` 按全局方块状态 ID 索引，
+/// 未匹配为 `None`。`VILLAGE_TYPES` 来自官方 `point_of_interest_type/village` 标签
+/// （13 个工作站 + home + meeting），`isVillageCenter` 用它。
+fn poi_types_file(data: &VersionData) -> Result<String, String> {
+    let types = &data.poi_types;
+    if types.len() != 21 {
+        return Err(format!("POI 类型应该有 21 种，实际 {}", types.len()));
+    }
+    let mut state_types = vec![None; data.block_states.total as usize];
+    let mut village = vec![false; types.len()];
+    for (id, poi) in types.iter().enumerate() {
+        for &state in &poi.states {
+            let index = usize::try_from(state).map_err(|_| format!("状态 {state} 越界"))?;
+            let slot = state_types
+                .get_mut(index)
+                .ok_or_else(|| format!("POI {} 的状态 {state} 超出状态总数", poi.name))?;
+            if slot.is_some() {
+                return Err(format!("状态 {state} 同时匹配两种 POI 类型"));
+            }
+            *slot = Some(u8::try_from(id).map_err(|_| "POI ID 超过 u8")?);
+        }
+    }
+    let village_tag = data
+        .tags
+        .iter()
+        .find(|group| group.registry == "minecraft:point_of_interest_type")
+        .and_then(|group| {
+            group
+                .tags
+                .iter()
+                .find(|tag| tag.name == "minecraft:village")
+        })
+        .ok_or("官方标签里没有 minecraft:village")?;
+    for &id in &village_tag.ids {
+        let index = usize::try_from(id).map_err(|_| format!("village 标签 ID {id} 为负"))?;
+        *village
+            .get_mut(index)
+            .ok_or_else(|| format!("village 标签 ID {id} 越界"))? = true;
+    }
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 官方 `PoiTypes.bootstrap` 注册的全部 21 种 POI 类型，下标是注册表 ID。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub struct PoiTypeDef {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    pub max_tickets: i32,");
+    let _ = writeln!(out, "    pub valid_range: i32,");
+    let _ = writeln!(out, "    /// 属于 `#minecraft:village` 标签。");
+    let _ = writeln!(out, "    pub village: bool,");
+    let _ = writeln!(out, "    /// 匹配的全部方块状态 ID。");
+    let _ = writeln!(out, "    pub states: &'static [u32],");
+    let _ = writeln!(out, "}}\n");
+    let _ = writeln!(out, "pub const POI_TYPES: &[PoiTypeDef] = &[");
+    for (id, poi) in types.iter().enumerate() {
+        let name = poi.name.strip_prefix("minecraft:").unwrap_or(&poi.name);
+        let _ = writeln!(
+            out,
+            "    PoiTypeDef {{ name: {name:?}, max_tickets: {}, valid_range: {}, village: {}, states: &{:?} }},",
+            poi.max_tickets, poi.valid_range, village[id], poi.states,
+        );
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(
+        out,
+        "/// 全局方块状态 ID → POI 类型 ID；`None` 表示这个状态没有 POI。"
+    );
+    let _ = writeln!(out, "pub static STATE_POI_TYPE: &[Option<u8>] = &[");
+    for chunk in state_types.chunks(24) {
+        let _ = write!(out, "    ");
+        for slot in chunk {
+            match slot {
+                Some(id) => {
+                    let _ = write!(out, "Some({id}), ");
+                }
+                None => {
+                    let _ = write!(out, "None, ");
+                }
+            }
+        }
+        let _ = writeln!(out);
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(out, "/// 按名字查 POI 类型 ID，存档的 `type` 键用它。");
+    let _ = writeln!(out, "pub fn poi_type_id(name: &str) -> Option<u8> {{");
+    let _ = writeln!(
+        out,
+        "    let name = name.strip_prefix(\"minecraft:\").unwrap_or(name);"
+    );
+    let _ = writeln!(
+        out,
+        "    POI_TYPES.iter().position(|poi| poi.name == name).map(|id| id as u8)"
+    );
+    let _ = writeln!(out, "}}\n");
+    let _ = writeln!(out, "/// `PoiTypes.forState`：状态 ID → POI 类型 ID。");
+    let _ = writeln!(out, "pub fn for_state(state: u32) -> Option<u8> {{");
+    let _ = writeln!(
+        out,
+        "    STATE_POI_TYPE.get(usize::try_from(state).ok()?).copied().flatten()"
+    );
+    let _ = writeln!(out, "}}");
+    Ok(out)
 }
 
 /// 群系的气候设置，`Biome.ClimateSettings` 里天气要用的三项。
@@ -3983,6 +4093,37 @@ fn entity_types_file(data: &VersionData) -> String {
         "pub const HORSE_EYE_HEIGHT: f32 = {};",
         float_literal(facts.horse_eye_height)
     );
+    for (name, value) in [
+        ("SKELETON_HORSE_MAX_HEALTH", facts.skeleton_horse_max_health),
+        (
+            "SKELETON_HORSE_MOVEMENT_SPEED",
+            facts.skeleton_horse_movement_speed,
+        ),
+        ("ZOMBIE_HORSE_MAX_HEALTH", facts.zombie_horse_max_health),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
+    }
+    for (name, value) in [
+        ("SKELETON_HORSE_BABY_WIDTH", facts.skeleton_horse_baby_width),
+        (
+            "SKELETON_HORSE_BABY_HEIGHT",
+            facts.skeleton_horse_baby_height,
+        ),
+        (
+            "SKELETON_HORSE_BABY_EYE_HEIGHT",
+            facts.skeleton_horse_baby_eye_height,
+        ),
+        ("SKELETON_HORSE_EYE_HEIGHT", facts.skeleton_horse_eye_height),
+        ("ZOMBIE_HORSE_BABY_WIDTH", facts.zombie_horse_baby_width),
+        ("ZOMBIE_HORSE_BABY_HEIGHT", facts.zombie_horse_baby_height),
+        (
+            "ZOMBIE_HORSE_BABY_EYE_HEIGHT",
+            facts.zombie_horse_baby_eye_height,
+        ),
+        ("ZOMBIE_HORSE_EYE_HEIGHT", facts.zombie_horse_eye_height),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f32 = {};", float_literal(value));
+    }
     for (name, id) in [
         ("HORSE_FLAGS", facts.horse_flags),
         ("HORSE_VARIANT", facts.horse_variant),

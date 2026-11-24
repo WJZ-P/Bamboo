@@ -764,6 +764,10 @@ pub enum KindData {
     },
     Mob(Box<mc_bamboo_blocks::entity::mob::MobPublic>),
     Arrow(mc_bamboo_blocks::entity::arrow::ArrowPublic),
+    /// 闪电没有可同步的元数据；客户端从生成包拿类型，闪光种子走实体位置上的种子字段。
+    ///
+    /// A lightning bolt has no synced metadata; the client reads the seed from the entity.
+    LightningBolt,
     /// 羊驼口水：没有自己的元数据。
     ///
     /// Llama spit, with no metadata of its own.
@@ -820,7 +824,8 @@ impl Snapshot {
             KindData::Tnt { .. }
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
-            | KindData::Mob(_) => 0,
+            | KindData::Mob(_)
+            | KindData::LightningBolt => 0,
         }
     }
 
@@ -844,6 +849,7 @@ impl KindData {
             KindPublic::LlamaSpit(spit) => Self::LlamaSpit(*spit),
             KindPublic::Egg(egg) => Self::Egg(egg.clone()),
             KindPublic::SplashPotion(potion) => Self::SplashPotion(potion.clone()),
+            KindPublic::LightningBolt(_) => Self::LightningBolt,
         }
     }
 
@@ -868,7 +874,8 @@ impl KindData {
             | Self::Arrow(_)
             | Self::LlamaSpit(_)
             | Self::Egg(_)
-            | Self::SplashPotion(_) => None,
+            | Self::SplashPotion(_)
+            | Self::LightningBolt => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -883,7 +890,8 @@ impl KindData {
             | Self::Arrow(_)
             | Self::LlamaSpit(_)
             | Self::Egg(_)
-            | Self::SplashPotion(_) => None,
+            | Self::SplashPotion(_)
+            | Self::LightningBolt => None,
         }
     }
 
@@ -935,7 +943,7 @@ impl KindData {
             Self::ExperienceOrb { value } if *value != 0 => {
                 vec![EntityData::ExperienceValue(*value)]
             }
-            Self::ExperienceOrb { .. } | Self::LlamaSpit(_) => Vec::new(),
+            Self::ExperienceOrb { .. } | Self::LlamaSpit(_) | Self::LightningBolt => Vec::new(),
             Self::Arrow(arrow) => {
                 let mut data = Vec::new();
                 if arrow.on_fire {

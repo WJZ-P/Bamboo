@@ -158,6 +158,18 @@ pub fn interact(
     now: i64,
     thundering: bool,
 ) -> MobInteraction {
+    // `SkeletonHorse.mobInteract`：没驯服时连父类都不走。
+    // `SkeletonHorse.mobInteract`: untamed skeleton horses return PASS.
+    if mob.mob_type == MobType::SkeletonHorse
+        && !mob.equine.as_ref().is_some_and(|state| state.tame)
+    {
+        return MobInteraction::pass();
+    }
+    // `ZombieHorse.interact`：任何交互都先标成持久（不会被距离消失）。
+    // `ZombieHorse.interact`: every interaction marks it persistent.
+    if mob.mob_type == MobType::ZombieHorse {
+        mob.persistence_required = true;
+    }
     if mob.mob_type == MobType::Panda
         && let Some(outcome) =
             super::panda::interact(me, mob, req, super::panda::is_scared(mob, thundering))

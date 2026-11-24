@@ -35,8 +35,9 @@ pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
     block_maps, block_transformers, blocks, command_argument_types, component_enums,
     component_registries, crafting_remainders, entity_types, environment, gamerules, heightmaps,
-    item_components, item_damage, items, jukebox_songs, light, loot, mob_spawns, packets, potions,
-    recipes, registries, saved_world, shapes, sounds, states, structures, tags, version, worldgen,
+    item_components, item_damage, items, jukebox_songs, light, loot, mob_spawns, packets, poi,
+    potions, recipes, registries, saved_world, shapes, sounds, states, structures, tags, version,
+    worldgen,
 };
 
 pub use generated::sounds::{
@@ -1839,6 +1840,40 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(found, expected);
+    }
+
+    /// 21 种 POI 类型、票数、有效范围和 village 标签都由官方导出；`for_state`
+    /// 和 `poi_type_id` 互为逆 lookup，每个匹配状态都落在状态总数以内。
+    #[test]
+    fn poi_types_match_the_official_registry() {
+        assert_eq!(poi::POI_TYPES.len(), 21);
+        assert_eq!(poi::STATE_POI_TYPE.len() as u32, blocks::TOTAL_STATES);
+        let mut covered = 0;
+        for (id, poi) in poi::POI_TYPES.iter().enumerate() {
+            assert_eq!(
+                poi::poi_type_id(poi.name),
+                Some(id as u8),
+                "{} 的名字查不回来",
+                poi.name
+            );
+            for &state in poi.states {
+                assert!(state < blocks::TOTAL_STATES);
+                assert_eq!(poi::for_state(state), Some(id as u8));
+                covered += 1;
+            }
+        }
+        assert_eq!(covered, 496, "官方 26.3 的 POI 状态总数");
+        let meeting = poi::poi_type_id("meeting").unwrap() as usize;
+        assert_eq!(poi::POI_TYPES[meeting].max_tickets, 32);
+        assert_eq!(poi::POI_TYPES[meeting].valid_range, 6);
+        let home = poi::poi_type_id("home").unwrap() as usize;
+        assert_eq!(
+            poi::POI_TYPES[home].states.len(),
+            128,
+            "16 色床的 HEAD 半边"
+        );
+        assert!(poi::POI_TYPES.iter().filter(|p| p.village).count() == 15);
+        assert_eq!(poi::for_state(blocks::STONE), None);
     }
 
     #[test]

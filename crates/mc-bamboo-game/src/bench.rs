@@ -141,7 +141,11 @@ impl<'a> BenchWorld<'a> {
         let Some(region) = self.region_at(pos) else {
             return;
         };
-        let _ = region.chunks.set_block(pos, state);
+        let old = region.chunks.block(pos);
+        if region.chunks.set_block(pos, state) {
+            let old = old.unwrap_or(mc_bamboo_data::blocks::VOID_AIR);
+            region.poi.on_block_state_change(pos, old, state);
+        }
         region.touch(pos);
     }
 
