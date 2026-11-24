@@ -112,7 +112,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     // `ZombieVillager.tick`：转化倒计时在 `super.tick()` 之前。
     // `ZombieVillager.tick`: the cure countdown runs ahead of `super.tick()`.
     if mob.mob_type == super::MobType::ZombieVillager {
-        super::zombie_villager::tick(me, mob, ctx, None);
+        super::zombie_villager::tick(me, mob, ctx);
     }
     // `Skeleton.tick`：`freezingTracker.tick()` 在 `super.tick()` 之前。
     // `Skeleton.tick`: `freezingTracker.tick()` runs ahead of `super.tick()`.

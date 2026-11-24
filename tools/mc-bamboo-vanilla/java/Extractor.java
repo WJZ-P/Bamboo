@@ -617,6 +617,10 @@ public final class Extractor {
         out.addProperty("finalizedSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(finalized.serializer()));
         out.addProperty("unhappyIndex", unhappy.id());
         out.addProperty("unhappySerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(unhappy.serializer()));
+        Class<?> zombieVillager = net.minecraft.world.entity.monster.zombie.ZombieVillager.class;
+        out.addProperty("zombieVillagerConvertingIndex", entityAccessor(zombieVillager, "DATA_CONVERTING_ID").id());
+        out.addProperty("zombieVillagerDataIndex", entityAccessor(zombieVillager, "DATA_VILLAGER_DATA").id());
+        out.addProperty("zombieVillagerFinalizedIndex", entityAccessor(zombieVillager, "DATA_VILLAGER_DATA_FINALIZED").id());
         var attributes = net.minecraft.world.entity.npc.villager.Villager.createAttributes().build();
         out.addProperty("movementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
         var dimensions = net.minecraft.world.entity.EntityTypes.VILLAGER.getDimensions();

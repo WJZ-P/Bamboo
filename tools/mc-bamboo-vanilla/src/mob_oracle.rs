@@ -68,6 +68,7 @@ mod undead_horse;
 mod villager;
 mod water_mob;
 mod witch_throw;
+mod zombie_villager;
 
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
@@ -166,6 +167,8 @@ enum Line {
     VillagerSpawn(villager::VillagerSpawnCase),
     VillagerSave(villager::VillagerSaveCase),
     VillagerDeath(villager::VillagerDeathCase),
+    ZombieVillager(zombie_villager::Case),
+    ZombieVillagerSave(zombie_villager::SaveCase),
     AttackTarget(Box<attack_target::AttackTargetCase>),
     Guardian(Box<guardian_scene::GuardianCase>),
     Fish(Box<fish::FishCase>),
@@ -1677,6 +1680,8 @@ impl Report {
                 Line::VillagerSpawn(case) => self.replay_villager_spawn(&case),
                 Line::VillagerSave(case) => self.replay_villager_save(&case),
                 Line::VillagerDeath(case) => self.replay_villager_death(&case),
+                Line::ZombieVillager(case) => self.replay_zombie_villager(&case),
+                Line::ZombieVillagerSave(case) => self.replay_zombie_villager_save(&case),
                 Line::AttackTarget(case) => self.replay_attack_target(&case),
                 Line::Guardian(case) => self.replay_guardian(&case),
                 Line::Fish(case) => self.replay_fish(&case),

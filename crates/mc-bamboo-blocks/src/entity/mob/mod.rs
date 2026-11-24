@@ -94,10 +94,10 @@ pub mod villager;
 mod water;
 pub mod wild_spawn;
 pub mod witch;
-pub mod zombie_villager;
 pub mod wolf;
 pub mod wolf_goals;
 mod zombie_spawn;
+pub mod zombie_villager;
 
 use mc_bamboo_core::{BlockPos, Vec3};
 
@@ -2069,6 +2069,12 @@ pub struct DamageSource {
     /// The `Zombie.killedEntity` normal-difficulty roll: true means this kill does
     /// not convert. Set only for a zombie attacker and a dying villager.
     pub villager_conversion_roll: Option<bool>,
+    /// `Zombie.killedEntity` 的攻击者是不是僵尸；伤害源来自别的实体（箭、玩家、
+    /// 外部命令）时由调用方填。
+    ///
+    /// Whether the attacker of `Zombie.killedEntity` is a zombie. Callers fill it
+    /// for external damage sources (arrows, players, commands).
+    pub attacker_is_zombie: bool,
 }
 
 impl DamageSource {
@@ -2093,6 +2099,7 @@ impl DamageSource {
             looting_level: 0,
             attacker_type: None,
             villager_conversion_roll: None,
+            attacker_is_zombie: false,
         }
     }
 
@@ -2123,6 +2130,12 @@ impl DamageSource {
     }
 
     /// 带上攻击者的 UUID。
+    /// 标记攻击者是僵尸一系（`Zombie.killedEntity` 的分支）。
+    pub const fn with_zombie_attacker(mut self) -> Self {
+        self.attacker_is_zombie = true;
+        self
+    }
+
     /// 带上 `Zombie.killedEntity` 的抽签结果。
     pub const fn with_villager_conversion_roll(mut self, roll: bool) -> Self {
         self.villager_conversion_roll = Some(roll);
@@ -2183,6 +2196,7 @@ impl DamageSource {
             looting_level: 0,
             attacker_type: None,
             villager_conversion_roll: None,
+            attacker_is_zombie: false,
         }
     }
 
@@ -3415,9 +3429,7 @@ impl Mob {
         if self.mob_type == MobType::ZombieVillager {
             // `ZombieVillager.removeWhenFarAway`：转化中或有交易经验时不消失。
             // `ZombieVillager.removeWhenFarAway`: no despawn while converting or with XP.
-            return self
-                .zombie_villager
-                .removes_when_far_away(self.villager.xp);
+            return self.zombie_villager.removes_when_far_away(self.villager.xp);
         }
         if self.mob_type == MobType::Chicken {
             // `Chicken.removeWhenFarAway` 直接返回 `isChickenJockey`。

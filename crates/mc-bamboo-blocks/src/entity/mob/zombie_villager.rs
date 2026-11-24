@@ -130,8 +130,8 @@ impl ZombieVillagerState {
             self.start(super::nbt::uuid_field(source, "ConversionPlayer"), time);
         }
         villager.xp = tag::int_or(source, "Xp", 0);
-        self.conversion_player = super::nbt::uuid_field(source, "ConversionPlayer")
-            .or(self.conversion_player.take());
+        self.conversion_player =
+            super::nbt::uuid_field(source, "ConversionPlayer").or(self.conversion_player.take());
     }
 
     /// `removeWhenFarAway`：转化中或有交易经验时不按距离消失。
@@ -258,17 +258,12 @@ pub fn start_converting(mob: &mut Mob, player: Option<[u8; 16]>, time: i32, diff
 /// Per-tick conversion progress: with `nextFloat() < 0.01`, scan the 9×9×9 box
 /// around the mob for up to 14 tagged blocks. Each tagged block draws one
 /// `nextFloat() < 0.3` and adds one extra tick of progress.
-pub fn conversion_progress(
-    me: &mut Entity,
-    mob: &Mob,
-    view: &dyn BlockView,
-    break_radius: Option<i32>,
-) -> i32 {
+pub fn conversion_progress(me: &mut Entity, mob: &Mob, view: &dyn BlockView) -> i32 {
     let mut progress = 1;
     if me.random.next_float() >= 0.01 {
         return progress;
     }
-    let radius = break_radius.unwrap_or(SPECIAL_BLOCK_RADIUS);
+    let radius = SPECIAL_BLOCK_RADIUS;
     let base = BlockPos::new(
         me.position.x as i32,
         me.position.y as i32,
@@ -305,19 +300,14 @@ fn is_curing_block(state: BlockState, _mob: &Mob) -> bool {
 ///
 /// `ZombieVillager.tick`: subtract the progress while converting, then emit the
 /// conversion command and discard this mob when the timer runs out.
-pub fn tick(
-    me: &mut Entity,
-    mob: &mut Mob,
-    ctx: &mut dyn EntityCtx,
-    break_radius: Option<i32>,
-) {
+pub fn tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type != MobType::ZombieVillager
         || !mob.zombie_villager.converting
         || !living::is_alive(me, mob)
     {
         return;
     }
-    let progress = conversion_progress(me, mob, ctx.blocks(), break_radius);
+    let progress = conversion_progress(me, mob, ctx.blocks());
     mob.zombie_villager.conversion_time -= progress;
     if mob.zombie_villager.conversion_time > 0 {
         return;
@@ -353,10 +343,7 @@ pub fn play_cure_sound(me: &mut Entity, mob: &Mob) {
 /// After the conversion the new villager gets 200 ticks of nausea. Gossip is not
 /// modelled, so reputation only keeps the `ConversionPlayer` hook.
 pub fn after_cure(mob: &mut Mob) {
-    let _ = living::add_effect(
-        mob,
-        EffectInstance::new(mob_effect::NAUSEA, 200),
-    );
+    let _ = living::add_effect(mob, EffectInstance::new(mob_effect::NAUSEA, 200));
 }
 
 /// `ZombieVillager.getVoicePitch()`：幼年基础音高 2.0，成年 1.0。
@@ -379,4 +366,3 @@ pub fn configure_new(mob: &mut Mob, random: &mut crate::entity::JavaRandom) {
 pub fn copy_villager_state(from: &Mob, to: &mut Mob) {
     to.villager = from.villager.clone();
 }
-

@@ -178,19 +178,15 @@ pub(crate) fn apply_convert(
         // and the finalized flag over.
         if matches!(
             (from.mob_type, to),
-            (
-                super::MobType::Villager,
-                super::MobType::ZombieVillager
-            ) | (
-                super::MobType::ZombieVillager,
-                super::MobType::Villager
-            )
+            (super::MobType::Villager, super::MobType::ZombieVillager)
+                | (super::MobType::ZombieVillager, super::MobType::Villager)
         ) {
             super::zombie_villager::copy_villager_state(from, mob);
         }
         if to == super::MobType::Villager && from.mob_type == super::MobType::ZombieVillager {
             if let Some(player) = from.zombie_villager.conversion_player {
-                mob.events.push(super::MobEvent::CuredZombieVillager { player });
+                mob.events
+                    .push(super::MobEvent::CuredZombieVillager { player });
             }
             // 治疗完成：新村民带 200 刻反胃；治疗者的进度事件由游戏层按
             // `ConversionPlayer` 发（声望系统还没建模）。
@@ -483,14 +479,11 @@ pub(crate) fn zombie_killed_villager(
     ctx: &mut dyn EntityCtx,
     source: &super::DamageSource,
 ) -> bool {
-    let difficulty = ctx.blocks().difficulty();
+    let difficulty = crate::entity::ctx::BlockView::difficulty(ctx.blocks());
     if !matches!(difficulty, 2 | 3) || mob.mob_type != super::MobType::Villager {
         return false;
     }
-    let Some(attacker_type) = source.attacker_type else {
-        return false;
-    };
-    if !super::MobType::by_entity_type(attacker_type).is_some_and(|kind| kind.is_zombie()) {
+    if !source.attacker_is_zombie {
         return false;
     }
     // `nextBoolean()` 为真直接返回，不转化也不生成。
@@ -507,5 +500,10 @@ pub(crate) fn zombie_killed_villager(
         },
         me,
     );
+    // `ConversionType.SINGLE` 在 `convertTo` 里丢掉原来那只；`die` 之后
+    // 的死亡动画也不该再跑。
+    // `ConversionType.SINGLE` discards the source in `convertTo`; the death
+    // animation after `die` does not run either.
+    me.discard();
     true
 }

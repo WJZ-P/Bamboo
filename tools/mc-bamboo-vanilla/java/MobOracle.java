@@ -420,6 +420,12 @@ public final class MobOracle {
                 cases += playVillagerSave(official, out);
                 cases += playVillagerDeath(official, out);
             }
+            if (only == null || only.startsWith("zombie_villager")) {
+                cases += playZombieVillager(official, out, only);
+            }
+            if (only == null || "zombie_villager_save".startsWith(only)) {
+                cases += playZombieVillagerSave(official, out);
+            }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playBat(official, out, name);
@@ -10617,6 +10623,238 @@ public final class MobOracle {
             }
         }
         return cases;
+    }
+
+    /**
+     * 僵尸村民转化 / 治疗 / 日晒的逐刻对拍。
+     *
+     * Zombie-villager infection, curing and sunburn tick comparison. Each frame
+     * records the entity table (type, position, health, conversion timer, effects),
+     * the level random seed and the level events emitted that tick.
+     */
+    private static int playZombieVillager(Official official, Writer out, String only) throws Exception {
+        java.util.List<String> names = java.util.List.of(
+                "zombie_villager_infect_easy", "zombie_villager_infect_normal_true",
+                "zombie_villager_infect_normal_false", "zombie_villager_infect_hard",
+                "zombie_villager_cure_bars", "zombie_villager_cure_bed",
+                "zombie_villager_cure_plain", "zombie_villager_cure_no_weakness",
+                "zombie_villager_sunburn");
+        int cases = 0;
+        for (String name : names) {
+            if (only != null && !name.startsWith(only)) continue;
+            out.write(zombieVillagerCase(official, name));
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
+    /** 一只僵尸村民的存档往返：数据、转化倒计时和治疗者 UUID 逐键对比。 */
+    private static int playZombieVillagerSave(Official official, Writer out) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        var mob = (net.minecraft.world.entity.monster.zombie.ZombieVillager)
+                EntityTypes.ZOMBIE_VILLAGER.create(world, EntitySpawnReason.COMMAND);
+        mob.setPos(1.5, 64.0, 2.5);
+        mob.setYRot(37.0F);
+        mob.setXRot(12.0F);
+        var registries = official.registries;
+        var data = new net.minecraft.world.entity.npc.villager.VillagerData(
+                registries.lookupOrThrow(net.minecraft.core.registries.Registries.VILLAGER_TYPE)
+                        .getOrThrow(net.minecraft.world.entity.npc.villager.VillagerType.TAIGA),
+                registries.lookupOrThrow(net.minecraft.core.registries.Registries.VILLAGER_PROFESSION)
+                        .getOrThrow(net.minecraft.world.entity.npc.villager.VillagerProfession.FARMER), 3);
+        mob.setVillagerData(data);
+        mob.setVillagerDataFinalized(true);
+        mob.setVillagerXp(20);
+        startConverting(mob, new java.util.UUID(3L, 4L), 123);
+        var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                net.minecraft.util.ProblemReporter.DISCARDING, registries);
+        mob.saveWithoutId(output);
+        var tag = output.buildResult();
+        var copy = (net.minecraft.world.entity.monster.zombie.ZombieVillager)
+                EntityTypes.ZOMBIE_VILLAGER.create(world, EntitySpawnReason.LOAD);
+        copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                net.minecraft.util.ProblemReporter.DISCARDING, registries, tag));
+        var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                net.minecraft.util.ProblemReporter.DISCARDING, registries);
+        copy.saveWithoutId(again);
+        out.write("{\"type\":\"zombieVillagerSave\",\"name\":\"zombie_villager_save\""
+                + ",\"nbt\":" + jsonString(tag.toString())
+                + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+        out.flush();
+        return 1;
+    }
+
+    /** `startConverting` 是私有的，用反射设置治疗者 / 倒计时（不跑效果和事件）。 */
+    private static void startConverting(net.minecraft.world.entity.monster.zombie.ZombieVillager mob,
+            java.util.UUID player, int time) throws Exception {
+        var field = net.minecraft.world.entity.monster.zombie.ZombieVillager.class
+                .getDeclaredField("conversionStarter");
+        field.setAccessible(true);
+        field.set(mob, player);
+        var timer = net.minecraft.world.entity.monster.zombie.ZombieVillager.class
+                .getDeclaredField("villagerConversionTime");
+        timer.setAccessible(true);
+        timer.setInt(mob, time);
+        var method = net.minecraft.world.entity.monster.zombie.ZombieVillager.class
+                .getDeclaredMethod("startConverting", java.util.UUID.class, int.class);
+        method.setAccessible(true);
+        method.invoke(mob, player, time);
+    }
+
+    /**
+     * 僵尸村民转化 / 治疗 / 日晒的逐刻对拍。每帧记实体表、世界随机源和这一刻的世界事件。
+     *
+     * Zombie-villager infection, curing and sunburn tick comparison. Each frame records
+     * the entity table, the level random seed and that tick's level events.
+     */
+    private static String zombieVillagerCase(Official official, String name) throws Exception {
+        boolean infection = name.startsWith("zombie_villager_infect");
+        boolean cure = name.startsWith("zombie_villager_cure");
+        boolean sunburn = name.equals("zombie_villager_sunburn");
+        int difficulty = name.endsWith("easy") ? 1 : name.endsWith("hard") ? 3 : 2;
+        boolean rollTrue = name.endsWith("_true");
+        boolean noWeakness = name.endsWith("no_weakness");
+        boolean bars = name.endsWith("bars");
+        boolean bed = name.endsWith("bed");
+        int ticks = infection ? 1 : sunburn ? 8 : 30;
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.values()[difficulty];
+        world.levelEvents = new ArrayList<>();
+        world.injectedSkyDarken = 0;
+        world.injectedBrightOutside = sunburn;
+        world.injectedCanSeeSky = sunburn;
+        world.injectedMonstersBurn = sunburn;
+        var random = net.minecraft.util.RandomSource.create(1L);
+        put(net.minecraft.world.level.Level.class, world, "random", random);
+        for (int x = -6; x <= 6; x++) {
+            for (int z = -6; z <= 6; z++) {
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        // 加速方块放在 4 格（生效）和 5 格（不生效）处，用来检验半径。
+        // Speed-up blocks at 4 (in range) and 5 (out of range) blocks.
+        if (bars) {
+            world.blocks.put(BlockPos.asLong(4, 61, 0), Blocks.IRON_BARS.defaultBlockState());
+            world.blocks.put(BlockPos.asLong(5, 61, 0), Blocks.IRON_BARS.defaultBlockState());
+        }
+        if (bed) {
+            world.blocks.put(BlockPos.asLong(-4, 61, 0), Blocks.BED.red().defaultBlockState());
+            world.blocks.put(BlockPos.asLong(-5, 61, 0), Blocks.BED.red().defaultBlockState());
+        }
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+        var tracked = new java.util.ArrayList<net.minecraft.world.entity.Entity>();
+        net.minecraft.world.entity.Mob victim = null;
+        net.minecraft.world.entity.monster.zombie.ZombieVillager patient = null;
+        if (infection) {
+            // 只造一个村民，直接打一记致命的僵尸攻击（`killedEntity` 在 die 里）。
+            // Build only the victim and apply one fatal zombie attack (`killedEntity`
+            // runs inside die). The attacker's random roll is supplied by the scene.
+            var zombie = new net.minecraft.world.entity.monster.zombie.Zombie(EntityTypes.ZOMBIE, world);
+            setRandom(zombie, rollTrue ? 1L : 0L);
+            zombie.setUUID(net.minecraft.util.Mth.createInsecureUUID(zombie.getRandom()));
+            zombie.setPos(2.5, 61.0, 0.5);
+            zombie.setNoAi(true);
+            world.tracked.add(zombie);
+            victim = (net.minecraft.world.entity.Mob)
+                    EntityTypes.VILLAGER.create(world, EntitySpawnReason.COMMAND);
+            setRandom(victim, 42002L);
+            victim.setUUID(net.minecraft.util.Mth.createInsecureUUID(victim.getRandom()));
+            victim.setYRot(0.0F);
+            victim.setYHeadRot(0.0F);
+            victim.setPos(0.5, 61.0, 0.5);
+            victim.setNoAi(true);
+            victim.setHealth(20.0F);
+            tracked.add(victim);
+            world.tracked.add(victim);
+            victim.hurtServer(world, world.damageSources().mobAttack(zombie), 20.0F);
+        } else {
+            patient = (net.minecraft.world.entity.monster.zombie.ZombieVillager)
+                    EntityTypes.ZOMBIE_VILLAGER.create(world, EntitySpawnReason.COMMAND);
+            setRandom(patient, 5120L);
+            patient.setUUID(net.minecraft.util.Mth.createInsecureUUID(patient.getRandom()));
+            patient.setYRot(0.0F);
+            patient.setYHeadRot(0.0F);
+            patient.setPos(0.5, 61.0, 0.5);
+            patient.setNoAi(true);
+            tracked.add(patient);
+            world.tracked.add(patient);
+            if (cure && !noWeakness) {
+                patient.addEffect(new net.minecraft.world.effect.MobEffectInstance(
+                        net.minecraft.world.effect.MobEffects.WEAKNESS, 1000));
+                // 私有 startConverting：金苹果交互只差玩家对象，场景直接调这一段。
+                // The private startConverting is the only part of the golden-apple
+                // interaction the scene needs.
+                startConverting(patient, new java.util.UUID(3L, 4L), 30);
+            }
+        }
+        var frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            world.levelEvents.clear();
+            if (tick > 0) {
+                world.gameTime++;
+                for (var entity : new java.util.ArrayList<>(tracked)) {
+                    if (!entity.isRemoved()) {
+                        entity.commonTick();
+                        entity.tick();
+                    }
+                }
+                for (var entity : new java.util.ArrayList<>(world.spawned)) {
+                    if (entity instanceof net.minecraft.world.entity.Mob && !tracked.contains(entity)) {
+                        tracked.add(entity);
+                        world.tracked.add(entity);
+                    }
+                }
+                world.spawned.clear();
+            }
+            if (tick != 0) frames.append(',');
+            frames.append("{\"entities\":[");
+            boolean first = true;
+            for (var entity : tracked) {
+                if (entity.isRemoved()) continue;
+                if (!first) frames.append(',');
+                first = false;
+                frames.append("{\"type\":")
+                        .append(jsonString(net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE
+                                .getKey(entity.getType()).toString()))
+                        .append(",\"x\":").append(Double.doubleToRawLongBits(entity.getX()))
+                        .append(",\"y\":").append(Double.doubleToRawLongBits(entity.getY()))
+                        .append(",\"z\":").append(Double.doubleToRawLongBits(entity.getZ()));
+                if (entity instanceof net.minecraft.world.entity.LivingEntity living) {
+                    frames.append(",\"health\":").append(Float.floatToRawIntBits(living.getHealth()))
+                            .append(",\"fire\":").append(living.getRemainingFireTicks())
+                            .append(",\"effects\":").append(living.getActiveEffects().size());
+                }
+                if (entity instanceof net.minecraft.world.entity.monster.zombie.ZombieVillager zv) {
+                    var f = net.minecraft.world.entity.monster.zombie.ZombieVillager.class
+                            .getDeclaredField("villagerConversionTime");
+                    f.setAccessible(true);
+                    frames.append(",\"converting\":").append(zv.isConverting())
+                            .append(",\"conversionTime\":").append(f.getInt(zv))
+                            .append(",\"level\":").append(zv.getVillagerData().level())
+                            .append(",\"xp\":").append(zv.getVillagerXp());
+                }
+                frames.append('}');
+            }
+            frames.append("],\"levelEvents\":[");
+            for (int i = 0; i < world.levelEvents.size(); i++) {
+                if (i != 0) frames.append(',');
+                frames.append(java.util.Arrays.toString(world.levelEvents.get(i)));
+            }
+            frames.append("],\"seed\":").append(randomSeed(random))
+                    .append(",\"removed\":").append(tracked.stream().filter(net.minecraft.world.entity.Entity::isRemoved).count())
+                    .append('}');
+        }
+        frames.append(']');
+        return "{\"type\":\"zombieVillager\",\"name\":" + jsonString(name)
+                + ",\"difficulty\":" + difficulty
+                + ",\"blocks\":" + blocks
+                + ",\"infection\":" + infection
+                + ",\"cure\":" + cure
+                + ",\"sunburn\":" + sunburn
+                + ",\"frames\":" + frames + "}\n";
     }
 
     /**

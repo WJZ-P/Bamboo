@@ -1383,16 +1383,13 @@ pub const REPUTATION_PER_TRADE: i32 = 2;
 
 pub const VILLAGER_DATA_INDEX: u8 = 19;
 pub const VILLAGER_DATA_FINALIZED_INDEX: u8 = 20;
-/// `ZombieVillager` 的三个元数据 index（按类层次顺序追加在僵尸的 16/17/18 之后）。
-///
-/// The three `ZombieVillager` metadata indices (after the zombie's 16/17/18).
-pub const ZOMBIE_VILLAGER_CONVERTING_INDEX: u8 = 19;
-pub const ZOMBIE_VILLAGER_DATA_INDEX: u8 = 20;
-pub const ZOMBIE_VILLAGER_DATA_FINALIZED_INDEX: u8 = 21;
 pub const UNHAPPY_COUNTER_INDEX: u8 = 18;
 pub const VILLAGER_DATA_SERIALIZER: i32 = 18;
 pub const VILLAGER_DATA_FINALIZED_SERIALIZER: i32 = 8;
 pub const UNHAPPY_COUNTER_SERIALIZER: i32 = 1;
+pub const ZOMBIE_VILLAGER_CONVERTING_INDEX: u8 = 19;
+pub const ZOMBIE_VILLAGER_DATA_INDEX: u8 = 20;
+pub const ZOMBIE_VILLAGER_DATA_FINALIZED_INDEX: u8 = 21;
 
 pub const VILLAGER_MOVEMENT_SPEED: f64 = 0.5;
 pub const VILLAGER_WIDTH: f32 = 0.6;
