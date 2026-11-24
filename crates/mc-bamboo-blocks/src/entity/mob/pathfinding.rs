@@ -107,6 +107,8 @@ pub enum Action {
     Inspect(Use),
     /// `PathNavigation.recomputePath`：结果直接覆盖导航里的路径。
     Recompute,
+    /// 结果没人用（调用点丢掉了返回值）：取到就丢，不留在导航里。
+    Discard,
 }
 
 impl Action {
@@ -135,6 +137,8 @@ pub enum Use {
     BeeHive,
     /// 狐狸扑跳、马驹跟母亲一类：只触发导航记录。
     Ignore,
+    /// 掠夺者巡逻：结果到达后才走「成功发目标 / 失败换随机点」两支。
+    Patrol,
 }
 
 /// 挂在 `Navigation` 上的一条请求；驱动在实体 tick 之后收走它。
@@ -252,6 +256,9 @@ pub struct PhaseState {
     pub last_nodes: u64,
     /// 最近一阶段实际跑 A* 的请求数（去重后）。
     pub last_searches: u64,
+    /// 从打开阶段以来的累计搜索数和展开节点数（压测和单测读）。
+    pub total_searches: u64,
+    pub total_nodes: u64,
 }
 
 impl PhaseState {
@@ -273,6 +280,8 @@ impl PhaseState {
     pub fn split_by(&mut self, moved: &BTreeSet<EntityUid>) -> Self {
         let mut out = Self {
             last_tick: self.last_tick,
+            total_searches: self.total_searches,
+            total_nodes: self.total_nodes,
             ..Self::default()
         };
         self.deferred.retain(|pending| {
@@ -331,6 +340,8 @@ impl PhaseState {
     /// 并岛：两个岛的刻号已对齐，保留请求和失败计数里较大的一份。
     pub fn absorb(&mut self, other: Self) {
         self.last_tick = self.last_tick.max(other.last_tick);
+        self.total_searches = self.total_searches.saturating_add(other.total_searches);
+        self.total_nodes = self.total_nodes.saturating_add(other.total_nodes);
         self.deferred.extend(other.deferred);
         for (uid, (count, until)) in other.failures {
             let entry = self.failures.entry(uid).or_insert((0, i64::MIN));
@@ -457,6 +468,8 @@ impl PhaseState {
         for (group, (path, nodes)) in groups.into_iter().zip(results) {
             self.last_nodes = self.last_nodes.saturating_add(nodes);
             self.last_searches = self.last_searches.saturating_add(1);
+            self.total_nodes = self.total_nodes.saturating_add(nodes);
+            self.total_searches = self.total_searches.saturating_add(1);
             for pending in &group {
                 if config.fail_cooldown {
                     let entry = self.failures.entry(pending.uid).or_insert((0, i64::MIN));
@@ -618,8 +631,13 @@ pub fn install(mob: &mut super::Mob, view: &dyn BlockView) {
             // 检查结果留在导航里，由原调用点这一刻的 `create_path` 取走，
             // 后续语句（写记忆、写黑名单、换目标、放弃）照官方顺序跑。
         }
+        Action::Discard => {
+            mob.navigation.replay = None;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod world_tests;

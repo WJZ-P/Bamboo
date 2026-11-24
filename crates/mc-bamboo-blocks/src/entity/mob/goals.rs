@@ -1914,14 +1914,22 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             // 之后每 20 刻一次。Bamboo 之前给了一个很大的负数，语义等价，
             // 但 `gameTime - last` 用 long 减法，这里按官方改成初值 0。
             let now = ctx.blocks().game_time();
-            if now - *last_can_use_check < 20 {
+            // 独立寻路阶段：请求挂着 / 结果刚到时绕开 20 刻的门闸，下一刻就能接着取结果。
+            let retrying = mob.navigation.awaiting() || mob.navigation.has_replay();
+            if !retrying && now - *last_can_use_check < 20 {
                 return false;
             }
-            *last_can_use_check = now;
+            if !retrying {
+                *last_can_use_check = now;
+            }
             let Some(target) = combat_target(mob, ctx) else {
                 return false;
             };
             let nav = living::nav_mob(me, mob, ctx.blocks());
+            mob.navigation
+                .set_next_action(super::pathfinding::Action::Inspect(
+                    super::pathfinding::Use::MeleeStart,
+                ));
             *start_path = mob.navigation.create_path(
                 ctx.blocks(),
                 &nav,
@@ -2223,13 +2231,28 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 return false;
             };
             *avoid = Some(uid);
-            let Some(pos) = away_random_pos(me, mob, ctx.blocks(), 16, 7, at) else {
-                return false;
+            // 独立寻路阶段：已经交付的结果按当时选定的点继续，不重抽随机数。
+            let pos = match mob.navigation.replay_target() {
+                Some(at) => Vec3::new(
+                    f64::from(at.x) + 0.5,
+                    f64::from(at.y),
+                    f64::from(at.z) + 0.5,
+                ),
+                None => {
+                    let Some(pos) = away_random_pos(me, mob, ctx.blocks(), 16, 7, at) else {
+                        return false;
+                    };
+                    pos
+                }
             };
             if at.distance_to_sqr(pos) < at.distance_to_sqr(me.position) {
                 return false;
             }
             let nav = living::nav_mob(me, mob, ctx.blocks());
+            mob.navigation
+                .set_next_action(super::pathfinding::Action::Inspect(
+                    super::pathfinding::Use::GoalPath,
+                ));
             *path = mob
                 .navigation
                 .create_path(ctx.blocks(), &nav, BlockPos::containing(pos), 0);

@@ -399,6 +399,19 @@ impl Navigation {
             .map(|replay| replay.at)
     }
 
+    /// 有没有已经交付、还没消费的结果。
+    pub fn has_replay(&self) -> bool {
+        self.replay.as_ref().is_some_and(|replay| !replay.consumed)
+    }
+
+    /// 已经交付、还没消费的结果对应的动作。
+    pub fn replay_action(&self) -> Option<Action> {
+        self.replay
+            .as_ref()
+            .filter(|replay| !replay.consumed)
+            .map(|replay| replay.action)
+    }
+
     /// 显式登记「结果到了以后做什么」。`move_to*` 自己登记，其余检查结果的调用点用这个。
     pub fn set_next_action(&mut self, action: Action) {
         self.next_action = Some(action);
