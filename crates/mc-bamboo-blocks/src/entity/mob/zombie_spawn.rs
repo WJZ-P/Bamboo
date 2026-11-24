@@ -146,16 +146,19 @@ fn set_baby(me: &mut Entity, mob: &mut Mob) {
     me.dimensions = (width, height);
 }
 
-/// 鸡骑士的两次判定。第一支要找附近没人骑的鸡，第二支要新建一只鸡；Bamboo 还没有鸡，
-/// 两支都只取数；第二支命中时官方会多一只鸡并跑它的 `finalizeSpawn`，这里没有。
+/// 鸡骑士的两次判定。第一支 `nextFloat() < 0.05` 找附近没人骑的鸡骑上去，否则第二支
+/// `nextFloat() < 0.05` 新建一只鸡、跑它的 `finalizeSpawn` 再骑上去。鸡已建模，真正的
+/// 缺口是骑乘（`startRiding`）和新建坐骑，所以两支都只取数、不挂乘客也不生成坐骑。
 ///
-/// The two chicken-jockey rolls. The first looks for a nearby unridden chicken, the
-/// second creates one; Bamboo has no chickens yet, so both only draw. A hit on the second
-/// roll would add a chicken and run its `finalizeSpawn` in vanilla; that is missing here.
+/// The two chicken-jockey rolls. The first `nextFloat() < 0.05` finds a nearby unridden
+/// chicken to ride; otherwise the second `nextFloat() < 0.05` creates a chicken, runs its
+/// `finalizeSpawn` and rides it. Chickens are modelled; the real gap is riding
+/// (`startRiding`) and spawning the mount, so both rolls only draw and neither attaches a
+/// passenger nor spawns a mount.
 fn roll_chicken_jockey(random: &LegacyRandom) {
     if f64::from(random.next_float()) >= 0.05 {
-        // 第二支：新建鸡的判定，命中也没有鸡可建。
-        // Second branch: the new-chicken roll; a hit has no chicken to create.
+        // 第二支：新建鸡的判定，命中也不生成坐骑、不挂骑手。
+        // Second branch: the new-chicken roll; a hit still spawns no mount and no rider.
         random.next_float();
     }
 }

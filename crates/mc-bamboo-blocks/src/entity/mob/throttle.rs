@@ -314,9 +314,16 @@ pub fn nearest_player_distance_sqr(position: Vec3, players: &[PlayerView]) -> Op
 
 /// 4.2 的豁免清单，命中就算全速档。
 ///
-/// 还没建模的状态：村民恐慌 / 袭击状态（Bamboo 没有村民和袭击系统）、拴绳
-/// （没有拴绳实体）、活塞推动（实体没有 `PISTON` 移动）。「在水流里」用
+/// 村民实体已建模（同步数据和存档），但恐慌 / 袭击状态和袭击系统仍缺；拴绳
+/// （没有拴绳实体）、活塞推动（实体没有 `PISTON` 移动）也还没建模。「在水流里」用
 /// 「浸水且会被水流推」近似：水流矢量不在实体状态里。这几项在注释和报告里写明。
+///
+/// The 4.2 exemption list; a hit means the full tick rate. Villagers are modelled
+/// now (synced data and saving), but their panic / raid state, the raid system,
+/// leashes (no leash entity) and piston pushes (entities have no `PISTON` movement)
+/// are not. "In a current" is approximated by "in water and pushed by fluid", since
+/// the flow vector is not part of entity state. These gaps are recorded here and in
+/// the reports.
 pub fn exempt(
     mob: &Mob,
     now: i64,
