@@ -720,16 +720,24 @@ fn run_tree(tree: &mut [TreeRow], shared: &Shared<'_>) {
                     tree[within].passenger_index,
                 );
                 me.position = at;
-                me.old_position = at;
             } else {
                 // 载具不在本刻的名单里：按官方 `baseTick` 的分支当场下车。
-                let spot = me
-                    .vehicle
-                    .and_then(|vehicle| shared.public_of(vehicle))
-                    .map(crate::entity::riding::dismount_location);
-                crate::entity::riding::dismount(&mut me, spot, None);
+                crate::entity::riding::dismount(&mut me, None);
             }
-            me.delta = mc_bamboo_core::Vec3::default();
+            // 官方 `checkDespawn` 对乘客排在 `rideTick` 之后；`tick_mob` 对乘客跳过，
+            // 由这里补上。
+            // Vanilla runs a passenger's `checkDespawn` after its `rideTick`; the
+            // tick path skips it for passengers, so it happens here.
+            if !me.removed {
+                let result = &mut tree[within].result;
+                let mut ctx = ParallelCtx {
+                    uid: shared.uids[tree[within].index],
+                    shared,
+                    commands: &mut result.commands,
+                    plan: tree[within].plan,
+                };
+                crate::entity::mob::living::check_despawn_entity(&mut me, &mut ctx);
+            }
         }
         let split = me.split();
         tree[within].result.removed = split.public.removed;

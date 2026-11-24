@@ -2086,9 +2086,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::CubeRandomDirection { .. } => {
             combat_target(mob, ctx).is_none() && super::slime::can_pick_direction(me, mob)
         }
-        // `!isPassenger()`：没有骑乘。
-        // `!isPassenger()`: riding is not modelled.
-        Goal::CubeKeepJumping => true,
+        // `CubeMobKeepOnJumpingGoal.canUse` 是 `!isPassenger()`。
+        // `CubeMobKeepOnJumpingGoal.canUse` is `!isPassenger()`.
+        Goal::CubeKeepJumping => me.vehicle.is_none(),
         Goal::DrownedGoToWater { wanted, .. } => {
             // `DrownedGoToWaterGoal.canUse`：白天、不在水里、找得到水。
             // `DrownedGoToWaterGoal.canUse`: daylight, not in water and water found.

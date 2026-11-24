@@ -30,7 +30,7 @@ use super::{
 };
 use crate::{
     entity::{
-        Entity, EntityKind, KindPublic, PrimedTnt,
+        Entity, EntityKind, EntityUid, KindPublic, PrimedTnt,
         ctx::{BlockView, Command, EntityCtx, ThrottlePlan},
     },
     shape::{self, CollisionContext},
@@ -86,7 +86,13 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     ) {
         mob.y_body_rot = me.y_rot;
     }
-    check_despawn(me, mob, ctx);
+    // 官方在 `ServerLevel.tick` 的 uid 顺序里对每个实体先 `checkDespawn` 再决定 tick；
+    // 乘客的这次检查发生在它的 `rideTick` 之后，由驱动补做，这里跳过。
+    // Vanilla checks despawn for every entity in uid order before ticking; a
+    // passenger's check runs after its `rideTick`, so the driver does it and we skip.
+    if me.vehicle.is_none() {
+        check_despawn(me, mob, ctx);
+    }
     if me.removed {
         return;
     }
@@ -171,11 +177,28 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     // 在第一刻才把血量夹到随机出来的最大血量。
     // `refreshDirtyAttributes`: a summoned equine clamps its health on its first tick.
     clamp_health(mob);
-    // `Mob.tick`：每 5 刻按乘客和载具重设控制标志；牛没有乘客，三个都打开。
+    // `Mob.tick`：每 5 刻按乘客和载具重设控制标志。官方 `Mob.updateControlFlags`：
+    // 控制乘客是生物、且不在 `#non_controlling_rider` 里时，MOVE / JUMP / LOOK 都关掉
+    // （史莱姆不在建模范围外，只有史莱姆在标签里）。玩家骑手不算生物，标志保持打开；
+    // 船不在建模范围，JUMP 和 MOVE 同值。
+    //
+    // Vanilla `Mob.updateControlFlags`: a mob passenger outside
+    // `#non_controlling_rider` (only slimes here) disables MOVE / JUMP / LOOK. A
+    // player rider is not a mob, so the flags stay on; boats are out of scope.
     if me.tick_count % 5 == 0 {
-        mob.goals.set_control_flag(Flag::Move, true);
-        mob.goals.set_control_flag(Flag::Jump, true);
-        mob.goals.set_control_flag(Flag::Look, true);
+        let mob_rider = !mob.no_ai
+            && mob.first_passenger().is_some_and(|uid| {
+                ctx.other(uid).is_some_and(|public| match &public.kind {
+                    crate::entity::KindPublic::Mob(rider) => {
+                        rider.mob_type != super::MobType::Slime
+                    }
+                    _ => false,
+                })
+            });
+        let free = !mob_rider;
+        mob.goals.set_control_flag(Flag::Move, free);
+        mob.goals.set_control_flag(Flag::Jump, free);
+        mob.goals.set_control_flag(Flag::Look, free);
     }
     // `AbstractCubeMob.tick`：`super.tick()` 之后的落地判断。
     // `AbstractCubeMob.tick`: the landing check after `super.tick()`.
@@ -297,7 +320,7 @@ pub(crate) fn is_alive(me: &Entity, mob: &Mob) -> bool {
 }
 
 /// `Mob.checkDespawn`。牛不会被远离玩家删掉，但最近的玩家决定 `noActionTime` 归不归零。
-fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+pub(crate) fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // 和平难度 + `!isAllowedInPeaceful()` 直接丢弃，且不再取随机数。
     if ctx.blocks().difficulty() == 0 && !mob.mob_type.allowed_in_peaceful() {
         me.discard();
@@ -338,6 +361,15 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     } else if distance < near_sqr {
         mob.no_action_time = 0;
     }
+}
+
+/// 对一个已经拼好的实体跑 `Mob.checkDespawn`。乘客的检查在 `rideTick` 之后补做，
+/// 调用方负责跳过已经移除的实体。
+///
+/// Run `Mob.checkDespawn` on a fully assembled entity. The driver calls this after
+/// a passenger's `rideTick`; callers skip removed entities.
+pub(crate) fn check_despawn_entity(me: &mut Entity, ctx: &mut dyn EntityCtx) {
+    me.with_mob(|me, mob| check_despawn(me, mob, ctx));
 }
 
 // ---- 流体 ----
@@ -2307,10 +2339,31 @@ fn jump_out_of_fluid(me: &mut Entity, mob: &Mob, view: &dyn BlockView, old_y: f6
 ///
 /// `LivingEntity.pushEntities`: nearby mobs shove each other apart. Bats override it with
 /// an empty body, and `EntitySelector.pushableBy` skips them as `isPushable()` is false.
+/// `Entity.getRootVehicle()`：沿 `vehicle` 往上走到没有载具的那个 uid（自己骑自己时
+/// 到环为止）。`isPassengerOfSameVehicle` 用它判断两边是否同一棵树。
+///
+/// `Entity.getRootVehicle()`: walk `vehicle` links up to the topmost uid, stopping
+/// at a cycle. `isPassengerOfSameVehicle` compares these.
+fn root_vehicle(uid: EntityUid, vehicle: Option<EntityUid>, ctx: &dyn EntityCtx) -> EntityUid {
+    let mut root = uid;
+    let mut current = vehicle;
+    let mut seen = 0_u32;
+    while let Some(next) = current {
+        root = next;
+        seen += 1;
+        if seen > 64 {
+            break;
+        }
+        current = ctx.other(next).and_then(|public| public.vehicle);
+    }
+    root
+}
+
 fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if !mob.mob_type.is_pushable() {
         return;
     }
+    let my_root = root_vehicle(me.id, me.vehicle, ctx);
     let rules = ctx.blocks().block_game_rules();
     let cap = rules.max_entity_collisions;
     let tick = ctx.blocks().game_time();
@@ -2339,6 +2392,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             && !other.removed
             && public.is_alive()
             && public.mob_type.is_pushable()
+            && root_vehicle(other.uid, other.vehicle, ctx) != my_root
         {
             others.push((other.uid, other.position));
             if iron_golem {

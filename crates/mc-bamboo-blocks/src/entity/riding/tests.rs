@@ -76,27 +76,18 @@ fn starting_a_ride_refuses_cycles_and_the_dismount_cooldown() {
 fn dismounting_clears_both_sides_and_blocks_remounting_for_sixty_ticks() {
     let mut passenger = entity(2, MobType::Skeleton, 0.5);
     passenger.vehicle = Some(1);
+    let position = passenger.position;
     let mut list = vec![2];
-    dismount(
-        &mut passenger,
-        Some(Vec3::new(1.5, 65.0, 0.5)),
-        Some(&mut list),
-    );
+    dismount(&mut passenger, Some(&mut list));
     assert_eq!(passenger.vehicle, None);
     assert_eq!(passenger.boarding_cooldown, 60);
-    assert_eq!(passenger.position, Vec3::new(1.5, 65.0, 0.5));
+    // 官方只有玩家会按 `getDismountLocationForPassenger` 挪位置，生物乘客不动。
+    assert_eq!(passenger.position, position);
     assert!(list.is_empty());
     // 载具已经离表时也照样把乘客这边摘干净。
     passenger.vehicle = Some(1);
-    dismount(&mut passenger, None, None);
+    dismount(&mut passenger, None);
     assert_eq!(passenger.vehicle, None);
-}
-
-#[test]
-fn the_default_dismount_spot_is_the_top_of_the_vehicle_box() {
-    let spider = entity(1, MobType::Spider, 0.5).split().public;
-    let at = dismount_location(&spider);
-    assert_eq!(at, Vec3::new(0.5, 64.0 + f64::from(0.9_f32), 0.5));
 }
 
 #[test]

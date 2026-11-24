@@ -177,6 +177,23 @@ struct Case {
     /// Equine scenes: this player rides mob 0; -1 means nobody rides.
     #[serde(default = "minus_one")]
     rider: i32,
+    /// 骑乘场景：这名下标上的生物骑上另一名下标的生物，-1 表示没有生物骑乘。
+    ///
+    /// Riding scenes: this mob rides another; -1 means no mob-on-mob riding.
+    #[serde(default = "minus_one")]
+    ride_passenger: i32,
+    #[serde(default = "minus_one")]
+    ride_vehicle: i32,
+    /// 骑乘场景：所有生物都持久化，避开 `checkDespawn` 取数顺序的差异。
+    ///
+    /// Riding scenes: every mob is persistent, avoiding `checkDespawn` draw order.
+    #[serde(default)]
+    persisted: bool,
+    /// 骑乘场景：所有生物都 `setNoAi(true)`。
+    ///
+    /// Riding scenes: every mob has `setNoAi(true)`.
+    #[serde(default)]
+    no_ai: bool,
     hurts: Vec<[i32; 4]>,
     #[serde(default)]
     summons: Vec<SummonSetup>,
@@ -1771,6 +1788,7 @@ impl Report {
                     21 => mc_bamboo_blocks::entity::mob::MobType::Ocelot,
                     22 => mc_bamboo_blocks::entity::mob::MobType::Cat,
                     23 => mc_bamboo_blocks::entity::mob::MobType::Parrot,
+                    44 => mc_bamboo_blocks::entity::mob::MobType::Skeleton,
                     40 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
                     41 => mc_bamboo_blocks::entity::mob::MobType::Spider,
                     42 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,
@@ -1978,6 +1996,19 @@ impl Report {
                         }
                     });
                 }
+                if case.persisted || case.no_ai {
+                    // 骑乘场景：和官方 `setPersistenceRequired` / `setNoAi` 一样设置。
+                    world.with_entity_mut(id, &mut |entity| {
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            if case.persisted {
+                                mob.persistence_required = true;
+                            }
+                            if case.no_ai {
+                                mob.no_ai = true;
+                            }
+                        }
+                    });
+                }
                 ids.push(id);
             }
             // 骑乘场景：官方 `startRiding` 之后，0 号生物身上坐着这名玩家。
@@ -1993,6 +2024,17 @@ impl Report {
                         mob.passengers.push(rider);
                     }
                 });
+            }
+            // 骑乘场景：官方 `startRiding(vehicle, false, false)`。
+            // Riding scenes: vanilla `startRiding(vehicle, false, false)`.
+            if case.ride_passenger >= 0
+                && case.ride_vehicle >= 0
+                && let (Some(&passenger), Some(&vehicle)) = (
+                    ids.get(case.ride_passenger as usize),
+                    ids.get(case.ride_vehicle as usize),
+                )
+            {
+                world.start_riding(passenger, vehicle);
             }
         }
         let Some(first) = case.steps.first() else {
@@ -4424,7 +4466,13 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             .map_or(0, |state| i32::from(state.flags())),
         tmp: mob.equine.as_ref().map_or(0, |state| state.temper),
         brain: String::new(),
-        rider_count: mob.passengers.len(),
+        // 官方只对马科打印 `rider_count`，其它生物缺省是 0。
+        // Vanilla prints `rider_count` only for equines; other mobs default to 0.
+        rider_count: if mob.mob_type.is_equine() {
+            mob.passengers.len()
+        } else {
+            0
+        },
         owner: mob
             .equine
             .as_ref()

@@ -3825,13 +3825,9 @@ impl<'a> World<'a> {
             };
             if passenger.vehicle != Some(vehicle.uid) || passenger.removed {
                 // 关系已经断了：官方 `tickPassenger` 在这里调 `stopRiding`，两边的关系
-                // 一起摘掉，乘客落回载具顶上。
+                // 一起摘掉。生物乘客不挪位置。
                 self.remove_passenger_from(vehicle.uid, passenger_id);
-                let spot = self
-                    .level
-                    .entity_public(vehicle.uid)
-                    .map(|public| crate::entity::riding::dismount_location(&public));
-                crate::entity::riding::dismount(&mut passenger, spot, None);
+                crate::entity::riding::dismount(&mut passenger, None);
                 self.level.put_entity(passenger);
                 continue;
             }
@@ -3849,19 +3845,22 @@ impl<'a> World<'a> {
             }
             // 载具此刻的公开快照：它自己的 tick 已经落地，位置是这一刻末的值。
             let Some(current) = ctx.into_world().level.entity_public(vehicle.uid) else {
-                // 载具这一刻被移除了：乘客按最后的公开数据下车。
-                crate::entity::riding::dismount(
-                    &mut passenger,
-                    Some(crate::entity::riding::dismount_location(vehicle)),
-                    None,
-                );
+                // 载具这一刻被移除了：乘客停在原地，只摘关系。
+                crate::entity::riding::dismount(&mut passenger, None);
                 self.level.put_entity(passenger);
                 continue;
             };
             let passenger_public = passenger.clone().split().public;
             let at = crate::entity::riding::rider_position(&current, &passenger_public, index);
             passenger.position = at;
-            passenger.delta = mc_bamboo_core::Vec3::default();
+            // 官方的 `checkDespawn` 在 uid 顺序里对每个实体各来一次：乘客的那次排在
+            // 它的 `rideTick` 之后，由这里补上（`tick_mob` 对乘客已经跳过）。
+            // Vanilla checks despawn once per entity in uid order; a passenger's
+            // check comes after its `rideTick`, so it happens here.
+            if !passenger.removed {
+                let mut check = crate::entity::ctx::PreciseCtx::with_plan(self, passenger_id, plan);
+                crate::entity::mob::living::check_despawn_entity(&mut passenger, &mut check);
+            }
             // 乘客可能自己也是载具：递归跑它的乘客树。锚点要用 `positionRider`
             // 之后的乘客位置，所以重新拆一次公开快照。
             let nested = passenger.clone().split().public;
@@ -3882,22 +3881,19 @@ impl<'a> World<'a> {
     }
 
     /// `setRemoved` / `ejectPassengers`：载具离场时把仍在表里的实体乘客摘掉，
-    /// 落到载具当时的包围盒顶上，并给 60 刻冷却。
+    /// 各给 60 刻冷却；生物乘客停在原地（官方只有玩家会重新落位）。
     ///
     /// `setRemoved` / `ejectPassengers`: drop entity passengers when their vehicle
-    /// leaves, landing them on the vehicle's bounding-box top with a 60-tick cooldown.
+    /// leaves and give each a 60-tick cooldown; mob passengers stay put (only
+    /// players get a dismount location in vanilla).
     fn eject_passengers_of(&mut self, vehicle: &crate::entity::Entity) {
         let Some(list) = entity_passengers(vehicle) else {
             return;
         };
-        let public = vehicle.clone().split().public;
-        self.eject_passenger_ids(
-            &list,
-            Some(crate::entity::riding::dismount_location(&public)),
-        );
+        self.eject_passenger_ids(&list);
     }
 
-    fn eject_passenger_ids(&mut self, list: &[EntityUid], spot: Option<Vec3>) {
+    fn eject_passenger_ids(&mut self, list: &[EntityUid]) {
         for &passenger_id in list {
             if passenger_id < crate::entity::FIRST_ENTITY_ID {
                 continue;
@@ -3905,7 +3901,7 @@ impl<'a> World<'a> {
             let Some(mut passenger) = self.level.take_entity(passenger_id) else {
                 continue;
             };
-            crate::entity::riding::dismount(&mut passenger, spot, None);
+            crate::entity::riding::dismount(&mut passenger, None);
             if passenger.removed {
                 self.level.keep_departed_mob_events(&passenger);
             } else {
@@ -3913,7 +3909,7 @@ impl<'a> World<'a> {
                 let nested = entity_passengers(&passenger);
                 self.level.put_entity(passenger);
                 if let Some(ids) = nested {
-                    self.eject_passenger_ids(&ids, spot);
+                    self.eject_passenger_ids(&ids);
                 }
             }
         }

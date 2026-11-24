@@ -102,34 +102,43 @@ fn passenger_attachment(vehicle: &EntityPublic, index: usize) -> Vec3 {
         return Vec3::new(0.0, f64::from(height), 0.0);
     };
     let (_, height) = mob.dimensions();
-    let (x, y, z): (f32, f32, f32) = match mob.mob_type {
-        MobType::Spider => (0.0, 0.765_f32, 0.0),
-        MobType::Chicken => (0.0, 0.7_f32, -0.1_f32),
-        MobType::Cow | MobType::Mooshroom => (0.0, 1.368_75_f32, 0.0),
-        MobType::Sheep => (0.0, 1.2375_f32, 0.0),
-        MobType::Pig => (0.0, 0.868_75_f32, 0.0),
-        MobType::Goat => (0.0, 1.1125_f32, 0.0),
-        MobType::Cat => (0.0, 0.5125_f32, 0.0),
-        MobType::Ocelot => (0.0, 0.6375_f32, 0.0),
-        MobType::Parrot => (0.0, 0.4625_f32, 0.0),
-        MobType::Silverfish | MobType::Endermite => (0.0, 0.2375_f32, 0.0),
-        MobType::Witch => (0.0, 2.2625_f32, 0.0),
-        MobType::Enderman => (0.0, 2.806_25_f32, 0.0),
-        MobType::Zombie | MobType::Drowned => (0.0, 2.0125_f32, 0.0),
-        MobType::Husk => (0.0, 2.075_f32, 0.0),
-        MobType::Wolf => (0.0, 0.818_75_f32, -0.0625_f32),
-        MobType::Fox => (0.0, 0.6375_f32, -0.25_f32),
-        MobType::Frog => (0.0, 0.375_f32, -0.25_f32),
-        MobType::Turtle => (0.0, 0.556_25_f32, -0.25_f32),
-        MobType::Llama => (0.0, 1.37_f32, -0.3_f32),
-        MobType::Phantom => (0.0, 0.3375_f32, 0.0),
-        MobType::Horse => (0.0, 1.443_75_f32, 0.0),
-        MobType::Donkey => (0.0, 1.1125_f32, 0.0),
-        MobType::Mule => (0.0, 1.2125_f32, 0.0),
-        _ => (0.0, height, 0.0),
+    // 注册表里的 PASSENGER 点是 JSON 里的双精度数，按 f64 原样用；`ridingOffset`
+    // 给 VEHICLE 点是 f32，两者不能混（0.7 和 0.7f 差 1.19e-8）。
+    // Registered PASSENGER points are doubles from JSON and stay f64 here; the
+    // VEHICLE points from `ridingOffset` are f32, and mixing them would show.
+    let (x, y, z): (f64, f64, f64) = match mob.mob_type {
+        // 数值按官方 `EntityTypes` 里注册表实际存的 f64 / f32 位模式抄：有的点是
+        // JSON 双精度字面量，有的是 f32 算出来的（0.765 是 0.7649999856948853）。
+        // Values are the exact bits registered in vanilla `EntityTypes`: some are
+        // JSON doubles, some came out of f32 math (0.765 is 0.7649999856948853).
+        MobType::Spider => (0.0, 0.7649999856948853, 0.0),
+        MobType::Chicken => (0.0, 0.7, -0.1),
+        MobType::Cow | MobType::Mooshroom => (0.0, 1.368749976158142, 0.0),
+        MobType::Sheep => (0.0, 1.2374999523162842, 0.0),
+        MobType::Pig => (0.0, 0.8687499761581421, 0.0),
+        MobType::Goat => (0.0, 1.1124999523162842, 0.0),
+        MobType::Cat => (0.0, 0.512499988079071, 0.0),
+        MobType::Ocelot => (0.0, 0.637499988079071, 0.0),
+        MobType::Parrot => (0.0, 0.4625000059604645, 0.0),
+        MobType::Silverfish | MobType::Endermite => (0.0, 0.23749999701976776, 0.0),
+        MobType::Witch => (0.0, 2.262500047683716, 0.0),
+        MobType::Enderman => (0.0, 2.8062500953674316, 0.0),
+        MobType::Zombie | MobType::Drowned => (0.0, 2.012500047683716, 0.0),
+        MobType::Husk => (0.0, 2.075000047683716, 0.0),
+        MobType::Skeleton => (0.0, 1.9900000095367432, 0.0),
+        MobType::Wolf => (0.0, 0.81875, -0.0625),
+        MobType::Fox => (0.0, 0.6375, -0.25),
+        MobType::Frog => (0.0, 0.375, -0.25),
+        MobType::Turtle => (0.0, 0.55625, -0.25),
+        MobType::Llama => (0.0, 1.37, -0.3),
+        MobType::Phantom => (0.0, 0.3375000059604645, 0.0),
+        MobType::Horse => (0.0, 1.443750023841858, 0.0),
+        MobType::Donkey => (0.0, 1.1124999523162842, 0.0),
+        MobType::Mule => (0.0, 1.212499976158142, 0.0),
+        _ => (0.0, f64::from(height), 0.0),
     };
     let _ = index; // 已建模的载具都只有一个附着点，`getClamped` 恒取 0 号。
-    Vec3::new(x.into(), y.into(), z.into())
+    Vec3::new(x, y, z)
 }
 
 /// 乘客的 `EntityAttachment.VEHICLE` 附着点：缺省脚底 0；`EntityTypes.ridingOffset(-0.7)`
@@ -148,8 +157,8 @@ fn vehicle_attachment(passenger: &EntityPublic) -> Vec3 {
         | MobType::Drowned
         | MobType::Skeleton
         | MobType::Stray
-        | MobType::Bogged
-        | MobType::Pillager => 0.7_f32,
+        | MobType::Bogged => 0.7_f32,
+        MobType::Pillager => 0.6_f32,
         MobType::Phantom => 0.125_f32,
         _ => 0.0,
     };
@@ -168,40 +177,20 @@ pub fn rider_position(vehicle: &EntityPublic, passenger: &EntityPublic, index: u
     vehicle.position.add(mount).subtract(feet)
 }
 
-/// `Entity.getDismountLocationForPassenger` 的缺省实现：载具 x、AABB 顶、载具 z。
-/// `Animal` 的 `DismountHelper` 版本没有建模（README 的已知限制）。
+/// `Entity.removeVehicle` 的实体乘客版：摘掉两边关系，给乘客 60 刻冷却。
+/// 官方只有玩家（`Avatar.removeVehicle`）会按 `getDismountLocationForPassenger` 挪位置；
+/// 生物乘客停在被摘下的那一刻的位置，这里同样不挪。
 ///
-/// The default `Entity.getDismountLocationForPassenger`: vehicle x, bounding-box
-/// top, vehicle z. `Animal`'s `DismountHelper` version is not modelled.
-pub fn dismount_location(vehicle: &EntityPublic) -> Vec3 {
-    Vec3::new(
-        vehicle.position.x,
-        vehicle.bounding_box().max_y,
-        vehicle.position.z,
-    )
-}
-
-/// `LivingEntity.stopRiding → dismountVehicle` 的落地：算好落点、摘掉两边关系、
-/// 给乘客 60 刻冷却。乘客自己（`Entity.vehicle`）与载具名单的清理分开做，因为
-/// 载具可能已经不在表里（被移除时）。
-///
-/// The landing half of `LivingEntity.stopRiding → dismountVehicle`: compute the
-/// landing spot, clear both sides and give the passenger a 60-tick cooldown.
-pub fn dismount(
-    passenger: &mut crate::entity::Entity,
-    vehicle_position: Option<Vec3>,
-    passengers: Option<&mut Vec<EntityUid>>,
-) {
+/// The entity-passenger half of `Entity.removeVehicle`: clear both sides and give
+/// the passenger a 60-tick cooldown. Vanilla repositions only players
+/// (`Avatar.removeVehicle` calls `getDismountLocationForPassenger`); mob
+/// passengers keep the position they had when unmounted, so this does not move.
+pub fn dismount(passenger: &mut crate::entity::Entity, passengers: Option<&mut Vec<EntityUid>>) {
     if passenger.vehicle.is_none() {
         return;
     }
     passenger.vehicle = None;
     passenger.boarding_cooldown = 60;
-    if let Some(position) = vehicle_position {
-        passenger.position = position;
-        passenger.old_position = position;
-        passenger.delta = Vec3::default();
-    }
     if let Some(list) = passengers {
         list.retain(|&uid| uid != passenger.id);
     }
