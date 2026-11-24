@@ -241,6 +241,8 @@ mod bench_tests {
             command_blocks: BTreeMap::new(),
             books: BTreeMap::new(),
             entities: Default::default(),
+            poi: Default::default(),
+            poi_version_changed: false,
         })
     }
 

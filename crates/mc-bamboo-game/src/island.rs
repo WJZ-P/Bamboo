@@ -1684,6 +1684,15 @@ impl Island {
             .into_iter()
             .filter(|&pos| region.chunks.is_loaded(pos))
             .collect();
+        // POI 的脏标记按区块分组，照官方 `SectionStorage.tick` 在写盘时取走。
+        // 写失败时主控的 `retry_dirty` 会重新标脏（它同时记进 `changes.content`）。
+        changes.content.extend(
+            region
+                .poi
+                .take_dirty_chunks()
+                .into_iter()
+                .filter(|&pos| region.chunks.is_loaded(pos)),
+        );
         region.profiler.end_sub();
         changes
     }

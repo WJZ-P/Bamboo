@@ -28,7 +28,7 @@ pub(super) fn speed(mut next: impl FnMut() -> f64) -> f64 {
 }
 
 /// `AbstractHorse.generateJumpStrength`。
-pub(super) fn jump(mut next: impl FnMut() -> f64) -> f64 {
+pub(in crate::entity::mob) fn jump(mut next: impl FnMut() -> f64) -> f64 {
     f64::from(0.4_f32) + next() * 0.2 + next() * 0.2 + next() * 0.2
 }
 

@@ -105,6 +105,7 @@ pub(crate) struct PendingWrite {
     pub(crate) seq: SaveSeq,
     pub(crate) chunk: Option<Vec<u8>>,
     pub(crate) entities: Option<Vec<u8>>,
+    pub(crate) poi: Option<Vec<u8>>,
 }
 #[cfg(not(test))]
 struct PendingWrite {
@@ -112,6 +113,7 @@ struct PendingWrite {
     seq: SaveSeq,
     chunk: Option<Vec<u8>>,
     entities: Option<Vec<u8>>,
+    poi: Option<Vec<u8>>,
 }
 
 /// 主控判脏的结果。
@@ -604,7 +606,13 @@ impl DirectorHost {
         // waits for its own barrier (review 8/9).
         for pending in self.save_queue.drain(..) {
             if let Some(io) = &self.io {
-                io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
+                io.submit_write_with_poi(
+                    pending.pos,
+                    pending.seq,
+                    pending.chunk,
+                    pending.entities,
+                    pending.poi,
+                );
             }
         }
         self.save_all_requests.push_back((source, seqs));
@@ -1346,7 +1354,13 @@ impl DirectorHost {
         }
         if let Some(io) = &self.io {
             for pending in to_write {
-                io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
+                io.submit_write_with_poi(
+                    pending.pos,
+                    pending.seq,
+                    pending.chunk,
+                    pending.entities,
+                    pending.poi,
+                );
             }
         }
     }
@@ -1489,7 +1503,13 @@ impl DirectorHost {
                 let Some(pending) = self.save_queue.pop_front() else {
                     break;
                 };
-                io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
+                io.submit_write_with_poi(
+                    pending.pos,
+                    pending.seq,
+                    pending.chunk,
+                    pending.entities,
+                    pending.poi,
+                );
             }
         }
     }
@@ -1629,7 +1649,13 @@ impl DirectorHost {
         // `saveEverything`), still through the bounded queue.
         if let Some(io) = &self.io {
             for pending in self.save_queue.drain(..) {
-                io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
+                io.submit_write_with_poi(
+                    pending.pos,
+                    pending.seq,
+                    pending.chunk,
+                    pending.entities,
+                    pending.poi,
+                );
             }
         }
     }
@@ -1666,6 +1692,7 @@ impl DirectorHost {
                         seq,
                         chunk: packed.chunk,
                         entities: packed.entities,
+                        poi: packed.poi,
                     });
                     self.pending_writes.insert(pos, seq);
                     // 「已保存」只在 Written 回执到达时记（复查「致命 2」）：
@@ -1850,6 +1877,7 @@ impl DirectorHost {
                     seq,
                     chunk: packed.chunk,
                     entities: packed.entities,
+                    poi: packed.poi,
                 }),
                 Err(error) => {
                     tracing::error!(%error, ?pos, "could not encode a parked chunk at shutdown")
@@ -1864,7 +1892,13 @@ impl DirectorHost {
         if let Some(io) = &self.io {
             for pending in self.save_queue.drain(..) {
                 unsaved.push(pending.pos);
-                io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
+                io.submit_write_with_poi(
+                    pending.pos,
+                    pending.seq,
+                    pending.chunk,
+                    pending.entities,
+                    pending.poi,
+                );
             }
         }
         self.posts.clear();
@@ -2319,6 +2353,7 @@ impl DirectorHost {
                     seq,
                     chunk: packed.chunk,
                     entities: packed.entities,
+                    poi: packed.poi,
                 });
                 self.pending_writes.insert(pos, seq);
                 // 卸载写不进已加载判脏路径；回执仍要清掉在途标记。
@@ -2653,6 +2688,7 @@ impl DirectorHost {
                     generation,
                     chunk,
                     entities,
+                    poi,
                     error,
                 } => {
                     let bytes = match error {
@@ -2661,7 +2697,14 @@ impl DirectorHost {
                             None
                         }
                         None if chunk.is_none() => None,
-                        None => Some(PackedChunk { chunk, entities }.pack()),
+                        None => Some(
+                            PackedChunk {
+                                chunk,
+                                entities,
+                                poi,
+                            }
+                            .pack(),
+                        ),
                     };
                     done.push(Event::TaskDone {
                         id: task_id,
@@ -3302,6 +3345,7 @@ mod tests {
                 seq: i as u64,
                 chunk: Some(vec![1]),
                 entities: None,
+                poi: None,
             });
         }
         host.pace_saves(1);
@@ -3368,6 +3412,7 @@ mod tests {
             seq,
             chunk: Some(vec![seq as u8]),
             entities: None,
+            poi: None,
         };
         host.enqueue_snapshot(snapshot(1));
 
@@ -3397,6 +3442,7 @@ mod tests {
             seq,
             chunk: Some(vec![seq as u8]),
             entities: None,
+            poi: None,
         };
         host.enqueue_snapshot(snapshot(pos, 1));
         host.enqueue_snapshot(snapshot(other, 1));
@@ -3425,6 +3471,7 @@ mod tests {
                 seq: i as u64,
                 chunk: Some(vec![1]),
                 entities: None,
+                poi: None,
             });
         }
         assert!(host.save_backpressure());
@@ -3514,6 +3561,7 @@ mod tests {
             seq: 5,
             chunk: Some(vec![1]),
             entities: None,
+            poi: None,
         });
 
         host.pace_saves(1);
@@ -3543,6 +3591,7 @@ mod tests {
                 seq: 100 + u64::from(i),
                 chunk: Some(vec![2]),
                 entities: None,
+                poi: None,
             });
             host.pace_saves(2 + u64::from(i));
             let _ = host.io().unwrap().flush(); // 故意写失败，flush 如实报 Err，只当同步点
@@ -3644,6 +3693,7 @@ mod tests {
             seq: 100,
             chunk: Some(vec![7]),
             entities: None,
+            poi: None,
         });
         host.parking.park(pos, column);
 

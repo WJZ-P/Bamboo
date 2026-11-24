@@ -151,6 +151,38 @@ impl JavaRandom {
     }
 }
 
+/// 把实体的 `JavaRandom`（`&mut self` 接口）适配成 `RandomSource`（`&self` 接口）。
+/// 官方有些生成路径传入的是实体自己的 `getRandom()`，例如陷阱骑士的
+/// `enchantItemFromProvider`；适配器让这些调用复用同一份 48 位状态。
+///
+/// Adapts an entity's `JavaRandom` to the `RandomSource` trait so vanilla paths
+/// that pass `getRandom()` share the same 48-bit state.
+pub struct EntityRandom(pub std::cell::RefCell<JavaRandom>);
+
+impl crate::random::RandomSource for EntityRandom {
+    fn next_int_unbounded(&self) -> i32 {
+        self.0.borrow_mut().next_int()
+    }
+    fn next_int(&self, bound: i32) -> i32 {
+        self.0.borrow_mut().next_int_bounded(bound)
+    }
+    fn next_long(&self) -> i64 {
+        self.0.borrow_mut().next_long()
+    }
+    fn next_boolean(&self) -> bool {
+        self.0.borrow_mut().next_boolean()
+    }
+    fn next_float(&self) -> f32 {
+        self.0.borrow_mut().next_float()
+    }
+    fn next_double(&self) -> f64 {
+        self.0.borrow_mut().next_double()
+    }
+    fn next_gaussian(&self) -> f64 {
+        self.0.borrow_mut().next_gaussian()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,6 +11,7 @@
 
 pub mod arrow;
 pub mod ctx;
+pub mod lightning;
 pub mod mob;
 pub mod parallel;
 pub mod random;
@@ -42,7 +43,7 @@ pub use physics::{
     TravelSegment, collide_border_only, enclosed_in_air, no_block_collision, overlaps_new_blocks,
     stuck_speed, sweep_movement,
 };
-pub use random::JavaRandom;
+pub use random::{EntityRandom, JavaRandom};
 pub use store::{
     ChunkEntities, EntityIds, EntityPublic, EntityRow, EntityState, EntityStore, EntityUid,
     FallingBlockState, ItemState, KindPublic, KindState,
@@ -220,6 +221,10 @@ pub enum EntityKind {
     ///
     /// A thrown splash potion.
     SplashPotion(Box<splash_potion::SplashPotion>),
+    /// 闪电，`LightningBolt`。
+    ///
+    /// A lightning bolt, vanilla `LightningBolt`.
+    LightningBolt(Box<lightning::LightningBolt>),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -238,6 +243,7 @@ impl EntityKind {
             Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(egg) => egg.kind.entity_type(),
             Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
+            Self::LightningBolt(_) => mc_bamboo_data::registries::entity_type::LIGHTNING_BOLT,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -467,6 +473,7 @@ impl Entity {
             EntityKind::LlamaSpit(_) => spit::tick(self, ctx),
             EntityKind::Egg(_) => thrown_egg::tick(self, ctx),
             EntityKind::SplashPotion(_) => splash_potion::tick(self, ctx),
+            EntityKind::LightningBolt(_) => lightning::tick(self, ctx),
             EntityKind::Mob(_) => {}
         }
     }

@@ -43,6 +43,7 @@ pub(crate) struct BorrowedParts {
     command_blocks: BTreeMap<BlockPos, CommandBlockData>,
     books: BTreeMap<BlockPos, Book>,
     entities: ChunkEntities,
+    poi: mc_bamboo_world::poi::PoiColumn,
 }
 
 impl BorrowedParts {
@@ -79,6 +80,7 @@ impl BorrowedParts {
         let block_items = clone_in_chunk(&region.block_items, pos);
         let command_blocks = clone_in_chunk(&region.command_blocks, pos);
         let books = clone_in_chunk(&region.lecterns.books, pos);
+        let poi = region.poi.column_snapshot(pos);
 
         Some(Self {
             column,
@@ -90,6 +92,7 @@ impl BorrowedParts {
             command_blocks,
             books,
             entities,
+            poi,
         })
     }
 }
@@ -141,6 +144,10 @@ impl EncodeParts for BorrowedParts {
 
     fn preserved_entities(&self) -> &[Tag] {
         self.entities.preserved()
+    }
+
+    fn poi(&self) -> Option<&mc_bamboo_world::poi::PoiColumn> {
+        Some(&self.poi)
     }
 }
 

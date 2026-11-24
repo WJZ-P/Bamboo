@@ -751,6 +751,8 @@ pub(super) fn check_spawn_rules(
         | MobType::Donkey
         | MobType::Mule
         | MobType::Llama
+        | MobType::SkeletonHorse
+        | MobType::ZombieHorse
         | MobType::Cat => animal_spawn_rules(world, pos),
         MobType::Mooshroom => super::mooshroom::spawn_rules(world, pos),
         MobType::PolarBear => super::polar_bear::spawn_rules(world, pos),
