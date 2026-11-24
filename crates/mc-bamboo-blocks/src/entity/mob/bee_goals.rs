@@ -474,8 +474,18 @@ impl BeeGoal {
                 }
             }
             Self::EnterHive => {
-                if let Some(hive) = mob.bee.hive_pos {
-                    ctx.emit(Command::BeeEnterHive { hive }, me);
+                if let Some(hive) = mob.bee.hive_pos
+                    && let Some(occupant) =
+                        crate::behaviour::machines::beehive_entity::Occupant::of_mob(me, mob)
+                {
+                    ctx.emit(
+                        Command::BeeEnterHive {
+                            hive,
+                            occupant: Box::new(occupant),
+                            saved_flower: mob.bee.saved_flower_pos,
+                        },
+                        me,
+                    );
                 }
             }
             Self::ValidateHive {
@@ -1077,21 +1087,25 @@ fn grown_state(state: BlockState) -> Option<BlockState> {
 }
 
 /// `Command::BeeEnterHive` 的落地：存进巢、发进巢声，然后把自己丢掉。
-pub fn apply_enter_hive(me: &mut Entity, world: &mut World, hive: BlockPos) {
-    let bee_has_flower = me
-        .kind
-        .mob()
-        .is_some_and(|mob| mob.bee.saved_flower_pos.is_some());
-    let row = me.clone().split();
+pub fn apply_enter_hive(
+    me: &mut Entity,
+    world: &mut World,
+    hive: BlockPos,
+    occupant: crate::behaviour::machines::beehive_entity::Occupant,
+    saved_flower: Option<BlockPos>,
+) {
     let stored = world.with_block_entity::<BeehiveEntity, _>(hive, |entity, world| {
         if entity.is_full() {
             return false;
         }
         // 官方 `BeehiveBlockEntity.addOccupant`：蜂和巢都有记住的花时才抽 `nextBoolean()`。
         // Vanilla `addOccupant`: draw `nextBoolean()` only when both bee and hive have a flower.
-        let keep_flower = bee_has_flower
-            && (entity.saved_flower_pos().is_none() || world.random().next_boolean());
-        entity.add_bee(&row, keep_flower)
+        if let Some(flower) = saved_flower
+            && (entity.saved_flower_pos().is_none() || world.random().next_boolean())
+        {
+            entity.set_saved_flower_pos(Some(flower));
+        }
+        entity.store(occupant)
     });
     if stored == Some(true) {
         world.play_sound(

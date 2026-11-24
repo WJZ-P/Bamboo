@@ -1362,6 +1362,8 @@ pub enum Command {
     /// 蜜蜂进巢：把当前生物存进 `BeehiveBlockEntity`，再把它从实体表里移除。
     BeeEnterHive {
         hive: BlockPos,
+        occupant: Box<crate::behaviour::machines::beehive_entity::Occupant>,
+        saved_flower: Option<BlockPos>,
     },
     /// 蜜蜂授粉作物：写方块状态并发 2011 事件。
     BeeGrowCrop {
@@ -1868,7 +1870,11 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::SetMobDelta { target, delta } => {
             world.with_listed_entity_mut(target, &mut |entity| entity.delta = delta);
         }
-        Command::BeeEnterHive { hive } => super::mob::bee_goals::apply_enter_hive(me, world, hive),
+        Command::BeeEnterHive {
+            hive,
+            occupant,
+            saved_flower,
+        } => super::mob::bee_goals::apply_enter_hive(me, world, hive, *occupant, saved_flower),
         Command::BeeGrowCrop { pos, state } => {
             world.level_event(2011, pos, 15);
             let _ = world.set_block_and_update(pos, state);

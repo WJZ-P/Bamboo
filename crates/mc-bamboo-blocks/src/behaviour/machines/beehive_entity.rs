@@ -96,6 +96,15 @@ impl Occupant {
         })
     }
 
+    /// 在 `living::with_mob` 临时拆出 `Mob` 的期间把实体与 `Mob` 拼回成 `Occupant`。
+    ///
+    /// Build an `Occupant` while `living::with_mob` holds `Mob` outside `Entity.kind`.
+    pub fn of_mob(me: &Entity, mob: &crate::entity::mob::Mob) -> Option<Self> {
+        let mut full = me.clone();
+        full.kind = crate::entity::EntityKind::Mob(Box::new(mob.clone()));
+        Self::of(&full.split())
+    }
+
     /// `BeeData.hasNectar()`。
     pub fn has_nectar(&self) -> bool {
         tag::bool_or(&self.entity_data, "HasNectar", false)
