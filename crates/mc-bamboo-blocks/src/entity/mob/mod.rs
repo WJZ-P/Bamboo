@@ -679,7 +679,6 @@ impl MobType {
                 | Self::Pillager
                 | Self::Ocelot
                 | Self::Cat
-                | Self::Bee
         )
     }
 
