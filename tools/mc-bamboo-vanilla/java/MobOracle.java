@@ -449,6 +449,14 @@ public final class MobOracle {
                     cases++;
                 }
             }
+            if (only == null || only.startsWith("bee_locate")) {
+                for (String name : List.of("bee_locate_order", "bee_locate_full",
+                        "bee_locate_nest", "bee_locate_breaks")) {
+                    if (only != null && !name.startsWith(only)) continue;
+                    playBeeLocate(official, out, name);
+                    cases++;
+                }
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -9016,6 +9024,151 @@ public final class MobOracle {
      * `stayOutOfHiveCountdown` 和世界随机源。六个场景分别覆盖白天出巢、夜间留在巢里、
      * 下雨留在巢里、带花蜜回巢加蜜、满蜜不再加、营火安抚时取蜜让蜂暂时不回巢。
      */
+    /** 蜜蜂找巢候选表的有界对拍（不跑真目标链 / 寻路，复用 NoAI 夹具思想）：
+     *  官方 `PoiManager.getInRange(#bee_home, blockPosition, 20, ANY)` 给有序候选，
+     *  按 `BeehiveBlockEntity.isFull()` 过滤满巢（本场景每个 POI 巢都挂了方块实体，
+     *  `full[i]` 就是 `isFull()` 的结果），再按
+     *  `Comparator.comparingDouble(blockPos.distSqr(pos))` 稳定排序。每刻只改哪些巢满，
+     *  逐刻比整张有序候选表：POI 遍历序、等距并列、满巢换巢、整数距离排序都在这里钉死。 */
+    private static void playBeeLocate(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        int[][] hives = beeLocateHives(name);  // [x, y, z, kind]  kind 0 = beehive, 1 = bee_nest
+        int[][] masks = beeLocateMasks(name);  // 每刻一行、每巢一列：1 = 满巢
+        // FakeLevel 自带的 PoiManager 没有可用的 LevelHeightAccessor（add 会 NPE），
+        // 这里仿照 PoiOracle 在临时目录里建一份独立实例，只用来跑 getInRange 的遍历序。
+        var dir = java.nio.file.Files.createTempDirectory("bamboo-bee-locate-");
+        var reporter = new net.minecraft.world.level.chunk.storage.ChunkIOErrorReporter() {
+            @Override public void reportChunkLoadFailure(Throwable error,
+                    net.minecraft.world.level.chunk.storage.RegionStorageInfo info,
+                    net.minecraft.world.level.ChunkPos pos) {}
+            @Override public void reportChunkSaveFailure(Throwable error,
+                    net.minecraft.world.level.chunk.storage.RegionStorageInfo info,
+                    net.minecraft.world.level.ChunkPos pos) {}
+        };
+        try (var poi = new net.minecraft.world.entity.ai.village.poi.PoiManager(
+                new net.minecraft.world.level.chunk.storage.RegionStorageInfo(
+                        "bee-locate", net.minecraft.world.level.Level.OVERWORLD, "poi"),
+                dir, net.minecraft.util.datafix.DataFixers.getDataFixer(), false,
+                official.registries, reporter,
+                net.minecraft.world.level.LevelHeightAccessor.create(-64, 384))) {
+        BlockPos center = new BlockPos(0, 64, 0);
+        java.util.List<BlockPos> positions = new java.util.ArrayList<>();
+        java.util.List<net.minecraft.core.Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> holders =
+                new java.util.ArrayList<>();
+        StringBuilder hivesJson = new StringBuilder("[");
+        for (int i = 0; i < hives.length; i++) {
+            int[] h = hives[i];
+            BlockPos pos = new BlockPos(h[0], h[1], h[2]);
+            BlockState state = h[3] == 1
+                    ? Blocks.BEE_NEST.defaultBlockState()
+                    : Blocks.BEEHIVE.defaultBlockState();
+            level.blocks.put(pos.asLong(), state);
+            holders.add(net.minecraft.world.entity.ai.village.poi.PoiTypes.forState(state).orElseThrow());
+            positions.add(pos);
+            if (i > 0) hivesJson.append(',');
+            hivesJson.append('[').append(h[0]).append(',').append(h[1]).append(',')
+                    .append(h[2]).append(',').append(Block.getId(state)).append(',').append(h[3]).append(']');
+        }
+        hivesJson.append(']');
+        // 官方同一 HashSet 桶内的记录保持插入序；按 (x,y,z) 排序登记，和 Bamboo 一致，
+        // 让「等距并列落在同一桶」时的先后可复现。
+        java.util.List<Integer> order = new java.util.ArrayList<>();
+        for (int i = 0; i < hives.length; i++) order.add(i);
+        order.sort(java.util.Comparator.comparingInt((Integer i) -> hives[i][0])
+                .thenComparingInt(i -> hives[i][1]).thenComparingInt(i -> hives[i][2]));
+        for (int i : order) poi.add(positions.get(i), holders.get(i));
+        java.util.function.Predicate<net.minecraft.core.Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> beeHome =
+                hh -> {
+                    var key = hh.unwrapKey();
+                    if (key.isEmpty()) return false;
+                    String p = key.get().identifier().getPath();
+                    return p.equals("beehive") || p.equals("bee_nest");
+                };
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick < masks.length; tick++) {
+            int[] mask = masks[tick];
+            java.util.Set<Long> full = new java.util.HashSet<>();
+            for (int i = 0; i < hives.length; i++) {
+                if (mask[i] != 0) full.add(positions.get(i).asLong());
+            }
+            // 官方 `findNearbyHivesWithSpace` 的等价计算：POI 遍历序 → 满巢过滤 → 整数 distSqr 稳定排序。
+            java.util.List<BlockPos> candidates = poi
+                    .getInRange(beeHome, center, 20,
+                            net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy.ANY)
+                    .map(net.minecraft.world.entity.ai.village.poi.PoiRecord::getPos)
+                    .filter(p -> !full.contains(p.asLong()))
+                    .sorted(java.util.Comparator.comparingDouble(p -> center.distSqr(p)))
+                    .collect(java.util.stream.Collectors.toList());
+            if (tick > 0) frames.append(',');
+            frames.append("{\"full\":[");
+            for (int i = 0; i < mask.length; i++) {
+                if (i > 0) frames.append(',');
+                frames.append(mask[i]);
+            }
+            frames.append("],\"candidates\":[");
+            for (int i = 0; i < candidates.size(); i++) {
+                if (i > 0) frames.append(',');
+                BlockPos p = candidates.get(i);
+                frames.append('[').append(p.getX()).append(',').append(p.getY()).append(',')
+                        .append(p.getZ()).append(']');
+            }
+            frames.append("]}");
+        }
+        frames.append(']');
+        out.write("{\"type\":\"beeLocate\",\"name\":" + jsonString(name)
+                + ",\"center\":[0,64,0],\"beePos\":[0.5,64.0,0.5]"
+                + ",\"hives\":" + hivesJson
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+        }
+    }
+
+    // 注意：官方 `PoiSection.byType` 的键是 Holder.Reference（identity hash），
+    // 多类型段内键序每次 JVM 都不同、不可复现（见 docs/villager-plan.md 偏差 1）。
+    // 所以每个场景的并列巢都用同一种 POI 类型，跨类型只在距离互不相同的时候混放；
+    // 这样并列取舍只落在可复现的 HashSet 桶序上。bee_nest 单独一个场景覆盖。
+    private static int[][] beeLocateHives(String name) {
+        if (name.equals("bee_locate_order")) {
+            // 全是 beehive：三个 d²=4 并列（同类型 → 可复现桶序），再 d²=9/25/36/49。
+            return new int[][]{
+                {0, 64, 2, 0}, {2, 64, 0, 0}, {0, 66, 0, 0},
+                {3, 64, 0, 0}, {0, 64, 5, 0}, {0, 64, -6, 0}, {0, 64, 7, 0},
+            };
+        }
+        if (name.equals("bee_locate_full")) {
+            // 最近的一巢中途变满，候选表里它消失、改去第二近的巢。
+            return new int[][]{
+                {0, 64, 2, 0}, {0, 64, 5, 0}, {4, 64, 0, 0},
+            };
+        }
+        if (name.equals("bee_locate_nest")) {
+            // 全是 bee_nest：一对 d²=9 并列 + 一个 d²=64，验证 #bee_home 也认 bee_nest。
+            return new int[][]{
+                {0, 64, 3, 1}, {3, 64, 0, 1}, {0, 64, 8, 1},
+            };
+        }
+        // (0,64,20) 正好在半径 20 的球面边界；(0,61,0)/(2,64,2) 是"整数排序 vs 浮点排序"翻转对。
+        // 距离全部互不相同，混类型也不会落到不可复现的键序并列上。
+        return new int[][]{
+            {0, 64, 20, 0}, {0, 61, 0, 0}, {2, 64, 2, 0},
+            {1, 64, 1, 0}, {0, 64, 4, 0},
+        };
+    }
+
+    private static int[][] beeLocateMasks(String name) {
+        if (name.equals("bee_locate_order")) {
+            return new int[][]{
+                {0, 0, 0, 0, 0, 0, 0}, {1, 0, 0, 0, 0, 0, 0}, {0, 0, 1, 0, 0, 0, 0},
+            };
+        }
+        if (name.equals("bee_locate_full") || name.equals("bee_locate_nest")) {
+            return new int[][]{{0, 0, 0}, {1, 0, 0}, {0, 0, 0}};
+        }
+        return new int[][]{
+            {0, 0, 0, 0, 0}, {0, 0, 0, 1, 0}, {0, 0, 0, 0, 0},
+        };
+    }
+
     /** 蜜蜂目标状态机的逐刻对拍：不跑真实的 POI / 寻路（假世界没有 POI 管理器），
      * 直接按官方字段推进 `Bee.aiStep` / `customServerAiStep` / 目标状态，
      * Bamboo 侧重放同一组判定。 */

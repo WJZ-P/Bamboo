@@ -195,6 +195,12 @@ impl Tree {
         while self.next_or_thread(vil).is_some() && self.previous_or_thread(vir).is_some() {
             vil = self.next_or_thread(vil).expect("刚检查过");
             vir = self.previous_or_thread(vir).expect("刚检查过");
+            // 官方是直接赋值 `vol = vol.previousOrThread()`；若为 null 会在后面
+            // `sol += vol.mod` 处抛 NPE，所以正常排版里轮廓线程保证它非空。Rust 没有
+            // null，这里用等价的兜底值，正常输入下这个分支永不生效。
+            // Vanilla assigns directly (a null here would NPE at `sol += vol.mod`);
+            // the contour threads keep it non-null. These `unwrap_or` guards are
+            // unreachable for valid trees.
             vol = self
                 .previous_or_thread(vol)
                 .unwrap_or(self.positions[parent].children[0]);
@@ -217,11 +223,21 @@ impl Tree {
         if self.next_or_thread(vil).is_some() && self.next_or_thread(vor).is_none() {
             self.positions[vor].thread = self.next_or_thread(vil);
             self.positions[vor].modifier += sil - sor;
-        } else if self.previous_or_thread(vir).is_some() && self.previous_or_thread(vol).is_none() {
-            self.positions[vol].thread = self.previous_or_thread(vir);
-            self.positions[vol].modifier += sir - sol;
+            // 官方字节码在设置右上轮廓 thread 后直接 `goto` 返回：这里保留原来的
+            // defaultAncestor（apportion 的参数），不更新成 this。Buchheim 算法里
+            // `defaultAncestor = v` 只在 else 分支执行。
+            // Vanilla jumps straight to the return here, leaving defaultAncestor as
+            // the incoming argument; `defaultAncestor = v` only runs in the else branch.
+            default_ancestor
+        } else {
+            if self.previous_or_thread(vir).is_some() && self.previous_or_thread(vol).is_none() {
+                self.positions[vol].thread = self.previous_or_thread(vir);
+                self.positions[vol].modifier += sir - sol;
+            }
+            // 官方在 else 分支里把 defaultAncestor 更新成 this 再返回。
+            // Vanilla sets defaultAncestor = this before returning from the else branch.
+            index
         }
-        index
     }
 
     /// 官方 `vil.getAncestor(this, defaultAncestor)`。
