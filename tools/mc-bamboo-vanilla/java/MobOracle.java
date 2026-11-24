@@ -507,7 +507,8 @@ public final class MobOracle {
                     "laser_player_elder", "laser_player_elder_hard",
                     "guardian_thorns_static", "guardian_thorns_moving",
                     "guardian_thorns_arrow",
-                    "laser_mob_victim_squid", "laser_mob_victim_axolotl")) {
+                    "laser_mob_victim_squid", "laser_mob_victim_axolotl",
+                    "laser_interrupt_close")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playGuardian(official, out, name);
                 cases++;
@@ -10320,12 +10321,13 @@ public final class MobOracle {
         boolean flop = name.startsWith("guardian_flop");
         boolean thorns = name.startsWith("guardian_thorns_");
         boolean mobVictim = name.startsWith("laser_mob_victim_");
+        boolean interrupt = name.startsWith("laser_interrupt_");
         int difficulty = name.contains("hard") ? 3 : 2;
         // 尖刺场景聚焦反伤判定本身（hurt 在 tick 5，再比一刻）；
         // 之后长时间的游走位移受 java.lang.Math.sin/cos 平台末位差影响。
         // Thorns scenes focus on the reflection itself (hurt at tick 5 plus one
         // tick); longer wandering motion is subject to Math.sin/cos platform diffs.
-        int ticks = thorns ? 6 : (laser || mobVictim ? 100 : 200);
+        int ticks = thorns ? 6 : (laser || mobVictim || interrupt ? 100 : 200);
         double[] guardianAt = flop ? new double[] {0.5, 61.0, 0.5}
                 : new double[] {0.5, 62.0, 0.5};
         FakeLevel world = FakeLevel.create(official);
@@ -10389,8 +10391,11 @@ public final class MobOracle {
         // Laser scenes add one survival player 8 blocks away (the selector needs
         // distSqr > 9) as a target; the player is not ticked and only the
         // guardian's state is compared.
+        // 玩家的初始位置：中途动作会改 player.position()，但 setup 要给初始位置。
+        // The player's initial position; mid-scene actions move player.position().
+        double[] playerAt = {thorns ? 1.5 : 8.5, 61.0, 0.5};
         ServerPlayer player = null;
-        if (laser || thorns) {
+        if (laser || thorns || interrupt) {
             GameProfile profile = new GameProfile(new UUID(1L, 2L), "GuardianTarget");
             player = new ServerPlayer(official.server, world, profile,
                     ClientInformation.createDefault());
@@ -10398,7 +10403,7 @@ public final class MobOracle {
             // 激光场景放 8 格外。
             // Thorns scenes put the player in melee range (the selector needs
             // distSqr > 9, so no laser); laser scenes place it 8 blocks away.
-            player.setPos(thorns ? 1.5 : 8.5, 61.0, 0.5);
+            player.setPos(playerAt[0], playerAt[1], playerAt[2]);
             setRandom(player, 42002L);
             player.setYRot(0.0F);
             player.setYHeadRot(0.0F);
@@ -10455,6 +10460,34 @@ public final class MobOracle {
                         : guardian.damageSources().playerAttack(player);
                 guardian.hurtServer(world, source, 1.0F);
             }
+            if (interrupt && tick == 30) {
+                if (name.contains("wall")) {
+                    // 挡住守卫者到玩家的视线（射线在 x=4..5 处撞墙）。
+                    // Block the guardian's line of sight to the player.
+                    for (int x = 4; x <= 5; x++) {
+                        for (int z = -2; z <= 2; z++) {
+                            for (int y = 61; y <= 63; y++) {
+                                world.blocks.put(BlockPos.asLong(x, y, z),
+                                        Blocks.STONE.defaultBlockState());
+                            }
+                        }
+                    }
+                } else if (name.contains("close")) {
+                    // 目标进到 3 格内（普通守卫者的 canContinueToUse 要求 distSqr > 9）。
+                    // Move the target within 3 blocks.
+                    player.setPos(2.5, 61.0, 0.5);
+                } else if (name.contains("kill")) {
+                    player.setHealth(0.0F);
+                } else if (name.contains("creative")) {
+                    // 直接设创造能力：`ServerPlayer.setGameMode` 会碰假世界里为 null
+                    // 的 `sleepStatus`，`isCreative()` 只看 abilities.instabuild。
+                    // Set the creative ability directly; `setGameMode` touches the
+                    // fake level's null sleepStatus, and `isCreative()` only reads
+                    // abilities.instabuild.
+                    player.getAbilities().instabuild = true;
+                    player.getAbilities().invulnerable = true;
+                }
+            }
             if (tick != 0) frames.append(',');
             frames.append("{\"guardian\":").append(guardianFrame(guardian))
                     .append(",\"playerHealth\":")
@@ -10480,7 +10513,9 @@ public final class MobOracle {
                 // which keeps the per-tick random draws aligned.
                 + ",\"skyDarken\":0"
                 + ",\"guardian\":" + guardianSetup(elder, guardianAt, 42001L)
-                + ",\"player\":" + (player == null ? "null" : guardianPlayerSetup(player))
+                + ",\"player\":" + (player == null ? "null" : guardianPlayerSetup(player, playerAt))
+                + ",\"interrupt\":" + (interrupt ? "{\"tick\":30,\"kind\":\""
+                        + name.substring(name.lastIndexOf('_') + 1) + "\"}" : "null")
                 + ",\"victim\":" + (victim == null ? "null"
                         : "{\"kind\":" + (name.contains("squid") ? "92" : "93")
                         + ",\"position\":[" + Double.doubleToRawLongBits(8.5) + ','
@@ -10492,11 +10527,12 @@ public final class MobOracle {
                 + ",\"frames\":" + frames + "}\n");
     }
 
-    private static String guardianPlayerSetup(ServerPlayer player) {
-        net.minecraft.world.phys.Vec3 p = player.position();
+    private static String guardianPlayerSetup(ServerPlayer player, double[] at) {
+        // 用初始位置，不用 player.position()：中途动作可能已经把它挪走了。
+        // Use the initial position: mid-scene actions may have moved the player.
         return "{\"uid\":" + player.getId()
-                + ",\"position\":[" + Double.doubleToRawLongBits(p.x) + ','
-                + Double.doubleToRawLongBits(p.y) + ',' + Double.doubleToRawLongBits(p.z) + ']'
+                + ",\"position\":[" + Double.doubleToRawLongBits(at[0]) + ','
+                + Double.doubleToRawLongBits(at[1]) + ',' + Double.doubleToRawLongBits(at[2]) + ']'
                 + ",\"health\":" + Float.floatToRawIntBits(20.0F)
                 + ",\"gameMode\":0}";
     }

@@ -51,7 +51,19 @@ pub(super) struct GuardianCase {
     /// The squid / axolotl in mob-victim scenes.
     #[serde(default)]
     victim: Option<GuardianVictim>,
+    /// 激光中途打断动作。
+    ///
+    /// A mid-laser interrupt action.
+    #[serde(default)]
+    interrupt: Option<GuardianInterrupt>,
     frames: Vec<GuardianFrameLine>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GuardianInterrupt {
+    tick: i32,
+    kind: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -308,6 +320,60 @@ fn guardian_frames_match(expected: &GuardianFrame, ours: &GuardianFrame) -> bool
     normalized == *expected
 }
 
+/// 在指定刻应用激光打断动作，同时改方块世界和游戏层玩家的视图。
+///
+/// Apply the mid-laser interrupt to both the block world and the game-layer player.
+fn apply_interrupt(case: &GuardianCase, level: &mut MobLevel, player_uid: i32) {
+    let Some(action) = &case.interrupt else {
+        return;
+    };
+    match action.kind.as_str() {
+        "wall" => {
+            for x in 4..=5 {
+                for z in -2..=2 {
+                    for y in 61..=63 {
+                        level.blocks.insert(
+                            BlockPos::new(x, y, z),
+                            BlockState(mc_bamboo_data::blocks::STONE),
+                        );
+                    }
+                }
+            }
+        }
+        "close" => {
+            let position = Vec3::new(2.5, 61.0, 0.5);
+            if let Some(game) = level.game.as_mut() {
+                game.teleport(player_uid, position);
+            }
+            if let Some(player) = level.players.first_mut() {
+                player.position = position;
+            }
+        }
+        "kill" => {
+            if let Some(game) = level.game.as_mut() {
+                game.hurt(
+                    player_uid,
+                    DamageSource::environment(DamageKind::Generic),
+                    100.0,
+                    None,
+                );
+            }
+            if let Some(player) = level.players.first_mut() {
+                player.alive = false;
+            }
+        }
+        "creative" => {
+            if let Some(game) = level.game.as_mut() {
+                game.set_arrow_target(player_uid, true, None);
+            }
+            if let Some(player) = level.players.first_mut() {
+                player.creative = true;
+            }
+        }
+        _ => unreachable!("unknown interrupt kind {}", action.kind),
+    }
+}
+
 /// 生物目标（鱿鱼 / 美西螈）和守卫者一样重放构造后的随机源。
 ///
 /// Replays the mob victim's post-construction random source like the guardian.
@@ -442,6 +508,11 @@ impl Report {
                 }
                 let mut world = World::new(&mut level, &mut ticks);
                 world.hurt_mob(guardian, source, hurt.amount);
+            }
+            if let Some(action) = &case.interrupt
+                && tick == action.tick as usize
+            {
+                apply_interrupt(case, &mut level, player_uid);
             }
             let ours = frame_of(&level, guardian);
             // 玩家状态直接读游戏层真实玩家（含 cooldown / lastHurt 的落地结果）。
