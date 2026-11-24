@@ -305,10 +305,10 @@ fn override_at_indexed_mut(
     }
     let chunk = pos.chunk();
     index.ensure_config(config);
-    if !index.chunks.contains_key(&chunk) {
-        let rows = build_rows_from_worldgen(config, chunk);
-        index.chunks.insert(chunk, rows);
-    }
+    index
+        .chunks
+        .entry(chunk)
+        .or_insert_with(|| build_rows_from_worldgen(config, chunk));
     resolve_rows(&index.chunks[&chunk], pos, category)
 }
 
