@@ -162,8 +162,11 @@ fn avoid_players_goal() -> WrappedGoal {
 /// (`mustSee = false`).
 pub(super) fn target_goals() -> GoalSelector {
     GoalSelector::from_goals(vec![
-        wrap(1, Goal::nearest_target(TargetType::Chicken)),
-        wrap(1, Goal::nearest_target(TargetType::BabyTurtleOnLand)),
+        wrap(1, Goal::nearest_target_without_sight(TargetType::Chicken)),
+        wrap(
+            1,
+            Goal::nearest_target_without_sight(TargetType::BabyTurtleOnLand),
+        ),
     ])
 }
 

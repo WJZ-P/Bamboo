@@ -109,8 +109,8 @@ pub(super) fn target_goals() -> GoalSelector {
                 unseen_ticks: 0,
             },
         ),
-        // 末影螨还不存在，但这个目标仍注册、仍按 `reducedTickDelay(10)` 取数。
-        // Endermites are not modelled, but the goal still registers and rolls its interval.
+        // `NearestAttackableTargetGoal<Endermite>(true, false)`：末影螨已建模。
+        // `NearestAttackableTargetGoal<Endermite>(true, false)`: endermites now exist.
         wrap(
             3,
             Goal::NearestAttackableTarget {
@@ -118,6 +118,7 @@ pub(super) fn target_goals() -> GoalSelector {
                 interval: reduced_tick_delay(10),
                 unseen_ticks: 0,
                 found: None,
+                must_see: true,
                 light_gate: false,
             },
         ),

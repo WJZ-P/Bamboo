@@ -399,3 +399,23 @@ fn convert_common(
         mob.passthrough.push(data.clone());
     }
 }
+
+/// `Zombie.killedEntity` 里僵尸杀死村民的转化分支。
+///
+/// 官方在 `Monster.killedEntity` 之后判断：难度为 NORMAL 或 HARD、死者是 `Villager`
+/// 且攻击者是僵尸时，NORMAL 先用僵尸自己的随机源 `nextBoolean()` 掷一次（为真就不转化），
+/// HARD 必定，然后 `convertVillagerToZombieVillager` 生成僵尸村民；转化成功会把击杀统计
+/// 置为假。简单难度不转化、也不消耗随机数，对拍场景用简单难度。
+///
+/// 僵尸村民属于村民第 7 期，Bamboo 还没有这个实体。这里只挂接口：不生成、不取数、
+/// 不假装转化，恒返回 `false` 让调用方照常走普通死亡。`ctx` 和 `source` 留给第 7 期
+/// 判难度、找攻击者和消费僵尸的随机源。
+///
+/// The villager conversion branch of `Zombie.killedEntity`. Vanilla converts a villager
+/// killed by a zombie on NORMAL (after the zombie's own `nextBoolean()` roll) or HARD;
+/// EASY neither converts nor draws. Zombie villagers are phase 7 of the villager work and
+/// are not modelled yet, so this hook generates nothing, draws nothing and returns `false`
+/// so the caller follows the normal death path. `ctx` and `source` are kept for phase 7.
+pub(crate) fn zombie_killed_villager(_ctx: &dyn EntityCtx, _source: &super::DamageSource) -> bool {
+    false
+}
