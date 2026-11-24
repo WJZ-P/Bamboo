@@ -423,6 +423,24 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
     );
 }
 
+/// 方块层生物乘客的 `stopRiding`：摘掉乘客自己的 `vehicle`、给 60 刻冷却，
+/// 位置不动（官方只有玩家 `Avatar.removeVehicle` 会重新落位）。载具名单由
+/// 调用方在同一刻摘，和玩家侧共用一份名单。
+///
+/// The block-layer mob passenger's `stopRiding`: clear its `vehicle` link and
+/// set the 60-tick cooldown, without moving it (vanilla repositions only
+/// players). The caller drops the vehicle's list in the same step.
+pub(crate) fn entity_stop(region: &mut Region, passenger: EntityUid, vehicle: EntityUid) {
+    if passenger < FIRST_ENTITY_ID {
+        return;
+    }
+    region.entities.with_mut(passenger, |entity| {
+        if entity.vehicle == Some(vehicle) {
+            mc_bamboo_blocks::entity::riding::dismount(entity, None);
+        }
+    });
+}
+
 /// 共用的 `stopRiding` / `removePassenger`：载具死亡、被移除、`/ride dismount`、
 /// 按潜行键下车全走这里。玩家按官方 `getDismountLocationForPassenger` 找落点，
 /// 生物乘客由方块层在同一刻停原地；两边关系一起摘，`set_passengers` 由同步阶段
