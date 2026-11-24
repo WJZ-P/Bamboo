@@ -191,6 +191,16 @@ impl KindPublic {
         }
     }
 
+    /// 村民的紧凑公开状态；不是村民时是 `None`。
+    ///
+    /// Compact public villager state; `None` for anything other than a villager.
+    pub fn villager(&self) -> Option<&super::mob::villager::VillagerPublic> {
+        match self {
+            Self::Mob(mob) => mob.villager.as_deref(),
+            _ => None,
+        }
+    }
+
     /// 按类型的子索引用这个 ID；和注册表 ID 一致，以后加生物不用改索引结构。
     ///
     /// Key for the per-type sub-index; matches the registry id so future mobs

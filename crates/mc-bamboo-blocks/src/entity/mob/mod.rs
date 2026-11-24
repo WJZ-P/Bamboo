@@ -3532,6 +3532,10 @@ pub struct MobPublic {
     pub villager_level: i32,
     pub villager_finalized: bool,
     pub villager_unhappy: i32,
+    /// 村民的紧凑公开状态，只在 `MobType::Villager` 时有值，其余生物只占一个空指针。
+    ///
+    /// Compact public villager state; `Some` only for `MobType::Villager`, null for other mobs.
+    pub villager: Option<Box<villager::VillagerPublic>>,
     /// `Bat.DATA_ID_FLAGS`。
     pub bat_flags: u8,
     /// `Phantom.ID_SIZE`。
@@ -3705,6 +3709,8 @@ impl MobPublic {
             villager_level: mob.villager.level,
             villager_finalized: mob.villager.finalized,
             villager_unhappy: mob.villager.unhappy,
+            villager: (mob.mob_type == MobType::Villager)
+                .then(|| Box::new(villager::VillagerPublic::of(&mob.villager))),
             phantom_size: mob.phantom.size,
             frog: mob.frog,
             camel: mob.camel,
