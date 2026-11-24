@@ -2298,6 +2298,13 @@ pub struct Mob {
     /// through `getMoveControl()`; written back to the vehicle after the tick. The
     /// rider's own `mover` still ticks its own field, as vanilla does.
     pub borrowed_move_control: Option<MoveControl>,
+    /// `RangedBowAttackGoal.tick()` strafe branch: `getControlledVehicle()` is a
+    /// `Mob`, so vanilla calls `vehicle.lookAt(target, 30, 30)` in addition to the
+    /// rider's own `lookAt`, rotating the vehicle's `yRot`/`xRot` from its own eye.
+    /// The rider's goal records the target eye position here while borrowing; the
+    /// driver applies it to the vehicle row at the borrow writeback. Always `None`
+    /// at a tick boundary.
+    pub borrowed_vehicle_look: Option<Vec3>,
     pub goals: GoalSelector,
     /// `Sensing` 的视线缓存，每刻清空。
     pub seen: Vec<(EntityUid, bool)>,
@@ -2945,6 +2952,7 @@ impl Mob {
             borrowed_own_navigation: None,
             borrowed_nav_mob: None,
             borrowed_move_control: None,
+            borrowed_vehicle_look: None,
             goals,
             seen: Vec::new(),
             malus: match mob_type {
@@ -3311,6 +3319,7 @@ impl Mob {
         self.borrowed_own_navigation = Some(std::mem::replace(&mut self.navigation, navigation));
         self.borrowed_move_control = Some(std::mem::replace(&mut self.mover, mover));
         self.borrowed_nav_mob = Some(snapshot);
+        self.borrowed_vehicle_look = None;
     }
 
     /// tick 之后取回共享状态（写回载具），恢复骑手自己的导航与移动控制。
@@ -3324,6 +3333,13 @@ impl Mob {
         let shared_mover = std::mem::replace(&mut self.mover, own_mover);
         self.borrowed_nav_mob = None;
         Some((shared_navigation, shared_mover))
+    }
+
+    /// 取走骑手目标记下的「载具也要看向目标」请求（[`Self::borrowed_vehicle_look`]）。
+    ///
+    /// Take the deferred `vehicle.lookAt` request recorded by the rider's bow goal.
+    pub(crate) fn take_vehicle_look(&mut self) -> Option<Vec3> {
+        self.borrowed_vehicle_look.take()
     }
 
     /// 官方 `Mob.serverAiStep` 的 `navigation.tick()` 用的是字段，不是 getter：
@@ -3540,6 +3556,10 @@ pub struct MobPublic {
     pub villager_level: i32,
     pub villager_finalized: bool,
     pub villager_unhappy: i32,
+    /// 村民的紧凑公开状态，只在 `MobType::Villager` 时有值，其余生物只占一个空指针。
+    ///
+    /// Compact public villager state; `Some` only for `MobType::Villager`, null for other mobs.
+    pub villager: Option<Box<villager::VillagerPublic>>,
     /// `Bat.DATA_ID_FLAGS`。
     pub bat_flags: u8,
     /// `Phantom.ID_SIZE`。
@@ -3713,6 +3733,8 @@ impl MobPublic {
             villager_level: mob.villager.level,
             villager_finalized: mob.villager.finalized,
             villager_unhappy: mob.villager.unhappy,
+            villager: (mob.mob_type == MobType::Villager)
+                .then(|| Box::new(villager::VillagerPublic::of(&mob.villager))),
             phantom_size: mob.phantom.size,
             frog: mob.frog,
             camel: mob.camel,

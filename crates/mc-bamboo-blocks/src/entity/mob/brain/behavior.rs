@@ -9,7 +9,7 @@
 
 use super::{
     super::Mob,
-    memory::{Memories, MemoryStatus, MemoryType},
+    memory::{Memories, MemoryMasks, MemoryStatus, MemoryType},
 };
 use crate::entity::{Entity, JavaRandom, ctx::EntityCtx};
 
@@ -71,21 +71,57 @@ pub enum Class {
     Gate,
 }
 
-/// 一个行为：状态、结束时刻和具体逻辑。
+/// 一个行为入口条件预编译成的三组位掩码，判定只做位运算。
 ///
-/// One behaviour: its status, end timestamp and concrete logic.
+/// A behaviour's entry conditions precompiled into three bit masks; checking is bit-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Preconditions {
+    pub present: u64,
+    pub absent: u64,
+    pub registered: u64,
+}
+
+impl Preconditions {
+    fn of(required: &[(MemoryType, MemoryStatus)]) -> Self {
+        let mut out = Self::default();
+        for &(memory, status) in required {
+            match status {
+                MemoryStatus::ValuePresent => out.present |= memory.bit(),
+                MemoryStatus::ValueAbsent => out.absent |= memory.bit(),
+                MemoryStatus::Registered => out.registered |= memory.bit(),
+            }
+        }
+        out
+    }
+
+    /// 全部入口条件满足：`tryStart` 一进门就只做这三次按位与。
+    ///
+    /// Every entry condition holds: `tryStart` begins with just these three bit-ands.
+    pub fn holds(&self, masks: &MemoryMasks) -> bool {
+        masks.present & self.present == self.present
+            && masks.absent & self.absent == self.absent
+            && masks.registered & self.registered == self.registered
+    }
+}
+
+/// 一个行为：状态、结束时刻、预编译的入口条件、具体逻辑。
+///
+/// One behaviour: status, end timestamp, precompiled preconditions and logic.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     pub status: Status,
     end_timestamp: i64,
+    pub required: Preconditions,
     pub kind: Kind,
 }
 
 impl Node {
     pub fn new(kind: Kind) -> Self {
+        let required = Preconditions::of(kind.required());
         Self {
             status: Status::Stopped,
             end_timestamp: 0,
+            required,
             kind,
         }
     }
@@ -125,14 +161,13 @@ impl Node {
     }
 
     /// 入口条件全部满足（`Behavior.hasRequiredMemories` / `BehaviorBuilder` 的记忆条件）。
+    /// 官方这些判定没有副作用、不取随机数，所以用预编译的掩码做纯位运算，取数顺序不变。
     ///
     /// Every entry condition holds (`Behavior.hasRequiredMemories` / the
-    /// `BehaviorBuilder` memory conditions).
+    /// `BehaviorBuilder` memory conditions). Vanilla's checks have no side effects and
+    /// draw no random, so a precompiled mask check is bit-only and keeps the draw order.
     fn has_required_memories(&self, memories: &Memories) -> bool {
-        self.kind
-            .required()
-            .iter()
-            .all(|&(memory, status)| memories.check(memory, status))
+        self.required.holds(&memories.masks())
     }
 
     /// `BehaviorControl.tryStart`。
@@ -357,15 +392,21 @@ impl Gate {
     }
 
     /// `ShufflingList.shuffle`：每项一个 `nextFloat`，权重是 `-pow(r, 1 / weight)`，
-    /// 按升序稳定排序（Java 的 `List.sort` 是稳定的）。
+    /// 按升序稳定排序（Java 的 `List.sort` 是稳定的）。权重为 1 时 `pow(r, 1) == r`，
+    /// 省掉 `powf`，但 `nextFloat` 照样每项取一次，取数次数不变。
     ///
     /// `ShufflingList.shuffle`: one `nextFloat` per entry, weight `-pow(r, 1 / weight)`,
-    /// then a stable ascending sort (Java's `List.sort` is stable).
+    /// then a stable ascending sort. For weight 1, `pow(r, 1) == r` so `powf` is skipped,
+    /// but `nextFloat` is still drawn once per entry, keeping the draw count unchanged.
     fn shuffle(&mut self) {
         for child in &mut self.children {
             let random = self.random.next_float();
-            let exponent = 1.0_f32 / child.weight as f32;
-            child.rand_weight = -f64::from(random).powf(f64::from(exponent));
+            child.rand_weight = if child.weight == 1 {
+                -f64::from(random)
+            } else {
+                let exponent = 1.0_f32 / child.weight as f32;
+                -f64::from(random).powf(f64::from(exponent))
+            };
         }
         self.children
             .sort_by(|a, b| a.rand_weight.total_cmp(&b.rand_weight));
@@ -393,6 +434,49 @@ impl Gate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 入口条件的三组掩码是纯位运算：present / absent / registered 各自都要齐。
+    ///
+    /// The three precondition masks are pure bit ops; present / absent / registered
+    /// must each be fully satisfied.
+    #[test]
+    fn preconditions_are_pure_bit_ops() {
+        let req = Preconditions::of(&[
+            (MemoryType::LookTarget, MemoryStatus::ValuePresent),
+            (MemoryType::WalkTarget, MemoryStatus::ValueAbsent),
+            (MemoryType::Path, MemoryStatus::Registered),
+        ]);
+        let masks = MemoryMasks {
+            present: MemoryType::LookTarget.bit(),
+            absent: MemoryType::WalkTarget.bit(),
+            registered: MemoryType::LookTarget.bit()
+                | MemoryType::WalkTarget.bit()
+                | MemoryType::Path.bit(),
+        };
+        assert!(req.holds(&masks));
+        assert!(!req.holds(&MemoryMasks {
+            present: 0,
+            ..masks
+        }));
+        assert!(!req.holds(&MemoryMasks { absent: 0, ..masks }));
+        assert!(!req.holds(&MemoryMasks {
+            registered: 0,
+            ..masks
+        }));
+    }
+
+    /// 权重 1 时 `pow(r, 1)` 与 `r` 逐位相同，洗牌略过 `powf` 不会改变排序值。
+    ///
+    /// For weight 1, `pow(r, 1)` equals `r` bit-for-bit, so skipping `powf` in the
+    /// shuffle changes no sorted value.
+    #[test]
+    fn weight_one_powf_is_the_identity() {
+        let mut random = JavaRandom::new(0x5eed_1234);
+        for _ in 0..100_000 {
+            let r = f64::from(random.next_float());
+            assert_eq!(r.powf(1.0).to_bits(), r.to_bits());
+        }
+    }
 
     /// `RunOne` 洗牌、只跑一个、对拍类名 `RunOne`；`ORDERED + TRY_ALL` 的 `GateBehavior`
     /// 不洗牌、不提前停、类名 `GateBehavior`。两个策略开关正好对应官方两个枚举。

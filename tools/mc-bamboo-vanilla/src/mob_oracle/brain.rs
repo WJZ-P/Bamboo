@@ -110,8 +110,8 @@ fn value_text(level: &MobLevel, value: &MemoryValue) -> String {
         MemoryValue::Long(value) => value.to_string(),
         MemoryValue::Unit => "path".to_owned(),
         MemoryValue::Entity(uid) => uid.to_string(),
-        MemoryValue::Entities(list) => ids_text(list),
-        MemoryValue::Visible(visible) => ids_text(&visible.entities),
+        MemoryValue::Entities(list) => ids_text(&list[..]),
+        MemoryValue::Visible(visible) => ids_text(&visible.entities[..]),
         MemoryValue::Walk(walk) => format!(
             "{}/{}/{}",
             tracker_block(level, walk.target),

@@ -72,18 +72,26 @@ pub fn attributes(kind: MobType) -> Attributes {
     table
 }
 
-/// `Spider.registerGoals` 的 `goalSelector`。`AvoidEntityGoal(Armadillo)` 保留注册位：
-/// 犰狳还没有，`canUse` 找不到对象也不取随机数。
+/// `Spider.registerGoals` 的 `goalSelector`。优先级 2 的
+/// `AvoidEntityGoal(Armadillo, 6.0F, 1.0D, 1.2D, !isScared())`：犰狳已建模，
+/// 按字节码只躲 `IDLE` 状态的犰狳，缩成球的不躲。
 ///
-/// The `goalSelector` half of `Spider.registerGoals`. The armadillo avoid goal keeps
-/// its slot: without armadillos `canUse` finds nothing and draws no random numbers.
+/// The `goalSelector` half of `Spider.registerGoals`. Its priority-2
+/// `AvoidEntityGoal(Armadillo, 6.0F, 1.0D, 1.2D, !isScared())` now runs: armadillos
+/// are modelled, and per bytecode it flees only `IDLE` armadillos, not rolled-up ones.
 pub fn goals(navigation: &mut Navigation) -> GoalSelector {
     // `FloatGoal` 的构造函数打开导航的浮水。
     // The `FloatGoal` constructor enables floating on the navigation.
     navigation.flags.can_float = true;
     GoalSelector::from_goals(vec![
         wrap(1, Goal::Float),
-        wrap(2, Goal::Unavailable("AvoidEntityGoal")),
+        wrap(
+            2,
+            Goal::Avoid(
+                super::avoid::AvoidEntity::new(super::avoid::AvoidClass::Armadillo, 6.0, 1.0, 1.2)
+                    .filtered(super::avoid::AvoidFilter::ArmadilloNotScared),
+            ),
+        ),
         wrap(3, Goal::LeapAtTarget { yd: 0.4 }),
         wrap(4, Goal::spider_melee(1.0)),
         wrap(
@@ -460,5 +468,15 @@ mod tests {
         };
         assert!(!run(0), "bright light must not produce a target");
         assert!(run(15), "darkness must produce a target");
+    }
+
+    /// 优先级 2 的 `AvoidEntityGoal(Armadillo, ...)` 已接上，不再是 `Unavailable` 占位。
+    ///
+    /// The priority-2 `AvoidEntityGoal(Armadillo, ...)` is wired, no longer an
+    /// `Unavailable` placeholder.
+    #[test]
+    fn the_armadillo_avoid_goal_is_wired() {
+        let spider = Mob::new(MobType::Spider);
+        assert!(matches!(&spider.goals.goals[1].goal, Goal::Avoid(_)));
     }
 }

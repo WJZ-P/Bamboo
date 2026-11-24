@@ -1984,7 +1984,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 BlockPos::containing(target.position),
                 0,
             );
-            start_path.is_some() || within_melee_range(me, mob, target)
+            start_path.is_some() || within_melee_range(me, mob, target, ctx)
         }
         Goal::HurtByTarget { timestamp, .. } => {
             let last = mob.last_hurt_by_mob;
@@ -2102,13 +2102,13 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 TargetType::Endermite => {
                     nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Endermite)
                 }
-                // `Turtle.BABY_ON_LAND_SELECTOR`：`isBaby() && !isInWater()`。僵尸 / 溺尸 /
-                // 狐狸 / 豹猫 / 猫的海龟目标共用这一个选择器。
-                // `Turtle.BABY_ON_LAND_SELECTOR`: `isBaby() && !isInWater()`. Zombies,
-                // drowned, foxes, ocelots and cats share this selector.
-                TargetType::BabyTurtleOnLand => nearest_mob_target_with(me, mob, ctx, |public| {
-                    public.mob_type == super::MobType::Turtle && public.baby && !public.in_water
-                }),
+                // `Turtle.BABY_ON_LAND_SELECTOR`：僵尸 / 溺尸 / 狐狸 / 豹猫 / 猫 / 野狼的
+                // 海龟目标共用这一个选择器。
+                // `Turtle.BABY_ON_LAND_SELECTOR`: shared by the turtle goals of zombies,
+                // drowned, foxes, ocelots, cats and wolves.
+                TargetType::BabyTurtleOnLand => {
+                    nearest_mob_target_with(me, mob, ctx, baby_turtle_on_land)
+                }
                 // `AbstractVillager`：官方还含流浪商人，Bamboo 没有建模，只匹配村民。
                 // `AbstractVillager`: vanilla also covers wandering traders, which are not
                 // modelled; match villagers only.
@@ -3607,7 +3607,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                     target,
                 );
             } else if *ticks_until_next_attack == 0
-                && within_melee_range(me, mob, target)
+                && within_melee_range(me, mob, target, ctx)
                 && living::has_line_of_sight(
                     me,
                     mob,
@@ -5273,6 +5273,17 @@ const fn is_schooling_fish(kind: super::MobType) -> bool {
     )
 }
 
+/// `Turtle.BABY_ON_LAND_SELECTOR`：`isBaby() && !isInWater()`。
+/// [`TargetType::BabyTurtleOnLand`] 的海龟目标和野狼的 `NonTameRandomTargetGoal`
+/// 共用这一个选择器，选目标和重测目标都用它。
+///
+/// `Turtle.BABY_ON_LAND_SELECTOR`: `isBaby() && !isInWater()`. Both the
+/// [`TargetType::BabyTurtleOnLand`] turtle goal and the wild wolf's
+/// `NonTameRandomTargetGoal` share this selector, for finding and re-testing a target.
+pub(super) fn baby_turtle_on_land(public: &super::MobPublic) -> bool {
+    public.mob_type == super::MobType::Turtle && public.baby && !public.in_water
+}
+
 /// `NearestAttackableTargetGoal.findTarget` 的生物分支：`FOLLOW_RANGE` 方盒里、
 /// 类型符合、看得见、在跟随距离内的最近一个（从眼睛高度量）。
 ///
@@ -5366,22 +5377,46 @@ fn leap_start(me: &mut Entity, mob: &Mob, ctx: &dyn EntityCtx, yd: f32) {
 }
 
 /// `PathfinderMob.isWithinMeleeAttackRange`：用实体交互范围算的方形距离。
-pub(super) fn within_melee_range(me: &Entity, _mob: &Mob, target: CombatTarget) -> bool {
+pub(super) fn within_melee_range(
+    me: &Entity,
+    mob: &Mob,
+    target: CombatTarget,
+    ctx: &dyn EntityCtx,
+) -> bool {
     // `Mob.DEFAULT_ATTACK_REACH = sqrt(2.04f) - 0.6f`（26.3 字节码）。
     // 官方用 `getAttackBoundingBox(reach).intersects(target.getHitbox())`，
     // 这里按双方 Aabb 膨胀后的相交判定，而不是旧的「交互范围 + 1」方格。
     let reach = 2.039_999_961_853_027_3_f64.sqrt() - f64::from(0.6_f32);
-    let (width, height) = _mob.dimensions();
+    let (width, height) = mob.dimensions();
     let half = f64::from(width) / 2.0;
+    let mut min_x = me.position.x - half;
+    let mut max_x = me.position.x + half;
+    let mut min_z = me.position.z - half;
+    let mut max_z = me.position.z + half;
+    // `Mob.getAttackBoundingBox(reach)`：乘客把自己的包围盒与**载具**的水平包围盒
+    // 取并集（min/max X、Z），竖直方向仍用自己的 minY/maxY，再水平膨胀 `reach`。
+    // 鸡骑士里鸡在骑手前方，合并后攻击盒多伸出一截，近战命中/收手时刻因而早一刻。
+    // A passenger's attack box is the X/Z hull of its own and the vehicle's
+    // bounding boxes (`Mob.getAttackBoundingBox`); Y stays its own. For a chicken
+    // jockey the chicken is ahead of the rider, so the hull reaches one tick earlier.
+    if let Some(vehicle_uid) = me.vehicle
+        && let Some(vehicle) = ctx.other(vehicle_uid)
+    {
+        let v = vehicle.bounding_box();
+        min_x = min_x.min(v.min_x);
+        max_x = max_x.max(v.max_x);
+        min_z = min_z.min(v.min_z);
+        max_z = max_z.max(v.max_z);
+    }
     // `getAttackBoundingBox` 只在水平方向膨胀（`inflate(reach, 0, reach)`）。
     // `getAttackBoundingBox` only grows horizontally (`inflate(reach, 0, reach)`).
     let ours = crate::shape::Aabb::new(
-        me.position.x - half - reach,
+        min_x - reach,
         me.position.y,
-        me.position.z - half - reach,
-        me.position.x + half + reach,
+        min_z - reach,
+        max_x + reach,
         me.position.y + f64::from(height),
-        me.position.z + half + reach,
+        max_z + reach,
     );
     ours.intersects(target.hitbox)
 }
@@ -5546,5 +5581,28 @@ mod tests {
         for kind in [MobType::Pufferfish, MobType::Squid, MobType::Tadpole] {
             assert!(!is_schooling_fish(kind));
         }
+    }
+
+    /// `Turtle.BABY_ON_LAND_SELECTOR`：只有陆地上的幼年海龟命中；水里、成年、
+    /// 别的生物都不命中。野狼的 `NonTameRandomTargetGoal` 和海龟目标共用它。
+    ///
+    /// `Turtle.BABY_ON_LAND_SELECTOR`: only a baby turtle out of water matches; a
+    /// turtle in water, an adult, or another mob does not. Shared by the wild
+    /// wolf's `NonTameRandomTargetGoal` and the turtle goal.
+    #[test]
+    fn baby_turtle_on_land_selector_matches_vanilla() {
+        use super::super::{Mob, MobPublic, MobType};
+
+        let mut baby = Mob::new(MobType::Turtle);
+        baby.age = -24000;
+        assert!(super::baby_turtle_on_land(&MobPublic::of(&baby, false)));
+        // 水里不选。/ In water: not selected.
+        assert!(!super::baby_turtle_on_land(&MobPublic::of(&baby, true)));
+
+        let adult = Mob::new(MobType::Turtle);
+        assert!(!super::baby_turtle_on_land(&MobPublic::of(&adult, false)));
+
+        let other = Mob::new(MobType::Cod);
+        assert!(!super::baby_turtle_on_land(&MobPublic::of(&other, false)));
     }
 }

@@ -506,6 +506,21 @@ pub trait LevelEntities {
     /// 已经在 tick 列表里的实体。正在 tick 的那一个看不到。
     fn entity(&self, uid: EntityUid) -> Option<Entity>;
     fn entity_public(&self, uid: EntityUid) -> Option<EntityPublic>;
+    /// 借用式读取公开数据，找到时返回 `true`，省掉整份克隆。默认回落到
+    /// [`Self::entity_public`] 的克隆实现；有整张实体表的实现覆盖成直接借用那一行。
+    ///
+    /// Borrows the public data and returns `true` when found, avoiding a full clone.
+    /// The default falls back to the cloning [`Self::entity_public`]; implementations
+    /// with a whole entity table override it to borrow the row directly.
+    fn with_entity_public(&self, uid: EntityUid, visit: &mut dyn FnMut(&EntityPublic)) -> bool {
+        match self.entity_public(uid) {
+            Some(public) => {
+                visit(&public);
+                true
+            }
+            None => false,
+        }
+    }
     /// 空间索引范围查询，按 uid 升序访问。
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
     /// `getEntitiesOfClass` 的官方分区顺序（`SectionPos.asLong` 升序，段内加入顺序）。
@@ -607,6 +622,16 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
 
     fn entity_public(&self, uid: EntityUid) -> Option<EntityPublic> {
         self.entities_table().public_at(uid).cloned()
+    }
+
+    fn with_entity_public(&self, uid: EntityUid, visit: &mut dyn FnMut(&EntityPublic)) -> bool {
+        match self.entities_table().public_at(uid) {
+            Some(public) => {
+                visit(public);
+                true
+            }
+            None => false,
+        }
     }
 
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
