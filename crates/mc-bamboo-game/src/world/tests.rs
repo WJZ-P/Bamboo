@@ -5100,13 +5100,17 @@ fn melee_hit_awards_damage_dealt_on_request_stats() {
     let frames = client.take_frames();
     let stats = frames_with_id(&frames, clientbound::AWARD_STATS);
     assert_eq!(stats.len(), 1, "RequestStats must answer the requester");
+    // `ItemStack.hurtEnemy` 对带 `WEAPON` 组件的钻石剑额外记一次
+    // `Stats.ITEM_USED.get(item)`，和 `DAMAGE_DEALT` 一起发。
+    // `ItemStack.hurtEnemy` also awards `Stats.ITEM_USED.get(item)` for the
+    // diamond sword's `WEAPON` component, sent alongside `DAMAGE_DEALT`.
     let expected_body = body_of(encode_frames(&AwardStats {
-        item_used: &[],
+        item_used: &[(items::DIAMOND_SWORD, 1)],
         damage_dealt: Some(expected),
     }));
     assert_eq!(
         stats[0].body, expected_body,
-        "DAMAGE_DEALT must be sent as a minecraft:custom stat"
+        "DAMAGE_DEALT and the weapon's ITEM_USED must be sent together"
     );
 }
 

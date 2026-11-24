@@ -1035,7 +1035,7 @@ fn finish_hit(
     //
     // `itemAttackInteraction` → `ItemStack.hurtEnemy`: a weapon with the
     // `WEAPON` component also awards one `Stats.ITEM_USED.get(item)`.
-    if weapon_component(region, id, &plan.held) {
+    if weapon_component(&plan.held) {
         item_use_stats::award(region, id, plan.held.item);
     }
     // `itemAttackInteraction`：主手武器 `hurtEnemy` 扣 1 点耐久。
@@ -1064,7 +1064,7 @@ fn finish_hit(
 ///
 /// `ItemStack.has(DataComponents.WEAPON)`: vanilla `hurtEnemy` awards
 /// `ITEM_USED` only for stacks with this component.
-fn weapon_component(_region: &Region, _id: PlayerId, held: &ItemStack) -> bool {
+fn weapon_component(held: &ItemStack) -> bool {
     !held.is_empty() && defaults::resolve(held.item, &held.patch(), kinds::WEAPON).is_some()
 }
 
@@ -1405,6 +1405,19 @@ mod tests {
 
     fn stack(item: i32) -> ItemStack {
         ItemStack::new(item, 1)
+    }
+
+    /// `ItemStack.hurtEnemy` 的 `WEAPON` 组件判定：带它的武器记
+    /// `ITEM_USED`，空手和不带该组件的物品不记。
+    ///
+    /// `ItemStack.hurtEnemy`'s `WEAPON` component gate: weapons carrying it
+    /// award `ITEM_USED`, empty hands and other items do not.
+    #[test]
+    fn weapon_component_gates_the_extra_item_used_stat() {
+        assert!(weapon_component(&stack(mc_bamboo_data::items::TRIDENT)));
+        assert!(weapon_component(&stack(mc_bamboo_data::items::DIAMOND_SWORD)));
+        assert!(!weapon_component(&ItemStack::empty()));
+        assert!(!weapon_component(&stack(mc_bamboo_data::items::STICK)));
     }
 
     fn enchanted(item: i32, name: &str, level: i32) -> ItemStack {
