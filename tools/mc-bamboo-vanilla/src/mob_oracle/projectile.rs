@@ -118,6 +118,14 @@ struct ProjectileFrame {
     /// Per-tick loyalty state: dealtDamage / noPhysics / return count /
     /// inGroundTime; `null` once the trident has been removed.
     trident: Option<Option<[i64; 4]>>,
+    /// 这一刻新掉出来的物品实体：物品 ID、数量、x/y/z 坐标原始位。
+    ///
+    /// Item entities dropped this tick: item id, count and raw x/y/z bits.
+    drops: Option<Vec<[i64; 5]>>,
+    /// 场景主人逐刻状态：`[是否存活, 是否旁观]`。
+    ///
+    /// The scene owner's per-tick state: `[alive, spectator]`.
+    owner: Option<[i64; 2]>,
 }
 
 /// 一次剪刀右键：是否消耗动作，以及掉出来的物品实体（物品、数量、位置和速度的原始位）。
@@ -323,6 +331,28 @@ impl ProjectileCase {
             || self.name.starts_with("trident_spectator")
     }
 
+    /// 主人死亡：`LivingEntity.isAlive()` 为假，忠诚三叉戟判定主人不可接受并掉落。
+    ///
+    /// Dead owner: `LivingEntity.isAlive()` is false, so a loyal trident drops.
+    fn owner_dead(&self) -> bool {
+        self.name == "trident_owner_dead"
+    }
+
+    /// 主人旁观：`isAcceptibleReturnOwner()` 为假，忠诚三叉戟也掉落。
+    ///
+    /// Spectator owner: `isAcceptibleReturnOwner()` is false, so it drops too.
+    fn owner_spectator(&self) -> bool {
+        self.name == "trident_spectator"
+    }
+
+    /// 主人下线：`getOwner()` 解析成 null，tick 外层短路，不掉落也不返回。
+    ///
+    /// Offline owner: `getOwner()` is null and the outer guard short-circuits,
+    /// so the trident neither drops nor returns.
+    fn owner_offline(&self) -> bool {
+        self.name == "trident_owner_offline"
+    }
+
     /// 引雷场景雷雨 + 天空可见（避雷针场景还要求避雷针，由方块表给）。
     ///
     /// Channeling scenes run in a thunderstorm with open sky (the rod scene
@@ -438,14 +468,21 @@ impl ProjectileCase {
                 item.removed = removed;
             }
             let owner_uuid = ((1_u128 << 64) | 2).to_be_bytes();
+            // 下线主人：物品堆仍带忠诚、dealtDamage 仍预置，但 `owner`/`owner_uuid`
+            // 都为空，`trident_tick` 解析不到主人 → 外层短路，既不掉也不返回，
+            // 走正常飞行；对应 Java `put(Projectile,"owner",null)`。
+            // Offline owner: the stack still has loyalty and dealtDamage is set,
+            // but both owner fields are null, so `trident_tick` resolves no
+            // owner and short-circuits — normal flight, no drop, no return.
+            let has_owner = loyalty > 0 && !self.owner_offline();
             let shot = TridentShot {
                 position: Vec3::new(0.5, 65.5, 0.5),
                 direction: Vec3::new(1.0, 0.0, 0.0),
                 power: 1.6,
                 uncertainty: 0.0,
                 source_movement: None,
-                owner: (loyalty > 0).then_some(self.player_id),
-                owner_uuid: (loyalty > 0).then_some(owner_uuid),
+                owner: has_owner.then_some(self.player_id),
+                owner_uuid: has_owner.then_some(owner_uuid),
                 item,
                 pickup: if loyalty > 0 {
                     Pickup::Allowed
@@ -558,6 +595,21 @@ impl Report {
             case.name.ends_with("_rejected") || case.passive(),
             case.flaming().then_some([37, 80]),
         );
+        // 主人不可接受的两条路径：死亡 / 旁观，逐刻行为和掉落物都要对上官方。
+        // The two unacceptable-owner paths: dead / spectator; both the per-tick
+        // behavior and the dropped item must match vanilla.
+        // 改坏确认 `trident_owner`：故意不把主人设成死亡 / 旁观，三叉戟就会错误地
+        // 飞回而不是掉落，逐刻状态、掉落物、主人状态和包都必须报不一致。
+        // Break self-test `trident_owner`: leave the owner acceptable, so the
+        // trident wrongly returns instead of dropping; state, drops, owner and
+        // packets must all diverge.
+        let break_owner = self.break_test.as_deref() == Some("trident_owner");
+        if case.owner_dead() && !break_owner {
+            level.game.as_mut().unwrap().set_dead(case.player_id);
+        }
+        if case.owner_spectator() && !break_owner {
+            level.game.as_mut().unwrap().set_spectator(case.player_id);
+        }
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
         case.spawn(
@@ -579,6 +631,7 @@ impl Report {
             let mut extinguished = Vec::new();
             let mut level_events = Vec::new();
             let mut sounds: Vec<[i64; 7]> = Vec::new();
+            let mut drops: Vec<[i64; 5]> = Vec::new();
             if tick != 0 {
                 if (case.flaming() || case.water()) && tick == 1 {
                     level
@@ -777,6 +830,22 @@ impl Report {
                 packets.push(packet_body(&RemoveEntities { entity_ids: &[uid] }));
             }
             let spawns = level.entities.take_spawn_snapshots();
+            // 这一刻新掉出来的物品实体：物品 ID、数量、生成坐标原始位。忠诚三叉戟
+            // 主人不可接受时掉出的拾取物就在这里（带 0.1f 抬高后的 y）。
+            // Item entities spawned this tick: item id, count, raw spawn position
+            // bits. A loyal trident's drop for an unacceptable owner lands here
+            // (with the 0.1f raised y).
+            for public in &spawns {
+                if let KindPublic::Item { stack, .. } = &public.kind {
+                    drops.push([
+                        i64::from(stack.item),
+                        i64::from(stack.count),
+                        public.position.x.to_bits() as i64,
+                        public.position.y.to_bits() as i64,
+                        public.position.z.to_bits() as i64,
+                    ]);
+                }
+            }
             for public in spawns {
                 if !matches!(public.kind, KindPublic::Arrow(_)) {
                     continue;
@@ -877,6 +946,28 @@ impl Report {
                 if theirs != ours {
                     self.mismatch(format!(
                         "{label} trident state: official {theirs:?}, bamboo {ours:?}"
+                    ));
+                }
+            }
+            if let Some(theirs) = &expected.drops
+                && *theirs != drops
+            {
+                self.mismatch(format!(
+                    "{label} drops: official {theirs:?}, bamboo {drops:?}"
+                ));
+            }
+            if let Some(theirs) = expected.owner {
+                let ours = level
+                    .game
+                    .as_ref()
+                    .unwrap()
+                    .views()
+                    .iter()
+                    .find(|view| view.uid == case.player_id)
+                    .map(|view| [i64::from(view.alive), i64::from(view.spectator)]);
+                if Some(theirs) != ours {
+                    self.mismatch(format!(
+                        "{label} owner: official {theirs:?}, bamboo {ours:?}"
                     ));
                 }
             }

@@ -179,6 +179,32 @@ impl ReplayPlayers {
         }
     }
 
+    /// 把主人设成「已死亡」：血量归零（`LivingEntity.isAlive()` 为假、忠诚三叉戟
+    /// 判定主人不可接受），并置 `ServerPlayer.dead`（`state()` 的死亡位、`sync_health`
+    /// 跳过死人）。对拍里对应官方 `player.setHealth(0)`。
+    ///
+    /// Mark the owner dead: zero health (so `LivingEntity.isAlive()` is false and
+    /// a loyal trident drops) plus `ServerPlayer.dead` (the `state()` dead bit and
+    /// `sync_health` skipping dead players). Mirrors official `player.setHealth(0)`.
+    pub fn set_dead(&mut self, target: EntityUid) {
+        if let Some(player) = self.region.players.get_mut(&PlayerId(target)) {
+            player.health.health = 0.0;
+            player.health_sync = crate::player_hurt::HealthSync::of(player);
+            player.dead = true;
+        }
+    }
+
+    /// 把主人设成旁观者（`ServerPlayerGameMode.gameModeForPlayer`），忠诚三叉戟
+    /// 判定主人不可接受；直接改字段以避开 `setGameMode` 发包。
+    ///
+    /// Make the owner a spectator so a loyal trident rejects them; set the field
+    /// directly to avoid the packets `setGameMode` would send.
+    pub fn set_spectator(&mut self, target: EntityUid) {
+        if let Some(player) = self.region.players.get_mut(&PlayerId(target)) {
+            player.game_mode = GameMode::Spectator;
+        }
+    }
+
     /// 玩家当前生效的效果列表：`[效果 ID, 剩余时长, 等级]`（按 ID 升序）。
     ///
     /// Active effects on a replay player as `[effect_id, duration, amplifier]` sorted by id.

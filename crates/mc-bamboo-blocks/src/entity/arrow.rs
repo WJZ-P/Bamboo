@@ -582,7 +582,9 @@ fn trident_tick(me: &mut Entity, ctx: &mut dyn EntityCtx) -> bool {
     // `!isAcceptibleReturnOwner()`: owner dead or spectating -> drop and discard.
     if !owner.alive || (owner.is_player && owner.spectator) {
         if pickup == Pickup::Allowed {
-            ctx.emit(Command::DropItem { stack: pickup_item }, me);
+            // 官方 `spawnAtLocation(getPickupItem(), 0.1f)`：掉落物抬高 0.1 格。
+            // Vanilla `spawnAtLocation(getPickupItem(), 0.1f)`: drop 0.1 above.
+            ctx.emit(Command::DropTridentItem { stack: pickup_item }, me);
         }
         me.removed = true;
         return false;

@@ -294,7 +294,8 @@ public final class MobOracle {
                     "stray_bow_normal", "bogged_bow_normal", "bogged_bow_hard",
                     "skeleton_freeze", "bogged_shear",
                     "pillager_crossbow_normal", "pillager_crossbow_hard", "pillager_crossbow_multishot",
-                    "trident_stick", "trident_loyalty")) {
+                    "trident_stick", "trident_loyalty", "trident_owner_offline",
+                    "trident_owner_dead", "trident_spectator")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
@@ -7971,6 +7972,13 @@ public final class MobOracle {
         // 三叉戟逐刻场景：飞行插地、命中生物、忠诚返回、引雷、溺尸远程。
         // Trident tick-by-tick scenes: stick / hit mob / loyalty / channeling / drowned.
         boolean trident = name.startsWith("trident_");
+        // 主人下线（owner == null）→ 外层短路不掉落；主人死亡 / 旁观 → 掉落并丢弃。
+        // Offline owner (owner == null) short-circuits with no drop; dead / spectator
+        // owner drops the pickup item and discards the trident.
+        boolean ownerDead = name.equals("trident_owner_dead");
+        boolean ownerOffline = name.equals("trident_owner_offline");
+        boolean ownerSpectator = name.equals("trident_spectator");
+        boolean ownerDrop = ownerDead || ownerSpectator;
         // 药水箭插在墙里，中途把 inGroundTime 拨到 597，三刻后褪色。
         // A tipped arrow stuck in the wall; inGroundTime jumps to 597 and it fades three ticks later.
         boolean fade = name.equals("arrow_tipped_fade");
@@ -8039,6 +8047,17 @@ public final class MobOracle {
             player.setTicksFrozen(80);
         }
         player.getAbilities().invulnerable = rejected || passive;
+        if (ownerDead) {
+            // `LivingEntity.isAlive()` = !isRemoved && health > 0；血量归零即视为死亡。
+            // `LivingEntity.isAlive()`: !isRemoved && health > 0; zero health is dead.
+            player.setHealth(0.0F);
+        }
+        if (ownerSpectator) {
+            // 直接改 `ServerPlayerGameMode.gameModeForPlayer`，避开 setGameMode 发包。
+            // Set the game-mode field directly to avoid setGameMode sending packets.
+            put(net.minecraft.server.level.ServerPlayerGameMode.class, player.gameMode,
+                    "gameModeForPlayer", GameType.SPECTATOR);
+        }
         Bytes playerSink = new Bytes(official.registries);
         RecordingListener connection = allocate(RecordingListener.class);
         put(ServerGamePacketListenerImpl.class, connection, "player", player);
@@ -8098,6 +8117,14 @@ public final class MobOracle {
                 arrow.pickup = net.minecraft.world.entity.projectile.arrow.AbstractArrow.Pickup.ALLOWED;
                 putBoolean(net.minecraft.world.entity.projectile.arrow.ThrownTrident.class,
                         arrow, "dealtDamage", true);
+            }
+            if (ownerOffline) {
+                // 主人下线：`getOwner()` 解析成 null，`tick()` 外层 `owner != null`
+                // 短路，既不掉落也不返回，只走 `super.tick()` 的正常飞行。
+                // Offline owner: `getOwner()` resolves to null, so the outer
+                // `owner != null` guard short-circuits — no drop, no return,
+                // just `super.tick()`'s normal flight.
+                put(net.minecraft.world.entity.projectile.Projectile.class, arrow, "owner", null);
             }
             arrows.add(arrow);
             world.tracked.add(arrow);
@@ -8164,6 +8191,7 @@ public final class MobOracle {
         int sheared = 0;
         int embeds = 0;
         int extinguishes = 0;
+        int totalTridentDrops = 0;
         Bytes arrowEvents = new Bytes(official.registries);
         int[] puffs = {0};
         if (fade) {
@@ -8176,6 +8204,10 @@ public final class MobOracle {
         }
         for (int tick = 0; tick <= ticks; tick++) {
             var arrowPackets = new ArrayList<String>();
+            // 忠诚三叉戟主人不可接受时掉出来的物品实体：物品、数量、坐标原始位。
+            // Item entities dropped when a loyal trident's owner is unacceptable:
+            // item, count and raw position bits.
+            var tridentDrops = new ArrayList<String>();
             // 剪蘑菇那一刻的结果：是否消耗动作、剪刀耐久损耗、掉出来的物品实体。
             // The shearing result of this tick: consumed, shears damage and the dropped items.
             String shearing = null;
@@ -8240,6 +8272,16 @@ public final class MobOracle {
                 if (effectTarget != null) effectTarget.tick();
                 world.tracked.removeIf(Entity::isRemoved);
                 for (Entity entity : world.spawned) {
+                    if (trident && entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                        // 忠诚三叉戟主人不可接受时掉落的物品：物品、数量、坐标原始位。
+                        // The pickup item dropped for an unacceptable loyal-trident owner.
+                        Vec3 at = item.position();
+                        tridentDrops.add("[" + BuiltInRegistries.ITEM.getId(item.getItem().getItem()) + ","
+                                + item.getItem().getCount() + ","
+                                + Double.doubleToRawLongBits(at.x) + ","
+                                + Double.doubleToRawLongBits(at.y) + ","
+                                + Double.doubleToRawLongBits(at.z) + "]");
+                    }
                     if (entity instanceof net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow) {
                         arrows.add(arrow);
                         world.tracked.add(arrow);
@@ -8325,6 +8367,12 @@ public final class MobOracle {
                 world.projectileExtinguishes.clear();
             }
             if (trident) {
+                totalTridentDrops += tridentDrops.size();
+                frames.append(",\"drops\":[").append(String.join(",", tridentDrops)).append("]");
+                // 主人逐刻状态：存活 / 旁观。下线时主人解析为 null。
+                // Owner state per tick: alive / spectator; resolves to null when offline.
+                frames.append(",\"owner\":[").append(player.isAlive() ? 1 : 0).append(',')
+                        .append(player.isSpectator() ? 1 : 0).append(']');
                 frames.append(",\"sounds\":").append(world.soundLog.stream()
                         .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
                 world.soundLog.clear();
@@ -8386,6 +8434,14 @@ public final class MobOracle {
                 || despawn && (embeds < 2 || !arrows.getFirst().isRemoved())
                 || fade && (puffs[0] != 1 || ((net.minecraft.world.entity.projectile.arrow.Arrow) arrows.getFirst()).getColor() != -1)) {
             throw new IllegalStateException("projectile scenario failed to exercise " + name);
+        }
+        // 死亡 / 旁观主人必须掉出一件拾取物；下线主人外层短路，一件都不能掉。
+        // A dead / spectator owner must drop the pickup; an offline owner
+        // short-circuits and must drop nothing.
+        if (ownerDrop && totalTridentDrops == 0
+                || ownerOffline && totalTridentDrops != 0) {
+            throw new IllegalStateException("trident owner scene missed the expected drop: " + name
+                    + " drops=" + totalTridentDrops);
         }
         if (flame && (player.getTicksFrozen() != 0
                 || player.getRemainingFireTicks() != (rejected ? 1 : 100)
