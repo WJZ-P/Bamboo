@@ -331,7 +331,7 @@ fn target_player(mob: &Mob, ctx: &dyn EntityCtx) -> Option<PlayerView> {
 fn can_attack(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx, player: &PlayerView) -> bool {
     !player.creative
         && ctx.blocks().difficulty() != 0
-        && goals::targeting_test(me, mob, ctx.blocks(), player, 0.0, true)
+        && goals::targeting_test(me, mob, ctx.blocks(), player, 0.0, true, true)
 }
 
 fn can_attack_target(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
@@ -355,7 +355,7 @@ fn scan_for_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
         if area.contains(player.position.x, player.position.y, player.position.z)
             && !player.creative
             && !peaceful
-            && goals::targeting_test(me, mob, view, &player, SCAN_RANGE, true)
+            && goals::targeting_test(me, mob, view, &player, SCAN_RANGE, true, true)
         {
             players.push(player);
         }

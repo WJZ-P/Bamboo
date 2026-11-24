@@ -350,7 +350,14 @@ pub fn travel_in_water(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, 
     let movement = me.delta;
     motion::move_living(me, mob, ctx, movement);
     me.delta = me.delta.scale(0.9);
-    if !mob.guardian.moving && mob.target.is_none() {
+    // 官方这里读 `getTarget()`（`asValidTarget()`）：创造 / 旁观 / 死亡玩家算
+    // 「没有目标」，照样下沉 0.005。Bamboo 的 `mob.target` 是未过滤的原始字段，
+    // 用走同一套过滤的 `combat_target` 判断。
+    //
+    // Vanilla reads `getTarget()` (`asValidTarget()`): a creative/spectator/dead
+    // player counts as "no target" and the guardian still sinks by 0.005. Use
+    // `combat_target`, which applies the same filter, instead of the raw field.
+    if !mob.guardian.moving && super::goals::combat_target(mob, ctx).is_none() {
         let delta = me.delta;
         me.delta = Vec3::new(delta.x, delta.y - 0.005, delta.z);
     }

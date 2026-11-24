@@ -276,7 +276,15 @@ impl AvoidEntity {
                 {
                     return false;
                 }
-                goals::targeting_test(me, mob, view, &player, f64::from(self.max_dist), true)
+                goals::targeting_test(
+                    me,
+                    mob,
+                    view,
+                    &player,
+                    f64::from(self.max_dist),
+                    true,
+                    false,
+                )
             }
             Candidate::Mob {
                 uid,

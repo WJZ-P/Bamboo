@@ -516,7 +516,8 @@ public final class MobOracle {
                     "guardian_thorns_static", "guardian_thorns_moving",
                     "guardian_thorns_arrow",
                     "laser_mob_victim_squid", "laser_mob_victim_axolotl",
-                    "laser_interrupt_close")) {
+                    "laser_interrupt_close", "laser_interrupt_wall",
+                    "laser_interrupt_kill", "laser_interrupt_creative")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playGuardian(official, out, name);
                 cases++;
@@ -10630,7 +10631,11 @@ public final class MobOracle {
                     // Move the target within 3 blocks.
                     player.setPos(2.5, 61.0, 0.5);
                 } else if (name.contains("kill")) {
-                    player.setHealth(0.0F);
+                    // 走真实受伤流程：Bamboo 侧 `game.hurt` 会设 hurtTime=10、
+                    // damageCooldownTime=20，直接 setHealth(0) 两边计时器会对不上。
+                    // Use the real hurt path: Bamboo's game.hurt sets hurtTime=10
+                    // and damageCooldownTime=20, which setHealth(0) would miss.
+                    player.hurtServer(world, player.damageSources().generic(), 100.0F);
                 } else if (name.contains("creative")) {
                     // 直接设创造能力：`ServerPlayer.setGameMode` 会碰假世界里为 null
                     // 的 `sleepStatus`，`isCreative()` 只看 abilities.instabuild。

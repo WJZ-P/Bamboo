@@ -301,7 +301,7 @@ fn nearest_beg_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Option
     let mut best = -1.0_f64;
     let mut found = None;
     for player in players {
-        if !goals::targeting_test(me, mob, view, &player, BEG_DISTANCE, true) {
+        if !goals::targeting_test(me, mob, view, &player, BEG_DISTANCE, true, false) {
             continue;
         }
         let distance = player.position.distance_to_sqr(me.position);
@@ -398,7 +398,7 @@ fn nearest_angry_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Opti
     for player in players {
         if goals::attack_candidate(mob, ctx, player.uid).is_none()
             || !wolf::is_angry_at(mob, ctx, player.uid)
-            || !goals::targeting_test(me, mob, view, &player, range, true)
+            || !goals::targeting_test(me, mob, view, &player, range, true, true)
         {
             continue;
         }
