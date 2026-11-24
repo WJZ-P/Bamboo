@@ -59,6 +59,12 @@ export interface ServerSettings {
   mobSleepDistance: number;
   /** 休眠生物每刻唤醒名额的倍率，1 = Paper 缺省。 */
   mobWakeupsScale: number;
+  /** 独立寻路阶段（实验）：结果晚一刻交给生物，转向最多慢 0.05 秒。 */
+  mobPathfindingPhase: boolean;
+  /** 每个岛每刻最多展开的 A* 节点数，0 = 65536。只在寻路阶段打开时生效。 */
+  mobPathfindingBudget: number;
+  /** 寻路失败冷却（实验）：连续失败的生物歇 2 秒再算。只在寻路阶段打开时生效。 */
+  mobPathfindingFailCooldown: boolean;
   /** 红石缓存（实验），设置页里可以开关。 */
   redstoneCache: boolean;
   chunkWorkerThreads: number;
@@ -79,6 +85,9 @@ export interface PerformancePreset {
   mobThrottleDistance: number;
   mobSleepDistance: number;
   mobWakeupsScale: number;
+  mobPathfindingPhase: boolean;
+  mobPathfindingBudget: number;
+  mobPathfindingFailCooldown: boolean;
 }
 
 /** 推荐值和恢复原版精确模式的两套值，都由 Rust 侧集中定义。 */
@@ -120,7 +129,7 @@ export const saveSettings = (settings: ServerSettings) =>
 export const defaultSettings = () => invoke<ServerSettings>("default_settings");
 /** 一键性能模式的推荐值和恢复原版精确模式的值。 */
 export const performancePresets = () => invoke<PerformancePresets>("performance_presets");
-/** 以已保存的设置为基准套用预设，结果只改那五项；其它字段原样保留。 */
+/** 以已保存的设置为基准套用预设，结果只改那八项；其它字段原样保留。 */
 export const mergePerformancePreset = (saved: ServerSettings, preset: PerformancePreset) =>
   invoke<ServerSettings>("merge_performance_preset", { saved, preset });
 export const recentLogs = () => invoke<LogLine[]>("recent_logs");

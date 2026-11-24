@@ -59,7 +59,7 @@ export const GROUPS = [
     id: "performance",
     section: "bamboo",
     title: "性能",
-    hint: "实体阶段、生物降频和区块信箱的执行方式，以及世界生成两份缓存的预算和空闲释放。精确模式是默认值，所有对拍和测试都在这个模式下跑；下面的一键按钮只改和生物性能有关的那几项。",
+    hint: "实体阶段、生物降频、独立寻路阶段和区块信箱的执行方式，以及世界生成两份缓存的预算和空闲释放。精确模式是默认值，所有对拍和测试都在这个模式下跑；下面的一键按钮只改和生物性能有关的那几项。",
   },
 ] as const;
 
@@ -149,6 +149,8 @@ const MAX_ENTITY_COLLISIONS = 4096;
 const MAX_MOB_DISTANCE = 4096;
 /** 休眠生物唤醒倍率的上限，和 `MAX_WAKEUPS_SCALE` 一致。 */
 const MAX_MOB_WAKEUPS_SCALE = 16;
+/** 每个岛每刻寻路节点预算的上限，和 `MAX_PATHFINDING_BUDGET` 一致。 */
+const MAX_PATHFINDING_BUDGET = 1_048_576;
 /** 服务端能接受的区块计算线程数上限，和 `MAX_CHUNK_WORKER_THREADS` 一致。 */
 const MAX_CHUNK_WORKER_THREADS = 64;
 const MAX_MAIL_BUDGET = 65_536;
@@ -443,6 +445,34 @@ export const FIELDS: readonly SettingField[] = [
     min: 0,
     max: MAX_MOB_WAKEUPS_SCALE,
     hint: "休眠生物的限量唤醒倍率：1 = Paper 的缺省（动物每刻 4 只、怪物 8 只、飞行怪物 8 只、其它 4 只，分别休眠 1200 / 400 / 200 / 1200 刻后成为候选，醒 100 刻）。0 按 1 算，合法范围 0 到 16。只在休眠档启用时有用；调大能让远处生物更快恢复活动，但会削弱休眠档的收益。",
+  },
+  {
+    key: "mobPathfindingPhase",
+    group: "performance",
+    fileKey: "mob_pathfinding_phase",
+    label: "独立寻路阶段（实验）",
+    control: "toggle",
+    wide: true,
+    hint: "实验功能，默认关闭（和官方逐位一致）。打开后生物发出的寻路请求先挂起一刻，服务端统一去重、排优先级再计算，结果在下一刻开头交给生物：生物转向最多比原来慢 0.05 秒，其它行为不变。",
+  },
+  {
+    key: "mobPathfindingBudget",
+    group: "performance",
+    fileKey: "mob_pathfinding_budget",
+    label: "寻路节点预算（实验）",
+    control: "number",
+    min: 0,
+    max: MAX_PATHFINDING_BUDGET,
+    hint: "每个岛每刻最多展开多少个 A* 节点，0 = 65536（推荐）。只在独立寻路阶段打开时有意义：超出预算的请求顺延到下一刻，等得越久越先算，极端拥挤时个别生物会多等几刻。合法范围 0 到 1048576。",
+  },
+  {
+    key: "mobPathfindingFailCooldown",
+    group: "performance",
+    fileKey: "mob_pathfinding_fail_cooldown",
+    label: "寻路失败冷却（实验）",
+    control: "toggle",
+    wide: true,
+    hint: "同一只生物连续寻路失败超过 10 次后，40 刻（2 秒）内不再计算它的请求，够不着的怪重试变稀。只在独立寻路阶段打开时有意义，默认关闭。",
   },
   {
     key: "redstoneCache",
