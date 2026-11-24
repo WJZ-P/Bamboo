@@ -42,7 +42,6 @@ use super::{
 use crate::{
     container::{self, CONTAINER_BUFFER},
     inbound::PlayerId,
-    interaction::BLOCK_INTERACTION_RANGE,
     inventory::Inventory,
     player::Player,
     region::Region,
@@ -570,7 +569,10 @@ impl Station {
             player.position().y + player.eye_height(),
             player.position().z,
         );
-        let range = BLOCK_INTERACTION_RANGE + CONTAINER_BUFFER;
+        let range = player
+            .attributes
+            .value(mc_bamboo_data::registries::attribute::BLOCK_INTERACTION_RANGE)
+            + CONTAINER_BUFFER;
         let x = f64::from(self.pos.x);
         let y = f64::from(self.pos.y);
         let z = f64::from(self.pos.z);

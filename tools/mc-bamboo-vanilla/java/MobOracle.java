@@ -541,7 +541,15 @@ public final class MobOracle {
                     "guardian_thorns_static", "guardian_thorns_moving",
                     "guardian_thorns_arrow",
                     "laser_mob_victim_squid", "laser_mob_victim_axolotl",
-                    "laser_interrupt_close")) {
+                    "laser_interrupt_close", "laser_interrupt_wall",
+                    "laser_interrupt_kill", "laser_interrupt_creative",
+                    "elder_fatigue_survival", "elder_fatigue_adventure",
+                    "elder_fatigue_creative", "elder_fatigue_spectator",
+                    "elder_fatigue_dist_4999", "elder_fatigue_dist_5000",
+                    "elder_fatigue_dist_5001", "elder_fatigue_existing_1199",
+                    "elder_fatigue_existing_1200", "elder_fatigue_higher",
+                    "elder_fatigue_silent",
+                    "elder_home_far")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playGuardian(official, out, name);
                 cases++;
@@ -11079,21 +11087,39 @@ public final class MobOracle {
         boolean thorns = name.startsWith("guardian_thorns_");
         boolean mobVictim = name.startsWith("laser_mob_victim_");
         boolean interrupt = name.startsWith("laser_interrupt_");
+        boolean fatigue = name.startsWith("elder_fatigue_");
+        boolean home = name.startsWith("elder_home_");
         int difficulty = name.contains("hard") ? 3 : 2;
         // 尖刺场景聚焦反伤判定本身（hurt 在 tick 5，再比一刻）；
         // 之后长时间的游走位移受 java.lang.Math.sin/cos 平台末位差影响。
         // Thorns scenes focus on the reflection itself (hurt at tick 5 plus one
         // tick); longer wandering motion is subject to Math.sin/cos platform diffs.
-        int ticks = thorns ? 6 : (laser || mobVictim || interrupt ? 100 : 200);
-        double[] guardianAt = flop ? new double[] {0.5, 61.0, 0.5}
+        int ticks = thorns || fatigue ? 6 : (home ? 40
+                : (laser || mobVictim || interrupt ? 100 : 200));
+        double[] guardianAt = home ? new double[] {30.5, 62.0, 0.5}
+                : flop ? new double[] {0.5, 61.0, 0.5}
                 : new double[] {0.5, 62.0, 0.5};
+        // 疲劳场景：距离、游戏模式、已有效果、静音、相位。
+        double fatigueDistance = name.contains("dist_4999") ? 49.99
+                : name.contains("dist_5000") ? 50.0
+                : name.contains("dist_5001") ? 50.01 : 8.5;
+        int fatigueMode = name.contains("adventure") ? 2
+                : name.contains("creative") ? 1
+                : name.contains("spectator") ? 3 : 0;
+        int existingDuration = name.contains("existing_1199") ? 1199
+                : name.contains("existing_1200") ? 1200
+                : name.contains("higher") ? 3000 : -1;
+        int existingAmplifier = name.contains("higher") ? 3 : 2;
+        boolean fatigueSilent = name.contains("silent");
         FakeLevel world = FakeLevel.create(official);
         world.getRandom().setSeed(9100L);
         world.injectedSeaLevel = -63;
         ((TickingLevelData) world.levelData).difficulty = Difficulty.values()[difficulty];
         // 一片 17×17 的水池，底是石头；守卫者泡在 y=62。
         // A 17x17 pool of water over stone; the guardian sits at y=62.
-        for (int x = -8; x <= 8; x++) {
+        // 回家场景的家在原点、守卫者在 x=30，水池要覆盖这段。
+        int poolMax = home ? 32 : 8;
+        for (int x = -8; x <= poolMax; x++) {
             for (int z = -8; z <= 8; z++) {
                 world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
                 // 扑腾场景抽干水，守卫者站在石头地板上。
@@ -11120,6 +11146,20 @@ public final class MobOracle {
         guardian.setYHeadRot(0.0F);
         guardian.setYBodyRot(0.0F);
         guardian.setPos(guardianAt[0], guardianAt[1], guardianAt[2]);
+        // `(tickCount + id) % 1200 == 0`：把相位挪到 tick 3，短场景就能命中。
+        // 官方 `Entity.commonTick` 每刻先 +1，再 `tick` 里的 customServerAiStep。
+        // Shift the phase to tick 3 so the short scene hits the 1200 multiple.
+        if (home) {
+            // 官方 `ElderGuardian.customServerAiStep` 只在 !hasHome() 时设家；
+            // 这里显式给一个家（原点、半径 16），守卫者放在范围外。
+            guardian.setHomeTo(new BlockPos(0, 62, 0), 16);
+        }
+        int fatiguePhase = -1;
+        if (fatigue) {
+            fatiguePhase = (1200 - ((guardian.getId() + 3) % 1200)) % 1200;
+            guardian.tickCount = fatiguePhase;
+            if (fatigueSilent) guardian.setSilent(true);
+        }
         world.tracked.add(guardian);
         // 生物目标场景：一名鱿鱼 / 美西螈目标（`GuardianAttackSelector` 认这两类）。
         // Mob-victim scenes: a squid / axolotl target (both accepted by the selector).
@@ -11150,9 +11190,12 @@ public final class MobOracle {
         // guardian's state is compared.
         // 玩家的初始位置：中途动作会改 player.position()，但 setup 要给初始位置。
         // The player's initial position; mid-scene actions move player.position().
-        double[] playerAt = {thorns ? 1.5 : 8.5, 61.0, 0.5};
+        double[] playerAt = fatigue
+                ? new double[] {0.5 + fatigueDistance, 62.0, 0.5}
+                : new double[] {thorns ? 1.5 : 8.5, 61.0, 0.5};
         ServerPlayer player = null;
-        if (laser || thorns || interrupt) {
+        Bytes playerSink = null;
+        if (laser || thorns || interrupt || fatigue) {
             GameProfile profile = new GameProfile(new UUID(1L, 2L), "GuardianTarget");
             player = new ServerPlayer(official.server, world, profile,
                     ClientInformation.createDefault());
@@ -11177,7 +11220,23 @@ public final class MobOracle {
             put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection,
                     "connection", new Connection(PacketFlow.CLIENTBOUND));
             connection.bytes = sink;
+            playerSink = sink;
             put(ServerPlayer.class, player, "connection", connection);
+            if (fatigue) {
+                // `ServerPlayerGameMode.isSurvival()` 只看 gameModeForPlayer；
+                // 直接反射设字段，避开 `setGameMode` 碰假世界里 null 的 sleepStatus。
+                // `ServerPlayer.setGameMode` NPEs on the fake level's null sleepStatus.
+                put(net.minecraft.server.level.ServerPlayerGameMode.class, player.gameMode,
+                        "gameModeForPlayer",
+                        net.minecraft.world.level.GameType.values()[fatigueMode]);
+                if (existingDuration >= 0) {
+                    player.addEffect(new MobEffectInstance(
+                            net.minecraft.world.effect.MobEffects.MINING_FATIGUE,
+                            existingDuration, existingAmplifier));
+                    // 初始化发的 UpdateMobEffect 包不参与逐刻比较。
+                    sink.take();
+                }
+            }
             // `NearestAttackableTargetGoal<LivingEntity>` 走 `getEntitiesOfClass`，
             // 所以玩家除了进玩家表也要进假世界的实体表，官方才会把它当目标。
             // `NearestAttackableTargetGoal<LivingEntity>` uses `getEntitiesOfClass`,
@@ -11234,7 +11293,11 @@ public final class MobOracle {
                     // Move the target within 3 blocks.
                     player.setPos(2.5, 61.0, 0.5);
                 } else if (name.contains("kill")) {
-                    player.setHealth(0.0F);
+                    // 走真实受伤流程：Bamboo 侧 `game.hurt` 会设 hurtTime=10、
+                    // damageCooldownTime=20，直接 setHealth(0) 两边计时器会对不上。
+                    // Use the real hurt path: Bamboo's game.hurt sets hurtTime=10
+                    // and damageCooldownTime=20, which setHealth(0) would miss.
+                    player.hurtServer(world, player.damageSources().generic(), 100.0F);
                 } else if (name.contains("creative")) {
                     // 直接设创造能力：`ServerPlayer.setGameMode` 会碰假世界里为 null
                     // 的 `sleepStatus`，`isCreative()` 只看 abilities.instabuild。
@@ -11255,6 +11318,10 @@ public final class MobOracle {
                     .append(player == null ? "0" : player.damageCooldownTime)
                     .append(",\"victimHealth\":")
                     .append(victim == null ? "0" : Float.floatToRawIntBits(victim.getHealth()))
+                    .append(",\"playerEffects\":")
+                    .append(fatigue ? playerEffectsJson(official, player) : "[]")
+                    .append(",\"elderPackets\":")
+                    .append(fatigue && playerSink != null ? elderPacketsJson(playerSink) : "[]")
                     .append('}');
         }
         frames.append(']');
@@ -11270,7 +11337,14 @@ public final class MobOracle {
                 // which keeps the per-tick random draws aligned.
                 + ",\"skyDarken\":0"
                 + ",\"guardian\":" + guardianSetup(elder, guardianAt, 42001L)
-                + ",\"player\":" + (player == null ? "null" : guardianPlayerSetup(player, playerAt))
+                + ",\"player\":" + (player == null ? "null"
+                        : guardianPlayerSetup(player, playerAt, fatigue ? fatigueMode : 0))
+                + ",\"home\":" + (home ? "{\"position\":[0,62,0],\"radius\":16}" : "null")
+                + ",\"fatigue\":" + (fatigue ? "{\"tickCount\":" + fatiguePhase
+                        + ",\"gameMode\":" + fatigueMode
+                        + ",\"existing\":" + (existingDuration < 0 ? "null"
+                                : "[" + existingDuration + "," + existingAmplifier + "]")
+                        + ",\"silent\":" + fatigueSilent + "}" : "null")
                 + ",\"interrupt\":" + (interrupt ? "{\"tick\":30,\"kind\":\""
                         + name.substring(name.lastIndexOf('_') + 1) + "\"}" : "null")
                 + ",\"victim\":" + (victim == null ? "null"
@@ -11284,14 +11358,68 @@ public final class MobOracle {
                 + ",\"frames\":" + frames + "}\n");
     }
 
-    private static String guardianPlayerSetup(ServerPlayer player, double[] at) {
+    private static String guardianPlayerSetup(ServerPlayer player, double[] at, int gameMode) {
         // 用初始位置，不用 player.position()：中途动作可能已经把它挪走了。
         // Use the initial position: mid-scene actions may have moved the player.
         return "{\"uid\":" + player.getId()
                 + ",\"position\":[" + Double.doubleToRawLongBits(at[0]) + ','
                 + Double.doubleToRawLongBits(at[1]) + ',' + Double.doubleToRawLongBits(at[2]) + ']'
                 + ",\"health\":" + Float.floatToRawIntBits(20.0F)
-                + ",\"gameMode\":0}";
+                + ",\"gameMode\":" + gameMode + "}";
+    }
+
+    /** 玩家身上的效果，按注册表 ID 排序（HashMap 迭代序不稳定）。 */
+    private static String playerEffectsJson(Official official, ServerPlayer player) {
+        var registry = official.registries.lookupOrThrow(Registries.MOB_EFFECT);
+        var effects = new java.util.ArrayList<>(player.getActiveEffects());
+        effects.sort(java.util.Comparator.comparingInt(
+                e -> registry.getId(e.getEffect().value())));
+        var out = new StringBuilder("[");
+        boolean first = true;
+        for (var e : effects) {
+            if (!first) out.append(',');
+            first = false;
+            out.append('[').append(registry.getId(e.getEffect().value()));
+            out.append(',').append(e.getDuration()).append(',').append(e.getAmplifier()).append(']');
+        }
+        return out.append(']').toString();
+    }
+
+    /** `MoveTowardsRestrictionGoal.wantedX/Y/Z`：`getPosTowards` 选中的落点。 */
+    private static String homeTargetJson(net.minecraft.world.entity.monster.Guardian guardian)
+            throws Exception {
+        var type = net.minecraft.world.entity.ai.goal.MoveTowardsRestrictionGoal.class;
+        for (var wrapped : guardian.getGoalSelector().getAvailableGoals()) {
+            if (!wrapped.getGoal().getClass().equals(type)) {
+                continue;
+            }
+            var fx = type.getDeclaredField("wantedX");
+            var fy = type.getDeclaredField("wantedY");
+            var fz = type.getDeclaredField("wantedZ");
+            fx.setAccessible(true);
+            fy.setAccessible(true);
+            fz.setAccessible(true);
+            var goal = wrapped.getGoal();
+            return "[" + Double.doubleToRawLongBits(fx.getDouble(goal)) + ','
+                    + Double.doubleToRawLongBits(fy.getDouble(goal)) + ','
+                    + Double.doubleToRawLongBits(fz.getDouble(goal)) + ']';
+        }
+        return "[0,0,0]";
+    }
+
+    /** 这一刻的 `GUARDIAN_ELDER_EFFECT` 游戏事件包（clientbound 包 ID 39），base64。 */
+    private static String elderPacketsJson(Bytes sink) {
+        var out = new StringBuilder("[");
+        boolean first = true;
+        for (String b64 : sink.take()) {
+            byte[] body = java.util.Base64.getDecoder().decode(b64);
+            // `mc_bamboo_data::packets::play::clientbound::GAME_EVENT` = 39。
+            if (body.length == 0 || (body[0] & 0xFF) != 39) continue;
+            if (!first) out.append(',');
+            first = false;
+            out.append(jsonString(b64));
+        }
+        return out.append(']').toString();
     }
 
     /** `Guardian.DATA_ID_ATTACK_TARGET` 的整数值（私有静态字段，反射读）。 */
@@ -11336,7 +11464,8 @@ public final class MobOracle {
                 + ",\"moving\":" + (g.isMoving() ? 1 : 0)
                 + guardianLook(g)
                 + ",\"randomState\":" + guardianRandomState(g)
-                + ",\"noActionTime\":" + g.getNoActionTime() + '}';
+                + ",\"noActionTime\":" + g.getNoActionTime()
+                + ",\"homeTarget\":" + homeTargetJson(g) + '}';
     }
 
     /** `LegacyRandomSource.seed`（AtomicLong），和 Bamboo `JavaRandom.state()` 逐位比。 */

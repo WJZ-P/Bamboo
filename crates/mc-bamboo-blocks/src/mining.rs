@@ -2,14 +2,15 @@
 //!
 //! 官方的进度是 `getDestroyProgress(state) * (挖了几刻 + 1)`，见 `ServerPlayerGameMode`。
 //! 这里只算每一刻的基础进度，攒进度和判断阈值在 `mc-bamboo-game`。
-//! 没有状态效果，所以急迫和挖掘疲劳都按没有算。
+//! 属性值和状态效果由调用方填进 [`Miner`]；没有属性系统时的缺省值见 [`Miner::plain`]。
 //!
 //! 官方这些方法拿到的 `BlockState` 一定在注册表里。状态 ID 不存在时这里不把它当成空气
 //! （方块 ID 0）：进度是 0，工具规则也不套。这是 Bamboo 的防御，不是官方的一个分支。
 //!
 //! Official methods always receive a registered `BlockState`. An unknown state id is not
 //! treated as air (block id 0): progress is 0 and tool rules are not applied. That guard
-//! belongs to Bamboo; vanilla has no such branch.
+//! belongs to Bamboo; vanilla has no such branch. Attribute values and effects are supplied
+//! by the caller through [`Miner`]; [`Miner::plain`] gives the vanilla defaults.
 
 use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::{
@@ -26,8 +27,11 @@ use crate::{
     state::{FluidState, SupportType},
 };
 
-/// `Player.getDestroySpeed` 读到的几样东西。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `Player.getDestroySpeed` 读到的几样东西：工具、物理位置，以及已经算好的属性值和效果。
+///
+/// The inputs to `Player.getDestroySpeed`: tool, physical state, and the already-resolved
+/// attribute values and status effects.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Miner {
     /// 主手物品的注册表 ID，空手是 [`items::AIR`]。
     pub main_hand: i32,
@@ -35,30 +39,82 @@ pub struct Miner {
     pub on_ground: bool,
     /// `isEyeInFluid(FluidTags.WATER)`。
     pub eye_in_water: bool,
+    /// `(float) MINING_EFFICIENCY` 属性值；工具速度 > 1 时加上去。
+    pub mining_efficiency: f32,
+    /// `(float) BLOCK_BREAK_SPEED` 属性值；最后乘上去。
+    pub block_break_speed: f32,
+    /// `(float) SUBMERGED_MINING_SPEED` 属性值；眼睛泡在水里时乘上去。
+    pub submerged_mining_speed: f32,
+    /// `MobEffectUtil.hasDigSpeed`：有急迫或潮涌能量。
+    pub has_dig_speed: bool,
+    /// `MobEffectUtil.getDigSpeedAmplification`。
+    pub dig_speed_amplification: i32,
+    /// 有 `MINING_FATIGUE` 时的放大器；`None` 表示没有这个效果。
+    pub mining_fatigue: Option<i32>,
+}
+
+impl Miner {
+    /// 官方缺省输入：属性取注册表缺省值、无状态效果。给对拍表和还没有属性状态的调用方用。
+    ///
+    /// The vanilla-default input: registry-default attributes and no status effects,
+    /// for parity tables and callers without attribute state yet.
+    pub fn plain(main_hand: i32, on_ground: bool, eye_in_water: bool) -> Self {
+        Self {
+            main_hand,
+            on_ground,
+            eye_in_water,
+            mining_efficiency: attribute_defaults::MINING_EFFICIENCY as f32,
+            block_break_speed: attribute_defaults::BLOCK_BREAK_SPEED as f32,
+            submerged_mining_speed: attribute_defaults::SUBMERGED_MINING_SPEED as f32,
+            has_dig_speed: false,
+            dig_speed_amplification: 0,
+            mining_fatigue: None,
+        }
+    }
 }
 
 /// 玩家的挖掘速度，官方的 `Player.getDestroySpeed`。
 ///
-/// 附魔和状态效果都还没有：`MINING_EFFICIENCY` 只是属性的默认值，
-/// `MobEffectUtil.hasDigSpeed` 和 `MINING_FATIGUE` 在这里是恒假。
-///
+/// 工具速度由主手物品查出来，再走 [`destroy_speed_from`] 套属性 / 效果。
 /// 状态 ID 不在注册表里时没有方块可拿去 `state.is(rule.blocks)`，不能当成空气。
 /// 有工具就用 `Tool.getMiningSpeed` 一条规则都没中时的 `defaultMiningSpeed`，否则是 1。
 ///
-/// An unregistered state id is not a block, so it is not air. A tool then uses
-/// `Tool.defaultMiningSpeed`, which is what `getMiningSpeed` returns when no rule matches;
-/// an empty hand stays at 1.
+/// The tool speed is looked up from the main-hand item, then [`destroy_speed_from`]
+/// applies attributes / effects. An unregistered state id is not a block, so it is not
+/// air. A tool then uses `Tool.defaultMiningSpeed` (the no-rule result); an empty hand
+/// stays at 1.
 pub fn destroy_speed(state: u32, miner: Miner) -> f32 {
-    let mut speed = tool_of(miner.main_hand).map_or(1.0, |tool| match block_id_of_state(state) {
+    let speed = tool_of(miner.main_hand).map_or(1.0, |tool| match block_id_of_state(state) {
         Some(block) => tool.mining_speed(block as i32),
         None => tool.default_mining_speed,
     });
+    destroy_speed_from(speed, &miner)
+}
+
+/// 官方 `Player.getDestroySpeed` 里 `ItemStack.getDestroySpeed` 之后的那一段。
+/// `speed` 是工具挖掘速度。运算全是 `float`（属性的 `double` 已在取值处 `d2f`），
+/// 顺序逐条照字节码；挖掘疲劳的 `Math.pow(0.3D, amp+1)` 用 `f64::powf` 再转 `f32`。
+///
+/// The part of `Player.getDestroySpeed` after `ItemStack.getDestroySpeed`. `speed` is
+/// the tool speed. All arithmetic is `float` (attribute doubles were narrowed with
+/// `d2f`); the order follows the bytecode. Mining fatigue uses
+/// `Math.pow(0.3D, amp+1)` via `f64::powf` cast to `f32`.
+pub fn destroy_speed_from(speed: f32, miner: &Miner) -> f32 {
+    let mut speed = speed;
     if speed > 1.0 {
-        speed += attribute_defaults::MINING_EFFICIENCY as f32;
+        speed += miner.mining_efficiency;
     }
-    speed *= attribute_defaults::BLOCK_BREAK_SPEED as f32;
+    if miner.has_dig_speed {
+        // 1.0F + (float)(amp + 1) * 0.2F，全部按 float 算。
+        speed *= 1.0 + (miner.dig_speed_amplification.wrapping_add(1) as f32) * 0.2;
+    }
+    if let Some(amplifier) = miner.mining_fatigue {
+        // (float) Math.pow(0.3D, amplifier + 1)；int 的 +1 按官方 iadd 回绕。
+        speed *= 0.3_f64.powf(f64::from(amplifier.wrapping_add(1))) as f32;
+    }
+    speed *= miner.block_break_speed;
     if miner.eye_in_water {
-        speed *= attribute_defaults::SUBMERGED_MINING_SPEED as f32;
+        speed *= miner.submerged_mining_speed;
     }
     if !miner.on_ground {
         speed /= 5.0;
@@ -210,11 +266,7 @@ mod tests {
     use crate::{BlockState, testing::TestLevel};
 
     fn miner(item: i32) -> Miner {
-        Miner {
-            main_hand: item,
-            on_ground: true,
-            eye_in_water: false,
-        }
+        Miner::plain(item, true, false)
     }
 
     #[test]

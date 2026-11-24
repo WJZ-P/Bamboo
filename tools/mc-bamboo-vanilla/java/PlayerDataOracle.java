@@ -71,6 +71,8 @@ import net.minecraft.world.level.storage.PrimaryLevelData;
 import net.minecraft.world.level.storage.TagValueInput;
 import net.minecraft.world.level.storage.ValueInput;
 import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 
 /**
  * 用官方 26.3 的类检查 Bamboo 写出的带槽位物品、玩家数据和 level.dat。
@@ -526,6 +528,9 @@ public final class PlayerDataOracle {
             fields.addProperty("food_tick_timer", input.getIntOr("foodTickTimer", 0));
             fields.addProperty("food_saturation", input.getFloatOr("foodSaturationLevel", 5.0F));
             fields.addProperty("food_exhaustion", input.getFloatOr("foodExhaustionLevel", 0.0F));
+            fields.add("attributes", canonical(tagList(input.listOrEmpty("attributes",
+                    AttributeInstance.Packed.CODEC).stream()
+                    .map(one -> AttributeInstance.Packed.CODEC.encodeStart(ops(), one).getOrThrow()))));
             fields.add("active_effects", canonical(tagList(input.listOrEmpty("active_effects",
                     MobEffectInstance.CODEC).stream()
                     .map(one -> MobEffectInstance.CODEC.encodeStart(ops(), one).getOrThrow()))));
@@ -590,6 +595,9 @@ public final class PlayerDataOracle {
             tag.putInt("foodTickTimer", input.getIntOr("foodTickTimer", 0));
             tag.putFloat("foodSaturationLevel", input.getFloatOr("foodSaturationLevel", 5.0F));
             tag.putFloat("foodExhaustionLevel", input.getFloatOr("foodExhaustionLevel", 0.0F));
+            // `LivingEntity.addAdditionalSaveData`：存在 `attributes` 时按官方 Packed.LIST_CODEC 往返。
+            input.read("attributes", AttributeInstance.Packed.LIST_CODEC)
+                    .ifPresent(attrs -> putCodec(tag, "attributes", AttributeInstance.Packed.LIST_CODEC, attrs));
             // `LivingEntity.addAdditionalSaveData`：空表不写键。
             var effects = input.listOrEmpty("active_effects", MobEffectInstance.CODEC)
                     .stream().toList();
@@ -670,6 +678,35 @@ public final class PlayerDataOracle {
             tag.putInt("foodTickTimer", spec.get("food_tick_timer").getAsInt());
             tag.putFloat("foodSaturationLevel", spec.get("food_saturation").getAsFloat());
             tag.putFloat("foodExhaustionLevel", spec.get("food_exhaustion").getAsFloat());
+            if (spec.has("attributes")) {
+                List<AttributeInstance.Packed> attrs = new ArrayList<>();
+                for (var element : spec.getAsJsonArray("attributes")) {
+                    JsonObject a = element.getAsJsonObject();
+                    var holder = registries.lookupOrThrow(net.minecraft.core.registries.Registries.ATTRIBUTE)
+                            .getOrThrow(net.minecraft.resources.ResourceKey.create(
+                                    net.minecraft.core.registries.Registries.ATTRIBUTE,
+                                    net.minecraft.resources.Identifier.parse(a.get("id").getAsString())));
+                    double base = a.get("base").getAsDouble();
+                    List<AttributeModifier> modifiers = new ArrayList<>();
+                    if (a.has("modifiers")) {
+                        for (var modElement : a.getAsJsonArray("modifiers")) {
+                            JsonObject m = modElement.getAsJsonObject();
+                            AttributeModifier.Operation op = switch (m.get("operation").getAsString()) {
+                                case "add_value" -> AttributeModifier.Operation.ADD_VALUE;
+                                case "add_multiplied_base" -> AttributeModifier.Operation.ADD_MULTIPLIED_BASE;
+                                case "add_multiplied_total" -> AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL;
+                                default -> throw new IllegalArgumentException("unknown op " + m.get("operation"));
+                            };
+                            modifiers.add(new AttributeModifier(
+                                    net.minecraft.resources.Identifier.parse(m.get("id").getAsString()),
+                                    m.get("amount").getAsDouble(),
+                                    op));
+                        }
+                    }
+                    attrs.add(new AttributeInstance.Packed(holder, base, modifiers));
+                }
+                putCodec(tag, "attributes", AttributeInstance.Packed.LIST_CODEC, attrs);
+            }
             if (spec.has("active_effects")) {
                 ListTag effects = new ListTag();
                 for (var element : spec.getAsJsonArray("active_effects")) {

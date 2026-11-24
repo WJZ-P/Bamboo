@@ -199,6 +199,8 @@ mod oracle;
 #[cfg(feature = "oracle")]
 mod path_type_oracle;
 #[cfg(feature = "oracle")]
+mod player_attributes_oracle;
+#[cfg(feature = "oracle")]
 mod player_data_oracle;
 #[cfg(feature = "oracle")]
 mod poi_oracle;
@@ -381,6 +383,9 @@ const CHUNK_CONTENT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ChunkCon
 #[cfg(feature = "oracle")]
 const TICKET_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/TicketOracle.java";
 #[cfg(feature = "oracle")]
+const PLAYER_ATTRIBUTES_ORACLE_SOURCE: &str =
+    "tools/mc-bamboo-vanilla/java/PlayerAttributesOracle.java";
+#[cfg(feature = "oracle")]
 const PLAYER_DATA_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/PlayerDataOracle.java";
 #[cfg(feature = "oracle")]
 const WORLD_BORDER_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/WorldBorderOracle.java";
@@ -442,6 +447,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla poi-oracle <java 路径> [--show N] [--break-self-test NAME]
       mc-bamboo-vanilla storage <java 路径> [--show N]
       mc-bamboo-vanilla saved-data <java 路径>
+      mc-bamboo-vanilla player-attributes <java 路径> [--cases N] [--mining-cases N] [--seed S] [--show N] [--break-self-test]
       mc-bamboo-vanilla player-data <java 路径> [--show N]
       mc-bamboo-vanilla chunk-content <java 路径> [--show N]
       mc-bamboo-vanilla ticket-oracle <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
@@ -543,6 +549,7 @@ fn run() -> Result<(), String> {
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
         ["poi-oracle", java, ref options @ ..] => poi_oracle_cli(java, options),
         ["saved-data", java] => saved_data_cli(java),
+        ["player-attributes", java, ref options @ ..] => player_attributes_oracle(java, options),
         ["player-data", java, ref options @ ..] => player_data_oracle(java, options),
         ["chunk-content", java, ref options @ ..] => chunk_content_oracle(java, options),
         ["ticket-oracle", java, ref options @ ..] => ticket_oracle(java, options),
@@ -1141,6 +1148,19 @@ fn storage_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn chunk_content_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(feature = "oracle")]
+fn player_attributes_oracle(java: &str, options: &[&str]) -> Result<(), String> {
+    player_attributes_oracle::run(
+        official_program(java, PLAYER_ATTRIBUTES_ORACLE_SOURCE)?,
+        options,
+    )
+}
+
+#[cfg(not(feature = "oracle"))]
+fn player_attributes_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

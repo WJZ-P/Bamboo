@@ -400,7 +400,7 @@ fn nearest_swim_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Optio
     let mut best = -1.0_f64;
     let mut found = None;
     for player in players {
-        if !goals::targeting_test(me, mob, view, &player, 10.0, false) {
+        if !goals::targeting_test(me, mob, view, &player, 10.0, false, false) {
             continue;
         }
         let distance = me.position.distance_to_sqr(player.position);

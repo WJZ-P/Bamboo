@@ -4130,7 +4130,7 @@ public final class Probe {
                                 snapshot.attribute().unwrapKey().map(key -> key.identifier().getPath().equals("movement_speed")).orElse(false)));
                 return;
             }
-            if (mobIds.contains(packet.getEntityId())) {
+            if (mobIds.contains(packet.getEntityId()) || remotes.containsKey(packet.getEntityId())) {
                 return;
             }
             check("play: attributes are only sent to the player itself", packet.getEntityId() == entityId);

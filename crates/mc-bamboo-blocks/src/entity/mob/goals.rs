@@ -2478,6 +2478,25 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
 }
 
 fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
+    // 官方 `Mob.getTarget()` 走 `asValidTarget()`：创造 / 旁观 / 死亡玩家读成 null，
+    // `TargetGoal.canContinueToUse` 回退 `targetMob` 也打不了 → 目标 goal 停止，
+    // `TargetGoal.stop()` 里 `mob.setTarget(null)`。Bamboo 的 `combat_target` 只把
+    // 这类目标读成 None，`mob.target` 字段却一直留着，逐刻对拍的 target 字段会分叉。
+    // 对目标选择器统一在这里落下 `setTarget(null)`。
+    //
+    // Vanilla `Mob.getTarget()` applies `asValidTarget()`: creative/spectator/dead
+    // players read as null, so the target goal stops and `TargetGoal.stop()` calls
+    // `mob.setTarget(null)`. Bamboo's `combat_target` only reads such a target as
+    // None while the raw `mob.target` field lingers. Clear it here for target goals.
+    if matches!(goal, Goal::NearestAttackableTarget { .. })
+        && let Some(uid) = mob.target
+        && let Some(player) = player_by_uid(ctx.blocks(), uid)
+        && (player.creative || player.spectator || !player.alive)
+    {
+        super::enderman::set_target(me, mob, None);
+        return false;
+    }
+
     match goal {
         // `Goal.canContinueToUse` 缺省是 `canUse()`：倒数到 0 就停。
         // `Goal.canContinueToUse` defaults to `canUse()`: stop at zero.
@@ -4258,8 +4277,18 @@ pub(super) fn targeting_test(
     player: &PlayerView,
     range: f64,
     check_line_of_sight: bool,
+    combat: bool,
 ) -> bool {
-    if player.spectator || !player.alive {
+    // `TargetingConditions.test` 无条件走 `canBeSeenByAnyone()`（旁观、死亡）。
+    // 只有 `isCombat` 分支再走 `canBeSeenAsEnemy()` / `canAttack()`：`Player` 的
+    // `!abilities.invulnerable`（创造）和 `Avatar` 的旁观/创造都在这里排除。
+    // `forNonCombat()`（LookAtPlayer / Tempt）不排除创造玩家。
+    //
+    // `TargetingConditions.test` always checks `canBeSeenByAnyone()` (spectator,
+    // dead). Only the `isCombat` branch adds `canBeSeenAsEnemy()` / `canAttack()`,
+    // where `Player`'s `!abilities.invulnerable` (creative) and `Avatar`'s
+    // spectator/creative exclusions live. `forNonCombat()` does not exclude creative.
+    if player.spectator || !player.alive || (combat && player.creative) {
         return false;
     }
     if range > 0.0 {
@@ -4306,7 +4335,7 @@ fn nearest_look_target(
         // `notRiding(mob)`：忽略骑在自己身上的玩家。
         // `notRiding(mob)`: ignore players riding this mob.
         if mob.passengers.contains(&player.uid)
-            || !targeting_test(me, mob, view, &player, range, true)
+            || !targeting_test(me, mob, view, &player, range, true, false)
         {
             continue;
         }
@@ -4401,7 +4430,7 @@ fn nearest_guardian_target(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
         {
             return;
         }
-        if !allied(mob, view, player) && targeting_test(me, mob, view, player, range, true) {
+        if !allied(mob, view, player) && targeting_test(me, mob, view, player, range, true, true) {
             // `getNearestEntity` 按目标脚下到生物眼睛的距离排名。
             // `getNearestEntity` ranks the target's feet against the mob's eye point.
             let distance = player.position.distance_to_sqr(eye);
@@ -4494,7 +4523,7 @@ pub(super) fn nearest_tempting_player(
         if !follows {
             continue;
         }
-        if !targeting_test(me, mob, view, &player, range, false) {
+        if !targeting_test(me, mob, view, &player, range, false, false) {
             continue;
         }
         let distance = player.position.distance_to_sqr(me.position);
@@ -5621,7 +5650,8 @@ fn nearest_attackable(
         {
             continue;
         }
-        if !allied(mob, view, &player) && targeting_test(me, mob, view, &player, range, true) {
+        if !allied(mob, view, &player) && targeting_test(me, mob, view, &player, range, true, true)
+        {
             // `getNearestEntity`：按玩家脚下的位置到生物 (x, eyeY, z) 的距离排名。
             // `getNearestEntity` ranks the player's feet against the mob's eye point.
             let distance = player.position.distance_to_sqr(eye);
@@ -5949,12 +5979,82 @@ pub(super) fn can_target_player(
             mob.attributes
                 .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE),
             true,
+            true,
         )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        BlockTicks, World,
+        entity::{
+            ctx::PreciseCtx,
+            mob::{MobType, throttle::test_player},
+        },
+        testing::TestLevel,
+    };
+
+    /// 官方 `TargetingConditions.forCombat()` 经 `canBeSeenAsEnemy()` 排除创造玩家；
+    /// `forNonCombat()`（LookAtPlayer / Tempt）不排除。
+    ///
+    /// Vanilla `forCombat()` excludes creative players via `canBeSeenAsEnemy()`,
+    /// while `forNonCombat()` does not.
+    #[test]
+    fn targeting_combat_excludes_creative_players() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        let world = World::new(&mut level, &mut ticks);
+        let me = Entity::by_mob_type(MobType::Guardian, Vec3::new(0.5, 62.0, 0.5));
+        let mut mob = Mob::new(MobType::Guardian);
+        let mut player = test_player(1, Vec3::new(8.5, 61.0, 0.5));
+
+        // 生存玩家：战斗目标可过。
+        assert!(targeting_test(
+            &me, &mut mob, &world, &player, 0.0, false, true
+        ));
+        player.creative = true;
+        // 创造玩家：战斗目标被排除，非战斗目标仍可过。
+        assert!(!targeting_test(
+            &me, &mut mob, &world, &player, 0.0, false, true
+        ));
+        assert!(targeting_test(
+            &me, &mut mob, &world, &player, 0.0, false, false
+        ));
+        // 旁观 / 死亡两条路都排除。
+        player.creative = false;
+        player.spectator = true;
+        assert!(!targeting_test(
+            &me, &mut mob, &world, &player, 0.0, false, false
+        ));
+        player.spectator = false;
+        player.alive = false;
+        assert!(!targeting_test(
+            &me, &mut mob, &world, &player, 0.0, false, true
+        ));
+    }
+
+    /// 玩家被锁定期间切到创造：`Mob.getTarget()` 经 `asValidTarget` 读成 null，
+    /// 目标 goal 停止并 `setTarget(null)`；Bamboo 在 `can_continue` 里同步清掉。
+    ///
+    /// A locked-on player switching to creative: `getTarget()` reads null via
+    /// `asValidTarget`, the target goal stops and clears `setTarget(null)`.
+    #[test]
+    fn target_goal_drops_a_player_that_becomes_creative() {
+        let mut level = TestLevel::new();
+        let mut player = test_player(1, Vec3::new(8.5, 61.0, 0.5));
+        player.creative = true;
+        level.players.push(player);
+        let mut ticks = BlockTicks::default();
+        let mut me = Entity::by_mob_type(MobType::Guardian, Vec3::new(0.5, 62.0, 0.5));
+        let mut mob = Mob::new(MobType::Guardian);
+        mob.target = Some(1);
+        let mut goal = Goal::nearest_target(TargetType::GuardianPrey);
+        let mut binding = World::new(&mut level, &mut ticks);
+        let mut ctx = PreciseCtx::new(&mut binding, 2);
+        assert!(!can_continue(&mut goal, &mut me, &mut mob, &mut ctx));
+        assert_eq!(mob.target, None, "切到创造后锁定目标要被放掉");
+    }
 
     /// 僵尸的四个目标：`mustSee` 只有村民为假，海龟用 BABY_ON_LAND_SELECTOR。
     ///

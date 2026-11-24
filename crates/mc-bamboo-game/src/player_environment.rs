@@ -18,7 +18,11 @@ use mc_bamboo_blocks::{
     entity::mob::{DamageKind, DamageSource},
 };
 use mc_bamboo_core::{Aabb, BlockPos, Vec3};
-use mc_bamboo_data::{blocks, registries::mob_effect, tags::fluid_tags};
+use mc_bamboo_data::{
+    blocks,
+    registries::{attribute, mob_effect},
+    tags::fluid_tags,
+};
 
 use crate::{inbound::PlayerId, player::Player, region::Region};
 
@@ -132,21 +136,16 @@ pub(crate) fn is_on_fire(player: &Player) -> bool {
 }
 
 /// `LivingEntity.calculateFallDamage`：
-/// `floor((fallDistance + 1e-6 - SAFE_FALL_DISTANCE) * damageMultiplier * FALL_DAMAGE_MULTIPLIER)`。
-/// 安全摔落距离受跳跃提升效果影响（`+amplifier+1`），伤害倍率目前是缺省 1。
+/// `floor((fallDistance + 1e-6 - getAttributeValue(SAFE_FALL_DISTANCE)) * getAttributeValue(FALL_DAMAGE_MULTIPLIER))`。
+/// 跳跃提升效果已经通过 `minecraft:effect.jump_boost` 修饰符加在 `SAFE_FALL_DISTANCE` 上。
 ///
-/// Vanilla `calculateFallDamage`, including the jump-boost safe-fall bonus.
+/// Vanilla `calculateFallDamage`, reading `SAFE_FALL_DISTANCE` (which already
+/// includes Jump Boost) and `FALL_DAMAGE_MULTIPLIER` from the attribute map.
 pub(crate) fn fall_damage(player: &Player, fall_distance: f64) -> i32 {
-    let safe = mc_bamboo_data::registries::attribute_defaults::SAFE_FALL_DISTANCE
-        + player
-            .effects
-            .amplifier(mob_effect::JUMP_BOOST)
-            .map_or(0.0, |amplifier| f64::from(amplifier.clamp(0, 255) + 1));
+    let safe = player.attributes.value(attribute::SAFE_FALL_DISTANCE);
     let power = fall_distance + FALL_EPSILON - safe;
-    mc_bamboo_core::mth::floor(
-        power * mc_bamboo_data::registries::attribute_defaults::FALL_DAMAGE_MULTIPLIER,
-    )
-    .max(0)
+    mc_bamboo_core::mth::floor(power * player.attributes.value(attribute::FALL_DAMAGE_MULTIPLIER))
+        .max(0)
 }
 
 /// `Entity.causeFallDamage` 的落地分支：伤害 > 0 才走完整受伤链路。
@@ -312,28 +311,35 @@ fn tick_player(region: &mut Region, id: PlayerId) {
         ignite_for_ticks(region, id, 8 * FIRE_TICKS_PER_SECOND);
     }
     // `LivingEntity.baseTick`：眼睛在水里且不是气泡柱时减氧气；
-    // 否则每刻回 4，封顶 300。`OXYGEN_BONUS` 由「海豚的恩惠」等效果给，
-    // 概率 `1/(bonus+1)` 不减，取玩家实体随机源。
-    let (oxygen_bonus, water_breathing, roll) = {
+    // `MobEffectUtil.hasWaterBreathing` 包含水下呼吸 / 潮涌能量 / 鹦鹉螺之息；
+    // `LivingEntity.decreaseAirSupply` 读 `Attributes.OXYGEN_BONUS`（水下呼吸附魔等），
+    // 概率 `1/(bonus+1)` 减氧，取玩家实体随机源。
+    let (oxygen_bonus, water_breathing, refill_air, roll) = {
         let Some(player) = region.players.get_mut(&id) else {
             return;
         };
-        let bonus = player
-            .effects
-            .amplifier(mob_effect::BREATH_OF_THE_NAUTILUS)
-            .map_or(0.0_f64, |amplifier| f64::from(amplifier.max(0) + 1));
-        let roll = if bonus > 0.0 {
+        let bonus = player.attributes.value(attribute::OXYGEN_BONUS);
+        let has_wb = player.effects.has(mob_effect::WATER_BREATHING);
+        let has_conduit = player.effects.has(mob_effect::CONDUIT_POWER);
+        let has_nautilus = player.effects.has(mob_effect::BREATH_OF_THE_NAUTILUS);
+        let water_breathing = has_wb || has_conduit || has_nautilus;
+        // `MobEffectUtil.shouldEffectsRefillAirsupply`：只有鹦鹉螺之息时停氧但不补氧。
+        // `MobEffectUtil.shouldEffectsRefillAirsupply`: Breath of the Nautilus alone pauses without refilling.
+        let refill_air = !has_nautilus || has_wb || has_conduit;
+        let roll = if in_water_eye && !bubble && !water_breathing && !creative && bonus > 0.0 {
             player.random.next_double()
         } else {
             0.0
         };
-        (bonus, player.effects.has(mob_effect::WATER_BREATHING), roll)
+        (bonus, water_breathing, refill_air, roll)
     };
     let skip_air_loss = oxygen_bonus > 0.0 && roll >= 1.0 / (oxygen_bonus + 1.0);
     let air = if in_water_eye && !bubble && !water_breathing && !creative {
         if skip_air_loss { air } else { air - 1 }
-    } else {
+    } else if refill_air {
         (air + 4).min(MAX_AIR)
+    } else {
+        air
     };
     let drown = air <= DROWN_AT;
     let air = if drown { 0 } else { air };
@@ -560,6 +566,7 @@ mod tests {
                 1,
             ),
         );
+        crate::player_attributes::rebuild_player(&mut boosted, false);
         assert_eq!(fall_damage(&boosted, 4.0), 0);
         assert_ne!(fall_damage(&boosted, 4.0), fall_damage(&player, 4.0));
     }

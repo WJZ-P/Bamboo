@@ -159,6 +159,11 @@ pub(crate) struct EntitySync {
     sent_metadata: Metadata,
     /// 上次比较时的装备，和 [`EQUIPMENT_SLOTS`] 一一对应。
     sent_equipment: [ItemStack; EQUIPMENT_SLOTS.len()],
+    /// 上次同步出去的可同步属性状态（脏属性同步用；进服时为空表示还没发过）。
+    ///
+    /// Last-synced syncable-attribute states, for dirty attribute sync. Empty
+    /// until the first sync after joining / respawning.
+    pub(crate) sent_attributes: Vec<crate::player_attributes::AttributeState>,
     /// 看得见这名玩家的人。它们的客户端里有这个实体。
     seen_by: BTreeSet<PlayerId>,
 }
@@ -196,6 +201,7 @@ impl EntitySync {
                 ..Metadata::DEFAULT
             },
             sent_equipment: [const { NO_EQUIPMENT }; EQUIPMENT_SLOTS.len()],
+            sent_attributes: Vec::new(),
             seen_by: BTreeSet::new(),
         }
     }
@@ -357,9 +363,18 @@ fn apply_viewer_changes(region: &mut Region, change: ViewerChanges) {
     }
     if !change.gained.is_empty() {
         let frames = pairing_frames(target);
+        // 全量可同步属性单独发（不在配对 bundle 里，官方 D5）：新观察者的客户端
+        // 这时才拿到目标的属性基础值和修饰符。
+        //
+        // Full syncable attributes go separately, outside the pairing bundle
+        // (vanilla D5), so a new observer learns the target's attribute state.
+        let attributes = crate::player_attributes::full_frames(target);
         for viewer in change.gained {
             target.sync.seen_by.insert(viewer);
             region.links.send_frames(viewer, &frames);
+            if let Some(attributes) = &attributes {
+                region.links.send_frames(viewer, attributes);
+            }
         }
     }
 }
@@ -367,8 +382,9 @@ fn apply_viewer_changes(region: &mut Region, change: ViewerChanges) {
 /// 把一名玩家介绍给新观察者的 bundle。`entities.md` 第 5 节。
 ///
 /// 位置、角度和元数据都取上次发出去的状态，还没发的变化下一个周期会发给包括它在内的所有观察者。
-/// `update_attributes` 配对时不发（D5）。两个分隔符要和内容一起写进同一条队列，
-/// 漏掉第二个的话后面的包都会被客户端吞掉，所以这里返回一整段字节。
+/// 属性配对时发全量（可同步属性），逐刻的增量由 `player_attributes::sync_dirty` 发。
+/// 两个分隔符要和内容一起写进同一条队列，漏掉第二个的话后面的包都会被客户端吞掉，
+/// 所以这里返回一整段字节。
 fn pairing_frames(player: &Player) -> Vec<u8> {
     let sync = &player.sync;
     let mut frames = encode_frames(&BundleDelimiter);
@@ -391,6 +407,11 @@ fn pairing_frames(player: &Player) -> Vec<u8> {
     if let Some(packet) = SetEquipment::new(player.id.0, &equipment) {
         frames.extend(encode_frames(&packet));
     }
+    // `update_attributes` 配对时不发（D5）：属性的全量 / 增量都由
+    // `player_attributes::sync_dirty` 在配对之后的同步阶段发给观察者。
+    //
+    // `update_attributes` is not part of the pairing bundle (D5); full/dirty
+    // attribute packets go to observers via `player_attributes::sync_dirty`.
     frames.extend(encode_frames(&BundleDelimiter));
     frames
 }

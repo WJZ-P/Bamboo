@@ -13,7 +13,6 @@ use mc_bamboo_blocks::entity::mob::{
     DamageKind, DamageSource,
     effects::{EffectAction, EffectChange, EffectInstance, EffectState},
 };
-use mc_bamboo_data::registries::mob_effect;
 use mc_bamboo_protocol::packet::play::{RemoveMobEffect, UpdateMobEffect};
 
 use crate::{inbound::PlayerId, player::Player, region::Region};
@@ -66,8 +65,7 @@ pub(crate) fn give_in(
     if events.attributes_changed
         && let Some(player) = players.get_mut(&id)
     {
-        let max = max_health(player);
-        player.health.health = player.health.health.min(max);
+        refresh_player_limits(player);
     }
     changed
 }
@@ -225,7 +223,7 @@ pub(crate) fn tick(region: &mut Region) {
         }
         let state = EffectState {
             health: player.health.health,
-            max_health: 20.0,
+            max_health: max_health(player),
             absorption: player.health.absorption,
         };
         let Some(player) = region.players.get_mut(&id) else {
@@ -327,24 +325,35 @@ fn hurt(region: &mut Region, id: PlayerId, kind: DamageKind, amount: f32) {
     );
 }
 
-/// `Attributes.MAX_HEALTH` 加生命提升效果：`20 + 4*(amplifier+1)`。
+/// `LivingEntity.getMaxHealth()`：直接读属性表里的 `Attributes.MAX_HEALTH` 再 `d2f`。
+/// 生命提升（`minecraft:effect.health_boost`）、装备和永久修饰符都已经在属性表里。
 ///
-/// `Attributes.MAX_HEALTH` with health boost.
+/// `LivingEntity.getMaxHealth()`: `(float) getAttributeValue(MAX_HEALTH)`.
 pub(crate) fn max_health(player: &Player) -> f32 {
-    let base = 20.0_f32;
-    let boost = player
-        .effects
-        .amplifier(mob_effect::HEALTH_BOOST)
-        .map_or(0.0, |amplifier| {
-            4.0 * (amplifier.clamp(0, 255) as f32 + 1.0)
-        });
-    base + boost
+    player
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32
 }
 
 fn mark_metadata_dirty(region: &mut Region, id: PlayerId) {
     if let Some(player) = region.players.get_mut(&id) {
         player.sync.metadata_dirty = true;
     }
+}
+
+/// 立即按当前效果表刷新属性修饰符并夹住血量上限（保留细雪减速修饰符避免闪烁）。
+///
+/// Immediately refreshes transient attribute modifiers after an effect change
+/// and clamps health to the updated `MAX_HEALTH`.
+fn refresh_player_limits(player: &mut Player) {
+    let keep_frost = player
+        .attributes
+        .get(mc_bamboo_data::registries::attribute::MOVEMENT_SPEED)
+        .and_then(|entry| entry.modifier("minecraft:powder_snow"))
+        .is_some();
+    crate::player_attributes::rebuild_player(player, keep_frost);
+    let max = max_health(player);
+    player.health.health = player.health.health.min(max);
 }
 
 /// 按效果表夹住血量 / 吸收的上限（`onEffect*` 的 `refreshDirtyAttributes`）。
@@ -354,8 +363,7 @@ fn mark_metadata_dirty(region: &mut Region, id: PlayerId) {
 /// Clamps health and absorption after the effect table changes.
 pub(crate) fn refresh_limits(region: &mut Region, id: PlayerId) {
     if let Some(player) = region.players.get_mut(&id) {
-        let max = max_health(player);
-        player.health.health = player.health.health.min(max);
+        refresh_player_limits(player);
     }
 }
 
@@ -363,6 +371,7 @@ pub(crate) fn refresh_limits(region: &mut Region, id: PlayerId) {
 mod tests {
     use super::*;
     use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::registries::mob_effect;
     use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
     use uuid::Uuid;
 

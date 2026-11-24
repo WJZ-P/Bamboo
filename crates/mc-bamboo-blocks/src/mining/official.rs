@@ -1,13 +1,18 @@
-//! 官方 26.3 的挖掘进度逐位对照。
+//! 官方 26.3 的挖掘进度 / 挖掘速度逐位对照。
 //!
 //! `OFFICIAL` 的每一行由 scratchpad 里的 `MiningProgress.java` 用官方代码算出来：
 //! `BlockBehaviour.getDestroyProgress` 和 `Player.getDestroySpeed`，没有状态效果。
 //! 每行是“方块 物品 在地面 在水里 进度 bits 速度 bits”，bits 是 `Float.floatToIntBits` 的十进制值。
 //! 这里把方块名和物品名换成 Bamboo 的常量，逐状态比较 `f32` 的位。
+//!
+//! `speed_cases.txt` 另外给几千条带随机属性值和状态效果的用例，对拍
+//! `destroy_speed_from`（`Player.getDestroySpeed` 里工具速度之后的那段）。
+//! 表由 `tools/mc-bamboo-vanilla/java/MiningSpeedOracle.java`（固定种子）生成，
+//! 算术逐条照官方字节码转写；Java `float` 与 Rust `f32` 逐位一致。
 
 use mc_bamboo_data::{blocks, items};
 
-use super::{Miner, destroy_progress, destroy_speed};
+use super::{Miner, destroy_progress, destroy_speed, destroy_speed_from};
 
 const OFFICIAL: &str = "\
 stone air true false 1004172302 1065353216
@@ -777,11 +782,9 @@ fn official_destroy_progress_matches_bit_for_bit() {
         );
 
         let state = state_of(block);
-        let miner = Miner {
-            main_hand: item_of(item),
-            on_ground,
-            eye_in_water,
-        };
+        // 704 行表是「没有状态效果、属性取缺省值」的官方结果。
+        // The 704 rows are the official no-effect, default-attribute result.
+        let miner = Miner::plain(item_of(item), on_ground, eye_in_water);
         let progress = destroy_progress(state, miner);
         assert_eq!(
             progress.to_bits(),
@@ -799,4 +802,111 @@ fn official_destroy_progress_matches_bit_for_bit() {
         rows += 1;
     }
     assert_eq!(rows, 704);
+}
+
+/// 几千条带随机属性值 / 状态效果的挖掘速度用例，由 MiningSpeedOracle.java 生成。
+const SPEED_CASES: &str = include_str!("speed_cases.txt");
+
+/// Java `Float.floatToRawIntBits` 是有符号 `int`，负浮点会打成负十进制；按 `i32` 读再
+/// 重解释成 `u32` 位（`as u32` 就是按位重解释）。
+fn to_bits(field: &str) -> u32 {
+    field.parse::<i32>().expect("i32 bits") as u32
+}
+
+/// 一行 11 个十进制整数还原成 (工具速度, Miner, 期望结果 bits)。
+///
+/// `main_hand` 不参与 `destroy_speed_from`，给 0 即可；`has_fatigue=0` 时
+/// `fatigue_amp` 无意义。
+fn parse_speed_case(line: &str) -> (f32, Miner, u32) {
+    let mut f = line.split_whitespace();
+    let mut next = || f.next();
+    let speed = f32::from_bits(to_bits(next().unwrap()));
+    let mining_efficiency = f32::from_bits(to_bits(next().unwrap()));
+    let has_dig_speed = next().unwrap() == "1";
+    let dig_speed_amplification: i32 = next().unwrap().parse().expect("i32");
+    let has_fatigue = next().unwrap() == "1";
+    let fatigue_amp: i32 = next().unwrap().parse().expect("i32");
+    let block_break_speed = f32::from_bits(to_bits(next().unwrap()));
+    let submerged_mining_speed = f32::from_bits(to_bits(next().unwrap()));
+    let eye_in_water = next().unwrap() == "1";
+    let on_ground = next().unwrap() == "1";
+    let result_bits = to_bits(next().unwrap());
+    assert!(next().is_none(), "speed case has extra fields");
+
+    let miner = Miner {
+        main_hand: 0,
+        on_ground,
+        eye_in_water,
+        mining_efficiency,
+        block_break_speed,
+        submerged_mining_speed,
+        has_dig_speed,
+        dig_speed_amplification,
+        mining_fatigue: has_fatigue.then_some(fatigue_amp),
+    };
+    (speed, miner, result_bits)
+}
+
+/// 跑完所有用例，返回逐位不一致的条数。`mutate` 可以在比较前故意改坏输入或期望位，
+/// 供下面的「改坏确认」用：正确的实现必须报 0，改坏任意一处必须报 >0。
+///
+/// Runs every case and returns the bit-mismatch count. `mutate` can deliberately
+/// corrupt an input or the expected bits, for the break-checks below: a correct
+/// implementation reports 0, any single break reports >0.
+fn speed_case_mismatches(mutate: impl Fn(&mut Miner, &mut u32)) -> usize {
+    let mut mismatches = 0;
+    for line in SPEED_CASES.lines() {
+        let (speed, mut miner, mut expected) = parse_speed_case(line);
+        mutate(&mut miner, &mut expected);
+        if destroy_speed_from(speed, &miner).to_bits() != expected {
+            mismatches += 1;
+        }
+    }
+    mismatches
+}
+
+#[test]
+fn official_destroy_speed_matches_bit_for_bit() {
+    assert_eq!(SPEED_CASES.lines().count(), 4000);
+    assert_eq!(speed_case_mismatches(|_, _| {}), 0);
+}
+
+/// 改坏确认 1：把 MINING_EFFICIENCY 归零，speed>1 的用例会不一致。
+#[test]
+fn breaking_mining_efficiency_is_detected() {
+    assert!(speed_case_mismatches(|miner, _| miner.mining_efficiency = 0.0) > 0);
+}
+
+/// 改坏确认 2：丢掉急迫 / 潮涌能量的乘数。
+#[test]
+fn breaking_the_haste_multiplier_is_detected() {
+    assert!(speed_case_mismatches(|miner, _| miner.has_dig_speed = false) > 0);
+}
+
+/// 改坏确认 3：丢掉挖掘疲劳的乘数。
+#[test]
+fn breaking_the_mining_fatigue_multiplier_is_detected() {
+    assert!(speed_case_mismatches(|miner, _| miner.mining_fatigue = None) > 0);
+}
+
+/// 改坏确认 4：丢掉水中减速 / BLOCK_BREAK_SPEED。
+#[test]
+fn breaking_the_block_break_and_water_multipliers_is_detected() {
+    assert!(
+        speed_case_mismatches(|miner, _| {
+            miner.block_break_speed = 1.0;
+            miner.eye_in_water = false;
+        }) > 0
+    );
+}
+
+/// 改坏确认 5：逐位比较器本身不能恒过——把每条期望位翻一位必须全报不一致。
+#[test]
+fn a_corrupted_expected_value_is_detected() {
+    let rows = SPEED_CASES.lines().count();
+    assert_eq!(
+        speed_case_mismatches(|_, expected| *expected ^= 1),
+        rows,
+        "flipping one expected bit must make every row mismatch"
+    );
 }

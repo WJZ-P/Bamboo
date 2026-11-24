@@ -104,6 +104,13 @@ pub struct PlayerData {
     pub food_tick_timer: i32,
     pub food_saturation: f32,
     pub food_exhaustion: f32,
+    /// `LivingEntity.attributes` 的官方 NBT 列表（`AttributeInstance.Packed.LIST_CODEC`）。
+    /// 只存已实例化属性的基础值和永久修饰符；`None` 表示不写这个键。
+    ///
+    /// Vanilla `LivingEntity.attributes` (`AttributeInstance.Packed.LIST_CODEC`).
+    /// Stores base values and permanent modifiers of instantiated attributes;
+    /// `None` omits the key.
+    pub attributes: Option<Tag>,
     /// `LivingEntity.active_effects` 的官方 NBT 列表。空表时官方不写这个键；
     /// `None` 表示不写，`Some(list)` 按 `MobEffectInstance.CODEC` 原样写回。
     ///
@@ -208,6 +215,7 @@ impl Default for PlayerData {
             food_tick_timer: 0,
             food_saturation: 5.0,
             food_exhaustion: 0.0,
+            attributes: None,
             active_effects: None,
             ender_pearls: Vec::new(),
             abilities: Abilities::default(),
@@ -254,6 +262,7 @@ const KNOWN_KEYS: &[&str] = &[
     "foodTickTimer",
     "foodSaturationLevel",
     "foodExhaustionLevel",
+    "attributes",
     "active_effects",
     "ender_pearls",
     "abilities",
@@ -389,6 +398,9 @@ impl PlayerData {
             "foodExhaustionLevel",
             zero_float(self.food_exhaustion),
         );
+        if let Some(list) = &self.attributes {
+            push(&mut root, "attributes", list.clone());
+        }
         if let Some(list) = &self.active_effects {
             push(&mut root, "active_effects", list.clone());
         }
@@ -464,6 +476,7 @@ impl PlayerData {
         data.food_tick_timer = opt_int(entries, "foodTickTimer", 0)?;
         data.food_saturation = opt_f32(entries, "foodSaturationLevel", 5.0)?;
         data.food_exhaustion = opt_f32(entries, "foodExhaustionLevel", 0.0)?;
+        data.attributes = field_of(entries, "attributes").cloned();
         data.active_effects = field_of(entries, "active_effects").cloned();
         // `childrenListOrEmpty`：不是复合标签列表时按空表处理。
         data.ender_pearls = match field_of(entries, "ender_pearls") {

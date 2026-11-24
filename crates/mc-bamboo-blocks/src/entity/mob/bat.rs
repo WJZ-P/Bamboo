@@ -133,7 +133,7 @@ fn player_nearby(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
     view.for_each_player(&mut |player| players.push(*player));
     let mut found = false;
     for player in players {
-        found |= goals::targeting_test(me, mob, view, &player, RESTING_RANGE, true);
+        found |= goals::targeting_test(me, mob, view, &player, RESTING_RANGE, true, false);
     }
     found
 }
