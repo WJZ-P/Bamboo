@@ -23,7 +23,10 @@ use crate::{
     },
 };
 
-use super::{Mob, MobType};
+use super::{
+    Mob, MobType,
+    brain::{Activity, memory::MemoryType},
+};
 
 /// 每刻唤醒名额的倍率上限，防配置写坏。
 pub const MAX_WAKEUPS_SCALE: usize = 16;
@@ -32,6 +35,14 @@ pub const FULL_TICK_PERIOD: i64 = 20;
 /// 降频档最密 / 最稀的间隔（设计稿 4.2）。
 pub const MIN_DECISION_PERIOD: i64 = 2;
 pub const MAX_DECISION_PERIOD: i64 = 4;
+/// 村民 `HEARD_BELL_TIME` 有效期（刻），照官方 `SetHiddenState` 的 300 刻判定。
+///
+/// Valid window for `HEARD_BELL_TIME` in ticks, matching vanilla `SetHiddenState`'s 300-tick check.
+pub const HEARD_BELL_EXEMPT_TICKS: i64 = 300;
+/// 村民大脑降频间隔上限（刻），防止配置文件写坏。
+///
+/// Upper bound on villager brain throttling intervals (ticks), guarding against bad configs.
+pub const MAX_VILLAGER_BRAIN_INTERVAL: i32 = 6000;
 
 /// Bamboo 自己的三档降频配置，不是官方游戏规则，不进存档。
 ///
@@ -269,6 +280,12 @@ pub struct MobThrottle {
     pub last_active: i64,
     /// 限量唤醒的有效期，刻号大于当前刻号时按全速档跑。
     pub awake_until: i64,
+    /// 村民大脑上次真正运行过的刻号（被困 / 睡觉村民降频用，不存档）。
+    pub villager_last_brain: i64,
+    /// 村民上次检查「四邻格被困」的刻号（不存档）。
+    pub villager_lobotomize_checked: i64,
+    /// 村民上次检查结果：是否处于被困状态（不存档）。
+    pub villager_lobotomized: bool,
 }
 
 impl MobThrottle {
@@ -276,6 +293,9 @@ impl MobThrottle {
         last_decision: i64::MIN,
         last_active: i64::MIN,
         awake_until: i64::MIN,
+        villager_last_brain: i64::MIN,
+        villager_lobotomize_checked: i64::MIN,
+        villager_lobotomized: false,
     };
 
     /// 岛合并：绝对时刻整体平移。
@@ -283,6 +303,8 @@ impl MobThrottle {
         self.last_decision = self.last_decision.saturating_add(delta);
         self.last_active = self.last_active.saturating_add(delta);
         self.awake_until = self.awake_until.saturating_add(delta);
+        self.villager_last_brain = self.villager_last_brain.saturating_add(delta);
+        self.villager_lobotomize_checked = self.villager_lobotomize_checked.saturating_add(delta);
     }
 
     /// 跳过的决策间隔：这次运行距上次运行过了几刻（至少 1）。
@@ -312,18 +334,41 @@ pub fn nearest_player_distance_sqr(position: Vec3, players: &[PlayerView]) -> Op
     best.is_finite().then_some(best)
 }
 
+/// 村民降频豁免：处于 `PANIC` / `RAID` / `PRE_RAID` / `HIDE` 活动、正在交易，
+/// 或 `HEARD_BELL_TIME` 仍在 300 刻有效期内时豁免降频（全速运行）。
+///
+/// Villager throttling exemptions: active in `PANIC` / `RAID` / `PRE_RAID` / `HIDE`,
+/// currently trading, or `HEARD_BELL_TIME` within the 300-tick valid window.
+pub fn villager_throttle_exempt(mob: &Mob, now: i64) -> bool {
+    if mob.villager.trading {
+        return true;
+    }
+    let Some(brain) = mob.brain.as_deref() else {
+        return false;
+    };
+    if brain.is_active(Activity::Panic)
+        || brain.is_active(Activity::Raid)
+        || brain.is_active(Activity::PreRaid)
+        || brain.is_active(Activity::Hide)
+    {
+        return true;
+    }
+    brain
+        .memories
+        .long(MemoryType::HeardBellTime)
+        .is_some_and(|heard| now >= heard && now.saturating_sub(heard) < HEARD_BELL_EXEMPT_TICKS)
+}
+
 /// 4.2 的豁免清单，命中就算全速档。
 ///
-/// 村民实体已建模（同步数据和存档），但恐慌 / 袭击状态和袭击系统仍缺；拴绳
-/// （没有拴绳实体）、活塞推动（实体没有 `PISTON` 移动）也还没建模。「在水流里」用
-/// 「浸水且会被水流推」近似：水流矢量不在实体状态里。这几项在注释和报告里写明。
+/// 村民在 `PANIC` / `RAID` / `PRE_RAID` / `HIDE`、正在交易或 `HEARD_BELL_TIME` 有效期内
+/// 均豁免降频；拴绳（没有拴绳实体）、活塞推动（实体没有 `PISTON` 移动）还没建模。
+/// 「在水流里」用「浸水且会被水流推」近似：水流矢量不在实体状态里。
 ///
-/// The 4.2 exemption list; a hit means the full tick rate. Villagers are modelled
-/// now (synced data and saving), but their panic / raid state, the raid system,
-/// leashes (no leash entity) and piston pushes (entities have no `PISTON` movement)
-/// are not. "In a current" is approximated by "in water and pushed by fluid", since
-/// the flow vector is not part of entity state. These gaps are recorded here and in
-/// the reports.
+/// The 4.2 exemption list; a hit means the full tick rate. Villagers in `PANIC` /
+/// `RAID` / `PRE_RAID` / `HIDE`, currently trading, or within the `HEARD_BELL_TIME`
+/// window are always exempt. Leashes and piston pushes are not modelled yet, and
+/// "in a current" is approximated by "in water and pushed by fluid".
 pub fn exempt(
     mob: &Mob,
     now: i64,
@@ -344,6 +389,8 @@ pub fn exempt(
         || mob.in_love > 0
         // 点燃的苦力怕。
         || (mob.mob_type == MobType::Creeper && mob.creeper.ignited)
+        // 村民紧急 / 交易 / 钟声豁免。
+        || (mob.mob_type == MobType::Villager && villager_throttle_exempt(mob, now))
 }
 
 /// 按距离和刻号分档；豁免和限量唤醒由调用方盖成全速档。

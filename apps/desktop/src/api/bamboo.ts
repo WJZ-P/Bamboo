@@ -65,6 +65,14 @@ export interface ServerSettings {
   mobPathfindingBudget: number;
   /** 寻路失败冷却（实验）：连续失败的生物歇 2 秒再算。只在寻路阶段打开时生效。 */
   mobPathfindingFailCooldown: boolean;
+  /** 被困村民降频（Purpur lobotomize）：四面受困的村民按间隔运行大脑。 */
+  villagerLobotomize: boolean;
+  /** 被困村民大脑运行间隔（刻），推荐 100。 */
+  villagerLobotomizeInterval: number;
+  /** 为真时只对已锁定交易（经验 > 0）的被困村民降频。 */
+  villagerLobotomizeWaitTradeLock: boolean;
+  /** 睡觉村民大脑运行间隔（刻），0 = 关闭，推荐 5。 */
+  villagerSleepBrainInterval: number;
   /** 红石缓存（实验），设置页里可以开关。 */
   redstoneCache: boolean;
   chunkWorkerThreads: number;
@@ -88,6 +96,10 @@ export interface PerformancePreset {
   mobPathfindingPhase: boolean;
   mobPathfindingBudget: number;
   mobPathfindingFailCooldown: boolean;
+  villagerLobotomize: boolean;
+  villagerLobotomizeInterval: number;
+  villagerLobotomizeWaitTradeLock: boolean;
+  villagerSleepBrainInterval: number;
 }
 
 /** 推荐值和恢复原版精确模式的两套值，都由 Rust 侧集中定义。 */

@@ -151,6 +151,10 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 | `mob_pathfinding_phase` | 布尔 | `false` | 独立寻路阶段（实验）：请求在发出的那一刻挂起，生物沿旧路走或原地等；阶段末尾统一去重、排优先级、按节点预算算，结果下一刻开头交给生物。打开后转向最多晚 1 刻（50 毫秒），行为差异见 `docs/mob-entity-design.md` 4.8。不进存档、不同步客户端 |
 | `mob_pathfinding_budget` | 整数 | `0` | 每个岛每刻最多展开的 A* 节点数；0 = 65536。超出的请求整条顺延，等得越久下一刻越先算。只在 `mob_pathfinding_phase` 打开时有意义。合法范围 0..=1048576 |
 | `mob_pathfinding_fail_cooldown` | 布尔 | `false` | 寻路失败冷却（Paper 的数值）：同一只生物连续失败超过 10 次后 40 刻内不再计算它的请求。只在 `mob_pathfinding_phase` 打开时有意义 |
+| `villager_lobotomize` | 布尔 | `false` | 被困村民降频（照 Purpur 的 lobotomize）：四个水平邻格（东 / 西 / 南 / 北）均不可水平通行（脚部格或成年头部格为阻挡型 `PathType`，或下方 3 格内无安全落脚方块）的村民按 `villager_lobotomize_interval` 刻运行一次大脑（走 `Brain::tick_by(gap)`）。被打、身边有敌对生物、恐慌、袭击、隐藏、交易中或钟声 300 刻有效期内立刻回到每刻运行。推荐 `true` |
+| `villager_lobotomize_interval` | 整数（刻） | `100` | 被困村民降频的大脑运行间隔（刻）。推荐 `100`，合法范围 `1..=6000` |
+| `villager_lobotomize_wait_trade_lock` | 布尔 | `true` | 为真时只对已锁定交易（`xp > 0`）的被困村民生效，避免挡住新村民认领工作站和刷职业。推荐 `true` |
+| `villager_sleep_brain_interval` | 整数（刻） | `0` | 睡觉村民降频：睡着的村民每 N 刻跑一次大脑（走 `Brain::tick_by(gap)`）；钟声（`HEARD_BELL_TIME` 300 刻有效期内）、敌对生物、恐慌（及交易、袭击、隐藏）时豁免。`0` = 关（精确模式），推荐 `5`，合法范围 `0..=6000` |
 | `chunk_worker_threads` | 整数 | `0` | 区块计算池的线程数：区块的解析、生成和存盘序列化放到多少条常驻后台线程上做。0 = 在世界线程上内联做 |
 | `spawn_per_player_cap` | 布尔 | `true` | 自然刷怪按玩家算上限：每名玩家附近的同类生物不超过官方 `maxInstancesPerChunk`。`false` 只剩官方的全局上限 `maxInstancesPerChunk * 刷怪区块数 / 289` |
 | `deliveries_per_tick` | 整数 | `64` | Director 信箱每刻最多交付多少个区块；0 表示不限 |

@@ -63,11 +63,11 @@ pub(super) struct WaterMobCase {
 /// The brain's structural table: sensors, the behaviour table, the activity requirements
 /// and the memories erased on stop.
 #[derive(Debug, Default, Deserialize, PartialEq)]
-struct BrainTable {
-    sensors: Vec<(String, i32, Vec<String>)>,
-    behaviors: Vec<(i32, String, String)>,
-    requirements: Vec<(String, Vec<(String, String)>)>,
-    erase: Vec<(String, Vec<String>)>,
+pub(super) struct BrainTable {
+    pub(super) sensors: Vec<(String, i32, Vec<String>)>,
+    pub(super) behaviors: Vec<(i32, String, String)>,
+    pub(super) requirements: Vec<(String, Vec<(String, String)>)>,
+    pub(super) erase: Vec<(String, Vec<String>)>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,7 +262,7 @@ fn goal_rows(selector: &GoalSelector) -> Vec<(i32, String, i32)> {
 /// The brain's structural table: sensor order, behaviour table order, activity
 /// requirements and the memories erased on stop (activities sorted by name). Break test:
 /// a fake sensor is appended, so the comparison must fail.
-fn brain_table(brain: &Brain, broken: bool) -> BrainTable {
+pub(super) fn brain_table(brain: &Brain, broken: bool) -> BrainTable {
     let mut sensors: Vec<(String, i32, Vec<String>)> = brain
         .sensor_table()
         .into_iter()

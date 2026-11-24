@@ -111,6 +111,50 @@ pub fn bees_stay_in_hive(total_ticks: i64) -> bool {
         .contains(&ticks)
 }
 
+/// 按周期关键帧表（官方 `KeyframeTrackSampler` + `LerpFunction.ofConstant()`）查当前活动：
+/// `[from, to)` 取 `from` 的值，首帧之前（`0..first`）绕回最后一帧的值。
+///
+/// Evaluates a periodic step-function activity track (`KeyframeTrackSampler` with
+/// `LerpFunction.ofConstant()`): `[from, to)` yields `from`'s value, and ticks before the
+/// first keyframe wrap around to the last keyframe's value.
+fn activity_on_track(
+    total_ticks: i64,
+    period: i64,
+    keyframes: &[(i64, &str)],
+) -> crate::entity::mob::brain::Activity {
+    use crate::entity::mob::brain::Activity;
+    let ticks = total_ticks.rem_euclid(period);
+    let name = keyframes
+        .iter()
+        .rev()
+        .find(|&&(at, _)| ticks >= at)
+        .or_else(|| keyframes.last())
+        .map_or("idle", |&(_, name)| name);
+    Activity::by_name(name).unwrap_or(Activity::Idle)
+}
+
+/// 主世界的 `EnvironmentAttributes.VILLAGER_ACTIVITY`（`villager_schedule.json`）。
+///
+/// The overworld `EnvironmentAttributes.VILLAGER_ACTIVITY` (`villager_schedule.json`).
+pub fn villager_activity(total_ticks: i64) -> crate::entity::mob::brain::Activity {
+    activity_on_track(
+        total_ticks,
+        mc_bamboo_data::villager::VILLAGER_SCHEDULE_PERIOD_TICKS,
+        mc_bamboo_data::villager::VILLAGER_ACTIVITY_KEYFRAMES,
+    )
+}
+
+/// 主世界的 `EnvironmentAttributes.BABY_VILLAGER_ACTIVITY`（`villager_schedule.json`）。
+///
+/// The overworld `EnvironmentAttributes.BABY_VILLAGER_ACTIVITY` (`villager_schedule.json`).
+pub fn baby_villager_activity(total_ticks: i64) -> crate::entity::mob::brain::Activity {
+    activity_on_track(
+        total_ticks,
+        mc_bamboo_data::villager::VILLAGER_SCHEDULE_PERIOD_TICKS,
+        mc_bamboo_data::villager::BABY_VILLAGER_ACTIVITY_KEYFRAMES,
+    )
+}
+
 /// `minecraft:moon` 时间线的周期：八个月相各一天。
 pub const MOON_PERIOD: i64 = 192_000;
 
@@ -299,5 +343,44 @@ mod tests {
     fn weather_levels_match_mth_lerp() {
         assert_eq!(weather_levels(0.0, 1.0, 0.0, 1.0), (1.0, 1.0));
         assert_eq!(weather_levels(0.5, 0.5, 0.25, 0.25), (0.5, 0.125));
+    }
+
+    #[test]
+    fn villager_schedules_follow_official_keyframes_and_wrap() {
+        use crate::entity::mob::brain::Activity;
+
+        // 成年村民：0..10 Rest, 10..2000 Idle, 2000..9000 Work, 9000..11000 Meet,
+        // 11000..12000 Idle, 12000..24000 Rest。
+        assert_eq!(villager_activity(0), Activity::Rest);
+        assert_eq!(villager_activity(9), Activity::Rest);
+        assert_eq!(villager_activity(10), Activity::Idle);
+        assert_eq!(villager_activity(1999), Activity::Idle);
+        assert_eq!(villager_activity(2000), Activity::Work);
+        assert_eq!(villager_activity(8999), Activity::Work);
+        assert_eq!(villager_activity(9000), Activity::Meet);
+        assert_eq!(villager_activity(10_999), Activity::Meet);
+        assert_eq!(villager_activity(11_000), Activity::Idle);
+        assert_eq!(villager_activity(11_999), Activity::Idle);
+        assert_eq!(villager_activity(12_000), Activity::Rest);
+        assert_eq!(villager_activity(23_999), Activity::Rest);
+        assert_eq!(villager_activity(24_000), Activity::Rest);
+        assert_eq!(villager_activity(24_010), Activity::Idle);
+        assert_eq!(villager_activity(-1), Activity::Rest);
+
+        // 幼年村民：0..10 Rest, 10..3000 Idle, 3000..6000 Play, 6000..10000 Idle,
+        // 10000..12000 Play, 12000..24000 Rest。
+        assert_eq!(baby_villager_activity(0), Activity::Rest);
+        assert_eq!(baby_villager_activity(9), Activity::Rest);
+        assert_eq!(baby_villager_activity(10), Activity::Idle);
+        assert_eq!(baby_villager_activity(2999), Activity::Idle);
+        assert_eq!(baby_villager_activity(3000), Activity::Play);
+        assert_eq!(baby_villager_activity(5999), Activity::Play);
+        assert_eq!(baby_villager_activity(6000), Activity::Idle);
+        assert_eq!(baby_villager_activity(9999), Activity::Idle);
+        assert_eq!(baby_villager_activity(10_000), Activity::Play);
+        assert_eq!(baby_villager_activity(11_999), Activity::Play);
+        assert_eq!(baby_villager_activity(12_000), Activity::Rest);
+        assert_eq!(baby_villager_activity(23_999), Activity::Rest);
+        assert_eq!(baby_villager_activity(24_010), Activity::Idle);
     }
 }

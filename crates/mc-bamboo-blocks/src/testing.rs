@@ -65,6 +65,8 @@ pub(crate) struct TestLevel {
     pub(crate) sleeping: Vec<crate::entity::EntityUid>,
     /// `Level.getSkyDarken()`。默认是开阔的白天（0）。
     pub(crate) sky_darken: i32,
+    /// `Level.clock_ticks()`：主世界时钟整数刻。默认 0。
+    pub(crate) clock_ticks: i64,
     /// `Level.block_weather()` 的天气快照，默认晴天；引雷测试要设成雷暴。
     pub(crate) weather: crate::weather::BlockWeather,
     /// POI 只读表。假世界放 POI 方块时同刻登记，让 `findLightningRod` 等
@@ -96,6 +98,7 @@ impl TestLevel {
             players: Vec::new(),
             sleeping: Vec::new(),
             sky_darken: 0,
+            clock_ticks: 0,
             weather: crate::weather::BlockWeather::CLEAR,
             poi: PoiStore::new(),
         }
@@ -228,6 +231,10 @@ impl EntityTables for TestLevel {
 impl Level for TestLevel {
     fn sky_darken(&self) -> i32 {
         self.sky_darken
+    }
+
+    fn clock_ticks(&self) -> i64 {
+        self.clock_ticks
     }
 
     fn for_each_player(&self, visit: &mut dyn FnMut(&crate::entity::ctx::PlayerView)) {
