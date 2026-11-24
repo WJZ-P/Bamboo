@@ -700,6 +700,13 @@ pub struct ThrottlePlan {
     pub tier: throttle::Tier,
     /// 这一刻决策（目标选择器、目标、大脑）跑不跑。
     pub decisions_run: bool,
+    /// 距离上次决策运行过了几刻（至少 1）。全速档 / 精确模式下恒为 1；
+    /// 降频 / 休眠档按这个间隔推进大脑的记忆过期与传感器倒计时。
+    ///
+    /// Ticks elapsed since the last decision run (at least 1). Always 1 in full-speed /
+    /// precise mode; throttled / sleeping brains advance memory expiry and sensor
+    /// countdowns by this gap.
+    pub decision_gap: i64,
     /// 休眠档每 20 刻的完整 tick 里不主动走动（AI 停摆，物理照跑）。
     pub no_active_move: bool,
     /// 限量唤醒的有效期（绝对刻号）；不大于当前刻号表示没被唤醒。
@@ -711,6 +718,7 @@ impl ThrottlePlan {
     pub const FULL: Self = Self {
         tier: throttle::Tier::Full,
         decisions_run: true,
+        decision_gap: 1,
         no_active_move: false,
         wake_until: i64::MIN,
     };
@@ -732,6 +740,22 @@ pub trait EntityCtx {
     }
     /// 按 ID 读别的实体的公开数据。自己已经被驱动从表里取出来，查不到是正常的。
     fn other(&self, uid: EntityUid) -> Option<EntityPublic>;
+    /// 借用别的实体的公开数据，找到时返回 `true`。热路径里用它省掉整份
+    /// [`EntityPublic`] 的克隆。默认退回 [`Self::other`] 的克隆实现；精确和并行
+    /// 两种真实驱动都覆盖成直接借用表里的那一行。
+    ///
+    /// Borrows another entity's public data; `true` when found. Hot paths use it to
+    /// avoid cloning a whole [`EntityPublic`]. The default falls back to the cloning
+    /// [`Self::other`]; both real drivers override it to borrow the stored row directly.
+    fn with_other(&self, uid: EntityUid, visit: &mut dyn FnMut(&EntityPublic)) -> bool {
+        match self.other(uid) {
+            Some(public) => {
+                visit(&public);
+                true
+            }
+            None => false,
+        }
+    }
     /// 按 ID 读一名玩家（骑手）。不在本岛时返回 `None`。
     ///
     /// Reads one player (a rider) by id. `None` when they are not on this island.
@@ -1819,6 +1843,10 @@ impl EntityCtx for PreciseCtx<'_, '_> {
 
     fn other(&self, uid: EntityUid) -> Option<EntityPublic> {
         self.world.level().entity_public(uid)
+    }
+
+    fn with_other(&self, uid: EntityUid, visit: &mut dyn FnMut(&EntityPublic)) -> bool {
+        self.world.level().with_entity_public(uid, visit)
     }
 
     fn entity_uids(&self) -> Vec<EntityUid> {

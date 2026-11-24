@@ -629,7 +629,7 @@ pub fn install(mob: &mut super::Mob, view: &dyn BlockView) {
             }
         }
         Action::Recompute => {
-            mob.navigation.path = replay.path.clone();
+            mob.navigation.set_path(replay.path.clone());
             if replay.path.is_some() {
                 mob.navigation.target_pos = Some(replay.at);
                 mob.navigation.reset_stuck_timeout();

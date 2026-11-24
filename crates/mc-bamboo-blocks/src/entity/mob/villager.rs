@@ -8,8 +8,10 @@
 //! unhappy counter, food / experience / restock times and gossips. Phase 2 keeps
 //! `Offers` and `Inventory` verbatim; trading and gossip semantics come later.
 
+use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::villager as facts;
 use mc_bamboo_nbt::Tag;
+use mc_bamboo_protocol::components::value::GlobalPos;
 
 use super::spawn::{self, SpawnReason};
 use crate::{
@@ -62,6 +64,72 @@ impl Default for Villager {
             gossips: None,
             offers: None,
             inventory: None,
+        }
+    }
+}
+
+/// 村民的紧凑公开状态，放进 [`crate::entity::KindPublic`] 里：第 4–6 期别的村民
+/// （繁殖、职业分配、铁傀儡生成）和并行驱动的只读视图只读这一份，不用翻整张
+/// `MobPublic`，也不会把十几个村民字段摊进每种生物的公开快照。
+///
+/// 期 2 只有骨架：现在只填已经拿得到的职业和经验。其余字段是第 3 期接入大脑 / POI /
+/// 睡觉 / 繁殖逻辑后再填的占位，缺省值表示「还没有」。
+///
+/// Compact public villager state, carried in [`crate::entity::KindPublic`]: phases 4–6
+/// cross-villager reads (breeding, profession assignment, golem spawning) and the
+/// parallel driver's read-only view read just this, without scanning the whole
+/// `MobPublic` or scattering a dozen villager fields onto every mob's public snapshot.
+///
+/// Phase 2 is a skeleton: only the already-available profession and experience are
+/// filled. The rest are placeholders for the phase-3 brain / POI / sleep / breeding
+/// wiring; their default means "not present yet".
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct VillagerPublic {
+    /// `VillagerData.profession` 的注册表 ID。
+    ///
+    /// The `VillagerData.profession` registry id.
+    pub profession: i32,
+    /// `Villager.getVillagerXp()`：交易经验。
+    ///
+    /// `Villager.getVillagerXp()`: trading experience.
+    pub experience: i32,
+    /// `MemoryModuleType.JOB_SITE`（`GlobalPos`）。还没有村民大脑，恒 `None`。
+    ///
+    /// `MemoryModuleType.JOB_SITE` (`GlobalPos`); `None` until villagers have a brain.
+    pub job_site: Option<GlobalPos>,
+    /// `MemoryModuleType.POTENTIAL_JOB_SITE`（`GlobalPos`），恒 `None`。
+    ///
+    /// `MemoryModuleType.POTENTIAL_JOB_SITE` (`GlobalPos`); always `None` for now.
+    pub potential_job_site: Option<GlobalPos>,
+    /// 当前路径（`MemoryModuleType.PATH`）的首 / 尾节点，恒 `None`。
+    ///
+    /// The first / last node of the current path; always `None` for now.
+    pub path_front: Option<BlockPos>,
+    pub path_back: Option<BlockPos>,
+    /// `LivingEntity.isSleeping()`，恒假。
+    ///
+    /// `LivingEntity.isSleeping()`; always false for now.
+    pub sleeping: bool,
+    /// `MemoryModuleType.LAST_SLEPT`（绝对刻号），恒 `None`。
+    ///
+    /// `MemoryModuleType.LAST_SLEPT` (absolute game time); always `None` for now.
+    pub last_slept: Option<i64>,
+    /// `Villager.canBreed()` 的可繁殖位，恒假。
+    ///
+    /// The `Villager.canBreed()` breedable bit; always false for now.
+    pub breedable: bool,
+}
+
+impl VillagerPublic {
+    /// 从现有村民状态造一份：只填职业和经验，其余保持占位（缺省即「还没有」）。
+    ///
+    /// Builds from the current villager state: fills only profession and experience,
+    /// leaving the rest as placeholders (default means "not present yet").
+    pub fn of(villager: &Villager) -> Self {
+        Self {
+            profession: villager.profession,
+            experience: villager.xp,
+            ..Self::default()
         }
     }
 }
@@ -357,5 +425,35 @@ mod tests {
         let villager = super::super::Mob::new(MobType::Villager);
         assert!(villager.brain.is_none());
         assert_eq!(villager.dimensions(), (0.6, 1.95));
+    }
+
+    /// `VillagerPublic` 挂在 `KindPublic::Mob` 下，只给村民装箱，非村民为 `None`；
+    /// 现阶段只填职业与经验，其余大脑 / 路径 / 睡觉 / 繁殖位保持缺省占位。
+    #[test]
+    fn villager_public_skeleton_fills_profession_and_experience_only() {
+        let farmer = facts::profession_id("minecraft:farmer").unwrap();
+        let mut entity = Entity::by_mob_type(MobType::Villager, Vec3::new(1.0, 64.0, 2.0));
+        entity.with_mob(|_, mob| {
+            mob.villager.profession = farmer;
+            mob.villager.xp = 42;
+        });
+        let row = entity.split();
+        let public = row
+            .public
+            .kind
+            .villager()
+            .expect("村民必须带 VillagerPublic");
+        assert_eq!(public.profession, farmer);
+        assert_eq!(public.experience, 42);
+        assert_eq!(public.job_site, None);
+        assert_eq!(public.potential_job_site, None);
+        assert_eq!(public.path_front, None);
+        assert_eq!(public.path_back, None);
+        assert!(!public.sleeping);
+        assert_eq!(public.last_slept, None);
+        assert!(!public.breedable);
+
+        let cow = Entity::by_mob_type(MobType::Cow, Vec3::new(1.0, 64.0, 2.0)).split();
+        assert!(cow.public.kind.villager().is_none());
     }
 }

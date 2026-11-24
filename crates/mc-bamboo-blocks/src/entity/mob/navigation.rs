@@ -43,6 +43,16 @@ pub struct NavMob {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Navigation {
     pub path: Option<Path>,
+    /// 换过几次路径对象。官方 `MoveToTargetSink.tick` 用 `if_acmpeq` 比的是路径对象
+    /// 身份：导航换一条新 `Path` 对象时 +1，原地推进节点 / 裁剪不算。`MoveToTargetSink`
+    /// 靠它判断要不要同步 `PATH` 记忆，省掉每刻整表克隆 + 深比较。
+    ///
+    /// How many times the path object was swapped. Vanilla `MoveToTargetSink.tick`
+    /// compares path identity with `if_acmpeq`: this bumps only when navigation
+    /// installs a new `Path` object, not when it advances/trims one in place.
+    /// `MoveToTargetSink` uses it to decide whether to sync the `PATH` memory,
+    /// avoiding a per-tick full clone plus deep comparison.
+    pub path_version: u32,
     pub avoid_sun: bool,
     pub speed_modifier: f64,
     pub tick: i32,
@@ -95,6 +105,7 @@ impl Navigation {
     pub fn new(follow_range_base: f64) -> Self {
         Self {
             path: None,
+            path_version: 0,
             avoid_sun: false,
             speed_modifier: 0.0,
             tick: 0,
@@ -144,8 +155,19 @@ impl Navigation {
         self.path.as_ref().is_none_or(Path::is_done)
     }
 
+    /// 换一条新路径对象并把版本号 +1。所有给 `self.path` 赋新对象的地方都走这里；
+    /// 跟着路径走时的原地推进（`Path::advance`）和 `trim_path` 不算换对象，不调用它。
+    ///
+    /// Swaps in a new path object and bumps the version. Every place that assigns a
+    /// new object to `self.path` goes through here; in-place advance (`Path::advance`)
+    /// and `trim_path` are not swaps and do not call it.
+    pub(super) fn set_path(&mut self, path: Option<Path>) {
+        self.path = path;
+        self.path_version = self.path_version.wrapping_add(1);
+    }
+
     pub fn stop(&mut self) {
-        self.path = None;
+        self.set_path(None);
         // 挂起的请求和还没取走的结果一起作废；结果到达时按序号丢掉。
         self.pending_request = None;
         self.replay = None;
@@ -237,11 +259,11 @@ impl Navigation {
             if self.pending_request.is_some() {
                 return false;
             }
-            self.path = None;
+            self.set_path(None);
             return false;
         };
         if !path.same_as(self.path.as_ref()) {
-            self.path = Some(path);
+            self.set_path(Some(path));
         }
         if self.is_done() {
             return false;
@@ -612,11 +634,12 @@ impl Navigation {
     pub fn recompute_path(&mut self, view: &dyn BlockView, mob: &NavMob) {
         if mob.game_time - self.time_last_recompute > 20 && self.can_update_path(mob) {
             if let Some(target) = self.target_pos {
-                self.path = None;
+                self.set_path(None);
                 if pathfinding::Config::of(&view.block_game_rules()).enabled {
                     self.next_action = Some(Action::Recompute);
                 }
-                self.path = self.create_path(view, mob, target, self.reach_range);
+                let new_path = self.create_path(view, mob, target, self.reach_range);
+                self.set_path(new_path);
                 self.time_last_recompute = mob.game_time;
                 self.has_delayed_recomputation = false;
             }

@@ -44,8 +44,23 @@ use self::{
 use super::Mob;
 use crate::entity::{Entity, ctx::EntityCtx};
 
+use std::sync::{Arc, OnceLock};
+
 pub use behavior::Cx;
 pub(in crate::entity::mob) use behaviors::current_position;
+
+/// 一份大脑模板缓存槽：每种生物一个 `OnceLock`，整张结构表只算一次、用 `Arc` 共享。
+///
+/// A brain-template cache slot: one `OnceLock` per mob kind, so the whole structure
+/// table is computed once and shared through an `Arc`.
+pub type TemplateCache = OnceLock<Arc<BrainTemplate>>;
+
+/// 新建一个空的模板缓存槽（`const`，可以给 `static` 用）。
+///
+/// A fresh empty template cache slot (const, usable in a `static`).
+pub const fn template_cache() -> TemplateCache {
+    OnceLock::new()
+}
 
 /// 官方 `Activity` 里 Bamboo 用到的那几个。
 ///
@@ -167,39 +182,42 @@ struct Entry {
     node: Node,
 }
 
-/// 一只生物的大脑。
+/// 一种生物共用的、不可变的大脑结构，`Arc` 共享、每种生物只构造一次：传感器表、排好序的
+/// 行为表（含闸门结构和每个行为预编译好的记忆前置条件掩码）、活动桶、活动进入条件 /
+/// 退出清理记忆、以及登记好的记忆位掩码。运行时的记忆、传感器倒计时和每个行为的运行态
+/// 留在 [`Brain`] 实例里。
 ///
-/// One mob's brain.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Brain {
-    pub memories: Memories,
-    pub sensors: Vec<Sensor>,
+/// The immutable brain structure shared by `Arc` across every mob of a kind, built once:
+/// the sensor table, the sorted behaviour table (with gate structure and each behaviour's
+/// precompiled memory precondition masks), activity buckets, activity entry conditions and
+/// exit-erased memories, and the registered-memory mask. Runtime memories, sensor
+/// countdowns and each behaviour's running state live in the [`Brain`] instance.
+#[derive(Debug, PartialEq)]
+pub struct BrainTemplate {
+    sensors: Vec<SensorKind>,
     entries: Vec<Entry>,
     requirements: Vec<(Activity, Vec<(MemoryType, MemoryStatus)>)>,
     erase_when_stopped: Vec<(Activity, Vec<MemoryType>)>,
-    /// `activeActivities`：官方是 `HashSet`，这里的顺序只用于对拍输出（排过序）。
-    ///
-    /// `activeActivities`; a `HashSet` in vanilla, the order here only feeds the sorted
-    /// oracle dump.
-    active: Vec<Activity>,
     default_activity: Activity,
+    registered: u64,
+    /// 活动 → 该活动的行为下标（按优先级升序）。`startEachNonRunning` 把核心桶和当前
+    /// 活动桶拼成要尝试启动的下标表，不再全表过滤。
+    ///
+    /// Activity → its behaviour indices (ascending priority). `startEachNonRunning`
+    /// merges the core bucket with the current activity bucket, no full-table filter.
+    buckets: Vec<(Activity, Vec<usize>)>,
 }
 
-impl Brain {
-    /// `Brain.Provider.makeBrain` → `new Brain(...)`：登记传感器和行为要的记忆，排好行为，
-    /// 核心活动是 `CORE`，然后切到默认活动 `IDLE`。传感器的随机起始延迟由调用方用
-    /// [`Self::randomly_delay_start`] 另外取，因为官方在构造函数里用生物的随机源取。
+impl BrainTemplate {
+    /// 按官方顺序排好行为、登记好所有记忆、建好活动桶；整份结构由调用方缓存复用。
     ///
-    /// `Brain.Provider.makeBrain` → `new Brain(...)`: registers the memories the sensors
-    /// and behaviours need, orders the behaviours, makes `CORE` the core activity and
-    /// switches to the default `IDLE`. The callers draw the sensors' random start delays
-    /// with [`Self::randomly_delay_start`], since vanilla draws them from the mob's random
-    /// inside the constructor.
+    /// Orders behaviours like vanilla, registers every memory and builds the activity
+    /// buckets; the caller caches the whole structure for reuse.
     pub fn new(sensors: &[SensorKind], activities: Vec<ActivityData>) -> Self {
         let mut memories = Memories::default();
-        let sensors: Vec<Sensor> = sensors.iter().map(|&kind| Sensor::new(kind)).collect();
-        for sensor in &sensors {
-            for &memory in sensor.kind.requires() {
+        let sensors: Vec<SensorKind> = sensors.to_vec();
+        for &kind in &sensors {
+            for &memory in kind.requires() {
                 memories.register(memory);
             }
         }
@@ -221,16 +239,113 @@ impl Brain {
                 });
             }
         }
-        let mut brain = Self {
-            memories,
+        let entries = order_entries(entries);
+        let registered = memories.registered_mask();
+        let mut buckets: Vec<(Activity, Vec<usize>)> = Vec::new();
+        for (index, entry) in entries.iter().enumerate() {
+            match buckets
+                .iter_mut()
+                .find(|(owner, _)| *owner == entry.activity)
+            {
+                Some((_, list)) => list.push(index),
+                None => buckets.push((entry.activity, vec![index])),
+            }
+        }
+        Self {
             sensors,
-            entries: order_entries(entries),
+            entries,
             requirements,
             erase_when_stopped,
-            active: Vec::new(),
             default_activity: Activity::Idle,
+            registered,
+            buckets,
+        }
+    }
+
+    /// 复制一份原型行为运行态给实例。官方每只生物各有一份行为对象，这里也一样；排序、
+    /// 登记、闸门结构、前置条件掩码这些大结构直接从共享模板拷贝，不再逐只重算。
+    ///
+    /// Clones the prototype behaviour nodes for one instance. Vanilla keeps one behaviour
+    /// object per mob; so do we, but the ordering, registration, gate structure and
+    /// precondition masks are copied from the shared template instead of rebuilt per mob.
+    fn fresh_nodes(&self) -> Vec<Node> {
+        self.entries
+            .iter()
+            .map(|entry| entry.node.clone())
+            .collect()
+    }
+}
+
+/// 一只生物的大脑：只存记忆、传感器倒计时、每个行为的运行态、活动集合和两个下标表；
+/// 大结构放在 [`BrainTemplate`] 里用 `Arc` 共享。
+///
+/// One mob's brain: only memories, sensor countdowns, per-behaviour running state, the
+/// active set and two index tables; the big structure lives in the `Arc`-shared
+/// [`BrainTemplate`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Brain {
+    template: Arc<BrainTemplate>,
+    pub memories: Memories,
+    pub sensors: Vec<Sensor>,
+    nodes: Vec<Node>,
+    /// `activeActivities`：官方是 `HashSet`，这里的顺序只用于对拍输出（排过序）。
+    ///
+    /// `activeActivities`; a `HashSet` in vanilla, the order here only feeds the sorted
+    /// oracle dump.
+    active: Vec<Activity>,
+    /// 当前活动（核心 + 当前活动）里要尝试启动的行为下标，按官方优先级顺序排好。
+    /// 只在切换活动时重建，`startEachNonRunning` 每刻只遍历它，不再全表过滤。
+    ///
+    /// Indices of behaviours to try starting, from the core and current activities, in
+    /// vanilla priority order. Rebuilt only on an activity switch; `startEachNonRunning`
+    /// walks just this list instead of filtering the whole table every tick.
+    start_bucket: Vec<usize>,
+    /// 正在跑的行为下标，按官方优先级顺序排好，跨刻保留。推进阶段直接遍历它，
+    /// 不再每刻分配一个 `Vec` 去全表筛选。
+    ///
+    /// Indices of running behaviours, in priority order, persistent across ticks. The
+    /// tick phase walks it directly instead of allocating a fresh `Vec` each tick.
+    running: Vec<usize>,
+}
+
+impl Brain {
+    /// `Brain.Provider.makeBrain` → `new Brain(...)`：登记传感器和行为要的记忆，排好行为，
+    /// 核心活动是 `CORE`，然后切到默认活动 `IDLE`。传感器的随机起始延迟由调用方用
+    /// [`Self::randomly_delay_start`] 另外取，因为官方在构造函数里用生物的随机源取。
+    ///
+    /// `Brain.Provider.makeBrain` → `new Brain(...)`: registers the memories the sensors
+    /// and behaviours need, orders the behaviours, makes `CORE` the core activity and
+    /// switches to the default `IDLE`. The callers draw the sensors' random start delays
+    /// with [`Self::randomly_delay_start`], since vanilla draws them from the mob's random
+    /// inside the constructor.
+    pub fn new(sensors: &[SensorKind], activities: Vec<ActivityData>) -> Self {
+        Self::from_template(Arc::new(BrainTemplate::new(sensors, activities)))
+    }
+
+    /// 每种生物一个缓存槽：整张模板只构造一次，之后每只生物只拷运行态。
+    ///
+    /// One cache slot per mob kind: the template is built once, each later mob only
+    /// copies its running state.
+    pub fn cached(slot: &'static TemplateCache, build: impl FnOnce() -> BrainTemplate) -> Self {
+        let template = slot.get_or_init(|| Arc::new(build()));
+        Self::from_template(Arc::clone(template))
+    }
+
+    fn from_template(template: Arc<BrainTemplate>) -> Self {
+        let mut memories = Memories::default();
+        memories.register_mask(template.registered);
+        let sensors = template.sensors.iter().copied().map(Sensor::new).collect();
+        let default_activity = template.default_activity;
+        let mut brain = Self {
+            nodes: template.fresh_nodes(),
+            template,
+            memories,
+            sensors,
+            active: Vec::new(),
+            start_bucket: Vec::new(),
+            running: Vec::new(),
         };
-        brain.set_active_activity(brain.default_activity);
+        brain.set_active_activity(default_activity);
         brain
     }
 
@@ -250,8 +365,8 @@ impl Brain {
     /// iteration order, depth first) uses [`shuffle_seed`]`(base, k)`.
     pub fn seed_shuffles(&mut self, base: i64) {
         let mut index = 0;
-        for entry in &mut self.entries {
-            entry.node.seed_gates(base, &mut index);
+        for node in &mut self.nodes {
+            node.seed_gates(base, &mut index);
         }
     }
 
@@ -276,6 +391,7 @@ impl Brain {
                 continue;
             }
             if let Some((_, memories)) = self
+                .template
                 .erase_when_stopped
                 .iter()
                 .find(|(owner, _)| *owner == old)
@@ -290,13 +406,32 @@ impl Brain {
         if activity != Activity::Core {
             self.active.push(activity);
         }
+        self.rebuild_start_bucket();
+    }
+
+    /// 切换活动后重建 `start_bucket`：核心活动桶和当前活动桶拼起来、按优先级（下标）升序。
+    /// 只在切换活动时调用，不在每刻的 `tick` 里。
+    ///
+    /// Rebuild `start_bucket` after an activity switch: the core bucket merged with the
+    /// current activity bucket, ascending by priority (index). Called only on a switch,
+    /// never per tick.
+    fn rebuild_start_bucket(&mut self) {
+        let mut bucket = Vec::new();
+        for (activity, indices) in &self.template.buckets {
+            if self.active.contains(activity) {
+                bucket.extend_from_slice(indices);
+            }
+        }
+        bucket.sort_unstable();
+        self.start_bucket = bucket;
     }
 
     /// `Brain.activityRequirementsAreMet`：没有登记过的活动不满足。
     ///
     /// `Brain.activityRequirementsAreMet`: unknown activities never qualify.
     fn requirements_met(&self, activity: Activity) -> bool {
-        self.requirements
+        self.template
+            .requirements
             .iter()
             .find(|(owner, _)| *owner == activity)
             .is_some_and(|(_, conditions)| {
@@ -318,17 +453,33 @@ impl Brain {
         }
     }
 
-    /// `Brain.tick`：记忆过期、传感器、启动、推进。
+    /// `Brain.tick`：记忆过期、传感器、启动、推进（精确单刻）。
     ///
-    /// `Brain.tick`: expire memories, sensors, start, then tick.
+    /// `Brain.tick`: expire memories, sensors, start, then tick (exact single tick).
     pub fn tick(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-        self.memories.tick();
+        self.tick_by(me, mob, ctx, 1);
+    }
+
+    /// 降频档用的跳刻版 `Brain.tick`：记忆过期与传感器倒计时按 `gap`（至少 1）推进，
+    /// 避免 20 刻传感器在降频 4 刻下拖慢成 80 刻。行为的结束时刻用的是绝对 `game_time`
+    /// （`ctx.blocks().game_time()`），不受 `gap` 影响。精确档传 `gap = 1` 与
+    /// [`Self::tick`] 逐位一致。
+    ///
+    /// Throttled `Brain.tick`: advances memory expiry and sensor countdowns by `gap`
+    /// (clamped to >= 1) so 20-tick sensors do not slow down 4× under 4-tick throttling.
+    /// Behaviour end timestamps use absolute `game_time` and are unaffected. Passing
+    /// `gap = 1` (precise mode) is bit-identical to [`Self::tick`].
+    pub fn tick_by(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, gap: i64) {
+        crate::entity::mob::timing::record_brain_tick!();
+        let step = gap.max(1);
+        self.memories.tick_by(step);
         let time = ctx.blocks().game_time();
         let Self {
             memories,
             sensors,
-            entries,
-            active,
+            nodes,
+            start_bucket,
+            running,
             ..
         } = self;
         let mut cx = Cx {
@@ -338,32 +489,50 @@ impl Brain {
             memories,
             time,
         };
-        for sensor in sensors.iter_mut() {
-            sensor.tick(&mut cx);
-        }
-        for entry in entries.iter_mut() {
-            if active.contains(&entry.activity) && entry.node.status == Status::Stopped {
-                entry.node.try_start(&mut cx);
+        {
+            crate::entity::mob::timing::span!(BrainSensors);
+            for sensor in sensors.iter_mut() {
+                sensor.tick_by(&mut cx, step);
             }
         }
-        let running: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.node.status == Status::Running)
-            .map(|(index, _)| index)
-            .collect();
-        for index in running {
-            entries[index].node.tick_or_stop(&mut cx);
+        // `startEachNonRunning`：只遍历核心 + 当前活动桶，按优先级顺序。新启动的行为
+        // 按序插进持久的 running 表，保持官方遍历顺序。
+        // `startEachNonRunning`: only the core + current activity buckets, in priority
+        // order. Newly started behaviours are inserted into the persistent running list
+        // in order, preserving vanilla iteration order.
+        {
+            crate::entity::mob::timing::span!(BrainBehaviors);
+            for &index in start_bucket.iter() {
+                let node = &mut nodes[index];
+                if node.status == Status::Stopped && node.try_start(&mut cx) {
+                    crate::entity::mob::timing::record_behavior_start!();
+                    let at = running.partition_point(|&other| other < index);
+                    running.insert(at, index);
+                }
+            }
+            // `tickEachRunning`：直接遍历持久下标表，不再每刻分配 Vec 或全表筛选；停掉的移除。
+            // `tickEachRunning`: walk the persistent index list directly — no per-tick Vec
+            // allocation or full-table filter; stopped behaviours are removed.
+            let mut at = 0;
+            while at < running.len() {
+                let index = running[at];
+                nodes[index].tick_or_stop(&mut cx);
+                if nodes[index].status == Status::Stopped {
+                    running.remove(at);
+                } else {
+                    at += 1;
+                }
+            }
         }
     }
 
-    /// `Brain.stopAll`：按遍历顺序停掉所有正在跑的行为。
+    /// `Brain.stopAll`：按下标顺序停掉所有正在跑的行为，并清空 running 表。
     ///
-    /// `Brain.stopAll`: stop every running behaviour in iteration order.
+    /// `Brain.stopAll`: stop every running behaviour in index order and clear the list.
     pub fn stop_all(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         let time = ctx.blocks().game_time();
         let Self {
-            memories, entries, ..
+            memories, nodes, ..
         } = self;
         let mut cx = Cx {
             me,
@@ -372,11 +541,12 @@ impl Brain {
             memories,
             time,
         };
-        for entry in entries.iter_mut() {
-            if entry.node.status == Status::Running {
-                entry.node.do_stop(&mut cx);
+        for node in nodes.iter_mut() {
+            if node.status == Status::Running {
+                node.do_stop(&mut cx);
             }
         }
+        self.running.clear();
     }
 
     /// 行为表里出现过的活动（去重前，按遍历顺序）。测试 / 对拍用。
@@ -384,7 +554,11 @@ impl Brain {
     /// The activities present in the behaviour table (before dedup, in iteration
     /// order), for tests / oracles.
     pub fn table_activities(&self) -> Vec<Activity> {
-        self.entries.iter().map(|entry| entry.activity).collect()
+        self.template
+            .entries
+            .iter()
+            .map(|entry| entry.activity)
+            .collect()
     }
 
     /// 对拍用：排过序的活动名。
@@ -401,10 +575,9 @@ impl Brain {
     /// For oracles: the class names of `getRunningBehaviors`; gates list their running
     /// children.
     pub fn running_names(&self) -> Vec<String> {
-        self.entries
+        self.running
             .iter()
-            .filter(|entry| entry.node.status == Status::Running)
-            .map(|entry| entry.node.debug_name())
+            .map(|&index| self.nodes[index].debug_name())
             .collect()
     }
 
@@ -432,7 +605,8 @@ impl Brain {
     /// For oracles: the behaviour table (priority, activity name, class name) in the
     /// vanilla iteration order; gates list their children's names in load order.
     pub fn behavior_table(&self) -> Vec<(i32, &'static str, String)> {
-        self.entries
+        self.template
+            .entries
             .iter()
             .map(|entry| {
                 (
@@ -449,7 +623,8 @@ impl Brain {
     /// For oracles: the activity entry conditions (activity name, memory name and
     /// status); activities without conditions are omitted.
     pub fn requirement_table(&self) -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
-        self.requirements
+        self.template
+            .requirements
             .iter()
             .filter(|(_, conditions)| !conditions.is_empty())
             .map(|(activity, conditions)| {
@@ -467,7 +642,8 @@ impl Brain {
     ///
     /// For oracles: the memories erased when an activity stops (activity, memory name).
     pub fn erase_table(&self) -> Vec<(&'static str, Vec<&'static str>)> {
-        self.erase_when_stopped
+        self.template
+            .erase_when_stopped
             .iter()
             .map(|(activity, memories)| {
                 let mut names: Vec<&'static str> =
@@ -543,6 +719,62 @@ fn hash_map_capacity(keys: usize) -> usize {
 mod tests {
     use super::*;
 
+    /// 钉住关键结构的大小。优化前 `Brain=6528`、`Memories=6400`（32 个槽每个都内联
+    /// 184 字节的 `MemoryValue`）；把值装箱、把整张结构表挪进 `Arc<BrainTemplate>` 后
+    /// `Brain=664`、`Memories=536`。这些数字变了就说明有人又把大对象塞回了实例。
+    ///
+    /// Pins the key struct sizes. Before: `Brain=6528`, `Memories=6400` (32 slots each
+    /// inlining a 184-byte `MemoryValue`); after boxing values and moving the whole
+    /// structure table into `Arc<BrainTemplate>`: `Brain=664`, `Memories=536`. A change
+    /// here means someone put a big object back into the instance.
+    #[test]
+    fn brain_and_memory_sizes_stay_small() {
+        use crate::entity::mob::brain::behavior::Node;
+        use crate::entity::mob::brain::memory::{Memories, MemoryValue};
+        assert_eq!(std::mem::size_of::<MemoryValue>(), 184);
+        assert_eq!(std::mem::size_of::<Memories>(), 536);
+        assert_eq!(std::mem::size_of::<Brain>(), 664);
+        assert_eq!(std::mem::size_of::<Node>(), 136);
+        assert_eq!(std::mem::size_of::<Sensor>(), 16);
+        assert_eq!(std::mem::size_of::<Entry>(), 144);
+    }
+
+    /// 同一缓存槽构造两只大脑，它们共享同一份模板（`Arc::ptr_eq`），但记忆和运行态
+    /// 各自独立。这就是「模板按种类缓存、实例只留小状态」。
+    ///
+    /// Two brains from one cache slot share the same template (`Arc::ptr_eq`) but own
+    /// separate memories and running state: "template cached per kind, instance holds
+    /// only small state".
+    #[test]
+    fn cached_brains_share_the_template_but_not_state() {
+        static TEMPLATE: TemplateCache = template_cache();
+        let build = || {
+            BrainTemplate::new(
+                &[],
+                vec![ActivityData::sequential(
+                    Activity::Core,
+                    0,
+                    vec![Kind::DoNothing { min: 30, max: 60 }],
+                )],
+            )
+        };
+        let mut first = Brain::cached(&TEMPLATE, build);
+        let second = Brain::cached(&TEMPLATE, build);
+        assert!(Arc::ptr_eq(&first.template, &second.template));
+
+        first.memories.register(MemoryType::WalkTarget);
+        first
+            .memories
+            .set(MemoryType::WalkTarget, memory::MemoryValue::Unit);
+        assert!(!second.memories.has(MemoryType::WalkTarget));
+
+        // 结构表来自共享模板，和官方遍历顺序一致；运行态表初始为空。
+        // Structure tables come from the shared template in vanilla order; running is empty.
+        assert_eq!(first.behavior_table().len(), 1);
+        assert!(first.running_names().is_empty());
+        assert_eq!(first.table_activities(), vec![Activity::Core]);
+    }
+
     /// 官方 `"core".hashCode()` 等几个值，和桶序：16 个桶时 idle、core、panic 的顺序。
     /// 新增的青蛙活动也按官方注册名逐个核过 `String.hashCode()`。
     ///
@@ -592,7 +824,7 @@ mod tests {
             ],
         );
         assert_eq!(brain.active_names(), vec!["core", "idle"]);
-        let activities: Vec<Activity> = brain.entries.iter().map(|entry| entry.activity).collect();
+        let activities: Vec<Activity> = brain.table_activities();
         assert_eq!(activities.len(), 3);
         // 优先级 0 的 core/idle 排在优先级 1 的 swim 之前。
         // Priority-0 core/idle precede priority-1 swim.
@@ -653,5 +885,211 @@ mod tests {
         // A registered empty slot satisfies VALUE_ABSENT; an unregistered one never does.
         assert!(brain.requirements_met(Activity::Idle));
         assert!(!brain.requirements_met(Activity::Swim));
+    }
+
+    /// `Memories::tick_by(gap)` 与连续 `gap` 次 `Memories::tick()` 逐槽逐位一致
+    /// （含 `ttl = 0`、`ttl = gap - 1`、`ttl = gap`、`ttl > gap` 与不过期槽）。
+    #[test]
+    fn memory_tick_by_matches_repeated_single_ticks() {
+        for gap in [1_i64, 2, 3, 4, 20] {
+            for ttl in [0_i64, 1, 2, 3, 4, 5, 19, 20, 21] {
+                let mut stepped = Memories::default();
+                let mut looped = Memories::default();
+                for m in [&mut stepped, &mut looped] {
+                    m.register(MemoryType::IsPanicking);
+                    m.register(MemoryType::WalkTarget);
+                    m.set_with_ttl(
+                        MemoryType::IsPanicking,
+                        memory::MemoryValue::Bool(true),
+                        ttl,
+                    );
+                    m.set(MemoryType::WalkTarget, memory::MemoryValue::Unit);
+                }
+                stepped.tick_by(gap);
+                for _ in 0..gap {
+                    looped.tick();
+                }
+                assert_eq!(stepped, looped, "gap={gap} ttl={ttl}");
+            }
+        }
+    }
+
+    /// `Brain::tick_by(gap)` 按 `gap` 推进记忆过期和传感器倒计时，行为的结束时刻仍读
+    /// 绝对 `game_time` 不受 `gap` 影响；精确档 `gap = 1` 与 `Brain::tick()` 一致。
+    #[test]
+    fn brain_tick_by_advances_memories_and_sensors_while_behaviors_use_game_time() {
+        use crate::{
+            BlockTicks, World, entity::ctx::PreciseCtx, entity::mob::MobType, testing::TestLevel,
+        };
+        use mc_bamboo_core::Vec3;
+
+        let mut brain = Brain::new(
+            &[SensorKind::IsInWater],
+            vec![ActivityData::sequential(
+                Activity::Core,
+                0,
+                vec![Kind::DoNothing { min: 10, max: 10 }],
+            )],
+        );
+        brain.memories.register(MemoryType::DangerDetectedRecently);
+        brain.memories.set_with_ttl(
+            MemoryType::DangerDetectedRecently,
+            memory::MemoryValue::Bool(true),
+            10,
+        );
+        brain.sensors[0].time_to_tick = 10;
+
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let mut me = Entity::by_mob_type(MobType::Frog, Vec3::new(0.5, 64.0, 0.5));
+        let mut mob = Mob::new(MobType::Frog);
+
+        // t = 100, gap = 1：启动 DoNothing (end = 110)，记忆 ttl 10→9，传感器 10→9。
+        ticks.set_time(100);
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            brain.tick_by(&mut me, &mut mob, &mut ctx, 1);
+        }
+        assert_eq!(
+            brain
+                .memories
+                .time_until_expiry(MemoryType::DangerDetectedRecently),
+            9
+        );
+        assert_eq!(brain.sensors[0].time_to_tick, 9);
+        assert_eq!(brain.running_names(), vec!["DoNothing"]);
+
+        // t = 104, gap = 4：记忆 ttl 9→5，传感器 9→5；行为按 game_time=104 < 110 仍在跑。
+        ticks.set_time(104);
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            brain.tick_by(&mut me, &mut mob, &mut ctx, 4);
+        }
+        assert_eq!(
+            brain
+                .memories
+                .time_until_expiry(MemoryType::DangerDetectedRecently),
+            5
+        );
+        assert_eq!(brain.sensors[0].time_to_tick, 5);
+        assert_eq!(brain.running_names(), vec!["DoNothing"]);
+
+        // t = 108, gap = 4：记忆 ttl 5→1，传感器 5→1；行为按 game_time=108 < 110 仍在跑。
+        ticks.set_time(108);
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            brain.tick_by(&mut me, &mut mob, &mut ctx, 4);
+        }
+        assert_eq!(
+            brain
+                .memories
+                .time_until_expiry(MemoryType::DangerDetectedRecently),
+            1
+        );
+        assert_eq!(brain.sensors[0].time_to_tick, 1);
+        assert_eq!(brain.running_names(), vec!["DoNothing"]);
+
+        // t = 112, gap = 4：记忆 ttl 1 < 4 到期清空；传感器 1 - 4 <= 0 触发并重置为 scan_rate(20)；
+        // DoNothing 按 game_time = 112 > 110 停止。
+        ticks.set_time(112);
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            brain.tick_by(&mut me, &mut mob, &mut ctx, 4);
+        }
+        assert!(!brain.memories.has(MemoryType::DangerDetectedRecently));
+        assert_eq!(
+            brain.sensors[0].time_to_tick,
+            i64::from(SensorKind::IsInWater.scan_rate())
+        );
+        assert!(brain.running_names().is_empty());
+    }
+
+    /// 降频档里的带大脑生物（山羊站在 48 格处，`throttle=32 / sleep=64`）每次决策时拿到
+    /// `decision_gap > 1`，大脑的记忆过期和传感器倒计时按 `decision_gap` 推进；关闭降频时
+    /// `decision_gap` 恒为 1，精确行为不变。
+    #[test]
+    fn throttled_brain_mob_advances_brain_by_decision_gap() {
+        use crate::{
+            BlockGameRules, BlockState, BlockTicks, World,
+            entity::mob::{MobType, throttle},
+            testing::TestLevel,
+        };
+        use mc_bamboo_core::{BlockPos, Vec3};
+        use mc_bamboo_data::blocks;
+
+        let mut level = TestLevel::new();
+        let mut rules = BlockGameRules::vanilla();
+        rules.mob_throttle_distance = 32;
+        rules.mob_sleep_distance = 64;
+        level.rules = rules;
+        level
+            .players
+            .push(throttle::test_player(1, Vec3::new(0.5, 64.0, 0.5)));
+
+        let mut ticks = BlockTicks::new();
+        let uid = {
+            let mut world = World::new(&mut level, &mut ticks);
+            for x in 44..=52 {
+                for z in -4..=4 {
+                    world.set_block(BlockPos::new(x, 63, z), BlockState(blocks::GRASS_BLOCK), 0);
+                }
+            }
+            let uid = world.spawn_entity(Entity::by_mob_type(
+                MobType::Armadillo,
+                Vec3::new(48.5, 64.0, 0.5),
+            ));
+            world.with_entity_mut(uid, &mut |entity| {
+                entity.on_ground = true;
+                entity.with_mob(|_, mob| {
+                    let brain = mob.brain.as_mut().expect("armadillo has a brain");
+                    assert!(
+                        brain
+                            .memories
+                            .is_registered(MemoryType::DangerDetectedRecently)
+                    );
+                    brain.memories.set_with_ttl(
+                        MemoryType::DangerDetectedRecently,
+                        memory::MemoryValue::Bool(true),
+                        30,
+                    );
+                    brain.sensors[0].time_to_tick = 18;
+                });
+            });
+            uid
+        };
+
+        // 跑 12 刻（距离 48 在 [32,64] 中点，period = 3），记忆与传感器应总共推进约 10..=12 刻
+        // 而不是降频后只推进 4 刻。
+        for tick in 1_i64..=12 {
+            ticks.set_time(tick);
+            let mut world = World::new(&mut level, &mut ticks);
+            world.tick_entities();
+        }
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut remaining_ttl = 0;
+        let mut sensor_left = 0;
+        world.with_entity_mut(uid, &mut |entity| {
+            entity.with_mob(|_, mob| {
+                let brain = mob.brain.as_ref().expect("armadillo has a brain");
+                remaining_ttl = brain
+                    .memories
+                    .time_until_expiry(MemoryType::DangerDetectedRecently);
+                sensor_left = brain.sensors[0].time_to_tick;
+            });
+        });
+        // 30 刻的记忆过了 10..=12 刻后剩下 18..=20，而不是只扣了 4 刻剩 26。
+        assert!(
+            (18..=21).contains(&remaining_ttl),
+            "throttled brain memory should advance by decision_gap, got ttl={remaining_ttl}"
+        );
+        // 初始 18 刻的传感器过了 10..=12 刻后剩下 6..=8，而不是只扣 4 刻剩 14。
+        assert!(
+            (6..=9).contains(&sensor_left),
+            "throttled brain sensor should advance by decision_gap, got time_to_tick={sensor_left}"
+        );
     }
 }
