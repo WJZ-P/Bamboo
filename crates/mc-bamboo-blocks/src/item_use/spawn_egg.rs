@@ -25,11 +25,10 @@ pub(super) fn use_egg(world: &mut World, ctx: &UseContext, kind: MobType) -> Int
     let clicked = ctx.clicked_pos();
     let face = ctx.clicked_face();
     let state = world.block_state(clicked);
-    // `SpawnEggItem.useOn` 在流体方块上直接放过。
-    // `SpawnEggItem.useOn` refuses to spawn on a fluid block.
-    if !state.fluid().is_empty() {
-        return InteractionResult::Pass;
-    }
+    // 官方 `SpawnEggItem.useOn` 不检查流体：`spawnEggItem.useOn` 只看被点格的
+    // 碰撞形状（水方块为空），所以水方块上照样生成。
+    // Vanilla `SpawnEggItem.useOn` does not check fluids: it only looks at the
+    // clicked cell's collision shape (empty for water), so a water block spawns too.
     // `getCollisionShape(level, clickedPos).isEmpty()`：碰撞形状为空才在被点格生成，
     // 否则沿点击面挪一格。`offsetMore` 只在真的挪了、而且点的是顶面时为真，
     // 让 `getYOffset` 往下多扫一格（点在实心方块顶面时给实体留出落脚的地方）。
@@ -151,9 +150,13 @@ mod tests {
         assert_eq!(position, Vec3::new(2.5, 64.5, 5.5));
     }
 
-    /// 流体方块直接放过，不生成实体。
+    /// 官方 `SpawnEggItem.useOn` 不检查流体：水方块碰撞形状为空，点它照样生成，
+    /// 实体落在被点格的格底。
+    ///
+    /// Vanilla `SpawnEggItem.useOn` does not check fluids: a water block has an
+    /// empty collision shape, so clicking it spawns in the clicked cell.
     #[test]
-    fn a_fluid_click_does_not_spawn() {
+    fn a_fluid_click_spawns() {
         let pos = BlockPos::new(0, 64, 0);
         let mut level = TestLevel::new();
         level.set(pos, BlockState(blocks::WATER).default_state());
@@ -163,9 +166,14 @@ mod tests {
         let ctx = UseContext::new(&actor, Hand::Main, top_hit(pos));
         assert_eq!(
             use_egg(&mut world, &ctx, MobType::Cow),
-            InteractionResult::Pass
+            InteractionResult::Success
         );
-        assert!(level.entities().ids().is_empty());
+        let ids = level.entities().ids();
+        assert_eq!(ids.len(), 1, "水方块上生成一头牛");
+        assert_eq!(
+            level.entities().public_at(ids[0]).unwrap().position,
+            Vec3::new(0.5, 64.0, 0.5)
+        );
     }
 
     /// `SpawnEggItem.use` 对着水面用 `(false, false)`：不做下落扫描，实体直接落在

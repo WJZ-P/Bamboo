@@ -510,6 +510,17 @@ public final class MobOracle {
                 playAttackTarget(official, out, name);
                 cases++;
             }
+            for (String name : List.of("guardian_swim", "guardian_flop",
+                    "laser_player_normal", "laser_player_hard",
+                    "laser_player_elder", "laser_player_elder_hard",
+                    "guardian_thorns_static", "guardian_thorns_moving",
+                    "guardian_thorns_arrow",
+                    "laser_mob_victim_squid", "laser_mob_victim_axolotl",
+                    "laser_interrupt_close")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playGuardian(official, out, name);
+                cases++;
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -10448,6 +10459,310 @@ public final class MobOracle {
                 + ",\"deathTime\":" + mob.deathTime
                 + ",\"removed\":" + (mob.isRemoved() ? 1 : 0)
                 + ",\"target\":" + (target == null ? -1 : target.getId()) + '}';
+    }
+
+    /**
+     * 守卫者逐刻场景。官方一侧在假世界里构造守卫者，逐刻 `commonTick` + `tick`
+     * 记录状态；Bamboo 侧用同一份方块和种子重放，按原始位比较。
+     *
+     * Guardian per-tick scenes. Vanilla builds the guardian in a fake level; the
+     * Bamboo side replays the same blocks and seeds and compares raw bits.
+     */
+    private static void playGuardian(Official official, Writer out, String name) throws Exception {
+        boolean elder = name.contains("elder");
+        boolean laser = name.startsWith("laser_");
+        boolean flop = name.startsWith("guardian_flop");
+        boolean thorns = name.startsWith("guardian_thorns_");
+        boolean mobVictim = name.startsWith("laser_mob_victim_");
+        boolean interrupt = name.startsWith("laser_interrupt_");
+        int difficulty = name.contains("hard") ? 3 : 2;
+        // 尖刺场景聚焦反伤判定本身（hurt 在 tick 5，再比一刻）；
+        // 之后长时间的游走位移受 java.lang.Math.sin/cos 平台末位差影响。
+        // Thorns scenes focus on the reflection itself (hurt at tick 5 plus one
+        // tick); longer wandering motion is subject to Math.sin/cos platform diffs.
+        int ticks = thorns ? 6 : (laser || mobVictim || interrupt ? 100 : 200);
+        double[] guardianAt = flop ? new double[] {0.5, 61.0, 0.5}
+                : new double[] {0.5, 62.0, 0.5};
+        FakeLevel world = FakeLevel.create(official);
+        world.getRandom().setSeed(9100L);
+        world.injectedSeaLevel = -63;
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.values()[difficulty];
+        // 一片 17×17 的水池，底是石头；守卫者泡在 y=62。
+        // A 17x17 pool of water over stone; the guardian sits at y=62.
+        for (int x = -8; x <= 8; x++) {
+            for (int z = -8; z <= 8; z++) {
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+                // 扑腾场景抽干水，守卫者站在石头地板上。
+                // The flop scene drains the pool so the guardian stands on stone.
+                if (!flop) {
+                    for (int y = 61; y <= 63; y++) {
+                        world.blocks.put(BlockPos.asLong(x, y, z), Blocks.WATER.defaultBlockState());
+                    }
+                }
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+        net.minecraft.world.entity.monster.Guardian guardian = elder
+                ? (net.minecraft.world.entity.monster.Guardian) EntityTypes.ELDER_GUARDIAN
+                        .create(world, EntitySpawnReason.COMMAND)
+                : (net.minecraft.world.entity.monster.Guardian) EntityTypes.GUARDIAN
+                        .create(world, EntitySpawnReason.COMMAND);
+        setRandom(guardian, 42001L);
+        guardian.setUUID(Mth.createInsecureUUID(guardian.getRandom()));
+        guardian.getRandom().nextFloat();
+        guardian.setYRot(0.0F);
+        guardian.setYHeadRot(0.0F);
+        guardian.setYBodyRot(0.0F);
+        guardian.setPos(guardianAt[0], guardianAt[1], guardianAt[2]);
+        world.tracked.add(guardian);
+        // 生物目标场景：一名鱿鱼 / 美西螈目标（`GuardianAttackSelector` 认这两类）。
+        // Mob-victim scenes: a squid / axolotl target (both accepted by the selector).
+        net.minecraft.world.entity.Mob victim = null;
+        if (mobVictim) {
+            victim = name.contains("squid")
+                    ? (net.minecraft.world.entity.Mob) EntityTypes.SQUID
+                            .create(world, EntitySpawnReason.COMMAND)
+                    : (net.minecraft.world.entity.Mob) EntityTypes.AXOLOTL
+                            .create(world, EntitySpawnReason.COMMAND);
+            setRandom(victim, 42003L);
+            victim.setUUID(Mth.createInsecureUUID(victim.getRandom()));
+            victim.getRandom().nextFloat();
+            victim.setYRot(0.0F);
+            victim.setYHeadRot(0.0F);
+            victim.setYBodyRot(0.0F);
+            victim.setPos(8.5, 62.0, 0.5);
+            // 目标静止：只验证选择器认这两类和激光命中，不引入鱿鱼游动的浮点差。
+            // Keep the victim still: verify the selector and laser hit without
+            // introducing the squid's swimming float drift.
+            victim.setNoAi(true);
+            world.tracked.add(victim);
+        }
+        // 激光场景放一名生存模式的玩家在 8 格外（选择器要求 distSqr > 9），
+        // 只把它当作目标；不 tick 玩家，逐刻只比守卫者一侧的状态。
+        // Laser scenes add one survival player 8 blocks away (the selector needs
+        // distSqr > 9) as a target; the player is not ticked and only the
+        // guardian's state is compared.
+        // 玩家的初始位置：中途动作会改 player.position()，但 setup 要给初始位置。
+        // The player's initial position; mid-scene actions move player.position().
+        double[] playerAt = {thorns ? 1.5 : 8.5, 61.0, 0.5};
+        ServerPlayer player = null;
+        if (laser || thorns || interrupt) {
+            GameProfile profile = new GameProfile(new UUID(1L, 2L), "GuardianTarget");
+            player = new ServerPlayer(official.server, world, profile,
+                    ClientInformation.createDefault());
+            // 尖刺场景玩家贴身（选择器要 distSqr > 9，所以不会触发激光）；
+            // 激光场景放 8 格外。
+            // Thorns scenes put the player in melee range (the selector needs
+            // distSqr > 9, so no laser); laser scenes place it 8 blocks away.
+            player.setPos(playerAt[0], playerAt[1], playerAt[2]);
+            setRandom(player, 42002L);
+            player.setYRot(0.0F);
+            player.setYHeadRot(0.0F);
+            player.setYBodyRot(0.0F);
+            // `ServerPlayer.hurtServer` 会读 `connection.hasClientLoaded()`，假玩家
+            // 需要一个能收包的 stub connection（和其它玩家受伤场景一样）。
+            // `ServerPlayer.hurtServer` reads `connection.hasClientLoaded()`; the fake
+            // player needs a stub connection like the other player-hurt scenes.
+            Bytes sink = new Bytes(official.registries);
+            RecordingListener connection = allocate(RecordingListener.class);
+            put(ServerGamePacketListenerImpl.class, connection, "player", player);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection,
+                    "server", official.server);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection,
+                    "connection", new Connection(PacketFlow.CLIENTBOUND));
+            connection.bytes = sink;
+            put(ServerPlayer.class, player, "connection", connection);
+            // `NearestAttackableTargetGoal<LivingEntity>` 走 `getEntitiesOfClass`，
+            // 所以玩家除了进玩家表也要进假世界的实体表，官方才会把它当目标。
+            // `NearestAttackableTargetGoal<LivingEntity>` uses `getEntitiesOfClass`,
+            // so the player must also be in the fake level's entity list.
+            world.playersList().add(player);
+            world.tracked.add(player);
+        }
+        var frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                world.gameTime++;
+                // 官方 `ServerPlayer.doTick` / `LivingEntity.baseTick` 每刻递减这两个计时器。
+                // Vanilla decrements these two timers every tick.
+                if (player != null) {
+                    player.hurtTime = Math.max(0, player.hurtTime - 1);
+                    player.damageCooldownTime = Math.max(0, player.damageCooldownTime - 1);
+                }
+                if (!guardian.isRemoved()) {
+                    guardian.checkDespawn();
+                    guardian.commonTick();
+                    guardian.tick();
+                }
+                if (victim != null && !victim.isRemoved()) {
+                    victim.checkDespawn();
+                    victim.commonTick();
+                    victim.tick();
+                }
+            }
+            if (thorns && tick == 5) {
+                // 玩家近战（或 generic 的非活体来源）打守卫者，触发
+                // `Guardian.hurtServer` 的尖刺判定。
+                // A player melee hit (or a generic non-living source) triggers
+                // `Guardian.hurtServer`'s thorns branch.
+                if (name.contains("moving")) guardian.setMoving(true);
+                net.minecraft.world.damagesource.DamageSource source = name.contains("arrow")
+                        ? guardian.damageSources().generic()
+                        : guardian.damageSources().playerAttack(player);
+                guardian.hurtServer(world, source, 1.0F);
+            }
+            if (interrupt && tick == 30) {
+                if (name.contains("wall")) {
+                    // 挡住守卫者到玩家的视线（射线在 x=4..5 处撞墙）。
+                    // Block the guardian's line of sight to the player.
+                    for (int x = 4; x <= 5; x++) {
+                        for (int z = -2; z <= 2; z++) {
+                            for (int y = 61; y <= 63; y++) {
+                                world.blocks.put(BlockPos.asLong(x, y, z),
+                                        Blocks.STONE.defaultBlockState());
+                            }
+                        }
+                    }
+                } else if (name.contains("close")) {
+                    // 目标进到 3 格内（普通守卫者的 canContinueToUse 要求 distSqr > 9）。
+                    // Move the target within 3 blocks.
+                    player.setPos(2.5, 61.0, 0.5);
+                } else if (name.contains("kill")) {
+                    player.setHealth(0.0F);
+                } else if (name.contains("creative")) {
+                    // 直接设创造能力：`ServerPlayer.setGameMode` 会碰假世界里为 null
+                    // 的 `sleepStatus`，`isCreative()` 只看 abilities.instabuild。
+                    // Set the creative ability directly; `setGameMode` touches the
+                    // fake level's null sleepStatus, and `isCreative()` only reads
+                    // abilities.instabuild.
+                    player.getAbilities().instabuild = true;
+                    player.getAbilities().invulnerable = true;
+                }
+            }
+            if (tick != 0) frames.append(',');
+            frames.append("{\"guardian\":").append(guardianFrame(guardian))
+                    .append(",\"playerHealth\":")
+                    .append(player == null ? "0" : Float.floatToRawIntBits(player.getHealth()))
+                    .append(",\"playerHurtTime\":")
+                    .append(player == null ? "0" : player.hurtTime)
+                    .append(",\"playerDamageCooldown\":")
+                    .append(player == null ? "0" : player.damageCooldownTime)
+                    .append(",\"victimHealth\":")
+                    .append(victim == null ? "0" : Float.floatToRawIntBits(victim.getHealth()))
+                    .append('}');
+        }
+        frames.append(']');
+        out.write("{\"type\":\"guardian\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"blocks\":" + blocks
+                + ",\"difficulty\":" + difficulty
+                // 守卫者泡在水池里，官方 `getLightLevelDependentMagicValue()` 让
+                // `Monster.updateNoActionTime()` 每刻 +2；Bamboo 的 `MobLevel` 用
+                // skyDarken=0 的亮度口径才同样 >0.5，随机源逐刻取数才对得上。
+                // In the pool the official magic value makes `Monster.updateNoActionTime()`
+                // add 2 per tick; Bamboo needs skyDarken=0 for the same >0.5 result,
+                // which keeps the per-tick random draws aligned.
+                + ",\"skyDarken\":0"
+                + ",\"guardian\":" + guardianSetup(elder, guardianAt, 42001L)
+                + ",\"player\":" + (player == null ? "null" : guardianPlayerSetup(player, playerAt))
+                + ",\"interrupt\":" + (interrupt ? "{\"tick\":30,\"kind\":\""
+                        + name.substring(name.lastIndexOf('_') + 1) + "\"}" : "null")
+                + ",\"victim\":" + (victim == null ? "null"
+                        : "{\"kind\":" + (name.contains("squid") ? "92" : "93")
+                        + ",\"position\":[" + Double.doubleToRawLongBits(8.5) + ','
+                        + Double.doubleToRawLongBits(62.0) + ','
+                        + Double.doubleToRawLongBits(0.5) + "],\"seed\":42003}")
+                + ",\"hurt\":" + (thorns ? "{\"tick\":5,\"amount\":1.0,\"livingDirect\":"
+                        + !name.contains("arrow") + ",\"moving\":" + name.contains("moving")
+                        + "}" : "null")
+                + ",\"frames\":" + frames + "}\n");
+    }
+
+    private static String guardianPlayerSetup(ServerPlayer player, double[] at) {
+        // 用初始位置，不用 player.position()：中途动作可能已经把它挪走了。
+        // Use the initial position: mid-scene actions may have moved the player.
+        return "{\"uid\":" + player.getId()
+                + ",\"position\":[" + Double.doubleToRawLongBits(at[0]) + ','
+                + Double.doubleToRawLongBits(at[1]) + ',' + Double.doubleToRawLongBits(at[2]) + ']'
+                + ",\"health\":" + Float.floatToRawIntBits(20.0F)
+                + ",\"gameMode\":0}";
+    }
+
+    /** `Guardian.DATA_ID_ATTACK_TARGET` 的整数值（私有静态字段，反射读）。 */
+    private static int guardianAttackTarget(net.minecraft.world.entity.monster.Guardian guardian)
+            throws Exception {
+        java.lang.reflect.Field field = net.minecraft.world.entity.monster.Guardian.class
+                .getDeclaredField("DATA_ID_ATTACK_TARGET");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        net.minecraft.network.syncher.EntityDataAccessor<Integer> accessor =
+                (net.minecraft.network.syncher.EntityDataAccessor<Integer>) field.get(null);
+        return guardian.getEntityData().get(accessor);
+    }
+
+    private static String guardianSetup(boolean elder, double[] at, long seed) {
+        return "{\"kind\":" + (elder ? 91 : 90)
+                + ",\"position\":[" + Double.doubleToRawLongBits(at[0]) + ','
+                + Double.doubleToRawLongBits(at[1]) + ',' + Double.doubleToRawLongBits(at[2]) + ']'
+                + ",\"seed\":" + seed
+                + ",\"yaw\":" + Float.floatToRawIntBits(0.0F) + '}';
+    }
+
+    private static String guardianFrame(net.minecraft.world.entity.monster.Guardian g)
+            throws Exception {
+        net.minecraft.world.phys.Vec3 p = g.position();
+        net.minecraft.world.phys.Vec3 v = g.getDeltaMovement();
+        net.minecraft.world.entity.LivingEntity target = g.getTarget();
+        return "{\"motion\":[" + Double.doubleToRawLongBits(p.x) + ','
+                + Double.doubleToRawLongBits(p.y) + ',' + Double.doubleToRawLongBits(p.z) + ','
+                + Double.doubleToRawLongBits(v.x) + ',' + Double.doubleToRawLongBits(v.y) + ','
+                + Double.doubleToRawLongBits(v.z) + ']'
+                + ",\"yRot\":" + Float.floatToRawIntBits(g.getYRot())
+                + ",\"yHeadRot\":" + Float.floatToRawIntBits(g.getYHeadRot())
+                + ",\"yBodyRot\":" + Float.floatToRawIntBits(g.yBodyRot)
+                + ",\"health\":" + Float.floatToRawIntBits(g.getHealth())
+                + ",\"air\":" + g.getAirSupply()
+                + ",\"hurtTime\":" + g.hurtTime
+                + ",\"deathTime\":" + g.deathTime
+                + ",\"removed\":" + (g.isRemoved() ? 1 : 0)
+                + ",\"target\":" + (target == null ? -1 : target.getId())
+                + ",\"attackTarget\":" + guardianAttackTarget(g)
+                + ",\"moving\":" + (g.isMoving() ? 1 : 0)
+                + guardianLook(g)
+                + ",\"randomState\":" + guardianRandomState(g)
+                + ",\"noActionTime\":" + g.getNoActionTime() + '}';
+    }
+
+    /** `LegacyRandomSource.seed`（AtomicLong），和 Bamboo `JavaRandom.state()` 逐位比。 */
+    private static long guardianRandomState(net.minecraft.world.entity.monster.Guardian g)
+            throws Exception {
+        java.lang.reflect.Field rf = net.minecraft.world.entity.Entity.class.getDeclaredField("random");
+        rf.setAccessible(true);
+        Object random = rf.get(g);
+        java.lang.reflect.Field sf = random.getClass().getDeclaredField("seed");
+        sf.setAccessible(true);
+        return ((java.util.concurrent.atomic.AtomicLong) sf.get(random)).get();
+    }
+
+    /** `Mob.lookControl` 的调试状态：`lookAtCooldown` 和 wanted 目标。 */
+    private static String guardianLook(net.minecraft.world.entity.monster.Guardian g)
+            throws Exception {
+        java.lang.reflect.Field field = net.minecraft.world.entity.Mob.class
+                .getDeclaredField("lookControl");
+        field.setAccessible(true);
+        Object look = field.get(g);
+        Class<?> cls = net.minecraft.world.entity.ai.control.LookControl.class;
+        java.lang.reflect.Field cooldown = cls.getDeclaredField("lookAtCooldown");
+        java.lang.reflect.Field wx = cls.getDeclaredField("wantedX");
+        java.lang.reflect.Field wz = cls.getDeclaredField("wantedZ");
+        cooldown.setAccessible(true);
+        wx.setAccessible(true);
+        wz.setAccessible(true);
+        return ",\"lookCooldown\":" + cooldown.getInt(look)
+                + ",\"wantedX\":" + Double.doubleToRawLongBits(wx.getDouble(look))
+                + ",\"wantedZ\":" + Double.doubleToRawLongBits(wz.getDouble(look));
     }
 
     /** 两种傀儡的存档：整份 SNBT 和读回再写出的 SNBT。 */

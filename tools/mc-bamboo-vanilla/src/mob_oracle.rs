@@ -49,6 +49,7 @@ mod fish;
 mod gen_spawn;
 mod golem;
 mod grazing;
+mod guardian_scene;
 mod lightning;
 mod llama_spit;
 mod natural_spawn;
@@ -158,6 +159,7 @@ enum Line {
     VillagerSave(villager::VillagerSaveCase),
     VillagerDeath(villager::VillagerDeathCase),
     AttackTarget(Box<attack_target::AttackTargetCase>),
+    Guardian(Box<guardian_scene::GuardianCase>),
     Fish(Box<fish::FishCase>),
     PhantomSpawn(Box<phantom::PhantomSpawnCase>),
     Phantom(Box<phantom::PhantomCase>),
@@ -1613,6 +1615,7 @@ impl Report {
                 Line::VillagerSave(case) => self.replay_villager_save(&case),
                 Line::VillagerDeath(case) => self.replay_villager_death(&case),
                 Line::AttackTarget(case) => self.replay_attack_target(&case),
+                Line::Guardian(case) => self.replay_guardian(&case),
                 Line::Fish(case) => self.replay_fish(&case),
                 Line::PhantomSpawn(case) => self.replay_phantom_spawn(&case),
                 Line::Phantom(case) => self.replay_phantom(&case),
