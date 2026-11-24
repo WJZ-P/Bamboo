@@ -1227,10 +1227,22 @@ fn poi_types_file(data: &VersionData) -> Result<String, String> {
     if types.len() != 21 {
         return Err(format!("POI 类型应该有 21 种，实际 {}", types.len()));
     }
+    // 官方 `matchingStates()` 用 HashSet，迭代顺序每次 JVM 运行都不同；按状态 ID 排序，
+    // 保证生成文件逐字节可重复。
+    // Official `matchingStates()` is a HashSet whose iteration order varies per JVM run;
+    // sort by state id so the generated file is byte-for-byte reproducible.
+    let sorted_states: Vec<Vec<u32>> = types
+        .iter()
+        .map(|poi| {
+            let mut states = poi.states.clone();
+            states.sort_unstable();
+            states
+        })
+        .collect();
     let mut state_types = vec![None; data.block_states.total as usize];
     let mut village = vec![false; types.len()];
     for (id, poi) in types.iter().enumerate() {
-        for &state in &poi.states {
+        for &state in &sorted_states[id] {
             let index = usize::try_from(state).map_err(|_| format!("状态 {state} 越界"))?;
             let slot = state_types
                 .get_mut(index)
@@ -1279,7 +1291,7 @@ fn poi_types_file(data: &VersionData) -> Result<String, String> {
         let _ = writeln!(
             out,
             "    PoiTypeDef {{ name: {name:?}, max_tickets: {}, valid_range: {}, village: {}, states: &{:?} }},",
-            poi.max_tickets, poi.valid_range, village[id], poi.states,
+            poi.max_tickets, poi.valid_range, village[id], sorted_states[id],
         );
     }
     let _ = writeln!(out, "];\n");
@@ -4068,6 +4080,16 @@ fn entity_types_file(data: &VersionData) -> String {
         facts.arrow_in_ground
     );
     let _ = writeln!(out, "pub const ARROW_COLOR: u8 = {};", facts.arrow_color);
+    let _ = writeln!(
+        out,
+        "/// `ThrownTrident.DATA_ID_LOYALTY`：BYTE，继承 `AbstractArrow` 之后的第一项自有元数据。\n///\n/// `ThrownTrident.DATA_ID_LOYALTY`: BYTE, the first accessor after `AbstractArrow`.\npub const TRIDENT_LOYALTY: u8 = {};",
+        facts.trident_loyalty
+    );
+    let _ = writeln!(
+        out,
+        "/// `ThrownTrident.DATA_ID_FOIL`：BOOLEAN，是否有附魔光效。\n///\n/// `ThrownTrident.DATA_ID_FOIL`: BOOLEAN, whether it has the enchantment glint.\npub const TRIDENT_FOIL: u8 = {};",
+        facts.trident_foil
+    );
     let _ = writeln!(
         out,
         "pub const SKELETON_EYE_HEIGHT: f32 = {};",

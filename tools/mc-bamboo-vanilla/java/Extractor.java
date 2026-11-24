@@ -1312,6 +1312,11 @@ public final class Extractor {
         Field color = net.minecraft.world.entity.projectile.arrow.Arrow.class.getDeclaredField("ID_EFFECT_COLOR");
         color.setAccessible(true);
         out.addProperty("arrowColor", ((net.minecraft.network.syncher.EntityDataAccessor<?>) color.get(null)).id());
+        // 三叉戟的两个自有元数据 index 由类本身导出，别在 Rust 侧手写。
+        // The trident's two own metadata indices come from the class.
+        Class<?> trident = net.minecraft.world.entity.projectile.arrow.ThrownTrident.class;
+        out.addProperty("tridentLoyalty", entityAccessor(trident, "ID_LOYALTY").id());
+        out.addProperty("tridentFoil", entityAccessor(trident, "ID_FOIL").id());
         out.addProperty("skeletonEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON.getDimensions().eyeHeight());
         var rabbit = net.minecraft.world.entity.EntityTypes.RABBIT.getDimensions();
         var baby = (net.minecraft.world.entity.EntityDimensions) readField(Rabbit.class, "BABY_DIMENSIONS", null);
