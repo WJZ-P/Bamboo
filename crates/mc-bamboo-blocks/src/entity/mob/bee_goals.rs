@@ -138,9 +138,11 @@ impl BeeGoal {
     }
 
     /// `BaseBeeGoal.canUse` 的闸门：愤怒时不跑生活目标。
+    /// 注意：`BeeWanderGoal` 直接继承 `Goal` 而非 `BaseBeeGoal`，生气时照样运行。
     fn calm(&self, mob: &Mob, now: i64) -> bool {
         match self {
             Self::Attack
+            | Self::Wander
             | Self::HurtByOther { .. }
             | Self::BecomeAngryTarget { .. }
             | Self::ResetUniversalAnger => true,
