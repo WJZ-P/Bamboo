@@ -170,22 +170,26 @@ pub fn age_boundary_reached(mob: &mut Mob) {
 ///
 /// `Goat.BRAIN_PROVIDER`: six sensors and the core, idle, long-jump and ram activities.
 pub(super) fn brain() -> Brain {
-    Brain::new(
-        &[
-            SensorKind::NearestLivingEntities,
-            SensorKind::NearestPlayers,
-            SensorKind::NearestItems,
-            SensorKind::NearestAdult,
-            SensorKind::HurtBy,
-            SensorKind::FoodTemptations,
-        ],
-        vec![
-            core_activity(),
-            idle_activity(),
-            long_jump_activity(),
-            ram_activity(),
-        ],
-    )
+    use crate::entity::mob::brain::{BrainTemplate, TemplateCache, template_cache};
+    static TEMPLATE: TemplateCache = template_cache();
+    Brain::cached(&TEMPLATE, || {
+        BrainTemplate::new(
+            &[
+                SensorKind::NearestLivingEntities,
+                SensorKind::NearestPlayers,
+                SensorKind::NearestItems,
+                SensorKind::NearestAdult,
+                SensorKind::HurtBy,
+                SensorKind::FoodTemptations,
+            ],
+            vec![
+                core_activity(),
+                idle_activity(),
+                long_jump_activity(),
+                ram_activity(),
+            ],
+        )
+    })
 }
 
 fn core_activity() -> ActivityData {
@@ -1028,7 +1032,7 @@ fn closest_ram_target(cx: &mut Cx) -> Option<EntityUid> {
         Some(MemoryValue::Visible(visible)) => visible.entities.clone(),
         _ => return None,
     };
-    list.into_iter().find(|&uid| {
+    list.iter().copied().find(|&uid| {
         sensor::living(cx, uid).is_some_and(|view| ram_targetable(cx, &view))
             && sensor::visible_contains(cx, uid)
     })
@@ -1474,7 +1478,8 @@ pub(super) fn custom_server_ai_step(
     ctx: &mut dyn crate::entity::ctx::EntityCtx,
 ) {
     if let Some(mut brain) = mob.brain.take() {
-        brain.tick(me, mob, ctx);
+        let gap = ctx.throttle_plan().decision_gap;
+        brain.tick_by(me, mob, ctx, gap);
         brain.set_active_activity_to_first_valid(&[
             Activity::Ram,
             Activity::LongJump,

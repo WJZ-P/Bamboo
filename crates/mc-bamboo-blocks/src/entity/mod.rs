@@ -38,6 +38,7 @@ use crate::{shape::Aabb, state::BlockState};
 
 pub(crate) use item::merge_explosion;
 pub use item::{can_pick_up, set_throw_velocity, take_stack};
+pub use mob::villager::VillagerPublic;
 pub use orb::{award, award_values, experience_value, pick_up};
 pub use physics::{
     TravelSegment, collide_border_only, enclosed_in_air, no_block_collision, overlaps_new_blocks,
@@ -584,6 +585,15 @@ impl Entity {
             // `Squid` 构造函数最后的 `tentacleSpeed`，取一次 `nextFloat`。
             // The `Squid` constructor's trailing `tentacleSpeed`, one `nextFloat`.
             mob.squid.tentacle_speed = mob::squid::roll_tentacle_speed(&mut self.random);
+        }
+        if mob::guardian::is_guardian(mob.mob_type) {
+            // `Guardian` 构造函数：`clientSideTailAnimation = random.nextFloat()`，
+            // `clientSideTailAnimationO` 紧跟着取同一个值。会影响实体随机源的起点。
+            // The `Guardian` constructor: `clientSideTailAnimation = random.nextFloat()`,
+            // with `clientSideTailAnimationO` set to the same value. This advances the
+            // entity's random source.
+            mob.guardian.tail_animation = self.random.next_float();
+            mob.guardian.tail_animation_o = mob.guardian.tail_animation;
         }
     }
 

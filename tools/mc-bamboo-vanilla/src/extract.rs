@@ -1075,6 +1075,11 @@ pub struct ProjectileFacts {
     pub glow_squid_dark_ticks: u8,
     pub bat_flags: u8,
     pub phantom_size: u8,
+    /// 守卫者 `DATA_ID_MOVING` / `DATA_ID_ATTACK_TARGET` 的元数据 index。
+    ///
+    /// The guardian's `DATA_ID_MOVING` / `DATA_ID_ATTACK_TARGET` metadata indices.
+    pub guardian_moving: u8,
+    pub guardian_attack_target: u8,
     /// 蠹虫 / 末影螨的属性、眼高与寿命上限。
     ///
     /// Silverfish / endermite attributes, eye heights and the life cap.

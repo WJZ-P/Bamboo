@@ -2,7 +2,7 @@ use mc_bamboo_core::{Vec3, mth};
 use mc_bamboo_data::{items, registries::attribute};
 use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
 
-use super::{Mob, MobType, control, goals::CombatTarget, living};
+use super::{Mob, MobEvent, MobType, control, goals::CombatTarget, living};
 use crate::{
     World,
     entity::{
@@ -101,6 +101,16 @@ impl BowGoal {
             self.attack_time -= 1;
             if self.attack_time <= 0 && self.see_time >= -60 {
                 self.draw_start = Some(me.tick_count);
+                // `LivingEntity.startUsingItem(hand)` 无条件把这只手的物品再发一遍
+                // (`updatePlayersWithNewEquipment`)：每次开始拉弓都发一个
+                // `SetEquipment` 包。这就是官方每 20+interval 刻一次的包流。
+                // `LivingEntity.startUsingItem(hand)` unconditionally re-sends the
+                // hand's item via `updatePlayersWithNewEquipment`, so every draw
+                // emits a `SetEquipment` packet.
+                mob.events.push(MobEvent::Equipment(vec![(
+                    slot,
+                    mob.equipment.get(slot).clone(),
+                )]));
                 mob.using_item_flags = if slot == EquipmentSlot::OffHand { 3 } else { 1 };
             }
         }
@@ -119,9 +129,17 @@ impl BowGoal {
             mob.navigation.stop();
             self.strafing_time += 1;
         } else {
+            // `RangedBowAttackGoal.tick()` 调两参数 `moveTo(entity, speed)`。基类
+            // `PathNavigation` 用 reach 1，`WallClimberNavigation` 覆写后 `createPath`
+            // 用 reach 0；借载具导航时 `mob.navigation` 正是载具那份，按它的类给 reach。
+            // `RangedBowAttackGoal.tick()` calls the two-arg `moveTo(entity, speed)`.
+            // Base `PathNavigation` uses reach 1, `WallClimberNavigation` overrides it
+            // with `createPath(entity, 0)`; while borrowing, `mob.navigation` is the
+            // vehicle's, so pick the reach from its class.
+            let reach = if mob.navigation.wall_climber { 0 } else { 1 };
             let nav = living::nav_mob(me, mob, view);
             mob.navigation
-                .move_to_entity(view, &nav, target.position, 1.0, 1);
+                .move_to_entity(view, &nav, target.position, 1.0, reach);
             self.strafing_time = -1;
         }
         if self.strafing_time >= 20 {
@@ -144,6 +162,16 @@ impl BowGoal {
                 if self.strafing_clockwise { 0.5 } else { -0.5 },
             );
             look_at_now(me, mob, target.eye_position());
+            // `RangedBowAttackGoal.tick()` 在 `strafingTime > -1` 分支里，除了骑手
+            // 自己 `lookAt`，还对 `getControlledVehicle()` 的 `Mob` 调 `lookAt`，
+            // 从**载具**自己的眼睛/位置把载具的 `yRot`/`xRot` 转向目标。这里只记
+            // 目标眼睛位置；驱动在借导航写回时把它应用到载具行。
+            // In the `strafingTime > -1` branch vanilla also calls `lookAt` on the
+            // controlled `Mob` vehicle, rotating the vehicle from its own eye.
+            // Record the target eye here; the driver applies it to the vehicle row.
+            if mob.borrowed_nav_mob.is_some() {
+                mob.borrowed_vehicle_look = Some(target.eye_position());
+            }
         } else {
             mob.look.set_look_at(
                 target.position.x,
@@ -580,6 +608,8 @@ mod tests {
             gaze_disguise: false,
             alive: true,
             spectator: false,
+            game_mode: 0,
+            mining_fatigue: None,
             creative: false,
             sneaking: false,
             sprinting: false,

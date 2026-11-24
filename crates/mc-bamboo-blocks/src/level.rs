@@ -506,6 +506,21 @@ pub trait LevelEntities {
     /// 已经在 tick 列表里的实体。正在 tick 的那一个看不到。
     fn entity(&self, uid: EntityUid) -> Option<Entity>;
     fn entity_public(&self, uid: EntityUid) -> Option<EntityPublic>;
+    /// 借用式读取公开数据，找到时返回 `true`，省掉整份克隆。默认回落到
+    /// [`Self::entity_public`] 的克隆实现；有整张实体表的实现覆盖成直接借用那一行。
+    ///
+    /// Borrows the public data and returns `true` when found, avoiding a full clone.
+    /// The default falls back to the cloning [`Self::entity_public`]; implementations
+    /// with a whole entity table override it to borrow the row directly.
+    fn with_entity_public(&self, uid: EntityUid, visit: &mut dyn FnMut(&EntityPublic)) -> bool {
+        match self.entity_public(uid) {
+            Some(public) => {
+                visit(&public);
+                true
+            }
+            None => false,
+        }
+    }
     /// 空间索引范围查询，按 uid 升序访问。
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
     /// `getEntitiesOfClass` 的官方分区顺序（`SectionPos.asLong` 升序，段内加入顺序）。
@@ -607,6 +622,16 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
 
     fn entity_public(&self, uid: EntityUid) -> Option<EntityPublic> {
         self.entities_table().public_at(uid).cloned()
+    }
+
+    fn with_entity_public(&self, uid: EntityUid, visit: &mut dyn FnMut(&EntityPublic)) -> bool {
+        match self.entities_table().public_at(uid) {
+            Some(public) => {
+                visit(public);
+                true
+            }
+            None => false,
+        }
     }
 
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
@@ -806,29 +831,16 @@ pub trait Level: LevelSideState + LevelEntities {
         None
     }
 
-    /// 以 `center` 为中心、`radius` 格（切比雪夫）内、已加载区块里的蜂巢 /
-    /// 蜂箱方块位置。返回顺序固定为 `(x, y, z)` 升序，调用方按离自己的距离
-    /// 做稳定排序；未加载的区块整块跳过。
+    /// 官方 `PoiManager.getInRange(#bee_home, center, radius, ANY)`：`beehive` /
+    /// `bee_nest` 两类 POI 的全部位置，保持官方遍历序（欧氏半径过滤）。
+    /// 有 POI 表的实现（精确 / 并行驱动、游戏层只读视图）覆盖它查询 `PoiStore`；
+    /// 没有 POI 数据的假世界默认返回空。
     ///
-    /// 这是 `PoiManager.getInRange(BEE_HOME, 20)` 的临时替代：以后换成 POI 查询。
-    /// 名称与避雷针那边同类查询保持一致（都放在 `Level` 上、都叫 `*_near`）。
-    /// 默认实现逐格扫方块状态；游戏层按区块段调色板先筛。
-    fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
-        let mut out = Vec::new();
-        for x in (center.x - radius)..=(center.x + radius) {
-            for y in (center.y - radius)..=(center.y + radius) {
-                for z in (center.z - radius)..=(center.z + radius) {
-                    let pos = BlockPos::new(x, y, z);
-                    if self
-                        .block_state(pos)
-                        .is_tagged(mc_bamboo_data::tags::block_tags::BEEHIVES)
-                    {
-                        out.push(pos);
-                    }
-                }
-            }
-        }
-        out
+    /// Vanilla `PoiManager.getInRange(#bee_home, center, radius, ANY)`: all
+    /// `beehive` / `bee_nest` POIs in official traversal order. Levels with a
+    /// POI store override it; fake levels without POI data return empty.
+    fn beehives_near(&self, _center: BlockPos, _radius: i32) -> Vec<BlockPos> {
+        Vec::new()
     }
 
     /// 这个区块里哪些区块段 [`is_randomly_ticking_section`](Self::is_randomly_ticking_section)：
@@ -996,15 +1008,21 @@ pub trait Level: LevelSideState + LevelEntities {
         mc_bamboo_data::registries::biome::PLAINS
     }
 
-    /// 雷击找避雷针时的 POI 替代查询：返回离 `center` 最近的露天避雷针上方一格。
-    /// 默认逐格扫已加载的区块；游戏层覆盖成按区块段调色板先筛。以后换成正式 POI 查询。
+    /// 官方 `ServerLevel.findLightningRod`：在 POI 里按 `LIGHTNING_ROD` 类型、
+    /// `ANY` 占用口径、半径 `radius` 取最近的一根，再用 `WORLD_SURFACE - 1`
+    /// 的高度过滤（只认露天的那一格），返回它上方一格。并列距离时 POI 遍历序
+    /// 里的第一根胜出；没有 POI 数据的视图返回 `None`。
     ///
-    /// A stand-in for the POI query used when lightning looks for a rod: return the
-    /// cell above the nearest exposed lightning rod. The default scans loaded
-    /// chunks cell by cell; the game layer narrows it down with section palettes.
-    /// A full POI index replaces this later.
+    /// Vanilla `ServerLevel.findLightningRod`: the closest `LIGHTNING_ROD` POI
+    /// (`ANY`, within `radius`) that sits on `WORLD_SURFACE - 1`, mapped to the
+    /// cell above it. Ties go to the first in POI traversal order; views without
+    /// POI data return `None`.
     fn lightning_rod_near(&self, center: BlockPos, radius: i32) -> Option<BlockPos> {
-        crate::lightning_rod::nearest_lightning_rod_from(self, center, radius)
+        let kind = mc_bamboo_data::poi::poi_type_id("lightning_rod")?;
+        self.poi_find_closest(center, radius, kind, 2, &|pos| {
+            pos.y == self.world_surface_y(pos) - 1
+        })
+        .map(|pos| pos.above())
     }
 
     /// 这个区块现在有没有加载。默认都加载；已加载模式的世界覆盖它。
@@ -2534,6 +2552,12 @@ pub enum Effect {
     ///
     /// A splash healing potion heals a player by a distance-scaled amount.
     HealPlayer { target: EntityUid, amount: f32 },
+    /// `ElderGuardian.customServerAiStep`：只给挂上挖掘疲劳的那名玩家发
+    /// `GUARDIAN_ELDER_EFFECT` 游戏事件包。
+    ///
+    /// `ElderGuardian.customServerAiStep`: send the `GUARDIAN_ELDER_EFFECT` game event
+    /// packet only to the player who received mining fatigue.
+    GuardianElderEffect { target: EntityUid, silent: bool },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///

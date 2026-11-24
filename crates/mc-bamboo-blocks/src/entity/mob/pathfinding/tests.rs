@@ -68,6 +68,8 @@ fn player(x: f64, z: f64) -> PlayerView {
         gaze_disguise: false,
         alive: true,
         spectator: false,
+        game_mode: 0,
+        mining_fatigue: None,
         creative: false,
         sneaking: false,
         sprinting: false,

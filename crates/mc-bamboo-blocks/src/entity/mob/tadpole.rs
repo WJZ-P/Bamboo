@@ -66,15 +66,19 @@ pub(super) fn attributes() -> Attributes {
 ///
 /// `Tadpole.BRAIN_PROVIDER`: four sensors and `TadpoleAi.getActivities()`.
 pub(super) fn brain() -> Brain {
-    Brain::new(
-        &[
-            SensorKind::NearestLivingEntities,
-            SensorKind::NearestPlayers,
-            SensorKind::HurtBy,
-            SensorKind::FrogTemptations,
-        ],
-        vec![core_activity(), idle_activity()],
-    )
+    use crate::entity::mob::brain::{BrainTemplate, TemplateCache, template_cache};
+    static TEMPLATE: TemplateCache = template_cache();
+    Brain::cached(&TEMPLATE, || {
+        BrainTemplate::new(
+            &[
+                SensorKind::NearestLivingEntities,
+                SensorKind::NearestPlayers,
+                SensorKind::HurtBy,
+                SensorKind::FrogTemptations,
+            ],
+            vec![core_activity(), idle_activity()],
+        )
+    })
 }
 
 /// `TadpoleAi.initCoreActivity`。
@@ -145,7 +149,8 @@ fn idle_activity() -> ActivityData {
 /// `TadpoleAi.updateActivity`.
 pub(super) fn custom_server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if let Some(mut brain) = mob.brain.take() {
-        brain.tick(me, mob, ctx);
+        let gap = ctx.throttle_plan().decision_gap;
+        brain.tick_by(me, mob, ctx, gap);
         brain.set_active_activity_to_first_valid(&[Activity::Idle]);
         mob.brain = Some(brain);
     }

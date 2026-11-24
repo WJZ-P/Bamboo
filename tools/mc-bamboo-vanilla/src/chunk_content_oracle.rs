@@ -1545,7 +1545,36 @@ fn entity_cases() -> Vec<Tag> {
     out.extend(egg_archive_cases());
     out.extend(fish_archive_cases());
     out.extend(jockey_archive_cases());
+    out.extend(guardian_archive_cases());
     out
+}
+
+/// 守卫者 / 远古守卫者的存档往返：两者都没有自有存档字段，远古靠
+/// `PersistenceRequired` 和家；元数据状态（`moving` / `attack_target`）不写进存档。
+///
+/// Guardian / elder guardian archive round trip: neither has its own saved fields,
+/// the elder relies on `PersistenceRequired` and a home; metadata state
+/// (`moving` / `attack_target`) is not saved.
+fn guardian_archive_cases() -> [Tag; 2] {
+    use mc_bamboo_blocks::entity::mob::MobType;
+
+    [MobType::Guardian, MobType::ElderGuardian].map(|kind| {
+        let mut store = mc_bamboo_blocks::EntityStore::new();
+        let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(1.5, 63.0, -2.5)));
+        store.with_mut(uid, |entity| {
+            entity.with_mob(|_, mob| {
+                // 元数据状态不属于存档字段。
+                // Metadata state is not part of the saved fields.
+                mob.guardian.moving = true;
+                mob.guardian.attack_target = 42;
+                if kind == MobType::ElderGuardian {
+                    mob.persistence_required = true;
+                    mob.home = Some((BlockPos::new(1, 63, -2), 16));
+                }
+            });
+        });
+        write_entity(&store.get(uid).expect("fresh guardian").split()).expect("guardian archive")
+    })
 }
 
 /// 一只带乘客的鸡：`Passengers` 嵌在载具的存档里，乘客的 `Pos` 用载具的 x/z。

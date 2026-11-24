@@ -39,6 +39,7 @@ mod attack_target;
 mod bat;
 mod bee;
 mod bee_ai;
+mod bee_locate;
 mod bee_release;
 mod brain;
 mod egg;
@@ -145,6 +146,7 @@ enum Line {
     UndeadHorseDeath(undead_horse::UndeadHorseDeathCase),
     Bee(Box<bee::BeeCase>),
     BeeAi(Box<bee_ai::BeeAiCase>),
+    BeeLocate(Box<bee_locate::BeeLocateCase>),
     BeeRelease(Box<bee_release::BeeReleaseCase>),
     Golem(Box<golem::GolemCase>),
     GolemAttackRoll(golem::GolemAttackRollCase),
@@ -964,6 +966,39 @@ impl Level for MobLevel {
         true
     }
 
+    /// 官方 `PoiManager.getInRange(#bee_home, center, radius, ANY)`。假世界没有
+    /// 常驻的 POI 表，这里按 `blocks` 里当前登记的蜂巢 / 蜂箱状态现建一份
+    /// `PoiStore`，让 `bee_locate` 场景走和真实世界同一套 POI 遍历序。
+    /// 只匹配 `beehive` / `bee_nest` 两类，别的 POI 状态不进候选。
+    fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        use mc_bamboo_world::poi::{Occupancy, PoiStore};
+        let beehive = mc_bamboo_data::poi::poi_type_id("beehive");
+        let bee_nest = mc_bamboo_data::poi::poi_type_id("bee_nest");
+        // 官方同一 HashSet 桶内的记录保持插入序；`self.blocks` 是 HashMap，
+        // 迭代序不确定。两边都按 (x,y,z) 排序后登记，并列桶序才可复现。
+        let mut entries: Vec<(BlockPos, u32)> = self
+            .blocks
+            .iter()
+            .map(|(&pos, &state)| (pos, state.0))
+            .collect();
+        entries.sort_by_key(|(pos, _)| (pos.x, pos.y, pos.z));
+        let mut poi = PoiStore::new();
+        for (pos, state) in entries {
+            if let Some(kind) = mc_bamboo_data::poi::for_state(state) {
+                poi.add(pos, kind);
+            }
+        }
+        poi.get_in_range(
+            |kind| Some(kind) == beehive || Some(kind) == bee_nest,
+            center,
+            radius,
+            Occupancy::Any,
+        )
+        .into_iter()
+        .map(|record| record.pos)
+        .collect()
+    }
+
     fn is_unobstructed(&self, _boxes: &[mc_bamboo_blocks::Aabb]) -> bool {
         true
     }
@@ -1566,6 +1601,7 @@ impl Report {
                 Line::UndeadHorseDeath(case) => self.replay_undead_horse_death(&case),
                 Line::Bee(case) => self.replay_bee(&case),
                 Line::BeeAi(case) => self.replay_bee_ai(&case),
+                Line::BeeLocate(case) => self.replay_bee_locate(&case),
                 Line::BeeRelease(case) => self.replay_bee_release(&case),
                 Line::Golem(case) => self.replay_golem(&case),
                 Line::GolemAttackRoll(case) => self.replay_golem_attack_roll(&case),
@@ -1774,6 +1810,8 @@ impl Report {
                     gaze_disguise: false,
                     alive: true,
                     spectator: false,
+                    game_mode: 0,
+                    mining_fatigue: None,
                     creative: false,
                     sneaking: false,
                     sprinting: false,
@@ -2071,6 +2109,11 @@ impl Report {
                                 Some("zombie_baby") => {
                                     mob.set_zombie_baby(!mob.zombie_baby);
                                 }
+                                // 改坏确认：鸡骑士的乘客换成成年，VEHICLE 附着点从
+                                // BABY_DIMENSIONS 的 0.1875 变回 0.7，骑手 y 立刻错。
+                                Some("ride_baby") if index as i32 == case.ride_passenger => {
+                                    mob.set_zombie_baby(!mob.zombie_baby);
+                                }
                                 _ => {}
                             }
                             if case.helmet != 0 {
@@ -2106,7 +2149,9 @@ impl Report {
                         }
                     });
                 }
-                if index as i32 == case.bow_rider {
+                // 改坏确认：不给骷髅骑士装备弓，`reassessWeaponGoal` 会退回近战目标，
+                // 射箭 / SetEquipment 包 / vehicle.lookAt / reach 0 的路径全都不再对拍。
+                if index as i32 == case.bow_rider && !matches!(break_test, Some("ride_bow")) {
                     // 骷髅骑士的 `reassessWeaponGoal` 要主手是弓才会启用射箭目标。
                     world.with_entity_mut(id, &mut |entity| {
                         if let Some(mob) = entity.kind.mob_mut() {

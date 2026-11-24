@@ -36,9 +36,15 @@ pub(crate) mod imp {
         Navigation,
         /// `PathFinder.findPath`。
         Path,
+        /// 大脑传感器扫描（`Brain::tick_by` 里的传感器循环）。
+        BrainSensors,
+        /// 大脑行为启动与推进（`startEachNonRunning` + `tickEachRunning`）。
+        BrainBehaviors,
+        /// POI 查询（`PoiStore` 查询接口）。
+        Poi,
     }
 
-    pub(crate) const PARTS: usize = 8;
+    pub(crate) const PARTS: usize = 11;
 
     /// 离最近玩家的水平距离档，对应设计稿 4.2 的三档。
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +150,14 @@ pub(crate) mod imp {
         push_commands: u64,
         /// 挤压伤害（`maxEntityCramming`）真正触发的次数。
         cramming_hits: u64,
+        /// 大脑执行次数（`Brain::tick_by`）。
+        brain_ticks: u64,
+        /// 传感器倒计时归零后真正执行扫描的次数。
+        sensor_scans: u64,
+        /// 大脑成功启动的行为次数。
+        behavior_starts: u64,
+        /// POI 查询次数。
+        poi_queries: u64,
     }
 
     #[derive(Default)]
@@ -268,6 +282,34 @@ pub(crate) mod imp {
         });
     }
 
+    /// 大脑运行一刻。
+    pub(crate) fn record_brain_tick() {
+        STATE.with(|state| {
+            state.borrow_mut().counters.brain_ticks += 1;
+        });
+    }
+
+    /// 传感器执行一次真实扫描。
+    pub(crate) fn record_sensor_scan() {
+        STATE.with(|state| {
+            state.borrow_mut().counters.sensor_scans += 1;
+        });
+    }
+
+    /// 大脑成功启动一条行为。
+    pub(crate) fn record_behavior_start() {
+        STATE.with(|state| {
+            state.borrow_mut().counters.behavior_starts += 1;
+        });
+    }
+
+    /// 执行一次 POI 查询。
+    pub(crate) fn record_poi_query() {
+        STATE.with(|state| {
+            state.borrow_mut().counters.poi_queries += 1;
+        });
+    }
+
     /// 取走全部线程累计的自身时间（纳秒），按 [`Part`] 的顺序。
     /// 并行算阶段各线程的时间在 [`flush_counters`] 里并进来，所以这里是 CPU 时间之和，
     /// 不是墙上时间。
@@ -313,6 +355,10 @@ pub(crate) mod imp {
         pub paths: PathStats,
         pub push_commands: u64,
         pub cramming_hits: u64,
+        pub brain_ticks: u64,
+        pub sensor_scans: u64,
+        pub behavior_starts: u64,
+        pub poi_queries: u64,
     }
 
     impl Snapshot {
@@ -325,6 +371,10 @@ pub(crate) mod imp {
                 paths: PathStats::new(),
                 push_commands: 0,
                 cramming_hits: 0,
+                brain_ticks: 0,
+                sensor_scans: 0,
+                behavior_starts: 0,
+                poi_queries: 0,
             }
         }
 
@@ -361,6 +411,10 @@ pub(crate) mod imp {
             to.global_duplicates += from.global_duplicates;
             self.push_commands += other.push_commands;
             self.cramming_hits += other.cramming_hits;
+            self.brain_ticks += other.brain_ticks;
+            self.sensor_scans += other.sensor_scans;
+            self.behavior_starts += other.behavior_starts;
+            self.poi_queries += other.poi_queries;
         }
     }
 }
@@ -422,6 +476,38 @@ macro_rules! new_tick {
     };
 }
 
+/// `record_brain_tick!()`：大脑执行一刻。
+#[cfg(test)]
+macro_rules! record_brain_tick {
+    () => {
+        $crate::entity::mob::timing::imp::record_brain_tick();
+    };
+}
+
+/// `record_sensor_scan!()`：传感器真正执行一次扫描。
+#[cfg(test)]
+macro_rules! record_sensor_scan {
+    () => {
+        $crate::entity::mob::timing::imp::record_sensor_scan();
+    };
+}
+
+/// `record_behavior_start!()`：大脑成功启动一条行为。
+#[cfg(test)]
+macro_rules! record_behavior_start {
+    () => {
+        $crate::entity::mob::timing::imp::record_behavior_start();
+    };
+}
+
+/// `record_poi_query!()`：执行一次 POI 查询。
+#[cfg(test)]
+macro_rules! record_poi_query {
+    () => {
+        $crate::entity::mob::timing::imp::record_poi_query();
+    };
+}
+
 /// 正式构建里的同名空宏：每个调用点都展开成一条空语句，零开销、零行为变化。
 /// 定义本身没有被用到不算问题。
 #[cfg(not(test))]
@@ -459,16 +545,44 @@ macro_rules! record_cramming {
 macro_rules! new_tick {
     () => {};
 }
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! record_brain_tick {
+    () => {};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! record_sensor_scan {
+    () => {};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! record_behavior_start {
+    () => {};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! record_poi_query {
+    () => {};
+}
 
 #[allow(unused_imports)]
 pub(crate) use begin_mob;
 pub(crate) use end_mob;
 #[allow(unused_imports)]
 pub(crate) use new_tick;
+#[allow(unused_imports)]
+pub(crate) use record_behavior_start;
+#[allow(unused_imports)]
+pub(crate) use record_brain_tick;
 pub(crate) use record_cramming;
 #[allow(unused_imports)]
 pub(crate) use record_path;
+#[allow(unused_imports)]
+pub(crate) use record_poi_query;
 pub(crate) use record_push;
+#[allow(unused_imports)]
+pub(crate) use record_sensor_scan;
 pub(crate) use span;
 
 #[cfg(test)]
@@ -524,6 +638,8 @@ mod bench {
                     gaze_disguise: false,
                     alive: true,
                     spectator: false,
+                    game_mode: 0,
+                    mining_fatigue: None,
                     creative: false,
                     sneaking: false,
                     sprinting: false,
@@ -572,6 +688,9 @@ mod bench {
             "goals",
             "navigation",
             "path",
+            "brain-sensors",
+            "brain-behaviors",
+            "poi",
         ];
         let timed: u64 = parts.iter().sum();
         let mut line = format!(

@@ -4184,6 +4184,8 @@ fn entity_types_file(data: &VersionData) -> String {
         ("GLOW_SQUID_DARK_TICKS", facts.glow_squid_dark_ticks),
         ("BAT_FLAGS", facts.bat_flags),
         ("PHANTOM_SIZE", facts.phantom_size),
+        ("GUARDIAN_MOVING", facts.guardian_moving),
+        ("GUARDIAN_ATTACK_TARGET", facts.guardian_attack_target),
         ("FISH_FROM_BUCKET", facts.fish_from_bucket),
         ("SALMON_VARIANT", facts.salmon_variant),
         ("TROPICAL_FISH_VARIANT", facts.tropical_fish_variant),

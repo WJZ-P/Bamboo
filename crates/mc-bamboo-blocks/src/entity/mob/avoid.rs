@@ -22,6 +22,10 @@ pub enum AvoidClass {
     Llama,
     Monster,
     PolarBear,
+    /// 蜘蛛躲的犰狳（`AvoidEntityGoal(Armadillo.class, 6.0F, 1.0D, 1.2D, ...)`）。
+    ///
+    /// The armadillos spiders avoid (`AvoidEntityGoal(Armadillo.class, 6.0F, 1.0D, 1.2D, ...)`).
+    Armadillo,
 }
 
 impl AvoidClass {
@@ -33,6 +37,7 @@ impl AvoidClass {
             Self::Monster => kind.is_monster(),
             // 北极熊还没实现。Polar bears are not modelled yet.
             Self::PolarBear => false,
+            Self::Armadillo => kind == MobType::Armadillo,
         }
     }
 }
@@ -61,6 +66,20 @@ pub enum AvoidFilter {
     FoxWolf,
     /// `!isDefending`。
     FoxDefending,
+    /// 蜘蛛的 `predicateOnAvoidEntity`：`!armadillo.isScared()`，即只躲 `IDLE` 状态的
+    /// 犰狳，缩成球（`SCARED` / `ROLLING` / `UNROLLING`）的不躲。
+    ///
+    /// The spider's `predicateOnAvoidEntity`: `!armadillo.isScared()`, so it flees
+    /// only `IDLE` armadillos and ignores rolled-up ones (`SCARED` / `ROLLING` /
+    /// `UNROLLING`).
+    ArmadilloNotScared,
+    /// 把蜘蛛的 `!isScared()` 判定取反：只躲缩成球的犰狳，`IDLE` 的不躲。这不是官方
+    /// 行为，只给 `mob-oracle` 的改坏确认用，证明对拍能抓到躲错对象。
+    ///
+    /// The inverse of the spider's `!isScared()` gate: flee rolled-up armadillos and
+    /// ignore `IDLE` ones. Not official behaviour; only for the `mob-oracle`
+    /// deliberate-breakage self-test, to prove the oracle catches a wrong target.
+    ArmadilloScared,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -224,6 +243,7 @@ impl AvoidEntity {
                     alive: public.is_alive(),
                     tame: public.tame_flags & super::tame::FLAG_TAME != 0,
                     llama_strength: public.equine.map_or(0, |equine| equine.strength),
+                    armadillo_state: public.armadillo_state,
                 }
                 .into(),
             );
@@ -264,6 +284,7 @@ impl AvoidEntity {
                 eye,
                 alive,
                 tame,
+                armadillo_state,
                 ..
             } => {
                 if !alive {
@@ -279,6 +300,12 @@ impl AvoidEntity {
                     AvoidFilter::FoxWolf | AvoidFilter::FoxDefending
                 ) && mob.fox.is_defending()
                 {
+                    return false;
+                }
+                // 蜘蛛的 `!isScared()` 判定（以及改坏确认用的取反判定）。
+                // The spider's `!isScared()` gate (and its inverse for the
+                // deliberate-breakage self-test).
+                if !armadillo_avoided(self.filter, armadillo_state) {
                     return false;
                 }
                 let max = mc_bamboo_core::mth::java_max(f64::from(self.max_dist), 2.0);
@@ -302,6 +329,10 @@ enum Candidate {
         alive: bool,
         tame: bool,
         llama_strength: i32,
+        /// `MobPublic.armadillo_state`（`ArmadilloState` 的网络 ID），蜘蛛用。
+        ///
+        /// `MobPublic.armadillo_state` (the `ArmadilloState` network id), used by spiders.
+        armadillo_state: i32,
     },
 }
 
@@ -364,4 +395,76 @@ fn current_position(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<Vec3> {
         return Some(player.position);
     }
     ctx.other(uid).map(|other| other.position)
+}
+
+/// 蜘蛛的犰狳躲避判定。`ArmadilloNotScared` 是官方的 `!isScared()`：只有 `IDLE`
+/// 才躲；`ArmadilloScared` 是 `mob-oracle` 改坏确认用的取反判定：只躲缩成球的。
+/// 其余 filter 与犰狳无关，一律放行。
+///
+/// Armadillo avoidance gate for spiders. `ArmadilloNotScared` is official
+/// `!isScared()`: flee only `IDLE`. `ArmadilloScared` is the inverse used by the
+/// `mob-oracle` deliberate breakage: flee only rolled-up states. Other filters do
+/// not concern armadillos and always pass.
+fn armadillo_avoided(filter: AvoidFilter, armadillo_state: i32) -> bool {
+    match filter {
+        AvoidFilter::ArmadilloNotScared => armadillo_state == super::armadillo::State::Idle.id(),
+        AvoidFilter::ArmadilloScared => armadillo_state != super::armadillo::State::Idle.id(),
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 蜘蛛的 `avoidClass` 只认犰狳。
+    ///
+    /// The spider's `avoidClass` is armadillos only.
+    #[test]
+    fn armadillo_avoid_class_matches_only_armadillos() {
+        assert!(AvoidClass::Armadillo.matches(MobType::Armadillo));
+        for kind in [MobType::Cow, MobType::Wolf, MobType::Spider] {
+            assert!(!AvoidClass::Armadillo.matches(kind));
+        }
+    }
+
+    /// 蜘蛛的 `!isScared()` 等价于「状态为 `IDLE`」：照字节码只躲 `IDLE`，
+    /// 缩成球的三种状态（`ROLLING` / `SCARED` / `UNROLLING`）都不躲。
+    ///
+    /// The spider's `!isScared()` means "state is `IDLE`": per bytecode only
+    /// `IDLE` is avoided, not the rolled-up states (`ROLLING` / `SCARED` /
+    /// `UNROLLING`).
+    #[test]
+    fn idle_is_the_only_state_a_spider_avoids() {
+        use super::super::armadillo::{State, is_scared};
+        for state in [State::Idle, State::Rolling, State::Scared, State::Unrolling] {
+            let mut armadillo = Mob::new(MobType::Armadillo);
+            armadillo.armadillo.state = state;
+            assert_eq!(!is_scared(&armadillo), state == State::Idle, "{state:?}");
+        }
+    }
+
+    /// 官方判定只躲 `IDLE`，改坏确认用的 `ArmadilloScared` 正好取反；其它 filter
+    /// 与犰狳无关，一律放行。
+    ///
+    /// The official gate flees only `IDLE`; the `ArmadilloScared` breakage filter
+    /// is its exact inverse. Other filters are unrelated and always pass.
+    #[test]
+    fn armadillo_gates_are_inverses() {
+        use super::super::armadillo::State;
+        for state in [State::Idle, State::Rolling, State::Scared, State::Unrolling] {
+            let id = state.id();
+            assert_eq!(
+                armadillo_avoided(AvoidFilter::ArmadilloNotScared, id),
+                state == State::Idle,
+                "official gate, {state:?}"
+            );
+            assert_eq!(
+                armadillo_avoided(AvoidFilter::ArmadilloScared, id),
+                state != State::Idle,
+                "inverted gate, {state:?}"
+            );
+            assert!(armadillo_avoided(AvoidFilter::FoxWolf, id), "{state:?}");
+        }
+    }
 }

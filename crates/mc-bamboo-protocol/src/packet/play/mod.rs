@@ -501,6 +501,12 @@ impl GameEvent {
     /// The player touched an inflated pufferfish, vanilla `PUFFER_FISH_STING`; the
     /// client plays the sting sound.
     pub const PUFFER_FISH_STING: u8 = 9;
+    /// `ElderGuardian` 的诅咒效果，官方 `GUARDIAN_ELDER_EFFECT`：参数是静音时
+    /// 0、否则 1。
+    ///
+    /// The elder guardian's curse, vanilla `GUARDIAN_ELDER_EFFECT`: parameter 0 when
+    /// silent, 1 otherwise.
+    pub const GUARDIAN_ELDER_EFFECT: u8 = 10;
     /// 客户端收到后才结束加载画面。
     pub const LEVEL_CHUNKS_LOAD_START: u8 = 13;
     /// 重生点方块失效，官方 `NO_RESPAWN_BLOCK_AVAILABLE`。

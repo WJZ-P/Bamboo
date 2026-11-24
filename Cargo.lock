@@ -1918,6 +1918,7 @@ dependencies = [
  "mc-bamboo-nbt",
  "mc-bamboo-protocol",
  "mc-bamboo-recipes",
+ "mc-bamboo-world",
  "mc-bamboo-worldgen",
  "thiserror 2.0.21",
  "tracing",

@@ -449,6 +449,14 @@ public final class MobOracle {
                     cases++;
                 }
             }
+            if (only == null || only.startsWith("bee_locate")) {
+                for (String name : List.of("bee_locate_order", "bee_locate_full",
+                        "bee_locate_nest", "bee_locate_breaks")) {
+                    if (only != null && !name.startsWith(only)) continue;
+                    playBeeLocate(official, out, name);
+                    cases++;
+                }
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -494,7 +502,10 @@ public final class MobOracle {
                     "attack_target_zombie_villager_sight", "attack_target_pillager_villager",
                     "attack_target_spider_golem", "attack_target_drowned_axolotl",
                     "attack_target_zombie_turtle", "attack_target_fox_turtle",
-                    "attack_target_fox_fish")) {
+                    "attack_target_fox_fish", "attack_target_wolf_baby_turtle",
+                    "attack_target_wolf_baby_turtle_water", "attack_target_spider_armadillo_idle",
+                    "attack_target_spider_armadillo_scared", "attack_target_polar_bear_fox",
+                    "attack_target_polar_bear_fox_unreachable", "attack_target_llama_wolf")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playAttackTarget(official, out, name);
                 cases++;
@@ -1362,6 +1373,20 @@ public final class MobOracle {
             brushed.interact(3, 0, 0, brush, 0);
             brushed.interact(10, 0, 0, spiderEye, 0);
             scenes.add(brushed);
+            // 等距排序核实：4 头牛与 1 名玩家在距犰狳完全等距（d²=16）的 4 个方向上，
+            // 验证 `NearestLivingEntitySensor`（`getEntitiesOfClass` + 稳定排序）的先后顺序。
+            // Equidistant sort check: four cows and one player all at exact d²=16 from the
+            // armadillo, pinning `NearestLivingEntitySensor` tie-breaking order.
+            Scene equidistant = new Scene("armadillo_equidistant_cows").ticks(60);
+            equidistant.sensorDelay = 1;
+            Scenes.ground(equidistant, 15);
+            equidistant.mob(13, 0.5, 64.0, 0.5, 0.0F, 51L, 0);
+            equidistant.mob(0, 4.5, 64.0, 0.5, 0.0F, 53L, 0);
+            equidistant.mob(0, -3.5, 64.0, 0.5, 0.0F, 59L, 0);
+            equidistant.mob(0, 0.5, 64.0, 4.5, 0.0F, 61L, 0);
+            equidistant.mob(0, 0.5, 64.0, -3.5, 0.0F, 67L, 0);
+            equidistant.player(0.5, 64.0, -3.5, Items.AIR);
+            scenes.add(equidistant);
             addGoatScenes(scenes);
             FrogScenes.add(scenes);
             CamelScenes.add(scenes);
@@ -3142,40 +3167,41 @@ public final class MobOracle {
                 scenes.add(death);
             }
             {
-                // 蜘蛛骑士追玩家（AI 开）：控制载具的僵尸骑手把目标/漫游路径写到**载具**
-                // 的导航上（`Mob.getNavigation` 转交），蜘蛛跟着走。这里用僵尸作骑手：
-                // 骷髅持弓 + 射箭那一支（`bowRider`）在第 11 刻的路径长度（官方到节点 7、
-                // Bamboo 到节点 6）和头/身体朝向上仍与官方不一致，记为已知限制，未并入场景。
-                // Spider jockey chase (AI on): the controlling zombie rider writes paths
-                // to the vehicle's navigation, driving the spider. A zombie is used here;
-                // the bow-armed skeleton + arrow-shooting variant (`bowRider`) still
-                // diverges from vanilla (path node 7 vs 6 at tick 11, plus head/body
-                // rotation) and is left as a known limitation, not wired into a scene.
+                // 蜘蛛骑士追玩家（AI 开）：持弓骷髅骑蜘蛛，借载具的
+                // `WallClimberNavigation`（`getNavigation` 转交）追玩家并射箭。
+                // `RangedBowAttackGoal.tick()` 两参数 `moveTo` 在这里用 reach 0，
+                // strafe 分支还会让 `getControlledVehicle()` 一起 `lookAt` 目标；
+                // `AbstractSkeleton.rideTick` 把载具的 `yBodyRot` 抄给骑手。
+                // Spider jockey chase (AI on): a bow-armed skeleton rides a spider,
+                // borrowing the vehicle's `WallClimberNavigation` to chase the player
+                // and shoot arrows. `RangedBowAttackGoal.tick()`'s two-arg `moveTo`
+                // uses reach 0 here; its strafe branch also makes the controlled
+                // vehicle `lookAt` the target; `AbstractSkeleton.rideTick` copies the
+                // vehicle's `yBodyRot` to the rider.
                 Scene chase = new Scene("spider_ride_chase").ticks(160).difficulty(2);
                 chase.clockStart = 18000;
                 chase.fill(-12, 63, -12, 12, 63, 12, bedrock);
                 chase.mob(41, 0.5, 64.0, 0.5, 0.0F, 817L, 0);
-                chase.mob(1, 0.5, 64.0, 0.5, 0.0F, 818L, 0);
-                chase.ride(1, 0);
+                chase.mob(44, 0.5, 64.0, 0.5, 0.0F, 818L, 0);
+                chase.ride(1, 0).bowRider(1);
                 chase.player(7.5, 64.0, 0.5, Items.AIR);
                 scenes.add(chase);
             }
             {
-                // 鸡骑士近战（AI 开）：僵尸骑鸡追玩家；鸡的 MOVE/LOOK/JUMP 被控制
-                // 乘客关掉，路径由僵尸写进鸡的导航。这里用成年僵尸、只跑到第 21 刻：
-                // 幼年僵尸（`age=-24000`）按 VEHICLE 附着点的年龄缩放会与官方差一个
-                // y（官方 64.5125 / Bamboo 64.00000001192093），再往后骑手的头/身体
-                // 朝向（-0.1 的乘客附着点造成的转身）也还没建模，两项都是已知限制。
-                // Chicken jockey melee (AI on). An adult zombie is used and the scene
-                // stops at tick 21: a baby zombie's age-scaled VEHICLE attachment point
-                // diverges in y from vanilla, and beyond tick 21 the rider's head/body
-                // rotation from the -0.1 passenger offset is not modelled yet. Both
-                // are known limitations.
-                Scene melee = new Scene("zombie_ride_melee").ticks(21).difficulty(2);
+                // 鸡骑士近战（AI 开）：幼年僵尸骑成年鸡追玩家并近战；鸡的
+                // MOVE/LOOK/JUMP 被控制乘客关掉，路径由僵尸写进鸡的导航。幼年乘客的
+                // VEHICLE 附着点按 `getAgeScale()` 缩到一半，鸡的 PASSENGER 点按成年鸡
+                // 不缩；跑到足够长以覆盖近战命中和 -0.1 附着点带来的转身。
+                // Chicken jockey melee (AI on): a baby zombie rides an adult chicken,
+                // chases the player and melees. The baby passenger's VEHICLE attachment
+                // point is halved by `getAgeScale()` while the adult chicken's PASSENGER
+                // point is not scaled; the scene runs long enough to cover melee hits
+                // and the turn caused by the -0.1 passenger offset.
+                Scene melee = new Scene("zombie_ride_melee").ticks(160).difficulty(2);
                 melee.clockStart = 18000;
                 melee.fill(-12, 63, -12, 12, 63, 12, bedrock);
                 melee.mob(5, 0.5, 64.0, 0.5, 0.0F, 819L, 0);
-                melee.mob(1, 0.5, 64.0, 0.5, 0.0F, 820L, 0);
+                melee.mob(1, 0.5, 64.0, 0.5, 0.0F, 820L, -24000);
                 melee.ride(1, 0);
                 melee.player(3.5, 64.0, 0.5, Items.AIR);
                 scenes.add(melee);
@@ -8986,6 +9012,151 @@ public final class MobOracle {
      * `stayOutOfHiveCountdown` 和世界随机源。六个场景分别覆盖白天出巢、夜间留在巢里、
      * 下雨留在巢里、带花蜜回巢加蜜、满蜜不再加、营火安抚时取蜜让蜂暂时不回巢。
      */
+    /** 蜜蜂找巢候选表的有界对拍（不跑真目标链 / 寻路，复用 NoAI 夹具思想）：
+     *  官方 `PoiManager.getInRange(#bee_home, blockPosition, 20, ANY)` 给有序候选，
+     *  按 `BeehiveBlockEntity.isFull()` 过滤满巢（本场景每个 POI 巢都挂了方块实体，
+     *  `full[i]` 就是 `isFull()` 的结果），再按
+     *  `Comparator.comparingDouble(blockPos.distSqr(pos))` 稳定排序。每刻只改哪些巢满，
+     *  逐刻比整张有序候选表：POI 遍历序、等距并列、满巢换巢、整数距离排序都在这里钉死。 */
+    private static void playBeeLocate(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        int[][] hives = beeLocateHives(name);  // [x, y, z, kind]  kind 0 = beehive, 1 = bee_nest
+        int[][] masks = beeLocateMasks(name);  // 每刻一行、每巢一列：1 = 满巢
+        // FakeLevel 自带的 PoiManager 没有可用的 LevelHeightAccessor（add 会 NPE），
+        // 这里仿照 PoiOracle 在临时目录里建一份独立实例，只用来跑 getInRange 的遍历序。
+        var dir = java.nio.file.Files.createTempDirectory("bamboo-bee-locate-");
+        var reporter = new net.minecraft.world.level.chunk.storage.ChunkIOErrorReporter() {
+            @Override public void reportChunkLoadFailure(Throwable error,
+                    net.minecraft.world.level.chunk.storage.RegionStorageInfo info,
+                    net.minecraft.world.level.ChunkPos pos) {}
+            @Override public void reportChunkSaveFailure(Throwable error,
+                    net.minecraft.world.level.chunk.storage.RegionStorageInfo info,
+                    net.minecraft.world.level.ChunkPos pos) {}
+        };
+        try (var poi = new net.minecraft.world.entity.ai.village.poi.PoiManager(
+                new net.minecraft.world.level.chunk.storage.RegionStorageInfo(
+                        "bee-locate", net.minecraft.world.level.Level.OVERWORLD, "poi"),
+                dir, net.minecraft.util.datafix.DataFixers.getDataFixer(), false,
+                official.registries, reporter,
+                net.minecraft.world.level.LevelHeightAccessor.create(-64, 384))) {
+        BlockPos center = new BlockPos(0, 64, 0);
+        java.util.List<BlockPos> positions = new java.util.ArrayList<>();
+        java.util.List<net.minecraft.core.Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> holders =
+                new java.util.ArrayList<>();
+        StringBuilder hivesJson = new StringBuilder("[");
+        for (int i = 0; i < hives.length; i++) {
+            int[] h = hives[i];
+            BlockPos pos = new BlockPos(h[0], h[1], h[2]);
+            BlockState state = h[3] == 1
+                    ? Blocks.BEE_NEST.defaultBlockState()
+                    : Blocks.BEEHIVE.defaultBlockState();
+            level.blocks.put(pos.asLong(), state);
+            holders.add(net.minecraft.world.entity.ai.village.poi.PoiTypes.forState(state).orElseThrow());
+            positions.add(pos);
+            if (i > 0) hivesJson.append(',');
+            hivesJson.append('[').append(h[0]).append(',').append(h[1]).append(',')
+                    .append(h[2]).append(',').append(Block.getId(state)).append(',').append(h[3]).append(']');
+        }
+        hivesJson.append(']');
+        // 官方同一 HashSet 桶内的记录保持插入序；按 (x,y,z) 排序登记，和 Bamboo 一致，
+        // 让「等距并列落在同一桶」时的先后可复现。
+        java.util.List<Integer> order = new java.util.ArrayList<>();
+        for (int i = 0; i < hives.length; i++) order.add(i);
+        order.sort(java.util.Comparator.comparingInt((Integer i) -> hives[i][0])
+                .thenComparingInt(i -> hives[i][1]).thenComparingInt(i -> hives[i][2]));
+        for (int i : order) poi.add(positions.get(i), holders.get(i));
+        java.util.function.Predicate<net.minecraft.core.Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> beeHome =
+                hh -> {
+                    var key = hh.unwrapKey();
+                    if (key.isEmpty()) return false;
+                    String p = key.get().identifier().getPath();
+                    return p.equals("beehive") || p.equals("bee_nest");
+                };
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick < masks.length; tick++) {
+            int[] mask = masks[tick];
+            java.util.Set<Long> full = new java.util.HashSet<>();
+            for (int i = 0; i < hives.length; i++) {
+                if (mask[i] != 0) full.add(positions.get(i).asLong());
+            }
+            // 官方 `findNearbyHivesWithSpace` 的等价计算：POI 遍历序 → 满巢过滤 → 整数 distSqr 稳定排序。
+            java.util.List<BlockPos> candidates = poi
+                    .getInRange(beeHome, center, 20,
+                            net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy.ANY)
+                    .map(net.minecraft.world.entity.ai.village.poi.PoiRecord::getPos)
+                    .filter(p -> !full.contains(p.asLong()))
+                    .sorted(java.util.Comparator.comparingDouble(p -> center.distSqr(p)))
+                    .collect(java.util.stream.Collectors.toList());
+            if (tick > 0) frames.append(',');
+            frames.append("{\"full\":[");
+            for (int i = 0; i < mask.length; i++) {
+                if (i > 0) frames.append(',');
+                frames.append(mask[i]);
+            }
+            frames.append("],\"candidates\":[");
+            for (int i = 0; i < candidates.size(); i++) {
+                if (i > 0) frames.append(',');
+                BlockPos p = candidates.get(i);
+                frames.append('[').append(p.getX()).append(',').append(p.getY()).append(',')
+                        .append(p.getZ()).append(']');
+            }
+            frames.append("]}");
+        }
+        frames.append(']');
+        out.write("{\"type\":\"beeLocate\",\"name\":" + jsonString(name)
+                + ",\"center\":[0,64,0],\"beePos\":[0.5,64.0,0.5]"
+                + ",\"hives\":" + hivesJson
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+        }
+    }
+
+    // 注意：官方 `PoiSection.byType` 的键是 Holder.Reference（identity hash），
+    // 多类型段内键序每次 JVM 都不同、不可复现（见 docs/villager-plan.md 偏差 1）。
+    // 所以每个场景的并列巢都用同一种 POI 类型，跨类型只在距离互不相同的时候混放；
+    // 这样并列取舍只落在可复现的 HashSet 桶序上。bee_nest 单独一个场景覆盖。
+    private static int[][] beeLocateHives(String name) {
+        if (name.equals("bee_locate_order")) {
+            // 全是 beehive：三个 d²=4 并列（同类型 → 可复现桶序），再 d²=9/25/36/49。
+            return new int[][]{
+                {0, 64, 2, 0}, {2, 64, 0, 0}, {0, 66, 0, 0},
+                {3, 64, 0, 0}, {0, 64, 5, 0}, {0, 64, -6, 0}, {0, 64, 7, 0},
+            };
+        }
+        if (name.equals("bee_locate_full")) {
+            // 最近的一巢中途变满，候选表里它消失、改去第二近的巢。
+            return new int[][]{
+                {0, 64, 2, 0}, {0, 64, 5, 0}, {4, 64, 0, 0},
+            };
+        }
+        if (name.equals("bee_locate_nest")) {
+            // 全是 bee_nest：一对 d²=9 并列 + 一个 d²=64，验证 #bee_home 也认 bee_nest。
+            return new int[][]{
+                {0, 64, 3, 1}, {3, 64, 0, 1}, {0, 64, 8, 1},
+            };
+        }
+        // (0,64,20) 正好在半径 20 的球面边界；(0,61,0)/(2,64,2) 是"整数排序 vs 浮点排序"翻转对。
+        // 距离全部互不相同，混类型也不会落到不可复现的键序并列上。
+        return new int[][]{
+            {0, 64, 20, 0}, {0, 61, 0, 0}, {2, 64, 2, 0},
+            {1, 64, 1, 0}, {0, 64, 4, 0},
+        };
+    }
+
+    private static int[][] beeLocateMasks(String name) {
+        if (name.equals("bee_locate_order")) {
+            return new int[][]{
+                {0, 0, 0, 0, 0, 0, 0}, {1, 0, 0, 0, 0, 0, 0}, {0, 0, 1, 0, 0, 0, 0},
+            };
+        }
+        if (name.equals("bee_locate_full") || name.equals("bee_locate_nest")) {
+            return new int[][]{{0, 0, 0}, {1, 0, 0}, {0, 0, 0}};
+        }
+        return new int[][]{
+            {0, 0, 0, 0, 0}, {0, 0, 0, 1, 0}, {0, 0, 0, 0, 0},
+        };
+    }
+
     /** 蜜蜂目标状态机的逐刻对拍：不跑真实的 POI / 寻路（假世界没有 POI 管理器），
      * 直接按官方字段推进 `Bee.aiStep` / `customServerAiStep` / 目标状态，
      * Bamboo 侧重放同一组判定。 */
@@ -9930,13 +10101,19 @@ public final class MobOracle {
      */
     /**
      * 攻击目标逐刻对拍：僵尸打村民、掠夺者弩射村民、蜘蛛打铁傀儡、溺尸打美西螈、
-     * 僵尸找陆地上的小海龟、狐狸找小海龟 / 鱼。受害者设 NoAI，官方村民的大脑不会
-     * 逐刻取数；每帧记双方位置 / 速度 / 血量 / 受伤与死亡计时 / 目标。
+     * 僵尸找陆地上的小海龟、狐狸找小海龟 / 鱼、野狼找陆地 / 泡水的小海龟、蜘蛛遇
+     * IDLE / 缩成球犰狳、北极熊找狐狸（含隔着壕沟够不着）、羊驼找狼。受害者设
+     * NoAI，官方村民的大脑不会逐刻取数；每帧记双方位置 / 速度 / 血量 / 受伤与死亡
+     * 计时 / 目标。壕沟场景用地板缺口而非墙（眼高射线不被挡），26.3 官方照样把
+     * 够不着的狐狸设为目标。
      *
      * Attack-target tick comparison: zombie-villager, pillager crossbow, spider-iron
-     * golem, drowned-axolotl, zombie-baby-turtle and fox-baby-turtle / fish. The victim
-     * is NoAI so the official villager brain draws nothing per tick; every frame records
-     * both mobs' motion, health, hurt/death timers and target.
+     * golem, drowned-axolotl, zombie-baby-turtle, fox-baby-turtle / fish, wild wolf
+     * vs baby turtle (land and in water), spider vs IDLE / SCARED armadillo, polar bear
+     * vs fox (reachable and across a gap), and llama vs wolf. The victim is NoAI so the
+     * official villager brain draws nothing per tick; every frame records both mobs'
+     * motion, health, hurt/death timers and target. The gap scene keeps LOS clear (a
+     * floor gap, not a wall) so official still targets the unreachable fox per 26.3.
      */
     private static void playAttackTarget(Official official, Writer out, String name) throws Exception {
         int difficulty = 2;
@@ -9951,6 +10128,15 @@ public final class MobOracle {
         int ticks = 160;
         int wallTick = -1;
         int[] wallBox = null;
+        // 犰狳受害者的 ARMADILLO_STATE 网络 ID：0 IDLE、1 ROLLING、2 SCARED、3 UNROLLING。
+        // 蜘蛛的 predicateOnAvoidEntity 是 !isScared()，只有 IDLE 会被躲。
+        // Victim armadillo's ARMADILLO_STATE network id: 0 IDLE, 1 ROLLING, 2 SCARED,
+        // 3 UNROLLING. The spider's predicateOnAvoidEntity is !isScared(): only IDLE is fled.
+        int victimArmadilloState = 0;
+        // [x0,x1]：y=60 的地板在这一段留空（所有 z），做成看得见却走不过去的壕沟。
+        // [x0,x1]: leave the y=60 floor empty here (all z) for a visible-but-unreachable
+        // gap, so mustSee stays satisfied but pathfinding finds no route.
+        int[] floorGap = null;
         switch (name) {
             case "attack_target_zombie_villager" -> {
                 // 简单难度官方不转化僵尸村民、也不消耗转化随机数。
@@ -10004,6 +10190,72 @@ public final class MobOracle {
                 // ticks already cover targeting, the pounce and the fish's death.
                 ticks = 110;
             }
+            case "attack_target_wolf_baby_turtle" -> {
+                // 野狼的 NonTameRandomTargetGoal(Turtle, false, BABY_ON_LAND_SELECTOR)：
+                // 陆地上的幼年海龟。攻击者是未驯服的狼，受害者 NoAI。
+                // Wild wolf's NonTameRandomTargetGoal: a baby turtle on land.
+                attackerKind = 8;
+                victimKind = 60;
+                baby = true;
+                ticks = 120;
+            }
+            case "attack_target_wolf_baby_turtle_water" -> {
+                // 泡在水里的幼年海龟：官方的 !isInWater() 判定不成立，野狼不该选它。
+                // 两侧正常都不设目标；wolf_turtle_no_land_gate 改坏确认靠它产生差异。
+                // A baby turtle in water: official !isInWater() fails, so the wolf must
+                // not target it. Both sides agree; the no-land-gate breakage diverges here.
+                attackerKind = 8;
+                victimKind = 60;
+                baby = true;
+                water = true;
+                ticks = 40;
+            }
+            case "attack_target_spider_armadillo_idle" -> {
+                // 蜘蛛的 AvoidEntityGoal(Armadillo, 6, 1, 1.2, !isScared())：IDLE 犰狳被躲。
+                // Spider avoids an IDLE armadillo.
+                attackerKind = 41;
+                victimKind = 13;
+                victimArmadilloState = 0;
+                ticks = 40;
+            }
+            case "attack_target_spider_armadillo_scared" -> {
+                // SCARED（缩成球）犰狳：isScared() 为真，蜘蛛不躲，正常逛。
+                // A SCARED (rolled-up) armadillo: isScared() is true, the spider does not flee.
+                attackerKind = 41;
+                victimKind = 13;
+                victimArmadilloState = 2;
+                ticks = 40;
+            }
+            case "attack_target_polar_bear_fox" -> {
+                // 北极熊的 NearestAttackableTargetGoal(Fox, 10, true, true, selector)：能走到。
+                // Polar bear's fox target: reachable.
+                attackerKind = 16;
+                victimKind = 7;
+                ticks = 100;
+            }
+            case "attack_target_polar_bear_fox_unreachable" -> {
+                // 隔着壕沟：视线通（forCombat().checkLineOfSight 只按眼高射线，地板缺口
+                // 不挡），但 y=60 地板在 x=2..4 全 z 留空，寻路无路可走。26.3 里
+                // mustReach=true 是死字段，官方照样把狐狸设为目标并卡住，Bamboo 也照做。
+                // Across a gap: LOS is clear (eye-height ray, floor gap doesn't occlude),
+                // but no path. In 26.3 mustReach is dead, so official still targets the
+                // fox and gets stuck; Bamboo does the same.
+                attackerKind = 16;
+                victimKind = 7;
+                victimAt = new double[] {8.5, 61.0, 0.5};
+                floorGap = new int[] {2, 4};
+                ticks = 50;
+            }
+            case "attack_target_llama_wolf" -> {
+                // 羊驼的 LlamaAttackWolfGoal(16, false, true, selector)：找未驯服的狼。
+                // 刻数压在 RangedAttackGoal 的 40 刻吐口水之前，只比选目标与靠近。
+                // Llama targets an untamed wolf. Ticks stay before the 40-tick spit so
+                // only target selection and approach are compared.
+                attackerKind = 12;
+                victimKind = 8;
+                victimAt = new double[] {2.5, 61.0, 0.5};
+                ticks = 30;
+            }
             default -> throw new IllegalArgumentException("unknown attack-target scene " + name);
         }
         official.server.sequences = new RandomSequences();
@@ -10020,6 +10272,10 @@ public final class MobOracle {
         world.golemFixture = true;
         for (int x = -12; x <= 12; x++) {
             for (int z = -12; z <= 12; z++) {
+                // 壕沟场景：这一段所有 z 都不铺 y=60 地板，做成看得见却走不过去的缺口。
+                // Gap scene: omit the y=60 floor here (all z), leaving a visible-but-
+                // impassable trench; the eye-height LOS ray still passes.
+                if (floorGap != null && x >= floorGap[0] && x <= floorGap[1]) continue;
                 world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
             }
         }
@@ -10081,6 +10337,14 @@ public final class MobOracle {
         if (baby && victim instanceof net.minecraft.world.entity.AgeableMob ageable) {
             ageable.setBaby(true);
         }
+        if (victim instanceof net.minecraft.world.entity.animal.armadillo.Armadillo armadillo) {
+            // switchToState 只写同步数据；受害者 NoAI，customServerAiStep 不跑，状态不会
+            // 自己退回 IDLE。id == ordinal（见 ARMADILLO_STATE 的 BY_ID）。
+            // switchToState only sets the synched data; the victim is NoAI so
+            // customServerAiStep never runs and the state never unrolls back to IDLE.
+            armadillo.switchToState(
+                    net.minecraft.world.entity.animal.armadillo.Armadillo.ArmadilloState.values()[victimArmadilloState]);
+        }
         world.tracked.add(victim);
         java.util.List<net.minecraft.world.entity.projectile.arrow.AbstractArrow> arrows = new ArrayList<>();
         var frames = new StringBuilder("[");
@@ -10134,8 +10398,9 @@ public final class MobOracle {
                         : Arrays.toString(new int[] {wallTick, wallBox[0], wallBox[1], wallBox[2],
                                 Block.getId(Blocks.STONE.defaultBlockState())}))
                 + ",\"wallBlocks\":" + wallBlocks
-                + ",\"attacker\":" + attackTargetSetup(attackerKind, attackerAt, 42001L, false, false, crossbow)
-                + ",\"victim\":" + attackTargetSetup(victimKind, victimAt, 42002L, baby, victimNoAi, false)
+                + ",\"attacker\":" + attackTargetSetup(attackerKind, attackerAt, 42001L, false, false, crossbow, 0)
+                + ",\"victim\":" + attackTargetSetup(victimKind, victimAt, 42002L, baby, victimNoAi, false,
+                        victimArmadilloState)
                 + ",\"frames\":" + frames + "}\n");
     }
 
@@ -10143,6 +10408,10 @@ public final class MobOracle {
         return switch (kind) {
             case 1 -> new Zombie(EntityTypes.ZOMBIE, world);
             case 7 -> EntityTypes.FOX.create(world, EntitySpawnReason.COMMAND);
+            case 8 -> EntityTypes.WOLF.create(world, EntitySpawnReason.COMMAND);
+            case 12 -> EntityTypes.LLAMA.create(world, EntitySpawnReason.COMMAND);
+            case 13 -> EntityTypes.ARMADILLO.create(world, EntitySpawnReason.COMMAND);
+            case 16 -> new PolarBear(EntityTypes.POLAR_BEAR, world);
             case 41 -> new net.minecraft.world.entity.monster.spider.Spider(EntityTypes.SPIDER, world);
             case 52 -> new net.minecraft.world.entity.monster.zombie.Drowned(EntityTypes.DROWNED, world);
             case 53 -> OraclePillager.create(world);
@@ -10156,14 +10425,15 @@ public final class MobOracle {
     }
 
     private static String attackTargetSetup(int kind, double[] at, long seed, boolean baby,
-            boolean noAi, boolean crossbow) {
+            boolean noAi, boolean crossbow, int armadilloState) {
         return "{\"kind\":" + kind
                 + ",\"position\":[" + Double.doubleToRawLongBits(at[0]) + ','
                 + Double.doubleToRawLongBits(at[1]) + ',' + Double.doubleToRawLongBits(at[2]) + ']'
                 + ",\"yaw\":" + Float.floatToRawIntBits(0.0F)
                 + ",\"seed\":" + seed
                 + ",\"baby\":" + baby + ",\"noAi\":" + noAi
-                + ",\"foxVariant\":0,\"crossbow\":" + crossbow + '}';
+                + ",\"foxVariant\":0,\"crossbow\":" + crossbow
+                + ",\"armadilloState\":" + armadilloState + '}';
     }
 
     private static String attackTargetFrame(Mob mob) {
@@ -12116,6 +12386,16 @@ public final class MobOracle {
                 // `AbstractHorse.MountPanicGoal` 没被生物控制时就是 `PanicGoal`，名字按后者记。
                 // `MountPanicGoal` is a plain `PanicGoal` without a mob controller.
                 String goalName = goal.getGoal().getClass().getSimpleName();
+                // `AbstractSkeleton` 的近战目标是一个匿名 `MeleeAttackGoal` 子类
+                // (`AbstractSkeleton$1`)，`getSimpleName()` 是空串；Bamboo 按
+                // `MeleeAttackGoal` 建模，这里补回类名以便逐刻对拍。
+                // The skeleton's melee goal is an anonymous `MeleeAttackGoal`
+                // subclass whose `getSimpleName()` is empty; Bamboo models it as
+                // `MeleeAttackGoal`, so restore the name here.
+                if (goalName.isEmpty()
+                        && goal.getGoal() instanceof net.minecraft.world.entity.ai.goal.MeleeAttackGoal) {
+                    goalName = "MeleeAttackGoal";
+                }
                 out.append("MountPanicGoal".equals(goalName) ? "PanicGoal" : goalName);
             }
             out.append('"');

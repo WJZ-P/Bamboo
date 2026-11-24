@@ -507,6 +507,11 @@ impl Player {
             alive: !self.health.is_dead_or_dying(),
             spectator: self.game_mode == GameMode::Spectator,
             creative: self.game_mode == GameMode::Creative,
+            game_mode: self.game_mode as i32,
+            mining_fatigue: self
+                .effects
+                .get(mc_bamboo_data::registries::mob_effect::MINING_FATIGUE)
+                .map(|instance| (instance.amplifier, instance.duration)),
             sneaking: self.sync.is_crouching(),
             sprinting: self.sync.is_sprinting(),
             swimming: self.motion.swimming,

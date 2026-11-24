@@ -10,6 +10,9 @@
 pub mod layout;
 pub mod progress_file;
 
+#[cfg(test)]
+mod layout_regression;
+
 use std::{collections::BTreeMap, sync::OnceLock};
 
 use mc_bamboo_protocol::{item::ItemStack, text::Component};

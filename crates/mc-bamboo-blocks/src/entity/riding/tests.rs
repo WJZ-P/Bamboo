@@ -37,6 +37,22 @@ fn a_chicken_jockey_sits_behind_the_chickens_head() {
 }
 
 #[test]
+fn a_baby_chicken_jockey_uses_the_baby_vehicle_attachment_point() {
+    let mut chicken = entity(1, MobType::Chicken, 0.5).split().public;
+    chicken.yaw = 0.0;
+    let mut zombie = entity(2, MobType::Zombie, 10.0);
+    zombie.kind.mob_mut().unwrap().set_zombie_baby(true);
+    let mut zombie = zombie.split().public;
+    zombie.yaw = 0.0;
+    // `Zombie.BABY_DIMENSIONS` 的 VEHICLE 点是 (0, 0.1875f, 0)，不是 0.7 折半；
+    // 成年鸡的 PASSENGER 点仍是 (0, 0.7, -0.1)，故 y = 64 + 0.7 - 0.1875。
+    // The baby zombie's VEHICLE point is 0.1875f (BABY_DIMENSIONS), so the rider
+    // sits at y = 64.5125 rather than 64.0 for an adult.
+    let at = rider_position(&chicken, &zombie, 0);
+    assert!((at.y - 64.5125).abs() < 1.0e-6, "{at:?}");
+}
+
+#[test]
 fn a_turned_vehicle_rotates_the_attachment_point() {
     let mut chicken = entity(1, MobType::Chicken, 0.5).split().public;
     chicken.yaw = 90.0;

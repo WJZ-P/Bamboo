@@ -223,12 +223,15 @@ impl Kind {
     }
 }
 
-/// `MoveToTargetSink` 的字段。`path` 只记有没有：官方比的是对象身份，只影响要不要重写
-/// `PATH` 记忆，而记忆的有无和导航的路径有无总是一致。
+/// `MoveToTargetSink` 的字段。`path` 是这一刻算出、待装进导航的路径；官方 `tick` 比的是
+/// 路径对象身份，这里用 `path_version` 记下这份路径对应的导航版本号，版本号一变就说明导航
+/// 换了新 `Path` 对象，要同步 `PATH` 记忆。记忆的有无和导航的路径有无始终一致。
 ///
-/// The `MoveToTargetSink` fields. `path` only records presence: vanilla compares object
-/// identity, which only decides whether `PATH` is rewritten, and the memory's presence
-/// always follows the navigation path's.
+/// The `MoveToTargetSink` fields. `path` is the freshly computed path to install into
+/// navigation; vanilla `tick` compares path object identity, so `path_version` records
+/// the navigation version this path corresponds to. A version change means navigation
+/// swapped in a new `Path` object and the `PATH` memory must be synced. The memory's
+/// presence always follows whether navigation has a path.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MoveToTargetSink {
     pub min: i32,
@@ -236,6 +239,7 @@ pub struct MoveToTargetSink {
     pub armadillo: bool,
     remaining_cooldown: i32,
     path: Option<super::super::path::Path>,
+    path_version: u32,
     last_target_pos: Option<BlockPos>,
     speed: f32,
 }
@@ -251,6 +255,7 @@ impl MoveToTargetSink {
             armadillo,
             remaining_cooldown: 0,
             path: None,
+            path_version: 0,
             last_target_pos: None,
             speed: 0.0,
         }
@@ -985,6 +990,7 @@ fn move_sink_stop(sink: &mut MoveToTargetSink, cx: &mut Cx) {
     cx.memories.erase(WalkTarget);
     cx.memories.erase(Path);
     sink.path = None;
+    sink.path_version = cx.mob.navigation.path_version;
 }
 
 fn move_sink_start(sink: &mut MoveToTargetSink, cx: &mut Cx) {
@@ -995,12 +1001,19 @@ fn move_sink_start(sink: &mut MoveToTargetSink, cx: &mut Cx) {
     cx.mob
         .navigation
         .move_to_path(cx.ctx.blocks(), &nav, path, f64::from(sink.speed));
+    sink.path_version = cx.mob.navigation.path_version;
 }
 
 fn move_sink_tick(sink: &mut MoveToTargetSink, cx: &mut Cx) {
-    let current = cx.mob.navigation.path.clone();
-    if sink.path != current {
-        sink.path = current;
+    // 官方 `tick` 用 `if_acmpeq` 比路径对象身份：只有导航换 `Path` 对象时版本号才变，
+    // 原地推进 / 裁剪不算。用版本号判断，省掉每刻 `navigation.path.clone()` 加深比较。
+    // Vanilla `tick` compares path identity with `if_acmpeq`: the version changes only
+    // when navigation swaps the `Path` object, not on in-place advance/trim. A version
+    // check replaces the per-tick `navigation.path.clone()` plus deep comparison.
+    let nav_version = cx.mob.navigation.path_version;
+    if sink.path_version != nav_version {
+        sink.path = cx.mob.navigation.path.clone();
+        sink.path_version = nav_version;
         cx.memories
             .set_or_erase(Path, sink.path.as_ref().map(|_| MemoryValue::Unit));
     }

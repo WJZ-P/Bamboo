@@ -7,7 +7,7 @@
 //! 逐项（含顺序、票数）比较；存档和村庄距离也逐项比。
 //!
 //! 命令：`cargo run -p mc-bamboo-vanilla -- poi-oracle <java> [--show N]
-//! [--break-self-test tickets|meeting|remove]`。
+//! [--break-self-test tickets|meeting|remove|counts]`。
 
 use std::{
     io::{BufRead, BufReader, Write},
@@ -26,8 +26,8 @@ use serde_json::{Value, json};
 
 const USAGE: &str = "usage: poi-oracle <java> [--show N] [--break-self-test NAME]";
 const DEFAULT_SHOW: usize = 8;
-/// 三处改坏自检的名字。
-const BREAK_TESTS: [&str; 3] = ["tickets", "meeting", "remove"];
+/// 四处改坏自检的名字；`counts` 模拟「漏维护村庄计数」。
+const BREAK_TESTS: [&str; 4] = ["tickets", "meeting", "remove", "counts"];
 
 struct Options {
     show: usize,
@@ -313,9 +313,9 @@ fn canonical(tag: &Tag) -> Value {
     }
 }
 
-/// Rust 侧重放一步操作。三处改坏自检都在这里注入：
-/// `tickets` 让新记录从 0 张票开始，`meeting` 跳过钟的登记，
-/// `remove` 让拆方块只 add 不 remove。
+/// Rust 侧重放一步操作。改坏自检在这里注入：`tickets` 让新记录从 0 张票
+/// 开始，`meeting` 跳过钟的登记，`remove` 让拆方块只 add 不 remove；
+/// `counts`（漏维护计数）在 [`run`] 里关掉距离缓存维护，不在单步里改值。
 fn apply_op(store: &mut PoiStore, op: &Value, sabotage: Option<&str>) -> Value {
     if let Some(at) = op.get("at") {
         let at = json_pos(at);
@@ -478,6 +478,11 @@ pub fn run(command: Command, args: &[&str]) -> Result<(), String> {
     let sabotage = options.break_self_test.as_deref();
     let mut report = Report::default();
     let mut store = PoiStore::new();
+    if sabotage == Some("counts") {
+        // 改坏自检：模拟「漏维护计数」——POI 改动不再维护村庄计数与距离缓存，
+        // 于是 `sectionsToVillage` 全给 7，探测器必须抓到与官方的偏差。
+        store.disable_village_count_maintenance();
+    }
     // Java 侧在第 step 步之后先跑一遍查询（step 0 = 没动过）。
     let mut step = 0usize;
     let mut query_index = 0usize;
