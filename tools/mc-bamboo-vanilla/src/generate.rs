@@ -843,6 +843,24 @@ fn villager_file(data: &VersionData) -> Result<String, String> {
     ] {
         let _ = writeln!(out, "pub const {name}: i32 = {value};");
     }
+    // `ZombieVillager` 的三个元数据 index 从官方类实测导出。
+    // The three `ZombieVillager` metadata indices are measured from the official class.
+    for (name, value) in [
+        (
+            "ZOMBIE_VILLAGER_CONVERTING_INDEX",
+            facts.zombie_villager_converting_index,
+        ),
+        (
+            "ZOMBIE_VILLAGER_DATA_INDEX",
+            facts.zombie_villager_data_index,
+        ),
+        (
+            "ZOMBIE_VILLAGER_DATA_FINALIZED_INDEX",
+            facts.zombie_villager_finalized_index,
+        ),
+    ] {
+        let _ = writeln!(out, "pub const {name}: u8 = {value};");
+    }
     let _ = writeln!(out);
     let _ = writeln!(
         out,

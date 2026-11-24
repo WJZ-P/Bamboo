@@ -45,6 +45,10 @@ pub enum SpawnReason {
     ///
     /// `EntitySpawnReason.JOCKEY`: a spider/chicken jockey's mount or rider.
     Jockey,
+    /// `EntitySpawnReason.CONVERSION`：生物转化出来的新实体。
+    ///
+    /// `EntitySpawnReason.CONVERSION`: the new entity of a mob conversion.
+    Conversion,
 }
 
 /// `/summon` 失败的原因，对应官方的四条错误。
@@ -500,6 +504,10 @@ fn finalize_spawn_in_group(
     }
     if kind == MobType::Villager {
         super::villager::finalize_spawn(world, entity, reason, group);
+        return;
+    }
+    if kind == MobType::ZombieVillager {
+        super::zombie_villager::finalize_spawn(world, entity, reason, group);
         return;
     }
     let biome = world.biome_id(entity.block_position());

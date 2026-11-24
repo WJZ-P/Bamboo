@@ -330,6 +330,7 @@ fn interact(world: &mut World<'_>, id: i32, player: i32, held: ItemStack, wrong_
         creative: false,
         position: Vec3::new(2.5, 64.0, 0.5),
         sneaking: false,
+        difficulty: 2,
     };
     world.interact_mob(id, &request);
 }

@@ -533,6 +533,14 @@ impl Entity {
         mob.uuid = mob::insecure_uuid(&mut self.random);
         self.y_rot = self.random.next_float() * 6.283_185_5;
         mob.y_head_rot = self.y_rot;
+        if mob.mob_type == mob::MobType::ZombieVillager {
+            // `ZombieVillager.defineSynchedData` 在 `Entity` 构造函数里跑，
+            // 随机职业的 `nextInt(size)` 比 LivingEntity 的朝向更早。
+            //
+            // `ZombieVillager.defineSynchedData` runs in the `Entity` constructor;
+            // the random profession's `nextInt(size)` precedes the facing draw.
+            mob::zombie_villager::configure_new(mob, &mut self.random);
+        }
         if mob.mob_type == mob::MobType::Rabbit {
             // 兔子构造时抽取一次头部闲置动画延迟；只在客户端使用其结果。
             // The rabbit constructor draws a head-idle delay used only by the client.

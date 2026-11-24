@@ -1082,6 +1082,23 @@ impl KindData {
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
     use mc_bamboo_data::entity_types as facts;
+    if kind == mc_bamboo_blocks::entity::mob::MobType::ZombieVillager {
+        use mc_bamboo_data::villager;
+        return match index {
+            villager::ZOMBIE_VILLAGER_CONVERTING_INDEX => {
+                EntityData::ZombieVillagerConverting(false)
+            }
+            villager::ZOMBIE_VILLAGER_DATA_INDEX => EntityData::ZombieVillagerData {
+                kind: villager::type_id(villager::DEFAULT_TYPE).unwrap_or(0),
+                profession: villager::profession_id(villager::NONE_PROFESSION).unwrap_or(0),
+                level: villager::MIN_VILLAGER_LEVEL,
+            },
+            villager::ZOMBIE_VILLAGER_DATA_FINALIZED_INDEX => {
+                EntityData::ZombieVillagerDataFinalized(false)
+            }
+            _ => EntityData::SharedFlags(0),
+        };
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::Villager {
         use mc_bamboo_data::villager;
         match index {
@@ -1739,6 +1756,28 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         }
         return out;
     }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::ZombieVillager {
+        use mc_bamboo_data::villager;
+        if mob.zombie_villager_converting {
+            out.push(EntityData::ZombieVillagerConverting(true));
+        }
+        let default_kind = villager::type_id(villager::DEFAULT_TYPE).unwrap_or(0);
+        let default_profession = villager::profession_id(villager::NONE_PROFESSION).unwrap_or(0);
+        if mob.villager_kind != default_kind
+            || mob.villager_profession != default_profession
+            || mob.villager_level != villager::MIN_VILLAGER_LEVEL
+        {
+            out.push(EntityData::ZombieVillagerData {
+                kind: mob.villager_kind,
+                profession: mob.villager_profession,
+                level: mob.villager_level,
+            });
+        }
+        if mob.villager_finalized {
+            out.push(EntityData::ZombieVillagerDataFinalized(true));
+        }
+        return out;
+    }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Villager {
         use mc_bamboo_data::villager;
         // 按 index 升序：18 不高兴计数、19 `VillagerData`、20 finalized。
@@ -2221,7 +2260,7 @@ fn event_packet(
             event: 18,
         })),
         // 驯服事件不是网络包；在 `send_mob_events` 里按 UUID 触发进度。
-        MobEvent::Tamed { .. } => EventPacket::Nothing,
+        MobEvent::Tamed { .. } | MobEvent::CuredZombieVillager { .. } => EventPacket::Nothing,
         MobEvent::EntityEvent { event } => EventPacket::Tracking(packet_body(&EntityEvent {
             entity_id: id,
             event: *event,
@@ -2334,6 +2373,26 @@ fn send_mob_events(
 ) {
     for (id, mob_events) in events {
         for event in mob_events {
+            if let mc_bamboo_blocks::entity::mob::MobEvent::CuredZombieVillager { player } = event {
+                let players: Vec<crate::inbound::PlayerId> = region
+                    .players
+                    .iter()
+                    .filter(|(_, candidate)| candidate.uuid.as_bytes() == player)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for player_id in players {
+                    crate::advancement_triggers::record(
+                        region,
+                        player_id,
+                        "minecraft:cured_zombie_villager",
+                        serde_json::json!({
+                            "zombie": {"type": "minecraft:zombie_villager"},
+                            "villager": {"type": "minecraft:villager"}
+                        }),
+                    );
+                }
+                continue;
+            }
             if let mc_bamboo_blocks::entity::mob::MobEvent::Tamed { player } = event {
                 let kind = region
                     .entities

@@ -98,6 +98,7 @@ pub mod witch;
 pub mod wolf;
 pub mod wolf_goals;
 mod zombie_spawn;
+pub mod zombie_villager;
 
 use mc_bamboo_core::{BlockPos, Vec3};
 
@@ -199,6 +200,10 @@ pub enum MobType {
     /// Villagers. Phase 2 is the skeleton only: spawning, saving, damage and death;
     /// no brain, profession behaviour or trading.
     Villager,
+    /// 僵尸村民：`Zombie` 加 `VillagerData`，可被金苹果 + 虚弱治疗。
+    ///
+    /// Zombie villagers: a `Zombie` plus `VillagerData`, curable with a golden apple.
+    ZombieVillager,
     Guardian,
     ElderGuardian,
 }
@@ -207,7 +212,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 56] = [
+    pub const ALL: [Self; 57] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -262,6 +267,7 @@ impl MobType {
         Self::Silverfish,
         Self::Endermite,
         Self::Villager,
+        Self::ZombieVillager,
         Self::Guardian,
         Self::ElderGuardian,
     ];
@@ -324,6 +330,7 @@ impl MobType {
             Self::Silverfish => ids::SILVERFISH,
             Self::Endermite => ids::ENDERMITE,
             Self::Villager => ids::VILLAGER,
+            Self::ZombieVillager => ids::ZOMBIE_VILLAGER,
             Self::Guardian => ids::GUARDIAN,
             Self::ElderGuardian => ids::ELDER_GUARDIAN,
         }
@@ -386,6 +393,7 @@ impl MobType {
             Self::Silverfish => "minecraft:silverfish",
             Self::Endermite => "minecraft:endermite",
             Self::Villager => "minecraft:villager",
+            Self::ZombieVillager => "minecraft:zombie_villager",
             Self::Guardian => "minecraft:guardian",
             Self::ElderGuardian => "minecraft:elder_guardian",
         }
@@ -529,7 +537,13 @@ impl MobType {
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
-            (Self::Zombie | Self::Husk | Self::Drowned, false) => (0.6, 1.95, 1.74),
+            // 成年僵尸村民沿用 `Zombie` 的尺寸，幼年用 `ZombieVillager.BABY_DIMENSIONS`。
+            // Adult zombie villagers keep the `Zombie` dimensions; babies use
+            // `ZombieVillager.BABY_DIMENSIONS`.
+            (Self::Zombie | Self::Husk | Self::Drowned | Self::ZombieVillager, false) => {
+                (0.6, 1.95, 1.74)
+            }
+            (Self::ZombieVillager, true) => (0.49, 0.98, 0.67),
             // `Zombie.BABY_DIMENSIONS`：`scalable(0.49F, 0.98F).withEyeHeight(0.775F)`。
             (Self::Zombie | Self::Husk | Self::Drowned, true) => (0.49, 0.98, 0.775),
             // `EntityTypes.WITCH`：`sized(0.6F, 1.95F).eyeHeight(1.62F)`。
@@ -566,6 +580,7 @@ impl MobType {
             Self::Zombie
                 | Self::Husk
                 | Self::Drowned
+                | Self::ZombieVillager
                 | Self::Witch
                 | Self::Pillager
                 | Self::Creeper
@@ -594,7 +609,10 @@ impl MobType {
     /// Whether this is a `Zombie`: zombies, husks and drowned share the melee, door
     /// breaking, reinforcement and conversion logic.
     pub const fn is_zombie(self) -> bool {
-        matches!(self, Self::Zombie | Self::Husk | Self::Drowned)
+        matches!(
+            self,
+            Self::Zombie | Self::Husk | Self::Drowned | Self::ZombieVillager
+        )
     }
 
     /// 是不是 `AbstractSkeleton` 一支：骷髅、流浪者、沼骸共用弓 / 近战目标和装备逻辑。
@@ -963,6 +981,7 @@ impl MobType {
             Self::Silverfish => "minecraft:entities/silverfish",
             Self::Endermite => "minecraft:entities/endermite",
             Self::Villager => "minecraft:entities/villager",
+            Self::ZombieVillager => "minecraft:entities/zombie_villager",
             Self::Guardian => "minecraft:entities/guardian",
             Self::ElderGuardian => "minecraft:entities/elder_guardian",
         }
@@ -971,7 +990,10 @@ impl MobType {
     /// `EntityTypeTags.BURN_IN_DAYLIGHT` 加 `Zombie.isSunSensitive()`：
     /// 尸壳不烧，僵尸、溺尸和骷髅一支烧。
     pub const fn burns_in_daylight(self) -> bool {
-        matches!(self, Self::Zombie | Self::Drowned | Self::Phantom) || self.is_skeleton()
+        matches!(
+            self,
+            Self::Zombie | Self::Drowned | Self::ZombieVillager | Self::Phantom
+        ) || self.is_skeleton()
     }
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
@@ -1086,6 +1108,7 @@ impl MobType {
             // Sleeping and trading sounds arrive in phases 3 and 5; the skeleton
             // plays the plain ambient sound.
             Self::Villager => Some("minecraft:entity.villager.ambient"),
+            Self::ZombieVillager => Some("minecraft:entity.zombie_villager.ambient"),
             // 守卫者的环境音分水中 / 岸上两套，由 `guardian::ambient_sound` 按 `isInWater` 选。
             // Guardian ambience has water / land variants picked by `guardian::ambient_sound`.
             Self::Guardian | Self::ElderGuardian => None,
@@ -1141,6 +1164,7 @@ impl MobType {
             Self::Silverfish => Some("minecraft:entity.silverfish.hurt"),
             Self::Endermite => Some("minecraft:entity.endermite.hurt"),
             Self::Villager => Some("minecraft:entity.villager.hurt"),
+            Self::ZombieVillager => Some("minecraft:entity.zombie_villager.hurt"),
             // 守卫者的受伤音分水中 / 岸上两套，由 `guardian::hurt_sound` 按 `isInWater` 选。
             // Guardian hurt sounds have water / land variants picked by `guardian::hurt_sound`.
             Self::Guardian | Self::ElderGuardian => None,
@@ -1196,6 +1220,7 @@ impl MobType {
             Self::Silverfish => Some("minecraft:entity.silverfish.death"),
             Self::Endermite => Some("minecraft:entity.endermite.death"),
             Self::Villager => Some("minecraft:entity.villager.death"),
+            Self::ZombieVillager => Some("minecraft:entity.zombie_villager.death"),
             // 守卫者的死亡音分水中 / 岸上两套，由 `guardian::death_sound` 按 `isInWater` 选。
             // Guardian death sounds have water / land variants picked by `guardian::death_sound`.
             Self::Guardian | Self::ElderGuardian => None,
@@ -1262,6 +1287,7 @@ impl MobType {
             //
             // Villagers do not override `playStepSound`; the block's sound plays.
             Self::Villager => None,
+            Self::ZombieVillager => Some("minecraft:entity.zombie_villager.step"),
             // `Guardian.getMovementEmission()` = `EVENTS`：没有脚步声。
             // `Guardian.getMovementEmission()` = `EVENTS`: no step sound.
             Self::Guardian | Self::ElderGuardian => None,
@@ -1326,6 +1352,7 @@ impl MobType {
             Self::Silverfish => items::SILVERFISH_SPAWN_EGG,
             Self::Endermite => items::ENDERMITE_SPAWN_EGG,
             Self::Villager => items::VILLAGER_SPAWN_EGG,
+            Self::ZombieVillager => items::ZOMBIE_VILLAGER_SPAWN_EGG,
             Self::Guardian => items::GUARDIAN_SPAWN_EGG,
             Self::ElderGuardian => items::ELDER_GUARDIAN_SPAWN_EGG,
         }
@@ -1388,6 +1415,7 @@ impl MobType {
             Self::Silverfish => "entity.minecraft.silverfish",
             Self::Endermite => "entity.minecraft.endermite",
             Self::Villager => "entity.minecraft.villager",
+            Self::ZombieVillager => "entity.minecraft.zombie_villager",
             Self::Guardian => "entity.minecraft.guardian",
             Self::ElderGuardian => "entity.minecraft.elder_guardian",
         }
@@ -2037,6 +2065,18 @@ pub struct DamageSource {
     /// in the entity table, so loot `source_entity` conditions (a frog eating a slime)
     /// fall back to this.
     pub attacker_type: Option<i32>,
+    /// `Zombie.killedEntity` 的普通难度抽签结果：真表示这一口不转化。
+    /// `None` 表示没有抽过（困难 / 简单 / 别的攻击者），或伤害来自旧存档。
+    ///
+    /// The `Zombie.killedEntity` normal-difficulty roll: true means this kill does
+    /// not convert. Set only for a zombie attacker and a dying villager.
+    pub villager_conversion_roll: Option<bool>,
+    /// `Zombie.killedEntity` 的攻击者是不是僵尸；伤害源来自别的实体（箭、玩家、
+    /// 外部命令）时由调用方填。
+    ///
+    /// Whether the attacker of `Zombie.killedEntity` is a zombie. Callers fill it
+    /// for external damage sources (arrows, players, commands).
+    pub attacker_is_zombie: bool,
 }
 
 impl DamageSource {
@@ -2060,6 +2100,8 @@ impl DamageSource {
             owner_credit: None,
             looting_level: 0,
             attacker_type: None,
+            villager_conversion_roll: None,
+            attacker_is_zombie: false,
         }
     }
 
@@ -2090,6 +2132,18 @@ impl DamageSource {
     }
 
     /// 带上攻击者的 UUID。
+    /// 标记攻击者是僵尸一系（`Zombie.killedEntity` 的分支）。
+    pub const fn with_zombie_attacker(mut self) -> Self {
+        self.attacker_is_zombie = true;
+        self
+    }
+
+    /// 带上 `Zombie.killedEntity` 的抽签结果。
+    pub const fn with_villager_conversion_roll(mut self, roll: bool) -> Self {
+        self.villager_conversion_roll = Some(roll);
+        self
+    }
+
     pub const fn with_attacker_uuid(mut self, uuid: [u8; 16]) -> Self {
         self.attacker_uuid = Some(uuid);
         self
@@ -2143,6 +2197,8 @@ impl DamageSource {
             owner_credit: None,
             looting_level: 0,
             attacker_type: None,
+            villager_conversion_roll: None,
+            attacker_is_zombie: false,
         }
     }
 
@@ -2555,6 +2611,10 @@ pub struct Mob {
     /// The villager's kind / profession / level, restock times and the verbatim
     /// offers / inventory data.
     pub villager: villager::Villager,
+    /// 僵尸村民的治疗倒计时和转化发起者。
+    ///
+    /// The zombie villager cure timer and the player who started it.
+    pub zombie_villager: zombie_villager::ZombieVillagerState,
     /// 蝙蝠的标志字节和飞行目标；别的生物是缺省值。
     ///
     /// The bat flag byte and flight target; default for every other mob.
@@ -2696,6 +2756,13 @@ pub enum MobEvent {
     /// `TamableAnimal.tame` / `AbstractHorse.tameWithName` credited this player.
     /// Not a packet; the game layer turns it into a `TAME_ANIMAL` trigger.
     Tamed { player: [u8; 16] },
+    /// `ZombieVillager.finishConversion`：治疗者 UUID 给 `CURED_ZOMBIE_VILLAGER`
+    /// 进度触发器；声望广播属于还没建模的八卦系统。不是网络包。
+    ///
+    /// `ZombieVillager.finishConversion`: the healer's UUID feeds the
+    /// `CURED_ZOMBIE_VILLAGER` trigger; reputation belongs to the unmodelled
+    /// gossip system. Not a packet.
+    CuredZombieVillager { player: [u8; 16] },
     /// `Player.playSound(COW_MILK, 1, 1)`：音源是玩家，不是中立生物。
     MilkSound { position: Vec3 },
     /// `ServerLevel.sendParticles`：一个粒子包，发给 32 格内的玩家（按玩家所在方块的中心算）。
@@ -2771,7 +2838,7 @@ impl Mob {
             MobType::Enderman => enderman::attributes(),
             MobType::Spider => spider::attributes(MobType::Spider),
             MobType::CaveSpider => spider::attributes(MobType::CaveSpider),
-            MobType::Zombie | MobType::Husk => Attributes::zombie(),
+            MobType::Zombie | MobType::Husk | MobType::ZombieVillager => Attributes::zombie(),
             MobType::Drowned => drowned::attributes(),
             MobType::Witch => witch::attributes(),
             MobType::Pillager => pillager::attributes(),
@@ -2851,7 +2918,9 @@ impl Mob {
             MobType::Creeper => creeper::goals(&mut navigation),
             MobType::Enderman => enderman::goals(&mut navigation),
             MobType::Spider | MobType::CaveSpider => spider::goals(&mut navigation),
-            MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
+            MobType::Zombie | MobType::Husk | MobType::ZombieVillager => {
+                GoalSelector::zombie(&mut navigation)
+            }
             MobType::Drowned => drowned::goals(&mut navigation),
             MobType::Witch => witch::goals(&mut navigation),
             MobType::Pillager => pillager::goals(&mut navigation),
@@ -2944,7 +3013,9 @@ impl Mob {
             MobType::Creeper => creeper::target_goals(),
             MobType::Enderman => enderman::target_goals(),
             MobType::Spider | MobType::CaveSpider => spider::target_goals(&mut navigation),
-            MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
+            MobType::Zombie | MobType::Husk | MobType::ZombieVillager => {
+                GoalSelector::zombie_targets()
+            }
             MobType::Slime => slime::targets(),
             MobType::Drowned => drowned::targets(),
             MobType::Witch => witch::targets(),
@@ -3169,6 +3240,7 @@ impl Mob {
             iron_golem: iron_golem::IronGolem::default(),
             snow_golem: snow_golem::SnowGolem::default(),
             villager: villager::Villager::default(),
+            zombie_villager: zombie_villager::ZombieVillagerState::default(),
             tadpole_age: 0,
             discard_friction: false,
             passengers: Vec::new(),
@@ -3355,6 +3427,11 @@ impl Mob {
         }
         if self.mob_type == MobType::Cat {
             return cat::removes_when_far_away(self, tick_count);
+        }
+        if self.mob_type == MobType::ZombieVillager {
+            // `ZombieVillager.removeWhenFarAway`：转化中或有交易经验时不消失。
+            // `ZombieVillager.removeWhenFarAway`: no despawn while converting or with XP.
+            return self.zombie_villager.removes_when_far_away(self.villager.xp);
         }
         if self.mob_type == MobType::Chicken {
             // `Chicken.removeWhenFarAway` 直接返回 `isChickenJockey`。
@@ -3659,6 +3736,8 @@ pub struct MobPublic {
     ///
     /// Compact public villager state; `Some` only for `MobType::Villager`, null for other mobs.
     pub villager: Option<Box<villager::VillagerPublic>>,
+    /// `ZombieVillager.DATA_CONVERTING_ID`。
+    pub zombie_villager_converting: bool,
     /// `Bat.DATA_ID_FLAGS`。
     pub bat_flags: u8,
     /// `Phantom.ID_SIZE`。
@@ -3841,6 +3920,7 @@ impl MobPublic {
                     &mob.navigation,
                 ))
             }),
+            zombie_villager_converting: mob.zombie_villager.converting,
             phantom_size: mob.phantom.size,
             frog: mob.frog,
             camel: mob.camel,

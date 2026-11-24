@@ -1251,7 +1251,7 @@ fn hit_entity_trident(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHi
         .as_ref()
         .map(|p| p.uid)
         .or(owner_player.map(|p| p.uid));
-    let source = DamageSource {
+    let mut source = DamageSource {
         attacker: cause.or(Some(me.id)),
         direct: Some(me.id),
         attacker_is_player: owner_player.is_some(),
@@ -1264,6 +1264,40 @@ fn hit_entity_trident(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHi
             .is_some_and(|p| matches!(p.kind, KindPublic::Mob(_))),
         ..DamageSource::environment(DamageKind::Trident)
     };
+    // `Zombie.killedEntity`：溺尸扔出的三叉戟命中村民时，官方 `source.getEntity()`
+    // 是那只溺尸，同样按难度转化。箭本体正在 tick，主人的随机源在实体表里，
+    // 所以这一次的 `nextBoolean()` 要就地改主人的随机源。
+    //
+    // `Zombie.killedEntity`: for a drowned's trident, vanilla's
+    // `source.getEntity()` is the drowned, so the same conversion applies. The
+    // owner's random lives in the entity store; draw there.
+    if !hit.player {
+        let zombie_owner = owner.as_ref().is_some_and(
+            |public| matches!(&public.kind, KindPublic::Mob(mob) if mob.mob_type.is_zombie()),
+        );
+        let mut lethal = false;
+        world.level().with_entity_public(hit.uid, &mut |public| {
+            lethal = matches!(&public.kind, KindPublic::Mob(mob)
+                if mob.mob_type == super::mob::MobType::Villager
+                    && mob.health > 0.0
+                    && mob.health <= damage);
+        });
+        let lethal_villager = lethal;
+        if zombie_owner && lethal_villager {
+            source = source.with_zombie_attacker();
+            source.attacker_type = owner.as_ref().map(|public| public.kind.entity_type());
+            let difficulty = world.difficulty_id();
+            if difficulty == 2 {
+                let mut roll = false;
+                if let Some(uid) = owner.as_ref().map(|public| public.uid) {
+                    world.with_entity_mut(uid, &mut |owner| {
+                        roll = owner.random.next_boolean();
+                    });
+                }
+                source = source.with_villager_conversion_roll(roll);
+            }
+        }
+    }
     let accepted = if hit.player {
         world.hurt_player_from_mob(hit.uid, source, damage, owner.as_ref())
     } else {
