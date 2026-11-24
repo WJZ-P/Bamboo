@@ -423,16 +423,7 @@ impl BeeGoal {
             }
             Self::LocateHive => {
                 mob.bee.remaining_cooldown_before_locating_new_hive = 200;
-                // `findNearbyHivesWithSpace`：候选是 POI `getInRange(#bee_home,
-                // blockPosition, 20, ANY)`（官方遍历序），按 `doesHiveHaveSpace`
-                // 过滤，再用 `Comparator.comparingDouble(blockPos.distSqr(pos))`
-                // 稳定排序（整数 BlockPos 之间的平方距离）。并列时保留 POI 遍历序。
-                let origin = me.block_position();
-                let mut hives = view.beehives_near(origin, 20);
-                hives.retain(|pos| !view.beehive_full(*pos));
-                hives.sort_by(|a, b| {
-                    hive_dist_sqr(origin, *a).total_cmp(&hive_dist_sqr(origin, *b))
-                });
+                let hives = nearby_hives_with_space(me.block_position(), view);
                 let blacklist = locate_blacklist(mob);
                 if let Some(hive) = hives.iter().find(|pos| !blacklist.contains(pos)) {
                     mob.bee.hive_pos = Some(*hive);
@@ -573,6 +564,22 @@ fn hive_dist_sqr(from: BlockPos, to: BlockPos) -> f64 {
     let dy = f64::from(to.y - from.y);
     let dz = f64::from(to.z - from.z);
     dx * dx + dy * dy + dz * dz
+}
+
+/// 官方 `Bee$BeeLocateHiveGoal.findNearbyHivesWithSpace()` 的候选表：
+/// POI `getInRange(#bee_home, origin, 20, ANY)`（官方遍历序）→ 满巢过滤
+/// （`BeehiveBlockEntity.isFull()`）→ `Comparator.comparingDouble(origin.distSqr(pos))`
+/// 稳定排序。并列距离时保留 POI 遍历序里的先后。
+///
+/// `LocateHive.start` 和对拍都调这一个函数，保证测的就是生产路径。
+///
+/// Vanilla `findNearbyHivesWithSpace`: POI candidates in official order, minus
+/// full hives, stably sorted by the integer `BlockPos` distance squared.
+pub fn nearby_hives_with_space(origin: BlockPos, view: &dyn BlockView) -> Vec<BlockPos> {
+    let mut hives = view.beehives_near(origin, 20);
+    hives.retain(|pos| !view.beehive_full(*pos));
+    hives.sort_by(|a, b| hive_dist_sqr(origin, *a).total_cmp(&hive_dist_sqr(origin, *b)));
+    hives
 }
 
 fn locate_blacklist(mob: &Mob) -> Vec<BlockPos> {
