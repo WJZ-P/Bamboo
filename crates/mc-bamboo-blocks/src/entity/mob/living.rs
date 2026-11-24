@@ -109,6 +109,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     mob.y_rot_o = me.y_rot;
     mob.x_rot_o = mob.x_rot;
     me.tick_count += 1;
+    // `ZombieVillager.tick`：转化倒计时在 `super.tick()` 之前。
+    // `ZombieVillager.tick`: the cure countdown runs ahead of `super.tick()`.
+    if mob.mob_type == super::MobType::ZombieVillager {
+        super::zombie_villager::tick(me, mob, ctx, None);
+    }
     // `Skeleton.tick`：`freezingTracker.tick()` 在 `super.tick()` 之前。
     // `Skeleton.tick`: `freezingTracker.tick()` runs ahead of `super.tick()`.
     if mob.mob_type == super::MobType::Skeleton {
@@ -1116,7 +1121,13 @@ pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
     let first = me.random.next_float();
     let second = me.random.next_float();
     let base = if mob.is_baby() { 1.5 } else { 1.0 };
-    let pitch = (first - second) * 0.2 + base;
+    let pitch = if mob.mob_type == super::MobType::ZombieVillager {
+        // `ZombieVillager.getVoicePitch()`：幼年 2.0、成年 1.0。
+        // `ZombieVillager.getVoicePitch()`: 2.0 for babies, 1.0 for adults.
+        (first - second) * 0.2 + if mob.is_baby() { 2.0 } else { 1.0 }
+    } else {
+        (first - second) * 0.2 + base
+    };
     if mob.mob_type == super::MobType::Bat {
         // `Bat.getVoicePitch()`：`super.getVoicePitch() * 0.95F`。
         // `Bat.getVoicePitch()`: `super.getVoicePitch() * 0.95F`.

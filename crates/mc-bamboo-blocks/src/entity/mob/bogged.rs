@@ -94,6 +94,7 @@ mod tests {
             held: ItemStack::new(item, 1),
             creative: false,
             sneaking: false,
+            difficulty: 2,
             position: Vec3::new(1.5, 64.0, 0.5),
         }
     }

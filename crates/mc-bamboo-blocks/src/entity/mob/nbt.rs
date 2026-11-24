@@ -421,6 +421,9 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::Villager {
         mob.villager.write_nbt(&mut out);
     }
+    if mob.mob_type == MobType::ZombieVillager {
+        mob.zombie_villager.write_nbt(&mob.villager, &mut out);
+    }
     // ---- Sheep / Chicken ----
     if mob.mob_type == MobType::Sheep {
         put(
@@ -893,6 +896,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Villager {
             mob.villager.read_nbt(tag);
+        }
+        if mob.mob_type == MobType::ZombieVillager {
+            mob.zombie_villager.read_nbt(&mut mob.villager, tag);
         }
         if mob.mob_type == MobType::Chicken {
             mob.chicken_jockey = tag::bool_or(tag, "IsChickenJockey", false);

@@ -502,6 +502,10 @@ fn finalize_spawn_in_group(
         super::villager::finalize_spawn(world, entity, reason, group);
         return;
     }
+    if kind == MobType::ZombieVillager {
+        super::zombie_villager::finalize_spawn(world, entity, reason, group);
+        return;
+    }
     let biome = world.biome_id(entity.block_position());
     let random = world.random();
     if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {

@@ -215,7 +215,21 @@ public final class MobOracle {
                 + ",\"foil\":" + metadataId("ID_FOIL") + "}\n";
     }
 
+    /** 僵尸村民的三个元数据 index 实测，不按类层次推导。 */
+    private static String zombieVillagerMetadataIds() throws Exception {
+        return "{\"type\":\"zombieVillagerMetadata\",\"converting\":" + metadataId("DATA_CONVERTING_ID")
+                + ",\"data\":" + metadataId("DATA_VILLAGER_DATA")
+                + ",\"finalized\":" + metadataId("DATA_VILLAGER_DATA_FINALIZED") + "}\n";
+    }
+
     private static int metadataId(String name) throws Exception {
+        if (name.startsWith("DATA_")) {
+            java.lang.reflect.Field field =
+                    net.minecraft.world.entity.monster.zombie.ZombieVillager.class.getDeclaredField(name);
+            field.setAccessible(true);
+            var accessor = (net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null);
+            return accessor.id();
+        }
         java.lang.reflect.Field field =
                 net.minecraft.world.entity.projectile.arrow.ThrownTrident.class.getDeclaredField(name);
         field.setAccessible(true);
@@ -278,6 +292,7 @@ public final class MobOracle {
             // 实测核对三叉戟的两个元数据索引，不靠类层级推导。
             // Cross-check the trident metadata indices against the official jar.
             out.write(tridentMetadataIds());
+            out.write(zombieVillagerMetadataIds());
             int cases = 0;
             for (Scene scene : Scenes.all()) {
                 if (only != null && !scene.name.startsWith(only)) {

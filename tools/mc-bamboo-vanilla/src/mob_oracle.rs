@@ -111,6 +111,14 @@ enum Line {
         loyalty: u8,
         foil: u8,
     },
+    /// 官方 `ZombieVillager` 的三个元数据 index。
+    ///
+    /// Official `ZombieVillager` metadata indices.
+    ZombieVillagerMetadata {
+        converting: u8,
+        data: u8,
+        finalized: u8,
+    },
     Case(Box<Case>),
     Projectile(Box<projectile::ProjectileCase>),
     Shot(shot::ShotCase),
@@ -1633,6 +1641,11 @@ impl Report {
                 Line::TridentMetadata { loyalty, foil } => {
                     self.replay_trident_metadata(loyalty, foil);
                 }
+                Line::ZombieVillagerMetadata {
+                    converting,
+                    data,
+                    finalized,
+                } => self.replay_zombie_villager_metadata(converting, data, finalized),
                 Line::Case(case) => self.replay(&case),
                 Line::Projectile(case) => self.replay_projectile(&case),
                 Line::Shot(case) => self.replay_shot(&case),
@@ -1766,6 +1779,24 @@ impl Report {
             self.mismatch(format!(
                 "trident metadata indices: official loyalty {} foil {}, bamboo loyalty {} foil {}",
                 loyalty, foil, ours.0, ours.1
+            ));
+        }
+    }
+
+    /// 实测核对僵尸村民的三个元数据 index。
+    ///
+    /// Verify the three zombie-villager metadata indices against the official jar.
+    fn replay_zombie_villager_metadata(&mut self, converting: u8, data: u8, finalized: u8) {
+        use mc_bamboo_data::villager;
+        let ours = (
+            villager::ZOMBIE_VILLAGER_CONVERTING_INDEX,
+            villager::ZOMBIE_VILLAGER_DATA_INDEX,
+            villager::ZOMBIE_VILLAGER_DATA_FINALIZED_INDEX,
+        );
+        if ours != (converting, data, finalized) {
+            self.mismatch(format!(
+                "zombie villager metadata indices: official {converting}/{data}/{finalized}, bamboo {}/{}/{}",
+                ours.0, ours.1, ours.2
             ));
         }
     }
@@ -2412,6 +2443,7 @@ impl Report {
                             f64::from_bits(player.z as u64),
                         ),
                         sneaking: false,
+                        difficulty: 2,
                     };
                     let outcome = world.interact_mob(ids[cow as usize], &request);
                     let result = if outcome.result.consumes_action() {

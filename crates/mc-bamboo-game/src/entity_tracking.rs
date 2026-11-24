@@ -1082,6 +1082,23 @@ impl KindData {
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
     use mc_bamboo_data::entity_types as facts;
+    if kind == mc_bamboo_blocks::entity::mob::MobType::ZombieVillager {
+        use mc_bamboo_data::villager;
+        return match index {
+            villager::ZOMBIE_VILLAGER_CONVERTING_INDEX => {
+                EntityData::ZombieVillagerConverting(false)
+            }
+            villager::ZOMBIE_VILLAGER_DATA_INDEX => EntityData::ZombieVillagerData {
+                kind: villager::type_id(villager::DEFAULT_TYPE).unwrap_or(0),
+                profession: villager::profession_id(villager::NONE_PROFESSION).unwrap_or(0),
+                level: villager::MIN_VILLAGER_LEVEL,
+            },
+            villager::ZOMBIE_VILLAGER_DATA_FINALIZED_INDEX => {
+                EntityData::ZombieVillagerDataFinalized(false)
+            }
+            _ => EntityData::SharedFlags(0),
+        };
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::Villager {
         use mc_bamboo_data::villager;
         match index {
@@ -1736,6 +1753,28 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         }
         if !mob.goat.right_horn {
             out.push(EntityData::GoatRightHorn(false));
+        }
+        return out;
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::ZombieVillager {
+        use mc_bamboo_data::villager;
+        if mob.zombie_villager_converting {
+            out.push(EntityData::ZombieVillagerConverting(true));
+        }
+        let default_kind = villager::type_id(villager::DEFAULT_TYPE).unwrap_or(0);
+        let default_profession = villager::profession_id(villager::NONE_PROFESSION).unwrap_or(0);
+        if mob.villager_kind != default_kind
+            || mob.villager_profession != default_profession
+            || mob.villager_level != villager::MIN_VILLAGER_LEVEL
+        {
+            out.push(EntityData::ZombieVillagerData {
+                kind: mob.villager_kind,
+                profession: mob.villager_profession,
+                level: mob.villager_level,
+            });
+        }
+        if mob.villager_finalized {
+            out.push(EntityData::ZombieVillagerDataFinalized(true));
         }
         return out;
     }

@@ -544,6 +544,14 @@ impl Entity {
             let countdown = mob::fox::sleep_countdown(&mut self.random);
             mob::fox::set_sleep_countdown(mob, countdown);
         }
+        if mob.mob_type == mob::MobType::ZombieVillager {
+            // `ZombieVillager.defineSynchedData`：`initializeZombieVillagerData(random)`
+            // 里的随机职业用实体自己的随机源。
+            //
+            // `ZombieVillager.defineSynchedData`: the random profession of
+            // `initializeZombieVillagerData(random)` uses the entity's own random.
+            mob::zombie_villager::configure_new(mob, &mut self.random);
+        }
         if mob.mob_type == mob::MobType::Chicken {
             // `Chicken` 构造函数最后的 `eggTime = nextInt(6000) + 6000`。
             // The `Chicken` constructor's trailing `eggTime = nextInt(6000) + 6000`.

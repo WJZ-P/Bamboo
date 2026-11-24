@@ -762,6 +762,7 @@ pub(super) fn check_spawn_rules(
         // `Parrot.checkParrotSpawnRules`: `#parrots_spawnable_on` plus brightness.
         MobType::Parrot => super::parrot::spawn_rules(world, pos),
         MobType::Zombie
+        | MobType::ZombieVillager
         | MobType::Skeleton
         | MobType::Bogged
         | MobType::Witch

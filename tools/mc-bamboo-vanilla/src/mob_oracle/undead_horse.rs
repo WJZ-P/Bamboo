@@ -164,6 +164,7 @@ impl Report {
                     creative: false,
                     position: Vec3::new(2.5, 64.0, 0.5),
                     sneaking: false,
+                    difficulty: 2,
                 };
                 let mut world = World::new(&mut level, &mut ticks);
                 result_code(world.interact_mob(id, &request).result)

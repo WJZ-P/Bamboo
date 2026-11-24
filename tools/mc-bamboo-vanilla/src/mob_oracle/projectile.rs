@@ -1644,6 +1644,7 @@ fn shear_shooter(world: &mut World<'_>, case: &ProjectileCase) -> (bool, Vec<[i6
         held: ItemStack::new(mc_bamboo_data::items::SHEARS, 1),
         creative: false,
         sneaking: false,
+        difficulty: 2,
         position: Vec3::new(case.player_x, 64.0, 0.5),
     };
     let outcome = world.interact_mob(case.first_id, &request);

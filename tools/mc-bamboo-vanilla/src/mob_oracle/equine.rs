@@ -462,6 +462,7 @@ impl Report {
             creative: case.creative,
             position: Vec3::new(1.5, 64.0, 0.5),
             sneaking: case.sneak,
+            difficulty: 2,
         };
         let outcome = entity
             .with_mob(|me, mob| interact::interact(me, mob, &request, 0, false))

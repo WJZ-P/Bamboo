@@ -956,6 +956,7 @@ mod tests {
             creative: false,
             position: Vec3::default(),
             sneaking: false,
+            difficulty: 2,
         }
     }
 
