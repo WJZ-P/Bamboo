@@ -1338,6 +1338,30 @@ impl EntityStore {
         &self.ejected_player_passengers
     }
 
+    /// 岛之间搬一整棵骑乘树：按 uid 取出完整一行并保留 uid 与两半状态。
+    /// 与 [`Self::remove`] 不同，这里不改任何 `vehicle` / `passengers` 链接，
+    /// 因为整棵树会一起插进目标表。取不到的 uid 返回 `None`。
+    ///
+    /// Move a whole riding tree between islands: take a full row by uid,
+    /// keeping its uid and both halves. Unlike [`Self::remove`] this does not
+    /// touch any riding links, since the whole tree is inserted together.
+    pub fn take_row(&mut self, uid: EntityUid) -> Option<super::EntityRow> {
+        let row = self.index.remove(&uid)?;
+        self.unindex_sub(uid);
+        self.taken.remove(&uid);
+        self.taken_snapshots.remove(&uid);
+        let entry = self.slots[row].take()?;
+        self.chunk_index_remove(uid, entry.public.chunk_position());
+        self.grid_remove(row, &entry.public);
+        self.free.push(row);
+        Some(entry)
+    }
+
+    /// [`Self::take_row`] 的另一半：原样插入一张新表，不分配新 ID、不取新种子。
+    pub fn insert_row_preserving(&mut self, row: super::EntityRow) {
+        self.insert_row_quietly(row);
+    }
+
     /// 从载具的乘客名单里摘掉一个 uid（公开与私有两份都要改）。
     fn detach_passenger(&mut self, vehicle: EntityUid, passenger: EntityUid) {
         let Some(row) = self.index.get(&vehicle).copied() else {

@@ -1056,3 +1056,65 @@ fn a_broken_root_vehicle_never_panics_or_leaves_orphans() {
         assert_eq!(region.entities.ids().len(), before, "no orphans");
     }
 }
+
+/// 跨岛搬迁把整棵骑乘树（根 + 嵌套生物乘客）从原表搬到目标表：uid 不变，
+/// 两边的 `vehicle` / `passengers` 链接原样保留，玩家侧的 `Riding.vehicle`
+/// 在目标表里依然指向同一只载具。
+#[test]
+fn moving_a_riding_tree_between_tables_keeps_every_link() {
+    use mc_bamboo_blocks::entity::{Entity, FIRST_ENTITY_ID};
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use uuid::Uuid;
+
+    use crate::{inbound::PlayerId, player::Player, region::Region};
+
+    let mut source = Region::new(2, 20, false);
+    let id = PlayerId(6);
+    source.insert_player(Player::new(
+        id,
+        Uuid::from_u128(1),
+        "Rider".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(8.5, 64.0, 8.5),
+    ));
+    let horse = source.entities.spawn(Entity::by_mob_type(
+        MobType::Horse,
+        Vec3::new(8.5, 64.0, 8.5),
+    ));
+    let cow = source
+        .entities
+        .spawn(Entity::cow(Vec3::new(9.5, 65.0, 8.5)));
+    super::mount(&mut source, id, horse);
+    source.entities.with_mut(horse, |entity| {
+        entity.with_mob(|_, mob| {
+            mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, cow, false);
+        })
+    });
+    source.entities.with_mut(cow, |entity| {
+        entity.vehicle = Some(horse);
+    });
+    assert!(cow >= FIRST_ENTITY_ID);
+
+    let tree = super::riding_entities(&source, id);
+    assert_eq!(tree, vec![horse, cow]);
+    let chunks = super::riding_tree_chunks(&source, id);
+    assert_eq!(chunks.len(), 1);
+
+    let mut target = Region::new(2, 20, false);
+    for uid in tree {
+        let row = source
+            .entities
+            .take_row(uid)
+            .expect("row leaves the source");
+        target.entities.insert_row_preserving(row);
+    }
+    // 玩家表也跟着搬：这里只改 riding 侧，剩下的表由岛的拆合负责。
+    let player = source.players.remove(&id).expect("player");
+    target.insert_player(player);
+    assert!(source.entities.ids().is_empty());
+    assert!(super::check_consistency(&target).is_empty());
+    assert_eq!(target.players[&id].riding.vehicle, Some(horse));
+    assert_eq!(super::passengers(&target, horse), vec![id.0, cow]);
+    assert_eq!(target.entities.public_at(cow).unwrap().vehicle, Some(horse));
+}

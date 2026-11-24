@@ -502,11 +502,21 @@ impl World {
         let origin = self.master.host.island_origin(to, chunk);
         let source = self.islands.get_mut(from).expect("在表里");
         // 只装这名玩家的小岛：随机源用不上（合进目标岛时丢掉）。
+        // 玩家骑着的整棵树单独搬（直接改实体表，避免把原岛的已加载区块拆开
+        // 而违反两部分的间隔前提）。
         // A one-player carrier; its random sources are dropped on the merge.
+        // The riding tree is moved separately through the entity tables so the
+        // carrier does not split off chunks that are adjacent to the old island.
+        let tree = crate::riding::riding_entities(&source.region, id);
         let random = source.region.derive_island_random(0, SectionPos::of(chunk));
-        let carrier = source
+        let mut carrier = source
             .split_off_island_boxed(to, &BTreeSet::new(), &BTreeSet::from([id]), random)
             .unwrap_or_else(|_| panic!("tick 边界上搬不走玩家 {id:?}"));
+        for uid in tree {
+            if let Some(row) = source.region.entities.take_row(uid) {
+                carrier.region.entities.insert_row_preserving(row);
+            }
+        }
         let target = self.islands.ensure(to, origin);
         let delta = target.region.tick.game_time() - carrier.region.tick.game_time();
         target.absorb_island_boxed(carrier, delta);

@@ -140,6 +140,63 @@ pub(crate) fn check_consistency(region: &Region) -> Vec<String> {
     problems
 }
 
+/// 玩家所在骑乘树的全部实体 uid（根 + 嵌套生物乘客，按 uid 升序）。
+/// 跨岛搬迁时按这张表把整棵树从原表搬到目标表，链接原样保留。
+///
+/// Every entity uid in the player's riding tree (root plus nested mob
+/// passengers, uid-ascending). Cross-island moves transfer the whole tree
+/// with the links intact.
+pub(crate) fn riding_entities(region: &Region, id: PlayerId) -> Vec<EntityUid> {
+    let Some(vehicle) = region.players.get(&id).and_then(|p| p.riding.vehicle) else {
+        return Vec::new();
+    };
+    let mut stack = vec![root_vehicle(region, vehicle)];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(uid) = stack.pop() {
+        if !seen.insert(uid) || seen.len() > 64 {
+            break;
+        }
+        stack.extend(
+            passengers(region, uid)
+                .into_iter()
+                .filter(|&passenger| passenger >= FIRST_ENTITY_ID),
+        );
+    }
+    seen.into_iter().collect()
+}
+
+/// 玩家所在骑乘树的全部实体所在区块（拆岛、跨岛搬迁时整组一起搬）。
+/// 玩家不在实体表里，从他直接骑的载具开始，按双向链接遍历整棵树。
+///
+/// All chunks of the riding tree the player belongs to (an island split or a
+/// cross-island move takes the whole group). Players are not in the entity
+/// table, so the walk starts at the player's direct vehicle.
+pub(crate) fn riding_tree_chunks(
+    region: &Region,
+    id: PlayerId,
+) -> std::collections::BTreeSet<mc_bamboo_core::ChunkPos> {
+    let mut out = std::collections::BTreeSet::new();
+    let Some(vehicle) = region.players.get(&id).and_then(|p| p.riding.vehicle) else {
+        return out;
+    };
+    let mut stack = vec![root_vehicle(region, vehicle)];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(uid) = stack.pop() {
+        if !seen.insert(uid) || seen.len() > 64 {
+            break;
+        }
+        if let Some(public) = region.entities.public_at(uid) {
+            out.insert(public.chunk_position());
+        }
+        stack.extend(
+            passengers(region, uid)
+                .into_iter()
+                .filter(|&passenger| passenger >= FIRST_ENTITY_ID),
+        );
+    }
+    out
+}
+
 /// 一棵骑乘树的根（官方 `Entity.getRootVehicle()`）：从玩家直接骑的载具沿
 /// `Entity.vehicle` 往上走。玩家不在实体表里，所以第一跳从玩家的载具开始。
 /// 坏数据里成环时停在 64 跳，不 panic。
