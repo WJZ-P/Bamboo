@@ -3631,6 +3631,11 @@ pub struct MobPublic {
     pub enderman_stared_at: bool,
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`。
     pub dark_ticks: i32,
+    /// `Guardian.DATA_ID_MOVING` / `DATA_ID_ATTACK_TARGET`。
+    ///
+    /// `Guardian.DATA_ID_MOVING` / `DATA_ID_ATTACK_TARGET`.
+    pub guardian_moving: bool,
+    pub guardian_attack_target: i32,
     /// `IronGolem.DATA_FLAGS_ID` / `SnowGolem.DATA_PUMPKIN_ID`，都是 BYTE。
     pub golem_flags: u8,
     /// 村民的 `VillagerData` 三项、`VillagerDataFinalized` 和 `DATA_UNHAPPY_COUNTER`。
@@ -3804,6 +3809,8 @@ impl MobPublic {
             enderman_creepy: mob.enderman.creepy,
             enderman_stared_at: mob.enderman.stared_at,
             dark_ticks: mob.squid.dark_ticks,
+            guardian_moving: mob.guardian.moving,
+            guardian_attack_target: mob.guardian.attack_target,
             bat_flags: mob.bat.flags,
             golem_flags: if mob.mob_type == MobType::IronGolem {
                 mob.iron_golem.flags
