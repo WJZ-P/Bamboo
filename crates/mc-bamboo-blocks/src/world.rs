@@ -3432,6 +3432,22 @@ impl<'a> World<'a> {
         self.add_prepared_entity(entity)
     }
 
+    /// `Projectile.spawnProjectileFromRotation(ThrownTrident::new, ...)`：和箭一样
+    /// 走 `prepare`（种子 / UUID），再按视角射出。
+    ///
+    /// `Projectile.spawnProjectileFromRotation(ThrownTrident::new, ...)`: like an
+    /// arrow it goes through `prepare` (seed / UUID), then shoots by rotation.
+    pub fn spawn_trident_shot(&mut self, shot: crate::entity::arrow::TridentShot) -> i32 {
+        let mut entity = self.prepare_entity(Entity::configured_trident(&shot));
+        entity.shoot_arrow_with_movement(
+            shot.direction,
+            shot.power,
+            shot.uncertainty,
+            shot.source_movement,
+        );
+        self.add_prepared_entity(entity)
+    }
+
     /// 构造一个实体但先不放进世界，见 [`crate::EntityStore::prepare`]。
     pub fn prepare_entity(&mut self, entity: Entity) -> Entity {
         self.level.prepare_entity(entity)

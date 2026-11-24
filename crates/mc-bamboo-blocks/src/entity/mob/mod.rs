@@ -1585,6 +1585,10 @@ pub enum DamageKind {
     MobAttack,
     MobAttackNoAggro,
     Arrow,
+    /// 三叉戟投掷物，`minecraft:trident`。
+    ///
+    /// A thrown trident, `minecraft:trident`.
+    Trident,
     /// 羊驼口水，`minecraft:spit`。
     ///
     /// Llama spit, `minecraft:spit`.
@@ -1647,6 +1651,7 @@ impl DamageKind {
             Self::MobAttack => "minecraft:mob_attack",
             Self::MobAttackNoAggro => "minecraft:mob_attack_no_aggro",
             Self::Arrow => "minecraft:arrow",
+            Self::Trident => "minecraft:trident",
             Self::Spit => "minecraft:spit",
             Self::Sting => "minecraft:sting",
             Self::Thrown => "minecraft:thrown",
@@ -1706,6 +1711,7 @@ impl DamageKind {
             Self::MobAttack | Self::MobAttackNoAggro | Self::Spit => "mob",
             Self::Sting => "sting",
             Self::Arrow => "arrow",
+            Self::Trident => "trident",
             Self::Thrown => "thrown",
             Self::Starve => "starve",
             Self::Thorns => "thorns",
@@ -1743,6 +1749,7 @@ impl DamageKind {
             Self::MobAttack,
             Self::MobAttackNoAggro,
             Self::Arrow,
+            Self::Trident,
             Self::Spit,
             Self::Sting,
             Self::Thrown,
@@ -1769,6 +1776,7 @@ impl DamageKind {
                 | Self::MobAttack
                 | Self::MobAttackNoAggro
                 | Self::Arrow
+                | Self::Trident
                 | Self::Spit
                 | Self::Thrown
                 | Self::Thorns

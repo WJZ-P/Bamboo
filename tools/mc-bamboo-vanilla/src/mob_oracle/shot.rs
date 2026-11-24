@@ -108,6 +108,10 @@ impl ShotCase {
                 None,
                 false,
             ),
+            "shot_trident" | "shot_trident_moving" => {
+                (items::TRIDENT, items::ARROW, 5, plain(), None, false)
+            }
+            "shot_trident_creative" => (items::TRIDENT, items::ARROW, 5, plain(), None, true),
             "shot_dispenser_arrow" | "shot_dispenser_arrow_up" => return None,
             other => panic!("unrecognized shot scene {other}"),
         };

@@ -539,7 +539,7 @@ fn run_cases(
             );
             if matches!(&tag, Tag::Compound(fields) if fields.iter().any(|(key, value)| {
                 key == "id"
-                    && matches!(value, Tag::String(id) if id == "minecraft:arrow" || id == "minecraft:egg" || id == "minecraft:llama_spit")
+                    && matches!(value, Tag::String(id) if id == "minecraft:arrow" || id == "minecraft:trident" || id == "minecraft:egg" || id == "minecraft:llama_spit")
             })) && let Some(row) = rebuilt
             {
                 let saved = write_entity(&row).map_err(|error| error.to_string())?;
@@ -1540,6 +1540,7 @@ fn entity_cases() -> Vec<Tag> {
     with_uuid.push(("UUID".to_owned(), uuid));
     out.push(Tag::Compound(with_uuid));
     out.extend(arrow_archive_cases());
+    out.extend(trident_archive_cases());
     out.extend(spit_archive_cases());
     out.extend(egg_archive_cases());
     out.extend(fish_archive_cases());
@@ -1698,6 +1699,48 @@ fn arrow_archive_cases() -> [Tag; 2] {
     arrow.pickup = Pickup::Allowed;
 
     [flight, embedded].map(|entity| write_entity(&entity.split()).unwrap())
+}
+
+/// 三叉戟的两道存档题：飞行中带忠诚 / 光效 / 主人，和插地、已命中实体的。
+/// `DealtDamage` 是 `ThrownTrident` 独有的存档键；忠诚 / 光效是元数据不进存档。
+///
+/// Two trident save cases: one in flight with loyalty / foil / owner, and one
+/// embedded in the ground that has already dealt damage. `DealtDamage` is
+/// `ThrownTrident`'s own save key; loyalty / foil are metadata and not saved.
+fn trident_archive_cases() -> [Tag; 2] {
+    let ground = mc_bamboo_data::sounds::sound_event("minecraft:item.trident.hit_ground");
+    let mut flight = Entity::trident(Vec3::new(1.5, 65.25, -2.0));
+    flight.id = 30;
+    flight.delta = Vec3::new(0.3, 0.2, -0.1);
+    flight.y_rot = -20.0;
+    let EntityKind::Arrow(arrow) = &mut flight.kind else {
+        unreachable!()
+    };
+    arrow.uuid = 30_u128.to_be_bytes();
+    arrow.owner_uuid = Some(17_u128.to_be_bytes());
+    arrow.pitch = 12.0;
+    arrow.pickup = Pickup::Allowed;
+    arrow.pickup_item = ItemStack::new(mc_bamboo_data::items::TRIDENT, 1);
+    arrow.sound = ground;
+    arrow.loyalty = 3;
+    arrow.foil = true;
+    arrow.dealt_damage = false;
+
+    let mut spent = Entity::trident(Vec3::new(1.5, 64.25, -2.0));
+    spent.id = 31;
+    let EntityKind::Arrow(arrow) = &mut spent.kind else {
+        unreachable!()
+    };
+    arrow.uuid = 31_u128.to_be_bytes();
+    arrow.pickup_item = ItemStack::new(mc_bamboo_data::items::TRIDENT, 1);
+    arrow.sound = ground;
+    arrow.in_ground = true;
+    arrow.last_state = Some(BlockState(blocks::STONE));
+    arrow.shake_time = 4;
+    arrow.life = 1199;
+    arrow.dealt_damage = true;
+
+    [flight, spent].map(|entity| write_entity(&entity.split()).unwrap())
 }
 
 /// 羊驼口水的两道存档题：飞行中、带主人且已离开主人的，和刚造出来什么都没设的。

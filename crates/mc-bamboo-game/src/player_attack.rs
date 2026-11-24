@@ -451,6 +451,11 @@ struct AttackRequest {
     ticker: i32,
     position: Vec3,
     yaw: f32,
+    /// 自旋攻击用 `autoSpinAttackDmg` 覆盖属性攻击力；普通攻击为 `None`。
+    ///
+    /// An auto-spin attack overrides the attribute damage with
+    /// `autoSpinAttackDmg`; `None` for an ordinary attack.
+    base_damage_override: Option<f32>,
 }
 
 /// 一次攻击算好的所有量，交给落地和发包两个阶段用。
@@ -481,7 +486,30 @@ struct AttackPlan {
 /// `ServerGamePacketListenerImpl.handleAttack` + `Player.attack` 的入口。
 ///
 /// Entry point for `ServerGamePacketListenerImpl.handleAttack` + `Player.attack`.
+/// 客户端左键攻击实体：官方 `ServerGamePacketListenerImpl.handleAttack`。
+///
+/// A client left-click attack, vanilla `ServerGamePacketListenerImpl.handleAttack`.
 pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
+    attack_inner(region, id, entity_id, None);
+}
+
+/// `Player.doAutoAttackOnTouch` -> `Player.attack`：自旋攻击时官方用
+/// `autoSpinAttackDmg` 作基础伤害，其余（附魔、充能、暴击、击退、横扫、音效、
+/// 统计）都走同一套 `Player.attack`。
+///
+/// `Player.doAutoAttackOnTouch` -> `Player.attack`: during an auto-spin attack
+/// vanilla uses `autoSpinAttackDmg` as the base damage; everything else runs the
+/// same `Player.attack` path.
+pub(crate) fn on_attack_with_base(region: &mut Region, id: PlayerId, entity_id: i32, base: f32) {
+    attack_inner(region, id, entity_id, Some(base));
+}
+
+fn attack_inner(
+    region: &mut Region,
+    id: PlayerId,
+    entity_id: i32,
+    base_damage_override: Option<f32>,
+) {
     let Some(player) = region.players.get(&id) else {
         return;
     };
@@ -505,6 +533,7 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
         ticker,
         position,
         yaw,
+        base_damage_override,
     };
     let Some(plan) = plan_attack(region, &target, &request) else {
         return;
@@ -730,13 +759,14 @@ fn plan_attack(
     target: &TargetInfo,
     req: &AttackRequest,
 ) -> Option<AttackPlan> {
-    let (id, entity_id, held, ticker, position, yaw) = (
+    let (id, entity_id, held, ticker, position, yaw, base_damage_override) = (
         req.id,
         req.entity_id,
         &req.held,
         req.ticker,
         req.position,
         req.yaw,
+        req.base_damage_override,
     );
     let delay = strength_delay(held);
     if has_piercing_weapon(held) || cannot_attack_with_item(ticker, held, delay) {
@@ -747,7 +777,8 @@ fn plan_attack(
     // 其余物品（含剑）都不加，这里按官方缺省跳过。
     //
     // `Item.getAttackDamageBonus` defaults to 0 in 26.3; swords add nothing.
-    let base_damage_0 = player_health::PlayerHealth::attack_damage(held);
+    let base_damage_0 =
+        base_damage_override.unwrap_or_else(|| player_health::PlayerHealth::attack_damage(held));
     let magic_boost = s * damage_bonus(held, target.entity_type);
     let mut base_damage = base_damage_0 * (BASE_SCALE_MIN + s * s * BASE_SCALE_SPAN);
     // `onAttack()` → `resetOnlyAttackStrengthTicker()`。
