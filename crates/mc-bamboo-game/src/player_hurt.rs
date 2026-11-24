@@ -78,16 +78,19 @@ pub(crate) fn tick(region: &mut Region) {
         if player.dead || player.spawn_pending.is_some() {
             continue;
         }
+        let max_health = crate::player_effects::max_health(player);
         if difficulty == 0 && natural_regen {
-            let _ = player.health.tick_peaceful(player.entity_ticks);
+            let _ = player.health.tick_peaceful(player.entity_ticks, max_health);
         }
         if player.health.death_time > 0 && player.health.death_time < 20 {
             // `LivingEntity.baseTick` 每刻推一次死亡动画，20 刻后才 discard。
             player.health.death_time += 1;
         }
-        let food_tick = player.health.tick_food(difficulty, natural_regen);
+        let food_tick = player
+            .health
+            .tick_food(difficulty, natural_regen, max_health);
         match food_tick {
-            crate::player_health::FoodTick::Heal(amount) => player.health.heal(amount),
+            crate::player_health::FoodTick::Heal(amount) => player.health.heal(amount, max_health),
             crate::player_health::FoodTick::Starve => starve.push(*id),
             crate::player_health::FoodTick::Idle => {}
         }
@@ -210,33 +213,13 @@ pub(crate) fn hurt_player_by_mob(
     (hurt, drops)
 }
 
-/// 玩家的击退抗性：属性缺省值加上装备的修饰符。
+/// 玩家的击退抗性：直接从属性表读 `Attributes.KNOCKBACK_RESISTANCE`。
 ///
-/// The player's knockback resistance: the default plus equipment modifiers.
+/// The player's knockback resistance from `Attributes.KNOCKBACK_RESISTANCE`.
 fn knockback_resistance(player: &Player) -> f64 {
-    use mc_bamboo_blocks::entity::mob::{
-        attributes::Attribute,
-        equipment::{SLOTS, stack_modifiers},
-    };
-    use mc_bamboo_data::registries::{attribute::KNOCKBACK_RESISTANCE, attribute_defaults};
-    use mc_bamboo_protocol::item::ItemStack;
-
-    let mut resistance = Attribute::new(
-        KNOCKBACK_RESISTANCE,
-        attribute_defaults::KNOCKBACK_RESISTANCE,
-    );
-    for (slot, stack) in SLOTS
-        .into_iter()
-        .zip(player.equipment_stacks(&ItemStack::empty()))
-    {
-        for (kind, modifier) in stack_modifiers(stack, slot) {
-            if kind == KNOCKBACK_RESISTANCE {
-                resistance.remove_modifier(&modifier.id);
-                resistance.modifiers.push(modifier);
-            }
-        }
-    }
-    resistance.value()
+    player
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::KNOCKBACK_RESISTANCE)
 }
 
 /// 山羊冲撞的 `LivingEntity.knockback(strength, dx, dz)`：不管这一下打没打中都推，
@@ -356,10 +339,27 @@ fn hurt_player_damage(
         return (false, None);
     }
     let position = player.position();
+    let max_health = crate::player_effects::max_health(player);
     let armor = {
         let empty = mc_bamboo_protocol::item::ItemStack::empty();
         let equipment = player.equipment_stacks(&empty);
         let mut armor = crate::player_health::PlayerHealth::armor_values(&equipment);
+        // 官方 `LivingEntity.getDamageAfterArmorAbsorb`：`getArmorValue()` 取
+        // `Mth.floor(getAttributeValue(ARMOR))`，韧性取 `(float) getAttributeValue(ARMOR_TOUGHNESS)`。
+        // 保护附魔等级和抗性提升效果仍从装备附魔与效果表读。
+        //
+        // Vanilla `getDamageAfterArmorAbsorb`: armor is `floor(ARMOR)`, toughness
+        // is `(float) ARMOR_TOUGHNESS`; protection and resistance come from
+        // enchantments and effects.
+        armor.armor = mc_bamboo_core::mth::floor(
+            player
+                .attributes
+                .value(mc_bamboo_data::registries::attribute::ARMOR),
+        ) as f32;
+        armor.toughness = player
+            .attributes
+            .value(mc_bamboo_data::registries::attribute::ARMOR_TOUGHNESS)
+            as f32;
         armor.resistance = player
             .effects
             .amplifier(mc_bamboo_data::registries::mob_effect::RESISTANCE);
@@ -368,7 +368,7 @@ fn hurt_player_damage(
     let (outcome, hurt_yaw, sync, saturation) = {
         let outcome = player
             .health
-            .hurt(amount, source, difficulty, armor, position);
+            .hurt(amount, source, difficulty, armor, position, max_health);
         let Some(outcome) = outcome else {
             return (false, None);
         };
@@ -639,8 +639,11 @@ fn knockback(
     if dx * dx + dz * dz < 1.0e-5 {
         return;
     }
-    // 官方 `dealDefaultKnockback` 传的是 float 0.4f，转成 double 后是 0.4000000059604645。
-    let strength = f64::from(0.4_f32);
+    // 官方 `dealDefaultKnockback` 传的是 float 0.4f，转成 double 后再乘 `1 - KNOCKBACK_RESISTANCE`。
+    let strength = f64::from(0.4_f32) * (1.0 - knockback_resistance(player));
+    if strength <= 0.0 {
+        return;
+    }
     let length = (dx * dx + dz * dz).sqrt();
     let push_x = dx / length * strength;
     let push_z = dz / length * strength;

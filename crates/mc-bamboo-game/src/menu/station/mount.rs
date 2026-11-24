@@ -14,7 +14,6 @@
 
 use mc_bamboo_blocks::entity::mob::{MobType, equine::inventory};
 use mc_bamboo_core::Vec3;
-use mc_bamboo_data::registries::attribute_defaults;
 use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::{EquipmentSlot, GameMode, MountScreenOpen},
@@ -27,10 +26,6 @@ use crate::{container::ContainerKind, inbound::PlayerId, menu::Target, region::R
 ///
 /// The extra reach in `isWithinEntityInteractionRange(mount, 4.0)`.
 const MOUNT_REACH_BUFFER: f64 = 4.0;
-/// 创造模式 `creative_mode_entity_range` 修饰符加的距离。
-///
-/// The reach added by the creative `creative_mode_entity_range` modifier.
-const CREATIVE_ENTITY_REACH: f64 = 2.0;
 
 /// 菜单记住的那头坐骑。
 ///
@@ -274,10 +269,10 @@ pub(super) fn still_valid(station: &Station, region: &Region, id: PlayerId) -> b
         player.position().y + player.eye_height(),
         player.position().z,
     );
-    let mut range = attribute_defaults::ENTITY_INTERACTION_RANGE + MOUNT_REACH_BUFFER;
-    if player.game_mode == GameMode::Creative {
-        range += CREATIVE_ENTITY_REACH;
-    }
+    let range = player
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::ENTITY_INTERACTION_RANGE)
+        + MOUNT_REACH_BUFFER;
     public.bounding_box().distance_to_sqr(eye) < range * range
 }
 

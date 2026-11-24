@@ -32,7 +32,7 @@ use crate::{
     block_items,
     container::{self, CONTAINER_BUFFER, ContainerKind},
     inbound::PlayerId,
-    interaction::{BLOCK_INTERACTION_RANGE, rules},
+    interaction::rules,
     inventory::{HOTBAR_START, Inventory, OFF_HAND, menu_slot},
     lock,
     region::Region,
@@ -846,7 +846,7 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bo
     if !is_spectator(region, id) {
         let positions = region.menus[&id].target.positions();
         for target_pos in positions {
-            container::start_open(region, target_pos, kind);
+            container::start_open(region, id, target_pos, kind);
         }
     }
     let title = menu_title(region, &region.menus[&id].target, title);
@@ -1225,25 +1225,29 @@ fn still_valid(region: &Region, id: PlayerId, menu: &Menu) -> bool {
         player.position().y + player.eye_height(),
         player.position().z,
     );
+    let reach = player
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::BLOCK_INTERACTION_RANGE);
     match menu.target {
-        Target::Single(pos) => in_reach(region, pos, menu.kind, eye),
+        Target::Single(pos) => in_reach(region, pos, menu.kind, eye, reach),
         Target::Double { first, second } => {
-            in_reach(region, first, menu.kind, eye) && in_reach(region, second, menu.kind, eye)
+            in_reach(region, first, menu.kind, eye, reach)
+                && in_reach(region, second, menu.kind, eye, reach)
         }
         Target::EnderChest(pos) => match player.ender_chest.active {
             // 官方的 `stillValid` 在没有打开的箱子时返回真。
             None => true,
-            Some(active) => active == pos && in_reach(region, active, menu.kind, eye),
+            Some(active) => active == pos && in_reach(region, active, menu.kind, eye, reach),
         },
     }
 }
 
 /// 方块还在，并且玩家在 `blockInteractionRange + 4` 以内。官方多给的 4 格见 `CONTAINER_BUFFER`。
-fn in_reach(region: &Region, pos: BlockPos, kind: ContainerKind, eye: Vec3) -> bool {
+fn in_reach(region: &Region, pos: BlockPos, kind: ContainerKind, eye: Vec3, reach: f64) -> bool {
     if container::kind_at(region, pos) != Some(kind) {
         return false;
     }
-    let range = BLOCK_INTERACTION_RANGE + CONTAINER_BUFFER;
+    let range = reach + CONTAINER_BUFFER;
     let x = f64::from(pos.x);
     let y = f64::from(pos.y);
     let z = f64::from(pos.z);

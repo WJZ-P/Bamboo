@@ -1176,6 +1176,7 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
     if scene.attack_sprint {
         entity_sync::set_sprinting(&mut region, id, true);
     }
+    player_attributes::rebuild(&mut region);
     region.global.difficulty = scene.difficulty_value();
     // 1a 的官方假世界明确不跑 `FoodData.tick` / `tickRegeneration`；
     // 关掉自然回血后满血满饥饿的玩家状态不会因食物阶段而改变。
@@ -2208,6 +2209,7 @@ pub fn replay_player_effects(
         .add(observer, Box::new(observer_capture.clone()));
     region.insert_player(watcher);
     region.insert_player(player);
+    player_attributes::rebuild(&mut region);
     region.sound_seed_generator = mc_bamboo_blocks::LevelRandom::new(12345);
     // 1a 的 `player_hurt::tick` 等价物：关掉自然回血，场景只跑效果链。
     {
@@ -2516,6 +2518,7 @@ pub fn replay_player_env(scene: &ReplayPlayerEnv) -> (Vec<PlayerEnvStep>, Vec<Ve
         .add(observer, Box::new(observer_capture.clone()));
     region.insert_player(watcher);
     region.insert_player(player);
+    player_attributes::rebuild(&mut region);
     region.sound_seed_generator = mc_bamboo_blocks::LevelRandom::new(12345);
     // 摔落伤害在 `finish_tick` 里由 `pending_land` 触发。
     if scene.fall > 0 {

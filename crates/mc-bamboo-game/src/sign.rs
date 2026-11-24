@@ -109,7 +109,9 @@ pub(crate) fn tick_editors(region: &mut Region) {
                 && interaction::within_block_interaction_range(
                     player.position(),
                     player.eye_height(),
-                    interaction::interaction_range(player.game_mode),
+                    player
+                        .attributes
+                        .value(mc_bamboo_data::registries::attribute::BLOCK_INTERACTION_RANGE),
                     pos,
                     EDIT_BUFFER,
                 )

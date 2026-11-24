@@ -19,7 +19,7 @@ use mc_bamboo_blocks::{
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{
     blocks, items,
-    registries::{attribute_defaults, mob_effect},
+    registries::{attribute, mob_effect},
 };
 use mc_bamboo_protocol::{
     codec::Reader,
@@ -471,7 +471,7 @@ fn inside_stuck(region: &Region, id: PlayerId, pending: &[TravelSegment]) -> Opt
 fn flying_tick(player: &mut Player) -> bool {
     if player.motion.client_is_floating {
         player.motion.above_ground_ticks = player.motion.above_ground_ticks.wrapping_add(1);
-        player.motion.above_ground_ticks > maximum_flying_ticks()
+        player.motion.above_ground_ticks > maximum_flying_ticks(player)
     } else {
         player.motion.client_is_floating = false;
         player.motion.above_ground_ticks = 0;
@@ -479,11 +479,12 @@ fn flying_tick(player: &mut Player) -> bool {
     }
 }
 
-/// `getMaximumFlyingTicks`。重力用属性默认值。
+/// `getMaximumFlyingTicks`：从玩家属性表读 `Attributes.GRAVITY`。
 ///
-/// `getMaximumFlyingTicks`. Gravity is the attribute default.
-fn maximum_flying_ticks() -> i32 {
-    let gravity = attribute_defaults::GRAVITY;
+/// `getMaximumFlyingTicks`: reads `Attributes.GRAVITY` from the player's
+/// attribute map.
+pub(crate) fn maximum_flying_ticks(player: &Player) -> i32 {
+    let gravity = player.attributes.value(attribute::GRAVITY);
     if gravity < f64::from(1.0e-5_f32) {
         return i32::MAX;
     }
@@ -733,7 +734,7 @@ fn simulate_move(
     let resolved = sweep_movement(
         delta,
         movement_box(player),
-        step_height(),
+        step_height(player),
         player.on_ground,
         move_context(player),
         CollisionBlocks {
@@ -796,7 +797,7 @@ fn floating_now(
         && enclosed_in_air(movement_box(player), &mut |pos| blocks.state(pos))
 }
 
-fn jump_from_ground(player: &mut Player) {
+pub(crate) fn jump_from_ground(player: &mut Player) {
     // `LivingEntity.getJumpPower` = JUMP_STRENGTH * block factor + getJumpBoostPower()。
     // 跳跃提升每级 +0.1；移动校验要用同一份高度，否则跳跃时会被判成悬空。
     // `getJumpPower`: JUMP_STRENGTH times the block factor plus the jump-boost
@@ -805,7 +806,7 @@ fn jump_from_ground(player: &mut Player) {
         .effects
         .amplifier(mob_effect::JUMP_BOOST)
         .map_or(0.0, |amplifier| 0.1 * (amplifier.max(0) as f32 + 1.0));
-    let power = attribute_defaults::JUMP_STRENGTH as f32 + boost;
+    let power = player.attributes.value(attribute::JUMP_STRENGTH) as f32 + boost;
     if power <= 1.0e-5 {
         return;
     }
@@ -826,7 +827,7 @@ fn jump_from_ground(player: &mut Player) {
 }
 
 fn back_off_from_edge(player: &Player, delta: Vec3, blocks: &PlayerBlocks<'_>) -> Vec3 {
-    let max_down = step_height();
+    let max_down = step_height(player);
     if player.sync.flying
         || delta.y > 0.0
         || !player.sync.shift_key_down
@@ -1068,8 +1069,8 @@ fn box_at(player: &Player, feet: Vec3) -> Aabb {
     movement_box(player).moved(delta.x, delta.y, delta.z)
 }
 
-fn step_height() -> f32 {
-    attribute_defaults::STEP_HEIGHT as f32
+pub(crate) fn step_height(player: &Player) -> f32 {
+    player.attributes.value(attribute::STEP_HEIGHT) as f32
 }
 
 fn may_fly(mode: GameMode) -> bool {
@@ -1214,6 +1215,7 @@ pub fn replay_movement(sample: &MoveReplay) -> MoveReplayReport {
             ),
         );
     }
+    crate::player_attributes::rebuild_player(&mut player, false);
     region.insert_player(player);
     for (pos, state) in &sample.blocks {
         region.chunks.set_block(*pos, *state);

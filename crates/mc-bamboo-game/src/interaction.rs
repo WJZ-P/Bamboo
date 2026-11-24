@@ -16,7 +16,7 @@ use std::{collections::BTreeSet, mem};
 use mc_bamboo_blocks::{Actor, BlockHit, BlockState, Effect, InteractionResult, LevelSideState};
 use mc_bamboo_command::permission;
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
-use mc_bamboo_data::{BlockAncestor, SOUND_EVENTS, items, registries::attribute_defaults, sounds};
+use mc_bamboo_data::{BlockAncestor, SOUND_EVENTS, items, registries::attribute, sounds};
 use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::{
@@ -51,8 +51,6 @@ const LECTERN_PAGE_TURN_EVENT: i32 = 1043;
 const COMPOSTER_FILL_EVENT: i32 = 1500;
 /// 骨粉事件的数据：粒子的数量。
 const BONE_MEAL_PARTICLES: i32 = 15;
-/// 创造模式的 `block_interaction_range`：基础值 4.5 加修饰符 0.5。
-pub(crate) const BLOCK_INTERACTION_RANGE: f64 = 5.0;
 /// 官方判定时多给的一格，服务端记录的位置可能比客户端晚一点。
 const REACH_BUFFER: f64 = 1.0;
 /// 点击点离方块中心的最大偏差，官方的比较是严格小于。
@@ -379,7 +377,7 @@ fn actor_of(player: &Player) -> Actor {
         main_hand: held(Hand::Main),
         off_hand: held(Hand::Off),
         eye_height: player.eye_height(),
-        block_interaction_range: interaction_range(player.game_mode),
+        block_interaction_range: player.attributes.value(attribute::BLOCK_INTERACTION_RANGE),
         // `GameType.applyAbilities`：冒险模式和旁观模式不能建造。
         may_build: !matches!(player.game_mode, GameMode::Adventure | GameMode::Spectator),
         // `Player.preventsBlockDrops()` 看的是 `instabuild`，只有创造模式有。
@@ -395,23 +393,12 @@ fn actor_of(player: &Player) -> Actor {
     }
 }
 
-/// `Player.blockInteractionRange()`：属性的基础值 4.5，
-/// 创造模式的 `ServerPlayer.updatePlayerAttributes` 再加 0.5 的修饰符。
-pub(crate) fn interaction_range(game_mode: GameMode) -> f64 {
-    let base = attribute_defaults::BLOCK_INTERACTION_RANGE;
-    if game_mode == GameMode::Creative {
-        base + 0.5
-    } else {
-        base
-    }
-}
-
 /// 玩家能不能够到这个方块。`blocks-inventory.md` 6.1。
 pub(crate) fn within_reach(player: &Player, pos: BlockPos) -> bool {
     within_block_interaction_range(
         player.position(),
         player.eye_height(),
-        interaction_range(player.game_mode),
+        player.attributes.value(attribute::BLOCK_INTERACTION_RANGE),
         pos,
         REACH_BUFFER,
     )
@@ -1347,12 +1334,13 @@ pub(crate) fn on_interact_entity(
     // 官方把 `usingSecondaryAction` 记成潜行键；马科用它判断开物品栏。
     // Vanilla stores `usingSecondaryAction` as the sneak key; equines read it.
     // 先把玩家和目标的只读数据抄出来，`block_level()` 要独占借 `region`。
-    let Some((game_mode, position, eye_height, player_uuid, main_held, off_held)) =
+    let Some((game_mode, position, eye_height, entity_reach, player_uuid, main_held, off_held)) =
         region.players.get(&id).map(|player| {
             (
                 player.game_mode,
                 player.position(),
                 player.eye_height(),
+                player.attributes.value(attribute::ENTITY_INTERACTION_RANGE),
                 *player.uuid.as_bytes(),
                 player.inventory.held(Hand::Main).clone(),
                 player.inventory.held(Hand::Off).clone(),
@@ -1370,12 +1358,11 @@ pub(crate) fn on_interact_entity(
     if target.removed || !matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) {
         return;
     }
-    // 够距：玩家眼睛到实体所在格的距离，和方块交互同一套判定。
-    let reach = interaction_range(game_mode);
+    // 够距：官方 `ServerGamePacketListenerImpl.handleInteract` 用 `ENTITY_INTERACTION_RANGE` + 3.0 缓冲。
     if !within_block_interaction_range(
         position,
         eye_height,
-        reach,
+        entity_reach,
         mc_bamboo_core::BlockPos::containing(target.position),
         3.0,
     ) {

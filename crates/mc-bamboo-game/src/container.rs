@@ -25,7 +25,7 @@ use mc_bamboo_world::store::ChunkStore;
 
 use crate::{
     inbound::PlayerId,
-    interaction::{self, BLOCK_INTERACTION_RANGE},
+    interaction,
     player::Player,
     region::{Region, RegionTick},
 };
@@ -339,11 +339,11 @@ fn neighbour_combines(chunks: &ChunkStore, pos: BlockPos, state: BlockState) -> 
 }
 
 /// 菜单构造时调用的 `Container.startOpen`。观察者不计数，由调用方筛掉。
-pub(crate) fn start_open(region: &mut Region, pos: BlockPos, kind: ContainerKind) {
+pub(crate) fn start_open(region: &mut Region, id: PlayerId, pos: BlockPos, kind: ContainerKind) {
     match kind {
         ContainerKind::ShulkerBox => start_open_shulker(region, pos),
         ContainerKind::Chest | ContainerKind::Barrel | ContainerKind::EnderChest => {
-            increment_openers(region, pos, kind)
+            increment_openers(region, id, pos, kind)
         }
         // 漏斗、发射器、投掷器和这四种容器用 `Container` 的默认 `startOpen`，什么也不做。
         //
@@ -378,7 +378,15 @@ pub(crate) fn stop_open(region: &mut Region, pos: BlockPos, kind: ContainerKind)
     }
 }
 
-fn increment_openers(region: &mut Region, pos: BlockPos, kind: ContainerKind) {
+fn increment_openers(region: &mut Region, id: PlayerId, pos: BlockPos, kind: ContainerKind) {
+    let opener_range = region.players.get(&id).map_or(
+        mc_bamboo_data::registries::attribute_defaults::BLOCK_INTERACTION_RANGE,
+        |player| {
+            player
+                .attributes
+                .value(mc_bamboo_data::registries::attribute::BLOCK_INTERACTION_RANGE)
+        },
+    );
     let previous = {
         let entry = entry_at(region, pos, kind);
         let previous = entry.open_count;
@@ -400,7 +408,7 @@ fn increment_openers(region: &mut Region, pos: BlockPos, kind: ContainerKind) {
         .map_or(0.0, |entry| entry.max_range);
     region.touch(pos);
     if let Some(entry) = region.containers.get_mut(&pos) {
-        entry.max_range = range.max(BLOCK_INTERACTION_RANGE);
+        entry.max_range = range.max(opener_range);
     }
 }
 
@@ -710,12 +718,17 @@ fn recheck_openers(region: &mut Region, pos: BlockPos) {
     if let Some(entry) = region.containers.get_mut(&pos) {
         entry.max_range = 0.0;
     }
-    // 官方取的是每个玩家自己的 `getContainerInteractionRange`，本任务里都是 5.0。
-    let range = if users.is_empty() {
-        0.0
-    } else {
-        BLOCK_INTERACTION_RANGE
-    };
+    // 官方取每个打开者自己的 `getContainerInteractionRange`（即 `BLOCK_INTERACTION_RANGE`）最大值。
+    // Vanilla takes the max `getContainerInteractionRange` (`BLOCK_INTERACTION_RANGE`) across openers.
+    let range = users.iter().fold(0.0_f64, |best, uid| {
+        region.players.get(uid).map_or(best, |player| {
+            best.max(
+                player
+                    .attributes
+                    .value(mc_bamboo_data::registries::attribute::BLOCK_INTERACTION_RANGE),
+            )
+        })
+    });
 
     let previous = region
         .containers

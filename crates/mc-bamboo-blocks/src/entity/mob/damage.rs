@@ -246,6 +246,47 @@ pub fn hurt(
     hurt_duration: i32,
     armor: ArmorValues,
 ) -> Option<HurtOutcome> {
+    hurt_with_max_health(
+        amount,
+        kind,
+        difficulty,
+        scales,
+        health,
+        absorption,
+        exhaustion,
+        damage_cooldown,
+        last_hurt,
+        hurt_time,
+        hurt_duration,
+        armor,
+        MAX_HEALTH,
+    )
+}
+
+/// 同 [`hurt`]，但血量上限由调用方从 `Attributes.MAX_HEALTH` 传入，
+/// 避免生命提升或修改最大生命属性时受伤把血量截断回 20。
+///
+/// Same as [`hurt`], clamping the resulting health to the caller's resolved
+/// `MAX_HEALTH` instead of the default 20.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the vanilla hurt path takes all these fields"
+)]
+pub fn hurt_with_max_health(
+    amount: f32,
+    kind: DamageKind,
+    difficulty: DifficultyId,
+    scales: bool,
+    health: f32,
+    absorption: f32,
+    exhaustion: f32,
+    damage_cooldown: i32,
+    last_hurt: f32,
+    hurt_time: i32,
+    hurt_duration: i32,
+    armor: ArmorValues,
+    max_health: f32,
+) -> Option<HurtOutcome> {
     let scaled = scale_by_difficulty(amount, difficulty, scales);
     if scaled == 0.0 || health <= 0.0 {
         return None;
@@ -267,7 +308,7 @@ pub fn hurt(
     } else {
         exhaustion
     };
-    let new_health = mth::clamp_f32(health - damage, 0.0, MAX_HEALTH);
+    let new_health = mth::clamp_f32(health - damage, 0.0, max_health.max(1.0));
     Some(HurtOutcome {
         damage,
         health: new_health,

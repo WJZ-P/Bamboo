@@ -661,4 +661,252 @@ mod tests {
             assert!(found, "{who}: MOVEMENT_SPEED got the speed effect modifier");
         }
     }
+
+    /// 所有已接入属性表的子系统都真的读 `player.attributes`（包括自定义基础值和
+    /// 永久修饰符），不是写死的常量或只查物品表。含改坏确认。
+    ///
+    /// Every wired player subsystem reads `player.attributes` (including custom
+    /// base values and permanent modifiers) instead of hardcoded constants.
+    /// Includes break-it checks.
+    #[test]
+    fn wired_subsystems_read_player_attributes() {
+        use mc_bamboo_blocks::entity::{
+            Entity, JavaRandom,
+            mob::{DamageKind, DamageSource},
+        };
+        use mc_bamboo_core::{BlockPos, Vec3};
+        use mc_bamboo_data::blocks;
+
+        // 1. 摔落伤害：SAFE_FALL_DISTANCE（含跳跃提升）与 FALL_DAMAGE_MULTIPLIER。
+        let mut p = player(GameMode::Survival);
+        assert_eq!(crate::player_environment::fall_damage(&p, 6.0), 3);
+        p.effects.add(EffectInstance::with_amplifier(
+            mob_effect::JUMP_BOOST,
+            200,
+            1,
+        ));
+        rebuild_player(&mut p, false);
+        assert_eq!(
+            p.attributes.value(attribute::SAFE_FALL_DISTANCE),
+            5.0,
+            "Jump Boost II raises SAFE_FALL_DISTANCE by 2"
+        );
+        assert_eq!(crate::player_environment::fall_damage(&p, 6.0), 1);
+        // 改坏确认：把 FALL_DAMAGE_MULTIPLIER 改成 2.0，摔落伤害翻倍。
+        p.attributes
+            .instance(attribute::FALL_DAMAGE_MULTIPLIER)
+            .unwrap()
+            .base = 2.0;
+        assert_eq!(crate::player_environment::fall_damage(&p, 6.0), 2);
+
+        // 2. 重力 / 跳跃高度 / 跨步高度读 GRAVITY / JUMP_STRENGTH / STEP_HEIGHT。
+        let mut p = player(GameMode::Survival);
+        assert_eq!(crate::player_move::maximum_flying_ticks(&p), 80);
+        assert_eq!(crate::player_move::step_height(&p), 0.6_f32);
+        p.attributes.instance(attribute::GRAVITY).unwrap().base = 0.04;
+        assert_eq!(crate::player_move::maximum_flying_ticks(&p), 160);
+        p.attributes
+            .instance(attribute::JUMP_STRENGTH)
+            .unwrap()
+            .base = 0.84;
+        crate::player_move::jump_from_ground(&mut p);
+        assert_eq!(p.motion.delta.y, f64::from(0.84_f32));
+        p.attributes.instance(attribute::STEP_HEIGHT).unwrap().base = 1.25;
+        assert_eq!(crate::player_move::step_height(&p), 1.25_f32);
+
+        // 3. 触及距离：自定义 BLOCK_INTERACTION_RANGE 修饰符放宽够得着判定。
+        let mut p = player(GameMode::Survival);
+        let far = BlockPos::new(7, 1, 0);
+        assert!(!crate::interaction::within_reach(&p, far));
+        p.attributes
+            .instance(attribute::BLOCK_INTERACTION_RANGE)
+            .unwrap()
+            .modifiers
+            .push(Modifier {
+                id: "minecraft:test_reach".to_owned(),
+                amount: 3.0,
+                operation: Operation::AddValue,
+                permanent: true,
+            });
+        assert!(crate::interaction::within_reach(&p, far));
+
+        // 4. 最大生命、回血夹取与刷新上限。
+        let mut region = Region::new(2, 20, false);
+        let pid = PlayerId(6);
+        let mut p = Player::new(
+            pid,
+            Uuid::from_u128(6),
+            "H".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::default(),
+        );
+        p.attributes.instance(attribute::MAX_HEALTH).unwrap().base = 26.0;
+        p.attributes
+            .instance(attribute::MAX_HEALTH)
+            .unwrap()
+            .modifiers
+            .push(Modifier {
+                id: "minecraft:test_hp".to_owned(),
+                amount: 4.0,
+                operation: Operation::AddValue,
+                permanent: true,
+            });
+        p.health.health = 22.0;
+        let max_hp = crate::player_effects::max_health(&p);
+        assert_eq!(max_hp, 30.0);
+        p.health.heal(10.0, max_hp);
+        assert_eq!(p.health.health, 30.0);
+        // 改坏确认：移除永久修饰符并刷新上限，血量夹回 26.0。
+        p.attributes
+            .instance(attribute::MAX_HEALTH)
+            .unwrap()
+            .remove_modifier("minecraft:test_hp");
+        region.insert_player(p);
+        crate::player_effects::refresh_limits(&mut region, pid);
+        assert_eq!(region.players[&pid].health.health, 26.0);
+
+        // 5. 护甲 / 韧性 / 击退抗性直接读属性表（即使裸体）。
+        let mut region = Region::new(2, 20, false);
+        let pid = PlayerId(7);
+        let mut victim = Player::new(
+            pid,
+            Uuid::from_u128(7),
+            "V".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        victim.attributes.instance(attribute::ARMOR).unwrap().base = 20.0;
+        victim
+            .attributes
+            .instance(attribute::ARMOR_TOUGHNESS)
+            .unwrap()
+            .base = 12.0;
+        victim
+            .attributes
+            .instance(attribute::KNOCKBACK_RESISTANCE)
+            .unwrap()
+            .base = 1.0;
+        let vel_before = victim.motion.delta;
+        region.insert_player(victim);
+        let mut source = DamageSource::environment(DamageKind::MobAttack);
+        source.position = Some(Vec3::new(2.5, 64.0, 0.5));
+        crate::player_hurt::hurt_player(&mut region, pid, source, 10.0, &mut None);
+        let hp_armored = region.players[&pid].health.health;
+        assert!(
+            hp_armored > 15.0,
+            "20 armor + 12 toughness reduces 10 damage well below 5, got hp={hp_armored}"
+        );
+        assert_eq!(
+            region.players[&pid].motion.delta, vel_before,
+            "1.0 knockback_resistance cancels knockback completely"
+        );
+
+        // 6. 氧气加成（OXYGEN_BONUS）按官方 1/(bonus+1) 跳过扣氧；鹦鹉螺之息不扣氧。
+        let mut region = Region::new(2, 20, false);
+        let pid = PlayerId(8);
+        let mut diver = Player::new(
+            pid,
+            Uuid::from_u128(8),
+            "Diver".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::new(0.5, 10.0, 0.5),
+        );
+        diver.random = JavaRandom::new(42);
+        diver
+            .attributes
+            .instance(attribute::OXYGEN_BONUS)
+            .unwrap()
+            .base = 9.0;
+        region
+            .chunks
+            .set_block(BlockPos::new(0, 11, 0), blocks::WATER);
+        region.insert_player(diver);
+        for _ in 0..40 {
+            crate::player_environment::tick_environment(&mut region);
+        }
+        let air_with_bonus = region.players[&pid].environment.air_supply;
+        assert!(
+            air_with_bonus > 260,
+            "OXYGEN_BONUS=9 should preserve most air over 40 ticks, got {air_with_bonus}"
+        );
+        // 鹦鹉螺之息期间完全不扣氧。
+        let air_before_nautilus = region.players[&pid].environment.air_supply;
+        region
+            .players
+            .get_mut(&pid)
+            .unwrap()
+            .effects
+            .add(EffectInstance::with_amplifier(
+                mob_effect::BREATH_OF_THE_NAUTILUS,
+                200,
+                0,
+            ));
+        for _ in 0..10 {
+            crate::player_environment::tick_environment(&mut region);
+        }
+        assert_eq!(
+            region.players[&pid].environment.air_supply, air_before_nautilus,
+            "BREATH_OF_THE_NAUTILUS prevents air loss"
+        );
+
+        // 7. 攻击伤害与实体触及距离读 ATTACK_DAMAGE / ENTITY_INTERACTION_RANGE。
+        let mut region = Region::new(2, 20, false);
+        let pid = PlayerId(9);
+        let mut attacker = Player::new(
+            pid,
+            Uuid::from_u128(9),
+            "Fighter".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        attacker.attack_strength_ticker = 100;
+        attacker
+            .attributes
+            .instance(attribute::ATTACK_DAMAGE)
+            .unwrap()
+            .base = 5.0;
+        attacker
+            .attributes
+            .instance(attribute::ENTITY_INTERACTION_RANGE)
+            .unwrap()
+            .base = 6.0;
+        region.insert_player(attacker);
+        // 牛站在 5.5 格远：默认生存实体触及 3.0 够不着，改成 6.0 能打到并造成 5 点伤害。
+        let cow = region
+            .entities
+            .spawn(Entity::cow(Vec3::new(6.0, 64.0, 0.5)));
+        crate::player_attack::on_attack(&mut region, pid, cow);
+        let cow_hp = region
+            .entities
+            .get(cow)
+            .and_then(|e| e.kind.mob().map(|m| m.health))
+            .expect("cow alive");
+        assert_eq!(cow_hp, 5.0, "custom ATTACK_DAMAGE=5 hits cow at 5.5 blocks");
+        // 改坏确认：把 ENTITY_INTERACTION_RANGE 改回 3.0，同一位置的牛够不着。
+        region
+            .players
+            .get_mut(&pid)
+            .unwrap()
+            .attributes
+            .instance(attribute::ENTITY_INTERACTION_RANGE)
+            .unwrap()
+            .base = 3.0;
+        region.players.get_mut(&pid).unwrap().attack_strength_ticker = 100;
+        region.entities.with_mut(cow, |e| {
+            if let Some(m) = e.kind.mob_mut() {
+                m.invulnerable_time = 0;
+            }
+        });
+        crate::player_attack::on_attack(&mut region, pid, cow);
+        let cow_hp_after = region
+            .entities
+            .get(cow)
+            .and_then(|e| e.kind.mob().map(|m| m.health))
+            .expect("cow alive");
+        assert_eq!(cow_hp_after, 5.0, "out-of-reach attack must not land");
+    }
 }
