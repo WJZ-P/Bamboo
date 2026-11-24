@@ -50,28 +50,49 @@ pub struct Attribute {
 }
 
 /// 属性的取值范围，`RangedAttribute` 的 `minValue` / `maxValue`。
+///
+/// 官方 `BuiltInRegistries.ATTRIBUTE` 里 40 个属性全都是 `RangedAttribute`；
+/// 下表是逐一读 `getMinValue` / `getMaxValue` 的结果。未知 ID 不夹取，只可能是
+/// 存档里读到的越界值，不会 panic。
+///
+/// The ranges of all 40 registry attributes, read from `RangedAttribute`. An
+/// unknown id is left unclamped; it can only come from a bad save and never panics.
 fn range(id: i32) -> (f64, f64) {
     match id {
-        attribute::AIR_DRAG_MODIFIER | attribute::FRICTION_MODIFIER => (0.0, 2048.0),
+        attribute::AIR_DRAG_MODIFIER
+        | attribute::FRICTION_MODIFIER
+        | attribute::ATTACK_DAMAGE
+        | attribute::FOLLOW_RANGE
+        | attribute::MAX_ABSORPTION
+        | attribute::TEMPT_RANGE => (0.0, 2048.0),
+        attribute::ATTACK_SPEED
+        | attribute::BLOCK_BREAK_SPEED
+        | attribute::BURNING_TIME
+        | attribute::FLYING_SPEED
+        | attribute::MINING_EFFICIENCY
+        | attribute::MOVEMENT_SPEED
+        | attribute::OXYGEN_BONUS => (0.0, 1024.0),
+        attribute::BELOW_NAME_DISTANCE | attribute::NAME_TAG_DISTANCE => (0.0, 512.0),
+        attribute::BLOCK_INTERACTION_RANGE | attribute::ENTITY_INTERACTION_RANGE => (0.0, 64.0),
+        attribute::CAMERA_DISTANCE | attribute::JUMP_STRENGTH => (0.0, 32.0),
         attribute::ARMOR => (0.0, 30.0),
-        attribute::ARMOR_TOUGHNESS => (0.0, 20.0),
+        attribute::ARMOR_TOUGHNESS | attribute::SUBMERGED_MINING_SPEED => (0.0, 20.0),
+        attribute::STEP_HEIGHT => (0.0, 10.0),
+        attribute::ATTACK_KNOCKBACK => (0.0, 5.0),
         attribute::BOUNCINESS
         | attribute::MOVEMENT_EFFICIENCY
         | attribute::WATER_MOVEMENT_EFFICIENCY
-        | attribute::EXPLOSION_KNOCKBACK_RESISTANCE => (0.0, 1.0),
-        attribute::BURNING_TIME => (0.0, 1024.0),
+        | attribute::EXPLOSION_KNOCKBACK_RESISTANCE
+        | attribute::SNEAKING_SPEED
+        | attribute::SPAWN_REINFORCEMENTS
+        | attribute::SWEEPING_DAMAGE_RATIO => (0.0, 1.0),
         attribute::FALL_DAMAGE_MULTIPLIER => (0.0, 100.0),
-        attribute::FOLLOW_RANGE | attribute::TEMPT_RANGE | attribute::MAX_ABSORPTION => {
-            (0.0, 2048.0)
-        }
         attribute::GRAVITY => (-1.0, 1.0),
-        attribute::JUMP_STRENGTH => (0.0, 32.0),
         attribute::KNOCKBACK_RESISTANCE => (-2.0, 1.0),
+        attribute::LUCK | attribute::SAFE_FALL_DISTANCE => (-1024.0, 1024.0),
         attribute::MAX_HEALTH => (1.0, 1024.0),
-        attribute::MOVEMENT_SPEED | attribute::OXYGEN_BONUS => (0.0, 1024.0),
-        attribute::SAFE_FALL_DISTANCE => (-1024.0, 1024.0),
         attribute::SCALE => (0.0625, 16.0),
-        attribute::STEP_HEIGHT => (0.0, 10.0),
+        attribute::WAYPOINT_TRANSMIT_RANGE | attribute::WAYPOINT_RECEIVE_RANGE => (0.0, 6.0E7),
         _ => (f64::NEG_INFINITY, f64::INFINITY),
     }
 }
@@ -203,6 +224,101 @@ impl Attributes {
                 .map(|(id, base)| Attribute::new(id, base))
                 .collect(),
         }
+    }
+
+    /// `LivingEntity.createLivingAttributes()`：官方 26 个属性，基础值全是注册表缺省值。
+    /// 玩家的 [`Attributes::player`] 从这里起步，再覆盖两个、追加十个。
+    ///
+    /// `LivingEntity.createLivingAttributes()`: the 26 attributes, all at their
+    /// registry defaults. [`Attributes::player`] starts here, overrides two and
+    /// appends ten more.
+    fn living() -> Self {
+        use mc_bamboo_data::registries::attribute_defaults as d;
+        let living = [
+            (attribute::MAX_HEALTH, d::MAX_HEALTH),
+            (attribute::KNOCKBACK_RESISTANCE, d::KNOCKBACK_RESISTANCE),
+            (attribute::MOVEMENT_SPEED, d::MOVEMENT_SPEED),
+            (attribute::ARMOR, d::ARMOR),
+            (attribute::ARMOR_TOUGHNESS, d::ARMOR_TOUGHNESS),
+            (attribute::MAX_ABSORPTION, d::MAX_ABSORPTION),
+            (attribute::STEP_HEIGHT, d::STEP_HEIGHT),
+            (attribute::SCALE, d::SCALE),
+            (attribute::GRAVITY, d::GRAVITY),
+            (attribute::SAFE_FALL_DISTANCE, d::SAFE_FALL_DISTANCE),
+            (attribute::FALL_DAMAGE_MULTIPLIER, d::FALL_DAMAGE_MULTIPLIER),
+            (attribute::JUMP_STRENGTH, d::JUMP_STRENGTH),
+            (
+                attribute::ENTITY_INTERACTION_RANGE,
+                d::ENTITY_INTERACTION_RANGE,
+            ),
+            (attribute::OXYGEN_BONUS, d::OXYGEN_BONUS),
+            (attribute::BURNING_TIME, d::BURNING_TIME),
+            (
+                attribute::EXPLOSION_KNOCKBACK_RESISTANCE,
+                d::EXPLOSION_KNOCKBACK_RESISTANCE,
+            ),
+            (
+                attribute::WATER_MOVEMENT_EFFICIENCY,
+                d::WATER_MOVEMENT_EFFICIENCY,
+            ),
+            (attribute::MOVEMENT_EFFICIENCY, d::MOVEMENT_EFFICIENCY),
+            (attribute::ATTACK_KNOCKBACK, d::ATTACK_KNOCKBACK),
+            (attribute::CAMERA_DISTANCE, d::CAMERA_DISTANCE),
+            (
+                attribute::WAYPOINT_TRANSMIT_RANGE,
+                d::WAYPOINT_TRANSMIT_RANGE,
+            ),
+            (attribute::BOUNCINESS, d::BOUNCINESS),
+            (attribute::AIR_DRAG_MODIFIER, d::AIR_DRAG_MODIFIER),
+            (attribute::FRICTION_MODIFIER, d::FRICTION_MODIFIER),
+            (attribute::NAME_TAG_DISTANCE, d::NAME_TAG_DISTANCE),
+            (attribute::BELOW_NAME_DISTANCE, d::BELOW_NAME_DISTANCE),
+        ];
+        Self {
+            entries: living
+                .into_iter()
+                .map(|(id, base)| Attribute::new(id, base))
+                .collect(),
+        }
+    }
+
+    /// `Player.createAttributes()`：`createLivingAttributes` 的 26 个，覆盖两个基础值
+    /// （移速 `(double)0.1F`、`WAYPOINT_TRANSMIT_RANGE=6.0E7`），再追加十个玩家专有属性
+    /// （攻击力 1、攻击速度、幸运、三种触及 / 挖掘距离、潜行速度、横扫伤害比、
+    /// `WAYPOINT_RECEIVE_RANGE=6.0E7`）。共 36 个实例、默认全未实例化。
+    ///
+    /// `Player.createAttributes()`: the 26 living attributes, two overridden base
+    /// values (`MOVEMENT_SPEED=(double)0.1F`, `WAYPOINT_TRANSMIT_RANGE=6.0E7`),
+    /// and ten player-only attributes (attack damage 1, attack speed, luck, three
+    /// reach / mining attributes, sneaking speed, sweeping damage ratio,
+    /// `WAYPOINT_RECEIVE_RANGE=6.0E7`). 36 instances, none instantiated by default.
+    pub fn player() -> Self {
+        use mc_bamboo_data::registries::attribute_defaults as d;
+        let mut table = Self::living();
+        // 覆盖 living 表里已有的两个基础值，官方 builder 用重复 add 替换值。
+        // Override two bases already present in the living builder; vanilla adds
+        // these holders again to replace their values.
+        table.set_base(attribute::MOVEMENT_SPEED, f64::from(0.1_f32));
+        table.set_base(attribute::WAYPOINT_TRANSMIT_RANGE, 6.0E7);
+        let added = [
+            (attribute::ATTACK_DAMAGE, 1.0),
+            (attribute::ATTACK_SPEED, d::ATTACK_SPEED),
+            (attribute::LUCK, d::LUCK),
+            (
+                attribute::BLOCK_INTERACTION_RANGE,
+                d::BLOCK_INTERACTION_RANGE,
+            ),
+            (attribute::BLOCK_BREAK_SPEED, d::BLOCK_BREAK_SPEED),
+            (attribute::SUBMERGED_MINING_SPEED, d::SUBMERGED_MINING_SPEED),
+            (attribute::SNEAKING_SPEED, d::SNEAKING_SPEED),
+            (attribute::MINING_EFFICIENCY, d::MINING_EFFICIENCY),
+            (attribute::SWEEPING_DAMAGE_RATIO, d::SWEEPING_DAMAGE_RATIO),
+            (attribute::WAYPOINT_RECEIVE_RANGE, 6.0E7),
+        ];
+        table
+            .entries
+            .extend(added.into_iter().map(|(id, base)| Attribute::new(id, base)));
+        table
     }
 
     /// `Villager.createAttributes()`：`Mob.createMobAttributes()` 加移动速度 0.5。
@@ -337,5 +453,138 @@ impl Attributes {
     /// `getAttributeBaseValue(holder)`。
     pub fn base(&self, id: i32) -> f64 {
         self.get(id).map_or(0.0, |entry| entry.base)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_data::registries::{attribute as a, attribute_defaults as d};
+
+    use super::{Attributes, range};
+
+    /// 官方 `BuiltInRegistries.ATTRIBUTE` 逐项读出的 `RangedAttribute` 范围。
+    /// 改一处范围，这一条就会红，是属性取值对拍的改坏确认之一。
+    ///
+    /// Ranges read from every `RangedAttribute` in the official registry.
+    /// Breaking one range turns this red: one of the parity break-checks.
+    const RANGES: &[(i32, f64, f64)] = &[
+        (a::AIR_DRAG_MODIFIER, 0.0, 2048.0),
+        (a::ARMOR, 0.0, 30.0),
+        (a::ARMOR_TOUGHNESS, 0.0, 20.0),
+        (a::ATTACK_DAMAGE, 0.0, 2048.0),
+        (a::ATTACK_KNOCKBACK, 0.0, 5.0),
+        (a::ATTACK_SPEED, 0.0, 1024.0),
+        (a::BELOW_NAME_DISTANCE, 0.0, 512.0),
+        (a::BLOCK_BREAK_SPEED, 0.0, 1024.0),
+        (a::BLOCK_INTERACTION_RANGE, 0.0, 64.0),
+        (a::BOUNCINESS, 0.0, 1.0),
+        (a::BURNING_TIME, 0.0, 1024.0),
+        (a::CAMERA_DISTANCE, 0.0, 32.0),
+        (a::EXPLOSION_KNOCKBACK_RESISTANCE, 0.0, 1.0),
+        (a::ENTITY_INTERACTION_RANGE, 0.0, 64.0),
+        (a::FALL_DAMAGE_MULTIPLIER, 0.0, 100.0),
+        (a::FLYING_SPEED, 0.0, 1024.0),
+        (a::FOLLOW_RANGE, 0.0, 2048.0),
+        (a::FRICTION_MODIFIER, 0.0, 2048.0),
+        (a::GRAVITY, -1.0, 1.0),
+        (a::JUMP_STRENGTH, 0.0, 32.0),
+        (a::KNOCKBACK_RESISTANCE, -2.0, 1.0),
+        (a::LUCK, -1024.0, 1024.0),
+        (a::MAX_ABSORPTION, 0.0, 2048.0),
+        (a::MAX_HEALTH, 1.0, 1024.0),
+        (a::MINING_EFFICIENCY, 0.0, 1024.0),
+        (a::MOVEMENT_EFFICIENCY, 0.0, 1.0),
+        (a::MOVEMENT_SPEED, 0.0, 1024.0),
+        (a::NAME_TAG_DISTANCE, 0.0, 512.0),
+        (a::OXYGEN_BONUS, 0.0, 1024.0),
+        (a::SAFE_FALL_DISTANCE, -1024.0, 1024.0),
+        (a::SCALE, 0.0625, 16.0),
+        (a::SNEAKING_SPEED, 0.0, 1.0),
+        (a::SPAWN_REINFORCEMENTS, 0.0, 1.0),
+        (a::STEP_HEIGHT, 0.0, 10.0),
+        (a::SUBMERGED_MINING_SPEED, 0.0, 20.0),
+        (a::SWEEPING_DAMAGE_RATIO, 0.0, 1.0),
+        (a::TEMPT_RANGE, 0.0, 2048.0),
+        (a::WATER_MOVEMENT_EFFICIENCY, 0.0, 1.0),
+        (a::WAYPOINT_TRANSMIT_RANGE, 0.0, 6.0e7),
+        (a::WAYPOINT_RECEIVE_RANGE, 0.0, 6.0e7),
+    ];
+
+    #[test]
+    fn every_attribute_range_matches_the_official_registry() {
+        assert_eq!(RANGES.len(), 40);
+        for &(id, min, max) in RANGES {
+            assert_eq!(range(id), (min, max), "attribute id {id}");
+        }
+        // 存档里越界的 ID 不夹取，绝不 panic。
+        // An out-of-range id from a save is left unclamped and never panics.
+        assert_eq!(range(-1), (f64::NEG_INFINITY, f64::INFINITY));
+        assert_eq!(range(999), (f64::NEG_INFINITY, f64::INFINITY));
+    }
+
+    #[test]
+    fn value_clamps_to_the_official_range() {
+        // 抽样确认 `value()` 真的用上了 range()，而不只是 range() 自己返回得对。
+        // Sample check that `value()` actually applies range(), not just that
+        // range() returns the right pair.
+        let mut high = Attributes::player();
+        high.set_base_for_oracle(a::ATTACK_DAMAGE, f64::MAX);
+        assert_eq!(high.value(a::ATTACK_DAMAGE), 2048.0);
+        high.set_base_for_oracle(a::GRAVITY, f64::MAX);
+        assert_eq!(high.value(a::GRAVITY), 1.0);
+        let mut low = Attributes::player();
+        low.set_base_for_oracle(a::MAX_HEALTH, -f64::MAX);
+        assert_eq!(low.value(a::MAX_HEALTH), 1.0);
+        low.set_base_for_oracle(a::SAFE_FALL_DISTANCE, -f64::MAX);
+        assert_eq!(low.value(a::SAFE_FALL_DISTANCE), -1024.0);
+    }
+
+    #[test]
+    fn player_table_matches_create_attributes() {
+        let player = Attributes::player();
+        assert_eq!(player.entries.len(), 36);
+
+        // 每个属性恰好一个实例，且都是官方 supplier 里的 ID。
+        // Exactly one instance per id, all from the official supplier.
+        let mut ids: Vec<i32> = player.entries.iter().map(|entry| entry.id).collect();
+        ids.sort_unstable();
+        let deduped = {
+            let mut copy = ids.clone();
+            copy.dedup();
+            copy
+        };
+        assert_eq!(ids, deduped, "no duplicate attribute ids");
+        for id in 0..40 {
+            let present = ids.binary_search(&id).is_ok();
+            let expected = !matches!(
+                id,
+                a::FOLLOW_RANGE | a::TEMPT_RANGE | a::SPAWN_REINFORCEMENTS | a::FLYING_SPEED
+            );
+            assert_eq!(present, expected, "attribute id {id} presence");
+        }
+
+        // 玩家覆盖 / 追加的基础值。
+        // The overridden / appended base values.
+        assert_eq!(player.base(a::ATTACK_DAMAGE), 1.0);
+        assert_eq!(player.base(a::MOVEMENT_SPEED), f64::from(0.1_f32));
+        assert_eq!(player.base(a::WAYPOINT_TRANSMIT_RANGE), 6.0e7);
+        assert_eq!(player.base(a::WAYPOINT_RECEIVE_RANGE), 6.0e7);
+        // 继承 living 表的缺省值。
+        // Inherited living defaults.
+        assert_eq!(player.base(a::MAX_HEALTH), d::MAX_HEALTH);
+        assert_eq!(player.base(a::BLOCK_BREAK_SPEED), d::BLOCK_BREAK_SPEED);
+        assert_eq!(
+            player.base(a::SUBMERGED_MINING_SPEED),
+            d::SUBMERGED_MINING_SPEED
+        );
+        assert_eq!(
+            player.base(a::ENTITY_INTERACTION_RANGE),
+            d::ENTITY_INTERACTION_RANGE
+        );
+
+        // 官方 supplier 造出来的实例默认都是未实例化。
+        // Official supplier instances all start non-instantiated.
+        assert!(player.entries.iter().all(|entry| !entry.instantiated));
+        assert!(player.entries.iter().all(|entry| entry.sync_version == 0));
     }
 }
