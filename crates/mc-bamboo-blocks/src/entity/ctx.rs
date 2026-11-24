@@ -121,8 +121,8 @@ pub trait BlockView {
         false
     }
 
-    /// 已加载区块里 `radius` 格内的蜂巢 / 蜂箱。顺序固定为 `(x, y, z)` 升序。
-    /// 这是 `PoiManager.getInRange(BEE_HOME, 20)` 的临时替代，以后换成 POI 查询。
+    /// 官方 `PoiManager.getInRange(#bee_home, center, radius, ANY)` 的全部位置，
+    /// 保持官方遍历序；有 POI 数据的视图覆盖它，没有的默认返回空。
     fn beehives_near(&self, _center: BlockPos, _radius: i32) -> Vec<BlockPos> {
         Vec::new()
     }

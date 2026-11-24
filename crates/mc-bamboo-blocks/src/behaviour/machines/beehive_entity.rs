@@ -442,10 +442,11 @@ impl BlockEntity for BeehiveEntity {
 
 /// 官方 `BeehiveBlock.angerNearbyBees`：蜂巢 AABB 外扩 (8, 6, 8) 里的蜂和玩家。
 ///
-/// 蜂列表、玩家列表都按实体分区顺序（这里按 uid 升序）取。玩家列表为空时
-/// 不取随机数；否则**每只无目标的蜂**都取一次世界随机源 `nextInt(玩家数)`，
-/// 哪怕只有一个玩家、哪怕这只蜂不在 4 格内。和 `emptyAllLivingFromHive`
-/// 是两段独立的逻辑，调用方按官方条件分别调用。
+/// 官方两次 `Level.getEntitiesOfClass` 都按实体分区顺序（`SectionPos.asLong`
+/// 升序）取；蜂列表走 `for_each_entity_in_section_order`，玩家列表仍按 uid
+/// 升序近似。玩家列表为空时不取随机数；否则**每只无目标的蜂**都取一次世界
+/// 随机源 `nextInt(玩家数)`，哪怕只有一个玩家、哪怕这只蜂不在 4 格内。和
+/// `emptyAllLivingFromHive` 是两段独立的逻辑，调用方按官方条件分别调用。
 pub fn anger_nearby_bees(world: &mut World, hive: BlockPos) {
     let area = crate::shape::Aabb::new(
         f64::from(hive.x) - 8.0,
@@ -456,7 +457,9 @@ pub fn anger_nearby_bees(world: &mut World, hive: BlockPos) {
         f64::from(hive.z) + 9.0,
     );
     let mut bees = Vec::new();
-    world.level().for_each_entity_in(area, &mut |public| {
+    world
+        .level()
+        .for_each_entity_in_section_order(area, &mut |public| {
         if matches!(&public.kind, crate::entity::KindPublic::Mob(mob) if mob.mob_type == MobType::Bee)
         {
             bees.push(public.uid);

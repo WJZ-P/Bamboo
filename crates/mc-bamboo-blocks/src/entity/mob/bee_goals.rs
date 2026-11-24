@@ -423,12 +423,15 @@ impl BeeGoal {
             }
             Self::LocateHive => {
                 mob.bee.remaining_cooldown_before_locating_new_hive = 200;
-                let mut hives = view.beehives_near(me.block_position(), 20);
+                // `findNearbyHivesWithSpace`：候选是 POI `getInRange(#bee_home,
+                // blockPosition, 20, ANY)`（官方遍历序），按 `doesHiveHaveSpace`
+                // 过滤，再用 `Comparator.comparingDouble(blockPos.distSqr(pos))`
+                // 稳定排序（整数 BlockPos 之间的平方距离）。并列时保留 POI 遍历序。
+                let origin = me.block_position();
+                let mut hives = view.beehives_near(origin, 20);
                 hives.retain(|pos| !view.beehive_full(*pos));
                 hives.sort_by(|a, b| {
-                    me.position
-                        .distance_to_sqr(center_vec(*a))
-                        .total_cmp(&me.position.distance_to_sqr(center_vec(*b)))
+                    hive_dist_sqr(origin, *a).total_cmp(&hive_dist_sqr(origin, *b))
                 });
                 let blacklist = locate_blacklist(mob);
                 if let Some(hive) = hives.iter().find(|pos| !blacklist.contains(pos)) {
@@ -560,6 +563,16 @@ fn center_vec(pos: BlockPos) -> Vec3 {
         f64::from(pos.y) + 0.5,
         f64::from(pos.z) + 0.5,
     )
+}
+
+/// 官方 `BlockPos.distSqr(Vec3i)`：整数坐标差的平方和，按 double 累加。
+/// `findNearbyHivesWithSpace` 的稳定排序键，比较的是蜜蜂 `blockPosition()` 与
+/// 巢 `BlockPos` 这两个整数位置，不是浮点位置到巢中心的距离。
+fn hive_dist_sqr(from: BlockPos, to: BlockPos) -> f64 {
+    let dx = f64::from(to.x - from.x);
+    let dy = f64::from(to.y - from.y);
+    let dz = f64::from(to.z - from.z);
+    dx * dx + dy * dy + dz * dz
 }
 
 fn locate_blacklist(mob: &Mob) -> Vec<BlockPos> {

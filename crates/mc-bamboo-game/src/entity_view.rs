@@ -134,52 +134,20 @@ impl BlockSource for ReadOnlyWorld<'_> {
             .section_has_any_collision(ChunkPos::new(section_x, section_z), section_y)
     }
 
-    /// 和精确驱动同一份已加载区块 / 段调色板筛选；以后一起换成 POI 查询。
+    /// 官方 `PoiManager.getInRange(#bee_home, center, radius, ANY)`。并行驱动
+    /// 读的是**本刻开始时拷下来的 POI 快照**（`self.poi`），算阶段内 Bee 找巢
+    /// 不会看到别的实体这一刻新放 / 挖掉的蜂巢；精确驱动读的是 `RegionLevel`
+    /// 的当前 `PoiStore`，两种驱动由同一份快照出发、不分叉。
+    ///
+    /// Vanilla `PoiManager.getInRange(#bee_home, center, radius, ANY)`. The
+    /// parallel driver reads the **POI snapshot taken at the start of the tick**
+    /// (`self.poi`), so hive lookups during the compute phase do not see hives
+    /// placed or removed by other entities this tick.
     fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
-        use mc_bamboo_data::{block_id_of_state, blocks, tags::block_tags};
-        let min_y = mc_bamboo_world::MIN_Y;
-        let max_y = min_y + mc_bamboo_world::WORLD_HEIGHT - 1;
-        let lo = BlockPos::new(center.x - radius, center.y - radius, center.z - radius);
-        let hi = BlockPos::new(center.x + radius, center.y + radius, center.z + radius);
-        let mut out = Vec::new();
-        for cx in (lo.x >> 4)..=(hi.x >> 4) {
-            for cz in (lo.z >> 4)..=(hi.z >> 4) {
-                let chunk = ChunkPos::new(cx, cz);
-                if !self.chunks.is_loaded(chunk) {
-                    continue;
-                }
-                let column = self.chunks.chunk(chunk);
-                let sy0 = lo.y.max(min_y) >> 4;
-                let sy1 = hi.y.min(max_y) >> 4;
-                for sy in sy0..=sy1 {
-                    let Some(section) = column.sections().get((sy - (min_y >> 4)) as usize) else {
-                        continue;
-                    };
-                    if !section.maybe_has(|state| {
-                        block_id_of_state(state).is_some_and(|id| {
-                            id == blocks::BEEHIVE as usize || id == blocks::BEE_NEST as usize
-                        })
-                    }) {
-                        continue;
-                    }
-                    for x in (cx << 4).max(lo.x)..=((cx << 4) + 15).min(hi.x) {
-                        for y in
-                            (sy << 4).max(lo.y).max(min_y)..=((sy << 4) + 15).min(hi.y).min(max_y)
-                        {
-                            for z in (cz << 4).max(lo.z)..=((cz << 4) + 15).min(hi.z) {
-                                let pos = BlockPos::new(x, y, z);
-                                if BlockState(self.chunks.block(pos).unwrap_or(blocks::VOID_AIR))
-                                    .is_tagged(block_tags::BEEHIVES)
-                                {
-                                    out.push(pos);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        out
+        crate::poi_query::bee_homes_in_range(self.poi, center, radius)
+            .into_iter()
+            .map(|(_, pos)| pos)
+            .collect()
     }
 
     fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {
