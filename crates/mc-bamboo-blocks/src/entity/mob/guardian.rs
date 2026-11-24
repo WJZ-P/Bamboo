@@ -127,12 +127,13 @@ pub struct GuardianSightCache {
     pub to: [u64; 3],
     /// 岛级的方块变更版本戳。
     pub stamp: u64,
-    /// `CollisionContext` 里除眼睛位之外还会影响碰撞形状的两项：`fallDistance`
-    /// 的原始位和「能不能在细雪上走」。
+    /// `CollisionContext` 里除眼睛位之外还会影响碰撞形状的两项：官方的碰撞形状
+    /// 只按 `fallDistance > 2.5` 分档，所以键里存这一档而不是逐刻变化的原始位。
     ///
-    /// The remaining shape-affecting parts of `CollisionContext`: the raw bits
-    /// of `fallDistance` and whether the mob walks on powder snow.
-    pub fall_distance: u64,
+    /// The remaining shape-affecting parts of `CollisionContext`: vanilla only
+    /// splits on `fallDistance > 2.5`, so the key stores that class instead of
+    /// the raw value, which changes every tick while falling.
+    pub falling: bool,
     pub powder_snow_walkable: bool,
     /// 上次射线的结果。
     pub seen: bool,
@@ -154,7 +155,14 @@ pub(crate) fn laser_line_of_sight(
     target: crate::entity::EntityUid,
     target_eye: Vec3,
 ) -> bool {
-    laser_line_of_sight_impl(me, mob, view, target, target_eye, true)
+    laser_line_of_sight_impl(
+        me,
+        mob,
+        view,
+        target,
+        target_eye,
+        !super::timing::stress_naive(),
+    )
 }
 
 /// 朴素路径（`cfg(test)` 差分用）：永远走真正的射线。
@@ -190,7 +198,7 @@ fn laser_line_of_sight_impl(
         target,
         to: bits(target_eye),
         stamp,
-        fall_distance: context.fall_distance.to_bits(),
+        falling: context.fall_distance > 2.5,
         powder_snow_walkable: context.powder_snow_walkable,
         seen: false,
     };
@@ -200,12 +208,14 @@ fn laser_line_of_sight_impl(
         && last.target == key.target
         && last.to == key.to
         && last.stamp == key.stamp
-        && last.fall_distance == key.fall_distance
+        && last.falling == key.falling
         && last.powder_snow_walkable == key.powder_snow_walkable
     {
+        super::timing::record_sight!(true);
         return last.seen;
     }
     let seen = super::living::has_line_of_sight(me, mob, view, target, target_eye);
+    super::timing::record_sight!(false);
     if cached {
         mob.guardian.sight_cache = Some(GuardianSightCache { seen, ..key });
     }

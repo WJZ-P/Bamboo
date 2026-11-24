@@ -4404,7 +4404,7 @@ fn nearest_look_mob(
 /// within follow range and in sight. The selector runs before the range and sight
 /// checks in `TargetingConditions.test`.
 fn nearest_guardian_target(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Option<EntityUid> {
-    nearest_guardian_target_impl(me, mob, ctx, true)
+    nearest_guardian_target_impl(me, mob, ctx, !super::timing::stress_naive())
 }
 
 /// 朴素候选扫描（`cfg(test)` 差分用）：全量遍历再逐个过选择器。
@@ -4478,6 +4478,7 @@ fn nearest_guardian_target_impl(
         mc_bamboo_data::registries::entity_type::AXOLOTL,
     ];
     let collect = &mut |other: &EntityPublic| {
+        super::timing::record_target_candidates!(1);
         let KindPublic::Mob(public) = &other.kind else {
             return;
         };

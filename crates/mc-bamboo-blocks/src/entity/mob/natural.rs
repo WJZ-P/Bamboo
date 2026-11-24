@@ -25,6 +25,8 @@ use mc_bamboo_data::blocks::{CACTUS, LAVA, LAVA_CAULDRON, MAGMA_BLOCK, POWDER_SN
 use mc_bamboo_data::spawning::{self, MobCategory, MobSpawnSettings, MobSpawnerDef};
 use mc_bamboo_data::tags::block_tags;
 
+#[cfg(test)]
+use super::timing::record_structure_query;
 use super::{MobType, spawn};
 use crate::{
     entity::{
@@ -489,10 +491,34 @@ fn can_spawn_mob_at(
 /// monster list replaces the biome table. The nether-fortress branch is not modelled.
 /// The override table is static data, so drawing and support checks share one list.
 fn mobs_at(world: &World, category: MobCategory, pos: BlockPos) -> &'static [MobSpawnerDef] {
-    world
-        .level()
-        .structure_spawn_override(pos, category)
+    structure_spawn_override_timed(world, pos, category)
         .unwrap_or_else(|| world.level().natural_spawn_table(pos, category))
+}
+
+/// 正式构建里就是一次虚调用；测试构建里顺手记一次查询次数和耗时。
+///
+/// One virtual call in production; the test build also records the query and its cost.
+#[cfg(not(test))]
+#[inline(always)]
+fn structure_spawn_override_timed(
+    world: &World,
+    pos: BlockPos,
+    category: MobCategory,
+) -> Option<&'static [MobSpawnerDef]> {
+    world.level().structure_spawn_override(pos, category)
+}
+
+#[cfg(test)]
+#[inline(always)]
+fn structure_spawn_override_timed(
+    world: &World,
+    pos: BlockPos,
+    category: MobCategory,
+) -> Option<&'static [MobSpawnerDef]> {
+    let started = std::time::Instant::now();
+    let table = world.level().structure_spawn_override(pos, category);
+    record_structure_query!(started.elapsed().as_nanos() as u64);
+    table
 }
 
 /// `level.environmentAttributes().getValue(NATURAL_MOB_SPAWNS, pos)`：主世界就是群系的表。

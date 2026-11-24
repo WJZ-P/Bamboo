@@ -271,6 +271,20 @@ pub(crate) fn resolve_rows(
         .map(|row| row.spawns)
 }
 
+/// 压测 / 差分用的同一条正式路径，从别的 crate 也能量到真实的结构查询。
+///
+/// The same production path, exposed for benchmarks and differential tests in
+/// other crates.
+#[doc(hidden)]
+pub fn override_at_indexed_for_bench(
+    config: &WorldGenConfig,
+    index: &RefCell<StructureSpawnIndex>,
+    pos: BlockPos,
+    category: MobCategory,
+) -> Option<&'static [MobSpawnerDef]> {
+    override_at_indexed(config, index, pos, category)
+}
+
 /// 按位置和类别查结构刷怪覆盖（正式路径：先取 / 后建按区块的索引，再查表）。
 /// 结构数据由世界生成按种子重算（和交付区块时是同一份纯函数），所以不需要读
 /// 区块里存的 `structures` 标签。
@@ -304,11 +318,16 @@ fn override_at_indexed_mut(
         return None;
     }
     let chunk = pos.chunk();
-    index.ensure_config(config);
-    index
-        .chunks
-        .entry(chunk)
-        .or_insert_with(|| build_rows_from_worldgen(config, chunk));
+    // 热路径只做一次哈希查表。配置换了的时候 `Global::publish` 会清空整张索引，
+    // 所以这里不必每次查询都比较整份 `WorldGenConfig`（含超平坦地层数组）。
+    //
+    // The hot path is a single hash lookup. `Global::publish` clears the whole
+    // index when the config changes, so no per-query config comparison here.
+    if !index.chunks.contains_key(&chunk) {
+        index.ensure_config(config);
+        let rows = build_rows_from_worldgen(config, chunk);
+        index.chunks.insert(chunk, rows);
+    }
     resolve_rows(&index.chunks[&chunk], pos, category)
 }
 
@@ -323,11 +342,11 @@ fn build_rows_from_worldgen(config: &WorldGenConfig, chunk: ChunkPos) -> ChunkSp
     })
 }
 
-/// 朴素实现，只作单测差分用：每次查询都重新走引用 → 起点 → 盒判定。
+/// 朴素实现，供单测差分和压测 A/B 用：每次查询都重新走引用 → 起点 → 盒判定。
 ///
-/// Naive implementation, kept for differential unit tests only.
-#[cfg(test)]
-fn override_at_naive(
+/// Naive implementation for differential tests and benchmark A/B runs.
+#[doc(hidden)]
+pub fn override_at_naive_for_bench(
     config: &WorldGenConfig,
     pos: BlockPos,
     category: MobCategory,
@@ -595,7 +614,7 @@ mod tests {
                         assert!(
                             same_table(
                                 override_at_indexed(&config, &index, pos, category),
-                                override_at_naive(&config, pos, category),
+                                override_at_naive_for_bench(&config, pos, category),
                             ),
                             "位置 {pos:?} 类别 {category:?}"
                         );
@@ -651,5 +670,112 @@ mod tests {
         assert_eq!(moved.len(), 1);
         index.absorb(moved);
         assert_eq!(index.len(), 1);
+    }
+
+    /// 结构查询单价的压测（`#[ignore]`）：同一份盘上女巫小屋，索引路径查表 vs 朴素路径
+    /// 每次克隆引用 + reset 线程状态。数字写进 `docs/performance-optimizations.md` 第 30 节。
+    ///
+    /// Ignored micro-benchmark of structure query cost: indexed lookup vs the naive
+    /// per-query reference clone and thread-state reset.
+    #[cfg(test)]
+    #[test]
+    #[ignore = "timing run, not a check"]
+    fn structure_query_cost() {
+        use std::time::Instant;
+
+        let config = WorldGenConfig {
+            seed: 20261122,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        };
+        install_test_hut(&config);
+        let index = RefCell::new(StructureSpawnIndex::default());
+        let pos = BlockPos::new(5, 65, 5);
+        // 先把两条路径的线程本地缓存都热起来。
+        for _ in 0..128 {
+            let _ = override_at_indexed_for_bench(&config, &index, pos, MobCategory::Monster);
+            let _ = override_at_naive_for_bench(&config, pos, MobCategory::Monster);
+        }
+        const ROUNDS: usize = 3;
+        const QUERIES: usize = 200_000;
+        let mut indexed = Vec::new();
+        let mut naive = Vec::new();
+        for round in 0..ROUNDS {
+            // 每轮交替顺序，抵掉机器负载漂移。
+            let order = if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for is_naive in order {
+                let start = Instant::now();
+                let mut hits = 0_usize;
+                for _ in 0..QUERIES {
+                    let table = if is_naive {
+                        override_at_naive_for_bench(&config, pos, MobCategory::Monster)
+                    } else {
+                        override_at_indexed_for_bench(&config, &index, pos, MobCategory::Monster)
+                    };
+                    hits += usize::from(table.is_some());
+                }
+                let ns = start.elapsed().as_nanos() as f64 / QUERIES as f64;
+                assert_eq!(hits, QUERIES, "全部查询都要命中女巫小屋");
+                if is_naive {
+                    naive.push(ns);
+                } else {
+                    indexed.push(ns);
+                }
+            }
+        }
+        let median = |mut values: Vec<f64>| {
+            values.sort_by(f64::total_cmp);
+            values[1]
+        };
+        let a = median(indexed);
+        let b = median(naive);
+        println!(
+            "structure-query (disk hut): indexed {a:.1} ns/query naive {b:.1} ns/query ratio {:.2}x",
+            b / a
+        );
+        clear_disk_structures();
+
+        // 没有盘上标签的纯生成区块：朴素路径不再逐次解析 NBT，只剩引用表克隆和
+        // 线程状态 reset，量这一项的单价。
+        let index = RefCell::new(StructureSpawnIndex::default());
+        for _ in 0..128 {
+            let _ = override_at_indexed_for_bench(&config, &index, pos, MobCategory::Monster);
+            let _ = override_at_naive_for_bench(&config, pos, MobCategory::Monster);
+        }
+        let mut indexed = Vec::new();
+        let mut naive = Vec::new();
+        for round in 0..ROUNDS {
+            let order = if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for is_naive in order {
+                let start = Instant::now();
+                for _ in 0..QUERIES {
+                    let _ = if is_naive {
+                        override_at_naive_for_bench(&config, pos, MobCategory::Monster)
+                    } else {
+                        override_at_indexed_for_bench(&config, &index, pos, MobCategory::Monster)
+                    };
+                }
+                let ns = start.elapsed().as_nanos() as f64 / QUERIES as f64;
+                if is_naive {
+                    naive.push(ns);
+                } else {
+                    indexed.push(ns);
+                }
+            }
+        }
+        let a = median(indexed);
+        let b = median(naive);
+        println!(
+            "structure-query (generated): indexed {a:.1} ns/query naive {b:.1} ns/query ratio {:.2}x",
+            b / a
+        );
     }
 }
