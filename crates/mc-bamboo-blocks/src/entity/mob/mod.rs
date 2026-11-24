@@ -34,6 +34,8 @@ pub mod dolphin;
 pub mod dolphin_goals;
 pub mod drowned;
 pub mod effects;
+pub mod enchantment_effects;
+pub mod enchantment_wiring;
 pub(crate) mod enderman;
 pub mod endermite;
 pub mod equine;
@@ -2326,6 +2328,10 @@ pub struct Mob {
     pub y_body_rot: f32,
     pub y_body_rot_o: f32,
     pub last_pos: Option<BlockPos>,
+    /// `activeLocationDependentEnchantments`：每个 `location_changed` 效果的激活状态。
+    ///
+    /// `activeLocationDependentEnchantments`: active state of each location effect.
+    pub active_location_effects: enchantment_effects::ActiveLocationEffects,
     pub last_climbable_pos: Option<BlockPos>,
     pub fall_flying: bool,
     /// `Entity.setSharedFlagOnFire` 写进共享标志位的那一位。每刻 `baseTick` 末尾按
@@ -3013,6 +3019,7 @@ impl Mob {
             y_body_rot: 0.0,
             y_body_rot_o: 0.0,
             last_pos: None,
+            active_location_effects: enchantment_effects::ActiveLocationEffects::default(),
             last_climbable_pos: None,
             fall_flying: false,
             visible_fire: false,

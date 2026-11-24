@@ -346,6 +346,7 @@ public final class PlayerAttributesOracle {
                         case "attributes" -> handleAttributes(request, response);
                         case "mining-speed" -> handleMiningSpeed(request, response);
                         case "sync-packets" -> handleSyncPackets(request, response);
+                        case "soul-speed-packet" -> handleSoulSpeedPacket(request, response);
                         default -> response.addProperty("error", "unknown command: " + command);
                     }
                 } catch (Exception error) {
@@ -652,6 +653,28 @@ public final class PlayerAttributesOracle {
             }
 
             response.add("cases", cases);
+        }
+
+        /** 灵魂疾行 III 的 `location_changed` 属性效果：官方真实数据包里的
+         *  `attribute` 效果挂在脚下方块为灵魂沙的玩家身上，再取脏同步包。 */
+        private void handleSoulSpeedPacket(JsonObject request, JsonObject response) {
+            byte[] bamboo = Base64.getDecoder().decode(request.get("soulSpeed").getAsString());
+            AttributeMap map = new AttributeMap(Player.createAttributes().build());
+            map.getAttributesToSync().clear();
+
+            // 与数据包一致：`minecraft:enchantment.soul_speed/feet` 两个 ADD_VALUE 修饰符。
+            // 官方 EnchantmentAttributeEffect.getModifier 用 id.withSuffix("/feet")。
+            Identifier modifierId = Identifier.parse("minecraft:enchantment.soul_speed/feet");
+            map.getInstance(Attributes.MOVEMENT_SPEED).addTransientModifier(
+                    new AttributeModifier(modifierId,
+                            (double) (0.0405F + 0.0105F * (3 - 1)),
+                            AttributeModifier.Operation.ADD_VALUE));
+            map.getInstance(Attributes.MOVEMENT_EFFICIENCY).addTransientModifier(
+                    new AttributeModifier(modifierId, 1.0,
+                            AttributeModifier.Operation.ADD_VALUE));
+            ClientboundUpdateAttributesPacket vanilla =
+                    new ClientboundUpdateAttributesPacket(42, map.getAttributesToSync());
+            response.add("soulSpeed", comparePacket("soulSpeed", bamboo, vanilla));
         }
 
         private void handleSyncPackets(JsonObject request, JsonObject response) {

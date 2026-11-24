@@ -5,7 +5,7 @@
 use mc_bamboo_blocks::entity::{
     JavaRandom,
     ctx::PlayerView,
-    mob::{attributes::Attributes, effects::EffectMap},
+    mob::{attributes::Attributes, effects::EffectMap, enchantment_effects::ActiveLocationEffects},
 };
 use mc_bamboo_core::{Aabb, BlockPos, ChunkPos, Hand, Vec3};
 use mc_bamboo_protocol::{
@@ -165,6 +165,24 @@ pub(crate) struct Player {
     /// [`crate::player_attributes::rebuild`] recomputes its modifiers from
     /// equipment, effects and game mode.
     pub(crate) attributes: Attributes,
+    /// `LivingEntity.activeLocationDependentEnchantments`：`location_changed` 效果的
+    /// 激活状态，以及灵魂疾行临时修饰符的当前等级（0 表示没挂）。
+    ///
+    /// `LivingEntity.activeLocationDependentEnchantments`: active state of each
+    /// `location_changed` effect, plus the level of the soul-speed transient
+    /// modifiers (0 means none).
+    pub(crate) location_effects: ActiveLocationEffects,
+    pub(crate) soul_speed_level: i32,
+    /// `LivingEntity.lastPos`：整数方块坐标跨格才重跑 `runLocationChangedEffects`。
+    ///
+    /// `LivingEntity.lastPos`: `runLocationChangedEffects` re-runs only when
+    /// the integer block position changes.
+    pub(crate) last_location_pos: Option<BlockPos>,
+    /// 上一刻靴子槽的物品；变化时先停掉旧的 location 效果再立即重跑。
+    ///
+    /// Last tick's boots stack; on change the old location effects stop and
+    /// the current ones run immediately.
+    pub(crate) last_location_boots: ItemStack,
     /// `Entity` 的环境状态：着火、氧气、细雪冻结。全是相对倒计时。
     ///
     /// `Entity` environment state: fire, air, powder-snow freeze. All relative counters.
@@ -326,6 +344,10 @@ impl Player {
             health: PlayerHealth::default(),
             effects: EffectMap::new(),
             attributes: Attributes::player(),
+            location_effects: ActiveLocationEffects::default(),
+            soul_speed_level: 0,
+            last_location_pos: None,
+            last_location_boots: ItemStack::empty(),
             environment: crate::player_environment::Environment::default(),
             use_item: None,
             weapon_use: None,

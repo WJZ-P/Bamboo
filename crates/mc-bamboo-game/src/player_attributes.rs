@@ -22,6 +22,7 @@ use mc_bamboo_blocks::{
     entity::mob::{
         attributes::{Attributes, Modifier, Operation},
         effects::attribute_modifiers,
+        enchantment_effects::EffectId,
         equipment::stack_modifiers,
     },
 };
@@ -112,7 +113,10 @@ pub(crate) fn rebuild(region: &mut Region) {
 ///
 /// Vanilla `LivingEntity.tryAddFrost`: `!getBlockStateOnLegacy().isAir()`,
 /// i.e. the block 0.2 below feet is not air. Skips the chunk lookup when not frozen.
-fn frost_block_solid(player: &Player, chunks: &mc_bamboo_world::store::ChunkStore) -> bool {
+pub(crate) fn frost_block_solid(
+    player: &Player,
+    chunks: &mc_bamboo_world::store::ChunkStore,
+) -> bool {
     if player.environment.ticks_frozen <= 0 {
         return false;
     }
@@ -193,10 +197,43 @@ fn powder_snow_modifier(ticks_frozen: i32) -> (i32, Modifier) {
     )
 }
 
-/// 当前装备 / 效果 / 游戏模式 / 疾跑 / 细雪 / 潜行给出的全部临时修饰符。
+/// `location_changed` 的 `attribute` 效果：灵魂疾行激活时挂
+/// `minecraft:enchantment.soul_speed/feet`（移动速度按等级线性增长、移动效率 +1）。
+/// 玩家属性每刻整体重建，所以状态存在 `Player` 上，由接线层按官方停机/激活维护。
+///
+/// The `attribute` effects of `location_changed`: while soul speed is active,
+/// add `minecraft:enchantment.soul_speed/feet` to movement speed (linear in
+/// level) and movement efficiency (+1). The player's transient modifiers are
+/// rebuilt each tick, so the wiring keeps the active state on `Player`.
+fn soul_speed_modifiers(level: i32) -> [(i32, Modifier); 2] {
+    let amount = f64::from(0.0405_f32 + 0.0105_f32 * (level.wrapping_sub(1) as f32));
+    let id = "minecraft:enchantment.soul_speed/feet".to_owned();
+    [
+        (
+            attribute::MOVEMENT_SPEED,
+            Modifier {
+                id: id.clone(),
+                amount,
+                operation: Operation::AddValue,
+                permanent: false,
+            },
+        ),
+        (
+            attribute::MOVEMENT_EFFICIENCY,
+            Modifier {
+                id,
+                amount: 1.0,
+                operation: Operation::AddValue,
+                permanent: false,
+            },
+        ),
+    ]
+}
+
+/// 当前装备 / 效果 / 游戏模式 / 疾跑 / 细雪 / 潜行 / location 效果给出的全部临时修饰符。
 ///
 /// All transient modifiers from equipment, effects, game mode, sprinting,
-/// powder snow and crouching.
+/// powder snow, crouching and active location effects.
 fn transient_modifiers(player: &Player, on_solid_for_frost: bool) -> Vec<(i32, Modifier)> {
     let mut mods = Vec::new();
     // 装备：六槽的 attribute_modifiers 组件 + 附魔 minecraft:attributes。
@@ -224,6 +261,15 @@ fn transient_modifiers(player: &Player, on_solid_for_frost: bool) -> Vec<(i32, M
     // 细雪减速。
     if on_solid_for_frost && player.environment.ticks_frozen > 0 {
         mods.push(powder_snow_modifier(player.environment.ticks_frozen));
+    }
+    // 灵魂疾行的 location_changed 属性效果（官方是 addTransientModifier，
+    // 这里和其余临时修饰符一起每刻重建）。
+    if player
+        .location_effects
+        .is_active(EffectId::SoulSpeedAttributes)
+        && player.soul_speed_level > 0
+    {
+        mods.extend(soul_speed_modifiers(player.soul_speed_level));
     }
     mods
 }
