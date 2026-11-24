@@ -12,7 +12,7 @@
 
 use mc_bamboo_blocks::{
     World,
-    entity::arrow::{ArrowShot, Pickup},
+    entity::arrow::{ArrowShot, Pickup, TridentShot},
 };
 use mc_bamboo_core::{Hand, Vec3, mth};
 use mc_bamboo_data::{items, registries::data_component_type as kinds, sounds, tags::item_tags};
@@ -69,7 +69,7 @@ impl WeaponUse {
 /// Returns true when the weapon consumed the action, so placement and block
 /// interaction are skipped.
 pub(crate) fn start(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
-    let Some(player) = region.players.get_mut(&id) else {
+    let Some(player) = region.players.get(&id) else {
         return false;
     };
     let stack = player.inventory.held(hand).clone();
@@ -77,13 +77,40 @@ pub(crate) fn start(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
         return false;
     }
     let creative = player.game_mode == GameMode::Creative;
-    match stack.item {
-        items::BOW => {
-            if !creative && find_projectile(player).is_none() {
+    let item = stack.item;
+    match item {
+        // `TridentItem.use`：快坏的物品和「有激流但不在水 / 雨里」都直接失败。
+        // `TridentItem.use`: a nearly-broken item, or riptide outside water/rain, fails.
+        items::TRIDENT => {
+            if mc_bamboo_blocks::durability::next_damage_will_break(&stack) {
                 return false;
             }
-            if player.weapon_use.is_none() && player.use_item.is_none() {
-                player.weapon_use = Some(WeaponUse::new(hand, stack.item));
+            if trident_spin_strength(&stack) > 0.0
+                && !crate::player_environment::is_in_water_or_rain(region, id)
+            {
+                return false;
+            }
+            if let Some(player) = region.players.get_mut(&id)
+                && player.weapon_use.is_none()
+                && player.use_item.is_none()
+            {
+                player.weapon_use = Some(WeaponUse::new(hand, item));
+                player.sync.metadata_dirty = true;
+            }
+            true
+        }
+        items::BOW => {
+            if !creative
+                && let Some(player) = region.players.get(&id)
+                && find_projectile(player).is_none()
+            {
+                return false;
+            }
+            if let Some(player) = region.players.get_mut(&id)
+                && player.weapon_use.is_none()
+                && player.use_item.is_none()
+            {
+                player.weapon_use = Some(WeaponUse::new(hand, item));
                 player.sync.metadata_dirty = true;
             }
             true
@@ -93,11 +120,16 @@ pub(crate) fn start(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
                 shoot_crossbow(region, id, hand);
                 return true;
             }
-            if find_projectile(player).is_none() {
+            if let Some(player) = region.players.get(&id)
+                && find_projectile(player).is_none()
+            {
                 return false;
             }
-            if player.weapon_use.is_none() && player.use_item.is_none() {
-                player.weapon_use = Some(WeaponUse::new(hand, stack.item));
+            if let Some(player) = region.players.get_mut(&id)
+                && player.weapon_use.is_none()
+                && player.use_item.is_none()
+            {
+                player.weapon_use = Some(WeaponUse::new(hand, item));
                 player.sync.metadata_dirty = true;
             }
             true
@@ -249,18 +281,196 @@ pub(crate) fn release(region: &mut Region, id: PlayerId) {
         return;
     };
     player.sync.metadata_dirty = true;
+    let held_item = player.inventory.held(using.hand).item;
+    let time_held = using.time_held();
+    let hand = using.hand;
+    if using.item == items::TRIDENT {
+        if held_item == items::TRIDENT {
+            release_trident(region, id, hand, time_held);
+        }
+        return;
+    }
     if using.item != items::BOW {
         return;
     }
-    if player.inventory.held(using.hand).item != items::BOW {
+    if held_item != items::BOW {
         return;
     }
-    let time_held = using.time_held();
     let power = get_power_for_time(time_held);
     if power < 0.1 {
         return;
     }
-    release_bow(region, id, using.hand, power);
+    release_bow(region, id, hand, power);
+}
+
+/// `TridentItem.THROW_THRESHOLD_TIME`：蓄力不足 10 刻不扔。
+const THROW_THRESHOLD_TIME: i32 = 10;
+/// `TridentItem.PROJECTILE_SHOOT_POWER`。
+const TRIDENT_SHOOT_POWER: f32 = 2.5;
+/// `TridentItem.releaseUsing` 里 `startAutoSpinAttack(20, 8.0f, stack)`。
+const AUTO_SPIN_ATTACK_TICKS: i32 = 20;
+const AUTO_SPIN_ATTACK_DAMAGE: f32 = 8.0;
+
+/// `EnchantmentHelper.getTridentSpinAttackStrength`：riptide 的
+/// `trident_spin_attack_strength` 是 linear base 1.5 / +0.75，即 1.5 + 0.75×(L−1)。
+///
+/// `EnchantmentHelper.getTridentSpinAttackStrength`: riptide's
+/// `trident_spin_attack_strength` is linear 1.5 / +0.75, i.e. 1.5 + 0.75×(L−1).
+fn trident_spin_strength(stack: &ItemStack) -> f32 {
+    let level = enchantment_level(stack, "minecraft:riptide");
+    if level <= 0 {
+        0.0
+    } else {
+        1.5 + 0.75 * (level - 1) as f32
+    }
+}
+
+/// `EnchantmentHelper.pickHighestLevel(stack, TRIDENT_SOUND).orElse(TRIDENT_THROW)`：
+/// 激流每级一个音效，没有激流时是普通投掷音。
+///
+/// `EnchantmentHelper.pickHighestLevel(stack, TRIDENT_SOUND).orElse(TRIDENT_THROW)`:
+/// one sound per riptide level, else the ordinary throw sound.
+fn trident_sound(stack: &ItemStack) -> &'static str {
+    match enchantment_level(stack, "minecraft:riptide").clamp(0, 3) {
+        1 => "minecraft:item.trident.riptide_1",
+        2 => "minecraft:item.trident.riptide_2",
+        3 => "minecraft:item.trident.riptide_3",
+        _ => "minecraft:item.trident.throw",
+    }
+}
+
+/// `TridentItem.releaseUsing`：蓄力门槛、激流 / 水雨与乘客判定、耐久、统计和音效，
+/// 然后按有没有激流分投掷实体或自旋攻击。玩家位移由客户端上报，服务端不模拟。
+///
+/// `TridentItem.releaseUsing`: the draw threshold, the riptide water/rain and
+/// passenger gates, durability, stat and sound, then either throws the entity or
+/// starts the auto-spin attack. Player motion is client-authoritative and not
+/// simulated here.
+fn release_trident(region: &mut Region, id: PlayerId, hand: Hand, time_held: i32) {
+    if time_held < THROW_THRESHOLD_TIME {
+        return;
+    }
+    let (stack, creative, is_passenger) = {
+        let Some(player) = region.players.get(&id) else {
+            return;
+        };
+        (
+            player.inventory.held(hand).clone(),
+            player.game_mode == GameMode::Creative,
+            player.riding.is_passenger(),
+        )
+    };
+    let spin = trident_spin_strength(&stack);
+    // 激流：必须在水或雨里，且不能是乘客。
+    // Riptide: only usable in water or rain, and never as a passenger.
+    if spin > 0.0 && (!crate::player_environment::is_in_water_or_rain(region, id) || is_passenger) {
+        return;
+    }
+    // `ItemStack.nextDamageWillBreak()`。
+    if mc_bamboo_blocks::durability::next_damage_will_break(&stack) {
+        return;
+    }
+    let sound = trident_sound(&stack);
+    // `player.awardStat(Stats.ITEM_USED.get(this))`。
+    crate::item_use_stats::award(region, id, items::TRIDENT);
+    // `stack.hurtWithoutBreaking(1, player)`：丢出 / 自旋前先扣耐久（不会坏）。
+    hurt_trident(region, id, hand);
+    // `consumeAndReturn` 的副本要带上刚扣的耐久，所以重读手里的堆。
+    let weapon = region.players[&id].inventory.held(hand).clone();
+    if spin == 0.0 {
+        throw_trident(region, id, hand, &weapon, creative, sound);
+    } else {
+        riptide(region, id, &weapon, sound);
+    }
+}
+
+/// `ItemStack.hurtWithoutBreaking(1, player)` 的手上物品版本。
+fn hurt_trident(region: &mut Region, id: PlayerId, hand: Hand) {
+    crate::durability::run(region, id, hand, |region| {
+        let (mut level, ticks) = region.block_level();
+        let world = World::new(&mut level, ticks);
+        mc_bamboo_blocks::durability::hurt_hand_without_breaking(&world, hand, 1);
+    });
+}
+
+/// 非激流：扔出 `ThrownTrident` 实体，生存模式消耗一个，创造模式不消耗且不可捡。
+///
+/// Non-riptide: throw a `ThrownTrident`, consume one in survival, keep it in
+/// creative and mark it `CREATIVE_ONLY`.
+fn throw_trident(
+    region: &mut Region,
+    id: PlayerId,
+    hand: Hand,
+    weapon: &ItemStack,
+    creative: bool,
+    sound: &str,
+) {
+    let Some(position) = player_eye(region, id) else {
+        return;
+    };
+    let (yaw, pitch) = player_rotation(region, id);
+    let (owner, owner_uuid, slot) = {
+        let Some(player) = region.players.get(&id) else {
+            return;
+        };
+        (
+            Some(player.id.0),
+            Some(*player.uuid.as_bytes()),
+            player.inventory.hand_slot(hand),
+        )
+    };
+    let source_movement = player_movement(region, id);
+    // `ItemStack.consumeAndReturn(1, living)`：生存模式手里减一个，创造模式不减。
+    if !creative {
+        if let Some(player) = region.players.get_mut(&id) {
+            let held = &mut player.inventory.slots[slot];
+            held.count -= 1;
+            if held.count <= 0 {
+                *held = ItemStack::empty();
+            }
+        }
+        sync_slots(region, id, [slot]);
+    }
+    let pickup = if creative {
+        Pickup::CreativeOnly
+    } else {
+        Pickup::Allowed
+    };
+    let shot = TridentShot {
+        position,
+        direction: shoot_from_rotation(yaw, pitch, 0.0),
+        power: TRIDENT_SHOOT_POWER,
+        uncertainty: 1.0,
+        source_movement,
+        owner,
+        owner_uuid,
+        item: copy_with_count(weapon, 1),
+        pickup,
+    };
+    {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        world.spawn_trident_shot(shot);
+    }
+    // `level.playSound(null, player, tridentSound, PLAYERS, 1, 1)`。
+    play_sound(region, player_position(region, id), sound, 1.0, 1.0);
+}
+
+/// 激流：服务端只做官方服务端那一侧的事 —— 自旋攻击计时、生物标志位、碰实体
+/// 伤害、音效和统计；推出 / 起跳的位移是客户端预测的，服务端不模拟。
+///
+/// Riptide: the server only does its own side — the spin-attack timer, the
+/// living flag, contact damage, sound and stat. The push / hop motion is
+/// client-predicted and not simulated here.
+fn riptide(region: &mut Region, id: PlayerId, weapon: &ItemStack, sound: &str) {
+    crate::player_auto_spin::start(
+        region,
+        id,
+        AUTO_SPIN_ATTACK_TICKS,
+        AUTO_SPIN_ATTACK_DAMAGE,
+        weapon.clone(),
+    );
+    play_sound(region, player_position(region, id), sound, 1.0, 1.0);
 }
 
 /// `BowItem.releaseUsing` 里的射击部分。
@@ -872,4 +1082,48 @@ pub(crate) fn play_sound(
         world.drain_effects()
     };
     crate::interaction::send_effects(region, None, &effects);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mc_bamboo_data::registries::{SYNCED_REGISTRIES, data_component_type};
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+
+    fn enchanted(name: &str, level: i32) -> ItemStack {
+        let mut stack = ItemStack::new(items::TRIDENT, 1);
+        let id = SYNCED_REGISTRIES
+            .iter()
+            .find(|registry| registry.name == "minecraft:enchantment")
+            .unwrap()
+            .entries
+            .iter()
+            .position(|entry| *entry == name)
+            .unwrap() as i32;
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            data_component_type::ENCHANTMENTS,
+            PatchEntry::Set(ComponentValue::Enchantments(vec![(id, level)])),
+        );
+        let (added, removed) = patch.to_opaque();
+        stack.added = added;
+        stack.removed = removed;
+        stack
+    }
+
+    #[test]
+    fn riptide_strength_and_sound_follow_the_26_3_effect_data() {
+        let plain = ItemStack::new(items::TRIDENT, 1);
+        assert_eq!(trident_spin_strength(&plain), 0.0);
+        assert_eq!(trident_sound(&plain), "minecraft:item.trident.throw");
+        for (level, strength, sound) in [
+            (1, 1.5, "minecraft:item.trident.riptide_1"),
+            (2, 2.25, "minecraft:item.trident.riptide_2"),
+            (3, 3.0, "minecraft:item.trident.riptide_3"),
+        ] {
+            let stack = enchanted("minecraft:riptide", level);
+            assert_eq!(trident_spin_strength(&stack), strength);
+            assert_eq!(trident_sound(&stack), sound);
+        }
+    }
 }
