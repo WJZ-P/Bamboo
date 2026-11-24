@@ -346,10 +346,11 @@ impl BeeGoal {
     pub(super) fn can_use(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
         let view = ctx.blocks();
         let now = view.game_time();
-        if !self.calm(mob, now) {
-            return false;
-        }
-        match self {
+        // 官方 `BaseBeeGoal.canUse` 先调 `canBeeUse()` 再判 `!isAngry()`，
+        // 生气时 `BeeGrowCropGoal` 等目标仍会在 `canBeeUse()` 里取随机数。
+        // Vanilla `BaseBeeGoal.canUse` calls `canBeeUse()` before `!isAngry()`,
+        // so goals like `BeeGrowCropGoal` still draw RNG while angry.
+        let ok = match self {
             Self::Attack => {
                 is_angry(mob, now)
                     && !mob.bee.has_stung()
@@ -457,7 +458,8 @@ impl BeeGoal {
                 found.is_some()
             }
             Self::ResetUniversalAnger => false,
-        }
+        };
+        ok && self.calm(mob, now)
     }
 
     pub(super) fn can_continue(
@@ -468,10 +470,9 @@ impl BeeGoal {
     ) -> bool {
         let view = ctx.blocks();
         let now = view.game_time();
-        if !self.calm(mob, now) {
-            return false;
-        }
-        match self {
+        // 官方 `BaseBeeGoal.canContinueToUse` 同样先调 `canBeeContinueToUse()` 再判 `!isAngry()`。
+        // Vanilla `BaseBeeGoal.canContinueToUse` also checks `canBeeContinueToUse()` before `!isAngry()`.
+        let ok = match self {
             Self::Attack => {
                 is_angry(mob, now)
                     && !mob.bee.has_stung()
@@ -508,7 +509,8 @@ impl BeeGoal {
             | Self::ValidateFlower { .. }
             | Self::LocateHive
             | Self::ResetUniversalAnger => false,
-        }
+        };
+        ok && self.calm(mob, now)
     }
 
     pub(super) fn start(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
