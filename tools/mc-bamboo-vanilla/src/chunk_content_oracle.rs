@@ -538,8 +538,8 @@ fn run_cases(
             inner.remove("active_effects");
             Value::Object(map)
         };
-        let original = case.original.as_ref().map(|v| comparable(v));
-        let written = case.written.as_ref().map(|v| comparable(v));
+        let original = case.original.as_ref().map(comparable);
+        let written = case.written.as_ref().map(comparable);
         report.check(
             original.is_some() && original == written,
             format!(

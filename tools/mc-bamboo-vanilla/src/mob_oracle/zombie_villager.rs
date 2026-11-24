@@ -358,9 +358,7 @@ fn frame_of(
         .iter()
         .filter(|entity| !entity.removed)
         .filter_map(|entity| {
-            let Some(mob) = entity.kind.mob() else {
-                return None;
-            };
+            let mob = entity.kind.mob()?;
             let mut frame = EntityFrame {
                 entity_type: mob.mob_type.name().to_owned(),
                 x: entity.position.x.to_bits() as i64,
