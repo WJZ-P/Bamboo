@@ -2097,6 +2097,20 @@ impl<'a> World<'a> {
         self.level.difficulty_id()
     }
 
+    /// 这一刻世界里的玩家快照，按加入顺序。
+    ///
+    /// This tick's player snapshots, in join order.
+    pub fn player_views(&self) -> Vec<crate::entity::ctx::PlayerView> {
+        self.level.player_views()
+    }
+
+    /// 这名玩家在不在床上。
+    ///
+    /// Whether this player is sleeping.
+    pub fn player_sleeping(&self, uid: crate::entity::EntityUid) -> bool {
+        self.level.player_sleeping(uid)
+    }
+
     /// 只取一个 `next_float()`，见 [`Level::next_random_float`]。
     pub fn next_random_float(&self) -> f32 {
         self.level.next_random_float()
@@ -4219,7 +4233,8 @@ mod tests {
                 | Effect::BredAnimals { .. }
                 | Effect::SummonedEntity { .. }
                 | Effect::CrafterCrafted { .. }
-                | Effect::KilledByArrow { .. } => None,
+                | Effect::KilledByArrow { .. }
+                | Effect::EnderPearlTeleport { .. } => None,
             })
             .collect()
     }

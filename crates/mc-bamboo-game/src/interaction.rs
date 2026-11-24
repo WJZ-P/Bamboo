@@ -683,6 +683,9 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     crate::command_block::open(region, id, pos);
                 }
             }
+            Effect::EnderPearlTeleport { target, position } => {
+                crate::ender_pearl::teleport(region, target, position);
+            }
             Effect::HurtPlayer {
                 target,
                 source,

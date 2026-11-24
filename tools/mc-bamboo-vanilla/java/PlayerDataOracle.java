@@ -279,7 +279,7 @@ public final class PlayerDataOracle {
             response.add("original", canonical(original));
             response.add("written", canonical(written));
             response.addProperty("gzipWritten", gzip(written));
-            response.add("fields", playerFields(input));
+            response.add("fields", playerFields(input, original));
         }
 
         /** 官方 codec 造一份玩家文件：每个字段都用 TagValueOutput 的同名方法写。 */
@@ -486,7 +486,7 @@ public final class PlayerDataOracle {
         }
 
         /** 官方读取入口逐字段读出来的值，交给 Rust 侧对照自己的 PlayerData。 */
-        private JsonObject playerFields(ValueInput input) {
+        private JsonObject playerFields(ValueInput input, CompoundTag original) {
             JsonObject fields = new JsonObject();
             fields.addProperty("data_version", input.getIntOr("DataVersion", -1));
             fields.addProperty("uuid", java.util.Arrays.toString(input.getIntArray("UUID").orElse(new int[4])));
@@ -543,6 +543,11 @@ public final class PlayerDataOracle {
                     net.minecraft.core.GlobalPos.CODEC)
                     .map(value -> net.minecraft.core.GlobalPos.CODEC.encodeStart(ops(), value).getOrThrow())
                     .map(Oracle::canonical).orElseGet(() -> new JsonObject()));
+            // `ServerPlayer.saveEnderPearls` 的 `ender_pearls` childrenList：官方
+            // `ValueInput.childrenListOrEmpty` 读出的条数，和原始 NBT 的规范 JSON。
+            fields.addProperty("ender_pearl_count",
+                    input.childrenListOrEmpty("ender_pearls").stream().count());
+            fields.add("ender_pearls", Oracle.canonical(original.getListOrEmpty("ender_pearls")));
             return fields;
         }
 
@@ -615,7 +620,7 @@ public final class PlayerDataOracle {
         }
 
         /** 官方造一份玩家文件，字段值来自请求里的一串数（Rust 侧按同一批用例出题）。 */
-        private CompoundTag buildPlayerTag(JsonObject request) {
+        private CompoundTag buildPlayerTag(JsonObject request) throws Exception {
             JsonObject spec = request.getAsJsonObject("player");
             CompoundTag tag = new CompoundTag();
             tag.putInt("DataVersion", SharedConstants.getCurrentVersion().dataVersion().version());
@@ -722,6 +727,15 @@ public final class PlayerDataOracle {
             // 官方有而 Bamboo 不认识的键，用来测 D9 原样保留。
             if (spec.has("unknown_tag")) {
                 tag.put("bamboo:unknown", StringTag.valueOf(spec.get("unknown_tag").getAsString()));
+            }
+            // `ender_pearls` 的每项由 Bamboo 写出、用官方 NbtIo 读回来：
+            // 两套 NBT 编解码器对同一份珍珠存档必须逐字节一致。
+            if (spec.has("ender_pearls")) {
+                ListTag pearls = new ListTag();
+                for (var element : spec.getAsJsonArray("ender_pearls")) {
+                    pearls.add(readNbt(element.getAsString()));
+                }
+                tag.put("ender_pearls", pearls);
             }
             return tag;
         }

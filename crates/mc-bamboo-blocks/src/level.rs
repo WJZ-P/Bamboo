@@ -1151,6 +1151,14 @@ pub trait Level: LevelSideState + LevelEntities {
         out
     }
 
+    /// 这名玩家在不在床上（`LivingEntity.isSleeping()`）。末影珍珠决定要不要传送主人时读它。
+    ///
+    /// Whether this player is sleeping (`LivingEntity.isSleeping()`), read when an
+    /// ender pearl decides whether it may teleport its owner.
+    fn player_sleeping(&self, _uid: EntityUid) -> bool {
+        false
+    }
+
     /// 现实中的本地日期，不是世界时间。
     ///
     /// The local calendar date, independent of the world clock.
@@ -2262,6 +2270,16 @@ pub enum Effect {
     /// A crafter crafted a recipe. The game layer credits nearby players' triggers.
     CrafterCrafted {
         recipe: &'static str,
+        position: mc_bamboo_core::Vec3,
+    },
+    /// `ThrownEnderpearl.onHit`：把扔出珍珠的玩家传送到 `position`（珍珠命中前的
+    /// `oldPosition()`）。游戏层走正式的 `movement::teleport` 并清下落距离。
+    ///
+    /// `ThrownEnderpearl.onHit`: teleport the pearl's owner to `position` (the
+    /// projectile's `oldPosition()` before impact). The game layer uses the
+    /// normal `movement::teleport` and clears fall distance.
+    EnderPearlTeleport {
+        target: crate::entity::EntityUid,
         position: mc_bamboo_core::Vec3,
     },
     /// 空桶舀起了东西。游戏层按 `ItemUtils.createFilledResult` 把 `item` 交还到 `hand`。

@@ -856,6 +856,25 @@ fn check_player_fields(report: &mut Report, name: &str, data: &PlayerData, field
             expected_effects
         ),
     );
+    // `ender_pearls`：官方 `childrenListOrEmpty` 的条数和列表的规范 JSON
+    // 都要和 Bamboo 写出的那一份一致。
+    let expected_pearls = if data.ender_pearls.is_empty() {
+        json!({"type": 9, "values": []})
+    } else {
+        canonical_tag(&Tag::List(data.ender_pearls.clone()))
+    };
+    report.check(
+        get("ender_pearl_count") == json!(data.ender_pearls.len()),
+        format!("{name}: ender_pearls childrenList count"),
+    );
+    report.check(
+        get("ender_pearls") == expected_pearls,
+        format!(
+            "{name}: ender_pearls NBT official={} bamboo={}",
+            get("ender_pearls"),
+            expected_pearls
+        ),
+    );
     report.check(
         get("selected_item_slot") == json!(data.selected_item_slot),
         format!("{name}: SelectedItemSlot"),
@@ -1202,6 +1221,64 @@ fn player_cases() -> Vec<(String, PlayerData)> {
     write_named("", &tag, &mut plain);
     unknown = PlayerData::from_named(&plain).expect("unknown keys decode");
     cases.push(("player unknown keys".into(), unknown));
+
+    // 末影珍珠：`ender_pearls` 是 childrenList，每项是一份完整的
+    // `ThrownEnderpearl.save()` 实体 NBT 加 `ender_pearl_dimension`。
+    let pearl = |x: f64, y: f64, z: f64, owner: bool| -> Tag {
+        let item = slots::encode_item(&ItemStack::new(mc_bamboo_data::items::ENDER_PEARL, 1))
+            .expect("pearl item encodes");
+        let mut entries = vec![
+            ("id".into(), Tag::String("minecraft:ender_pearl".into())),
+            (
+                "Pos".into(),
+                Tag::List(vec![Tag::Double(x), Tag::Double(y), Tag::Double(z)]),
+            ),
+            (
+                "Motion".into(),
+                Tag::List(vec![
+                    Tag::Double(1.25),
+                    Tag::Double(-0.03),
+                    Tag::Double(0.0),
+                ]),
+            ),
+            (
+                "Rotation".into(),
+                Tag::List(vec![Tag::Float(90.0), Tag::Float(-4.5)]),
+            ),
+            ("fall_distance".into(), Tag::Double(0.0)),
+            ("Fire".into(), Tag::Short(0)),
+            ("Air".into(), Tag::Short(300)),
+            ("OnGround".into(), Tag::Byte(0)),
+            ("Invulnerable".into(), Tag::Byte(0)),
+            ("PortalCooldown".into(), Tag::Int(0)),
+            (
+                "UUID".into(),
+                Tag::IntArray(vec![0, 0x0000_baab_u32 as i32, 0, 77]),
+            ),
+            ("LeftOwner".into(), Tag::Byte(1)),
+            ("HasBeenShot".into(), Tag::Byte(1)),
+            ("Item".into(), item),
+            (
+                "ender_pearl_dimension".into(),
+                Tag::String(player_data::OVERWORLD.to_owned()),
+            ),
+        ];
+        if owner {
+            entries.push(("Owner".into(), Tag::IntArray(vec![1, 2, 3, 4])));
+        }
+        Tag::Compound(entries)
+    };
+    let mut one_pearl = cases[0].1.clone();
+    one_pearl.ender_pearls = vec![pearl(3.5, 70.25, -8.0, true)];
+    cases.push(("player one ender pearl".into(), one_pearl));
+
+    let mut two_pearls = cases[1].1.clone();
+    two_pearls.ender_pearls = vec![
+        pearl(1.0e300, -64.0, -1.0e300, false),
+        // 官方 `DoubleTag.valueOf` 把 -0.0 归一成 +0.0，这里用普通 0.0。
+        pearl(0.0, 320.0, 0.125, true),
+    ];
+    cases.push(("player two ender pearls".into(), two_pearls));
     cases
 }
 
@@ -1270,6 +1347,20 @@ fn player_spec(data: &PlayerData) -> Value {
         spec["last_death_x"] = json!(pos[0]);
         spec["last_death_y"] = json!(pos[1]);
         spec["last_death_z"] = json!(pos[2]);
+    }
+    if !data.ender_pearls.is_empty() {
+        // 每项是 Bamboo 写出的「带空名字的复合标签」字节，Java 侧用官方
+        // `NbtIo.read` 解回来再装进 `ender_pearls` 列表。
+        let pearls: Vec<Value> = data
+            .ender_pearls
+            .iter()
+            .map(|tag| {
+                let mut bytes = Vec::new();
+                mc_bamboo_nbt::write_named("", tag, &mut bytes);
+                json!(b64(&bytes))
+            })
+            .collect();
+        spec["ender_pearls"] = json!(pearls);
     }
     if !data.preserved.is_empty() {
         spec["unknown_tag"] = json!("keep");

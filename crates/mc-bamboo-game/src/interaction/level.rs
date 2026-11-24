@@ -251,6 +251,13 @@ impl Level for RegionLevel<'_> {
         }
     }
 
+    /// `LivingEntity.isSleeping()`：玩家 `sleep` 非空就是在床上。
+    fn player_sleeping(&self, uid: mc_bamboo_blocks::entity::EntityUid) -> bool {
+        self.players
+            .get(&PlayerId(uid))
+            .is_some_and(|player| player.sleep.is_some())
+    }
+
     /// 官方 `Block.tryDropExperience` + `Block.popExperience`：
     /// `xpRange.sample(level.random)`（常数区间不取数），然后
     /// `ExperienceOrb.award(level, Vec3.atCenterOf(pos), amount)` 拆成球。

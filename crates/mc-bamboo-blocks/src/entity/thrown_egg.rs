@@ -8,7 +8,7 @@
 //! broadcasts entity event 3 and disappears.
 
 use mc_bamboo_core::{Aabb, Vec3, mth};
-use mc_bamboo_data::registries::data_component_type as kinds;
+use mc_bamboo_data::{registries::data_component_type as kinds, sounds};
 use mc_bamboo_protocol::components::{ComponentValue, defaults};
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -30,6 +30,10 @@ pub enum ThrowableKind {
     #[default]
     Egg,
     Snowball,
+    /// `ThrownEnderpearl`：飞行共用这里，命中改成传送主人。
+    ///
+    /// `ThrownEnderpearl`: shared flight, teleport the owner on impact.
+    EnderPearl,
 }
 
 impl ThrowableKind {
@@ -38,6 +42,18 @@ impl ThrowableKind {
         match self {
             Self::Egg => mc_bamboo_data::registries::entity_type::EGG,
             Self::Snowball => mc_bamboo_data::registries::entity_type::SNOWBALL,
+            Self::EnderPearl => mc_bamboo_data::registries::entity_type::ENDER_PEARL,
+        }
+    }
+
+    /// `getDefaultItem()`：读不到 `Item` 时给对应种类的默认物品。
+    ///
+    /// `getDefaultItem()`: the default item when `Item` cannot be read.
+    pub const fn default_item(self) -> i32 {
+        match self {
+            Self::Egg => mc_bamboo_data::items::EGG,
+            Self::Snowball => mc_bamboo_data::items::SNOWBALL,
+            Self::EnderPearl => mc_bamboo_data::items::ENDER_PEARL,
         }
     }
 }
@@ -447,6 +463,11 @@ pub(super) fn impact(me: &mut Entity, world: &mut World<'_>, hit: EggHit) {
         me.removed = true;
         return;
     }
+    if kind == ThrowableKind::EnderPearl {
+        ender_pearl_impact(me, world, hit);
+        me.removed = true;
+        return;
+    }
     match hit.target {
         EggTarget::Mob(uid) => {
             world.hurt_mob(uid, damage_source(me, world), 0.0);
@@ -476,6 +497,125 @@ pub(super) fn impact(me: &mut Entity, world: &mut World<'_>, hit: EggHit) {
         egg.cracked = true;
     }
     me.removed = true;
+}
+
+/// `ThrownEnderpearl.onHitEntity` / `onHit`：先给被打中的实体 0 点 `thrown` 伤害，
+/// 再按珍珠自己的随机源取 32 组传送门粒子的数（`Level.addParticle` 在服务端不发包，
+/// 但取数照发生），然后传送主人、造成 5 点 `ender_pearl` 伤害、发传送声。
+///
+/// 落点是 `oldPosition()`（`commonTick` 记下的命中前位置），不是 `HitResult.getLocation()`。
+/// 主人是玩家时保留朝向（`Relative.ROTATION`）；玩家下线 / 死亡 / 睡觉 / 跨维度时
+/// 不传送，直接消失。5% 刷末影螨要求 `nextFloat() < 0.05`、两条刷怪游戏规则都为真
+/// 且难度不是和平，末影螨 `snapTo` 到主人当时的位置与朝向。
+///
+/// `ThrownEnderpearl.onHitEntity` / `onHit`: deal 0 `thrown` damage to the struck
+/// entity, draw the 32 portal-particle samples from the pearl's own random
+/// (`Level.addParticle` sends no packet on a server but still consumes them),
+/// then teleport the owner, deal 5 `ender_pearl` damage and play the teleport sound.
+/// The destination is `oldPosition()`, not `HitResult.getLocation()`.
+fn ender_pearl_impact(me: &mut Entity, world: &mut World<'_>, hit: EggHit) {
+    // `onHitEntity`：官方在 `Projectile.onHit` 里先调它，再进 `onHit`。
+    // `onHitEntity`: `Projectile.onHit` calls it before `onHit`.
+    let source = damage_source(me, world);
+    match hit.target {
+        EggTarget::Mob(uid) => {
+            world.hurt_mob(uid, source, 0.0);
+        }
+        EggTarget::Player(uid) => {
+            let owner = source
+                .attacker
+                .and_then(|uid| world.level().entity_public(uid));
+            world.hurt_player_from_mob(uid, source, 0.0, owner.as_ref());
+        }
+        EggTarget::Block | EggTarget::Other => {}
+    }
+    // 32 个 PORTAL 粒子：每个取 `nextDouble()` 抬 y、两个 `nextGaussian()` 当 x/z 偏移。
+    // 26.3 的 `Level.addParticle` 在服务端是空实现，没有粒子包，但随机数照取。
+    // 32 PORTAL particles: one `nextDouble()` for y and two `nextGaussian()`s
+    // for x/z each. `Level.addParticle` is a no-op on a server, so no packet.
+    for _ in 0..32 {
+        let _ = me.random.next_double();
+        let _ = me.random.next_gaussian();
+        let _ = me.random.next_gaussian();
+    }
+    let EntityKind::Egg(pearl) = &me.kind else {
+        return;
+    };
+    // 主人按 UUID 找（官方 `findOwnerIncludingDeadPlayer` 连死了的玩家也找得到）。
+    // Look the owner up by UUID, including dead players as vanilla does.
+    let views = world.player_views();
+    let owner = pearl
+        .owner
+        .and_then(|uid| views.iter().find(|view| view.uid == uid))
+        .or_else(|| {
+            pearl
+                .owner_uuid
+                .and_then(|uuid| views.iter().find(|view| view.uuid == Some(uuid)))
+        })
+        .copied();
+    let Some(owner) = owner else {
+        return;
+    };
+    // `isAllowedToTeleportOwner`：同维度时要求活着且不在睡觉。Bamboo 只有主世界，
+    // 跨维度的 `canUsePortal(true)` 分支不存在。
+    // `isAllowedToTeleportOwner`: alive and not sleeping in the same dimension.
+    // Bamboo has only the overworld, so the cross-dimension branch is absent.
+    if !owner.alive || world.player_sleeping(owner.uid) {
+        return;
+    }
+    let landing = me.old_position;
+    // 5% 末影螨：先取 `nextFloat()`，再判刷怪规则和难度。
+    // 5% endermite: draw `nextFloat()` first, then check spawn rules / difficulty.
+    let rules = world.block_game_rules();
+    if me.random.next_float() < 0.05
+        && rules.spawn_mobs
+        && rules.spawn_monsters
+        && world.difficulty_id() != 0
+    {
+        spawn_endermite(world, owner);
+    }
+    // `isOnPortalCooldown()` 只有珍珠自己跨过传送门才为真；Bamboo 的实体还没有
+    // `portalCooldown`，缺省 0，这里照官方的假分支跳过 `setPortalCooldown`。
+    // `isOnPortalCooldown()` is false for a pearl that never teleported; Bamboo
+    // entities have no `portalCooldown` yet.
+    world.push_effect(crate::Effect::EnderPearlTeleport {
+        target: owner.uid,
+        position: landing,
+    });
+    world.hurt_player_from_mob(
+        owner.uid,
+        DamageSource::environment(DamageKind::EnderPearl),
+        5.0,
+        None,
+    );
+    let Vec3 { x, y, z } = landing;
+    world.push_effect(crate::Effect::Sound {
+        sound: i32::from(sounds::sound_event("minecraft:entity.player.teleport")),
+        source: sounds::PLAYERS,
+        x,
+        y,
+        z,
+        volume: 1.0,
+        pitch: 1.0,
+        except_initiator: false,
+        seed: None,
+    });
+}
+
+/// `EntityTypes.ENDERMITE.create(level, TRIGGERED)` + `snapTo(owner.x/y/z, yRot, xRot)`。
+///
+/// `EntityTypes.ENDERMITE.create(level, TRIGGERED)` then `snapTo` the owner's
+/// position and facing.
+fn spawn_endermite(world: &mut World<'_>, owner: super::ctx::PlayerView) {
+    let mut mite = world.prepare_entity(Entity::by_mob_type(MobType::Endermite, owner.position));
+    mite.with_mob(|entity, mob| {
+        entity.y_rot = owner.yaw;
+        mob.y_rot_o = owner.yaw;
+        mob.x_rot = owner.pitch;
+        mob.x_rot_o = owner.pitch;
+    });
+    mite.old_position = owner.position;
+    world.add_prepared_entity(mite);
 }
 
 /// `Snowball.onHitEntity`：`hurt(thrown(this, owner), blaze ? 3 : 0)`。

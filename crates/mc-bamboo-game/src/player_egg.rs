@@ -1,19 +1,21 @@
-//! 玩家右键扔鸡蛋或雪球：官方 `EggItem.use` / `SnowballItem.use`。先用世界随机源取
-//! 投掷声的音高，再在眼睛下方 0.1 处生成 `ThrowableItemProjectile`，按视线以力度
-//! 1.5、散布 1 射出，记使用统计，最后非创造模式扣一个。
+//! 玩家右键扔鸡蛋、雪球或末影珍珠：官方 `EggItem.use` / `SnowballItem.use` /
+//! `EnderpearlItem.use`。先用世界随机源取投掷声的音高，再在眼睛下方 0.1 处生成
+//! `ThrowableItemProjectile`，按视线以力度 1.5、散布 1 射出，记使用统计，最后
+//! 非创造模式扣一个。珍珠另外有 20 刻 `use_cooldown`，并注册到玩家的珍珠集合。
 //!
-//! A player throwing an egg or snowball, vanilla `EggItem.use` /
-//! `SnowballItem.use`: the throw sound's pitch comes from the level random first,
-//! then a `ThrowableItemProjectile` spawns 0.1 below the eyes and is shot along
-//! the view with power 1.5 and uncertainty 1. Award the use stat, then consume
-//! one unless the player has infinite materials.
+//! A player throwing an egg, snowball or ender pearl, vanilla `EggItem.use` /
+//! `SnowballItem.use` / `EnderpearlItem.use`: the throw sound's pitch comes from
+//! the level random first, then a `ThrowableItemProjectile` spawns 0.1 below the
+//! eyes and is shot along the view with power 1.5 and uncertainty 1. Award the
+//! use stat, then consume one unless the player has infinite materials. Ender
+//! pearls also get a 20-tick `use_cooldown` and are registered on the player.
 
 use mc_bamboo_blocks::{
     World,
     entity::thrown_egg::{EggShot, ThrowableKind},
 };
 use mc_bamboo_core::Hand;
-use mc_bamboo_data::items;
+use mc_bamboo_data::{items, sounds};
 use mc_bamboo_protocol::packet::play::GameMode;
 
 use crate::player_weapon::{
@@ -31,15 +33,52 @@ pub(crate) fn throw(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
         return false;
     };
     let stack = player.inventory.held(hand).clone();
-    let (snowball, sound) = match stack.item {
-        items::EGG | items::BLUE_EGG | items::BROWN_EGG => (false, "minecraft:entity.egg.throw"),
-        items::SNOWBALL => (true, "minecraft:entity.snowball.throw"),
+    let (projectile, sound, neutral_source) = match stack.item {
+        items::EGG | items::BLUE_EGG | items::BROWN_EGG => {
+            (ThrowableKind::Egg, "minecraft:entity.egg.throw", false)
+        }
+        items::SNOWBALL => (
+            ThrowableKind::Snowball,
+            "minecraft:entity.snowball.throw",
+            false,
+        ),
+        items::ENDER_PEARL => (
+            ThrowableKind::EnderPearl,
+            "minecraft:entity.ender_pearl.throw",
+            true,
+        ),
         _ => return false,
     };
+    // `ServerPlayerGameMode.useItem` 开头先问 `isOnCooldown(stack)`；在冷却中直接
+    // `PASS`，连投掷声都不发。珍珠的 `use_cooldown` 组件是 1 秒（20 刻）。
+    if projectile == ThrowableKind::EnderPearl && crate::ender_pearl::on_cooldown(player, &stack) {
+        return false;
+    }
     let item = stack.item;
     let (owner, owner_uuid) = (player.id.0, *player.uuid.as_bytes());
     let pitch = 0.4 / (level_random_float(region) * 0.4 + 0.8);
-    play_sound(region, player_position(region, id), sound, 0.5, pitch);
+    if neutral_source {
+        // `EnderpearlItem.use` 用 NEUTRAL 音源，鸡蛋 / 雪球用 PLAYERS。
+        let position = player_position(region, id);
+        let effects = {
+            let (mut level, ticks) = region.block_level();
+            let mut world = World::new(&mut level, ticks);
+            if let Some(position) = position {
+                world.play_sound(
+                    position,
+                    sounds::sound_event(sound),
+                    sounds::NEUTRAL,
+                    0.5,
+                    pitch,
+                    false,
+                );
+            }
+            world.drain_effects()
+        };
+        crate::interaction::send_effects(region, None, &effects);
+    } else {
+        play_sound(region, player_position(region, id), sound, 0.5, pitch);
+    }
     let Some(position) = player_eye(region, id) else {
         return false;
     };
@@ -52,20 +91,23 @@ pub(crate) fn throw(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
         source_movement: player_movement(region, id),
         owner: Some(owner),
         owner_uuid: Some(owner_uuid),
-        item: stack,
-        projectile: if snowball {
-            ThrowableKind::Snowball
-        } else {
-            ThrowableKind::Egg
-        },
+        item: stack.clone(),
+        projectile,
     };
-    {
+    let pearl_id = {
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
-        world.spawn_egg_shot(&shot);
-    }
+        world.spawn_egg_shot(&shot)
+    };
     crate::item_use_stats::award(region, id, item);
     consume_one(region, id, hand);
+    // `ItemStack.use` 成功后 `UseCooldown.apply` 挂冷却；`setOwner` 时注册到玩家。
+    if let Some(player) = region.players.get_mut(&id) {
+        crate::ender_pearl::apply_cooldown(player, &stack);
+    }
+    if projectile == ThrowableKind::EnderPearl {
+        crate::ender_pearl::register(region, id, pearl_id);
+    }
     true
 }
 

@@ -176,6 +176,13 @@ pub(crate) struct Player {
     /// detect the item swap that resets the attack cooldown.
     pub(crate) last_main_hand_item: ItemStack,
     pub(crate) item_use_stats: crate::item_use_stats::ItemUseStats,
+    /// `Player.cooldowns`：右键使用后的物品冷却。
+    pub(crate) cooldowns: crate::item_cooldowns::ItemCooldowns,
+    /// `ServerPlayer.enderPearls`：这名玩家扔出、还在飞的珍珠实体号。
+    pub(crate) ender_pearls: std::collections::BTreeSet<i32>,
+    /// `saveEnderPearls` 的 NBT 快照；`runtime_player_data` 是 `&Player` 的纯函数，
+    /// 每刻由 `ender_pearl::tick` 从实体表刷新。
+    pub(crate) saved_ender_pearls: Vec<mc_bamboo_nbt::Tag>,
     /// 这一刻累计的饥饿消耗，`player_exhaustion::flush` 在 tick 末尾写入。
     pub(crate) pending_exhaustion: f32,
     /// `ServerPlayer.lastSentHealth` / `lastSentFood` / `lastFoodSaturationZero` 的合并快照。
@@ -309,6 +316,9 @@ impl Player {
             attack_strength_ticker: 0,
             last_main_hand_item: ItemStack::empty(),
             item_use_stats: Default::default(),
+            cooldowns: crate::item_cooldowns::ItemCooldowns::default(),
+            ender_pearls: std::collections::BTreeSet::new(),
+            saved_ender_pearls: Vec::new(),
             pending_exhaustion: 0.0,
             health_sync: crate::player_hurt::HealthSync::INITIAL,
             in_combat: false,

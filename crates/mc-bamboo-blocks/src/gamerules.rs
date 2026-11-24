@@ -48,6 +48,8 @@ pub struct BlockGameRules {
     pub spawn_mobs: bool,
     /// `GameRules.SPAWN_MONSTERS`。和 `spawn_mobs` 一起决定 `isSpawningMonsters()`。
     pub spawn_monsters: bool,
+    /// `GameRules.ENDER_PEARLS_VANISH_ON_DEATH`：主人死后飞行中的珍珠消失。
+    pub ender_pearls_vanish_on_death: bool,
     /// `GameRules.SPAWN_PHANTOMS`。`PhantomSpawner.tick` 开头读它。
     ///
     /// `GameRules.SPAWN_PHANTOMS`, read at the top of `PhantomSpawner.tick`.
@@ -96,6 +98,7 @@ impl BlockGameRules {
             max_snow_accumulation_height: int_default(gamerules::MAX_SNOW_ACCUMULATION_HEIGHT),
             spawn_mobs: bool_default(gamerules::SPAWN_MOBS),
             spawn_monsters: bool_default(gamerules::SPAWN_MONSTERS),
+            ender_pearls_vanish_on_death: bool_default(gamerules::ENDER_PEARLS_VANISH_ON_DEATH),
             spawn_phantoms: bool_default(gamerules::SPAWN_PHANTOMS),
             mob_griefing: bool_default(gamerules::MOB_GRIEFING),
             mob_drops: bool_default(gamerules::MOB_DROPS),

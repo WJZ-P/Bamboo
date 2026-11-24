@@ -4,7 +4,6 @@
 //! The `minecraft:egg` save fields: `Projectile.addAdditionalSaveData` plus the
 //! `Item` of `ThrowableItemProjectile`.
 
-use mc_bamboo_data::items;
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{components::archive::slots, item::ItemStack};
 
@@ -31,14 +30,10 @@ pub(super) fn write(egg: &ThrownEgg, out: &mut Vec<(String, Tag)>) -> Result<()>
 ///
 /// Without `Item`, `getDefaultItem()` gives that kind's default item.
 pub(super) fn read(input: &Tag, pitch: f32, kind: ThrowableKind) -> ThrownEgg {
-    let default = match kind {
-        ThrowableKind::Egg => items::EGG,
-        ThrowableKind::Snowball => items::SNOWBALL,
-    };
     let item = tag::field(input, "Item")
         .and_then(|value| slots::decode_item(value).ok())
         .filter(|stack| !stack.is_empty())
-        .unwrap_or_else(|| ItemStack::new(default, 1));
+        .unwrap_or_else(|| ItemStack::new(kind.default_item(), 1));
     let mut egg = ThrownEgg::with_kind(&item, kind);
     egg.x_rot = pitch;
     egg.uuid = super::arrow::uuid_from(input, "UUID").unwrap_or([0; 16]);
