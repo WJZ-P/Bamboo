@@ -64,6 +64,8 @@ pub(crate) struct TestLevel {
     pub(crate) sleeping: Vec<crate::entity::EntityUid>,
     /// `Level.getSkyDarken()`。默认是开阔的白天（0）。
     pub(crate) sky_darken: i32,
+    /// `Level.block_weather()` 的天气快照，默认晴天；引雷测试要设成雷暴。
+    pub(crate) weather: crate::weather::BlockWeather,
 }
 
 impl TestLevel {
@@ -90,6 +92,7 @@ impl TestLevel {
             players: Vec::new(),
             sleeping: Vec::new(),
             sky_darken: 0,
+            weather: crate::weather::BlockWeather::CLEAR,
         }
     }
 
@@ -289,6 +292,10 @@ impl Level for TestLevel {
 
     fn any_player_close_enough_to(&self, _pos: BlockPos, _max_distance: i32) -> bool {
         true
+    }
+
+    fn block_weather(&self) -> crate::weather::BlockWeather {
+        self.weather
     }
 
     fn brightness(&self, layer: LightLayer, _pos: BlockPos) -> i32 {

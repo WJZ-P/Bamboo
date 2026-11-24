@@ -209,6 +209,20 @@ public final class MobOracle {
     private static ServerStatsCounter stats;
     private static PlayerAdvancements advancements;
 
+    /** 官方 `ThrownTrident.ID_LOYALTY` / `ID_FOIL` 的元数据索引（反射读 record 的 id）。 */
+    private static String tridentMetadataIds() throws Exception {
+        return "{\"type\":\"tridentMetadata\",\"loyalty\":" + metadataId("ID_LOYALTY")
+                + ",\"foil\":" + metadataId("ID_FOIL") + "}\n";
+    }
+
+    private static int metadataId(String name) throws Exception {
+        java.lang.reflect.Field field =
+                net.minecraft.world.entity.projectile.arrow.ThrownTrident.class.getDeclaredField(name);
+        field.setAccessible(true);
+        var accessor = (net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null);
+        return accessor.id();
+    }
+
     public static void main(String[] args) {
         PrintStream log = System.err;
         try {
@@ -261,6 +275,9 @@ public final class MobOracle {
             out.write(Integer.toString(SharedConstants.getCurrentVersion().protocolVersion()));
             out.write(",\"tables\":" + tableHashes());
             out.write("}\n");
+            // 实测核对三叉戟的两个元数据索引，不靠类层级推导。
+            // Cross-check the trident metadata indices against the official jar.
+            out.write(tridentMetadataIds());
             int cases = 0;
             for (Scene scene : Scenes.all()) {
                 if (only != null && !scene.name.startsWith(only)) {
@@ -308,7 +325,8 @@ public final class MobOracle {
                     "shot_bow_infinity", "shot_bow_tipped", "shot_bow_creative",
                     "shot_crossbow_load", "shot_crossbow_multishot",
                     "shot_crossbow_quick_charge", "shot_crossbow_angled_multishot",
-                    "shot_crossbow_piercing", "shot_dispenser_arrow", "shot_dispenser_arrow_up")) {
+                    "shot_crossbow_piercing", "shot_dispenser_arrow", "shot_dispenser_arrow_up",
+                    "shot_trident", "shot_trident_moving", "shot_trident_creative")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playShot(official, out, name);
                 cases++;
@@ -3138,40 +3156,41 @@ public final class MobOracle {
                 scenes.add(death);
             }
             {
-                // 蜘蛛骑士追玩家（AI 开）：控制载具的僵尸骑手把目标/漫游路径写到**载具**
-                // 的导航上（`Mob.getNavigation` 转交），蜘蛛跟着走。这里用僵尸作骑手：
-                // 骷髅持弓 + 射箭那一支（`bowRider`）在第 11 刻的路径长度（官方到节点 7、
-                // Bamboo 到节点 6）和头/身体朝向上仍与官方不一致，记为已知限制，未并入场景。
-                // Spider jockey chase (AI on): the controlling zombie rider writes paths
-                // to the vehicle's navigation, driving the spider. A zombie is used here;
-                // the bow-armed skeleton + arrow-shooting variant (`bowRider`) still
-                // diverges from vanilla (path node 7 vs 6 at tick 11, plus head/body
-                // rotation) and is left as a known limitation, not wired into a scene.
+                // 蜘蛛骑士追玩家（AI 开）：持弓骷髅骑蜘蛛，借载具的
+                // `WallClimberNavigation`（`getNavigation` 转交）追玩家并射箭。
+                // `RangedBowAttackGoal.tick()` 两参数 `moveTo` 在这里用 reach 0，
+                // strafe 分支还会让 `getControlledVehicle()` 一起 `lookAt` 目标；
+                // `AbstractSkeleton.rideTick` 把载具的 `yBodyRot` 抄给骑手。
+                // Spider jockey chase (AI on): a bow-armed skeleton rides a spider,
+                // borrowing the vehicle's `WallClimberNavigation` to chase the player
+                // and shoot arrows. `RangedBowAttackGoal.tick()`'s two-arg `moveTo`
+                // uses reach 0 here; its strafe branch also makes the controlled
+                // vehicle `lookAt` the target; `AbstractSkeleton.rideTick` copies the
+                // vehicle's `yBodyRot` to the rider.
                 Scene chase = new Scene("spider_ride_chase").ticks(160).difficulty(2);
                 chase.clockStart = 18000;
                 chase.fill(-12, 63, -12, 12, 63, 12, bedrock);
                 chase.mob(41, 0.5, 64.0, 0.5, 0.0F, 817L, 0);
-                chase.mob(1, 0.5, 64.0, 0.5, 0.0F, 818L, 0);
-                chase.ride(1, 0);
+                chase.mob(44, 0.5, 64.0, 0.5, 0.0F, 818L, 0);
+                chase.ride(1, 0).bowRider(1);
                 chase.player(7.5, 64.0, 0.5, Items.AIR);
                 scenes.add(chase);
             }
             {
-                // 鸡骑士近战（AI 开）：僵尸骑鸡追玩家；鸡的 MOVE/LOOK/JUMP 被控制
-                // 乘客关掉，路径由僵尸写进鸡的导航。这里用成年僵尸、只跑到第 21 刻：
-                // 幼年僵尸（`age=-24000`）按 VEHICLE 附着点的年龄缩放会与官方差一个
-                // y（官方 64.5125 / Bamboo 64.00000001192093），再往后骑手的头/身体
-                // 朝向（-0.1 的乘客附着点造成的转身）也还没建模，两项都是已知限制。
-                // Chicken jockey melee (AI on). An adult zombie is used and the scene
-                // stops at tick 21: a baby zombie's age-scaled VEHICLE attachment point
-                // diverges in y from vanilla, and beyond tick 21 the rider's head/body
-                // rotation from the -0.1 passenger offset is not modelled yet. Both
-                // are known limitations.
-                Scene melee = new Scene("zombie_ride_melee").ticks(21).difficulty(2);
+                // 鸡骑士近战（AI 开）：幼年僵尸骑成年鸡追玩家并近战；鸡的
+                // MOVE/LOOK/JUMP 被控制乘客关掉，路径由僵尸写进鸡的导航。幼年乘客的
+                // VEHICLE 附着点按 `getAgeScale()` 缩到一半，鸡的 PASSENGER 点按成年鸡
+                // 不缩；跑到足够长以覆盖近战命中和 -0.1 附着点带来的转身。
+                // Chicken jockey melee (AI on): a baby zombie rides an adult chicken,
+                // chases the player and melees. The baby passenger's VEHICLE attachment
+                // point is halved by `getAgeScale()` while the adult chicken's PASSENGER
+                // point is not scaled; the scene runs long enough to cover melee hits
+                // and the turn caused by the -0.1 passenger offset.
+                Scene melee = new Scene("zombie_ride_melee").ticks(160).difficulty(2);
                 melee.clockStart = 18000;
                 melee.fill(-12, 63, -12, 12, 63, 12, bedrock);
                 melee.mob(5, 0.5, 64.0, 0.5, 0.0F, 819L, 0);
-                melee.mob(1, 0.5, 64.0, 0.5, 0.0F, 820L, 0);
+                melee.mob(1, 0.5, 64.0, 0.5, 0.0F, 820L, -24000);
                 melee.ride(1, 0);
                 melee.player(3.5, 64.0, 0.5, Items.AIR);
                 scenes.add(melee);
@@ -7103,6 +7122,7 @@ public final class MobOracle {
     private static void playShot(Official official, Writer out, String name) throws Exception {
         boolean dispenser = name.startsWith("shot_dispenser");
         boolean crossbow = name.startsWith("shot_crossbow");
+        boolean trident = name.startsWith("shot_trident");
         boolean creative = name.contains("creative");
         boolean multishot = name.contains("multishot");
         boolean quick = name.contains("quick_charge");
@@ -7160,7 +7180,7 @@ public final class MobOracle {
             player.getAbilities().instabuild = creative;
             level.playersList().add(player);
 
-            ItemStack weapon = new ItemStack(crossbow ? Items.CROSSBOW : Items.BOW);
+            ItemStack weapon = new ItemStack(trident ? Items.TRIDENT : (crossbow ? Items.CROSSBOW : Items.BOW));
             ItemStack ammo = new ItemStack(tipped ? Items.TIPPED_ARROW : Items.ARROW, 5);
             if (tipped) {
                 ammo.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.POISON));
@@ -7190,6 +7210,33 @@ public final class MobOracle {
                     item.onUseTick(level, player, weapon, 72000 - hold);
                     player.stopUsingItem();
                     item.use(level, player, InteractionHand.MAIN_HAND);
+                } else if (trident) {
+                    // 非激流投掷：`TridentItem.releaseUsing` 的顺序，在进程内手写一遍，
+                    // 只是把 `ThrownTrident` 的 factory 换成带可控种子的版本 —— 官方
+                    // 实体的随机源不带种子，`shootFromRotation` 的散布才没法对拍。
+                    // Non-riptide throw: the order of `TridentItem.releaseUsing`,
+                    // written inline with a seeded `ThrownTrident` factory, because
+                    // vanilla's entity random is unseeded and would make the shoot
+                    // spread irreproducible.
+                    player.awardStat(net.minecraft.stats.Stats.ITEM_USED.get(Items.TRIDENT));
+                    weapon.hurtWithoutBreaking(1, player);
+                    ItemStack consumed = weapon.consumeAndReturn(1, player);
+                    long seed = level.entitySeeds.nextLong();
+                    var tridentEntity = net.minecraft.world.entity.projectile.Projectile
+                            .spawnProjectileFromRotation(
+                                (lvl, shooter, stack) -> {
+                                    var t = new net.minecraft.world.entity.projectile.arrow.ThrownTrident(
+                                            lvl, shooter, stack);
+                                    setRandom(t, seed);
+                                    t.setUUID(Mth.createInsecureUUID(t.getRandom()));
+                                    return t;
+                                }, level, consumed, player, 0.0F, 2.5F, 1.0F);
+                    if (player.getAbilities().instabuild) {
+                        tridentEntity.pickup = net.minecraft.world.entity.projectile.arrow
+                                .AbstractArrow.Pickup.CREATIVE_ONLY;
+                    }
+                    level.playSound(null, player, net.minecraft.sounds.SoundEvents.TRIDENT_THROW,
+                            net.minecraft.sounds.SoundSource.PLAYERS, 1.0F, 1.0F);
                 } else {
                     SeedBow item = new SeedBow(new Item.Properties().durability(384).setId(net.minecraft.resources.ResourceKey.create(Registries.ITEM, net.minecraft.resources.Identifier.withDefaultNamespace("bow"))), level.entitySeeds);
                     item.releaseUsing(weapon, level, player, 72000 - hold);
@@ -12084,6 +12131,16 @@ public final class MobOracle {
                 // `AbstractHorse.MountPanicGoal` 没被生物控制时就是 `PanicGoal`，名字按后者记。
                 // `MountPanicGoal` is a plain `PanicGoal` without a mob controller.
                 String goalName = goal.getGoal().getClass().getSimpleName();
+                // `AbstractSkeleton` 的近战目标是一个匿名 `MeleeAttackGoal` 子类
+                // (`AbstractSkeleton$1`)，`getSimpleName()` 是空串；Bamboo 按
+                // `MeleeAttackGoal` 建模，这里补回类名以便逐刻对拍。
+                // The skeleton's melee goal is an anonymous `MeleeAttackGoal`
+                // subclass whose `getSimpleName()` is empty; Bamboo models it as
+                // `MeleeAttackGoal`, so restore the name here.
+                if (goalName.isEmpty()
+                        && goal.getGoal() instanceof net.minecraft.world.entity.ai.goal.MeleeAttackGoal) {
+                    goalName = "MeleeAttackGoal";
+                }
                 out.append("MountPanicGoal".equals(goalName) ? "PanicGoal" : goalName);
             }
             out.append('"');

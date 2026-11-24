@@ -283,6 +283,17 @@ pub enum Goal {
         attack_time: i32,
         see_time: i32,
     },
+    /// `Drowned.DrownedTridentAttackGoal`（`RangedAttackGoal(this, 1.0, 40, 10.0f)`）：
+    /// 也是 `RangedAttackGoal` 的变体，额外要求主手是三叉戟。
+    ///
+    /// `Drowned.DrownedTridentAttackGoal` (`RangedAttackGoal(this, 1.0, 40, 10.0f)`):
+    /// another `RangedAttackGoal` variant that additionally requires a trident
+    /// in the main hand.
+    DrownedTridentAttack {
+        target: Option<EntityUid>,
+        attack_time: i32,
+        see_time: i32,
+    },
     /// `Llama.LlamaHurtByTargetGoal`：`HurtByTargetGoal`，吐过口水就停。
     ///
     /// `Llama.LlamaHurtByTargetGoal`: a `HurtByTargetGoal` that stops after a spit.
@@ -694,9 +705,10 @@ impl Goal {
             | Self::GolemBackToVillage { .. } => &[Flag::Move],
             Self::OfferFlower { .. } => &[Flag::Move, Flag::Look],
             Self::RunAroundLikeCrazy { .. } => &[Flag::Move],
-            Self::MeleeAttack { .. } | Self::Bow(_) | Self::RangedAttack { .. } => {
-                &[Flag::Move, Flag::Look]
-            }
+            Self::MeleeAttack { .. }
+            | Self::Bow(_)
+            | Self::RangedAttack { .. }
+            | Self::DrownedTridentAttack { .. } => &[Flag::Move, Flag::Look],
             Self::HurtByTarget { .. }
             | Self::NearestAttackableTarget { .. }
             | Self::LlamaHurtByTarget { .. } => &[Flag::Target],
@@ -778,6 +790,7 @@ impl Goal {
                 | Self::SquidFlee { .. }
                 | Self::RandomStand { .. }
                 | Self::RangedAttack { .. }
+                | Self::DrownedTridentAttack { .. }
                 | Self::TurtleLayEgg { .. }
                 | Self::TurtleGoToWater { .. }
                 | Self::BreakDoor
@@ -848,6 +861,7 @@ impl Goal {
             Self::RandomStand { .. } => "RandomStandGoal",
             Self::RunAroundLikeCrazy { .. } => "RunAroundLikeCrazyGoal",
             Self::RangedAttack { .. } => "RangedAttackGoal",
+            Self::DrownedTridentAttack { .. } => "DrownedTridentAttackGoal",
             Self::LlamaHurtByTarget { .. } => "LlamaHurtByTargetGoal",
             Self::EatBlock { .. } => "EatBlockGoal",
             Self::CubeFloat => "CubeMobFloatGoal",
@@ -1970,7 +1984,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 BlockPos::containing(target.position),
                 0,
             );
-            start_path.is_some() || within_melee_range(me, mob, target)
+            start_path.is_some() || within_melee_range(me, mob, target, ctx)
         }
         Goal::HurtByTarget { timestamp, .. } => {
             let last = mob.last_hurt_by_mob;
@@ -2015,6 +2029,22 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 *target = alive;
             }
             alive.is_some()
+        }
+        // `DrownedTridentAttackGoal.canUse`：先走 `RangedAttackGoal.canUse`，再要求
+        // 主手是三叉戟。
+        // `DrownedTridentAttackGoal.canUse`: `RangedAttackGoal.canUse` plus a
+        // trident in the main hand.
+        Goal::DrownedTridentAttack { target, .. } => {
+            let alive = mob.target.filter(|&uid| alive_target(ctx, uid).is_some());
+            if alive.is_some() {
+                *target = alive;
+            }
+            alive.is_some()
+                && mob
+                    .equipment
+                    .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
+                    .item
+                    == mc_bamboo_data::items::TRIDENT
         }
         Goal::NearestAttackableTarget {
             kind,
@@ -2586,7 +2616,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
 
             *unseen_ticks <= reduced_tick_delay(60)
         }
-        Goal::RangedAttack { target, .. } => {
+        Goal::RangedAttack { target, .. } | Goal::DrownedTridentAttack { target, .. } => {
             let stored = *target;
             can_use(goal, me, mob, ctx)
                 || (stored.is_some_and(|uid| alive_target(ctx, uid).is_some())
@@ -2698,6 +2728,13 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::Bee(goal) => goal.start(me, mob, ctx),
         Goal::LeapAtTarget { yd } => leap_start(me, mob, ctx, *yd),
         Goal::Bow(_) => mob.aggressive = true,
+        // `DrownedTridentAttackGoal.start`：`setAggressive(true)` + 主手开始使用物品。
+        // `DrownedTridentAttackGoal.start`: `setAggressive(true)` and start using
+        // the main-hand item.
+        Goal::DrownedTridentAttack { .. } => {
+            mob.aggressive = true;
+            mob.using_item_flags |= 1;
+        }
         Goal::Panic { speed, target, .. } => {
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *target, *speed);
@@ -3056,6 +3093,21 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             *target = None;
             *see_time = 0;
             *attack_time = -1;
+        }
+        // `DrownedTridentAttackGoal.stop`：清目标，`setAggressive(false)` +
+        // `stopUsingItem()`。
+        // `DrownedTridentAttackGoal.stop`: clear the target, `setAggressive(false)`
+        // and `stopUsingItem()`.
+        Goal::DrownedTridentAttack {
+            target,
+            attack_time,
+            see_time,
+        } => {
+            *target = None;
+            *see_time = 0;
+            *attack_time = -1;
+            mob.aggressive = false;
+            mob.using_item_flags &= !1;
         }
         Goal::NearestAttackableTarget { found, .. } => {
             super::enderman::set_target(me, mob, None);
@@ -3472,6 +3524,22 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 super::equine::ranged_attack_tick(me, mob, ctx, target, attack_time, see_time);
             }
         }
+        Goal::DrownedTridentAttack {
+            target,
+            attack_time,
+            see_time,
+        } => {
+            if let Some((target, _)) = target.and_then(|uid| target_view(ctx, uid)) {
+                super::drowned::ranged_attack_tick(
+                    me,
+                    mob,
+                    ctx,
+                    target,
+                    attack_time,
+                    see_time,
+                );
+            }
+        }
         Goal::MeleeAttack {
             speed,
             ticks_until_next_attack,
@@ -3539,7 +3607,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                     target,
                 );
             } else if *ticks_until_next_attack == 0
-                && within_melee_range(me, mob, target)
+                && within_melee_range(me, mob, target, ctx)
                 && living::has_line_of_sight(
                     me,
                     mob,
@@ -5298,22 +5366,46 @@ fn leap_start(me: &mut Entity, mob: &Mob, ctx: &dyn EntityCtx, yd: f32) {
 }
 
 /// `PathfinderMob.isWithinMeleeAttackRange`：用实体交互范围算的方形距离。
-pub(super) fn within_melee_range(me: &Entity, _mob: &Mob, target: CombatTarget) -> bool {
+pub(super) fn within_melee_range(
+    me: &Entity,
+    mob: &Mob,
+    target: CombatTarget,
+    ctx: &dyn EntityCtx,
+) -> bool {
     // `Mob.DEFAULT_ATTACK_REACH = sqrt(2.04f) - 0.6f`（26.3 字节码）。
     // 官方用 `getAttackBoundingBox(reach).intersects(target.getHitbox())`，
     // 这里按双方 Aabb 膨胀后的相交判定，而不是旧的「交互范围 + 1」方格。
     let reach = 2.039_999_961_853_027_3_f64.sqrt() - f64::from(0.6_f32);
-    let (width, height) = _mob.dimensions();
+    let (width, height) = mob.dimensions();
     let half = f64::from(width) / 2.0;
+    let mut min_x = me.position.x - half;
+    let mut max_x = me.position.x + half;
+    let mut min_z = me.position.z - half;
+    let mut max_z = me.position.z + half;
+    // `Mob.getAttackBoundingBox(reach)`：乘客把自己的包围盒与**载具**的水平包围盒
+    // 取并集（min/max X、Z），竖直方向仍用自己的 minY/maxY，再水平膨胀 `reach`。
+    // 鸡骑士里鸡在骑手前方，合并后攻击盒多伸出一截，近战命中/收手时刻因而早一刻。
+    // A passenger's attack box is the X/Z hull of its own and the vehicle's
+    // bounding boxes (`Mob.getAttackBoundingBox`); Y stays its own. For a chicken
+    // jockey the chicken is ahead of the rider, so the hull reaches one tick earlier.
+    if let Some(vehicle_uid) = me.vehicle
+        && let Some(vehicle) = ctx.other(vehicle_uid)
+    {
+        let v = vehicle.bounding_box();
+        min_x = min_x.min(v.min_x);
+        max_x = max_x.max(v.max_x);
+        min_z = min_z.min(v.min_z);
+        max_z = max_z.max(v.max_z);
+    }
     // `getAttackBoundingBox` 只在水平方向膨胀（`inflate(reach, 0, reach)`）。
     // `getAttackBoundingBox` only grows horizontally (`inflate(reach, 0, reach)`).
     let ours = crate::shape::Aabb::new(
-        me.position.x - half - reach,
+        min_x - reach,
         me.position.y,
-        me.position.z - half - reach,
-        me.position.x + half + reach,
+        min_z - reach,
+        max_x + reach,
         me.position.y + f64::from(height),
-        me.position.z + half + reach,
+        max_z + reach,
     );
     ours.intersects(target.hitbox)
 }

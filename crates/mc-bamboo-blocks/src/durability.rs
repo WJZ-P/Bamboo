@@ -433,6 +433,51 @@ pub fn set_damage_for_oracle(stack: &mut ItemStack, damage: i32) {
     let _ = write_damage(stack, damage);
 }
 
+/// `ItemStack.nextDamageWillBreak()`：可损耗且再扣一点就到上限。
+///
+/// `ItemStack.nextDamageWillBreak()`: damageable and one more point reaches the cap.
+pub fn next_damage_will_break(stack: &ItemStack) -> bool {
+    let Ok(patch) = ComponentPatch::from_opaque(stack) else {
+        return false;
+    };
+    is_damageable(stack.item, &patch)
+        && damage_value(stack.item, &patch) >= max_damage(stack.item, &patch) - 1
+}
+
+/// `ItemStack.hurtWithoutBreaking(amount, player)`：耐久附魔照常取数，但把损耗封顶在
+/// `maxDamage - 1`，物品永远不会坏（三叉戟松手时用它）。
+///
+/// `ItemStack.hurtWithoutBreaking(amount, player)`: durability enchantments still
+/// draw, but the damage is clamped to `maxDamage - 1` so the item never breaks.
+pub fn hurt_without_breaking(stack: &mut ItemStack, amount: i32, random: &LegacyRandom) {
+    let Ok(patch) = ComponentPatch::from_opaque(stack) else {
+        return;
+    };
+    let spent = durability_change(stack.item, &patch, amount, random, false);
+    if spent == 0 {
+        return;
+    }
+    let new_damage = damage_value(stack.item, &patch)
+        .wrapping_add(spent)
+        .min(max_damage(stack.item, &patch) - 1);
+    let _ = write_damage(stack, new_damage);
+}
+
+/// `ItemStack.hurtWithoutBreaking(amount, player)` 的手上物品版本，给游戏层的
+/// [`ActiveHands`] 用。创造模式在取数之前短路，和官方
+/// `ServerPlayer.processDurabilityChange` 一致。
+///
+/// The held-stack version of `hurtWithoutBreaking`, for the game layer's
+/// [`ActiveHands`]. Creative mode short-circuits before any draws, like vanilla's
+/// `ServerPlayer.processDurabilityChange`.
+pub fn hurt_hand_without_breaking(world: &World, hand: Hand, amount: i32) {
+    edit_hand(hand, |stack, hands| {
+        if !hands.infinite_materials {
+            hurt_without_breaking(stack, amount, world.random());
+        }
+    });
+}
+
 /// `ItemStack.isBroken`，给装备同步用。
 pub(crate) fn is_broken_stack(stack: &ItemStack) -> bool {
     !stack.is_empty() && is_broken(stack)

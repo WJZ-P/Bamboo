@@ -102,6 +102,13 @@ mod base64_stub {
 #[serde(tag = "type", rename_all = "camelCase")]
 enum Line {
     Header(Header),
+    /// 官方 `ThrownTrident.ID_LOYALTY` / `ID_FOIL` 的元数据索引对照。
+    ///
+    /// Cross-check of the official `ThrownTrident.ID_LOYALTY` / `ID_FOIL` indices.
+    TridentMetadata {
+        loyalty: u8,
+        foil: u8,
+    },
     Case(Box<Case>),
     Projectile(Box<projectile::ProjectileCase>),
     Shot(shot::ShotCase),
@@ -1536,6 +1543,9 @@ impl Report {
             })?;
             match parsed {
                 Line::Header(header) => self.check_header(&header)?,
+                Line::TridentMetadata { loyalty, foil } => {
+                    self.replay_trident_metadata(loyalty, foil);
+                }
                 Line::Case(case) => self.replay(&case),
                 Line::Projectile(case) => self.replay_projectile(&case),
                 Line::Shot(case) => self.replay_shot(&case),
@@ -1653,6 +1663,22 @@ impl Report {
             ));
         }
         Ok(())
+    }
+
+    /// 实测核对 `TRIDENT_LOYALTY` / `TRIDENT_FOIL` 两个元数据索引，不靠类层级推导。
+    ///
+    /// Verify the two metadata indices against the official jar, not by hierarchy.
+    fn replay_trident_metadata(&mut self, loyalty: u8, foil: u8) {
+        let ours = (
+            mc_bamboo_data::entity_types::TRIDENT_LOYALTY,
+            mc_bamboo_data::entity_types::TRIDENT_FOIL,
+        );
+        if ours != (loyalty, foil) {
+            self.mismatch(format!(
+                "trident metadata indices: official loyalty {} foil {}, bamboo loyalty {} foil {}",
+                loyalty, foil, ours.0, ours.1
+            ));
+        }
     }
 
     fn replay(&mut self, case: &Case) {
@@ -2045,6 +2071,11 @@ impl Report {
                                 Some("zombie_baby") => {
                                     mob.set_zombie_baby(!mob.zombie_baby);
                                 }
+                                // 改坏确认：鸡骑士的乘客换成成年，VEHICLE 附着点从
+                                // BABY_DIMENSIONS 的 0.1875 变回 0.7，骑手 y 立刻错。
+                                Some("ride_baby") if index as i32 == case.ride_passenger => {
+                                    mob.set_zombie_baby(!mob.zombie_baby);
+                                }
                                 _ => {}
                             }
                             if case.helmet != 0 {
@@ -2080,7 +2111,9 @@ impl Report {
                         }
                     });
                 }
-                if index as i32 == case.bow_rider {
+                // 改坏确认：不给骷髅骑士装备弓，`reassessWeaponGoal` 会退回近战目标，
+                // 射箭 / SetEquipment 包 / vehicle.lookAt / reach 0 的路径全都不再对拍。
+                if index as i32 == case.bow_rider && !matches!(break_test, Some("ride_bow")) {
                     // 骷髅骑士的 `reassessWeaponGoal` 要主手是弓才会启用射箭目标。
                     world.with_entity_mut(id, &mut |entity| {
                         if let Some(mob) = entity.kind.mob_mut() {

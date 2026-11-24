@@ -3432,6 +3432,22 @@ impl<'a> World<'a> {
         self.add_prepared_entity(entity)
     }
 
+    /// `Projectile.spawnProjectileFromRotation(ThrownTrident::new, ...)`：和箭一样
+    /// 走 `prepare`（种子 / UUID），再按视角射出。
+    ///
+    /// `Projectile.spawnProjectileFromRotation(ThrownTrident::new, ...)`: like an
+    /// arrow it goes through `prepare` (seed / UUID), then shoots by rotation.
+    pub fn spawn_trident_shot(&mut self, shot: crate::entity::arrow::TridentShot) -> i32 {
+        let mut entity = self.prepare_entity(Entity::configured_trident(&shot));
+        entity.shoot_arrow_with_movement(
+            shot.direction,
+            shot.power,
+            shot.uncertainty,
+            shot.source_movement,
+        );
+        self.add_prepared_entity(entity)
+    }
+
     /// 构造一个实体但先不放进世界，见 [`crate::EntityStore::prepare`]。
     pub fn prepare_entity(&mut self, entity: Entity) -> Entity {
         self.level.prepare_entity(entity)
@@ -3904,9 +3920,15 @@ impl<'a> World<'a> {
                     crate::entity::riding::end_nav_borrow(&mut passenger)
             {
                 let mut shared = Some((navigation, mover));
+                let mut vehicle_look = crate::entity::riding::take_vehicle_look(&mut passenger);
                 world.with_entity_mut(vehicle.uid, &mut |entity| {
                     if let Some((navigation, mover)) = shared.take() {
                         crate::entity::riding::put_borrowed_nav(entity, navigation, mover);
+                    }
+                    // `RangedBowAttackGoal.tick()` 的 `vehicle.lookAt`：把这一刻转向
+                    // 目标的请求落到载具的 `yRot` / `xRot`。
+                    if let Some(target_eye) = vehicle_look.take() {
+                        crate::entity::riding::apply_vehicle_look(entity, target_eye);
                     }
                 });
             }
@@ -3926,6 +3948,11 @@ impl<'a> World<'a> {
             let passenger_public = passenger.clone().split().public;
             let at = crate::entity::riding::rider_position(&current, &passenger_public, index);
             passenger.position = at;
+            // `AbstractSkeleton.rideTick` / `Drowned.rideTick` 结尾：控制载具的骷髅/溺尸
+            // 把载具的 `yBodyRot` 抄成自己的，让蜘蛛骑士朝向一致。
+            if let Some(vehicle) = vehicle_snapshot.as_ref() {
+                crate::entity::riding::sync_rider_body_rotation(&mut passenger, vehicle);
+            }
             // 官方的 `checkDespawn` 在 uid 顺序里对每个实体各来一次：乘客的那次排在
             // 它的 `rideTick` 之后，由这里补上（`tick_mob` 对乘客已经跳过）。
             // Vanilla checks despawn once per entity in uid order; a passenger's
