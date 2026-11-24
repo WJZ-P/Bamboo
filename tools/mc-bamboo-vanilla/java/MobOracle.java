@@ -502,6 +502,11 @@ public final class MobOracle {
                 playAttackTarget(official, out, name);
                 cases++;
             }
+            for (String name : List.of("guardian_swim")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playGuardian(official, out, name);
+                cases++;
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -10295,6 +10300,151 @@ public final class MobOracle {
                 + ",\"deathTime\":" + mob.deathTime
                 + ",\"removed\":" + (mob.isRemoved() ? 1 : 0)
                 + ",\"target\":" + (target == null ? -1 : target.getId()) + '}';
+    }
+
+    /**
+     * 守卫者逐刻场景。官方一侧在假世界里构造守卫者，逐刻 `commonTick` + `tick`
+     * 记录状态；Bamboo 侧用同一份方块和种子重放，按原始位比较。
+     *
+     * Guardian per-tick scenes. Vanilla builds the guardian in a fake level; the
+     * Bamboo side replays the same blocks and seeds and compares raw bits.
+     */
+    private static void playGuardian(Official official, Writer out, String name) throws Exception {
+        boolean elder = name.contains("elder");
+        int difficulty = name.contains("hard") ? 3 : 2;
+        int ticks = 200;
+        FakeLevel world = FakeLevel.create(official);
+        world.getRandom().setSeed(9100L);
+        world.injectedSeaLevel = -63;
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.values()[difficulty];
+        // 一片 17×17 的水池，底是石头；守卫者泡在 y=62。
+        // A 17x17 pool of water over stone; the guardian sits at y=62.
+        for (int x = -8; x <= 8; x++) {
+            for (int z = -8; z <= 8; z++) {
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+                for (int y = 61; y <= 63; y++) {
+                    world.blocks.put(BlockPos.asLong(x, y, z), Blocks.WATER.defaultBlockState());
+                }
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+        net.minecraft.world.entity.monster.Guardian guardian = elder
+                ? (net.minecraft.world.entity.monster.Guardian) EntityTypes.ELDER_GUARDIAN
+                        .create(world, EntitySpawnReason.COMMAND)
+                : (net.minecraft.world.entity.monster.Guardian) EntityTypes.GUARDIAN
+                        .create(world, EntitySpawnReason.COMMAND);
+        setRandom(guardian, 42001L);
+        guardian.setUUID(Mth.createInsecureUUID(guardian.getRandom()));
+        guardian.getRandom().nextFloat();
+        guardian.setYRot(0.0F);
+        guardian.setYHeadRot(0.0F);
+        guardian.setYBodyRot(0.0F);
+        guardian.setPos(0.5, 62.0, 0.5);
+        world.tracked.add(guardian);
+        var frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                world.gameTime++;
+                if (!guardian.isRemoved()) {
+                    guardian.checkDespawn();
+                    guardian.commonTick();
+                    guardian.tick();
+                }
+            }
+            if (tick != 0) frames.append(',');
+            frames.append("{\"guardian\":").append(guardianFrame(guardian)).append('}');
+        }
+        frames.append(']');
+        out.write("{\"type\":\"guardian\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"blocks\":" + blocks
+                + ",\"difficulty\":" + difficulty
+                // 守卫者泡在水池里，官方 `getLightLevelDependentMagicValue()` 让
+                // `Monster.updateNoActionTime()` 每刻 +2；Bamboo 的 `MobLevel` 用
+                // skyDarken=0 的亮度口径才同样 >0.5，随机源逐刻取数才对得上。
+                // In the pool the official magic value makes `Monster.updateNoActionTime()`
+                // add 2 per tick; Bamboo needs skyDarken=0 for the same >0.5 result,
+                // which keeps the per-tick random draws aligned.
+                + ",\"skyDarken\":0"
+                + ",\"guardian\":" + guardianSetup(elder, new double[] {0.5, 62.0, 0.5}, 42001L)
+                + ",\"frames\":" + frames + "}\n");
+    }
+
+    /** `Guardian.DATA_ID_ATTACK_TARGET` 的整数值（私有静态字段，反射读）。 */
+    private static int guardianAttackTarget(net.minecraft.world.entity.monster.Guardian guardian)
+            throws Exception {
+        java.lang.reflect.Field field = net.minecraft.world.entity.monster.Guardian.class
+                .getDeclaredField("DATA_ID_ATTACK_TARGET");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        net.minecraft.network.syncher.EntityDataAccessor<Integer> accessor =
+                (net.minecraft.network.syncher.EntityDataAccessor<Integer>) field.get(null);
+        return guardian.getEntityData().get(accessor);
+    }
+
+    private static String guardianSetup(boolean elder, double[] at, long seed) {
+        return "{\"kind\":" + (elder ? 91 : 90)
+                + ",\"position\":[" + Double.doubleToRawLongBits(at[0]) + ','
+                + Double.doubleToRawLongBits(at[1]) + ',' + Double.doubleToRawLongBits(at[2]) + ']'
+                + ",\"seed\":" + seed
+                + ",\"yaw\":" + Float.floatToRawIntBits(0.0F) + '}';
+    }
+
+    private static String guardianFrame(net.minecraft.world.entity.monster.Guardian g)
+            throws Exception {
+        net.minecraft.world.phys.Vec3 p = g.position();
+        net.minecraft.world.phys.Vec3 v = g.getDeltaMovement();
+        net.minecraft.world.entity.LivingEntity target = g.getTarget();
+        return "{\"motion\":[" + Double.doubleToRawLongBits(p.x) + ','
+                + Double.doubleToRawLongBits(p.y) + ',' + Double.doubleToRawLongBits(p.z) + ','
+                + Double.doubleToRawLongBits(v.x) + ',' + Double.doubleToRawLongBits(v.y) + ','
+                + Double.doubleToRawLongBits(v.z) + ']'
+                + ",\"yRot\":" + Float.floatToRawIntBits(g.getYRot())
+                + ",\"yHeadRot\":" + Float.floatToRawIntBits(g.getYHeadRot())
+                + ",\"yBodyRot\":" + Float.floatToRawIntBits(g.yBodyRot)
+                + ",\"health\":" + Float.floatToRawIntBits(g.getHealth())
+                + ",\"air\":" + g.getAirSupply()
+                + ",\"hurtTime\":" + g.hurtTime
+                + ",\"deathTime\":" + g.deathTime
+                + ",\"removed\":" + (g.isRemoved() ? 1 : 0)
+                + ",\"target\":" + (target == null ? -1 : target.getId())
+                + ",\"attackTarget\":" + guardianAttackTarget(g)
+                + ",\"moving\":" + (g.isMoving() ? 1 : 0)
+                + guardianLook(g)
+                + ",\"randomState\":" + guardianRandomState(g)
+                + ",\"noActionTime\":" + g.getNoActionTime() + '}';
+    }
+
+    /** `LegacyRandomSource.seed`（AtomicLong），和 Bamboo `JavaRandom.state()` 逐位比。 */
+    private static long guardianRandomState(net.minecraft.world.entity.monster.Guardian g)
+            throws Exception {
+        java.lang.reflect.Field rf = net.minecraft.world.entity.Entity.class.getDeclaredField("random");
+        rf.setAccessible(true);
+        Object random = rf.get(g);
+        java.lang.reflect.Field sf = random.getClass().getDeclaredField("seed");
+        sf.setAccessible(true);
+        return ((java.util.concurrent.atomic.AtomicLong) sf.get(random)).get();
+    }
+
+    /** `Mob.lookControl` 的调试状态：`lookAtCooldown` 和 wanted 目标。 */
+    private static String guardianLook(net.minecraft.world.entity.monster.Guardian g)
+            throws Exception {
+        java.lang.reflect.Field field = net.minecraft.world.entity.Mob.class
+                .getDeclaredField("lookControl");
+        field.setAccessible(true);
+        Object look = field.get(g);
+        Class<?> cls = net.minecraft.world.entity.ai.control.LookControl.class;
+        java.lang.reflect.Field cooldown = cls.getDeclaredField("lookAtCooldown");
+        java.lang.reflect.Field wx = cls.getDeclaredField("wantedX");
+        java.lang.reflect.Field wz = cls.getDeclaredField("wantedZ");
+        cooldown.setAccessible(true);
+        wx.setAccessible(true);
+        wz.setAccessible(true);
+        return ",\"lookCooldown\":" + cooldown.getInt(look)
+                + ",\"wantedX\":" + Double.doubleToRawLongBits(wx.getDouble(look))
+                + ",\"wantedZ\":" + Double.doubleToRawLongBits(wz.getDouble(look));
     }
 
     /** 两种傀儡的存档：整份 SNBT 和读回再写出的 SNBT。 */
