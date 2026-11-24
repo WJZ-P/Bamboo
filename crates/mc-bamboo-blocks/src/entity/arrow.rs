@@ -559,8 +559,11 @@ fn trident_tick(me: &mut Entity, ctx: &mut dyn EntityCtx) -> bool {
             arrow.pickup_item.clone(),
         )
     };
-    // `loyalty > 0 && (!dealtDamage || isNoPhysics()) && owner != null`。
-    if loyalty == 0 || (dealt_damage && !no_physics) {
+    // `loyalty > 0 && (dealtDamage || isNoPhysics()) && owner != null`：只有命中过
+    // （或已在返回途中置了 noPhysics）才飞回；刚投出、还没命中时继续正常飞行。
+    // `loyalty > 0 && (dealtDamage || isNoPhysics()) && owner != null`: fly back
+    // only after a hit, or once noPhysics marks the return as already in progress.
+    if loyalty == 0 || (!dealt_damage && !no_physics) {
         return false;
     }
     let owner_uid = owner.or_else(|| owner_uuid.and_then(|uuid| resolve_owner(ctx, uuid)));
@@ -2474,13 +2477,17 @@ mod tests {
         assert!(state.dealt_damage);
     }
 
-    fn loyal_trident(owner_uid: i32, position: Vec3, loyalty: u8) -> Entity {
+    /// `dealt_damage` 建模「是否已经命中过」：官方忠诚返回只在命中后触发。
+    /// `dealt_damage` models whether the trident has already hit: vanilla only
+    /// returns a loyal trident after it has dealt damage.
+    fn loyal_trident(owner_uid: i32, position: Vec3, loyalty: u8, dealt_damage: bool) -> Entity {
         let mut entity = Entity::trident(position);
         if let EntityKind::Arrow(arrow) = &mut entity.kind {
             arrow.loyalty = loyalty;
             arrow.owner = Some(owner_uid);
             arrow.owner_uuid = Some([1; 16]);
             arrow.pickup = Pickup::Allowed;
+            arrow.dealt_damage = dealt_damage;
         }
         entity
     }
@@ -2521,7 +2528,7 @@ mod tests {
         level.players.push(owner);
         let mut ticks = crate::BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);
-        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3));
+        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3, true));
         world.tick_entities();
         {
             let trident = world.entity(id).expect("still returning");
@@ -2561,7 +2568,7 @@ mod tests {
         level.players.push(owner);
         let mut ticks = crate::BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);
-        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3));
+        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3, true));
         world.tick_entities();
         assert!(world.entity(id).is_none(), "the trident is discarded");
         let mut items = 0;
@@ -2584,7 +2591,7 @@ mod tests {
         level.players.push(owner);
         let mut ticks = crate::BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);
-        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3));
+        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3, true));
         world.tick_entities();
         let _ = world.drain_effects();
         world.tick_entities();
@@ -2600,6 +2607,37 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, crate::level::Effect::Sound { sound: s, .. } if *s == sound)),
             "no return sound on the second tick"
+        );
+    }
+
+    /// 刚投出、还没命中的忠诚三叉戟不会立刻飞回：官方 `dealtDamage || isNoPhysics()`
+    /// 在命中前为假，这一刻只做正常飞行（不置 noPhysics、不播返回音效）。
+    /// A freshly thrown loyal trident does not return before it hits: vanilla's
+    /// `dealtDamage || isNoPhysics()` is false before a hit, so it just flies.
+    #[test]
+    fn a_loyal_trident_keeps_flying_until_it_hits() {
+        let mut level = crate::testing::TestLevel::new();
+        let owner = return_player(7, Vec3::new(3.5, 64.0, 0.5), true);
+        level.players.push(owner);
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3, false));
+        world.tick_entities();
+        {
+            let trident = world.entity(id).expect("still flying");
+            let EntityKind::Arrow(arrow) = &trident.kind else {
+                panic!("expected a trident");
+            };
+            assert!(!arrow.no_physics, "no return before a hit");
+            assert_eq!(arrow.client_side_return_trident_tick_count, 0);
+        }
+        let sound = i32::from(sounds::sound_event("minecraft:item.trident.return"));
+        let effects = world.drain_effects();
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, crate::level::Effect::Sound { sound: s, .. } if *s == sound)),
+            "no return sound before a hit"
         );
     }
 
