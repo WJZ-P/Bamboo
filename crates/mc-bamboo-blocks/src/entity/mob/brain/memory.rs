@@ -192,6 +192,13 @@ impl MemoryType {
     const fn index(self) -> usize {
         self as usize
     }
+
+    /// 这个记忆在 `u64` 位掩码里的位，给行为入口条件预编译用。
+    ///
+    /// This memory's bit in a `u64` mask, for precompiled behaviour preconditions.
+    pub const fn bit(self) -> u64 {
+        1_u64 << (self as usize)
+    }
 }
 
 /// `MemoryStatus`。
@@ -387,24 +394,47 @@ impl MemoryValue {
     }
 }
 
-/// `MemorySlot`。
+/// `MemorySlot`。值用 `Box` 装着：官方 `MemorySlot` 里值是对象引用，这里
+/// `MemoryValue` 有 184 字节，装进槽里会让 32 个槽白白占 6400 字节。装箱后
+/// 空槽只有一个空指针，大对象只在真正写入记忆时才分配。
 ///
-/// `MemorySlot`.
+/// `MemorySlot`. The value is boxed: vanilla holds an object reference, while
+/// `MemoryValue` is 184 bytes and embedding it would waste 6400 bytes on 32 slots.
+/// An empty slot is now just a null pointer; the big object is allocated only when a
+/// memory is actually set.
 #[derive(Debug, Clone, PartialEq)]
 struct Slot {
-    registered: bool,
-    value: Option<MemoryValue>,
+    value: Option<Box<MemoryValue>>,
     ttl: i64,
 }
 
 impl Default for Slot {
     fn default() -> Self {
         Self {
-            registered: false,
             value: None,
             ttl: NEVER_EXPIRE,
         }
     }
+}
+
+/// 一个记忆种类在位掩码里的位。`MemoryType::COUNT` 是 32，正好落进 `u64`。
+///
+/// The bit of a memory type in the masks. `MemoryType::COUNT` is 32, fitting a `u64`.
+const fn bit(kind: MemoryType) -> u64 {
+    kind.bit()
+}
+
+/// 记忆状态的三组位掩码，给行为入口条件做纯位运算判定。
+///
+/// The three bit masks of memory state, for bit-only behaviour precondition checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryMasks {
+    /// 有值的记忆。
+    pub present: u64,
+    /// 登记过但没有值的记忆。
+    pub absent: u64,
+    /// 登记过的记忆。
+    pub registered: u64,
 }
 
 /// 一只生物的全部记忆槽。
@@ -413,6 +443,12 @@ impl Default for Slot {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Memories {
     slots: [Slot; MemoryType::COUNT],
+    /// 登记过的记忆位。
+    registered: u64,
+    /// 有值的记忆位（`registered` 的子集）。
+    present: u64,
+    /// 有值且会过期（`ttl != NEVER_EXPIRE`）的位，`tick` 只遍历这些。
+    expiring: u64,
 }
 
 impl Memories {
@@ -420,40 +456,64 @@ impl Memories {
     ///
     /// `Brain.registerMemory`.
     pub fn register(&mut self, kind: MemoryType) {
-        self.slots[kind.index()].registered = true;
+        self.registered |= bit(kind);
     }
 
     pub fn is_registered(&self, kind: MemoryType) -> bool {
-        self.slots[kind.index()].registered
+        self.registered & bit(kind) != 0
     }
 
-    /// `Brain.forgetOutdatedMemories` → `MemorySlot.tick`。
+    /// `Brain.checkMemory`：用位掩码判定，不碰槽里的值。
     ///
-    /// `Brain.forgetOutdatedMemories` → `MemorySlot.tick`.
-    pub fn tick(&mut self) {
-        for slot in &mut self.slots {
-            if slot.value.is_some() && slot.ttl != NEVER_EXPIRE {
-                if slot.ttl <= 0 {
-                    slot.value = None;
-                    slot.ttl = NEVER_EXPIRE;
-                } else {
-                    slot.ttl -= 1;
-                }
-            }
+    /// `Brain.checkMemory`: a bit-mask test that never touches the slot values.
+    pub fn check(&self, kind: MemoryType, status: MemoryStatus) -> bool {
+        let b = bit(kind);
+        if self.registered & b == 0 {
+            return false;
+        }
+        match status {
+            MemoryStatus::Registered => true,
+            MemoryStatus::ValuePresent => self.present & b != 0,
+            MemoryStatus::ValueAbsent => self.present & b == 0,
         }
     }
 
-    /// `Brain.checkMemory`。
+    /// 给行为入口条件用的三组掩码。
     ///
-    /// `Brain.checkMemory`.
-    pub fn check(&self, kind: MemoryType, status: MemoryStatus) -> bool {
-        let slot = &self.slots[kind.index()];
-        slot.registered
-            && match status {
-                MemoryStatus::Registered => true,
-                MemoryStatus::ValuePresent => slot.value.is_some(),
-                MemoryStatus::ValueAbsent => slot.value.is_none(),
+    /// The three masks a behaviour checks its entry conditions against.
+    pub fn masks(&self) -> MemoryMasks {
+        MemoryMasks {
+            present: self.present,
+            absent: self.registered & !self.present,
+            registered: self.registered,
+        }
+    }
+
+    /// `Brain.forgetOutdatedMemories` → `MemorySlot.tick`：只遍历「有值且会过期」的位，
+    /// 不再每刻扫全部 32 个槽。
+    ///
+    /// `Brain.forgetOutdatedMemories` → `MemorySlot.tick`: iterate only the filled slots
+    /// with a finite expiry, instead of scanning all 32 slots every tick.
+    pub fn tick(&mut self) {
+        let mut bits = self.expiring;
+        while bits != 0 {
+            let index = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let b = 1_u64 << index;
+            let slot = &mut self.slots[index];
+            let cleared = if slot.ttl <= 0 {
+                slot.value = None;
+                slot.ttl = NEVER_EXPIRE;
+                true
+            } else {
+                slot.ttl -= 1;
+                false
+            };
+            if cleared {
+                self.present &= !b;
+                self.expiring &= !b;
             }
+        }
     }
 
     /// `Brain.hasMemoryValue`。
@@ -467,18 +527,16 @@ impl Memories {
     ///
     /// `Brain.getMemory`; vanilla throws for unregistered types, here they read as empty.
     pub fn get(&self, kind: MemoryType) -> Option<&MemoryValue> {
-        let slot = &self.slots[kind.index()];
-        if slot.registered {
-            slot.value.as_ref()
+        if self.registered & bit(kind) != 0 {
+            self.slots[kind.index()].value.as_deref()
         } else {
             None
         }
     }
 
     pub fn get_mut(&mut self, kind: MemoryType) -> Option<&mut MemoryValue> {
-        let slot = &mut self.slots[kind.index()];
-        if slot.registered {
-            slot.value.as_mut()
+        if self.registered & bit(kind) != 0 {
+            self.slots[kind.index()].value.as_deref_mut()
         } else {
             None
         }
@@ -505,16 +563,31 @@ impl Memories {
     ///
     /// `Brain.setMemoryWithExpiry`.
     pub fn set_with_ttl(&mut self, kind: MemoryType, value: MemoryValue, ttl: i64) {
-        let slot = &mut self.slots[kind.index()];
-        if !slot.registered {
+        let b = bit(kind);
+        if self.registered & b == 0 {
             return;
         }
-        if value.is_empty_collection() {
-            slot.value = None;
-            slot.ttl = NEVER_EXPIRE;
+        let empty = value.is_empty_collection();
+        {
+            let slot = &mut self.slots[kind.index()];
+            if empty {
+                slot.value = None;
+                slot.ttl = NEVER_EXPIRE;
+            } else {
+                slot.value = Some(Box::new(value));
+                slot.ttl = ttl;
+            }
+        }
+        if empty {
+            self.present &= !b;
+            self.expiring &= !b;
         } else {
-            slot.value = Some(value);
-            slot.ttl = ttl;
+            self.present |= b;
+            if ttl == NEVER_EXPIRE {
+                self.expiring &= !b;
+            } else {
+                self.expiring |= b;
+            }
         }
     }
 
@@ -522,11 +595,15 @@ impl Memories {
     ///
     /// `Brain.eraseMemory`.
     pub fn erase(&mut self, kind: MemoryType) {
-        let slot = &mut self.slots[kind.index()];
-        if slot.registered {
-            slot.value = None;
-            slot.ttl = NEVER_EXPIRE;
+        let b = bit(kind);
+        if self.registered & b == 0 {
+            return;
         }
+        let slot = &mut self.slots[kind.index()];
+        slot.value = None;
+        slot.ttl = NEVER_EXPIRE;
+        self.present &= !b;
+        self.expiring &= !b;
     }
 
     /// `Brain.clearMemories`：全部槽清空，登记保留。
@@ -537,23 +614,41 @@ impl Memories {
             slot.value = None;
             slot.ttl = NEVER_EXPIRE;
         }
+        self.present = 0;
+        self.expiring = 0;
     }
 
     /// `Brain.getTimeUntilExpiry`：空槽也返回 `Long.MAX_VALUE`。
     ///
     /// `Brain.getTimeUntilExpiry`; empty slots report `Long.MAX_VALUE` as well.
     pub fn time_until_expiry(&self, kind: MemoryType) -> i64 {
-        self.slots[kind.index()].ttl
+        let slot = &self.slots[kind.index()];
+        if slot.value.is_some() {
+            slot.ttl
+        } else {
+            NEVER_EXPIRE
+        }
     }
 
     /// 有值的槽：（种类，值，过期时间；不过期时为 `None`）。存档和对拍用。
     ///
     /// The filled slots as (type, value, time to live or `None`), for saving and oracles.
-    pub fn filled(&self) -> impl Iterator<Item = (MemoryType, &MemoryValue, Option<i64>)> {
-        MemoryType::ALL.into_iter().filter_map(|kind| {
-            let slot = &self.slots[kind.index()];
-            let value = slot.value.as_ref()?;
-            Some((kind, value, (slot.ttl != NEVER_EXPIRE).then_some(slot.ttl)))
+    pub fn filled(&self) -> impl Iterator<Item = (MemoryType, &MemoryValue, Option<i64>)> + '_ {
+        let mut bits = self.present;
+        std::iter::from_fn(move || {
+            while bits != 0 {
+                let index = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let slot = &self.slots[index];
+                if let Some(value) = slot.value.as_deref() {
+                    return Some((
+                        MemoryType::ALL[index],
+                        value,
+                        (slot.ttl != NEVER_EXPIRE).then_some(slot.ttl),
+                    ));
+                }
+            }
+            None
         })
     }
 

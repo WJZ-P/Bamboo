@@ -543,6 +543,21 @@ fn hash_map_capacity(keys: usize) -> usize {
 mod tests {
     use super::*;
 
+    #[test]
+    fn size_probe_before() {
+        use crate::entity::mob::brain::behavior::Node;
+        use crate::entity::mob::brain::memory::{Memories, MemoryValue};
+        eprintln!(
+            "SIZE_PROBE Brain={} Memories={} MemoryValue={} Node={} Sensor={} Entry={}",
+            std::mem::size_of::<Brain>(),
+            std::mem::size_of::<Memories>(),
+            std::mem::size_of::<MemoryValue>(),
+            std::mem::size_of::<Node>(),
+            std::mem::size_of::<Sensor>(),
+            std::mem::size_of::<Entry>(),
+        );
+    }
+
     /// 官方 `"core".hashCode()` 等几个值，和桶序：16 个桶时 idle、core、panic 的顺序。
     /// 新增的青蛙活动也按官方注册名逐个核过 `String.hashCode()`。
     ///
