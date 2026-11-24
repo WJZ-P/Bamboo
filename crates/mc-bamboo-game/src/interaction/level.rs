@@ -22,7 +22,7 @@ use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::GameMode,
 };
-use mc_bamboo_world::{MIN_Y, flat, store::ChunkStore};
+use mc_bamboo_world::{MIN_Y, flat, palette::PaletteView, store::ChunkStore};
 
 use super::{BlockChanges, MAX_Y};
 use crate::{
@@ -185,6 +185,80 @@ impl Level for RegionLevel<'_> {
 
     fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
         self.tick_levels.chunk_ticks_entities(chunk)
+    }
+
+    fn chunk_is_loaded(&self, chunk: ChunkPos) -> bool {
+        self.chunks.is_loaded(chunk)
+    }
+
+    /// 雷击找避雷针：先看区块段调色板，段里没有避雷针状态就整段跳过。
+    /// 顺序照官方 POI 流（区块 x、z、段 y、段内坐标），以后换成正式 POI 查询。
+    fn lightning_rod_near(&self, center: BlockPos, radius: i32) -> Option<BlockPos> {
+        use mc_bamboo_world::SECTION_SIZE;
+        if radius < 0 {
+            return None;
+        }
+        let chunks = radius.div_euclid(SECTION_SIZE) + 1;
+        let centre = ChunkPos::new(center.x >> 4, center.z >> 4);
+        let radius_sq = i64::from(radius) * i64::from(radius);
+        let mut best: Option<(i64, BlockPos)> = None;
+        for chunk_x in (centre.x - chunks)..=(centre.x + chunks) {
+            for chunk_z in (centre.z - chunks)..=(centre.z + chunks) {
+                let chunk_pos = ChunkPos::new(chunk_x, chunk_z);
+                if !self.chunks.is_loaded(chunk_pos) {
+                    continue;
+                }
+                let chunk = self
+                    .chunks
+                    .edited(chunk_pos)
+                    .unwrap_or_else(|| self.chunks.template());
+                let base_x = chunk_x * SECTION_SIZE;
+                let base_z = chunk_z * SECTION_SIZE;
+                for (section_index, section) in chunk.sections().iter().enumerate() {
+                    let has_rod = match section.blocks().palette() {
+                        PaletteView::Global => true,
+                        PaletteView::Single(state) => {
+                            mc_bamboo_blocks::lightning_rod::is_lightning_rod(BlockState(state))
+                        }
+                        PaletteView::Indirect(table) => table.iter().any(|&state| {
+                            mc_bamboo_blocks::lightning_rod::is_lightning_rod(BlockState(state))
+                        }),
+                    };
+                    if !has_rod {
+                        continue;
+                    }
+                    let base_y = MIN_Y + section_index as i32 * SECTION_SIZE;
+                    for y in 0..SECTION_SIZE {
+                        for z in 0..SECTION_SIZE {
+                            for x in 0..SECTION_SIZE {
+                                let pos = BlockPos::new(base_x + x, base_y + y, base_z + z);
+                                let dx = i64::from(pos.x - center.x);
+                                let dz = i64::from(pos.z - center.z);
+                                if dx.abs() > i64::from(radius) || dz.abs() > i64::from(radius) {
+                                    continue;
+                                }
+                                let dy = i64::from(pos.y - center.y);
+                                let distance = dx * dx + dy * dy + dz * dz;
+                                if distance > radius_sq
+                                    || best.is_some_and(|(old, _)| distance >= old)
+                                {
+                                    continue;
+                                }
+                                let state = self.block_state(pos);
+                                if !mc_bamboo_blocks::lightning_rod::is_lightning_rod(state) {
+                                    continue;
+                                }
+                                if pos.y != self.world_surface_y(pos) - 1 {
+                                    continue;
+                                }
+                                best = Some((distance, pos.above()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|(_, pos)| pos)
     }
 
     /// 已加载区块里半径内的蜂巢 / 蜂箱：先用段调色板把没有 `beehive` /
@@ -385,12 +459,18 @@ impl Level for RegionLevel<'_> {
     }
 
     fn enchant_mob_spawn_equipment(&self, stack: &mut ItemStack, special: f32) {
+        self.enchant_mob_spawn_equipment_from(stack, special, self.random().source());
+    }
+
+    fn enchant_mob_spawn_equipment_from(
+        &self,
+        stack: &mut ItemStack,
+        special: f32,
+        random: &dyn mc_bamboo_blocks::random::RandomSource,
+    ) {
         use mc_bamboo_protocol::components::{ComponentValue, PatchEntry};
-        let levels = mc_bamboo_loot::mob_spawn_enchantments(
-            &game_stack_to_loot(stack),
-            special,
-            self.random().source(),
-        );
+        let levels =
+            mc_bamboo_loot::mob_spawn_enchantments(&game_stack_to_loot(stack), special, random);
         if !levels.is_empty() {
             let mut patch = stack.patch();
             patch.put(

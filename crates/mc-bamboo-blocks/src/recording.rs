@@ -1394,6 +1394,16 @@ impl LevelEntities for Recording<'_> {
         self.level.for_each_entity_in(area, visit);
     }
 
+    fn for_each_entity_in_section_order(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
+        self.note_entities(4);
+        self.read(
+            None,
+            K_ENTITIES,
+            (4_u8, area.min_x.to_bits(), area.max_z.to_bits()),
+        );
+        self.level.for_each_entity_in_section_order(area, visit);
+    }
+
     fn for_each_pushable_in(
         &self,
         area: Aabb,

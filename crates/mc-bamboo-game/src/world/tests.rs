@@ -5137,3 +5137,56 @@ fn the_collision_cap_reaches_entity_rules() {
     assert_eq!(entity_rules.mob_wakeups_scale, 2);
     assert_eq!(level.block_game_rules().mob_throttle_distance, 32);
 }
+
+/// 闪电最后一刻 `discard()` 时发出的 `LightningTick` 仍要落地：精确驱动当场写火，
+/// 并行驱动不能因为「算阶段已标记移除」跳过命令。两种驱动逐刻比对落点的火方块
+/// 和出站包字节。
+#[test]
+fn lightning_last_tick_commands_match_in_both_drivers() {
+    type Cells = Vec<(i32, i32, i32, u32)>;
+    fn strike(threads: usize) -> (Cells, Vec<u8>) {
+        use mc_bamboo_blocks::entity::lightning;
+        use mc_bamboo_core::Vec3;
+
+        let mut server = Harness::new(2);
+        let client = server.join_and_settle("Kitten");
+        client.take_frames();
+        server.set_entity_threads(threads);
+        let center = Vec3::new(8.5, -59.0, 8.5);
+        let floor = BlockPos::new(8, -60, 8);
+        server.set_block(floor, blocks::GRASS_BLOCK);
+        // 把闪电的闪光次数固定成 1、life 固定成 0，让下一刻就是它的最终一刻。
+        let mut bolt = lightning::entity(center, false);
+        if let mc_bamboo_blocks::entity::EntityKind::LightningBolt(state) = &mut bolt.kind {
+            state.life = 0;
+            state.flashes = 1;
+        }
+        server.spawn_entity(bolt);
+        let mut bytes = Vec::new();
+        let mut changes = Vec::new();
+        for _ in 0..4 {
+            server.tick();
+            for frame in client.take_frames() {
+                bytes.extend_from_slice(&(frame.id as u64).to_le_bytes());
+                bytes.extend_from_slice(&frame.body);
+            }
+            let region = server.world_region();
+            for x in 6..=10 {
+                for y in -60..=-57 {
+                    for z in 6..=10 {
+                        let pos = BlockPos::new(x, y, z);
+                        let state = region.chunks.block(pos).unwrap_or(0);
+                        if state != 0 {
+                            changes.push((x, y, z, state));
+                        }
+                    }
+                }
+            }
+        }
+        (changes, bytes)
+    }
+    let precise = strike(0);
+    let parallel = strike(4);
+    assert!(!precise.1.is_empty());
+    assert_eq!(precise, parallel);
+}

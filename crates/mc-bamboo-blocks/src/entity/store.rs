@@ -127,6 +127,10 @@ pub enum KindPublic {
     ExperienceOrb {
         value: i32,
     },
+    /// 闪电：客户端要 `seed`、`life` 和闪光次数。
+    ///
+    /// A lightning bolt: the client reads its seed, life and remaining flashes.
+    LightningBolt(super::lightning::LightningBolt),
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
     Arrow(super::arrow::ArrowPublic),
@@ -156,6 +160,7 @@ impl KindPublic {
             Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(egg) => egg.kind.entity_type(),
             Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
+            Self::LightningBolt(_) => mc_bamboo_data::registries::entity_type::LIGHTNING_BOLT,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -171,6 +176,14 @@ impl KindPublic {
 
     pub const fn is_falling_block(&self) -> bool {
         matches!(self, Self::FallingBlock { .. })
+    }
+
+    /// 这个公开种类的生物类型；不是生物时是 `None`。
+    pub const fn mob_type(&self) -> Option<super::mob::MobType> {
+        match self {
+            Self::Mob(mob) => Some(mob.mob_type),
+            _ => None,
+        }
     }
 
     /// 按类型的子索引用这个 ID；和注册表 ID 一致，以后加生物不用改索引结构。
@@ -204,6 +217,8 @@ pub enum KindState {
     Item(ItemState),
     /// 经验球自己的字段（年龄、健康、数量、跟随的玩家）。
     ExperienceOrb(super::ExperienceOrb),
+    /// 闪电的全部状态，公开的那一半就是它本身。
+    LightningBolt(super::lightning::LightningBolt),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
     Arrow(Box<super::arrow::Arrow>),
@@ -329,6 +344,9 @@ impl EntityRow {
             (KindPublic::SplashPotion(_), KindState::SplashPotion(potion)) => {
                 EntityKind::SplashPotion(potion)
             }
+            (KindPublic::LightningBolt(_), KindState::LightningBolt(bolt)) => {
+                EntityKind::LightningBolt(Box::new(bolt))
+            }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
@@ -414,6 +432,10 @@ impl Entity {
             EntityKind::SplashPotion(potion) => (
                 KindPublic::SplashPotion(Box::new(potion.public(self.remaining_fire_ticks))),
                 KindState::SplashPotion(potion),
+            ),
+            EntityKind::LightningBolt(bolt) => (
+                KindPublic::LightningBolt((*bolt).clone()),
+                KindState::LightningBolt(*bolt),
             ),
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
@@ -888,6 +910,47 @@ impl EntityStore {
         (uids, rows, states)
     }
 
+    /// 官方 `EntitySectionStorage` 的分区遍历顺序：`SectionPos.asLong` 升序。
+    /// 打包顺序是 `x << 42 | z << 20 | y`，所以外层 x、中层 z、内层 y；段内
+    /// `ClassInstanceMultiMap` 是加入顺序，等价 uid 升序。`getEntitiesOfClass`
+    /// 用这个顺序建列表，再由 `nextInt(list.size())` 挑一个。
+    ///
+    /// Vanilla `EntitySectionStorage` order: ascending packed `SectionPos.asLong`
+    /// (`x << 42 | z << 20 | y`), then insertion order within a section.
+    pub fn for_each_in_section_order(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
+        let (first, last) = section_range(&area);
+        // 只遍历真的登记过的段，按官方的打包键排序（负数坐标也按打包后的值）。
+        let mut keys: Vec<(i64, (i32, i32, i32))> = self
+            .grid
+            .range(first..=last)
+            .map(|(&key, _)| (section_key(key), key))
+            .collect();
+        keys.sort_by_key(|(packed, key)| (*packed, *key));
+        keys.dedup_by_key(|(packed, _)| *packed);
+        for (_, key) in keys {
+            let Some(rows) = self.grid.get(&key) else {
+                continue;
+            };
+            let mut candidates: Vec<(EntityUid, usize)> = rows
+                .iter()
+                .copied()
+                .filter_map(|row| {
+                    let entry = self.slots.get(row)?.as_ref()?;
+                    Some((entry.public.uid, row))
+                })
+                .collect();
+            candidates.sort_unstable_by_key(|(uid, _)| *uid);
+            for (_, row) in candidates {
+                let Some(entry) = self.slots.get(row).and_then(|slot| slot.as_ref()) else {
+                    continue;
+                };
+                if entry.public.bounding_box().intersects(area) {
+                    visit(&entry.public);
+                }
+            }
+        }
+    }
+
     /// 空间索引：和 `area` 相交的实体公开数据，按 uid 升序。
     pub fn for_each_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.for_each_in_limited(area, usize::MAX, &mut |public| {
@@ -990,6 +1053,9 @@ impl EntityStore {
         }
         if let EntityKind::SplashPotion(potion) = &mut entity.kind {
             potion.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
+        if matches!(entity.kind, super::EntityKind::LightningBolt(_)) {
+            super::lightning::finish_spawn(&mut entity);
         }
         entity
     }
@@ -1760,6 +1826,13 @@ fn sections_of(bounds: Aabb) -> Vec<(i32, i32, i32)> {
         }
     }
     keys
+}
+
+/// `SectionPos.asLong(x, y, z)`：`x << 42 | z << 20 | y`（各轴按官方位宽掩码）。
+fn section_key((x, y, z): (i32, i32, i32)) -> i64 {
+    ((i64::from(x) & 0x3F_FFFF) << 42)
+        | ((i64::from(z) & 0x3F_FFFF) << 20)
+        | (i64::from(y) & 0xF_FFFF)
 }
 
 pub(crate) fn section_range(area: &Aabb) -> ((i32, i32, i32), (i32, i32, i32)) {

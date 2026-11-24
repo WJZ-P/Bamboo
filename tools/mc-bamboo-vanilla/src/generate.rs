@@ -3628,6 +3628,37 @@ fn entity_types_file(data: &VersionData) -> String {
         "pub const HORSE_EYE_HEIGHT: f32 = {};",
         float_literal(facts.horse_eye_height)
     );
+    for (name, value) in [
+        ("SKELETON_HORSE_MAX_HEALTH", facts.skeleton_horse_max_health),
+        (
+            "SKELETON_HORSE_MOVEMENT_SPEED",
+            facts.skeleton_horse_movement_speed,
+        ),
+        ("ZOMBIE_HORSE_MAX_HEALTH", facts.zombie_horse_max_health),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
+    }
+    for (name, value) in [
+        ("SKELETON_HORSE_BABY_WIDTH", facts.skeleton_horse_baby_width),
+        (
+            "SKELETON_HORSE_BABY_HEIGHT",
+            facts.skeleton_horse_baby_height,
+        ),
+        (
+            "SKELETON_HORSE_BABY_EYE_HEIGHT",
+            facts.skeleton_horse_baby_eye_height,
+        ),
+        ("SKELETON_HORSE_EYE_HEIGHT", facts.skeleton_horse_eye_height),
+        ("ZOMBIE_HORSE_BABY_WIDTH", facts.zombie_horse_baby_width),
+        ("ZOMBIE_HORSE_BABY_HEIGHT", facts.zombie_horse_baby_height),
+        (
+            "ZOMBIE_HORSE_BABY_EYE_HEIGHT",
+            facts.zombie_horse_baby_eye_height,
+        ),
+        ("ZOMBIE_HORSE_EYE_HEIGHT", facts.zombie_horse_eye_height),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f32 = {};", float_literal(value));
+    }
     for (name, id) in [
         ("HORSE_FLAGS", facts.horse_flags),
         ("HORSE_VARIANT", facts.horse_variant),

@@ -72,6 +72,7 @@ pub mod sheep;
 pub mod silverfish;
 pub mod skeleton;
 mod skeleton_drops;
+pub mod skeleton_horse;
 pub mod slime;
 pub mod smooth_swim;
 pub mod snow_golem;
@@ -82,6 +83,7 @@ pub mod stray;
 pub mod tadpole;
 pub mod tame;
 pub mod throttle;
+pub mod thunder;
 pub(crate) mod timing;
 pub mod turtle;
 mod water;
@@ -177,6 +179,10 @@ pub enum MobType {
     Bat,
     Phantom,
     Camel,
+    /// 骷髅马，`SkeletonHorse`。
+    SkeletonHorse,
+    /// 僵尸马，`ZombieHorse`。
+    ZombieHorse,
     Bee,
     IronGolem,
     SnowGolem,
@@ -188,7 +194,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 51] = [
+    pub const ALL: [Self; 53] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -235,6 +241,8 @@ impl MobType {
         Self::Tadpole,
         Self::Bat,
         Self::Phantom,
+        Self::SkeletonHorse,
+        Self::ZombieHorse,
         Self::Bee,
         Self::IronGolem,
         Self::SnowGolem,
@@ -292,6 +300,8 @@ impl MobType {
             Self::Bat => ids::BAT,
             Self::Phantom => ids::PHANTOM,
             Self::Camel => ids::CAMEL,
+            Self::SkeletonHorse => ids::SKELETON_HORSE,
+            Self::ZombieHorse => ids::ZOMBIE_HORSE,
             Self::Bee => ids::BEE,
             Self::IronGolem => ids::IRON_GOLEM,
             Self::SnowGolem => ids::SNOW_GOLEM,
@@ -349,6 +359,8 @@ impl MobType {
             Self::Bat => "minecraft:bat",
             Self::Phantom => "minecraft:phantom",
             Self::Camel => "minecraft:camel",
+            Self::SkeletonHorse => "minecraft:skeleton_horse",
+            Self::ZombieHorse => "minecraft:zombie_horse",
             Self::Bee => "minecraft:bee",
             Self::IronGolem => "minecraft:iron_golem",
             Self::SnowGolem => "minecraft:snow_golem",
@@ -396,7 +408,13 @@ impl MobType {
     pub const fn is_equine(self) -> bool {
         matches!(
             self,
-            Self::Horse | Self::Donkey | Self::Mule | Self::Llama | Self::Camel
+            Self::Horse
+                | Self::Donkey
+                | Self::Mule
+                | Self::Llama
+                | Self::Camel
+                | Self::SkeletonHorse
+                | Self::ZombieHorse
         )
     }
 
@@ -437,9 +455,15 @@ impl MobType {
             // 大小 1 的尺寸；别的大小看 [`Mob::dimensions`]。
             // Size 1; other sizes go through [`Mob::dimensions`].
             (Self::Slime, _) => slime::dimensions(1),
-            (Self::Horse | Self::Donkey | Self::Mule | Self::Llama, _) => {
-                equine::dimensions(self, baby)
-            }
+            (
+                Self::Horse
+                | Self::Donkey
+                | Self::Mule
+                | Self::Llama
+                | Self::SkeletonHorse
+                | Self::ZombieHorse,
+                _,
+            ) => equine::dimensions(self, baby),
             (Self::Pig, baby) => pig::dimensions(baby),
             (Self::Armadillo, baby) => armadillo::dimensions(baby),
             (Self::Goat, baby) => goat::dimensions(baby),
@@ -676,7 +700,10 @@ impl MobType {
             || turtle::is_turtle(self)
             // 幻翼在 `#undead` 里，`#can_breathe_under_water` 收了整个标签。
             // Phantoms are `#undead`, which `#can_breathe_under_water` includes.
-            || matches!(self, Self::Axolotl | Self::Frog | Self::Phantom)
+            || matches!(
+                self,
+                Self::Axolotl | Self::Frog | Self::Phantom | Self::SkeletonHorse
+            )
     }
 
     /// 是不是官方 `WaterAnimal`（鱼）：有氧气处理、不吃水流、生成时不查液体，
@@ -860,6 +887,8 @@ impl MobType {
             Self::Bat => "minecraft:entities/bat",
             Self::Phantom => "minecraft:entities/phantom",
             Self::Camel => "minecraft:entities/camel",
+            Self::SkeletonHorse => "minecraft:entities/skeleton_horse",
+            Self::ZombieHorse => "minecraft:entities/zombie_horse",
             Self::Bee => "minecraft:entities/bee",
             Self::IronGolem => "minecraft:entities/iron_golem",
             Self::SnowGolem => "minecraft:entities/snow_golem",
@@ -969,6 +998,8 @@ impl MobType {
             // [`living::play_ambient_sound`].
             Self::Parrot => Some("minecraft:entity.parrot.ambient"),
             Self::Camel => Some("minecraft:entity.camel.ambient"),
+            Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.ambient"),
+            Self::ZombieHorse => Some("minecraft:entity.zombie_horse.ambient"),
             // `Bee.getAmbientSound()` 返回 null：不出环境音也不抽音高的随机数。
             Self::Bee => None,
             Self::IronGolem => None,
@@ -1019,6 +1050,8 @@ impl MobType {
             Self::Bat => Some("minecraft:entity.bat.hurt"),
             Self::Phantom => Some("minecraft:entity.phantom.hurt"),
             Self::Camel => Some("minecraft:entity.camel.hurt"),
+            Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.hurt"),
+            Self::ZombieHorse => Some("minecraft:entity.zombie_horse.hurt"),
             Self::Bee => Some("minecraft:entity.bee.hurt"),
             Self::IronGolem => Some("minecraft:entity.iron_golem.hurt"),
             Self::SnowGolem => Some("minecraft:entity.snow_golem.hurt"),
@@ -1068,6 +1101,8 @@ impl MobType {
             Self::Bat => Some("minecraft:entity.bat.death"),
             Self::Phantom => Some("minecraft:entity.phantom.death"),
             Self::Camel => Some("minecraft:entity.camel.death"),
+            Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.death"),
+            Self::ZombieHorse => Some("minecraft:entity.zombie_horse.death"),
             Self::Bee => Some("minecraft:entity.bee.death"),
             Self::IronGolem => Some("minecraft:entity.iron_golem.death"),
             Self::SnowGolem => Some("minecraft:entity.snow_golem.death"),
@@ -1124,6 +1159,8 @@ impl MobType {
             // Phantoms keep the default `playStepSound`: the block's own step sound.
             Self::Phantom => None,
             Self::Camel => Some("minecraft:entity.camel.step"),
+            Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.step_water"),
+            Self::ZombieHorse => Some("minecraft:entity.horse.step"),
             // `Bee.playStepSound` 是空实现。
             Self::Bee => None,
             Self::IronGolem => Some("minecraft:entity.iron_golem.step"),
@@ -1183,6 +1220,8 @@ impl MobType {
             Self::Bat => items::BAT_SPAWN_EGG,
             Self::Phantom => items::PHANTOM_SPAWN_EGG,
             Self::Camel => items::CAMEL_SPAWN_EGG,
+            Self::SkeletonHorse => items::SKELETON_HORSE_SPAWN_EGG,
+            Self::ZombieHorse => items::ZOMBIE_HORSE_SPAWN_EGG,
             Self::Bee => items::BEE_SPAWN_EGG,
             Self::IronGolem => items::IRON_GOLEM_SPAWN_EGG,
             Self::SnowGolem => items::SNOW_GOLEM_SPAWN_EGG,
@@ -1240,6 +1279,8 @@ impl MobType {
             Self::Bat => "entity.minecraft.bat",
             Self::Phantom => "entity.minecraft.phantom",
             Self::Camel => "entity.minecraft.camel",
+            Self::SkeletonHorse => "entity.minecraft.skeleton_horse",
+            Self::ZombieHorse => "entity.minecraft.zombie_horse",
             Self::Bee => "entity.minecraft.bee",
             Self::IronGolem => "entity.minecraft.iron_golem",
             Self::SnowGolem => "entity.minecraft.snow_golem",
@@ -1353,6 +1394,9 @@ impl MobType {
     pub const fn water_slow_down(self) -> f32 {
         if matches!(self, Self::PolarBear) {
             0.98
+        } else if matches!(self, Self::SkeletonHorse) {
+            // `SkeletonHorse.getWaterSlowDown()`。
+            0.96
         } else {
             0.8
         }
@@ -1532,6 +1576,10 @@ pub enum DamageKind {
     /// `no_knockback` and `bypasses_armor`, with `message_id` `fall` and
     /// zero exhaustion.
     EnderPearl,
+    /// 雷击，`minecraft:lightning_bolt`。
+    ///
+    /// A lightning strike, `minecraft:lightning_bolt`.
+    LightningBolt,
 }
 
 impl DamageKind {
@@ -1568,6 +1616,7 @@ impl DamageKind {
             Self::DryOut => "minecraft:dry_out",
             Self::PlayerExplosion => "minecraft:player_explosion",
             Self::EnderPearl => "minecraft:ender_pearl",
+            Self::LightningBolt => "minecraft:lightning_bolt",
         }
     }
 
@@ -1624,6 +1673,7 @@ impl DamageKind {
             Self::DryOut => "dryout",
             Self::PlayerExplosion => "explosion.player",
             Self::EnderPearl => "fall",
+            Self::LightningBolt => "lightningBolt",
         }
     }
 
@@ -1662,6 +1712,7 @@ impl DamageKind {
             Self::DryOut,
             Self::PlayerExplosion,
             Self::EnderPearl,
+            Self::LightningBolt,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -1769,7 +1820,8 @@ impl DamageKind {
             | Self::Lava
             | Self::HotFloor
             | Self::SweetBerryBush
-            | Self::DryOut => TENTH,
+            | Self::DryOut
+            | Self::LightningBolt => TENTH,
             _ => 0.0,
         }
     }
@@ -1781,14 +1833,20 @@ impl DamageKind {
         matches!(self, Self::MobAttackNoAggro)
     }
 
-    /// `#panic_environmental_causes`（这里有的那几种；`lightning_bolt` 和 `sulfur_cube_hot` 还没有）。
+    /// `#panic_environmental_causes`（这里有的那几种；`sulfur_cube_hot` 还没有）。
     ///
-    /// `#panic_environmental_causes` (the kinds modelled here; `lightning_bolt` and
-    /// `sulfur_cube_hot` do not exist yet).
+    /// `#panic_environmental_causes` (the kinds modelled here; `sulfur_cube_hot`
+    /// does not exist yet).
     pub const fn panic_environmental_causes(self) -> bool {
         matches!(
             self,
-            Self::Cactus | Self::Freeze | Self::HotFloor | Self::InFire | Self::Lava | Self::OnFire
+            Self::Cactus
+                | Self::Freeze
+                | Self::HotFloor
+                | Self::InFire
+                | Self::Lava
+                | Self::OnFire
+                | Self::LightningBolt
         )
     }
 
@@ -2413,6 +2471,8 @@ pub struct Mob {
     /// 不存档、不同步；绝对刻号是岛时钟，拆岛平移跟着实体走。
     pub throttle: throttle::MobThrottle,
     pub equine: Option<Box<equine::EquineState>>,
+    /// 骷髅马自己的陷阱状态。
+    pub skeleton_horse: Option<Box<skeleton_horse::SkeletonHorseState>>,
     /// 跑大脑的生物（犰狳）的 `Brain`；用目标选择器的生物是 `None`。
     ///
     /// The `Brain` of brain-driven mobs (armadillos); `None` for goal-driven mobs.
@@ -2563,6 +2623,8 @@ impl Mob {
             MobType::Bat => bat::attributes(),
             MobType::Phantom => phantom::attributes(),
             MobType::Camel => camel::attributes(),
+            MobType::SkeletonHorse => skeleton_horse::skeleton_attributes(),
+            MobType::ZombieHorse => skeleton_horse::zombie_attributes(),
             MobType::Bee => bee::attributes(),
             MobType::IronGolem => iron_golem::attributes(),
             MobType::SnowGolem => snow_golem::attributes(),
@@ -2632,6 +2694,18 @@ impl Mob {
             // alongside the brain.
             MobType::Tadpole => fish::goals(mob_type),
             MobType::Phantom => phantom::goals(),
+            MobType::ZombieHorse => GoalSelector::default(),
+            MobType::SkeletonHorse => {
+                // `AbstractHorse.registerGoals` 的公共表 + `SkeletonHorse.addBehaviourGoals` 空覆写；
+                // `setTrap` 再把 `SkeletonTrapGoal` 挂上。
+                let mut goals = equine::goals(MobType::SkeletonHorse, &mut navigation);
+                goals.goals.push(goals::WrappedGoal {
+                    priority: 1,
+                    running: false,
+                    goal: goals::Goal::SkeletonTrap,
+                });
+                goals
+            }
             MobType::Bee => bee_goals::goals(&mut navigation),
             MobType::IronGolem => iron_golem::goals(&mut navigation),
             MobType::SnowGolem => snow_golem::goals(&mut navigation),
@@ -2694,6 +2768,7 @@ impl Mob {
             MobType::Phantom => phantom::target_goals(),
             MobType::Bee => bee_goals::target_goals(),
             MobType::Pillager => pillager::targets(),
+            MobType::SkeletonHorse | MobType::ZombieHorse => GoalSelector::default(),
             MobType::IronGolem => iron_golem::target_goals(),
             MobType::SnowGolem => snow_golem::target_goals(),
             MobType::Silverfish => silverfish::targets(),
@@ -2908,6 +2983,8 @@ impl Mob {
             equine: mob_type
                 .is_equine()
                 .then(|| Box::new(equine::EquineState::default())),
+            skeleton_horse: (mob_type == MobType::SkeletonHorse)
+                .then(|| Box::new(skeleton_horse::SkeletonHorseState::default())),
         };
         if mob_type == MobType::Salmon {
             // `Salmon` 的 `DATA_TYPE` 缺省是 `Variant.MEDIUM`。
