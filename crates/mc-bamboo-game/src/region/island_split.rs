@@ -381,6 +381,23 @@ impl Region {
             |pos| moving.contains(&pos),
             |pos| store.is_loaded(pos),
         );
+        // 玩家骑手和载具是不可分的一组：整棵骑乘树都在玩家这一边。分区器给
+        // `chunks` 时按玩家的视野中心分人，而载具可能刚好在切口另一侧；这里
+        // 断言两边一致，`island_runtime::split_ready` 会在不一致时推迟拆分。
+        for (id, player) in &self.players {
+            let Some(vehicle) = player.riding.vehicle else {
+                continue;
+            };
+            let root = crate::riding::root_vehicle(self, vehicle);
+            let Some(public) = self.entities.public_at(root) else {
+                continue;
+            };
+            assert_eq!(
+                chunks.contains(&public.chunk_position()),
+                players.contains(id),
+                "玩家 {id:?} 和他的载具 {root} 被拆到了两个岛"
+            );
+        }
         for id in players {
             assert!(
                 self.players.contains_key(id),
@@ -529,6 +546,12 @@ impl Region {
         let none = const { &BTreeSet::new() };
         let pick = |part: IslandPart| if moves(part) { players } else { none };
         let new_players = split_players(&mut self.players, pick(IslandPart::Players));
+        // 原岛留下的玩家不能还引用已经搬走的载具名单（双向一致检查）。
+        debug_assert!(
+            crate::riding::check_consistency(self).is_empty(),
+            "拆分后原岛的骑乘关系不一致：{:?}",
+            crate::riding::check_consistency(self)
+        );
         let player_grid = self.player_grid.split_off(pick(IslandPart::PlayerGrid));
         let links = self.links.split_off(pick(IslandPart::Links));
         let menus = split_players(&mut self.menus, pick(IslandPart::Menus));

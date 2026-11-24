@@ -676,6 +676,60 @@ mod tests {
         );
         assert_eq!(storage_tag(&global, "minecraft:a"), before, "不静默成功");
     }
+
+    /// `Entity.saveWithoutId` 的 `Passengers` 从唯一一份名单递归写生物乘客；
+    /// 玩家不在实体表里，不能变成一条没有实体的嵌套标签。
+    #[test]
+    fn data_get_entity_keeps_mob_passengers_but_skips_player_ids() {
+        use mc_bamboo_blocks::entity::{Entity, FIRST_ENTITY_ID};
+
+        let (global, mut region, _id) = world();
+        let cow = region
+            .entities
+            .spawn(Entity::cow(Vec3::new(2.5, -60.0, 2.5)));
+        let rider = region
+            .entities
+            .spawn(Entity::cow(Vec3::new(2.5, -60.0, 2.5)));
+        region
+            .entities
+            .with_mut_including_pending_dyn(rider, &mut |entity| {
+                entity.vehicle = Some(cow);
+            });
+        region
+            .entities
+            .with_mut_including_pending_dyn(cow, &mut |entity| {
+                if let Some(mob) = entity.kind.mob_mut() {
+                    mob.passengers.push(7); // 玩家 ID
+                    mob.passengers.push(rider);
+                }
+            });
+        const { assert!(7 < FIRST_ENTITY_ID) };
+        let source = data_source::Source {
+            kind: data_source::Kind::Entity,
+            block: None,
+            entity: Some(crate::command::select::Target::World(cow)),
+            storage: None,
+        };
+        let tag = data_source::read(&global, &region, &source).expect("vehicle NBT");
+        let text = tag.to_pretty_snbt();
+        assert!(text.contains("Passengers"), "{text}");
+        assert!(text.contains("\"minecraft:cow\""), "{text}");
+        // 玩家 ID 既不在实体表里也没有存档行，官方 `saveAsPassenger` 不会写出它：
+        // `Passengers` 列表里只剩那一条生物乘客。
+        let count = match &tag {
+            Tag::Compound(entries) => entries
+                .iter()
+                .rev()
+                .find(|(key, _)| key == "Passengers")
+                .and_then(|(_, value)| match value {
+                    Tag::List(items) => Some(items.len()),
+                    _ => None,
+                })
+                .unwrap_or(0),
+            _ => 0,
+        };
+        assert_eq!(count, 1, "exactly one nested mob passenger: {text}");
+    }
 }
 
 #[cfg(test)]

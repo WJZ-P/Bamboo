@@ -2116,3 +2116,49 @@ fn run_death_respawn_split_window(break_view: bool, spawn_moves: bool, immediate
         "玩家收到了跟踪区块里的方块更新"
     );
 }
+
+/// 玩家骑手和载具在岛拆分时是不可分的一组：`split_ready` 在「玩家留在原岛、
+/// 载具在拆出去的那半」时推迟拆分；玩家和载具在同一边时放行。
+#[test]
+fn a_split_never_separates_a_rider_from_the_vehicle() {
+    use mc_bamboo_blocks::entity::{Entity, mob::MobType};
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use uuid::Uuid;
+
+    use crate::{
+        inbound::PlayerId, player::Player, region::Region, world::island_runtime::split_ready,
+    };
+
+    let mut region = Region::new(2, 20, false);
+    let id = PlayerId(4);
+    region.insert_player(Player::new(
+        id,
+        Uuid::from_u128(9),
+        "Rider".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(8.5, -60.0, 8.5),
+    ));
+    let horse = region.entities.spawn(Entity::by_mob_type(
+        MobType::Horse,
+        Vec3::new(8.5, -60.0, 8.5),
+    ));
+    crate::riding::mount(&mut region, id, horse);
+    assert!(crate::riding::check_consistency(&region).is_empty());
+
+    // 玩家和载具都在区块 (0,0)，把 (1,0) 拆出去：玩家留在原岛，放行。
+    let far = BTreeSet::from([ChunkPos::new(1, 0)]);
+    let leaving = BTreeSet::new();
+    let inside = |pos: ChunkPos| far.contains(&pos);
+    assert!(split_ready(&region, &leaving, &inside, true));
+
+    // 载具挪到拆出去的那一边，玩家还在原岛：不能拆。
+    region.entities.with_mut(horse, |entity| {
+        entity.position = Vec3::new(24.5, -60.0, 8.5);
+    });
+    assert!(!split_ready(&region, &leaving, &inside, true));
+
+    // 玩家也分到拆出去的那边（视野中心已跟过去）：整组一起走，放行。
+    let leaving = BTreeSet::from([id]);
+    assert!(split_ready(&region, &leaving, &inside, true));
+}

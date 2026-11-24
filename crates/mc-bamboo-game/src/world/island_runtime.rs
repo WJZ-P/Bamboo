@@ -542,6 +542,25 @@ impl World {
                     panic!("玩家 {id:?} 同时在岛 {other} 和 {} 上", island.id);
                 }
             }
+            // 玩家骑手、载具和整棵乘客树必须在同一个岛：每名在线玩家的
+            // `Riding.vehicle` 都能在本岛的实体表里找到，且名单双向一致。
+            let broken = crate::riding::check_consistency(&island.region);
+            assert!(
+                broken.is_empty(),
+                "岛 {} 的骑乘关系跨岛或不一致：{broken:?}",
+                island.id
+            );
+            for player in island.region.players.values() {
+                let Some(vehicle) = player.riding.vehicle else {
+                    continue;
+                };
+                assert!(
+                    island.region.entities.public_at(vehicle).is_some(),
+                    "玩家 {:?} 的载具 {vehicle} 不在岛 {} 上",
+                    player.id,
+                    island.id
+                );
+            }
             for entity in island.region.entities.ids() {
                 assert!(entity_ids.insert(entity), "实体网络 ID {entity} 重复");
             }
@@ -689,7 +708,7 @@ pub(crate) fn split_parts(
 /// cut postpones the split: placing a player directly can briefly put their
 /// position and view centre on opposite sides, and replaying then would carry
 /// them, with the old island's tracked chunks, to the new island.
-fn split_ready(
+pub(crate) fn split_ready(
     region: &crate::region::Region,
     players: &BTreeSet<PlayerId>,
     inside: &impl Fn(ChunkPos) -> bool,
@@ -727,6 +746,16 @@ fn split_ready(
             .any(|viewer| players.contains(viewer) != side)
         {
             return false;
+        }
+        // 玩家骑手和载具是不可分的一组：载具那边的区块归哪边，玩家就必须归哪边。
+        // 载具跟着玩家跑到切口对面时推迟拆分，等两边重新对齐（或玩家下车）。
+        if let Some(vehicle) = player.riding.vehicle {
+            let root = crate::riding::root_vehicle(region, vehicle);
+            if let Some(public) = region.entities.public_at(root)
+                && inside(public.chunk_position()) != side
+            {
+                return false;
+            }
         }
     }
     !region.entity_tracking.straddles(players)
