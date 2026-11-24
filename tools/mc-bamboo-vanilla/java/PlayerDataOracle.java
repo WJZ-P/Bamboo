@@ -565,7 +565,7 @@ public final class PlayerDataOracle {
                 fields.add("root_vehicle_entity",
                         Oracle.canonical(root.getCompoundOrEmpty("Entity")));
                 fields.add("root_vehicle_tag", Oracle.canonical(root));
-            }
+            });
             return fields;
         }
 
