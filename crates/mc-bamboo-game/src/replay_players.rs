@@ -229,6 +229,39 @@ impl ReplayPlayers {
         }
     }
 
+    /// `ElderGuardian.customServerAiStep`：给挂上挖掘疲劳的玩家发
+    /// `GUARDIAN_ELDER_EFFECT` 游戏事件包（静音时参数 0、否则 1）。
+    ///
+    /// `ElderGuardian.customServerAiStep`: send the `GUARDIAN_ELDER_EFFECT`
+    /// game-event packet (param 0 when silent, else 1).
+    pub fn guardian_elder_effect(&mut self, target: EntityUid, silent: bool) {
+        use mc_bamboo_protocol::packet::play::GameEvent;
+        let packet = GameEvent {
+            event: GameEvent::GUARDIAN_ELDER_EFFECT,
+            param: if silent { 0.0 } else { 1.0 },
+        };
+        self.region
+            .links
+            .send(crate::inbound::PlayerId(target), &packet);
+    }
+
+    /// 对拍场景设玩家游戏模式（0 生存 / 1 创造 / 2 冒险 / 3 旁观）。
+    /// `ReplayPlayerSetup` 只带 creative 布尔，其余模式用这个补上。
+    ///
+    /// Set the game mode for a replay player (0 survival / 1 creative /
+    /// 2 adventure / 3 spectator); `ReplayPlayerSetup` only carries a bool.
+    pub fn set_game_mode(&mut self, target: EntityUid, game_mode: i32) {
+        let mode = match game_mode {
+            1 => GameMode::Creative,
+            2 => GameMode::Adventure,
+            3 => GameMode::Spectator,
+            _ => GameMode::Survival,
+        };
+        if let Some(player) = self.region.players.get_mut(&PlayerId(target)) {
+            player.game_mode = mode;
+        }
+    }
+
     /// 给弹射物定点场景设无敌、火焰和冰冻初值。
     ///
     /// Set invulnerability, fire and freezing in a projectile fixture.

@@ -133,6 +133,19 @@ impl EffectInstance {
     /// effect and reports whether anything changed.
     pub fn update(&mut self, other: &Self) -> bool {
         let mut changed = false;
+        // 官方 `MobEffectInstance.update(other)` 两处 `isShorterDurationThan`
+        // 的方向不同（探针验证）：
+        // - 更高等级分支：`other.isShorterDurationThan(this)` —— 新的更短时把
+        //   当前实例存进隐藏层；
+        // - 同级 / 更低分支：`this.isShorterDurationThan(other)` —— 新的更长时
+        //   才刷新，新的更短保持不变。第二处方向写反会让重复挂同等级更长效果
+        //   时反而缩短，例如远古守卫者给剩余 1199 刻的玩家重挂 6000 刻挖掘疲劳。
+        //
+        // Vanilla `MobEffectInstance.update(other)` uses opposite directions in
+        // the two `isShorterDurationThan` checks (verified with a Java probe):
+        // higher amplifier keeps the current instance as a hidden effect when the
+        // new one is shorter; same/lower amplifier refreshes only when the new
+        // one is longer. Reversing the second check shortens longer re-applies.
         if other.amplifier > self.amplifier {
             if other.is_shorter_than(self) {
                 // 官方把当前实例复制成隐藏效果，并把旧链挂在新副本下面。
@@ -146,7 +159,7 @@ impl EffectInstance {
             self.amplifier = other.amplifier;
             self.duration = other.duration;
             changed = true;
-        } else if other.is_shorter_than(self) {
+        } else if self.is_shorter_than(other) {
             if other.amplifier == self.amplifier {
                 self.duration = other.duration;
                 changed = true;
@@ -820,18 +833,18 @@ mod tests {
         assert_eq!((instance.duration, instance.amplifier), (200, 2));
         assert_eq!(instance.hidden.as_ref().unwrap().amplifier, 0);
         assert_eq!(instance.hidden.as_ref().unwrap().duration, 600);
-        // 同等级更短时长只改时长，不改隐藏层。
-        let _ = give(&mut map, mob_effect::SPEED, 50, 2);
-        assert_eq!(map.get(mob_effect::SPEED).unwrap().duration, 50);
+        // 官方 `MobEffectInstance.update`：同级 / 更低等级时，只有新的时长
+        // 更长才刷新；新的更短保持不变（探针验证）。
+        let shorter = give(&mut map, mob_effect::SPEED, 50, 2);
+        assert!(shorter.changes.is_empty(), "同级更短不应刷新");
+        assert_eq!(map.get(mob_effect::SPEED).unwrap().duration, 200);
+        // 同级更长才刷新（远古守卫者给 1199 刻玩家重挂 6000 刻疲劳）。
+        let longer = give(&mut map, mob_effect::SPEED, 6000, 2);
         assert_eq!(
-            map.get(mob_effect::SPEED)
-                .unwrap()
-                .hidden
-                .as_ref()
-                .unwrap()
-                .duration,
-            600
+            longer.changes,
+            vec![EffectChange::Updated(mob_effect::SPEED)]
         );
+        assert_eq!(map.get(mob_effect::SPEED).unwrap().duration, 6000);
     }
 
     #[test]
