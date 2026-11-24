@@ -61,6 +61,7 @@ pub mod nbt;
 pub mod neutral;
 pub mod ocelot;
 pub mod panda;
+pub mod parched;
 pub mod parrot;
 pub mod path;
 pub mod pathfinding;
@@ -158,6 +159,10 @@ pub enum MobType {
     Skeleton,
     Stray,
     Bogged,
+    /// 焦骸：`AbstractSkeleton` 一支，箭带 600 刻虚弱。
+    ///
+    /// Parched: an `AbstractSkeleton` shooting 600-tick weakness arrows.
+    Parched,
     Slime,
     Drowned,
     Witch,
@@ -186,6 +191,10 @@ pub enum MobType {
     Bat,
     Phantom,
     Camel,
+    /// 尸壳骆驼：`Camel` 的敌对变体，只在尸壳生成骑士时骑着出现。
+    ///
+    /// Camel husk: the hostile camel variant, spawned as a husk jockey mount.
+    CamelHusk,
     /// 骷髅马，`SkeletonHorse`。
     SkeletonHorse,
     /// 僵尸马，`ZombieHorse`。
@@ -212,7 +221,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 59] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -231,11 +240,13 @@ impl MobType {
         Self::Mule,
         Self::Llama,
         Self::Camel,
+        Self::CamelHusk,
         Self::Zombie,
         Self::Husk,
         Self::Skeleton,
         Self::Stray,
         Self::Bogged,
+        Self::Parched,
         Self::Slime,
         Self::Drowned,
         Self::Witch,
@@ -294,6 +305,7 @@ impl MobType {
             Self::Skeleton => ids::SKELETON,
             Self::Stray => ids::STRAY,
             Self::Bogged => ids::BOGGED,
+            Self::Parched => ids::PARCHED,
             Self::Slime => ids::SLIME,
             Self::Drowned => ids::DROWNED,
             Self::Witch => ids::WITCH,
@@ -322,6 +334,7 @@ impl MobType {
             Self::Bat => ids::BAT,
             Self::Phantom => ids::PHANTOM,
             Self::Camel => ids::CAMEL,
+            Self::CamelHusk => ids::CAMEL_HUSK,
             Self::SkeletonHorse => ids::SKELETON_HORSE,
             Self::ZombieHorse => ids::ZOMBIE_HORSE,
             Self::Bee => ids::BEE,
@@ -357,6 +370,7 @@ impl MobType {
             Self::Skeleton => "minecraft:skeleton",
             Self::Stray => "minecraft:stray",
             Self::Bogged => "minecraft:bogged",
+            Self::Parched => "minecraft:parched",
             Self::Slime => "minecraft:slime",
             Self::Drowned => "minecraft:drowned",
             Self::Witch => "minecraft:witch",
@@ -385,6 +399,7 @@ impl MobType {
             Self::Bat => "minecraft:bat",
             Self::Phantom => "minecraft:phantom",
             Self::Camel => "minecraft:camel",
+            Self::CamelHusk => "minecraft:camel_husk",
             Self::SkeletonHorse => "minecraft:skeleton_horse",
             Self::ZombieHorse => "minecraft:zombie_horse",
             Self::Bee => "minecraft:bee",
@@ -410,6 +425,9 @@ impl MobType {
             Self::Goat => Some(item_tags::GOAT_FOOD),
             Self::Frog | Self::Tadpole => Some(item_tags::FROG_FOOD),
             Self::Camel => Some(item_tags::CAMEL_FOOD),
+            // `CamelHusk.isFood` 用 `#camel_husk_food`（兔脚）。
+            // `CamelHusk.isFood` uses `#camel_husk_food` (rabbit feet).
+            Self::CamelHusk => Some(item_tags::CAMEL_HUSK_FOOD),
             Self::Bee => Some(item_tags::BEE_FOOD),
             Self::Turtle => Some(item_tags::TURTLE_FOOD),
             Self::Axolotl => Some(item_tags::AXOLOTL_FOOD),
@@ -435,6 +453,14 @@ impl MobType {
         Self::ALL.into_iter().find(|kind| kind.name() == name)
     }
 
+    /// 是不是官方 `Camel` 一支（普通骆驼和尸壳骆驼共用姿势、大脑、冲刺和存档）。
+    ///
+    /// Whether this is on vanilla's `Camel` branch (both kinds share the pose,
+    /// brain, dash and save logic).
+    pub const fn is_camel(self) -> bool {
+        matches!(self, Self::Camel | Self::CamelHusk)
+    }
+
     pub const fn is_equine(self) -> bool {
         matches!(
             self,
@@ -443,6 +469,7 @@ impl MobType {
                 | Self::Mule
                 | Self::Llama
                 | Self::Camel
+                | Self::CamelHusk
                 | Self::SkeletonHorse
                 | Self::ZombieHorse
         )
@@ -453,7 +480,7 @@ impl MobType {
         match (self, baby) {
             // 三种骷髅的 `EntityType` 都是 `sized(0.6F, 1.99F).eyeHeight(1.74F)`。
             // All three skeletons are `sized(0.6F, 1.99F).eyeHeight(1.74F)`.
-            (Self::Skeleton | Self::Stray | Self::Bogged, _) => {
+            (Self::Skeleton | Self::Stray | Self::Bogged | Self::Parched, _) => {
                 let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
                 (
                     facts.width,
@@ -510,7 +537,7 @@ impl MobType {
             }
             // 坐姿尺寸在 `Mob::dimensions` 里按 `camel.pose` 覆盖。
             // Sitting dimensions are overridden by `Mob::dimensions` from `camel.pose`.
-            (Self::Camel, baby) => camel::dimensions(baby, false),
+            (Self::Camel | Self::CamelHusk, baby) => camel::dimensions(baby, false),
             (Self::Bee, _) => bee::dimensions(),
             (Self::IronGolem, _) => iron_golem::dimensions(),
             (Self::SnowGolem, _) => snow_golem::dimensions(),
@@ -574,6 +601,13 @@ impl MobType {
     }
 
     /// 是不是 `Monster` 一支（决定消失规则、经验和战利品规则）。
+    /// 是不是 `Monster` 一支。尸壳骆驼虽是 `EntityType` 的 `MONSTER` 类别，Java 类却
+    /// 继承 `Camel`（`Animal`），所以不在这张表里：消失规则由
+    /// [`Self::is_enemy`] / [`Self::removes_when_far_away`] 单独按类别处理。
+    ///
+    /// Whether this is on the `Monster` branch. A camel husk has the `MONSTER`
+    /// category but its Java class extends `Camel` (`Animal`), so it is absent
+    /// here; despawning follows [`Self::is_enemy`] instead.
     pub const fn is_monster(self) -> bool {
         matches!(
             self,
@@ -620,7 +654,10 @@ impl MobType {
     /// Whether this is an `AbstractSkeleton`: skeletons, strays and bogged share the
     /// bow / melee goals and the equipment logic.
     pub const fn is_skeleton(self) -> bool {
-        matches!(self, Self::Skeleton | Self::Stray | Self::Bogged)
+        matches!(
+            self,
+            Self::Skeleton | Self::Stray | Self::Bogged | Self::Parched
+        )
     }
 
     /// `LivingEntity.isInvertedHealAndHarm()`：`#inverted_healing_and_harm` 标签。
@@ -721,7 +758,7 @@ impl MobType {
     /// that only implements `Enemy`). Despawning, peaceful removal and the sound category
     /// follow it.
     pub const fn is_enemy(self) -> bool {
-        self.is_monster() || matches!(self, Self::Slime | Self::Phantom)
+        self.is_monster() || matches!(self, Self::Slime | Self::Phantom | Self::CamelHusk)
     }
 
     /// `EntityType.getCategory()` 的消失距离。牛是 `CREATURE`（32），
@@ -801,7 +838,9 @@ impl MobType {
     /// negative (later group members roll `setAge(-24000)`), but they are not babies, never
     /// grow up and do not save the three `Age` keys.
     pub const fn can_be_a_baby(self) -> bool {
-        !matches!(self, Self::Frog | Self::Parrot)
+        // `CamelHusk.canBeABaby()` 恒假（也不能求爱、繁殖）。
+        // `CamelHusk.canBeABaby()` is always false (no love or breeding either).
+        !matches!(self, Self::Frog | Self::Parrot | Self::CamelHusk)
     }
 
     /// 是不是官方 `AgeableWaterCreature` 一支（鱿鱼、发光鱿鱼、海豚）：不吃水流，
@@ -945,6 +984,7 @@ impl MobType {
             Self::Skeleton => "minecraft:entities/skeleton",
             Self::Stray => "minecraft:entities/stray",
             Self::Bogged => "minecraft:entities/bogged",
+            Self::Parched => "minecraft:entities/parched",
             Self::Slime => "minecraft:entities/slime",
             Self::Drowned => "minecraft:entities/drowned",
             Self::Witch => "minecraft:entities/witch",
@@ -973,6 +1013,7 @@ impl MobType {
             Self::Bat => "minecraft:entities/bat",
             Self::Phantom => "minecraft:entities/phantom",
             Self::Camel => "minecraft:entities/camel",
+            Self::CamelHusk => "minecraft:entities/camel_husk",
             Self::SkeletonHorse => "minecraft:entities/skeleton_horse",
             Self::ZombieHorse => "minecraft:entities/zombie_horse",
             Self::Bee => "minecraft:entities/bee",
@@ -1061,6 +1102,7 @@ impl MobType {
             Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
             Self::Stray => Some("minecraft:entity.stray.ambient"),
             Self::Bogged => Some("minecraft:entity.bogged.ambient"),
+            Self::Parched => Some("minecraft:entity.parched.ambient"),
             // 溺尸的叫声分水上、水下两种，由 [`drowned::sound`] 按 `isInWater` 选。
             //
             // Drowned pick a water or land variant in [`drowned::sound`] by `isInWater`.
@@ -1095,6 +1137,7 @@ impl MobType {
             // [`living::play_ambient_sound`].
             Self::Parrot => Some("minecraft:entity.parrot.ambient"),
             Self::Camel => Some("minecraft:entity.camel.ambient"),
+            Self::CamelHusk => Some("minecraft:entity.camel_husk.ambient"),
             Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.ambient"),
             Self::ZombieHorse => Some("minecraft:entity.zombie_horse.ambient"),
             // `Bee.getAmbientSound()` 返回 null：不出环境音也不抽音高的随机数。
@@ -1132,6 +1175,7 @@ impl MobType {
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
             Self::Stray => Some("minecraft:entity.stray.hurt"),
             Self::Bogged => Some("minecraft:entity.bogged.hurt"),
+            Self::Parched => Some("minecraft:entity.parched.hurt"),
             Self::Drowned => None,
             Self::Witch => Some("minecraft:entity.witch.hurt"),
             Self::Pillager => Some("minecraft:entity.pillager.hurt"),
@@ -1156,6 +1200,7 @@ impl MobType {
             Self::Bat => Some("minecraft:entity.bat.hurt"),
             Self::Phantom => Some("minecraft:entity.phantom.hurt"),
             Self::Camel => Some("minecraft:entity.camel.hurt"),
+            Self::CamelHusk => Some("minecraft:entity.camel_husk.hurt"),
             Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.hurt"),
             Self::ZombieHorse => Some("minecraft:entity.zombie_horse.hurt"),
             Self::Bee => Some("minecraft:entity.bee.hurt"),
@@ -1188,6 +1233,7 @@ impl MobType {
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
             Self::Stray => Some("minecraft:entity.stray.death"),
             Self::Bogged => Some("minecraft:entity.bogged.death"),
+            Self::Parched => Some("minecraft:entity.parched.death"),
             Self::Drowned => None,
             Self::Witch => Some("minecraft:entity.witch.death"),
             Self::Pillager => Some("minecraft:entity.pillager.death"),
@@ -1212,6 +1258,7 @@ impl MobType {
             Self::Bat => Some("minecraft:entity.bat.death"),
             Self::Phantom => Some("minecraft:entity.phantom.death"),
             Self::Camel => Some("minecraft:entity.camel.death"),
+            Self::CamelHusk => Some("minecraft:entity.camel_husk.death"),
             Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.death"),
             Self::ZombieHorse => Some("minecraft:entity.zombie_horse.death"),
             Self::Bee => Some("minecraft:entity.bee.death"),
@@ -1244,6 +1291,7 @@ impl MobType {
             Self::Skeleton => Some("minecraft:entity.skeleton.step"),
             Self::Stray => Some("minecraft:entity.stray.step"),
             Self::Bogged => Some("minecraft:entity.bogged.step"),
+            Self::Parched => Some("minecraft:entity.parched.step"),
             Self::Drowned => Some("minecraft:entity.drowned.step"),
             // 女巫没覆写 `getStepSound`，走方块自己的脚步声（和史莱姆一样）。
             //
@@ -1275,6 +1323,7 @@ impl MobType {
             // Phantoms keep the default `playStepSound`: the block's own step sound.
             Self::Phantom => None,
             Self::Camel => Some("minecraft:entity.camel.step"),
+            Self::CamelHusk => Some("minecraft:entity.camel_husk.step"),
             Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.step_water"),
             Self::ZombieHorse => Some("minecraft:entity.horse.step"),
             // `Bee.playStepSound` 是空实现。
@@ -1316,6 +1365,7 @@ impl MobType {
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
             Self::Stray => items::STRAY_SPAWN_EGG,
             Self::Bogged => items::BOGGED_SPAWN_EGG,
+            Self::Parched => items::PARCHED_SPAWN_EGG,
             Self::Slime => items::SLIME_SPAWN_EGG,
             Self::Drowned => items::DROWNED_SPAWN_EGG,
             Self::Witch => items::WITCH_SPAWN_EGG,
@@ -1344,6 +1394,7 @@ impl MobType {
             Self::Bat => items::BAT_SPAWN_EGG,
             Self::Phantom => items::PHANTOM_SPAWN_EGG,
             Self::Camel => items::CAMEL_SPAWN_EGG,
+            Self::CamelHusk => items::CAMEL_HUSK_SPAWN_EGG,
             Self::SkeletonHorse => items::SKELETON_HORSE_SPAWN_EGG,
             Self::ZombieHorse => items::ZOMBIE_HORSE_SPAWN_EGG,
             Self::Bee => items::BEE_SPAWN_EGG,
@@ -1379,6 +1430,7 @@ impl MobType {
             Self::Skeleton => "entity.minecraft.skeleton",
             Self::Stray => "entity.minecraft.stray",
             Self::Bogged => "entity.minecraft.bogged",
+            Self::Parched => "entity.minecraft.parched",
             Self::Slime => "entity.minecraft.slime",
             Self::Drowned => "entity.minecraft.drowned",
             Self::Witch => "entity.minecraft.witch",
@@ -1407,6 +1459,7 @@ impl MobType {
             Self::Bat => "entity.minecraft.bat",
             Self::Phantom => "entity.minecraft.phantom",
             Self::Camel => "entity.minecraft.camel",
+            Self::CamelHusk => "entity.minecraft.camel_husk",
             Self::SkeletonHorse => "entity.minecraft.skeleton_horse",
             Self::ZombieHorse => "entity.minecraft.zombie_horse",
             Self::Bee => "entity.minecraft.bee",
@@ -2821,6 +2874,7 @@ impl Mob {
             MobType::Chicken => chicken::attributes(),
             MobType::Skeleton | MobType::Stray => Attributes::skeleton(),
             MobType::Bogged => bogged::attributes(),
+            MobType::Parched => parched::attributes(),
             MobType::Slime => slime::attributes(),
             MobType::PolarBear => polar_bear::attributes(),
             MobType::Panda => panda::attributes(),
@@ -2848,7 +2902,7 @@ impl Mob {
             MobType::Tadpole => tadpole::attributes(),
             MobType::Bat => bat::attributes(),
             MobType::Phantom => phantom::attributes(),
-            MobType::Camel => camel::attributes(),
+            MobType::Camel | MobType::CamelHusk => camel::attributes(),
             MobType::SkeletonHorse => skeleton_horse::skeleton_attributes(),
             MobType::ZombieHorse => skeleton_horse::zombie_attributes(),
             MobType::Bee => bee::attributes(),
@@ -2901,7 +2955,9 @@ impl Mob {
             MobType::Pig => pig::goals(&mut navigation),
             MobType::Sheep => sheep::goals(&mut navigation),
             MobType::Chicken => chicken::goals(&mut navigation),
-            MobType::Skeleton | MobType::Stray | MobType::Bogged => GoalSelector::skeleton(),
+            MobType::Skeleton | MobType::Stray | MobType::Bogged | MobType::Parched => {
+                GoalSelector::skeleton()
+            }
             MobType::Slime => slime::goals(&mut navigation),
             MobType::PolarBear => polar_bear::goals(&mut navigation),
             MobType::Panda => panda::goals(&mut navigation),
@@ -2932,6 +2988,7 @@ impl Mob {
             | MobType::Frog
             | MobType::Bat
             | MobType::Camel
+            | MobType::CamelHusk
             | MobType::Villager => GoalSelector::default(),
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
@@ -2990,7 +3047,8 @@ impl Mob {
             | MobType::Frog
             | MobType::Tadpole
             | MobType::Bat
-            | MobType::Camel => GoalSelector::default(),
+            | MobType::Camel
+            | MobType::CamelHusk => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Ocelot => ocelot::target_goals(),
@@ -3007,7 +3065,7 @@ impl Mob {
             | MobType::Pufferfish
             | MobType::Axolotl => GoalSelector::default(),
             MobType::Dolphin => dolphin::target_goals(),
-            MobType::Skeleton | MobType::Stray | MobType::Bogged => {
+            MobType::Skeleton | MobType::Stray | MobType::Bogged | MobType::Parched => {
                 GoalSelector::skeleton_targets()
             }
             MobType::Creeper => creeper::target_goals(),
@@ -3294,7 +3352,7 @@ impl Mob {
             // The `Armadillo` constructor's `getNavigation().setCanFloat(true)`.
             mob.navigation.flags.can_float = true;
         }
-        if mob_type == MobType::Camel {
+        if mob_type.is_camel() {
             camel::configure(&mut mob);
         }
         if mob_type == MobType::Parrot {
@@ -3382,7 +3440,7 @@ impl Mob {
             let (width, height, _) = goat::pose_dimensions(self.is_baby(), self.goat.long_jumping);
             return (width, height);
         }
-        if self.mob_type == MobType::Camel {
+        if self.mob_type.is_camel() {
             let sitting = self.camel.pose == camel::Pose::Sitting;
             let (width, height, _) = camel::dimensions(self.is_baby(), sitting);
             return (width, height);
@@ -3986,7 +4044,7 @@ impl MobPublic {
             let (width, height, _) = goat::pose_dimensions(self.baby, self.goat.long_jumping);
             return (width, height);
         }
-        if self.mob_type == MobType::Camel {
+        if self.mob_type.is_camel() {
             let sitting = self.camel.pose == camel::Pose::Sitting;
             let (width, height, _) = camel::dimensions(self.baby, sitting);
             return (width, height);
@@ -4025,7 +4083,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Goat => Some(Box::new(goat::brain())),
         MobType::Frog => Some(Box::new(frog::brain())),
         MobType::Tadpole => Some(Box::new(tadpole::brain())),
-        MobType::Camel => Some(Box::new(camel::brain())),
+        kind if kind.is_camel() => Some(Box::new(camel::brain())),
         MobType::Axolotl => Some(Box::new(axolotl::brain())),
         MobType::Villager => Some(Box::new(villager_ai::brain(false, 0))),
         _ => None,

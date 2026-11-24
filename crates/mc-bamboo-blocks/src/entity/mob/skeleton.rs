@@ -45,6 +45,10 @@ impl BowGoal {
                 super::bogged::HARD_ATTACK_INTERVAL,
                 super::bogged::ATTACK_INTERVAL,
             ),
+            MobType::Parched => (
+                super::parched::HARD_ATTACK_INTERVAL,
+                super::parched::ATTACK_INTERVAL,
+            ),
             _ => (20, 40),
         };
         Self {
@@ -240,6 +244,7 @@ const fn arrow_effect(kind: MobType) -> Option<(i32, i32)> {
     match kind {
         MobType::Stray => Some(super::stray::ARROW_EFFECT),
         MobType::Bogged => Some(super::bogged::ARROW_EFFECT),
+        MobType::Parched => Some(super::parched::ARROW_EFFECT),
         _ => None,
     }
 }
@@ -553,12 +558,15 @@ mod tests {
         let interval = |kind, difficulty| BowGoal::for_kind(kind, difficulty).interval;
         assert_eq!(interval(MobType::Bogged, 3), 50);
         assert_eq!(interval(MobType::Bogged, 2), 70);
+        assert_eq!(interval(MobType::Parched, 3), 50);
+        assert_eq!(interval(MobType::Parched, 2), 70);
         assert_eq!(interval(MobType::Stray, 3), 20);
         assert_eq!(interval(MobType::Stray, 1), 40);
         assert_eq!(arrow_effect(MobType::Skeleton), None);
         for (kind, effect, duration) in [
             (MobType::Stray, mob_effect::SLOWNESS, 600),
             (MobType::Bogged, mob_effect::POISON, 100),
+            (MobType::Parched, mob_effect::WEAKNESS, 600),
         ] {
             let mut stack = ItemStack::new(items::ARROW, 1);
             let (id, ticks) = arrow_effect(kind).unwrap();

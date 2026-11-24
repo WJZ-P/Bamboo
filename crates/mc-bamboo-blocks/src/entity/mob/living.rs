@@ -244,7 +244,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     }
     // `Camel.tick` 在 `super.tick()` 之后：冲刺、冷却、夹头、坐在水里站起。
     // `Camel.tick` after `super.tick()`: dash, cooldown, head clamp, stand up in water.
-    if mob.mob_type == super::MobType::Camel {
+    if mob.mob_type.is_camel() {
         super::camel::tick_after(me, mob, ctx);
     }
     // `AbstractHorse.tick` 在 `super.tick()` 之后推进计时器。
@@ -953,6 +953,11 @@ fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 ///
 /// `LivingEntity.canBeAffected`: filters out effects the mob type is immune to.
 pub fn can_be_affected(kind: super::MobType, effect: i32) -> bool {
+    // `Parched.canBeAffected`：对虚弱免疫（自己射的箭不会反过来削弱它）。
+    // `Parched.canBeAffected`: immune to weakness, so its own arrows cannot weaken it.
+    if kind == super::MobType::Parched && effect == mob_effect::WEAKNESS {
+        return false;
+    }
     if kind.in_entity_tag("minecraft:immune_to_infested") {
         return effect != mob_effect::INFESTED;
     }
@@ -1819,7 +1824,7 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         super::smooth_swim::move_tick(me, mob, &super::smooth_swim::FROG);
         super::smooth_swim::look_tick(me, mob, 10.0);
     } else {
-        if mob.mob_type == super::MobType::Camel {
+        if mob.mob_type.is_camel() {
             // `CamelMoveControl.tick` 在 `super.tick()` 之前。
             // `CamelMoveControl.tick` runs before `super.tick()`.
             super::camel::before_move_control(me, mob, ctx.blocks().game_time());
@@ -1847,7 +1852,7 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     if mob.mob_type == super::MobType::Tadpole {
         super::tadpole::custom_server_ai_step(me, mob, ctx);
     }
-    if mob.mob_type == super::MobType::Camel {
+    if mob.mob_type.is_camel() {
         super::camel::custom_server_ai_step(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::Axolotl {
@@ -2024,7 +2029,7 @@ fn max_head_y_rot(mob: &Mob) -> f32 {
     } else if mob.mob_type == super::MobType::Frog {
         // `Frog.getMaxHeadYRot`。
         5.0
-    } else if mob.mob_type == super::MobType::Camel {
+    } else if mob.mob_type.is_camel() {
         // `Camel.getMaxHeadYRot()`。
         super::camel::max_head_y_rot()
     } else {
@@ -2044,7 +2049,7 @@ fn body_rotation_tick(me: &Entity, mob: &mut Mob, time: i64) {
         super::phantom::body_rotation_tick(me, mob);
         return;
     }
-    if mob.mob_type == super::MobType::Camel && super::camel::refuse_to_move(mob, time) {
+    if mob.mob_type.is_camel() && super::camel::refuse_to_move(mob, time) {
         return;
     }
     let dx = me.position.x - me.old_position.x;
@@ -2163,7 +2168,7 @@ fn travel(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, mut input: Ve
     // `Camel.travel`：`refuseToMove && onGround` 时把水平速度和输入清零，再跑 `super.travel`。
     // `Camel.travel`: zero horizontal velocity / input while refusing on ground, then
     // `super.travel`.
-    if mob.mob_type == super::MobType::Camel {
+    if mob.mob_type.is_camel() {
         super::camel::travel(me, mob, ctx.blocks().game_time(), &mut input);
     }
     let in_liquid = is_in_liquid(me, mob);
@@ -2896,7 +2901,7 @@ fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource, ti
     // 放在 `super` 之后对可观察状态等价。
     // `Camel.actuallyHurt` calls `standUpInstantly()` before `super`; a pure state change
     // with no random draw, so after `super` is equivalent for observable state.
-    if mob.mob_type == super::MobType::Camel {
+    if mob.mob_type.is_camel() {
         super::camel::after_actually_hurt(mob, time);
     }
 }

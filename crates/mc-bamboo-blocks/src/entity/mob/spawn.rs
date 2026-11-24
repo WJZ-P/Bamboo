@@ -487,7 +487,7 @@ fn finalize_spawn_in_group(
         // `resetLastPoseChangeTickToFullStand(gameTime)`，再走 `AbstractHorse.finalizeSpawn`。
         // `Camel.finalizeSpawn`: `initMemories` (empty, no draws) and
         // `resetLastPoseChangeTickToFullStand(gameTime)` before `AbstractHorse.finalizeSpawn`.
-        if kind == MobType::Camel {
+        if kind.is_camel() {
             let time = world.game_time();
             super::camel::finalize_pose(entity, time);
         }

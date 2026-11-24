@@ -36,7 +36,7 @@ pub(in crate::entity::mob) fn finalize_spawn(
         // `Camel` does not override `AbstractHorse.randomizeAttributes` (empty base), so no
         // attribute draws for camels.
         match mob.mob_type {
-            MobType::Camel => {}
+            MobType::Camel | MobType::CamelHusk => {}
             MobType::SkeletonHorse => {
                 crate::entity::mob::skeleton_horse::randomize_skeleton(mob, random);
             }
