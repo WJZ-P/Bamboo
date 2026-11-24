@@ -17,6 +17,9 @@ use mc_bamboo_game::world_options::{FlatSettings, LevelType, WorldGenConfig};
 use mc_bamboo_game::worldgen_cache::{
     MAX_FEATURE_CACHE_MB, MAX_IDLE_SECONDS, MAX_TERRAIN_CACHE_MB, WorldgenCacheSettings,
 };
+use mc_bamboo_game::{
+    MAX_ENTITY_COLLISIONS, MAX_ENTITY_THREADS, MAX_MOB_DISTANCE, MAX_MOB_WAKEUPS_SCALE,
+};
 use mc_bamboo_server::{
     CLIENT_READ_TIMEOUT, ForwardingMode, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE, ServerConfig,
     config_files::{
@@ -195,6 +198,22 @@ pub struct ServerSettings {
     pub forwarding_secret: String,
     /// 实体阶段线程数（实验）：0 = 精确模式，≥ 1 = 性能模式。
     pub entity_threads: u32,
+    /// 每只生物每刻最多处理几次推挤（0 = 不限，精确模式）。
+    ///
+    /// Per-mob per-tick push cap (0 = unlimited, exact mode).
+    pub max_entity_collisions: u32,
+    /// 三档降频的降频档起点（格）：0 = 不启用。
+    ///
+    /// The throttle-tier distance in blocks; 0 disables the tier.
+    pub mob_throttle_distance: i32,
+    /// 三档降频的休眠档起点（格）：0 = 不启用。
+    ///
+    /// The sleep-tier distance in blocks; 0 disables the tier.
+    pub mob_sleep_distance: i32,
+    /// 休眠生物每刻唤醒名额的倍率（1 = Paper 缺省）。
+    ///
+    /// Wake-up allowance multiplier for sleeping mobs (1 = Paper default).
+    pub mob_wakeups_scale: u32,
     /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。
     pub redstone_cache: bool,
     /// 区块计算池的线程数：0 = 内联（默认），≥ 1 = 常驻后台线程。
@@ -283,6 +302,10 @@ impl ServerSettings {
             forwarding: bamboo.forwarding.into(),
             forwarding_secret: bamboo.forwarding_secret.clone(),
             entity_threads: u32::try_from(bamboo.entity_threads).unwrap_or(u32::MAX),
+            max_entity_collisions: u32::try_from(bamboo.max_entity_collisions).unwrap_or(u32::MAX),
+            mob_throttle_distance: bamboo.mob_throttle_distance,
+            mob_sleep_distance: bamboo.mob_sleep_distance,
+            mob_wakeups_scale: u32::try_from(bamboo.mob_wakeups_scale).unwrap_or(u32::MAX),
             redstone_cache: bamboo.redstone_cache,
             chunk_worker_threads: u32::try_from(bamboo.chunk_worker_threads).unwrap_or(u32::MAX),
             worldgen_terrain_cache_mb: u32::try_from(bamboo.worldgen_cache.terrain_mb)
@@ -347,12 +370,10 @@ impl ServerSettings {
             // World dir = server dir + level-name, matching the CLI.
             world_dir: Some(PathBuf::from(&self.server_directory).join(self.level_name.trim())),
             entity_threads: self.entity_threads as usize,
-            // 桌面界面不暴露这一项，按精确模式（0 = 不限）。
-            max_entity_collisions: defaults.max_entity_collisions,
-            // 桌面界面也不暴露三档降频，按精确模式（两个距离都是 0）。
-            mob_throttle_distance: defaults.mob_throttle_distance,
-            mob_sleep_distance: defaults.mob_sleep_distance,
-            mob_wakeups_scale: defaults.mob_wakeups_scale,
+            max_entity_collisions: self.max_entity_collisions as usize,
+            mob_throttle_distance: self.mob_throttle_distance,
+            mob_sleep_distance: self.mob_sleep_distance,
+            mob_wakeups_scale: self.mob_wakeups_scale as usize,
             redstone_cache: self.redstone_cache,
             chunk_worker_threads: self.chunk_worker_threads as usize,
             worldgen_cache: WorldgenCacheSettings {
@@ -472,6 +493,18 @@ impl ServerSettings {
                 mc_bamboo_game::MAX_ENTITY_THREADS
             ));
         }
+        if self.max_entity_collisions as usize > MAX_ENTITY_COLLISIONS {
+            return Err(format!("挤压上限不能超过 {MAX_ENTITY_COLLISIONS}"));
+        }
+        if !(0..=MAX_MOB_DISTANCE as i32).contains(&self.mob_throttle_distance) {
+            return Err(format!("降频距离必须在 0 到 {MAX_MOB_DISTANCE} 格之间"));
+        }
+        if !(0..=MAX_MOB_DISTANCE as i32).contains(&self.mob_sleep_distance) {
+            return Err(format!("休眠距离必须在 0 到 {MAX_MOB_DISTANCE} 格之间"));
+        }
+        if self.mob_wakeups_scale as usize > MAX_MOB_WAKEUPS_SCALE {
+            return Err(format!("唤醒倍率不能超过 {MAX_MOB_WAKEUPS_SCALE}"));
+        }
         if self.deliveries_per_tick as usize > mc_bamboo_game::MAX_MAIL_BUDGET
             || self.reclaims_per_tick as usize > mc_bamboo_game::MAX_MAIL_BUDGET
         {
@@ -494,6 +527,126 @@ impl ServerSettings {
             return Err("正版验证和代理转发不能同时打开：代理已经替服务端验过身份了".to_owned());
         }
         Ok(())
+    }
+}
+
+/// 一键性能模式除实体线程数外的固定推荐值，集中成一张表。
+///
+/// 实体线程数按这台机器算，不在这张表里。寻路阶段的三个开关
+/// （`mob_pathfinding_phase` / `mob_pathfinding_budget` /
+/// `mob_pathfinding_fail_cooldown`）合并进 main 后加在这里。
+///
+/// The fixed one-click performance values apart from the machine-dependent
+/// entity thread count. The pathfinding switches land here once merged.
+const PRESET_MAX_ENTITY_COLLISIONS: u32 = 8;
+const PRESET_MOB_THROTTLE_DISTANCE: i32 = 32;
+const PRESET_MOB_SLEEP_DISTANCE: i32 = 64;
+const PRESET_MOB_WAKEUPS_SCALE: u32 = 1;
+
+/// 一键性能模式写进 `bamboo.toml` 的一组值。
+///
+/// 集中定义在这里：前端通过 `performance_presets` 命令取，不自己写死数字。
+/// 推荐值和恢复原版精确模式的两套都在 [`performance_presets`] 里给出。
+///
+/// 寻路阶段的三个开关（`mob_pathfinding_phase` / `mob_pathfinding_budget` /
+/// `mob_pathfinding_fail_cooldown`）正在另一个分支做：合并进 main 后，在这个
+/// 结构里各加一项，并同步前端 `PerformancePreset` 的字段。
+///
+/// One set of values the one-click performance mode writes into `bamboo.toml`.
+/// This is the single definition the UI reads through the
+/// `performance_presets` command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformancePreset {
+    pub entity_threads: u32,
+    pub max_entity_collisions: u32,
+    pub mob_throttle_distance: i32,
+    pub mob_sleep_distance: i32,
+    pub mob_wakeups_scale: u32,
+}
+
+/// 一键预设写进设置的一项动作，只碰这五个字段。
+///
+/// The single write action of a one-click preset; it touches only the five
+/// knobs.
+impl PerformancePreset {
+    /// 只改这五项，其它字段原样保留。
+    ///
+    /// Change only the five knobs and leave every other field untouched.
+    fn apply_to(self, settings: &mut ServerSettings) {
+        settings.entity_threads = self.entity_threads;
+        settings.max_entity_collisions = self.max_entity_collisions;
+        settings.mob_throttle_distance = self.mob_throttle_distance;
+        settings.mob_sleep_distance = self.mob_sleep_distance;
+        settings.mob_wakeups_scale = self.mob_wakeups_scale;
+    }
+}
+
+/// 以上次保存的设置为基准套用一键预设。
+///
+/// 界面上还没保存的修改不参与合并：结果里除了这五项，其它字段全部来自 `saved`。
+/// 前端拿到结果后照常走 `save` 写文件，再把草稿里的这五项同步成新值。
+///
+/// Apply a one-click preset on top of the last saved settings. Unsaved edits
+/// in the UI never take part: apart from the five knobs every field comes from
+/// `saved`. The frontend then writes the result through the normal `save` path
+/// and syncs those five values into its draft.
+pub fn merge_performance_preset(
+    saved: &ServerSettings,
+    preset: PerformancePreset,
+) -> ServerSettings {
+    let mut merged = saved.clone();
+    preset.apply_to(&mut merged);
+    merged
+}
+
+/// 两张预设：推荐开启的值，和恢复原版精确模式的值。
+///
+/// 两套一起发给前端，避免前端各自写一份 0 / 1。
+///
+/// Both presets: the recommended performance values and the vanilla exact
+/// mode values. Sending them together keeps the frontend from hard-coding
+/// the zeros and ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformancePresets {
+    pub recommended: PerformancePreset,
+    pub exact: PerformancePreset,
+}
+
+/// 当前机器上的一键性能模式推荐值。
+///
+/// `entity_threads` 取本机逻辑核数，并夹在服务端的 `MAX_ENTITY_THREADS` 以内；
+/// 取不到核数时按 1 条算（0 是精确模式，不能当推荐值）。其余几项取第 4 步压测
+/// 里收益最大的档位：挤压上限 8、降频 32 格、休眠 64 格、唤醒倍率 1。
+///
+/// The recommended one-click performance values for this machine. The entity
+/// thread count comes from the logical core count, clamped to the server's
+/// `MAX_ENTITY_THREADS` and never 0 (0 is exact mode). The mob knobs use the
+/// best-measured step-4 tiers: 8 collisions, throttle at 32, sleep at 64 and
+/// wake-up scale 1.
+pub fn performance_presets() -> PerformancePresets {
+    let entity_threads = std::thread::available_parallelism()
+        .map(|count| count.get() as u32)
+        .unwrap_or(1)
+        .clamp(1, MAX_ENTITY_THREADS as u32);
+    PerformancePresets {
+        recommended: PerformancePreset {
+            entity_threads,
+            max_entity_collisions: PRESET_MAX_ENTITY_COLLISIONS,
+            mob_throttle_distance: PRESET_MOB_THROTTLE_DISTANCE,
+            mob_sleep_distance: PRESET_MOB_SLEEP_DISTANCE,
+            mob_wakeups_scale: PRESET_MOB_WAKEUPS_SCALE,
+        },
+        // 恢复原版：四项全部关闭，唤醒倍率回到 Paper 的缺省 1。
+        // Vanilla: all four features off, wake-up scale back to Paper's 1.
+        exact: PerformancePreset {
+            entity_threads: 0,
+            max_entity_collisions: 0,
+            mob_throttle_distance: 0,
+            mob_sleep_distance: 0,
+            mob_wakeups_scale: 1,
+        },
     }
 }
 
@@ -637,6 +790,10 @@ mod tests {
         assert_eq!(defaults.view_distance, 10);
         assert!(defaults.online_mode);
         assert_eq!(defaults.entity_threads, 0);
+        assert_eq!(defaults.max_entity_collisions, 0);
+        assert_eq!(defaults.mob_throttle_distance, 0);
+        assert_eq!(defaults.mob_sleep_distance, 0);
+        assert_eq!(defaults.mob_wakeups_scale, 1);
         assert_eq!(defaults.deliveries_per_tick, 64);
         assert_eq!(defaults.reclaims_per_tick, 64);
         assert_eq!(defaults.port, 25565);
@@ -669,6 +826,10 @@ mod tests {
             forwarding: Forwarding::Modern,
             forwarding_secret: "secret".to_owned(),
             entity_threads: 4,
+            max_entity_collisions: 8,
+            mob_throttle_distance: 32,
+            mob_sleep_distance: 64,
+            mob_wakeups_scale: 2,
             redstone_cache: true,
             chunk_worker_threads: 3,
             worldgen_terrain_cache_mb: 48,
@@ -697,6 +858,10 @@ mod tests {
         assert_eq!(config.forwarding, ForwardingMode::Modern);
         assert_eq!(config.forwarding_secret, "secret");
         assert_eq!(config.entity_threads, 4);
+        assert_eq!(config.max_entity_collisions, 8);
+        assert_eq!(config.mob_throttle_distance, 32);
+        assert_eq!(config.mob_sleep_distance, 64);
+        assert_eq!(config.mob_wakeups_scale, 2);
         assert!(config.redstone_cache);
         assert_eq!(config.chunk_worker_threads, 3);
         assert_eq!(config.worldgen_cache.terrain_mb, 48);
@@ -779,6 +944,10 @@ mod tests {
         settings.port = 25600;
         settings.level_name = "creative".to_owned();
         settings.entity_threads = 2;
+        settings.max_entity_collisions = 8;
+        settings.mob_throttle_distance = 32;
+        settings.mob_sleep_distance = 64;
+        settings.mob_wakeups_scale = 3;
         settings.deliveries_per_tick = 32;
         settings.keep_alive_seconds = 20;
         settings.level_seed = "my seed".to_owned();
@@ -797,6 +966,10 @@ mod tests {
         assert_eq!(loaded.port, 25600);
         assert_eq!(loaded.level_name, "creative");
         assert_eq!(loaded.entity_threads, 2);
+        assert_eq!(loaded.max_entity_collisions, 8);
+        assert_eq!(loaded.mob_throttle_distance, 32);
+        assert_eq!(loaded.mob_sleep_distance, 64);
+        assert_eq!(loaded.mob_wakeups_scale, 3);
         assert_eq!(loaded.deliveries_per_tick, 32);
         assert_eq!(loaded.keep_alive_seconds, 20);
         assert_eq!(loaded.level_seed, "my seed");
@@ -820,6 +993,10 @@ mod tests {
         );
         let bamboo = fs::read_to_string(directory.join(BAMBOO_FILE)).unwrap();
         assert!(bamboo.contains("entity_threads = 2\n"));
+        assert!(bamboo.contains("max_entity_collisions = 8\n"));
+        assert!(bamboo.contains("mob_throttle_distance = 32\n"));
+        assert!(bamboo.contains("mob_sleep_distance = 64\n"));
+        assert!(bamboo.contains("mob_wakeups_scale = 3\n"));
     }
 
     /// 世界生成四项在界面 JSON 里的拼写是固定的 camelCase，读写要能原样往返。
@@ -1042,6 +1219,38 @@ mod tests {
     fn the_performance_knobs_have_upper_bounds() {
         assert!(validate(|settings| settings.entity_threads = 1).is_ok());
         assert!(validate(|settings| settings.entity_threads = u32::MAX).is_err());
+        assert!(validate(|settings| settings.max_entity_collisions = 0).is_ok());
+        assert!(
+            validate(|settings| settings.max_entity_collisions = MAX_ENTITY_COLLISIONS as u32)
+                .is_ok()
+        );
+        assert!(
+            validate(|settings| settings.max_entity_collisions = MAX_ENTITY_COLLISIONS as u32 + 1)
+                .is_err()
+        );
+        assert!(validate(|settings| settings.mob_throttle_distance = -1).is_err());
+        assert!(validate(|settings| settings.mob_throttle_distance = 0).is_ok());
+        assert!(
+            validate(|settings| settings.mob_throttle_distance = MAX_MOB_DISTANCE as i32).is_ok()
+        );
+        assert!(
+            validate(|settings| settings.mob_throttle_distance = MAX_MOB_DISTANCE as i32 + 1)
+                .is_err()
+        );
+        // 休眠档和降频档用同一组边界。
+        assert!(validate(|settings| settings.mob_sleep_distance = -1).is_err());
+        assert!(validate(|settings| settings.mob_sleep_distance = MAX_MOB_DISTANCE as i32).is_ok());
+        assert!(
+            validate(|settings| settings.mob_sleep_distance = MAX_MOB_DISTANCE as i32 + 1).is_err()
+        );
+        assert!(validate(|settings| settings.mob_wakeups_scale = 0).is_ok());
+        assert!(
+            validate(|settings| settings.mob_wakeups_scale = MAX_MOB_WAKEUPS_SCALE as u32).is_ok()
+        );
+        assert!(
+            validate(|settings| settings.mob_wakeups_scale = MAX_MOB_WAKEUPS_SCALE as u32 + 1)
+                .is_err()
+        );
         assert!(validate(|settings| settings.deliveries_per_tick = 0).is_ok());
         assert!(validate(|settings| settings.deliveries_per_tick = u32::MAX).is_err());
         assert!(validate(|settings| settings.reclaims_per_tick = u32::MAX).is_err());
@@ -1050,6 +1259,168 @@ mod tests {
         assert!(validate(|settings| settings.worldgen_feature_cache_mb = u32::MAX).is_err());
         assert!(validate(|settings| settings.worldgen_cache_idle_seconds = 0).is_ok());
         assert!(validate(|settings| settings.worldgen_cache_idle_seconds = u32::MAX).is_err());
+    }
+
+    /// 把一份设置写进临时服务器目录，返回两份文件的原文。
+    ///
+    /// Write a settings draft into a temporary server directory and return both
+    /// files' text.
+    fn write_settings(settings: &ServerSettings) -> (String, String) {
+        let temp = Temp::new();
+        let directory = temp.0.join("server");
+        fs::create_dir_all(&directory).unwrap();
+        write(&directory, &settings.as_files(&ConfigFiles::default())).unwrap();
+        (
+            fs::read_to_string(directory.join(BAMBOO_FILE)).unwrap(),
+            fs::read_to_string(directory.join(PROPERTIES_FILE)).unwrap(),
+        )
+    }
+
+    #[test]
+    fn the_one_click_preset_writes_the_recommended_values() {
+        let presets = performance_presets();
+        let recommended = presets.recommended;
+        // 实体线程数取本机逻辑核数，夹在服务端上限以内，且不能是 0（0 是精确模式）。
+        let cores = std::thread::available_parallelism()
+            .map(|count| count.get() as u32)
+            .unwrap_or(1);
+        assert_eq!(
+            recommended.entity_threads,
+            cores.min(MAX_ENTITY_THREADS as u32)
+        );
+        assert!(recommended.entity_threads >= 1);
+        assert_eq!(recommended.max_entity_collisions, 8);
+        assert_eq!(recommended.mob_throttle_distance, 32);
+        assert_eq!(recommended.mob_sleep_distance, 64);
+        assert_eq!(recommended.mob_wakeups_scale, 1);
+
+        let settings = merge_performance_preset(&ServerSettings::default(), recommended);
+        assert_eq!(settings.validate(), Ok(()));
+        let (bamboo, _) = write_settings(&settings);
+        assert!(
+            bamboo.contains(&format!(
+                "entity_threads = {}\n",
+                recommended.entity_threads
+            )),
+            "{bamboo}"
+        );
+        assert!(bamboo.contains("max_entity_collisions = 8\n"), "{bamboo}");
+        assert!(bamboo.contains("mob_throttle_distance = 32\n"), "{bamboo}");
+        assert!(bamboo.contains("mob_sleep_distance = 64\n"), "{bamboo}");
+        assert!(bamboo.contains("mob_wakeups_scale = 1\n"), "{bamboo}");
+
+        // 读回来要和写进去的一致，界面刷新时看到的就是这些值。
+        let temp = Temp::new();
+        let directory = temp.0.join("server");
+        fs::create_dir_all(&directory).unwrap();
+        write(&directory, &settings.as_files(&ConfigFiles::default())).unwrap();
+        let loaded = ServerSettings::from_files(
+            &read(&directory).unwrap(),
+            &directory.display().to_string(),
+        );
+        assert_eq!(loaded.entity_threads, recommended.entity_threads);
+        assert_eq!(loaded.max_entity_collisions, 8);
+        assert_eq!(loaded.mob_throttle_distance, 32);
+        assert_eq!(loaded.mob_sleep_distance, 64);
+        assert_eq!(loaded.mob_wakeups_scale, 1);
+    }
+
+    #[test]
+    fn the_exact_preset_restores_the_vanilla_values() {
+        let presets = performance_presets();
+        let recommended = merge_performance_preset(&ServerSettings::default(), presets.recommended);
+        let settings = merge_performance_preset(&recommended, presets.exact);
+        assert_eq!(settings.entity_threads, 0);
+        assert_eq!(settings.max_entity_collisions, 0);
+        assert_eq!(settings.mob_throttle_distance, 0);
+        assert_eq!(settings.mob_sleep_distance, 0);
+        assert_eq!(settings.mob_wakeups_scale, 1);
+        assert_eq!(settings.validate(), Ok(()));
+
+        let (bamboo, _) = write_settings(&settings);
+        assert!(bamboo.contains("entity_threads = 0\n"), "{bamboo}");
+        assert!(bamboo.contains("max_entity_collisions = 0\n"), "{bamboo}");
+        assert!(bamboo.contains("mob_throttle_distance = 0\n"), "{bamboo}");
+        assert!(bamboo.contains("mob_sleep_distance = 0\n"), "{bamboo}");
+        assert!(bamboo.contains("mob_wakeups_scale = 1\n"), "{bamboo}");
+    }
+
+    /// 一键预设以磁盘上已保存的设置为基准：界面上其它字段的未保存修改不能跟着写进文件。
+    /// The preset merges on top of the last saved settings, so unsaved edits to
+    /// any other field must never reach the files.
+    #[test]
+    fn the_one_click_preset_does_not_write_unsaved_edits() {
+        let saved = ServerSettings {
+            host: "saved.example".to_owned(),
+            motd: "savedmotd".to_owned(),
+            max_players: 20,
+            view_distance: 12,
+            ..Default::default()
+        };
+        // 界面上还没保存的修改：只有这五项以外的字段不同。
+        let draft = ServerSettings {
+            host: "draft.example".to_owned(),
+            motd: "unsavedmotd".to_owned(),
+            max_players: 99,
+            view_distance: 18,
+            ..saved.clone()
+        };
+        let preset = performance_presets().recommended;
+        let merged = merge_performance_preset(&saved, preset);
+
+        assert_eq!(merged.entity_threads, preset.entity_threads);
+        assert_eq!(merged.max_entity_collisions, preset.max_entity_collisions);
+        assert_eq!(merged.mob_throttle_distance, preset.mob_throttle_distance);
+        assert_eq!(merged.mob_sleep_distance, preset.mob_sleep_distance);
+        assert_eq!(merged.mob_wakeups_scale, preset.mob_wakeups_scale);
+        // 其它字段全部来自已保存的设置，草稿里的值一个都不在结果里。
+        assert_eq!(merged.host, saved.host);
+        assert_eq!(merged.motd, saved.motd);
+        assert_eq!(merged.max_players, saved.max_players);
+        assert_eq!(merged.view_distance, saved.view_distance);
+        assert_ne!(merged.host, draft.host);
+        assert_ne!(merged.motd, draft.motd);
+        assert_ne!(merged.max_players, draft.max_players);
+        assert_ne!(merged.view_distance, draft.view_distance);
+
+        let (bamboo, properties) = write_settings(&merged);
+        assert!(
+            properties.contains("server-ip=saved.example\n"),
+            "{properties}"
+        );
+        assert!(properties.contains("motd=savedmotd\n"), "{properties}");
+        assert!(properties.contains("max-players=20\n"), "{properties}");
+        assert!(properties.contains("view-distance=12\n"), "{properties}");
+        assert!(!properties.contains("draft.example"), "{properties}");
+        assert!(!properties.contains("unsavedmotd"), "{properties}");
+        assert!(!properties.contains("max-players=99"), "{properties}");
+        assert!(!properties.contains("view-distance=18"), "{properties}");
+        assert!(
+            bamboo.contains(&format!("entity_threads = {}\n", preset.entity_threads)),
+            "{bamboo}"
+        );
+        assert!(
+            bamboo.contains(&format!(
+                "max_entity_collisions = {}\n",
+                preset.max_entity_collisions
+            )),
+            "{bamboo}"
+        );
+    }
+
+    /// 两张预设的 JSON 用固定的 camelCase 拼写，前端才能直接套到字段上。
+    /// The two presets keep fixed camelCase JSON names so the frontend can
+    /// spread them straight onto its settings object.
+    #[test]
+    fn the_presets_round_trip_through_the_ui_json() {
+        let presets = performance_presets();
+        let text = serde_json::to_string(&presets).unwrap();
+        assert!(text.contains(r#""maxEntityCollisions":8"#), "{text}");
+        assert!(text.contains(r#""mobThrottleDistance":32"#), "{text}");
+        assert!(text.contains(r#""mobSleepDistance":64"#), "{text}");
+        assert!(text.contains(r#""mobWakeupsScale":1"#), "{text}");
+        let parsed: PerformancePresets = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, presets);
     }
 
     #[test]
