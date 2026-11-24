@@ -2071,6 +2071,11 @@ impl Report {
                                 Some("zombie_baby") => {
                                     mob.set_zombie_baby(!mob.zombie_baby);
                                 }
+                                // 改坏确认：鸡骑士的乘客换成成年，VEHICLE 附着点从
+                                // BABY_DIMENSIONS 的 0.1875 变回 0.7，骑手 y 立刻错。
+                                Some("ride_baby") if index as i32 == case.ride_passenger => {
+                                    mob.set_zombie_baby(!mob.zombie_baby);
+                                }
                                 _ => {}
                             }
                             if case.helmet != 0 {
@@ -2106,7 +2111,9 @@ impl Report {
                         }
                     });
                 }
-                if index as i32 == case.bow_rider {
+                // 改坏确认：不给骷髅骑士装备弓，`reassessWeaponGoal` 会退回近战目标，
+                // 射箭 / SetEquipment 包 / vehicle.lookAt / reach 0 的路径全都不再对拍。
+                if index as i32 == case.bow_rider && !matches!(break_test, Some("ride_bow")) {
                     // 骷髅骑士的 `reassessWeaponGoal` 要主手是弓才会启用射箭目标。
                     world.with_entity_mut(id, &mut |entity| {
                         if let Some(mob) = entity.kind.mob_mut() {

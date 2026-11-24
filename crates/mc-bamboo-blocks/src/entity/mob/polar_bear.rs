@@ -197,7 +197,7 @@ pub(super) fn check_and_perform_attack(
     const ATTACK_INTERVAL: i32 = 20;
     let time_to_attack = *ticks_until_next_attack <= 0;
     if time_to_attack
-        && goals::within_melee_range(me, mob, target)
+        && goals::within_melee_range(me, mob, target, ctx)
         && living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position())
     {
         *ticks_until_next_attack = ATTACK_INTERVAL;
