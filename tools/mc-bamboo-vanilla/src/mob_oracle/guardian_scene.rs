@@ -388,8 +388,10 @@ impl GuardianCase {
 /// 平台末位差单独归类，不算行为差异。
 ///
 /// `GuardianMoveControl.tick` uses `java.lang.Math.sin/cos`; Rust's `f64::sin/cos`
-/// differs by 1-2 ULP (up to 8 bits), which only shows up in the wobble displacement. All other
-/// fields are compared bit for bit.
+/// differs by 1-2 ULP (up to 8 bits), which shows up in the wobble displacement
+/// and in the LookControl `wanted_x/z`. Both get a tolerance (see
+/// [`motion_tolerance`] and [`WANTED_TOLERANCE`]); every other field stays bit
+/// for bit.
 fn guardian_frames_match(
     expected: &GuardianFrame,
     ours: &GuardianFrame,
@@ -617,15 +619,31 @@ fn motion_tolerance(name: &str) -> u64 {
     }
 }
 
-/// `elder_home_*` 的 `wanted_x/z`（LookControl 目标）同样受 sin/cos 末位差
-/// 影响，最大 5 bits / 8.3e-17；其它场景不放宽。
-fn wanted_tolerance(name: &str) -> u64 {
-    if name.starts_with("elder_home_") {
-        8
-    } else {
-        0
-    }
-}
+/// `wanted_x/z`（`LookControl` 的 `wantedX/Z`）不是独立状态：它来自
+/// `GuardianMoveControl.tick` 的 `java.lang.Math.sin/cos`（`(phase*0.5).sin()`、
+/// `radians.cos()/sin()`），经 `me.position`/`delta` → `look_x/look_z` →
+/// `lerp(0.125, ...)` 落到 `mob.look.wanted_x/z`。JIT 把 `Math.sin/cos` 编译成
+/// intrinsic 前后末位会差 1–2 ULP，和 `frog_*` 的 dy 末位差同类、时有时无、
+/// 不挑场景：主代理在 main 全套验证里 `laser_interrupt_*` 从 tick 53 起每个
+/// 48 处差异，`wanted_x` 差约 20 ULP、`motion` 差 1 ULP（已在 motion 容差内）。
+///
+/// 所有 guardian 场景共用同一个 `GuardianMoveControl.tick`，所以统一对
+/// `wanted_x/z` 放 128 ULP（观测 20 的约 6 倍余量，数值差约 2e-13；真实行为
+/// 差异会是完全不同的 f64，位模式差远大于此），而不是只挑出问题的那组场景。
+/// 其它字段（`random_state`、`target`、血量、`y_rot`、`home_target` 等）仍逐位：
+/// `home_target` 是 `BlockPos` 中心的精确半整数，不受 sin/cos 末位差影响。
+///
+/// `wanted_x/z` (LookControl `wantedX/Z`) come from `GuardianMoveControl.tick`'s
+/// `java.lang.Math.sin/cos` via position/delta -> look_x/look_z -> lerp, not from
+/// independent state. JIT-compiling `Math.sin/cos` into intrinsics shifts the
+/// last 1-2 ULP, the same intermittent class as the `frog_*` dy diff: main's
+/// full validation saw ~20 ULP on `wanted_x` in every `laser_interrupt_*` scene
+/// from tick 53 on, with `motion` only 1 ULP (already tolerated). Every guardian
+/// scene shares that one tick function, so apply a uniform 128 ULP tolerance
+/// here; all other fields (random_state, target, health, rotations, home_target)
+/// stay bit for bit. `home_target` is an exact half-integer BlockPos centre and
+/// is not affected by sin/cos last bits.
+const WANTED_TOLERANCE: u64 = 128;
 
 impl Report {
     pub(super) fn replay_guardian(&mut self, case: &GuardianCase) {
@@ -770,7 +788,7 @@ impl Report {
                 &expected.guardian,
                 &ours,
                 motion_tolerance(&case.name),
-                wanted_tolerance(&case.name),
+                WANTED_TOLERANCE,
             ) || expected.player_health != ours_player_health
                 || expected.player_hurt_time != ours_hurt_time
                 || expected.player_damage_cooldown != ours_damage_cooldown
@@ -809,5 +827,105 @@ impl Report {
             case.frames.len(),
             laser_ticks
         );
+    }
+}
+
+#[cfg(test)]
+mod tolerance_tests {
+    use super::*;
+
+    fn zero_frame() -> GuardianFrame {
+        GuardianFrame {
+            motion: [0; 6],
+            y_rot: 0,
+            y_head_rot: 0,
+            y_body_rot: 0,
+            health: 0,
+            air: 0,
+            hurt_time: 0,
+            death_time: 0,
+            removed: 0,
+            target: -1,
+            attack_target: 0,
+            moving: 0,
+            look_cooldown: 0,
+            wanted_x: 0,
+            wanted_z: 0,
+            random_state: 0,
+            no_action_time: 0,
+            home_target: [0; 3],
+        }
+    }
+
+    /// main 上 `laser_interrupt_*` 观测到的 JIT 末位差：`wanted_x/z` 约 20 ULP、
+    /// `motion` 1 ULP。容差要吸收它们，但其它字段（`random_state`、`target`、
+    /// 血量、`y_rot`、`home_target`）和「真实的目标变化」仍必须被抓出来。
+    ///
+    /// The JIT last-bit diff seen on main: ~20 ULP on `wanted_x/z`, 1 ULP on
+    /// `motion`. The tolerance must absorb those while every other field and
+    /// a real look-target change still fail the comparison.
+    #[test]
+    fn wanted_tolerance_absorbs_jit_last_bits_only() {
+        let expected = zero_frame();
+        let motion_tol = motion_tolerance("laser_interrupt_wall");
+
+        // JIT 末位差：motion 1 ULP、wanted 20 ULP → 通过。
+        let mut ours = zero_frame();
+        ours.motion[4] = 1;
+        ours.wanted_x = 20;
+        ours.wanted_z = -20;
+        assert!(guardian_frames_match(
+            &expected,
+            &ours,
+            motion_tol,
+            WANTED_TOLERANCE
+        ));
+
+        // 真实目标变化（完全不同的 f64）→ 仍被抓。
+        ours.wanted_x = 1_000_000_000;
+        assert!(!guardian_frames_match(
+            &expected,
+            &ours,
+            motion_tol,
+            WANTED_TOLERANCE
+        ));
+        // 其它字段照旧逐位：随机源 / 目标 / 血量 / 朝向 / 落点都不能放松。
+        for mut changed in [
+            {
+                let mut f = zero_frame();
+                f.random_state = 1;
+                f
+            },
+            {
+                let mut f = zero_frame();
+                f.target = 7;
+                f
+            },
+            {
+                let mut f = zero_frame();
+                f.health = 1;
+                f
+            },
+            {
+                let mut f = zero_frame();
+                f.y_rot = 1;
+                f
+            },
+            {
+                let mut f = zero_frame();
+                f.home_target = [1, 0, 0];
+                f
+            },
+        ] {
+            changed.motion[4] = 1;
+            changed.wanted_x = 20;
+            changed.wanted_z = -20;
+            assert!(!guardian_frames_match(
+                &expected,
+                &changed,
+                motion_tol,
+                WANTED_TOLERANCE
+            ));
+        }
     }
 }
