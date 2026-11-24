@@ -19,6 +19,7 @@ use mc_bamboo_game::worldgen_cache::{
 };
 use mc_bamboo_game::{
     MAX_ENTITY_COLLISIONS, MAX_ENTITY_THREADS, MAX_MOB_DISTANCE, MAX_MOB_WAKEUPS_SCALE,
+    MAX_PATHFINDING_BUDGET,
 };
 use mc_bamboo_server::{
     CLIENT_READ_TIMEOUT, ForwardingMode, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE, ServerConfig,
@@ -214,6 +215,26 @@ pub struct ServerSettings {
     ///
     /// Wake-up allowance multiplier for sleeping mobs (1 = Paper default).
     pub mob_wakeups_scale: u32,
+    /// 独立寻路阶段（实验）：请求挂起一刻后统一计算，结果下一刻交给生物。
+    /// 打开后生物转向最多晚 1 刻（50 毫秒）。缺省关，和官方逐位一致。
+    ///
+    /// The separate pathfinding phase (experimental). Requests are held for a
+    /// tick, solved together and handed back at the start of the next one, so
+    /// turns lag by up to 50 ms. Off by default for exact vanilla behaviour.
+    pub mob_pathfinding_phase: bool,
+    /// 每个岛每刻最多展开的 A* 节点数；0 = 65536。只在寻路阶段打开时有意义。
+    /// 合法范围 0 到 [`MAX_PATHFINDING_BUDGET`]。
+    ///
+    /// Per-island A* node budget per tick, 0 = 65536. Only used with the
+    /// pathfinding phase; the server accepts 0 to [`MAX_PATHFINDING_BUDGET`].
+    pub mob_pathfinding_budget: u32,
+    /// 寻路失败冷却（实验，Paper 的数值）：同一只生物连续失败超过 10 次后
+    /// 40 刻（2 秒）内不再计算它的请求。只在寻路阶段打开时有意义，缺省关。
+    ///
+    /// Pathfinding failure cooldown (Paper's numbers): after more than 10
+    /// consecutive failures a mob skips path requests for 40 ticks (2 s).
+    /// Only meaningful with the pathfinding phase; off by default.
+    pub mob_pathfinding_fail_cooldown: bool,
     /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。
     pub redstone_cache: bool,
     /// 区块计算池的线程数：0 = 内联（默认），≥ 1 = 常驻后台线程。
@@ -306,6 +327,9 @@ impl ServerSettings {
             mob_throttle_distance: bamboo.mob_throttle_distance,
             mob_sleep_distance: bamboo.mob_sleep_distance,
             mob_wakeups_scale: u32::try_from(bamboo.mob_wakeups_scale).unwrap_or(u32::MAX),
+            mob_pathfinding_phase: bamboo.mob_pathfinding_phase,
+            mob_pathfinding_budget: bamboo.mob_pathfinding_budget,
+            mob_pathfinding_fail_cooldown: bamboo.mob_pathfinding_fail_cooldown,
             redstone_cache: bamboo.redstone_cache,
             chunk_worker_threads: u32::try_from(bamboo.chunk_worker_threads).unwrap_or(u32::MAX),
             worldgen_terrain_cache_mb: u32::try_from(bamboo.worldgen_cache.terrain_mb)
@@ -374,11 +398,9 @@ impl ServerSettings {
             mob_throttle_distance: self.mob_throttle_distance,
             mob_sleep_distance: self.mob_sleep_distance,
             mob_wakeups_scale: self.mob_wakeups_scale as usize,
-            // 寻路阶段三项还没进桌面界面，先按精确模式（关）。
-            // The pathfinding phase knobs are not in the desktop UI yet; keep them off.
-            mob_pathfinding_phase: defaults.mob_pathfinding_phase,
-            mob_pathfinding_budget: defaults.mob_pathfinding_budget,
-            mob_pathfinding_fail_cooldown: defaults.mob_pathfinding_fail_cooldown,
+            mob_pathfinding_phase: self.mob_pathfinding_phase,
+            mob_pathfinding_budget: self.mob_pathfinding_budget,
+            mob_pathfinding_fail_cooldown: self.mob_pathfinding_fail_cooldown,
             redstone_cache: self.redstone_cache,
             chunk_worker_threads: self.chunk_worker_threads as usize,
             worldgen_cache: WorldgenCacheSettings {
@@ -510,6 +532,9 @@ impl ServerSettings {
         if self.mob_wakeups_scale as usize > MAX_MOB_WAKEUPS_SCALE {
             return Err(format!("唤醒倍率不能超过 {MAX_MOB_WAKEUPS_SCALE}"));
         }
+        if self.mob_pathfinding_budget > MAX_PATHFINDING_BUDGET {
+            return Err(format!("寻路节点预算不能超过 {MAX_PATHFINDING_BUDGET}"));
+        }
         if self.deliveries_per_tick as usize > mc_bamboo_game::MAX_MAIL_BUDGET
             || self.reclaims_per_tick as usize > mc_bamboo_game::MAX_MAIL_BUDGET
         {
@@ -537,25 +562,24 @@ impl ServerSettings {
 
 /// 一键性能模式除实体线程数外的固定推荐值，集中成一张表。
 ///
-/// 实体线程数按这台机器算，不在这张表里。寻路阶段的三个开关
-/// （`mob_pathfinding_phase` / `mob_pathfinding_budget` /
-/// `mob_pathfinding_fail_cooldown`）合并进 main 后加在这里。
+/// 实体线程数按这台机器算，不在这张表里。寻路阶段的三项推荐打开阶段和失败
+/// 冷却，节点预算用 0（服务端按 65536 算）。
 ///
 /// The fixed one-click performance values apart from the machine-dependent
-/// entity thread count. The pathfinding switches land here once merged.
+/// entity thread count. The pathfinding recommendations turn on the phase and
+/// the failure cooldown and leave the node budget at 0 (65536 on the server).
 const PRESET_MAX_ENTITY_COLLISIONS: u32 = 8;
 const PRESET_MOB_THROTTLE_DISTANCE: i32 = 32;
 const PRESET_MOB_SLEEP_DISTANCE: i32 = 64;
 const PRESET_MOB_WAKEUPS_SCALE: u32 = 1;
+const PRESET_MOB_PATHFINDING_PHASE: bool = true;
+const PRESET_MOB_PATHFINDING_BUDGET: u32 = 0;
+const PRESET_MOB_PATHFINDING_FAIL_COOLDOWN: bool = true;
 
 /// 一键性能模式写进 `bamboo.toml` 的一组值。
 ///
 /// 集中定义在这里：前端通过 `performance_presets` 命令取，不自己写死数字。
 /// 推荐值和恢复原版精确模式的两套都在 [`performance_presets`] 里给出。
-///
-/// 寻路阶段的三个开关（`mob_pathfinding_phase` / `mob_pathfinding_budget` /
-/// `mob_pathfinding_fail_cooldown`）正在另一个分支做：合并进 main 后，在这个
-/// 结构里各加一项，并同步前端 `PerformancePreset` 的字段。
 ///
 /// One set of values the one-click performance mode writes into `bamboo.toml`.
 /// This is the single definition the UI reads through the
@@ -568,34 +592,40 @@ pub struct PerformancePreset {
     pub mob_throttle_distance: i32,
     pub mob_sleep_distance: i32,
     pub mob_wakeups_scale: u32,
+    pub mob_pathfinding_phase: bool,
+    pub mob_pathfinding_budget: u32,
+    pub mob_pathfinding_fail_cooldown: bool,
 }
 
-/// 一键预设写进设置的一项动作，只碰这五个字段。
+/// 一键预设写进设置的一项动作，只碰这八个字段。
 ///
-/// The single write action of a one-click preset; it touches only the five
+/// The single write action of a one-click preset; it touches only the eight
 /// knobs.
 impl PerformancePreset {
-    /// 只改这五项，其它字段原样保留。
+    /// 只改这八项，其它字段原样保留。
     ///
-    /// Change only the five knobs and leave every other field untouched.
+    /// Change only the eight knobs and leave every other field untouched.
     fn apply_to(self, settings: &mut ServerSettings) {
         settings.entity_threads = self.entity_threads;
         settings.max_entity_collisions = self.max_entity_collisions;
         settings.mob_throttle_distance = self.mob_throttle_distance;
         settings.mob_sleep_distance = self.mob_sleep_distance;
         settings.mob_wakeups_scale = self.mob_wakeups_scale;
+        settings.mob_pathfinding_phase = self.mob_pathfinding_phase;
+        settings.mob_pathfinding_budget = self.mob_pathfinding_budget;
+        settings.mob_pathfinding_fail_cooldown = self.mob_pathfinding_fail_cooldown;
     }
 }
 
 /// 以上次保存的设置为基准套用一键预设。
 ///
-/// 界面上还没保存的修改不参与合并：结果里除了这五项，其它字段全部来自 `saved`。
-/// 前端拿到结果后照常走 `save` 写文件，再把草稿里的这五项同步成新值。
+/// 界面上还没保存的修改不参与合并：结果里除了这八项，其它字段全部来自 `saved`。
+/// 前端拿到结果后照常走 `save` 写文件，再把草稿里的这八项同步成新值。
 ///
 /// Apply a one-click preset on top of the last saved settings. Unsaved edits
-/// in the UI never take part: apart from the five knobs every field comes from
+/// in the UI never take part: apart from the eight knobs every field comes from
 /// `saved`. The frontend then writes the result through the normal `save` path
-/// and syncs those five values into its draft.
+/// and syncs those eight values into its draft.
 pub fn merge_performance_preset(
     saved: &ServerSettings,
     preset: PerformancePreset,
@@ -623,13 +653,15 @@ pub struct PerformancePresets {
 ///
 /// `entity_threads` 取本机逻辑核数，并夹在服务端的 `MAX_ENTITY_THREADS` 以内；
 /// 取不到核数时按 1 条算（0 是精确模式，不能当推荐值）。其余几项取第 4 步压测
-/// 里收益最大的档位：挤压上限 8、降频 32 格、休眠 64 格、唤醒倍率 1。
+/// 里收益最大的档位：挤压上限 8、降频 32 格、休眠 64 格、唤醒倍率 1，并打开
+/// 独立寻路阶段和失败冷却（节点预算 0 = 65536）。
 ///
 /// The recommended one-click performance values for this machine. The entity
 /// thread count comes from the logical core count, clamped to the server's
 /// `MAX_ENTITY_THREADS` and never 0 (0 is exact mode). The mob knobs use the
 /// best-measured step-4 tiers: 8 collisions, throttle at 32, sleep at 64 and
-/// wake-up scale 1.
+/// wake-up scale 1, plus the pathfinding phase and failure cooldown on (budget
+/// 0 = 65536).
 pub fn performance_presets() -> PerformancePresets {
     let entity_threads = std::thread::available_parallelism()
         .map(|count| count.get() as u32)
@@ -642,15 +674,21 @@ pub fn performance_presets() -> PerformancePresets {
             mob_throttle_distance: PRESET_MOB_THROTTLE_DISTANCE,
             mob_sleep_distance: PRESET_MOB_SLEEP_DISTANCE,
             mob_wakeups_scale: PRESET_MOB_WAKEUPS_SCALE,
+            mob_pathfinding_phase: PRESET_MOB_PATHFINDING_PHASE,
+            mob_pathfinding_budget: PRESET_MOB_PATHFINDING_BUDGET,
+            mob_pathfinding_fail_cooldown: PRESET_MOB_PATHFINDING_FAIL_COOLDOWN,
         },
-        // 恢复原版：四项全部关闭，唤醒倍率回到 Paper 的缺省 1。
-        // Vanilla: all four features off, wake-up scale back to Paper's 1.
+        // 恢复原版：各项全部关闭，唤醒倍率回到 Paper 的缺省 1。
+        // Vanilla: every feature off, wake-up scale back to Paper's 1.
         exact: PerformancePreset {
             entity_threads: 0,
             max_entity_collisions: 0,
             mob_throttle_distance: 0,
             mob_sleep_distance: 0,
             mob_wakeups_scale: 1,
+            mob_pathfinding_phase: false,
+            mob_pathfinding_budget: 0,
+            mob_pathfinding_fail_cooldown: false,
         },
     }
 }
@@ -799,6 +837,9 @@ mod tests {
         assert_eq!(defaults.mob_throttle_distance, 0);
         assert_eq!(defaults.mob_sleep_distance, 0);
         assert_eq!(defaults.mob_wakeups_scale, 1);
+        assert!(!defaults.mob_pathfinding_phase);
+        assert_eq!(defaults.mob_pathfinding_budget, 0);
+        assert!(!defaults.mob_pathfinding_fail_cooldown);
         assert_eq!(defaults.deliveries_per_tick, 64);
         assert_eq!(defaults.reclaims_per_tick, 64);
         assert_eq!(defaults.port, 25565);
@@ -835,6 +876,9 @@ mod tests {
             mob_throttle_distance: 32,
             mob_sleep_distance: 64,
             mob_wakeups_scale: 2,
+            mob_pathfinding_phase: true,
+            mob_pathfinding_budget: 8192,
+            mob_pathfinding_fail_cooldown: true,
             redstone_cache: true,
             chunk_worker_threads: 3,
             worldgen_terrain_cache_mb: 48,
@@ -867,6 +911,9 @@ mod tests {
         assert_eq!(config.mob_throttle_distance, 32);
         assert_eq!(config.mob_sleep_distance, 64);
         assert_eq!(config.mob_wakeups_scale, 2);
+        assert!(config.mob_pathfinding_phase);
+        assert_eq!(config.mob_pathfinding_budget, 8192);
+        assert!(config.mob_pathfinding_fail_cooldown);
         assert!(config.redstone_cache);
         assert_eq!(config.chunk_worker_threads, 3);
         assert_eq!(config.worldgen_cache.terrain_mb, 48);
@@ -953,6 +1000,9 @@ mod tests {
         settings.mob_throttle_distance = 32;
         settings.mob_sleep_distance = 64;
         settings.mob_wakeups_scale = 3;
+        settings.mob_pathfinding_phase = true;
+        settings.mob_pathfinding_budget = 8192;
+        settings.mob_pathfinding_fail_cooldown = true;
         settings.deliveries_per_tick = 32;
         settings.keep_alive_seconds = 20;
         settings.level_seed = "my seed".to_owned();
@@ -975,6 +1025,9 @@ mod tests {
         assert_eq!(loaded.mob_throttle_distance, 32);
         assert_eq!(loaded.mob_sleep_distance, 64);
         assert_eq!(loaded.mob_wakeups_scale, 3);
+        assert!(loaded.mob_pathfinding_phase);
+        assert_eq!(loaded.mob_pathfinding_budget, 8192);
+        assert!(loaded.mob_pathfinding_fail_cooldown);
         assert_eq!(loaded.deliveries_per_tick, 32);
         assert_eq!(loaded.keep_alive_seconds, 20);
         assert_eq!(loaded.level_seed, "my seed");
@@ -1002,6 +1055,9 @@ mod tests {
         assert!(bamboo.contains("mob_throttle_distance = 32\n"));
         assert!(bamboo.contains("mob_sleep_distance = 64\n"));
         assert!(bamboo.contains("mob_wakeups_scale = 3\n"));
+        assert!(bamboo.contains("mob_pathfinding_phase = true\n"));
+        assert!(bamboo.contains("mob_pathfinding_budget = 8192\n"));
+        assert!(bamboo.contains("mob_pathfinding_fail_cooldown = true\n"));
     }
 
     /// 世界生成四项在界面 JSON 里的拼写是固定的 camelCase，读写要能原样往返。
@@ -1256,6 +1312,14 @@ mod tests {
             validate(|settings| settings.mob_wakeups_scale = MAX_MOB_WAKEUPS_SCALE as u32 + 1)
                 .is_err()
         );
+        assert!(validate(|settings| settings.mob_pathfinding_budget = 0).is_ok());
+        assert!(
+            validate(|settings| settings.mob_pathfinding_budget = MAX_PATHFINDING_BUDGET).is_ok()
+        );
+        assert!(
+            validate(|settings| settings.mob_pathfinding_budget = MAX_PATHFINDING_BUDGET + 1)
+                .is_err()
+        );
         assert!(validate(|settings| settings.deliveries_per_tick = 0).is_ok());
         assert!(validate(|settings| settings.deliveries_per_tick = u32::MAX).is_err());
         assert!(validate(|settings| settings.reclaims_per_tick = u32::MAX).is_err());
@@ -1298,6 +1362,9 @@ mod tests {
         assert_eq!(recommended.mob_throttle_distance, 32);
         assert_eq!(recommended.mob_sleep_distance, 64);
         assert_eq!(recommended.mob_wakeups_scale, 1);
+        assert!(recommended.mob_pathfinding_phase);
+        assert_eq!(recommended.mob_pathfinding_budget, 0);
+        assert!(recommended.mob_pathfinding_fail_cooldown);
 
         let settings = merge_performance_preset(&ServerSettings::default(), recommended);
         assert_eq!(settings.validate(), Ok(()));
@@ -1313,6 +1380,15 @@ mod tests {
         assert!(bamboo.contains("mob_throttle_distance = 32\n"), "{bamboo}");
         assert!(bamboo.contains("mob_sleep_distance = 64\n"), "{bamboo}");
         assert!(bamboo.contains("mob_wakeups_scale = 1\n"), "{bamboo}");
+        assert!(
+            bamboo.contains("mob_pathfinding_phase = true\n"),
+            "{bamboo}"
+        );
+        assert!(bamboo.contains("mob_pathfinding_budget = 0\n"), "{bamboo}");
+        assert!(
+            bamboo.contains("mob_pathfinding_fail_cooldown = true\n"),
+            "{bamboo}"
+        );
 
         // 读回来要和写进去的一致，界面刷新时看到的就是这些值。
         let temp = Temp::new();
@@ -1328,6 +1404,9 @@ mod tests {
         assert_eq!(loaded.mob_throttle_distance, 32);
         assert_eq!(loaded.mob_sleep_distance, 64);
         assert_eq!(loaded.mob_wakeups_scale, 1);
+        assert!(loaded.mob_pathfinding_phase);
+        assert_eq!(loaded.mob_pathfinding_budget, 0);
+        assert!(loaded.mob_pathfinding_fail_cooldown);
     }
 
     #[test]
@@ -1340,6 +1419,9 @@ mod tests {
         assert_eq!(settings.mob_throttle_distance, 0);
         assert_eq!(settings.mob_sleep_distance, 0);
         assert_eq!(settings.mob_wakeups_scale, 1);
+        assert!(!settings.mob_pathfinding_phase);
+        assert_eq!(settings.mob_pathfinding_budget, 0);
+        assert!(!settings.mob_pathfinding_fail_cooldown);
         assert_eq!(settings.validate(), Ok(()));
 
         let (bamboo, _) = write_settings(&settings);
@@ -1348,6 +1430,15 @@ mod tests {
         assert!(bamboo.contains("mob_throttle_distance = 0\n"), "{bamboo}");
         assert!(bamboo.contains("mob_sleep_distance = 0\n"), "{bamboo}");
         assert!(bamboo.contains("mob_wakeups_scale = 1\n"), "{bamboo}");
+        assert!(
+            bamboo.contains("mob_pathfinding_phase = false\n"),
+            "{bamboo}"
+        );
+        assert!(bamboo.contains("mob_pathfinding_budget = 0\n"), "{bamboo}");
+        assert!(
+            bamboo.contains("mob_pathfinding_fail_cooldown = false\n"),
+            "{bamboo}"
+        );
     }
 
     /// 一键预设以磁盘上已保存的设置为基准：界面上其它字段的未保存修改不能跟着写进文件。
@@ -1362,15 +1453,19 @@ mod tests {
             view_distance: 12,
             ..Default::default()
         };
-        // 界面上还没保存的修改：只有这五项以外的字段不同。
+        let preset = performance_presets().recommended;
+        // 界面上还没保存的修改：只有这八项以外的字段不同；预设里的寻路三项
+        // 也先按相反的值改过，确认结果以预设为准。
         let draft = ServerSettings {
             host: "draft.example".to_owned(),
             motd: "unsavedmotd".to_owned(),
             max_players: 99,
             view_distance: 18,
+            mob_pathfinding_phase: !preset.mob_pathfinding_phase,
+            mob_pathfinding_budget: 4096,
+            mob_pathfinding_fail_cooldown: !preset.mob_pathfinding_fail_cooldown,
             ..saved.clone()
         };
-        let preset = performance_presets().recommended;
         let merged = merge_performance_preset(&saved, preset);
 
         assert_eq!(merged.entity_threads, preset.entity_threads);
@@ -1378,6 +1473,18 @@ mod tests {
         assert_eq!(merged.mob_throttle_distance, preset.mob_throttle_distance);
         assert_eq!(merged.mob_sleep_distance, preset.mob_sleep_distance);
         assert_eq!(merged.mob_wakeups_scale, preset.mob_wakeups_scale);
+        assert_eq!(merged.mob_pathfinding_phase, preset.mob_pathfinding_phase);
+        assert_eq!(merged.mob_pathfinding_budget, preset.mob_pathfinding_budget);
+        assert_eq!(
+            merged.mob_pathfinding_fail_cooldown,
+            preset.mob_pathfinding_fail_cooldown
+        );
+        assert_ne!(merged.mob_pathfinding_phase, draft.mob_pathfinding_phase);
+        assert_ne!(merged.mob_pathfinding_budget, draft.mob_pathfinding_budget);
+        assert_ne!(
+            merged.mob_pathfinding_fail_cooldown,
+            draft.mob_pathfinding_fail_cooldown
+        );
         // 其它字段全部来自已保存的设置，草稿里的值一个都不在结果里。
         assert_eq!(merged.host, saved.host);
         assert_eq!(merged.motd, saved.motd);
@@ -1411,6 +1518,32 @@ mod tests {
             )),
             "{bamboo}"
         );
+        assert!(
+            bamboo.contains(&format!(
+                "mob_pathfinding_phase = {}\n",
+                preset.mob_pathfinding_phase
+            )),
+            "{bamboo}"
+        );
+        assert!(
+            bamboo.contains(&format!(
+                "mob_pathfinding_budget = {}\n",
+                preset.mob_pathfinding_budget
+            )),
+            "{bamboo}"
+        );
+        assert!(
+            bamboo.contains(&format!(
+                "mob_pathfinding_fail_cooldown = {}\n",
+                preset.mob_pathfinding_fail_cooldown
+            )),
+            "{bamboo}"
+        );
+        // 草稿里把节点预算改成 4096 也不能写进文件。
+        assert!(
+            !bamboo.contains("mob_pathfinding_budget = 4096"),
+            "{bamboo}"
+        );
     }
 
     /// 两张预设的 JSON 用固定的 camelCase 拼写，前端才能直接套到字段上。
@@ -1424,6 +1557,12 @@ mod tests {
         assert!(text.contains(r#""mobThrottleDistance":32"#), "{text}");
         assert!(text.contains(r#""mobSleepDistance":64"#), "{text}");
         assert!(text.contains(r#""mobWakeupsScale":1"#), "{text}");
+        assert!(text.contains(r#""mobPathfindingPhase":true"#), "{text}");
+        assert!(text.contains(r#""mobPathfindingBudget":0"#), "{text}");
+        assert!(
+            text.contains(r#""mobPathfindingFailCooldown":true"#),
+            "{text}"
+        );
         let parsed: PerformancePresets = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed, presets);
     }
@@ -1484,6 +1623,9 @@ mod tests {
         assert!(parsed.online_mode);
         assert!(!parsed.prevent_proxy_connections);
         assert_eq!(parsed.entity_threads, 0);
+        assert!(!parsed.mob_pathfinding_phase);
+        assert_eq!(parsed.mob_pathfinding_budget, 0);
+        assert!(!parsed.mob_pathfinding_fail_cooldown);
         assert_eq!(parsed.deliveries_per_tick, 64);
         // 世界生成四项也要保持官方默认，不能让旧草稿把新世界变成超平坦。
         // The four world-gen fields keep their official defaults too, so an old

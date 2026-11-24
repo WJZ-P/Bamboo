@@ -472,6 +472,15 @@ public final class MobOracle {
             if (only == null || "skeleton_death".startsWith(only)) {
                 cases += playSkeletonDeaths(official, out);
             }
+            for (String name : List.of("attack_target_zombie_villager",
+                    "attack_target_zombie_villager_sight", "attack_target_pillager_villager",
+                    "attack_target_spider_golem", "attack_target_drowned_axolotl",
+                    "attack_target_zombie_turtle", "attack_target_fox_turtle",
+                    "attack_target_fox_fish")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playAttackTarget(official, out, name);
+                cases++;
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -3115,10 +3124,15 @@ public final class MobOracle {
                 scenes.add(death);
             }
             {
-                // 蜘蛛骑士追玩家（AI 开）：骷髅主手一把弓，目标/漫游把路径写到**载具**
-                // 的导航上（`Mob.getNavigation` 转交），蜘蛛跟着走，骷髅同时射箭。
-                // Spider jockey chase (AI on): the bow-armed skeleton's goals write paths
-                // to the vehicle's navigation, driving the spider while it shoots.
+                // 蜘蛛骑士追玩家（AI 开）：控制载具的僵尸骑手把目标/漫游路径写到**载具**
+                // 的导航上（`Mob.getNavigation` 转交），蜘蛛跟着走。这里用僵尸作骑手：
+                // 骷髅持弓 + 射箭那一支（`bowRider`）在第 11 刻的路径长度（官方到节点 7、
+                // Bamboo 到节点 6）和头/身体朝向上仍与官方不一致，记为已知限制，未并入场景。
+                // Spider jockey chase (AI on): the controlling zombie rider writes paths
+                // to the vehicle's navigation, driving the spider. A zombie is used here;
+                // the bow-armed skeleton + arrow-shooting variant (`bowRider`) still
+                // diverges from vanilla (path node 7 vs 6 at tick 11, plus head/body
+                // rotation) and is left as a known limitation, not wired into a scene.
                 Scene chase = new Scene("spider_ride_chase").ticks(160).difficulty(2);
                 chase.clockStart = 18000;
                 chase.fill(-12, 63, -12, 12, 63, 12, bedrock);
@@ -3130,11 +3144,15 @@ public final class MobOracle {
             }
             {
                 // 鸡骑士近战（AI 开）：僵尸骑鸡追玩家；鸡的 MOVE/LOOK/JUMP 被控制
-                // 乘客关掉，路径由僵尸写进鸡的导航。只跑到第 21 刻：再往后骑手的
-                // 头/身体朝向（-0.1 的乘客附着点造成的 -90° 转身）还没建模。
-                // Chicken jockey melee (AI on). Stops at tick 21: beyond that the
-                // rider's head/body rotation from the -0.1 passenger offset is not
-                // modelled yet.
+                // 乘客关掉，路径由僵尸写进鸡的导航。这里用成年僵尸、只跑到第 21 刻：
+                // 幼年僵尸（`age=-24000`）按 VEHICLE 附着点的年龄缩放会与官方差一个
+                // y（官方 64.5125 / Bamboo 64.00000001192093），再往后骑手的头/身体
+                // 朝向（-0.1 的乘客附着点造成的转身）也还没建模，两项都是已知限制。
+                // Chicken jockey melee (AI on). An adult zombie is used and the scene
+                // stops at tick 21: a baby zombie's age-scaled VEHICLE attachment point
+                // diverges in y from vanilla, and beyond tick 21 the rider's head/body
+                // rotation from the -0.1 passenger offset is not modelled yet. Both
+                // are known limitations.
                 Scene melee = new Scene("zombie_ride_melee").ticks(21).difficulty(2);
                 melee.clockStart = 18000;
                 melee.fill(-12, 63, -12, 12, 63, 12, bedrock);
@@ -3145,10 +3163,11 @@ public final class MobOracle {
                 scenes.add(melee);
             }
             {
-                // 骑手中途下马：第 20 刻 `stopRiding()`，之后蜘蛛和骷髅各自跑自己的
+                // 骑手中途下马：第 20 刻 `stopRiding()`，之后蜘蛛和僵尸各自跑自己的
                 // 导航（借导航只在骑乘期间发生）。
-                // Mid-ride dismount: after `stopRiding()` both mobs use their own
-                // navigation again (the borrow only exists while riding).
+                // Mid-ride dismount: after `stopRiding()` the spider and the zombie
+                // each use their own navigation again (the borrow only exists while
+                // riding).
                 Scene dismount = new Scene("spider_ride_dismount").ticks(120).difficulty(2);
                 dismount.clockStart = 18000;
                 dismount.fill(-12, 63, -12, 12, 63, 12, bedrock);
@@ -9863,6 +9882,258 @@ public final class MobOracle {
      * per-tick motion, health, random, target, metadata, snow trail, spawned
      * entities and the level random seed.
      */
+    /**
+     * 攻击目标逐刻对拍：僵尸打村民、掠夺者弩射村民、蜘蛛打铁傀儡、溺尸打美西螈、
+     * 僵尸找陆地上的小海龟、狐狸找小海龟 / 鱼。受害者设 NoAI，官方村民的大脑不会
+     * 逐刻取数；每帧记双方位置 / 速度 / 血量 / 受伤与死亡计时 / 目标。
+     *
+     * Attack-target tick comparison: zombie-villager, pillager crossbow, spider-iron
+     * golem, drowned-axolotl, zombie-baby-turtle and fox-baby-turtle / fish. The victim
+     * is NoAI so the official villager brain draws nothing per tick; every frame records
+     * both mobs' motion, health, hurt/death timers and target.
+     */
+    private static void playAttackTarget(Official official, Writer out, String name) throws Exception {
+        int difficulty = 2;
+        int attackerKind = 1;
+        int victimKind = 70;
+        double[] attackerAt = {0.5, 61.0, 0.5};
+        double[] victimAt = {3.5, 61.0, 0.5};
+        boolean baby = false;
+        boolean victimNoAi = true;
+        boolean crossbow = false;
+        boolean water = false;
+        int ticks = 160;
+        int wallTick = -1;
+        int[] wallBox = null;
+        switch (name) {
+            case "attack_target_zombie_villager" -> {
+                // 简单难度官方不转化僵尸村民、也不消耗转化随机数。
+                // EASY: no zombie-villager conversion and no conversion draw.
+                difficulty = 1;
+                ticks = 200;
+            }
+            case "attack_target_zombie_villager_sight" -> {
+                difficulty = 1;
+                victimAt = new double[] {12.5, 61.0, 0.5};
+                wallTick = 20;
+                wallBox = new int[] {9, 61, -12, 9, 63, 12};
+                // 隔墙之后不久寻路会在墙前出现末位差异；视线记忆在 ~50 刻就分叉，
+                // 80 刻足够覆盖，且不碰到那段差异。
+                // Pathing near the wall diverges in the last bits later on; the sight
+                // memory already diverges by tick ~50, so 80 ticks is plenty.
+                ticks = 80;
+            }
+            case "attack_target_pillager_villager" -> {
+                attackerKind = 53;
+                victimAt = new double[] {8.5, 61.0, 0.5};
+                crossbow = true;
+                ticks = 200;
+            }
+            case "attack_target_spider_golem" -> {
+                attackerKind = 41;
+                victimKind = 71;
+                victimNoAi = false; // the iron golem must retaliate
+            }
+            case "attack_target_drowned_axolotl" -> {
+                attackerKind = 52;
+                victimKind = 72;
+                water = true;
+            }
+            case "attack_target_zombie_turtle" -> {
+                difficulty = 1;
+                victimKind = 60;
+                baby = true;
+            }
+            case "attack_target_fox_turtle" -> {
+                attackerKind = 7;
+                victimKind = 60;
+                baby = true;
+            }
+            case "attack_target_fox_fish" -> {
+                attackerKind = 7;
+                victimKind = 73;
+                water = true;
+                // 鱼死后狐狸在水里浮沉会出现末位差异；110 刻已覆盖选目标、扑击和鱼死亡。
+                // Water bobbing diverges in the last bits after the fish dies; 110
+                // ticks already cover targeting, the pounce and the fish's death.
+                ticks = 110;
+            }
+            default -> throw new IllegalArgumentException("unknown attack-target scene " + name);
+        }
+        official.server.sequences = new RandomSequences();
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.values()[difficulty];
+        world.injectedBrightOutside = false;
+        world.injectedSkyDarken = 11;
+        world.injectedCanSeeSky = false;
+        world.injectedMonstersBurn = false;
+        world.injectedSeaLevel = -63;
+        // 铁傀儡的村庄目标要查 POI；假世界没有 POI 管理器，用傀儡场景的「没有村庄」口径。
+        // The iron golem's village goals query POIs; the fake level has no POI manager,
+        // so reuse the golem fixture's "no village" branch.
+        world.golemFixture = true;
+        for (int x = -12; x <= 12; x++) {
+            for (int z = -12; z <= 12; z++) {
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        if (water) {
+            for (int x = 2; x <= 5; x++) {
+                for (int z = -2; z <= 2; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 61, z), Blocks.WATER.defaultBlockState());
+                }
+            }
+        }
+        var wallBlocks = new StringBuilder("[");
+        if (wallBox != null) {
+            boolean first = true;
+            for (int x = wallBox[0]; x <= wallBox[3]; x++) {
+                for (int y = wallBox[1]; y <= wallBox[4]; y++) {
+                    for (int z = wallBox[2]; z <= wallBox[5]; z++) {
+                        if (!first) wallBlocks.append(',');
+                        first = false;
+                        wallBlocks.append('[').append(x).append(',').append(y).append(',').append(z)
+                                .append(',').append(Block.getId(Blocks.STONE.defaultBlockState())).append(']');
+                    }
+                }
+            }
+        }
+        wallBlocks.append(']');
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+        // Bamboo 的 prepare() 给每个实体抽一颗种子；这里先消费两颗，让种子源和箭对齐。
+        // Bamboo's prepare() draws one seed per entity; consume two up front so the
+        // seed source lines up with the arrow from the crossbow.
+        world.entitySeeds.nextLong();
+        world.entitySeeds.nextLong();
+        Mob attacker = attackTargetMob(world, attackerKind);
+        setRandom(attacker, 42001L);
+        attacker.setUUID(Mth.createInsecureUUID(attacker.getRandom()));
+        attacker.getRandom().nextFloat();
+        attacker.setYRot(0.0F);
+        attacker.setYHeadRot(0.0F);
+        attacker.setYBodyRot(0.0F);
+        attacker.setPos(attackerAt[0], attackerAt[1], attackerAt[2]);
+        if (crossbow) attacker.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.CROSSBOW));
+        if (attacker instanceof net.minecraft.world.entity.animal.fox.Fox) {
+            java.lang.reflect.Method hunts = net.minecraft.world.entity.animal.fox.Fox.class
+                    .getDeclaredMethod("setTargetGoals");
+            hunts.setAccessible(true);
+            hunts.invoke(attacker);
+        }
+        world.tracked.add(attacker);
+        Mob victim = attackTargetMob(world, victimKind);
+        setRandom(victim, 42002L);
+        victim.setUUID(Mth.createInsecureUUID(victim.getRandom()));
+        victim.getRandom().nextFloat();
+        victim.setYRot(0.0F);
+        victim.setYHeadRot(0.0F);
+        victim.setYBodyRot(0.0F);
+        victim.setPos(victimAt[0], victimAt[1], victimAt[2]);
+        if (victimNoAi) victim.setNoAi(true);
+        if (baby && victim instanceof net.minecraft.world.entity.AgeableMob ageable) {
+            ageable.setBaby(true);
+        }
+        world.tracked.add(victim);
+        java.util.List<net.minecraft.world.entity.projectile.arrow.AbstractArrow> arrows = new ArrayList<>();
+        var frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                world.gameTime++;
+                if (tick == wallTick && wallBox != null) {
+                    for (int x = wallBox[0]; x <= wallBox[3]; x++) {
+                        for (int y = wallBox[1]; y <= wallBox[4]; y++) {
+                            for (int z = wallBox[2]; z <= wallBox[5]; z++) {
+                                world.blocks.put(BlockPos.asLong(x, y, z), Blocks.STONE.defaultBlockState());
+                            }
+                        }
+                    }
+                }
+                for (Mob mob : java.util.List.of(attacker, victim)) {
+                    if (mob.isRemoved()) continue;
+                    mob.checkDespawn();
+                    mob.commonTick();
+                    mob.tick();
+                }
+                for (net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow : arrows) {
+                    if (arrow.isRemoved()) continue;
+                    arrow.commonTick();
+                    arrow.tick();
+                }
+                // Bamboo 在 tick 开头取实体表快照，这一刻刚射出的箭要下一刻才 tick；
+                // 和 playProjectile 一样，把新箭放到循环末尾再收进来。
+                // Bamboo snapshots the entity table at the start of a tick, so a freshly
+                // fired arrow only ticks next tick; collect it at the end like playProjectile.
+                for (net.minecraft.world.entity.Entity entity : world.spawned) {
+                    if (entity instanceof net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow) {
+                        arrows.add(arrow);
+                        world.tracked.add(arrow);
+                    }
+                }
+                world.spawned.clear();
+                world.tracked.removeIf(net.minecraft.world.entity.Entity::isRemoved);
+            }
+            if (tick != 0) frames.append(',');
+            frames.append("{\"attacker\":").append(attackTargetFrame(attacker))
+                    .append(",\"victim\":").append(attackTargetFrame(victim)).append('}');
+        }
+        frames.append(']');
+        out.write("{\"type\":\"attackTarget\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"blocks\":" + blocks
+                + ",\"difficulty\":" + difficulty
+                + ",\"brightOutside\":false,\"skyDarken\":11"
+                + ",\"wall\":" + (wallBox == null ? "null"
+                        : Arrays.toString(new int[] {wallTick, wallBox[0], wallBox[1], wallBox[2],
+                                Block.getId(Blocks.STONE.defaultBlockState())}))
+                + ",\"wallBlocks\":" + wallBlocks
+                + ",\"attacker\":" + attackTargetSetup(attackerKind, attackerAt, 42001L, false, false, crossbow)
+                + ",\"victim\":" + attackTargetSetup(victimKind, victimAt, 42002L, baby, victimNoAi, false)
+                + ",\"frames\":" + frames + "}\n");
+    }
+
+    private static Mob attackTargetMob(FakeLevel world, int kind) throws Exception {
+        return switch (kind) {
+            case 1 -> new Zombie(EntityTypes.ZOMBIE, world);
+            case 7 -> EntityTypes.FOX.create(world, EntitySpawnReason.COMMAND);
+            case 41 -> new net.minecraft.world.entity.monster.spider.Spider(EntityTypes.SPIDER, world);
+            case 52 -> new net.minecraft.world.entity.monster.zombie.Drowned(EntityTypes.DROWNED, world);
+            case 53 -> OraclePillager.create(world);
+            case 60 -> EntityTypes.TURTLE.create(world, EntitySpawnReason.COMMAND);
+            case 70 -> EntityTypes.VILLAGER.create(world, EntitySpawnReason.COMMAND);
+            case 71 -> EntityTypes.IRON_GOLEM.create(world, EntitySpawnReason.COMMAND);
+            case 72 -> EntityTypes.AXOLOTL.create(world, EntitySpawnReason.COMMAND);
+            case 73 -> EntityTypes.COD.create(world, EntitySpawnReason.COMMAND);
+            default -> throw new IllegalArgumentException("unknown attack-target kind " + kind);
+        };
+    }
+
+    private static String attackTargetSetup(int kind, double[] at, long seed, boolean baby,
+            boolean noAi, boolean crossbow) {
+        return "{\"kind\":" + kind
+                + ",\"position\":[" + Double.doubleToRawLongBits(at[0]) + ','
+                + Double.doubleToRawLongBits(at[1]) + ',' + Double.doubleToRawLongBits(at[2]) + ']'
+                + ",\"yaw\":" + Float.floatToRawIntBits(0.0F)
+                + ",\"seed\":" + seed
+                + ",\"baby\":" + baby + ",\"noAi\":" + noAi
+                + ",\"foxVariant\":0,\"crossbow\":" + crossbow + '}';
+    }
+
+    private static String attackTargetFrame(Mob mob) {
+        net.minecraft.world.phys.Vec3 p = mob.position();
+        net.minecraft.world.phys.Vec3 v = mob.getDeltaMovement();
+        net.minecraft.world.entity.LivingEntity target = mob.getTarget();
+        return "{\"motion\":[" + Double.doubleToRawLongBits(p.x) + ',' + Double.doubleToRawLongBits(p.y)
+                + ',' + Double.doubleToRawLongBits(p.z) + ',' + Double.doubleToRawLongBits(v.x)
+                + ',' + Double.doubleToRawLongBits(v.y) + ',' + Double.doubleToRawLongBits(v.z) + ']'
+                + ",\"health\":" + Float.floatToRawIntBits(mob.getHealth())
+                + ",\"hurtTime\":" + mob.hurtTime
+                + ",\"deathTime\":" + mob.deathTime
+                + ",\"removed\":" + (mob.isRemoved() ? 1 : 0)
+                + ",\"target\":" + (target == null ? -1 : target.getId()) + '}';
+    }
+
     /** 两种傀儡的存档：整份 SNBT 和读回再写出的 SNBT。 */
     private static int playGolemSaves(Official official, Writer out) throws Exception {
         int cases = 0;

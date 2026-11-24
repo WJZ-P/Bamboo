@@ -27,7 +27,11 @@ pub enum WolfTarget {
     AngryPlayer,
     /// `(5) NonTameRandomTargetGoal(Animal, false, PREY_SELECTOR)`：羊、兔子、狐狸。
     Prey,
-    /// `(6) NonTameRandomTargetGoal(Turtle, false, BABY_ON_LAND_SELECTOR)`：海龟还没有。
+    /// `(6) NonTameRandomTargetGoal(Turtle, false, BABY_ON_LAND_SELECTOR)`：海龟已建模，
+    /// 但这条野狼目标还没接（`find_target` 仍返回 `None`）。
+    ///
+    /// `(6) NonTameRandomTargetGoal(Turtle, false, BABY_ON_LAND_SELECTOR)`: turtles are
+    /// modelled now, but this wild-wolf goal is still unwired (`find_target` returns `None`).
     BabyTurtle,
     /// `(7) NearestAttackableTargetGoal(AbstractSkeleton, false)`。
     Skeleton,

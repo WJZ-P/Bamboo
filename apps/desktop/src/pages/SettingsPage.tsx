@@ -119,13 +119,16 @@ const DifferenceList = styled.ul`
   line-height: 1.7;
 `;
 
-/** 一键预设会改的五个字段；保存成功后只同步这几项到草稿。 */
+/** 一键预设会改的八个字段；保存成功后只同步这几项到草稿。 */
 const PRESET_KEYS = [
   "entityThreads",
   "maxEntityCollisions",
   "mobThrottleDistance",
   "mobSleepDistance",
   "mobWakeupsScale",
+  "mobPathfindingPhase",
+  "mobPathfindingBudget",
+  "mobPathfindingFailCooldown",
 ] as const satisfies readonly (keyof ServerSettings)[];
 
 /** 输入框里显示的数字。NaN 表示正在编辑或者填了非数字，显示成空。 */
@@ -189,7 +192,7 @@ export function SettingsPage() {
   };
 
   /**
-   * 以上次保存的设置为基准套用预设，只把这五项同步到草稿；
+   * 以上次保存的设置为基准套用预设，只把这八项同步到草稿；
    * 界面上其它未保存的修改留在草稿里，不会写进文件。
    */
   const applyPreset = async (preset: PerformancePreset, applied: string) => {
@@ -423,7 +426,8 @@ export function SettingsPage() {
                       <PresetTitle>一键性能模式</PresetTitle>
                       <Lead>
                         把最吃 CPU 的几项一次写好：实体并行线程数设成本机逻辑核数，
-                        挤压上限 8、生物降频 32 格、生物休眠 64 格、唤醒倍率 1。
+                        挤压上限 8、生物降频 32 格、生物休眠 64 格、唤醒倍率 1，
+                        再打开独立寻路阶段和寻路失败冷却（节点预算 65536）。
                         点之前会先列出和官方逐位一致模式的差别。
                       </Lead>
                       <Actions>
@@ -479,6 +483,8 @@ export function SettingsPage() {
               <li>远处生物休眠：64 格外的生物基本不动，每 20 刻才完整 tick 一次。</li>
               <li>64 格外的刷怪塔效率会下降：靠生物自己走进陷阱的农场变慢。</li>
               <li>挤成一团的生物散开慢：每只每刻只处理前 8 次推挤。</li>
+              <li>生物寻路晚一刻：转向最多比原来慢 0.05 秒。</li>
+              <li>连续寻路失败的生物会歇 2 秒再算：够不着的怪重试变稀。</li>
               <li>并行时实体看到的是这一刻开始时的状态，物品合并最多晚一刻。</li>
             </DifferenceList>
             <Lead>
