@@ -200,6 +200,45 @@ pub fn dismount(passenger: &mut crate::entity::Entity, passengers: Option<&mut V
     }
 }
 
+/// `Entity.getDismountLocationForPassenger` 的缺省实现：载具 x、AABB 顶、载具 z。
+/// `Animal` 的 `DismountHelper` 版本没有建模；这里只给「活着的载具」用。
+///
+/// Default `Entity.getDismountLocationForPassenger`: vehicle x, bounding-box top,
+/// vehicle z. `Animal`'s `DismountHelper` version is not modelled; this is only for
+/// a live vehicle.
+pub fn dismount_location(vehicle: &EntityPublic) -> Vec3 {
+    Vec3::new(
+        vehicle.position.x,
+        vehicle.bounding_box().max_y,
+        vehicle.position.z,
+    )
+}
+
+/// `LivingEntity.stopRiding()`：断关系后按载具是否已被移除决定落点。官方
+/// `LivingEntity.dismountVehicle` 在载具还活着时用 `getDismountLocationForPassenger`
+/// 重新落位（这里用缺省实现），载具已经离表时只保留 `max(自己 y, 载具 y)`，不水平挪动。
+///
+/// Vanilla `LivingEntity.stopRiding()` repositions to the dismount location while the
+/// vehicle is alive; once the vehicle is removed it keeps `max(own y, vehicle y)` and
+/// does not move horizontally.
+pub fn stop_riding(
+    passenger: &mut crate::entity::Entity,
+    vehicle: &EntityPublic,
+    passengers: Option<&mut Vec<EntityUid>>,
+) {
+    if passenger.vehicle.is_none() {
+        return;
+    }
+    dismount(passenger, passengers);
+    if !vehicle.removed {
+        passenger.position = dismount_location(vehicle);
+        passenger.old_position = passenger.position;
+        // 官方 `teleportTo/snapTo` 不清速度：乘客这一刻的重力速度留着，下一刻作为根实体
+        // 再叠一次重力。Vanilla `snapTo` keeps the velocity, so the root tick adds gravity again.
+        passenger.on_ground = false;
+    }
+}
+
 // ---- 骑手借载具导航（`Mob.getNavigation` / `getMoveControl` 的转交）----
 
 /// 官方 `Mob.getControllingPassenger()`：载具不是 `NoAI`、第一位乘客就是这个实体、

@@ -934,3 +934,127 @@ fn a_riding_tree_is_identical_in_precise_and_parallel_modes() {
         );
     }
 }
+
+/// 控制载具的骑手会借载具的导航/移动控制；借还只发生在同一棵树的这份活内部，
+/// 精确驱动和 1/2/8 线程的并行驱动必须逐位一致。玩家在 6 格外让骷髅真的寻路。
+///
+/// A rider controlling its vehicle borrows the vehicle's navigation; the swap
+/// happens inside the riding-tree job. Precise and 1/2/8-thread parallel results
+/// must be bit-identical, with a nearby player so the zombie really pathfinds.
+#[test]
+fn controlling_rider_is_bit_identical_in_precise_and_parallel_modes() {
+    use crate::entity::{
+        ctx::PlayerView,
+        mob::{MobType, throttle},
+        view::BlockSource,
+    };
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::blocks;
+
+    struct RidingSource {
+        players: Vec<PlayerView>,
+        time: i64,
+    }
+
+    impl BlockSource for RidingSource {
+        fn block_state(&self, pos: BlockPos) -> BlockState {
+            if pos.y == 63 {
+                BlockState(blocks::GRASS_BLOCK)
+            } else {
+                BlockState::AIR
+            }
+        }
+        fn facts(&self) -> ViewFacts {
+            ViewFacts {
+                sky_brightness: 0,
+                block_brightness: 0,
+                game_time: self.time,
+                ..ViewFacts::default()
+            }
+        }
+        fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
+            for player in &self.players {
+                visit(player);
+            }
+        }
+    }
+
+    fn build() -> (TestLevel, BlockTicks, Vec<PlayerView>) {
+        let mut level = TestLevel::new();
+        level.set_entities(crate::entity::EntityStore::with_next_id(
+            crate::entity::FIRST_ENTITY_ID,
+        ));
+        level.light = Some((0, 0));
+        let mut ticks = BlockTicks::new();
+        ticks.set_time(5);
+        let player = throttle::test_player(1, Vec3::new(16.0, 64.0, 0.5));
+        level.players.push(player);
+        let (spider, zombie) = {
+            let mut world = World::new(&mut level, &mut ticks);
+            for x in -40..=40 {
+                for z in -8..=8 {
+                    world.set_block(BlockPos::new(x, 63, z), BlockState(blocks::GRASS_BLOCK), 0);
+                }
+            }
+            let spider = world.spawn_entity(Entity::by_mob_type(
+                MobType::Spider,
+                Vec3::new(0.5, 64.0, 0.5),
+            ));
+            let zombie = world.spawn_entity(Entity::by_mob_type(
+                MobType::Zombie,
+                Vec3::new(0.5, 64.0, 0.5),
+            ));
+            (spider, zombie)
+        };
+        level.entities_mut_for_test().end_tick();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            assert!(
+                world.start_riding(zombie, spider),
+                "rider mounts the spider"
+            );
+        }
+        (level, ticks, vec![player])
+    }
+
+    let (mut precise_level, mut precise_ticks, _) = build();
+    for _ in 0..12 {
+        let mut world = World::new(&mut precise_level, &mut precise_ticks);
+        world.tick_entities();
+    }
+    let precise = World::new(&mut precise_level, &mut precise_ticks).live_entities();
+    assert_eq!(precise.len(), 2, "spider + zombie");
+    // 借导航的字段内容（载具尺寸、owner uid、写回）由
+    // `entity::riding::tests::a_controlling_rider_borrows_the_vehicle_navigation_and_move_control`
+    // 逐项钉住；这里只钉住两种驱动 / 多种线程数下整棵乘客树逐位一致。
+    // The borrowed state itself is asserted in the riding unit tests; here we
+    // pin the whole tree's bit-identical behaviour across drivers/threads.
+    let baseline = format!("{precise:?}");
+
+    for threads in [1, 2, 8] {
+        let (mut level, mut ticks, players) = build();
+        let view = SourceView::new(RidingSource { players, time: 5 });
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            tick_entities_parallel(
+                &view,
+                &mut world,
+                &WorkerPool::new("mob-riding", threads).expect("起实体线程池"),
+            );
+            for _ in 1..12 {
+                // 复用同一份只读视图，逐刻推进（时间固定为 5，和精确侧一致）。
+                tick_entities_parallel(
+                    &view,
+                    &mut world,
+                    &WorkerPool::new("mob-riding", threads).expect("起实体线程池"),
+                );
+            }
+        }
+        let parallel = World::new(&mut level, &mut ticks).live_entities();
+        let got = format!("{parallel:?}");
+        assert_eq!(
+            got, baseline,
+            "threads={threads}: precise and parallel must match with a borrowed navigation"
+        );
+    }
+}

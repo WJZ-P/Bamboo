@@ -205,6 +205,14 @@ struct Case {
     /// Riding scenes: every mob has `setNoAi(true)`.
     #[serde(default)]
     no_ai: bool,
+    /// 骑乘场景：给这名下标的生物主手一把弓（骷髅骑士射箭），-1 表示不装备。
+    #[serde(default = "minus_one")]
+    bow_rider: i32,
+    /// 骑乘场景：这一刻让指定乘客下车，之后两边各自寻路；-1 表示不下车。
+    #[serde(default = "minus_one")]
+    ride_dismount_tick: i32,
+    #[serde(default = "minus_one")]
+    ride_dismount_rider: i32,
     hurts: Vec<[i32; 4]>,
     #[serde(default)]
     summons: Vec<SummonSetup>,
@@ -2037,6 +2045,20 @@ impl Report {
                         }
                     });
                 }
+                if index as i32 == case.bow_rider {
+                    // 骷髅骑士的 `reassessWeaponGoal` 要主手是弓才会启用射箭目标。
+                    world.with_entity_mut(id, &mut |entity| {
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            mob.equipment.set(
+                                mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand,
+                                mc_bamboo_protocol::item::ItemStack::new(
+                                    mc_bamboo_data::items::BOW,
+                                    1,
+                                ),
+                            );
+                        }
+                    });
+                }
                 ids.push(id);
             }
             // 骑乘场景：官方 `startRiding` 之后，0 号生物身上坐着这名玩家。
@@ -2312,6 +2334,26 @@ impl Report {
                             seeded_early.push(setup.id);
                         }
                     }
+                }
+                if case.ride_dismount_tick == index as i32
+                    && case.ride_dismount_rider >= 0
+                    && case.ride_vehicle >= 0
+                    && let Some(&rider) = ids.get(case.ride_dismount_rider as usize)
+                    && let Some(&vehicle) = ids.get(case.ride_vehicle as usize)
+                {
+                    // 官方 `LivingEntity.stopRiding()`：当场断两边关系，载具还活着时
+                    // 按 `getDismountLocationForPassenger` 重新落位。
+                    let vehicle_public = world.entity(vehicle).expect("vehicle").split().public;
+                    world.with_entity_mut(vehicle, &mut |entity| {
+                        entity.with_mob(|_, mob| mob.passengers.retain(|&uid| uid != rider));
+                    });
+                    world.with_entity_mut(rider, &mut |entity| {
+                        mc_bamboo_blocks::entity::riding::stop_riding(
+                            entity,
+                            &vehicle_public,
+                            None,
+                        );
+                    });
                 }
                 world.tick_entities();
                 tick_effects = world.into_effects();
@@ -4201,6 +4243,41 @@ fn set_zombie_clock(level: &mut MobLevel, case: &Case, tick: i64, break_test: Op
     level.facts.monsters_burn = mc_bamboo_blocks::sky::monsters_burn(clock);
 }
 
+/// 官方 `zombieStepJson` 取的是 `mob.getNavigation().getPath()`，控制载具的骑手
+/// 这个 getter 会转到载具的导航；Bamboo 的 `step_of` 默认用自己那份。这里照 getter
+/// 的语义改写，才不会把「载具的路径」误报成「骑手没有路径」。
+///
+/// Official `zombieStepJson` reads `mob.getNavigation().getPath()`, which delegates
+/// to the vehicle for a controlling rider; Bamboo's `step_of` uses its own field.
+fn shown_path(level: &MobLevel, entity: &Entity, mob: &Mob) -> Option<Vec<i32>> {
+    let path = |m: &Mob| {
+        m.navigation.path.as_ref().map(|path| {
+            let mut values = vec![path.next_node_index as i32];
+            for node in &path.nodes {
+                values.extend([node.x, node.y, node.z]);
+            }
+            values
+        })
+    };
+    // `Entity.getControlledVehicle()`：载具的 `getControllingPassenger()` 必须是自己。
+    let Some(vehicle_uid) = entity.vehicle else {
+        return path(mob);
+    };
+    let Some(vehicle) = level.entities.get(vehicle_uid) else {
+        return path(mob);
+    };
+    let Some(vm) = vehicle.kind.mob() else {
+        return path(mob);
+    };
+    if vm.no_ai
+        || vm.passengers.first().copied() != Some(entity.id)
+        || mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Slime
+    {
+        return path(mob);
+    }
+    path(vm)
+}
+
 fn snapshot(level: &MobLevel, ids: &[i32]) -> Vec<Option<CowStep>> {
     let lr = level.random.source().seed();
     let bh = block_hash(level);
@@ -4208,6 +4285,9 @@ fn snapshot(level: &MobLevel, ids: &[i32]) -> Vec<Option<CowStep>> {
         .map(|&id| {
             level.entities.get(id).and_then(|entity| {
                 step_of(&entity, lr).map(|mut step| {
+                    if let Some(mob) = entity.kind.mob() {
+                        step.path = shown_path(level, &entity, mob);
+                    }
                     step.bh = bh;
                     // 官方 `ServerLevel.getCurrentDifficultyAt(mob.blockPosition())`：
                     // 时钟、该区块的 `InhabitedTime`、月相。只在 `InhabitedTime`

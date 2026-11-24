@@ -187,3 +187,29 @@ fn non_controlling_passengers_do_not_borrow_the_vehicle_navigation() {
     spider.kind.mob_mut().unwrap().passengers = vec![2, 3];
     assert!(!begin_nav_borrow(&mut skeleton, &spider, &view));
 }
+
+#[test]
+fn stop_riding_on_a_live_vehicle_lands_the_rider_on_its_box_top() {
+    let mut spider = entity(1, MobType::Spider, 0.5).split().public;
+    spider.yaw = 0.0;
+    let mut zombie = entity(2, MobType::Zombie, 10.0);
+    zombie.vehicle = Some(1);
+    let at = dismount_location(&spider);
+    assert_eq!(at.x, 0.5);
+    assert_eq!(at.y, 64.0 + f64::from(0.9_f32));
+    stop_riding(&mut zombie, &spider, None);
+    assert_eq!(zombie.vehicle, None);
+    assert_eq!(zombie.boarding_cooldown, 60);
+    assert_eq!(zombie.position, at);
+    assert!(!zombie.on_ground);
+
+    // 载具已经离表时不下落、不水平挪动（官方 `dismountVehicle` 的 removed 分支）。
+    let mut removed = spider.clone();
+    removed.removed = true;
+    let mut zombie = entity(3, MobType::Zombie, 10.0);
+    zombie.vehicle = Some(1);
+    let before = zombie.position;
+    stop_riding(&mut zombie, &removed, None);
+    assert_eq!(zombie.vehicle, None);
+    assert_eq!(zombie.position, before);
+}

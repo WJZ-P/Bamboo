@@ -704,6 +704,11 @@ public final class MobOracle {
         boolean persisted;
         /** 骑乘场景：所有生物都 `setNoAi(true)`，只比附着点和骑乘状态。 */
         boolean noAi;
+        /** 骑乘场景：给这名下标的生物主手一把弓（骷髅骑士射箭用），-1 表示不装备。 */
+        int bowRider = -1;
+        /** 骑乘场景：在这一刻让指定乘客 `stopRiding()`，之后两边各自寻路。 */
+        int rideDismountTick = -1;
+        int rideDismountRider = -1;
         /**
          * 马科场景：0 号生物的初始脾气，-1 表示用构造时的值。
          *
@@ -771,6 +776,19 @@ public final class MobOracle {
         /** 不对生物跑 AI，只让它们 tick 和跟随载具。 */
         Scene noAi() {
             this.noAi = true;
+            return this;
+        }
+
+        /** 给指定下标的生物一把弓（骷髅骑士的 `RangedBowAttackGoal` 需要主手是弓）。 */
+        Scene bowRider(int index) {
+            this.bowRider = index;
+            return this;
+        }
+
+        /** 指定刻让乘客下车，后面的刻各自寻路。 */
+        Scene dismountAt(int tick, int rider) {
+            this.rideDismountTick = tick;
+            this.rideDismountRider = rider;
             return this;
         }
 
@@ -3038,13 +3056,9 @@ public final class MobOracle {
         static void ridingScenes(List<Scene> scenes) {
             BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
             {
-                // 蜘蛛骑士：骷髅坐在蜘蛛上跑 80 刻，位置由蜘蛛的附着点决定。附近不放
-                // 玩家：骑手的导航会和载具共用（官方 `Mob.getNavigation` 在控制乘客时
-                // 返回载具的导航），这一条还没有建模，见 README 的已知限制。
-                // Spider jockey: a skeleton rides a spider for 80 ticks; the attachment
-                // point drives its position. No nearby player: a controlling rider
-                // shares the vehicle's navigation in vanilla (`Mob.getNavigation`),
-                // which is not modelled yet; see the README limitation.
+                // 蜘蛛骑士（静止）：骷髅坐在蜘蛛上，只比附着点和每刻的乘客 tick；
+                // NoAI 让两边都不跑寻路，钉住借导航之前的基线。
+                // Static spider jockey: attachment point and the passenger tick only.
                 Scene jockey = new Scene("spider_ride_jockey").ticks(80).difficulty(2);
                 jockey.clockStart = 18000;
                 jockey.fill(-12, 63, -12, 12, 63, 12, bedrock);
@@ -3055,9 +3069,8 @@ public final class MobOracle {
                 scenes.add(jockey);
             }
             {
-                // 鸡骑士：僵尸骑鸡，鸡自己乱走，僵尸照常锁定并近战玩家。
-                // Chicken jockey: a zombie rides a wandering chicken and still targets
-                // and melees the player.
+                // 鸡骑士（静止）：同上，鸡的附着点在头后方。
+                // Static chicken jockey: the chicken's passenger point is behind its head.
                 Scene chicken = new Scene("zombie_ride_chicken").ticks(160).difficulty(2);
                 chicken.clockStart = 18000;
                 chicken.fill(-12, 63, -12, 12, 63, 12, bedrock);
@@ -3068,11 +3081,9 @@ public final class MobOracle {
                 scenes.add(chicken);
             }
             {
-                // 载具死亡：第 6 刻打死蜘蛛，20 刻后移除时骷髅落回蜘蛛包围盒顶，
-                // 之后的刻作为根实体自己跑。蜘蛛的落点是 `Entity` 缺省实现。
-                // Vehicle death: kill the spider on tick 6; when it is removed 20
-                // ticks later the skeleton lands on the spider's box top and ticks as
-                // a root. A spider uses the default `Entity` dismount spot.
+                // 载具死亡：第 6 刻打死蜘蛛，20 刻后移除时骷髅停在原地（官方只有玩家
+                // 会按 `getDismountLocationForPassenger` 重新落位）。
+                // Vehicle death: the skeleton stays where it sat when the spider is removed.
                 Scene death = new Scene("spider_ride_death").ticks(60).difficulty(2);
                 death.clockStart = 18000;
                 death.fill(-12, 63, -12, 12, 63, 12, bedrock);
@@ -3083,6 +3094,50 @@ public final class MobOracle {
                 death.noAi();
                 death.hurts.add(new double[] {6, 0, 30.0, 0});
                 scenes.add(death);
+            }
+            {
+                // 蜘蛛骑士追玩家（AI 开）：骷髅主手一把弓，目标/漫游把路径写到**载具**
+                // 的导航上（`Mob.getNavigation` 转交），蜘蛛跟着走，骷髅同时射箭。
+                // Spider jockey chase (AI on): the bow-armed skeleton's goals write paths
+                // to the vehicle's navigation, driving the spider while it shoots.
+                Scene chase = new Scene("spider_ride_chase").ticks(160).difficulty(2);
+                chase.clockStart = 18000;
+                chase.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                chase.mob(41, 0.5, 64.0, 0.5, 0.0F, 817L, 0);
+                chase.mob(1, 0.5, 64.0, 0.5, 0.0F, 818L, 0);
+                chase.ride(1, 0);
+                chase.player(7.5, 64.0, 0.5, Items.AIR);
+                scenes.add(chase);
+            }
+            {
+                // 鸡骑士近战（AI 开）：僵尸骑鸡追玩家；鸡的 MOVE/LOOK/JUMP 被控制
+                // 乘客关掉，路径由僵尸写进鸡的导航。只跑到第 21 刻：再往后骑手的
+                // 头/身体朝向（-0.1 的乘客附着点造成的 -90° 转身）还没建模。
+                // Chicken jockey melee (AI on). Stops at tick 21: beyond that the
+                // rider's head/body rotation from the -0.1 passenger offset is not
+                // modelled yet.
+                Scene melee = new Scene("zombie_ride_melee").ticks(21).difficulty(2);
+                melee.clockStart = 18000;
+                melee.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                melee.mob(5, 0.5, 64.0, 0.5, 0.0F, 819L, 0);
+                melee.mob(1, 0.5, 64.0, 0.5, 0.0F, 820L, 0);
+                melee.ride(1, 0);
+                melee.player(3.5, 64.0, 0.5, Items.AIR);
+                scenes.add(melee);
+            }
+            {
+                // 骑手中途下马：第 20 刻 `stopRiding()`，之后蜘蛛和骷髅各自跑自己的
+                // 导航（借导航只在骑乘期间发生）。
+                // Mid-ride dismount: after `stopRiding()` both mobs use their own
+                // navigation again (the borrow only exists while riding).
+                Scene dismount = new Scene("spider_ride_dismount").ticks(120).difficulty(2);
+                dismount.clockStart = 18000;
+                dismount.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                dismount.mob(41, 0.5, 64.0, 0.5, 0.0F, 821L, 0);
+                dismount.mob(1, 0.5, 64.0, 0.5, 0.0F, 822L, 0);
+                dismount.ride(1, 0).dismountAt(20, 1);
+                dismount.player(7.5, 64.0, 0.5, Items.AIR);
+                scenes.add(dismount);
             }
         }
 
@@ -10702,6 +10757,11 @@ public final class MobOracle {
             mobs.add(mob);
             level.tracked.add(mob);
         }
+        if (scene.bowRider >= 0 && scene.bowRider < mobs.size()) {
+            mobs.get(scene.bowRider).setItemSlot(
+                    net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                    new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.BOW));
+        }
         if (scene.rider >= 0 && !players.get(scene.rider).startRiding(mobs.get(0))) {
             throw new IllegalStateException("Rider could not mount in " + scene.name);
         }
@@ -10718,6 +10778,9 @@ public final class MobOracle {
         line.append(",\"rideVehicle\":").append(scene.rideVehicle);
         line.append(",\"persisted\":").append(scene.persisted);
         line.append(",\"noAi\":").append(scene.noAi);
+        line.append(",\"bowRider\":").append(scene.bowRider);
+        line.append(",\"rideDismountTick\":").append(scene.rideDismountTick);
+        line.append(",\"rideDismountRider\":").append(scene.rideDismountRider);
         line.append(",\"startTime\":").append(START_TIME);
         line.append(",\"blocks\":").append(blockArray(scene.blocks));
         line.append(",\"cows\":[");
@@ -10891,6 +10954,12 @@ public final class MobOracle {
                         target.hurtServer(level, level.damageSources().drown(), (float) hurt[2]);
                     }
                 }
+            }
+            if (scene.rideDismountTick == tick
+                    && scene.rideDismountRider >= 0
+                    && scene.rideDismountRider < mobs.size()) {
+                // 官方 `Entity.stopRiding()`：当场断两边关系，生物乘客不挪位置。
+                mobs.get(scene.rideDismountRider).stopRiding();
             }
             if (slimeScene) {
                 // `Player.aiStep` 的 `touch(entity)`：玩家活着时，碰到包围盒外扩 (1, 0.5, 1) 以内的
