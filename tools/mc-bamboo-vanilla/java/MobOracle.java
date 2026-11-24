@@ -1344,6 +1344,20 @@ public final class MobOracle {
             brushed.interact(3, 0, 0, brush, 0);
             brushed.interact(10, 0, 0, spiderEye, 0);
             scenes.add(brushed);
+            // 等距排序核实：4 头牛与 1 名玩家在距犰狳完全等距（d²=16）的 4 个方向上，
+            // 验证 `NearestLivingEntitySensor`（`getEntitiesOfClass` + 稳定排序）的先后顺序。
+            // Equidistant sort check: four cows and one player all at exact d²=16 from the
+            // armadillo, pinning `NearestLivingEntitySensor` tie-breaking order.
+            Scene equidistant = new Scene("armadillo_equidistant_cows").ticks(60);
+            equidistant.sensorDelay = 1;
+            Scenes.ground(equidistant, 15);
+            equidistant.mob(13, 0.5, 64.0, 0.5, 0.0F, 51L, 0);
+            equidistant.mob(0, 4.5, 64.0, 0.5, 0.0F, 53L, 0);
+            equidistant.mob(0, -3.5, 64.0, 0.5, 0.0F, 59L, 0);
+            equidistant.mob(0, 0.5, 64.0, 4.5, 0.0F, 61L, 0);
+            equidistant.mob(0, 0.5, 64.0, -3.5, 0.0F, 67L, 0);
+            equidistant.player(0.5, 64.0, -3.5, Items.AIR);
+            scenes.add(equidistant);
             addGoatScenes(scenes);
             FrogScenes.add(scenes);
             CamelScenes.add(scenes);
