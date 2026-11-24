@@ -3168,3 +3168,329 @@ pub fn replay_advancement_command(line: &str) -> (i32, String, String) {
     done.sort_unstable();
     (count, key, done.join(","))
 }
+
+/// 玩家属性对拍里的自定义修饰符：`(attribute_id, mod_id, amount, op, slot_group)`。
+///
+/// One custom item attribute modifier entry for the player-attributes oracle.
+#[cfg(feature = "oracle-samples")]
+pub type ReplayCustomModifier = (i32, String, f64, i32, i32);
+
+/// 玩家属性对拍里单条已生效修饰符：`(mod_id, amount 原始位, op)`。
+///
+/// One resolved attribute modifier for the player-attributes oracle.
+#[cfg(feature = "oracle-samples")]
+pub type ReplayAttrModifier = (String, u64, i32);
+
+/// 玩家属性对拍里单条属性结果：`(attribute_id, value 原始位, 修饰符列表)`。
+///
+/// One resolved attribute snapshot for the player-attributes oracle.
+#[cfg(feature = "oracle-samples")]
+pub type ReplayAttrEntry = (i32, u64, Vec<ReplayAttrModifier>);
+
+/// 玩家属性对拍里单个装备槽的输入描述。
+///
+/// One equipment slot input for the player-attributes oracle.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone)]
+pub struct ReplayAttrSlot {
+    /// 0=MainHand, 1=OffHand, 2=Feet, 3=Legs, 4=Chest, 5=Head。
+    pub slot: u8,
+    pub item: i32,
+    pub enchantments: Vec<(i32, i32)>,
+    /// `Some` 时覆盖默认 `attribute_modifiers` 组件。
+    pub custom_modifiers: Option<Vec<ReplayCustomModifier>>,
+}
+
+/// 玩家属性对拍的场景描述。
+///
+/// One randomized scenario for the player-attributes oracle.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone)]
+pub struct ReplayAttrScene {
+    /// 0=Survival, 1=Creative, 2=Adventure, 3=Spectator。
+    pub game_mode: u8,
+    pub sprinting: bool,
+    pub crouching: bool,
+    pub ticks_frozen: i32,
+    pub on_solid_for_frost: bool,
+    pub slots: Vec<ReplayAttrSlot>,
+    pub effects: Vec<(i32, i32)>,
+    /// 0=正常，1=故意改坏效率附魔，2=故意把 AddMultipliedTotal 改成 AddMultipliedBase。
+    pub break_mode: u8,
+}
+
+/// 玩家属性对拍的输出：每个属性的 `(id, value 原始位, 排序后的 (mod_id, amount 原始位, op))`，
+/// 以及供挖掘速度对拍的 `mining_inputs`。
+///
+/// Output of one player-attributes replay: each attribute's `(id, raw value bits,
+/// sorted modifiers)` plus resolved `mining_inputs`.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone)]
+pub struct ReplayAttrResult {
+    pub attributes: Vec<ReplayAttrEntry>,
+    pub mining_efficiency: f32,
+    pub block_break_speed: f32,
+    pub submerged_mining_speed: f32,
+    pub has_dig_speed: bool,
+    pub dig_speed_amplification: i32,
+    pub mining_fatigue: Option<i32>,
+}
+
+/// 用生产代码的 `Player` + `player_attributes::rebuild_player` 重放一次属性场景，
+/// 供 `mc-bamboo-vanilla player-attributes` 对拍。
+///
+/// Replay one attribute scenario through production `Player` and
+/// `player_attributes::rebuild_player` for `mc-bamboo-vanilla player-attributes`.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_player_attributes(scene: &ReplayAttrScene) -> ReplayAttrResult {
+    use mc_bamboo_blocks::entity::mob::{attributes::Operation, effects::EffectInstance};
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::registries::{attribute, data_component_type as kinds};
+    use mc_bamboo_protocol::{
+        components::{
+            ComponentPatch, ComponentValue, PatchEntry,
+            value::{AttributeDisplay, AttributeEntry, AttributeModifier},
+        },
+        item::ItemStack,
+        packet::play::{ClientInformation, ENTITY_FLAG_SPRINTING, GameMode},
+    };
+    use uuid::Uuid;
+
+    let game_mode = match scene.game_mode {
+        1 => GameMode::Creative,
+        2 => GameMode::Adventure,
+        3 => GameMode::Spectator,
+        _ => GameMode::Survival,
+    };
+    let mut player = player::Player::new(
+        inbound::PlayerId(42),
+        Uuid::from_u128(42),
+        "AttrOracle".to_owned(),
+        game_mode,
+        ClientInformation::default(),
+        Vec3::default(),
+    );
+    if scene.sprinting {
+        player.sync.shared_flags |= ENTITY_FLAG_SPRINTING;
+    }
+    player.sync.shift_key_down = scene.crouching;
+    player.environment.ticks_frozen = scene.ticks_frozen;
+
+    // 0=MainHand(36), 1=OffHand(45), 2=Feet(8), 3=Legs(7), 4=Chest(6), 5=Head(5)。
+    let menu_slot = [36_usize, 45, 8, 7, 6, 5];
+    for slot in &scene.slots {
+        let Some(&index) = menu_slot.get(slot.slot as usize) else {
+            continue;
+        };
+        let mut patch = ComponentPatch::new();
+        if !slot.enchantments.is_empty() {
+            patch.put(
+                kinds::ENCHANTMENTS,
+                PatchEntry::Set(ComponentValue::Enchantments(slot.enchantments.clone())),
+            );
+        }
+        if let Some(custom) = &slot.custom_modifiers {
+            let entries: Vec<AttributeEntry> = custom
+                .iter()
+                .map(|(attr_id, mod_id, amount, op, group)| AttributeEntry {
+                    attribute: *attr_id,
+                    modifier: AttributeModifier {
+                        id: mod_id.clone(),
+                        amount: *amount,
+                        operation: *op,
+                    },
+                    slot: *group,
+                    display: AttributeDisplay::Default,
+                })
+                .collect();
+            patch.put(
+                kinds::ATTRIBUTE_MODIFIERS,
+                PatchEntry::Set(ComponentValue::AttributeModifiers(entries)),
+            );
+        }
+        let (added, removed) = patch.to_opaque();
+        player.inventory.slots[index] = ItemStack {
+            item: slot.item,
+            count: 1,
+            added,
+            removed,
+        };
+    }
+    for &(effect, amplifier) in &scene.effects {
+        player
+            .effects
+            .add(EffectInstance::with_amplifier(effect, 200, amplifier));
+    }
+    player_attributes::rebuild_player(&mut player, scene.on_solid_for_frost);
+
+    if scene.break_mode == 1
+        && let Some(inst) = player.attributes.instance(attribute::MINING_EFFICIENCY)
+    {
+        inst.base += 1.0;
+    } else if scene.break_mode == 2 {
+        for entry in &mut player.attributes.entries {
+            for modifier in &mut entry.modifiers {
+                if modifier.operation == Operation::AddMultipliedTotal {
+                    modifier.operation = Operation::AddMultipliedBase;
+                }
+            }
+        }
+    }
+
+    let mut attributes: Vec<ReplayAttrEntry> = player
+        .attributes
+        .entries
+        .iter()
+        .map(|entry| {
+            let mut mods: Vec<ReplayAttrModifier> = entry
+                .modifiers
+                .iter()
+                .map(|m| {
+                    let op = match m.operation {
+                        Operation::AddValue => 0,
+                        Operation::AddMultipliedBase => 1,
+                        Operation::AddMultipliedTotal => 2,
+                    };
+                    (m.id.clone(), m.amount.to_bits(), op)
+                })
+                .collect();
+            mods.sort_by(|a, b| a.0.cmp(&b.0));
+            (entry.id, entry.value().to_bits(), mods)
+        })
+        .collect();
+    attributes.sort_by_key(|row| row.0);
+
+    let mining = player_attributes::mining_inputs(&player);
+    ReplayAttrResult {
+        attributes,
+        mining_efficiency: mining.mining_efficiency,
+        block_break_speed: mining.block_break_speed,
+        submerged_mining_speed: mining.submerged_mining_speed,
+        has_dig_speed: mining.has_dig_speed,
+        dig_speed_amplification: mining.dig_speed_amplification,
+        mining_fatigue: mining.mining_fatigue,
+    }
+}
+
+/// 供 `mc-bamboo-vanilla player-attributes` 对拍 `UpdateAttributes` 线上包体：
+/// 返回 `(进服全量包体, 速度 II 脏同步包体, 效率V镐+创造+疾跑脏同步包体)`（去掉长度和包 ID）。
+/// `omit_dirty = true` 用于改坏确认（模拟漏发脏属性包）。
+///
+/// Replay `UpdateAttributes` wire payloads (body after packet id) for:
+/// `(full join snapshot, Speed II dirty sync, Efficiency V + Creative + Sprinting dirty sync)`.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_speed_sync_packets(omit_dirty: bool) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    use mc_bamboo_blocks::entity::mob::effects::EffectInstance;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::{
+        items,
+        packets::play::clientbound,
+        registries::{data_component_type as kinds, mob_effect},
+    };
+    use mc_bamboo_protocol::{
+        codec::decode_varint,
+        components::{ComponentPatch, ComponentValue, PatchEntry},
+        frame::{MAX_FRAME_LEN, find_frame},
+        item::ItemStack,
+        packet::play::{ClientInformation, ENTITY_FLAG_SPRINTING, GameMode},
+    };
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl inbound::PlayerSink for Capture {
+        fn send(&mut self, frames: outgoing::Outgoing) -> bool {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(frames.to_raw_bytes());
+            true
+        }
+        fn close(&mut self) {}
+    }
+
+    let extract_update_body = |capture: &Capture| -> Vec<u8> {
+        let bytes = std::mem::take(&mut *capture.0.lock().unwrap());
+        let mut rest = bytes.as_slice();
+        while !rest.is_empty() {
+            let Some(bounds) = find_frame(rest, MAX_FRAME_LEN).ok().flatten() else {
+                break;
+            };
+            let payload = &rest[bounds.header_len..bounds.header_len + bounds.payload_len];
+            rest = &rest[bounds.header_len + bounds.payload_len..];
+            if let Ok((packet_id, consumed)) = decode_varint(payload)
+                && packet_id == clientbound::UPDATE_ATTRIBUTES
+            {
+                return payload[consumed..].to_vec();
+            }
+        }
+        Vec::new()
+    };
+
+    let mut region = region::Region::new(2, 20, false);
+    let id = inbound::PlayerId(42);
+    let player = player::Player::new(
+        id,
+        Uuid::from_u128(42),
+        "Alice".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    let capture = Capture::default();
+    region.links.add(id, Box::new(capture.clone()));
+    region.insert_player(player);
+
+    // 1. 进服全量同步。
+    player_attributes::send_full_to_self(&mut region, id);
+    region.links.flush();
+    let full_body = extract_update_body(&capture);
+
+    // 2. 速度 II 药水脏同步。
+    region
+        .players
+        .get_mut(&id)
+        .expect("player")
+        .effects
+        .add(EffectInstance::with_amplifier(mob_effect::SPEED, 200, 1));
+    player_attributes::rebuild(&mut region);
+    if !omit_dirty {
+        player_attributes::sync_dirty(&mut region);
+    }
+    region.links.flush();
+    let speed_body = extract_update_body(&capture);
+
+    // 3. 主手效率 V 钻石镐 + 创造模式 + 疾跑脏同步。
+    let efficiency_id = mc_bamboo_data::registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|r| r.name == "minecraft:enchantment")
+        .and_then(|r| r.entries.iter().position(|e| *e == "minecraft:efficiency"))
+        .expect("efficiency enchantment") as i32;
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        kinds::ENCHANTMENTS,
+        PatchEntry::Set(ComponentValue::Enchantments(vec![(efficiency_id, 5)])),
+    );
+    let (added, removed) = patch.to_opaque();
+    let pickaxe = ItemStack {
+        item: items::DIAMOND_PICKAXE,
+        count: 1,
+        added,
+        removed,
+    };
+    {
+        let p = region.players.get_mut(&id).expect("player");
+        p.inventory.slots[36] = pickaxe;
+        p.game_mode = GameMode::Creative;
+        p.sync.shared_flags |= ENTITY_FLAG_SPRINTING;
+    }
+    player_attributes::rebuild(&mut region);
+    if !omit_dirty {
+        player_attributes::sync_dirty(&mut region);
+    }
+    region.links.flush();
+    let complex_body = extract_update_body(&capture);
+
+    (full_body, speed_body, complex_body)
+}
