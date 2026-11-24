@@ -632,6 +632,8 @@ impl MobType {
                 | Self::Enderman
                 | Self::Pillager
                 | Self::Endermite
+                | Self::Guardian
+                | Self::ElderGuardian
         ) || self.is_skeleton()
     }
 
@@ -872,9 +874,14 @@ impl MobType {
     ///
     /// Types registered as `IN_WATER` in `SpawnPlacements`.
     pub const fn spawns_in_water(self) -> bool {
+        // `SpawnPlacements` 里 GUARDIAN / ELDER_GUARDIAN 都登记成 `IN_WATER`。
+        // `SpawnPlacements` registers GUARDIAN / ELDER_GUARDIAN as `IN_WATER`.
         squid::is_squid(self)
             || fish::is_fish(self)
-            || matches!(self, Self::Dolphin | Self::Axolotl)
+            || matches!(
+                self,
+                Self::Dolphin | Self::Axolotl | Self::Guardian | Self::ElderGuardian
+            )
     }
 
     /// `Mob.xpReward`：牛由 `Animal.getBaseExperienceReward` 抽，僵尸固定 5。
@@ -2872,7 +2879,7 @@ impl Mob {
             MobType::SnowGolem => snow_golem::goals(&mut navigation),
             MobType::Silverfish => silverfish::goals(&mut navigation),
             MobType::Endermite => endermite::goals(&mut navigation),
-            MobType::Guardian | MobType::ElderGuardian => guardian::goals(),
+            MobType::Guardian | MobType::ElderGuardian => guardian::goals(mob_type),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {

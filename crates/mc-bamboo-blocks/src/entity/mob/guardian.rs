@@ -1,16 +1,21 @@
-//! 守卫者 / 远古守卫者：官方 `Guardian` / `ElderGuardian` 的构造事实与状态。
+//! 守卫者 / 远古守卫者：官方 `Guardian` / `ElderGuardian` 的构造事实、目标表与状态。
 //!
-//! 目标表、移动控制、激光和范围效果在后续阶段接入；这里先放属性、路径代价、
-//! 音效分派和实体上需要随存档搬动的自有状态。
+//! 移动控制、激光和范围效果在后续阶段接入；这里放属性、路径代价、目标表、音效
+//! 分派和实体上需要随存档搬动的自有状态。
 //!
-//! Guardian / elder guardian: the construction facts and state of vanilla `Guardian` /
-//! `ElderGuardian`. Goals, movement control, the laser and the area effect are wired in
-//! later phases; this module holds attributes, pathfinding malus, sound dispatch and the
-//! state that travels with the entity row.
+//! Guardian / elder guardian: the construction facts, goal table and state of vanilla
+//! `Guardian` / `ElderGuardian`. Movement control, the laser and the area effect are
+//! wired in later phases; this module holds attributes, pathfinding malus, the goal
+//! table, sound dispatch and the state that travels with the entity row.
 
-use mc_bamboo_data::{PathType, registries::attribute};
+use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_data::{PathType, registries::attribute, tags::fluid_tags};
 
-use super::{Attributes, Malus, MobType, goals::GoalSelector};
+use super::{
+    Attributes, Malus, MobType,
+    goals::{Goal, GoalSelector, PLAIN_STROLL, WrappedGoal},
+};
+use crate::entity::ctx::BlockView;
 
 /// 是不是守卫者一支。
 ///
@@ -77,18 +82,94 @@ pub fn malus() -> Malus {
     malus
 }
 
-/// 守卫者的目标表在后续阶段接入；目前两个选择器都为空。
+/// `Guardian.getWalkTargetValue`：水格给 `10 + 光照路径代价`，其余走 `Monster` 那一支。
 ///
-/// The guardian goal tables are wired in a later phase; both selectors are empty for now.
-pub fn goals() -> GoalSelector {
-    GoalSelector::default()
+/// `Guardian.getWalkTargetValue`: water cells get `10 + the light path cost`,
+/// otherwise the `Monster` branch.
+pub fn walk_target_value(view: &dyn BlockView, pos: BlockPos) -> f32 {
+    if view.fluid_state(pos).is_tagged(fluid_tags::WATER) {
+        10.0 + super::goals::light_level_cost(view, pos)
+    } else {
+        super::goals::monster_walk_target_value(view, pos)
+    }
 }
 
-/// 守卫者的目标选择器在后续阶段接入；目前为空。
+/// `Guardian.registerGoals` 的 `goalSelector`，按注册顺序。激光和回家目标先用
+/// [`Goal::Unavailable`] 占住优先级，逻辑在后续阶段接入。
 ///
-/// The guardian target selector is wired in a later phase; empty for now.
+/// The `goalSelector` half of `Guardian.registerGoals`, in registration order. The
+/// laser and go-home goals keep their priority slots as [`Goal::Unavailable`] until
+/// their behaviour is wired in a later phase.
+pub fn goals(kind: MobType) -> GoalSelector {
+    // `ElderGuardian` 构造函数把 `randomStrollGoal.setInterval(400)`。
+    // The `ElderGuardian` constructor calls `randomStrollGoal.setInterval(400)`.
+    let stroll_interval = if kind == MobType::ElderGuardian {
+        400
+    } else {
+        80
+    };
+    GoalSelector::from_goals(vec![
+        wrap(4, Goal::Unavailable("GuardianAttackGoal")),
+        wrap(5, Goal::Unavailable("MoveTowardsRestrictionGoal")),
+        wrap(
+            7,
+            Goal::Stroll {
+                speed: 1.0,
+                interval: stroll_interval,
+                probability: PLAIN_STROLL,
+                wanted: Vec3::default(),
+                force_trigger: false,
+            },
+        ),
+        wrap(
+            8,
+            Goal::LookAtPlayer {
+                look_distance: 8.0,
+                probability: 0.02,
+                look_at: None,
+                look_time: 0,
+            },
+        ),
+        wrap(
+            8,
+            Goal::LookAtMob {
+                kind: MobType::Guardian,
+                look_distance: 12.0,
+                probability: 0.01,
+                look_at: None,
+                look_time: 0,
+            },
+        ),
+        wrap(
+            9,
+            Goal::RandomLookAround {
+                rel_x: 0.0,
+                rel_z: 0.0,
+                look_time: 0,
+            },
+        ),
+    ])
+}
+
+fn wrap(priority: i32, goal: Goal) -> WrappedGoal {
+    WrappedGoal {
+        priority,
+        running: false,
+        goal,
+    }
+}
+
+/// `Guardian.registerGoals` 的 `targetSelector`：优先级 1 的
+/// `NearestAttackableTargetGoal`。选择器和激光一起在后续阶段接入，先占位。
+///
+/// The `targetSelector` half of `Guardian.registerGoals`: the priority-1
+/// `NearestAttackableTargetGoal`. Its selector arrives with the laser in a later
+/// phase; kept as a placeholder for now.
 pub fn target_goals() -> GoalSelector {
-    GoalSelector::default()
+    GoalSelector::from_goals(vec![wrap(
+        1,
+        Goal::Unavailable("NearestAttackableTargetGoal"),
+    )])
 }
 
 /// `Guardian.getAmbientSound()` / `ElderGuardian.getAmbientSound()`：水中和岸上各一套。
@@ -172,6 +253,66 @@ mod tests {
         // `ElderGuardian` 构造函数 `setPersistenceRequired()`。
         // The `ElderGuardian` constructor calls `setPersistenceRequired()`.
         assert!(elder.persistence_required);
+    }
+
+    /// 目标表：优先级、看守卫者变体、以及远古守卫者的游走间隔 400。
+    ///
+    /// Goal table: priorities, the "watch guardians" variant and the elder
+    /// guardian's stroll interval of 400.
+    #[test]
+    fn guardian_goal_table() {
+        let table = goals(MobType::Guardian).goals;
+        let priorities: Vec<i32> = table.iter().map(|wrapped| wrapped.priority).collect();
+        assert_eq!(priorities, vec![4, 5, 7, 8, 8, 9]);
+        assert!(matches!(
+            table[2].goal,
+            Goal::Stroll {
+                interval: 80,
+                probability,
+                ..
+            } if probability == PLAIN_STROLL
+        ));
+        assert!(matches!(
+            table[3].goal,
+            Goal::LookAtPlayer {
+                look_distance,
+                probability,
+                ..
+            } if look_distance == 8.0 && probability == 0.02
+        ));
+        assert!(matches!(
+            table[4].goal,
+            Goal::LookAtMob {
+                kind: MobType::Guardian,
+                look_distance,
+                probability,
+                ..
+            } if look_distance == 12.0 && probability == 0.01
+        ));
+        assert!(matches!(table[5].goal, Goal::RandomLookAround { .. }));
+
+        // `ElderGuardian` 构造函数 `setInterval(400)`。
+        // The `ElderGuardian` constructor calls `setInterval(400)`.
+        let elder = goals(MobType::ElderGuardian).goals;
+        assert!(matches!(elder[2].goal, Goal::Stroll { interval: 400, .. }));
+
+        let targets = target_goals().goals;
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].priority, 1);
+    }
+
+    /// 目标与生成规则按字节码：完整目标规则（从而有视线记忆）、`IN_WATER` 生成、
+    /// 未覆写 `isPushedByFluid`（缺省为真）。
+    ///
+    /// Targeting and placement rules from bytecode: full target rules (hence sight
+    /// memory), `IN_WATER` placement, and no `isPushedByFluid` override (default true).
+    #[test]
+    fn guardian_target_and_placement_rules() {
+        assert!(MobType::Guardian.full_target_rules());
+        assert!(MobType::Guardian.uses_target_memory());
+        assert!(MobType::Guardian.spawns_in_water());
+        assert!(MobType::ElderGuardian.spawns_in_water());
+        assert!(MobType::Guardian.is_pushed_by_fluid());
     }
 
     #[test]

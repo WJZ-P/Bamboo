@@ -150,6 +150,19 @@ pub enum Goal {
         look_at: Option<EntityUid>,
         look_time: i32,
     },
+    /// `LookAtPlayerGoal(mob, <type>.class, distance, probability)`：按种类看最近的生物。
+    /// 守卫者的「看守卫者」用这个变体；运行名仍是 `"LookAtPlayerGoal"`。
+    ///
+    /// `LookAtPlayerGoal(mob, <type>.class, distance, probability)`: watch the nearest
+    /// mob of a given kind. The guardian's "watch guardians" goal uses this variant;
+    /// its running name stays `"LookAtPlayerGoal"`.
+    LookAtMob {
+        kind: super::MobType,
+        look_distance: f32,
+        probability: f32,
+        look_at: Option<EntityUid>,
+        look_time: i32,
+    },
     RandomLookAround {
         rel_x: f64,
         rel_z: f64,
@@ -695,7 +708,7 @@ impl Goal {
             | Self::OcelotAttack { .. }
             | Self::RandomLookAround { .. } => &[Flag::Move, Flag::Look],
             Self::FollowParent { .. } => &[],
-            Self::LookAtPlayer { .. } => &[Flag::Look],
+            Self::LookAtPlayer { .. } | Self::LookAtMob { .. } => &[Flag::Look],
             Self::Unavailable(_)
             | Self::RandomStand { .. }
             | Self::SkeletonTrap
@@ -826,7 +839,7 @@ impl Goal {
             Self::FollowParent { .. } => "FollowParentGoal",
             Self::Stroll { probability, .. } if *probability < 0.0 => "RandomStrollGoal",
             Self::Stroll { .. } => "WaterAvoidingRandomStrollGoal",
-            Self::LookAtPlayer { .. } => "LookAtPlayerGoal",
+            Self::LookAtPlayer { .. } | Self::LookAtMob { .. } => "LookAtPlayerGoal",
             Self::RandomLookAround { .. } => "RandomLookAroundGoal",
             Self::Unavailable(name) => name,
             Self::SkeletonTrap => "SkeletonTrapGoal",
@@ -1896,6 +1909,23 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             // `FoxLookAtPlayerGoal`: no looking while faceplanted or interested.
             look_at.is_some() && !super::fox::blocks_look(mob)
         }
+        Goal::LookAtMob {
+            probability,
+            look_distance,
+            look_at,
+            kind,
+            ..
+        } => {
+            if me.random.next_float() >= *probability {
+                return false;
+            }
+            // 官方 `canUse` 无条件按 `lookAtType` 找最近实体（中间给 `getTarget()`
+            // 的赋值随后就被覆盖）。
+            // Vanilla `canUse` always searches by `lookAtType`; the interim
+            // `getTarget()` assignment is overwritten.
+            *look_at = nearest_look_mob(me, mob, ctx, f64::from(*look_distance), *kind);
+            look_at.is_some()
+        }
         Goal::RandomLookAround { .. } => me.random.next_float() < 0.02,
         Goal::Unavailable(_) => false,
         // `SkeletonTrapGoal.canUse`: `level.hasNearbyAlivePlayer(x, y, z, 10)`。
@@ -2497,6 +2527,21 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             }
             *look_time > 0 && !super::fox::blocks_look(mob)
         }
+        Goal::LookAtMob {
+            look_distance,
+            look_at,
+            look_time,
+            ..
+        } => {
+            let Some((target, alive)) = look_at.and_then(|uid| target_view(ctx, uid)) else {
+                return false;
+            };
+            if !alive {
+                return false;
+            }
+            let limit = f64::from(*look_distance * *look_distance);
+            me.position.distance_to_sqr(target.position) <= limit && *look_time > 0
+        }
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
         Goal::Float
         | Goal::Swell { .. }
@@ -2803,7 +2848,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         }
         Goal::PufferfishPuff => super::fish::puff_start(mob),
         Goal::FollowFlock { time_to_recalc, .. } => *time_to_recalc = 0,
-        Goal::LookAtPlayer { look_time, .. } => {
+        Goal::LookAtPlayer { look_time, .. } | Goal::LookAtMob { look_time, .. } => {
             *look_time = reduced_tick_delay(40 + me.random.next_int_bounded(40));
         }
         Goal::RandomLookAround {
@@ -3040,7 +3085,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::TurtleTravel { .. } => mob.turtle.travel_pos = None,
         Goal::PufferfishPuff => super::fish::puff_stop(mob),
         Goal::FollowFlock { .. } => super::fish::flock_stop(mob, ctx, me),
-        Goal::LookAtPlayer { look_at, .. } => *look_at = None,
+        Goal::LookAtPlayer { look_at, .. } | Goal::LookAtMob { look_at, .. } => *look_at = None,
         Goal::Swell { target } => *target = None,
         Goal::Float
         | Goal::RabbitRaid(_)
@@ -3443,6 +3488,25 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 player.position.x,
                 player.eye_y(),
                 player.position.z,
+                super::control::HEAD_ROT_SPEED as f32,
+                max_head_x_rot(mob),
+            );
+            *look_time -= 1;
+        }
+        Goal::LookAtMob {
+            look_at, look_time, ..
+        } => {
+            let Some((target, alive)) = look_at.and_then(|uid| target_view(ctx, uid)) else {
+                return;
+            };
+            if !alive {
+                return;
+            }
+            let eye = target.eye_position();
+            mob.look.set_look_at(
+                eye.x,
+                eye.y,
+                eye.z,
                 super::control::HEAD_ROT_SPEED as f32,
                 max_head_x_rot(mob),
             );
@@ -4044,6 +4108,53 @@ fn nearest_look_target(
     found
 }
 
+/// `LookAtPlayerGoal.canUse` 的非玩家分支：`getEntitiesOfClass(<type>.class,
+/// bb.inflate(d, 3, d))` 里过了 `lookAtContext`（`d` 格、看得见）的最近一只，
+/// 距离从它的脚量到自己的眼睛。
+///
+/// The non-player branch of `LookAtPlayerGoal.canUse`: the nearest mob of the
+/// given kind in `bb.inflate(d, 3, d)` passing `lookAtContext` (`d` blocks, in
+/// sight), measured from its feet to this mob's eyes.
+fn nearest_look_mob(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    range: f64,
+    kind: super::MobType,
+) -> Option<EntityUid> {
+    let eye = Vec3::new(me.position.x, living::eye_y(me, mob), me.position.z);
+    let mut candidates: Vec<(EntityUid, Vec3)> = Vec::new();
+    ctx.for_each_other_in(me.bounding_box().inflate(range, 3.0, range), &mut |other| {
+        if let KindPublic::Mob(public) = &other.kind
+            && public.mob_type == kind
+            && !other.removed
+            && public.is_alive()
+        {
+            candidates.push((other.uid, other.position));
+        }
+    });
+    let limit = mth::java_max(range, 2.0);
+    let mut best = -1.0_f64;
+    let mut found = None;
+    for (uid, position) in candidates {
+        if me.position.distance_to_sqr(position) > limit * limit {
+            continue;
+        }
+        let Some((target, _)) = target_view(ctx, uid) else {
+            continue;
+        };
+        if !living::has_line_of_sight(me, mob, ctx.blocks(), uid, target.eye_position()) {
+            continue;
+        }
+        let distance = position.distance_to_sqr(eye);
+        if best == -1.0 || distance < best {
+            best = distance;
+            found = Some(uid);
+        }
+    }
+    found
+}
+
 /// `TemptGoal.canUse` 里的 `getNearestPlayer(targetingConditions.range(TEMPT_RANGE), mob)`。
 pub(super) fn nearest_tempting_player(
     me: &Entity,
@@ -4355,6 +4466,12 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
         && super::infested::is_compatible_host_block(view.block_state(pos.below()))
     {
         return 10.0;
+    }
+    // `Guardian.getWalkTargetValue`：水格给 `10 + 光照代价`，其余走怪物那一支。
+    // `Guardian.getWalkTargetValue`: water cells get `10 + light cost`, else the monster
+    // branch.
+    if super::guardian::is_guardian(mob.mob_type) {
+        return super::guardian::walk_target_value(view, pos);
     }
     if mob.mob_type.is_monster() {
         return monster_walk_target_value(view, pos);
@@ -4878,6 +4995,10 @@ pub(super) fn target_goal_can_continue(me: &Entity, mob: &Mob, ctx: &dyn EntityC
 pub(super) fn max_head_x_rot(mob: &Mob) -> f32 {
     if mob.mob_type == super::MobType::Wolf {
         super::wolf::max_head_x_rot(mob)
+    } else if super::guardian::is_guardian(mob.mob_type) {
+        // `Guardian.getMaxHeadXRot()` = 180。
+        // `Guardian.getMaxHeadXRot()` = 180.
+        180.0
     } else {
         super::control::MAX_HEAD_X_ROT as f32
     }
