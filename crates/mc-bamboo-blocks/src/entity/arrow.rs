@@ -83,6 +83,10 @@ pub struct ArrowPublic {
     pub pickup: Pickup,
     pub on_fire: bool,
     pub no_gravity: bool,
+    /// `AbstractArrow.ID_FLAGS` 的 noPhysics 位（忠诚返回中的三叉戟）。
+    ///
+    /// The noPhysics bit of `AbstractArrow.ID_FLAGS` (a returning loyal trident).
+    pub no_physics: bool,
     pub needs_sync: bool,
     pub sync_velocity: bool,
     pub variant: ArrowVariant,
@@ -208,6 +212,7 @@ impl Arrow {
             pickup: self.pickup,
             on_fire: remaining_fire_ticks > 0,
             no_gravity: self.no_gravity,
+            no_physics: self.no_physics,
             needs_sync: self.needs_sync,
             sync_velocity: self.sync_velocity,
             variant: self.variant,
@@ -736,12 +741,23 @@ fn fly(me: &mut Entity, ctx: &mut dyn EntityCtx, movement: Vec3) {
     let blocks = ctx.blocks();
     let position = me.position;
     let collision = me.collision_context();
-    // `AbstractArrow.tick()` 里 `flag = !isNoPhysics()`：noPhysics 时整段
-    // clip / 命中 / 移动物理都跳过，位置只按速度推进（忠诚返回中的三叉戟）。
-    // `AbstractArrow.tick()`'s `flag = !isNoPhysics()`: with no physics the whole
-    // clip / hit / move section is skipped and only the position advances.
+    // `AbstractArrow.tick()` 里 `flag = !isNoPhysics()`：noPhysics 时跳过
+    // clip / 命中 / 碰撞与重力，但仍要按「取负速度」更新朝向、
+    // `setPos(pos + delta)`，再照常跑 0.99 空气阻力与 `Projectile.tick()`
+    // 收尾（`finish_flight` 里对 noPhysics 跳过重力）。忠诚返回的三叉戟走这里。
+    // `AbstractArrow.tick()`'s `flag = !isNoPhysics()`: with no physics the
+    // clip / hit / collision / gravity sections are skipped, but rotation
+    // (from the negated delta) and `setPos(pos + delta)` still happen, followed
+    // by the usual 0.99 air drag and `Projectile.tick()` tail (`finish_flight`
+    // skips gravity for noPhysics). A returning loyal trident takes this path.
     if matches!(&me.kind, EntityKind::Arrow(arrow) if arrow.no_physics) {
+        let (yaw, pitch) = rotation(Vec3::new(-movement.x, movement.y, -movement.z));
+        me.y_rot = lerp_rotation(me.y_rot, yaw);
         me.position = position.add(movement);
+        if let EntityKind::Arrow(arrow) = &mut me.kind {
+            arrow.pitch = lerp_rotation(arrow.pitch, pitch);
+        }
+        finish_flight(me, blocks);
         return;
     }
     let EntityKind::Arrow(arrow) = &mut me.kind else {
@@ -1762,9 +1778,13 @@ fn finish_flight(me: &mut Entity, blocks: &dyn BlockView) {
     if !me.in_water {
         me.delta = me.delta.scale(f64::from(0.99_f32));
     }
-    if matches!(&me.kind, EntityKind::Arrow(arrow) if !arrow.in_ground && !arrow.no_gravity) {
+    if matches!(&me.kind, EntityKind::Arrow(arrow)
+        if !arrow.in_ground && !arrow.no_gravity && !arrow.no_physics)
+    {
         // Entity.applyGravity 把整支向量加上 (0, -g, 0)，也会规范化反弹留下的 -0。
-        // Entity.applyGravity adds (0, -g, 0) to the whole vector, normalizing -0 after a reversal.
+        // `AbstractArrow.tick()` 对 noPhysics 跳过重力（忠诚返回中的三叉戟）。
+        // Entity.applyGravity adds (0, -g, 0) to the whole vector, normalizing -0
+        // after a reversal. `AbstractArrow.tick()` skips gravity for noPhysics.
         me.delta = me.delta.add(Vec3::new(0.0, -0.05, 0.0));
     }
     let in_lava = me.update_projectile_fluid(blocks);
@@ -2537,9 +2557,15 @@ mod tests {
             };
             assert!(arrow.no_physics);
             assert_eq!(arrow.client_side_return_trident_tick_count, 1);
-            // `delta = old * 0.95 + normalize(toOwner) * 0.05*L`（初速为 0）。
+            // `delta = old * 0.95 + normalize(toOwner) * 0.05*L`（初速为 0），
+            // 之后 `super.tick()` 仍施加 0.99 空气阻力（noPhysics 也照施）。
+            // `delta = old*0.95 + normalize(toOwner)*0.05*L` (initial speed 0),
+            // then `super.tick()` still applies the 0.99 air drag even with noPhysics.
             let to_owner = Vec3::new(3.0, (64.0 + 1.62) - 65.0, 0.0);
-            let expected = to_owner.normalize().scale(0.05 * 3.0);
+            let expected = to_owner
+                .normalize()
+                .scale(0.05 * 3.0)
+                .scale(f64::from(0.99_f32));
             assert!(
                 (trident.delta.x - expected.x).abs() < 1.0e-9
                     && (trident.delta.y - expected.y).abs() < 1.0e-9,

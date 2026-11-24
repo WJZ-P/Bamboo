@@ -112,6 +112,12 @@ struct ProjectileFrame {
     ///
     /// All sounds this tick: id, source ordinal, raw x/y/z, volume, pitch.
     sounds: Option<Vec<[i64; 7]>>,
+    /// 忠诚返回逐刻状态：dealtDamage / noPhysics / 返回计数 / inGroundTime。
+    /// 三叉戟已被丢弃时是 `null`。
+    ///
+    /// Per-tick loyalty state: dealtDamage / noPhysics / return count /
+    /// inGroundTime; `null` once the trident has been removed.
+    trident: Option<Option<[i64; 4]>>,
 }
 
 /// 一次剪刀右键：是否消耗动作，以及掉出来的物品实体（物品、数量、位置和速度的原始位）。
@@ -294,6 +300,29 @@ impl ProjectileCase {
         self.name.starts_with("trident_")
     }
 
+    /// 忠诚等级（忠诚 / 主人死亡 / 旁观场景）。
+    ///
+    /// Loyalty level for the return / dead-owner / spectator scenes.
+    fn loyalty(&self) -> u8 {
+        if self.name.starts_with("trident_loyalty")
+            || self.name.starts_with("trident_owner")
+            || self.name.starts_with("trident_spectator")
+        {
+            3
+        } else {
+            0
+        }
+    }
+
+    /// 场上预置的 `dealtDamage`：忠诚三叉戟从「已命中」态开始返回。
+    ///
+    /// A pre-set `dealtDamage`: a returning loyal trident starts post-hit.
+    fn dealt_damage(&self) -> bool {
+        self.name == "trident_loyalty"
+            || self.name.starts_with("trident_owner")
+            || self.name.starts_with("trident_spectator")
+    }
+
     /// 引雷场景雷雨 + 天空可见（避雷针场景还要求避雷针，由方块表给）。
     ///
     /// Channeling scenes run in a thunderstorm with open sky (the rod scene
@@ -351,7 +380,7 @@ impl ProjectileCase {
         }
     }
 
-    fn spawn(&self, world: &mut World<'_>, mutate: bool, break_pierce: bool) {
+    fn spawn(&self, world: &mut World<'_>, mutate: bool, break_pierce: bool, break_return: bool) {
         if self.skeleton {
             let mut skeleton = world.prepare_entity(Entity::by_mob_type(
                 self.shooter_kind(),
@@ -377,18 +406,59 @@ impl ProjectileCase {
             // throw's initial state is already covered by `shot_trident`; here we
             // compare only the per-tick flight / stick / loyalty / channeling.
             use mc_bamboo_blocks::entity::arrow::{Pickup, TridentShot};
+            use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+            let loyalty = self.loyalty();
+            // 改坏确认：忠诚等级驱动返回加速度（0.05*L），改掉它逐刻位置/速度
+            // 与 ID_LOYALTY 元数据都应报不一致。
+            // Break self-test: the loyalty level drives the return acceleration
+            // (0.05*L); corrupting it must break the per-tick motion and metadata.
+            let loyalty = if break_return && loyalty > 1 {
+                loyalty - 1
+            } else {
+                loyalty
+            };
+            let mut item = ItemStack::new(mc_bamboo_data::items::TRIDENT, 1);
+            if loyalty > 0 {
+                let registry = mc_bamboo_data::registries::SYNCED_REGISTRIES
+                    .iter()
+                    .find(|registry| registry.name == "minecraft:enchantment")
+                    .unwrap();
+                let id = registry
+                    .entries
+                    .iter()
+                    .position(|entry| *entry == "minecraft:loyalty")
+                    .unwrap() as i32;
+                let mut patch = ComponentPatch::new();
+                patch.put(
+                    mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+                    PatchEntry::Set(ComponentValue::Enchantments(vec![(id, i32::from(loyalty))])),
+                );
+                let (added, removed) = patch.to_opaque();
+                item.added = added;
+                item.removed = removed;
+            }
+            let owner_uuid = ((1_u128 << 64) | 2).to_be_bytes();
             let shot = TridentShot {
                 position: Vec3::new(0.5, 65.5, 0.5),
                 direction: Vec3::new(1.0, 0.0, 0.0),
                 power: 1.6,
                 uncertainty: 0.0,
                 source_movement: None,
-                owner: None,
-                owner_uuid: None,
-                item: ItemStack::new(mc_bamboo_data::items::TRIDENT, 1),
-                pickup: Pickup::Disallowed,
+                owner: (loyalty > 0).then_some(self.player_id),
+                owner_uuid: (loyalty > 0).then_some(owner_uuid),
+                item,
+                pickup: if loyalty > 0 {
+                    Pickup::Allowed
+                } else {
+                    Pickup::Disallowed
+                },
             };
             let mut arrow = world.prepare_entity(Entity::configured_trident(&shot));
+            if self.dealt_damage()
+                && let EntityKind::Arrow(data) = &mut arrow.kind
+            {
+                data.dealt_damage = true;
+            }
             arrow.shoot_arrow(Vec3::new(1.0, 0.0, 0.0), 1.6, 0.0);
             world.add_prepared_entity(arrow);
         } else {
@@ -494,6 +564,7 @@ impl Report {
             &mut World::new(&mut level, &mut ticks),
             self.break_test.as_deref() == Some("projectile"),
             self.break_test.as_deref() == Some("arrow_piercing"),
+            self.break_test.as_deref() == Some("trident_return"),
         );
         let mut tracking = EntityTracking::default();
         let mut previous = BTreeSet::new();
@@ -788,6 +859,26 @@ impl Report {
                 self.mismatch(format!(
                     "{label} sounds: official {theirs:?}, bamboo {sounds:?}"
                 ));
+            }
+            if let Some(theirs) = expected.trident {
+                let ours =
+                    level
+                        .entities
+                        .get(case.first_id)
+                        .and_then(|entity| match &entity.kind {
+                            EntityKind::Arrow(data) => Some([
+                                i64::from(data.dealt_damage),
+                                i64::from(data.no_physics),
+                                i64::from(data.client_side_return_trident_tick_count),
+                                i64::from(data.in_ground_time),
+                            ]),
+                            _ => None,
+                        });
+                if theirs != ours {
+                    self.mismatch(format!(
+                        "{label} trident state: official {theirs:?}, bamboo {ours:?}"
+                    ));
+                }
             }
             if let Some(expected_motion) = expected.shooter {
                 // 转化之后射手换成新生成的那只：取表里编号最大的生物。

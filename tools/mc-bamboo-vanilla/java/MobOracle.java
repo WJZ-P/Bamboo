@@ -294,7 +294,7 @@ public final class MobOracle {
                     "stray_bow_normal", "bogged_bow_normal", "bogged_bow_hard",
                     "skeleton_freeze", "bogged_shear",
                     "pillager_crossbow_normal", "pillager_crossbow_hard", "pillager_crossbow_multishot",
-                    "trident_stick")) {
+                    "trident_stick", "trident_loyalty")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
@@ -7974,7 +7974,11 @@ public final class MobOracle {
         // 药水箭插在墙里，中途把 inGroundTime 拨到 597，三刻后褪色。
         // A tipped arrow stuck in the wall; inGroundTime jumps to 597 and it fades three ticks later.
         boolean fade = name.equals("arrow_tipped_fade");
-        boolean hasWall = wall || noGravity || despawn || waterTail || fade || trident;
+        // 只有插地场景需要 (7,65,0) 的墙；忠诚返回要让路径干净、别撞墙。
+        // Only the stick scene needs the wall at (7,65,0); the loyalty return
+        // needs a clear flight path.
+        boolean hasWall = wall || noGravity || despawn || waterTail || fade
+                || name.equals("trident_stick");
         Difficulty difficulty = name.endsWith("_hard") ? Difficulty.HARD : Difficulty.NORMAL;
         FakeLevel world = FakeLevel.create(official);
         world.injectedBrightOutside = false;
@@ -8073,9 +8077,9 @@ public final class MobOracle {
             // stack like Rust's `configured_trident`, then use the official
             // `shoot`. The throw's initial state is already covered by
             // `shot_trident`; here we compare the per-tick flight.
-            ItemStack stack = new ItemStack(Items.TRIDENT);
             boolean loyalty = name.startsWith("trident_loyalty") || name.startsWith("trident_owner")
                     || name.startsWith("trident_spectator");
+            ItemStack stack = new ItemStack(Items.TRIDENT);
             if (loyalty) enchant(official, stack, Enchantments.LOYALTY, 3);
             if (name.startsWith("trident_channeling")) enchant(official, stack, Enchantments.CHANNELING, 1);
             var arrow = new net.minecraft.world.entity.projectile.arrow.ThrownTrident(
@@ -8084,6 +8088,17 @@ public final class MobOracle {
             arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
             arrow.setPos(0.5, 65.5, 0.5);
             arrow.shoot(1.0, 0.0, 0.0, 1.6F, 0.0F);
+            if (loyalty) {
+                // 忠诚返回：主人是场景玩家，`dealtDamage` 预置成「已命中」，
+                // 于是 `tick()` 第一刻就按 (dealtDamage || isNoPhysics) 进入返回分支。
+                // Loyalty: the owner is the scene player and `dealtDamage` starts
+                // as "already hit", so `tick()` enters the return branch on its
+                // very first tick via (dealtDamage || isNoPhysics).
+                arrow.setOwner(player);
+                arrow.pickup = net.minecraft.world.entity.projectile.arrow.AbstractArrow.Pickup.ALLOWED;
+                putBoolean(net.minecraft.world.entity.projectile.arrow.ThrownTrident.class,
+                        arrow, "dealtDamage", true);
+            }
             arrows.add(arrow);
             world.tracked.add(arrow);
         } else {
@@ -8313,6 +8328,26 @@ public final class MobOracle {
                 frames.append(",\"sounds\":").append(world.soundLog.stream()
                         .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
                 world.soundLog.clear();
+                // 忠诚返回逐刻状态：dealtDamage / noPhysics / 返回计数 / inGroundTime。
+                // Loyalty return state: dealtDamage / noPhysics / return count / inGroundTime.
+                frames.append(",\"trident\":");
+                net.minecraft.world.entity.projectile.arrow.AbstractArrow live = null;
+                for (var arrow : arrows) {
+                    if (!arrow.isRemoved()) { live = arrow; break; }
+                }
+                if (live == null) {
+                    frames.append("null");
+                } else {
+                    var t = (net.minecraft.world.entity.projectile.arrow.ThrownTrident) live;
+                    frames.append('[')
+                            .append(getBoolean(net.minecraft.world.entity.projectile.arrow.ThrownTrident.class,
+                                    t, "dealtDamage") ? 1 : 0).append(',')
+                            .append(t.isNoPhysics() ? 1 : 0).append(',')
+                            .append(t.clientSideReturnTridentTickCount).append(',')
+                            .append(getInt(net.minecraft.world.entity.projectile.arrow.AbstractArrow.class,
+                                    t, "inGroundTime"))
+                            .append(']');
+                }
             }
             if (enchanted) {
                 Vec3 delta = player.getDeltaMovement();
