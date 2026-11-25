@@ -539,7 +539,8 @@ impl PlayerData {
         data.seen_credits = opt_bool(entries, "seenCredits", false)?;
         data.spawn_extra_particles_on_fall =
             opt_bool(entries, "spawn_extra_particles_on_fall", false)?;
-        data.warden_spawn_tracker = decode_warden_spawn_tracker(field_of(entries, "warden_spawn_tracker"));
+        data.warden_spawn_tracker =
+            decode_warden_spawn_tracker(field_of(entries, "warden_spawn_tracker"));
         if let Some(tag) = field_of(entries, "abilities") {
             data.abilities = decode_abilities(tag)?;
         } else {
@@ -640,9 +641,7 @@ fn decode_warden_spawn_tracker(tag: Option<&Tag>) -> WardenSpawnTracker {
         .unwrap_or(0)
         .max(0);
     tracker.warning_level = opt_int(entries, "warning_level", 0).unwrap_or(0).max(0);
-    tracker.cooldown_ticks = opt_int(entries, "cooldown_ticks", 0)
-        .unwrap_or(0)
-        .max(0);
+    tracker.cooldown_ticks = opt_int(entries, "cooldown_ticks", 0).unwrap_or(0).max(0);
     tracker
 }
 
