@@ -135,6 +135,11 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
         "minecraft:command_block" => (command_block(raw), COMMAND_BLOCK_OMIT),
         "minecraft:test_block" => (test_block(raw), TEST_BLOCK_OMIT),
         "minecraft:test_instance_block" => (test_instance_block(raw), TEST_INSTANCE_OMIT),
+        // `CopperGolemStatueBlockEntity` 不覆写 `saveAdditional`：自定义名在 `components`
+        // 组件表里，是元数据键，由游戏层的组件补丁写；这里没有任何自有键。
+        // A copper golem statue overrides no `saveAdditional`: its custom name lives in
+        // the `components` metadata key, written by the game layer's component patch.
+        "minecraft:copper_golem_statue" => (Vec::new(), &[][..]),
         _ => return None,
     };
     Some(Resaved::new(fields, omit))

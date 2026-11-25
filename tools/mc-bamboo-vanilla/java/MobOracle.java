@@ -489,6 +489,9 @@ public final class MobOracle {
             if (only == null || "golem_save".startsWith(only)) {
                 cases += playGolemSaves(official, out);
             }
+            if (only == null || only.startsWith("copper_golem")) {
+                cases += playCopperGolem(official, out, only);
+            }
             for (String name : List.of("golem_iron_idle", "golem_iron_attack", "golem_iron_repair",
                     "golem_iron_death", "golem_iron_player_created", "golem_snow_idle",
                     "golem_snow_no_grief", "golem_snow_shear", "golem_snow_wet",
@@ -16124,6 +16127,295 @@ public final class MobOracle {
                 net.minecraft.world.entity.player.Player.class, InteractionHand.class);
         method.setAccessible(true);
         method.invoke(golem, player, InteractionHand.MAIN_HAND);
+    }
+
+    /**
+     * 铜傀儡逐刻对拍：官方假世界里跑真 `CopperGolem.tick()` / 大脑 / 搬运行为，
+     * 逐刻比方块、容器槽位、氧化等级与计时、状态、主手物品、大脑快照和世界随机源。
+     */
+    private static int playCopperGolem(Official official, Writer out, String only) throws Exception {
+        String[] names = {
+            "copper_golem_build",
+            "copper_golem_transport",
+            "copper_golem_no_target",
+            "copper_golem_oxidize",
+            "copper_golem_wax",
+            "copper_golem_statue",
+        };
+        int cases = 0;
+        for (String name : names) {
+            if (only != null && !name.startsWith(only)) continue;
+            playCopperGolemOne(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    private static void playCopperGolemOne(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        try {
+            level.nextId = FIRST_ID;
+            level.gameTime = START_TIME;
+            level.injectedCanSeeSky = true;
+            level.getRandom().setSeed(1L);
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            level.blockEntities = new Long2ObjectOpenHashMap<>();
+            level.spawned = new ArrayList<>();
+            level.levelEvents = new ArrayList<>();
+            put(ServerLevel.class, level, "blockEvents",
+                    new it.unimi.dsi.fastutil.objects.ObjectLinkedOpenHashSet<>());
+            java.util.Map<Object, Object> levels = new java.util.LinkedHashMap<>();
+            levels.put(Level.OVERWORLD, level);
+            put(MinecraftServer.class, official.server, "levels", levels);
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -4; x <= 8; x++) {
+                for (int z = -4; z <= 8; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+
+            // 南瓜放在铜块上：`CarvedPumpkinBlock.onPlace` 的搭建图案。
+            BlockPos build = new BlockPos(2, 64, 0);
+            BlockPos pumpkin = build.above();
+            boolean buildScene = name.equals("copper_golem_build");
+            if (buildScene) {
+                level.blocks.put(build.asLong(), Blocks.COPPER_BLOCK.weathering().unaffected().defaultBlockState());
+                level.blocks.put(pumpkin.asLong(), Blocks.CARVED_PUMPKIN.defaultBlockState());
+            }
+
+            // 铜箱子（源）和普通箱子（目标）：每个都挂真的 net.minecraft.world.level.block.entity.ChestBlockEntity 并登记进
+            // 假世界的方块实体表 + 区块的 getBlockEntities()，搬运行为的搜索走后者。
+            BlockPos source = new BlockPos(3, 63, 0);
+            BlockPos dest = new BlockPos(4, 63, 0);
+            boolean hasSource = name.equals("copper_golem_transport") || name.equals("copper_golem_no_target");
+            boolean hasDest = name.equals("copper_golem_transport");
+            net.minecraft.world.level.block.entity.ChestBlockEntity sourceBe = null;
+            net.minecraft.world.level.block.entity.ChestBlockEntity destBe = null;
+            if (hasSource) {
+                level.blocks.put(source.asLong(), Blocks.COPPER_CHEST.weathering().unaffected().defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.ChestBlock.FACING, Direction.NORTH));
+                sourceBe = new net.minecraft.world.level.block.entity.ChestBlockEntity(source, level.getBlockState(source));
+                sourceBe.setItem(0, new ItemStack(Items.STONE, 5));
+                level.putBlockEntity(sourceBe);
+            }
+            if (hasDest) {
+                level.blocks.put(dest.asLong(), Blocks.CHEST.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.ChestBlock.FACING, Direction.NORTH));
+                destBe = new net.minecraft.world.level.block.entity.ChestBlockEntity(dest, level.getBlockState(dest));
+                destBe.setItem(0, new ItemStack(Items.STONE, 2));
+                level.putBlockEntity(destBe);
+            }
+            // `getChunkNow` 建区块时把 level.blocks 拷进区段；必须在方块状态写完之后
+            // 清缓存重建，否则 `setBlockEntity` 看到的还是空气。
+            level.chunkCache.clear();
+            LevelChunk chestChunk = level.chunkSource.getChunkNow(0, 0);
+            if (sourceBe != null) chestChunk.setBlockEntity(sourceBe);
+            if (destBe != null) chestChunk.setBlockEntity(destBe);
+
+            var golem = (net.minecraft.world.entity.animal.golem.CopperGolem) EntityTypes.COPPER_GOLEM
+                    .create(level, EntitySpawnReason.COMMAND);
+            golem.setId(FIRST_ID);
+            setRandom(golem, ENTITY_RANDOM_SEED);
+            golem.setUUID(new UUID(0L, 3L));
+            golem.snapTo(3.5, 64.0, 0.5, 0.0F, 0.0F);
+            golem.setYHeadRot(0.0F);
+            golem.setYBodyRot(0.0F);
+            BrainOracle.fixSensorDelays(golem, 1L);
+            BrainOracle.reseedShuffles(golem, randomSeed(golem));
+            // 构造时的 `nextInt(60,100)` 来自 Sensor 的全局无种子随机源，夹具里定成
+            // 固定值 65，和 Bamboo 的实体随机源逐位对齐。
+            golem.getBrain().setMemory(
+                    net.minecraft.world.entity.ai.memory.MemoryModuleType.TRANSPORT_ITEMS_COOLDOWN_TICKS, 65);
+            if (name.equals("copper_golem_transport") || name.equals("copper_golem_no_target")) {
+                golem.getBrain().eraseMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.TRANSPORT_ITEMS_COOLDOWN_TICKS);
+            }
+            long weatheringTick = -1L;
+            var weather = net.minecraft.world.level.block.WeatheringCopper.WeatherState.UNAFFECTED;
+            if (name.equals("copper_golem_oxidize")) {
+                weatheringTick = START_TIME + 3L;
+                put(net.minecraft.world.entity.animal.golem.CopperGolem.class, golem,
+                        "nextWeatheringTick", weatheringTick);
+            } else if (name.equals("copper_golem_wax")) {
+                put(net.minecraft.world.entity.animal.golem.CopperGolem.class, golem,
+                        "nextWeatheringTick", -2L);
+            } else if (name.equals("copper_golem_statue")) {
+                golem.setWeatherState(net.minecraft.world.level.block.WeatheringCopper.WeatherState.OXIDIZED);
+                put(net.minecraft.world.entity.animal.golem.CopperGolem.class, golem,
+                        "nextWeatheringTick", 0L);
+                // `LegacyRandomSource(1).nextFloat()` 约 8.95e-5，小于 0.0058：
+                // 第一刻就掷中变雕像；之后不能再被别的行为抽走随机数。
+                level.getRandom().setSeed(1L);
+            }
+            level.tracked.add(golem);
+
+            int ticks = switch (name) {
+                case "copper_golem_build" -> 1;
+                case "copper_golem_transport" -> 62;
+                case "copper_golem_no_target" -> 62;
+                case "copper_golem_oxidize" -> 8;
+                case "copper_golem_wax" -> 8;
+                case "copper_golem_statue" -> 4;
+                default -> 4;
+            };
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                long startSeed = levelSeed(level);
+                if (tick > 0) {
+                    level.gameTime++;
+                    if (buildScene && tick == 1) {
+                        // 官方 `CarvedPumpkinBlock.onPlace` 由放置时触发；假世界直接调一次同名入口。
+                        var onPlace = net.minecraft.world.level.block.state.BlockBehaviour.class
+                                .getDeclaredMethod("onPlace", BlockState.class, Level.class,
+                                        BlockPos.class, BlockState.class, boolean.class);
+                        onPlace.setAccessible(true);
+                        onPlace.invoke(Blocks.CARVED_PUMPKIN, level.getBlockState(pumpkin), level, pumpkin,
+                                Blocks.AIR.defaultBlockState(), false);
+                    }
+                    if (!golem.isRemoved()) {
+                        // 雕像场景：`CarvedPumpkinBlock` 之外的假世界不会自动建
+                        // `CopperGolemStatueBlockEntity`，这里按其默认方块预置一个，
+                        // 再直接调官方私有 `turnToStatue`（等价于掷中 0.0058 后的分支）。
+                        if (name.equals("copper_golem_statue") && tick == 1) {
+                            BlockPos statuePos = golem.blockPosition();
+                            var statueState = Blocks.COPPER_GOLEM_STATUE.weathering().oxidized().defaultBlockState();
+                            var statueBe = new net.minecraft.world.level.block.entity.CopperGolemStatueBlockEntity(
+                                    statuePos, statueState);
+                            level.putBlockEntity(statueBe);
+                            var turn = net.minecraft.world.entity.animal.golem.CopperGolem.class
+                                    .getDeclaredMethod("turnToStatue", net.minecraft.server.level.ServerLevel.class);
+                            turn.setAccessible(true);
+                            turn.invoke(golem, level);
+                        }
+                        golem.checkDespawn();
+                        golem.commonTick();
+                        golem.tick();
+                    }
+                }
+                if (tick > 0) frames.append(',');
+                frames.append("{\"blocks\":").append(copperBlocks(level, build, source, dest, hasSource, hasDest));
+                frames.append(",\"chests\":").append(copperChests(level, sourceBe, destBe));
+                frames.append(",\"openCounts\":").append(copperOpenCounts(sourceBe, destBe));
+                frames.append(",\"golem\":").append(copperGolemState(level, golem));
+                frames.append(",\"brain\":").append(copperBrainSummary(golem));
+                frames.append(",\"startSeed\":").append(startSeed)
+                        .append(",\"levelSeed\":").append(levelSeed(level));
+                frames.append(",\"spawns\":").append(copperSpawns(level));
+                frames.append('}');
+                level.spawned.clear();
+            }
+            out.write("{\"type\":\"copperGolem\",\"name\":" + jsonString(name)
+                    + ",\"frames\":" + frames.toString() + "]}\n");
+            out.flush();
+        } finally {
+            official.attributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+        }
+    }
+
+    private static String copperBlocks(FakeLevel level, BlockPos build, BlockPos source,
+            BlockPos dest, boolean hasSource, boolean hasDest) {
+        BlockPos[] cells = {build, build.above(), source, dest, new BlockPos(3, 64, 0)};
+        StringBuilder out = new StringBuilder("[");
+        for (int i = 0; i < cells.length; i++) {
+            if (i > 0) out.append(',');
+            out.append(Block.getId(level.getBlockState(cells[i])));
+        }
+        return out.append(']').toString();
+    }
+
+    /** `ChestBlockEntity.getEntitiesWithContainerOpen().size()`，即开盖者计数。 */
+    private static String copperOpenCounts(net.minecraft.world.level.block.entity.ChestBlockEntity source,
+            net.minecraft.world.level.block.entity.ChestBlockEntity dest) {
+        return "[" + (source == null ? 0 : source.getEntitiesWithContainerOpen().size())
+                + "," + (dest == null ? 0 : dest.getEntitiesWithContainerOpen().size()) + "]";
+    }
+
+    private static String copperChests(FakeLevel level, net.minecraft.world.level.block.entity.ChestBlockEntity source, net.minecraft.world.level.block.entity.ChestBlockEntity dest) {
+        StringBuilder out = new StringBuilder("[");
+        for (net.minecraft.world.level.block.entity.ChestBlockEntity be : new net.minecraft.world.level.block.entity.ChestBlockEntity[] {source, dest}) {
+            if (be == null) {
+                out.append("[],");
+                continue;
+            }
+            out.append('[');
+            for (int slot = 0; slot < be.getContainerSize(); slot++) {
+                if (slot > 0) out.append(',');
+                var stack = be.getItem(slot);
+                out.append('[').append(stack.isEmpty() ? 0 : net.minecraft.world.item.Item.getId(stack.getItem()))
+                        .append(',').append(stack.getCount()).append(']');
+            }
+            out.append("],");
+        }
+        // 去掉最后一个逗号。
+        out.setLength(out.length() - 1);
+        return out.append(']').toString();
+    }
+
+    private static String copperGolemState(FakeLevel level,
+            net.minecraft.world.entity.animal.golem.CopperGolem golem) throws Exception {
+        if (golem.isRemoved()) {
+            return "[1,0,0,0,0,0,0,0]";
+        }
+        var held = golem.getMainHandItem();
+        var clockField = net.minecraft.world.entity.animal.golem.CopperGolem.class
+                .getDeclaredField("nextWeatheringTick");
+        clockField.setAccessible(true);
+        StringBuilder out = new StringBuilder("[0,");
+        out.append(golem.getWeatherState().ordinal()).append(',')
+                .append(golem.getState().ordinal()).append(',')
+                .append(clockField.getLong(golem)).append(',')
+                .append(held.isEmpty() ? 0 : net.minecraft.world.item.Item.getId(held.getItem())).append(',')
+                .append(held.getCount()).append(',')
+                .append(Float.floatToRawIntBits(golem.getHealth())).append(',')
+                .append(Double.doubleToRawLongBits(golem.position().x)).append(']');
+        return out.toString();
+    }
+
+    /** 铜傀儁逐刻的大脑摘要：活动、正在跑的行为名、冷却 / 位置集合 / 走路目标。
+     *  固定格式，不受 `HashSet` 类名和空 `visible_mobs` 记忆的 Java/Bamboo 表现差异影响；
+     *  每一项都是官方大脑里的真实值。 */
+    private static String copperBrainSummary(net.minecraft.world.entity.animal.golem.CopperGolem golem)
+            throws Exception {
+        if (golem.isRemoved()) return "[]";
+        var brain = golem.getBrain();
+        StringBuilder out = new StringBuilder("[");
+        java.util.List<String> activities = new java.util.ArrayList<>();
+        for (var a : brain.getActiveActivities()) activities.add(a.getName());
+        java.util.Collections.sort(activities);
+        out.append(jsonString(String.join(",", activities))).append(',');
+        java.util.List<String> running = new java.util.ArrayList<>();
+        for (var b : brain.getRunningBehaviors()) running.add(BrainOracle.behaviorName(b));
+        java.util.Collections.sort(running);
+        out.append(jsonString(String.join(",", running))).append(',');
+        out.append(jsonString(brain.getMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.TRANSPORT_ITEMS_COOLDOWN_TICKS)
+                .map(String::valueOf).orElse(""))).append(',');
+        out.append(jsonString(brain.getMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.VISITED_BLOCK_POSITIONS)
+                .map(set -> set.stream()
+                        .map(gp -> gp.pos().getX() + ":" + gp.pos().getY() + ":" + gp.pos().getZ())
+                        .sorted().collect(java.util.stream.Collectors.joining(";")))
+                .orElse(""))).append(',');
+        out.append(jsonString(brain.getMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.UNREACHABLE_TRANSPORT_BLOCK_POSITIONS)
+                .map(set -> set.stream()
+                        .map(gp -> gp.pos().getX() + ":" + gp.pos().getY() + ":" + gp.pos().getZ())
+                        .sorted().collect(java.util.stream.Collectors.joining(";")))
+                .orElse(""))).append(',');
+        out.append(jsonString(brain.getMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.WALK_TARGET)
+                .map(w -> BrainOracle.pos(w.getTarget().currentBlockPosition()))
+                .orElse(""))).append(',');
+        out.append(jsonString(brain.getMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.LOOK_TARGET)
+                .map(BrainOracle::trackerPos).orElse("")));
+        return out.append(']').toString();
+    }
+
+    private static String copperSpawns(FakeLevel level) {
+        StringBuilder out = new StringBuilder("[");
+        boolean first = true;
+        for (Entity spawned : level.spawned) {
+            if (!first) out.append(',');
+            first = false;
+            out.append('[').append(jsonString(BuiltInRegistries.ENTITY_TYPE.getKey(spawned.getType()).getPath()))
+                    .append(',').append(spawned.getId()).append(']');
+        }
+        return out.append(']').toString();
     }
 
     private static void playGolem(Official official, Writer out, String name) throws Exception {

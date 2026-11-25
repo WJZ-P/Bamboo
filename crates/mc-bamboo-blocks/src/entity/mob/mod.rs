@@ -27,6 +27,7 @@ pub mod cat;
 pub mod chicken;
 pub mod control;
 pub mod conversion;
+pub mod copper_golem;
 pub mod creaking;
 mod creaking_ai;
 pub mod creeper;
@@ -242,6 +243,10 @@ pub enum MobType {
     ///
     /// The `ZombieNautilus`.
     ZombieNautilus,
+    /// 铜傀儡，`CopperGolem`。
+    ///
+    /// The `CopperGolem`.
+    CopperGolem,
     /// 监守者，`Warden`。`Monster` → `Warden`，脑驱动，自己是振动监听者。
     ///
     /// The `Warden`. A `Monster` → `Warden`, brain-driven, itself a vibration listener.
@@ -271,7 +276,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 69] = [
+    pub const ALL: [Self; 70] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -334,6 +339,7 @@ impl MobType {
         Self::SulfurCube,
         Self::Nautilus,
         Self::ZombieNautilus,
+        Self::CopperGolem,
         Self::Creaking,
         Self::Warden,
         Self::Sniffer,
@@ -410,7 +416,9 @@ impl MobType {
             Self::Creaking => ids::CREAKING,
             Self::Nautilus => ids::NAUTILUS,
             Self::ZombieNautilus => ids::ZOMBIE_NAUTILUS,
+            Self::CopperGolem => ids::COPPER_GOLEM,
             Self::Warden => ids::WARDEN,
+
             Self::Sniffer => ids::SNIFFER,
             Self::Vindicator => ids::VINDICATOR,
             Self::Ravager => ids::RAVAGER,
@@ -485,7 +493,9 @@ impl MobType {
             Self::Creaking => "minecraft:creaking",
             Self::Nautilus => "minecraft:nautilus",
             Self::ZombieNautilus => "minecraft:zombie_nautilus",
+            Self::CopperGolem => "minecraft:copper_golem",
             Self::Warden => "minecraft:warden",
+
             Self::Sniffer => "minecraft:sniffer",
             Self::Vindicator => "minecraft:vindicator",
             Self::Ravager => "minecraft:ravager",
@@ -655,6 +665,7 @@ impl MobType {
             (Self::Guardian, _) => (0.85, 0.85, 0.425),
             (Self::ElderGuardian, _) => (1.9975, 1.9975, 0.99875),
             (Self::Nautilus | Self::ZombieNautilus, baby) => nautilus::dimensions(baby),
+            (Self::CopperGolem, baby) => copper_golem::dimensions(baby),
             (Self::Sniffer, baby) => sniffer::dimensions(baby),
             // `EntityTypes.VINDICATOR` / `RAVAGER`：眼高用官方缺省的 height*0.85。
             (Self::Vindicator, _) => (0.6, 1.95, 1.95 * 0.85),
@@ -828,6 +839,7 @@ impl MobType {
                 | Self::Tadpole
                 | Self::Bee
                 | Self::IronGolem
+                | Self::CopperGolem
                 | Self::SulfurCube
         )
     }
@@ -1187,7 +1199,9 @@ impl MobType {
             Self::Creaking => "minecraft:entities/creaking",
             Self::Nautilus => "minecraft:entities/nautilus",
             Self::ZombieNautilus => "minecraft:entities/zombie_nautilus",
+            Self::CopperGolem => "minecraft:entities/copper_golem",
             Self::Warden => "minecraft:entities/warden",
+
             Self::Sniffer => "minecraft:entities/sniffer",
             Self::Vindicator => "minecraft:entities/vindicator",
             Self::Ravager => "minecraft:entities/ravager",
@@ -1344,7 +1358,9 @@ impl MobType {
             | Self::SulfurCube
             | Self::Nautilus
             | Self::ZombieNautilus
-            | Self::Creaking => None,
+            | Self::CopperGolem => None,
+            Self::Creaking => None,
+
             // `Sniffer.getAmbientSound`：挖掘 / 搜寻时不叫，见 `sniffer::ambient_voice`。
             // `Sniffer.getAmbientSound`: silent while digging or searching; see
             // `sniffer::ambient_voice`.
@@ -1418,7 +1434,9 @@ impl MobType {
             | Self::SulfurCube
             | Self::Nautilus
             | Self::ZombieNautilus
-            | Self::Creaking => None,
+            | Self::CopperGolem => None,
+            Self::Creaking => None,
+
             Self::Sniffer => Some("minecraft:entity.sniffer.hurt"),
             Self::Vindicator => Some("minecraft:entity.vindicator.hurt"),
             Self::Ravager => Some("minecraft:entity.ravager.hurt"),
@@ -1487,7 +1505,8 @@ impl MobType {
             | Self::ElderGuardian
             | Self::SulfurCube
             | Self::Nautilus
-            | Self::ZombieNautilus => None,
+            | Self::ZombieNautilus
+            | Self::CopperGolem => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.death"),
             Self::Vindicator => Some("minecraft:entity.vindicator.death"),
             Self::Ravager => Some("minecraft:entity.ravager.death"),
@@ -1567,7 +1586,8 @@ impl MobType {
             | Self::ElderGuardian
             | Self::SulfurCube
             | Self::Nautilus
-            | Self::ZombieNautilus => None,
+            | Self::ZombieNautilus
+            | Self::CopperGolem => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.step"),
             // `AbstractIllager` / `Vindicator` 没有覆写脚步声；劫掠兽有自己的。
             Self::Vindicator => None,
@@ -1647,6 +1667,7 @@ impl MobType {
             Self::Creaking => items::CREAKING_SPAWN_EGG,
             Self::Nautilus => items::NAUTILUS_SPAWN_EGG,
             Self::ZombieNautilus => items::ZOMBIE_NAUTILUS_SPAWN_EGG,
+            Self::CopperGolem => items::COPPER_GOLEM_SPAWN_EGG,
             Self::Sniffer => items::SNIFFER_SPAWN_EGG,
             Self::Vindicator => items::VINDICATOR_SPAWN_EGG,
             Self::Ravager => items::RAVAGER_SPAWN_EGG,
@@ -1722,6 +1743,7 @@ impl MobType {
             Self::Creaking => "entity.minecraft.creaking",
             Self::Nautilus => "entity.minecraft.nautilus",
             Self::ZombieNautilus => "entity.minecraft.zombie_nautilus",
+            Self::CopperGolem => "entity.minecraft.copper_golem",
             Self::Sniffer => "entity.minecraft.sniffer",
             Self::Vindicator => "entity.minecraft.vindicator",
             Self::Ravager => "entity.minecraft.ravager",
@@ -2969,6 +2991,11 @@ pub struct Mob {
     ///
     /// The zombie villager cure timer and the player who started it.
     pub zombie_villager: zombie_villager::ZombieVillagerState,
+    /// 铜傀儡的氧化等级、状态、氧化计时和开箱位置；别的生物恒为缺省值。
+    ///
+    /// The copper golem's oxidation stage, state, weathering clock and opened chest;
+    /// defaults for other mobs.
+    pub copper_golem: copper_golem::CopperGolem,
     /// 蝙蝠的标志字节和飞行目标；别的生物是缺省值。
     ///
     /// The bat flag byte and flight target; default for every other mob.
@@ -3260,7 +3287,9 @@ impl Mob {
             MobType::SulfurCube => sulfur_cube::attributes(),
             MobType::Creaking => creaking::attributes(),
             MobType::Nautilus | MobType::ZombieNautilus => nautilus::attributes(mob_type),
+            MobType::CopperGolem => copper_golem::attributes(),
             MobType::Warden => warden::attributes(),
+
             MobType::Sniffer => sniffer::attributes(),
             MobType::Vindicator => vindicator::attributes(),
             MobType::Ravager => ravager::attributes(),
@@ -3295,6 +3324,13 @@ impl Mob {
             // and loot pickup.
             navigation.flags.can_open_doors = true;
             navigation.flags.can_float = true;
+            navigation.required_path_length = 48.0;
+            navigation.update_max_visited_nodes(follow_range);
+        }
+        if mob_type == MobType::CopperGolem {
+            // `CopperGolem` 构造函数：能开门、要求路径长度 48。
+            // The `CopperGolem` constructor: doors and required path length 48.
+            navigation.flags.can_open_doors = true;
             navigation.required_path_length = 48.0;
             navigation.update_max_visited_nodes(follow_range);
         }
@@ -3346,8 +3382,10 @@ impl Mob {
             | MobType::Villager
             | MobType::Nautilus
             | MobType::ZombieNautilus
-            | MobType::Creaking => GoalSelector::default(),
-            MobType::Sniffer => GoalSelector::default(),
+            | MobType::CopperGolem
+            | MobType::Creaking
+            | MobType::Sniffer => GoalSelector::default(),
+
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
             // alongside the brain.
@@ -3422,6 +3460,7 @@ impl Mob {
             | MobType::CamelHusk
             | MobType::Nautilus
             | MobType::ZombieNautilus
+            | MobType::CopperGolem
             | MobType::Sniffer => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
@@ -3588,6 +3627,15 @@ impl Mob {
                 // 蝙蝠直接继承 `Mob`，没有 `Animal` 的两项覆盖。
                 // Bats extend `Mob` directly, without the two `Animal` overrides.
                 MobType::Bat | MobType::Phantom => Malus::monster(),
+                MobType::CopperGolem => {
+                    // `CopperGolem` 构造函数的三项寻路代价。
+                    // The three pathfinding maluses from the `CopperGolem` constructor.
+                    let mut malus = Malus::animal();
+                    malus.set(mc_bamboo_data::PathType::FireInNeighbor, 16.0);
+                    malus.set(mc_bamboo_data::PathType::DamagingInNeighbor, 16.0);
+                    malus.set(mc_bamboo_data::PathType::Fire, -1.0);
+                    malus
+                }
                 _ => Malus::animal(),
             },
             persistence_required: false,
@@ -3693,6 +3741,7 @@ impl Mob {
             snow_golem: snow_golem::SnowGolem::default(),
             villager: villager::Villager::default(),
             zombie_villager: zombie_villager::ZombieVillagerState::default(),
+            copper_golem: copper_golem::CopperGolem::default(),
             tadpole_age: 0,
             warden: warden::Warden::default(),
             entity_listener: None,
@@ -3760,6 +3809,11 @@ impl Mob {
             // `Armadillo` 构造函数里的 `getNavigation().setCanFloat(true)`。
             // The `Armadillo` constructor's `getNavigation().setCanFloat(true)`.
             mob.navigation.flags.can_float = true;
+        }
+        if mob_type == MobType::CopperGolem {
+            // `CopperGolem` 构造函数里的 `setPersistenceRequired()`。
+            // The `CopperGolem` constructor's `setPersistenceRequired()`.
+            mob.persistence_required = true;
         }
         if mob_type == MobType::Sniffer {
             sniffer::configure(&mut mob);
@@ -4343,8 +4397,14 @@ pub struct MobPublic {
     /// 硫磺方块怪的 `MAX_FUSE` / `FROM_BUCKET` 元数据。
     pub sulfur_cube_max_fuse: i32,
     pub sulfur_cube_from_bucket: bool,
+    /// `CopperGolem.DATA_WEATHER_STATE` / `COPPER_GOLEM_STATE` 的网络 ID。
+    ///
+    /// The network ids of `CopperGolem.DATA_WEATHER_STATE` / `COPPER_GOLEM_STATE`.
+    pub copper_golem_weather_state: i32,
+    pub copper_golem_state: i32,
     /// 嘎枝的四项元数据。
     pub creaking: creaking::CreakingState,
+
     /// `Mob.isPersistenceRequired()`：持久化的生物不参与自然刷怪的计数。
     ///
     /// `Mob.isPersistenceRequired()`: persistent mobs are left out of the spawn counts.
@@ -4502,7 +4562,10 @@ impl MobPublic {
             cube_size: mob.cube.size,
             sulfur_cube_max_fuse: mob.sulfur_cube.max_fuse,
             sulfur_cube_from_bucket: mob.sulfur_cube.from_bucket,
+            copper_golem_weather_state: mob.copper_golem.weather_state.id(),
+            copper_golem_state: mob.copper_golem.state.id(),
             creaking: mob.creaking,
+
             equipment: mob
                 .equipment
                 .iter()
@@ -4583,8 +4646,10 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Axolotl => Some(Box::new(axolotl::brain())),
         MobType::Villager => Some(Box::new(villager_ai::brain(false, 0))),
         MobType::Nautilus | MobType::ZombieNautilus => Some(Box::new(nautilus_ai::brain(kind))),
+        MobType::CopperGolem => Some(Box::new(copper_golem::brain())),
         MobType::Creaking => Some(Box::new(creaking_ai::brain())),
         MobType::Warden => Some(Box::new(warden_ai::brain())),
+
         MobType::Sniffer => Some(Box::new(sniffer::brain())),
         _ => None,
     }

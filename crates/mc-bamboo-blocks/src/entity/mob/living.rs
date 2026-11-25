@@ -322,6 +322,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Axolotl {
         super::axolotl::sync_playing_dead(mob);
     }
+    // `CopperGolem.tick` 在 `super.tick()` 之后：氧化计时与变雕像。
+    // `CopperGolem.tick` after `super.tick()`: the weathering clock and statue conversion.
+    if mob.mob_type == super::MobType::CopperGolem && !me.removed {
+        super::copper_golem::tick_after(me, mob, ctx);
+    }
 }
 
 /// `LivingEntity.detectEquipmentUpdates`：在 `aiStep` 之前比较装备，变了的槽发给跟踪的玩家。
@@ -910,6 +915,16 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
 /// Ambient, hurt and death sounds: equines by kind and age, others by type,
 /// cows by their sound variant.
 fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
+    // 铜傀儡的受伤 / 死亡音按氧化等级换，环境音恒无。
+    // A copper golem's hurt / death sounds depend on its oxidation stage; no ambient.
+    if mob.mob_type == super::MobType::CopperGolem {
+        let weather = mob.copper_golem.weather_state;
+        return match voice {
+            Voice::Hurt => super::copper_golem::hurt_sound(weather),
+            Voice::Death => super::copper_golem::death_sound(weather),
+            _ => "",
+        };
+    }
     // 硫磺方块怪按大小和是否吞了方块分派四种声音。
     // Sulfur cubes dispatch their four sounds by size and body item.
     if mob.mob_type == super::MobType::SulfurCube {
@@ -2098,6 +2113,9 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     if super::nautilus::is_nautilus(mob.mob_type) {
         super::nautilus_ai::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::CopperGolem {
+        super::copper_golem::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Creaking {
         super::creaking_ai::custom_server_ai_step(me, mob, ctx);
     }
@@ -3197,6 +3215,9 @@ fn hurt_living(
 fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource, time: i64) {
     if mob.mob_type == super::MobType::Armadillo {
         super::armadillo::after_actually_hurt(me, mob, source);
+    }
+    if mob.mob_type == super::MobType::CopperGolem {
+        super::copper_golem::after_hurt(mob);
     }
     // `Camel.actuallyHurt` 在 `super` 之前 `standUpInstantly()`；纯状态改动、不取随机数，
     // 放在 `super` 之后对可观察状态等价。

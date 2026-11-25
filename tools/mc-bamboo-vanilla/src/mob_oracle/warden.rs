@@ -77,6 +77,8 @@ fn mob_level(case: &WardenCase) -> MobLevel {
         warden_warnings: Default::default(),
         darkness_ticks: 0,
         poi: mc_bamboo_world::poi::PoiStore::new(),
+        containers: Default::default(),
+        container_open_counts: Default::default(),
         shoulder: Default::default(),
         entities: Entities::with_next_id(case.first_id),
         players: Vec::new(),
