@@ -5195,6 +5195,7 @@ mod tests {
                 | Effect::RaiderDied { .. }
                 | Effect::Explode { .. }
                 | Effect::PlayerShoulder { .. }
+                | Effect::Particles { .. }
                 | Effect::VibrationParticle { .. } => None,
             })
             .collect()

@@ -1256,7 +1256,8 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // 爆炸包发给附近玩家，方块题不比较。
             | Effect::Explode { .. }
             | Effect::PlayerShoulder { .. }
-            | Effect::VibrationParticle { .. } => None,
+            | Effect::VibrationParticle { .. }
+            | Effect::Particles { .. } => None,
         })
         .collect()
 }
@@ -1385,6 +1386,7 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::Explode { .. }
             | Effect::PlayerShoulder { .. }
             | Effect::VibrationParticle { .. }
+            | Effect::Particles { .. }
             | Effect::RaiderDied { .. } => {}
         }
     }

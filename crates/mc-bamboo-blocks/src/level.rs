@@ -2744,6 +2744,17 @@ pub enum Effect {
         data: i32,
         except_initiator: bool,
     },
+    /// `ServerLevel.sendParticles`：一个简单粒子包（幽匿催发体的 `sculk_soul`）。
+    /// 游戏层发给 32 格内的玩家。
+    ///
+    /// A simple `ServerLevel.sendParticles` packet (the catalyst's `sculk_soul`).
+    Particles {
+        particle: i32,
+        position: mc_bamboo_core::Vec3,
+        offset: mc_bamboo_core::Vec3,
+        speed: f32,
+        count: i32,
+    },
     /// 音符盒响了，`NoteBlock.triggerEvent`。`pitch` 是官方的 `getPitchFromNote(note)`，
     /// `seed` 是官方传给 `playSeededSound` 的那个随机数。
     ///

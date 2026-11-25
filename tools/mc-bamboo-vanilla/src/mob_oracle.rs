@@ -1399,6 +1399,19 @@ impl Level for MobLevel {
         Some(outcome)
     }
 
+    fn knock_back_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        strength: f64,
+        (dx, dz): (f64, f64),
+    ) -> bool {
+        let Some(game) = self.game.as_mut() else {
+            return false;
+        };
+        game.knock_back(target, strength, dx, dz);
+        true
+    }
+
     fn ignite_player_now(
         &mut self,
         target: mc_bamboo_blocks::entity::EntityUid,

@@ -113,6 +113,12 @@ impl ReplayPlayers {
         PlayerHurtNow { hurt, death_drops }
     }
 
+    /// 生物给玩家的额外击退：`LivingEntity.knockback(strength, dx, dz)`。
+    pub fn knock_back(&mut self, target: EntityUid, strength: f64, dx: f64, dz: f64) {
+        let mut parts = self.region.hurt_parts();
+        crate::player_hurt::knock_back_player(&mut parts, PlayerId(target), strength, (dx, dz));
+    }
+
     /// 生物给玩家点火。
     pub fn ignite(&mut self, target: EntityUid, ticks: i32) {
         if let Some(player) = self.region.players.get_mut(&PlayerId(target)) {
