@@ -78,20 +78,22 @@ impl ChargeCursor {
             self.update_delay -= 1;
             return;
         }
-        let state = world.block_state(self.pos);
-        let behaviour = SculkBehaviour::of(state);
+        let mut state = world.block_state(self.pos);
+        let mut behaviour = SculkBehaviour::of(state);
         if force
             && attempt_spread_vein(behaviour, world, self.pos, state, self.facings.as_deref())
             && behaviour.can_change_block_state_on_spread()
         {
-            // `SculkBlock` 不重读状态，其它实现重读；这里统一重读，让 `facings`
-            // 和后续 `onDischarged` 看到的是最新值。
-            let fresh = world.block_state(self.pos);
-            self.charge =
-                attempt_use_charge(SculkBehaviour::of(fresh), self, world, origin, force, fresh);
-        } else {
-            self.charge = attempt_use_charge(behaviour, self, world, origin, force, state);
+            // 官方在 `force` 铺完脉络后重读方块状态和 `SculkBehaviour`，后续的
+            // `attemptUseCharge` / `onDischarged` / `updateDecayDelay` 都用重读后的值
+            // （脉络会被 `onDischarged` 拆掉贴住幽匿块的面）。这里照同一顺序重读。
+            // The official re-reads the block state and `SculkBehaviour` after the forced
+            // vein spread; `attemptUseCharge` / `onDischarged` / `updateDecayDelay` then
+            // use the re-read values (so `onDischarged` prunes faces backed by sculk).
+            state = world.block_state(self.pos);
+            behaviour = SculkBehaviour::of(state);
         }
+        self.charge = attempt_use_charge(behaviour, self, world, origin, force, state);
         if self.charge <= 0 {
             on_discharged(behaviour, world, state, self.pos);
             return;
@@ -928,12 +930,20 @@ impl SpreadKind {
 }
 
 /// `MultifaceSpreader.SpreadPos.place`：目标格是空气 / 水或已有脉络，且贴得住。
+/// 官方 `SculkVeinSpreaderConfig.stateCanBeReplaced` 额外拒绝把脉络贴在幽匿块 /
+/// 幽匿催发体 / 移动中的活塞背面，这里照做。
 fn place_vein_face(world: &mut World<'_>, pos: BlockPos, face: Direction) -> bool {
     let state = world.block_state(pos);
     if !state.is(blocks::SCULK_VEIN) && !state.is_air() && !world.fluid_state(pos).is_water() {
         return false;
     }
     let support = world.block_state(pos.relative(face));
+    if support.is(blocks::SCULK)
+        || support.is(blocks::SCULK_CATALYST)
+        || support.is(blocks::MOVING_PISTON)
+    {
+        return false;
+    }
     if !support.is_face_sturdy(face.opposite(), crate::state::SupportType::Full) {
         return false;
     }
