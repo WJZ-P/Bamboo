@@ -1317,3 +1317,124 @@ fn step_events_reach_a_sensor_identically_in_precise_and_parallel_modes() {
         "牛走过时感测体至少要激活一次: {precise:?}"
     );
 }
+
+/// 实体监听者的区段登记在精确 / 并行驱动下逐位一致：每刻把监听者推向不同区块，
+/// 比较登记表快照（记录的区段 + 该区段里的监听者列表）。
+///
+/// Entity-listener registration is bit-identical in precise and parallel drives: the
+/// listener is pushed across chunks each tick and the registry snapshot is compared.
+#[test]
+fn entity_listener_sync_matches_in_precise_and_parallel_modes() {
+    use crate::entity::mob::MobType;
+    use crate::game_event::dispatch::{DeliveryMode, EntityListener};
+    use crate::game_event::registry::ListenerRef;
+    use mc_bamboo_core::{BlockPos, ChunkPos};
+
+    const TICKS: i64 = 40;
+    type Frame = (Option<(ChunkPos, i32)>, Vec<ListenerRef>);
+
+    fn setup(level: &mut TestLevel, ticks: &mut BlockTicks) -> i32 {
+        ticks.set_time(0);
+        level.set_entities(crate::entity::EntityStore::with_next_id(
+            crate::entity::FIRST_ENTITY_ID,
+        ));
+        let mut world = World::new(level, ticks);
+        for x in -24..=24 {
+            for z in -8..=8 {
+                world.set_block(
+                    BlockPos::new(x, 63, z),
+                    BlockState(mc_bamboo_data::blocks::STONE),
+                    0,
+                );
+            }
+        }
+        let mut entity = Entity::by_mob_type(MobType::Cow, Vec3::new(0.5, 64.0, 0.5));
+        entity.with_mob(|_, mob| {
+            // 固定 y：精确驱动的世界地面有限，并行视图是无限平面，失重后两者只比 x 跨区段。
+            // Fix y: the precise world has a finite floor while the parallel view is an
+            // infinite plane; with no gravity both drives only differ by x across chunks.
+            mob.no_gravity = true;
+            mob.entity_listener = Some(EntityListener {
+                radius: 16,
+                delivery_mode: DeliveryMode::ByDistance,
+                vibration: Default::default(),
+            });
+        });
+        world.spawn_entity(entity)
+    }
+
+    fn snapshot(level: &mut TestLevel, ticks: &mut BlockTicks, uid: i32) -> Frame {
+        let world = World::new(level, ticks);
+        let table = world.level().game_event_listeners().unwrap();
+        let section = table.entity_section(uid);
+        let list = section
+            .map(|(chunk, y)| table.section(chunk, y))
+            .unwrap_or_default();
+        (section, list)
+    }
+
+    fn run(
+        level: &mut TestLevel,
+        ticks: &mut BlockTicks,
+        uid: i32,
+        parallel: bool,
+        executor: &WorkerPool,
+    ) -> Vec<Frame> {
+        let mut frames: Vec<Frame> = Vec::new();
+        for tick in 1..=TICKS {
+            ticks.set_time(tick);
+            {
+                let mut world = World::new(level, ticks);
+                world.with_listed_entity_mut(uid, &mut |entity| {
+                    entity.position.x = 0.5 + f64::from(tick as i32);
+                });
+            }
+            let mut world = World::new(level, ticks);
+            if parallel {
+                let view = SourceView::new(FlatSource {
+                    floor_y: 63,
+                    facts: ViewFacts {
+                        game_time: tick,
+                        ..ViewFacts::default()
+                    },
+                });
+                tick_entities_parallel(&view, &mut world, executor);
+            } else {
+                world.tick_entities();
+            }
+            drop(world);
+            frames.push(snapshot(level, ticks, uid));
+        }
+        frames
+    }
+
+    let executor = WorkerPool::new("entity-listener-sync", 4).expect("起实体线程池");
+    let (mut precise_level, mut precise_ticks) = (TestLevel::new(), BlockTicks::new());
+    let precise_uid = setup(&mut precise_level, &mut precise_ticks);
+    let precise = run(
+        &mut precise_level,
+        &mut precise_ticks,
+        precise_uid,
+        false,
+        &executor,
+    );
+    let (mut parallel_level, mut parallel_ticks) = (TestLevel::new(), BlockTicks::new());
+    let parallel_uid = setup(&mut parallel_level, &mut parallel_ticks);
+    let parallel = run(
+        &mut parallel_level,
+        &mut parallel_ticks,
+        parallel_uid,
+        true,
+        &executor,
+    );
+
+    assert_eq!(
+        precise, parallel,
+        "实体监听者登记表在精确 / 并行驱动下必须逐位一致"
+    );
+    let sections: std::collections::BTreeSet<(i32, i32, i32)> = precise
+        .iter()
+        .filter_map(|(section, _)| section.map(|(chunk, y)| (chunk.x, y, chunk.z)))
+        .collect();
+    assert!(sections.len() > 1, "监听者要跨过区段: {sections:?}");
+}

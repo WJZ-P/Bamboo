@@ -11,6 +11,7 @@ use crate::{
     game_event::{
         GameEvent,
         registry::{GameEventListeners, ListenerRef},
+        vibration::VibrationData,
     },
     state::BlockState,
     world::World,
@@ -40,11 +41,37 @@ pub struct EventContext {
     pub projectile_owner: Option<crate::entity::EntityUid>,
 }
 
+/// 实体自带的游戏事件监听者（`VibrationSystem.Data` 的运行时状态 + 半径 / 投递模式）。
+/// 只有设了 `Some` 的生物会被登记到区段表，位置取实体眼睛。
+///
+/// A mob's own game-event listener (the runtime `VibrationSystem.Data` plus its radius
+/// and delivery mode). Only mobs with `Some` are registered in the section table;
+/// the listener position is the entity's eye.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EntityListener {
+    pub radius: i32,
+    pub delivery_mode: DeliveryMode,
+    pub vibration: VibrationData,
+}
+
+/// 实体监听者当前所在区段（按眼睛位置，`EntityPositionSource`）；不是监听者就 `None`。
+///
+/// The section an entity listener belongs to (by eye position, `EntityPositionSource`);
+/// `None` for a mob that is not a listener.
+pub(crate) fn entity_listener_section(entity: &crate::entity::Entity) -> Option<(ChunkPos, i32)> {
+    let mob = entity.kind.mob()?;
+    mob.entity_listener.as_ref()?;
+    let eye_y = entity.position.y + f64::from(mob.eye_height);
+    let block = BlockPos::containing(Vec3::new(entity.position.x, eye_y, entity.position.z));
+    Some((block.chunk(), block.y >> 4))
+}
+
 /// `GameEventListener.DeliveryMode`：感测体等都是 `BY_DISTANCE`。
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DeliveryMode {
     ByDistance,
+    #[default]
     Unspecified,
 }
 
@@ -168,7 +195,27 @@ fn listener_info(
             let mode = listener.delivery_mode()?;
             (block_center(pos), radius, mode)
         }
-        ListenerRef::Entity(_) => return None,
+        ListenerRef::Entity(uid) => {
+            // `EntityPositionSource`：监听点在实体眼睛，半径 / 投递模式由实体自带。
+            // `EntityPositionSource`: the listener sits at the entity's eye; the mob
+            // carries its own radius and delivery mode.
+            let entity = world.entity(uid)?;
+            let mob = entity.kind.mob()?;
+            let state = mob.entity_listener.as_ref()?;
+            let eye = Vec3::new(
+                entity.position.x,
+                entity.position.y + f64::from(mob.eye_height),
+                entity.position.z,
+            );
+            let block = BlockPos::containing(eye);
+            let chunk = block.chunk();
+            if (chunk.x, section(block.y), chunk.z) != key
+                || !table.contains(chunk, key.1, listener)
+            {
+                return None;
+            }
+            (eye, state.radius, state.delivery_mode)
+        }
     };
     let listener_block = BlockPos::containing(pos);
     let dx = f64::from(listener_block.x - BlockPos::containing(source).x);
@@ -259,9 +306,6 @@ impl World<'_> {
     /// [`crate::BlockEntity::receive_vibration`] 当场决定是否记候选，和官方
     /// `handleGameEvent` 一样。
     pub(crate) fn deliver_game_event(&mut self, delivery: Delivery) {
-        let ListenerRef::BlockEntity(pos) = delivery.listener else {
-            return;
-        };
         let event = delivery.event;
         let context = delivery.context;
         let source = delivery.source;
@@ -270,13 +314,48 @@ impl World<'_> {
         if is_occluded(self, source, listener_pos) {
             return;
         }
-        let Some((id, mut entity)) = self.level_mut().take_block_entity_at(pos) else {
-            return;
-        };
-        let received = entity.receive_vibration(self, event, source, listener_pos, context, now);
-        self.level_mut().put_block_entity(pos, id, entity);
-        if received {
-            self.level_mut().wake_block_entity(pos);
+        match delivery.listener {
+            ListenerRef::BlockEntity(pos) => {
+                let Some((id, mut entity)) = self.level_mut().take_block_entity_at(pos) else {
+                    return;
+                };
+                let received =
+                    entity.receive_vibration(self, event, source, listener_pos, context, now);
+                self.level_mut().put_block_entity(pos, id, entity);
+                if received {
+                    self.level_mut().wake_block_entity(pos);
+                }
+            }
+            ListenerRef::Entity(uid) => {
+                // `VibrationSystem.Listener.handleGameEvent`：记成候选，到达时由实体自己的
+                // `VibrationSystem.Ticker` 回调 `User.onReceiveVibration`。
+                //
+                // `VibrationSystem.Listener.handleGameEvent`: record a candidate; the
+                // entity's own `VibrationSystem.Ticker` fires `User.onReceiveVibration`.
+                let info = crate::game_event::vibration::VibrationInfo {
+                    event,
+                    distance: source.distance_to_sqr(listener_pos).sqrt() as f32,
+                    pos: source,
+                    source_player: context.source_player,
+                };
+                let mut record = |entity: &mut crate::entity::Entity| {
+                    entity.with_mob(|_, mob| {
+                        if let Some(listener) = mob.entity_listener.as_mut()
+                            && listener.vibration.current.is_none()
+                        {
+                            crate::game_event::vibration::add_candidate(
+                                &mut listener.vibration,
+                                info,
+                                now,
+                                &mut || {},
+                            );
+                        }
+                    });
+                };
+                if !self.with_listed_entity_mut(uid, &mut record) {
+                    self.with_entity_mut(uid, &mut record);
+                }
+            }
         }
     }
 }
@@ -298,5 +377,64 @@ mod tests {
         assert_eq!(section(-16), -1);
         assert_eq!(section(-17), -2);
         assert_eq!(section(16), 1);
+    }
+
+    /// 实体监听者生成即登记到区段，附近的游戏事件落成一条振动候选。
+    ///
+    /// An entity listener is registered on spawn and a nearby event becomes a candidate.
+    #[test]
+    fn an_entity_listener_receives_a_game_event_candidate() {
+        use crate::{
+            BlockTicks, World,
+            entity::{Entity, mob::MobType},
+            testing::TestLevel,
+        };
+        use mc_bamboo_core::{BlockPos, Vec3};
+
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        for x in -4..=4 {
+            for z in -4..=4 {
+                level.set(
+                    BlockPos::new(x, 63, z),
+                    crate::BlockState(mc_bamboo_data::blocks::STONE),
+                );
+            }
+        }
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut entity = Entity::by_mob_type(MobType::Cow, Vec3::new(0.5, 64.0, 0.5));
+        entity.with_mob(|_, mob| {
+            mob.entity_listener = Some(EntityListener {
+                radius: 16,
+                delivery_mode: DeliveryMode::ByDistance,
+                vibration: VibrationData::default(),
+            });
+        });
+        let uid = world.spawn_entity(entity);
+        assert!(
+            world
+                .level()
+                .game_event_listeners()
+                .unwrap()
+                .entity_section(uid)
+                .is_some(),
+            "生成时登记到眼睛所在区段"
+        );
+        world.game_event(
+            GameEvent::Step,
+            Vec3::new(2.5, 64.5, 0.5),
+            EventContext::default(),
+        );
+        let state = world.entity(uid).expect("listener still in the world");
+        let listener = state
+            .kind
+            .mob()
+            .and_then(|mob| mob.entity_listener)
+            .expect("entity listener state");
+        assert!(
+            listener.vibration.current.is_some()
+                || listener.vibration.selector.codec_event().is_some(),
+            "事件记成振动候选"
+        );
     }
 }

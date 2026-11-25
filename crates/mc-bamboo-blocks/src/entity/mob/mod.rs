@@ -2925,6 +2925,10 @@ pub struct Mob {
     /// The warden's anger management, vibration listener, pose and client anger
     /// level; default for every other mob.
     pub warden: warden::Warden,
+    /// 实体自带的游戏事件监听者（监守者等）；别的生物是 `None`。
+    ///
+    /// The mob's own game-event listener (the warden and similar); `None` otherwise.
+    pub entity_listener: Option<crate::game_event::dispatch::EntityListener>,
     /// `LivingEntity.discardFriction`：长跳途中 `travelInAir` 不乘摩擦。
     ///
     /// `LivingEntity.discardFriction`: `travelInAir` skips friction during a long jump.
@@ -3480,6 +3484,7 @@ impl Mob {
             zombie_villager: zombie_villager::ZombieVillagerState::default(),
             tadpole_age: 0,
             warden: warden::Warden::default(),
+            entity_listener: None,
             discard_friction: false,
             passengers: Vec::new(),
             ejected_passenger: None,
