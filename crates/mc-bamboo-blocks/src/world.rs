@@ -3616,9 +3616,8 @@ impl<'a> World<'a> {
         &self,
         pos: BlockPos,
         range: f64,
-        line_of_sight: bool,
     ) -> Vec<crate::level::TrialSpawnerPlayer> {
-        self.level.trial_spawner_players(pos, range, line_of_sight)
+        self.level.trial_spawner_players(pos, range)
     }
 
     /// `SpawnData.entityToSpawn` 造实体的通用路径：普通刷怪笼和试炼刷怪笼共用。

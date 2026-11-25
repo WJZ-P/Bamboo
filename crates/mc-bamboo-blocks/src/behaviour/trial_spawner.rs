@@ -1034,14 +1034,29 @@ impl TrialSpawnerContext for TrialSpawnerWorld<'_, '_> {
         range: f64,
         line_of_sight: bool,
     ) -> Vec<DetectedPlayer> {
+        let center = Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.5,
+            f64::from(pos.z) + 0.5,
+        );
         self.world
-            .trial_spawner_players(pos, range, line_of_sight)
+            .trial_spawner_players(pos, range)
             .into_iter()
+            .filter(|player| {
+                // `PlayerDetector.inLineOfSight`：从眼睛到刷怪笼中心没有视觉遮挡。
+                if !line_of_sight {
+                    return true;
+                }
+                match BlockView::clip_visual(&*self.world, player.eye_position, center) {
+                    None => true,
+                    Some(hit) => hit.pos == BlockPos::containing(center),
+                }
+            })
             .map(|player| DetectedPlayer {
                 uuid: player.uuid,
                 trial_omen: player.trial_omen,
                 bad_omen_amplifier: player.bad_omen_amplifier,
-                eye_block: player.eye_block,
+                eye_block: BlockPos::containing(player.eye_position),
             })
             .collect()
     }
@@ -1097,8 +1112,7 @@ impl TrialSpawnerContext for TrialSpawnerWorld<'_, '_> {
             f64::from(pos.y) + 0.5,
             f64::from(pos.z) + 0.5,
         );
-        if let Some(hit) =
-            BlockView::clip_collider(&*self.world, position, center, CollisionContext::Empty)
+        if let Some(hit) = BlockView::clip_visual(&*self.world, position, center)
             && hit.pos != BlockPos::containing(center)
         {
             return None;

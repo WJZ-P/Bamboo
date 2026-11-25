@@ -941,6 +941,28 @@ pub fn outline_shape(state: u32) -> &'static [Aabb] {
     shape_at(shapes::OUTLINE_SHAPE[state as usize])
 }
 
+/// `getVisualShape` 的形状：视线 clip（`ClipContext.Block.VISUAL`）用它。大多数方块
+/// 等于 [`outline_shape`]，只有透明的（玻璃 / 铁栏杆 / 细雪）没有视觉形状、泥巴 /
+/// 灵魂沙是完整方块。
+///
+/// `getVisualShape`, the shape used by the visual block clip. It equals
+/// [`outline_shape`] for most blocks; transparent blocks (glass, iron bars,
+/// powder snow) have no visual shape, and mud / soul sand are a full cube.
+pub fn visual_shape(state: u32) -> &'static [Aabb] {
+    let class = block_of_state(state).map_or(BlockClass::TransparentBlock, |block| block.class);
+    match class {
+        BlockClass::TransparentBlock
+        | BlockClass::StainedGlassBlock
+        | BlockClass::TintedGlassBlock
+        | BlockClass::WaterloggedTransparentBlock
+        | BlockClass::IronBarsBlock
+        | BlockClass::StainedGlassPaneBlock
+        | BlockClass::PowderSnowBlock => shapes::SHAPES[0],
+        BlockClass::MudBlock | BlockClass::SoulSandBlock => shapes::SHAPES[1],
+        _ => outline_shape(state),
+    }
+}
+
 /// `getBlockSupportShape` 的形状。
 pub fn support_shape(state: u32) -> &'static [Aabb] {
     shape_at(shapes::SUPPORT_SHAPE[state as usize])

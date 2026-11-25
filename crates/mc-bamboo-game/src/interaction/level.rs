@@ -249,11 +249,13 @@ impl Level for RegionLevel<'_> {
 
     /// `Mob.equip(EquipmentTable)`：按装备表给一只还没进世界的生物套上装备。
     ///
-    /// 官方先给八个槽设掉落几率（缺省 0），再滚战利品表，每件按 `equippable` 组件的
-    /// 槽位套进去。新生的生物槽位是空的，`equipItemIfPossible` 里「已有装备时掉出 /
-    /// 换到主手」的分支走不到，这里只做直接套槽。
+    /// 官方先给八个槽设掉落几率（`slot_drop_chances`，缺省 0，也接受一个浮点值表示
+    /// 所有槽同一个值），再滚战利品表，每件按 `equippable` 组件的槽位走
+    /// `equipItemIfPossible`：槽位能穿才套，套上后 `setGuaranteedDrop` 把掉落几率设成
+    /// 2.0（必掉）。新生的生物槽位是空的，`canReplaceCurrentItem` 的盔甲 / 武器比较和
+    /// 「掉出已有装备」的分支走不到。
     fn equip_mob(&mut self, entity: &mut mc_bamboo_blocks::entity::Entity, equipment: &Tag) {
-        use mc_bamboo_blocks::entity::mob::equipment::{SLOTS, slot_name};
+        use mc_bamboo_blocks::entity::mob::equipment::{GUARANTEED_DROP_CHANCE, SLOTS, slot_name};
         use mc_bamboo_protocol::packet::play::EquipmentSlot;
 
         let Tag::Compound(values) = equipment else {
@@ -270,12 +272,23 @@ impl Level for RegionLevel<'_> {
             return;
         };
         let mut chances = std::collections::BTreeMap::new();
-        if let Some(Tag::Compound(entries)) = get("slot_drop_chances") {
-            for (name, value) in entries {
-                if let Ok(chance) = mc_bamboo_blocks::archive::tag::java_f32(value) {
-                    chances.insert(name.clone(), chance);
+        match get("slot_drop_chances") {
+            Some(Tag::Compound(entries)) => {
+                for (name, value) in entries {
+                    if let Ok(chance) = mc_bamboo_blocks::archive::tag::java_f32(value) {
+                        chances.insert(name.clone(), chance);
+                    }
                 }
             }
+            // `DROP_CHANCES_CODEC` 也接受一个浮点：所有槽同一个值。
+            Some(value) => {
+                if let Ok(chance) = mc_bamboo_blocks::archive::tag::java_f32(value) {
+                    for slot in SLOTS {
+                        chances.insert(slot_name(slot).to_owned(), chance);
+                    }
+                }
+            }
+            None => {}
         }
         let Some(mob_type) = entity.kind.mob().map(|mob| mob.mob_type) else {
             return;
@@ -299,11 +312,16 @@ impl Level for RegionLevel<'_> {
         for stack in stacks {
             let stack = crate::loot_stacks::loot_stack(&stack);
             let slot_id = mc_bamboo_recipes::equipment_slot_for_item(&stack);
+            if !mc_bamboo_recipes::is_equippable_in_slot(&stack, slot_id) {
+                continue;
+            }
             let slot = SLOTS
                 .get(slot_id as usize)
                 .copied()
                 .unwrap_or(EquipmentSlot::MainHand);
             mob.equipment.set(slot, stack);
+            // `setItemSlotAndDropWhenKilled` 里的 `setGuaranteedDrop`。
+            mob.equipment.set_drop_chance(slot, GUARANTEED_DROP_CHANCE);
         }
     }
 
@@ -311,7 +329,6 @@ impl Level for RegionLevel<'_> {
         &self,
         pos: BlockPos,
         range: f64,
-        _line_of_sight: bool,
     ) -> Vec<mc_bamboo_blocks::level::TrialSpawnerPlayer> {
         use mc_bamboo_data::registries::mob_effect;
         let center = Vec3::new(
@@ -331,7 +348,7 @@ impl Level for RegionLevel<'_> {
                 uuid: *player.uuid.as_bytes(),
                 trial_omen: player.effects.has(mob_effect::TRIAL_OMEN),
                 bad_omen_amplifier: player.effects.amplifier(mob_effect::BAD_OMEN),
-                eye_block: BlockPos::containing(eye),
+                eye_position: eye,
             });
         }
         out

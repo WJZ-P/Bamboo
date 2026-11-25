@@ -47,23 +47,24 @@ pub struct EquipTarget {
     pub equipment: [Option<ItemStack>; 8],
 }
 
-/// 试炼刷怪笼一次玩家探测看到的一名玩家：UUID、身上的不祥效果和眼睛所在方块。
+/// 试炼刷怪笼一次玩家探测看到的一名玩家：UUID、眼睛位置和身上的不祥效果。
 ///
-/// 效果信息在游戏层（`PlayerView` 没有它），所以整次探测由 [`Level::trial_spawner_players`]
-/// 落地，方块层只拿结果跑状态机。
+/// 效果信息在游戏层（`PlayerView` 没有它），所以 [`Level::trial_spawner_players`]
+/// 负责距离筛选并给出眼睛位置；视线遮挡由方块层用 [`World::clip_visual`] 再滤一遍。
 ///
-/// One player seen by the trial spawner's detector: its UUID, the ominous
-/// effects it carries, and the block its eyes are in. The effect facts live in
-/// the game layer, so [`Level::trial_spawner_players`] performs the whole scan.
-#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+/// One player seen by the trial spawner's detector: its UUID, eye position and
+/// ominous effects. The effect facts live in the game layer, so
+/// [`Level::trial_spawner_players`] filters by distance and reports the eye
+/// position; the block layer then applies the line-of-sight clip.
+#[derive(Clone, Debug, Copy, PartialEq)]
 pub struct TrialSpawnerPlayer {
     pub uuid: [u8; 16],
     /// 身上有 `TRIAL_OMEN`。
     pub trial_omen: bool,
     /// 身上的 `BAD_OMEN` 等级；没有时是 `None`。
     pub bad_omen_amplifier: Option<i32>,
-    /// 眼睛所在的方块，`levelEvent(3020, ...)` 用它。
-    pub eye_block: BlockPos,
+    /// 眼睛位置，`levelEvent(3020, ...)` 用 `BlockPos::containing`。
+    pub eye_position: mc_bamboo_core::Vec3,
 }
 
 /// 一次触发的种类。
@@ -1300,14 +1301,9 @@ pub trait Level: LevelSideState + LevelEntities {
     // machine; hooks that need game-layer data default to no players / no spawn /
     // no drops, which the block oracle and read-only test worlds use.
 
-    /// `PlayerDetector.detect`：`pos` 附近 `range` 格内（`line_of_sight` 为真时还要
-    /// 看得见方块中心）的玩家，带上不祥效果和眼睛方块。默认没有玩家。
-    fn trial_spawner_players(
-        &self,
-        _pos: BlockPos,
-        _range: f64,
-        _line_of_sight: bool,
-    ) -> Vec<TrialSpawnerPlayer> {
+    /// `PlayerDetector.detect` 的候选玩家：`pos` 附近 `range` 格内、带不祥效果和眼睛
+    /// 位置的玩家。视线遮挡由方块层用 [`World::clip_visual`] 再滤。默认没有玩家。
+    fn trial_spawner_players(&self, _pos: BlockPos, _range: f64) -> Vec<TrialSpawnerPlayer> {
         Vec::new()
     }
 
