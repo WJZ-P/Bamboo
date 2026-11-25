@@ -646,9 +646,16 @@ const ITEM_EYE_HEIGHT: f32 = 0.2125;
 fn sense_items(cx: &mut Cx) {
     let area = cx.me.bounding_box().inflate(32.0, 16.0, 32.0);
     let position = cx.me.position;
+    let is_villager = cx.mob.mob_type == MobType::Villager;
     let mut items: Vec<(f64, EntityUid, Vec3)> = Vec::new();
     cx.ctx.for_each_other_in(area, &mut |other| {
-        if matches!(other.kind, KindPublic::Item { .. }) && !other.removed {
+        if other.removed {
+            return;
+        }
+        if let KindPublic::Item { stack, .. } = &other.kind {
+            if is_villager && !cx.mob.villager.wants_to_pick_up(stack) {
+                return;
+            }
             items.push((
                 position.distance_to_sqr(other.position),
                 other.uid,
@@ -674,7 +681,7 @@ fn sense_items(cx: &mut Cx) {
     });
     cx.memories.set_or_erase(
         MemoryType::NearestVisibleWantedItem,
-        found.map(|(_, uid, _)| MemoryValue::Entity(uid)),
+        found.map(|(_, uid, pos)| MemoryValue::WantedItem { uid, pos }),
     );
 }
 
@@ -708,33 +715,68 @@ pub const fn villager_hostile_distance(mob_type: MobType) -> Option<f32> {
 }
 
 /// `NearestBedSensor.doTick`：只对幼年村民生效，先从世界随机源抽 `nextInt(20)` 记刷新时刻，
-/// 再在 48 格内找床（`PoiTypes.HOME`，`Occupancy.ANY`）。
+/// 再在 48 格内用 `batchCache`（5 个一组、40 刻过期）收集 `HOME` POI 并走
+/// `AcquirePoi.findPathToPois` 一次多目标 A\* 寻路。
 ///
 /// `NearestBedSensor.doTick`: baby villagers only; draws `level.random.nextInt(20)` for
-/// the batch timeout, then looks for a bed POI within 48 blocks.
+/// the batch timeout, collects up to 5 uncached `HOME` POIs within 48 blocks, and runs
+/// `AcquirePoi.findPathToPois` (multi-target A\*).
 fn sense_nearest_bed(cx: &mut Cx) {
     if !cx.mob.is_baby() {
         return;
     }
-    let _last_update = cx.time + i64::from(cx.level_next_int(20));
+    let last_update = cx.time + i64::from(cx.level_next_int(20));
+    let cache = cx
+        .mob
+        .villager
+        .nearest_bed_cache
+        .get_or_insert_with(|| Box::new(super::super::villager::NearestBedCache::default()));
+    cache.tried_count = 0;
+    cache.last_update = last_update;
+
     const OCCUPANCY_ANY: u8 = 2;
-    let Some(home_kind) = mc_bamboo_data::poi::poi_type_id("minecraft:home") else {
+    let home_mask = super::super::villager::poi_name_mask("minecraft:home");
+    if home_mask == 0 {
         return;
-    };
+    }
     let origin = cx.me.block_position();
-    let Some(bed) = cx
+    let all = cx
         .ctx
         .blocks()
-        .poi_find_closest(origin, 48, home_kind, OCCUPANCY_ANY, &|_| true)
-    else {
-        return;
-    };
-    let nav = living::nav_mob(cx.me, cx.mob, cx.ctx.blocks());
-    if let Some(path) = cx.mob.navigation.create_path(cx.ctx.blocks(), &nav, bed, 1)
+        .poi_in_range(origin, 48, home_mask, OCCUPANCY_ANY);
+    let mut candidates: Vec<(u8, BlockPos)> = Vec::new();
+    for (kind, pos) in all {
+        let cache = cx
+            .mob
+            .villager
+            .nearest_bed_cache
+            .as_mut()
+            .expect("刚初始化");
+        if cache.batch_cache.contains_key(&pos) {
+            continue;
+        }
+        cache.tried_count += 1;
+        if cache.tried_count >= 5 {
+            continue;
+        }
+        cache.batch_cache.insert(pos, last_update + 40);
+        candidates.push((kind, pos));
+    }
+    let path = super::super::villager_ai::find_path_to_pois(cx, &candidates);
+    if let Some(path) = path
         && path.reached
     {
-        cx.memories
-            .set(MemoryType::NearestBed, MemoryValue::BlockPos(bed));
+        let target = path.target;
+        if cx.ctx.blocks().poi_type_at(target).is_some() {
+            cx.memories
+                .set(MemoryType::NearestBed, MemoryValue::BlockPos(target));
+        }
+    } else if let Some(cache) = cx.mob.villager.nearest_bed_cache.as_mut()
+        && cache.tried_count < 5
+    {
+        cache
+            .batch_cache
+            .retain(|_, &mut expire| expire >= last_update);
     }
 }
 

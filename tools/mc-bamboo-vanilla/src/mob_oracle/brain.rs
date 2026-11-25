@@ -110,6 +110,7 @@ fn value_text(level: &MobLevel, value: &MemoryValue) -> String {
         MemoryValue::Long(value) => value.to_string(),
         MemoryValue::Unit => "path".to_owned(),
         MemoryValue::Entity(uid) => uid.to_string(),
+        MemoryValue::WantedItem { uid, .. } => uid.to_string(),
         MemoryValue::Entities(list) => ids_text(&list[..]),
         MemoryValue::Visible(visible) => ids_text(&visible.entities[..]),
         MemoryValue::Walk(walk) => format!(
@@ -144,6 +145,14 @@ fn value_text(level: &MobLevel, value: &MemoryValue) -> String {
 fn tracker_block(level: &MobLevel, tracker: PositionTracker) -> String {
     match tracker {
         PositionTracker::Block { pos, .. } => pos_text(pos),
+        PositionTracker::Item { uid, .. } => {
+            // 官方 tracker 仍持有已移除的 ItemEntity，BrainOracle 记成 `?`。
+            // The official tracker still holds the removed ItemEntity, printed as `?`.
+            match level.entities.get(uid) {
+                Some(entity) if !entity.removed => pos_text(BlockPos::containing(entity.position)),
+                _ => "?".to_owned(),
+            }
+        }
         PositionTracker::Entity {
             uid, target_eye, ..
         } => {

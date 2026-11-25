@@ -441,7 +441,9 @@ impl Kind {
     pub(super) fn never_times_out(&self) -> bool {
         matches!(
             self,
-            Self::CountDownCooldown(_) | Self::FollowTemptation { .. }
+            Self::CountDownCooldown(_)
+                | Self::FollowTemptation { .. }
+                | Self::Villager(super::super::villager_ai::Behavior::SleepInBed { .. })
         )
     }
 
@@ -894,9 +896,9 @@ fn direction_from_rotation(x_rot: f32, y_rot: f32) -> Vec3 {
     )
 }
 
-/// `PositionTracker.currentPosition`；跟踪的实体不在了时没有位置。
+/// `PositionTracker.currentPosition`。
 ///
-/// `PositionTracker.currentPosition`; no position once the tracked entity is gone.
+/// `PositionTracker.currentPosition`.
 pub(in crate::entity::mob) fn current_position(cx: &Cx, target: PositionTracker) -> Option<Vec3> {
     match target {
         PositionTracker::Block { center, .. } => Some(center),
@@ -907,6 +909,22 @@ pub(in crate::entity::mob) fn current_position(cx: &Cx, target: PositionTracker)
                     .add(Vec3::new(0.0, f64::from(view.eye_height), 0.0))
             } else {
                 view.position
+            })
+        }
+        PositionTracker::Item {
+            uid,
+            pos,
+            track_eye,
+            ..
+        } => {
+            // 掉落物还在表里时读实时坐标，离表后用快照；非活体眼高固定。
+            // Use the live position while the item is in the table, else the snapshot.
+            let mut at = pos;
+            cx.ctx.with_other(uid, &mut |public| at = public.position);
+            Some(if track_eye {
+                at.add(Vec3::new(0.0, f64::from(0.2125_f32), 0.0))
+            } else {
+                at
             })
         }
     }
@@ -932,16 +950,22 @@ pub(super) fn current_block_position(cx: &Cx, target: PositionTracker) -> Option
                 BlockPos::containing(view.position)
             })
         }
+        PositionTracker::Item { uid, pos, .. } => {
+            let mut at = pos;
+            cx.ctx.with_other(uid, &mut |public| at = public.position);
+            Some(BlockPos::containing(at))
+        }
     }
 }
 
-/// `PositionTracker.isVisibleBy`：方块总看得见；活体要活着且在 `visible_mobs` 里看得见。
+/// `PositionTracker.isVisibleBy`：方块总看得见；活体要活着且在 `visible_mobs` 里看得见；
+/// 非活体（掉落物）总看得见。
 ///
 /// `PositionTracker.isVisibleBy`: blocks always are; living entities must be alive and
-/// visible in `visible_mobs`.
+/// visible in `visible_mobs`; non-living entities (items) always are.
 fn is_visible_by(cx: &mut Cx, target: PositionTracker) -> bool {
     match target {
-        PositionTracker::Block { .. } => true,
+        PositionTracker::Block { .. } | PositionTracker::Item { .. } => true,
         PositionTracker::Entity { uid, .. } => match sensor::living(cx, uid) {
             Some(view) if view.alive => sensor::visible_contains(cx, uid),
             _ => false,
@@ -979,7 +1003,7 @@ fn is_walk_target_spectator(cx: &Cx, walk: WalkTarget) -> bool {
         PositionTracker::Entity { uid, .. } => {
             sensor::living(cx, uid).is_some_and(|view| view.spectator)
         }
-        PositionTracker::Block { .. } => false,
+        PositionTracker::Block { .. } | PositionTracker::Item { .. } => false,
     }
 }
 

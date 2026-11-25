@@ -50,6 +50,20 @@ fn age(state: BlockState) -> i32 {
     state.get(age_property(state.class()))
 }
 
+/// 是否属于官方 `CropBlock` 及其子类。
+///
+/// Whether `state` is an instance of vanilla `CropBlock`.
+pub(crate) fn is_crop_block(state: BlockState) -> bool {
+    state.is_a(mc_bamboo_data::BlockAncestor::CropBlock)
+}
+
+/// `CropBlock.isMaxAge(BlockState)`。
+///
+/// `CropBlock.isMaxAge(BlockState)`.
+pub(crate) fn is_crop_max_age(state: BlockState) -> bool {
+    is_crop_block(state) && age(state) >= max_age(state.block())
+}
+
 /// `getStateForAge`。
 fn state_for_age(block: &'static Block, age: i32) -> BlockState {
     if block.class == BlockClass::TorchflowerCropBlock && age == max_age(block) {

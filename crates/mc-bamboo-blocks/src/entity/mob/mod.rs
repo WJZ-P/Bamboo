@@ -3636,6 +3636,9 @@ impl Mob {
                 fish::dimensions(self.mob_type, self.fish.variant, self.fish.puff_state);
             return (width, height);
         }
+        if self.mob_type == MobType::Villager && self.villager.sleeping_pos.is_some() {
+            return (0.2, 0.2);
+        }
         let (width, height, _) = self.mob_type.dimensions(self.is_baby());
         (width, height)
     }
@@ -3982,6 +3985,10 @@ pub struct MobPublic {
     pub villager_level: i32,
     pub villager_finalized: bool,
     pub villager_unhappy: i32,
+    /// `LivingEntity.SLEEPING_POS_ID`：睡在床上时的床头坐标。
+    ///
+    /// `LivingEntity.SLEEPING_POS_ID`: the bed head position while sleeping.
+    pub sleeping_pos: Option<BlockPos>,
     /// 村民的紧凑公开状态，只在 `MobType::Villager` 时有值，其余生物只占一个空指针。
     ///
     /// Compact public villager state; `Some` only for `MobType::Villager`, null for other mobs.
@@ -4171,6 +4178,7 @@ impl MobPublic {
             villager_level: mob.villager.level,
             villager_finalized: mob.villager.finalized,
             villager_unhappy: mob.villager.unhappy,
+            sleeping_pos: mob.villager.sleeping_pos,
             villager: (mob.mob_type == MobType::Villager).then(|| {
                 Box::new(villager::VillagerPublic::of(
                     &mob.villager,
@@ -4260,6 +4268,9 @@ impl MobPublic {
             let (width, height, _) =
                 fish::dimensions(self.mob_type, self.fish_variant, self.puff_state);
             return (width, height);
+        }
+        if self.mob_type == MobType::Villager && self.sleeping_pos.is_some() {
+            return (0.2, 0.2);
         }
         let (width, height, _) = self.mob_type.dimensions(self.baby);
         (width, height)
