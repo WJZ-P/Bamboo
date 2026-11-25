@@ -263,9 +263,7 @@ impl Report {
                     }
                 }
                 Some("cg_build") if case.name == "copper_golem_build" => {
-                    if !ours.blocks.is_empty() {
-                        ours.blocks[0] += 1;
-                    }
+                    ours.blocks[0] = ours.blocks[0].wrapping_add(1);
                 }
                 _ => {}
             }
