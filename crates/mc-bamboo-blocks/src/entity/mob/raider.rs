@@ -959,9 +959,7 @@ fn add_visited(mob: &mut Mob, pos: BlockPos) {
 
 /// `hasSuitablePoi`：半径 48 内随机挑一个没去过的 `home` POI，按官方洗牌顺序。
 fn move_through_poi(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> Option<BlockPos> {
-    let Some(raid) = mob.raider.raid_view(ctx.blocks(), me.position) else {
-        return None;
-    };
+    let raid = mob.raider.raid_view(ctx.blocks(), me.position)?;
     if !raid.active || raid.is_over || goals::current_combat_target(mob, ctx).is_some() {
         return None;
     }

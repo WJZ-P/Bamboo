@@ -1567,6 +1567,14 @@ pub enum Command {
         target: EntityUid,
         delta: Vec3,
     },
+    /// `Entity.push(x, y, z)`：把一段速度加到目标现有的 delta 上（劫掠兽的强撞击）。
+    ///
+    /// `Entity.push(x, y, z)`: add a velocity onto the target's current delta
+    /// (the ravager's strong knockback).
+    AddMobDelta {
+        target: EntityUid,
+        delta: Vec3,
+    },
     /// `ShootTongue.eatEntity`：`doHurtTarget`，打死了当场 `remove(KILLED)`。
     ///
     /// `ShootTongue.eatEntity`: `doHurtTarget`, then `remove(KILLED)` at once on a kill.
@@ -2193,6 +2201,11 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::SetMobDelta { target, delta } => {
             world.with_listed_entity_mut(target, &mut |entity| entity.delta = delta);
+        }
+        Command::AddMobDelta { target, delta } => {
+            world.with_listed_entity_mut(target, &mut |entity| {
+                entity.delta = entity.delta.add(delta);
+            });
         }
         Command::BeeEnterHive {
             hive,

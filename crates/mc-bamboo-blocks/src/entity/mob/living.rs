@@ -1346,6 +1346,13 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
         super::creaking::ai_step(me, mob, ctx);
     }
     animal_ai_step(me, mob, ctx, plan);
+    // `Ravager.aiStep` 在 `super.aiStep()` 之后跑自己的那一段：速度渐进、踩树叶、
+    // 三个计时器。
+    // `Ravager.aiStep` runs its own part after `super.aiStep()`: speed easing,
+    // leaf trampling and the three timers.
+    if mob.mob_type == super::MobType::Ravager {
+        super::ravager::ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Bee {
         let target_close = super::goals::combat_target(mob, ctx)
             .is_some_and(|target| target.position.distance_to_sqr(me.position) < 4.0);
@@ -1421,9 +1428,14 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     // `applyInput`。
     mob.xxa *= 0.98;
     mob.zza *= 0.98;
-    // `isImmobile()`：缺省是濒死，马科另有覆写。
-    // `isImmobile()`: dying by default; equines override it.
-    if super::equine::is_immobile(mob) {
+    // `isImmobile()`：缺省是濒死，马科另有覆写，劫掠兽再加上三个计时器。
+    // `isImmobile()`: dying by default; equines override it, ravagers add the timers.
+    let immobile = if mob.mob_type == super::MobType::Ravager {
+        super::ravager::is_immobile(mob)
+    } else {
+        super::equine::is_immobile(mob)
+    };
+    if immobile {
         mob.jumping = false;
         mob.xxa = 0.0;
         mob.zza = 0.0;
@@ -2363,7 +2375,7 @@ pub(super) fn set_sprinting(mob: &mut Mob, sprinting: bool) {
 }
 
 /// `jumpFromGround`。
-fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
+pub(crate) fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     let strength = mob.attributes.value(attribute::JUMP_STRENGTH) as f32;
     let boost = jump_boost_power(mob);
     let is_rabbit = mob.mob_type == super::MobType::Rabbit;
@@ -3264,6 +3276,11 @@ pub(crate) fn do_hurt_target(
     // `Creeper.doHurtTarget` just returns true: melee only chases, the blast does the damage.
     if mob.mob_type == super::MobType::Creeper {
         return;
+    }
+    // `Ravager.doHurtTarget`：先记 `attackTick = 10`、4 号事件和攻击声，再打。
+    // `Ravager.doHurtTarget`: set `attackTick = 10`, event 4 and the attack sound first.
+    if mob.mob_type == super::MobType::Ravager {
+        super::ravager::start_attack(me, mob);
     }
     let raw_damage = mob.attributes.value(attribute::ATTACK_DAMAGE).max(0.0);
     // `Bee.doHurtTarget` 把攻击力先截成整数再转浮点：`(float)(int)getAttributeValue(ATTACK_DAMAGE)`。
