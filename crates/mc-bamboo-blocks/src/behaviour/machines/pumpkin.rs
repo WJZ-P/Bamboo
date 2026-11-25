@@ -402,6 +402,45 @@ mod tests {
         assert_eq!(chest.get(CHEST_TYPE), ChestType::Single);
     }
 
+    /// 图案真的生成一只铜傀儡，初始氧化等级取铜块（打蜡的也认）。
+    #[test]
+    fn a_copper_golem_entity_takes_the_copper_oxidation() {
+        use crate::entity::mob::{MobType, copper_golem};
+        for (block, weather) in [
+            (blocks::COPPER_BLOCK, copper_golem::WeatherState::Unaffected),
+            (blocks::EXPOSED_COPPER, copper_golem::WeatherState::Exposed),
+            (
+                blocks::WEATHERED_COPPER,
+                copper_golem::WeatherState::Weathered,
+            ),
+            (
+                blocks::OXIDIZED_COPPER,
+                copper_golem::WeatherState::Oxidized,
+            ),
+            (
+                blocks::WAXED_WEATHERED_COPPER,
+                copper_golem::WeatherState::Weathered,
+            ),
+        ] {
+            let mut level = TestLevel::new();
+            level.set(TOP.below(), BlockState(block));
+            place_pumpkin(&mut level);
+            let golems: Vec<_> = level
+                .entities()
+                .iter()
+                .filter(|entity| {
+                    entity
+                        .kind
+                        .mob()
+                        .is_some_and(|mob| mob.mob_type == MobType::CopperGolem)
+                })
+                .collect();
+            assert_eq!(golems.len(), 1, "block {block}");
+            let mob = golems[0].kind.mob().unwrap();
+            assert_eq!(mob.copper_golem.weather_state, weather, "block {block}");
+        }
+    }
+
     /// 铜傀儡实体由官方在方块动作里生成，顺手报一声。
     #[test]
     fn a_copper_golem_announces_itself() {

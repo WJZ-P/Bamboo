@@ -18,6 +18,7 @@ use crate::{
         },
     },
     context::{PlaceContext, UseContext},
+    entity::{Entity, mob::MobType},
     interact::InteractionResult,
     state::{
         BlockState, COPPER_GOLEM_POSE, CopperGolemPose, HORIZONTAL_FACING, LIT, POWERED,
@@ -175,27 +176,44 @@ impl Behaviour for CopperGolemStatue {
 /// `WeatheringCopperGolemStatueBlock`：会氧化的雕像。
 pub(super) struct WeatheringCopperGolemStatue;
 
-/// 没有氧化的雕像被斧头点中时变回铜傀儡。实体不在范围里，方块和官方成功路径一样消失。
+/// 没有氧化的雕像被斧头点中时变回铜傀儡。
 ///
-/// An unaffected statue hit with an axe turns back into a copper golem. The entity is out of scope; the block disappears, matching vanilla's success path.
+/// `removeStatue`：在方块中心生成铜傀儡，朝向取雕像的 `FACING`，播 `spawn` 声，
+/// 然后移除方块。方块实体的自定义名这里没有建模，不复制。
+///
+/// An unaffected statue hit with an axe turns back into a copper golem.
+///
+/// `removeStatue`: spawn a golem at the block centre facing the statue's `FACING`,
+/// play the spawn sound and remove the block. The block entity's custom name is
+/// not modelled here, so it is not copied.
 fn revive_statue(state: BlockState, world: &mut World, ctx: &UseContext) -> InteractionResult {
     if field_name(state.block(), "getAge()") != "unaffected" {
         return InteractionResult::Pass;
     }
-    // 官方先 `hurtAndBreak(1)`，再 `playSpawnSound`，傀儡生成成功才 `removeBlock`。
-    // 这里没有方块实体，方块总会消失。声音在方块中心的 x/z 上，y 是方块的 y，来源是 `NEUTRAL`。
-    //
-    // Vanilla calls `hurtAndBreak(1)`, then `playSpawnSound`, and `removeBlock` only when the golem
-    // exists. There is no block entity here, so the block always disappears. The sound is at the
-    // block center on x/z, at the block's y, from `NEUTRAL`.
     let pos = ctx.clicked_pos();
     crate::durability::hurt_hand(world, ctx.hand, 1);
+    let position = Vec3 {
+        x: f64::from(pos.x) + 0.5,
+        y: f64::from(pos.y),
+        z: f64::from(pos.z) + 0.5,
+    };
+    // `prepare_entity` 会调 `finish_mob_random` 覆写朝向，朝向要在之后设。
+    // `prepare_entity` calls `finish_mob_random`, which overwrites the facing, so
+    // set it afterwards.
+    let facing = state.get(HORIZONTAL_FACING).to_yaw();
+    let mut entity = world.prepare_entity(Entity::by_mob_type(MobType::CopperGolem, position));
+    entity.old_position = position;
+    entity.y_rot = facing;
+    entity.with_mob(|_, mob| {
+        mob.x_rot = 0.0;
+        mob.y_head_rot = facing;
+        mob.y_body_rot = facing;
+        mob.y_head_rot_o = facing;
+        mob.y_body_rot_o = facing;
+    });
+    world.add_prepared_entity(entity);
     world.play_sound(
-        Vec3 {
-            x: f64::from(pos.x) + 0.5,
-            y: f64::from(pos.y),
-            z: f64::from(pos.z) + 0.5,
-        },
+        position,
         sound_event("minecraft:entity.copper_golem.spawn"),
         sounds::NEUTRAL,
         1.0,
