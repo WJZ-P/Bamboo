@@ -203,6 +203,10 @@ pub enum EntityData {
     MobFlags(u8),
     /// index 16，BOOLEAN。`AgeableMob.DATA_BABY_ID`。
     Baby(bool),
+    /// index 16，INT。`Warden.CLIENT_ANGER_LEVEL`（`getActiveAnger()`）。
+    ///
+    /// index 16, INT. `Warden.CLIENT_ANGER_LEVEL` (`getActiveAnger()`).
+    ClientAngerLevel(i32),
     /// index 17，BOOLEAN。`AgeableMob.AGE_LOCKED`。
     AgeLocked(bool),
     /// index 18，COW_VARIANT。`Cow.DATA_VARIANT_ID`，值是注册表 ID 的 VarInt。
@@ -534,7 +538,7 @@ impl EntityData {
             Self::EffectAmbience(_) => 11,
             Self::SleepingPos(_) => 14,
             Self::MobFlags(_) => 15,
-            Self::MainHand(_) | Self::Baby(_) => 16,
+            Self::MainHand(_) | Self::Baby(_) | Self::ClientAngerLevel(_) => 16,
             Self::ModelCustomisation(_)
             | Self::AgeLocked(_)
             | Self::SpecialType(_)
@@ -983,7 +987,8 @@ impl EntityData {
             }
             Self::SalmonVariant(value)
             | Self::TropicalFishVariant(value)
-            | Self::PufferfishPuffState(value) => {
+            | Self::PufferfishPuffState(value)
+            | Self::ClientAngerLevel(value) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *value);
             }

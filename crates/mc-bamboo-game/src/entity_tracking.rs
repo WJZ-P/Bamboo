@@ -1097,6 +1097,11 @@ impl KindData {
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
     use mc_bamboo_data::entity_types as facts;
+    // `Warden.CLIENT_ANGER_LEVEL` 占 index 16 的 INT（不是 `AgeableMob.Baby` 的 BOOL）。
+    // `Warden.CLIENT_ANGER_LEVEL` is the INT at index 16 (not `AgeableMob.Baby`'s BOOL).
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Warden && index == 16 {
+        return EntityData::ClientAngerLevel(0);
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::ZombieVillager {
         use mc_bamboo_data::villager;
         return match index {
@@ -1429,6 +1434,12 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     }
     if mob_flags != 0 {
         out.push(EntityData::MobFlags(mob_flags));
+    }
+    // `Warden.CLIENT_ANGER_LEVEL`：非缺省值发 INT（缺省 0 走 default_data_for_type）。
+    // `Warden.CLIENT_ANGER_LEVEL`: send the INT when non-default (0 goes to defaults).
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Warden && mob.client_anger_level != 0
+    {
+        out.push(EntityData::ClientAngerLevel(mob.client_anger_level));
     }
     // 骷髅的 `DATA_STRAY_CONVERSION_ID` 和沼骸的 `DATA_SHEARED` 都是 index 16 的 BOOLEAN，
     // 和这里的 `Baby` 字节完全相同；变回假时走 `default_data_for_type` 的 16 号缺省。

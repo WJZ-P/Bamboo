@@ -3890,6 +3890,10 @@ pub struct MobPublic {
     pub baby: bool,
     /// `AgeableMob.AGE_LOCKED` 元数据。
     pub age_locked: bool,
+    /// `Warden.CLIENT_ANGER_LEVEL` 元数据（`getActiveAnger()`）。
+    ///
+    /// `Warden.CLIENT_ANGER_LEVEL` metadata (`getActiveAnger()`).
+    pub client_anger_level: i32,
     pub x_rot: f32,
     pub y_head_rot: f32,
     pub y_body_rot: f32,
@@ -4140,6 +4144,7 @@ impl MobPublic {
             status_effects: mob.effects.clone(),
             baby: mob.is_baby(),
             age_locked: mob.age_locked,
+            client_anger_level: mob.warden.client_anger_level,
             x_rot: mob.x_rot,
             y_head_rot: mob.y_head_rot,
             y_body_rot: mob.y_body_rot,
