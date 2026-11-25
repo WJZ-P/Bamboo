@@ -125,6 +125,8 @@ struct ClockEntry {
     paused: bool,
 }
 
+// 官方 codec 要读的一串文件路径，逐个当参数传最直接，不需要打包。
+#[allow(clippy::too_many_arguments)]
 fn decode(
     java: &str,
     game_rules: &Path,
