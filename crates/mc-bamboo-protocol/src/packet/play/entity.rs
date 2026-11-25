@@ -507,6 +507,14 @@ pub enum EntityData {
     ///
     /// `HappyGhast.STAYS_STILL` (BOOLEAN, index 19, false by default).
     HappyGhastStaysStill(bool),
+    /// `Creaking.CAN_MOVE`（BOOLEAN，索引 16，缺省 true）。
+    CreakingCanMove(bool),
+    /// `Creaking.IS_ACTIVE`（BOOLEAN，索引 17，缺省 false）。
+    CreakingActive(bool),
+    /// `Creaking.IS_TEARING_DOWN`（BOOLEAN，索引 18，缺省 false）。
+    CreakingTearingDown(bool),
+    /// `Creaking.HOME_POS`（OPTIONAL_BLOCK_POS，索引 19，缺省 None）。
+    CreakingHomePos(Option<BlockPos>),
     /// `Guardian.DATA_ID_MOVING`（BOOLEAN，索引 16）。
     ///
     /// `Guardian.DATA_ID_MOVING` (BOOLEAN, index 16).
@@ -656,6 +664,10 @@ impl EntityData {
             Self::GuardianAttackTarget(_) => mc_bamboo_data::entity_types::GUARDIAN_ATTACK_TARGET,
             Self::HappyGhastLeashHolder(_) => HAPPY_GHAST_LEASH_HOLDER,
             Self::HappyGhastStaysStill(_) => HAPPY_GHAST_STAYS_STILL,
+            Self::CreakingCanMove(_) => mc_bamboo_data::entity_types::CREAKING_CAN_MOVE,
+            Self::CreakingActive(_) => mc_bamboo_data::entity_types::CREAKING_IS_ACTIVE,
+            Self::CreakingTearingDown(_) => mc_bamboo_data::entity_types::CREAKING_IS_TEARING_DOWN,
+            Self::CreakingHomePos(_) => mc_bamboo_data::entity_types::CREAKING_HOME_POS,
         }
     }
 
@@ -1068,6 +1080,19 @@ impl EntityData {
             Self::SulfurCubeFromBucket(flag) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 write_bool(out, *flag);
+            }
+            Self::CreakingCanMove(value)
+            | Self::CreakingActive(value)
+            | Self::CreakingTearingDown(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::CreakingHomePos(pos) => {
+                write_data_header(out, self.index(), SERIALIZER_OPTIONAL_BLOCK_POS);
+                write_bool(out, pos.is_some());
+                if let Some(pos) = pos {
+                    write_block_pos(out, *pos);
+                }
             }
             Self::DrownedConverting(converting) => {
                 write_data_header(out, 18, SERIALIZER_BOOLEAN);

@@ -1078,7 +1078,9 @@ impl KindData {
                 data
             }
             Self::Mob(mob) => {
-                if mob.mob_type.is_monster() {
+                if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Creaking {
+                    creaking_non_default_data(mob)
+                } else if mob.mob_type.is_monster() {
                     monster_non_default_data(mob)
                 } else {
                     mob_non_default_data(mob)
@@ -1136,6 +1138,15 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             16 => EntityData::Baby(false),
             17 => EntityData::AgeLocked(false),
             2 => EntityData::NoCustomName,
+            _ => EntityData::SharedFlags(0),
+        };
+    }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Creaking {
+        return match index {
+            facts::CREAKING_CAN_MOVE => EntityData::CreakingCanMove(true),
+            facts::CREAKING_IS_ACTIVE => EntityData::CreakingActive(false),
+            facts::CREAKING_IS_TEARING_DOWN => EntityData::CreakingTearingDown(false),
+            facts::CREAKING_HOME_POS => EntityData::CreakingHomePos(None),
             _ => EntityData::SharedFlags(0),
         };
     }
@@ -1424,6 +1435,25 @@ fn effect_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic, out: &mut Vec<Ent
     if mob.status_effects.iter().any(|effect| effect.ambient) {
         out.push(EntityData::EffectAmbience(true));
     }
+}
+
+/// `Creaking` 四项元数据中偏离官方缺省值的部分。
+fn creaking_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
+    let mut out = Vec::new();
+    let state = &mob.creaking;
+    if !state.can_move {
+        out.push(EntityData::CreakingCanMove(false));
+    }
+    if state.active {
+        out.push(EntityData::CreakingActive(true));
+    }
+    if state.tearing_down {
+        out.push(EntityData::CreakingTearingDown(true));
+    }
+    if state.home_pos.is_some() {
+        out.push(EntityData::CreakingHomePos(state.home_pos));
+    }
+    out
 }
 
 fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
