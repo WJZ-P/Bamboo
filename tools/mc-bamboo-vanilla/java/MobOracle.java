@@ -185,6 +185,11 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.ticks.LevelTicks;
 import sun.misc.Unsafe;
+import net.minecraft.world.level.block.entity.vault.VaultBlockEntity;
+import net.minecraft.world.level.block.entity.vault.VaultConfig;
+import net.minecraft.world.level.block.entity.vault.VaultServerData;
+import net.minecraft.world.level.block.entity.vault.VaultSharedData;
+import net.minecraft.world.level.block.entity.vault.VaultState;
 
 /**
  * 官方牛在假世界里逐刻的状态。每个场景一行 JSON：场景本身（方块、牛、玩家、伤害动作）加上
@@ -545,6 +550,9 @@ public final class MobOracle {
             }
             if (only == null || only.startsWith("trial_spawner")) {
                 cases += playTrialSpawner(official, out, only);
+            }
+            if (only == null || only.startsWith("vault")) {
+                cases += playVault(official, out, only);
             }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
@@ -11679,6 +11687,216 @@ public final class MobOracle {
                 + ",\"cooldownLength\":" + cooldownLength
                 + ",\"playerRange\":" + playerRange
                 + ",\"killTick\":" + killTick
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+    }
+
+    /** `[item,count]`；空堆统一成 `[0,0]`。 */
+    private static String vaultStack(net.minecraft.world.item.ItemStack stack) {
+        if (stack.isEmpty()) return "[0,0]";
+        return "[" + BuiltInRegistries.ITEM.getId(stack.getItem()) + "," + stack.getCount() + "]";
+    }
+
+    private static int[] vaultUuid(UUID uuid) {
+        long msb = uuid.getMostSignificantBits();
+        long lsb = uuid.getLeastSignificantBits();
+        return new int[] { (int) (msb >>> 32), (int) msb, (int) (lsb >>> 32), (int) lsb };
+    }
+
+    /** UUID 集合按四个 int 排序，和 Rust 侧一致（官方是 HashSet，不能比顺序）。 */
+    private static String vaultUuidSet(java.util.Set<UUID> uuids) {
+        List<int[]> rows = new ArrayList<>();
+        for (UUID uuid : uuids) rows.add(vaultUuid(uuid));
+        rows.sort((a, b) -> {
+            for (int i = 0; i < 4; i++) if (a[i] != b[i]) return Integer.compare(a[i], b[i]);
+            return 0;
+        });
+        StringBuilder out = new StringBuilder("[");
+        for (int i = 0; i < rows.size(); i++) {
+            if (i > 0) out.append(',');
+            int[] r = rows.get(i);
+            out.append('[').append(r[0]).append(',').append(r[1]).append(',')
+                    .append(r[2]).append(',').append(r[3]).append(']');
+        }
+        return out.append(']').toString();
+    }
+
+    private static String vaultItemList(List<net.minecraft.world.item.ItemStack> items) {
+        StringBuilder out = new StringBuilder("[");
+        for (int i = 0; i < items.size(); i++) {
+            if (i > 0) out.append(',');
+            out.append(vaultStack(items.get(i)));
+        }
+        return out.append(']').toString();
+    }
+
+    /**
+     * 宝库完整流程逐刻对拍：探测玩家激活 → 插钥匙解锁 → 弹出奖励 → 回到未激活。
+     * 逐刻比方块状态、ServerData、SharedData、世界事件、声音、弹出的物品和世界随机源。
+     */
+    private static int playVault(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("vault_full")) {
+            if (only != null && !name.startsWith(only)) continue;
+            playVaultCase(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void playVaultCase(Official official, Writer out, String name) throws Exception {
+        int insertTick = 5;
+        int ticks = 240;
+
+        FakeLevel level = FakeLevel.create(official);
+        level.levelEvents = new ArrayList<>();
+        level.soundLog = new ArrayList<>();
+        // 石地板，让 getBlockState / setBlockAndUpdate 有真实地面（同试炼刷怪笼场景）。
+        for (int x = -4; x <= 4; x++) {
+            for (int z = -4; z <= 4; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        BlockPos pos = new BlockPos(0, 64, 0);
+        BlockState inactive = Blocks.VAULT.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.VaultBlock.STATE, VaultState.INACTIVE)
+                .setValue(net.minecraft.world.level.block.VaultBlock.OMINOUS, false);
+        level.blocks.put(pos.asLong(), inactive);
+
+        VaultConfig config = VaultConfig.DEFAULT;
+        VaultServerData serverData = new VaultServerData();
+        VaultSharedData sharedData = new VaultSharedData();
+        net.minecraft.world.item.ItemStack key = config.keyItem().copy();
+
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "VaultOracle"), ClientInformation.createDefault());
+        player.setPos(0.5, 64.0, 0.5);
+        level.playersList().add(player);
+
+        // 循环前存初始方块状态（setVaultState 之后会改），世界随机源对齐 Bamboo 的
+        // LevelRandom::new(1)，战利品随机序列对齐 RandomSequences::new(0)。
+        String initialBlocks = blockArray(level.blocks);
+        level.getRandom().setSeed(1L);
+        official.server.sequences = new RandomSequences();
+
+        Field fRewarded = VaultServerData.class.getDeclaredField("rewardedPlayers");
+        Field fResumes = VaultServerData.class.getDeclaredField("stateUpdatingResumesAt");
+        Field fItems = VaultServerData.class.getDeclaredField("itemsToEject");
+        Field fTotal = VaultServerData.class.getDeclaredField("totalEjectionsNeeded");
+        Field fDisplay = VaultSharedData.class.getDeclaredField("displayItem");
+        Field fConnected = VaultSharedData.class.getDeclaredField("connectedPlayers");
+        Field fParticles = VaultSharedData.class.getDeclaredField("connectedParticlesRange");
+        fRewarded.setAccessible(true);
+        fResumes.setAccessible(true);
+        fItems.setAccessible(true);
+        fTotal.setAccessible(true);
+        fDisplay.setAccessible(true);
+        fConnected.setAccessible(true);
+        fParticles.setAccessible(true);
+
+        int maxState = 0;
+        int maxRewarded = 0;
+        int totalEjected = 0;
+        int activateEvents = 0;
+        int deactivateEvents = 0;
+        int ejectEvents = 0;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            List<int[]> events = new ArrayList<>();
+            List<long[]> sounds = new ArrayList<>();
+            List<net.minecraft.world.item.ItemStack> ejected = new ArrayList<>();
+            if (tick > 0) {
+                level.gameTime = START_TIME + tick;
+                level.spawned.clear();
+                level.levelEvents.clear();
+                level.soundLog.clear();
+                BlockState blockState = level.getBlockState(pos);
+                VaultBlockEntity.Server.tick(level, pos, blockState, config, serverData, sharedData);
+                if (tick == insertTick) {
+                    blockState = level.getBlockState(pos);
+                    VaultBlockEntity.Server.tryInsertKey(level, pos, blockState,
+                            config, serverData, sharedData, player, key);
+                }
+                events = new ArrayList<>(level.levelEvents);
+                sounds = new ArrayList<>(level.soundLog);
+                for (Entity e : level.spawned) {
+                    if (e instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                        ejected.add(item.getItem());
+                    }
+                }
+            }
+            int state = level.getBlockState(pos)
+                    .getValue(net.minecraft.world.level.block.VaultBlock.STATE).ordinal();
+            java.util.Set<UUID> rewarded = (java.util.Set<UUID>) fRewarded.get(serverData);
+            java.util.Set<UUID> connected = (java.util.Set<UUID>) fConnected.get(sharedData);
+            List<net.minecraft.world.item.ItemStack> items =
+                    (List<net.minecraft.world.item.ItemStack>) fItems.get(serverData);
+            maxState = Math.max(maxState, state);
+            maxRewarded = Math.max(maxRewarded, rewarded.size());
+            totalEjected += ejected.size();
+            for (int[] ev : events) {
+                if (ev[0] == 3015) activateEvents++;
+                if (ev[0] == 3016) deactivateEvents++;
+                if (ev[0] == 3017) ejectEvents++;
+            }
+
+            StringBuilder eventsArr = new StringBuilder("[");
+            for (int i = 0; i < events.size(); i++) {
+                if (i > 0) eventsArr.append(',');
+                int[] ev = events.get(i);
+                eventsArr.append('[');
+                for (int j = 0; j < ev.length; j++) {
+                    if (j > 0) eventsArr.append(',');
+                    eventsArr.append(ev[j]);
+                }
+                eventsArr.append(']');
+            }
+            eventsArr.append(']');
+            StringBuilder soundsArr = new StringBuilder("[");
+            for (int i = 0; i < sounds.size(); i++) {
+                if (i > 0) soundsArr.append(',');
+                long[] s = sounds.get(i);
+                // [soundId, volumeBits, pitchBits]；位置 / source 不参与比较。
+                soundsArr.append('[').append(s[0]).append(',').append(s[5]).append(',').append(s[6]).append(']');
+            }
+            soundsArr.append(']');
+            StringBuilder ejectedArr = new StringBuilder("[");
+            for (int i = 0; i < ejected.size(); i++) {
+                if (i > 0) ejectedArr.append(',');
+                ejectedArr.append(vaultStack(ejected.get(i)));
+            }
+            ejectedArr.append(']');
+
+            if (tick > 0) frames.append(',');
+            frames.append("{\"state\":").append(state)
+                    .append(",\"rewarded\":").append(vaultUuidSet(rewarded))
+                    .append(",\"resumesAt\":").append(fResumes.getLong(serverData))
+                    .append(",\"itemsToEject\":").append(vaultItemList(items))
+                    .append(",\"totalEjections\":").append(fTotal.getInt(serverData))
+                    .append(",\"display\":").append(vaultStack((net.minecraft.world.item.ItemStack) fDisplay.get(sharedData)))
+                    .append(",\"connected\":").append(vaultUuidSet(connected))
+                    .append(",\"particlesBits\":").append(Double.doubleToRawLongBits(fParticles.getDouble(sharedData)))
+                    .append(",\"events\":").append(eventsArr)
+                    .append(",\"sounds\":").append(soundsArr)
+                    .append(",\"ejected\":").append(ejectedArr)
+                    .append(",\"seed\":").append(levelSeed(level))
+                    .append('}');
+        }
+        frames.append(']');
+        // 确认真的走完了整条状态链、弹过奖励、发过激活/失效/弹出事件，防空对拍。
+        if (maxState < 3 || maxRewarded < 1 || totalEjected < 1
+                || activateEvents < 1 || deactivateEvents < 1 || ejectEvents < 1) {
+            throw new IllegalStateException("vault_full missed the flow: maxState=" + maxState
+                    + " maxRewarded=" + maxRewarded + " totalEjected=" + totalEjected
+                    + " activateEvents=" + activateEvents + " deactivateEvents=" + deactivateEvents
+                    + " ejectEvents=" + ejectEvents);
+        }
+        out.write("{\"type\":\"vault\",\"name\":" + jsonString(name)
+                + ",\"pos\":[0,64,0]"
+                + ",\"blocks\":" + initialBlocks
+                + ",\"player\":[0.5,64.0,0.5]"
+                + ",\"insertTick\":" + insertTick
                 + ",\"frames\":" + frames + "}\n");
         out.flush();
     }

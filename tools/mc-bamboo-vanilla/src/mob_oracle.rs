@@ -73,6 +73,7 @@ mod sulfur_cube;
 mod thunder;
 mod trial_spawner;
 mod undead_horse;
+mod vault;
 mod villager;
 mod water_mob;
 mod witch_throw;
@@ -197,6 +198,7 @@ enum Line {
     Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
     TrialSpawner(Box<trial_spawner::TrialSpawnerCase>),
+    Vault(Box<vault::VaultCase>),
     SculkSensor(sculk_sensor::SculkSensorCase),
     SculkSensorOrder(sculk_sensor::SculkSensorOrderCase),
     SculkShrieker(sculk_sensor::SculkShriekerCase),
@@ -1783,6 +1785,93 @@ impl Level for MobLevel {
         true
     }
 
+    fn vault_players(&self, pos: BlockPos, range: f64) -> Vec<[u8; 16]> {
+        // `INCLUDING_CREATIVE_PLAYERS`：整块坐标平方距离、只排旁观者（创造也算）。
+        let squared = range * range;
+        self.players
+            .iter()
+            .filter(|player| !player.spectator)
+            .filter(|player| {
+                let block = BlockPos::containing(player.position);
+                let dx = i64::from(block.x - pos.x);
+                let dy = i64::from(block.y - pos.y);
+                let dz = i64::from(block.z - pos.z);
+                (dx * dx + dy * dy + dz * dz) as f64 <= squared
+            })
+            .filter_map(|player| player.uuid)
+            .collect()
+    }
+
+    fn vault_resolve_reward(
+        &mut self,
+        pos: BlockPos,
+        player: [u8; 16],
+        key: &ItemStack,
+        loot_table: &str,
+    ) -> Vec<ItemStack> {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return Vec::new();
+        };
+        // `resolveItemsToEject`：VAULT 参数集走表的 `random_sequence`（世界种子 0）。
+        let mut params =
+            mc_bamboo_loot::LootParams::new(0.0).with_origin(mc_bamboo_loot::Position::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ));
+        params.tool = Some(mc_bamboo_loot::LootStack::new(key.item, key.count));
+        params.this_entity = Some(
+            self.players
+                .iter()
+                .find(|p| p.uuid == Some(player))
+                .map(|p| {
+                    let mut view = mc_bamboo_loot::EntityView::new(
+                        mc_bamboo_data::registries::entity_type::PLAYER,
+                    );
+                    view.is_living = true;
+                    view.position = Some(mc_bamboo_loot::Position::new(
+                        p.position.x,
+                        p.position.y,
+                        p.position.z,
+                    ));
+                    view
+                })
+                .unwrap_or_else(|| {
+                    mc_bamboo_loot::EntityView::new(mc_bamboo_data::registries::entity_type::PLAYER)
+                }),
+        );
+        let Ok(stacks) = table.get_random_items_with_seed(
+            &params,
+            0,
+            Some(&self.loot_sequences),
+            self.random.source(),
+        ) else {
+            return Vec::new();
+        };
+        stacks.iter().map(mc_bamboo_game::loot_stack).collect()
+    }
+
+    fn vault_random_display_item(&mut self, loot_table: &str, pos: BlockPos) -> ItemStack {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return ItemStack::empty();
+        };
+        // `getRandomDisplayItemFromLootTable`：世界随机源滚表，再 `nextInt` 取一件。
+        let params =
+            mc_bamboo_loot::LootParams::new(0.0).with_origin(mc_bamboo_loot::Position::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ));
+        let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
+            return ItemStack::empty();
+        };
+        if stacks.is_empty() {
+            return ItemStack::empty();
+        }
+        let index = self.random.source().next_int(stacks.len() as i32) as usize;
+        mc_bamboo_game::loot_stack(&stacks[index])
+    }
+
     fn player_mob_attack(
         &self,
         uid: i32,
@@ -2005,6 +2094,7 @@ impl Report {
                 Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
                 Line::TrialSpawner(case) => self.replay_trial_spawner(&case),
+                Line::Vault(case) => self.replay_vault(&case),
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
                 Line::SculkSensorOrder(case) => self.replay_sculk_sensor_order(&case),
                 Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),
