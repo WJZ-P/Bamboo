@@ -27,6 +27,7 @@ pub mod cat;
 pub mod chicken;
 pub mod control;
 pub mod conversion;
+pub mod creaking;
 pub mod creeper;
 pub mod crossbow;
 pub mod damage;
@@ -220,6 +221,8 @@ pub enum MobType {
     ElderGuardian,
     /// 硫磺方块怪，`SulfurCube`。
     SulfurCube,
+    /// 嘎枝，`Creaking`。
+    Creaking,
     /// 鹦鹉螺，`Nautilus`。
     ///
     /// The `Nautilus`.
@@ -234,7 +237,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 62] = [
+    pub const ALL: [Self; 63] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -297,6 +300,7 @@ impl MobType {
         Self::SulfurCube,
         Self::Nautilus,
         Self::ZombieNautilus,
+        Self::Creaking,
     ];
 
     /// 注册表 ID。
@@ -363,6 +367,7 @@ impl MobType {
             Self::Guardian => ids::GUARDIAN,
             Self::ElderGuardian => ids::ELDER_GUARDIAN,
             Self::SulfurCube => ids::SULFUR_CUBE,
+            Self::Creaking => ids::CREAKING,
             Self::Nautilus => ids::NAUTILUS,
             Self::ZombieNautilus => ids::ZOMBIE_NAUTILUS,
         }
@@ -431,6 +436,7 @@ impl MobType {
             Self::Guardian => "minecraft:guardian",
             Self::ElderGuardian => "minecraft:elder_guardian",
             Self::SulfurCube => "minecraft:sulfur_cube",
+            Self::Creaking => "minecraft:creaking",
             Self::Nautilus => "minecraft:nautilus",
             Self::ZombieNautilus => "minecraft:zombie_nautilus",
         }
@@ -536,6 +542,14 @@ impl MobType {
             // Size 1; other sizes go through [`Mob::dimensions`].
             (Self::Slime, _) => slime::dimensions(1),
             (Self::SulfurCube, _) => sulfur_cube::dimensions(2),
+            (Self::Creaking, _) => {
+                let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
+                (
+                    facts.width,
+                    facts.height,
+                    mc_bamboo_data::entity_types::CREAKING_EYE_HEIGHT,
+                )
+            }
             (
                 Self::Horse
                 | Self::Donkey
@@ -718,6 +732,7 @@ impl MobType {
                 | Self::Endermite
                 | Self::Guardian
                 | Self::ElderGuardian
+                | Self::Creaking
         ) || self.is_skeleton()
     }
 
@@ -794,7 +809,7 @@ impl MobType {
         self.is_monster()
             || matches!(
                 self,
-                Self::Slime | Self::Phantom | Self::SulfurCube | Self::CamelHusk
+                Self::Slime | Self::Phantom | Self::SulfurCube | Self::CamelHusk | Self::Creaking
             )
     }
 
@@ -1019,6 +1034,9 @@ impl MobType {
         if matches!(self, Self::SulfurCube) {
             return 1;
         }
+        if matches!(self, Self::Creaking) {
+            return 0;
+        }
         // `Phantom` 构造函数里也是 `xpReward = 5`。
         // The `Phantom` constructor sets `xpReward = 5` as well.
         if self.is_monster() || matches!(self, Self::Phantom) {
@@ -1091,6 +1109,7 @@ impl MobType {
             Self::Guardian => "minecraft:entities/guardian",
             Self::ElderGuardian => "minecraft:entities/elder_guardian",
             Self::SulfurCube => "minecraft:entities/sulfur_cube",
+            Self::Creaking => "minecraft:entities/creaking",
             Self::Nautilus => "minecraft:entities/nautilus",
             Self::ZombieNautilus => "minecraft:entities/zombie_nautilus",
         }
@@ -1230,7 +1249,8 @@ impl MobType {
             | Self::ElderGuardian
             | Self::SulfurCube
             | Self::Nautilus
-            | Self::ZombieNautilus => None,
+            | Self::ZombieNautilus
+            | Self::Creaking => None,
         }
     }
 
@@ -1292,7 +1312,8 @@ impl MobType {
             | Self::ElderGuardian
             | Self::SulfurCube
             | Self::Nautilus
-            | Self::ZombieNautilus => None,
+            | Self::ZombieNautilus
+            | Self::Creaking => None,
         }
     }
 
@@ -1350,6 +1371,7 @@ impl MobType {
             Self::ZombieVillager => Some("minecraft:entity.zombie_villager.death"),
             // 守卫者的死亡音分水中 / 岸上两套，由 `guardian::death_sound` 按 `isInWater` 选。
             // Guardian death sounds have water / land variants picked by `guardian::death_sound`.
+            Self::Creaking => Some("minecraft:entity.creaking.death"),
             Self::Guardian
             | Self::ElderGuardian
             | Self::SulfurCube
@@ -1423,6 +1445,7 @@ impl MobType {
             Self::ZombieVillager => Some("minecraft:entity.zombie_villager.step"),
             // `Guardian.getMovementEmission()` = `EVENTS`：没有脚步声。
             // `Guardian.getMovementEmission()` = `EVENTS`: no step sound.
+            Self::Creaking => Some("minecraft:entity.creaking.step"),
             Self::Guardian
             | Self::ElderGuardian
             | Self::SulfurCube
@@ -1495,6 +1518,7 @@ impl MobType {
             Self::Guardian => items::GUARDIAN_SPAWN_EGG,
             Self::ElderGuardian => items::ELDER_GUARDIAN_SPAWN_EGG,
             Self::SulfurCube => items::SULFUR_CUBE_SPAWN_EGG,
+            Self::Creaking => items::CREAKING_SPAWN_EGG,
             Self::Nautilus => items::NAUTILUS_SPAWN_EGG,
             Self::ZombieNautilus => items::ZOMBIE_NAUTILUS_SPAWN_EGG,
         }
@@ -1563,6 +1587,7 @@ impl MobType {
             Self::Guardian => "entity.minecraft.guardian",
             Self::ElderGuardian => "entity.minecraft.elder_guardian",
             Self::SulfurCube => "entity.minecraft.sulfur_cube",
+            Self::Creaking => "entity.minecraft.creaking",
             Self::Nautilus => "entity.minecraft.nautilus",
             Self::ZombieNautilus => "entity.minecraft.zombie_nautilus",
         }
@@ -2809,6 +2834,8 @@ pub struct Mob {
     ///
     /// Sulfur-cube archetype values, swallowed block and fuse; default elsewhere.
     pub sulfur_cube: sulfur_cube::SulfurCubeState,
+    /// 嘎枝的四个同步元数据；别的生物是缺省值。
+    pub creaking: creaking::CreakingState,
     /// 鹦鹉螺的冲刺状态与僵尸鹦鹉螺的变种；别的生物恒为缺省值。
     ///
     /// Nautilus dash state and zombie-nautilus variant; default for other mobs.
@@ -2967,6 +2994,15 @@ pub enum MobEvent {
     },
 }
 
+/// 官方大脑由 `CreakingAi` 驱动；Bamboo 逐刻场景落地前先只保留浮水。
+fn creaking_goals(_navigation: &mut Navigation) -> GoalSelector {
+    GoalSelector::from_goals(vec![goals::WrappedGoal {
+        priority: 1,
+        goal: goals::Goal::Float,
+        running: false,
+    }])
+}
+
 impl Mob {
     /// `EntityType.create`：构造函数链。随机数（UUID 两个 `nextLong`、`yRot` 一个
     /// `nextFloat`）由调用方在实体拿到 ID 之后取，见 [`super::Entity::cow`]。
@@ -3026,6 +3062,7 @@ impl Mob {
             MobType::Guardian => guardian::attributes(false),
             MobType::ElderGuardian => guardian::attributes(true),
             MobType::SulfurCube => sulfur_cube::attributes(),
+            MobType::Creaking => creaking::attributes(),
             MobType::Nautilus | MobType::ZombieNautilus => nautilus::attributes(mob_type),
             kind => equine::attributes(kind),
         };
@@ -3074,6 +3111,7 @@ impl Mob {
             }
             MobType::Slime => slime::goals(&mut navigation),
             MobType::SulfurCube => sulfur_cube::goals(&mut navigation),
+            MobType::Creaking => creaking_goals(&mut navigation),
             MobType::PolarBear => polar_bear::goals(&mut navigation),
             MobType::Panda => panda::goals(&mut navigation),
             MobType::Ocelot => ocelot::goals(&mut navigation),
@@ -3203,6 +3241,7 @@ impl Mob {
             }
             MobType::Slime => slime::targets(),
             MobType::SulfurCube => GoalSelector::default(),
+            MobType::Creaking => GoalSelector::default(),
             MobType::Drowned => drowned::targets(),
             MobType::Witch => witch::targets(),
             MobType::Phantom => phantom::target_goals(),
@@ -3414,6 +3453,7 @@ impl Mob {
             axolotl: axolotl::AxolotlState::new(),
             guardian: guardian::GuardianState::default(),
             sulfur_cube: sulfur_cube::SulfurCubeState::default(),
+            creaking: creaking::CreakingState::new(),
             nautilus: nautilus::NautilusState::default(),
             events: Vec::new(),
             needs_sync: false,
@@ -4028,6 +4068,8 @@ pub struct MobPublic {
     /// 硫磺方块怪的 `MAX_FUSE` / `FROM_BUCKET` 元数据。
     pub sulfur_cube_max_fuse: i32,
     pub sulfur_cube_from_bucket: bool,
+    /// 嘎枝的四项元数据。
+    pub creaking: creaking::CreakingState,
     /// `Mob.isPersistenceRequired()`：持久化的生物不参与自然刷怪的计数。
     ///
     /// `Mob.isPersistenceRequired()`: persistent mobs are left out of the spawn counts.
@@ -4170,6 +4212,7 @@ impl MobPublic {
             cube_size: mob.cube.size,
             sulfur_cube_max_fuse: mob.sulfur_cube.max_fuse,
             sulfur_cube_from_bucket: mob.sulfur_cube.from_bucket,
+            creaking: mob.creaking,
             equipment: mob
                 .equipment
                 .iter()
@@ -4328,6 +4371,35 @@ mod tests {
             assert!(mob.can_break_doors);
             assert_eq!(mob.mob_type, MobType::Zombie);
         });
+    }
+
+    /// 嘎枝的注册事实、属性、尺寸、元数据缺省和 `home_pos` 存档。
+    #[test]
+    fn creaking_registry_facts() {
+        use mc_bamboo_core::BlockPos;
+        use mc_bamboo_data::{entity_types, registries::entity_type as ids};
+
+        let kind = MobType::Creaking;
+        assert_eq!(MobType::by_name("minecraft:creaking"), Some(kind));
+        assert_eq!(kind.entity_type(), ids::CREAKING);
+        assert_eq!(kind.dimensions(false), (0.9, 2.7, 2.3));
+        assert_eq!(kind.loot_table(), "minecraft:entities/creaking");
+        assert_eq!(kind.xp_reward(), 0);
+        assert_eq!(kind.spawn_egg(), mc_bamboo_data::items::CREAKING_SPAWN_EGG);
+        let mob = Mob::new(kind);
+        assert_eq!(
+            mob.attributes
+                .base(mc_bamboo_data::registries::attribute::MAX_HEALTH),
+            entity_types::CREAKING_MAX_HEALTH
+        );
+        assert!(mob.creaking.can_move);
+        assert!(!mob.creaking.active);
+        assert_eq!(mob.creaking.home_pos, None);
+        let home = BlockPos::new(1, 2, 3);
+        assert_eq!(
+            super::creaking::home_from_tag(&super::creaking::home_tag(home)),
+            Some(home)
+        );
     }
 
     /// 每种 `MobType` 的注册表 ID 必须两两不同，且能从 `by_entity_type` 反查回自己。

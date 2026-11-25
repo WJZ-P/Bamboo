@@ -381,3 +381,15 @@ pub const ENDERMAN_EYE_HEIGHT: f32 = 2.55;
 pub const ENDERMITE_EYE_HEIGHT: f32 = 0.13;
 pub const SILVERFISH_EYE_HEIGHT: f32 = 0.13;
 pub const SPIDER_EYE_HEIGHT: f32 = 0.65;
+/// `Creaking` 的四项元数据下标，由官方类的 `defineId` 顺序算出。
+pub const CREAKING_CAN_MOVE: u8 = 16;
+pub const CREAKING_IS_ACTIVE: u8 = 17;
+pub const CREAKING_IS_TEARING_DOWN: u8 = 18;
+pub const CREAKING_HOME_POS: u8 = 19;
+/// `Creaking.createAttributes()` 覆盖的五个基础值。
+pub const CREAKING_MAX_HEALTH: f64 = 1.0;
+pub const CREAKING_MOVEMENT_SPEED: f64 = 0.4000000059604645;
+pub const CREAKING_ATTACK_DAMAGE: f64 = 3.0;
+pub const CREAKING_FOLLOW_RANGE: f64 = 32.0;
+pub const CREAKING_STEP_HEIGHT: f64 = 1.0625;
+pub const CREAKING_EYE_HEIGHT: f32 = 2.3;

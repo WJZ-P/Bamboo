@@ -4544,6 +4544,25 @@ fn entity_types_file(data: &VersionData) -> String {
         "pub const SLIME_EYE_HEIGHT: f32 = {};",
         float_literal(facts.slime_eye_height)
     );
+    // `Creaking` 的元数据 / 属性常量由官方类的字节码顺序与 `createAttributes()` 得出。
+    for (name, value) in [
+        ("CREAKING_CAN_MOVE", 16),
+        ("CREAKING_IS_ACTIVE", 17),
+        ("CREAKING_IS_TEARING_DOWN", 18),
+        ("CREAKING_HOME_POS", 19),
+    ] {
+        let _ = writeln!(out, "pub const {name}: u8 = {value};");
+    }
+    for (name, value) in [
+        ("CREAKING_MAX_HEALTH", 1.0),
+        ("CREAKING_MOVEMENT_SPEED", 0.4000000059604645),
+        ("CREAKING_ATTACK_DAMAGE", 3.0),
+        ("CREAKING_FOLLOW_RANGE", 32.0),
+        ("CREAKING_STEP_HEIGHT", 1.0625),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
+    }
+    let _ = writeln!(out, "pub const CREAKING_EYE_HEIGHT: f32 = 2.3;");
     mooshroom_facts(&mut out, facts);
     // 敌对生物自己定义的元数据 index 和眼高，按常量名排序。
     // Hostile-mob metadata indices and eye heights, sorted by constant name.
