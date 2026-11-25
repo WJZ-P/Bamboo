@@ -15052,10 +15052,15 @@ public final class MobOracle {
      */
     private static int playLeash(Official official, Writer out, String only) throws Exception {
         String[] names = {"leash_player_walk", "leash_player_shear", "leash_fence_hold",
-                "leash_fence_untie", "leash_fence_break"};
+                "leash_fence_untie", "leash_fence_break",
+                "leash_ai_follow", "leash_ai_stop", "leash_ai_snap"};
         int written = 0;
         for (String name : names) {
             if (only != null && !name.startsWith(only)) continue;
+            // `leash_ai_*` 开着牛的 AI，逐刻比牛朝牵引者走过来、停在附近、超距断绳
+            // 时的位置 / 速度 / 朝向 / 寻路目标 / 运行目标 / 随机源；其余场景沿用 NoAI
+            // 只比拴绳物理。
+            boolean ai = name.startsWith("leash_ai_");
             boolean fence = name.startsWith("leash_fence");
             int fx = 8, fy = 64, fz = 0;
             BlockPos fencePos = new BlockPos(fx, fy, fz);
@@ -15087,9 +15092,10 @@ public final class MobOracle {
             cow.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
             cow.setYHeadRot(0.0F);
             cow.setYBodyRot(0.0F);
-            // 只比 leash 的物理，不比牛自己的 AI（Bamboo 的 Cow AI 在拴绳状态下与官方
-            // 有既有的目标差异）：两边都关掉 AI，弹性力 / 角动量 / 断绳仍逐位可比。
-            cow.setNoAi(true);
+            // `leash_ai_*` 开着牛的 AI：官方 `PathfinderMob.closeRangeLeashBehaviour`
+            // 会让被拴的牛自己朝牵引者走过来，逐刻比得到导航 / 目标 / 随机源。
+            // 其余场景沿用 NoAI，只比拴绳物理。
+            cow.setNoAi(!ai);
             world.tracked.add(cow);
             net.minecraft.world.entity.decoration.LeashFenceKnotEntity knot = null;
             if (fence) {
@@ -15105,8 +15111,24 @@ public final class MobOracle {
             StringBuilder frames = new StringBuilder("[");
             StringBuilder playerMotion = new StringBuilder("[");
             for (int tick = 0; tick <= ticks; tick++) {
-                double px = 2.5 + tick * 0.4;
-                double vx = tick == 0 ? 0.0 : 0.4;
+                // 玩家轨迹按场景分：
+                // - `leash_ai_follow`：慢慢走（每刻 0.12），牛始终在弹性距离内，靠
+                //   `closeRangeLeashBehaviour` 自己跟着走。
+                // - `leash_ai_stop`：走 20 刻后停下，牛走到附近后停住。
+                // - `leash_ai_snap` / 其余场景：每刻 0.4 一直走远，直到超距断绳。
+                double px;
+                double vx;
+                if (name.equals("leash_ai_follow")) {
+                    px = 2.5 + tick * 0.12;
+                    vx = tick == 0 ? 0.0 : 0.12;
+                } else if (name.equals("leash_ai_stop")) {
+                    double walked = Math.min(tick, 20) * 0.12;
+                    px = 2.5 + walked;
+                    vx = (tick == 0 || tick > 20) ? 0.0 : 0.12;
+                } else {
+                    px = 2.5 + tick * 0.4;
+                    vx = tick == 0 ? 0.0 : 0.4;
+                }
                 if (tick > 0) {
                     world.gameTime++;
                     player.setPos(px, 64.0, 0.5);
@@ -15190,6 +15212,28 @@ public final class MobOracle {
                 .append(',').append(kind).append(',').append(Double.doubleToRawLongBits(am)).append(']');
         out.append(",\"items\":").append(items);
         out.append(",\"knotAlive\":").append(knot != null && !knot.isRemoved());
+        // 开 AI 的场景逐刻比正在跑的目标和导航路径：牛跟着牵引者走时这两个都要对上。
+        StringBuilder goals = new StringBuilder();
+        boolean firstGoal = true;
+        for (WrappedGoal goal : cow.getGoalSelector().getAvailableGoals()) {
+            if (!goal.isRunning()) continue;
+            if (!firstGoal) goals.append(' ');
+            firstGoal = false;
+            goals.append(goal.getGoal().getClass().getSimpleName());
+        }
+        out.append(",\"goals\":").append(jsonString(goals.toString()));
+        net.minecraft.world.level.pathfinder.Path path = cow.getNavigation().getPath();
+        out.append(",\"path\":");
+        if (path == null) {
+            out.append("null");
+        } else {
+            out.append('[').append(path.getNextNodeIndex());
+            for (int n = 0; n < path.getNodeCount(); n++) {
+                net.minecraft.world.level.pathfinder.Node node = path.getNode(n);
+                out.append(',').append(node.x).append(',').append(node.y).append(',').append(node.z);
+            }
+            out.append(']');
+        }
         out.append('}');
     }
 

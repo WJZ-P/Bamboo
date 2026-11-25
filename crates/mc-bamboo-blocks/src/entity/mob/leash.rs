@@ -7,10 +7,24 @@
 //! [`tick_leash`] pulls or snaps it by distance every tick; attach, detach and snap
 //! each broadcast `set_entity_link` so clients draw the rope.
 
+use std::cell::Cell;
+
 use mc_bamboo_core::{Aabb, BlockPos, Vec3, mth};
 
-use super::{Mob, MobEvent, MobType};
+use super::{Mob, MobEvent, MobType, goals};
 use crate::entity::{Entity, EntityUid, ctx::EntityCtx};
+
+thread_local! {
+    /// 仅供 `mob-oracle --break-self-test leash_nav`：命中时让
+    /// `close_range_leash_behaviour` 跳过导航，模拟「被拴生物不自己跟着走」这个回归，
+    /// 逐刻对拍应报不一致。默认 false，正式游戏零影响。
+    static SKIP_LEASH_NAV: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 改坏确认开关，只由 `mob-oracle` 调用；默认 false。
+pub fn set_oracle_skip_leash_nav(value: bool) {
+    SKIP_LEASH_NAV.with(|flag| flag.set(value));
+}
 
 /// `LEASH_TOO_FAR_DIST`：超过这个距离绳子断掉。
 pub const LEASH_TOO_FAR_DIST: f64 = 12.0;
@@ -254,6 +268,118 @@ fn lead_item() -> mc_bamboo_protocol::item::ItemStack {
     mc_bamboo_protocol::item::ItemStack::new(mc_bamboo_data::items::LEAD, 1)
 }
 
+/// `PathfinderMob.shouldStayCloseToLeashHolder()`：默认 true；`Allay` / `HappyGhast`
+/// 覆盖成 false。Bamboo 没建模这两个实体，其余寻路生物恒 true。
+fn should_stay_close_to_leash_holder(_kind: MobType) -> bool {
+    true
+}
+
+/// `PathfinderMob.followLeashSpeed()`：默认 1.0；`Llama`（含继承它的行商羊驼）覆盖成 2.0。
+fn follow_leash_speed(kind: MobType) -> f64 {
+    if kind == MobType::Llama { 2.0 } else { 1.0 }
+}
+
+/// 被拴的生物是不是 `PathfinderMob`：只有这一类覆盖 `whenLeashedTo` /
+/// `closeRangeLeashBehaviour`；直接继承 `Mob` 的（蝙蝠、史莱姆、鱿鱼、悦灵等）走
+/// `Leashable` 的空默认。官方类层次里 `Animal` / `Monster` / `AgeableMob` /
+/// `TamableAnimal` / `AbstractHorse` / `Villager` / `Allay` / 傀儡都挂在
+/// `PathfinderMob` 下；这里按能被拴的建模类型判定，非寻路生物不跟着牵引者走。
+fn is_pathfinder_mob(kind: MobType) -> bool {
+    !matches!(
+        kind,
+        MobType::Bat | MobType::Slime | MobType::Squid | MobType::GlowSquid
+    )
+}
+
+/// `PathfinderMob.isPanicking()`：大脑的 `IS_PANICKING` 记忆或正在跑的 `PanicGoal`。
+/// Bamboo 的目标系统里 `goals.is_panicking()` 覆盖后者；有大脑的生物（村民、悦灵等）
+/// 的恐慌由 `goals` 里的对应目标体现，这里沿用目标系统的判断。
+fn is_panicking(mob: &Mob) -> bool {
+    mob.goals.is_panicking()
+}
+
+/// `PathfinderMob.whenLeashedTo(holder)`：每刻把家设到牵引者所在方块，半径
+/// `leashElasticDistance() - 1`（6-1=5）。父类 `Mob.whenLeashedTo` →
+/// `Leashable.whenLeashedTo` → `holder.notifyLeashHolder(this)` 是空操作。
+///
+/// 官方 `tickLeash` 在算完 `leashDistanceTo` 之后、判断 snap / elastic 之前无条件调它。
+fn when_leashed_to(mob: &mut Mob, holder: &HolderInfo) {
+    if !is_pathfinder_mob(mob.mob_type) {
+        return;
+    }
+    mob.home = Some((
+        BlockPos::containing(holder.position),
+        leash_elastic_distance() as i32 - 1,
+    ));
+}
+
+/// `PathfinderMob.closeRangeLeashBehaviour(holder)`：近距离（没断绳、没弹性拉扯）时
+/// 打开 `MOVE` 控制位并朝牵引者导航，停在离牵引者 2 格处。玩家牵着动物走时动物就是
+/// 靠这个自己走过来的，弹性拉扯只是兜底。
+fn close_range_leash_behaviour(
+    me: &mut Entity,
+    mob: &mut Mob,
+    holder: &HolderInfo,
+    ctx: &dyn EntityCtx,
+) {
+    // `super.closeRangeLeashBehaviour` 是 `Leashable` 的空默认。
+    if !is_pathfinder_mob(mob.mob_type)
+        || !should_stay_close_to_leash_holder(mob.mob_type)
+        || is_panicking(mob)
+    {
+        return;
+    }
+    // `goalSelector.enableControlFlag(MOVE)`。
+    mob.goals.set_control_flag(goals::Flag::Move, true);
+    // `Entity.distanceTo(Entity)`：每格差值 d2f 后算平方和，再 `Mth.sqrt(F)F`。
+    let dx = (me.position.x - holder.position.x) as f32;
+    let dy = (me.position.y - holder.position.y) as f32;
+    let dz = (me.position.z - holder.position.z) as f32;
+    let distance = mth::sqrt_f32(dx * dx + dy * dy + dz * dz);
+    // 朝牵引者的方向，长度 `max(distance - 2, 0)`；目标是 `position + offset`。
+    let offset = Vec3::new(
+        holder.position.x - me.position.x,
+        holder.position.y - me.position.y,
+        holder.position.z - me.position.z,
+    )
+    .normalize()
+    .scale(f64::from((distance - 2.0).max(0.0)));
+    let at = me.position.add(offset);
+    let view = ctx.blocks();
+    let nav = super::living::nav_mob(me, mob, view);
+    // `mob-oracle --break-self-test leash_nav`：故意不调导航（其余逻辑照旧）。
+    if SKIP_LEASH_NAV.with(|flag| flag.get()) {
+        return;
+    }
+    mob.navigation
+        .move_to(view, &nav, at, follow_leash_speed(mob.mob_type));
+}
+
+/// `onElasticLeashPull()`：默认 `checkFallDistanceAccumulation()`；`AbstractHorse` 系
+/// 额外停下吃草，`Camel` 系额外从坐姿站起来。这些只在弹性拉扯那一刻发生。
+fn on_elastic_leash_pull(me: &mut Entity, mob: &mut Mob, time: i64) {
+    // `Entity.checkFallDistanceAccumulation()`。
+    if me.delta.y > -0.5 && me.fall_distance > 1.0 {
+        me.fall_distance = 1.0;
+    }
+    // `AbstractHorse.onElasticLeashPull`：`if (isEating()) setEating(false)`。
+    // 马科 / 羊驼 / 骆驼都继承 `AbstractHorse`。
+    if mob.mob_type.is_equine()
+        && let Some(equine) = mob.equine.as_mut()
+        && equine.eating
+    {
+        equine.eating = false;
+    }
+    // `Camel.onElasticLeashPull`：坐着、不在换姿势、能换姿势时站起来。`Camel` 的子类
+    // `CamelHusk` 一并覆盖。Bamboo 的 `canCamelChangePose` 在开阔平地恒真。
+    if matches!(mob.mob_type, MobType::Camel | MobType::CamelHusk)
+        && super::camel::is_camel_sitting(mob)
+        && !super::camel::is_in_pose_transition(mob, time)
+    {
+        super::camel::stand_up_instantly(mob, time);
+    }
+}
+
 /// 每刻的拉扯：`Leashable.tickLeash`。
 pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `restoreLeashFromSave`：读档进来的牵引者身份每刻试着重连成 uid。
@@ -307,6 +433,9 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     // 换维度不在这里处理：同一岛上没有别的维度，绳子原样保留。
     let dist = leash_distance_to(me.position, me.dimensions.1, holder.position, holder.height);
+    // `whenLeashedTo(holder)`：官方在算完 `leashDistanceTo` 之后、判断 snap / elastic
+    // 之前每刻无条件调用（`setHomeTo`），让被拴的寻路生物把游荡目标限制在牵引者附近。
+    when_leashed_to(mob, &holder);
     if dist > leash_snap_distance() {
         // `level.playSound(null, holder.pos, LEAD_BREAK, NEUTRAL, 1, 1)`。
         mob.events.push(MobEvent::Sound {
@@ -337,10 +466,13 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let elastic_threshold =
         leash_elastic_distance() - f64::from(holder.width) - f64::from(me.dimensions.0);
     if dist > elastic_threshold && elastic_interactions(me, mob, &holder) {
-        // `onElasticLeashPull()`：`checkFallDistanceAccumulation()`。
-        if me.delta.y > -0.5 && me.fall_distance > 1.0 {
-            me.fall_distance = 1.0;
-        }
+        // `onElasticLeashPull()`：默认 `checkFallDistanceAccumulation()`，马科 / 骆驼
+        // 另有附加行为。
+        on_elastic_leash_pull(me, mob, ctx.blocks().game_time());
+    } else {
+        // `closeRangeLeashBehaviour(holder)`：没断绳、没弹性拉扯时，被拴的寻路生物
+        // 自己朝牵引者走过来（打开 MOVE 控制位并导航）。
+        close_range_leash_behaviour(me, mob, &holder, ctx);
     }
     // `entity.setYRot((float)(yRot - angularMomentum))`，再按摩擦衰减角动量。
     if let Some(data) = mob.leash.as_mut() {

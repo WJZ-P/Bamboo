@@ -64,6 +64,12 @@ struct LeashFrame {
     /// 拴绳结是否还在（没有结的场景恒 false）。
     #[serde(default)]
     knot_alive: bool,
+    /// 正在跑的目标类名（空格分隔），开 AI 的场景逐刻比。
+    #[serde(default)]
+    goals: String,
+    /// 导航路径 `[nextNodeIndex, x,y,z, ...]`，开 AI 的场景逐刻比。
+    #[serde(default)]
+    path: Option<Vec<i32>>,
 }
 
 fn v3(bits: &[i64]) -> Vec3 {
@@ -159,8 +165,9 @@ impl LeashCase {
                 mob.x_rot_o = 0.0;
                 mob.y_head_rot = 0.0;
                 mob.y_body_rot = 0.0;
-                // 和 Java 一样关掉 AI，只比 leash 的物理（Cow AI 在拴绳状态有既有差异）。
-                mob.no_ai = true;
+                // `leash_ai_*` 开 AI，逐刻比牛跟着牵引者走的导航 / 目标 / 随机源；
+                // 其余场景沿用 NoAI 只比拴绳物理。和 Java 的 `setNoAi(!ai)` 一致。
+                mob.no_ai = !self.name.starts_with("leash_ai_");
                 if self.start_leash == 1 && break_test != Some("leash_attach") {
                     mob.leash = Some(LeashData::new(
                         self.player_id,
@@ -189,6 +196,11 @@ impl Report {
     pub(super) fn replay_leash(&mut self, case: &LeashCase) {
         self.cases += 1;
         let break_test = self.break_test.clone();
+        // 第 4 处改坏确认：命中 `leash_nav` 时让 `closeRangeLeashBehaviour` 不调导航，
+        // 开 AI 的牛就不自己跟着牵引者走，逐刻对拍应报不一致。跑完重置，避免串场。
+        mc_bamboo_blocks::entity::mob::leash::set_oracle_skip_leash_nav(
+            break_test.as_deref() == Some("leash_nav"),
+        );
         let mut level = case.level();
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
@@ -335,6 +347,8 @@ impl Report {
                         .entities
                         .public_at(knot_uid)
                         .is_some_and(|p| !p.removed),
+                goals: mob.goals.running_names_of(mob).join(" "),
+                path: super::shown_path(&level, &cow, mob),
             };
             if &ours != expected {
                 self.mismatch(format!(
@@ -342,6 +356,31 @@ impl Report {
                 ));
             }
             self.steps += 1;
+        }
+        // 诊断（`MOB_ORACLE_DUMP`）：官方侧牛的位置跨度、有导航路径 / 运行目标的刻数，
+        // 用来确认开 AI 的场景真的测到了「牛跟着走 / 导航 / 目标」，而不是两边都静止。
+        if std::env::var_os("MOB_ORACLE_DUMP").is_some() {
+            let xs: Vec<f64> = case
+                .frames
+                .iter()
+                .map(|f| f64::from_bits(f.cow[0] as u64))
+                .collect();
+            let (min, max) = xs
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &x| {
+                    (a.min(x), b.max(x))
+                });
+            let paths = case.frames.iter().filter(|f| f.path.is_some()).count();
+            let goals = case.frames.iter().filter(|f| !f.goals.is_empty()).count();
+            eprintln!(
+                "{}: official x {:.3}..{:.3} (span {:.3}), path {} ticks, goals {} ticks",
+                case.name,
+                min,
+                max,
+                max - min,
+                paths,
+                goals
+            );
         }
         println!(
             "{}: {} ticks, knot {knot_uid}",
