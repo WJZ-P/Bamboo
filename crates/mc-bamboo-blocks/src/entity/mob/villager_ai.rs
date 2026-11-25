@@ -1312,23 +1312,29 @@ fn trigger_go_to_wanted_item(speed: f32, max_dist: i32, cx: &mut Cx) -> bool {
     if cx.memories.has(ItemPickupCooldownTicks) || !cx.mob.can_pick_up_loot {
         return false;
     }
-    let Some(item_uid) = cx.memories.entity(NearestVisibleWantedItem) else {
+    // 官方记忆里持有 ItemEntity 对象本体；被捡走后它只是 isRemoved，位置和距离仍可读。
+    // Vanilla holds the ItemEntity object itself: after pickup it is merely removed,
+    // while position and distance remain readable.
+    let Some((item_uid, remembered_pos)) = cx.memories.wanted_item() else {
         return false;
     };
-    let Some(item) = cx.ctx.other(item_uid) else {
-        return false;
-    };
-    if item.removed {
-        return false;
-    }
+    let mut item_pos = remembered_pos;
+    let mut in_world = false;
+    cx.ctx.with_other(item_uid, &mut |public| {
+        if !public.removed {
+            item_pos = public.position;
+            in_world = true;
+        }
+    });
     let max_d = f64::from(max_dist);
-    if item.position.distance_to_sqr(cx.me.position) >= max_d * max_d {
+    if item_pos.distance_to_sqr(cx.me.position) >= max_d * max_d {
         return false;
     }
     cx.memories.set(
         LookTarget,
-        MemoryValue::Look(PositionTracker::Entity {
+        MemoryValue::Look(PositionTracker::Item {
             uid: item_uid,
+            pos: item_pos,
             track_eye: true,
             target_eye: false,
         }),
@@ -1336,8 +1342,9 @@ fn trigger_go_to_wanted_item(speed: f32, max_dist: i32, cx: &mut Cx) -> bool {
     cx.memories.set(
         WalkTarget,
         MemoryValue::Walk(WalkTarget {
-            target: PositionTracker::Entity {
+            target: PositionTracker::Item {
                 uid: item_uid,
+                pos: item_pos,
                 track_eye: false,
                 target_eye: false,
             },
@@ -1345,6 +1352,7 @@ fn trigger_go_to_wanted_item(speed: f32, max_dist: i32, cx: &mut Cx) -> bool {
             close_enough: 0,
         }),
     );
+    let _ = in_world;
     true
 }
 

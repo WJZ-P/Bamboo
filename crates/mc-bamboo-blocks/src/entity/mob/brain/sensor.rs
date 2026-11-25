@@ -672,7 +672,7 @@ fn sense_items(cx: &mut Cx) {
     });
     cx.memories.set_or_erase(
         MemoryType::NearestVisibleWantedItem,
-        found.map(|(_, uid, _)| MemoryValue::Entity(uid)),
+        found.map(|(_, uid, pos)| MemoryValue::WantedItem { uid, pos }),
     );
 }
 
