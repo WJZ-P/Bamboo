@@ -709,8 +709,13 @@ fn entity_position(cx: &Cx, uid: crate::entity::EntityUid) -> Option<Vec3> {
 }
 
 fn look_at_entity(cx: &mut Cx, uid: crate::entity::EntityUid) {
-    if let Some(pos) = entity_position(cx, uid) {
-        cx.mob.look.set_look_at(pos.x, pos.y, pos.z, 10.0, 90.0);
+    // `BehaviorUtils.lookAtEntity` / `LookAtTargetSink`：追踪目标的眼睛位置，
+    // 用 `getHeadRotSpeed()` = 10、`getMaxHeadXRot()` = 40 的默认转速。
+    if let Some(view) = super::brain::sensor::living(cx, uid) {
+        let eye = view
+            .position
+            .add(Vec3::new(0.0, f64::from(view.eye_height), 0.0));
+        cx.mob.look.set_look_at_default(eye.x, eye.y, eye.z);
     }
 }
 

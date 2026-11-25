@@ -474,9 +474,18 @@ pub(crate) fn is_in_liquid(me: &Entity, mob: &Mob) -> bool {
     me.in_water || is_in_lava(me, mob)
 }
 
-/// `getEyeY()`。
+/// `getEyeY()`：钻出 / 钻入的监守者把高度压成 1，眼睛高度跟着 `getDimensions` 变。
+///
+/// `getEyeY()`: an emerging / digging warden is flattened to height 1, so its eye
+/// height follows the current pose dimensions.
 pub(crate) fn eye_y(me: &Entity, mob: &Mob) -> f64 {
-    me.position.y + f64::from(mob.eye_height)
+    let eye = if mob.mob_type == super::MobType::Warden && mob.warden.pose.is_digging_or_emerging()
+    {
+        mob.dimensions().1 * 0.85
+    } else {
+        mob.eye_height
+    };
+    me.position.y + f64::from(eye)
 }
 
 /// `getLastDamageSource()`：40 刻以内的那一次。
