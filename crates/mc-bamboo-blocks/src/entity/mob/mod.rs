@@ -82,6 +82,7 @@ mod skeleton_drops;
 pub mod skeleton_horse;
 pub mod slime;
 pub mod smooth_swim;
+pub mod sniffer;
 pub mod snow_golem;
 pub mod spawn;
 pub mod spider;
@@ -235,13 +236,16 @@ pub enum MobType {
     ///
     /// The `Warden`. A `Monster` → `Warden`, brain-driven, itself a vibration listener.
     Warden,
+    /// 嗅探兽，`Sniffer`。
+    /// The `Sniffer`.
+    Sniffer,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 63] = [
+    pub const ALL: [Self; 64] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -305,6 +309,7 @@ impl MobType {
         Self::Nautilus,
         Self::ZombieNautilus,
         Self::Warden,
+        Self::Sniffer,
     ];
 
     /// 注册表 ID。
@@ -374,6 +379,7 @@ impl MobType {
             Self::Nautilus => ids::NAUTILUS,
             Self::ZombieNautilus => ids::ZOMBIE_NAUTILUS,
             Self::Warden => ids::WARDEN,
+            Self::Sniffer => ids::SNIFFER,
         }
     }
 
@@ -443,6 +449,7 @@ impl MobType {
             Self::Nautilus => "minecraft:nautilus",
             Self::ZombieNautilus => "minecraft:zombie_nautilus",
             Self::Warden => "minecraft:warden",
+            Self::Sniffer => "minecraft:sniffer",
         }
     }
 
@@ -464,6 +471,7 @@ impl MobType {
             Self::Turtle => Some(item_tags::TURTLE_FOOD),
             Self::Axolotl => Some(item_tags::AXOLOTL_FOOD),
             Self::Nautilus | Self::ZombieNautilus => Some(item_tags::NAUTILUS_FOOD),
+            Self::Sniffer => Some(item_tags::SNIFFER_FOOD),
             Self::Ocelot => Some(item_tags::OCELOT_FOOD),
             Self::Cat => Some(item_tags::CAT_FOOD),
             _ => None,
@@ -596,6 +604,7 @@ impl MobType {
             (Self::Guardian, _) => (0.85, 0.85, 0.425),
             (Self::ElderGuardian, _) => (1.9975, 1.9975, 0.99875),
             (Self::Nautilus | Self::ZombieNautilus, baby) => nautilus::dimensions(baby),
+            (Self::Sniffer, baby) => sniffer::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -1110,6 +1119,7 @@ impl MobType {
             Self::Nautilus => "minecraft:entities/nautilus",
             Self::ZombieNautilus => "minecraft:entities/zombie_nautilus",
             Self::Warden => "minecraft:entities/warden",
+            Self::Sniffer => "minecraft:entities/sniffer",
         }
     }
 
@@ -1259,6 +1269,10 @@ impl MobType {
             | Self::SulfurCube
             | Self::Nautilus
             | Self::ZombieNautilus => None,
+            // `Sniffer.getAmbientSound`：挖掘 / 搜寻时不叫，见 `sniffer::ambient_voice`。
+            // `Sniffer.getAmbientSound`: silent while digging or searching; see
+            // `sniffer::ambient_voice`.
+            Self::Sniffer => Some("minecraft:entity.sniffer.idle"),
         }
     }
 
@@ -1322,6 +1336,7 @@ impl MobType {
             | Self::SulfurCube
             | Self::Nautilus
             | Self::ZombieNautilus => None,
+            Self::Sniffer => Some("minecraft:entity.sniffer.hurt"),
         }
     }
 
@@ -1385,6 +1400,7 @@ impl MobType {
             | Self::SulfurCube
             | Self::Nautilus
             | Self::ZombieNautilus => None,
+            Self::Sniffer => Some("minecraft:entity.sniffer.death"),
         }
     }
 
@@ -1459,6 +1475,7 @@ impl MobType {
             | Self::SulfurCube
             | Self::Nautilus
             | Self::ZombieNautilus => None,
+            Self::Sniffer => Some("minecraft:entity.sniffer.step"),
         }
     }
 
@@ -1529,6 +1546,7 @@ impl MobType {
             Self::SulfurCube => items::SULFUR_CUBE_SPAWN_EGG,
             Self::Nautilus => items::NAUTILUS_SPAWN_EGG,
             Self::ZombieNautilus => items::ZOMBIE_NAUTILUS_SPAWN_EGG,
+            Self::Sniffer => items::SNIFFER_SPAWN_EGG,
         }
     }
 
@@ -1598,6 +1616,7 @@ impl MobType {
             Self::SulfurCube => "entity.minecraft.sulfur_cube",
             Self::Nautilus => "entity.minecraft.nautilus",
             Self::ZombieNautilus => "entity.minecraft.zombie_nautilus",
+            Self::Sniffer => "entity.minecraft.sniffer",
         }
     }
 
@@ -1906,6 +1925,14 @@ pub enum DamageKind {
     ///
     /// Contact damage of the HOT sulfur-cube archetype.
     SulfurCubeHot,
+    /// `minecraft:bad_respawn_point`：主世界用重生锚重生失败时的爆炸伤害。
+    /// 数据文件里是 `INTENTIONAL_GAME_DESIGN`、exhaustion 0.1、scaling
+    /// `always`、message_id `badRespawnPoint`。
+    ///
+    /// `minecraft:bad_respawn_point`: the blast from using a respawn anchor in
+    /// the overworld. `INTENTIONAL_GAME_DESIGN`, exhaustion 0.1, `always`
+    /// scaling, `message_id` `badRespawnPoint`.
+    BadRespawnPoint,
 }
 
 impl DamageKind {
@@ -1945,6 +1972,7 @@ impl DamageKind {
             Self::EnderPearl => "minecraft:ender_pearl",
             Self::LightningBolt => "minecraft:lightning_bolt",
             Self::SulfurCubeHot => "minecraft:sulfur_cube_hot",
+            Self::BadRespawnPoint => "minecraft:bad_respawn_point",
         }
     }
 
@@ -1957,6 +1985,7 @@ impl DamageKind {
     pub const fn death_message_type(self) -> DeathMessageType {
         match self {
             Self::Fall | Self::EnderPearl => DeathMessageType::FallVariants,
+            Self::BadRespawnPoint => DeathMessageType::IntentionalGameDesign,
             _ => DeathMessageType::Default,
         }
     }
@@ -2004,6 +2033,7 @@ impl DamageKind {
             Self::EnderPearl => "fall",
             Self::LightningBolt => "lightningBolt",
             Self::SulfurCubeHot => "sulfurCubeHot",
+            Self::BadRespawnPoint => "badRespawnPoint",
         }
     }
 
@@ -2045,6 +2075,7 @@ impl DamageKind {
             Self::EnderPearl,
             Self::LightningBolt,
             Self::SulfurCubeHot,
+            Self::BadRespawnPoint,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -2132,7 +2163,10 @@ impl DamageKind {
     /// `DamageSource.scalesWithDifficulty()`: only `always`, or
     /// `when_caused_by_living_non_player` with a non-player living cause.
     pub const fn scales_with_difficulty(self) -> bool {
-        matches!(self, Self::Explosion | Self::PlayerExplosion)
+        matches!(
+            self,
+            Self::Explosion | Self::PlayerExplosion | Self::BadRespawnPoint
+        )
     }
 
     /// `DamageType.exhaustion`：受伤后累加的饥饿消耗。
@@ -2155,7 +2189,8 @@ impl DamageKind {
             | Self::SweetBerryBush
             | Self::DryOut
             | Self::LightningBolt
-            | Self::SulfurCubeHot => TENTH,
+            | Self::SulfurCubeHot
+            | Self::BadRespawnPoint => TENTH,
             _ => 0.0,
         }
     }
@@ -2910,6 +2945,10 @@ pub struct Mob {
     ///
     /// The frog's variant, pose and tongue target.
     pub frog: frog::Frog,
+    /// 嗅探兽的状态机和掉种子时刻；别的生物是缺省值。
+    ///
+    /// The sniffer's state machine and drop-seed tick; default for other mobs.
+    pub sniffer: sniffer::Sniffer,
     /// 骆驼的姿势状态机同步值和冲刺计时。
     ///
     /// The camel's pose state machine synced values and dash timer.
@@ -3074,6 +3113,7 @@ impl Mob {
             MobType::SulfurCube => sulfur_cube::attributes(),
             MobType::Nautilus | MobType::ZombieNautilus => nautilus::attributes(mob_type),
             MobType::Warden => warden::attributes(),
+            MobType::Sniffer => sniffer::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3153,7 +3193,8 @@ impl Mob {
             | MobType::CamelHusk
             | MobType::Villager
             | MobType::Nautilus
-            | MobType::ZombieNautilus => GoalSelector::default(),
+            | MobType::ZombieNautilus
+            | MobType::Sniffer => GoalSelector::default(),
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
             // alongside the brain.
@@ -3225,7 +3266,8 @@ impl Mob {
             | MobType::Camel
             | MobType::CamelHusk
             | MobType::Nautilus
-            | MobType::ZombieNautilus => GoalSelector::default(),
+            | MobType::ZombieNautilus
+            | MobType::Sniffer => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Ocelot => ocelot::target_goals(),
@@ -3468,6 +3510,7 @@ impl Mob {
             guardian: guardian::GuardianState::default(),
             sulfur_cube: sulfur_cube::SulfurCubeState::default(),
             nautilus: nautilus::NautilusState::default(),
+            sniffer: sniffer::Sniffer::default(),
             events: Vec::new(),
             needs_sync: false,
             knockback_sync: false,
@@ -3549,6 +3592,9 @@ impl Mob {
             // `Armadillo` 构造函数里的 `getNavigation().setCanFloat(true)`。
             // The `Armadillo` constructor's `getNavigation().setCanFloat(true)`.
             mob.navigation.flags.can_float = true;
+        }
+        if mob_type == MobType::Sniffer {
+            sniffer::configure(&mut mob);
         }
         if mob_type.is_camel() {
             camel::configure(&mut mob);
@@ -3645,6 +3691,10 @@ impl Mob {
         if self.mob_type.is_camel() {
             let sitting = self.camel.pose == camel::Pose::Sitting;
             let (width, height, _) = camel::dimensions(self.is_baby(), sitting);
+            return (width, height);
+        }
+        if self.mob_type == MobType::Sniffer {
+            let (width, height, _) = sniffer::pose_dimensions(self.is_baby(), self.sniffer.state);
             return (width, height);
         }
         if fish::is_fish(self.mob_type) {
@@ -4004,6 +4054,14 @@ pub struct MobPublic {
     /// The nautilus `DASH` boolean and zombie-nautilus variant id.
     pub nautilus_dashing: bool,
     pub nautilus_variant: i32,
+    /// 嗅探兽的状态（挖掘时尺寸变小）。
+    ///
+    /// The sniffer's state (smaller dimensions while digging).
+    pub sniffer_state: sniffer::State,
+    /// 嗅探兽掉种子的时刻（`DATA_DROP_SEED_AT_TICK`）。
+    ///
+    /// The sniffer's drop-seed tick (`DATA_DROP_SEED_AT_TICK`).
+    pub sniffer_drop_seed_at_tick: i32,
     /// `IronGolem.DATA_FLAGS_ID` / `SnowGolem.DATA_PUMPKIN_ID`，都是 BYTE。
     pub golem_flags: u8,
     /// 村民的 `VillagerData` 三项、`VillagerDataFinalized` 和 `DATA_UNHAPPY_COUNTER`。
@@ -4197,6 +4255,8 @@ impl MobPublic {
             guardian_attack_target: mob.guardian.attack_target,
             nautilus_dashing: mob.nautilus.dashing,
             nautilus_variant: mob.nautilus.variant,
+            sniffer_state: mob.sniffer.state,
+            sniffer_drop_seed_at_tick: mob.sniffer.drop_seed_at_tick,
             bat_flags: mob.bat.flags,
             golem_flags: if mob.mob_type == MobType::IronGolem {
                 mob.iron_golem.flags
@@ -4293,6 +4353,10 @@ impl MobPublic {
             let (width, height, _) = camel::dimensions(self.baby, sitting);
             return (width, height);
         }
+        if self.mob_type == MobType::Sniffer {
+            let (width, height, _) = sniffer::pose_dimensions(self.baby, self.sniffer_state);
+            return (width, height);
+        }
         if fish::is_fish(self.mob_type) {
             let (width, height, _) =
                 fish::dimensions(self.mob_type, self.fish_variant, self.puff_state);
@@ -4335,6 +4399,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Villager => Some(Box::new(villager_ai::brain(false, 0))),
         MobType::Nautilus | MobType::ZombieNautilus => Some(Box::new(nautilus_ai::brain(kind))),
         MobType::Warden => Some(Box::new(warden_ai::brain())),
+        MobType::Sniffer => Some(Box::new(sniffer::brain())),
         _ => None,
     }
 }

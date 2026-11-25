@@ -3835,7 +3835,14 @@ impl<'a> World<'a> {
         let now = self.game_time();
         let outcome = entity
             .with_mob(|me, mob| {
-                crate::entity::mob::interact::interact(me, mob, request, now, thundering)
+                crate::entity::mob::interact::interact(
+                    me,
+                    mob,
+                    request,
+                    now,
+                    thundering,
+                    &mut || self.random().next_float(),
+                )
             })
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
         let armadillo = entity
@@ -4988,6 +4995,7 @@ mod tests {
                 | Effect::KilledByArrow { .. }
                 | Effect::EnderPearlTeleport { .. }
                 | Effect::GuardianElderEffect { .. }
+                | Effect::Explode { .. }
                 | Effect::VibrationParticle { .. } => None,
             })
             .collect()

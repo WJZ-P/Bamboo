@@ -1142,6 +1142,9 @@ public final class MobOracle {
         int seaLevel = -63;
         /** 僵尸场景：玩家走真实的受伤链路，逐刻比玩家状态和玩家自己收到的包。 */
         boolean realPlayers;
+        /** TNT 场景：{x, y, z} 方块坐标，TNT 生成在方块底心；null 表示没有 TNT。 */
+        int[] tntBlock;
+        long tntSeed;
         /** 僵尸场景：主世界时钟的起始刻；`>= 0` 时天色、`MONSTERS_BURN`、月相都按真实时间线逐刻算。 */
         long clockStart = -1;
         /** 真实时间模式下的雨强（`getRainLevel`），雷暴恒 0。 */
@@ -1351,6 +1354,13 @@ public final class MobOracle {
             players.add(new double[] {x, y, z});
             playerItems.add(item);
             lootingLevels.add(looting);
+            return this;
+        }
+
+        /** TNT 场景：在方块坐标 (x, y, z) 放一个点燃的 TNT，底心起爆。 */
+        Scene tnt(int x, int y, int z, long seed) {
+            tntBlock = new int[] {x, y, z};
+            tntSeed = seed;
             return this;
         }
 
@@ -1870,6 +1880,7 @@ public final class MobOracle {
             addGoatScenes(scenes);
             FrogScenes.add(scenes);
             CamelScenes.add(scenes);
+            SnifferScenes.add(scenes);
         }
 
         /**
@@ -2651,6 +2662,49 @@ public final class MobOracle {
                     return null;
                 }
             };
+        }
+    }
+
+    /** 嗅探兽场景：闲逛、嗅闻、走过去挖土掉种子、记下挖过的位置、繁殖产蛋。 */
+    static final class SnifferScenes {
+        static void add(List<Scene> scenes) {
+            int seeds = BuiltInRegistries.ITEM.getId(Items.TORCHFLOWER_SEEDS);
+            // 这几个种子真的跑完整的 Sniffing→Searching→Digging→Rising 闭环并掉种子。
+            // 逐刻比位置、state、SNIFFER_EXPLORED_POSITIONS / SNIFF_COOLDOWN 记忆、
+            // 世界战利品随机序列和掉出来的东西（gameplay/sniffer_digging 礼物表）。
+            // These seeds exercise the full Sniffing→Searching→Digging→Rising loop and
+            // drop a seed. Compare position, state, memory, the world loot sequence and
+            // the drop (gameplay/sniffer_digging gift table) every tick.
+            for (long seed : new long[] {23L, 37L, 53L, 101L}) {
+                Scene dig = new Scene("sniffer_dig_" + seed).ticks(900).drops();
+                Scenes.ground(dig, 15);
+                dig.mob(24, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(dig);
+            }
+            // 闲逛对照：这个种子只跑 Scenting / DoNothing / 踱步，不进入挖掘。
+            // Idle control: this seed only runs Scenting / DoNothing / strolling, no digging.
+            Scene wander = new Scene("sniffer_wander_11").ticks(600).drops();
+            Scenes.ground(wander, 15);
+            wander.mob(24, 0.5, 64.0, 0.5, 0.0F, 11L, 0);
+            scenes.add(wander);
+            // 拿火把花种子的玩家喂两只；都喂了以后繁殖，产下一颗蛋和经验球。
+            // A player with torchflower seeds feeds two; once both are fed they breed
+            // and one lays an egg plus an experience orb.
+            Scene breed = new Scene("sniffer_breed").ticks(400).drops();
+            Scenes.ground(breed, 15);
+            breed.mob(24, 0.5, 64.0, 0.5, 0.0F, 67L, 0);
+            breed.mob(24, -2.5, 64.0, 0.5, 0.0F, 71L, 0);
+            breed.player(-0.5, 64.0, 3.5, Items.TORCHFLOWER_SEEDS);
+            breed.interact(20, 0, 0, seeds, 0);
+            breed.interact(22, 1, 0, seeds, 0);
+            scenes.add(breed);
+        }
+
+        /** `DATA_STATE` 的网络 ID：挖掘时换尺寸、掉种子都由它驱动。 */
+        static int state(net.minecraft.world.entity.animal.sniffer.Sniffer sniffer) {
+            var data = (net.minecraft.network.syncher.EntityDataAccessor<net.minecraft.world.entity.animal.sniffer.Sniffer.State>)
+                    readStatic(net.minecraft.world.entity.animal.sniffer.Sniffer.class, "DATA_STATE");
+            return sniffer.getEntityData().get(data).id();
         }
     }
 
@@ -3475,6 +3529,28 @@ public final class MobOracle {
             }
         }
 
+        /** TNT：点燃到爆炸的 80 刻逐刻比位置/引信，爆炸那刻比牛的掉血和击退、
+         * 玩家包里的击退向量和死亡消息、被炸的方块数。 */
+        static void tntBlastScenes(List<Scene> scenes) {
+            BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
+            for (int difficulty : new int[] {1, 2, 3}) {
+                Scene blast = new Scene("tnt_blast_player_" + difficulty).ticks(82).difficulty(difficulty);
+                blast.monstersBurn = false;
+                blast.realPlayers = true;
+                // 基岩地面炸不动：射线算出的方块数、连锁和世界随机源两边一样。
+                blast.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                // 一头牛和一个真实玩家都在爆炸范围里。玩家站得够远，三档难度都不死：
+                // 逐刻比血量和包里的击退向量，不掺死亡消息（TNT 死亡消息里的来源实体
+                // UUID 另见 README 限制）。
+                blast.mob(0, 3.5, 64.0, 4.5, 0.0F, 70L + difficulty, 0);
+                blast.player(7.5, 64.0, 0.5, Items.AIR);
+                // TNT 从 (0,70,0) 落下：比 80 刻里的下落和水平移动，爆炸中心是
+                // `getY(0.0625)`，强度 4，伤害来源 `explosion`（无 owner 的 TNT）。
+                blast.tnt(0, 70, 0, 80L + difficulty);
+                scenes.add(blast);
+            }
+        }
+
         /** 末影人：注视激怒、白天传送、淋雨、搬方块、躲箭。 */
         static void endermanScenes(List<Scene> scenes) {
             BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
@@ -3966,6 +4042,7 @@ public final class MobOracle {
             farmScenes(scenes);
             miscScenes(scenes);
             creeperScenes(scenes);
+            tntBlastScenes(scenes);
             spiderScenes(scenes);
             ridingScenes(scenes);
             endermanScenes(scenes);
@@ -5255,11 +5332,11 @@ public final class MobOracle {
                 || scene.name.startsWith("wolf_") || scene.name.startsWith("armadillo_")
                 || scene.name.startsWith("goat_") || scene.name.startsWith("slime_")
                 || scene.name.startsWith("frog_") || scene.name.startsWith("tadpole_")
-                || scene.name.startsWith("camel_")
+                || scene.name.startsWith("camel_") || scene.name.startsWith("sniffer_")
                 || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")
                 || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
                 || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")
-                || scene.name.startsWith("pillager_")) {
+                || scene.name.startsWith("tnt_blast_") || scene.name.startsWith("pillager_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -5289,8 +5366,8 @@ public final class MobOracle {
         if (events != null) {
             list.sounds = events::add;
         }
-        // 每个场景从干净的战利品随机序列开始，Bamboo 一侧每个 case 也是新建一份。
-        // Each scene starts with a fresh loot sequence, like a fresh Bamboo case.
+        // 每个包场景从干净的战利品随机序列开始，Bamboo 一侧每个 case 也是新建一份。
+        // Each packet scene starts with a fresh loot sequence, like a fresh Bamboo case.
         official.server.sequences = new RandomSequences();
         FakeLevel level = FakeLevel.create(official);
         if (events != null) {
@@ -15411,6 +15488,17 @@ public final class MobOracle {
     }
 
     private static void playZombie(Official official, Writer out, Scene scene) throws Exception {
+        // 掉落场景逐刻比礼物表掉出来的东西（挖出的种子、繁殖下的蛋）。礼物表按
+        // 序列名取世界战利品随机序列，Bamboo 每个 case 新建一份，所以这里也临时
+        // 换成一份干净序列；场景结束再还原，免得影响后面场景沿用累积的序列。
+        // Drop scenes compare gift-table results (dug-up seeds, laid eggs). Gift
+        // tables draw from the world loot sequence by name; Bamboo creates a fresh
+        // one per case, so swap in a clean sequence here and restore it afterwards
+        // so later scenes keep using the accumulated one.
+        var savedSequences = official.server.sequences;
+        if (scene.drops) {
+            official.server.sequences = new RandomSequences();
+        }
         FakeLevel level = FakeLevel.create(official);
         // `EntityReference` 找不到实体时会查所有维度（被炸的牛记着已经消失的苦力怕）。
         // `EntityReference` falls back to every dimension when the entity is gone.
@@ -15459,6 +15547,12 @@ public final class MobOracle {
         level.nextId = FIRST_ID;
         java.util.List<ServerPlayer> players = new java.util.ArrayList<>();
         java.util.List<Bytes> zombieSinks = new java.util.ArrayList<>();
+        // `drops()` 场景逐刻比新生成的掉落物、经验球和幼崽（挖出的种子、繁殖下的蛋）。
+        // `drops()` scenes compare freshly spawned items/orbs/calves (dug-up seeds, laid eggs).
+        List<List<String>> spawns = scene.drops ? new ArrayList<>() : null;
+        if (spawns != null) {
+            for (int t = 0; t <= scene.ticks; t++) spawns.add(new ArrayList<>());
+        }
         StringBuilder playerStates = new StringBuilder("[");
         StringBuilder playerPackets = new StringBuilder("[");
         float[] lastSentHealth = {-1.0e8F};
@@ -15581,6 +15675,7 @@ public final class MobOracle {
                 case 18 -> EntityTypes.FROG.create(level, EntitySpawnReason.COMMAND);
                 case 19 -> EntityTypes.TADPOLE.create(level, EntitySpawnReason.COMMAND);
                 case 20 -> EntityTypes.CAMEL.create(level, EntitySpawnReason.COMMAND);
+                case 24 -> EntityTypes.SNIFFER.create(level, EntitySpawnReason.COMMAND);
                 // 61 焦骸、62 尸壳骆驼。
                 // 61 parched, 62 camel husk.
                 case 61 -> new net.minecraft.world.entity.monster.skeleton.Parched(EntityTypes.PARCHED, level);
@@ -15701,6 +15796,16 @@ public final class MobOracle {
                         mobs.get(scene.rideVehicle), false, false)) {
             throw new IllegalStateException("Second mob rider could not mount in " + scene.name);
         }
+        // TNT 场景：额外实体。构造时从 `level.random` 取朝向（和 Bamboo `spawn_tnt` 同一个源）。
+        net.minecraft.world.entity.item.PrimedTnt tntEntity = null;
+        if (scene.tntBlock != null) {
+            tntEntity = new net.minecraft.world.entity.item.PrimedTnt(level,
+                    scene.tntBlock[0] + 0.5, scene.tntBlock[1], scene.tntBlock[2] + 0.5, null);
+            // ID 排在所有生物之后，和 Bamboo `spawn_tnt` 从实体表发号一致。
+            tntEntity.setId(FIRST_ID + mobs.size());
+            setRandom(tntEntity, scene.tntSeed);
+            level.tracked.add(tntEntity);
+        }
         StringBuilder line = new StringBuilder(1 << 18);
         line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
         line.append(",\"firstId\":").append(FIRST_ID);
@@ -15791,6 +15896,9 @@ public final class MobOracle {
         line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(
                 scene.realPlayers ? scene.playerHealth : 20.0F));
         line.append(",\"realPlayers\":").append(scene.realPlayers);
+        line.append(",\"tnt\":").append(scene.tntBlock == null ? "null"
+                : "[" + scene.tntBlock[0] + "," + scene.tntBlock[1] + "," + scene.tntBlock[2] + "]");
+        line.append(",\"tntSeed\":").append(scene.tntSeed);
         line.append(",\"clockStart\":").append(scene.clockStart);
         line.append(",\"sleepTick\":").append(scene.sleepTick);
         line.append(",\"playerCreative\":").append(scene.playerCreative);
@@ -15813,7 +15921,15 @@ public final class MobOracle {
                     .append(action[4]).append(']');
         }
         line.append("],\"interactions\":null");
-        line.append(",\"packets\":null,\"syncFlags\":null,\"spawns\":null,\"life\":null,\"spawnResult\":null");
+        line.append(",\"packets\":null,\"syncFlags\":null,\"life\":null,\"spawnResult\":null");
+        // TNT 场景：逐刻记 TNT 的位置和引信。
+        StringBuilder tntSteps = new StringBuilder();
+        if (tntEntity != null) {
+            tntSteps.append('[').append(Double.doubleToRawLongBits(tntEntity.getX()))
+                    .append(',').append(Double.doubleToRawLongBits(tntEntity.getY()))
+                    .append(',').append(Double.doubleToRawLongBits(tntEntity.getZ()))
+                    .append(',').append(tntEntity.getFuse()).append(']');
+        }
         line.append(",\"steps\":[");
         if (scene.name.startsWith("zombie_inhabited_")) {
             incrementInhabitedTime(level, players);
@@ -15925,6 +16041,12 @@ public final class MobOracle {
                     tickMobRiders(mob);
                 }
             }
+            // TNT 场景：额外实体按 ID 排在生物之后，每刻自己 tick（重力、移动、引信、
+            // 归零时 `explode`，发 EXPLODE 包、伤生物和玩家、破坏方块）。官方的
+            // `PrimedTnt.tick` 也不调 `commonTick`。
+            if (tntEntity != null && !tntEntity.isRemoved()) {
+                tntEntity.tick();
+            }
             if (slimeScene) {
                 // 分裂出来的小史莱姆：记下数量、位置、朝向、大小和血量就丢掉，不让它们继续 tick
                 // （官方构造函数的随机源不带种子）。
@@ -15966,7 +16088,30 @@ public final class MobOracle {
                         .append(',').append(event[5]).append(']');
             }
             worldEvents.clear();
+            // TNT 场景：这一刻 tick 完记 TNT 的位置和引信；爆炸那一刻实体已 discard，记 null。
+            if (tntEntity != null) {
+                tntSteps.append(',');
+                if (tntEntity.isRemoved()) {
+                    tntSteps.append("null");
+                } else {
+                    tntSteps.append('[').append(Double.doubleToRawLongBits(tntEntity.getX()))
+                            .append(',').append(Double.doubleToRawLongBits(tntEntity.getY()))
+                            .append(',').append(Double.doubleToRawLongBits(tntEntity.getZ()))
+                            .append(',').append(tntEntity.getFuse()).append(']');
+                }
+            }
             line.append(',').append(zombieStepJson(mobs, players, level));
+            if (spawns != null) {
+                // 按 `addFreshEntity` 顺序收集，不做 id 排序：Bamboo 一侧也按生成顺序
+                // 记录，两边逐项对齐。实体 id 是内部编号，假世界玩家会占掉一个号。
+                // Collect in `addFreshEntity` order without sorting by id: Bamboo also
+                // records spawns in generation order; the entity id is an internal number
+                // and the fake world's player consumes one of them.
+                for (Entity born : level.spawned) {
+                    level.reseedBorn(born);
+                    spawns.get(tick).add(spawnJson(born));
+                }
+            }
             if (scene.realPlayers) {
                 zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
                         lastSentHealth, false, scene.name.startsWith("zombie_husk_hunger_"));
@@ -16021,6 +16166,16 @@ public final class MobOracle {
         }
         line.append("]");
         PillagerScenes.check(scene, mobs);
+        // 挖掘场景必须真的走完闭环并掉出种子，防止种子变化让场景退化成纯闲逛。
+        // Dig scenes must actually finish the loop and drop a seed, so a seed change
+        // cannot silently degrade the scene into pure idling.
+        if (scene.name.startsWith("sniffer_dig_")) {
+            boolean dropped = spawns != null && spawns.stream().flatMap(java.util.List::stream)
+                    .anyMatch(json -> json.contains("\"kind\":\"item\""));
+            if (!dropped) {
+                throw new IllegalStateException(scene.name + " never dug up a seed");
+            }
+        }
         // 焦骸日晒场景必须真的着火掉血，夜间场景不能着火。
         // The parched day scene must burn and take damage; the night scene must not.
         if (scene.name.equals("parched_burn_day")
@@ -16040,6 +16195,9 @@ public final class MobOracle {
                 && !mobs.getFirst().hasEffect(net.minecraft.world.effect.MobEffects.WATER_BREATHING)) {
             throw new IllegalStateException("water scene must drink water breathing");
         }
+        if (tntEntity != null && !tntEntity.isRemoved()) {
+            throw new IllegalStateException(scene.name + " TNT never exploded (fuse 80 not reached)");
+        }
         if (scene.name.equals("witch_drink_speed")
                 && !mobs.getFirst().hasEffect(net.minecraft.world.effect.MobEffects.SPEED)) {
             throw new IllegalStateException("distant target scene must drink swiftness");
@@ -16050,12 +16208,20 @@ public final class MobOracle {
         line.append(",\"mobEventPackets\":").append(mobEvents).append("]]");
         line.append(",\"sleepResult\":").append(jsonString(sleepResult));
         line.append(",\"levelEvents\":").append(levelEventsJson).append("]]");
+        line.append(",\"spawns\":");
+        appendSpawns(line, spawns);
         if (scene.realPlayers) {
             line.append(",\"zombiePlayerStates\":").append(playerStates).append(']');
             line.append(",\"zombiePlayerPackets\":").append(playerPackets).append(']');
         }
+        if (tntEntity != null) {
+            line.append(",\"tntSteps\":[").append(tntSteps).append(']');
+        }
         line.append("}\n");
         out.write(line.toString());
+        if (scene.drops) {
+            official.server.sequences = savedSequences;
+        }
     }
 
     /** `entity_event`（34）和 `set_equipment`（104）。 */
@@ -16075,7 +16241,7 @@ public final class MobOracle {
 
     /** 玩家自己收到的包里要比的那几种：受伤动画、进入 / 离开战斗、死亡界面、血量。 */
     private static final java.util.Set<Integer> ZOMBIE_SELF_PACKETS = java.util.Set.of(
-            43, 67, 68, 69, 106);
+            36, 43, 67, 68, 69, 106);
     /** 尸壳饥饿场景额外比 `update_mob_effect`（135，VarInt 首字节 0x87）。 */
     private static final java.util.Set<Integer> EFFECT_PACKET = java.util.Set.of(135);
 
@@ -16213,6 +16379,9 @@ public final class MobOracle {
             }
             if (mob instanceof net.minecraft.world.entity.animal.frog.Frog frog) {
                 out.append(",\"goat\":").append(FrogScenes.flags(frog));
+            }
+            if (mob instanceof net.minecraft.world.entity.animal.sniffer.Sniffer sniffer) {
+                out.append(",\"sniffer\":").append(SnifferScenes.state(sniffer));
             }
             out.append(",\"love\":").append(mob instanceof net.minecraft.world.entity.animal.Animal animal
                     ? getInt(net.minecraft.world.entity.animal.Animal.class, animal, "inLove") : 0);

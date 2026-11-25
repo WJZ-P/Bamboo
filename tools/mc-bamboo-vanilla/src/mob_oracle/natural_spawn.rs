@@ -596,6 +596,8 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         game_mode: 0,
         mining_fatigue: None,
         creative: false,
+        flying: false,
+        explosion_knockback_resistance: 0.0,
         sneaking: false,
         sprinting: false,
         swimming: false,
@@ -664,6 +666,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         ignore_bed_monsters: false,
         short_hunger: false,
         wrong_was_hurt: false,
+        explosion_break: 0,
     })
 }
 

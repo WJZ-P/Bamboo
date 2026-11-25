@@ -133,6 +133,7 @@ impl NautilusCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
         }
     }
 }
@@ -381,7 +382,12 @@ impl Report {
                     level.entities.with_mut(uid, |row| {
                         row.with_mob(|me, mob| {
                             let _ = mc_bamboo_blocks::entity::mob::interact::interact(
-                                me, mob, &request, 0, false,
+                                me,
+                                mob,
+                                &request,
+                                0,
+                                false,
+                                &mut || 0.0,
                             );
                         });
                         // 官方在交互之后报出随机源状态，两边从这里开始逐刻。

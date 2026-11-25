@@ -106,6 +106,7 @@ impl WitchThrowCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
         }
     }
 

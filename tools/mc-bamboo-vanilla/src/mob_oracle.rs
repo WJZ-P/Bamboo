@@ -423,6 +423,12 @@ struct Case {
     /// 每刻 0 号玩家自己收到的那几种包（受伤动画、战斗进出、死亡界面、血量）。
     #[serde(default)]
     zombie_player_packets: Option<Vec<Vec<String>>>,
+    /// TNT 场景：{x, y, z} 方块坐标，TNT 生成在方块底心。
+    #[serde(default)]
+    tnt: Option<[i32; 3]>,
+    /// TNT 场景：逐刻 [x,y,z 的 f64 位, fuse]；爆炸后那刻起是 null。
+    #[serde(default)]
+    tnt_steps: Option<Vec<Option<[i64; 4]>>>,
     /// S2 玩家效果场景的规则与动作。
     #[serde(default)]
     effect_scene: Option<EffectScene>,
@@ -718,7 +724,7 @@ struct PlayerSetup {
     team: i32,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 struct CowStep {
     x: i64,
     y: i64,
@@ -790,6 +796,11 @@ struct CowStep {
     /// for other mobs.
     #[serde(default)]
     goat: i32,
+    /// 嗅探兽：`DATA_STATE` 的网络 ID；其余生物是 0。
+    ///
+    /// Sniffers: the `DATA_STATE` network id; 0 for other mobs.
+    #[serde(default)]
+    sniffer: i32,
     /// 狼：驯服标志、坐下命令、有没有主人、仇恨结束时刻、讨食、项圈、最大生命（位）。
     ///
     /// Wolves: tame flags, sit order, owner, anger end, begging, collar, max health bits.
@@ -865,11 +876,13 @@ fn zombie_style(name: &str) -> bool {
         "frog_",
         "tadpole_",
         "camel_",
+        "sniffer_",
         "polar_bear_fight_",
         "creeper_",
         "spider_",
         "cave_spider_",
         "enderman_",
+        "tnt_blast_",
         "slime_",
         "witch_drink_",
         "pillager_",
@@ -1017,6 +1030,8 @@ struct MobLevel {
     short_hunger: bool,
     /// 改坏确认 `zombie_bed`：床的怪物检查一律放行。
     ignore_bed_monsters: bool,
+    /// 改坏确认爆炸：位 0 跳过 `hurtEntities`，位 1 丢掉爆炸中心的 0.0625 抬升。
+    explosion_break: u8,
 }
 
 impl MobLevel {
@@ -1099,6 +1114,10 @@ impl EntityTables for MobLevel {
 }
 
 impl Level for MobLevel {
+    fn explosion_break(&self) -> u8 {
+        self.explosion_break
+    }
+
     fn block_state(&self, pos: BlockPos) -> BlockState {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
             return BlockState(mc_bamboo_data::blocks::VOID_AIR);
@@ -2100,6 +2119,8 @@ impl Report {
                     game_mode: 0,
                     mining_fatigue: None,
                     creative: false,
+                    flying: false,
+                    explosion_knockback_resistance: 0.0,
                     sneaking: false,
                     sprinting: false,
                     swimming: false,
@@ -2151,6 +2172,11 @@ impl Report {
             ignore_bed_monsters: matches!(break_test, Some("zombie_bed")),
             short_hunger: matches!(break_test, Some("zombie_hunger")),
             wrong_was_hurt: matches!(break_test, Some("zombie_was_hurt")),
+            explosion_break: match break_test {
+                Some("explode_tnt_hurt") => 1,
+                Some("explode_tnt_center") => 2,
+                _ => 0,
+            },
         };
         for &[x, y, z, state] in &case.blocks {
             level
@@ -2169,6 +2195,8 @@ impl Report {
         let mut ticks = BlockTicks::new();
         ticks.set_time(case.start_time);
         let mut ids = Vec::new();
+        // TNT 场景：额外实体的 ID，排在所有牛之后（和官方 setId(FIRST_ID + mobs.size()) 一致）。
+        let mut tnt_id: Option<i32> = None;
         let mut tracking = EntityTracking::default();
         let sound_source = mc_bamboo_blocks::LegacyRandom::new(12345);
         {
@@ -2204,6 +2232,7 @@ impl Report {
                     18 => mc_bamboo_blocks::entity::mob::MobType::Frog,
                     19 => mc_bamboo_blocks::entity::mob::MobType::Tadpole,
                     20 => mc_bamboo_blocks::entity::mob::MobType::Camel,
+                    24 => mc_bamboo_blocks::entity::mob::MobType::Sniffer,
                     15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
                     16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
@@ -2511,6 +2540,14 @@ impl Report {
             {
                 world.start_riding_with_limit(passenger, vehicle, 2);
             }
+            // TNT 场景：照官方 `PrimedTnt(level, x+0.5, y, z+0.5, null)` 构造函数起一个
+            // 点燃的 TNT。构造时从 `level.random` 取一次 `next_double` 算朝向，位次和官方
+            // 一致，后面射线/洗牌的世界随机源仍对齐。
+            if let Some([x, y, z]) = case.tnt {
+                let position = Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5);
+                let angle = world.random().next_double();
+                tnt_id = Some(world.spawn_entity(Entity::primed_tnt(position, angle)));
+            }
         }
         let Some(first) = case.steps.first() else {
             self.mismatch(format!("{}: no steps", case.name));
@@ -2530,6 +2567,7 @@ impl Report {
         }
         self.compare(&case.name, 0, &ours, first);
         self.compare_zombie_player(case, &mut level, 0);
+        self.compare_tnt(case, &level, 0, tnt_id);
         // 场景开始时的牛也算「刚生成」，但它们在 tick 0 已经建过同步状态，
         // 不该出现在后面逐刻的新实体比对里。
         let _ = level.entities.take_spawn_snapshots();
@@ -2793,6 +2831,48 @@ impl Report {
                 world.tick_entities();
                 tick_effects = world.into_effects();
             }
+            // 爆炸包走游戏层正式入口：把 `Effect::Explode` 发给区域里的玩家，
+            // `compare_zombie_player` 再和官方逐字节比（含击退向量）。
+            if let Some(game) = level.game.as_mut() {
+                for effect in &tick_effects {
+                    if let mc_bamboo_blocks::Effect::Explode {
+                        center,
+                        radius,
+                        block_count,
+                        hit_players,
+                        is_small,
+                        play_sound,
+                    } = effect
+                    {
+                        // 改坏确认：粒子、方块数和击退向量各有一处故意改错。
+                        let break_test = self.break_test.as_deref();
+                        let is_small = if break_test == Some("explode_particle") {
+                            !*is_small
+                        } else {
+                            *is_small
+                        };
+                        let block_count = if break_test == Some("explode_block_count") {
+                            *block_count + 1
+                        } else {
+                            *block_count
+                        };
+                        let empty: Vec<(i32, mc_bamboo_core::Vec3)> = Vec::new();
+                        let knock = if break_test == Some("explode_knockback") {
+                            empty.as_slice()
+                        } else {
+                            hit_players.as_slice()
+                        };
+                        game.send_explode(
+                            *center,
+                            *radius,
+                            block_count,
+                            knock,
+                            is_small,
+                            *play_sound,
+                        );
+                    }
+                }
+            }
             // 这一刻新生成的实体：快照是在 `addFreshEntity` 时记下的，官方
             // `ChunkMap.addEntity` 也在同一时刻建 `ServerEntity`。
             // Newly spawned entities: the snapshot is taken at `addFreshEntity`,
@@ -2855,7 +2935,17 @@ impl Report {
             }
             // 死亡场景：逐刻比新生成的掉落物和经验球（种类、数量、位置）。
             if let Some(expected_spawns) = &case.spawns {
-                let ours_spawns = spawn_snapshot(&level, &spawn_public);
+                let mut ours_spawns = spawn_snapshot(&level, &spawn_public);
+                // 改坏确认：把挖出来的种子数量改错，证明掉落比较没放松。
+                // Deliberate breakage: corrupt the dug-up seed count to prove the
+                // spawn comparison is not relaxed.
+                if self.break_test.as_deref() == Some("sniffer_drop")
+                    && case.name.starts_with("sniffer_")
+                {
+                    for spawn in &mut ours_spawns {
+                        spawn.count = spawn.count.wrapping_add(1);
+                    }
+                }
                 compare_spawns(
                     &mut self.mismatches,
                     &self.show,
@@ -2890,6 +2980,7 @@ impl Report {
             self.compare(&case.name, index, &ours, expected);
             self.compare_blocks(case, &level, index);
             self.compare_zombie_player(case, &mut level, index);
+            self.compare_tnt(case, &level, index, tnt_id);
             if let Some(expected) = case.level_events.as_ref().and_then(|all| all.get(index)) {
                 let ours: Vec<[i32; 6]> = tick_effects
                     .iter()
@@ -3001,9 +3092,34 @@ impl Report {
         }
     }
 
+    /// TNT 场景：逐刻比 TNT 的位置（f64 位）和引信；爆炸那刻实体离表，官方记 null。
+    fn compare_tnt(&mut self, case: &Case, level: &MobLevel, index: usize, tnt_id: Option<i32>) {
+        let Some(expected) = case.tnt_steps.as_ref().and_then(|all| all.get(index)) else {
+            return;
+        };
+        let ours: Option<[i64; 4]> =
+            tnt_id
+                .and_then(|id| level.entities.get(id))
+                .and_then(|entity| match &entity.kind {
+                    EntityKind::Tnt(data) => Some([
+                        entity.position.x.to_bits() as i64,
+                        entity.position.y.to_bits() as i64,
+                        entity.position.z.to_bits() as i64,
+                        i64::from(data.fuse),
+                    ]),
+                    _ => None,
+                });
+        if &ours != expected && self.mismatches.len() < self.show {
+            self.mismatches.push(format!(
+                "{} tick {index} tnt: official {expected:?} bamboo {ours:?}",
+                case.name
+            ));
+        }
+    }
+
     /// 真实玩家的僵尸场景：比 0 号玩家的状态和它自己收到的那几种包。
     fn compare_zombie_player(&mut self, case: &Case, level: &mut MobLevel, index: usize) {
-        const SELF_PACKETS: [u8; 6] = [43, 67, 68, 69, 106, 135];
+        const SELF_PACKETS: [u8; 7] = [36, 43, 67, 68, 69, 106, 135];
         let (Some(game), Some(player)) = (level.game.as_mut(), case.players.first()) else {
             return;
         };
@@ -3048,6 +3164,27 @@ impl Report {
         ours: &[Option<CowStep>],
         official: &[CowStep],
     ) {
+        // 改坏确认：把 Bamboo 逐刻的 state / brain 记忆故意改错，证明比较没放松。
+        // Deliberate breakage: corrupt the per-tick state / brain memory to prove
+        // the comparison is not relaxed.
+        let tampered = match self.break_test.as_deref() {
+            Some("sniffer_state") if name.starts_with("sniffer_") => {
+                let mut steps = ours.to_vec();
+                for step in steps.iter_mut().flatten() {
+                    step.sniffer = step.sniffer.wrapping_add(1);
+                }
+                Some(steps)
+            }
+            Some("sniffer_brain") if name.starts_with("sniffer_") => {
+                let mut steps = ours.to_vec();
+                for step in steps.iter_mut().flatten() {
+                    step.brain.push('!');
+                }
+                Some(steps)
+            }
+            _ => None,
+        };
+        let ours: &[Option<CowStep>] = tampered.as_deref().unwrap_or(ours);
         for (cow, expected) in official.iter().enumerate() {
             let place = format!("{name} tick {index} cow {cow}");
             if std::env::var_os("MOB_ORACLE_BRAIN").is_some() && !expected.brain.is_empty() {
@@ -3139,6 +3276,7 @@ impl Report {
                 plain!(fox_flags);
                 plain!(fox_mouth);
                 plain!(goat);
+                plain!(sniffer);
                 plain!(wolf_tame);
                 plain!(wolf_sit);
                 plain!(wolf_owned);
@@ -4475,7 +4613,21 @@ fn compare_spawns(
                 && ours.y == expected.y
                 && ours.z == expected.z
         } else {
-            ours == expected
+            // 掉落物 / 经验球的实体 id 是实体表内部编号：假世界里玩家也占一个号，
+            // Bamboo 的玩家不进实体表，两边基数差一。它不是行为结果，只比种类、
+            // 物品、数量、数值和位置；生成数量与顺序仍由上面的长度和逐项 zip 保证。
+            // A dropped item's/orb's entity id is an internal table number: the fake
+            // world's player consumes one, while Bamboo's player is not in the entity
+            // table, so the bases differ by one. It is not a behaviour result; compare
+            // kind, item, count, value and position only. Spawn count and order are
+            // still checked by the length and the per-index zip above.
+            ours.kind == expected.kind
+                && ours.item == expected.item
+                && ours.count == expected.count
+                && ours.value == expected.value
+                && ours.x == expected.x
+                && ours.y == expected.y
+                && ours.z == expected.z
         };
         if same {
             continue;
@@ -4962,6 +5114,11 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             0
         },
         goat: goat_flags(mob),
+        sniffer: if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Sniffer {
+            mob.sniffer.state.id()
+        } else {
+            0
+        },
         wolf_tame: if is_wolf(mob) {
             i32::from(mob.tame.flags)
         } else {

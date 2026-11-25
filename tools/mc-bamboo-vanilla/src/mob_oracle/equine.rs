@@ -381,6 +381,7 @@ fn spawn_level(seed: i64) -> MobLevel {
         ignore_bed_monsters: false,
         short_hunger: false,
         wrong_was_hurt: false,
+        explosion_break: 0,
     }
 }
 
@@ -469,7 +470,7 @@ impl Report {
             difficulty: 2,
         };
         let outcome = entity
-            .with_mob(|me, mob| interact::interact(me, mob, &request, 0, false))
+            .with_mob(|me, mob| interact::interact(me, mob, &request, 0, false, &mut || 0.0))
             .unwrap();
         let swing = match outcome.result {
             InteractionResult::Success => "PREDICTED",
@@ -528,6 +529,7 @@ impl Report {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
         };
         let mut ticks = BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);

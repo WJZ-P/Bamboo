@@ -309,7 +309,7 @@ impl Behavior {
         }
     }
 
-    pub(super) fn stop(&mut self, cx: &mut Cx) {
+    pub(super) fn stop(&mut self, cx: &mut Cx, _timed_out: bool) {
         match self {
             Self::Emerging => {
                 if cx.mob.warden.pose == WardenPose::Emerging {

@@ -134,13 +134,28 @@ pub enum MemoryType {
     RecentProjectile,
     TouchCooldown,
     NearestVisibleNemesis,
+    /// 嗅探兽的记忆。带编解码器的进存档：`sniffer_explored_positions`
+    /// （`GlobalPos.CODEC.listOf()`）和 `sniff_cooldown`（`Unit.CODEC`）；其余
+    /// （`sniffer_sniffing_target` / `sniffer_digging` / `sniffer_happy`）用
+    /// `register("...")` 无编解码器，不进存档。追加在末尾，不改既有下标。
+    /// The sniffer's memories. Those with a codec are saved: `sniffer_explored_positions`
+    /// (`GlobalPos.CODEC.listOf()`) and `sniff_cooldown` (`Unit.CODEC`); the rest
+    /// (`sniffer_sniffing_target` / `sniffer_digging` / `sniffer_happy`) are registered
+    /// without a codec and are not saved. Appended last so the existing indices stay put.
+    SnifferExploredPositions,
+    SnifferSniffingTarget,
+    SnifferDigging,
+    SnifferHappy,
 }
 
 impl MemoryType {
     /// 记忆种类的个数，槽表的长度。
     ///
     /// The number of memory types: the length of the slot table.
-    pub const COUNT: usize = 66;
+    /// 51 个基础 + 15 个监守者 + 4 个嗅探兽（`sniff_cooldown` 两边共用，只算一次）。
+    ///
+    /// 51 base + 15 warden + 4 sniffer (`sniff_cooldown` is shared, counted once).
+    pub const COUNT: usize = 70;
 
     /// 全部种类，按枚举顺序。
     ///
@@ -212,6 +227,10 @@ impl MemoryType {
         Self::RecentProjectile,
         Self::TouchCooldown,
         Self::NearestVisibleNemesis,
+        Self::SnifferExploredPositions,
+        Self::SnifferSniffingTarget,
+        Self::SnifferDigging,
+        Self::SnifferHappy,
     ];
 
     /// 官方注册名（不带命名空间）。
@@ -285,6 +304,10 @@ impl MemoryType {
             Self::RecentProjectile => "recent_projectile",
             Self::TouchCooldown => "touch_cooldown",
             Self::NearestVisibleNemesis => "nearest_visible_nemesis",
+            Self::SnifferExploredPositions => "sniffer_explored_positions",
+            Self::SnifferSniffingTarget => "sniffer_sniffing_target",
+            Self::SnifferDigging => "sniffer_digging",
+            Self::SnifferHappy => "sniffer_happy",
         }
     }
 
@@ -321,6 +344,8 @@ impl MemoryType {
                 | Self::LastSlept
                 | Self::LastWoken
                 | Self::ItemPickupCooldownTicks
+                | Self::SnifferExploredPositions
+                | Self::SniffCooldown
         )
     }
 
@@ -886,6 +911,14 @@ impl Memories {
     pub fn global_pos(&self, kind: MemoryType) -> Option<&GlobalPos> {
         match self.get(kind) {
             Some(MemoryValue::GlobalPos(pos)) => Some(pos),
+            _ => None,
+        }
+    }
+
+    /// `List<GlobalPos>`（`sniffer_explored_positions`）。
+    pub fn global_pos_list(&self, kind: MemoryType) -> Option<&[GlobalPos]> {
+        match self.get(kind) {
+            Some(MemoryValue::GlobalPosList(list)) => Some(list.as_slice()),
             _ => None,
         }
     }

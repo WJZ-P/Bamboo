@@ -1147,6 +1147,12 @@ pub struct ProjectileFacts {
     ///
     /// The metadata index of `MushroomCow.DATA_TYPE`.
     pub mooshroom_type: u8,
+    /// `Sniffer.DATA_STATE` / `DATA_DROP_SEED_AT_TICK` 的下标和序列化器。
+    ///
+    /// The indices and serializer of `Sniffer.DATA_STATE` and `DATA_DROP_SEED_AT_TICK`.
+    pub sniffer_state: u8,
+    pub sniffer_state_serializer: i32,
+    pub sniffer_drop_seed_at_tick: u8,
     /// `PolarBear.DATA_STANDING_ID` 的元数据 index。
     ///
     /// The metadata index of `PolarBear.DATA_STANDING_ID`.

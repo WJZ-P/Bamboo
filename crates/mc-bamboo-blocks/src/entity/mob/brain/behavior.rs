@@ -305,13 +305,16 @@ impl Node {
         }
     }
 
-    /// `BehaviorControl.doStop`。
+    /// `BehaviorControl.doStop`。`stop` 拿到的 `timed_out` 是 `gameTime > endTimestamp`，
+    /// 嗅探兽的 `Sniffing` / `Digging` / `FinishedDigging` 在 `stop` 里按它分叉。
     ///
-    /// `BehaviorControl.doStop`.
+    /// `BehaviorControl.doStop`. The `timed_out` passed to `stop` is
+    /// `gameTime > endTimestamp`; the sniffer's `Sniffing` / `Digging` /
+    /// `FinishedDigging` branch on it inside `stop`.
     pub fn do_stop(&mut self, cx: &mut Cx) {
         self.status = Status::Stopped;
         match self.kind.class() {
-            Class::Timed { .. } => self.kind.stop(cx),
+            Class::Timed { .. } => self.kind.stop(cx, cx.time > self.end_timestamp),
             Class::OneShot | Class::DoNothing { .. } => {}
             Class::Gate => {
                 let Kind::Gate(gate) = &mut self.kind else {
