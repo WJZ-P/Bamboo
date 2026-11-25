@@ -22,7 +22,7 @@ use crate::{
     behaviour::{
         machines::{
             BrewingStandEntity, CampfireEntity, FurnaceEntity, PistonMoving, ShulkerBoxEntity,
-            beehive_entity::BeehiveEntity,
+            beehive_entity::BeehiveEntity, spawner::SpawnerBlockEntity,
         },
         trial_spawner::{TrialSpawner, TrialSpawnerBlockEntity},
     },
@@ -43,6 +43,7 @@ pub enum BlockEntityKind {
     Campfire,
     Piston,
     Beehive,
+    Spawner,
 }
 
 impl BlockEntityKind {
@@ -59,6 +60,7 @@ impl BlockEntityKind {
             "minecraft:soul_campfire" => Self::Campfire,
             "minecraft:piston" => Self::Piston,
             "minecraft:beehive" => Self::Beehive,
+            "minecraft:mob_spawner" => Self::Spawner,
             _ => return None,
         })
     }
@@ -79,12 +81,13 @@ impl BlockEntityKind {
             Self::Campfire => "minecraft:campfire",
             Self::Piston => "minecraft:piston",
             Self::Beehive => "minecraft:beehive",
+            Self::Spawner => "minecraft:mob_spawner",
         }
     }
 
     /// 每种会动的机器各造一次，测试用它盯住工厂分支不要漏。
     /// 只保留存档态的四种由 [`PassiveKind::ALL`] 单独覆盖。
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Furnace,
         Self::BlastFurnace,
         Self::Smoker,
@@ -94,6 +97,7 @@ impl BlockEntityKind {
         Self::Campfire,
         Self::Piston,
         Self::Beehive,
+        Self::Spawner,
     ];
 }
 
@@ -177,6 +181,9 @@ pub fn create_block_entity(
             }
         }
         BlockEntityKind::Beehive => Box::new(BeehiveEntity::read(pos, tag)) as Box<dyn BlockEntity>,
+        BlockEntityKind::Spawner => {
+            Box::new(SpawnerBlockEntity::read(pos, tag)) as Box<dyn BlockEntity>
+        }
         BlockEntityKind::Piston => {
             let moved = match tag::field(tag, "blockState") {
                 Some(value) => tag::decode_block_state(value)?,
@@ -278,6 +285,7 @@ pub fn state_matches(state: BlockState, id: &str) -> bool {
         kinds::CAMPFIRE => state.is(blocks::CAMPFIRE) || state.is(blocks::SOUL_CAMPFIRE),
         kinds::PISTON => state.is(blocks::MOVING_PISTON),
         kinds::BEEHIVE => state.is(blocks::BEEHIVE) || state.is(blocks::BEE_NEST),
+        kinds::MOB_SPAWNER => state.is(blocks::SPAWNER),
         _ => true,
     }
 }

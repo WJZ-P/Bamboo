@@ -53,9 +53,10 @@ pub enum SpawnReason {
     ///
     /// `EntitySpawnReason.CONVERSION`: the new entity of a mob conversion.
     Conversion,
-    /// `EntitySpawnReason.SPAWNER`：普通刷怪笼（`BaseSpawner`）。
+    /// `EntitySpawnReason.SPAWNER`：刷怪笼（`BaseSpawner`）生成的实体。
     ///
-    /// `EntitySpawnReason.SPAWNER`: a vanilla monster spawner (`BaseSpawner`).
+    /// `EntitySpawnReason.SPAWNER`: an entity spawned by a mob spawner
+    /// (`BaseSpawner`).
     Spawner,
     /// `EntitySpawnReason.TRIAL_SPAWNER`：试炼刷怪笼。
     ///

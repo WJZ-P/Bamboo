@@ -32,6 +32,7 @@ mod pumpkin;
 mod rail;
 mod redstone_torch;
 mod redstone_wire;
+pub mod spawner;
 mod tripwire;
 mod workstations;
 

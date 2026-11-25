@@ -15,10 +15,9 @@ use crate::{
     archive::tag::{self, field, put},
     entity::{
         ctx::BlockView,
-        mob::{MobType, spawn::SpawnReason},
+        mob::{MobType, natural, spawn::SpawnReason},
     },
     level::Effect,
-    shape::{Aabb, CollisionContext},
     state::{OMINOUS, TRIAL_SPAWNER_STATE, TrialSpawnerState},
 };
 
@@ -1097,18 +1096,11 @@ impl TrialSpawnerContext for TrialSpawnerWorld<'_, '_> {
             _ => None,
         })?;
         let kind = MobType::by_name(id)?;
-        let (width, height, _) = kind.dimensions(false);
-        let half = f64::from(width / 2.0);
-        let spawn_box = Aabb::new(
-            position.x - half,
-            position.y,
-            position.z - half,
-            position.x + half,
-            position.y + f64::from(height),
-            position.z + half,
-        );
-        if !BlockView::block_collisions(&*self.world, spawn_box, CollisionContext::Empty).is_empty()
-        {
+        // `EntityType.getSpawnAABB(x,y,z)`：生点周围的碰撞盒，与普通刷怪笼共用
+        // `natural::spawn_aabb_at`。
+        let spawn_box = natural::spawn_aabb_at(kind, position.x, position.y, position.z);
+        // `noCollision(...)`：生点周围不能撞方块 / 硬碰撞实体。
+        if !natural::no_collision(self.world, spawn_box) {
             return None;
         }
         // `inLineOfSight(atCenterOf(pos), position)`：从生点到刷怪笼中心没有视觉遮挡。
@@ -1122,33 +1114,13 @@ impl TrialSpawnerContext for TrialSpawnerWorld<'_, '_> {
         {
             return None;
         }
-        // `SpawnPlacements.checkSpawnRules` 对 `TRIAL_SPAWNER` 恒真：`isSpawner()` 让
-        // `Mob.checkMobSpawnRules` 直接返回 true（跳过 `isValidSpawn`），而和平难度已经
-        // 被 `canSpawnInLevel` 挡掉。试炼密室的 `spawn_potentials` 不带
-        // `custom_spawn_rules`，`CustomSpawnRules.isValidPosition` 也用不上。
-        // `Mob.checkSpawnObstruction`：碰撞盒不在液体里、也不挡别的实体。
-        let min = BlockPos::new(
-            spawn_box.min_x.floor() as i32,
-            spawn_box.min_y.floor() as i32,
-            spawn_box.min_z.floor() as i32,
-        );
-        let max = BlockPos::new(
-            (spawn_box.max_x - 1.0e-7).floor() as i32,
-            (spawn_box.max_y - 1.0e-7).floor() as i32,
-            (spawn_box.max_z - 1.0e-7).floor() as i32,
-        );
-        let mut in_liquid = false;
-        'liquid_check: for y in min.y..=max.y {
-            for z in min.z..=max.z {
-                for x in min.x..=max.x {
-                    if !self.world.fluid_state(BlockPos::new(x, y, z)).is_empty() {
-                        in_liquid = true;
-                        break 'liquid_check;
-                    }
-                }
-            }
-        }
-        if in_liquid || !self.world.level().is_unobstructed(&[spawn_box]) {
+        // `Mob.checkSpawnObstruction`：碰撞盒不在液体里、也不挡别的实体。与普通刷怪笼
+        // 共用 natural.rs 的判定。`SpawnPlacements.checkSpawnRules` 对 `TRIAL_SPAWNER`
+        // 恒真（`isSpawner` 跳过脚下检查，和平难度已被 `canSpawnInLevel` 挡掉），
+        // 试炼密室的 `spawn_potentials` 也不带 `custom_spawn_rules`。
+        if natural::contains_any_liquid(self.world, spawn_box)
+            || !natural::is_unobstructed_by_entities(self.world, spawn_box)
+        {
             return None;
         }
         // `lambda$spawnMob$2`：朝向 (nextFloat*360, 0)。

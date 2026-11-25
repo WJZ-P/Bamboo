@@ -1316,6 +1316,103 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             ])]),
         )],
     );
+    // `custom_spawn_rules` 的 `block_light_limit` / `sky_light_limit` 走官方
+    // `InclusiveRange.INT`：单 int、[min,max] 列表、{min_inclusive,max_inclusive}
+    // 复合标签三种输入形状，逐一核对 load -> save 之后写回的形状。
+    full(
+        "spawner-custom-light-limits",
+        "minecraft:spawner",
+        "minecraft:mob_spawner",
+        vec![(
+            "SpawnPotentials".to_owned(),
+            Tag::List(vec![
+                Tag::Compound(vec![
+                    (
+                        "data".to_owned(),
+                        Tag::Compound(vec![
+                            (
+                                "entity".to_owned(),
+                                Tag::Compound(vec![(
+                                    "id".to_owned(),
+                                    Tag::String("minecraft:zombie".to_owned()),
+                                )]),
+                            ),
+                            (
+                                "custom_spawn_rules".to_owned(),
+                                Tag::Compound(vec![
+                                    ("block_light_limit".to_owned(), Tag::Int(7)),
+                                    ("sky_light_limit".to_owned(), Tag::Int(9)),
+                                ]),
+                            ),
+                        ]),
+                    ),
+                    ("weight".to_owned(), Tag::Int(1)),
+                ]),
+                Tag::Compound(vec![
+                    (
+                        "data".to_owned(),
+                        Tag::Compound(vec![
+                            (
+                                "entity".to_owned(),
+                                Tag::Compound(vec![(
+                                    "id".to_owned(),
+                                    Tag::String("minecraft:skeleton".to_owned()),
+                                )]),
+                            ),
+                            (
+                                "custom_spawn_rules".to_owned(),
+                                Tag::Compound(vec![
+                                    (
+                                        "block_light_limit".to_owned(),
+                                        Tag::List(vec![Tag::Int(3), Tag::Int(10)]),
+                                    ),
+                                    (
+                                        "sky_light_limit".to_owned(),
+                                        Tag::List(vec![Tag::Int(5), Tag::Int(12)]),
+                                    ),
+                                ]),
+                            ),
+                        ]),
+                    ),
+                    ("weight".to_owned(), Tag::Int(2)),
+                ]),
+                Tag::Compound(vec![
+                    (
+                        "data".to_owned(),
+                        Tag::Compound(vec![
+                            (
+                                "entity".to_owned(),
+                                Tag::Compound(vec![(
+                                    "id".to_owned(),
+                                    Tag::String("minecraft:husk".to_owned()),
+                                )]),
+                            ),
+                            (
+                                "custom_spawn_rules".to_owned(),
+                                Tag::Compound(vec![
+                                    (
+                                        "block_light_limit".to_owned(),
+                                        Tag::Compound(vec![
+                                            ("min_inclusive".to_owned(), Tag::Int(2)),
+                                            ("max_inclusive".to_owned(), Tag::Int(8)),
+                                        ]),
+                                    ),
+                                    (
+                                        "sky_light_limit".to_owned(),
+                                        Tag::Compound(vec![
+                                            ("min_inclusive".to_owned(), Tag::Int(4)),
+                                            ("max_inclusive".to_owned(), Tag::Int(4)),
+                                        ]),
+                                    ),
+                                ]),
+                            ),
+                        ]),
+                    ),
+                    ("weight".to_owned(), Tag::Int(3)),
+                ]),
+            ]),
+        )],
+    );
     full(
         "beehive-rich-entity-data",
         "minecraft:beehive",

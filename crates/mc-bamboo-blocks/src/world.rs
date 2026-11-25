@@ -3639,13 +3639,13 @@ impl<'a> World<'a> {
         self.level.trial_spawner_players(pos, range)
     }
 
-    /// `SpawnData.entityToSpawn` 造实体的通用路径：普通刷怪笼和试炼刷怪笼共用。
-    /// 按 `entity_tag`（含 `id`）构造实体、`snapTo(position, yaw, pitch)`，只有 `id`
-    /// 时跑 `finalizeSpawn`，可选套 `equipment` 装备表，放进世界并返回 UUID。
+    /// `SpawnData.entityToSpawn` 一步到位的路径（试炼刷怪笼用）：按 `entity_tag`
+    /// 构造实体、`snapTo(position, yaw, pitch)`，再走 [`Self::commit_spawn_data_entity`]
+    /// 提交，返回 UUID。
     ///
-    /// The shared entity construction path for `SpawnData.entityToSpawn`: build the
-    /// entity from `entity_tag`, snap it, run `finalizeSpawn` when the tag only holds
-    /// an `id`, optionally equip it, add it to the world and return its UUID.
+    /// The one-shot `SpawnData.entityToSpawn` path (used by the trial spawner):
+    /// build the entity from `entity_tag`, `snapTo`, then commit via
+    /// [`Self::commit_spawn_data_entity`] and return its UUID.
     pub fn spawn_from_spawn_data(
         &mut self,
         entity_tag: &Tag,
@@ -3655,33 +3655,58 @@ impl<'a> World<'a> {
         reason: crate::entity::mob::spawn::SpawnReason,
         equipment: Option<&Tag>,
     ) -> Option<[u8; 16]> {
-        use crate::entity::mob::{
-            MobType,
-            nbt::load_into,
-            spawn::{finalize_spawn, snap_to},
-        };
+        use crate::entity::mob::{MobType, nbt::load_into, spawn::snap_to};
         let id = crate::archive::tag::field(entity_tag, "id").and_then(|value| match value {
             Tag::String(text) if !text.is_empty() => Some(text.as_str()),
             _ => None,
         })?;
         let kind = MobType::by_name(id)?;
+        let is_id_only = matches!(entity_tag, Tag::Compound(entries) if entries.len() == 1);
         let mut entity = self.prepare_entity(Entity::by_mob_type(kind, Vec3::default()));
         if load_into(&mut entity, entity_tag).is_err() {
             return None;
         }
         snap_to(&mut entity, position, yaw, pitch);
-        // 官方：entityToSpawn 只有 `id` 时才跑 finalizeSpawn 随机化。
-        if matches!(entity_tag, Tag::Compound(entries) if entries.len() == 1) {
+        Some(
+            self.commit_spawn_data_entity(entity, kind, is_id_only, reason, true, equipment)
+                .0,
+        )
+    }
+
+    /// `SpawnData.entityToSpawn` 的提交阶段：只有 `id` 时跑 `finalizeSpawn`、可选的
+    /// 持久化标记和装备表、放进世界、收尾骑士。普通刷怪笼和试炼刷怪笼共用这一份，
+    /// 让 `finalizeSpawn` / `add_prepared_entity` / `finish_jockeys` 只有一处实现；
+    /// 两者构造实体和随机朝向的时机不同（各自照官方字节码），所以构造仍分开。
+    /// 返回 `(UUID, 实体 ID)`。
+    ///
+    /// The commit stage of `SpawnData.entityToSpawn`: `finalizeSpawn` (id-only),
+    /// optional persistence / equipment, add to world, finish jockeys. Shared by
+    /// the vanilla and trial spawners so the finalize/add code exists once; the
+    /// two build their entity and roll facing at different times (per their own
+    /// vanilla bytecode), so construction stays separate. Returns `(UUID, id)`.
+    pub(crate) fn commit_spawn_data_entity(
+        &mut self,
+        mut entity: Entity,
+        kind: crate::entity::mob::MobType,
+        is_id_only: bool,
+        reason: crate::entity::mob::spawn::SpawnReason,
+        persistent: bool,
+        equipment: Option<&Tag>,
+    ) -> ([u8; 16], crate::entity::EntityUid) {
+        use crate::entity::mob::spawn::finalize_spawn;
+        if is_id_only {
             finalize_spawn(self, kind, &mut entity, reason);
         }
-        entity.with_mob(|_, mob| mob.persistence_required = true);
+        if persistent {
+            entity.with_mob(|_, mob| mob.persistence_required = true);
+        }
         if let Some(equipment) = equipment {
             self.level.equip_mob(&mut entity, equipment);
         }
         let uuid = entity.kind.mob().map(|mob| mob.uuid).unwrap_or_default();
         let uid = self.add_prepared_entity(entity);
         self.finish_jockeys(uid);
-        Some(uuid)
+        (uuid, uid)
     }
 
     /// 见 [`Level::trial_spawner_eject_reward`]。

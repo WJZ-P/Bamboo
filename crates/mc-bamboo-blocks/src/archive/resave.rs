@@ -78,7 +78,18 @@ impl Resaved {
 /// when generated). Both the encoder and the oracle use this one function.
 pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resaved> {
     let (fields, omit) = match id {
-        "minecraft:mob_spawner" => (spawner(raw), SPAWNER_OMIT),
+        // 刷怪笼由活方块实体读写；重存走同一条 `read` → `saveAdditional` 路径，
+        // 存档格式只有一份实现。
+        // Spawners are read and written by the live block entity; resaving goes
+        // through the same `read` then `saveAdditional` path, so there is one format.
+        "minecraft:mob_spawner" => (
+            crate::behaviour::machines::spawner::SpawnerBlockEntity::read(
+                mc_bamboo_core::BlockPos::new(0, 0, 0),
+                raw,
+            )
+            .additional(),
+            SPAWNER_OMIT,
+        ),
         // 试炼刷怪笼的 `state` / `ominous` 来自方块状态，其余两组 codec 读同一条目；
         // 重存和活实例走同一份 `TrialSpawner::additional`，存档格式只有一份实现。
         // The trial spawner's state and ominous come from the block state; the
@@ -180,10 +191,6 @@ fn entry<'a>(tag: &'a Tag, key: &str) -> Option<&'a Tag> {
     tag::field(tag, key)
 }
 
-fn short_tag(tag: &Tag, key: &str, default: i16) -> Tag {
-    Tag::Short(tag::short_or(tag, key, default))
-}
-
 fn bool_tag(tag: &Tag, key: &str, default: bool) -> Tag {
     Tag::Byte(i8::from(tag::bool_or(tag, key, default)))
 }
@@ -220,109 +227,6 @@ fn items(value: Option<&Tag>, size: usize) -> Tag {
         .filter(|item| !item.stack.is_empty())
         .collect();
     slots::encode_list(&slotted).unwrap_or(Tag::List(Vec::new()))
-}
-
-// ---------------------------------------------------------------------------
-// BaseSpawner.save / load
-// ---------------------------------------------------------------------------
-
-/// `BaseSpawner.load` 里 `SpawnPotentials` 缺失时按 `nextSpawnData` 造一份带一项的
-/// 列表：空的 `SpawnData`（`{entity:{}}`）权重 1。
-/// A missing `SpawnPotentials` list becomes one default empty `SpawnData` item.
-fn default_spawn_potentials() -> Tag {
-    Tag::List(vec![Tag::Compound(vec![
-        (
-            "data".to_owned(),
-            Tag::Compound(vec![("entity".to_owned(), Tag::Compound(Vec::new()))]),
-        ),
-        ("weight".to_owned(), Tag::Int(1)),
-    ])])
-}
-
-/// `SpawnData.CODEC`：`entity` 是必填的 `CompoundTag.CODEC`，另外两个可选字段
-/// 存在时原样带回；`entity.id` 由构造器用 `Identifier.CODEC` 重新规范化。
-/// `entity` is required; the two optional fields are carried through verbatim
-/// (no sub-codec normalization), while `entity.id` is canonicalized.
-fn spawn_data(tag: &Tag) -> Tag {
-    let mut entity = match entry(tag, "entity") {
-        Some(Tag::Compound(values)) => values.clone(),
-        _ => Vec::new(),
-    };
-    if let Some(Tag::String(id)) = entry(tag, "entity").and_then(|e| entry(e, "id")) {
-        // `SpawnData` 的构造器用 `Identifier.CODEC` 把 `entity.id` 规范化；
-        // 解不开时移除 `id`（`CompoundTag.remove`）。
-        // The constructor canonicalizes `entity.id`, removing it when invalid.
-        entity.retain(|(key, _)| key != "id");
-        if let Ok(name) = parse_identifier(id) {
-            entity.push(("id".to_owned(), Tag::String(name)));
-        }
-    }
-    let mut out = vec![("entity".to_owned(), Tag::Compound(entity))];
-    // 两个可省字段按官方 codec 的宽松规则原样带回：不丢键、不改值，
-    // 也不做子 codec 的逐字段规范化（清单里记着这条已知限制）。
-    // Carry the optional fields verbatim: no loss, no mutation and no sub-codec
-    // normalization (recorded as a known limitation in the checklist).
-    for key in ["custom_spawn_rules", "equipment"] {
-        if let Some(value) = entry(tag, key) {
-            out.push((key.to_owned(), value.clone()));
-        }
-    }
-    Tag::Compound(out)
-}
-
-fn spawn_potentials(raw: &Tag) -> Tag {
-    let fallback = entry(raw, "SpawnData")
-        .filter(|tag| matches!(tag, Tag::Compound(_)))
-        .map(|data| {
-            Tag::List(vec![Tag::Compound(vec![
-                ("data".to_owned(), spawn_data(data)),
-                ("weight".to_owned(), Tag::Int(1)),
-            ])])
-        })
-        .unwrap_or_else(default_spawn_potentials);
-    let Some(Tag::List(values)) = entry(raw, "SpawnPotentials") else {
-        return fallback;
-    };
-    let mut out = Vec::with_capacity(values.len());
-    for value in values {
-        let Tag::Compound(_) = value else {
-            return fallback;
-        };
-        let Some(data) = entry(value, "data").filter(|tag| matches!(tag, Tag::Compound(_))) else {
-            return fallback;
-        };
-        let mut one = Vec::new();
-        put(&mut one, "data", spawn_data(data));
-        put(
-            &mut one,
-            "weight",
-            Tag::Int(tag::int_or(value, "weight", 1)),
-        );
-        out.push(Tag::Compound(one));
-    }
-    Tag::List(out)
-}
-
-fn spawner(raw: &Tag) -> Vec<(String, Tag)> {
-    let mut out = Vec::new();
-    for (key, default) in [
-        ("Delay", 20_i16),
-        ("MinSpawnDelay", 200),
-        ("MaxSpawnDelay", 800),
-        ("SpawnCount", 4),
-        ("MaxNearbyEntities", 6),
-        ("RequiredPlayerRange", 16),
-        ("SpawnRange", 4),
-    ] {
-        put(&mut out, key, short_tag(raw, key, default));
-    }
-    // `SpawnData` 是 storeNullable：只有读盘条目里解得出 `SpawnData` 时才写。
-    // `SpawnData` is storeNullable: written only when it decodes from disk.
-    if let Some(data) = entry(raw, "SpawnData").filter(|tag| matches!(tag, Tag::Compound(_))) {
-        put(&mut out, "SpawnData", spawn_data(data));
-    }
-    put(&mut out, "SpawnPotentials", spawn_potentials(raw));
-    out
 }
 
 // ---------------------------------------------------------------------------

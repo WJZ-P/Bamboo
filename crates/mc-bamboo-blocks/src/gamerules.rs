@@ -48,8 +48,6 @@ pub struct BlockGameRules {
     pub spawn_mobs: bool,
     /// `GameRules.SPAWN_MONSTERS`。和 `spawn_mobs` 一起决定 `isSpawningMonsters()`。
     pub spawn_monsters: bool,
-    /// `GameRules.SPAWNER_BLOCKS_WORK`。试炼刷怪笼 `canSpawnInLevel` 开头读它。
-    pub spawner_blocks_work: bool,
     /// `GameRules.ENDER_PEARLS_VANISH_ON_DEATH`：主人死后飞行中的珍珠消失。
     pub ender_pearls_vanish_on_death: bool,
     /// `GameRules.SPAWN_PHANTOMS`。`PhantomSpawner.tick` 开头读它。
@@ -65,6 +63,10 @@ pub struct BlockGameRules {
     /// `GameRules.MOB_EXPLOSION_DROP_DECAY`: blocks broken by a mob explosion drop with
     /// probability 1/radius.
     pub mob_explosion_drop_decay: bool,
+    /// `GameRules.SPAWNER_BLOCKS_WORK`：刷怪笼会不会刷怪（`ServerLevel.isSpawnerBlockEnabled`）。
+    ///
+    /// `GameRules.SPAWNER_BLOCKS_WORK`: whether spawners work.
+    pub spawner_blocks_work: bool,
     /// `GameRules.MAX_ENTITY_CRAMMING`：`pushEntities` 的挤压伤害上限。
     pub max_entity_cramming: i32,
     /// Bamboo 的 `max_entity_collisions`：每只生物每刻最多处理几次推挤。
@@ -116,12 +118,12 @@ impl BlockGameRules {
             max_snow_accumulation_height: int_default(gamerules::MAX_SNOW_ACCUMULATION_HEIGHT),
             spawn_mobs: bool_default(gamerules::SPAWN_MOBS),
             spawn_monsters: bool_default(gamerules::SPAWN_MONSTERS),
-            spawner_blocks_work: bool_default(gamerules::SPAWNER_BLOCKS_WORK),
             ender_pearls_vanish_on_death: bool_default(gamerules::ENDER_PEARLS_VANISH_ON_DEATH),
             spawn_phantoms: bool_default(gamerules::SPAWN_PHANTOMS),
             mob_griefing: bool_default(gamerules::MOB_GRIEFING),
             mob_drops: bool_default(gamerules::MOB_DROPS),
             mob_explosion_drop_decay: bool_default(gamerules::MOB_EXPLOSION_DROP_DECAY),
+            spawner_blocks_work: bool_default(gamerules::SPAWNER_BLOCKS_WORK),
             max_entity_cramming: int_default(gamerules::MAX_ENTITY_CRAMMING),
             max_entity_collisions: 0,
             mob_throttle_distance: 0,
@@ -217,11 +219,11 @@ fn assign_bool(rules: &mut BlockGameRules, name: &str, value: bool) {
         "lava_source_conversion" => rules.lava_source_conversion = value,
         "spread_vines" => rules.spread_vines = value,
         "spawn_mobs" => rules.spawn_mobs = value,
-        "spawner_blocks_work" => rules.spawner_blocks_work = value,
         "spawn_phantoms" => rules.spawn_phantoms = value,
         "mob_griefing" => rules.mob_griefing = value,
         "mob_drops" => rules.mob_drops = value,
         "mob_explosion_drop_decay" => rules.mob_explosion_drop_decay = value,
+        "spawner_blocks_work" => rules.spawner_blocks_work = value,
         _ => {}
     }
 }
