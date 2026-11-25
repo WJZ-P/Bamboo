@@ -4428,7 +4428,21 @@ fn compare_spawns(
                 && ours.y == expected.y
                 && ours.z == expected.z
         } else {
-            ours == expected
+            // 掉落物 / 经验球的实体 id 是实体表内部编号：假世界里玩家也占一个号，
+            // Bamboo 的玩家不进实体表，两边基数差一。它不是行为结果，只比种类、
+            // 物品、数量、数值和位置；生成数量与顺序仍由上面的长度和逐项 zip 保证。
+            // A dropped item's/orb's entity id is an internal table number: the fake
+            // world's player consumes one, while Bamboo's player is not in the entity
+            // table, so the bases differ by one. It is not a behaviour result; compare
+            // kind, item, count, value and position only. Spawn count and order are
+            // still checked by the length and the per-index zip above.
+            ours.kind == expected.kind
+                && ours.item == expected.item
+                && ours.count == expected.count
+                && ours.value == expected.value
+                && ours.x == expected.x
+                && ours.y == expected.y
+                && ours.z == expected.z
         };
         if same {
             continue;
