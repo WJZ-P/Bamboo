@@ -77,6 +77,8 @@ pub enum SensorKind {
     ///
     /// `GolemSensor` (200-tick scan; writes `GOLEM_DETECTED_RECENTLY` with TTL 599 if an iron golem is nearby).
     GolemDetected,
+    /// `BreezeAttackEntitySensor`：从附近的活体里挑可攻击的玩家 / 铁傀儡。
+    BreezeAttackEntities,
 }
 
 impl SensorKind {
@@ -148,6 +150,7 @@ impl SensorKind {
                 MemoryType::NearestLivingEntities,
                 MemoryType::GolemDetectedRecently,
             ],
+            Self::BreezeAttackEntities => &[MemoryType::NearestAttackable],
         }
     }
 
@@ -173,6 +176,7 @@ impl SensorKind {
             Self::VillagerBabies => "VillagerBabiesSensor",
             Self::SecondaryPois => "SecondaryPoiSensor",
             Self::GolemDetected => "GolemSensor",
+            Self::BreezeAttackEntities => "BreezeAttackEntitySensor",
         }
     }
 }
@@ -233,6 +237,9 @@ impl Sensor {
             SensorKind::VillagerBabies => sense_villager_babies(cx),
             SensorKind::SecondaryPois => sense_secondary_pois(cx),
             SensorKind::GolemDetected => sense_golem_detected(cx),
+            SensorKind::BreezeAttackEntities => {
+                super::super::breeze::sense_attackables(cx);
+            }
         }
     }
 }

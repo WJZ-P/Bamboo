@@ -224,6 +224,10 @@ pub enum Kind {
     ///
     /// Sniffer-specific behaviours.
     Sniffer(super::super::sniffer::Behavior),
+    /// 旋风人专属行为。
+    ///
+    /// Breeze-specific behaviours.
+    Breeze(super::super::breeze::Behavior),
 }
 
 impl Kind {
@@ -366,6 +370,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.class(),
             Self::Villager(behavior) => behavior.class(),
             Self::Sniffer(behavior) => behavior.class(),
+            Self::Breeze(behavior) => behavior.class(),
         }
     }
 
@@ -405,6 +410,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.required(),
             Self::Villager(behavior) => behavior.required(),
             Self::Sniffer(behavior) => behavior.required(),
+            Self::Breeze(behavior) => behavior.required(),
         }
     }
 
@@ -448,6 +454,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.name(),
             Self::Villager(behavior) => behavior.name(),
             Self::Sniffer(behavior) => behavior.name(),
+            Self::Breeze(behavior) => behavior.name(),
         }
     }
 
@@ -505,6 +512,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.extra_start(cx),
             Self::Villager(behavior) => behavior.extra_start(cx),
             Self::Sniffer(behavior) => behavior.extra_start(cx),
+            Self::Breeze(behavior) => behavior.extra_start(cx),
             _ => true,
         }
     }
@@ -589,6 +597,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.start(cx),
             Self::Villager(behavior) => behavior.start(cx),
             Self::Sniffer(behavior) => behavior.start(cx),
+            Self::Breeze(behavior) => behavior.start(cx),
             _ => {}
         }
     }
@@ -626,6 +635,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.can_still_use(cx),
             Self::Villager(behavior) => behavior.can_still_use(cx),
             Self::Sniffer(behavior) => behavior.can_still_use(cx),
+            Self::Breeze(behavior) => behavior.can_still_use(cx),
             _ => false,
         }
     }
@@ -746,6 +756,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.tick(cx),
             Self::Villager(behavior) => behavior.tick(cx),
             Self::Sniffer(behavior) => behavior.tick(cx),
+            Self::Breeze(behavior) => behavior.tick(cx),
             _ => {}
         }
     }
@@ -779,6 +790,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.stop(cx),
             Self::Villager(behavior) => behavior.stop(cx),
             Self::Sniffer(behavior) => behavior.stop(cx, timed_out),
+            Self::Breeze(behavior) => behavior.stop(cx, timed_out),
             _ => {}
         }
     }
@@ -917,6 +929,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.trigger(cx),
             Self::Villager(behavior) => behavior.trigger(cx),
             Self::Sniffer(behavior) => behavior.trigger(cx),
+            Self::Breeze(behavior) => behavior.trigger(cx),
             _ => false,
         }
     }

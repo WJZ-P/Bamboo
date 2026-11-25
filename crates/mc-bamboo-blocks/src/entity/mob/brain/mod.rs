@@ -339,6 +339,12 @@ impl BrainTemplate {
         }
     }
 
+    /// 显式指定默认活动（旋风人的 `makeBrain` 把默认活动设成 FIGHT）。
+    pub fn with_default_activity(mut self, activity: Activity) -> Self {
+        self.default_activity = activity;
+        self
+    }
+
     /// 复制一份原型行为运行态给实例。官方每只生物各有一份行为对象，这里也一样；排序、
     /// 登记、闸门结构、前置条件掩码这些大结构直接从共享模板拷贝，不再逐只重算。
     ///
@@ -1136,15 +1142,15 @@ mod tests {
     /// Pins the key struct sizes. After boxing values and moving the structure table into
     /// `Arc<BrainTemplate>`: 32 slots had `Brain=664`, `Memories=536`; phase 3 grew to 49
     /// slots (+272) plus schedule fields (`Memories=808`, `Brain=952`), the two nautilus
-    /// memories add 32 more (`840` / `984`), and the five sniffer memories add 80 more
-    /// (`920` / `1064`).
+    /// memories add 32 more (`840` / `984`), the five sniffer memories add 80 more
+    /// (`920` / `1064`), and the eight breeze memories add 128 more (`1048` / `1192`).
     #[test]
     fn brain_and_memory_sizes_stay_small() {
         use crate::entity::mob::brain::behavior::Node;
         use crate::entity::mob::brain::memory::{Memories, MemoryValue};
         assert_eq!(std::mem::size_of::<MemoryValue>(), 184);
-        assert_eq!(std::mem::size_of::<Memories>(), 920);
-        assert_eq!(std::mem::size_of::<Brain>(), 1064);
+        assert_eq!(std::mem::size_of::<Memories>(), 1048);
+        assert_eq!(std::mem::size_of::<Brain>(), 1192);
         assert_eq!(std::mem::size_of::<Node>(), 136);
         assert_eq!(std::mem::size_of::<Sensor>(), 16);
         assert_eq!(std::mem::size_of::<Entry>(), 144);

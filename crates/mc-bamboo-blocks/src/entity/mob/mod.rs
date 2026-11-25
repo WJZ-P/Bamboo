@@ -21,6 +21,7 @@ pub mod bee;
 pub mod bee_goals;
 pub mod bogged;
 pub mod brain;
+pub mod breeze;
 pub mod bucketable;
 pub mod camel;
 pub mod cat;
@@ -234,13 +235,18 @@ pub enum MobType {
     ///
     /// The `Sniffer`.
     Sniffer,
+    /// 旋风人，`Breeze`。试炼密室的敌对生物，射风弹、长跳和滑动。
+    ///
+    /// The breeze: a trial-chambers hostile that shoots wind charges, long-jumps
+    /// and slides.
+    Breeze,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 63] = [
+    pub const ALL: [Self; 64] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -304,6 +310,7 @@ impl MobType {
         Self::Nautilus,
         Self::ZombieNautilus,
         Self::Sniffer,
+        Self::Breeze,
     ];
 
     /// 注册表 ID。
@@ -373,6 +380,7 @@ impl MobType {
             Self::Nautilus => ids::NAUTILUS,
             Self::ZombieNautilus => ids::ZOMBIE_NAUTILUS,
             Self::Sniffer => ids::SNIFFER,
+            Self::Breeze => ids::BREEZE,
         }
     }
 
@@ -442,6 +450,7 @@ impl MobType {
             Self::Nautilus => "minecraft:nautilus",
             Self::ZombieNautilus => "minecraft:zombie_nautilus",
             Self::Sniffer => "minecraft:sniffer",
+            Self::Breeze => "minecraft:breeze",
         }
     }
 
@@ -597,6 +606,8 @@ impl MobType {
             (Self::ElderGuardian, _) => (1.9975, 1.9975, 0.99875),
             (Self::Nautilus | Self::ZombieNautilus, baby) => nautilus::dimensions(baby),
             (Self::Sniffer, baby) => sniffer::dimensions(baby),
+            // `EntityTypes.BREEZE`：`sized(0.6F, 1.77F).eyeHeight(1.385F)`。
+            (Self::Breeze, _) => (0.6, 1.77, 1.385),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -662,6 +673,7 @@ impl MobType {
                 | Self::Guardian
                 | Self::ElderGuardian
                 | Self::ZombieNautilus
+                | Self::Breeze
         ) || self.is_skeleton()
     }
 
@@ -1022,7 +1034,7 @@ impl MobType {
         }
         // 守卫者构造函数里 `xpReward = 10`，覆盖 `Monster` 的 5。
         // The guardian constructor sets `xpReward = 10`, overriding the monster's 5.
-        if matches!(self, Self::Guardian | Self::ElderGuardian) {
+        if matches!(self, Self::Guardian | Self::ElderGuardian | Self::Breeze) {
             return 10;
         }
         // 硫磺方块怪成年是 1 + rand(2)，幼年 0，见 `living::drop_loot`。
@@ -1105,6 +1117,7 @@ impl MobType {
             Self::Nautilus => "minecraft:entities/nautilus",
             Self::ZombieNautilus => "minecraft:entities/zombie_nautilus",
             Self::Sniffer => "minecraft:entities/sniffer",
+            Self::Breeze => "minecraft:entities/breeze",
         }
     }
 
@@ -1247,6 +1260,8 @@ impl MobType {
             // `Sniffer.getAmbientSound`: silent while digging or searching; see
             // `sniffer::ambient_voice`.
             Self::Sniffer => Some("minecraft:entity.sniffer.idle"),
+            // 旋风人的环境声有着地 / 空中两种，见 `breeze::ambient_sound`。
+            Self::Breeze => None,
         }
     }
 
@@ -1310,6 +1325,7 @@ impl MobType {
             | Self::Nautilus
             | Self::ZombieNautilus => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.hurt"),
+            Self::Breeze => Some("minecraft:entity.breeze.hurt"),
         }
     }
 
@@ -1373,6 +1389,7 @@ impl MobType {
             | Self::Nautilus
             | Self::ZombieNautilus => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.death"),
+            Self::Breeze => Some("minecraft:entity.breeze.death"),
         }
     }
 
@@ -1447,6 +1464,7 @@ impl MobType {
             | Self::Nautilus
             | Self::ZombieNautilus => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.step"),
+            Self::Breeze => None,
         }
     }
 
@@ -1517,6 +1535,7 @@ impl MobType {
             Self::Nautilus => items::NAUTILUS_SPAWN_EGG,
             Self::ZombieNautilus => items::ZOMBIE_NAUTILUS_SPAWN_EGG,
             Self::Sniffer => items::SNIFFER_SPAWN_EGG,
+            Self::Breeze => items::BREEZE_SPAWN_EGG,
         }
     }
 
@@ -1586,6 +1605,7 @@ impl MobType {
             Self::Nautilus => "entity.minecraft.nautilus",
             Self::ZombieNautilus => "entity.minecraft.zombie_nautilus",
             Self::Sniffer => "entity.minecraft.sniffer",
+            Self::Breeze => "entity.minecraft.breeze",
         }
     }
 
@@ -2926,6 +2946,10 @@ pub struct Mob {
     ///
     /// The sniffer's state machine and drop-seed tick; default for other mobs.
     pub sniffer: sniffer::Sniffer,
+    /// 旋风人的姿态和长跳计时；别的生物是缺省值。
+    ///
+    /// The breeze's pose and long-jump timer; default for other mobs.
+    pub breeze: breeze::Breeze,
     /// 骆驼的姿势状态机同步值和冲刺计时。
     ///
     /// The camel's pose state machine synced values and dash timer.
@@ -3085,6 +3109,7 @@ impl Mob {
             MobType::SulfurCube => sulfur_cube::attributes(),
             MobType::Nautilus | MobType::ZombieNautilus => nautilus::attributes(mob_type),
             MobType::Sniffer => sniffer::attributes(),
+            MobType::Breeze => breeze::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3165,7 +3190,8 @@ impl Mob {
             | MobType::Villager
             | MobType::Nautilus
             | MobType::ZombieNautilus
-            | MobType::Sniffer => GoalSelector::default(),
+            | MobType::Sniffer
+            | MobType::Breeze => GoalSelector::default(),
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
             // alongside the brain.
@@ -3235,7 +3261,8 @@ impl Mob {
             | MobType::CamelHusk
             | MobType::Nautilus
             | MobType::ZombieNautilus
-            | MobType::Sniffer => GoalSelector::default(),
+            | MobType::Sniffer
+            | MobType::Breeze => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Ocelot => ocelot::target_goals(),
@@ -3477,6 +3504,7 @@ impl Mob {
             sulfur_cube: sulfur_cube::SulfurCubeState::default(),
             nautilus: nautilus::NautilusState::default(),
             sniffer: sniffer::Sniffer::default(),
+            breeze: breeze::Breeze::default(),
             events: Vec::new(),
             needs_sync: false,
             knockback_sync: false,
@@ -4348,6 +4376,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Villager => Some(Box::new(villager_ai::brain(false, 0))),
         MobType::Nautilus | MobType::ZombieNautilus => Some(Box::new(nautilus_ai::brain(kind))),
         MobType::Sniffer => Some(Box::new(sniffer::brain())),
+        MobType::Breeze => Some(Box::new(breeze::brain())),
         _ => None,
     }
 }

@@ -843,6 +843,8 @@ pub(super) fn check_spawn_rules(
         // 村民不在任何群系刷怪表里，只由结构 / 命令 / 刷怪蛋生成。
         // Villagers are in no biome spawn table; structures, commands and eggs make them.
         MobType::Villager => true,
+        // 旋风人只在试炼刷怪笼 / 命令 / 刷怪蛋里生成，不在群系刷怪表。
+        MobType::Breeze => true,
         // `Guardian.checkGuardianSpawnRules`：1/20 或者水下看不见天，然后非和平、
         // 上下两格都是水（自然生成不是刷怪笼）。和平难度在函数开头已经挡掉。
         //

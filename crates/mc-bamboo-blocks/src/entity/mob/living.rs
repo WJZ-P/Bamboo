@@ -858,6 +858,8 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
         // `Sniffer.getAmbientSound`：挖掘 / 搜寻时不叫。
         // `Sniffer.getAmbientSound`: silent while digging or searching.
         super::MobType::Sniffer => super::sniffer::ambient_voice(mob),
+        // `Breeze.getAmbientSound`：着地 / 空中两种。
+        super::MobType::Breeze => Some(super::breeze::ambient_sound(me.on_ground)),
         _ => Some(voice_of(mob, Voice::Ambient, me.in_water)),
     }
 }
@@ -2031,6 +2033,9 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     }
     if mob.mob_type == super::MobType::Sniffer {
         super::sniffer::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Breeze {
+        super::breeze::custom_server_ai_step(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::ElderGuardian {
         // `ElderGuardian.customServerAiStep`：范围挖掘疲劳和家。
