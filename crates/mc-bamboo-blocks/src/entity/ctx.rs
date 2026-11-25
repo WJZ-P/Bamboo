@@ -1078,6 +1078,8 @@ pub enum Command {
     ///
     /// One ominous item spawner tick: warning sound, drop / shot, 3021 and game event.
     OminousItemSpawnerTick(super::ominous_item_spawner::SpawnerTick),
+    /// 风弹这一刻命中：`AbstractWindCharge.onHitBlock` / `onHitEntity` 的爆炸。
+    WindChargeImpact(super::wind_charge::WindChargeHit),
     /// 骷髅陷阱马被玩家触发：视觉闪电和四名骷髅骑士。
     ///
     /// A skeleton trap triggered by a player: a visual bolt and four riders.
@@ -1724,6 +1726,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::OminousItemSpawnerTick(facts) => {
             super::ominous_item_spawner::apply(me, world, facts);
         }
+        Command::WindChargeImpact(hit) => super::wind_charge::impact(me, world, hit),
         Command::SkeletonTrap(facts) => super::mob::skeleton_horse::spawn_trap(world, me, facts),
         Command::ThrowSplashPotion { shot } => {
             world.spawn_splash_shot(&shot);

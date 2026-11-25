@@ -210,9 +210,17 @@ fn spawn_projectile(world: &mut World<'_>, facts: &SpawnerTick) {
             };
             world.spawn_splash_shot(&shot);
         }
-        // 风弹实体在下一步接入；当前按掉落物处理，避免伪造一份飞行逻辑。
         items::WIND_CHARGE => {
-            world.spawn_entity(Entity::ground_item(facts.position, stack.clone()));
+            let shot = super::wind_charge::WindChargeShot {
+                position: facts.position,
+                direction,
+                power,
+                uncertainty,
+                variant: super::wind_charge::WindChargeVariant::Player,
+                owner: None,
+                owner_uuid: None,
+            };
+            world.spawn_wind_charge_shot(&shot);
         }
         items::EGG | items::SNOWBALL | items::ENDER_PEARL | items::EXPERIENCE_BOTTLE => {
             let projectile = match stack.item {

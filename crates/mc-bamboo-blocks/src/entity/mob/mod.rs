@@ -1902,6 +1902,8 @@ pub enum DamageKind {
     /// the overworld. `INTENTIONAL_GAME_DESIGN`, exhaustion 0.1, `always`
     /// scaling, `message_id` `badRespawnPoint`.
     BadRespawnPoint,
+    /// 风弹命中实体，`minecraft:wind_charge`。
+    WindCharge,
 }
 
 impl DamageKind {
@@ -1942,6 +1944,7 @@ impl DamageKind {
             Self::LightningBolt => "minecraft:lightning_bolt",
             Self::SulfurCubeHot => "minecraft:sulfur_cube_hot",
             Self::BadRespawnPoint => "minecraft:bad_respawn_point",
+            Self::WindCharge => "minecraft:wind_charge",
         }
     }
 
@@ -2003,6 +2006,7 @@ impl DamageKind {
             Self::LightningBolt => "lightningBolt",
             Self::SulfurCubeHot => "sulfurCubeHot",
             Self::BadRespawnPoint => "badRespawnPoint",
+            Self::WindCharge => "windCharge",
         }
     }
 

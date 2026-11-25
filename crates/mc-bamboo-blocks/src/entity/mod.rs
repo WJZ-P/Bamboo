@@ -23,6 +23,7 @@ pub mod splash_potion;
 pub mod store;
 pub mod thrown_egg;
 pub mod view;
+pub mod wind_charge;
 
 mod explosion;
 mod falling;
@@ -243,6 +244,10 @@ pub enum EntityKind {
     ///
     /// An ominous item spawner, vanilla `OminousItemSpawner`.
     OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawner>),
+    /// 风弹，`WindCharge` / `BreezeWindCharge`。
+    ///
+    /// A wind charge, vanilla `WindCharge` / `BreezeWindCharge`.
+    WindCharge(Box<wind_charge::WindCharge>),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -266,6 +271,7 @@ impl EntityKind {
             Self::OminousItemSpawner(_) => {
                 mc_bamboo_data::registries::entity_type::OMINOUS_ITEM_SPAWNER
             }
+            Self::WindCharge(charge) => charge.variant.entity_type(),
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -502,6 +508,7 @@ impl Entity {
             EntityKind::OminousItemSpawner(_) => {
                 ominous_item_spawner::tick(self, ctx);
             }
+            EntityKind::WindCharge(_) => wind_charge::tick(self, ctx),
             EntityKind::LeashKnot(_) => leash_knot::tick(self, ctx),
             EntityKind::Mob(_) => {}
         }

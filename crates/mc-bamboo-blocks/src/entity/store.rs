@@ -144,6 +144,8 @@ pub enum KindPublic {
     ///
     /// An ominous item spawner: the synced `DATA_ITEM`.
     OminousItemSpawner(ItemStack),
+    /// 风弹：同步要的 UUID、主人、种类和俯仰角。
+    WindCharge(super::wind_charge::WindChargePublic),
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
     Arrow(super::arrow::ArrowPublic),
@@ -178,6 +180,7 @@ impl KindPublic {
             Self::OminousItemSpawner(_) => {
                 mc_bamboo_data::registries::entity_type::OMINOUS_ITEM_SPAWNER
             }
+            Self::WindCharge(charge) => charge.variant.entity_type(),
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -253,6 +256,8 @@ pub enum KindState {
     LightningBolt(super::lightning::LightningBolt),
     /// 不祥物品生成器的全部状态。
     OminousItemSpawner(Box<super::ominous_item_spawner::OminousItemSpawner>),
+    /// 风弹的全部状态。
+    WindCharge(Box<super::wind_charge::WindCharge>),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
     Arrow(Box<super::arrow::Arrow>),
@@ -391,6 +396,9 @@ impl EntityRow {
             (KindPublic::OminousItemSpawner(_), KindState::OminousItemSpawner(spawner)) => {
                 EntityKind::OminousItemSpawner(spawner)
             }
+            (KindPublic::WindCharge(_), KindState::WindCharge(charge)) => {
+                EntityKind::WindCharge(charge)
+            }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
@@ -490,6 +498,10 @@ impl Entity {
             EntityKind::OminousItemSpawner(spawner) => (
                 KindPublic::OminousItemSpawner(spawner.item.clone()),
                 KindState::OminousItemSpawner(spawner),
+            ),
+            EntityKind::WindCharge(charge) => (
+                KindPublic::WindCharge(charge.public(self.remaining_fire_ticks)),
+                KindState::WindCharge(charge),
             ),
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),

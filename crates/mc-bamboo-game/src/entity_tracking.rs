@@ -828,6 +828,8 @@ pub enum KindData {
     ///
     /// The ominous item spawner's `DATA_ITEM`: an ITEM_STACK at index 8.
     OminousItemSpawner(ItemStack),
+    /// 风弹：`add_entity` 的 data 用主人 ID。
+    WindCharge(mc_bamboo_blocks::entity::wind_charge::WindChargePublic),
     /// 羊驼口水：没有自己的元数据。
     ///
     /// Llama spit, with no metadata of its own.
@@ -885,12 +887,14 @@ impl Snapshot {
                 KindPublic::LlamaSpit(spit) => spit.needs_sync,
                 KindPublic::Egg(egg) => egg.needs_sync,
                 KindPublic::SplashPotion(potion) => potion.needs_sync,
+                KindPublic::WindCharge(charge) => charge.needs_sync,
                 _ => false,
             },
             sync_velocity: match &public.kind {
                 KindPublic::Arrow(arrow) => arrow.sync_velocity,
                 KindPublic::Egg(egg) => egg.sync_velocity,
                 KindPublic::SplashPotion(potion) => potion.sync_velocity,
+                KindPublic::WindCharge(charge) => charge.sync_velocity,
                 _ => false,
             },
             sync_position: false,
@@ -911,6 +915,7 @@ impl Snapshot {
             KindData::LlamaSpit(spit) => spit.owner.unwrap_or(0),
             KindData::Egg(egg) => egg.owner.unwrap_or(0),
             KindData::SplashPotion(potion) => potion.owner.unwrap_or(0),
+            KindData::WindCharge(charge) => charge.owner.unwrap_or(0),
             KindData::Tnt { .. }
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
@@ -943,6 +948,7 @@ impl KindData {
             KindPublic::SplashPotion(potion) => Self::SplashPotion(potion.clone()),
             KindPublic::LightningBolt(_) => Self::LightningBolt,
             KindPublic::OminousItemSpawner(stack) => Self::OminousItemSpawner(stack.clone()),
+            KindPublic::WindCharge(charge) => Self::WindCharge(*charge),
             KindPublic::LeashKnot { .. } => Self::LeashKnot,
         }
     }
@@ -954,7 +960,11 @@ impl KindData {
     fn is_projectile(&self) -> bool {
         matches!(
             self,
-            Self::Arrow(_) | Self::Egg(_) | Self::LlamaSpit(_) | Self::SplashPotion(_)
+            Self::Arrow(_)
+                | Self::Egg(_)
+                | Self::LlamaSpit(_)
+                | Self::SplashPotion(_)
+                | Self::WindCharge(_)
         )
     }
 
@@ -971,6 +981,7 @@ impl KindData {
             | Self::SplashPotion(_)
             | Self::LightningBolt
             | Self::OminousItemSpawner(_)
+            | Self::WindCharge(_)
             | Self::LeashKnot => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
@@ -988,6 +999,7 @@ impl KindData {
             | Self::Egg(_)
             | Self::SplashPotion(_)
             | Self::LightningBolt
+            | Self::WindCharge(_)
             | Self::LeashKnot => None,
         }
     }
@@ -1000,6 +1012,7 @@ impl KindData {
             Self::LlamaSpit(spit) => Some(spit.uuid),
             Self::Egg(egg) => Some(egg.uuid),
             Self::SplashPotion(potion) => Some(potion.uuid),
+            Self::WindCharge(charge) => Some(charge.uuid),
             _ => None,
         }
     }
@@ -1012,6 +1025,7 @@ impl KindData {
             Self::LlamaSpit(spit) => Some(spit.pitch),
             Self::Egg(egg) => Some(egg.x_rot),
             Self::SplashPotion(potion) => Some(potion.x_rot),
+            Self::WindCharge(charge) => Some(charge.pitch),
             _ => None,
         }
     }
@@ -1043,6 +1057,7 @@ impl KindData {
             Self::ExperienceOrb { .. }
             | Self::LlamaSpit(_)
             | Self::LightningBolt
+            | Self::WindCharge(_)
             | Self::LeashKnot => Vec::new(),
             Self::OminousItemSpawner(stack) if !stack.is_empty() => {
                 vec![EntityData::Item(stack.clone())]

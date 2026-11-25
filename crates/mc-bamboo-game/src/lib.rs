@@ -106,6 +106,7 @@ mod player_move;
 pub mod player_respawn;
 mod player_save;
 pub mod player_weapon;
+pub mod player_wind_charge;
 pub mod poi_query;
 mod pos_map;
 mod profiler;
