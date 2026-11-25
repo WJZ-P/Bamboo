@@ -1094,6 +1094,13 @@ pub struct ProjectileFacts {
     /// The guardian's `DATA_ID_MOVING` / `DATA_ID_ATTACK_TARGET` metadata indices.
     pub guardian_moving: u8,
     pub guardian_attack_target: u8,
+    /// `AbstractNautilus.DASH` 和 `ZombieNautilus.DATA_VARIANT_ID` 的元数据 index。
+    ///
+    /// The metadata indices of `AbstractNautilus.DASH` and
+    /// `ZombieNautilus.DATA_VARIANT_ID`.
+    pub nautilus_dash: u8,
+    pub zombie_nautilus_variant: u8,
+    pub zombie_nautilus_variant_serializer: i32,
     /// 蠹虫 / 末影螨的属性、眼高与寿命上限。
     ///
     /// Silverfish / endermite attributes, eye heights and the life cap.

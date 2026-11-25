@@ -440,6 +440,9 @@ public final class MobOracle {
             if (only == null || "villager_poi_acquire".startsWith(only) || only.startsWith("villager_poi")) {
                 cases += playVillagerPoi(official, out, only);
             }
+            if (only == null || "villager_p4".startsWith(only) || only.startsWith("villager_p4")) {
+                cases += playVillagerPhase4(official, out, only);
+            }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playBat(official, out, name);
@@ -481,6 +484,13 @@ public final class MobOracle {
                     "axolotl_water", "axolotl_land", "axolotl_variant", "axolotl_baby")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playWaterMob(official, out, name);
+                cases++;
+            }
+            for (String name : List.of("nautilus_swim", "nautilus_brain",
+                    "nautilus_tame", "nautilus_saddle",
+                    "nautilus_jockey")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playNautilus(official, out, name);
                 cases++;
             }
             if (only == null || only.startsWith("bee_ai")) {
@@ -9870,6 +9880,312 @@ public final class MobOracle {
     }
 
     /**
+     * 鹦鹉螺 / 僵尸鹦鹉螺逐刻场景：游动 + 大脑结构表、驯服 / 上鞍、以及
+     * 溺尸骑僵尸鹦鹉螺的静止骑乘。方块是 17×17 的水池，两边都用显式实体随机源。
+     *
+     * <p>Nautilus / zombie-nautilus tick scenes: swimming with the brain structure
+     * table, taming / saddling, and a still drowned rider on a zombie nautilus. The
+     * fixture is a 17×17 water tank with explicit entity random seeds on both sides.
+     */
+    private static void playNautilus(Official official, Writer out, String name) throws Exception {
+        boolean swim = name.equals("nautilus_swim");
+        boolean brain = name.equals("nautilus_brain");
+        boolean tame = name.equals("nautilus_tame");
+        boolean saddle = name.equals("nautilus_saddle");
+        boolean jockey = name.equals("nautilus_jockey");
+        int ticks = jockey ? 40 : 120;
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -8; x <= 8; x++) {
+            for (int z = -8; z <= 8; z++) {
+                boolean wall = Math.abs(x) == 8 || Math.abs(z) == 8;
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+                for (int y = 61; y <= 66; y++) {
+                    world.blocks.put(BlockPos.asLong(x, y, z),
+                            wall ? Blocks.STONE.defaultBlockState() : Blocks.WATER.defaultBlockState());
+                }
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        long seed = 0x5EED_5EEDL;
+        var mobs = new ArrayList<net.minecraft.world.entity.Mob>();
+        net.minecraft.world.entity.animal.nautilus.AbstractNautilus nautilus = null;
+        if (jockey) {
+            // `Drowned.finalizeSpawn` 的坐骑分支：溺尸拿三叉戟、自然生成、非幼年、
+            // 不在 `#more_frequent_drowned_spawns`，再让 50% 那一抽命中。
+            // The jockey branch of `Drowned.finalizeSpawn`: a trident-carrying,
+            // adult, naturally spawned drowned outside the frequent-spawn biomes.
+            var drowned = new net.minecraft.world.entity.monster.zombie.Drowned(EntityTypes.DROWNED, world);
+            world.entitySeeds.nextLong();
+            setRandom(drowned, seed);
+            drowned.setUUID(new UUID(1L, 2L));
+            drowned.setId(FIRST_ID);
+            drowned.setYRot(0.0F);
+            drowned.setYHeadRot(0.0F);
+            drowned.setYBodyRot(0.0F);
+            drowned.setPos(0.5, 63.0, 0.5);
+            drowned.setNoAi(true);
+            // 把主手固定成三叉戟，让官方 `Drowned.finalizeSpawn` 的坐骑分支命中：
+            // 构造 / 装备抽签都在这一个显式世界随机源上，坐骑的 50% 也会抽中。
+            // Pin the trident so the official jockey branch of
+            // `Drowned.finalizeSpawn` runs; all spawn rolls share the seeded
+            // level random and the 50% jockey roll hits.
+            drowned.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                    new ItemStack(Items.TRIDENT));
+            world.spawned = new ArrayList<>();
+            put(net.minecraft.world.level.Level.class, world, "random", RandomSource.create(1L));
+            long before = randomSeed(world.getRandom());
+            drowned.finalizeSpawn(world, world.getCurrentDifficultyAt(drowned.blockPosition()),
+                    EntitySpawnReason.NATURAL, null);
+            long after = randomSeed(world.getRandom());
+            // `finalizeSpawn` 会重掷装备；把主手换回三叉戟，并补喂世界随机源
+            // 让官方坐骑分支的 `nextFloat() < 0.5` 命中。场景比的是骑乘之后的
+            // 逐刻行为，生成期的长随机序列由 `natural-spawn` 和单测覆盖。
+            // `finalizeSpawn` rerolls equipment; restore the trident and feed the
+            // level random a state whose jockey roll hits. The scene compares the
+            // ticks after mounting, not the spawn-time draw sequence.
+            drowned.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                    new ItemStack(Items.TRIDENT));
+            put(net.minecraft.world.level.Level.class, world, "random",
+                    RandomSource.create(0x5EED_5EEDL));
+            net.minecraft.util.RandomSource jockeyRandom = world.getRandom();
+            jockeyRandom.nextFloat();
+            jockeyRandom.nextFloat();
+            net.minecraft.world.entity.animal.nautilus.ZombieNautilus jockeyMount =
+                    EntityTypes.ZOMBIE_NAUTILUS.create(world, EntitySpawnReason.JOCKEY);
+            if (jockeyMount != null) {
+                jockeyMount.setPersistenceRequired();
+                jockeyMount.snapTo(drowned.getX(), drowned.getY(), drowned.getZ(),
+                        drowned.getYRot(), 0.0F);
+                jockeyMount.finalizeSpawn(world,
+                        world.getCurrentDifficultyAt(drowned.blockPosition()),
+                        EntitySpawnReason.NATURAL, null);
+                drowned.startRiding(jockeyMount, false, false);
+                world.addFreshEntity(jockeyMount);
+                jockeyMount.setNoAi(true);
+            }
+            world.tracked.add(drowned);
+            mobs.add(drowned);
+            for (var added : world.spawned) {
+                if (added instanceof net.minecraft.world.entity.animal.nautilus.ZombieNautilus zn) {
+                    nautilus = zn;
+                    zn.setNoAi(true);
+                    mobs.add(zn);
+                }
+            }
+            if (nautilus == null) {
+                throw new IllegalStateException("drowned jockey did not create a zombie nautilus");
+            }
+            int jockeyVariant = ((net.minecraft.world.entity.animal.nautilus.ZombieNautilus) nautilus)
+                    .getVariant().unwrapKey().map(key -> key.identifier().toString())
+                    .orElse("minecraft:temperate").equals("minecraft:warm") ? 1 : 0;
+            // 构造 / `finalizeSpawn` 的熵取完后把两边的随机源显式对齐：
+            // 场景要比的是「骑手已经生成并静止骑乘」之后的逐刻行为，不是
+            // 生成期那一长串世界随机源取数（那些由 `natural-spawn` 和单测覆盖）。
+            // After construction / `finalizeSpawn`, align both sides' random
+            // sources explicitly: this scene checks the ticks after the jockey
+            // exists, not the long spawn-time world-random sequence (covered
+            // by natural-spawn and unit tests).
+            // 用官方 `RandomSource.create(11L)` / `(23L)` 起步，再按场景名字散列出
+            // 一个确定的前进量：这样无论前面跑了多少场景，两边都能从同一状态起步。
+            // Start from vanilla `RandomSource.create(11L)` / `(23L)` and advance
+            // by a scene-name hash so preceding scenes cannot desync the pair.
+            net.minecraft.util.RandomSource riderRandom = RandomSource.create(11L);
+            net.minecraft.util.RandomSource mountRandom = RandomSource.create(23L);
+            int advance = 1 + ("nautilus_jockey".hashCode() & 15);
+            for (int i = 0; i < advance; i++) {
+                riderRandom.nextLong();
+                mountRandom.nextLong();
+            }
+            long riderSeed = randomSeed(riderRandom);
+            long mountSeed = randomSeed(mountRandom);
+            put(net.minecraft.world.entity.Entity.class, drowned, "random", riderRandom);
+            put(net.minecraft.world.entity.Entity.class, nautilus, "random", mountRandom);
+            long riderFinal = randomSeed(drowned);
+            long mountFinal = randomSeed(nautilus);
+            put(net.minecraft.world.level.Level.class, world, "random", RandomSource.create(1L));
+            put(net.minecraft.world.level.Level.class, world, "soundSeedGenerator",
+                    RandomSource.create(1L));
+            // 官方 `Entity.makeSound` 的音高种子取自 `level.getRandom().nextLong()`，
+            // 每次比较级别随机源状态前先把这一笔耗掉，避免假世界里的全局静态
+            // 音源状态因前面跑了多少场景而不同。Bamboo 侧同样显式耗一笔。
+            // Vanilla's `Entity.makeSound` seeds from `level.getRandom().nextLong()`;
+            // consume it here so the fake world's global sound source cannot vary
+            // with the number of preceding scenes. Bamboo consumes it too.
+            world.getRandom().nextLong();
+            long tickSeed = randomSeed(world.getRandom());
+            out.write("{\"type\":\"nautilus\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID + ",\"blocks\":" + blocks
+                    + ",\"seed\":" + seed + ",\"ticks\":" + ticks
+                    + ",\"jockey\":true,\"levelSeedBefore\":" + before
+                    + ",\"levelSeedAfter\":" + after
+                    + ",\"tickSeed\":" + tickSeed
+                    + ",\"riderVehicle\":" + (drowned.getVehicle() != null)
+                    + ",\"riderVehicleKind\":" + (drowned.getVehicle() == null ? -1
+                            : BuiltInRegistries.ENTITY_TYPE.getId(drowned.getVehicle().getType()))
+                    + ",\"variant\":" + jockeyVariant
+                    + ",\"riderSeed\":" + riderFinal + ",\"mountSeed\":" + mountFinal
+                    + ",\"frames\":" + nautilusFrames(world, mobs, ticks)
+                    + "}\n");
+            out.flush();
+            return;
+        }
+        nautilus = EntityTypes.NAUTILUS.create(world, EntitySpawnReason.COMMAND);
+        setRandom(nautilus, seed);
+        net.minecraft.util.RandomSource nautilusRandom = nautilus.getRandom();
+        nautilus.setUUID(net.minecraft.util.Mth.createInsecureUUID(nautilusRandom));
+        float nautilusYaw = nautilusRandom.nextFloat() * 6.2831855F;
+        nautilus.setYRot(nautilusYaw);
+        nautilus.setYHeadRot(nautilusYaw);
+        // 构造函数里 `makeBrain` 的五个传感器起始延迟也按官方取。
+        // The five brain sensor start delays from `makeBrain` are drawn too.
+        java.lang.reflect.Field brainSensors = net.minecraft.world.entity.ai.Brain.class
+                .getDeclaredField("sensors");
+        brainSensors.setAccessible(true);
+        var sensorMap = (java.util.Map<?, ?>) brainSensors.get(nautilus.getBrain());
+        java.lang.reflect.Field delay = net.minecraft.world.entity.ai.sensing.Sensor.class
+                .getDeclaredField("timeToTick");
+        delay.setAccessible(true);
+        for (var sensor : sensorMap.values()) {
+            delay.setLong(sensor, nautilusRandom.nextInt(20));
+        }
+        nautilus.setYRot(0.0F);
+        nautilus.setYHeadRot(0.0F);
+        nautilus.setYBodyRot(0.0F);
+        nautilus.setId(FIRST_ID);
+        nautilus.setYRot(0.0F);
+        nautilus.setYHeadRot(0.0F);
+        nautilus.setYBodyRot(0.0F);
+        nautilus.setPos(0.5, 63.0, 0.5);
+        nautilus.setNoAi(true);
+        // 服务端 `addParticle` 不取数：把气泡概率那一支跳过，两边都只留
+        // `Mob.baseTick` 的取数。见 README 的已知限制。
+        mobs.add(nautilus);
+        world.tracked.add(nautilus);
+        String brainTable = brain ? brainTable(nautilus) : "null";
+        // 让两边从构造取数之后的同一个随机源状态起步：报出这个状态，
+        // 再把 Java 侧的实体随机源设回它（RandomSource.create 会先异或乘子）。
+        long initialSeed = randomSeed(nautilus);
+        // 再按构造函数取一遍，让传感器延迟等熵也落在同一个随机源上。
+        net.minecraft.util.RandomSource drawRandom = nautilus.getRandom();
+        nautilus.setUUID(net.minecraft.util.Mth.createInsecureUUID(drawRandom));
+        drawRandom.nextFloat();
+        for (int i = 0; i < 5; i++) drawRandom.nextInt(20);
+        long postConstruction = randomSeed(nautilus);
+        long originalState = postConstruction;
+        long state = postConstruction ^ 0x5DEECE66DL;
+        long afterInteraction = postConstruction;
+        put(net.minecraft.world.entity.Entity.class, nautilus, "random", RandomSource.create(state));
+        String data = "null";
+        if (tame || saddle) {
+            // 官方 `mobInteract`：驯服用河豚（1/3）、上鞍用鞍。两边都显式固定种子。
+            // Vanilla `mobInteract`: pufferfish tames (one in three), a saddle equips.
+            GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+            ServerPlayer player = new ServerPlayer(official.server, world, profile,
+                    ClientInformation.createDefault());
+            player.setPos(1.5, 63.0, 0.5);
+            ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+            put(ServerGamePacketListenerImpl.class, connection, "player", player);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "server", official.server);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+            ((RecordingListener) connection).bytes = new Bytes(official.registries);
+            put(ServerPlayer.class, player, "connection", connection);
+            var stack = new ItemStack(tame ? Items.PUFFERFISH : Items.SADDLE);
+            player.setItemInHand(InteractionHand.MAIN_HAND, stack);
+            // 让驯服的三分之一命中：河豚场景显式设实体随机源。
+            // Make the one-in-three taming roll succeed with an explicit seed.
+            // 驯服那一抽 `nextInt(3) == 0` 要命中：从构造后的状态里挑一个
+            // 已知种子；上鞍场景没有抽签，沿用构造后的状态。
+            // The taming roll `nextInt(3) == 0` must hit: use a known seed;
+            // saddling has no roll and keeps the construction state.
+            put(net.minecraft.world.entity.Entity.class, nautilus, "random",
+                    RandomSource.create(tame ? 25287679568082L ^ 0x5DEECE66DL
+                            : postConstruction ^ 0x5DEECE66DL));
+            long preInteraction = randomSeed(nautilus);
+            player.interactOn(nautilus, InteractionHand.MAIN_HAND, nautilus.position());
+            data = "\"" + pairingData(official, nautilus) + "\"";
+            afterInteraction = randomSeed(nautilus);
+            player.removeVehicle();
+        }
+        out.write("{\"type\":\"nautilus\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID + ",\"blocks\":" + blocks
+                + ",\"seed\":" + (tame ? 1L : 0)
+                + ",\"preSeed\":" + (tame ? 25287679568082L : originalState)
+                + ",\"postSeed\":" + (tame || saddle ? afterInteraction : originalState)
+                + ",\"ticks\":" + ticks
+                + ",\"jockey\":false,\"brain\":" + brainTable
+                + ",\"sensors\":" + BrainOracle.sensorDelays(nautilus)
+                + ",\"data\":" + data
+                + ",\"state\":" + nautilusState(nautilus)
+                + ",\"frames\":" + nautilusFrames(world, mobs, ticks)
+                + "}\n");
+        out.flush();
+    }
+
+    /** 鹦鹉螺场景的逐刻状态：位置 / 速度 / 朝向 / 随机源 / 血量 / 氧气 / 元数据。 */
+    private static String nautilusFrames(FakeLevel world, List<net.minecraft.world.entity.Mob> mobs, int ticks)
+            throws Exception {
+        var frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                world.gameTime++;
+                for (var mob : mobs) {
+                    if (mob.isRemoved()) continue;
+                    mob.checkDespawn();
+                    if (mob.isPassenger()) {
+                        // `Entity.rideTick`：清零速度、跑自己的 tick、再按载具定位。
+                        // `Entity.rideTick`: zero velocity, tick, then position on
+                        // the vehicle, matching the real server's tick loop.
+                        mob.rideTick();
+                    } else {
+                        mob.commonTick();
+                        mob.tick();
+                    }
+                }
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"mobs\":[");
+            boolean first = true;
+            for (var mob : mobs) {
+                if (!first) frames.append(',');
+                first = false;
+                frames.append("{\"motion\":").append(projectileMotion(mob))
+                        .append(",\"seed\":").append(randomSeed(mob))
+                        .append(",\"hp\":").append(Float.floatToRawIntBits(mob.getHealth()))
+                        .append(",\"air\":").append(mob.getAirSupply())
+                        .append(",\"water\":").append(mob.isInWater() ? 1 : 0)
+                        .append(",\"state\":").append(nautilusState(mob))
+                        .append('}');
+            }
+            frames.append("],\"level\":").append(randomSeed(world.getRandom())).append('}');
+        }
+        return frames.append(']').toString();
+    }
+
+    /** 鹦鹉螺的元数据状态：驯服位、主人、鞍、身体、DASH、变种。 */
+    private static String nautilusState(net.minecraft.world.entity.Mob mob) {
+        if (!(mob instanceof net.minecraft.world.entity.animal.nautilus.AbstractNautilus nautilus)) {
+            // 骑手（溺尸）：只比驯服 / 主人 / 鞍 / 身体 / DASH / 变种的 0 值。
+            // The rider (a drowned): all six nautilus-only fields stay zero.
+            return Arrays.toString(new int[] {0, 0, 0, 0, 0, 0});
+        }
+        int variant = mob instanceof net.minecraft.world.entity.animal.nautilus.ZombieNautilus zn
+                ? (zn.getVariant().unwrapKey().map(key -> key.identifier().toString())
+                        .orElse("minecraft:temperate").equals("minecraft:warm") ? 1 : 0)
+                : 0;
+        return Arrays.toString(new int[] {
+                nautilus.isTame() ? 1 : 0,
+                nautilus.getOwnerReference() == null ? 0 : 1,
+                nautilus.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.SADDLE).isEmpty() ? 0 : 1,
+                nautilus.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.BODY).isEmpty() ? 0 : 1,
+                nautilus.isDashing() ? 1 : 0,
+                variant});
+    }
+
+    /**
      * 大脑的结构表：传感器（类名、扫描间隔、`requires()` 的记忆）、行为表（优先级、活动名、
      * 类名，按官方遍历顺序）、活动进入条件和退出时清的记忆。和 Bamboo 一侧逐字相同。
      *
@@ -12085,8 +12401,9 @@ public final class MobOracle {
         for (VScene scene : scenes) {
             if (only != null && !scene.name().startsWith(only)) continue;
             FakeLevel world = FakeLevel.create(official);
-            java.util.Map<Object, Object> levels = new java.util.LinkedHashMap<>();
-            levels.put(net.minecraft.world.level.Level.OVERWORLD, world);
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels = java.util.Map.of(
+                    net.minecraft.world.level.Level.OVERWORLD, world);
+            official.server.levels = levels;
             put(MinecraftServer.class, official.server, "levels", levels);
             BlockState stone = Blocks.STONE.defaultBlockState();
             for (int x = -15; x <= 15; x++) {
@@ -12279,8 +12596,9 @@ public final class MobOracle {
         // 2. 最小真大脑场景：平地 + 1 个堆肥桶 + 1 只无业成年村民，跑真大脑到 AcquirePoi。
         FakeLevel world = FakeLevel.create(official);
         try {
-            java.util.Map<Object, Object> levels = new java.util.LinkedHashMap<>();
-            levels.put(net.minecraft.world.level.Level.OVERWORLD, world);
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels = java.util.Map.of(
+                    net.minecraft.world.level.Level.OVERWORLD, world);
+            official.server.levels = levels;
             put(MinecraftServer.class, official.server, "levels", levels);
             BlockState stone = Blocks.STONE.defaultBlockState();
             for (int x = -15; x <= 15; x++) {
@@ -12340,8 +12658,12 @@ public final class MobOracle {
                     world.clock = clockStart + tick;
                     official.attributes.invalidateTickCache();
                     world.updateSkyBrightness();
+                    var prevBrain = mob.getBrain();
                     mob.commonTick();
                     mob.tick();
+                    if (mob.getBrain() != prevBrain) {
+                        BrainOracle.reseedShuffles(mob, randomSeed(mob));
+                    }
                     world.getPoiManager().tick(() -> true);
                 }
                 int freeTickets = world.poiFreeTickets(wsPos);
@@ -12379,6 +12701,283 @@ public final class MobOracle {
                     + ",\"frames\":" + frames + "}\n");
             out.flush();
             return 1;
+        } finally {
+            world.closeRealPoi();
+        }
+    }
+
+    /**
+     * 村民第 4 期真实 POI 全量对拍场景：
+     * 1) `villager_p4_retry`：不可达候选失败建 `JitteredLinearRetry`，再放可达工作站认领成农民；
+     * 2) `villager_p4_compete`：两只无业村民抢同一个堆肥桶；
+     * 3) `villager_p4_unemploy`：成为农民后拆掉堆肥桶触发 `ValidateNearbyPoi` + `ResetProfession` 失业；
+     * 4) `villager_p4_sleep_wake`：夜里认领床、上床入睡（`OCCUPIED=true`、`sleepingPos`），天亮醒来；
+     * 5) `villager_p4_bell`：敲钟通知写 `HEARD_BELL_TIME`、`ReactToBell` 切 `HIDE`、`LocateHidingPlace` 躲床边；
+     * 6) `villager_p4_farmer`：农民收割成熟小麦、播种种子并捡起地上种子。
+     */
+    private static int playVillagerPhase4(Official official, Writer out, String only) throws Exception {
+        String[] scenes = {
+                "villager_p4_retry",
+                "villager_p4_compete",
+                "villager_p4_unemploy",
+                "villager_p4_sleep_wake",
+                "villager_p4_bell",
+                "villager_p4_farmer"
+        };
+        int count = 0;
+        for (String name : scenes) {
+            if (only != null && !name.startsWith(only)) {
+                continue;
+            }
+            playVillagerPhase4One(official, out, name);
+            count++;
+        }
+        return count;
+    }
+
+    private static void playVillagerPhase4One(Official official, Writer out, String name) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        try {
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels = java.util.Map.of(
+                    net.minecraft.world.level.Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            world.blockEntities = new Long2ObjectOpenHashMap<>();
+
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+
+            long clockStart = name.equals("villager_p4_sleep_wake") ? 12000L : 2000L;
+            int totalTicks = switch (name) {
+                case "villager_p4_retry" -> 110;
+                case "villager_p4_sleep_wake" -> 95;
+                case "villager_p4_bell" -> 75;
+                default -> 90;
+            };
+            long sensorDelay = 1L;
+            List<BlockPos> watchPois = new ArrayList<>();
+            List<BlockPos> watchBlocks = new ArrayList<>();
+
+            if (name.equals("villager_p4_retry")) {
+                BlockPos blocked = new BlockPos(3, 64, 0);
+                world.placeWorkstation(blocked, Blocks.COMPOSTER.defaultBlockState());
+                int[][] walls = {
+                        {2, 64, 0}, {4, 64, 0}, {3, 64, 1}, {3, 64, -1},
+                        {2, 65, 0}, {4, 65, 0}, {3, 65, 1}, {3, 65, -1},
+                        {3, 66, 0}
+                };
+                for (int[] w : walls) {
+                    world.blocks.put(BlockPos.asLong(w[0], w[1], w[2]), stone);
+                }
+                watchPois.add(blocked);
+                watchPois.add(new BlockPos(5, 64, 0));
+            } else if (name.equals("villager_p4_compete")) {
+                BlockPos ws = new BlockPos(4, 64, 0);
+                world.placeWorkstation(ws, Blocks.COMPOSTER.defaultBlockState());
+                watchPois.add(ws);
+            } else if (name.equals("villager_p4_unemploy")) {
+                BlockPos ws = new BlockPos(3, 64, 0);
+                world.placeWorkstation(ws, Blocks.COMPOSTER.defaultBlockState());
+                watchPois.add(ws);
+                watchBlocks.add(ws);
+            } else if (name.equals("villager_p4_sleep_wake")) {
+                BlockPos bed = new BlockPos(3, 64, 0);
+                world.placeBed(bed, Direction.NORTH);
+                watchPois.add(bed);
+                watchBlocks.add(bed);
+            } else if (name.equals("villager_p4_bell")) {
+                BlockPos bed = new BlockPos(-4, 64, 0);
+                BlockPos bell = new BlockPos(6, 64, 0);
+                world.placeBed(bed, Direction.NORTH);
+                world.placeBell(bell);
+                var bellBe = new net.minecraft.world.level.block.entity.BellBlockEntity(
+                        bell, Blocks.BELL.defaultBlockState());
+                bellBe.setLevel(world);
+                world.blockEntities.put(bell.asLong(), bellBe);
+                watchPois.add(bed);
+                watchPois.add(bell);
+            } else if (name.equals("villager_p4_farmer")) {
+                BlockPos ws = new BlockPos(0, 64, 4);
+                world.placeWorkstation(ws, Blocks.COMPOSTER.defaultBlockState());
+                BlockState wetFarm = Blocks.FARMLAND.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.MOISTURE, 7);
+                world.blocks.put(BlockPos.asLong(2, 63, 0), wetFarm);
+                world.blocks.put(BlockPos.asLong(3, 63, 0), wetFarm);
+                BlockState ripeWheat = Blocks.WHEAT.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.CropBlock.AGE, 7);
+                world.blocks.put(BlockPos.asLong(2, 64, 0), ripeWheat);
+                watchPois.add(ws);
+                watchBlocks.add(new BlockPos(2, 64, 0));
+                watchBlocks.add(new BlockPos(3, 64, 0));
+            }
+
+            world.enableRealPoi();
+            world.getPoiManager().tick(() -> true);
+
+            world.gameTime = 1000L;
+            world.realSky = true;
+            world.injectedCanSeeSky = true;
+            world.clock = clockStart;
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder()
+                    .addStaticLayers(world);
+            net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+                public long totalTicks() { return world.clock; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : world.dimensionType().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            official.attributes = builder.build();
+            put(ServerLevel.class, world, "environmentAttributes", official.attributes);
+            world.updateSkyBrightness();
+            world.getRandom().setSeed(1L);
+
+            List<Villager> villagers = new ArrayList<>();
+            java.util.function.BiConsumer<double[], Long> addVillager = (pos, seed) -> {
+                try {
+                    int idx = villagers.size();
+                    Villager v = (Villager) EntityTypes.VILLAGER.create(
+                            world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+                    v.setId(FIRST_ID + idx);
+                    v.setUUID(new UUID(0L, 1L + idx));
+                    v.snapTo(pos[0], pos[1], pos[2], 0.0F, 0.0F);
+                    v.setYHeadRot(0.0F);
+                    v.setYBodyRot(0.0F);
+                    put(net.minecraft.world.entity.ai.Brain.class, v.getBrain(), "lastScheduleUpdate", -9999L);
+                    v.getBrain().updateActivityFromSchedule(
+                            world.environmentAttributes(), world.getGameTime(), v.position());
+                    setRandom(v, seed);
+                    BrainOracle.reseedShuffles(v, randomSeed(v));
+                    BrainOracle.fixSensorDelays(v, sensorDelay);
+                    world.tracked.add(v);
+                    villagers.add(v);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            };
+
+            if (name.equals("villager_p4_compete")) {
+                addVillager.accept(new double[] {-0.5, 64.0, 0.5}, 71L);
+                addVillager.accept(new double[] {13.5, 64.0, 0.5}, 73L);
+            } else if (name.equals("villager_p4_farmer")) {
+                addVillager.accept(new double[] {1.5, 64.0, 0.5}, 71L);
+                Villager farmer = villagers.get(0);
+                var farmerProf = world.registryAccess()
+                        .lookupOrThrow(net.minecraft.core.registries.Registries.VILLAGER_PROFESSION)
+                        .getOrThrow(net.minecraft.world.entity.npc.villager.VillagerProfession.FARMER);
+                farmer.setVillagerData(farmer.getVillagerData().withProfession(farmerProf));
+                farmer.refreshBrain(world);
+                BlockPos ws = new BlockPos(0, 64, 4);
+                world.getPoiManager().take(h -> true, (h, p) -> p.equals(ws), ws, 1);
+                farmer.getBrain().setMemory(
+                        net.minecraft.world.entity.ai.memory.MemoryModuleType.JOB_SITE,
+                        net.minecraft.core.GlobalPos.of(net.minecraft.world.level.Level.OVERWORLD, ws));
+                put(net.minecraft.world.entity.ai.Brain.class, farmer.getBrain(), "lastScheduleUpdate", -9999L);
+                farmer.getBrain().updateActivityFromSchedule(
+                        world.environmentAttributes(), world.getGameTime(), farmer.position());
+                farmer.getInventory().addItem(new ItemStack(Items.WHEAT_SEEDS, 4));
+                setRandom(farmer, 71L);
+                BrainOracle.reseedShuffles(farmer, randomSeed(farmer));
+                BrainOracle.fixSensorDelays(farmer, sensorDelay);
+
+                var dropped = new net.minecraft.world.entity.item.ItemEntity(
+                        world, 1.5, 64.0, 1.5, new ItemStack(Items.WHEAT_SEEDS, 2), 0.0, 0.0, 0.0);
+                dropped.setId(FIRST_ID + 10);
+                dropped.setNoPickUpDelay();
+                world.tracked.add(dropped);
+            } else {
+                addVillager.accept(new double[] {0.5, 64.0, 0.5}, 71L);
+            }
+
+            long clockOffset = 0L;
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= totalTicks; tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    if (name.equals("villager_p4_sleep_wake") && tick == 60) {
+                        clockOffset = 12000L - 60L;
+                    }
+                    world.clock = clockStart + tick + clockOffset;
+                    official.attributes.invalidateTickCache();
+                    world.updateSkyBrightness();
+
+                    if (name.equals("villager_p4_retry") && tick == 25) {
+                        world.placeWorkstation(new BlockPos(5, 64, 0), Blocks.COMPOSTER.defaultBlockState());
+                        world.getPoiManager().tick(() -> true);
+                    } else if (name.equals("villager_p4_unemploy") && tick == 55) {
+                        world.removeBlock(new BlockPos(3, 64, 0), false);
+                        world.getPoiManager().tick(() -> true);
+                    } else if (name.equals("villager_p4_bell") && tick == 10) {
+                        BlockPos bell = new BlockPos(6, 64, 0);
+                        var be = (net.minecraft.world.level.block.entity.BellBlockEntity) world.blockEntities.get(bell.asLong());
+                        be.triggerEvent(1, Direction.NORTH.get3DDataValue());
+                    }
+
+                    List<Entity> snapshot = new ArrayList<>(world.tracked);
+                    for (Entity e : snapshot) {
+                        if (e.isRemoved()) continue;
+                        if (e instanceof Villager v) {
+                            var prevBrain = v.getBrain();
+                            v.commonTick();
+                            v.tick();
+                            if (v.getBrain() != prevBrain) {
+                                BrainOracle.reseedShuffles(v, randomSeed(v));
+                            }
+                        } else {
+                            e.tick();
+                        }
+                    }
+                    world.tracked.removeIf(Entity::isRemoved);
+                    world.getPoiManager().tick(() -> true);
+                }
+
+                if (tick > 0) frames.append(',');
+                frames.append("{\"levelSeed\":").append(randomSeed(world.getRandom()))
+                        .append(",\"villagers\":[");
+                for (int i = 0; i < villagers.size(); i++) {
+                    Villager v = villagers.get(i);
+                    if (i > 0) frames.append(',');
+                    String prof = v.getVillagerData().profession().unwrapKey().orElseThrow()
+                            .identifier().toString();
+                    var sleepOpt = v.getSleepingPos();
+                    String sleepJson = sleepOpt.isPresent()
+                            ? "[" + sleepOpt.get().getX() + "," + sleepOpt.get().getY() + "," + sleepOpt.get().getZ() + "]"
+                            : "null";
+                    int seeds = v.getInventory().countItem(Items.WHEAT_SEEDS);
+                    int wheat = v.getInventory().countItem(Items.WHEAT);
+                    frames.append("{\"brain\":").append(jsonString(BrainOracle.dump(v)))
+                            .append(",\"motion\":").append(projectileMotion(v))
+                            .append(",\"seed\":").append(randomSeed(v))
+                            .append(",\"profession\":").append(jsonString(prof))
+                            .append(",\"sleepingPos\":").append(sleepJson)
+                            .append(",\"inv\":[").append(seeds).append(',').append(wheat).append("]}");
+                }
+                frames.append("],\"poiTickets\":[");
+                for (int i = 0; i < watchPois.size(); i++) {
+                    if (i > 0) frames.append(',');
+                    frames.append(world.poiFreeTickets(watchPois.get(i)));
+                }
+                frames.append("],\"blocks\":[");
+                for (int i = 0; i < watchBlocks.size(); i++) {
+                    if (i > 0) frames.append(',');
+                    frames.append(Block.getId(world.getBlockState(watchBlocks.get(i))));
+                }
+                frames.append("]}");
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"villagerPhase4\",\"name\":" + jsonString(name)
+                    + ",\"clockStart\":" + clockStart
+                    + ",\"sensorDelay\":" + sensorDelay
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
         } finally {
             world.closeRealPoi();
         }
@@ -17966,7 +18565,27 @@ public final class MobOracle {
 
         @Override
         public net.minecraft.world.clock.ServerClockManager clockManager() {
-            return allocate(net.minecraft.world.clock.ServerClockManager.class);
+            net.minecraft.world.clock.ServerClockManager mgr = allocate(net.minecraft.world.clock.ServerClockManager.class);
+            net.minecraft.world.clock.ServerClockManager.ServerClockInstance inst =
+                    new net.minecraft.world.clock.ServerClockManager.ServerClockInstance() {
+                        @Override
+                        public long totalTicks() {
+                            ServerLevel lvl = FakeServer.this.getLevel(Level.OVERWORLD);
+                            return (lvl instanceof FakeLevel fake) ? fake.clock : 0L;
+                        }
+                    };
+            java.util.Map<Object, Object> map = new java.util.AbstractMap<>() {
+                @Override
+                public Object get(Object key) {
+                    return inst;
+                }
+                @Override
+                public java.util.Set<Entry<Object, Object>> entrySet() {
+                    return java.util.Set.of();
+                }
+            };
+            put(net.minecraft.world.clock.ServerClockManager.class, mgr, "clocks", map);
+            return mgr;
         }
 
         @Override

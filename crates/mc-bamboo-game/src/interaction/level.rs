@@ -580,6 +580,43 @@ impl Level for RegionLevel<'_> {
         )
     }
 
+    fn poi_in_range(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        type_mask: u32,
+        occupancy: u8,
+    ) -> Vec<(u8, BlockPos)> {
+        let Some(occupancy) = crate::poi_query::occupancy(occupancy) else {
+            return Vec::new();
+        };
+        self.poi
+            .get_in_range(
+                |found| (type_mask & (1_u32 << found)) != 0,
+                center,
+                radius,
+                occupancy,
+            )
+            .into_iter()
+            .map(|r| (r.kind, r.pos))
+            .collect()
+    }
+
+    fn poi_take(&mut self, pos: BlockPos, type_mask: u32) -> bool {
+        self.poi
+            .take(
+                |found| (type_mask & (1_u32 << found)) != 0,
+                |_, p| p == pos,
+                pos,
+                1,
+            )
+            .is_some()
+    }
+
+    fn poi_release(&mut self, pos: BlockPos) -> bool {
+        self.poi.release(pos)
+    }
+
     fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
         self.poi
             .sections_to_village(mc_bamboo_world::light::SectionPos::of(pos))

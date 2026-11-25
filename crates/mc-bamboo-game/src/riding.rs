@@ -615,7 +615,9 @@ pub(crate) fn open_vehicle_inventory(region: &mut Region, id: PlayerId) {
     let tamed = region
         .entities
         .with_mut(vehicle, |row| {
-            row.with_mob(|_, mob| mob.equine.as_ref().is_some_and(|state| state.tame))
+            row.with_mob(|_, mob| {
+                mob.tame.is_tame() || mob.equine.as_ref().is_some_and(|state| state.tame)
+            })
         })
         .flatten()
         .unwrap_or(false);

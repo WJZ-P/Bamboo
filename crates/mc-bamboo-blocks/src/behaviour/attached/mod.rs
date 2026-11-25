@@ -4,7 +4,7 @@
 //! 一个文件放一组官方类，文件头写着里面有哪些类。这里只有分派和几个类共用的小函数。
 
 mod banner;
-mod bell;
+pub mod bell;
 mod button;
 mod chiseled_bookshelf;
 mod hanging_sign;

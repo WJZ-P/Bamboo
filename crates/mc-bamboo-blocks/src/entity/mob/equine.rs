@@ -24,6 +24,7 @@ mod death;
 mod goals;
 pub(super) mod horse;
 pub(super) mod interact;
+pub(in crate::entity::mob) use interact::{equip_on_target, equippable};
 pub mod inventory;
 mod life;
 mod llama;
@@ -195,6 +196,10 @@ pub fn passenger_attachment(kind: MobType) -> (f32, f32) {
         MobType::Donkey => (1.112_5, 0.0),
         MobType::Mule => (1.212_5, 0.0),
         MobType::Llama => (1.37, -0.3),
+        // `EntityTypes.NAUTILUS` / `ZOMBIE_NAUTILUS` 的 `passengerAttachments(1.1375F)`。
+        // `EntityTypes.NAUTILUS` / `ZOMBIE_NAUTILUS` register
+        // `passengerAttachments(1.1375F)`.
+        MobType::Nautilus | MobType::ZombieNautilus => (f32::from_bits(0x3f91_a3d7), 0.0),
         _ => (0.0, 0.0),
     }
 }
