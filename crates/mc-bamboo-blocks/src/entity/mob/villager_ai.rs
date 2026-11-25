@@ -1082,11 +1082,26 @@ impl Behavior {
                 true
             }
             Self::SetRaidStatus => {
-                // `SetRaidStatus`：即使 Bamboo 没有袭击系统，每刻也必须抽一次
-                // `level.random.nextInt(20)`，否则整个世界的随机序列会错位。
-                // `SetRaidStatus`: even without raids, must draw `level.random.nextInt(20)`
-                // every tick so the level random sequence stays in sync.
-                cx.level_next_int(20) == 0
+                // `SetRaidStatus`：每刻抽 `level.random.nextInt(20)` 保持世界随机序列
+                // 对齐；命中时按 `ServerLevel.getRaidAt(pos)` 切 PRE_RAID / RAID。
+                //
+                // `SetRaidStatus`: draw `level.random.nextInt(20)` every tick to keep the
+                // level RNG in step; on a hit, switch to PRE_RAID / RAID per
+                // `ServerLevel.getRaidAt(pos)`.
+                if cx.level_next_int(20) != 0 {
+                    return false;
+                }
+                let pos = BlockPos::containing(cx.me.position);
+                if let Some(raid) = cx.ctx.blocks().raid_at(pos) {
+                    let activity = if !raid.has_first_wave_spawned || raid.is_between_waves {
+                        Activity::PreRaid
+                    } else {
+                        Activity::Raid
+                    };
+                    cx.set_default_activity(activity);
+                    cx.set_active_activity_if_possible(activity);
+                }
+                true
             }
             Self::SetEntityLookTarget { filter, max_dist } => {
                 let max_sqr = f64::from(*max_dist * *max_dist);
@@ -1162,9 +1177,15 @@ impl Behavior {
                 true
             }
             Self::ReactToBell => {
-                // 无袭击时听到钟声直接切到 `HIDE`。
-                // Without an active raid, hearing the bell switches to `HIDE`.
-                cx.set_active_activity_if_possible(Activity::Hide);
+                // 官方 `ReactToBell`：有活跃袭击时不切 HIDE（钟声由 PRE_RAID 的
+                // `RingBell` 处理）；只在平时听到钟声才躲。
+                //
+                // Official `ReactToBell`: an active raid suppresses the HIDE switch
+                // (PRE_RAID's `RingBell` handles bells); only hide outside raids.
+                let pos = BlockPos::containing(cx.me.position);
+                if cx.ctx.blocks().raid_at(pos).is_none() {
+                    cx.set_active_activity_if_possible(Activity::Hide);
+                }
                 true
             }
             Self::WalkTargetFromBlockMemory {

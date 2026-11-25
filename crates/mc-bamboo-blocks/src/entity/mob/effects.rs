@@ -255,18 +255,30 @@ impl EffectInstance {
 /// `shouldApplyEffectTickThisTick(int duration, int amplifier)`。
 ///
 /// 再生 `50 >> amp`、中毒 `25 >> amp`、凋零 `40 >> amp`；商为 0 时每刻都跑。
-/// 饥饿效果每刻跑；瞬间效果只在 `duration >= 1` 时跑。
+/// 饥饿效果每刻跑；瞬间效果只在 `duration >= 1` 时跑。不祥之兆每刻跑
+/// （进村判定在调用方），袭击之兆只在倒计时最后一刻 `duration == 1` 跑。
 /// 其余效果不跑（返回空动作）。
 ///
 /// `shouldApplyEffectTickThisTick`: regeneration 50>>amp, poison 25>>amp,
 /// wither 40>>amp; a zero interval runs every tick. Hunger runs every tick and
-/// instantaneous effects run when duration >= 1. Others do nothing.
+/// instantaneous effects run when duration >= 1. Bad omen runs every tick (the
+/// village check lives in the caller), raid omen only on its last tick
+/// (`duration == 1`). Others do nothing.
 pub fn should_apply_this_tick(effect: i32, duration: i32, amplifier: i32) -> bool {
     match effect {
         mob_effect::REGENERATION => interval_tick(duration, 50 >> amplifier.min(30)),
         mob_effect::POISON => interval_tick(duration, 25 >> amplifier.min(30)),
         mob_effect::WITHER => interval_tick(duration, 40 >> amplifier.min(30)),
         mob_effect::HUNGER => true,
+        // `BadOmenMobEffect.shouldApplyEffectTickThisTick` 恒真：每一刻都要判定
+        // 玩家是否进了村庄。转换 / 移除效果这些副作用在调用方落地。
+        //
+        // Vanilla `BadOmenMobEffect` runs every tick so the caller can test for
+        // village entry; the conversion and removal are the caller's side effects.
+        mob_effect::BAD_OMEN => true,
+        // `RaidOmenMobEffect` 只在倒计时最后一刻触发 `createOrExtendRaid`。
+        // Vanilla `RaidOmenMobEffect` fires only on the final tick.
+        mob_effect::RAID_OMEN => duration == 1,
         mob_effect::INSTANT_HEALTH
         | mob_effect::INSTANT_DAMAGE
         | mob_effect::SATURATION
@@ -305,11 +317,30 @@ pub enum EffectAction {
     /// `HealOrHarmMobEffect`：`4 << amplifier` 治疗 / `6 << amplifier` magic 伤害。
     InstantHeal(f32),
     InstantDamage(f32),
+    /// `BadOmenMobEffect.applyEffectTick`：每刻让调用方判玩家是否进村，转成
+    /// `RAID_OMEN` 并移除本效果。携带 BAD_OMEN 的 amplifier（转换后沿用）。
+    ///
+    /// Vanilla `BadOmenMobEffect.applyEffectTick`: every tick, let the caller test
+    /// for village entry, convert to `RAID_OMEN` and remove this effect. Carries
+    /// the BAD_OMEN amplifier (reused by the converted effect).
+    BadOmenCheck(i32),
+    /// `RaidOmenMobEffect.applyEffectTick`：倒计时最后一刻让调用方
+    /// `createOrExtendRaid` 并清掉记录的坐标。携带 RAID_OMEN 的 amplifier。
+    ///
+    /// Vanilla `RaidOmenMobEffect.applyEffectTick`: on the final tick, let the
+    /// caller `createOrExtendRaid` and clear the recorded position. Carries the
+    /// RAID_OMEN amplifier.
+    RaidOmenTrigger(i32),
 }
 
-/// `applyEffectTick` / `onEffectStarted` 的动作表。
+/// `applyEffectTick` / `onEffectStarted` 的动作表。数值动作在这里就地落地；
+/// 不祥之兆 / 袭击之兆的副作用要访问世界（进村判定、建袭击），由调用方按
+/// [`EffectAction::BadOmenCheck`] / [`EffectAction::RaidOmenTrigger`] 处理。
 ///
-/// The action table of `applyEffectTick` / `onEffectStarted`.
+/// The action table of `applyEffectTick` / `onEffectStarted`. Numeric actions
+/// are applied here; the bad-omen / raid-omen side effects need world access
+/// (village test, starting a raid) and are handled by the caller through
+/// [`EffectAction::BadOmenCheck`] / [`EffectAction::RaidOmenTrigger`].
 pub fn effect_tick_actions(effect: i32, amplifier: i32) -> Vec<EffectAction> {
     let level = amplifier.max(0) as f32;
     match effect {
@@ -323,6 +354,8 @@ pub fn effect_tick_actions(effect: i32, amplifier: i32) -> Vec<EffectAction> {
         }],
         mob_effect::INSTANT_HEALTH => vec![EffectAction::InstantHeal(scaled(4.0, amplifier))],
         mob_effect::INSTANT_DAMAGE => vec![EffectAction::InstantDamage(scaled(6.0, amplifier))],
+        mob_effect::BAD_OMEN => vec![EffectAction::BadOmenCheck(amplifier)],
+        mob_effect::RAID_OMEN => vec![EffectAction::RaidOmenTrigger(amplifier)],
         _ => Vec::new(),
     }
 }
@@ -872,6 +905,39 @@ mod tests {
         assert!(should_apply_this_tick(mob_effect::WITHER, 40, 0));
         // 改坏确认：把再生的间隔改成 25，49 刻会错误地触发。
         assert!(!interval_tick(49, 25));
+    }
+
+    /// 不祥之兆每刻判定、袭击之兆只在最后一刻判定；动作把 amplifier 交给调用方。
+    #[test]
+    fn omen_effects_tick_on_the_official_schedule() {
+        // `BadOmenMobEffect.shouldApplyEffectTickThisTick` 恒真。
+        assert!(should_apply_this_tick(mob_effect::BAD_OMEN, 120000, 0));
+        assert!(should_apply_this_tick(mob_effect::BAD_OMEN, 1, 3));
+        assert!(should_apply_this_tick(mob_effect::BAD_OMEN, 7, 0));
+        // `RaidOmenMobEffect` 只在 `duration == 1` 触发。
+        assert!(should_apply_this_tick(mob_effect::RAID_OMEN, 1, 0));
+        assert!(!should_apply_this_tick(mob_effect::RAID_OMEN, 2, 0));
+        assert!(!should_apply_this_tick(mob_effect::RAID_OMEN, 600, 2));
+        assert!(!should_apply_this_tick(mob_effect::RAID_OMEN, 0, 0));
+        // 改坏确认：把袭击之兆当成每刻触发、或不祥之兆当成不触发都会翻。
+        assert!(!should_apply_this_tick(mob_effect::RAID_OMEN, 5, 0));
+        assert_ne!(
+            should_apply_this_tick(mob_effect::BAD_OMEN, 7, 0),
+            should_apply_this_tick(mob_effect::RAID_OMEN, 7, 0)
+        );
+        // 副作用在调用方，动作表只把 amplifier 递过去。
+        assert_eq!(
+            effect_tick_actions(mob_effect::BAD_OMEN, 0),
+            vec![EffectAction::BadOmenCheck(0)]
+        );
+        assert_eq!(
+            effect_tick_actions(mob_effect::BAD_OMEN, 3),
+            vec![EffectAction::BadOmenCheck(3)]
+        );
+        assert_eq!(
+            effect_tick_actions(mob_effect::RAID_OMEN, 2),
+            vec![EffectAction::RaidOmenTrigger(2)]
+        );
     }
 
     #[test]

@@ -77,14 +77,16 @@ pub enum MemoryType {
     PlayDeadTicks,
     HuntingCooldown,
     AttackCoolingDown,
-    /// 村民的记忆：追加在末尾，保持既有种类下标和 `filled()` 顺序不变（总数 49 <= 64，
-    /// 仍落在 `u64` 位掩码里）。带编解码器的进存档：`home` / `job_site` /
+    /// 村民的记忆：追加在末尾，保持既有种类下标和 `filled()` 顺序不变。位掩码已升到
+    /// `u128`：注册表的记忆种类超过 64（监守者与后续生物还要继续加），`u64` 装不下。
+    /// 带编解码器的进存档：`home` / `job_site` /
     /// `potential_job_site` / `meeting_point`（`GlobalPos.CODEC`）、`last_worked_at_poi` /
     /// `last_slept` / `last_woken`（`Codec.LONG`）、`golem_detected_recently`（`Codec.BOOL`）、
     /// `item_pickup_cooldown_ticks`（`Codec.INT`）；其余不进存档。
     ///
-    /// Villager memories appended last so existing indices and `filled()` order stay put
-    /// (49 <= 64, fitting `u64` masks). Those with a codec are saved: `home` / `job_site` /
+    /// Villager memories appended last so existing indices and `filled()` order stay put.
+    /// The masks are now `u128` because the registry's memory types exceed 64 (the warden
+    /// and later mobs keep adding more). Those with a codec are saved: `home` / `job_site` /
     /// `potential_job_site` / `meeting_point` (`GlobalPos.CODEC`), `last_worked_at_poi` /
     /// `last_slept` / `last_woken` (`Codec.LONG`), `golem_detected_recently` (`Codec.BOOL`),
     /// `item_pickup_cooldown_ticks` (`Codec.INT`); the rest are not saved.
@@ -111,11 +113,31 @@ pub enum MemoryType {
     /// The nautilus's `charge_cooldown_ticks` and `attack_target_cooldown`.
     ChargeCooldownTicks,
     AttackTargetCooldown,
+    /// 监守者的记忆，追加在末尾、按官方 `MemoryModuleType` 注册名。位掩码已升到 `u128`，
+    /// 这些种类让总数超过 64。全部不进存档（愤怒在 `anger` 键里单独存）。
+    ///
+    /// The warden's memories, appended last with their official registry names. The
+    /// masks are `u128`, so these push the total past 64. None of them is serialized
+    /// (anger is saved in its own `anger` key).
+    IsEmerging,
+    DigCooldown,
+    RoarTarget,
+    RoarSoundCooldown,
+    RoarSoundDelay,
+    IsSniffing,
+    SniffCooldown,
+    DisturbanceLocation,
+    SonicBoomCooldown,
+    SonicBoomSoundCooldown,
+    SonicBoomSoundDelay,
+    VibrationCooldown,
+    RecentProjectile,
+    TouchCooldown,
+    NearestVisibleNemesis,
     /// 嗅探兽的记忆。带编解码器的进存档：`sniffer_explored_positions`
     /// （`GlobalPos.CODEC.listOf()`）和 `sniff_cooldown`（`Unit.CODEC`）；其余
     /// （`sniffer_sniffing_target` / `sniffer_digging` / `sniffer_happy`）用
     /// `register("...")` 无编解码器，不进存档。追加在末尾，不改既有下标。
-    ///
     /// The sniffer's memories. Those with a codec are saved: `sniffer_explored_positions`
     /// (`GlobalPos.CODEC.listOf()`) and `sniff_cooldown` (`Unit.CODEC`); the rest
     /// (`sniffer_sniffing_target` / `sniffer_digging` / `sniffer_happy`) are registered
@@ -124,7 +146,6 @@ pub enum MemoryType {
     SnifferSniffingTarget,
     SnifferDigging,
     SnifferHappy,
-    SniffCooldown,
     /// 旋风人的记忆（按官方注册名，均无编解码器、不进存档）。
     BreezeJumpTarget,
     BreezeJumpCooldown,
@@ -140,7 +161,9 @@ impl MemoryType {
     /// 记忆种类的个数，槽表的长度。
     ///
     /// The number of memory types: the length of the slot table.
-    pub const COUNT: usize = 64;
+    /// 51 个基础 + 15 个监守者 + 4 个嗅探兽 + 8 个旋风人
+    /// （`sniff_cooldown` 两边共用，只算一次）。
+    pub const COUNT: usize = 78;
 
     /// 全部种类，按枚举顺序。
     ///
@@ -197,11 +220,25 @@ impl MemoryType {
         Self::ItemPickupCooldownTicks,
         Self::ChargeCooldownTicks,
         Self::AttackTargetCooldown,
+        Self::IsEmerging,
+        Self::DigCooldown,
+        Self::RoarTarget,
+        Self::RoarSoundCooldown,
+        Self::RoarSoundDelay,
+        Self::IsSniffing,
+        Self::SniffCooldown,
+        Self::DisturbanceLocation,
+        Self::SonicBoomCooldown,
+        Self::SonicBoomSoundCooldown,
+        Self::SonicBoomSoundDelay,
+        Self::VibrationCooldown,
+        Self::RecentProjectile,
+        Self::TouchCooldown,
+        Self::NearestVisibleNemesis,
         Self::SnifferExploredPositions,
         Self::SnifferSniffingTarget,
         Self::SnifferDigging,
         Self::SnifferHappy,
-        Self::SniffCooldown,
         Self::BreezeJumpTarget,
         Self::BreezeJumpCooldown,
         Self::BreezeJumpInhaling,
@@ -268,11 +305,25 @@ impl MemoryType {
             Self::ItemPickupCooldownTicks => "item_pickup_cooldown_ticks",
             Self::ChargeCooldownTicks => "charge_cooldown_ticks",
             Self::AttackTargetCooldown => "attack_target_cooldown",
+            Self::IsEmerging => "is_emerging",
+            Self::DigCooldown => "dig_cooldown",
+            Self::RoarTarget => "roar_target",
+            Self::RoarSoundCooldown => "roar_sound_cooldown",
+            Self::RoarSoundDelay => "roar_sound_delay",
+            Self::IsSniffing => "is_sniffing",
+            Self::SniffCooldown => "sniff_cooldown",
+            Self::DisturbanceLocation => "disturbance_location",
+            Self::SonicBoomCooldown => "sonic_boom_cooldown",
+            Self::SonicBoomSoundCooldown => "sonic_boom_sound_cooldown",
+            Self::SonicBoomSoundDelay => "sonic_boom_sound_delay",
+            Self::VibrationCooldown => "vibration_cooldown",
+            Self::RecentProjectile => "recent_projectile",
+            Self::TouchCooldown => "touch_cooldown",
+            Self::NearestVisibleNemesis => "nearest_visible_nemesis",
             Self::SnifferExploredPositions => "sniffer_explored_positions",
             Self::SnifferSniffingTarget => "sniffer_sniffing_target",
             Self::SnifferDigging => "sniffer_digging",
             Self::SnifferHappy => "sniffer_happy",
-            Self::SniffCooldown => "sniff_cooldown",
             Self::BreezeJumpTarget => "breeze_jump_target",
             Self::BreezeJumpCooldown => "breeze_jump_cooldown",
             Self::BreezeJumpInhaling => "breeze_jump_inhaling",
@@ -326,11 +377,13 @@ impl MemoryType {
         self as usize
     }
 
-    /// 这个记忆在 `u64` 位掩码里的位，给行为入口条件预编译用。
+    /// 这个记忆在 `u128` 位掩码里的位，给行为入口条件预编译用。记忆种类超过 64，
+    /// 整组掩码从 `u64` 升到 `u128`。
     ///
-    /// This memory's bit in a `u64` mask, for precompiled behaviour preconditions.
-    pub const fn bit(self) -> u64 {
-        1_u64 << (self as usize)
+    /// This memory's bit in a `u128` mask, for precompiled behaviour preconditions. The
+    /// number of memory types exceeds 64, so the whole mask set moved from `u64` to `u128`.
+    pub const fn bit(self) -> u128 {
+        1_u128 << (self as usize)
     }
 }
 
@@ -433,6 +486,23 @@ impl WalkTarget {
     pub fn to_point(point: Vec3, speed: f32, close_enough: i32) -> Self {
         Self {
             target: PositionTracker::at_block(BlockPos::containing(point)),
+            speed,
+            close_enough,
+        }
+    }
+
+    /// `new WalkTarget(new EntityTracker(entity, false), speed, closeEnough)`：
+    /// 目标移动时行走点跟着变。
+    ///
+    /// `new WalkTarget(new EntityTracker(entity, false), speed, closeEnough)`:
+    /// the walk point follows a moving entity.
+    pub fn to_entity(uid: crate::entity::EntityUid, speed: f32, close_enough: i32) -> Self {
+        Self {
+            target: PositionTracker::Entity {
+                uid,
+                track_eye: false,
+                target_eye: false,
+            },
             speed,
             close_enough,
         }
@@ -582,10 +652,11 @@ impl Default for Slot {
     }
 }
 
-/// 一个记忆种类在位掩码里的位。`MemoryType::COUNT` 是 32，正好落进 `u64`。
+/// 一个记忆种类在位掩码里的位。记忆种类超过 64（监守者与后续生物），掩码用 `u128`。
 ///
-/// The bit of a memory type in the masks. `MemoryType::COUNT` is 32, fitting a `u64`.
-const fn bit(kind: MemoryType) -> u64 {
+/// The bit of a memory type in the masks. The memory types exceed 64 (the warden and
+/// later mobs), so the mask is `u128`.
+const fn bit(kind: MemoryType) -> u128 {
     kind.bit()
 }
 
@@ -595,11 +666,11 @@ const fn bit(kind: MemoryType) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryMasks {
     /// 有值的记忆。
-    pub present: u64,
+    pub present: u128,
     /// 登记过但没有值的记忆。
-    pub absent: u64,
+    pub absent: u128,
     /// 登记过的记忆。
-    pub registered: u64,
+    pub registered: u128,
 }
 
 /// 一只生物的全部记忆槽。
@@ -609,11 +680,11 @@ pub struct MemoryMasks {
 pub struct Memories {
     slots: [Slot; MemoryType::COUNT],
     /// 登记过的记忆位。
-    registered: u64,
+    registered: u128,
     /// 有值的记忆位（`registered` 的子集）。
-    present: u64,
+    present: u128,
     /// 有值且会过期（`ttl != NEVER_EXPIRE`）的位，`tick` 只遍历这些。
-    expiring: u64,
+    expiring: u128,
 }
 
 impl Default for Memories {
@@ -639,14 +710,14 @@ impl Memories {
     ///
     /// Registers a whole precomputed memory set at once (avoids per-type `register`
     /// calls when building a brain).
-    pub fn register_mask(&mut self, mask: u64) {
+    pub fn register_mask(&mut self, mask: u128) {
         self.registered |= mask;
     }
 
     /// 已登记记忆的位掩码（模板构造时读出来，供实例复用）。
     ///
     /// The registered-memory bit mask (read when building a template, reused by instances).
-    pub fn registered_mask(&self) -> u64 {
+    pub fn registered_mask(&self) -> u128 {
         self.registered
     }
 
@@ -704,7 +775,7 @@ impl Memories {
         while bits != 0 {
             let index = bits.trailing_zeros() as usize;
             bits &= bits - 1;
-            let b = 1_u64 << index;
+            let b = 1_u128 << index;
             let slot = &mut self.slots[index];
             let cleared = if slot.ttl < step {
                 slot.value = None;

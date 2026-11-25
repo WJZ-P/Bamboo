@@ -64,6 +64,7 @@ mod phantom;
 mod pig_ride;
 mod pillager;
 mod projectile;
+mod raid;
 mod sculk_sensor;
 mod shot;
 mod skeleton_death;
@@ -78,6 +79,7 @@ mod trial_spawner;
 mod undead_horse;
 mod vault;
 mod villager;
+mod warden;
 mod water_mob;
 mod wind_charge;
 mod witch_throw;
@@ -179,6 +181,7 @@ enum Line {
     WitchThrow(Box<witch_throw::WitchThrowCase>),
     NaturalSpawn(natural_spawn::Case),
     PatrolSpawn(patrol_spawn::Case),
+    RaidScene(raid::Case),
     StructureSpawn(structure_spawn::Case),
     GenSpawn(gen_spawn::Case),
     PandaGenes(PandaGenesCase),
@@ -237,6 +240,8 @@ enum Line {
     SculkSensor(sculk_sensor::SculkSensorCase),
     SculkSensorOrder(sculk_sensor::SculkSensorOrderCase),
     SculkShrieker(sculk_sensor::SculkShriekerCase),
+    Warden(Box<warden::WardenCase>),
+    WardenSave(warden::WardenSaveCase),
     End(End),
 }
 
@@ -2191,6 +2196,8 @@ impl Report {
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
                 Line::SculkSensorOrder(case) => self.replay_sculk_sensor_order(&case),
                 Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),
+                Line::Warden(case) => self.replay_warden(&case),
+                Line::WardenSave(case) => self.replay_warden_save(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
@@ -2206,6 +2213,7 @@ impl Report {
                 Line::WitchThrow(case) => self.replay_witch_throw(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::PatrolSpawn(case) => self.replay_patrol_spawn(&case)?,
+                Line::RaidScene(case) => self.replay_raid(&case),
                 Line::StructureSpawn(case) => self.replay_structure_spawn(&case)?,
                 Line::GenSpawn(case) => self.replay_gen_spawn(&case),
                 Line::PandaGenes(case) => self.replay_panda_genes(&case),

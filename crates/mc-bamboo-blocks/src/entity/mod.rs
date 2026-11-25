@@ -16,6 +16,7 @@ pub mod lightning;
 pub mod mob;
 pub mod ominous_item_spawner;
 pub mod parallel;
+pub mod raid;
 pub mod random;
 pub mod riding;
 pub mod shoulder;

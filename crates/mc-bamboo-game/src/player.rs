@@ -158,6 +158,13 @@ pub(crate) struct Player {
     /// `LivingEntity.activeEffects`: the same shared map as mobs, with
     /// relative countdowns only.
     pub(crate) effects: EffectMap,
+    /// `ServerPlayer.raidOmenPosition`：不祥之兆转成袭击之兆时记下的村庄坐标，
+    /// 袭击之兆倒计时结束用它建袭击，用完清掉。官方不存档。
+    ///
+    /// Vanilla `ServerPlayer.raidOmenPosition`: the village position recorded when
+    /// BAD_OMEN converts into RAID_OMEN; the expiring raid omen uses it to start
+    /// the raid, then clears it. Not saved.
+    pub(crate) raid_omen_position: Option<BlockPos>,
     /// `LivingEntity.attributes`：玩家属性表，基础值来自 `Player.createAttributes`。
     /// 每刻由 [`crate::player_attributes::rebuild`] 从装备 / 效果 / 游戏模式重算修饰符。
     ///
@@ -382,6 +389,7 @@ impl Player {
             riding: crate::riding::Riding::default(),
             advancements: crate::advancements::PlayerAdvancements::default(),
             shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState::empty(),
+            raid_omen_position: None,
         };
         crate::player_attributes::rebuild_player(&mut player, false);
         player

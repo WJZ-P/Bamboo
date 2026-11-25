@@ -18,6 +18,22 @@ pub struct VibrationInfo {
     pub pos: Vec3,
     /// 发出事件的玩家（`tryGetPlayer`）；存档里不写，运行时传给尖啸体。
     pub source_player: Option<crate::entity::EntityUid>,
+    /// `VibrationInfo.getEntity()`：发出事件的源实体；存档里不写。
+    ///
+    /// `VibrationInfo.getEntity()`: the source entity; not written to disk.
+    pub source_entity: Option<crate::entity::EntityUid>,
+    /// `VibrationInfo.getProjectileOwner()`：射弹的拥有者；存档里不写。
+    ///
+    /// `VibrationInfo.getProjectileOwner()`: the projectile owner; not written to disk.
+    pub projectile_owner: Option<crate::entity::EntityUid>,
+    /// `VibrationInfo.CODEC` 的 `source`：`UUIDUtil.CODEC` 四元 int 数组。
+    ///
+    /// `VibrationInfo.CODEC`'s `source`: a four-word UUID int array.
+    pub source_uuid: Option<[u8; 16]>,
+    /// `VibrationInfo.CODEC` 的 `projectile_owner`。
+    ///
+    /// `VibrationInfo.CODEC`'s `projectile_owner`.
+    pub projectile_owner_uuid: Option<[u8; 16]>,
 }
 
 /// `VibrationSelector`：同一刻来的候选只留距离最近、等距时频率最高的一个。
@@ -123,14 +139,21 @@ impl VibrationInfo {
     /// 运行时不保存实体 UUID，存档里按官方的「可省字段」省略。
     pub fn write_codec(self) -> Tag {
         let pos = |value: f64| Tag::Double(value);
-        Tag::Compound(vec![
+        let mut out = vec![
             ("game_event".to_owned(), Tag::String(self.event.full_name())),
             ("distance".to_owned(), Tag::Float(self.distance)),
             (
                 "pos".to_owned(),
                 Tag::List(vec![pos(self.pos.x), pos(self.pos.y), pos(self.pos.z)]),
             ),
-        ])
+        ];
+        if let Some(uuid) = self.source_uuid {
+            put(&mut out, "source", uuid_tag(&uuid));
+        }
+        if let Some(uuid) = self.projectile_owner_uuid {
+            put(&mut out, "projectile_owner", uuid_tag(&uuid));
+        }
+        Tag::Compound(out)
     }
 
     /// `VibrationSelector` / `Data` codec 的坏数据都回到默认值，这里只认
@@ -174,8 +197,48 @@ impl VibrationInfo {
             distance,
             pos: Vec3::new(xyz[0], xyz[1], xyz[2]),
             source_player: None,
+            source_entity: None,
+            projectile_owner: None,
+            source_uuid: values
+                .iter()
+                .rev()
+                .find(|(key, _)| key == "source")
+                .and_then(|(_, value)| uuid_bytes(value)),
+            projectile_owner_uuid: values
+                .iter()
+                .rev()
+                .find(|(key, _)| key == "projectile_owner")
+                .and_then(|(_, value)| uuid_bytes(value)),
         })
     }
+}
+
+/// `UUIDUtil.CODEC` 的 `int[4]`。
+fn uuid_tag(bytes: &[u8; 16]) -> Tag {
+    let mut words = [0i32; 4];
+    for (index, word) in words.iter_mut().enumerate() {
+        let mut value = 0u32;
+        for &byte in &bytes[index * 4..index * 4 + 4] {
+            value = value << 8 | u32::from(byte);
+        }
+        *word = value as i32;
+    }
+    Tag::IntArray(words.to_vec())
+}
+
+/// 读 `UUIDUtil.CODEC` 的四元 int 数组；长度不对就当作缺省字段。
+fn uuid_bytes(tag: &Tag) -> Option<[u8; 16]> {
+    let Tag::IntArray(words) = tag else {
+        return None;
+    };
+    if words.len() != 4 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for (index, word) in words.iter().enumerate() {
+        bytes[index * 4..index * 4 + 4].copy_from_slice(&(*word as u32).to_be_bytes());
+    }
+    Some(bytes)
 }
 
 /// 同名键取最后一个，写档时按 codec 的键序覆盖旧值。
@@ -199,6 +262,24 @@ pub trait VibrationUser {
         source_player: Option<crate::entity::EntityUid>,
         distance: f32,
     );
+    /// `VibrationSystem.Ticker` 的完整回调：额外带源实体和射弹拥有者。默认实现
+    /// 只转发旧签名，实体监听者可以覆写拿到这两个实体。
+    ///
+    /// The full `VibrationSystem.Ticker` callback with the source entity and
+    /// projectile owner. The default forwards to [`Self::on_receive`]; entity
+    /// listeners may override it to use both entities.
+    fn on_receive_full(
+        &mut self,
+        event: GameEvent,
+        source: BlockPos,
+        source_player: Option<crate::entity::EntityUid>,
+        source_entity: Option<crate::entity::EntityUid>,
+        projectile_owner: Option<crate::entity::EntityUid>,
+        distance: f32,
+    ) {
+        let _ = (source_entity, projectile_owner);
+        self.on_receive(event, source, source_player, distance);
+    }
     /// `calculateTravelTimeInTicks` 的默认值 `Mth.floor(distance)`。
     fn travel_ticks(&self, distance: f32) -> i32 {
         mc_bamboo_core::mth::floor_f32(distance)
@@ -264,10 +345,12 @@ pub fn tick<U: VibrationUser>(
         } else {
             let source = BlockPos::containing(info.pos);
             let listener = BlockPos::containing(target);
-            user.on_receive(
+            user.on_receive_full(
                 info.event,
                 source,
                 info.source_player,
+                info.source_entity,
+                info.projectile_owner,
                 distance_between_in_blocks(source, listener),
             );
             data.current = None;
@@ -369,6 +452,10 @@ mod tests {
             distance,
             pos: Vec3::new(0.5, 0.5, 0.5),
             source_player: None,
+            source_entity: None,
+            projectile_owner: None,
+            source_uuid: None,
+            projectile_owner_uuid: None,
         }
     }
 

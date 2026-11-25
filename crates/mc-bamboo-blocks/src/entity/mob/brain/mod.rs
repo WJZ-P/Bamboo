@@ -31,7 +31,7 @@
 //! the oracle reseeds both sides with the same formula.
 
 pub mod behavior;
-mod behaviors;
+pub(crate) mod behaviors;
 pub mod memory;
 pub mod nbt;
 pub mod sensor;
@@ -96,11 +96,18 @@ pub enum Activity {
     PreRaid,
     Hide,
     Celebrate,
-    /// 嗅探兽的嗅闻和挖掘活动（`Activity.SNIFF / DIG`）。
+    /// 监守者的钻出 / 钻入 / 咆哮 / 调查 / 嗅探活动（`Activity.EMERGE / DIG / ROAR /
+    /// INVESTIGATE / SNIFF`）。
     ///
-    /// The sniffer's sniff and dig activities (`Activity.SNIFF / DIG`).
-    Sniff,
+    /// The warden's emerge, dig, roar, investigate and sniff activities.
+    Emerge,
     Dig,
+    Roar,
+    Investigate,
+    /// `SNIFF` / `DIG` 监守者和嗅探兽共用同一个官方 `Activity`。
+    ///
+    /// `SNIFF` / `DIG` are the same vanilla `Activity` for both the warden and sniffer.
+    Sniff,
 }
 
 impl Activity {
@@ -127,8 +134,11 @@ impl Activity {
             Self::PreRaid => "pre_raid",
             Self::Hide => "hide",
             Self::Celebrate => "celebrate",
-            Self::Sniff => "sniff",
+            Self::Emerge => "emerge",
             Self::Dig => "dig",
+            Self::Roar => "roar",
+            Self::Investigate => "investigate",
+            Self::Sniff => "sniff",
         }
     }
 
@@ -156,8 +166,11 @@ impl Activity {
             "pre_raid" => Some(Self::PreRaid),
             "hide" => Some(Self::Hide),
             "celebrate" => Some(Self::Celebrate),
-            "sniff" => Some(Self::Sniff),
+            "emerge" => Some(Self::Emerge),
             "dig" => Some(Self::Dig),
+            "roar" => Some(Self::Roar),
+            "investigate" => Some(Self::Investigate),
+            "sniff" => Some(Self::Sniff),
             _ => None,
         }
     }
@@ -228,6 +241,17 @@ impl ActivityData {
         self.conditions = conditions;
         self
     }
+
+    /// `ActivityData.create(..., MemoryModuleType)`：退出该活动时擦掉的记忆。
+    /// 官方那个重载把同一个记忆同时用作 `VALUE_PRESENT` 进入条件和退出擦除项。
+    ///
+    /// `ActivityData.create(..., MemoryModuleType)`: memories erased when the
+    /// activity stops. Vanilla's overload uses that memory both as the
+    /// `VALUE_PRESENT` entry condition and as the exit-erased item.
+    pub fn erasing(mut self, memories: Vec<MemoryType>) -> Self {
+        self.erase_when_stopped = memories;
+        self
+    }
 }
 
 /// 大脑里排好序的一个行为。
@@ -257,7 +281,7 @@ pub struct BrainTemplate {
     requirements: Vec<(Activity, Vec<(MemoryType, MemoryStatus)>)>,
     erase_when_stopped: Vec<(Activity, Vec<MemoryType>)>,
     default_activity: Activity,
-    registered: u64,
+    registered: u128,
     /// 活动 → 该活动的行为下标（按优先级升序）。`startEachNonRunning` 把核心桶和当前
     /// 活动桶拼成要尝试启动的下标表，不再全表过滤。
     ///
@@ -1132,11 +1156,10 @@ fn hash_map_capacity(keys: usize) -> usize {
 mod tests {
     use super::*;
 
-    /// 钉住关键结构的大小。优化前 `Brain=6528`、`Memories=6400`（32 个槽每个都内联
-    /// 184 字节的 `MemoryValue`）；把值装箱、把整张结构表挪进 `Arc<BrainTemplate>` 后
-    /// 32 槽时 `Brain=664`、`Memories=536`，期 3 扩到 49 槽（+17×16 = +272）加日程字段后
-    /// `Memories=808`、`Brain=952`；鹦鹉螺再加两个记忆槽（+32）后是 `840` / `984`；
-    /// 嗅探兽再加五个记忆槽（+5×16 = +80）后是 `920` / `1064`。
+    /// 钉住关键结构的大小。值装箱、结构表挪进 `Arc<BrainTemplate>` 后，32 槽
+    /// `Brain=664` / `Memories=536`；49 槽加日程字段是 `808` / `952`，鹦鹉螺两个槽
+    /// 后 `840` / `984`。三组掩码升到 `u128`，再加 15 个监守者记忆和 4 个嗅探兽记忆
+    /// （`sniff_cooldown` 两边共用，槽表 51→70）后是 `Memories=1168` / `Brain=1312`。
     /// 这些数字变了就说明有人又把大对象塞回了实例。
     ///
     /// Pins the key struct sizes. After boxing values and moving the structure table into
@@ -1144,16 +1167,20 @@ mod tests {
     /// slots (+272) plus schedule fields (`Memories=808`, `Brain=952`), the two nautilus
     /// memories add 32 more (`840` / `984`), the five sniffer memories add 80 more
     /// (`920` / `1064`), and the eight breeze memories add 128 more (`1048` / `1192`).
+    /// `Arc<BrainTemplate>`: 32 slots gave `Brain=664` / `Memories=536`, 49 slots plus
+    /// schedule fields gave `808` / `952`, and the nautilus memories gave `840` / `984`.
+    /// Widening the masks to `u128` and adding 15 warden plus 4 sniffer memories
+    /// (`sniff_cooldown` shared, 51→70 slots) gives `Memories=1168` / `Brain=1312`.
     #[test]
     fn brain_and_memory_sizes_stay_small() {
         use crate::entity::mob::brain::behavior::Node;
         use crate::entity::mob::brain::memory::{Memories, MemoryValue};
         assert_eq!(std::mem::size_of::<MemoryValue>(), 184);
-        assert_eq!(std::mem::size_of::<Memories>(), 1048);
-        assert_eq!(std::mem::size_of::<Brain>(), 1192);
-        assert_eq!(std::mem::size_of::<Node>(), 136);
+        assert_eq!(std::mem::size_of::<Memories>(), 1296);
+        assert_eq!(std::mem::size_of::<Brain>(), 1440);
+        assert_eq!(std::mem::size_of::<Node>(), 160);
         assert_eq!(std::mem::size_of::<Sensor>(), 16);
-        assert_eq!(std::mem::size_of::<Entry>(), 144);
+        assert_eq!(std::mem::size_of::<Entry>(), 176);
     }
 
     /// 同一缓存槽构造两只大脑，它们共享同一份模板（`Arc::ptr_eq`），但记忆和运行态
