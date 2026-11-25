@@ -941,13 +941,16 @@ pub fn outline_shape(state: u32) -> &'static [Aabb] {
     shape_at(shapes::OUTLINE_SHAPE[state as usize])
 }
 
-/// `getVisualShape` 的形状：视线 clip（`ClipContext.Block.VISUAL`）用它。大多数方块
-/// 等于 [`outline_shape`]，只有透明的（玻璃 / 铁栏杆 / 细雪）没有视觉形状、泥巴 /
+/// `getVisualShape` 的形状：视线 clip（`ClipContext.Block.VISUAL`）用它。官方缺省
+/// 是 [`collision_shape`]（`getVisualShape` 默认转发 `getCollisionShape`），只有栅栏 /
+/// 雪层覆写成 [`outline_shape`]、透明的（玻璃 / 铁栏杆 / 细雪）没有视觉形状、泥巴 /
 /// 灵魂沙是完整方块。
 ///
-/// `getVisualShape`, the shape used by the visual block clip. It equals
-/// [`outline_shape`] for most blocks; transparent blocks (glass, iron bars,
-/// powder snow) have no visual shape, and mud / soul sand are a full cube.
+/// `getVisualShape`, the shape used by the visual block clip. Vanilla defaults to
+/// [`collision_shape`] (`getVisualShape` forwards to `getCollisionShape`); fences
+/// and snow layers override it to [`outline_shape`], transparent blocks (glass,
+/// iron bars, powder snow) have no visual shape, and mud / soul sand are a full
+/// cube.
 pub fn visual_shape(state: u32) -> &'static [Aabb] {
     let class = block_of_state(state).map_or(BlockClass::TransparentBlock, |block| block.class);
     match class {
@@ -959,7 +962,8 @@ pub fn visual_shape(state: u32) -> &'static [Aabb] {
         | BlockClass::StainedGlassPaneBlock
         | BlockClass::PowderSnowBlock => shapes::SHAPES[0],
         BlockClass::MudBlock | BlockClass::SoulSandBlock => shapes::SHAPES[1],
-        _ => outline_shape(state),
+        BlockClass::FenceBlock | BlockClass::SnowLayerBlock => outline_shape(state),
+        _ => collision_shape(state),
     }
 }
 
@@ -1051,6 +1055,51 @@ mod tests {
         assert!(is_client_syncable_attribute(
             registries::attribute::MAX_HEALTH
         ));
+    }
+
+    /// `getVisualShape` 的特例必须和 javap 扫 `net/minecraft/world/level/block/`
+    /// 得到的那份覆写清单一一对应。官方以后新增一个覆写 `getVisualShape` 的方块类，
+    /// 而数据里多出一个 `BlockClass` 变体时，这里会因为多出一个「视觉形状不等于
+    /// 碰撞形状」的类而失败。
+    ///
+    /// The `getVisualShape` special cases must match the javap scan of the block
+    /// package: `FenceBlock` / `IronBarsBlock` / `MudBlock` / `PowderSnowBlock` /
+    /// `SnowLayerBlock` / `SoulSandBlock` / `TransparentBlock` and their
+    /// subclasses. Iron bars and transparent blocks return the empty shape, mud
+    /// and soul sand the full cube, and fences / snow layers the outline. If
+    /// vanilla later adds another override, its `BlockClass` shows up here and
+    /// the test fails.
+    #[test]
+    fn visual_shape_specials_match_the_javap_list() {
+        let mut non_default = std::collections::HashSet::new();
+        for state in 0..blocks::TOTAL_STATES {
+            let class = block_of_state(state).unwrap().class;
+            if visual_shape(state) != collision_shape(state) {
+                non_default.insert(class);
+            }
+        }
+        // `PowderSnowBlock` 也声明了 `getVisualShape`（返回空），但它在空上下文里的
+        // 碰撞形状本来就是空（`CollisionContext.empty()` 走到 `Shapes.empty()`），
+        // 覆写是冗余的，所以不在这份「视觉 ≠ 碰撞」的清单里。
+        //
+        // `PowderSnowBlock` also declares `getVisualShape` (empty), but its
+        // collision shape is already empty under `CollisionContext.empty()`, so
+        // the override is redundant and absent from this visual-differs list.
+        let expected: std::collections::HashSet<BlockClass> = [
+            BlockClass::TransparentBlock,
+            BlockClass::StainedGlassBlock,
+            BlockClass::TintedGlassBlock,
+            BlockClass::WaterloggedTransparentBlock,
+            BlockClass::IronBarsBlock,
+            BlockClass::StainedGlassPaneBlock,
+            BlockClass::MudBlock,
+            BlockClass::SoulSandBlock,
+            BlockClass::FenceBlock,
+            BlockClass::SnowLayerBlock,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(non_default, expected);
     }
 
     fn short(name: &str) -> &str {
