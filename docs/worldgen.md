@@ -769,7 +769,7 @@ Bamboo 的对应设计如下。
 - **方块实体。** 地物和结构写下的方块实体 NBT 按目标区块分开，跟方块增量一起带到组装：
   每格取赢得该格方块的那个来源的方块实体。`build_region_column` 补上 `id` 和坐标后，
   走和读盘相同的 `install_block_entities`。之前组装只传方块，结构里的箱子、发射器、宝库、
-  刷怪笼在游戏里没有方块实体（种子 42 沙漠神殿的四个箱子没有战利品表）。
+  刷怪笼等方块实体在游戏里已能按结构模板装配并读回（见 README「刷怪笼」「宝库」两节）。
   `StructureTemplate.placeInWorld` 对每个 `RandomizableContainer` 都取一次 `nextLong`，
   不管有没有 `LootTable`；之前漏了没有战利品表的容器，后面的种子都错了一位。
 
