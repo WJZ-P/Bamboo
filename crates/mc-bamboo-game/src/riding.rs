@@ -19,7 +19,7 @@ use mc_bamboo_blocks::entity::{
     EntityUid, FIRST_ENTITY_ID, KindPublic, no_block_collision, sweep_movement,
 };
 use mc_bamboo_blocks::{CollisionContext, EntityContext, world::CollisionBlocks};
-use mc_bamboo_core::{BlockPos, Vec3, mth};
+use mc_bamboo_core::{BlockPos, Hand, Vec3, mth};
 use mc_bamboo_data::registries::attribute;
 use mc_bamboo_protocol::packet::play::MoveVehicle;
 
@@ -708,13 +708,26 @@ pub(crate) fn tick(region: &mut Region) {
         // `AbstractHorse.getControllingPassenger` needs a saddle. An unsaddled
         // mount can be ridden but its AI owns the position; `move_vehicle` is never
         // accepted for it.
+        // `Pig.getControllingPassenger` 另外要求第一位乘客手里（任一只手）拿着胡萝卜钓竿。
+        let holds_stick = region.players.get(&id).is_some_and(|player| {
+            [Hand::Main, Hand::Off].into_iter().any(|hand| {
+                player.inventory.held(hand).item == mc_bamboo_data::items::CARROT_ON_A_STICK
+            })
+        });
+        let first_passenger = passengers(region, vehicle).first() == Some(&id.0);
         let saddled = region
             .entities
             .with_mut(vehicle, |row| {
                 row.with_mob(|_, mob| {
-                    !mob.equipment
+                    let has_saddle = !mob
+                        .equipment
                         .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)
-                        .is_empty()
+                        .is_empty();
+                    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Pig {
+                        has_saddle && first_passenger && holds_stick
+                    } else {
+                        has_saddle
+                    }
                 })
             })
             .flatten()

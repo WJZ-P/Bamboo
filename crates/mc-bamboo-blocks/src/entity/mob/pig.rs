@@ -155,6 +155,27 @@ pub(super) fn step_sound(baby: bool) -> &'static str {
     }
 }
 
+/// `Pig.mobInteract` 手里不是食物时：上了鞍、没人在骑、没潜行就骑上去（SUCCESS），
+/// 否则走装鞍分支。
+///
+/// `Pig.mobInteract` with a non-food item: a saddled, unridden pig is mounted when
+/// the player is not sneaking (SUCCESS); otherwise fall through to saddling.
+pub(super) fn interact_not_food(
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+) -> MobInteraction {
+    let saddled = !mob.equipment.get(EquipmentSlot::Saddle).is_empty();
+    if saddled && mob.passengers.is_empty() && !req.sneaking {
+        return MobInteraction {
+            result: InteractionResult::Success,
+            ride: true,
+            ..MobInteraction::pass()
+        };
+    }
+    equip_saddle(me, mob, req)
+}
+
 /// `ItemStack.interactLivingEntity` → `Equippable.equipOnTarget` 的鞍分支：成年（`Pig.canUseSlot`
 /// 对鞍槽要求 `!isBaby()`）、活着、鞍槽空才装上，声音来自 `LivingEntity.onEquipItem`。
 ///
