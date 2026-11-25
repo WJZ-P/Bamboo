@@ -911,11 +911,9 @@ impl Behavior {
                     .set(EquipmentSlot::MainHand, ItemStack::empty());
                 state.last_session = i64::from(cx.me.tick_count);
             }
-            Self::SleepInBed { next_ok_start_time } => {
-                if cx.mob.villager.sleeping {
-                    villager::stop_sleeping(cx.me, cx.mob, Some(cx.memories), cx.ctx);
-                    *next_ok_start_time = cx.time + 40;
-                }
+            Self::SleepInBed { next_ok_start_time } if cx.mob.villager.sleeping => {
+                villager::stop_sleeping(cx.me, cx.mob, Some(cx.memories), cx.ctx);
+                *next_ok_start_time = cx.time + 40;
             }
             _ => {}
         }
@@ -2212,11 +2210,9 @@ fn trigger_acquire_poi(state: &mut AcquirePoiState, cx: &mut Cx) -> bool {
         }
     } else {
         for &(_, pos) in &candidates {
-            if !state.retry_cache.contains_key(&pos) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = state.retry_cache.entry(pos) {
                 let r = cx.level_next_int(40);
-                state
-                    .retry_cache
-                    .insert(pos, JitteredLinearRetry::new(now, r));
+                slot.insert(JitteredLinearRetry::new(now, r));
             }
         }
     }
