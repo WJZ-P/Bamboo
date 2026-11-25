@@ -489,7 +489,10 @@ fn spread_resin(world: &mut World, heart: BlockPos) -> Option<BlockPos> {
             // children(pos)：洗过的六个方向里，是苍白橡木的邻居。
             for side in world.random().shuffled_directions() {
                 let neighbor = pos.relative(side);
-                if world.block_state(neighbor).is_tagged(block_tags::PALE_OAK_LOGS) {
+                if world
+                    .block_state(neighbor)
+                    .is_tagged(block_tags::PALE_OAK_LOGS)
+                {
                     next.push(neighbor);
                 }
             }

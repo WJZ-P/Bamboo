@@ -115,7 +115,10 @@ fn resin_clumps(world: &World) -> i32 {
     for x in -6..=6 {
         for y in 58..=66 {
             for z in -6..=6 {
-                if world.block_state(BlockPos::new(x, y, z)).is(blocks::RESIN_CLUMP) {
+                if world
+                    .block_state(BlockPos::new(x, y, z))
+                    .is(blocks::RESIN_CLUMP)
+                {
                     count += 1;
                 }
             }
@@ -173,9 +176,8 @@ pub(super) fn replay_creaking(report: &mut Report, case: &CreakingCase) {
             let mut world = World::new(&mut level, &mut ticks);
             // `ServerLevel.tick` 顺序：先实体，后方块实体。
             world.tick_entities();
-            let _ = world.with_block_entity::<CreakingHeartEntity, _>(home, |be, world| {
-                be.tick(world)
-            });
+            let _ =
+                world.with_block_entity::<CreakingHeartEntity, _>(home, |be, world| be.tick(world));
             if case.name == "creaking_hurt" && tick == 5 {
                 let mut source = DamageSource::player(1025, Vec3::new(4.5, 61.0, 0.5), false);
                 source.attacker_uuid = Some(((1_u128 << 64) | 2).to_be_bytes());
