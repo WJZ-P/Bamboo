@@ -3874,12 +3874,15 @@ impl<'a> World<'a> {
     }
 
     /// `TntBlock.prime`：在这一格生成一个默认引信的 TNT。方块本身的移除由调用方负责。
+    /// `owner` 是点燃它的活体（打火石点着的玩家），红石 / 发射器 / 火焰传 `None`。
     ///
     /// 朝向取自 `level.getRandom()`，和方块逻辑共用同一个随机源。
     ///
     /// `TntBlock.prime`: spawns a primed TNT with the default fuse. The caller removes the block.
+    /// `owner` is the living entity that lit it (a player with flint and steel);
+    /// redstone, dispensers and fire pass `None`.
     /// The yaw comes from `level.getRandom()`, the same source block logic uses.
-    pub fn spawn_tnt(&mut self, pos: BlockPos) -> i32 {
+    pub fn spawn_tnt(&mut self, pos: BlockPos, owner: Option<EntityUid>) -> i32 {
         // `TntBlock.prime` 在规则为假时直接返回，不取朝向的随机数。
         //
         // `TntBlock.prime` returns before drawing the yaw when the rule is false.
@@ -3888,7 +3891,10 @@ impl<'a> World<'a> {
         }
         let position = block_center_bottom(pos);
         let angle = self.random().next_double();
-        let entity = Entity::primed_tnt(position, angle);
+        let mut entity = Entity::primed_tnt(position, angle);
+        if let Some(owner) = owner {
+            entity.set_tnt_owner(owner);
+        }
         let id = self.spawn_entity(entity);
         // `TntBlock.prime` 在 `addFreshEntity` 之后，于实体脚底播放。被爆炸点燃的短引信不走这里。
         // `TntBlock.prime` plays this at the entity's feet after `addFreshEntity`.

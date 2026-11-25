@@ -59,13 +59,23 @@ impl World<'_> {
     /// `PrimedTnt.explode` 走到 `ServerLevel.explode` 和 `ServerExplosion.explode`：
     /// 破坏方块、连锁点燃 TNT、伤害掉落物，还伤生物和玩家，并把爆炸包发给范围内玩家。
     ///
-    /// `center` 是爆炸中心，`radius` 是爆炸强度。`source` 是点燃的 TNT 的实体 ID，
-    /// 伤害来源是 `explosion`（TNT 没有 owner 建模，`direct` 指向 TNT、`causing` 为空）。
+    /// `center` 是爆炸中心，`radius` 是爆炸强度。`source` 是点燃的 TNT 这一刻的公开
+    /// 数据（死亡消息用它拿 `entity.minecraft.tnt` 显示名）；`owner` 是点燃它的活体，
+    /// 有 owner 时伤害来源是 `player_explosion`（`direct` 指 TNT、`causing` 指 owner），
+    /// 没有时是 `explosion`（`direct` 指 TNT、`causing` 为空）。
     ///
     /// `center` is the explosion centre and `radius` is its power. `source` is the primed
-    /// TNT entity id; the damage source is `explosion` with the TNT as `direct` and no
-    /// `causing` entity (TNT ownership is not modelled).
-    pub fn explode_tnt(&mut self, center: Vec3, radius: f32, source: EntityUid) {
+    /// TNT's public data (the death message reads its `entity.minecraft.tnt` name); `owner`
+    /// is the living entity that lit it. With an owner the damage source is `player_explosion`
+    /// (`direct` is the TNT, `causing` the owner); without one it is `explosion` (`direct` is
+    /// the TNT, no `causing`).
+    pub fn explode_tnt(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        source: Box<EntityPublic>,
+        owner: Option<EntityUid>,
+    ) {
         // 对拍的改坏确认钩子，正式构建里恒为 0（`Level::explosion_break`）。
         let brk = explosion_break(self);
         // 位 1：丢掉 `PrimedTnt.getY(0.0625)` 的抬升（TNT 高 0.98）。
@@ -79,14 +89,13 @@ impl World<'_> {
         // `hurtEntities` 在打乱方块之前，而且不取 `level.random`。
         // `hurtEntities` runs before the block list is shuffled and does not draw `level.random`.
         crate::entity::item::hurt_items_by_explosion(self, center, radius);
-        let mut damage = DamageSource::environment(DamageKind::Explosion);
-        damage.direct = Some(source);
+        let mut damage = tnt_blast_source(&source, owner);
         damage.position = Some(center);
         // 位 0：跳过 `hurtEntities`，牛不掉血、玩家包里没有击退向量。
         let hit_players = if brk & 1 != 0 {
             Vec::new()
         } else {
-            hurt_living_by_explosion(self, None, damage, center, radius)
+            hurt_living_by_explosion(self, Some(&source), damage, center, radius)
         };
         self.interact_with_blocks(&mut broken, None);
         self.push_effect(Effect::Explode {
@@ -330,6 +339,29 @@ impl World<'_> {
 fn blast_damage(dist: f64, exposure: f32, double_radius: f64) -> f32 {
     let power = (1.0 - dist) * f64::from(exposure);
     ((power * power + power) / 2.0 * 7.0 * double_radius + 1.0) as f32
+}
+
+/// `Explosion.getDefaultDamageSource(level, tnt)`：
+/// `DamageSources.explosion(tnt, tnt.getIndirectSourceEntity())`。有 owner 时两个来源
+/// 实体都在，是 `player_explosion`（`direct` 指 TNT、`causing` 指 owner）；没有时是
+/// `explosion`（`direct` 指 TNT、`causing` 为空）。
+///
+/// `Explosion.getDefaultDamageSource(level, tnt)`, i.e.
+/// `DamageSources.explosion(tnt, tnt.getIndirectSourceEntity())`. With an owner both
+/// source entities exist and the kind is `player_explosion` (`direct` is the TNT,
+/// `causing` the owner); otherwise `explosion` (`direct` is the TNT, no `causing`).
+fn tnt_blast_source(source: &EntityPublic, owner: Option<EntityUid>) -> DamageSource {
+    let mut damage = DamageSource::environment(if owner.is_some() {
+        DamageKind::PlayerExplosion
+    } else {
+        DamageKind::Explosion
+    });
+    damage.direct = Some(source.uid);
+    if let Some(owner) = owner {
+        damage.attacker = Some(owner);
+        damage.attacker_is_player = true;
+    }
+    damage
 }
 
 /// `DamageSources.explosion(direct, causing)`：两个来源实体都有时是 `player_explosion`。
@@ -631,6 +663,32 @@ mod tnt_tests {
         testing::TestLevel,
     };
 
+    /// `tnt_blast_source`：有 owner 是 `player_explosion`（`direct` 指 TNT、`attacker` 指 owner），
+    /// 没有 owner 是 `explosion`（只有 `direct`）。
+    #[test]
+    fn tnt_blast_source_sets_direct_and_owner() {
+        let tnt = EntityPublic {
+            uid: 7,
+            kind: KindPublic::Tnt { fuse: 0 },
+            position: Vec3::default(),
+            delta: Vec3::default(),
+            on_ground: false,
+            yaw: 0.0,
+            removed: false,
+            precise: false,
+            vehicle: None,
+        };
+        let plain = tnt_blast_source(&tnt, None);
+        assert_eq!(plain.kind, DamageKind::Explosion);
+        assert_eq!(plain.direct, Some(7));
+        assert_eq!(plain.attacker, None);
+        let owned = tnt_blast_source(&tnt, Some(3));
+        assert_eq!(owned.kind, DamageKind::PlayerExplosion);
+        assert_eq!(owned.direct, Some(7));
+        assert_eq!(owned.attacker, Some(3));
+        assert!(owned.attacker_is_player);
+    }
+
     /// TNT 也伤生物：爆炸范围内的牛掉血，并被推开（速度变了）。
     #[test]
     fn tnt_hurts_a_nearby_mob() {
@@ -640,7 +698,22 @@ mod tnt_tests {
         let id = world.spawn_entity(Entity::by_mob_type(MobType::Cow, Vec3::new(2.0, 64.0, 0.0)));
         let before = world.entity(id).expect("the cow is in the world");
         let before_health = before.kind.mob().expect("a cow is a mob").health;
-        world.explode_tnt(Vec3::new(0.0, 64.0, 0.0), 4.0, 0);
+        world.explode_tnt(
+            Vec3::new(0.0, 64.0, 0.0),
+            4.0,
+            Box::new(EntityPublic {
+                uid: 0,
+                kind: KindPublic::Tnt { fuse: 0 },
+                position: Vec3::new(0.0, 64.0, 0.0),
+                delta: Vec3::default(),
+                on_ground: false,
+                yaw: 0.0,
+                removed: false,
+                precise: false,
+                vehicle: None,
+            }),
+            None,
+        );
         let after = world.entity(id).expect("the cow survives");
         let after_mob = after.kind.mob().expect("a cow is a mob");
         assert!(

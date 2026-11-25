@@ -1188,13 +1188,15 @@ WebView2 的渲染进程不算在内。
   也按官方 `hurtEntities` 伤害生物和玩家（伤害类型 `explosion`，生物按爆炸击退抗性被推开，玩家那份击退
   向量放进 `ClientboundExplodePacket`），并照 `ServerLevel.explode` 把爆炸包发给 64 格内的玩家；
   包里的爆炸声和粒子走这个包，不在 `playSound`。爆炸中心是 `PrimedTnt` 的 `getY(0.0625)`
-  （实体高 0.98，抬升 0.06125），强度 4，伤害来源是 `explosion`（TNT 无 owner，`direct` 指 TNT、
-  `causing` 为空）。对拍：`mob-oracle --only tnt_blast` 三个难度逐刻比 TNT 从 y=70 落到基岩地面的
+  （实体高 0.98，抬升 0.06125），强度 4。伤害来源没有 owner 时是 `explosion`（`direct` 指 TNT、
+  `causing` 为空），玩家用打火石 / 火焰弹点着时是 `player_explosion`（`direct` 指 TNT、`causing`
+  指点它的玩家）。对拍：`mob-oracle --only tnt_blast` 三个难度逐刻比 TNT 从 y=70 落到基岩地面的
   位置、引信（80→0）、爆炸那刻牛的血量和击退速度、玩家包里的击退向量和方块数，0 不一致；
   `--break-self-test explode_tnt_hurt`（不调 `hurtEntities`）和 `explode_tnt_center`（丢 0.0625 抬升）
-  两处都报不一致。**已知限制**：被 TNT 直接炸死的玩家，死亡消息 official 会在 `with` 里带上
-  第二个来源实体（`entity.minecraft.tnt` + `show_entity` 的 UUID），Bamboo 的 TNT 爆炸没把
-  TNT 实体传进死亡消息，那个 UUID 也不稳定，所以这一项没有对拍；场景里玩家站得够远不会死。
+  两处都报不一致。被 TNT 直接炸死的玩家，死亡消息照官方带上第二个来源实体
+  （`entity.minecraft.tnt` + `show_entity`）；点着它的玩家按 `player_explosion` 出现在消息里。
+  TNT 实体本身没有 UUID，Bamboo 的 `show_entity` 用零 UUID，官方是随机 UUID，所以这一项没有对拍；
+  场景里玩家站得够远不会死。
   TNT 矿车 Bamboo 没有这个实体（实体容器整体没移植），见下面实体容器的限制。
   TNT 爆炸在换成空气之前按 `getDrops` 收集掉落，整圈方块处理完再 `popResource`；`tntExplosionDropDecay` 默认是假，
   所以不传爆炸半径，`explosion_decay` 不取数。TNT 自己的 `dropFromExplosion` 是假，不掉 TNT 物品。
