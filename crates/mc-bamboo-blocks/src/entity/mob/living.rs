@@ -147,6 +147,10 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Pillager && !me.removed {
         super::crossbow::use_tick(me, mob, ctx);
     }
+    // `WanderingTrader` 的 `UseItemGoal` 走同一条 `updatingUsingItem()`。
+    if mob.mob_type == super::MobType::WanderingTrader && !me.removed {
+        super::wandering_trader::use_tick(me, mob);
+    }
     detect_equipment_updates(me, mob, ctx);
     // `LivingEntity.tick`：睡在床上但床没了时立刻起床。
     // `LivingEntity.tick`: wake up if sleeping and the bed no longer exists.
@@ -179,7 +183,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
         // The wandering-trader / trader-llama `aiStep()` tail: drinking and despawn.
         if !me.removed {
             if mob.mob_type == super::MobType::WanderingTrader {
-                super::wandering_trader::custom_ai_step(mob, ctx);
+                super::wandering_trader::custom_ai_step(me, mob, ctx);
                 super::wandering_trader::maybe_despawn(me, mob);
             } else if mob.mob_type == super::MobType::TraderLlama {
                 super::trader_llama::maybe_despawn(me, mob, ctx);
