@@ -615,7 +615,8 @@ public final class MobOracle {
                 cases++;
             }
             for (String name : List.of("creaking_night", "creaking_watched", "creaking_unwatched",
-                    "creaking_hurt", "creaking_heart_broken")) {
+                    "creaking_hurt", "creaking_heart_broken", "creaking_chase",
+                    "creaking_heart_removed")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playCreaking(official, out, name);
                 cases++;
@@ -18293,6 +18294,8 @@ public final class MobOracle {
         int ticks = switch (name) {
             case "creaking_night" -> 40;
             case "creaking_heart_broken" -> 55;
+            case "creaking_chase" -> 60;
+            case "creaking_heart_removed" -> 30;
             default -> 20;
         };
 
@@ -18338,7 +18341,7 @@ public final class MobOracle {
         ServerPlayer player = new ServerPlayer(official.server, level,
                 new GameProfile(new UUID(1L, 2L), "CreakingWatcher"),
                 ClientInformation.createDefault());
-        player.setPos(4.5, 61.0, 0.5);
+        player.setPos(name.equals("creaking_chase") ? 6.5 : 4.5, 61.0, 0.5);
         setRandom(player, 0x0DDB1A5E5BAD5EEDL);
         player.setYRot(0.0F);
         player.setYHeadRot(0.0F);
@@ -18373,7 +18376,12 @@ public final class MobOracle {
             level.tracked.add(creaking);
         }
 
-        // 反射拿 Creaking 的三个布尔元数据 accessor 和心的 creakingInfo。
+        // 反射拿 Creaking 的三个布尔元数据 accessor、挥击动画刻数和心的 creakingInfo。
+        // `attackAnimationRemainingTicks` 反映每次 `doHurtTarget` 的挥击（冷却 40 刻），
+        // 用来确认攻击冷却真的被逐刻对拍覆盖（改坏成 1 会立刻报不一致）。
+        Field attackAnimF = net.minecraft.world.entity.monster.creaking.Creaking.class
+                .getDeclaredField("attackAnimationRemainingTicks");
+        attackAnimF.setAccessible(true);
         Field canMoveF = net.minecraft.world.entity.monster.creaking.Creaking.class.getDeclaredField("CAN_MOVE");
         canMoveF.setAccessible(true);
         var CAN_MOVE = (net.minecraft.network.syncher.EntityDataAccessor<Boolean>) canMoveF.get(null);
@@ -18393,7 +18401,10 @@ public final class MobOracle {
             if (tick != 0) {
                 level.gameTime = START_TIME + tick;
                 level.clock = 12600L;
-                boolean watch = name.equals("creaking_watched");
+                // `creaking_chase`：前几刻看着（激活 + 冻结），中段转头（追击 + 攻击），
+                // 末段再转回来看（验证「玩家转头看它时停住」）。
+                boolean watch = name.equals("creaking_watched")
+                        || (name.equals("creaking_chase") && (tick < 5 || tick >= 45));
                 player.setYRot(watch ? 90.0F : -90.0F);
                 player.setXRot(0.0F);
                 player.setYHeadRot(watch ? 90.0F : -90.0F);
@@ -18421,6 +18432,11 @@ public final class MobOracle {
                     heartBe.removeProtector(level.damageSources().playerAttack(player));
                     level.removeBlock(heartPos, false);
                 }
+                if (name.equals("creaking_heart_removed") && tick == 3) {
+                    // 心被活塞 / 爆炸这类非玩家方式移走：`preRemoveSideEffects → removeProtector(null)`。
+                    heartBe.removeProtector(null);
+                    level.removeBlock(heartPos, false);
+                }
                 // 夜里心刷出来的嘎枝这一刻接进名单，之后逐刻跟着 tick。
                 if (creaking == null) {
                     for (Entity entity : level.spawned) {
@@ -18443,6 +18459,7 @@ public final class MobOracle {
             boolean canMove = present && creaking.getEntityData().get(CAN_MOVE);
             boolean active = present && creaking.getEntityData().get(IS_ACTIVE);
             boolean tearing = present && creaking.getEntityData().get(IS_TEARING_DOWN);
+            int attackAnim = present ? attackAnimF.getInt(creaking) : 0;
             int resin = 0;
             for (int x = -6; x <= 6; x++) {
                 for (int y = 58; y <= 66; y++) {
@@ -18454,6 +18471,10 @@ public final class MobOracle {
                 }
             }
             if (tick > 0) frames.append(',');
+            // 不比逐刻浮点坐标：两条独立的寻路/物理链有亚毫格浮点末位差和一刻相位差。
+            // 生命下降证明「嘎枝从 3 格外走进近战范围并攻击」；挥击动画刻数证明攻击
+            // 冷却（40 刻）真的在对拍里——改坏成 1 会每刻挥击、动画常驻 15。玩家不 tick，
+            // 首次命中后进入永久无敌，生命只在命中那一刻 20→17 一次。
             frames.append("{\"heartState\":\"").append(heartStateName)
                     .append("\",\"bound\":").append(bound)
                     .append(",\"creakingPresent\":").append(present)
@@ -18461,6 +18482,9 @@ public final class MobOracle {
                     .append(",\"active\":").append(active)
                     .append(",\"tearingDown\":").append(tearing)
                     .append(",\"resin\":").append(resin)
+                    .append(",\"playerHealth\":")
+                    .append(Float.floatToRawIntBits(player.getHealth()))
+                    .append(",\"attackAnimation\":").append(attackAnim)
                     .append('}');
         }
         frames.append(']');

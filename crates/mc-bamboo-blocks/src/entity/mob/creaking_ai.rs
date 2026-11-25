@@ -18,10 +18,13 @@ use super::{
 use crate::entity::{Entity, ctx::EntityCtx};
 
 use MemoryStatus::{ValueAbsent, ValuePresent};
-use MemoryType::{AttackTarget, AttackCoolingDown, LookTarget, WalkTarget as WalkTargetMemory};
+use MemoryType::{AttackCoolingDown, AttackTarget, LookTarget, WalkTarget as WalkTargetMemory};
 
 /// `Creaking.makeBrain` 的传感器顺序：`NEAREST_LIVING_ENTITIES` 和 `NEAREST_PLAYERS`。
-const SENSORS: &[SensorKind] = &[SensorKind::NearestLivingEntities, SensorKind::NearestPlayers];
+const SENSORS: &[SensorKind] = &[
+    SensorKind::NearestLivingEntities,
+    SensorKind::NearestPlayers,
+];
 
 /// `Brain.provider(sensors, activities)`：缓存一份模板。
 pub(in crate::entity::mob) fn brain() -> Brain {
@@ -121,7 +124,9 @@ impl Behavior {
         match self {
             Self::Swim { .. } => "Swim",
             Self::StartAttacking => "StartAttacking",
-            Self::SetWalkTargetFromAttackTarget => "SetWalkTargetFromAttackTargetIfTargetOutOfReach",
+            Self::SetWalkTargetFromAttackTarget => {
+                "SetWalkTargetFromAttackTargetIfTargetOutOfReach"
+            }
             Self::MeleeAttack => "MeleeAttack",
             Self::StopAttacking => "StopAttackingIfTargetInvalid",
         }
@@ -159,9 +164,7 @@ impl Behavior {
 
     pub(super) fn extra_start(&mut self, cx: &mut Cx) -> bool {
         match self {
-            Self::Swim { .. } => {
-                cx.mob.creaking.can_move && goals::float_can_use(cx.me, cx.mob)
-            }
+            Self::Swim { .. } => cx.mob.creaking.can_move && goals::float_can_use(cx.me, cx.mob),
             _ => true,
         }
     }
@@ -274,7 +277,8 @@ fn melee_attack(cx: &mut Cx) -> bool {
     );
     // `doHurtTarget`：挥击动画 15 刻 + 事件 4，再走 `Monster.doHurtTarget`。
     creaking::swing_and_hurt(cx.me, cx.mob, cx.ctx, target);
-    cx.memories.set_with_ttl(AttackCoolingDown, MemoryValue::Bool(true), 40);
+    cx.memories
+        .set_with_ttl(AttackCoolingDown, MemoryValue::Bool(true), 40);
     true
 }
 
@@ -345,9 +349,17 @@ mod tests {
                 .any(|(_, _, name)| name == "SetWalkTargetFromAttackTargetIfTargetOutOfReach")
         );
         assert!(table.iter().any(|(_, _, name)| name == "MeleeAttack"));
-        assert!(table.iter().any(|(_, _, name)| name == "StopAttackingIfTargetInvalid"));
+        assert!(
+            table
+                .iter()
+                .any(|(_, _, name)| name == "StopAttackingIfTargetInvalid")
+        );
         let requirements = brain.requirement_table();
-        assert!(requirements.iter().any(|(activity, _)| *activity == "fight"));
+        assert!(
+            requirements
+                .iter()
+                .any(|(activity, _)| *activity == "fight")
+        );
         assert_eq!(brain.active_names(), vec!["core", "idle"]);
     }
 }

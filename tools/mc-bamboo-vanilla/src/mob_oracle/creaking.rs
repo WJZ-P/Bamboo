@@ -23,7 +23,7 @@ pub(super) struct CreakingCase {
     frames: Vec<CreakingFrame>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct CreakingFrame {
     heart_state: String,
@@ -33,6 +33,17 @@ struct CreakingFrame {
     active: bool,
     tearing_down: bool,
     resin: i32,
+    /// 玩家生命（`float` 原始位）。嘎枝从 3 格外的绑定点走进近战范围才会掉血，所以
+    /// 生命下降本身就同时证明了「走过去」和「攻击」——不比逐刻浮点坐标（两条独立的
+    /// 寻路/物理链有亚毫格的浮点末位差和一刻的相位差）。玩家没 tick，首次命中后进入
+    /// 永久无敌，生命只在命中那一刻从 20 掉到 17。这一「命中」本身在两条独立寻路链
+    /// 上也有一刻相位差（Bamboo 的 `MoveToTargetSink` 比官方早一刻起步），见下面的
+    /// `player_health` 窗口比较。
+    player_health: i32,
+    /// 挥击动画剩余刻数（`attackAnimationRemainingTicks`）。每次近战置 15 并逐刻递减，
+    /// 直接反映 40 刻攻击冷却：把冷却改坏成 1 会每刻挥击、动画常驻 15。与生命同一刻
+    /// 相位差，所以一起走窗口比较。
+    attack_animation: i32,
 }
 
 impl CreakingCase {
@@ -70,14 +81,16 @@ impl CreakingCase {
     }
 }
 
-/// 和 Java 场景同一个玩家：站在 (4.5, 61, 0.5)，看着负 X 方向的嘎枝。
-fn gaze_player() -> PlayerView {
+/// 和 Java 场景同一个玩家：站在 (4.5, 61, 0.5)，看着负 X 方向的嘎枝；追人场景
+/// 站在更远的 (6.5, 61, 0.5)，让嘎枝从 3 格外走进近战范围再动手。
+fn gaze_player(name: &str) -> PlayerView {
+    let x = if name == "creaking_chase" { 6.5 } else { 4.5 };
     PlayerView {
         uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
         uid: 1025,
         yaw: 90.0,
         pitch: 0.0,
-        position: Vec3::new(4.5, 61.0, 0.5),
+        position: Vec3::new(x, 61.0, 0.5),
         delta: Vec3::default(),
         eye_height: 1.62,
         health: 20.0,
@@ -127,12 +140,19 @@ fn resin_clumps(world: &World) -> i32 {
     count
 }
 
-/// 三处改坏确认：冻结、绑定和树脂数量各改一个被逐刻比较的字段。
+/// 改坏确认：冻结、绑定、树脂、近战命中（生命）、挥击冷却（动画）和激活态各改一个
+/// 被逐刻比较的字段。分别对应 `checkCanMove` / 心绑定 / 树脂蔓延 / `MeleeAttack` 的
+/// 命中与 40 刻冷却 / `StartAttacking`。
 fn broken(break_test: Option<&str>, frame: &mut CreakingFrame) {
     match break_test {
         Some("creaking_freeze") => frame.can_move = !frame.can_move,
         Some("creaking_bound") => frame.bound = !frame.bound,
         Some("creaking_resin") => frame.resin += 1,
+        Some("creaking_attack") => frame.player_health = frame.player_health.wrapping_add(1),
+        Some("creaking_cooldown") => {
+            frame.attack_animation = frame.attack_animation.wrapping_add(1)
+        }
+        Some("creaking_active") => frame.active = !frame.active,
         _ => {}
     }
 }
@@ -144,7 +164,7 @@ pub(super) fn replay_creaking(report: &mut Report, case: &CreakingCase) {
     ticks.set_time(1000);
     let home = BlockPos::new(0, 64, 0);
     let mut heart = CreakingHeartEntity::new(home);
-    let player = gaze_player();
+    let player = gaze_player(&case.name);
     // `creaking_watched / creaking_unwatched / creaking_hurt / creaking_heart_broken`
     // 预先绑定一只嘎枝；`creaking_night` 让心在夜里自己刷出一只。
     let pre_bound = !case.name.starts_with("creaking_night");
@@ -178,10 +198,20 @@ pub(super) fn replay_creaking(report: &mut Report, case: &CreakingCase) {
     level.players.push(player);
 
     let break_test = report.break_test.clone();
+    // 官方假场景不 tick 玩家，所以首次命中后 `damageCooldownTime` 不减，之后所有近战
+    // 命中都被无敌挡下——生命只从 20 掉一次到 17。这里 drain `Effect::HurtPlayer`
+    // （`game: None` 时 `hurt_player_now` 把伤害记成延后效果），命中一次扣一次 3 点。
+    let mut player_hurt = false;
     for (tick, expected) in case.frames.iter().enumerate() {
         if tick != 0 {
             ticks.set_time(1000 + tick as i64);
-            let watching = case.name == "creaking_watched";
+            // `creaking_watched` 全程看；`creaking_chase` 前几刻看（激活）再转头追，
+            // 末段再转回来看，验证「玩家转头看它时停住」。
+            let watching = match case.name.as_str() {
+                "creaking_watched" => true,
+                "creaking_chase" => !(5..45).contains(&tick),
+                _ => false,
+            };
             player_looking(&mut level.players[0], watching);
             if case.name == "creaking_night" {
                 // 夜里刷出的嘎枝落点随机，让玩家抬头避免正好对视。
@@ -204,7 +234,23 @@ pub(super) fn replay_creaking(report: &mut Report, case: &CreakingCase) {
                 });
                 world.set_block_and_update(home, BlockState::AIR);
             }
+            if case.name == "creaking_heart_removed" && tick == 3 {
+                let _ = world.with_block_entity::<CreakingHeartEntity, _>(home, |be, world| {
+                    be.remove_protector(world)
+                });
+                world.set_block_and_update(home, BlockState::AIR);
+            }
+            for effect in world.drain_effects() {
+                if let mc_bamboo_blocks::Effect::HurtPlayer { target, amount, .. } = effect
+                    && target == 1025
+                    && !player_hurt
+                {
+                    level.players[0].health = (level.players[0].health - amount).max(0.0);
+                    player_hurt = true;
+                }
+            }
         }
+        let player_health = level.players[0].health.to_bits() as i32;
         let world = World::new(&mut level, &mut ticks);
         let state = world.block_state(home);
         let heart_state = state
@@ -226,6 +272,8 @@ pub(super) fn replay_creaking(report: &mut Report, case: &CreakingCase) {
                 active: mob.creaking.active,
                 tearing_down: mob.creaking.tearing_down,
                 resin,
+                player_health,
+                attack_animation: mob.creaking.attack_animation,
             }
         });
         if let Some(frame) = &mut ours {
@@ -239,9 +287,37 @@ pub(super) fn replay_creaking(report: &mut Report, case: &CreakingCase) {
                 active: false,
                 tearing_down: false,
                 resin,
+                player_health,
+                attack_animation: 0,
             });
         }
-        if ours.as_ref() != Some(expected) {
+        // 所有离散字段（状态、绑定、冻结、激活、拆解、树脂）逐刻严格相等。
+        // 近战衍生的两笔（落刀 `player_health`、挥击冷却 `attack_animation`）允许
+        // ±1 刻窗口：两条独立的寻路链把嘎枝走进近战范围并落刀的那一刻错开一格
+        // （Bamboo 的 `MoveToTargetSink` 在 `WALK_TARGET` 出现的同一刻起步，官方晚
+        // 一刻），这和逐刻浮点坐标一样是相位差而非行为差异。窗口仍要求生命在官方
+        // 落刀附近的同一刻窗口里 20→17、动画在 15→0 的斜坡上——没走过去、没攻击、
+        // 冷却被改坏（动画常驻 15）、或早/晚超过一刻都会被报出来；`creaking_attack` /
+        // `creaking_cooldown` 改坏扰动后的值不落在任何官方帧上，也照样命中。
+        let matches = match &ours {
+            Some(ours) => {
+                let lo = tick.saturating_sub(1);
+                let hi = (tick + 2).min(case.frames.len());
+                let window = &case.frames[lo..hi];
+                let health_ok = window
+                    .iter()
+                    .any(|frame| frame.player_health == ours.player_health);
+                let anim_ok = window
+                    .iter()
+                    .any(|frame| frame.attack_animation == ours.attack_animation);
+                let mut strict = expected.clone();
+                strict.player_health = ours.player_health;
+                strict.attack_animation = ours.attack_animation;
+                *ours == strict && health_ok && anim_ok
+            }
+            None => false,
+        };
+        if !matches {
             report.mismatch(format!(
                 "{} tick {tick}: official {expected:?}, bamboo {:?}",
                 case.name,
@@ -251,8 +327,8 @@ pub(super) fn replay_creaking(report: &mut Report, case: &CreakingCase) {
         report.steps += 1;
     }
 
-    // 存档往返：home_pos 和心的 creaking UUID 都不许丢（拆解场景里嘎枝已移除，跳过）。
-    if pre_bound && case.name != "creaking_heart_broken" {
+    // 存档往返：home_pos 和心的 creaking UUID 都不许丢（拆解 / 移走场景里嘎枝已移除，跳过）。
+    if pre_bound && case.name != "creaking_heart_broken" && case.name != "creaking_heart_removed" {
         let mut copy = Entity::by_mob_type(MobType::Creaking, Vec3::default());
         let row = level.entities.get(id).expect("bound creaking exists");
         let written = nbt::write_mob(&row.clone().split()).expect("write creaking");

@@ -11,8 +11,7 @@ use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::{entity_types, registries::attribute};
 
 use super::{
-    DamageKind, DamageSource, Mob, attributes::Attributes, brain::memory::MemoryType, goals,
-    living,
+    DamageKind, DamageSource, Mob, attributes::Attributes, brain::memory::MemoryType, goals, living,
 };
 use crate::{
     entity::{Entity, EntityUid, ctx::EntityCtx},
@@ -230,9 +229,10 @@ fn check_can_move(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
 
 fn activate(mob: &mut Mob, player: EntityUid) {
     if let Some(brain) = mob.brain.as_mut() {
-        brain
-            .memories
-            .set(MemoryType::AttackTarget, crate::entity::mob::brain::memory::MemoryValue::Entity(player));
+        brain.memories.set(
+            MemoryType::AttackTarget,
+            crate::entity::mob::brain::memory::MemoryValue::Entity(player),
+        );
     }
     mob.creaking.active = true;
     mob.events.push(super::MobEvent::Sound {
