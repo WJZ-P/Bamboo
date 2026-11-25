@@ -68,6 +68,9 @@ impl CreakingCase {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(self.first_id),
             players: Vec::new(),
@@ -77,6 +80,7 @@ impl CreakingCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
         }
     }
 }
@@ -92,6 +96,8 @@ fn gaze_player(name: &str) -> PlayerView {
         pitch: 0.0,
         position: Vec3::new(x, 61.0, 0.5),
         delta: Vec3::default(),
+        width: 0.6,
+        height: 1.8,
         eye_height: 1.62,
         health: 20.0,
         look_direction: Vec3::view_vector(90.0, 0.0),
@@ -101,6 +107,8 @@ fn gaze_player(name: &str) -> PlayerView {
         game_mode: 0,
         mining_fatigue: None,
         creative: false,
+        flying: false,
+        explosion_knockback_resistance: 0.0,
         sneaking: false,
         sprinting: false,
         swimming: false,

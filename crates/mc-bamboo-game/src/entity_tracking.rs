@@ -394,6 +394,15 @@ impl TrackedEntity {
             {
                 out.push(packet_body(&packet));
             }
+            // `sendPairingData`：拴着就发 `set_entity_link`，客户端才画得出绳子。
+            if let Some(holder) = mob.leash_holder {
+                out.push(packet_body(
+                    &mc_bamboo_protocol::packet::play::SetEntityLink {
+                        source_id: snapshot.id,
+                        dest_id: holder,
+                    },
+                ));
+            }
         }
         // 官方 `sendPairingData` 最后两句：自己有乘客就发自己的名单，自己在骑就发
         // 载具的名单（乘客那一侧客户端才知道自己挂在谁身上）。
@@ -819,6 +828,10 @@ pub enum KindData {
     ///
     /// Llama spit, with no metadata of its own.
     LlamaSpit(mc_bamboo_blocks::entity::spit::LlamaSpitPublic),
+    /// 拴绳结：没有自己的元数据。
+    ///
+    /// A fence leash knot, with no metadata of its own.
+    LeashKnot,
     Egg(Box<mc_bamboo_blocks::entity::thrown_egg::EggPublic>),
     SplashPotion(Box<mc_bamboo_blocks::entity::splash_potion::SplashPotionPublic>),
 }
@@ -898,7 +911,8 @@ impl Snapshot {
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
             | KindData::Mob(_)
-            | KindData::LightningBolt => 0,
+            | KindData::LightningBolt
+            | KindData::LeashKnot => 0,
         }
     }
 
@@ -923,6 +937,7 @@ impl KindData {
             KindPublic::Egg(egg) => Self::Egg(egg.clone()),
             KindPublic::SplashPotion(potion) => Self::SplashPotion(potion.clone()),
             KindPublic::LightningBolt(_) => Self::LightningBolt,
+            KindPublic::LeashKnot { .. } => Self::LeashKnot,
         }
     }
 
@@ -948,7 +963,8 @@ impl KindData {
             | Self::LlamaSpit(_)
             | Self::Egg(_)
             | Self::SplashPotion(_)
-            | Self::LightningBolt => None,
+            | Self::LightningBolt
+            | Self::LeashKnot => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -964,7 +980,8 @@ impl KindData {
             | Self::LlamaSpit(_)
             | Self::Egg(_)
             | Self::SplashPotion(_)
-            | Self::LightningBolt => None,
+            | Self::LightningBolt
+            | Self::LeashKnot => None,
         }
     }
 
@@ -1016,7 +1033,10 @@ impl KindData {
             Self::ExperienceOrb { value } if *value != 0 => {
                 vec![EntityData::ExperienceValue(*value)]
             }
-            Self::ExperienceOrb { .. } | Self::LlamaSpit(_) | Self::LightningBolt => Vec::new(),
+            Self::ExperienceOrb { .. }
+            | Self::LlamaSpit(_)
+            | Self::LightningBolt
+            | Self::LeashKnot => Vec::new(),
             Self::Arrow(arrow) => {
                 let mut data = Vec::new();
                 if arrow.on_fire {
@@ -1244,6 +1264,20 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             return EntityData::AxolotlFromBucket(false);
         }
         _ => {}
+    }
+    // 嗅探兽的 18、19 是 `DATA_STATE`（缺省 IDLING=0）和 `DATA_DROP_SEED_AT_TICK`
+    // （缺省 0）；从非默认变回默认时发这两条。
+    // A sniffer's 18 and 19 are `DATA_STATE` (default IDLING=0) and
+    // `DATA_DROP_SEED_AT_TICK` (default 0); send these when they flip back.
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Sniffer {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::SNIFFER_STATE => return EntityData::SnifferState(0),
+            facts::SNIFFER_DROP_SEED_AT_TICK => {
+                return EntityData::SnifferDropSeedAtTick(0);
+            }
+            _ => {}
+        }
     }
     // 海龟的 18、19 是「有蛋」「正在产卵」两个布尔，不是牛的花色和叫声；
     // 从 true 变回 false 时要发这两条默认值。
@@ -1804,6 +1838,21 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         }
         return out;
     }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Sniffer {
+        // 嗅探兽的 18、19 是状态和掉种子时刻，缺省 IDLING（0）和 0。
+        // A sniffer's 18 and 19 are the state and the drop-seed tick, defaults IDLING (0)
+        // and 0.
+        let state = mob.sniffer_state.id();
+        if state != 0 {
+            out.push(EntityData::SnifferState(state));
+        }
+        if mob.sniffer_drop_seed_at_tick != 0 {
+            out.push(EntityData::SnifferDropSeedAtTick(
+                mob.sniffer_drop_seed_at_tick,
+            ));
+        }
+        return out;
+    }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Tadpole {
         // 蝌蚪只有鱼的 `FROM_BUCKET`（从来不写）和自己的 `AGE_LOCKED`（上面已经放了）。
         // Tadpoles only have the fish `FROM_BUCKET` (never written) and their own
@@ -1902,6 +1951,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         let sound = mob.pig_sound_variant.registry_id();
         if sound != pig_sound_variant_default() {
             out.push(EntityData::PigSoundVariant(sound));
+        }
+        if mob.pig_boost_time != 0 {
+            out.push(EntityData::PigBoostTime(mob.pig_boost_time));
         }
     } else {
         if mob.variant.registry_id() != 1 {
@@ -2388,6 +2440,12 @@ fn event_packet(
                 None => EventPacket::Nothing,
             }
         }
+        MobEvent::LeashLink { holder } => EventPacket::Tracking(packet_body(
+            &mc_bamboo_protocol::packet::play::SetEntityLink {
+                source_id: id,
+                dest_id: holder.unwrap_or(0),
+            },
+        )),
         MobEvent::MilkSound { position } => {
             player_sound("minecraft:entity.cow.milk", *position, sound_seed())
         }
@@ -2562,6 +2620,15 @@ fn send_mob_events(
 ///
 /// `ServerLevel.sendParticles(player, false, x, y, z, packet)`: only players whose block
 /// centre is within 32 blocks get the packet (`BlockPos.closerToCenterThan`).
+/// 方块实体发出的振动粒子包，距离判定和普通粒子包一样。
+pub(crate) fn send_vibration_particle(
+    region: &mut Region,
+    body: &[u8],
+    position: mc_bamboo_core::Vec3,
+) {
+    send_particles(region, body, position);
+}
+
 fn send_particles(region: &mut Region, body: &[u8], position: mc_bamboo_core::Vec3) {
     let frames = frame_from_body(body);
     let near: Vec<_> = region

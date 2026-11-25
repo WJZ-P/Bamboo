@@ -20,8 +20,8 @@ use mc_bamboo_data::{BlockAncestor, SOUND_EVENTS, items, registries::attribute, 
 use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::{
-        BlockChangedAck, BlockEvent, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
-        PlayerActionKind, Sound, SystemChat,
+        BlockChangedAck, BlockEvent, BlockUpdate, DEFAULT_EXPLOSION_BLOCK_PARTICLES, Explode,
+        GameMode, LevelEvent, OpenSignEditor, PlayerActionKind, Sound, SystemChat,
     },
     text::{Color, Component},
 };
@@ -361,7 +361,7 @@ fn record_sequence(region: &mut Region, id: PlayerId, sequence: i32) -> bool {
 }
 
 /// 方块逻辑看到的这名玩家。
-fn actor_of(player: &Player) -> Actor {
+fn actor_of(player: &Player, id: PlayerId) -> Actor {
     let held = |hand| {
         let stack = player.inventory.held(hand);
         if stack.is_empty() {
@@ -371,6 +371,7 @@ fn actor_of(player: &Player) -> Actor {
         }
     };
     Actor {
+        uid: id.0,
         uuid: *player.uuid.as_bytes(),
         position: player.position(),
         yaw: player.yaw,
@@ -560,7 +561,7 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 except_initiator,
                 seed,
             } => {
-                region.sound_effects.push(*effect);
+                region.sound_effects.push(effect.clone());
                 let except = initiator.filter(|_| except_initiator);
                 let packet = Sound {
                     sound,
@@ -575,6 +576,22 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 };
                 send_sound(region, except, &packet);
             }
+            Effect::Explode {
+                center,
+                radius,
+                block_count,
+                ref hit_players,
+                is_small,
+                play_sound,
+            } => send_explode(
+                region,
+                center,
+                radius,
+                block_count,
+                hit_players,
+                is_small,
+                play_sound,
+            ),
             Effect::LevelEvent {
                 event,
                 pos,
@@ -734,6 +751,26 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     crate::player_effects::give(region, id, instance);
                 }
             }
+            Effect::TrialSpawnerTransformBadOmen { player, duration } => {
+                use mc_bamboo_data::registries::mob_effect;
+                let Some(id) = region
+                    .players
+                    .iter()
+                    .find(|(_, p)| p.uuid.as_bytes() == &player)
+                    .map(|(id, _)| *id)
+                else {
+                    return;
+                };
+                crate::player_effects::clear(region, id, Some(mob_effect::BAD_OMEN));
+                let instance = mc_bamboo_blocks::entity::mob::effects::EffectInstance::with_flags(
+                    mob_effect::TRIAL_OMEN,
+                    duration,
+                    0,
+                    false,
+                    true,
+                );
+                crate::player_effects::give(region, id, instance);
+            }
             Effect::HealPlayer { target, amount } => {
                 let id = crate::inbound::PlayerId(target);
                 if let Some(player) = region.players.get_mut(&id)
@@ -847,6 +884,46 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                         );
                     }
                 }
+            }
+            Effect::VibrationParticle {
+                pos,
+                x,
+                y,
+                z,
+                travel,
+            } => {
+                // VibrationParticleOption.STREAM_CODEC:
+                // particle type id, position-source type id 0 (minecraft:block),
+                // BlockPos(long), arrivalInTicks(VarInt).
+                let mut options = Vec::new();
+                mc_bamboo_protocol::codec::write_varint(
+                    &mut options,
+                    mc_bamboo_data::registries::particle_type::VIBRATION,
+                );
+                mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+                mc_bamboo_protocol::codec::write_block_pos(&mut options, pos);
+                mc_bamboo_protocol::codec::write_varint(&mut options, travel);
+                let body = mc_bamboo_protocol::frame::packet_body(
+                    &mc_bamboo_protocol::packet::play::LevelParticles {
+                        options: &options,
+                        override_limiter: false,
+                        always_show: false,
+                        x,
+                        y,
+                        z,
+                        x_dist: 0.0,
+                        y_dist: 0.0,
+                        z_dist: 0.0,
+                        max_speed: 0.0,
+                        count: 1,
+                        randomization: mc_bamboo_protocol::packet::play::Randomization::Default,
+                    },
+                );
+                crate::entity_tracking::send_vibration_particle(
+                    region,
+                    &body,
+                    mc_bamboo_core::Vec3::new(x, y, z),
+                );
             }
             Effect::CrafterCrafted { recipe, position } => {
                 // `CrafterBlock.dispenseFrom`：17x17x17 的盒子里每名玩家。
@@ -965,6 +1042,52 @@ pub(crate) fn hears_level_event(player: &Player, pos: BlockPos) -> bool {
     let dy = f64::from(pos.y) - y;
     let dz = f64::from(pos.z) - z;
     dx * dx + dy * dy + dz * dz < LEVEL_EVENT_RADIUS * LEVEL_EVENT_RADIUS
+}
+
+/// `ServerLevel.explode` 把 `ClientboundExplodePacket` 发给 64 格内的每名玩家，
+/// 各带 `getHitPlayers` 里自己那份击退向量。
+///
+/// `ServerLevel.explode` sends `ClientboundExplodePacket` to every player within
+/// 64 blocks, each carrying their own `getHitPlayers` knockback.
+pub(crate) fn send_explode(
+    region: &mut Region,
+    center: Vec3,
+    radius: f32,
+    block_count: i32,
+    hit_players: &[(i32, Vec3)],
+    is_small: bool,
+    play_sound: bool,
+) {
+    let particle = if is_small {
+        mc_bamboo_data::registries::particle_type::EXPLOSION
+    } else {
+        mc_bamboo_data::registries::particle_type::EXPLOSION_EMITTER
+    };
+    let sound = i32::from(sounds::sound_event("minecraft:entity.generic.explode"));
+    for player in region.players.values() {
+        let Vec3 { x, y, z } = player.position();
+        let dx = center.x - x;
+        let dy = center.y - y;
+        let dz = center.z - z;
+        if dx * dx + dy * dy + dz * dz >= 64.0 * 64.0 {
+            continue;
+        }
+        let knockback = hit_players
+            .iter()
+            .find(|(uid, _)| *uid == player.id.0)
+            .map(|(_, knock)| *knock);
+        let packet = Explode {
+            center,
+            radius,
+            block_count,
+            player_knockback: knockback,
+            explosion_particle: particle,
+            explosion_sound: sound,
+            block_particles: DEFAULT_EXPLOSION_BLOCK_PARTICLES,
+            play_sound,
+        };
+        region.links.send(player.id, &packet);
+    }
 }
 
 fn block_update(pos: BlockPos, state: u32) -> BlockUpdate {
@@ -1102,7 +1225,7 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         spectator_use_item_on(region, id, packet);
         return;
     }
-    let actor = actor_of(player);
+    let actor = actor_of(player, id);
     // `can_place_on` 要在借出 `level` 之前从物品栏读出来。
     let held = player.inventory.held(packet.hand).clone();
     let is_placement_attempt = rules::is_placement_attempt(&held);
@@ -1287,7 +1410,7 @@ pub(crate) fn on_use_item(
     }
     // `Item.use` → `Consumable.startConsuming`：可消耗物品先进入「正在使用」，
     // 不往下走放置 / 方块交互链。先把 `actor` 抄出来，`start` 要独占借 `region`。
-    let actor = actor_of(player);
+    let actor = actor_of(player, id);
     // 鱼桶要从这一堆上的组件还原鱼，先抄下来。
     // A fish bucket restores its fish from this stack's components, so copy it first.
     let held = player.inventory.held(hand).clone();
@@ -1304,6 +1427,46 @@ pub(crate) fn on_use_item(
     // `EggItem.use`: throw the egg and return `SUCCESS`.
     if crate::player_egg::throw(region, id, hand) {
         swing(region, id, hand, InteractionResult::Success);
+        return;
+    }
+    // `FoodOnAStickItem.use`：拿着胡萝卜钓竿、骑着由自己控制的猪时，右键
+    // 让猪加速并扣 7 点耐久；没加速成则只记一次使用统计。
+    //
+    // `FoodOnAStickItem.use`: with a carrot on a stick while riding a
+    // player-controlled pig, right-click boosts the pig and spends seven
+    // durability points; a failed use only awards the item-use stat.
+    if held.item == items::CARROT_ON_A_STICK {
+        let vehicle = crate::riding::player_vehicles(region).get(&id).copied();
+        let boosted = vehicle.is_some_and(|vehicle| {
+            region
+                .entities
+                .with_mut(vehicle, |entity| {
+                    entity.with_mob(|me, mob| {
+                        if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::Pig
+                            || mob.controlling_passenger() != Some(id.0)
+                        {
+                            return false;
+                        }
+                        let random = mc_bamboo_blocks::entity::EntityRandom(
+                            std::cell::RefCell::new(me.random),
+                        );
+                        let boosted = mob.pig_steering.boost(&random);
+                        me.random = random.0.into_inner();
+                        if boosted {
+                            mob.needs_sync = true;
+                        }
+                        boosted
+                    })
+                })
+                .flatten()
+                .unwrap_or(false)
+        });
+        if boosted {
+            durability::hurt_and_convert_on_break(region, id, hand);
+            swing(region, id, hand, InteractionResult::SuccessServer);
+        } else {
+            crate::item_use_stats::award(region, id, held.item);
+        }
         return;
     }
 
@@ -1347,18 +1510,27 @@ pub(crate) fn on_interact_entity(
     // 官方把 `usingSecondaryAction` 记成潜行键；马科用它判断开物品栏。
     // Vanilla stores `usingSecondaryAction` as the sneak key; equines read it.
     // 先把玩家和目标的只读数据抄出来，`block_level()` 要独占借 `region`。
-    let Some((game_mode, position, eye_height, entity_reach, player_uuid, main_held, off_held)) =
-        region.players.get(&id).map(|player| {
-            (
-                player.game_mode,
-                player.position(),
-                player.eye_height(),
-                player.attributes.value(attribute::ENTITY_INTERACTION_RANGE),
-                *player.uuid.as_bytes(),
-                player.inventory.held(Hand::Main).clone(),
-                player.inventory.held(Hand::Off).clone(),
-            )
-        })
+    let Some((
+        game_mode,
+        position,
+        eye_height,
+        entity_reach,
+        player_uuid,
+        main_held,
+        off_held,
+        player_height,
+    )) = region.players.get(&id).map(|player| {
+        (
+            player.game_mode,
+            player.position(),
+            player.eye_height(),
+            player.attributes.value(attribute::ENTITY_INTERACTION_RANGE),
+            *player.uuid.as_bytes(),
+            player.inventory.held(Hand::Main).clone(),
+            player.inventory.held(Hand::Off).clone(),
+            player.height(),
+        )
+    })
     else {
         return;
     };
@@ -1368,7 +1540,13 @@ pub(crate) fn on_interact_entity(
     let Some(target) = region.entities.public_at(entity_id) else {
         return;
     };
-    if target.removed || !matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) {
+    let is_knot = matches!(
+        target.kind,
+        mc_bamboo_blocks::entity::KindPublic::LeashKnot { .. }
+    );
+    if target.removed
+        || !(matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) || is_knot)
+    {
         return;
     }
     // 够距：官方 `ServerGamePacketListenerImpl.handleInteract` 用 `ENTITY_INTERACTION_RANGE` + 3.0 缓冲。
@@ -1386,6 +1564,33 @@ pub(crate) fn on_interact_entity(
         Hand::Main => Hand::Off,
         Hand::Off => Hand::Main,
     };
+    if is_knot {
+        // 拴绳结：剪刀剪断绳子，或把玩家 / 结之间的生物转来转去。
+        for try_hand in [hand, other] {
+            let held = match try_hand {
+                Hand::Main => main_held.clone(),
+                Hand::Off => off_held.clone(),
+            };
+            let result = crate::durability::run(region, id, try_hand, |region| {
+                let (mut level, ticks) = region.block_level();
+                let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+                world.interact_knot(
+                    entity_id,
+                    id.0,
+                    player_uuid,
+                    &held,
+                    try_hand,
+                    using_secondary_action,
+                )
+            });
+            if !result.consumes_action() {
+                continue;
+            }
+            swing(region, id, try_hand, result);
+            return;
+        }
+        return;
+    }
     for try_hand in [hand, other] {
         let held = match try_hand {
             Hand::Main => main_held.clone(),
@@ -1398,6 +1603,7 @@ pub(crate) fn on_interact_entity(
             held,
             creative,
             position,
+            player_height,
             sneaking: using_secondary_action,
             difficulty: region.global.difficulty as i32,
         };
@@ -1408,6 +1614,19 @@ pub(crate) fn on_interact_entity(
             let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
             world.interact_mob(entity_id, &request)
         });
+        // 村民不由 `mobInteract` 处理：右键按 `Villager.mobInteract` 分支走
+        // （幼年摇头、`NONE` 职业摇头 + 消耗、有职业进交易菜单）。
+        // Bamboo's mobInteract does not implement villagers; handle `Villager.mobInteract`
+        // here before the generic "pass" filter.
+        if !using_secondary_action
+            && let Some(target) = region.entities.public_at(entity_id)
+            && matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
+            && let Some(result) =
+                crate::merchant::interact(region, id, entity_id, try_hand == Hand::Main)
+        {
+            swing(region, id, try_hand, result);
+            return;
+        }
         if !outcome.result.consumes_action() {
             continue;
         }

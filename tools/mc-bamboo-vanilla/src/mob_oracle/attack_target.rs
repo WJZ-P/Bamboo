@@ -142,6 +142,9 @@ impl AttackTargetCase {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(self.first_id),
             players: Vec::new(),
@@ -149,6 +152,7 @@ impl AttackTargetCase {
             inhabited: Default::default(),
             mob_teams: Default::default(),
             wrong_was_hurt: false,
+            explosion_break: 0,
             short_hunger: false,
             ignore_bed_monsters: false,
         }

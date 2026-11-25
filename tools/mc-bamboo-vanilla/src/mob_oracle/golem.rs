@@ -72,6 +72,9 @@ impl GolemCase {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(self.first_id),
             players: vec![super::bat::player_view(self.player_id, [2.5, 64.0, 0.5])],
@@ -81,6 +84,7 @@ impl GolemCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
         };
         // 官方夹具的 `heightmap_y` 在这些方块世界里挡不住雨，统一注入。
         let _ = &mut level;
@@ -330,6 +334,7 @@ fn interact(world: &mut World<'_>, id: i32, player: i32, held: ItemStack, wrong_
         },
         creative: false,
         position: Vec3::new(2.5, 64.0, 0.5),
+        player_height: 1.8,
         sneaking: false,
         difficulty: 2,
     };

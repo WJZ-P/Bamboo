@@ -104,6 +104,15 @@ struct Case {
     /// Component patches, in the network format, applied before the menu opens.
     #[serde(default)]
     patches: Vec<StoredPatch>,
+    /// 商人菜单的固定交易表。每条是
+    /// `[itemA, countA, itemB, countB, resultItem, resultCount, maxUses]`，
+    /// `itemB == 0` 表示没有第二格付款。
+    ///
+    /// The merchant menu's fixed trade list. Each entry is
+    /// `[itemA, countA, itemB, countB, resultItem, resultCount, maxUses]`;
+    /// `itemB == 0` means no second payment.
+    #[serde(default)]
+    offers: Vec<[i32; 7]>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +150,11 @@ struct Step {
     /// Whether the carried item was resent.
     #[serde(default)]
     carried_resent: bool,
+    /// 商人菜单的 `ServerboundSelectTradePacket`。别的题不写。
+    ///
+    /// The merchant menu's `ServerboundSelectTradePacket`. Other cases omit it.
+    #[serde(default, rename = "selectTrade")]
+    select_trade: Option<i32>,
 }
 
 /// 菜单在某一刻的样子。槽位和光标是 `[物品 ID, 数量, 组件补丁的十六进制]`，空槽是 `[0, 0, ""]`。
@@ -280,6 +294,9 @@ impl Report {
         if case.shape == "nautilus_mount" {
             return self.replay_nautilus_mount(case);
         }
+        if case.shape == "merchant" {
+            return self.replay_merchant(case);
+        }
         let shape = shape_of(&case.shape)
             .ok_or_else(|| format!("case {}: unknown menu shape {:?}", case.id, case.shape))?;
         self.cases += 1;
@@ -395,6 +412,62 @@ impl Report {
         for (index, step) in case.steps.iter().enumerate() {
             let input = ContainerInput::from_id(i32::from(step.input));
             let snapshot = replay.click(step.slot, step.button, input);
+            self.steps += 1;
+            self.compare(
+                &format!("case {} step {index}", case.id),
+                &snapshot,
+                &step.outcome,
+            );
+        }
+        Ok(())
+    }
+
+    /// `MerchantMenu`：固定交易表，付款两格加结果格和玩家 36 格逐步点击。
+    ///
+    /// `MerchantMenu`: a fixed trade list, two payment slots, a result slot and the
+    /// player's 36 slots, click by click.
+    fn replay_merchant(&mut self, case: &Case) -> Result<(), String> {
+        self.cases += 1;
+        let offers = case
+            .offers
+            .iter()
+            .map(
+                |&[
+                    item_a,
+                    count_a,
+                    item_b,
+                    count_b,
+                    result,
+                    result_count,
+                    max_uses,
+                ]| {
+                    mc_bamboo_protocol::merchant::MerchantOffer {
+                        base_cost_a: mc_bamboo_protocol::merchant::ItemCost::new(item_a, count_a),
+                        cost_b: (item_b != 0)
+                            .then(|| mc_bamboo_protocol::merchant::ItemCost::new(item_b, count_b)),
+                        result: mc_bamboo_protocol::item::ItemStack::new(result, result_count),
+                        uses: 0,
+                        max_uses,
+                        reward_exp: true,
+                        special_price_diff: 0,
+                        demand: 0,
+                        price_multiplier: 0.0,
+                        xp: 1,
+                    }
+                },
+            )
+            .collect();
+        let mut replay = Replay::merchant(offers, &pairs(&case.container), &pairs(&case.inventory));
+        let snapshot = replay.open();
+        self.compare(&format!("case {} open", case.id), &snapshot, &case.open);
+        for (index, step) in case.steps.iter().enumerate() {
+            let snapshot = if let Some(trade) = step.select_trade {
+                replay.select_trade(trade);
+                replay.snapshot()
+            } else {
+                let input = ContainerInput::from_id(i32::from(step.input));
+                replay.click(step.slot, step.button, input)
+            };
             self.steps += 1;
             self.compare(
                 &format!("case {} step {index}", case.id),
@@ -555,6 +628,7 @@ fn shape_of(name: &str) -> Option<ReplayShape> {
         "anvil" => Some(ReplayShape::Anvil),
         "cartography" => Some(ReplayShape::Cartography),
         "enchantment" => Some(ReplayShape::Enchantment),
+        "merchant" => Some(ReplayShape::Merchant),
         _ => None,
     }
 }

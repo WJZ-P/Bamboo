@@ -53,6 +53,7 @@ pub mod guardian;
 pub mod infested;
 pub mod interact;
 pub mod iron_golem;
+pub mod leash;
 pub mod living;
 pub mod mooshroom;
 pub mod motion;
@@ -72,7 +73,7 @@ pub mod pathfinding;
 pub mod patrol;
 pub mod phantom;
 pub mod phantom_spawner;
-mod pig;
+pub mod pig;
 pub mod pillager;
 pub mod polar_bear;
 pub mod rabbit;
@@ -84,6 +85,7 @@ mod skeleton_drops;
 pub mod skeleton_horse;
 pub mod slime;
 pub mod smooth_swim;
+pub mod sniffer;
 pub mod snow_golem;
 pub mod spawn;
 pub mod spider;
@@ -232,13 +234,17 @@ pub enum MobType {
     ///
     /// The `ZombieNautilus`.
     ZombieNautilus,
+    /// 嗅探兽，`Sniffer`。
+    ///
+    /// The `Sniffer`.
+    Sniffer,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 63] = [
+    pub const ALL: [Self; 64] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -302,6 +308,7 @@ impl MobType {
         Self::Nautilus,
         Self::ZombieNautilus,
         Self::Creaking,
+        Self::Sniffer,
     ];
 
     /// 注册表 ID。
@@ -371,6 +378,7 @@ impl MobType {
             Self::Creaking => ids::CREAKING,
             Self::Nautilus => ids::NAUTILUS,
             Self::ZombieNautilus => ids::ZOMBIE_NAUTILUS,
+            Self::Sniffer => ids::SNIFFER,
         }
     }
 
@@ -440,6 +448,7 @@ impl MobType {
             Self::Creaking => "minecraft:creaking",
             Self::Nautilus => "minecraft:nautilus",
             Self::ZombieNautilus => "minecraft:zombie_nautilus",
+            Self::Sniffer => "minecraft:sniffer",
         }
     }
 
@@ -461,6 +470,7 @@ impl MobType {
             Self::Turtle => Some(item_tags::TURTLE_FOOD),
             Self::Axolotl => Some(item_tags::AXOLOTL_FOOD),
             Self::Nautilus | Self::ZombieNautilus => Some(item_tags::NAUTILUS_FOOD),
+            Self::Sniffer => Some(item_tags::SNIFFER_FOOD),
             Self::Ocelot => Some(item_tags::OCELOT_FOOD),
             Self::Cat => Some(item_tags::CAT_FOOD),
             _ => None,
@@ -601,6 +611,7 @@ impl MobType {
             (Self::Guardian, _) => (0.85, 0.85, 0.425),
             (Self::ElderGuardian, _) => (1.9975, 1.9975, 0.99875),
             (Self::Nautilus | Self::ZombieNautilus, baby) => nautilus::dimensions(baby),
+            (Self::Sniffer, baby) => sniffer::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -1113,6 +1124,7 @@ impl MobType {
             Self::Creaking => "minecraft:entities/creaking",
             Self::Nautilus => "minecraft:entities/nautilus",
             Self::ZombieNautilus => "minecraft:entities/zombie_nautilus",
+            Self::Sniffer => "minecraft:entities/sniffer",
         }
     }
 
@@ -1252,6 +1264,10 @@ impl MobType {
             | Self::Nautilus
             | Self::ZombieNautilus
             | Self::Creaking => None,
+            // `Sniffer.getAmbientSound`：挖掘 / 搜寻时不叫，见 `sniffer::ambient_voice`。
+            // `Sniffer.getAmbientSound`: silent while digging or searching; see
+            // `sniffer::ambient_voice`.
+            Self::Sniffer => Some("minecraft:entity.sniffer.idle"),
         }
     }
 
@@ -1315,6 +1331,7 @@ impl MobType {
             | Self::Nautilus
             | Self::ZombieNautilus
             | Self::Creaking => None,
+            Self::Sniffer => Some("minecraft:entity.sniffer.hurt"),
         }
     }
 
@@ -1378,6 +1395,7 @@ impl MobType {
             | Self::SulfurCube
             | Self::Nautilus
             | Self::ZombieNautilus => None,
+            Self::Sniffer => Some("minecraft:entity.sniffer.death"),
         }
     }
 
@@ -1452,6 +1470,7 @@ impl MobType {
             | Self::SulfurCube
             | Self::Nautilus
             | Self::ZombieNautilus => None,
+            Self::Sniffer => Some("minecraft:entity.sniffer.step"),
         }
     }
 
@@ -1522,6 +1541,7 @@ impl MobType {
             Self::Creaking => items::CREAKING_SPAWN_EGG,
             Self::Nautilus => items::NAUTILUS_SPAWN_EGG,
             Self::ZombieNautilus => items::ZOMBIE_NAUTILUS_SPAWN_EGG,
+            Self::Sniffer => items::SNIFFER_SPAWN_EGG,
         }
     }
 
@@ -1591,6 +1611,7 @@ impl MobType {
             Self::Creaking => "entity.minecraft.creaking",
             Self::Nautilus => "entity.minecraft.nautilus",
             Self::ZombieNautilus => "entity.minecraft.zombie_nautilus",
+            Self::Sniffer => "entity.minecraft.sniffer",
         }
     }
 
@@ -1899,6 +1920,14 @@ pub enum DamageKind {
     ///
     /// Contact damage of the HOT sulfur-cube archetype.
     SulfurCubeHot,
+    /// `minecraft:bad_respawn_point`：主世界用重生锚重生失败时的爆炸伤害。
+    /// 数据文件里是 `INTENTIONAL_GAME_DESIGN`、exhaustion 0.1、scaling
+    /// `always`、message_id `badRespawnPoint`。
+    ///
+    /// `minecraft:bad_respawn_point`: the blast from using a respawn anchor in
+    /// the overworld. `INTENTIONAL_GAME_DESIGN`, exhaustion 0.1, `always`
+    /// scaling, `message_id` `badRespawnPoint`.
+    BadRespawnPoint,
 }
 
 impl DamageKind {
@@ -1938,6 +1967,7 @@ impl DamageKind {
             Self::EnderPearl => "minecraft:ender_pearl",
             Self::LightningBolt => "minecraft:lightning_bolt",
             Self::SulfurCubeHot => "minecraft:sulfur_cube_hot",
+            Self::BadRespawnPoint => "minecraft:bad_respawn_point",
         }
     }
 
@@ -1950,6 +1980,7 @@ impl DamageKind {
     pub const fn death_message_type(self) -> DeathMessageType {
         match self {
             Self::Fall | Self::EnderPearl => DeathMessageType::FallVariants,
+            Self::BadRespawnPoint => DeathMessageType::IntentionalGameDesign,
             _ => DeathMessageType::Default,
         }
     }
@@ -1997,6 +2028,7 @@ impl DamageKind {
             Self::EnderPearl => "fall",
             Self::LightningBolt => "lightningBolt",
             Self::SulfurCubeHot => "sulfurCubeHot",
+            Self::BadRespawnPoint => "badRespawnPoint",
         }
     }
 
@@ -2038,6 +2070,7 @@ impl DamageKind {
             Self::EnderPearl,
             Self::LightningBolt,
             Self::SulfurCubeHot,
+            Self::BadRespawnPoint,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -2125,7 +2158,10 @@ impl DamageKind {
     /// `DamageSource.scalesWithDifficulty()`: only `always`, or
     /// `when_caused_by_living_non_player` with a non-player living cause.
     pub const fn scales_with_difficulty(self) -> bool {
-        matches!(self, Self::Explosion | Self::PlayerExplosion)
+        matches!(
+            self,
+            Self::Explosion | Self::PlayerExplosion | Self::BadRespawnPoint
+        )
     }
 
     /// `DamageType.exhaustion`：受伤后累加的饥饿消耗。
@@ -2148,7 +2184,8 @@ impl DamageKind {
             | Self::SweetBerryBush
             | Self::DryOut
             | Self::LightningBolt
-            | Self::SulfurCubeHot => TENTH,
+            | Self::SulfurCubeHot
+            | Self::BadRespawnPoint => TENTH,
             _ => 0.0,
         }
     }
@@ -2521,11 +2558,15 @@ pub struct Mob {
     pub glowing: bool,
     pub portal_cooldown: i32,
     pub tags: Vec<String>,
-    /// 存档里官方有、这里不建模的键（效果、装备、拴绳、`data` 等），读进来原样写回。
+    /// 存档里官方有、这里不建模的键（效果、装备、`data` 等），读进来原样写回。
     ///
-    /// Vanilla keys that are not modelled here (effects, equipment, leash, `data`),
+    /// Vanilla keys that are not modelled here (effects, equipment, `data`),
     /// kept verbatim from disk and written back.
     pub passthrough: Vec<(String, mc_bamboo_nbt::Tag)>,
+    /// 拴绳的牵引数据，官方 `Mob.leashData`。`None` 表示没拴。
+    ///
+    /// The leash data, vanilla `Mob.leashData`. `None` means unleashes.
+    pub leash: Option<leash::LeashData>,
     // ---- LivingEntity ----
     /// `activeEffects`。只存相对剩余刻数，整行随实体搬，不需要时钟平移。
     ///
@@ -2677,6 +2718,10 @@ pub struct Mob {
     pub tame: tame::Tamable,
     pub wolf: wolf::Wolf,
     pub pig_sound_variant: pig::SoundVariant,
+    /// 猪的 `ItemBasedSteering`。
+    ///
+    /// The pig's `ItemBasedSteering`.
+    pub pig_steering: pig::Steering,
     /// 羊的 `DATA_WOOL_ID`：低 4 位颜色，第 5 位已剪毛。
     ///
     /// The sheep `DATA_WOOL_ID`: colour in the low four bits, bit 4 when sheared.
@@ -2901,6 +2946,10 @@ pub struct Mob {
     ///
     /// The frog's variant, pose and tongue target.
     pub frog: frog::Frog,
+    /// 嗅探兽的状态机和掉种子时刻；别的生物是缺省值。
+    ///
+    /// The sniffer's state machine and drop-seed tick; default for other mobs.
+    pub sniffer: sniffer::Sniffer,
     /// 骆驼的姿势状态机同步值和冲刺计时。
     ///
     /// The camel's pose state machine synced values and dash timer.
@@ -2929,6 +2978,10 @@ pub enum MobEvent {
             mc_bamboo_protocol::item::ItemStack,
         )>,
     ),
+    /// 拴绳关系变了：`sendToTrackingPlayers` 一个 `set_entity_link`。`holder` 为空表示解开。
+    ///
+    /// The leash link changed: broadcast one `set_entity_link`; `None` detaches.
+    LeashLink { holder: Option<EntityUid> },
     /// 别的 `broadcastEntityEvent`：装备坏掉（47–52）、主副手互换（55）。
     EntityEvent { event: u8 },
     /// `broadcastDamageEvent`：受了一次完整的伤害。
@@ -3057,6 +3110,7 @@ impl Mob {
             MobType::SulfurCube => sulfur_cube::attributes(),
             MobType::Creaking => creaking::attributes(),
             MobType::Nautilus | MobType::ZombieNautilus => nautilus::attributes(mob_type),
+            MobType::Sniffer => sniffer::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3138,6 +3192,7 @@ impl Mob {
             | MobType::Nautilus
             | MobType::ZombieNautilus
             | MobType::Creaking => GoalSelector::default(),
+            MobType::Sniffer => GoalSelector::default(),
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
             // alongside the brain.
@@ -3206,7 +3261,8 @@ impl Mob {
             | MobType::Camel
             | MobType::CamelHusk
             | MobType::Nautilus
-            | MobType::ZombieNautilus => GoalSelector::default(),
+            | MobType::ZombieNautilus
+            | MobType::Sniffer => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Ocelot => ocelot::target_goals(),
@@ -3409,6 +3465,7 @@ impl Mob {
             tame: tame::Tamable::default(),
             wolf: wolf::Wolf::default(),
             pig_sound_variant: pig::SoundVariant::Classic,
+            pig_steering: pig::Steering::default(),
             wool: 0,
             chicken_sound_variant: chicken::SoundVariant::Classic,
             egg_time: 0,
@@ -3452,6 +3509,7 @@ impl Mob {
             sulfur_cube: sulfur_cube::SulfurCubeState::default(),
             creaking: creaking::CreakingState::new(),
             nautilus: nautilus::NautilusState::default(),
+            sniffer: sniffer::Sniffer::default(),
             events: Vec::new(),
             needs_sync: false,
             knockback_sync: false,
@@ -3469,6 +3527,7 @@ impl Mob {
             zombie_villager: zombie_villager::ZombieVillagerState::default(),
             tadpole_age: 0,
             discard_friction: false,
+            leash: None,
             passengers: Vec::new(),
             ejected_passenger: None,
             push_count: (i64::MIN, 0),
@@ -3519,6 +3578,9 @@ impl Mob {
             // `Armadillo` 构造函数里的 `getNavigation().setCanFloat(true)`。
             // The `Armadillo` constructor's `getNavigation().setCanFloat(true)`.
             mob.navigation.flags.can_float = true;
+        }
+        if mob_type == MobType::Sniffer {
+            sniffer::configure(&mut mob);
         }
         if mob_type.is_camel() {
             camel::configure(&mut mob);
@@ -3617,6 +3679,10 @@ impl Mob {
             let (width, height, _) = camel::dimensions(self.is_baby(), sitting);
             return (width, height);
         }
+        if self.mob_type == MobType::Sniffer {
+            let (width, height, _) = sniffer::pose_dimensions(self.is_baby(), self.sniffer.state);
+            return (width, height);
+        }
         if fish::is_fish(self.mob_type) {
             let (width, height, _) =
                 fish::dimensions(self.mob_type, self.fish.variant, self.fish.puff_state);
@@ -3684,6 +3750,7 @@ impl Mob {
             || (fish::is_fish(self.mob_type) && self.fish.from_bucket)
             || (self.mob_type == MobType::Axolotl && self.axolotl.from_bucket)
             || self.enderman.carried.is_some()
+            || leash::is_leashed(self)
     }
 
     /// `isDeadOrDying`。
@@ -3896,6 +3963,10 @@ pub struct MobPublic {
     pub wolf_sound_variant: i32,
     pub needs_sync: bool,
     pub pig_sound_variant: pig::SoundVariant,
+    /// 猪的 `DATA_BOOST_TIME`。
+    ///
+    /// The pig `DATA_BOOST_TIME`.
+    pub pig_boost_time: i32,
     pub wool: u8,
     pub chicken_sound_variant: chicken::SoundVariant,
     /// `Armadillo.ARMADILLO_STATE` 的网络 ID。
@@ -3960,6 +4031,14 @@ pub struct MobPublic {
     /// The nautilus `DASH` boolean and zombie-nautilus variant id.
     pub nautilus_dashing: bool,
     pub nautilus_variant: i32,
+    /// 嗅探兽的状态（挖掘时尺寸变小）。
+    ///
+    /// The sniffer's state (smaller dimensions while digging).
+    pub sniffer_state: sniffer::State,
+    /// 嗅探兽掉种子的时刻（`DATA_DROP_SEED_AT_TICK`）。
+    ///
+    /// The sniffer's drop-seed tick (`DATA_DROP_SEED_AT_TICK`).
+    pub sniffer_drop_seed_at_tick: i32,
     /// `IronGolem.DATA_FLAGS_ID` / `SnowGolem.DATA_PUMPKIN_ID`，都是 BYTE。
     pub golem_flags: u8,
     /// 村民的 `VillagerData` 三项、`VillagerDataFinalized` 和 `DATA_UNHAPPY_COUNTER`。
@@ -4087,6 +4166,10 @@ pub struct MobPublic {
     ///
     /// The players riding this mob; the sync layer sends `set_passengers` from it.
     pub passengers: Vec<EntityUid>,
+    /// 拴绳牵引者；配对时发 `set_entity_link`。
+    ///
+    /// The leash holder, sent as `set_entity_link` on pairing.
+    pub leash_holder: Option<EntityUid>,
 }
 
 impl MobPublic {
@@ -4129,6 +4212,7 @@ impl MobPublic {
             wolf_sound_variant: mob.wolf.sound_variant,
             needs_sync: mob.needs_sync,
             pig_sound_variant: mob.pig_sound_variant,
+            pig_boost_time: mob.pig_steering.boost_time_total,
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,
             armadillo_state: mob.armadillo.state.id(),
@@ -4153,6 +4237,8 @@ impl MobPublic {
             guardian_attack_target: mob.guardian.attack_target,
             nautilus_dashing: mob.nautilus.dashing,
             nautilus_variant: mob.nautilus.variant,
+            sniffer_state: mob.sniffer.state,
+            sniffer_drop_seed_at_tick: mob.sniffer.drop_seed_at_tick,
             bat_flags: mob.bat.flags,
             golem_flags: if mob.mob_type == MobType::IronGolem {
                 mob.iron_golem.flags
@@ -4225,6 +4311,7 @@ impl MobPublic {
                 .map(|(slot, stack)| (slot, stack.clone()))
                 .collect(),
             passengers: mob.passengers.clone(),
+            leash_holder: leash::leash_holder(mob),
         }
     }
 
@@ -4250,6 +4337,10 @@ impl MobPublic {
             let (width, height, _) = camel::dimensions(self.baby, sitting);
             return (width, height);
         }
+        if self.mob_type == MobType::Sniffer {
+            let (width, height, _) = sniffer::pose_dimensions(self.baby, self.sniffer_state);
+            return (width, height);
+        }
         if fish::is_fish(self.mob_type) {
             let (width, height, _) =
                 fish::dimensions(self.mob_type, self.fish_variant, self.puff_state);
@@ -4269,6 +4360,7 @@ impl MobPublic {
         self.persistence_required
             || (fish::is_fish(self.mob_type) && self.fish_from_bucket)
             || self.enderman_carried.is_some()
+            || self.leash_holder.is_some()
     }
 
     pub fn is_alive(&self) -> bool {
@@ -4292,6 +4384,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Villager => Some(Box::new(villager_ai::brain(false, 0))),
         MobType::Nautilus | MobType::ZombieNautilus => Some(Box::new(nautilus_ai::brain(kind))),
         MobType::Creaking => Some(Box::new(creaking_ai::brain())),
+        MobType::Sniffer => Some(Box::new(sniffer::brain())),
         _ => None,
     }
 }

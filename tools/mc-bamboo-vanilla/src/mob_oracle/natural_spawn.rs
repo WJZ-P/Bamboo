@@ -587,6 +587,8 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         uuid: None,
         position: Vec3::new(case.player_x, f64::from(case.floors[0] + 1), 8.5),
         delta: Vec3::default(),
+        width: 0.6,
+        height: 1.8,
         eye_height: 1.62,
         health: 20.0,
         look_direction: Vec3::default(),
@@ -596,6 +598,8 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         game_mode: 0,
         mining_fatigue: None,
         creative: false,
+        flying: false,
+        explosion_knockback_resistance: 0.0,
         sneaking: false,
         sprinting: false,
         swimming: false,
@@ -652,6 +656,9 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         redstone: Default::default(),
         block_entities: BlockEntities::default(),
         block_events: BlockEvents::default(),
+        game_event_listeners: Default::default(),
+        warden_warnings: Default::default(),
+        darkness_ticks: 0,
         poi: mc_bamboo_world::poi::PoiStore::new(),
         entities: Entities::with_next_id(2),
         players: vec![player],
@@ -661,6 +668,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         ignore_bed_monsters: false,
         short_hunger: false,
         wrong_was_hurt: false,
+        explosion_break: 0,
     })
 }
 

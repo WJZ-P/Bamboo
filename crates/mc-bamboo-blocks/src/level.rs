@@ -10,6 +10,7 @@ use mc_bamboo_core::{
     sign::{SignContent, SignTextSlot},
 };
 use mc_bamboo_data::SoundSource;
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -44,6 +45,26 @@ pub struct EquipTarget {
     /// `minecraft:entity_type` 的注册表 ID。
     pub entity_type: i32,
     pub equipment: [Option<ItemStack>; 8],
+}
+
+/// 试炼刷怪笼一次玩家探测看到的一名玩家：UUID、眼睛位置和身上的不祥效果。
+///
+/// 效果信息在游戏层（`PlayerView` 没有它），所以 [`Level::trial_spawner_players`]
+/// 负责距离筛选并给出眼睛位置；视线遮挡由方块层用 [`World::clip_visual`] 再滤一遍。
+///
+/// One player seen by the trial spawner's detector: its UUID, eye position and
+/// ominous effects. The effect facts live in the game layer, so
+/// [`Level::trial_spawner_players`] filters by distance and reports the eye
+/// position; the block layer then applies the line-of-sight clip.
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub struct TrialSpawnerPlayer {
+    pub uuid: [u8; 16],
+    /// 身上有 `TRIAL_OMEN`。
+    pub trial_omen: bool,
+    /// 身上的 `BAD_OMEN` 等级；没有时是 `None`。
+    pub bad_omen_amplifier: Option<i32>,
+    /// 眼睛位置，`levelEvent(3020, ...)` 用 `BlockPos::containing`。
+    pub eye_position: mc_bamboo_core::Vec3,
 }
 
 /// 一次触发的种类。
@@ -232,6 +253,18 @@ pub trait LevelSideState {
     /// 把这一刻世界边界的方块盒交给方块实体表，离开边界的睡眠实体暂停，见
     /// [`BlockEntities::sync_border`]。
     fn sync_block_entity_border(&mut self, border: BlockBox);
+    /// 这一岛的游戏事件监听者登记表。没有登记表的世界（世界生成、压测）返回 `None`，
+    /// 游戏事件在那里不投递。
+    fn game_event_listeners(&self) -> Option<&crate::game_event::registry::GameEventListeners> {
+        None
+    }
+    /// 见 [`LevelSideState::game_event_listeners`]。
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut crate::game_event::registry::GameEventListeners> {
+        None
+    }
+
     /// 这一格的方块或容器内容变了：叫醒关注它的睡眠条目，见 [`BlockEntities::notify_cell`]。
     /// 默认什么都不做（没有休眠的世界）。
     fn notify_block_entity_cell(&mut self, _pos: BlockPos) {}
@@ -277,6 +310,16 @@ pub trait LevelTables {
     /// Game layer hook: mark a chunk as possibly changed. Called from every
     /// positional write in the blanket impl; over-marking is harmless.
     fn mark_chunk_dirty(&mut self, _pos: ChunkPos) {}
+    /// 见 [`LevelSideState::game_event_listeners`]。
+    fn game_event_listeners(&self) -> Option<&crate::game_event::registry::GameEventListeners> {
+        None
+    }
+    /// 见 [`LevelSideState::game_event_listeners`]。
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut crate::game_event::registry::GameEventListeners> {
+        None
+    }
 }
 
 impl<T: LevelTables + ?Sized> LevelSideState for T {
@@ -469,6 +512,16 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
         &mut self,
     ) -> Option<std::collections::HashSet<(i32, i32, i32)>> {
         self.block_entities_table_mut().take_watched_sections()
+    }
+
+    fn game_event_listeners(&self) -> Option<&crate::game_event::registry::GameEventListeners> {
+        LevelTables::game_event_listeners(self)
+    }
+
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut crate::game_event::registry::GameEventListeners> {
+        LevelTables::game_event_listeners_mut(self)
     }
 
     fn begin_block_entity_tick(&mut self, now: i64) {
@@ -932,6 +985,15 @@ pub trait Level: LevelSideState + LevelEntities {
         true
     }
 
+    /// 爆炸对拍的改坏确认钩子：正式世界恒为 0。位 0 让 `explode_tnt` 跳过
+    /// `hurtEntities`，位 1 让它丢掉爆炸中心的 `getY(0.0625)` 抬升。
+    ///
+    /// Oracle break-test hook for explosions; real levels always return 0. Bit 0 makes
+    /// `explode_tnt` skip `hurtEntities`; bit 1 drops the `getY(0.0625)` centre lift.
+    fn explosion_break(&self) -> u8 {
+        0
+    }
+
     /// 这一格的方块实体这一刻要不要跑。默认要跑。
     ///
     /// 方块 oracle 的假世界只登记漏斗和移动中的活塞，熔炉和酿造台不跑。
@@ -1273,6 +1335,81 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
+    // 试炼刷怪笼的世界副作用。方块层只跑状态机，这些副作用里需要游戏层数据
+    // （玩家的不祥效果、装备表、战利品表、实体位置）的都由游戏层实现；缺省是
+    // 「没有玩家 / 不生成 / 不掉落」，只读测试世界和方块 oracle 走这一条。
+    // The trial spawner's world side effects. The block layer only runs the state
+    // machine; hooks that need game-layer data default to no players / no spawn /
+    // no drops, which the block oracle and read-only test worlds use.
+
+    /// `PlayerDetector.detect` 的候选玩家：`pos` 附近 `range` 格内、带不祥效果和眼睛
+    /// 位置的玩家。视线遮挡由方块层用 [`World::clip_visual`] 再滤。默认没有玩家。
+    fn trial_spawner_players(&self, _pos: BlockPos, _range: f64) -> Vec<TrialSpawnerPlayer> {
+        Vec::new()
+    }
+
+    /// `EquipmentTable` 套到一只还没放进世界的生物上：按战利品表给装备槽，写
+    /// 掉率。默认不做事。
+    fn equip_mob(&mut self, _entity: &mut crate::entity::Entity, _equipment: &Tag) {}
+
+    /// `TrialSpawner.ejectReward`：按战利品表在 `pos` 弹出一组奖励，返回有没有弹过。
+    /// 默认不弹。
+    fn trial_spawner_eject_reward(&mut self, _pos: BlockPos, _loot_table: &str) -> bool {
+        false
+    }
+
+    /// `spawnOminousOminousItemSpawner`：在探测到的玩家上方生成不祥物品生成器。
+    /// 默认不生成。
+    fn trial_spawner_spawn_ominous_item(&mut self, _pos: BlockPos, _loot_table: &str) -> bool {
+        false
+    }
+
+    /// `resetAfterBecomingOminous`：变成不祥试炼时让已记录的生物消失。默认不做事。
+    fn trial_spawner_discard_mobs(&mut self, _mobs: &[[u8; 16]]) {}
+
+    /// `shouldMobBeUntracked`：这只已记录的生物是否已经不活 / 太远 / 换维度。
+    /// 默认只在实体不存在时算「已不活」。
+    fn trial_spawner_mob_untracked(&self, uuid: [u8; 16], _pos: BlockPos) -> bool {
+        !self.has_mob_uuid(&uuid)
+    }
+
+    /// `getOrCreateDisplayEntity` 能不能造出显示实体。默认可以，让刷怪笼从
+    /// `inactive` 推进到 `waiting_for_players`。
+    fn trial_spawner_has_display_entity(&self) -> bool {
+        true
+    }
+
+    // 宝库的世界副作用。方块层只跑状态机；需要游戏层数据的（玩家探测、VAULT
+    // 战利品表、世界随机源、玩家物品栏）由游戏层实现，缺省是「没有玩家 / 空奖励 /
+    // 不消耗」，只读测试世界和方块 oracle 走这一条。
+
+    /// `PlayerDetector.detect` 的候选玩家：`pos` 附近 `range` 格内的玩家 UUID
+    /// （`INCLUDING_CREATIVE_PLAYERS`、`lineOfSight=false`）。默认没有玩家。
+    fn vault_players(&self, _pos: BlockPos, _range: f64) -> Vec<[u8; 16]> {
+        Vec::new()
+    }
+
+    /// `resolveItemsToEject`：按 VAULT 战利品表（玩家 luck / this_entity / 钥匙 tool）
+    /// 弹出一组物品。默认空。
+    fn vault_resolve_reward(
+        &mut self,
+        _pos: BlockPos,
+        _player: [u8; 16],
+        _key: &ItemStack,
+        _loot_table: &str,
+    ) -> Vec<ItemStack> {
+        Vec::new()
+    }
+
+    /// `getRandomDisplayItemFromLootTable`：用世界随机源从表里取一件展示物品。
+    /// 默认空。
+    fn vault_random_display_item(&mut self, _loot_table: &str, _pos: BlockPos) -> ItemStack {
+        ItemStack::empty()
+    }
+
+    /// `ItemStack.consume`：消耗玩家手里的 `count` 把钥匙。默认不消耗。
+    fn vault_consume_key(&mut self, _player: [u8; 16], _count: i32) {}
+
     /// 现实中的本地日期，不是世界时间。
     ///
     /// The local calendar date, independent of the world clock.
@@ -1535,6 +1672,13 @@ pub trait Level: LevelSideState + LevelEntities {
     /// `false` means this level cannot, and the caller falls back to [`Effect::HealPlayer`].
     fn heal_player_now(&mut self, _target: crate::entity::EntityUid, _amount: f32) -> bool {
         false
+    }
+
+    /// 幽匿尖啸体 `tryToWarn`：给这名玩家加一级监守者警告，返回警告后的等级。
+    /// `None` 表示没加成（冷却中，或这个世界不存玩家警告等级）。默认不做，
+    /// 测试和游戏层各自覆盖。
+    fn warn_warden(&mut self, _target: crate::entity::EntityUid) -> Option<i32> {
+        None
     }
 
     /// `ServerPlayer.startSleepInBed` 的怪物查询：以床的 `Vec3.atBottomCenterOf(pos)` 为中心、
@@ -2458,13 +2602,22 @@ pub fn monster_prevents_rest_in<L: Level + ?Sized>(level: &L, pos: BlockPos) -> 
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
 ///
 /// The non-block results of one action, handed to the caller for delivery.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// `levelEvent(2001, pos, state)`。`except_initiator` 表示不用发给发起者，它自己已经预测过了。
     Destroyed {
         pos: BlockPos,
         state: BlockState,
         except_initiator: bool,
+    },
+    /// 振动飞行粒子：`VibrationParticleOption(BlockPositionSource(pos), travel)`。
+    /// 游戏层按位置源补上目标格，广播给 32 格内的玩家。
+    VibrationParticle {
+        pos: BlockPos,
+        x: f64,
+        y: f64,
+        z: f64,
+        travel: i32,
     },
     /// `levelEvent(1502, pos, 0)`：红石火把开关得太频繁，烧坏时冒的那股烟。
     TorchBurnout { pos: BlockPos },
@@ -2546,6 +2699,24 @@ pub enum Effect {
         except_initiator: bool,
         /// 显式给的种子。音符盒用 `Level.random.nextLong()`，其余由网络层另取。
         seed: Option<i64>,
+    },
+    /// `ServerLevel.explode` 发给范围内玩家的 `ClientboundExplodePacket`。
+    /// 游戏层按 `hit_players` 给每名玩家带上自己那份击退向量。
+    ///
+    /// `ServerLevel.explode` broadcasts `ClientboundExplodePacket` to players in range.
+    /// The game layer picks each player's own knockback out of `hit_players`.
+    Explode {
+        center: mc_bamboo_core::Vec3,
+        radius: f32,
+        block_count: i32,
+        /// 被击退的玩家 `(uid, 击退向量)`，和 `ServerExplosion.getHitPlayers` 对应。
+        ///
+        /// The knocked-back players `(uid, knockback)`, mirroring `getHitPlayers`.
+        hit_players: Vec<(crate::entity::EntityUid, mc_bamboo_core::Vec3)>,
+        /// `ServerExplosion.isSmall()`：小爆炸用 `EXPLOSION` 粒子。
+        is_small: bool,
+        /// `playSound`：来源实体不静音。
+        play_sound: bool,
     },
     /// `levelEvent`：客户端自己放粒子和声音。传播范围是 64 格，坐标是方块整数坐标。
     LevelEvent {
@@ -2646,6 +2817,12 @@ pub enum Effect {
     /// `ElderGuardian.customServerAiStep`: send the `GUARDIAN_ELDER_EFFECT` game event
     /// packet only to the player who received mining fatigue.
     GuardianElderEffect { target: EntityUid, silent: bool },
+    /// `transformBadOmenIntoTrialOmen`：把玩家的不祥之兆换成试炼之兆。游戏层按
+    /// `player` 找玩家、移除 `BAD_OMEN`、加上 `TRIAL_OMEN`（时长 `duration`）。
+    ///
+    /// `transformBadOmenIntoTrialOmen`: replace the player's bad omen with trial omen.
+    /// The game layer finds the player by UUID, removes `BAD_OMEN` and adds `TRIAL_OMEN`.
+    TrialSpawnerTransformBadOmen { player: [u8; 16], duration: i32 },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///

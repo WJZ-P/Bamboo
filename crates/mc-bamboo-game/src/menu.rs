@@ -20,6 +20,7 @@ use mc_bamboo_core::{Aabb, BlockPos, Hand, Vec3};
 use mc_bamboo_data::{BlockAncestor, blocks, registries::menu};
 use mc_bamboo_protocol::{
     item::ItemStack,
+    merchant::MerchantOffer,
     packet::play::{
         ContainerClose, ContainerInput, ContainerSetContent, ContainerSetSlot, GameMode,
         HashedStack, OpenScreen, SetCursorItem, SetPlayerInventory,
@@ -49,14 +50,21 @@ const DOUBLE_CHEST_TITLE: &str = "container.chestDouble";
 /// 物品栏菜单里快捷栏第一格的槽位，玩家部分的 36 格从这里开始。
 const PLAYER_SLOTS: usize = 36;
 /// 物品栏菜单里第一格的位置，`Inventory.slots` 是按菜单槽位存的。
-const INVENTORY_MENU_START: usize = 9;
+pub(crate) const INVENTORY_MENU_START: usize = 9;
+/// 商人菜单的结果格。
+const RESULT_SLOT: usize = 2;
 
 /// 菜单指向的方块。双箱要记住两半，打开和关闭都要作用在两边。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Target {
     Single(BlockPos),
-    Double { first: BlockPos, second: BlockPos },
+    Double {
+        first: BlockPos,
+        second: BlockPos,
+    },
     EnderChest(BlockPos),
+    /// 商人菜单指向的村民实体 ID。
+    Villager(i32),
 }
 
 impl Target {
@@ -64,6 +72,7 @@ impl Target {
     pub(crate) fn positions(&self) -> Vec<BlockPos> {
         match *self {
             Self::Single(pos) | Self::EnderChest(pos) => vec![pos],
+            Self::Villager(_) => Vec::new(),
             Self::Double { first, second } => vec![first, second],
         }
     }
@@ -71,6 +80,14 @@ impl Target {
     /// 这个位置是不是菜单指向的方块之一。
     pub(crate) fn contains(&self, pos: BlockPos) -> bool {
         self.positions().contains(&pos)
+    }
+
+    /// 商人菜单指向的村民实体 ID。
+    pub(crate) fn villager(&self) -> Option<i32> {
+        match *self {
+            Self::Villager(id) => Some(id),
+            _ => None,
+        }
     }
 }
 
@@ -127,7 +144,7 @@ pub(crate) struct Menu {
     /// 容器自己的格数。玩家物品栏的 36 格另加在后面。
     container_size: usize,
     carried: ItemStack,
-    state_id: i32,
+    pub(crate) state_id: i32,
     remote_slots: Vec<RemoteSlot>,
     remote_carried: RemoteSlot,
     quickcraft_status: i32,
@@ -137,6 +154,8 @@ pub(crate) struct Menu {
     ///
     /// Crafting, furnace, and brewing. When set, the chest slot path is not used.
     pub(crate) station: Option<station::Station>,
+    /// 商人菜单的三格和选中提示。
+    pub(crate) merchant: Option<crate::merchant::MerchantMenu>,
 }
 
 impl Menu {
@@ -155,7 +174,26 @@ impl Menu {
             quickcraft_type: 0,
             quickcraft_slots: Vec::new(),
             station: None,
+            merchant: None,
         }
+    }
+
+    /// 一个商人菜单：三格容器、玩家 36 格。
+    pub(crate) fn merchant(container_id: i32, villager: i32) -> Self {
+        let mut menu = Self::new(
+            container_id,
+            ContainerKind::Chest,
+            Target::Villager(villager),
+            3,
+        );
+        menu.merchant = Some(crate::merchant::MerchantMenu {
+            villager,
+            selection_hint: 0,
+            payment: [ItemStack::empty(), ItemStack::empty()],
+            result: ItemStack::empty(),
+            active: None,
+        });
+        menu
     }
 
     /// 菜单一共有多少格。
@@ -217,6 +255,16 @@ pub(crate) struct ClickPacket {
     pub(crate) carried: HashedStack,
 }
 
+/// 商人菜单借给点击逻辑的那部分：交易表和选中提示。结果格是 `container[2]`，
+/// 只读、取出时完成交易。
+///
+/// The merchant menu state the click logic borrows: the offers and the selection
+/// hint. `container[2]` is the read-only result slot, taken to complete the trade.
+struct MerchantCtx<'a> {
+    offers: &'a mut [MerchantOffer],
+    selection_hint: &'a mut i32,
+}
+
 /// 点击时菜单和物品栏的联合视图，对应官方 `doClick` 里能碰到的东西。
 struct Ctx<'a> {
     kind: ContainerKind,
@@ -232,6 +280,8 @@ struct Ctx<'a> {
     ///
     /// Stacks thrown by this click. Entities are spawned after the click finishes.
     thrown: &'a mut Vec<ItemStack>,
+    /// 商人菜单。`None` 是普通容器。
+    merchant: Option<MerchantCtx<'a>>,
 }
 
 impl Ctx<'_> {
@@ -266,12 +316,53 @@ impl Ctx<'_> {
         }
     }
 
-    /// 官方 `Slot.mayPlace`。只有潜影盒的槽拒绝潜影盒。
+    /// 官方 `Slot.mayPlace`。只有潜影盒的槽拒绝潜影盒；商人菜单的结果格（2）只读。
     fn may_place(&self, index: usize, stack: &ItemStack) -> bool {
+        if self.merchant.is_some() && index == RESULT_SLOT {
+            return false;
+        }
         if self.kind != ContainerKind::ShulkerBox || index >= self.container_size {
             return true;
         }
         !is_shulker_box_item(stack)
+    }
+
+    /// 取出结果格后完成交易（`MerchantResultSlot.onTake` 的扣付款 + 使用次数）。
+    fn merchant_take(&mut self) {
+        let Some(merchant) = &mut self.merchant else {
+            return;
+        };
+        let a = self.container[0].clone();
+        let b = self.container[1].clone();
+        let Some(index) =
+            crate::merchant::active_offer_index(merchant.offers, &a, &b, *merchant.selection_hint)
+        else {
+            return;
+        };
+        let mut a = a;
+        let mut b = b;
+        let offer = &merchant.offers[index];
+        if !(crate::merchant::offer_take(offer, &mut a, &mut b)
+            || crate::merchant::offer_take(offer, &mut b, &mut a))
+        {
+            return;
+        }
+        self.container[0] = a;
+        self.container[1] = b;
+        merchant.offers[index].uses += 1;
+    }
+
+    /// 商人菜单点击后重算结果格（`MerchantContainer.updateSellItem`）。
+    fn settle_merchant(&mut self) {
+        let Some(merchant) = &self.merchant else {
+            return;
+        };
+        let a = self.container[0].clone();
+        let b = self.container[1].clone();
+        self.container[2] =
+            crate::merchant::active_offer_index(merchant.offers, &a, &b, *merchant.selection_hint)
+                .map(|index| merchant.offers[index].result.clone())
+                .unwrap_or_else(ItemStack::empty);
     }
 
     /// 官方 `Slot.tryRemove`，`allowModification` 和 `mayPickup` 在我们的槽上恒为真。
@@ -422,6 +513,12 @@ impl Ctx<'_> {
         {
             return ItemStack::empty();
         }
+        // 商人结果格 Shift 取出：搬进背包后完成一次交易并重算结果，官方
+        // `MerchantResultSlot.onTake` 的扣付款 + 使用次数 + `updateSellItem`。
+        if index == RESULT_SLOT && self.merchant.is_some() {
+            self.merchant_take();
+            self.settle_merchant();
+        }
         clicked
     }
 
@@ -487,6 +584,10 @@ fn do_click(ctx: &mut Ctx, slot_index: i32, button: i32, input: ContainerInput) 
     } else if input == ContainerInput::PickupAll && slot_index >= 0 {
         pickup_all(ctx, slot_index, button);
     }
+    // 商人菜单点击后重算结果格。
+    if ctx.merchant.is_some() {
+        ctx.settle_merchant();
+    }
 }
 
 fn pickup_or_quick_move(ctx: &mut Ctx, slot_index: i32, button: i32, quick: bool) {
@@ -504,6 +605,9 @@ fn pickup_or_quick_move(ctx: &mut Ctx, slot_index: i32, button: i32, quick: bool
         return;
     };
     if quick {
+        // `AbstractContainerMenu.doClick` 的 QUICK_MOVE 分支是一个循环：结果格取走后
+        // `slotsChanged` 按剩余付款重新填结果，Shift 点一下会一直交易到付款不够或
+        // 背包放不下为止。
         let mut clicked = ctx.quick_move(index);
         while !clicked.is_empty() && is_same_item(&ctx.get(index), &clicked) {
             clicked = ctx.quick_move(index);
@@ -529,6 +633,10 @@ fn pickup(ctx: &mut Ctx, index: usize, primary: bool) {
         };
         if let Some(taken) = ctx.try_remove(index, amount, i32::MAX) {
             *ctx.carried = taken;
+            // 结果格取出即完成交易：扣付款、加使用次数。
+            if index == RESULT_SLOT {
+                ctx.merchant_take();
+            }
         }
     } else if ctx.may_place(index, &carried) {
         if is_same_item_same_components(&clicked, &carried) {
@@ -1022,6 +1130,11 @@ pub(crate) fn on_rename(region: &mut Region, id: PlayerId, name: &str) {
 }
 
 /// 合成器菜单切换禁用槽。官方 `handleContainerSlotStateChanged`。
+/// `ServerboundSelectTradePacket`。
+pub(crate) fn on_select_trade(region: &mut Region, id: PlayerId, slot: i32) {
+    crate::merchant::on_select_trade(region, id, slot);
+}
+
 pub(crate) fn on_slot_state_changed(
     region: &mut Region,
     id: PlayerId,
@@ -1034,6 +1147,21 @@ pub(crate) fn on_slot_state_changed(
 
 /// 官方 `AbstractContainerMenu.removed` 加子类的 `stopOpen`。
 fn finish_menu(region: &mut Region, id: PlayerId, menu: &mut Menu, return_items: bool) {
+    if let Some(state) = menu.merchant.take() {
+        let carried = std::mem::take(&mut menu.carried);
+        if return_items {
+            for stack in state.payment.into_iter().chain([carried]) {
+                place_item_back_in_inventory(region, id, stack);
+            }
+        }
+        // `MerchantMenu.removed` → `stopTrading()`：菜单关了就不再算交易中，降频豁免随之解除。
+        region.entities.with_mut(state.villager, |entity| {
+            if let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &mut entity.kind {
+                mob.villager.stop_trading();
+            }
+        });
+        return;
+    }
     if menu.station.is_some() {
         station::finish(region, id, menu, return_items);
         return;
@@ -1196,6 +1324,22 @@ pub(crate) fn tick(region: &mut Region) {
         }
         // 官方先 `broadcastChanges`，再看 `stillValid`：失效这一刻的槽位变化也会先发出去。
         // Vanilla broadcasts before `stillValid`, so the last slot changes still go out.
+        if region
+            .menus
+            .get(&id)
+            .is_some_and(|menu| menu.merchant.is_some())
+        {
+            // 商人菜单的 tick 只看 `stillValid`：村民死了或走远了就关掉。
+            // 补货由村民大脑（`WorkAtPoi`）触发，不在这里做。
+            let valid = region
+                .menus
+                .get(&id)
+                .is_some_and(|menu| still_valid(region, id, menu));
+            if !valid {
+                close_menu(region, id);
+            }
+            continue;
+        }
         let Some(mut menu) = region.menus.remove(&id) else {
             continue;
         };
@@ -1228,7 +1372,11 @@ fn still_valid(region: &Region, id: PlayerId, menu: &Menu) -> bool {
     let reach = player
         .attributes
         .value(mc_bamboo_data::registries::attribute::BLOCK_INTERACTION_RANGE);
+    if menu.merchant.is_some() {
+        return crate::merchant::still_valid(region, id, menu);
+    }
     match menu.target {
+        Target::Villager(_) => false,
         Target::Single(pos) => in_reach(region, pos, menu.kind, eye, reach),
         Target::Double { first, second } => {
             in_reach(region, first, menu.kind, eye, reach)
@@ -1254,8 +1402,21 @@ fn in_reach(region: &Region, pos: BlockPos, kind: ContainerKind, eye: Vec3, reac
     Aabb::new(x, y, z, x + 1.0, y + 1.0, z + 1.0).distance_to_sqr(eye) < range * range
 }
 
-/// 官方 `handleContainerClick`。
+/// 商人菜单点击先进专门的路径：结果格完成交易，别的格走通用点击。
 pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
+    if region
+        .menus
+        .get(&id)
+        .is_some_and(|menu| menu.merchant.is_some())
+    {
+        let _ = crate::merchant::on_click(region, id, packet);
+        return;
+    }
+    on_click_default(region, id, packet);
+}
+
+/// 通用点击（箱子 / 工作站 / 商人菜单的付款格和玩家物品栏）。
+pub(crate) fn on_click_default(region: &mut Region, id: PlayerId, packet: ClickPacket) {
     if packet.container_id == 0 {
         // 方块菜单开着时，容器 ID 0 不是当前菜单。
         // Container id 0 is not the open menu while a block menu is up.
@@ -1323,6 +1484,7 @@ pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
             quickcraft_slots: &mut menu.quickcraft_slots,
             creative,
             thrown: &mut thrown,
+            merchant: None,
         };
         do_click(
             &mut ctx,
@@ -1341,6 +1503,11 @@ pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
                 .slots
                 .clone_from_slice(&slots[..menu.container_size]);
         }
+    } else if let Some(state) = menu.merchant.as_mut() {
+        if slots.len() >= 3 {
+            state.payment = [slots[0].clone(), slots[1].clone()];
+            state.result = slots[2].clone();
+        }
     } else {
         write_back_containers(region, &menu, &slots);
     }
@@ -1354,13 +1521,57 @@ pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
         }
     }
     menu.remote_carried.receive(packet.carried);
-    if full_resync {
+    region.menus.insert(id, menu);
+    if region
+        .menus
+        .get(&id)
+        .is_some_and(|menu| menu.merchant.is_some())
+    {
+        broadcast_merchant_state(region, id);
+    } else if full_resync {
+        let Some(mut menu) = region.menus.remove(&id) else {
+            return;
+        };
         broadcast_full_state(region, id, &mut menu);
+        region.menus.insert(id, menu);
     } else {
+        let Some(mut menu) = region.menus.remove(&id) else {
+            return;
+        };
         broadcast_changes(region, id, &mut menu);
+        region.menus.insert(id, menu);
+    }
+}
+
+/// 商人菜单：把点击后的前三格写回付款 / 结果状态，重算结果，再同步全部槽位。
+pub(crate) fn broadcast_merchant_state(region: &mut Region, id: PlayerId) {
+    let Some(mut menu) = region.menus.remove(&id) else {
+        return;
+    };
+    let slots = display(region, id, &menu);
+    if let Some(state) = menu.merchant.as_mut() {
+        state.payment = [slots[0].clone(), slots[1].clone()];
+    }
+    crate::merchant::slots_changed(region, id, &mut menu);
+    if let Some(state) = menu.merchant.as_ref() {
+        let items = display(region, id, &menu);
+        let mut all = items;
+        all[RESULT_SLOT_FOR_MENU] = state.result.clone();
+        let state_id = menu.take_full_state(&all);
+        region.links.send(
+            id,
+            &ContainerSetContent {
+                container_id: menu.container_id,
+                state_id,
+                items: &all,
+                carried: &menu.carried,
+            },
+        );
     }
     region.menus.insert(id, menu);
 }
+
+const RESULT_SLOT_FOR_MENU: usize = 2;
 
 /// 官方 `broadcastChanges`：只发和远程槽不一致的格，光标单独发。
 fn broadcast_changes(region: &mut Region, id: PlayerId, menu: &mut Menu) {
@@ -1422,6 +1633,13 @@ fn display(region: &Region, id: PlayerId, menu: &Menu) -> Vec<ItemStack> {
 ///
 /// The container's own slots. An ender chest's contents live on the player.
 fn raw_container_slots(region: &Region, id: PlayerId, menu: &Menu) -> Vec<ItemStack> {
+    if let Some(state) = &menu.merchant {
+        return vec![
+            state.payment[0].clone(),
+            state.payment[1].clone(),
+            state.result.clone(),
+        ];
+    }
     if matches!(menu.target, Target::EnderChest(_)) {
         return region.players.get(&id).map_or_else(
             || vec![ItemStack::empty(); menu.container_size],
@@ -1446,6 +1664,13 @@ fn raw_container_slots(region: &Region, id: PlayerId, menu: &Menu) -> Vec<ItemSt
 /// 漏斗和发射器原来没有条目，这里按需新建，否则点开的菜单编辑会悄悄丢掉。
 /// 内容变了的格子要 `setChanged`，比较器才会立刻重算。
 fn write_back_containers(region: &mut Region, menu: &Menu, slots: &[ItemStack]) {
+    if slots.len() < 3 {
+        return;
+    }
+    let _ = region;
+    if menu.merchant.is_some() {
+        return;
+    }
     let mut offset = 0;
     let mut changed = Vec::new();
     for pos in menu.target.positions() {

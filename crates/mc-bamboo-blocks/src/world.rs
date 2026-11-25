@@ -4,12 +4,16 @@
 
 use std::{borrow::BorrowMut, collections::VecDeque};
 
-use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, mth, sign::SignContent};
+use mc_bamboo_core::{
+    BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3, mth, sign::SignContent,
+};
 use mc_bamboo_data::{Block, BlockAncestor, CollisionShapeKind, blocks, sounds};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 use tracing::{error, warn};
 
 use crate::{
+    InteractionResult,
     behaviour::machines::{PistonMoving, ShulkerBoxEntity, open_support_shape},
     block_entity::{self, BlockEntity, BlockEvent},
     context::BlockHit,
@@ -799,6 +803,34 @@ impl<'a> World<'a> {
         }
     }
 
+    /// 幽匿尖啸体 `tryToWarn`：给这名玩家加一级监守者警告，返回警告后的等级。
+    pub fn warn_player(&mut self, target: crate::entity::EntityUid) -> Option<i32> {
+        self.level.warn_warden(target)
+    }
+
+    /// `Warden.applyDarknessAround`：给半径内的玩家上黑暗效果。
+    pub fn darkness_around(&mut self, center: Vec3, radius: i32, ticks: i32) {
+        let targets: Vec<crate::entity::EntityUid> = {
+            let mut ids = Vec::new();
+            let radius = f64::from(radius);
+            self.level.for_each_player(&mut |player| {
+                if player.position.distance_to_sqr(center) <= radius * radius {
+                    ids.push(player.uid);
+                }
+            });
+            ids
+        };
+        for target in targets {
+            self.give_player_effect(
+                target,
+                crate::entity::mob::effects::EffectInstance::new(
+                    mc_bamboo_data::registries::mob_effect::DARKNESS,
+                    ticks,
+                ),
+            );
+        }
+    }
+
     /// 给一头生物挂效果（`LivingEntity.addEffect`）。
     ///
     /// Adds an effect to a mob (`LivingEntity.addEffect`).
@@ -1081,6 +1113,27 @@ impl<'a> World<'a> {
         self.level.block_state(pos)
     }
 
+    /// 这一格在合法高度内时的状态；越界 / 未加载时返回 `None`。
+    pub fn block_state_if_valid(&self, pos: BlockPos) -> Option<BlockState> {
+        self.is_loaded(pos).then(|| self.block_state(pos))
+    }
+
+    /// 游戏事件在 26.3 当场投递，见 [`crate::game_event::dispatch::post`]。
+    ///
+    /// 精确 / 并行驱动各自保证落地顺序：并行阶段把事件当命令攒起来，
+    /// 按 uid 顺序投递；这里不排队、不留到刻末。
+    pub fn game_event(
+        &mut self,
+        event: crate::game_event::GameEvent,
+        source: Vec3,
+        context: crate::game_event::dispatch::EventContext,
+    ) {
+        let deliveries = crate::game_event::dispatch::post(self, event, source, context);
+        for delivery in deliveries {
+            self.deliver_game_event(delivery);
+        }
+    }
+
     /// `getFluidState`。
     pub fn fluid_state(&self, pos: BlockPos) -> FluidState {
         self.block_state(pos).fluid()
@@ -1104,6 +1157,10 @@ impl<'a> World<'a> {
     /// 这次操作背后的可变存储。测试里要把借出去的实体原样放回去。
     #[cfg(test)]
     pub(crate) fn level_mut_for_test(&mut self) -> &mut dyn Level {
+        self.level
+    }
+    /// 这次操作背后的可变存储。登记表这类岛级数据要在触发里改。
+    pub fn level_mut(&mut self) -> &mut dyn Level {
         self.level
     }
 
@@ -1593,6 +1650,13 @@ impl<'a> World<'a> {
             return;
         }
         self.level.insert_block_entity(entity);
+        if let Some(table) = self.level.game_event_listeners_mut() {
+            table.register(
+                pos.chunk(),
+                pos.y >> 4,
+                crate::game_event::registry::ListenerRef::BlockEntity(pos),
+            );
+        }
     }
 
     /// `Level.removeBlockEntity`。
@@ -1601,6 +1665,13 @@ impl<'a> World<'a> {
         self.level.wake_block_entity(pos);
         self.notify_changed(pos);
         let _ = self.level.remove_block_entity(pos);
+        if let Some(table) = self.level.game_event_listeners_mut() {
+            table.unregister(
+                pos.chunk(),
+                pos.y >> 4,
+                crate::game_event::registry::ListenerRef::BlockEntity(pos),
+            );
+        }
     }
 
     /// 带着这一格的方块实体运行一段代码。这段时间它不在表里，[`BlockEntities::get`] 是 `None`，
@@ -3293,7 +3364,19 @@ impl<'a> World<'a> {
             self.spawn_after_break(state, pos, &mc_bamboo_protocol::item::ItemStack::empty());
         }
         let fluid = self.fluid_state(pos);
-        self.set_block_limited(pos, fluid.legacy_block(), UPDATE_ALL, limit)
+        let removed = self.set_block_limited(pos, fluid.legacy_block(), UPDATE_ALL, limit);
+        if removed {
+            // `Level.destroyBlock` 只在真的换掉这一格时发 BLOCK_DESTROY。
+            self.game_event(
+                crate::game_event::GameEvent::BlockDestroy,
+                crate::world::block_center_public(pos),
+                crate::game_event::dispatch::EventContext {
+                    affected_state: Some(state),
+                    ..Default::default()
+                },
+            );
+        }
+        removed
     }
 
     /// `Block.updateOrDestroy`。
@@ -3632,6 +3715,145 @@ impl<'a> World<'a> {
         self.level.has_mob_uuid(uuid)
     }
 
+    // 试炼刷怪笼的副作用，转发给 [`Level`] 的钩子；游戏层覆盖成真实现。
+
+    /// 见 [`Level::trial_spawner_players`]。
+    pub fn trial_spawner_players(
+        &self,
+        pos: BlockPos,
+        range: f64,
+    ) -> Vec<crate::level::TrialSpawnerPlayer> {
+        self.level.trial_spawner_players(pos, range)
+    }
+
+    /// `SpawnData.entityToSpawn` 一步到位的路径（试炼刷怪笼用）：按 `entity_tag`
+    /// 构造实体、`snapTo(position, yaw, pitch)`，再走 [`Self::commit_spawn_data_entity`]
+    /// 提交，返回 UUID。
+    ///
+    /// The one-shot `SpawnData.entityToSpawn` path (used by the trial spawner):
+    /// build the entity from `entity_tag`, `snapTo`, then commit via
+    /// [`Self::commit_spawn_data_entity`] and return its UUID.
+    pub fn spawn_from_spawn_data(
+        &mut self,
+        entity_tag: &Tag,
+        position: Vec3,
+        yaw: f32,
+        pitch: f32,
+        reason: crate::entity::mob::spawn::SpawnReason,
+        equipment: Option<&Tag>,
+    ) -> Option<[u8; 16]> {
+        use crate::entity::mob::{MobType, nbt::load_into, spawn::snap_to};
+        let id = crate::archive::tag::field(entity_tag, "id").and_then(|value| match value {
+            Tag::String(text) if !text.is_empty() => Some(text.as_str()),
+            _ => None,
+        })?;
+        let kind = MobType::by_name(id)?;
+        let is_id_only = matches!(entity_tag, Tag::Compound(entries) if entries.len() == 1);
+        let mut entity = self.prepare_entity(Entity::by_mob_type(kind, Vec3::default()));
+        if load_into(&mut entity, entity_tag).is_err() {
+            return None;
+        }
+        snap_to(&mut entity, position, yaw, pitch);
+        Some(
+            self.commit_spawn_data_entity(entity, kind, is_id_only, reason, true, equipment)
+                .0,
+        )
+    }
+
+    /// `SpawnData.entityToSpawn` 的提交阶段：只有 `id` 时跑 `finalizeSpawn`、可选的
+    /// 持久化标记和装备表、放进世界、收尾骑士。普通刷怪笼和试炼刷怪笼共用这一份，
+    /// 让 `finalizeSpawn` / `add_prepared_entity` / `finish_jockeys` 只有一处实现；
+    /// 两者构造实体和随机朝向的时机不同（各自照官方字节码），所以构造仍分开。
+    /// 返回 `(UUID, 实体 ID)`。
+    ///
+    /// The commit stage of `SpawnData.entityToSpawn`: `finalizeSpawn` (id-only),
+    /// optional persistence / equipment, add to world, finish jockeys. Shared by
+    /// the vanilla and trial spawners so the finalize/add code exists once; the
+    /// two build their entity and roll facing at different times (per their own
+    /// vanilla bytecode), so construction stays separate. Returns `(UUID, id)`.
+    pub(crate) fn commit_spawn_data_entity(
+        &mut self,
+        mut entity: Entity,
+        kind: crate::entity::mob::MobType,
+        is_id_only: bool,
+        reason: crate::entity::mob::spawn::SpawnReason,
+        persistent: bool,
+        equipment: Option<&Tag>,
+    ) -> ([u8; 16], crate::entity::EntityUid) {
+        use crate::entity::mob::spawn::finalize_spawn;
+        if is_id_only {
+            finalize_spawn(self, kind, &mut entity, reason);
+        }
+        if persistent {
+            entity.with_mob(|_, mob| mob.persistence_required = true);
+        }
+        if let Some(equipment) = equipment {
+            self.level.equip_mob(&mut entity, equipment);
+        }
+        let uuid = entity.kind.mob().map(|mob| mob.uuid).unwrap_or_default();
+        let uid = self.add_prepared_entity(entity);
+        self.finish_jockeys(uid);
+        (uuid, uid)
+    }
+
+    /// 见 [`Level::trial_spawner_eject_reward`]。
+    pub fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
+        self.level.trial_spawner_eject_reward(pos, loot_table)
+    }
+
+    /// 见 [`Level::trial_spawner_spawn_ominous_item`]。
+    pub fn trial_spawner_spawn_ominous_item(&mut self, pos: BlockPos, loot_table: &str) -> bool {
+        self.level.trial_spawner_spawn_ominous_item(pos, loot_table)
+    }
+
+    /// 见 [`Level::trial_spawner_discard_mobs`]。
+    pub fn trial_spawner_discard_mobs(&mut self, mobs: &[[u8; 16]]) {
+        self.level.trial_spawner_discard_mobs(mobs);
+    }
+
+    /// 见 [`Level::trial_spawner_mob_untracked`]。
+    pub fn trial_spawner_mob_untracked(&self, uuid: [u8; 16], pos: BlockPos) -> bool {
+        self.level.trial_spawner_mob_untracked(uuid, pos)
+    }
+
+    /// 见 [`Level::trial_spawner_has_display_entity`]。
+    pub fn trial_spawner_has_display_entity(&self) -> bool {
+        self.level.trial_spawner_has_display_entity()
+    }
+
+    // 宝库的世界副作用，转发给 [`Level`] 的钩子；游戏层覆盖成真实现。
+
+    /// 见 [`Level::vault_players`]。
+    pub fn vault_players(&self, pos: BlockPos, range: f64) -> Vec<[u8; 16]> {
+        self.level.vault_players(pos, range)
+    }
+
+    /// 见 [`Level::vault_resolve_reward`]。
+    pub fn vault_resolve_reward(
+        &mut self,
+        pos: BlockPos,
+        player: [u8; 16],
+        key: &mc_bamboo_protocol::item::ItemStack,
+        loot_table: &str,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.level
+            .vault_resolve_reward(pos, player, key, loot_table)
+    }
+
+    /// 见 [`Level::vault_random_display_item`]。
+    pub fn vault_random_display_item(
+        &mut self,
+        loot_table: &str,
+        pos: BlockPos,
+    ) -> mc_bamboo_protocol::item::ItemStack {
+        self.level.vault_random_display_item(loot_table, pos)
+    }
+
+    /// 见 [`Level::vault_consume_key`]。
+    pub fn vault_consume_key(&mut self, player: [u8; 16], count: i32) {
+        self.level.vault_consume_key(player, count);
+    }
+
     /// `level.getBiome(pos)` 的注册表 ID。
     pub fn biome_id(&self, pos: BlockPos) -> i32 {
         self.level.biome_id(pos)
@@ -3747,7 +3969,20 @@ impl<'a> World<'a> {
         let now = self.game_time();
         let outcome = entity
             .with_mob(|me, mob| {
-                crate::entity::mob::interact::interact(me, mob, request, now, thundering)
+                // `Entity.interact` 的拴绳分支在 `mobInteract` 之前。
+                if let Some(outcome) =
+                    crate::entity::mob::interact::leash_interact(self, me, mob, request)
+                {
+                    return outcome;
+                }
+                crate::entity::mob::interact::interact(
+                    me,
+                    mob,
+                    request,
+                    now,
+                    thundering,
+                    &mut || self.random().next_float(),
+                )
             })
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
         let armadillo = entity
@@ -3810,7 +4045,49 @@ impl<'a> World<'a> {
         outcome
     }
 
-    /// 剪毛 / 下蛋这类实体战利品表的掉落，见 [`Level::entity_loot_drops`]。
+    /// `LeashFenceKnotEntity.interact`：剪刀剪断结上所有绳子，或把玩家牵着的生物拴到
+    /// 结上 / 把结上的生物解回玩家。
+    ///
+    /// `LeashFenceKnotEntity.interact`: shear every rope off the knot, or transfer the
+    /// player's mobs to the knot / the knot's mobs back to the player.
+    pub fn interact_knot(
+        &mut self,
+        id: i32,
+        player_uid: i32,
+        player_uuid: [u8; 16],
+        held: &ItemStack,
+        hand: Hand,
+        sneaking: bool,
+    ) -> InteractionResult {
+        let Some(entity) = self.level.take_entity(id) else {
+            return InteractionResult::Pass;
+        };
+        let crate::entity::EntityKind::LeashKnot(knot) = entity.kind else {
+            self.level.put_entity(entity);
+            return InteractionResult::Pass;
+        };
+        let pos = knot.pos;
+        self.level.put_entity(entity);
+
+        // 剪刀分支：`shearOffAllLeashConnections` → `dropAllLeashConnections`。
+        if held.item == mc_bamboo_data::items::SHEARS
+            && crate::entity::leash_knot::drop_all_leashed_to(self, id)
+        {
+            crate::durability::hurt_hand(self, hand, 1);
+            self.play_sound(
+                crate::entity::leash_knot::knot_position(pos),
+                mc_bamboo_data::sound_event("minecraft:item.shears.snip"),
+                sounds::PLAYERS,
+                1.0,
+                1.0,
+                false,
+            );
+            return InteractionResult::Success;
+        }
+        crate::entity::leash_knot::interact(self, id, pos, player_uid, player_uuid, sneaking)
+    }
+
+    /// 剪毛 / 下蛋这类实体战利品表的掉落，见 [`Level::entity_loot_drops`].
     ///
     /// Shearing or egg-laying loot drops; see [`Level::entity_loot_drops`].
     pub(crate) fn entity_loot_drops(
@@ -4855,7 +5132,10 @@ mod tests {
                 | Effect::CrafterCrafted { .. }
                 | Effect::KilledByArrow { .. }
                 | Effect::EnderPearlTeleport { .. }
-                | Effect::GuardianElderEffect { .. } => None,
+                | Effect::GuardianElderEffect { .. }
+                | Effect::TrialSpawnerTransformBadOmen { .. }
+                | Effect::Explode { .. }
+                | Effect::VibrationParticle { .. } => None,
             })
             .collect()
     }

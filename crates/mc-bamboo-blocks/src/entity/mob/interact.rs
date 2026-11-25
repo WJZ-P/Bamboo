@@ -14,7 +14,8 @@ use mc_bamboo_data::{items, tags::item_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
 use super::{Mob, MobEvent, MobType, chicken, living, mooshroom, pig, sheep};
-use crate::entity::Entity;
+use crate::entity::{Entity, EntityUid};
+use crate::world::World;
 use crate::{InteractionResult, state::item_is_tagged};
 
 /// 一次右键交互的输入。
@@ -30,6 +31,11 @@ pub struct MobInteractRequest {
     pub creative: bool,
     /// 玩家位置，`Player.playSound` 用它当音源坐标。
     pub position: Vec3,
+    /// 玩家碰撞盒高（`getBbHeight()`，成年玩家恒 1.8），拴绳算距离用。
+    ///
+    /// The player's box height (`getBbHeight()`, always 1.8 for adults), used by
+    /// the leash distance check.
+    pub player_height: f32,
     /// `isSecondaryUseActive()`：交互包里的 `usingSecondaryAction`（潜行）。
     ///
     /// `isSecondaryUseActive()`: the packet's `usingSecondaryAction` (sneaking).
@@ -162,6 +168,7 @@ pub fn interact(
     req: &MobInteractRequest,
     now: i64,
     thundering: bool,
+    level_next_float: &mut dyn FnMut() -> f32,
 ) -> MobInteraction {
     // `ZombieVillager.mobInteract` 不是 `Animal`：金苹果 + 虚弱才转化。
     // `ZombieVillager.mobInteract` is not `Animal`: golden apple + weakness cures.
@@ -213,13 +220,13 @@ pub fn interact(
         return super::tadpole::interact(me, mob, req).unwrap_or_else(MobInteraction::pass);
     }
     if mob.mob_type == super::MobType::Wolf {
-        return super::wolf::interact(me, mob, req, now);
+        return super::wolf::interact(me, mob, req, now, level_next_float);
     }
     if mob.mob_type == MobType::Cat {
-        return super::cat::interact(me, mob, req);
+        return super::cat::interact(me, mob, req, level_next_float);
     }
     if mob.mob_type == MobType::Parrot {
-        return super::parrot::interact(me, mob, req);
+        return super::parrot::interact(me, mob, req, level_next_float);
     }
     if mob.mob_type == MobType::Armadillo
         && let Some(outcome) = super::armadillo::interact(me, mob, req)
@@ -239,10 +246,10 @@ pub fn interact(
         return outcome;
     }
     if mob.mob_type.is_equine() {
-        return super::equine::interact(me, mob, req);
+        return super::equine::interact(me, mob, req, level_next_float);
     }
     if super::nautilus::is_nautilus(mob.mob_type) {
-        return super::nautilus::interact(me, mob, req);
+        return super::nautilus::interact(me, mob, req, level_next_float);
     }
     // `Dolphin.mobInteract`：手里是 `#fishes` 时放吃鱼声，幼崽加速长大、成年记下
     // `gotFish`，并消费一个鱼。这是它自己的 `mobInteract`，不走 `Animal.mobInteract`。
@@ -296,7 +303,217 @@ pub fn interact(
     if mob.mob_type == MobType::SnowGolem {
         return super::snow_golem::interact(mob, req);
     }
-    animal_interact(me, mob, req)
+    if mob.mob_type == MobType::Sniffer {
+        // `Sniffer.mobInteract`：先走 `Animal.mobInteract`，吃的是 `#sniffer_food` 且
+        // 真的消费了，就再放一次吃食声。
+        // `Sniffer.mobInteract`: the `Animal.mobInteract` path first, then a second
+        // eating sound when the food is `#sniffer_food` and was actually consumed.
+        let is_food = !req.held.is_empty() && is_food(mob.mob_type, req.held.item);
+        let outcome = animal_interact(me, mob, req, level_next_float);
+        if outcome.result.consumes_action() && is_food {
+            sniffer_eat_sound(me, mob, level_next_float);
+        }
+        return outcome;
+    }
+    animal_interact(me, mob, req, level_next_float)
+}
+
+/// `Entity.interact` 的拴绳分支，在 `mobInteract` 之前跑。返回 `Some` 表示这次交互
+/// 被拴绳处理掉了，调用方直接用它落地（不再走喂食 / 挤奶那些分支）。
+///
+/// The leash branches of `Entity.interact`, before `mobInteract`. `Some` means the
+/// interaction was handled here and the caller applies it directly.
+pub fn leash_interact(
+    world: &mut World,
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+) -> Option<MobInteraction> {
+    let now = world.game_time();
+    // 分支 1：潜行 + 可拴 + 活着 + 非幼崽 → 把玩家牵着的生物转到自己身上。
+    if req.sneaking
+        && super::leash::can_be_leashed(mob, now)
+        && living::is_alive(me, mob)
+        && !mob.is_baby()
+    {
+        let own_uuid = mob.uuid;
+        let transfers = leashed_to_player_in_area(world, me.position, req.player_uid);
+        let mut tied = false;
+        for uid in transfers {
+            let mut attached = false;
+            world.with_entity_mut(uid, &mut |other| {
+                let position = other.position;
+                let height = other.dimensions.1;
+                other.with_mob(|_, other_mob| {
+                    let can = super::leash::can_have_a_leash_attached_to(
+                        other_mob,
+                        position,
+                        height,
+                        me.position,
+                        me.dimensions.1,
+                        now,
+                    );
+                    if can {
+                        super::leash::set_leashed_to(
+                            other_mob,
+                            me.id,
+                            super::leash::LeashDelayed::Entity(own_uuid),
+                        );
+                        attached = true;
+                    }
+                });
+            });
+            tied |= attached;
+        }
+        if tied {
+            mob.events.push(MobEvent::Sound {
+                sound: "minecraft:item.lead.tied",
+                volume: 1.0,
+                pitch: 1.0,
+                position: me.position,
+                hostile: mob.mob_type.is_enemy(),
+                seed: None,
+            });
+            return Some(MobInteraction {
+                result: InteractionResult::SuccessServer,
+                ..MobInteraction::pass()
+            });
+        }
+    }
+    // 分支 2：剪刀 → 剪断自己牵着的和牵着自己的所有拴绳。
+    if req.held.item == items::SHEARS && shear_off_all(world, me, mob, req) {
+        return Some(MobInteraction {
+            result: InteractionResult::Success,
+            damage_held: true,
+            ..MobInteraction::pass()
+        });
+    }
+    if !living::is_alive(me, mob) {
+        return None;
+    }
+    // 分支 4a：已经拴在自己身上 → 解开。
+    if super::leash::leash_holder(mob) == Some(req.player_uid) {
+        if req.creative {
+            super::leash::remove_leash(mob);
+        } else {
+            super::leash::drop_leash(mob);
+        }
+        mob.events.push(MobEvent::Sound {
+            sound: "minecraft:item.lead.untied",
+            volume: 1.0,
+            pitch: 1.0,
+            position: me.position,
+            hostile: mob.mob_type.is_enemy(),
+            seed: None,
+        });
+        return Some(MobInteraction {
+            result: InteractionResult::Success,
+            drop_stack: (!req.creative).then(|| ItemStack::new(items::LEAD, 1)),
+            ..MobInteraction::pass()
+        });
+    }
+    // 分支 4b：拿拴绳 → 拴到玩家。
+    if req.held.item == items::LEAD && !leash_holder_is_player(world, mob) {
+        if !super::leash::can_have_a_leash_attached_to(
+            mob,
+            me.position,
+            me.dimensions.1,
+            req.position,
+            req.player_height,
+            now,
+        ) {
+            return None;
+        }
+        if super::leash::is_leashed(mob)
+            && let Some(old) = super::leash::drop_leash(mob)
+        {
+            crate::entity::leash_knot::notify_leashee_removed(world, old);
+        }
+        super::leash::set_leashed_to(
+            mob,
+            req.player_uid,
+            super::leash::LeashDelayed::Entity(req.player_uuid),
+        );
+        mob.events.push(MobEvent::Sound {
+            sound: "minecraft:item.lead.tied",
+            volume: 1.0,
+            pitch: 1.0,
+            position: me.position,
+            hostile: mob.mob_type.is_enemy(),
+            seed: None,
+        });
+        return Some(MobInteraction {
+            result: InteractionResult::SuccessServer,
+            shrink_held: !req.creative,
+            ..MobInteraction::pass()
+        });
+    }
+    None
+}
+
+/// `leashableLeashedTo(player)` 的 32 格区域版：玩家牵着、且在这头生物附近的 uid。
+fn leashed_to_player_in_area(world: &World, this_pos: Vec3, player: EntityUid) -> Vec<EntityUid> {
+    let mut out = Vec::new();
+    for entity in world.live_entities() {
+        if let Some(mob) = entity.kind.mob()
+            && super::leash::leash_holder(mob) == Some(player)
+            && super::leash::in_leashable_area(entity.bounding_box(), this_pos)
+        {
+            out.push(entity.id);
+        }
+    }
+    out
+}
+
+/// 牵引者是不是玩家。
+fn leash_holder_is_player(world: &World, mob: &Mob) -> bool {
+    let Some(holder) = super::leash::leash_holder(mob) else {
+        return false;
+    };
+    world.player_views().iter().any(|view| view.uid == holder)
+}
+
+/// `shearOffAllLeashConnections` → `dropAllLeashConnections`。
+fn shear_off_all(world: &mut World, me: &Entity, mob: &mut Mob, _req: &MobInteractRequest) -> bool {
+    let others = leashed_to(world, me.id);
+    let mut dropped = !others.is_empty();
+    if super::leash::is_leashed(mob)
+        && let Some(old) = super::leash::drop_leash(mob)
+    {
+        crate::entity::leash_knot::notify_leashee_removed(world, old);
+        dropped = true;
+    }
+    for uid in others {
+        world.with_entity_mut(uid, &mut |other| {
+            other.with_mob(|_, other_mob| super::leash::drop_leash(other_mob));
+        });
+    }
+    if dropped {
+        // `shearOffAllLeashConnections`：`ServerLevel.playSound(null, blockPosition,
+        // SHEARS_SNIP, player.getSoundSource())`。Bamboo 的音源按玩家的处理，这里记实体事件。
+        mob.events.push(MobEvent::Sound {
+            sound: "minecraft:item.shears.snip",
+            volume: 1.0,
+            pitch: 1.0,
+            position: me.position,
+            hostile: false,
+            seed: None,
+        });
+    }
+    dropped
+}
+
+/// `leashableLeashedTo(this)`：牵着者是这头生物的 uid。
+fn leashed_to(world: &World, holder: EntityUid) -> Vec<EntityUid> {
+    let mut out = Vec::new();
+    for entity in world.live_entities() {
+        if let Some(mob) = entity.kind.mob()
+            && super::leash::leash_holder(mob) == Some(holder)
+        {
+            out.push(entity.id);
+        }
+    }
+    out
 }
 
 /// `Animal.mobInteract`：吃的能让成年动物发情、让幼崽长大。
@@ -306,6 +523,7 @@ pub(super) fn animal_interact(
     me: &mut Entity,
     mob: &mut Mob,
     req: &MobInteractRequest,
+    level_next_float: &mut dyn FnMut() -> f32,
 ) -> MobInteraction {
     if mob.mob_type == MobType::Sheep
         && let Some(outcome) = sheep::interact_shears(mob, req)
@@ -318,7 +536,7 @@ pub(super) fn animal_interact(
     let food = !req.held.is_empty() && is_food(mob.mob_type, req.held.item);
     if !food {
         return match mob.mob_type {
-            MobType::Pig => pig::equip_saddle(me, mob, req),
+            MobType::Pig => pig::interact_not_food(me, mob, req),
             MobType::Sheep => sheep::interact_dye(me, mob, req),
             _ => MobInteraction::pass(),
         };
@@ -341,7 +559,7 @@ pub(super) fn animal_interact(
         mob.in_love = 600;
         mob.love_cause = Some(req.player_uuid);
         mob.events.push(MobEvent::Hearts);
-        play_eating_sound(me, mob);
+        play_eating_sound(me, mob, level_next_float);
         return MobInteraction {
             result: InteractionResult::SuccessServer,
             shrink_held,
@@ -353,7 +571,7 @@ pub(super) fn animal_interact(
         // `getSpeedUpSecondsWhenFeeding(-age)`：int 除法先算，再乘 0.1F 截成 int。
         let seconds = (((-age) / 20) as f32 * 0.1_f32) as i32;
         age_up(me, mob, seconds, true);
-        play_eating_sound(me, mob);
+        play_eating_sound(me, mob, level_next_float);
         return MobInteraction {
             result: InteractionResult::Success,
             shrink_held,
@@ -366,9 +584,11 @@ pub(super) fn animal_interact(
 }
 
 /// `Animal.playEatingSound`：缺省不出声，猪、犰狳和青蛙各有自己的。
+/// `level_next_float` 给嗅探兽取音高（`Mth.randomBetween(level.random, 0.8, 1.2)`）。
 ///
 /// `Animal.playEatingSound`: silent by default; pigs, armadillos and frogs have their own.
-fn play_eating_sound(me: &mut Entity, mob: &mut Mob) {
+/// `level_next_float` feeds the sniffer's pitch (`Mth.randomBetween(level.random, 0.8, 1.2)`).
+fn play_eating_sound(me: &mut Entity, mob: &mut Mob, level_next_float: &mut dyn FnMut() -> f32) {
     match mob.mob_type {
         MobType::Pig => pig::play_eating_sound(me, mob),
         MobType::Cat => super::cat::play_eating_sound(me, mob),
@@ -385,8 +605,26 @@ fn play_eating_sound(me: &mut Entity, mob: &mut Mob) {
             hostile: false,
             seed: None,
         }),
+        // `Sniffer.playEatingSound`：`level.playSound(null, this, SNIFFER_EAT, NEUTRAL,
+        // 1.0F, randomBetween(level.random, 0.8, 1.2))`。
+        MobType::Sniffer => sniffer_eat_sound(me, mob, level_next_float),
         _ => {}
     }
+}
+
+/// `Sniffer.playEatingSound`：音高 `0.8 + level.random.nextFloat() * 0.4`。
+///
+/// `Sniffer.playEatingSound`: pitch `0.8 + level.random.nextFloat() * 0.4`.
+fn sniffer_eat_sound(me: &mut Entity, mob: &mut Mob, level_next_float: &mut dyn FnMut() -> f32) {
+    let pitch = 0.8 + level_next_float() * 0.4;
+    mob.events.push(MobEvent::Sound {
+        sound: "minecraft:entity.sniffer.eat",
+        volume: 1.0,
+        pitch,
+        position: me.position,
+        hostile: false,
+        seed: None,
+    });
 }
 
 /// `Shearable.shear` 的落地：按种类分给羊或哞菇。
@@ -436,6 +674,7 @@ mod tests {
             held: ItemStack::new(item, 1),
             creative: false,
             position: Vec3::default(),
+            player_height: 1.8,
             sneaking: false,
             difficulty: 2,
         }
@@ -449,7 +688,16 @@ mod tests {
     fn an_axolotl_fed_a_tropical_fish_bucket_gets_a_water_bucket_back() {
         let mut entity = Entity::by_mob_type(MobType::Axolotl, Vec3::new(0.5, 62.0, 0.5));
         let outcome = entity
-            .with_mob(|me, mob| interact(me, mob, &request(items::TROPICAL_FISH_BUCKET), 0, false))
+            .with_mob(|me, mob| {
+                interact(
+                    me,
+                    mob,
+                    &request(items::TROPICAL_FISH_BUCKET),
+                    0,
+                    false,
+                    &mut || 0.0,
+                )
+            })
             .expect("an axolotl mob");
         assert_eq!(outcome.result, InteractionResult::SuccessServer);
         assert!(!outcome.shrink_held);
@@ -467,7 +715,16 @@ mod tests {
     fn an_axolotl_fed_something_else_just_shrinks_the_stack() {
         let mut entity = Entity::by_mob_type(MobType::Axolotl, Vec3::new(0.5, 62.0, 0.5));
         let outcome = entity
-            .with_mob(|me, mob| interact(me, mob, &request(items::TROPICAL_FISH), 0, false))
+            .with_mob(|me, mob| {
+                interact(
+                    me,
+                    mob,
+                    &request(items::TROPICAL_FISH),
+                    0,
+                    false,
+                    &mut || 0.0,
+                )
+            })
             .expect("an axolotl mob");
         assert_eq!(outcome.result, InteractionResult::Pass);
     }

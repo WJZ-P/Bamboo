@@ -70,6 +70,15 @@ pub trait BlockView {
         context: CollisionContext,
     ) -> Option<BlockHit>;
     fn clip_collider(&self, from: Vec3, to: Vec3, context: CollisionContext) -> Option<BlockHit>;
+    /// `ClipContext.Block.VISUAL` 的视线 clip：用 [`mc_bamboo_data::visual_shape`]
+    /// 而不是碰撞形状，玻璃 / 铁栏杆 / 细雪等透明方块不挡视线。默认实现逐格读
+    /// [`Self::block_state`]。
+    fn clip_visual(&self, from: Vec3, to: Vec3) -> Option<BlockHit> {
+        crate::world::traverse_blocks(from, to, |pos| {
+            let boxes = crate::shape::visual_boxes(self.block_state(pos), pos);
+            crate::shape::clip(&boxes, from, to, pos)
+        })
+    }
     /// 岛级的方块变更版本戳：方块或影响射线形状的方块实体一变就换一个值。
     /// 没有版本戳的视图给 0（这时缓存不会命中，行为等同于没有缓存）。
     ///
@@ -434,6 +443,17 @@ pub struct PlayerView {
     ///
     /// `Entity.getDeltaMovement()`, read by witches to lead thrown potions.
     pub delta: Vec3,
+    /// `Entity.getBbWidth()`。玩家碰撞盒宽恒 0.6。
+    ///
+    /// `Entity.getBbWidth()`. A player's box is always 0.6 wide.
+    pub width: f32,
+    /// `Entity.getBbHeight()`。成年玩家碰撞盒高恒 1.8：官方 `getDimensions(Pose)`
+    /// 只有 `SLEEPING` 缩到 0.2×0.2，潜行 / 游泳只改眼高、不改碰撞盒。
+    ///
+    /// `Entity.getBbHeight()`. An adult player's box is always 1.8 tall: vanilla
+    /// `getDimensions(Pose)` only shrinks `SLEEPING` to 0.2×0.2; crouching and
+    /// swimming change the eye height, not the box.
+    pub height: f32,
     pub eye_height: f32,
     /// `LivingEntity.getHealth()`，女巫选毒药还是伤害药水时读它。
     ///
@@ -444,6 +464,16 @@ pub struct PlayerView {
     pub alive: bool,
     pub spectator: bool,
     pub creative: bool,
+    /// `getAbilities().flying`：创造且飞行中的玩家不被打进 `getHitPlayers`。
+    ///
+    /// `getAbilities().flying`: a creative, flying player is left out of `getHitPlayers`.
+    pub flying: bool,
+    /// `getAttributeValue(EXPLOSION_KNOCKBACK_RESISTANCE)`：爆炸击退抗性，
+    /// 爆炸保护附魔和盔甲修饰符会提高它。
+    ///
+    /// `getAttributeValue(EXPLOSION_KNOCKBACK_RESISTANCE)`; blast protection and
+    /// armor modifiers raise it.
+    pub explosion_knockback_resistance: f64,
     /// 官方 `GameType` 的 ID：0 生存、1 创造、2 冒险、3 旁观。
     /// `isSurvival()` 为真的是生存（0）和冒险（2）。
     ///
@@ -955,6 +985,12 @@ pub struct LandFacts {
 /// `Spawn`、`Remove`、`ScheduleTick`、`Depart`。这次不实现。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    /// 实体移动 / 死亡等发出的游戏事件。并行驱动攒到落地阶段按 uid 顺序投递。
+    GameEvent {
+        event: crate::game_event::GameEvent,
+        position: Vec3,
+        context: crate::game_event::dispatch::EventContext,
+    },
     ShootMobArrow {
         position: Vec3,
         direction: Vec3,
@@ -1113,6 +1149,20 @@ pub enum Command {
     /// `Entity.spawnAtLocation`：生成一件掉落物。
     DropItem {
         stack: ItemStack,
+    },
+    /// `Leashable.dropLeash` / `setLeashedTo` 的 `notifyLeasheeRemoved`：旧牵引者是
+    /// 拴绳结且没有生物还拴着它时，结消失。
+    ///
+    /// `notifyLeasheeRemoved` from `Leashable.dropLeash` / `setLeashedTo`: the old
+    /// holder is a fence knot and no mob is left tied to it, so the knot vanishes.
+    NotifyLeasheeRemoved(EntityUid),
+    /// `LeashFenceKnotEntity.dropItem`：栅栏没了，结消失时放 `LEAD_UNTIED`（只放音、
+    /// 不掉拴绳，26.3 就是这样）。
+    ///
+    /// `LeashFenceKnotEntity.dropItem`: play `LEAD_UNTIED` when the fence is gone.
+    /// Sound only, no item drop, matching 26.3.
+    LeashKnotUntied {
+        position: Vec3,
     },
     /// `ThrownTrident` 主人不可接受时的 `spawnAtLocation(stack, 0.1f)`：比通用
     /// `DropItem` 多抬高 0.1 格（`(double) 0.1f`）。
@@ -1583,7 +1633,12 @@ pub enum Command {
 /// 改发出者，没有任何回写补丁。
 pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
     match command {
-        Command::Explode { center, radius } => world.explode_tnt(center, radius),
+        Command::GameEvent {
+            event,
+            position,
+            context,
+        } => world.game_event(event, position, context),
+        Command::Explode { center, radius } => world.explode_tnt(center, radius, me.id),
         Command::ExplodeMob {
             center,
             radius,
@@ -1690,6 +1745,19 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             super::mob::raider::apply_patrol_target(world, &others, target);
         }
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
+        Command::NotifyLeasheeRemoved(holder) => {
+            super::leash_knot::notify_leashee_removed(world, holder);
+        }
+        Command::LeashKnotUntied { position } => {
+            world.play_sound(
+                position,
+                mc_bamboo_data::sound_event("minecraft:item.lead.untied"),
+                mc_bamboo_data::sounds::NEUTRAL,
+                1.0,
+                1.0,
+                false,
+            );
+        }
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
         }

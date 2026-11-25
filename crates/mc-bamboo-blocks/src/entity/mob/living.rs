@@ -133,6 +133,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Parrot {
         mob.parrot.ride_cooldown += 1;
     }
+    // `Sniffer.tick` 在 `super.tick()` 之前：挖掘时掉种子。
+    // `Sniffer.tick` before `super.tick()`: drop the seed while digging.
+    if mob.mob_type == super::MobType::Sniffer {
+        super::sniffer::tick_before(me, mob, ctx);
+    }
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
     // `LivingEntity.tick`：`updatingUsingItem()` 紧跟 `super.tick()`，在装备比较和
@@ -666,6 +671,9 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Entity.baseTick`：服务端每刻按剩余着火刻数重写共享标志位。
     // `Entity.baseTick`: the server rewrites the shared flag from the remaining fire ticks.
     mob.visible_fire = me.remaining_fire_ticks > 0;
+    // `Entity.baseTick` 末尾的 `Leashable.tickLeash`（服务端且自己是 Leashable）。
+    // The `Leashable.tickLeash` at the end of `Entity.baseTick`.
+    super::leash::tick_leash(me, mob, ctx);
     // `LivingEntity.baseTick` 自己的部分。
     if is_alive(me, mob) {
         if is_in_wall(me, mob, ctx.blocks()) {
@@ -844,6 +852,9 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
         // `Villager.getAmbientSound`：睡觉时返回 null，不出声也不取音高。
         // `Villager.getAmbientSound`: returns null while sleeping, drawing no pitch.
         super::MobType::Villager if mob.villager.sleeping => None,
+        // `Sniffer.getAmbientSound`：挖掘 / 搜寻时不叫。
+        // `Sniffer.getAmbientSound`: silent while digging or searching.
+        super::MobType::Sniffer => super::sniffer::ambient_voice(mob),
         _ => Some(voice_of(mob, Voice::Ambient, me.in_water)),
     }
 }
@@ -1446,6 +1457,8 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
             if let Some(view) = ctx.player(rider) {
                 if mob.mob_type.is_equine() {
                     super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
+                } else if mob.mob_type == super::MobType::Pig {
+                    super::pig::tick_ridden(me, mob, view.yaw, view.pitch);
                 } else if super::nautilus::is_nautilus(mob.mob_type) {
                     super::nautilus_ai::ridden_rotation(me, mob, view.yaw, view.pitch);
                 }
@@ -2024,6 +2037,9 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     if mob.mob_type == super::MobType::Creaking {
         super::creaking_ai::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Sniffer {
+        super::sniffer::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::ElderGuardian {
         // `ElderGuardian.customServerAiStep`：范围挖掘疲劳和家。
         // `ElderGuardian.customServerAiStep`: area mining fatigue and home.
@@ -2192,6 +2208,10 @@ fn max_head_y_rot(mob: &Mob) -> f32 {
     } else if mob.mob_type.is_camel() {
         // `Camel.getMaxHeadYRot()`。
         super::camel::max_head_y_rot()
+    } else if mob.mob_type == super::MobType::Sniffer {
+        // `Sniffer.getMaxHeadYRot()`。
+        // `Sniffer.getMaxHeadYRot()`.
+        50.0
     } else {
         MAX_HEAD_Y_ROT as f32
     }
@@ -3404,6 +3424,11 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         return;
     }
     mob.dead = true;
+    // `AbstractVillager.die` → `stopTrading()`（覆盖普通死亡与僵尸转化分支）。
+    // `AbstractVillager.die` → `stopTrading()` (covers regular death and zombie conversion).
+    if mob.mob_type == super::MobType::Villager {
+        mob.villager.stop_trading();
+    }
     if mob.mob_type == super::MobType::Wolf {
         super::wolf::on_death(mob);
     }
@@ -3617,6 +3642,12 @@ pub(crate) fn apply_breed(
     // `Frog.spawnChildFromBreeding`: only the `finalizeSpawnChildFromBreeding` half.
     if kind == super::MobType::Frog {
         super::frog::breed(me, partner, position, world);
+        return;
+    }
+    // `Sniffer.spawnChildFromBreeding`：不产幼崽，下一颗蛋。
+    // `Sniffer.spawnChildFromBreeding`: no calf — it lays an egg.
+    if kind == super::MobType::Sniffer {
+        super::sniffer::breed(me, partner, position, world);
         return;
     }
     let mother = world.entity(partner).and_then(|entity| {

@@ -22,7 +22,7 @@ use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, Container, EntityStore, EntityTables,
     Level, LevelRandom, LevelTables, World,
     entity::{
-        Entities, Entity, EntityKind, JavaRandom,
+        Entities, Entity, EntityKind, EntityUid, JavaRandom, KindPublic,
         ctx::PlayerView,
         mob::{DamageSource, Mob, spawn},
     },
@@ -53,23 +53,29 @@ mod golem;
 mod grazing;
 mod guardian_scene;
 mod husk_jockey;
+mod leash;
 mod lightning;
 mod llama_spit;
 mod natural_spawn;
 mod nautilus;
 mod patrol_spawn;
 mod phantom;
+mod pig_ride;
 mod pillager;
 mod projectile;
+mod sculk_sensor;
 mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
 mod small_mob;
+mod spawner;
 mod squid;
 mod structure_spawn;
 mod sulfur_cube;
 mod thunder;
+mod trial_spawner;
 mod undead_horse;
+mod vault;
 mod villager;
 mod water_mob;
 mod witch_throw;
@@ -137,7 +143,11 @@ enum Line {
     EquineInteract(equine::InteractCase),
     EquineDeath(equine::DeathCase),
     EquineSave(equine::SaveCase),
+    PigMount(pig_ride::MountCase),
+    PigBoost(pig_ride::BoostCase),
+    PigDismount(pig_ride::DismountCase),
     LlamaSpit(Box<llama_spit::LlamaSpitCase>),
+    Leash(Box<leash::LeashCase>),
     WitchThrow(Box<witch_throw::WitchThrowCase>),
     NaturalSpawn(natural_spawn::Case),
     PatrolSpawn(patrol_spawn::Case),
@@ -169,6 +179,7 @@ enum Line {
     GolemSave(Box<golem::GolemSaveCase>),
     SmallMob(Box<small_mob::SmallMobCase>),
     SmallMobSave(small_mob::SmallMobSaveCase),
+    Spawner(Box<spawner::SpawnerCase>),
     SulfurCube(Box<sulfur_cube::SulfurCubeCase>),
     SulfurCubeSave(sulfur_cube::SulfurCubeSaveCase),
     SmallMobDeath(small_mob::SmallMobDeathCase),
@@ -182,6 +193,7 @@ enum Line {
     VillagerBrain(Box<villager::VillagerBrainCase>),
     VillagerPoi(Box<villager::VillagerPoiCase>),
     VillagerPhase4(Box<villager::VillagerPhase4Case>),
+    VillagerTrade(Box<villager::VillagerTradeCase>),
     AttackTarget(Box<attack_target::AttackTargetCase>),
     Guardian(Box<guardian_scene::GuardianCase>),
     Fish(Box<fish::FishCase>),
@@ -190,6 +202,11 @@ enum Line {
     WaterMob(Box<water_mob::WaterMobCase>),
     Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
+    TrialSpawner(Box<trial_spawner::TrialSpawnerCase>),
+    Vault(Box<vault::VaultCase>),
+    SculkSensor(sculk_sensor::SculkSensorCase),
+    SculkSensorOrder(sculk_sensor::SculkSensorOrderCase),
+    SculkShrieker(sculk_sensor::SculkShriekerCase),
     End(End),
 }
 
@@ -415,6 +432,12 @@ struct Case {
     /// 每刻 0 号玩家自己收到的那几种包（受伤动画、战斗进出、死亡界面、血量）。
     #[serde(default)]
     zombie_player_packets: Option<Vec<Vec<String>>>,
+    /// TNT 场景：{x, y, z} 方块坐标，TNT 生成在方块底心。
+    #[serde(default)]
+    tnt: Option<[i32; 3]>,
+    /// TNT 场景：逐刻 [x,y,z 的 f64 位, fuse]；爆炸后那刻起是 null。
+    #[serde(default)]
+    tnt_steps: Option<Vec<Option<[i64; 4]>>>,
     /// S2 玩家效果场景的规则与动作。
     #[serde(default)]
     effect_scene: Option<EffectScene>,
@@ -710,7 +733,7 @@ struct PlayerSetup {
     team: i32,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 struct CowStep {
     x: i64,
     y: i64,
@@ -782,6 +805,11 @@ struct CowStep {
     /// for other mobs.
     #[serde(default)]
     goat: i32,
+    /// 嗅探兽：`DATA_STATE` 的网络 ID；其余生物是 0。
+    ///
+    /// Sniffers: the `DATA_STATE` network id; 0 for other mobs.
+    #[serde(default)]
+    sniffer: i32,
     /// 狼：驯服标志、坐下命令、有没有主人、仇恨结束时刻、讨食、项圈、最大生命（位）。
     ///
     /// Wolves: tame flags, sit order, owner, anger end, begging, collar, max health bits.
@@ -857,11 +885,13 @@ fn zombie_style(name: &str) -> bool {
         "frog_",
         "tadpole_",
         "camel_",
+        "sniffer_",
         "polar_bear_fight_",
         "creeper_",
         "spider_",
         "cave_spider_",
         "enderman_",
+        "tnt_blast_",
         "slime_",
         "witch_drink_",
         "pillager_",
@@ -926,6 +956,11 @@ struct ZombieFacts {
     /// 村民日程活动（主世界时钟求值；`None` 时按 `clock` 现场算）。
     villager_activity: Option<mc_bamboo_blocks::entity::mob::brain::Activity>,
     baby_villager_activity: Option<mc_bamboo_blocks::entity::mob::brain::Activity>,
+    /// 刷怪笼对拍：注入 (天空光, 方块光)，缺省用 MobLevel 的 `brightness` 默认值。
+    ///
+    /// Spawner parity: injected (sky, block) light; the default keeps the
+    /// `MobLevel::brightness` defaults.
+    spawner_light: Option<(i32, i32)>,
 }
 
 /// 给生物穿上带指定附魔的靴子，和官方场景的 `ItemStack.enchant` 一致。
@@ -977,6 +1012,15 @@ struct MobLevel {
     redstone: mc_bamboo_blocks::RedstoneMemory,
     block_entities: BlockEntities,
     block_events: BlockEvents,
+    /// 游戏事件监听者登记表；只有幽匿感测体这类场景会用到。
+    game_event_listeners: mc_bamboo_blocks::game_event::registry::GameEventListeners,
+    /// 尖啸体场景的玩家监守者警告等级，按玩家 uid。
+    warden_warnings: HashMap<
+        mc_bamboo_blocks::entity::EntityUid,
+        mc_bamboo_blocks::behaviour::misc::warden::WardenSpawnTracker,
+    >,
+    /// 尖啸体场景玩家身上黑暗效果剩下的刻数（`tryRespond` 给 260 刻）。
+    darkness_ticks: i32,
     /// 常驻 POI 索引表；未登记的场景保持为空，查询返回空。
     ///
     /// Persistent POI store; stays empty for scenes that do not register POIs.
@@ -995,6 +1039,8 @@ struct MobLevel {
     short_hunger: bool,
     /// 改坏确认 `zombie_bed`：床的怪物检查一律放行。
     ignore_bed_monsters: bool,
+    /// 改坏确认爆炸：位 0 跳过 `hurtEntities`，位 1 丢掉爆炸中心的 0.0625 抬升。
+    explosion_break: u8,
 }
 
 impl MobLevel {
@@ -1052,6 +1098,18 @@ impl LevelTables for MobLevel {
     fn redstone_table_mut(&mut self) -> &mut mc_bamboo_blocks::RedstoneMemory {
         &mut self.redstone
     }
+
+    fn game_event_listeners(
+        &self,
+    ) -> Option<&mc_bamboo_blocks::game_event::registry::GameEventListeners> {
+        Some(&self.game_event_listeners)
+    }
+
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut mc_bamboo_blocks::game_event::registry::GameEventListeners> {
+        Some(&mut self.game_event_listeners)
+    }
 }
 
 impl EntityTables for MobLevel {
@@ -1065,6 +1123,10 @@ impl EntityTables for MobLevel {
 }
 
 impl Level for MobLevel {
+    fn explosion_break(&self) -> u8 {
+        self.explosion_break
+    }
+
     fn block_state(&self, pos: BlockPos) -> BlockState {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
             return BlockState(mc_bamboo_data::blocks::VOID_AIR);
@@ -1211,6 +1273,12 @@ impl Level for MobLevel {
     }
 
     fn brightness(&self, layer: LightLayer, _pos: BlockPos) -> i32 {
+        if let Some((sky, block)) = self.facts.spawner_light {
+            return match layer {
+                LightLayer::Sky => sky,
+                LightLayer::Block => block,
+            };
+        }
         match layer {
             LightLayer::Sky => self.natural_spawn.as_ref().map_or(15, |scene| scene.sky),
             LightLayer::Block => self.natural_spawn.as_ref().map_or(0, |scene| scene.block),
@@ -1302,6 +1370,11 @@ impl Level for MobLevel {
         target: mc_bamboo_blocks::entity::EntityUid,
         instance: &mc_bamboo_blocks::entity::mob::effects::EffectInstance,
     ) -> bool {
+        // 尖啸体的黑暗：没有真实玩家时在这里记下剩余刻数。
+        if instance.effect == mc_bamboo_data::registries::mob_effect::DARKNESS {
+            self.darkness_ticks = self.darkness_ticks.max(instance.duration);
+            return true;
+        }
         let Some(game) = self.game.as_mut() else {
             return false;
         };
@@ -1327,6 +1400,10 @@ impl Level for MobLevel {
         };
         game.heal(target, amount);
         true
+    }
+
+    fn warn_warden(&mut self, target: mc_bamboo_blocks::entity::EntityUid) -> Option<i32> {
+        self.warden_warnings.entry(target).or_default().try_warn()
     }
 
     fn teleport_player_now(
@@ -1605,6 +1682,207 @@ impl Level for MobLevel {
         }
     }
 
+    fn trial_spawner_players(
+        &self,
+        pos: BlockPos,
+        range: f64,
+    ) -> Vec<mc_bamboo_blocks::level::TrialSpawnerPlayer> {
+        let views: Vec<PlayerView> = if let Some(game) = &self.game {
+            game.views()
+        } else {
+            self.players.clone()
+        };
+        let mut out = Vec::new();
+        for player in &views {
+            if player.spectator || player.creative {
+                continue;
+            }
+            // 官方 `PlayerDetector.NO_CREATIVE_PLAYERS`：`blockPosition().closerThan(pos, range)`
+            // 用整块坐标的平方距离，`< range²`。
+            let block = BlockPos::containing(player.position);
+            let dx = i64::from(block.x - pos.x);
+            let dy = i64::from(block.y - pos.y);
+            let dz = i64::from(block.z - pos.z);
+            if (dx * dx + dy * dy + dz * dz) as f64 >= range * range {
+                continue;
+            }
+            let eye = Vec3::new(
+                player.position.x,
+                player.position.y + f64::from(player.eye_height),
+                player.position.z,
+            );
+            out.push(mc_bamboo_blocks::level::TrialSpawnerPlayer {
+                uuid: player.uuid.unwrap_or_default(),
+                trial_omen: false,
+                bad_omen_amplifier: None,
+                eye_position: eye,
+            });
+        }
+        out
+    }
+
+    fn trial_spawner_mob_untracked(&self, uuid: [u8; 16], pos: BlockPos) -> bool {
+        let Some(public) = self
+            .entities
+            .iter_public()
+            .find(|public| match &public.kind {
+                KindPublic::Mob(mob) => mob.uuid == uuid,
+                _ => false,
+            })
+        else {
+            return true;
+        };
+        if public.removed {
+            return true;
+        }
+        let block = BlockPos::containing(public.position);
+        let dx = i64::from(block.x - pos.x);
+        let dy = i64::from(block.y - pos.y);
+        let dz = i64::from(block.z - pos.z);
+        dx * dx + dy * dy + dz * dz > 2_209
+    }
+
+    fn trial_spawner_discard_mobs(&mut self, mobs: &[[u8; 16]]) {
+        let doomed: Vec<EntityUid> = self
+            .entities
+            .iter_public()
+            .filter(|public| match &public.kind {
+                KindPublic::Mob(mob) => mobs.contains(&mob.uuid),
+                _ => false,
+            })
+            .map(|public| public.uid)
+            .collect();
+        for uid in doomed {
+            let _ = mc_bamboo_blocks::level::LevelEntities::discard_entity(self, uid);
+        }
+    }
+
+    fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return false;
+        };
+        let params = mc_bamboo_loot::LootParams::new(0.0);
+        let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
+            return false;
+        };
+        if stacks.is_empty() {
+            return false;
+        }
+        for stack in stacks {
+            let stack = mc_bamboo_game::loot_stack(&stack);
+            // `DefaultDispenseItemBehavior.spawnItem(level, stack, 2, UP,
+            // atBottomCenterOf(pos).relative(UP, 1.2))`。
+            let position = Vec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 1.2 - 0.125,
+                f64::from(pos.z) + 0.5,
+            );
+            let random = self.random.source();
+            let _g = random.next_double() * 0.1 + 0.2;
+            let spread = 0.017_227_5 * 2.0;
+            let velocity = Vec3::new(
+                random.triangle(0.0, spread),
+                random.triangle(0.2, spread),
+                random.triangle(0.0, spread),
+            );
+            let uid = mc_bamboo_blocks::level::LevelEntities::spawn_entity(
+                self,
+                Entity::ground_item(position, stack),
+            );
+            mc_bamboo_blocks::level::LevelEntities::with_just_spawned(self, uid, &mut |entity| {
+                entity.delta = velocity;
+            });
+        }
+        true
+    }
+
+    fn vault_players(&self, pos: BlockPos, range: f64) -> Vec<[u8; 16]> {
+        // `INCLUDING_CREATIVE_PLAYERS`：整块坐标平方距离、只排旁观者（创造也算）。
+        let squared = range * range;
+        self.players
+            .iter()
+            .filter(|player| !player.spectator)
+            .filter(|player| {
+                let block = BlockPos::containing(player.position);
+                let dx = i64::from(block.x - pos.x);
+                let dy = i64::from(block.y - pos.y);
+                let dz = i64::from(block.z - pos.z);
+                ((dx * dx + dy * dy + dz * dz) as f64) < squared
+            })
+            .filter_map(|player| player.uuid)
+            .collect()
+    }
+
+    fn vault_resolve_reward(
+        &mut self,
+        pos: BlockPos,
+        player: [u8; 16],
+        key: &ItemStack,
+        loot_table: &str,
+    ) -> Vec<ItemStack> {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return Vec::new();
+        };
+        // `resolveItemsToEject`：VAULT 参数集走表的 `random_sequence`（世界种子 0）。
+        let mut params =
+            mc_bamboo_loot::LootParams::new(0.0).with_origin(mc_bamboo_loot::Position::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ));
+        params.tool = Some(mc_bamboo_loot::LootStack::new(key.item, key.count));
+        params.this_entity = Some(
+            self.players
+                .iter()
+                .find(|p| p.uuid == Some(player))
+                .map(|p| {
+                    let mut view = mc_bamboo_loot::EntityView::new(
+                        mc_bamboo_data::registries::entity_type::PLAYER,
+                    );
+                    view.is_living = true;
+                    view.position = Some(mc_bamboo_loot::Position::new(
+                        p.position.x,
+                        p.position.y,
+                        p.position.z,
+                    ));
+                    view
+                })
+                .unwrap_or_else(|| {
+                    mc_bamboo_loot::EntityView::new(mc_bamboo_data::registries::entity_type::PLAYER)
+                }),
+        );
+        let Ok(stacks) = table.get_random_items_with_seed(
+            &params,
+            0,
+            Some(&self.loot_sequences),
+            self.random.source(),
+        ) else {
+            return Vec::new();
+        };
+        stacks.iter().map(mc_bamboo_game::loot_stack).collect()
+    }
+
+    fn vault_random_display_item(&mut self, loot_table: &str, pos: BlockPos) -> ItemStack {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return ItemStack::empty();
+        };
+        // `getRandomDisplayItemFromLootTable`：世界随机源滚表，再 `nextInt` 取一件。
+        let params =
+            mc_bamboo_loot::LootParams::new(0.0).with_origin(mc_bamboo_loot::Position::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ));
+        let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
+            return ItemStack::empty();
+        };
+        if stacks.is_empty() {
+            return ItemStack::empty();
+        }
+        let index = self.random.source().next_int(stacks.len() as i32) as usize;
+        mc_bamboo_game::loot_stack(&stacks[index])
+    }
+
     fn player_mob_attack(
         &self,
         uid: i32,
@@ -1777,6 +2055,9 @@ impl Report {
                 Line::Case(case) => self.replay(&case),
                 Line::Projectile(case) => self.replay_projectile(&case),
                 Line::Shot(case) => self.replay_shot(&case),
+                Line::PigMount(case) => self.replay_pig_mount(&case),
+                Line::PigBoost(case) => self.replay_pig_boost(&case),
+                Line::PigDismount(case) => self.replay_pig_dismount(&case),
                 Line::Egg(case) => self.replay_egg(&case),
                 Line::EggThrow(case) => self.replay_egg_throw(&case),
                 Line::EggDispense(case) => self.replay_egg_dispense(&case),
@@ -1802,6 +2083,7 @@ impl Report {
                 Line::GolemSave(case) => self.replay_golem_save(&case),
                 Line::SmallMob(case) => self.replay_small_mob(&case),
                 Line::SmallMobSave(case) => self.replay_small_mob_save(&case),
+                Line::Spawner(case) => self.replay_spawner(&case),
                 Line::SulfurCube(case) => self.replay_sulfur_cube(&case),
                 Line::SulfurCubeSave(case) => self.replay_sulfur_cube_save(&case),
                 Line::SmallMobDeath(case) => self.replay_small_mob_death(&case),
@@ -1815,6 +2097,7 @@ impl Report {
                 Line::VillagerBrain(case) => self.replay_villager_brain(&case),
                 Line::VillagerPoi(case) => self.replay_villager_poi(&case),
                 Line::VillagerPhase4(case) => self.replay_villager_phase4(&case),
+                Line::VillagerTrade(case) => self.replay_villager_trade(&case),
                 Line::AttackTarget(case) => self.replay_attack_target(&case),
                 Line::Guardian(case) => self.replay_guardian(&case),
                 Line::Fish(case) => self.replay_fish(&case),
@@ -1823,6 +2106,11 @@ impl Report {
                 Line::WaterMob(case) => self.replay_water_mob(&case),
                 Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
+                Line::TrialSpawner(case) => self.replay_trial_spawner(&case),
+                Line::Vault(case) => self.replay_vault(&case),
+                Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
+                Line::SculkSensorOrder(case) => self.replay_sculk_sensor_order(&case),
+                Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
@@ -1833,6 +2121,7 @@ impl Report {
                 Line::EquineDeath(case) => self.replay_equine_death(case),
                 Line::EquineSave(case) => self.replay_equine_save(case),
                 Line::LlamaSpit(case) => self.replay_llama_spit(&case),
+                Line::Leash(case) => self.replay_leash(&case),
                 Line::WitchThrow(case) => self.replay_witch_throw(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::PatrolSpawn(case) => self.replay_patrol_spawn(&case)?,
@@ -2004,12 +2293,16 @@ impl Report {
                 raining: case.raining,
                 thundering: false,
                 bees_stay: None,
+                spawner_light: None,
             },
             natural_spawn: None,
             biome: None,
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(case.first_id),
             players: case
@@ -2029,6 +2322,8 @@ impl Report {
                         f64::from_bits(player.z as u64),
                     ),
                     delta: Vec3::default(),
+                    width: 0.6,
+                    height: 1.8,
                     eye_height: f32::from_bits(player.eye as u32),
                     health: 20.0,
                     look_direction: Vec3::view_vector(
@@ -2041,6 +2336,8 @@ impl Report {
                     game_mode: 0,
                     mining_fatigue: None,
                     creative: false,
+                    flying: false,
+                    explosion_knockback_resistance: 0.0,
                     sneaking: false,
                     sprinting: false,
                     swimming: false,
@@ -2092,6 +2389,11 @@ impl Report {
             ignore_bed_monsters: matches!(break_test, Some("zombie_bed")),
             short_hunger: matches!(break_test, Some("zombie_hunger")),
             wrong_was_hurt: matches!(break_test, Some("zombie_was_hurt")),
+            explosion_break: match break_test {
+                Some("explode_tnt_hurt") => 1,
+                Some("explode_tnt_center") => 2,
+                _ => 0,
+            },
         };
         for &[x, y, z, state] in &case.blocks {
             level
@@ -2110,6 +2412,8 @@ impl Report {
         let mut ticks = BlockTicks::new();
         ticks.set_time(case.start_time);
         let mut ids = Vec::new();
+        // TNT 场景：额外实体的 ID，排在所有牛之后（和官方 setId(FIRST_ID + mobs.size()) 一致）。
+        let mut tnt_id: Option<i32> = None;
         let mut tracking = EntityTracking::default();
         let sound_source = mc_bamboo_blocks::LegacyRandom::new(12345);
         {
@@ -2145,6 +2449,7 @@ impl Report {
                     18 => mc_bamboo_blocks::entity::mob::MobType::Frog,
                     19 => mc_bamboo_blocks::entity::mob::MobType::Tadpole,
                     20 => mc_bamboo_blocks::entity::mob::MobType::Camel,
+                    24 => mc_bamboo_blocks::entity::mob::MobType::Sniffer,
                     15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
                     16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
@@ -2452,6 +2757,14 @@ impl Report {
             {
                 world.start_riding_with_limit(passenger, vehicle, 2);
             }
+            // TNT 场景：照官方 `PrimedTnt(level, x+0.5, y, z+0.5, null)` 构造函数起一个
+            // 点燃的 TNT。构造时从 `level.random` 取一次 `next_double` 算朝向，位次和官方
+            // 一致，后面射线/洗牌的世界随机源仍对齐。
+            if let Some([x, y, z]) = case.tnt {
+                let position = Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5);
+                let angle = world.random().next_double();
+                tnt_id = Some(world.spawn_entity(Entity::primed_tnt(position, angle)));
+            }
         }
         let Some(first) = case.steps.first() else {
             self.mismatch(format!("{}: no steps", case.name));
@@ -2471,6 +2784,7 @@ impl Report {
         }
         self.compare(&case.name, 0, &ours, first);
         self.compare_zombie_player(case, &mut level, 0);
+        self.compare_tnt(case, &level, 0, tnt_id);
         // 场景开始时的牛也算「刚生成」，但它们在 tick 0 已经建过同步状态，
         // 不该出现在后面逐刻的新实体比对里。
         let _ = level.entities.take_spawn_snapshots();
@@ -2605,6 +2919,7 @@ impl Report {
                             f64::from_bits(player.y as u64),
                             f64::from_bits(player.z as u64),
                         ),
+                        player_height: 1.8,
                         sneaking: false,
                         difficulty: 2,
                     };
@@ -2734,6 +3049,48 @@ impl Report {
                 world.tick_entities();
                 tick_effects = world.into_effects();
             }
+            // 爆炸包走游戏层正式入口：把 `Effect::Explode` 发给区域里的玩家，
+            // `compare_zombie_player` 再和官方逐字节比（含击退向量）。
+            if let Some(game) = level.game.as_mut() {
+                for effect in &tick_effects {
+                    if let mc_bamboo_blocks::Effect::Explode {
+                        center,
+                        radius,
+                        block_count,
+                        hit_players,
+                        is_small,
+                        play_sound,
+                    } = effect
+                    {
+                        // 改坏确认：粒子、方块数和击退向量各有一处故意改错。
+                        let break_test = self.break_test.as_deref();
+                        let is_small = if break_test == Some("explode_particle") {
+                            !*is_small
+                        } else {
+                            *is_small
+                        };
+                        let block_count = if break_test == Some("explode_block_count") {
+                            *block_count + 1
+                        } else {
+                            *block_count
+                        };
+                        let empty: Vec<(i32, mc_bamboo_core::Vec3)> = Vec::new();
+                        let knock = if break_test == Some("explode_knockback") {
+                            empty.as_slice()
+                        } else {
+                            hit_players.as_slice()
+                        };
+                        game.send_explode(
+                            *center,
+                            *radius,
+                            block_count,
+                            knock,
+                            is_small,
+                            *play_sound,
+                        );
+                    }
+                }
+            }
             // 这一刻新生成的实体：快照是在 `addFreshEntity` 时记下的，官方
             // `ChunkMap.addEntity` 也在同一时刻建 `ServerEntity`。
             // Newly spawned entities: the snapshot is taken at `addFreshEntity`,
@@ -2796,7 +3153,17 @@ impl Report {
             }
             // 死亡场景：逐刻比新生成的掉落物和经验球（种类、数量、位置）。
             if let Some(expected_spawns) = &case.spawns {
-                let ours_spawns = spawn_snapshot(&level, &spawn_public);
+                let mut ours_spawns = spawn_snapshot(&level, &spawn_public);
+                // 改坏确认：把挖出来的种子数量改错，证明掉落比较没放松。
+                // Deliberate breakage: corrupt the dug-up seed count to prove the
+                // spawn comparison is not relaxed.
+                if self.break_test.as_deref() == Some("sniffer_drop")
+                    && case.name.starts_with("sniffer_")
+                {
+                    for spawn in &mut ours_spawns {
+                        spawn.count = spawn.count.wrapping_add(1);
+                    }
+                }
                 compare_spawns(
                     &mut self.mismatches,
                     &self.show,
@@ -2831,6 +3198,7 @@ impl Report {
             self.compare(&case.name, index, &ours, expected);
             self.compare_blocks(case, &level, index);
             self.compare_zombie_player(case, &mut level, index);
+            self.compare_tnt(case, &level, index, tnt_id);
             if let Some(expected) = case.level_events.as_ref().and_then(|all| all.get(index)) {
                 let ours: Vec<[i32; 6]> = tick_effects
                     .iter()
@@ -2942,9 +3310,34 @@ impl Report {
         }
     }
 
+    /// TNT 场景：逐刻比 TNT 的位置（f64 位）和引信；爆炸那刻实体离表，官方记 null。
+    fn compare_tnt(&mut self, case: &Case, level: &MobLevel, index: usize, tnt_id: Option<i32>) {
+        let Some(expected) = case.tnt_steps.as_ref().and_then(|all| all.get(index)) else {
+            return;
+        };
+        let ours: Option<[i64; 4]> =
+            tnt_id
+                .and_then(|id| level.entities.get(id))
+                .and_then(|entity| match &entity.kind {
+                    EntityKind::Tnt(data) => Some([
+                        entity.position.x.to_bits() as i64,
+                        entity.position.y.to_bits() as i64,
+                        entity.position.z.to_bits() as i64,
+                        i64::from(data.fuse),
+                    ]),
+                    _ => None,
+                });
+        if &ours != expected && self.mismatches.len() < self.show {
+            self.mismatches.push(format!(
+                "{} tick {index} tnt: official {expected:?} bamboo {ours:?}",
+                case.name
+            ));
+        }
+    }
+
     /// 真实玩家的僵尸场景：比 0 号玩家的状态和它自己收到的那几种包。
     fn compare_zombie_player(&mut self, case: &Case, level: &mut MobLevel, index: usize) {
-        const SELF_PACKETS: [u8; 6] = [43, 67, 68, 69, 106, 135];
+        const SELF_PACKETS: [u8; 7] = [36, 43, 67, 68, 69, 106, 135];
         let (Some(game), Some(player)) = (level.game.as_mut(), case.players.first()) else {
             return;
         };
@@ -2989,6 +3382,27 @@ impl Report {
         ours: &[Option<CowStep>],
         official: &[CowStep],
     ) {
+        // 改坏确认：把 Bamboo 逐刻的 state / brain 记忆故意改错，证明比较没放松。
+        // Deliberate breakage: corrupt the per-tick state / brain memory to prove
+        // the comparison is not relaxed.
+        let tampered = match self.break_test.as_deref() {
+            Some("sniffer_state") if name.starts_with("sniffer_") => {
+                let mut steps = ours.to_vec();
+                for step in steps.iter_mut().flatten() {
+                    step.sniffer = step.sniffer.wrapping_add(1);
+                }
+                Some(steps)
+            }
+            Some("sniffer_brain") if name.starts_with("sniffer_") => {
+                let mut steps = ours.to_vec();
+                for step in steps.iter_mut().flatten() {
+                    step.brain.push('!');
+                }
+                Some(steps)
+            }
+            _ => None,
+        };
+        let ours: &[Option<CowStep>] = tampered.as_deref().unwrap_or(ours);
         for (cow, expected) in official.iter().enumerate() {
             let place = format!("{name} tick {index} cow {cow}");
             if std::env::var_os("MOB_ORACLE_BRAIN").is_some() && !expected.brain.is_empty() {
@@ -3080,6 +3494,7 @@ impl Report {
                 plain!(fox_flags);
                 plain!(fox_mouth);
                 plain!(goat);
+                plain!(sniffer);
                 plain!(wolf_tame);
                 plain!(wolf_sit);
                 plain!(wolf_owned);
@@ -4416,7 +4831,21 @@ fn compare_spawns(
                 && ours.y == expected.y
                 && ours.z == expected.z
         } else {
-            ours == expected
+            // 掉落物 / 经验球的实体 id 是实体表内部编号：假世界里玩家也占一个号，
+            // Bamboo 的玩家不进实体表，两边基数差一。它不是行为结果，只比种类、
+            // 物品、数量、数值和位置；生成数量与顺序仍由上面的长度和逐项 zip 保证。
+            // A dropped item's/orb's entity id is an internal table number: the fake
+            // world's player consumes one, while Bamboo's player is not in the entity
+            // table, so the bases differ by one. It is not a behaviour result; compare
+            // kind, item, count, value and position only. Spawn count and order are
+            // still checked by the length and the per-index zip above.
+            ours.kind == expected.kind
+                && ours.item == expected.item
+                && ours.count == expected.count
+                && ours.value == expected.value
+                && ours.x == expected.x
+                && ours.y == expected.y
+                && ours.z == expected.z
         };
         if same {
             continue;
@@ -4555,6 +4984,7 @@ fn try_sleep(level: &mut MobLevel, ticks: &mut BlockTicks, case: &Case, head: Bl
     );
     let creative = case.player_creative;
     let actor = Actor {
+        uid: 0,
         uuid: ((1_u128 << 64) | 2).to_be_bytes(),
         position,
         yaw: 0.0,
@@ -4903,6 +5333,11 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             0
         },
         goat: goat_flags(mob),
+        sniffer: if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Sniffer {
+            mob.sniffer.state.id()
+        } else {
+            0
+        },
         wolf_tame: if is_wolf(mob) {
             i32::from(mob.tame.flags)
         } else {

@@ -234,7 +234,12 @@ impl Node {
                     return false;
                 }
                 self.status = Status::Running;
-                let duration = min + cx.level_next_int(max + 1 - min);
+                // 官方 `maxDuration + 1 - minDuration` 是 int 加减，会在 `Integer.MAX_VALUE`
+                // 时长（如 `LookAndFollowTradingPlayerSink`）上回绕成 1；这里也按 int 回绕算。
+                // Vanilla's `maxDuration + 1 - minDuration` is int arithmetic and wraps to 1
+                // for `Integer.MAX_VALUE` durations (e.g. `LookAndFollowTradingPlayerSink`).
+                let span = max.wrapping_add(1).wrapping_sub(min);
+                let duration = min.wrapping_add(cx.level_next_int(span));
                 self.end_timestamp = cx.time + i64::from(duration);
                 self.kind.start(cx);
                 true
@@ -305,13 +310,16 @@ impl Node {
         }
     }
 
-    /// `BehaviorControl.doStop`。
+    /// `BehaviorControl.doStop`。`stop` 拿到的 `timed_out` 是 `gameTime > endTimestamp`，
+    /// 嗅探兽的 `Sniffing` / `Digging` / `FinishedDigging` 在 `stop` 里按它分叉。
     ///
-    /// `BehaviorControl.doStop`.
+    /// `BehaviorControl.doStop`. The `timed_out` passed to `stop` is
+    /// `gameTime > endTimestamp`; the sniffer's `Sniffing` / `Digging` /
+    /// `FinishedDigging` branch on it inside `stop`.
     pub fn do_stop(&mut self, cx: &mut Cx) {
         self.status = Status::Stopped;
         match self.kind.class() {
-            Class::Timed { .. } => self.kind.stop(cx),
+            Class::Timed { .. } => self.kind.stop(cx, cx.time > self.end_timestamp),
             Class::OneShot | Class::DoNothing { .. } => {}
             Class::Gate => {
                 let Kind::Gate(gate) = &mut self.kind else {

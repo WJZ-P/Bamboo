@@ -186,6 +186,11 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.ticks.LevelTicks;
 import sun.misc.Unsafe;
+import net.minecraft.world.level.block.entity.vault.VaultBlockEntity;
+import net.minecraft.world.level.block.entity.vault.VaultConfig;
+import net.minecraft.world.level.block.entity.vault.VaultServerData;
+import net.minecraft.world.level.block.entity.vault.VaultSharedData;
+import net.minecraft.world.level.block.entity.vault.VaultState;
 
 /**
  * 官方牛在假世界里逐刻的状态。每个场景一行 JSON：场景本身（方块、牛、玩家、伤害动作）加上
@@ -340,6 +345,9 @@ public final class MobOracle {
                 playRiptide(official, out, name);
                 cases++;
             }
+            if (only == null || "pig_ride".startsWith(only)) {
+                cases += playPigRide(official, out);
+            }
             if (only == null || "equine".startsWith(only)) {
                 cases += playEquines(official, out);
             }
@@ -354,6 +362,9 @@ public final class MobOracle {
                 playLlamaSpit(official, out, "llama_spit_far", 9.5, 61L);
                 playLlamaSpit(official, out, "llama_spit_near", 3.5, 4207L);
                 cases += 2;
+            }
+            if (only == null || "leash".startsWith(only) || only.startsWith("leash")) {
+                cases += playLeash(official, out, only);
             }
             if (only == null || "witch_throw".startsWith(only)) {
                 OracleWitch.checkAim(official);
@@ -417,6 +428,9 @@ public final class MobOracle {
             if (only == null || only.equals("small_mob_death")) {
                 cases += playSmallMobDeath(official, out);
             }
+            if (only == null || only.startsWith("spawner")) {
+                cases += playSpawner(official, out, only);
+            }
             if (only == null || only.startsWith("sulfur_cube_")) {
                 cases += playSulfurCube(official, out, only);
                 cases += playSulfurCubeSave(official, out);
@@ -440,6 +454,9 @@ public final class MobOracle {
             }
             if (only == null || "villager_p4".startsWith(only) || only.startsWith("villager_p4")) {
                 cases += playVillagerPhase4(official, out, only);
+            }
+            if (only == null || "villager_trade".startsWith(only) || only.startsWith("villager_trade")) {
+                cases += playVillagerTrade(official, out, only);
             }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
@@ -538,6 +555,12 @@ public final class MobOracle {
                     cases++;
                 }
             }
+            if (only == null || only.startsWith("trial_spawner")) {
+                cases += playTrialSpawner(official, out, only);
+            }
+            if (only == null || only.startsWith("vault")) {
+                cases += playVault(official, out, only);
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -621,8 +644,354 @@ public final class MobOracle {
                 playCreaking(official, out, name);
                 cases++;
             }
+            if (only == null || only.startsWith("sculk_sensor")) {
+                for (String name : List.of(
+                        "sculk_sensor_step",
+                        "sculk_sensor_wool",
+                        "sculk_sensor_cooldown",
+                        "sculk_sensor_calibrated_match",
+                        "sculk_sensor_calibrated_mismatch")) {
+                    if (only != null && !name.startsWith(only)) continue;
+                    playSculkSensor(official, out, name);
+                    cases++;
+                }
+            }
+            if (only == null || only.startsWith("sculk_sensor_order")) {
+                playSculkSensorOrder(official, out);
+                cases++;
+            }
+            if (only == null || only.startsWith("sculk_shrieker")) {
+                for (String name : List.of("sculk_shrieker_warn", "sculk_shrieker_cooldown",
+                        "sculk_shrieker_decay")) {
+                    if (only != null && !name.startsWith(only)) continue;
+                    playSculkShrieker(official, out, name);
+                    cases++;
+                }
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
+        }
+    }
+
+    /** 幽匿感测体：真实 `SculkSensorBlockEntity` + `VibrationSystem`，逐刻驱动振动。 */
+    private static void playSculkSensor(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        try {
+            level.enableGameEvents();
+            level.nextId = FIRST_ID;
+            level.gameTime = START_TIME;
+
+            BlockPos sensor = new BlockPos(4, 64, 0);
+            BlockPos source = new BlockPos(1, 64, 0);
+            BlockPos wool = new BlockPos(2, 64, 0);
+            boolean calibrated = name.contains("calibrated");
+            int ticks = switch (name) {
+                case "sculk_sensor_cooldown" -> 70;
+                default -> 20;
+            };
+
+            // 平坦石地板，保证振动射线和落点都有真实地面。
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -12; x <= 12; x++) {
+                for (int z = -12; z <= 12; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            BlockState sensorState = calibrated
+                    ? Blocks.CALIBRATED_SCULK_SENSOR.defaultBlockState()
+                            .setValue(net.minecraft.world.level.block.CalibratedSculkSensorBlock.FACING,
+                                    Direction.NORTH)
+                    : Blocks.SCULK_SENSOR.defaultBlockState();
+            level.blocks.put(sensor.asLong(), sensorState);
+            if (name.equals("sculk_sensor_wool")) {
+                level.blocks.put(wool.asLong(), Blocks.WOOL.white().defaultBlockState());
+            }
+            if (name.contains("calibrated")) {
+                // 校频体朝北，背面（南，z+1）放红石块给满强度 15。
+                level.blocks.put(new BlockPos(4, 64, 1).asLong(), Blocks.REDSTONE_BLOCK.defaultBlockState());
+            }
+
+            net.minecraft.world.level.block.entity.SculkSensorBlockEntity be = calibrated
+                    ? new net.minecraft.world.level.block.entity.CalibratedSculkSensorBlockEntity(sensor, sensorState)
+                    : new net.minecraft.world.level.block.entity.SculkSensorBlockEntity(sensor, sensorState);
+            level.putBlockEntity(be);
+            // 官方 `LevelChunk.addGameEventListener`：把监听者登记进区段，并跨
+            // `setBlock` 清区块缓存保留（见 `FakeLevel.registerGameEventListener`）。
+            level.registerGameEventListener(sensor, be.getListener());
+            // 计划刻需要一个区块容器：官方 `scheduleTick` 找不到容器会静默丢弃。
+            net.minecraft.core.SectionPos section = net.minecraft.core.SectionPos.of(sensor);
+            level.getBlockTicks().addContainer(
+                    new net.minecraft.world.level.ChunkPos(section.x(), section.z()),
+                    new net.minecraft.world.ticks.LevelChunkTicks<>());
+
+            // 要发的事件与时刻。
+            int fireTick = 1;
+            int fire2Tick = name.equals("sculk_sensor_cooldown") ? 45 : -1;
+            Holder<GameEvent> event = switch (name) {
+                case "sculk_sensor_calibrated_match" -> GameEvent.ENTITY_DIE; // 频率 15，与背面 15 匹配
+                default -> GameEvent.STEP; // 频率 1
+            };
+            int eventId = official.registries
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.GAME_EVENT)
+                    .getId(event.value());
+            int stepEventId = official.registries
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.GAME_EVENT)
+                    .getId(GameEvent.STEP.value());
+
+            Vec3 sourceCenter = new Vec3(source.getX() + 0.5, source.getY() + 0.5, source.getZ() + 0.5);
+
+            // 初始方块必须在 tick 之前快照：tick 会改掉感测体的相位。
+            String initialBlocks = blockArray(level.blocks);
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime = START_TIME + tick;
+                    if (tick == fireTick) {
+                        // 官方 `ServerLevel.gameEvent` → `GameEventDispatcher.post` 的完整分发：
+                        // 区段路由 + 按距离排序后逐一听者投递。
+                        level.gameEvent(event, sourceCenter, new GameEvent.Context(null, null));
+                    }
+                    if (tick == fire2Tick) {
+                        level.gameEvent(GameEvent.STEP, sourceCenter, new GameEvent.Context(null, null));
+                    }
+                    // 方块实体 tick：`VibrationSystem.Ticker.tick`（getTicker 的 lambda）。
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, be.getVibrationData(), be.getVibrationUser());
+                    // 计划刻：ACTIVE 30 刻后转 COOLDOWN，再 10 刻转 INACTIVE。
+                    level.getBlockTicks().tick(level.gameTime, Integer.MAX_VALUE, (p, block) -> {
+                        BlockState st = level.getBlockState(p);
+                        if (st.is(block)) {
+                            st.tick(level, p, level.getRandom());
+                        }
+                    });
+                }
+                if (tick > 0) frames.append(',');
+                BlockState st = level.getBlockState(sensor);
+                int phase = st.getValue(net.minecraft.world.level.block.SculkSensorBlock.PHASE).ordinal();
+                int power = st.getValue(net.minecraft.world.level.block.SculkSensorBlock.POWER);
+                int freq = be.getLastVibrationFrequency();
+                frames.append('[').append(phase).append(',').append(power).append(',').append(freq).append(']');
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"sculkSensor\",\"name\":" + jsonString(name)
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"blocks\":" + initialBlocks
+                    + ",\"sensor\":" + Arrays.toString(new int[] {sensor.getX(), sensor.getY(), sensor.getZ()})
+                    + ",\"calibrated\":" + calibrated
+                    + ",\"events\":[" + fireTick + ',' + eventId + ','
+                    + source.getX() + ',' + source.getY() + ',' + source.getZ() + "],\"event2\":"
+                    + (fire2Tick < 0 ? "null" : "[" + fire2Tick + ',' + stepEventId + ',' + source.getX() + ',' + source.getY() + ',' + source.getZ() + "]")
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            level.closeRealPoi();
+        }
+    }
+
+    /** 两个感测体到发声点距离不同：`GameEventDispatcher.post` 按距离排序后逐个投递，
+     *  两只感测体各自按距离给红石强度。 */
+    private static void playSculkSensorOrder(Official official, Writer out) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        try {
+            level.enableGameEvents();
+            level.nextId = FIRST_ID;
+            level.gameTime = START_TIME;
+
+            BlockPos near = new BlockPos(2, 64, 0);
+            BlockPos far = new BlockPos(6, 64, 0);
+            BlockPos source = new BlockPos(0, 64, 0);
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -12; x <= 12; x++) {
+                for (int z = -12; z <= 12; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            BlockState sensorState = Blocks.SCULK_SENSOR.defaultBlockState();
+            level.blocks.put(near.asLong(), sensorState);
+            level.blocks.put(far.asLong(), sensorState);
+
+            net.minecraft.world.level.block.entity.SculkSensorBlockEntity nearBe =
+                    new net.minecraft.world.level.block.entity.SculkSensorBlockEntity(near, sensorState);
+            net.minecraft.world.level.block.entity.SculkSensorBlockEntity farBe =
+                    new net.minecraft.world.level.block.entity.SculkSensorBlockEntity(far, sensorState);
+            level.putBlockEntity(nearBe);
+            level.putBlockEntity(farBe);
+            level.registerGameEventListener(near, nearBe.getListener());
+            level.registerGameEventListener(far, farBe.getListener());
+            // 两个感测体的计划刻容器。
+            net.minecraft.core.SectionPos section = net.minecraft.core.SectionPos.of(near);
+            level.getBlockTicks().addContainer(
+                    new net.minecraft.world.level.ChunkPos(section.x(), section.z()),
+                    new net.minecraft.world.ticks.LevelChunkTicks<>());
+
+            int stepEventId = official.registries
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.GAME_EVENT)
+                    .getId(GameEvent.STEP.value());
+            Vec3 sourceCenter = new Vec3(source.getX() + 0.5, source.getY() + 0.5, source.getZ() + 0.5);
+            String initialBlocks = blockArray(level.blocks);
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= 20; tick++) {
+                if (tick > 0) {
+                    level.gameTime = START_TIME + tick;
+                    if (tick == 1) {
+                        level.gameEvent(GameEvent.STEP, sourceCenter, new GameEvent.Context(null, null));
+                    }
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, nearBe.getVibrationData(), nearBe.getVibrationUser());
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, farBe.getVibrationData(), farBe.getVibrationUser());
+                    level.getBlockTicks().tick(level.gameTime, Integer.MAX_VALUE, (p, block) -> {
+                        BlockState st = level.getBlockState(p);
+                        if (st.is(block)) {
+                            st.tick(level, p, level.getRandom());
+                        }
+                    });
+                }
+                if (tick > 0) frames.append(',');
+                frames.append('[');
+                for (BlockPos sensor : new BlockPos[] {near, far}) {
+                    BlockState st = level.getBlockState(sensor);
+                    int phase = st.getValue(net.minecraft.world.level.block.SculkSensorBlock.PHASE).ordinal();
+                    int power = st.getValue(net.minecraft.world.level.block.SculkSensorBlock.POWER);
+                    net.minecraft.world.level.block.entity.SculkSensorBlockEntity be =
+                            sensor.equals(near) ? nearBe : farBe;
+                    int freq = be.getLastVibrationFrequency();
+                    frames.append('[').append(phase).append(',').append(power).append(',').append(freq).append("],");
+                }
+                frames.setLength(frames.length() - 1);
+                frames.append(']');
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"sculkSensorOrder\",\"name\":\"sculk_sensor_order\""
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"blocks\":" + initialBlocks
+                    + ",\"sensors\":[[2,64,0],[6,64,0]]"
+                    + ",\"events\":[1," + stepEventId + ",0,64,0]"
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            level.closeRealPoi();
+        }
+    }
+
+    /** 幽匿尖啸体：玩家触发感测体 → 尖啸体警告加一、尖叫，冷却期内再触发不加，
+     *  90 刻后 `tryRespond` 给玩家黑暗。逐刻比警告等级、尖叫状态和黑暗。 */
+    private static void playSculkShrieker(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        try {
+            level.enableGameEvents();
+            level.nextId = FIRST_ID;
+            level.gameTime = START_TIME;
+
+            BlockPos sensor = new BlockPos(4, 64, 0);
+            BlockPos shrieker = new BlockPos(6, 64, 0);
+            BlockPos playerPos = new BlockPos(2, 64, 0);
+            // 触发时刻；冷却场景第二次触发在 200 刻冷却内，第三次过了冷却。
+            // 衰减场景只触发一次，跑满 12000 刻看警告掉级。
+            int[] triggers = switch (name) {
+                case "sculk_shrieker_cooldown" -> new int[] {1, 100, 220};
+                default -> new int[] {1};
+            };
+            int ticks = switch (name) {
+                case "sculk_shrieker_cooldown" -> 300;
+                case "sculk_shrieker_decay" -> 12_200;
+                default -> 120;
+            };
+
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -12; x <= 12; x++) {
+                for (int z = -12; z <= 12; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            // 天然生成的尖啸体 `can_summon=true`。
+            BlockState shriekerState = Blocks.SCULK_SHRIEKER.defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.SculkShriekerBlock.CAN_SUMMON, true);
+            level.blocks.put(sensor.asLong(), Blocks.SCULK_SENSOR.defaultBlockState());
+            level.blocks.put(shrieker.asLong(), shriekerState);
+
+            net.minecraft.world.level.block.entity.SculkSensorBlockEntity sensorBe =
+                    new net.minecraft.world.level.block.entity.SculkSensorBlockEntity(sensor, Blocks.SCULK_SENSOR.defaultBlockState());
+            net.minecraft.world.level.block.entity.SculkShriekerBlockEntity shriekerBe =
+                    new net.minecraft.world.level.block.entity.SculkShriekerBlockEntity(shrieker, shriekerState);
+            level.putBlockEntity(sensorBe);
+            level.putBlockEntity(shriekerBe);
+            level.registerGameEventListener(sensor, sensorBe.getListener());
+            level.registerGameEventListener(shrieker, shriekerBe.getListener());
+            net.minecraft.core.SectionPos section = net.minecraft.core.SectionPos.of(sensor);
+            level.getBlockTicks().addContainer(
+                    new net.minecraft.world.level.ChunkPos(section.x(), section.z()),
+                    new net.minecraft.world.ticks.LevelChunkTicks<>());
+
+            // 一名站在尖啸体附近的玩家，带着自己的 WardenSpawnTracker。
+            GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+            ServerPlayer player = new ServerPlayer(official.server, level, profile, ClientInformation.createDefault());
+            player.setPos(playerPos.getX() + 0.5, 64.0, playerPos.getZ() + 0.5);
+            // 黑暗效果会走连接发包，挂一个记录用的假连接。
+            ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+            put(ServerGamePacketListenerImpl.class, connection, "player", player);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "server", official.server);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+            ((RecordingListener) connection).bytes = new Bytes(official.registries);
+            put(ServerPlayer.class, player, "connection", connection);
+            level.playersList().add(player);
+            level.tracked.add(player);
+
+            int stepEventId = official.registries
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.GAME_EVENT)
+                    .getId(GameEvent.STEP.value());
+            String initialBlocks = blockArray(level.blocks);
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime = START_TIME + tick;
+                    player.getWardenSpawnTracker().tick();
+                    for (int fireAt : triggers) {
+                        if (tick == fireAt) {
+                            level.gameEvent(GameEvent.STEP,
+                                    new Vec3(playerPos.getX() + 0.5, 64.5, playerPos.getZ() + 0.5),
+                                    GameEvent.Context.of(player));
+                        }
+                    }
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, sensorBe.getVibrationData(), sensorBe.getVibrationUser());
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, shriekerBe.getVibrationData(), shriekerBe.getVibrationUser());
+                    level.getBlockTicks().tick(level.gameTime, Integer.MAX_VALUE, (p, block) -> {
+                        BlockState st = level.getBlockState(p);
+                        if (st.is(block)) {
+                            st.tick(level, p, level.getRandom());
+                        }
+                    });
+                }
+                if (tick > 0) frames.append(',');
+                int warning = player.getWardenSpawnTracker().getWarningLevel();
+                int shrieking = level.getBlockState(shrieker)
+                        .getValue(net.minecraft.world.level.block.SculkShriekerBlock.SHRIEKING) ? 1 : 0;
+                int darkness = player.hasEffect(net.minecraft.world.effect.MobEffects.DARKNESS) ? 1 : 0;
+                frames.append('[').append(warning).append(',').append(shrieking).append(',').append(darkness).append(']');
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"sculkShrieker\",\"name\":" + jsonString(name)
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"blocks\":" + initialBlocks
+                    + ",\"sensor\":[4,64,0]"
+                    + ",\"shrieker\":[6,64,0]"
+                    + ",\"player\":[2,64,0]"
+                    + ",\"triggers\":" + java.util.Arrays.toString(triggers)
+                    + ",\"events\":[1," + stepEventId + ",2,64,0]"
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            level.closeRealPoi();
         }
     }
 
@@ -793,6 +1162,9 @@ public final class MobOracle {
         int seaLevel = -63;
         /** 僵尸场景：玩家走真实的受伤链路，逐刻比玩家状态和玩家自己收到的包。 */
         boolean realPlayers;
+        /** TNT 场景：{x, y, z} 方块坐标，TNT 生成在方块底心；null 表示没有 TNT。 */
+        int[] tntBlock;
+        long tntSeed;
         /** 僵尸场景：主世界时钟的起始刻；`>= 0` 时天色、`MONSTERS_BURN`、月相都按真实时间线逐刻算。 */
         long clockStart = -1;
         /** 真实时间模式下的雨强（`getRainLevel`），雷暴恒 0。 */
@@ -1002,6 +1374,13 @@ public final class MobOracle {
             players.add(new double[] {x, y, z});
             playerItems.add(item);
             lootingLevels.add(looting);
+            return this;
+        }
+
+        /** TNT 场景：在方块坐标 (x, y, z) 放一个点燃的 TNT，底心起爆。 */
+        Scene tnt(int x, int y, int z, long seed) {
+            tntBlock = new int[] {x, y, z};
+            tntSeed = seed;
             return this;
         }
 
@@ -1521,6 +1900,7 @@ public final class MobOracle {
             addGoatScenes(scenes);
             FrogScenes.add(scenes);
             CamelScenes.add(scenes);
+            SnifferScenes.add(scenes);
         }
 
         /**
@@ -2320,6 +2700,49 @@ public final class MobOracle {
                     return null;
                 }
             };
+        }
+    }
+
+    /** 嗅探兽场景：闲逛、嗅闻、走过去挖土掉种子、记下挖过的位置、繁殖产蛋。 */
+    static final class SnifferScenes {
+        static void add(List<Scene> scenes) {
+            int seeds = BuiltInRegistries.ITEM.getId(Items.TORCHFLOWER_SEEDS);
+            // 这几个种子真的跑完整的 Sniffing→Searching→Digging→Rising 闭环并掉种子。
+            // 逐刻比位置、state、SNIFFER_EXPLORED_POSITIONS / SNIFF_COOLDOWN 记忆、
+            // 世界战利品随机序列和掉出来的东西（gameplay/sniffer_digging 礼物表）。
+            // These seeds exercise the full Sniffing→Searching→Digging→Rising loop and
+            // drop a seed. Compare position, state, memory, the world loot sequence and
+            // the drop (gameplay/sniffer_digging gift table) every tick.
+            for (long seed : new long[] {23L, 37L, 53L, 101L}) {
+                Scene dig = new Scene("sniffer_dig_" + seed).ticks(900).drops();
+                Scenes.ground(dig, 15);
+                dig.mob(24, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(dig);
+            }
+            // 闲逛对照：这个种子只跑 Scenting / DoNothing / 踱步，不进入挖掘。
+            // Idle control: this seed only runs Scenting / DoNothing / strolling, no digging.
+            Scene wander = new Scene("sniffer_wander_11").ticks(600).drops();
+            Scenes.ground(wander, 15);
+            wander.mob(24, 0.5, 64.0, 0.5, 0.0F, 11L, 0);
+            scenes.add(wander);
+            // 拿火把花种子的玩家喂两只；都喂了以后繁殖，产下一颗蛋和经验球。
+            // A player with torchflower seeds feeds two; once both are fed they breed
+            // and one lays an egg plus an experience orb.
+            Scene breed = new Scene("sniffer_breed").ticks(400).drops();
+            Scenes.ground(breed, 15);
+            breed.mob(24, 0.5, 64.0, 0.5, 0.0F, 67L, 0);
+            breed.mob(24, -2.5, 64.0, 0.5, 0.0F, 71L, 0);
+            breed.player(-0.5, 64.0, 3.5, Items.TORCHFLOWER_SEEDS);
+            breed.interact(20, 0, 0, seeds, 0);
+            breed.interact(22, 1, 0, seeds, 0);
+            scenes.add(breed);
+        }
+
+        /** `DATA_STATE` 的网络 ID：挖掘时换尺寸、掉种子都由它驱动。 */
+        static int state(net.minecraft.world.entity.animal.sniffer.Sniffer sniffer) {
+            var data = (net.minecraft.network.syncher.EntityDataAccessor<net.minecraft.world.entity.animal.sniffer.Sniffer.State>)
+                    readStatic(net.minecraft.world.entity.animal.sniffer.Sniffer.class, "DATA_STATE");
+            return sniffer.getEntityData().get(data).id();
         }
     }
 
@@ -3144,6 +3567,28 @@ public final class MobOracle {
             }
         }
 
+        /** TNT：点燃到爆炸的 80 刻逐刻比位置/引信，爆炸那刻比牛的掉血和击退、
+         * 玩家包里的击退向量和死亡消息、被炸的方块数。 */
+        static void tntBlastScenes(List<Scene> scenes) {
+            BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
+            for (int difficulty : new int[] {1, 2, 3}) {
+                Scene blast = new Scene("tnt_blast_player_" + difficulty).ticks(82).difficulty(difficulty);
+                blast.monstersBurn = false;
+                blast.realPlayers = true;
+                // 基岩地面炸不动：射线算出的方块数、连锁和世界随机源两边一样。
+                blast.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                // 一头牛和一个真实玩家都在爆炸范围里。玩家站得够远，三档难度都不死：
+                // 逐刻比血量和包里的击退向量，不掺死亡消息（TNT 死亡消息里的来源实体
+                // UUID 另见 README 限制）。
+                blast.mob(0, 3.5, 64.0, 4.5, 0.0F, 70L + difficulty, 0);
+                blast.player(7.5, 64.0, 0.5, Items.AIR);
+                // TNT 从 (0,70,0) 落下：比 80 刻里的下落和水平移动，爆炸中心是
+                // `getY(0.0625)`，强度 4，伤害来源 `explosion`（无 owner 的 TNT）。
+                blast.tnt(0, 70, 0, 80L + difficulty);
+                scenes.add(blast);
+            }
+        }
+
         /** 末影人：注视激怒、白天传送、淋雨、搬方块、躲箭。 */
         static void endermanScenes(List<Scene> scenes) {
             BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
@@ -3635,6 +4080,7 @@ public final class MobOracle {
             farmScenes(scenes);
             miscScenes(scenes);
             creeperScenes(scenes);
+            tntBlastScenes(scenes);
             spiderScenes(scenes);
             ridingScenes(scenes);
             endermanScenes(scenes);
@@ -4924,11 +5370,11 @@ public final class MobOracle {
                 || scene.name.startsWith("wolf_") || scene.name.startsWith("armadillo_")
                 || scene.name.startsWith("goat_") || scene.name.startsWith("slime_")
                 || scene.name.startsWith("frog_") || scene.name.startsWith("tadpole_")
-                || scene.name.startsWith("camel_")
+                || scene.name.startsWith("camel_") || scene.name.startsWith("sniffer_")
                 || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")
                 || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
                 || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")
-                || scene.name.startsWith("pillager_")) {
+                || scene.name.startsWith("tnt_blast_") || scene.name.startsWith("pillager_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -4958,8 +5404,8 @@ public final class MobOracle {
         if (events != null) {
             list.sounds = events::add;
         }
-        // 每个场景从干净的战利品随机序列开始，Bamboo 一侧每个 case 也是新建一份。
-        // Each scene starts with a fresh loot sequence, like a fresh Bamboo case.
+        // 每个包场景从干净的战利品随机序列开始，Bamboo 一侧每个 case 也是新建一份。
+        // Each packet scene starts with a fresh loot sequence, like a fresh Bamboo case.
         official.server.sequences = new RandomSequences();
         FakeLevel level = FakeLevel.create(official);
         if (events != null) {
@@ -7333,6 +7779,191 @@ public final class MobOracle {
         return cases;
     }
 
+    /**
+     * 猪的骑乘：右键上猪（走官方 `Player.interactOn`）、胡萝卜钓竿加速（走 `ItemStack.use`，
+     * 再反射调 `Pig.tickRidden` / `getRiddenSpeed` 逐刻比）、下车落点（`getDismountLocationForPassenger`）。
+     * Pig riding: mounting through `Player.interactOn`, carrot-on-a-stick boosts through
+     * `ItemStack.use` plus reflective `Pig.tickRidden` / `getRiddenSpeed` per tick, and the
+     * dismount spot through `getDismountLocationForPassenger`.
+     */
+    private static int playPigRide(Official official, Writer out) throws Exception {
+        int cases = 0;
+        List<Item> pigItems = List.of(Items.AIR, Items.CARROT_ON_A_STICK, Items.CARROT, Items.SADDLE,
+                Items.STICK, Items.SHEARS);
+        for (int setup = 0; setup < 3; setup++) {
+            for (int itemIndex = 0; itemIndex < pigItems.size(); itemIndex++) {
+                for (int sneak = 0; sneak < 2; sneak++) {
+                    long seed = 31000L + setup * 100L + itemIndex * 3L + sneak;
+                    FakeLevel world = pigWorld(official);
+                    net.minecraft.world.entity.animal.pig.Pig pig = newPig(world, setup != 1, setup == 2, seed);
+                    ServerPlayer player = pigPlayer(official, world);
+                    player.setShiftKeyDown(sneak == 1);
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(pigItems.get(itemIndex)));
+                    var result = player.interactOn(pig, InteractionHand.MAIN_HAND, pig.position());
+                    String swing = result instanceof net.minecraft.world.InteractionResult.Success success
+                            ? success.swingSource().name() : "PASS";
+                    var saddle = pig.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.SADDLE);
+                    out.write("{\"type\":\"pigMount\",\"setup\":" + setup
+                            + ",\"item\":" + BuiltInRegistries.ITEM.getId(pigItems.get(itemIndex))
+                            + ",\"sneak\":" + (sneak == 1) + ",\"seed\":" + seed
+                            + ",\"swing\":\"" + swing + "\""
+                            + ",\"count\":" + player.getItemInHand(InteractionHand.MAIN_HAND).getCount()
+                            + ",\"vehicle\":" + (player.getVehicle() == pig)
+                            + ",\"controller\":" + (pig.getControllingPassenger() == player)
+                            + ",\"saddle\":" + (saddle.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(saddle.getItem()))
+                            + ",\"pigSeed\":" + randomSeed(pig) + "}\n");
+                    cases++;
+                }
+            }
+        }
+        var bootAccessor = net.minecraft.world.entity.animal.pig.Pig.class.getDeclaredField("DATA_BOOST_TIME");
+        bootAccessor.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        var boostData = (net.minecraft.network.syncher.EntityDataAccessor<Integer>) bootAccessor.get(null);
+        var tickRidden = net.minecraft.world.entity.animal.pig.Pig.class.getDeclaredMethod("tickRidden",
+                net.minecraft.world.entity.player.Player.class, Vec3.class);
+        tickRidden.setAccessible(true);
+        var riddenSpeed = net.minecraft.world.entity.animal.pig.Pig.class.getDeclaredMethod("getRiddenSpeed",
+                net.minecraft.world.entity.player.Player.class);
+        riddenSpeed.setAccessible(true);
+        var broken = net.minecraft.stats.Stats.ITEM_USED.get(Items.CARROT_ON_A_STICK);
+        for (int damage : new int[] {0, 7, 17, 18, 24}) {
+            long seed = 32000L + damage;
+            FakeLevel world = pigWorld(official);
+            net.minecraft.world.entity.animal.pig.Pig pig = newPig(world, true, false, seed);
+            ServerPlayer player = pigPlayer(official, world);
+            ItemStack rod = new ItemStack(Items.CARROT_ON_A_STICK);
+            rod.setDamageValue(damage);
+            player.setItemInHand(InteractionHand.MAIN_HAND, rod);
+            player.interactOn(pig, InteractionHand.MAIN_HAND, pig.position());
+            if (player.getVehicle() != pig) throw new IllegalStateException("pig boost: player did not mount");
+            StringBuilder uses = new StringBuilder();
+            for (int use = 0; use < 2; use++) {
+                ItemStack stack = player.getItemInHand(InteractionHand.MAIN_HAND);
+                if (!stack.is(Items.CARROT_ON_A_STICK)) break;
+                int usedBefore = player.getStats().getValue(broken);
+                var result = stack.use(world, player, InteractionHand.MAIN_HAND);
+                // 官方 `ServerPlayerGameMode.useItem` 把 `heldItemTransformedTo` 放回手里。
+                // Vanilla `ServerPlayerGameMode.useItem` puts `heldItemTransformedTo` back in hand.
+                if (result instanceof net.minecraft.world.InteractionResult.Success success
+                        && success.heldItemTransformedTo() != null) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, success.heldItemTransformedTo());
+                }
+                ItemStack held = player.getItemInHand(InteractionHand.MAIN_HAND);
+                if (uses.length() > 0) uses.append(',');
+                uses.append("{\"boosted\":").append(result instanceof net.minecraft.world.InteractionResult.Success)
+                        .append(",\"item\":").append(BuiltInRegistries.ITEM.getId(held.getItem()))
+                        .append(",\"damage\":").append(held.getDamageValue())
+                        .append(",\"count\":").append(held.getCount())
+                        .append(",\"boostTime\":").append(pig.getEntityData().get(boostData))
+                        .append(",\"itemUsed\":").append(player.getStats().getValue(broken) - usedBefore)
+                        .append(",\"seed\":").append(randomSeed(pig)).append('}');
+            }
+            int total = pig.getEntityData().get(boostData);
+            StringBuilder ticks = new StringBuilder();
+            for (int t = 0; t < Math.max(0, total + 3); t++) {
+                float yaw = -170.0F + 7.0F * t;
+                float pitch = (float) ((t % 90) - 45);
+                player.setYRot(yaw);
+                player.setXRot(pitch);
+                tickRidden.invoke(pig, player, Vec3.ZERO);
+                float speed = (Float) riddenSpeed.invoke(pig, player);
+                if (t > 0) ticks.append(',');
+                ticks.append('[').append(Float.floatToRawIntBits(speed))
+                        .append(',').append(Float.floatToRawIntBits(pig.getYRot()))
+                        .append(',').append(Float.floatToRawIntBits(pig.getXRot()))
+                        .append(',').append(Float.floatToRawIntBits(pig.yBodyRot))
+                        .append(',').append(Float.floatToRawIntBits(pig.yHeadRot))
+                        .append(',').append(Float.floatToRawIntBits(pig.yRotO)).append(']');
+            }
+            out.write("{\"type\":\"pigBoost\",\"damage\":" + damage + ",\"seed\":" + seed
+                    + ",\"uses\":[" + uses + "],\"ticks\":[" + ticks + "]}\n");
+            cases++;
+        }
+        float[] yaws = {0.0F, 90.0F, 37.0F, -135.0F, 180.0F};
+        for (int layout = 0; layout < 5; layout++) {
+            for (float yaw : yaws) {
+                FakeLevel world = pigWorld(official);
+                for (int x = -4; x <= 4; x++) {
+                    for (int z = -4; z <= 4; z++) {
+                        for (int y = -63; y <= -61; y++) {
+                            world.blocks.put(BlockPos.asLong(x, y, z), Blocks.STONE.defaultBlockState());
+                        }
+                    }
+                }
+                for (int x = -1; x <= 1; x++) {
+                    for (int z = -1; z <= 1; z++) {
+                        if (x == 0 && z == 0) continue;
+                        switch (layout) {
+                            case 1 -> {
+                                for (int y = -60; y <= -58; y++) {
+                                    world.blocks.put(BlockPos.asLong(x, y, z), Blocks.STONE.defaultBlockState());
+                                }
+                            }
+                            case 2 -> {
+                                if (x == -1) {
+                                    for (int y = -60; y <= -58; y++) {
+                                        world.blocks.put(BlockPos.asLong(x, y, z), Blocks.STONE.defaultBlockState());
+                                    }
+                                }
+                            }
+                            case 3 -> world.blocks.remove(BlockPos.asLong(x, -61, z));
+                            case 4 -> world.blocks.put(BlockPos.asLong(x, -59, z), Blocks.STONE.defaultBlockState());
+                            default -> { }
+                        }
+                    }
+                }
+                net.minecraft.world.entity.animal.pig.Pig pig = newPig(world, true, false, 1L);
+                pig.setPos(0.5, -60.0, 0.5);
+                pig.setYRot(yaw);
+                ServerPlayer player = pigPlayer(official, world);
+                player.setPos(0.5, -60.0, 0.5);
+                Vec3 spot = pig.getDismountLocationForPassenger(player);
+                out.write("{\"type\":\"pigDismount\",\"layout\":" + layout
+                        + ",\"yaw\":" + Float.floatToRawIntBits(yaw)
+                        + ",\"spot\":[" + Double.doubleToRawLongBits(spot.x) + ","
+                        + Double.doubleToRawLongBits(spot.y) + "," + Double.doubleToRawLongBits(spot.z) + "]}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
+    private static FakeLevel pigWorld(Official official) {
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.spawned = new ArrayList<>();
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+        level.getRandom().setSeed(1L);
+        return level;
+    }
+
+    private static net.minecraft.world.entity.animal.pig.Pig newPig(FakeLevel world, boolean saddled,
+            boolean baby, long seed) {
+        var pig = (net.minecraft.world.entity.animal.pig.Pig) EntityTypes.PIG.create(world, EntitySpawnReason.COMMAND);
+        pig.setPos(0.5, 64.0, 0.5);
+        if (saddled) pig.setItemSlot(net.minecraft.world.entity.EquipmentSlot.SADDLE, new ItemStack(Items.SADDLE));
+        if (baby) pig.setAge(-24000);
+        setRandom(pig, seed);
+        putBoolean(Entity.class, pig, "firstTick", false);
+        return pig;
+    }
+
+    private static ServerPlayer pigPlayer(Official official, FakeLevel world) {
+        ServerPlayer player = new ServerPlayer(official.server, world,
+                new GameProfile(new UUID(1L, 2L), "Oracle0"), ClientInformation.createDefault());
+        player.setPos(1.5, 64.0, 0.5);
+        ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+        ((RecordingListener) connection).bytes = new Bytes(official.registries);
+        put(ServerPlayer.class, player, "connection", connection);
+        return player;
+    }
+
     /** 交互对拍用的物品，按顺序编号。 */
     private static List<Item> equineItems() {
         return List.of(Items.WHEAT, Items.SUGAR, Items.HAY_BLOCK,
@@ -7694,6 +8325,136 @@ public final class MobOracle {
      * breaking tick compare the hatched chicks and the struck cow. Hatch scenes swap
      * the egg's random for a searched seed so the hatch draws take the wanted branch.
      */
+    /**
+     * 刷怪笼：逐刻比 `SpawnerBlockEntity.serverTick` 之后的 `spawnDelay`、当前 `SpawnData`
+     * 的实体、这一轮刷出的实体（类型 + 位置）和世界随机源。场景覆盖玩家在范围内外、倒数、
+     * `MaxNearbyEntities` 封顶、光照规则挡住、刷怪蛋改实体。
+     *
+     * Spawners: compare `spawnDelay`, the current `SpawnData` entity, the mobs spawned
+     * this tick (type + position) and the level random after `SpawnerBlockEntity.serverTick`.
+     */
+    private static int playSpawner(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("spawner_zombie", "spawner_skeleton", "spawner_spider",
+                "spawner_cave_spider", "spawner_silverfish", "spawner_near", "spawner_cap",
+                "spawner_lit", "spawner_egg")) {
+            if (only != null && !name.startsWith(only)) continue;
+            playSpawnerCase(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    private static void playSpawnerCase(Official official, Writer out, String name) throws Exception {
+        EntityType<?> type = switch (name) {
+            case "spawner_skeleton" -> EntityTypes.SKELETON;
+            case "spawner_spider" -> EntityTypes.SPIDER;
+            case "spawner_cave_spider" -> EntityTypes.CAVE_SPIDER;
+            case "spawner_silverfish" -> EntityTypes.SILVERFISH;
+            default -> EntityTypes.ZOMBIE;
+        };
+        boolean near = !name.equals("spawner_near");
+        boolean cap = name.equals("spawner_cap");
+        boolean lit = name.equals("spawner_lit");
+        boolean egg = name.equals("spawner_egg");
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.spawnerScene = true;
+        // 假世界没有 `ServerLevel.blockEvents`（构造器跳过），刷怪笼的 `broadcastEvent` 要写它。
+        // The fake world skips `ServerLevel.blockEvents`; the spawner's `broadcastEvent` writes it.
+        put(ServerLevel.class, level, "blockEvents",
+                new it.unimi.dsi.fastutil.objects.ObjectLinkedOpenHashSet<>());
+        // 地下刷怪笼：没有天空光，方块光 0；`injectedSkyDarken = 15` 让
+        // `getMaxLocalRawBrightness` 归 0，怪物认为够黑。
+        // An underground spawner: no sky light and block light 0; a darken of 15 makes
+        // `getMaxLocalRawBrightness` zero so monsters find it dark enough.
+        level.injectedSkyDarken = 15;
+        if (lit) {
+            level.injectedBlockLight = 15;
+        }
+        for (int x = -3; x <= 3; x++) {
+            for (int z = -3; z <= 3; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        BlockPos spawnerPos = new BlockPos(0, 64, 0);
+        BlockState spawnerState = Blocks.SPAWNER.defaultBlockState();
+        level.blocks.put(spawnerPos.asLong(), spawnerState);
+        var be = new net.minecraft.world.level.block.entity.SpawnerBlockEntity(spawnerPos, spawnerState);
+        be.setLevel(level);
+        be.setEntityId(type, level.getRandom());
+        Field delayField = net.minecraft.world.level.BaseSpawner.class.getDeclaredField("spawnDelay");
+        delayField.setAccessible(true);
+        delayField.setInt(be.getSpawner(), 1);
+        if (cap) {
+            for (int i = 0; i < 6; i++) {
+                Mob zombie = EntityTypes.ZOMBIE.create(level, EntitySpawnReason.COMMAND);
+                zombie.snapTo(1.5 + (i % 3), 64.0, 1.5 + (i / 3), 0.0F, 0.0F);
+                level.tracked.add(zombie);
+            }
+        }
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "SpawnerOracle"), ClientInformation.createDefault());
+        player.setPos(0.5, 64.0, near ? 0.5 : 30.5);
+        level.playersList().add(player);
+        Field nextField = net.minecraft.world.level.BaseSpawner.class.getDeclaredField("nextSpawnData");
+        nextField.setAccessible(true);
+        int ticks = near ? 6 : 4;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                level.spawned.clear();
+                if (egg && tick == 1) {
+                    be.setEntityId(EntityTypes.SKELETON, level.getRandom());
+                }
+                net.minecraft.world.level.block.entity.SpawnerBlockEntity.serverTick(
+                        level, spawnerPos, spawnerState, be);
+            }
+            int delay = delayField.getInt(be.getSpawner());
+            Object next = nextField.get(be.getSpawner());
+            String entity = next == null ? ""
+                    : ((net.minecraft.world.level.SpawnData) next).getEntityToSpawn()
+                            .getString("id").orElse("");
+            JsonArray spawned = new JsonArray();
+            for (Entity spawnedEntity : level.spawned) {
+                if (spawnedEntity instanceof Mob mob) {
+                    JsonArray row = new JsonArray();
+                    row.add(BuiltInRegistries.ENTITY_TYPE.getId(mob.getType()));
+                    row.add((int) (mob.getX() * 2));
+                    row.add((int) mob.getY());
+                    row.add((int) (mob.getZ() * 2));
+                    spawned.add(row);
+                }
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"delay\":").append(delay)
+                    .append(",\"entity\":").append(jsonString(entity))
+                    .append(",\"spawned\":").append(spawned)
+                    .append(",\"levelSeed\":").append(levelSeed(level))
+                    .append('}');
+        }
+        out.write("{\"type\":\"spawner\",\"name\":" + jsonString(name)
+                + ",\"pos\":[0,64,0]"
+                + ",\"blocks\":" + blockArray(level.blocks)
+                + ",\"player\":" + (near ? "[0.5,64.0,0.5]" : "[0.5,64.0,30.5]")
+                + ",\"difficulty\":2"
+                + ",\"entity\":" + jsonString(type == EntityTypes.SKELETON ? "minecraft:skeleton"
+                        : type == EntityTypes.SPIDER ? "minecraft:spider"
+                        : type == EntityTypes.CAVE_SPIDER ? "minecraft:cave_spider"
+                        : type == EntityTypes.SILVERFISH ? "minecraft:silverfish"
+                        : "minecraft:zombie")
+                + ",\"delay\":1"
+                + ",\"spawnCount\":4,\"maxNearbyEntities\":6,\"spawnRange\":4"
+                + ",\"requiredPlayerRange\":16,\"minSpawnDelay\":200,\"maxSpawnDelay\":800"
+                + ",\"prePlace\":" + (cap ? 6 : 0)
+                + ",\"blockLight\":" + (lit ? 15 : -1)
+                + ",\"egg\":" + egg
+                + ",\"ticks\":" + ticks
+                + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
     private static void playEgg(Official official, Writer out, String name) throws Exception {
         // `_owned`：蛋有玩家主人，牛开着 AI，蛋碎之后再跑 OWNED_TICKS 刻看它恐慌逃跑。
         // `_owned`: a player owns the egg and the cow keeps its AI; run on after the
@@ -10814,6 +11575,408 @@ public final class MobOracle {
             out.flush();
         }
 
+    /**
+     * 试炼刷怪笼完整流程逐刻对拍：等玩家 → 激活刷怪 → 怪被打死 → 等待弹奖励 → 弹出 →
+     * 冷却。逐刻比状态机（state/ominous）、`registered_players` / `current_mobs` 数量、
+     * 冷却计时、刷出的怪（类型 + 精确位置）、弹出的奖励、世界事件和世界随机源。
+     * 场景从 `waiting_for_players` 起步，避开还没建模的显示实体。
+     */
+    private static int playTrialSpawner(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("trial_spawner_full")) {
+            if (only != null && !name.startsWith(only)) continue;
+            playTrialSpawnerCase(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    private static void playTrialSpawnerCase(Official official, Writer out, String name) throws Exception {
+        EntityType<?> type = EntityTypes.ZOMBIE;
+        int cooldownLength = 100;
+        int playerRange = 14;
+        int totalMobs = 1;
+        int simultaneousMobs = 1;
+        int killTick = 70;
+        int ticks = 320;
+
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.injectedSkyDarken = 15;
+        level.injectedCanSeeSky = true;
+        level.levelEvents = new ArrayList<>();
+        // 石地板，让刷怪和碰撞检查有真实地面。
+        for (int x = -5; x <= 5; x++) {
+            for (int z = -5; z <= 5; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        BlockPos spawnerPos = new BlockPos(0, 64, 0);
+        BlockState spawnerState = Blocks.TRIAL_SPAWNER.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.TRIAL_SPAWNER_STATE,
+                        net.minecraft.world.level.block.entity.trialspawner.TrialSpawnerState.WAITING_FOR_PLAYERS);
+        level.blocks.put(spawnerPos.asLong(), spawnerState);
+        var be = new net.minecraft.world.level.block.entity.TrialSpawnerBlockEntity(spawnerPos, spawnerState);
+        be.setLevel(level);
+        // 自定义配置：只刷僵尸、一次一只、短冷却。
+        net.minecraft.nbt.CompoundTag entityTag = new net.minecraft.nbt.CompoundTag();
+        entityTag.putString("id", BuiltInRegistries.ENTITY_TYPE.getKey(type).toString());
+        var spawnData = new net.minecraft.world.level.SpawnData(entityTag,
+                java.util.Optional.empty(), java.util.Optional.empty());
+        var normalConfig = net.minecraft.world.level.block.entity.trialspawner.TrialSpawnerConfig.builder()
+                .totalMobs(totalMobs)
+                .simultaneousMobs(simultaneousMobs)
+                .totalMobsAddedPerPlayer(0)
+                .simultaneousMobsAddedPerPlayer(0)
+                .spawnPotentialsDefinition(WeightedList.of(spawnData))
+                .lootTablesToEject(WeightedList.of(
+                        net.minecraft.world.level.storage.loot.BuiltInLootTables.SPAWNER_TRIAL_CHAMBER_KEY))
+                .build();
+        var fullConfig = new net.minecraft.world.level.block.entity.trialspawner.TrialSpawner.FullConfig(
+                Holder.direct(normalConfig), Holder.direct(normalConfig), cooldownLength, playerRange);
+        Field tsField = net.minecraft.world.level.block.entity.TrialSpawnerBlockEntity.class
+                .getDeclaredField("trialSpawner");
+        tsField.setAccessible(true);
+        tsField.set(be, new net.minecraft.world.level.block.entity.trialspawner.TrialSpawner(
+                fullConfig, be,
+                net.minecraft.world.level.block.entity.trialspawner.PlayerDetector.NO_CREATIVE_PLAYERS,
+                net.minecraft.world.level.block.entity.trialspawner.PlayerDetector.EntitySelector.SELECT_FROM_LEVEL));
+        level.putBlockEntity(be);
+
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "TrialSpawnerOracle"), ClientInformation.createDefault());
+        player.setPos(0.5, 64.0, 0.5);
+        level.playersList().add(player);
+
+        // 循环前保存初始方块状态（tickServer 的 setState 之后会改方块状态），并
+        // 把世界随机源对齐到 Bamboo 的 LevelRandom::new(1) 初值。
+        String initialBlocks = blockArray(level.blocks);
+        level.getRandom().setSeed(1L);
+
+        // 反射读状态机内部字段。
+        var data = be.getTrialSpawner().getStateData();
+        Field fDetected = data.getClass().getDeclaredField("detectedPlayers");
+        fDetected.setAccessible(true);
+        Field fMobs = data.getClass().getDeclaredField("currentMobs");
+        fMobs.setAccessible(true);
+        Field fCooldown = data.getClass().getDeclaredField("cooldownEndsAt");
+        fCooldown.setAccessible(true);
+        Field fNext = data.getClass().getDeclaredField("nextMobSpawnsAt");
+        fNext.setAccessible(true);
+        Field fTotal = data.getClass().getDeclaredField("totalMobsSpawned");
+        fTotal.setAccessible(true);
+
+        java.util.Set<Integer> seen = new java.util.HashSet<>();
+        int maxState = 0;
+        int maxTotalSpawned = 0;
+        int maxRegistered = 0;
+        int totalEjected = 0;
+        int detectEvents = 0;
+        int spawnEvents = 0;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            List<int[]> events = new ArrayList<>();
+            if (tick > 0) {
+                level.gameTime = START_TIME + tick;
+                level.spawned.clear();
+                level.levelEvents.clear();
+                if (tick == killTick) {
+                    for (Entity e : new ArrayList<>(level.tracked)) {
+                        if (e instanceof Mob mob) {
+                            mob.discard();
+                        }
+                    }
+                }
+                boolean ominous = level.getBlockState(spawnerPos)
+                        .getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.OMINOUS);
+                be.getTrialSpawner().tickServer(level, spawnerPos, ominous);
+                events = new ArrayList<>(level.levelEvents);
+            }
+            JsonArray spawned = new JsonArray();
+            for (Entity e : level.tracked) {
+                if (e instanceof Mob mob && seen.add(mob.getId())) {
+                    JsonArray row = new JsonArray();
+                    row.add(BuiltInRegistries.ENTITY_TYPE.getId(mob.getType()));
+                    row.add(Double.doubleToRawLongBits(mob.getX()));
+                    row.add(Double.doubleToRawLongBits(mob.getY()));
+                    row.add(Double.doubleToRawLongBits(mob.getZ()));
+                    spawned.add(row);
+                }
+            }
+            JsonArray ejected = new JsonArray();
+            for (Entity e : level.spawned) {
+                if (e instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                    JsonArray row = new JsonArray();
+                    row.add(BuiltInRegistries.ITEM.getId(item.getItem().getItem()));
+                    row.add(item.getItem().getCount());
+                    ejected.add(row);
+                }
+            }
+            JsonArray eventsArr = new JsonArray();
+            for (int[] ev : events) {
+                JsonArray row = new JsonArray();
+                for (int value : ev) {
+                    row.add(value);
+                }
+                eventsArr.add(row);
+            }
+            maxState = Math.max(maxState, be.getTrialSpawner().getState().ordinal());
+            maxTotalSpawned = Math.max(maxTotalSpawned, fTotal.getInt(data));
+            maxRegistered = Math.max(maxRegistered, ((java.util.Set<?>) fDetected.get(data)).size());
+            totalEjected += ejected.size();
+            for (int[] ev : events) {
+                if (ev[0] == 3013) detectEvents++;
+                if (ev[0] == 3011 || ev[0] == 3012 || ev[0] == 3014) spawnEvents++;
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"state\":").append(be.getTrialSpawner().getState().ordinal())
+                    .append(",\"ominous\":").append(level.getBlockState(spawnerPos)
+                            .getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.OMINOUS))
+                    .append(",\"registered\":").append(((java.util.Set<?>) fDetected.get(data)).size())
+                    .append(",\"mobs\":").append(((java.util.Set<?>) fMobs.get(data)).size())
+                    .append(",\"cooldownEndsAt\":").append(fCooldown.getLong(data))
+                    .append(",\"nextMobSpawnsAt\":").append(fNext.getLong(data))
+                    .append(",\"totalMobsSpawned\":").append(fTotal.getInt(data))
+                    .append(",\"spawned\":").append(spawned)
+                    .append(",\"ejected\":").append(ejected)
+                    .append(",\"events\":").append(eventsArr)
+                    .append(",\"seed\":").append(levelSeed(level))
+                    .append('}');
+        }
+        frames.append(']');
+        // 确认这一轮真的走完了整条状态链、弹过奖励、发过探测/刷怪事件，防止空对拍。
+        if (maxState < 5 || maxTotalSpawned < 1 || maxRegistered < 1
+                || totalEjected < 1 || detectEvents < 1 || spawnEvents < 1) {
+            throw new IllegalStateException("trial_spawner_full missed the flow: maxState=" + maxState
+                    + " maxTotalSpawned=" + maxTotalSpawned + " maxRegistered=" + maxRegistered
+                    + " totalEjected=" + totalEjected + " detectEvents=" + detectEvents
+                    + " spawnEvents=" + spawnEvents);
+        }
+        out.write("{\"type\":\"trialSpawner\",\"name\":" + jsonString(name)
+                + ",\"pos\":[0,64,0]"
+                + ",\"blocks\":" + initialBlocks
+                + ",\"player\":[0.5,64.0,0.5]"
+                + ",\"difficulty\":2"
+                + ",\"entity\":\"minecraft:zombie\""
+                + ",\"totalMobs\":" + totalMobs
+                + ",\"simultaneousMobs\":" + simultaneousMobs
+                + ",\"cooldownLength\":" + cooldownLength
+                + ",\"playerRange\":" + playerRange
+                + ",\"killTick\":" + killTick
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+    }
+
+    /** `[item,count]`；空堆统一成 `[0,0]`。 */
+    private static String vaultStack(net.minecraft.world.item.ItemStack stack) {
+        if (stack.isEmpty()) return "[0,0]";
+        return "[" + BuiltInRegistries.ITEM.getId(stack.getItem()) + "," + stack.getCount() + "]";
+    }
+
+    private static int[] vaultUuid(UUID uuid) {
+        long msb = uuid.getMostSignificantBits();
+        long lsb = uuid.getLeastSignificantBits();
+        return new int[] { (int) (msb >>> 32), (int) msb, (int) (lsb >>> 32), (int) lsb };
+    }
+
+    /** UUID 集合按四个 int 排序，和 Rust 侧一致（官方是 HashSet，不能比顺序）。 */
+    private static String vaultUuidSet(java.util.Set<UUID> uuids) {
+        List<int[]> rows = new ArrayList<>();
+        for (UUID uuid : uuids) rows.add(vaultUuid(uuid));
+        rows.sort((a, b) -> {
+            for (int i = 0; i < 4; i++) if (a[i] != b[i]) return Integer.compare(a[i], b[i]);
+            return 0;
+        });
+        StringBuilder out = new StringBuilder("[");
+        for (int i = 0; i < rows.size(); i++) {
+            if (i > 0) out.append(',');
+            int[] r = rows.get(i);
+            out.append('[').append(r[0]).append(',').append(r[1]).append(',')
+                    .append(r[2]).append(',').append(r[3]).append(']');
+        }
+        return out.append(']').toString();
+    }
+
+    private static String vaultItemList(List<net.minecraft.world.item.ItemStack> items) {
+        StringBuilder out = new StringBuilder("[");
+        for (int i = 0; i < items.size(); i++) {
+            if (i > 0) out.append(',');
+            out.append(vaultStack(items.get(i)));
+        }
+        return out.append(']').toString();
+    }
+
+    /**
+     * 宝库完整流程逐刻对拍：探测玩家激活 → 插钥匙解锁 → 弹出奖励 → 回到未激活。
+     * 逐刻比方块状态、ServerData、SharedData、世界事件、声音、弹出的物品和世界随机源。
+     */
+    private static int playVault(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("vault_full")) {
+            if (only != null && !name.startsWith(only)) continue;
+            playVaultCase(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void playVaultCase(Official official, Writer out, String name) throws Exception {
+        int insertTick = 5;
+        int ticks = 240;
+
+        FakeLevel level = FakeLevel.create(official);
+        level.levelEvents = new ArrayList<>();
+        level.soundLog = new ArrayList<>();
+        // 石地板，让 getBlockState / setBlockAndUpdate 有真实地面（同试炼刷怪笼场景）。
+        for (int x = -4; x <= 4; x++) {
+            for (int z = -4; z <= 4; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        BlockPos pos = new BlockPos(0, 64, 0);
+        BlockState inactive = Blocks.VAULT.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.VaultBlock.STATE, VaultState.INACTIVE)
+                .setValue(net.minecraft.world.level.block.VaultBlock.OMINOUS, false);
+        level.blocks.put(pos.asLong(), inactive);
+
+        VaultConfig config = VaultConfig.DEFAULT;
+        VaultServerData serverData = new VaultServerData();
+        VaultSharedData sharedData = new VaultSharedData();
+        net.minecraft.world.item.ItemStack key = config.keyItem().copy();
+
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "VaultOracle"), ClientInformation.createDefault());
+        player.setPos(0.5, 64.0, 0.5);
+        level.playersList().add(player);
+
+        // 循环前存初始方块状态（setVaultState 之后会改），世界随机源对齐 Bamboo 的
+        // LevelRandom::new(1)，战利品随机序列对齐 RandomSequences::new(0)。
+        String initialBlocks = blockArray(level.blocks);
+        level.getRandom().setSeed(1L);
+        official.server.sequences = new RandomSequences();
+
+        Field fRewarded = VaultServerData.class.getDeclaredField("rewardedPlayers");
+        Field fResumes = VaultServerData.class.getDeclaredField("stateUpdatingResumesAt");
+        Field fItems = VaultServerData.class.getDeclaredField("itemsToEject");
+        Field fTotal = VaultServerData.class.getDeclaredField("totalEjectionsNeeded");
+        Field fDisplay = VaultSharedData.class.getDeclaredField("displayItem");
+        Field fConnected = VaultSharedData.class.getDeclaredField("connectedPlayers");
+        Field fParticles = VaultSharedData.class.getDeclaredField("connectedParticlesRange");
+        fRewarded.setAccessible(true);
+        fResumes.setAccessible(true);
+        fItems.setAccessible(true);
+        fTotal.setAccessible(true);
+        fDisplay.setAccessible(true);
+        fConnected.setAccessible(true);
+        fParticles.setAccessible(true);
+
+        int maxState = 0;
+        int maxRewarded = 0;
+        int totalEjected = 0;
+        int activateEvents = 0;
+        int deactivateEvents = 0;
+        int ejectEvents = 0;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            List<int[]> events = new ArrayList<>();
+            List<long[]> sounds = new ArrayList<>();
+            List<net.minecraft.world.item.ItemStack> ejected = new ArrayList<>();
+            if (tick > 0) {
+                level.gameTime = START_TIME + tick;
+                level.spawned.clear();
+                level.levelEvents.clear();
+                level.soundLog.clear();
+                BlockState blockState = level.getBlockState(pos);
+                VaultBlockEntity.Server.tick(level, pos, blockState, config, serverData, sharedData);
+                if (tick == insertTick) {
+                    blockState = level.getBlockState(pos);
+                    VaultBlockEntity.Server.tryInsertKey(level, pos, blockState,
+                            config, serverData, sharedData, player, key);
+                }
+                events = new ArrayList<>(level.levelEvents);
+                sounds = new ArrayList<>(level.soundLog);
+                for (Entity e : level.spawned) {
+                    if (e instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                        ejected.add(item.getItem());
+                    }
+                }
+            }
+            int state = level.getBlockState(pos)
+                    .getValue(net.minecraft.world.level.block.VaultBlock.STATE).ordinal();
+            java.util.Set<UUID> rewarded = (java.util.Set<UUID>) fRewarded.get(serverData);
+            java.util.Set<UUID> connected = (java.util.Set<UUID>) fConnected.get(sharedData);
+            List<net.minecraft.world.item.ItemStack> items =
+                    (List<net.minecraft.world.item.ItemStack>) fItems.get(serverData);
+            maxState = Math.max(maxState, state);
+            maxRewarded = Math.max(maxRewarded, rewarded.size());
+            totalEjected += ejected.size();
+            for (int[] ev : events) {
+                if (ev[0] == 3015) activateEvents++;
+                if (ev[0] == 3016) deactivateEvents++;
+                if (ev[0] == 3017) ejectEvents++;
+            }
+
+            StringBuilder eventsArr = new StringBuilder("[");
+            for (int i = 0; i < events.size(); i++) {
+                if (i > 0) eventsArr.append(',');
+                int[] ev = events.get(i);
+                eventsArr.append('[');
+                for (int j = 0; j < ev.length; j++) {
+                    if (j > 0) eventsArr.append(',');
+                    eventsArr.append(ev[j]);
+                }
+                eventsArr.append(']');
+            }
+            eventsArr.append(']');
+            StringBuilder soundsArr = new StringBuilder("[");
+            for (int i = 0; i < sounds.size(); i++) {
+                if (i > 0) soundsArr.append(',');
+                long[] s = sounds.get(i);
+                // [soundId, volumeBits, pitchBits]；位置 / source 不参与比较。
+                soundsArr.append('[').append(s[0]).append(',').append(s[5]).append(',').append(s[6]).append(']');
+            }
+            soundsArr.append(']');
+            StringBuilder ejectedArr = new StringBuilder("[");
+            for (int i = 0; i < ejected.size(); i++) {
+                if (i > 0) ejectedArr.append(',');
+                ejectedArr.append(vaultStack(ejected.get(i)));
+            }
+            ejectedArr.append(']');
+
+            if (tick > 0) frames.append(',');
+            frames.append("{\"state\":").append(state)
+                    .append(",\"rewarded\":").append(vaultUuidSet(rewarded))
+                    .append(",\"resumesAt\":").append(fResumes.getLong(serverData))
+                    .append(",\"itemsToEject\":").append(vaultItemList(items))
+                    .append(",\"totalEjections\":").append(fTotal.getInt(serverData))
+                    .append(",\"display\":").append(vaultStack((net.minecraft.world.item.ItemStack) fDisplay.get(sharedData)))
+                    .append(",\"connected\":").append(vaultUuidSet(connected))
+                    .append(",\"particlesBits\":").append(Double.doubleToRawLongBits(fParticles.getDouble(sharedData)))
+                    .append(",\"events\":").append(eventsArr)
+                    .append(",\"sounds\":").append(soundsArr)
+                    .append(",\"ejected\":").append(ejectedArr)
+                    .append(",\"seed\":").append(levelSeed(level))
+                    .append('}');
+        }
+        frames.append(']');
+        // 确认真的走完了整条状态链、弹过奖励、发过激活/失效/弹出事件，防空对拍。
+        if (maxState < 3 || maxRewarded < 1 || totalEjected < 1
+                || activateEvents < 1 || deactivateEvents < 1 || ejectEvents < 1) {
+            throw new IllegalStateException("vault_full missed the flow: maxState=" + maxState
+                    + " maxRewarded=" + maxRewarded + " totalEjected=" + totalEjected
+                    + " activateEvents=" + activateEvents + " deactivateEvents=" + deactivateEvents
+                    + " ejectEvents=" + ejectEvents);
+        }
+        out.write("{\"type\":\"vault\",\"name\":" + jsonString(name)
+                + ",\"pos\":[0,64,0]"
+                + ",\"blocks\":" + initialBlocks
+                + ",\"player\":[0.5,64.0,0.5]"
+                + ",\"insertTick\":" + insertTick
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+    }
+
     private static void playBeeLocate(Official official, Writer out, String name) throws Exception {
         FakeLevel level = FakeLevel.create(official);
         int[][] hives = beeLocateHives(name);  // [x, y, z, kind]  kind 0 = beehive, 1 = bee_nest
@@ -12821,6 +13984,208 @@ public final class MobOracle {
         }
     }
 
+    /**
+     * 村民交易接进大脑的逐刻对拍：玩家打开/关闭交易、工作站补货、交易后升级。
+     * 一侧在假 `ServerLevel` 里跑官方 `Villager`，每刻记下大脑、位移、随机源、
+     * 交易表摘要、经验/等级、再生效果、血量；Bamboo 侧重放同一场景并逐位比较。
+     *
+     * Villager-trading tick-by-tick comparison: opening/closing a trade, restocking at a
+     * workstation and levelling up after a trade. The official `Villager` runs in a fake
+     * `ServerLevel`; each tick records brain, motion, RNG, an offer digest, xp/level,
+     * regeneration and health. Bamboo replays the same scene bit for bit.
+     */
+    private static int playVillagerTrade(Official official, Writer out, String only) throws Exception {
+        String[] scenes = {"villager_trade_follow", "villager_trade_restock", "villager_trade_levelup"};
+        int count = 0;
+        for (String name : scenes) {
+            if (only != null && !name.startsWith(only)) continue;
+            playVillagerTradeOne(official, out, name);
+            count++;
+        }
+        return count;
+    }
+
+    private static net.minecraft.world.item.trading.MerchantOffers tradeOffers(int... uses) {
+        var offers = new net.minecraft.world.item.trading.MerchantOffers();
+        for (int u : uses) {
+            var offer = new net.minecraft.world.item.trading.MerchantOffer(
+                    new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 1),
+                    new ItemStack(Items.APPLE), 12, 1, 0.05F);
+            for (int i = 0; i < u; i++) offer.increaseUses();
+            offers.add(offer);
+        }
+        return offers;
+    }
+
+    private static String offersDigest(net.minecraft.world.item.trading.MerchantOffers offers) {
+        int uses = 0, demand = 0, special = 0;
+        for (var offer : offers) {
+            uses += offer.getUses();
+            demand += offer.getDemand();
+            special += offer.getSpecialPriceDiff();
+        }
+        return "[" + offers.size() + "," + uses + "," + demand + "," + special + "]";
+    }
+
+    private static void playVillagerTradeOne(Official official, Writer out, String name) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        try {
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels = java.util.Map.of(Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            world.blockEntities = new Long2ObjectOpenHashMap<>();
+
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+
+            boolean follow = name.equals("villager_trade_follow");
+            boolean restock = name.equals("villager_trade_restock");
+            boolean levelup = name.equals("villager_trade_levelup");
+            long clockStart = 2000L;
+            int totalTicks = levelup ? 260 : (follow ? 120 : 90);
+            // 传感器关掉：ShowTradesToPlayer 等村民间交互行为要靠传感器记忆才启动，
+            // 关掉后官方与 Bamboo 的占位都不跑；交易 sink 直接读 tradingPlayer，不受影响。
+            // Sensors off: villager-to-villager interaction behaviours need sensor memories
+            // to start, so with sensors off both the official ones and Bamboo's stubs stay
+            // idle; the trading sink reads tradingPlayer directly and is unaffected.
+            long sensorDelay = 1_000_000L;
+            int playerId = FIRST_ID + 1024;
+            int eventTick = restock ? 20 : 10;
+            int closeTick = follow ? 60 : -1;
+
+            world.gameTime = 1000L;
+            world.realSky = true;
+            world.injectedCanSeeSky = true;
+            world.clock = clockStart;
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder().addStaticLayers(world);
+            net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+                public long totalTicks() { return world.clock; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : world.dimensionType().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            official.attributes = builder.build();
+            put(ServerLevel.class, world, "environmentAttributes", official.attributes);
+            world.updateSkyBrightness();
+            world.getRandom().setSeed(1L);
+
+            ServerPlayer player = null;
+            if (follow) {
+                player = new ServerPlayer(official.server, world,
+                        new GameProfile(new UUID(1L, 2L), "TradeOracle"), ClientInformation.createDefault());
+                player.setId(playerId);
+                player.setPos(2.5, 64.0, 0.5);
+                player.setYRot(0.0F);
+                player.setYHeadRot(0.0F);
+                player.setYBodyRot(0.0F);
+                world.playersList().add(player);
+                // `NearestLivingEntitySensor` 走 `getEntitiesOfClass`（读 `tracked`）。
+                world.tracked.add(player);
+            }
+
+            Villager v = (Villager) EntityTypes.VILLAGER.create(world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+            v.setId(FIRST_ID);
+            v.setUUID(new UUID(0L, 1L));
+            v.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            v.setYHeadRot(0.0F);
+            v.setYBodyRot(0.0F);
+            put(net.minecraft.world.entity.ai.Brain.class, v.getBrain(), "lastScheduleUpdate", -9999L);
+            v.getBrain().updateActivityFromSchedule(world.environmentAttributes(), world.getGameTime(), v.position());
+            setRandom(v, 71L);
+            BrainOracle.reseedShuffles(v, randomSeed(v));
+            BrainOracle.fixSensorDelays(v, sensorDelay);
+            if (levelup) {
+                v.setHealth(10.0F);
+                v.setVillagerXp(9); // 9 + offer.xp(2) = 11 >= 10 → 升级
+            }
+            v.setOffers(restock ? tradeOffers(3, 1) : tradeOffers(0));
+            world.tracked.add(v);
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= totalTicks; tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    world.clock = clockStart + tick;
+                    official.attributes.invalidateTickCache();
+                    world.updateSkyBrightness();
+
+                    if (tick == eventTick) {
+                        if (follow) {
+                            // `Villager.startTrading` 里记下交易玩家。
+                            v.setTradingPlayer(player);
+                        } else if (restock) {
+                            // `WorkAtPoi.useWorkstation` 末尾的补货判定（直接调同一对方法）。
+                            if (v.shouldRestock(world)) v.restock();
+                        } else {
+                            // `MerchantResultSlot.onTake` → `notifyTrade`；rewardExp 关掉，
+                            // 免得在假世界里撒经验球。声望为 none 职业，updateTrades 不生成交易。
+                            var offer = new net.minecraft.world.item.trading.MerchantOffer(
+                                    new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 1),
+                                    new ItemStack(Items.APPLE), 12, 2, 0.05F);
+                            put(net.minecraft.world.item.trading.MerchantOffer.class, offer, "rewardExp", false);
+                            v.notifyTrade(offer);
+                            // `increaseMerchantCareer` 追加的新等级交易（受控夹具）。
+                            v.setOffers(tradeOffers(0, 0, 0));
+                        }
+                    }
+                    if (tick == closeTick) {
+                        // `MerchantMenu.removed` → `stopTrading()`。
+                        v.setTradingPlayer(null);
+                    }
+
+                    List<Entity> snapshot = new ArrayList<>(world.tracked);
+                    for (Entity e : snapshot) {
+                        if (e.isRemoved()) continue;
+                        if (e instanceof Villager villager) {
+                            var prevBrain = villager.getBrain();
+                            villager.commonTick();
+                            villager.tick();
+                            if (villager.getBrain() != prevBrain) BrainOracle.reseedShuffles(villager, randomSeed(villager));
+                        } else if (!(e instanceof ServerPlayer)) {
+                            // 玩家保持静止，和 Bamboo 一侧的 PlayerView 快照一致。
+                            e.tick();
+                        }
+                    }
+                    world.tracked.removeIf(Entity::isRemoved);
+                }
+
+                if (tick > 0) frames.append(',');
+                var regen = v.getEffect(MobEffects.REGENERATION);
+                frames.append("{\"brain\":").append(jsonString(BrainOracle.dump(v)))
+                        .append(",\"motion\":").append(projectileMotion(v))
+                        .append(",\"seed\":").append(randomSeed(v))
+                        .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
+                        .append(",\"xp\":").append(v.getVillagerXp())
+                        .append(",\"level\":").append(v.getVillagerData().level())
+                        .append(",\"regen\":").append(regen == null ? -1 : regen.getDuration())
+                        .append(",\"health\":").append(Float.floatToRawIntBits(v.getHealth()))
+                        .append(",\"offers\":").append(offersDigest(v.getOffers()))
+                        .append(",\"trading\":").append(v.getTradingPlayer() != null ? 1 : 0)
+                        .append("}");
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"villagerTrade\",\"name\":" + jsonString(name)
+                    + ",\"clockStart\":" + clockStart
+                    + ",\"sensorDelay\":" + sensorDelay
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"playerId\":" + playerId
+                    + ",\"eventTick\":" + eventTick
+                    + ",\"closeTick\":" + closeTick
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            world.closeRealPoi();
+        }
+    }
+
     /** `Silverfish.friendsGoal` 的私有字段。 */
     private static Object friendsOf(Mob mob) throws Exception {
         Field field = net.minecraft.world.entity.monster.Silverfish.class.getDeclaredField("friendsGoal");
@@ -14400,6 +15765,200 @@ public final class MobOracle {
     }
 
     /**
+     * 拴绳逐刻对拍：一头牛拴到玩家或栅栏结上，玩家逐刻走远触发弹性拉扯 / 超距断绳，
+     * 或在中途剪绳 / 解回 / 拆栅栏。每刻比牛的位置、速度、四个朝向、随机源、绳状态和掉落。
+     *
+     * Tick-by-tick leash replay: a cow leashed to a player or a fence knot; the player
+     * walks away (elastic pull + snap), or the rope is sheared / untied / the fence broken.
+     */
+    private static int playLeash(Official official, Writer out, String only) throws Exception {
+        String[] names = {"leash_player_walk", "leash_player_shear", "leash_fence_hold",
+                "leash_fence_untie", "leash_fence_break",
+                "leash_ai_follow", "leash_ai_stop", "leash_ai_snap"};
+        int written = 0;
+        for (String name : names) {
+            if (only != null && !name.startsWith(only)) continue;
+            // `leash_ai_*` 开着牛的 AI，逐刻比牛朝牵引者走过来、停在附近、超距断绳
+            // 时的位置 / 速度 / 朝向 / 寻路目标 / 运行目标 / 随机源；其余场景沿用 NoAI
+            // 只比拴绳物理。
+            boolean ai = name.startsWith("leash_ai_");
+            boolean fence = name.startsWith("leash_fence");
+            int fx = 8, fy = 64, fz = 0;
+            BlockPos fencePos = new BlockPos(fx, fy, fz);
+            FakeLevel world = FakeLevel.create(official);
+            ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+            for (int x = -2; x <= 40; x++)
+                for (int z = -4; z <= 4; z++)
+                    world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            if (fence)
+                world.blocks.put(BlockPos.asLong(fx, fy, fz), Blocks.OAK_FENCE.defaultBlockState());
+            String blocks = blockArray(world.blocks);
+            int playerId = FIRST_ID + 1024;
+            ServerPlayer player = new ServerPlayer(official.server, world,
+                    new GameProfile(new UUID(1L, 2L), "LeashOracle"), ClientInformation.createDefault());
+            player.setId(playerId);
+            player.setPos(2.5, 64.0, 0.5);
+            setRandom(player, ENTITY_RANDOM_SEED);
+            player.setYRot(0.0F);
+            player.setYHeadRot(0.0F);
+            player.setYBodyRot(0.0F);
+            world.playersList().add(player);
+            world.tracked.add(player);
+            world.nextId = FIRST_ID;
+            Cow cow = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            world.entitySeeds.nextLong();
+            long cowSeed = 0x0DDB1A5E5BAD5EEDL ^ 0x4C45415348L;
+            setRandom(cow, cowSeed);
+            cow.setUUID(new UUID(0L, 1L));
+            cow.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            cow.setYHeadRot(0.0F);
+            cow.setYBodyRot(0.0F);
+            // `leash_ai_*` 开着牛的 AI：官方 `PathfinderMob.closeRangeLeashBehaviour`
+            // 会让被拴的牛自己朝牵引者走过来，逐刻比得到导航 / 目标 / 随机源。
+            // 其余场景沿用 NoAI，只比拴绳物理。
+            cow.setNoAi(!ai);
+            world.tracked.add(cow);
+            net.minecraft.world.entity.decoration.LeashFenceKnotEntity knot = null;
+            if (fence) {
+                knot = new net.minecraft.world.entity.decoration.LeashFenceKnotEntity(world, fencePos);
+                knot.setId(FIRST_ID + 512);
+                world.tracked.add(knot);
+            }
+            int startLeash = fence ? 2 : 1;
+            if (startLeash == 1) cow.setLeashedTo(player, true);
+            else cow.setLeashedTo(knot, true);
+
+            int ticks = 80;
+            StringBuilder frames = new StringBuilder("[");
+            StringBuilder playerMotion = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                // 玩家轨迹按场景分：
+                // - `leash_ai_follow`：慢慢走（每刻 0.12），牛始终在弹性距离内，靠
+                //   `closeRangeLeashBehaviour` 自己跟着走。
+                // - `leash_ai_stop`：走 20 刻后停下，牛走到附近后停住。
+                // - `leash_ai_snap` / 其余场景：每刻 0.4 一直走远，直到超距断绳。
+                double px;
+                double vx;
+                if (name.equals("leash_ai_follow")) {
+                    px = 2.5 + tick * 0.12;
+                    vx = tick == 0 ? 0.0 : 0.12;
+                } else if (name.equals("leash_ai_stop")) {
+                    double walked = Math.min(tick, 20) * 0.12;
+                    px = 2.5 + walked;
+                    vx = (tick == 0 || tick > 20) ? 0.0 : 0.12;
+                } else {
+                    px = 2.5 + tick * 0.4;
+                    vx = tick == 0 ? 0.0 : 0.4;
+                }
+                if (tick > 0) {
+                    world.gameTime++;
+                    player.setPos(px, 64.0, 0.5);
+                    player.setDeltaMovement(vx, 0.0, 0.0);
+                    if (tick == 10) {
+                        if (name.equals("leash_player_shear")) {
+                            cow.dropLeash();
+                        } else if (name.equals("leash_fence_untie")) {
+                            cow.setLeashedTo(player, true);
+                        } else if (name.equals("leash_fence_break")) {
+                            world.blocks.put(BlockPos.asLong(fx, fy, fz), Blocks.AIR.defaultBlockState());
+                            knot.discard();
+                        }
+                    }
+                    cow.checkDespawn();
+                    cow.commonTick();
+                    cow.tick();
+                }
+                if (tick > 0) playerMotion.append(',');
+                playerMotion.append('[')
+                        .append(Double.doubleToRawLongBits(px)).append(',')
+                        .append(Double.doubleToRawLongBits(64.0)).append(',')
+                        .append(Double.doubleToRawLongBits(0.5)).append(',')
+                        .append(Double.doubleToRawLongBits(vx)).append(',')
+                        .append(Double.doubleToRawLongBits(0.0)).append(',')
+                        .append(Double.doubleToRawLongBits(0.0)).append(']');
+                if (tick > 0) frames.append(',');
+                appendLeashFrame(frames, cow, world, knot);
+            }
+            frames.append(']');
+            playerMotion.append(']');
+            String knotJson = fence ? "[" + fx + "," + fy + "," + fz + "]" : "null";
+            out.write("{\"type\":\"leash\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID + ",\"playerId\":" + playerId
+                    + ",\"cowSeed\":" + cowSeed
+                    + ",\"cow\":[" + Double.doubleToRawLongBits(0.5) + ","
+                    + Double.doubleToRawLongBits(64.0) + "," + Double.doubleToRawLongBits(0.5) + "]"
+                    + ",\"playerStart\":[" + Double.doubleToRawLongBits(2.5) + ","
+                    + Double.doubleToRawLongBits(64.0) + "," + Double.doubleToRawLongBits(0.5) + "]"
+                    + ",\"blocks\":" + blocks
+                    + ",\"knotPos\":" + knotJson
+                    + ",\"startLeash\":" + startLeash
+                    + ",\"playerMotion\":" + playerMotion
+                    + ",\"frames\":" + frames + "}\n");
+            written++;
+        }
+        return written;
+    }
+
+    /** 一刻的牛状态和绳状态，字段见 Rust 侧 `LeashFrame`。 */
+    private static void appendLeashFrame(StringBuilder out, Cow cow, FakeLevel world,
+            net.minecraft.world.entity.decoration.LeashFenceKnotEntity knot) throws Exception {
+        Vec3 p = cow.position();
+        Vec3 d = cow.getDeltaMovement();
+        boolean leashed = cow.isLeashed();
+        boolean may = cow.mayBeLeashed();
+        Entity holder = cow.getLeashHolder();
+        int kind = holder instanceof ServerPlayer ? 1
+                : holder instanceof net.minecraft.world.entity.decoration.LeashFenceKnotEntity ? 2 : 0;
+        double am = cow.getLeashData() == null ? 0.0 : cow.getLeashData().angularMomentum;
+        int items = 0;
+        for (Entity e : world.spawned) {
+            if (e instanceof net.minecraft.world.entity.item.ItemEntity ie
+                    && ie.getItem().is(Items.LEAD)) items++;
+        }
+        out.append("{\"cow\":[")
+                .append(Double.doubleToRawLongBits(p.x)).append(',')
+                .append(Double.doubleToRawLongBits(p.y)).append(',')
+                .append(Double.doubleToRawLongBits(p.z)).append(',')
+                .append(Double.doubleToRawLongBits(d.x)).append(',')
+                .append(Double.doubleToRawLongBits(d.y)).append(',')
+                .append(Double.doubleToRawLongBits(d.z)).append(']');
+        out.append(",\"rot\":[")
+                .append(Float.floatToRawIntBits(cow.getYRot())).append(',')
+                .append(Float.floatToRawIntBits(cow.getXRot())).append(',')
+                .append(Float.floatToRawIntBits(cow.getYHeadRot())).append(',')
+                .append(Float.floatToRawIntBits(cow.yBodyRot)).append(']');
+        out.append(",\"ground\":").append(cow.onGround());
+        out.append(",\"seed\":").append(randomSeed(cow));
+        out.append(",\"leash\":[").append(leashed ? 1 : 0).append(',').append(may ? 1 : 0)
+                .append(',').append(kind).append(',').append(Double.doubleToRawLongBits(am)).append(']');
+        out.append(",\"items\":").append(items);
+        out.append(",\"knotAlive\":").append(knot != null && !knot.isRemoved());
+        // 开 AI 的场景逐刻比正在跑的目标和导航路径：牛跟着牵引者走时这两个都要对上。
+        StringBuilder goals = new StringBuilder();
+        boolean firstGoal = true;
+        for (WrappedGoal goal : cow.getGoalSelector().getAvailableGoals()) {
+            if (!goal.isRunning()) continue;
+            if (!firstGoal) goals.append(' ');
+            firstGoal = false;
+            goals.append(goal.getGoal().getClass().getSimpleName());
+        }
+        out.append(",\"goals\":").append(jsonString(goals.toString()));
+        net.minecraft.world.level.pathfinder.Path path = cow.getNavigation().getPath();
+        out.append(",\"path\":");
+        if (path == null) {
+            out.append("null");
+        } else {
+            out.append('[').append(path.getNextNodeIndex());
+            for (int n = 0; n < path.getNodeCount(); n++) {
+                net.minecraft.world.level.pathfinder.Node node = path.getNode(n);
+                out.append(',').append(node.x).append(',').append(node.y).append(',').append(node.z);
+            }
+            out.append(']');
+        }
+        out.append('}');
+    }
+
+    /**
      * 女巫投掷喷溅药水的对拍用女巫：直接跑原版 `Witch.performRangedAttack` 选药与消费女巫随机源，
      * 只把新生成喷溅药水的无种子随机源换成 Bamboo 的岛种子源并重放 `shoot`。
      * The witch for splash-potion replays: runs vanilla `Witch.performRangedAttack` for potion
@@ -14728,6 +16287,17 @@ public final class MobOracle {
     }
 
     private static void playZombie(Official official, Writer out, Scene scene) throws Exception {
+        // 掉落场景逐刻比礼物表掉出来的东西（挖出的种子、繁殖下的蛋）。礼物表按
+        // 序列名取世界战利品随机序列，Bamboo 每个 case 新建一份，所以这里也临时
+        // 换成一份干净序列；场景结束再还原，免得影响后面场景沿用累积的序列。
+        // Drop scenes compare gift-table results (dug-up seeds, laid eggs). Gift
+        // tables draw from the world loot sequence by name; Bamboo creates a fresh
+        // one per case, so swap in a clean sequence here and restore it afterwards
+        // so later scenes keep using the accumulated one.
+        var savedSequences = official.server.sequences;
+        if (scene.drops) {
+            official.server.sequences = new RandomSequences();
+        }
         FakeLevel level = FakeLevel.create(official);
         // `EntityReference` 找不到实体时会查所有维度（被炸的牛记着已经消失的苦力怕）。
         // `EntityReference` falls back to every dimension when the entity is gone.
@@ -14776,6 +16346,12 @@ public final class MobOracle {
         level.nextId = FIRST_ID;
         java.util.List<ServerPlayer> players = new java.util.ArrayList<>();
         java.util.List<Bytes> zombieSinks = new java.util.ArrayList<>();
+        // `drops()` 场景逐刻比新生成的掉落物、经验球和幼崽（挖出的种子、繁殖下的蛋）。
+        // `drops()` scenes compare freshly spawned items/orbs/calves (dug-up seeds, laid eggs).
+        List<List<String>> spawns = scene.drops ? new ArrayList<>() : null;
+        if (spawns != null) {
+            for (int t = 0; t <= scene.ticks; t++) spawns.add(new ArrayList<>());
+        }
         StringBuilder playerStates = new StringBuilder("[");
         StringBuilder playerPackets = new StringBuilder("[");
         float[] lastSentHealth = {-1.0e8F};
@@ -14898,6 +16474,7 @@ public final class MobOracle {
                 case 18 -> EntityTypes.FROG.create(level, EntitySpawnReason.COMMAND);
                 case 19 -> EntityTypes.TADPOLE.create(level, EntitySpawnReason.COMMAND);
                 case 20 -> EntityTypes.CAMEL.create(level, EntitySpawnReason.COMMAND);
+                case 24 -> EntityTypes.SNIFFER.create(level, EntitySpawnReason.COMMAND);
                 // 61 焦骸、62 尸壳骆驼。
                 // 61 parched, 62 camel husk.
                 case 61 -> new net.minecraft.world.entity.monster.skeleton.Parched(EntityTypes.PARCHED, level);
@@ -15018,6 +16595,16 @@ public final class MobOracle {
                         mobs.get(scene.rideVehicle), false, false)) {
             throw new IllegalStateException("Second mob rider could not mount in " + scene.name);
         }
+        // TNT 场景：额外实体。构造时从 `level.random` 取朝向（和 Bamboo `spawn_tnt` 同一个源）。
+        net.minecraft.world.entity.item.PrimedTnt tntEntity = null;
+        if (scene.tntBlock != null) {
+            tntEntity = new net.minecraft.world.entity.item.PrimedTnt(level,
+                    scene.tntBlock[0] + 0.5, scene.tntBlock[1], scene.tntBlock[2] + 0.5, null);
+            // ID 排在所有生物之后，和 Bamboo `spawn_tnt` 从实体表发号一致。
+            tntEntity.setId(FIRST_ID + mobs.size());
+            setRandom(tntEntity, scene.tntSeed);
+            level.tracked.add(tntEntity);
+        }
         StringBuilder line = new StringBuilder(1 << 18);
         line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
         line.append(",\"firstId\":").append(FIRST_ID);
@@ -15108,6 +16695,9 @@ public final class MobOracle {
         line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(
                 scene.realPlayers ? scene.playerHealth : 20.0F));
         line.append(",\"realPlayers\":").append(scene.realPlayers);
+        line.append(",\"tnt\":").append(scene.tntBlock == null ? "null"
+                : "[" + scene.tntBlock[0] + "," + scene.tntBlock[1] + "," + scene.tntBlock[2] + "]");
+        line.append(",\"tntSeed\":").append(scene.tntSeed);
         line.append(",\"clockStart\":").append(scene.clockStart);
         line.append(",\"sleepTick\":").append(scene.sleepTick);
         line.append(",\"playerCreative\":").append(scene.playerCreative);
@@ -15130,7 +16720,15 @@ public final class MobOracle {
                     .append(action[4]).append(']');
         }
         line.append("],\"interactions\":null");
-        line.append(",\"packets\":null,\"syncFlags\":null,\"spawns\":null,\"life\":null,\"spawnResult\":null");
+        line.append(",\"packets\":null,\"syncFlags\":null,\"life\":null,\"spawnResult\":null");
+        // TNT 场景：逐刻记 TNT 的位置和引信。
+        StringBuilder tntSteps = new StringBuilder();
+        if (tntEntity != null) {
+            tntSteps.append('[').append(Double.doubleToRawLongBits(tntEntity.getX()))
+                    .append(',').append(Double.doubleToRawLongBits(tntEntity.getY()))
+                    .append(',').append(Double.doubleToRawLongBits(tntEntity.getZ()))
+                    .append(',').append(tntEntity.getFuse()).append(']');
+        }
         line.append(",\"steps\":[");
         if (scene.name.startsWith("zombie_inhabited_")) {
             incrementInhabitedTime(level, players);
@@ -15242,6 +16840,12 @@ public final class MobOracle {
                     tickMobRiders(mob);
                 }
             }
+            // TNT 场景：额外实体按 ID 排在生物之后，每刻自己 tick（重力、移动、引信、
+            // 归零时 `explode`，发 EXPLODE 包、伤生物和玩家、破坏方块）。官方的
+            // `PrimedTnt.tick` 也不调 `commonTick`。
+            if (tntEntity != null && !tntEntity.isRemoved()) {
+                tntEntity.tick();
+            }
             if (slimeScene) {
                 // 分裂出来的小史莱姆：记下数量、位置、朝向、大小和血量就丢掉，不让它们继续 tick
                 // （官方构造函数的随机源不带种子）。
@@ -15283,7 +16887,30 @@ public final class MobOracle {
                         .append(',').append(event[5]).append(']');
             }
             worldEvents.clear();
+            // TNT 场景：这一刻 tick 完记 TNT 的位置和引信；爆炸那一刻实体已 discard，记 null。
+            if (tntEntity != null) {
+                tntSteps.append(',');
+                if (tntEntity.isRemoved()) {
+                    tntSteps.append("null");
+                } else {
+                    tntSteps.append('[').append(Double.doubleToRawLongBits(tntEntity.getX()))
+                            .append(',').append(Double.doubleToRawLongBits(tntEntity.getY()))
+                            .append(',').append(Double.doubleToRawLongBits(tntEntity.getZ()))
+                            .append(',').append(tntEntity.getFuse()).append(']');
+                }
+            }
             line.append(',').append(zombieStepJson(mobs, players, level));
+            if (spawns != null) {
+                // 按 `addFreshEntity` 顺序收集，不做 id 排序：Bamboo 一侧也按生成顺序
+                // 记录，两边逐项对齐。实体 id 是内部编号，假世界玩家会占掉一个号。
+                // Collect in `addFreshEntity` order without sorting by id: Bamboo also
+                // records spawns in generation order; the entity id is an internal number
+                // and the fake world's player consumes one of them.
+                for (Entity born : level.spawned) {
+                    level.reseedBorn(born);
+                    spawns.get(tick).add(spawnJson(born));
+                }
+            }
             if (scene.realPlayers) {
                 zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
                         lastSentHealth, false, scene.name.startsWith("zombie_husk_hunger_"));
@@ -15338,6 +16965,16 @@ public final class MobOracle {
         }
         line.append("]");
         PillagerScenes.check(scene, mobs);
+        // 挖掘场景必须真的走完闭环并掉出种子，防止种子变化让场景退化成纯闲逛。
+        // Dig scenes must actually finish the loop and drop a seed, so a seed change
+        // cannot silently degrade the scene into pure idling.
+        if (scene.name.startsWith("sniffer_dig_")) {
+            boolean dropped = spawns != null && spawns.stream().flatMap(java.util.List::stream)
+                    .anyMatch(json -> json.contains("\"kind\":\"item\""));
+            if (!dropped) {
+                throw new IllegalStateException(scene.name + " never dug up a seed");
+            }
+        }
         // 焦骸日晒场景必须真的着火掉血，夜间场景不能着火。
         // The parched day scene must burn and take damage; the night scene must not.
         if (scene.name.equals("parched_burn_day")
@@ -15357,6 +16994,9 @@ public final class MobOracle {
                 && !mobs.getFirst().hasEffect(net.minecraft.world.effect.MobEffects.WATER_BREATHING)) {
             throw new IllegalStateException("water scene must drink water breathing");
         }
+        if (tntEntity != null && !tntEntity.isRemoved()) {
+            throw new IllegalStateException(scene.name + " TNT never exploded (fuse 80 not reached)");
+        }
         if (scene.name.equals("witch_drink_speed")
                 && !mobs.getFirst().hasEffect(net.minecraft.world.effect.MobEffects.SPEED)) {
             throw new IllegalStateException("distant target scene must drink swiftness");
@@ -15367,12 +17007,20 @@ public final class MobOracle {
         line.append(",\"mobEventPackets\":").append(mobEvents).append("]]");
         line.append(",\"sleepResult\":").append(jsonString(sleepResult));
         line.append(",\"levelEvents\":").append(levelEventsJson).append("]]");
+        line.append(",\"spawns\":");
+        appendSpawns(line, spawns);
         if (scene.realPlayers) {
             line.append(",\"zombiePlayerStates\":").append(playerStates).append(']');
             line.append(",\"zombiePlayerPackets\":").append(playerPackets).append(']');
         }
+        if (tntEntity != null) {
+            line.append(",\"tntSteps\":[").append(tntSteps).append(']');
+        }
         line.append("}\n");
         out.write(line.toString());
+        if (scene.drops) {
+            official.server.sequences = savedSequences;
+        }
     }
 
     /** `entity_event`（34）和 `set_equipment`（104）。 */
@@ -15392,7 +17040,7 @@ public final class MobOracle {
 
     /** 玩家自己收到的包里要比的那几种：受伤动画、进入 / 离开战斗、死亡界面、血量。 */
     private static final java.util.Set<Integer> ZOMBIE_SELF_PACKETS = java.util.Set.of(
-            43, 67, 68, 69, 106);
+            36, 43, 67, 68, 69, 106);
     /** 尸壳饥饿场景额外比 `update_mob_effect`（135，VarInt 首字节 0x87）。 */
     private static final java.util.Set<Integer> EFFECT_PACKET = java.util.Set.of(135);
 
@@ -15530,6 +17178,9 @@ public final class MobOracle {
             }
             if (mob instanceof net.minecraft.world.entity.animal.frog.Frog frog) {
                 out.append(",\"goat\":").append(FrogScenes.flags(frog));
+            }
+            if (mob instanceof net.minecraft.world.entity.animal.sniffer.Sniffer sniffer) {
+                out.append(",\"sniffer\":").append(SnifferScenes.state(sniffer));
             }
             out.append(",\"love\":").append(mob instanceof net.minecraft.world.entity.animal.Animal animal
                     ? getInt(net.minecraft.world.entity.animal.Animal.class, animal, "inLove") : 0);
@@ -18980,6 +20631,8 @@ public final class MobOracle {
         private LevelTicks<net.minecraft.world.level.material.Fluid> fluidTicks;
         private Chunks chunkSource;
         private Long2ObjectOpenHashMap<ChunkAccess> chunkCache;
+        /** 区块缓存清掉后仍要保留的游戏事件监听者：区块键 → (段 Y → 监听者)。 */
+        private Long2ObjectOpenHashMap<it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<List<net.minecraft.world.level.gameevent.GameEventListener>>> persistentListeners;
         private ServerScoreboard scoreboard;
         private TickRateManager tickRate;
         private LevelData levelData;
@@ -18998,6 +20651,14 @@ public final class MobOracle {
         /** 僵尸场景注入的天色 / 天气 / 环境属性。 */
         int injectedSkyDarken;
         boolean injectedRaining;
+        /** 刷怪笼对拍：注入方块光（-1 表示用缺省的 0），让光照规则挡住生成。 */
+        /// Spawner parity: injected block light (-1 means the default 0), to let the
+        /// light rule block spawning.
+        int injectedBlockLight = -1;
+        /** 刷怪笼对拍：生成的实体进 `tracked`，`MaxNearbyEntities` 计数才和官方一致。 */
+        /// Spawner parity: spawned entities also enter `tracked` so the
+        /// `MaxNearbyEntities` count matches the official one.
+        boolean spawnerScene;
         boolean injectedBrightOutside = true;
         int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
@@ -19050,6 +20711,7 @@ public final class MobOracle {
                 put(ServerLevel.class, level, "environmentAttributes", official.attributes);
             }
             level.chunkCache = new Long2ObjectOpenHashMap<>();
+            level.persistentListeners = new Long2ObjectOpenHashMap<>();
             level.scoreboard = new ServerScoreboard(official.server);
             level.tickRate = new TickRateManager();
             level.tracked = new ArrayList<>();
@@ -19236,6 +20898,14 @@ public final class MobOracle {
         public int getBrightness(LightLayer layer, BlockPos pos) {
             if (naturalScene != null) {
                 return layer == LightLayer.SKY ? naturalScene.sky() : naturalScene.block();
+            }
+            if (spawnerScene) {
+                // 假世界没有光照引擎：天空光 0，方块光按注入值（缺省 0）。
+                // The fake world has no light engine: sky 0, the injected block light.
+                return layer == LightLayer.BLOCK && injectedBlockLight >= 0 ? injectedBlockLight : 0;
+            }
+            if (layer == LightLayer.BLOCK && injectedBlockLight >= 0) {
+                return injectedBlockLight;
             }
             return super.getBrightness(layer, pos);
         }
@@ -19447,7 +21117,32 @@ public final class MobOracle {
             // no other scene changes.
             Heightmap.primeHeightmaps(chunk, java.util.EnumSet.of(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES));
             chunkCache.put(key, chunk);
+            // `setBlock` 会清掉区块缓存，新建的 `LevelChunk` 没有监听者登记表。
+            // 这里把持久登记的监听者重新挂回新区块，保证 `GameEventDispatcher.post`
+            // 总能在 `chunk.getListenerRegistry` 里找到它们。
+            var sections = persistentListeners.get(key);
+            if (sections != null) {
+                for (var entry : sections.int2ObjectEntrySet()) {
+                    var registry = chunk.getListenerRegistry(entry.getIntKey());
+                    for (var listener : entry.getValue()) {
+                        registry.register(listener);
+                    }
+                }
+            }
             return chunk;
+        }
+
+        /** 官方 `LevelChunk.addGameEventListener`：登记监听者，且跨 `setBlock` 清缓存保留。 */
+        void registerGameEventListener(BlockPos pos, net.minecraft.world.level.gameevent.GameEventListener listener) {
+            long chunkKey = ChunkPos.pack(pos.getX() >> 4, pos.getZ() >> 4);
+            int sectionY = net.minecraft.core.SectionPos.blockToSectionCoord(pos.getY());
+            LevelChunk chunk = (LevelChunk) getChunk(pos.getX() >> 4, pos.getZ() >> 4,
+                    net.minecraft.world.level.chunk.status.ChunkStatus.FULL, false);
+            chunk.getListenerRegistry(sectionY).register(listener);
+            persistentListeners
+                    .computeIfAbsent(chunkKey, k -> new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>())
+                    .computeIfAbsent(sectionY, s -> new ArrayList<>())
+                    .add(listener);
         }
 
         @Override
@@ -19551,6 +21246,9 @@ public final class MobOracle {
             if (naturalScene != null && !worldGenRegion) {
                 tracked.add(entity);
             }
+            if (spawnerScene) {
+                tracked.add(entity);
+            }
             spawned.add(entity);
             return true;
         }
@@ -19610,6 +21308,10 @@ public final class MobOracle {
                 }
             }
             tracked.add(entity);
+            // 刷怪笼对拍：这一轮新加的实体同时进 `spawned`，供逐刻帧记录种类和位置。
+            if (spawnerScene) {
+                spawned.add(entity);
+            }
             return true;
         }
 
@@ -19740,8 +21442,27 @@ public final class MobOracle {
             return true;
         }
 
+        /** 振动到达要查 3x3 区块是否都在 tick；假世界全部视为在 tick。 */
         @Override
-        public void gameEvent(Holder<GameEvent> gameEvent, Vec3 position, GameEvent.Context context) {}
+        public boolean shouldTickBlocksAt(long chunkPos) {
+            return true;
+        }
+
+        /** 幽匿场景装上真的 `GameEventDispatcher`，`gameEvent` 走官方完整分发。 */
+        net.minecraft.world.level.gameevent.GameEventDispatcher gameEventDispatcher;
+
+        void enableGameEvents() {
+            if (gameEventDispatcher == null) {
+                gameEventDispatcher = new net.minecraft.world.level.gameevent.GameEventDispatcher(this);
+            }
+        }
+
+        @Override
+        public void gameEvent(Holder<GameEvent> gameEvent, Vec3 position, GameEvent.Context context) {
+            if (gameEventDispatcher != null) {
+                gameEventDispatcher.post(gameEvent, position, context);
+            }
+        }
 
         @Override
         public void sendBlockUpdated(BlockPos pos, BlockState old, BlockState current, int flags) {}

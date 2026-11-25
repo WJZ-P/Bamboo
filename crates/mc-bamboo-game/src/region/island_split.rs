@@ -456,6 +456,11 @@ impl Region {
             self.block_events.split_off(&BTreeSet::new())
         };
         lap("BlockEvents");
+        let game_event_listeners = self.game_event_listeners.split_off(chunks);
+        debug_assert!(
+            game_event_listeners.check_invariants(chunks).is_ok(),
+            "拆出去的游戏事件监听者行必须都落在新岛的区块里"
+        );
         let block_entities = self
             .block_entities
             .split_off_island(if moves(IslandPart::BlockEntities) {
@@ -608,6 +613,7 @@ impl Region {
             lecterns,
             block_entities,
             block_events,
+            game_event_listeners,
             random,
             redstone_cache: mc_bamboo_blocks::cache::RedstoneCache::new(
                 *self.redstone_cache.config(),
@@ -788,6 +794,7 @@ impl Region {
             lecterns,
             block_entities,
             block_events,
+            game_event_listeners,
             random,
             redstone_cache: _,
             block_change_stamp: _,
@@ -858,6 +865,7 @@ impl Region {
         self.block_ticks.absorb(block_ticks);
         lap("merge BlockTicks");
         self.block_events.absorb(block_events);
+        self.game_event_listeners.absorb(game_event_listeners);
         lap("merge BlockEvents");
         self.block_entities.absorb_island(block_entities);
         lap("merge BlockEntities");

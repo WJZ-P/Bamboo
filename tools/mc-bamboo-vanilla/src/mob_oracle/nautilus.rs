@@ -121,6 +121,9 @@ impl NautilusCase {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(self.first_id),
             players: Vec::new(),
@@ -130,6 +133,7 @@ impl NautilusCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
         }
     }
 }
@@ -372,13 +376,19 @@ impl Report {
                         held: ItemStack::new(held, 1),
                         creative: false,
                         position: Vec3::new(1.5, 63.0, 0.5),
+                        player_height: 1.8,
                         sneaking: false,
                         difficulty: 2,
                     };
                     level.entities.with_mut(uid, |row| {
                         row.with_mob(|me, mob| {
                             let _ = mc_bamboo_blocks::entity::mob::interact::interact(
-                                me, mob, &request, 0, false,
+                                me,
+                                mob,
+                                &request,
+                                0,
+                                false,
+                                &mut || 0.0,
                             );
                         });
                         // 官方在交互之后报出随机源状态，两边从这里开始逐刻。

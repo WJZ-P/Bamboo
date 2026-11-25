@@ -75,24 +75,28 @@ pub(crate) fn tick(region: &mut Region) {
         player.health.tick_cooldowns();
         // 等出生点区块就绪时不跑玩家 tick、回血和饥饿。
         // No player tick, regeneration or food while spawn chunks are pending.
-        if player.dead || player.spawn_pending.is_some() {
+        if player.spawn_pending.is_some() {
             continue;
         }
-        let max_health = crate::player_effects::max_health(player);
-        if difficulty == 0 && natural_regen {
-            let _ = player.health.tick_peaceful(player.entity_ticks, max_health);
-        }
-        if player.health.death_time > 0 && player.health.death_time < 20 {
-            // `LivingEntity.baseTick` 每刻推一次死亡动画，20 刻后才 discard。
-            player.health.death_time += 1;
-        }
-        let food_tick = player
-            .health
-            .tick_food(difficulty, natural_regen, max_health);
-        match food_tick {
-            crate::player_health::FoodTick::Heal(amount) => player.health.heal(amount, max_health),
-            crate::player_health::FoodTick::Starve => starve.push(*id),
-            crate::player_health::FoodTick::Idle => {}
+        if !player.dead {
+            let max_health = crate::player_effects::max_health(player);
+            if difficulty == 0 && natural_regen {
+                let _ = player.health.tick_peaceful(player.entity_ticks, max_health);
+            }
+            if player.health.death_time > 0 && player.health.death_time < 20 {
+                // `LivingEntity.baseTick` 每刻推一次死亡动画，20 刻后才 discard。
+                player.health.death_time += 1;
+            }
+            let food_tick = player
+                .health
+                .tick_food(difficulty, natural_regen, max_health);
+            match food_tick {
+                crate::player_health::FoodTick::Heal(amount) => {
+                    player.health.heal(amount, max_health)
+                }
+                crate::player_health::FoodTick::Starve => starve.push(*id),
+                crate::player_health::FoodTick::Idle => {}
+            }
         }
         let now = HealthSync::of(player);
         if now != player.health_sync {
@@ -472,8 +476,14 @@ fn hurt_player_damage(
     } else {
         None
     };
-    // 死了的玩家不再跑玩家阶段的血量同步，只能当场补。
-    if dying || !parts.defer_health {
+    // 官方 `ServerPlayer.doTick` 在 `die` 之后才补 `set_health`，死亡流程里的
+    // player_combat_kill / system_chat / entity_event 以及同一刻更晚的爆炸包都要排前面，
+    // 所以死了也走玩家阶段的血量同步，不在这里当场补。
+    //
+    // Vanilla `doTick` supplements `set_health` after `die`: the death flow's
+    // combat_kill / system_chat / entity_event and the same-tick blast packet must
+    // come first, so a dying player also syncs in the player phase.
+    if !parts.defer_health {
         send_health(parts);
     }
     (true, drops)

@@ -129,6 +129,8 @@ impl EggCase {
                 uid: self.owner,
                 position: EGG_OWNER,
                 delta: Vec3::default(),
+                width: 0.6,
+                height: 1.8,
                 eye_height: 1.62,
                 health: 20.0,
                 look_direction: Vec3::default(),
@@ -140,6 +142,8 @@ impl EggCase {
                 game_mode: 0,
                 mining_fatigue: None,
                 creative: false,
+                flying: false,
+                explosion_knockback_resistance: 0.0,
                 sneaking: false,
                 // 投掷者站着扔蛋，没有疾跑；犰狳才读这个标志。
                 // The thrower stands still, not sprinting; only armadillos read this flag.
@@ -174,6 +178,9 @@ impl EggCase {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(first_id),
             players: Vec::new(),
@@ -183,6 +190,7 @@ impl EggCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
             natural_spawn: None,
             biome: None,
         }

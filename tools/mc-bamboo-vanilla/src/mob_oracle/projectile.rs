@@ -458,6 +458,9 @@ impl ProjectileCase {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(self.first_id),
             players: Vec::new(),
@@ -478,6 +481,7 @@ impl ProjectileCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
         }
     }
 
@@ -1654,6 +1658,7 @@ fn shear_shooter(world: &mut World<'_>, case: &ProjectileCase) -> (bool, Vec<[i6
         hand: mc_bamboo_core::Hand::Main,
         held: ItemStack::new(mc_bamboo_data::items::SHEARS, 1),
         creative: false,
+        player_height: 1.8,
         sneaking: false,
         difficulty: 2,
         position: Vec3::new(case.player_x, 64.0, 0.5),

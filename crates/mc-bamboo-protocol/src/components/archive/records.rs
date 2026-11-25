@@ -1554,7 +1554,7 @@ fn append_matchers(fields: Fields, matchers: &ComponentMatchers, depth: u32) -> 
         .optional("predicates", partial))
 }
 
-fn encode_exact(components: &[TypedComponent], depth: u32) -> Result<Dyn> {
+pub(crate) fn encode_exact(components: &[TypedComponent], depth: u32) -> Result<Dyn> {
     let mut entries = Vec::new();
     for component in components {
         if stack::is_transient(component.kind) {
@@ -1992,7 +1992,7 @@ fn decode_matchers(entries: &[(String, Tag)], depth: u32) -> Result<ComponentMat
     Ok(ComponentMatchers { exact, partial })
 }
 
-fn decode_exact_components(tag: &Tag, depth: u32) -> Result<Vec<TypedComponent>> {
+pub(crate) fn decode_exact_components(tag: &Tag, depth: u32) -> Result<Vec<TypedComponent>> {
     let mut out = Vec::new();
     for (key, value) in read::compound(tag)? {
         let name = crate::components::cursor::parse_identifier(key)

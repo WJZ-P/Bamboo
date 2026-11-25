@@ -19,12 +19,17 @@ use super::{
 };
 use crate::{
     BlockEntity, BlockState,
-    behaviour::machines::{
-        BrewingStandEntity, CampfireEntity, FurnaceEntity, PistonMoving, ShulkerBoxEntity,
-        beehive_entity::BeehiveEntity,
-    },
     behaviour::misc::creaking_heart_entity::CreakingHeartEntity,
+    behaviour::{
+        machines::{
+            BrewingStandEntity, CampfireEntity, FurnaceEntity, PistonMoving, ShulkerBoxEntity,
+            beehive_entity::BeehiveEntity, spawner::SpawnerBlockEntity,
+        },
+        trial_spawner::{TrialSpawner, TrialSpawnerBlockEntity},
+        vault::{Vault, VaultBlockEntity},
+    },
     hopper::HopperEntity,
+    state::{OMINOUS, TRIAL_SPAWNER_STATE, VAULT_STATE, VaultState},
 };
 
 /// Bamboo 会实例化的会动的方块实体类型。读盘还认 [`PassiveKind`] 那四种只保留
@@ -41,6 +46,7 @@ pub enum BlockEntityKind {
     Piston,
     Beehive,
     CreakingHeart,
+    Spawner,
 }
 
 impl BlockEntityKind {
@@ -58,6 +64,7 @@ impl BlockEntityKind {
             "minecraft:piston" => Self::Piston,
             "minecraft:beehive" => Self::Beehive,
             "minecraft:creaking_heart" => Self::CreakingHeart,
+            "minecraft:mob_spawner" => Self::Spawner,
             _ => return None,
         })
     }
@@ -79,12 +86,13 @@ impl BlockEntityKind {
             Self::Piston => "minecraft:piston",
             Self::Beehive => "minecraft:beehive",
             Self::CreakingHeart => "minecraft:creaking_heart",
+            Self::Spawner => "minecraft:mob_spawner",
         }
     }
 
     /// 每种会动的机器各造一次，测试用它盯住工厂分支不要漏。
     /// 只保留存档态的四种由 [`PassiveKind::ALL`] 单独覆盖。
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Furnace,
         Self::BlastFurnace,
         Self::Smoker,
@@ -95,6 +103,7 @@ impl BlockEntityKind {
         Self::Piston,
         Self::Beehive,
         Self::CreakingHeart,
+        Self::Spawner,
     ];
 }
 
@@ -104,13 +113,38 @@ impl BlockEntityKind {
 pub fn create_block_entity(
     id: &str,
     pos: BlockPos,
-    _state: BlockState,
+    state: BlockState,
     tag: &Tag,
 ) -> Result<Option<Box<dyn BlockEntity>>> {
+    if id == "minecraft:vault" {
+        // 官方 `loadAdditional`：`state` 来自方块状态，三份 codec 读同一条目。
+        // The state comes from the block state; the three codecs read one entry.
+        let vault = Vault::read(
+            tag,
+            state.try_get(VAULT_STATE).unwrap_or(VaultState::Inactive),
+        );
+        return Ok(Some(Box::new(VaultBlockEntity::new(pos, vault))));
+    }
     if let Some(passive) = PassiveKind::from_name(id) {
-        return Ok(Some(Box::new(PassiveBlockEntity::read(
-            passive, pos, _state, tag,
-        )?)));
+        return Ok(Some(match passive {
+            PassiveKind::SculkSensor | PassiveKind::CalibratedSculkSensor => Box::new(
+                crate::behaviour::misc::sculk_entity::SculkSensorEntity::read(
+                    pos,
+                    passive == PassiveKind::CalibratedSculkSensor,
+                    tag,
+                )?,
+            ),
+            PassiveKind::SculkShrieker => Box::new(
+                crate::behaviour::misc::sculk_shrieker::SculkShriekerEntity::read(pos, tag)?,
+            ),
+            _ => Box::new(PassiveBlockEntity::read(passive, pos, state, tag)?),
+        }));
+    }
+    if id == "minecraft:trial_spawner" {
+        // 官方 `loadAdditional`：`state` 和 `ominous` 来自方块状态，其余两组
+        // codec 读同一条目。
+        let spawner = TrialSpawner::read(tag, state.get(TRIAL_SPAWNER_STATE), state.get(OMINOUS));
+        return Ok(Some(Box::new(TrialSpawnerBlockEntity::new(pos, spawner))));
     }
     let Some(kind) = BlockEntityKind::from_name(id) else {
         return Ok(None);
@@ -173,6 +207,9 @@ pub fn create_block_entity(
         }
         BlockEntityKind::Beehive => Box::new(BeehiveEntity::read(pos, tag)) as Box<dyn BlockEntity>,
         BlockEntityKind::CreakingHeart => Box::new(CreakingHeartEntity::read(pos, tag)),
+        BlockEntityKind::Spawner => {
+            Box::new(SpawnerBlockEntity::read(pos, tag)) as Box<dyn BlockEntity>
+        }
         BlockEntityKind::Piston => {
             let moved = match tag::field(tag, "blockState") {
                 Some(value) => tag::decode_block_state(value)?,
@@ -275,6 +312,7 @@ pub fn state_matches(state: BlockState, id: &str) -> bool {
         kinds::PISTON => state.is(blocks::MOVING_PISTON),
         kinds::BEEHIVE => state.is(blocks::BEEHIVE) || state.is(blocks::BEE_NEST),
         kinds::CREAKING_HEART => state.is(blocks::CREAKING_HEART),
+        kinds::MOB_SPAWNER => state.is(blocks::SPAWNER),
         _ => true,
     }
 }

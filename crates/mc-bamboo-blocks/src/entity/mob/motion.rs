@@ -107,7 +107,7 @@ pub(crate) fn move_living(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCt
     if moved_vertically && me.vertical_collision || me.horizontal_collision {
         restitute(me, mob, legacy_state, x_collision, z_collision, collided);
     }
-    movement_emission(me, mob, ctx.blocks(), collided, legacy_pos, legacy_state);
+    movement_emission(me, mob, ctx, collided, legacy_pos, legacy_state);
     let factor = mth::lerp_f32(
         mob.attributes
             .value(mc_bamboo_data::registries::attribute::MOVEMENT_EFFICIENCY) as f32,
@@ -281,7 +281,7 @@ fn restitute(
 fn movement_emission(
     me: &mut Entity,
     mob: &mut Mob,
-    view: &dyn BlockView,
+    ctx: &mut dyn super::super::ctx::EntityCtx,
     collided: Vec3,
     legacy_pos: BlockPos,
     legacy_state: BlockState,
@@ -289,20 +289,32 @@ fn movement_emission(
     let length = (collided.length() * f64::from(0.6_f32)) as f32;
     let horizontal =
         ((collided.x * collided.x + collided.z * collided.z).sqrt() * f64::from(0.6_f32)) as f32;
-    let on_pos = me.on_pos(view, 1.0e-5);
-    let on_state = view.block_state(on_pos);
+    let (on_pos, on_state) = {
+        let view = ctx.blocks();
+        let on_pos = me.on_pos(view, 1.0e-5);
+        (on_pos, view.block_state(on_pos))
+    };
     let climbing = on_state.is_tagged(block_tags::CLIMBABLE) || on_state.is(blocks::POWDER_SNOW);
     mob.move_dist += if climbing { length } else { horizontal };
     mob.fly_dist += length;
+    let mut step_event = None;
     if mob.move_dist > mob.next_step && !on_state.is_air() {
         let same = on_pos == legacy_pos;
         // `MovementEmission.EVENTS`（鱿鱼）只发游戏事件：没有脚步声，也不取游泳声的随机数。
         // `MovementEmission.EVENTS` (squid) only emits game events: no step sound and no
         // swim-sound draws.
         let sounds = mob.mob_type.emits_movement_sounds();
-        let mut stepped = step_effects(me, mob, view, legacy_pos, legacy_state, sounds, collided);
-        if !same {
-            stepped |= step_effects(me, mob, view, on_pos, on_state, false, collided);
+        let stepped = {
+            let view = ctx.blocks();
+            let mut stepped =
+                step_effects(me, mob, view, legacy_pos, legacy_state, sounds, collided);
+            if !same {
+                stepped |= step_effects(me, mob, view, on_pos, on_state, false, collided);
+            }
+            stepped
+        };
+        if stepped {
+            step_event = Some((me.position, legacy_state));
         }
         if stepped {
             mob.next_step = next_step_value(mob);
@@ -335,6 +347,20 @@ fn movement_emission(
             super::living::play_sound(me, mob, "minecraft:entity.parrot.fly", 0.15, 1.0);
             mob.parrot.next_flap = mob.fly_dist + mob.parrot.flap_speed / 2.0;
         }
+    }
+
+    if let Some((position, affected_state)) = step_event {
+        ctx.emit(
+            super::super::ctx::Command::GameEvent {
+                event: crate::game_event::GameEvent::Step,
+                position,
+                context: crate::game_event::dispatch::EventContext {
+                    affected_state: Some(affected_state),
+                    ..Default::default()
+                },
+            },
+            me,
+        );
     }
 }
 

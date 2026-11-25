@@ -1011,7 +1011,12 @@ pub(super) fn is_food(stack: &ItemStack) -> bool {
 ///
 /// `Cat.mobInteract`: owners can dye the collar, heal with fish (1×nutrition or 1), or toggle
 /// sitting; untamed cats roll 1/3 to tame on fish, persist, and play the eating sound.
-pub(super) fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
+pub(super) fn interact(
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+    level_next_float: &mut dyn FnMut() -> f32,
+) -> MobInteraction {
     let held = &req.held;
     let consume = !req.creative;
     if mob.tame.is_tame() {
@@ -1035,7 +1040,7 @@ pub(super) fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest)
                     return outcome(InteractionResult::Success, consume);
                 }
             }
-            let parent = super::interact::animal_interact(me, mob, req);
+            let parent = super::interact::animal_interact(me, mob, req, level_next_float);
             if !parent.result.consumes_action() {
                 mob.tame.ordered_to_sit = !mob.tame.ordered_to_sit;
                 return outcome(InteractionResult::Success, false);
@@ -1058,7 +1063,7 @@ pub(super) fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest)
             ..outcome(InteractionResult::Success, consume)
         };
     }
-    let result = super::interact::animal_interact(me, mob, req);
+    let result = super::interact::animal_interact(me, mob, req, level_next_float);
     if result.result.consumes_action() {
         mob.persistence_required = true;
     }
