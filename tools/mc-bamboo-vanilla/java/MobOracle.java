@@ -446,6 +446,9 @@ public final class MobOracle {
             if (only == null || "villager_p4".startsWith(only) || only.startsWith("villager_p4")) {
                 cases += playVillagerPhase4(official, out, only);
             }
+            if (only == null || "villager_trade".startsWith(only) || only.startsWith("villager_trade")) {
+                cases += playVillagerTrade(official, out, only);
+            }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playBat(official, out, name);
@@ -13455,6 +13458,208 @@ public final class MobOracle {
                     + ",\"clockStart\":" + clockStart
                     + ",\"sensorDelay\":" + sensorDelay
                     + ",\"firstId\":" + FIRST_ID
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            world.closeRealPoi();
+        }
+    }
+
+    /**
+     * 村民交易接进大脑的逐刻对拍：玩家打开/关闭交易、工作站补货、交易后升级。
+     * 一侧在假 `ServerLevel` 里跑官方 `Villager`，每刻记下大脑、位移、随机源、
+     * 交易表摘要、经验/等级、再生效果、血量；Bamboo 侧重放同一场景并逐位比较。
+     *
+     * Villager-trading tick-by-tick comparison: opening/closing a trade, restocking at a
+     * workstation and levelling up after a trade. The official `Villager` runs in a fake
+     * `ServerLevel`; each tick records brain, motion, RNG, an offer digest, xp/level,
+     * regeneration and health. Bamboo replays the same scene bit for bit.
+     */
+    private static int playVillagerTrade(Official official, Writer out, String only) throws Exception {
+        String[] scenes = {"villager_trade_follow", "villager_trade_restock", "villager_trade_levelup"};
+        int count = 0;
+        for (String name : scenes) {
+            if (only != null && !name.startsWith(only)) continue;
+            playVillagerTradeOne(official, out, name);
+            count++;
+        }
+        return count;
+    }
+
+    private static net.minecraft.world.item.trading.MerchantOffers tradeOffers(int... uses) {
+        var offers = new net.minecraft.world.item.trading.MerchantOffers();
+        for (int u : uses) {
+            var offer = new net.minecraft.world.item.trading.MerchantOffer(
+                    new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 1),
+                    new ItemStack(Items.APPLE), 12, 1, 0.05F);
+            for (int i = 0; i < u; i++) offer.increaseUses();
+            offers.add(offer);
+        }
+        return offers;
+    }
+
+    private static String offersDigest(net.minecraft.world.item.trading.MerchantOffers offers) {
+        int uses = 0, demand = 0, special = 0;
+        for (var offer : offers) {
+            uses += offer.getUses();
+            demand += offer.getDemand();
+            special += offer.getSpecialPriceDiff();
+        }
+        return "[" + offers.size() + "," + uses + "," + demand + "," + special + "]";
+    }
+
+    private static void playVillagerTradeOne(Official official, Writer out, String name) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        try {
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels = java.util.Map.of(Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            world.blockEntities = new Long2ObjectOpenHashMap<>();
+
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+
+            boolean follow = name.equals("villager_trade_follow");
+            boolean restock = name.equals("villager_trade_restock");
+            boolean levelup = name.equals("villager_trade_levelup");
+            long clockStart = 2000L;
+            int totalTicks = levelup ? 260 : (follow ? 120 : 90);
+            // 传感器关掉：ShowTradesToPlayer 等村民间交互行为要靠传感器记忆才启动，
+            // 关掉后官方与 Bamboo 的占位都不跑；交易 sink 直接读 tradingPlayer，不受影响。
+            // Sensors off: villager-to-villager interaction behaviours need sensor memories
+            // to start, so with sensors off both the official ones and Bamboo's stubs stay
+            // idle; the trading sink reads tradingPlayer directly and is unaffected.
+            long sensorDelay = 1_000_000L;
+            int playerId = FIRST_ID + 1024;
+            int eventTick = restock ? 20 : 10;
+            int closeTick = follow ? 60 : -1;
+
+            world.gameTime = 1000L;
+            world.realSky = true;
+            world.injectedCanSeeSky = true;
+            world.clock = clockStart;
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder().addStaticLayers(world);
+            net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+                public long totalTicks() { return world.clock; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : world.dimensionType().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            official.attributes = builder.build();
+            put(ServerLevel.class, world, "environmentAttributes", official.attributes);
+            world.updateSkyBrightness();
+            world.getRandom().setSeed(1L);
+
+            ServerPlayer player = null;
+            if (follow) {
+                player = new ServerPlayer(official.server, world,
+                        new GameProfile(new UUID(1L, 2L), "TradeOracle"), ClientInformation.createDefault());
+                player.setId(playerId);
+                player.setPos(2.5, 64.0, 0.5);
+                player.setYRot(0.0F);
+                player.setYHeadRot(0.0F);
+                player.setYBodyRot(0.0F);
+                world.playersList().add(player);
+                // `NearestLivingEntitySensor` 走 `getEntitiesOfClass`（读 `tracked`）。
+                world.tracked.add(player);
+            }
+
+            Villager v = (Villager) EntityTypes.VILLAGER.create(world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+            v.setId(FIRST_ID);
+            v.setUUID(new UUID(0L, 1L));
+            v.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            v.setYHeadRot(0.0F);
+            v.setYBodyRot(0.0F);
+            put(net.minecraft.world.entity.ai.Brain.class, v.getBrain(), "lastScheduleUpdate", -9999L);
+            v.getBrain().updateActivityFromSchedule(world.environmentAttributes(), world.getGameTime(), v.position());
+            setRandom(v, 71L);
+            BrainOracle.reseedShuffles(v, randomSeed(v));
+            BrainOracle.fixSensorDelays(v, sensorDelay);
+            if (levelup) {
+                v.setHealth(10.0F);
+                v.setVillagerXp(9); // 9 + offer.xp(2) = 11 >= 10 → 升级
+            }
+            v.setOffers(restock ? tradeOffers(3, 1) : tradeOffers(0));
+            world.tracked.add(v);
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= totalTicks; tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    world.clock = clockStart + tick;
+                    official.attributes.invalidateTickCache();
+                    world.updateSkyBrightness();
+
+                    if (tick == eventTick) {
+                        if (follow) {
+                            // `Villager.startTrading` 里记下交易玩家。
+                            v.setTradingPlayer(player);
+                        } else if (restock) {
+                            // `WorkAtPoi.useWorkstation` 末尾的补货判定（直接调同一对方法）。
+                            if (v.shouldRestock(world)) v.restock();
+                        } else {
+                            // `MerchantResultSlot.onTake` → `notifyTrade`；rewardExp 关掉，
+                            // 免得在假世界里撒经验球。声望为 none 职业，updateTrades 不生成交易。
+                            var offer = new net.minecraft.world.item.trading.MerchantOffer(
+                                    new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 1),
+                                    new ItemStack(Items.APPLE), 12, 2, 0.05F);
+                            put(net.minecraft.world.item.trading.MerchantOffer.class, offer, "rewardExp", false);
+                            v.notifyTrade(offer);
+                            // `increaseMerchantCareer` 追加的新等级交易（受控夹具）。
+                            v.setOffers(tradeOffers(0, 0, 0));
+                        }
+                    }
+                    if (tick == closeTick) {
+                        // `MerchantMenu.removed` → `stopTrading()`。
+                        v.setTradingPlayer(null);
+                    }
+
+                    List<Entity> snapshot = new ArrayList<>(world.tracked);
+                    for (Entity e : snapshot) {
+                        if (e.isRemoved()) continue;
+                        if (e instanceof Villager villager) {
+                            var prevBrain = villager.getBrain();
+                            villager.commonTick();
+                            villager.tick();
+                            if (villager.getBrain() != prevBrain) BrainOracle.reseedShuffles(villager, randomSeed(villager));
+                        } else if (!(e instanceof ServerPlayer)) {
+                            // 玩家保持静止，和 Bamboo 一侧的 PlayerView 快照一致。
+                            e.tick();
+                        }
+                    }
+                    world.tracked.removeIf(Entity::isRemoved);
+                }
+
+                if (tick > 0) frames.append(',');
+                var regen = v.getEffect(MobEffects.REGENERATION);
+                frames.append("{\"brain\":").append(jsonString(BrainOracle.dump(v)))
+                        .append(",\"motion\":").append(projectileMotion(v))
+                        .append(",\"seed\":").append(randomSeed(v))
+                        .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
+                        .append(",\"xp\":").append(v.getVillagerXp())
+                        .append(",\"level\":").append(v.getVillagerData().level())
+                        .append(",\"regen\":").append(regen == null ? -1 : regen.getDuration())
+                        .append(",\"health\":").append(Float.floatToRawIntBits(v.getHealth()))
+                        .append(",\"offers\":").append(offersDigest(v.getOffers()))
+                        .append(",\"trading\":").append(v.getTradingPlayer() != null ? 1 : 0)
+                        .append("}");
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"villagerTrade\",\"name\":" + jsonString(name)
+                    + ",\"clockStart\":" + clockStart
+                    + ",\"sensorDelay\":" + sensorDelay
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"playerId\":" + playerId
+                    + ",\"eventTick\":" + eventTick
+                    + ",\"closeTick\":" + closeTick
                     + ",\"frames\":" + frames + "}\n");
             out.flush();
         } finally {

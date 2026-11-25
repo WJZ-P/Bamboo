@@ -780,6 +780,11 @@ pub fn notify_trade(
     new_offers: impl FnOnce() -> Vec<MerchantOffer>,
 ) -> TradeOutcome {
     let mut orb_amount = orb_base;
+    // `AbstractVillager.notifyTrade`：`ambientSoundTime = -getAmbientSoundInterval()`，
+    // 压住交易后的环境音，音高随机源才和官方同步。
+    // `AbstractVillager.notifyTrade`: `ambientSoundTime = -getAmbientSoundInterval()`
+    // suppresses the post-trade ambient sound so the pitch RNG stays aligned.
+    mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
     mob.villager.xp += offer_xp;
     mob.villager.last_traded_player = mob.villager.trading_player;
     let leveled_up = mob.villager.should_increase_level();

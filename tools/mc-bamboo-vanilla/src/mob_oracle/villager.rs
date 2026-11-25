@@ -1474,3 +1474,313 @@ fn field<'a>(tag: &'a mc_bamboo_nbt::Tag, key: &str) -> Option<&'a mc_bamboo_nbt
         _ => None,
     }
 }
+
+/// 村民交易接进大脑的逐刻对拍用例：打开/关闭交易、工作站补货、交易后升级。
+///
+/// Villager-trading tick-by-tick case: opening/closing a trade, restocking at a
+/// workstation, and levelling up after a trade.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct VillagerTradeCase {
+    pub name: String,
+    pub clock_start: i64,
+    pub sensor_delay: i64,
+    pub first_id: i32,
+    pub player_id: i32,
+    pub event_tick: i32,
+    pub close_tick: i32,
+    pub frames: Vec<VillagerTradeFrame>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct VillagerTradeFrame {
+    brain: String,
+    motion: [i64; 8],
+    seed: i64,
+    level_seed: i64,
+    xp: i32,
+    level: i32,
+    regen: i32,
+    health: i64,
+    offers: [i64; 4],
+    trading: i32,
+}
+
+fn trade_offer(uses: i32) -> mc_bamboo_protocol::merchant::MerchantOffer {
+    use mc_bamboo_protocol::merchant::{ItemCost, MerchantOffer};
+    MerchantOffer {
+        base_cost_a: ItemCost::new(mc_bamboo_data::items::EMERALD, 1),
+        cost_b: None,
+        result: ItemStack::new(mc_bamboo_data::items::APPLE, 1),
+        uses,
+        max_uses: 12,
+        reward_exp: true,
+        special_price_diff: 0,
+        demand: 0,
+        price_multiplier: 0.05,
+        xp: 1,
+    }
+}
+
+impl Report {
+    /// 逐刻重放交易场景，附带 5 处 `--break-self-test` 改坏确认：
+    /// `vt_no_follow` / `vt_no_close` / `vt_no_restock` / `vt_no_levelup` / `vt_no_orb_rng`。
+    pub(super) fn replay_villager_trade(&mut self, case: &VillagerTradeCase) {
+        use mc_bamboo_blocks::entity::mob::villager_ai;
+        use mc_bamboo_data::registries::mob_effect;
+
+        self.cases += 1;
+        let break_test = self.break_test.clone();
+        let break_test = break_test.as_deref();
+        let name = case.name.as_str();
+        let follow = name == "villager_trade_follow";
+        let restock = name == "villager_trade_restock";
+        let levelup = name == "villager_trade_levelup";
+
+        let mut blocks_map = std::collections::HashMap::new();
+        for x in -15..=15 {
+            for z in -15..=15 {
+                blocks_map.insert(
+                    BlockPos::new(x, 63, z),
+                    BlockState(mc_bamboo_data::blocks::STONE),
+                );
+            }
+        }
+
+        let rules = mc_bamboo_blocks::BlockGameRules::vanilla();
+        let players = if follow {
+            vec![super::bat::player_view(case.player_id, [2.5, 64.0, 0.5])]
+        } else {
+            Vec::new()
+        };
+        let mut level = MobLevel {
+            blocks: blocks_map,
+            random: LevelRandom::new(1),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: Vec::new(),
+            biome: None,
+            rules,
+            facts: ZombieFacts {
+                clock: case.clock_start,
+                difficulty: 2,
+                can_see_sky: true,
+                ..ZombieFacts::default()
+            },
+            natural_spawn: None,
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
+            poi: mc_bamboo_world::poi::PoiStore::new(),
+            entities: Entities::with_next_id(case.first_id),
+            players,
+            game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
+            wrong_was_hurt: false,
+        };
+
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(1000);
+        let set_clock = |level: &mut MobLevel, clock: i64| {
+            level.facts.clock = clock;
+            level.facts.villager_activity = Some(mc_bamboo_blocks::sky::villager_activity(clock));
+            level.facts.baby_villager_activity =
+                Some(mc_bamboo_blocks::sky::baby_villager_activity(clock));
+        };
+        set_clock(&mut level, case.clock_start);
+
+        let pos = Vec3::new(0.5, 64.0, 0.5);
+        let mut entity = Entity::by_mob_type(MobType::Villager, pos);
+        let mut world = World::new(&mut level, &mut ticks);
+        entity.with_mob(|_, mob| {
+            villager_ai::register_brain_goals(mob, &world, 1000);
+        });
+        let vid = world.spawn_entity(entity);
+        world.with_entity_mut(vid, &mut |entity| {
+            entity.y_rot = 0.0;
+            entity.old_position = pos;
+            entity.random = JavaRandom::new(71);
+            entity.with_mob(|me, mob| {
+                mob.uuid = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+                mob.x_rot = 0.0;
+                mob.y_rot_o = 0.0;
+                mob.x_rot_o = 0.0;
+                mob.y_head_rot = 0.0;
+                mob.y_head_rot_o = 0.0;
+                mob.y_body_rot = 0.0;
+                mob.y_body_rot_o = 0.0;
+                mob.villager.offers = Some(if restock {
+                    vec![trade_offer(3), trade_offer(1)]
+                } else {
+                    vec![trade_offer(0)]
+                });
+                if levelup {
+                    mob.villager.xp = 9;
+                    mob.health = 10.0;
+                }
+                if let Some(brain) = mob.brain.as_mut() {
+                    brain.seed_shuffles(me.random.state());
+                    for sensor in &mut brain.sensors {
+                        sensor.time_to_tick = case.sensor_delay;
+                    }
+                }
+            });
+        });
+
+        for (tick, expected) in case.frames.iter().enumerate() {
+            if tick > 0 {
+                let now = 1000 + tick as i64;
+                ticks.set_time(now);
+                set_clock(&mut level, case.clock_start + tick as i64);
+                let day = (case.clock_start + tick as i64) / 24_000;
+
+                if tick as i32 == case.event_tick {
+                    let mut world = World::new(&mut level, &mut ticks);
+                    world.with_entity_mut(vid, &mut |entity| {
+                        entity.with_mob(|me, mob| {
+                            if follow {
+                                if break_test != Some("vt_no_follow") {
+                                    mob.villager.set_trading_player(Some(case.player_id));
+                                }
+                            } else if restock {
+                                if break_test != Some("vt_no_restock")
+                                    && mob.villager.should_restock(now, day)
+                                {
+                                    mob.villager.restock(now);
+                                }
+                            } else if break_test != Some("vt_no_levelup") {
+                                let mut rng = me.random;
+                                let orb_base = if break_test == Some("vt_no_orb_rng") {
+                                    3
+                                } else {
+                                    3 + rng.next_int_bounded(4)
+                                };
+                                me.random = rng;
+                                let _ = mc_bamboo_blocks::entity::mob::villager::notify_trade(
+                                    mob,
+                                    2,
+                                    orb_base,
+                                    || vec![trade_offer(0), trade_offer(0)],
+                                );
+                            }
+                        });
+                    });
+                }
+                if tick as i32 == case.close_tick && break_test != Some("vt_no_close") {
+                    let mut world = World::new(&mut level, &mut ticks);
+                    world.with_entity_mut(vid, &mut |entity| {
+                        entity.with_mob(|_, mob| mob.villager.stop_trading());
+                    });
+                }
+
+                let mut world = World::new(&mut level, &mut ticks);
+                world.tick_entities();
+            }
+
+            let Some(entity) = level.entities.get(vid) else {
+                self.mismatch(format!("{} tick {tick}: missing villager", case.name));
+                return;
+            };
+            let mob = entity.kind.mob().expect("villager is mob");
+            let ours_brain = super::brain::dump(&level, &entity);
+            if ours_brain != expected.brain {
+                self.mismatch(format!(
+                    "{} tick {tick} brain: official {:?}, bamboo {:?}",
+                    case.name, expected.brain, ours_brain
+                ));
+            }
+            let (p, v) = (entity.position, entity.delta);
+            let ours_motion = [
+                p.x.to_bits() as i64,
+                p.y.to_bits() as i64,
+                p.z.to_bits() as i64,
+                v.x.to_bits() as i64,
+                v.y.to_bits() as i64,
+                v.z.to_bits() as i64,
+                i64::from(entity.y_rot.to_bits() as i32),
+                i64::from(mob.x_rot.to_bits() as i32),
+            ];
+            if ours_motion != expected.motion {
+                self.mismatch(format!(
+                    "{} tick {tick} motion: official {:?}, bamboo {:?}",
+                    case.name, expected.motion, ours_motion
+                ));
+            }
+            let ours_seed = entity.random.state();
+            if ours_seed != expected.seed {
+                self.mismatch(format!(
+                    "{} tick {tick} seed: official {}, bamboo {ours_seed}",
+                    case.name, expected.seed
+                ));
+            }
+            let ours_level_seed = level.random.source().seed();
+            if ours_level_seed != expected.level_seed {
+                self.mismatch(format!(
+                    "{} tick {tick} levelSeed: official {}, bamboo {ours_level_seed}",
+                    case.name, expected.level_seed
+                ));
+            }
+            let ours_xp = mob.villager.xp;
+            if ours_xp != expected.xp {
+                self.mismatch(format!(
+                    "{} tick {tick} xp: official {}, bamboo {ours_xp}",
+                    case.name, expected.xp
+                ));
+            }
+            if mob.villager.level != expected.level {
+                self.mismatch(format!(
+                    "{} tick {tick} level: official {}, bamboo {}",
+                    case.name, expected.level, mob.villager.level
+                ));
+            }
+            let ours_regen = mob
+                .effects
+                .get(mob_effect::REGENERATION)
+                .map_or(-1, |effect| effect.duration);
+            if ours_regen != expected.regen {
+                self.mismatch(format!(
+                    "{} tick {tick} regen: official {}, bamboo {ours_regen}",
+                    case.name, expected.regen
+                ));
+            }
+            let ours_health = i64::from(mob.health.to_bits() as i32);
+            if ours_health != expected.health {
+                self.mismatch(format!(
+                    "{} tick {tick} health: official {}, bamboo {ours_health}",
+                    case.name, expected.health
+                ));
+            }
+            let offers = mob.villager.offers.as_deref().unwrap_or(&[]);
+            let ours_offers = [
+                offers.len() as i64,
+                offers.iter().map(|o| i64::from(o.uses)).sum(),
+                offers.iter().map(|o| i64::from(o.demand)).sum(),
+                offers.iter().map(|o| i64::from(o.special_price_diff)).sum(),
+            ];
+            if ours_offers != expected.offers {
+                self.mismatch(format!(
+                    "{} tick {tick} offers: official {:?}, bamboo {:?}",
+                    case.name, expected.offers, ours_offers
+                ));
+            }
+            let ours_trading = i32::from(mob.villager.is_trading());
+            if ours_trading != expected.trading {
+                self.mismatch(format!(
+                    "{} tick {tick} trading: official {}, bamboo {ours_trading}",
+                    case.name, expected.trading
+                ));
+            }
+            self.steps += 1;
+            if self.mismatches.len() >= self.show {
+                return;
+            }
+        }
+        println!("{}: {} ticks compared", case.name, case.frames.len());
+    }
+}
