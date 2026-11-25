@@ -43,6 +43,10 @@ const START_HEALTH: f64 = 8.0;
 const SOUND_ARMOR_REPAIR: &str = "minecraft:item.wolf_armor.repair";
 /// `Equippable.equipSound`（wolf_armor）：穿狼铠。
 const SOUND_ARMOR_EQUIP: &str = "minecraft:item.armor.equip_wolf";
+/// `SoundEvents.WOLF_ARMOR_DAMAGE`：穿狼铠吸收伤害时的受伤声。
+pub(super) const SOUND_ARMOR_DAMAGE: &str = "minecraft:item.wolf_armor.damage";
+/// `SoundEvents.WOLF_ARMOR_CRACK`：狼铠开裂阶段变化时。
+const SOUND_ARMOR_CRACK: &str = "minecraft:item.wolf_armor.crack";
 /// `EquipmentSlot.BODY` 在 `equipment_slot` 组件枚举里的 ID。
 const BODY_SLOT: i32 = 6;
 
@@ -610,6 +614,76 @@ fn set_body_damage(mob: &mut Mob, damage: i32) {
         stack.added = added;
         stack.removed = removed;
     });
+}
+
+/// `Wolf.canArmorAbsorb`：BODY 槽是狼铠，且伤害源不在 `bypasses_wolf_armor` 里。
+///
+/// `Wolf.canArmorAbsorb`: the BODY slot holds wolf armour and the source is not
+/// in `bypasses_wolf_armor`.
+pub(super) fn can_armor_absorb(mob: &Mob, source: super::DamageSource) -> bool {
+    mob.mob_type == MobType::Wolf
+        && mob.equipment.get(EquipmentSlot::Body).item == items::WOLF_ARMOR
+        && !super::goals::damage_type_tagged("minecraft:bypasses_wolf_armor", source.kind)
+}
+
+/// `Crackiness.WOLF_ARMOR` 的四个阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CrackLevel {
+    None,
+    Low,
+    Medium,
+    High,
+}
+
+/// `Crackiness.byDamage(damage, maxDamage)`：按剩余耐久比例分四个阶段
+/// （阈值 0.32 / 0.69 / 0.95）。
+fn crack_level(damage: i32, max_damage: i32) -> CrackLevel {
+    if max_damage <= 0 {
+        return CrackLevel::None;
+    }
+    let fraction = (max_damage - damage) as f32 / max_damage as f32;
+    if fraction < 0.32 {
+        CrackLevel::High
+    } else if fraction < 0.69 {
+        CrackLevel::Medium
+    } else if fraction < 0.95 {
+        CrackLevel::Low
+    } else {
+        CrackLevel::None
+    }
+}
+
+/// `Crackiness.byDamage(ItemStack)`：不可损或空的物品是 NONE。
+fn stack_crack_level(stack: &ItemStack) -> CrackLevel {
+    if !crate::durability::is_damageable_stack(stack) {
+        return CrackLevel::None;
+    }
+    crack_level(body_damage(stack), body_max_damage(stack))
+}
+
+/// `Wolf.actuallyHurt` 的狼铠吸收分支：扣 `ceil(amount)` 点耐久，开裂阶段变化时播
+/// 开裂声，破损时广播装备破损事件；**不扣血**（不调 `super.actuallyHurt`）。
+///
+/// The wolf armour branch of `Wolf.actuallyHurt`: spend `ceil(amount)` durability,
+/// play the crack sound when the crackiness level changes, broadcast the equipment
+/// break event on break, and take no health damage (no `super.actuallyHurt`).
+pub(super) fn absorb_hurt(me: &mut Entity, mob: &mut Mob, amount: f32) {
+    let before = stack_crack_level(mob.equipment.get(EquipmentSlot::Body));
+    let mut stack = mob.equipment.get(EquipmentSlot::Body).clone();
+    let broken = crate::durability::hurt_equipment(
+        &mut stack,
+        amount.ceil() as i32,
+        &crate::random::LegacyRandom::new(0),
+    );
+    mob.equipment.set(EquipmentSlot::Body, stack);
+    if broken {
+        mob.events.push(MobEvent::EntityEvent {
+            event: super::equipment::break_event(EquipmentSlot::Body),
+        });
+    }
+    if before != stack_crack_level(mob.equipment.get(EquipmentSlot::Body)) {
+        living::play_sound(me, mob, SOUND_ARMOR_CRACK, 1.0, 1.0);
+    }
 }
 
 // ---- 交互 ----
@@ -1386,5 +1460,99 @@ mod tests {
             Some(30)
         );
         assert!(loaded.equipment.is_preserved(EquipmentSlot::Body));
+    }
+
+    fn wolf_with_armor(damage: i32) -> (Entity, Mob) {
+        let (me, mut mob) = tamed_wolf();
+        let mut armor = ItemStack::new(items::WOLF_ARMOR, 1);
+        crate::durability::set_damage_for_oracle(&mut armor, damage);
+        mob.equipment.set(EquipmentSlot::Body, armor);
+        (me, mob)
+    }
+
+    /// `Crackiness.WOLF_ARMOR`（max_damage 64）的四个阶段边界。
+    #[test]
+    fn wolf_armor_crackiness_levels() {
+        assert_eq!(crack_level(0, 64), CrackLevel::None);
+        assert_eq!(crack_level(3, 64), CrackLevel::None);
+        assert_eq!(crack_level(4, 64), CrackLevel::Low);
+        assert_eq!(crack_level(19, 64), CrackLevel::Low);
+        assert_eq!(crack_level(20, 64), CrackLevel::Medium);
+        assert_eq!(crack_level(43, 64), CrackLevel::Medium);
+        assert_eq!(crack_level(44, 64), CrackLevel::High);
+        assert_eq!(crack_level(63, 64), CrackLevel::High);
+    }
+
+    /// 狼铠吸收一次伤害：耐久按 `ceil(amount)` 增长，狼不掉血，跨阶段时播开裂声。
+    #[test]
+    fn wolf_armor_absorbs_a_hit_and_cracks() {
+        let (mut me, mut mob) = wolf_with_armor(0);
+        mob.health = 40.0;
+        // 0 → 4 越过 NONE→LOW 阈值，播一次开裂声。
+        absorb_hurt(&mut me, &mut mob, 4.0);
+        assert_eq!(
+            crate::durability::damage_of(mob.equipment.get(EquipmentSlot::Body)),
+            Some(4)
+        );
+        assert_eq!(mob.health, 40.0);
+        assert!(mob.events.iter().any(|event| matches!(
+            event,
+            MobEvent::Sound { sound, .. } if *sound == SOUND_ARMOR_CRACK
+        )));
+        // 再打一次不跨阶段，不重复播开裂声。
+        mob.events.clear();
+        absorb_hurt(&mut me, &mut mob, 1.0);
+        assert_eq!(
+            crate::durability::damage_of(mob.equipment.get(EquipmentSlot::Body)),
+            Some(5)
+        );
+        assert!(mob.events.iter().all(|event| !matches!(
+            event,
+            MobEvent::Sound { sound, .. } if *sound == SOUND_ARMOR_CRACK
+        )));
+    }
+
+    /// 狼铠碎裂时清空 BODY 槽并广播装备破损事件 65。
+    #[test]
+    fn wolf_armor_breaks_and_broadcasts() {
+        let (mut me, mut mob) = wolf_with_armor(63);
+        absorb_hurt(&mut me, &mut mob, 1.0);
+        assert!(mob.equipment.get(EquipmentSlot::Body).is_empty());
+        assert!(
+            mob.events
+                .iter()
+                .any(|event| matches!(event, MobEvent::EntityEvent { event: 65 }))
+        );
+    }
+
+    /// `canArmorAbsorb`：穿狼铠且伤害源不在 `bypasses_wolf_armor` 里。
+    #[test]
+    fn can_armor_absorb_checks_item_and_damage_tag() {
+        use super::super::{DamageKind, DamageSource};
+        let (_, mob) = wolf_with_armor(0);
+        assert!(can_armor_absorb(
+            &mob,
+            DamageSource::environment(DamageKind::Generic)
+        ));
+        let bypass = [
+            DamageKind::Drown,
+            DamageKind::OnFire,
+            DamageKind::InFire,
+            DamageKind::Lava,
+            DamageKind::Starve,
+            DamageKind::Wither,
+            DamageKind::Magic,
+            DamageKind::Fall,
+            DamageKind::Freeze,
+        ]
+        .into_iter()
+        .find(|kind| super::goals::damage_type_tagged("minecraft:bypasses_wolf_armor", *kind))
+        .expect("a bypassing damage type exists in the exported tag");
+        assert!(!can_armor_absorb(&mob, DamageSource::environment(bypass)));
+        let (_, bare) = tamed_wolf();
+        assert!(!can_armor_absorb(
+            &bare,
+            DamageSource::environment(DamageKind::Generic)
+        ));
     }
 }
