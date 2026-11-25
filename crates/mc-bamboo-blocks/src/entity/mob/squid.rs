@@ -250,6 +250,7 @@ fn spawn_ink(me: &mut Entity, mob: &mut Mob) {
         let offset = direction.scale(f64::from(base + me.random.next_float() * 2.0));
         mob.events.push(MobEvent::Particles {
             particle,
+            item: None,
             position: Vec3::new(origin.x, origin.y + 0.5, origin.z),
             offset,
             speed: 0.1,

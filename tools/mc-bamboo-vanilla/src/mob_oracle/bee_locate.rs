@@ -139,6 +139,7 @@ impl Report {
             containers: Default::default(),
             container_open_counts: Default::default(),
             explosion_break: 0,
+            shoulder: Default::default(),
             inhabited: HashMap::new(),
             mob_teams: HashMap::new(),
             short_hunger: false,

@@ -94,6 +94,7 @@ impl PhantomSpawnCase {
             containers: Default::default(),
             container_open_counts: Default::default(),
             explosion_break: 0,
+            shoulder: Default::default(),
             natural_spawn: None,
             biome: None,
         }
@@ -309,6 +310,7 @@ impl PhantomCase {
             containers: Default::default(),
             container_open_counts: Default::default(),
             explosion_break: 0,
+            shoulder: Default::default(),
             natural_spawn: None,
             biome: None,
         }

@@ -212,11 +212,14 @@ fn fixture(case: &Case) -> MobLevel {
         containers: Default::default(),
         container_open_counts: Default::default(),
         explosion_break: 0,
+        shoulder: Default::default(),
     }
 }
 
 fn player() -> PlayerView {
     PlayerView {
+        shoulder_left: None,
+        shoulder_right: None,
         uid: 1,
         yaw: 0.0,
         pitch: 0.0,

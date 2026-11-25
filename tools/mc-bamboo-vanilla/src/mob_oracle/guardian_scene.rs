@@ -234,6 +234,8 @@ impl GuardianCase {
                         f64::from_bits(setup.position[2] as u64),
                     );
                     PlayerView {
+                        shoulder_left: None,
+                        shoulder_right: None,
                         uid: setup.uid,
                         yaw: 0.0,
                         pitch: 0.0,
@@ -322,6 +324,7 @@ impl GuardianCase {
             containers: Default::default(),
             container_open_counts: Default::default(),
             explosion_break: 0,
+            shoulder: Default::default(),
             short_hunger: false,
             ignore_bed_monsters: false,
         }

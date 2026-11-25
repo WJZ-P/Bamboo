@@ -42,6 +42,8 @@ pub(super) struct Drop {
 
 pub(super) fn player_view() -> PlayerView {
     PlayerView {
+        shoulder_left: None,
+        shoulder_right: None,
         uid: 1025,
         yaw: 0.0,
         pitch: 0.0,
@@ -154,6 +156,7 @@ impl Report {
             containers: Default::default(),
             container_open_counts: Default::default(),
             explosion_break: 0,
+            shoulder: Default::default(),
         };
         let mut ticks = BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);

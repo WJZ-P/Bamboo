@@ -124,6 +124,8 @@ impl VaultCase {
             combat: Default::default(),
             effects: Default::default(),
             team: None,
+            shoulder_left: None,
+            shoulder_right: None,
         };
         if broken == "vault_far_player" {
             player.position = Vec3::new(self.player[0] + 30.0, self.player[1], self.player[2]);
@@ -163,6 +165,7 @@ impl VaultCase {
             containers: Default::default(),
             container_open_counts: Default::default(),
             explosion_break: 0,
+            shoulder: Default::default(),
         }
     }
 }

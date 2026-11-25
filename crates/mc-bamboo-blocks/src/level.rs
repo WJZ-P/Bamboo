@@ -1502,6 +1502,12 @@ pub trait Level: LevelSideState + LevelEntities {
             || self.block_weather().thunder_level > 0.0
     }
 
+    /// `EnvironmentAttributes.CREAKING_ACTIVE`：主世界按 `day` 时间线求值；
+    /// 有固定时间的维度没有这条时间线，恒假。
+    fn creaking_active(&self) -> bool {
+        !self.dimension_has_fixed_time() && crate::sky::creaking_active(self.clock_ticks())
+    }
+
     /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线在
     /// [`Level::clock_ticks`] 处求值；有固定时间的维度没有这条时间线，恒假。
     fn monsters_burn(&self) -> bool {
@@ -1625,6 +1631,15 @@ pub trait Level: LevelSideState + LevelEntities {
     /// `ServerLevel.isCloseToVillage(pos, sections)`。默认假。
     fn poi_is_close_to_village(&self, _pos: BlockPos, _sections: i32) -> bool {
         false
+    }
+
+    /// `ServerLevel.getRaidAt(pos)`：`Raids.getNearbyRaid` 找到的那场袭击。
+    /// 默认没有袭击（夹具 / 非主世界）。
+    ///
+    /// `ServerLevel.getRaidAt(pos)`: the raid found by `Raids.getNearbyRaid`;
+    /// none by default (fixtures / non-overworld dimensions).
+    fn raid_at(&self, _pos: BlockPos) -> Option<crate::entity::raid::RaidView> {
+        None
     }
 
     /// `Level.isDarkOutside()`：没有固定时间的维度里 `skyDarken >= 4`。
@@ -2640,6 +2655,16 @@ pub fn monster_prevents_rest_in<L: Level + ?Sized>(level: &L, pos: BlockPos) -> 
 /// The non-block results of one action, handed to the caller for delivery.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
+    /// `ShoulderRidingEntity.setEntityOnShoulder`：把整只鹦鹉的 NBT 存进玩家的
+    /// 左 / 右肩膀槽，并把这只鹦鹉从世界移除。游戏层负责改玩家状态和实体表。
+    ///
+    /// `ShoulderRidingEntity.setEntityOnShoulder`: store the parrot's NBT in the
+    /// player's shoulder slot and remove the parrot from the world. The game layer
+    /// updates the player state and the entity table.
+    PlayerShoulder {
+        player: i32,
+        tag: mc_bamboo_nbt::Tag,
+    },
     /// `levelEvent(2001, pos, state)`。`except_initiator` 表示不用发给发起者，它自己已经预测过了。
     Destroyed {
         pos: BlockPos,
@@ -2859,6 +2884,16 @@ pub enum Effect {
     /// `transformBadOmenIntoTrialOmen`: replace the player's bad omen with trial omen.
     /// The game layer finds the player by UUID, removes `BAD_OMEN` and adds `TRIAL_OMEN`.
     TrialSpawnerTransformBadOmen { player: [u8; 16], duration: i32 },
+    /// `Raider.die`：一名袭击者死亡。游戏层按位置找活跃袭击、把击杀玩家记进
+    /// `heroesOfTheVillage`，并从袭击名册里移除这只实体。
+    ///
+    /// `Raider.die`: a raider died. The game layer finds the active raid at the
+    /// position, credits the killing player as a hero and removes the raider.
+    RaiderDied {
+        uid: i32,
+        position: mc_bamboo_core::Vec3,
+        killer: Option<[u8; 16]>,
+    },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///

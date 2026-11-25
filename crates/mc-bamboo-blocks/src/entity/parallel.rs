@@ -1360,6 +1360,9 @@ fn commit_timed(computed: Computed, world: &mut World<'_>) -> PhaseTimes {
     }
     times.apply = apply_start.elapsed();
     world.entities_mut().end_entity_tick();
+    // 和精确驱动同样在落地后按 uid 升序同步实体监听者，逐位一致。
+    // Sync entity listeners after apply in the same uid order as the precise drive.
+    world.sync_entity_listeners();
     times
 }
 

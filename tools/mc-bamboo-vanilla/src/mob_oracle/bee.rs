@@ -74,6 +74,8 @@ impl BeeCase {
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: EntityStore::new(),
             players: vec![PlayerView {
+                shoulder_left: None,
+                shoulder_right: None,
                 uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
                 uid: (1 << 24) + 1024,
                 yaw: 0.0,
@@ -109,6 +111,7 @@ impl BeeCase {
             containers: Default::default(),
             container_open_counts: Default::default(),
             explosion_break: 0,
+            shoulder: Default::default(),
             inhabited: std::collections::HashMap::new(),
             mob_teams: std::collections::HashMap::new(),
             short_hunger: false,

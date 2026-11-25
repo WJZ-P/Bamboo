@@ -70,6 +70,8 @@ pub(crate) struct RegionLevel<'a> {
     /// 村民 / 幼年村民日程活动快照，和 `sky_darken` 一同从 `GlobalView` 读入。
     pub(crate) villager_activity: mc_bamboo_blocks::entity::mob::brain::Activity,
     pub(crate) baby_villager_activity: mc_bamboo_blocks::entity::mob::brain::Activity,
+    /// 本岛袭击表的只读快照：`SetRaidStatus` / `ReactToBell` 按中心位置查。
+    pub(crate) raids: mc_bamboo_blocks::entity::raid::Raids,
     /// `getOverworldClockTime()`：主世界时钟的整数刻，`MONSTERS_BURN` 和区域难度读它。
     pub(crate) clock_ticks: i64,
     /// `WorldGenLevel.getSeed()`：世界种子，史莱姆区块读它。
@@ -958,6 +960,19 @@ impl Level for RegionLevel<'_> {
         self.poi.is_close_to_village(pos, sections)
     }
 
+    fn raid_at(&self, pos: BlockPos) -> Option<mc_bamboo_blocks::entity::raid::RaidView> {
+        let id = self.raids.nearby_raid(
+            pos,
+            f64::from(mc_bamboo_blocks::entity::raid::VALID_RAID_RADIUS_SQR),
+        )?;
+        let raid = self.raids.raids.get(&id)?;
+        Some(mc_bamboo_blocks::entity::raid::RaidView {
+            has_first_wave_spawned: raid.has_first_wave_spawned(),
+            is_between_waves: raid.is_between_waves(raid.total_raiders()),
+            is_victory: raid.is_victory(),
+        })
+    }
+
     /// 精确驱动里生物打玩家：拼出和区域入口同一组借用，当场走玩家受伤的正式入口。
     fn hurt_player_now(
         &mut self,
@@ -971,7 +986,7 @@ impl Level for RegionLevel<'_> {
             players: &mut *self.players,
             links: &mut *side.links,
             sound_seeds: side.sound_seeds,
-            entities: &*self.entities,
+            entities: &mut *self.entities,
             difficulty: self.difficulty as i32,
             rules: side.rules,
             attacker,
@@ -1000,7 +1015,7 @@ impl Level for RegionLevel<'_> {
             players: &mut *self.players,
             links: &mut *side.links,
             sound_seeds: side.sound_seeds,
-            entities: &*self.entities,
+            entities: &mut *self.entities,
             difficulty: self.difficulty as i32,
             rules: side.rules,
             attacker: None,
@@ -1596,21 +1611,22 @@ impl Level for RegionLevel<'_> {
             return u16::try_from(slot).ok();
         }
         // 官方 `EquipmentDispenseItemBehavior` 给生物上装备：`setItemSlot`、
-        // `setGuaranteedDrop` 和 `setPersistenceRequired`。鞍是 7 号装备槽。
+        // `setGuaranteedDrop` 和 `setPersistenceRequired`。身体是 6 号、鞍是 7 号装备槽。
         //
         // Vanilla `EquipmentDispenseItemBehavior` equips mobs: `setItemSlot`,
-        // `setGuaranteedDrop` and `setPersistenceRequired`. Saddle is slot 7.
-        if component_slot != 7 || entity_id < mc_bamboo_blocks::entity::FIRST_ENTITY_ID {
+        // `setGuaranteedDrop` and `setPersistenceRequired`. Body is slot 6, saddle slot 7.
+        let slot = match component_slot {
+            6 => mc_bamboo_protocol::packet::play::EquipmentSlot::Body,
+            7 => mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle,
+            _ => return None,
+        };
+        if entity_id < mc_bamboo_blocks::entity::FIRST_ENTITY_ID {
             return None;
         }
         self.entities.with_mut(entity_id, |entity| {
             entity.with_mob(|_, mob| {
-                mob.equipment.set(
-                    mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle,
-                    stack.clone(),
-                );
-                mob.equipment
-                    .set_drop_chance(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle, 2.0);
+                mob.equipment.set(slot, stack.clone());
+                mob.equipment.set_drop_chance(slot, 2.0);
                 mob.persistence_required = true;
             })
         })?;
@@ -1638,19 +1654,26 @@ impl Level for RegionLevel<'_> {
 ///
 /// The equipment a dispenser can see on a mob; only a pig's saddle slot is supported.
 fn mob_equip_target(public: &mc_bamboo_blocks::entity::EntityPublic) -> Option<EquipTarget> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_protocol::packet::play::EquipmentSlot;
     let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind else {
         return None;
     };
-    if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::Pig || mob.baby {
-        return None;
-    }
+    // 猪只能用发射器上鞍（幼猪不行）；狼只能用发射器穿身体铠甲（`canUseSlot` 恒真，不限年龄）。
+    // Pigs take a saddle from a dispenser (not babies); wolves take body armour
+    // (Wolf.canUseSlot is always true, so no age restriction).
+    let (slot, index) = match mob.mob_type {
+        MobType::Pig if !mob.baby => (EquipmentSlot::Saddle, 7),
+        MobType::Wolf => (EquipmentSlot::Body, 6),
+        _ => return None,
+    };
     let (width, height) = public.kind.dimensions();
     let half = f64::from(width) / 2.0;
     let mut equipment: [Option<ItemStack>; 8] = std::array::from_fn(|_| None);
-    equipment[7] = Some(
+    equipment[index] = Some(
         mob.equipment
             .iter()
-            .find(|(slot, _)| *slot == mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)
+            .find(|(candidate, _)| *candidate == slot)
             .map(|(_, stack)| stack.clone())
             .unwrap_or_else(ItemStack::empty),
     );

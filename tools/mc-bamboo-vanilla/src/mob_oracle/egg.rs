@@ -125,6 +125,8 @@ impl EggCase {
             .collect();
         if self.owner >= 0 {
             level.players.push(PlayerView {
+                shoulder_left: None,
+                shoulder_right: None,
                 uuid: Some(EGG_OWNER_UUID.to_be_bytes()),
                 uid: self.owner,
                 position: EGG_OWNER,
@@ -158,6 +160,7 @@ impl EggCase {
                 effects: Default::default(),
             });
         }
+        level.shoulder = Default::default();
         level
     }
 
@@ -193,6 +196,7 @@ impl EggCase {
             containers: Default::default(),
             container_open_counts: Default::default(),
             explosion_break: 0,
+            shoulder: Default::default(),
             natural_spawn: None,
             biome: None,
         }

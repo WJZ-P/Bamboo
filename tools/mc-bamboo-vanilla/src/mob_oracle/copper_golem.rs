@@ -126,6 +126,7 @@ impl CopperGolemCase {
             wrong_was_hurt: false,
             containers,
             container_open_counts: Default::default(),
+            shoulder: Default::default(),
             explosion_break: 0,
         }
     }

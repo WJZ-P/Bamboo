@@ -878,6 +878,11 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             "minecraft:hanging_sign",
         ),
         ("beehive-bare", "minecraft:beehive", "minecraft:beehive"),
+        (
+            "creaking_heart-bare",
+            "minecraft:creaking_heart",
+            "minecraft:creaking_heart",
+        ),
         ("jigsaw-bare", "minecraft:jigsaw", "minecraft:jigsaw"),
         (
             "end_gateway-bare",
@@ -1438,6 +1443,12 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
                 ("min_ticks_in_hive".to_owned(), Tag::Int(2)),
             ])]),
         )],
+    );
+    full(
+        "creaking_heart-bound",
+        "minecraft:creaking_heart",
+        "minecraft:creaking_heart",
+        vec![("creaking".to_owned(), Tag::IntArray(vec![1, 2, 3, 4]))],
     );
     full(
         "command_block-full",

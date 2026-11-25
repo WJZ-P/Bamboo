@@ -461,6 +461,22 @@ pub type PostProcessingTables = (Vec<Vec<u16>>, Vec<Vec<u16>>);
 #[doc(hidden)]
 pub type ScheduledTickRow = (mc_bamboo_core::BlockPos, bool, i64, i64, i32);
 impl World {
+    /// 存盘时把各停放岛的 `Raids` 按岛编号汇总给 `raids.dat`。岛不在主控手里时
+    /// 只收停放着的那些（和区块快照一致：没交回的岛不进这次存盘）。
+    ///
+    /// Collect every parked island's `Raids` for `raids.dat`. Islands still away
+    /// from the master are skipped, like their chunk snapshots.
+    fn raid_tables(&self) -> Vec<(u32, mc_bamboo_blocks::entity::raid::Raids)> {
+        // `parked()` 只遍历停放着的岛；关服时岛还卡在 tick 线程上，用 `iter()`
+        // 会因为 `IslandSlot` 的 Deref 断言而 panic。
+        // `parked()` only visits islands at home; during shutdown an island can
+        // still be away on its tick thread, where `iter()`'s Deref would panic.
+        self.islands
+            .parked()
+            .map(|island| (island.id, island.region.raids.clone()))
+            .collect()
+    }
+
     /// 创建一个空世界。`config` 的视距超出合法范围时取最接近的值。
     pub fn new(config: WorldConfig, inbox: InboundReceiver) -> Self {
         Self::with_service_keys(config, inbox, secure_chat::empty_keys())
@@ -2636,11 +2652,11 @@ impl World {
             .host
             .snapshot_all_dirty(&mut self.islands.all_mut(), self.master.director_tick);
         self.save_all_players();
-        let files = self
-            .master
-            .save
-            .as_mut()
-            .map(|save| save.encode_saves(&self.master.global, crate::admin::now_millis()));
+        let raid_tables = self.raid_tables();
+        let master = &mut self.master;
+        let files = master.save.as_mut().map(|save| {
+            save.encode_saves(&master.global, &raid_tables, crate::admin::now_millis())
+        });
         let encoded = match files {
             Some(Ok(files)) => {
                 self.master.host.submit_file_writes(files);
@@ -3458,11 +3474,11 @@ impl World {
         }
         self.master.host.set_saves_enabled(true);
         self.save_all_players();
-        let files = self
-            .master
-            .save
-            .as_mut()
-            .map(|save| save.encode_saves(&self.master.global, crate::admin::now_millis()));
+        let raid_tables = self.raid_tables();
+        let master = &mut self.master;
+        let files = master.save.as_mut().map(|save| {
+            save.encode_saves(&master.global, &raid_tables, crate::admin::now_millis())
+        });
         match files {
             Some(Ok(files)) => self.master.host.submit_file_writes(files),
             Some(Err(error)) => warn!(%error, "could not encode level data on shutdown"),
@@ -3511,11 +3527,11 @@ impl World {
             save.set_auto_save(true);
         }
         self.master.host.set_saves_enabled(true);
-        let files = self
-            .master
-            .save
-            .as_mut()
-            .map(|save| save.encode_saves(&self.master.global, crate::admin::now_millis()));
+        let raid_tables = self.raid_tables();
+        let master = &mut self.master;
+        let files = master.save.as_mut().map(|save| {
+            save.encode_saves(&master.global, &raid_tables, crate::admin::now_millis())
+        });
         match files {
             Some(Ok(files)) => self.master.host.submit_file_writes(files),
             Some(Err(error)) => warn!(%error, "could not encode level data on shutdown"),
@@ -3657,6 +3673,9 @@ fn run_island_simulation(
     // level random draws follow the random ticks and phantoms come before patrols.
     crate::phantom_spawn::tick(region);
     crate::patrol_spawn::tick(region);
+    // 官方 `ServerLevel.tick` 的 "raid" 阶段：自定义刷怪器之后跑袭击状态机。
+    // Vanilla's "raid" phase of `ServerLevel.tick`: after the custom spawners.
+    crate::raid::tick(region);
     region.profiler.lap(Phase::RandomTicks);
     region.profiler.begin_chunk_phase(ChunkPhase::BlockEvents);
     region.profiler.begin_partition_phase();
@@ -3769,6 +3788,8 @@ fn run_island_simulation(
     let region = &mut island.region;
     region.profiler.lap(Phase::PlayerMisc);
 
+    // `ServerPlayer.handleShoulderEntities`：离肩条件在派生状态之前跑，元数据能看到清空。
+    crate::player_shoulder::tick(region);
     entity_sync::update_derived_state(region);
     chunk_tracking::update_views(region);
     region.profiler.lap(Phase::Views);

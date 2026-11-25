@@ -111,6 +111,8 @@ fn player_view(uid: i32, position: Vec3) -> PlayerView {
         pitch: 0.0,
         combat: Default::default(),
         effects: Default::default(),
+        shoulder_left: None,
+        shoulder_right: None,
     }
 }
 
@@ -143,6 +145,7 @@ impl LeashCase {
             containers: Default::default(),
             container_open_counts: Default::default(),
             explosion_break: 0,
+            shoulder: Default::default(),
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(self.first_id),
             players: vec![player_view(self.player_id, v3(&self.player_start))],

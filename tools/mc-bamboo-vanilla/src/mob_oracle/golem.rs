@@ -87,6 +87,7 @@ impl GolemCase {
             containers: Default::default(),
             container_open_counts: Default::default(),
             explosion_break: 0,
+            shoulder: Default::default(),
         };
         // 官方夹具的 `heightmap_y` 在这些方块世界里挡不住雨，统一注入。
         let _ = &mut level;

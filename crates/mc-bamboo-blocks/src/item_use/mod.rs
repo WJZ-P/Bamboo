@@ -176,6 +176,9 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         _ if ctx.item == items::ELDER_GUARDIAN_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::ElderGuardian)
         }
+        _ if ctx.item == items::CREAKING_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Creaking)
+        }
         _ if ctx.item == items::SULFUR_CUBE_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::SulfurCube)
         }
@@ -190,6 +193,12 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         }
         _ if ctx.item == items::PILLAGER_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Pillager)
+        }
+        _ if ctx.item == items::VINDICATOR_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Vindicator)
+        }
+        _ if ctx.item == items::RAVAGER_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Ravager)
         }
         _ if ctx.item == items::SPIDER_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Spider)

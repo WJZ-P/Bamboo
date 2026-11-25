@@ -482,9 +482,18 @@ pub(crate) fn is_in_liquid(me: &Entity, mob: &Mob) -> bool {
     me.in_water || is_in_lava(me, mob)
 }
 
-/// `getEyeY()`。
+/// `getEyeY()`：钻出 / 钻入的监守者把高度压成 1，眼睛高度跟着 `getDimensions` 变。
+///
+/// `getEyeY()`: an emerging / digging warden is flattened to height 1, so its eye
+/// height follows the current pose dimensions.
 pub(crate) fn eye_y(me: &Entity, mob: &Mob) -> f64 {
-    me.position.y + f64::from(mob.eye_height)
+    let eye = if mob.mob_type == super::MobType::Warden && mob.warden.pose.is_digging_or_emerging()
+    {
+        mob.dimensions().1 * 0.85
+    } else {
+        mob.eye_height
+    };
+    me.position.y + f64::from(eye)
 }
 
 /// `getLastDamageSource()`：40 刻以内的那一次。
@@ -863,6 +872,16 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
         // `Sniffer.getAmbientSound`：挖掘 / 搜寻时不叫。
         // `Sniffer.getAmbientSound`: silent while digging or searching.
         super::MobType::Sniffer => super::sniffer::ambient_voice(mob),
+        // `Warden.getAmbientSound()`：咆哮 / 钻出 / 钻入时返回 null，`makeSound`
+        // 不取音高的两个随机数。
+        // `Warden.getAmbientSound()`: null while roaring / emerging / digging, so
+        // `makeSound` draws no pitch random values.
+        super::MobType::Warden
+            if mob.warden.pose == super::warden::WardenPose::Roaring
+                || mob.warden.pose.is_digging_or_emerging() =>
+        {
+            None
+        }
         _ => Some(voice_of(mob, Voice::Ambient, me.in_water)),
     }
 }
@@ -1023,6 +1042,12 @@ fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             EffectAction::AbsorptionEnded => {
                 mob.effects.remove(tick.effect);
             }
+            EffectAction::BadOmenCheck(_) | EffectAction::RaidOmenTrigger(_) => {
+                // 不祥之兆 / 袭击之兆只对玩家有意义（进村、建袭击），
+                // 生物侧不处理，落地在 game 层的玩家效果里。
+                // Bad/raid omen only matter for players (village entry, starting
+                // a raid); mobs ignore them, handled in the game-layer effects.
+            }
         }
     }
     for (kind, amount) in hurts {
@@ -1107,6 +1132,15 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
     // `Armadillo.getAmbientSound` 受惊时是 `null`：`makeSound` 不跑，也不取音高。
     // A scared armadillo has no ambient sound, so `makeSound` and its pitch draws are skipped.
     if super::armadillo::is_scared(mob) {
+        return;
+    }
+    // `Warden.getAmbientSound()` 在 ROARING / 钻出 / 钻入时返回 null，不出声也不取音高。
+    // `Warden.getAmbientSound()` is null while ROARING / emerging / digging: no sound
+    // and no pitch draws.
+    if mob.mob_type == super::MobType::Warden
+        && (mob.warden.pose == super::warden::WardenPose::Roaring
+            || mob.warden.pose.is_digging_or_emerging())
+    {
         return;
     }
     if mob.mob_type == super::MobType::Wolf {
@@ -1194,6 +1228,9 @@ fn ambient_sound(mob: &Mob, in_water: bool) -> &'static str {
         );
     }
     match mob.mob_type {
+        // `Warden.getAmbientSound()` 按愤怒等级选（null 姿态由 play_ambient_sound 拦掉）。
+        // `Warden.getAmbientSound()` picks by anger level (null poses are filtered above).
+        super::MobType::Warden => mob.warden.anger_level().ambient_sound(),
         super::MobType::Goat => super::goat::voice(mob, Voice::Ambient),
         super::MobType::Enderman if mob.enderman.creepy => "minecraft:entity.enderman.scream",
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
@@ -1272,6 +1309,9 @@ fn is_in_wall(me: &Entity, mob: &Mob, view: &dyn BlockView) -> bool {
 
 /// `tickDeath`：第 20 刻移除。
 fn tick_death(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    if mob.mob_type == super::MobType::Creaking && super::creaking::tear_down_death(me, mob) {
+        return;
+    }
     mob.death_time += 1;
     if mob.death_time >= 20 && !me.removed {
         mob.events.push(MobEvent::Poof);
@@ -1314,6 +1354,11 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
     // The server part of `Guardian.aiStep` runs before `super.aiStep()` (Monster).
     if super::guardian::is_guardian(mob.mob_type) {
         super::guardian::ai_step(me, mob);
+    }
+    // `Creaking.aiStep` 在 `super.aiStep()` 之前：先 `checkCanMove`（读上一刻的大脑记忆），
+    // 再走 `Monster.aiStep`（`customServerAiStep` 跑大脑、传感器）。
+    if mob.mob_type == super::MobType::Creaking {
+        super::creaking::ai_step(me, mob, ctx);
     }
     animal_ai_step(me, mob, ctx, plan);
     if mob.mob_type == super::MobType::Bee {
@@ -2047,6 +2092,9 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     if mob.mob_type == super::MobType::CopperGolem {
         super::copper_golem::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Creaking {
+        super::creaking_ai::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Sniffer {
         super::sniffer::custom_server_ai_step(me, mob, ctx);
     }
@@ -2054,6 +2102,11 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
         // `ElderGuardian.customServerAiStep`：范围挖掘疲劳和家。
         // `ElderGuardian.customServerAiStep`: area mining fatigue and home.
         super::guardian::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Warden {
+        // `Warden.customServerAiStep`：大脑、振动、愤怒衰减、活动重选。
+        // `Warden.customServerAiStep`: brain, vibration, anger decay, activity switch.
+        super::warden_ai::custom_server_ai_step(me, mob, ctx, decision_gap);
     }
 }
 
@@ -2076,6 +2129,11 @@ pub(crate) fn set_speed(mob: &mut Mob, speed: f32) {
 
 /// `MoveControl.tick`（牛不横移，`STRAFE` 走不到）。
 pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
+    // `CreakingMoveControl.tick`：冻结时整个跳过 `MoveControl.tick`。
+    // `CreakingMoveControl.tick`: skip `MoveControl.tick` entirely while frozen.
+    if mob.mob_type == super::MobType::Creaking && !mob.creaking.can_move {
+        return;
+    }
     // `Panda.PandaMoveControl.tick`：做不了动作时不响应移动控制。
     // `Panda.PandaMoveControl.tick`: no move control while an action is playing.
     if mob.mob_type == super::MobType::Panda && !mob.panda_can_perform_action(view.is_thundering())
@@ -2753,6 +2811,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // Skip own passengers and a rider just ejected this tick.
     let ejected = mob.ejected_passenger.take();
     let mut players = Vec::new();
+    let mut pushed_players = Vec::new();
     ctx.blocks().for_each_player(&mut |player| {
         if player.alive
             && !player.spectator
@@ -2761,6 +2820,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             && super::avoid::player_box(player).intersects(bounds)
         {
             players.push(player.position);
+            pushed_players.push((player.uid, player.position));
         }
     });
     // `maxEntityCramming` 的伤害判定用的是**没截断**的名单：Paper 的
@@ -2799,6 +2859,13 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         );
     }
     timing::record_push!(others.len() as u64);
+    // `Warden.doPush` 在逐个推开之前先按「实体、再玩家」的枚举顺序记账。
+    // `Warden.doPush` runs before the pushes, in the entity-then-player iteration order.
+    if mob.mob_type == super::MobType::Warden {
+        let mut pushed: Vec<_> = others.iter().map(|(uid, pos)| (*uid, *pos)).collect();
+        pushed.extend_from_slice(&pushed_players);
+        super::warden_ai::do_push(me, mob, &pushed);
+    }
     // `Entity.push(Entity)` 只有 `!entity.isVehicle()` 才推得动自己这一半；载具和它的
     // 乘客共享 root vehicle，整对被 `isPassengerOfSameVehicle` 跳过，所以这里也不推。
     // `Entity.push(Entity)` pushes its own half only when `!entity.isVehicle()`; a
@@ -2906,6 +2973,13 @@ pub(crate) fn hurt_server(
     source: DamageSource,
     amount: f32,
 ) -> bool {
+    // `Creaking.hurtServer`：绑定心的嘎枝不掉血，改由心放树脂和连线效果。
+    if mob.mob_type == super::MobType::Creaking
+        && let Some(home) = super::creaking::hurt_server(me, mob, &source)
+    {
+        ctx.emit(super::super::ctx::Command::CreakingHeartHurt { home }, me);
+        return true;
+    }
     // `Panda.hurtServer`：先站起来，再做官方的无敌和冷却判定。
     // `Panda.hurtServer`: stand up first, then the vanilla invulnerability checks.
     if mob.mob_type == super::MobType::Panda {
@@ -2965,7 +3039,14 @@ pub(crate) fn hurt_server(
 /// The modelled part of `isInvulnerableTo`: removed, or invulnerable to a source that
 /// does not bypass it.
 pub(super) fn is_invulnerable_to(me: &Entity, mob: &Mob, source: &DamageSource) -> bool {
+    // `Warden.isInvulnerableTo`：钻出 / 钻入时，除 `BYPASSES_INVULNERABILITY` 外一律无敌。
+    // `Warden.isInvulnerableTo`: invulnerable while emerging or digging, except for
+    // damage tagged `BYPASSES_INVULNERABILITY`.
+    let digging_invulnerable = mob.mob_type == super::MobType::Warden
+        && mob.warden.pose.is_digging_or_emerging()
+        && !source.kind.bypasses_invulnerability();
     me.removed
+        || digging_invulnerable
         || ((mob.invulnerable || mob.invulnerable_time > 0)
             && !source.kind.bypasses_invulnerability()
             && !source.creative_player)
@@ -3086,10 +3167,14 @@ fn hurt_living(
         }
         die(me, mob, ctx, source);
     } else if full_hit {
-        // `Mob.playHurtSound`：先重置叫声计时，再取音高。
+        // `Mob.playHurtSound`：先重置叫声计时，再取音高；狼铠吸收时换成铠甲受伤声。
         mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
         let pitch = voice_pitch(me, mob);
-        let sound = voice_of(mob, Voice::Hurt, me.in_water);
+        let sound = if super::wolf::can_armor_absorb(mob, source) {
+            super::wolf::SOUND_ARMOR_DAMAGE
+        } else {
+            voice_of(mob, Voice::Hurt, me.in_water)
+        };
         play_sound(me, mob, sound, sound_volume(mob), pitch);
     }
     mob.last_damage_source = Some(source);
@@ -3121,6 +3206,12 @@ fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource, ti
 
 /// `Animal.actuallyHurt` → `LivingEntity.actuallyHurt`。没有护甲、效果和吸收。
 fn actually_hurt(me: &mut Entity, mob: &mut Mob, source: DamageSource, amount: f32) {
+    // `Wolf.actuallyHurt`：狼铠把这次伤害全吸收掉，只扣耐久、不掉血。
+    // `Wolf.actuallyHurt`: wolf armour absorbs the hit, spending durability only.
+    if super::wolf::can_armor_absorb(mob, source) {
+        super::wolf::absorb_hurt(me, mob, amount);
+        return;
+    }
     mob.in_love = 0;
     let _ = me;
     let mut amount = amount;
@@ -3240,6 +3331,15 @@ pub(crate) fn do_hurt_target(
             whole.split().public
         };
         let hurt = ctx.hurt_player(target, source, amount, me, &attacker);
+        // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`：ATTACK_KNOCKBACK
+        // 大于 0 且这一下打中时，攻击者自己的水平速度被压到 0.6 倍（监守者是 1.5）。
+        // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`: with a positive
+        // ATTACK_KNOCKBACK and a landed hit, the attacker's horizontal velocity is
+        // scaled by 0.6 (the warden has 1.5).
+        if hurt && mob.attributes.value(attribute::ATTACK_KNOCKBACK) > 0.0 {
+            me.delta.x *= 0.6;
+            me.delta.z *= 0.6;
+        }
         // `CaveSpider.doHurtTarget`：打中之后按难度给中毒。
         // `CaveSpider.doHurtTarget`: poison the target after a landed hit.
         if hurt && let Some(effect) = super::bee::poison_instance(mob, ctx.blocks().difficulty()) {
@@ -3425,6 +3525,19 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         return;
     }
     mob.dead = true;
+    // `Raider.die` 在 `super.die` 之前：记英雄、离队、去队长旗帜。
+    // `Raider.die` runs before `super.die`: hero credit, roster removal, leader flag.
+    if mob.mob_type.is_raider() {
+        let credited = mob.last_hurt_by_player_memory_time > 0;
+        ctx.emit(
+            Command::RaiderDied {
+                uid: me.id,
+                position: me.position,
+                killer: mob.last_hurt_by_player_ref.filter(|_| credited),
+            },
+            me,
+        );
+    }
     // `AbstractVillager.die` → `stopTrading()`（覆盖普通死亡与僵尸转化分支）。
     // `AbstractVillager.die` → `stopTrading()` (covers regular death and zombie conversion).
     if mob.mob_type == super::MobType::Villager {

@@ -147,6 +147,8 @@ impl Report {
                     f64::from_bits(p.pos[2] as u64),
                 );
                 PlayerView {
+                    shoulder_left: None,
+                    shoulder_right: None,
                     uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
                     uid: p.uid,
                     yaw: 0.0,
@@ -239,6 +241,7 @@ impl Report {
             containers: Default::default(),
             container_open_counts: Default::default(),
             explosion_break: 0,
+            shoulder: Default::default(),
             inhabited: HashMap::new(),
             mob_teams: HashMap::new(),
             short_hunger: false,

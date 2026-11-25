@@ -189,6 +189,7 @@ impl ShotCase {
             containers: Default::default(),
             container_open_counts: Default::default(),
             explosion_break: 0,
+            shoulder: Default::default(),
         };
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);

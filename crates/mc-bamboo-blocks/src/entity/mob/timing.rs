@@ -739,6 +739,8 @@ mod bench {
         for px in (-half..half).step_by(32) {
             for pz in (-half..half).step_by(32) {
                 level.players.push(PlayerView {
+                    shoulder_left: None,
+                    shoulder_right: None,
                     uuid: None,
                     uid: 1_000_000 + level.players.len() as i32,
                     yaw: 0.0,

@@ -52,6 +52,10 @@ pub struct MobInteraction {
     pub result: InteractionResult,
     /// 生存模式从手里拿走一个（小麦、空桶）；创造模式不扣。
     pub shrink_held: bool,
+    /// `ItemStack.shrink`：不看创造模式也扣一个（狼铠用鳞甲修复）。
+    ///
+    /// `ItemStack.shrink`: spend one even in creative mode (wolf armour repair).
+    pub shrink_even_creative: bool,
     /// `ItemUtils.createFilledResult` 交回来的奶桶。背包满时调用方丢在地上。
     pub replacement: Option<ItemStack>,
     /// 马科 `openCustomInventoryScreen`：调用方给这名玩家打开坐骑物品栏。
@@ -123,6 +127,7 @@ impl MobInteraction {
         Self {
             result: InteractionResult::Pass,
             shrink_held: false,
+            shrink_even_creative: false,
             replacement: None,
             open_inventory: false,
             shear: false,
@@ -177,6 +182,20 @@ pub fn interact(
     thundering: bool,
     level_next_float: &mut dyn FnMut() -> f32,
 ) -> MobInteraction {
+    // `Mob.interact` / `Entity.interact`：剪刀卸装备先于任何 `mobInteract`。
+    // `Wolf.canShearEquipment` 只认主人，和猪剪鞍走同一个 `attemptToShearEquipment`。
+    // `Mob.interact` runs `attemptToShearEquipment` before `mobInteract`; the wolf
+    // override accepts only the owner, like the pig's saddle shearing.
+    if mob.mob_type == MobType::Wolf
+        && req.held.item == items::SHEARS
+        && living::is_alive(me, mob)
+        && !mob.is_vehicle()
+        && !req.sneaking
+        && mob.tame.is_owned_by(Some(req.player_uuid))
+        && let Some(outcome) = super::equine::interact::attempt_to_shear_equipment(me, mob, req)
+    {
+        return outcome;
+    }
     // `ZombieVillager.mobInteract` 不是 `Animal`：金苹果 + 虚弱才转化。
     // `ZombieVillager.mobInteract` is not `Animal`: golden apple + weakness cures.
     if mob.mob_type == MobType::ZombieVillager
