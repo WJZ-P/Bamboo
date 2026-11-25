@@ -666,6 +666,9 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Entity.baseTick`：服务端每刻按剩余着火刻数重写共享标志位。
     // `Entity.baseTick`: the server rewrites the shared flag from the remaining fire ticks.
     mob.visible_fire = me.remaining_fire_ticks > 0;
+    // `Entity.baseTick` 末尾的 `Leashable.tickLeash`（服务端且自己是 Leashable）。
+    // The `Leashable.tickLeash` at the end of `Entity.baseTick`.
+    super::leash::tick_leash(me, mob, ctx);
     // `LivingEntity.baseTick` 自己的部分。
     if is_alive(me, mob) {
         if is_in_wall(me, mob, ctx.blocks()) {

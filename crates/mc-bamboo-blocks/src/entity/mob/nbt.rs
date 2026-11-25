@@ -31,7 +31,6 @@ use crate::{
 ///
 /// Vanilla keys kept verbatim and written back.
 const PASSTHROUGH: &[&str] = &[
-    "leash",
     "DeathLootTable",
     "data",
     "HasVisualFire",
@@ -300,6 +299,10 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     // `Mob`：掉落几率不是 `DropChances.DEFAULT` 才写，等于缺省值的槽省略。
     if !mob.equipment.default_drop_chances() {
         put(&mut out, "drop_chances", mob.equipment.drop_chances_tag());
+    }
+    // `Leashable.writeLeashData`：`leash` 键。
+    if let Some(data) = &mob.leash {
+        put(&mut out, "leash", leash_tag(&data.attachment));
     }
     if let Some((pos, radius)) = mob.home {
         put(&mut out, "home_radius", Tag::Int(radius));
@@ -785,6 +788,8 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         mob.persistence_required = tag::bool_or(tag, "PersistenceRequired", false);
         mob.equipment
             .read_drop_chances(tag::field(tag, "drop_chances"));
+        // `Leashable.readLeashData`：`leash` 键。
+        mob.leash = read_leash(tag);
         let radius = tag::int_or(tag, "home_radius", -1);
         mob.home = (radius >= 0).then(|| {
             let pos = tag::int_array(tag, "home_pos");
@@ -1212,6 +1217,35 @@ fn vec3_tag(value: Vec3) -> Tag {
 /// `BlockPos.CODEC` 是三个 int 的数组。
 fn block_pos_tag(pos: BlockPos) -> Tag {
     Tag::IntArray(vec![pos.x, pos.y, pos.z])
+}
+
+/// `LeashData.CODEC`：实体牵引者写 `{UUID: [I; ...]}`，拴绳结写 `[I; x, y, z]`。
+fn leash_tag(attachment: &super::leash::LeashDelayed) -> Tag {
+    match attachment {
+        super::leash::LeashDelayed::Entity(uuid) => {
+            Tag::Compound(vec![("UUID".to_owned(), uuid_tag(uuid))])
+        }
+        super::leash::LeashDelayed::Knot(pos) => block_pos_tag(*pos),
+    }
+}
+
+/// 读 `leash` 键：实体牵引者是 `{UUID: [I; ...]}`，拴绳结是 `[I; x, y, z]`。
+fn read_leash(tag: &Tag) -> Option<super::leash::LeashData> {
+    let leash = tag::field(tag, "leash")?;
+    match leash {
+        Tag::Compound(_) => {
+            let uuid = uuid_field(leash, "UUID")?;
+            Some(super::leash::LeashData::from_disk(
+                super::leash::LeashDelayed::Entity(uuid),
+            ))
+        }
+        Tag::IntArray(words) if words.len() == 3 => {
+            Some(super::leash::LeashData::from_disk(
+                super::leash::LeashDelayed::Knot(BlockPos::new(words[0], words[1], words[2])),
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// `UUIDUtil.CODEC`：四个 int，大端拆开。

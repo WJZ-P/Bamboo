@@ -14,7 +14,8 @@ use mc_bamboo_data::{items, tags::item_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
 use super::{Mob, MobEvent, MobType, chicken, living, mooshroom, pig, sheep};
-use crate::entity::Entity;
+use crate::entity::{Entity, EntityUid};
+use crate::world::World;
 use crate::{InteractionResult, state::item_is_tagged};
 
 /// 一次右键交互的输入。
@@ -297,6 +298,209 @@ pub fn interact(
         return super::snow_golem::interact(mob, req);
     }
     animal_interact(me, mob, req)
+}
+
+/// `Entity.interact` 的拴绳分支，在 `mobInteract` 之前跑。返回 `Some` 表示这次交互
+/// 被拴绳处理掉了，调用方直接用它落地（不再走喂食 / 挤奶那些分支）。
+///
+/// The leash branches of `Entity.interact`, before `mobInteract`. `Some` means the
+/// interaction was handled here and the caller applies it directly.
+pub fn leash_interact(
+    world: &mut World,
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+) -> Option<MobInteraction> {
+    let now = world.game_time();
+    // 分支 1：潜行 + 可拴 + 活着 + 非幼崽 → 把玩家牵着的生物转到自己身上。
+    if req.sneaking
+        && super::leash::can_be_leashed(mob, now)
+        && living::is_alive(me, mob)
+        && !mob.is_baby()
+    {
+        let own_uuid = mob.uuid;
+        let transfers = leashed_to_player_in_area(world, me.position, req.player_uid);
+        let mut tied = false;
+        for uid in transfers {
+            let mut attached = false;
+            world.with_entity_mut(uid, &mut |other| {
+                let position = other.position;
+                let height = other.dimensions.1;
+                other.with_mob(|_, other_mob| {
+                    let can = super::leash::can_have_a_leash_attached_to(
+                        other_mob,
+                        position,
+                        height,
+                        me.position,
+                        me.dimensions.1,
+                        now,
+                    );
+                    if can {
+                        super::leash::set_leashed_to(
+                            other_mob,
+                            me.id,
+                            super::leash::LeashDelayed::Entity(own_uuid),
+                        );
+                        attached = true;
+                    }
+                });
+            });
+            tied |= attached;
+        }
+        if tied {
+            mob.events.push(MobEvent::Sound {
+                sound: "minecraft:item.lead.tied",
+                volume: 1.0,
+                pitch: 1.0,
+                position: me.position,
+                hostile: mob.mob_type.is_enemy(),
+                seed: None,
+            });
+            return Some(MobInteraction {
+                result: InteractionResult::SuccessServer,
+                ..MobInteraction::pass()
+            });
+        }
+    }
+    // 分支 2：剪刀 → 剪断自己牵着的和牵着自己的所有拴绳。
+    if req.held.item == items::SHEARS && shear_off_all(world, me, mob, req) {
+        return Some(MobInteraction {
+            result: InteractionResult::Success,
+            damage_held: true,
+            ..MobInteraction::pass()
+        });
+    }
+    if !living::is_alive(me, mob) {
+        return None;
+    }
+    // 分支 4a：已经拴在自己身上 → 解开。
+    if super::leash::leash_holder(mob) == Some(req.player_uid) {
+        if req.creative {
+            super::leash::remove_leash(mob);
+        } else {
+            super::leash::drop_leash(mob);
+        }
+        mob.events.push(MobEvent::Sound {
+            sound: "minecraft:item.lead.untied",
+            volume: 1.0,
+            pitch: 1.0,
+            position: me.position,
+            hostile: mob.mob_type.is_enemy(),
+            seed: None,
+        });
+        return Some(MobInteraction {
+            result: InteractionResult::Success,
+            drop_stack: (!req.creative)
+                .then(|| ItemStack::new(items::LEAD, 1)),
+            ..MobInteraction::pass()
+        });
+    }
+    // 分支 4b：拿拴绳 → 拴到玩家。
+    if req.held.item == items::LEAD && !leash_holder_is_player(world, mob) {
+        if !super::leash::can_have_a_leash_attached_to(
+            mob,
+            me.position,
+            me.dimensions.1,
+            req.position,
+            1.8,
+            now,
+        ) {
+            return None;
+        }
+        if super::leash::is_leashed(mob) {
+            super::leash::drop_leash(mob);
+        }
+        super::leash::set_leashed_to(
+            mob,
+            req.player_uid,
+            super::leash::LeashDelayed::Entity(req.player_uuid),
+        );
+        mob.events.push(MobEvent::Sound {
+            sound: "minecraft:item.lead.tied",
+            volume: 1.0,
+            pitch: 1.0,
+            position: me.position,
+            hostile: mob.mob_type.is_enemy(),
+            seed: None,
+        });
+        return Some(MobInteraction {
+            result: InteractionResult::SuccessServer,
+            shrink_held: !req.creative,
+            ..MobInteraction::pass()
+        });
+    }
+    None
+}
+
+/// `leashableLeashedTo(player)` 的 32 格区域版：玩家牵着、且在这头生物附近的 uid。
+fn leashed_to_player_in_area(world: &World, this_pos: Vec3, player: EntityUid) -> Vec<EntityUid> {
+    let mut out = Vec::new();
+    for entity in world.live_entities() {
+        if let Some(mob) = entity.kind.mob()
+            && super::leash::leash_holder(mob) == Some(player)
+            && in_area(entity.position, this_pos)
+        {
+            out.push(entity.id);
+        }
+    }
+    out
+}
+
+/// `AABB.ofSize(center, 32, 32, 32)` 的判定。
+fn in_area(position: Vec3, center: Vec3) -> bool {
+    let dx = position.x - center.x;
+    let dy = position.y - center.y;
+    let dz = position.z - center.z;
+    dx * dx + dy * dy + dz * dz <= 32.0 * 32.0
+}
+
+/// 牵引者是不是玩家。
+fn leash_holder_is_player(world: &World, mob: &Mob) -> bool {
+    let Some(holder) = super::leash::leash_holder(mob) else {
+        return false;
+    };
+    world.player_views().iter().any(|view| view.uid == holder)
+}
+
+/// `shearOffAllLeashConnections` → `dropAllLeashConnections`。
+fn shear_off_all(world: &mut World, me: &Entity, mob: &mut Mob, _req: &MobInteractRequest) -> bool {
+    let others = leashed_to(world, me.id);
+    let mut dropped = !others.is_empty();
+    if super::leash::is_leashed(mob) {
+        super::leash::drop_leash(mob);
+        dropped = true;
+    }
+    for uid in others {
+        world.with_entity_mut(uid, &mut |other| {
+            other.with_mob(|_, other_mob| super::leash::drop_leash(other_mob));
+        });
+    }
+    if dropped {
+        // `shearOffAllLeashConnections`：`ServerLevel.playSound(null, blockPosition,
+        // SHEARS_SNIP, player.getSoundSource())`。Bamboo 的音源按玩家的处理，这里记实体事件。
+        mob.events.push(MobEvent::Sound {
+            sound: "minecraft:item.shears.snip",
+            volume: 1.0,
+            pitch: 1.0,
+            position: me.position,
+            hostile: false,
+            seed: None,
+        });
+    }
+    dropped
+}
+
+/// `leashableLeashedTo(this)`：牵着者是这头生物的 uid。
+fn leashed_to(world: &World, holder: EntityUid) -> Vec<EntityUid> {
+    let mut out = Vec::new();
+    for entity in world.live_entities() {
+        if let Some(mob) = entity.kind.mob()
+            && super::leash::leash_holder(mob) == Some(holder)
+        {
+            out.push(entity.id);
+        }
+    }
+    out
 }
 
 /// `Animal.mobInteract`：吃的能让成年动物发情、让幼崽长大。

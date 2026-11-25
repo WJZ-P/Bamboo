@@ -3742,6 +3742,12 @@ impl<'a> World<'a> {
         let now = self.game_time();
         let outcome = entity
             .with_mob(|me, mob| {
+                // `Entity.interact` 的拴绳分支在 `mobInteract` 之前。
+                if let Some(outcome) =
+                    crate::entity::mob::interact::leash_interact(self, me, mob, request)
+                {
+                    return outcome;
+                }
                 crate::entity::mob::interact::interact(me, mob, request, now, thundering)
             })
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);

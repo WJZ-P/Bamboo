@@ -51,6 +51,7 @@ pub mod guardian;
 pub mod infested;
 pub mod interact;
 pub mod iron_golem;
+pub mod leash;
 pub mod living;
 pub mod mooshroom;
 pub mod motion;
@@ -2495,11 +2496,15 @@ pub struct Mob {
     pub glowing: bool,
     pub portal_cooldown: i32,
     pub tags: Vec<String>,
-    /// 存档里官方有、这里不建模的键（效果、装备、拴绳、`data` 等），读进来原样写回。
+    /// 存档里官方有、这里不建模的键（效果、装备、`data` 等），读进来原样写回。
     ///
-    /// Vanilla keys that are not modelled here (effects, equipment, leash, `data`),
+    /// Vanilla keys that are not modelled here (effects, equipment, `data`),
     /// kept verbatim from disk and written back.
     pub passthrough: Vec<(String, mc_bamboo_nbt::Tag)>,
+    /// 拴绳的牵引数据，官方 `Mob.leashData`。`None` 表示没拴。
+    ///
+    /// The leash data, vanilla `Mob.leashData`. `None` means unleashes.
+    pub leash: Option<leash::LeashData>,
     // ---- LivingEntity ----
     /// `activeEffects`。只存相对剩余刻数，整行随实体搬，不需要时钟平移。
     ///
@@ -2905,6 +2910,10 @@ pub enum MobEvent {
             mc_bamboo_protocol::item::ItemStack,
         )>,
     ),
+    /// 拴绳关系变了：`sendToTrackingPlayers` 一个 `set_entity_link`。`holder` 为空表示解开。
+    ///
+    /// The leash link changed: broadcast one `set_entity_link`; `None` detaches.
+    LeashLink { holder: Option<EntityUid> },
     /// 别的 `broadcastEntityEvent`：装备坏掉（47–52）、主副手互换（55）。
     EntityEvent { event: u8 },
     /// `broadcastDamageEvent`：受了一次完整的伤害。
@@ -3437,6 +3446,7 @@ impl Mob {
             zombie_villager: zombie_villager::ZombieVillagerState::default(),
             tadpole_age: 0,
             discard_friction: false,
+            leash: None,
             passengers: Vec::new(),
             ejected_passenger: None,
             push_count: (i64::MIN, 0),
@@ -4057,6 +4067,10 @@ pub struct MobPublic {
     ///
     /// The players riding this mob; the sync layer sends `set_passengers` from it.
     pub passengers: Vec<EntityUid>,
+    /// 拴绳牵引者；配对时发 `set_entity_link`。
+    ///
+    /// The leash holder, sent as `set_entity_link` on pairing.
+    pub leash_holder: Option<EntityUid>,
 }
 
 impl MobPublic {
@@ -4195,6 +4209,7 @@ impl MobPublic {
                 .map(|(slot, stack)| (slot, stack.clone()))
                 .collect(),
             passengers: mob.passengers.clone(),
+            leash_holder: leash::leash_holder(mob),
         }
     }
 
