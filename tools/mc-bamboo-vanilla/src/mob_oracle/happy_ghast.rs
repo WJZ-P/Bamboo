@@ -114,6 +114,8 @@ impl HappyGhastCase {
             short_hunger: false,
             wrong_was_hurt: false,
             shoulder: Default::default(),
+            containers: Default::default(),
+            container_open_counts: Default::default(),
         }
     }
 

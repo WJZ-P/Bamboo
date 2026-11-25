@@ -203,7 +203,7 @@ fn run_cases(
     //    并检查 Bamboo 必写的 components / keepPacked 都在官方写出的键里。
     let answer = ask(stdin, lines, json!({"command": "block-entities"}))?;
     report.check(
-        answer.cases.len() >= 13,
+        answer.cases.len() >= 14,
         "official sent too few block entity cases",
     );
     for case in &answer.cases {
@@ -938,6 +938,11 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             "minecraft:test_instance_block",
             "minecraft:test_instance_block",
         ),
+        (
+            "copper_golem_statue-bare",
+            "minecraft:copper_golem_statue",
+            "minecraft:copper_golem_statue",
+        ),
     ];
     let mut out: Vec<_> = bare
         .iter()
@@ -1457,6 +1462,24 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             ("auto".to_owned(), Tag::Byte(1)),
         ],
     );
+    // `CopperGolemStatueBlockEntity`：不覆写 `saveAdditional`，自定义名只在
+    // `components` 组件表里。`components` 是元数据键，重存比对不看它的值，
+    // 但这一题让官方 `loadStatic` 真的读回名字再写出。
+    let mut statue = meta("minecraft:copper_golem_statue");
+    statue.retain(|(key, _)| key != "components");
+    statue.push((
+        "components".to_owned(),
+        Tag::Compound(vec![(
+            "minecraft:custom_name".to_owned(),
+            Tag::String("Copper Nick".to_owned()),
+        )]),
+    ));
+    out.push((
+        "copper_golem_statue-named".to_owned(),
+        "minecraft:copper_golem_statue",
+        "minecraft:copper_golem_statue",
+        Tag::Compound(statue),
+    ));
     out
 }
 
@@ -1581,6 +1604,27 @@ fn block_entity_load_cases() -> Result<Vec<(String, &'static str, Tag)>, String>
     ] {
         out.push((name.to_owned(), id, Tag::Compound(meta(id))));
     }
+    // 铜傀儡雕像：`create_block_entity` 要认得 `minecraft:copper_golem_statue`，
+    // 且 `write_additional` 为空（官方不覆写 `saveAdditional`）。
+    out.push((
+        "copper_golem_statue-bare".to_owned(),
+        "minecraft:copper_golem_statue",
+        Tag::Compound(meta("minecraft:copper_golem_statue")),
+    ));
+    let mut statue_named = meta("minecraft:copper_golem_statue");
+    statue_named.retain(|(key, _)| key != "components");
+    statue_named.push((
+        "components".to_owned(),
+        Tag::Compound(vec![(
+            "minecraft:custom_name".to_owned(),
+            Tag::String("Copper Nick".to_owned()),
+        )]),
+    ));
+    out.push((
+        "copper_golem_statue-named".to_owned(),
+        "minecraft:copper_golem_statue",
+        Tag::Compound(statue_named),
+    ));
     let mut vault = meta("minecraft:vault");
     vault.push((
         "config".to_owned(),

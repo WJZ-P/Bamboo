@@ -153,6 +153,37 @@ pub trait BlockView {
         Vec::new()
     }
 
+    /// `TransportItemsBetweenContainers` 的只读查询：这一格容器现在的槽位（item、count）。
+    /// 没有容器数据时返回空表。精确驱动读当前世界状态，并行驱动读本刻开始的快照，
+    /// 所以「两只铜傀儡同一刻碰同一个箱子」时两种驱动可能看到不同的内容（见 README）。
+    ///
+    /// Read-only container slots for `TransportItemsBetweenContainers`. Precise reads the
+    /// live state, parallel reads a start-of-tick snapshot, so two golems opening the same
+    /// chest in one tick can diverge (see README).
+    fn container_slots(&self, _pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        Vec::new()
+    }
+
+    /// 只读查询：以 `center` 的方块为中心、`horizontal`（x/z）与 `vertical`（y）为
+    /// 半径的盒子里所有容器方块的位置（保持遍历序）。没有容器数据时返回空表。
+    ///
+    /// Read-only query: all container positions inside the search box. Empty when the
+    /// view has no container data.
+    fn container_positions_in(
+        &self,
+        _center: BlockPos,
+        _horizontal: i32,
+        _vertical: i32,
+    ) -> Vec<BlockPos> {
+        Vec::new()
+    }
+
+    /// `ChestBlockEntity.getEntitiesWithContainerOpen()` 是否有打开者，
+    /// 铜傀儡排队判定用；精确驱动读当前容器表、并行驱动读本刻开始的快照。
+    fn container_open_count(&self, _pos: BlockPos) -> i32 {
+        0
+    }
+
     /// 官方 `EnvironmentAttributeSystem.getValue(BEES_STAY_IN_HIVE, pos)`。
     ///
     /// 主世界按时间线的两条关键帧给值；`RAIN` / `THUNDER` 两张天气覆盖层在雨强
@@ -760,6 +791,25 @@ impl BlockView for World<'_> {
 
     fn has_block_entity(&self, pos: BlockPos) -> bool {
         World::has_block_entity(self, pos)
+    }
+
+    fn container_open_count(&self, pos: BlockPos) -> i32 {
+        self.level().container_open_count(pos)
+    }
+
+    fn container_slots(&self, pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        // 精确驱动：`slots_at` 读的是当前世界的容器槽位表（只读、内部可变性记录访问）。
+        self.slots_at(pos)
+    }
+
+    fn container_positions_in(
+        &self,
+        center: BlockPos,
+        horizontal: i32,
+        vertical: i32,
+    ) -> Vec<BlockPos> {
+        self.level()
+            .container_positions_in(center, horizontal, vertical)
     }
 
     fn bees_stay_in_hive(&self, pos: BlockPos) -> bool {
@@ -1385,6 +1435,37 @@ pub enum Command {
     LayTurtleEgg {
         pos: mc_bamboo_core::BlockPos,
         eggs: i32,
+    },
+    /// `CopperGolem.turnToStatue`：把铜傀儡换成氧化雕像方块（姿态、朝向）。
+    ///
+    /// `CopperGolem.turnToStatue`: replace the golem with an oxidised statue block
+    /// (pose and facing).
+    CopperGolemStatue {
+        pos: mc_bamboo_core::BlockPos,
+        pose: u8,
+        facing: mc_bamboo_core::Direction,
+    },
+    /// `TransportItemsBetweenContainers.pickUpItems`：从箱子取最多 16 个物品进主手。
+    /// 落地阶段才读箱子（两条命令冲突时按 uid 顺序、后到的看前一条的结果）。
+    ///
+    /// Pick up to 16 items from a chest into the main hand. Applied at the landing
+    /// phase so conflicting commands are ordered by uid (first come, first served).
+    CopperGolemPickUp {
+        pos: mc_bamboo_core::BlockPos,
+    },
+    /// `TransportItemsBetweenContainers.putDownItem`：把主手物品放进箱子，剩余留主手。
+    ///
+    /// Place the held stack into a chest, keeping any remainder in the main hand.
+    CopperGolemPutDown {
+        pos: mc_bamboo_core::BlockPos,
+        /// 主手在发出命令那一刻的物品堆（落地时箱子可能已被别的傀儡改过）。
+        held: mc_bamboo_protocol::item::ItemStack,
+    },
+    /// `Container.startOpen/stopOpen`：铜傀儡开箱 / 关箱时改箱子的打开者人数。
+    /// `open` 为真 +1、为假 -1；落地阶段串行应用，别的铜傀儡下一刻就能读到。
+    CopperGolemChestOpen {
+        pos: mc_bamboo_core::BlockPos,
+        open: bool,
     },
     /// `ServerLevel.destroyBlockProgress(breaker, pos, progress)`：`BreakDoorGoal` 的
     /// 门上裂纹，`progress` 为 -1 时清掉。
@@ -2221,6 +2302,20 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             source,
             amount,
         } => super::mob::frog::apply_eat(world, target, source, amount),
+        Command::CopperGolemStatue { pos, pose, facing } => {
+            super::mob::copper_golem::apply_statue(world, me, pos, pose, facing)
+        }
+        Command::CopperGolemPickUp { pos } => {
+            super::mob::copper_golem::apply_pick_up(world, me, pos);
+        }
+        Command::CopperGolemPutDown { pos, held } => {
+            super::mob::copper_golem::apply_put_down(world, me, pos, &held);
+        }
+        Command::CopperGolemChestOpen { pos, open } => {
+            let _ = me;
+            let delta = if open { 1 } else { -1 };
+            world.change_container_open_count(pos, delta);
+        }
         Command::LayTurtleEgg { pos, eggs } => {
             let pitch = 0.9 + world.random().next_float() * 0.2;
             world.play_block_sound(

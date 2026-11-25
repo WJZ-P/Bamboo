@@ -598,6 +598,23 @@ impl Entity {
             brain.seed_shuffles(self.random.state());
             brain.randomly_delay_start(&mut self.random);
         }
+        if mob.mob_type == mob::MobType::CopperGolem {
+            // `CopperGolem` 构造函数：`brain.setMemory(TRANSPORT_ITEMS_COOLDOWN_TICKS,
+            // random.nextInt(60, 100))`，在传感器延迟之后取一次随机数。
+            //
+            // The `CopperGolem` constructor sets the transport cooldown from one
+            // `nextInt(60, 100)` draw after the sensor delays.
+            use mob::brain::memory::{MemoryType, MemoryValue};
+            let cooldown = self.random.next_int_bounded(
+                mob::copper_golem::SPAWN_COOLDOWN_MAX - mob::copper_golem::SPAWN_COOLDOWN_MIN,
+            ) + mob::copper_golem::SPAWN_COOLDOWN_MIN;
+            if let Some(brain) = mob.brain.as_mut() {
+                brain.memories.set(
+                    MemoryType::TransportItemsCooldownTicks,
+                    MemoryValue::Int(cooldown),
+                );
+            }
+        }
         if mob.mob_type == mob::MobType::Armadillo {
             // `Armadillo` 构造函数最后的 `scuteTime = pickNextScuteDropTime()`。
             // The `Armadillo` constructor's trailing `scuteTime = pickNextScuteDropTime()`.

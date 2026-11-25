@@ -595,7 +595,14 @@ fn activities() -> Vec<ActivityData> {
                 Kind::Gate(Box::new(Gate::run_one(
                     vec![(M::IsSniffing, ValueAbsent)],
                     vec![
-                        (Kind::RandomStroll { speed: 0.5 }, 2),
+                        (
+                            Kind::RandomStroll {
+                                speed: 0.5,
+                                horizontal: 10,
+                                vertical: 7,
+                            },
+                            2,
+                        ),
                         (Kind::DoNothing { min: 30, max: 60 }, 1),
                     ],
                 ))),

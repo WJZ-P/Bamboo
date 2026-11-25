@@ -125,26 +125,28 @@ struct ClockEntry {
     paused: bool,
 }
 
-/// 交给官方 codec 复核的六份存档路径。
-/// The six saved-data paths handed to the official codecs.
-struct DecodePaths<'a> {
-    game_rules: &'a Path,
-    world_border: &'a Path,
-    world_clocks: &'a Path,
-    raids: &'a Path,
-    world_gen_settings: &'a Path,
-    wandering_trader: &'a Path,
-}
-
-fn decode(java: &str, paths: &DecodePaths, noise_files: &[&Path]) -> Result<Report, String> {
+// 每个存档文件都是独立的命令行参数，逐个列名比打包成结构体更直白。
+// Each saved-data file is its own command-line argument; naming them one by one
+// reads clearer than bundling them into a struct.
+#[allow(clippy::too_many_arguments)]
+fn decode(
+    java: &str,
+    game_rules: &Path,
+    world_border: &Path,
+    world_clocks: &Path,
+    raids: &Path,
+    world_gen_settings: &Path,
+    wandering_trader: &Path,
+    noise_files: &[&Path],
+) -> Result<Report, String> {
     let mut command = crate::official_program(java, SOURCE)?;
     command
-        .arg(paths.game_rules)
-        .arg(paths.world_border)
-        .arg(paths.world_clocks)
-        .arg(paths.raids)
-        .arg(paths.world_gen_settings)
-        .arg(paths.wandering_trader);
+        .arg(game_rules)
+        .arg(world_border)
+        .arg(world_clocks)
+        .arg(raids)
+        .arg(world_gen_settings)
+        .arg(wandering_trader);
     for path in noise_files {
         command.arg(path);
     }
@@ -196,14 +198,6 @@ pub fn run(java: &str) -> Result<(), String> {
     let raids_path = world.saved_data("minecraft:raids");
     let world_gen_path = world.saved_data("minecraft:world_gen_settings");
     let wandering_trader_path = world.saved_data("minecraft:wandering_trader");
-    let paths = DecodePaths {
-        game_rules: &game_rules_path,
-        world_border: &world_border_path,
-        world_clocks: &world_clocks_path,
-        raids: &raids_path,
-        world_gen_settings: &world_gen_path,
-        wandering_trader: &wandering_trader_path,
-    };
     write_saved_data_at(&game_rules_path, &game_rules_tag)
         .map_err(|error| format!("cannot write game_rules.dat: {error}"))?;
     write_saved_data_at(&world_border_path, &world_border_tag)
@@ -263,7 +257,16 @@ pub fn run(java: &str) -> Result<(), String> {
 
     // 1. 官方 codec 能解码 Bamboo 写出的文件，且值一致。
     // The official codecs decode Bamboo's files and the values match.
-    let report = decode(java, &paths, &noise_refs)?;
+    let report = decode(
+        java,
+        &game_rules_path,
+        &world_border_path,
+        &world_clocks_path,
+        &raids_path,
+        &world_gen_path,
+        &wandering_trader_path,
+        &noise_refs,
+    )?;
     check_rule(&report, "minecraft:random_tick_speed", "int", &json!(7))?;
     check_rule(&report, "minecraft:fire_damage", "bool", &json!(false))?;
     // `Raids.CODEC` 解出的两场袭击每个字段都和写出的示例一致。
@@ -311,7 +314,18 @@ pub fn run(java: &str) -> Result<(), String> {
     let broken_raids = corrupt_raid_status(&raids_tag);
     write_saved_data_at(&raids_path, &broken_raids)
         .map_err(|error| format!("cannot write broken raids.dat: {error}"))?;
-    if decode(java, &paths, &noise_refs).is_ok() {
+    if decode(
+        java,
+        &game_rules_path,
+        &world_border_path,
+        &world_clocks_path,
+        &raids_path,
+        &world_gen_path,
+        &wandering_trader_path,
+        &noise_refs,
+    )
+    .is_ok()
+    {
         return Err("official codec accepted a raids.dat with a broken status".to_owned());
     }
     write_saved_data_at(&raids_path, &raids_tag)
@@ -430,7 +444,18 @@ pub fn run(java: &str) -> Result<(), String> {
     ));
     write_saved_data_at(&broken_noise_path, &broken)
         .map_err(|error| format!("cannot write broken noise world_gen_settings.dat: {error}"))?;
-    if decode(java, &paths, &[broken_noise_path.as_path()]).is_ok() {
+    if decode(
+        java,
+        &game_rules_path,
+        &world_border_path,
+        &world_clocks_path,
+        &raids_path,
+        &world_gen_path,
+        &wandering_trader_path,
+        &[broken_noise_path.as_path()],
+    )
+    .is_ok()
+    {
         return Err(
             "official codec accepted a noise world_gen_settings.dat with a broken generator type"
                 .to_owned(),
@@ -455,7 +480,18 @@ pub fn run(java: &str) -> Result<(), String> {
         .collect();
     write_saved_data_at(&world_border_path, &Tag::Compound(renamed))
         .map_err(|error| format!("cannot write broken world_border.dat: {error}"))?;
-    if decode(java, &paths, &[]).is_ok() {
+    if decode(
+        java,
+        &game_rules_path,
+        &world_border_path,
+        &world_clocks_path,
+        &raids_path,
+        &world_gen_path,
+        &wandering_trader_path,
+        &[],
+    )
+    .is_ok()
+    {
         return Err("official codec accepted a world_border.dat with a broken key".to_owned());
     }
 
@@ -492,7 +528,18 @@ pub fn run(java: &str) -> Result<(), String> {
     );
     write_saved_data_at(&world_clocks_path, &broken_clocks)
         .map_err(|error| format!("cannot write broken world_clocks.dat: {error}"))?;
-    if decode(java, &paths, &[]).is_ok() {
+    if decode(
+        java,
+        &game_rules_path,
+        &world_border_path,
+        &world_clocks_path,
+        &raids_path,
+        &world_gen_path,
+        &wandering_trader_path,
+        &[],
+    )
+    .is_ok()
+    {
         return Err("official codec accepted a world_clocks.dat with a broken key".to_owned());
     }
 

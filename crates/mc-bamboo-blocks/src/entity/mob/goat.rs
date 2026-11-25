@@ -257,7 +257,14 @@ fn idle_activity() -> ActivityData {
                 Kind::Gate(Box::new(Gate::run_one(
                     Vec::new(),
                     vec![
-                        (Kind::RandomStroll { speed: 1.0 }, 2),
+                        (
+                            Kind::RandomStroll {
+                                speed: 1.0,
+                                horizontal: 10,
+                                vertical: 7,
+                            },
+                            2,
+                        ),
                         (
                             Kind::WalkTargetFromLook {
                                 speed: Speed::fixed(1.0),
@@ -1523,6 +1530,7 @@ pub(super) fn interact(mob: &mut Mob, req: &MobInteractRequest) -> Option<MobInt
         tamed: false,
         filled_bucket: false,
         self_hurt: None,
+        level_events: Vec::new(),
     })
 }
 
@@ -1653,6 +1661,7 @@ mod tests {
             tamed: false,
             filled_bucket: false,
             self_hurt: None,
+            level_events: Vec::new(),
         };
         assert_eq!(
             eating_sounds(&goat, &request(1, false, items::WHEAT), &fed(false)),

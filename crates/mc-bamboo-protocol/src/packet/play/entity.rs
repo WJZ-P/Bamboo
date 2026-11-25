@@ -252,6 +252,14 @@ pub enum EntityData {
     ///
     /// `Armadillo.ARMADILLO_STATE`: the state'"'"'s network id (its own serializer, a VarInt).
     ArmadilloState(i32),
+    /// `CopperGolem.DATA_WEATHER_STATE`：`WeatherState` 的网络 ID（VarInt）。
+    ///
+    /// `CopperGolem.DATA_WEATHER_STATE`: the `WeatherState` network id (VarInt).
+    CopperGolemWeatherState(i32),
+    /// `CopperGolem.COPPER_GOLEM_STATE`：`CopperGolemState` 的网络 ID（VarInt）。
+    ///
+    /// `CopperGolem.COPPER_GOLEM_STATE`: the `CopperGolemState` network id (VarInt).
+    CopperGolemState(i32),
     /// `Goat` 的三个 BOOLEAN：尖叫、左角、右角（缺省假、真、真）。
     ///
     /// The three `Goat` booleans: screaming, left horn and right horn (false, true and
@@ -628,6 +636,10 @@ impl EntityData {
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
             Self::ArmadilloState(_) => mc_bamboo_data::entity_types::ARMADILLO_STATE,
+            Self::CopperGolemWeatherState(_) => {
+                mc_bamboo_data::entity_types::COPPER_GOLEM_WEATHER_STATE
+            }
+            Self::CopperGolemState(_) => mc_bamboo_data::entity_types::COPPER_GOLEM_STATE,
             Self::GoatScreaming(_) => mc_bamboo_data::entity_types::GOAT_SCREAMING,
             Self::GoatLeftHorn(_) => mc_bamboo_data::entity_types::GOAT_LEFT_HORN,
             Self::GoatRightHorn(_) => mc_bamboo_data::entity_types::GOAT_RIGHT_HORN,
@@ -964,6 +976,22 @@ impl EntityData {
                     out,
                     self.index(),
                     mc_bamboo_data::entity_types::ARMADILLO_STATE_SERIALIZER,
+                );
+                write_varint(out, *state);
+            }
+            Self::CopperGolemWeatherState(state) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::COPPER_GOLEM_WEATHER_STATE_SERIALIZER,
+                );
+                write_varint(out, *state);
+            }
+            Self::CopperGolemState(state) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::COPPER_GOLEM_STATE_SERIALIZER,
                 );
                 write_varint(out, *state);
             }

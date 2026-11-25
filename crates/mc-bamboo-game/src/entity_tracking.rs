@@ -1219,6 +1219,16 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
     {
         return EntityData::ArmadilloState(0);
     }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::CopperGolem {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::COPPER_GOLEM_WEATHER_STATE => {
+                return EntityData::CopperGolemWeatherState(0);
+            }
+            facts::COPPER_GOLEM_STATE => return EntityData::CopperGolemState(0),
+            _ => {}
+        }
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::Frog {
         use mc_bamboo_data::entity_types as facts;
         match index {
@@ -1866,6 +1876,20 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         // Armadillos only add `ARMADILLO_STATE`, `IDLE` (0) by default.
         if mob.armadillo_state != 0 {
             out.push(EntityData::ArmadilloState(mob.armadillo_state));
+        }
+        return out;
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::CopperGolem {
+        // 铜傀儡自有两项：氧化等级（缺省 UNAFFECTED=0）和交互动画状态（缺省 IDLE=0）。
+        // A copper golem adds two: the oxidation stage (UNAFFECTED=0) and the interaction
+        // state (IDLE=0).
+        if mob.copper_golem_weather_state != 0 {
+            out.push(EntityData::CopperGolemWeatherState(
+                mob.copper_golem_weather_state,
+            ));
+        }
+        if mob.copper_golem_state != 0 {
+            out.push(EntityData::CopperGolemState(mob.copper_golem_state));
         }
         return out;
     }

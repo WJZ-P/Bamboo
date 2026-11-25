@@ -23,6 +23,8 @@ import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
+import net.minecraft.core.component.DataComponentMap;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
@@ -35,6 +37,7 @@ import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.RegistryLayer;
@@ -467,6 +470,14 @@ public final class ChunkContentOracle {
         private JsonArray blockEntities() {
             JsonArray cases = new JsonArray();
             BlockPos pos = new BlockPos(3, 64, 5);
+            // `CopperGolemStatueBlockEntity.createStatue`：自定义名在组件表里，
+            // 官方 `saveWithFullMetadata` 写 `components:{"minecraft:custom_name":...}`。
+            var statueState = Blocks.COPPER_GOLEM_STATUE.weathering().unaffected().defaultBlockState();
+            var statue = new net.minecraft.world.level.block.entity.CopperGolemStatueBlockEntity(pos, statueState);
+            var statueComponents = DataComponentMap.builder();
+            statueComponents.addAll(statue.components());
+            statueComponents.set(DataComponents.CUSTOM_NAME, Component.literal("Copper Nick"));
+            statue.setComponents(statueComponents.build());
             List<NamedEntity> entities = List.of(
                     new NamedEntity("chest", new ChestBlockEntity(pos, Blocks.CHEST.defaultBlockState()), Blocks.CHEST.defaultBlockState()),
                     new NamedEntity("barrel", new net.minecraft.world.level.block.entity.BarrelBlockEntity(pos, Blocks.BARREL.defaultBlockState()), Blocks.BARREL.defaultBlockState()),
@@ -480,7 +491,8 @@ public final class ChunkContentOracle {
                     new NamedEntity("comparator", new net.minecraft.world.level.block.entity.ComparatorBlockEntity(pos, Blocks.COMPARATOR.defaultBlockState()), Blocks.COMPARATOR.defaultBlockState()),
                     new NamedEntity("lectern", new net.minecraft.world.level.block.entity.LecternBlockEntity(pos, Blocks.LECTERN.defaultBlockState()), Blocks.LECTERN.defaultBlockState()),
                     new NamedEntity("command_block", new net.minecraft.world.level.block.entity.CommandBlockEntity(pos, Blocks.COMMAND_BLOCK.defaultBlockState()), Blocks.COMMAND_BLOCK.defaultBlockState()),
-                    new NamedEntity("sign", new net.minecraft.world.level.block.entity.SignBlockEntity(pos, Blocks.OAK_SIGN.defaultBlockState()), Blocks.OAK_SIGN.defaultBlockState()));
+                    new NamedEntity("sign", new net.minecraft.world.level.block.entity.SignBlockEntity(pos, Blocks.OAK_SIGN.defaultBlockState()), Blocks.OAK_SIGN.defaultBlockState()),
+                    new NamedEntity("copper_golem_statue", statue, statueState));
             for (NamedEntity named : entities) {
                 JsonObject one = new JsonObject();
                 one.addProperty("name", named.name);

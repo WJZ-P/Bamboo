@@ -113,6 +113,12 @@ pub struct MobInteraction {
     /// Damage the interaction deals to the mob itself (a parrot eating a cookie): the
     /// caller resolves it as a player attack once the mob is back in the world.
     pub self_hurt: Option<f32>,
+    /// `level.levelEvent(this, event, pos, data)`：调用方发世界事件包让客户端播粒子
+    /// （铜傀儡打蜡 3003 / 去蜡 3004 / 刮锈 3005）。
+    ///
+    /// World events emitted by `levelEvent`: the caller sends the packet so clients
+    /// play particles (copper golem waxing 3003 / unwaxing 3004 / scraping 3005).
+    pub level_events: Vec<(i32, mc_bamboo_core::BlockPos, i32)>,
 }
 
 impl MobInteraction {
@@ -134,6 +140,7 @@ impl MobInteraction {
             tamed: false,
             filled_bucket: false,
             self_hurt: None,
+            level_events: Vec::new(),
         }
     }
 }
@@ -321,6 +328,9 @@ pub fn interact(
     }
     if mob.mob_type == MobType::SnowGolem {
         return super::snow_golem::interact(mob, req);
+    }
+    if mob.mob_type == MobType::CopperGolem {
+        return super::copper_golem::interact(me, mob, req);
     }
     if mob.mob_type == MobType::Sniffer {
         // `Sniffer.mobInteract`：先走 `Animal.mobInteract`，吃的是 `#sniffer_food` 且

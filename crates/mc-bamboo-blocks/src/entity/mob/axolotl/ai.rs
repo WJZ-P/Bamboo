@@ -180,7 +180,14 @@ fn idle_activity() -> ActivityData {
                     vec![(MemoryType::WalkTarget, ValueAbsent)],
                     vec![
                         (Kind::Axolotl(Behavior::SwimStroll { speed: 0.5 }), 2),
-                        (Kind::RandomStroll { speed: 0.15 }, 2),
+                        (
+                            Kind::RandomStroll {
+                                speed: 0.15,
+                                horizontal: 10,
+                                vertical: 7,
+                            },
+                            2,
+                        ),
                         (
                             Kind::Axolotl(Behavior::WalkTargetFromLook {
                                 speed: SPEED_IDLE,
