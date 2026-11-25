@@ -590,26 +590,32 @@ fn run_cases(
                 let tree = read_entity_tree(&tag, &mut next)
                     .map_err(|error| error.to_string())?
                     .expect("jockey root is modelled");
+                let root_uid = tree[0].public.uid;
+                let passengers = match &tree[0].public.kind {
+                    mc_bamboo_blocks::entity::KindPublic::Mob(mob) => mob.passengers.clone(),
+                    _ => unreachable!("a jockey's vehicle is a mob"),
+                };
+                // 一名（鸡骑士）或两名（尸壳骆驼）乘客都要逐位对上。
+                // Compare one (chicken jockey) or two (camel husk) passengers.
                 report.check(
-                    tree.len() == 2,
+                    tree.len() == passengers.len() + 1,
                     format!(
-                        "entity {label}: Bamboo read {} rows, expected 2",
-                        tree.len()
+                        "entity {label}: Bamboo read {} rows, expected {}",
+                        tree.len(),
+                        passengers.len() + 1
                     ),
                 );
-                if tree.len() == 2 {
-                    let root_uid = tree[0].public.uid;
+                if tree.len() == passengers.len() + 1 {
                     report.check(
                         tree[0].public.vehicle.is_none()
-                            && tree[1].public.vehicle == Some(root_uid),
+                            && tree[1..]
+                                .iter()
+                                .all(|row| row.public.vehicle == Some(root_uid)),
                         format!("entity {label}: Bamboo lost the rider's vehicle link"),
                     );
-                    let passengers = match &tree[0].public.kind {
-                        mc_bamboo_blocks::entity::KindPublic::Mob(mob) => &mob.passengers,
-                        _ => unreachable!("a jockey's vehicle is a mob"),
-                    };
+                    let rider_ids: Vec<_> = tree[1..].iter().map(|row| row.public.uid).collect();
                     report.check(
-                        passengers.as_slice() == [tree[1].public.uid],
+                        passengers == rider_ids,
                         format!("entity {label}: Bamboo lost the vehicle's passenger list"),
                     );
                     let rows: std::collections::BTreeMap<_, _> = tree
@@ -1582,7 +1588,73 @@ fn entity_cases() -> Vec<Tag> {
     out.extend(guardian_archive_cases());
     out.extend(sulfur_cube_archive_cases());
     out.extend(zombie_villager_archive_cases());
+    out.extend(parched_jockey_archive_cases());
     out
+}
+
+/// 尸壳骆驼载两名乘客（尸壳、焦骸）的存档树：`Passengers` 嵌在载具里，
+/// 官方 `loadEntityRecursive` 逐层重存。
+///
+/// A camel husk carrying two passengers (husk and parched): `Passengers` is
+/// nested in the vehicle and the official recursive loader resaves each layer.
+fn parched_jockey_archive_cases() -> Vec<Tag> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+
+    let mut store = mc_bamboo_blocks::EntityStore::new();
+    let camel = store.spawn(Entity::by_mob_type(
+        MobType::CamelHusk,
+        Vec3::new(1.5, 64.0, -2.5),
+    ));
+    let husk = store.spawn(Entity::by_mob_type(
+        MobType::Husk,
+        Vec3::new(1.5, 64.0, -2.0),
+    ));
+    let parched = store.spawn(Entity::by_mob_type(
+        MobType::Parched,
+        Vec3::new(1.5, 64.0, -3.2),
+    ));
+    // 官方 `loadEntityRecursive` 用 `startRiding` 把乘客的朝向归零；夹具先对齐。
+    // The official recursive loader zeroes passenger facing via `startRiding`;
+    // align the fixture up front.
+    for uid in [camel, husk, parched] {
+        store.with_mut(uid, |entity| {
+            entity.y_rot = 0.0;
+            entity.with_mob(|_, mob| {
+                mob.y_head_rot = 0.0;
+                mob.y_body_rot = 0.0;
+                mob.x_rot = 0.0;
+            });
+        });
+    }
+    store.with_mut(camel, |entity| {
+        entity.with_mob(|_, mob| mob.passengers.extend([husk, parched]));
+    });
+    for rider in [husk, parched] {
+        store.with_mut(rider, |entity| {
+            entity.vehicle = Some(camel);
+        });
+    }
+    let rows: BTreeMap<i32, mc_bamboo_blocks::entity::EntityRow> =
+        [store.get(camel), store.get(husk), store.get(parched)]
+            .into_iter()
+            .flatten()
+            .map(|entity| {
+                let row = entity.split();
+                (row.public.uid, row)
+            })
+            .collect();
+    // 再读再写一遍：官方 `loadEntityRecursive` 会把乘客的朝向归零并补上懒创建的
+    // 属性实例，和鸡骑士夹具一样先归一化，两边比的才是存档层。
+    // Read and write once more: the official recursive loader zeroes passenger
+    // rotation and creates lazy attribute instances, so normalize first just
+    // like the chicken-jockey fixture.
+    let first = write_entity_tree(&rows[&camel], &|uid| rows.get(&uid).cloned()).unwrap();
+    let mut next = 1 << 24;
+    let tree = read_entity_tree(&first, &mut next).unwrap().unwrap();
+    let root = tree[0].public.uid;
+    let rebuilt: BTreeMap<i32, mc_bamboo_blocks::entity::EntityRow> =
+        tree.into_iter().map(|row| (row.public.uid, row)).collect();
+    vec![write_entity_tree(&rebuilt[&root], &|uid| rebuilt.get(&uid).cloned()).unwrap()]
 }
 
 /// 僵尸村民的存档：`VillagerData`、`VillagerDataFinalized`、`Offers`、`Gossips`、
@@ -2100,13 +2172,67 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
         compound(vec![
             ("id", Tag::String("minecraft:cow".to_owned())),
             ("Pos", doubles([0.5, 64.0, 0.5])),
-            ("UUID", uuid),
+            ("UUID", uuid.clone()),
             ("InLove", Tag::Int(512)),
             ("Age", Tag::Int(4000)),
             ("variant", Tag::String("minecraft:cold".to_owned())),
         ]),
     ));
     out.extend(brain_resave_cases());
+    // 焦骸没有自己的存档键（`AbstractSkeleton.readAdditionalSaveData` 只调 super
+    // 再重挑武器目标），尸壳骆驼和普通骆驼共用 `LastPoseTick`。
+    // Parched has no own save keys; camel husks share `LastPoseTick` with camels.
+    out.push((
+        "parched_bare".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:parched".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+        ]),
+    ));
+    out.push((
+        "parched_equipped".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:parched".to_owned())),
+            ("Pos", doubles([1.5, 64.0, 2.5])),
+            ("UUID", uuid.clone()),
+            (
+                "Rotation",
+                Tag::List(vec![Tag::Float(37.0), Tag::Float(-12.0)]),
+            ),
+            ("Health", Tag::Float(9.0)),
+            ("LeftHanded", Tag::Byte(1)),
+            ("CanPickUpLoot", Tag::Byte(1)),
+            ("PersistenceRequired", Tag::Byte(1)),
+            (
+                "HandItems",
+                Tag::List(vec![
+                    compound(vec![
+                        ("id", Tag::String("minecraft:bow".to_owned())),
+                        ("count", Tag::Int(1)),
+                    ]),
+                    compound(vec![]),
+                ]),
+            ),
+        ]),
+    ));
+    out.push((
+        "camel_husk_bare".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:camel_husk".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+        ]),
+    ));
+    out.push((
+        "camel_husk_sitting".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:camel_husk".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid),
+            ("LastPoseTick", Tag::Long(-1000)),
+        ]),
+    ));
     let mut store = mc_bamboo_blocks::EntityStore::new();
     let uid = store.spawn(Entity::cow(Vec3::new(8.5, 65.0, 8.5)));
     let row = store.get(uid).expect("刚生成").split();

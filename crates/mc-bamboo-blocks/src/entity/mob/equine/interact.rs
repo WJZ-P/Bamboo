@@ -221,6 +221,7 @@ fn is_food(kind: MobType, stack: &ItemStack) -> bool {
     let tag = match kind {
         MobType::Llama => item_tags::LLAMA_FOOD,
         MobType::Camel => item_tags::CAMEL_FOOD,
+        MobType::CamelHusk => item_tags::CAMEL_HUSK_FOOD,
         _ => item_tags::HORSE_FOOD,
     };
     item_is_tagged(stack.item, tag)
