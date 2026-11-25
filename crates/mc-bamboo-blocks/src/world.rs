@@ -2240,13 +2240,18 @@ impl<'a> World<'a> {
                 mob.y_head_rot = me.y_rot;
                 mob.y_body_rot = me.y_rot;
             });
-            // 官方 `finalizeSpawn(JOCKEY, null)`：只有骷髅/鸡自己的随机取数。
-            super::entity::mob::spawn::finalize_spawn(
-                self,
-                request.kind,
-                &mut entity,
-                super::entity::mob::spawn::SpawnReason::Jockey,
-            );
+            // 官方 `finalizeSpawn(reason, null)`：父实体把原因原样传进来，只有
+            // 骷髅/鸡骑士沿用 `JOCKEY`。
+            //
+            // Vanilla's `finalizeSpawn(reason, null)`: the parent passes its reason
+            // through; only skeleton / chicken jockeys keep `JOCKEY`.
+            let reason = request
+                .reason
+                .unwrap_or(super::entity::mob::spawn::SpawnReason::Jockey);
+            if request.persistent {
+                entity.with_mob(|_, mob| mob.persistence_required = true);
+            }
+            super::entity::mob::spawn::finalize_spawn(self, request.kind, &mut entity, reason);
             if request.kind == super::entity::mob::MobType::Chicken {
                 self.level.with_just_spawned(entity.id, &mut |me| {
                     me.with_mob(|_, mob| mob.chicken_jockey = true);
@@ -3885,6 +3890,22 @@ impl<'a> World<'a> {
     /// `addFreshEntity` 之后按 ID 改这个实体。刚生成、还没并进 tick 列表的也找得到。
     pub fn with_entity_mut(&mut self, id: i32, f: &mut dyn FnMut(&mut Entity)) -> bool {
         self.level.with_just_spawned(id, f)
+    }
+
+    /// 把实体从表里取出来，交给 oracle / 命令做一次 `finalizeSpawn` 之类的整行操作，
+    /// 再由 [`Self::put_taken_entity`] 放回去。
+    ///
+    /// Takes an entity out of the table so an oracle or command can run a whole-row
+    /// operation such as `finalizeSpawn`; [`Self::put_taken_entity`] puts it back.
+    pub fn take_entity_for_oracle(&mut self, id: i32) -> Option<crate::entity::Entity> {
+        self.level.take_entity(id)
+    }
+
+    /// [`Self::take_entity_for_oracle`] 的放回。
+    ///
+    /// Puts an entity taken by [`Self::take_entity_for_oracle`] back.
+    pub fn put_entity_for_oracle(&mut self, entity: crate::entity::Entity) {
+        self.level.put_entity(entity);
     }
 
     /// 就地改一个已经在 tick 列表里的实体（正在 tick 的那一个不在里面）。

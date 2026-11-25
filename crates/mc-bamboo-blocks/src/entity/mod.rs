@@ -526,7 +526,7 @@ impl Entity {
 
     /// 构造函数里的随机数：`Entity` 的 UUID 两个 `nextLong`，`LivingEntity` 的
     /// `yRot = nextFloat() * 6.2831855F`（弧度当角度用，官方就是这样）。
-    pub(crate) fn finish_mob_random(&mut self) {
+    pub fn finish_mob_random(&mut self) {
         let EntityKind::Mob(mob) = &mut self.kind else {
             return;
         };

@@ -384,7 +384,7 @@ fn equip_chest(me: &mut Entity, mob: &mut Mob) {
     living::play_sound(me, mob, sound, 1.0, pitch);
 }
 
-pub(super) fn equippable(stack: &ItemStack) -> Option<Equippable> {
+pub(in crate::entity::mob) fn equippable(stack: &ItemStack) -> Option<Equippable> {
     match defaults::resolve(stack.item, &stack.patch(), kinds::EQUIPPABLE) {
         Some(ComponentValue::Equippable(value)) => Some(value.clone()),
         _ => None,
@@ -410,7 +410,7 @@ fn wearing(mob: &Mob, slot: EquipmentSlot) -> bool {
 ///
 /// `isEquippableInSlot` for the body and saddle slots: `canUseSlot`, then the
 /// allowed entity types.
-fn can_equip(mob: &Mob, equippable: &Equippable) -> bool {
+pub(super) fn can_equip(mob: &Mob, equippable: &Equippable) -> bool {
     slot_of(equippable).is_some_and(|slot| can_use_slot(mob, slot))
         && crate::dispense::equippable_allows(
             equippable.allowed_entities.as_ref(),
@@ -424,6 +424,9 @@ fn can_equip(mob: &Mob, equippable: &Equippable) -> bool {
 /// `canUseSlot`: always true for horses and llamas; donkeys and mules need an
 /// alive, adult, tamed mount for the saddle slot only.
 pub(super) fn can_use_slot(mob: &Mob, slot: EquipmentSlot) -> bool {
+    if crate::entity::mob::nautilus::is_nautilus(mob.mob_type) {
+        return crate::entity::mob::nautilus::can_use_slot(mob, slot);
+    }
     if matches!(mob.mob_type, MobType::Horse | MobType::Llama) || slot != EquipmentSlot::Saddle {
         return true;
     }
@@ -434,7 +437,7 @@ pub(super) fn can_use_slot(mob: &Mob, slot: EquipmentSlot) -> bool {
 ///
 /// `Equippable.equipOnTarget`: equip one if allowed, the slot is free and the
 /// mount is alive, and make the slot a guaranteed drop.
-fn equip_on_target(
+pub(in crate::entity::mob) fn equip_on_target(
     me: &mut Entity,
     mob: &mut Mob,
     equippable: &Equippable,
@@ -500,7 +503,13 @@ fn play_equip_sound(me: &mut Entity, mob: &mut Mob, slot: EquipmentSlot, equippa
     if mob.silent {
         return;
     }
-    let sound = if slot == EquipmentSlot::Saddle {
+    let sound = if crate::entity::mob::nautilus::is_nautilus(mob.mob_type)
+        && slot == EquipmentSlot::Saddle
+    {
+        Some(crate::entity::mob::nautilus::saddle_equip_sound(
+            me.in_water,
+        ))
+    } else if slot == EquipmentSlot::Saddle {
         Some("minecraft:entity.horse.saddle")
     } else {
         equip_sound(equippable)

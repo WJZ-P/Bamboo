@@ -71,6 +71,9 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Abilities;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.animal.nautilus.AbstractNautilus;
+import net.minecraft.world.entity.animal.nautilus.Nautilus;
+import net.minecraft.world.inventory.NautilusInventoryMenu;
 import net.minecraft.world.entity.player.PlayerEquipment;
 import net.minecraft.world.flag.FeatureFlagSet;
 import net.minecraft.world.flag.FeatureFlags;
@@ -333,6 +336,10 @@ public final class MenuOracle {
                 written++;
             }
             if (options.only() < 0) {
+                for (int index = 0; index < 12; index++) {
+                    write(nautilusCase(written, index, options.seed()));
+                    written++;
+                }
                 write(componentCase(written));
                 written++;
                 write(lootChestCase(written));
@@ -461,6 +468,84 @@ public final class MenuOracle {
                 step.addProperty("button", click[1]);
                 step.addProperty("input", click[2]);
                 step.addProperty("menuButton", menuButton);
+                step.add("outcome", outcome(menu));
+                steps.add(step);
+            }
+            line.add("steps", steps);
+            return line;
+        }
+
+        /**
+         * 鹦鹉螺坐骑物品栏：官方 `NautilusInventoryMenu` 的两格（鞍、身体）
+         * 和玩家 36 格。开局按题目的背包 / 装备填好，逐步点击后逐槽比。
+         *
+         * Nautilus mount inventory: vanilla `NautilusInventoryMenu`'s saddle /
+         * body slots plus the player's 36 slots, with per-click slot comparison.
+         */
+        private JsonObject nautilusCase(int id, int variant, long baseSeed) {
+            Random random = new Random(baseSeed * 9_000_019L + variant);
+            boolean creative = variant % 3 == 0;
+            FakePlayer player = FakePlayer.create(creative);
+            Inventory inventory = player.getInventory();
+            for (int i = 0, count = random.nextInt(10); i < count; i++) {
+                inventory.setItem(inventorySlot(random), randomStack(random));
+            }
+            // 官方 `EntityTypes.NAUTILUS.create` 在这个假世界里需要注册表；
+            // 直接调无参构造器，再手工放进一个能读写装备槽的世界。
+            // `EntityTypes.NAUTILUS.create` needs a full fake level here, so
+            // construct the mob directly and give it equipment through the
+            // menu's own `createEquipmentSlotContainer`.
+            Nautilus nautilus = new Nautilus(net.minecraft.world.entity.EntityTypes.NAUTILUS,
+                    player.level());
+            nautilus.setPos(0.5, 64.0, 0.5);
+            // `TamableAnimal.tame` 要给玩家发进度；假服务器没有进度表，直接设
+            // 驯服位和主人。菜单只关心 `canUseSlot` / `isTame()`。
+            // `TamableAnimal.tame` awards an advancement; the fake server has
+            // no advancement map, so set the tame flag and owner directly.
+            nautilus.setTame(true, false);
+            nautilus.setOwnerReference(net.minecraft.world.entity.EntityReference.of(player));
+            if (variant % 2 == 0) {
+                nautilus.setItemSlot(EquipmentSlot.SADDLE, new ItemStack(Items.SADDLE));
+            }
+            if (variant % 3 == 1) {
+                nautilus.setItemSlot(EquipmentSlot.BODY,
+                        new ItemStack(Items.IRON_NAUTILUS_ARMOR));
+            }
+            AbstractContainerMenu menu = new NautilusInventoryMenu(
+                    CONTAINER_ID, inventory, new SimpleContainer(0), nautilus, 0);
+            menu.setSynchronizer(new Sync());
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "case");
+            line.addProperty("id", id);
+            line.addProperty("shape", "nautilus_mount");
+            line.addProperty("creative", creative);
+            JsonArray mountItems = new JsonArray();
+            if (variant % 2 == 0) {
+                mountItems.add(idCount(new ItemStack(Items.SADDLE)));
+            } else {
+                mountItems.add(idCount(ItemStack.EMPTY));
+            }
+            if (variant % 3 == 1) {
+                mountItems.add(idCount(new ItemStack(Items.IRON_NAUTILUS_ARMOR)));
+            } else {
+                mountItems.add(idCount(ItemStack.EMPTY));
+            }
+            line.add("container", mountItems);
+            line.add("inventory", inventoryItems(inventory));
+            line.add("data", new JsonArray());
+            line.add("open", outcome(menu));
+            JsonArray steps = new JsonArray();
+            for (int[] click : clickSequence(random, menu.slots.size())) {
+                menu.suppressRemoteUpdates();
+                menu.clicked(click[0], click[1], INPUTS[click[2]], player);
+                menu.setRemoteCarried(HashedStack.EMPTY);
+                menu.resumeRemoteUpdates();
+                menu.broadcastChanges();
+                JsonObject step = new JsonObject();
+                step.addProperty("slot", click[0]);
+                step.addProperty("button", click[1]);
+                step.addProperty("input", click[2]);
+                step.addProperty("menuButton", false);
                 step.add("outcome", outcome(menu));
                 steps.add(step);
             }
@@ -1747,6 +1832,16 @@ public final class MenuOracle {
         }
 
         @Override
+        public int getNextEntityId() {
+            // 假世界没有区块源，但实体构造函数要一个 ID；直接用官方的全局计数器。
+            // The fake level has no chunk source; the entity constructor still
+            // needs an id, so use vanilla's global counter directly.
+            return 1000 + idCounter++;
+        }
+
+        private static int idCounter = 1;
+
+        @Override
         public BlockState getBlockState(BlockPos pos) {
             return blocks.getOrDefault(pos, Blocks.AIR.defaultBlockState());
         }
@@ -1925,6 +2020,15 @@ public final class MenuOracle {
         @Override
         public RegistryAccess registryAccess() {
             return REGISTRIES;
+        }
+
+        @Override
+        public boolean isCreative() {
+            // `ArmorSlot.mayPickup` 会经 `ServerPlayer.gameMode` 查这个；
+            // 假玩家没有 gameMode，用 abilities.instabuild 代替。
+            // `ArmorSlot.mayPickup` reaches `ServerPlayer.gameMode`; the fake
+            // player has none, so use abilities.instabuild instead.
+            return getAbilities().instabuild;
         }
 
         @Override
