@@ -7,12 +7,15 @@
 use mc_bamboo_core::{BlockPos, Vec3};
 
 use crate::{
-    entity::{Entity, EntityUid, ctx::EntityCtx},
+    entity::{
+        Entity, EntityUid,
+        ctx::{Command, EntityCtx},
+    },
     game_event::{GameEvent, vibration::VibrationUser},
 };
 
 use super::{
-    Mob, MobEvent,
+    DamageKind, DamageSource, Mob, MobEvent, MobType,
     brain::{
         Activity, ActivityData, Brain,
         behavior::{Class, Cx, Gate, Kind, MoveToTargetSink},
@@ -155,8 +158,10 @@ impl Behavior {
         const SET_WALK: &[(M, MemoryStatus)] =
             &[(M::AttackTarget, ValuePresent), (M::WalkTarget, Registered)];
         const MELEE: &[(M, MemoryStatus)] = &[
+            (M::LookTarget, Registered),
             (M::AttackTarget, ValuePresent),
-            (M::AttackCoolingDown, Registered),
+            (M::AttackCoolingDown, ValueAbsent),
+            (M::NearestVisibleLivingEntities, ValuePresent),
         ];
         match self {
             Self::Emerging => EMERGING,
@@ -496,10 +501,27 @@ impl Behavior {
                 let Some(target) = cx.memories.entity(M::AttackTarget) else {
                     return false;
                 };
-                if cx.memories.has(M::AttackCoolingDown) {
+                if cx.memories.has(M::AttackCoolingDown) || !can_target_entity(cx, target) {
                     return false;
                 }
-                if !can_target_entity(cx, target) {
+                // `Mob.isWithinMeleeAttackRange`：`getBoundingBox().inflate(DEFAULT_ATTACK_REACH, 0, ...)`
+                // 与目标 hitbox 相交。`DEFAULT_ATTACK_REACH = sqrt(2.04) - 0.6`.
+                let reach = 2.04_f64.sqrt() - 0.6000000238418579_f64;
+                let attack_box = cx.me.bounding_box().inflate(reach, 0.0, reach);
+                let Some(view) = super::brain::sensor::living(cx, target) else {
+                    return false;
+                };
+                if !attack_box.intersects(view.bounding_box) {
+                    return false;
+                }
+                // `NearestVisibleLivingEntities.contains(target)`。
+                let visible = cx
+                    .memories
+                    .get(M::NearestVisibleLivingEntities)
+                    .is_some_and(|value| {
+                        matches!(value, MemoryValue::Visible(list) if list.entities.contains(&target))
+                    });
+                if !visible {
                     return false;
                 }
                 entity_event(cx, 4);
@@ -530,7 +552,8 @@ fn activities() -> Vec<ActivityData> {
             ],
         ),
         ActivityData::sequential(Activity::Emerge, 5, vec![w(Behavior::Emerging)])
-            .when(vec![(M::IsEmerging, ValuePresent)]),
+            .when(vec![(M::IsEmerging, ValuePresent)])
+            .erasing(vec![M::IsEmerging]),
         ActivityData::with_priorities(
             Activity::Dig,
             vec![(0, w(Behavior::ForceUnmount)), (1, w(Behavior::Digging))],
@@ -557,7 +580,8 @@ fn activities() -> Vec<ActivityData> {
             ],
         ),
         ActivityData::sequential(Activity::Roar, 10, vec![w(Behavior::Roar)])
-            .when(vec![(M::RoarTarget, ValuePresent)]),
+            .when(vec![(M::RoarTarget, ValuePresent)])
+            .erasing(vec![M::RoarTarget]),
         ActivityData::sequential(
             Activity::Fight,
             10,
@@ -570,28 +594,45 @@ fn activities() -> Vec<ActivityData> {
                 w(Behavior::MeleeAttack),
             ],
         )
-        .when(vec![(M::AttackTarget, ValuePresent)]),
+        .when(vec![(M::AttackTarget, ValuePresent)])
+        .erasing(vec![M::AttackTarget]),
         ActivityData::sequential(
             Activity::Investigate,
             5,
             vec![w(Behavior::SetRoarTarget), w(Behavior::GoToTargetLocation)],
         )
-        .when(vec![(M::DisturbanceLocation, ValuePresent)]),
+        .when(vec![(M::DisturbanceLocation, ValuePresent)])
+        .erasing(vec![M::DisturbanceLocation]),
         ActivityData::sequential(
             Activity::Sniff,
             5,
             vec![w(Behavior::SetRoarTarget), w(Behavior::Sniffing)],
         )
-        .when(vec![(M::IsSniffing, ValuePresent)]),
+        .when(vec![(M::IsSniffing, ValuePresent)])
+        .erasing(vec![M::IsSniffing]),
     ]
 }
 
 /// 监守者的大脑：两个传感器（`NEAREST_PLAYERS` / `WARDEN_ENTITY_SENSOR`）+ 8 个活动。
+/// 官方 `BRAIN_PROVIDER` 还显式登记四个只由实体方法读写的记忆。
+///
+/// The warden brain: two sensors and eight activities. Vanilla's `BRAIN_PROVIDER`
+/// also registers four memories read/written only by the entity's own methods.
 pub fn brain() -> Brain {
-    Brain::new(
-        &[SensorKind::NearestPlayers, SensorKind::WardenEntitySensor],
-        activities(),
-    )
+    use crate::entity::mob::brain::{BrainTemplate, TemplateCache, template_cache};
+    static TEMPLATE: TemplateCache = template_cache();
+    Brain::cached(&TEMPLATE, || {
+        BrainTemplate::new_with_memories(
+            &[SensorKind::NearestPlayers, SensorKind::WardenEntitySensor],
+            &[
+                M::NearestVisibleNemesis,
+                M::RecentProjectile,
+                M::TouchCooldown,
+                M::VibrationCooldown,
+            ],
+            activities(),
+        )
+    })
 }
 
 /// `WardenAi.updateActivity`：按这个顺序选第一个有效的活动。
@@ -637,9 +678,29 @@ pub fn warden_entity_sensor(cx: &mut Cx) {
         .set_or_erase(M::NearestAttackable, chosen.map(MemoryValue::Entity));
 }
 
-/// `Warden.canTargetEntity` 的可观察部分：不是自己、不是监守者、还在世界里。
+/// `Warden.canTargetEntity`：活着的 LivingEntity、不是自己、不在创造 / 旁观模式、
+/// 不是另一个监守者、还没被移除。
+///
+/// `Warden.canTargetEntity`: a living entity, not self, not creative / spectator,
+/// not another warden and not removed.
 fn can_target_entity(cx: &Cx, uid: crate::entity::EntityUid) -> bool {
-    uid != cx.me.id && !cx.me.removed
+    if uid == cx.me.id || cx.me.removed {
+        return false;
+    }
+    let Some(view) = super::brain::sensor::living(cx, uid) else {
+        return false;
+    };
+    if !view.alive {
+        return false;
+    }
+    if view.player {
+        // `NO_CREATIVE_OR_SPECTATOR`：生存(0) / 冒险(2) 可以，创造(1) / 旁观(3) 不行。
+        return !matches!(
+            cx.ctx.player(uid).map(|player| player.game_mode),
+            Some(1 | 3)
+        );
+    }
+    view.mob_type != Some(MobType::Warden)
 }
 
 /// 只读实体位置（`EntityCtx` 提供视图）。
@@ -668,12 +729,40 @@ fn sound(cx: &mut Cx, name: &'static str, volume: f32, pitch: f32) {
     });
 }
 
-fn melee_damage(_cx: &mut Cx, _target: crate::entity::EntityUid) {
-    // 近战伤害落地在 `living::do_hurt_target`，对拍场景按伤害帧核；这里先记冷却与事件。
+/// `Warden.doHurtTarget`：`super.doHurtTarget`（ATTACK_DAMAGE = 30 的近战伤害）、
+/// `WARDEN_ATTACK_IMPACT`（`getVoicePitch` 消耗实体随机源两次）、40 刻音波冷却。
+fn melee_damage(cx: &mut Cx, target: crate::entity::EntityUid) {
+    super::living::do_hurt_target(cx.me, cx.mob, cx.ctx, target);
+    let first = cx.me.random.next_float();
+    let second = cx.me.random.next_float();
+    let pitch = (first - second) * 0.2 + 1.0;
+    cx.mob.events.push(MobEvent::Sound {
+        sound: "minecraft:entity.warden.attack_impact",
+        volume: 10.0,
+        pitch,
+        position: cx.me.position,
+        hostile: true,
+        seed: None,
+    });
 }
 
-fn sonic_boom_damage(_cx: &mut Cx, _target: crate::entity::EntityUid) {
-    // 音波穿墙伤害落地在伤害路径，对拍场景按血量帧核；这里先记冷却与声音。
+/// `target.hurtServer(damageSources().sonicBoom(warden), 10.0f)`：10 点穿墙伤害，
+/// 绕过护甲与保护附魔，伤害来源 `minecraft:sonic_boom`。
+fn sonic_boom_damage(cx: &mut Cx, target: crate::entity::EntityUid) {
+    let mut source = DamageSource::environment(DamageKind::SonicBoom).with_non_player_cause(true);
+    source.attacker = Some(cx.me.id);
+    source.direct = Some(cx.me.id);
+    source.attacker_uuid = Some(cx.mob.uuid);
+    source.attacker_type = Some(cx.mob.mob_type.entity_type());
+    source.position = Some(cx.me.position);
+    cx.ctx.emit(
+        Command::HurtPlayer {
+            target,
+            source,
+            amount: 10.0,
+        },
+        cx.me,
+    );
 }
 
 /// `Warden.increaseAngerAt(entity, amount, playSound)`：加愤怒、刷钻地冷却，
@@ -754,21 +843,19 @@ pub fn sync_client_anger(cx: &mut Cx) {
     cx.mob.warden.client_anger_level = cx.mob.warden.anger.get_active_anger(target);
 }
 
-/// `Warden.customServerAiStep`：跑大脑 → 推进振动监听者 → 每 20 刻衰减愤怒并同步
-/// 客户端等级 → 每刻末按官方顺序重选活动。
+/// `Warden.customServerAiStep`：官方在 `Warden.tick()` 里先跑
+/// `VibrationSystem.Ticker.tick`（回调设的记忆当刻就在 `super.tick()` 的脑 tick 里
+/// 递减），随后跑大脑、每 20 刻衰减愤怒并同步客户端等级、每刻末重选活动。
 ///
-/// `Warden.customServerAiStep`: tick the brain, advance the vibration listener,
-/// decay anger and sync the client level every 20 ticks, then reselect the activity.
+/// `Warden.customServerAiStep`: vanilla runs `VibrationSystem.Ticker.tick` first
+/// (its memories decay in the same tick's brain tick), then ticks the brain,
+/// decays anger / syncs the client level every 20 ticks and reselects the activity.
 pub fn custom_server_ai_step(
     me: &mut Entity,
     mob: &mut Mob,
     ctx: &mut dyn EntityCtx,
     decision_gap: i64,
 ) {
-    if let Some(mut brain) = mob.brain.take() {
-        let replaced = brain.tick_by(me, mob, ctx, decision_gap.max(1));
-        mob.brain = Some(Box::new(replaced.unwrap_or(*brain)));
-    }
     let now = ctx.blocks().game_time();
     let eye = Vec3::new(
         me.position.x,
@@ -780,11 +867,34 @@ pub fn custom_server_ai_step(
         .map(|listener| listener.vibration)
         .unwrap_or_default();
     {
-        let mut user = WardenVibrationUser { me: &*me, mob };
+        let mut user = WardenVibrationUser {
+            me: &mut *me,
+            mob,
+            ctx: &*ctx,
+        };
         crate::game_event::vibration::tick(&mut data, &mut user, now, Some(eye), false);
     }
     if let Some(listener) = mob.entity_listener.as_mut() {
         listener.vibration = data;
+    }
+    if let Some(mut brain) = mob.brain.take() {
+        let replaced = brain.tick_by(me, mob, ctx, decision_gap.max(1));
+        mob.brain = Some(Box::new(replaced.unwrap_or(*brain)));
+    }
+    // `Warden.customServerAiStep`：`(tickCount + getId()) % 120 == 0` 时给半径
+    // 20 内的玩家上 260 刻黑暗效果。
+    //
+    // `Warden.customServerAiStep`: every `(tickCount + id) % 120` ticks, darkness
+    // for 260 ticks on players within radius 20.
+    if (me.tick_count + me.id) % 120 == 0 {
+        ctx.emit(
+            Command::WardenDarkness {
+                center: me.position,
+                radius: 20,
+                ticks: 260,
+            },
+            me,
+        );
     }
     if me.tick_count % ANGER_TICK_DELAY == 0 {
         mob.warden.anger.tick();
@@ -803,8 +913,119 @@ pub fn custom_server_ai_step(
 ///
 /// `Warden$VibrationUser`: radius 16, eye position, anger and disturbance on arrival.
 struct WardenVibrationUser<'a> {
-    me: &'a Entity,
+    me: &'a mut Entity,
     mob: &'a mut Mob,
+    ctx: &'a dyn EntityCtx,
+}
+
+/// `Warden.increaseAngerAt` 里刷钻地冷却，不经过行为的 `Cx`。
+///
+/// Refresh the dig cooldown like `Warden.increaseAngerAt`, without a behaviour `Cx`.
+fn refresh_dig_cooldown(mob: &mut Mob) {
+    if let Some(brain) = mob.brain.as_mut()
+        && brain.memories.has(M::DigCooldown)
+    {
+        brain.memories.set_with_ttl(
+            M::DigCooldown,
+            MemoryValue::Unit,
+            i64::from(DIGGING_COOLDOWN),
+        );
+    }
+}
+
+/// `WardenAi.setDisturbanceLocation` 的非 `Cx` 版本（振动回调）。
+///
+/// `WardenAi.setDisturbanceLocation` for the vibration callback, without a `Cx`.
+fn set_disturbance(mob: &mut Mob, pos: BlockPos) {
+    if mob.warden.anger.anger_level().is_angry()
+        || mob
+            .brain
+            .as_ref()
+            .is_some_and(|brain| brain.memories.has(M::AttackTarget))
+    {
+        return;
+    }
+    refresh_dig_cooldown(mob);
+    if let Some(brain) = mob.brain.as_mut() {
+        brain
+            .memories
+            .set_with_ttl(M::SniffCooldown, MemoryValue::Unit, DISTURBANCE_EXPIRY);
+        brain.memories.set_with_ttl(
+            M::LookTarget,
+            MemoryValue::Look(PositionTracker::at_block(pos)),
+            DISTURBANCE_EXPIRY,
+        );
+        brain.memories.set_with_ttl(
+            M::DisturbanceLocation,
+            MemoryValue::BlockPos(pos),
+            DISTURBANCE_EXPIRY,
+        );
+        brain.memories.erase(M::WalkTarget);
+    }
+}
+
+impl WardenVibrationUser<'_> {
+    fn entity_position(&self, uid: EntityUid) -> Option<Vec3> {
+        self.ctx
+            .player(uid)
+            .map(|player| player.position)
+            .or_else(|| self.ctx.other(uid).map(|other| other.position))
+    }
+
+    /// `Warden.canTargetEntity` 的可观察部分：不是自己、还在世界里。
+    fn can_target(&self, uid: EntityUid) -> bool {
+        uid != self.me.id && !self.me.removed && self.entity_position(uid).is_some()
+    }
+
+    /// `warden.closerThan(entity, distance)`。
+    fn closer_than(&self, uid: EntityUid, distance: f64) -> bool {
+        self.entity_position(uid)
+            .is_some_and(|p| p.subtract(self.me.position).length_sqr() <= distance * distance)
+    }
+
+    /// `Warden.increaseAngerAt(entity, amount, playSound)`：刷钻地冷却、加愤怒、
+    /// 从非玩家目标转成 ANGRY 玩家时擦掉 `ATTACK_TARGET`、按 `playSound` 播
+    /// 监听声（`getVoicePitch` 消耗实体随机源两次）。
+    fn increase_anger(&mut self, uid: EntityUid, amount: i32, play_sound: bool) {
+        if self.mob.no_ai || !self.can_target(uid) {
+            return;
+        }
+        refresh_dig_cooldown(self.mob);
+        let was_not_player = self
+            .mob
+            .brain
+            .as_ref()
+            .and_then(|brain| brain.memories.entity(M::AttackTarget))
+            .is_none_or(|target| target >= crate::entity::FIRST_ENTITY_ID);
+        let uuid = crate::archive::entity::entity_uuid(uid).to_be_bytes();
+        let is_player = uid < crate::entity::FIRST_ENTITY_ID;
+        let anger = self
+            .mob
+            .warden
+            .anger
+            .increase_anger(uid, uuid, amount, is_player);
+        if is_player
+            && was_not_player
+            && super::warden::AngerLevel::by_anger(anger).is_angry()
+            && let Some(brain) = self.mob.brain.as_mut()
+        {
+            brain.memories.erase(M::AttackTarget);
+        }
+        if play_sound && self.mob.warden.pose != super::warden::WardenPose::Roaring {
+            // `getVoicePitch()` 取两次实体随机数；音高本身不影响对拍。
+            let first = self.me.random.next_float();
+            let second = self.me.random.next_float();
+            let pitch = (first - second) * 0.2 + 1.0;
+            self.mob.events.push(MobEvent::Sound {
+                sound: self.mob.warden.anger.anger_level().listening_sound(),
+                volume: 10.0,
+                pitch,
+                position: self.me.position,
+                hostile: true,
+                seed: None,
+            });
+        }
+    }
 }
 
 impl VibrationUser for WardenVibrationUser<'_> {
@@ -833,21 +1054,35 @@ impl VibrationUser for WardenVibrationUser<'_> {
 
     fn on_receive(
         &mut self,
+        event: GameEvent,
+        source: BlockPos,
+        source_player: Option<EntityUid>,
+        distance: f32,
+    ) {
+        self.on_receive_full(event, source, source_player, None, None, distance);
+    }
+
+    /// `Warden$VibrationUser.onReceiveVibration`：e4 是源实体、e5 是射弹拥有者。
+    ///
+    /// `Warden$VibrationUser.onReceiveVibration`: e4 is the source entity and e5 the
+    /// projectile owner.
+    fn on_receive_full(
+        &mut self,
         _event: GameEvent,
         source: BlockPos,
         source_player: Option<EntityUid>,
+        source_entity: Option<EntityUid>,
+        projectile_owner: Option<EntityUid>,
         _distance: f32,
     ) {
         if self.me.removed {
             return;
         }
+        let mut target_pos = source;
         if let Some(brain) = self.mob.brain.as_mut() {
             brain
                 .memories
                 .set_with_ttl(M::VibrationCooldown, MemoryValue::Unit, 40);
-            brain
-                .memories
-                .set_with_ttl(M::RecentProjectile, MemoryValue::Unit, 100);
         }
         self.mob.events.push(MobEvent::EntityEvent { event: 61 });
         self.mob.events.push(MobEvent::Sound {
@@ -858,33 +1093,39 @@ impl VibrationUser for WardenVibrationUser<'_> {
             hostile: true,
             seed: None,
         });
-        if let Some(uid) = source_player {
-            let uuid = crate::archive::entity::entity_uuid(uid).to_be_bytes();
-            self.mob.warden.anger.increase_anger(
-                uid,
-                uuid,
-                35,
-                uid < crate::entity::FIRST_ENTITY_ID,
-            );
-            self.mob.warden.client_anger_level = self.mob.warden.anger.get_active_anger(None);
+        let recent_projectile = self
+            .mob
+            .brain
+            .as_ref()
+            .is_some_and(|brain| brain.memories.has(M::RecentProjectile));
+        if let Some(owner) = projectile_owner {
+            if self.closer_than(owner, 30.0) || recent_projectile {
+                if self.can_target(owner)
+                    && let Some(pos) = self.entity_position(owner)
+                {
+                    target_pos = BlockPos::containing(pos);
+                }
+                self.increase_anger(owner, 35, false);
+            } else {
+                self.increase_anger(owner, 10, true);
+                if let Some(brain) = self.mob.brain.as_mut() {
+                    brain
+                        .memories
+                        .set_with_ttl(M::RecentProjectile, MemoryValue::Unit, 100);
+                }
+            }
+        } else if let Some(uid) = source_entity.or(source_player) {
+            self.increase_anger(uid, 35, true);
         }
-        // 非 ANGRY 时设调查点；射弹分支的 10 点愤怒留给后续场景。
-        // Set the disturbance when not ANGRY; the projectile 10-anger branch is later.
-        if !self.mob.warden.anger.anger_level().is_angry()
-            && let Some(brain) = self.mob.brain.as_mut()
-        {
-            brain
-                .memories
-                .set_with_ttl(M::SniffCooldown, MemoryValue::Unit, 100);
-            brain.memories.set_with_ttl(
-                M::LookTarget,
-                MemoryValue::Look(PositionTracker::at_block(source)),
-                100,
-            );
-            brain
-                .memories
-                .set_with_ttl(M::DisturbanceLocation, MemoryValue::BlockPos(source), 100);
-            brain.memories.erase(M::WalkTarget);
+
+        // 非 ANGRY 且 (无射弹拥有者 / 没有活动嫌疑 / 活动嫌疑不是源实体) 时设调查点。
+        let angry = self.mob.warden.anger.anger_level().is_angry();
+        let active = angry
+            .then(|| self.mob.warden.anger.get_active_entity())
+            .flatten();
+        let allow = projectile_owner.is_none() || active.is_none() || active != source_entity;
+        if !angry && allow {
+            set_disturbance(self.mob, target_pos);
         }
     }
 

@@ -241,6 +241,17 @@ impl ActivityData {
         self.conditions = conditions;
         self
     }
+
+    /// `ActivityData.create(..., MemoryModuleType)`：退出该活动时擦掉的记忆。
+    /// 官方那个重载把同一个记忆同时用作 `VALUE_PRESENT` 进入条件和退出擦除项。
+    ///
+    /// `ActivityData.create(..., MemoryModuleType)`: memories erased when the
+    /// activity stops. Vanilla's overload uses that memory both as the
+    /// `VALUE_PRESENT` entry condition and as the exit-erased item.
+    pub fn erasing(mut self, memories: Vec<MemoryType>) -> Self {
+        self.erase_when_stopped = memories;
+        self
+    }
 }
 
 /// 大脑里排好序的一个行为。

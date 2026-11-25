@@ -1933,6 +1933,10 @@ pub enum DamageKind {
     /// the overworld. `INTENTIONAL_GAME_DESIGN`, exhaustion 0.1, `always`
     /// scaling, `message_id` `badRespawnPoint`.
     BadRespawnPoint,
+    /// 监守者的音波，`minecraft:sonic_boom`：穿墙、绕过护甲。
+    ///
+    /// The warden's `minecraft:sonic_boom`: passes through walls and armor.
+    SonicBoom,
 }
 
 impl DamageKind {
@@ -1973,6 +1977,7 @@ impl DamageKind {
             Self::LightningBolt => "minecraft:lightning_bolt",
             Self::SulfurCubeHot => "minecraft:sulfur_cube_hot",
             Self::BadRespawnPoint => "minecraft:bad_respawn_point",
+            Self::SonicBoom => "minecraft:sonic_boom",
         }
     }
 
@@ -2034,6 +2039,7 @@ impl DamageKind {
             Self::LightningBolt => "lightningBolt",
             Self::SulfurCubeHot => "sulfurCubeHot",
             Self::BadRespawnPoint => "badRespawnPoint",
+            Self::SonicBoom => "sonic_boom",
         }
     }
 
@@ -2076,6 +2082,7 @@ impl DamageKind {
             Self::LightningBolt,
             Self::SulfurCubeHot,
             Self::BadRespawnPoint,
+            Self::SonicBoom,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -2114,6 +2121,7 @@ impl DamageKind {
                 | Self::IndirectMagic
                 | Self::Wither
                 | Self::EnderPearl
+                | Self::SonicBoom
         )
     }
 
@@ -2124,7 +2132,7 @@ impl DamageKind {
 
     /// `#bypasses_enchantments`：保护附魔不生效。
     pub const fn bypasses_enchantments(self) -> bool {
-        matches!(self, Self::OutOfWorld | Self::GenericKill)
+        matches!(self, Self::OutOfWorld | Self::GenericKill | Self::SonicBoom)
     }
 
     /// `#is_fire`。
@@ -2165,7 +2173,7 @@ impl DamageKind {
     pub const fn scales_with_difficulty(self) -> bool {
         matches!(
             self,
-            Self::Explosion | Self::PlayerExplosion | Self::BadRespawnPoint
+            Self::Explosion | Self::PlayerExplosion | Self::BadRespawnPoint | Self::SonicBoom
         )
     }
 

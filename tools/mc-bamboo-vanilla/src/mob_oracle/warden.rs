@@ -241,6 +241,7 @@ impl Report {
                     world.with_entity_mut(warden_id, &mut |entity| {
                         entity.with_mob(|_, mob| {
                             if let Some(listener) = mob.entity_listener.as_mut() {
+                                let player = case.first_id + 1;
                                 listener.vibration.current = Some(VibrationInfo {
                                     event: GameEvent::Step,
                                     distance: 5.0,
@@ -249,7 +250,9 @@ impl Report {
                                         f64::from(vib[2]) + 0.5,
                                         f64::from(vib[3]) + 0.5,
                                     ),
-                                    source_player: Some(case.first_id + 1),
+                                    source_player: (vib[4] == 1).then_some(player),
+                                    source_entity: (vib[4] == 1).then_some(player),
+                                    projectile_owner: (vib[5] == 1).then_some(player),
                                 });
                                 listener.vibration.travel = 0;
                             }
@@ -258,6 +261,11 @@ impl Report {
                 }
                 let mut world = World::new(&mut level, &mut ticks);
                 world.tick_entities();
+            }
+            // `brain::dump` 用 `MobLevel.players` 解析 `EntityTracker`；真实受伤链路
+            // 的玩家状态在 `game` 里，这里每刻同步一份只读视图。
+            if let Some(views) = level.game.as_ref().map(|game| game.views()) {
+                level.players = views;
             }
 
             let Some(entity) = level.entities.get(warden_id) else {

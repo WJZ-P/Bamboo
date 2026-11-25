@@ -18,6 +18,14 @@ pub struct VibrationInfo {
     pub pos: Vec3,
     /// 发出事件的玩家（`tryGetPlayer`）；存档里不写，运行时传给尖啸体。
     pub source_player: Option<crate::entity::EntityUid>,
+    /// `VibrationInfo.getEntity()`：发出事件的源实体；存档里不写。
+    ///
+    /// `VibrationInfo.getEntity()`: the source entity; not written to disk.
+    pub source_entity: Option<crate::entity::EntityUid>,
+    /// `VibrationInfo.getProjectileOwner()`：射弹的拥有者；存档里不写。
+    ///
+    /// `VibrationInfo.getProjectileOwner()`: the projectile owner; not written to disk.
+    pub projectile_owner: Option<crate::entity::EntityUid>,
 }
 
 /// `VibrationSelector`：同一刻来的候选只留距离最近、等距时频率最高的一个。
@@ -174,6 +182,8 @@ impl VibrationInfo {
             distance,
             pos: Vec3::new(xyz[0], xyz[1], xyz[2]),
             source_player: None,
+            source_entity: None,
+            projectile_owner: None,
         })
     }
 }
@@ -199,6 +209,24 @@ pub trait VibrationUser {
         source_player: Option<crate::entity::EntityUid>,
         distance: f32,
     );
+    /// `VibrationSystem.Ticker` 的完整回调：额外带源实体和射弹拥有者。默认实现
+    /// 只转发旧签名，实体监听者可以覆写拿到这两个实体。
+    ///
+    /// The full `VibrationSystem.Ticker` callback with the source entity and
+    /// projectile owner. The default forwards to [`Self::on_receive`]; entity
+    /// listeners may override it to use both entities.
+    fn on_receive_full(
+        &mut self,
+        event: GameEvent,
+        source: BlockPos,
+        source_player: Option<crate::entity::EntityUid>,
+        source_entity: Option<crate::entity::EntityUid>,
+        projectile_owner: Option<crate::entity::EntityUid>,
+        distance: f32,
+    ) {
+        let _ = (source_entity, projectile_owner);
+        self.on_receive(event, source, source_player, distance);
+    }
     /// `calculateTravelTimeInTicks` 的默认值 `Mth.floor(distance)`。
     fn travel_ticks(&self, distance: f32) -> i32 {
         mc_bamboo_core::mth::floor_f32(distance)
@@ -264,10 +292,12 @@ pub fn tick<U: VibrationUser>(
         } else {
             let source = BlockPos::containing(info.pos);
             let listener = BlockPos::containing(target);
-            user.on_receive(
+            user.on_receive_full(
                 info.event,
                 source,
                 info.source_player,
+                info.source_entity,
+                info.projectile_owner,
                 distance_between_in_blocks(source, listener),
             );
             data.current = None;
@@ -369,6 +399,8 @@ mod tests {
             distance,
             pos: Vec3::new(0.5, 0.5, 0.5),
             source_player: None,
+            source_entity: None,
+            projectile_owner: None,
         }
     }
 

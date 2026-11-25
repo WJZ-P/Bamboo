@@ -337,6 +337,8 @@ impl World<'_> {
                     distance: source.distance_to_sqr(listener_pos).sqrt() as f32,
                     pos: source,
                     source_player: context.source_player,
+                    source_entity: context.source_entity,
+                    projectile_owner: context.projectile_owner,
                 };
                 let mut record = |entity: &mut crate::entity::Entity| {
                     entity.with_mob(|_, mob| {
