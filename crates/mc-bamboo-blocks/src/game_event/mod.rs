@@ -1,5 +1,7 @@
 //! 游戏事件：`GameEvent` 注册表、通知半径和振动频率表（`VibrationSystem`）。
 
+pub mod registry;
+
 /// `GameEvent` 注册表里的条目，顺序就是注册顺序，判别值即网络 / 注册表 id。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
