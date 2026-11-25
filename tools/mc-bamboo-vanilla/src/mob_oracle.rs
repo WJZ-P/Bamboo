@@ -61,6 +61,7 @@ mod phantom;
 mod pig_ride;
 mod pillager;
 mod projectile;
+mod raid;
 mod sculk_sensor;
 mod shot;
 mod skeleton_death;
@@ -146,6 +147,7 @@ enum Line {
     WitchThrow(Box<witch_throw::WitchThrowCase>),
     NaturalSpawn(natural_spawn::Case),
     PatrolSpawn(patrol_spawn::Case),
+    RaidScene(raid::Case),
     StructureSpawn(structure_spawn::Case),
     GenSpawn(gen_spawn::Case),
     PandaGenes(PandaGenesCase),
@@ -1912,6 +1914,7 @@ impl Report {
                 Line::WitchThrow(case) => self.replay_witch_throw(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::PatrolSpawn(case) => self.replay_patrol_spawn(&case)?,
+                Line::RaidScene(case) => self.replay_raid(&case),
                 Line::StructureSpawn(case) => self.replay_structure_spawn(&case)?,
                 Line::GenSpawn(case) => self.replay_gen_spawn(&case),
                 Line::PandaGenes(case) => self.replay_panda_genes(&case),

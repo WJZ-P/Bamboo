@@ -109,6 +109,9 @@ pub mod player_weapon;
 pub mod poi_query;
 mod pos_map;
 mod profiler;
+#[cfg(feature = "oracle-samples")]
+pub mod raid;
+#[cfg(not(feature = "oracle-samples"))]
 mod raid;
 pub mod region;
 #[cfg(feature = "oracle-samples")]

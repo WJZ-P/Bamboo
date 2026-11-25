@@ -7,6 +7,11 @@
 //! wave tables and world-free predicates live in `mc_bamboo_blocks::entity::raid`;
 //! this module only drives a `Region`.
 
+#[cfg(feature = "oracle-samples")]
+mod replay;
+#[cfg(feature = "oracle-samples")]
+pub use replay::*;
+
 use mc_bamboo_blocks::{
     World,
     entity::{
@@ -617,16 +622,26 @@ fn spawn_group_plan(raid: &mut Raid, difficulty: i32, pos: BlockPos, alive: i32)
     raid.total_health = 0.0;
     let bonus = raid.should_spawn_bonus_group(alive);
     let mut members = Vec::new();
-    for kind in [RaiderType::Pillager, RaiderType::Witch] {
+    // 官方 `RaiderType.VALUES` 有五个类型，spawnGroup 每个都要走一次
+    // `getPotentialBonusSpawns`（后面几期未建模的类型不刷实体，但仍取其随机
+    // 数，否则随机源状态会和官方错开）。
+    //
+    // Official `RaiderType.VALUES` has five entries; `spawnGroup` calls
+    // `getPotentialBonusSpawns` for each, so even types not modelled yet draw
+    // from the same random source.
+    for kind in RaiderType::VALUES {
         let def = raid.default_num_spawns(kind, wave, bonus);
         let extra =
             Raid::potential_bonus_spawns(kind, wave, difficulty, bonus, &mut |b| raid.next_int(b));
         let mob = match kind {
-            RaiderType::Pillager => MobType::Pillager,
-            _ => MobType::Witch,
+            RaiderType::Pillager => Some(MobType::Pillager),
+            RaiderType::Witch => Some(MobType::Witch),
+            _ => None,
         };
-        for _ in 0..(def + extra) {
-            members.push(mob);
+        if let Some(mob) = mob {
+            for _ in 0..(def + extra) {
+                members.push(mob);
+            }
         }
     }
     raid.wave_spawn_pos = None;
