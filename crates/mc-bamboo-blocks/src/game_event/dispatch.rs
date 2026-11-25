@@ -27,6 +27,7 @@ pub struct EventContext {
 }
 
 /// `GameEventListener.DeliveryMode`：感测体等都是 `BY_DISTANCE`。
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeliveryMode {
     ByDistance,
@@ -237,6 +238,37 @@ pub fn valid_vibration(event: GameEvent, context: EventContext) -> bool {
     !context
         .affected_state
         .is_some_and(|state| state.is_tagged(block_tags::DAMPENS_VIBRATIONS))
+}
+
+impl World<'_> {
+    /// 把一条投递交给具体的监听者。方块实体用 `with_block_entity` 临时取出，
+    /// 和官方 `handleGameEvent` 一样当场决定是否记候选。
+    pub(crate) fn deliver_game_event(&mut self, delivery: Delivery) {
+        let ListenerRef::BlockEntity(pos) = delivery.listener else {
+            return;
+        };
+        let event = delivery.event;
+        let context = delivery.context;
+        let source = delivery.source;
+        let listener_pos = delivery.position;
+        let now = self.game_time();
+        if !valid_vibration(event, context) || is_occluded(self, source, listener_pos) {
+            return;
+        }
+        let source_block = BlockPos::containing(source);
+        self.with_block_entity::<crate::behaviour::misc::sculk_entity::SculkSensorEntity, _>(
+            pos,
+            |entity, world| {
+                if entity.listener.current.is_some()
+                    || !entity.can_receive_vibration(world, event, source_block)
+                {
+                    return;
+                }
+                entity.handle_game_event(event, source, listener_pos, now);
+                world.level_mut().wake_block_entity(pos);
+            },
+        );
+    }
 }
 
 #[cfg(test)]

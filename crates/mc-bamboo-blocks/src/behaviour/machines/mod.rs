@@ -23,7 +23,7 @@ mod cooking;
 mod daylight_detector;
 mod diode;
 mod lectern;
-mod note_block;
+pub(crate) mod note_block;
 mod observer;
 mod piston;
 mod piston_entity;

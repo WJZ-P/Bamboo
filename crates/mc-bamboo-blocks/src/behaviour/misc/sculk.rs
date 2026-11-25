@@ -1,7 +1,6 @@
 //! `SculkSensorBlock`、`CalibratedSculkSensorBlock`、`SculkShriekerBlock`、`SculkCatalystBlock`。
 //!
-//! 这个世界没有振动和实体，感测器不会被触发，幽匿尖啸体也不会叫。
-//! 这里只有放置、含水、把状态放回去的计划刻，还有被破坏时的邻居更新。
+//! 感测体的振动行为在 [`super::sculk_entity`]；这里管状态、计划刻和红石输出。
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, sounds::sound_event};
@@ -10,6 +9,7 @@ use crate::{
     behaviour::{
         Behaviour,
         common::{default_state, is_water_source, tick_water_if_waterlogged},
+        misc::sculk_entity,
     },
     context::PlaceContext,
     state::{
@@ -23,7 +23,7 @@ use crate::{
 pub(super) struct SculkSensor;
 
 /// `updateNeighbours`。
-fn update_neighbours(state: BlockState, world: &mut World, pos: BlockPos) {
+pub(crate) fn update_neighbours(state: BlockState, world: &mut World, pos: BlockPos) {
     world.update_neighbors_at(pos, state.block());
     world.update_neighbors_at(pos.below(), state.block());
 }
@@ -95,6 +95,30 @@ impl Behaviour for SculkSensor {
         }
     }
 
+    /// 放下方块时挂上方块实体，和官方 `newBlockEntity` 一致。
+    fn on_place(&self, _state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
+        if !world.has_block_entity(pos) {
+            world.set_block_entity(sculk_entity::create_block_entity(pos, false));
+        }
+    }
+
+    /// ACTIVE 时比较器读最后一次振动频率。
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        if state.get(SCULK_SENSOR_PHASE) == SculkSensorPhase::Active {
+            world
+                .block_entity::<sculk_entity::SculkSensorEntity>(pos)
+                .map_or(0, sculk_entity::SculkSensorEntity::last_frequency)
+        } else {
+            0
+        }
+    }
+
     fn own_signal(&self, state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
         state.get(POWER)
     }
@@ -119,6 +143,12 @@ impl Behaviour for SculkSensor {
 pub(super) struct CalibratedSculkSensor;
 
 impl Behaviour for CalibratedSculkSensor {
+    fn on_place(&self, _state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
+        if !world.has_block_entity(pos) {
+            world.set_block_entity(sculk_entity::create_block_entity(pos, true));
+        }
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,
@@ -151,6 +181,16 @@ impl Behaviour for CalibratedSculkSensor {
 
     fn own_signal(&self, state: BlockState, world: &World, pos: BlockPos) -> i32 {
         SculkSensor.own_signal(state, world, pos)
+    }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        SculkSensor.analog_output_signal(state, world, pos, direction)
     }
 
     /// 校准型的那一面是输入，不往那边输出。

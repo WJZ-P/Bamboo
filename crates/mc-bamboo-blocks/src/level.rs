@@ -2463,6 +2463,15 @@ pub enum Effect {
         state: BlockState,
         except_initiator: bool,
     },
+    /// 振动飞行粒子：`VibrationParticleOption(BlockPositionSource(pos), travel)`。
+    /// 游戏层按位置源补上目标格，广播给 32 格内的玩家。
+    VibrationParticle {
+        pos: BlockPos,
+        x: f64,
+        y: f64,
+        z: f64,
+        travel: i32,
+    },
     /// `levelEvent(1502, pos, 0)`：红石火把开关得太频繁，烧坏时冒的那股烟。
     TorchBurnout { pos: BlockPos },
     /// 一次繁殖落地了幼崽。游戏层按 `lover` 找出求爱者，触发 `BRED_ANIMALS`。
