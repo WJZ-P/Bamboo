@@ -120,6 +120,7 @@ import net.minecraft.world.entity.animal.polarbear.PolarBear;
 import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.entity.monster.zombie.Zombie;
 import net.minecraft.world.entity.monster.zombie.Husk;
+import net.minecraft.world.entity.monster.warden.Warden;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.flag.FeatureFlags;
@@ -289,6 +290,10 @@ public final class MobOracle {
             out.write(Integer.toString(SharedConstants.getCurrentVersion().protocolVersion()));
             out.write(",\"tables\":" + tableHashes());
             out.write("}\n");
+            if ("warden_probe".equals(only)) {
+                playWardenProbe(official, log);
+                return;
+            }
             // 实测核对三叉戟的两个元数据索引，不靠类层级推导。
             // Cross-check the trident metadata indices against the official jar.
             out.write(tridentMetadataIds());
@@ -12857,6 +12862,43 @@ public final class MobOracle {
      * baby schedule transitions (3000/6000/10000/12000), panic from hurt and nearby zombie
      * plus calm-down, and idle strolling.
      */
+    /** 官方 Warden 在假世界里的可行性探针：跑 100 刻，看完整大脑能否运行。 */
+    private static void playWardenProbe(Official official, PrintStream log) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        java.util.Map<ResourceKey<Level>, ServerLevel> levels =
+                java.util.Map.of(Level.OVERWORLD, world);
+        official.server.levels = levels;
+        put(MinecraftServer.class, official.server, "levels", levels);
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        for (int x = -15; x <= 15; x++) {
+            for (int z = -15; z <= 15; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+            }
+        }
+        world.gameTime = 1000L;
+        world.getRandom().setSeed(1L);
+        Warden mob = (Warden) EntityTypes.WARDEN.create(world, EntitySpawnReason.TRIGGERED);
+        mob.setId(FIRST_ID);
+        mob.setUUID(new UUID(0L, 1L));
+        mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        world.tracked.add(mob);
+        for (int tick = 0; tick <= 100; tick++) {
+            if (tick > 0) {
+                world.gameTime = 1000L + tick;
+                mob.commonTick();
+                mob.tick();
+            }
+            String brain;
+            try {
+                brain = BrainOracle.dump(mob);
+            } catch (Exception error) {
+                brain = "dump-failed:" + error;
+            }
+            log.println("warden_probe tick=" + tick + " pose=" + mob.getPose()
+                    + " anger=" + mob.getClientAngerLevel() + " brain=" + brain);
+        }
+    }
+
     private static int playVillagerBrain(Official official, Writer out, String only) throws Exception {
         record VScene(String name, long clockStart, int ticks, boolean baby, String profession,
                 boolean hasJobSite, boolean hasMeetingPoint, int hurtTick, boolean hasZombie,
