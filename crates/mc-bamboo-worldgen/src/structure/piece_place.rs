@@ -101,6 +101,13 @@ pub trait PieceLevel {
     /// The nbt written to a block entity after `WorldGenRegion.getBlockEntity(...)`.
     /// The default drops it; only `FeaturePieceLevel` collects it.
     fn set_block_entity(&mut self, _x: i32, _y: i32, _z: i32, _nbt: &mc_bamboo_nbt::Tag) {}
+    /// `WorldGenLevel.addFreshEntityWithPassengers`：生成期实体记进区块。默认丢弃；
+    /// 只有收集实体行给交付盒子用的调用方需要实现。
+    ///
+    /// `WorldGenLevel.addFreshEntityWithPassengers`: record a generation-time entity
+    /// into the chunk. The default drops it; only callers that collect entity rows
+    /// for the delivered column implement it.
+    fn add_generated_entity(&mut self, _entity: crate::feature::GeneratedEntity) {}
     /// `LevelReader.getMinY()`。
     fn min_y(&self) -> i32;
     /// `LevelReader.getMaxY()`。

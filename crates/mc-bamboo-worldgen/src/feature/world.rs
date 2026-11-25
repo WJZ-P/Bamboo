@@ -58,6 +58,10 @@ pub struct FeatureWorld<'a> {
     /// `markPosForPostProcessing` call order. Kept as world positions here and
     /// packed per chunk/section when encoding the save.
     pub post_processing: Vec<(i32, i32, i32)>,
+    /// 结构件生成期放进世界的实体，按调用顺序。
+    ///
+    /// Entities added by structure pieces during generation, in call order.
+    pub entities: Vec<super::GeneratedEntity>,
 }
 
 impl<'a> FeatureWorld<'a> {
@@ -84,6 +88,7 @@ impl<'a> FeatureWorld<'a> {
                 .iter()
                 .flat_map(|chunk| chunk.iter().copied())
                 .collect(),
+            entities: Vec::new(),
         })
     }
 
@@ -105,6 +110,7 @@ impl<'a> FeatureWorld<'a> {
             deltas: self.deltas.map(last_writes),
             block_entities: self.block_entities,
             post_processing: self.post_processing,
+            entities: self.entities,
             unsupported,
         }
     }

@@ -2,7 +2,9 @@
 
 这一篇记录「开启结构生成」时的整块对拍：官方 26.3 在 JVM 里按 Director 的
 `ChunkStatus` 顺序生成 3×3 九宫格跑到 FEATURES，Bamboo 走游戏里同一条纯函数路径，
-**逐方块**比较 9 宫格。命令、口径与限制见下文；逐类型地物对拍见
+**逐方块**比较 9 宫格。海底神殿另在 `structure-place` 的 `E` 行逐项比
+3 只远古守卫者的类型、位置、`PersistenceRequired` 和满血；实体的 UUID / 朝向来自
+官方不带种子的 `RandomSource.create()`，不参与比较。命令、口径与限制见下文；逐类型地物对拍见
 [`docs/worldgen-e2e-coverage.md`](worldgen-e2e-coverage.md)。
 
 ## 命令
