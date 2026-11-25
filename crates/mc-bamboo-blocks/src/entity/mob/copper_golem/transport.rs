@@ -121,6 +121,12 @@ impl Transport {
 
     /// `TransportItemsBetweenContainers.tick`。
     pub fn tick(&mut self, cx: &mut Cx) {
+        if std::env::var_os("CG_DEBUG").is_some() {
+            eprintln!(
+                "cg tick time={} state={:?} it={} target={:?}",
+                cx.time, self.transport_state, self.interaction_tick, self.target
+            );
+        }
         let invalid = self.update_invalid_target(cx);
         if self.target.is_none() {
             self.stop(cx);
