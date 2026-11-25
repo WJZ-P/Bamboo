@@ -295,7 +295,10 @@ impl Behavior {
                 cx.memories
                     .set_with_ttl(BreezeShootRecovering, MemoryValue::Unit, 4);
                 let dx = view.position.x - cx.me.position.x;
-                let dy = view.position.y + f64::from(view.eye_height * 0.3_f32) - firing_y(cx);
+                // `target.getY(isPassenger ? 0.8 : 0.3)` = 脚底 + `getBbHeight() * 0.3`。
+                // 对拍的场景里目标不骑乘，恒取 0.3。
+                let height = view.bounding_box.max_y - view.bounding_box.min_y;
+                let dy = view.position.y + height * 0.3 - firing_y(cx);
                 let dz = view.position.z - cx.me.position.z;
                 let uncertainty = 5.0 - 4.0 * f64::from(cx.ctx.blocks().difficulty());
                 let shot = WindChargeShot {
