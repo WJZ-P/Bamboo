@@ -76,10 +76,6 @@ pub enum DolphinGoal {
     /// `FollowPlayerRiddenEntityGoal` (boat / nautilus): follow a player-ridden entity.
     /// No flags.
     FollowRidden,
-    /// `AvoidEntityGoal(Guardian, 8.0, 1.0, 1.0)`：躲开守卫者。MOVE。
-    ///
-    /// `AvoidEntityGoal(Guardian, 8.0, 1.0, 1.0)`: flee guardians. MOVE.
-    AvoidGuardian,
 }
 
 impl DolphinGoal {
@@ -93,7 +89,7 @@ impl DolphinGoal {
             Self::BreathAir | Self::SwimToTreasure { .. } | Self::SwimWithPlayer { .. } => {
                 &[Flag::Move, Flag::Look]
             }
-            Self::MoveToItem { .. } | Self::AvoidGuardian => &[Flag::Move],
+            Self::MoveToItem { .. } => &[Flag::Move],
             // `JumpGoal` 构造函数：`setFlags(MOVE, JUMP)`。
             // `JumpGoal` constructor: `setFlags(MOVE, JUMP)`.
             Self::Jump { .. } => &[Flag::Move, Flag::Jump],
@@ -111,7 +107,6 @@ impl DolphinGoal {
             Self::MoveToItem { .. } => "MoveToItemGoal",
             Self::PlayWithItems => "PlayWithItemsGoal",
             Self::FollowRidden => "FollowPlayerRiddenEntityGoal",
-            Self::AvoidGuardian => "AvoidEntityGoal",
         }
     }
 
@@ -176,12 +171,6 @@ impl DolphinGoal {
             // `FollowPlayerRiddenEntityGoal.canUse`: a player-ridden boat / nautilus
             // within five blocks. The fixture has none, and vanilla draws nothing.
             Self::FollowRidden => false,
-            // `AvoidEntityGoal.canUse`：找 8 格内的守卫者。夹具里没有，
-            // 官方的 `getNearestEntity` 返回 null 直接短路、不取随机数。
-            // `AvoidEntityGoal.canUse`: find a guardian within eight blocks. The
-            // fixture has none; vanilla's `getNearestEntity` short-circuits without
-            // drawing.
-            Self::AvoidGuardian => false,
         }
     }
 
@@ -230,8 +219,7 @@ impl DolphinGoal {
             Self::TryFindLiquid
             | Self::MoveToItem { .. }
             | Self::PlayWithItems
-            | Self::FollowRidden
-            | Self::AvoidGuardian => self.can_use(me, mob, ctx),
+            | Self::FollowRidden => self.can_use(me, mob, ctx),
         }
     }
 
@@ -282,7 +270,7 @@ impl DolphinGoal {
             Self::MoveToItem { cooldown } => *cooldown = 0,
             // 其余目标 `start` 为空。
             // The rest have an empty `start`.
-            Self::PlayWithItems | Self::FollowRidden | Self::AvoidGuardian => {}
+            Self::PlayWithItems | Self::FollowRidden => {}
         }
     }
 
@@ -314,7 +302,7 @@ impl DolphinGoal {
             Self::MoveToItem { .. } => {}
             // `PlayWithItemsGoal.stop` / `FollowPlayerRiddenEntityGoal.stop` 为空或清字段。
             // `PlayWithItemsGoal.stop` / `FollowPlayerRiddenEntityGoal.stop` are empty.
-            Self::PlayWithItems | Self::FollowRidden | Self::AvoidGuardian => {}
+            Self::PlayWithItems | Self::FollowRidden => {}
         }
         let _ = me;
     }
@@ -382,8 +370,7 @@ impl DolphinGoal {
             | Self::SwimToTreasure { .. }
             | Self::MoveToItem { .. }
             | Self::PlayWithItems
-            | Self::FollowRidden
-            | Self::AvoidGuardian => {}
+            | Self::FollowRidden => {}
         }
     }
 }
