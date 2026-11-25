@@ -1118,9 +1118,7 @@ impl KindData {
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
     use mc_bamboo_data::entity_types as facts;
     if kind == mc_bamboo_blocks::entity::mob::MobType::HappyGhast {
-        use mc_bamboo_protocol::packet::play::{
-            HAPPY_GHAST_LEASH_HOLDER, HAPPY_GHAST_STAYS_STILL,
-        };
+        use mc_bamboo_protocol::packet::play::{HAPPY_GHAST_LEASH_HOLDER, HAPPY_GHAST_STAYS_STILL};
         return match index {
             HAPPY_GHAST_LEASH_HOLDER => EntityData::HappyGhastLeashHolder(false),
             HAPPY_GHAST_STAYS_STILL => EntityData::HappyGhastStaysStill(false),

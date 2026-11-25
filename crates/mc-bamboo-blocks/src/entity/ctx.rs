@@ -774,8 +774,7 @@ impl BlockView for World<'_> {
     }
 
     fn biome_precipitates(&self, pos: BlockPos) -> bool {
-        self.level().precipitation_facts(pos).precipitation
-            != crate::weather::Precipitation::None
+        self.level().precipitation_facts(pos).precipitation != crate::weather::Precipitation::None
     }
 
     fn is_thundering(&self) -> bool {

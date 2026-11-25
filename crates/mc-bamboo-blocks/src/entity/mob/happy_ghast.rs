@@ -25,7 +25,7 @@ use super::{
         sensor::SensorKind,
         template_cache,
     },
-    interact::{MobInteraction, MobInteractRequest},
+    interact::{MobInteractRequest, MobInteraction},
     living,
 };
 use crate::entity::{Entity, EntityUid, ctx::EntityCtx};
@@ -380,11 +380,7 @@ pub fn restriction_radius(mob: &Mob) -> i32 {
 ///
 /// The server tail of `HappyGhast.tick`: count down `leashHolderTime` and the hover
 /// timeout and scan for players above. `me.tick_count` is `Entity.tickCount`.
-pub(in crate::entity::mob) fn tick_end(
-    me: &Entity,
-    mob: &mut Mob,
-    player_above: bool,
-) {
+pub(in crate::entity::mob) fn tick_end(me: &Entity, mob: &mut Mob, player_above: bool) {
     let state = &mut mob.happy_ghast;
     if state.leash_holder_time > 0 {
         state.leash_holder_time -= 1;
@@ -416,19 +412,21 @@ pub fn notify_leash_holder(mob: &mut Mob, leashed_supports_quad: bool) {
 ///
 /// `HappyGhast.continuousHeal()`: while alive, not dying and hurt, heal 1 point every
 /// 20 ticks in clouds or precipitating biomes, or every 600 ticks otherwise.
-pub(in crate::entity::mob) fn continuous_heal(
-    me: &Entity,
-    mob: &mut Mob,
-    fast: bool,
-) {
+pub(in crate::entity::mob) fn continuous_heal(me: &Entity, mob: &mut Mob, fast: bool) {
     if mob.dead || mob.death_time != 0 {
         return;
     }
     let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;
-    if !(max > mob.health) {
+    // `getMaxHealth() != getHealth()`：只会回血，所以只在确实缺血时继续。
+    // `getMaxHealth() != getHealth()`: healing only, so proceed when actually hurt.
+    if mob.health >= max {
         return;
     }
-    let period = if fast { FAST_HEALING_TICKS } else { SLOW_HEALING_TICKS };
+    let period = if fast {
+        FAST_HEALING_TICKS
+    } else {
+        SLOW_HEALING_TICKS
+    };
     if me.tick_count % period == 0 {
         mob.health = (mob.health + 1.0).min(max);
     }
@@ -476,11 +474,7 @@ pub fn interact(
 /// `Equippable.equipOnInteract`：装进 BODY 槽、消费一个、放装备音。
 ///
 /// `Equippable.equipOnInteract`: put it in the BODY slot, consume one, play the equip sound.
-fn equip_harness(
-    me: &mut Entity,
-    mob: &mut Mob,
-    req: &MobInteractRequest,
-) -> MobInteraction {
+fn equip_harness(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
     // 官方 `Equippable.equipOnInteract` 在目标槽非空时换下旧物品；这里同时保留
     // 生存模式消费一个手里的挽具。
     // Vanilla `Equippable.equipOnInteract` swaps out the old item when the slot is
@@ -601,12 +595,7 @@ pub enum Voice {
 /// `HappyGhast.addPassenger` / `removePassenger` 的护目镜音效和悬停超时。
 ///
 /// The goggle sounds and hover timeout of `HappyGhast.addPassenger` / `removePassenger`.
-pub fn after_add_passenger(
-    me: &mut Entity,
-    mob: &mut Mob,
-    was_vehicle: bool,
-    player_above: bool,
-) {
+pub fn after_add_passenger(me: &mut Entity, mob: &mut Mob, was_vehicle: bool, player_above: bool) {
     if !was_vehicle {
         living::play_sound(
             me,
@@ -680,12 +669,8 @@ pub fn ridden_input(input: RiddenInput, flying_speed: f64) -> Vec3 {
     if input.jumping {
         y += 0.5;
     }
-    Vec3::new(
-        f64::from(input.strafe),
-        f64::from(y),
-        f64::from(z),
-    )
-    .scale(3.900_000_095_367_431_6 * flying_speed)
+    Vec3::new(f64::from(input.strafe), f64::from(y), f64::from(z))
+        .scale(3.900_000_095_367_431_6 * flying_speed)
 }
 
 /// 服务端算骑乘输入时用到的玩家按键 / 朝向快照。
@@ -726,11 +711,7 @@ pub fn tick_ridden(me: &mut Entity, mob: &mut Mob, pitch: f32, yaw: f32) {
 ///
 /// `HappyGhast.scanPlayerAboveGhast()`'s box (x/z expanded by one, y from the top
 /// of the bounding box to the top plus half its height).
-pub fn player_above_box(
-    position: Vec3,
-    width: f32,
-    height: f32,
-) -> (Vec3, Vec3) {
+pub fn player_above_box(position: Vec3, width: f32, height: f32) -> (Vec3, Vec3) {
     let half = f64::from(width) / 2.0;
     let top = position.y + f64::from(height);
     (
@@ -764,11 +745,7 @@ pub fn is_above(root_position: Vec3, min: Vec3, max: Vec3) -> bool {
 ///
 /// `HappyGhast.getWalkTargetValue`: 0 for solid cells, 10 for an empty cell with a
 /// solid cell two below, and 5 otherwise.
-pub fn walk_target_value(
-    empty: bool,
-    empty_below: bool,
-    solid_two_below: bool,
-) -> f32 {
+pub fn walk_target_value(empty: bool, empty_below: bool, solid_two_below: bool) -> f32 {
     if !empty {
         0.0
     } else if empty_below && solid_two_below {

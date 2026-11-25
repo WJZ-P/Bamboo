@@ -294,9 +294,7 @@ fn resolve_holder(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<HolderInfo> {
                 crate::entity::KindPublic::Mob(mob) if mob.no_ai
             ),
             quad_holder: happy,
-            quad_offsets: happy.then(|| {
-                super::happy_ghast::quad_holder_offsets(width, height)
-            }),
+            quad_offsets: happy.then(|| super::happy_ghast::quad_holder_offsets(width, height)),
         });
     });
     out
@@ -502,9 +500,8 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.goals.set_control_flag(super::goals::Flag::Move, false);
         return;
     }
-    let elastic_threshold = elastic_distance_of(mob.mob_type)
-        - f64::from(holder.width)
-        - f64::from(me.dimensions.0);
+    let elastic_threshold =
+        elastic_distance_of(mob.mob_type) - f64::from(holder.width) - f64::from(me.dimensions.0);
     if dist > elastic_threshold && elastic_interactions(me, mob, &holder) {
         // `onElasticLeashPull()`：默认 `checkFallDistanceAccumulation()`，马科 / 骆驼
         // 另有附加行为。
@@ -570,15 +567,21 @@ fn elastic_interactions(me: &mut Entity, mob: &mut Mob, holder: &HolderInfo) -> 
         );
         for index in 0..4 {
             let entity_offset = y_rot(
-                super::happy_ghast::SHARED_QUAD_ATTACHMENT_POINTS[index]
-                    .multiply(leashed_scale.x, leashed_scale.y, leashed_scale.z),
+                super::happy_ghast::SHARED_QUAD_ATTACHMENT_POINTS[index].multiply(
+                    leashed_scale.x,
+                    leashed_scale.y,
+                    leashed_scale.z,
+                ),
                 -(me.y_rot * DEG_TO_RAD),
             );
             let holder_offset = y_rot(
                 holder.quad_offsets.map_or_else(
                     || {
-                        super::happy_ghast::SHARED_QUAD_ATTACHMENT_POINTS[index]
-                            .multiply(holder_scale.x, holder_scale.y, holder_scale.z)
+                        super::happy_ghast::SHARED_QUAD_ATTACHMENT_POINTS[index].multiply(
+                            holder_scale.x,
+                            holder_scale.y,
+                            holder_scale.z,
+                        )
                     },
                     |offsets| offsets[index],
                 ),

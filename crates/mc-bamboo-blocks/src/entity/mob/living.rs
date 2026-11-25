@@ -303,11 +303,8 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     // `HappyGhast.tick()` after `super.tick()`: holder flag, hover timeout and the
     // player-above scan.
     if mob.mob_type == super::MobType::HappyGhast {
-        let (min, max) = super::happy_ghast::player_above_box(
-            me.position,
-            me.dimensions.0,
-            me.dimensions.1,
-        );
+        let (min, max) =
+            super::happy_ghast::player_above_box(me.position, me.dimensions.0, me.dimensions.1);
         let mut player_above = false;
         ctx.blocks().for_each_player(&mut |view| {
             if !view.spectator
@@ -1203,10 +1200,7 @@ fn ambient_sound(mob: &Mob, in_water: bool) -> &'static str {
     if mob.mob_type == super::MobType::HappyGhast {
         // `HappyGhast.getAmbientSound`：幼年 / 成年两套。
         // `HappyGhast.getAmbientSound`: baby and adult variants.
-        return super::happy_ghast::voice(
-            super::happy_ghast::Voice::Ambient,
-            mob.is_baby(),
-        );
+        return super::happy_ghast::voice(super::happy_ghast::Voice::Ambient, mob.is_baby());
     }
     // 守卫者的环境音按水 / 岸和种类分派（表里返回 `None`）。
     // Guardian ambience is dispatched by water / land and kind (the table returns

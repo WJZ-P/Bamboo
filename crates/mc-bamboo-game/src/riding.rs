@@ -439,9 +439,7 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
     };
     let happy_ghast = mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::HappyGhast;
     if happy_ghast {
-        if !mc_bamboo_blocks::entity::mob::happy_ghast::can_add_passenger(
-            mob.passengers.len(),
-        ) {
+        if !mc_bamboo_blocks::entity::mob::happy_ghast::can_add_passenger(mob.passengers.len()) {
             return;
         }
     } else if !mob.passengers.is_empty() {
@@ -655,11 +653,7 @@ fn passenger_offset(
         // `EntityTypes.HAPPY_GHAST` 的四个 PASSENGER 点；按乘客下标 clamp。
         // The four PASSENGER points of `EntityTypes.HAPPY_GHAST`, clamped by index.
         let at = mc_bamboo_blocks::entity::mob::happy_ghast::passenger_attachment(index);
-        return Vec3::new(
-            at.x * cos + at.z * sin,
-            at.y,
-            at.z * cos - at.x * sin,
-        );
+        return Vec3::new(at.x * cos + at.z * sin, at.y, at.z * cos - at.x * sin);
     }
     let (y, z) = mc_bamboo_blocks::entity::mob::equine::passenger_attachment(mob.mob_type);
     let mut offset = Vec3::new(f64::from(z) * sin, f64::from(y), f64::from(z) * cos);
@@ -792,14 +786,15 @@ pub(crate) fn controls_vehicle(region: &mut Region, id: PlayerId, vehicle: Entit
                     mc_bamboo_blocks::entity::mob::pig::is_saddled(mob)
                         && first_passenger
                         && holds_stick
-                } else if mob.mob_type
-                    == mc_bamboo_blocks::entity::mob::MobType::HappyGhast
-                {
+                } else if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::HappyGhast {
                     // `HappyGhast.getControllingPassenger`：穿了挽具、不在悬停超时、
                     // 第一位乘客是玩家。
                     // `HappyGhast.getControllingPassenger`: harnessed, out of the
                     // hover timeout, with a player as first passenger.
-                    mc_bamboo_blocks::entity::mob::happy_ghast::controls(mob, first_passenger.then_some(id.0))
+                    mc_bamboo_blocks::entity::mob::happy_ghast::controls(
+                        mob,
+                        first_passenger.then_some(id.0),
+                    )
                 } else {
                     !mob.equipment
                         .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)
