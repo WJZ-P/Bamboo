@@ -221,6 +221,11 @@ impl GameEvent {
         NAMES[usize::from(self.id())]
     }
 
+    /// 完整注册名，`ResourceLocation` 的字符串形式（`minecraft:step`）。
+    pub fn full_name(self) -> String {
+        format!("minecraft:{}", self.name())
+    }
+
     /// 按名字取条目，可带 `minecraft:` 前缀。
     pub fn from_name(name: &str) -> Option<Self> {
         let name = name.strip_prefix("minecraft:").unwrap_or(name);

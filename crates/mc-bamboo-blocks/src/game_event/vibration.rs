@@ -124,10 +124,7 @@ impl VibrationInfo {
     pub fn write_codec(self) -> Tag {
         let pos = |value: f64| Tag::Double(value);
         Tag::Compound(vec![
-            (
-                "game_event".to_owned(),
-                Tag::String(self.event.name().to_owned()),
-            ),
+            ("game_event".to_owned(), Tag::String(self.event.full_name())),
             ("distance".to_owned(), Tag::Float(self.distance)),
             (
                 "pos".to_owned(),
