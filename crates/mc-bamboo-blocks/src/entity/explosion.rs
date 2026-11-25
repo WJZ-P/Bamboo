@@ -159,19 +159,17 @@ impl World<'_> {
                         }
                         let state = self.block_state(pos);
                         let fluid = state.fluid();
-                        let resistance = if state.is_tagged(
-                            mc_bamboo_data::tags::block_tags::BLOCKS_WIND_CHARGE_EXPLOSIONS,
-                        ) {
-                            3_600_000.0
-                        } else if !(state.is_air() && fluid.is_empty()) {
-                            state
-                                .block()
-                                .explosion_resistance
-                                .max(fluid_resistance(fluid))
-                        } else {
-                            0.0
-                        };
-                        if resistance > 0.0 {
+                        // `SimpleExplosionDamageCalculator.getBlockExplosionResistance`：
+                        // `immuneBlocks` 存在时只判这个标签，命中给 3600000.0f，
+                        // 没命中直接返回 `Optional.empty()`，**不**回退到基类的
+                        // `max(方块抗性, 流体抗性)`（风弹就是这种计算器）。
+                        let resistance = state
+                            .is_tagged(
+                                mc_bamboo_data::tags::block_tags::BLOCKS_WIND_CHARGE_EXPLOSIONS,
+                            )
+                            .then_some(3_600_000.0_f32);
+                        let _ = fluid;
+                        if let Some(resistance) = resistance {
                             remaining -= (resistance + RESISTANCE_BONUS) * RESISTANCE_COST;
                         }
                         if remaining > 0.0 {

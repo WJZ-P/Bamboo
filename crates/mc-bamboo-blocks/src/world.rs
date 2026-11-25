@@ -4532,6 +4532,24 @@ impl<'a> World<'a> {
         after
     }
 
+    /// 只 tick 一个实体并把它的最后状态交给调用方（连已消失的也一样）。
+    /// oracle 的假世界用它对齐「只 tick 目标实体」的场景；实体消失后不再放回表。
+    ///
+    /// Ticks one entity and hands its final state (including a removed one) back
+    /// to the caller. Oracle fake worlds use it for scenes that tick only the
+    /// subject entity.
+    pub fn tick_one_entity_kept(&mut self, id: i32) -> Option<crate::entity::Entity> {
+        let mut entity = self.level.take_entity(id)?;
+        if !entity.removed {
+            let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
+            entity.tick(&mut ctx);
+        }
+        if !entity.removed {
+            self.level.put_entity(entity.clone());
+        }
+        Some(entity)
+    }
+
     /// 还在世界里的实体。已经 `discard` 的不在里面。
     ///
     /// Entities still in the world. Discarded ones are absent.

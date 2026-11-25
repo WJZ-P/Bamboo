@@ -78,6 +78,7 @@ mod undead_horse;
 mod vault;
 mod villager;
 mod water_mob;
+mod wind_charge;
 mod witch_throw;
 mod zombie_villager;
 
@@ -201,6 +202,7 @@ enum Line {
     WaterMob(Box<water_mob::WaterMobCase>),
     Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
+    WindCharge(Box<wind_charge::WindChargeCase>),
     OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawnerCase>),
     TrialSpawner(Box<trial_spawner::TrialSpawnerCase>),
     Vault(Box<vault::VaultCase>),
@@ -2139,6 +2141,7 @@ impl Report {
                 Line::WaterMob(case) => self.replay_water_mob(&case),
                 Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
+                Line::WindCharge(case) => self.replay_wind_charge(&case),
                 Line::OminousItemSpawner(case) => self.replay_ominous_item_spawner(&case),
                 Line::TrialSpawner(case) => self.replay_trial_spawner(&case),
                 Line::Vault(case) => self.replay_vault(&case),

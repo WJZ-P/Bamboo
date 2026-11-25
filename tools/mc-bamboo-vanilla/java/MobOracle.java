@@ -554,6 +554,9 @@ public final class MobOracle {
                     cases++;
                 }
             }
+            if (only == null || only.startsWith("wind_charge")) {
+                cases += playWindCharge(official, out, only);
+            }
             if (only == null || only.startsWith("ominous_item_spawner")) {
                 cases += playOminousItemSpawner(official, out, only);
             }
@@ -11575,6 +11578,97 @@ public final class MobOracle {
                     + ",\"frames\":" + frames + "}\n");
             out.flush();
         }
+
+    /**
+     * 风弹逐刻对拍：固定起点和速度，逐刻比位置 / 速度 / 朝向 / 消失 /
+     * 3021 之类的世界事件 / 场景方块 / 挨着的生物血量和速度 / 世界随机源。
+     */
+    private static int playWindCharge(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("wind_charge_block", "wind_charge_mob")) {
+            if (only != null && !name.startsWith(only)) continue;
+            boolean mob = name.endsWith("mob");
+            FakeLevel level = FakeLevel.create(official);
+            ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+            level.nextId = FIRST_ID;
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            level.spawned = new ArrayList<>();
+            level.tracked = new ArrayList<>();
+            level.levelEvents = new ArrayList<>();
+            level.getRandom().setSeed(1L);
+            level.gameTime = START_TIME;
+            for (int x = -4; x <= 4; x++) {
+                for (int z = -4; z <= 4; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+            // 命中面在 (2, 64, 0) 的一堵石墙；生物场景把墙换成一头牛。
+            if (!mob) {
+                level.blocks.put(BlockPos.asLong(2, 64, 0), Blocks.STONE.defaultBlockState());
+            }
+            net.minecraft.world.entity.animal.cow.Cow cow = null;
+            if (mob) {
+                cow = EntityTypes.COW.create(level, EntitySpawnReason.EVENT);
+                setRandom(cow, 7L);
+                cow.setUUID(new UUID(0L, 2L));
+                cow.setId(FIRST_ID + 2);
+                cow.snapTo(2.5, 64.0, 0.5, 0.0F, 0.0F);
+                cow.setPersistenceRequired();
+                level.tracked.add(cow);
+            }
+            var charge = new net.minecraft.world.entity.projectile.hurtingprojectile.windcharge.WindCharge(
+                    level, 0.5, 64.5, 0.5, new net.minecraft.world.phys.Vec3(0.8, 0.0, 0.0));
+            setRandom(charge, 11L);
+            charge.setUUID(new UUID(0L, 1L));
+            charge.setId(FIRST_ID);
+            charge.setDeltaMovement(0.8, 0.0, 0.0);
+            level.tracked.add(charge);
+            int ticks = 12;
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime++;
+                    level.levelEvents.clear();
+                    if (!charge.isRemoved()) {
+                        charge.commonTick();
+                        charge.tick();
+                    }
+                }
+                if (tick > 0) frames.append(',');
+                frames.append('[')
+                        .append(Double.doubleToRawLongBits(charge.getX())).append(',')
+                        .append(Double.doubleToRawLongBits(charge.getY())).append(',')
+                        .append(Double.doubleToRawLongBits(charge.getZ())).append(',')
+                        .append(Double.doubleToRawLongBits(charge.getDeltaMovement().x)).append(',')
+                        .append(Double.doubleToRawLongBits(charge.getDeltaMovement().y)).append(',')
+                        .append(Double.doubleToRawLongBits(charge.getDeltaMovement().z)).append(',')
+                        .append(Float.floatToRawIntBits(charge.getYRot())).append(',')
+                        .append(Float.floatToRawIntBits(charge.getXRot())).append(',')
+                        .append(charge.isRemoved() ? 1 : 0).append(',')
+                        .append(mob ? Float.floatToRawIntBits(cow.getHealth()) : 0).append(',')
+                        .append(randomSeed(level.getRandom())).append(']');
+            }
+            frames.append(']');
+            long[] keys = level.blocks.keySet().toLongArray();
+            Arrays.sort(keys);
+            StringBuilder blocks = new StringBuilder("[");
+            for (int i = 0; i < keys.length; i++) {
+                if (i > 0) blocks.append(',');
+                BlockPos pos = BlockPos.of(keys[i]);
+                blocks.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',')
+                        .append(pos.getZ()).append(',')
+                        .append(Block.getId(level.getBlockState(pos))).append(']');
+            }
+            blocks.append(']');
+            out.write("{\"type\":\"windCharge\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"mob\":" + mob + ",\"start\":[0.5,64.5,0.5]"
+                    + ",\"velocity\":[0.8,0.0,0.0],\"frames\":" + frames
+                    + ",\"finalBlocks\":" + blocks + "}\n");
+            cases++;
+        }
+        return cases;
+    }
 
     /**
      * 不祥物品生成器逐刻对拍：固定一件普通物品和一个到点刻数，逐刻比

@@ -189,10 +189,23 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         .as_ref()
         .map_or_else(|| me.position.add(movement), |hit| hit.location);
     me.position = position;
-    let (yaw, pitch) = rotation(movement);
-    me.y_rot = crate::entity::thrown_egg::lerp_rotation(me.y_rot, yaw);
-    if let EntityKind::WindCharge(charge) = &mut me.kind {
-        charge.pitch = crate::entity::thrown_egg::lerp_rotation(charge.pitch, pitch);
+    // `ProjectileUtil.rotateTowardsMovement(this, 0.2F)`：先按速度算绝对朝向，
+    // 再用 `Entity.xRotO / yRotO`（上一刻的朝向）做 0.2 插值。
+    if movement.length_sqr() > 0.0 {
+        let horizontal = (movement.x * movement.x + movement.z * movement.z).sqrt();
+        let deg = |radians: f64| (radians * 57.295_776_367_187_5) as f32;
+        let target_yaw = deg(mc_bamboo_core::mth::atan2(movement.z, movement.x)) + 90.0;
+        let target_pitch = deg(mc_bamboo_core::mth::atan2(horizontal, movement.y)) - 90.0;
+        let EntityKind::WindCharge(charge) = &me.kind else {
+            return;
+        };
+        let old_yaw = me.y_rot;
+        let old_pitch = charge.pitch;
+        me.y_rot = mc_bamboo_core::mth::lerp_f32(0.2, old_yaw, target_yaw);
+        let EntityKind::WindCharge(charge) = &mut me.kind else {
+            return;
+        };
+        charge.pitch = mc_bamboo_core::mth::lerp_f32(0.2, old_pitch, target_pitch);
     }
     me.update_projectile_fluid(ctx.blocks());
     if me.position.y < f64::from(ctx.blocks().min_y() - 64) {
@@ -227,14 +240,14 @@ fn find_hit(me: &Entity, ctx: &dyn EntityCtx, movement: Vec3) -> Option<WindChar
         .bounding_box()
         .expanded_towards(movement.x, movement.y, movement.z)
         .inflated(1.0);
-    let mut best: Option<(f64, EntityUid, bool)> = None;
+    let mut best: Option<(f64, Vec3, EntityUid, bool)> = None;
     let mut consider = |uid: EntityUid, bb: Aabb, player: bool| {
         let Some(location) = clip_entity(bb, from, to) else {
             return;
         };
         let distance = from.distance_to_sqr(location);
-        if best.is_none_or(|(nearest, _, _)| distance < nearest) {
-            best = Some((distance, uid, player));
+        if best.is_none_or(|(nearest, _, _, _)| distance < nearest) {
+            best = Some((distance, location, uid, player));
         }
     };
     ctx.for_each_other_in(area, &mut |other| {
@@ -252,8 +265,8 @@ fn find_hit(me: &Entity, ctx: &dyn EntityCtx, movement: Vec3) -> Option<WindChar
         }
     });
     match (best, block) {
-        (Some((_, uid, player)), _) => Some(WindChargeHit {
-            location: to,
+        (Some((_, location, uid, player)), _) => Some(WindChargeHit {
+            location,
             face: None,
             target: Some((uid, player)),
         }),
