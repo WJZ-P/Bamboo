@@ -150,10 +150,11 @@ impl SculkShriekerEntity {
         world.darkness_around(center, DARKNESS_RADIUS, DARKNESS_TICKS);
     }
 
-    /// `canRespond`：`can_summon` 且非和平。`spawn_wardens` 游戏规则这一轮没建模，
-    /// 按官方缺省（开）处理。
+    /// `canRespond`：`can_summon` 且非和平且 `spawn_wardens` 游戏规则开。
     fn can_respond(&self, world: &World<'_>) -> bool {
-        world.block_state(self.pos).get(CAN_SUMMON) && world.level().difficulty_id() != 0
+        world.block_state(self.pos).get(CAN_SUMMON)
+            && world.level().difficulty_id() != 0
+            && world.level().block_game_rules().spawn_wardens
     }
 
     fn take_shriek(&mut self) -> Option<Option<crate::entity::EntityUid>> {
