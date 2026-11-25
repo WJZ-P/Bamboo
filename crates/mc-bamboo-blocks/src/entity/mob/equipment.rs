@@ -19,7 +19,10 @@ use mc_bamboo_protocol::{
     packet::play::EquipmentSlot,
 };
 
-use super::attributes::{Attributes, Modifier, Operation};
+use super::{
+    Mob, MobType,
+    attributes::{Attributes, Modifier, Operation},
+};
 
 /// [`MobEquipment::detect_updates`] 的结果。
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -582,6 +585,264 @@ impl MobEquipment {
     }
 }
 
+/// `EquipmentSlot.isArmor()`：humanoid 四件（脚、腿、胸、头）加动物护甲（body）。
+pub const fn is_armor_slot(slot: EquipmentSlot) -> bool {
+    matches!(
+        slot,
+        EquipmentSlot::Feet
+            | EquipmentSlot::Legs
+            | EquipmentSlot::Chest
+            | EquipmentSlot::Head
+            | EquipmentSlot::Body
+    )
+}
+
+/// `EquipmentSlot.limit(stack)`：`countLimit > 0` 时把数量压到上限。主手 / 副手没有
+/// 上限（`NO_COUNT_LIMIT`），其余槽上限 1。
+fn slot_limit(slot: EquipmentSlot, mut stack: ItemStack) -> ItemStack {
+    let limit = if matches!(slot, EquipmentSlot::MainHand | EquipmentSlot::OffHand) {
+        -1
+    } else {
+        1
+    };
+    if limit > 0 {
+        stack.count = stack.count.min(limit);
+    }
+    stack
+}
+
+/// `minecraft:equipment_slot` 注册表 ID → 协议 `EquipmentSlot`（枚举值是 ordinal）。
+/// 注册表顺序是官方 `EquipmentSlot.getId()`：mainhand、feet、legs、chest、head、
+/// offhand、body、saddle。
+const fn equipment_slot_from_registry(id: i32) -> EquipmentSlot {
+    match id {
+        0 => EquipmentSlot::MainHand,
+        1 => EquipmentSlot::Feet,
+        2 => EquipmentSlot::Legs,
+        3 => EquipmentSlot::Chest,
+        4 => EquipmentSlot::Head,
+        5 => EquipmentSlot::OffHand,
+        6 => EquipmentSlot::Body,
+        _ => EquipmentSlot::Saddle,
+    }
+}
+
+/// 协议 `EquipmentSlot` → `minecraft:equipment_slot` 注册表 ID。
+const fn equipment_slot_to_registry(slot: EquipmentSlot) -> i32 {
+    match slot {
+        EquipmentSlot::MainHand => 0,
+        EquipmentSlot::OffHand => 5,
+        EquipmentSlot::Feet => 1,
+        EquipmentSlot::Legs => 2,
+        EquipmentSlot::Chest => 3,
+        EquipmentSlot::Head => 4,
+        EquipmentSlot::Body => 6,
+        EquipmentSlot::Saddle => 7,
+    }
+}
+
+/// `LivingEntity.getEquipmentSlotForItem`：`equippable` 组件给的槽，没有组件就是主手。
+fn equippable_slot(stack: &ItemStack) -> EquipmentSlot {
+    equipment_slot_from_registry(mc_bamboo_recipes::equipment_slot_for_item(stack))
+}
+
+/// `LivingEntity.isEquippableInSlot`（玩家版本）：`equippable` 组件的槽和这个槽一致。
+/// `canBeEquippedBy` 的 `allowed_entities` 没复刻，见 README 已知限制。
+fn equippable_in_slot(stack: &ItemStack, slot: EquipmentSlot) -> bool {
+    mc_bamboo_recipes::is_equippable_in_slot(stack, equipment_slot_to_registry(slot))
+}
+
+/// `Mob.canHoldItem`：缺省恒真，狐狸按 `Fox.canHoldItem` 覆盖。
+fn can_hold_item(mob: &Mob, stack: &ItemStack) -> bool {
+    if mob.mob_type == MobType::Fox {
+        super::fox::can_hold(mob, stack)
+    } else {
+        true
+    }
+}
+
+/// `Mob.getPreferredWeaponType`：这些生物偏爱某类武器；其余是 `None`。
+fn preferred_weapon(mob_type: MobType) -> Option<mc_bamboo_data::ItemTag> {
+    use mc_bamboo_data::tags::item_tags;
+    match mob_type {
+        MobType::Skeleton | MobType::Stray | MobType::Bogged | MobType::Parched => {
+            Some(item_tags::SKELETON_PREFERRED_WEAPONS)
+        }
+        MobType::Drowned => Some(item_tags::DROWNED_PREFERRED_WEAPONS),
+        MobType::Pillager => Some(item_tags::PILLAGER_PREFERRED_WEAPONS),
+        _ => None,
+    }
+}
+
+/// `EnchantmentHelper.has(stack, PREVENT_ARMOR_CHANGE)`：26.3 里只有
+/// `minecraft:binding_curse`（绑定诅咒）带这个效果。
+fn has_prevent_armor_change(stack: &ItemStack) -> bool {
+    crate::entity::arrow::enchantment_level(stack, "minecraft:binding_curse") > 0
+}
+
+/// `ItemStack.getOrDefault(ENCHANTMENTS, EMPTY).entrySet().size()`。
+fn enchantment_count(stack: &ItemStack) -> usize {
+    let Ok(patch) = ComponentPatch::from_opaque(stack) else {
+        return 0;
+    };
+    match defaults::resolve(stack.item, &patch, kinds::ENCHANTMENTS) {
+        Some(ComponentValue::Enchantments(levels)) => levels.len(),
+        _ => 0,
+    }
+}
+
+/// `ItemStack.has(CUSTOM_NAME)`。
+fn has_custom_name(stack: &ItemStack) -> bool {
+    let Ok(patch) = ComponentPatch::from_opaque(stack) else {
+        return false;
+    };
+    defaults::resolve(stack.item, &patch, kinds::CUSTOM_NAME).is_some()
+}
+
+/// `Mob.canReplaceEqualItem`：附魔多者优先；一样多时耐久高（伤害值低）者优先；
+/// 再一样时新的有自定义名而旧的没有则换。
+fn can_replace_equal_item(new: &ItemStack, current: &ItemStack) -> bool {
+    let new_ench = enchantment_count(new);
+    let cur_ench = enchantment_count(current);
+    if new_ench != cur_ench {
+        return new_ench > cur_ench;
+    }
+    let new_damage = crate::durability::damage_of(new).unwrap_or(0);
+    let cur_damage = crate::durability::damage_of(current).unwrap_or(0);
+    if new_damage != cur_damage {
+        return new_damage < cur_damage;
+    }
+    has_custom_name(new) && !has_custom_name(current)
+}
+
+/// `Mob.getApproximateAttributeWith`：基础值加上物品在这个槽给的属性修饰符，
+/// 单遍、按修饰符列表顺序。
+fn approximate_attribute(mob: &Mob, stack: &ItemStack, attr: i32, slot: EquipmentSlot) -> f64 {
+    let base = mob.attributes.base(attr);
+    let mut value = base;
+    for (attribute, modifier) in stack_modifiers(stack, slot) {
+        if attribute != attr {
+            continue;
+        }
+        match modifier.operation {
+            Operation::AddValue => value += modifier.amount,
+            Operation::AddMultipliedBase => value += modifier.amount * base,
+            Operation::AddMultipliedTotal => value += modifier.amount * value,
+        }
+    }
+    value
+}
+
+/// `Mob.compareArmor`：旧的带 `prevent_armor_change` 不换；否则比护甲值，再比韧性，
+/// 都相等时走 [`can_replace_equal_item`]。
+fn compare_armor(mob: &Mob, new: &ItemStack, current: &ItemStack, slot: EquipmentSlot) -> bool {
+    if has_prevent_armor_change(current) {
+        return false;
+    }
+    let new_armor = approximate_attribute(mob, new, attribute::ARMOR, slot);
+    let cur_armor = approximate_attribute(mob, current, attribute::ARMOR, slot);
+    if new_armor != cur_armor {
+        return new_armor > cur_armor;
+    }
+    let new_toughness = approximate_attribute(mob, new, attribute::ARMOR_TOUGHNESS, slot);
+    let cur_toughness = approximate_attribute(mob, current, attribute::ARMOR_TOUGHNESS, slot);
+    if new_toughness != cur_toughness {
+        return new_toughness > cur_toughness;
+    }
+    can_replace_equal_item(new, current)
+}
+
+/// `Mob.compareWeapons`：先按偏爱武器标签，再比攻击力，都相等时走
+/// [`can_replace_equal_item`]。
+fn compare_weapons(mob: &Mob, new: &ItemStack, current: &ItemStack, slot: EquipmentSlot) -> bool {
+    if let Some(tag) = preferred_weapon(mob.mob_type) {
+        let current_is = crate::state::item_is_tagged(current.item, tag);
+        let new_is = crate::state::item_is_tagged(new.item, tag);
+        if current_is && !new_is {
+            return false;
+        }
+        if !current_is && new_is {
+            return true;
+        }
+    }
+    let new_damage = approximate_attribute(mob, new, attribute::ATTACK_DAMAGE, slot);
+    let cur_damage = approximate_attribute(mob, current, attribute::ATTACK_DAMAGE, slot);
+    if new_damage != cur_damage {
+        return new_damage > cur_damage;
+    }
+    can_replace_equal_item(new, current)
+}
+
+/// `Mob.canReplaceCurrentItem`：槽是空的直接换；护甲槽走 [`compare_armor`]，主手走
+/// [`compare_weapons`]，其余槽（副手、身体、鞍）不换。
+fn can_replace_current_item(
+    mob: &Mob,
+    new: &ItemStack,
+    current: &ItemStack,
+    slot: EquipmentSlot,
+) -> bool {
+    if current.is_empty() {
+        return true;
+    }
+    if is_armor_slot(slot) {
+        return compare_armor(mob, new, current, slot);
+    }
+    if slot == EquipmentSlot::MainHand {
+        return compare_weapons(mob, new, current, slot);
+    }
+    false
+}
+
+impl Mob {
+    /// `Mob.equipItemIfPossible(level, stack)`：把一件物品套进合适的装备槽。
+    ///
+    /// 槽里已有装备且换上更差时（护甲 / 武器比较、绑定诅咒）套不上，返回空堆；
+    /// 换上更好的会把旧的那件按掉落几率掉出来（返回的 `dropped` 交给调用方
+    /// `spawnAtLocation`），新件按槽上限收进 `leftover`。套上后 `persistenceRequired`
+    /// 置真、掉落几率设成必掉。`random` 是这只生物自己的随机源。
+    ///
+    /// `Mob.equipItemIfPossible(level, stack)`: put an item into its equipment slot.
+    /// A worse replacement (armor / weapon comparison, binding curse) leaves the
+    /// slot alone and returns an empty stack; a better one drops the old item by
+    /// chance (the returned `dropped`, which the caller spawns) and keeps the new
+    /// one limited to the slot cap in `leftover`. On success `persistenceRequired`
+    /// is set and the drop chance becomes guaranteed. `random` is the mob's source.
+    pub fn equip_item_if_possible(
+        &mut self,
+        random: &mut crate::entity::JavaRandom,
+        stack: ItemStack,
+    ) -> (ItemStack, Option<ItemStack>) {
+        let slot = equippable_slot(&stack);
+        if !equippable_in_slot(&stack, slot) {
+            return (ItemStack::empty(), None);
+        }
+        let mut slot = slot;
+        let mut current = self.equipment.get(slot).clone();
+        let mut can_replace = can_replace_current_item(self, &stack, &current, slot);
+        // `slot.isArmor() && !canReplace`：护甲换不上就改试主手。
+        if is_armor_slot(slot) && !can_replace {
+            slot = EquipmentSlot::MainHand;
+            current = self.equipment.get(slot).clone();
+            can_replace = current.is_empty();
+        }
+        if !can_replace || !can_hold_item(self, &stack) {
+            return (ItemStack::empty(), None);
+        }
+        // 旧的那件按 `max(0, nextFloat() - 0.1) < dropChance` 掉出来。
+        let dropped = if current.is_empty() {
+            None
+        } else {
+            let roll = (random.next_float() - 0.1).max(0.0);
+            (roll < self.equipment.drop_chance(slot)).then_some(current)
+        };
+        let limited = slot_limit(slot, stack);
+        self.equipment.set(slot, limited.clone());
+        self.equipment.set_drop_chance(slot, GUARANTEED_DROP_CHANCE);
+        self.persistence_required = true;
+        (limited, dropped)
+    }
+}
+
 /// `ItemStack.matches`：两个都空，或者物品、数量和组件都一样。
 fn same_stack(a: &ItemStack, b: &ItemStack) -> bool {
     if a.is_empty() || b.is_empty() {
@@ -902,5 +1163,115 @@ mod tests {
                 EquipmentSlot::Head,
             );
         }
+    }
+
+    /// 任意物品挂一条附魔。
+    fn enchanted_item(item: i32, name: &str, level: i32) -> ItemStack {
+        use mc_bamboo_data::registries::data_component_type::ENCHANTMENTS;
+        use mc_bamboo_protocol::components::PatchEntry;
+
+        let mut stack = ItemStack::new(item, 1);
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            ENCHANTMENTS,
+            PatchEntry::Set(ComponentValue::Enchantments(vec![(
+                enchantment_id(name),
+                level,
+            )])),
+        );
+        let (added, removed) = patch.to_opaque();
+        stack.added = added;
+        stack.removed = removed;
+        stack
+    }
+
+    #[test]
+    fn equip_item_if_possible_fills_an_empty_slot() {
+        let mut mob = Mob::new(MobType::Zombie);
+        let mut random = crate::entity::JavaRandom::new(0);
+        let sword = ItemStack::new(mc_bamboo_data::items::IRON_SWORD, 1);
+        let (leftover, dropped) = mob.equip_item_if_possible(&mut random, sword.clone());
+        assert_eq!(leftover, sword);
+        assert!(dropped.is_none());
+        assert_eq!(mob.equipment.get(EquipmentSlot::MainHand), &sword);
+        assert!(mob.persistence_required);
+        assert!(mob.equipment.is_preserved(EquipmentSlot::MainHand));
+    }
+
+    #[test]
+    fn equip_item_if_possible_replaces_worse_armor() {
+        let mut mob = Mob::new(MobType::Zombie);
+        mob.equipment.set_drop_chance(EquipmentSlot::Head, 0.0);
+        mob.equipment.set(
+            EquipmentSlot::Head,
+            ItemStack::new(mc_bamboo_data::items::LEATHER_HELMET, 1),
+        );
+        let mut random = crate::entity::JavaRandom::new(0);
+        let iron = ItemStack::new(mc_bamboo_data::items::IRON_HELMET, 1);
+        let (leftover, dropped) = mob.equip_item_if_possible(&mut random, iron.clone());
+        assert_eq!(leftover, iron);
+        assert!(dropped.is_none(), "drop chance 0 不掉旧头盔");
+        assert_eq!(mob.equipment.get(EquipmentSlot::Head), &iron);
+    }
+
+    #[test]
+    fn worse_armor_falls_back_to_the_main_hand() {
+        let mut mob = Mob::new(MobType::Zombie);
+        mob.equipment.set(
+            EquipmentSlot::Head,
+            ItemStack::new(mc_bamboo_data::items::IRON_HELMET, 1),
+        );
+        let mut random = crate::entity::JavaRandom::new(0);
+        let leather = ItemStack::new(mc_bamboo_data::items::LEATHER_HELMET, 1);
+        let (leftover, _) = mob.equip_item_if_possible(&mut random, leather.clone());
+        assert_eq!(leftover, leather, "皮头盔比铁头盔差，改放主手");
+        assert_eq!(
+            mob.equipment.get(EquipmentSlot::Head),
+            &ItemStack::new(mc_bamboo_data::items::IRON_HELMET, 1)
+        );
+        assert_eq!(mob.equipment.get(EquipmentSlot::MainHand), &leather);
+    }
+
+    #[test]
+    fn equip_item_if_possible_drops_the_replaced_item_by_chance() {
+        let mut mob = Mob::new(MobType::Zombie);
+        mob.equipment
+            .set_drop_chance(EquipmentSlot::Head, GUARANTEED_DROP_CHANCE);
+        mob.equipment.set(
+            EquipmentSlot::Head,
+            ItemStack::new(mc_bamboo_data::items::LEATHER_HELMET, 1),
+        );
+        let mut random = crate::entity::JavaRandom::new(0);
+        let iron = ItemStack::new(mc_bamboo_data::items::IRON_HELMET, 1);
+        let (leftover, dropped) = mob.equip_item_if_possible(&mut random, iron);
+        assert_eq!(
+            leftover,
+            ItemStack::new(mc_bamboo_data::items::IRON_HELMET, 1)
+        );
+        assert_eq!(
+            dropped,
+            Some(ItemStack::new(mc_bamboo_data::items::LEATHER_HELMET, 1)),
+            "必掉几率下旧头盔掉出来"
+        );
+    }
+
+    #[test]
+    fn equip_item_if_possible_keeps_binding_curse_armor() {
+        let mut mob = Mob::new(MobType::Zombie);
+        let cursed = enchanted_item(
+            mc_bamboo_data::items::IRON_HELMET,
+            "minecraft:binding_curse",
+            1,
+        );
+        mob.equipment.set(EquipmentSlot::Head, cursed);
+        let mut random = crate::entity::JavaRandom::new(0);
+        let diamond = ItemStack::new(mc_bamboo_data::items::DIAMOND_HELMET, 1);
+        let (leftover, _) = mob.equip_item_if_possible(&mut random, diamond.clone());
+        assert_eq!(leftover, diamond, "绑定诅咒挡下头盔，钻石头盔改放主手");
+        assert_eq!(
+            mob.equipment.get(EquipmentSlot::Head).item,
+            mc_bamboo_data::items::IRON_HELMET
+        );
+        assert_eq!(mob.equipment.get(EquipmentSlot::MainHand), &diamond);
     }
 }

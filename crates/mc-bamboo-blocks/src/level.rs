@@ -1350,8 +1350,15 @@ pub trait Level: LevelSideState + LevelEntities {
     }
 
     /// `EquipmentTable` 套到一只还没放进世界的生物上：按战利品表给装备槽，写
-    /// 掉率。默认不做事。
-    fn equip_mob(&mut self, _entity: &mut crate::entity::Entity, _equipment: &Tag) {}
+    /// 掉率。返回被替换掉、要按掉落几率掉出来的旧装备（调用方 `spawnAtLocation`）。
+    /// 默认不做事、不掉落。
+    fn equip_mob(
+        &mut self,
+        _entity: &mut crate::entity::Entity,
+        _equipment: &Tag,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        Vec::new()
+    }
 
     /// `TrialSpawner.ejectReward`：按战利品表在 `pos` 弹出一组奖励，返回有没有弹过。
     /// 默认不弹。

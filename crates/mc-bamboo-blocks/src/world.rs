@@ -3788,7 +3788,11 @@ impl<'a> World<'a> {
             entity.with_mob(|_, mob| mob.persistence_required = true);
         }
         if let Some(equipment) = equipment {
-            self.level.equip_mob(&mut entity, equipment);
+            let dropped = self.level.equip_mob(&mut entity, equipment);
+            // `equipItemIfPossible` 里被换掉的旧装备按掉落几率掉出来。
+            for stack in dropped {
+                self.spawn_at_location(entity.position, stack);
+            }
         }
         let uuid = entity.kind.mob().map(|mob| mob.uuid).unwrap_or_default();
         let uid = self.add_prepared_entity(entity);
