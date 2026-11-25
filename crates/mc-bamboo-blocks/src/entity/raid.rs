@@ -50,6 +50,16 @@ pub const OUTSIDE_RAID_BOUNDS_TIMEOUT: i32 = 30;
 /// `Raids.tick` 里强制 `setDirty` 的周期。
 pub const RAID_SAVE_INTERVAL: i32 = 200;
 
+/// `ServerLevel.getRaidAt(pos)` 给村民大脑的那两个判定。
+///
+/// The two predicates `ServerLevel.getRaidAt(pos)` provides to villager brains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RaidView {
+    pub has_first_wave_spawned: bool,
+    pub is_between_waves: bool,
+    pub is_victory: bool,
+}
+
 /// `Raid.RaidStatus`，序列化名照 `getSerializedName`。
 ///
 /// Vanilla `Raid.RaidStatus` with its `getSerializedName` values.

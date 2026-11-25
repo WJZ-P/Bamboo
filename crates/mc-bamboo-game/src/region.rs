@@ -760,6 +760,7 @@ impl Region {
             sky_darken: self.global.sky_darken,
             villager_activity: self.global.villager_activity,
             baby_villager_activity: self.global.baby_villager_activity,
+            raids: self.raids.clone(),
             clock_ticks: self.global.clock.total_ticks,
             scoreboard: &self.global.scoreboard,
             world_seed: self.global.seed,

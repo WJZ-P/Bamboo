@@ -350,6 +350,11 @@ pub trait BlockView {
         false
     }
 
+    /// `ServerLevel.getRaidAt(pos)`。默认没有袭击。
+    fn raid_at(&self, _pos: BlockPos) -> Option<crate::entity::raid::RaidView> {
+        None
+    }
+
     /// `getOverworldClockTime()`：主世界时钟的整数刻。没有时钟的视图给 0。
     fn clock_ticks(&self) -> i64 {
         0
@@ -676,6 +681,10 @@ impl BlockView for World<'_> {
 
     fn poi_is_close_to_village(&self, pos: BlockPos, sections: i32) -> bool {
         self.level().poi_is_close_to_village(pos, sections)
+    }
+
+    fn raid_at(&self, pos: BlockPos) -> Option<crate::entity::raid::RaidView> {
+        self.level().raid_at(pos)
     }
 
     fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {

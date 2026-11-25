@@ -1489,6 +1489,15 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
+    /// `ServerLevel.getRaidAt(pos)`：`Raids.getNearbyRaid` 找到的那场袭击。
+    /// 默认没有袭击（夹具 / 非主世界）。
+    ///
+    /// `ServerLevel.getRaidAt(pos)`: the raid found by `Raids.getNearbyRaid`;
+    /// none by default (fixtures / non-overworld dimensions).
+    fn raid_at(&self, _pos: BlockPos) -> Option<crate::entity::raid::RaidView> {
+        None
+    }
+
     /// `Level.isDarkOutside()`：没有固定时间的维度里 `skyDarken >= 4`。
     /// 主世界没有 `hasFixedTime`，床的 `when_dark` 规则走这个判断。
     ///
