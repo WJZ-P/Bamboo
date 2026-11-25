@@ -163,6 +163,7 @@ impl VaultCase {
             short_hunger: false,
             ignore_bed_monsters: false,
             explosion_break: 0,
+            shoulder: Default::default(),
         }
     }
 }

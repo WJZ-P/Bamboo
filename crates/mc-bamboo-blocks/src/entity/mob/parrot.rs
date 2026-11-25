@@ -404,10 +404,18 @@ impl ParrotGoal {
                 if owner.shoulder_left.is_some() && owner.shoulder_right.is_some() {
                     return;
                 }
-                // 官方 `setEntityOnShoulder`：把鹦鹉存进玩家的肩膀槽并 `discard()`。
-                // 命令落地时序列化整只鹦鹉、写玩家肩膀、把实体从世界移除。
+                // 官方 `setEntityOnShoulder`：先在目标里按 `Entity.save` 写整份 NBT，
+                // 命令落地再写玩家肩膀、`discard()`。tick 期间 `me.kind` 是占位，
+                // 所以把 `mob` 克隆回实体再 split。
+                let mut snapshot = me.clone();
+                snapshot.kind = crate::entity::EntityKind::Mob(Box::new(mob.clone()));
+                let tag = super::nbt::write_mob(&snapshot.split())
+                    .unwrap_or(mc_bamboo_nbt::Tag::Compound(Vec::new()));
                 ctx.emit(
-                    crate::entity::ctx::Command::SetEntityOnShoulder { player: owner.uid },
+                    crate::entity::ctx::Command::SetEntityOnShoulder {
+                        player: owner.uid,
+                        tag,
+                    },
                     me,
                 );
                 *sitting_on_shoulder = true;

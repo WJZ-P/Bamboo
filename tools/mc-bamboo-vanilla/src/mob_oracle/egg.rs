@@ -160,6 +160,7 @@ impl EggCase {
                 effects: Default::default(),
             });
         }
+        level.shoulder = Default::default();
         level
     }
 
@@ -193,6 +194,7 @@ impl EggCase {
             short_hunger: false,
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
             natural_spawn: None,
             biome: None,
         }

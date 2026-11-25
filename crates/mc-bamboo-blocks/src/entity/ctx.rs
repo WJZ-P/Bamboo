@@ -999,6 +999,12 @@ pub enum Command {
     /// layer, then removes the parrot from the world.
     SetEntityOnShoulder {
         player: EntityUid,
+        /// 落地前的 `saveWithoutId` NBT（含 `id`）。目标里才有完整的鹦鹉状态；
+        /// `apply` 拿到的 `me` 在 tick 期间是占位实体，不能再序列化。
+        ///
+        /// The `saveWithoutId` tag (including `id`) taken in the goal, where the
+        /// full parrot state is available; `apply` only sees a placeholder `me`.
+        tag: mc_bamboo_nbt::Tag,
     },
     /// 实体移动 / 死亡等发出的游戏事件。并行驱动攒到落地阶段按 uid 顺序投递。
     GameEvent {
@@ -1644,11 +1650,9 @@ pub enum Command {
 /// 改发出者，没有任何回写补丁。
 pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
     match command {
-        Command::SetEntityOnShoulder { player } => {
-            // 落地时 `me` 是完整的鹦鹉实体：按官方 `Entity.save` 写整份 NBT（含 `id`），
-            // 交给游戏层存进玩家肩膀，再把鹦鹉从世界移除。
-            let tag = super::mob::nbt::write_mob(&me.clone().split())
-                .unwrap_or(mc_bamboo_nbt::Tag::Compound(Vec::new()));
+        Command::SetEntityOnShoulder { player, tag } => {
+            // 目标里已经按官方 `Entity.save` 写好整份 NBT（含 `id`）：交给游戏层
+            // 存进玩家肩膀，再把鹦鹉从世界移除。
             world.push_effect(crate::Effect::PlayerShoulder { player, tag });
             if !super::shoulder::keep_entity_on_perch() {
                 me.discard();

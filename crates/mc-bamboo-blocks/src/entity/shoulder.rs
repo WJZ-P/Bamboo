@@ -146,10 +146,11 @@ pub fn step(
         return None;
     }
     if state.since > 20 && facts.should_remove() {
-        // `respawnEntityOnShoulder` 把鹦鹉放在玩家 y + 0.7 处。
+        // `respawnEntityOnShoulder`：`getY() + 0.699999988079071d`，那个 double
+        // 是 Java 的 `0.7F` float 字面量扩宽后的值。
         let position = Vec3::new(
             player_position.x,
-            player_position.y + 0.7,
+            player_position.y + f64::from(0.7_f32),
             player_position.z,
         );
         let mut tags = Vec::new();
@@ -249,7 +250,7 @@ mod tests {
         }
         let removed = step(&mut state, facts, Vec3::new(0.5, 64.0, 0.5)).unwrap();
         assert_eq!(removed.tags, vec![parrot(2)]);
-        assert_eq!(removed.position.y, 64.7);
+        assert_eq!(removed.position.y, 64.0 + f64::from(0.7_f32));
         assert_eq!(state.left_variant(), None);
     }
 
@@ -336,10 +337,7 @@ mod tests {
     fn respawn_restores_the_parrot() {
         let tag = Tag::Compound(vec![
             ("Variant".to_owned(), Tag::Int(3)),
-            (
-                "Owner".to_owned(),
-                Tag::IntArray(vec![1, 2, 3, 4]),
-            ),
+            ("Owner".to_owned(), Tag::IntArray(vec![1, 2, 3, 4])),
         ]);
         let entity = respawn(&tag, Vec3::new(0.5, 64.7, 0.5), Some([7; 16])).unwrap();
         assert_eq!(entity.position.y, 64.7);

@@ -111,23 +111,20 @@ mod base64_stub {
     }
 }
 
-/// `parrotShoulder`：官方 `ServerPlayer` 左右肩膀的鹦鹉品种，逐刻对拍。
+/// `parrotShoulder`：官方假世界每刻输出左右肩品种、还在世界的鹦鹉及其位置。
 ///
-/// `parrotShoulder`: the official player's left/right shoulder parrot variants,
-/// compared tick by tick.
+/// `parrotShoulder`: vanilla emits both shoulder variants, the parrots still in
+/// the world and their positions each tick.
 #[derive(Debug, Deserialize)]
 struct ParrotShoulderCase {
     name: String,
-    #[serde(rename = "perchTick")]
-    perch_tick: i32,
-    #[serde(rename = "perchTick2")]
-    perch_tick2: i32,
-    #[serde(rename = "jumpTick")]
-    jump_tick: i32,
-    #[serde(rename = "perchVariant")]
-    perch_variant: i32,
-    #[serde(rename = "perchVariant2")]
-    perch_variant2: i32,
+    removal: String,
+    #[serde(rename = "playerX")]
+    player_x: i64,
+    #[serde(rename = "playerY")]
+    player_y: i64,
+    #[serde(rename = "playerZ")]
+    player_z: i64,
     steps: Vec<ShoulderStep>,
 }
 
@@ -135,14 +132,8 @@ struct ParrotShoulderCase {
 struct ShoulderStep {
     left: i32,
     right: i32,
-}
-
-/// MobLevel 假世界里 0 号玩家的肩膀状态（选 A）：左右肩品种和上肩后的相对刻数。
-#[derive(Default)]
-struct ShoulderSlots {
-    left: Option<i32>,
-    right: Option<i32>,
-    since: i32,
+    /// 每只在世界里的鹦鹉的 `[x, y, z]`（f64 原始位）。
+    parrots: Vec<[i64; 3]>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1083,6 +1074,11 @@ struct MobLevel {
     ignore_bed_monsters: bool,
     /// 改坏确认爆炸：位 0 跳过 `hurtEntities`，位 1 丢掉爆炸中心的 0.0625 抬升。
     explosion_break: u8,
+    /// 0 号玩家左右肩上的鹦鹉（选 A）：逐刻由 Bamboo 自己的目标 / 命令落地写这份状态。
+    ///
+    /// The fake world's player 0 shoulder parrots (option A), written step by step
+    /// through Bamboo's own goal and command pipeline.
+    shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState,
 }
 
 impl MobLevel {
@@ -2184,52 +2180,240 @@ impl Report {
         Ok(())
     }
 
-    /// `parrotShoulder`：在 MobLevel 假世界里建一份玩家肩膀状态（选 A），按官方
-    /// `setEntityOnShoulder`（左肩先）和 20 刻后跳起离肩逐刻对拍左右肩的品种。
+    /// 把 `MobLevel` 肩膀状态同步到玩家视图（客户端元数据 / 目标的空位判断）。
+    fn sync_shoulder_view(level: &mut MobLevel) {
+        level.players[0].shoulder_left = level.shoulder.left_variant();
+        level.players[0].shoulder_right = level.shoulder.right_variant();
+    }
+
+    /// `parrotShoulder`：在 `MobLevel` 假世界里真跑 Bamboo 的鹦鹉目标
+    /// （`LandOnOwnersShoulderGoal` → `Command::SetEntityOnShoulder` → 游戏层落地）、
+    /// 肩膀共享状态与离肩 / respawn 生产代码，每刻和官方逐项比左右肩、鹦鹉是否在
+    /// 世界里、重新出现的位置。
+    ///
+    /// `parrotShoulder`: run Bamboo's real parrot goal, command and shoulder
+    /// production code in the `MobLevel` fake world, then compare both shoulder
+    /// variants, world presence and respawn positions with vanilla each tick.
     fn replay_parrot_shoulder(&mut self, case: &ParrotShoulderCase) {
-        self.cases += 1;
-        let mut slots = ShoulderSlots {
-            since: i32::MAX,
-            ..ShoulderSlots::default()
+        use mc_bamboo_blocks::entity::{
+            ctx::PlayerView,
+            mob::{
+                MobType,
+                goals::{Goal, WrappedGoal},
+                parrot::ParrotGoal,
+            },
+            shoulder,
         };
-        let break_test = self.break_test.clone();
+
+        self.cases += 1;
+        let break_test = self.break_test.as_deref();
+        shoulder::set_oracle_tamper(break_test.unwrap_or(""));
+
+        let player_pos = Vec3::new(
+            f64::from_bits(case.player_x as u64),
+            f64::from_bits(case.player_y as u64),
+            f64::from_bits(case.player_z as u64),
+        );
+        let player_uuid = (1_u128 << 64) | 2;
+        let mut level = MobLevel {
+            blocks: HashMap::new(),
+            random: LevelRandom::new(1),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: Vec::new(),
+            rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+            facts: ZombieFacts {
+                difficulty: 2,
+                bright_outside: true,
+                monsters_burn: true,
+                ..ZombieFacts::default()
+            },
+            natural_spawn: None,
+            biome: None,
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
+            poi: mc_bamboo_world::poi::PoiStore::new(),
+            entities: Entities::with_next_id(1),
+            // 官方夹具里只有 0 号玩家；肩膀状态挂在 MobLevel 上（选 A）。
+            players: vec![PlayerView {
+                uid: 1024,
+                uuid: Some(player_uuid.to_be_bytes()),
+                position: player_pos,
+                delta: Vec3::default(),
+                width: 0.6,
+                height: 1.8,
+                eye_height: 1.62,
+                health: 20.0,
+                look_direction: Vec3::view_vector(0.0, 0.0),
+                gaze_disguise: false,
+                alive: true,
+                spectator: false,
+                creative: false,
+                game_mode: 0,
+                mining_fatigue: None,
+                sneaking: false,
+                sprinting: false,
+                swimming: false,
+                flying: false,
+                invisible: false,
+                explosion_knockback_resistance: 0.0,
+                armor_cover: 0.0,
+                main_hand: 0,
+                off_hand: 0,
+                team: None,
+                yaw: 0.0,
+                pitch: 0.0,
+                combat: Default::default(),
+                effects: Default::default(),
+                shoulder_left: None,
+                shoulder_right: None,
+            }],
+            game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            wrong_was_hurt: false,
+            short_hunger: false,
+            ignore_bed_monsters: false,
+            explosion_break: 0,
+            shoulder: shoulder::ShoulderState::empty(),
+        };
+        // 和 Java 夹具一样铺一格草地，鹦鹉站着不动才能一直和玩家包围盒相交。
+        for x in -1..=1 {
+            for z in -1..=1 {
+                level.blocks.insert(
+                    BlockPos::new(x, 63, z),
+                    BlockState(mc_bamboo_data::blocks::GRASS_BLOCK),
+                );
+            }
+        }
+        let mut ticks = BlockTicks::new();
+        ticks.set_time(0);
+        let mut ids = Vec::new();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            for (index, variant) in [2, 4].into_iter().enumerate() {
+                let mut entity = Entity::by_mob_type(MobType::Parrot, player_pos);
+                entity.random = JavaRandom::new(77001 + index as i64);
+                entity.y_rot = 0.0;
+                entity.old_position = player_pos;
+                if let Some(mob) = entity.kind.mob_mut() {
+                    mob.uuid = (100_u128 + index as u128).to_be_bytes();
+                    mob.parrot.variant = variant;
+                    mob.tame.owner = Some(player_uuid.to_be_bytes());
+                    mob.tame.flags |= mc_bamboo_blocks::entity::mob::tame::FLAG_TAME;
+                    mob.no_gravity = true;
+                    // 和 Java 夹具一样只留 `LandOnOwnersShoulderGoal`；其余目标会挪动
+                    // 鹦鹉、取随机数，假世界没有寻路 / 地形，逐刻位置会发散。
+                    mob.goals.goals = vec![WrappedGoal {
+                        priority: 3,
+                        running: false,
+                        goal: Goal::Parrot(ParrotGoal::LandOnShoulder {
+                            sitting_on_shoulder: false,
+                        }),
+                    }];
+                }
+                let id = world.spawn_entity(entity);
+                ids.push(id);
+            }
+        }
         for (index, expected) in case.steps.iter().enumerate() {
             let tick = index as i32 + 1;
-            slots.since = slots.since.saturating_add(1);
-            // 官方 `ShoulderRidingEntity.setEntityOnShoulder`：左肩空先左。
-            if tick == case.perch_tick {
-                slots.left = Some(case.perch_variant);
-                slots.since = 0;
+            // 官方 `Player.hurtServer` 在 tick 130 直接清肩；Bamboo 走共享生产函数。
+            let mut facts = shoulder::RemovalFacts::default();
+            if tick == 130 {
+                match case.removal.as_str() {
+                    "jump" => facts.fall_distance = 1.0,
+                    "water" => facts.in_water = true,
+                    "sleep" => facts.sleeping = true,
+                    "snow" => facts.in_powder_snow = true,
+                    _ => {}
+                }
             }
-            if tick == case.perch_tick2 {
-                slots.right = Some(case.perch_variant2);
-                slots.since = 0;
+            // 实体 tick：`ShoulderRidingEntity.tick` 加冷却，目标飞上肩后走
+            // `Command::SetEntityOnShoulder`；命令落地把鹦鹉 discard 并留下 Effect。
+            let effects;
+            {
+                let mut world = World::new(&mut level, &mut ticks);
+                world.tick_entities();
+                effects = world.into_effects();
             }
-            // 官方 `removeEntitiesOnShoulder`：`time + 20 < gameTime` 才清空并 respawn。
-            if tick == case.jump_tick && slots.since > 20 {
-                slots.left = None;
-                slots.right = None;
-                slots.since = i32::MAX;
+            // 游戏层 `send_effects`：Effect::PlayerShoulder 写进 MobLevel 的肩膀状态。
+            for effect in &effects {
+                if let mc_bamboo_blocks::Effect::PlayerShoulder { tag, .. } = effect {
+                    // 生产函数写 MobLevel 的肩膀槽，再同步给玩家视图（元数据）。
+                    shoulder::set_entity_on_shoulder(&mut level.shoulder, tag.clone());
+                    Self::sync_shoulder_view(&mut level);
+                }
             }
-            // 改坏确认：故意把一侧肩膀的值改错，对拍必须报不一致。
-            let left = if break_test.as_deref() == Some("shoulder_left") {
-                -1
-            } else {
-                slots.left.unwrap_or(-1)
-            };
-            let right = if break_test.as_deref() == Some("shoulder_right") {
-                -1
-            } else {
-                slots.right.unwrap_or(-1)
-            };
-            if left != expected.left || right != expected.right {
+            // 受伤是 `Player.hurtServer` 的独立入口：不看 20 刻锁。
+            if case.removal == "hurt" && tick == 130 {
+                level.shoulder.since = i32::MAX;
+                facts.hurt = true;
+            }
+            let removed = shoulder::step(&mut level.shoulder, facts, player_pos);
+            if let Some(removed) = removed {
+                // `ServerPlayer.respawnEntityOnShoulder` 从 NBT 造回鹦鹉放回世界。
+                let mut world = World::new(&mut level, &mut ticks);
+                for tag in &removed.tags {
+                    if let Some(entity) =
+                        shoulder::respawn(tag, removed.position, Some(player_uuid.to_be_bytes()))
+                    {
+                        world.spawn_entity(entity);
+                    }
+                }
+            }
+            Self::sync_shoulder_view(&mut level);
+            let left = level.shoulder.left_variant().unwrap_or(-1);
+            let right = level.shoulder.right_variant().unwrap_or(-1);
+            let mut parrots: Vec<[i64; 3]> = level
+                .entities
+                .iter_public()
+                .filter(|public| {
+                    !public.removed
+                        && matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
+                        && matches!(
+                            public.kind,
+                            mc_bamboo_blocks::entity::KindPublic::Mob(ref mob)
+                                if mob.mob_type == MobType::Parrot
+                        )
+                })
+                .map(|public| {
+                    [
+                        public.position.x.to_bits() as i64,
+                        public.position.y.to_bits() as i64,
+                        public.position.z.to_bits() as i64,
+                    ]
+                })
+                .collect();
+            parrots.sort();
+            if left != expected.left || right != expected.right || parrots != expected.parrots {
                 self.mismatch(format!(
-                    "{} tick {}: left official {} bamboo {} right official {} bamboo {}",
-                    case.name, tick, expected.left, left, expected.right, right
+                    "{} tick {}: shoulders official [{}, {}] bamboo [{}, {}], parrots official {:?} bamboo {:?}",
+                    case.name,
+                    tick,
+                    expected.left,
+                    expected.right,
+                    left,
+                    right,
+                    expected
+                        .parrots
+                        .iter()
+                        .map(|p| {
+                            p.map(|v| f64::from_bits(v as u64))
+                        })
+                        .collect::<Vec<_>>(),
+                    parrots
+                        .iter()
+                        .map(|p| p.map(|v| f64::from_bits(v as u64)))
+                        .collect::<Vec<_>>(),
                 ));
             }
             self.steps += 1;
         }
+        shoulder::set_oracle_tamper("");
     }
 
     fn check_header(&mut self, header: &Header) -> Result<(), String> {
@@ -2486,6 +2670,7 @@ impl Report {
                 Some("explode_tnt_center") => 2,
                 _ => 0,
             },
+            shoulder: Default::default(),
         };
         for &[x, y, z, state] in &case.blocks {
             level

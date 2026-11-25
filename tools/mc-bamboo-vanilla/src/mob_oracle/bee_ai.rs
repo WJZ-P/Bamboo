@@ -95,6 +95,7 @@ impl BeeAiCase {
             game: None,
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
             inhabited: std::collections::HashMap::new(),
             mob_teams: std::collections::HashMap::new(),
             short_hunger: false,

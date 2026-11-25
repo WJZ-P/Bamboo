@@ -61,10 +61,7 @@ pub fn tick(region: &mut Region) {
 ///
 /// `Player.hurtServer` calls `removeEntitiesOnShoulder()` first thing: being hurt
 /// removes the parrots right away, bypassing the 20-tick lock.
-pub fn remove_on_hurt(
-    player: &mut Player,
-    entities: &mut mc_bamboo_blocks::entity::Entities,
-) {
+pub fn remove_on_hurt(player: &mut Player, entities: &mut mc_bamboo_blocks::entity::Entities) {
     let mut state = player.shoulder_state();
     let facts = shoulder::RemovalFacts {
         hurt: true,

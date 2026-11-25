@@ -175,6 +175,7 @@ impl Report {
             short_hunger: false,
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
         };
         let mut ticks = BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);
