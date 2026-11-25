@@ -2769,7 +2769,14 @@ impl Report {
                         } else {
                             hit_players.as_slice()
                         };
-                        game.send_explode(*center, *radius, block_count, knock, is_small, *play_sound);
+                        game.send_explode(
+                            *center,
+                            *radius,
+                            block_count,
+                            knock,
+                            is_small,
+                            *play_sound,
+                        );
                     }
                 }
             }
