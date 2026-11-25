@@ -178,6 +178,13 @@ fn passenger_attachment(vehicle: &EntityPublic, index: usize) -> Vec3 {
         MobType::Horse => (0.0, 1.443750023841858, 0.0),
         MobType::Donkey => (0.0, 1.1124999523162842, 0.0),
         MobType::Mule => (0.0, 1.212499976158142, 0.0),
+        // `EntityTypes.SKELETON_HORSE` / `ZOMBIE_HORSE` 都注册
+        // `passengerAttachments([1.31875f])`，和马的高度 1.6 不同；没上鞍被生物骑时
+        // `AbstractHorse.getPassengerAttachmentPoint` 的 standAnim 偏移为 0，退化成这个点。
+        // Both SKELETON_HORSE and ZOMBIE_HORSE register
+        // passengerAttachments([1.31875f]), unlike the horse's 1.6 height; with
+        // standAnimO == 0 the AbstractHorse override reduces to this point.
+        MobType::SkeletonHorse | MobType::ZombieHorse => (0.0, 1.318750023841858, 0.0),
         // `EntityTypes.NAUTILUS` / `ZOMBIE_NAUTILUS` 的 `passengerAttachments(1.1375F)`。
         // `EntityTypes.NAUTILUS` / `ZOMBIE_NAUTILUS` register
         // `passengerAttachments(1.1375F)`.
@@ -307,9 +314,10 @@ pub fn stop_riding(
 // ---- 骑手借载具导航（`Mob.getNavigation` / `getMoveControl` 的转交）----
 
 /// 官方 `Mob.getControllingPassenger()`：载具不是 `NoAI`、第一位乘客就是这个实体、
-/// 乘客是生物且 `canControlVehicle()`（不在 `#non_controlling_rider` 里；建模范围内
-/// 只有史莱姆在标签里）。满足时载具的 `getNavigation()` / `getMoveControl()` 会转给
-/// 这个乘客所在的载具链顶端，所以骑手的目标与大脑用的是**载具**的导航。
+/// 乘客是生物且 `canControlVehicle()`（不在 `#non_controlling_rider` 里；26.3 标签是
+/// 史莱姆 / 岩浆怪 / 硫磺方块怪，建模范围内是史莱姆和硫磺方块怪）。满足时载具的
+/// `getNavigation()` / `getMoveControl()` 会转给这个乘客所在的载具链顶端，所以骑手的
+/// 目标与大脑用的是**载具**的导航。
 ///
 /// Vanilla `Mob.getControllingPassenger()`: the vehicle is not NoAI, its first
 /// passenger is this rider, and the rider can control vehicles. When true the
@@ -318,7 +326,7 @@ pub(crate) fn controls_vehicle(vehicle_mob: &Mob, rider_uid: EntityUid, rider_mo
     if vehicle_mob.no_ai || vehicle_mob.first_passenger() != Some(rider_uid) {
         return false;
     }
-    !matches!(rider_mob.mob_type, MobType::Slime)
+    !matches!(rider_mob.mob_type, MobType::Slime | MobType::SulfurCube)
 }
 
 /// 乘客 tick 之前：若它控制载具，就把载具的 `Navigation` / `MoveControl` 和按载具

@@ -929,6 +929,7 @@ fn zombie_style(name: &str) -> bool {
         "witch_drink_",
         "pillager_",
         "drowned_",
+        "skeleton_horse_",
     ]
     .iter()
     .any(|prefix| name.starts_with(prefix))
@@ -2704,13 +2705,13 @@ impl Report {
                 let yaw = f32::from_bits(cow.yaw as u32);
                 // 场景编号（两侧同一套，别撞号）：1 僵尸、2 尸壳、3 猪、4 羊、5 鸡、
                 // 6 兔子、7 狐狸、8 狼、9..=12 马科、13 犰狳、14 山羊、15 熊猫、
-                // 16 北极熊、17 哞菇、18 青蛙、19 蝌蚪、20 骆驼、
+                // 16 北极熊、17 哞菇、18 青蛙、19 蝌蚪、20 骆驼、24 嗅探兽、25 骷髅马、
                 // 40..=43 敌对生物、60 海龟，其余是牛。
                 // Scene kind ids (one shared set, no collisions): 1 zombie, 2 husk,
                 // 3 pig, 4 sheep, 5 chicken, 6 rabbit, 7 fox, 8 wolf, 9..=12 equines,
                 // 13 armadillo, 14 goat, 15 panda, 16 polar bear, 17 mooshroom,
-                // 18 frog, 19 tadpole, 20 camel, 40..=43 hostiles, 60 turtle;
-                // anything else is a cow.
+                // 18 frog, 19 tadpole, 20 camel, 24 sniffer, 25 skeleton horse,
+                // 40..=43 hostiles, 60 turtle; anything else is a cow.
                 let kind = match cow.kind {
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
@@ -2727,6 +2728,7 @@ impl Report {
                     19 => mc_bamboo_blocks::entity::mob::MobType::Tadpole,
                     20 => mc_bamboo_blocks::entity::mob::MobType::Camel,
                     24 => mc_bamboo_blocks::entity::mob::MobType::Sniffer,
+                    25 => mc_bamboo_blocks::entity::mob::MobType::SkeletonHorse,
                     15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
                     16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
@@ -3324,6 +3326,21 @@ impl Report {
                     });
                 }
                 world.tick_entities();
+                // 改坏确认：把骑手这一刻借来、写回载具的路径丢掉，马不再跟着骑手的
+                // 导航走；逐刻的 path / 位置 / 速度都会和官方不一致。
+                // Breakage check: drop the path the rider borrowed and wrote back to the
+                // vehicle this tick, so the horse no longer follows the rider's
+                // navigation; the per-tick path, position and velocity all diverge.
+                if self.break_test.as_deref() == Some("ride_nav")
+                    && case.ride_vehicle >= 0
+                    && let Some(&vehicle) = ids.get(case.ride_vehicle as usize)
+                {
+                    world.with_entity_mut(vehicle, &mut |entity| {
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            mob.navigation.path = None;
+                        }
+                    });
+                }
                 tick_effects = world.into_effects();
             }
             // 爆炸包走游戏层正式入口：把 `Effect::Explode` 发给区域里的玩家，
@@ -3797,7 +3814,10 @@ impl Report {
                 plain!(wolf_body_damage);
                 plain!(wolf_body_count);
             }
-            if name.starts_with("zombie_") || name.starts_with("drowned_") {
+            if name.starts_with("zombie_")
+                || name.starts_with("drowned_")
+                || name.starts_with("skeleton_horse_")
+            {
                 if name.starts_with("zombie_inhabited_") {
                     plain!(ed);
                 }
@@ -5369,9 +5389,18 @@ fn shown_path(level: &MobLevel, entity: &Entity, mob: &Mob) -> Option<Vec<i32>> 
     let Some(vm) = vehicle.kind.mob() else {
         return path(mob);
     };
+    // `#non_controlling_rider`（建模范围内是史莱姆和硫磺方块怪）不借载具导航，
+    // path 也就不能转交到载具；和 `riding::controls_vehicle` 保持同一判据。
+    // A #non_controlling_rider (slime and sulfur cube among modelled mobs) does
+    // not borrow the vehicle navigation, so its path must not delegate either;
+    // keep this in step with riding::controls_vehicle.
     if vm.no_ai
         || vm.passengers.first().copied() != Some(entity.id)
-        || mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Slime
+        || matches!(
+            mob.mob_type,
+            mc_bamboo_blocks::entity::mob::MobType::Slime
+                | mc_bamboo_blocks::entity::mob::MobType::SulfurCube
+        )
     {
         return path(mob);
     }
