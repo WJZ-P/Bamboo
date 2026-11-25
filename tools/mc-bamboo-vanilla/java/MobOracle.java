@@ -632,6 +632,14 @@ public final class MobOracle {
                 playSculkSensorOrder(official, out);
                 cases++;
             }
+            if (only == null || only.startsWith("sculk_shrieker")) {
+                for (String name : List.of("sculk_shrieker_warn", "sculk_shrieker_cooldown",
+                        "sculk_shrieker_decay")) {
+                    if (only != null && !name.startsWith(only)) continue;
+                    playSculkShrieker(official, out, name);
+                    cases++;
+                }
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -835,6 +843,123 @@ public final class MobOracle {
                     + ",\"blocks\":" + initialBlocks
                     + ",\"sensors\":[[2,64,0],[6,64,0]]"
                     + ",\"events\":[1," + stepEventId + ",0,64,0]"
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            level.closeRealPoi();
+        }
+    }
+
+    /** 幽匿尖啸体：玩家触发感测体 → 尖啸体警告加一、尖叫，冷却期内再触发不加，
+     *  90 刻后 `tryRespond` 给玩家黑暗。逐刻比警告等级、尖叫状态和黑暗。 */
+    private static void playSculkShrieker(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        try {
+            level.enableGameEvents();
+            level.nextId = FIRST_ID;
+            level.gameTime = START_TIME;
+
+            BlockPos sensor = new BlockPos(4, 64, 0);
+            BlockPos shrieker = new BlockPos(6, 64, 0);
+            BlockPos playerPos = new BlockPos(2, 64, 0);
+            // 触发时刻；冷却场景第二次触发在 200 刻冷却内，第三次过了冷却。
+            // 衰减场景只触发一次，跑满 12000 刻看警告掉级。
+            int[] triggers = switch (name) {
+                case "sculk_shrieker_cooldown" -> new int[] {1, 100, 220};
+                default -> new int[] {1};
+            };
+            int ticks = switch (name) {
+                case "sculk_shrieker_cooldown" -> 300;
+                case "sculk_shrieker_decay" -> 12_200;
+                default -> 120;
+            };
+
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -12; x <= 12; x++) {
+                for (int z = -12; z <= 12; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            // 天然生成的尖啸体 `can_summon=true`。
+            BlockState shriekerState = Blocks.SCULK_SHRIEKER.defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.SculkShriekerBlock.CAN_SUMMON, true);
+            level.blocks.put(sensor.asLong(), Blocks.SCULK_SENSOR.defaultBlockState());
+            level.blocks.put(shrieker.asLong(), shriekerState);
+
+            net.minecraft.world.level.block.entity.SculkSensorBlockEntity sensorBe =
+                    new net.minecraft.world.level.block.entity.SculkSensorBlockEntity(sensor, Blocks.SCULK_SENSOR.defaultBlockState());
+            net.minecraft.world.level.block.entity.SculkShriekerBlockEntity shriekerBe =
+                    new net.minecraft.world.level.block.entity.SculkShriekerBlockEntity(shrieker, shriekerState);
+            level.putBlockEntity(sensorBe);
+            level.putBlockEntity(shriekerBe);
+            level.registerGameEventListener(sensor, sensorBe.getListener());
+            level.registerGameEventListener(shrieker, shriekerBe.getListener());
+            net.minecraft.core.SectionPos section = net.minecraft.core.SectionPos.of(sensor);
+            level.getBlockTicks().addContainer(
+                    new net.minecraft.world.level.ChunkPos(section.x(), section.z()),
+                    new net.minecraft.world.ticks.LevelChunkTicks<>());
+
+            // 一名站在尖啸体附近的玩家，带着自己的 WardenSpawnTracker。
+            GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+            ServerPlayer player = new ServerPlayer(official.server, level, profile, ClientInformation.createDefault());
+            player.setPos(playerPos.getX() + 0.5, 64.0, playerPos.getZ() + 0.5);
+            // 黑暗效果会走连接发包，挂一个记录用的假连接。
+            ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+            put(ServerGamePacketListenerImpl.class, connection, "player", player);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "server", official.server);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+            ((RecordingListener) connection).bytes = new Bytes(official.registries);
+            put(ServerPlayer.class, player, "connection", connection);
+            level.playersList().add(player);
+            level.tracked.add(player);
+
+            int stepEventId = official.registries
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.GAME_EVENT)
+                    .getId(GameEvent.STEP.value());
+            String initialBlocks = blockArray(level.blocks);
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime = START_TIME + tick;
+                    player.getWardenSpawnTracker().tick();
+                    for (int fireAt : triggers) {
+                        if (tick == fireAt) {
+                            level.gameEvent(GameEvent.STEP,
+                                    new Vec3(playerPos.getX() + 0.5, 64.5, playerPos.getZ() + 0.5),
+                                    GameEvent.Context.of(player));
+                        }
+                    }
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, sensorBe.getVibrationData(), sensorBe.getVibrationUser());
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, shriekerBe.getVibrationData(), shriekerBe.getVibrationUser());
+                    level.getBlockTicks().tick(level.gameTime, Integer.MAX_VALUE, (p, block) -> {
+                        BlockState st = level.getBlockState(p);
+                        if (st.is(block)) {
+                            st.tick(level, p, level.getRandom());
+                        }
+                    });
+                }
+                if (tick > 0) frames.append(',');
+                int warning = player.getWardenSpawnTracker().getWarningLevel();
+                int shrieking = level.getBlockState(shrieker)
+                        .getValue(net.minecraft.world.level.block.SculkShriekerBlock.SHRIEKING) ? 1 : 0;
+                int darkness = player.hasEffect(net.minecraft.world.effect.MobEffects.DARKNESS) ? 1 : 0;
+                frames.append('[').append(warning).append(',').append(shrieking).append(',').append(darkness).append(']');
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"sculkShrieker\",\"name\":" + jsonString(name)
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"blocks\":" + initialBlocks
+                    + ",\"sensor\":[4,64,0]"
+                    + ",\"shrieker\":[6,64,0]"
+                    + ",\"player\":[2,64,0]"
+                    + ",\"triggers\":" + java.util.Arrays.toString(triggers)
+                    + ",\"events\":[1," + stepEventId + ",2,64,0]"
                     + ",\"frames\":" + frames + "}\n");
             out.flush();
         } finally {

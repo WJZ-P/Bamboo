@@ -195,6 +195,7 @@ enum Line {
     AxolotlBreed(water_mob::AxolotlBreedCase),
     SculkSensor(sculk_sensor::SculkSensorCase),
     SculkSensorOrder(sculk_sensor::SculkSensorOrderCase),
+    SculkShrieker(sculk_sensor::SculkShriekerCase),
     End(End),
 }
 
@@ -984,6 +985,13 @@ struct MobLevel {
     block_events: BlockEvents,
     /// 游戏事件监听者登记表；只有幽匿感测体这类场景会用到。
     game_event_listeners: mc_bamboo_blocks::game_event::registry::GameEventListeners,
+    /// 尖啸体场景的玩家监守者警告等级，按玩家 uid。
+    warden_warnings: HashMap<
+        mc_bamboo_blocks::entity::EntityUid,
+        mc_bamboo_blocks::behaviour::misc::warden::WardenSpawnTracker,
+    >,
+    /// 尖啸体场景玩家身上黑暗效果剩下的刻数（`tryRespond` 给 260 刻）。
+    darkness_ticks: i32,
     /// 常驻 POI 索引表；未登记的场景保持为空，查询返回空。
     ///
     /// Persistent POI store; stays empty for scenes that do not register POIs.
@@ -1321,6 +1329,11 @@ impl Level for MobLevel {
         target: mc_bamboo_blocks::entity::EntityUid,
         instance: &mc_bamboo_blocks::entity::mob::effects::EffectInstance,
     ) -> bool {
+        // 尖啸体的黑暗：没有真实玩家时在这里记下剩余刻数。
+        if instance.effect == mc_bamboo_data::registries::mob_effect::DARKNESS {
+            self.darkness_ticks = self.darkness_ticks.max(instance.duration);
+            return true;
+        }
         let Some(game) = self.game.as_mut() else {
             return false;
         };
@@ -1346,6 +1359,10 @@ impl Level for MobLevel {
         };
         game.heal(target, amount);
         true
+    }
+
+    fn warn_warden(&mut self, target: mc_bamboo_blocks::entity::EntityUid) -> Option<i32> {
+        self.warden_warnings.entry(target).or_default().try_warn()
     }
 
     fn teleport_player_now(
@@ -1846,6 +1863,7 @@ impl Report {
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
                 Line::SculkSensorOrder(case) => self.replay_sculk_sensor_order(&case),
+                Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
@@ -2034,6 +2052,8 @@ impl Report {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(case.first_id),
             players: case

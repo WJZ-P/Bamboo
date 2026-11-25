@@ -69,6 +69,8 @@ impl BeeCase {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: EntityStore::new(),
             players: vec![PlayerView {

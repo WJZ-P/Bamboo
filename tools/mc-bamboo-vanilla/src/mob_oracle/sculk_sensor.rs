@@ -7,7 +7,7 @@
 use mc_bamboo_blocks::{
     behaviour::misc::sculk_entity::{SculkSensorEntity, create_block_entity},
     game_event::{GameEvent, dispatch::EventContext},
-    state::{POWER, SCULK_SENSOR_PHASE, SculkSensorPhase},
+    state::{POWER, SCULK_SENSOR_PHASE, SHRIEKING, SculkSensorPhase},
 };
 
 use super::*;
@@ -40,6 +40,53 @@ pub(super) struct SculkSensorOrderCase {
     frames: Vec<Vec<[i32; 3]>>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SculkShriekerCase {
+    name: String,
+    start_time: i64,
+    blocks: Vec<[i32; 4]>,
+    sensor: [i32; 3],
+    shrieker: [i32; 3],
+    player: [i32; 3],
+    triggers: Vec<i32>,
+    events: [i32; 5],
+    /// 每刻 `[警告等级, 尖叫中, 黑暗]`。
+    frames: Vec<[i32; 3]>,
+}
+
+/// 尖啸体场景里站在 `pos` 上方的一名玩家。
+fn shrieker_player(pos: BlockPos) -> mc_bamboo_blocks::entity::ctx::PlayerView {
+    use mc_bamboo_blocks::entity::ctx::PlayerView;
+    PlayerView {
+        uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
+        uid: 1,
+        yaw: 0.0,
+        pitch: 0.0,
+        position: mc_bamboo_core::Vec3::new(f64::from(pos.x) + 0.5, 64.0, f64::from(pos.z) + 0.5),
+        delta: mc_bamboo_core::Vec3::default(),
+        eye_height: 1.62,
+        health: 20.0,
+        look_direction: mc_bamboo_core::Vec3::view_vector(0.0, 0.0),
+        gaze_disguise: false,
+        alive: true,
+        spectator: false,
+        game_mode: 0,
+        mining_fatigue: None,
+        creative: false,
+        sneaking: false,
+        sprinting: false,
+        swimming: false,
+        invisible: false,
+        armor_cover: 0.0,
+        main_hand: 0,
+        off_hand: 0,
+        team: None,
+        combat: Default::default(),
+        effects: Default::default(),
+    }
+}
+
 /// 在 `world` 里按 `[刻, 事件 id, x, y, z]` 发一个游戏事件（格心）。
 fn fire(world: &mut World<'_>, event: &[i32; 5]) {
     let kind = GameEvent::from_id(event[1] as u8).unwrap_or(GameEvent::Step);
@@ -61,13 +108,19 @@ fn mob_level(blocks: &[[i32; 4]]) -> MobLevel {
         loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
         looting: Vec::new(),
         rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
-        facts: ZombieFacts::default(),
+        facts: ZombieFacts {
+            // 尖啸体 `canRespond` 要非和平；感测体场景读不读都一样。
+            difficulty: 2,
+            ..ZombieFacts::default()
+        },
         natural_spawn: None,
         biome: None,
         redstone: mc_bamboo_blocks::RedstoneMemory::default(),
         block_entities: BlockEntities::default(),
         block_events: BlockEvents::default(),
         game_event_listeners: Default::default(),
+        warden_warnings: Default::default(),
+        darkness_ticks: 0,
         poi: mc_bamboo_world::poi::PoiStore::new(),
         entities: EntityStore::with_next_id(1),
         players: Vec::new(),
@@ -185,6 +238,78 @@ impl Report {
             if states != *expected {
                 self.mismatch(format!(
                     "{} tick {tick}: official {expected:?}, bamboo {states:?}",
+                    case.name
+                ));
+            }
+        }
+    }
+
+    pub(super) fn replay_sculk_shrieker(&mut self, case: &SculkShriekerCase) {
+        self.cases += 1;
+        let broken = self.break_test.as_deref();
+        let break_phase = broken == Some("sculk_shrieker_phase");
+        let break_level = broken == Some("sculk_shrieker_level");
+
+        let sensor = BlockPos::new(case.sensor[0], case.sensor[1], case.sensor[2]);
+        let shrieker = BlockPos::new(case.shrieker[0], case.shrieker[1], case.shrieker[2]);
+        let player = BlockPos::new(case.player[0], case.player[1], case.player[2]);
+        let mut level = mob_level(&case.blocks);
+        level.players.push(shrieker_player(player));
+        let mut ticks = BlockTicks::default();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            world.set_block_entity(create_block_entity(sensor, false));
+            world.set_block_entity(
+                mc_bamboo_blocks::behaviour::misc::sculk_shrieker::create_block_entity(shrieker),
+            );
+        }
+
+        for (tick, expected) in case.frames.iter().enumerate() {
+            if tick > 0 {
+                let now = case.start_time + tick as i64;
+                ticks.set_time(now);
+                // 假世界不跑 `player.tick`，黑暗效果不会衰减；和 Java 一侧一致。
+                level.warden_warnings.entry(1).or_default().tick();
+                {
+                    let mut world = World::new(&mut level, &mut ticks);
+                    if case.triggers.contains(&(tick as i32)) {
+                        let kind =
+                            GameEvent::from_id(case.events[1] as u8).unwrap_or(GameEvent::Step);
+                        let source = mc_bamboo_core::Vec3::new(
+                            f64::from(player.x) + 0.5,
+                            64.5,
+                            f64::from(player.z) + 0.5,
+                        );
+                        world.game_event(
+                            kind,
+                            source,
+                            EventContext {
+                                source_player: Some(1),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+                let _ = mc_bamboo_blocks::run_block_entity_tick(&mut level, &mut ticks);
+                let _ = mc_bamboo_blocks::run_due_ticks(&mut level, &mut ticks, now);
+            }
+
+            let mut warning = level
+                .warden_warnings
+                .get(&1)
+                .map_or(0, |tracker| tracker.warning_level());
+            let darkness = i32::from(level.darkness_ticks > 0);
+            let world = World::new(&mut level, &mut ticks);
+            let mut shrieking = i32::from(world.block_state(shrieker).get(SHRIEKING));
+            if break_phase && tick == 5 {
+                shrieking = 0;
+            }
+            if break_level {
+                warning = warning.saturating_add(1);
+            }
+            if [warning, shrieking, darkness] != *expected {
+                self.mismatch(format!(
+                    "{} tick {tick}: official {expected:?}, bamboo [{warning}, {shrieking}, {darkness}]",
                     case.name
                 ));
             }

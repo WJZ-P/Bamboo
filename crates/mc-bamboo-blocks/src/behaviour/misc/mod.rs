@@ -39,7 +39,7 @@ mod respawn_anchor;
 mod scaffolding;
 mod sculk;
 pub mod sculk_entity;
-pub(crate) mod sculk_shrieker;
+pub mod sculk_shrieker;
 mod sea_pickle;
 mod sniffer_egg;
 mod snow;
