@@ -20,7 +20,7 @@ use super::{
     },
     sensor,
 };
-use crate::entity::EntityUid;
+use crate::entity::{EntityUid, store::KindPublic};
 
 /// `BehaviorBuilder.triggerIf(predicate)` 的实体谓词：青蛙用 `Entity::onGround` /
 /// `Entity::isInWater`。声明式 `OneShot`，`getRequiredMemories()` 是空集、不取随机数，
@@ -886,17 +886,36 @@ fn direction_from_rotation(x_rot: f32, y_rot: f32) -> Vec3 {
 /// `PositionTracker.currentPosition`；跟踪的实体不在了时没有位置。
 ///
 /// `PositionTracker.currentPosition`; no position once the tracked entity is gone.
+/// `EntityTracker.currentPosition`：活体按眼高，掉落物等非活体按实体表里的坐标。
+/// 官方的 `getEyeHeight` 对掉落物是固定的 `ItemEntity.EYE_HEIGHT`。
+///
+/// `EntityTracker.currentPosition`: living entities use eye height; non-living
+/// entities such as dropped items use the entity table's position and fixed eye height.
 pub(in crate::entity::mob) fn current_position(cx: &Cx, target: PositionTracker) -> Option<Vec3> {
     match target {
         PositionTracker::Block { center, .. } => Some(center),
         PositionTracker::Entity { uid, track_eye, .. } => {
-            let view = sensor::living(cx, uid)?;
-            Some(if track_eye {
-                view.position
-                    .add(Vec3::new(0.0, f64::from(view.eye_height), 0.0))
-            } else {
-                view.position
-            })
+            if let Some(view) = sensor::living(cx, uid) {
+                return Some(if track_eye {
+                    view.position
+                        .add(Vec3::new(0.0, f64::from(view.eye_height), 0.0))
+                } else {
+                    view.position
+                });
+            }
+            let mut found = None;
+            cx.ctx.with_other(uid, &mut |public| {
+                // 掉落物不是 LivingEntity：track_eye 时加上官方固定的 EYE_HEIGHT。
+                // Dropped items are not LivingEntity: add vanilla's fixed EYE_HEIGHT.
+                found = Some(
+                    if track_eye && matches!(public.kind, KindPublic::Item { .. }) {
+                        public.position.add(Vec3::new(0.0, 0.2125, 0.0))
+                    } else {
+                        public.position
+                    },
+                );
+            });
+            found
         }
     }
 }
@@ -910,30 +929,38 @@ pub(super) fn current_block_position(cx: &Cx, target: PositionTracker) -> Option
         PositionTracker::Entity {
             uid, target_eye, ..
         } => {
-            let view = sensor::living(cx, uid)?;
-            Some(if target_eye {
-                BlockPos::containing(view.position.add(Vec3::new(
-                    0.0,
-                    f64::from(view.eye_height),
-                    0.0,
-                )))
-            } else {
-                BlockPos::containing(view.position)
-            })
+            if let Some(view) = sensor::living(cx, uid) {
+                return Some(if target_eye {
+                    BlockPos::containing(view.position.add(Vec3::new(
+                        0.0,
+                        f64::from(view.eye_height),
+                        0.0,
+                    )))
+                } else {
+                    BlockPos::containing(view.position)
+                });
+            }
+            let mut found = None;
+            cx.ctx.with_other(uid, &mut |public| {
+                found = Some(BlockPos::containing(public.position));
+            });
+            found
         }
     }
 }
 
-/// `PositionTracker.isVisibleBy`：方块总看得见；活体要活着且在 `visible_mobs` 里看得见。
+/// `PositionTracker.isVisibleBy`：方块和非活体总看得见；活体要活着且在
+/// `NearestVisibleLivingEntities.contains` 里。
 ///
-/// `PositionTracker.isVisibleBy`: blocks always are; living entities must be alive and
-/// visible in `visible_mobs`.
+/// `PositionTracker.isVisibleBy`: blocks and non-living entities always are; living
+/// entities must be alive and in `NearestVisibleLivingEntities.contains`.
 fn is_visible_by(cx: &mut Cx, target: PositionTracker) -> bool {
     match target {
         PositionTracker::Block { .. } => true,
         PositionTracker::Entity { uid, .. } => match sensor::living(cx, uid) {
             Some(view) if view.alive => sensor::visible_contains(cx, uid),
-            _ => false,
+            Some(_) => false,
+            None => true,
         },
     }
 }
