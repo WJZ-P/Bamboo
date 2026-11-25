@@ -127,10 +127,9 @@ pub(super) fn finalize_spawn(entity: &mut Entity, random: &dyn RandomSource) {
 
 /// `Ravager.addAdditionalSaveData` 的三个计时字段。
 pub(super) fn save(mob: &Mob, out: &mut Vec<(String, Tag)>) {
-    let state = state_of(mob);
-    out.push(("AttackTick".to_owned(), Tag::Int(state.attack_tick)));
-    out.push(("StunTick".to_owned(), Tag::Int(state.stunned_tick)));
-    out.push(("RoarTick".to_owned(), Tag::Int(state.roar_tick)));
+    out.push(("AttackTick".to_owned(), Tag::Int(mob.ravager.attack_tick)));
+    out.push(("StunTick".to_owned(), Tag::Int(mob.ravager.stunned_tick)));
+    out.push(("RoarTick".to_owned(), Tag::Int(mob.ravager.roar_tick)));
 }
 
 /// `Ravager.readAdditionalSaveData` 的三个计时字段。
@@ -140,19 +139,6 @@ pub(super) fn load(tag: &Tag) -> RavagerState {
         attack_tick: tag::int_or(tag, "AttackTick", 0),
         stunned_tick: tag::int_or(tag, "StunTick", 0),
         roar_tick: tag::int_or(tag, "RoarTick", 0),
-    }
-}
-
-/// 计时字段暂存在 passthrough（不打进 `Mob` 的结构体），读出来仍按官方缺省 0。
-fn state_of(mob: &Mob) -> RavagerState {
-    let int = |key: &str| match mob.passthrough.iter().find(|(k, _)| k == key) {
-        Some((_, Tag::Int(value))) => *value,
-        _ => 0,
-    };
-    RavagerState {
-        attack_tick: int("AttackTick"),
-        stunned_tick: int("StunTick"),
-        roar_tick: int("RoarTick"),
     }
 }
 
@@ -176,11 +162,11 @@ mod tests {
     #[test]
     fn timers_round_trip() {
         let mut mob = Mob::new(super::super::MobType::Ravager);
-        mob.passthrough = vec![
-            ("AttackTick".to_owned(), Tag::Int(7)),
-            ("StunTick".to_owned(), Tag::Int(11)),
-            ("RoarTick".to_owned(), Tag::Int(20)),
-        ];
+        mob.ravager = RavagerState {
+            attack_tick: 7,
+            stunned_tick: 11,
+            roar_tick: 20,
+        };
         let mut out = Vec::new();
         save(&mob, &mut out);
         let tag = Tag::Compound(out);

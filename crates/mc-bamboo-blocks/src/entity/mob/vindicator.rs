@@ -141,16 +141,31 @@ pub(super) fn finalize_spawn(entity: &mut Entity, random: &dyn RandomSource) {
     });
 }
 
-/// `Vindicator.addAdditionalSaveData` 的 `Johnny` 键。
+/// `Vindicator.addAdditionalSaveData` 的 `Johnny` 键：只在为真时写。
 ///
-/// The `Johnny` key of `Vindicator.addAdditionalSaveData`.
+/// The `Johnny` key of `Vindicator.addAdditionalSaveData`: written only when true.
 pub(super) fn save(mob: &Mob, out: &mut Vec<(String, Tag)>) {
-    // 卫道士没有自己的可变状态字段（`Mob` 上不存 Johnny），只读 passthrough 里的值。
-    // Vindicator has no separate mutable state on `Mob`; only a saved passthrough key.
-    if let Some((_, value)) = mob.passthrough.iter().find(|(key, _)| key == "Johnny") {
-        out.retain(|(key, _)| key != "Johnny");
-        out.push(("Johnny".to_owned(), value.clone()));
+    if mob.vindicator.johnny {
+        out.push(("Johnny".to_owned(), Tag::Byte(1)));
     }
+}
+
+/// `Vindicator.applyRaidBuffs`：先抽一次 `nextFloat` 和 `Raid.getEnchantOdds()` 比，
+/// 中了就按波次给新铁斧套锋利（`wave > 5` 用 post_wave_5 的 II，否则 I）；无论
+/// 中不中，主手都换成这把新铁斧（覆盖旧的）。
+///
+/// `Vindicator.applyRaidBuffs`: draw `nextFloat` once and compare it to
+/// `Raid.getEnchantOdds()`; a hit enchants a fresh iron axe with Sharpness
+/// (`wave > 5` gives post-wave-5 II, otherwise I). The main hand is always
+/// replaced with this axe.
+pub(crate) fn apply_raid_buffs(me: &mut Entity, mob: &mut Mob, enchant_odds: f32, wave: i32) {
+    let enchant = me.random.next_float() <= enchant_odds;
+    let mut axe = ItemStack::new(items::IRON_AXE, 1);
+    if enchant {
+        let level = if wave > 5 { 2 } else { 1 };
+        super::raider::add_enchantment(&mut axe, "minecraft:sharpness", level);
+    }
+    mob.equipment.set(EquipmentSlot::MainHand, axe);
 }
 
 /// 读盘时的 `Johnny` 是布尔；名字叫 "Johnny" 时官方 `setCustomName` 也会置位。
@@ -187,5 +202,36 @@ mod tests {
         assert_eq!(names[7], "VindicatorBreakDoorGoal");
         assert_eq!(names[9], "HoldGroundAttackGoal");
         assert_eq!(names[10], "MeleeAttackGoal");
+    }
+
+    /// `applyRaidBuffs`：命中给新铁斧套锋利（`wave > 5` 用 II），没命中主手仍是
+    /// 一把新铁斧。
+    #[test]
+    fn raid_buffs_enchant_the_axe() {
+        let mut entity = Entity::by_mob_type(super::super::MobType::Vindicator, Vec3::default());
+        entity.with_mob(|me, mob| {
+            // 命中率 1：wave 2 → 锋利 I。
+            super::apply_raid_buffs(me, mob, 1.0, 2);
+            let axe = mob.equipment.get(EquipmentSlot::MainHand);
+            assert_eq!(axe.item, items::IRON_AXE);
+            assert_eq!(
+                crate::entity::arrow::enchantment_level(axe, "minecraft:sharpness"),
+                1
+            );
+            // 命中率 1：wave 7 → 锋利 II。
+            super::apply_raid_buffs(me, mob, 1.0, 7);
+            let axe = mob.equipment.get(EquipmentSlot::MainHand);
+            assert_eq!(
+                crate::entity::arrow::enchantment_level(axe, "minecraft:sharpness"),
+                2
+            );
+            // 命中率 0：主手换成无附魔的新铁斧。
+            super::apply_raid_buffs(me, mob, 0.0, 7);
+            let axe = mob.equipment.get(EquipmentSlot::MainHand);
+            assert_eq!(
+                crate::entity::arrow::enchantment_level(axe, "minecraft:sharpness"),
+                0
+            );
+        });
     }
 }

@@ -216,7 +216,46 @@ pub(crate) fn is_captain(mob: &Mob) -> bool {
             .matches(&ominous_banner())
 }
 
-/// `Raid.getOminousBannerInstance`：白旗加八层图案、隐藏图案提示、物品名和稀有度。
+/// `Raider.applyRaidBuffs`：卫道士套锋利、掠夺者套快速装填，其余袭击者不取数
+/// 也不换装备。`enchant_odds` 是 `Raid.getEnchantOdds()`，`wave` 是这一波的编号。
+///
+/// `Raider.applyRaidBuffs`: vindicators get Sharpness and pillagers Quick Charge;
+/// the other raiders draw nothing and keep their gear.
+pub fn apply_raid_buffs(me: &mut Entity, mob: &mut Mob, enchant_odds: f32, wave: i32) {
+    if mob.mob_type == super::MobType::Vindicator {
+        super::vindicator::apply_raid_buffs(me, mob, enchant_odds, wave);
+    } else if mob.mob_type == super::MobType::Pillager {
+        super::pillager::apply_raid_buffs(me, mob, enchant_odds, wave);
+    }
+}
+
+/// 给物品加一条附魔（等级只升不降），照官方 `ItemEnchantments.Mutable.upgrade`。
+///
+/// Add one enchantment to a stack (raising a level only), mirroring vanilla
+/// `ItemEnchantments.Mutable.upgrade`.
+pub(crate) fn add_enchantment(stack: &mut ItemStack, name: &str, level: i32) {
+    use mc_bamboo_data::registries::data_component_type::ENCHANTMENTS;
+    use mc_bamboo_protocol::components::{ComponentValue, defaults};
+    let Some(id) = mc_bamboo_data::registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:enchantment")
+        .and_then(|registry| registry.entries.iter().position(|entry| *entry == name))
+        .map(|index| index as i32)
+    else {
+        return;
+    };
+    let mut levels = match defaults::resolve(stack.item, &stack.patch(), ENCHANTMENTS) {
+        Some(ComponentValue::Enchantments(levels)) => levels.clone(),
+        _ => Vec::new(),
+    };
+    match levels.iter_mut().find(|(existing, _)| *existing == id) {
+        Some((_, old)) => *old = (*old).max(level),
+        None => levels.push((id, level)),
+    }
+    crate::item_exchange::set_component(stack, ENCHANTMENTS, ComponentValue::Enchantments(levels));
+}
+
+/// `Raider.getOminousBannerInstance`：白旗加八层图案、隐藏图案提示、物品名和稀有度。
 ///
 /// `Raid.getOminousBannerInstance`: a white banner with eight pattern layers, the hidden
 /// pattern tooltip, the item name and the rarity.

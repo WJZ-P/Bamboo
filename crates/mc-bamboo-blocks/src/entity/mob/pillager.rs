@@ -215,6 +215,29 @@ fn enchantment_id(name: &str) -> Option<i32> {
         .map(|index| index as i32)
 }
 
+/// `Pillager.applyRaidBuffs`：抽一次 `nextFloat` 和 `Raid.getEnchantOdds()` 比，
+/// 中了且波次超过简单波次（`wave > 3`）才换弩并套快速装填（`wave > 5` 用 II，
+/// 否则 I）；否则什么都不换。
+///
+/// `Pillager.applyRaidBuffs`: draw `nextFloat` once against `getEnchantOdds()`; a
+/// hit replaces the crossbow with Quick Charge only past the easy waves
+/// (`wave > 5` gives II, otherwise I). Nothing is swapped otherwise.
+pub(crate) fn apply_raid_buffs(me: &mut Entity, mob: &mut Mob, enchant_odds: f32, wave: i32) {
+    if me.random.next_float() > enchant_odds {
+        return;
+    }
+    let level = if wave > 5 {
+        2
+    } else if wave > 3 {
+        1
+    } else {
+        return;
+    };
+    let mut crossbow = ItemStack::new(items::CROSSBOW, 1);
+    super::raider::add_enchantment(&mut crossbow, "minecraft:quick_charge", level);
+    mob.equipment.set(EquipmentSlot::MainHand, crossbow);
+}
+
 /// `PatrollingMonster.checkPatrollingMonsterSpawnRules`：方块光大于 8 不刷，否则只要脚下
 /// 是能生成的方块（`Monster.checkAnyLightMonsterSpawnRules`，和平难度由调用方先挡掉）。
 ///

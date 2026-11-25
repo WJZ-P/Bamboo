@@ -370,6 +370,8 @@ struct SpawnPlan {
     raid_id: i32,
     wave: i32,
     pos: BlockPos,
+    /// `Raid.getEnchantOdds()`：`joinRaid` 里给卫道士 / 掠夺者套附魔的门槛。
+    enchant_odds: f32,
     /// 第一期刷掠夺者、卫道士、劫掠兽、女巫；唤魔者留到第二期。
     members: Vec<MobType>,
 }
@@ -561,6 +563,7 @@ fn step_one(
                     raid_id,
                     wave: raid.groups_spawned,
                     pos,
+                    enchant_odds: raid.enchant_odds(),
                     members,
                 });
                 if !first_sound {
@@ -666,9 +669,27 @@ fn spawn_group(world: &mut World, plan: &SpawnPlan) -> Vec<(i32, f32)> {
         finalize_spawn(world, mob, &mut entity, SpawnReason::Natural);
         let health = entity.kind.mob().map_or(0.0, |m| m.health);
         let uid = world.add_prepared_entity(entity);
+        join_mob(world, uid, plan.raid_id, plan.wave, plan.enchant_odds);
         out.push((uid, health));
     }
     out
+}
+
+/// `Raid.joinRaid` 里写回实体的那部分：登记 `RaidId`、波次、能加入袭击、清零离队
+/// 计时，并按波次套袭击附魔（卫道士锋利、掠夺者快速装填）。
+///
+/// The entity-side half of `Raid.joinRaid`: record the `RaidId` and wave, allow
+/// joining, reset the outside-raid timer and apply the wave enchantment.
+fn join_mob(world: &mut World, uid: i32, raid_id: i32, wave: i32, enchant_odds: f32) {
+    world.with_entity_mut(uid, &mut |entity| {
+        entity.with_mob(|me, mob| {
+            mob.raider.raid_id = Some(raid_id);
+            mob.raider.wave = wave;
+            mob.raider.can_join_raid = true;
+            mob.raider.ticks_outside_raid = 0;
+            mc_bamboo_blocks::entity::mob::raider::apply_raid_buffs(me, mob, enchant_odds, wave);
+        });
+    });
 }
 
 /// `updateRaiders`：每 20 刻清掉已移除 / 离中心太远的袭击者（其余离队条件
