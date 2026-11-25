@@ -24,7 +24,7 @@ use mc_bamboo_data::{
 use super::{Mob, MobEvent, goals::GoalSelector, living, navigation::Navigation};
 use crate::{
     RandomSource,
-    entity::{Entity, EntityRandom, ctx::EntityCtx},
+    entity::{Entity, EntityRandom},
 };
 
 /// 刷新器生成流浪商人时设的 `despawnDelay`（`WanderingTraderSpawner.spawn`）。
@@ -96,39 +96,45 @@ pub struct WanderingTrader {
     pub invisible: bool,
     /// `effectsDirty`：效果表变了，下一次 `baseTick` 才刷新共享标志位。
     pub effects_dirty: bool,
-    /// `updatingUsingItem` 这一刻刚喝完：`UseItemGoal` 在这一刻的目标表里
-    /// 还没 `stop()`，新的一次要等下一刻才 `canUse()`。
-    pub finished_this_tick: bool,
-    /// `UseItemGoal.stop()` 下一刻要播的喝完音效（音高在那一刻画一次随机数）。
-    /// 0 = 没有，1 = 喝完这一刻设的（还不能播），2 = 下一刻可播；
-    /// 3 / 4 同理但用牛奶的 `reappeared` 音效。
-    pub finish_sound_ticks: u8,
 }
 
-/// `WanderingTrader.registerGoals`：官方用 `GoalSelector` 注册一串目标
-/// （`UseItemGoal` 喝隐身药水 / 牛奶、`WanderToPositionGoal`、躲避僵尸等）。
-/// 饮水由 [`custom_ai_step`] 按官方 `GoalSelector` / `updatingUsingItem` 的时序
-/// 驱动，游走目标和消失走 [`wander_tick`] / [`maybe_despawn`]；目标表本身
-/// 按注册顺序留一份供对拍读「正在跑的目标名」。
+/// `WanderingTrader.registerGoals`：按官方 `addGoal` 顺序注册整张表。两条
+/// `UseItemGoal`（隐身药水 / 牛奶）是真实目标，走 `GoalSelector` 的隔刻相位；
+/// 七条 `AvoidEntityGoal` 按官方类名和距离注册，其中灾厄村民 / 亡灵未建模的
+/// 恒匹配不到。`TradeWithPlayerGoal` / `LookAtTradingPlayerGoal` /
+/// `WanderToPositionGoal` / `InteractGoal` 见各自实现。
 ///
-/// The official `WanderingTrader.registerGoals` uses a `GoalSelector`; drinking,
-/// wandering and despawning are driven here by the per-tick steps, with the
-/// registered goal list kept for the oracle's running-goal names.
+/// `WanderingTrader.registerGoals`, in vanilla `addGoal` order. The two
+/// `UseItemGoal`s (potion / milk) are real goals that follow the selector's
+/// every-other-tick phase; the seven `AvoidEntityGoal`s keep the vanilla class
+/// names and distances, the unmodelled illager / undead ones never matching.
 pub(in crate::entity::mob) fn goals(_navigation: &mut Navigation) -> GoalSelector {
+    use super::goals::UseItemKind;
+    let avoid = |class: super::avoid::AvoidClass, max: f32| {
+        super::goals::Goal::Avoid(super::avoid::AvoidEntity::new(class, max, 0.5, 0.5))
+    };
     super::goals::GoalSelector::from_ordered_pairs(vec![
         (0, super::goals::Goal::Float),
-        (0, super::goals::Goal::Unavailable("UseItemGoal")),
-        (0, super::goals::Goal::Unavailable("UseItemGoal")),
-        (1, super::goals::Goal::Unavailable("TradeWithPlayerGoal")),
         (
-            1,
-            super::goals::Goal::Avoid(super::avoid::AvoidEntity::new(
-                super::avoid::AvoidClass::Monster,
-                8.0,
-                0.5,
-                0.5,
-            )),
+            0,
+            super::goals::Goal::UseItem {
+                kind: UseItemKind::Invisibility,
+            },
         ),
+        (
+            0,
+            super::goals::Goal::UseItem {
+                kind: UseItemKind::Milk,
+            },
+        ),
+        (1, super::goals::Goal::Unavailable("TradeWithPlayerGoal")),
+        (1, avoid(super::avoid::AvoidClass::Zombie, 8.0)),
+        (1, avoid(super::avoid::AvoidClass::Evoker, 12.0)),
+        (1, avoid(super::avoid::AvoidClass::Vindicator, 8.0)),
+        (1, avoid(super::avoid::AvoidClass::Vex, 8.0)),
+        (1, avoid(super::avoid::AvoidClass::Pillager, 15.0)),
+        (1, avoid(super::avoid::AvoidClass::Illusioner, 12.0)),
+        (1, avoid(super::avoid::AvoidClass::Zoglin, 10.0)),
         (
             1,
             super::goals::Goal::Panic {
@@ -204,27 +210,6 @@ pub fn maybe_despawn(me: &mut Entity, mob: &mut Mob) {
     }
 }
 
-/// `UseItemGoal.canUse` 的两个谓词，按官方注册顺序：夜里且没隐身 → 隐身药水；
-/// 白天且隐身 → 牛奶。`isInvisible()` 由状态效果表派生（`updateInvisibilityStatus`）。
-///
-/// The two `UseItemGoal.canUse` predicates in registration order: dark and
-/// visible → invisibility potion; bright and invisible → milk. `isInvisible()`
-/// is derived from the effect map like `updateInvisibilityStatus`.
-fn choose_drink(mob: &Mob, bright: bool) -> Option<Drink> {
-    let invisible = mob.wandering_trader.invisible;
-    if !bright && !invisible {
-        Some(Drink::Invisibility {
-            remaining: DRINK_DURATION,
-        })
-    } else if bright && invisible {
-        Some(Drink::Milk {
-            remaining: DRINK_DURATION,
-        })
-    } else {
-        None
-    }
-}
-
 /// `ItemStack.onUseTick` 的 `Consumable.shouldEmitParticlesAndSounds`：
 /// `consumeTicks - remaining > (int)(consumeTicks * 0.21875F)` 且
 /// `remaining % 4 == 0`。32 刻 ⇒ 阈值 7，命中刻是 28 / 24 / … / 4 / 0。
@@ -287,17 +272,28 @@ fn finish_drink(me: &mut Entity, mob: &mut Mob, drink: Drink) {
         Drink::None => {}
     }
     // `onEffectAdded` / `removeAllEffects` 标脏，共享标志位下一刻 baseTick 才刷新。
-    mob.wandering_trader.effects_dirty = true;
-    mob.wandering_trader.finished_this_tick = true;
-    // `UseItemGoal.stop()` 在目标表的下一次 tick 才跑，那时才取音高随机数；
+    // `UseItemGoal.stop()` 由目标表在下一个完整刻调用，那里才取音高随机数；
     // `completeUsingItem` 这一刻只有 `Consumable.onConsume` 的 4 次取数。
-    // `UseItemGoal.stop()` draws its pitch on the next goal tick, not here.
+    mob.wandering_trader.effects_dirty = true;
     mob.wandering_trader.drink = Drink::None;
-    mob.wandering_trader.finish_sound_ticks = if matches!(drink, Drink::Milk { .. }) {
-        3
+}
+
+/// `UseItemGoal.stop()` 的喝完音效：`playSound(finishUsingSound, 1.0, 0.9 + nextFloat * 0.2)`。
+/// 音高在调 `playSound` 之前取，静音的生物也照样消耗这次随机数。
+///
+/// `UseItemGoal.stop()` plays the finish sound at volume 1.0 and pitch
+/// `0.9 + nextFloat * 0.2`; the pitch draw happens before `playSound`, so a silent
+/// mob still consumes it.
+pub fn use_item_stop(me: &mut Entity, mob: &mut Mob, milk: bool) {
+    let sound = if milk {
+        REAPPEARED_SOUND
     } else {
-        1
+        DISAPPEARED_SOUND
     };
+    let random = EntityRandom(std::cell::RefCell::new(me.random));
+    let pitch = 0.9 + random.next_float() * 0.2;
+    me.random = random.0.into_inner();
+    living::play_sound(me, mob, sound, 1.0, pitch);
 }
 
 /// `LivingEntity.updatingUsingItem()`：紧跟 `super.tick()`，在 `aiStep()` 之前。
@@ -329,67 +325,6 @@ pub fn use_tick(me: &mut Entity, mob: &mut Mob) {
             },
             Drink::None => Drink::None,
         };
-    }
-}
-
-/// `UseItemGoal` 的两个 `canUse` 谓词：官方在 `Mob.serverAiStep()` 的目标表
-/// 里跑，隔刻调度；这里在 `aiStep()` 尾部按注册顺序推进，并把正在跑的目标
-/// 名写进目标表，供逐刻对拍读。
-///
-/// The two `UseItemGoal.canUse` predicates: vanilla runs them in the goal
-/// selector inside `Mob.serverAiStep()`; here they advance at the `aiStep()`
-/// tail and the running goal names go into the selector for the oracle.
-pub fn custom_ai_step(_me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    // `Mob.serverAiStep` 在 `isEffectiveAi()` 为假（NoAI / 有人控制）时整个跳过，
-    // 两个 `UseItemGoal` 也就不会启动；官方夹具的 NoAI 场景正是这样。
-    if mob.no_ai {
-        return;
-    }
-    let bright = ctx.blocks().is_bright_outside();
-    // `UseItemGoal.stop()` 在目标表的下一次 tick 才把 MOVE 位放开；这一刻
-    // `canUse()` 看到旧的 `isUsingItem()`，不会立刻开始新的一次。
-    let finished = std::mem::take(&mut mob.wandering_trader.finished_this_tick);
-    let ticks = mob.wandering_trader.finish_sound_ticks;
-    let stop_sound = matches!(ticks, 2 | 4).then_some(if ticks == 4 {
-        REAPPEARED_SOUND
-    } else {
-        DISAPPEARED_SOUND
-    });
-    if let Some(sound) = stop_sound {
-        let random = EntityRandom(std::cell::RefCell::new(_me.random));
-        let pitch = 0.9 + random.next_float() * 0.2;
-        _me.random = random.0.into_inner();
-        mob.events.push(MobEvent::Sound {
-            sound,
-            volume: 1.0,
-            pitch,
-            position: _me.position,
-            hostile: false,
-            seed: None,
-        });
-        mob.wandering_trader.finish_sound_ticks = 0;
-    } else if ticks == 1 || ticks == 3 {
-        mob.wandering_trader.finish_sound_ticks = ticks + 1;
-    }
-    if !finished
-        && stop_sound.is_none()
-        && let Some(next) = choose_drink(mob, bright)
-        && mob.wandering_trader.drink == Drink::None
-    {
-        // `UseItemGoal.start()`：主手换成消耗品并 `startUsingItem`，这一刻不取随机数。
-        mob.wandering_trader.drink = next;
-    }
-    // 把两个 `UseItemGoal` 的运行状态写回目标表（下标 1 / 2，按注册顺序）。
-    // 喝完那一刻目标仍 running（`stop()` 在下一刻的目标表 tick 才被调用）。
-    let which = match mob.wandering_trader.drink {
-        Drink::Invisibility { .. } => Some(1),
-        Drink::Milk { .. } => Some(2),
-        Drink::None => finished.then_some(1),
-    };
-    for (index, wrapped) in mob.goals.goals.iter_mut().enumerate() {
-        if matches!(wrapped.goal, super::goals::Goal::Unavailable("UseItemGoal")) {
-            wrapped.running = which == Some(index);
-        }
     }
 }
 
@@ -432,20 +367,17 @@ mod tests {
     }
 
     #[test]
-    fn drink_predicates_and_effect_application() {
+    fn drink_finish_applies_and_clears_effects() {
         let (mut me, mut mob) = trader();
         // 夜里启动隐身药水；喝完挂 3600 刻 INVISIBILITY。
         mob.wandering_trader.drink = Drink::Invisibility { remaining: 1 };
         finish_drink(&mut me, &mut mob, Drink::Invisibility { remaining: 1 });
         assert!(mob.effects.has(mob_effect::INVISIBILITY));
         assert_eq!(mob.wandering_trader.drink, Drink::None);
-        assert!(
-            choose_drink(&mob, false).is_some(),
-            "标志位还没刷新，仍会再喝一次"
-        );
+        // 效果表标脏，`updateInvisibilityStatus` 在同步阶段刷新共享标志位。
+        assert!(mob.wandering_trader.effects_dirty);
         update_invisibility(&mut mob);
         assert!(mob.wandering_trader.invisible);
-        assert!(!choose_drink(&mob, false).is_some());
         // 白天启动牛奶；喝完清掉全部效果。
         mob.wandering_trader.drink = Drink::Milk { remaining: 1 };
         finish_drink(&mut me, &mut mob, Drink::Milk { remaining: 1 });

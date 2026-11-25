@@ -32,6 +32,30 @@ pub enum AvoidClass {
     /// The guardians a dolphin avoids (`AvoidEntityGoal(Guardian.class, 8.0F, 1.0D, 1.0D)`;
     /// the `Guardian` class also covers elder guardians).
     Guardian,
+    /// 流浪商人躲的僵尸（`AvoidEntityGoal(Zombie.class, 8.0F, ...)`，含尸壳 / 溺尸 /
+    /// 僵尸村民）。
+    ///
+    /// The zombie the wandering trader avoids (`AvoidEntityGoal(Zombie.class, 8.0F, ...)`,
+    /// including husks, drowned and zombie villagers).
+    Zombie,
+    /// 流浪商人躲的卫道士（`AvoidEntityGoal(Vindicator.class, 8.0F, ...)`）。
+    ///
+    /// The vindicator the wandering trader avoids.
+    Vindicator,
+    /// 流浪商人躲的掠夺者（`AvoidEntityGoal(Pillager.class, 15.0F, ...)`）。
+    ///
+    /// The pillager the wandering trader avoids.
+    Pillager,
+    /// 官方注册了但 Bamboo 还没建模的灾厄村民 / 亡灵（唤魔者、恼鬼、幻术师、僵尸疣猪兽）：
+    /// 永远匹配不到，`canUse` 恒假、不取随机数，只占注册顺序。
+    ///
+    /// The illagers / undead the wandering trader avoids that Bamboo does not model
+    /// (evoker, vex, illusioner, zoglin): never matched, `canUse` is always false and
+    /// draws nothing; they only keep the registration order.
+    Evoker,
+    Vex,
+    Illusioner,
+    Zoglin,
 }
 
 impl AvoidClass {
@@ -45,6 +69,10 @@ impl AvoidClass {
             Self::PolarBear => false,
             Self::Armadillo => kind == MobType::Armadillo,
             Self::Guardian => super::guardian::is_guardian(kind),
+            Self::Zombie => kind.is_zombie(),
+            Self::Vindicator => kind == MobType::Vindicator,
+            Self::Pillager => kind == MobType::Pillager,
+            Self::Evoker | Self::Vex | Self::Illusioner | Self::Zoglin => false,
         }
     }
 }

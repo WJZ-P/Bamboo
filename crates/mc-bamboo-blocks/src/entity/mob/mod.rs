@@ -4368,6 +4368,16 @@ pub struct MobPublic {
     /// `WanderingTrader.despawnDelay`: trader llamas read the holder's countdown
     /// in `maybeDespawn()`; zero for other mobs.
     pub trader_despawn_delay: i32,
+    /// `Mob.getLastHurtByMob()`：行商羊驼的 `TraderLlamaDefendWanderingTraderGoal`
+    /// 从牵引者身上读这个值。其它生物也能读，只是没目标会看。
+    ///
+    /// `Mob.getLastHurtByMob()`, read by the trader llama's defend goal from its
+    /// holder. Other mobs may read it too, but no goal consults it.
+    pub last_hurt_by_mob: Option<EntityUid>,
+    /// `Mob.getLastHurtByMobTimestamp()`，同上。
+    ///
+    /// `Mob.getLastHurtByMobTimestamp()`, likewise.
+    pub last_hurt_by_mob_timestamp: i32,
 }
 
 impl MobPublic {
@@ -4512,6 +4522,8 @@ impl MobPublic {
             passengers: mob.passengers.clone(),
             leash_holder: leash::leash_holder(mob),
             trader_despawn_delay: mob.wandering_trader.despawn_delay,
+            last_hurt_by_mob: mob.last_hurt_by_mob,
+            last_hurt_by_mob_timestamp: mob.last_hurt_by_mob_timestamp,
         }
     }
 
