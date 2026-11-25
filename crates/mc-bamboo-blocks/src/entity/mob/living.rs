@@ -1080,6 +1080,15 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
     if super::armadillo::is_scared(mob) {
         return;
     }
+    // `Warden.getAmbientSound()` 在 ROARING / 钻出 / 钻入时返回 null，不出声也不取音高。
+    // `Warden.getAmbientSound()` is null while ROARING / emerging / digging: no sound
+    // and no pitch draws.
+    if mob.mob_type == super::MobType::Warden
+        && (mob.warden.pose == super::warden::WardenPose::Roaring
+            || mob.warden.pose.is_digging_or_emerging())
+    {
+        return;
+    }
     if mob.mob_type == super::MobType::Wolf {
         // 刚生成的狼还没有仇恨，时刻不影响叫声。
         // A fresh wolf has no anger, so the clock does not matter.
@@ -1165,6 +1174,9 @@ fn ambient_sound(mob: &Mob, in_water: bool) -> &'static str {
         );
     }
     match mob.mob_type {
+        // `Warden.getAmbientSound()` 按愤怒等级选（null 姿态由 play_ambient_sound 拦掉）。
+        // `Warden.getAmbientSound()` picks by anger level (null poses are filtered above).
+        super::MobType::Warden => mob.warden.anger_level().ambient_sound(),
         super::MobType::Goat => super::goat::voice(mob, Voice::Ambient),
         super::MobType::Enderman if mob.enderman.creepy => "minecraft:entity.enderman.scream",
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
@@ -2926,7 +2938,14 @@ pub(crate) fn hurt_server(
 /// The modelled part of `isInvulnerableTo`: removed, or invulnerable to a source that
 /// does not bypass it.
 pub(super) fn is_invulnerable_to(me: &Entity, mob: &Mob, source: &DamageSource) -> bool {
+    // `Warden.isInvulnerableTo`：钻出 / 钻入时，除 `BYPASSES_INVULNERABILITY` 外一律无敌。
+    // `Warden.isInvulnerableTo`: invulnerable while emerging or digging, except for
+    // damage tagged `BYPASSES_INVULNERABILITY`.
+    let digging_invulnerable = mob.mob_type == super::MobType::Warden
+        && mob.warden.pose.is_digging_or_emerging()
+        && !source.kind.bypasses_invulnerability();
     me.removed
+        || digging_invulnerable
         || ((mob.invulnerable || mob.invulnerable_time > 0)
             && !source.kind.bypasses_invulnerability()
             && !source.creative_player)

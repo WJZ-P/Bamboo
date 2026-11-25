@@ -3533,9 +3533,16 @@ impl Mob {
             mob.fish.from_bucket = true;
         }
         if mob_type == MobType::Warden {
-            // `Warden` 构造函数里的 `getNavigation().setCanFloat(true)`。
-            // The `Warden` constructor's `getNavigation().setCanFloat(true)`.
+            // `Warden` 构造函数里的 `getNavigation().setCanFloat(true)` 和
+            // `VibrationSystem.Listener`（半径 16、眼睛位置、`BY_DISTANCE`）。
+            // The `Warden` constructor's `getNavigation().setCanFloat(true)` and its
+            // `VibrationSystem.Listener` (radius 16, eye position, `BY_DISTANCE`).
             mob.navigation.flags.can_float = true;
+            mob.entity_listener = Some(crate::game_event::dispatch::EntityListener {
+                radius: 16,
+                delivery_mode: crate::game_event::dispatch::DeliveryMode::ByDistance,
+                vibration: Default::default(),
+            });
         }
         if mob_type == MobType::Armadillo {
             // `Armadillo` 构造函数里的 `getNavigation().setCanFloat(true)`。
@@ -3646,6 +3653,12 @@ impl Mob {
         }
         if self.mob_type == MobType::Villager && self.villager.sleeping_pos.is_some() {
             return (0.2, 0.2);
+        }
+        if self.mob_type == MobType::Warden && self.warden.pose.is_digging_or_emerging() {
+            // `Warden.getDefaultDimensions`：钻出 / 钻入时 `fixed(width, 1.0F)`。
+            // `Warden.getDefaultDimensions`: `fixed(width, 1.0F)` while emerging or digging.
+            let (width, _, _) = self.mob_type.dimensions(false);
+            return (width, 1.0);
         }
         let (width, height, _) = self.mob_type.dimensions(self.is_baby());
         (width, height)

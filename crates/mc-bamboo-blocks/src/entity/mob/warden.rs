@@ -389,4 +389,27 @@ mod tests {
         assert_eq!(table.value(attribute::ATTACK_DAMAGE), 30.0);
         assert_eq!(table.value(attribute::FOLLOW_RANGE), 24.0);
     }
+
+    /// 监守者生成时是半径 16 的振动监听者；钻出 / 钻入时高度压成 1。
+    ///
+    /// A fresh warden is a radius-16 vibration listener; its height is 1 while
+    /// emerging or digging.
+    #[test]
+    fn warden_construction_and_pose_facts() {
+        use crate::entity::mob::{Mob, MobType};
+        use crate::game_event::dispatch::DeliveryMode;
+
+        let mut mob = Mob::new(MobType::Warden);
+        let listener = mob.entity_listener.as_ref().expect("warden is a listener");
+        assert_eq!(listener.radius, 16);
+        assert_eq!(listener.delivery_mode, DeliveryMode::ByDistance);
+        assert_eq!(mob.dimensions(), (0.9, 2.9));
+        mob.warden.pose = WardenPose::Emerging;
+        assert_eq!(mob.dimensions(), (0.9, 1.0));
+        mob.warden.pose = WardenPose::Standing;
+        assert_eq!(mob.dimensions(), (0.9, 2.9));
+        assert_eq!(MobType::Warden.sound_volume(), 4.0);
+        assert!(MobType::Warden.fire_immune());
+        assert!(!MobType::Warden.removes_when_far_away());
+    }
 }
