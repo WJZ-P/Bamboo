@@ -164,63 +164,58 @@ pub fn brain() -> Brain {
     })
 }
 
-/// `AllayAi.initCoreActivity`：六个优先级全为 0 的行为。
+/// `AllayAi.initCoreActivity`：`ActivityData.create(CORE, 0, [...])`，优先级从 0 顺排
+/// 0..5。
 fn core_activity() -> ActivityData {
-    ActivityData::with_priorities(
+    ActivityData::sequential(
         Activity::Core,
+        0,
         vec![
-            (0, Kind::Swim { chance: 0.8 }),
-            (
-                0,
-                Kind::AnimalPanic {
-                    speed: 2.5,
-                    environmental: false,
-                    armadillo: false,
-                    camel: false,
-                },
-            ),
-            (0, Kind::LookAtTargetSink { min: 45, max: 90 }),
-            (0, Kind::MoveToTargetSink(MoveToTargetSink::new(false))),
-            (0, Kind::CountDownCooldown(M::LikedNoteblockCooldownTicks)),
-            (0, Kind::CountDownCooldown(ItemPickupCooldownTicks)),
+            Kind::Swim { chance: 0.8 },
+            Kind::AnimalPanic {
+                speed: 2.5,
+                environmental: false,
+                armadillo: false,
+                camel: false,
+            },
+            Kind::LookAtTargetSink { min: 45, max: 90 },
+            Kind::MoveToTargetSink(MoveToTargetSink::new(false)),
+            Kind::CountDownCooldown(M::LikedNoteblockCooldownTicks),
+            Kind::CountDownCooldown(ItemPickupCooldownTicks),
         ],
     )
 }
 
-/// `AllayAi.initIdleActivity`：五个优先级全为 0 的行为（最后一个是 `RunOne`）。
+/// `AllayAi.initIdleActivity`：`ActivityData.create(IDLE, 0, [...])`，优先级从 0 顺排
+/// 0..4（最后一个是 `RunOne`）。
 fn idle_activity() -> ActivityData {
-    ActivityData::with_priorities(
+    ActivityData::sequential(
         Activity::Idle,
+        0,
         vec![
-            (0, Kind::Allay(Behavior::GoToWantedItem)),
-            (0, Kind::Allay(Behavior::GoAndGiveItemsToTarget)),
-            (0, Kind::Allay(Behavior::StayCloseToTarget)),
-            (
-                0,
-                Kind::LookAtPlayerSometimes {
-                    max_dist: 6.0,
-                    min_interval: 30,
-                    max_interval: 60,
-                    ticks_until_next_start: 0,
-                },
-            ),
-            (
-                0,
-                Kind::Gate(Box::new(Gate::run_one(
-                    Vec::new(),
-                    vec![
-                        (Kind::Allay(Behavior::FlyStroll), 2),
-                        (
-                            Kind::WalkTargetFromLook {
-                                speed: Speed::Fixed(1.0),
-                                close_enough: 3,
-                            },
-                            2,
-                        ),
-                        (Kind::DoNothing { min: 30, max: 60 }, 1),
-                    ],
-                ))),
-            ),
+            Kind::Allay(Behavior::GoToWantedItem),
+            Kind::Allay(Behavior::GoAndGiveItemsToTarget),
+            Kind::Allay(Behavior::StayCloseToTarget),
+            Kind::LookAtPlayerSometimes {
+                max_dist: 6.0,
+                min_interval: 30,
+                max_interval: 60,
+                ticks_until_next_start: 0,
+            },
+            Kind::Gate(Box::new(Gate::run_one(
+                Vec::new(),
+                vec![
+                    (Kind::Allay(Behavior::FlyStroll), 2),
+                    (
+                        Kind::WalkTargetFromLook {
+                            speed: Speed::Fixed(1.0),
+                            close_enough: 3,
+                        },
+                        2,
+                    ),
+                    (Kind::DoNothing { min: 30, max: 60 }, 1),
+                ],
+            ))),
         ],
     )
 }
@@ -273,10 +268,12 @@ fn item_deposit_position(cx: &mut Cx) -> Option<PositionTracker> {
         return Some(PositionTracker::at_block(gp.pos.above()));
     }
     cx.memories.erase(M::LikedNoteblockPosition);
+    // `new EntityTracker(player, true)`：`trackEyeHeight` 为真、`targetEyeHeight` 为假。
+    // `new EntityTracker(player, true)`: `trackEyeHeight` true, `targetEyeHeight` false.
     liked_player(cx).map(|uid| PositionTracker::Entity {
         uid,
         track_eye: true,
-        target_eye: true,
+        target_eye: false,
     })
 }
 
@@ -335,7 +332,12 @@ fn set_walk_and_look(cx: &mut Cx, tracker: PositionTracker, speed: f32, close: i
 
 /// `GoToWantedItem` 的一次性触发。
 fn trigger_go_to_wanted_item(cx: &mut Cx) -> bool {
-    if cx.memories.has(ItemPickupCooldownTicks) || !cx.mob.can_pick_up_loot {
+    // `tryGet(WALK_TARGET).isEmpty()`：已经有要去的地方就不再触发。
+    // `tryGet(WALK_TARGET).isEmpty()`: do not trigger while a walk target is set.
+    if cx.memories.has(WalkTarget) {
+        return false;
+    }
+    if !cx.mob.can_pick_up_loot {
         return false;
     }
     let Some((uid, remembered)) = cx.memories.wanted_item() else {
@@ -350,6 +352,15 @@ fn trigger_go_to_wanted_item(cx: &mut Cx) -> bool {
     if at.distance_to_sqr(cx.me.position) >= 32.0 * 32.0 {
         return false;
     }
+    // `WorldBorder.isWithinBounds(item.blockPosition())`。
+    if !cx
+        .ctx
+        .blocks()
+        .world_border()
+        .is_within_bounds_pos(BlockPos::containing(at))
+    {
+        return false;
+    }
     let tracker = PositionTracker::Item {
         uid,
         pos: at,
@@ -361,7 +372,7 @@ fn trigger_go_to_wanted_item(cx: &mut Cx) -> bool {
         MemoryValue::Look(PositionTracker::Item {
             uid,
             pos: at,
-            track_eye: false,
+            track_eye: true,
             target_eye: true,
         }),
     );

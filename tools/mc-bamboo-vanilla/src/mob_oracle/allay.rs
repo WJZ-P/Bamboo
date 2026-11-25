@@ -4,7 +4,7 @@
 
 use mc_bamboo_blocks::{
     entity::{
-        Entity, JavaRandom,
+        Entity, EntityUid, JavaRandom,
         mob::{MobType, interact::MobInteractRequest},
     },
     game_event::{GameEvent, dispatch::EventContext},
@@ -258,9 +258,15 @@ impl Report {
             let mut world = World::new(&mut level, &mut ticks);
             spawn_allay(&mut world, case)
         };
+        // 悦灵自己在官方夹具里是 `world.tracked.add`（不是 `addFreshEntity`），
+        // 清掉 `spawn_entity` 留下的生成快照，后面才不会被当成 spawned 排除。
+        let _ = level.entities.take_spawn_snapshots();
         let mut player_held = 0;
         let mut level_seed;
         let mut player_main_hand = 0;
+        // 官方夹具里 `addFreshEntity`（投出的物品、复制的悦灵）进 `spawned` 而不是
+        // `tracked`，`items` / `allays` 只数 `tracked`；Bamboo 一侧用生成快照区分。
+        let mut spawned: std::collections::HashSet<EntityUid> = std::collections::HashSet::new();
         for (index, expected) in case.frames.iter().enumerate() {
             let tick = index as i32;
             if tick > 0 {
@@ -332,6 +338,11 @@ impl Report {
                 }
                 world.tick_entities();
             }
+            // 这一拍 `addFreshEntity` 出来的实体（投出的物品 / 复制的悦灵）记成 spawned，
+            // 之后 `count_items` / `count_allays` 都不再数它们，和官方 `tracked` 一致。
+            for fresh in level.entities.take_spawn_snapshots() {
+                spawned.insert(fresh.uid);
+            }
             if case.has_player {
                 level.players = vec![player_view(case.first_id + 1, player_main_hand)];
             }
@@ -359,8 +370,8 @@ impl Report {
                     .count,
                 mob.allay.inventory.first().map_or(0, |stack| stack.count),
                 player_held,
-                count_allays(&level),
-                count_items(&level),
+                count_allays(&level, &spawned),
+                count_items(&level, &spawned),
                 entity.random.state(),
                 level_seed,
             );
@@ -443,23 +454,26 @@ impl Report {
     }
 }
 
-fn count_allays(level: &MobLevel) -> i32 {
+fn count_allays(level: &MobLevel, spawned: &std::collections::HashSet<EntityUid>) -> i32 {
     level
         .entities
         .iter()
         .filter(|entity| {
             !entity.removed
+                && !spawned.contains(&entity.id)
                 && matches!(&entity.kind, mc_bamboo_blocks::entity::EntityKind::Mob(mob) if mob.mob_type == MobType::Allay)
         })
         .count() as i32
 }
 
-fn count_items(level: &MobLevel) -> i32 {
+fn count_items(level: &MobLevel, spawned: &std::collections::HashSet<EntityUid>) -> i32 {
     level
         .entities
         .iter()
         .filter(|entity| {
-            !entity.removed && matches!(entity.kind, mc_bamboo_blocks::entity::EntityKind::Item(_))
+            !entity.removed
+                && !spawned.contains(&entity.id)
+                && matches!(entity.kind, mc_bamboo_blocks::entity::EntityKind::Item(_))
         })
         .count() as i32
 }

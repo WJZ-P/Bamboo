@@ -309,6 +309,10 @@ const TEMPTATION_COOLDOWN: &[(MemoryType, MemoryStatus)] =
 const GAZE_COOLDOWN: &[(MemoryType, MemoryStatus)] = &[(GazeCooldownTicks, ValuePresent)];
 const LONG_JUMP_COOLDOWN: &[(MemoryType, MemoryStatus)] = &[(LongJumpCooldownTicks, ValuePresent)];
 const RAM_COOLDOWN: &[(MemoryType, MemoryStatus)] = &[(RamCooldownTicks, ValuePresent)];
+const ITEM_PICKUP_COOLDOWN: &[(MemoryType, MemoryStatus)] =
+    &[(ItemPickupCooldownTicks, ValuePresent)];
+const NOTEBLOCK_COOLDOWN: &[(MemoryType, MemoryStatus)] =
+    &[(LikedNoteblockCooldownTicks, ValuePresent)];
 const LOOK_SOMETIMES_REQUIRED: &[(MemoryType, MemoryStatus)] = &[
     (LookTarget, ValueAbsent),
     (NearestVisibleLivingEntities, ValuePresent),
@@ -398,6 +402,8 @@ impl Kind {
                 TemptationCooldownTicks => TEMPTATION_COOLDOWN,
                 GazeCooldownTicks => GAZE_COOLDOWN,
                 LongJumpCooldownTicks => LONG_JUMP_COOLDOWN,
+                ItemPickupCooldownTicks => ITEM_PICKUP_COOLDOWN,
+                LikedNoteblockCooldownTicks => NOTEBLOCK_COOLDOWN,
                 _ => RAM_COOLDOWN,
             },
             Self::LookAtPlayerSometimes { .. } | Self::LookAtPlayer { .. } => {
