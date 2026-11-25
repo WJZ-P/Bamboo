@@ -1,7 +1,10 @@
 //! 存档编解码的单元测试：每种方块实体写 → 按 id 读 → 再写，计划刻和实体往返回。
 
 use mc_bamboo_core::{BlockPos, Direction, Vec3};
-use mc_bamboo_data::{blocks, items::STONE};
+use mc_bamboo_data::{
+    blocks,
+    items::{STONE, WIND_CHARGE},
+};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -290,6 +293,12 @@ fn three_entity_kinds_round_trip() {
             roll_velocity: false,
             target: Some([7u8; 16]),
         }),
+        EntityKind::OminousItemSpawner(Box::new(
+            crate::entity::ominous_item_spawner::OminousItemSpawner {
+                item: ItemStack::new(WIND_CHARGE, 2),
+                spawn_item_after_ticks: 87,
+            },
+        )),
     ];
     for kind in cases {
         let row = entity_row(kind, Vec3::new(1.5, 64.25, -2.0));

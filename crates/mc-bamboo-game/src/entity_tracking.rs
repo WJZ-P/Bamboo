@@ -824,6 +824,10 @@ pub enum KindData {
     ///
     /// A lightning bolt has no synced metadata; the client reads the seed from the entity.
     LightningBolt,
+    /// 不祥物品生成器的 `DATA_ITEM`：index 8 的 ITEM_STACK。
+    ///
+    /// The ominous item spawner's `DATA_ITEM`: an ITEM_STACK at index 8.
+    OminousItemSpawner(ItemStack),
     /// 羊驼口水：没有自己的元数据。
     ///
     /// Llama spit, with no metadata of its own.
@@ -912,6 +916,7 @@ impl Snapshot {
             | KindData::ExperienceOrb { .. }
             | KindData::Mob(_)
             | KindData::LightningBolt
+            | KindData::OminousItemSpawner(_)
             | KindData::LeashKnot => 0,
         }
     }
@@ -937,6 +942,7 @@ impl KindData {
             KindPublic::Egg(egg) => Self::Egg(egg.clone()),
             KindPublic::SplashPotion(potion) => Self::SplashPotion(potion.clone()),
             KindPublic::LightningBolt(_) => Self::LightningBolt,
+            KindPublic::OminousItemSpawner(stack) => Self::OminousItemSpawner(stack.clone()),
             KindPublic::LeashKnot { .. } => Self::LeashKnot,
         }
     }
@@ -964,6 +970,7 @@ impl KindData {
             | Self::Egg(_)
             | Self::SplashPotion(_)
             | Self::LightningBolt
+            | Self::OminousItemSpawner(_)
             | Self::LeashKnot => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
@@ -971,7 +978,7 @@ impl KindData {
 
     fn stack(&self) -> Option<&ItemStack> {
         match self {
-            Self::Item(stack) => Some(stack),
+            Self::Item(stack) | Self::OminousItemSpawner(stack) => Some(stack),
             Self::FallingBlock { .. }
             | Self::Tnt { .. }
             | Self::ExperienceOrb { .. }
@@ -1037,6 +1044,10 @@ impl KindData {
             | Self::LlamaSpit(_)
             | Self::LightningBolt
             | Self::LeashKnot => Vec::new(),
+            Self::OminousItemSpawner(stack) if !stack.is_empty() => {
+                vec![EntityData::Item(stack.clone())]
+            }
+            Self::OminousItemSpawner(_) => Vec::new(),
             Self::Arrow(arrow) => {
                 let mut data = Vec::new();
                 if arrow.on_fire {

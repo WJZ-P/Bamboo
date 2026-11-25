@@ -140,6 +140,10 @@ pub enum KindPublic {
     ///
     /// A lightning bolt: the client reads its seed, life and remaining flashes.
     LightningBolt(super::lightning::LightningBolt),
+    /// 不祥物品生成器：客户端要同步的 `DATA_ITEM`。
+    ///
+    /// An ominous item spawner: the synced `DATA_ITEM`.
+    OminousItemSpawner(ItemStack),
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
     Arrow(super::arrow::ArrowPublic),
@@ -171,6 +175,9 @@ impl KindPublic {
             Self::Egg(egg) => egg.kind.entity_type(),
             Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
             Self::LightningBolt(_) => mc_bamboo_data::registries::entity_type::LIGHTNING_BOLT,
+            Self::OminousItemSpawner(_) => {
+                mc_bamboo_data::registries::entity_type::OMINOUS_ITEM_SPAWNER
+            }
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -244,6 +251,8 @@ pub enum KindState {
     LeashKnot(super::LeashKnot),
     /// 闪电的全部状态，公开的那一半就是它本身。
     LightningBolt(super::lightning::LightningBolt),
+    /// 不祥物品生成器的全部状态。
+    OminousItemSpawner(Box<super::ominous_item_spawner::OminousItemSpawner>),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
     Arrow(Box<super::arrow::Arrow>),
@@ -379,6 +388,9 @@ impl EntityRow {
             (KindPublic::LightningBolt(_), KindState::LightningBolt(bolt)) => {
                 EntityKind::LightningBolt(Box::new(bolt))
             }
+            (KindPublic::OminousItemSpawner(_), KindState::OminousItemSpawner(spawner)) => {
+                EntityKind::OminousItemSpawner(spawner)
+            }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
@@ -474,6 +486,10 @@ impl Entity {
             EntityKind::LightningBolt(bolt) => (
                 KindPublic::LightningBolt((*bolt).clone()),
                 KindState::LightningBolt(*bolt),
+            ),
+            EntityKind::OminousItemSpawner(spawner) => (
+                KindPublic::OminousItemSpawner(spawner.item.clone()),
+                KindState::OminousItemSpawner(spawner),
             ),
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
