@@ -1244,6 +1244,20 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
         }
         _ => {}
     }
+    // 嗅探兽的 18、19 是 `DATA_STATE`（缺省 IDLING=0）和 `DATA_DROP_SEED_AT_TICK`
+    // （缺省 0）；从非默认变回默认时发这两条。
+    // A sniffer's 18 and 19 are `DATA_STATE` (default IDLING=0) and
+    // `DATA_DROP_SEED_AT_TICK` (default 0); send these when they flip back.
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Sniffer {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::SNIFFER_STATE => return EntityData::SnifferState(0),
+            facts::SNIFFER_DROP_SEED_AT_TICK => {
+                return EntityData::SnifferDropSeedAtTick(0);
+            }
+            _ => {}
+        }
+    }
     // 海龟的 18、19 是「有蛋」「正在产卵」两个布尔，不是牛的花色和叫声；
     // 从 true 变回 false 时要发这两条默认值。
     // A turtle's 18 and 19 are the has-egg / laying-egg booleans, not the cow
@@ -1795,6 +1809,21 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         }
         if mob.frog.tongue_target.is_some() {
             out.push(EntityData::FrogTongueTarget(mob.frog.tongue_target));
+        }
+        return out;
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Sniffer {
+        // 嗅探兽的 18、19 是状态和掉种子时刻，缺省 IDLING（0）和 0。
+        // A sniffer's 18 and 19 are the state and the drop-seed tick, defaults IDLING (0)
+        // and 0.
+        let state = mob.sniffer_state.id();
+        if state != 0 {
+            out.push(EntityData::SnifferState(state));
+        }
+        if mob.sniffer_drop_seed_at_tick != 0 {
+            out.push(EntityData::SnifferDropSeedAtTick(
+                mob.sniffer_drop_seed_at_tick,
+            ));
         }
         return out;
     }

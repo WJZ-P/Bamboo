@@ -301,6 +301,8 @@ pub const GOAT_LEFT_HORN: u8 = 19;
 pub const GOAT_RIGHT_HORN: u8 = 20;
 pub const FROG_VARIANT: u8 = 18;
 pub const FROG_TONGUE_TARGET: u8 = 19;
+pub const SNIFFER_STATE: u8 = 18;
+pub const SNIFFER_DROP_SEED_AT_TICK: u8 = 19;
 pub const TURTLE_HAS_EGG: u8 = 18;
 pub const TURTLE_LAYING_EGG: u8 = 19;
 pub const DOLPHIN_GOT_FISH: u8 = 18;
@@ -340,6 +342,7 @@ pub const CHICKEN_SOUND_VARIANT_SERIALIZER: i32 = 31;
 pub const ARMADILLO_STATE_SERIALIZER: i32 = 36;
 pub const FROG_VARIANT_SERIALIZER: i32 = 27;
 pub const FROG_TONGUE_TARGET_SERIALIZER: i32 = 19;
+pub const SNIFFER_STATE_SERIALIZER: i32 = 35;
 pub const ZOMBIE_NAUTILUS_VARIANT_SERIALIZER: i32 = 32;
 // 铜傀儡的两项自有元数据：`CopperGolem.DATA_WEATHER_STATE` / `COPPER_GOLEM_STATE`
 // 的 `EntityDataAccessor.id()` 与 `EntityDataSerializers.getSerializedId(...)`。

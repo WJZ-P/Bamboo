@@ -446,6 +446,9 @@ public final class MobOracle {
             if (only == null || "villager_p4".startsWith(only) || only.startsWith("villager_p4")) {
                 cases += playVillagerPhase4(official, out, only);
             }
+            if (only == null || "villager_trade".startsWith(only) || only.startsWith("villager_trade")) {
+                cases += playVillagerTrade(official, out, only);
+            }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playBat(official, out, name);
@@ -1875,6 +1878,7 @@ public final class MobOracle {
             addGoatScenes(scenes);
             FrogScenes.add(scenes);
             CamelScenes.add(scenes);
+            SnifferScenes.add(scenes);
         }
 
         /**
@@ -2656,6 +2660,49 @@ public final class MobOracle {
                     return null;
                 }
             };
+        }
+    }
+
+    /** 嗅探兽场景：闲逛、嗅闻、走过去挖土掉种子、记下挖过的位置、繁殖产蛋。 */
+    static final class SnifferScenes {
+        static void add(List<Scene> scenes) {
+            int seeds = BuiltInRegistries.ITEM.getId(Items.TORCHFLOWER_SEEDS);
+            // 这几个种子真的跑完整的 Sniffing→Searching→Digging→Rising 闭环并掉种子。
+            // 逐刻比位置、state、SNIFFER_EXPLORED_POSITIONS / SNIFF_COOLDOWN 记忆、
+            // 世界战利品随机序列和掉出来的东西（gameplay/sniffer_digging 礼物表）。
+            // These seeds exercise the full Sniffing→Searching→Digging→Rising loop and
+            // drop a seed. Compare position, state, memory, the world loot sequence and
+            // the drop (gameplay/sniffer_digging gift table) every tick.
+            for (long seed : new long[] {23L, 37L, 53L, 101L}) {
+                Scene dig = new Scene("sniffer_dig_" + seed).ticks(900).drops();
+                Scenes.ground(dig, 15);
+                dig.mob(24, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(dig);
+            }
+            // 闲逛对照：这个种子只跑 Scenting / DoNothing / 踱步，不进入挖掘。
+            // Idle control: this seed only runs Scenting / DoNothing / strolling, no digging.
+            Scene wander = new Scene("sniffer_wander_11").ticks(600).drops();
+            Scenes.ground(wander, 15);
+            wander.mob(24, 0.5, 64.0, 0.5, 0.0F, 11L, 0);
+            scenes.add(wander);
+            // 拿火把花种子的玩家喂两只；都喂了以后繁殖，产下一颗蛋和经验球。
+            // A player with torchflower seeds feeds two; once both are fed they breed
+            // and one lays an egg plus an experience orb.
+            Scene breed = new Scene("sniffer_breed").ticks(400).drops();
+            Scenes.ground(breed, 15);
+            breed.mob(24, 0.5, 64.0, 0.5, 0.0F, 67L, 0);
+            breed.mob(24, -2.5, 64.0, 0.5, 0.0F, 71L, 0);
+            breed.player(-0.5, 64.0, 3.5, Items.TORCHFLOWER_SEEDS);
+            breed.interact(20, 0, 0, seeds, 0);
+            breed.interact(22, 1, 0, seeds, 0);
+            scenes.add(breed);
+        }
+
+        /** `DATA_STATE` 的网络 ID：挖掘时换尺寸、掉种子都由它驱动。 */
+        static int state(net.minecraft.world.entity.animal.sniffer.Sniffer sniffer) {
+            var data = (net.minecraft.network.syncher.EntityDataAccessor<net.minecraft.world.entity.animal.sniffer.Sniffer.State>)
+                    readStatic(net.minecraft.world.entity.animal.sniffer.Sniffer.class, "DATA_STATE");
+            return sniffer.getEntityData().get(data).id();
         }
     }
 
@@ -5283,7 +5330,7 @@ public final class MobOracle {
                 || scene.name.startsWith("wolf_") || scene.name.startsWith("armadillo_")
                 || scene.name.startsWith("goat_") || scene.name.startsWith("slime_")
                 || scene.name.startsWith("frog_") || scene.name.startsWith("tadpole_")
-                || scene.name.startsWith("camel_")
+                || scene.name.startsWith("camel_") || scene.name.startsWith("sniffer_")
                 || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")
                 || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
                 || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")
@@ -5317,8 +5364,8 @@ public final class MobOracle {
         if (events != null) {
             list.sounds = events::add;
         }
-        // 每个场景从干净的战利品随机序列开始，Bamboo 一侧每个 case 也是新建一份。
-        // Each scene starts with a fresh loot sequence, like a fresh Bamboo case.
+        // 每个包场景从干净的战利品随机序列开始，Bamboo 一侧每个 case 也是新建一份。
+        // Each packet scene starts with a fresh loot sequence, like a fresh Bamboo case.
         official.server.sequences = new RandomSequences();
         FakeLevel level = FakeLevel.create(official);
         if (events != null) {
@@ -13495,6 +13542,208 @@ public final class MobOracle {
         }
     }
 
+    /**
+     * 村民交易接进大脑的逐刻对拍：玩家打开/关闭交易、工作站补货、交易后升级。
+     * 一侧在假 `ServerLevel` 里跑官方 `Villager`，每刻记下大脑、位移、随机源、
+     * 交易表摘要、经验/等级、再生效果、血量；Bamboo 侧重放同一场景并逐位比较。
+     *
+     * Villager-trading tick-by-tick comparison: opening/closing a trade, restocking at a
+     * workstation and levelling up after a trade. The official `Villager` runs in a fake
+     * `ServerLevel`; each tick records brain, motion, RNG, an offer digest, xp/level,
+     * regeneration and health. Bamboo replays the same scene bit for bit.
+     */
+    private static int playVillagerTrade(Official official, Writer out, String only) throws Exception {
+        String[] scenes = {"villager_trade_follow", "villager_trade_restock", "villager_trade_levelup"};
+        int count = 0;
+        for (String name : scenes) {
+            if (only != null && !name.startsWith(only)) continue;
+            playVillagerTradeOne(official, out, name);
+            count++;
+        }
+        return count;
+    }
+
+    private static net.minecraft.world.item.trading.MerchantOffers tradeOffers(int... uses) {
+        var offers = new net.minecraft.world.item.trading.MerchantOffers();
+        for (int u : uses) {
+            var offer = new net.minecraft.world.item.trading.MerchantOffer(
+                    new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 1),
+                    new ItemStack(Items.APPLE), 12, 1, 0.05F);
+            for (int i = 0; i < u; i++) offer.increaseUses();
+            offers.add(offer);
+        }
+        return offers;
+    }
+
+    private static String offersDigest(net.minecraft.world.item.trading.MerchantOffers offers) {
+        int uses = 0, demand = 0, special = 0;
+        for (var offer : offers) {
+            uses += offer.getUses();
+            demand += offer.getDemand();
+            special += offer.getSpecialPriceDiff();
+        }
+        return "[" + offers.size() + "," + uses + "," + demand + "," + special + "]";
+    }
+
+    private static void playVillagerTradeOne(Official official, Writer out, String name) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        try {
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels = java.util.Map.of(Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            world.blockEntities = new Long2ObjectOpenHashMap<>();
+
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+
+            boolean follow = name.equals("villager_trade_follow");
+            boolean restock = name.equals("villager_trade_restock");
+            boolean levelup = name.equals("villager_trade_levelup");
+            long clockStart = 2000L;
+            int totalTicks = levelup ? 260 : (follow ? 120 : 90);
+            // 传感器关掉：ShowTradesToPlayer 等村民间交互行为要靠传感器记忆才启动，
+            // 关掉后官方与 Bamboo 的占位都不跑；交易 sink 直接读 tradingPlayer，不受影响。
+            // Sensors off: villager-to-villager interaction behaviours need sensor memories
+            // to start, so with sensors off both the official ones and Bamboo's stubs stay
+            // idle; the trading sink reads tradingPlayer directly and is unaffected.
+            long sensorDelay = 1_000_000L;
+            int playerId = FIRST_ID + 1024;
+            int eventTick = restock ? 20 : 10;
+            int closeTick = follow ? 60 : -1;
+
+            world.gameTime = 1000L;
+            world.realSky = true;
+            world.injectedCanSeeSky = true;
+            world.clock = clockStart;
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder().addStaticLayers(world);
+            net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+                public long totalTicks() { return world.clock; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : world.dimensionType().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            official.attributes = builder.build();
+            put(ServerLevel.class, world, "environmentAttributes", official.attributes);
+            world.updateSkyBrightness();
+            world.getRandom().setSeed(1L);
+
+            ServerPlayer player = null;
+            if (follow) {
+                player = new ServerPlayer(official.server, world,
+                        new GameProfile(new UUID(1L, 2L), "TradeOracle"), ClientInformation.createDefault());
+                player.setId(playerId);
+                player.setPos(2.5, 64.0, 0.5);
+                player.setYRot(0.0F);
+                player.setYHeadRot(0.0F);
+                player.setYBodyRot(0.0F);
+                world.playersList().add(player);
+                // `NearestLivingEntitySensor` 走 `getEntitiesOfClass`（读 `tracked`）。
+                world.tracked.add(player);
+            }
+
+            Villager v = (Villager) EntityTypes.VILLAGER.create(world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+            v.setId(FIRST_ID);
+            v.setUUID(new UUID(0L, 1L));
+            v.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            v.setYHeadRot(0.0F);
+            v.setYBodyRot(0.0F);
+            put(net.minecraft.world.entity.ai.Brain.class, v.getBrain(), "lastScheduleUpdate", -9999L);
+            v.getBrain().updateActivityFromSchedule(world.environmentAttributes(), world.getGameTime(), v.position());
+            setRandom(v, 71L);
+            BrainOracle.reseedShuffles(v, randomSeed(v));
+            BrainOracle.fixSensorDelays(v, sensorDelay);
+            if (levelup) {
+                v.setHealth(10.0F);
+                v.setVillagerXp(9); // 9 + offer.xp(2) = 11 >= 10 → 升级
+            }
+            v.setOffers(restock ? tradeOffers(3, 1) : tradeOffers(0));
+            world.tracked.add(v);
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= totalTicks; tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    world.clock = clockStart + tick;
+                    official.attributes.invalidateTickCache();
+                    world.updateSkyBrightness();
+
+                    if (tick == eventTick) {
+                        if (follow) {
+                            // `Villager.startTrading` 里记下交易玩家。
+                            v.setTradingPlayer(player);
+                        } else if (restock) {
+                            // `WorkAtPoi.useWorkstation` 末尾的补货判定（直接调同一对方法）。
+                            if (v.shouldRestock(world)) v.restock();
+                        } else {
+                            // `MerchantResultSlot.onTake` → `notifyTrade`；rewardExp 关掉，
+                            // 免得在假世界里撒经验球。声望为 none 职业，updateTrades 不生成交易。
+                            var offer = new net.minecraft.world.item.trading.MerchantOffer(
+                                    new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 1),
+                                    new ItemStack(Items.APPLE), 12, 2, 0.05F);
+                            put(net.minecraft.world.item.trading.MerchantOffer.class, offer, "rewardExp", false);
+                            v.notifyTrade(offer);
+                            // `increaseMerchantCareer` 追加的新等级交易（受控夹具）。
+                            v.setOffers(tradeOffers(0, 0, 0));
+                        }
+                    }
+                    if (tick == closeTick) {
+                        // `MerchantMenu.removed` → `stopTrading()`。
+                        v.setTradingPlayer(null);
+                    }
+
+                    List<Entity> snapshot = new ArrayList<>(world.tracked);
+                    for (Entity e : snapshot) {
+                        if (e.isRemoved()) continue;
+                        if (e instanceof Villager villager) {
+                            var prevBrain = villager.getBrain();
+                            villager.commonTick();
+                            villager.tick();
+                            if (villager.getBrain() != prevBrain) BrainOracle.reseedShuffles(villager, randomSeed(villager));
+                        } else if (!(e instanceof ServerPlayer)) {
+                            // 玩家保持静止，和 Bamboo 一侧的 PlayerView 快照一致。
+                            e.tick();
+                        }
+                    }
+                    world.tracked.removeIf(Entity::isRemoved);
+                }
+
+                if (tick > 0) frames.append(',');
+                var regen = v.getEffect(MobEffects.REGENERATION);
+                frames.append("{\"brain\":").append(jsonString(BrainOracle.dump(v)))
+                        .append(",\"motion\":").append(projectileMotion(v))
+                        .append(",\"seed\":").append(randomSeed(v))
+                        .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
+                        .append(",\"xp\":").append(v.getVillagerXp())
+                        .append(",\"level\":").append(v.getVillagerData().level())
+                        .append(",\"regen\":").append(regen == null ? -1 : regen.getDuration())
+                        .append(",\"health\":").append(Float.floatToRawIntBits(v.getHealth()))
+                        .append(",\"offers\":").append(offersDigest(v.getOffers()))
+                        .append(",\"trading\":").append(v.getTradingPlayer() != null ? 1 : 0)
+                        .append("}");
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"villagerTrade\",\"name\":" + jsonString(name)
+                    + ",\"clockStart\":" + clockStart
+                    + ",\"sensorDelay\":" + sensorDelay
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"playerId\":" + playerId
+                    + ",\"eventTick\":" + eventTick
+                    + ",\"closeTick\":" + closeTick
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            world.closeRealPoi();
+        }
+    }
+
     /** `Silverfish.friendsGoal` 的私有字段。 */
     private static Object friendsOf(Mob mob) throws Exception {
         Field field = net.minecraft.world.entity.monster.Silverfish.class.getDeclaredField("friendsGoal");
@@ -15402,6 +15651,17 @@ public final class MobOracle {
     }
 
     private static void playZombie(Official official, Writer out, Scene scene) throws Exception {
+        // 掉落场景逐刻比礼物表掉出来的东西（挖出的种子、繁殖下的蛋）。礼物表按
+        // 序列名取世界战利品随机序列，Bamboo 每个 case 新建一份，所以这里也临时
+        // 换成一份干净序列；场景结束再还原，免得影响后面场景沿用累积的序列。
+        // Drop scenes compare gift-table results (dug-up seeds, laid eggs). Gift
+        // tables draw from the world loot sequence by name; Bamboo creates a fresh
+        // one per case, so swap in a clean sequence here and restore it afterwards
+        // so later scenes keep using the accumulated one.
+        var savedSequences = official.server.sequences;
+        if (scene.drops) {
+            official.server.sequences = new RandomSequences();
+        }
         FakeLevel level = FakeLevel.create(official);
         // `EntityReference` 找不到实体时会查所有维度（被炸的牛记着已经消失的苦力怕）。
         // `EntityReference` falls back to every dimension when the entity is gone.
@@ -15450,6 +15710,12 @@ public final class MobOracle {
         level.nextId = FIRST_ID;
         java.util.List<ServerPlayer> players = new java.util.ArrayList<>();
         java.util.List<Bytes> zombieSinks = new java.util.ArrayList<>();
+        // `drops()` 场景逐刻比新生成的掉落物、经验球和幼崽（挖出的种子、繁殖下的蛋）。
+        // `drops()` scenes compare freshly spawned items/orbs/calves (dug-up seeds, laid eggs).
+        List<List<String>> spawns = scene.drops ? new ArrayList<>() : null;
+        if (spawns != null) {
+            for (int t = 0; t <= scene.ticks; t++) spawns.add(new ArrayList<>());
+        }
         StringBuilder playerStates = new StringBuilder("[");
         StringBuilder playerPackets = new StringBuilder("[");
         float[] lastSentHealth = {-1.0e8F};
@@ -15572,6 +15838,7 @@ public final class MobOracle {
                 case 18 -> EntityTypes.FROG.create(level, EntitySpawnReason.COMMAND);
                 case 19 -> EntityTypes.TADPOLE.create(level, EntitySpawnReason.COMMAND);
                 case 20 -> EntityTypes.CAMEL.create(level, EntitySpawnReason.COMMAND);
+                case 24 -> EntityTypes.SNIFFER.create(level, EntitySpawnReason.COMMAND);
                 // 61 焦骸、62 尸壳骆驼。
                 // 61 parched, 62 camel husk.
                 case 61 -> new net.minecraft.world.entity.monster.skeleton.Parched(EntityTypes.PARCHED, level);
@@ -15817,7 +16084,7 @@ public final class MobOracle {
                     .append(action[4]).append(']');
         }
         line.append("],\"interactions\":null");
-        line.append(",\"packets\":null,\"syncFlags\":null,\"spawns\":null,\"life\":null,\"spawnResult\":null");
+        line.append(",\"packets\":null,\"syncFlags\":null,\"life\":null,\"spawnResult\":null");
         // TNT 场景：逐刻记 TNT 的位置和引信。
         StringBuilder tntSteps = new StringBuilder();
         if (tntEntity != null) {
@@ -15997,6 +16264,17 @@ public final class MobOracle {
                 }
             }
             line.append(',').append(zombieStepJson(mobs, players, level));
+            if (spawns != null) {
+                // 按 `addFreshEntity` 顺序收集，不做 id 排序：Bamboo 一侧也按生成顺序
+                // 记录，两边逐项对齐。实体 id 是内部编号，假世界玩家会占掉一个号。
+                // Collect in `addFreshEntity` order without sorting by id: Bamboo also
+                // records spawns in generation order; the entity id is an internal number
+                // and the fake world's player consumes one of them.
+                for (Entity born : level.spawned) {
+                    level.reseedBorn(born);
+                    spawns.get(tick).add(spawnJson(born));
+                }
+            }
             if (scene.realPlayers) {
                 zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
                         lastSentHealth, false, scene.name.startsWith("zombie_husk_hunger_"));
@@ -16051,6 +16329,16 @@ public final class MobOracle {
         }
         line.append("]");
         PillagerScenes.check(scene, mobs);
+        // 挖掘场景必须真的走完闭环并掉出种子，防止种子变化让场景退化成纯闲逛。
+        // Dig scenes must actually finish the loop and drop a seed, so a seed change
+        // cannot silently degrade the scene into pure idling.
+        if (scene.name.startsWith("sniffer_dig_")) {
+            boolean dropped = spawns != null && spawns.stream().flatMap(java.util.List::stream)
+                    .anyMatch(json -> json.contains("\"kind\":\"item\""));
+            if (!dropped) {
+                throw new IllegalStateException(scene.name + " never dug up a seed");
+            }
+        }
         // 焦骸日晒场景必须真的着火掉血，夜间场景不能着火。
         // The parched day scene must burn and take damage; the night scene must not.
         if (scene.name.equals("parched_burn_day")
@@ -16083,6 +16371,8 @@ public final class MobOracle {
         line.append(",\"mobEventPackets\":").append(mobEvents).append("]]");
         line.append(",\"sleepResult\":").append(jsonString(sleepResult));
         line.append(",\"levelEvents\":").append(levelEventsJson).append("]]");
+        line.append(",\"spawns\":");
+        appendSpawns(line, spawns);
         if (scene.realPlayers) {
             line.append(",\"zombiePlayerStates\":").append(playerStates).append(']');
             line.append(",\"zombiePlayerPackets\":").append(playerPackets).append(']');
@@ -16092,6 +16382,9 @@ public final class MobOracle {
         }
         line.append("}\n");
         out.write(line.toString());
+        if (scene.drops) {
+            official.server.sequences = savedSequences;
+        }
     }
 
     /** `entity_event`（34）和 `set_equipment`（104）。 */
@@ -16249,6 +16542,9 @@ public final class MobOracle {
             }
             if (mob instanceof net.minecraft.world.entity.animal.frog.Frog frog) {
                 out.append(",\"goat\":").append(FrogScenes.flags(frog));
+            }
+            if (mob instanceof net.minecraft.world.entity.animal.sniffer.Sniffer sniffer) {
+                out.append(",\"sniffer\":").append(SnifferScenes.state(sniffer));
             }
             out.append(",\"love\":").append(mob instanceof net.minecraft.world.entity.animal.Animal animal
                     ? getInt(net.minecraft.world.entity.animal.Animal.class, animal, "inLove") : 0);

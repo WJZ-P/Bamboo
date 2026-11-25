@@ -187,6 +187,7 @@ enum Line {
     VillagerBrain(Box<villager::VillagerBrainCase>),
     VillagerPoi(Box<villager::VillagerPoiCase>),
     VillagerPhase4(Box<villager::VillagerPhase4Case>),
+    VillagerTrade(Box<villager::VillagerTradeCase>),
     AttackTarget(Box<attack_target::AttackTargetCase>),
     Guardian(Box<guardian_scene::GuardianCase>),
     Fish(Box<fish::FishCase>),
@@ -724,7 +725,7 @@ struct PlayerSetup {
     team: i32,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 struct CowStep {
     x: i64,
     y: i64,
@@ -796,6 +797,11 @@ struct CowStep {
     /// for other mobs.
     #[serde(default)]
     goat: i32,
+    /// 嗅探兽：`DATA_STATE` 的网络 ID；其余生物是 0。
+    ///
+    /// Sniffers: the `DATA_STATE` network id; 0 for other mobs.
+    #[serde(default)]
+    sniffer: i32,
     /// 狼：驯服标志、坐下命令、有没有主人、仇恨结束时刻、讨食、项圈、最大生命（位）。
     ///
     /// Wolves: tame flags, sit order, owner, anger end, begging, collar, max health bits.
@@ -871,6 +877,7 @@ fn zombie_style(name: &str) -> bool {
         "frog_",
         "tadpole_",
         "camel_",
+        "sniffer_",
         "polar_bear_fight_",
         "creeper_",
         "spider_",
@@ -1880,6 +1887,7 @@ impl Report {
                 Line::VillagerBrain(case) => self.replay_villager_brain(&case),
                 Line::VillagerPoi(case) => self.replay_villager_poi(&case),
                 Line::VillagerPhase4(case) => self.replay_villager_phase4(&case),
+                Line::VillagerTrade(case) => self.replay_villager_trade(&case),
                 Line::AttackTarget(case) => self.replay_attack_target(&case),
                 Line::Guardian(case) => self.replay_guardian(&case),
                 Line::Fish(case) => self.replay_fish(&case),
@@ -2226,6 +2234,7 @@ impl Report {
                     18 => mc_bamboo_blocks::entity::mob::MobType::Frog,
                     19 => mc_bamboo_blocks::entity::mob::MobType::Tadpole,
                     20 => mc_bamboo_blocks::entity::mob::MobType::Camel,
+                    24 => mc_bamboo_blocks::entity::mob::MobType::Sniffer,
                     15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
                     16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
@@ -2928,7 +2937,17 @@ impl Report {
             }
             // 死亡场景：逐刻比新生成的掉落物和经验球（种类、数量、位置）。
             if let Some(expected_spawns) = &case.spawns {
-                let ours_spawns = spawn_snapshot(&level, &spawn_public);
+                let mut ours_spawns = spawn_snapshot(&level, &spawn_public);
+                // 改坏确认：把挖出来的种子数量改错，证明掉落比较没放松。
+                // Deliberate breakage: corrupt the dug-up seed count to prove the
+                // spawn comparison is not relaxed.
+                if self.break_test.as_deref() == Some("sniffer_drop")
+                    && case.name.starts_with("sniffer_")
+                {
+                    for spawn in &mut ours_spawns {
+                        spawn.count = spawn.count.wrapping_add(1);
+                    }
+                }
                 compare_spawns(
                     &mut self.mismatches,
                     &self.show,
@@ -3147,6 +3166,27 @@ impl Report {
         ours: &[Option<CowStep>],
         official: &[CowStep],
     ) {
+        // 改坏确认：把 Bamboo 逐刻的 state / brain 记忆故意改错，证明比较没放松。
+        // Deliberate breakage: corrupt the per-tick state / brain memory to prove
+        // the comparison is not relaxed.
+        let tampered = match self.break_test.as_deref() {
+            Some("sniffer_state") if name.starts_with("sniffer_") => {
+                let mut steps = ours.to_vec();
+                for step in steps.iter_mut().flatten() {
+                    step.sniffer = step.sniffer.wrapping_add(1);
+                }
+                Some(steps)
+            }
+            Some("sniffer_brain") if name.starts_with("sniffer_") => {
+                let mut steps = ours.to_vec();
+                for step in steps.iter_mut().flatten() {
+                    step.brain.push('!');
+                }
+                Some(steps)
+            }
+            _ => None,
+        };
+        let ours: &[Option<CowStep>] = tampered.as_deref().unwrap_or(ours);
         for (cow, expected) in official.iter().enumerate() {
             let place = format!("{name} tick {index} cow {cow}");
             if std::env::var_os("MOB_ORACLE_BRAIN").is_some() && !expected.brain.is_empty() {
@@ -3238,6 +3278,7 @@ impl Report {
                 plain!(fox_flags);
                 plain!(fox_mouth);
                 plain!(goat);
+                plain!(sniffer);
                 plain!(wolf_tame);
                 plain!(wolf_sit);
                 plain!(wolf_owned);
@@ -4574,7 +4615,21 @@ fn compare_spawns(
                 && ours.y == expected.y
                 && ours.z == expected.z
         } else {
-            ours == expected
+            // 掉落物 / 经验球的实体 id 是实体表内部编号：假世界里玩家也占一个号，
+            // Bamboo 的玩家不进实体表，两边基数差一。它不是行为结果，只比种类、
+            // 物品、数量、数值和位置；生成数量与顺序仍由上面的长度和逐项 zip 保证。
+            // A dropped item's/orb's entity id is an internal table number: the fake
+            // world's player consumes one, while Bamboo's player is not in the entity
+            // table, so the bases differ by one. It is not a behaviour result; compare
+            // kind, item, count, value and position only. Spawn count and order are
+            // still checked by the length and the per-index zip above.
+            ours.kind == expected.kind
+                && ours.item == expected.item
+                && ours.count == expected.count
+                && ours.value == expected.value
+                && ours.x == expected.x
+                && ours.y == expected.y
+                && ours.z == expected.z
         };
         if same {
             continue;
@@ -5061,6 +5116,11 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             0
         },
         goat: goat_flags(mob),
+        sniffer: if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Sniffer {
+            mob.sniffer.state.id()
+        } else {
+            0
+        },
         wolf_tame: if is_wolf(mob) {
             i32::from(mob.tame.flags)
         } else {
