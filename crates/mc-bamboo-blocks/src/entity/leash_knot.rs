@@ -8,9 +8,7 @@
 
 use mc_bamboo_core::BlockPos;
 
-use super::{
-    ctx::EntityCtx, mob::leash, Entity, EntityKind, EntityUid, LeashKnot,
-};
+use super::{Entity, EntityKind, EntityUid, LeashKnot, ctx::EntityCtx, mob::leash};
 use crate::{InteractionResult, world::World};
 
 /// `LeashFenceKnotEntity` 挂着的世界位置（栅栏那一格的上方 0.375 格处）。
@@ -214,15 +212,12 @@ pub fn interact(
 
 /// `notifyLeasheeRemoved`：没有生物还拴在结上时，结消失。
 pub fn notify_leashee_removed(world: &mut World, knot: EntityUid) {
-    let empty = !world
-        .live_entities()
-        .iter()
-        .any(|entity| {
-            entity
-                .kind
-                .mob()
-                .is_some_and(|mob| leash::leash_holder(mob) == Some(knot))
-        });
+    let empty = !world.live_entities().iter().any(|entity| {
+        entity
+            .kind
+            .mob()
+            .is_some_and(|mob| leash::leash_holder(mob) == Some(knot))
+    });
     if empty {
         world.remove_entity(knot);
     }

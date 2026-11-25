@@ -10,7 +10,7 @@
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 
 use super::{Mob, MobEvent, MobType};
-use crate::entity::{ctx::EntityCtx, Entity, EntityUid};
+use crate::entity::{Entity, EntityUid, ctx::EntityCtx};
 
 /// `LEASH_TOO_FAR_DIST`：超过这个距离绳子断掉。
 pub const LEASH_TOO_FAR_DIST: f64 = 12.0;
@@ -76,6 +76,11 @@ impl LeashData {
 /// `isLeashed()`：有牵引数据且牵引者非空。
 pub fn is_leashed(mob: &Mob) -> bool {
     mob.leash.as_ref().is_some_and(|data| data.holder.is_some())
+}
+
+/// `mayBeLeashed()`：有牵引数据（不管牵引者有没有重连上）。
+pub fn may_be_leashed(mob: &Mob) -> bool {
+    mob.leash.is_some()
 }
 
 /// `getLeashHolder()`：当前牵引者的 uid。
@@ -149,8 +154,12 @@ pub fn can_have_a_leash_attached_to(
     holder_height: f32,
     now: i64,
 ) -> bool {
-    leash_distance_to(entity_position, entity_height, holder_position, holder_height)
-        <= leash_snap_distance()
+    leash_distance_to(
+        entity_position,
+        entity_height,
+        holder_position,
+        holder_height,
+    ) <= leash_snap_distance()
         && can_be_leashed(mob, now)
 }
 
@@ -235,17 +244,13 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         if let Some(uid) = resolve_attachment(ctx, attachment) {
             if let Some(data) = mob.leash.as_mut() {
                 data.holder = Some(uid);
-                mob.events.push(MobEvent::LeashLink {
-                    holder: Some(uid),
-                });
+                mob.events.push(MobEvent::LeashLink { holder: Some(uid) });
             }
         } else if me.tick_count > 100 {
             // 100 刻后还没找到：掉一根拴绳，绳子清空。
             mob.leash = None;
             ctx.emit(
-                crate::entity::ctx::Command::DropItem {
-                    stack: lead_item(),
-                },
+                crate::entity::ctx::Command::DropItem { stack: lead_item() },
                 me,
             );
             return;
@@ -261,9 +266,7 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // 牵引者不在这张表里（跨岛或已消失）：掉拴绳。
         drop_leash(mob);
         ctx.emit(
-            crate::entity::ctx::Command::DropItem {
-                stack: lead_item(),
-            },
+            crate::entity::ctx::Command::DropItem { stack: lead_item() },
             me,
         );
         return;
@@ -272,9 +275,7 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         if ctx.blocks().block_game_rules().entity_drops {
             drop_leash(mob);
             ctx.emit(
-                crate::entity::ctx::Command::DropItem {
-                    stack: lead_item(),
-                },
+                crate::entity::ctx::Command::DropItem { stack: lead_item() },
                 me,
             );
         } else {
@@ -297,9 +298,7 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // `Mob.leashTooFarBehaviour()`：`dropLeash()` + `disableControlFlag(MOVE)`。
         drop_leash(mob);
         ctx.emit(
-            crate::entity::ctx::Command::DropItem {
-                stack: lead_item(),
-            },
+            crate::entity::ctx::Command::DropItem { stack: lead_item() },
             me,
         );
         mob.goals.set_control_flag(super::goals::Flag::Move, false);

@@ -390,8 +390,7 @@ pub fn leash_interact(
         });
         return Some(MobInteraction {
             result: InteractionResult::Success,
-            drop_stack: (!req.creative)
-                .then(|| ItemStack::new(items::LEAD, 1)),
+            drop_stack: (!req.creative).then(|| ItemStack::new(items::LEAD, 1)),
             ..MobInteraction::pass()
         });
     }

@@ -1239,11 +1239,9 @@ fn read_leash(tag: &Tag) -> Option<super::leash::LeashData> {
                 super::leash::LeashDelayed::Entity(uuid),
             ))
         }
-        Tag::IntArray(words) if words.len() == 3 => {
-            Some(super::leash::LeashData::from_disk(
-                super::leash::LeashDelayed::Knot(BlockPos::new(words[0], words[1], words[2])),
-            ))
-        }
+        Tag::IntArray(words) if words.len() == 3 => Some(super::leash::LeashData::from_disk(
+            super::leash::LeashDelayed::Knot(BlockPos::new(words[0], words[1], words[2])),
+        )),
         _ => None,
     }
 }
@@ -1523,5 +1521,57 @@ mod tests {
         let tag = write_mob(&cow.split()).expect("cow saves");
         assert!(tag::field(&tag, "equipment").is_none());
         assert!(tag::field(&tag, "drop_chances").is_none());
+    }
+
+    /// `leash` 键：实体牵引者写 `{UUID: [I; ...]}`，拴绳结写 `[I; x, y, z]`，读回来
+    /// 都变成延迟身份、等 tick 重连。
+    #[test]
+    fn leash_round_trips_both_kinds_of_attachment() {
+        use super::super::leash::{LeashData, LeashDelayed};
+
+        let uuid = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+            0xff, 0x00,
+        ];
+        let mut cow = Entity::cow(Vec3::new(0.5, 64.0, 0.5));
+        cow.with_mob(|_, mob| {
+            mob.leash = Some(LeashData::new(1, LeashDelayed::Entity(uuid)));
+        });
+        let tag = write_mob(&cow.split()).expect("cow saves");
+        let leash = tag::field(&tag, "leash").expect("leash written");
+        match leash {
+            Tag::Compound(entries) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].0, "UUID");
+            }
+            other => panic!("expected a compound, got {other:?}"),
+        }
+        let row = read_mob(&tag, "minecraft:cow", 3)
+            .expect("reads")
+            .expect("a cow");
+        let mob = row.into_entity().kind.mob().cloned().expect("a mob");
+        let data = mob.leash.expect("leash read back");
+        assert_eq!(data.holder, None);
+        assert_eq!(data.attachment, LeashDelayed::Entity(uuid));
+
+        let mut cow = Entity::cow(Vec3::new(0.5, 64.0, 0.5));
+        cow.with_mob(|_, mob| {
+            mob.leash = Some(LeashData::new(
+                1,
+                LeashDelayed::Knot(BlockPos::new(3, 4, 5)),
+            ));
+        });
+        let tag = write_mob(&cow.split()).expect("cow saves");
+        match tag::field(&tag, "leash").expect("leash written") {
+            Tag::IntArray(words) => assert_eq!(words, &[3, 4, 5]),
+            other => panic!("expected an int array, got {other:?}"),
+        }
+        let row = read_mob(&tag, "minecraft:cow", 3)
+            .expect("reads")
+            .expect("a cow");
+        let mob = row.into_entity().kind.mob().cloned().expect("a mob");
+        let data = mob.leash.expect("leash read back");
+        assert_eq!(data.holder, None);
+        assert_eq!(data.attachment, LeashDelayed::Knot(BlockPos::new(3, 4, 5)));
     }
 }
