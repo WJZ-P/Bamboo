@@ -147,6 +147,10 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Pillager && !me.removed {
         super::crossbow::use_tick(me, mob, ctx);
     }
+    // `WanderingTrader` 的 `UseItemGoal` 走同一条 `updatingUsingItem()`。
+    if mob.mob_type == super::MobType::WanderingTrader && !me.removed {
+        super::wandering_trader::use_tick(me, mob);
+    }
     detect_equipment_updates(me, mob, ctx);
     // `LivingEntity.tick`：睡在床上但床没了时立刻起床。
     // `LivingEntity.tick`: wake up if sleeping and the bed no longer exists.
@@ -173,6 +177,17 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
             // `Parrot.aiStep` 结尾的 `calculateFlapping`。
             // `calculateFlapping` at the end of `Parrot.aiStep`.
             super::parrot::after_ai_step(me, mob);
+        }
+        // `WanderingTrader.aiStep()` / `TraderLlama.aiStep()`：在 `super.aiStep()`
+        // 之后每刻跑饮水状态机与 `maybeDespawn()`。
+        // The wandering-trader / trader-llama `aiStep()` tail: drinking and despawn.
+        if !me.removed {
+            if mob.mob_type == super::MobType::WanderingTrader {
+                super::wandering_trader::custom_ai_step(me, mob, ctx);
+                super::wandering_trader::maybe_despawn(me, mob);
+            } else if mob.mob_type == super::MobType::TraderLlama {
+                super::trader_llama::maybe_despawn(me, mob, ctx);
+            }
         }
     }
     // `Bee.tick` 在 `super.tick()` 之后的花蜜粒子与翻滚动画。
@@ -591,6 +606,10 @@ pub(crate) fn max_up_step(mob: &Mob) -> f32 {
 /// `super.baseTick()`; every other mob only runs the latter.
 fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let pre_tick_air = mob.air_supply;
+    // `LivingEntity.baseTick` 里的 `updateDirtyEffects`（隐身共享标志位）。
+    if mob.mob_type == super::MobType::WanderingTrader {
+        super::wandering_trader::update_invisibility(mob);
+    }
     // 官方 `LivingEntity.baseTick` 开头的 `EnchantmentHelper.tickEffects`（TICK 组件）。
     // `EnchantmentHelper.tickEffects` at the head of vanilla `LivingEntity.baseTick`.
     super::enchantment_wiring::tick(me, mob, ctx);
@@ -885,6 +904,11 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
         // `Villager.getAmbientSound`：睡觉时返回 null，不出声也不取音高。
         // `Villager.getAmbientSound`: returns null while sleeping, drawing no pitch.
         super::MobType::Villager if mob.villager.sleeping => None,
+        // `WanderingTrader.getAmbientSound`：交易中换成 `...trade`。
+        // `WanderingTrader.getAmbientSound`: the trading variant while trading.
+        super::MobType::WanderingTrader if mob.villager.is_trading() => {
+            Some("minecraft:entity.wandering_trader.trade")
+        }
         // `Sniffer.getAmbientSound`：挖掘 / 搜寻时不叫。
         // `Sniffer.getAmbientSound`: silent while digging or searching.
         super::MobType::Sniffer => super::sniffer::ambient_voice(mob),

@@ -55,36 +55,78 @@ pub(crate) struct MerchantMenu {
 /// 调 `updateTrades(level)`，等级从 1 开始逐级补齐到当前等级。
 pub(crate) fn ensure_offers(
     villager: &mut mc_bamboo_blocks::entity::mob::villager::Villager,
+    kind: MobType,
     position: Vec3,
     sequences: &RandomSequences,
 ) {
     if villager.offers.is_none() {
         let mut offers = Vec::new();
-        for level in 1..=villager.level.clamp(1, 5) {
-            let Some(profession) = data::profession(villager.profession) else {
-                break;
-            };
-            let name = profession.trade_sets_by_level[(level - 1) as usize];
-            if name.is_empty() {
-                continue;
+        // `WanderingTrader.updateTrades`：buying → uncommon → common 三张交易集。
+        // `WanderingTrader.updateTrades`: the buying, uncommon and common sets.
+        if kind == MobType::WanderingTrader {
+            for name in WANDERING_TRADE_SETS {
+                append_trade_set(&mut offers, name, villager, position, sequences);
             }
-            let Ok(set) = TradeSet::parse(name) else {
-                continue;
-            };
-            let params = TradeParams {
-                world_seed: 0,
-                origin: Position::new(position.x, position.y, position.z),
-                villager_type: data::type_name(villager.kind).unwrap_or(data::DEFAULT_TYPE),
-            };
-            let fallback = mc_bamboo_blocks::random::LegacyRandom::new(0);
-            let generated = generate_offers(&set, &params, sequences, &fallback);
-            for offer in &generated {
-                if let Some(offer) = generated_offer_to_merchant(offer) {
-                    offers.push(offer);
+        } else {
+            for level in 1..=villager.level.clamp(1, 5) {
+                let Some(profession) = data::profession(villager.profession) else {
+                    break;
+                };
+                let name = profession.trade_sets_by_level[(level - 1) as usize];
+                if name.is_empty() {
+                    continue;
+                }
+                let Ok(set) = TradeSet::parse(name) else {
+                    continue;
+                };
+                let params = TradeParams {
+                    world_seed: 0,
+                    origin: Position::new(position.x, position.y, position.z),
+                    villager_type: data::type_name(villager.kind).unwrap_or(data::DEFAULT_TYPE),
+                };
+                let fallback = mc_bamboo_blocks::random::LegacyRandom::new(0);
+                let generated = generate_offers(&set, &params, sequences, &fallback);
+                for offer in &generated {
+                    if let Some(offer) = generated_offer_to_merchant(offer) {
+                        offers.push(offer);
+                    }
                 }
             }
         }
         villager.offers = Some(offers);
+    }
+}
+
+/// 官方 `TradeSets.WANDERING_TRADER_*` 的注册名，按 `updateTrades` 的追加顺序。
+///
+/// The `TradeSets.WANDERING_TRADER_*` names in `updateTrades` order.
+pub const WANDERING_TRADE_SETS: [&str; 3] = [
+    "minecraft:wandering_trader/buying",
+    "minecraft:wandering_trader/uncommon",
+    "minecraft:wandering_trader/common",
+];
+
+/// 求一张 `trade_set` 并把生成的交易追加到协议层的交易表。
+fn append_trade_set(
+    offers: &mut Vec<MerchantOffer>,
+    name: &str,
+    villager: &mc_bamboo_blocks::entity::mob::villager::Villager,
+    position: Vec3,
+    sequences: &RandomSequences,
+) {
+    let Ok(set) = TradeSet::parse(name) else {
+        return;
+    };
+    let params = TradeParams {
+        world_seed: 0,
+        origin: Position::new(position.x, position.y, position.z),
+        villager_type: data::type_name(villager.kind).unwrap_or(data::DEFAULT_TYPE),
+    };
+    let fallback = mc_bamboo_blocks::random::LegacyRandom::new(0);
+    for offer in generate_offers(&set, &params, sequences, &fallback) {
+        if let Some(offer) = generated_offer_to_merchant(&offer) {
+            offers.push(offer);
+        }
     }
 }
 
@@ -191,28 +233,37 @@ pub(crate) fn interact(
     }
     let position = public.position;
     // 懒生成交易表，顺便拿到幼年标志。睡觉 / 交易中走通用路径。
-    let (villager, offers, baby) = {
+    let (villager, offers, baby, kind) = {
         let entity = region.entities.get(villager_id)?;
         let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &entity.kind else {
             return None;
         };
-        if mob.mob_type != MobType::Villager {
+        let kind = mob.mob_type;
+        if !matches!(kind, MobType::Villager | MobType::WanderingTrader) {
             return None;
         }
-        if mob.villager.sleeping || mob.villager.is_trading() {
+        if mob.villager.is_trading() || (kind == MobType::Villager && mob.villager.sleeping) {
             return None;
         }
         let baby = mob.is_baby();
+        // `WanderingTrader.mobInteract` 在幼年时落到 `AbstractVillager.mobInteract`，
+        // 不能开交易界面；村民幼年由下面 `setUnhappy` 摇头。
+        // `WanderingTrader.mobInteract` falls through on a baby; baby villagers shake
+        // their heads through `setUnhappy` below.
+        if baby && kind == MobType::WanderingTrader {
+            return None;
+        }
         let mut villager = mob.villager.clone();
-        ensure_offers(&mut villager, position, &region.loot_sequences);
+        ensure_offers(&mut villager, kind, position, &region.loot_sequences);
         let offers = villager.offers.clone().unwrap_or_default();
-        (villager, offers, baby)
+        (villager, offers, baby, kind)
     };
     if baby {
         set_unhappy(region, villager_id, position);
         return Some(InteractionResult::Success);
     }
-    // `Stats.TALKED_TO_VILLAGER` 只在主手交互时记。
+    // `Stats.TALKED_TO_VILLAGER` 只在主手交互时记，村民与流浪商人共用。
+    // `Stats.TALKED_TO_VILLAGER` is awarded on a main-hand interaction by both kinds.
     if main_hand {
         crate::item_use_stats::award_custom(
             region,
@@ -222,10 +273,12 @@ pub(crate) fn interact(
         );
     }
     if offers.is_empty() {
-        set_unhappy(region, villager_id, position);
+        if kind == MobType::Villager {
+            set_unhappy(region, villager_id, position);
+        }
         return Some(InteractionResult::Consume);
     }
-    open_screen(region, player, villager_id, villager);
+    open_screen(region, player, villager_id, villager, kind);
     Some(InteractionResult::Success)
 }
 
@@ -264,7 +317,13 @@ fn set_unhappy(region: &mut Region, villager_id: i32, position: Vec3) {
 ///
 /// `Villager.startTrading` + `openTradingScreen`: write back the generated offers,
 /// send the screen and offers, and install the menu.
-fn open_screen(region: &mut Region, player: PlayerId, villager_id: i32, mut villager: Villager) {
+fn open_screen(
+    region: &mut Region,
+    player: PlayerId,
+    villager_id: i32,
+    mut villager: Villager,
+    kind: MobType,
+) {
     let hero_amplifier = region.players.get(&player).and_then(|p| {
         p.effects
             .get(registries::mob_effect::HERO_OF_THE_VILLAGE)
@@ -272,15 +331,24 @@ fn open_screen(region: &mut Region, player: PlayerId, villager_id: i32, mut vill
     });
     let level = villager.level;
     let xp = villager.xp;
-    let title = {
+    let trader = kind == MobType::WanderingTrader;
+    let title = if trader {
+        // `WanderingTrader.mobInteract` 传 `getDisplayName()`，翻译键是实体名。
+        // `WanderingTrader.mobInteract` passes `getDisplayName()`, the entity name.
+        Component::translate("entity.minecraft.wandering_trader", [])
+    } else {
         let name = data::profession(villager.profession)
             .map(|p| p.name)
-            .unwrap_or("minecraft:none");
+            .unwrap_or("none");
         Component::translate(format!("entity.minecraft.villager.{name}"), [])
     };
     // `Villager.startTrading`：`updateSpecialPrices(player)` 在 `setTradingPlayer` 之前。
     // `Villager.startTrading`: `updateSpecialPrices(player)` precedes `setTradingPlayer`.
-    villager.update_special_prices(hero_amplifier);
+    // 流浪商人没有声望，`updateSpecialPrices` 是村民的覆写。
+    // Wandering traders have no reputation; `updateSpecialPrices` is a villager override.
+    if !trader {
+        villager.update_special_prices(hero_amplifier);
+    }
     villager.set_trading_player(Some(player.0));
     let offers = villager.offers.clone().unwrap_or_default();
     region.entities.with_mut(villager_id, |entity| {
@@ -313,10 +381,13 @@ fn open_screen(region: &mut Region, player: PlayerId, villager_id: i32, mut vill
         &MerchantOffersPacket {
             container_id,
             offers: &offers,
-            villager_level: level,
-            villager_xp: xp,
-            show_progress: true,
-            can_restock: true,
+            villager_level: if trader { 1 } else { level },
+            villager_xp: if trader { 0 } else { xp },
+            // `WanderingTrader.showProgressBar()` = false；`MerchantMenu.canRestock`
+            // 由 `Merchant.canRestock()` 给，流浪商人不继承村民的补货。
+            // `WanderingTrader.showProgressBar()` is false; it has no restocking.
+            show_progress: !trader,
+            can_restock: !trader,
         },
     );
     crate::menu::broadcast_merchant_state(region, player);
@@ -596,19 +667,20 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
     if let Some(player_data) = region.players.get_mut(&player) {
         let _ = player_data.inventory.receive(result.clone(), false);
     }
-    crate::advancement_triggers::record(
-        region,
-        player,
-        "minecraft:villager_trade",
-        serde_json::json!({
-            "item": mc_bamboo_loot::item_name(result.item).unwrap_or(""),
-            "villager": {"type": "minecraft:villager"}
-        }),
-    );
+
     let mut orb_amount = 0;
+    let mut advancement_villager = "minecraft:villager";
     region.entities.with_mut(villager_id, |entity| {
         let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &mut entity.kind else {
             return;
+        };
+        // `CriteriaTriggers.TRADE` 里的 `type` 是实体的注册表 ID。
+        // `CriteriaTriggers.TRADE`'s `type` is the entity's registry id.
+        let trader = mob.mob_type == MobType::WanderingTrader;
+        advancement_villager = if trader {
+            "minecraft:wandering_trader"
+        } else {
+            "minecraft:villager"
         };
         let offer_xp = {
             let Some(offers) = mob.villager.offers.as_mut() else {
@@ -642,9 +714,26 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
                 next_level,
             )
         };
-        let outcome = villager::notify_trade(mob, offer_xp, orb_base, new_offers);
-        orb_amount = outcome.orb_amount;
+        if trader {
+            // `WanderingTrader.rewardTradeXp`: 3 + nextInt(4) 经验球，不升级、不加
+            // 经验也不改 `VillagerData`；`AbstractVillager.notifyTrade` 仍压住环境音。
+            // `WanderingTrader.rewardTradeXp`: 3 + nextInt(4) orbs, no levelling.
+            mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
+            orb_amount = orb_base;
+        } else {
+            let outcome = villager::notify_trade(mob, offer_xp, orb_base, new_offers);
+            orb_amount = outcome.orb_amount;
+        }
     });
+    crate::advancement_triggers::record(
+        region,
+        player,
+        "minecraft:villager_trade",
+        serde_json::json!({
+            "item": mc_bamboo_loot::item_name(result.item).unwrap_or(""),
+            "villager": {"type": advancement_villager}
+        }),
+    );
     // 交易完成后把新的使用次数 / 等级 / 交易表发给客户端，`uses` 变化会改「售罄」状态。
     // After a trade, resend the updated offers: `uses` changes the out-of-stock state
     // and a level-up appends a new tier.
@@ -858,9 +947,10 @@ pub(crate) fn send_offers(region: &mut Region, player: PlayerId, menu: &Menu) {
     let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &entity.kind else {
         return;
     };
+    let trader = mob.mob_type == MobType::WanderingTrader;
     let (level, xp, offers) = (
-        mob.villager.level,
-        mob.villager.xp,
+        if trader { 1 } else { mob.villager.level },
+        if trader { 0 } else { mob.villager.xp },
         mob.villager.offers.clone().unwrap_or_default(),
     );
     region.links.send(
@@ -870,8 +960,8 @@ pub(crate) fn send_offers(region: &mut Region, player: PlayerId, menu: &Menu) {
             offers: &offers,
             villager_level: level,
             villager_xp: xp,
-            show_progress: true,
-            can_restock: true,
+            show_progress: !trader,
+            can_restock: !trader,
         },
     );
 }
@@ -1114,6 +1204,82 @@ mod e2e_tests {
         assert!(state.payment[0].is_empty(), "付款没扣");
         let _: Option<&Menu> = region.menus.get(&id);
         let _ = items::AIR;
+    }
+
+    /// 流浪商人：懒生成 buying→uncommon→common 共 9 笔交易，界面不带进度条，
+    /// 完成一笔不升级、不加村民经验（只加使用次数）。
+    #[test]
+    fn a_wandering_trader_shares_the_merchant_menu_without_villager_progression() {
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let sink = TestSink::default();
+        region.links.add(id, Box::new(sink.clone()));
+        let position = Vec3::new(0.5, f64::from(flat::surface_y()), 0.5);
+        region.insert_player(Player::new(
+            id,
+            Uuid::from_u128(2),
+            "customer".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            position,
+        ));
+        let trader = region
+            .entities
+            .spawn(Entity::by_mob_type(MobType::WanderingTrader, position));
+        region.entities.with_mut(trader, |entity| {
+            if let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &mut entity.kind {
+                mob.wandering_trader.despawn_delay = 48000;
+            }
+        });
+        crate::interaction::on_interact_entity(
+            &mut region,
+            id,
+            trader,
+            mc_bamboo_core::Hand::Main,
+            false,
+        );
+        assert!(region.menus.contains_key(&id), "右键应该已经打开了交易界面");
+        let offers = region
+            .entities
+            .get(trader)
+            .and_then(|entity| match &entity.kind {
+                mc_bamboo_blocks::entity::EntityKind::Mob(mob) => mob.villager.offers.clone(),
+                _ => None,
+            })
+            .expect("流浪商人应该懒生成了交易表");
+        assert_eq!(offers.len(), 9, "三张交易集分别是 2 / 2 / 5 笔");
+        // 界面包按 `links.flush` 之后才能从 sink 里读到，交易表本身已生成好。
+        region.links.flush();
+        assert!(!packet_ids(&sink).is_empty(), "应该发了 open_screen 等包");
+
+        let offer = offers[0].clone();
+        let container_id = region.menus[&id].container_id;
+        if let Some(state) = region.menus.get_mut(&id).and_then(|m| m.merchant.as_mut()) {
+            state.payment[0] = ItemStack::new(offer.base_cost_a.item, offer.base_cost_a.count);
+            if let Some(cost) = &offer.cost_b {
+                state.payment[1] = ItemStack::new(cost.item, cost.count);
+            }
+        }
+        crate::menu::broadcast_merchant_state(&mut region, id);
+        let click = ClickPacket {
+            container_id,
+            state_id: region.menus[&id].state_id,
+            slot: 2,
+            button: 0,
+            input: ContainerInput::Pickup,
+            changed_slots: Default::default(),
+            carried: mc_bamboo_protocol::packet::play::HashedStack::Empty,
+        };
+        crate::menu::on_click(&mut region, id, click);
+        let entity = region.entities.get(trader).unwrap();
+        let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &entity.kind else {
+            panic!("流浪商人应该是生物");
+        };
+        assert_eq!(mob.villager.offers.as_ref().unwrap()[0].uses, 1);
+        assert_eq!(mob.villager.level, 1, "流浪商人不升级");
+        assert_eq!(mob.villager.xp, 0, "流浪商人不加村民经验");
+        assert_eq!(mob.villager.offers.as_ref().unwrap().len(), 9);
+        assert_eq!(mob.wandering_trader.despawn_delay, 48000);
     }
 
     /// 交易经验跨过阈值后升级：追加新等级交易、等级 +1、挂 200 刻再生、经验累加。

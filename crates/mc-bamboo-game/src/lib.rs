@@ -78,7 +78,7 @@ mod links;
 mod lock;
 mod loot_stacks;
 mod menu;
-mod merchant;
+pub mod merchant;
 mod movement;
 mod natural_spawn;
 mod outgoing;
@@ -125,7 +125,7 @@ pub use replay_players::{ReplayPlayerSetup, ReplayPlayers};
 #[cfg(feature = "oracle-samples")]
 #[doc(hidden)]
 pub mod resume_replay;
-mod save_data;
+pub mod save_data;
 pub mod save_session;
 mod scoreboard;
 mod secure_chat;
@@ -137,6 +137,7 @@ pub(crate) mod spawn_landing;
 /// The structure spawn override (`ChunkGenerator.getMobsAt`), also used by the oracle.
 pub mod structure_spawn;
 mod tick_levels;
+mod wandering_trader_spawn;
 mod weather;
 mod world;
 mod world_gen_settings;
