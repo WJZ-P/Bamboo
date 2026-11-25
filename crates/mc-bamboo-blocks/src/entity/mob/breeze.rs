@@ -259,15 +259,31 @@ impl Behavior {
                 let Some(view) = sensor::living(cx, target) else {
                     return;
                 };
-                // `withinInnerCircleRange` 命中时官方先试 `DefaultRandomPos.getPosAway`；
-                // 该落点求解还没复刻，内圈内外都按 `nextBoolean` 二选一（对拍场景目标
-                // 在内圈外，走不到这一支）。
-                let _in_inner = within_inner_circle(cx, 4.0, 10.0);
-                let pos = if cx.me.random.next_boolean() {
-                    random_point_behind_target(&view, &mut cx.me.random)
-                } else {
-                    random_point_in_middle_circle(cx, &view)
-                };
+                // `withinInnerCircleRange` 命中时先试 `DefaultRandomPos.getPosAway(5,5)`；
+                // 内圈外按 `nextBoolean` 在背后点 / 中圈点里二选一。
+                let mut slide_pos = None;
+                if within_inner_circle(cx, 4.0, 10.0) == Some(true)
+                    && let Some(away) = super::goals::default_random_pos_away(
+                        cx.me,
+                        cx.mob,
+                        cx.ctx.blocks(),
+                        5,
+                        5,
+                        view.position,
+                    )
+                    && has_line_of_sight(cx, away)
+                    && view.position.distance_to_sqr(away)
+                        > view.position.distance_to_sqr(cx.me.position)
+                {
+                    slide_pos = Some(away);
+                }
+                let pos = slide_pos.unwrap_or_else(|| {
+                    if cx.me.random.next_boolean() {
+                        random_point_behind_target(&view, &mut cx.me.random)
+                    } else {
+                        random_point_in_middle_circle(cx, &view)
+                    }
+                });
                 cx.memories.set(
                     WalkTarget,
                     MemoryValue::Walk(WalkTarget::to_point(pos, 0.6, 1)),
