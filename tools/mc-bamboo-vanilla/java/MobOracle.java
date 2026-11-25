@@ -14705,8 +14705,8 @@ public final class MobOracle {
 
             // 铜箱子（源）和普通箱子（目标）：每个都挂真的 net.minecraft.world.level.block.entity.ChestBlockEntity 并登记进
             // 假世界的方块实体表 + 区块的 getBlockEntities()，搬运行为的搜索走后者。
-            BlockPos source = new BlockPos(3, 64, 0);
-            BlockPos dest = new BlockPos(5, 64, 0);
+            BlockPos source = new BlockPos(3, 63, 0);
+            BlockPos dest = new BlockPos(4, 63, 0);
             boolean hasSource = name.equals("copper_golem_transport") || name.equals("copper_golem_no_target");
             boolean hasDest = name.equals("copper_golem_transport");
             net.minecraft.world.level.block.entity.ChestBlockEntity sourceBe = null;
@@ -14737,13 +14737,15 @@ public final class MobOracle {
             golem.setId(FIRST_ID);
             setRandom(golem, ENTITY_RANDOM_SEED);
             golem.setUUID(new UUID(0L, 3L));
-            golem.snapTo(1.5, 64.0, 0.5, 0.0F, 0.0F);
+            golem.snapTo(3.5, 64.0, 0.5, 0.0F, 0.0F);
             golem.setYHeadRot(0.0F);
             golem.setYBodyRot(0.0F);
             BrainOracle.fixSensorDelays(golem, 1L);
             BrainOracle.reseedShuffles(golem, randomSeed(golem));
-            // 构造时的 60..100 冷却用固定值对齐 Bamboo：搬运场景直接清零，
-            // 其余场景保留官方构造值、由 CORE 的倒数行为消耗。
+            // 构造时的 `nextInt(60,100)` 来自 Sensor 的全局无种子随机源，夹具里定成
+            // 固定值 65，和 Bamboo 的实体随机源逐位对齐。
+            golem.getBrain().setMemory(
+                    net.minecraft.world.entity.ai.memory.MemoryModuleType.TRANSPORT_ITEMS_COOLDOWN_TICKS, 65);
             if (name.equals("copper_golem_transport") || name.equals("copper_golem_no_target")) {
                 golem.getBrain().eraseMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.TRANSPORT_ITEMS_COOLDOWN_TICKS);
             }
@@ -14768,8 +14770,8 @@ public final class MobOracle {
 
             int ticks = switch (name) {
                 case "copper_golem_build" -> 3;
-                case "copper_golem_transport" -> 145;
-                case "copper_golem_no_target" -> 145;
+                case "copper_golem_transport" -> 62;
+                case "copper_golem_no_target" -> 62;
                 case "copper_golem_oxidize" -> 8;
                 case "copper_golem_wax" -> 8;
                 case "copper_golem_statue" -> 4;
@@ -14777,6 +14779,7 @@ public final class MobOracle {
             };
             StringBuilder frames = new StringBuilder("[");
             for (int tick = 0; tick <= ticks; tick++) {
+                long startSeed = levelSeed(level);
                 if (tick > 0) {
                     level.gameTime++;
                     if (buildScene && tick == 1) {
@@ -14798,8 +14801,9 @@ public final class MobOracle {
                 frames.append("{\"blocks\":").append(copperBlocks(level, build, source, dest, hasSource, hasDest));
                 frames.append(",\"chests\":").append(copperChests(level, sourceBe, destBe));
                 frames.append(",\"golem\":").append(copperGolemState(level, golem));
-                frames.append(",\"brain\":").append(jsonString(golem.isRemoved() ? "" : BrainOracle.dump(golem)));
-                frames.append(",\"levelSeed\":").append(levelSeed(level));
+                frames.append(",\"brain\":").append(copperBrainSummary(golem));
+                frames.append(",\"startSeed\":").append(startSeed)
+                        .append(",\"levelSeed\":").append(levelSeed(level));
                 frames.append(",\"spawns\":").append(copperSpawns(level));
                 frames.append('}');
                 level.spawned.clear();
@@ -14814,7 +14818,7 @@ public final class MobOracle {
 
     private static String copperBlocks(FakeLevel level, BlockPos build, BlockPos source,
             BlockPos dest, boolean hasSource, boolean hasDest) {
-        BlockPos[] cells = {build, build.above(), source, dest, new BlockPos(1, 64, 0)};
+        BlockPos[] cells = {build, build.above(), source, dest, new BlockPos(3, 64, 0)};
         StringBuilder out = new StringBuilder("[");
         for (int i = 0; i < cells.length; i++) {
             if (i > 0) out.append(',');
@@ -14847,7 +14851,7 @@ public final class MobOracle {
     private static String copperGolemState(FakeLevel level,
             net.minecraft.world.entity.animal.golem.CopperGolem golem) throws Exception {
         if (golem.isRemoved()) {
-            return "[1,0,0,0,0,0,0,[]]";
+            return "[1,0,0,0,0,0,0,0]";
         }
         var held = golem.getMainHandItem();
         var clockField = net.minecraft.world.entity.animal.golem.CopperGolem.class
@@ -14860,8 +14864,44 @@ public final class MobOracle {
                 .append(held.isEmpty() ? 0 : net.minecraft.world.item.Item.getId(held.getItem())).append(',')
                 .append(held.getCount()).append(',')
                 .append(Float.floatToRawIntBits(golem.getHealth())).append(',')
-                .append(Double.doubleToRawLongBits(golem.position().x)).append(",[]]");
+                .append(Double.doubleToRawLongBits(golem.position().x)).append(']');
         return out.toString();
+    }
+
+    /** 铜傀儁逐刻的大脑摘要：活动、正在跑的行为名、冷却 / 位置集合 / 走路目标。
+     *  固定格式，不受 `HashSet` 类名和空 `visible_mobs` 记忆的 Java/Bamboo 表现差异影响；
+     *  每一项都是官方大脑里的真实值。 */
+    private static String copperBrainSummary(net.minecraft.world.entity.animal.golem.CopperGolem golem)
+            throws Exception {
+        if (golem.isRemoved()) return "[]";
+        var brain = golem.getBrain();
+        StringBuilder out = new StringBuilder("[");
+        java.util.List<String> activities = new java.util.ArrayList<>();
+        for (var a : brain.getActiveActivities()) activities.add(a.getName());
+        java.util.Collections.sort(activities);
+        out.append(jsonString(String.join(",", activities))).append(',');
+        java.util.List<String> running = new java.util.ArrayList<>();
+        for (var b : brain.getRunningBehaviors()) running.add(BrainOracle.behaviorName(b));
+        java.util.Collections.sort(running);
+        out.append(jsonString(String.join(",", running))).append(',');
+        out.append(jsonString(brain.getMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.TRANSPORT_ITEMS_COOLDOWN_TICKS)
+                .map(String::valueOf).orElse(""))).append(',');
+        out.append(jsonString(brain.getMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.VISITED_BLOCK_POSITIONS)
+                .map(set -> set.stream()
+                        .map(gp -> gp.pos().getX() + ":" + gp.pos().getY() + ":" + gp.pos().getZ())
+                        .sorted().collect(java.util.stream.Collectors.joining(";")))
+                .orElse(""))).append(',');
+        out.append(jsonString(brain.getMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.UNREACHABLE_TRANSPORT_BLOCK_POSITIONS)
+                .map(set -> set.stream()
+                        .map(gp -> gp.pos().getX() + ":" + gp.pos().getY() + ":" + gp.pos().getZ())
+                        .sorted().collect(java.util.stream.Collectors.joining(";")))
+                .orElse(""))).append(',');
+        out.append(jsonString(brain.getMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.WALK_TARGET)
+                .map(w -> BrainOracle.pos(w.getTarget().currentBlockPosition()))
+                .orElse(""))).append(',');
+        out.append(jsonString(brain.getMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.LOOK_TARGET)
+                .map(BrainOracle::trackerPos).orElse("")));
+        return out.append(']').toString();
     }
 
     private static String copperSpawns(FakeLevel level) {

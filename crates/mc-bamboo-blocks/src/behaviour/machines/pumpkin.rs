@@ -246,6 +246,14 @@ fn replace_copper_block_with_chest(world: &mut World, cells: &PatternMatch) {
     world.set_block(copper_pos, chest, UPDATE_CLIENTS);
 }
 
+/// 对拍夹具用：直接跑一次官方 `CarvedPumpkinBlock.onPlace` 的搭建判定。
+/// 官方夹具调的是 protected `onPlace`，这里走同一条 `trySpawnGolem`。
+///
+/// Oracle hook: run the vanilla `CarvedPumpkinBlock.onPlace` spawn check once.
+pub fn place_for_oracle(world: &mut World, top: BlockPos) {
+    try_spawn_golem(world, top);
+}
+
 /// `trySpawnGolem`。
 fn try_spawn_golem(world: &mut World, top: BlockPos) {
     use crate::entity::mob::MobType;

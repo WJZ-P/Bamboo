@@ -43,6 +43,7 @@ mod bee_full;
 mod bee_locate;
 mod bee_release;
 mod brain;
+mod copper_golem;
 mod egg;
 mod ender_pearl;
 mod equine;
@@ -170,6 +171,7 @@ enum Line {
     BeeLocate(Box<bee_locate::BeeLocateCase>),
     BeeRelease(Box<bee_release::BeeReleaseCase>),
     Golem(Box<golem::GolemCase>),
+    CopperGolem(Box<copper_golem::CopperGolemCase>),
     GolemAttackRoll(golem::GolemAttackRollCase),
     GolemSave(Box<golem::GolemSaveCase>),
     SmallMob(Box<small_mob::SmallMobCase>),
@@ -1329,6 +1331,22 @@ impl Level for MobLevel {
         true
     }
 
+    fn with_slots(
+        &mut self,
+        pos: BlockPos,
+        len: usize,
+        f: &mut dyn FnMut(&mut [ItemStack]),
+    ) -> bool {
+        let Some(slots) = self.containers.get_mut(&pos) else {
+            return false;
+        };
+        if slots.len() != len {
+            return false;
+        }
+        f(slots);
+        true
+    }
+
     fn slots_at(&self, pos: BlockPos) -> Vec<ItemStack> {
         self.containers.get(&pos).cloned().unwrap_or_default()
     }
@@ -1910,6 +1928,7 @@ impl Report {
                 Line::BeeLocate(case) => self.replay_bee_locate(&case),
                 Line::BeeRelease(case) => self.replay_bee_release(&case),
                 Line::Golem(case) => self.replay_golem(&case),
+                Line::CopperGolem(case) => self.replay_copper_golem(&case),
                 Line::GolemAttackRoll(case) => self.replay_golem_attack_roll(&case),
                 Line::GolemSave(case) => self.replay_golem_save(&case),
                 Line::SmallMob(case) => self.replay_small_mob(&case),

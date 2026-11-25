@@ -1324,12 +1324,18 @@ pub enum Command {
     /// phase so conflicting commands are ordered by uid (first come, first served).
     CopperGolemPickUp {
         pos: mc_bamboo_core::BlockPos,
+        /// 发出命令那一刻箱子首格的内容；落地时由 `World` 复核（先到先得）。
+        /// The first non-empty stack observed when the command was emitted; the
+        /// landing phase re-checks the chest so conflicts are first come, first served.
+        expected: mc_bamboo_protocol::item::ItemStack,
     },
     /// `TransportItemsBetweenContainers.putDownItem`：把主手物品放进箱子，剩余留主手。
     ///
     /// Place the held stack into a chest, keeping any remainder in the main hand.
     CopperGolemPutDown {
         pos: mc_bamboo_core::BlockPos,
+        /// 主手在发出命令那一刻的物品堆（落地时箱子可能已被别的傀儡改过）。
+        held: mc_bamboo_protocol::item::ItemStack,
     },
     /// `ServerLevel.destroyBlockProgress(breaker, pos, progress)`：`BreakDoorGoal` 的
     /// 门上裂纹，`progress` 为 -1 时清掉。
@@ -2124,11 +2130,11 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::CopperGolemStatue { pos, pose, facing } => {
             super::mob::copper_golem::apply_statue(world, me, pos, pose, facing)
         }
-        Command::CopperGolemPickUp { pos } => {
-            super::mob::copper_golem::apply_pick_up(world, me, pos);
+        Command::CopperGolemPickUp { pos, expected } => {
+            super::mob::copper_golem::apply_pick_up(world, me, pos, &expected);
         }
-        Command::CopperGolemPutDown { pos } => {
-            super::mob::copper_golem::apply_put_down(world, me, pos);
+        Command::CopperGolemPutDown { pos, held } => {
+            super::mob::copper_golem::apply_put_down(world, me, pos, &held);
         }
         Command::LayTurtleEgg { pos, eggs } => {
             let pitch = 0.9 + world.random().next_float() * 0.2;

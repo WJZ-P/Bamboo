@@ -9,13 +9,17 @@
 
 use mc_bamboo_core::{Aabb, Axis, BlockPos, Direction, Vec3};
 use mc_bamboo_data::{blocks, tags::block_tags};
-use mc_bamboo_protocol::{components::value::GlobalPos, packet::play::EquipmentSlot};
+use mc_bamboo_protocol::{
+    components::value::GlobalPos, item::ItemStack, packet::play::EquipmentSlot,
+};
 
 use super::{
     HORIZONTAL_SEARCH_RADIUS, IDLE_COOLDOWN, MAX_UNREACHABLE_POSITIONS, MAX_VISITED_POSITIONS,
-    State, TARGET_INTERACTION_TIME, VERTICAL_SEARCH_RADIUS, VISITED_POSITIONS_MEMORY_TIME,
+    State, TARGET_INTERACTION_TIME, TRANSPORTED_ITEM_MAX_STACK_SIZE, VERTICAL_SEARCH_RADIUS,
+    VISITED_POSITIONS_MEMORY_TIME,
 };
 use crate::{
+    container,
     entity::{
         ctx::{BlockView, Command},
         mob::{
@@ -213,6 +217,11 @@ impl Transport {
         if self.transport_state != TransportState::Travelling {
             return true;
         }
+        // `hasValidTravellingPath` 在导航还没有路径时先按官方 `createPath` 算一条，
+        // 但不装进导航；这里只在已经有一条路径之后才校验可达性。
+        if cx.mob.navigation.path.is_none() {
+            return true;
+        }
         if self.has_valid_travelling_path(cx, target.pos) {
             return true;
         }
@@ -265,7 +274,9 @@ impl Transport {
             self.transport_state = TransportState::Queuing;
             return;
         }
-        if within_target_distance(blocks, cx.me, target.pos, interaction_range(cx), center) {
+        let range = interaction_range(cx);
+        let in_range = within_target_distance(blocks, cx.me, target.pos, range, center);
+        if in_range {
             self.start_on_reached_target_interaction(cx, target.pos);
         } else {
             walk_towards_target(cx, target.pos);
@@ -299,11 +310,16 @@ impl Transport {
             let (state, sound) = interaction.animation();
             match self.interaction_tick {
                 1 => {
+                    // `ChestBlockEntity.startOpen` → `signalOpenCount` → `playSound`：
+                    // 世界随机源取一次 `nextFloat()` 算开盖音高。
+                    let _ = cx.ctx.blocks().level_random_float();
                     cx.mob.copper_golem.opened_chest_pos = Some(target.pos);
                     cx.mob.copper_golem.state = state;
                 }
                 9 => living::play_sound(cx.me, cx.mob, sound, 1.0, 1.0),
                 60 => {
+                    // `stopOpen` 同样取一次世界随机数算关盖音高。
+                    let _ = cx.ctx.blocks().level_random_float();
                     cx.mob.copper_golem.opened_chest_pos = None;
                 }
                 _ => {}
@@ -311,18 +327,46 @@ impl Transport {
         }
         if self.interaction_tick >= TARGET_INTERACTION_TIME {
             let action = reached_interaction(cx, target.pos);
+            let slots = cx.ctx.blocks().container_slots(target.pos);
             match action {
                 Interaction::PickupItem => {
-                    cx.ctx
-                        .emit(Command::CopperGolemPickUp { pos: target.pos }, cx.me);
-                    self.clear_memories_after_match(cx);
+                    // 官方 `pickUpItems` 在行为里直接 setItemSlot；这里改的是
+                    // `Cx.mob`（`me.kind` 此刻被借走），箱子内容由命令串行落地。
+                    let taken = slots
+                        .iter()
+                        .find(|stack| !stack.is_empty())
+                        .cloned()
+                        .unwrap_or_else(ItemStack::empty);
+                    if !taken.is_empty() {
+                        let mut capped = taken.clone();
+                        capped.count = capped.count.min(TRANSPORTED_ITEM_MAX_STACK_SIZE);
+                        cx.mob.equipment.set(EquipmentSlot::MainHand, capped);
+                        cx.ctx.emit(
+                            Command::CopperGolemPickUp {
+                                pos: target.pos,
+                                expected: taken,
+                            },
+                            cx.me,
+                        );
+                        self.clear_memories_after_match(cx);
+                    } else {
+                        self.stop_targeting_current_target(cx);
+                    }
                 }
                 Interaction::PickupNoItem | Interaction::PlaceNoItem => {
                     self.stop_targeting_current_target(cx);
                 }
                 Interaction::PlaceItem => {
-                    cx.ctx
-                        .emit(Command::CopperGolemPutDown { pos: target.pos }, cx.me);
+                    let held = cx.mob.equipment.get(EquipmentSlot::MainHand).clone();
+                    let remaining = simulate_put_down(&slots, &held);
+                    cx.mob.equipment.set(EquipmentSlot::MainHand, remaining);
+                    cx.ctx.emit(
+                        Command::CopperGolemPutDown {
+                            pos: target.pos,
+                            held,
+                        },
+                        cx.me,
+                    );
                     self.clear_memories_after_match(cx);
                 }
             }
@@ -637,4 +681,28 @@ fn connected_chest_positions(blocks: &dyn BlockView, pos: BlockPos) -> Vec<Block
     } else {
         vec![pos]
     }
+}
+
+/// `addItemsToContainer` 对一份只读槽位快照的推演，用来在行为里同步主手剩余量；
+/// 真正改箱子的是 `Command::CopperGolemPutDown` 的落地阶段。
+fn simulate_put_down(slots: &[ItemStack], held: &ItemStack) -> ItemStack {
+    if held.is_empty() {
+        return ItemStack::empty();
+    }
+    let mut rest = held.clone();
+    for stack in slots {
+        if stack.is_empty() {
+            return ItemStack::empty();
+        }
+        if container::same_item_same_components(stack, &rest)
+            && stack.count < crate::container::item_max(stack)
+        {
+            let space = crate::container::item_max(stack) - stack.count;
+            rest.count -= space;
+            if rest.is_empty() {
+                return ItemStack::empty();
+            }
+        }
+    }
+    rest
 }

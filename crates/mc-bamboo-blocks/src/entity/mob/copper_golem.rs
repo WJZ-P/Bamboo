@@ -356,8 +356,8 @@ fn idle_activity() -> ActivityData {
                         (
                             Kind::RandomStroll {
                                 speed: 1.0,
-                                horizontal: 10,
-                                vertical: 7,
+                                horizontal: 2,
+                                vertical: 2,
                             },
                             1,
                         ),
@@ -411,6 +411,8 @@ impl Behavior {
     }
 
     /// `start`：`GroundPathNavigation.setCanPathToTargetsBelowSurface(true)`。
+    /// 官方大脑在 `tryStart` 的同一刻紧接着跑一次 `tick`，这里把首刻的目标搜索
+    /// 一起做掉，避免活动/记忆快照差一相位。
     pub(super) fn start(&mut self, cx: &mut Cx) {
         let Self::Transport(state) = self;
         state.target = None;
@@ -418,6 +420,7 @@ impl Behavior {
         state.interaction = None;
         state.interaction_tick = 0;
         cx.mob.navigation.flags.can_open_doors = true;
+        state.tick(cx);
     }
 
     /// `canStillUse`：冷却无值、不恐慌、没被拴住。
@@ -587,7 +590,12 @@ fn clear_transport_memories(mob: &mut Mob) {
 ///
 /// 只读查询决定要取之后才发这条命令；落地阶段按 uid 顺序串行应用，若另一只傀儡
 /// 已经把东西取走，这里读到空箱子就什么都不做（官方「先到先得」）。
-pub(crate) fn apply_pick_up(world: &mut crate::world::World, me: &mut Entity, pos: BlockPos) {
+pub(crate) fn apply_pick_up(
+    world: &mut crate::world::World,
+    me: &mut Entity,
+    pos: BlockPos,
+    expected: &ItemStack,
+) {
     let mut taken = ItemStack::empty();
     let found = world.with_container(pos, &mut |container| {
         for slot in 0..container.size() {
@@ -602,19 +610,25 @@ pub(crate) fn apply_pick_up(world: &mut crate::world::World, me: &mut Entity, po
     if !found || taken.is_empty() {
         return;
     }
+    // `emit` 精确驱动当场落地，但此时 `me.kind` 已被 `living::tick` 借走换成占位；
+    // 生物状态在 `Cx.mob` 上，由行为本体负责设置（见 transport.rs）。这里只补上
+    // 从存档 / 其它命令路径直接调用时的装备写入。
     if let Some(mob) = me.kind.mob_mut() {
-        mob.equipment.set(EquipmentSlot::MainHand, taken);
+        mob.equipment.set(EquipmentSlot::MainHand, taken.clone());
         clear_transport_memories(mob);
     }
+    let _ = expected;
 }
 
 /// `TransportItemsBetweenContainers.addItemsToContainer` 的落地：主手物品进箱子，
 /// 剩余留主手。逐槽合并 / 填空，和官方一样用「可容纳空间」而不是实际移动数去减主手。
-pub(crate) fn apply_put_down(world: &mut crate::world::World, me: &mut Entity, pos: BlockPos) {
-    let Some(mob) = me.kind.mob_mut() else {
-        return;
-    };
-    let mut held = mob.equipment.get(EquipmentSlot::MainHand).clone();
+pub(crate) fn apply_put_down(
+    world: &mut crate::world::World,
+    me: &mut Entity,
+    pos: BlockPos,
+    held_stack: &ItemStack,
+) {
+    let mut held = held_stack.clone();
     if held.is_empty() {
         return;
     }
@@ -648,10 +662,12 @@ pub(crate) fn apply_put_down(world: &mut crate::world::World, me: &mut Entity, p
     if !found {
         return;
     }
-    mob.equipment
-        .set(EquipmentSlot::MainHand, remaining.clone());
-    if remaining.is_empty() {
-        clear_transport_memories(mob);
+    if let Some(mob) = me.kind.mob_mut() {
+        mob.equipment
+            .set(EquipmentSlot::MainHand, remaining.clone());
+        if remaining.is_empty() {
+            clear_transport_memories(mob);
+        }
     }
 }
 
@@ -969,8 +985,20 @@ mod transport_tests {
         let mut first = golem(1);
         let mut second = golem(2);
         // 落地阶段按 uid 升序串行应用，正是 `parallel.rs` 的循环语义。
-        ctx::apply(Command::CopperGolemPickUp { pos }, &mut first, &mut world);
-        ctx::apply(Command::CopperGolemPickUp { pos }, &mut second, &mut world);
+        let expected = ItemStack::new(items::STONE, 3);
+        ctx::apply(
+            Command::CopperGolemPickUp {
+                pos,
+                expected: expected.clone(),
+            },
+            &mut first,
+            &mut world,
+        );
+        ctx::apply(
+            Command::CopperGolemPickUp { pos, expected },
+            &mut second,
+            &mut world,
+        );
 
         assert_eq!(
             first
@@ -1002,7 +1030,14 @@ mod transport_tests {
         let mut ticks = BlockTicks::new();
         let mut world = World::new(&mut level, &mut ticks);
         let mut golem = golem(1);
-        ctx::apply(Command::CopperGolemPickUp { pos }, &mut golem, &mut world);
+        ctx::apply(
+            Command::CopperGolemPickUp {
+                pos,
+                expected: ItemStack::new(items::STONE, 16),
+            },
+            &mut golem,
+            &mut world,
+        );
         assert_eq!(
             golem
                 .kind
