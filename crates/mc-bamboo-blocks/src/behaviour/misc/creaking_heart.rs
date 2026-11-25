@@ -3,14 +3,16 @@
 use mc_bamboo_core::{Axis, BlockPos, Direction};
 use mc_bamboo_data::{Block, tags::block_tags};
 
+use crate::entity::Entity;
+
 use crate::{
     behaviour::{
-        Behaviour,
+        Behaviour, Plain,
         common::{default_state, update_neighbours_after_destroy},
         misc::creaking_heart_entity,
     },
-    context::PlaceContext,
-    state::{AXIS, BlockState, CREAKING_HEART_STATE, CreakingHeartState},
+    context::{Actor, PlaceContext},
+    state::{AXIS, BlockState, CREAKING_HEART_STATE, CreakingHeartState, NATURAL},
     world::World,
 };
 
@@ -55,6 +57,30 @@ impl Behaviour for CreakingHeart {
         } else {
             state.with(CREAKING_HEART_STATE, CreakingHeartState::Uprooted)
         })
+    }
+
+    /// `CreakingHeartBlock.playerWillDestroy`：拆掉绑定的嘎枝，再按 NATURAL 给经验。
+    fn player_will_destroy(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        player: &Actor,
+    ) -> BlockState {
+        let had_be = world
+            .with_block_entity::<creaking_heart_entity::CreakingHeartEntity, _>(
+                pos,
+                |heart, world| heart.remove_protector(world),
+            )
+            .is_some();
+        if had_be && !player.prevents_block_drops && state.try_get(NATURAL).unwrap_or(false) {
+            let amount = world.random().next_int_between_inclusive(20, 24);
+            world.spawn_entity(Entity::experience_orb(
+                crate::world::block_center_public(pos),
+                amount,
+            ));
+        }
+        Plain.player_will_destroy(state, world, pos, player)
     }
 
     /// `getAnalogOutputSignal`：`UPROOTED` 恒 0，否则读方块实体。

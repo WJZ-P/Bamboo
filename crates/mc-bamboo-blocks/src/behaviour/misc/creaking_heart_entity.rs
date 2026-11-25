@@ -1,26 +1,36 @@
-//! `CreakingHeartBlockEntity`：昼夜状态、绑定的嘎枝 UUID 和比较器信号。
+//! `CreakingHeartBlockEntity`：昼夜状态、绑定的嘎枝、刷出与比较器信号。
 //!
 //! 心每 20~24 刻复查一次状态，夜里变 `awake`，白天变 `dormant`；两头缺了
 //! 苍白橡木且没有绑定的嘎枝时变 `uprooted`。存档的 `creaking` 是官方的
 //! int-array UUID。
 //!
-//! `CreakingHeartBlockEntity`: the day/night state, the bound creaking UUID and
-//! the comparator signal. The `creaking` key is the int-array UUID.
+//! `CreakingHeartBlockEntity`: the day/night state, the bound creaking, its
+//! spawn attempt and the comparator signal. The `creaking` key is the int-array
+//! UUID.
 
 use std::any::Any;
 
-use mc_bamboo_core::BlockPos;
-use mc_bamboo_data::{BlockAncestor, blocks, tags::block_tags};
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
+use mc_bamboo_data::{BlockAncestor, blocks, sounds, tags::block_tags};
 use mc_bamboo_nbt::Tag;
 
 use crate::{
     BlockEntity, BlockState, World,
     archive::tag::{self, Result},
+    entity::{
+        Entity,
+        mob::{MobType, creaking as mob_creaking},
+    },
+    shape::{self, CollisionContext},
     state::{AXIS, CREAKING_HEART_STATE, CreakingHeartState},
 };
 
 /// `CreakingHeartBlockEntity` 存档里的 UUID（四个 int）。
 type Uuid = [i32; 4];
+/// `CreakingHeartBlockEntity.PLAYER_DETECTION_RANGE` 的平方。
+const PLAYER_RANGE_SQ: f64 = 32.0 * 32.0;
+/// `CreakingHeartBlockEntity` 判定嘎枝离心的距离。
+const MAX_PROTECTOR_DISTANCE: f64 = 34.0;
 
 /// `hasRequiredLogs`：这条轴两头都是同一条轴的苍白橡木。
 fn has_required_logs(world: &World, pos: BlockPos, state: BlockState) -> bool {
@@ -49,6 +59,10 @@ pub struct CreakingHeartEntity {
     output_signal: i32,
     /// 最近一次由实体层算出的嘎枝到心的距离；`None` 表示没接回实体。
     protector_distance: Option<f64>,
+    /// `emitter`：心受伤后剩余的连线 / 心跳效果刻数。
+    emitter: i32,
+    /// `emitterTarget`：连线效果的另一端。
+    emitter_target: Option<Vec3>,
 }
 
 impl CreakingHeartEntity {
@@ -62,6 +76,8 @@ impl CreakingHeartEntity {
             ticks_existed: 0,
             output_signal: 0,
             protector_distance: None,
+            emitter: 0,
+            emitter_target: None,
         }
     }
 
@@ -81,6 +97,8 @@ impl CreakingHeartEntity {
             ticks_existed: 0,
             output_signal: 0,
             protector_distance: None,
+            emitter: 0,
+            emitter_target: None,
         }
     }
 
@@ -101,6 +119,8 @@ impl CreakingHeartEntity {
         self.creaking = None;
         self.loading = false;
         self.protector_distance = None;
+        self.emitter = 0;
+        self.emitter_target = None;
     }
 
     /// 读盘后按 UUID 找实体；找不到且过了 30 刻就清掉绑定。
@@ -150,10 +170,40 @@ impl CreakingHeartEntity {
         }
     }
 
-    /// `CreakingHeartBlockEntity.serverTick`：状态复查安排在 20~24 刻之后。
+    /// `getCreakingProtector`：按存档 UUID 在实体表里找回这一只嘎枝。
+    fn protector(&self, world: &World) -> Option<(i32, Vec3, [u8; 16])> {
+        let uuid = uuid_bytes(self.creaking?);
+        for id in world.entity_ids() {
+            let entity = world.entity(id)?;
+            let Some(mob) = entity.kind.mob() else {
+                continue;
+            };
+            if mob.mob_type == MobType::Creaking && mob.uuid == uuid && !entity.removed {
+                return Some((id, entity.position, uuid));
+            }
+        }
+        None
+    }
+
+    /// `CreakingHeartBlockEntity.serverTick`。
     pub fn server_tick(&mut self, world: &mut World) {
         self.ticks_existed = self.ticks_existed.saturating_add(1);
         self.resolve_creaking(world);
+        if self.emitter > 0 {
+            self.tick_emitter(world);
+        }
+        // 绑定的嘎枝每刻把距离交给心，比较器按 15 - floor(d/32*15) 读。
+        let protector = self.protector(world);
+        let distance = protector.map(|(_, position, _)| {
+            position
+                .distance_to_sqr(Vec3::new(
+                    f64::from(self.pos.x) + 0.5,
+                    f64::from(self.pos.y),
+                    f64::from(self.pos.z) + 0.5,
+                ))
+                .sqrt()
+        });
+        self.set_protector_distance(if self.loading { None } else { distance });
         let signal = self.compute_analog_output_signal();
         if signal != self.output_signal {
             self.output_signal = signal;
@@ -171,6 +221,7 @@ impl CreakingHeartEntity {
         if !state.is_a(BlockAncestor::CreakingHeartBlock) {
             return;
         }
+        let active = world.creaking_active(self.pos);
         let next = self.update_state(world, state);
         if state.get(CREAKING_HEART_STATE) != next {
             world.set_block_and_update(self.pos, state.with(CREAKING_HEART_STATE, next));
@@ -178,8 +229,169 @@ impl CreakingHeartEntity {
         if next == CreakingHeartState::Uprooted {
             return;
         }
-        // 绑定 / 刷怪分支在嘎枝实体落地后接入。
-        let _ = (blocks::CREAKING_HEART, world.game_time());
+        if self.creaking.is_some() {
+            if let Some((id, _, _)) = protector
+                && (!active || distance.is_some_and(|d| d > MAX_PROTECTOR_DISTANCE))
+            {
+                self.tear_down_creaking(world, id);
+                self.clear_creaking_info();
+            }
+            return;
+        }
+        if next != CreakingHeartState::Awake {
+            return;
+        }
+        let rules = world.block_game_rules();
+        if !rules.spawn_mobs || !rules.spawn_monsters || world.difficulty_id() == 0 {
+            return;
+        }
+        let heart = Vec3::new(
+            f64::from(self.pos.x),
+            f64::from(self.pos.y),
+            f64::from(self.pos.z),
+        );
+        let player_near = world
+            .player_views()
+            .iter()
+            .any(|player| player.position.distance_to_sqr(heart) <= PLAYER_RANGE_SQ);
+        if !player_near {
+            return;
+        }
+        if let Some((id, position, uuid)) = self.spawn_protector(world) {
+            self.set_creaking_info(uuid_ints(&uuid), false);
+            self.protector_distance = Some(
+                position
+                    .distance_to_sqr(Vec3::new(
+                        f64::from(self.pos.x) + 0.5,
+                        f64::from(self.pos.y),
+                        f64::from(self.pos.z) + 0.5,
+                    ))
+                    .sqrt(),
+            );
+            world.play_sound(
+                position,
+                sounds::sound_event("minecraft:entity.creaking.spawn"),
+                sounds::HOSTILE,
+                1.0,
+                1.0,
+                false,
+            );
+            world.play_block_sound(
+                self.pos,
+                sounds::sound_event("minecraft:block.creaking_heart.spawn"),
+                1.0,
+                1.0,
+            );
+            // 官方广播 entityEvent 60；Bamboo 的实体事件表由游戏层同步。
+            world.with_entity_mut(id, &mut |entity| {
+                entity.with_mob(|_, mob| {
+                    mob.events
+                        .push(crate::entity::mob::MobEvent::EntityEvent { event: 60 });
+                });
+            });
+        }
+    }
+
+    /// `spawnProtector`：`SpawnUtil.trySpawnMob` 的 5 次尝试和 16×8 取点。
+    fn spawn_protector(&self, world: &mut World) -> Option<(i32, Vec3, [u8; 16])> {
+        for _ in 0..5 {
+            let dx = world.random().next_int(33) - 16;
+            let dz = world.random().next_int(33) - 16;
+            let mut at = self.pos.offset(dx, 8, dz);
+            let mut below = world.block_state(at);
+            for _ in 0..=16 {
+                let above = at.above();
+                let state = world.block_state(above);
+                if can_spawn_on(world, above, state, at, below) {
+                    at = above.above();
+                    break;
+                }
+                at = at.below();
+                below = state;
+            }
+            // 循环走完仍未 break 视为没有落点；下面再检查一次落脚格。
+            if !can_hold_protector(world, at) {
+                continue;
+            }
+            let position = Vec3::new(
+                f64::from(at.x) + 0.5,
+                f64::from(at.y),
+                f64::from(at.z) + 0.5,
+            );
+            let mut entity = world.prepare_entity(Entity::by_mob_type(MobType::Creaking, position));
+            entity.with_mob(|_, mob| mob_creaking::bind(mob, self.pos));
+            let uuid = entity.kind.mob().map(|mob| mob.uuid).unwrap_or_default();
+            let id = world.add_prepared_entity(entity);
+            return Some((id, position, uuid));
+        }
+        None
+    }
+
+    /// `preRemoveSideEffects` / `playerWillDestroy`：心没了，绑定的嘎枝直接拆解。
+    pub fn remove_protector(&mut self, world: &mut World) {
+        if let Some((id, _, _)) = self.protector(world) {
+            self.tear_down_creaking(world, id);
+        }
+        self.clear_creaking_info();
+    }
+
+    fn tear_down_creaking(&self, world: &mut World, id: i32) {
+        world.with_entity_mut(id, &mut |entity| {
+            entity.with_mob(|_, mob| {
+                mob.creaking.tearing_down = true;
+                mob.health = 0.0;
+                mob.dead = true;
+                mob.death_time = 0;
+                mob.events
+                    .push(crate::entity::mob::MobEvent::EntityEvent { event: 60 });
+            });
+        });
+    }
+
+    /// `creakingHurt`：不扣血，改放树脂团与心的连线效果。
+    pub fn creaking_hurt(&mut self, world: &mut World) {
+        if self.emitter > 0 {
+            return;
+        }
+        self.emitter = 100;
+        self.emitter_target = self.protector(world).map(|(_, position, _)| position);
+        if world.block_state(self.pos).get(CREAKING_HEART_STATE) == CreakingHeartState::Awake {
+            let count = world.random().next_int_between_inclusive(2, 3);
+            for _ in 0..count {
+                if let Some(at) = spread_resin(world, self.pos) {
+                    world.play_block_sound(
+                        at,
+                        sounds::sound_event("minecraft:block.resin.place"),
+                        1.0,
+                        1.0,
+                    );
+                }
+            }
+        }
+    }
+
+    /// emitter>50 时每刻发两组连线粒子，每 10 刻沿心→嘎枝播一次心跳声。
+    fn tick_emitter(&mut self, world: &mut World) {
+        if self.emitter % 10 == 0
+            && let Some(target) = self.emitter_target
+        {
+            let fraction = 0.2 + 0.8 * f64::from(100 - self.emitter) / 100.0;
+            let center = Vec3::new(
+                f64::from(self.pos.x) + 0.5,
+                f64::from(self.pos.y) + 0.5,
+                f64::from(self.pos.z) + 0.5,
+            );
+            let at = center.add(target.subtract(center).scale(fraction));
+            let pos = BlockPos::containing(at);
+            let volume = f64::from(self.emitter) / 200.0 + 0.5;
+            world.play_block_sound(
+                pos,
+                sounds::sound_event("minecraft:block.creaking_heart.hurt"),
+                volume as f32,
+                1.0,
+            );
+        }
+        self.emitter = self.emitter.saturating_sub(1);
     }
 
     /// `saveAdditional`：`creaking` 只在有绑定时写。
@@ -189,6 +401,85 @@ impl CreakingHeartEntity {
             None => Vec::new(),
         }
     }
+}
+
+/// `SpawnUtil.Strategy.ON_TOP_OF_COLLIDER_NO_LEAVES`：上面一格空、脚下是完整顶面且不是树叶。
+fn can_spawn_on(
+    world: &World,
+    _above: BlockPos,
+    state: BlockState,
+    at: BlockPos,
+    below: BlockState,
+) -> bool {
+    if !state.is_air() {
+        return false;
+    }
+    let support = shape::block_collision_boxes(
+        below,
+        at,
+        CollisionContext::Empty,
+        world.moving_piston_shape(at).as_deref(),
+        world.shulker_box_shape(at),
+    );
+    !below.is_tagged(block_tags::LEAVES) && shape::is_face_full(&support, Direction::Up)
+}
+
+/// 嘎枝落脚格的 AABB 不能与方块碰撞；简化为落脚格与上一格都是空气 / 无碰撞。
+fn can_hold_protector(world: &World, at: BlockPos) -> bool {
+    [at, at.above()].into_iter().all(|pos| {
+        let state = world.block_state(pos);
+        state.is_air()
+            || shape::block_collision_boxes(
+                state,
+                pos,
+                CollisionContext::Empty,
+                world.moving_piston_shape(pos).as_deref(),
+                world.shulker_box_shape(pos),
+            )
+            .is_empty()
+    })
+}
+
+/// `spreadResin`：从心沿苍白橡木 BFS 两层，找到能放树脂团的邻格。
+fn spread_resin(world: &mut World, heart: BlockPos) -> Option<BlockPos> {
+    let mut visited = vec![heart];
+    let mut frontier = vec![heart];
+    for _ in 0..2 {
+        let mut next = Vec::new();
+        for pos in frontier {
+            for side in [
+                Direction::Up,
+                Direction::Down,
+                Direction::North,
+                Direction::South,
+                Direction::East,
+                Direction::West,
+            ] {
+                let neighbor = pos.relative(side);
+                if visited.contains(&neighbor)
+                    || !world.block_state(pos).is_tagged(block_tags::PALE_OAK_LOGS)
+                {
+                    continue;
+                }
+                visited.push(neighbor);
+                let state = world.block_state(neighbor);
+                let clump = BlockState(blocks::RESIN_CLUMP)
+                    .default_state()
+                    .with(AXIS, side.axis());
+                if state.is_air() {
+                    world.set_block_and_update(neighbor, clump);
+                    return Some(neighbor);
+                }
+                if state.is(blocks::RESIN_CLUMP) {
+                    world.set_block_and_update(neighbor, clump);
+                    return Some(neighbor);
+                }
+                next.push(neighbor);
+            }
+        }
+        frontier = next;
+    }
+    None
 }
 
 /// UUID 的四个 int 转成 Bamboo 的 `[u8; 16]`（大端，顺序与官方一致）。
@@ -227,6 +518,11 @@ impl BlockEntity for CreakingHeartEntity {
 
     fn tick(&mut self, world: &mut World) {
         self.server_tick(world);
+    }
+
+    /// `preRemoveSideEffects` → `removeProtector(null)`。
+    fn pre_remove_side_effects(&mut self, world: &mut World, _pos: BlockPos, _state: BlockState) {
+        self.remove_protector(world);
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -339,5 +635,51 @@ mod tests {
             heart.additional()
         );
         assert_eq!(uuid_ints(&uuid_bytes(uuid)), uuid);
+    }
+
+    #[test]
+    fn a_heart_spawns_and_saves_one_creaking_at_night() {
+        let (mut level, mut ticks) = level(heart(), 12600);
+        level.players.push(player_view(Vec3::new(0.5, 64.0, 0.5)));
+        let mut world = World::new(&mut level, &mut ticks);
+        world.set_block_entity(entity::create_block_entity(POS));
+        for _ in 0..21 {
+            world.with_block_entity::<CreakingHeartEntity, _>(POS, |be, world| be.tick(world));
+        }
+        let uuid = world
+            .block_entity::<CreakingHeartEntity>(POS)
+            .and_then(CreakingHeartEntity::creaking_uuid);
+        assert!(uuid.is_some(), "夜里 32 格内有玩家时心应刷出嘎枝");
+        assert!(world.has_mob_uuid(&uuid_bytes(uuid.unwrap())));
+    }
+
+    fn player_view(position: Vec3) -> crate::entity::ctx::PlayerView {
+        crate::entity::ctx::PlayerView {
+            uuid: None,
+            uid: 1,
+            yaw: 0.0,
+            pitch: 0.0,
+            position,
+            delta: Vec3::default(),
+            eye_height: 1.62,
+            health: 20.0,
+            look_direction: Vec3::default(),
+            gaze_disguise: false,
+            alive: true,
+            spectator: false,
+            game_mode: 0,
+            mining_fatigue: None,
+            creative: false,
+            sneaking: false,
+            sprinting: false,
+            swimming: false,
+            invisible: false,
+            armor_cover: 0.0,
+            main_hand: 0,
+            off_hand: 0,
+            team: None,
+            combat: Default::default(),
+            effects: Default::default(),
+        }
     }
 }
