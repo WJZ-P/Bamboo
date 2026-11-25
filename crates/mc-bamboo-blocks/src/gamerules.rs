@@ -63,6 +63,10 @@ pub struct BlockGameRules {
     /// `GameRules.MOB_EXPLOSION_DROP_DECAY`: blocks broken by a mob explosion drop with
     /// probability 1/radius.
     pub mob_explosion_drop_decay: bool,
+    /// `GameRules.SPAWNER_BLOCKS_WORK`：刷怪笼会不会刷怪（`ServerLevel.isSpawnerBlockEnabled`）。
+    ///
+    /// `GameRules.SPAWNER_BLOCKS_WORK`: whether spawners work.
+    pub spawner_blocks_work: bool,
     /// `GameRules.MAX_ENTITY_CRAMMING`：`pushEntities` 的挤压伤害上限。
     pub max_entity_cramming: i32,
     /// Bamboo 的 `max_entity_collisions`：每只生物每刻最多处理几次推挤。
@@ -119,6 +123,7 @@ impl BlockGameRules {
             mob_griefing: bool_default(gamerules::MOB_GRIEFING),
             mob_drops: bool_default(gamerules::MOB_DROPS),
             mob_explosion_drop_decay: bool_default(gamerules::MOB_EXPLOSION_DROP_DECAY),
+            spawner_blocks_work: bool_default(gamerules::SPAWNER_BLOCKS_WORK),
             max_entity_cramming: int_default(gamerules::MAX_ENTITY_CRAMMING),
             max_entity_collisions: 0,
             mob_throttle_distance: 0,
@@ -218,6 +223,7 @@ fn assign_bool(rules: &mut BlockGameRules, name: &str, value: bool) {
         "mob_griefing" => rules.mob_griefing = value,
         "mob_drops" => rules.mob_drops = value,
         "mob_explosion_drop_decay" => rules.mob_explosion_drop_decay = value,
+        "spawner_blocks_work" => rules.spawner_blocks_work = value,
         _ => {}
     }
 }

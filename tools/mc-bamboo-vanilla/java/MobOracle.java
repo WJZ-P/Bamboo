@@ -419,6 +419,9 @@ public final class MobOracle {
             if (only == null || only.equals("small_mob_death")) {
                 cases += playSmallMobDeath(official, out);
             }
+            if (only == null || only.startsWith("spawner")) {
+                cases += playSpawner(official, out, only);
+            }
             if (only == null || only.startsWith("sulfur_cube_")) {
                 cases += playSulfurCube(official, out, only);
                 cases += playSulfurCubeSave(official, out);
@@ -7856,6 +7859,136 @@ public final class MobOracle {
      * breaking tick compare the hatched chicks and the struck cow. Hatch scenes swap
      * the egg's random for a searched seed so the hatch draws take the wanted branch.
      */
+    /**
+     * 刷怪笼：逐刻比 `SpawnerBlockEntity.serverTick` 之后的 `spawnDelay`、当前 `SpawnData`
+     * 的实体、这一轮刷出的实体（类型 + 位置）和世界随机源。场景覆盖玩家在范围内外、倒数、
+     * `MaxNearbyEntities` 封顶、光照规则挡住、刷怪蛋改实体。
+     *
+     * Spawners: compare `spawnDelay`, the current `SpawnData` entity, the mobs spawned
+     * this tick (type + position) and the level random after `SpawnerBlockEntity.serverTick`.
+     */
+    private static int playSpawner(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("spawner_zombie", "spawner_skeleton", "spawner_spider",
+                "spawner_cave_spider", "spawner_silverfish", "spawner_near", "spawner_cap",
+                "spawner_lit", "spawner_egg")) {
+            if (only != null && !name.startsWith(only)) continue;
+            playSpawnerCase(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    private static void playSpawnerCase(Official official, Writer out, String name) throws Exception {
+        EntityType<?> type = switch (name) {
+            case "spawner_skeleton" -> EntityTypes.SKELETON;
+            case "spawner_spider" -> EntityTypes.SPIDER;
+            case "spawner_cave_spider" -> EntityTypes.CAVE_SPIDER;
+            case "spawner_silverfish" -> EntityTypes.SILVERFISH;
+            default -> EntityTypes.ZOMBIE;
+        };
+        boolean near = !name.equals("spawner_near");
+        boolean cap = name.equals("spawner_cap");
+        boolean lit = name.equals("spawner_lit");
+        boolean egg = name.equals("spawner_egg");
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.spawnerScene = true;
+        // 假世界没有 `ServerLevel.blockEvents`（构造器跳过），刷怪笼的 `broadcastEvent` 要写它。
+        // The fake world skips `ServerLevel.blockEvents`; the spawner's `broadcastEvent` writes it.
+        put(ServerLevel.class, level, "blockEvents",
+                new it.unimi.dsi.fastutil.objects.ObjectLinkedOpenHashSet<>());
+        // 地下刷怪笼：没有天空光，方块光 0；`injectedSkyDarken = 15` 让
+        // `getMaxLocalRawBrightness` 归 0，怪物认为够黑。
+        // An underground spawner: no sky light and block light 0; a darken of 15 makes
+        // `getMaxLocalRawBrightness` zero so monsters find it dark enough.
+        level.injectedSkyDarken = 15;
+        if (lit) {
+            level.injectedBlockLight = 15;
+        }
+        for (int x = -3; x <= 3; x++) {
+            for (int z = -3; z <= 3; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        BlockPos spawnerPos = new BlockPos(0, 64, 0);
+        BlockState spawnerState = Blocks.SPAWNER.defaultBlockState();
+        level.blocks.put(spawnerPos.asLong(), spawnerState);
+        var be = new net.minecraft.world.level.block.entity.SpawnerBlockEntity(spawnerPos, spawnerState);
+        be.setLevel(level);
+        be.setEntityId(type, level.getRandom());
+        Field delayField = net.minecraft.world.level.BaseSpawner.class.getDeclaredField("spawnDelay");
+        delayField.setAccessible(true);
+        delayField.setInt(be.getSpawner(), 1);
+        if (cap) {
+            for (int i = 0; i < 6; i++) {
+                Mob zombie = EntityTypes.ZOMBIE.create(level, EntitySpawnReason.COMMAND);
+                zombie.snapTo(1.5 + (i % 3), 64.0, 1.5 + (i / 3), 0.0F, 0.0F);
+                level.tracked.add(zombie);
+            }
+        }
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "SpawnerOracle"), ClientInformation.createDefault());
+        player.setPos(0.5, 64.0, near ? 0.5 : 30.5);
+        level.playersList().add(player);
+        Field nextField = net.minecraft.world.level.BaseSpawner.class.getDeclaredField("nextSpawnData");
+        nextField.setAccessible(true);
+        int ticks = near ? 6 : 4;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                level.spawned.clear();
+                if (egg && tick == 1) {
+                    be.setEntityId(EntityTypes.SKELETON, level.getRandom());
+                }
+                net.minecraft.world.level.block.entity.SpawnerBlockEntity.serverTick(
+                        level, spawnerPos, spawnerState, be);
+            }
+            int delay = delayField.getInt(be.getSpawner());
+            Object next = nextField.get(be.getSpawner());
+            String entity = next == null ? ""
+                    : ((net.minecraft.world.level.SpawnData) next).getEntityToSpawn()
+                            .getString("id").orElse("");
+            JsonArray spawned = new JsonArray();
+            for (Entity spawnedEntity : level.spawned) {
+                if (spawnedEntity instanceof Mob mob) {
+                    JsonArray row = new JsonArray();
+                    row.add(BuiltInRegistries.ENTITY_TYPE.getId(mob.getType()));
+                    row.add((int) (mob.getX() * 2));
+                    row.add((int) mob.getY());
+                    row.add((int) (mob.getZ() * 2));
+                    spawned.add(row);
+                }
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"delay\":").append(delay)
+                    .append(",\"entity\":").append(jsonString(entity))
+                    .append(",\"spawned\":").append(spawned)
+                    .append(",\"levelSeed\":").append(levelSeed(level))
+                    .append('}');
+        }
+        out.write("{\"type\":\"spawner\",\"name\":" + jsonString(name)
+                + ",\"pos\":[0,64,0]"
+                + ",\"blocks\":" + blockArray(level.blocks)
+                + ",\"player\":" + (near ? "[0.5,64.0,0.5]" : "[0.5,64.0,30.5]")
+                + ",\"difficulty\":2"
+                + ",\"entity\":" + jsonString(type == EntityTypes.SKELETON ? "minecraft:skeleton"
+                        : type == EntityTypes.SPIDER ? "minecraft:spider"
+                        : type == EntityTypes.CAVE_SPIDER ? "minecraft:cave_spider"
+                        : type == EntityTypes.SILVERFISH ? "minecraft:silverfish"
+                        : "minecraft:zombie")
+                + ",\"delay\":1"
+                + ",\"spawnCount\":4,\"maxNearbyEntities\":6,\"spawnRange\":4"
+                + ",\"requiredPlayerRange\":16,\"minSpawnDelay\":200,\"maxSpawnDelay\":800"
+                + ",\"prePlace\":" + (cap ? 6 : 0)
+                + ",\"blockLight\":" + (lit ? 15 : -1)
+                + ",\"egg\":" + egg
+                + ",\"ticks\":" + ticks
+                + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
     private static void playEgg(Official official, Writer out, String name) throws Exception {
         // `_owned`：蛋有玩家主人，牛开着 AI，蛋碎之后再跑 OWNED_TICKS 刻看它恐慌逃跑。
         // `_owned`: a player owns the egg and the cow keeps its AI; run on after the
@@ -18928,6 +19061,14 @@ public final class MobOracle {
         /** 僵尸场景注入的天色 / 天气 / 环境属性。 */
         int injectedSkyDarken;
         boolean injectedRaining;
+        /** 刷怪笼对拍：注入方块光（-1 表示用缺省的 0），让光照规则挡住生成。 */
+        /// Spawner parity: injected block light (-1 means the default 0), to let the
+        /// light rule block spawning.
+        int injectedBlockLight = -1;
+        /** 刷怪笼对拍：生成的实体进 `tracked`，`MaxNearbyEntities` 计数才和官方一致。 */
+        /// Spawner parity: spawned entities also enter `tracked` so the
+        /// `MaxNearbyEntities` count matches the official one.
+        boolean spawnerScene;
         boolean injectedBrightOutside = true;
         int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
@@ -19166,6 +19307,14 @@ public final class MobOracle {
         public int getBrightness(LightLayer layer, BlockPos pos) {
             if (naturalScene != null) {
                 return layer == LightLayer.SKY ? naturalScene.sky() : naturalScene.block();
+            }
+            if (spawnerScene) {
+                // 假世界没有光照引擎：天空光 0，方块光按注入值（缺省 0）。
+                // The fake world has no light engine: sky 0, the injected block light.
+                return layer == LightLayer.BLOCK && injectedBlockLight >= 0 ? injectedBlockLight : 0;
+            }
+            if (layer == LightLayer.BLOCK && injectedBlockLight >= 0) {
+                return injectedBlockLight;
             }
             return super.getBrightness(layer, pos);
         }
@@ -19481,6 +19630,9 @@ public final class MobOracle {
             if (naturalScene != null && !worldGenRegion) {
                 tracked.add(entity);
             }
+            if (spawnerScene) {
+                tracked.add(entity);
+            }
             spawned.add(entity);
             return true;
         }
@@ -19540,6 +19692,10 @@ public final class MobOracle {
                 }
             }
             tracked.add(entity);
+            // 刷怪笼对拍：这一轮新加的实体同时进 `spawned`，供逐刻帧记录种类和位置。
+            if (spawnerScene) {
+                spawned.add(entity);
+            }
             return true;
         }
 
