@@ -56,6 +56,8 @@ pub mod mooshroom;
 pub mod motion;
 pub mod natural;
 pub mod natural_gen;
+pub mod nautilus;
+pub mod nautilus_ai;
 pub mod navigation;
 pub mod nbt;
 pub mod neutral;
@@ -68,7 +70,7 @@ pub mod pathfinding;
 pub mod patrol;
 pub mod phantom;
 pub mod phantom_spawner;
-mod pig;
+pub mod pig;
 pub mod pillager;
 pub mod polar_bear;
 pub mod rabbit;
@@ -218,13 +220,21 @@ pub enum MobType {
     ElderGuardian,
     /// 硫磺方块怪，`SulfurCube`。
     SulfurCube,
+    /// 鹦鹉螺，`Nautilus`。
+    ///
+    /// The `Nautilus`.
+    Nautilus,
+    /// 僵尸鹦鹉螺，`ZombieNautilus`。
+    ///
+    /// The `ZombieNautilus`.
+    ZombieNautilus,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 60] = [
+    pub const ALL: [Self; 62] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -285,6 +295,8 @@ impl MobType {
         Self::Guardian,
         Self::ElderGuardian,
         Self::SulfurCube,
+        Self::Nautilus,
+        Self::ZombieNautilus,
     ];
 
     /// 注册表 ID。
@@ -351,6 +363,8 @@ impl MobType {
             Self::Guardian => ids::GUARDIAN,
             Self::ElderGuardian => ids::ELDER_GUARDIAN,
             Self::SulfurCube => ids::SULFUR_CUBE,
+            Self::Nautilus => ids::NAUTILUS,
+            Self::ZombieNautilus => ids::ZOMBIE_NAUTILUS,
         }
     }
 
@@ -417,6 +431,8 @@ impl MobType {
             Self::Guardian => "minecraft:guardian",
             Self::ElderGuardian => "minecraft:elder_guardian",
             Self::SulfurCube => "minecraft:sulfur_cube",
+            Self::Nautilus => "minecraft:nautilus",
+            Self::ZombieNautilus => "minecraft:zombie_nautilus",
         }
     }
 
@@ -437,6 +453,7 @@ impl MobType {
             Self::Bee => Some(item_tags::BEE_FOOD),
             Self::Turtle => Some(item_tags::TURTLE_FOOD),
             Self::Axolotl => Some(item_tags::AXOLOTL_FOOD),
+            Self::Nautilus | Self::ZombieNautilus => Some(item_tags::NAUTILUS_FOOD),
             Self::Ocelot => Some(item_tags::OCELOT_FOOD),
             Self::Cat => Some(item_tags::CAT_FOOD),
             _ => None,
@@ -568,6 +585,7 @@ impl MobType {
             // Guardian / elder guardian: official `EntityTypes` dimensions and eye heights.
             (Self::Guardian, _) => (0.85, 0.85, 0.425),
             (Self::ElderGuardian, _) => (1.9975, 1.9975, 0.99875),
+            (Self::Nautilus | Self::ZombieNautilus, baby) => nautilus::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -632,6 +650,7 @@ impl MobType {
                 | Self::Endermite
                 | Self::Guardian
                 | Self::ElderGuardian
+                | Self::ZombieNautilus
         ) || self.is_skeleton()
     }
 
@@ -816,7 +835,10 @@ impl MobType {
         // 守卫者在 `#can_breathe_under_water` 里。
         // Guardians are in `#can_breathe_under_water`.
         squid::is_squid(self)
-            || matches!(self, Self::Guardian | Self::ElderGuardian)
+            || matches!(
+                self,
+                Self::Guardian | Self::ElderGuardian | Self::Nautilus | Self::ZombieNautilus
+            )
             || fish::is_fish(self)
             || turtle::is_turtle(self)
             // 幻翼在 `#undead` 里，`#can_breathe_under_water` 收了整个标签。
@@ -871,6 +893,13 @@ impl MobType {
         squid::is_squid(self) || matches!(self, Self::Dolphin)
     }
 
+    /// 这个种类是不是 `TamableAnimal`。
+    ///
+    /// Whether this kind is a `TamableAnimal`.
+    pub const fn is_tamable(self) -> bool {
+        tame::is_tamable(self)
+    }
+
     /// `Entity.isPushedByFluid()`：`AgeableWaterCreature` 覆盖成假。
     ///
     /// `Entity.isPushedByFluid()`, overridden to false by `AgeableWaterCreature`.
@@ -878,7 +907,8 @@ impl MobType {
         !(self.is_ageable_water_creature()
             || self.is_water_animal()
             || turtle::is_turtle(self)
-            || matches!(self, Self::Frog))
+            || matches!(self, Self::Frog)
+            || nautilus::is_nautilus(self))
     }
 
     /// 是不是官方 `Animal`（有求爱和喂食）：非怪物里除掉 `AgeableWaterCreature` 一支。
@@ -938,6 +968,8 @@ impl MobType {
                     // `Guardian.getMovementEmission()` = `EVENTS`.
                     | Self::Guardian
                     | Self::ElderGuardian
+                    | Self::Nautilus
+                    | Self::ZombieNautilus
             )
     }
 
@@ -969,6 +1001,7 @@ impl MobType {
                 self,
                 Self::Dolphin | Self::Axolotl | Self::Guardian | Self::ElderGuardian
             )
+            || nautilus::is_nautilus(self)
     }
 
     /// `Mob.xpReward`：牛由 `Animal.getBaseExperienceReward` 抽，僵尸固定 5。
@@ -1058,6 +1091,8 @@ impl MobType {
             Self::Guardian => "minecraft:entities/guardian",
             Self::ElderGuardian => "minecraft:entities/elder_guardian",
             Self::SulfurCube => "minecraft:entities/sulfur_cube",
+            Self::Nautilus => "minecraft:entities/nautilus",
+            Self::ZombieNautilus => "minecraft:entities/zombie_nautilus",
         }
     }
 
@@ -1076,6 +1111,10 @@ impl MobType {
         // `Guardian.getAmbientSoundInterval()` = 160.
         if matches!(self, Self::Guardian | Self::ElderGuardian) {
             160
+        } else if matches!(self, Self::Nautilus) {
+            // `Mob.getAmbientSoundInterval()` 的缺省 80：鹦鹉螺没有覆写。
+            // `Mob.getAmbientSoundInterval()`'s default 80: nautiluses do not override.
+            80
         } else if matches!(self, Self::Ocelot) {
             900
         } else if self.is_equine() {
@@ -1187,7 +1226,11 @@ impl MobType {
             Self::ZombieVillager => Some("minecraft:entity.zombie_villager.ambient"),
             // 守卫者的环境音分水中 / 岸上两套，由 `guardian::ambient_sound` 按 `isInWater` 选。
             // Guardian ambience has water / land variants picked by `guardian::ambient_sound`.
-            Self::Guardian | Self::ElderGuardian | Self::SulfurCube => None,
+            Self::Guardian
+            | Self::ElderGuardian
+            | Self::SulfurCube
+            | Self::Nautilus
+            | Self::ZombieNautilus => None,
         }
     }
 
@@ -1245,7 +1288,11 @@ impl MobType {
             Self::ZombieVillager => Some("minecraft:entity.zombie_villager.hurt"),
             // 守卫者的受伤音分水中 / 岸上两套，由 `guardian::hurt_sound` 按 `isInWater` 选。
             // Guardian hurt sounds have water / land variants picked by `guardian::hurt_sound`.
-            Self::Guardian | Self::ElderGuardian | Self::SulfurCube => None,
+            Self::Guardian
+            | Self::ElderGuardian
+            | Self::SulfurCube
+            | Self::Nautilus
+            | Self::ZombieNautilus => None,
         }
     }
 
@@ -1303,7 +1350,11 @@ impl MobType {
             Self::ZombieVillager => Some("minecraft:entity.zombie_villager.death"),
             // 守卫者的死亡音分水中 / 岸上两套，由 `guardian::death_sound` 按 `isInWater` 选。
             // Guardian death sounds have water / land variants picked by `guardian::death_sound`.
-            Self::Guardian | Self::ElderGuardian | Self::SulfurCube => None,
+            Self::Guardian
+            | Self::ElderGuardian
+            | Self::SulfurCube
+            | Self::Nautilus
+            | Self::ZombieNautilus => None,
         }
     }
 
@@ -1372,7 +1423,11 @@ impl MobType {
             Self::ZombieVillager => Some("minecraft:entity.zombie_villager.step"),
             // `Guardian.getMovementEmission()` = `EVENTS`：没有脚步声。
             // `Guardian.getMovementEmission()` = `EVENTS`: no step sound.
-            Self::Guardian | Self::ElderGuardian | Self::SulfurCube => None,
+            Self::Guardian
+            | Self::ElderGuardian
+            | Self::SulfurCube
+            | Self::Nautilus
+            | Self::ZombieNautilus => None,
         }
     }
 
@@ -1440,6 +1495,8 @@ impl MobType {
             Self::Guardian => items::GUARDIAN_SPAWN_EGG,
             Self::ElderGuardian => items::ELDER_GUARDIAN_SPAWN_EGG,
             Self::SulfurCube => items::SULFUR_CUBE_SPAWN_EGG,
+            Self::Nautilus => items::NAUTILUS_SPAWN_EGG,
+            Self::ZombieNautilus => items::ZOMBIE_NAUTILUS_SPAWN_EGG,
         }
     }
 
@@ -1506,6 +1563,8 @@ impl MobType {
             Self::Guardian => "entity.minecraft.guardian",
             Self::ElderGuardian => "entity.minecraft.elder_guardian",
             Self::SulfurCube => "entity.minecraft.sulfur_cube",
+            Self::Nautilus => "entity.minecraft.nautilus",
+            Self::ZombieNautilus => "entity.minecraft.zombie_nautilus",
         }
     }
 
@@ -1531,7 +1590,7 @@ impl MobType {
         use mc_bamboo_data::spawning::MobCategory;
         match self {
             Self::Squid => MobCategory::WaterCreature,
-            Self::Dolphin => MobCategory::WaterCreature,
+            Self::Dolphin | Self::Nautilus => MobCategory::WaterCreature,
             Self::Axolotl => MobCategory::Axolotls,
             Self::GlowSquid => MobCategory::UndergroundWaterCreature,
             Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => {
@@ -2592,6 +2651,10 @@ pub struct Mob {
     pub tame: tame::Tamable,
     pub wolf: wolf::Wolf,
     pub pig_sound_variant: pig::SoundVariant,
+    /// 猪的 `ItemBasedSteering`。
+    ///
+    /// The pig's `ItemBasedSteering`.
+    pub pig_steering: pig::Steering,
     /// 羊的 `DATA_WOOL_ID`：低 4 位颜色，第 5 位已剪毛。
     ///
     /// The sheep `DATA_WOOL_ID`: colour in the low four bits, bit 4 when sheared.
@@ -2750,6 +2813,10 @@ pub struct Mob {
     ///
     /// Sulfur-cube archetype values, swallowed block and fuse; default elsewhere.
     pub sulfur_cube: sulfur_cube::SulfurCubeState,
+    /// 鹦鹉螺的冲刺状态与僵尸鹦鹉螺的变种；别的生物恒为缺省值。
+    ///
+    /// Nautilus dash state and zombie-nautilus variant; default for other mobs.
+    pub nautilus: nautilus::NautilusState,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `Entity.needsSync`：这一刻 `jumpFromGround` 跳过，移动包要带上速度。
@@ -2963,6 +3030,7 @@ impl Mob {
             MobType::Guardian => guardian::attributes(false),
             MobType::ElderGuardian => guardian::attributes(true),
             MobType::SulfurCube => sulfur_cube::attributes(),
+            MobType::Nautilus | MobType::ZombieNautilus => nautilus::attributes(mob_type),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3040,7 +3108,9 @@ impl Mob {
             | MobType::Bat
             | MobType::Camel
             | MobType::CamelHusk
-            | MobType::Villager => GoalSelector::default(),
+            | MobType::Villager
+            | MobType::Nautilus
+            | MobType::ZombieNautilus => GoalSelector::default(),
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
             // alongside the brain.
@@ -3080,6 +3150,14 @@ impl Mob {
             // `AmphibiousPathNavigation(this, level)`。
             navigation.flags.amphibious = true;
         }
+        if nautilus::is_nautilus(mob_type) {
+            // `AbstractNautilus.createNavigation` = `WaterBoundPathNavigation`，
+            // 两参数构造（`allowBreaching = false`）。
+            //
+            // `AbstractNautilus.createNavigation` builds a two-argument
+            // `WaterBoundPathNavigation` with allowBreaching false.
+            navigation.flags.swim = Some(false);
+        }
         if guardian::is_guardian(mob_type) {
             // `Guardian.createNavigation` = `WaterBoundPathNavigation(this, level)`，
             // 两参数构造，`allowBreaching` 缺省为 false。
@@ -3099,7 +3177,9 @@ impl Mob {
             | MobType::Tadpole
             | MobType::Bat
             | MobType::Camel
-            | MobType::CamelHusk => GoalSelector::default(),
+            | MobType::CamelHusk
+            | MobType::Nautilus
+            | MobType::ZombieNautilus => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Ocelot => ocelot::target_goals(),
@@ -3237,6 +3317,7 @@ impl Mob {
                 // 守卫者必须在 `is_monster` 分支之前单列，否则水的代价不是 0。
                 // Guardians must precede the `is_monster` arm or water costs are not zero.
                 MobType::Guardian | MobType::ElderGuardian => guardian::malus(),
+                MobType::Nautilus | MobType::ZombieNautilus => nautilus::malus(),
                 _ if mob_type.is_monster() => Malus::monster(),
                 MobType::Chicken => chicken::malus(),
                 MobType::Enderman => enderman::malus(),
@@ -3296,6 +3377,7 @@ impl Mob {
             tame: tame::Tamable::default(),
             wolf: wolf::Wolf::default(),
             pig_sound_variant: pig::SoundVariant::Classic,
+            pig_steering: pig::Steering::default(),
             wool: 0,
             chicken_sound_variant: chicken::SoundVariant::Classic,
             egg_time: 0,
@@ -3337,6 +3419,7 @@ impl Mob {
             axolotl: axolotl::AxolotlState::new(),
             guardian: guardian::GuardianState::default(),
             sulfur_cube: sulfur_cube::SulfurCubeState::default(),
+            nautilus: nautilus::NautilusState::default(),
             events: Vec::new(),
             needs_sync: false,
             knockback_sync: false,
@@ -3506,6 +3589,9 @@ impl Mob {
             let (width, height, _) =
                 fish::dimensions(self.mob_type, self.fish.variant, self.fish.puff_state);
             return (width, height);
+        }
+        if self.mob_type == MobType::Villager && self.villager.sleeping_pos.is_some() {
+            return (0.2, 0.2);
         }
         let (width, height, _) = self.mob_type.dimensions(self.is_baby());
         (width, height)
@@ -3778,6 +3864,10 @@ pub struct MobPublic {
     pub wolf_sound_variant: i32,
     pub needs_sync: bool,
     pub pig_sound_variant: pig::SoundVariant,
+    /// 猪的 `DATA_BOOST_TIME`。
+    ///
+    /// The pig `DATA_BOOST_TIME`.
+    pub pig_boost_time: i32,
     pub wool: u8,
     pub chicken_sound_variant: chicken::SoundVariant,
     /// `Armadillo.ARMADILLO_STATE` 的网络 ID。
@@ -3837,6 +3927,11 @@ pub struct MobPublic {
     /// `Guardian.DATA_ID_MOVING` / `DATA_ID_ATTACK_TARGET`.
     pub guardian_moving: bool,
     pub guardian_attack_target: i32,
+    /// 鹦鹉螺的 `DASH` 布尔与僵尸鹦鹉螺的变种 ID。
+    ///
+    /// The nautilus `DASH` boolean and zombie-nautilus variant id.
+    pub nautilus_dashing: bool,
+    pub nautilus_variant: i32,
     /// `IronGolem.DATA_FLAGS_ID` / `SnowGolem.DATA_PUMPKIN_ID`，都是 BYTE。
     pub golem_flags: u8,
     /// 村民的 `VillagerData` 三项、`VillagerDataFinalized` 和 `DATA_UNHAPPY_COUNTER`。
@@ -3848,6 +3943,10 @@ pub struct MobPublic {
     pub villager_level: i32,
     pub villager_finalized: bool,
     pub villager_unhappy: i32,
+    /// `LivingEntity.SLEEPING_POS_ID`：睡在床上时的床头坐标。
+    ///
+    /// `LivingEntity.SLEEPING_POS_ID`: the bed head position while sleeping.
+    pub sleeping_pos: Option<BlockPos>,
     /// 村民的紧凑公开状态，只在 `MobType::Villager` 时有值，其余生物只占一个空指针。
     ///
     /// Compact public villager state; `Some` only for `MobType::Villager`, null for other mobs.
@@ -4000,6 +4099,7 @@ impl MobPublic {
             wolf_sound_variant: mob.wolf.sound_variant,
             needs_sync: mob.needs_sync,
             pig_sound_variant: mob.pig_sound_variant,
+            pig_boost_time: mob.pig_steering.boost_time_total,
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,
             armadillo_state: mob.armadillo.state.id(),
@@ -4022,6 +4122,8 @@ impl MobPublic {
             dark_ticks: mob.squid.dark_ticks,
             guardian_moving: mob.guardian.moving,
             guardian_attack_target: mob.guardian.attack_target,
+            nautilus_dashing: mob.nautilus.dashing,
+            nautilus_variant: mob.nautilus.variant,
             bat_flags: mob.bat.flags,
             golem_flags: if mob.mob_type == MobType::IronGolem {
                 mob.iron_golem.flags
@@ -4033,6 +4135,7 @@ impl MobPublic {
             villager_level: mob.villager.level,
             villager_finalized: mob.villager.finalized,
             villager_unhappy: mob.villager.unhappy,
+            sleeping_pos: mob.villager.sleeping_pos,
             villager: (mob.mob_type == MobType::Villager).then(|| {
                 Box::new(villager::VillagerPublic::of(
                     &mob.villager,
@@ -4122,6 +4225,9 @@ impl MobPublic {
                 fish::dimensions(self.mob_type, self.fish_variant, self.puff_state);
             return (width, height);
         }
+        if self.mob_type == MobType::Villager && self.sleeping_pos.is_some() {
+            return (0.2, 0.2);
+        }
         let (width, height, _) = self.mob_type.dimensions(self.baby);
         (width, height)
     }
@@ -4154,6 +4260,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         kind if kind.is_camel() => Some(Box::new(camel::brain())),
         MobType::Axolotl => Some(Box::new(axolotl::brain())),
         MobType::Villager => Some(Box::new(villager_ai::brain(false, 0))),
+        MobType::Nautilus | MobType::ZombieNautilus => Some(Box::new(nautilus_ai::brain(kind))),
         _ => None,
     }
 }

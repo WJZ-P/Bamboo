@@ -1402,6 +1402,15 @@ fn player_cases() -> Vec<(String, PlayerData)> {
         "player root vehicle without passengers".into(),
         simple_mount,
     ));
+    // 骑着上鞍的猪下线：用 Bamboo 自己存出来的 `RootVehicle`（猪的装备、血量、乘客），
+    // 官方一侧同样读回逐键比。
+    // Riding a saddled pig: Bamboo's own saved `RootVehicle` (equipment, health, passenger)
+    // read back and compared key by key.
+    if let Some(tag) = mc_bamboo_game::pig_riding::replay_pig_root_vehicle() {
+        let mut pig_mount = cases[0].1.clone();
+        pig_mount.root_vehicle = Some(tag);
+        cases.push(("player root vehicle saddled pig".into(), pig_mount));
+    }
     cases
 }
 

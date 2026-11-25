@@ -767,6 +767,43 @@ impl Level for RegionLevel<'_> {
         )
     }
 
+    fn poi_in_range(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        type_mask: u32,
+        occupancy: u8,
+    ) -> Vec<(u8, BlockPos)> {
+        let Some(occupancy) = crate::poi_query::occupancy(occupancy) else {
+            return Vec::new();
+        };
+        self.poi
+            .get_in_range(
+                |found| (type_mask & (1_u32 << found)) != 0,
+                center,
+                radius,
+                occupancy,
+            )
+            .into_iter()
+            .map(|r| (r.kind, r.pos))
+            .collect()
+    }
+
+    fn poi_take(&mut self, pos: BlockPos, type_mask: u32) -> bool {
+        self.poi
+            .take(
+                |found| (type_mask & (1_u32 << found)) != 0,
+                |_, p| p == pos,
+                pos,
+                1,
+            )
+            .is_some()
+    }
+
+    fn poi_release(&mut self, pos: BlockPos) -> bool {
+        self.poi.release(pos)
+    }
+
     fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
         self.poi
             .sections_to_village(mc_bamboo_world::light::SectionPos::of(pos))
@@ -1356,7 +1393,9 @@ impl Level for RegionLevel<'_> {
     /// `getEntitiesOfClass(LivingEntity)`. Players are ordered by `PlayerId`, which is not
     /// necessarily the entity-list order.
     fn dispenser_targets(&self) -> Vec<EquipTarget> {
-        self.players.values().map(equip_target).collect()
+        let mut targets: Vec<_> = self.players.values().map(equip_target).collect();
+        targets.extend(self.entities.iter_public().filter_map(mob_equip_target));
+        targets
     }
 
     /// 写进玩家物品栏。`Body` 和 `Saddle` 这套物品栏没有，返回 `None`。
@@ -1369,13 +1408,35 @@ impl Level for RegionLevel<'_> {
         component_slot: i32,
         stack: ItemStack,
     ) -> Option<u16> {
-        let player = self
+        if let Some(player) = self
             .players
             .values_mut()
-            .find(|player| player.id.0 == entity_id)?;
-        let slot =
-            crate::inventory::set_dispenser_slot(&mut player.inventory, component_slot, stack)?;
-        u16::try_from(slot).ok()
+            .find(|player| player.id.0 == entity_id)
+        {
+            let slot =
+                crate::inventory::set_dispenser_slot(&mut player.inventory, component_slot, stack)?;
+            return u16::try_from(slot).ok();
+        }
+        // 官方 `EquipmentDispenseItemBehavior` 给生物上装备：`setItemSlot`、
+        // `setGuaranteedDrop` 和 `setPersistenceRequired`。鞍是 7 号装备槽。
+        //
+        // Vanilla `EquipmentDispenseItemBehavior` equips mobs: `setItemSlot`,
+        // `setGuaranteedDrop` and `setPersistenceRequired`. Saddle is slot 7.
+        if component_slot != 7 || entity_id < mc_bamboo_blocks::entity::FIRST_ENTITY_ID {
+            return None;
+        }
+        self.entities.with_mut(entity_id, |entity| {
+            entity.with_mob(|_, mob| {
+                mob.equipment.set(
+                    mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle,
+                    stack.clone(),
+                );
+                mob.equipment
+                    .set_drop_chance(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle, 2.0);
+                mob.persistence_required = true;
+            })
+        })?;
+        Some(0)
     }
 
     /// 按区块统计三个方块侧阶段的触发耗时；开关关着时 `chunk_profiler` 是 `None`，
@@ -1393,6 +1454,42 @@ impl Level for RegionLevel<'_> {
         self.partition_profiler
             .is_some_and(crate::profiler::Profiler::partition_enabled)
     }
+}
+
+/// 一只生物能被发射器看到的装备；只有猪的鞍槽支持发射器装填。
+///
+/// The equipment a dispenser can see on a mob; only a pig's saddle slot is supported.
+fn mob_equip_target(public: &mc_bamboo_blocks::entity::EntityPublic) -> Option<EquipTarget> {
+    let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind else {
+        return None;
+    };
+    if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::Pig || mob.baby {
+        return None;
+    }
+    let (width, height) = public.kind.dimensions();
+    let half = f64::from(width) / 2.0;
+    let mut equipment: [Option<ItemStack>; 8] = std::array::from_fn(|_| None);
+    equipment[7] = Some(
+        mob.equipment
+            .iter()
+            .find(|(slot, _)| *slot == mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)
+            .map(|(_, stack)| stack.clone())
+            .unwrap_or_else(ItemStack::empty),
+    );
+    Some(EquipTarget {
+        entity_id: public.uid,
+        bounds: Aabb::new(
+            public.position.x - half,
+            public.position.y,
+            public.position.z - half,
+            public.position.x + half,
+            public.position.y + f64::from(height),
+            public.position.z + half,
+        ),
+        spectator: false,
+        entity_type: mob.mob_type.entity_type(),
+        equipment,
+    })
 }
 
 /// 一名玩家能被发射器看到的装备。身体和鞍是 `None`。
