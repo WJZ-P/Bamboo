@@ -11,13 +11,13 @@
 //! and a config. Per-tick logic, key insertion, reward ejection and persistence
 //! live here; world side effects go through [`VaultContext`].
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{components::archive::slots, item::ItemStack};
 
 use crate::{
     archive::tag::{self, field, put},
-    state::VaultState,
+    state::{OMINOUS, VAULT_STATE, VaultState},
 };
 
 /// 官方 `VaultConfig.DEFAULT`。
@@ -53,6 +53,8 @@ pub enum VaultSound {
     RejectRewardedPlayer,
     OpenShutter,
     CloseShutter,
+    /// `ejectResultItem` 每弹一件时播（音量 1、音高随进度变化）。
+    EjectItem,
 }
 
 /// `VaultConfig`：五个字段，缺省取 [`DEFAULT`] 那份。
@@ -487,7 +489,7 @@ impl Vault {
         range: f64,
         ctx: &mut C,
     ) -> VaultState {
-        let detected = ctx.connected_players(pos, range, &self.server.rewarded_players);
+        let detected = ctx.connected_players(pos, range);
         self.shared
             .update_connected_players(detected, &self.server.rewarded_players);
         self.server
@@ -540,7 +542,7 @@ impl Vault {
             self.play_insert_fail_sound(pos, VaultSound::RejectRewardedPlayer, ctx);
             return false;
         }
-        let items = ctx.resolve_reward(pos, player, key);
+        let items = ctx.resolve_reward(pos, player, key, &self.config.loot_table);
         if items.is_empty() {
             return false;
         }
@@ -548,11 +550,7 @@ impl Vault {
         self.unlock(pos, ominous, items, ctx);
         self.server.add_to_rewarded_players(player);
         // 解锁后立刻按失效范围刷新已连接玩家（把刚领奖的玩家排除）。
-        let detected = ctx.connected_players(
-            pos,
-            self.config.deactivation_range,
-            &self.server.rewarded_players,
-        );
+        let detected = ctx.connected_players(pos, self.config.deactivation_range);
         self.shared
             .update_connected_players(detected, &self.server.rewarded_players);
         true
@@ -672,10 +670,17 @@ fn uuid_from_tag(tag: &Tag) -> Option<[u8; 16]> {
 /// 声音、消耗钥匙）由调用方落地；缺省实现让纯逻辑单测不依赖世界。
 pub trait VaultContext {
     fn game_time(&self) -> i64;
-    /// `PlayerDetector.detect`（`INCLUDING_CREATIVE_PLAYERS`、`lineOfSight=false`）。
-    fn connected_players(&self, pos: BlockPos, range: f64, rewarded: &[[u8; 16]]) -> Vec<[u8; 16]>;
+    /// `PlayerDetector.detect`（`INCLUDING_CREATIVE_PLAYERS`、`lineOfSight=false`）返回的
+    /// 范围内玩家 UUID；领过奖的过滤由状态机做。
+    fn connected_players(&self, pos: BlockPos, range: f64) -> Vec<[u8; 16]>;
     /// `resolveItemsToEject`：VAULT 战利品表（含玩家 luck / this_entity / tool）。
-    fn resolve_reward(&self, pos: BlockPos, player: [u8; 16], key: &ItemStack) -> Vec<ItemStack>;
+    fn resolve_reward(
+        &mut self,
+        pos: BlockPos,
+        player: [u8; 16],
+        key: &ItemStack,
+        loot_table: &str,
+    ) -> Vec<ItemStack>;
     /// `getRandomDisplayItemFromLootTable`：用世界随机源从表里取一件。
     fn random_display_item(&mut self, loot_table: &str, pos: BlockPos) -> ItemStack;
     /// `ejectResultItem`：`spawnItem` + `levelEvent(3017)` + 弹出声音。
@@ -685,6 +690,163 @@ pub trait VaultContext {
     fn set_block_state(&mut self, state: VaultState);
     /// 消耗玩家手里的钥匙（`ItemStack.consume`）。
     fn consume_key(&mut self, player: [u8; 16], count: i32);
+}
+
+/// [`VaultContext`] 在 [`crate::World`] 上的实现。能直接做的读写（时间、方块状态、
+/// 世界事件、声音、掉落物）就地做；需要游戏层数据的（玩家探测、VAULT 战利品表、
+/// 展示物品随机、消耗钥匙）转发给 [`crate::Level`] 钩子。
+///
+/// The `VaultContext` implementation on `World`: direct effects are done in place,
+/// while game-layer data goes through `Level` hooks.
+pub struct VaultWorld<'a, 'w> {
+    world: &'a mut crate::World<'w>,
+    pos: BlockPos,
+}
+
+impl<'a, 'w> VaultWorld<'a, 'w> {
+    pub fn new(world: &'a mut crate::World<'w>, pos: BlockPos) -> Self {
+        Self { world, pos }
+    }
+}
+
+impl VaultContext for VaultWorld<'_, '_> {
+    fn game_time(&self) -> i64 {
+        self.world.game_time()
+    }
+
+    fn connected_players(&self, pos: BlockPos, range: f64) -> Vec<[u8; 16]> {
+        self.world.vault_players(pos, range)
+    }
+
+    fn resolve_reward(
+        &mut self,
+        pos: BlockPos,
+        player: [u8; 16],
+        key: &ItemStack,
+        loot_table: &str,
+    ) -> Vec<ItemStack> {
+        self.world
+            .vault_resolve_reward(pos, player, key, loot_table)
+    }
+
+    fn random_display_item(&mut self, loot_table: &str, pos: BlockPos) -> ItemStack {
+        self.world.vault_random_display_item(loot_table, pos)
+    }
+
+    fn eject_item(&mut self, pos: BlockPos, stack: &ItemStack, progress: f32) {
+        // `DefaultDispenseItemBehavior.spawnItem(level, stack, 2, UP,
+        // atBottomCenterOf(pos).relative(UP, 1.2))`。速度与试炼刷怪笼弹奖励同源。
+        let velocity = {
+            let random = self.world.random();
+            let _g = random.next_double() * 0.1 + 0.2;
+            let spread = 0.017_227_5 * 2.0;
+            Vec3::new(
+                random.triangle(0.0, spread),
+                random.triangle(0.2, spread),
+                random.triangle(0.0, spread),
+            )
+        };
+        let position = Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 1.2 - 0.125,
+            f64::from(pos.z) + 0.5,
+        );
+        let uid = self
+            .world
+            .spawn_entity(crate::entity::Entity::ground_item(position, stack.clone()));
+        self.world
+            .with_entity_mut(uid, &mut |entity| entity.delta = velocity);
+        self.world.level_event(level_event::EJECT_ITEM, pos, 0);
+        // `playSound(null, pos, VAULT_EJECT_ITEM, BLOCKS, 1.0, 0.8+0.4*progress)`。
+        self.world.play_block_sound(
+            pos,
+            vault_sound(VaultSound::EjectItem),
+            1.0,
+            0.8 + 0.4 * progress,
+        );
+    }
+
+    fn level_event(&mut self, event: i32, pos: BlockPos, data: i32) {
+        self.world.level_event(event, pos, data);
+    }
+
+    fn sound(&mut self, pos: BlockPos, sound: VaultSound) {
+        self.world
+            .play_block_sound(pos, vault_sound(sound), 1.0, 1.0);
+    }
+
+    fn set_block_state(&mut self, state: VaultState) {
+        let block = self.world.block_state(self.pos);
+        self.world
+            .set_block_and_update(self.pos, block.with(VAULT_STATE, state));
+    }
+
+    fn consume_key(&mut self, player: [u8; 16], count: i32) {
+        self.world.vault_consume_key(player, count);
+    }
+}
+
+/// [`VaultSound`] 到 `SoundEvent` 注册表 ID 的映射。
+fn vault_sound(sound: VaultSound) -> u16 {
+    let name = match sound {
+        VaultSound::InsertItem => "minecraft:block.vault.insert_item",
+        VaultSound::InsertItemFail => "minecraft:block.vault.insert_item_fail",
+        VaultSound::RejectRewardedPlayer => "minecraft:block.vault.reject_rewarded_player",
+        VaultSound::OpenShutter => "minecraft:block.vault.open_shutter",
+        VaultSound::CloseShutter => "minecraft:block.vault.close_shutter",
+        VaultSound::EjectItem => "minecraft:block.vault.eject_item",
+    };
+    mc_bamboo_data::sounds::sound_event(name)
+}
+
+/// 挂在 `minecraft:vault` 上的活方块实体，逐刻跑 [`Vault::tick`]。
+///
+/// The live block entity of `minecraft:vault`, running `Vault::tick` each tick.
+pub struct VaultBlockEntity {
+    pos: BlockPos,
+    vault: Vault,
+}
+
+impl VaultBlockEntity {
+    pub fn new(pos: BlockPos, vault: Vault) -> Self {
+        Self { pos, vault }
+    }
+
+    /// 对拍 / 交互用：读出当前状态机。
+    pub fn vault(&self) -> &Vault {
+        &self.vault
+    }
+
+    /// 交互（插钥匙）用：读出当前状态机的可变引用。
+    pub fn vault_mut(&mut self) -> &mut Vault {
+        &mut self.vault
+    }
+}
+
+impl crate::BlockEntity for VaultBlockEntity {
+    fn pos(&self) -> BlockPos {
+        self.pos
+    }
+
+    fn tick(&mut self, world: &mut crate::World) {
+        let block = world.block_state(self.pos);
+        self.vault.state = block.get(VAULT_STATE);
+        let ominous = block.get(OMINOUS);
+        let mut ctx = VaultWorld::new(world, self.pos);
+        self.vault.tick(self.pos, ominous, &mut ctx);
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
+        Ok(self.vault.additional())
+    }
 }
 
 #[cfg(test)]
@@ -715,19 +877,15 @@ mod tests {
         fn game_time(&self) -> i64 {
             self.time
         }
-        fn connected_players(
-            &self,
-            _pos: BlockPos,
-            _range: f64,
-            _rewarded: &[[u8; 16]],
-        ) -> Vec<[u8; 16]> {
+        fn connected_players(&self, _pos: BlockPos, _range: f64) -> Vec<[u8; 16]> {
             self.players.clone()
         }
         fn resolve_reward(
-            &self,
+            &mut self,
             _pos: BlockPos,
             _player: [u8; 16],
             _key: &ItemStack,
+            _loot_table: &str,
         ) -> Vec<ItemStack> {
             vec![loot_item(900), loot_item(901)]
         }

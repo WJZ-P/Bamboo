@@ -25,9 +25,10 @@ use crate::{
             beehive_entity::BeehiveEntity, spawner::SpawnerBlockEntity,
         },
         trial_spawner::{TrialSpawner, TrialSpawnerBlockEntity},
+        vault::{Vault, VaultBlockEntity},
     },
     hopper::HopperEntity,
-    state::{OMINOUS, TRIAL_SPAWNER_STATE},
+    state::{OMINOUS, TRIAL_SPAWNER_STATE, VAULT_STATE, VaultState},
 };
 
 /// Bamboo 会实例化的会动的方块实体类型。读盘还认 [`PassiveKind`] 那四种只保留
@@ -110,6 +111,15 @@ pub fn create_block_entity(
     state: BlockState,
     tag: &Tag,
 ) -> Result<Option<Box<dyn BlockEntity>>> {
+    if id == "minecraft:vault" {
+        // 官方 `loadAdditional`：`state` 来自方块状态，三份 codec 读同一条目。
+        // The state comes from the block state; the three codecs read one entry.
+        let vault = Vault::read(
+            tag,
+            state.try_get(VAULT_STATE).unwrap_or(VaultState::Inactive),
+        );
+        return Ok(Some(Box::new(VaultBlockEntity::new(pos, vault))));
+    }
     if let Some(passive) = PassiveKind::from_name(id) {
         return Ok(Some(Box::new(PassiveBlockEntity::read(
             passive, pos, state, tag,

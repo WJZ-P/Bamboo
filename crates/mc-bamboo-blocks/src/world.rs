@@ -3734,6 +3734,39 @@ impl<'a> World<'a> {
         self.level.trial_spawner_has_display_entity()
     }
 
+    // 宝库的世界副作用，转发给 [`Level`] 的钩子；游戏层覆盖成真实现。
+
+    /// 见 [`Level::vault_players`]。
+    pub fn vault_players(&self, pos: BlockPos, range: f64) -> Vec<[u8; 16]> {
+        self.level.vault_players(pos, range)
+    }
+
+    /// 见 [`Level::vault_resolve_reward`]。
+    pub fn vault_resolve_reward(
+        &mut self,
+        pos: BlockPos,
+        player: [u8; 16],
+        key: &mc_bamboo_protocol::item::ItemStack,
+        loot_table: &str,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.level
+            .vault_resolve_reward(pos, player, key, loot_table)
+    }
+
+    /// 见 [`Level::vault_random_display_item`]。
+    pub fn vault_random_display_item(
+        &mut self,
+        loot_table: &str,
+        pos: BlockPos,
+    ) -> mc_bamboo_protocol::item::ItemStack {
+        self.level.vault_random_display_item(loot_table, pos)
+    }
+
+    /// 见 [`Level::vault_consume_key`]。
+    pub fn vault_consume_key(&mut self, player: [u8; 16], count: i32) {
+        self.level.vault_consume_key(player, count);
+    }
+
     /// `level.getBiome(pos)` 的注册表 ID。
     pub fn biome_id(&self, pos: BlockPos) -> i32 {
         self.level.biome_id(pos)

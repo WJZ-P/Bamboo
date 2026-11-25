@@ -1338,6 +1338,37 @@ pub trait Level: LevelSideState + LevelEntities {
         true
     }
 
+    // 宝库的世界副作用。方块层只跑状态机；需要游戏层数据的（玩家探测、VAULT
+    // 战利品表、世界随机源、玩家物品栏）由游戏层实现，缺省是「没有玩家 / 空奖励 /
+    // 不消耗」，只读测试世界和方块 oracle 走这一条。
+
+    /// `PlayerDetector.detect` 的候选玩家：`pos` 附近 `range` 格内的玩家 UUID
+    /// （`INCLUDING_CREATIVE_PLAYERS`、`lineOfSight=false`）。默认没有玩家。
+    fn vault_players(&self, _pos: BlockPos, _range: f64) -> Vec<[u8; 16]> {
+        Vec::new()
+    }
+
+    /// `resolveItemsToEject`：按 VAULT 战利品表（玩家 luck / this_entity / 钥匙 tool）
+    /// 弹出一组物品。默认空。
+    fn vault_resolve_reward(
+        &mut self,
+        _pos: BlockPos,
+        _player: [u8; 16],
+        _key: &ItemStack,
+        _loot_table: &str,
+    ) -> Vec<ItemStack> {
+        Vec::new()
+    }
+
+    /// `getRandomDisplayItemFromLootTable`：用世界随机源从表里取一件展示物品。
+    /// 默认空。
+    fn vault_random_display_item(&mut self, _loot_table: &str, _pos: BlockPos) -> ItemStack {
+        ItemStack::empty()
+    }
+
+    /// `ItemStack.consume`：消耗玩家手里的 `count` 把钥匙。默认不消耗。
+    fn vault_consume_key(&mut self, _player: [u8; 16], _count: i32) {}
+
     /// 现实中的本地日期，不是世界时间。
     ///
     /// The local calendar date, independent of the world clock.
