@@ -285,6 +285,13 @@ fn apply_action(region: &mut Region, id: PlayerId, effect: i32, action: EffectAc
         EffectAction::AbsorptionEnded => {
             clear(region, id, Some(effect));
         }
+        // 不祥之兆 / 袭击之兆的副作用要访问世界，交给袭击模块。
+        EffectAction::BadOmenCheck(amplifier) => {
+            crate::raid::bad_omen_check(region, id, amplifier);
+        }
+        EffectAction::RaidOmenTrigger(amplifier) => {
+            crate::raid::raid_omen_expire(region, id, amplifier);
+        }
     }
 }
 

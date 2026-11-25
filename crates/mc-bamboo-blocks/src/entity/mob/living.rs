@@ -1002,6 +1002,12 @@ fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             EffectAction::AbsorptionEnded => {
                 mob.effects.remove(tick.effect);
             }
+            EffectAction::BadOmenCheck(_) | EffectAction::RaidOmenTrigger(_) => {
+                // 不祥之兆 / 袭击之兆只对玩家有意义（进村、建袭击），
+                // 生物侧不处理，落地在 game 层的玩家效果里。
+                // Bad/raid omen only matter for players (village entry, starting
+                // a raid); mobs ignore them, handled in the game-layer effects.
+            }
         }
     }
     for (kind, amount) in hurts {

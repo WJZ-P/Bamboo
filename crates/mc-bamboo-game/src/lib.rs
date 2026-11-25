@@ -109,6 +109,7 @@ pub mod player_weapon;
 pub mod poi_query;
 mod pos_map;
 mod profiler;
+mod raid;
 pub mod region;
 #[cfg(feature = "oracle-samples")]
 mod replay_players;

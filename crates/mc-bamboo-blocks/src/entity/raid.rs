@@ -447,6 +447,44 @@ impl Raids {
         id
     }
 
+    /// 拆岛：把中心落在 `inside` 区块里的袭击搬到返回的新表，其余留在本表。
+    /// 一场袭击整个跟着它的中心走；两岛共享 `next_id` 起点，全局计数在存盘
+    /// 汇总时统一（各岛运行时只看自己的表，id 暂时重复不影响查找）。
+    ///
+    /// Island split: move raids whose center is `inside` into the returned table,
+    /// keeping the rest. A raid moves whole with its center; both islands share
+    /// the `next_id` start, and the save rolls every island into one global
+    /// counter. Each island only reads its own map at runtime.
+    pub fn split_off(&mut self, inside: impl Fn(&BlockPos) -> bool) -> Self {
+        let mut moved = std::collections::BTreeMap::new();
+        let mut staying = std::collections::BTreeMap::new();
+        for (id, raid) in std::mem::take(&mut self.raids) {
+            if inside(&raid.center) {
+                moved.insert(id, raid);
+            } else {
+                staying.insert(id, raid);
+            }
+        }
+        self.raids = staying;
+        Self {
+            raids: moved,
+            next_id: self.next_id,
+            tick: self.tick,
+        }
+    }
+
+    /// 合岛：把另一张表的袭击并进来，给它们重新分配不冲突的 id。别的全局计数
+    /// （`next_id` / `tick`）以吸收方为准，存盘汇总时再统一。
+    ///
+    /// Island merge: absorb another table's raids, reassigning collision-free ids.
+    /// The absorber's global counters win; the save unifies them.
+    pub fn absorb(&mut self, other: Self) {
+        for raid in other.raids.into_values() {
+            let id = self.unique_id();
+            self.raids.insert(id, raid);
+        }
+    }
+
     /// `getNearbyRaid(pos, radiusSqr)`：active 且中心距离平方小于半径的最近一场，
     /// 返回它的 id。半径参数本身就是平方值（官方 `ServerLevel.getRaidAt` 传
     /// `VALID_RAID_RADIUS_SQR`）。
