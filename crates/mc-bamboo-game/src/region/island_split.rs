@@ -663,6 +663,7 @@ impl Region {
             // Vanilla has one spawner; a split continues both from the same countdown,
             // and a merge keeps the absorber's.
             phantom_spawner: self.phantom_spawner,
+            wandering_trader_spawner: self.wandering_trader_spawner,
         })
     }
 
@@ -840,6 +841,7 @@ impl Region {
             dirty,
             sleep: _,
             phantom_spawner: _,
+            wandering_trader_spawner: _,
             pending_triggers,
             sound_effects: _,
         } = other;

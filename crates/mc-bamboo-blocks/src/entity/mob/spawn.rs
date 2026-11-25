@@ -41,6 +41,10 @@ pub enum SpawnReason {
     ///
     /// `EntitySpawnReason.PATROL`: a patrol from `PatrolSpawner`.
     Patrol,
+    /// `EntitySpawnReason.EVENT`：`WanderingTraderSpawner` 刷出来的商人和行商羊驼。
+    ///
+    /// `EntitySpawnReason.EVENT`: traders and llamas from `WanderingTraderSpawner`.
+    Event,
     /// `EntitySpawnReason.STRUCTURE`：结构生成。
     ///
     /// `EntitySpawnReason.STRUCTURE`: structure spawning.

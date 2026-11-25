@@ -142,6 +142,7 @@ impl SaveSession {
             raids: read_saved_data(&dir, "minecraft:raids")
                 .map(|tag| mc_bamboo_blocks::entity::raid::Raids::from_tag(&tag))
                 .unwrap_or_default(),
+            wandering_trader: read_saved_data(&dir, "minecraft:wandering_trader"),
             command_storage: read_command_storage(&dir),
         };
         let loaded_level = matches!(loaded.source, LevelSource::Primary | LevelSource::Fallback);
@@ -273,6 +274,15 @@ impl SaveSession {
         // `WorldGenSettings.CODEC`: flat writes `minecraft:flat` + layers, noise
         // worlds write `minecraft:noise` + a settings id. An official server
         // reopening the world uses the same generator and the fixed seed.
+        // `WanderingTraderData.TYPE`：全局一份 `data/minecraft/wandering_trader.dat`。
+        // `WanderingTraderData.TYPE`: one global `data/minecraft/wandering_trader.dat`.
+        files.push(EncodedFile {
+            path: self.dir.saved_data("minecraft:wandering_trader"),
+            backup: None,
+            bytes: encode_saved_data(&crate::save_data::wandering_trader_tag(
+                global.wandering_trader_data(),
+            ))?,
+        });
         files.push(EncodedFile {
             path: self.dir.saved_data("minecraft:world_gen_settings"),
             backup: None,
