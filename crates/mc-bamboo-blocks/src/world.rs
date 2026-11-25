@@ -4,12 +4,15 @@
 
 use std::{borrow::BorrowMut, collections::VecDeque};
 
-use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, mth, sign::SignContent};
+use mc_bamboo_core::{
+    BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3, mth, sign::SignContent,
+};
 use mc_bamboo_data::{Block, BlockAncestor, CollisionShapeKind, blocks, sounds};
 use mc_bamboo_protocol::item::ItemStack;
 use tracing::{error, warn};
 
 use crate::{
+    InteractionResult,
     behaviour::machines::{PistonMoving, ShulkerBoxEntity, open_support_shape},
     block_entity::{self, BlockEntity, BlockEvent},
     context::BlockHit,
@@ -3821,6 +3824,12 @@ impl<'a> World<'a> {
         let now = self.game_time();
         let outcome = entity
             .with_mob(|me, mob| {
+                // `Entity.interact` 的拴绳分支在 `mobInteract` 之前。
+                if let Some(outcome) =
+                    crate::entity::mob::interact::leash_interact(self, me, mob, request)
+                {
+                    return outcome;
+                }
                 crate::entity::mob::interact::interact(
                     me,
                     mob,
@@ -3891,7 +3900,49 @@ impl<'a> World<'a> {
         outcome
     }
 
-    /// 剪毛 / 下蛋这类实体战利品表的掉落，见 [`Level::entity_loot_drops`]。
+    /// `LeashFenceKnotEntity.interact`：剪刀剪断结上所有绳子，或把玩家牵着的生物拴到
+    /// 结上 / 把结上的生物解回玩家。
+    ///
+    /// `LeashFenceKnotEntity.interact`: shear every rope off the knot, or transfer the
+    /// player's mobs to the knot / the knot's mobs back to the player.
+    pub fn interact_knot(
+        &mut self,
+        id: i32,
+        player_uid: i32,
+        player_uuid: [u8; 16],
+        held: &ItemStack,
+        hand: Hand,
+        sneaking: bool,
+    ) -> InteractionResult {
+        let Some(entity) = self.level.take_entity(id) else {
+            return InteractionResult::Pass;
+        };
+        let crate::entity::EntityKind::LeashKnot(knot) = entity.kind else {
+            self.level.put_entity(entity);
+            return InteractionResult::Pass;
+        };
+        let pos = knot.pos;
+        self.level.put_entity(entity);
+
+        // 剪刀分支：`shearOffAllLeashConnections` → `dropAllLeashConnections`。
+        if held.item == mc_bamboo_data::items::SHEARS
+            && crate::entity::leash_knot::drop_all_leashed_to(self, id)
+        {
+            crate::durability::hurt_hand(self, hand, 1);
+            self.play_sound(
+                crate::entity::leash_knot::knot_position(pos),
+                mc_bamboo_data::sound_event("minecraft:item.shears.snip"),
+                sounds::PLAYERS,
+                1.0,
+                1.0,
+                false,
+            );
+            return InteractionResult::Success;
+        }
+        crate::entity::leash_knot::interact(self, id, pos, player_uid, player_uuid, sneaking)
+    }
+
+    /// 剪毛 / 下蛋这类实体战利品表的掉落，见 [`Level::entity_loot_drops`].
     ///
     /// Shearing or egg-laying loot drops; see [`Level::entity_loot_drops`].
     pub(crate) fn entity_loot_drops(

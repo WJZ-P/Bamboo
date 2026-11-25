@@ -95,7 +95,7 @@ fn snapshot(region: &Region, id: PlayerId) -> Option<Snapshot> {
         id,
         entity_id: player.id.0,
         game_mode: player.game_mode,
-        actor: actor_of(player),
+        actor: actor_of(player, id),
         eye_height: player.eye_height(),
         on_ground: player.on_ground,
         mining: player.mining,

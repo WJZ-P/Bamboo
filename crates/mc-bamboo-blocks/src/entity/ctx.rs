@@ -434,6 +434,17 @@ pub struct PlayerView {
     ///
     /// `Entity.getDeltaMovement()`, read by witches to lead thrown potions.
     pub delta: Vec3,
+    /// `Entity.getBbWidth()`。玩家碰撞盒宽恒 0.6。
+    ///
+    /// `Entity.getBbWidth()`. A player's box is always 0.6 wide.
+    pub width: f32,
+    /// `Entity.getBbHeight()`。成年玩家碰撞盒高恒 1.8：官方 `getDimensions(Pose)`
+    /// 只有 `SLEEPING` 缩到 0.2×0.2，潜行 / 游泳只改眼高、不改碰撞盒。
+    ///
+    /// `Entity.getBbHeight()`. An adult player's box is always 1.8 tall: vanilla
+    /// `getDimensions(Pose)` only shrinks `SLEEPING` to 0.2×0.2; crouching and
+    /// swimming change the eye height, not the box.
+    pub height: f32,
     pub eye_height: f32,
     /// `LivingEntity.getHealth()`，女巫选毒药还是伤害药水时读它。
     ///
@@ -1126,6 +1137,20 @@ pub enum Command {
     DropItem {
         stack: ItemStack,
     },
+    /// `Leashable.dropLeash` / `setLeashedTo` 的 `notifyLeasheeRemoved`：旧牵引者是
+    /// 拴绳结且没有生物还拴着它时，结消失。
+    ///
+    /// `notifyLeasheeRemoved` from `Leashable.dropLeash` / `setLeashedTo`: the old
+    /// holder is a fence knot and no mob is left tied to it, so the knot vanishes.
+    NotifyLeasheeRemoved(EntityUid),
+    /// `LeashFenceKnotEntity.dropItem`：栅栏没了，结消失时放 `LEAD_UNTIED`（只放音、
+    /// 不掉拴绳，26.3 就是这样）。
+    ///
+    /// `LeashFenceKnotEntity.dropItem`: play `LEAD_UNTIED` when the fence is gone.
+    /// Sound only, no item drop, matching 26.3.
+    LeashKnotUntied {
+        position: Vec3,
+    },
     /// `ThrownTrident` 主人不可接受时的 `spawnAtLocation(stack, 0.1f)`：比通用
     /// `DropItem` 多抬高 0.1 格（`(double) 0.1f`）。
     ///
@@ -1701,6 +1726,19 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             super::mob::raider::apply_patrol_target(world, &others, target);
         }
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
+        Command::NotifyLeasheeRemoved(holder) => {
+            super::leash_knot::notify_leashee_removed(world, holder);
+        }
+        Command::LeashKnotUntied { position } => {
+            world.play_sound(
+                position,
+                mc_bamboo_data::sound_event("minecraft:item.lead.untied"),
+                mc_bamboo_data::sounds::NEUTRAL,
+                1.0,
+                1.0,
+                false,
+            );
+        }
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
         }

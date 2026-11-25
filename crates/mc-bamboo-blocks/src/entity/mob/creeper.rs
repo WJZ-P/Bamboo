@@ -474,6 +474,7 @@ mod tests {
             held: mc_bamboo_protocol::item::ItemStack::new(item, 1),
             creative: false,
             position: Vec3::default(),
+            player_height: 1.8,
             sneaking: false,
             difficulty: 2,
         };

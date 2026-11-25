@@ -132,6 +132,10 @@ pub enum KindPublic {
     ExperienceOrb {
         value: i32,
     },
+    /// 拴绳结：同步只需要它的位置（`add_entity` 的 data 是 0）。
+    LeashKnot {
+        pos: BlockPos,
+    },
     /// 闪电：客户端要 `seed`、`life` 和闪光次数。
     ///
     /// A lightning bolt: the client reads its seed, life and remaining flashes.
@@ -161,6 +165,7 @@ impl KindPublic {
             Self::Tnt { .. } => mc_bamboo_data::registries::entity_type::TNT,
             Self::Item { .. } => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb { .. } => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
+            Self::LeashKnot { .. } => mc_bamboo_data::registries::entity_type::LEASH_KNOT,
             Self::Arrow(arrow) => arrow.variant.entity_type(),
             Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(egg) => egg.kind.entity_type(),
@@ -174,6 +179,9 @@ impl KindPublic {
     pub fn dimensions(&self) -> (f32, f32) {
         if let Self::Mob(mob) = self {
             return mob.dimensions();
+        }
+        if let Self::LeashKnot { .. } = self {
+            return (0.375, 0.5);
         }
         let facts = &entity_types::FACTS[self.entity_type() as usize];
         (facts.width, facts.height)
@@ -232,6 +240,8 @@ pub enum KindState {
     Item(ItemState),
     /// 经验球自己的字段（年龄、健康、数量、跟随的玩家）。
     ExperienceOrb(super::ExperienceOrb),
+    /// 拴绳结的全部状态；公开的那一半就是它本身。
+    LeashKnot(super::LeashKnot),
     /// 闪电的全部状态，公开的那一半就是它本身。
     LightningBolt(super::lightning::LightningBolt),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
@@ -357,6 +367,9 @@ impl EntityRow {
                 orb.value = value;
                 EntityKind::ExperienceOrb(orb)
             }
+            (KindPublic::LeashKnot { pos: _ }, KindState::LeashKnot(knot)) => {
+                EntityKind::LeashKnot(knot)
+            }
             (KindPublic::Arrow(_), KindState::Arrow(arrow)) => EntityKind::Arrow(arrow),
             (KindPublic::LlamaSpit(_), KindState::LlamaSpit(spit)) => EntityKind::LlamaSpit(spit),
             (KindPublic::Egg(_), KindState::Egg(egg)) => EntityKind::Egg(egg),
@@ -437,6 +450,10 @@ impl Entity {
             EntityKind::ExperienceOrb(orb) => (
                 KindPublic::ExperienceOrb { value: orb.value },
                 KindState::ExperienceOrb(orb),
+            ),
+            EntityKind::LeashKnot(knot) => (
+                KindPublic::LeashKnot { pos: knot.pos },
+                KindState::LeashKnot(knot),
             ),
             EntityKind::Arrow(arrow) => (
                 KindPublic::Arrow(arrow.public(self.remaining_fire_ticks)),
