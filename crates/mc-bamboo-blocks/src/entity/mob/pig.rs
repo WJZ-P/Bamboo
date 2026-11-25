@@ -10,6 +10,7 @@ use mc_bamboo_protocol::packet::play::EquipmentSlot;
 use super::{
     Mob, MobType,
     attributes::Attributes,
+    equine,
     equipment::GUARANTEED_DROP_CHANCE,
     goals::{Goal, GoalSelector, WrappedGoal},
     interact::{MobInteractRequest, MobInteraction},
@@ -63,6 +64,91 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
         },
     );
     selector
+}
+
+/// `ItemBasedSteering`：胡萝卜钓竿加速的状态。`boost_time_total` 就是同步给客户端的
+/// `DATA_BOOST_TIME`。
+///
+/// `ItemBasedSteering`: the carrot-on-a-stick boost state. `boost_time_total` is
+/// the synced `DATA_BOOST_TIME`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Steering {
+    pub boosting: bool,
+    pub boost_time: i32,
+    pub boost_time_total: i32,
+}
+
+impl Steering {
+    /// `ItemBasedSteering.boost`：已在加速时返回假；否则开始加速，总时长 `nextInt(841) + 140`。
+    ///
+    /// `ItemBasedSteering.boost`: false while boosting, otherwise start a boost of
+    /// `nextInt(841) + 140` ticks.
+    pub fn boost(&mut self, random: &dyn crate::random::RandomSource) -> bool {
+        if self.boosting {
+            return false;
+        }
+        self.boosting = true;
+        self.boost_time = 0;
+        self.boost_time_total = random.next_int(841) + 140;
+        true
+    }
+
+    /// `ItemBasedSteering.tickBoost`：比较的是自增前的值。
+    ///
+    /// `ItemBasedSteering.tickBoost`: compares the value before the increment.
+    pub fn tick_boost(&mut self) {
+        if self.boosting {
+            let old = self.boost_time;
+            self.boost_time += 1;
+            if old > self.boost_time_total {
+                self.boosting = false;
+            }
+        }
+    }
+
+    /// `ItemBasedSteering.boostFactor`。
+    ///
+    /// `ItemBasedSteering.boostFactor`.
+    pub fn boost_factor(&self) -> f32 {
+        if self.boosting && self.boost_time_total > 0 {
+            let t = self.boost_time as f32 / self.boost_time_total as f32;
+            1.0 + 1.15 * mc_bamboo_core::mth::sin(f64::from(t * std::f32::consts::PI))
+        } else {
+            1.0
+        }
+    }
+}
+
+/// `Pig.getRiddenSpeed`：`MOVEMENT_SPEED * 0.225 * boostFactor`。服务端上玩家控制的
+/// 载具不能自己模拟运动，速度只由客户端用来算 `move_vehicle` 报上来的位置。
+///
+/// `Pig.getRiddenSpeed`: `MOVEMENT_SPEED * 0.225 * boostFactor`. On the server a
+/// player-controlled vehicle cannot simulate its own movement; the client alone
+/// uses the speed to compute the positions sent in `move_vehicle`.
+pub fn ridden_speed(movement_speed: f64, steering: &Steering) -> f32 {
+    (movement_speed * 0.225 * f64::from(steering.boost_factor())) as f32
+}
+
+/// `Pig.tickRidden`：朝向跟骑手（俯仰取一半），旧朝向、身体、头对齐，再走 `tickBoost`。
+///
+/// `Pig.tickRidden`: face the rider (half pitch), snap previous/body/head yaw, then
+/// `tickBoost`.
+pub fn tick_ridden(me: &mut Entity, mob: &mut Mob, yaw: f32, pitch: f32) {
+    // `Entity.setRot` 先把两个角取 `% 360`。
+    //
+    // `Entity.setRot` takes both angles `% 360` first.
+    let yaw = if yaw.is_finite() {
+        yaw % 360.0
+    } else {
+        me.y_rot
+    };
+    let pitch = if pitch.is_finite() { pitch } else { 0.0 };
+    me.y_rot = yaw;
+    mob.x_rot = super::control::clamp_x_rot((pitch * 0.5) % 360.0, mob.x_rot);
+    mob.y_rot_o = yaw;
+    mob.y_body_rot = yaw;
+    mob.y_head_rot = yaw;
+    mob.pig_steering.tick_boost();
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +239,48 @@ pub(super) fn step_sound(baby: bool) -> &'static str {
     } else {
         "minecraft:entity.pig.step"
     }
+}
+
+/// `Mob.isSaddled`：鞍槽里有鞍，且 `Pig.canUseSlot` 认可（活着、不是幼年）。
+///
+/// `Mob.isSaddled`: a saddle in the slot that `Pig.canUseSlot` accepts (alive, not a baby).
+pub fn is_saddled(mob: &Mob) -> bool {
+    !mob.equipment.get(EquipmentSlot::Saddle).is_empty()
+        && !mob.is_baby()
+        && !mob.is_dead_or_dying()
+}
+
+/// `Pig.mobInteract` 手里不是食物时：上了鞍、没人在骑、没潜行就骑上去（SUCCESS），
+/// 否则走装鞍分支。
+///
+/// `Pig.mobInteract` with a non-food item: a saddled, unridden pig is mounted when
+/// the player is not sneaking (SUCCESS); otherwise fall through to saddling.
+pub(super) fn interact_not_food(
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+) -> MobInteraction {
+    // `Entity.interact` 在 `mobInteract` 之前先用剪刀卸下可剪的装备；有人骑、
+    // 潜行或槽里没有可剪装备时什么也不做。
+    //
+    // `Entity.interact` tries shearing removable equipment before `mobInteract`;
+    // a rider, sneaking or no shearable slot makes it a no-op.
+    if req.held.item == items::SHEARS
+        && !mob.is_vehicle()
+        && !req.sneaking
+        && let Some(outcome) = equine::interact::attempt_to_shear_equipment(me, mob, req)
+    {
+        return outcome;
+    }
+    let saddled = is_saddled(mob);
+    if saddled && mob.passengers.is_empty() && !req.sneaking {
+        return MobInteraction {
+            result: InteractionResult::Success,
+            ride: true,
+            ..MobInteraction::pass()
+        };
+    }
+    equip_saddle(me, mob, req)
 }
 
 /// `ItemStack.interactLivingEntity` → `Equippable.equipOnTarget` 的鞍分支：成年（`Pig.canUseSlot`

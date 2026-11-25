@@ -95,7 +95,7 @@ pub(in crate::entity::mob) fn interact(
 /// `Mob.attemptToShearEquipment`: walk `EquipmentSlot.VALUES` for the first
 /// shearable item (without binding curse unless creative), clear the slot, play
 /// its shearing sound, drop at the average `PASSENGER` attachment and hurt the shears.
-fn attempt_to_shear_equipment(
+pub(in crate::entity::mob) fn attempt_to_shear_equipment(
     me: &mut Entity,
     mob: &mut Mob,
     req: &MobInteractRequest,
@@ -524,7 +524,7 @@ fn equip_sound(equippable: &Equippable) -> Option<&'static str> {
     sound_name(&equippable.equip_sound)
 }
 
-fn sound_name(
+pub(super) fn sound_name(
     sound: &Holder<mc_bamboo_protocol::components::value::SoundEvent>,
 ) -> Option<&'static str> {
     match sound {

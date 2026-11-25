@@ -187,3 +187,73 @@ pub(crate) fn dismount_location(
     }
     Some(vehicle_position)
 }
+
+/// 官方 `Animal.getDismountLocationForPassenger`：朝向 `Direction.fromYRot(yRot)`，按
+/// `DismountHelper.offsetsForDirection` 的八个相邻格（右、左、后右、后左、前右、前左、后、前）
+/// 依次试，每格对三种姿势取格子中心上方的落点；全都不行落在载具包围盒顶上。
+///
+/// Vanilla `Animal.getDismountLocationForPassenger`: face `Direction.fromYRot(yRot)` and try
+/// the eight `DismountHelper.offsetsForDirection` cells in order, three poses each at the
+/// centre of the cell; if none fits the passenger lands on top of the vehicle's box.
+pub(crate) fn animal_dismount_location(
+    chunks: &ChunkStore,
+    border: &WorldBorder,
+    player: &Player,
+    vehicle_position: Vec3,
+    vehicle_height: f64,
+    vehicle_yaw: f32,
+) -> Vec3 {
+    // 水平方向的 2D 数据值：南 0、西 1、北 2、东 3；顺时针就是加一。
+    //
+    // Horizontal 2D data values: south 0, west 1, north 2, east 3; clockwise is plus one.
+    const STEPS: [(i32, i32); 4] = [(0, 1), (-1, 0), (0, -1), (1, 0)];
+    let facing = ((f64::from(vehicle_yaw) / 90.0 + 0.5).floor() as i64 & 3) as usize;
+    let direction = STEPS[facing];
+    let clockwise = STEPS[(facing + 1) & 3];
+    let counter = (-clockwise.0, -clockwise.1);
+    let back = (-direction.0, -direction.1);
+    let add = |a: (i32, i32), b: (i32, i32)| (a.0 + b.0, a.1 + b.1);
+    let offsets = [
+        clockwise,
+        counter,
+        add(back, clockwise),
+        add(back, counter),
+        add(direction, clockwise),
+        add(direction, counter),
+        back,
+        direction,
+    ];
+    let context = CollisionContext::Entity(EntityContext {
+        fall_distance: player.motion.fall_distance,
+        bottom: player.position().y,
+        falling_block: false,
+        descending: player.sync.shift_key_down,
+        placement: false,
+        powder_snow_walkable: false,
+    });
+    let mut state_at = |pos: BlockPos| BlockState(chunks.block(pos).unwrap_or(blocks::VOID_AIR));
+    let base = BlockPos::containing(vehicle_position);
+    for &(width, height) in &PLAYER_POSES {
+        for &(dx, dz) in &offsets {
+            let pos = BlockPos::new(base.x + dx, base.y, base.z + dz);
+            let floor = block_floor_height(&mut state_at, pos);
+            if !floor_valid(floor) {
+                continue;
+            }
+            let location = Vec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + floor,
+                f64::from(pos.z) + 0.5,
+            );
+            let bounds = pose_bounds(width, height, location);
+            if !collides(&mut state_at, context, bounds) && border.is_within_bounds_aabb(bounds) {
+                return location;
+            }
+        }
+    }
+    Vec3::new(
+        vehicle_position.x,
+        vehicle_position.y + vehicle_height,
+        vehicle_position.z,
+    )
+}
