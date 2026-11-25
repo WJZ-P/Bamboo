@@ -243,8 +243,19 @@ impl Behavior {
                     i64::from(ROAR_SOUND_DELAY),
                 );
                 cx.memories.erase(M::WalkTarget);
+                // `BehaviorUtils.lookAtEntity` 只把 LOOK_TARGET 设成 EntityTracker，
+                // 朝向由 CORE 的 LookAtTargetSink 逐步转过去。
+                // `BehaviorUtils.lookAtEntity` only sets LOOK_TARGET to an EntityTracker;
+                // CORE's LookAtTargetSink turns the head gradually.
                 if let Some(target) = cx.memories.entity(M::RoarTarget) {
-                    look_at_entity(cx, target);
+                    cx.memories.set(
+                        M::LookTarget,
+                        MemoryValue::Look(PositionTracker::Entity {
+                            uid: target,
+                            track_eye: true,
+                            target_eye: false,
+                        }),
+                    );
                 }
                 cx.mob.warden.pose = WardenPose::Roaring;
                 if let Some(target) = cx.memories.entity(M::RoarTarget) {
@@ -803,7 +814,6 @@ pub fn increase_anger_at(
     if is_player && was_not_player && super::warden::AngerLevel::by_anger(anger).is_angry() {
         cx.memories.erase(M::AttackTarget);
     }
-    sync_client_anger(cx);
 }
 
 /// `Warden.doPush`：没有推挤冷却时起 20 刻冷却、加 35 点愤怒、把对方脚下的
@@ -834,10 +844,7 @@ pub fn do_push(me: &mut Entity, mob: &mut Mob, pushed: &[(EntityUid, Vec3)]) {
             .as_ref()
             .and_then(|brain| brain.memories.entity(M::AttackTarget))
             .is_none_or(|target| target >= crate::entity::FIRST_ENTITY_ID);
-        let anger = mob
-            .warden
-            .anger
-            .increase_anger(*uid, uuid, 35, is_player);
+        let anger = mob.warden.anger.increase_anger(*uid, uuid, 35, is_player);
         if is_player
             && was_not_player
             && super::warden::AngerLevel::by_anger(anger).is_angry()
@@ -893,13 +900,6 @@ pub fn set_attack_target(cx: &mut Cx, uid: crate::entity::EntityUid) {
     cx.memories.erase(M::CantReachWalkTargetSince);
     cx.memories
         .set_with_ttl(M::SonicBoomCooldown, MemoryValue::Unit, 200);
-    sync_client_anger(cx);
-}
-
-/// `Warden.syncClientAngerLevel`：元数据等于 `getActiveAnger(getTarget())`。
-pub fn sync_client_anger(cx: &mut Cx) {
-    let target = cx.memories.entity(M::AttackTarget);
-    cx.mob.warden.client_anger_level = cx.mob.warden.anger.get_active_anger(target);
 }
 
 /// `Warden.customServerAiStep`：官方在 `Warden.tick()` 里先跑
