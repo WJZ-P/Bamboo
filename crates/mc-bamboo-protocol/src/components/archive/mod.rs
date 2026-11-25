@@ -20,6 +20,7 @@ pub mod components;
 pub mod dynamic;
 pub mod read;
 mod records;
+pub(crate) use records::{decode_exact_components, encode_exact};
 pub mod slots;
 pub mod stack;
 pub mod text;

@@ -661,24 +661,28 @@ impl ClientboundPacket for BundleDelimiter {
 }
 
 /// `ClientboundAwardStatsPacket`：有变更的统计累计值，按 (统计类型, ID, 值) 编码。
-/// 物品使用走 `minecraft:used`，近战伤害走 `minecraft:custom` 的 `damage_dealt`。
+/// 物品使用走 `minecraft:used`，近战伤害走 `minecraft:custom` 的 `damage_dealt`，
+/// 其余自定义统计（村民交易 / 交谈等）走 `custom`。
 /// 官方用哈希映射，条目顺序不定；这里先物品后自定义，客户端一样按映射应用。
 ///
 /// `ClientboundAwardStatsPacket`: changed cumulative stats as (type, id, value).
 /// Item usage uses `minecraft:used`; melee damage uses `damage_dealt` under
-/// `minecraft:custom`. Vanilla iterates a hash map (order unspecified); we send
-/// item stats first and the custom stat last, which the client applies as a map.
+/// `minecraft:custom`, and the remaining custom stats (villager trade / talk) use
+/// `custom`. Vanilla iterates a hash map (order unspecified); we send item stats
+/// first and custom stats last, which the client applies as a map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AwardStats<'a> {
     pub item_used: &'a [(i32, i32)],
     pub damage_dealt: Option<i32>,
+    /// 其它自定义统计，(custom_stat 注册表 ID, 累计值)。
+    pub custom: &'a [(i32, i32)],
 }
 
 impl ClientboundPacket for AwardStats<'_> {
     const ID: i32 = clientbound::AWARD_STATS;
 
     fn write_body(&self, out: &mut Vec<u8>) {
-        let extra = i32::from(self.damage_dealt.is_some());
+        let extra = i32::from(self.damage_dealt.is_some()) + self.custom.len() as i32;
         write_varint(out, self.item_used.len() as i32 + extra);
         for &(item, value) in self.item_used {
             write_varint(out, mc_bamboo_data::registries::stat_type::USED);
@@ -688,6 +692,11 @@ impl ClientboundPacket for AwardStats<'_> {
         if let Some(value) = self.damage_dealt {
             write_varint(out, mc_bamboo_data::registries::stat_type::CUSTOM);
             write_varint(out, mc_bamboo_data::registries::custom_stat::DAMAGE_DEALT);
+            write_varint(out, value);
+        }
+        for &(stat, value) in self.custom {
+            write_varint(out, mc_bamboo_data::registries::stat_type::CUSTOM);
+            write_varint(out, stat);
             write_varint(out, value);
         }
     }
@@ -1000,6 +1009,7 @@ mod tests {
             body(&AwardStats {
                 item_used: &[],
                 damage_dealt: None,
+                custom: &[],
             }),
             hex("00")
         );
@@ -1015,7 +1025,19 @@ mod tests {
         let packet = AwardStats {
             item_used: &[(7, 3)],
             damage_dealt: Some(42),
+            custom: &[],
         };
         assert_eq!(body(&packet), hex("02 02 07 03 08 19 2a"));
+    }
+
+    /// 自定义统计（村民交谈 37 / 交易 38）跟在 `damage_dealt` 后面，各占三项。
+    #[test]
+    fn award_stats_encodes_extra_custom_stats() {
+        let packet = AwardStats {
+            item_used: &[],
+            damage_dealt: None,
+            custom: &[(37, 2), (38, 1)],
+        };
+        assert_eq!(body(&packet), hex("02 08 25 02 08 26 01"));
     }
 }

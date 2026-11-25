@@ -419,6 +419,9 @@ public final class MobOracle {
             if (only == null || only.equals("small_mob_death")) {
                 cases += playSmallMobDeath(official, out);
             }
+            if (only == null || only.startsWith("spawner")) {
+                cases += playSpawner(official, out, only);
+            }
             if (only == null || only.startsWith("sulfur_cube_")) {
                 cases += playSulfurCube(official, out, only);
                 cases += playSulfurCubeSave(official, out);
@@ -616,8 +619,354 @@ public final class MobOracle {
                 playGuardian(official, out, name);
                 cases++;
             }
+            if (only == null || only.startsWith("sculk_sensor")) {
+                for (String name : List.of(
+                        "sculk_sensor_step",
+                        "sculk_sensor_wool",
+                        "sculk_sensor_cooldown",
+                        "sculk_sensor_calibrated_match",
+                        "sculk_sensor_calibrated_mismatch")) {
+                    if (only != null && !name.startsWith(only)) continue;
+                    playSculkSensor(official, out, name);
+                    cases++;
+                }
+            }
+            if (only == null || only.startsWith("sculk_sensor_order")) {
+                playSculkSensorOrder(official, out);
+                cases++;
+            }
+            if (only == null || only.startsWith("sculk_shrieker")) {
+                for (String name : List.of("sculk_shrieker_warn", "sculk_shrieker_cooldown",
+                        "sculk_shrieker_decay")) {
+                    if (only != null && !name.startsWith(only)) continue;
+                    playSculkShrieker(official, out, name);
+                    cases++;
+                }
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
+        }
+    }
+
+    /** 幽匿感测体：真实 `SculkSensorBlockEntity` + `VibrationSystem`，逐刻驱动振动。 */
+    private static void playSculkSensor(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        try {
+            level.enableGameEvents();
+            level.nextId = FIRST_ID;
+            level.gameTime = START_TIME;
+
+            BlockPos sensor = new BlockPos(4, 64, 0);
+            BlockPos source = new BlockPos(1, 64, 0);
+            BlockPos wool = new BlockPos(2, 64, 0);
+            boolean calibrated = name.contains("calibrated");
+            int ticks = switch (name) {
+                case "sculk_sensor_cooldown" -> 70;
+                default -> 20;
+            };
+
+            // 平坦石地板，保证振动射线和落点都有真实地面。
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -12; x <= 12; x++) {
+                for (int z = -12; z <= 12; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            BlockState sensorState = calibrated
+                    ? Blocks.CALIBRATED_SCULK_SENSOR.defaultBlockState()
+                            .setValue(net.minecraft.world.level.block.CalibratedSculkSensorBlock.FACING,
+                                    Direction.NORTH)
+                    : Blocks.SCULK_SENSOR.defaultBlockState();
+            level.blocks.put(sensor.asLong(), sensorState);
+            if (name.equals("sculk_sensor_wool")) {
+                level.blocks.put(wool.asLong(), Blocks.WOOL.white().defaultBlockState());
+            }
+            if (name.contains("calibrated")) {
+                // 校频体朝北，背面（南，z+1）放红石块给满强度 15。
+                level.blocks.put(new BlockPos(4, 64, 1).asLong(), Blocks.REDSTONE_BLOCK.defaultBlockState());
+            }
+
+            net.minecraft.world.level.block.entity.SculkSensorBlockEntity be = calibrated
+                    ? new net.minecraft.world.level.block.entity.CalibratedSculkSensorBlockEntity(sensor, sensorState)
+                    : new net.minecraft.world.level.block.entity.SculkSensorBlockEntity(sensor, sensorState);
+            level.putBlockEntity(be);
+            // 官方 `LevelChunk.addGameEventListener`：把监听者登记进区段，并跨
+            // `setBlock` 清区块缓存保留（见 `FakeLevel.registerGameEventListener`）。
+            level.registerGameEventListener(sensor, be.getListener());
+            // 计划刻需要一个区块容器：官方 `scheduleTick` 找不到容器会静默丢弃。
+            net.minecraft.core.SectionPos section = net.minecraft.core.SectionPos.of(sensor);
+            level.getBlockTicks().addContainer(
+                    new net.minecraft.world.level.ChunkPos(section.x(), section.z()),
+                    new net.minecraft.world.ticks.LevelChunkTicks<>());
+
+            // 要发的事件与时刻。
+            int fireTick = 1;
+            int fire2Tick = name.equals("sculk_sensor_cooldown") ? 45 : -1;
+            Holder<GameEvent> event = switch (name) {
+                case "sculk_sensor_calibrated_match" -> GameEvent.ENTITY_DIE; // 频率 15，与背面 15 匹配
+                default -> GameEvent.STEP; // 频率 1
+            };
+            int eventId = official.registries
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.GAME_EVENT)
+                    .getId(event.value());
+            int stepEventId = official.registries
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.GAME_EVENT)
+                    .getId(GameEvent.STEP.value());
+
+            Vec3 sourceCenter = new Vec3(source.getX() + 0.5, source.getY() + 0.5, source.getZ() + 0.5);
+
+            // 初始方块必须在 tick 之前快照：tick 会改掉感测体的相位。
+            String initialBlocks = blockArray(level.blocks);
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime = START_TIME + tick;
+                    if (tick == fireTick) {
+                        // 官方 `ServerLevel.gameEvent` → `GameEventDispatcher.post` 的完整分发：
+                        // 区段路由 + 按距离排序后逐一听者投递。
+                        level.gameEvent(event, sourceCenter, new GameEvent.Context(null, null));
+                    }
+                    if (tick == fire2Tick) {
+                        level.gameEvent(GameEvent.STEP, sourceCenter, new GameEvent.Context(null, null));
+                    }
+                    // 方块实体 tick：`VibrationSystem.Ticker.tick`（getTicker 的 lambda）。
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, be.getVibrationData(), be.getVibrationUser());
+                    // 计划刻：ACTIVE 30 刻后转 COOLDOWN，再 10 刻转 INACTIVE。
+                    level.getBlockTicks().tick(level.gameTime, Integer.MAX_VALUE, (p, block) -> {
+                        BlockState st = level.getBlockState(p);
+                        if (st.is(block)) {
+                            st.tick(level, p, level.getRandom());
+                        }
+                    });
+                }
+                if (tick > 0) frames.append(',');
+                BlockState st = level.getBlockState(sensor);
+                int phase = st.getValue(net.minecraft.world.level.block.SculkSensorBlock.PHASE).ordinal();
+                int power = st.getValue(net.minecraft.world.level.block.SculkSensorBlock.POWER);
+                int freq = be.getLastVibrationFrequency();
+                frames.append('[').append(phase).append(',').append(power).append(',').append(freq).append(']');
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"sculkSensor\",\"name\":" + jsonString(name)
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"blocks\":" + initialBlocks
+                    + ",\"sensor\":" + Arrays.toString(new int[] {sensor.getX(), sensor.getY(), sensor.getZ()})
+                    + ",\"calibrated\":" + calibrated
+                    + ",\"events\":[" + fireTick + ',' + eventId + ','
+                    + source.getX() + ',' + source.getY() + ',' + source.getZ() + "],\"event2\":"
+                    + (fire2Tick < 0 ? "null" : "[" + fire2Tick + ',' + stepEventId + ',' + source.getX() + ',' + source.getY() + ',' + source.getZ() + "]")
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            level.closeRealPoi();
+        }
+    }
+
+    /** 两个感测体到发声点距离不同：`GameEventDispatcher.post` 按距离排序后逐个投递，
+     *  两只感测体各自按距离给红石强度。 */
+    private static void playSculkSensorOrder(Official official, Writer out) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        try {
+            level.enableGameEvents();
+            level.nextId = FIRST_ID;
+            level.gameTime = START_TIME;
+
+            BlockPos near = new BlockPos(2, 64, 0);
+            BlockPos far = new BlockPos(6, 64, 0);
+            BlockPos source = new BlockPos(0, 64, 0);
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -12; x <= 12; x++) {
+                for (int z = -12; z <= 12; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            BlockState sensorState = Blocks.SCULK_SENSOR.defaultBlockState();
+            level.blocks.put(near.asLong(), sensorState);
+            level.blocks.put(far.asLong(), sensorState);
+
+            net.minecraft.world.level.block.entity.SculkSensorBlockEntity nearBe =
+                    new net.minecraft.world.level.block.entity.SculkSensorBlockEntity(near, sensorState);
+            net.minecraft.world.level.block.entity.SculkSensorBlockEntity farBe =
+                    new net.minecraft.world.level.block.entity.SculkSensorBlockEntity(far, sensorState);
+            level.putBlockEntity(nearBe);
+            level.putBlockEntity(farBe);
+            level.registerGameEventListener(near, nearBe.getListener());
+            level.registerGameEventListener(far, farBe.getListener());
+            // 两个感测体的计划刻容器。
+            net.minecraft.core.SectionPos section = net.minecraft.core.SectionPos.of(near);
+            level.getBlockTicks().addContainer(
+                    new net.minecraft.world.level.ChunkPos(section.x(), section.z()),
+                    new net.minecraft.world.ticks.LevelChunkTicks<>());
+
+            int stepEventId = official.registries
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.GAME_EVENT)
+                    .getId(GameEvent.STEP.value());
+            Vec3 sourceCenter = new Vec3(source.getX() + 0.5, source.getY() + 0.5, source.getZ() + 0.5);
+            String initialBlocks = blockArray(level.blocks);
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= 20; tick++) {
+                if (tick > 0) {
+                    level.gameTime = START_TIME + tick;
+                    if (tick == 1) {
+                        level.gameEvent(GameEvent.STEP, sourceCenter, new GameEvent.Context(null, null));
+                    }
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, nearBe.getVibrationData(), nearBe.getVibrationUser());
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, farBe.getVibrationData(), farBe.getVibrationUser());
+                    level.getBlockTicks().tick(level.gameTime, Integer.MAX_VALUE, (p, block) -> {
+                        BlockState st = level.getBlockState(p);
+                        if (st.is(block)) {
+                            st.tick(level, p, level.getRandom());
+                        }
+                    });
+                }
+                if (tick > 0) frames.append(',');
+                frames.append('[');
+                for (BlockPos sensor : new BlockPos[] {near, far}) {
+                    BlockState st = level.getBlockState(sensor);
+                    int phase = st.getValue(net.minecraft.world.level.block.SculkSensorBlock.PHASE).ordinal();
+                    int power = st.getValue(net.minecraft.world.level.block.SculkSensorBlock.POWER);
+                    net.minecraft.world.level.block.entity.SculkSensorBlockEntity be =
+                            sensor.equals(near) ? nearBe : farBe;
+                    int freq = be.getLastVibrationFrequency();
+                    frames.append('[').append(phase).append(',').append(power).append(',').append(freq).append("],");
+                }
+                frames.setLength(frames.length() - 1);
+                frames.append(']');
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"sculkSensorOrder\",\"name\":\"sculk_sensor_order\""
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"blocks\":" + initialBlocks
+                    + ",\"sensors\":[[2,64,0],[6,64,0]]"
+                    + ",\"events\":[1," + stepEventId + ",0,64,0]"
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            level.closeRealPoi();
+        }
+    }
+
+    /** 幽匿尖啸体：玩家触发感测体 → 尖啸体警告加一、尖叫，冷却期内再触发不加，
+     *  90 刻后 `tryRespond` 给玩家黑暗。逐刻比警告等级、尖叫状态和黑暗。 */
+    private static void playSculkShrieker(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        try {
+            level.enableGameEvents();
+            level.nextId = FIRST_ID;
+            level.gameTime = START_TIME;
+
+            BlockPos sensor = new BlockPos(4, 64, 0);
+            BlockPos shrieker = new BlockPos(6, 64, 0);
+            BlockPos playerPos = new BlockPos(2, 64, 0);
+            // 触发时刻；冷却场景第二次触发在 200 刻冷却内，第三次过了冷却。
+            // 衰减场景只触发一次，跑满 12000 刻看警告掉级。
+            int[] triggers = switch (name) {
+                case "sculk_shrieker_cooldown" -> new int[] {1, 100, 220};
+                default -> new int[] {1};
+            };
+            int ticks = switch (name) {
+                case "sculk_shrieker_cooldown" -> 300;
+                case "sculk_shrieker_decay" -> 12_200;
+                default -> 120;
+            };
+
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -12; x <= 12; x++) {
+                for (int z = -12; z <= 12; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            // 天然生成的尖啸体 `can_summon=true`。
+            BlockState shriekerState = Blocks.SCULK_SHRIEKER.defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.SculkShriekerBlock.CAN_SUMMON, true);
+            level.blocks.put(sensor.asLong(), Blocks.SCULK_SENSOR.defaultBlockState());
+            level.blocks.put(shrieker.asLong(), shriekerState);
+
+            net.minecraft.world.level.block.entity.SculkSensorBlockEntity sensorBe =
+                    new net.minecraft.world.level.block.entity.SculkSensorBlockEntity(sensor, Blocks.SCULK_SENSOR.defaultBlockState());
+            net.minecraft.world.level.block.entity.SculkShriekerBlockEntity shriekerBe =
+                    new net.minecraft.world.level.block.entity.SculkShriekerBlockEntity(shrieker, shriekerState);
+            level.putBlockEntity(sensorBe);
+            level.putBlockEntity(shriekerBe);
+            level.registerGameEventListener(sensor, sensorBe.getListener());
+            level.registerGameEventListener(shrieker, shriekerBe.getListener());
+            net.minecraft.core.SectionPos section = net.minecraft.core.SectionPos.of(sensor);
+            level.getBlockTicks().addContainer(
+                    new net.minecraft.world.level.ChunkPos(section.x(), section.z()),
+                    new net.minecraft.world.ticks.LevelChunkTicks<>());
+
+            // 一名站在尖啸体附近的玩家，带着自己的 WardenSpawnTracker。
+            GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+            ServerPlayer player = new ServerPlayer(official.server, level, profile, ClientInformation.createDefault());
+            player.setPos(playerPos.getX() + 0.5, 64.0, playerPos.getZ() + 0.5);
+            // 黑暗效果会走连接发包，挂一个记录用的假连接。
+            ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+            put(ServerGamePacketListenerImpl.class, connection, "player", player);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "server", official.server);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+            ((RecordingListener) connection).bytes = new Bytes(official.registries);
+            put(ServerPlayer.class, player, "connection", connection);
+            level.playersList().add(player);
+            level.tracked.add(player);
+
+            int stepEventId = official.registries
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.GAME_EVENT)
+                    .getId(GameEvent.STEP.value());
+            String initialBlocks = blockArray(level.blocks);
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime = START_TIME + tick;
+                    player.getWardenSpawnTracker().tick();
+                    for (int fireAt : triggers) {
+                        if (tick == fireAt) {
+                            level.gameEvent(GameEvent.STEP,
+                                    new Vec3(playerPos.getX() + 0.5, 64.5, playerPos.getZ() + 0.5),
+                                    GameEvent.Context.of(player));
+                        }
+                    }
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, sensorBe.getVibrationData(), sensorBe.getVibrationUser());
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, shriekerBe.getVibrationData(), shriekerBe.getVibrationUser());
+                    level.getBlockTicks().tick(level.gameTime, Integer.MAX_VALUE, (p, block) -> {
+                        BlockState st = level.getBlockState(p);
+                        if (st.is(block)) {
+                            st.tick(level, p, level.getRandom());
+                        }
+                    });
+                }
+                if (tick > 0) frames.append(',');
+                int warning = player.getWardenSpawnTracker().getWarningLevel();
+                int shrieking = level.getBlockState(shrieker)
+                        .getValue(net.minecraft.world.level.block.SculkShriekerBlock.SHRIEKING) ? 1 : 0;
+                int darkness = player.hasEffect(net.minecraft.world.effect.MobEffects.DARKNESS) ? 1 : 0;
+                frames.append('[').append(warning).append(',').append(shrieking).append(',').append(darkness).append(']');
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"sculkShrieker\",\"name\":" + jsonString(name)
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"blocks\":" + initialBlocks
+                    + ",\"sensor\":[4,64,0]"
+                    + ",\"shrieker\":[6,64,0]"
+                    + ",\"player\":[2,64,0]"
+                    + ",\"triggers\":" + java.util.Arrays.toString(triggers)
+                    + ",\"events\":[1," + stepEventId + ",2,64,0]"
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            level.closeRealPoi();
         }
     }
 
@@ -7900,6 +8249,136 @@ public final class MobOracle {
      * breaking tick compare the hatched chicks and the struck cow. Hatch scenes swap
      * the egg's random for a searched seed so the hatch draws take the wanted branch.
      */
+    /**
+     * 刷怪笼：逐刻比 `SpawnerBlockEntity.serverTick` 之后的 `spawnDelay`、当前 `SpawnData`
+     * 的实体、这一轮刷出的实体（类型 + 位置）和世界随机源。场景覆盖玩家在范围内外、倒数、
+     * `MaxNearbyEntities` 封顶、光照规则挡住、刷怪蛋改实体。
+     *
+     * Spawners: compare `spawnDelay`, the current `SpawnData` entity, the mobs spawned
+     * this tick (type + position) and the level random after `SpawnerBlockEntity.serverTick`.
+     */
+    private static int playSpawner(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("spawner_zombie", "spawner_skeleton", "spawner_spider",
+                "spawner_cave_spider", "spawner_silverfish", "spawner_near", "spawner_cap",
+                "spawner_lit", "spawner_egg")) {
+            if (only != null && !name.startsWith(only)) continue;
+            playSpawnerCase(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    private static void playSpawnerCase(Official official, Writer out, String name) throws Exception {
+        EntityType<?> type = switch (name) {
+            case "spawner_skeleton" -> EntityTypes.SKELETON;
+            case "spawner_spider" -> EntityTypes.SPIDER;
+            case "spawner_cave_spider" -> EntityTypes.CAVE_SPIDER;
+            case "spawner_silverfish" -> EntityTypes.SILVERFISH;
+            default -> EntityTypes.ZOMBIE;
+        };
+        boolean near = !name.equals("spawner_near");
+        boolean cap = name.equals("spawner_cap");
+        boolean lit = name.equals("spawner_lit");
+        boolean egg = name.equals("spawner_egg");
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.spawnerScene = true;
+        // 假世界没有 `ServerLevel.blockEvents`（构造器跳过），刷怪笼的 `broadcastEvent` 要写它。
+        // The fake world skips `ServerLevel.blockEvents`; the spawner's `broadcastEvent` writes it.
+        put(ServerLevel.class, level, "blockEvents",
+                new it.unimi.dsi.fastutil.objects.ObjectLinkedOpenHashSet<>());
+        // 地下刷怪笼：没有天空光，方块光 0；`injectedSkyDarken = 15` 让
+        // `getMaxLocalRawBrightness` 归 0，怪物认为够黑。
+        // An underground spawner: no sky light and block light 0; a darken of 15 makes
+        // `getMaxLocalRawBrightness` zero so monsters find it dark enough.
+        level.injectedSkyDarken = 15;
+        if (lit) {
+            level.injectedBlockLight = 15;
+        }
+        for (int x = -3; x <= 3; x++) {
+            for (int z = -3; z <= 3; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        BlockPos spawnerPos = new BlockPos(0, 64, 0);
+        BlockState spawnerState = Blocks.SPAWNER.defaultBlockState();
+        level.blocks.put(spawnerPos.asLong(), spawnerState);
+        var be = new net.minecraft.world.level.block.entity.SpawnerBlockEntity(spawnerPos, spawnerState);
+        be.setLevel(level);
+        be.setEntityId(type, level.getRandom());
+        Field delayField = net.minecraft.world.level.BaseSpawner.class.getDeclaredField("spawnDelay");
+        delayField.setAccessible(true);
+        delayField.setInt(be.getSpawner(), 1);
+        if (cap) {
+            for (int i = 0; i < 6; i++) {
+                Mob zombie = EntityTypes.ZOMBIE.create(level, EntitySpawnReason.COMMAND);
+                zombie.snapTo(1.5 + (i % 3), 64.0, 1.5 + (i / 3), 0.0F, 0.0F);
+                level.tracked.add(zombie);
+            }
+        }
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "SpawnerOracle"), ClientInformation.createDefault());
+        player.setPos(0.5, 64.0, near ? 0.5 : 30.5);
+        level.playersList().add(player);
+        Field nextField = net.minecraft.world.level.BaseSpawner.class.getDeclaredField("nextSpawnData");
+        nextField.setAccessible(true);
+        int ticks = near ? 6 : 4;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                level.spawned.clear();
+                if (egg && tick == 1) {
+                    be.setEntityId(EntityTypes.SKELETON, level.getRandom());
+                }
+                net.minecraft.world.level.block.entity.SpawnerBlockEntity.serverTick(
+                        level, spawnerPos, spawnerState, be);
+            }
+            int delay = delayField.getInt(be.getSpawner());
+            Object next = nextField.get(be.getSpawner());
+            String entity = next == null ? ""
+                    : ((net.minecraft.world.level.SpawnData) next).getEntityToSpawn()
+                            .getString("id").orElse("");
+            JsonArray spawned = new JsonArray();
+            for (Entity spawnedEntity : level.spawned) {
+                if (spawnedEntity instanceof Mob mob) {
+                    JsonArray row = new JsonArray();
+                    row.add(BuiltInRegistries.ENTITY_TYPE.getId(mob.getType()));
+                    row.add((int) (mob.getX() * 2));
+                    row.add((int) mob.getY());
+                    row.add((int) (mob.getZ() * 2));
+                    spawned.add(row);
+                }
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"delay\":").append(delay)
+                    .append(",\"entity\":").append(jsonString(entity))
+                    .append(",\"spawned\":").append(spawned)
+                    .append(",\"levelSeed\":").append(levelSeed(level))
+                    .append('}');
+        }
+        out.write("{\"type\":\"spawner\",\"name\":" + jsonString(name)
+                + ",\"pos\":[0,64,0]"
+                + ",\"blocks\":" + blockArray(level.blocks)
+                + ",\"player\":" + (near ? "[0.5,64.0,0.5]" : "[0.5,64.0,30.5]")
+                + ",\"difficulty\":2"
+                + ",\"entity\":" + jsonString(type == EntityTypes.SKELETON ? "minecraft:skeleton"
+                        : type == EntityTypes.SPIDER ? "minecraft:spider"
+                        : type == EntityTypes.CAVE_SPIDER ? "minecraft:cave_spider"
+                        : type == EntityTypes.SILVERFISH ? "minecraft:silverfish"
+                        : "minecraft:zombie")
+                + ",\"delay\":1"
+                + ",\"spawnCount\":4,\"maxNearbyEntities\":6,\"spawnRange\":4"
+                + ",\"requiredPlayerRange\":16,\"minSpawnDelay\":200,\"maxSpawnDelay\":800"
+                + ",\"prePlace\":" + (cap ? 6 : 0)
+                + ",\"blockLight\":" + (lit ? 15 : -1)
+                + ",\"egg\":" + egg
+                + ",\"ticks\":" + ticks
+                + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
     private static void playEgg(Official official, Writer out, String name) throws Exception {
         // `_owned`：蛋有玩家主人，牛开着 AI，蛋碎之后再跑 OWNED_TICKS 刻看它恐慌逃跑。
         // `_owned`: a player owns the egg and the cow keeps its AI; run on after the
@@ -19001,6 +19480,8 @@ public final class MobOracle {
         private LevelTicks<net.minecraft.world.level.material.Fluid> fluidTicks;
         private Chunks chunkSource;
         private Long2ObjectOpenHashMap<ChunkAccess> chunkCache;
+        /** 区块缓存清掉后仍要保留的游戏事件监听者：区块键 → (段 Y → 监听者)。 */
+        private Long2ObjectOpenHashMap<it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<List<net.minecraft.world.level.gameevent.GameEventListener>>> persistentListeners;
         private ServerScoreboard scoreboard;
         private TickRateManager tickRate;
         private LevelData levelData;
@@ -19019,6 +19500,14 @@ public final class MobOracle {
         /** 僵尸场景注入的天色 / 天气 / 环境属性。 */
         int injectedSkyDarken;
         boolean injectedRaining;
+        /** 刷怪笼对拍：注入方块光（-1 表示用缺省的 0），让光照规则挡住生成。 */
+        /// Spawner parity: injected block light (-1 means the default 0), to let the
+        /// light rule block spawning.
+        int injectedBlockLight = -1;
+        /** 刷怪笼对拍：生成的实体进 `tracked`，`MaxNearbyEntities` 计数才和官方一致。 */
+        /// Spawner parity: spawned entities also enter `tracked` so the
+        /// `MaxNearbyEntities` count matches the official one.
+        boolean spawnerScene;
         boolean injectedBrightOutside = true;
         int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
@@ -19071,6 +19560,7 @@ public final class MobOracle {
                 put(ServerLevel.class, level, "environmentAttributes", official.attributes);
             }
             level.chunkCache = new Long2ObjectOpenHashMap<>();
+            level.persistentListeners = new Long2ObjectOpenHashMap<>();
             level.scoreboard = new ServerScoreboard(official.server);
             level.tickRate = new TickRateManager();
             level.tracked = new ArrayList<>();
@@ -19257,6 +19747,14 @@ public final class MobOracle {
         public int getBrightness(LightLayer layer, BlockPos pos) {
             if (naturalScene != null) {
                 return layer == LightLayer.SKY ? naturalScene.sky() : naturalScene.block();
+            }
+            if (spawnerScene) {
+                // 假世界没有光照引擎：天空光 0，方块光按注入值（缺省 0）。
+                // The fake world has no light engine: sky 0, the injected block light.
+                return layer == LightLayer.BLOCK && injectedBlockLight >= 0 ? injectedBlockLight : 0;
+            }
+            if (layer == LightLayer.BLOCK && injectedBlockLight >= 0) {
+                return injectedBlockLight;
             }
             return super.getBrightness(layer, pos);
         }
@@ -19468,7 +19966,32 @@ public final class MobOracle {
             // no other scene changes.
             Heightmap.primeHeightmaps(chunk, java.util.EnumSet.of(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES));
             chunkCache.put(key, chunk);
+            // `setBlock` 会清掉区块缓存，新建的 `LevelChunk` 没有监听者登记表。
+            // 这里把持久登记的监听者重新挂回新区块，保证 `GameEventDispatcher.post`
+            // 总能在 `chunk.getListenerRegistry` 里找到它们。
+            var sections = persistentListeners.get(key);
+            if (sections != null) {
+                for (var entry : sections.int2ObjectEntrySet()) {
+                    var registry = chunk.getListenerRegistry(entry.getIntKey());
+                    for (var listener : entry.getValue()) {
+                        registry.register(listener);
+                    }
+                }
+            }
             return chunk;
+        }
+
+        /** 官方 `LevelChunk.addGameEventListener`：登记监听者，且跨 `setBlock` 清缓存保留。 */
+        void registerGameEventListener(BlockPos pos, net.minecraft.world.level.gameevent.GameEventListener listener) {
+            long chunkKey = ChunkPos.pack(pos.getX() >> 4, pos.getZ() >> 4);
+            int sectionY = net.minecraft.core.SectionPos.blockToSectionCoord(pos.getY());
+            LevelChunk chunk = (LevelChunk) getChunk(pos.getX() >> 4, pos.getZ() >> 4,
+                    net.minecraft.world.level.chunk.status.ChunkStatus.FULL, false);
+            chunk.getListenerRegistry(sectionY).register(listener);
+            persistentListeners
+                    .computeIfAbsent(chunkKey, k -> new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>())
+                    .computeIfAbsent(sectionY, s -> new ArrayList<>())
+                    .add(listener);
         }
 
         @Override
@@ -19572,6 +20095,9 @@ public final class MobOracle {
             if (naturalScene != null && !worldGenRegion) {
                 tracked.add(entity);
             }
+            if (spawnerScene) {
+                tracked.add(entity);
+            }
             spawned.add(entity);
             return true;
         }
@@ -19631,6 +20157,10 @@ public final class MobOracle {
                 }
             }
             tracked.add(entity);
+            // 刷怪笼对拍：这一轮新加的实体同时进 `spawned`，供逐刻帧记录种类和位置。
+            if (spawnerScene) {
+                spawned.add(entity);
+            }
             return true;
         }
 
@@ -19761,8 +20291,27 @@ public final class MobOracle {
             return true;
         }
 
+        /** 振动到达要查 3x3 区块是否都在 tick；假世界全部视为在 tick。 */
         @Override
-        public void gameEvent(Holder<GameEvent> gameEvent, Vec3 position, GameEvent.Context context) {}
+        public boolean shouldTickBlocksAt(long chunkPos) {
+            return true;
+        }
+
+        /** 幽匿场景装上真的 `GameEventDispatcher`，`gameEvent` 走官方完整分发。 */
+        net.minecraft.world.level.gameevent.GameEventDispatcher gameEventDispatcher;
+
+        void enableGameEvents() {
+            if (gameEventDispatcher == null) {
+                gameEventDispatcher = new net.minecraft.world.level.gameevent.GameEventDispatcher(this);
+            }
+        }
+
+        @Override
+        public void gameEvent(Holder<GameEvent> gameEvent, Vec3 position, GameEvent.Context context) {
+            if (gameEventDispatcher != null) {
+                gameEventDispatcher.post(gameEvent, position, context);
+            }
+        }
 
         @Override
         public void sendBlockUpdated(BlockPos pos, BlockState old, BlockState current, int flags) {}

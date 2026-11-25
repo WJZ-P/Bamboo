@@ -3160,6 +3160,7 @@ impl World {
                     carried,
                 },
             ),
+            PlayRequest::SelectTrade { slot } => menu::on_select_trade(region, player, slot),
             PlayRequest::ContainerClose { .. } => {
                 menu::on_close_request(region, player);
                 lectern::on_player_close(region, player);

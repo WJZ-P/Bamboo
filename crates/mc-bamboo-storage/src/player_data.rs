@@ -135,6 +135,9 @@ pub struct PlayerData {
     pub abilities: Abilities,
     pub seen_credits: bool,
     pub spawn_extra_particles_on_fall: bool,
+    /// `ServerPlayer` 的 `warden_spawn_tracker`：监守者警告等级，`WardenSpawnTracker.CODEC`
+    /// 的三个字段，官方总是写这个键。
+    pub warden_spawn_tracker: WardenSpawnTracker,
     /// 解码时跳过的物品条目，按 `Inventory` 然后 `EnderItems` 的顺序。
     pub problems: Vec<slots::ItemProblem>,
     /// 本层不认识的顶层键（`CompoundTag` 的键序不算，按键名排序稳定输出）。
@@ -169,6 +172,15 @@ impl Default for Abilities {
             walk_speed: DEFAULT_WALK_SPEED,
         }
     }
+}
+
+/// `WardenSpawnTracker.CODEC` 的三个字段：`ticks_since_last_warning`、`warning_level`、
+/// `cooldown_ticks`，都是非负整数，官方用 `optionalAlwaysPresentFieldOf` 恒写。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WardenSpawnTracker {
+    pub ticks_since_last_warning: i32,
+    pub warning_level: i32,
+    pub cooldown_ticks: i32,
 }
 
 impl Abilities {
@@ -231,6 +243,7 @@ impl Default for PlayerData {
             abilities: Abilities::default(),
             seen_credits: false,
             spawn_extra_particles_on_fall: false,
+            warden_spawn_tracker: WardenSpawnTracker::default(),
             problems: Vec::new(),
             preserved: Vec::new(),
             nested_preserved: Vec::new(),
@@ -283,6 +296,7 @@ const KNOWN_KEYS: &[&str] = &[
     "previousPlayerGameType",
     "seenCredits",
     "spawn_extra_particles_on_fall",
+    "warden_spawn_tracker",
 ];
 
 /// 本层建模的复合标签。这些标签里的多余键进 `nested_preserved`。
@@ -446,6 +460,19 @@ impl PlayerData {
             "spawn_extra_particles_on_fall",
             Tag::Byte(i8::from(self.spawn_extra_particles_on_fall)),
         );
+        let warden = self.warden_spawn_tracker;
+        push(
+            &mut root,
+            "warden_spawn_tracker",
+            Tag::Compound(vec![
+                (
+                    "ticks_since_last_warning".to_owned(),
+                    Tag::Int(warden.ticks_since_last_warning),
+                ),
+                ("warning_level".to_owned(), Tag::Int(warden.warning_level)),
+                ("cooldown_ticks".to_owned(), Tag::Int(warden.cooldown_ticks)),
+            ]),
+        );
         // D9：不认识的顶层键原样写回；重名时以本层写出的键为准。
         for (key, value) in &self.preserved {
             if !KNOWN_KEYS.contains(&key.as_str()) && !root.iter().any(|(own, _)| own == key) {
@@ -512,6 +539,8 @@ impl PlayerData {
         data.seen_credits = opt_bool(entries, "seenCredits", false)?;
         data.spawn_extra_particles_on_fall =
             opt_bool(entries, "spawn_extra_particles_on_fall", false)?;
+        data.warden_spawn_tracker =
+            decode_warden_spawn_tracker(field_of(entries, "warden_spawn_tracker"));
         if let Some(tag) = field_of(entries, "abilities") {
             data.abilities = decode_abilities(tag)?;
         } else {
@@ -600,6 +629,20 @@ fn decode_abilities(tag: &Tag) -> Result<Abilities, PlayerDataError> {
         fly_speed: opt_f32(entries, "flySpeed", default.fly_speed)?,
         walk_speed: opt_f32(entries, "walkSpeed", default.walk_speed)?,
     })
+}
+
+/// 解 `warden_spawn_tracker`：缺字段回默认 0，坏值回默认值。
+fn decode_warden_spawn_tracker(tag: Option<&Tag>) -> WardenSpawnTracker {
+    let mut tracker = WardenSpawnTracker::default();
+    let Some(Tag::Compound(entries)) = tag else {
+        return tracker;
+    };
+    tracker.ticks_since_last_warning = opt_int(entries, "ticks_since_last_warning", 0)
+        .unwrap_or(0)
+        .max(0);
+    tracker.warning_level = opt_int(entries, "warning_level", 0).unwrap_or(0).max(0);
+    tracker.cooldown_ticks = opt_int(entries, "cooldown_ticks", 0).unwrap_or(0).max(0);
+    tracker
 }
 
 /// 解一个物品列表，把跳过的条目记进 `problems`。

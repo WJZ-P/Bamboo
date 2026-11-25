@@ -862,6 +862,75 @@ pub(super) fn check_spawn_rules(
     }
 }
 
+/// `SpawnPlacements.checkSpawnRules` 的 SPAWNER 分支：官方只在 `isSpawner(reason)`
+/// 时跳过 `Mob.checkMobSpawnRules` 里的脚下方块检查，但普通刷怪笼仍要吃光照门槛
+/// （只有试炼刷怪笼才 `ignoresLightRequirements`）。蠹虫 / 末影螨的谓词对刷怪笼恒真。
+///
+/// The SPAWNER arm of `SpawnPlacements.checkSpawnRules`: a spawner skips the
+/// below-block `isValidSpawn` of `Mob.checkMobSpawnRules` but still applies the
+/// light rule (only the trial spawner ignores light). Silverfish / endermites
+/// accept every position from a spawner.
+pub(crate) fn check_spawner_rules(world: &World, kind: MobType, pos: BlockPos) -> bool {
+    if !kind.allowed_in_peaceful() && world.level().difficulty_id() == 0 {
+        return false;
+    }
+    match kind {
+        // `Monster.checkMonsterSpawnRules`：刷怪笼跳过脚下检查，只剩黑暗判定。
+        // `Monster.checkMonsterSpawnRules`: a spawner keeps only the darkness test.
+        MobType::Zombie
+        | MobType::ZombieVillager
+        | MobType::Skeleton
+        | MobType::Bogged
+        | MobType::Witch
+        | MobType::Creeper
+        | MobType::Spider
+        | MobType::CaveSpider
+        | MobType::Enderman
+        | MobType::Stray
+        | MobType::Husk
+        | MobType::Parched
+        | MobType::CamelHusk => is_dark_enough_to_spawn(world, pos),
+        // `Silverfish.checkSilverfishSpawnRules` / `Endermite.checkEndermiteSpawnRules`：
+        // `checkAnyLightMonsterSpawnRules`（刷怪笼跳过脚下）再 `isSpawner`，恒真。
+        // Both return true for a spawner once the peaceful gate above passed.
+        MobType::Silverfish | MobType::Endermite => true,
+        // `Mob.checkMobSpawnRules`：刷怪笼跳过脚下检查。
+        // `Mob.checkMobSpawnRules`: a spawner skips the below-block check.
+        MobType::Phantom => true,
+        // 其余类型的谓词不读脚下 `isValidSpawn`，和自然生成共用同一条规则。
+        // Every other type's predicate reads no below-block `isValidSpawn`, so it
+        // shares the natural rule.
+        _ => check_spawn_rules(world, kind, pos, world.sea_level()),
+    }
+}
+
+/// `Mob.checkSpawnObstruction`：盒子里没有液体、没有挡路的实体。水生生物、溺尸、
+/// 美西螈、守卫者和鹦鹉螺只查实体遮挡；豹猫走它自己的那一支。
+///
+/// `Mob.checkSpawnObstruction`: no liquid and no blocking entity in the box.
+/// Aquatic mobs, drowned, axolotls, guardians and nautiluses check only the
+/// entities; ocelots take their own branch.
+pub(crate) fn check_spawn_obstruction(world: &World, entity: &Entity, kind: MobType) -> bool {
+    if kind == MobType::Ocelot {
+        return super::ocelot::check_spawn_obstruction(world, entity, world.sea_level());
+    }
+    let bounds = entity.bounding_box();
+    (kind == MobType::Drowned
+        || kind.is_ageable_water_creature()
+        || kind.is_water_animal()
+        // 美西螈的 `checkSpawnObstruction` 也只剩 `isUnobstructed`，不查液体。
+        // The axolotl's `checkSpawnObstruction` is `isUnobstructed` alone, no liquid check.
+        || kind == MobType::Axolotl
+        // `Guardian.checkSpawnObstruction` 同样只查实体遮挡。
+        // `Guardian.checkSpawnObstruction` also checks entity obstruction only.
+        || super::guardian::is_guardian(kind)
+        // `AbstractNautilus.checkSpawnObstruction` 只查实体遮挡，不查液体。
+        // `AbstractNautilus.checkSpawnObstruction` is `isUnobstructed` alone.
+        || super::nautilus::is_nautilus(kind)
+        || !contains_any_liquid(world, bounds))
+        && is_unobstructed_by_entities(world, bounds)
+}
+
 /// `LevelReader.canSeeSkyFromBelowWater`：水面以上看得见天，且从海平面往下到
 /// 落点之间不能有「挡光又不是液体」的方块。
 ///
@@ -924,7 +993,7 @@ pub(super) fn bright_spawn_rules(
 }
 
 /// `Monster.isDarkEnoughToSpawn`。
-pub(super) fn is_dark_enough_to_spawn(world: &World, pos: BlockPos) -> bool {
+pub(crate) fn is_dark_enough_to_spawn(world: &World, pos: BlockPos) -> bool {
     let random = world.random();
     if world.brightness(LightLayer::Sky, pos) > random.next_int(32) {
         return false;
@@ -1008,7 +1077,7 @@ fn is_valid_position_for_mob(
 /// `EntityGetter.isUnobstructed(entity)`: no live `blocksBuilding` entity overlaps the box.
 /// The new mob is not in the table yet, so it cannot block itself; players are checked
 /// through `Level::is_unobstructed`.
-pub(super) fn is_unobstructed_by_entities(world: &World, box_: Aabb) -> bool {
+pub(crate) fn is_unobstructed_by_entities(world: &World, box_: Aabb) -> bool {
     let mut blocked = false;
     world
         .level()
@@ -1035,7 +1104,7 @@ fn blocks_building(kind: &KindPublic) -> bool {
 ///
 /// `PathfinderMob.checkSpawnRules`: `getWalkTargetValue(pos) >= 0`. Cows look at the
 /// block below and otherwise use the light-based path cost; monsters negate that cost.
-pub(super) fn pathfinder_spawn_rules(world: &World, entity: &Entity, pos: BlockPos) -> bool {
+pub(crate) fn pathfinder_spawn_rules(world: &World, entity: &Entity, pos: BlockPos) -> bool {
     let Some(mob) = entity.kind.mob() else {
         return true;
     };
@@ -1043,7 +1112,7 @@ pub(super) fn pathfinder_spawn_rules(world: &World, entity: &Entity, pos: BlockP
 }
 
 /// `EntityType.getSpawnAABB(x, y, z)`：以 (x, y, z) 为脚底中心的身体盒。
-pub(super) fn spawn_aabb(kind: MobType, pos: BlockPos) -> Aabb {
+pub(crate) fn spawn_aabb_at(kind: MobType, x: f64, y: f64, z: f64) -> Aabb {
     let (mut width, mut height, _) = kind.dimensions(false);
     // `EntityType.spawnDimensionsScale`：只有史莱姆不是 1。
     // `EntityType.spawnDimensionsScale`: 1 for everything but slimes.
@@ -1052,9 +1121,6 @@ pub(super) fn spawn_aabb(kind: MobType, pos: BlockPos) -> Aabb {
         height *= super::slime::SPAWN_DIMENSIONS_SCALE;
     }
     let half = f64::from(width / 2.0);
-    let x = f64::from(pos.x) + 0.5;
-    let y = f64::from(pos.y);
-    let z = f64::from(pos.z) + 0.5;
     Aabb::new(
         x - half,
         y,
@@ -1065,8 +1131,18 @@ pub(super) fn spawn_aabb(kind: MobType, pos: BlockPos) -> Aabb {
     )
 }
 
+/// 同 [`spawn_aabb_at`]，以方块的脚底中心 (x + 0.5, y, z + 0.5) 为基准。
+pub(super) fn spawn_aabb(kind: MobType, pos: BlockPos) -> Aabb {
+    spawn_aabb_at(
+        kind,
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y),
+        f64::from(pos.z) + 0.5,
+    )
+}
+
 /// `Level.containsAnyLiquid(AABB)`。
-pub(super) fn contains_any_liquid(world: &World, box_: Aabb) -> bool {
+pub(crate) fn contains_any_liquid(world: &World, box_: Aabb) -> bool {
     let min = BlockPos::new(
         box_.min(Axis::X).floor() as i32,
         box_.min(Axis::Y).floor() as i32,
@@ -1095,7 +1171,7 @@ pub(super) fn contains_any_liquid(world: &World, box_: Aabb) -> bool {
 /// `CollisionGetter.noCollision(AABB)`: no block collision and no hard-colliding entity
 /// (boats, minecarts, shulkers). Players and mobs are not hard colliders; a null source
 /// skips the world border.
-pub(super) fn no_collision(world: &World, box_: Aabb) -> bool {
+pub(crate) fn no_collision(world: &World, box_: Aabb) -> bool {
     if !world
         .block_collisions(box_, CollisionContext::Empty)
         .is_empty()

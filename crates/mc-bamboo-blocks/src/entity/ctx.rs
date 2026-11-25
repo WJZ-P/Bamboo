@@ -955,6 +955,12 @@ pub struct LandFacts {
 /// `Spawn`、`Remove`、`ScheduleTick`、`Depart`。这次不实现。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    /// 实体移动 / 死亡等发出的游戏事件。并行驱动攒到落地阶段按 uid 顺序投递。
+    GameEvent {
+        event: crate::game_event::GameEvent,
+        position: Vec3,
+        context: crate::game_event::dispatch::EventContext,
+    },
     ShootMobArrow {
         position: Vec3,
         direction: Vec3,
@@ -1579,6 +1585,11 @@ pub enum Command {
 /// 改发出者，没有任何回写补丁。
 pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
     match command {
+        Command::GameEvent {
+            event,
+            position,
+            context,
+        } => world.game_event(event, position, context),
         Command::Explode { center, radius } => world.explode_tnt(center, radius),
         Command::ExplodeMob {
             center,

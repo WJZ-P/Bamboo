@@ -356,12 +356,24 @@ pub const fn trigger_position(trigger: Trigger) -> BlockPos {
 }
 
 pub const fn cacheable_trigger(trigger: Trigger) -> bool {
-    matches!(
-        trigger,
-        Trigger::ScheduledTick { .. }
-            | Trigger::BlockEvent { .. }
-            | Trigger::BlockEntityTick { .. }
-    )
+    // 发出游戏事件的触发器先标成不可缓存：事件会当场投递给别的方块实体，
+    // 缓存重放目前只记账方块读写和已有 Effect，见 docs/redstone-cache-design.md。
+    let emits_game_events = match trigger {
+        Trigger::ScheduledTick { kind, .. }
+        | Trigger::BlockEvent { kind, .. }
+        | Trigger::BlockEntityTick { kind, .. } => {
+            crate::behaviour::misc::sculk_entity::is_vibration_listener_block(kind)
+                || crate::behaviour::misc::sculk_shrieker::is_vibration_listener_block(kind)
+        }
+        Trigger::ScheduledFluidTick { .. } => false,
+    };
+    !emits_game_events
+        && matches!(
+            trigger,
+            Trigger::ScheduledTick { .. }
+                | Trigger::BlockEvent { .. }
+                | Trigger::BlockEntityTick { .. }
+        )
 }
 
 /// 守卫用的探针记录，供缓存的 `try_replay` 之外做诊断。

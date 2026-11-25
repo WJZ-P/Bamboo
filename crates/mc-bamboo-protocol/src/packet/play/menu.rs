@@ -4,8 +4,9 @@ use mc_bamboo_core::Hand;
 use mc_bamboo_data::packets::play::clientbound;
 
 use crate::{
-    codec::{write_i16, write_varint},
+    codec::{write_bool, write_i16, write_varint},
     item::ItemStack,
+    merchant::MerchantOffer,
     packet::ClientboundPacket,
     text::Component,
 };
@@ -277,5 +278,29 @@ mod tests {
             }),
             hex("28 00")
         );
+    }
+}
+
+/// `ClientboundMerchantOffersPacket`：交易列表加村民的等级、经验和两个界面开关。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MerchantOffersPacket<'a> {
+    pub container_id: i32,
+    pub offers: &'a [MerchantOffer],
+    pub villager_level: i32,
+    pub villager_xp: i32,
+    pub show_progress: bool,
+    pub can_restock: bool,
+}
+
+impl ClientboundPacket for MerchantOffersPacket<'_> {
+    const ID: i32 = clientbound::MERCHANT_OFFERS;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.container_id);
+        crate::merchant::write_offers(out, self.offers);
+        write_varint(out, self.villager_level);
+        write_varint(out, self.villager_xp);
+        write_bool(out, self.show_progress);
+        write_bool(out, self.can_restock);
     }
 }

@@ -58,7 +58,7 @@ fn play_note(state: BlockState, world: &mut World, pos: BlockPos) {
 }
 
 /// `NoteBlock.getPitchFromNote`。
-fn pitch_from_note(note: i32) -> f32 {
+pub(crate) fn pitch_from_note(note: i32) -> f32 {
     2.0f64.powf(f64::from(note - 12) / 12.0) as f32
 }
 
