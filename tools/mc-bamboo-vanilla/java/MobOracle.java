@@ -3815,6 +3815,29 @@ public final class MobOracle {
                 dismount.player(7.5, 64.0, 0.5, Items.AIR);
                 scenes.add(dismount);
             }
+            {
+                // 骷髅陷阱马的骑士（AI 开）：持弓骷髅骑在一头没上鞍的骷髅马上，借载具的
+                // `GroundPathNavigation`（`getNavigation` 转交）追玩家并射箭。马科的
+                // `travel` / `tickRidden` / `getControllingPassenger` 覆盖和蜘蛛、鸡不同：
+                // 载具朝向不跟着骑手，移动走 `AbstractHorse` 自己的 `aiStep` / `travel`。
+                // 逐刻比骑手和马的位置、速度、朝向、寻路目标、随机源和马科状态。
+                // Skeleton trap horse chase (AI on): a bow-armed skeleton rides an
+                // unsaddled skeleton horse, borrowing the vehicle's GroundPathNavigation
+                // (getNavigation delegates) to chase the player and shoot arrows. The
+                // equine travel/tickRidden/getControllingPassenger overrides differ from
+                // spiders and chickens: the vehicle's facing does not follow the rider
+                // and movement goes through AbstractHorse's own aiStep/travel. Compare
+                // both the rider's and the horse's position, velocity, rotation, path,
+                // random source and equine state every tick.
+                Scene horseChase = new Scene("skeleton_horse_ride_chase").ticks(160).difficulty(2);
+                horseChase.clockStart = 18000;
+                horseChase.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                horseChase.mob(25, 0.5, 64.0, 0.5, 0.0F, 825L, 0);
+                horseChase.mob(44, 0.5, 64.0, 0.5, 0.0F, 826L, 0);
+                horseChase.ride(1, 0).bowRider(1);
+                horseChase.player(7.5, 64.0, 0.5, Items.AIR);
+                scenes.add(horseChase);
+            }
         }
 
         /** 羊和鸡：吃草长毛、剪毛、染色、混色繁殖、死亡掉落、下蛋、缓慢下落和种子繁殖。 */
@@ -5348,7 +5371,8 @@ public final class MobOracle {
                 || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")
                 || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
                 || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")
-                || scene.name.startsWith("tnt_blast_") || scene.name.startsWith("pillager_")) {
+                || scene.name.startsWith("tnt_blast_") || scene.name.startsWith("pillager_")
+                || scene.name.startsWith("skeleton_horse_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -16405,6 +16429,13 @@ public final class MobOracle {
         level.shapeUpdates = true;
         StringBuilder levelEventsJson = new StringBuilder("[[");
         boolean slimeScene = scene.name.startsWith("slime_");
+        // 陷阱马追击场景的有效性检查：马真的移动、借到路径、锁定玩家、真的射箭。
+        // Validity checks for the trap-horse chase: the horse really moves, borrows a
+        // path, targets the player and actually shoots an arrow.
+        boolean horseChase = scene.name.startsWith("skeleton_horse_");
+        int horseChaseArrows = 0;
+        boolean horseChaseHadPath = false;
+        boolean horseChaseTargeted = false;
         StringBuilder splits = new StringBuilder("[[]");
         java.util.List<Mob> mobs = new java.util.ArrayList<>();
         for (int i = 0; i < scene.cows.size(); i++) {
@@ -16413,13 +16444,13 @@ public final class MobOracle {
             // `EntityType.create` 在和平难度会拒绝敌对生物；场景要能先生成再
             // 观察 `checkDespawn` 的和平清除，所以直接调构造函数。
             Mob mob = switch (kind[0]) {
-                // 编号两套合并：13 犰狳、14 山羊、16 北极熊、18 青蛙、19 蝌蚪、20 骆驼
-                // （15 熊猫、17 哞菇走按名字的动物路径），敌对生物用 40 起避开它们；
-                // 其余 1..12 是僵尸 / 动物 / 马科。
+                // 编号两套合并：13 犰狳、14 山羊、16 北极熊、18 青蛙、19 蝌蚪、20 骆驼、
+                // 24 嗅探兽、25 骷髅马（15 熊猫、17 哞菇走按名字的动物路径），敌对生物
+                // 用 40 起避开它们；其余 1..12 是僵尸 / 动物 / 马科。
                 // Merged id sets: 13 armadillo, 14 goat, 16 polar bear, 18 frog, 19 tadpole,
-                // 20 camel (15 panda and 17 mooshroom use the name-based animal path);
-                // hostiles start at 40 to stay clear, and 1..12 are the zombies, animals
-                // and equines.
+                // 20 camel, 24 sniffer, 25 skeleton horse (15 panda and 17 mooshroom use
+                // the name-based animal path); hostiles start at 40 to stay clear, and
+                // 1..12 are the zombies, animals and equines.
                 case 40 -> new net.minecraft.world.entity.monster.Creeper(EntityTypes.CREEPER, level);
                 case 41 -> new net.minecraft.world.entity.monster.spider.Spider(EntityTypes.SPIDER, level);
                 case 43 -> new net.minecraft.world.entity.monster.Enderman(EntityTypes.ENDERMAN, level);
@@ -16449,6 +16480,10 @@ public final class MobOracle {
                 case 19 -> EntityTypes.TADPOLE.create(level, EntitySpawnReason.COMMAND);
                 case 20 -> EntityTypes.CAMEL.create(level, EntitySpawnReason.COMMAND);
                 case 24 -> EntityTypes.SNIFFER.create(level, EntitySpawnReason.COMMAND);
+                // 25 骷髅马（陷阱马追击场景的载具）；`isTrap` 默认 false，不召额外骑手。
+                // 25 skeleton horse (the trap-horse chase vehicle); isTrap defaults to
+                // false, so no extra riders are summoned.
+                case 25 -> EntityTypes.SKELETON_HORSE.create(level, EntitySpawnReason.COMMAND);
                 // 61 焦骸、62 尸壳骆驼。
                 // 61 parched, 62 camel husk.
                 case 61 -> new net.minecraft.world.entity.monster.skeleton.Parched(EntityTypes.PARCHED, level);
@@ -16874,6 +16909,17 @@ public final class MobOracle {
                 }
             }
             line.append(',').append(zombieStepJson(mobs, players, level));
+            if (horseChase) {
+                for (Entity fresh : level.spawned) {
+                    if (fresh instanceof net.minecraft.world.entity.projectile.arrow.Arrow) {
+                        horseChaseArrows++;
+                    }
+                }
+                // 载具自己的 navigation 字段就是骑手借去写路径的那一份。
+                // The vehicle's own navigation field is the one the rider borrows.
+                if (mobs.get(0).getNavigation().getPath() != null) horseChaseHadPath = true;
+                if (mobs.get(1).getTarget() == players.get(0)) horseChaseTargeted = true;
+            }
             if (spawns != null) {
                 // 按 `addFreshEntity` 顺序收集，不做 id 排序：Bamboo 一侧也按生成顺序
                 // 记录，两边逐项对齐。实体 id 是内部编号，假世界玩家会占掉一个号。
@@ -16935,6 +16981,21 @@ public final class MobOracle {
             }
             if (turtle.hasEgg() || !placed) {
                 throw new IllegalStateException(scene.name + " never laid a turtle egg");
+            }
+        }
+        if (horseChase) {
+            // 防止种子退化：马必须真的追出去、借导航写过路径、骷髅锁定玩家并射出箭。
+            // Guard against a degenerate seed: the horse must actually move, borrow a
+            // path, the skeleton must target the player and fire an arrow.
+            double[] start = scene.cows.get(0);
+            double moved = Math.abs(mobs.get(0).getX() - start[0])
+                    + Math.abs(mobs.get(0).getZ() - start[2]);
+            if (moved < 1.0 || !horseChaseHadPath || !horseChaseTargeted
+                    || horseChaseArrows == 0) {
+                throw new IllegalStateException(scene.name
+                        + " did not chase / borrow navigation / shoot: moved=" + moved
+                        + " hadPath=" + horseChaseHadPath + " targeted=" + horseChaseTargeted
+                        + " arrows=" + horseChaseArrows);
             }
         }
         line.append("]");
