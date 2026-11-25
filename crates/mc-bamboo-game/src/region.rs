@@ -290,6 +290,13 @@ pub(crate) struct Region {
     /// The `PatrolSpawner` of `ServerLevel.customSpawners`. One per island, matching
     /// vanilla's one per dimension; a split carries the timer with each side.
     pub(crate) patrol_spawner: mc_bamboo_blocks::entity::mob::patrol::PatrolSpawner,
+    /// `ServerLevel.raids`：本岛的袭击表。每岛一份，拆/合岛时跟着袭击中心搬；
+    /// 存盘时所有岛汇总成一份 `raids.dat`，`next_id` 是全服的全局计数。
+    ///
+    /// `ServerLevel.raids`: this island's raids. One per island, carried with the
+    /// raid center on split/merge; the save rolls every island into one
+    /// `raids.dat`, and `next_id` is the server-wide counter.
+    pub(crate) raids: mc_bamboo_blocks::entity::raid::Raids,
     /// 战利品表的 `random_sequence`。平坦世界的种子是 0，和 `login` 里的 `hashed_seed` 一样。
     ///
     /// Loot `random_sequence`s. The flat world seed is 0, the same value as `hashed_seed` in `login`.
@@ -366,6 +373,31 @@ pub(crate) struct Region {
     ///
     /// `PhantomSpawner.nextTick`: the custom spawner's countdown, kept across ticks.
     pub(crate) phantom_spawner: mc_bamboo_blocks::entity::mob::phantom_spawner::PhantomSpawner,
+    /// `WanderingTraderSpawner` 的内存状态：`tickDelay` 和随机源内部种子。
+    /// 存档的两个字段在 `GlobalView::wandering_trader_data` 里，全服一份。
+    ///
+    /// `WanderingTraderSpawner`'s in-memory state: `tickDelay` and the RNG's
+    /// internal seed; the two saved fields are the global snapshot.
+    pub(crate) wandering_trader_spawner: WanderingTraderSpawnerState,
+}
+
+/// 刷新器在岛上的内存状态（不存档；只存随机源的内部种子，便于克隆）。
+///
+/// The spawner's per-island in-memory state (not saved; only the RNG's
+/// internal seed, so it stays cloneable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WanderingTraderSpawnerState {
+    pub(crate) tick_delay: i32,
+    pub(crate) random_seed: i64,
+}
+
+impl Default for WanderingTraderSpawnerState {
+    fn default() -> Self {
+        Self {
+            tick_delay: mc_bamboo_blocks::entity::mob::wandering_trader_spawner::TICK_DELAY,
+            random_seed: mc_bamboo_blocks::random::LegacyRandom::new(unique_seed()).seed(),
+        }
+    }
 }
 
 /// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
@@ -500,6 +532,7 @@ impl Region {
             villager_lobotomize_wait_trade_lock: true,
             villager_sleep_brain_interval: 0,
             patrol_spawner: mc_bamboo_blocks::entity::mob::patrol::PatrolSpawner::default(),
+            raids: mc_bamboo_blocks::entity::raid::Raids::new(),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             sound_seed_generator: LevelRandom::new(unique_seed()),
             entities: Entities::default(),
@@ -523,6 +556,7 @@ impl Region {
             dirty: dirty::Dirty::default(),
             sleep: crate::sleep::SleepStatus::default(),
             phantom_spawner: Default::default(),
+            wandering_trader_spawner: WanderingTraderSpawnerState::default(),
         }
     }
 
@@ -752,6 +786,7 @@ impl Region {
             sky_darken: self.global.sky_darken,
             villager_activity: self.global.villager_activity,
             baby_villager_activity: self.global.baby_villager_activity,
+            raids: self.raids.clone(),
             clock_ticks: self.global.clock.total_ticks,
             scoreboard: &self.global.scoreboard,
             world_seed: self.global.seed,

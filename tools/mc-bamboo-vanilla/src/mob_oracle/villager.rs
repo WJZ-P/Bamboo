@@ -154,6 +154,7 @@ impl Report {
             short_hunger: false,
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
         };
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
@@ -301,6 +302,7 @@ impl Report {
             short_hunger: false,
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
         };
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
@@ -413,6 +415,7 @@ impl Report {
             short_hunger: false,
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
         };
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
@@ -706,6 +709,7 @@ impl Report {
                 short_hunger: false,
                 wrong_was_hurt: false,
                 explosion_break: 0,
+                shoulder: Default::default(),
             };
             check_level.register_poi_from_blocks();
 
@@ -820,6 +824,7 @@ impl Report {
             short_hunger: false,
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
         };
         level.register_poi_from_blocks();
 
@@ -1128,6 +1133,7 @@ impl Report {
             short_hunger: false,
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
         };
         if !(name == "villager_p4_retry" && break_test.as_deref() == Some("villager_p4_no_take")) {
             level.register_poi_from_blocks();
@@ -1590,6 +1596,7 @@ impl Report {
             short_hunger: false,
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
         };
 
         let mut ticks = BlockTicks::default();

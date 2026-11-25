@@ -139,6 +139,10 @@ impl SaveSession {
             game_rules: read_saved_data(&dir, "minecraft:game_rules"),
             world_border: read_saved_data_at(&dir.world_border_dat()),
             world_clocks: read_saved_data(&dir, "minecraft:world_clocks"),
+            raids: read_saved_data(&dir, "minecraft:raids")
+                .map(|tag| mc_bamboo_blocks::entity::raid::Raids::from_tag(&tag))
+                .unwrap_or_default(),
+            wandering_trader: read_saved_data(&dir, "minecraft:wandering_trader"),
             command_storage: read_command_storage(&dir),
         };
         let loaded_level = matches!(loaded.source, LevelSource::Primary | LevelSource::Fallback);
@@ -226,6 +230,7 @@ impl SaveSession {
     pub(crate) fn encode_saves(
         &mut self,
         global: &Global,
+        islands: &[(u32, mc_bamboo_blocks::entity::raid::Raids)],
         last_played: i64,
     ) -> io::Result<Vec<EncodedFile>> {
         crate::save_data::sync_level_data(
@@ -269,10 +274,26 @@ impl SaveSession {
         // `WorldGenSettings.CODEC`: flat writes `minecraft:flat` + layers, noise
         // worlds write `minecraft:noise` + a settings id. An official server
         // reopening the world uses the same generator and the fixed seed.
+        // `WanderingTraderData.TYPE`：全局一份 `data/minecraft/wandering_trader.dat`。
+        // `WanderingTraderData.TYPE`: one global `data/minecraft/wandering_trader.dat`.
+        files.push(EncodedFile {
+            path: self.dir.saved_data("minecraft:wandering_trader"),
+            backup: None,
+            bytes: encode_saved_data(&crate::save_data::wandering_trader_tag(
+                global.wandering_trader_data(),
+            ))?,
+        });
         files.push(EncodedFile {
             path: self.dir.saved_data("minecraft:world_gen_settings"),
             backup: None,
             bytes: encode_saved_data(&crate::world_gen_settings::encode(&self.world_gen))?,
+        });
+        // `Raids.TYPE` 的文件 id 是 `minecraft:raids`，每岛的袭击汇总成一份。
+        // `Raids.TYPE` uses `minecraft:raids`; every island's raids are rolled up.
+        files.push(EncodedFile {
+            path: self.dir.saved_data("minecraft:raids"),
+            backup: None,
+            bytes: encode_saved_data(&crate::save_data::raids_tag(islands))?,
         });
         files.push(EncodedFile {
             path: self.dir.chunk_tickets(),
@@ -307,7 +328,7 @@ impl SaveSession {
     /// Test-only: write `encode_saves` bytes synchronously, standing in for the IO thread.
     #[cfg(test)]
     pub(crate) fn save_all(&mut self, global: &Global, last_played: i64) -> io::Result<()> {
-        for file in self.encode_saves(global, last_played)? {
+        for file in self.encode_saves(global, &[], last_played)? {
             mc_bamboo_storage::world_dir::safe_replace(
                 &file.path,
                 &file.bytes,
@@ -416,7 +437,7 @@ mod tests {
         let (mut session, _) = SaveSession::open(&tmp.0).unwrap();
         assert!(!session.dir().level_dat().exists());
         let global = Global::default();
-        let files = session.encode_saves(&global, 777).unwrap();
+        let files = session.encode_saves(&global, &[], 777).unwrap();
         assert!(
             files
                 .iter()

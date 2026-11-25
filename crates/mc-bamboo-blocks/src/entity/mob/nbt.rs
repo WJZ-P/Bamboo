@@ -36,6 +36,11 @@ const PASSTHROUGH: &[&str] = &[
     "HasVisualFire",
     "locator_bar_icon",
     "current_explosion_impact_pos",
+    // 卫道士的 Johnny 彩蛋和劫掠兽的三个计时字段：读盘原样保留写回。
+    "Johnny",
+    "AttackTick",
+    "StunTick",
+    "RoarTick",
 ];
 
 /// `MobEffectInstance.CODEC` 的一项：`id` 加 `Details` 的六个字段（可递归的
@@ -393,6 +398,12 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::Pillager {
         super::pillager::save(mob, &mut out);
     }
+    if mob.mob_type == MobType::Vindicator {
+        super::vindicator::save(mob, &mut out);
+    }
+    if mob.mob_type == MobType::Ravager {
+        super::ravager::save(mob, &mut out);
+    }
     if mob.mob_type == MobType::GlowSquid {
         put(
             &mut out,
@@ -461,9 +472,29 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::SnowGolem {
         super::snow_golem::write_nbt(mob, &mut out);
     }
-    // ---- AbstractVillager / Villager ----
+    // ---- AbstractVillager / Villager / WanderingTrader / TraderLlama ----
+    if matches!(mob.mob_type, MobType::Villager | MobType::WanderingTrader) {
+        mob.villager.write_abstract_nbt(&mut out);
+    }
     if mob.mob_type == MobType::Villager {
-        mob.villager.write_nbt(&mut out);
+        mob.villager.write_villager_nbt(&mut out);
+    }
+    if mob.mob_type == MobType::WanderingTrader {
+        put(
+            &mut out,
+            "DespawnDelay",
+            Tag::Int(mob.wandering_trader.despawn_delay),
+        );
+        if let Some(target) = mob.wandering_trader.wander_target {
+            put(&mut out, "wander_target", block_pos_tag(target));
+        }
+    }
+    if mob.mob_type == MobType::TraderLlama {
+        put(
+            &mut out,
+            "DespawnDelay",
+            Tag::Int(mob.trader_llama.despawn_delay),
+        );
     }
     if mob.mob_type == MobType::ZombieVillager {
         mob.zombie_villager.write_nbt(&mob.villager, &mut out);
@@ -488,6 +519,18 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::String(mob.armadillo.state.name().to_owned()),
         );
         put(&mut out, "scute_time", Tag::Int(mob.armadillo.scute_time));
+    }
+    if mob.mob_type == MobType::Warden {
+        // `Warden.addAdditionalSaveData`：`anger` 走 `AngerManagement.codec`，
+        // `listener` 走 `VibrationSystem.Data.CODEC`。
+        // `Warden.addAdditionalSaveData`: `anger` via `AngerManagement.codec`,
+        // `listener` via `VibrationSystem.Data.CODEC`.
+        put(&mut out, "anger", mob.warden.anger.write_codec());
+        put(
+            &mut out,
+            "listener",
+            Tag::Compound(mob.warden.listener.write_codec()),
+        );
     }
     if mob.mob_type == MobType::Frog {
         // `Frog.addAdditionalSaveData`：`VariantUtils.writeVariant`。
@@ -849,6 +892,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         if mob.mob_type == MobType::Pillager {
             super::pillager::load(mob, tag);
         }
+        if mob.mob_type == MobType::Vindicator {
+            let _ = super::vindicator::load_johnny(tag);
+        }
+        if mob.mob_type == MobType::Ravager {
+            let _ = super::ravager::load(tag);
+        }
         if mob.mob_type == MobType::GlowSquid {
             mob.squid.dark_ticks = tag::int_or(tag, "DarkTicksRemaining", 0);
         }
@@ -932,6 +981,19 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
                 mob.frog.variant = variant;
             }
         }
+        if mob.mob_type == MobType::Warden {
+            // `Warden.readAdditionalSaveData`：读不出的键回到缺省值，再同步客户端愤怒等级。
+            // `Warden.readAdditionalSaveData`: unreadable keys fall back to defaults,
+            // then the client anger level is synced.
+            if let Some(anger) = tag::field(tag, "anger") {
+                mob.warden.anger = super::warden::AngerManagement::read_codec(anger);
+            }
+            if let Some(listener) = tag::field(tag, "listener") {
+                mob.warden.listener =
+                    crate::archive::passive::read_listener_for_vibration(listener);
+            }
+            mob.warden.client_anger_level = mob.warden.anger.get_active_anger(None);
+        }
         if mob.mob_type == MobType::SkeletonHorse
             && let Some(state) = mob.skeleton_horse.as_mut()
         {
@@ -976,13 +1038,30 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         if mob.mob_type == MobType::SnowGolem {
             super::snow_golem::read_nbt(mob, tag);
         }
+        if matches!(mob.mob_type, MobType::Villager | MobType::WanderingTrader) {
+            mob.villager.read_abstract_nbt(tag);
+        }
         if mob.mob_type == MobType::Villager {
-            mob.villager.read_nbt(tag);
+            mob.villager.read_villager_nbt(tag);
             // `Villager.readAdditionalSaveData` 末尾按读出的年龄与职业刷新大脑，
             // 保留从 `Brain` 标签读回的可序列化记忆。
             // `Villager.readAdditionalSaveData` refreshes the brain for the loaded age and
             // profession, keeping serialisable memories read from the `Brain` tag.
             super::villager_ai::refresh_brain_offline(me, mob);
+        }
+        if mob.mob_type == MobType::WanderingTrader {
+            mob.wandering_trader.despawn_delay = tag::int_or(tag, "DespawnDelay", 0);
+            let pos = tag::int_array(tag, "wander_target");
+            mob.wandering_trader.wander_target =
+                (pos.len() == 3).then(|| BlockPos::new(pos[0], pos[1], pos[2]));
+            mob.age = mob.age.max(0);
+        }
+        if mob.mob_type == MobType::TraderLlama {
+            mob.trader_llama.despawn_delay = tag::int_or(
+                tag,
+                "DespawnDelay",
+                super::trader_llama::DEFAULT_DESPAWN_DELAY,
+            );
         }
         if mob.mob_type == MobType::ZombieVillager {
             mob.zombie_villager.read_nbt(&mut mob.villager, tag);
@@ -1413,6 +1492,37 @@ pub(super) fn uuid_field(tag: &Tag, key: &str) -> Option<[u8; 16]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 监守者存档往返保留 `anger` / `listener`；读档的愤怒先按 UUID 暂存，
+    /// 客户端等级按官方 `syncClientAngerLevel` 仍是 0。
+    ///
+    /// A warden save round-trips `anger` / `listener`; loaded anger stays
+    /// UUID-staged and the client level is 0 as in vanilla `syncClientAngerLevel`.
+    #[test]
+    fn warden_nbt_round_trip_keeps_anger_and_listener() {
+        let mut entity = Entity::by_mob_type(MobType::Warden, Vec3::new(0.5, 64.0, 0.5));
+        entity.with_mob(|_, mob| {
+            mob.warden.anger.increase_anger(1, [7; 16], 95, true);
+            mob.warden.client_anger_level = 95;
+        });
+        let row = entity.split();
+        let tag = write_mob(&row).expect("write warden");
+        let Tag::Compound(entries) = &tag else {
+            panic!("mob NBT is a compound");
+        };
+        let has = |key: &str| entries.iter().any(|(name, _)| name == key);
+        assert!(has("anger"));
+        assert!(has("listener"));
+        let loaded = read_mob(&tag, "minecraft:warden", 7)
+            .expect("read warden")
+            .expect("modelled");
+        let mut rebuilt = loaded.into_entity();
+        rebuilt.with_mob(|_, mob| {
+            assert_eq!(mob.mob_type, MobType::Warden);
+            assert_eq!(mob.warden.anger.anger_by_uuid, vec![([7; 16], 95)]);
+            assert_eq!(mob.warden.client_anger_level, 0);
+        });
+    }
 
     fn round_trip(instances: Vec<EffectInstance>) -> EffectMap {
         let mut map = EffectMap::new();

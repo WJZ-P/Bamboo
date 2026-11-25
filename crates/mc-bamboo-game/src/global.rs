@@ -267,6 +267,11 @@ pub(crate) struct Global {
     /// `None` with one island: the weather uses that island's `Level.random`
     /// as vanilla does.
     pub(crate) weather_random: Option<mc_bamboo_blocks::random::LevelRandom>,
+    /// 全服一份的 `WanderingTraderData`（`data/minecraft/wandering_trader.dat`）。
+    ///
+    /// The one `WanderingTraderData` (`data/minecraft/wandering_trader.dat`).
+    pub(crate) wandering_trader_data:
+        mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData,
     /// 权威的世界生成参数（种子、世界类型、flat 预设、结构开关）。启动时定下来，
     /// 发布到岛上的全局快照，之后整局不变。
     ///
@@ -301,6 +306,7 @@ impl Default for Global {
             random_sequences: mc_bamboo_loot::RandomSequences::new(crate::world_state::WORLD_SEED),
             weather_random: None,
             world_gen: crate::world_options::WorldGenConfig::default(),
+            wandering_trader_data: mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData::default(),
         }
     }
 }
@@ -443,6 +449,7 @@ impl Global {
             world_gen: self.world_gen.clone(),
             idle_timeout_minutes: self.admin.idle_timeout_minutes,
             scoreboard: Arc::clone(&self.scoreboard),
+            wandering_trader_data: self.wandering_trader_data,
         }
     }
 
@@ -515,6 +522,25 @@ impl Global {
     /// The authoritative world settings.
     pub(crate) fn state(&self) -> &WorldState {
         &self.state
+    }
+
+    /// 存档用的 `WanderingTraderData` 权威副本。
+    ///
+    /// The authoritative saved copy of `WanderingTraderData`.
+    pub(crate) fn wandering_trader_data(
+        &self,
+    ) -> mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData {
+        self.wandering_trader_data
+    }
+
+    /// 岛上刷新器改完存档计时后同步回全服。
+    ///
+    /// Sync the saved timer back after an island spawner changed it.
+    pub(crate) fn set_wandering_trader_data(
+        &mut self,
+        data: mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData,
+    ) {
+        self.wandering_trader_data = data;
     }
 
     /// 权威的世界设置，可写。
@@ -833,6 +859,9 @@ pub(crate) struct GlobalView {
     /// `/setidletimeout` 的分钟数，0 表示不踢。
     pub(crate) idle_timeout_minutes: i32,
     pub(crate) scoreboard: Arc<Scoreboard>,
+    /// 全服的 `WanderingTraderData`，写盘时用。
+    pub(crate) wandering_trader_data:
+        mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData,
 }
 
 impl Default for GlobalView {

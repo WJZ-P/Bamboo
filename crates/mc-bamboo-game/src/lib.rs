@@ -78,7 +78,7 @@ mod links;
 mod lock;
 mod loot_stacks;
 mod menu;
-mod merchant;
+pub mod merchant;
 mod movement;
 mod natural_spawn;
 mod outgoing;
@@ -105,10 +105,15 @@ pub mod player_hurt;
 mod player_move;
 pub mod player_respawn;
 mod player_save;
+mod player_shoulder;
 pub mod player_weapon;
 pub mod poi_query;
 mod pos_map;
 mod profiler;
+#[cfg(feature = "oracle-samples")]
+pub mod raid;
+#[cfg(not(feature = "oracle-samples"))]
+mod raid;
 pub mod region;
 #[cfg(feature = "oracle-samples")]
 mod replay_players;
@@ -120,7 +125,7 @@ pub use replay_players::{ReplayPlayerSetup, ReplayPlayers};
 #[cfg(feature = "oracle-samples")]
 #[doc(hidden)]
 pub mod resume_replay;
-mod save_data;
+pub mod save_data;
 pub mod save_session;
 mod scoreboard;
 mod secure_chat;
@@ -132,6 +137,7 @@ pub(crate) mod spawn_landing;
 /// The structure spawn override (`ChunkGenerator.getMobsAt`), also used by the oracle.
 pub mod structure_spawn;
 mod tick_levels;
+mod wandering_trader_spawn;
 mod weather;
 mod world;
 mod world_gen_settings;
@@ -679,6 +685,50 @@ pub fn replay_criteria_values(total: i32, level: i32) -> [i32; 6] {
 /// saved-data` official-codec comparison. Exposes only public [`Tag`]s with
 /// fixed values so the tool can assert the expected decoded values. Gated
 /// behind the `oracle-samples` feature so production builds omit it.
+/// `mc-bamboo-vanilla saved-data` 用的一份固定 `raids.dat` 示例：两场不同状态
+/// 和等级的袭击、各带一名英雄 UUID。值固定，官方 codec 解出后逐项断言。
+///
+/// A fixed `raids.dat` sample for the official-codec comparison: two raids in
+/// different states with different omen levels, each with one hero UUID.
+#[cfg(feature = "oracle-samples")]
+pub fn raids_sample() -> mc_bamboo_nbt::Tag {
+    mc_bamboo_blocks::entity::raid::Raids {
+        raids: [
+            (1, {
+                let mut raid = mc_bamboo_blocks::entity::raid::Raid::new(
+                    mc_bamboo_core::BlockPos::new(16, 68, -32),
+                    2,
+                );
+                raid.started = true;
+                raid.ticks_active = 1234;
+                raid.raid_omen_level = 3;
+                raid.groups_spawned = 2;
+                raid.cooldown_ticks = 42;
+                raid.total_health = 96.5;
+                raid.add_hero_of_the_village([0xA1; 16]);
+                raid
+            }),
+            (7, {
+                let mut raid = mc_bamboo_blocks::entity::raid::Raid::new(
+                    mc_bamboo_core::BlockPos::new(-100, 72, 240),
+                    3,
+                );
+                raid.status = mc_bamboo_blocks::entity::raid::RaidStatus::Victory;
+                raid.active = false;
+                raid.post_raid_ticks = 40;
+                raid.total_health = 0.0;
+                raid.add_hero_of_the_village([0x5E; 16]);
+                raid
+            }),
+        ]
+        .into_iter()
+        .collect(),
+        next_id: 12,
+        tick: 777,
+    }
+    .to_tag()
+}
+
 #[cfg(feature = "oracle-samples")]
 pub fn saved_data_samples() -> (mc_bamboo_nbt::Tag, mc_bamboo_nbt::Tag, mc_bamboo_nbt::Tag) {
     let mut rules = gamerules::GameRuleSet::vanilla();

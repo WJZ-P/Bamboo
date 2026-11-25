@@ -42,6 +42,7 @@ import net.minecraft.world.RandomSequences;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntitySpawnRequest;
 import net.minecraft.world.entity.npc.villager.Villager;
+import net.minecraft.world.entity.npc.wanderingtrader.WanderingTrader;
 import net.minecraft.world.entity.npc.villager.VillagerData;
 import net.minecraft.world.entity.npc.villager.VillagerProfession;
 import net.minecraft.world.entity.npc.villager.VillagerType;
@@ -114,6 +115,16 @@ public final class TradeOracle {
                         }
                     }
                 }
+            }
+            // 流浪商人没有职业 / 等级 / 品种：三张交易集一次求值，四个世界种子各一题。
+            // Wandering traders have no profession/level/type: one evaluation of
+            // the three trade sets per world seed.
+            for (long seed : SEEDS) {
+                String name = "wandering_trader";
+                if (only != null && !name.startsWith(only)) continue;
+                JsonObject line = world.wanderingCaseOf(seed);
+                cases++;
+                OUT.println(line);
             }
             JsonObject summary = new JsonObject();
             summary.addProperty("kind", "summary");
@@ -210,6 +221,25 @@ public final class TradeOracle {
             mob.setVillagerData(new VillagerData(variant, job, level));
             MerchantOffers offers = mob.getOffers();
             return caseLine(profession, level, type, seed, offers, ops);
+        }
+
+        JsonObject wanderingCaseOf(long seed) throws Exception {
+            server.sequences = new RandomSequences();
+            server.worldSeed = seed;
+            set(Level.class, this.level, "random", RandomSource.create(seed));
+            WanderingTrader mob = (WanderingTrader) net.minecraft.world.entity.EntityTypes.WANDERING_TRADER.create(
+                    this.level, EntitySpawnReason.COMMAND);
+            if (mob == null) throw new IllegalStateException("cannot create wandering trader");
+            mob.setPos(1.5, 64.0, 2.5);
+            MerchantOffers offers = mob.getOffers();
+            JsonObject line = new JsonObject();
+            line.addProperty("kind", "wandering_trade");
+            line.addProperty("seed", Long.toString(seed));
+            JsonElement encoded = MerchantOffers.CODEC
+                    .encodeStart(ops, offers)
+                    .getOrThrow(error -> new IllegalStateException("cannot encode offers: " + error));
+            line.add("offers", encoded);
+            return line;
         }
 
     }

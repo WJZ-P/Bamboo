@@ -41,6 +41,8 @@ const SERIALIZER_BLOCK_STATE: i32 = 14;
 const SERIALIZER_OPTIONAL_BLOCK_STATE: i32 = 15;
 /// `EntityDataSerializers.PARTICLES`：注册顺序里的第 18 个。
 const SERIALIZER_PARTICLES: i32 = 17;
+/// `EntityDataSerializers.OPTIONAL_UNSIGNED_INT`，注册顺序第 20 个（ID 19）。
+const SERIALIZER_OPTIONAL_UNSIGNED_INT: i32 = 19;
 const SERIALIZER_POSE: i32 = 20;
 /// `EntityDataSerializers.COW_VARIANT`，注册顺序里的第 24 个。
 ///
@@ -201,8 +203,19 @@ pub enum EntityData {
     ///
     /// index 15, BYTE. `Mob.DATA_MOB_FLAGS_ID`: no AI, left-handed, aggressive.
     MobFlags(u8),
+    /// `Player.DATA_SHOULDER_PARROT_LEFT`（index 19）/ `RIGHT`（index 20），
+    /// OPTIONAL_UNSIGNED_INT：肩膀上鹦鹉的品种 ID，空肩是 `None`。
+    ///
+    /// `Player.DATA_SHOULDER_PARROT_LEFT` / `RIGHT`: OPTIONAL_UNSIGNED_INT with
+    /// the perched parrot's variant id, `None` for an empty shoulder.
+    ShoulderParrotLeft(Option<i32>),
+    ShoulderParrotRight(Option<i32>),
     /// index 16，BOOLEAN。`AgeableMob.DATA_BABY_ID`。
     Baby(bool),
+    /// index 16，INT。`Warden.CLIENT_ANGER_LEVEL`（`getActiveAnger()`）。
+    ///
+    /// index 16, INT. `Warden.CLIENT_ANGER_LEVEL` (`getActiveAnger()`).
+    ClientAngerLevel(i32),
     /// index 17，BOOLEAN。`AgeableMob.AGE_LOCKED`。
     AgeLocked(bool),
     /// index 18，COW_VARIANT。`Cow.DATA_VARIANT_ID`，值是注册表 ID 的 VarInt。
@@ -551,7 +564,7 @@ impl EntityData {
             Self::EffectAmbience(_) => 11,
             Self::SleepingPos(_) => 14,
             Self::MobFlags(_) => 15,
-            Self::MainHand(_) | Self::Baby(_) => 16,
+            Self::MainHand(_) | Self::Baby(_) | Self::ClientAngerLevel(_) => 16,
             Self::ModelCustomisation(_)
             | Self::AgeLocked(_)
             | Self::SpecialType(_)
@@ -574,6 +587,8 @@ impl EntityData {
             }
             Self::RabbitVariant(_) => mc_bamboo_data::entity_types::RABBIT_VARIANT,
             Self::CowSoundVariant(_) => 19,
+            Self::ShoulderParrotLeft(_) => 19,
+            Self::ShoulderParrotRight(_) => 20,
             Self::CreeperSwellDir(_) => mc_bamboo_data::entity_types::CREEPER_SWELL_DIR,
             Self::CreeperPowered(_) => mc_bamboo_data::entity_types::CREEPER_POWERED,
             Self::CreeperIgnited(_) => mc_bamboo_data::entity_types::CREEPER_IGNITED,
@@ -655,6 +670,11 @@ impl EntityData {
 
     fn write(&self, out: &mut Vec<u8>) {
         match self {
+            Self::ShoulderParrotLeft(variant) | Self::ShoulderParrotRight(variant) => {
+                write_data_header(out, self.index(), SERIALIZER_OPTIONAL_UNSIGNED_INT);
+                // 官方 OptionalInt：空写 0，有值写品种 ID + 1。
+                write_varint(out, variant.map_or(0, |value| value + 1));
+            }
             Self::TameFlags(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*value);
@@ -1020,7 +1040,8 @@ impl EntityData {
             }
             Self::SalmonVariant(value)
             | Self::TropicalFishVariant(value)
-            | Self::PufferfishPuffState(value) => {
+            | Self::PufferfishPuffState(value)
+            | Self::ClientAngerLevel(value) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *value);
             }

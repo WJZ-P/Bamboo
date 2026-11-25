@@ -41,6 +41,10 @@ pub enum SpawnReason {
     ///
     /// `EntitySpawnReason.PATROL`: a patrol from `PatrolSpawner`.
     Patrol,
+    /// `EntitySpawnReason.EVENT`：`WanderingTraderSpawner` 刷出来的商人和行商羊驼。
+    ///
+    /// `EntitySpawnReason.EVENT`: traders and llamas from `WanderingTraderSpawner`.
+    Event,
     /// `EntitySpawnReason.STRUCTURE`：结构生成。
     ///
     /// `EntitySpawnReason.STRUCTURE`: structure spawning.
@@ -548,6 +552,15 @@ fn finalize_spawn_in_group(
     }
     if kind == MobType::Pillager {
         super::pillager::finalize_spawn(world, entity, reason);
+        return;
+    }
+    if matches!(kind, MobType::Vindicator | MobType::Ravager) {
+        let random = world.random();
+        if kind == MobType::Vindicator {
+            super::vindicator::finalize_spawn(entity, random);
+        } else {
+            super::ravager::finalize_spawn(entity, random);
+        }
         return;
     }
     // `Guardian` / `ElderGuardian` 没有自己的 `finalizeSpawn`，只走 `Monster` 继承的

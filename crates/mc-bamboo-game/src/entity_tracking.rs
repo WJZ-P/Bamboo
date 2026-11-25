@@ -1130,6 +1130,11 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             _ => EntityData::SharedFlags(0),
         };
     }
+    // `Warden.CLIENT_ANGER_LEVEL` 占 index 16 的 INT（不是 `AgeableMob.Baby` 的 BOOL）。
+    // `Warden.CLIENT_ANGER_LEVEL` is the INT at index 16 (not `AgeableMob.Baby`'s BOOL).
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Warden && index == 16 {
+        return EntityData::ClientAngerLevel(0);
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::ZombieVillager {
         use mc_bamboo_data::villager;
         return match index {
@@ -1147,18 +1152,28 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             _ => EntityData::SharedFlags(0),
         };
     }
-    if kind == mc_bamboo_blocks::entity::mob::MobType::Villager {
+    // `AbstractVillager.DATA_UNHAPPY_COUNTER` 也定义在流浪商人身上，index 相同。
+    // `AbstractVillager.DATA_UNHAPPY_COUNTER` also belongs to the wandering trader.
+    if matches!(
+        kind,
+        mc_bamboo_blocks::entity::mob::MobType::Villager
+            | mc_bamboo_blocks::entity::mob::MobType::WanderingTrader
+    ) {
         use mc_bamboo_data::villager;
         match index {
             villager::UNHAPPY_COUNTER_INDEX => return EntityData::VillagerUnhappy(0),
-            villager::VILLAGER_DATA_INDEX => {
+            villager::VILLAGER_DATA_INDEX
+                if kind == mc_bamboo_blocks::entity::mob::MobType::Villager =>
+            {
                 return EntityData::VillagerData {
                     kind: villager::type_id(villager::DEFAULT_TYPE).unwrap_or(0),
                     profession: villager::profession_id(villager::NONE_PROFESSION).unwrap_or(0),
                     level: villager::MIN_VILLAGER_LEVEL,
                 };
             }
-            villager::VILLAGER_DATA_FINALIZED_INDEX => {
+            villager::VILLAGER_DATA_FINALIZED_INDEX
+                if kind == mc_bamboo_blocks::entity::mob::MobType::Villager =>
+            {
                 return EntityData::VillagerDataFinalized(false);
             }
             _ => {}
@@ -1496,6 +1511,12 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     if mob_flags != 0 {
         out.push(EntityData::MobFlags(mob_flags));
     }
+    // `Warden.CLIENT_ANGER_LEVEL`：非缺省值发 INT（缺省 0 走 default_data_for_type）。
+    // `Warden.CLIENT_ANGER_LEVEL`: send the INT when non-default (0 goes to defaults).
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Warden && mob.client_anger_level != 0
+    {
+        out.push(EntityData::ClientAngerLevel(mob.client_anger_level));
+    }
     // 骷髅的 `DATA_STRAY_CONVERSION_ID` 和沼骸的 `DATA_SHEARED` 都是 index 16 的 BOOLEAN，
     // 和这里的 `Baby` 字节完全相同；变回假时走 `default_data_for_type` 的 16 号缺省。
     // `Skeleton.DATA_STRAY_CONVERSION_ID` and `Bogged.DATA_SHEARED` are index-16 booleans,
@@ -1613,7 +1634,7 @@ fn equine_non_default_data(
     if equine.chested {
         out.push(EntityData::HorseChest(true));
     }
-    if kind == MobType::Llama {
+    if matches!(kind, MobType::Llama | MobType::TraderLlama) {
         if equine.strength != 0 {
             out.push(EntityData::LlamaStrength(equine.strength));
         }
@@ -1912,12 +1933,19 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         }
         return out;
     }
-    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Villager {
+    if matches!(
+        mob.mob_type,
+        mc_bamboo_blocks::entity::mob::MobType::Villager
+            | mc_bamboo_blocks::entity::mob::MobType::WanderingTrader
+    ) {
         use mc_bamboo_data::villager;
-        // 按 index 升序：18 不高兴计数、19 `VillagerData`、20 finalized。
-        // Ascending indices: 18 unhappy, 19 `VillagerData`, 20 finalized.
+        // 按 index 升序：18 不高兴计数、19 `VillagerData`、20 finalized（仅村民）。
+        // Ascending indices: 18 unhappy, 19 `VillagerData`, 20 finalized (villagers only).
         if mob.villager_unhappy != 0 {
             out.push(EntityData::VillagerUnhappy(mob.villager_unhappy));
+        }
+        if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::WanderingTrader {
+            return out;
         }
         let default_kind = villager::type_id(villager::DEFAULT_TYPE).unwrap_or(0);
         let default_profession = villager::profession_id(villager::NONE_PROFESSION).unwrap_or(0);
@@ -2465,15 +2493,25 @@ fn event_packet(
         }
         MobEvent::Particles {
             particle,
+            item,
             position,
             offset,
             speed,
             count,
         } => {
-            // 简单粒子的 `ParticleTypes.STREAM_CODEC` 只有类型 ID。
-            // A simple particle's `ParticleTypes.STREAM_CODEC` is the type id alone.
+            // 简单粒子的 `ParticleTypes.STREAM_CODEC` 只有类型 ID；带物品的粒子
+            // （`ItemParticleOption`）再按 `ItemStackTemplate.STREAM_CODEC` 追加
+            // 物品 ID、数量 1、空的组件补丁（两个 0 varint）。
+            // A simple particle's codec is the type id alone; an item particle appends
+            // `ItemStackTemplate.STREAM_CODEC`: item id, count 1, empty component patch.
             let mut options = Vec::new();
             mc_bamboo_protocol::codec::write_varint(&mut options, *particle);
+            if let Some(item) = *item {
+                mc_bamboo_protocol::codec::write_varint(&mut options, item);
+                mc_bamboo_protocol::codec::write_varint(&mut options, 1);
+                mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+                mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+            }
             EventPacket::Particles {
                 body: packet_body(&mc_bamboo_protocol::packet::play::LevelParticles {
                     options: &options,

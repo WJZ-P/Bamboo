@@ -158,6 +158,13 @@ pub(crate) struct Player {
     /// `LivingEntity.activeEffects`: the same shared map as mobs, with
     /// relative countdowns only.
     pub(crate) effects: EffectMap,
+    /// `ServerPlayer.raidOmenPosition`：不祥之兆转成袭击之兆时记下的村庄坐标，
+    /// 袭击之兆倒计时结束用它建袭击，用完清掉。官方不存档。
+    ///
+    /// Vanilla `ServerPlayer.raidOmenPosition`: the village position recorded when
+    /// BAD_OMEN converts into RAID_OMEN; the expiring raid omen uses it to start
+    /// the raid, then clears it. Not saved.
+    pub(crate) raid_omen_position: Option<BlockPos>,
     /// `LivingEntity.attributes`：玩家属性表，基础值来自 `Player.createAttributes`。
     /// 每刻由 [`crate::player_attributes::rebuild`] 从装备 / 效果 / 游戏模式重算修饰符。
     ///
@@ -285,6 +292,14 @@ pub(crate) struct Player {
     pub(crate) riding: crate::riding::Riding,
     /// 官方 `ServerPlayer.getAdvancements()` 的可变状态，跟着玩家在岛之间搬动。
     pub(crate) advancements: crate::advancements::PlayerAdvancements,
+    /// `ServerPlayer.shoulderEntityLeft` / `Right`：整只鹦鹉的 `saveWithoutId` NBT。
+    /// 空肩是 `None`（官方存空 `CompoundTag`，不写进玩家档）。
+    /// 上肩后经过的相对刻数也在共享状态里（`> 20` 才允许离肩）。
+    ///
+    /// `ServerPlayer.shoulderEntityLeft` / `Right`: the whole parrot's
+    /// `saveWithoutId` tag. `None` means an empty shoulder. The shared state
+    /// also holds the relative tick count since the last perch.
+    pub(crate) shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState,
 }
 
 impl Player {
@@ -373,6 +388,8 @@ impl Player {
             awaiting_respawn: false,
             riding: crate::riding::Riding::default(),
             advancements: crate::advancements::PlayerAdvancements::default(),
+            shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState::empty(),
+            raid_omen_position: None,
         };
         crate::player_attributes::rebuild_player(&mut player, false);
         player
@@ -562,7 +579,26 @@ impl Player {
             pitch: self.pitch,
             combat: self.combat_memory.view(self.entity_ticks),
             effects: mc_bamboo_blocks::entity::ctx::TargetEffects::from_map(&self.effects),
+            shoulder_left: self.shoulder.left_variant(),
+            shoulder_right: self.shoulder.right_variant(),
         }
+    }
+
+    /// 把肩膀字段拆成共享状态，交给 `mc-bamboo-blocks` 的同一份生产逻辑。
+    pub(crate) fn shoulder_state(&self) -> mc_bamboo_blocks::entity::shoulder::ShoulderState {
+        mc_bamboo_blocks::entity::shoulder::ShoulderState {
+            left: self.shoulder.left.clone(),
+            right: self.shoulder.right.clone(),
+            since: self.shoulder.since,
+        }
+    }
+
+    /// 把共享状态写回玩家的三个肩膀字段。
+    pub(crate) fn apply_shoulder_state(
+        &mut self,
+        state: mc_bamboo_blocks::entity::shoulder::ShoulderState,
+    ) {
+        self.shoulder = state;
     }
 
     /// [`view`](Self::view) 加上按名字查到的队伍。

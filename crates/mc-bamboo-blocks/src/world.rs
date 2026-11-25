@@ -3665,7 +3665,14 @@ impl<'a> World<'a> {
 
     /// `addFreshEntity`：放进世界，返回实体 ID。tick 的时候生成的实体下一 tick 才开始动。
     pub fn spawn_entity(&mut self, entity: Entity) -> i32 {
-        self.level.spawn_entity(entity)
+        let section = crate::game_event::dispatch::entity_listener_section(&entity);
+        let uid = self.level.spawn_entity(entity);
+        if let Some((chunk, y)) = section
+            && let Some(table) = self.level.game_event_listeners_mut()
+        {
+            table.sync_entity(uid, chunk, y);
+        }
+        uid
     }
 
     /// 生成一支射出的箭：先分配 ID 和随机种子（官方构造函数里的 UUID 取数），
@@ -3707,7 +3714,14 @@ impl<'a> World<'a> {
 
     /// 放进一个 [`Self::prepare_entity`] 过的实体。
     pub fn add_prepared_entity(&mut self, entity: Entity) -> i32 {
-        self.level.add_prepared_entity(entity)
+        let section = crate::game_event::dispatch::entity_listener_section(&entity);
+        let uid = self.level.add_prepared_entity(entity);
+        if let Some((chunk, y)) = section
+            && let Some(table) = self.level.game_event_listeners_mut()
+        {
+            table.sync_entity(uid, chunk, y);
+        }
+        uid
     }
 
     /// 世界里有没有这个 UUID 的生物。
@@ -4242,6 +4256,49 @@ impl<'a> World<'a> {
         self.level.entity_uids()
     }
 
+    /// 每刻把实体监听者同步到所在区段：按 uid 升序，`sync_entity` 搬家、实体没了就注销。
+    /// 官方是 `onTrackingStart` / `onSectionChange` / `onTrackingEnd` 三个回调，这里在
+    /// 一刻末尾统一做，精确与并行驱动都按同样的 uid 顺序落地，逐位一致。
+    ///
+    /// Sync entity listeners to their section each tick in ascending uid order:
+    /// `sync_entity` moves them, departed ones are removed. Vanilla uses the
+    /// `onTrackingStart` / `onSectionChange` / `onTrackingEnd` callbacks; doing it
+    /// once at the end of the tick in the same uid order keeps precise and parallel
+    /// drives bit-identical.
+    pub(crate) fn sync_entity_listeners(&mut self) {
+        self.sync_entity_listeners_for(None);
+    }
+
+    fn sync_entity_listeners_for(&mut self, only: Option<crate::entity::EntityUid>) {
+        let mut uids: std::collections::BTreeSet<crate::entity::EntityUid> = match only {
+            Some(uid) => [uid].into_iter().collect(),
+            None => self.level.entity_uids().into_iter().collect(),
+        };
+        if only.is_none()
+            && let Some(table) = self.level.game_event_listeners()
+        {
+            for uid in table.entity_listener_uids() {
+                uids.insert(uid);
+            }
+        }
+        let mut updates = Vec::with_capacity(uids.len());
+        for uid in uids {
+            let section = self
+                .level
+                .entity(uid)
+                .and_then(|entity| crate::game_event::dispatch::entity_listener_section(&entity));
+            updates.push((uid, section));
+        }
+        if let Some(table) = self.level.game_event_listeners_mut() {
+            for (uid, section) in updates {
+                match section {
+                    Some((chunk, y)) => table.sync_entity(uid, chunk, y),
+                    None => table.remove_entity(uid),
+                }
+            }
+        }
+    }
+
     /// 从 tick 列表里拿掉。正在 tick 的实体只标记 `discard`，由 tick 循环丢掉。
     ///
     /// Removes an entity from the tick list. The entity currently ticking is only marked `discard`.
@@ -4333,6 +4390,7 @@ impl<'a> World<'a> {
             }
         }
         self.level.end_entity_tick();
+        self.sync_entity_listeners();
         self.run_pathfinding_phase();
         // 精确驱动只有一个线程；把分段计数并进全局汇总（正式构建是空操作）。
         #[cfg(test)]
@@ -5146,7 +5204,9 @@ mod tests {
                 | Effect::EnderPearlTeleport { .. }
                 | Effect::GuardianElderEffect { .. }
                 | Effect::TrialSpawnerTransformBadOmen { .. }
+                | Effect::RaiderDied { .. }
                 | Effect::Explode { .. }
+                | Effect::PlayerShoulder { .. }
                 | Effect::VibrationParticle { .. } => None,
             })
             .collect()

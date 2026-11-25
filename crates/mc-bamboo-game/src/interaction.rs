@@ -464,6 +464,13 @@ pub(crate) fn on_player_action(
 pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Effect]) {
     for effect in effects {
         match *effect {
+            Effect::PlayerShoulder { player, ref tag } => {
+                // `ShoulderRidingEntity.setEntityOnShoulder`：把鹦鹉 NBT 存进玩家肩膀。
+                let id = crate::inbound::PlayerId(player);
+                if let Some(shouldered) = region.players.get_mut(&id) {
+                    crate::player_shoulder::set_entity_on_shoulder(shouldered, tag.clone());
+                }
+            }
             Effect::Destroyed {
                 pos,
                 state,
@@ -796,6 +803,13 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 if let Some(id) = initiator {
                     crate::sleep::on_sleep_in_bed(region, id, pos, set_spawn, problem);
                 }
+            }
+            Effect::RaiderDied {
+                uid,
+                position,
+                killer,
+            } => {
+                crate::raid::raider_died(region, uid, position, killer);
             }
             Effect::BredAnimals {
                 father,
@@ -1664,7 +1678,12 @@ pub(crate) fn on_interact_entity(
         // `createFilledResult` 自己会消耗手里的一个，有交回物品时不再另扣。
         // `createFilledResult` consumes the held item itself, so no extra shrink then.
         if outcome.shrink_held && outcome.replacement.is_none() {
-            inventory::shrink_held(region, id, try_hand);
+            // 狼铠修复走官方 `ItemStack.shrink`：创造模式也扣一个鳞甲。
+            if outcome.shrink_even_creative {
+                inventory::shrink_held_force(region, id, try_hand);
+            } else {
+                inventory::shrink_held(region, id, try_hand);
+            }
         }
         if let Some(replacement) = outcome.replacement {
             inventory::give_filled_result(

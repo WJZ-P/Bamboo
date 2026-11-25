@@ -224,6 +224,10 @@ pub enum Kind {
     ///
     /// Creaking-only behaviours.
     Creaking(super::super::creaking_ai::Behavior),
+    /// 监守者专属行为。
+    ///
+    /// Warden-specific behaviours.
+    Warden(super::super::warden_ai::Behavior),
     /// 嗅探兽专属行为。
     ///
     /// Sniffer-specific behaviours.
@@ -370,6 +374,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.class(),
             Self::Villager(behavior) => behavior.class(),
             Self::Creaking(behavior) => behavior.class(),
+            Self::Warden(behavior) => behavior.class(),
             Self::Sniffer(behavior) => behavior.class(),
         }
     }
@@ -410,6 +415,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.required(),
             Self::Villager(behavior) => behavior.required(),
             Self::Creaking(behavior) => behavior.required(),
+            Self::Warden(behavior) => behavior.required(),
             Self::Sniffer(behavior) => behavior.required(),
         }
     }
@@ -454,6 +460,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.name(),
             Self::Villager(behavior) => behavior.name(),
             Self::Creaking(behavior) => behavior.name(),
+            Self::Warden(behavior) => behavior.name(),
             Self::Sniffer(behavior) => behavior.name(),
         }
     }
@@ -512,6 +519,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.extra_start(cx),
             Self::Villager(behavior) => behavior.extra_start(cx),
             Self::Creaking(behavior) => behavior.extra_start(cx),
+            Self::Warden(behavior) => behavior.extra_start(cx),
             Self::Sniffer(behavior) => behavior.extra_start(cx),
             _ => true,
         }
@@ -597,6 +605,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.start(cx),
             Self::Villager(behavior) => behavior.start(cx),
             Self::Creaking(behavior) => behavior.start(cx),
+            Self::Warden(behavior) => behavior.start(cx),
             Self::Sniffer(behavior) => behavior.start(cx),
             _ => {}
         }
@@ -635,6 +644,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.can_still_use(cx),
             Self::Villager(behavior) => behavior.can_still_use(cx),
             Self::Creaking(behavior) => behavior.can_still_use(cx),
+            Self::Warden(behavior) => behavior.can_still_use(cx),
             Self::Sniffer(behavior) => behavior.can_still_use(cx),
             _ => false,
         }
@@ -756,6 +766,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.tick(cx),
             Self::Villager(behavior) => behavior.tick(cx),
             Self::Creaking(behavior) => behavior.tick(cx),
+            Self::Warden(behavior) => behavior.tick(cx),
             Self::Sniffer(behavior) => behavior.tick(cx),
             _ => {}
         }
@@ -790,6 +801,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.stop(cx),
             Self::Villager(behavior) => behavior.stop(cx),
             Self::Creaking(behavior) => behavior.stop(cx),
+            Self::Warden(behavior) => behavior.stop(cx, timed_out),
             Self::Sniffer(behavior) => behavior.stop(cx, timed_out),
             _ => {}
         }
@@ -929,6 +941,7 @@ impl Kind {
             Self::Nautilus(behavior) => behavior.trigger(cx),
             Self::Villager(behavior) => behavior.trigger(cx),
             Self::Creaking(behavior) => behavior.trigger(cx),
+            Self::Warden(behavior) => behavior.trigger(cx),
             Self::Sniffer(behavior) => behavior.trigger(cx),
             _ => false,
         }

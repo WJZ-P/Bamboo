@@ -1182,11 +1182,11 @@ impl World {
         // 自动保存照官方 autoSave：只入队，不 join、不排阻塞栅栏（R5 / F3）。
         // Autosave like official autoSave: enqueue only, never join or block.
         self.save_all_players();
-        let files = self
-            .master
-            .save
-            .as_mut()
-            .map(|save| save.encode_saves(&self.master.global, crate::admin::now_millis()));
+        let raid_tables = self.raid_tables();
+        let master = &mut self.master;
+        let files = master.save.as_mut().map(|save| {
+            save.encode_saves(&master.global, &raid_tables, crate::admin::now_millis())
+        });
         match files {
             Some(Ok(files)) => self.master.host.submit_file_writes(files),
             Some(Err(error)) => warn!(%error, "could not encode level data for autosave"),
