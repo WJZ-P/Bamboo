@@ -683,6 +683,16 @@ pub(super) fn absorb_hurt(me: &mut Entity, mob: &mut Mob, amount: f32) {
     }
     if before != stack_crack_level(mob.equipment.get(EquipmentSlot::Body)) {
         living::play_sound(me, mob, SOUND_ARMOR_CRACK, 1.0, 1.0);
+        // `ServerLevel.sendParticles(new ItemParticleOption(ITEM, ARMADILLO_SCUTE),
+        // x, y + 1, z, 20, 0.2, 0.1, 0.2, 0.1)`：开裂阶段变化时撒鳞甲碎片。
+        mob.events.push(MobEvent::Particles {
+            particle: mc_bamboo_data::registries::particle_type::ITEM,
+            item: Some(items::ARMADILLO_SCUTE),
+            position: Vec3::new(me.position.x, me.position.y + 1.0, me.position.z),
+            offset: Vec3::new(0.2, 0.1, 0.2),
+            speed: 0.1,
+            count: 20,
+        });
     }
 }
 
@@ -700,17 +710,6 @@ pub(super) fn interact(
 ) -> MobInteraction {
     let held = &req.held;
     let consume = !req.creative;
-    // `Mob.interact` 先走 `Entity.interact` 的剪刀卸装；`Wolf.canShearEquipment` 只认主人。
-    // `Mob.interact` runs `Entity.interact`'s equipment shearing first; the wolf override
-    // accepts only the owner.
-    if held.item == items::SHEARS
-        && !mob.is_vehicle()
-        && !req.sneaking
-        && mob.tame.is_owned_by(Some(req.player_uuid))
-        && let Some(outcome) = super::equine::interact::attempt_to_shear_equipment(me, mob, req)
-    {
-        return outcome;
-    }
     if mob.tame.is_tame() {
         let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;
         if is_food(held) && mob.health < max {
@@ -760,7 +759,13 @@ pub(super) fn interact(
                 let new_damage = (body_damage(&body) - repair).max(0);
                 set_body_damage(mob, new_damage);
                 living::play_sound(me, mob, SOUND_ARMOR_REPAIR, 1.0, 1.0);
-                return outcome(InteractionResult::Success, true);
+                // 官方 `held.shrink(1)`：不看创造模式，也扣掉一个鳞甲。
+                return MobInteraction {
+                    result: InteractionResult::Success,
+                    shrink_held: true,
+                    shrink_even_creative: true,
+                    ..MobInteraction::pass()
+                };
             }
         }
         // `TamableAnimal.mobInteract`；主人且没消耗动作时再切换坐姿。
@@ -1393,11 +1398,13 @@ mod tests {
             0,
             &mut || 0.0,
         );
-        let outcome = interact(
+        // 剪刀卸装备在 `Mob.interact` 层（总分发），先于 `mobInteract`。
+        let outcome = crate::entity::mob::interact::interact(
             &mut me,
             &mut mob,
             &request_stack(ItemStack::new(items::SHEARS, 1), 7),
             0,
+            false,
             &mut || 0.0,
         );
         assert_eq!(outcome.result, InteractionResult::Success);
@@ -1425,6 +1432,8 @@ mod tests {
         );
         assert_eq!(outcome.result, InteractionResult::Success);
         assert!(outcome.shrink_held);
+        // 官方 `held.shrink(1)`：创造模式也扣，落地时不能短路。
+        assert!(outcome.shrink_even_creative);
         assert_eq!(
             crate::durability::damage_of(mob.equipment.get(EquipmentSlot::Body)),
             Some(12)
@@ -1498,6 +1507,14 @@ mod tests {
         assert!(mob.events.iter().any(|event| matches!(
             event,
             MobEvent::Sound { sound, .. } if *sound == SOUND_ARMOR_CRACK
+        )));
+        assert!(mob.events.iter().any(|event| matches!(
+            event,
+            MobEvent::Particles {
+                item: Some(item),
+                count: 20,
+                ..
+            } if *item == items::ARMADILLO_SCUTE
         )));
         // 再打一次不跨阶段，不重复播开裂声。
         mob.events.clear();

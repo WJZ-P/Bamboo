@@ -1509,6 +1509,7 @@ pub(super) fn interact(mob: &mut Mob, req: &MobInteractRequest) -> Option<MobInt
     Some(MobInteraction {
         result: InteractionResult::Success,
         shrink_held: !req.creative,
+        shrink_even_creative: false,
         replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
         open_inventory: false,
         shear: false,
@@ -1637,6 +1638,7 @@ mod tests {
         let fed = |creative: bool| MobInteraction {
             result: InteractionResult::SuccessServer,
             shrink_held: !creative,
+            shrink_even_creative: false,
             replacement: None,
             open_inventory: false,
             shear: false,
