@@ -831,7 +831,11 @@ pub(super) fn check_spawn_rules(
         // neither path goes through natural spawning here.
         MobType::Silverfish | MobType::Endermite => valid_mob_spawn_block(world, kind, pos),
         MobType::Drowned => super::drowned::check_spawn_rules(world, pos),
-        MobType::Husk => {
+        // `Monster.checkSurfaceMonstersSpawnRules`：怪物规则之后再要求看得见天。
+        // `SpawnPlacements` 把尸壳、焦骸和尸壳骆驼都登记到这一支。
+        // `Monster.checkSurfaceMonstersSpawnRules`: the monster rules, then open sky.
+        // `SpawnPlacements` registers husks, parched and camel husks on this branch.
+        MobType::Husk | MobType::Parched | MobType::CamelHusk => {
             is_dark_enough_to_spawn(world, pos)
                 && valid_mob_spawn_block(world, kind, pos)
                 && world.level().can_see_sky(pos)

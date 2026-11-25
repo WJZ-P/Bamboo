@@ -467,7 +467,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::Int(state.map_or(0, |state| state.trap_time)),
         );
     }
-    if mob.mob_type == MobType::Camel {
+    if mob.mob_type.is_camel() {
         // `Camel.addAdditionalSaveData`：`output.putLong("LastPoseTick", entityData.get(LAST_POSE_CHANGE_TICK))`。
         // `Camel.addAdditionalSaveData`: writes the synced pose tick as `LastPoseTick`.
         put(
@@ -857,7 +857,7 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             state.trap_time = tag::int_or(tag, "SkeletonTrapTime", 0);
             crate::entity::mob::skeleton_horse::set_trap(mob, trap);
         }
-        if mob.mob_type == MobType::Camel {
+        if mob.mob_type.is_camel() {
             // `Camel.readAdditionalSaveData`：读 `LastPoseTick`（缺省 0），负数设成坐姿。
             // `Camel.readAdditionalSaveData`: read `LastPoseTick` (default 0), negative
             // means sitting.
