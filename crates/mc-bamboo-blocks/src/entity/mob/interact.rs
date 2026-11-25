@@ -315,6 +315,9 @@ pub fn interact(
         }
         return outcome;
     }
+    if mob.mob_type == MobType::HappyGhast {
+        return super::happy_ghast::interact(me, mob, req, level_next_float);
+    }
     animal_interact(me, mob, req, level_next_float)
 }
 
@@ -542,9 +545,12 @@ pub(super) fn animal_interact(
         };
     }
     let age = mob.age;
-    // `Turtle.canFallInLove`：身上有蛋时不进求爱。
-    // `Turtle.canFallInLove`: no love while carrying an egg.
-    let can_fall_in_love = mob.mob_type != MobType::Turtle || !mob.turtle.has_egg;
+    // `Turtle.canFallInLove`：身上有蛋时不进求爱；
+    // `HappyGhast.canFallInLove()` 恒假（成年不繁殖也不求爱）。
+    // `Turtle.canFallInLove`: no love while carrying an egg;
+    // `HappyGhast.canFallInLove()` is always false (adults never breed).
+    let can_fall_in_love = mob.mob_type != MobType::HappyGhast
+        && (mob.mob_type != MobType::Turtle || !mob.turtle.has_egg);
     // `Axolotl.usePlayerItem`：热带鱼桶喂完换成水桶（创造模式手里不变）。
     // `Axolotl.usePlayerItem`: the tropical fish bucket turns into a water bucket
     // (creative keeps the bucket).

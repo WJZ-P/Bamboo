@@ -2,7 +2,7 @@
 //! `WaterloggedTransparentBlock`、`WeatheringCopperGrateBlock`、`ConduitBlock`、`DriedGhastBlock`、
 //! `LightBlock`。
 
-use mc_bamboo_core::{BlockPos, Direction};
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::{Block, items, sounds::sound_event};
 
 use crate::behaviour::weathering::change_over_time;
@@ -12,6 +12,11 @@ use crate::{
         common::{default_state, is_full_water, is_water_source, tick_water_if_waterlogged},
     },
     context::{Actor, PlaceContext, UseContext},
+    entity::{
+        Entity,
+        mob::{MobType, living, spawn},
+    },
+    game_event::{GameEvent, dispatch::EventContext},
     interact::InteractionResult,
     state::{BlockState, DRIED_GHAST_HYDRATION_LEVELS, FluidState, HORIZONTAL_FACING, WATERLOGGED},
     world::World,
@@ -128,8 +133,13 @@ impl Behaviour for Conduit {
     }
 }
 
-/// `DriedGhastBlock`。吸水和孵化的计划刻不在范围里。
+/// `DriedGhastBlock`。含水的方块，泡水后按计划刻推进水合阶段，吸满孵出幼年快乐恶魂。
 pub(super) struct DriedGhast;
+
+/// `DriedGhastBlock.MAX_HYDRATION_LEVEL`：水合到这一级就孵出恶魂。
+const MAX_HYDRATION_LEVEL: i32 = 3;
+/// `AgeableMob.BABY_START_AGE`：`setBaby(true)` 落到的年龄。
+const BABY_START_AGE: i32 = -24_000;
 
 impl Behaviour for DriedGhast {
     fn state_for_placement(
@@ -184,13 +194,102 @@ impl Behaviour for DriedGhast {
         true
     }
 
-    /// 泡着水或者已经吸了水时排一个吸水的计划刻。吸满后生成恶魂实体，那个计划刻不在范围里。
+    /// 泡着水或者已经吸了水时排一个吸水的计划刻。
     fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         let hydrating = state.get(WATERLOGGED) || state.get(DRIED_GHAST_HYDRATION_LEVELS) > 0;
         if hydrating && !world.has_scheduled_tick(pos, state.block()) {
             world.schedule_tick(pos, state.block(), DRIED_GHAST_HYDRATION_DELAY);
         }
     }
+
+    /// `DriedGhastBlock.tick`：含水时推进一级水合（吸满则孵出幼年快乐恶魂），
+    /// 脱水时退一级水合。每次变状态都发 `BLOCK_CHANGE` 游戏事件。
+    ///
+    /// `DriedGhastBlock.tick`: while waterlogged, advance hydration (or hatch a baby
+    /// happy ghast when saturated); while dry, decay hydration. Every state change
+    /// emits a `BLOCK_CHANGE` game event.
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        let hydration = state.get(DRIED_GHAST_HYDRATION_LEVELS);
+        let center = Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.5,
+            f64::from(pos.z) + 0.5,
+        );
+        if state.get(WATERLOGGED) {
+            if hydration < MAX_HYDRATION_LEVEL {
+                world.play_block_sound(
+                    pos,
+                    sound_event("minecraft:block.dried_ghast.transition"),
+                    1.0,
+                    1.0,
+                );
+                world.set_block(
+                    pos,
+                    state.with(DRIED_GHAST_HYDRATION_LEVELS, hydration + 1),
+                    2,
+                );
+                world.game_event(
+                    GameEvent::BlockChange,
+                    center,
+                    EventContext {
+                        affected_state: Some(state),
+                        ..Default::default()
+                    },
+                );
+            } else {
+                spawn_ghastling(state, world, pos);
+            }
+            return;
+        }
+        if hydration > 0 {
+            world.set_block(
+                pos,
+                state.with(DRIED_GHAST_HYDRATION_LEVELS, hydration - 1),
+                2,
+            );
+            world.game_event(
+                GameEvent::BlockChange,
+                center,
+                EventContext {
+                    affected_state: Some(state),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+}
+
+/// `DriedGhastBlock.spawnGhastling`：拿掉方块，孵出一只朝 `FACING` 的幼年快乐恶魂，
+/// 落点在方块底心，放孵化声。
+///
+/// `DriedGhastBlock.spawnGhastling`: remove the block and spawn a baby happy ghast
+/// facing `FACING` at the block's bottom centre, with the spawn sound.
+fn spawn_ghastling(state: BlockState, world: &mut World, pos: BlockPos) {
+    world.remove_block(pos);
+    let yaw = state.get(HORIZONTAL_FACING).to_yaw();
+    let mut ghastling =
+        world.prepare_entity(Entity::by_mob_type(MobType::HappyGhast, Vec3::default()));
+    ghastling.with_mob(|me, mob| {
+        living::set_age(me, mob, BABY_START_AGE);
+        mob.y_head_rot = yaw;
+    });
+    spawn::snap_to(
+        &mut ghastling,
+        Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y),
+            f64::from(pos.z) + 0.5,
+        ),
+        yaw,
+        0.0,
+    );
+    world.add_prepared_entity(ghastling);
+    world.play_block_sound(
+        pos,
+        sound_event("minecraft:entity.ghastling.spawn"),
+        1.0,
+        1.0,
+    );
 }
 
 /// `DriedGhastBlock.HYDRATION_TICK_DELAY`：吸一次水要等的刻数。

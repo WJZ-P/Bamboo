@@ -245,6 +245,15 @@ pub trait BlockView {
         false
     }
 
+    /// `ServerLevel.precipitationAt(pos) != Biome.Precipitation.NONE`：
+    /// 快乐恶魂在会降水的群系里回血更快。没有群系表的视图按「不降水」。
+    ///
+    /// `ServerLevel.precipitationAt(pos) != Biome.Precipitation.NONE`: happy ghasts
+    /// heal faster where the biome precipitates. Views without biome data say no.
+    fn biome_precipitates(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
     /// `Level.isThundering()`：担心基因的熊猫在雷雨天会坐下。
     ///
     /// `Level.isThundering()`: a worried panda sits down during a thunderstorm.
@@ -762,6 +771,11 @@ impl BlockView for World<'_> {
 
     fn is_raining_at(&self, pos: BlockPos) -> bool {
         self.level().is_raining_at(pos)
+    }
+
+    fn biome_precipitates(&self, pos: BlockPos) -> bool {
+        self.level().precipitation_facts(pos).precipitation
+            != crate::weather::Precipitation::None
     }
 
     fn is_thundering(&self) -> bool {

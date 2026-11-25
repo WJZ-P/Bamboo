@@ -48,6 +48,7 @@ pub mod goals;
 pub mod goat;
 mod golem_goals;
 pub mod guardian;
+pub mod happy_ghast;
 pub mod infested;
 pub mod interact;
 pub mod iron_golem;
@@ -234,13 +235,19 @@ pub enum MobType {
     ///
     /// The `Sniffer`.
     Sniffer,
+    /// 快乐恶魂，`HappyGhast`。可养大的可骑乘飞行生物；幼年用大脑，成年用目标，
+    /// 套挽具后最多载四名玩家。
+    ///
+    /// The `HappyGhast`: a growable rideable flying mob. Babies use a brain, adults use
+    /// goals, and a harnessed adult carries up to four players.
+    HappyGhast,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 63] = [
+    pub const ALL: [Self; 64] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -304,6 +311,7 @@ impl MobType {
         Self::Nautilus,
         Self::ZombieNautilus,
         Self::Sniffer,
+        Self::HappyGhast,
     ];
 
     /// 注册表 ID。
@@ -373,6 +381,7 @@ impl MobType {
             Self::Nautilus => ids::NAUTILUS,
             Self::ZombieNautilus => ids::ZOMBIE_NAUTILUS,
             Self::Sniffer => ids::SNIFFER,
+            Self::HappyGhast => ids::HAPPY_GHAST,
         }
     }
 
@@ -442,6 +451,7 @@ impl MobType {
             Self::Nautilus => "minecraft:nautilus",
             Self::ZombieNautilus => "minecraft:zombie_nautilus",
             Self::Sniffer => "minecraft:sniffer",
+            Self::HappyGhast => "minecraft:happy_ghast",
         }
     }
 
@@ -464,6 +474,9 @@ impl MobType {
             Self::Axolotl => Some(item_tags::AXOLOTL_FOOD),
             Self::Nautilus | Self::ZombieNautilus => Some(item_tags::NAUTILUS_FOOD),
             Self::Sniffer => Some(item_tags::SNIFFER_FOOD),
+            // `HappyGhast.isFood` 用 `#happy_ghast_food`（雪球），喂食加速幼年成长。
+            // `HappyGhast.isFood` uses `#happy_ghast_food` (snowballs) to speed up growth.
+            Self::HappyGhast => Some(item_tags::HAPPY_GHAST_FOOD),
             Self::Ocelot => Some(item_tags::OCELOT_FOOD),
             Self::Cat => Some(item_tags::CAT_FOOD),
             _ => None,
@@ -633,6 +646,7 @@ impl MobType {
                 mc_bamboo_data::villager::BABY_VILLAGER_HEIGHT,
                 mc_bamboo_data::villager::BABY_VILLAGER_EYE_HEIGHT,
             ),
+            (Self::HappyGhast, baby) => happy_ghast::dimensions(baby),
         }
     }
 
@@ -975,6 +989,9 @@ impl MobType {
                 Self::Bat
                     | Self::Silverfish
                     | Self::Endermite
+                    // `HappyGhast.playStepSound` 空实现，飞着走也不出移动声。
+                    // `HappyGhast.playStepSound` is empty, so flying makes no step sound.
+                    | Self::HappyGhast
                     // `Guardian.getMovementEmission()` = `EVENTS`。
                     // `Guardian.getMovementEmission()` = `EVENTS`.
                     | Self::Guardian
@@ -992,12 +1009,15 @@ impl MobType {
         !matches!(self, Self::Bat)
     }
 
-    /// 把 `checkFallDamage` 覆写成空方法的类型（鹦鹉、蝙蝠和幻翼）。
+    /// 把 `checkFallDamage` 覆写成空方法的类型（鹦鹉、蝙蝠、幻翼、蜜蜂、快乐恶魂）。
     ///
-    /// Types that override `checkFallDamage` with an empty body (parrots, bats and
-    /// phantoms).
+    /// Types that override `checkFallDamage` with an empty body (parrots, bats,
+    /// phantoms, bees and happy ghasts).
     pub const fn ignores_fall_damage_check(self) -> bool {
-        matches!(self, Self::Parrot | Self::Bat | Self::Phantom | Self::Bee)
+        matches!(
+            self,
+            Self::Parrot | Self::Bat | Self::Phantom | Self::Bee | Self::HappyGhast
+        )
     }
 
     /// `SpawnPlacements` 里登记成 `IN_WATER` 的类型。
@@ -1105,6 +1125,7 @@ impl MobType {
             Self::Nautilus => "minecraft:entities/nautilus",
             Self::ZombieNautilus => "minecraft:entities/zombie_nautilus",
             Self::Sniffer => "minecraft:entities/sniffer",
+            Self::HappyGhast => "minecraft:entities/happy_ghast",
         }
     }
 
@@ -1247,6 +1268,11 @@ impl MobType {
             // `Sniffer.getAmbientSound`: silent while digging or searching; see
             // `sniffer::ambient_voice`.
             Self::Sniffer => Some("minecraft:entity.sniffer.idle"),
+            // `HappyGhast.getAmbientSound`：幼年 / 成年两套，成年值在此，幼年由
+            // `living::voice_of` 换成 `entity.ghastling.ambient`。
+            // `HappyGhast.getAmbientSound`: baby/adult variants; adult here, baby is
+            // swapped to `entity.ghastling.ambient` in `living::voice_of`.
+            Self::HappyGhast => Some("minecraft:entity.happy_ghast.ambient"),
         }
     }
 
@@ -1310,6 +1336,7 @@ impl MobType {
             | Self::Nautilus
             | Self::ZombieNautilus => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.hurt"),
+            Self::HappyGhast => Some("minecraft:entity.happy_ghast.hurt"),
         }
     }
 
@@ -1373,6 +1400,7 @@ impl MobType {
             | Self::Nautilus
             | Self::ZombieNautilus => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.death"),
+            Self::HappyGhast => Some("minecraft:entity.happy_ghast.death"),
         }
     }
 
@@ -1447,6 +1475,9 @@ impl MobType {
             | Self::Nautilus
             | Self::ZombieNautilus => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.step"),
+            // `HappyGhast.playStepSound` 空实现，没有脚步声。
+            // `HappyGhast.playStepSound` is empty, so there is no step sound.
+            Self::HappyGhast => None,
         }
     }
 
@@ -1517,6 +1548,7 @@ impl MobType {
             Self::Nautilus => items::NAUTILUS_SPAWN_EGG,
             Self::ZombieNautilus => items::ZOMBIE_NAUTILUS_SPAWN_EGG,
             Self::Sniffer => items::SNIFFER_SPAWN_EGG,
+            Self::HappyGhast => items::HAPPY_GHAST_SPAWN_EGG,
         }
     }
 
@@ -1586,6 +1618,7 @@ impl MobType {
             Self::Nautilus => "entity.minecraft.nautilus",
             Self::ZombieNautilus => "entity.minecraft.zombie_nautilus",
             Self::Sniffer => "entity.minecraft.sniffer",
+            Self::HappyGhast => "entity.minecraft.happy_ghast",
         }
     }
 
@@ -2922,6 +2955,11 @@ pub struct Mob {
     ///
     /// The sniffer's state machine and drop-seed tick; default for other mobs.
     pub sniffer: sniffer::Sniffer,
+    /// 快乐恶魂的悬停超时、牵引者计时和两项同步布尔；别的生物是缺省值。
+    ///
+    /// The happy ghast's hover timeout, holder timer and two synced booleans;
+    /// default for other mobs.
+    pub happy_ghast: happy_ghast::HappyGhastState,
     /// 骆驼的姿势状态机同步值和冲刺计时。
     ///
     /// The camel's pose state machine synced values and dash timer.
@@ -3081,6 +3119,7 @@ impl Mob {
             MobType::SulfurCube => sulfur_cube::attributes(),
             MobType::Nautilus | MobType::ZombieNautilus => nautilus::attributes(mob_type),
             MobType::Sniffer => sniffer::attributes(),
+            MobType::HappyGhast => happy_ghast::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3161,7 +3200,12 @@ impl Mob {
             | MobType::Villager
             | MobType::Nautilus
             | MobType::ZombieNautilus
-            | MobType::Sniffer => GoalSelector::default(),
+            | MobType::Sniffer
+            // 成年快乐恶魂的 `registerGoals` 只在服务端跑（`adultGhastSetup`），
+            // 幼年用大脑，目标表在这里保持空。
+            // Adult happy ghasts register goals server-side only (`adultGhastSetup`);
+            // babies use a brain, so the goal table starts empty.
+            | MobType::HappyGhast => GoalSelector::default(),
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
             // alongside the brain.
@@ -3231,7 +3275,8 @@ impl Mob {
             | MobType::CamelHusk
             | MobType::Nautilus
             | MobType::ZombieNautilus
-            | MobType::Sniffer => GoalSelector::default(),
+            | MobType::Sniffer
+            | MobType::HappyGhast => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Ocelot => ocelot::target_goals(),
@@ -3473,6 +3518,7 @@ impl Mob {
             sulfur_cube: sulfur_cube::SulfurCubeState::default(),
             nautilus: nautilus::NautilusState::default(),
             sniffer: sniffer::Sniffer::default(),
+            happy_ghast: happy_ghast::initial_state(),
             events: Vec::new(),
             needs_sync: false,
             knockback_sync: false,
@@ -3823,6 +3869,15 @@ impl Mob {
     /// first passenger. Vanilla horses, pigs and camels follow this rule; llamas
     /// have no saddle slot, so a player never controls one.
     pub fn controlling_passenger(&self) -> Option<EntityUid> {
+        if self.mob_type == MobType::HappyGhast {
+            // `HappyGhast.getControllingPassenger`：穿了挽具、不在悬停超时、
+            // 第一位乘客是玩家；否则走 `Animal` 的空实现。
+            // `HappyGhast.getControllingPassenger`: harnessed, out of the hover
+            // timeout and with a player as first passenger; otherwise `Animal`'s
+            // empty implementation.
+            let first = self.first_passenger()?;
+            return happy_ghast::controls(self, Some(first)).then_some(first);
+        }
         if self
             .equipment
             .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)
@@ -4073,6 +4128,11 @@ pub struct MobPublic {
     pub glowing: bool,
     pub left_handed: bool,
     pub dying: bool,
+    /// `HappyGhast.IS_LEASH_HOLDER` / `STAYS_STILL`（index 18、19 的布尔）。
+    ///
+    /// `HappyGhast.IS_LEASH_HOLDER` / `STAYS_STILL` (index 18 and 19 booleans).
+    pub happy_ghast_is_leash_holder: bool,
+    pub happy_ghast_stays_still: bool,
     /// `Mob.DATA_MOB_FLAGS_ID` 的攻击性位；牛恒为假。
     pub aggressive: bool,
     pub using_item_flags: u8,
@@ -4246,6 +4306,8 @@ impl MobPublic {
             glowing: mob.glowing,
             left_handed: mob.left_handed,
             dying: mob.is_dead_or_dying(),
+            happy_ghast_is_leash_holder: mob.happy_ghast.is_leash_holder,
+            happy_ghast_stays_still: mob.happy_ghast.stays_still,
             aggressive: mob.aggressive,
             using_item_flags: mob.using_item_flags,
             zombie_baby: mob.zombie_baby,
@@ -4344,6 +4406,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Villager => Some(Box::new(villager_ai::brain(false, 0))),
         MobType::Nautilus | MobType::ZombieNautilus => Some(Box::new(nautilus_ai::brain(kind))),
         MobType::Sniffer => Some(Box::new(sniffer::brain())),
+        MobType::HappyGhast => Some(Box::new(happy_ghast::brain())),
         _ => None,
     }
 }

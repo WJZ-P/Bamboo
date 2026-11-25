@@ -299,6 +299,26 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Dolphin {
         super::dolphin::tick(me, mob, ctx);
     }
+    // `HappyGhast.tick()` 在 `super.tick()` 之后：牵引者标志、悬停超时、扫描头顶玩家。
+    // `HappyGhast.tick()` after `super.tick()`: holder flag, hover timeout and the
+    // player-above scan.
+    if mob.mob_type == super::MobType::HappyGhast {
+        let (min, max) = super::happy_ghast::player_above_box(
+            me.position,
+            me.dimensions.0,
+            me.dimensions.1,
+        );
+        let mut player_above = false;
+        ctx.blocks().for_each_player(&mut |view| {
+            if !view.spectator
+                && !mob.passengers.contains(&view.uid)
+                && super::happy_ghast::is_above(view.position, min, max)
+            {
+                player_above = true;
+            }
+        });
+        super::happy_ghast::tick_end(me, mob, player_above);
+    }
     // `Axolotl.customServerAiStep` 尾部：把 `PLAY_DEAD_TICKS` 记忆映射成元数据。
     // Tail of `Axolotl.customServerAiStep`: map the PLAY_DEAD_TICKS memory to metadata.
     if mob.mob_type == super::MobType::Axolotl {
@@ -786,7 +806,11 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         let time = mob.ambient_sound_time;
         mob.ambient_sound_time += 1;
         if roll < time {
-            mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
+            mob.ambient_sound_time = -if mob.mob_type == super::MobType::HappyGhast {
+                super::happy_ghast::ambient_sound_interval(mob)
+            } else {
+                mob.mob_type.ambient_sound_interval()
+            };
             if mob.mob_type == super::MobType::Fox {
                 super::fox::play_ambient_sound(me, mob, ctx.blocks());
                 return;
@@ -822,7 +846,7 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 return;
             };
             let pitch = voice_pitch(me, mob);
-            play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
+            play_sound(me, mob, sound, sound_volume(mob), pitch);
         }
     }
 }
@@ -911,6 +935,12 @@ fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
     match voice {
         Voice::Hurt if super::armadillo::is_scared(mob) => {
             "minecraft:entity.armadillo.hurt_reduced"
+        }
+        Voice::Hurt if mob.mob_type == super::MobType::HappyGhast => {
+            super::happy_ghast::voice(super::happy_ghast::Voice::Hurt, mob.is_baby())
+        }
+        Voice::Death if mob.mob_type == super::MobType::HappyGhast => {
+            super::happy_ghast::voice(super::happy_ghast::Voice::Death, mob.is_baby())
         }
         Voice::Hurt => mob
             .mob_type
@@ -1160,12 +1190,24 @@ fn sound_volume(mob: &Mob) -> f32 {
         super::MobType::Slime | super::MobType::SulfurCube
     ) {
         super::slime::sound_volume(mob)
+    } else if mob.mob_type == super::MobType::HappyGhast {
+        // `HappyGhast.getSoundVolume()`：幼年 1、成年 4。
+        // `HappyGhast.getSoundVolume()`: 1 for babies, 4 for adults.
+        super::happy_ghast::sound_volume(mob)
     } else {
         mob.mob_type.sound_volume()
     }
 }
 
 fn ambient_sound(mob: &Mob, in_water: bool) -> &'static str {
+    if mob.mob_type == super::MobType::HappyGhast {
+        // `HappyGhast.getAmbientSound`：幼年 / 成年两套。
+        // `HappyGhast.getAmbientSound`: baby and adult variants.
+        return super::happy_ghast::voice(
+            super::happy_ghast::Voice::Ambient,
+            mob.is_baby(),
+        );
+    }
     // 守卫者的环境音按水 / 岸和种类分派（表里返回 `None`）。
     // Guardian ambience is dispatched by water / land and kind (the table returns
     // `None`).
@@ -1194,6 +1236,11 @@ fn ambient_sound(mob: &Mob, in_water: bool) -> &'static str {
 ///
 /// The voice pitch takes two draws and uses a higher base pitch for babies.
 pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
+    // `HappyGhast.getVoicePitch()` 恒 1.0，不取两次随机数。
+    // `HappyGhast.getVoicePitch()` is always 1.0 and draws no random numbers.
+    if mob.mob_type == super::MobType::HappyGhast {
+        return super::happy_ghast::VOICE_PITCH;
+    }
     let first = me.random.next_float();
     let second = me.random.next_float();
     let base = if mob.is_baby() { 1.5 } else { 1.0 };
@@ -1327,6 +1374,13 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
     if equine {
         super::equine::ai_step_end(me, mob, ctx);
     }
+    // `HappyGhast.aiStep` 在 `super.aiStep()` 之后按云 / 降水周期回血。
+    // `HappyGhast.aiStep` after `super.aiStep()`: heal on the cloud / precipitation
+    // period.
+    if mob.mob_type == super::MobType::HappyGhast {
+        let fast = ctx.blocks().biome_precipitates(me.block_position());
+        super::happy_ghast::continuous_heal(me, mob, fast);
+    }
 }
 
 /// `Animal.aiStep` 一路到 `LivingEntity.aiStep` 的公共部分。
@@ -1453,6 +1507,11 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
                     super::pig::tick_ridden(me, mob, view.yaw, view.pitch);
                 } else if super::nautilus::is_nautilus(mob.mob_type) {
                     super::nautilus_ai::ridden_rotation(me, mob, view.yaw, view.pitch);
+                } else if mob.mob_type == super::MobType::HappyGhast {
+                    // `HappyGhast.tickRidden`：0.08 插值车身朝向，头 / 身一起抄过去。
+                    // `HappyGhast.tickRidden`: lerp the yaw by 0.08 and copy it
+                    // into head and body rotations.
+                    super::happy_ghast::tick_ridden(me, mob, view.pitch, view.yaw);
                 }
             }
             me.delta = Vec3::default();
@@ -2033,6 +2092,11 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
         // `ElderGuardian.customServerAiStep`：范围挖掘疲劳和家。
         // `ElderGuardian.customServerAiStep`: area mining fatigue and home.
         super::guardian::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::HappyGhast {
+        // `HappyGhast.customServerAiStep`：幼年跑大脑，两种年龄都检查家的半径。
+        // `HappyGhast.customServerAiStep`: babies tick the brain, both ages check home.
+        super::happy_ghast::custom_server_ai_step(me, mob, ctx);
     }
 }
 
@@ -3066,7 +3130,11 @@ fn hurt_living(
         die(me, mob, ctx, source);
     } else if full_hit {
         // `Mob.playHurtSound`：先重置叫声计时，再取音高。
-        mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
+        mob.ambient_sound_time = -if mob.mob_type == super::MobType::HappyGhast {
+            super::happy_ghast::ambient_sound_interval(mob)
+        } else {
+            mob.mob_type.ambient_sound_interval()
+        };
         let pitch = voice_pitch(me, mob);
         let sound = voice_of(mob, Voice::Hurt, me.in_water);
         play_sound(me, mob, sound, sound_volume(mob), pitch);

@@ -350,6 +350,16 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::Byte(i8::from(mob.cube.was_on_ground)),
         );
     }
+    // ---- HappyGhast ----
+    if mob.mob_type == MobType::HappyGhast {
+        // `HappyGhast.addAdditionalSaveData`：无条件写 `still_timeout`。
+        // `HappyGhast.addAdditionalSaveData`: `still_timeout` is always written.
+        put(
+            &mut out,
+            super::happy_ghast::STILL_TIMEOUT_KEY,
+            Tag::Int(mob.happy_ghast.still_timeout),
+        );
+    }
     // ---- SulfurCube ----
     if mob.mob_type == MobType::SulfurCube {
         put(
@@ -854,6 +864,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Endermite {
             mob.endermite.life = tag::int_or(tag, "Lifetime", 0);
+        }
+        if mob.mob_type == MobType::HappyGhast {
+            // `HappyGhast.readAdditionalSaveData`：读 `still_timeout` 并同步标志。
+            // `HappyGhast.readAdditionalSaveData`: read `still_timeout` and sync the flag.
+            let timeout = tag::int_or(tag, super::happy_ghast::STILL_TIMEOUT_KEY, 0);
+            mob.happy_ghast.set_still_timeout(timeout);
         }
         if mob.mob_type == MobType::SulfurCube {
             let state = &mut mob.sulfur_cube;

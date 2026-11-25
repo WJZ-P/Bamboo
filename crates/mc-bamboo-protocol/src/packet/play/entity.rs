@@ -56,6 +56,14 @@ const SERIALIZER_WOLF_VARIANT: i32 = 25;
 const SERIALIZER_WOLF_SOUND_VARIANT: i32 = 26;
 const SERIALIZER_HUMANOID_ARM: i32 = 42;
 
+/// `HappyGhast` 在 `Animal` 之后定义的两项布尔元数据：
+/// `Animal` 的 `DATA_BABY_ID`(16) / `AGE_LOCKED`(17) 之后依次是 18、19。
+///
+/// The two booleans `HappyGhast` defines after `Animal`: `DATA_BABY_ID`(16)
+/// / `AGE_LOCKED`(17), then 18 and 19.
+pub const HAPPY_GHAST_LEASH_HOLDER: u8 = 18;
+pub const HAPPY_GHAST_STAYS_STILL: u8 = 19;
+
 /// `set_entity_data` 的结束标记。
 const ENTITY_DATA_END: u8 = 0xff;
 
@@ -491,6 +499,14 @@ pub enum EntityData {
     ///
     /// `ZombieNautilus.DATA_VARIANT_ID` (index 21, a registry id).
     ZombieNautilusVariant(i32),
+    /// `HappyGhast.IS_LEASH_HOLDER`（BOOLEAN，index 18，缺省假）。
+    ///
+    /// `HappyGhast.IS_LEASH_HOLDER` (BOOLEAN, index 18, false by default).
+    HappyGhastLeashHolder(bool),
+    /// `HappyGhast.STAYS_STILL`（BOOLEAN，index 19，缺省假）。
+    ///
+    /// `HappyGhast.STAYS_STILL` (BOOLEAN, index 19, false by default).
+    HappyGhastStaysStill(bool),
     /// `Guardian.DATA_ID_MOVING`（BOOLEAN，索引 16）。
     ///
     /// `Guardian.DATA_ID_MOVING` (BOOLEAN, index 16).
@@ -638,6 +654,8 @@ impl EntityData {
             Self::ZombieNautilusVariant(_) => mc_bamboo_data::entity_types::ZOMBIE_NAUTILUS_VARIANT,
             Self::GuardianMoving(_) => mc_bamboo_data::entity_types::GUARDIAN_MOVING,
             Self::GuardianAttackTarget(_) => mc_bamboo_data::entity_types::GUARDIAN_ATTACK_TARGET,
+            Self::HappyGhastLeashHolder(_) => HAPPY_GHAST_LEASH_HOLDER,
+            Self::HappyGhastStaysStill(_) => HAPPY_GHAST_STAYS_STILL,
         }
     }
 
@@ -1100,6 +1118,10 @@ impl EntityData {
             Self::GuardianAttackTarget(target) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *target);
+            }
+            Self::HappyGhastLeashHolder(flag) | Self::HappyGhastStaysStill(flag) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *flag);
             }
         }
     }
