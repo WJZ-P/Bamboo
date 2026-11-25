@@ -1169,3 +1169,151 @@ fn parallel_world_random_hashes_deterministically_across_thread_counts() {
         );
     }
 }
+
+/// 生物走步发出的 `STEP` 游戏事件在精确驱动里当场投递，在并行驱动里攒成
+/// [`Command::GameEvent`]、落地阶段按 uid 顺序投递。这里让一头随机漫步的牛经过
+/// 附近的幽匿感测体，逐刻记录感测体的相位 / 红石强度 / 比较器频率，证明两种驱动
+/// 投递到感测体的振动逐位一致。
+///
+/// A mob's step emits the `STEP` game event: precise applies it at once, parallel
+/// buffers it as a command and lands it in uid order. A randomly strolling cow passes
+/// a nearby sculk sensor; recording the sensor's phase / redstone power / comparator
+/// frequency per tick proves both drivers deliver the vibration bit-identically.
+#[test]
+fn step_events_reach_a_sensor_identically_in_precise_and_parallel_modes() {
+    use crate::behaviour::misc::sculk_entity::{SculkSensorEntity, create_block_entity};
+    use crate::entity::mob::MobType;
+    use crate::entity::view::BlockSource;
+    use crate::state::{POWER, SCULK_SENSOR_PHASE, SculkSensorPhase};
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::blocks;
+
+    const SENSOR: BlockPos = BlockPos::new(2, 64, 0);
+    const TICKS: i64 = 120;
+
+    /// 算阶段只读方块视图：与 `setup` 里写的 `TestLevel` 方块一致，草地加感测体。
+    struct SensorSource {
+        time: i64,
+        players: Vec<crate::entity::ctx::PlayerView>,
+    }
+
+    impl BlockSource for SensorSource {
+        fn block_state(&self, pos: BlockPos) -> BlockState {
+            if pos == SENSOR {
+                BlockState(blocks::SCULK_SENSOR)
+            } else if pos.y == 63 {
+                BlockState(blocks::GRASS_BLOCK)
+            } else {
+                BlockState::AIR
+            }
+        }
+
+        fn facts(&self) -> ViewFacts {
+            ViewFacts {
+                game_time: self.time,
+                ..ViewFacts::default()
+            }
+        }
+
+        fn for_each_player(&self, visit: &mut dyn FnMut(&crate::entity::ctx::PlayerView)) {
+            for player in &self.players {
+                visit(player);
+            }
+        }
+    }
+
+    /// 放一片草地、感测体和一头朝玩家走的僵尸：目标在正东 8 格，路径经过感测体。
+    fn setup(level: &mut TestLevel, ticks: &mut BlockTicks) {
+        ticks.set_time(0);
+        level.set_entities(crate::entity::EntityStore::with_next_id(
+            crate::entity::FIRST_ENTITY_ID,
+        ));
+        let player = crate::entity::mob::throttle::test_player(
+            1,
+            mc_bamboo_core::Vec3::new(8.5, 64.0, 0.5),
+        );
+        level.players.push(player);
+        let mut world = World::new(level, ticks);
+        for x in -24..=24 {
+            for z in -8..=8 {
+                world.set_block(BlockPos::new(x, 63, z), BlockState(blocks::GRASS_BLOCK), 0);
+            }
+        }
+        world.set_block(SENSOR, BlockState(blocks::SCULK_SENSOR), 0);
+        world.set_block_entity(create_block_entity(SENSOR, false));
+        world.spawn_entity(Entity::by_mob_type(
+            MobType::Zombie,
+            mc_bamboo_core::Vec3::new(0.5, 64.0, 0.5),
+        ));
+        world.tick_block_entities();
+    }
+
+    /// 每刻的感测体快照：(相位, 红石强度, 比较器频率)。
+    fn snapshot(level: &mut TestLevel, ticks: &mut BlockTicks) -> (i32, i32, i32) {
+        let world = World::new(level, ticks);
+        let state = world.block_state(SENSOR);
+        let frequency = world
+            .block_entity::<SculkSensorEntity>(SENSOR)
+            .map(|entity| entity.last_frequency())
+            .unwrap_or(0);
+        (
+            match state.get(SCULK_SENSOR_PHASE) {
+                SculkSensorPhase::Inactive => 0,
+                SculkSensorPhase::Active => 1,
+                SculkSensorPhase::Cooldown => 2,
+            },
+            state.get(POWER),
+            frequency,
+        )
+    }
+
+    fn run_precise(level: &mut TestLevel, ticks: &mut BlockTicks) -> Vec<(i32, i32, i32)> {
+        let mut frames = Vec::new();
+        for tick in 1..=TICKS {
+            ticks.set_time(tick);
+            let mut world = World::new(level, ticks);
+            world.tick_entities();
+            world.tick_block_entities();
+            drop(world);
+            frames.push(snapshot(level, ticks));
+        }
+        frames
+    }
+
+    fn run_parallel(level: &mut TestLevel, ticks: &mut BlockTicks) -> Vec<(i32, i32, i32)> {
+        let executor = WorkerPool::new("mob-step-event", 4).expect("起实体线程池");
+        let players = level.players.clone();
+        let mut frames = Vec::new();
+        for tick in 1..=TICKS {
+            ticks.set_time(tick);
+            let view = SourceView::new(SensorSource {
+                time: tick,
+                players: players.clone(),
+            });
+            let mut world = World::new(level, ticks);
+            tick_entities_parallel(&view, &mut world, &executor);
+            world.tick_block_entities();
+            drop(world);
+            frames.push(snapshot(level, ticks));
+        }
+        frames
+    }
+
+    let (mut precise_level, mut precise_ticks) = (TestLevel::new(), BlockTicks::new());
+    setup(&mut precise_level, &mut precise_ticks);
+    let precise = run_precise(&mut precise_level, &mut precise_ticks);
+
+    let (mut parallel_level, mut parallel_ticks) = (TestLevel::new(), BlockTicks::new());
+    setup(&mut parallel_level, &mut parallel_ticks);
+    let parallel = run_parallel(&mut parallel_level, &mut parallel_ticks);
+
+    assert_eq!(
+        precise, parallel,
+        "感测体逐刻状态在精确 / 并行驱动下必须逐位一致"
+    );
+    // 场景必须真的发生过激活，否则对拍是空的。
+    assert!(
+        precise.iter().any(|&(phase, power, _)| phase == 1 && power > 0),
+        "牛走过时感测体至少要激活一次: {precise:?}"
+    );
+}
