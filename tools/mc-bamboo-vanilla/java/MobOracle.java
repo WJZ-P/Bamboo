@@ -8092,7 +8092,8 @@ public final class MobOracle {
      */
     private static int playParrotShoulder(Official official, Writer out, String only) throws Exception {
         String[] names = {"parrot_shoulder_jump", "parrot_shoulder_water",
-                "parrot_shoulder_hurt", "parrot_shoulder_sleep", "parrot_shoulder_snow"};
+                "parrot_shoulder_hurt", "parrot_shoulder_sleep", "parrot_shoulder_snow",
+                "parrot_shoulder_flying"};
         int written = 0;
         for (int scene = 0; scene < names.length; scene++) {
             if (only != null && !names[scene].startsWith(only) && !"parrot_shoulder".startsWith(only)) {
@@ -8168,6 +8169,7 @@ public final class MobOracle {
                                 java.util.Optional.of(new net.minecraft.core.BlockPos(0, 64, 0)));
                         case 4 -> put(net.minecraft.world.entity.Entity.class, player,
                                 "isInPowderSnow", Boolean.TRUE);
+                        case 5 -> player.getAbilities().flying = true;
                         default -> { }
                     }
                 }
@@ -8218,7 +8220,7 @@ public final class MobOracle {
             steps.append(']');
             written++;
             out.write("{\"type\":\"parrotShoulder\",\"name\":\"" + names[scene] + "\","
-                    + "\"removal\":\"" + new String[] {"jump", "water", "hurt", "sleep", "snow"}[scene] + "\","
+                    + "\"removal\":\"" + new String[] {"jump", "water", "hurt", "sleep", "snow", "flying"}[scene] + "\","
                     + "\"playerX\":" + Double.doubleToRawLongBits(player.getX())
                     + ",\"playerY\":" + Double.doubleToRawLongBits(player.getY())
                     + ",\"playerZ\":" + Double.doubleToRawLongBits(player.getZ())

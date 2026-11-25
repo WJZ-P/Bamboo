@@ -2330,6 +2330,7 @@ impl Report {
                     "water" => facts.in_water = true,
                     "sleep" => facts.sleeping = true,
                     "snow" => facts.in_powder_snow = true,
+                    "flying" => facts.flying = true,
                     _ => {}
                 }
             }
