@@ -651,6 +651,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("warden")) {
                 cases += playWarden(official, out, only);
             }
+            if (only == null || only.startsWith("warden")) {
+                cases += playWardenSave(official, out);
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -13125,6 +13128,49 @@ public final class MobOracle {
             cases++;
         }
         out.flush();
+        return cases;
+    }
+
+    /** 监守者存档：`saveWithoutId` 的 SNBT 和读回后再写出的 SNBT。 */
+    private static int playWardenSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean filled : new boolean[] {false, true}) {
+            FakeLevel world = FakeLevel.create(official);
+            Warden mob = (Warden) EntityTypes.WARDEN.create(world, EntitySpawnReason.COMMAND);
+            setRandom(mob, world.entitySeeds.nextLong());
+            mob.setPos(1.5, 64.0, 2.5);
+            mob.setYRot(37.0F);
+            mob.setXRot(12.0F);
+            mob.setHealth(317.0F);
+            if (filled) {
+                ServerPlayer player = pigPlayer(official, world);
+                player.setPos(4.5, 64.0, 2.5);
+                player.setId(FIRST_ID + 1);
+                player.setUUID(new UUID(0L, 2L));
+                world.tracked.add(player);
+                world.playersList().add(player);
+                mob.increaseAngerAt(player, 95, false);
+                var info = new net.minecraft.world.level.gameevent.vibrations.VibrationInfo(
+                        net.minecraft.world.level.gameevent.GameEvent.STEP,
+                        7.0F, new net.minecraft.world.phys.Vec3(3.5, 64.5, 2.5),
+                        new UUID(0L, 2L), null);
+                mob.getVibrationData().setCurrentVibration(info);
+                mob.getVibrationData().setTravelTimeInTicks(23);
+            }
+            var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            mob.saveWithoutId(output);
+            var copy = (Warden) EntityTypes.WARDEN.create(world, EntitySpawnReason.LOAD);
+            copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries, output.buildResult()));
+            var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            copy.saveWithoutId(again);
+            out.write("{\"type\":\"wardenSave\",\"filled\":" + filled
+                    + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                    + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+            cases++;
+        }
         return cases;
     }
 

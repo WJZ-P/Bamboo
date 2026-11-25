@@ -339,6 +339,8 @@ impl World<'_> {
                     source_player: context.source_player,
                     source_entity: context.source_entity,
                     projectile_owner: context.projectile_owner,
+                    source_uuid: None,
+                    projectile_owner_uuid: None,
                 };
                 let mut record = |entity: &mut crate::entity::Entity| {
                     entity.with_mob(|_, mob| {

@@ -258,6 +258,8 @@ impl Report {
                                     source_player: (vib[4] == 1).then_some(player),
                                     source_entity: (vib[4] == 1).then_some(player),
                                     projectile_owner: (vib[5] == 1).then_some(player),
+                                    source_uuid: None,
+                                    projectile_owner_uuid: None,
                                 });
                                 listener.vibration.travel = 0;
                             }
@@ -406,5 +408,72 @@ impl Report {
             }
         }
         println!("{}: {} ticks", case.name, case.frames.len());
+    }
+}
+
+/// 监守者存档对拍：`anger` 与 `listener` 两个键照官方 codec 往返。
+///
+/// Warden save parity: round-trip the `anger` and `listener` keys against the
+/// official codec.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WardenSaveCase {
+    filled: bool,
+    nbt: String,
+    reloaded: String,
+}
+
+const WARDEN_SAVE_KEYS: &[&str] = &[
+    "anger", "listener", "Health", "Pos", "Motion", "Rotation", "UUID",
+];
+
+impl Report {
+    pub(super) fn replay_warden_save(&mut self, case: &WardenSaveCase) {
+        use mc_bamboo_blocks::entity::{Entity, mob::MobType, mob::nbt};
+        use mc_bamboo_core::Vec3;
+
+        self.cases += 1;
+        let label = format!("warden save filled {}", case.filled);
+        let official = match mc_bamboo_nbt::parse_snbt(&case.nbt) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!("{label}: SNBT does not parse: {error:?}"));
+                return;
+            }
+        };
+        let reloaded = match mc_bamboo_nbt::parse_snbt(&case.reloaded) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!("{label}: reloaded SNBT does not parse: {error:?}"));
+                return;
+            }
+        };
+        let mut entity = Entity::by_mob_type(MobType::Warden, Vec3::default());
+        if let Err(error) = nbt::load_into(&mut entity, &official) {
+            self.mismatch(format!("{label}: load failed: {error:?}"));
+            return;
+        }
+        let ours = match nbt::write_mob(&entity.split()) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!("{label}: save failed: {error:?}"));
+                return;
+            }
+        };
+        let broken = self.break_test.as_deref() == Some("warden_save_anger") && case.filled;
+        for key in WARDEN_SAVE_KEYS {
+            let expected =
+                super::small_mob::save_field(&reloaded, key).map(super::small_mob::canonical_tag);
+            let mut actual =
+                super::small_mob::save_field(&ours, key).map(super::small_mob::canonical_tag);
+            if broken && *key == "anger" {
+                actual = None;
+            }
+            if expected != actual {
+                self.mismatch(format!(
+                    "{label} {key}: official {expected:?}, bamboo {actual:?}"
+                ));
+            }
+        }
     }
 }

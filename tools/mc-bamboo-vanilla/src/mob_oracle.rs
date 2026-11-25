@@ -200,6 +200,7 @@ enum Line {
     SculkSensorOrder(sculk_sensor::SculkSensorOrderCase),
     SculkShrieker(sculk_sensor::SculkShriekerCase),
     Warden(Box<warden::WardenCase>),
+    WardenSave(warden::WardenSaveCase),
     End(End),
 }
 
@@ -1900,6 +1901,7 @@ impl Report {
                 Line::SculkSensorOrder(case) => self.replay_sculk_sensor_order(&case),
                 Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),
                 Line::Warden(case) => self.replay_warden(&case),
+                Line::WardenSave(case) => self.replay_warden_save(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),

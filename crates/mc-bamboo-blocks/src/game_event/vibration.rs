@@ -26,6 +26,14 @@ pub struct VibrationInfo {
     ///
     /// `VibrationInfo.getProjectileOwner()`: the projectile owner; not written to disk.
     pub projectile_owner: Option<crate::entity::EntityUid>,
+    /// `VibrationInfo.CODEC` 的 `source`：`UUIDUtil.CODEC` 四元 int 数组。
+    ///
+    /// `VibrationInfo.CODEC`'s `source`: a four-word UUID int array.
+    pub source_uuid: Option<[u8; 16]>,
+    /// `VibrationInfo.CODEC` 的 `projectile_owner`。
+    ///
+    /// `VibrationInfo.CODEC`'s `projectile_owner`.
+    pub projectile_owner_uuid: Option<[u8; 16]>,
 }
 
 /// `VibrationSelector`：同一刻来的候选只留距离最近、等距时频率最高的一个。
@@ -131,14 +139,21 @@ impl VibrationInfo {
     /// 运行时不保存实体 UUID，存档里按官方的「可省字段」省略。
     pub fn write_codec(self) -> Tag {
         let pos = |value: f64| Tag::Double(value);
-        Tag::Compound(vec![
+        let mut out = vec![
             ("game_event".to_owned(), Tag::String(self.event.full_name())),
             ("distance".to_owned(), Tag::Float(self.distance)),
             (
                 "pos".to_owned(),
                 Tag::List(vec![pos(self.pos.x), pos(self.pos.y), pos(self.pos.z)]),
             ),
-        ])
+        ];
+        if let Some(uuid) = self.source_uuid {
+            put(&mut out, "source", uuid_tag(&uuid));
+        }
+        if let Some(uuid) = self.projectile_owner_uuid {
+            put(&mut out, "projectile_owner", uuid_tag(&uuid));
+        }
+        Tag::Compound(out)
     }
 
     /// `VibrationSelector` / `Data` codec 的坏数据都回到默认值，这里只认
@@ -184,8 +199,46 @@ impl VibrationInfo {
             source_player: None,
             source_entity: None,
             projectile_owner: None,
+            source_uuid: values
+                .iter()
+                .rev()
+                .find(|(key, _)| key == "source")
+                .and_then(|(_, value)| uuid_bytes(value)),
+            projectile_owner_uuid: values
+                .iter()
+                .rev()
+                .find(|(key, _)| key == "projectile_owner")
+                .and_then(|(_, value)| uuid_bytes(value)),
         })
     }
+}
+
+/// `UUIDUtil.CODEC` 的 `int[4]`。
+fn uuid_tag(bytes: &[u8; 16]) -> Tag {
+    let mut words = [0i32; 4];
+    for (index, word) in words.iter_mut().enumerate() {
+        let mut value = 0u32;
+        for &byte in &bytes[index * 4..index * 4 + 4] {
+            value = value << 8 | u32::from(byte);
+        }
+        *word = value as i32;
+    }
+    Tag::IntArray(words.to_vec())
+}
+
+/// 读 `UUIDUtil.CODEC` 的四元 int 数组；长度不对就当作缺省字段。
+fn uuid_bytes(tag: &Tag) -> Option<[u8; 16]> {
+    let Tag::IntArray(words) = tag else {
+        return None;
+    };
+    if words.len() != 4 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for (index, word) in words.iter().enumerate() {
+        bytes[index * 4..index * 4 + 4].copy_from_slice(&(*word as u32).to_be_bytes());
+    }
+    Some(bytes)
 }
 
 /// 同名键取最后一个，写档时按 codec 的键序覆盖旧值。
@@ -401,6 +454,8 @@ mod tests {
             source_player: None,
             source_entity: None,
             projectile_owner: None,
+            source_uuid: None,
+            projectile_owner_uuid: None,
         }
     }
 

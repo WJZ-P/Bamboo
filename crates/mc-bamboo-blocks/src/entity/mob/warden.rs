@@ -253,7 +253,12 @@ impl AngerManagement {
             list.push(suspect_tag(uuid, anger));
         }
         let mut root = Vec::new();
-        put(&mut root, "suspects", Tag::List(list));
+        // 官方 `createUuidAngerPairs()` 为空时 `optionalFieldOf` 省略整个键。
+        // Official `createUuidAngerPairs()` is empty, so `optionalFieldOf`
+        // omits the key entirely.
+        if !list.is_empty() {
+            put(&mut root, "suspects", Tag::List(list));
+        }
         Tag::Compound(root)
     }
 

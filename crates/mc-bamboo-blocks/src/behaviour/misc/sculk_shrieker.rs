@@ -96,6 +96,8 @@ impl SculkShriekerEntity {
             source_player,
             source_entity: None,
             projectile_owner: None,
+            source_uuid: None,
+            projectile_owner_uuid: None,
         };
         vibration::add_candidate(&mut self.listener, info, game_time, &mut || {});
     }
