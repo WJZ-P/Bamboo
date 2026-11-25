@@ -359,6 +359,21 @@ pub enum Goal {
     ///
     /// `AbstractCubeMob.CubeMobKeepOnJumpingGoal`: keep asking for movement.
     CubeKeepJumping,
+    /// `SulfurCube.SulfurCubeTemptGoal`（`TemptGoal.ForNonPathfinders`）：玩家手上
+    /// 拿着可吞物品时用它自己的移动控制走过去，不寻路。
+    ///
+    /// `SulfurCube.SulfurCubeTemptGoal` (`TemptGoal.ForNonPathfinders`): follow a
+    /// player holding a swallowable item with the cube move control, no pathfinding.
+    SulfurCubeTempt {
+        player: Option<EntityUid>,
+    },
+    /// `SulfurCube.SulfurCubeSearchForItemsGoal`：找 8 格内最近的、可吞的掉落物。
+    ///
+    /// `SulfurCube.SulfurCubeSearchForItemsGoal`: find the nearest swallowable
+    /// item entity within eight blocks.
+    SulfurCubeSearchForItems {
+        target: Option<EntityUid>,
+    },
     /// `Drowned.DrownedGoToWaterGoal`：天亮时上岸的溺尸往回找水。
     ///
     /// `Drowned.DrownedGoToWaterGoal`: a drowned on land heads back to water in daylight.
@@ -761,6 +776,7 @@ impl Goal {
             | Self::CubeAttack { .. }
             | Self::CubeRandomDirection { .. }
             | Self::CubeKeepJumping => super::slime::flags(self),
+            Self::SulfurCubeTempt { .. } | Self::SulfurCubeSearchForItems { .. } => &[Flag::Look],
             Self::DrownedGoToWater { .. }
             | Self::RandomStroll { .. }
             | Self::SilverfishMergeWithStone { .. } => &[Flag::Move],
@@ -906,6 +922,8 @@ impl Goal {
             Self::CubeAttack { .. } => "CubeMobAttackGoal",
             Self::CubeRandomDirection { .. } => "CubeMobRandomDirectionGoal",
             Self::CubeKeepJumping => "CubeMobKeepOnJumpingGoal",
+            Self::SulfurCubeTempt { .. } => "SulfurCubeTemptGoal",
+            Self::SulfurCubeSearchForItems { .. } => "SulfurCubeSearchForItemsGoal",
             Self::DrownedGoToWater { .. } => "DrownedGoToWaterGoal",
             Self::DrownedSwimUp { .. } => "DrownedSwimUpGoal",
             Self::DrownedGoToBeach { .. } => "DrownedGoToBeachGoal",
@@ -2325,6 +2343,45 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         // `CubeMobKeepOnJumpingGoal.canUse` 是 `!isPassenger()`。
         // `CubeMobKeepOnJumpingGoal.canUse` is `!isPassenger()`.
         Goal::CubeKeepJumping => me.vehicle.is_none(),
+        Goal::SulfurCubeTempt { player } => {
+            // `SulfurCubeTemptGoal` 的 predicate：幼年认 `#sulfur_cube_food`
+            // (slime_ball)，成年认 `#sulfur_cube_swallowable`。
+            let baby = mob.age < 0;
+            let found = nearest_sulfur_cube_tempting_player(me, mob, ctx, baby);
+            *player = found;
+            found.is_some()
+        }
+        Goal::SulfurCubeSearchForItems { target } => {
+            let state = &mob.sulfur_cube;
+            if mob.age < 0 || state.pickup_timer > 0 {
+                *target = None;
+                return false;
+            }
+            let area = me.bounding_box().inflate(8.0, 8.0, 8.0);
+            let mut best = f64::INFINITY;
+            let mut found = None;
+            ctx.for_each_other_in(area, &mut |other| {
+                let crate::entity::KindPublic::Item {
+                    stack,
+                    pickup_delay,
+                    health,
+                    ..
+                } = &other.kind
+                else {
+                    return;
+                };
+                if *pickup_delay > 0 || *health <= 0 || !super::sulfur_cube::is_swallowable(stack) {
+                    return;
+                }
+                let distance = me.position.distance_to_sqr(other.position);
+                if distance < best {
+                    best = distance;
+                    found = Some(other.uid);
+                }
+            });
+            *target = found;
+            found.is_some()
+        }
         Goal::DrownedGoToWater { wanted, .. } => {
             // `DrownedGoToWaterGoal.canUse`：白天、不在水里、找得到水。
             // `DrownedGoToWaterGoal.canUse`: daylight, not in water and water found.
@@ -2702,7 +2759,9 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         | Goal::Swell { .. }
         | Goal::CubeFloat
         | Goal::CubeRandomDirection { .. }
-        | Goal::CubeKeepJumping => can_use(goal, me, mob, ctx),
+        | Goal::CubeKeepJumping
+        | Goal::SulfurCubeTempt { .. }
+        | Goal::SulfurCubeSearchForItems { .. } => can_use(goal, me, mob, ctx),
         Goal::CubeAttack { grow_tired_timer } => {
             if combat_target(mob, ctx).is_none() {
                 return false;
@@ -3067,6 +3126,8 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         | Goal::CubeFloat
         | Goal::CubeRandomDirection { .. }
         | Goal::CubeKeepJumping
+        | Goal::SulfurCubeTempt { .. }
+        | Goal::SulfurCubeSearchForItems { .. }
         | Goal::WitchRangedAttack { .. }
         | Goal::SnowGolemRangedAttack { .. }
         | Goal::SquidRandomMovement => {}
@@ -3285,11 +3346,16 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         | Goal::CubeAttack { .. }
         | Goal::CubeRandomDirection { .. }
         | Goal::CubeKeepJumping
+        | Goal::SulfurCubeSearchForItems { .. }
         | Goal::DrownedGoToWater { .. }
         | Goal::RandomStroll { .. }
         | Goal::RandomStand { .. }
         | Goal::WitchHealRaiders { .. }
         | Goal::RunAroundLikeCrazy { .. } => {}
+        Goal::SulfurCubeTempt { player } => {
+            *player = None;
+            super::sulfur_cube::stop_tempt(mob);
+        }
         // `DrownedSwimUpGoal.stop` 关掉「正在找陆地」。
         Goal::DrownedSwimUp { .. } => mob.searching_for_land = false,
         // `DrownedGoToBeachGoal.stop` 只调 `super.stop()`，而 `MoveToBlockGoal` 没有覆写
@@ -3429,6 +3495,40 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             mob.cube.aggressive = false;
         }
         Goal::CubeKeepJumping => super::slime::set_wanted_movement(mob, 1.0),
+        Goal::SulfurCubeTempt { player } => {
+            let Some(uid) = *player else { return };
+            let Some(found) = player_by_uid(ctx.blocks(), uid) else {
+                return;
+            };
+            // `Mob.lookAt(player, 10, 10)`；`SulfurCubeLookControl` 在有 body 时
+            // 把 yRot 折回直角，所以这里仅写 look 目标。
+            mob.look.set_look_at(
+                found.position.x,
+                found.eye_y(),
+                found.position.z,
+                10.0,
+                0.0,
+            );
+            super::slime::set_wanted_movement(mob, 1.0);
+            mob.cube.move_y_rot = me.y_rot;
+            mob.cube.aggressive = false;
+        }
+        Goal::SulfurCubeSearchForItems { target } => {
+            let Some(uid) = *target else { return };
+            let mut position = None;
+            ctx.with_other(uid, &mut |other| position = Some(other.position));
+            let Some(position) = position else { return };
+            let dy = position.y - living::eye_y(me, mob);
+            let dx = position.x - me.position.x;
+            let dz = position.z - me.position.z;
+            let horizontal = (dx * dx + dz * dz).sqrt();
+            let degrees = |radians: f64| radians * f64::from(180.0_f32 / std::f32::consts::PI);
+            let yaw = degrees(mc_bamboo_core::mth::atan2(dz, dx)) as f32 - 90.0;
+            let pitch = -degrees(mc_bamboo_core::mth::atan2(dy, horizontal)) as f32;
+            mob.x_rot = super::control::rotate_towards(mob.x_rot, pitch, 10.0);
+            me.y_rot = super::control::rotate_towards(me.y_rot, yaw, 10.0);
+            mob.cube.move_y_rot = me.y_rot;
+        }
         // `DrownedSwimUpGoal.tick`：离终点够近或没有路径时，朝海平面方向重新找点。
         Goal::DrownedSwimUp { speed, stuck } => {
             let sea = f64::from(ctx.blocks().sea_level());
@@ -4542,6 +4642,56 @@ fn nearest_guardian_target_impl(
         if distance < best {
             best = distance;
             found = Some(uid);
+        }
+    }
+    found
+}
+
+/// `SulfurCubeTemptGoal` 的 `canUse`：按 `TEMPT_RANGE` 找拿着目标物品的最近玩家，
+/// 和平难度不参与（`TargetingConditions.forNonCombat` 不排除创造玩家，这里沿用）。
+///
+/// `SulfurCubeTemptGoal.canUse`: nearest player holding the predicate item within
+/// `TEMPT_RANGE`. Creative players are not excluded.
+fn nearest_sulfur_cube_tempting_player(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    baby: bool,
+) -> Option<EntityUid> {
+    let view = ctx.blocks();
+    let range = mob
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::TEMPT_RANGE);
+    let mut players = Vec::new();
+    view.for_each_player(&mut |player| players.push(*player));
+    let mut best = f64::INFINITY;
+    let mut found = None;
+    for player in players {
+        if player.spectator || !player.alive {
+            continue;
+        }
+        let follows = [player.main_hand, player.off_hand].into_iter().any(|item| {
+            if baby {
+                crate::state::item_is_tagged(
+                    item,
+                    mc_bamboo_data::tags::item_tags::SULFUR_CUBE_FOOD,
+                )
+            } else {
+                super::sulfur_cube::is_swallowable(&mc_bamboo_protocol::item::ItemStack::new(
+                    item, 1,
+                ))
+            }
+        });
+        if !follows {
+            continue;
+        }
+        if !targeting_test(me, mob, view, &player, range, false, false) {
+            continue;
+        }
+        let distance = player.position.distance_to_sqr(me.position);
+        if distance < best {
+            best = distance;
+            found = Some(player.uid);
         }
     }
     found

@@ -209,7 +209,10 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     }
     // `AbstractCubeMob.tick`：`super.tick()` 之后的落地判断。
     // `AbstractCubeMob.tick`: the landing check after `super.tick()`.
-    if mob.mob_type == super::MobType::Slime {
+    if matches!(
+        mob.mob_type,
+        super::MobType::Slime | super::MobType::SulfurCube
+    ) {
         super::slime::after_tick(me, mob);
     }
     // `PolarBear.tick` 在 `super.tick()` 之后：吼叫冷却和持久愤怒。
@@ -816,6 +819,11 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
 /// Ambient, hurt and death sounds: equines by kind and age, others by type,
 /// cows by their sound variant.
 fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
+    // 硫磺方块怪按大小和是否吞了方块分派四种声音。
+    // Sulfur cubes dispatch their four sounds by size and body item.
+    if mob.mob_type == super::MobType::SulfurCube {
+        return super::sulfur_cube::voice(mob, voice);
+    }
     // 守卫者 / 远古守卫者：环境、受伤、死亡音都分水中 / 岸上两套。
     // Guardian / elder guardian: ambient, hurt and death sounds all have water / land
     // variants.
@@ -1063,9 +1071,14 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
         make_sound(me, mob, sound);
         return;
     }
-    // 史莱姆的 `getAmbientSound()` 是空：`makeSound(null)` 不放音效，也不取音高。
-    // A slime's `getAmbientSound()` is null: `makeSound(null)` plays nothing and draws no pitch.
-    if mob.mob_type == super::MobType::Slime {
+    // 史莱姆和硫磺方块怪的 `getAmbientSound()` 是空：`makeSound(null)` 不放音效，
+    // 也不取音高。
+    // Slimes and sulfur cubes have a null `getAmbientSound()`: `makeSound(null)`
+    // plays nothing and draws no pitch.
+    if matches!(
+        mob.mob_type,
+        super::MobType::Slime | super::MobType::SulfurCube
+    ) {
         return;
     }
     let pitch = voice_pitch(me, mob);
@@ -1082,7 +1095,10 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
 ///
 /// `getSoundVolume()`: by size for slimes, by type otherwise.
 fn sound_volume(mob: &Mob) -> f32 {
-    if mob.mob_type == super::MobType::Slime {
+    if matches!(
+        mob.mob_type,
+        super::MobType::Slime | super::MobType::SulfurCube
+    ) {
         super::slime::sound_volume(mob)
     } else {
         mob.mob_type.sound_volume()
@@ -1181,7 +1197,10 @@ fn tick_death(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.events.push(MobEvent::Poof);
         // `AbstractCubeMob.remove`：先分裂，再 `super.remove`。
         // `AbstractCubeMob.remove`: split first, then `super.remove`.
-        if mob.mob_type == super::MobType::Slime {
+        if matches!(
+            mob.mob_type,
+            super::MobType::Slime | super::MobType::SulfurCube
+        ) {
             super::slime::split_on_remove(me, mob, ctx);
         }
         me.discard();
@@ -1335,7 +1354,10 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
         {
             jump_in_liquid(me, mob);
         } else if (me.on_ground || (in_water && fluid <= threshold)) && mob.no_jump_delay == 0 {
-            if mob.mob_type == super::MobType::Slime {
+            if matches!(
+                mob.mob_type,
+                super::MobType::Slime | super::MobType::SulfurCube
+            ) {
                 super::slime::jump_from_ground(me, mob, ctx.blocks());
             } else {
                 jump_from_ground(me, mob, ctx.blocks());
@@ -1792,6 +1814,9 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     } else if mob.mob_type == super::MobType::Slime {
         super::slime::move_control_tick(me, mob);
         look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::SulfurCube {
+        super::sulfur_cube::move_control_tick(me, mob);
+        super::sulfur_cube::look_control_tick(me, mob);
     } else if mob.mob_type == super::MobType::Phantom {
         // `PhantomLookControl.tick` 是空的。
         // `PhantomLookControl.tick` is empty.
@@ -1993,6 +2018,12 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
         Operation::Strafe => super::skeleton::strafe(me, mob, view),
         Operation::Wait => mob.zza = 0.0,
     }
+}
+
+/// `LookControl.tick`。
+/// `LookControl.tick` 的公开入口，给别的生物模块在默认路径复用。
+pub(crate) fn look_control_tick_public(me: &mut Entity, mob: &mut Mob) {
+    look_control_tick(me, mob);
 }
 
 /// `LookControl.tick`。
@@ -3267,6 +3298,26 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
                 Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
                 me,
             );
+        }
+        return;
+    }
+    if mob.mob_type == super::MobType::SulfurCube {
+        // `SulfurCube.getBaseExperienceReward`：幼年 0，成年 `1 + nextInt(2)`。
+        // `SulfurCube.getBaseExperienceReward`: 0 for babies, `1 + nextInt(2)` for adults.
+        let amount = if by_player && drops && adult {
+            1 + me.random.next_int_bounded(2)
+        } else {
+            0
+        };
+        mob.events.push(MobEvent::Death);
+        if drops {
+            ctx.emit(
+                Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
+                me,
+            );
+        }
+        if amount > 0 {
+            ctx.emit(Command::AwardDeathExperience { amount }, me);
         }
         return;
     }

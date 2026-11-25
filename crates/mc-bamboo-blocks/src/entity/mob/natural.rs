@@ -844,6 +844,9 @@ pub(super) fn check_spawn_rules(
         // Guardian natural-spawn rules (`checkGuardianSpawnRules` / ocean monuments) belong to
         // a later phase; treat them as absent from biome tables for now (commands, eggs,
         // structures).
+        // `SulfurCube.checkSulfurCubeSpawnRules` 恒真：没有亮度 / 群系门槛。
+        // `SulfurCube.checkSulfurCubeSpawnRules` is always true: no light or biome gate.
+        MobType::SulfurCube => true,
         MobType::Guardian | MobType::ElderGuardian => true,
         // 两种傀儡都不在群系刷怪表里，只保留命令 / 方块图案生成时共用的规则。
         // Neither golem is in a biome spawn table; only the shared rule remains.
