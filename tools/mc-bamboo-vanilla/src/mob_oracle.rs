@@ -784,6 +784,11 @@ struct CowStep {
     /// for other mobs.
     #[serde(default)]
     goat: i32,
+    /// 嗅探兽：`DATA_STATE` 的网络 ID；其余生物是 0。
+    ///
+    /// Sniffers: the `DATA_STATE` network id; 0 for other mobs.
+    #[serde(default)]
+    sniffer: i32,
     /// 狼：驯服标志、坐下命令、有没有主人、仇恨结束时刻、讨食、项圈、最大生命（位）。
     ///
     /// Wolves: tame flags, sit order, owner, anger end, begging, collar, max health bits.
@@ -859,6 +864,7 @@ fn zombie_style(name: &str) -> bool {
         "frog_",
         "tadpole_",
         "camel_",
+        "sniffer_",
         "polar_bear_fight_",
         "creeper_",
         "spider_",
@@ -2149,6 +2155,7 @@ impl Report {
                     18 => mc_bamboo_blocks::entity::mob::MobType::Frog,
                     19 => mc_bamboo_blocks::entity::mob::MobType::Tadpole,
                     20 => mc_bamboo_blocks::entity::mob::MobType::Camel,
+                    24 => mc_bamboo_blocks::entity::mob::MobType::Sniffer,
                     15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
                     16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
@@ -3084,6 +3091,7 @@ impl Report {
                 plain!(fox_flags);
                 plain!(fox_mouth);
                 plain!(goat);
+                plain!(sniffer);
                 plain!(wolf_tame);
                 plain!(wolf_sit);
                 plain!(wolf_owned);
@@ -4907,6 +4915,11 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             0
         },
         goat: goat_flags(mob),
+        sniffer: if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Sniffer {
+            mob.sniffer.state.id()
+        } else {
+            0
+        },
         wolf_tame: if is_wolf(mob) {
             i32::from(mob.tame.flags)
         } else {

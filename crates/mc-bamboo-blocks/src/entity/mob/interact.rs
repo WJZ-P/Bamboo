@@ -162,6 +162,7 @@ pub fn interact(
     req: &MobInteractRequest,
     now: i64,
     thundering: bool,
+    level_next_float: &mut dyn FnMut() -> f32,
 ) -> MobInteraction {
     // `ZombieVillager.mobInteract` 不是 `Animal`：金苹果 + 虚弱才转化。
     // `ZombieVillager.mobInteract` is not `Animal`: golden apple + weakness cures.
@@ -213,13 +214,13 @@ pub fn interact(
         return super::tadpole::interact(me, mob, req).unwrap_or_else(MobInteraction::pass);
     }
     if mob.mob_type == super::MobType::Wolf {
-        return super::wolf::interact(me, mob, req, now);
+        return super::wolf::interact(me, mob, req, now, level_next_float);
     }
     if mob.mob_type == MobType::Cat {
-        return super::cat::interact(me, mob, req);
+        return super::cat::interact(me, mob, req, level_next_float);
     }
     if mob.mob_type == MobType::Parrot {
-        return super::parrot::interact(me, mob, req);
+        return super::parrot::interact(me, mob, req, level_next_float);
     }
     if mob.mob_type == MobType::Armadillo
         && let Some(outcome) = super::armadillo::interact(me, mob, req)
@@ -239,10 +240,10 @@ pub fn interact(
         return outcome;
     }
     if mob.mob_type.is_equine() {
-        return super::equine::interact(me, mob, req);
+        return super::equine::interact(me, mob, req, level_next_float);
     }
     if super::nautilus::is_nautilus(mob.mob_type) {
-        return super::nautilus::interact(me, mob, req);
+        return super::nautilus::interact(me, mob, req, level_next_float);
     }
     // `Dolphin.mobInteract`：手里是 `#fishes` 时放吃鱼声，幼崽加速长大、成年记下
     // `gotFish`，并消费一个鱼。这是它自己的 `mobInteract`，不走 `Animal.mobInteract`。
@@ -296,7 +297,19 @@ pub fn interact(
     if mob.mob_type == MobType::SnowGolem {
         return super::snow_golem::interact(mob, req);
     }
-    animal_interact(me, mob, req)
+    if mob.mob_type == MobType::Sniffer {
+        // `Sniffer.mobInteract`：先走 `Animal.mobInteract`，吃的是 `#sniffer_food` 且
+        // 真的消费了，就再放一次吃食声。
+        // `Sniffer.mobInteract`: the `Animal.mobInteract` path first, then a second
+        // eating sound when the food is `#sniffer_food` and was actually consumed.
+        let is_food = !req.held.is_empty() && is_food(mob.mob_type, req.held.item);
+        let outcome = animal_interact(me, mob, req, level_next_float);
+        if outcome.result.consumes_action() && is_food {
+            sniffer_eat_sound(me, mob, level_next_float);
+        }
+        return outcome;
+    }
+    animal_interact(me, mob, req, level_next_float)
 }
 
 /// `Animal.mobInteract`：吃的能让成年动物发情、让幼崽长大。
@@ -306,6 +319,7 @@ pub(super) fn animal_interact(
     me: &mut Entity,
     mob: &mut Mob,
     req: &MobInteractRequest,
+    level_next_float: &mut dyn FnMut() -> f32,
 ) -> MobInteraction {
     if mob.mob_type == MobType::Sheep
         && let Some(outcome) = sheep::interact_shears(mob, req)
@@ -341,7 +355,7 @@ pub(super) fn animal_interact(
         mob.in_love = 600;
         mob.love_cause = Some(req.player_uuid);
         mob.events.push(MobEvent::Hearts);
-        play_eating_sound(me, mob);
+        play_eating_sound(me, mob, level_next_float);
         return MobInteraction {
             result: InteractionResult::SuccessServer,
             shrink_held,
@@ -353,7 +367,7 @@ pub(super) fn animal_interact(
         // `getSpeedUpSecondsWhenFeeding(-age)`：int 除法先算，再乘 0.1F 截成 int。
         let seconds = (((-age) / 20) as f32 * 0.1_f32) as i32;
         age_up(me, mob, seconds, true);
-        play_eating_sound(me, mob);
+        play_eating_sound(me, mob, level_next_float);
         return MobInteraction {
             result: InteractionResult::Success,
             shrink_held,
@@ -366,9 +380,11 @@ pub(super) fn animal_interact(
 }
 
 /// `Animal.playEatingSound`：缺省不出声，猪、犰狳和青蛙各有自己的。
+/// `level_next_float` 给嗅探兽取音高（`Mth.randomBetween(level.random, 0.8, 1.2)`）。
 ///
 /// `Animal.playEatingSound`: silent by default; pigs, armadillos and frogs have their own.
-fn play_eating_sound(me: &mut Entity, mob: &mut Mob) {
+/// `level_next_float` feeds the sniffer's pitch (`Mth.randomBetween(level.random, 0.8, 1.2)`).
+fn play_eating_sound(me: &mut Entity, mob: &mut Mob, level_next_float: &mut dyn FnMut() -> f32) {
     match mob.mob_type {
         MobType::Pig => pig::play_eating_sound(me, mob),
         MobType::Cat => super::cat::play_eating_sound(me, mob),
@@ -385,8 +401,26 @@ fn play_eating_sound(me: &mut Entity, mob: &mut Mob) {
             hostile: false,
             seed: None,
         }),
+        // `Sniffer.playEatingSound`：`level.playSound(null, this, SNIFFER_EAT, NEUTRAL,
+        // 1.0F, randomBetween(level.random, 0.8, 1.2))`。
+        MobType::Sniffer => sniffer_eat_sound(me, mob, level_next_float),
         _ => {}
     }
+}
+
+/// `Sniffer.playEatingSound`：音高 `0.8 + level.random.nextFloat() * 0.4`。
+///
+/// `Sniffer.playEatingSound`: pitch `0.8 + level.random.nextFloat() * 0.4`.
+fn sniffer_eat_sound(me: &mut Entity, mob: &mut Mob, level_next_float: &mut dyn FnMut() -> f32) {
+    let pitch = 0.8 + level_next_float() * 0.4;
+    mob.events.push(MobEvent::Sound {
+        sound: "minecraft:entity.sniffer.eat",
+        volume: 1.0,
+        pitch,
+        position: me.position,
+        hostile: false,
+        seed: None,
+    });
 }
 
 /// `Shearable.shear` 的落地：按种类分给羊或哞菇。

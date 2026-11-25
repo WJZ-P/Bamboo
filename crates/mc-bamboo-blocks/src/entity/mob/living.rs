@@ -2189,6 +2189,10 @@ fn max_head_y_rot(mob: &Mob) -> f32 {
     } else if mob.mob_type.is_camel() {
         // `Camel.getMaxHeadYRot()`。
         super::camel::max_head_y_rot()
+    } else if mob.mob_type == super::MobType::Sniffer {
+        // `Sniffer.getMaxHeadYRot()`。
+        // `Sniffer.getMaxHeadYRot()`.
+        50.0
     } else {
         MAX_HEAD_Y_ROT as f32
     }

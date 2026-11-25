@@ -511,6 +511,7 @@ pub(super) fn interact(
     mob: &mut Mob,
     req: &MobInteractRequest,
     now: i64,
+    level_next_float: &mut dyn FnMut() -> f32,
 ) -> MobInteraction {
     let held = &req.held;
     let consume = !req.creative;
@@ -527,7 +528,7 @@ pub(super) fn interact(
         let owned = mob.tame.is_owned_by(Some(req.player_uuid));
         let dye = item_is_tagged(held.item, item_tags::WOLF_COLLAR_DYES);
         if !dye || !owned {
-            let animal = super::interact::animal_interact(me, mob, req);
+            let animal = super::interact::animal_interact(me, mob, req, level_next_float);
             if !animal.result.consumes_action() && owned {
                 mob.tame.ordered_to_sit = !mob.tame.ordered_to_sit;
                 mob.jumping = false;
@@ -550,7 +551,7 @@ pub(super) fn interact(
             ..outcome(InteractionResult::SuccessServer, consume)
         };
     }
-    super::interact::animal_interact(me, mob, req)
+    super::interact::animal_interact(me, mob, req, level_next_float)
 }
 
 fn outcome(result: InteractionResult, shrink_held: bool) -> MobInteraction {

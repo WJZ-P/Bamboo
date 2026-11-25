@@ -140,6 +140,11 @@ pub enum Kind {
         max_interval: i32,
         ticks_until_next_start: i32,
     },
+    /// `SetEntityLookTarget.create(PLAYER, maxDist)`：没有间隔计时器，每次都直接找最近的玩家。
+    ///
+    /// `SetEntityLookTarget.create(PLAYER, maxDist)`: no interval ticker; it looks for the
+    /// nearest player every time.
+    LookAtPlayer { max_dist: f32 },
     /// `AnimalMakeLove(partnerType, speed, closeEnough)`。
     MakeLove {
         partner: MobType,
@@ -342,6 +347,7 @@ impl Kind {
             },
             Self::MakeLove { .. } => Class::Timed { min: 110, max: 110 },
             Self::LookAtPlayerSometimes { .. }
+            | Self::LookAtPlayer { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
             | Self::WalkTargetFromLook { .. }
@@ -381,7 +387,9 @@ impl Kind {
                 LongJumpCooldownTicks => LONG_JUMP_COOLDOWN,
                 _ => RAM_COOLDOWN,
             },
-            Self::LookAtPlayerSometimes { .. } => LOOK_SOMETIMES_REQUIRED,
+            Self::LookAtPlayerSometimes { .. } | Self::LookAtPlayer { .. } => {
+                LOOK_SOMETIMES_REQUIRED
+            }
             Self::MakeLove { .. } => MAKE_LOVE_REQUIRED,
             Self::FollowTemptation { .. } => TEMPT_REQUIRED,
             Self::BabyFollowAdult { .. } => FOLLOW_ADULT_REQUIRED,
@@ -421,6 +429,7 @@ impl Kind {
             Self::MoveToTargetSink(_) => "MoveToTargetSink",
             Self::CountDownCooldown(_) => "CountDownCooldownTicks",
             Self::LookAtPlayerSometimes { .. }
+            | Self::LookAtPlayer { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
             | Self::WalkTargetFromLook { .. }
@@ -776,6 +785,24 @@ impl Kind {
     /// The `OneShot.trigger` lambda that runs after the memory conditions.
     pub(super) fn trigger(&mut self, cx: &mut Cx) -> bool {
         match self {
+            Self::LookAtPlayer { max_dist } => {
+                let max_sqr = f64::from(*max_dist * *max_dist);
+                let position = cx.me.position;
+                let Some(target) = sensor::find_closest_visible(cx, &mut |view| {
+                    view.player && view.position.distance_to_sqr(position) <= max_sqr
+                }) else {
+                    return false;
+                };
+                cx.memories.set(
+                    LookTarget,
+                    MemoryValue::Look(PositionTracker::Entity {
+                        uid: target,
+                        track_eye: true,
+                        target_eye: false,
+                    }),
+                );
+                true
+            }
             Self::LookAtPlayerSometimes {
                 max_dist,
                 min_interval,

@@ -19,7 +19,7 @@ use mc_bamboo_data::{PathType, items, registries::attribute, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
 use super::{
-    Mob, MobType,
+    Mob, MobEvent, MobType,
     attributes::Attributes,
     brain::{
         Activity, ActivityData, Brain, Cx,
@@ -392,15 +392,7 @@ fn idle_activity() -> ActivityData {
                         ),
                         (Kind::Sniffer(Behavior::Scenting), 1),
                         (Kind::Sniffer(Behavior::Sniffing), 1),
-                        (
-                            Kind::LookAtPlayerSometimes {
-                                max_dist: 6.0,
-                                min_interval: 30,
-                                max_interval: 60,
-                                ticks_until_next_start: 0,
-                            },
-                            1,
-                        ),
+                        (Kind::LookAtPlayer { max_dist: 6.0 }, 1),
                         (Kind::RandomStroll { speed: 1.0 }, 1),
                         (Kind::DoNothing { min: 5, max: 20 }, 2),
                     ],
@@ -494,6 +486,9 @@ fn transition_to(me: &mut Entity, mob: &mut Mob, state: State) {
         State::Searching => {}
         State::Digging => {
             mob.sniffer.drop_seed_at_tick = me.tick_count + 120;
+            // `onDiggingStart`：`broadcastEntityEvent(this, 63)`。
+            // `onDiggingStart`: `broadcastEntityEvent(this, 63)`.
+            mob.events.push(MobEvent::EntityEvent { event: 63 });
         }
         State::Rising => {
             living::play_sound(me, mob, "minecraft:entity.sniffer.digging_stop", 1.0, 1.0);
@@ -693,8 +688,9 @@ pub(super) fn breed(
     }
     let egg = ItemStack::new(items::SNIFFER_EGG, 1);
     world.spawn_at_location(position, egg);
+    // `playSound(SNIFFER_EGG_PLOP, 1.0, (this.random.nextFloat() - this.random.nextFloat()) * 0.2 + 0.5)`。
+    let pitch = (me.random.next_float() - me.random.next_float()) * 0.2 + 0.5;
     me.with_mob(|me, mob| {
-        let pitch = (me.random.next_float() - me.random.next_float()) * 0.2 + 0.5;
         living::play_sound(me, mob, "minecraft:block.sniffer_egg.plop", 1.0, pitch);
     });
 }

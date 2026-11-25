@@ -59,6 +59,7 @@ pub(in crate::entity::mob) fn interact(
     me: &mut Entity,
     mob: &mut Mob,
     req: &MobInteractRequest,
+    level_next_float: &mut dyn FnMut() -> f32,
 ) -> MobInteraction {
     if !living::is_alive(me, mob) {
         return MobInteraction::pass();
@@ -72,7 +73,7 @@ pub(in crate::entity::mob) fn interact(
     {
         return outcome;
     }
-    let outcome = mob_interact(me, mob, req);
+    let outcome = mob_interact(me, mob, req, level_next_float);
     if outcome.result.consumes_action() || req.held.is_empty() {
         return outcome;
     }
@@ -132,7 +133,12 @@ pub(in crate::entity::mob) fn attempt_to_shear_equipment(
     None
 }
 
-fn mob_interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
+fn mob_interact(
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+    level_next_float: &mut dyn FnMut() -> f32,
+) -> MobInteraction {
     let open_inventory = !mob.is_baby() && tame(mob) && req.sneaking;
     // `isHolding(GOLDEN_DANDELION)` 看两只手；请求里只有这一只手的物品。
     // `isHolding` checks both hands; the request only carries this hand's stack.
@@ -150,7 +156,7 @@ fn mob_interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             return success(true, req);
         }
     }
-    abstract_horse_interact(me, mob, req)
+    abstract_horse_interact(me, mob, req, level_next_float)
 }
 
 /// `AbstractHorse.mobInteract`：有人骑或幼崽交给 `Animal.mobInteract`；
@@ -163,9 +169,10 @@ fn abstract_horse_interact(
     me: &mut Entity,
     mob: &mut Mob,
     req: &MobInteractRequest,
+    level_next_float: &mut dyn FnMut() -> f32,
 ) -> MobInteraction {
     if mob.is_vehicle() {
-        return crate::entity::mob::interact::animal_interact(me, mob, req);
+        return crate::entity::mob::interact::animal_interact(me, mob, req, level_next_float);
     }
     if mob.is_baby() {
         return MobInteraction::pass();

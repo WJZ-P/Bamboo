@@ -1516,6 +1516,7 @@ public final class MobOracle {
             addGoatScenes(scenes);
             FrogScenes.add(scenes);
             CamelScenes.add(scenes);
+            SnifferScenes.add(scenes);
         }
 
         /**
@@ -2297,6 +2298,40 @@ public final class MobOracle {
                     return null;
                 }
             };
+        }
+    }
+
+    /** 嗅探兽场景：闲逛、嗅闻、挖土掉种子、记下挖过的位置、繁殖产蛋。 */
+    static final class SnifferScenes {
+        static void add(List<Scene> scenes) {
+            int seeds = BuiltInRegistries.ITEM.getId(Items.TORCHFLOWER_SEEDS);
+            for (long seed : new long[] {11L, 23L}) {
+                // 平地：闲逛、嗅闻找能挖的方块、走过去挖、掉种子、记下挖过的位置。
+                // Flat ground: idling, sniffing out a diggable block, walking there,
+                // digging for a seed and remembering the dug position.
+                Scene wander = new Scene("sniffer_wander_" + seed).ticks(900);
+                Scenes.ground(wander, 15);
+                wander.mob(24, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(wander);
+            }
+            // 拿火把花种子的玩家喂两只；都喂了以后繁殖，产下一颗蛋。
+            // A player with torchflower seeds feeds two; once both are fed they breed
+            // and one lays an egg.
+            Scene breed = new Scene("sniffer_breed").ticks(400);
+            Scenes.ground(breed, 15);
+            breed.mob(24, 0.5, 64.0, 0.5, 0.0F, 67L, 0);
+            breed.mob(24, -2.5, 64.0, 0.5, 0.0F, 71L, 0);
+            breed.player(-0.5, 64.0, 3.5, Items.TORCHFLOWER_SEEDS);
+            breed.interact(20, 0, 0, seeds, 0);
+            breed.interact(22, 1, 0, seeds, 0);
+            scenes.add(breed);
+        }
+
+        /** `DATA_STATE` 的网络 ID：挖掘时换尺寸、掉种子都由它驱动。 */
+        static int state(net.minecraft.world.entity.animal.sniffer.Sniffer sniffer) {
+            var data = (net.minecraft.network.syncher.EntityDataAccessor<net.minecraft.world.entity.animal.sniffer.Sniffer.State>)
+                    readStatic(net.minecraft.world.entity.animal.sniffer.Sniffer.class, "DATA_STATE");
+            return sniffer.getEntityData().get(data).id();
         }
     }
 
@@ -4901,7 +4936,7 @@ public final class MobOracle {
                 || scene.name.startsWith("wolf_") || scene.name.startsWith("armadillo_")
                 || scene.name.startsWith("goat_") || scene.name.startsWith("slime_")
                 || scene.name.startsWith("frog_") || scene.name.startsWith("tadpole_")
-                || scene.name.startsWith("camel_")
+                || scene.name.startsWith("camel_") || scene.name.startsWith("sniffer_")
                 || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")
                 || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
                 || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")
@@ -15060,6 +15095,7 @@ public final class MobOracle {
                 case 18 -> EntityTypes.FROG.create(level, EntitySpawnReason.COMMAND);
                 case 19 -> EntityTypes.TADPOLE.create(level, EntitySpawnReason.COMMAND);
                 case 20 -> EntityTypes.CAMEL.create(level, EntitySpawnReason.COMMAND);
+                case 24 -> EntityTypes.SNIFFER.create(level, EntitySpawnReason.COMMAND);
                 // 61 焦骸、62 尸壳骆驼。
                 // 61 parched, 62 camel husk.
                 case 61 -> new net.minecraft.world.entity.monster.skeleton.Parched(EntityTypes.PARCHED, level);
@@ -15692,6 +15728,9 @@ public final class MobOracle {
             }
             if (mob instanceof net.minecraft.world.entity.animal.frog.Frog frog) {
                 out.append(",\"goat\":").append(FrogScenes.flags(frog));
+            }
+            if (mob instanceof net.minecraft.world.entity.animal.sniffer.Sniffer sniffer) {
+                out.append(",\"sniffer\":").append(SnifferScenes.state(sniffer));
             }
             out.append(",\"love\":").append(mob instanceof net.minecraft.world.entity.animal.Animal animal
                     ? getInt(net.minecraft.world.entity.animal.Animal.class, animal, "inLove") : 0);
