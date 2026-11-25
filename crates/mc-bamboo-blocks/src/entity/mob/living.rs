@@ -3265,6 +3265,15 @@ pub(crate) fn do_hurt_target(
             whole.split().public
         };
         let hurt = ctx.hurt_player(target, source, amount, me, &attacker);
+        // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`：ATTACK_KNOCKBACK
+        // 大于 0 且这一下打中时，攻击者自己的水平速度被压到 0.6 倍（监守者是 1.5）。
+        // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`: with a positive
+        // ATTACK_KNOCKBACK and a landed hit, the attacker's horizontal velocity is
+        // scaled by 0.6 (the warden has 1.5).
+        if hurt && mob.attributes.value(attribute::ATTACK_KNOCKBACK) > 0.0 {
+            me.delta.x *= 0.6;
+            me.delta.z *= 0.6;
+        }
         // `CaveSpider.doHurtTarget`：打中之后按难度给中毒。
         // `CaveSpider.doHurtTarget`: poison the target after a landed hit.
         if hurt && let Some(effect) = super::bee::poison_instance(mob, ctx.blocks().difficulty()) {
