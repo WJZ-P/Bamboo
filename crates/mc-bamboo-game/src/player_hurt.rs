@@ -268,6 +268,23 @@ pub(crate) fn knock_back_player(
     send_to_tracking_and_self(parts, id, &packet);
 }
 
+/// `Entity.push(dx, dy, dz)` 给玩家：音波命中这类「直接加冲量」的击退。
+/// 不按 `knockback` 公式，直接把向量加到速度上，再广播运动包。
+///
+/// `Entity.push(dx, dy, dz)` for a player: an impulse knockback such as a landed
+/// sonic boom. It adds the vector to the velocity directly and broadcasts motion.
+pub(crate) fn push_player(parts: &mut HurtParts<'_>, id: PlayerId, push: Vec3) {
+    let Some(player) = parts.players.get_mut(&id) else {
+        return;
+    };
+    player.motion.delta = player.motion.delta.add(push);
+    let packet = crate::links::encode_frames(&SetEntityMotion {
+        entity_id: id.0,
+        movement: player.motion.delta,
+    });
+    send_to_tracking_and_self(parts, id, &packet);
+}
+
 fn apply_arrow_push(parts: &mut HurtParts<'_>, id: PlayerId, source: &DamageSource) {
     let Some(player) = parts.players.get_mut(&id) else {
         return;

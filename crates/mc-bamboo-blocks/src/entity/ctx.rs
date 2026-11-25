@@ -1307,6 +1307,16 @@ pub enum Command {
         source: super::mob::DamageSource,
         amount: f32,
     },
+    /// `SonicBoom` 打中后 `target.push(dx, dy, dz)`：不走 `knockback`，只加速度。
+    /// 玩家由游戏层把同样的向量加到速度上。
+    ///
+    /// The `target.push(dx, dy, dz)` after a landed sonic boom: a velocity add,
+    /// not the `knockback` formula.
+    SonicBoomPush {
+        target: EntityUid,
+        player: bool,
+        push: mc_bamboo_core::Vec3,
+    },
     /// `LivingEntity.causeExtraKnockback` 给受害者补的那一次 `knockback`。
     /// 伤害在 [`Command::HurtPlayer`] / [`Command::HurtMob`] 里落地之后才轮到它，
     /// 所以单独排一条命令，保持官方的先后顺序。
@@ -1928,6 +1938,17 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             amount,
         } => {
             super::mob::living::apply_hurt_player(world, me, target, source, amount);
+        }
+        Command::SonicBoomPush {
+            target,
+            player,
+            push,
+        } => {
+            if player {
+                world.push_player(target, push);
+            } else {
+                world.push_mob(target, push);
+            }
         }
         Command::ExtraKnockback {
             target,

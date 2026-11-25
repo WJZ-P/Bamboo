@@ -4066,6 +4066,10 @@ pub struct MobPublic {
     pub no_ai: bool,
     pub silent: bool,
     pub no_gravity: bool,
+    /// `LivingEntity.isInvulnerable()`：NBT 的 `Invulnerable` 标志。
+    ///
+    /// `LivingEntity.isInvulnerable()`: the NBT `Invulnerable` flag.
+    pub invulnerable: bool,
     pub variant: CowVariant,
     pub sound_variant: CowSoundVariant,
     pub rabbit_variant: i32,
@@ -4328,6 +4332,7 @@ impl MobPublic {
             no_ai: mob.no_ai,
             silent: mob.silent,
             no_gravity: mob.no_gravity,
+            invulnerable: mob.invulnerable,
             variant: mob.variant,
             sound_variant: mob.sound_variant,
             rabbit_variant: mob.rabbit.variant.id(),

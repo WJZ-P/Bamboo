@@ -113,6 +113,12 @@ impl ReplayPlayers {
         PlayerHurtNow { hurt, death_drops }
     }
 
+    /// 音波命中给玩家的速度冲量：`Entity.push(dx, dy, dz)`。
+    pub fn push(&mut self, target: EntityUid, push: Vec3) {
+        let mut parts = self.region.hurt_parts();
+        crate::player_hurt::push_player(&mut parts, PlayerId(target), push);
+    }
+
     /// 生物给玩家的额外击退：`LivingEntity.knockback(strength, dx, dz)`。
     pub fn knock_back(&mut self, target: EntityUid, strength: f64, dx: f64, dz: f64) {
         let mut parts = self.region.hurt_parts();

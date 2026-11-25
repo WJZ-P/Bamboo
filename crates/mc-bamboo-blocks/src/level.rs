@@ -1654,6 +1654,15 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
+    /// 精确驱动当场给玩家加一次 `Entity.push(dx, dy, dz)`（音波命中）。
+    fn push_player_now(
+        &mut self,
+        _target: crate::entity::EntityUid,
+        _push: mc_bamboo_core::Vec3,
+    ) -> bool {
+        false
+    }
+
     /// 精确驱动当场给玩家点火（`Entity.igniteForSeconds`）。`false` 表示不能当场做，
     /// 调用方改成延后的 [`Effect::IgnitePlayer`]。
     fn ignite_player_now(&mut self, _target: crate::entity::EntityUid, _ticks: i32) -> bool {

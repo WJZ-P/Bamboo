@@ -994,6 +994,29 @@ impl Level for RegionLevel<'_> {
         true
     }
 
+    fn push_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        push: mc_bamboo_core::Vec3,
+    ) -> bool {
+        let Some(side) = self.player_side.as_mut() else {
+            return false;
+        };
+        let mut parts = crate::player_hurt::HurtParts {
+            players: &mut *self.players,
+            links: &mut *side.links,
+            sound_seeds: side.sound_seeds,
+            entities: &mut *self.entities,
+            difficulty: self.difficulty as i32,
+            rules: side.rules,
+            attacker: None,
+            defer_health: true,
+            pending_triggers: Some(side.pending_triggers),
+        };
+        crate::player_hurt::push_player(&mut parts, PlayerId(target), push);
+        true
+    }
+
     fn ignite_player_now(
         &mut self,
         target: mc_bamboo_blocks::entity::EntityUid,

@@ -268,6 +268,10 @@ pub struct LivingView {
     ///
     /// `isAlive()`: not removed and health above 0.
     pub alive: bool,
+    /// `LivingEntity.isInvulnerable()`：NBT 的 `Invulnerable` 标志。
+    ///
+    /// `LivingEntity.isInvulnerable()`: the NBT `Invulnerable` flag.
+    pub invulnerable: bool,
     pub spectator: bool,
     /// 创造模式的玩家（`canBeSeenAsEnemy` 为假）。
     ///
@@ -343,6 +347,7 @@ fn player_view(player: &crate::entity::ctx::PlayerView) -> LivingView {
         ),
         alive: player.alive,
         spectator: player.spectator,
+        invulnerable: false,
         creative: player.creative,
         sprinting: player.sprinting,
         baby: false,
@@ -381,6 +386,7 @@ fn mob_view(uid: EntityUid, position: Vec3, removed: bool, mob: &KindPublicMob) 
         ),
         alive: !removed && mob.is_alive(),
         spectator: false,
+        invulnerable: mob.invulnerable,
         creative: false,
         sprinting: false,
         baby: mob.baby,

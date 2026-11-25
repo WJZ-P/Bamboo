@@ -4146,6 +4146,26 @@ impl<'a> World<'a> {
         Some(result)
     }
 
+    /// `Entity.push(dx, dy, dz)`：把一组有限向量加到一只生物的速度上。
+    pub fn push_mob(&mut self, id: i32, push: Vec3) {
+        if !(push.x.is_finite() && push.y.is_finite() && push.z.is_finite()) {
+            return;
+        }
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return;
+        };
+        entity.delta = entity.delta.add(push);
+        self.level.put_entity(entity);
+    }
+
+    /// `Entity.push(dx, dy, dz)` 对玩家：精确驱动当场改速度并发包，否则延后。
+    pub fn push_player(&mut self, target: crate::entity::EntityUid, push: Vec3) {
+        if !(push.x.is_finite() && push.y.is_finite() && push.z.is_finite()) {
+            return;
+        }
+        let _ = self.level.push_player_now(target, push);
+    }
+
     /// `Player.causeExtraKnockback` 对生物目标调的 `LivingEntity.knockback`。
     /// 方向和力道由攻击者给；这是受伤默认击退之外的第二下击退。
     ///
