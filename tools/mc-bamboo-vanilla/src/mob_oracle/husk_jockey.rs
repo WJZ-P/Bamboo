@@ -141,8 +141,19 @@ impl Report {
         // The official fixture lists spawn order (mount, rider, husk) while
         // Bamboo's table is id-ordered; sort by type and position.
         rows.sort();
+        // 改坏确认：把世界随机源往后推一步，骑士分支必须报种子不一致。
+        // Breakage check: advance the level random one step; the jockey case
+        // must report a seed mismatch.
+        if self.break_test.as_deref() == Some("husk_jockey") {
+            let _ = level.random.source().next_float();
+        }
         let mut expected = case.rows.clone();
         expected.sort();
+        let world_seed = if self.break_test.as_deref() == Some("husk_jockey") {
+            level.random.source().seed()
+        } else {
+            world_seed
+        };
         if rows != expected {
             self.mismatch(format!(
                 "{} entities: official {expected:?}, bamboo {rows:?}",

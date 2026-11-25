@@ -2348,7 +2348,16 @@ impl Report {
         };
         set_zombie_clock(&mut level, case, 0, break_test);
         accumulate_inhabited(&mut level, 0, self.break_test.as_deref());
-        let ours = snapshot(&level, &ids);
+        let mut ours = snapshot(&level, &ids);
+        // 改坏确认：把第二名乘客的 z 挪一格，静止骑乘场景必须报不一致。
+        // Breakage check: shift the second rider's z; the static riding scene
+        // must report a mismatch.
+        if self.break_test.as_deref() == Some("camel_husk_ride")
+            && case.ride_passenger2 >= 0
+            && let Some(Some(row)) = ours.get_mut(case.ride_passenger2 as usize)
+        {
+            row.z = (f64::from_bits(row.z as u64) + 1.0).to_bits() as i64;
+        }
         self.compare(&case.name, 0, &ours, first);
         self.compare_zombie_player(case, &mut level, 0);
         // 场景开始时的牛也算「刚生成」，但它们在 tick 0 已经建过同步状态，
