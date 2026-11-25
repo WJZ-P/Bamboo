@@ -339,9 +339,15 @@ impl Report {
                 world.tick_entities();
             }
             // 这一拍 `addFreshEntity` 出来的实体（投出的物品 / 复制的悦灵）记成 spawned，
-            // 之后 `count_items` / `count_allays` 都不再数它们，和官方 `tracked` 一致。
-            for fresh in level.entities.take_spawn_snapshots() {
-                spawned.insert(fresh.uid);
+            // 并且当场丢弃：官方假世界的 `addFreshEntity` 只进 `spawned` 不进 `tracked`，
+            // 所以它们不参与 tick、传感器也看不到；`count_items` / `count_allays` 也不数。
+            let fresh_spawned = level.entities.take_spawn_snapshots();
+            if !fresh_spawned.is_empty() {
+                let mut world = World::new(&mut level, &mut ticks);
+                for fresh in &fresh_spawned {
+                    spawned.insert(fresh.uid);
+                    world.with_entity_mut(fresh.uid, &mut |entity| entity.discard());
+                }
             }
             if case.has_player {
                 level.players = vec![player_view(case.first_id + 1, player_main_hand)];
