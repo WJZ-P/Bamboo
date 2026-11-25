@@ -1094,6 +1094,13 @@ pub struct ProjectileFacts {
     /// The guardian's `DATA_ID_MOVING` / `DATA_ID_ATTACK_TARGET` metadata indices.
     pub guardian_moving: u8,
     pub guardian_attack_target: u8,
+    /// `AbstractNautilus.DASH` 和 `ZombieNautilus.DATA_VARIANT_ID` 的元数据 index。
+    ///
+    /// The metadata indices of `AbstractNautilus.DASH` and
+    /// `ZombieNautilus.DATA_VARIANT_ID`.
+    pub nautilus_dash: u8,
+    pub zombie_nautilus_variant: u8,
+    pub zombie_nautilus_variant_serializer: i32,
     /// 蠹虫 / 末影螨的属性、眼高与寿命上限。
     ///
     /// Silverfish / endermite attributes, eye heights and the life cap.
@@ -1115,6 +1122,11 @@ pub struct ProjectileFacts {
     pub chicken_variant_serializer: i32,
     pub chicken_sound_variant_serializer: i32,
     pub cube_mob_size: u8,
+    /// 硫磺方块怪的 `MAX_FUSE` / `FROM_BUCKET` 元数据下标、眼高和生成盒倍率。
+    pub sulfur_cube_max_fuse: u8,
+    pub sulfur_cube_from_bucket: u8,
+    pub sulfur_cube_eye_height: f32,
+    pub sulfur_cube_spawn_dimensions_scale: f32,
     pub slime_eye_height: f32,
     /// `Armadillo.ARMADILLO_STATE` 的下标和序列化器、山羊的三个布尔元数据。
     ///

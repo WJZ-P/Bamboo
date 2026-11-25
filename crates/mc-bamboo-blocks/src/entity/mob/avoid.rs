@@ -26,6 +26,12 @@ pub enum AvoidClass {
     ///
     /// The armadillos spiders avoid (`AvoidEntityGoal(Armadillo.class, 6.0F, 1.0D, 1.2D, ...)`).
     Armadillo,
+    /// 海豚躲的守卫者（`AvoidEntityGoal(Guardian.class, 8.0F, 1.0D, 1.0D)`；
+    /// `Guardian` 类也包含远古守卫者）。
+    ///
+    /// The guardians a dolphin avoids (`AvoidEntityGoal(Guardian.class, 8.0F, 1.0D, 1.0D)`;
+    /// the `Guardian` class also covers elder guardians).
+    Guardian,
 }
 
 impl AvoidClass {
@@ -38,6 +44,7 @@ impl AvoidClass {
             // 北极熊还没实现。Polar bears are not modelled yet.
             Self::PolarBear => false,
             Self::Armadillo => kind == MobType::Armadillo,
+            Self::Guardian => super::guardian::is_guardian(kind),
         }
     }
 }

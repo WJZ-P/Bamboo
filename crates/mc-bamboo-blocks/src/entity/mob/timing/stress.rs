@@ -651,10 +651,12 @@ enum Scene {
     GuardianTower300,
     /// 玩家站在前哨站 / 女巫小屋旁，开着自然刷怪，量结构刷怪覆盖查询。
     StructureSpawn,
+    /// 玩家站在海底神殿上方，开着自然刷怪，量 `full` 盒覆盖查询。
+    MonumentSpawn,
 }
 
 impl Scene {
-    const ALL: [Self; 18] = [
+    const ALL: [Self; 19] = [
         Self::Pasture500,
         Self::Pasture2000,
         Self::Chase,
@@ -673,6 +675,7 @@ impl Scene {
         Self::NightVillage100,
         Self::GuardianTower300,
         Self::StructureSpawn,
+        Self::MonumentSpawn,
     ];
 
     fn name(self) -> &'static str {
@@ -695,6 +698,7 @@ impl Scene {
             Self::NightVillage100 => "night-village-100",
             Self::GuardianTower300 => "guardian-tower-300",
             Self::StructureSpawn => "structure-spawn",
+            Self::MonumentSpawn => "monument-spawn",
         }
     }
 
@@ -1122,6 +1126,26 @@ impl Scene {
         (terrain, Vec::new())
     }
 
+    /// 神殿旁的结构刷怪：种子 42 的 `(-12,-148)` 区块有一座真实海底神殿
+    /// （`docs/worldgen-structures-e2e.md` 的代表区块），玩家站在它的上方，
+    /// 开着自然刷怪；结构索引和女巫小屋场景走同一条路径。
+    ///
+    /// Structure spawning beside a monument: seed 42 has a real ocean monument
+    /// at chunk `(-12,-148)`; the player stands above it with natural spawning
+    /// on. The structure index follows the same path as the swamp-hut scene.
+    fn monument_spawn() -> (Terrain, Vec<(MobType, Vec3)>) {
+        let floor = 64;
+        let (px, pz) = (-12 * 16 + 8, -148 * 16 + 8);
+        let mut terrain = Terrain::new(floor);
+        terrain.flat_around(px, pz, 40);
+        terrain.sky_darken = 4;
+        terrain.add_player(
+            1,
+            Vec3::new(f64::from(px) + 0.5, f64::from(floor), f64::from(pz) + 0.5),
+        );
+        (terrain, Vec::new())
+    }
+
     /// 混合：两名玩家、自然刷怪开、真的噪声主世界地形（`minecraft:overworld`，
     /// 种子 20261116，跑 `mc_bamboo_worldgen::chunk::Generator` 到 CARVERS）。
     /// 刷怪走 `natural::spawn_for_chunk` 的真实路径；地形只在搭场景时生成一次，
@@ -1255,6 +1279,10 @@ impl Scene {
                 let (terrain, mobs) = Self::structure_spawn();
                 (terrain, mobs, true)
             }
+            Self::MonumentSpawn => {
+                let (terrain, mobs) = Self::monument_spawn();
+                (terrain, mobs, true)
+            }
         }
     }
 }
@@ -1316,7 +1344,7 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
         redstone: RedstoneMemory::default(),
         block_entities: BlockEntities::default(),
         block_events: BlockEvents::default(),
-        structure: (scene == Scene::StructureSpawn).then(|| {
+        structure: matches!(scene, Scene::StructureSpawn | Scene::MonumentSpawn).then(|| {
             let config = WorldGenConfig {
                 seed: 42,
                 level_type: LevelType::Normal,
@@ -1395,19 +1423,31 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
     // `structure-spawn` 场景每刻再按两类覆盖表逐区块问一次结构：自然刷怪到上限后
     // 类别会被过滤掉，直接问这两类才能量到稳定的结构查询单价。
     let structure_queries: Vec<(BlockPos, mc_bamboo_data::spawning::MobCategory)> =
-        if scene == Scene::StructureSpawn {
+        if matches!(scene, Scene::StructureSpawn | Scene::MonumentSpawn) {
             use mc_bamboo_data::spawning::MobCategory;
+            // 神殿还注册了 `axolotls` / `underground_water_creature` 两张空表，
+            // 一起问进去才能量到「空表也挡住群系表」这条路径。
+            // The monument also has two empty override lists; query them too so
+            // the "empty list suppresses the biome table" path is measured.
+            let categories: &[MobCategory] = if scene == Scene::MonumentSpawn {
+                &[
+                    MobCategory::Monster,
+                    MobCategory::Creature,
+                    MobCategory::Axolotls,
+                    MobCategory::UndergroundWaterCreature,
+                ]
+            } else {
+                &[MobCategory::Monster, MobCategory::Creature]
+            };
             spawn_chunks
                 .iter()
                 .flat_map(|chunk| {
-                    [MobCategory::Monster, MobCategory::Creature]
-                        .into_iter()
-                        .map(|category| {
-                            (
-                                BlockPos::new(chunk.x * 16 + 8, 64, chunk.z * 16 + 8),
-                                category,
-                            )
-                        })
+                    categories.iter().copied().map(|category| {
+                        (
+                            BlockPos::new(chunk.x * 16 + 8, 64, chunk.z * 16 + 8),
+                            category,
+                        )
+                    })
                 })
                 .collect()
         } else {
@@ -1481,6 +1521,17 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
                     f64::from(-17 * 16 + 8) + 0.5 + angle.cos() * 6.0,
                     64.0,
                     f64::from(22 * 16 + 8) + 0.5 + angle.sin() * 6.0,
+                );
+            }
+        } else if scene == Scene::MonumentSpawn {
+            // 玩家站在神殿上方的水面，绕着起点区块走，始终在 `full` 盒里。
+            // The player stands above the monument and walks around the source
+            // chunk, staying inside the `full` box.
+            if let Some(player) = players.first_mut() {
+                player.position = Vec3::new(
+                    f64::from(-12 * 16 + 8) + 0.5 + angle.cos() * 6.0,
+                    64.0,
+                    f64::from(-148 * 16 + 8) + 0.5 + angle.sin() * 6.0,
                 );
             }
         } else if natural || matches!(scene, Scene::Chase | Scene::ChaseObstacles) {
@@ -1805,7 +1856,10 @@ fn mob_stress() {
         }) {
             continue;
         }
-        let natural = matches!(scene, Scene::Mixed | Scene::StructureSpawn);
+        let natural = matches!(
+            scene,
+            Scene::Mixed | Scene::StructureSpawn | Scene::MonumentSpawn
+        );
         for &count in &threads {
             let mut rounds = Vec::with_capacity(ROUNDS);
             for round in 0..ROUNDS {
@@ -2026,7 +2080,11 @@ fn guardian_perf_scenes_tick_cleanly_and_structure_index_is_wired() {
         start::{BoundingBox, StructurePiece, chunk_pos_pack},
     };
 
-    for scene in [Scene::GuardianTower300, Scene::StructureSpawn] {
+    for scene in [
+        Scene::GuardianTower300,
+        Scene::StructureSpawn,
+        Scene::MonumentSpawn,
+    ] {
         let (terrain, mobs, _) = scene.build();
         let mut level = StressLevel {
             terrain: terrain.clone(),
@@ -2036,7 +2094,7 @@ fn guardian_perf_scenes_tick_cleanly_and_structure_index_is_wired() {
             redstone: RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
-            structure: (scene == Scene::StructureSpawn).then(|| {
+            structure: matches!(scene, Scene::StructureSpawn | Scene::MonumentSpawn).then(|| {
                 (
                     WorldGenConfig {
                         seed: 20261122,
@@ -2088,6 +2146,20 @@ fn guardian_perf_scenes_tick_cleanly_and_structure_index_is_wired() {
             Some(entity_type::WITCH),
             "真实女巫小屋覆盖盒要命中"
         );
+        // 种子 42 的 (-12,-148) 区块有真实海底神殿：monument-spawn 场景的落点
+        // 必须命中守卫者表，两张空表也必须返回空静态表而不是回退群系表。
+        let monument = BlockPos::new(-12 * 16 + 8, 50, -148 * 16 + 8);
+        assert_eq!(
+            override_at_indexed_for_bench(&world_config, &index, monument, MobCategory::Monster)
+                .map(|table| table[0].entity_type),
+            Some(entity_type::GUARDIAN),
+            "真实海底神殿覆盖盒要命中守卫者"
+        );
+        for category in [MobCategory::Axolotls, MobCategory::UndergroundWaterCreature] {
+            let table = override_at_indexed_for_bench(&world_config, &index, monument, category)
+                .unwrap_or_else(|| panic!("神殿 {category:?} 空表要挡住群系表"));
+            assert!(table.is_empty(), "神殿 {category:?} 覆盖表应为空");
+        }
     }
 
     // 人造女巫小屋：索引路径第一次查询就建好行，朴素路径给同一张覆盖表。

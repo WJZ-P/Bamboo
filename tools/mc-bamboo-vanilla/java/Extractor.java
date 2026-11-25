@@ -1376,6 +1376,15 @@ public final class Extractor {
         Class<?> guardian = net.minecraft.world.entity.monster.Guardian.class;
         out.addProperty("guardianMoving", entityAccessor(guardian, "DATA_ID_MOVING").id());
         out.addProperty("guardianAttackTarget", entityAccessor(guardian, "DATA_ID_ATTACK_TARGET").id());
+        // 鹦鹉螺的两项自有元数据 index 由类本身导出，别在 Rust 侧手写。
+        // The nautilus's two own metadata indices come from the class.
+        Class<?> abstractNautilus = net.minecraft.world.entity.animal.nautilus.AbstractNautilus.class;
+        Class<?> zombieNautilus = net.minecraft.world.entity.animal.nautilus.ZombieNautilus.class;
+        out.addProperty("nautilusDash", entityAccessor(abstractNautilus, "DASH").id());
+        var zombieVariant = entityAccessor(zombieNautilus, "DATA_VARIANT_ID");
+        out.addProperty("zombieNautilusVariant", zombieVariant.id());
+        out.addProperty("zombieNautilusVariantSerializer",
+                net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(zombieVariant.serializer()));
         // 蠹虫 / 末影螨：`createAttributes()` 的属性和寿命上限。眼高和苦力怕一样
         // 在 `monsterFacts()` 的 `eyeHeights` 表里导出。
         var silverfish = net.minecraft.world.entity.monster.Silverfish.createAttributes().build();
@@ -1419,6 +1428,16 @@ public final class Extractor {
         out.addProperty("chickenVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenVariant.serializer()));
         out.addProperty("chickenSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenSound.serializer()));
         out.addProperty("cubeMobSize", entityAccessor(net.minecraft.world.entity.monster.cubemob.AbstractCubeMob.class, "ID_SIZE").id());
+        // 硫磺方块怪自己的两项元数据：MAX_FUSE (INT) 和 FROM_BUCKET (BOOLEAN)。
+        Class<?> sulfurCube = net.minecraft.world.entity.monster.cubemob.SulfurCube.class;
+        out.addProperty("sulfurCubeMaxFuse", entityAccessor(sulfurCube, "MAX_FUSE").id());
+        out.addProperty("sulfurCubeFromBucket", entityAccessor(sulfurCube, "FROM_BUCKET").id());
+        out.addProperty("sulfurCubeEyeHeight", net.minecraft.world.entity.EntityTypes.SULFUR_CUBE.getDimensions().eyeHeight());
+        {
+            var scale = net.minecraft.world.entity.EntityType.class.getDeclaredField("spawnDimensionsScale");
+            scale.setAccessible(true);
+            out.addProperty("sulfurCubeSpawnDimensionsScale", scale.getFloat(net.minecraft.world.entity.EntityTypes.SULFUR_CUBE));
+        }
         out.addProperty("slimeEyeHeight", net.minecraft.world.entity.EntityTypes.SLIME.getDimensions().eyeHeight());
         var armadilloState = entityAccessor(net.minecraft.world.entity.animal.armadillo.Armadillo.class, "ARMADILLO_STATE");
         out.addProperty("armadilloState", armadilloState.id());

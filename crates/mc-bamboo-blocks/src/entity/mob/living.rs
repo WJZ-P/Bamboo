@@ -124,6 +124,10 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Creeper {
         super::creeper::tick(me, mob, ctx);
     }
+    // `SulfurCube.tick` 在 `super.tick()` 之前推进导火索 / 红石点燃。
+    if mob.mob_type == super::MobType::SulfurCube {
+        super::sulfur_cube::tick(me, mob, ctx);
+    }
     // `ShoulderRidingEntity.tick`：上肩冷却先加一。
     // `ShoulderRidingEntity.tick`: the shoulder cooldown goes up first.
     if mob.mob_type == super::MobType::Parrot {
@@ -180,6 +184,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type.climbs_walls() && !me.removed {
         super::spider::tick(me, mob);
     }
+    // `AbstractNautilus.tick` 在 `super.tick()` 之后：冲刺冷却、气泡取数。
+    // `AbstractNautilus.tick` runs after `super.tick()`: dash cooldown and bubbles.
+    if super::nautilus::is_nautilus(mob.mob_type) && !me.removed {
+        super::nautilus::tick(me, mob);
+    }
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
     body_rotation_tick(me, mob, ctx.blocks().game_time());
     range_checks(me, mob);
@@ -217,9 +226,13 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
         mob.goals.set_control_flag(Flag::Jump, free);
         mob.goals.set_control_flag(Flag::Look, free);
     }
-    // `AbstractCubeMob.tick`：`super.tick()` 之后的落地判断。
-    // `AbstractCubeMob.tick`: the landing check after `super.tick()`.
-    if mob.mob_type == super::MobType::Slime {
+    // `AbstractCubeMob.tick`：`super.tick()` 之后的落地判断。硫磺方块怪的
+    // `getParticleType()` 是固定的 `sulfur_cube_goo`，这里用同一套取数顺序，
+    // 声音换成它自己的 squish / bounce。
+    if matches!(
+        mob.mob_type,
+        super::MobType::Slime | super::MobType::SulfurCube
+    ) {
         super::slime::after_tick(me, mob);
     }
     // `PolarBear.tick` 在 `super.tick()` 之后：吼叫冷却和持久愤怒。
@@ -254,7 +267,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     }
     // `Camel.tick` 在 `super.tick()` 之后：冲刺、冷却、夹头、坐在水里站起。
     // `Camel.tick` after `super.tick()`: dash, cooldown, head clamp, stand up in water.
-    if mob.mob_type == super::MobType::Camel {
+    if mob.mob_type.is_camel() {
         super::camel::tick_after(me, mob, ctx);
     }
     // `AbstractHorse.tick` 在 `super.tick()` 之后推进计时器。
@@ -548,7 +561,12 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `EnchantmentHelper.tickEffects` at the head of vanilla `LivingEntity.baseTick`.
     super::enchantment_wiring::tick(me, mob, ctx);
     mob_base_tick(me, mob, ctx);
-    if super::squid::is_squid(mob.mob_type) || super::fish::is_fish(mob.mob_type) {
+    if super::nautilus::is_nautilus(mob.mob_type) {
+        // `Nautilus.handleAirSupply`：水里回满 300，离水每刻掉 1，到 -20 受 2 点干死伤害。
+        // `Nautilus.handleAirSupply`: refill to 300 in water, decrement on land,
+        // and take two dry-out damage at -20.
+        super::water::handle_air_supply(me, mob, ctx, pre_tick_air);
+    } else if super::squid::is_squid(mob.mob_type) || super::fish::is_fish(mob.mob_type) {
         // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply`（鱿鱼和鱼）。
         // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply` (squid and fish).
         super::water::handle_air_supply(me, mob, ctx, pre_tick_air);
@@ -808,6 +826,12 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
     match mob.mob_type {
         kind if kind.has_no_ambient_sound() => None,
+        // `Nautilus.getAmbientSound`：幼年 / 成年、水下 / 岸上四套；僵尸版两套。
+        // `Nautilus.getAmbientSound`: four water/land and baby/adult variants;
+        // the zombie version has two.
+        kind if super::nautilus::is_nautilus(kind) => {
+            super::nautilus::ambient_voice(kind, mob.is_baby(), me.in_water)
+        }
         super::MobType::Turtle if me.in_water || !me.on_ground || mob.is_baby() => None,
         // `Dolphin.getAmbientSound`：水里 / 水外两种。
         // `Dolphin.getAmbientSound`: water / land variants.
@@ -829,9 +853,24 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
 /// Ambient, hurt and death sounds: equines by kind and age, others by type,
 /// cows by their sound variant.
 fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
+    // 硫磺方块怪按大小和是否吞了方块分派四种声音。
+    // Sulfur cubes dispatch their four sounds by size and body item.
+    if mob.mob_type == super::MobType::SulfurCube {
+        return super::sulfur_cube::voice(mob, voice);
+    }
     // 守卫者 / 远古守卫者：环境、受伤、死亡音都分水中 / 岸上两套。
     // Guardian / elder guardian: ambient, hurt and death sounds all have water / land
     // variants.
+    if super::nautilus::is_nautilus(mob.mob_type) {
+        let which = match voice {
+            Voice::Ambient => super::nautilus::Voice::Ambient,
+            Voice::Hurt => super::nautilus::Voice::Hurt,
+            Voice::Death => super::nautilus::Voice::Death,
+            Voice::Eat => super::nautilus::Voice::Eat,
+            Voice::Angry => super::nautilus::Voice::Hurt,
+        };
+        return super::nautilus::voice(mob.mob_type, mob.is_baby(), in_water, which);
+    }
     if super::guardian::is_guardian(mob.mob_type) {
         let elder = mob.mob_type == super::MobType::ElderGuardian;
         return match voice {
@@ -966,6 +1005,11 @@ fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 ///
 /// `LivingEntity.canBeAffected`: filters out effects the mob type is immune to.
 pub fn can_be_affected(kind: super::MobType, effect: i32) -> bool {
+    // `Parched.canBeAffected`：对虚弱免疫（自己射的箭不会反过来削弱它）。
+    // `Parched.canBeAffected`: immune to weakness, so its own arrows cannot weaken it.
+    if kind == super::MobType::Parched && effect == mob_effect::WEAKNESS {
+        return false;
+    }
     if kind.in_entity_tag("minecraft:immune_to_infested") {
         return effect != mob_effect::INFESTED;
     }
@@ -1076,9 +1120,14 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
         make_sound(me, mob, sound);
         return;
     }
-    // 史莱姆的 `getAmbientSound()` 是空：`makeSound(null)` 不放音效，也不取音高。
-    // A slime's `getAmbientSound()` is null: `makeSound(null)` plays nothing and draws no pitch.
-    if mob.mob_type == super::MobType::Slime {
+    // 史莱姆和硫磺方块怪的 `getAmbientSound()` 是空：`makeSound(null)` 不放音效，
+    // 也不取音高。
+    // Slimes and sulfur cubes have a null `getAmbientSound()`: `makeSound(null)`
+    // plays nothing and draws no pitch.
+    if matches!(
+        mob.mob_type,
+        super::MobType::Slime | super::MobType::SulfurCube
+    ) {
         return;
     }
     let pitch = voice_pitch(me, mob);
@@ -1095,7 +1144,10 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
 ///
 /// `getSoundVolume()`: by size for slimes, by type otherwise.
 fn sound_volume(mob: &Mob) -> f32 {
-    if mob.mob_type == super::MobType::Slime {
+    if matches!(
+        mob.mob_type,
+        super::MobType::Slime | super::MobType::SulfurCube
+    ) {
         super::slime::sound_volume(mob)
     } else {
         mob.mob_type.sound_volume()
@@ -1196,7 +1248,10 @@ fn tick_death(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.events.push(MobEvent::Poof);
         // `AbstractCubeMob.remove`：先分裂，再 `super.remove`。
         // `AbstractCubeMob.remove`: split first, then `super.remove`.
-        if mob.mob_type == super::MobType::Slime {
+        if matches!(
+            mob.mob_type,
+            super::MobType::Slime | super::MobType::SulfurCube
+        ) {
             super::slime::split_on_remove(me, mob, ctx);
         }
         me.discard();
@@ -1350,7 +1405,10 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
         {
             jump_in_liquid(me, mob);
         } else if (me.on_ground || (in_water && fluid <= threshold)) && mob.no_jump_delay == 0 {
-            if mob.mob_type == super::MobType::Slime {
+            if matches!(
+                mob.mob_type,
+                super::MobType::Slime | super::MobType::SulfurCube
+            ) {
                 super::slime::jump_from_ground(me, mob, ctx.blocks());
             } else {
                 jump_from_ground(me, mob, ctx.blocks());
@@ -1377,10 +1435,12 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
         // `tickRidden` and zeroes the velocity. The position comes from the client's
         // `move_vehicle` packet.
         if let Some(rider) = mob.controlling_passenger() {
-            if let Some(view) = ctx.player(rider)
-                && mob.mob_type.is_equine()
-            {
-                super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
+            if let Some(view) = ctx.player(rider) {
+                if mob.mob_type.is_equine() {
+                    super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
+                } else if super::nautilus::is_nautilus(mob.mob_type) {
+                    super::nautilus_ai::ridden_rotation(me, mob, view.yaw, view.pitch);
+                }
             }
             me.delta = Vec3::default();
         } else if mob.mob_type == super::MobType::Phantom {
@@ -1850,6 +1910,9 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     } else if mob.mob_type == super::MobType::Slime {
         super::slime::move_control_tick(me, mob);
         look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::SulfurCube {
+        super::sulfur_cube::move_control_tick(me, mob);
+        super::sulfur_cube::look_control_tick(me, mob);
     } else if mob.mob_type == super::MobType::Phantom {
         // `PhantomLookControl.tick` 是空的。
         // `PhantomLookControl.tick` is empty.
@@ -1881,6 +1944,11 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // `SmoothSwimmingLookControl(this, 10)`.
         super::smooth_swim::move_tick(me, mob, &super::smooth_swim::FROG);
         super::smooth_swim::look_tick(me, mob, 10.0);
+    } else if super::nautilus::is_nautilus(mob.mob_type) {
+        // `AbstractNautilus` 的 `SmoothSwimmingMoveControl` / `SmoothSwimmingLookControl`。
+        // The `AbstractNautilus` smooth-swimming move and look controls.
+        super::smooth_swim::move_tick(me, mob, &super::nautilus::MOVE_PARAMS);
+        super::smooth_swim::look_tick(me, mob, 10.0);
     } else if mob.mob_type == super::MobType::Bee {
         // `Bee`: `FlyingMoveControl(this, 20, true)` + `BeeLookControl`（生气时跳过，授粉时不重置俯仰）。
         // `Bee`: `FlyingMoveControl(this, 20, true)` + `BeeLookControl` (skipped while angry;
@@ -1890,7 +1958,7 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             look_control_tick_with(me, mob, !mob.bee.pollinating);
         }
     } else {
-        if mob.mob_type == super::MobType::Camel {
+        if mob.mob_type.is_camel() {
             // `CamelMoveControl.tick` 在 `super.tick()` 之前。
             // `CamelMoveControl.tick` runs before `super.tick()`.
             super::camel::before_move_control(me, mob, ctx.blocks().game_time());
@@ -1918,7 +1986,7 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     if mob.mob_type == super::MobType::Tadpole {
         super::tadpole::custom_server_ai_step(me, mob, ctx);
     }
-    if mob.mob_type == super::MobType::Camel {
+    if mob.mob_type.is_camel() {
         super::camel::custom_server_ai_step(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::Axolotl {
@@ -1941,6 +2009,9 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     }
     if mob.mob_type == super::MobType::Villager {
         super::villager_ai::custom_server_ai_step(me, mob, ctx, decision_gap);
+    }
+    if super::nautilus::is_nautilus(mob.mob_type) {
+        super::nautilus_ai::custom_server_ai_step(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::ElderGuardian {
         // `ElderGuardian.customServerAiStep`：范围挖掘疲劳和家。
@@ -2054,6 +2125,12 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
 }
 
 /// `LookControl.tick`。
+/// `LookControl.tick` 的公开入口，给别的生物模块在默认路径复用。
+pub(crate) fn look_control_tick_public(me: &mut Entity, mob: &mut Mob) {
+    look_control_tick(me, mob);
+}
+
+/// `LookControl.tick`。
 fn look_control_tick(me: &mut Entity, mob: &mut Mob) {
     let reset_x_rot = mob.mob_type != super::MobType::Fox || super::fox::resets_x_rot(mob);
     look_control_tick_with(me, mob, reset_x_rot);
@@ -2096,7 +2173,7 @@ fn max_head_y_rot(mob: &Mob) -> f32 {
     } else if mob.mob_type == super::MobType::Frog {
         // `Frog.getMaxHeadYRot`。
         5.0
-    } else if mob.mob_type == super::MobType::Camel {
+    } else if mob.mob_type.is_camel() {
         // `Camel.getMaxHeadYRot()`。
         super::camel::max_head_y_rot()
     } else {
@@ -2116,7 +2193,7 @@ fn body_rotation_tick(me: &Entity, mob: &mut Mob, time: i64) {
         super::phantom::body_rotation_tick(me, mob);
         return;
     }
-    if mob.mob_type == super::MobType::Camel && super::camel::refuse_to_move(mob, time) {
+    if mob.mob_type.is_camel() && super::camel::refuse_to_move(mob, time) {
         return;
     }
     let dx = me.position.x - me.old_position.x;
@@ -2237,7 +2314,7 @@ fn travel(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, mut input: Ve
     // `Camel.travel`：`refuseToMove && onGround` 时把水平速度和输入清零，再跑 `super.travel`。
     // `Camel.travel`: zero horizontal velocity / input while refusing on ground, then
     // `super.travel`.
-    if mob.mob_type == super::MobType::Camel {
+    if mob.mob_type.is_camel() {
         super::camel::travel(me, mob, ctx.blocks().game_time(), &mut input);
     }
     let in_liquid = is_in_liquid(me, mob);
@@ -2326,7 +2403,11 @@ fn travel_in_air(
     // 0.91 的空气阻力，而不是 0.98。
     // `LivingEntity.travelInAir`: an `omnidirectionalAirMover()` (parrot, bee) uses the
     // 0.91 air drag vertically instead of 0.98.
-    let vertical = if matches!(mob.mob_type, super::MobType::Parrot | super::MobType::Bee) {
+    // `SulfurCube.omnidirectionalAirMover()` 是 `hasBodyItem()`，装了方块时
+    // 竖直方向也用 0.91 的空气阻力。
+    let vertical = if matches!(mob.mob_type, super::MobType::Parrot | super::MobType::Bee)
+        || (mob.mob_type == super::MobType::SulfurCube && super::sulfur_cube::has_body_item(mob))
+    {
         horizontal_air
     } else {
         modified_friction(0.98, air_drag)
@@ -2446,6 +2527,10 @@ fn handle_on_climbable(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView, del
 fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) {
     // `AbstractFish.travelInWater` 整个换掉了水里的推进。
     // `AbstractFish.travelInWater` replaces the whole in-water path.
+    if me.in_water && super::nautilus::is_nautilus(mob.mob_type) {
+        super::nautilus::travel_in_water(me, mob, ctx, input);
+        return;
+    }
     if me.in_water && super::fish::is_fish(mob.mob_type) {
         super::fish::travel_in_water(me, mob, ctx, input);
         return;
@@ -2802,6 +2887,9 @@ pub(crate) fn hurt_server(
     } else {
         amount
     };
+    if mob.mob_type == super::MobType::SulfurCube {
+        super::sulfur_cube::prime_on_hurt(me, mob, &source);
+    }
     if mob.mob_type == super::MobType::IronGolem {
         return super::iron_golem::hurt_server(me, mob, ctx, source, amount);
     }
@@ -2982,7 +3070,7 @@ fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource, ti
     // 放在 `super` 之后对可观察状态等价。
     // `Camel.actuallyHurt` calls `standUpInstantly()` before `super`; a pure state change
     // with no random draw, so after `super` is equivalent for observable state.
-    if mob.mob_type == super::MobType::Camel {
+    if mob.mob_type.is_camel() {
         super::camel::after_actually_hurt(mob, time);
     }
 }
@@ -3339,6 +3427,26 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
                 Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
                 me,
             );
+        }
+        return;
+    }
+    if mob.mob_type == super::MobType::SulfurCube {
+        // `SulfurCube.getBaseExperienceReward`：幼年 0，成年 `1 + nextInt(2)`。
+        // `SulfurCube.getBaseExperienceReward`: 0 for babies, `1 + nextInt(2)` for adults.
+        let amount = if by_player && drops && adult {
+            1 + me.random.next_int_bounded(2)
+        } else {
+            0
+        };
+        mob.events.push(MobEvent::Death);
+        if drops {
+            ctx.emit(
+                Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
+                me,
+            );
+        }
+        if amount > 0 {
+            ctx.emit(Command::AwardDeathExperience { amount }, me);
         }
         return;
     }

@@ -1197,6 +1197,18 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
     if let Some(data) = farm_default_data(index, kind) {
         return data;
     }
+    if mc_bamboo_blocks::entity::mob::nautilus::is_nautilus(kind) {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::NAUTILUS_DASH => return EntityData::NautilusDash(false),
+            facts::ZOMBIE_NAUTILUS_VARIANT => {
+                return EntityData::ZombieNautilusVariant(0);
+            }
+            facts::TAME_FLAGS => return EntityData::TameFlags(0),
+            facts::TAME_OWNER => return EntityData::TameOwner(None),
+            _ => {}
+        }
+    }
     if let Some(data) = fish_default_data(index, kind) {
         return data;
     }
@@ -1445,6 +1457,14 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     }
     if mob.enderman_stared_at {
         out.push(EntityData::EndermanStaredAt(true));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::ZombieNautilus {
+        if mob.nautilus_variant != 0 {
+            out.push(EntityData::ZombieNautilusVariant(mob.nautilus_variant));
+        }
+        if mob.nautilus_dashing {
+            out.push(EntityData::NautilusDash(true));
+        }
     }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Creeper {
         // `Creeper.defineSynchedData`：膨胀方向缺省 -1，带电和点燃缺省 false。
@@ -1709,6 +1729,13 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         }
         return out;
     }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Nautilus {
+        if mob.nautilus_dashing {
+            out.push(EntityData::NautilusDash(true));
+        }
+        out.extend(wolf_non_default_data(mob));
+        return out;
+    }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Wolf {
         // 狼的 18、19 是驯服标志和主人，不是牛的花色和叫声。
         // A wolf's 18 and 19 are the taming items, not the cow variants.
@@ -1886,6 +1913,14 @@ fn farm_default_data(
     match (kind, index) {
         (MobType::Sheep, facts::SHEEP_WOOL) => Some(EntityData::SheepWool(0)),
         (MobType::Slime, facts::CUBE_MOB_SIZE) => Some(EntityData::CubeMobSize(1)),
+        // `AbstractCubeMob.ID_SIZE` 也是硫磺方块怪的 index 18，默认是 1。
+        (MobType::SulfurCube, facts::CUBE_MOB_SIZE) => Some(EntityData::CubeMobSize(1)),
+        (MobType::SulfurCube, facts::SULFUR_CUBE_MAX_FUSE) => {
+            Some(EntityData::SulfurCubeMaxFuse(-1))
+        }
+        (MobType::SulfurCube, facts::SULFUR_CUBE_FROM_BUCKET) => {
+            Some(EntityData::SulfurCubeFromBucket(false))
+        }
         (MobType::Mooshroom, facts::MOOSHROOM_TYPE) => Some(EntityData::MooshroomType(0)),
         (MobType::PolarBear, facts::POLAR_BEAR_STANDING) => {
             Some(EntityData::PolarBearStanding(false))
@@ -2049,6 +2084,19 @@ fn farm_non_default_data(
             }
             true
         }
+        // 硫磺方块怪：`ID_SIZE`、`MAX_FUSE`、`FROM_BUCKET` 三项元数据。
+        MobType::SulfurCube => {
+            if mob.cube_size != 1 {
+                out.push(EntityData::CubeMobSize(mob.cube_size));
+            }
+            if mob.sulfur_cube_max_fuse != -1 {
+                out.push(EntityData::SulfurCubeMaxFuse(mob.sulfur_cube_max_fuse));
+            }
+            if mob.sulfur_cube_from_bucket {
+                out.push(EntityData::SulfurCubeFromBucket(true));
+            }
+            true
+        }
         MobType::Mooshroom => {
             if mob.mooshroom_brown {
                 out.push(EntityData::MooshroomType(1));
@@ -2124,6 +2172,18 @@ fn farm_non_default_data(
             }
             if mob.parrot.variant != parrot::DEFAULT_VARIANT {
                 out.push(EntityData::ParrotVariant(mob.parrot.variant));
+            }
+            true
+        }
+        MobType::Nautilus => {
+            if mob.tame_flags != 0 {
+                out.push(EntityData::TameFlags(mob.tame_flags));
+            }
+            if mob.owner.is_some() {
+                out.push(EntityData::TameOwner(mob.owner));
+            }
+            if mob.nautilus_dashing {
+                out.push(EntityData::NautilusDash(true));
             }
             true
         }

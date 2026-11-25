@@ -492,6 +492,10 @@ impl BlockView for ParallelBlockView<'_> {
         self.inner.block_state(pos)
     }
 
+    fn best_own_or_neighbour_signal(&self, pos: BlockPos) -> i32 {
+        self.inner.best_own_or_neighbour_signal(pos)
+    }
+
     fn block_change_stamp(&self) -> u64 {
         self.inner.block_change_stamp()
     }

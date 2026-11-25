@@ -140,6 +140,7 @@ pub(super) fn is_food(kind: MobType, item: i32) -> bool {
         // `Camel.isFood` 认 `#camel_food`（仙人掌），不走马科的 `horse_food`。
         // `Camel.isFood` uses `#camel_food` (cactus), not the equine `horse_food`.
         MobType::Camel => item_is_tagged(item, item_tags::CAMEL_FOOD),
+        MobType::CamelHusk => item_is_tagged(item, item_tags::CAMEL_HUSK_FOOD),
         kind if kind.is_equine() => {
             item_is_tagged(item, mc_bamboo_data::tags::item_tags::HORSE_FOOD)
         }
@@ -230,8 +231,18 @@ pub fn interact(
     {
         return outcome;
     }
+    // `SulfurCube.mobInteract`：幼年喂食、点燃、剪切和吞方块四支；桶装在
+    // `bucketable` 那一层单独处理，这里不重复。
+    if mob.mob_type == MobType::SulfurCube
+        && let Some(outcome) = super::sulfur_cube::interact(me, mob, req)
+    {
+        return outcome;
+    }
     if mob.mob_type.is_equine() {
         return super::equine::interact(me, mob, req);
+    }
+    if super::nautilus::is_nautilus(mob.mob_type) {
+        return super::nautilus::interact(me, mob, req);
     }
     // `Dolphin.mobInteract`：手里是 `#fishes` 时放吃鱼声，幼崽加速长大、成年记下
     // `gotFish`，并消费一个鱼。这是它自己的 `mobInteract`，不走 `Animal.mobInteract`。

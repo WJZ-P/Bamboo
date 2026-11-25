@@ -142,32 +142,22 @@ pub fn for_biome_id(id: i32) -> MobSpawnSettings {
         .unwrap_or(EMPTY)
 }
 
-/// `StructureSpawnOverride.BoundingBoxType`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpawnOverrideBox {
-    /// `STRUCTURE`：整个 `StructureStart` 的包围盒。
-    ///
-    /// `STRUCTURE`: the whole `StructureStart` bounding box.
-    Structure,
-    /// `PIECE`：位置要落在某个结构件的包围盒里。
-    ///
-    /// `PIECE`: the position must fall inside a structure piece's box.
-    Piece,
-}
+/// `StructureSpawnOverride.BoundingBoxType`，由官方数据包生成。
+///
+/// `StructureSpawnOverride.BoundingBoxType`, generated from the vanilla data pack.
+pub use crate::generated::mob_spawns::StructureSpawnOverrideBox as SpawnOverrideBox;
 
 /// 官方 `Structure.spawnOverrides()` 的一项：某结构在某一类里替换群系表的加权列表。
-/// `Structures.bootstrap` 里前哨站、女巫小屋、海底神殿、下界要塞等都注册了覆盖；
-/// 这里先收会刷已建模生物的两种，其余结构以后按同一张表追加即可。
+/// 整表由 `data/minecraft/worldgen/structure/*.json` 生成，空表也保留（它挡住群系表）。
 ///
 /// One entry of vanilla `Structure.spawnOverrides()`: a structure replaces the biome
-/// table for one category. `Structures.bootstrap` registers overrides for outposts,
-/// swamp huts, ocean monuments, fortresses and more; the two that spawn modelled
-/// mobs are here, and future structures append to the same table.
+/// table for one category. The whole table comes from the structure data pack,
+/// including empty lists, which suppress the biome table.
 #[derive(Debug, Clone, Copy)]
 pub struct StructureSpawnOverride {
-    /// 结构的注册名，例如 `minecraft:pillager_outpost`。
+    /// 结构的注册名，例如 `minecraft:monument`。
     ///
-    /// The structure's registry name, e.g. `minecraft:pillager_outpost`.
+    /// The structure's registry name, e.g. `minecraft:monument`.
     pub structure: &'static str,
     pub bounding: SpawnOverrideBox,
     pub category: MobCategory,
@@ -177,48 +167,27 @@ pub struct StructureSpawnOverride {
     pub spawns: &'static [MobSpawnerDef],
 }
 
-/// `WeightedList.of(SpawnerData(ENTITY, ConstantInt(1)))`：默认权重 1、数量恒 1。
-const fn one(entity_type: i32) -> MobSpawnerDef {
-    MobSpawnerDef {
-        entity_type,
-        weight: 1,
-        min: 1,
-        max: 1,
-    }
-}
-
-/// 前哨站 `MONSTER` 的覆盖表（`STRUCTURE` 盒，只有掠夺者）。
-const OUTPOST_MONSTERS: &[MobSpawnerDef] = &[one(registries::entity_type::PILLAGER)];
-/// 女巫小屋 `MONSTER` / `CREATURE` 的覆盖表（`PIECE` 盒，女巫 / 猫）。
-const HUT_MONSTERS: &[MobSpawnerDef] = &[one(registries::entity_type::WITCH)];
-const HUT_CREATURES: &[MobSpawnerDef] = &[one(registries::entity_type::CAT)];
-
 /// 所有结构刷怪覆盖，按 `structure` 和 `category` 查。[`structure_spawn_override`]
-/// 是唯一的入口，新增结构只要往这张表追加一行。
+/// 是唯一的入口。顺序照生成的注册表：结构名字典序，再按 `MobCategory` 判别值。
 ///
 /// Every structure spawn override, looked up by `structure` and `category`.
-/// [`structure_spawn_override`] is the single entry point; adding a structure is
-/// one more row here.
-pub const STRUCTURE_SPAWN_OVERRIDES: &[StructureSpawnOverride] = &[
-    StructureSpawnOverride {
-        structure: "minecraft:pillager_outpost",
-        bounding: SpawnOverrideBox::Structure,
-        category: MobCategory::Monster,
-        spawns: OUTPOST_MONSTERS,
-    },
-    StructureSpawnOverride {
-        structure: "minecraft:swamp_hut",
-        bounding: SpawnOverrideBox::Piece,
-        category: MobCategory::Monster,
-        spawns: HUT_MONSTERS,
-    },
-    StructureSpawnOverride {
-        structure: "minecraft:swamp_hut",
-        bounding: SpawnOverrideBox::Piece,
-        category: MobCategory::Creature,
-        spawns: HUT_CREATURES,
-    },
-];
+/// [`structure_spawn_override`] is the single entry point. Generated order: structure
+/// name, then the `MobCategory` discriminant.
+pub static STRUCTURE_SPAWN_OVERRIDES: std::sync::LazyLock<Vec<StructureSpawnOverride>> =
+    std::sync::LazyLock::new(|| {
+        crate::generated::mob_spawns::STRUCTURE_SPAWN_OVERRIDES
+            .iter()
+            .map(|row| StructureSpawnOverride {
+                structure: row.structure,
+                bounding: row.bounding,
+                category: MobCategory::ALL
+                    .into_iter()
+                    .find(|candidate| candidate.index() == usize::from(row.category))
+                    .expect("生成的覆盖类别必须是官方 MobCategory"),
+                spawns: row.spawns,
+            })
+            .collect()
+    });
 
 /// 按结构名和类别取覆盖表；没有覆盖的结构返回 `None`（调用方回退到群系表）。
 ///
@@ -319,5 +288,61 @@ mod tests {
         assert_eq!(for_biome_id(-1).name, "");
         assert!(for_biome_id(-1).categories.is_empty());
         assert!(by_biome_name("minecraft:not_a_biome").is_none());
+    }
+
+    /// 生成的结构覆盖表：前哨站和女巫小屋不变，神殿三类（含两张空表）齐全。
+    ///
+    /// Generated structure overrides: the outpost and swamp hut are unchanged, and
+    /// the monument has all three rows, including the two empty lists.
+    #[test]
+    fn structure_overrides_are_generated_from_the_data_pack() {
+        let outpost =
+            structure_spawn_override_row("minecraft:pillager_outpost", MobCategory::Monster)
+                .expect("outpost monster override");
+        assert_eq!(outpost.bounding, SpawnOverrideBox::Structure);
+        assert_eq!(outpost.spawns.len(), 1);
+        assert_eq!(
+            outpost.spawns[0].entity_type,
+            registries::entity_type::PILLAGER
+        );
+        assert_eq!(outpost.spawns[0].weight, 1);
+        assert_eq!((outpost.spawns[0].min, outpost.spawns[0].max), (1, 1));
+
+        let hut = structure_spawn_override_row("minecraft:swamp_hut", MobCategory::Monster)
+            .expect("hut monster override");
+        assert_eq!(hut.bounding, SpawnOverrideBox::Piece);
+        assert_eq!(hut.spawns[0].entity_type, registries::entity_type::WITCH);
+        let cat = structure_spawn_override_row("minecraft:swamp_hut", MobCategory::Creature)
+            .expect("hut creature override");
+        assert_eq!(cat.bounding, SpawnOverrideBox::Piece);
+        assert_eq!(cat.spawns[0].entity_type, registries::entity_type::CAT);
+
+        let monument = structure_spawn_override_row("minecraft:monument", MobCategory::Monster)
+            .expect("monument monster override");
+        assert_eq!(monument.bounding, SpawnOverrideBox::Structure);
+        assert_eq!(monument.spawns.len(), 1);
+        assert_eq!(
+            monument.spawns[0].entity_type,
+            registries::entity_type::GUARDIAN
+        );
+        assert_eq!(monument.spawns[0].weight, 1);
+        assert_eq!((monument.spawns[0].min, monument.spawns[0].max), (2, 4));
+        for category in [MobCategory::Axolotls, MobCategory::UndergroundWaterCreature] {
+            let empty = structure_spawn_override_row("minecraft:monument", category)
+                .unwrap_or_else(|| panic!("monument {category:?} override"));
+            assert_eq!(empty.bounding, SpawnOverrideBox::Structure);
+            assert!(empty.spawns.is_empty());
+        }
+        assert!(
+            structure_spawn_override_row("minecraft:monument", MobCategory::WaterAmbient).is_none()
+        );
+        // 下界要塞的覆盖也导出了，但正式世界暂不接下界刷怪。
+        // The fortress override is exported too, though nether spawning is not wired.
+        assert!(
+            structure_spawn_override("minecraft:fortress", MobCategory::Monster)
+                .is_some_and(|table| table.len() == 5)
+        );
+        assert!(has_structure_spawn_override(MobCategory::Creature));
+        assert_eq!(STRUCTURE_SPAWN_OVERRIDES.len(), 23);
     }
 }

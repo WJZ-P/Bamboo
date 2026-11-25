@@ -207,6 +207,10 @@ pub enum Kind {
     ///
     /// Axolotl-only behaviours.
     Axolotl(super::super::axolotl::Behavior),
+    /// 鹦鹉螺专属行为。
+    ///
+    /// Nautilus-specific behaviours.
+    Nautilus(super::super::nautilus_ai::Behavior),
     /// 村民专属行为与未接通占位。
     ///
     /// Villager-specific behaviours and Phase 4+ placeholders.
@@ -349,6 +353,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.class(),
             Self::Frog(behavior) => behavior.class(),
             Self::Axolotl(behavior) => behavior.class(),
+            Self::Nautilus(behavior) => behavior.class(),
             Self::Villager(behavior) => behavior.class(),
         }
     }
@@ -384,6 +389,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.required(),
             Self::Frog(behavior) => behavior.required(),
             Self::Axolotl(behavior) => behavior.required(),
+            Self::Nautilus(behavior) => behavior.required(),
             Self::Villager(behavior) => behavior.required(),
         }
     }
@@ -424,6 +430,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.name(),
             Self::Frog(behavior) => behavior.name(),
             Self::Axolotl(behavior) => behavior.name(),
+            Self::Nautilus(behavior) => behavior.name(),
             Self::Villager(behavior) => behavior.name(),
         }
     }
@@ -449,7 +456,7 @@ impl Kind {
             Self::AnimalPanic { environmental, .. } => {
                 // `CamelPanic.checkExtraStartConditions`：还要求 `!isMobControlled()`。
                 // `CamelPanic.checkExtraStartConditions`: also requires `!isMobControlled()`.
-                if cx.mob.mob_type == MobType::Camel && cx.mob.controlling_passenger().is_some() {
+                if cx.mob.mob_type.is_camel() && cx.mob.controlling_passenger().is_some() {
                     return false;
                 }
                 let tag = if *environmental {
@@ -476,6 +483,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.extra_start(cx),
             Self::Frog(behavior) => behavior.extra_start(cx),
             Self::Axolotl(behavior) => behavior.extra_start(cx),
+            Self::Nautilus(behavior) => behavior.extra_start(cx),
             Self::Villager(behavior) => behavior.extra_start(cx),
             _ => true,
         }
@@ -492,7 +500,7 @@ impl Kind {
                 }
                 // `CamelPanic.start`：先 `standUpInstantly()` 再走 `super.start()`。
                 // `CamelPanic.start`: `standUpInstantly()` before `super.start()`.
-                if cx.mob.mob_type == MobType::Camel {
+                if cx.mob.mob_type.is_camel() {
                     super::super::camel::stand_up_instantly(cx.mob, cx.time);
                 }
                 cx.memories.set(IsPanicking, MemoryValue::Bool(true));
@@ -558,6 +566,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.start(cx),
             Self::Frog(behavior) => behavior.start(cx),
             Self::Axolotl(behavior) => behavior.start(cx),
+            Self::Nautilus(behavior) => behavior.start(cx),
             Self::Villager(behavior) => behavior.start(cx),
             _ => {}
         }
@@ -593,6 +602,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.can_still_use(cx),
             Self::Frog(behavior) => behavior.can_still_use(cx),
             Self::Axolotl(behavior) => behavior.can_still_use(cx),
+            Self::Nautilus(behavior) => behavior.can_still_use(cx),
             Self::Villager(behavior) => behavior.can_still_use(cx),
             _ => false,
         }
@@ -711,6 +721,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.tick(cx),
             Self::Frog(behavior) => behavior.tick(cx),
             Self::Axolotl(behavior) => behavior.tick(cx),
+            Self::Nautilus(behavior) => behavior.tick(cx),
             Self::Villager(behavior) => behavior.tick(cx),
             _ => {}
         }
@@ -742,6 +753,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.stop(cx),
             Self::Frog(behavior) => behavior.stop(cx),
             Self::Axolotl(behavior) => behavior.stop(cx),
+            Self::Nautilus(behavior) => behavior.stop(cx),
             Self::Villager(behavior) => behavior.stop(cx),
             _ => {}
         }
@@ -860,6 +872,7 @@ impl Kind {
             Self::Armadillo(behavior) => behavior.trigger(cx),
             Self::Frog(behavior) => behavior.trigger(cx),
             Self::Axolotl(behavior) => behavior.trigger(cx),
+            Self::Nautilus(behavior) => behavior.trigger(cx),
             Self::Villager(behavior) => behavior.trigger(cx),
             _ => false,
         }

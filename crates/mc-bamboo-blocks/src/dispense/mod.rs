@@ -19,6 +19,7 @@ mod entity;
 mod equipment;
 mod ignite;
 mod place;
+mod sulfur_cube;
 mod wax;
 
 /// `Equippable.canBeEquippedBy`，马科右键装备也用。
@@ -306,6 +307,13 @@ fn dispatch(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStac
     // Official `getDefaultDispenseMethod`.
     if equipment::is_equippable(&stack) {
         return equipment::execute(world, pos, facing, stack);
+    }
+    // `SulfurCubeBlockDispenseItemBehavior`：`#sulfur_cube_swallowable` 的物品
+    // 先试着让前方一格里的硫磺方块怪吞下；吞成功就少一个并不抛。
+    if crate::entity::mob::sulfur_cube::is_swallowable(&stack)
+        && crate::dispense::sulfur_cube::dispense_block(world, pos.relative(facing), &stack)
+    {
+        return Shot::optional(super::dispenser::without_one(&stack), true);
     }
     if entity::is_spawn_egg(item) {
         return entity::spawn_egg(world, pos, facing, stack);

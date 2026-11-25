@@ -41,6 +41,10 @@ pub enum SpawnReason {
     ///
     /// `EntitySpawnReason.PATROL`: a patrol from `PatrolSpawner`.
     Patrol,
+    /// `EntitySpawnReason.STRUCTURE`：结构生成。
+    ///
+    /// `EntitySpawnReason.STRUCTURE`: structure spawning.
+    Structure,
     /// `EntitySpawnReason.JOCKEY`：蜘蛛骑士 / 鸡骑士的坐骑或骑手。
     ///
     /// `EntitySpawnReason.JOCKEY`: a spider/chicken jockey's mount or rider.
@@ -126,6 +130,14 @@ pub enum SpawnGroup {
     /// `Llama.LlamaGroupData`: the colour id shared by the group.
     Llama(AgeableGroupData, i32),
     Zombie(super::zombie_spawn::ZombieGroupData),
+    /// `Husk.HuskGroupData`：僵尸组数据加「这一组已经试过骆驼尸壳」。
+    ///
+    /// `Husk.HuskGroupData`: zombie group data plus "this group already tried
+    /// to spawn a camel husk".
+    Husk {
+        zombie: super::zombie_spawn::ZombieGroupData,
+        tried_to_spawn_camel_husk: bool,
+    },
     Spider(SpiderGroupData),
     /// 鱼群共享领头鱼；热带鱼还共享花纹。
     ///
@@ -171,6 +183,16 @@ pub struct JockeyRequest {
     pub position: Vec3,
     pub yaw: f32,
     pub rider_is_vehicle: bool,
+    /// 官方把父实体的 `EntitySpawnReason` 原样传给坐骑的 `finalizeSpawn`；
+    /// 空表示沿用 `JOCKEY`（鸡骑士 / 蜘蛛骑士）。
+    ///
+    /// Vanilla passes the parent's `EntitySpawnReason` into the mount's
+    /// `finalizeSpawn`; `None` keeps `JOCKEY` for chicken / spider jockeys.
+    pub reason: Option<SpawnReason>,
+    /// `STRUCTURE` 原因的僵尸鹦鹉螺坐骑要标成持久。
+    ///
+    /// A `STRUCTURE` zombie-nautilus mount is marked persistent.
+    pub persistent: bool,
 }
 
 /// `Level.isInSpawnableBounds`：竖直 `[-2e7, 2e7)`，水平绝对值小于 3e7。
@@ -368,12 +390,7 @@ pub(crate) fn snap_to(entity: &mut Entity, pos: Vec3, y_rot: f32, x_rot: f32) {
 /// 3. `AgeableMobGroupData(true)` 的组大小是 0，`getGroupSize() > 0` 为假，不取数也不变小；
 /// 4. 跟随距离加一个 `triangle(0, 0.11485)` 的修饰符（没有时才加）；
 /// 5. `nextFloat() < 0.05` 左撇子。
-pub(crate) fn finalize_spawn(
-    world: &mut World,
-    kind: MobType,
-    entity: &mut Entity,
-    reason: SpawnReason,
-) {
+pub fn finalize_spawn(world: &mut World, kind: MobType, entity: &mut Entity, reason: SpawnReason) {
     let mut group = None;
     finalize_spawn_in_group(world, kind, entity, reason, &mut group);
 }
@@ -433,6 +450,10 @@ fn finalize_spawn_in_group(
         super::slime::finalize_spawn(world, entity, group);
         return;
     }
+    if kind == MobType::SulfurCube {
+        super::sulfur_cube::finalize_spawn(world, entity, group);
+        return;
+    }
     if kind == MobType::Phantom {
         super::phantom::finalize_spawn(entity, world.random());
         return;
@@ -482,12 +503,30 @@ fn finalize_spawn_in_group(
         super::axolotl::finalize_spawn(world, entity, reason, group);
         return;
     }
+    if super::nautilus::is_nautilus(kind) {
+        // `AbstractNautilus.finalizeSpawn`：先用世界随机源记攻击冷却，再走
+        // `AgeableMob` / `Mob` 那两层；僵尸版还要按群系标签定变种。
+        //
+        // `AbstractNautilus.finalizeSpawn`: record the attack cooldown from the
+        // level random, then the `AgeableMob` / `Mob` layers; the zombie version
+        // also picks the variant from the biome tag.
+        super::nautilus_ai::init_memories(
+            entity.kind.mob_mut().expect("nautilus row"),
+            world.random(),
+        );
+        let biome = world.biome_id(entity.block_position());
+        if kind == MobType::ZombieNautilus {
+            entity.with_mob(|_, mob| super::nautilus_ai::finalize_variant(mob, biome));
+        }
+        finalize_ageable(entity, world.random(), group, 0.05);
+        return;
+    }
     if kind.is_equine() {
         // `Camel.finalizeSpawn`：先 `initMemories`（空、不取数）和
         // `resetLastPoseChangeTickToFullStand(gameTime)`，再走 `AbstractHorse.finalizeSpawn`。
         // `Camel.finalizeSpawn`: `initMemories` (empty, no draws) and
         // `resetLastPoseChangeTickToFullStand(gameTime)` before `AbstractHorse.finalizeSpawn`.
-        if kind == MobType::Camel {
+        if kind.is_camel() {
             let time = world.game_time();
             super::camel::finalize_pose(entity, time);
         }
@@ -500,6 +539,15 @@ fn finalize_spawn_in_group(
     }
     if kind == MobType::Pillager {
         super::pillager::finalize_spawn(world, entity, reason);
+        return;
+    }
+    // `Guardian` / `ElderGuardian` 没有自己的 `finalizeSpawn`，只走 `Monster` 继承的
+    // `Mob.finalizeSpawn`（跟随距离加成 + 左撇子，各取世界随机源一次）。
+    //
+    // Guardians have no `finalizeSpawn` override: only the inherited
+    // `Mob.finalizeSpawn` (follow-range bonus + left-handedness, two level draws).
+    if super::guardian::is_guardian(kind) {
+        super::creeper::finalize_spawn(entity, world.random());
         return;
     }
     if kind == MobType::Villager {

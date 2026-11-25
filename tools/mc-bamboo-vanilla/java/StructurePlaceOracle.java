@@ -183,7 +183,14 @@ public final class StructurePlaceOracle {
         }
 
         @Override
+        public void setPersistenceRequired() {
+        }
+
+        @Override
         public void snapTo(double x, double y, double z, float yRot, float xRot) {
+            // `addFreshEntityWithPassengers` 里把这个位置交给 Level 收集。
+            // `addFreshEntityWithPassengers` hands this position to Level for collection.
+            SNAP_TO.set(new double[] {x, y, z});
         }
 
         @Override
@@ -200,6 +207,10 @@ public final class StructurePlaceOracle {
             return data;
         }
     }
+
+    /** 最近一次 `InertElderGuardian.snapTo` 的落点；没有服务端时不进实体表。 */
+    // Last `InertElderGuardian.snapTo` position; no entity table without a server.
+    private static final ThreadLocal<double[]> SNAP_TO = new ThreadLocal<>();
 
     /** 不走构造器的唤魔者（府邸的 `Mage` 标记）。 */
     // Constructor-less evoker (the mansion's `Mage` marker).
@@ -503,6 +514,10 @@ public final class StructurePlaceOracle {
             for (String block : snapshot) {
                 out.append(block).append('\n');
             }
+            out.append("E ").append(level.entities.size()).append('\n');
+            for (String entity : level.entities) {
+                out.append(entity).append('\n');
+            }
         }
     }
 
@@ -674,6 +689,9 @@ public final class StructurePlaceOracle {
                 net.minecraft.util.RandomSource.create(0L);
         /** 当前这次结构件调用的写入，按顺序：`x y z state`。 */
         private final List<String> pieceWrites = new ArrayList<>();
+        /** 生成期实体，按 `addFreshEntityWithPassengers` 调用顺序。 */
+        // Generation-time entities, in `addFreshEntityWithPassengers` call order.
+        private final List<String> entities = new ArrayList<>();
 
         void beginPiece() {
             pieceWrites.clear();
@@ -970,10 +988,23 @@ public final class StructurePlaceOracle {
                     case "addFreshEntity":
                         return true;
                     case "addFreshEntityWithPassengers":
+                        // 只收集远古守卫者：类型、位置、持久、满血。构造器的 UUID /
+                        // 朝向是不带种子的 `RandomSource.create()`，不参与比较。
+                        // Collect elder guardians only: type, position, persistence,
+                        // full health. The constructor's UUID / yaw come from an
+                        // unseeded `RandomSource.create()` and are not compared.
+                        if (args[0] instanceof net.minecraft.world.entity.monster.ElderGuardian) {
+                            double[] pos = SNAP_TO.get();
+                            if (pos != null) {
+                                Level.this.entities.add("minecraft:elder_guardian "
+                                        + (int) Math.floor(pos[0]) + " "
+                                        + (int) Math.floor(pos[1]) + " "
+                                        + (int) Math.floor(pos[2]) + " 1 1");
+                                SNAP_TO.remove();
+                            }
+                        }
+                        return null;
                     case "getCurrentDifficultyAt":
-                        // 实体不比；这两个只在实体创建之后被调，返回值没人读。
-                        // Entities are not compared; these run only after an entity was
-                        // created and nobody reads the result.
                         return null;
                     case "getRandom":
                         // `WorldGenRegion.getRandom()` 是这个区块的位置随机源，和传给

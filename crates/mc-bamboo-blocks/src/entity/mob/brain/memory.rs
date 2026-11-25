@@ -105,13 +105,19 @@ pub enum MemoryType {
     LastSlept,
     LastWoken,
     ItemPickupCooldownTicks,
+    /// 鹦鹉螺的 `charge_cooldown_ticks`（`Codec.INT`）和
+    /// `attack_target_cooldown`（`Codec.INT`）。追加在末尾，不改既有下标。
+    ///
+    /// The nautilus's `charge_cooldown_ticks` and `attack_target_cooldown`.
+    ChargeCooldownTicks,
+    AttackTargetCooldown,
 }
 
 impl MemoryType {
     /// 记忆种类的个数，槽表的长度。
     ///
     /// The number of memory types: the length of the slot table.
-    pub const COUNT: usize = 49;
+    pub const COUNT: usize = 51;
 
     /// 全部种类，按枚举顺序。
     ///
@@ -166,6 +172,8 @@ impl MemoryType {
         Self::LastSlept,
         Self::LastWoken,
         Self::ItemPickupCooldownTicks,
+        Self::ChargeCooldownTicks,
+        Self::AttackTargetCooldown,
     ];
 
     /// 官方注册名（不带命名空间）。
@@ -222,6 +230,8 @@ impl MemoryType {
             Self::LastSlept => "last_slept",
             Self::LastWoken => "last_woken",
             Self::ItemPickupCooldownTicks => "item_pickup_cooldown_ticks",
+            Self::ChargeCooldownTicks => "charge_cooldown_ticks",
+            Self::AttackTargetCooldown => "attack_target_cooldown",
         }
     }
 

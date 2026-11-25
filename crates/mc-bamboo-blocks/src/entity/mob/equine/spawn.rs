@@ -36,7 +36,7 @@ pub(in crate::entity::mob) fn finalize_spawn(
         // `Camel` does not override `AbstractHorse.randomizeAttributes` (empty base), so no
         // attribute draws for camels.
         match mob.mob_type {
-            MobType::Camel => {}
+            MobType::Camel | MobType::CamelHusk => {}
             MobType::SkeletonHorse => {
                 crate::entity::mob::skeleton_horse::randomize_skeleton(mob, random);
             }
@@ -116,7 +116,9 @@ fn chested_horse_group(group: &mut Option<SpawnGroup>) -> &mut AgeableGroupData 
     let data = group.get_or_insert_with(|| SpawnGroup::Ageable(AgeableGroupData::new(0.2)));
     match data {
         SpawnGroup::Ageable(age) | SpawnGroup::Horse(age, _) | SpawnGroup::Llama(age, _) => age,
-        SpawnGroup::Zombie(_) => unreachable!("equine with a zombie spawn group"),
+        SpawnGroup::Zombie(_) | SpawnGroup::Husk { .. } => {
+            unreachable!("equine with a zombie spawn group")
+        }
         SpawnGroup::Spider(_) => unreachable!("equine with a spider spawn group"),
         SpawnGroup::FishSchool { .. } => unreachable!("equine with a fish spawn group"),
         SpawnGroup::Wild(_) => unreachable!("equine with a wild animal group"),

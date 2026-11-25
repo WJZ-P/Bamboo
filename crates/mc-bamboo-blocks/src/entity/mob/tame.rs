@@ -75,7 +75,14 @@ impl Tamable {
 ///
 /// Whether this kind is a `TamableAnimal`.
 pub const fn is_tamable(kind: MobType) -> bool {
-    matches!(kind, MobType::Wolf | MobType::Cat | MobType::Parrot)
+    matches!(
+        kind,
+        MobType::Wolf
+            | MobType::Cat
+            | MobType::Parrot
+            | MobType::Nautilus
+            | MobType::ZombieNautilus
+    )
 }
 
 /// `TamableAnimal.setTame(isTame, includeSideEffects)`。

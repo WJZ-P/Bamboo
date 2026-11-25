@@ -71,6 +71,17 @@ pub(super) struct Case {
     /// Axolotl fixture: the bottom of the three "water" layers is clay.
     #[serde(default)]
     clay_floor: bool,
+    /// 海底神殿夹具：用 `minecraft:monument` 的覆盖表，水面以上到水柱铺水。
+    ///
+    /// Ocean monument fixture: use the monument override table and fill the
+    /// water column up to the sea level.
+    #[serde(default)]
+    monument: bool,
+    /// 神殿夹具在水面盖一层石头，挡住 `canSeeSkyFromBelowWater`。
+    ///
+    /// The monument fixture puts a stone roof at sea level to block sky visibility.
+    #[serde(default)]
+    monument_roof: bool,
     steps: Vec<Step>,
 }
 
@@ -115,10 +126,12 @@ pub(super) struct Coverage {
     farm: [usize; 3],
     skeletons: usize,
     zombies: usize,
+    parched: usize,
     slimes: usize,
     squid: usize,
     equines: usize,
     witches: usize,
+    sulfur_cubes: usize,
     without_spawn: usize,
     cap_off: usize,
     per_scene: std::collections::BTreeMap<String, usize>,
@@ -151,6 +164,11 @@ impl Coverage {
             .iter()
             .filter(|row| row[0] == entity_type::ZOMBIE || row[0] == entity_type::HUSK)
             .count();
+        self.parched += step
+            .spawned
+            .iter()
+            .filter(|row| row[0] == entity_type::PARCHED)
+            .count();
         self.slimes += step
             .spawned
             .iter()
@@ -171,6 +189,11 @@ impl Coverage {
             .iter()
             .filter(|row| row[0] == entity_type::WITCH)
             .count();
+        self.sulfur_cubes += step
+            .spawned
+            .iter()
+            .filter(|row| row[0] == entity_type::SULFUR_CUBE)
+            .count();
         if case.name == "cow_no_local_cap" {
             self.cap_off += step.spawned.len();
         }
@@ -179,17 +202,19 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {:?} pigs/sheep/chickens, {} skeletons, {} zombies or husks, {} slimes, {} squid or glow squid, {} equines, {} witches, {} empty ticks, {} spawns with local cap bypassed",
+                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {:?} pigs/sheep/chickens, {} skeletons, {} zombies or husks, {} parched, {} slimes, {} squid or glow squid, {} equines, {} witches, {} sulfur cubes, {} empty ticks, {} spawns with local cap bypassed",
                 self.cases,
                 self.ticks,
                 self.cows,
                 self.farm,
                 self.skeletons,
                 self.zombies,
+                self.parched,
                 self.slimes,
                 self.squid,
                 self.equines,
                 self.witches,
+                self.sulfur_cubes,
                 self.without_spawn,
                 self.cap_off
             );
@@ -220,12 +245,25 @@ impl Coverage {
         // 流浪者和沼骸的正例必须真的刷出生物，否则找天 / 黑暗规则没被覆盖。
         // The stray and bogged positive scenes must really spawn, or the sky / darkness
         // rules went untested.
-        for (scene, creature) in [("stray_night", "strays"), ("bogged_night", "bogged")] {
+        for (scene, creature) in [
+            ("stray_night", "strays"),
+            ("bogged_night", "bogged"),
+            ("parched_night", "parched"),
+        ] {
             if let Some(&count) = self.per_scene.get(scene)
                 && count == 0
             {
                 return Err(format!(
                     "natural spawn fixture {scene} did not spawn any {creature}"
+                ));
+            }
+        }
+        // 焦骸：夜里看得见天必须刷，白天 / 没天 / 和平必须不刷。
+        // Parched: open sky at night must spawn; day, no sky and peaceful must not.
+        for name in ["parched_day", "parched_no_sky", "parched_peaceful"] {
+            if self.per_scene.get(name) != Some(&0) {
+                return Err(format!(
+                    "natural spawn fixture {name} must not spawn parched"
                 ));
             }
         }
@@ -238,6 +276,20 @@ impl Coverage {
                 "bat natural spawn fixtures must spawn under a roof but not in the open".into(),
             );
         }
+        // 硫磺方块怪：暗处、白天、强光和和平难度都要刷（官方 EntityType builder
+        // 没调 notInPeaceful，checkSulfurCubeSpawnRules 恒真）。
+        // Sulfur cubes: dark, daylight, bright light and peaceful must all spawn
+        // (the vanilla builder skips notInPeaceful and the spawn predicate is true).
+        for scene in [
+            "sulfur_cube_night",
+            "sulfur_cube_day",
+            "sulfur_cube_lit",
+            "sulfur_cube_peaceful",
+        ] {
+            if self.per_scene.get(scene) == Some(&0) {
+                return Err(format!("sulfur cube fixture {scene} produced no mobs"));
+            }
+        }
         // 熊猫单独的一组：亮场景必须刷、暗场景必须不刷。
         // The panda-only group: the bright scene must spawn and the dim one must not.
         if let Some(&day) = self.per_scene.get("panda_day") {
@@ -246,6 +298,18 @@ impl Coverage {
             } else {
                 Err("panda natural spawn fixtures must spawn at raw brightness 15 but not 8".into())
             };
+        }
+        // 神殿正例必须真的刷出守卫者，和平难度不能刷；两个露天/封顶场景都要有结果。
+        // The monument positives must spawn guardians, peaceful must not, and both
+        // the open-sky and roofed scenes must be exercised.
+        if let Some(&count) = self.per_scene.get("monument_guardian_sky")
+            && (count == 0
+                || self.per_scene.get("monument_guardian_peaceful") != Some(&0)
+                || self.per_scene.get("monument_guardian") == Some(&0))
+        {
+            return Err(
+                "monument guardian natural spawn fixtures did not exercise the spawn rules".into(),
+            );
         }
         for name in [
             "fish_cod",
@@ -383,14 +447,14 @@ fn spawn_row(entity: Entity) -> [i32; 12] {
         // 大小不是 1 的史莱姆朝向来自构造函数的随机源，官方那边不带种子，两边都记 0。
         // The yaw of a slime whose size is not 1 comes from the constructor random, unseeded
         // in vanilla; both sides record 0.
-        if mob.mob_type == MobType::Slime && mob.cube.size != 1 {
+        if matches!(mob.mob_type, MobType::Slime | MobType::SulfurCube) && mob.cube.size != 1 {
             0
         } else {
             entity.y_rot.to_bits() as i32
         },
         // 史莱姆不会是幼年，这一列改放大小。
         // Slimes are never babies; this column carries their size instead.
-        if mob.mob_type == MobType::Slime {
+        if matches!(mob.mob_type, MobType::Slime | MobType::SulfurCube) {
             mob.cube.size
         } else {
             i32::from(mob.is_baby())
@@ -434,11 +498,24 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
     } else {
         kind.mob_category()
     };
-    let entry = spawning::for_biome_id(biome)
-        .mobs_to_spawn(category)
-        .iter()
-        .find(|entry| entry.entity_type == case.entity_type)
-        .ok_or_else(|| format!("{} has no spawn entry for {}", case.biome, case.entity_type))?;
+    // 神殿夹具用生成的官方覆盖表（守卫者 ×2–4），其余夹具从群系表里挑单一条目。
+    // The monument fixture uses the generated official override (guardians ×2–4);
+    // the rest pick one entry from the biome table.
+    let entry = if case.monument {
+        spawning::structure_spawn_override("minecraft:monument", category)
+            .and_then(|table| {
+                table
+                    .iter()
+                    .find(|entry| entry.entity_type == case.entity_type)
+            })
+            .ok_or("monument guardian override is missing")?
+    } else {
+        spawning::for_biome_id(biome)
+            .mobs_to_spawn(category)
+            .iter()
+            .find(|entry| entry.entity_type == case.entity_type)
+            .ok_or_else(|| format!("{} has no spawn entry for {}", case.biome, case.entity_type))?
+    };
     // 尸壳夹具多一层 -60 的玻璃顶，挡住官方的骆驼尸壳分支（见 `MobOracle.java`）。
     // The husk fixture adds a glass roof at -60 to block vanilla's camel-husk branch.
     // 蝙蝠夹具：石头地面，除了 `_open` 都有同样的玻璃顶。
@@ -453,6 +530,8 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         spawn_floor(biome)
     };
     let aquatic = case.aquatic;
+    let monument = case.monument;
+    let monument_roof = case.monument_roof;
     let floors = case.floors.clone();
     let water_depth = case.water_depth;
     let blocks = (-16..48)
@@ -460,6 +539,16 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
             let floors = floors.clone();
             (-16..32).flat_map(move |z| {
                 let mut column = Vec::new();
+                if monument {
+                    for y in -61..=-56 {
+                        let state = if monument_roof && y == -56 {
+                            blocks::STONE
+                        } else {
+                            blocks::WATER
+                        };
+                        column.push((BlockPos::new(x, y, z), BlockState(state)));
+                    }
+                }
                 for &y in &floors {
                     column.push((BlockPos::new(x, y, z), BlockState(blocks::GRASS_BLOCK)));
                 }

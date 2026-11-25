@@ -2539,12 +2539,14 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
 ### 12.4 结构刷怪覆盖
 
 - 数据：`mc-bamboo-data::spawning::STRUCTURE_SPAWN_OVERRIDES`，每行是结构名、盒类型
-  （`STRUCTURE` / `PIECE`）、类别和加权表。已收：
+  （`STRUCTURE` / `PIECE`）、类别和加权表；整表由官方 `worldgen/structure/*.json` 的
+  `spawn_overrides` 生成（23 行，空表也保留）。主要几行：
   - `minecraft:pillager_outpost` / `MONSTER` / `STRUCTURE` / 掠夺者 ×1；
   - `minecraft:swamp_hut` / `MONSTER` / `PIECE` / 女巫 ×1；
-  - `minecraft:swamp_hut` / `CREATURE` / `PIECE` / 猫 ×1。
-  官方在 `Structures.bootstrap` 里还给海底神殿注册了守卫者和两个空表，那两种生物 / 类别没有
-  建模，表先不写。
+  - `minecraft:swamp_hut` / `CREATURE` / `PIECE` / 猫 ×1；
+  - `minecraft:monument` / `MONSTER` / `STRUCTURE` / 守卫者 ×2–4；
+  - `minecraft:monument` / `AXOLOTLS`、`UNDERGROUND_WATER_CREATURE` / `STRUCTURE` / 空表。
+  下界要塞、古城和试炼密室的覆盖也导出了；下界刷怪暂不接。
 - 查询：`game/src/structure_spawn.rs` 照 `ChunkGenerator.getMobsAt`：取位置所在区块的
   `STRUCTURE_REFERENCES`，逐个引用区块读 `STRUCTURE_STARTS`，按盒类型判定位置（`STRUCTURE`
   用整个起点盒，含 `terrainAdaptation` 的 12 格外扩；`PIECE` 要求落在某个结构件里）；命中就返回

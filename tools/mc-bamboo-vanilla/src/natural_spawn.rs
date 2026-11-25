@@ -20,7 +20,9 @@ use std::process::Command;
 
 use mc_bamboo_blocks::entity::mob::natural;
 use mc_bamboo_core::{ChunkPos, Vec3};
-use mc_bamboo_data::spawning::{self, MobCategory, MobSpawnerDef};
+use mc_bamboo_data::spawning::{
+    self, MobCategory, MobSpawnerDef, STRUCTURE_SPAWN_OVERRIDES, SpawnOverrideBox,
+};
 use serde_json::Value;
 
 const USAGE: &str = "usage: natural-spawn <java> [--show N] [--break-self-test]";
@@ -78,6 +80,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
 
     let mut stats = Stats::default();
     let mut first = true;
+    let mut ocean_nautilus = 0;
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let value: Value =
             serde_json::from_str(line).map_err(|error| format!("bad oracle line: {error}"))?;
@@ -85,8 +88,35 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
             .get("type")
             .and_then(Value::as_str)
             .ok_or("oracle line has no type")?;
+        // 海洋群系的刷怪表里应当有 `minecraft:nautilus`，而且 Bamboo 已经建模。
+        // Ocean spawn tables should contain `minecraft:nautilus`, modelled by Bamboo.
+        if kind == "pick"
+            && value["biome"]
+                .as_str()
+                .is_some_and(|name| name.contains("ocean"))
+            && let Some(settings) = value["biome"].as_str().and_then(spawning::by_biome_name)
+        {
+            for row in settings.categories {
+                if row.entries.iter().any(|entry| {
+                    mc_bamboo_data::registries::entity_type::name_of(entry.entity_type)
+                        == Some("minecraft:nautilus")
+                }) {
+                    ocean_nautilus += 1;
+                    if mc_bamboo_blocks::entity::mob::MobType::by_entity_type(
+                        mc_bamboo_data::registries::entity_type::NAUTILUS,
+                    ) != Some(mc_bamboo_blocks::entity::mob::MobType::Nautilus)
+                    {
+                        stats.mismatches.push(
+                            "nautilus is in an ocean spawn table but Bamboo cannot spawn it"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+        }
         let mismatch = match kind {
             "pick" => replay_pick(&value, options.break_self_test && first)?,
+            "structureOverride" => replay_structure_override(&value)?,
             "shuffle" => replay_shuffle(&value, options.break_self_test && first)?,
             "origin" => replay_origin(&value)?,
             "chunk_distance" => replay_chunk_distance(&value)?,
@@ -98,7 +128,122 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
             stats.mismatches.push(message);
         }
     }
+    if ocean_nautilus == 0 && !options.break_self_test {
+        return Err("natural-spawn saw no ocean nautilus spawn entries".to_owned());
+    }
+    println!("natural-spawn: {ocean_nautilus} ocean nautilus tables covered");
     finish(stats, &options)
+}
+
+/// 官方结构覆盖表的抽选和组大小，逐位比 Bamboo 生成的表（含空表不取随机数）。
+///
+/// Vanilla structure-override picks and group sizes, replayed over the generated
+/// Bamboo table (empty lists draw nothing).
+fn replay_structure_override(value: &Value) -> Result<Option<String>, String> {
+    let structure = value
+        .get("structure")
+        .and_then(Value::as_str)
+        .ok_or("structureOverride line missing structure")?;
+    let category_name = value
+        .get("category")
+        .and_then(Value::as_str)
+        .ok_or("structureOverride line missing category")?;
+    let bounding = value
+        .get("bounding")
+        .and_then(Value::as_str)
+        .ok_or("structureOverride line missing bounding")?;
+    let seed = value
+        .get("seed")
+        .and_then(Value::as_i64)
+        .ok_or("structureOverride line missing seed")?;
+    let category = MobCategory::ALL
+        .into_iter()
+        .find(|category| category.facts().name == category_name)
+        .ok_or_else(|| format!("unknown mob category {category_name}"))?;
+    let row = STRUCTURE_SPAWN_OVERRIDES
+        .iter()
+        .find(|row| row.structure == structure && row.category == category)
+        .ok_or_else(|| format!("missing generated override {structure}/{category_name}"))?;
+    let want_bounding = match row.bounding {
+        SpawnOverrideBox::Structure => "full",
+        SpawnOverrideBox::Piece => "piece",
+    };
+    if want_bounding != bounding {
+        return Ok(Some(format!(
+            "{structure}/{category_name}: official box {bounding}, Bamboo {want_bounding}"
+        )));
+    }
+    Ok(replay_draws(
+        structure,
+        category_name,
+        row.spawns,
+        seed,
+        value,
+        false,
+    ))
+}
+
+/// `pick` 和结构覆盖共用的逐位重放：加权抽选 + 组大小 + 之后一次取数指纹。
+///
+/// Shared bit-for-bit replay for `pick` and structure overrides: weighted pick,
+/// group size, then a fingerprint draw.
+fn replay_draws(
+    name: &str,
+    category_name: &str,
+    table: &[MobSpawnerDef],
+    seed: i64,
+    value: &Value,
+    break_self_test: bool,
+) -> Option<String> {
+    let official = value.get("picks")?.as_array()?;
+    let random = mc_bamboo_blocks::LegacyRandom::new(seed);
+    let mut ours = Vec::new();
+    for _index in 0..official.len() {
+        let Some(picked) = natural::pick(table, &random) else {
+            ours.push(("empty".to_owned(), 0));
+            continue;
+        };
+        let count = natural::sample(picked, &random);
+        let entity = mc_bamboo_data::registries::entity_type::name_of(picked.entity_type)
+            .unwrap_or("<unknown>")
+            .to_owned();
+        ours.push((entity, count));
+    }
+    let after = random.next_int(1000);
+    let want_after = value.get("after")?.as_i64()?;
+
+    let mut problems = Vec::new();
+    for (index, entry) in official.iter().enumerate() {
+        let (want_type, want_count) = if let Some(array) = entry.as_array() {
+            (
+                array
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or("empty")
+                    .to_owned(),
+                array.get(1).and_then(Value::as_i64).unwrap_or(0),
+            )
+        } else {
+            ("empty".to_owned(), 0)
+        };
+        let (have_type, have_count) = ours.get(index).cloned().unwrap_or_default();
+        let broken = break_self_test && index == 0;
+        if broken || want_type != have_type || want_count != i64::from(have_count) {
+            problems.push(format!(
+                "{name}/{category_name} seed {seed} pick {index}: official {want_type} x{want_count}, game {have_type} x{have_count}"
+            ));
+        }
+    }
+    if i64::from(after) != want_after {
+        problems.push(format!(
+            "{name}/{category_name} seed {seed}: official after {want_after}, game {after}"
+        ));
+    }
+    if problems.is_empty() {
+        None
+    } else {
+        Some(problems.join("; "))
+    }
 }
 
 fn replay_origin(value: &Value) -> Result<Option<String>, String> {
@@ -162,62 +307,22 @@ fn replay_pick(value: &Value, break_self_test: bool) -> Result<Option<String>, S
         .iter()
         .find(|row| row.category == category.index() as u8)
         .map_or(&[], |row| row.entries);
-
-    let official = value
+    value
         .get("picks")
         .and_then(Value::as_array)
         .ok_or("pick line missing picks")?;
-    let random = mc_bamboo_blocks::LegacyRandom::new(seed);
-    let mut ours = Vec::new();
-    for _index in 0..official.len() {
-        let Some(picked) = natural::pick(table, &random) else {
-            ours.push(("empty".to_owned(), 0));
-            continue;
-        };
-        let count = natural::sample(picked, &random);
-        let name = mc_bamboo_data::registries::entity_type::name_of(picked.entity_type)
-            .unwrap_or("<unknown>")
-            .to_owned();
-        ours.push((name, count));
-    }
-    let after = random.next_int(1000);
-    let want_after = value
+    value
         .get("after")
         .and_then(Value::as_i64)
         .ok_or("pick line missing after")?;
-
-    let mut problems = Vec::new();
-    for (index, entry) in official.iter().enumerate() {
-        let (want_type, want_count) = if let Some(array) = entry.as_array() {
-            (
-                array
-                    .first()
-                    .and_then(Value::as_str)
-                    .unwrap_or("empty")
-                    .to_owned(),
-                array.get(1).and_then(Value::as_i64).unwrap_or(0),
-            )
-        } else {
-            ("empty".to_owned(), 0)
-        };
-        let (have_type, have_count) = ours.get(index).cloned().unwrap_or_default();
-        let broken = break_self_test && index == 0;
-        if broken || want_type != have_type || want_count != i64::from(have_count) {
-            problems.push(format!(
-                "{biome}/{category_name} seed {seed} pick {index}: official {want_type} x{want_count}, game {have_type} x{have_count}"
-            ));
-        }
-    }
-    if i64::from(after) != want_after {
-        problems.push(format!(
-            "{biome}/{category_name} seed {seed}: official after {want_after}, game {after}"
-        ));
-    }
-    Ok(if problems.is_empty() {
-        None
-    } else {
-        Some(problems.join("; "))
-    })
+    Ok(replay_draws(
+        biome,
+        category_name,
+        table,
+        seed,
+        value,
+        break_self_test,
+    ))
 }
 
 fn replay_shuffle(value: &Value, break_self_test: bool) -> Result<Option<String>, String> {

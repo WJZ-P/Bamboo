@@ -363,10 +363,14 @@ pub enum EntityData {
     ExperienceValue(i32),
     /// index 17，INT。`Zombie.DATA_SPECIAL_TYPE_ID`。
     SpecialType(i32),
-    /// `AbstractCubeMob.ID_SIZE`（INT）：史莱姆的大小。
+    /// `AbstractCubeMob.ID_SIZE`（INT）：史莱姆 / 硫磺方块怪的大小。
     ///
-    /// `AbstractCubeMob.ID_SIZE` (INT): the slime size.
+    /// `AbstractCubeMob.ID_SIZE` (INT): the slime / sulfur cube size.
     CubeMobSize(i32),
+    /// `SulfurCube.MAX_FUSE`（index 19，INT，缺省 -1）。
+    SulfurCubeMaxFuse(i32),
+    /// `SulfurCube.FROM_BUCKET`（index 20，BOOLEAN）。
+    SulfurCubeFromBucket(bool),
     /// index 18，BOOLEAN。`Zombie.DATA_DROWNED_CONVERSION_ID`。
     DrownedConverting(bool),
     /// index 17，BOOLEAN。`Witch.DATA_USING_ITEM`（`Entity` 0–7、`LivingEntity` 8–14、
@@ -470,6 +474,14 @@ pub enum EntityData {
     WolfVariant(i32),
     /// `Wolf.DATA_SOUND_VARIANT_ID`：`wolf_sound_variant` 注册表 ID。
     WolfSoundVariant(i32),
+    /// `AbstractNautilus.DASH`（index 20，BOOLEAN）。
+    ///
+    /// `AbstractNautilus.DASH` (index 20, BOOLEAN).
+    NautilusDash(bool),
+    /// `ZombieNautilus.DATA_VARIANT_ID`（index 21，注册表 ID）。
+    ///
+    /// `ZombieNautilus.DATA_VARIANT_ID` (index 21, a registry id).
+    ZombieNautilusVariant(i32),
     /// `Guardian.DATA_ID_MOVING`（BOOLEAN，索引 16）。
     ///
     /// `Guardian.DATA_ID_MOVING` (BOOLEAN, index 16).
@@ -563,6 +575,8 @@ impl EntityData {
             Self::PigSoundVariant(_) => mc_bamboo_data::entity_types::PIG_SOUND_VARIANT,
             Self::SheepWool(_) => mc_bamboo_data::entity_types::SHEEP_WOOL,
             Self::CubeMobSize(_) => mc_bamboo_data::entity_types::CUBE_MOB_SIZE,
+            Self::SulfurCubeMaxFuse(_) => mc_bamboo_data::entity_types::SULFUR_CUBE_MAX_FUSE,
+            Self::SulfurCubeFromBucket(_) => mc_bamboo_data::entity_types::SULFUR_CUBE_FROM_BUCKET,
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
             Self::ArmadilloState(_) => mc_bamboo_data::entity_types::ARMADILLO_STATE,
@@ -607,6 +621,8 @@ impl EntityData {
             Self::AxolotlVariant(_) => mc_bamboo_data::entity_types::AXOLOTL_VARIANT,
             Self::AxolotlPlayingDead(_) => mc_bamboo_data::entity_types::AXOLOTL_PLAYING_DEAD,
             Self::AxolotlFromBucket(_) => mc_bamboo_data::entity_types::AXOLOTL_FROM_BUCKET,
+            Self::NautilusDash(_) => mc_bamboo_data::entity_types::NAUTILUS_DASH,
+            Self::ZombieNautilusVariant(_) => mc_bamboo_data::entity_types::ZOMBIE_NAUTILUS_VARIANT,
             Self::GuardianMoving(_) => mc_bamboo_data::entity_types::GUARDIAN_MOVING,
             Self::GuardianAttackTarget(_) => mc_bamboo_data::entity_types::GUARDIAN_ATTACK_TARGET,
         }
@@ -1002,6 +1018,14 @@ impl EntityData {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *size);
             }
+            Self::SulfurCubeMaxFuse(fuse) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *fuse);
+            }
+            Self::SulfurCubeFromBucket(flag) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *flag);
+            }
             Self::DrownedConverting(converting) => {
                 write_data_header(out, 18, SERIALIZER_BOOLEAN);
                 write_bool(out, *converting);
@@ -1031,6 +1055,18 @@ impl EntityData {
             Self::WitchUsingItem(using) => {
                 write_data_header(out, 17, SERIALIZER_BOOLEAN);
                 write_bool(out, *using);
+            }
+            Self::NautilusDash(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::ZombieNautilusVariant(variant) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::ZOMBIE_NAUTILUS_VARIANT_SERIALIZER,
+                );
+                write_varint(out, *variant);
             }
             Self::GuardianMoving(moving) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);

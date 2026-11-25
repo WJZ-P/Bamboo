@@ -69,6 +69,10 @@ pub enum SensorKind {
     ///
     /// `SecondaryPoiSensor` (40-tick scan; farmers collect nearby farmland in a 9×5×9 box).
     SecondaryPois,
+    /// `SensorType.NAUTILUS_TEMPTATIONS`：`TemptingSensor(NautilusAi.getTemptations())`。
+    ///
+    /// `SensorType.NAUTILUS_TEMPTATIONS`: `TemptingSensor(NautilusAi.getTemptations())`.
+    NautilusTemptations,
     /// `GolemSensor`（200 刻扫描，附近有铁傀儡时写 `GOLEM_DETECTED_RECENTLY`，TTL 599）。
     ///
     /// `GolemSensor` (200-tick scan; writes `GOLEM_DETECTED_RECENTLY` with TTL 599 if an iron golem is nearby).
@@ -121,7 +125,7 @@ impl SensorKind {
                 MemoryType::NearestAttackable,
                 MemoryType::UnreachableTongueTargets,
             ],
-            Self::FrogTemptations => &[MemoryType::TemptingPlayer],
+            Self::FrogTemptations | Self::NautilusTemptations => &[MemoryType::TemptingPlayer],
             Self::IsInWater => &[MemoryType::IsInWater],
             // `AxolotlAttackablesSensor.requires()` = 视线表 + `NEAREST_ATTACKABLE`
             // + `HAS_HUNTING_COOLDOWN`。
@@ -154,7 +158,9 @@ impl SensorKind {
         match self {
             Self::NearestLivingEntities => "NearestLivingEntitySensor",
             Self::HurtBy => "HurtBySensor",
-            Self::FoodTemptations | Self::FrogTemptations => "TemptingSensor",
+            Self::FoodTemptations | Self::FrogTemptations | Self::NautilusTemptations => {
+                "TemptingSensor"
+            }
             Self::NearestAdult => "AdultSensor",
             Self::ArmadilloScareDetected => "MobSensor",
             Self::NearestPlayers => "PlayerSensor",
@@ -217,6 +223,9 @@ impl Sensor {
             // `FROG_TEMPTATIONS` has the same shape as `TemptingSensor.forAnimal()`:
             // the frog's `isFood` is `#frog_food`, the same table this lookup uses.
             SensorKind::FrogTemptations => sense_temptations(cx),
+            // `NAUTILUS_TEMPTATIONS` 用 `#nautilus_food`，走同一条搜索。
+            // `NAUTILUS_TEMPTATIONS` uses `#nautilus_food` through the same lookup.
+            SensorKind::NautilusTemptations => sense_temptations(cx),
             SensorKind::IsInWater => super::super::frog::sense_is_in_water(cx),
             SensorKind::AxolotlAttackables => super::super::axolotl::sense_attackables(cx),
             SensorKind::NearestBed => sense_nearest_bed(cx),
@@ -335,7 +344,7 @@ fn mob_view(uid: EntityUid, position: Vec3, removed: bool, mob: &KindPublicMob) 
     // A sitting camel's `getEyeHeight()` follows the pose (2.275 → 0.845); a
     // watching baby's `LookControl` reads that live eye height, not a static
     // per-species value.
-    let eye_height = if mob.mob_type == MobType::Camel {
+    let eye_height = if mob.mob_type.is_camel() {
         camel::dimensions(mob.baby, mob.camel.pose == camel::Pose::Sitting).2
     } else {
         mob.mob_type.dimensions(mob.baby).2

@@ -527,7 +527,7 @@ impl Entity {
 
     /// 构造函数里的随机数：`Entity` 的 UUID 两个 `nextLong`，`LivingEntity` 的
     /// `yRot = nextFloat() * 6.2831855F`（弧度当角度用，官方就是这样）。
-    pub(crate) fn finish_mob_random(&mut self) {
+    pub fn finish_mob_random(&mut self) {
         let EntityKind::Mob(mob) = &mut self.kind else {
             return;
         };
@@ -558,7 +558,7 @@ impl Entity {
             // The `Chicken` constructor's trailing `eggTime = nextInt(6000) + 6000`.
             mob.egg_time = self.random.next_int_bounded(6000) + 6000;
         }
-        if mob.mob_type == mob::MobType::Slime {
+        if matches!(mob.mob_type, mob::MobType::Slime | mob::MobType::SulfurCube) {
             mob.cube.move_y_rot = mob::slime::constructor_move_y_rot(self.y_rot);
         }
         if mob.mob_type == mob::MobType::Bee {

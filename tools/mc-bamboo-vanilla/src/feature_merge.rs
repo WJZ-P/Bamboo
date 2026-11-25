@@ -568,6 +568,7 @@ impl Report<'_> {
                 deltas,
                 marks: Vec::new(),
                 block_entities: official_block_entities(&entity_sources[slot])?,
+                entities: Vec::new(),
             });
             let mut game_writes: BTreeMap<usize, u32> = BTreeMap::new();
             for &(wx, wy, wz, state) in &game[slot] {
@@ -607,6 +608,7 @@ impl Report<'_> {
             heightmaps: Default::default(),
             post_processing: Vec::new(),
             block_entities: Vec::new(),
+            entities: Vec::new(),
         };
         merge_feature_writes(&mut merged, groups);
         self.compare_block_entities(seed, x, z, &merged.block_entities)?;

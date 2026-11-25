@@ -150,6 +150,12 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         _ if ctx.item == items::HUSK_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Husk)
         }
+        _ if ctx.item == items::PARCHED_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Parched)
+        }
+        _ if ctx.item == items::CAMEL_HUSK_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::CamelHusk)
+        }
         _ if ctx.item == items::STRAY_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Stray)
         }
@@ -167,6 +173,15 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         }
         _ if ctx.item == items::ELDER_GUARDIAN_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::ElderGuardian)
+        }
+        _ if ctx.item == items::SULFUR_CUBE_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::SulfurCube)
+        }
+        _ if ctx.item == items::NAUTILUS_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Nautilus)
+        }
+        _ if ctx.item == items::ZOMBIE_NAUTILUS_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::ZombieNautilus)
         }
         _ if ctx.item == items::WITCH_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Witch)

@@ -144,6 +144,7 @@ impl CompactTerrain {
                 heightmaps: chunk.heightmaps.clone(),
                 post_processing: chunk.post_processing.clone(),
                 block_entities: chunk.block_entities.clone(),
+                entities: chunk.entities.clone(),
             },
         }
     }
@@ -162,6 +163,7 @@ impl CompactTerrain {
             heightmaps: self.rest.heightmaps.clone(),
             post_processing: self.rest.post_processing.clone(),
             block_entities: self.rest.block_entities.clone(),
+            entities: self.rest.entities.clone(),
         }
     }
 

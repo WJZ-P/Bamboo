@@ -1587,7 +1587,154 @@ fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
         let _ = writeln!(out, "    {melts}, // {name}");
     }
     let _ = writeln!(out, "];");
+    append_structure_spawn_overrides(&mut out, data, entity_id)?;
     Ok(out)
+}
+
+/// `data/minecraft/worldgen/structure/*.json` 的 `spawn_overrides`，按结构名和
+/// `MobCategory` 顺序展开。空表也收进来：官方的空表同样挡住群系表。
+///
+/// The `spawn_overrides` of the structure data pack, in structure-name and
+/// `MobCategory` order. Empty lists matter too: they suppress the biome table.
+fn append_structure_spawn_overrides(
+    out: &mut String,
+    data: &VersionData,
+    entity_id: impl Fn(&str) -> Result<i32, String>,
+) -> Result<(), String> {
+    let Some(structures) = data.worldgen.get("structure").and_then(|v| v.as_object()) else {
+        return Err("官方世界生成数据里没有 structure 注册表".to_owned());
+    };
+    let mut rows = Vec::new();
+    for (structure, definition) in structures {
+        let Some(overrides) = definition
+            .get("spawn_overrides")
+            .and_then(|v| v.as_object())
+        else {
+            continue;
+        };
+        for (name, override_) in overrides {
+            let category = MOB_CATEGORY_ORDER
+                .iter()
+                .position(|candidate| *candidate == name)
+                .ok_or_else(|| format!("{structure} 的覆盖引用了未知 MobCategory {name}"))?;
+            let bounding = override_
+                .get("bounding_box")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("{structure}/{name} 缺 bounding_box"))?;
+            let bounding = match bounding {
+                "full" => "Structure",
+                "piece" => "Piece",
+                other => return Err(format!("{structure}/{name} 的盒类型未知: {other}")),
+            };
+            let spawns = override_
+                .get("spawns")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| format!("{structure}/{name} 缺 spawns 列表"))?;
+            let mut entries = Vec::new();
+            for spawn in spawns {
+                let entity = spawn
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| format!("{structure}/{name} 的 spawns 项缺 type"))?;
+                let weight = spawn
+                    .get("weight")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|v| i32::try_from(v).ok())
+                    .ok_or_else(|| format!("{structure}/{name} 的 spawns 项 weight 异常"))?;
+                // `IntProvider` 只有常量和均匀分布两种，官方群系表也是这样导出的。
+                // The only `IntProvider` kinds in the pack are constants and uniform.
+                let (min, max) = match spawn.get("count") {
+                    Some(serde_json::Value::Number(number)) => {
+                        let count = number
+                            .as_i64()
+                            .and_then(|v| i32::try_from(v).ok())
+                            .ok_or_else(|| format!("{structure}/{name} 的 count 越界"))?;
+                        (count, count)
+                    }
+                    Some(serde_json::Value::Object(uniform)) => {
+                        if uniform.get("type").and_then(|v| v.as_str()) != Some("minecraft:uniform")
+                        {
+                            return Err(format!("{structure}/{name} 的 count 类型未知"));
+                        }
+                        let min = uniform
+                            .get("min_inclusive")
+                            .and_then(|v| v.as_i64())
+                            .and_then(|v| i32::try_from(v).ok())
+                            .ok_or_else(|| format!("{structure}/{name} 的 min 越界"))?;
+                        let max = uniform
+                            .get("max_inclusive")
+                            .and_then(|v| v.as_i64())
+                            .and_then(|v| i32::try_from(v).ok())
+                            .ok_or_else(|| format!("{structure}/{name} 的 max 越界"))?;
+                        (min, max)
+                    }
+                    _ => return Err(format!("{structure}/{name} 的 count 格式未知")),
+                };
+                entries.push(format!(
+                    "MobSpawnerDef {{ entity_type: {}, weight: {weight}, min: {min}, max: {max} }}",
+                    entity_id(entity)?
+                ));
+            }
+            rows.push((structure.as_str(), category, bounding, entries));
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(&b.1)));
+    if rows.is_empty() {
+        return Err("官方结构里一个 spawn_overrides 都没有".to_owned());
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 官方 `StructureSpawnOverride.BoundingBoxType`。");
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub enum StructureSpawnOverrideBox {{");
+    let _ = writeln!(out, "    /// `STRUCTURE`：整个起点的包围盒。");
+    let _ = writeln!(out, "    Structure,");
+    let _ = writeln!(out, "    /// `PIECE`：某个结构件的包围盒。");
+    let _ = writeln!(out, "    Piece,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 一项结构刷怪覆盖。");
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct StructureSpawnOverride {{");
+    let _ = writeln!(out, "    pub structure: &'static str,");
+    let _ = writeln!(out, "    pub bounding: StructureSpawnOverrideBox,");
+    let _ = writeln!(out, "    /// `MobCategory` 的判别值。");
+    let _ = writeln!(out, "    pub category: u8,");
+    let _ = writeln!(out, "    pub spawns: &'static [MobSpawnerDef],");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "/// `data/minecraft/worldgen/structure/*.json` 的 `spawn_overrides`，按结构名和类别排序。"
+    );
+    let _ = writeln!(out, "#[rustfmt::skip]");
+    let _ = writeln!(
+        out,
+        "pub static STRUCTURE_SPAWN_OVERRIDES: &[StructureSpawnOverride] = &["
+    );
+    for (index, (structure, category, bounding, _)) in rows.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "    // {structure} / {}",
+            MOB_CATEGORY_ORDER[*category]
+        );
+        let _ = writeln!(
+            out,
+            "    StructureSpawnOverride {{ structure: {structure:?}, bounding: StructureSpawnOverrideBox::{bounding}, category: {category}, spawns: SPAWN_OVERRIDE_LIST_{index} }},"
+        );
+    }
+    let _ = writeln!(out, "];");
+    for (index, (_, _, _, entries)) in rows.iter().enumerate() {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "#[rustfmt::skip]\nconst SPAWN_OVERRIDE_LIST_{index}: &[MobSpawnerDef] = &["
+        );
+        for entry in entries {
+            let _ = writeln!(out, "    {entry},");
+        }
+        let _ = writeln!(out, "];");
+    }
+    Ok(())
 }
 
 fn version_file(data: &VersionData) -> String {
@@ -4226,6 +4373,8 @@ fn entity_types_file(data: &VersionData) -> String {
         ("PHANTOM_SIZE", facts.phantom_size),
         ("GUARDIAN_MOVING", facts.guardian_moving),
         ("GUARDIAN_ATTACK_TARGET", facts.guardian_attack_target),
+        ("NAUTILUS_DASH", facts.nautilus_dash),
+        ("ZOMBIE_NAUTILUS_VARIANT", facts.zombie_nautilus_variant),
         ("FISH_FROM_BUCKET", facts.fish_from_bucket),
         ("SALMON_VARIANT", facts.salmon_variant),
         ("TROPICAL_FISH_VARIANT", facts.tropical_fish_variant),
@@ -4339,6 +4488,10 @@ fn entity_types_file(data: &VersionData) -> String {
             "FROG_TONGUE_TARGET_SERIALIZER",
             facts.frog_tongue_target_serializer,
         ),
+        (
+            "ZOMBIE_NAUTILUS_VARIANT_SERIALIZER",
+            facts.zombie_nautilus_variant_serializer,
+        ),
     ] {
         let _ = writeln!(out, "pub const {name}: i32 = {value};");
     }
@@ -4346,6 +4499,26 @@ fn entity_types_file(data: &VersionData) -> String {
         out,
         "pub const CUBE_MOB_SIZE: u8 = {};",
         facts.cube_mob_size
+    );
+    let _ = writeln!(
+        out,
+        "pub const SULFUR_CUBE_MAX_FUSE: u8 = {};",
+        facts.sulfur_cube_max_fuse
+    );
+    let _ = writeln!(
+        out,
+        "pub const SULFUR_CUBE_FROM_BUCKET: u8 = {};",
+        facts.sulfur_cube_from_bucket
+    );
+    let _ = writeln!(
+        out,
+        "pub const SULFUR_CUBE_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.sulfur_cube_eye_height)
+    );
+    let _ = writeln!(
+        out,
+        "pub const SULFUR_CUBE_SPAWN_DIMENSIONS_SCALE: f32 = {};",
+        float_literal(facts.sulfur_cube_spawn_dimensions_scale)
     );
     let _ = writeln!(
         out,

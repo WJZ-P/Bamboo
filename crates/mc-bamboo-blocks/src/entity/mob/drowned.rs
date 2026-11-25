@@ -468,13 +468,16 @@ pub(super) fn perform_ranged_attack(
 }
 
 /// `Drowned.finalizeSpawn` 在 `Zombie.finalizeSpawn` 之后的部分：3% 的副手鹦鹉螺壳，
-/// 以及自然生成时带三叉戟的有 50% 变成鹦鹉螺僵尸的骑手。后者 Bamboo 没有鹦鹉螺僵尸，
-/// 只照官方取那一次随机数，不生成坐骑。
+/// 以及自然 / 结构生成时带三叉戟的有 50% 变成僵尸鹦鹉螺骑手。
 ///
 /// The part of `Drowned.finalizeSpawn` after `Zombie.finalizeSpawn`: the 3% offhand
-/// nautilus shell, and the 50% zombie-nautilus jockey for trident-carrying natural spawns.
-/// Bamboo has no zombie nautilus, so the draw happens but no mount is created.
-pub(super) fn after_zombie_finalize(world: &World<'_>, entity: &mut Entity, reason: SpawnReason) {
+/// nautilus shell, and the 50% zombie-nautilus jockey for trident-carrying natural
+/// or structure spawns.
+pub(super) fn after_zombie_finalize(
+    world: &mut World<'_>,
+    entity: &mut Entity,
+    reason: SpawnReason,
+) {
     let random = world.random();
     let mut place_shell = false;
     entity.with_mob(|_, mob| {
@@ -489,7 +492,7 @@ pub(super) fn after_zombie_finalize(world: &World<'_>, entity: &mut Entity, reas
     if place_shell {
         entity.with_mob(|_, mob| mob.equipment.set_drop_chance(EquipmentSlot::OffHand, 2.0));
     }
-    let natural = reason == SpawnReason::Natural;
+    let natural = matches!(reason, SpawnReason::Natural | SpawnReason::Structure);
     let trident = entity
         .kind
         .mob()
@@ -504,23 +507,22 @@ pub(super) fn after_zombie_finalize(world: &World<'_>, entity: &mut Entity, reas
     let baby = entity.kind.mob().is_some_and(Mob::is_baby);
     let biome = world.biome_id(entity.block_position());
     if !baby && !super::spawn::biome_tag_contains(MORE_FREQUENT_DROWNED_SPAWNS, biome) {
-        // 官方的 `ZombieNautilus.create` 在这里生成坐骑并让溺尸骑上去；Bamboo 没有这个实体。
+        // 官方 `ZombieNautilus.create(JOCKEY)` → `snapTo` → `finalizeSpawn` →
+        // `startRiding` → `addFreshEntity`。这里排队到 `finish_jockeys` 落地，
+        // 随机数顺序（构造函数、大脑传感器、finalizeSpawn）都在生成入口里照跑。
         //
-        // Vanilla creates and mounts a zombie nautilus here; Bamboo has no such entity.
+        // Vanilla creates a `ZombieNautilus(JOCKEY)`, snaps it, finalizes it, mounts
+        // the drowned and adds it. Queueing here keeps every random draw in order at
+        // the spawn entry point.
+        world.queue_jockey(super::spawn::JockeyRequest {
+            kind: MobType::ZombieNautilus,
+            position: entity.position,
+            yaw: entity.y_rot,
+            rider_is_vehicle: true,
+            reason: Some(reason),
+            persistent: reason == SpawnReason::Structure,
+        });
     }
-}
-
-/// `SpawnPlacementTypes.IN_WATER.isSpawnPositionOk`：水格里、上面一格不是红石导体。
-///
-/// `SpawnPlacementTypes.IN_WATER.isSpawnPositionOk`: a water block whose block above is
-/// not a redstone conductor.
-pub(super) fn placement_ok(world: &World, pos: BlockPos) -> bool {
-    if !world.world_border().is_within_bounds_pos(pos) {
-        return false;
-    }
-    let above = BlockPos::new(pos.x, pos.y + 1, pos.z);
-    world.fluid_state(pos).is_tagged(fluid_tags::WATER)
-        && !world.block_state(above).is_redstone_conductor()
 }
 
 /// `Drowned.checkDrownedSpawnRules`：脚下必须是水；浅水里只有 1/40（沼泽类群系 1/15），
@@ -573,6 +575,19 @@ pub(super) const fn death_sound(in_water: bool) -> &'static str {
     } else {
         "minecraft:entity.drowned.death"
     }
+}
+
+/// 对拍用：对一只已经在表里的溺尸补跑 `finalizeSpawn` 之后的坐骑分支。
+///
+/// Oracle helper: re-run the post-`finalizeSpawn` jockey branch for an existing
+/// drowned row so the whole spawn entry point can be replayed.
+pub fn after_zombie_finalize_for_oracle(world: &mut World<'_>, uid: i32) {
+    let Some(entity) = world.take_entity_for_oracle(uid) else {
+        return;
+    };
+    let mut entity = entity;
+    after_zombie_finalize(world, &mut entity, SpawnReason::Natural);
+    world.put_entity_for_oracle(entity);
 }
 
 #[cfg(test)]

@@ -281,10 +281,16 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "sleeping_pos", block_pos_tag(pos));
     }
     // ---- Mob ----
+    // `SulfurCube.canPickUpLoot()` = `!hasBodyItem()`，存档写的是覆写后的值。
+    let can_pick_up_loot = if mob.mob_type == MobType::SulfurCube {
+        !super::sulfur_cube::has_body_item(mob)
+    } else {
+        mob.can_pick_up_loot
+    };
     put(
         &mut out,
         "CanPickUpLoot",
-        Tag::Byte(i8::from(mob.can_pick_up_loot)),
+        Tag::Byte(i8::from(can_pick_up_loot)),
     );
     put(
         &mut out,
@@ -319,20 +325,41 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     // 史莱姆和鱿鱼一支是 `AgeableMob` 但不是 `Animal`，没有求爱的两个键。
     // Slimes and the squid branch are `AgeableMob`s but not `Animal`s, so they
     // lack the two love keys.
-    if mob.mob_type.is_animal() && mob.mob_type != MobType::Slime {
+    // `ZombieNautilus` 虽然是 `Monster`，但它继承的 `Animal.addAdditionalSaveData`
+    // 仍写 `InLove`；Bamboo 的 `is_animal()` 只对非怪物为真，这里显式补上。
+    // `ZombieNautilus` is a `Monster`, yet its inherited
+    // `Animal.addAdditionalSaveData` still writes `InLove`; `is_animal()` is
+    // false for monsters, so include it explicitly here.
+    if (mob.mob_type.is_animal() || mob.mob_type == MobType::ZombieNautilus)
+        && mob.mob_type != MobType::Slime
+    {
         put(&mut out, "InLove", Tag::Int(mob.in_love));
         if let Some(uuid) = &mob.love_cause {
             put(&mut out, "LoveCause", uuid_tag(uuid));
         }
     }
     // ---- AbstractCubeMob ----
-    if mob.mob_type == MobType::Slime {
+    if matches!(mob.mob_type, MobType::Slime | MobType::SulfurCube) {
         put(&mut out, "Size", Tag::Int(mob.cube.size - 1));
         put(
             &mut out,
             "wasOnGround",
             Tag::Byte(i8::from(mob.cube.was_on_ground)),
         );
+    }
+    // ---- SulfurCube ----
+    if mob.mob_type == MobType::SulfurCube {
+        put(
+            &mut out,
+            "pickup_timer",
+            Tag::Int(mob.sulfur_cube.pickup_timer),
+        );
+        put(
+            &mut out,
+            "from_bucket",
+            Tag::Byte(i8::from(mob.sulfur_cube.from_bucket)),
+        );
+        put(&mut out, "fuse", Tag::Int(mob.sulfur_cube.fuse));
     }
     // ---- Skeleton / Bogged ----
     if mob.mob_type == MobType::Skeleton {
@@ -410,6 +437,12 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if super::tame::is_tamable(mob.mob_type) {
         write_tame(&mut out, mob);
     }
+    if mob.mob_type == MobType::ZombieNautilus {
+        // `VariantUtils.writeVariant`：僵尸鹦鹉螺的 `variant` 键。
+        // `VariantUtils.writeVariant`: the zombie nautilus's `variant` key.
+        let name = super::nautilus::Variant::from_id(mob.nautilus.variant).name();
+        put(&mut out, "variant", Tag::String(name.to_owned()));
+    }
     if mob.mob_type == MobType::Wolf {
         write_wolf(&mut out, mob);
     }
@@ -469,7 +502,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::Int(state.map_or(0, |state| state.trap_time)),
         );
     }
-    if mob.mob_type == MobType::Camel {
+    if mob.mob_type.is_camel() {
         // `Camel.addAdditionalSaveData`：`output.putLong("LastPoseTick", entityData.get(LAST_POSE_CHANGE_TICK))`。
         // `Camel.addAdditionalSaveData`: writes the synced pose tick as `LastPoseTick`.
         put(
@@ -702,9 +735,13 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         // `super.readAdditionalSaveData` 之前，后面读到的 `attributes` 和 `Health` 盖在它上面。
         // `AbstractCubeMob.readAdditionalSaveData`: `setSize(Size + 1, false)` runs ahead of
         // `super.readAdditionalSaveData`, so the saved `attributes` and `Health` land on top.
-        if mob.mob_type == MobType::Slime {
+        if matches!(mob.mob_type, MobType::Slime | MobType::SulfurCube) {
             let size = tag::int_or(tag, "Size", 0).saturating_add(1);
-            super::slime::set_size(me, mob, size, false);
+            if mob.mob_type == MobType::SulfurCube {
+                super::sulfur_cube::set_size(me, mob, size, false);
+            } else {
+                super::slime::set_size(me, mob, size, false);
+            }
             mob.cube.was_on_ground = tag::bool_or(tag, "wasOnGround", false);
         }
         // ---- LivingEntity.readAdditionalSaveData ----
@@ -779,7 +816,7 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
             mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
         }
-        if mob.mob_type.is_animal() {
+        if mob.mob_type.is_animal() || mob.mob_type == MobType::ZombieNautilus {
             mob.in_love = tag::int_or(tag, "InLove", 0);
             mob.love_cause = uuid_field(tag, "LoveCause");
         }
@@ -813,6 +850,20 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         if mob.mob_type == MobType::Endermite {
             mob.endermite.life = tag::int_or(tag, "Lifetime", 0);
         }
+        if mob.mob_type == MobType::SulfurCube {
+            let state = &mut mob.sulfur_cube;
+            state.pickup_timer = tag::int_or(tag, "pickup_timer", 0);
+            state.from_bucket = tag::bool_or(tag, "from_bucket", false);
+            state.fuse = tag::int_or(tag, "fuse", -1);
+            state.max_fuse = state.fuse;
+            // BODY 槽里的物品决定原型派生值；读盘时不移除任何属性修饰，
+            // 存档里已经带着它们。
+            let body = mob
+                .equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Body)
+                .clone();
+            super::sulfur_cube::collect_equipment_changes(mob, body);
+        }
         if mob.mob_type == MobType::Phantom {
             let pos = tag::int_array(tag, "anchor_pos");
             mob.phantom.anchor = (pos.len() == 3).then(|| BlockPos::new(pos[0], pos[1], pos[2]));
@@ -838,6 +889,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if super::tame::is_tamable(mob.mob_type) {
             read_tame(mob, tag);
+        }
+        if mob.mob_type == MobType::ZombieNautilus
+            && let Some(variant) =
+                tag::string_or(tag, "variant").and_then(super::nautilus::Variant::from_name)
+        {
+            mob.nautilus.variant = variant.registry_id();
         }
         if mob.mob_type == MobType::Wolf {
             read_wolf(mob, tag);
@@ -867,7 +924,7 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             state.trap_time = tag::int_or(tag, "SkeletonTrapTime", 0);
             crate::entity::mob::skeleton_horse::set_trap(mob, trap);
         }
-        if mob.mob_type == MobType::Camel {
+        if mob.mob_type.is_camel() {
             // `Camel.readAdditionalSaveData`：读 `LastPoseTick`（缺省 0），负数设成坐姿。
             // `Camel.readAdditionalSaveData`: read `LastPoseTick` (default 0), negative
             // means sitting.
