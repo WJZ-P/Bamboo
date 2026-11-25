@@ -20,6 +20,8 @@ pub mod common;
 pub mod machines;
 pub mod misc;
 pub mod plants;
+/// 试炼刷怪笼的状态机：会动的方块实体共用这一份逐刻逻辑。
+pub mod trial_spawner;
 mod weathering;
 
 use mc_bamboo_core::{BlockPos, Direction};
