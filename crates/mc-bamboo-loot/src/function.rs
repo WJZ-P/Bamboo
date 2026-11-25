@@ -10,7 +10,8 @@
 use std::sync::OnceLock;
 
 use mc_bamboo_blocks::random::RandomSource;
-use mc_bamboo_data::{items, loot};
+use mc_bamboo_data::{items, loot, registries::data_component_type as kinds};
+use mc_bamboo_protocol::components::{ComponentValue, defaults};
 use serde_json::{Map, Value, json};
 
 use crate::condition::LootCondition;
@@ -42,8 +43,6 @@ const UNSUPPORTED_FUNCTIONS: &[&str] = &[
     "minecraft:fill_player_head",
     "minecraft:copy_custom_data",
     "minecraft:set_banner_pattern",
-    "minecraft:set_random_dyes",
-    "minecraft:set_random_potion",
     "minecraft:set_fireworks",
     "minecraft:set_firework_explosion",
     "minecraft:set_book_cover",
@@ -130,6 +129,12 @@ enum FunctionBody {
     SetStewEffect(Vec<(i32, IntProvider)>),
     /// 本实现没有这个函数需要的数据。
     Unsupported(String),
+    /// `exploration_map`：找不到结构时原样退回。
+    ExplorationMap,
+    /// `set_random_dyes`：`number_of_dyes` 提供器。
+    SetRandomDyes(IntProvider),
+    /// `set_random_potion`：药水注册表 ID 的候选列表，空表示整张注册表。
+    SetRandomPotion(Option<Vec<i32>>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -370,9 +375,17 @@ impl LootFunction {
                 }
                 FunctionBody::SetStewEffect(effects)
             }
-            // 需要世界里的结构或地图数据，本实现暂时算不了。
-            "minecraft:exploration_map" => FunctionBody::Unsupported(
-                "exploration_map needs structure generation data".to_owned(),
+            // 假世界和还没生成结构的世界里 `findNearestMapStructure` 返回空，
+            // 官方原样退回输入堆；结构查询本身由调用方在世界侧做。
+            "minecraft:exploration_map" => FunctionBody::ExplorationMap,
+            "minecraft:set_random_dyes" => FunctionBody::SetRandomDyes(parse_int_provider(
+                required(map, "number_of_dyes", kind)?,
+                "number_of_dyes",
+            )?),
+            "minecraft:set_random_potion" => FunctionBody::SetRandomPotion(
+                field(map, "options")
+                    .map(|value| names::holder_set(value, Registry::Potion, "options"))
+                    .transpose()?,
             ),
             other if UNSUPPORTED_FUNCTIONS.contains(&other) => {
                 FunctionBody::Unsupported(format!("function `{other}` is not implemented"))
@@ -643,6 +656,11 @@ impl LootFunction {
                     stack.set_component(SUSPICIOUS_STEW_EFFECTS, Value::Array(list));
                 }
                 Ok(stack)
+            }
+            FunctionBody::ExplorationMap => Ok(stack),
+            FunctionBody::SetRandomDyes(number) => Ok(set_random_dyes(stack, number, context)?),
+            FunctionBody::SetRandomPotion(options) => {
+                Ok(set_random_potion(stack, options.as_deref(), context))
             }
             FunctionBody::Unsupported(message) => Err(LootError::Unsupported(message.clone())),
         }
@@ -975,6 +993,117 @@ fn weighted_random(items: &[(i32, i32)], random: &dyn RandomSource) -> Option<us
         }
     }
     None
+}
+
+/// `DyeColor.getTextureDiffuseColor`：16 种颜色的 ARGB，顺序照 `VALUES`。
+const DYE_DIFFUSE: [i32; 16] = [
+    16383998, 16351261, 13061821, 3847130, 16701501, 8439583, 15961002, 4673362, 10329495, 1481884,
+    8991416, 3949738, 8606770, 6192150, 11546150, 1908001,
+];
+
+/// `SetRandomDyesFunction.run` + `DyedItemColor.applyDyes`：先取 N 个随机颜色，
+/// 和已有的 `dyed_color` 一起按官方公式加权平均，再写回组件。
+fn set_random_dyes(
+    mut stack: LootStack,
+    number: &IntProvider,
+    context: &LootContext<'_, '_, '_>,
+) -> Result<LootStack> {
+    let count = number.get(context)?;
+    if count <= 0 {
+        return Ok(stack);
+    }
+    let diffuse = |id: usize| {
+        let rgb = DYE_DIFFUSE[id];
+        [
+            (rgb >> 16) & 0xff,
+            (rgb >> 8) & 0xff,
+            rgb & 0xff,
+            ((rgb >> 16) & 0xff).max((rgb >> 8) & 0xff).max(rgb & 0xff),
+        ]
+    };
+    let mut totals = [0_i32; 4];
+    let mut parts = 0_i32;
+    let existing = stack
+        .component("minecraft:dyed_color")
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| {
+            // `ItemStack.get(DYED_COLOR)` 会读到物品的默认组件。
+            match defaults::resolve(
+                stack.item,
+                &mc_bamboo_protocol::components::ComponentPatch::new(),
+                kinds::DYED_COLOR,
+            ) {
+                Some(ComponentValue::DyedColor(rgb)) => *rgb as i64,
+                _ => 0,
+            }
+        });
+    if existing != 0 {
+        let rgb = existing as i32;
+        let parts_of = |rgb: i32| [(rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff];
+        let channels = parts_of(rgb);
+        for (index, value) in channels.iter().enumerate() {
+            totals[index] += *value;
+        }
+        totals[3] += channels.iter().copied().max().unwrap_or(0);
+        parts += 1;
+    }
+    for _ in 0..count {
+        let index = context.random().next_int(DYE_DIFFUSE.len() as i32);
+        if index < 0 || index as usize >= DYE_DIFFUSE.len() {
+            return Err(LootError::Invalid("dye index out of range".to_owned()));
+        }
+        let channels = diffuse(index as usize);
+        for (total, value) in totals.iter_mut().zip(channels) {
+            *total += value;
+        }
+        parts += 1;
+    }
+    let average = totals.map(|total| total / parts);
+    let brightest = average[3] as f32;
+    let max = average[..3].iter().copied().max().unwrap_or(0) as f32;
+    let mut channels = [0_i32; 3];
+    for (index, total) in average[..3].iter().enumerate() {
+        channels[index] = if max > 0.0 {
+            (*total as f32 * brightest / max) as i32
+        } else {
+            0
+        };
+    }
+    let rgb = (channels[0] << 16) | (channels[1] << 8) | channels[2];
+    stack.set_component("minecraft:dyed_color", Value::from(rgb));
+    Ok(stack)
+}
+
+/// `SetRandomPotionFunction.run`：从候选药水（或整个注册表）里随机取一个写进
+/// `potion_contents`，其余字段保留。
+fn set_random_potion(
+    mut stack: LootStack,
+    options: Option<&[i32]>,
+    context: &LootContext<'_, '_, '_>,
+) -> LootStack {
+    let count = options.map_or_else(
+        || mc_bamboo_data::registries::potion::NAMES.len() as i32,
+        |ids| ids.len() as i32,
+    );
+    if count <= 0 {
+        return stack;
+    }
+    let index = context.random().next_int(count);
+    if index < 0 || index as usize >= count as usize {
+        return stack;
+    }
+    let id = options.map_or(index, |ids| ids[index as usize]);
+    let Some(name) = names::potion_name(id) else {
+        return stack;
+    };
+    let mut contents = stack
+        .component(POTION_CONTENTS)
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    contents.insert("potion".to_owned(), Value::from(name));
+    stack.set_component(POTION_CONTENTS, Value::Object(contents));
+    stack
 }
 
 /// `SmeltItemFunction.run`：按输入找熔炉配方，结果的数量按输入数量放大。
