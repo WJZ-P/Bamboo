@@ -357,13 +357,17 @@ pub(super) fn interact(
     Some(MobInteraction::pass())
 }
 
-/// `Allay.wantsToPickUp`：主手同种（药水成分也要一样）、mobGriefing 开、背包放得下。
+/// `Allay.wantsToPickUp`：手上必须有「模板」物品，mobGriefing 开、背包放得下、
+/// 且掉落物和主手同种（药水成分也一样）才捡。
 pub(super) fn wants_to_pick_up(mob: &Mob, stack: &ItemStack, rules: &BlockGameRules) -> bool {
+    let held = mob.equipment.get(EquipmentSlot::MainHand);
+    if held.is_empty() {
+        return false;
+    }
     if !rules.mob_griefing || stack.is_empty() {
         return false;
     }
-    let held = mob.equipment.get(EquipmentSlot::MainHand);
-    held.is_empty() || !allay_considers_item_equal(held, stack) || !mob.allay.can_add_item(stack)
+    mob.allay.can_add_item(stack) && allay_considers_item_equal(held, stack)
 }
 
 /// `Allay.allayConsidersItemEqual`：`ItemStack.isSameItem` 且药水成分相同。

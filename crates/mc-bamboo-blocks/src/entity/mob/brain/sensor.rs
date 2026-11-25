@@ -634,11 +634,15 @@ fn sense_players(cx: &mut Cx) {
         MemoryType::NearestVisiblePlayer,
         players.first().map(|view| MemoryValue::Entity(view.uid)),
     );
-    // `isEntityAttackable`：`forCombat` 多一条 `canAttack`——和平难度不打玩家，创造玩家不算敌人。
-    // `isEntityAttackable`: `forCombat` adds `canAttack` — no players on peaceful, and
-    // creative players are not enemies.
+    // `isEntityAttackable`：`forCombat` 多一条 `canAttack`——和平难度不打玩家，创造玩家
+    // 不算敌人——还有一条 `!isAlliedTo`。悦灵把喜欢的玩家当盟友
+    // （`Allay.considersEntityAsAlly` → `isLikedPlayer`），所以也要排除。
+    // `isEntityAttackable`: `forCombat` adds `canAttack` — no players on peaceful,
+    // creative players are not enemies — and `!isAlliedTo`. The allay treats its
+    // liked player as an ally (`Allay.considersEntityAsAlly` → `isLikedPlayer`), so
+    // that player is excluded too.
     let peaceful = cx.ctx.blocks().difficulty() == 0;
-    players.retain(|view| !peaceful && !view.creative);
+    players.retain(|view| !peaceful && !view.creative && !is_liked_player(cx, view));
     cx.memories.set(
         MemoryType::NearestVisibleAttackablePlayers,
         MemoryValue::Entities(ids(&players)),
@@ -647,6 +651,26 @@ fn sense_players(cx: &mut Cx) {
         MemoryType::NearestVisibleAttackablePlayer,
         players.first().map(|view| MemoryValue::Entity(view.uid)),
     );
+}
+
+/// `Allay.considersEntityAsAlly` → `isLikedPlayer`：这个玩家是不是悦灵喜欢的那位。
+///
+/// `Allay.considersEntityAsAlly` → `isLikedPlayer`: whether this player is the
+/// allay's liked player.
+fn is_liked_player(cx: &Cx, view: &LivingView) -> bool {
+    if cx.mob.mob_type != MobType::Allay {
+        return false;
+    }
+    let Some(uuid) = cx.memories.uuid(MemoryType::LikedPlayer) else {
+        return false;
+    };
+    let mut liked = false;
+    cx.ctx.blocks().for_each_player(&mut |player| {
+        if player.uid == view.uid && player.uuid == Some(uuid) {
+            liked = true;
+        }
+    });
+    liked
 }
 
 /// `EntityTypes.ITEM` 的眼高。

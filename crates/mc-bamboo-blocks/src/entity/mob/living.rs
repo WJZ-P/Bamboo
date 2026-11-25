@@ -2201,8 +2201,8 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
         return;
     }
     if mob.mob_type == super::MobType::Allay {
-        // `Allay` 构造函数：`FlyingMoveControl(this, 20, false)`。
-        super::parrot::flying_move_control_tick(me, mob, 20.0, false);
+        // `Allay` 构造函数：`FlyingMoveControl(this, 20, true)`。
+        super::parrot::flying_move_control_tick(me, mob, 20.0, true);
         return;
     }
     if mob.mob_type == super::MobType::Bee {

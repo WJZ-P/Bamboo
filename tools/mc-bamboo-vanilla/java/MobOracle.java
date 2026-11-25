@@ -14091,7 +14091,7 @@ public final class MobOracle {
                     }
                     List<Entity> snapshot = new ArrayList<>(world.tracked);
                     for (Entity entity : snapshot) {
-                        if (entity.isRemoved()) continue;
+                        if (entity.isRemoved() || entity instanceof ServerPlayer) continue;
                         entity.commonTick();
                         entity.tick();
                     }

@@ -191,24 +191,30 @@ fn player_view(uid: i32, held: i32) -> mc_bamboo_blocks::entity::ctx::PlayerView
 }
 
 /// 场景开始时的悦灵：与官方夹具同位置、随机源、UUID，传感器延迟定成 1，洗牌种子固定。
+/// 先走 `spawn_entity` 让动态振动监听者登记进监听者表（官方 `setRandom` 之前构造时
+/// 就登记了），再把构造后被 `prepare` 重取的随机源 / 朝向 / UUID / 大脑洗牌覆盖成
+/// 官方 `setRandom(allay, 5)` 之后的终态。
 fn spawn_allay(world: &mut mc_bamboo_blocks::World<'_>, case: &AllayCase) -> i32 {
-    let mut entity = Entity::by_mob_type(MobType::Allay, Vec3::new(0.5, 64.5, 0.5));
-    entity.with_mob(|me, mob| {
-        me.random = JavaRandom::new(case.mob_seed);
-        me.y_rot = 0.0;
-        mob.uuid = ((0_u128) << 64 | 1).to_be_bytes();
-        mob.x_rot = 0.0;
-        mob.y_head_rot = 0.0;
-        mob.y_body_rot = 0.0;
-        mob.y_rot_o = 0.0;
-        if let Some(brain) = mob.brain.as_mut() {
-            for sensor in &mut brain.sensors {
-                sensor.time_to_tick = 1;
+    let entity = Entity::by_mob_type(MobType::Allay, Vec3::new(0.5, 64.5, 0.5));
+    let id = world.spawn_entity(entity);
+    world.with_entity_mut(id, &mut |entity| {
+        entity.random = JavaRandom::from_state(case.mob_seed);
+        entity.y_rot = 0.0;
+        entity.with_mob(|_, mob| {
+            mob.uuid = ((0_u128) << 64 | 1).to_be_bytes();
+            mob.x_rot = 0.0;
+            mob.y_head_rot = 0.0;
+            mob.y_body_rot = 0.0;
+            mob.y_rot_o = 0.0;
+            if let Some(brain) = mob.brain.as_mut() {
+                for sensor in &mut brain.sensors {
+                    sensor.time_to_tick = 1;
+                }
+                brain.seed_shuffles(case.mob_seed);
             }
-            brain.seed_shuffles(case.mob_seed);
-        }
+        });
     });
-    world.spawn_entity(entity)
+    id
 }
 
 fn center(pos: BlockPos) -> Vec3 {
@@ -256,6 +262,19 @@ impl Report {
             let tick = index as i32;
             if tick > 0 {
                 ticks.set_time(case.start_time + i64::from(tick));
+                // 掉落物按官方夹具固定成 `FIRST_ID + 10 + tick`，直接原样进表，
+                // 不走 `spawn_entity`（那会重新分配 ID）。
+                if let Some((at, pos, count)) = script.drop
+                    && at == tick
+                {
+                    let mut drop = Entity::ground_item_with_delta(
+                        pos,
+                        ItemStack::new(items::WHEAT_SEEDS, count),
+                        Vec3::default(),
+                    );
+                    drop.id = case.first_id + 10 + tick;
+                    level.entities.insert_row_preserving(drop.split());
+                }
                 let mut world = World::new(&mut level, &mut ticks);
                 if let Some((at, pos)) = script.note
                     && at == tick
@@ -307,17 +326,6 @@ impl Report {
                         player_held = stack.count;
                     }
                     player_main_hand = held;
-                }
-                if let Some((at, pos, count)) = script.drop
-                    && at == tick
-                {
-                    let mut drop = Entity::ground_item_with_delta(
-                        pos,
-                        ItemStack::new(items::WHEAT_SEEDS, count),
-                        Vec3::default(),
-                    );
-                    drop.id = case.first_id + 10 + tick;
-                    world.spawn_entity(drop);
                 }
                 world.tick_entities();
             }
