@@ -417,6 +417,12 @@ struct Case {
     /// 每刻 0 号玩家自己收到的那几种包（受伤动画、战斗进出、死亡界面、血量）。
     #[serde(default)]
     zombie_player_packets: Option<Vec<Vec<String>>>,
+    /// TNT 场景：{x, y, z} 方块坐标，TNT 生成在方块底心。
+    #[serde(default)]
+    tnt: Option<[i32; 3]>,
+    /// TNT 场景：逐刻 [x,y,z 的 f64 位, fuse]；爆炸后那刻起是 null。
+    #[serde(default)]
+    tnt_steps: Option<Vec<Option<[i64; 4]>>>,
     /// S2 玩家效果场景的规则与动作。
     #[serde(default)]
     effect_scene: Option<EffectScene>,
@@ -864,6 +870,7 @@ fn zombie_style(name: &str) -> bool {
         "spider_",
         "cave_spider_",
         "enderman_",
+        "tnt_blast_",
         "slime_",
         "witch_drink_",
         "pillager_",
@@ -997,6 +1004,8 @@ struct MobLevel {
     short_hunger: bool,
     /// 改坏确认 `zombie_bed`：床的怪物检查一律放行。
     ignore_bed_monsters: bool,
+    /// 改坏确认爆炸：位 0 跳过 `hurtEntities`，位 1 丢掉爆炸中心的 0.0625 抬升。
+    explosion_break: u8,
 }
 
 impl MobLevel {
@@ -1067,6 +1076,10 @@ impl EntityTables for MobLevel {
 }
 
 impl Level for MobLevel {
+    fn explosion_break(&self) -> u8 {
+        self.explosion_break
+    }
+
     fn block_state(&self, pos: BlockPos) -> BlockState {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
             return BlockState(mc_bamboo_data::blocks::VOID_AIR);
@@ -2098,6 +2111,11 @@ impl Report {
             ignore_bed_monsters: matches!(break_test, Some("zombie_bed")),
             short_hunger: matches!(break_test, Some("zombie_hunger")),
             wrong_was_hurt: matches!(break_test, Some("zombie_was_hurt")),
+            explosion_break: match break_test {
+                Some("explode_tnt_hurt") => 1,
+                Some("explode_tnt_center") => 2,
+                _ => 0,
+            },
         };
         for &[x, y, z, state] in &case.blocks {
             level
@@ -2116,6 +2134,8 @@ impl Report {
         let mut ticks = BlockTicks::new();
         ticks.set_time(case.start_time);
         let mut ids = Vec::new();
+        // TNT 场景：额外实体的 ID，排在所有牛之后（和官方 setId(FIRST_ID + mobs.size()) 一致）。
+        let mut tnt_id: Option<i32> = None;
         let mut tracking = EntityTracking::default();
         let sound_source = mc_bamboo_blocks::LegacyRandom::new(12345);
         {
@@ -2458,6 +2478,14 @@ impl Report {
             {
                 world.start_riding_with_limit(passenger, vehicle, 2);
             }
+            // TNT 场景：照官方 `PrimedTnt(level, x+0.5, y, z+0.5, null)` 构造函数起一个
+            // 点燃的 TNT。构造时从 `level.random` 取一次 `next_double` 算朝向，位次和官方
+            // 一致，后面射线/洗牌的世界随机源仍对齐。
+            if let Some([x, y, z]) = case.tnt {
+                let position = Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5);
+                let angle = world.random().next_double();
+                tnt_id = Some(world.spawn_entity(Entity::primed_tnt(position, angle)));
+            }
         }
         let Some(first) = case.steps.first() else {
             self.mismatch(format!("{}: no steps", case.name));
@@ -2477,6 +2505,7 @@ impl Report {
         }
         self.compare(&case.name, 0, &ours, first);
         self.compare_zombie_player(case, &mut level, 0);
+        self.compare_tnt(case, &level, 0, tnt_id);
         // 场景开始时的牛也算「刚生成」，但它们在 tick 0 已经建过同步状态，
         // 不该出现在后面逐刻的新实体比对里。
         let _ = level.entities.take_spawn_snapshots();
@@ -2879,6 +2908,7 @@ impl Report {
             self.compare(&case.name, index, &ours, expected);
             self.compare_blocks(case, &level, index);
             self.compare_zombie_player(case, &mut level, index);
+            self.compare_tnt(case, &level, index, tnt_id);
             if let Some(expected) = case.level_events.as_ref().and_then(|all| all.get(index)) {
                 let ours: Vec<[i32; 6]> = tick_effects
                     .iter()
@@ -2987,6 +3017,31 @@ impl Report {
                     case.name
                 ));
             }
+        }
+    }
+
+    /// TNT 场景：逐刻比 TNT 的位置（f64 位）和引信；爆炸那刻实体离表，官方记 null。
+    fn compare_tnt(&mut self, case: &Case, level: &MobLevel, index: usize, tnt_id: Option<i32>) {
+        let Some(expected) = case.tnt_steps.as_ref().and_then(|all| all.get(index)) else {
+            return;
+        };
+        let ours: Option<[i64; 4]> =
+            tnt_id
+                .and_then(|id| level.entities.get(id))
+                .and_then(|entity| match &entity.kind {
+                    EntityKind::Tnt(data) => Some([
+                        entity.position.x.to_bits() as i64,
+                        entity.position.y.to_bits() as i64,
+                        entity.position.z.to_bits() as i64,
+                        i64::from(data.fuse),
+                    ]),
+                    _ => None,
+                });
+        if &ours != expected && self.mismatches.len() < self.show {
+            self.mismatches.push(format!(
+                "{} tick {index} tnt: official {expected:?} bamboo {ours:?}",
+                case.name
+            ));
         }
     }
 

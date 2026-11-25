@@ -1177,7 +1177,15 @@ WebView2 的渲染进程不算在内。
   点燃的 TNT 播放 `entity.tnt.primed` 并生成实体。它不走传送门，也不被水推动。爆炸会打到地上的物品，
   也按官方 `hurtEntities` 伤害生物和玩家（伤害类型 `explosion`，生物按爆炸击退抗性被推开，玩家那份击退
   向量放进 `ClientboundExplodePacket`），并照 `ServerLevel.explode` 把爆炸包发给 64 格内的玩家；
-  包里的爆炸声和粒子走这个包，不在 `playSound`。
+  包里的爆炸声和粒子走这个包，不在 `playSound`。爆炸中心是 `PrimedTnt` 的 `getY(0.0625)`
+  （实体高 0.98，抬升 0.06125），强度 4，伤害来源是 `explosion`（TNT 无 owner，`direct` 指 TNT、
+  `causing` 为空）。对拍：`mob-oracle --only tnt_blast` 三个难度逐刻比 TNT 从 y=70 落到基岩地面的
+  位置、引信（80→0）、爆炸那刻牛的血量和击退速度、玩家包里的击退向量和方块数，0 不一致；
+  `--break-self-test explode_tnt_hurt`（不调 `hurtEntities`）和 `explode_tnt_center`（丢 0.0625 抬升）
+  两处都报不一致。**已知限制**：被 TNT 直接炸死的玩家，死亡消息 official 会在 `with` 里带上
+  第二个来源实体（`entity.minecraft.tnt` + `show_entity` 的 UUID），Bamboo 的 TNT 爆炸没把
+  TNT 实体传进死亡消息，那个 UUID 也不稳定，所以这一项没有对拍；场景里玩家站得够远不会死。
+  TNT 矿车 Bamboo 没有这个实体（实体容器整体没移植），见下面实体容器的限制。
   TNT 爆炸在换成空气之前按 `getDrops` 收集掉落，整圈方块处理完再 `popResource`；`tntExplosionDropDecay` 默认是假，
   所以不传爆炸半径，`explosion_decay` 不取数。TNT 自己的 `dropFromExplosion` 是假，不掉 TNT 物品。
   容器被炸开时，`dropContents` 仍在这一圈里、在后面 TNT 的引信之前取 `level.random`。不调用 `spawnAfterBreak`：
@@ -1313,7 +1321,7 @@ WebView2 的渲染进程不算在内。
   红石缓存默认关，打开后按确定性工作量门槛只在划算的触发点生效。
 - 命令已经接上：`/gamemode`、`/gamerule`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`、`/scoreboard`、`/team`、`/bossbar`、`/tellraw`、`/title`、`/playsound`、`/particle`（这七个要等级 2）；世界设置类还接上了 `/difficulty`、`/defaultgamemode`、`/seed`、`/setworldspawn`、`/spawnpoint`、`/clone`、`/stopsound`、`/random`、`/enchant`、`/loot`、`/weather`；服务器管理类还接上了 `/op`、`/deop`、`/ban`、`/ban-ip`、`/banlist`、`/pardon`、`/pardon-ip`、`/whitelist`、`/stop`、`/setidletimeout`、`/transfer`、`/version`（权限见下一段）。
   语法、权限和提示按官方 Brigadier。启动时从服务器目录读 `ops.json`（命令行版的工作目录或 `--server-dir` 指定的目录，桌面版是 APP 数据目录的 `server/`），名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。`/op`、`/deop` 可以在运行中改这份名单。
-  26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照，并按官方 `GameRuleMap.CODEC` 写进 `data/minecraft/game_rules.dat`，启动时读回。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`entity_drops` 会挡住下落方块 `spawnAtLocation`，`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius`（缺省 10）按官方 `PlayerSpawnFinder.findSpawn` 用：新玩家进服和无床 / 锚重生都在世界出生点周围散布、找能站的列；冒险模式直接走 `fixupSpawnHeight`，超平坦世界也散布。`/spawnpoint` 设的强制个人点在两格都能重生时直接落在 `pos + (0.5, 0.1, 0.5)`，否则回退到世界出生点并发 `NO_RESPAWN_BLOCK_AVAILABLE`。世界出生点由 `/setworldspawn` 改；老玩家进服照官方 `SavedPosition` 用存档里的位置。床和重生锚的 `findStandUpPosition` / 充能扣减还没做。`/weather` 只写天气状态和回成功提示。世界每 tick 按官方 `ServerLevel.advanceWeatherCycle` 倒计时、自然开始/结束下雨和打雷（`advance_weather` 规则为假时冻结）、每刻把雨和雷暴强度渐变 0.01，并在强度变化、`isRaining()` 翻转时广播 `RAIN_LEVEL_CHANGE` / `THUNDER_LEVEL_CHANGE` / `START_RAINING` / `STOP_RAINING`；进服时按 `PlayerList.sendLevelInfo` 补发当前的渐变强度。战利品表的 `weather_check` 条件也读这份天气。夜里或雷暴天右键完整的床会按官方 `ServerPlayer.startSleepInBed` 检查天色、距离、遮挡和
+  26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照，并按官方 `GameRuleMap.CODEC` 写进 `data/minecraft/game_rules.dat`，启动时读回。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`entity_drops` 会挡住下落方块 `spawnAtLocation`，`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius`（缺省 10）按官方 `PlayerSpawnFinder.findSpawn` 用：新玩家进服和无床 / 锚重生都在世界出生点周围散布、找能站的列；冒险模式直接走 `fixupSpawnHeight`，超平坦世界也散布。`/spawnpoint` 设的强制个人点在两格都能重生时直接落在 `pos + (0.5, 0.1, 0.5)`，否则回退到世界出生点并发 `NO_RESPAWN_BLOCK_AVAILABLE`。世界出生点由 `/setworldspawn` 改；老玩家进服照官方 `SavedPosition` 用存档里的位置。主世界里对充能的重生锚空手右键会照 `RespawnAnchorBlock.explode` 真的爆炸：强度 5、带火、伤害类型 `bad_respawn_point`、`BLOCK` 交互（`block_explosion_drop_decay`），近水时按 `RespawnAnchorBlock$1` 把被移除那格的爆炸抗性换成水的抗性，放火逐格按 1/3 概率取 `level.random`。单测覆盖了爆炸、方块破坏和近水判定；**已知限制**：这条爆炸没有像 TNT 那样进 `mob-oracle` / 方块 oracle 的逐刻字节对拍（放火位置、方块破坏和世界随机源没有逐位比），重生锚在下界设重生点的 `findStandUpPosition` / 充能扣减也还没做（Bamboo 只有主世界，充能锚空手右键必爆）。`/weather` 只写天气状态和回成功提示。世界每 tick 按官方 `ServerLevel.advanceWeatherCycle` 倒计时、自然开始/结束下雨和打雷（`advance_weather` 规则为假时冻结）、每刻把雨和雷暴强度渐变 0.01，并在强度变化、`isRaining()` 翻转时广播 `RAIN_LEVEL_CHANGE` / `THUNDER_LEVEL_CHANGE` / `START_RAINING` / `STOP_RAINING`；进服时按 `PlayerList.sendLevelInfo` 补发当前的渐变强度。战利品表的 `weather_check` 条件也读这份天气。夜里或雷暴天右键完整的床会按官方 `ServerPlayer.startSleepInBed` 检查天色、距离、遮挡和
   附近怪物，成功后置 `occupied`、设重生点、换成睡姿并发位置 / 元数据包；失败发对应的快捷栏提示。
   `ServerLevel` 的 `SleepStatus` 按 `players_sleeping_percentage` 统计熟睡人数；主控在每刻开头、
   天气之后、岛开跑之前用上一刻全部岛交回的计数决定跳到 `minecraft:wake_up_from_sleep` 时间标记、

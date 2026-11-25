@@ -788,6 +788,9 @@ public final class MobOracle {
         int seaLevel = -63;
         /** 僵尸场景：玩家走真实的受伤链路，逐刻比玩家状态和玩家自己收到的包。 */
         boolean realPlayers;
+        /** TNT 场景：{x, y, z} 方块坐标，TNT 生成在方块底心；null 表示没有 TNT。 */
+        int[] tntBlock;
+        long tntSeed;
         /** 僵尸场景：主世界时钟的起始刻；`>= 0` 时天色、`MONSTERS_BURN`、月相都按真实时间线逐刻算。 */
         long clockStart = -1;
         /** 真实时间模式下的雨强（`getRainLevel`），雷暴恒 0。 */
@@ -997,6 +1000,13 @@ public final class MobOracle {
             players.add(new double[] {x, y, z});
             playerItems.add(item);
             lootingLevels.add(looting);
+            return this;
+        }
+
+        /** TNT 场景：在方块坐标 (x, y, z) 放一个点燃的 TNT，底心起爆。 */
+        Scene tnt(int x, int y, int z, long seed) {
+            tntBlock = new int[] {x, y, z};
+            tntSeed = seed;
             return this;
         }
 
@@ -3121,6 +3131,28 @@ public final class MobOracle {
             }
         }
 
+        /** TNT：点燃到爆炸的 80 刻逐刻比位置/引信，爆炸那刻比牛的掉血和击退、
+         * 玩家包里的击退向量和死亡消息、被炸的方块数。 */
+        static void tntBlastScenes(List<Scene> scenes) {
+            BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
+            for (int difficulty : new int[] {1, 2, 3}) {
+                Scene blast = new Scene("tnt_blast_player_" + difficulty).ticks(82).difficulty(difficulty);
+                blast.monstersBurn = false;
+                blast.realPlayers = true;
+                // 基岩地面炸不动：射线算出的方块数、连锁和世界随机源两边一样。
+                blast.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                // 一头牛和一个真实玩家都在爆炸范围里。玩家站得够远，三档难度都不死：
+                // 逐刻比血量和包里的击退向量，不掺死亡消息（TNT 死亡消息里的来源实体
+                // UUID 另见 README 限制）。
+                blast.mob(0, 3.5, 64.0, 4.5, 0.0F, 70L + difficulty, 0);
+                blast.player(7.5, 64.0, 0.5, Items.AIR);
+                // TNT 从 (0,70,0) 落下：比 80 刻里的下落和水平移动，爆炸中心是
+                // `getY(0.0625)`，强度 4，伤害来源 `explosion`（无 owner 的 TNT）。
+                blast.tnt(0, 70, 0, 80L + difficulty);
+                scenes.add(blast);
+            }
+        }
+
         /** 末影人：注视激怒、白天传送、淋雨、搬方块、躲箭。 */
         static void endermanScenes(List<Scene> scenes) {
             BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
@@ -3612,6 +3644,7 @@ public final class MobOracle {
             farmScenes(scenes);
             miscScenes(scenes);
             creeperScenes(scenes);
+            tntBlastScenes(scenes);
             spiderScenes(scenes);
             ridingScenes(scenes);
             endermanScenes(scenes);
@@ -4905,7 +4938,7 @@ public final class MobOracle {
                 || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")
                 || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
                 || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")
-                || scene.name.startsWith("pillager_")) {
+                || scene.name.startsWith("tnt_blast_") || scene.name.startsWith("pillager_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -15180,6 +15213,16 @@ public final class MobOracle {
                         mobs.get(scene.rideVehicle), false, false)) {
             throw new IllegalStateException("Second mob rider could not mount in " + scene.name);
         }
+        // TNT 场景：额外实体。构造时从 `level.random` 取朝向（和 Bamboo `spawn_tnt` 同一个源）。
+        net.minecraft.world.entity.item.PrimedTnt tntEntity = null;
+        if (scene.tntBlock != null) {
+            tntEntity = new net.minecraft.world.entity.item.PrimedTnt(level,
+                    scene.tntBlock[0] + 0.5, scene.tntBlock[1], scene.tntBlock[2] + 0.5, null);
+            // ID 排在所有生物之后，和 Bamboo `spawn_tnt` 从实体表发号一致。
+            tntEntity.setId(FIRST_ID + mobs.size());
+            setRandom(tntEntity, scene.tntSeed);
+            level.tracked.add(tntEntity);
+        }
         StringBuilder line = new StringBuilder(1 << 18);
         line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
         line.append(",\"firstId\":").append(FIRST_ID);
@@ -15270,6 +15313,9 @@ public final class MobOracle {
         line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(
                 scene.realPlayers ? scene.playerHealth : 20.0F));
         line.append(",\"realPlayers\":").append(scene.realPlayers);
+        line.append(",\"tnt\":").append(scene.tntBlock == null ? "null"
+                : "[" + scene.tntBlock[0] + "," + scene.tntBlock[1] + "," + scene.tntBlock[2] + "]");
+        line.append(",\"tntSeed\":").append(scene.tntSeed);
         line.append(",\"clockStart\":").append(scene.clockStart);
         line.append(",\"sleepTick\":").append(scene.sleepTick);
         line.append(",\"playerCreative\":").append(scene.playerCreative);
@@ -15293,6 +15339,14 @@ public final class MobOracle {
         }
         line.append("],\"interactions\":null");
         line.append(",\"packets\":null,\"syncFlags\":null,\"spawns\":null,\"life\":null,\"spawnResult\":null");
+        // TNT 场景：逐刻记 TNT 的位置和引信。
+        StringBuilder tntSteps = new StringBuilder();
+        if (tntEntity != null) {
+            tntSteps.append('[').append(Double.doubleToRawLongBits(tntEntity.getX()))
+                    .append(',').append(Double.doubleToRawLongBits(tntEntity.getY()))
+                    .append(',').append(Double.doubleToRawLongBits(tntEntity.getZ()))
+                    .append(',').append(tntEntity.getFuse()).append(']');
+        }
         line.append(",\"steps\":[");
         if (scene.name.startsWith("zombie_inhabited_")) {
             incrementInhabitedTime(level, players);
@@ -15404,6 +15458,12 @@ public final class MobOracle {
                     tickMobRiders(mob);
                 }
             }
+            // TNT 场景：额外实体按 ID 排在生物之后，每刻自己 tick（重力、移动、引信、
+            // 归零时 `explode`，发 EXPLODE 包、伤生物和玩家、破坏方块）。官方的
+            // `PrimedTnt.tick` 也不调 `commonTick`。
+            if (tntEntity != null && !tntEntity.isRemoved()) {
+                tntEntity.tick();
+            }
             if (slimeScene) {
                 // 分裂出来的小史莱姆：记下数量、位置、朝向、大小和血量就丢掉，不让它们继续 tick
                 // （官方构造函数的随机源不带种子）。
@@ -15445,6 +15505,18 @@ public final class MobOracle {
                         .append(',').append(event[5]).append(']');
             }
             worldEvents.clear();
+            // TNT 场景：这一刻 tick 完记 TNT 的位置和引信；爆炸那一刻实体已 discard，记 null。
+            if (tntEntity != null) {
+                tntSteps.append(',');
+                if (tntEntity.isRemoved()) {
+                    tntSteps.append("null");
+                } else {
+                    tntSteps.append('[').append(Double.doubleToRawLongBits(tntEntity.getX()))
+                            .append(',').append(Double.doubleToRawLongBits(tntEntity.getY()))
+                            .append(',').append(Double.doubleToRawLongBits(tntEntity.getZ()))
+                            .append(',').append(tntEntity.getFuse()).append(']');
+                }
+            }
             line.append(',').append(zombieStepJson(mobs, players, level));
             if (scene.realPlayers) {
                 zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
@@ -15519,6 +15591,9 @@ public final class MobOracle {
                 && !mobs.getFirst().hasEffect(net.minecraft.world.effect.MobEffects.WATER_BREATHING)) {
             throw new IllegalStateException("water scene must drink water breathing");
         }
+        if (tntEntity != null && !tntEntity.isRemoved()) {
+            throw new IllegalStateException(scene.name + " TNT never exploded (fuse 80 not reached)");
+        }
         if (scene.name.equals("witch_drink_speed")
                 && !mobs.getFirst().hasEffect(net.minecraft.world.effect.MobEffects.SPEED)) {
             throw new IllegalStateException("distant target scene must drink swiftness");
@@ -15532,6 +15607,9 @@ public final class MobOracle {
         if (scene.realPlayers) {
             line.append(",\"zombiePlayerStates\":").append(playerStates).append(']');
             line.append(",\"zombiePlayerPackets\":").append(playerPackets).append(']');
+        }
+        if (tntEntity != null) {
+            line.append(",\"tntSteps\":[").append(tntSteps).append(']');
         }
         line.append("}\n");
         out.write(line.toString());

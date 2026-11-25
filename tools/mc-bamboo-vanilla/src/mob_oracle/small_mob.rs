@@ -84,6 +84,7 @@ impl SmallMobCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
         }
     }
 }
@@ -430,6 +431,7 @@ impl Report {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
         };
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);

@@ -78,6 +78,7 @@ impl FishCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
             natural_spawn: None,
             biome: None,
         }

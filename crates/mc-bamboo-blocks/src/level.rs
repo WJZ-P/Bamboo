@@ -932,6 +932,15 @@ pub trait Level: LevelSideState + LevelEntities {
         true
     }
 
+    /// 爆炸对拍的改坏确认钩子：正式世界恒为 0。位 0 让 `explode_tnt` 跳过
+    /// `hurtEntities`，位 1 让它丢掉爆炸中心的 `getY(0.0625)` 抬升。
+    ///
+    /// Oracle break-test hook for explosions; real levels always return 0. Bit 0 makes
+    /// `explode_tnt` skip `hurtEntities`; bit 1 drops the `getY(0.0625)` centre lift.
+    fn explosion_break(&self) -> u8 {
+        0
+    }
+
     /// 这一格的方块实体这一刻要不要跑。默认要跑。
     ///
     /// 方块 oracle 的假世界只登记漏斗和移动中的活塞，熔炉和酿造台不跑。

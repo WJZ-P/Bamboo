@@ -104,6 +104,7 @@ impl BeeReleaseCase {
             players: (0..self.players).map(player).collect(),
             game: None,
             wrong_was_hurt: false,
+            explosion_break: 0,
             inhabited: HashMap::new(),
             mob_teams: HashMap::new(),
             short_hunger: false,

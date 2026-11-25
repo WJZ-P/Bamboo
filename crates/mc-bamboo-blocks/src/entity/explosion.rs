@@ -53,6 +53,14 @@ impl World<'_> {
     /// TNT entity id; the damage source is `explosion` with the TNT as `direct` and no
     /// `causing` entity (TNT ownership is not modelled).
     pub fn explode_tnt(&mut self, center: Vec3, radius: f32, source: EntityUid) {
+        // 对拍的改坏确认钩子，正式世界恒为 0（`Level::explosion_break`）。
+        let brk = self.level().explosion_break();
+        // 位 1：丢掉 `PrimedTnt.getY(0.0625)` 的抬升（TNT 高 0.98）。
+        let center = if brk & 2 != 0 {
+            Vec3::new(center.x, center.y - f64::from(0.98_f32) * 0.0625, center.z)
+        } else {
+            center
+        };
         let mut broken = self.calculate_exploded_positions(center, radius, None);
         let block_count = broken.len() as i32;
         // `hurtEntities` 在打乱方块之前，而且不取 `level.random`。
@@ -61,7 +69,12 @@ impl World<'_> {
         let mut damage = DamageSource::environment(DamageKind::Explosion);
         damage.direct = Some(source);
         damage.position = Some(center);
-        let hit_players = hurt_living_by_explosion(self, None, damage, center, radius);
+        // 位 0：跳过 `hurtEntities`，牛不掉血、玩家包里没有击退向量。
+        let hit_players = if brk & 1 != 0 {
+            Vec::new()
+        } else {
+            hurt_living_by_explosion(self, None, damage, center, radius)
+        };
         self.interact_with_blocks(&mut broken, None);
         self.push_effect(Effect::Explode {
             center,
