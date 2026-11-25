@@ -47,7 +47,12 @@ fn has_controlling_passenger(mob: &Mob, ctx: &dyn EntityCtx) -> bool {
         return true;
     }
     ctx.other(first).is_some_and(|public| match &public.kind {
-        KindPublic::Mob(rider) => rider.mob_type != super::MobType::Slime,
+        // `#non_controlling_rider` 里建模的是史莱姆和硫磺方块怪（岩浆怪未建模）。
+        // The modelled #non_controlling_rider members are slime and sulfur cube.
+        KindPublic::Mob(rider) => !matches!(
+            rider.mob_type,
+            super::MobType::Slime | super::MobType::SulfurCube
+        ),
         _ => false,
     })
 }
