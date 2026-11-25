@@ -840,6 +840,9 @@ pub(super) fn check_spawn_rules(
                 && valid_mob_spawn_block(world, kind, pos)
                 && world.level().can_see_sky(pos)
         }
+        // 监守者不在任何群系刷怪表里，也不登记 `SpawnPlacements`：只由尖啸体召唤。
+        // Wardens appear in no biome spawn table and have no `SpawnPlacements` entry.
+        MobType::Warden => true,
         // 村民不在任何群系刷怪表里，只由结构 / 命令 / 刷怪蛋生成。
         // Villagers are in no biome spawn table; structures, commands and eggs make them.
         MobType::Villager => true,

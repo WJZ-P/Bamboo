@@ -96,6 +96,7 @@ pub(crate) mod timing;
 pub mod turtle;
 pub mod villager;
 pub mod villager_ai;
+pub mod warden;
 mod water;
 pub mod wild_spawn;
 pub mod witch;
@@ -228,13 +229,17 @@ pub enum MobType {
     ///
     /// The `ZombieNautilus`.
     ZombieNautilus,
+    /// 监守者，`Warden`。`Monster` → `Warden`，脑驱动，自己是振动监听者。
+    ///
+    /// The `Warden`. A `Monster` → `Warden`, brain-driven, itself a vibration listener.
+    Warden,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 62] = [
+    pub const ALL: [Self; 63] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -297,6 +302,7 @@ impl MobType {
         Self::SulfurCube,
         Self::Nautilus,
         Self::ZombieNautilus,
+        Self::Warden,
     ];
 
     /// 注册表 ID。
@@ -365,6 +371,7 @@ impl MobType {
             Self::SulfurCube => ids::SULFUR_CUBE,
             Self::Nautilus => ids::NAUTILUS,
             Self::ZombieNautilus => ids::ZOMBIE_NAUTILUS,
+            Self::Warden => ids::WARDEN,
         }
     }
 
@@ -433,6 +440,7 @@ impl MobType {
             Self::SulfurCube => "minecraft:sulfur_cube",
             Self::Nautilus => "minecraft:nautilus",
             Self::ZombieNautilus => "minecraft:zombie_nautilus",
+            Self::Warden => "minecraft:warden",
         }
     }
 
@@ -622,6 +630,9 @@ impl MobType {
                 mc_bamboo_data::villager::BABY_VILLAGER_HEIGHT,
                 mc_bamboo_data::villager::BABY_VILLAGER_EYE_HEIGHT,
             ),
+            // `EntityTypes.WARDEN`：`sized(0.9F, 2.9F)`，未显式给眼高，取缺省 `height * 0.85F`。
+            // `EntityTypes.WARDEN`: `sized(0.9F, 2.9F)` with the default eye height.
+            (Self::Warden, _) => (0.9, 2.9, 2.9 * 0.85),
         }
     }
 
@@ -651,6 +662,7 @@ impl MobType {
                 | Self::Guardian
                 | Self::ElderGuardian
                 | Self::ZombieNautilus
+                | Self::Warden
         ) || self.is_skeleton()
     }
 
@@ -811,7 +823,9 @@ impl MobType {
     pub const fn removes_when_far_away(self) -> bool {
         // `AbstractGolem.removeWhenFarAway` 恒假。
         // `AbstractGolem.removeWhenFarAway` is always false.
-        if matches!(self, Self::IronGolem | Self::SnowGolem) {
+        // `Warden.removeWhenFarAway()` 恒假，监守者不因距离消失。
+        // `Warden.removeWhenFarAway()` is always false.
+        if matches!(self, Self::IronGolem | Self::SnowGolem | Self::Warden) {
             return false;
         }
         // 鱿鱼、海豚（`AgeableWaterCreature`）、鱼（`WaterAnimal`）和蝙蝠不是 `Animal`，沿用
@@ -1093,6 +1107,7 @@ impl MobType {
             Self::SulfurCube => "minecraft:entities/sulfur_cube",
             Self::Nautilus => "minecraft:entities/nautilus",
             Self::ZombieNautilus => "minecraft:entities/zombie_nautilus",
+            Self::Warden => "minecraft:entities/warden",
         }
     }
 
@@ -1132,6 +1147,11 @@ impl MobType {
 
     /// `Mob.getSoundVolume()`。牛 0.4，僵尸 1.0（`Monster` 用 `getSoundVolume` 缺省）。
     pub const fn sound_volume(self) -> f32 {
+        // `Warden.getSoundVolume()` 覆写成 4.0。
+        // `Warden.getSoundVolume()` overrides it to 4.0.
+        if matches!(self, Self::Warden) {
+            return 4.0;
+        }
         if self.is_equine() {
             0.8
         } else if matches!(self, Self::Bat) {
@@ -1155,6 +1175,12 @@ impl MobType {
     /// `living::ambient_sound` pick by age.
     pub const fn ambient_sound(self) -> Option<&'static str> {
         match self {
+            // `Warden.getAmbientSound()` 按愤怒等级选，且在咆哮 / 钻地时返回 null，
+            // 由 `warden::ambient_sound` 按状态分派；静态表里不写死。
+            //
+            // `Warden.getAmbientSound()` depends on the anger level and is null while
+            // roaring or digging; `warden::ambient_sound` dispatches by state.
+            Self::Warden => None,
             Self::Rabbit => Some("minecraft:entity.rabbit.ambient"),
             Self::Fox => Some("minecraft:entity.fox.ambient"),
             // 狼的叫声按叫声品种和幼年换，见 [`wolf::sound`]。
@@ -1236,6 +1262,7 @@ impl MobType {
 
     pub const fn hurt_sound(self) -> Option<&'static str> {
         match self {
+            Self::Warden => Some("minecraft:entity.warden.hurt"),
             Self::Rabbit => Some("minecraft:entity.rabbit.hurt"),
             Self::Fox => Some("minecraft:entity.fox.hurt"),
             Self::Wolf => Some("minecraft:entity.wolf.hurt"),
@@ -1298,6 +1325,7 @@ impl MobType {
 
     pub const fn death_sound(self) -> Option<&'static str> {
         match self {
+            Self::Warden => Some("minecraft:entity.warden.death"),
             Self::Rabbit => Some("minecraft:entity.rabbit.death"),
             Self::Fox => Some("minecraft:entity.fox.death"),
             Self::Wolf => Some("minecraft:entity.wolf.death"),
@@ -1360,6 +1388,7 @@ impl MobType {
 
     pub const fn step_sound(self) -> Option<&'static str> {
         match self {
+            Self::Warden => Some("minecraft:entity.warden.step"),
             Self::Rabbit | Self::Fox | Self::Wolf | Self::Slime => None,
             Self::Cow
             | Self::Mooshroom
@@ -1435,6 +1464,7 @@ impl MobType {
     pub const fn spawn_egg(self) -> i32 {
         use mc_bamboo_data::items;
         match self {
+            Self::Warden => items::WARDEN_SPAWN_EGG,
             Self::Cow => items::COW_SPAWN_EGG,
             Self::Mooshroom => items::MOOSHROOM_SPAWN_EGG,
             Self::Rabbit => items::RABBIT_SPAWN_EGG,
@@ -1503,6 +1533,7 @@ impl MobType {
     /// `/summon` 成功反馈里的翻译键。
     pub const fn translation_key(self) -> &'static str {
         match self {
+            Self::Warden => "entity.minecraft.warden",
             Self::Cow => "entity.minecraft.cow",
             Self::Mooshroom => "entity.minecraft.mooshroom",
             Self::Rabbit => "entity.minecraft.rabbit",
@@ -1623,11 +1654,11 @@ impl MobType {
         ) || matches!(self, Self::Pillager)
     }
 
-    /// `EntityType.fireImmune()`：已支持的自然生成生物均不防火。
+    /// `EntityType.fireImmune()`：监守者的 `Builder` 调了 `fireImmune()`。
     ///
-    /// `EntityType.fireImmune()`: all modelled natural spawns are vulnerable to fire.
+    /// `EntityType.fireImmune()`: the warden's `Builder` calls `fireImmune()`.
     pub const fn fire_immune(self) -> bool {
-        false
+        matches!(self, Self::Warden)
     }
 
     /// `LivingEntity.getMaxAirSupply()`：海豚 4800、美西螈 6000，其余 300。
@@ -2888,6 +2919,11 @@ pub struct Mob {
     /// `Tadpole.age`: a frog at 24000. Tadpoles are not `AgeableMob`s, so this is
     /// separate from `age`.
     pub tadpole_age: i32,
+    /// 监守者的愤怒管理、振动监听者、姿态和客户端愤怒等级；别的生物是缺省值。
+    ///
+    /// The warden's anger management, vibration listener, pose and client anger
+    /// level; default for every other mob.
+    pub warden: warden::Warden,
     /// `LivingEntity.discardFriction`：长跳途中 `travelInAir` 不乘摩擦。
     ///
     /// `LivingEntity.discardFriction`: `travelInAir` skips friction during a long jump.
@@ -3031,6 +3067,7 @@ impl Mob {
             MobType::ElderGuardian => guardian::attributes(true),
             MobType::SulfurCube => sulfur_cube::attributes(),
             MobType::Nautilus | MobType::ZombieNautilus => nautilus::attributes(mob_type),
+            MobType::Warden => warden::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3134,6 +3171,9 @@ impl Mob {
             MobType::Silverfish => silverfish::goals(&mut navigation),
             MobType::Endermite => endermite::goals(&mut navigation),
             MobType::Guardian | MobType::ElderGuardian => guardian::goals(mob_type),
+            // 监守者是脑驱动，没有 `registerGoals` 覆盖。
+            // The warden is brain-driven and has no `registerGoals` override.
+            MobType::Warden => GoalSelector::default(),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
@@ -3218,6 +3258,7 @@ impl Mob {
             MobType::Silverfish => silverfish::targets(),
             MobType::Endermite => endermite::targets(),
             MobType::Guardian | MobType::ElderGuardian => guardian::target_goals(),
+            MobType::Warden => GoalSelector::default(),
             kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -3318,6 +3359,7 @@ impl Mob {
                 // Guardians must precede the `is_monster` arm or water costs are not zero.
                 MobType::Guardian | MobType::ElderGuardian => guardian::malus(),
                 MobType::Nautilus | MobType::ZombieNautilus => nautilus::malus(),
+                MobType::Warden => warden::malus(),
                 _ if mob_type.is_monster() => Malus::monster(),
                 MobType::Chicken => chicken::malus(),
                 MobType::Enderman => enderman::malus(),
@@ -3436,6 +3478,7 @@ impl Mob {
             villager: villager::Villager::default(),
             zombie_villager: zombie_villager::ZombieVillagerState::default(),
             tadpole_age: 0,
+            warden: warden::Warden::default(),
             discard_friction: false,
             passengers: Vec::new(),
             ejected_passenger: None,
@@ -3482,6 +3525,11 @@ impl Mob {
             // `Tadpole.fromBucket()` is always true (`setFromBucket` does nothing), so
             // tadpoles never despawn.
             mob.fish.from_bucket = true;
+        }
+        if mob_type == MobType::Warden {
+            // `Warden` 构造函数里的 `getNavigation().setCanFloat(true)`。
+            // The `Warden` constructor's `getNavigation().setCanFloat(true)`.
+            mob.navigation.flags.can_float = true;
         }
         if mob_type == MobType::Armadillo {
             // `Armadillo` 构造函数里的 `getNavigation().setCanFloat(true)`。
