@@ -826,6 +826,10 @@ pub enum KindData {
     ///
     /// Llama spit, with no metadata of its own.
     LlamaSpit(mc_bamboo_blocks::entity::spit::LlamaSpitPublic),
+    /// 拴绳结：没有自己的元数据。
+    ///
+    /// A fence leash knot, with no metadata of its own.
+    LeashKnot,
     Egg(Box<mc_bamboo_blocks::entity::thrown_egg::EggPublic>),
     SplashPotion(Box<mc_bamboo_blocks::entity::splash_potion::SplashPotionPublic>),
 }
@@ -905,7 +909,8 @@ impl Snapshot {
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
             | KindData::Mob(_)
-            | KindData::LightningBolt => 0,
+            | KindData::LightningBolt
+            | KindData::LeashKnot => 0,
         }
     }
 
@@ -930,6 +935,7 @@ impl KindData {
             KindPublic::Egg(egg) => Self::Egg(egg.clone()),
             KindPublic::SplashPotion(potion) => Self::SplashPotion(potion.clone()),
             KindPublic::LightningBolt(_) => Self::LightningBolt,
+            KindPublic::LeashKnot { .. } => Self::LeashKnot,
         }
     }
 
@@ -953,9 +959,10 @@ impl KindData {
             | Self::Mob(_)
             | Self::Arrow(_)
             | Self::LlamaSpit(_)
-            | Self::Egg(_)
+            |             Self::Egg(_)
             | Self::SplashPotion(_)
-            | Self::LightningBolt => None,
+            | Self::LightningBolt
+            | Self::LeashKnot => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -969,9 +976,10 @@ impl KindData {
             | Self::Mob(_)
             | Self::Arrow(_)
             | Self::LlamaSpit(_)
-            | Self::Egg(_)
+            |             Self::Egg(_)
             | Self::SplashPotion(_)
-            | Self::LightningBolt => None,
+            | Self::LightningBolt
+            | Self::LeashKnot => None,
         }
     }
 
@@ -1023,7 +1031,10 @@ impl KindData {
             Self::ExperienceOrb { value } if *value != 0 => {
                 vec![EntityData::ExperienceValue(*value)]
             }
-            Self::ExperienceOrb { .. } | Self::LlamaSpit(_) | Self::LightningBolt => Vec::new(),
+            Self::ExperienceOrb { .. }
+            | Self::LlamaSpit(_)
+            | Self::LightningBolt
+            | Self::LeashKnot => Vec::new(),
             Self::Arrow(arrow) => {
                 let mut data = Vec::new();
                 if arrow.on_fire {

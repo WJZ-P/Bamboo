@@ -11,6 +11,7 @@
 
 pub mod arrow;
 pub mod ctx;
+pub mod leash_knot;
 pub mod lightning;
 pub mod mob;
 pub mod parallel;
@@ -114,6 +115,13 @@ impl FallingBlock {
     }
 }
 
+/// 拴绳结，对应 `LeashFenceKnotEntity`：挂在栅栏上的一格位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeashKnot {
+    /// `BlockAttachedEntity.pos`：挂着的栅栏那一格。
+    pub pos: BlockPos,
+}
+
 /// 点燃的 TNT，对应 `PrimedTnt`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrimedTnt {
@@ -209,6 +217,10 @@ pub enum EntityKind {
     Tnt(PrimedTnt),
     Item(GroundItem),
     ExperienceOrb(ExperienceOrb),
+    /// 拴绳结，`LeashFenceKnotEntity`。
+    ///
+    /// A fence leash knot.
+    LeashKnot(LeashKnot),
     Arrow(Box<arrow::Arrow>),
     /// 羊驼的口水。
     ///
@@ -240,6 +252,7 @@ impl EntityKind {
             Self::Tnt(_) => mc_bamboo_data::registries::entity_type::TNT,
             Self::Item(_) => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb(_) => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
+            Self::LeashKnot(_) => mc_bamboo_data::registries::entity_type::LEASH_KNOT,
             Self::Arrow(arrow) => arrow.variant.entity_type(),
             Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(egg) => egg.kind.entity_type(),
@@ -253,6 +266,9 @@ impl EntityKind {
     pub fn dimensions(&self) -> (f32, f32) {
         if let Self::Mob(mob) = self {
             return mob.dimensions();
+        }
+        if let Self::LeashKnot(_) = self {
+            return (0.375, 0.5);
         }
         let facts = &entity_types::FACTS[self.entity_type() as usize];
         (facts.width, facts.height)
@@ -475,6 +491,7 @@ impl Entity {
             EntityKind::Egg(_) => thrown_egg::tick(self, ctx),
             EntityKind::SplashPotion(_) => splash_potion::tick(self, ctx),
             EntityKind::LightningBolt(_) => lightning::tick(self, ctx),
+            EntityKind::LeashKnot(_) => leash_knot::tick(self, ctx),
             EntityKind::Mob(_) => {}
         }
     }

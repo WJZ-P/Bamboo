@@ -20,7 +20,7 @@ use crate::{
     BlockState,
     entity::{
         Entity, EntityKind, EntityRow, EntityUid, ExperienceOrb, FallingBlock, GroundItem,
-        JavaRandom, PrimedTnt,
+        JavaRandom, LeashKnot, PrimedTnt,
     },
 };
 
@@ -73,6 +73,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::Tnt { .. } => kinds::TNT,
         crate::entity::KindPublic::Item { .. } => kinds::ITEM,
         crate::entity::KindPublic::ExperienceOrb { .. } => kinds::EXPERIENCE_ORB,
+        crate::entity::KindPublic::LeashKnot { .. } => kinds::LEASH_KNOT,
         crate::entity::KindPublic::Arrow(arrow) => arrow.variant.entity_type(),
         crate::entity::KindPublic::LlamaSpit(_) => kinds::LLAMA_SPIT,
         crate::entity::KindPublic::Egg(egg) => egg.kind.entity_type(),
@@ -161,6 +162,14 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
             );
         }
         crate::entity::KindPublic::Mob(_) | crate::entity::KindPublic::LightningBolt(_) => {}
+        crate::entity::KindPublic::LeashKnot { pos } => {
+            // `BlockAttachedEntity.addAdditionalSaveData`：`block_pos` 键。
+            put(
+                &mut out,
+                "block_pos",
+                Tag::IntArray(vec![pos.x, pos.y, pos.z]),
+            );
+        }
         crate::entity::KindPublic::Arrow(_) => {
             let crate::entity::KindState::Arrow(saved) = &state.kind else {
                 return Err(Error::new("mismatched arrow entity halves"));
@@ -451,6 +460,15 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                 })
             }
             "minecraft:lightning_bolt" => EntityKind::LightningBolt(Box::default()),
+            "minecraft:leash_knot" => {
+                let words = tag::int_array(tag, "block_pos");
+                let pos = if words.len() == 3 {
+                    BlockPos::new(words[0], words[1], words[2])
+                } else {
+                    BlockPos::new(0, 0, 0)
+                };
+                EntityKind::LeashKnot(LeashKnot { pos })
+            }
             "minecraft:experience_orb" => {
                 let value = i32::from(tag::short_or(tag, "Value", 0));
                 let mut orb = ExperienceOrb::new(value);

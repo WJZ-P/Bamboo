@@ -361,7 +361,7 @@ fn record_sequence(region: &mut Region, id: PlayerId, sequence: i32) -> bool {
 }
 
 /// 方块逻辑看到的这名玩家。
-fn actor_of(player: &Player) -> Actor {
+fn actor_of(player: &Player, id: PlayerId) -> Actor {
     let held = |hand| {
         let stack = player.inventory.held(hand);
         if stack.is_empty() {
@@ -371,6 +371,7 @@ fn actor_of(player: &Player) -> Actor {
         }
     };
     Actor {
+        uid: id.0,
         uuid: *player.uuid.as_bytes(),
         position: player.position(),
         yaw: player.yaw,
@@ -1102,7 +1103,7 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         spectator_use_item_on(region, id, packet);
         return;
     }
-    let actor = actor_of(player);
+    let actor = actor_of(player, id);
     // `can_place_on` 要在借出 `level` 之前从物品栏读出来。
     let held = player.inventory.held(packet.hand).clone();
     let is_placement_attempt = rules::is_placement_attempt(&held);
@@ -1287,7 +1288,7 @@ pub(crate) fn on_use_item(
     }
     // `Item.use` → `Consumable.startConsuming`：可消耗物品先进入「正在使用」，
     // 不往下走放置 / 方块交互链。先把 `actor` 抄出来，`start` 要独占借 `region`。
-    let actor = actor_of(player);
+    let actor = actor_of(player, id);
     // 鱼桶要从这一堆上的组件还原鱼，先抄下来。
     // A fish bucket restores its fish from this stack's components, so copy it first.
     let held = player.inventory.held(hand).clone();

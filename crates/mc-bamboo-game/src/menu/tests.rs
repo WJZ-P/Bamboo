@@ -1334,6 +1334,7 @@ fn creative_breaks_only_drop_non_empty_shulker_boxes() {
         }
         // 创造模式（`preventsBlockDrops`）空手。
         let actor = mc_bamboo_blocks::Actor {
+            uid: 0,
             uuid: [0; 16],
             position: Vec3::new(0.5, f64::from(pos.y) + 2.0, 0.5),
             yaw: 0.0,
