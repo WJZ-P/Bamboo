@@ -3383,6 +3383,11 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         return;
     }
     mob.dead = true;
+    // `AbstractVillager.die` → `stopTrading()`（覆盖普通死亡与僵尸转化分支）。
+    // `AbstractVillager.die` → `stopTrading()` (covers regular death and zombie conversion).
+    if mob.mob_type == super::MobType::Villager {
+        mob.villager.stop_trading();
+    }
     if mob.mob_type == super::MobType::Wolf {
         super::wolf::on_death(mob);
     }

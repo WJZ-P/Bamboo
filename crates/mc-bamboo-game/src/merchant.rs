@@ -8,7 +8,7 @@
 use mc_bamboo_blocks::InteractionResult;
 use mc_bamboo_blocks::RandomSource;
 use mc_bamboo_blocks::entity::mob::MobType;
-use mc_bamboo_blocks::entity::mob::villager::Villager;
+use mc_bamboo_blocks::entity::mob::villager::{self, Villager};
 use mc_bamboo_core::Vec3;
 use mc_bamboo_data::{registries, villager as data};
 use mc_bamboo_loot::{
@@ -39,9 +39,6 @@ use crate::{
 const RESULT_SLOT: usize = 2;
 /// `AbstractVillager.stillValid` 的额外交互距离。
 const INTERACTION_BUFFER: f64 = 4.0;
-/// `Villager.restock` 的冷却和新的一天。
-const RESTOCK_COOLDOWN: i64 = 2400;
-const LONG_OVERDUE: i64 = 12000;
 
 /// 一个商人菜单的全部状态，存在 [`Menu`] 里。
 #[derive(Debug, Clone, PartialEq)]
@@ -202,7 +199,7 @@ pub(crate) fn interact(
         if mob.mob_type != MobType::Villager {
             return None;
         }
-        if mob.villager.sleeping || mob.villager.trading {
+        if mob.villager.sleeping || mob.villager.is_trading() {
             return None;
         }
         let baby = mob.is_baby();
@@ -228,7 +225,7 @@ pub(crate) fn interact(
         set_unhappy(region, villager_id, position);
         return Some(InteractionResult::Consume);
     }
-    open_screen(region, player, villager_id, villager, offers);
+    open_screen(region, player, villager_id, villager);
     Some(InteractionResult::Success)
 }
 
@@ -267,13 +264,12 @@ fn set_unhappy(region: &mut Region, villager_id: i32, position: Vec3) {
 ///
 /// `Villager.startTrading` + `openTradingScreen`: write back the generated offers,
 /// send the screen and offers, and install the menu.
-fn open_screen(
-    region: &mut Region,
-    player: PlayerId,
-    villager_id: i32,
-    villager: Villager,
-    offers: Vec<MerchantOffer>,
-) {
+fn open_screen(region: &mut Region, player: PlayerId, villager_id: i32, mut villager: Villager) {
+    let hero_amplifier = region.players.get(&player).and_then(|p| {
+        p.effects
+            .get(registries::mob_effect::HERO_OF_THE_VILLAGE)
+            .map(|instance| instance.amplifier)
+    });
     let level = villager.level;
     let xp = villager.xp;
     let title = {
@@ -282,11 +278,14 @@ fn open_screen(
             .unwrap_or("minecraft:none");
         Component::translate(format!("entity.minecraft.villager.{name}"), [])
     };
+    // `Villager.startTrading`：`updateSpecialPrices(player)` 在 `setTradingPlayer` 之前。
+    // `Villager.startTrading`: `updateSpecialPrices(player)` precedes `setTradingPlayer`.
+    villager.update_special_prices(hero_amplifier);
+    villager.set_trading_player(Some(player.0));
+    let offers = villager.offers.clone().unwrap_or_default();
     region.entities.with_mut(villager_id, |entity| {
         if let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &mut entity.kind {
-            mob.villager.offers = villager.offers.clone();
-            // `startTrading` 记下正在交易，村民降频豁免看它。
-            mob.villager.trading = true;
+            mob.villager = villager;
         }
     });
     if region.menus.contains_key(&player) {
@@ -606,57 +605,45 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
             "villager": {"type": "minecraft:villager"}
         }),
     );
-    let mut level_up = false;
     let mut orb_amount = 0;
     region.entities.with_mut(villager_id, |entity| {
         let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &mut entity.kind else {
             return;
         };
-        let Some(offers) = mob.villager.offers.as_mut() else {
-            return;
+        let offer_xp = {
+            let Some(offers) = mob.villager.offers.as_mut() else {
+                return;
+            };
+            let Some(offer) = offers.get_mut(index) else {
+                return;
+            };
+            // `AbstractVillager.notifyTrade` → `MerchantOffer.increaseUses()`。
+            offer.uses += 1;
+            offer.xp
         };
-        let Some(offer) = offers.get_mut(index) else {
-            return;
-        };
-        offer.uses += 1;
-        // `rewardTradeXp` 先按村民自己的随机源抽经验球数量，再加经验、查升级。
+        // `rewardTradeXp` 先按村民自己的随机源抽经验球数量。
         // `rewardTradeXp` draws the orb count from the villager's own random first.
         let random = mc_bamboo_blocks::entity::EntityRandom(std::cell::RefCell::new(entity.random));
-        orb_amount = 3 + random.next_int(4);
+        let orb_base = 3 + random.next_int(4);
         entity.random = random.0.into_inner();
-        mob.villager.xp += offer.xp;
-        if should_increase_level(mob.villager.level, mob.villager.xp)
-            && let Some(profession) = data::profession(mob.villager.profession)
-        {
-            let next = mob.villager.level + 1;
-            if let Some(name) = profession.trade_sets_by_level.get((next - 1) as usize)
-                && !name.is_empty()
-                && let Ok(set) = TradeSet::parse(name)
-            {
-                let params = TradeParams {
-                    world_seed: 0,
-                    origin: Position::new(entity.position.x, entity.position.y, entity.position.z),
-                    villager_type: data::type_name(mob.villager.kind).unwrap_or(data::DEFAULT_TYPE),
-                };
-                let fallback = mc_bamboo_blocks::random::LegacyRandom::new(0);
-                let mut generated = Vec::new();
-                let _ = add_offers_from_trade_set(
-                    &set,
-                    &params,
-                    Some(&region.loot_sequences),
-                    &fallback,
-                    &mut generated,
-                );
-                for generated in &generated {
-                    if let Some(offer) = generated_offer_to_merchant(generated) {
-                        offers.push(offer);
-                    }
-                }
-                mob.villager.level = next;
-                level_up = true;
-                orb_amount += 5;
-            }
-        }
+        let profession = mob.villager.profession;
+        let kind = mob.villager.kind;
+        let position = entity.position;
+        let next_level = mob.villager.level + 1;
+        // `increaseMerchantCareer` 追加的是新等级这一套交易；只在升级时求值（blocks 不依赖 loot）。
+        // `increaseMerchantCareer` appends the new tier's offers; evaluated only on a
+        // level-up (blocks does not depend on loot).
+        let new_offers = || {
+            generate_level_offers(
+                &region.loot_sequences,
+                profession,
+                kind,
+                position,
+                next_level,
+            )
+        };
+        let outcome = villager::notify_trade(mob, offer_xp, orb_base, new_offers);
+        orb_amount = outcome.orb_amount;
     });
     // 交易完成后把新的使用次数 / 等级 / 交易表发给客户端，`uses` 变化会改「售罄」状态。
     // After a trade, resend the updated offers: `uses` changes the out-of-stock state
@@ -673,15 +660,44 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
     true
 }
 
-fn should_increase_level(level: i32, xp: i32) -> bool {
-    let need = match level {
-        1 => 10,
-        2 => 70,
-        3 => 150,
-        4 => 250,
-        _ => return false,
+/// `Villager.updateTrades` 里 `addOffersFromTradeSet(..., profession.getTrades(level))`：
+/// 按新等级的交易集生成要追加的 `MerchantOffer`。只在升级时调用，避免非升级交易推进
+/// loot 随机序列。
+///
+/// The `addOffersFromTradeSet(..., profession.getTrades(level))` half of
+/// `Villager.updateTrades`: generate the `MerchantOffer`s to append for the new tier.
+/// Called only on a level-up so non-levelling trades do not advance loot RNG.
+fn generate_level_offers(
+    sequences: &RandomSequences,
+    profession: i32,
+    kind: i32,
+    position: Vec3,
+    level: i32,
+) -> Vec<MerchantOffer> {
+    let Some(prof) = data::profession(profession) else {
+        return Vec::new();
     };
-    level < 5 && xp >= need
+    let Some(name) = prof.trade_sets_by_level.get((level - 1) as usize) else {
+        return Vec::new();
+    };
+    if name.is_empty() {
+        return Vec::new();
+    }
+    let Ok(set) = TradeSet::parse(name) else {
+        return Vec::new();
+    };
+    let params = TradeParams {
+        world_seed: 0,
+        origin: Position::new(position.x, position.y, position.z),
+        villager_type: data::type_name(kind).unwrap_or(data::DEFAULT_TYPE),
+    };
+    let fallback = mc_bamboo_blocks::random::LegacyRandom::new(0);
+    let mut generated = Vec::new();
+    let _ = add_offers_from_trade_set(&set, &params, Some(sequences), &fallback, &mut generated);
+    generated
+        .iter()
+        .filter_map(generated_offer_to_merchant)
+        .collect()
 }
 
 /// `Villager.rewardTradeXp`：`rewardExp` 为真时在村民头顶 `(x, y+0.5, z)` 撒
@@ -777,108 +793,14 @@ pub(crate) fn cost_matches(cost: &ItemCost, stack: &ItemStack) -> bool {
     true
 }
 
-/// 官方 `Villager.updateSpecialPrices`：声望（期 6 接八卦）先按 0 算，
-/// 英雄效果按 `0.3 + 0.0625 * amplifier` 打折。
-#[allow(dead_code)]
-pub(crate) fn update_special_prices(
-    region: &mut Region,
-    villager_id: i32,
-    hero_amplifier: Option<i32>,
-) {
-    // 声望在第 6 期接八卦之前恒为 0。
-    let reputation = 0_i32;
-    region.entities.with_mut(villager_id, |entity| {
-        let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &mut entity.kind else {
-            return;
-        };
-        let Some(offers) = mob.villager.offers.as_mut() else {
-            return;
-        };
-        for offer in offers.iter_mut() {
-            offer.special_price_diff = 0;
-            let factor = hero_amplifier.map_or(0.0, |level| 0.3 + 0.0625 * f64::from(level));
-            let discount = if factor > 0.0 {
-                (factor * f64::from(offer.base_cost_a.count))
-                    .floor()
-                    .max(1.0) as i32
-            } else {
-                0
-            };
-            offer.special_price_diff -=
-                discount + (reputation as f32 * offer.price_multiplier).floor() as i32;
-        }
-    });
-}
-
-/// `Villager.shouldRestock(level)`：跨天或长时间没补货时先重置计数，
-/// 再返回「今天还能补且需要补」。`day` 是 OVERWORLD_DAY 的天数（`now / 24000` 的近似）。
-///
-/// `Villager.shouldRestock(level)`: on a new day or after a long overdue gap, reset the
-/// daily counter first, then report whether a restock is both allowed and needed. `day` is
-/// the OVERWORLD_DAY day number.
-#[allow(dead_code)] // 补货由村民大脑 WorkAtPoi 触发，交易这一侧先提供接口。
-pub(crate) fn should_restock(v: &mut Villager, now: i64, day: i64) -> bool {
-    let long_overdue = now > v.last_restock + LONG_OVERDUE;
-    let new_day = v.last_restock_check_day > 0 && day > v.last_restock_check_day;
-    v.last_restock_check_day = day;
-    if long_overdue || new_day {
-        v.last_restock = now;
-        reset_number_of_restocks(v);
-    }
-    allowed_to_restock(v, now) && needs_restock(v)
-}
-
-/// `Villager.restock()`：把每笔交易按使用次数折算进需求，再清零使用次数。
-/// 官方在这里还会对有交易玩家调 `updateSpecialPrices`，声望期 6 才接，先跳过。
-///
-/// `Villager.restock()`: fold each offer's uses into demand, then clear the uses.
-/// Vanilla also recomputes special prices for the trading player here; that lands with
-/// gossip in phase 6, so it is skipped for now.
-#[allow(dead_code)] // 补货由村民大脑 WorkAtPoi 触发，交易这一侧先提供接口。
-pub(crate) fn restock(v: &mut Villager, now: i64) {
-    for offer in v.offers.iter_mut().flatten() {
-        update_demand(offer);
-        offer.uses = 0;
-    }
-    v.last_restock = now;
-    v.restocks_today += 1;
-}
-
-/// `Villager.resetNumberOfRestocks()`。
-fn reset_number_of_restocks(v: &mut Villager) {
-    catch_up_demand(v);
-    v.restocks_today = 0;
-}
-
-/// `Villager.catchUpDemand()`：把没补到的那几次的需求补上。
-fn catch_up_demand(v: &mut Villager) {
-    let misses = (2 - v.restocks_today).max(0);
-    if misses > 0 {
-        for offer in v.offers.iter_mut().flatten() {
-            offer.uses = 0;
-        }
-    }
-    for _ in 0..misses {
-        for offer in v.offers.iter_mut().flatten() {
-            update_demand(offer);
-        }
-    }
-}
-
-/// `MerchantOffer.updateDemand`：`demand += 2 * uses - maxUses`。
-fn update_demand(offer: &mut MerchantOffer) {
-    offer.demand += 2 * offer.uses - offer.max_uses;
-}
-
-fn allowed_to_restock(v: &Villager, now: i64) -> bool {
-    v.restocks_today == 0 || (v.restocks_today < 2 && now > v.last_restock + RESTOCK_COOLDOWN)
-}
-
-fn needs_restock(v: &Villager) -> bool {
-    v.offers
-        .as_ref()
-        .is_some_and(|offers| offers.iter().any(|offer| offer.uses > 0))
-}
+// 补货（`shouldRestock` / `restock` / `catchUpDemand` / `updateDemand`）与
+// `updateSpecialPrices` 的状态转移都在 `mc-bamboo-blocks` 的 `Villager` 上，村民大脑
+// `WorkAtPoi` 直接调用；这一侧只保留菜单与封包逻辑，不留第二份实现。
+//
+// Restock (`shouldRestock` / `restock` / `catchUpDemand` / `updateDemand`) and the
+// `updateSpecialPrices` state transition live on `mc-bamboo-blocks`' `Villager`; the
+// `WorkAtPoi` brain behaviour calls them directly, so this side keeps only menu/packet
+// logic and no second copy.
 
 /// `stillValid`：交易玩家相同、村民活着、4 格距离内。
 pub(crate) fn still_valid(region: &Region, player: PlayerId, menu: &Menu) -> bool {
@@ -892,6 +814,20 @@ pub(crate) fn still_valid(region: &Region, player: PlayerId, menu: &Menu) -> boo
         return false;
     };
     if public.removed {
+        return false;
+    }
+    // `AbstractVillager.stillValid(Player)`：`getTradingPlayer() == player`。
+    let same_trader = region
+        .entities
+        .get(state.villager)
+        .and_then(|entity| match &entity.kind {
+            mc_bamboo_blocks::entity::EntityKind::Mob(mob) => {
+                Some(mob.villager.still_valid_trading(player.0))
+            }
+            _ => None,
+        })
+        .unwrap_or(false);
+    if !same_trader {
         return false;
     }
     let eye = Vec3::new(
@@ -977,59 +913,6 @@ mod tests {
         offer.special_price_diff = -2;
         assert_eq!(cost_count(&offer, &offer.base_cost_a), 3);
         let _ = empty_menu();
-    }
-
-    /// `MerchantOffer.updateDemand` 的公式来自字节码：`demand += 2*uses - maxUses`。
-    #[test]
-    fn update_demand_follows_the_vanilla_formula() {
-        let mut offer = MerchantOffer {
-            base_cost_a: ItemCost::new(items::EMERALD, 1),
-            cost_b: None,
-            result: ItemStack::new(items::APPLE, 1),
-            uses: 3,
-            max_uses: 12,
-            reward_exp: true,
-            special_price_diff: 0,
-            demand: 0,
-            price_multiplier: 0.0,
-            xp: 1,
-        };
-        update_demand(&mut offer);
-        assert_eq!(offer.demand, 2 * 3 - 12);
-    }
-
-    /// 补货跨天重置计数，且只有「今天还能补」和「有使用过」同时成立才补。
-    #[test]
-    fn restock_only_fires_when_needed_and_allowed() {
-        let mut v = Villager {
-            offers: Some(vec![MerchantOffer {
-                base_cost_a: ItemCost::new(items::EMERALD, 1),
-                cost_b: None,
-                result: ItemStack::new(items::APPLE, 1),
-                uses: 1,
-                max_uses: 12,
-                reward_exp: true,
-                special_price_diff: 0,
-                demand: 0,
-                price_multiplier: 0.0,
-                xp: 1,
-            }]),
-            ..Villager::default()
-        };
-        // 第一次：需要补（uses>0）且允许（restocks_today==0）。
-        assert!(should_restock(&mut v, 1000, 0));
-        restock(&mut v, 1000);
-        assert_eq!(v.restocks_today, 1);
-        assert_eq!(v.offers.as_ref().unwrap()[0].uses, 0);
-        // 刚补完还没冷却，不再补。
-        assert!(!should_restock(&mut v, 2000, 0));
-        // 跨天重置当天计数：先让检查日变成正数，再跨到第二天。
-        v.last_restock_check_day = 1;
-        assert!(
-            !should_restock(&mut v, 3000, 2),
-            "跨天重置后 uses 已经清零，不需要补"
-        );
-        assert_eq!(v.restocks_today, 0);
     }
 
     /// `moveFromInventoryToPaymentSlot` 把整堆匹配物品搬进付款格（不只 `cost.count`）。
