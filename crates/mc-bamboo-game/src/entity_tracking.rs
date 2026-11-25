@@ -1104,7 +1104,9 @@ impl KindData {
                 data
             }
             Self::Mob(mob) => {
-                if mob.mob_type.is_monster() {
+                if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Creaking {
+                    creaking_non_default_data(mob)
+                } else if mob.mob_type.is_monster() {
                     monster_non_default_data(mob)
                 } else {
                     mob_non_default_data(mob)
@@ -1143,6 +1145,15 @@ impl KindData {
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
     use mc_bamboo_data::entity_types as facts;
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Creaking {
+        return match index {
+            facts::CREAKING_CAN_MOVE => EntityData::CreakingCanMove(true),
+            facts::CREAKING_IS_ACTIVE => EntityData::CreakingActive(false),
+            facts::CREAKING_IS_TEARING_DOWN => EntityData::CreakingTearingDown(false),
+            facts::CREAKING_HOME_POS => EntityData::CreakingHomePos(None),
+            _ => EntityData::SharedFlags(0),
+        };
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::ZombieVillager {
         use mc_bamboo_data::villager;
         return match index {
@@ -1428,6 +1439,25 @@ fn effect_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic, out: &mut Vec<Ent
     if mob.status_effects.iter().any(|effect| effect.ambient) {
         out.push(EntityData::EffectAmbience(true));
     }
+}
+
+/// `Creaking` 四项元数据中偏离官方缺省值的部分。
+fn creaking_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
+    let mut out = Vec::new();
+    let state = &mob.creaking;
+    if !state.can_move {
+        out.push(EntityData::CreakingCanMove(false));
+    }
+    if state.active {
+        out.push(EntityData::CreakingActive(true));
+    }
+    if state.tearing_down {
+        out.push(EntityData::CreakingTearingDown(true));
+    }
+    if state.home_pos.is_some() {
+        out.push(EntityData::CreakingHomePos(state.home_pos));
+    }
+    out
 }
 
 fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
@@ -2459,15 +2489,25 @@ fn event_packet(
         }
         MobEvent::Particles {
             particle,
+            item,
             position,
             offset,
             speed,
             count,
         } => {
-            // 简单粒子的 `ParticleTypes.STREAM_CODEC` 只有类型 ID。
-            // A simple particle's `ParticleTypes.STREAM_CODEC` is the type id alone.
+            // 简单粒子的 `ParticleTypes.STREAM_CODEC` 只有类型 ID；带物品的粒子
+            // （`ItemParticleOption`）再按 `ItemStackTemplate.STREAM_CODEC` 追加
+            // 物品 ID、数量 1、空的组件补丁（两个 0 varint）。
+            // A simple particle's codec is the type id alone; an item particle appends
+            // `ItemStackTemplate.STREAM_CODEC`: item id, count 1, empty component patch.
             let mut options = Vec::new();
             mc_bamboo_protocol::codec::write_varint(&mut options, *particle);
+            if let Some(item) = *item {
+                mc_bamboo_protocol::codec::write_varint(&mut options, item);
+                mc_bamboo_protocol::codec::write_varint(&mut options, 1);
+                mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+                mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+            }
             EventPacket::Particles {
                 body: packet_body(&mc_bamboo_protocol::packet::play::LevelParticles {
                     options: &options,

@@ -1464,6 +1464,12 @@ pub trait Level: LevelSideState + LevelEntities {
             || self.block_weather().thunder_level > 0.0
     }
 
+    /// `EnvironmentAttributes.CREAKING_ACTIVE`：主世界按 `day` 时间线求值；
+    /// 有固定时间的维度没有这条时间线，恒假。
+    fn creaking_active(&self) -> bool {
+        !self.dimension_has_fixed_time() && crate::sky::creaking_active(self.clock_ticks())
+    }
+
     /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线在
     /// [`Level::clock_ticks`] 处求值；有固定时间的维度没有这条时间线，恒假。
     fn monsters_burn(&self) -> bool {
@@ -2602,6 +2608,16 @@ pub fn monster_prevents_rest_in<L: Level + ?Sized>(level: &L, pos: BlockPos) -> 
 /// The non-block results of one action, handed to the caller for delivery.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
+    /// `ShoulderRidingEntity.setEntityOnShoulder`：把整只鹦鹉的 NBT 存进玩家的
+    /// 左 / 右肩膀槽，并把这只鹦鹉从世界移除。游戏层负责改玩家状态和实体表。
+    ///
+    /// `ShoulderRidingEntity.setEntityOnShoulder`: store the parrot's NBT in the
+    /// player's shoulder slot and remove the parrot from the world. The game layer
+    /// updates the player state and the entity table.
+    PlayerShoulder {
+        player: i32,
+        tag: mc_bamboo_nbt::Tag,
+    },
     /// `levelEvent(2001, pos, state)`。`except_initiator` 表示不用发给发起者，它自己已经预测过了。
     Destroyed {
         pos: BlockPos,

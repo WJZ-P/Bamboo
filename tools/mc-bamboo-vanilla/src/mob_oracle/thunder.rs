@@ -91,6 +91,7 @@ fn fresh_level(
         mob_teams: Default::default(),
         wrong_was_hurt: false,
         explosion_break: 0,
+        shoulder: Default::default(),
         short_hunger: false,
         ignore_bed_monsters: false,
     }

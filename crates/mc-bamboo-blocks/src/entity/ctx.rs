@@ -517,6 +517,12 @@ pub struct PlayerView {
     ///
     /// Whether the target has slowness, poison or weakness, read by witches.
     pub effects: TargetEffects,
+    /// 左右肩上鹦鹉的品种 ID；`None` 表示空肩。鹦鹉上肩前判断有没有空位。
+    ///
+    /// Variant ids of the parrots on the left / right shoulder; `None` is an
+    /// empty shoulder, checked before a parrot perches.
+    pub shoulder_left: Option<i32>,
+    pub shoulder_right: Option<i32>,
 }
 
 /// 玩家的 `getLastHurtByMob` / `getLastHurtMob` 和两个时间戳（玩家自己的 tick 数），
@@ -985,6 +991,21 @@ pub struct LandFacts {
 /// `Spawn`、`Remove`、`ScheduleTick`、`Depart`。这次不实现。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    /// `ShoulderRidingEntity.setEntityOnShoulder`：这只鹦鹉（me）落到玩家肩上。
+    /// 落地时把整只鹦鹉序列化成 NBT 交给游戏层，随后把鹦鹉从世界移除。
+    ///
+    /// `ShoulderRidingEntity.setEntityOnShoulder`: this parrot (me) perches on a
+    /// player's shoulder. Landing serializes the whole parrot to NBT for the game
+    /// layer, then removes the parrot from the world.
+    SetEntityOnShoulder {
+        player: EntityUid,
+        /// 落地前的 `saveWithoutId` NBT（含 `id`）。目标里才有完整的鹦鹉状态；
+        /// `apply` 拿到的 `me` 在 tick 期间是占位实体，不能再序列化。
+        ///
+        /// The `saveWithoutId` tag (including `id`) taken in the goal, where the
+        /// full parrot state is available; `apply` only sees a placeholder `me`.
+        tag: mc_bamboo_nbt::Tag,
+    },
     /// 实体移动 / 死亡等发出的游戏事件。并行驱动攒到落地阶段按 uid 顺序投递。
     GameEvent {
         event: crate::game_event::GameEvent,
@@ -1043,6 +1064,10 @@ pub enum Command {
     /// A snow golem places a snow layer at the four cells under its feet.
     PlaceSnowTrail {
         cells: Vec<BlockPos>,
+    },
+    /// `Creaking.hurtServer` 打到绑定嘎枝：心放树脂 / 连线，不掉血。
+    CreakingHeartHurt {
+        home: BlockPos,
     },
     /// 冰霜行者 `replace_disk`：把算阶段选中的水面格逐格换成 `frosted_ice`（age 0）。
     ///
@@ -1637,6 +1662,14 @@ pub enum Command {
 /// 改发出者，没有任何回写补丁。
 pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
     match command {
+        Command::SetEntityOnShoulder { player, tag } => {
+            // 目标里已经按官方 `Entity.save` 写好整份 NBT（含 `id`）：交给游戏层
+            // 存进玩家肩膀，再把鹦鹉从世界移除。
+            world.push_effect(crate::Effect::PlayerShoulder { player, tag });
+            if !super::shoulder::keep_entity_on_perch() {
+                me.discard();
+            }
+        }
         Command::GameEvent {
             event,
             position,
@@ -1699,6 +1732,12 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             for pos in cells {
                 world.set_block_and_update(pos, snow);
             }
+        }
+        Command::CreakingHeartHurt { home } => {
+            world.with_block_entity::<
+                crate::behaviour::misc::creaking_heart_entity::CreakingHeartEntity,
+                _,
+            >(home, |heart, world| heart.creaking_hurt(world));
         }
         Command::FreezeWater { cells } => {
             let ice = BlockState(mc_bamboo_data::blocks::FROSTED_ICE);

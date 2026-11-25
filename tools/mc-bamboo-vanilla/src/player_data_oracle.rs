@@ -1263,6 +1263,25 @@ fn player_cases() -> Vec<(String, PlayerData)> {
     };
     cases.push(("player warden warning".into(), warned));
 
+    // `ShoulderEntityLeft` / `Right`：整只鹦鹉的实体 NBT。官方
+    // `ServerPlayer.addAdditionalSaveData` 只在非空时写这两个键。
+    let parrot_left = Tag::Compound(vec![
+        ("id".to_owned(), Tag::String("minecraft:parrot".to_owned())),
+        ("Variant".to_owned(), Tag::Int(2)),
+    ]);
+    let parrot_right = Tag::Compound(vec![
+        ("id".to_owned(), Tag::String("minecraft:parrot".to_owned())),
+        ("Variant".to_owned(), Tag::Int(4)),
+        ("Silent".to_owned(), Tag::Byte(1)),
+    ]);
+    let mut both_shoulders = cases[0].1.clone();
+    both_shoulders.shoulder_left = Some(parrot_left.clone());
+    both_shoulders.shoulder_right = Some(parrot_right);
+    cases.push(("player both shoulder parrots".into(), both_shoulders));
+    let mut left_only = cases[0].1.clone();
+    left_only.shoulder_left = Some(parrot_left);
+    cases.push(("player left shoulder parrot".into(), left_only));
+
     // 1b：`LastDeathLocation` 只有 Optional 非空才写，`GlobalPos.CODEC` 是
     // dimension 字符串 + pos 三个 int 的复合标签。
     let mut died = cases[0].1.clone();

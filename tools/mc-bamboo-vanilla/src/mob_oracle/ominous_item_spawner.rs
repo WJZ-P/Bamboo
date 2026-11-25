@@ -71,6 +71,7 @@ impl OminousItemSpawnerCase {
             short_hunger: false,
             ignore_bed_monsters: false,
             explosion_break: 0,
+            shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState::empty(),
         }
     }
 }

@@ -17,6 +17,7 @@ pub(crate) use composter::{
 mod copper;
 mod crafter;
 mod creaking_heart;
+pub mod creaking_heart_entity;
 mod decorated_pot;
 mod facing;
 pub(crate) mod falling;

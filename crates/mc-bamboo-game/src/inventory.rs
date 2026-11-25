@@ -654,10 +654,21 @@ pub(crate) fn apply_item_exchange(
 ///
 /// `ItemStack.consume(1, player)` for feeding or milking in survival mode.
 pub(crate) fn shrink_held(region: &mut Region, id: PlayerId, hand: Hand) {
+    shrink(region, id, hand, true);
+}
+
+/// `ItemStack.shrink`：不看创造模式也扣一个（狼铠修复的鳞甲）。
+///
+/// `ItemStack.shrink`: spend one even in creative mode (the wolf armour scute).
+pub(crate) fn shrink_held_force(region: &mut Region, id: PlayerId, hand: Hand) {
+    shrink(region, id, hand, false);
+}
+
+fn shrink(region: &mut Region, id: PlayerId, hand: Hand, skip_creative: bool) {
     let Some(player) = region.players.get_mut(&id) else {
         return;
     };
-    if player.game_mode == GameMode::Creative {
+    if skip_creative && player.game_mode == GameMode::Creative {
         return;
     }
     let slot = player.inventory.hand_slot(hand);

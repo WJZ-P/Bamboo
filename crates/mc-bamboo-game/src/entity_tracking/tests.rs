@@ -27,6 +27,42 @@ use crate::{
 
 use super::*;
 
+/// 带物品参数的粒子包按官方 `ItemStackTemplate.STREAM_CODEC` 追加
+/// 物品 ID、数量 1、空组件补丁（两个 0 varint）。
+#[test]
+fn item_particles_carry_the_item_stack_template() {
+    use mc_bamboo_blocks::entity::mob::MobEvent;
+    use mc_bamboo_data::{items, registries::particle_type};
+    let make = |item| {
+        vec![(
+            1,
+            vec![MobEvent::Particles {
+                particle: particle_type::ITEM,
+                item,
+                position: Vec3::new(1.0, 2.0, 3.0),
+                offset: Vec3::new(0.2, 0.1, 0.2),
+                speed: 0.1,
+                count: 20,
+            }],
+        )]
+    };
+    let with_item = event_packets(&make(Some(items::ARMADILLO_SCUTE)), || 0);
+    let without_item = event_packets(&make(None), || 0);
+    assert_eq!(with_item.len(), 1);
+    assert_eq!(without_item.len(), 1);
+    // ITEM=57, ARMADILLO_SCUTE=1003 (varint EB 07), count=1, empty patch 0,0.
+    let options = [0x39u8, 0xEB, 0x07, 0x01, 0x00, 0x00];
+    assert!(
+        with_item[0]
+            .windows(options.len())
+            .any(|window| window == options),
+        "item particle options missing from {:?}",
+        with_item[0]
+    );
+    // 物品参数正好多 5 字节：物品 ID 两字节 + 数量 1 + 两个 0。
+    assert_eq!(with_item[0].len(), without_item[0].len() + 5);
+}
+
 #[test]
 fn tracking_ranges_come_from_the_entity_type() {
     assert_eq!(entity_tracking_range(entity_type::FALLING_BLOCK), 160);

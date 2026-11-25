@@ -2173,6 +2173,11 @@ impl<'a> World<'a> {
         self.level.bees_stay_in_hive()
     }
 
+    /// `EnvironmentAttributeSystem.getValue(CREAKING_ACTIVE, pos)`：嘎枝之心按昼夜激活。
+    pub fn creaking_active(&self, _pos: BlockPos) -> bool {
+        self.level.creaking_active()
+    }
+
     /// `Level.isThundering()`：雷暴强度和雨强的乘积超过 0.9 才算打雷。
     pub fn is_thundering(&self) -> bool {
         self.level.block_weather().is_thundering()
@@ -5152,6 +5157,7 @@ mod tests {
                 | Effect::GuardianElderEffect { .. }
                 | Effect::TrialSpawnerTransformBadOmen { .. }
                 | Effect::Explode { .. }
+                | Effect::PlayerShoulder { .. }
                 | Effect::VibrationParticle { .. } => None,
             })
             .collect()

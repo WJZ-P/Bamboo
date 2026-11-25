@@ -861,6 +861,8 @@ pub(super) fn check_spawn_rules(
         // 两种傀儡都不在群系刷怪表里，只保留命令 / 方块图案生成时共用的规则。
         // Neither golem is in a biome spawn table; only the shared rule remains.
         MobType::IronGolem | MobType::SnowGolem => animal_spawn_rules(world, pos),
+        // 嘎枝不在群系刷怪表里；心用 `SpawnUtil` 的落点规则单独刷出。
+        MobType::Creaking => true,
     }
 }
 
@@ -1273,6 +1275,8 @@ mod tests {
 
     fn player(uid: i32, position: Vec3) -> PlayerView {
         PlayerView {
+            shoulder_left: None,
+            shoulder_right: None,
             uuid: None,
             uid,
             yaw: 0.0,

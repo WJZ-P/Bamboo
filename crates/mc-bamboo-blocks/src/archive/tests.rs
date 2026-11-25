@@ -97,6 +97,9 @@ fn every_block_entity_kind_round_trips() {
             BlockEntityKind::Beehive => {
                 Box::new(crate::behaviour::machines::beehive_entity::BeehiveEntity::new(POS))
             }
+            BlockEntityKind::CreakingHeart => Box::new(
+                crate::behaviour::misc::creaking_heart_entity::CreakingHeartEntity::new(POS),
+            ),
             BlockEntityKind::Spawner => {
                 Box::new(crate::behaviour::machines::spawner::SpawnerBlockEntity::new(POS))
             }

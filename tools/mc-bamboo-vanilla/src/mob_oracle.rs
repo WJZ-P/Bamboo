@@ -43,6 +43,7 @@ mod bee_full;
 mod bee_locate;
 mod bee_release;
 mod brain;
+mod creaking;
 mod egg;
 mod ender_pearl;
 mod equine;
@@ -113,6 +114,31 @@ mod base64_stub {
     }
 }
 
+/// `parrotShoulder`：官方假世界每刻输出左右肩品种、还在世界的鹦鹉及其位置。
+///
+/// `parrotShoulder`: vanilla emits both shoulder variants, the parrots still in
+/// the world and their positions each tick.
+#[derive(Debug, Deserialize)]
+struct ParrotShoulderCase {
+    name: String,
+    removal: String,
+    #[serde(rename = "playerX")]
+    player_x: i64,
+    #[serde(rename = "playerY")]
+    player_y: i64,
+    #[serde(rename = "playerZ")]
+    player_z: i64,
+    steps: Vec<ShoulderStep>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShoulderStep {
+    left: i32,
+    right: i32,
+    /// 每只在世界里的鹦鹉的 `[x, y, z]`（f64 原始位）。
+    parrots: Vec<[i64; 3]>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum Line {
@@ -144,6 +170,7 @@ enum Line {
     EquineInteract(equine::InteractCase),
     EquineDeath(equine::DeathCase),
     EquineSave(equine::SaveCase),
+    ParrotShoulder(ParrotShoulderCase),
     PigMount(pig_ride::MountCase),
     PigBoost(pig_ride::BoostCase),
     PigDismount(pig_ride::DismountCase),
@@ -184,6 +211,7 @@ enum Line {
     SulfurCube(Box<sulfur_cube::SulfurCubeCase>),
     SulfurCubeSave(sulfur_cube::SulfurCubeSaveCase),
     SmallMobDeath(small_mob::SmallMobDeathCase),
+    Creaking(Box<creaking::CreakingCase>),
     VillagerSpawn(villager::VillagerSpawnCase),
     VillagerSave(villager::VillagerSaveCase),
     VillagerDeath(villager::VillagerDeathCase),
@@ -829,6 +857,15 @@ struct CowStep {
     wolf_collar: i32,
     #[serde(default, rename = "wolfMaxHp")]
     wolf_max_hp: i64,
+    /// 狼铠：BODY 槽的物品 id、耐久损耗、数量；没穿时全是 0。
+    ///
+    /// Wolf armour: BODY slot item id, damage and count; all 0 when unarmoured.
+    #[serde(default, rename = "wolfBodyItem")]
+    wolf_body_item: i32,
+    #[serde(default, rename = "wolfBodyDamage")]
+    wolf_body_damage: i32,
+    #[serde(default, rename = "wolfBodyCount")]
+    wolf_body_count: i32,
     /// 马科场景：`DATA_ID_FLAGS` 字节和脾气值，其余生物是 0。
     ///
     /// Equine scenes: the `DATA_ID_FLAGS` byte and the temper; 0 for other mobs.
@@ -1044,6 +1081,11 @@ struct MobLevel {
     ignore_bed_monsters: bool,
     /// 改坏确认爆炸：位 0 跳过 `hurtEntities`，位 1 丢掉爆炸中心的 0.0625 抬升。
     explosion_break: u8,
+    /// 0 号玩家左右肩上的鹦鹉（选 A）：逐刻由 Bamboo 自己的目标 / 命令落地写这份状态。
+    ///
+    /// The fake world's player 0 shoulder parrots (option A), written step by step
+    /// through Bamboo's own goal and command pipeline.
+    shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState,
 }
 
 impl MobLevel {
@@ -2123,6 +2165,7 @@ impl Report {
                 Line::SulfurCube(case) => self.replay_sulfur_cube(&case),
                 Line::SulfurCubeSave(case) => self.replay_sulfur_cube_save(&case),
                 Line::SmallMobDeath(case) => self.replay_small_mob_death(&case),
+                Line::Creaking(case) => creaking::replay_creaking(self, &case),
                 Line::VillagerSpawn(case) => self.replay_villager_spawn(&case),
                 Line::VillagerSave(case) => self.replay_villager_save(&case),
                 Line::VillagerDeath(case) => self.replay_villager_death(&case),
@@ -2157,6 +2200,7 @@ impl Report {
                 Line::EquineInteract(case) => self.replay_equine_interact(case),
                 Line::EquineDeath(case) => self.replay_equine_death(case),
                 Line::EquineSave(case) => self.replay_equine_save(case),
+                Line::ParrotShoulder(case) => self.replay_parrot_shoulder(&case),
                 Line::LlamaSpit(case) => self.replay_llama_spit(&case),
                 Line::Leash(case) => self.replay_leash(&case),
                 Line::WitchThrow(case) => self.replay_witch_throw(&case),
@@ -2177,6 +2221,243 @@ impl Report {
             }
         }
         Ok(())
+    }
+
+    /// 把 `MobLevel` 肩膀状态同步到玩家视图（客户端元数据 / 目标的空位判断）。
+    fn sync_shoulder_view(level: &mut MobLevel) {
+        level.players[0].shoulder_left = level.shoulder.left_variant();
+        level.players[0].shoulder_right = level.shoulder.right_variant();
+    }
+
+    /// `parrotShoulder`：在 `MobLevel` 假世界里真跑 Bamboo 的鹦鹉目标
+    /// （`LandOnOwnersShoulderGoal` → `Command::SetEntityOnShoulder` → 游戏层落地）、
+    /// 肩膀共享状态与离肩 / respawn 生产代码，每刻和官方逐项比左右肩、鹦鹉是否在
+    /// 世界里、重新出现的位置。
+    ///
+    /// `parrotShoulder`: run Bamboo's real parrot goal, command and shoulder
+    /// production code in the `MobLevel` fake world, then compare both shoulder
+    /// variants, world presence and respawn positions with vanilla each tick.
+    fn replay_parrot_shoulder(&mut self, case: &ParrotShoulderCase) {
+        use mc_bamboo_blocks::entity::{
+            ctx::PlayerView,
+            mob::{
+                MobType,
+                goals::{Goal, WrappedGoal},
+                parrot::ParrotGoal,
+            },
+            shoulder,
+        };
+
+        self.cases += 1;
+        let break_test = self.break_test.as_deref();
+        shoulder::set_oracle_tamper(break_test.unwrap_or(""));
+
+        let player_pos = Vec3::new(
+            f64::from_bits(case.player_x as u64),
+            f64::from_bits(case.player_y as u64),
+            f64::from_bits(case.player_z as u64),
+        );
+        let player_uuid = (1_u128 << 64) | 2;
+        let mut level = MobLevel {
+            blocks: HashMap::new(),
+            random: LevelRandom::new(1),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: Vec::new(),
+            rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+            facts: ZombieFacts {
+                difficulty: 2,
+                bright_outside: true,
+                monsters_burn: true,
+                ..ZombieFacts::default()
+            },
+            natural_spawn: None,
+            biome: None,
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
+            poi: mc_bamboo_world::poi::PoiStore::new(),
+            entities: Entities::with_next_id(1),
+            // 官方夹具里只有 0 号玩家；肩膀状态挂在 MobLevel 上（选 A）。
+            players: vec![PlayerView {
+                uid: 1024,
+                uuid: Some(player_uuid.to_be_bytes()),
+                position: player_pos,
+                delta: Vec3::default(),
+                width: 0.6,
+                height: 1.8,
+                eye_height: 1.62,
+                health: 20.0,
+                look_direction: Vec3::view_vector(0.0, 0.0),
+                gaze_disguise: false,
+                alive: true,
+                spectator: false,
+                creative: false,
+                game_mode: 0,
+                mining_fatigue: None,
+                sneaking: false,
+                sprinting: false,
+                swimming: false,
+                flying: false,
+                invisible: false,
+                explosion_knockback_resistance: 0.0,
+                armor_cover: 0.0,
+                main_hand: 0,
+                off_hand: 0,
+                team: None,
+                yaw: 0.0,
+                pitch: 0.0,
+                combat: Default::default(),
+                effects: Default::default(),
+                shoulder_left: None,
+                shoulder_right: None,
+            }],
+            game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            wrong_was_hurt: false,
+            short_hunger: false,
+            ignore_bed_monsters: false,
+            explosion_break: 0,
+            shoulder: shoulder::ShoulderState::empty(),
+        };
+        // 和 Java 夹具一样铺一格草地，鹦鹉站着不动才能一直和玩家包围盒相交。
+        for x in -1..=1 {
+            for z in -1..=1 {
+                level.blocks.insert(
+                    BlockPos::new(x, 63, z),
+                    BlockState(mc_bamboo_data::blocks::GRASS_BLOCK),
+                );
+            }
+        }
+        let mut ticks = BlockTicks::new();
+        ticks.set_time(0);
+        let mut ids = Vec::new();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            for (index, variant) in [2, 4].into_iter().enumerate() {
+                let mut entity = Entity::by_mob_type(MobType::Parrot, player_pos);
+                entity.random = JavaRandom::new(77001 + index as i64);
+                entity.y_rot = 0.0;
+                entity.old_position = player_pos;
+                if let Some(mob) = entity.kind.mob_mut() {
+                    mob.uuid = (100_u128 + index as u128).to_be_bytes();
+                    mob.parrot.variant = variant;
+                    mob.tame.owner = Some(player_uuid.to_be_bytes());
+                    mob.tame.flags |= mc_bamboo_blocks::entity::mob::tame::FLAG_TAME;
+                    mob.no_gravity = true;
+                    // 和 Java 夹具一样只留 `LandOnOwnersShoulderGoal`；其余目标会挪动
+                    // 鹦鹉、取随机数，假世界没有寻路 / 地形，逐刻位置会发散。
+                    mob.goals.goals = vec![WrappedGoal {
+                        priority: 3,
+                        running: false,
+                        goal: Goal::Parrot(ParrotGoal::LandOnShoulder {
+                            sitting_on_shoulder: false,
+                        }),
+                    }];
+                }
+                let id = world.spawn_entity(entity);
+                ids.push(id);
+            }
+        }
+        for (index, expected) in case.steps.iter().enumerate() {
+            let tick = index as i32 + 1;
+            // 官方 `Player.hurtServer` 在 tick 130 直接清肩；Bamboo 走共享生产函数。
+            let mut facts = shoulder::RemovalFacts::default();
+            if tick == 130 {
+                match case.removal.as_str() {
+                    "jump" => facts.fall_distance = 1.0,
+                    "water" => facts.in_water = true,
+                    "sleep" => facts.sleeping = true,
+                    "snow" => facts.in_powder_snow = true,
+                    "flying" => facts.flying = true,
+                    _ => {}
+                }
+            }
+            // 实体 tick：`ShoulderRidingEntity.tick` 加冷却，目标飞上肩后走
+            // `Command::SetEntityOnShoulder`；命令落地把鹦鹉 discard 并留下 Effect。
+            let effects;
+            {
+                let mut world = World::new(&mut level, &mut ticks);
+                world.tick_entities();
+                effects = world.into_effects();
+            }
+            // 游戏层 `send_effects`：Effect::PlayerShoulder 写进 MobLevel 的肩膀状态。
+            for effect in &effects {
+                if let mc_bamboo_blocks::Effect::PlayerShoulder { tag, .. } = effect {
+                    // 生产函数写 MobLevel 的肩膀槽，再同步给玩家视图（元数据）。
+                    shoulder::set_entity_on_shoulder(&mut level.shoulder, tag.clone());
+                    Self::sync_shoulder_view(&mut level);
+                }
+            }
+            // 受伤是 `Player.hurtServer` 的独立入口：不看 20 刻锁。
+            if case.removal == "hurt" && tick == 130 {
+                level.shoulder.since = i32::MAX;
+                facts.hurt = true;
+            }
+            let removed = shoulder::step(&mut level.shoulder, facts, player_pos);
+            if let Some(removed) = removed {
+                // `ServerPlayer.respawnEntityOnShoulder` 从 NBT 造回鹦鹉放回世界。
+                let mut world = World::new(&mut level, &mut ticks);
+                for tag in &removed.tags {
+                    if let Some(entity) =
+                        shoulder::respawn(tag, removed.position, Some(player_uuid.to_be_bytes()))
+                    {
+                        world.spawn_entity(entity);
+                    }
+                }
+            }
+            Self::sync_shoulder_view(&mut level);
+            let left = level.shoulder.left_variant().unwrap_or(-1);
+            let right = level.shoulder.right_variant().unwrap_or(-1);
+            let mut parrots: Vec<[i64; 3]> = level
+                .entities
+                .iter_public()
+                .filter(|public| {
+                    !public.removed
+                        && matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
+                        && matches!(
+                            public.kind,
+                            mc_bamboo_blocks::entity::KindPublic::Mob(ref mob)
+                                if mob.mob_type == MobType::Parrot
+                        )
+                })
+                .map(|public| {
+                    [
+                        public.position.x.to_bits() as i64,
+                        public.position.y.to_bits() as i64,
+                        public.position.z.to_bits() as i64,
+                    ]
+                })
+                .collect();
+            parrots.sort();
+            if left != expected.left || right != expected.right || parrots != expected.parrots {
+                self.mismatch(format!(
+                    "{} tick {}: shoulders official [{}, {}] bamboo [{}, {}], parrots official {:?} bamboo {:?}",
+                    case.name,
+                    tick,
+                    expected.left,
+                    expected.right,
+                    left,
+                    right,
+                    expected
+                        .parrots
+                        .iter()
+                        .map(|p| {
+                            p.map(|v| f64::from_bits(v as u64))
+                        })
+                        .collect::<Vec<_>>(),
+                    parrots
+                        .iter()
+                        .map(|p| p.map(|v| f64::from_bits(v as u64)))
+                        .collect::<Vec<_>>(),
+                ));
+            }
+            self.steps += 1;
+        }
+        shoulder::set_oracle_tamper("");
     }
 
     fn check_header(&mut self, header: &Header) -> Result<(), String> {
@@ -2347,6 +2628,8 @@ impl Report {
                 .iter()
                 .enumerate()
                 .map(|(index, player)| PlayerView {
+                    shoulder_left: None,
+                    shoulder_right: None,
                     // 官方一侧的玩家 UUID 是 (1, 2 + 下标)；狼认主人要用它。
                     // The official players use UUID (1, 2 + index); wolves match owners by it.
                     uuid: Some(((1_u128 << 64) | (2 + index as u128)).to_be_bytes()),
@@ -2431,6 +2714,7 @@ impl Report {
                 Some("explode_tnt_center") => 2,
                 _ => 0,
             },
+            shoulder: Default::default(),
         };
         for &[x, y, z, state] in &case.blocks {
             level
@@ -3453,6 +3737,20 @@ impl Report {
                 }
                 Some(steps)
             }
+            Some("wolf_armor_damage") if name.starts_with("wolf_armor_") => {
+                let mut steps = ours.to_vec();
+                for step in steps.iter_mut().flatten() {
+                    step.wolf_body_damage = step.wolf_body_damage.wrapping_add(1);
+                }
+                Some(steps)
+            }
+            Some("wolf_armor_item") if name.starts_with("wolf_armor_") => {
+                let mut steps = ours.to_vec();
+                for step in steps.iter_mut().flatten() {
+                    step.wolf_body_item = 0;
+                }
+                Some(steps)
+            }
             _ => None,
         };
         let ours: &[Option<CowStep>] = tampered.as_deref().unwrap_or(ours);
@@ -3555,6 +3853,9 @@ impl Report {
                 plain!(wolf_beg);
                 plain!(wolf_collar);
                 plain!(wolf_max_hp);
+                plain!(wolf_body_item);
+                plain!(wolf_body_damage);
+                plain!(wolf_body_count);
             }
             if name.starts_with("zombie_")
                 || name.starts_with("drowned_")
@@ -5422,6 +5723,29 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
                 .attributes
                 .value(mc_bamboo_data::registries::attribute::MAX_HEALTH);
             i64::from((max as f32).to_bits())
+        } else {
+            0
+        },
+        wolf_body_item: if is_wolf(mob) {
+            mob.equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Body)
+                .item
+        } else {
+            0
+        },
+        wolf_body_damage: if is_wolf(mob) {
+            mc_bamboo_blocks::durability::damage_of(
+                mob.equipment
+                    .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Body),
+            )
+            .unwrap_or(0)
+        } else {
+            0
+        },
+        wolf_body_count: if is_wolf(mob) {
+            mob.equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Body)
+                .count
         } else {
             0
         },

@@ -513,7 +513,7 @@ mod tests {
         let mob = entity.kind.mob().expect("breeze is a mob");
         assert!(mob.brain.is_some());
         assert_eq!(mob.breeze.pose, Pose::Standing);
-        assert_eq!(MobType::ALL.len(), 64);
+        assert_eq!(MobType::ALL.len(), 65);
         assert!(MobType::by_name("minecraft:breeze") == Some(MobType::Breeze));
         assert_eq!(MobType::Breeze.name(), "minecraft:breeze");
     }

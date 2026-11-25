@@ -18,6 +18,7 @@ pub mod ominous_item_spawner;
 pub mod parallel;
 pub mod random;
 pub mod riding;
+pub mod shoulder;
 pub mod spit;
 pub mod splash_potion;
 pub mod store;
