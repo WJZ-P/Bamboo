@@ -118,11 +118,21 @@ impl Steering {
     }
 }
 
+/// `Pig.getRiddenSpeed`：`MOVEMENT_SPEED * 0.225 * boostFactor`。服务端上玩家控制的
+/// 载具不能自己模拟运动，速度只由客户端用来算 `move_vehicle` 报上来的位置。
+///
+/// `Pig.getRiddenSpeed`: `MOVEMENT_SPEED * 0.225 * boostFactor`. On the server a
+/// player-controlled vehicle cannot simulate its own movement; the client alone
+/// uses the speed to compute the positions sent in `move_vehicle`.
+pub fn ridden_speed(movement_speed: f64, steering: &Steering) -> f32 {
+    (movement_speed * 0.225 * f64::from(steering.boost_factor())) as f32
+}
+
 /// `Pig.tickRidden`：朝向跟骑手（俯仰取一半），旧朝向、身体、头对齐，再走 `tickBoost`。
 ///
 /// `Pig.tickRidden`: face the rider (half pitch), snap previous/body/head yaw, then
 /// `tickBoost`.
-pub(super) fn tick_ridden(me: &mut Entity, mob: &mut Mob, yaw: f32, pitch: f32) {
+pub fn tick_ridden(me: &mut Entity, mob: &mut Mob, yaw: f32, pitch: f32) {
     let yaw = if yaw.is_finite() { yaw } else { me.y_rot };
     let pitch = if pitch.is_finite() { pitch } else { 0.0 };
     me.y_rot = yaw;

@@ -68,7 +68,7 @@ pub mod pathfinding;
 pub mod patrol;
 pub mod phantom;
 pub mod phantom_spawner;
-mod pig;
+pub mod pig;
 pub mod pillager;
 pub mod polar_bear;
 pub mod rabbit;
