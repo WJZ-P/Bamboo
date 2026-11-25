@@ -361,6 +361,8 @@ pub struct World<'a> {
     jockeys: Vec<crate::entity::mob::spawn::JockeyRequest>,
     /// 鸡骑士第一支找到的已有载具。
     existing_jockey_vehicle: Option<EntityUid>,
+    /// `Husk.finalizeSpawn` 排队的「尸壳 + 焦骸骑尸壳骆驼」三人组。
+    husk_jockey: bool,
 }
 
 /// `CollisionGetter.getBlockCollisions`，方块从 `block_at` 读，移动中活塞的形状从
@@ -632,6 +634,7 @@ impl<'a> World<'a> {
             partition_enabled,
             jockeys: Vec::new(),
             existing_jockey_vehicle: None,
+            husk_jockey: false,
         }
     }
 
@@ -2198,6 +2201,15 @@ impl<'a> World<'a> {
         self.existing_jockey_vehicle = Some(uid);
     }
 
+    /// `Husk.finalizeSpawn` 的骆驼尸壳分支命中：等根实体进表后由
+    /// [`Self::finish_jockeys`] 生成尸壳骆驼和焦骸两名乘客。
+    ///
+    /// The camel-husk branch of `Husk.finalizeSpawn` fired: `finish_jockeys`
+    /// creates the camel husk and the parched rider once the root is in the table.
+    pub fn queue_husk_jockey(&mut self) {
+        self.husk_jockey = true;
+    }
+
     /// 生成入口在 `finalizeSpawn` 之后调用：按官方顺序构造排队的坐骑/骑手，
     /// 跑它们的 `finalizeSpawn`，放进世界，再 `startRiding`。返回这一批新实体的 ID。
     ///
@@ -2207,7 +2219,11 @@ impl<'a> World<'a> {
     pub fn finish_jockeys(&mut self, root: EntityUid) -> Vec<EntityUid> {
         let existing = self.existing_jockey_vehicle.take();
         let requests = std::mem::take(&mut self.jockeys);
+        let husk_jockey = std::mem::take(&mut self.husk_jockey);
         let mut added = Vec::with_capacity(requests.len());
+        if husk_jockey {
+            added.extend(self.finish_husk_jockey(root));
+        }
         for request in requests {
             if request.rider_is_vehicle
                 && let Some(vehicle) = existing
@@ -2253,12 +2269,123 @@ impl<'a> World<'a> {
         added
     }
 
+    /// `Husk.finalizeSpawn` 的三人组：`CamelHusk(NATURAL)` 先构造、跑
+    /// `finalizeSpawn`、进表，尸壳用 `startRiding(force=true)` 骑上去；然后
+    /// `Parched(NATURAL)` 同样构造、`snapTo` 到尸壳的朝向、跑 `finalizeSpawn`，
+    /// 最后 `startRiding` 骑在同一头骆驼上。`addFreshEntityWithPassengers` 把
+    /// 焦骸连同它的乘客树一起加进来；这里两层的乘客都在表里，直接逐个加。
+    ///
+    /// The three-mob group of `Husk.finalizeSpawn`: a `CamelHusk(NATURAL)` is
+    /// built, finalized and added, then the husk mounts it with
+    /// `startRiding(force=true)`; a `Parched(NATURAL)` is built, snapped to the
+    /// husk's yaw, finalized and mounted on the same camel. The official
+    /// `addFreshEntityWithPassengers` adds the parched and its passenger tree;
+    /// both passengers are already linked here, so they are added one by one.
+    fn finish_husk_jockey(&mut self, root: EntityUid) -> Vec<EntityUid> {
+        let Some(root_public) = self.level.entity_public(root) else {
+            return Vec::new();
+        };
+        let position = root_public.position;
+        let yaw = root_public.yaw;
+        let mut added = Vec::with_capacity(2);
+
+        // `EntityTypes.CAMEL_HUSK.create(level, NATURAL)`：构造取实体自己的随机源
+        // （UUID 两个 nextLong、朝向一个 nextFloat）和种子源的一个 nextLong。
+        let mut camel = self.prepare_entity(super::entity::Entity::by_mob_type(
+            super::entity::mob::MobType::CamelHusk,
+            Vec3::default(),
+        ));
+        camel.position = position;
+        super::entity::mob::spawn::finalize_spawn(
+            self,
+            super::entity::mob::MobType::CamelHusk,
+            &mut camel,
+            super::entity::mob::spawn::SpawnReason::Natural,
+        );
+        let camel_uid = self.add_prepared_entity(camel);
+        added.push(camel_uid);
+        // `Husk.startRiding(camelHusk, true, true)`。
+        self.start_riding_camel(root, camel_uid);
+
+        // `EntityTypes.PARCHED.create(level, NATURAL)` + `snapTo(x, y, z, yRot, 0)`。
+        let mut parched = self.prepare_entity(super::entity::Entity::by_mob_type(
+            super::entity::mob::MobType::Parched,
+            Vec3::default(),
+        ));
+        super::entity::mob::spawn::snap_to(&mut parched, position, yaw, 0.0);
+        parched.with_mob(|me, mob| {
+            mob.y_head_rot = me.y_rot;
+            mob.y_body_rot = me.y_rot;
+        });
+        super::entity::mob::spawn::finalize_spawn(
+            self,
+            super::entity::mob::MobType::Parched,
+            &mut parched,
+            super::entity::mob::spawn::SpawnReason::Natural,
+        );
+        let parched_uid = self.add_prepared_entity(parched);
+        added.push(parched_uid);
+        // `Parched.startRiding(camelHusk, false, false)`：骆驼还能再带一名乘客。
+        self.start_riding_with_limit(parched_uid, camel_uid, 2);
+        added
+    }
+
     /// 官方 `Entity.startRiding(vehicle, force=false, emitEvent=false)`：两边都在表里
     /// 时按 `canAddPassenger`（一人）、`canRide`（冷却）和防环规则建立关系。
     ///
     /// Vanilla `Entity.startRiding(vehicle, false, false)`: link both sides in the
     /// entity table, following the one-passenger, cooldown and no-cycle rules.
     pub fn start_riding(&mut self, passenger: EntityUid, vehicle: EntityUid) -> bool {
+        self.start_riding_with_limit(passenger, vehicle, 1)
+    }
+
+    /// `Husk.startRiding(camelHusk, force=true, emitEvent=true)`：`force` 跳过
+    /// `canRide` / `canAddPassenger`，只留防环和冷却检查。
+    ///
+    /// `Husk.startRiding(camelHusk, true, true)`: `force` skips `canRide` and
+    /// `canAddPassenger`, leaving only the cycle and cooldown checks.
+    fn start_riding_camel(&mut self, passenger: EntityUid, vehicle: EntityUid) -> bool {
+        let Some(public) = self.level.entity_public(vehicle) else {
+            return false;
+        };
+        let list = match &public.kind {
+            super::entity::KindPublic::Mob(mob) => mob.passengers.clone(),
+            _ => Vec::new(),
+        };
+        let Some(passenger_entity) = self.level.entity_public(passenger) else {
+            return false;
+        };
+        let mut chain = Vec::new();
+        let mut at = Some(vehicle);
+        while let Some(uid) = at {
+            chain.push(uid);
+            at = self
+                .level
+                .entity_public(uid)
+                .and_then(|public| public.vehicle);
+        }
+        if !super::entity::riding::can_start_riding_camel(
+            passenger,
+            passenger_entity.vehicle,
+            &chain,
+            &list,
+        ) {
+            return false;
+        }
+        self.link_riding(passenger, vehicle);
+        true
+    }
+
+    /// 同上，但允许载具带 `max_passengers` 名乘客（骆驼覆写 `canAddPassenger` 后是 2）。
+    ///
+    /// As above, but the vehicle may carry `max_passengers` riders (a camel's
+    /// `canAddPassenger` override allows 2).
+    pub fn start_riding_with_limit(
+        &mut self,
+        passenger: EntityUid,
+        vehicle: EntityUid,
+        max_passengers: usize,
+    ) -> bool {
         let list = match self.level.entity_public(vehicle) {
             Some(public) => match &public.kind {
                 super::entity::KindPublic::Mob(mob) => mob.passengers.clone(),
@@ -2281,17 +2408,36 @@ impl<'a> World<'a> {
                 .entity_public(uid)
                 .and_then(|public| public.vehicle);
         }
-        if !super::entity::riding::can_start_riding(
-            passenger,
-            passenger_entity.vehicle,
-            self.passenger_cooldown(passenger),
-            false,
-            vehicle,
-            &chain,
-            &list,
-        ) {
+        // `Camel.canAddPassenger` 允许两名乘客；其余条件仍按 `startRiding` 的
+        // 基类走（不潜行、冷却已过、不成环）。
+        // `Camel.canAddPassenger` allows two passengers; the other base
+        // `startRiding` conditions (no sneak, no cooldown, no cycle) remain.
+        let allowed = if max_passengers > 1 {
+            super::entity::riding::can_start_riding_camel(
+                passenger,
+                passenger_entity.vehicle,
+                &chain,
+                &list,
+            ) && self.passenger_cooldown(passenger) <= 0
+        } else {
+            super::entity::riding::can_start_riding(
+                passenger,
+                passenger_entity.vehicle,
+                self.passenger_cooldown(passenger),
+                false,
+                vehicle,
+                &chain,
+                &list,
+            )
+        };
+        if !allowed {
             return false;
         }
+        self.link_riding(passenger, vehicle);
+        true
+    }
+
+    fn link_riding(&mut self, passenger: EntityUid, vehicle: EntityUid) {
         self.level.with_just_spawned(passenger, &mut |entity| {
             entity.vehicle = Some(vehicle);
         });
@@ -2300,7 +2446,6 @@ impl<'a> World<'a> {
                 super::entity::riding::add_passenger(&mut mob.passengers, passenger, false);
             });
         });
-        true
     }
 
     fn passenger_cooldown(&self, passenger: EntityUid) -> i32 {

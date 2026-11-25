@@ -258,6 +258,8 @@ impl ProjectileCase {
             MobType::Stray
         } else if self.name.starts_with("bogged_") {
             MobType::Bogged
+        } else if self.name.starts_with("parched_") {
+            MobType::Parched
         } else {
             MobType::Skeleton
         }
@@ -486,12 +488,19 @@ impl ProjectileCase {
         break_pierce: bool,
         break_return: bool,
         break_drowned: bool,
+        break_parched: bool,
     ) {
         if self.skeleton {
-            let mut skeleton = world.prepare_entity(Entity::by_mob_type(
-                self.shooter_kind(),
-                Vec3::new(0.5, 64.0, 0.5),
-            ));
+            // 改坏确认：把焦骸换成普通骷髅，箭上的 600 刻虚弱立刻消失。
+            // Breakage check: replace the parched with a plain skeleton so its
+            // 600-tick weakness arrow disappears.
+            let shooter_kind = if break_parched && self.shooter_kind() == MobType::Parched {
+                MobType::Skeleton
+            } else {
+                self.shooter_kind()
+            };
+            let mut skeleton =
+                world.prepare_entity(Entity::by_mob_type(shooter_kind, Vec3::new(0.5, 64.0, 0.5)));
             skeleton.random = JavaRandom::new(42);
             skeleton.y_rot = 0.0;
             let mob = skeleton.kind.mob_mut().unwrap();
@@ -996,6 +1005,7 @@ impl Report {
             self.break_test.as_deref() == Some("arrow_piercing"),
             self.break_test.as_deref() == Some("trident_return"),
             self.break_test.as_deref() == Some("trident_drowned"),
+            self.break_test.as_deref() == Some("parched_arrow"),
         );
         let mut tracking = EntityTracking::default();
         let mut previous = BTreeSet::new();

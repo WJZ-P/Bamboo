@@ -59,7 +59,7 @@ pub(super) fn finalize_spawn(
         entity.block_position(),
     ));
     // 和蜘蛛骑士一样：副本随机源取完数再写回，好让闭包里能 `&mut World` 排队。
-    let random = crate::random::LegacyRandom::new(world.random().seed());
+    let random = crate::random::LegacyRandom::from_raw_seed(world.random().seed());
     // 官方在这里读的是 `getBoundingBox()`（幼年尺寸），闭包里 `entity` 被借走，
     // 先按值拷出来。
     let (position, yaw) = (entity.position, entity.y_rot);
@@ -91,7 +91,7 @@ pub(super) fn finalize_spawn(
     });
     world.set_level_random_seed(random.seed());
     if kind == MobType::Husk {
-        husk_finalize_spawn(world, entity, reason, special);
+        husk_finalize_spawn(world, entity, reason, special, group);
     }
 }
 
@@ -115,8 +115,10 @@ pub(super) fn special_multiplier(effective: f32) -> f32 {
 /// A null group gets `ZombieGroupData(getSpawnAsBabyOdds(random), true)`; later members
 /// of the group reuse it without drawing.
 fn zombie_group(random: &LegacyRandom, group: &mut Option<SpawnGroup>) -> ZombieGroupData {
-    if let Some(SpawnGroup::Zombie(data)) = group {
-        return *data;
+    match group {
+        Some(SpawnGroup::Zombie(data)) => return *data,
+        Some(SpawnGroup::Husk { zombie, .. }) => return *zombie,
+        _ => {}
     }
     let data = ZombieGroupData {
         is_baby: random.next_float() < 0.05,
@@ -290,33 +292,68 @@ fn replace_modifier(mob: &mut Mob, id: i32, name: &str, amount: f64, operation: 
     });
 }
 
-/// `Husk.finalizeSpawn`：僵尸那一套之后再抽一次捡物；自然生成时，骆驼尸壳的生成盒
-/// 没有碰撞就 `nextFloat() < 0.1` 拿铁矛。Bamboo 还没有骆驼尸壳和焦尸，命中时只给长矛，
-/// 不生成坐骑和骑手。
+/// `Husk.finalizeSpawn`：僵尸那一套之后再抽一次捡物，把组数据换成
+/// `HuskGroupData`（非自然生成时 `triedToSpawnCamelHusk` 直接为真）。只有自然生成、
+/// 这一组还没试过、且骆驼尸壳的生成盒没有碰撞时，才取 `nextFloat() < 0.1`；
+/// 命中后给尸壳一把铁矛，并排队生成尸壳骆驼 + 焦骸两名乘客。
 ///
-/// `Husk.finalizeSpawn`: after the zombie part, roll loot pickup again; for natural
-/// spawns a clear camel-husk spawn box gives `nextFloat() < 0.1` for an iron spear.
-/// Bamboo has no camel husks or parched yet, so a hit only grants the spear without the
-/// mount and rider.
+/// `Husk.finalizeSpawn`: after the zombie part, roll loot pickup again and wrap
+/// the group data in `HuskGroupData` (non-natural spawns mark the try as done).
+/// Only a natural spawn in a group that has not tried yet, with a clear camel-husk
+/// spawn box, draws `nextFloat() < 0.1`. A hit grants the husk an iron spear and
+/// queues the camel husk and parched passengers.
 fn husk_finalize_spawn(
     world: &mut World<'_>,
     entity: &mut Entity,
     reason: SpawnReason,
     special: f32,
+    group: &mut Option<SpawnGroup>,
 ) {
     let can_pick_up_loot = world.random().next_float() < 0.55 * special;
     entity.with_mob(|_, mob| mob.can_pick_up_loot = can_pick_up_loot);
-    if reason != SpawnReason::Natural {
+    // 官方对**每个非空**组数据都新建一份 `HuskGroupData`（连已经是
+    // `HuskGroupData` 的也再包一层），所以同一组里第二只尸壳会再试一次。
+    // `triedToSpawnCamelHusk` 按生成理由重新初始化（非自然生成直接为真）。
+    //
+    // Vanilla wraps *every* non-null group in a fresh `HuskGroupData` (even an
+    // existing one), so the second husk of a group tries again; the flag is
+    // reinitialized from the spawn reason.
+    let tried = match group {
+        Some(SpawnGroup::Zombie(data)) | Some(SpawnGroup::Husk { zombie: data, .. }) => {
+            let data = *data;
+            let tried = reason != SpawnReason::Natural;
+            *group = Some(SpawnGroup::Husk {
+                zombie: data,
+                tried_to_spawn_camel_husk: tried,
+            });
+            tried
+        }
+        _ => reason != SpawnReason::Natural,
+    };
+    if reason != SpawnReason::Natural || tried {
         return;
     }
     let area = camel_husk_spawn_box(entity.block_position());
-    if super::natural::no_collision(world, area) && world.random().next_float() < 0.1 {
+    if !super::natural::no_collision(world, area) {
+        return;
+    }
+    // `triedToSpawnCamelHusk = true` 在概率判定之前，和官方字节码一致。
+    if let Some(SpawnGroup::Husk {
+        tried_to_spawn_camel_husk,
+        ..
+    }) = group
+    {
+        *tried_to_spawn_camel_husk = true;
+    }
+    if world.random().next_float() < 0.1 {
         entity.with_mob(|_, mob| {
             mob.equipment.set(
                 EquipmentSlot::MainHand,
                 ItemStack::new(items::IRON_SPEAR, 1),
             );
         });
+        // 生成入口 `finish_jockeys` 在根实体进表后按官方顺序构造坐骑和骑手。
+        world.queue_husk_jockey();
     }
 }
 

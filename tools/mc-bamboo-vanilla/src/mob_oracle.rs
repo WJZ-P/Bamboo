@@ -51,6 +51,7 @@ mod gen_spawn;
 mod golem;
 mod grazing;
 mod guardian_scene;
+mod husk_jockey;
 mod lightning;
 mod llama_spit;
 mod natural_spawn;
@@ -172,6 +173,7 @@ enum Line {
     VillagerDeath(villager::VillagerDeathCase),
     ZombieVillager(zombie_villager::Case),
     ZombieVillagerSave(zombie_villager::SaveCase),
+    HuskJockey(husk_jockey::Case),
     VillagerBrain(Box<villager::VillagerBrainCase>),
     VillagerPoi(Box<villager::VillagerPoiCase>),
     AttackTarget(Box<attack_target::AttackTargetCase>),
@@ -239,6 +241,9 @@ struct Case {
     ride_passenger: i32,
     #[serde(default = "minus_one")]
     ride_vehicle: i32,
+    /// 第二位生物乘客（尸壳骆驼上的焦骸）。
+    #[serde(default = "minus_one")]
+    ride_passenger2: i32,
     /// 骑乘场景：所有生物都持久化，避开 `checkDespawn` 取数顺序的差异。
     ///
     /// Riding scenes: every mob is persistent, avoiding `checkDespawn` draw order.
@@ -837,6 +842,7 @@ struct CowStep {
 fn zombie_style(name: &str) -> bool {
     [
         "zombie_",
+        "parched_",
         "rabbit_",
         "fox_",
         "wolf_",
@@ -1759,6 +1765,7 @@ impl Report {
                 Line::VillagerDeath(case) => self.replay_villager_death(&case),
                 Line::ZombieVillager(case) => self.replay_zombie_villager(&case),
                 Line::ZombieVillagerSave(case) => self.replay_zombie_villager_save(&case),
+                Line::HuskJockey(case) => self.replay_husk_jockey(&case),
                 Line::VillagerBrain(case) => self.replay_villager_brain(&case),
                 Line::VillagerPoi(case) => self.replay_villager_poi(&case),
                 Line::AttackTarget(case) => self.replay_attack_target(&case),
@@ -2107,6 +2114,8 @@ impl Report {
                     52 => mc_bamboo_blocks::entity::mob::MobType::Drowned,
                     53 => mc_bamboo_blocks::entity::mob::MobType::Pillager,
                     60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
+                    61 => mc_bamboo_blocks::entity::mob::MobType::Parched,
+                    62 => mc_bamboo_blocks::entity::mob::MobType::CamelHusk,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
                 // 幼年标志和破门是僵尸一系专属的起始状态。
@@ -2386,6 +2395,16 @@ impl Report {
             {
                 world.start_riding(passenger, vehicle);
             }
+            // 尸壳骆驼的第二名乘客用放宽到两人的 `canAddPassenger`。
+            if case.ride_passenger2 >= 0
+                && case.ride_vehicle >= 0
+                && let (Some(&passenger), Some(&vehicle)) = (
+                    ids.get(case.ride_passenger2 as usize),
+                    ids.get(case.ride_vehicle as usize),
+                )
+            {
+                world.start_riding_with_limit(passenger, vehicle, 2);
+            }
         }
         let Some(first) = case.steps.first() else {
             self.mismatch(format!("{}: no steps", case.name));
@@ -2393,7 +2412,16 @@ impl Report {
         };
         set_zombie_clock(&mut level, case, 0, break_test);
         accumulate_inhabited(&mut level, 0, self.break_test.as_deref());
-        let ours = snapshot(&level, &ids);
+        let mut ours = snapshot(&level, &ids);
+        // 改坏确认：把第二名乘客的 z 挪一格，静止骑乘场景必须报不一致。
+        // Breakage check: shift the second rider's z; the static riding scene
+        // must report a mismatch.
+        if self.break_test.as_deref() == Some("camel_husk_ride")
+            && case.ride_passenger2 >= 0
+            && let Some(Some(row)) = ours.get_mut(case.ride_passenger2 as usize)
+        {
+            row.z = (f64::from_bits(row.z as u64) + 1.0).to_bits() as i64;
+        }
         self.compare(&case.name, 0, &ours, first);
         self.compare_zombie_player(case, &mut level, 0);
         // 场景开始时的牛也算「刚生成」，但它们在 tick 0 已经建过同步状态，

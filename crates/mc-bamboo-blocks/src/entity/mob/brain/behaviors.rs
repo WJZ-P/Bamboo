@@ -454,7 +454,7 @@ impl Kind {
             Self::AnimalPanic { environmental, .. } => {
                 // `CamelPanic.checkExtraStartConditions`：还要求 `!isMobControlled()`。
                 // `CamelPanic.checkExtraStartConditions`: also requires `!isMobControlled()`.
-                if cx.mob.mob_type == MobType::Camel && cx.mob.controlling_passenger().is_some() {
+                if cx.mob.mob_type.is_camel() && cx.mob.controlling_passenger().is_some() {
                     return false;
                 }
                 let tag = if *environmental {
@@ -498,7 +498,7 @@ impl Kind {
                 }
                 // `CamelPanic.start`：先 `standUpInstantly()` 再走 `super.start()`。
                 // `CamelPanic.start`: `standUpInstantly()` before `super.start()`.
-                if cx.mob.mob_type == MobType::Camel {
+                if cx.mob.mob_type.is_camel() {
                     super::super::camel::stand_up_instantly(cx.mob, cx.time);
                 }
                 cx.memories.set(IsPanicking, MemoryValue::Bool(true));

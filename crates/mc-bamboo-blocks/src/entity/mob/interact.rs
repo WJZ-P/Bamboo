@@ -140,6 +140,7 @@ pub(super) fn is_food(kind: MobType, item: i32) -> bool {
         // `Camel.isFood` 认 `#camel_food`（仙人掌），不走马科的 `horse_food`。
         // `Camel.isFood` uses `#camel_food` (cactus), not the equine `horse_food`.
         MobType::Camel => item_is_tagged(item, item_tags::CAMEL_FOOD),
+        MobType::CamelHusk => item_is_tagged(item, item_tags::CAMEL_HUSK_FOOD),
         kind if kind.is_equine() => {
             item_is_tagged(item, mc_bamboo_data::tags::item_tags::HORSE_FOOD)
         }

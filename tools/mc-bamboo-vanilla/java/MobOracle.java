@@ -319,6 +319,7 @@ public final class MobOracle {
                     "arrow_water_crossing", "arrow_water_after_pierce", "arrow_tipped_hit", "arrow_tipped_fade", "arrow_spectral_hit", "arrow_power_punch_hit",
                     "skeleton_bow_normal", "skeleton_bow_hard",
                     "stray_bow_normal", "bogged_bow_normal", "bogged_bow_hard",
+                    "parched_bow_normal", "parched_bow_hard",
                     "skeleton_freeze", "bogged_shear",
                     "pillager_crossbow_normal", "pillager_crossbow_hard", "pillager_crossbow_multishot",
                     "trident_stick", "trident_loyalty", "trident_owner_offline",
@@ -566,6 +567,9 @@ public final class MobOracle {
             }
             if (only == null || only.startsWith("undead_horse")) {
                 cases += playUndeadHorse(official, out, only);
+            }
+            if (only == null || "husk_jockey".startsWith(only)) {
+                cases += playHuskJockey(official, out, only);
             }
             if (only == null || "skeleton_death".startsWith(only)) {
                 cases += playSkeletonDeaths(official, out);
@@ -851,6 +855,9 @@ public final class MobOracle {
          */
         int ridePassenger = -1;
         int rideVehicle = -1;
+        /** 第二位生物乘客（尸壳骆驼上的焦骸），-1 表示没有。 */
+        /** A second mob passenger (the parched on a camel husk), -1 for none. */
+        int ridePassenger2 = -1;
         /** 骑乘场景：所有生物都 `setPersistenceRequired`，避开 `checkDespawn` 的取数顺序差异。 */
         boolean persisted;
         /** 骑乘场景：所有生物都 `setNoAi(true)`，只比附着点和骑乘状态。 */
@@ -928,6 +935,13 @@ public final class MobOracle {
             this.ridePassenger = passenger;
             this.rideVehicle = vehicle;
             this.persisted = true;
+            return this;
+        }
+
+        /** 尸壳骆驼的第二名乘客：焦骸和尸壳同骑一头坐骑。 */
+        /** A camel husk's second passenger: parched and husk share one mount. */
+        Scene ride2(int passenger) {
+            this.ridePassenger2 = passenger;
             return this;
         }
 
@@ -3253,6 +3267,20 @@ public final class MobOracle {
                 scenes.add(jockey);
             }
             {
+                // 尸壳骆驼（静止）：尸壳与焦骸同骑一头骆驼，NoAI 只比附着点和乘客 tick。
+                // Static camel-husk jockey: husk and parched share one camel, with
+                // NoAI so only the attachment points and passenger ticks are compared.
+                Scene huskCamel = new Scene("camel_husk_ride_static").ticks(80).difficulty(2);
+                huskCamel.clockStart = 18000;
+                huskCamel.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                huskCamel.mob(62, 0.5, 64.0, 0.5, 0.0F, 831L, 0);
+                huskCamel.mob(2, 0.5, 64.0, 0.5, 0.0F, 832L, 0);
+                huskCamel.mob(61, 0.5, 64.0, 0.5, 0.0F, 833L, 0);
+                huskCamel.ride(1, 0).ride2(2).noAi();
+                huskCamel.player(40.5, 64.0, 0.5, Items.AIR);
+                scenes.add(huskCamel);
+            }
+            {
                 // 鸡骑士（静止）：同上，鸡的附着点在头后方。
                 // Static chicken jockey: the chicken's passenger point is behind its head.
                 Scene chicken = new Scene("zombie_ride_chicken").ticks(160).difficulty(2);
@@ -4297,6 +4325,21 @@ public final class MobOracle {
                 burn.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
                 burn.player(20.5, 64.0, 0.5, Items.AIR);
                 scenes.add(burn);
+                // 焦骸（16 血、弓、白天燃烧）：白天着火掉血，夜里不着火。
+                // Parched (16 health, bow, burns in daylight): burns by day, safe at night.
+                Scene parchedDay = new Scene("parched_burn_day").ticks(60).difficulty(2);
+                ground(parchedDay, 12);
+                parchedDay.clockStart = 1000;
+                parchedDay.mob(61, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+                parchedDay.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(parchedDay);
+                Scene parchedNight = new Scene("parched_burn_night").ticks(60).difficulty(2);
+                ground(parchedNight, 12);
+                parchedNight.clockStart = 18000;
+                parchedNight.monstersBurn = false;
+                parchedNight.mob(61, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+                parchedNight.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(parchedNight);
                 Scene night = new Scene("zombie_burn_night").ticks(40).difficulty(2);
                 ground(night, 12);
                 night.clockStart = 18000;
@@ -5787,6 +5830,20 @@ public final class MobOracle {
         }
     }
 
+    /** 焦骸的箭也走官方 `getArrow`（600 刻虚弱），只是像流浪者 / 沼骸那样重新播种。 */
+    /** Parched arrows use vanilla `getArrow` (600-tick weakness), reseeded like strays. */
+    private static final class OracleParched extends net.minecraft.world.entity.monster.skeleton.Parched {
+        OracleParched(FakeLevel level) {
+            super(EntityTypes.PARCHED, level);
+        }
+
+        @Override
+        protected net.minecraft.world.entity.projectile.arrow.AbstractArrow getArrow(
+                ItemStack projectile, float power, ItemStack weapon) {
+            return seededArrow(this, projectile, power, weapon, () -> super.getArrow(projectile, power, weapon));
+        }
+    }
+
     /** 骷髅一支的逐刻状态：实体 ID、类型、index 16 的布尔（转化中 / 已剪）、冻结刻数、血量、主手物品。 */
     private static String skeletonKinState(Mob shooter) {
         boolean flag = shooter instanceof net.minecraft.world.entity.monster.skeleton.Skeleton skeleton
@@ -6047,6 +6104,18 @@ public final class MobOracle {
         scenes.add(new NaturalScene("zombie_villager_day", EntityTypes.ZOMBIE_VILLAGER, "plains",
                 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("husk_night", EntityTypes.HUSK, "desert", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        // 焦骸：沙漠表里的 50 权重条目，和尸壳同走 `checkSurfaceMonstersSpawnRules`
+        // （暗 + 看得见天）。没有玻璃顶，尸壳骆驼分支不会影响这一组。
+        // Parched: the 50-weight desert entry, using the same surface-monster
+        // rules as husks. No glass roof; the camel-husk branch is not involved.
+        scenes.add(new NaturalScene("parched_night", EntityTypes.PARCHED, "desert", 2, 15, 0, 11,
+                false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("parched_day", EntityTypes.PARCHED, "desert", 2, 15, 0, 0,
+                false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("parched_no_sky", EntityTypes.PARCHED, "desert", 2, 0, 0, 11,
+                false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("parched_peaceful", EntityTypes.PARCHED, "desert", 0, 15, 0, 11,
+                false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("skeleton_day", EntityTypes.SKELETON, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("skeleton_torch", EntityTypes.SKELETON, "plains", 2, 0, 1, 11, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("skeleton_thunder", EntityTypes.SKELETON, "desert", 3, 15, 0, 10, true, -32, 0, 289, true, false));
@@ -8425,6 +8494,7 @@ public final class MobOracle {
         // player that is never targeted.
         boolean stray = name.startsWith("stray_");
         boolean bogged = name.startsWith("bogged_");
+        boolean parched = name.startsWith("parched_");
         boolean freeze = name.equals("skeleton_freeze");
         boolean shear = name.equals("bogged_shear");
         boolean passive = freeze || shear;
@@ -8434,7 +8504,7 @@ public final class MobOracle {
         // Piercing. The shooter branches (ground, player position, per-tick shooter state)
         // are shared with the skeletons.
         boolean pillager = name.startsWith("pillager_crossbow");
-        boolean skeleton = name.startsWith("skeleton_") || stray || bogged || pillager;
+        boolean skeleton = name.startsWith("skeleton_") || stray || bogged || parched || pillager;
         boolean wall = name.equals("arrow_hits_wall");
         boolean overlap = name.equals("arrow_block_overlaps_flight");
         boolean noGravity = name.equals("arrow_no_gravity");
@@ -8601,7 +8671,8 @@ public final class MobOracle {
         var sync = new java.util.LinkedHashMap<Integer, Sync>();
         if (skeleton) {
             shooter = pillager ? OraclePillager.create(world)
-                    : stray ? new OracleStray(world) : bogged ? new OracleBogged(world) : new OracleSkeleton(world);
+                    : stray ? new OracleStray(world) : bogged ? new OracleBogged(world)
+                    : parched ? new OracleParched(world) : new OracleSkeleton(world);
             world.entitySeeds.nextLong();
             setRandom(shooter, 42L);
             shooter.setUUID(new UUID(0, 1));
@@ -8765,8 +8836,11 @@ public final class MobOracle {
         var playerStates = new StringBuilder("[");
         var playerPackets = new StringBuilder("[");
         float[] lastSentHealth = {-1.0e8F};
-        int ticks = (effectHit || enchanted) ? 4 : freeze ? 450 : shear ? 12 : bogged ? 150 : pillager ? 190 : skeleton ? 105
-                : (piercing || water) ? 3 : 26;
+        // 焦骸每 70 / 50 刻才射一次，要比骷髅的 105 刻跑得更久才能射出第二支箭。
+        // Parched shoot every 70 / 50 ticks, so they need longer than the skeleton's
+        // 105 ticks to fire a second arrow.
+        int ticks = (effectHit || enchanted) ? 4 : freeze ? 450 : shear ? 12 : bogged || parched ? 200
+                : pillager ? 190 : skeleton ? 105 : (piercing || water) ? 3 : 26;
         int conversions = 0;
         int sheared = 0;
         int embeds = 0;
@@ -9049,6 +9123,7 @@ public final class MobOracle {
                         || !shooter.getMainHandItem().is(Items.BOW))
                 || shear && (sheared != 1 || !((net.minecraft.world.entity.monster.skeleton.Bogged) shooter).isSheared())
                 || stray && !player.hasEffect(MobEffects.SLOWNESS) || bogged && !shear && !player.hasEffect(MobEffects.POISON)
+                || parched && !player.hasEffect(MobEffects.WEAKNESS)
                 || despawn && (embeds < 2 || !arrows.getFirst().isRemoved())
                 || fade && (puffs[0] != 1 || ((net.minecraft.world.entity.projectile.arrow.Arrow) arrows.getFirst()).getColor() != -1)) {
             throw new IllegalStateException("projectile scenario failed to exercise " + name);
@@ -11542,6 +11617,90 @@ public final class MobOracle {
                 cases++;
             }
         }
+        return cases;
+    }
+
+
+    /**
+     * 尸壳自然生成的骑士分支：直接跑官方 `Husk.finalizeSpawn(NATURAL, null)`，
+     * 记录它往假世界里加的实体（尸壳、尸壳骆驼、焦骸）及世界随机源。
+     * `group` 在一组里复用，第二只尸壳不会再试坐骑；带 `_blocked` 的场景在
+     * 头顶放玻璃让生成盒通不过 `noCollision`。
+     *
+     * The camel-husk jockey branch of natural husks: run vanilla
+     * `Husk.finalizeSpawn(NATURAL, null)` and record the entities it adds plus
+     * the level random seed. Group data is reused, so the second husk of a group
+     * never retries the mount; `_blocked` scenes put glass overhead so the
+     * `noCollision` check fails.
+     */
+    private static int playHuskJockey(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (long seed : new long[] {0L, 1L, 2L, 7L, 42L, 12345L, -1L}) {
+            for (String suffix : new String[] {"", "_blocked", "_group"}) {
+                String name = "husk_jockey_" + seed + suffix;
+                if (only != null && !name.startsWith(only)) continue;
+                FakeLevel world = FakeLevel.create(official);
+                world.getRandom().setSeed(seed);
+                world.spawnDifficulty = new DifficultyInstance(Difficulty.NORMAL, 0L, 0L, 0.0F);
+                world.levelEvents = new ArrayList<>();
+                var json = new JsonObject();
+                json.addProperty("initialSeed", levelSeed(world));
+                world.spawned = new ArrayList<>();
+                world.injectedCanSeeSky = false;
+                world.injectedMonstersBurn = false;
+                for (int x = -6; x <= 6; x++) {
+                    for (int z = -6; z <= 6; z++) {
+                        world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                        if (suffix.equals("_blocked")) {
+                            world.blocks.put(BlockPos.asLong(x, 65, z), Blocks.GLASS.defaultBlockState());
+                        }
+                    }
+                }
+                int count = suffix.equals("_group") ? 2 : 1;
+                net.minecraft.world.entity.SpawnGroupData group = null;
+                for (int index = 0; index < count; index++) {
+                    var husk = (net.minecraft.world.entity.monster.zombie.Husk)
+                            EntityTypes.HUSK.create(world, EntitySpawnReason.NATURAL);
+                    husk.snapTo(0.5 + index * 3.0, 64.0, 0.5, 0.0F, 0.0F);
+                    husk.setUUID(new UUID(0L, index + 1));
+                    group = husk.finalizeSpawn(world, world.spawnDifficulty,
+                            EntitySpawnReason.NATURAL, group);
+                    world.addFreshEntity(husk);
+                }
+                var rows = new JsonArray();
+                for (Entity entity : world.spawned) {
+                    var row = new JsonArray();
+                    row.add(BuiltInRegistries.ENTITY_TYPE.getId(entity.getType()));
+                    row.add(Double.doubleToRawLongBits(entity.getX()));
+                    row.add(Double.doubleToRawLongBits(entity.getY()));
+                    row.add(Double.doubleToRawLongBits(entity.getZ()));
+                    // 骆驼尸壳的朝向来自构造时不带种子的随机源，这里只比另外两只。
+                    // A camel husk's facing comes from its unseeded constructor
+                    // random, so only compare the other two mobs here.
+                    boolean camelHusk = entity.getType() == EntityTypes.CAMEL_HUSK;
+                    row.add(camelHusk ? 0 : Float.floatToRawIntBits(entity.getYRot()));
+                    if (entity instanceof net.minecraft.world.entity.LivingEntity living) {
+                        row.add(Float.floatToRawIntBits(living.getHealth()));
+                        row.add(BuiltInRegistries.ITEM.getId(
+                                living.getMainHandItem().getItem()));
+                        row.add(living.isBaby() ? 1 : 0);
+                    } else {
+                        row.add(0); row.add(0); row.add(0);
+                    }
+                    rows.add(row);
+                }
+                json.addProperty("type", "huskJockey");
+                json.addProperty("name", name);
+                json.addProperty("seed", seed);
+                json.addProperty("blocked", suffix.equals("_blocked"));
+                json.addProperty("group", suffix.equals("_group"));
+                json.addProperty("worldSeed", levelSeed(world));
+                json.add("rows", rows);
+                out.write(json + "\n");
+                cases++;
+            }
+        }
+        out.flush();
         return cases;
     }
 
@@ -14297,6 +14456,10 @@ public final class MobOracle {
                 case 18 -> EntityTypes.FROG.create(level, EntitySpawnReason.COMMAND);
                 case 19 -> EntityTypes.TADPOLE.create(level, EntitySpawnReason.COMMAND);
                 case 20 -> EntityTypes.CAMEL.create(level, EntitySpawnReason.COMMAND);
+                // 61 焦骸、62 尸壳骆驼。
+                // 61 parched, 62 camel husk.
+                case 61 -> new net.minecraft.world.entity.monster.skeleton.Parched(EntityTypes.PARCHED, level);
+                case 62 -> new net.minecraft.world.entity.animal.camel.CamelHusk(EntityTypes.CAMEL_HUSK, level);
                 case 21 -> EntityTypes.OCELOT.create(level, EntitySpawnReason.COMMAND);
                 case 22 -> EntityTypes.CAT.create(level, EntitySpawnReason.COMMAND);
                 case 23 -> EntityTypes.PARROT.create(level, EntitySpawnReason.COMMAND);
@@ -14408,12 +14571,18 @@ public final class MobOracle {
                         mobs.get(scene.rideVehicle), false, false)) {
             throw new IllegalStateException("Mob rider could not mount in " + scene.name);
         }
+        if (scene.ridePassenger2 >= 0
+                && !mobs.get(scene.ridePassenger2).startRiding(
+                        mobs.get(scene.rideVehicle), false, false)) {
+            throw new IllegalStateException("Second mob rider could not mount in " + scene.name);
+        }
         StringBuilder line = new StringBuilder(1 << 18);
         line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
         line.append(",\"firstId\":").append(FIRST_ID);
         line.append(",\"rider\":").append(scene.rider);
         line.append(",\"ridePassenger\":").append(scene.ridePassenger);
         line.append(",\"rideVehicle\":").append(scene.rideVehicle);
+        line.append(",\"ridePassenger2\":").append(scene.ridePassenger2);
         line.append(",\"persisted\":").append(scene.persisted);
         line.append(",\"noAi\":").append(scene.noAi);
         line.append(",\"bowRider\":").append(scene.bowRider);
@@ -14727,6 +14896,15 @@ public final class MobOracle {
         }
         line.append("]");
         PillagerScenes.check(scene, mobs);
+        // 焦骸日晒场景必须真的着火掉血，夜间场景不能着火。
+        // The parched day scene must burn and take damage; the night scene must not.
+        if (scene.name.equals("parched_burn_day")
+                && (mobs.getFirst().getHealth() >= 16.0F || mobs.getFirst().getRemainingFireTicks() <= 0)) {
+            throw new IllegalStateException("parched day scene never burned");
+        }
+        if (scene.name.equals("parched_burn_night") && mobs.getFirst().getRemainingFireTicks() > 0) {
+            throw new IllegalStateException("parched night scene burned unexpectedly");
+        }
         if (scene.name.equals("witch_drink_fire")) {
             Mob witch = mobs.getFirst();
             if (!witch.hasEffect(net.minecraft.world.effect.MobEffects.FIRE_RESISTANCE) || witch.getHealth() != 26.0F) {

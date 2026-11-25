@@ -203,7 +203,7 @@ pub(super) fn finalize_spawn(
 ) {
     // `world.random()` 是可变内部状态的 `&LegacyRandom`；排队时要 `&mut World`，
     // 所以先按值拷一份同种子的随机源给这次 `finalizeSpawn`，取完数再把种子写回去。
-    let random = crate::random::LegacyRandom::new(world.random().seed());
+    let random = crate::random::LegacyRandom::from_raw_seed(world.random().seed());
     finalize_spawn_with_random(world, entity, group, &random);
     world.set_level_random_seed(random.seed());
 }
