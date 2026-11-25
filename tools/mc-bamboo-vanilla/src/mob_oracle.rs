@@ -361,6 +361,9 @@ struct Case {
     /// 袭击行为场景：{centerX, centerY, centerZ, status(0 ongoing/1 victory/2 loss/3 stopped), started, active, groupsSpawned, omenLevel}。
     #[serde(default)]
     raid: Option<[i32; 8]>,
+    /// 把 `blocks` 里的 POI 方块（床/钟/工作站）登记进 `poi` 表，袭击者穿村/村民认领会用到。
+    #[serde(default)]
+    poi: bool,
     #[serde(default)]
     player_health: i32,
     #[serde(default)]
@@ -2731,6 +2734,9 @@ impl Report {
             level
                 .blocks
                 .insert(BlockPos::new(x, y, z), BlockState(state as u32));
+        }
+        if case.poi {
+            level.register_poi_from_blocks();
         }
         if case.name.ends_with("_no_grief") {
             // 和 `MobOracle.play` 一样按场景名关掉 `mobGriefing`。

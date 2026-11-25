@@ -1210,6 +1210,13 @@ public final class MobOracle {
             return this;
         }
 
+        /** 开启真 POI 管理器，把 `blocks` 里的 POI 方块（床/钟/工作站）登记进去。 */
+        boolean poi;
+        Scene poi() {
+            this.poi = true;
+            return this;
+        }
+
         /** 僵尸场景：第 `sleepTick` 刻开头 0 号玩家右键床头 `bed`（`startSleepInBed`）。 */
         int sleepTick = -1;
         int[] bed;
@@ -2530,20 +2537,25 @@ public final class MobOracle {
             Scene door = new Scene("raid_mob_vindicator_door").ticks(320).difficulty(3);
             Scenes.ground(door, 24);
             door.clockStart = 2000;
-            door.raid(0, 64, 0, 0, 1, 1, 1, 3);
-            door.fill(2, 64, 0, 3, 66, 0, Blocks.OAK_PLANKS.defaultBlockState());
-            door.fill(2, 64, -3, 3, 66, 3, Blocks.OAK_PLANKS.defaultBlockState());
-            door.mob(54, 0.5, 64.0, 0.5, 0.0F, 8101L, 0);
-            door.mob(56, 4.5, 64.0, 0.5, 180.0F, 8102L, 0);
+            door.raid(8, 64, 0, 0, 1, 1, 1, 3);
+            door.set(0, 64, 0, Blocks.OAK_DOOR.defaultBlockState());
+            door.set(0, 65, 0, Blocks.OAK_DOOR.defaultBlockState().setValue(
+                    net.minecraft.world.level.block.state.properties.BlockStateProperties.DOUBLE_BLOCK_HALF,
+                    net.minecraft.world.level.block.state.properties.DoubleBlockHalf.UPPER));
+            door.mob(54, -3.5, 64.0, 0.5, 0.0F, 8101L, 0);
             scenes.add(door);
             // 劫掠兽咆哮踩树叶：袭击里的一只劫掠兽，身前一片树叶，水平碰撞时踩坏。
-            Scene leaves = new Scene("raid_mob_ravager_roar").ticks(120).difficulty(2);
+            Scene leaves = new Scene("raid_mob_ravager_roar").ticks(120).difficulty(2).poi();
             Scenes.ground(leaves, 24);
             leaves.clockStart = 2000;
             leaves.raid(0, 64, 0, 0, 1, 1, 1, 3);
             for (int x = 1; x <= 4; x++) {
                 leaves.fill(x, 64, -1, x, 64, 1, Blocks.OAK_LEAVES.defaultBlockState());
             }
+            leaves.set(12, 64, 0, Blocks.BED.red().defaultBlockState());
+            leaves.set(12, 64, -1, Blocks.BED.red().defaultBlockState().setValue(
+                    net.minecraft.world.level.block.state.properties.BlockStateProperties.BED_PART,
+                    net.minecraft.world.level.block.state.properties.BedPart.HEAD));
             leaves.mob(55, 0.5, 64.0, 0.5, 0.0F, 8201L, 0);
             scenes.add(leaves);
             // 袭击判负庆祝：一只掠夺者在已判负的袭击里，`RaiderCelebration` 开始庆祝。
@@ -17100,6 +17112,9 @@ public final class MobOracle {
         levels.put(net.minecraft.world.level.Level.OVERWORLD, level);
         put(MinecraftServer.class, official.server, "levels", levels);
         level.blocks.putAll(scene.blocks);
+        if (scene.poi) {
+            level.enableRealPoi();
+        }
         level.injectedSkyDarken = scene.skyDarken;
         level.injectedRaining = scene.raining;
         level.injectedBrightOutside = scene.brightOutside;
@@ -17501,6 +17516,7 @@ public final class MobOracle {
                 : "[" + scene.raid[0] + "," + scene.raid[1] + "," + scene.raid[2] + ","
                         + scene.raid[3] + "," + scene.raid[4] + "," + scene.raid[5] + ","
                         + scene.raid[6] + "," + scene.raid[7] + "]");
+        line.append(",\"poi\":").append(scene.poi);
         line.append(",\"difficulty\":").append(scene.difficulty);
         line.append(",\"skyDarken\":").append(scene.skyDarken);
         line.append(",\"raining\":").append(scene.raining);
