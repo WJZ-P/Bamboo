@@ -734,13 +734,20 @@ fn sound(cx: &mut Cx, name: &'static str, volume: f32, pitch: f32) {
     });
 }
 
+/// `LivingEntity.getVoicePitch()`：两次实体随机数决定音高。
+///
+/// `LivingEntity.getVoicePitch()`: two entity random draws determine the pitch.
+fn voice_pitch(me: &mut Entity) -> f32 {
+    let first = me.random.next_float();
+    let second = me.random.next_float();
+    (first - second) * 0.2 + 1.0
+}
+
 /// `Warden.doHurtTarget`：`super.doHurtTarget`（ATTACK_DAMAGE = 30 的近战伤害）、
 /// `WARDEN_ATTACK_IMPACT`（`getVoicePitch` 消耗实体随机源两次）、40 刻音波冷却。
 fn melee_damage(cx: &mut Cx, target: crate::entity::EntityUid) {
     super::living::do_hurt_target(cx.me, cx.mob, cx.ctx, target);
-    let first = cx.me.random.next_float();
-    let second = cx.me.random.next_float();
-    let pitch = (first - second) * 0.2 + 1.0;
+    let pitch = voice_pitch(cx.me);
     cx.mob.events.push(MobEvent::Sound {
         sound: "minecraft:entity.warden.attack_impact",
         volume: 10.0,
@@ -797,6 +804,53 @@ pub fn increase_anger_at(
         cx.memories.erase(M::AttackTarget);
     }
     sync_client_anger(cx);
+}
+
+/// `Warden.doPush`：没有推挤冷却时起 20 刻冷却、加 35 点愤怒、把对方脚下的
+/// 方块设成调查点。推挤本身由 `living::push_entities` 完成。
+///
+/// `Warden.doPush`: without a touch cooldown, start a 20-tick cooldown, add 35
+/// anger and set the disturbance location to the pushed entity's block position.
+pub fn do_push(me: &mut Entity, mob: &mut Mob, pushed: &[(EntityUid, Vec3)]) {
+    for (uid, position) in pushed {
+        if mob.no_ai
+            || mob
+                .brain
+                .as_ref()
+                .is_some_and(|brain| brain.memories.has(M::TouchCooldown))
+            || *uid == me.id
+        {
+            continue;
+        }
+        let uuid = crate::archive::entity::entity_uuid(*uid).to_be_bytes();
+        let is_player = *uid < crate::entity::FIRST_ENTITY_ID;
+        if let Some(brain) = mob.brain.as_mut() {
+            brain
+                .memories
+                .set_with_ttl(M::TouchCooldown, MemoryValue::Unit, 20);
+        }
+        let was_not_player = mob
+            .brain
+            .as_ref()
+            .and_then(|brain| brain.memories.entity(M::AttackTarget))
+            .is_none_or(|target| target >= crate::entity::FIRST_ENTITY_ID);
+        let anger = mob
+            .warden
+            .anger
+            .increase_anger(*uid, uuid, 35, is_player);
+        if is_player
+            && was_not_player
+            && super::warden::AngerLevel::by_anger(anger).is_angry()
+            && let Some(brain) = mob.brain.as_mut()
+        {
+            brain.memories.erase(M::AttackTarget);
+        }
+        // `increaseAngerAt(entity)` 带播放监听声，消耗实体随机源两次。
+        if mob.warden.pose != WardenPose::Roaring {
+            let _ = voice_pitch(me);
+        }
+        set_disturbance(mob, BlockPos::containing(*position));
+    }
 }
 
 /// `WardenAi.setDigCooldown`：只在 `DIG_COOLDOWN` 已存在时刷新 1200 刻。
@@ -1017,10 +1071,7 @@ impl WardenVibrationUser<'_> {
             brain.memories.erase(M::AttackTarget);
         }
         if play_sound && self.mob.warden.pose != super::warden::WardenPose::Roaring {
-            // `getVoicePitch()` 取两次实体随机数；音高本身不影响对拍。
-            let first = self.me.random.next_float();
-            let second = self.me.random.next_float();
-            let pitch = (first - second) * 0.2 + 1.0;
+            let pitch = voice_pitch(self.me);
             self.mob.events.push(MobEvent::Sound {
                 sound: self.mob.warden.anger.anger_level().listening_sound(),
                 volume: 10.0,
@@ -1090,10 +1141,13 @@ impl VibrationUser for WardenVibrationUser<'_> {
                 .set_with_ttl(M::VibrationCooldown, MemoryValue::Unit, 40);
         }
         self.mob.events.push(MobEvent::EntityEvent { event: 61 });
+        // `playSound(WARDEN_TENDRIL_CLICKS, 5.0, getVoicePitch())`：两次实体随机数。
+        // `playSound(WARDEN_TENDRIL_CLICKS, 5.0, getVoicePitch())`: two entity draws.
+        let pitch = voice_pitch(self.me);
         self.mob.events.push(MobEvent::Sound {
             sound: "minecraft:entity.warden.tendril_clicks",
             volume: 5.0,
-            pitch: 1.0,
+            pitch,
             position: self.me.position,
             hostile: true,
             seed: None,

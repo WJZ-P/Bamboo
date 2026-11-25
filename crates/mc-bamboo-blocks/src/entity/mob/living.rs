@@ -2765,6 +2765,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // Skip own passengers and a rider just ejected this tick.
     let ejected = mob.ejected_passenger.take();
     let mut players = Vec::new();
+    let mut pushed_players = Vec::new();
     ctx.blocks().for_each_player(&mut |player| {
         if player.alive
             && !player.spectator
@@ -2773,6 +2774,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             && super::avoid::player_box(player).intersects(bounds)
         {
             players.push(player.position);
+            pushed_players.push((player.uid, player.position));
         }
     });
     // `maxEntityCramming` 的伤害判定用的是**没截断**的名单：Paper 的
@@ -2811,6 +2813,13 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         );
     }
     timing::record_push!(others.len() as u64);
+    // `Warden.doPush` 在逐个推开之前先按「实体、再玩家」的枚举顺序记账。
+    // `Warden.doPush` runs before the pushes, in the entity-then-player iteration order.
+    if mob.mob_type == super::MobType::Warden {
+        let mut pushed: Vec<_> = others.iter().map(|(uid, pos)| (*uid, *pos)).collect();
+        pushed.extend_from_slice(&pushed_players);
+        super::warden_ai::do_push(me, mob, &pushed);
+    }
     // `Entity.push(Entity)` 只有 `!entity.isVehicle()` 才推得动自己这一半；载具和它的
     // 乘客共享 root vehicle，整对被 `isPassengerOfSameVehicle` 跳过，所以这里也不推。
     // `Entity.push(Entity)` pushes its own half only when `!entity.isVehicle()`; a
