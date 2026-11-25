@@ -108,6 +108,40 @@ mod base64_stub {
     }
 }
 
+/// `parrotShoulder`：官方 `ServerPlayer` 左右肩膀的鹦鹉品种，逐刻对拍。
+///
+/// `parrotShoulder`: the official player's left/right shoulder parrot variants,
+/// compared tick by tick.
+#[derive(Debug, Deserialize)]
+struct ParrotShoulderCase {
+    name: String,
+    #[serde(rename = "perchTick")]
+    perch_tick: i32,
+    #[serde(rename = "perchTick2")]
+    perch_tick2: i32,
+    #[serde(rename = "jumpTick")]
+    jump_tick: i32,
+    #[serde(rename = "perchVariant")]
+    perch_variant: i32,
+    #[serde(rename = "perchVariant2")]
+    perch_variant2: i32,
+    steps: Vec<ShoulderStep>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShoulderStep {
+    left: i32,
+    right: i32,
+}
+
+/// MobLevel 假世界里 0 号玩家的肩膀状态（选 A）：左右肩品种和上肩后的相对刻数。
+#[derive(Default)]
+struct ShoulderSlots {
+    left: Option<i32>,
+    right: Option<i32>,
+    since: i32,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum Line {
@@ -139,6 +173,7 @@ enum Line {
     EquineInteract(equine::InteractCase),
     EquineDeath(equine::DeathCase),
     EquineSave(equine::SaveCase),
+    ParrotShoulder(ParrotShoulderCase),
     PigMount(pig_ride::MountCase),
     PigBoost(pig_ride::BoostCase),
     PigDismount(pig_ride::DismountCase),
@@ -1915,6 +1950,7 @@ impl Report {
                 Line::EquineInteract(case) => self.replay_equine_interact(case),
                 Line::EquineDeath(case) => self.replay_equine_death(case),
                 Line::EquineSave(case) => self.replay_equine_save(case),
+                Line::ParrotShoulder(case) => self.replay_parrot_shoulder(&case),
                 Line::LlamaSpit(case) => self.replay_llama_spit(&case),
                 Line::WitchThrow(case) => self.replay_witch_throw(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
@@ -1934,6 +1970,54 @@ impl Report {
             }
         }
         Ok(())
+    }
+
+    /// `parrotShoulder`：在 MobLevel 假世界里建一份玩家肩膀状态（选 A），按官方
+    /// `setEntityOnShoulder`（左肩先）和 20 刻后跳起离肩逐刻对拍左右肩的品种。
+    fn replay_parrot_shoulder(&mut self, case: &ParrotShoulderCase) {
+        self.cases += 1;
+        let mut slots = ShoulderSlots {
+            since: i32::MAX,
+            ..ShoulderSlots::default()
+        };
+        let break_test = self.break_test.clone();
+        for (index, expected) in case.steps.iter().enumerate() {
+            let tick = index as i32 + 1;
+            slots.since = slots.since.saturating_add(1);
+            // 官方 `ShoulderRidingEntity.setEntityOnShoulder`：左肩空先左。
+            if tick == case.perch_tick {
+                slots.left = Some(case.perch_variant);
+                slots.since = 0;
+            }
+            if tick == case.perch_tick2 {
+                slots.right = Some(case.perch_variant2);
+                slots.since = 0;
+            }
+            // 官方 `removeEntitiesOnShoulder`：`time + 20 < gameTime` 才清空并 respawn。
+            if tick == case.jump_tick && slots.since > 20 {
+                slots.left = None;
+                slots.right = None;
+                slots.since = i32::MAX;
+            }
+            // 改坏确认：故意把一侧肩膀的值改错，对拍必须报不一致。
+            let left = if break_test.as_deref() == Some("shoulder_left") {
+                -1
+            } else {
+                slots.left.unwrap_or(-1)
+            };
+            let right = if break_test.as_deref() == Some("shoulder_right") {
+                -1
+            } else {
+                slots.right.unwrap_or(-1)
+            };
+            if left != expected.left || right != expected.right {
+                self.mismatch(format!(
+                    "{} tick {}: left official {} bamboo {} right official {} bamboo {}",
+                    case.name, tick, expected.left, left, expected.right, right
+                ));
+            }
+            self.steps += 1;
+        }
     }
 
     fn check_header(&mut self, header: &Header) -> Result<(), String> {

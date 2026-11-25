@@ -345,6 +345,9 @@ public final class MobOracle {
             if (only == null || "equine".startsWith(only)) {
                 cases += playEquines(official, out);
             }
+            if (only == null || "parrot_shoulder".startsWith(only)) {
+                cases += playParrotShoulder(official, out);
+            }
             if (only == null || "panda".startsWith(only)) {
                 cases += playPandaGenes(official, out);
             }
@@ -8029,6 +8032,74 @@ public final class MobOracle {
             }
         }
         return cases;
+    }
+
+    /**
+     * 鹦鹉站肩膀：官方 `ShoulderRidingEntity.setEntityOnShoulder` 把整只鹦鹉存进玩家
+     * 左右肩并 discard，20 刻后玩家跳起（`fallDistance > 0.5`）触发
+     * `handleShoulderEntities` 离肩并 respawn。每刻输出左右肩的 `Variant`（空为 -1），
+     * 让 Bamboo 一侧逐刻对拍这份客户端画肩膀鹦鹉用的元数据。
+     *
+     * Parrot on shoulder: vanilla `setEntityOnShoulder` stores the whole parrot in
+     * the player's shoulder and discards it; after 20 ticks a jump (fallDistance >
+     * 0.5) makes `handleShoulderEntities` remove and respawn it. Each tick emits
+     * both shoulders' Variant (-1 when empty) for Bamboo to compare.
+     */
+    private static int playParrotShoulder(Official official, Writer out) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+        ServerPlayer player = new ServerPlayer(official.server, world, profile,
+                ClientInformation.createDefault());
+        player.setPos(0.5, 64.0, 0.5);
+        // 假世界不跑物理，显式让官方 `setEntityOnShoulder` 的 onGround 条件成立。
+        player.setOnGround(true);
+        ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+        ((RecordingListener) connection).bytes = new Bytes(official.registries);
+        put(ServerPlayer.class, player, "connection", connection);
+        var parrot = EntityTypes.PARROT.create(world, EntitySpawnReason.COMMAND);
+        parrot.setPos(0.5, 64.0, 0.5);
+        setRandom(parrot, 77001L);
+        @SuppressWarnings("unchecked")
+        var variantId = (net.minecraft.network.syncher.EntityDataAccessor<Integer>) readStatic(
+                net.minecraft.world.entity.animal.parrot.Parrot.class, "DATA_VARIANT_ID");
+        parrot.getEntityData().set(variantId, 2);
+        world.tracked.add(parrot);
+        var parrot2 = EntityTypes.PARROT.create(world, EntitySpawnReason.COMMAND);
+        parrot2.setPos(0.5, 64.0, 0.5);
+        parrot2.getEntityData().set(variantId, 4);
+        world.tracked.add(parrot2);
+        StringBuilder steps = new StringBuilder("[");
+        for (int tick = 1; tick <= 40; tick++) {
+            world.gameTime++;
+            if (tick == 5) {
+                parrot.setEntityOnShoulder(player);
+            }
+            if (tick == 6) {
+                parrot2.setEntityOnShoulder(player);
+            }
+            if (tick == 30) {
+                player.fallDistance = 1.0;
+            }
+            player.handleShoulderEntities();
+            int left = player.getShoulderEntityLeft().isEmpty() ? -1
+                    : player.getShoulderEntityLeft().getIntOr("Variant", -1);
+            int right = player.getShoulderEntityRight().isEmpty() ? -1
+                    : player.getShoulderEntityRight().getIntOr("Variant", -1);
+            if (tick > 1) steps.append(',');
+            steps.append("{\"left\":").append(left).append(",\"right\":").append(right).append('}');
+            if (tick == 30) player.fallDistance = 0.0;
+        }
+        steps.append(']');
+        out.write("{\"type\":\"parrotShoulder\",\"name\":\"parrot_shoulder\","
+                + "\"perchTick\":5,\"perchTick2\":6,\"jumpTick\":30,"
+                + "\"perchVariant\":2,\"perchVariant2\":4,\"steps\":"
+                + steps + "}\n");
+        return 1;
     }
 
     /** 六种初始状态：0 野生满血、1 野生残血高脾气、2 驯服满血、3 驯服残血带鞍带护甲带箱子、4 驯服幼崽残血、5 野生幼崽。 */
@@ -20221,6 +20292,15 @@ public final class MobOracle {
             }
             spawned.add(entity);
             return true;
+        }
+
+        @Override
+        public boolean addWithUUID(net.minecraft.world.entity.Entity entity) {
+            // 官方 `ServerPlayer.respawnEntityOnShoulder` 走 addWithUUID；假世界没有
+            // entityManager，接到 addFreshEntity 收集实体即可，避免空指针。
+            // Vanilla's respawnEntityOnShoulder calls addWithUUID; the fake world has
+            // no entityManager, so route it to addFreshEntity.
+            return addFreshEntity(entity);
         }
 
         /** 按幼崽 / 掉落物的构造顺序给新实体换上岛的种子源，并重放构造取数。 */
