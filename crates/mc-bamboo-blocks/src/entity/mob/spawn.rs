@@ -482,6 +482,24 @@ fn finalize_spawn_in_group(
         super::axolotl::finalize_spawn(world, entity, reason, group);
         return;
     }
+    if super::nautilus::is_nautilus(kind) {
+        // `AbstractNautilus.finalizeSpawn`：先用世界随机源记攻击冷却，再走
+        // `AgeableMob` / `Mob` 那两层；僵尸版还要按群系标签定变种。
+        //
+        // `AbstractNautilus.finalizeSpawn`: record the attack cooldown from the
+        // level random, then the `AgeableMob` / `Mob` layers; the zombie version
+        // also picks the variant from the biome tag.
+        super::nautilus_ai::init_memories(
+            entity.kind.mob_mut().expect("nautilus row"),
+            world.random(),
+        );
+        let biome = world.biome_id(entity.block_position());
+        if kind == MobType::ZombieNautilus {
+            entity.with_mob(|_, mob| super::nautilus_ai::finalize_variant(mob, biome));
+        }
+        finalize_ageable(entity, world.random(), group, 0.05);
+        return;
+    }
     if kind.is_equine() {
         // `Camel.finalizeSpawn`：先 `initMemories`（空、不取数）和
         // `resetLastPoseChangeTickToFullStand(gameTime)`，再走 `AbstractHorse.finalizeSpawn`。

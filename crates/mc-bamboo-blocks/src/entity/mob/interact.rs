@@ -233,6 +233,9 @@ pub fn interact(
     if mob.mob_type.is_equine() {
         return super::equine::interact(me, mob, req);
     }
+    if super::nautilus::is_nautilus(mob.mob_type) {
+        return super::nautilus::interact(me, mob, req);
+    }
     // `Dolphin.mobInteract`：手里是 `#fishes` 时放吃鱼声，幼崽加速长大、成年记下
     // `gotFish`，并消费一个鱼。这是它自己的 `mobInteract`，不走 `Animal.mobInteract`。
     // `Dolphin.mobInteract`: a `#fishes` item plays the eat sound, ages a baby up or

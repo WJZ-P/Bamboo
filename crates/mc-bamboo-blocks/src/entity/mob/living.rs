@@ -119,6 +119,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Skeleton {
         super::conversion::tick_freezing(me, mob, ctx);
     }
+    // `AbstractNautilus.tick` 在 `super.tick()` 之后：冲刺冷却、气泡取数。
+    // `AbstractNautilus.tick` runs after `super.tick()`: dash cooldown and bubbles.
+    if super::nautilus::is_nautilus(mob.mob_type) {
+        super::nautilus::tick(me, mob);
+    }
     // `Creeper.tick` 在 `super.tick()` 之前推进膨胀，可能当刻爆炸。
     // `Creeper.tick` advances the swell before `super.tick()` and may explode here.
     if mob.mob_type == super::MobType::Creeper {
@@ -538,7 +543,12 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `EnchantmentHelper.tickEffects` at the head of vanilla `LivingEntity.baseTick`.
     super::enchantment_wiring::tick(me, mob, ctx);
     mob_base_tick(me, mob, ctx);
-    if super::squid::is_squid(mob.mob_type) || super::fish::is_fish(mob.mob_type) {
+    if super::nautilus::is_nautilus(mob.mob_type) {
+        // `Nautilus.handleAirSupply`：水里回满 300，离水每刻掉 1，到 -20 受 2 点干死伤害。
+        // `Nautilus.handleAirSupply`: refill to 300 in water, decrement on land,
+        // and take two dry-out damage at -20.
+        super::water::handle_air_supply(me, mob, ctx, pre_tick_air);
+    } else if super::squid::is_squid(mob.mob_type) || super::fish::is_fish(mob.mob_type) {
         // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply`（鱿鱼和鱼）。
         // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply` (squid and fish).
         super::water::handle_air_supply(me, mob, ctx, pre_tick_air);
@@ -798,6 +808,12 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
     match mob.mob_type {
         kind if kind.has_no_ambient_sound() => None,
+        // `Nautilus.getAmbientSound`：幼年 / 成年、水下 / 岸上四套；僵尸版两套。
+        // `Nautilus.getAmbientSound`: four water/land and baby/adult variants;
+        // the zombie version has two.
+        kind if super::nautilus::is_nautilus(kind) => {
+            super::nautilus::ambient_voice(kind, mob.is_baby(), me.in_water)
+        }
         super::MobType::Turtle if me.in_water || !me.on_ground || mob.is_baby() => None,
         // `Dolphin.getAmbientSound`：水里 / 水外两种。
         // `Dolphin.getAmbientSound`: water / land variants.
@@ -819,6 +835,16 @@ fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
     // 守卫者 / 远古守卫者：环境、受伤、死亡音都分水中 / 岸上两套。
     // Guardian / elder guardian: ambient, hurt and death sounds all have water / land
     // variants.
+    if super::nautilus::is_nautilus(mob.mob_type) {
+        let which = match voice {
+            Voice::Ambient => super::nautilus::Voice::Ambient,
+            Voice::Hurt => super::nautilus::Voice::Hurt,
+            Voice::Death => super::nautilus::Voice::Death,
+            Voice::Eat => super::nautilus::Voice::Eat,
+            Voice::Angry => super::nautilus::Voice::Hurt,
+        };
+        return super::nautilus::voice(mob.mob_type, mob.is_baby(), in_water, which);
+    }
     if super::guardian::is_guardian(mob.mob_type) {
         let elder = mob.mob_type == super::MobType::ElderGuardian;
         return match voice {
@@ -1362,10 +1388,12 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
         // `tickRidden` and zeroes the velocity. The position comes from the client's
         // `move_vehicle` packet.
         if let Some(rider) = mob.controlling_passenger() {
-            if let Some(view) = ctx.player(rider)
-                && mob.mob_type.is_equine()
-            {
-                super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
+            if let Some(view) = ctx.player(rider) {
+                if mob.mob_type.is_equine() {
+                    super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
+                } else if super::nautilus::is_nautilus(mob.mob_type) {
+                    super::nautilus_ai::ridden_rotation(me, mob, view.yaw, view.pitch);
+                }
             }
             me.delta = Vec3::default();
         } else if mob.mob_type == super::MobType::Phantom {
@@ -1823,6 +1851,11 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // `SmoothSwimmingLookControl(this, 10)`.
         super::smooth_swim::move_tick(me, mob, &super::smooth_swim::FROG);
         super::smooth_swim::look_tick(me, mob, 10.0);
+    } else if super::nautilus::is_nautilus(mob.mob_type) {
+        // `AbstractNautilus` 的 `SmoothSwimmingMoveControl` / `SmoothSwimmingLookControl`。
+        // The `AbstractNautilus` smooth-swimming move and look controls.
+        super::smooth_swim::move_tick(me, mob, &super::nautilus::MOVE_PARAMS);
+        super::smooth_swim::look_tick(me, mob, 10.0);
     } else if mob.mob_type == super::MobType::Bee {
         // `Bee`: `FlyingMoveControl(this, 20, true)` + `BeeLookControl`（生气时跳过，授粉时不重置俯仰）。
         // `Bee`: `FlyingMoveControl(this, 20, true)` + `BeeLookControl` (skipped while angry;
@@ -1883,6 +1916,9 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     }
     if mob.mob_type == super::MobType::Villager {
         super::villager_ai::custom_server_ai_step(me, mob, ctx, decision_gap);
+    }
+    if super::nautilus::is_nautilus(mob.mob_type) {
+        super::nautilus_ai::custom_server_ai_step(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::ElderGuardian {
         // `ElderGuardian.customServerAiStep`：范围挖掘疲劳和家。
@@ -2388,6 +2424,10 @@ fn handle_on_climbable(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView, del
 fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) {
     // `AbstractFish.travelInWater` 整个换掉了水里的推进。
     // `AbstractFish.travelInWater` replaces the whole in-water path.
+    if me.in_water && super::nautilus::is_nautilus(mob.mob_type) {
+        super::nautilus::travel_in_water(me, mob, ctx, input);
+        return;
+    }
     if me.in_water && super::fish::is_fish(mob.mob_type) {
         super::fish::travel_in_water(me, mob, ctx, input);
         return;

@@ -59,6 +59,18 @@ impl Station {
         } else {
             EquipmentSlot::Body
         };
+        if mc_bamboo_blocks::entity::mob::nautilus::is_nautilus(mount.mob_type) {
+            // `NautilusInventoryMenu` 的两格也要按驯服 / 成年判 `canUseSlot`：
+            // 菜单里的 `saddle_usable` 每次 `pull` 都从生物刷新。
+            // The two `NautilusInventoryMenu` slots also check `canUseSlot`; the
+            // menu's `saddle_usable` is refreshed from the mob on every pull.
+            return mc_bamboo_blocks::entity::mob::nautilus::inventory_accepts_with_flag(
+                mount.mob_type,
+                mount.saddle_usable,
+                slot,
+                stack,
+            );
+        }
         inventory::accepts(mount.mob_type, mount.saddle_usable, slot, stack)
     }
 

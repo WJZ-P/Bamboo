@@ -408,6 +408,12 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if super::tame::is_tamable(mob.mob_type) {
         write_tame(&mut out, mob);
     }
+    if mob.mob_type == MobType::ZombieNautilus {
+        // `VariantUtils.writeVariant`：僵尸鹦鹉螺的 `variant` 键。
+        // `VariantUtils.writeVariant`: the zombie nautilus's `variant` key.
+        let name = super::nautilus::Variant::from_id(mob.nautilus.variant).name();
+        put(&mut out, "variant", Tag::String(name.to_owned()));
+    }
     if mob.mob_type == MobType::Wolf {
         write_wolf(&mut out, mob);
     }
@@ -828,6 +834,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if super::tame::is_tamable(mob.mob_type) {
             read_tame(mob, tag);
+        }
+        if mob.mob_type == MobType::ZombieNautilus
+            && let Some(variant) =
+                tag::string_or(tag, "variant").and_then(super::nautilus::Variant::from_name)
+        {
+            mob.nautilus.variant = variant.registry_id();
         }
         if mob.mob_type == MobType::Wolf {
             read_wolf(mob, tag);

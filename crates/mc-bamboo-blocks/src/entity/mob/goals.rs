@@ -4849,6 +4849,11 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     ) {
         return 0.0;
     }
+    // `AbstractNautilus.getWalkTargetValue` 恒为 0，`checkSpawnRules` 恒真。
+    // `AbstractNautilus.getWalkTargetValue` is always 0, so `checkSpawnRules` passes.
+    if super::nautilus::is_nautilus(mob.mob_type) {
+        return 0.0;
+    }
     if mob.mob_type == super::MobType::Turtle {
         return super::turtle::walk_target_value(mob, view, pos);
     }

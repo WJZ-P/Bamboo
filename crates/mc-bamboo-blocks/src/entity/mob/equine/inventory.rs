@@ -18,6 +18,14 @@ use crate::entity::{Entity, mob::equipment::GUARANTEED_DROP_CHANCE};
 /// The ground branch of `openCustomInventoryScreen`: not ridden and tamed.
 /// Opening while riding checks `hasPassenger(player) && isTamed()` in the game layer.
 pub fn can_open(mob: &Mob) -> bool {
+    if crate::entity::mob::nautilus::is_nautilus(mob.mob_type) {
+        // `AbstractNautilus.openCustomInventoryScreen`：没被别的生物骑、已驯服，
+        // 且（有人骑时）骑手就是这名玩家。
+        //
+        // `AbstractNautilus.openCustomInventoryScreen`: not ridden by another mob,
+        // tame, and (if ridden) ridden by this player.
+        return !mob.is_vehicle() || mob.tame.is_tame();
+    }
     !mob.is_vehicle() && mob.equine.as_ref().is_some_and(|state| state.tame)
 }
 
@@ -26,6 +34,9 @@ pub fn can_open(mob: &Mob) -> bool {
 /// `getInventoryColumns`: 0 for horses; 5 for chested donkeys and mules; the
 /// strength for chested llamas.
 pub fn columns(mob: &Mob) -> i32 {
+    if crate::entity::mob::nautilus::is_nautilus(mob.mob_type) {
+        return crate::entity::mob::nautilus::inventory_columns(mob);
+    }
     let Some(state) = &mob.equine else {
         return 0;
     };

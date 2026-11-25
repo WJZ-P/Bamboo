@@ -24,6 +24,7 @@ mod death;
 mod goals;
 pub(super) mod horse;
 mod interact;
+pub(in crate::entity::mob) use interact::{equip_on_target, equippable};
 pub mod inventory;
 mod life;
 mod llama;

@@ -735,6 +735,11 @@ pub(super) fn check_spawn_rules(
         // `Dolphin` 用 `checkSurfaceAgeableWaterCreatureSpawnRules`（和鱿鱼同源）。
         // The dolphin uses `checkSurfaceAgeableWaterCreatureSpawnRules` (same as squid).
         MobType::Dolphin => super::dolphin::check_spawn_rules(world, sea_level, pos),
+        // `AbstractNautilus.checkNautilusSpawnRules`：海平面下 5..25 格、上方是水。
+        // `AbstractNautilus.checkNautilusSpawnRules`: 5..25 below sea level, water above.
+        MobType::Nautilus | MobType::ZombieNautilus => {
+            super::nautilus::check_spawn_rules(world, pos, sea_level)
+        }
         // `Axolotl.checkAxolotlSpawnRules`：脚下是 `axolotls_spawnable_on`（黏土）。
         // `Axolotl.checkAxolotlSpawnRules`: the block below is in
         // `axolotls_spawnable_on` (clay).
@@ -942,6 +947,9 @@ fn is_valid_position_for_mob(
             // 美西螈的 `checkSpawnObstruction` 也只剩 `isUnobstructed`，不查液体。
             // The axolotl's `checkSpawnObstruction` is `isUnobstructed` alone, no liquid check.
             || kind == MobType::Axolotl
+            // `AbstractNautilus.checkSpawnObstruction` 只查实体遮挡，不查液体。
+            // `AbstractNautilus.checkSpawnObstruction` is `isUnobstructed` alone.
+            || super::nautilus::is_nautilus(kind)
             || !contains_any_liquid(world, bounds))
         && is_unobstructed_by_entities(world, bounds)
 }

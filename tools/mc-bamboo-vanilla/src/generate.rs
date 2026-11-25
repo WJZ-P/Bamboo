@@ -4226,6 +4226,8 @@ fn entity_types_file(data: &VersionData) -> String {
         ("PHANTOM_SIZE", facts.phantom_size),
         ("GUARDIAN_MOVING", facts.guardian_moving),
         ("GUARDIAN_ATTACK_TARGET", facts.guardian_attack_target),
+        ("NAUTILUS_DASH", facts.nautilus_dash),
+        ("ZOMBIE_NAUTILUS_VARIANT", facts.zombie_nautilus_variant),
         ("FISH_FROM_BUCKET", facts.fish_from_bucket),
         ("SALMON_VARIANT", facts.salmon_variant),
         ("TROPICAL_FISH_VARIANT", facts.tropical_fish_variant),
@@ -4338,6 +4340,10 @@ fn entity_types_file(data: &VersionData) -> String {
         (
             "FROG_TONGUE_TARGET_SERIALIZER",
             facts.frog_tongue_target_serializer,
+        ),
+        (
+            "ZOMBIE_NAUTILUS_VARIANT_SERIALIZER",
+            facts.zombie_nautilus_variant_serializer,
         ),
     ] {
         let _ = writeln!(out, "pub const {name}: i32 = {value};");

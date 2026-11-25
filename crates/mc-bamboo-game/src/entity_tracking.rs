@@ -1197,6 +1197,18 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
     if let Some(data) = farm_default_data(index, kind) {
         return data;
     }
+    if mc_bamboo_blocks::entity::mob::nautilus::is_nautilus(kind) {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::NAUTILUS_DASH => return EntityData::NautilusDash(false),
+            facts::ZOMBIE_NAUTILUS_VARIANT => {
+                return EntityData::ZombieNautilusVariant(0);
+            }
+            facts::TAME_FLAGS => return EntityData::TameFlags(0),
+            facts::TAME_OWNER => return EntityData::TameOwner(None),
+            _ => {}
+        }
+    }
     if let Some(data) = fish_default_data(index, kind) {
         return data;
     }
@@ -1441,6 +1453,14 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     }
     if mob.enderman_stared_at {
         out.push(EntityData::EndermanStaredAt(true));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::ZombieNautilus {
+        if mob.nautilus_variant != 0 {
+            out.push(EntityData::ZombieNautilusVariant(mob.nautilus_variant));
+        }
+        if mob.nautilus_dashing {
+            out.push(EntityData::NautilusDash(true));
+        }
     }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Creeper {
         // `Creeper.defineSynchedData`：膨胀方向缺省 -1，带电和点燃缺省 false。
@@ -1696,6 +1716,13 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         if mob.bee_anger_end_time != -1 {
             out.push(EntityData::BeeAngerEndTime(mob.bee_anger_end_time));
         }
+        return out;
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Nautilus {
+        if mob.nautilus_dashing {
+            out.push(EntityData::NautilusDash(true));
+        }
+        out.extend(wolf_non_default_data(mob));
         return out;
     }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Wolf {
@@ -2113,6 +2140,18 @@ fn farm_non_default_data(
             }
             if mob.parrot.variant != parrot::DEFAULT_VARIANT {
                 out.push(EntityData::ParrotVariant(mob.parrot.variant));
+            }
+            true
+        }
+        MobType::Nautilus => {
+            if mob.tame_flags != 0 {
+                out.push(EntityData::TameFlags(mob.tame_flags));
+            }
+            if mob.owner.is_some() {
+                out.push(EntityData::TameOwner(mob.owner));
+            }
+            if mob.nautilus_dashing {
+                out.push(EntityData::NautilusDash(true));
             }
             true
         }
