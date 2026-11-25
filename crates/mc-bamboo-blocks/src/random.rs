@@ -44,11 +44,10 @@ impl LegacyRandom {
     /// Copy another source's `seed()` (its internal state) without XORing the
     /// multiplier a second time.
     pub fn from_raw_seed(seed: i64) -> Self {
-        let random = Self {
+        Self {
             seed: Cell::new(seed & MODULUS_MASK),
             next_gaussian: Cell::new(None),
-        };
-        random
+        }
     }
 
     /// `setSeed`。
