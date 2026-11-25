@@ -62,7 +62,17 @@ pub fn try_summon_warden(
             f64::from(pos.y),
             f64::from(pos.z) + 0.5,
         );
-        spawn::snap_to(&mut entity, center, 0.0, 0.0);
+        // `EntityType.create` 的 `snapTo(..., wrapDegrees(nextFloat() * 360), 0)`。
+        // `EntityType.create`'s `snapTo(..., wrapDegrees(nextFloat() * 360), 0)`.
+        let yaw = mc_bamboo_core::mth::wrap_degrees(world.random().next_float() * 360.0);
+        spawn::snap_to(&mut entity, center, yaw, 0.0);
+        // `Mob.finalizeSpawn`：`triangle(0, 0.11485)` 两次 `nextDouble()`（共四步线性
+        // 同余）加一次 `nextFloat()` 决定左撇子。记忆和装备由下面显式设置。
+        // `Mob.finalizeSpawn`: `triangle(0, 0.11485)` draws two `nextDouble()` values
+        // (four LCG steps) plus one `nextFloat()` for left-handedness.
+        world.random().next_double();
+        world.random().next_double();
+        world.random().next_float();
         entity.with_mob(|_, mob| {
             // `Warden.finalizeSpawn(TRIGGERED)`：DIG_COOLDOWN 1200、IS_EMERGING 134、
             // EMERGING 姿态（Java 侧 `EntityType.create` 不跑 finalizeSpawn，对拍场景要显式设）。

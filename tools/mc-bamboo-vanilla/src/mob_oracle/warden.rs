@@ -23,6 +23,8 @@ pub(super) struct WardenCase {
     erase_dig: bool,
     vibration: Option<Vec<i32>>,
     vibration2: Option<Vec<i32>>,
+    #[serde(default)]
+    summon: bool,
     sensors: Vec<i64>,
     mob_seed: i64,
     level_seed: i64,
@@ -145,77 +147,96 @@ impl Report {
         ticks.set_time(case.start_time);
 
         let warden_id = {
-            let mut entity = Entity::by_mob_type(MobType::Warden, Vec3::new(0.5, 64.0, 0.5));
-            entity.with_mob(|_, mob| {
-                if case.emerge {
-                    mob.warden.pose = WardenPose::Emerging;
-                }
-                if let Some(brain) = mob.brain.as_mut() {
+            let mut world = World::new(&mut level, &mut ticks);
+            let id = if case.summon {
+                // `SpawnUtil.trySpawnMob(WARDEN, TRIGGERED, ..., ON_TOP_OF_COLLIDER)`。
+                mc_bamboo_blocks::entity::mob::warden_spawn::try_summon_warden(
+                    &mut world,
+                    BlockPos::new(0, 64, 0),
+                    4,
+                )
+                .expect("a warden is summoned")
+            } else {
+                let mut entity = Entity::by_mob_type(MobType::Warden, Vec3::new(0.5, 64.0, 0.5));
+                entity.with_mob(|_, mob| {
                     if case.emerge {
-                        brain
-                            .memories
-                            .set_with_ttl(MemoryType::IsEmerging, MemoryValue::Unit, 134);
-                        brain.memories.set_with_ttl(
-                            MemoryType::DigCooldown,
-                            MemoryValue::Unit,
-                            1200,
-                        );
+                        mob.warden.pose = WardenPose::Emerging;
                     }
-                    if case.anger > 0 {
-                        // `Warden.increaseAngerAt(player, anger, false)`：刷钻地冷却、加愤怒。
-                        if brain.memories.has(MemoryType::DigCooldown) {
+                    if let Some(brain) = mob.brain.as_mut() {
+                        if case.emerge {
+                            brain.memories.set_with_ttl(
+                                MemoryType::IsEmerging,
+                                MemoryValue::Unit,
+                                134,
+                            );
                             brain.memories.set_with_ttl(
                                 MemoryType::DigCooldown,
                                 MemoryValue::Unit,
                                 1200,
                             );
                         }
-                        let player = case.first_id + 1;
-                        mob.warden.anger.increase_anger(
-                            player,
-                            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
-                            case.anger,
-                            true,
-                        );
+                        if case.anger > 0 {
+                            // `Warden.increaseAngerAt(player, anger, false)`：刷钻地冷却、加愤怒。
+                            // `Warden.increaseAngerAt(player, anger, false)`: refresh the
+                            // dig cooldown and add anger.
+                            if brain.memories.has(MemoryType::DigCooldown) {
+                                brain.memories.set_with_ttl(
+                                    MemoryType::DigCooldown,
+                                    MemoryValue::Unit,
+                                    1200,
+                                );
+                            }
+                            let player = case.first_id + 1;
+                            mob.warden.anger.increase_anger(
+                                player,
+                                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+                                case.anger,
+                                true,
+                            );
+                        }
+                        if case.attack_target {
+                            // `Warden.setAttackTarget`。
+                            brain.memories.erase(MemoryType::RoarTarget);
+                            brain.memories.set(
+                                MemoryType::AttackTarget,
+                                MemoryValue::Entity(case.first_id + 1),
+                            );
+                            brain.memories.erase(MemoryType::CantReachWalkTargetSince);
+                            brain.memories.set_with_ttl(
+                                MemoryType::SonicBoomCooldown,
+                                MemoryValue::Unit,
+                                200,
+                            );
+                        }
+                        if case.erase_sonic {
+                            brain.memories.erase(MemoryType::SonicBoomCooldown);
+                        }
+                        if case.erase_dig {
+                            brain.memories.erase(MemoryType::DigCooldown);
+                        }
                     }
-                    if case.attack_target {
-                        // `Warden.setAttackTarget`。
-                        brain.memories.erase(MemoryType::RoarTarget);
-                        brain.memories.set(
-                            MemoryType::AttackTarget,
-                            MemoryValue::Entity(case.first_id + 1),
-                        );
-                        brain.memories.erase(MemoryType::CantReachWalkTargetSince);
-                        brain.memories.set_with_ttl(
-                            MemoryType::SonicBoomCooldown,
-                            MemoryValue::Unit,
-                            200,
-                        );
-                    }
-                    if case.erase_sonic {
-                        brain.memories.erase(MemoryType::SonicBoomCooldown);
-                    }
-                    if case.erase_dig {
-                        brain.memories.erase(MemoryType::DigCooldown);
-                    }
-                }
-            });
-            let mut world = World::new(&mut level, &mut ticks);
-            let id = world.spawn_entity(entity);
-            // `spawn_entity` 会跑 `init_mob_state`，spawn 之后显式对齐官方场景初值。
+                });
+                world.spawn_entity(entity)
+            };
+            // 官方场景在生成后显式设 ID / UUID / 实体随机源 / 传感器延迟。
+            // The official scene pins the id, uuid, entity random seed and sensor
+            // delays after spawning.
             world.with_entity_mut(id, &mut |entity| {
-                entity.y_rot = 0.0;
-                entity.old_position = Vec3::new(0.5, 64.0, 0.5);
+                if !case.summon {
+                    entity.y_rot = 0.0;
+                    entity.old_position = Vec3::new(0.5, 64.0, 0.5);
+                }
                 entity.random = JavaRandom::from_state(case.mob_seed);
+                let yaw = entity.y_rot;
                 entity.with_mob(|me, mob| {
                     mob.uuid = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
                     mob.x_rot = 0.0;
-                    mob.y_rot_o = 0.0;
+                    mob.y_rot_o = yaw;
                     mob.x_rot_o = 0.0;
-                    mob.y_head_rot = 0.0;
-                    mob.y_head_rot_o = 0.0;
-                    mob.y_body_rot = 0.0;
-                    mob.y_body_rot_o = 0.0;
+                    mob.y_head_rot = yaw;
+                    mob.y_head_rot_o = yaw;
+                    mob.y_body_rot = yaw;
+                    mob.y_body_rot_o = yaw;
                     if let Some(brain) = mob.brain.as_mut() {
                         brain.seed_shuffles(me.random.state());
                         for (index, sensor) in brain.sensors.iter_mut().enumerate() {

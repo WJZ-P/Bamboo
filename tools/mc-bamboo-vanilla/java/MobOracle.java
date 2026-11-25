@@ -652,6 +652,9 @@ public final class MobOracle {
                 cases += playWarden(official, out, only);
             }
             if (only == null || only.startsWith("warden")) {
+                cases += playWardenSummon(official, out);
+            }
+            if (only == null || only.startsWith("warden")) {
                 cases += playWardenSave(official, out);
             }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
@@ -13129,6 +13132,74 @@ public final class MobOracle {
         }
         out.flush();
         return cases;
+    }
+
+    /** 尖啸体四级警告：官方 `SpawnUtil.trySpawnMob` 取点召唤监守者并钻出地面。 */
+    private static int playWardenSummon(Official official, Writer out) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        java.util.Map<ResourceKey<Level>, ServerLevel> levels =
+                java.util.Map.of(Level.OVERWORLD, world);
+        official.server.levels = levels;
+        put(MinecraftServer.class, official.server, "levels", levels);
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        for (int x = -15; x <= 15; x++) {
+            for (int z = -15; z <= 15; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+            }
+        }
+        world.gameTime = 1000L;
+        world.getRandom().setSeed(1L);
+        world.spawnerScene = true;
+        world.spawnDifficulty = new net.minecraft.world.DifficultyInstance(
+                net.minecraft.world.Difficulty.NORMAL, 0L, 0L, 0.0F);
+        var summoned = net.minecraft.util.SpawnUtil.trySpawnMob(
+                EntityTypes.WARDEN, EntitySpawnReason.TRIGGERED, world,
+                new BlockPos(0, 64, 0), 20, 5, 6,
+                net.minecraft.util.SpawnUtil.Strategy.ON_TOP_OF_COLLIDER, false);
+        Warden mob = summoned.orElseThrow(() -> new IllegalStateException("warden did not spawn"));
+        mob.setId(FIRST_ID);
+        mob.setUUID(new UUID(0L, 1L));
+        setRandom(mob, 5L);
+        BrainOracle.fixSensorDelays(mob, 1L);
+        BrainOracle.reseedShuffles(mob, randomSeed(mob));
+        String sensors = BrainOracle.sensorDelays(mob);
+        long mobSeed = randomSeed(mob);
+        long levelSeed = randomSeed(world.getRandom());
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= 150; tick++) {
+            if (tick > 0) {
+                world.gameTime = 1000L + tick;
+                mob.commonTick();
+                mob.tick();
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"pose\":").append(jsonString(mob.getPose().name()))
+                    .append(",\"anger\":").append(mob.getClientAngerLevel())
+                    .append(",\"angerLevel\":").append(jsonString(mob.getAngerLevel().name()))
+                    .append(",\"brain\":").append(jsonString(BrainOracle.dump(mob)))
+                    .append(",\"motion\":").append(projectileMotion(mob))
+                    .append(",\"mobSeed\":").append(randomSeed(mob))
+                    .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
+                    .append(",\"playerHealth\":-1")
+                    .append(",\"playerEffects\":[]")
+                    .append(",\"removed\":").append(mob.isRemoved())
+                    .append('}');
+        }
+        frames.append(']');
+        out.write("{\"type\":\"warden\",\"name\":\"warden_summon\""
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"startTime\":1000"
+                + ",\"ticks\":150"
+                + ",\"emerge\":false,\"player\":false,\"anger\":0"
+                + ",\"attackTarget\":false,\"eraseSonic\":false,\"eraseDig\":false"
+                + ",\"summon\":true"
+                + ",\"vibration\":null,\"vibration2\":null"
+                + ",\"sensors\":" + sensors
+                + ",\"mobSeed\":" + mobSeed
+                + ",\"levelSeed\":" + levelSeed
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+        return 1;
     }
 
     /** 监守者存档：`saveWithoutId` 的 SNBT 和读回后再写出的 SNBT。 */
