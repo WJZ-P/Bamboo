@@ -17,6 +17,7 @@ pub mod mob;
 pub mod parallel;
 pub mod random;
 pub mod riding;
+pub mod shoulder;
 pub mod spit;
 pub mod splash_potion;
 pub mod store;

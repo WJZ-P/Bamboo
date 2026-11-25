@@ -5170,6 +5170,7 @@ mod tests {
                 | Effect::GuardianElderEffect { .. }
                 | Effect::TrialSpawnerTransformBadOmen { .. }
                 | Effect::Explode { .. }
+                | Effect::PlayerShoulder { .. }
                 | Effect::VibrationParticle { .. } => None,
             })
             .collect()

@@ -1279,6 +1279,8 @@ mod tests {
 
     fn player(uid: i32, position: Vec3) -> PlayerView {
         PlayerView {
+            shoulder_left: None,
+            shoulder_right: None,
             uuid: None,
             uid,
             yaw: 0.0,

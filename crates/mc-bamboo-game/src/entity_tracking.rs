@@ -2496,15 +2496,25 @@ fn event_packet(
         }
         MobEvent::Particles {
             particle,
+            item,
             position,
             offset,
             speed,
             count,
         } => {
-            // 简单粒子的 `ParticleTypes.STREAM_CODEC` 只有类型 ID。
-            // A simple particle's `ParticleTypes.STREAM_CODEC` is the type id alone.
+            // 简单粒子的 `ParticleTypes.STREAM_CODEC` 只有类型 ID；带物品的粒子
+            // （`ItemParticleOption`）再按 `ItemStackTemplate.STREAM_CODEC` 追加
+            // 物品 ID、数量 1、空的组件补丁（两个 0 varint）。
+            // A simple particle's codec is the type id alone; an item particle appends
+            // `ItemStackTemplate.STREAM_CODEC`: item id, count 1, empty component patch.
             let mut options = Vec::new();
             mc_bamboo_protocol::codec::write_varint(&mut options, *particle);
+            if let Some(item) = *item {
+                mc_bamboo_protocol::codec::write_varint(&mut options, item);
+                mc_bamboo_protocol::codec::write_varint(&mut options, 1);
+                mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+                mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+            }
             EventPacket::Particles {
                 body: packet_body(&mc_bamboo_protocol::packet::play::LevelParticles {
                     options: &options,

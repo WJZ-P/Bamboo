@@ -113,6 +113,7 @@ impl HappyGhastCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            shoulder: Default::default(),
         }
     }
 
@@ -216,6 +217,8 @@ fn oracle_player(uid: i32, position: Vec3) -> PlayerView {
         pitch: 0.0,
         combat: Default::default(),
         effects: Default::default(),
+        shoulder_left: None,
+        shoulder_right: None,
     }
 }
 

@@ -59,6 +59,8 @@ pub(super) struct SculkShriekerCase {
 fn shrieker_player(pos: BlockPos) -> mc_bamboo_blocks::entity::ctx::PlayerView {
     use mc_bamboo_blocks::entity::ctx::PlayerView;
     PlayerView {
+        shoulder_left: None,
+        shoulder_right: None,
         uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
         uid: 1,
         yaw: 0.0,
@@ -133,6 +135,7 @@ fn mob_level(blocks: &[[i32; 4]]) -> MobLevel {
         mob_teams: HashMap::new(),
         wrong_was_hurt: false,
         explosion_break: 0,
+        shoulder: Default::default(),
         short_hunger: false,
         ignore_bed_monsters: false,
     }
