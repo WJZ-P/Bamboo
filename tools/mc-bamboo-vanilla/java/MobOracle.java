@@ -628,6 +628,10 @@ public final class MobOracle {
                     cases++;
                 }
             }
+            if (only == null || only.startsWith("sculk_sensor_order")) {
+                playSculkSensorOrder(official, out);
+                cases++;
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -637,6 +641,7 @@ public final class MobOracle {
     private static void playSculkSensor(Official official, Writer out, String name) throws Exception {
         FakeLevel level = FakeLevel.create(official);
         try {
+            level.enableGameEvents();
             level.nextId = FIRST_ID;
             level.gameTime = START_TIME;
 
@@ -674,6 +679,9 @@ public final class MobOracle {
                     ? new net.minecraft.world.level.block.entity.CalibratedSculkSensorBlockEntity(sensor, sensorState)
                     : new net.minecraft.world.level.block.entity.SculkSensorBlockEntity(sensor, sensorState);
             level.putBlockEntity(be);
+            // 官方 `LevelChunk.addGameEventListener`：把监听者登记进区段，并跨
+            // `setBlock` 清区块缓存保留（见 `FakeLevel.registerGameEventListener`）。
+            level.registerGameEventListener(sensor, be.getListener());
             // 计划刻需要一个区块容器：官方 `scheduleTick` 找不到容器会静默丢弃。
             net.minecraft.core.SectionPos section = net.minecraft.core.SectionPos.of(sensor);
             level.getBlockTicks().addContainer(
@@ -704,13 +712,12 @@ public final class MobOracle {
                 if (tick > 0) {
                     level.gameTime = START_TIME + tick;
                     if (tick == fireTick) {
-                        // 官方 `GameEventDispatcher.post` 只做区段路由和距离排序，单个监听者时
-                        // 等价于直接调 `VibrationSystem.Listener.handleGameEvent`。这里直接走这条
-                        // 路径，避开假世界 `setBlock` 清空区块缓存会连带丢掉监听者登记表的问题。
-                        be.getListener().handleGameEvent(level, event, new GameEvent.Context(null, null), sourceCenter);
+                        // 官方 `ServerLevel.gameEvent` → `GameEventDispatcher.post` 的完整分发：
+                        // 区段路由 + 按距离排序后逐一听者投递。
+                        level.gameEvent(event, sourceCenter, new GameEvent.Context(null, null));
                     }
                     if (tick == fire2Tick) {
-                        be.getListener().handleGameEvent(level, GameEvent.STEP, new GameEvent.Context(null, null), sourceCenter);
+                        level.gameEvent(GameEvent.STEP, sourceCenter, new GameEvent.Context(null, null));
                     }
                     // 方块实体 tick：`VibrationSystem.Ticker.tick`（getTicker 的 lambda）。
                     net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
@@ -740,6 +747,94 @@ public final class MobOracle {
                     + ",\"events\":[" + fireTick + ',' + eventId + ','
                     + source.getX() + ',' + source.getY() + ',' + source.getZ() + "],\"event2\":"
                     + (fire2Tick < 0 ? "null" : "[" + fire2Tick + ',' + stepEventId + ',' + source.getX() + ',' + source.getY() + ',' + source.getZ() + "]")
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            level.closeRealPoi();
+        }
+    }
+
+    /** 两个感测体到发声点距离不同：`GameEventDispatcher.post` 按距离排序后逐个投递，
+     *  两只感测体各自按距离给红石强度。 */
+    private static void playSculkSensorOrder(Official official, Writer out) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        try {
+            level.enableGameEvents();
+            level.nextId = FIRST_ID;
+            level.gameTime = START_TIME;
+
+            BlockPos near = new BlockPos(2, 64, 0);
+            BlockPos far = new BlockPos(6, 64, 0);
+            BlockPos source = new BlockPos(0, 64, 0);
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -12; x <= 12; x++) {
+                for (int z = -12; z <= 12; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            BlockState sensorState = Blocks.SCULK_SENSOR.defaultBlockState();
+            level.blocks.put(near.asLong(), sensorState);
+            level.blocks.put(far.asLong(), sensorState);
+
+            net.minecraft.world.level.block.entity.SculkSensorBlockEntity nearBe =
+                    new net.minecraft.world.level.block.entity.SculkSensorBlockEntity(near, sensorState);
+            net.minecraft.world.level.block.entity.SculkSensorBlockEntity farBe =
+                    new net.minecraft.world.level.block.entity.SculkSensorBlockEntity(far, sensorState);
+            level.putBlockEntity(nearBe);
+            level.putBlockEntity(farBe);
+            level.registerGameEventListener(near, nearBe.getListener());
+            level.registerGameEventListener(far, farBe.getListener());
+            // 两个感测体的计划刻容器。
+            net.minecraft.core.SectionPos section = net.minecraft.core.SectionPos.of(near);
+            level.getBlockTicks().addContainer(
+                    new net.minecraft.world.level.ChunkPos(section.x(), section.z()),
+                    new net.minecraft.world.ticks.LevelChunkTicks<>());
+
+            int stepEventId = official.registries
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.GAME_EVENT)
+                    .getId(GameEvent.STEP.value());
+            Vec3 sourceCenter = new Vec3(source.getX() + 0.5, source.getY() + 0.5, source.getZ() + 0.5);
+            String initialBlocks = blockArray(level.blocks);
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= 20; tick++) {
+                if (tick > 0) {
+                    level.gameTime = START_TIME + tick;
+                    if (tick == 1) {
+                        level.gameEvent(GameEvent.STEP, sourceCenter, new GameEvent.Context(null, null));
+                    }
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, nearBe.getVibrationData(), nearBe.getVibrationUser());
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, farBe.getVibrationData(), farBe.getVibrationUser());
+                    level.getBlockTicks().tick(level.gameTime, Integer.MAX_VALUE, (p, block) -> {
+                        BlockState st = level.getBlockState(p);
+                        if (st.is(block)) {
+                            st.tick(level, p, level.getRandom());
+                        }
+                    });
+                }
+                if (tick > 0) frames.append(',');
+                frames.append('[');
+                for (BlockPos sensor : new BlockPos[] {near, far}) {
+                    BlockState st = level.getBlockState(sensor);
+                    int phase = st.getValue(net.minecraft.world.level.block.SculkSensorBlock.PHASE).ordinal();
+                    int power = st.getValue(net.minecraft.world.level.block.SculkSensorBlock.POWER);
+                    net.minecraft.world.level.block.entity.SculkSensorBlockEntity be =
+                            sensor.equals(near) ? nearBe : farBe;
+                    int freq = be.getLastVibrationFrequency();
+                    frames.append('[').append(phase).append(',').append(power).append(',').append(freq).append("],");
+                }
+                frames.setLength(frames.length() - 1);
+                frames.append(']');
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"sculkSensorOrder\",\"name\":\"sculk_sensor_order\""
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"blocks\":" + initialBlocks
+                    + ",\"sensors\":[[2,64,0],[6,64,0]]"
+                    + ",\"events\":[1," + stepEventId + ",0,64,0]"
                     + ",\"frames\":" + frames + "}\n");
             out.flush();
         } finally {
@@ -19036,6 +19131,8 @@ public final class MobOracle {
         private LevelTicks<net.minecraft.world.level.material.Fluid> fluidTicks;
         private Chunks chunkSource;
         private Long2ObjectOpenHashMap<ChunkAccess> chunkCache;
+        /** 区块缓存清掉后仍要保留的游戏事件监听者：区块键 → (段 Y → 监听者)。 */
+        private Long2ObjectOpenHashMap<it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<List<net.minecraft.world.level.gameevent.GameEventListener>>> persistentListeners;
         private ServerScoreboard scoreboard;
         private TickRateManager tickRate;
         private LevelData levelData;
@@ -19106,6 +19203,7 @@ public final class MobOracle {
                 put(ServerLevel.class, level, "environmentAttributes", official.attributes);
             }
             level.chunkCache = new Long2ObjectOpenHashMap<>();
+            level.persistentListeners = new Long2ObjectOpenHashMap<>();
             level.scoreboard = new ServerScoreboard(official.server);
             level.tickRate = new TickRateManager();
             level.tracked = new ArrayList<>();
@@ -19503,7 +19601,32 @@ public final class MobOracle {
             // no other scene changes.
             Heightmap.primeHeightmaps(chunk, java.util.EnumSet.of(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES));
             chunkCache.put(key, chunk);
+            // `setBlock` 会清掉区块缓存，新建的 `LevelChunk` 没有监听者登记表。
+            // 这里把持久登记的监听者重新挂回新区块，保证 `GameEventDispatcher.post`
+            // 总能在 `chunk.getListenerRegistry` 里找到它们。
+            var sections = persistentListeners.get(key);
+            if (sections != null) {
+                for (var entry : sections.int2ObjectEntrySet()) {
+                    var registry = chunk.getListenerRegistry(entry.getIntKey());
+                    for (var listener : entry.getValue()) {
+                        registry.register(listener);
+                    }
+                }
+            }
             return chunk;
+        }
+
+        /** 官方 `LevelChunk.addGameEventListener`：登记监听者，且跨 `setBlock` 清缓存保留。 */
+        void registerGameEventListener(BlockPos pos, net.minecraft.world.level.gameevent.GameEventListener listener) {
+            long chunkKey = ChunkPos.pack(pos.getX() >> 4, pos.getZ() >> 4);
+            int sectionY = net.minecraft.core.SectionPos.blockToSectionCoord(pos.getY());
+            LevelChunk chunk = (LevelChunk) getChunk(pos.getX() >> 4, pos.getZ() >> 4,
+                    net.minecraft.world.level.chunk.status.ChunkStatus.FULL, false);
+            chunk.getListenerRegistry(sectionY).register(listener);
+            persistentListeners
+                    .computeIfAbsent(chunkKey, k -> new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>())
+                    .computeIfAbsent(sectionY, s -> new ArrayList<>())
+                    .add(listener);
         }
 
         @Override
@@ -19802,8 +19925,21 @@ public final class MobOracle {
             return true;
         }
 
+        /** 幽匿场景装上真的 `GameEventDispatcher`，`gameEvent` 走官方完整分发。 */
+        net.minecraft.world.level.gameevent.GameEventDispatcher gameEventDispatcher;
+
+        void enableGameEvents() {
+            if (gameEventDispatcher == null) {
+                gameEventDispatcher = new net.minecraft.world.level.gameevent.GameEventDispatcher(this);
+            }
+        }
+
         @Override
-        public void gameEvent(Holder<GameEvent> gameEvent, Vec3 position, GameEvent.Context context) {}
+        public void gameEvent(Holder<GameEvent> gameEvent, Vec3 position, GameEvent.Context context) {
+            if (gameEventDispatcher != null) {
+                gameEventDispatcher.post(gameEvent, position, context);
+            }
+        }
 
         @Override
         public void sendBlockUpdated(BlockPos pos, BlockState old, BlockState current, int flags) {}

@@ -194,6 +194,7 @@ enum Line {
     Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
     SculkSensor(sculk_sensor::SculkSensorCase),
+    SculkSensorOrder(sculk_sensor::SculkSensorOrderCase),
     End(End),
 }
 
@@ -1844,6 +1845,7 @@ impl Report {
                 Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
+                Line::SculkSensorOrder(case) => self.replay_sculk_sensor_order(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
