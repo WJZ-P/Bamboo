@@ -105,6 +105,7 @@ pub mod player_hurt;
 mod player_move;
 pub mod player_respawn;
 mod player_save;
+mod player_shoulder;
 pub mod player_weapon;
 pub mod poi_query;
 mod pos_map;

@@ -76,6 +76,7 @@ impl LightningCase {
             game: None,
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
             natural_spawn: None,
             inhabited: Default::default(),
             mob_teams: Default::default(),
@@ -196,6 +197,7 @@ impl Report {
             game: None,
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
             natural_spawn: None,
             inhabited: Default::default(),
             mob_teams: Default::default(),
@@ -311,6 +313,7 @@ impl Report {
             mob_teams: Default::default(),
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
             short_hunger: false,
             ignore_bed_monsters: false,
         };

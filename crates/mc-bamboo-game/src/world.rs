@@ -3777,6 +3777,8 @@ fn run_island_simulation(
     let region = &mut island.region;
     region.profiler.lap(Phase::PlayerMisc);
 
+    // `ServerPlayer.handleShoulderEntities`：离肩条件在派生状态之前跑，元数据能看到清空。
+    crate::player_shoulder::tick(region);
     entity_sync::update_derived_state(region);
     chunk_tracking::update_views(region);
     region.profiler.lap(Phase::Views);

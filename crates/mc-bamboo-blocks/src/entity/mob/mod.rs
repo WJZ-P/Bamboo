@@ -3072,6 +3072,13 @@ pub enum MobEvent {
     /// measured from the centre of the player's block.
     Particles {
         particle: i32,
+        /// `ItemParticleOption` 的物品参数（物品注册表 ID）；简单粒子是 `None`。
+        /// 官方 `ItemStackTemplate.STREAM_CODEC`：物品 ID + 数量 1 + 空组件补丁。
+        ///
+        /// The `ItemParticleOption` item argument (item registry id); `None` for
+        /// simple particles. Vanilla's `ItemStackTemplate.STREAM_CODEC` writes the
+        /// item id, count 1 and an empty component patch.
+        item: Option<i32>,
         position: Vec3,
         offset: Vec3,
         speed: f32,

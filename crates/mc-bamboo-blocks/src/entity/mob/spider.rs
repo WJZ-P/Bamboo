@@ -417,6 +417,8 @@ mod tests {
             let mut level = crate::testing::TestLevel::new();
             level.sky_darken = sky_darken;
             level.players.push(crate::entity::ctx::PlayerView {
+                shoulder_left: None,
+                shoulder_right: None,
                 uid: 900,
                 uuid: None,
                 position: Vec3::new(0.5, 64.0, 5.5),

@@ -132,6 +132,14 @@ pub struct PlayerData {
     /// whole `Passengers` tree. Absent when not riding. The game layer builds
     /// the tag; this layer reads and writes the official top-level key verbatim.
     pub root_vehicle: Option<Tag>,
+    /// `ServerPlayer` 的 `ShoulderEntityLeft` / `ShoulderEntityRight`：整只鹦鹉的
+    /// `saveWithoutId` NBT（含 `id` 键）。空肩时官方不写这个键，这里用 `None`。
+    ///
+    /// `ServerPlayer`'s `ShoulderEntityLeft` / `ShoulderEntityRight`: the whole
+    /// parrot's `saveWithoutId` tag (with `id`). `None` means no shoulder entity,
+    /// which vanilla omits from the save.
+    pub shoulder_left: Option<Tag>,
+    pub shoulder_right: Option<Tag>,
     pub abilities: Abilities,
     pub seen_credits: bool,
     pub spawn_extra_particles_on_fall: bool,
@@ -240,6 +248,8 @@ impl Default for PlayerData {
             active_effects: None,
             ender_pearls: Vec::new(),
             root_vehicle: None,
+            shoulder_left: None,
+            shoulder_right: None,
             abilities: Abilities::default(),
             seen_credits: false,
             spawn_extra_particles_on_fall: false,
@@ -289,6 +299,8 @@ const KNOWN_KEYS: &[&str] = &[
     "active_effects",
     "ender_pearls",
     "RootVehicle",
+    "ShoulderEntityLeft",
+    "ShoulderEntityRight",
     "abilities",
     "EnderItems",
     "Dimension",
@@ -441,6 +453,13 @@ impl PlayerData {
         if let Some(tag) = &self.root_vehicle {
             push(&mut root, "RootVehicle", tag.clone());
         }
+        // `ServerPlayer.addAdditionalSaveData`：只在肩膀非空时写这两个键。
+        if let Some(tag) = &self.shoulder_left {
+            push(&mut root, "ShoulderEntityLeft", tag.clone());
+        }
+        if let Some(tag) = &self.shoulder_right {
+            push(&mut root, "ShoulderEntityRight", tag.clone());
+        }
         push(&mut root, "abilities", self.abilities_tag());
         if let Ok(items) = slots::encode_list(&self.ender_items) {
             push(&mut root, "EnderItems", items);
@@ -530,6 +549,10 @@ impl PlayerData {
             Some(tag @ Tag::Compound(_)) => Some(tag.clone()),
             _ => None,
         };
+        // `ValueInput.read("ShoulderEntityLeft", CompoundTag.CODEC)`：缺键或空复合标签
+        // 都按空肩处理，坏数据也不 panic。
+        data.shoulder_left = shoulder_tag(entries, "ShoulderEntityLeft");
+        data.shoulder_right = shoulder_tag(entries, "ShoulderEntityRight");
         data.dimension = opt_string(entries, "Dimension", OVERWORLD)?;
         data.game_type = opt_int(entries, "playerGameType", DEFAULT_GAME_TYPE)?;
         data.previous_game_type = match field_of(entries, "previousPlayerGameType") {
@@ -615,6 +638,14 @@ fn abilities_known(key: &str) -> bool {
         key,
         "invulnerable" | "flying" | "mayfly" | "instabuild" | "mayBuild" | "flySpeed" | "walkSpeed"
     )
+}
+
+/// `CompoundTag.CODEC` 读肩膀：只有非空复合标签算有鹦鹉。
+fn shoulder_tag(entries: &[(String, Tag)], key: &str) -> Option<Tag> {
+    match field_of(entries, key) {
+        Some(tag @ Tag::Compound(inner)) if !inner.is_empty() => Some(tag.clone()),
+        _ => None,
+    }
 }
 
 fn decode_abilities(tag: &Tag) -> Result<Abilities, PlayerDataError> {
@@ -1085,6 +1116,38 @@ mod tests {
         assert!(PlayerData::decode(&tag).is_err());
         let tag = Tag::Compound(vec![("UUID".to_owned(), Tag::IntArray(vec![1, 2]))]);
         assert!(PlayerData::decode(&tag).is_err());
+    }
+
+    /// `ShoulderEntityLeft` / `Right`：整只鹦鹉的 NBT 存读往返，空肩不写键。
+    #[test]
+    fn shoulder_entities_round_trip_and_are_omitted_when_empty() {
+        let parrot = Tag::Compound(vec![
+            ("id".to_owned(), Tag::String("minecraft:parrot".to_owned())),
+            ("Variant".to_owned(), Tag::Int(2)),
+            ("Silent".to_owned(), Tag::Byte(0)),
+        ]);
+        let mut data = sample();
+        data.shoulder_left = Some(parrot.clone());
+        let tag = data.encode();
+        assert_eq!(field(&tag, "ShoulderEntityLeft"), Some(&parrot));
+        assert_eq!(field(&tag, "ShoulderEntityRight"), None);
+        let decoded = PlayerData::decode(&tag).unwrap();
+        assert_eq!(decoded.shoulder_left, Some(parrot));
+        assert_eq!(decoded.shoulder_right, None);
+        assert_eq!(decoded.encode(), tag);
+        // 空复合标签和坏类型都按空肩处理，不 panic。
+        let empty = PlayerData::decode(&Tag::Compound(vec![(
+            "ShoulderEntityLeft".to_owned(),
+            Tag::Compound(Vec::new()),
+        )]))
+        .unwrap();
+        assert_eq!(empty.shoulder_left, None);
+        let broken = PlayerData::decode(&Tag::Compound(vec![(
+            "ShoulderEntityRight".to_owned(),
+            Tag::Int(7),
+        )]))
+        .unwrap();
+        assert_eq!(broken.shoulder_right, None);
     }
 
     #[test]
