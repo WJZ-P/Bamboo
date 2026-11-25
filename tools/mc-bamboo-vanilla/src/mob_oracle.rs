@@ -43,6 +43,7 @@ mod bee_full;
 mod bee_locate;
 mod bee_release;
 mod brain;
+mod creaking;
 mod egg;
 mod ender_pearl;
 mod equine;
@@ -182,6 +183,7 @@ enum Line {
     SulfurCube(Box<sulfur_cube::SulfurCubeCase>),
     SulfurCubeSave(sulfur_cube::SulfurCubeSaveCase),
     SmallMobDeath(small_mob::SmallMobDeathCase),
+    Creaking(Box<creaking::CreakingCase>),
     VillagerSpawn(villager::VillagerSpawnCase),
     VillagerSave(villager::VillagerSaveCase),
     VillagerDeath(villager::VillagerDeathCase),
@@ -2086,6 +2088,7 @@ impl Report {
                 Line::SulfurCube(case) => self.replay_sulfur_cube(&case),
                 Line::SulfurCubeSave(case) => self.replay_sulfur_cube_save(&case),
                 Line::SmallMobDeath(case) => self.replay_small_mob_death(&case),
+                Line::Creaking(case) => creaking::replay_creaking(self, &case),
                 Line::VillagerSpawn(case) => self.replay_villager_spawn(&case),
                 Line::VillagerSave(case) => self.replay_villager_save(&case),
                 Line::VillagerDeath(case) => self.replay_villager_death(&case),
