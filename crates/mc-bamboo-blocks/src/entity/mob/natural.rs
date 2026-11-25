@@ -856,6 +856,9 @@ pub(super) fn check_spawn_rules(
         // 嗅探兽不在任何群系刷怪表里：只从蛋孵出来或 `/summon` / 刷怪蛋生成。
         // Sniffers are in no biome spawn table: only the egg or `/summon` / a spawn egg.
         MobType::Sniffer => true,
+        // 流浪商人和行商羊驼不在群系刷怪表里，由刷新器 / 命令 / 刷怪蛋生成。
+        // Wandering traders and trader llamas are in no biome spawn table.
+        MobType::WanderingTrader | MobType::TraderLlama => true,
         // 两种傀儡都不在群系刷怪表里，只保留命令 / 方块图案生成时共用的规则。
         // Neither golem is in a biome spawn table; only the shared rule remains.
         MobType::IronGolem | MobType::SnowGolem => animal_spawn_rules(world, pos),

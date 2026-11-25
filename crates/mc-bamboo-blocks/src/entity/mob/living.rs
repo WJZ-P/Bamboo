@@ -174,6 +174,17 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
             // `calculateFlapping` at the end of `Parrot.aiStep`.
             super::parrot::after_ai_step(me, mob);
         }
+        // `WanderingTrader.aiStep()` / `TraderLlama.aiStep()`：在 `super.aiStep()`
+        // 之后每刻跑饮水状态机与 `maybeDespawn()`。
+        // The wandering-trader / trader-llama `aiStep()` tail: drinking and despawn.
+        if !me.removed {
+            if mob.mob_type == super::MobType::WanderingTrader {
+                super::wandering_trader::custom_ai_step(mob, ctx);
+                super::wandering_trader::maybe_despawn(me, mob);
+            } else if mob.mob_type == super::MobType::TraderLlama {
+                super::trader_llama::maybe_despawn(me, mob);
+            }
+        }
     }
     // `Bee.tick` 在 `super.tick()` 之后的花蜜粒子与翻滚动画。
     if mob.mob_type == super::MobType::Bee && !me.removed {
