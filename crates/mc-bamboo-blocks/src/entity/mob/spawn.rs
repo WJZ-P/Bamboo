@@ -49,6 +49,14 @@ pub enum SpawnReason {
     ///
     /// `EntitySpawnReason.CONVERSION`: the new entity of a mob conversion.
     Conversion,
+    /// `EntitySpawnReason.SPAWNER`：普通刷怪笼（`BaseSpawner`）。
+    ///
+    /// `EntitySpawnReason.SPAWNER`: a vanilla monster spawner (`BaseSpawner`).
+    Spawner,
+    /// `EntitySpawnReason.TRIAL_SPAWNER`：试炼刷怪笼。
+    ///
+    /// `EntitySpawnReason.TRIAL_SPAWNER`: a trial spawner.
+    TrialSpawner,
 }
 
 /// `/summon` 失败的原因，对应官方的四条错误。

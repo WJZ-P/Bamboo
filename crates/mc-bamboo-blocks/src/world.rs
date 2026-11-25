@@ -3627,8 +3627,24 @@ impl<'a> World<'a> {
         pos: BlockPos,
         spawn_data: &Tag,
         ominous: bool,
+        spawn_range: i32,
     ) -> Option<[u8; 16]> {
-        self.level.trial_spawner_spawn_mob(pos, spawn_data, ominous)
+        self.level
+            .trial_spawner_spawn_mob(pos, spawn_data, ominous, spawn_range)
+    }
+
+    /// 见 [`Level::spawner_spawn_entity`]。
+    pub fn spawner_spawn_entity(
+        &mut self,
+        entity_tag: &Tag,
+        position: Vec3,
+        yaw: f32,
+        pitch: f32,
+        reason: crate::entity::mob::spawn::SpawnReason,
+        equipment: Option<&Tag>,
+    ) -> Option<[u8; 16]> {
+        self.level
+            .spawner_spawn_entity(entity_tag, position, yaw, pitch, reason, equipment)
     }
 
     /// 见 [`Level::trial_spawner_eject_reward`]。

@@ -421,7 +421,13 @@ pub trait TrialSpawnerContext {
     /// 这只已记录的生物是否已经不活 / 太远 / 换维度。
     fn mob_untracked(&self, uuid: [u8; 16], pos: BlockPos) -> bool;
     /// 生成一只带 `SpawnData` 的生物，返回它的 UUID；同时发出刷怪粒子和声音。
-    fn spawn_mob(&mut self, pos: BlockPos, spawn_data: &Tag, ominous: bool) -> Option<[u8; 16]>;
+    fn spawn_mob(
+        &mut self,
+        pos: BlockPos,
+        spawn_data: &Tag,
+        ominous: bool,
+        spawn_range: i32,
+    ) -> Option<[u8; 16]>;
     /// `ejectReward`：按战利品表弹出一堆物品，返回有没有弹过。
     fn eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool;
     /// `transformBadOmenIntoTrialOmen` 和激活不祥试炼的客户端事件。
@@ -743,7 +749,7 @@ impl TrialSpawner {
                     }
                 } else if self.data.ready_to_spawn_next_mob(now, &config, additional)
                     && let Some(data) = self.data.next_spawn_data.clone()
-                    && let Some(uuid) = ctx.spawn_mob(pos, &data, self.ominous)
+                    && let Some(uuid) = ctx.spawn_mob(pos, &data, self.ominous, config.spawn_range)
                 {
                     self.data.current_mobs.insert(uuid);
                     self.data.total_mobs_spawned = self.data.total_mobs_spawned.saturating_add(1);
@@ -1042,8 +1048,15 @@ impl TrialSpawnerContext for TrialSpawnerWorld<'_, '_> {
         self.world.trial_spawner_mob_untracked(uuid, pos)
     }
 
-    fn spawn_mob(&mut self, pos: BlockPos, spawn_data: &Tag, ominous: bool) -> Option<[u8; 16]> {
-        self.world.trial_spawner_spawn_mob(pos, spawn_data, ominous)
+    fn spawn_mob(
+        &mut self,
+        pos: BlockPos,
+        spawn_data: &Tag,
+        ominous: bool,
+        spawn_range: i32,
+    ) -> Option<[u8; 16]> {
+        self.world
+            .trial_spawner_spawn_mob(pos, spawn_data, ominous, spawn_range)
     }
 
     fn eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
@@ -1193,6 +1206,7 @@ mod tests {
             _pos: BlockPos,
             _spawn_data: &Tag,
             _ominous: bool,
+            _spawn_range: i32,
         ) -> Option<[u8; 16]> {
             let id = uuid(self.next_uuid);
             self.next_uuid += 1;

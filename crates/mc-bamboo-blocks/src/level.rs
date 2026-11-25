@@ -1311,13 +1311,29 @@ pub trait Level: LevelSideState + LevelEntities {
         Vec::new()
     }
 
-    /// `TrialSpawner.spawnMob`：按 `SpawnData` 生成一只带装备的生物，返回它的 UUID。
-    /// 默认不生成。
+    /// `TrialSpawner.spawnMob` 的试炼专属包装：算出生点（按 `spawn_range`）、做视线 /
+    /// 生成规则检查，再走 [`Self::spawner_spawn_entity`] 造实体。默认不生成。
     fn trial_spawner_spawn_mob(
         &mut self,
         _pos: BlockPos,
         _spawn_data: &Tag,
         _ominous: bool,
+        _spawn_range: i32,
+    ) -> Option<[u8; 16]> {
+        None
+    }
+
+    /// `SpawnData.entityToSpawn` 造实体的通用路径：普通刷怪笼和试炼刷怪笼共用。
+    /// 按 `entity_tag`（含 `id`）构造实体、`snapTo(position, yaw, pitch)`、只有 `id`
+    /// 时跑 `finalizeSpawn`，可选套 `equipment` 装备表，放进世界并返回 UUID。默认不生成。
+    fn spawner_spawn_entity(
+        &mut self,
+        _entity_tag: &Tag,
+        _position: mc_bamboo_core::Vec3,
+        _yaw: f32,
+        _pitch: f32,
+        _reason: crate::entity::mob::spawn::SpawnReason,
+        _equipment: Option<&Tag>,
     ) -> Option<[u8; 16]> {
         None
     }
