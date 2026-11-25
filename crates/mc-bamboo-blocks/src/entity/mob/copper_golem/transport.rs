@@ -223,11 +223,6 @@ impl Transport {
         if self.transport_state != TransportState::Travelling {
             return true;
         }
-        // `hasValidTravellingPath` 在导航还没有路径时先按官方 `createPath` 算一条，
-        // 但不装进导航；这里只在已经有一条路径之后才校验可达性。
-        if cx.mob.navigation.path.is_none() {
-            return true;
-        }
         if self.has_valid_travelling_path(cx, target.pos) {
             return true;
         }
@@ -235,18 +230,21 @@ impl Transport {
         false
     }
 
-    /// `hasValidTravellingPath`：路径终点（或当前位置）与箱子碰撞盒相交，
-    /// 或者从该点能看到箱子六个面之一。
+    /// `hasValidTravellingPath`：导航没有路径时按官方 `createPath(pos, 0)` 临时
+    /// 算一条（不装进导航），用它的终点（没有终点就用当前位置）判与箱子碰撞盒
+    /// 是否相交；只有相交时才再看能不能看到箱子六个面之一。
     fn has_valid_travelling_path(&self, cx: &mut Cx, pos: BlockPos) -> bool {
         let blocks = cx.ctx.blocks();
-        let path_end = cx
-            .mob
-            .navigation
-            .path
-            .as_ref()
-            .and_then(|path| path.end_node())
-            .map(|node| node.pos());
-        let from = match path_end {
+        // 官方 `getPath()` 为 null 时调 `createPath`：这里只读地算一次，
+        // 不改变导航状态（`create_path` 只在 `wall_climber` 时记目标位置）。
+        let temporary_path = if cx.mob.navigation.path.is_none() {
+            let nav = living::nav_mob(cx.me, cx.mob, blocks);
+            cx.mob.navigation.create_path(blocks, &nav, pos, 0)
+        } else {
+            None
+        };
+        let path = cx.mob.navigation.path.as_ref().or(temporary_path.as_ref());
+        let from = match path.and_then(|path| path.end_node()) {
             Some(end) => Vec3::new(
                 f64::from(end.x) + 0.5,
                 f64::from(end.y),
@@ -257,14 +255,11 @@ impl Transport {
         let from = middle_y(from, cx.me.bounding_box());
         let range = interaction_range(cx);
         let within = within_target_distance(blocks, cx.me, pos, range, from);
-        let no_path = cx.mob.navigation.path.is_none();
-        if !no_path && within {
-            return true;
-        }
-        if no_path && !within {
-            return false;
-        }
-        within || can_see_any_target_side(cx, pos, from)
+        // 官方：`bad = (path == null && !within)`；`bad` 为假就有效，
+        // 为真才走 `targetIsReachableFromPosition(within, ...)`，即
+        // `within && canSeeAnyTargetSide(...)`（此时 `within` 已是假）。
+        let bad = path.is_none() && !within;
+        !bad || (within && can_see_any_target_side(cx, pos, from))
     }
 
     fn on_travel(&mut self, cx: &mut Cx) {
