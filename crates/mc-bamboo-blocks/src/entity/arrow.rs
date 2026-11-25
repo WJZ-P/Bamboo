@@ -1091,12 +1091,14 @@ pub(super) fn play_extinguished_sound(me: &Entity, world: &mut World<'_>, pitch:
     );
 }
 
-/// `Entity.deflection`：目标是 `deflects_projectiles`（现在只有旋风人）时按
-/// `ProjectileDeflection.REVERSE` 弹回（速度 × -0.5、偏航 +170..190），放
-/// `BREEZE_DEFLECT` 音，不造成伤害。`Breeze.deflection` 对风弹返回 NONE，但箭和三叉戟
-/// 不是风弹，走这一支。
-fn deflect_off_target(me: &mut Entity, world: &mut World<'_>, uid: EntityUid) -> bool {
-    let deflects = world.entity(uid).is_some_and(|entity| {
+/// `hitTargetOrDeflectSelf` 的 REVERSE 弹回：目标是 `deflects_projectiles` 生物
+/// （现在只有旋风人）时按 `ProjectileDeflection.REVERSE` 弹回（速度 × -0.5、偏航
+/// +170..190），在目标身上放 `BREEZE_DEFLECT` 音，不造成伤害、继续飞行。
+/// `Breeze.deflection` 对风弹返回 NONE，但箭、三叉戟、雪球、鸡蛋、末影珍珠和喷溅
+/// 药水不是风弹，走这一支。返回是否弹回。
+pub(super) fn deflect_off_target(me: &mut Entity, world: &mut World<'_>, uid: EntityUid) -> bool {
+    let target = world.entity(uid);
+    let deflects = target.as_ref().is_some_and(|entity| {
         entity
             .kind
             .mob()
@@ -1105,8 +1107,11 @@ fn deflect_off_target(me: &mut Entity, world: &mut World<'_>, uid: EntityUid) ->
     if !deflects {
         return false;
     }
+    // `Breeze.PROJECTILE_DEFLECTION`：先放音再 `REVERSE`；音在目标实体身上（
+    // `playSound(null, entity, ...)` → `entity.getX/Y/Z`），音源是目标的 HOSTILE。
+    let position = target.map_or(me.position, |entity| entity.position);
     world.play_sound(
-        me.position,
+        position,
         sounds::sound_event("minecraft:entity.breeze.deflect"),
         sounds::HOSTILE,
         1.0,
@@ -1115,8 +1120,11 @@ fn deflect_off_target(me: &mut Entity, world: &mut World<'_>, uid: EntityUid) ->
     );
     me.delta = me.delta.multiply(-0.5, -0.5, -0.5);
     me.y_rot += 170.0 + me.random.next_float() * 20.0;
-    if let EntityKind::Arrow(arrow) = &mut me.kind {
-        arrow.needs_sync = true;
+    match &mut me.kind {
+        EntityKind::Arrow(arrow) => arrow.needs_sync = true,
+        EntityKind::Egg(egg) => egg.needs_sync = true,
+        EntityKind::SplashPotion(potion) => potion.needs_sync = true,
+        _ => {}
     }
     true
 }

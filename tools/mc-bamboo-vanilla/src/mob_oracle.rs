@@ -35,6 +35,7 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod arrow_deflect;
 mod attack_target;
 mod bat;
 mod bee;
@@ -238,6 +239,7 @@ enum Line {
     Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
     WindCharge(Box<wind_charge::WindChargeCase>),
+    ArrowDeflect(Box<arrow_deflect::ArrowDeflectCase>),
     OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawnerCase>),
     TrialSpawner(Box<trial_spawner::TrialSpawnerCase>),
     Vault(Box<vault::VaultCase>),
@@ -2194,6 +2196,7 @@ impl Report {
                 Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
                 Line::WindCharge(case) => self.replay_wind_charge(&case),
+                Line::ArrowDeflect(case) => self.replay_arrow_deflect(&case),
                 Line::OminousItemSpawner(case) => self.replay_ominous_item_spawner(&case),
                 Line::TrialSpawner(case) => self.replay_trial_spawner(&case),
                 Line::Vault(case) => self.replay_vault(&case),

@@ -578,6 +578,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("wind_charge")) {
                 cases += playWindCharge(official, out, only);
             }
+            if (only == null || only.startsWith("arrow_deflect")) {
+                cases += playArrowDeflect(official, out, only);
+            }
             if (only == null || only.startsWith("ominous_item_spawner")) {
                 cases += playOminousItemSpawner(official, out, only);
             }
@@ -12093,6 +12096,98 @@ public final class MobOracle {
                     + ",\"mob\":" + mob + ",\"start\":[0.5,64.5,0.5]"
                     + ",\"velocity\":[0.8,0.0,0.0],\"frames\":" + frames
                     + ",\"finalBlocks\":" + blocks + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    /**
+     * 箭射旋风人被弹回逐刻对拍：一支固定起点 / 速度的箭朝静止的旋风人飞去，
+     * 逐刻比位置、速度、朝向、是否消失、旋风人血量（不该受伤）、箭的随机源、
+     * 世界随机源和这一刻的 `BREEZE_DEFLECT` 音效（在旋风人身上）。
+     */
+    private static int playArrowDeflect(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("arrow_deflect_breeze")) {
+            if (only != null && !name.startsWith(only)) continue;
+            FakeLevel level = FakeLevel.create(official);
+            ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+            level.nextId = FIRST_ID;
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            level.spawned = new ArrayList<>();
+            level.tracked = new ArrayList<>();
+            level.levelEvents = new ArrayList<>();
+            level.soundLog = new ArrayList<>();
+            level.getRandom().setSeed(1L);
+            level.gameTime = START_TIME;
+            for (int x = -4; x <= 4; x++) {
+                for (int z = -4; z <= 4; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+            // 旋风人在 (3.5, 64, 0.5)，箭从 (0.5, 64.5, 0.5) 沿 +X 飞过去。
+            var breeze = net.minecraft.world.entity.EntityTypes.BREEZE.create(level, EntitySpawnReason.EVENT);
+            setRandom(breeze, 7L);
+            breeze.setUUID(new UUID(0L, 2L));
+            breeze.setId(FIRST_ID + 2);
+            breeze.snapTo(3.5, 64.0, 0.5, 0.0F, 0.0F);
+            breeze.setPersistenceRequired();
+            level.tracked.add(breeze);
+            var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(
+                    level, 0.5, 64.5, 0.5,
+                    new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.ARROW), null);
+            setRandom(arrow, 11L);
+            arrow.setUUID(new UUID(0L, 1L));
+            arrow.setId(FIRST_ID);
+            arrow.setDeltaMovement(0.8, 0.0, 0.0);
+            arrow.setYRot(0.0F);
+            arrow.setXRot(0.0F);
+            level.tracked.add(arrow);
+            int ticks = 8;
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime++;
+                    level.levelEvents.clear();
+                    level.soundLog.clear();
+                    if (!arrow.isRemoved()) {
+                        arrow.commonTick();
+                        arrow.tick();
+                    }
+                }
+                if (tick > 0) frames.append(',');
+                StringBuilder sounds = new StringBuilder("[");
+                boolean firstSound = true;
+                for (long[] sound : level.soundLog) {
+                    if (!firstSound) sounds.append(',');
+                    firstSound = false;
+                    sounds.append('[').append(sound[0]).append(',').append(sound[1]).append(',')
+                            .append(sound[2]).append(',').append(sound[3]).append(',')
+                            .append(sound[4]).append(',').append(sound[5]).append(',')
+                            .append(sound[6]).append(']');
+                }
+                sounds.append(']');
+                frames.append("{\"x\":")
+                        .append(Double.doubleToRawLongBits(arrow.getX()))
+                        .append(",\"y\":").append(Double.doubleToRawLongBits(arrow.getY()))
+                        .append(",\"z\":").append(Double.doubleToRawLongBits(arrow.getZ()))
+                        .append(",\"dx\":").append(Double.doubleToRawLongBits(arrow.getDeltaMovement().x))
+                        .append(",\"dy\":").append(Double.doubleToRawLongBits(arrow.getDeltaMovement().y))
+                        .append(",\"dz\":").append(Double.doubleToRawLongBits(arrow.getDeltaMovement().z))
+                        .append(",\"yRot\":").append(Float.floatToRawIntBits(arrow.getYRot()))
+                        .append(",\"xRot\":").append(Float.floatToRawIntBits(arrow.getXRot()))
+                        .append(",\"removed\":").append(arrow.isRemoved() ? 1 : 0)
+                        .append(",\"breezeHealth\":").append(Float.floatToRawIntBits(breeze.getHealth()))
+                        .append(",\"arrowSeed\":").append(randomSeed(arrow))
+                        .append(",\"levelSeed\":").append(randomSeed(level.getRandom()))
+                        .append(",\"sounds\":").append(sounds)
+                        .append('}');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"arrowDeflect\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"start\":[0.5,64.5,0.5]"
+                    + ",\"velocity\":[0.8,0.0,0.0],\"frames\":" + frames + "}\n");
             cases++;
         }
         return cases;
