@@ -29,11 +29,42 @@ pub(super) fn attributes() -> Attributes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        BlockTicks,
+        entity::mob::{MobType, skeleton::bow_slot, spawn},
+    };
+    use mc_bamboo_core::{BlockPos, Vec3};
+    use mc_bamboo_protocol::packet::play::EquipmentSlot;
 
     #[test]
     fn parched_has_bogged_health_and_weakness_arrows() {
         assert_eq!(attributes().value(attribute::MAX_HEALTH), 16.0);
         assert_eq!(ARROW_EFFECT, (mob_effect::WEAKNESS, 600));
         assert_eq!((HARD_ATTACK_INTERVAL, ATTACK_INTERVAL), (50, 70));
+    }
+
+    #[test]
+    fn summon_and_eggs_create_both_new_kinds() {
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        let mut world = crate::World::new(&mut level, &mut ticks);
+        let at = Vec3::new(0.5, 64.0, 0.5);
+        for (kind, health) in [(MobType::Parched, 16.0), (MobType::CamelHusk, 32.0)] {
+            let uid = spawn::summon_mob(&mut world, kind, at, None).unwrap();
+            {
+                let entity = world.entity(uid).unwrap();
+                let mob = entity.kind.mob().unwrap();
+                assert_eq!(mob.mob_type, kind);
+                assert_eq!(mob.health, health);
+                assert_eq!(
+                    bow_slot(mob).map(|_| mob.equipment.get(EquipmentSlot::MainHand).item),
+                    (kind == MobType::Parched).then_some(mc_bamboo_data::items::BOW)
+                );
+            }
+            let egg =
+                spawn::spawn_egg(&mut world, kind, BlockPos::new(1, 64, 0), true, false, None);
+            let entity = world.entity(egg).unwrap();
+            assert_eq!(entity.kind.mob().unwrap().mob_type, kind);
+        }
     }
 }
