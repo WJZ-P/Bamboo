@@ -9,6 +9,24 @@
 //! 与挤压伤害」这几组计数，见 [`imp::counters`]。探针全部只在 `cfg(test)` 下存在，
 //! 关掉时正式构建连一次原子操作都没有。
 
+/// 压测的 A/B 开关：`MOB_STRESS_NAIVE=1` 让三项优化都走朴素路径，
+/// 同一个二进制就能量到「改之前 / 改之后」。正式构建里恒为假。
+///
+/// A/B switch for benchmarks: `MOB_STRESS_NAIVE=1` sends all three optimisations
+/// down their naive paths, so one binary measures both sides. Always false in
+/// production builds.
+#[cfg(test)]
+pub(crate) fn stress_naive() -> bool {
+    static NAIVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *NAIVE.get_or_init(|| std::env::var_os("MOB_STRESS_NAIVE").is_some())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) const fn stress_naive() -> bool {
+    false
+}
+
 #[cfg(test)]
 pub(crate) mod imp {
     use std::cell::RefCell;
@@ -158,6 +176,14 @@ pub(crate) mod imp {
         behavior_starts: u64,
         /// POI 查询次数。
         poi_queries: u64,
+        /// 结构刷怪覆盖查询次数和累计耗时（纳秒）。
+        structure_queries: u64,
+        structure_query_ns: u64,
+        /// 目标搜索真正访问到的候选数。
+        target_candidates: u64,
+        /// 视线射线次数、缓存命中次数。
+        sight_rays: u64,
+        sight_cache_hits: u64,
     }
 
     #[derive(Default)]
@@ -310,6 +336,33 @@ pub(crate) mod imp {
         });
     }
 
+    /// 一次结构刷怪覆盖查询及其耗时（纳秒）。
+    pub(crate) fn record_structure_query(nanos: u64) {
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.counters.structure_queries += 1;
+            state.counters.structure_query_ns += nanos;
+        });
+    }
+
+    /// 目标搜索访问到的候选实体数。
+    pub(crate) fn record_target_candidates(count: u64) {
+        STATE.with(|state| {
+            state.borrow_mut().counters.target_candidates += count;
+        });
+    }
+
+    /// 一次视线检查：`hit` 为真表示复用了跨刻缓存，没有真跑射线。
+    pub(crate) fn record_sight(hit: bool) {
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.counters.sight_rays += 1;
+            if hit {
+                state.counters.sight_cache_hits += 1;
+            }
+        });
+    }
+
     /// 取走全部线程累计的自身时间（纳秒），按 [`Part`] 的顺序。
     /// 并行算阶段各线程的时间在 [`flush_counters`] 里并进来，所以这里是 CPU 时间之和，
     /// 不是墙上时间。
@@ -359,6 +412,11 @@ pub(crate) mod imp {
         pub sensor_scans: u64,
         pub behavior_starts: u64,
         pub poi_queries: u64,
+        pub structure_queries: u64,
+        pub structure_query_ns: u64,
+        pub target_candidates: u64,
+        pub sight_rays: u64,
+        pub sight_cache_hits: u64,
     }
 
     impl Snapshot {
@@ -375,6 +433,11 @@ pub(crate) mod imp {
                 sensor_scans: 0,
                 behavior_starts: 0,
                 poi_queries: 0,
+                structure_queries: 0,
+                structure_query_ns: 0,
+                target_candidates: 0,
+                sight_rays: 0,
+                sight_cache_hits: 0,
             }
         }
 
@@ -415,6 +478,11 @@ pub(crate) mod imp {
             self.sensor_scans += other.sensor_scans;
             self.behavior_starts += other.behavior_starts;
             self.poi_queries += other.poi_queries;
+            self.structure_queries += other.structure_queries;
+            self.structure_query_ns += other.structure_query_ns;
+            self.target_candidates += other.target_candidates;
+            self.sight_rays += other.sight_rays;
+            self.sight_cache_hits += other.sight_cache_hits;
         }
     }
 }
@@ -508,6 +576,30 @@ macro_rules! record_poi_query {
     };
 }
 
+/// `record_structure_query!(nanos)`：一次结构刷怪覆盖查询。
+#[cfg(test)]
+macro_rules! record_structure_query {
+    ($nanos:expr) => {
+        $crate::entity::mob::timing::imp::record_structure_query($nanos);
+    };
+}
+
+/// `record_target_candidates!(n)`：目标搜索访问到的候选数。
+#[cfg(test)]
+macro_rules! record_target_candidates {
+    ($n:expr) => {
+        $crate::entity::mob::timing::imp::record_target_candidates($n);
+    };
+}
+
+/// `record_sight!(hit)`：一次视线检查及是否命中缓存。
+#[cfg(test)]
+macro_rules! record_sight {
+    ($hit:expr) => {
+        $crate::entity::mob::timing::imp::record_sight($hit);
+    };
+}
+
 /// 正式构建里的同名空宏：每个调用点都展开成一条空语句，零开销、零行为变化。
 /// 定义本身没有被用到不算问题。
 #[cfg(not(test))]
@@ -565,6 +657,21 @@ macro_rules! record_behavior_start {
 macro_rules! record_poi_query {
     () => {};
 }
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! record_structure_query {
+    ($nanos:expr) => {};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! record_target_candidates {
+    ($n:expr) => {};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! record_sight {
+    ($hit:expr) => {};
+}
 
 #[allow(unused_imports)]
 pub(crate) use begin_mob;
@@ -583,6 +690,12 @@ pub(crate) use record_poi_query;
 pub(crate) use record_push;
 #[allow(unused_imports)]
 pub(crate) use record_sensor_scan;
+#[allow(unused_imports)]
+pub(crate) use record_sight;
+#[allow(unused_imports)]
+pub(crate) use record_structure_query;
+#[allow(unused_imports)]
+pub(crate) use record_target_candidates;
 pub(crate) use span;
 
 #[cfg(test)]

@@ -492,7 +492,17 @@ impl Global {
     /// once, so the island always reads the latest state, bit for bit like
     /// reading `Global` itself.
     pub(crate) fn publish(&self, region: &mut Region) {
-        region.global = self.view();
+        let view = self.view();
+        // 结构刷怪索引是按世界生成配置（种子 / 预设 / 超平坦设置）算的纯函数结果；
+        // 配置换掉时整张清空，下一次查询按新配置重算。
+        //
+        // The structure spawn index is a pure function of the world-generation
+        // config; clear it when the config changes so the next query rebuilds it.
+        if view.world_gen != region.global.world_gen {
+            *region.structure_spawn_index.borrow_mut() =
+                crate::structure_spawn::StructureSpawnIndex::default();
+        }
+        region.global = view;
     }
 
     #[cfg(test)]

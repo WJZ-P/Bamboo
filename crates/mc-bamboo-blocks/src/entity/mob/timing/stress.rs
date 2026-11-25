@@ -28,7 +28,7 @@ use crate::{
     entity::{
         Entities, Entity, EntityStore,
         ctx::PlayerView,
-        mob::{MobType, natural},
+        mob::{MobType, goals::Goal, natural},
         parallel::{
             Executor, InlineExecutor, ScopedThreads, WorkerPool, tick_entities_parallel_timed,
         },
@@ -37,13 +37,38 @@ use crate::{
     level::EquipTarget,
     state::{BED_PART, BedPart},
 };
+use mc_bamboo_game::{
+    WorldGenConfig,
+    structure_spawn::{
+        StructureSpawnIndex, override_at_indexed_for_bench, override_at_naive_for_bench,
+    },
+    world_options::LevelType,
+};
 
 /// 每个场景、每个线程数跑几轮；报告取每轮中位数再取三轮中位数。
 const ROUNDS: usize = 3;
-/// 预热刻数：让牛散开、僵尸找到目标、自然刷怪到上限。
-const WARM: usize = 200;
+/// 预热刻数：让牛散开、僵尸找到目标、自然刷怪到上限。守卫者塔要更久，
+/// 让 300 只守卫者在推挤里沉降到稳定位置（真实刷怪塔里它们本来就站定）。
+fn warm_ticks(scene: Option<Scene>) -> usize {
+    std::env::var("MOB_STRESS_WARM")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or_else(|| {
+            if scene == Some(Scene::GuardianTower300) {
+                600
+            } else {
+                200
+            }
+        })
+}
 /// 测量刻数：刻级 p50/p95/p99 的样本数。
-const MEASURE: usize = 300;
+fn measure_ticks() -> usize {
+    std::env::var("MOB_STRESS_MEASURE")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(300)
+}
 /// 线程数，0 是精确串行，其余是并行驱动。
 const THREADS: [usize; 5] = [0, 1, 2, 4, 8];
 
@@ -136,8 +161,15 @@ impl Terrain {
 
     /// 铺一块 `radius × radius` 的平地（`y = floor_y - 1` 草方块，`floor_y` 是站的高度）。
     fn flat(&mut self, radius: i32) {
-        for x in -radius..=radius {
-            for z in -radius..=radius {
+        self.flat_around(0, 0, radius);
+    }
+
+    /// 同 [`Self::flat`]，但以 `(cx, cz)` 为中心（结构刷怪场景的玩家在真实结构附近）。
+    ///
+    /// Like [`Self::flat`] but centred on `(cx, cz)`.
+    fn flat_around(&mut self, cx: i32, cz: i32, radius: i32) {
+        for x in cx - radius..=cx + radius {
+            for z in cz - radius..=cz + radius {
                 self.set(BlockPos::new(x, self.floor_y - 1, z), blocks::GRASS_BLOCK);
             }
         }
@@ -199,6 +231,12 @@ struct StressLevel {
     redstone: RedstoneMemory,
     block_entities: BlockEntities,
     block_events: BlockEvents,
+    /// `structure-spawn` 场景用游戏侧的真实结构刷怪索引；其它场景为 `None`，
+    /// 走 `Level` 的缺省（回退群系表）。
+    ///
+    /// The real game-side structure spawn index for the `structure-spawn`
+    /// scene; `None` elsewhere (falls back to the biome table).
+    structure: Option<(WorldGenConfig, std::cell::RefCell<StructureSpawnIndex>)>,
 }
 
 impl LevelTables for StressLevel {
@@ -288,6 +326,19 @@ impl Level for StressLevel {
             visit(player);
         }
     }
+    fn structure_spawn_override(
+        &self,
+        pos: BlockPos,
+        category: mc_bamboo_data::spawning::MobCategory,
+    ) -> Option<&'static [mc_bamboo_data::spawning::MobSpawnerDef]> {
+        let (config, index) = self.structure.as_ref()?;
+        if super::stress_naive() {
+            override_at_naive_for_bench(config, pos, category)
+        } else {
+            override_at_indexed_for_bench(config, index, pos, category)
+        }
+    }
+
     fn block_weather(&self) -> BlockWeather {
         BlockWeather::CLEAR
     }
@@ -529,10 +580,14 @@ enum Scene {
     Unemployed60,
     /// 100 只村民的夜间村庄（`base_clock=13000`, `sky_darken=4`, 110 张床 + 工作站 + 钟）。
     NightVillage100,
+    /// 300 只守卫者挤在水坑里，一名玩家在 30 格外；量目标扫描、激光视线和推挤。
+    GuardianTower300,
+    /// 玩家站在前哨站 / 女巫小屋旁，开着自然刷怪，量结构刷怪覆盖查询。
+    StructureSpawn,
 }
 
 impl Scene {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 18] = [
         Self::Pasture500,
         Self::Pasture2000,
         Self::Chase,
@@ -549,6 +604,8 @@ impl Scene {
         Self::Pod100,
         Self::Unemployed60,
         Self::NightVillage100,
+        Self::GuardianTower300,
+        Self::StructureSpawn,
     ];
 
     fn name(self) -> &'static str {
@@ -569,6 +626,8 @@ impl Scene {
             Self::Pod100 => "pod-100",
             Self::Unemployed60 => "unemployed-60",
             Self::NightVillage100 => "night-village-100",
+            Self::GuardianTower300 => "guardian-tower-300",
+            Self::StructureSpawn => "structure-spawn",
         }
     }
 
@@ -914,6 +973,88 @@ impl Scene {
         (terrain, mobs)
     }
 
+    /// 守卫者塔：300 只守卫者挤在 5×5 的水坑里，被量到的玩家在 30 格外，另有一名
+    /// 8 格外的「诱饵」玩家当激光目标（玩家不会死、不会动），坑里再放几只非猎物的
+    /// 水生生物，量按类型筛省掉了多少候选。
+    fn guardian_tower() -> (Terrain, Vec<(MobType, Vec3)>) {
+        let floor = 64;
+        let mut terrain = Terrain::new(floor);
+        terrain.flat(48);
+        terrain.rules.max_entity_cramming = 0;
+        // 18×18 水坑：底和四壁用石头，内部三格高全是水。
+        for x in -1..=18 {
+            for z in -1..=18 {
+                terrain.set(BlockPos::new(x, floor - 1, z), blocks::STONE);
+            }
+        }
+        for (x, z) in [-1, 18]
+            .into_iter()
+            .flat_map(|x| [-1, 18].into_iter().map(move |z| (x, z)))
+        {
+            for y in floor..floor + 4 {
+                terrain.set(BlockPos::new(x, y, z), blocks::STONE);
+            }
+        }
+        for x in 0..=17 {
+            for z in 0..=17 {
+                for y in floor..floor + 4 {
+                    terrain.set(BlockPos::new(x, y, z), blocks::WATER);
+                }
+            }
+        }
+        terrain.add_player(1, Vec3::new(31.5, f64::from(floor), 0.5));
+        terrain.add_player(2, Vec3::new(9.5, f64::from(floor), 0.5));
+        let mut mobs = Vec::with_capacity(305);
+        for i in 0..300 {
+            let x = i % 18;
+            let z = i / 18 % 18;
+            mobs.push((
+                MobType::Guardian,
+                Vec3::new(
+                    f64::from(x) + 0.5,
+                    f64::from(floor) + 1.0,
+                    f64::from(z) + 0.5,
+                ),
+            ));
+        }
+        // 五只非猎物的水生生物：朴素路径会逐个过选择器，按类型筛的路径不访问。
+        for (i, kind) in [MobType::Pufferfish, MobType::Cod, MobType::Salmon]
+            .into_iter()
+            .cycle()
+            .take(5)
+            .enumerate()
+        {
+            mobs.push((
+                kind,
+                Vec3::new(
+                    1.5 + (i % 3) as f64,
+                    f64::from(floor) + 1.0,
+                    1.5 + (i / 3) as f64,
+                ),
+            ));
+        }
+        (terrain, mobs)
+    }
+
+    /// 结构刷怪：种子 42 的噪声主世界里 `(-17,22)` 区块有一座真实的女巫小屋
+    /// （`docs/worldgen-structures-e2e.md` 的代表区块），玩家就站在它旁边，
+    /// 开着自然刷怪；结构索引走游戏侧的真实路径。
+    ///
+    /// Structure spawning: seed 42 has a real swamp hut at chunk `(-17,22)`;
+    /// the player stands next to it with natural spawning on.
+    fn structure_spawn() -> (Terrain, Vec<(MobType, Vec3)>) {
+        let floor = 64;
+        let (px, pz) = (-17 * 16 + 8, 22 * 16 + 8);
+        let mut terrain = Terrain::new(floor);
+        terrain.flat_around(px, pz, 40);
+        terrain.sky_darken = 4;
+        terrain.add_player(
+            1,
+            Vec3::new(f64::from(px) + 0.5, f64::from(floor), f64::from(pz) + 0.5),
+        );
+        (terrain, Vec::new())
+    }
+
     /// 混合：两名玩家、自然刷怪开、真的噪声主世界地形（`minecraft:overworld`，
     /// 种子 20261116，跑 `mc_bamboo_worldgen::chunk::Generator` 到 CARVERS）。
     /// 刷怪走 `natural::spawn_for_chunk` 的真实路径；地形只在搭场景时生成一次，
@@ -1039,6 +1180,14 @@ impl Scene {
                 let (terrain, mobs) = Self::village(100, 100, true);
                 (terrain, mobs, false)
             }
+            Self::GuardianTower300 => {
+                let (terrain, mobs) = Self::guardian_tower();
+                (terrain, mobs, false)
+            }
+            Self::StructureSpawn => {
+                let (terrain, mobs) = Self::structure_spawn();
+                (terrain, mobs, true)
+            }
         }
     }
 }
@@ -1048,7 +1197,7 @@ static MIXED_TERRAIN: std::sync::OnceLock<Terrain> = std::sync::OnceLock::new();
 
 /// 一次测量的结果。
 struct Sample {
-    /// 每刻墙上时间（纳秒），`MEASURE` 个样本。
+    /// 每刻墙上时间（纳秒），`measure_ticks()` 个样本。
     ticks_ns: Vec<u64>,
     /// 分段自身时间（纳秒），按 [`PARTS`]。
     parts: [u64; PARTS],
@@ -1058,7 +1207,7 @@ struct Sample {
     entities: usize,
 }
 
-/// 一个场景 × 一个线程数的一轮：搭世界、预热、量 `MEASURE` 刻。
+/// 一个场景 × 一个线程数的一轮：搭世界、预热、量 `measure_ticks()` 刻。
 fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool) -> Sample {
     let (mut terrain, mobs, _) = if scene == Scene::Mixed {
         (
@@ -1100,12 +1249,38 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
         redstone: RedstoneMemory::default(),
         block_entities: BlockEntities::default(),
         block_events: BlockEvents::default(),
+        structure: (scene == Scene::StructureSpawn).then(|| {
+            let config = WorldGenConfig {
+                seed: 42,
+                level_type: LevelType::Normal,
+                ..WorldGenConfig::default()
+            };
+            (
+                config,
+                std::cell::RefCell::new(StructureSpawnIndex::default()),
+            )
+        }),
     };
     let mut ticks = BlockTicks::new();
     {
         let mut world = World::new(&mut level, &mut ticks);
         for (kind, position) in &mobs {
             let uid = world.spawn_entity(Entity::by_mob_type(*kind, *position));
+            // 守卫者塔关掉游走 / 漫游目标，让守卫者攻击时站定：真实的刷怪塔里
+            // 守卫者被水柱和墙夹住，本来就基本不动。
+            if scene == Scene::GuardianTower300 && *kind == MobType::Guardian {
+                world.with_entity_mut(uid, &mut |entity| {
+                    entity.with_mob(|_, mob| {
+                        mob.no_gravity = true;
+                        mob.goals.goals.retain(|wrapped| {
+                            !matches!(
+                                wrapped.goal,
+                                Goal::Stroll { .. } | Goal::RandomLookAround { .. }
+                            )
+                        });
+                    });
+                });
+            }
             // 追玩家场景：把玩家设成每只僵尸的攻击目标，近战目标每刻才会发寻路请求。
             // `NearestAttackableTarget` 自己也会挑到他，但那样受 10 刻调度和视线限制；
             // 显式设目标等价于「已经看见玩家」，让 A* 稳定有活干。
@@ -1150,6 +1325,27 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
     } else {
         Vec::new()
     };
+    // `structure-spawn` 场景每刻再按两类覆盖表逐区块问一次结构：自然刷怪到上限后
+    // 类别会被过滤掉，直接问这两类才能量到稳定的结构查询单价。
+    let structure_queries: Vec<(BlockPos, mc_bamboo_data::spawning::MobCategory)> =
+        if scene == Scene::StructureSpawn {
+            use mc_bamboo_data::spawning::MobCategory;
+            spawn_chunks
+                .iter()
+                .flat_map(|chunk| {
+                    [MobCategory::Monster, MobCategory::Creature]
+                        .into_iter()
+                        .map(|category| {
+                            (
+                                BlockPos::new(chunk.x * 16 + 8, 64, chunk.z * 16 + 8),
+                                category,
+                            )
+                        })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
     let tick = |level: &mut StressLevel,
                 ticks: &mut BlockTicks,
@@ -1181,6 +1377,14 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
                 natural::spawn_for_chunk(&mut world, chunk, &mut state, &params, &categories);
             }
         }
+        if !structure_queries.is_empty() {
+            let world = World::new(&mut *level, &mut *ticks);
+            for &(pos, category) in &structure_queries {
+                let started = Instant::now();
+                let _ = world.level().structure_spawn_override(pos, category);
+                imp::record_structure_query(started.elapsed().as_nanos() as u64);
+            }
+        }
         if threads == 0 {
             let mut world = World::new(&mut *level, &mut *ticks);
             world.tick_entities();
@@ -1202,7 +1406,17 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
     let move_players = |level: &mut StressLevel, i: usize| {
         let angle = (i as f64) * std::f64::consts::TAU / 120.0;
         let mut players = level.terrain.players.lock().expect("player mutex");
-        if natural || matches!(scene, Scene::Chase | Scene::ChaseObstacles) {
+        if scene == Scene::StructureSpawn {
+            // 结构刷怪场景的玩家绕着女巫小屋走，始终在结构覆盖盒附近。
+            // The structure-spawn player walks around the swamp hut, always nearby.
+            if let Some(player) = players.first_mut() {
+                player.position = Vec3::new(
+                    f64::from(-17 * 16 + 8) + 0.5 + angle.cos() * 6.0,
+                    64.0,
+                    f64::from(22 * 16 + 8) + 0.5 + angle.sin() * 6.0,
+                );
+            }
+        } else if natural || matches!(scene, Scene::Chase | Scene::ChaseObstacles) {
             if let Some(player) = players.first_mut() {
                 player.position = Vec3::new(angle.cos() * 10.0, 64.0, angle.sin() * 10.0);
             }
@@ -1214,7 +1428,8 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
             }
         }
     };
-    for i in 0..WARM {
+    let warm = warm_ticks(Some(scene));
+    for i in 0..warm {
         move_players(&mut level, i);
         tick(&mut level, &mut ticks, &source, executor.as_ref(), i as i64);
     }
@@ -1222,17 +1437,18 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
     imp::take();
     let _ = imp::take_all_counters();
 
-    let mut ticks_ns = Vec::with_capacity(MEASURE);
+    let measure = measure_ticks();
+    let mut ticks_ns = Vec::with_capacity(measure);
     let mut framework = [0_u64; 4];
-    for i in 0..MEASURE {
-        move_players(&mut level, WARM + i);
+    for i in 0..measure {
+        move_players(&mut level, warm + i);
         let start = Instant::now();
         let times = tick(
             &mut level,
             &mut ticks,
             &source,
             executor.as_ref(),
-            (WARM + i) as i64,
+            (warm + i) as i64,
         );
         ticks_ns.push(start.elapsed().as_nanos() as u64);
         for (to, from) in framework.iter_mut().zip(times) {
@@ -1274,6 +1490,7 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 
 /// 把三轮的分位数 / 分段 / 计数各自再取中位数。
 fn summarize(scene: Scene, threads: usize, rounds: Vec<Sample>) -> String {
+    let measure = measure_ticks() as f64;
     let entities = rounds.iter().map(|s| s.entities as u64).collect::<Vec<_>>();
     let mut tick_stats = Vec::new();
     let mut part_millis: [Vec<f64>; PARTS] = std::array::from_fn(|_| Vec::new());
@@ -1285,6 +1502,11 @@ fn summarize(scene: Scene, threads: usize, rounds: Vec<Sample>) -> String {
     let mut sensor_scans = Vec::new();
     let mut behavior_starts = Vec::new();
     let mut poi_queries = Vec::new();
+    let mut structure_queries = Vec::new();
+    let mut structure_ns = Vec::new();
+    let mut target_candidates = Vec::new();
+    let mut sight_rays = Vec::new();
+    let mut sight_hit_rate = Vec::new();
     let mut band_ticks = Vec::new();
     let mut band_ms = Vec::new();
     let mut kinds: BTreeMap<i32, Vec<f64>> = BTreeMap::new();
@@ -1297,41 +1519,43 @@ fn summarize(scene: Scene, threads: usize, rounds: Vec<Sample>) -> String {
             percentile(&sorted, 0.99),
         ]);
         for (i, part) in part_millis.iter_mut().enumerate() {
-            part.push(sample.parts[i] as f64 / 1e6 / MEASURE as f64);
+            part.push(sample.parts[i] as f64 / 1e6 / measure);
         }
         for (i, framework) in framework_millis.iter_mut().enumerate() {
-            framework.push(sample.framework[i] as f64 / 1e6 / MEASURE as f64);
+            framework.push(sample.framework[i] as f64 / 1e6 / measure);
         }
         let p = &sample.counters.paths;
         path_stats.push([
-            p.requests as f64 / MEASURE as f64,
-            p.nodes as f64 / MEASURE as f64,
-            p.succeeded as f64 / MEASURE as f64,
-            p.failed as f64 / MEASURE as f64,
-            p.duplicates as f64 / MEASURE as f64,
+            p.requests as f64 / measure,
+            p.nodes as f64 / measure,
+            p.succeeded as f64 / measure,
+            p.failed as f64 / measure,
+            p.duplicates as f64 / measure,
             p.succeeded as f64 / p.requests.max(1) as f64,
-            p.global_duplicates as f64 / MEASURE as f64,
+            p.global_duplicates as f64 / measure,
         ]);
-        push.push(sample.counters.push_commands as f64 / MEASURE as f64);
-        cramming.push(sample.counters.cramming_hits as f64 / MEASURE as f64);
-        brain_ticks.push(sample.counters.brain_ticks as f64 / MEASURE as f64);
-        sensor_scans.push(sample.counters.sensor_scans as f64 / MEASURE as f64);
-        behavior_starts.push(sample.counters.behavior_starts as f64 / MEASURE as f64);
-        poi_queries.push(sample.counters.poi_queries as f64 / MEASURE as f64);
-        band_ticks.push(
-            sample
-                .counters
-                .bands
-                .map(|b| b.ticks as f64 / MEASURE as f64),
+        push.push(sample.counters.push_commands as f64 / measure);
+        cramming.push(sample.counters.cramming_hits as f64 / measure);
+        brain_ticks.push(sample.counters.brain_ticks as f64 / measure);
+        sensor_scans.push(sample.counters.sensor_scans as f64 / measure);
+        behavior_starts.push(sample.counters.behavior_starts as f64 / measure);
+        poi_queries.push(sample.counters.poi_queries as f64 / measure);
+        structure_queries.push(sample.counters.structure_queries as f64 / measure);
+        structure_ns.push(sample.counters.structure_query_ns as f64 / 1e6 / measure);
+        target_candidates.push(sample.counters.target_candidates as f64 / measure);
+        sight_rays.push(sample.counters.sight_rays as f64 / measure);
+        sight_hit_rate.push(
+            sample.counters.sight_cache_hits as f64 / sample.counters.sight_rays.max(1) as f64,
         );
+        band_ticks.push(sample.counters.bands.map(|b| b.ticks as f64 / measure));
         band_ms.push(
             sample
                 .counters
                 .bands
-                .map(|b| b.parts.iter().sum::<u64>() as f64 / 1e6 / MEASURE as f64),
+                .map(|b| b.parts.iter().sum::<u64>() as f64 / 1e6 / measure),
         );
         for (kind, stats) in sample.counters.kinds() {
-            let total = stats.parts.iter().sum::<u64>() as f64 / 1e6 / MEASURE as f64;
+            let total = stats.parts.iter().sum::<u64>() as f64 / 1e6 / measure;
             kinds.entry(*kind).or_default().push(total);
         }
     }
@@ -1430,6 +1654,18 @@ fn summarize(scene: Scene, threads: usize, rounds: Vec<Sample>) -> String {
         line(&mut behavior_starts),
         line(&mut poi_queries),
     );
+    out += &format!(
+        "structure/tick: queries={} ms={:.3}\n",
+        line(&mut structure_queries),
+        med(&mut structure_ns),
+    );
+    out += &format!(
+        "target-sight/tick: candidates={} rays={} cache-hit={:.1}% push-cmds={}\n",
+        line(&mut target_candidates),
+        line(&mut sight_rays),
+        med(&mut sight_hit_rate) * 100.0,
+        line(&mut push),
+    );
     for band in 0..3 {
         let mut count = band_ticks
             .iter()
@@ -1481,7 +1717,9 @@ fn mob_stress() {
         })
         .unwrap_or_else(|| THREADS.to_vec());
     println!(
-        "mob-stress: rounds={ROUNDS} warm={WARM} measure={MEASURE} scenes={} threads={:?} scoped={} max-collisions={} throttle={} villager-opt={} pathfinding={}",
+        "mob-stress: rounds={ROUNDS} warm={} measure={} scenes={} threads={:?} scoped={} max-collisions={} throttle={} villager-opt={} pathfinding={}",
+        warm_ticks(None),
+        measure_ticks(),
         only.as_deref().unwrap_or("all"),
         threads,
         scoped,
@@ -1500,7 +1738,7 @@ fn mob_stress() {
         }) {
             continue;
         }
-        let natural = scene == Scene::Mixed;
+        let natural = matches!(scene, Scene::Mixed | Scene::StructureSpawn);
         for &count in &threads {
             let mut rounds = Vec::with_capacity(ROUNDS);
             for round in 0..ROUNDS {
@@ -1550,6 +1788,7 @@ fn measure_cramming(scene: Scene, threads: usize, rounds: usize) -> String {
             redstone: RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            structure: None,
         };
         let mut ticks = BlockTicks::new();
         {
@@ -1667,6 +1906,7 @@ fn villager_stress_scenarios_register_real_pois_and_tick_cleanly() {
             redstone: RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            structure: None,
         };
         let source = SourceView::new(StressSource::new(terrain));
         assert_eq!(
@@ -1704,4 +1944,130 @@ fn villager_stress_scenarios_register_real_pois_and_tick_cleanly() {
             }
         }
     }
+}
+
+/// 冒烟：两个新场景都能搭起来、精确和并行各跑几刻，且结构刷怪索引的接线在
+/// 人造女巫小屋上真的命中（索引路径和朴素路径给同一张表）。
+#[test]
+fn guardian_perf_scenes_tick_cleanly_and_structure_index_is_wired() {
+    use mc_bamboo_data::{registries::entity_type, spawning::MobCategory};
+    use mc_bamboo_game::worldgen_structures::{
+        clear_disk_structures, encode_structures, install_disk_structures,
+    };
+    use mc_bamboo_worldgen::structure::{
+        pipeline::{StartPieces, WorldStructureStart, WorldStructureStarts},
+        start::{BoundingBox, StructurePiece, chunk_pos_pack},
+    };
+
+    for scene in [Scene::GuardianTower300, Scene::StructureSpawn] {
+        let (terrain, mobs, _) = scene.build();
+        let mut level = StressLevel {
+            terrain: terrain.clone(),
+            clock: 0,
+            random: LevelRandom::new(7),
+            entities: Entities::with_next_id(2),
+            redstone: RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            structure: (scene == Scene::StructureSpawn).then(|| {
+                (
+                    WorldGenConfig {
+                        seed: 20261122,
+                        level_type: LevelType::Normal,
+                        ..WorldGenConfig::default()
+                    },
+                    std::cell::RefCell::new(StructureSpawnIndex::default()),
+                )
+            }),
+        };
+        let source = SourceView::new(StressSource::new(terrain));
+        let mut ticks = BlockTicks::new();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            for (kind, pos) in mobs.iter().take(8) {
+                world.spawn_entity(Entity::by_mob_type(*kind, *pos));
+            }
+        }
+        for t in 0..2 {
+            ticks.set_time(t);
+            source
+                .0
+                .clock
+                .store(t, std::sync::atomic::Ordering::Relaxed);
+            let mut world = World::new(&mut level, &mut ticks);
+            if t == 0 {
+                world.tick_entities();
+            } else {
+                let _ = tick_entities_parallel_timed(&source, &mut world, &InlineExecutor);
+            }
+        }
+        imp::take();
+        let _ = imp::take_all_counters();
+    }
+
+    // 种子 42 的噪声主世界在 (-17,22) 区块有真实女巫小屋：场景的玩家确实站在结构旁。
+    {
+        let world_config = WorldGenConfig {
+            seed: 42,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        };
+        let index = std::cell::RefCell::new(StructureSpawnIndex::default());
+        // 种子 42 的女巫小屋结构件盒是 x -272..-264、y 64..70、z 352..358。
+        let hut_pos = BlockPos::new(-268, 65, 355);
+        assert_eq!(
+            override_at_indexed_for_bench(&world_config, &index, hut_pos, MobCategory::Monster)
+                .map(|table| table[0].entity_type),
+            Some(entity_type::WITCH),
+            "真实女巫小屋覆盖盒要命中"
+        );
+    }
+
+    // 人造女巫小屋：索引路径第一次查询就建好行，朴素路径给同一张覆盖表。
+    let config = WorldGenConfig {
+        seed: 20261122,
+        level_type: LevelType::Normal,
+        ..WorldGenConfig::default()
+    };
+    let hut = WorldStructureStart {
+        structure: "minecraft:swamp_hut".to_owned(),
+        chunk_x: 0,
+        chunk_z: 0,
+        references: 1,
+        pieces: StartPieces::Sparse(vec![StructurePiece {
+            piece_type: "minecraft:shstart".to_owned(),
+            bounding_box: BoundingBox {
+                min_x: 2,
+                min_y: 60,
+                min_z: 2,
+                max_x: 8,
+                max_y: 70,
+                max_z: 8,
+            },
+            orientation: -1,
+            ground_level_delta: 0,
+        }]),
+        terrain_adaptation: false,
+    };
+    let mut starts = WorldStructureStarts::default();
+    starts.insert(hut);
+    let references = std::collections::BTreeMap::from([(
+        "minecraft:swamp_hut".to_owned(),
+        vec![chunk_pos_pack(0, 0)],
+    )]);
+    let tag = encode_structures(&config, &starts, &references).expect("encode hut");
+    install_disk_structures(&config, 0, 0, Some(&tag));
+    let index = std::cell::RefCell::new(StructureSpawnIndex::default());
+    for (category, expected) in [
+        (MobCategory::Monster, entity_type::WITCH),
+        (MobCategory::Creature, entity_type::CAT),
+    ] {
+        let pos = BlockPos::new(5, 65, 5);
+        let optimized = override_at_indexed_for_bench(&config, &index, pos, category);
+        let naive = override_at_naive_for_bench(&config, pos, category);
+        assert_eq!(optimized.map(|t| t[0].entity_type), Some(expected));
+        assert_eq!(naive.map(|t| t[0].entity_type), Some(expected));
+        assert!(std::ptr::eq(optimized.unwrap(), naive.unwrap()));
+    }
+    clear_disk_structures();
 }

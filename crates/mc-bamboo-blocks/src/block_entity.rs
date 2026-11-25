@@ -155,6 +155,12 @@ const UNIT_SHIFT: u32 = 40;
 /// - 被删掉的槽位不再运行，下一刻开头回收。
 pub struct BlockEntities {
     entities: HashMap<BlockPos, Stored>,
+    /// 形状可能变过的次数（方块实体增删、取出 tick、放回、叫醒）。守卫者的激光视线
+    /// 缓存拿它当岛级版本戳的一部分：移动活塞 / 潜影盒的碰撞形状必须即时失效。
+    ///
+    /// Shape-change counter (insert / remove / take / put / wake). Part of the
+    /// island-level stamp used by the guardian laser sight cache.
+    shape_stamp: std::cell::Cell<u64>,
     /// 正在 tick、已经从表里拿出来的实体，值是它的编号。
     taken: HashMap<BlockPos, u64>,
     /// tick 里被删掉的编号，放回去的时候直接扔掉。
@@ -216,6 +222,7 @@ impl Default for BlockEntities {
     fn default() -> Self {
         Self {
             entities: HashMap::new(),
+            shape_stamp: std::cell::Cell::new(0),
             taken: HashMap::new(),
             removed_while_taken: HashSet::new(),
             slots: Vec::new(),
@@ -273,6 +280,17 @@ impl Ticker {
 }
 
 impl BlockEntities {
+    /// 形状版本戳，见 [`Self::shape_stamp`] 字段。
+    ///
+    /// The shape stamp, see the [`Self::shape_stamp`] field.
+    pub fn shape_stamp(&self) -> u64 {
+        self.shape_stamp.get()
+    }
+
+    fn bump_shape_stamp(&self) {
+        self.shape_stamp.set(self.shape_stamp.get().wrapping_add(1));
+    }
+
     /// 现在能不能按区块搬方块实体：不在 tick 中途，也没有实体被拿出去还没放回。
     ///
     /// [`Self::take_chunk`] 的前提，可以在动手之前只读地问一声，好让一次要搬几张表的
@@ -285,7 +303,9 @@ impl BlockEntities {
     ///
     /// 调用方要保证这一格的状态有方块实体，官方也只在这种情况下才放。
     pub fn insert(&mut self, entity: Box<dyn BlockEntity>) {
+        self.bump_shape_stamp();
         let pos = entity.pos();
+
         let id = self.next_id;
         self.next_id += 1;
         if self.entities.insert(pos, Stored { id, entity }).is_none() {
@@ -375,6 +395,7 @@ impl BlockEntities {
     /// See [`BlockEntities::get`], but mutable. Returns `None` while that entity is ticking,
     /// because it is not in the map.
     pub fn get_mut<T: BlockEntity>(&mut self, pos: BlockPos) -> Option<&mut T> {
+        self.bump_shape_stamp();
         set_block_entity_clock(self.now);
         self.entities
             .get_mut(&pos)?
@@ -403,6 +424,7 @@ impl BlockEntities {
     /// 实体正在 tick 时（已经从表里拿出来）调用它表示把自己删掉：返回值是 `None`，
     /// 放回去的时候会扔掉。删掉之后 [`BlockEntities::contains`] 也不再算这一格。
     pub fn remove(&mut self, pos: BlockPos) -> Option<Box<dyn BlockEntity>> {
+        self.bump_shape_stamp();
         if let Some(&index) = self.positions.get(&pos)
             && let Some(old) = self.slots[index]
         {
@@ -420,6 +442,7 @@ impl BlockEntities {
 
     /// 把这一格的实体拿出来，不管编号。调用方用完要用 [`BlockEntities::put`] 放回去。
     pub fn take_at(&mut self, pos: BlockPos) -> Option<(u64, Box<dyn BlockEntity>)> {
+        self.bump_shape_stamp();
         let stored = self.entities.remove(&pos)?;
         self.taken.insert(pos, stored.id);
         Some((stored.id, stored.entity))
@@ -427,6 +450,7 @@ impl BlockEntities {
 
     /// 把这一格正在 tick 的实体拿出来，编号对不上时不动它。
     pub fn take(&mut self, pos: BlockPos, id: u64) -> Option<Box<dyn BlockEntity>> {
+        self.bump_shape_stamp();
         if self.entities.get(&pos).is_none_or(|stored| stored.id != id) {
             return None;
         }
@@ -435,6 +459,7 @@ impl BlockEntities {
 
     /// 把 [`BlockEntities::take`] 拿出来的实体放回去。它在这期间被删掉或者被顶替时扔掉。
     pub fn put(&mut self, pos: BlockPos, id: u64, entity: Box<dyn BlockEntity>) {
+        self.bump_shape_stamp();
         self.taken.remove(&pos);
         if self.removed_while_taken.remove(&id) || self.entities.contains_key(&pos) {
             return;
@@ -457,6 +482,7 @@ impl BlockEntities {
     ///
     /// 睡着的条目不进 `due`，每刻的开销只和这一刻真跑的条目数成正比。
     pub fn begin_tick(&mut self, now: i64) {
+        self.bump_shape_stamp();
         debug_assert!(!self.ticking);
         self.ticking = true;
         self.next = 0;
@@ -617,6 +643,7 @@ impl BlockEntities {
     /// （官方这一刻会跑它并看到新物品）；排在前面说明官方这一刻已经跑过它了，
     /// 新物品下一刻才处理，只把数值按公式推进到这一刻。
     pub fn wake(&mut self, pos: BlockPos) {
+        self.bump_shape_stamp();
         if self.taken.contains_key(&pos) {
             return;
         }
@@ -661,6 +688,7 @@ impl BlockEntities {
     ///
     /// The block or container contents at `pos` changed: wake the sleepers watching it.
     pub fn notify_cell(&mut self, pos: BlockPos) {
+        self.bump_shape_stamp();
         if self.watchers.is_empty() {
             return;
         }
@@ -689,6 +717,7 @@ impl BlockEntities {
     ///
     /// An entity appeared, moved or changed its stack inside `area`.
     pub fn notify_box(&mut self, area: crate::shape::Aabb) {
+        self.bump_shape_stamp();
         if self.watchers.is_empty() {
             return;
         }

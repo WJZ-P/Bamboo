@@ -103,6 +103,123 @@ pub struct GuardianState {
     /// Scene-level break-self-test hook: ignores the "not moving" thorns
     /// condition when true. Always false on the normal path.
     pub thorns_ignore_moving: bool,
+    /// 激光视线的跨刻缓存。三样键（守卫者眼睛位、目标眼睛位、岛级方块版本戳）
+    /// 都没变时复用上一次的射线结果；不存档、不同步。
+    ///
+    /// Cross-tick laser line-of-sight cache. Reuses the last ray result while the
+    /// guardian eye position, target eye position and island block stamp are all
+    /// unchanged. Not saved and not synced.
+    pub sight_cache: Option<GuardianSightCache>,
+}
+
+/// 一次激光视线射线的键和结果。三个坐标用**原始位**比较，避免 `NaN` / `-0.0`
+/// 让 `==` 把不同的位置当成相同。
+///
+/// The key and result of one laser sight ray. Coordinates are compared by raw
+/// bits so `NaN` and `-0.0` cannot make two different positions look equal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuardianSightCache {
+    /// 守卫者眼睛位置（x, y, z）的原始位。
+    pub from: [u64; 3],
+    /// 目标 uid。
+    pub target: crate::entity::EntityUid,
+    /// 目标眼睛位置（x, y, z）的原始位。
+    pub to: [u64; 3],
+    /// 岛级的方块变更版本戳。
+    pub stamp: u64,
+    /// `CollisionContext` 里除眼睛位之外还会影响碰撞形状的两项：官方的碰撞形状
+    /// 只按 `fallDistance > 2.5` 分档，所以键里存这一档而不是逐刻变化的原始位。
+    ///
+    /// The remaining shape-affecting parts of `CollisionContext`: vanilla only
+    /// splits on `fallDistance > 2.5`, so the key stores that class instead of
+    /// the raw value, which changes every tick while falling.
+    pub falling: bool,
+    pub powder_snow_walkable: bool,
+    /// 上次射线的结果。
+    pub seen: bool,
+}
+
+fn bits(v: Vec3) -> [u64; 3] {
+    [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]
+}
+
+/// `GuardianAttackGoal.tick` 的 `hasLineOfSight`：守卫者攻击时基本不动，三样键
+/// 都没变就复用上次结果，否则真做一次射线并更新缓存。
+///
+/// `hasLineOfSight` for `GuardianAttackGoal.tick`: the guardian barely moves
+/// while attacking, so reuse the previous result when all three keys match.
+pub(crate) fn laser_line_of_sight(
+    me: &Entity,
+    mob: &mut Mob,
+    view: &dyn crate::entity::ctx::BlockView,
+    target: crate::entity::EntityUid,
+    target_eye: Vec3,
+) -> bool {
+    laser_line_of_sight_impl(
+        me,
+        mob,
+        view,
+        target,
+        target_eye,
+        !super::timing::stress_naive(),
+    )
+}
+
+/// 朴素路径（`cfg(test)` 差分用）：永远走真正的射线。
+///
+/// Naive path for differential tests: always cast the ray.
+#[cfg(test)]
+pub(crate) fn laser_line_of_sight_naive(
+    me: &Entity,
+    mob: &mut Mob,
+    view: &dyn crate::entity::ctx::BlockView,
+    target: crate::entity::EntityUid,
+    target_eye: Vec3,
+) -> bool {
+    laser_line_of_sight_impl(me, mob, view, target, target_eye, false)
+}
+
+fn laser_line_of_sight_impl(
+    me: &Entity,
+    mob: &mut Mob,
+    view: &dyn crate::entity::ctx::BlockView,
+    target: crate::entity::EntityUid,
+    target_eye: Vec3,
+    cached: bool,
+) -> bool {
+    let from = Vec3::new(me.position.x, super::living::eye_y(me, mob), me.position.z);
+    let stamp = view.block_change_stamp();
+    let context = match me.mob_collision_context(mob) {
+        crate::shape::CollisionContext::Entity(context) => context,
+        _ => return super::living::has_line_of_sight(me, mob, view, target, target_eye),
+    };
+    let key = GuardianSightCache {
+        from: bits(from),
+        target,
+        to: bits(target_eye),
+        stamp,
+        falling: context.fall_distance > 2.5,
+        powder_snow_walkable: context.powder_snow_walkable,
+        seen: false,
+    };
+    if cached
+        && let Some(last) = mob.guardian.sight_cache
+        && last.from == key.from
+        && last.target == key.target
+        && last.to == key.to
+        && last.stamp == key.stamp
+        && last.falling == key.falling
+        && last.powder_snow_walkable == key.powder_snow_walkable
+    {
+        super::timing::record_sight!(true);
+        return last.seen;
+    }
+    let seen = super::living::has_line_of_sight(me, mob, view, target, target_eye);
+    super::timing::record_sight!(false);
+    if cached {
+        mob.guardian.sight_cache = Some(GuardianSightCache { seen, ..key });
+    }
+    seen
 }
 
 /// `Guardian.createAttributes` / `ElderGuardian.createAttributes`：
@@ -574,7 +691,86 @@ mod tests {
     use mc_bamboo_data::{PathType, registries::attribute};
 
     use super::*;
-    use crate::entity::mob::{Mob, MobType};
+    use crate::{
+        BlockState, World,
+        entity::mob::{Mob, MobType},
+        state::BlockState as State,
+        testing::TestLevel,
+    };
+
+    /// 激光视线缓存和朴素逐刻射线逐位相同：挡墙放下 / 拿走、版本戳变化、两端眼睛
+    /// 位置（含 -0.0 这类原始位不同的值）变化、超 128 格、目标换人都覆盖到。
+    /// 三样键都稳定时缓存必须命中。
+    ///
+    /// The laser sight cache is bit-identical to a naive ray every tick: placing
+    /// and removing an occluding wall, stamp changes, both eye positions (including
+    /// raw-bit differences like -0.0), the 128-block cutoff and a target swap.
+    /// The cache must hit while all three keys are stable.
+    #[test]
+    fn laser_sight_cache_matches_naive_bit_for_bit() {
+        let mut level = TestLevel::new();
+        let mut ticks = crate::ticks::BlockTicks::default();
+        // 从守卫者眼睛 (0.5, 62.85, 0.5) 到目标眼睛 (8.5, 63.62, 0.5) 的射线
+        // 穿过 (4, 63, 0)：这一格放石头就看不见。
+        let wall = BlockPos::new(4, 63, 0);
+        let target_eye = Vec3::new(8.5, 63.62, 0.5);
+        let mut me = Entity::by_mob_type(MobType::Guardian, Vec3::new(0.5, 62.0, 0.5));
+        let mut cached = Mob::new(MobType::Guardian);
+        let mut naive = Mob::new(MobType::Guardian);
+        let hits = std::cell::Cell::new(0_usize);
+        let rays = std::cell::Cell::new(0_usize);
+        let mut check = |level: &mut TestLevel,
+                         ticks: &mut crate::ticks::BlockTicks,
+                         me: &Entity,
+                         target_eye: Vec3,
+                         uid: i32| {
+            let world = World::new(level, ticks);
+            // 每条路径都从本刻的空 `seen` 出发。
+            cached.seen.clear();
+            naive.seen.clear();
+            let before = cached.guardian.sight_cache;
+            let got = laser_line_of_sight(me, &mut cached, &world, uid, target_eye);
+            let expected = laser_line_of_sight_naive(me, &mut naive, &world, uid, target_eye);
+            assert_eq!(got, expected, "位置 {:?} 目标 {uid}", me.position);
+            rays.set(rays.get() + 1);
+            if before.is_some() && cached.guardian.sight_cache == before {
+                hits.set(hits.get() + 1);
+            }
+        };
+        // 一、空视线连续 20 刻：第一刻真射线，其余 19 刻命中缓存。
+        {
+            let world = World::new(&mut level, &mut ticks);
+            assert!(world.block_state(wall).is_air());
+        }
+        for _ in 0..20 {
+            check(&mut level, &mut ticks, &me, target_eye, 7);
+        }
+        assert_eq!(hits.get(), 19, "稳定键下应该复用 19 次");
+        // 二、放下挡墙：版本戳变了，缓存失效，两条路径都变成看不见。
+        level.set(wall, State(mc_bamboo_data::blocks::STONE));
+        for _ in 0..5 {
+            check(&mut level, &mut ticks, &me, target_eye, 7);
+        }
+        assert!(!laser_line_of_sight_naive(
+            &me,
+            &mut Mob::new(MobType::Guardian),
+            &World::new(&mut level, &mut ticks),
+            7,
+            target_eye
+        ));
+        // 三、拿走挡墙，再换目标 uid / 眼睛位 / 守卫者位置。
+        level.set(wall, BlockState(0));
+        check(&mut level, &mut ticks, &me, target_eye, 8);
+        check(&mut level, &mut ticks, &me, Vec3::new(8.5, 63.62, -0.0), 8);
+        check(&mut level, &mut ticks, &me, Vec3::new(8.5, 63.62, 0.0), 8);
+        me.position.x = 0.5;
+        me.position.y += 0.000_001;
+        check(&mut level, &mut ticks, &me, target_eye, 8);
+        // 四、超过 128 格：两条路径都直接返回假。
+        check(&mut level, &mut ticks, &me, Vec3::new(200.5, 63.62, 0.5), 8);
+        assert_eq!(rays.get(), 30);
+        assert!(hits.get() > 19, "稳定键下还有额外命中");
+    }
 
     /// 构造事实：属性、水代价、导航、持久化和音效分派都按官方类。
     ///

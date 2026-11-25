@@ -5,6 +5,7 @@
 //! 玩家和它的链路一起搬家。
 
 use std::{
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -245,6 +246,20 @@ pub(crate) struct Region {
     pub(crate) random: LevelRandom,
     /// 红石缓存，一个 region 一份；开关从 `bamboo.toml` 读，默认关。
     pub(crate) redstone_cache: mc_bamboo_blocks::cache::RedstoneCache,
+    /// 方块变更版本戳：方块或会影响射线的方块实体（移动活塞 / 潜影盒）一变就加一，
+    /// 守卫者的激光视线用它判断缓存能不能复用。`Cell` 是因为 `Level` 只有 `&self`。
+    ///
+    /// Block-change stamp: bumped on block writes and shape-affecting block-entity
+    /// changes; the guardian's laser line-of-sight cache uses it to decide whether
+    /// a cached result is still valid. A `Cell` because `Level` only has `&self`.
+    pub(crate) block_change_stamp: Cell<u64>,
+    /// 按岛维护的结构刷怪索引：自然刷怪第一次问到某区块时算一次覆盖行 / 包围盒 /
+    /// 结构件盒，之后查表。结构是种子的纯函数，索引内容不进存档、不同步客户端。
+    ///
+    /// Per-island structure spawn index: the first natural-spawn query for a chunk
+    /// computes override rows / boxes / piece boxes; later queries look them up.
+    /// Structure data is a pure function of the seed; the index is not saved.
+    pub(crate) structure_spawn_index: RefCell<crate::structure_spawn::StructureSpawnIndex>,
     /// 自然刷怪要不要按玩家算上限（`bamboo.toml` 的 `spawn_per_player_cap`）；
     /// 关掉只剩官方的全局上限。
     ///
@@ -467,6 +482,8 @@ impl Region {
             redstone_cache: mc_bamboo_blocks::cache::RedstoneCache::new(
                 mc_bamboo_blocks::cache::CacheConfig::default(),
             ),
+            block_change_stamp: Cell::new(0),
+            structure_spawn_index: RefCell::default(),
             spawn_per_player_cap: true,
             max_entity_collisions: 0,
             mob_throttle_distance: 0,
@@ -735,6 +752,8 @@ impl Region {
             scoreboard: &self.global.scoreboard,
             world_seed: self.global.seed,
             world_gen: &self.global.world_gen,
+            block_change_stamp: &self.block_change_stamp,
+            structure_spawn_index: &self.structure_spawn_index,
             sea_level: if self.global.world_gen.level_type.is_flat() {
                 -63
             } else {

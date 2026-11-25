@@ -13,7 +13,7 @@ use mc_bamboo_data::{blocks, tags::fluid_tags};
 use super::{Mob, living, navigation::Navigation, path::static_path_type};
 use crate::{
     entity::{
-        Entity, EntityUid, KindPublic,
+        Entity, EntityPublic, EntityUid, KindPublic,
         ctx::{BlockView, Command, EntityCtx, PlayerView},
     },
     shape::{self, CollisionContext},
@@ -3708,7 +3708,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             let eye = target.eye_position();
             mob.look.set_look_at(eye.x, eye.y, eye.z, 90.0, 90.0);
             let uid = target.uid;
-            if !living::has_line_of_sight(me, mob, ctx.blocks(), uid, eye) {
+            if !super::guardian::laser_line_of_sight(me, mob, ctx.blocks(), uid, eye) {
                 mob.target = None;
                 return;
             }
@@ -4426,6 +4426,27 @@ fn nearest_look_mob(
 /// within follow range and in sight. The selector runs before the range and sight
 /// checks in `TargetingConditions.test`.
 fn nearest_guardian_target(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Option<EntityUid> {
+    nearest_guardian_target_impl(me, mob, ctx, !super::timing::stress_naive())
+}
+
+/// 朴素候选扫描（`cfg(test)` 差分用）：全量遍历再逐个过选择器。
+///
+/// Naive candidate scan for differential tests: a full scan then the selector.
+#[cfg(test)]
+fn nearest_guardian_target_naive(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+) -> Option<EntityUid> {
+    nearest_guardian_target_impl(me, mob, ctx, false)
+}
+
+fn nearest_guardian_target_impl(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    typed: bool,
+) -> Option<EntityUid> {
     let view = ctx.blocks();
     // `TargetingConditions.test` 的和平难度闸门：不打玩家。
     // The peaceful gate of `TargetingConditions.test`: no player targets.
@@ -4467,17 +4488,30 @@ fn nearest_guardian_target(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
     // `instanceof Squid` (GlowSquid included) or `instanceof Axolotl`; squared distance > 9.
     let area = me.bounding_box().inflate(range, range, range);
     let mut candidates: Vec<(EntityUid, Vec3, f32)> = Vec::new();
-    ctx.for_each_other_in(area, &mut |other| {
+    // 官方目标类是 `LivingEntity`，但选择器只认这三型；按类型筛掉塔里成百上千只
+    // 其它守卫者，候选的先后顺序（uid 升序）和逐个过选择器完全相同。
+    //
+    // Vanilla's goal scans `LivingEntity`, but the selector only accepts these
+    // three kinds. Filtering by type skips the hundreds of other guardians in a
+    // tower while keeping the same candidate order (ascending uid).
+    let prey = [
+        mc_bamboo_data::registries::entity_type::SQUID,
+        mc_bamboo_data::registries::entity_type::GLOW_SQUID,
+        mc_bamboo_data::registries::entity_type::AXOLOTL,
+    ];
+    let collect = &mut |other: &EntityPublic| {
+        super::timing::record_target_candidates!(1);
         let KindPublic::Mob(public) = &other.kind else {
             return;
         };
         if other.uid == me.id
             || other.removed
             || !public.is_alive()
-            || !matches!(
-                public.mob_type,
-                super::MobType::Squid | super::MobType::GlowSquid | super::MobType::Axolotl
-            )
+            || (!typed
+                && !matches!(
+                    public.mob_type,
+                    super::MobType::Squid | super::MobType::GlowSquid | super::MobType::Axolotl
+                ))
             || me.position.distance_to_sqr(other.position)
                 <= super::guardian::MIN_TARGET_DISTANCE_SQR
         {
@@ -4485,7 +4519,12 @@ fn nearest_guardian_target(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
         }
         let (_, _, eye_height) = public.mob_type.dimensions(public.baby);
         candidates.push((other.uid, other.position, eye_height));
-    });
+    };
+    if typed {
+        ctx.for_each_other_of_types_in(area, &prey, collect);
+    } else {
+        ctx.for_each_other_in(area, collect);
+    }
     let limit = mth::java_max(range, 2.0);
     for (uid, position, target_eye_height) in candidates {
         if me.position.distance_to_sqr(position) > limit * limit {
@@ -6229,6 +6268,52 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// 按类型筛的守卫者目标搜索和朴素全量扫描逐位相同：塔里几百只守卫者、
+    /// 混进鱿鱼 / 发光鱿鱼 / 美西螈 / 河豚，以及并列距离时都选同一个 uid。
+    ///
+    /// Type-filtered guardian targeting is bit-identical to the naive full scan:
+    /// hundreds of guardians mixed with squid / glow squid / axolotl / pufferfish,
+    /// including tied distances.
+    #[test]
+    fn guardian_typed_target_scan_matches_naive() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let _me = world.spawn_entity(Entity::by_mob_type(
+            MobType::Guardian,
+            Vec3::new(0.5, 62.0, 0.5),
+        ));
+        let mut kinds = Vec::new();
+        for i in 0..300 {
+            kinds.push((
+                MobType::Guardian,
+                Vec3::new(1.5 + f64::from(i % 10), 62.0, 1.5 + f64::from(i / 10)),
+            ));
+        }
+        for (i, kind) in [
+            MobType::Squid,
+            MobType::Pufferfish,
+            MobType::GlowSquid,
+            MobType::Axolotl,
+            MobType::Squid,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            kinds.push((kind, Vec3::new(8.5, 62.0, i as f64 + 2.5)));
+        }
+        for (kind, position) in kinds {
+            world.spawn_entity(Entity::by_mob_type(kind, position));
+        }
+        let me = Entity::by_mob_type(MobType::Guardian, Vec3::new(0.5, 62.0, 0.5));
+        let mut mob = Mob::new(MobType::Guardian);
+        let ctx = PreciseCtx::new(&mut world, 1);
+        let typed = nearest_guardian_target(&me, &mut mob, &ctx);
+        let naive = nearest_guardian_target_naive(&me, &mut mob, &ctx);
+        assert_eq!(typed, naive);
+        assert!(typed.is_some(), "至少要有一只猎物在跟随距离内");
     }
 
     /// 狐狸的鱼目标只认三种成群鱼，河豚不是 `AbstractSchoolingFish`。

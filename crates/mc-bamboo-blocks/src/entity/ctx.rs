@@ -62,6 +62,15 @@ pub trait BlockView {
         context: CollisionContext,
     ) -> Option<BlockHit>;
     fn clip_collider(&self, from: Vec3, to: Vec3, context: CollisionContext) -> Option<BlockHit>;
+    /// 岛级的方块变更版本戳：方块或影响射线形状的方块实体一变就换一个值。
+    /// 没有版本戳的视图给 0（这时缓存不会命中，行为等同于没有缓存）。
+    ///
+    /// Island-level block-change stamp: changes whenever a block or a shape-affecting
+    /// block entity changes. Views without a stamp return 0 (the cache then never
+    /// hits, which is equivalent to no cache).
+    fn block_change_stamp(&self) -> u64 {
+        0
+    }
     fn is_face_sturdy(&self, pos: BlockPos, face: Direction, support: SupportType) -> bool;
     fn is_loaded(&self, pos: BlockPos) -> bool;
     fn is_in_world_bounds(&self, pos: BlockPos) -> bool;
@@ -534,6 +543,10 @@ impl BlockView for World<'_> {
         World::clip_collider(self, from, to, context)
     }
 
+    fn block_change_stamp(&self) -> u64 {
+        self.level().block_change_stamp()
+    }
+
     fn is_face_sturdy(&self, pos: BlockPos, face: Direction, support: SupportType) -> bool {
         World::is_face_sturdy(self, pos, face, support)
     }
@@ -816,6 +829,23 @@ pub trait EntityCtx {
     fn entity_uids(&self) -> Vec<EntityUid>;
     /// 范围查询，按 uid 升序访问。空间索引查出来之后要排序。
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
+    /// 同 [`Self::for_each_other_in`]，但只访问 `types` 里那几种注册表实体类型；
+    /// 顺序仍是 uid 升序，结果与全量扫描后过滤完全相同。
+    ///
+    /// Like [`Self::for_each_other_in`] but only the given registry entity types;
+    /// still in ascending uid order, identical to filtering a full scan.
+    fn for_each_other_of_types_in(
+        &self,
+        area: Aabb,
+        types: &[i32],
+        visit: &mut dyn FnMut(&EntityPublic),
+    ) {
+        self.for_each_other_in(area, &mut |public| {
+            if types.contains(&public.kind.entity_type()) {
+                visit(public);
+            }
+        });
+    }
     /// 同 [`Self::for_each_other_in`]，但 `visit` 返回 `true` 才算一个够数的
     /// 结果：挤压上限下推到查询里，凑够 `limit` 个就停止枚举。
     ///
@@ -1973,6 +2003,17 @@ impl EntityCtx for PreciseCtx<'_, '_> {
 
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.world.level().for_each_entity_in(area, visit);
+    }
+
+    fn for_each_other_of_types_in(
+        &self,
+        area: Aabb,
+        types: &[i32],
+        visit: &mut dyn FnMut(&EntityPublic),
+    ) {
+        self.world
+            .level()
+            .for_each_entity_of_types_in(area, types, visit);
     }
 
     fn pushable_others(

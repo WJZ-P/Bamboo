@@ -886,6 +886,36 @@ impl EntityStore {
             .copied()
     }
 
+    /// 按类型筛选的空间范围查询：只取 `types` 里那几种注册表实体类型，顺序仍是
+    /// uid 升序。候选数远小于全量扫描时（例如守卫者塔里全是守卫者）省掉逐个访问。
+    ///
+    /// Type-filtered spatial query: visit only the given registry entity types, still
+    /// in ascending uid order. Avoids touching every candidate when they mostly
+    /// do not match (e.g. a guardian tower full of guardians).
+    pub fn for_each_of_types_in(
+        &self,
+        area: Aabb,
+        types: &[i32],
+        visit: &mut dyn FnMut(&EntityPublic),
+    ) {
+        let mut rows = self.grid_rows_in(area);
+        // `grid_rows_in` 按行号排，槽位回收后不等于 uid 序；先按 uid 排，再只访问
+        // 属于目标类型的 uid。这样结果和全量查询逐位相同。
+        let mut found: Vec<(EntityUid, &EntityPublic)> = rows
+            .drain(..)
+            .filter_map(|row| self.slots.get(row)?.as_ref())
+            .filter(|entry| {
+                entry.public.bounding_box().intersects(area)
+                    && types.contains(&entry.public.kind.entity_type())
+            })
+            .map(|entry| (entry.public.uid, &entry.public))
+            .collect();
+        found.sort_unstable_by_key(|(uid, _)| *uid);
+        for (_, public) in found {
+            visit(public);
+        }
+    }
+
     /// 硬碰撞实体的 uid，按 uid 升序。现在恒为空。
     ///
     /// Uids of hard-colliding entities, in ascending order. Empty today.

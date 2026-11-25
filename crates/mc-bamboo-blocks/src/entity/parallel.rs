@@ -397,6 +397,7 @@ impl Shared<'_> {
         area: Aabb,
         exclude: EntityUid,
         limit: usize,
+        types: Option<&[i32]>,
         visit: &mut dyn FnMut(&EntityPublic) -> bool,
     ) {
         let (first, last) = section_range(&area);
@@ -417,7 +418,9 @@ impl Shared<'_> {
             .into_iter()
             .filter_map(|row| self.entities.row_at(row))
             .filter(|entry| {
-                entry.public.uid != exclude && entry.public.bounding_box().intersects(area)
+                entry.public.uid != exclude
+                    && entry.public.bounding_box().intersects(area)
+                    && types.is_none_or(|types| types.contains(&entry.public.kind.entity_type()))
             })
             .map(|entry| (entry.public.uid, &entry.public))
             .collect();
@@ -487,6 +490,10 @@ impl<'a> ParallelBlockView<'a> {
 impl BlockView for ParallelBlockView<'_> {
     fn block_state(&self, pos: BlockPos) -> BlockState {
         self.inner.block_state(pos)
+    }
+
+    fn block_change_stamp(&self) -> u64 {
+        self.inner.block_change_stamp()
     }
 
     fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<Aabb>> {
@@ -783,7 +790,20 @@ impl EntityCtx for ParallelCtx<'_> {
 
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.shared
-            .for_each_in(area, self.uid, usize::MAX, &mut |public| {
+            .for_each_in(area, self.uid, usize::MAX, None, &mut |public| {
+                visit(public);
+                true
+            });
+    }
+
+    fn for_each_other_of_types_in(
+        &self,
+        area: Aabb,
+        types: &[i32],
+        visit: &mut dyn FnMut(&EntityPublic),
+    ) {
+        self.shared
+            .for_each_in(area, self.uid, usize::MAX, Some(types), &mut |public| {
                 visit(public);
                 true
             });
@@ -795,12 +815,12 @@ impl EntityCtx for ParallelCtx<'_> {
         limit: usize,
         visit: &mut dyn FnMut(&EntityPublic) -> bool,
     ) {
-        self.shared.for_each_in(area, self.uid, limit, visit);
+        self.shared.for_each_in(area, self.uid, limit, None, visit);
     }
 
     fn for_each_other_uid_in(&self, area: Aabb, visit: &mut dyn FnMut(EntityUid)) {
         self.shared
-            .for_each_in(area, self.uid, usize::MAX, &mut |public| {
+            .for_each_in(area, self.uid, usize::MAX, None, &mut |public| {
                 visit(public.uid);
                 true
             });
@@ -1366,7 +1386,7 @@ pub(crate) fn shared_rows_in(
     uids.iter()
         .map(|&uid| {
             let mut seen = Vec::new();
-            shared.for_each_in(area, uid, usize::MAX, &mut |public| {
+            shared.for_each_in(area, uid, usize::MAX, None, &mut |public| {
                 seen.push(public.uid);
                 true
             });

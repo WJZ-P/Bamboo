@@ -523,6 +523,24 @@ pub trait LevelEntities {
     }
     /// 空间索引范围查询，按 uid 升序访问。
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
+    /// 同 [`Self::for_each_entity_in`]，但只访问 `types` 里那几种注册表实体类型。
+    /// 没有按类型建索引的实现退回全量扫描加过滤，顺序和结果都不变。
+    ///
+    /// Like [`Self::for_each_entity_in`] but only the given registry entity types.
+    /// Implementations without a type index fall back to a filtered full scan;
+    /// the order and the result are unchanged.
+    fn for_each_entity_of_types_in(
+        &self,
+        area: Aabb,
+        types: &[i32],
+        visit: &mut dyn FnMut(&EntityPublic),
+    ) {
+        self.for_each_entity_in(area, &mut |public| {
+            if types.contains(&public.kind.entity_type()) {
+                visit(public);
+            }
+        });
+    }
     /// `getEntitiesOfClass` 的官方分区顺序（`SectionPos.asLong` 升序，段内加入顺序）。
     ///
     /// Vanilla `EntitySectionStorage` order for `getEntitiesOfClass`.
@@ -636,6 +654,16 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
 
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.entities_table().for_each_in(area, visit);
+    }
+
+    fn for_each_entity_of_types_in(
+        &self,
+        area: Aabb,
+        types: &[i32],
+        visit: &mut dyn FnMut(&EntityPublic),
+    ) {
+        self.entities_table()
+            .for_each_of_types_in(area, types, visit);
     }
 
     fn for_each_entity_in_section_order(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
@@ -1266,6 +1294,14 @@ pub trait Level: LevelSideState + LevelEntities {
 
     /// `getSkyDarken()`。天色由主控的时钟和天气发布，这一层只读快照。
     fn sky_darken(&self) -> i32 {
+        0
+    }
+
+    /// 岛级的方块变更版本戳，见 [`BlockView::block_change_stamp`](crate::entity::ctx::BlockView::block_change_stamp)。
+    /// 默认 0：没有版本戳的世界不复用视线结果。
+    ///
+    /// Island-level block-change stamp; 0 by default means no sight-result reuse.
+    fn block_change_stamp(&self) -> u64 {
         0
     }
 

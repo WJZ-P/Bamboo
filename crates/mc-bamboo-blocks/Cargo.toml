@@ -21,6 +21,8 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# 结构刷怪压测场景要用游戏侧的真实结构刷怪索引（只在测试构建里用）。
+mc-bamboo-game.workspace = true
 # 谓词的 NBT 字段在测试里要能构造。
 mc-bamboo-nbt.workspace = true
 # 生物压测的村民场景需要真实的 `PoiStore`（只在测试构建里用）。

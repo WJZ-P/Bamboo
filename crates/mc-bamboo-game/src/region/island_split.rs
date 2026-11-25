@@ -20,7 +20,10 @@
 //! compile. Preconditions (asserted): the two parts' loaded chunks are at
 //! least 3 apart, and no view crosses islands (plan 4.2).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, BTreeSet},
+};
 
 use mc_bamboo_blocks::{LevelRandom, entity::Entities};
 use mc_bamboo_core::{BlockPos, ChunkPos};
@@ -543,6 +546,17 @@ impl Region {
             loot_sequences,
             entity_seeds: _,
         } = random;
+        // 拆岛会重建两边的方块实体表（形状版本戳归零），所以显式把岛级戳各换一个
+        // 新值：守卫者的视线缓存不可能因为「加起来的值恰好相同」而复用旧结果。
+        //
+        // A split rebuilds both block-entity tables (shape stamps reset), so give
+        // each side a fresh island stamp; the sum cannot accidentally match an
+        // old cached value.
+        let next_stamp = self.block_change_stamp.get().wrapping_add(1);
+        self.block_change_stamp.set(next_stamp);
+        let block_change_stamp = Cell::new(next_stamp.wrapping_add(1));
+        let structure_spawn_index =
+            RefCell::new(self.structure_spawn_index.borrow_mut().split_off(chunks));
         Ok(Region {
             players: new_players,
             player_grid,
@@ -567,6 +581,8 @@ impl Region {
             redstone_cache: mc_bamboo_blocks::cache::RedstoneCache::new(
                 *self.redstone_cache.config(),
             ),
+            block_change_stamp,
+            structure_spawn_index,
             spawn_per_player_cap: self.spawn_per_player_cap,
             max_entity_collisions: self.max_entity_collisions,
             mob_throttle_distance: self.mob_throttle_distance,
@@ -743,6 +759,8 @@ impl Region {
             block_events,
             random,
             redstone_cache: _,
+            block_change_stamp: _,
+            structure_spawn_index,
             spawn_per_player_cap: _,
             max_entity_collisions: _,
             mob_throttle_distance: _,
@@ -789,6 +807,14 @@ impl Region {
             entity_seeds: entities.entity_seed_source(),
             profiler,
         };
+        self.structure_spawn_index
+            .borrow_mut()
+            .absorb(structure_spawn_index.into_inner());
+        // 被吸收岛带过来的实体可能带着按旧戳算出的视线缓存；换一个新戳强制重算。
+        // Entities arriving from the absorbed island may carry sight caches
+        // computed under its stamp, so bump ours to force a fresh ray.
+        self.block_change_stamp
+            .set(self.block_change_stamp.get().wrapping_add(1));
         self.pending_triggers.extend(pending_triggers);
         self.chunks
             .absorb(chunks)
