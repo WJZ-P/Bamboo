@@ -230,9 +230,6 @@ impl ReplayPlayers {
     pub fn sync_health(&mut self) {
         let mut pending = Vec::new();
         for (id, player) in &mut self.region.players {
-            if player.dead {
-                continue;
-            }
             let now = crate::player_hurt::HealthSync::of(player);
             if now != player.health_sync {
                 player.health_sync = now;
@@ -497,6 +494,30 @@ impl ReplayPlayers {
         std::mem::take(&mut self.region.sound_effects)
             .into_iter()
             .collect()
+    }
+
+    /// 把爆炸包发给区域里 64 格内的玩家，和正式路径 `Effect::Explode` 同一个入口。
+    ///
+    /// Sends the blast packet to players within 64 blocks, the same entry the
+    /// production `Effect::Explode` path uses.
+    pub fn send_explode(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        block_count: i32,
+        hit_players: &[(EntityUid, Vec3)],
+        is_small: bool,
+        play_sound: bool,
+    ) {
+        crate::interaction::send_explode(
+            &mut self.region,
+            center,
+            radius,
+            block_count,
+            hit_players,
+            is_small,
+            play_sound,
+        );
     }
 
     /// 取走这名玩家这一刻收到的全部包，每项是「包 ID + 包体」。

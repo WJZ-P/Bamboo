@@ -430,6 +430,10 @@ public final class Probe {
             // (`ServerLevel.broadcastDamageEvent`).
             "handleDamageEvent",
             "handleDisconnect",
+            // TNT 炸掉旁边的石头时官方发 `explode`（声音、粒子和玩家击退都在这个包里）。
+            // Vanilla sends `explode` when the TNT breaks the neighbouring stone (sound,
+            // particles and player knockback all travel in this packet).
+            "handleExplosion",
             "handleDisguisedChat",
             "handleEntityEvent",
             "handleEntityPositionSync",
