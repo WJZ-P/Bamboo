@@ -248,7 +248,9 @@ fn set_unhappy(region: &mut Region, villager_id: i32, position: Vec3) {
         region,
         None,
         &Sound {
-            sound: i32::from(mc_bamboo_data::sounds::sound_event("entity.villager.no")),
+            sound: i32::from(mc_bamboo_data::sounds::sound_event(
+                "minecraft:entity.villager.no",
+            )),
             inline: None,
             source: mc_bamboo_data::sounds::NEUTRAL,
             x: position.x,
@@ -1229,5 +1231,36 @@ mod e2e_tests {
         assert!(state.payment[0].is_empty(), "付款没扣");
         let _: Option<&Menu> = region.menus.get(&id);
         let _ = items::AIR;
+    }
+
+    /// 幼年村民右键摇头，不打开交易界面。
+    #[test]
+    fn a_baby_villager_does_not_open_the_trade() {
+        let (mut region, id, villager_id, _sink) = fixture();
+        region.entities.with_mut(villager_id, |entity| {
+            if let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &mut entity.kind {
+                mob.age = -100;
+            }
+        });
+        crate::interaction::on_interact_entity(
+            &mut region,
+            id,
+            villager_id,
+            mc_bamboo_core::Hand::Main,
+            false,
+        );
+        assert!(
+            !region.menus.contains_key(&id),
+            "幼年村民不应该打开交易界面"
+        );
+        let unhappy = region
+            .entities
+            .get(villager_id)
+            .and_then(|entity| match &entity.kind {
+                mc_bamboo_blocks::entity::EntityKind::Mob(mob) => Some(mob.villager.unhappy),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(unhappy, 40, "幼年村民应该摇头（unhappy 计数 40）");
     }
 }
