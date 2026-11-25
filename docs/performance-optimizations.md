@@ -4337,17 +4337,21 @@ release 构建、20 万次查询、单次运行 3 轮交替取中位数；上表
 
 ### 30.6 验收与已知限制
 
-- `cargo fmt --all --check` 通过、`cargo clippy --workspace --all-targets` 0 警告、
-  `cargo test --workspace` 全绿（exit 0）。`natural-spawn java` 1727 例 0 不一致，
-  `structure-e2e java` 的 `gen-world` 60 区块 0 不一致。探针用缺省配置
-  （`PROBE_ISLAND_THREADS=default PROBE_ISLANDS=default`）在端口 28661 上
+- 第二段合进 `origin/main`（马骑乘统一、焦骸 / 尸壳骆驼、对拍夹具）之后重跑：
+  `cargo fmt --all --check` 通过、`cargo clippy --workspace --all-targets` 0 警告、
+  `cargo test --workspace` 全绿（exit 0，含 `mc-bamboo-game` 1374 例 / `mc-bamboo-blocks`
+  1044 例 / `mc-bamboo-worldgen` 358 例）。`natural-spawn java` **1888 例 0 不一致**，
+  `structure-e2e java` 的 `gen-world` 60 区块 / 53084160 方块 / 4743 结构件 0 不一致，
+  `gen-world java` 0 不一致，`chunk-content java` **565 checks passed**，
+  `structure-place java` **0 mismatches**，`tools/check-generated.sh` 两遍全量导出无 diff。
+  探针用缺省配置（`PROBE_ISLAND_THREADS=default PROBE_ISLANDS=default`）在端口 29021 上
   **770/770**，正常关服、`world-dir` 官方解码器通过。
-- `mob-oracle java --show 2000`：合进 `origin/main`（村民第 3 期）**之前**是 46 处不一致，
-  即已知的 12 处 `Mth.COS_TAB` / `ASIN_TAB` 末位差加 34 处 `frog_lily_31` /
-  `frog_long_jump` 的 `dy` 末位差，守卫者全部场景 0 帧差异。合进 main **之后**总数变成
-  252：新增的 206 处全部是 `frog_lily_41` 的 `x` / `z` / `dx` / `dz` 末位差，来自 main 的
-  村民大脑改动，与本分支的三项优化无关（`--only guardian` / `--only laser` 在合并后仍只
-  剩那 12 处全局三角函数表差，0 帧差异）。这是 main 的基线回归，需要单独收敛，见报告里的疑点。
+- `mob-oracle java --show 2000`：合并后 **46 处不一致**，即已知的 12 处
+  `Mth.COS_TAB` / `ASIN_TAB` 末位差加 34 处 `frog_lily_31` / `frog_long_jump` 的
+  `dy` 末位差；`frog_lily_41` 那次偶发的 206 处 `x/z` 末位差这次没有复现。
+  `--only guardian` / `--only laser` / `--only guardian_spawn` /
+  `--only attack_target_dolphin_guardian` / `--only structure_spawn` /
+  `--only dolphin` / `--only water_mob` 各自都只剩那 12 处全局三角函数表差、0 帧差异。
 - 朴素路径只在 `cfg(test)` 下通过 `MOB_STRESS_NAIVE=1` 启用，正式二进制没有开关、
   没有配置、没有环境变量读取；三项优化都缺省打开。
 - 视线缓存的键除了规格里的三样，还带 `CollisionContext` 里真正影响碰撞形状的两项
