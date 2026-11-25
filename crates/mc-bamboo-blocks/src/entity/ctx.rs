@@ -1053,6 +1053,10 @@ pub enum Command {
     PlaceSnowTrail {
         cells: Vec<BlockPos>,
     },
+    /// `Creaking.hurtServer` 打到绑定嘎枝：心放树脂 / 连线，不掉血。
+    CreakingHeartHurt {
+        home: BlockPos,
+    },
     /// 冰霜行者 `replace_disk`：把算阶段选中的水面格逐格换成 `frosted_ice`（age 0）。
     ///
     /// Frost walker `replace_disk`: replace the selected water cells with `frosted_ice`.
@@ -1708,6 +1712,12 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             for pos in cells {
                 world.set_block_and_update(pos, snow);
             }
+        }
+        Command::CreakingHeartHurt { home } => {
+            world.with_block_entity::<
+                crate::behaviour::misc::creaking_heart_entity::CreakingHeartEntity,
+                _,
+            >(home, |heart, world| heart.creaking_hurt(world));
         }
         Command::FreezeWater { cells } => {
             let ice = BlockState(mc_bamboo_data::blocks::FROSTED_ICE);
