@@ -1183,20 +1183,30 @@ impl VibrationUser for WardenVibrationUser<'_> {
             .as_ref()
             .is_some_and(|brain| brain.memories.has(M::RecentProjectile));
         if let Some(owner) = projectile_owner {
-            if self.closer_than(owner, 30.0) || recent_projectile {
-                if self.can_target(owner)
-                    && let Some(pos) = self.entity_position(owner)
-                {
-                    target_pos = BlockPos::containing(pos);
+            // 官方：射弹拥有者非 null 时，先看 30 格内；已经有过射弹就按拥有者位置
+            // 加 35 点愤怒，否则加 10 点（带监听声）。RECENT_PROJECTILE 两支都会刷新。
+            // Vanilla: with a projectile owner, check the 30-block radius; an already
+            // recent projectile adds 35 anger at the owner's position, otherwise add
+            // 10 with the listening sound. Both branches refresh RECENT_PROJECTILE.
+            if self.closer_than(owner, 30.0) {
+                if recent_projectile {
+                    if self.can_target(owner)
+                        && let Some(pos) = self.entity_position(owner)
+                    {
+                        target_pos = BlockPos::containing(pos);
+                    }
+                    // 一参的 `increaseAngerAt(entity)` 也会播监听声（35 点）。
+                    // The one-argument `increaseAngerAt(entity)` also plays the
+                    // listening sound (35 anger).
+                    self.increase_anger(owner, 35, true);
+                } else {
+                    self.increase_anger(owner, 10, true);
                 }
-                self.increase_anger(owner, 35, false);
-            } else {
-                self.increase_anger(owner, 10, true);
-                if let Some(brain) = self.mob.brain.as_mut() {
-                    brain
-                        .memories
-                        .set_with_ttl(M::RecentProjectile, MemoryValue::Unit, 100);
-                }
+            }
+            if let Some(brain) = self.mob.brain.as_mut() {
+                brain
+                    .memories
+                    .set_with_ttl(M::RecentProjectile, MemoryValue::Unit, 100);
             }
         } else if let Some(uid) = source_entity.or(source_player) {
             self.increase_anger(uid, 35, true);

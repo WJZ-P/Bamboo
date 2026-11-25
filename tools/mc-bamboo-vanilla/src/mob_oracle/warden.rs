@@ -22,6 +22,7 @@ pub(super) struct WardenCase {
     erase_sonic: bool,
     erase_dig: bool,
     vibration: Option<Vec<i32>>,
+    vibration2: Option<Vec<i32>>,
     sensors: Vec<i64>,
     mob_seed: i64,
     level_seed: i64,
@@ -232,11 +233,15 @@ impl Report {
             if tick > 0 {
                 let now = case.start_time + tick as i64;
                 ticks.set_time(now);
-                if let Some(vib) = &case.vibration
-                    && vib[0] == tick as i32
-                {
-                    // 官方场景直接调 `onReceiveVibration`，这里注入一个已到达的振动，
-                    // 让本刻的 `custom_server_ai_step` 立刻回调。
+                // 官方场景直接调 `onReceiveVibration`，这里注入一个已到达的振动，
+                // 让本刻的 `custom_server_ai_step` 立刻回调。
+                // The official scene calls `onReceiveVibration` directly: inject an
+                // already-arrived vibration so this tick's step invokes the callback.
+                let arriving = [&case.vibration, &case.vibration2]
+                    .into_iter()
+                    .flatten()
+                    .find(|vib| vib[0] == tick as i32);
+                if let Some(vib) = arriving {
                     let mut world = World::new(&mut level, &mut ticks);
                     world.with_entity_mut(warden_id, &mut |entity| {
                         entity.with_mob(|_, mob| {

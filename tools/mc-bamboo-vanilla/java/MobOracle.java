@@ -12984,16 +12984,20 @@ public final class MobOracle {
     private static int playWarden(Official official, Writer out, String only) throws Exception {
         record WScene(String name, int ticks, boolean emerge, boolean player,
                 int anger, boolean attackTarget, boolean eraseSonic, boolean eraseDig,
-                int[] vibration) {}
+                int[] vibration, int[] vibration2) {}
         List<WScene> scenes = List.of(
-                new WScene("warden_emerge", 150, true, false, 0, false, false, false, null),
+                new WScene("warden_emerge", 150, true, false, 0, false, false, false, null, null),
                 new WScene("warden_investigate", 200, true, true, 0, false, false, false,
-                        new int[] {140, 5, 64, 0, 1, 0}),
-                new WScene("warden_sniff", 200, true, true, 0, false, false, false, null),
-                new WScene("warden_anger_roar", 200, true, true, 100, false, false, false, null),
-                new WScene("warden_melee", 200, true, true, 100, true, false, false, null),
-                new WScene("warden_sonic_boom", 210, true, true, 100, true, true, false, null),
-                new WScene("warden_dig_back", 130, false, false, 0, false, false, false, null));
+                        new int[] {140, 5, 64, 0, 1, 0}, null),
+                new WScene("warden_sniff", 200, true, true, 0, false, false, false, null, null),
+                new WScene("warden_anger_roar", 200, true, true, 100, false, false, false, null, null),
+                new WScene("warden_melee", 200, true, true, 100, true, false, false, null, null),
+                new WScene("warden_sonic_boom", 210, true, true, 100, true, true, false, null, null),
+                new WScene("warden_dig_back", 130, false, false, 0, false, false, false, null, null),
+                new WScene("warden_projectile", 200, true, true, 0, false, false, false,
+                        new int[] {140, 5, 64, 0, 0, 1}, null),
+                new WScene("warden_recent_projectile", 200, true, true, 0, false, false, false,
+                        new int[] {140, 5, 64, 0, 0, 1}, new int[] {160, 5, 64, 0, 0, 1}));
         int cases = 0;
         for (WScene s : scenes) {
             if (only != null && !s.name().startsWith(only)) continue;
@@ -13059,14 +13063,15 @@ public final class MobOracle {
             for (int tick = 0; tick <= s.ticks(); tick++) {
                 if (tick > 0) {
                     world.gameTime = 1000L + tick;
-                    int[] vib = s.vibration();
-                    if (vib != null && tick == vib[0]) {
-                        net.minecraft.world.entity.Entity source = vib[4] == 1 ? player : null;
-                        net.minecraft.world.entity.Entity owner = vib[5] == 1 ? player : null;
-                        mob.getVibrationUser().onReceiveVibration(world,
-                                new BlockPos(vib[1], vib[2], vib[3]),
-                                net.minecraft.world.level.gameevent.GameEvent.STEP,
-                                source, owner, 5.0F);
+                    for (int[] vib : new int[][] {s.vibration(), s.vibration2()}) {
+                        if (vib != null && tick == vib[0]) {
+                            net.minecraft.world.entity.Entity source = vib[4] == 1 ? player : null;
+                            net.minecraft.world.entity.Entity owner = vib[5] == 1 ? player : null;
+                            mob.getVibrationUser().onReceiveVibration(world,
+                                    new BlockPos(vib[1], vib[2], vib[3]),
+                                    net.minecraft.world.level.gameevent.GameEvent.STEP,
+                                    source, owner, 5.0F);
+                        }
                     }
                     mob.commonTick();
                     mob.tick();
@@ -13111,6 +13116,8 @@ public final class MobOracle {
                     + ",\"eraseDig\":" + s.eraseDig()
                     + ",\"vibration\":"
                     + (s.vibration() == null ? "null" : java.util.Arrays.toString(s.vibration()))
+                    + ",\"vibration2\":"
+                    + (s.vibration2() == null ? "null" : java.util.Arrays.toString(s.vibration2()))
                     + ",\"sensors\":" + sensors
                     + ",\"mobSeed\":" + mobSeed
                     + ",\"levelSeed\":" + levelSeed
