@@ -70,7 +70,7 @@ pub mod pathfinding;
 pub mod patrol;
 pub mod phantom;
 pub mod phantom_spawner;
-mod pig;
+pub mod pig;
 pub mod pillager;
 pub mod polar_bear;
 pub mod rabbit;
@@ -2651,6 +2651,10 @@ pub struct Mob {
     pub tame: tame::Tamable,
     pub wolf: wolf::Wolf,
     pub pig_sound_variant: pig::SoundVariant,
+    /// 猪的 `ItemBasedSteering`。
+    ///
+    /// The pig's `ItemBasedSteering`.
+    pub pig_steering: pig::Steering,
     /// 羊的 `DATA_WOOL_ID`：低 4 位颜色，第 5 位已剪毛。
     ///
     /// The sheep `DATA_WOOL_ID`: colour in the low four bits, bit 4 when sheared.
@@ -3373,6 +3377,7 @@ impl Mob {
             tame: tame::Tamable::default(),
             wolf: wolf::Wolf::default(),
             pig_sound_variant: pig::SoundVariant::Classic,
+            pig_steering: pig::Steering::default(),
             wool: 0,
             chicken_sound_variant: chicken::SoundVariant::Classic,
             egg_time: 0,
@@ -3859,6 +3864,10 @@ pub struct MobPublic {
     pub wolf_sound_variant: i32,
     pub needs_sync: bool,
     pub pig_sound_variant: pig::SoundVariant,
+    /// 猪的 `DATA_BOOST_TIME`。
+    ///
+    /// The pig `DATA_BOOST_TIME`.
+    pub pig_boost_time: i32,
     pub wool: u8,
     pub chicken_sound_variant: chicken::SoundVariant,
     /// `Armadillo.ARMADILLO_STATE` 的网络 ID。
@@ -4090,6 +4099,7 @@ impl MobPublic {
             wolf_sound_variant: mob.wolf.sound_variant,
             needs_sync: mob.needs_sync,
             pig_sound_variant: mob.pig_sound_variant,
+            pig_boost_time: mob.pig_steering.boost_time_total,
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,
             armadillo_state: mob.armadillo.state.id(),

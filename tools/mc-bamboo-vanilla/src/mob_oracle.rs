@@ -58,6 +58,7 @@ mod natural_spawn;
 mod nautilus;
 mod patrol_spawn;
 mod phantom;
+mod pig_ride;
 mod pillager;
 mod projectile;
 mod shot;
@@ -137,6 +138,9 @@ enum Line {
     EquineInteract(equine::InteractCase),
     EquineDeath(equine::DeathCase),
     EquineSave(equine::SaveCase),
+    PigMount(pig_ride::MountCase),
+    PigBoost(pig_ride::BoostCase),
+    PigDismount(pig_ride::DismountCase),
     LlamaSpit(Box<llama_spit::LlamaSpitCase>),
     WitchThrow(Box<witch_throw::WitchThrowCase>),
     NaturalSpawn(natural_spawn::Case),
@@ -1788,6 +1792,9 @@ impl Report {
                 Line::Case(case) => self.replay(&case),
                 Line::Projectile(case) => self.replay_projectile(&case),
                 Line::Shot(case) => self.replay_shot(&case),
+                Line::PigMount(case) => self.replay_pig_mount(&case),
+                Line::PigBoost(case) => self.replay_pig_boost(&case),
+                Line::PigDismount(case) => self.replay_pig_dismount(&case),
                 Line::Egg(case) => self.replay_egg(&case),
                 Line::EggThrow(case) => self.replay_egg_throw(&case),
                 Line::EggDispense(case) => self.replay_egg_dispense(&case),
