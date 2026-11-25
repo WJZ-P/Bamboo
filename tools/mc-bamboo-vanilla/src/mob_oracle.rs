@@ -2744,14 +2744,25 @@ impl Report {
                         play_sound,
                     } = effect
                     {
-                        game.send_explode(
-                            *center,
-                            *radius,
-                            *block_count,
-                            hit_players,
-                            *is_small,
-                            *play_sound,
-                        );
+                        // 改坏确认：粒子、方块数和击退向量各有一处故意改错。
+                        let break_test = self.break_test.as_deref();
+                        let is_small = if break_test == Some("explode_particle") {
+                            !*is_small
+                        } else {
+                            *is_small
+                        };
+                        let block_count = if break_test == Some("explode_block_count") {
+                            *block_count + 1
+                        } else {
+                            *block_count
+                        };
+                        let empty: Vec<(i32, mc_bamboo_core::Vec3)> = Vec::new();
+                        let knock = if break_test == Some("explode_knockback") {
+                            empty.as_slice()
+                        } else {
+                            hit_players.as_slice()
+                        };
+                        game.send_explode(*center, *radius, block_count, knock, is_small, *play_sound);
                     }
                 }
             }
