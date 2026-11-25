@@ -65,6 +65,8 @@ fn shrieker_player(pos: BlockPos) -> mc_bamboo_blocks::entity::ctx::PlayerView {
         pitch: 0.0,
         position: mc_bamboo_core::Vec3::new(f64::from(pos.x) + 0.5, 64.0, f64::from(pos.z) + 0.5),
         delta: mc_bamboo_core::Vec3::default(),
+        width: 0.6,
+        height: 1.8,
         eye_height: 1.62,
         health: 20.0,
         look_direction: mc_bamboo_core::Vec3::view_vector(0.0, 0.0),

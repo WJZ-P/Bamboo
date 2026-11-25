@@ -1,13 +1,13 @@
 //! `FenceBlock`。
 //!
-//! 官方的 `useWithoutItem` 是把拴绳系到栅栏上。这个世界看不到实体，结果总是 `PASS`，
-//! 和默认实现相同，所以这里没有写。
+//! 官方的 `useWithoutItem` 是把玩家牵着的生物系到栅栏上（`LeadItem.bindPlayerMobs`）。
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, BlockAncestor, tags::block_tags};
 
 use super::{fence_gate, has_full_face};
 use crate::{
+    InteractionResult,
     behaviour::{
         Behaviour, Plain,
         common::{
@@ -15,7 +15,7 @@ use crate::{
             tick_water_if_waterlogged,
         },
     },
-    context::PlaceContext,
+    context::{PlaceContext, UseContext},
     state::{BlockState, WATERLOGGED},
     world::World,
 };
@@ -45,6 +45,16 @@ fn connects_to(
 }
 
 impl Behaviour for Fence {
+    /// `FenceBlock.useWithoutItem`：`LeadItem.bindPlayerMobs(player, level, pos)`。
+    fn use_without_item(
+        &self,
+        _state: BlockState,
+        world: &mut World,
+        ctx: &UseContext,
+    ) -> InteractionResult {
+        crate::entity::leash_knot::bind_player_mobs(world, ctx.actor.uid, ctx.clicked_pos())
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,

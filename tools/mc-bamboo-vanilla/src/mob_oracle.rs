@@ -22,7 +22,7 @@ use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, Container, EntityStore, EntityTables,
     Level, LevelRandom, LevelTables, World,
     entity::{
-        Entities, Entity, EntityKind, JavaRandom,
+        Entities, Entity, EntityKind, EntityUid, JavaRandom, KindPublic,
         ctx::PlayerView,
         mob::{DamageSource, Mob, spawn},
     },
@@ -52,6 +52,7 @@ mod golem;
 mod grazing;
 mod guardian_scene;
 mod husk_jockey;
+mod leash;
 mod lightning;
 mod llama_spit;
 mod natural_spawn;
@@ -71,7 +72,9 @@ mod squid;
 mod structure_spawn;
 mod sulfur_cube;
 mod thunder;
+mod trial_spawner;
 mod undead_horse;
+mod vault;
 mod villager;
 mod warden;
 mod water_mob;
@@ -144,6 +147,7 @@ enum Line {
     PigBoost(pig_ride::BoostCase),
     PigDismount(pig_ride::DismountCase),
     LlamaSpit(Box<llama_spit::LlamaSpitCase>),
+    Leash(Box<leash::LeashCase>),
     WitchThrow(Box<witch_throw::WitchThrowCase>),
     NaturalSpawn(natural_spawn::Case),
     PatrolSpawn(patrol_spawn::Case),
@@ -188,6 +192,7 @@ enum Line {
     VillagerBrain(Box<villager::VillagerBrainCase>),
     VillagerPoi(Box<villager::VillagerPoiCase>),
     VillagerPhase4(Box<villager::VillagerPhase4Case>),
+    VillagerTrade(Box<villager::VillagerTradeCase>),
     AttackTarget(Box<attack_target::AttackTargetCase>),
     Guardian(Box<guardian_scene::GuardianCase>),
     Fish(Box<fish::FishCase>),
@@ -196,6 +201,8 @@ enum Line {
     WaterMob(Box<water_mob::WaterMobCase>),
     Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
+    TrialSpawner(Box<trial_spawner::TrialSpawnerCase>),
+    Vault(Box<vault::VaultCase>),
     SculkSensor(sculk_sensor::SculkSensorCase),
     SculkSensorOrder(sculk_sensor::SculkSensorOrderCase),
     SculkShrieker(sculk_sensor::SculkShriekerCase),
@@ -890,6 +897,7 @@ fn zombie_style(name: &str) -> bool {
         "witch_drink_",
         "pillager_",
         "drowned_",
+        "skeleton_horse_",
     ]
     .iter()
     .any(|prefix| name.starts_with(prefix))
@@ -1676,6 +1684,207 @@ impl Level for MobLevel {
         }
     }
 
+    fn trial_spawner_players(
+        &self,
+        pos: BlockPos,
+        range: f64,
+    ) -> Vec<mc_bamboo_blocks::level::TrialSpawnerPlayer> {
+        let views: Vec<PlayerView> = if let Some(game) = &self.game {
+            game.views()
+        } else {
+            self.players.clone()
+        };
+        let mut out = Vec::new();
+        for player in &views {
+            if player.spectator || player.creative {
+                continue;
+            }
+            // 官方 `PlayerDetector.NO_CREATIVE_PLAYERS`：`blockPosition().closerThan(pos, range)`
+            // 用整块坐标的平方距离，`< range²`。
+            let block = BlockPos::containing(player.position);
+            let dx = i64::from(block.x - pos.x);
+            let dy = i64::from(block.y - pos.y);
+            let dz = i64::from(block.z - pos.z);
+            if (dx * dx + dy * dy + dz * dz) as f64 >= range * range {
+                continue;
+            }
+            let eye = Vec3::new(
+                player.position.x,
+                player.position.y + f64::from(player.eye_height),
+                player.position.z,
+            );
+            out.push(mc_bamboo_blocks::level::TrialSpawnerPlayer {
+                uuid: player.uuid.unwrap_or_default(),
+                trial_omen: false,
+                bad_omen_amplifier: None,
+                eye_position: eye,
+            });
+        }
+        out
+    }
+
+    fn trial_spawner_mob_untracked(&self, uuid: [u8; 16], pos: BlockPos) -> bool {
+        let Some(public) = self
+            .entities
+            .iter_public()
+            .find(|public| match &public.kind {
+                KindPublic::Mob(mob) => mob.uuid == uuid,
+                _ => false,
+            })
+        else {
+            return true;
+        };
+        if public.removed {
+            return true;
+        }
+        let block = BlockPos::containing(public.position);
+        let dx = i64::from(block.x - pos.x);
+        let dy = i64::from(block.y - pos.y);
+        let dz = i64::from(block.z - pos.z);
+        dx * dx + dy * dy + dz * dz > 2_209
+    }
+
+    fn trial_spawner_discard_mobs(&mut self, mobs: &[[u8; 16]]) {
+        let doomed: Vec<EntityUid> = self
+            .entities
+            .iter_public()
+            .filter(|public| match &public.kind {
+                KindPublic::Mob(mob) => mobs.contains(&mob.uuid),
+                _ => false,
+            })
+            .map(|public| public.uid)
+            .collect();
+        for uid in doomed {
+            let _ = mc_bamboo_blocks::level::LevelEntities::discard_entity(self, uid);
+        }
+    }
+
+    fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return false;
+        };
+        let params = mc_bamboo_loot::LootParams::new(0.0);
+        let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
+            return false;
+        };
+        if stacks.is_empty() {
+            return false;
+        }
+        for stack in stacks {
+            let stack = mc_bamboo_game::loot_stack(&stack);
+            // `DefaultDispenseItemBehavior.spawnItem(level, stack, 2, UP,
+            // atBottomCenterOf(pos).relative(UP, 1.2))`。
+            let position = Vec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 1.2 - 0.125,
+                f64::from(pos.z) + 0.5,
+            );
+            let random = self.random.source();
+            let _g = random.next_double() * 0.1 + 0.2;
+            let spread = 0.017_227_5 * 2.0;
+            let velocity = Vec3::new(
+                random.triangle(0.0, spread),
+                random.triangle(0.2, spread),
+                random.triangle(0.0, spread),
+            );
+            let uid = mc_bamboo_blocks::level::LevelEntities::spawn_entity(
+                self,
+                Entity::ground_item(position, stack),
+            );
+            mc_bamboo_blocks::level::LevelEntities::with_just_spawned(self, uid, &mut |entity| {
+                entity.delta = velocity;
+            });
+        }
+        true
+    }
+
+    fn vault_players(&self, pos: BlockPos, range: f64) -> Vec<[u8; 16]> {
+        // `INCLUDING_CREATIVE_PLAYERS`：整块坐标平方距离、只排旁观者（创造也算）。
+        let squared = range * range;
+        self.players
+            .iter()
+            .filter(|player| !player.spectator)
+            .filter(|player| {
+                let block = BlockPos::containing(player.position);
+                let dx = i64::from(block.x - pos.x);
+                let dy = i64::from(block.y - pos.y);
+                let dz = i64::from(block.z - pos.z);
+                ((dx * dx + dy * dy + dz * dz) as f64) < squared
+            })
+            .filter_map(|player| player.uuid)
+            .collect()
+    }
+
+    fn vault_resolve_reward(
+        &mut self,
+        pos: BlockPos,
+        player: [u8; 16],
+        key: &ItemStack,
+        loot_table: &str,
+    ) -> Vec<ItemStack> {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return Vec::new();
+        };
+        // `resolveItemsToEject`：VAULT 参数集走表的 `random_sequence`（世界种子 0）。
+        let mut params =
+            mc_bamboo_loot::LootParams::new(0.0).with_origin(mc_bamboo_loot::Position::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ));
+        params.tool = Some(mc_bamboo_loot::LootStack::new(key.item, key.count));
+        params.this_entity = Some(
+            self.players
+                .iter()
+                .find(|p| p.uuid == Some(player))
+                .map(|p| {
+                    let mut view = mc_bamboo_loot::EntityView::new(
+                        mc_bamboo_data::registries::entity_type::PLAYER,
+                    );
+                    view.is_living = true;
+                    view.position = Some(mc_bamboo_loot::Position::new(
+                        p.position.x,
+                        p.position.y,
+                        p.position.z,
+                    ));
+                    view
+                })
+                .unwrap_or_else(|| {
+                    mc_bamboo_loot::EntityView::new(mc_bamboo_data::registries::entity_type::PLAYER)
+                }),
+        );
+        let Ok(stacks) = table.get_random_items_with_seed(
+            &params,
+            0,
+            Some(&self.loot_sequences),
+            self.random.source(),
+        ) else {
+            return Vec::new();
+        };
+        stacks.iter().map(mc_bamboo_game::loot_stack).collect()
+    }
+
+    fn vault_random_display_item(&mut self, loot_table: &str, pos: BlockPos) -> ItemStack {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return ItemStack::empty();
+        };
+        // `getRandomDisplayItemFromLootTable`：世界随机源滚表，再 `nextInt` 取一件。
+        let params =
+            mc_bamboo_loot::LootParams::new(0.0).with_origin(mc_bamboo_loot::Position::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ));
+        let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
+            return ItemStack::empty();
+        };
+        if stacks.is_empty() {
+            return ItemStack::empty();
+        }
+        let index = self.random.source().next_int(stacks.len() as i32) as usize;
+        mc_bamboo_game::loot_stack(&stacks[index])
+    }
+
     fn player_mob_attack(
         &self,
         uid: i32,
@@ -1889,6 +2098,7 @@ impl Report {
                 Line::VillagerBrain(case) => self.replay_villager_brain(&case),
                 Line::VillagerPoi(case) => self.replay_villager_poi(&case),
                 Line::VillagerPhase4(case) => self.replay_villager_phase4(&case),
+                Line::VillagerTrade(case) => self.replay_villager_trade(&case),
                 Line::AttackTarget(case) => self.replay_attack_target(&case),
                 Line::Guardian(case) => self.replay_guardian(&case),
                 Line::Fish(case) => self.replay_fish(&case),
@@ -1897,6 +2107,8 @@ impl Report {
                 Line::WaterMob(case) => self.replay_water_mob(&case),
                 Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
+                Line::TrialSpawner(case) => self.replay_trial_spawner(&case),
+                Line::Vault(case) => self.replay_vault(&case),
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
                 Line::SculkSensorOrder(case) => self.replay_sculk_sensor_order(&case),
                 Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),
@@ -1912,6 +2124,7 @@ impl Report {
                 Line::EquineDeath(case) => self.replay_equine_death(case),
                 Line::EquineSave(case) => self.replay_equine_save(case),
                 Line::LlamaSpit(case) => self.replay_llama_spit(&case),
+                Line::Leash(case) => self.replay_leash(&case),
                 Line::WitchThrow(case) => self.replay_witch_throw(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::PatrolSpawn(case) => self.replay_patrol_spawn(&case)?,
@@ -2112,6 +2325,8 @@ impl Report {
                         f64::from_bits(player.z as u64),
                     ),
                     delta: Vec3::default(),
+                    width: 0.6,
+                    height: 1.8,
                     eye_height: f32::from_bits(player.eye as u32),
                     health: 20.0,
                     look_direction: Vec3::view_vector(
@@ -2215,13 +2430,13 @@ impl Report {
                 let yaw = f32::from_bits(cow.yaw as u32);
                 // 场景编号（两侧同一套，别撞号）：1 僵尸、2 尸壳、3 猪、4 羊、5 鸡、
                 // 6 兔子、7 狐狸、8 狼、9..=12 马科、13 犰狳、14 山羊、15 熊猫、
-                // 16 北极熊、17 哞菇、18 青蛙、19 蝌蚪、20 骆驼、
+                // 16 北极熊、17 哞菇、18 青蛙、19 蝌蚪、20 骆驼、24 嗅探兽、25 骷髅马、
                 // 40..=43 敌对生物、60 海龟，其余是牛。
                 // Scene kind ids (one shared set, no collisions): 1 zombie, 2 husk,
                 // 3 pig, 4 sheep, 5 chicken, 6 rabbit, 7 fox, 8 wolf, 9..=12 equines,
                 // 13 armadillo, 14 goat, 15 panda, 16 polar bear, 17 mooshroom,
-                // 18 frog, 19 tadpole, 20 camel, 40..=43 hostiles, 60 turtle;
-                // anything else is a cow.
+                // 18 frog, 19 tadpole, 20 camel, 24 sniffer, 25 skeleton horse,
+                // 40..=43 hostiles, 60 turtle; anything else is a cow.
                 let kind = match cow.kind {
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
@@ -2238,6 +2453,7 @@ impl Report {
                     19 => mc_bamboo_blocks::entity::mob::MobType::Tadpole,
                     20 => mc_bamboo_blocks::entity::mob::MobType::Camel,
                     24 => mc_bamboo_blocks::entity::mob::MobType::Sniffer,
+                    25 => mc_bamboo_blocks::entity::mob::MobType::SkeletonHorse,
                     15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
                     16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
@@ -2707,6 +2923,7 @@ impl Report {
                             f64::from_bits(player.y as u64),
                             f64::from_bits(player.z as u64),
                         ),
+                        player_height: 1.8,
                         sneaking: false,
                         difficulty: 2,
                     };
@@ -2834,6 +3051,21 @@ impl Report {
                     });
                 }
                 world.tick_entities();
+                // 改坏确认：把骑手这一刻借来、写回载具的路径丢掉，马不再跟着骑手的
+                // 导航走；逐刻的 path / 位置 / 速度都会和官方不一致。
+                // Breakage check: drop the path the rider borrowed and wrote back to the
+                // vehicle this tick, so the horse no longer follows the rider's
+                // navigation; the per-tick path, position and velocity all diverge.
+                if self.break_test.as_deref() == Some("ride_nav")
+                    && case.ride_vehicle >= 0
+                    && let Some(&vehicle) = ids.get(case.ride_vehicle as usize)
+                {
+                    world.with_entity_mut(vehicle, &mut |entity| {
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            mob.navigation.path = None;
+                        }
+                    });
+                }
                 tick_effects = world.into_effects();
             }
             // 爆炸包走游戏层正式入口：把 `Effect::Explode` 发给区域里的玩家，
@@ -3290,7 +3522,10 @@ impl Report {
                 plain!(wolf_collar);
                 plain!(wolf_max_hp);
             }
-            if name.starts_with("zombie_") || name.starts_with("drowned_") {
+            if name.starts_with("zombie_")
+                || name.starts_with("drowned_")
+                || name.starts_with("skeleton_horse_")
+            {
                 if name.starts_with("zombie_inhabited_") {
                     plain!(ed);
                 }
@@ -4771,6 +5006,7 @@ fn try_sleep(level: &mut MobLevel, ticks: &mut BlockTicks, case: &Case, head: Bl
     );
     let creative = case.player_creative;
     let actor = Actor {
+        uid: 0,
         uuid: ((1_u128 << 64) | 2).to_be_bytes(),
         position,
         yaw: 0.0,
@@ -4861,9 +5097,18 @@ fn shown_path(level: &MobLevel, entity: &Entity, mob: &Mob) -> Option<Vec<i32>> 
     let Some(vm) = vehicle.kind.mob() else {
         return path(mob);
     };
+    // `#non_controlling_rider`（建模范围内是史莱姆和硫磺方块怪）不借载具导航，
+    // path 也就不能转交到载具；和 `riding::controls_vehicle` 保持同一判据。
+    // A #non_controlling_rider (slime and sulfur cube among modelled mobs) does
+    // not borrow the vehicle navigation, so its path must not delegate either;
+    // keep this in step with riding::controls_vehicle.
     if vm.no_ai
         || vm.passengers.first().copied() != Some(entity.id)
-        || mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Slime
+        || matches!(
+            mob.mob_type,
+            mc_bamboo_blocks::entity::mob::MobType::Slime
+                | mc_bamboo_blocks::entity::mob::MobType::SulfurCube
+        )
     {
         return path(mob);
     }

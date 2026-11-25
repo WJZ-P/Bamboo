@@ -361,7 +361,7 @@ fn record_sequence(region: &mut Region, id: PlayerId, sequence: i32) -> bool {
 }
 
 /// 方块逻辑看到的这名玩家。
-fn actor_of(player: &Player) -> Actor {
+fn actor_of(player: &Player, id: PlayerId) -> Actor {
     let held = |hand| {
         let stack = player.inventory.held(hand);
         if stack.is_empty() {
@@ -371,6 +371,7 @@ fn actor_of(player: &Player) -> Actor {
         }
     };
     Actor {
+        uid: id.0,
         uuid: *player.uuid.as_bytes(),
         position: player.position(),
         yaw: player.yaw,
@@ -749,6 +750,26 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     instance.show_icon = show_icon;
                     crate::player_effects::give(region, id, instance);
                 }
+            }
+            Effect::TrialSpawnerTransformBadOmen { player, duration } => {
+                use mc_bamboo_data::registries::mob_effect;
+                let Some(id) = region
+                    .players
+                    .iter()
+                    .find(|(_, p)| p.uuid.as_bytes() == &player)
+                    .map(|(id, _)| *id)
+                else {
+                    return;
+                };
+                crate::player_effects::clear(region, id, Some(mob_effect::BAD_OMEN));
+                let instance = mc_bamboo_blocks::entity::mob::effects::EffectInstance::with_flags(
+                    mob_effect::TRIAL_OMEN,
+                    duration,
+                    0,
+                    false,
+                    true,
+                );
+                crate::player_effects::give(region, id, instance);
             }
             Effect::HealPlayer { target, amount } => {
                 let id = crate::inbound::PlayerId(target);
@@ -1204,7 +1225,7 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         spectator_use_item_on(region, id, packet);
         return;
     }
-    let actor = actor_of(player);
+    let actor = actor_of(player, id);
     // `can_place_on` 要在借出 `level` 之前从物品栏读出来。
     let held = player.inventory.held(packet.hand).clone();
     let is_placement_attempt = rules::is_placement_attempt(&held);
@@ -1389,7 +1410,7 @@ pub(crate) fn on_use_item(
     }
     // `Item.use` → `Consumable.startConsuming`：可消耗物品先进入「正在使用」，
     // 不往下走放置 / 方块交互链。先把 `actor` 抄出来，`start` 要独占借 `region`。
-    let actor = actor_of(player);
+    let actor = actor_of(player, id);
     // 鱼桶要从这一堆上的组件还原鱼，先抄下来。
     // A fish bucket restores its fish from this stack's components, so copy it first.
     let held = player.inventory.held(hand).clone();
@@ -1489,18 +1510,27 @@ pub(crate) fn on_interact_entity(
     // 官方把 `usingSecondaryAction` 记成潜行键；马科用它判断开物品栏。
     // Vanilla stores `usingSecondaryAction` as the sneak key; equines read it.
     // 先把玩家和目标的只读数据抄出来，`block_level()` 要独占借 `region`。
-    let Some((game_mode, position, eye_height, entity_reach, player_uuid, main_held, off_held)) =
-        region.players.get(&id).map(|player| {
-            (
-                player.game_mode,
-                player.position(),
-                player.eye_height(),
-                player.attributes.value(attribute::ENTITY_INTERACTION_RANGE),
-                *player.uuid.as_bytes(),
-                player.inventory.held(Hand::Main).clone(),
-                player.inventory.held(Hand::Off).clone(),
-            )
-        })
+    let Some((
+        game_mode,
+        position,
+        eye_height,
+        entity_reach,
+        player_uuid,
+        main_held,
+        off_held,
+        player_height,
+    )) = region.players.get(&id).map(|player| {
+        (
+            player.game_mode,
+            player.position(),
+            player.eye_height(),
+            player.attributes.value(attribute::ENTITY_INTERACTION_RANGE),
+            *player.uuid.as_bytes(),
+            player.inventory.held(Hand::Main).clone(),
+            player.inventory.held(Hand::Off).clone(),
+            player.height(),
+        )
+    })
     else {
         return;
     };
@@ -1510,7 +1540,13 @@ pub(crate) fn on_interact_entity(
     let Some(target) = region.entities.public_at(entity_id) else {
         return;
     };
-    if target.removed || !matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) {
+    let is_knot = matches!(
+        target.kind,
+        mc_bamboo_blocks::entity::KindPublic::LeashKnot { .. }
+    );
+    if target.removed
+        || !(matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) || is_knot)
+    {
         return;
     }
     // 够距：官方 `ServerGamePacketListenerImpl.handleInteract` 用 `ENTITY_INTERACTION_RANGE` + 3.0 缓冲。
@@ -1528,6 +1564,33 @@ pub(crate) fn on_interact_entity(
         Hand::Main => Hand::Off,
         Hand::Off => Hand::Main,
     };
+    if is_knot {
+        // 拴绳结：剪刀剪断绳子，或把玩家 / 结之间的生物转来转去。
+        for try_hand in [hand, other] {
+            let held = match try_hand {
+                Hand::Main => main_held.clone(),
+                Hand::Off => off_held.clone(),
+            };
+            let result = crate::durability::run(region, id, try_hand, |region| {
+                let (mut level, ticks) = region.block_level();
+                let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+                world.interact_knot(
+                    entity_id,
+                    id.0,
+                    player_uuid,
+                    &held,
+                    try_hand,
+                    using_secondary_action,
+                )
+            });
+            if !result.consumes_action() {
+                continue;
+            }
+            swing(region, id, try_hand, result);
+            return;
+        }
+        return;
+    }
     for try_hand in [hand, other] {
         let held = match try_hand {
             Hand::Main => main_held.clone(),
@@ -1540,6 +1603,7 @@ pub(crate) fn on_interact_entity(
             held,
             creative,
             position,
+            player_height,
             sneaking: using_secondary_action,
             difficulty: region.global.difficulty as i32,
         };

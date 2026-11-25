@@ -467,6 +467,9 @@ impl Kind {
             Self::CountDownCooldown(_)
                 | Self::FollowTemptation { .. }
                 | Self::Villager(super::super::villager_ai::Behavior::SleepInBed { .. })
+                | Self::Villager(
+                    super::super::villager_ai::Behavior::LookAndFollowTradingPlayerSink { .. }
+                )
         )
     }
 

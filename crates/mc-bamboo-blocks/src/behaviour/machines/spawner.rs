@@ -77,7 +77,8 @@ impl SpawnData {
         }
         Self {
             entity: Tag::Compound(entity),
-            custom_spawn_rules: tag::field(tag, "custom_spawn_rules").cloned(),
+            custom_spawn_rules: tag::field(tag, "custom_spawn_rules")
+                .map(normalize_custom_spawn_rules),
             equipment: tag::field(tag, "equipment").cloned(),
         }
     }
@@ -163,6 +164,47 @@ fn light_limit(raw: &Tag, key: &str) -> (i32, i32) {
 /// 读一个数值标签成 int；形状不对时是 `None`。
 fn value_at(tag: &Tag) -> Option<i32> {
     tag::java_i32(tag).ok()
+}
+
+/// 把 `custom_spawn_rules` 的 `block_light_limit` / `sky_light_limit` 按官方
+/// `InclusiveRange.INT` 的编码形状规范化：先用 [`light_limit`] 宽松读成
+/// `(min, max)`，等于缺省 `LIGHT_RANGE = [0, 15]` 的字段按
+/// `lenientOptionalFieldOf` 的语义省略，其余 `min == max` 写单 int、
+/// `min != max` 写 `[min, max]` 列表。官方 `load -> save` 也会把
+/// `{min_inclusive, max_inclusive}` 复合标签重写成这两种形状，所以这里不能
+/// 原样带回输入。
+///
+/// Normalize the two light limits of `custom_spawn_rules` to the shape the
+/// official `InclusiveRange.INT` codec writes: a single int when `min == max`,
+/// a `[min, max]` list otherwise, and omitted when equal to the default
+/// `[0, 15]` (`lenientOptionalFieldOf`). A `{min_inclusive, max_inclusive}`
+/// compound is rewritten by vanilla's `load -> save` too, so it cannot be
+/// carried through verbatim.
+fn normalize_custom_spawn_rules(tag: &Tag) -> Tag {
+    let Tag::Compound(entries) = tag else {
+        return tag.clone();
+    };
+    let raw = Tag::Compound(entries.clone());
+    let mut out = Vec::new();
+    for (key, value) in entries {
+        if (key == "block_light_limit" || key == "sky_light_limit")
+            && let (min, max) = light_limit(&raw, key)
+        {
+            if min == 0 && max == 15 {
+                // `lenientOptionalFieldOf` 的缺省值，编码时省略。
+                continue;
+            }
+            let encoded = if min == max {
+                Tag::Int(min)
+            } else {
+                Tag::List(vec![Tag::Int(min), Tag::Int(max)])
+            };
+            out.push((key.clone(), encoded));
+        } else {
+            out.push((key.clone(), value.clone()));
+        }
+    }
+    Tag::Compound(out)
 }
 
 /// `SpawnerBlockEntity`：挂在 `minecraft:spawner` 上的活方块实体。
@@ -465,13 +507,17 @@ impl SpawnerBlockEntity {
                     continue;
                 }
             }
-            // 实体标签只有 `id` 时跑 `finalizeSpawn`（`groupData` 为空）。
-            if data.is_id_only() {
-                spawn::finalize_spawn(world, kind, &mut entity, spawn::SpawnReason::Spawner);
-            }
-            // `tryAddFreshEntityWithPassengers`：新实体总能进表。
-            let uid = world.add_prepared_entity(entity);
-            world.finish_jockeys(uid);
+            // 只有 `id` 时跑 `finalizeSpawn`；普通刷怪笼不标持久、不套装备表。
+            // 与试炼刷怪笼共用 World 层的提交路径（`finalize` / `add` / `finish_jockeys`）。
+            // Shared commit path with the trial spawner (`finalize` / `add` / jockeys).
+            let (_, uid) = world.commit_spawn_data_entity(
+                entity,
+                kind,
+                data.is_id_only(),
+                spawn::SpawnReason::Spawner,
+                false,
+                None,
+            );
             world.level_event(2004, self.pos, 0);
             // `gameEvent(entity, ENTITY_PLACE, BlockPos.containing(落点))`：源头是新刷出的实体，
             // 位置取落点所在格的格心。
