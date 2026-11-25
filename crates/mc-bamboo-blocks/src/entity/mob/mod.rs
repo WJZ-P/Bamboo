@@ -3191,6 +3191,16 @@ impl Mob {
             navigation.required_path_length = 48.0;
             navigation.update_max_visited_nodes(follow_range);
         }
+        if mob_type == MobType::HappyGhast {
+            // `HappyGhast` 构造时是成年 `GhastMoveControl`；`setBaby(true)` 之后
+            // `ageBoundaryReached` 会换成 `BabyFlyingPathNavigation`。这里只放
+            // 成年那份（普通地面寻路，不开门也不浮水）。
+            // Vanilla constructs an adult with the ghast control; `setBaby(true)`
+            // switches to `BabyFlyingPathNavigation` on the age boundary.
+            navigation.flags.can_open_doors = false;
+            navigation.flags.can_float = false;
+            navigation.required_path_length = 16.0;
+        }
         let goals = match mob_type {
             MobType::Cow | MobType::Mooshroom => GoalSelector::cow(&mut navigation),
             MobType::Rabbit => rabbit::goals(&mut navigation),
@@ -3239,10 +3249,12 @@ impl Mob {
             | MobType::ZombieNautilus
             | MobType::Creaking
             | MobType::Sniffer
-            // 成年快乐恶魂的 `registerGoals` 只在服务端跑（`adultGhastSetup`），
-            // 幼年用大脑，目标表在这里保持空。
-            // Adult happy ghasts register goals server-side only (`adultGhastSetup`);
-            // babies use a brain, so the goal table starts empty.
+            // 成年快乐恶魂的 `registerGoals` 只在 `adultGhastSetup` 里跑；
+            // 构造出来后 `setBaby(true)` 会走 `babyGhastSetup` 把目标全清掉，
+            // 所以这里（等价构造后尚未跨年龄边界）保持空表。
+            // An adult's `registerGoals` only runs from `adultGhastSetup`;
+            // `setBaby(true)` runs `babyGhastSetup` and clears them, so the
+            // constructor-equivalent table here stays empty.
             | MobType::HappyGhast => GoalSelector::default(),
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run

@@ -595,14 +595,22 @@ fn sense_nearest_adult(cx: &mut Cx) {
     );
 }
 
-/// `AdultSensorAnyType.doTick`：看得见的最近成年个体，不限种类。
+/// `AdultSensorAnyType.doTick`：看得见的最近成年 `#followable_friendly_mobs`。
+/// 它不限种类，但玩家不在这个标签里。
 ///
-/// `AdultSensorAnyType.doTick`: the nearest visible adult of any species.
+/// `AdultSensorAnyType.doTick`: the nearest visible adult in
+/// `#followable_friendly_mobs`, regardless of species; players are not in that tag.
 fn sense_nearest_adult_any_type(cx: &mut Cx) {
     if !cx.memories.has(MemoryType::NearestVisibleLivingEntities) {
         return;
     }
-    let adult = find_closest_visible(cx, &mut |view| !view.baby);
+    let adult = find_closest_visible(cx, &mut |view| {
+        !view.baby
+            && view.mob_type.is_some_and(|kind| {
+                mc_bamboo_data::entity_type_tag("minecraft:followable_friendly_mobs")
+                    .is_some_and(|ids| ids.contains(&kind.entity_type()))
+            })
+    });
     cx.memories.set_or_erase(
         MemoryType::NearestVisibleAdult,
         adult.map(MemoryValue::Entity),

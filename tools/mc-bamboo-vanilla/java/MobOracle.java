@@ -370,6 +370,7 @@ public final class MobOracle {
             }
             if (only == null || "happy_ghast".startsWith(only) || only.startsWith("happy_ghast")) {
                 cases += playHappyGhast(official, out, only);
+                cases += playHappyGhastAi(official, out, only);
             }
             if (only == null || "leash".startsWith(only) || only.startsWith("leash")) {
                 cases += playLeash(official, out, only);
@@ -16252,6 +16253,212 @@ public final class MobOracle {
             out.append(",\"driedGone\":").append(
                     !world.getBlockState(new BlockPos(1, 64, 0)).is(Blocks.DRIED_GHAST));
         }
+        return out.append('}').toString();
+    }
+
+    /**
+     * 快乐恶魂开着 AI 的逐刻对拍：成年自由飘浮、幼年跟着拿雪球的玩家飞、长大的
+     * 那一刻换控制器和目标、以及静止超时后的行为。逐刻比位置、速度、朝向、年龄、
+     * 尺寸、导航 / 移动控制目标、目标表、大脑快照、家和随机源。
+     *
+     * Happy ghasts with AI on: adult free floating, babies following a player with
+     * snowballs, the control/goal switch when growing up, and hover-timeout behaviour.
+     * Every tick compares position, velocity, rotation, age, size, navigation / move
+     * targets, running goals, brain dump, home and the entity random.
+     */
+    private static int playHappyGhastAi(Official official, Writer out, String only) throws Exception {
+        String[] names = {"happy_ghast_ai_adult", "happy_ghast_ai_baby",
+                "happy_ghast_ai_grow", "happy_ghast_ai_still", "happy_ghast_ai_ride"};
+        int cases = 0;
+        int snowball = BuiltInRegistries.ITEM.getId(Items.SNOWBALL);
+        int harness = BuiltInRegistries.ITEM.getId(Items.HARNESS.red());
+        for (String name : names) {
+            if (only != null && !name.startsWith(only)) continue;
+            FakeLevel world = FakeLevel.create(official);
+            world.nextId = FIRST_ID;
+            world.gameTime = START_TIME;
+            ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+            for (int x = -18; x <= 18; x++)
+                for (int z = -18; z <= 18; z++)
+                    world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            String blocks = blockArray(world.blocks);
+
+            long seed = 0x48415050_59475_31L;
+            var ghast = (net.minecraft.world.entity.animal.happyghast.HappyGhast)
+                    EntityTypes.HAPPY_GHAST.create(world, EntitySpawnReason.COMMAND);
+            world.entitySeeds.nextLong();
+            setRandom(ghast, seed);
+            ghast.setId(FIRST_ID);
+            ghast.setUUID(new UUID(0L, 1L));
+            ghast.setPersistenceRequired();
+            ghast.snapTo(2.5, 72.0, 0.5, 0.0F, 0.0F);
+            ghast.setYHeadRot(0.0F);
+            ghast.setYBodyRot(0.0F);
+            boolean baby = name.equals("happy_ghast_ai_baby") || name.equals("happy_ghast_ai_grow");
+            if (baby) ghast.setBaby(true);
+            if (name.equals("happy_ghast_ai_grow")) {
+                // 第 3 刻长大：把年龄钉在 -1，下一刻 `aiStep` 就跨过 0。
+                ghast.setAge(-1);
+            }
+            if (name.equals("happy_ghast_ai_still")) {
+                putInt(net.minecraft.world.entity.animal.happyghast.HappyGhast.class, ghast,
+                        "serverStillTimeout", 10);
+            }
+            if (baby) {
+                // 喂雪球的玩家已经把走路目标写进大脑：幼年大脑从「有目标」这一刻
+                // 开始跑，`RunOne` 的飞行闲逛因为 `WALK_TARGET` 不空而不触发。
+                // Seed the walk target so the baby brain runs from a defined state:
+                // `RunOne`'s flying stroll requires an absent WALK_TARGET.
+                ghast.getBrain().setMemory(
+                        net.minecraft.world.entity.ai.memory.MemoryModuleType.WALK_TARGET,
+                        new net.minecraft.world.entity.ai.memory.WalkTarget(
+                                new net.minecraft.world.entity.ai.behavior.BlockPosTracker(
+                                        new Vec3(6.5, 72.0, 0.5)), 1.25F, 2));
+            }
+            // 大脑的洗牌随机源不带种子，两边按同一个公式重设；传感器延迟定成 1。
+            BrainOracle.reseedShuffles(ghast, randomSeed(ghast));
+            if (baby) BrainOracle.fixSensorDelays(ghast, 1L);
+            String sensorDelays = baby ? BrainOracle.sensorDelays(ghast) : "[]";
+            world.tracked.add(ghast);
+
+            ServerPlayer player = new ServerPlayer(official.server, world,
+                    new GameProfile(new UUID(1L, 2L), "GhastAiOracle"), ClientInformation.createDefault());
+            player.setId(FIRST_ID - 1024);
+            player.setPos(6.5, 72.0, 0.5);
+            player.setYRot(0.0F);
+            setRandom(player, ENTITY_RANDOM_SEED);
+            ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+            put(ServerGamePacketListenerImpl.class, connection, "player", player);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "server", official.server);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+            ((RecordingListener) connection).bytes = new Bytes(official.registries);
+            put(ServerPlayer.class, player, "connection", connection);
+            world.playersList().add(player);
+            world.tracked.add(player);
+            boolean tempt = name.equals("happy_ghast_ai_baby");
+            if (tempt) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.SNOWBALL));
+            }
+            if (name.equals("happy_ghast_ai_ride")) {
+                ghast.setItemSlot(net.minecraft.world.entity.EquipmentSlot.BODY,
+                        new ItemStack(Items.HARNESS.red()));
+            }
+
+            int ticks = switch (name) {
+                case "happy_ghast_ai_grow" -> 80;
+                case "happy_ghast_ai_still" -> 30;
+                case "happy_ghast_ai_ride" -> 30;
+                default -> 120;
+            };
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    world.gameTime = START_TIME + tick;
+                    if (name.equals("happy_ghast_ai_ride") && tick == 2) {
+                        // 玩家上车：服务端 `startRiding` 会发一个传送包，夹具接住。
+                        player.startRiding(ghast);
+                    }
+                    if (name.equals("happy_ghast_ai_ride") && tick > 2) {
+                        player.setYRot(17.0F);
+                        player.setXRot(-12.0F);
+                    }
+                    for (net.minecraft.world.entity.Entity e
+                            : new java.util.ArrayList<>(world.tracked)) {
+                        if (e instanceof net.minecraft.world.entity.Mob mob
+                                && !(e instanceof ServerPlayer) && !mob.isRemoved()
+                                && !mob.isPassenger()) {
+                            mob.checkDespawn();
+                            mob.commonTick();
+                            mob.tick();
+                        }
+                    }
+                }
+                if (tick > 0) frames.append(',');
+                frames.append(happyGhastAiFrame(ghast, player, name, tick));
+            }
+            frames.append(']');
+            out.write("{\"type\":\"happyGhastAi\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"seed\":" + seed
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"blocks\":" + blocks
+                    + ",\"baby\":" + baby
+                    + ",\"tempt\":" + tempt
+                    + ",\"snowball\":" + snowball
+                    + ",\"harness\":" + harness
+                    + ",\"sensors\":" + sensorDelays
+                    + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
+    /** 开 AI 场景的一帧：运动、朝向、导航 / 移动目标、目标表、大脑、家、年龄、随机源。 */
+    private static String happyGhastAiFrame(
+            net.minecraft.world.entity.animal.happyghast.HappyGhast ghast,
+            ServerPlayer player, String name, int tick) throws Exception {
+        Vec3 p = ghast.position();
+        Vec3 v = ghast.getDeltaMovement();
+        var dims = ghast.getDimensions(net.minecraft.world.entity.Pose.STANDING);
+        var control = ghast.getMoveControl();
+        StringBuilder goals = new StringBuilder();
+        for (WrappedGoal goal : ghast.getGoalSelector().getAvailableGoals()) {
+            if (!goal.isRunning()) continue;
+            if (!goals.isEmpty()) goals.append(' ');
+            goals.append(goal.getGoal().getClass().getSimpleName());
+        }
+        net.minecraft.world.level.pathfinder.Path path = ghast.getNavigation().getPath();
+        StringBuilder nav = new StringBuilder("[");
+        if (path != null) {
+            nav.append(path.getNextNodeIndex());
+            for (int n = 0; n < path.getNodeCount(); n++) {
+                net.minecraft.world.level.pathfinder.Node node = path.getNode(n);
+                nav.append(',').append(node.x).append(',').append(node.y).append(',').append(node.z);
+            }
+        }
+        nav.append(']');
+        BlockPos home = ghast.getHomePosition();
+        var out = new StringBuilder("{\"pos\":[");
+        out.append(Double.doubleToRawLongBits(p.x)).append(',')
+                .append(Double.doubleToRawLongBits(p.y)).append(',')
+                .append(Double.doubleToRawLongBits(p.z)).append(']');
+        out.append(",\"vel\":[").append(Double.doubleToRawLongBits(v.x)).append(',')
+                .append(Double.doubleToRawLongBits(v.y)).append(',')
+                .append(Double.doubleToRawLongBits(v.z)).append(']');
+        out.append(",\"rot\":[")
+                .append(Float.floatToRawIntBits(ghast.getYRot())).append(',')
+                .append(Float.floatToRawIntBits(ghast.getXRot())).append(',')
+                .append(Float.floatToRawIntBits(ghast.getYHeadRot())).append(',')
+                .append(Float.floatToRawIntBits(ghast.yBodyRot)).append(']');
+        out.append(",\"age\":").append(ghast.getAge());
+        out.append(",\"dims\":[")
+                .append(Float.floatToRawIntBits(dims.width())).append(',')
+                .append(Float.floatToRawIntBits(dims.height())).append(',')
+                .append(Float.floatToRawIntBits(ghast.getEyeHeight())).append(']');
+        out.append(",\"wanted\":[")
+                .append(Double.doubleToRawLongBits(control.getWantedX())).append(',')
+                .append(Double.doubleToRawLongBits(control.getWantedY())).append(',')
+                .append(Double.doubleToRawLongBits(control.getWantedZ())).append(']');
+        out.append(",\"speed\":").append(Double.doubleToRawLongBits(control.getSpeedModifier()));
+        out.append(",\"moving\":").append(control.hasWanted());
+        out.append(",\"goals\":").append(jsonString(goals.toString()));
+        out.append(",\"path\":").append(nav);
+        out.append(",\"brain\":").append(jsonString(BrainOracle.dump(ghast)));
+        out.append(",\"home\":[").append(home.getX()).append(',').append(home.getY()).append(',')
+                .append(home.getZ()).append(',').append(ghast.getHomeRadius()).append(']');
+        out.append(",\"hasHome\":").append(ghast.hasHome());
+        out.append(",\"staysStill\":").append(ghast.staysStill());
+        out.append(",\"stillTimeout\":").append(getInt(
+                net.minecraft.world.entity.animal.happyghast.HappyGhast.class, ghast,
+                "serverStillTimeout"));
+        out.append(",\"passengers\":").append(ghast.getPassengers().size());
+        out.append(",\"seed\":").append(randomSeed(ghast));
+        out.append(",\"playerRot\":[")
+                .append(Float.floatToRawIntBits(player.getYRot())).append(',')
+                .append(Float.floatToRawIntBits(player.getXRot())).append(']');
         return out.append('}').toString();
     }
 

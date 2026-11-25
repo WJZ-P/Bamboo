@@ -18,6 +18,8 @@ use mc_bamboo_protocol::packet::play::EquipmentSlot;
 use super::{
     Attributes, Mob, MobEvent, MobType,
     attributes::Attribute,
+    control::Operation,
+    goals::{Goal, GoalSelector, WrappedGoal},
     brain::{
         Activity, ActivityData, Brain, BrainTemplate, TemplateCache,
         behavior::{Gate, Kind, MoveToTargetSink, Speed},
@@ -83,6 +85,14 @@ pub struct HappyGhastState {
     ///
     /// `STAYS_STILL` metadata (index 19, BOOLEAN, false by default).
     pub stays_still: bool,
+    /// `GhastMoveControl.floatDuration`：成年每几刻重抽一次飞行冲量。
+    ///
+    /// `GhastMoveControl.floatDuration`: how often an adult re-rolls its impulse.
+    pub float_duration: i32,
+    /// 对拍的改坏确认：长大时不换目标表。
+    ///
+    /// Oracle break check: skip the goal-table switch when growing up.
+    pub keep_baby_goals: bool,
 }
 
 impl HappyGhastState {
@@ -218,6 +228,175 @@ pub const LEASHER_ATTACHMENT_POINT: Vec3 = Vec3::new(0.0, 0.5, 0.0);
 pub const LEASH_ELASTIC_DISTANCE: f64 = 10.0;
 pub const LEASH_SNAP_DISTANCE: f64 = 16.0;
 
+/// `HappyGhast.registerGoals()`：优先级 3 悬停、4 诱惑、5 随机飞行。
+/// 只在服端长大成人的那一支 (`adultGhastSetup`) 注册。
+///
+/// `HappyGhast.registerGoals()`: float (3), temptation (4), random flight (5).
+/// Registered by the server-side `adultGhastSetup` only.
+pub fn goals() -> GoalSelector {
+    GoalSelector::from_goals(vec![
+        WrappedGoal {
+            priority: 3,
+            running: false,
+            goal: Goal::HappyGhastFloat,
+        },
+        WrappedGoal {
+            priority: 4,
+            running: false,
+            goal: Goal::HappyGhastTempt {
+                player: None,
+                calm_down: 0,
+            },
+        },
+        WrappedGoal {
+            priority: 5,
+            running: false,
+            goal: Goal::HappyGhastFloatAround { distance_to_blocks: 16 },
+        },
+    ])
+}
+
+/// `HappyGhast.babyGhastSetup()` / `adultGhastSetup()`：长大时换控制器、
+/// 寻路器和目标表，大脑停掉并清空记忆；变回幼年时换成飞行控制和幼年寻路器。
+///
+/// `HappyGhast.babyGhastSetup()` / `adultGhastSetup()`: swap the controls,
+/// navigation and goals at the age boundary; adults stop and clear the brain.
+pub fn age_boundary_reached(mob: &mut Mob) {
+    if mob.is_baby() {
+        mob.happy_ghast.set_still_timeout(0);
+        mob.goals.clear_running();
+        mob.navigation.flags.fly = true;
+        mob.navigation.flags.can_open_doors = false;
+        mob.navigation.flags.can_float = true;
+        mob.navigation.required_path_length = 48.0;
+    } else {
+        // 改坏确认：长大时不换目标表，其它切换照旧。
+        // Break check: keep the baby goal table but still switch the rest.
+        if !mob.happy_ghast.keep_baby_goals {
+            mob.goals = goals();
+        }
+        // `createNavigation(level)` 换掉整份导航对象，旧路径随之作废。
+        // `createNavigation(level)` replaces the navigation, dropping the old path.
+        mob.navigation.stop();
+        mob.navigation.flags.fly = false;
+        mob.navigation.flags.can_open_doors = false;
+        mob.navigation.flags.can_float = false;
+        mob.navigation.required_path_length = 16.0;
+        if let Some(brain) = mob.brain.as_mut() {
+            brain.memories.clear();
+            brain.stop_running_for_setup();
+        }
+    }
+    mob.mover.operation = Operation::Wait;
+}
+
+/// `HappyGhast.HappyGhastFloatGoal.canUse`：悬停超时时彻底不跑。
+///
+/// `HappyGhast.HappyGhastFloatGoal.canUse`: skipped entirely on hover timeout.
+pub fn float_can_use(me: &Entity, mob: &Mob) -> bool {
+    !mob.happy_ghast.is_on_still_timeout() && super::goals::float_can_use(me, mob)
+}
+
+/// `TemptGoal.ForNonPathfinders.navigateTowards`：朝玩家的眼睛按 `nextDouble()`
+/// 的比例插值，交给自己的移动控制（不寻路）；`stopNavigation` 就是 `setWait()`。
+///
+/// `TemptGoal.ForNonPathfinders.navigateTowards`: interpolate towards the
+/// player's eyes by `nextDouble()` and hand it to the move control.
+pub fn tempt_navigate(me: &mut Entity, mob: &mut Mob, player: Vec3, speed: f64) {
+    let scale = me.random.next_double();
+    let at = me
+        .position
+        .add(Vec3::new(
+            (player.x - me.position.x) * scale,
+            (player.y - me.position.y) * scale,
+            (player.z - me.position.z) * scale,
+        ));
+    mob.mover.set_wanted_position(at.x, at.y, at.z, speed);
+}
+
+/// `TemptGoal.ForNonPathfinders.stopNavigation`。
+pub fn tempt_stop(mob: &mut Mob) {
+    mob.mover.operation = Operation::Wait;
+}
+
+/// `Ghast.RandomFloatAroundGoal.getSuitableFlyToPosition`：最多 64 次按家的
+/// 限制抽三维偏移，离方块够远就用；否则退回最后一次候选并按高度图压回地面之上。
+///
+/// `Ghast.RandomFloatAroundGoal.getSuitableFlyToPosition`: up to 64 tries of
+/// restriction-checked offsets, then a heightmap adjustment of the last pick.
+pub fn suitable_fly_to_position(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn crate::entity::ctx::BlockView,
+    distance_to_blocks: i32,
+) -> Vec3 {
+    const ATTEMPTS: usize = 64;
+    let mut candidate = None;
+    for _ in 0..ATTEMPTS {
+        let at = random_fly_position(me);
+        if !within_home(mob, at) {
+            continue;
+        }
+        candidate = Some(at);
+        if good_target(view, at, distance_to_blocks) {
+            return at;
+        }
+    }
+    let mut at = candidate.unwrap_or_else(|| random_fly_position(me));
+    let pos = BlockPos::containing(at);
+    let height = view.motion_blocking_y(pos);
+    if height < pos.y && height > view.min_y() {
+        at.y = me.position.y - (me.position.y - at.y).abs();
+    }
+    at
+}
+
+fn random_fly_position(me: &mut Entity) -> Vec3 {
+    Vec3::new(
+        me.position.x + f64::from(me.random.next_float() * 2.0 - 1.0) * 16.0,
+        me.position.y + f64::from(me.random.next_float() * 2.0 - 1.0) * 16.0,
+        me.position.z + f64::from(me.random.next_float() * 2.0 - 1.0) * 16.0,
+    )
+}
+
+fn within_home(mob: &Mob, at: Vec3) -> bool {
+    let Some((home, radius)) = mob.home else {
+        return true;
+    };
+    if radius < 0 {
+        return true;
+    }
+    // `BlockPos.distToCenterSqr(Position) < radius²`。
+    let dx = at.x - (f64::from(home.x) + 0.5);
+    let dy = at.y - (f64::from(home.y) + 0.5);
+    let dz = at.z - (f64::from(home.z) + 0.5);
+    dx * dx + dy * dy + dz * dz < f64::from(radius * radius)
+}
+
+/// `RandomFloatAroundGoal.isGoodTarget`：目标格必须是空气，且六方向
+/// `distanceToBlocks` 格内**要有**一个非空气方块（官方的循环在找到方块时立刻返回真）。
+///
+/// `RandomFloatAroundGoal.isGoodTarget`: the target cell must be air and one of
+/// the six directions must reach a non-air cell within `distanceToBlocks` steps
+/// (vanilla returns true as soon as it finds one).
+fn good_target(view: &dyn crate::entity::ctx::BlockView, at: Vec3, distance: i32) -> bool {
+    if distance <= 0 {
+        return true;
+    }
+    let pos = BlockPos::containing(at);
+    if !view.block_state(pos).is_air() {
+        return false;
+    }
+    for direction in mc_bamboo_core::Direction::ALL {
+        for step in 1..distance {
+            if !view.block_state(pos.relative_by(direction, step)).is_air() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// `HappyGhast.BRAIN_PROVIDER`：五个传感器和 `HappyGhastAi.getActivities()` 的三张活动表。
 ///
 /// `HappyGhast.BRAIN_PROVIDER`: five sensors and `HappyGhastAi.getActivities()`'s
@@ -279,6 +458,7 @@ fn idle_activity() -> ActivityData {
                     speed: Speed::Fixed(SPEED_TEMPTED),
                     close_adult: BABY_CLOSE_ENOUGH_DIST,
                     close_baby: BABY_CLOSE_ENOUGH_DIST,
+                    look_in_eyes: true,
                 },
             ),
             (
@@ -302,7 +482,7 @@ fn idle_activity() -> ActivityData {
                 Kind::Gate(Box::new(Gate::run_one(
                     Vec::new(),
                     vec![
-                        (Kind::RandomStroll { speed: 1.0 }, 1),
+                        (Kind::RandomStrollFly { speed: 1.0 }, 1),
                         (
                             Kind::WalkTargetFromLook {
                                 speed: Speed::Fixed(1.0),
@@ -346,10 +526,10 @@ pub(in crate::entity::mob) fn custom_server_ai_step(
 }
 
 /// `HappyGhast.checkRestriction()`：被拴或载人时不改家；否则把家设到当前方块，
-/// 半径按「成年且穿了挽具」取 64，其余 32。
+/// 半径按「成年且 BODY 槽空着」取 64，其余 32。
 ///
 /// `HappyGhast.checkRestriction()`: leashed or ridden mobs keep their home; otherwise
-/// the home is set to the current block with radius 64 for a harnessed adult, 32 else.
+/// the home is set to the current block with radius 64 for an unharnessed adult, 32 else.
 fn check_restriction(me: &Entity, mob: &mut Mob) {
     if super::leash::is_leashed(mob) || !mob.passengers.is_empty() {
         return;
@@ -366,9 +546,13 @@ fn check_restriction(me: &Entity, mob: &mut Mob) {
     mob.home = Some((pos, radius));
 }
 
-/// `HappyGhast.getHappyGhastRestrictionRadius()`。
+/// `HappyGhast.getHappyGhastRestrictionRadius()`：成年且 BODY 槽**空着**是 64；
+/// 幼年或穿了挽具是 32（字节码里 `isEmpty()` 直接落在 64 那一支）。
+///
+/// `HappyGhast.getHappyGhastRestrictionRadius()`: 64 for an adult with an
+/// **empty** BODY slot; 32 for babies or a harnessed adult.
 pub fn restriction_radius(mob: &Mob) -> i32 {
-    if !mob.is_baby() && is_wearing_harness(mob) {
+    if !mob.is_baby() && !is_wearing_harness(mob) {
         LARGE_RESTRICTION_RADIUS
     } else {
         SMALL_RESTRICTION_RADIUS
@@ -752,6 +936,199 @@ pub fn walk_target_value(empty: bool, empty_below: bool, solid_two_below: bool) 
     }
 }
 
+/// `LivingEntity.travelFlying(input, 0.02, 0.02, speed)` 的非流体分支：
+/// `moveRelative(speed, input)`、`move(SELF, delta)`、速度整体乘 0.91；
+/// 没有重力、没有额外空气阻力。
+///
+/// The non-fluid branch of `LivingEntity.travelFlying(input, 0.02, 0.02, speed)`:
+/// `moveRelative(speed, input)`, `move(SELF, delta)` and a 0.91 velocity scale,
+/// with no gravity and no extra drag.
+pub fn travel_flying(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    input: Vec3,
+    speed: f32,
+) {
+    super::living::move_relative(me, speed, input);
+    let movement = me.delta;
+    super::motion::move_living(me, mob, ctx, movement);
+    me.delta = me.delta.scale(0.910_000_026_226_043_7);
+}
+
+/// `Ghast.GhastMoveControl.tick`（成年）：`shouldBeStopped` 时停住；
+/// `floatDuration` 用完时抽 `nextInt(5)+2` 并从当前速度加一段朝目标的方向向量。
+///
+/// `Ghast.GhastMoveControl.tick` (adult): stop when the supplier is true; when
+/// `floatDuration` runs out, take `nextInt(5)+2` and add a normalised impulse.
+pub fn ghast_move_control_tick(
+    me: &mut Entity,
+    mob: &mut Mob,
+    view: &dyn crate::entity::ctx::BlockView,
+) {
+    if mob.happy_ghast.is_on_still_timeout() {
+        // `Mob.stopInPlace()`：清掉移动输入并让移动控制停下。
+        // `Mob.stopInPlace()`: clear the movement inputs and wait.
+        mob.mover.operation = Operation::Wait;
+        mob.xxa = 0.0;
+        mob.yya = 0.0;
+        mob.zza = 0.0;
+        mob.jump.jump = false;
+        return;
+    }
+    if mob.mover.operation != Operation::MoveTo {
+        return;
+    }
+    // `if (floatDuration-- <= 0)`：判的是自减**之前**的值。
+    // `if (floatDuration-- <= 0)`: the test reads the value before decrementing.
+    let counter = &mut mob.happy_ghast.float_duration;
+    let before = *counter;
+    *counter -= 1;
+    if before > 0 {
+        return;
+    }
+    *counter += me.random.next_int_bounded(5) + 2;
+    let wanted = Vec3::new(
+        mob.mover.wanted_x - me.position.x,
+        mob.mover.wanted_y - me.position.y,
+        mob.mover.wanted_z - me.position.z,
+    );
+    if move_can_reach(me, mob, view, wanted) {
+        let flying = mob.attributes.value(attribute::FLYING_SPEED) * 5.0 / 3.0;
+        me.delta = me.delta.add(wanted.normalize().scale(flying));
+    } else {
+        mob.mover.operation = Operation::Wait;
+    }
+}
+
+/// `GhastMoveControl.canReach`：目标方向的包围盒沿途不能撞上实心方块。
+/// `careful=true` 的那一支对目标盒外扩 1 格逐格看碰撞。
+///
+/// `GhastMoveControl.canReach`: the swept bounding box must not meet any solid
+/// block. With `careful=true` the target box is inflated by one block and each
+/// cell is checked for collisions.
+fn move_can_reach(
+    me: &Entity,
+    mob: &Mob,
+    view: &dyn crate::entity::ctx::BlockView,
+    wanted: Vec3,
+) -> bool {
+    let bounds = me.bounding_box();
+    let moved = bounds.moved(wanted.x, wanted.y, wanted.z);
+    // `careful=true`：目标盒外扩 1 格逐格问 `blockTraversalPossible`；
+    // `forEachBlockIntersectedBetween` 再沿起点盒到目标盒扫一遍。
+    // With `careful=true`, check every cell of the inflated target box, then
+    // sweep the entity box from the start to the target.
+    let inflated = moved.inflate(1.0, 1.0, 1.0);
+    // 扫过的整体范围：起点盒、目标盒、外扩 1 格三者的并集。
+    // The overall scanned range: start box, target box and the 1-block margin.
+    let min_x = mth::floor(bounds.min_x.min(inflated.min_x));
+    let max_x = mth::floor(bounds.max_x.max(inflated.max_x));
+    let min_y = mth::floor(bounds.min_y.min(inflated.min_y));
+    let max_y = mth::floor(bounds.max_y.max(inflated.max_y));
+    let min_z = mth::floor(bounds.min_z.min(inflated.min_z));
+    let max_z = mth::floor(bounds.max_z.max(inflated.max_z));
+    for x in min_x..=max_x {
+        for y in min_y..=max_y {
+            for z in min_z..=max_z {
+                let pos = BlockPos::new(x, y, z);
+                let state = view.block_state(pos);
+                if state.is_air() {
+                    continue;
+                }
+                if state.is_tagged(mc_bamboo_data::tags::block_tags::HAPPY_GHAST_AVOIDS) {
+                    return false;
+                }
+                let boxes = crate::shape::collision_boxes(
+                    state,
+                    pos,
+                    crate::shape::CollisionContext::Empty,
+                );
+                for box_ in boxes.iter() {
+                    let world_box = box_.at(pos);
+                    if inflated.intersects(world_box)
+                        || swept_intersects(bounds, wanted, world_box)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    let _ = mob;
+    true
+}
+
+/// `BlockGetter.forEachBlockIntersectedBetween`：沿移动向量按小步推进实体包围盒，
+/// 看是不是碰到了这一格的碰撞形状。
+///
+/// `BlockGetter.forEachBlockIntersectedBetween`: step the entity box along the
+/// movement vector and see whether it meets this block's collision shape.
+fn swept_intersects(
+    bounds: mc_bamboo_core::Aabb,
+    wanted: Vec3,
+    block: mc_bamboo_core::Aabb,
+) -> bool {
+    let steps = (wanted.x.abs().max(wanted.y.abs()).max(wanted.z.abs()) / 0.5)
+        .ceil()
+        .max(1.0)
+        .min(256.0) as i32;
+    for step in 0..=steps {
+        let t = f64::from(step) / f64::from(steps);
+        let shifted = bounds.moved(wanted.x * t, wanted.y * t, wanted.z * t);
+        if shifted.intersects(block) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `HappyGhastLookControl.tick`：悬停超时时把朝向折回 ±45° 并同步头朝向；
+/// 有 lookAt 冷却时按 `atan2` 直接写朝向和头 / 身；其余照 `Ghast.faceMovementDirection`
+/// 把朝向对着水平速度。
+///
+/// `HappyGhastLookControl.tick`: fold the yaw into ±45° on hover timeout, use
+/// the look target directly while its cooldown lasts, otherwise face the
+/// horizontal velocity like `Ghast.faceMovementDirection`.
+pub fn look_control_tick(me: &mut Entity, mob: &mut Mob) {
+    if mob.happy_ghast.is_on_still_timeout() {
+        let folded = wrap_degrees90(me.y_rot);
+        me.y_rot -= folded;
+        mob.y_head_rot = me.y_rot;
+        return;
+    }
+    if mob.look.look_at_cooldown > 0 {
+        mob.look.look_at_cooldown -= 1;
+        let dx = mob.look.wanted_x - me.position.x;
+        let dz = mob.look.wanted_z - me.position.z;
+        me.y_rot = (-(mth::atan2(dx, dz)) as f32) * 57.295_776;
+        mob.y_body_rot = me.y_rot;
+        mob.y_head_rot = me.y_rot;
+    } else {
+        let delta = me.delta;
+        // `Ghast.faceMovementDirection` 的 `Mth.atan2(Vec3.x, Vec3.z)`：
+        // 字节码先把 x 压栈、再压 z，所以 y=x、x=z。
+        // `Ghast.faceMovementDirection`'s `Mth.atan2(Vec3.x, Vec3.z)`:
+        // the bytecode pushes x then z, so y=x and x=z.
+        me.y_rot = (-(mth::atan2(delta.x, delta.z)) as f32) * 57.295_776;
+        mob.y_body_rot = me.y_rot;
+    }
+}
+
+/// `Mth.wrapDegrees90`：`f % 90` 折到 [-45, 45)。
+///
+/// `Mth.wrapDegrees90`: fold `f % 90` into [-45, 45).
+pub const fn wrap_degrees90(value: f32) -> f32 {
+    let mut wrapped = value % 90.0;
+    if wrapped >= 45.0 {
+        wrapped -= 90.0;
+    }
+    if wrapped < -45.0 {
+        wrapped += 90.0;
+    }
+    wrapped
+}
+
 /// `HappyGhast.travel`：`FLYING_SPEED * 5 / 3` 传给 `travelFlying`。
 ///
 /// `HappyGhast.travel`: `FLYING_SPEED * 5 / 3` goes to `travelFlying`.
@@ -842,6 +1219,8 @@ pub const fn initial_state() -> HappyGhastState {
         still_timeout: 0,
         is_leash_holder: false,
         stays_still: false,
+        float_duration: 0,
+        keep_baby_goals: false,
     }
 }
 

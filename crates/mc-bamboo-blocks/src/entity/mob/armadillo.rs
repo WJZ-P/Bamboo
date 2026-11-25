@@ -335,6 +335,7 @@ fn idle_activity() -> ActivityData {
                                 speed: Speed::fixed(1.25),
                                 close_adult: 2.0,
                                 close_baby: 1.0,
+                                look_in_eyes: false,
                             },
                             1,
                         ),

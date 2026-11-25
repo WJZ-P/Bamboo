@@ -161,6 +161,11 @@ pub enum Kind {
         speed: Speed,
         close_adult: f64,
         close_baby: f64,
+        /// `FollowTemptation(..., lookInTheEyes)`：走路目标取玩家眼睛那一格。
+        ///
+        /// `FollowTemptation(..., lookInTheEyes)`: the walk target uses the
+        /// player's eye block.
+        look_in_eyes: bool,
     },
     /// `BabyFollowAdult.create(UniformInt(min, max), speed)`。
     BabyFollowAdult { min: i32, max: i32, speed: Speed },
@@ -174,6 +179,10 @@ pub enum Kind {
     },
     /// `RandomStroll.stroll(speed)`。
     RandomStroll { speed: f32 },
+    /// `RandomStroll.fly(speed)`：飞行的那一支用 `AirAndWaterRandomPos`。
+    ///
+    /// `RandomStroll.fly(speed)`: the flying variant uses `AirAndWaterRandomPos`.
+    RandomStrollFly { speed: f32 },
     /// `SetWalkTargetFromLookTarget.create(speed, closeEnough)`。
     WalkTargetFromLook { speed: Speed, close_enough: i32 },
     /// `DoNothing(min, max)`。
@@ -354,6 +363,7 @@ impl Kind {
             | Self::LookAtPlayer { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
+            | Self::RandomStrollFly { .. }
             | Self::WalkTargetFromLook { .. }
             | Self::TriggerIf(_)
             | Self::TriggerIfWrapped { .. } => Class::OneShot,
@@ -399,7 +409,7 @@ impl Kind {
             Self::FollowTemptation { .. } => TEMPT_REQUIRED,
             Self::BabyFollowAdult { .. } => FOLLOW_ADULT_REQUIRED,
             Self::RandomLookAround { .. } => LOOK_AROUND_REQUIRED,
-            Self::RandomStroll { .. } => STROLL_REQUIRED,
+            Self::RandomStroll { .. } | Self::RandomStrollFly { .. } => STROLL_REQUIRED,
             Self::WalkTargetFromLook { .. } => WALK_FROM_LOOK_REQUIRED,
             Self::Gate(gate) => &gate.entry,
             Self::Camel(behavior) => behavior.required(),
@@ -438,6 +448,7 @@ impl Kind {
             | Self::LookAtPlayer { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
+            | Self::RandomStrollFly { .. }
             | Self::WalkTargetFromLook { .. }
             | Self::TriggerIf(_)
             | Self::TriggerIfWrapped { .. } => "OneShot",
@@ -711,6 +722,7 @@ impl Kind {
                 speed,
                 close_adult,
                 close_baby,
+                look_in_eyes,
             } => {
                 let Some(player) = cx.memories.entity(TemptingPlayer) else {
                     return;
@@ -739,8 +751,8 @@ impl Kind {
                         MemoryValue::Walk(WalkTarget {
                             target: PositionTracker::Entity {
                                 uid: player,
-                                track_eye: false,
-                                target_eye: false,
+                                track_eye: *look_in_eyes,
+                                target_eye: *look_in_eyes,
                             },
                             speed: speed.value(cx.me.in_water),
                             close_enough: 2,
@@ -892,6 +904,25 @@ impl Kind {
             }
             Self::RandomStroll { speed } => {
                 let pos = goals::land_random_pos(cx.me, cx.mob, cx.ctx.blocks(), 10, 7);
+                cx.memories.set_or_erase(
+                    WalkTarget,
+                    pos.map(|pos| MemoryValue::Walk(WalkTarget::to_point(pos, *speed, 0))),
+                );
+                true
+            }
+            Self::RandomStrollFly { speed } => {
+                let facing = Vec3::view_vector(cx.mob.x_rot, cx.me.y_rot);
+                let pos = goals::air_and_water_random_pos(
+                    cx.me,
+                    cx.mob,
+                    cx.ctx.blocks(),
+                    10,
+                    7,
+                    -2,
+                    facing.x,
+                    facing.z,
+                    1.570_796_370_506_286_6,
+                );
                 cx.memories.set_or_erase(
                     WalkTarget,
                     pos.map(|pos| MemoryValue::Walk(WalkTarget::to_point(pos, *speed, 0))),

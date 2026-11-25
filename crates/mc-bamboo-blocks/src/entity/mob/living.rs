@@ -1534,6 +1534,13 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
             // `Squid.travel` is a bare `move(SELF, deltaMovement)`.
             let movement = me.delta;
             motion::move_living(me, mob, ctx, movement);
+        } else if mob.mob_type == super::MobType::HappyGhast {
+            // `HappyGhast.travel`：用 `FLYING_SPEED * 5/3` 走 `travelFlying`。
+            // `HappyGhast.travel`: `travelFlying` with `FLYING_SPEED * 5/3`.
+            let speed = super::happy_ghast::travel_speed(
+                mob.attributes.value(mc_bamboo_data::registries::attribute::FLYING_SPEED) as f32,
+            );
+            super::happy_ghast::travel_flying(me, mob, ctx, input, speed);
         } else {
             travel(me, mob, ctx, input);
         }
@@ -1733,6 +1740,12 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
         if was_baby != mob.is_baby() && mob.mob_type == super::MobType::Villager {
             super::villager_ai::refresh_brain(me, mob, ctx);
         }
+        // `HappyGhast.ageBoundaryReached`：换成幼年 / 成年那套控制器、寻路器和目标表。
+        // `HappyGhast.ageBoundaryReached`: swap the baby / adult controls,
+        // navigation and goal table.
+        if was_baby != mob.is_baby() && mob.mob_type == super::MobType::HappyGhast {
+            super::happy_ghast::age_boundary_reached(mob);
+        }
     }
     if super::turtle::is_turtle(mob.mob_type) {
         super::turtle::ai_step(me, mob, ctx);
@@ -1808,9 +1821,18 @@ pub(crate) fn set_age(me: &mut Entity, mob: &mut Mob, age: i32) {
     let old = mob.age;
     mob.age = age;
     if (old < 0) != (age < 0) {
+        let old_height = me.dimensions.1;
         let (width, height, eye) = mob.mob_type.dimensions(age < 0);
         me.dimensions = (width, height);
         mob.eye_height = eye;
+        if mob.mob_type == super::MobType::HappyGhast {
+            // `Entity.fudgePositionAfterSizeChange`：换了尺寸之后
+            // `findFreePosition` 把脚底对齐到旧中心减新半高（空旷处的解）。
+            // `Entity.fudgePositionAfterSizeChange`: after the resize,
+            // `findFreePosition` puts the feet at old centre minus the new
+            // half-height (the open-space solution).
+            me.position.y += f64::from(old_height) / 2.0 - f64::from(height) / 2.0;
+        }
         if mob.mob_type == super::MobType::Goat {
             // 山羊的尺寸还看姿势；`ageBoundaryReached` 换攻击力。
             // Goat size also depends on the pose; `ageBoundaryReached` swaps the attack damage.
@@ -2041,6 +2063,15 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         if !mob.anger.is_angry(ctx.blocks().game_time()) {
             look_control_tick_with(me, mob, !mob.bee.pollinating);
         }
+    } else if mob.mob_type == super::MobType::HappyGhast {
+        move_control_tick(me, mob, ctx.blocks());
+        if mob.is_baby() {
+            look_control_tick(me, mob);
+        } else {
+            // `HappyGhastLookControl`：折角 / 直接写朝向 / 对着速度，不跑默认那支。
+            // `HappyGhastLookControl`: fold, direct or velocity facing.
+            super::happy_ghast::look_control_tick(me, mob);
+        }
     } else {
         if mob.mob_type.is_camel() {
             // `CamelMoveControl.tick` 在 `super.tick()` 之前。
@@ -2165,6 +2196,17 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
         // `Bee` 用 `FlyingMoveControl(this, 20, true)`：最大俯仰步长 20°，空闲时原地悬停不恢复重力。
         // `Bee` uses `FlyingMoveControl(this, 20, true)`: max turn 20°, hovers in place.
         super::parrot::flying_move_control_tick(me, mob, 20.0, true);
+        return;
+    }
+    if mob.mob_type == super::MobType::HappyGhast {
+        // `HappyGhast.babyGhastSetup` 用 `FlyingMoveControl(this, 180, true)`；
+        // 成年 `adultGhastSetup` 换成 `GhastMoveControl(this, true, stillTimeout)`。
+        // Babies use `FlyingMoveControl(this, 180, true)`; adults use the ghast control.
+        if mob.is_baby() {
+            super::parrot::flying_move_control_tick(me, mob, 180.0, true);
+        } else {
+            super::happy_ghast::ghast_move_control_tick(me, mob, view);
+        }
         return;
     }
     if super::turtle::is_turtle(mob.mob_type) {

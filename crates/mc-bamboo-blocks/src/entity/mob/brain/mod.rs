@@ -952,6 +952,19 @@ impl Brain {
         self.running.clear();
     }
 
+    /// `Brain.stopAll` 之后 `clearMemories`：官方 `adultGhastSetup` 不带世界上下文，
+    /// 所以这里把正在跑的行为和记忆直接归零（长大的快乐恶魂随后不再跑大脑）。
+    ///
+    /// `Brain.stopAll` followed by `clearMemories`: vanilla's `adultGhastSetup`
+    /// has no level context, so the running behaviours and memories are reset
+    /// outright (an adult happy ghast stops ticking its brain afterwards).
+    pub fn stop_running_for_setup(&mut self) {
+        for node in &mut self.nodes {
+            node.status = Status::Stopped;
+        }
+        self.running.clear();
+    }
+
     /// 行为表里出现过的活动（去重前，按遍历顺序）。测试 / 对拍用。
     ///
     /// The activities present in the behaviour table (before dedup, in iteration
