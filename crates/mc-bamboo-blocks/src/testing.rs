@@ -48,6 +48,9 @@ pub(crate) struct TestLevel {
     block_entities: BlockEntities,
     block_events: BlockEvents,
     game_event_listeners: crate::game_event::registry::GameEventListeners,
+    /// 尖啸体测试用的玩家监守者警告等级，按玩家 uid。
+    pub(crate) warden_warnings:
+        HashMap<crate::entity::EntityUid, crate::behaviour::misc::warden::WardenSpawnTracker>,
     entities: Entities,
     /// 发射器能穿装备的生物。
     pub(crate) living: Vec<EquipTarget>,
@@ -96,6 +99,7 @@ impl TestLevel {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             game_event_listeners: Default::default(),
+            warden_warnings: HashMap::new(),
             entities: Entities::default(),
             living: Vec::new(),
             rules: crate::gamerules::BlockGameRules::vanilla(),
@@ -270,6 +274,10 @@ impl Level for TestLevel {
         for player in &self.players {
             visit(player);
         }
+    }
+
+    fn warn_warden(&mut self, target: crate::entity::EntityUid) -> Option<i32> {
+        self.warden_warnings.entry(target).or_default().try_warn()
     }
 
     fn player_sleeping(&self, uid: crate::entity::EntityUid) -> bool {

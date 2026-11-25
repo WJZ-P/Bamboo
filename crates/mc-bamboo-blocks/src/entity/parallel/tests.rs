@@ -1228,10 +1228,8 @@ fn step_events_reach_a_sensor_identically_in_precise_and_parallel_modes() {
         level.set_entities(crate::entity::EntityStore::with_next_id(
             crate::entity::FIRST_ENTITY_ID,
         ));
-        let player = crate::entity::mob::throttle::test_player(
-            1,
-            mc_bamboo_core::Vec3::new(8.5, 64.0, 0.5),
-        );
+        let player =
+            crate::entity::mob::throttle::test_player(1, mc_bamboo_core::Vec3::new(8.5, 64.0, 0.5));
         level.players.push(player);
         let mut world = World::new(level, ticks);
         for x in -24..=24 {
@@ -1313,7 +1311,9 @@ fn step_events_reach_a_sensor_identically_in_precise_and_parallel_modes() {
     );
     // 场景必须真的发生过激活，否则对拍是空的。
     assert!(
-        precise.iter().any(|&(phase, power, _)| phase == 1 && power > 0),
+        precise
+            .iter()
+            .any(|&(phase, power, _)| phase == 1 && power > 0),
         "牛走过时感测体至少要激活一次: {precise:?}"
     );
 }

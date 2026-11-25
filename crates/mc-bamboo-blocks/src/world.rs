@@ -799,6 +799,34 @@ impl<'a> World<'a> {
         }
     }
 
+    /// 幽匿尖啸体 `tryToWarn`：给这名玩家加一级监守者警告，返回警告后的等级。
+    pub fn warn_player(&mut self, target: crate::entity::EntityUid) -> Option<i32> {
+        self.level.warn_warden(target)
+    }
+
+    /// `Warden.applyDarknessAround`：给半径内的玩家上黑暗效果。
+    pub fn darkness_around(&mut self, center: Vec3, radius: i32, ticks: i32) {
+        let targets: Vec<crate::entity::EntityUid> = {
+            let mut ids = Vec::new();
+            let radius = f64::from(radius);
+            self.level.for_each_player(&mut |player| {
+                if player.position.distance_to_sqr(center) <= radius * radius {
+                    ids.push(player.uid);
+                }
+            });
+            ids
+        };
+        for target in targets {
+            self.give_player_effect(
+                target,
+                crate::entity::mob::effects::EffectInstance::new(
+                    mc_bamboo_data::registries::mob_effect::DARKNESS,
+                    ticks,
+                ),
+            );
+        }
+    }
+
     /// 给一头生物挂效果（`LivingEntity.addEffect`）。
     ///
     /// Adds an effect to a mob (`LivingEntity.addEffect`).

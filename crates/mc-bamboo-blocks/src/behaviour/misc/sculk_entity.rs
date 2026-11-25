@@ -45,6 +45,8 @@ pub struct SculkSensorEntity {
 struct Activation {
     frequency: i32,
     power: i32,
+    /// 发出这次振动的玩家（可能没有），`SCULK_SENSOR_TENDRILS_CLICKING` 要带给尖啸体。
+    source_player: Option<crate::entity::EntityUid>,
 }
 
 impl SculkSensorEntity {
@@ -155,7 +157,10 @@ impl SculkSensorEntity {
         world.game_event(
             GameEvent::SculkSensorTendrilsClicking,
             source,
-            crate::game_event::dispatch::EventContext::default(),
+            crate::game_event::dispatch::EventContext {
+                source_player: activation.source_player,
+                ..Default::default()
+            },
         );
         if !state.get(WATERLOGGED) {
             let pitch = world.random().next_float() * 0.2 + 0.8;
@@ -213,6 +218,7 @@ impl SculkSensorEntity {
         event: GameEvent,
         source: Vec3,
         listener_pos: Vec3,
+        source_player: Option<crate::entity::EntityUid>,
         game_time: i64,
     ) {
         if self.listener.current.is_some() {
@@ -222,6 +228,7 @@ impl SculkSensorEntity {
             event,
             distance: source.distance_to_sqr(listener_pos).sqrt() as f32,
             pos: source,
+            source_player,
         };
         vibration::add_candidate(&mut self.listener, info, game_time, &mut || {});
     }
@@ -303,6 +310,28 @@ impl BlockEntity for SculkSensorEntity {
         Some(DeliveryMode::ByDistance)
     }
 
+    fn receive_vibration(
+        &mut self,
+        world: &mut World,
+        event: GameEvent,
+        source: Vec3,
+        listener_pos: Vec3,
+        context: crate::game_event::dispatch::EventContext,
+        now: i64,
+    ) -> bool {
+        if !crate::game_event::dispatch::valid_vibration(event, context) {
+            return false;
+        }
+        let source_block = BlockPos::containing(source);
+        if self.listener.current.is_some()
+            || !self.can_receive_vibration(world, event, source_block)
+        {
+            return false;
+        }
+        self.handle_game_event(event, source, listener_pos, context.source_player, now);
+        true
+    }
+
     fn pre_remove_side_effects(&mut self, world: &mut World, pos: BlockPos, _state: BlockState) {
         let chunk = pos.chunk();
         if let Some(table) = world.level_mut().game_event_listeners_mut() {
@@ -347,12 +376,19 @@ impl VibrationUser for Adapter<'_, '_> {
         self.entity.can_receive_vibration(self.world, event, source)
     }
 
-    fn on_receive(&mut self, event: GameEvent, _source: BlockPos, distance: f32) {
+    fn on_receive(
+        &mut self,
+        event: GameEvent,
+        _source: BlockPos,
+        source_player: Option<crate::entity::EntityUid>,
+        distance: f32,
+    ) {
         let frequency = event.vibration_frequency();
         self.entity.last_vibration_frequency = frequency;
         self.entity.activation = Some(Activation {
             frequency,
             power: vibration::redstone_strength(distance, self.entity.radius()),
+            source_player,
         });
     }
 
@@ -374,7 +410,7 @@ impl VibrationUser for Adapter<'_, '_> {
 }
 
 /// `areAdjacentChunksTicking`：3×3 区块都在 tick。
-fn adjacent_chunks_ticking(world: &World<'_>, pos: BlockPos) -> bool {
+pub(crate) fn adjacent_chunks_ticking(world: &World<'_>, pos: BlockPos) -> bool {
     let center = pos.chunk();
     for x in -1..=1 {
         for z in -1..=1 {

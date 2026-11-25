@@ -16,6 +16,8 @@ pub struct VibrationInfo {
     /// `Vec3.distanceTo` 的 `double` 再收窄成 `float`。
     pub distance: f32,
     pub pos: Vec3,
+    /// 发出事件的玩家（`tryGetPlayer`）；存档里不写，运行时传给尖啸体。
+    pub source_player: Option<crate::entity::EntityUid>,
 }
 
 /// `VibrationSelector`：同一刻来的候选只留距离最近、等距时频率最高的一个。
@@ -174,6 +176,7 @@ impl VibrationInfo {
             event,
             distance,
             pos: Vec3::new(xyz[0], xyz[1], xyz[2]),
+            source_player: None,
         })
     }
 }
@@ -192,7 +195,13 @@ pub trait VibrationUser {
     /// `canReceiveVibration`，在分发时当场判断。
     fn can_receive(&self, event: GameEvent, source: BlockPos) -> bool;
     /// `onReceiveVibration`，`distance` 是两个整数格之间的欧氏距离。
-    fn on_receive(&mut self, event: GameEvent, source: BlockPos, distance: f32);
+    fn on_receive(
+        &mut self,
+        event: GameEvent,
+        source: BlockPos,
+        source_player: Option<crate::entity::EntityUid>,
+        distance: f32,
+    );
     /// `calculateTravelTimeInTicks` 的默认值 `Mth.floor(distance)`。
     fn travel_ticks(&self, distance: f32) -> i32 {
         mc_bamboo_core::mth::floor_f32(distance)
@@ -261,6 +270,7 @@ pub fn tick<U: VibrationUser>(
             user.on_receive(
                 info.event,
                 source,
+                info.source_player,
                 distance_between_in_blocks(source, listener),
             );
             data.current = None;
@@ -341,7 +351,13 @@ mod tests {
         fn can_receive(&self, _event: GameEvent, _source: BlockPos) -> bool {
             true
         }
-        fn on_receive(&mut self, event: GameEvent, _source: BlockPos, distance: f32) {
+        fn on_receive(
+            &mut self,
+            event: GameEvent,
+            _source: BlockPos,
+            _source_player: Option<crate::entity::EntityUid>,
+            distance: f32,
+        ) {
             self.received.push((event, distance));
         }
         fn send_particles(&mut self, from: Vec3, _to: Vec3, travel: i32) -> usize {
@@ -355,6 +371,7 @@ mod tests {
             event,
             distance,
             pos: Vec3::new(0.5, 0.5, 0.5),
+            source_player: None,
         }
     }
 

@@ -242,6 +242,20 @@ impl Behaviour for SculkShrieker {
         if state.get(SHRIEKING) {
             world.set_block_and_update(pos, state.with(SHRIEKING, false));
         }
+        // 官方 `SculkShriekerBlock.tick`：复位尖叫之后 `tryRespond`。
+        let _ = world
+            .with_block_entity::<crate::behaviour::misc::sculk_shrieker::SculkShriekerEntity, _>(
+                pos,
+                |entity, world| entity.try_respond(world),
+            );
+    }
+
+    fn on_place(&self, _state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
+        if !world.has_block_entity(pos) {
+            world.set_block_entity(crate::behaviour::misc::sculk_shrieker::create_block_entity(
+                pos,
+            ));
+        }
     }
 }
 

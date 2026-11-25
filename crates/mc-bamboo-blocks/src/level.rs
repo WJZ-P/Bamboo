@@ -1534,6 +1534,13 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
+    /// 幽匿尖啸体 `tryToWarn`：给这名玩家加一级监守者警告，返回警告后的等级。
+    /// `None` 表示没加成（冷却中，或这个世界不存玩家警告等级）。默认不做，
+    /// 测试和游戏层各自覆盖。
+    fn warn_warden(&mut self, _target: crate::entity::EntityUid) -> Option<i32> {
+        None
+    }
+
     /// `ServerPlayer.startSleepInBed` 的怪物查询：以床的 `Vec3.atBottomCenterOf(pos)` 为中心、
     /// 水平 ±8、竖直 ±5 的盒，`getEntitiesOfClass(Monster.class, box,
     /// m -> m.isPreventingPlayerRest(level, player))` 非空。

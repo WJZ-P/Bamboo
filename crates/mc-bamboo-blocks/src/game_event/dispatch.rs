@@ -17,13 +17,15 @@ use crate::{
 };
 
 /// `GameEvent.Context` 里振动分发要用到的部分。`affected_state` 由共鸣、羊毛
-/// 这类上下文给出；实体本身的信息先不进入分发层。
+/// 这类上下文给出；`source_player` 是发出事件的玩家（幽匿尖啸体只对玩家源响应）。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EventContext {
     pub affected_state: Option<BlockState>,
     pub sneaking: bool,
     pub dampens_vibrations: bool,
     pub spectator: bool,
+    /// `tryGetPlayer(sourceEntity)`：事件的源头是不是一名玩家。
+    pub source_player: Option<crate::entity::EntityUid>,
 }
 
 /// `GameEventListener.DeliveryMode`：感测体等都是 `BY_DISTANCE`。
@@ -241,8 +243,9 @@ pub fn valid_vibration(event: GameEvent, context: EventContext) -> bool {
 }
 
 impl World<'_> {
-    /// 把一条投递交给具体的监听者。方块实体用 `with_block_entity` 临时取出，
-    /// 和官方 `handleGameEvent` 一样当场决定是否记候选。
+    /// 把一条投递交给具体的监听者。方块实体临时取出，各监听者用
+    /// [`crate::BlockEntity::receive_vibration`] 当场决定是否记候选，和官方
+    /// `handleGameEvent` 一样。
     pub(crate) fn deliver_game_event(&mut self, delivery: Delivery) {
         let ListenerRef::BlockEntity(pos) = delivery.listener else {
             return;
@@ -252,22 +255,17 @@ impl World<'_> {
         let source = delivery.source;
         let listener_pos = delivery.position;
         let now = self.game_time();
-        if !valid_vibration(event, context) || is_occluded(self, source, listener_pos) {
+        if is_occluded(self, source, listener_pos) {
             return;
         }
-        let source_block = BlockPos::containing(source);
-        self.with_block_entity::<crate::behaviour::misc::sculk_entity::SculkSensorEntity, _>(
-            pos,
-            |entity, world| {
-                if entity.listener.current.is_some()
-                    || !entity.can_receive_vibration(world, event, source_block)
-                {
-                    return;
-                }
-                entity.handle_game_event(event, source, listener_pos, now);
-                world.level_mut().wake_block_entity(pos);
-            },
-        );
+        let Some((id, mut entity)) = self.level_mut().take_block_entity_at(pos) else {
+            return;
+        };
+        let received = entity.receive_vibration(self, event, source, listener_pos, context, now);
+        self.level_mut().put_block_entity(pos, id, entity);
+        if received {
+            self.level_mut().wake_block_entity(pos);
+        }
     }
 }
 

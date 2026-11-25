@@ -363,6 +363,7 @@ pub const fn cacheable_trigger(trigger: Trigger) -> bool {
         | Trigger::BlockEvent { kind, .. }
         | Trigger::BlockEntityTick { kind, .. } => {
             crate::behaviour::misc::sculk_entity::is_vibration_listener_block(kind)
+                || crate::behaviour::misc::sculk_shrieker::is_vibration_listener_block(kind)
         }
         Trigger::ScheduledFluidTick { .. } => false,
     };

@@ -111,6 +111,9 @@ pub fn create_block_entity(
                     tag,
                 )?,
             ),
+            PassiveKind::SculkShrieker => Box::new(
+                crate::behaviour::misc::sculk_shrieker::SculkShriekerEntity::read(pos, tag)?,
+            ),
             _ => Box::new(PassiveBlockEntity::read(passive, pos, _state, tag)?),
         }));
     }

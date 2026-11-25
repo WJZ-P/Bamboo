@@ -75,6 +75,23 @@ pub trait BlockEntity: Any + Send {
         None
     }
 
+    /// 一条振动到达这个监听者方块实体：做各自的有效性、能不能收的判断，能收就
+    /// 记候选。返回是否真的记了候选。默认不是监听者，直接拒绝。
+    ///
+    /// `GameEventDispatcher` 已按距离排好序，这里对应官方 `VibrationSystem.Listener
+    /// .handleGameEvent` 的判定链，只是「听哪些事件」和「收到后做什么」因实体而异。
+    fn receive_vibration(
+        &mut self,
+        _world: &mut World,
+        _event: crate::game_event::GameEvent,
+        _source: Vec3,
+        _listener_pos: Vec3,
+        _context: crate::game_event::dispatch::EventContext,
+        _now: i64,
+    ) -> bool {
+        false
+    }
+
     /// 官方 `saveAdditional`：写这个方块实体自己的键（不含 `id`、`x/y/z` 和 `components`）。
     ///
     /// 没有默认实现：新加一种方块实体时编译器会要求补上，内容不会悄悄漏存。

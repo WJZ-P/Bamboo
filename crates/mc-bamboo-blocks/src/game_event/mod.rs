@@ -280,6 +280,11 @@ impl GameEvent {
         game_event_tag_contains("minecraft:ignore_vibrations_sneaking", self.id())
     }
 
+    /// `#minecraft:shrieker_can_listen`：幽匿尖啸体只听的标签。
+    pub fn in_shrieker_can_listen_tag(self) -> bool {
+        game_event_tag_contains("minecraft:shrieker_can_listen", self.id())
+    }
+
     /// `VibrationSystem.RESONANCE_EVENTS[frequency - 1]`。
     pub fn resonate(frequency: i32) -> Option<Self> {
         if !(1..=15).contains(&frequency) {
