@@ -182,7 +182,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
                 super::wandering_trader::custom_ai_step(mob, ctx);
                 super::wandering_trader::maybe_despawn(me, mob);
             } else if mob.mob_type == super::MobType::TraderLlama {
-                super::trader_llama::maybe_despawn(me, mob);
+                super::trader_llama::maybe_despawn(me, mob, ctx);
             }
         }
     }

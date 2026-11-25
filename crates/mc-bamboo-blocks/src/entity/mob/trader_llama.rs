@@ -4,8 +4,8 @@
 //! Trader llama: a llama spawned leashed to a wandering trader, despawning
 //! together with it when `despawnDelay` runs out.
 
-use super::{Mob, MobType, goals::GoalSelector, navigation::Navigation};
-use crate::entity::Entity;
+use super::{Mob, MobType, goals::GoalSelector, leash, navigation::Navigation};
+use crate::entity::{Entity, ctx::EntityCtx};
 
 /// 新建行商羊驼时的 `DespawnDelay` 缺省值（官方 `DEFAULT_DESPAWN_DELAY`）。
 ///
@@ -58,28 +58,52 @@ fn can_despawn(mob: &Mob) -> bool {
 }
 
 /// `TraderLlama.maybeDespawn()`：`aiStep()` 末尾每刻跑一次。
+/// 被拴在流浪商人身上时按官方 `holder.getDespawnDelay() - 1` 取牵引者的倒计时；
+/// 否则自己递减。`getLeashHolder()` 的公开行里带着商人的 `despawnDelay`。
 ///
 /// `TraderLlama.maybeDespawn()`, run once per tick at the end of `aiStep()`.
-pub fn maybe_despawn(me: &mut Entity, mob: &mut Mob) {
+/// While leashed to a wandering trader it follows the holder's
+/// `getDespawnDelay() - 1`; otherwise it ticks down its own counter.
+pub fn maybe_despawn(me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) {
     if !can_despawn(mob) {
         return;
     }
-    mob.trader_llama.despawn_delay -= 1;
-    if mob.trader_llama.despawn_delay <= 0 {
-        super::leash::remove_leash(mob);
+    let holder_delay = leash::leash_holder(mob).and_then(|uid| {
+        let mut delay = None;
+        ctx.with_other(uid, &mut |public| {
+            if let crate::entity::KindPublic::Mob(holder) = &public.kind
+                && holder.mob_type == MobType::WanderingTrader
+            {
+                delay = Some(holder.trader_despawn_delay);
+            }
+        });
+        delay
+    });
+    if tick_despawn_delay(mob, holder_delay) {
+        leash::remove_leash(mob);
         me.discard();
     }
+}
+
+/// 官方 `maybeDespawn()` 的赋值那一半：`holder.getDespawnDelay() - 1` 或
+/// `despawnDelay - 1`；返回是否已经到 `<= 0`（调用方解绳并 `discard()`）。
+///
+/// The assignment half of official `maybeDespawn()`: either the holder's
+/// `getDespawnDelay() - 1` or its own `despawnDelay - 1`.
+fn tick_despawn_delay(mob: &mut Mob, holder_delay: Option<i32>) -> bool {
+    mob.trader_llama.despawn_delay = match holder_delay {
+        Some(delay) => delay - 1,
+        None => mob.trader_llama.despawn_delay - 1,
+    };
+    mob.trader_llama.despawn_delay <= 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn llama() -> (crate::entity::Entity, Mob) {
-        (
-            crate::entity::Entity::by_mob_type(MobType::TraderLlama, Default::default()),
-            Mob::new(MobType::TraderLlama),
-        )
+    fn llama() -> Mob {
+        Mob::new(MobType::TraderLlama)
     }
 
     #[test]
@@ -88,24 +112,31 @@ mod tests {
     }
 
     #[test]
-    fn despawn_delay_counts_down_and_discards_at_zero() {
-        let (mut me, mut mob) = llama();
+    fn unleased_delay_counts_down_to_zero() {
+        let mut mob = llama();
         mob.trader_llama.despawn_delay = 2;
-        maybe_despawn(&mut me, &mut mob);
+        assert!(!tick_despawn_delay(&mut mob, None));
         assert_eq!(mob.trader_llama.despawn_delay, 1);
-        assert!(!me.removed);
-        maybe_despawn(&mut me, &mut mob);
+        assert!(tick_despawn_delay(&mut mob, None));
         assert_eq!(mob.trader_llama.despawn_delay, 0);
-        assert!(me.removed);
+    }
+
+    #[test]
+    fn leashed_delay_follows_the_trader() {
+        let mut mob = llama();
+        mob.trader_llama.despawn_delay = 47999;
+        // 官方 `holder.getDespawnDelay() - 1`：商人剩 123 刻，羊驼就是 122。
+        assert!(!tick_despawn_delay(&mut mob, Some(123)));
+        assert_eq!(mob.trader_llama.despawn_delay, 122);
+        // 商人的倒计时到 0 时羊驼也一起消失。
+        assert!(tick_despawn_delay(&mut mob, Some(1)));
+        assert_eq!(mob.trader_llama.despawn_delay, 0);
     }
 
     #[test]
     fn persistence_required_blocks_despawn() {
-        let (mut me, mut mob) = llama();
-        mob.trader_llama.despawn_delay = 1;
+        let mut mob = llama();
         mob.persistence_required = true;
-        maybe_despawn(&mut me, &mut mob);
-        assert_eq!(mob.trader_llama.despawn_delay, 1);
-        assert!(!me.removed);
+        assert!(!can_despawn(&mob));
     }
 }

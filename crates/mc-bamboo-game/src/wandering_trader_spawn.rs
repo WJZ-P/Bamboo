@@ -31,9 +31,12 @@ use crate::{
 /// Run the wandering-trader spawner once and publish the saved timer and effects.
 pub(crate) fn tick(region: &mut Region, port: &mut GlobalPort<'_>) {
     let enabled = region.global.rules.bool(SPAWN_WANDERING_TRADERS);
+    // `getRandomPlayer` 的 `isAlive()` 过滤：只把活着的玩家交给刷新器，
+    // `nextInt(players.size())` 的世界随机源取数由方块层在 `spawn` 里做。
     let players: Vec<Vec3> = region
         .players
         .values()
+        .filter(|player| !player.health.is_dead_or_dying())
         .map(|player| player.position())
         .collect();
     let state = region.wandering_trader_spawner;

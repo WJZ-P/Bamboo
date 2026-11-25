@@ -160,16 +160,23 @@ impl WanderingTraderSpawner {
     ///
     /// `WanderingTraderSpawner.spawn(level)`.
     fn spawn(&mut self, world: &mut World, players: &[Vec3]) -> bool {
-        // `getRandomPlayer()`：Bamboo 没有官方的随机玩家列表，调用方按官方的
-        // `level.getRandom().nextInt(players.size())` 之外的方式提供；没有玩家时
-        // 官方返回 true（重置概率）。
+        // `ServerLevel.getRandomPlayer()`：先按官方的存活过滤（这里调用方只给
+        // 活着的玩家），再用 **世界随机源** 抽 `nextInt(players.size())`；一个
+        // 玩家也要取这一次数，不取会让之后整条世界随机序列错位。没有玩家时
+        // 官方返回 null，`spawn` 直接返回 true（重置概率）且不取随机数。
+        //
+        // `ServerLevel.getRandomPlayer()`: filter alive players and draw
+        // `level.random.nextInt(players.size())`; a single player still consumes
+        // the draw. With no players vanilla returns null, so `spawn` returns true
+        // without drawing anything.
         if players.is_empty() {
             return true;
         }
+        let index = world.random().next_int(players.len() as i32) as usize;
         if self.random.next_int(SPAWN_ONE_IN_X_CHANCE) != 0 {
             return false;
         }
-        let player_pos = BlockPos::containing(players[0]);
+        let player_pos = BlockPos::containing(players[index.min(players.len() - 1)]);
         // `PoiManager.find(holder.is(PoiTypes.MEETING), pos -> true, pos, 48, ANY)`：
         // 找不到村庄钟就退回玩家位置。
         // `PoiManager.find(...)`: fall back to the player position when no bell exists.

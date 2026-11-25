@@ -4194,6 +4194,12 @@ pub struct MobPublic {
     ///
     /// The leash holder, sent as `set_entity_link` on pairing.
     pub leash_holder: Option<EntityUid>,
+    /// `WanderingTrader.despawnDelay`：被拴在商人身上的行商羊驼按官方
+    /// `maybeDespawn()` 读牵引者的倒计时。其它生物恒 0。
+    ///
+    /// `WanderingTrader.despawnDelay`: trader llamas read the holder's countdown
+    /// in `maybeDespawn()`; zero for other mobs.
+    pub trader_despawn_delay: i32,
 }
 
 impl MobPublic {
@@ -4335,6 +4341,7 @@ impl MobPublic {
                 .collect(),
             passengers: mob.passengers.clone(),
             leash_holder: leash::leash_holder(mob),
+            trader_despawn_delay: mob.wandering_trader.despawn_delay,
         }
     }
 
