@@ -855,7 +855,9 @@ pub(super) fn check_spawn_rules(
         MobType::SulfurCube => true,
         // 两种傀儡都不在群系刷怪表里，只保留命令 / 方块图案生成时共用的规则。
         // Neither golem is in a biome spawn table; only the shared rule remains.
-        MobType::IronGolem | MobType::SnowGolem => animal_spawn_rules(world, pos),
+        MobType::IronGolem | MobType::SnowGolem | MobType::CopperGolem => {
+            animal_spawn_rules(world, pos)
+        }
     }
 }
 

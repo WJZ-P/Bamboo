@@ -1099,20 +1099,22 @@ mod tests {
     /// 钉住关键结构的大小。优化前 `Brain=6528`、`Memories=6400`（32 个槽每个都内联
     /// 184 字节的 `MemoryValue`）；把值装箱、把整张结构表挪进 `Arc<BrainTemplate>` 后
     /// 32 槽时 `Brain=664`、`Memories=536`，期 3 扩到 49 槽（+17×16 = +272）加日程字段后
-    /// `Memories=808`、`Brain=952`；鹦鹉螺再加两个记忆槽（+32）后是 `840` / `984`。
+    /// `Memories=808`、`Brain=952`；鹦鹉螺再加两个记忆槽（+32）后是 `840` / `984`，
+    /// 铜傀儡的搬运冷却再加一个槽（+16）后是 `856` / `1000`。
     /// 这些数字变了就说明有人又把大对象塞回了实例。
     ///
     /// Pins the key struct sizes. After boxing values and moving the structure table into
     /// `Arc<BrainTemplate>`: 32 slots had `Brain=664`, `Memories=536`; phase 3 grew to 49
-    /// slots (+272) plus schedule fields (`Memories=808`, `Brain=952`), and the two
-    /// nautilus memories add 32 more (`840` / `984`).
+    /// slots (+272) plus schedule fields (`Memories=808`, `Brain=952`), the two nautilus
+    /// memories add 32 more (`840` / `984`), and the copper golem transport cooldown adds
+    /// one more slot (`856` / `1000`).
     #[test]
     fn brain_and_memory_sizes_stay_small() {
         use crate::entity::mob::brain::behavior::Node;
         use crate::entity::mob::brain::memory::{Memories, MemoryValue};
         assert_eq!(std::mem::size_of::<MemoryValue>(), 184);
-        assert_eq!(std::mem::size_of::<Memories>(), 840);
-        assert_eq!(std::mem::size_of::<Brain>(), 984);
+        assert_eq!(std::mem::size_of::<Memories>(), 856);
+        assert_eq!(std::mem::size_of::<Brain>(), 1000);
         assert_eq!(std::mem::size_of::<Node>(), 136);
         assert_eq!(std::mem::size_of::<Sensor>(), 16);
         assert_eq!(std::mem::size_of::<Entry>(), 144);

@@ -215,6 +215,10 @@ pub enum Kind {
     ///
     /// Villager-specific behaviours and Phase 4+ placeholders.
     Villager(super::super::villager_ai::Behavior),
+    /// 铜傀儡专属行为（`TransportItemsBetweenContainers`）。
+    ///
+    /// Copper-golem-specific behaviour (`TransportItemsBetweenContainers`).
+    CopperGolem(super::super::copper_golem::Behavior),
 }
 
 impl Kind {
@@ -290,6 +294,8 @@ const TEMPTATION_COOLDOWN: &[(MemoryType, MemoryStatus)] =
 const GAZE_COOLDOWN: &[(MemoryType, MemoryStatus)] = &[(GazeCooldownTicks, ValuePresent)];
 const LONG_JUMP_COOLDOWN: &[(MemoryType, MemoryStatus)] = &[(LongJumpCooldownTicks, ValuePresent)];
 const RAM_COOLDOWN: &[(MemoryType, MemoryStatus)] = &[(RamCooldownTicks, ValuePresent)];
+const TRANSPORT_COOLDOWN: &[(MemoryType, MemoryStatus)] =
+    &[(TransportItemsCooldownTicks, ValuePresent)];
 const LOOK_SOMETIMES_REQUIRED: &[(MemoryType, MemoryStatus)] = &[
     (LookTarget, ValueAbsent),
     (NearestVisibleLivingEntities, ValuePresent),
@@ -355,6 +361,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.class(),
             Self::Nautilus(behavior) => behavior.class(),
             Self::Villager(behavior) => behavior.class(),
+            Self::CopperGolem(behavior) => behavior.class(),
         }
     }
 
@@ -374,6 +381,7 @@ impl Kind {
                 TemptationCooldownTicks => TEMPTATION_COOLDOWN,
                 GazeCooldownTicks => GAZE_COOLDOWN,
                 LongJumpCooldownTicks => LONG_JUMP_COOLDOWN,
+                TransportItemsCooldownTicks => TRANSPORT_COOLDOWN,
                 _ => RAM_COOLDOWN,
             },
             Self::LookAtPlayerSometimes { .. } => LOOK_SOMETIMES_REQUIRED,
@@ -391,6 +399,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.required(),
             Self::Nautilus(behavior) => behavior.required(),
             Self::Villager(behavior) => behavior.required(),
+            Self::CopperGolem(behavior) => behavior.required(),
         }
     }
 
@@ -432,6 +441,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.name(),
             Self::Nautilus(behavior) => behavior.name(),
             Self::Villager(behavior) => behavior.name(),
+            Self::CopperGolem(behavior) => behavior.name(),
         }
     }
 
@@ -485,6 +495,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.extra_start(cx),
             Self::Nautilus(behavior) => behavior.extra_start(cx),
             Self::Villager(behavior) => behavior.extra_start(cx),
+            Self::CopperGolem(behavior) => behavior.extra_start(cx),
             _ => true,
         }
     }
@@ -568,6 +579,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.start(cx),
             Self::Nautilus(behavior) => behavior.start(cx),
             Self::Villager(behavior) => behavior.start(cx),
+            Self::CopperGolem(behavior) => behavior.start(cx),
             _ => {}
         }
     }
@@ -604,6 +616,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.can_still_use(cx),
             Self::Nautilus(behavior) => behavior.can_still_use(cx),
             Self::Villager(behavior) => behavior.can_still_use(cx),
+            Self::CopperGolem(behavior) => behavior.can_still_use(cx),
             _ => false,
         }
     }
@@ -723,6 +736,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.tick(cx),
             Self::Nautilus(behavior) => behavior.tick(cx),
             Self::Villager(behavior) => behavior.tick(cx),
+            Self::CopperGolem(behavior) => behavior.tick(cx),
             _ => {}
         }
     }
@@ -755,6 +769,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.stop(cx),
             Self::Nautilus(behavior) => behavior.stop(cx),
             Self::Villager(behavior) => behavior.stop(cx),
+            Self::CopperGolem(behavior) => behavior.stop(cx),
             _ => {}
         }
     }
@@ -874,6 +889,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.trigger(cx),
             Self::Nautilus(behavior) => behavior.trigger(cx),
             Self::Villager(behavior) => behavior.trigger(cx),
+            Self::CopperGolem(behavior) => behavior.trigger(cx),
             _ => false,
         }
     }

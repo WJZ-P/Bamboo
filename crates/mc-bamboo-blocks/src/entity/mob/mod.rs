@@ -27,6 +27,7 @@ pub mod cat;
 pub mod chicken;
 pub mod control;
 pub mod conversion;
+pub mod copper_golem;
 pub mod creeper;
 pub mod crossbow;
 pub mod damage;
@@ -228,13 +229,17 @@ pub enum MobType {
     ///
     /// The `ZombieNautilus`.
     ZombieNautilus,
+    /// 铜傀儡，`CopperGolem`。
+    ///
+    /// The `CopperGolem`.
+    CopperGolem,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 62] = [
+    pub const ALL: [Self; 63] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -297,6 +302,7 @@ impl MobType {
         Self::SulfurCube,
         Self::Nautilus,
         Self::ZombieNautilus,
+        Self::CopperGolem,
     ];
 
     /// 注册表 ID。
@@ -365,6 +371,7 @@ impl MobType {
             Self::SulfurCube => ids::SULFUR_CUBE,
             Self::Nautilus => ids::NAUTILUS,
             Self::ZombieNautilus => ids::ZOMBIE_NAUTILUS,
+            Self::CopperGolem => ids::COPPER_GOLEM,
         }
     }
 
@@ -433,6 +440,7 @@ impl MobType {
             Self::SulfurCube => "minecraft:sulfur_cube",
             Self::Nautilus => "minecraft:nautilus",
             Self::ZombieNautilus => "minecraft:zombie_nautilus",
+            Self::CopperGolem => "minecraft:copper_golem",
         }
     }
 
@@ -586,6 +594,7 @@ impl MobType {
             (Self::Guardian, _) => (0.85, 0.85, 0.425),
             (Self::ElderGuardian, _) => (1.9975, 1.9975, 0.99875),
             (Self::Nautilus | Self::ZombieNautilus, baby) => nautilus::dimensions(baby),
+            (Self::CopperGolem, baby) => copper_golem::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -1093,6 +1102,7 @@ impl MobType {
             Self::SulfurCube => "minecraft:entities/sulfur_cube",
             Self::Nautilus => "minecraft:entities/nautilus",
             Self::ZombieNautilus => "minecraft:entities/zombie_nautilus",
+            Self::CopperGolem => "minecraft:entities/copper_golem",
         }
     }
 
@@ -1230,7 +1240,8 @@ impl MobType {
             | Self::ElderGuardian
             | Self::SulfurCube
             | Self::Nautilus
-            | Self::ZombieNautilus => None,
+            | Self::ZombieNautilus
+            | Self::CopperGolem => None,
         }
     }
 
@@ -1292,7 +1303,8 @@ impl MobType {
             | Self::ElderGuardian
             | Self::SulfurCube
             | Self::Nautilus
-            | Self::ZombieNautilus => None,
+            | Self::ZombieNautilus
+            | Self::CopperGolem => None,
         }
     }
 
@@ -1354,7 +1366,8 @@ impl MobType {
             | Self::ElderGuardian
             | Self::SulfurCube
             | Self::Nautilus
-            | Self::ZombieNautilus => None,
+            | Self::ZombieNautilus
+            | Self::CopperGolem => None,
         }
     }
 
@@ -1427,7 +1440,8 @@ impl MobType {
             | Self::ElderGuardian
             | Self::SulfurCube
             | Self::Nautilus
-            | Self::ZombieNautilus => None,
+            | Self::ZombieNautilus
+            | Self::CopperGolem => None,
         }
     }
 
@@ -1497,6 +1511,7 @@ impl MobType {
             Self::SulfurCube => items::SULFUR_CUBE_SPAWN_EGG,
             Self::Nautilus => items::NAUTILUS_SPAWN_EGG,
             Self::ZombieNautilus => items::ZOMBIE_NAUTILUS_SPAWN_EGG,
+            Self::CopperGolem => items::COPPER_GOLEM_SPAWN_EGG,
         }
     }
 
@@ -1565,6 +1580,7 @@ impl MobType {
             Self::SulfurCube => "entity.minecraft.sulfur_cube",
             Self::Nautilus => "entity.minecraft.nautilus",
             Self::ZombieNautilus => "entity.minecraft.zombie_nautilus",
+            Self::CopperGolem => "entity.minecraft.copper_golem",
         }
     }
 
@@ -2792,6 +2808,11 @@ pub struct Mob {
     ///
     /// The zombie villager cure timer and the player who started it.
     pub zombie_villager: zombie_villager::ZombieVillagerState,
+    /// 铜傀儡的氧化等级、状态、氧化计时和开箱位置；别的生物恒为缺省值。
+    ///
+    /// The copper golem's oxidation stage, state, weathering clock and opened chest;
+    /// defaults for other mobs.
+    pub copper_golem: copper_golem::CopperGolem,
     /// 蝙蝠的标志字节和飞行目标；别的生物是缺省值。
     ///
     /// The bat flag byte and flight target; default for every other mob.
@@ -3047,6 +3068,7 @@ impl Mob {
             MobType::ElderGuardian => guardian::attributes(true),
             MobType::SulfurCube => sulfur_cube::attributes(),
             MobType::Nautilus | MobType::ZombieNautilus => nautilus::attributes(mob_type),
+            MobType::CopperGolem => copper_golem::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3126,7 +3148,8 @@ impl Mob {
             | MobType::CamelHusk
             | MobType::Villager
             | MobType::Nautilus
-            | MobType::ZombieNautilus => GoalSelector::default(),
+            | MobType::ZombieNautilus
+            | MobType::CopperGolem => GoalSelector::default(),
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
             // alongside the brain.
@@ -3195,7 +3218,8 @@ impl Mob {
             | MobType::Camel
             | MobType::CamelHusk
             | MobType::Nautilus
-            | MobType::ZombieNautilus => GoalSelector::default(),
+            | MobType::ZombieNautilus
+            | MobType::CopperGolem => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Ocelot => ocelot::target_goals(),
@@ -3451,6 +3475,7 @@ impl Mob {
             snow_golem: snow_golem::SnowGolem::default(),
             villager: villager::Villager::default(),
             zombie_villager: zombie_villager::ZombieVillagerState::default(),
+            copper_golem: copper_golem::CopperGolem::default(),
             tadpole_age: 0,
             discard_friction: false,
             passengers: Vec::new(),
@@ -4277,6 +4302,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Axolotl => Some(Box::new(axolotl::brain())),
         MobType::Villager => Some(Box::new(villager_ai::brain(false, 0))),
         MobType::Nautilus | MobType::ZombieNautilus => Some(Box::new(nautilus_ai::brain(kind))),
+        MobType::CopperGolem => Some(Box::new(copper_golem::brain())),
         _ => None,
     }
 }

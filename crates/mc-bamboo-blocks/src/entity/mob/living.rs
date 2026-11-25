@@ -2015,6 +2015,9 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     if super::nautilus::is_nautilus(mob.mob_type) {
         super::nautilus_ai::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::CopperGolem {
+        super::copper_golem::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::ElderGuardian {
         // `ElderGuardian.customServerAiStep`：范围挖掘疲劳和家。
         // `ElderGuardian.customServerAiStep`: area mining fatigue and home.
