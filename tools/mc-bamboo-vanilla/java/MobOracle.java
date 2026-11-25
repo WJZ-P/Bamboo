@@ -357,6 +357,9 @@ public final class MobOracle {
                 playLlamaSpit(official, out, "llama_spit_near", 3.5, 4207L);
                 cases += 2;
             }
+            if (only == null || "leash".startsWith(only) || only.startsWith("leash")) {
+                cases += playLeash(official, out, only);
+            }
             if (only == null || "witch_throw".startsWith(only)) {
                 OracleWitch.checkAim(official);
                 playWitchThrow(official, out, "witch_throw_far", 9.5, 20.0F, 73L, 220, false);
@@ -14559,6 +14562,156 @@ public final class MobOracle {
                 + ",\"playerId\":" + playerId + ",\"playerX\":" + playerX + ",\"seed\":" + seed
                 + ",\"blocks\":" + blocks + ",\"shots\":" + spits.size() + ",\"frames\":" + frames + "]"
                 + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
+    }
+
+    /**
+     * 拴绳逐刻对拍：一头牛拴到玩家或栅栏结上，玩家逐刻走远触发弹性拉扯 / 超距断绳，
+     * 或在中途剪绳 / 解回 / 拆栅栏。每刻比牛的位置、速度、四个朝向、随机源、绳状态和掉落。
+     *
+     * Tick-by-tick leash replay: a cow leashed to a player or a fence knot; the player
+     * walks away (elastic pull + snap), or the rope is sheared / untied / the fence broken.
+     */
+    private static int playLeash(Official official, Writer out, String only) throws Exception {
+        String[] names = {"leash_player_walk", "leash_player_shear", "leash_fence_hold",
+                "leash_fence_untie", "leash_fence_break"};
+        int written = 0;
+        for (String name : names) {
+            if (only != null && !name.startsWith(only)) continue;
+            boolean fence = name.startsWith("leash_fence");
+            int fx = 8, fy = 64, fz = 0;
+            BlockPos fencePos = new BlockPos(fx, fy, fz);
+            FakeLevel world = FakeLevel.create(official);
+            ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+            for (int x = -2; x <= 40; x++)
+                for (int z = -4; z <= 4; z++)
+                    world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            if (fence)
+                world.blocks.put(BlockPos.asLong(fx, fy, fz), Blocks.OAK_FENCE.defaultBlockState());
+            String blocks = blockArray(world.blocks);
+            int playerId = FIRST_ID + 1024;
+            ServerPlayer player = new ServerPlayer(official.server, world,
+                    new GameProfile(new UUID(1L, 2L), "LeashOracle"), ClientInformation.createDefault());
+            player.setId(playerId);
+            player.setPos(2.5, 64.0, 0.5);
+            setRandom(player, ENTITY_RANDOM_SEED);
+            player.setYRot(0.0F);
+            player.setYHeadRot(0.0F);
+            player.setYBodyRot(0.0F);
+            world.playersList().add(player);
+            world.tracked.add(player);
+            world.nextId = FIRST_ID;
+            Cow cow = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            world.entitySeeds.nextLong();
+            long cowSeed = 0x0DDB1A5E5BAD5EEDL ^ 0x4C45415348L;
+            setRandom(cow, cowSeed);
+            cow.setUUID(new UUID(0L, 1L));
+            cow.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            cow.setYHeadRot(0.0F);
+            cow.setYBodyRot(0.0F);
+            // 只比 leash 的物理，不比牛自己的 AI（Bamboo 的 Cow AI 在拴绳状态下与官方
+            // 有既有的目标差异）：两边都关掉 AI，弹性力 / 角动量 / 断绳仍逐位可比。
+            cow.setNoAi(true);
+            world.tracked.add(cow);
+            net.minecraft.world.entity.decoration.LeashFenceKnotEntity knot = null;
+            if (fence) {
+                knot = new net.minecraft.world.entity.decoration.LeashFenceKnotEntity(world, fencePos);
+                knot.setId(FIRST_ID + 512);
+                world.tracked.add(knot);
+            }
+            int startLeash = fence ? 2 : 1;
+            if (startLeash == 1) cow.setLeashedTo(player, true);
+            else cow.setLeashedTo(knot, true);
+
+            int ticks = 80;
+            StringBuilder frames = new StringBuilder("[");
+            StringBuilder playerMotion = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                double px = 2.5 + tick * 0.4;
+                double vx = tick == 0 ? 0.0 : 0.4;
+                if (tick > 0) {
+                    world.gameTime++;
+                    player.setPos(px, 64.0, 0.5);
+                    player.setDeltaMovement(vx, 0.0, 0.0);
+                    if (tick == 10) {
+                        if (name.equals("leash_player_shear")) {
+                            cow.dropLeash();
+                        } else if (name.equals("leash_fence_untie")) {
+                            cow.setLeashedTo(player, true);
+                        } else if (name.equals("leash_fence_break")) {
+                            world.blocks.put(BlockPos.asLong(fx, fy, fz), Blocks.AIR.defaultBlockState());
+                            knot.discard();
+                        }
+                    }
+                    cow.checkDespawn();
+                    cow.commonTick();
+                    cow.tick();
+                }
+                if (tick > 0) playerMotion.append(',');
+                playerMotion.append('[')
+                        .append(Double.doubleToRawLongBits(px)).append(',')
+                        .append(Double.doubleToRawLongBits(64.0)).append(',')
+                        .append(Double.doubleToRawLongBits(0.5)).append(',')
+                        .append(Double.doubleToRawLongBits(vx)).append(',')
+                        .append(Double.doubleToRawLongBits(0.0)).append(',')
+                        .append(Double.doubleToRawLongBits(0.0)).append(']');
+                if (tick > 0) frames.append(',');
+                appendLeashFrame(frames, cow, world, knot);
+            }
+            frames.append(']');
+            playerMotion.append(']');
+            String knotJson = fence ? "[" + fx + "," + fy + "," + fz + "]" : "null";
+            out.write("{\"type\":\"leash\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID + ",\"playerId\":" + playerId
+                    + ",\"cowSeed\":" + cowSeed
+                    + ",\"cow\":[" + Double.doubleToRawLongBits(0.5) + ","
+                    + Double.doubleToRawLongBits(64.0) + "," + Double.doubleToRawLongBits(0.5) + "]"
+                    + ",\"playerStart\":[" + Double.doubleToRawLongBits(2.5) + ","
+                    + Double.doubleToRawLongBits(64.0) + "," + Double.doubleToRawLongBits(0.5) + "]"
+                    + ",\"blocks\":" + blocks
+                    + ",\"knotPos\":" + knotJson
+                    + ",\"startLeash\":" + startLeash
+                    + ",\"playerMotion\":" + playerMotion
+                    + ",\"frames\":" + frames + "}\n");
+            written++;
+        }
+        return written;
+    }
+
+    /** 一刻的牛状态和绳状态，字段见 Rust 侧 `LeashFrame`。 */
+    private static void appendLeashFrame(StringBuilder out, Cow cow, FakeLevel world,
+            net.minecraft.world.entity.decoration.LeashFenceKnotEntity knot) throws Exception {
+        Vec3 p = cow.position();
+        Vec3 d = cow.getDeltaMovement();
+        boolean leashed = cow.isLeashed();
+        boolean may = cow.mayBeLeashed();
+        Entity holder = cow.getLeashHolder();
+        int kind = holder instanceof ServerPlayer ? 1
+                : holder instanceof net.minecraft.world.entity.decoration.LeashFenceKnotEntity ? 2 : 0;
+        double am = cow.getLeashData() == null ? 0.0 : cow.getLeashData().angularMomentum;
+        int items = 0;
+        for (Entity e : world.spawned) {
+            if (e instanceof net.minecraft.world.entity.item.ItemEntity ie
+                    && ie.getItem().is(Items.LEAD)) items++;
+        }
+        out.append("{\"cow\":[")
+                .append(Double.doubleToRawLongBits(p.x)).append(',')
+                .append(Double.doubleToRawLongBits(p.y)).append(',')
+                .append(Double.doubleToRawLongBits(p.z)).append(',')
+                .append(Double.doubleToRawLongBits(d.x)).append(',')
+                .append(Double.doubleToRawLongBits(d.y)).append(',')
+                .append(Double.doubleToRawLongBits(d.z)).append(']');
+        out.append(",\"rot\":[")
+                .append(Float.floatToRawIntBits(cow.getYRot())).append(',')
+                .append(Float.floatToRawIntBits(cow.getXRot())).append(',')
+                .append(Float.floatToRawIntBits(cow.getYHeadRot())).append(',')
+                .append(Float.floatToRawIntBits(cow.yBodyRot)).append(']');
+        out.append(",\"ground\":").append(cow.onGround());
+        out.append(",\"seed\":").append(randomSeed(cow));
+        out.append(",\"leash\":[").append(leashed ? 1 : 0).append(',').append(may ? 1 : 0)
+                .append(',').append(kind).append(',').append(Double.doubleToRawLongBits(am)).append(']');
+        out.append(",\"items\":").append(items);
+        out.append(",\"knotAlive\":").append(knot != null && !knot.isRemoved());
+        out.append('}');
     }
 
     /**

@@ -217,7 +217,14 @@ fn resolve_holder(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<HolderInfo> {
     if let Some(view) = player {
         return Some(HolderInfo {
             position: view.position,
-            delta: view.delta,
+            // `getHolderMovement(player)` 走 `player.getKnownMovement()`。26.3 服务端的
+            // 玩家移动是客户端权威，`getKnownMovement()` 返回 ZERO，不是 `getDeltaMovement()`；
+            // 拴绳的弹性力因此不把玩家的上报速度算进去（逐刻对拍确认）。
+            //
+            // `getHolderMovement(player)` uses `player.getKnownMovement()`, which on the
+            // 26.3 server is ZERO (client-authoritative movement), not `getDeltaMovement()`.
+            // The elastic force therefore ignores the player's reported velocity.
+            delta: Vec3::default(),
             width: view.width,
             height: view.height,
             interactable: view.alive && !view.spectator,
@@ -311,6 +318,12 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             seed: None,
         });
         // `Mob.leashTooFarBehaviour()`：`dropLeash()` + `disableControlFlag(MOVE)`。
+        // 官方 `tickLeash` 在断绳分支用 `goto` 跳到尾部，仍用局部 leashData 执行
+        // `setYRot(yRot - angularMomentum)`——这一帧照样把累计角动量应用到朝向。
+        // 之后 leashData 已弃用，`ang *= friction` 无副作用，可省。
+        if let Some(data) = mob.leash.as_ref() {
+            me.y_rot = (f64::from(me.y_rot) - data.angular_momentum) as f32;
+        }
         if let Some(old) = drop_leash(mob) {
             ctx.emit(crate::entity::ctx::Command::NotifyLeasheeRemoved(old), me);
         }
@@ -350,11 +363,15 @@ fn angular_friction(me: &Entity, ctx: &dyn EntityCtx) -> f32 {
 
 /// `checkElasticInteractions`：弹性拉扯，返回有没有拉。
 fn elastic_interactions(me: &mut Entity, mob: &mut Mob, holder: &HolderInfo) -> bool {
+    // `getHolderMovement(holder)`：STIFFNESS 项用。NoAI 生物 / 服务端玩家都是 ZERO。
     let holder_movement = if holder.no_ai_mob {
         Vec3::default()
     } else {
         holder.delta
     };
+    // `computeDampenedSpringInteraction` 的 dampening 判断用「被拴生物」自己的
+    // `getHolderMovement`（NoAI→ZERO），不是 holder 的。
+    let leashed_movement = if mob.no_ai { Vec3::default() } else { me.delta };
     // 单点附着，不做四方拴绳（快乐恶魂、船之间的四点拴绳还没建模）。
     let entity_offset = y_rot(
         Vec3::new(
@@ -375,7 +392,7 @@ fn elastic_interactions(me: &mut Entity, mob: &mut Mob, holder: &HolderInfo) -> 
     let entity_point = me.position.add(entity_offset);
     let holder_point = holder.position.add(holder_offset);
     let Some((force, torque)) =
-        dampened_spring(entity_point, holder_point, holder_movement, entity_offset)
+        dampened_spring(entity_point, holder_point, leashed_movement, entity_offset)
     else {
         return false;
     };
@@ -404,8 +421,10 @@ fn dampened_spring(
     if dist < leash_elastic_distance() {
         return None;
     }
-    let mut force = entity_point
-        .subtract(holder_point)
+    // `computeDampenedSpringInteraction(holderPoint, entityPoint, ...)`：
+    // force = (holderPoint - entityPoint) 归一化后乘 (dist - elastic)，指向 holder。
+    let mut force = holder_point
+        .subtract(entity_point)
         .normalize()
         .scale(dist - leash_elastic_distance());
     let torque = attachment_point.z * force.x - attachment_point.x * force.z;
@@ -451,7 +470,14 @@ pub fn set_leashed_to(
     attachment: LeashDelayed,
 ) -> Option<EntityUid> {
     let old = leash_holder(mob);
-    mob.leash = Some(LeashData::new(holder, attachment));
+    // 官方 `setLeashedTo`：已有 `LeashData` 时复用同一个对象（保留 `angularMomentum`），
+    // 只 `setLeashHolder` 并清掉 delayed 身份；只有原来没有牵引数据时才新建。
+    if let Some(data) = mob.leash.as_mut() {
+        data.holder = Some(holder);
+        data.attachment = attachment;
+    } else {
+        mob.leash = Some(LeashData::new(holder, attachment));
+    }
     mob.events.push(MobEvent::LeashLink {
         holder: Some(holder),
     });
