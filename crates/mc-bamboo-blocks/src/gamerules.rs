@@ -63,6 +63,11 @@ pub struct BlockGameRules {
     /// `GameRules.MOB_EXPLOSION_DROP_DECAY`: blocks broken by a mob explosion drop with
     /// probability 1/radius.
     pub mob_explosion_drop_decay: bool,
+    /// `GameRules.BLOCK_EXPLOSION_DROP_DECAY`：方块来源的爆炸（重生锚）按 1/半径 的概率掉落。
+    ///
+    /// `GameRules.BLOCK_EXPLOSION_DROP_DECAY`: block-caused blasts (respawn anchors) drop
+    /// with probability 1/radius.
+    pub block_explosion_drop_decay: bool,
     /// `GameRules.MAX_ENTITY_CRAMMING`：`pushEntities` 的挤压伤害上限。
     pub max_entity_cramming: i32,
     /// Bamboo 的 `max_entity_collisions`：每只生物每刻最多处理几次推挤。
@@ -119,6 +124,7 @@ impl BlockGameRules {
             mob_griefing: bool_default(gamerules::MOB_GRIEFING),
             mob_drops: bool_default(gamerules::MOB_DROPS),
             mob_explosion_drop_decay: bool_default(gamerules::MOB_EXPLOSION_DROP_DECAY),
+            block_explosion_drop_decay: bool_default(gamerules::BLOCK_EXPLOSION_DROP_DECAY),
             max_entity_cramming: int_default(gamerules::MAX_ENTITY_CRAMMING),
             max_entity_collisions: 0,
             mob_throttle_distance: 0,
@@ -218,6 +224,7 @@ fn assign_bool(rules: &mut BlockGameRules, name: &str, value: bool) {
         "mob_griefing" => rules.mob_griefing = value,
         "mob_drops" => rules.mob_drops = value,
         "mob_explosion_drop_decay" => rules.mob_explosion_drop_decay = value,
+        "block_explosion_drop_decay" => rules.block_explosion_drop_decay = value,
         _ => {}
     }
 }

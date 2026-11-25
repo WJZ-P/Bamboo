@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 
 use mc_bamboo_core::{BlockPos, Vec3, mth};
-use mc_bamboo_data::BlockAncestor;
+use mc_bamboo_data::{BlockAncestor, blocks};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -53,7 +53,7 @@ impl World<'_> {
     /// TNT entity id; the damage source is `explosion` with the TNT as `direct` and no
     /// `causing` entity (TNT ownership is not modelled).
     pub fn explode_tnt(&mut self, center: Vec3, radius: f32, source: EntityUid) {
-        let broken = self.calculate_exploded_positions(center, radius);
+        let mut broken = self.calculate_exploded_positions(center, radius, None);
         let block_count = broken.len() as i32;
         // `hurtEntities` 在打乱方块之前，而且不取 `level.random`。
         // `hurtEntities` runs before the block list is shuffled and does not draw `level.random`.
@@ -62,7 +62,7 @@ impl World<'_> {
         damage.direct = Some(source);
         damage.position = Some(center);
         let hit_players = hurt_living_by_explosion(self, None, damage, center, radius);
-        self.interact_with_blocks(broken, None);
+        self.interact_with_blocks(&mut broken, None);
         self.push_effect(Effect::Explode {
             center,
             radius,
@@ -85,7 +85,7 @@ impl World<'_> {
     /// The blast packet is sent to players in range.
     pub(crate) fn explode_mob(&mut self, source: &EntityPublic, center: Vec3, radius: f32) {
         let rules = self.block_game_rules();
-        let broken = self.calculate_exploded_positions(center, radius);
+        let mut broken = self.calculate_exploded_positions(center, radius, None);
         let block_count = broken.len() as i32;
         crate::entity::item::hurt_items_by_explosion(self, center, radius);
         let damage = blast_source(source);
@@ -93,7 +93,7 @@ impl World<'_> {
         let interacts = rules.mob_griefing;
         if interacts {
             let decay = rules.mob_explosion_drop_decay.then_some(radius);
-            self.interact_with_blocks(broken, decay);
+            self.interact_with_blocks(&mut broken, decay);
         }
         let silent = matches!(&source.kind, KindPublic::Mob(mob) if mob.silent);
         self.push_effect(Effect::Explode {
@@ -106,18 +106,96 @@ impl World<'_> {
         });
     }
 
+    /// `RespawnAnchorBlock.explode` 走到 `ServerLevel.explode(..., BLOCK)`：强度 5、带火，
+    /// 伤害类型 `bad_respawn_point`。`anchor` 是被移除的重生锚那格，近水时按水的抗性算。
+    ///
+    /// `RespawnAnchorBlock.explode` lands in `ServerLevel.explode(..., BLOCK)`: power 5,
+    /// fire, `bad_respawn_point` damage. `anchor` is the removed block position; its
+    /// resistance becomes water's when the anchor sat next to water.
+    pub(crate) fn explode_respawn_anchor(&mut self, center: Vec3, anchor: BlockPos) {
+        // `removeBlock(pos, false)`：先移除重生锚，再算水和爆炸。
+        self.remove_block(anchor);
+        let rules = self.block_game_rules();
+        let water_resistance = self.respawn_anchor_near_water(anchor).then_some((
+            anchor,
+            BlockState(blocks::WATER).block().explosion_resistance,
+        ));
+        let mut broken = self.calculate_exploded_positions(center, 5.0, water_resistance);
+        let block_count = broken.len() as i32;
+        crate::entity::item::hurt_items_by_explosion(self, center, 5.0);
+        let mut damage = DamageSource::environment(DamageKind::BadRespawnPoint);
+        damage.position = Some(center);
+        let hit_players = hurt_living_by_explosion(self, None, damage, center, 5.0);
+        let decay = rules.block_explosion_drop_decay.then_some(5.0);
+        self.interact_with_blocks(&mut broken, decay);
+        self.create_fire(&broken);
+        self.push_effect(Effect::Explode {
+            center,
+            radius: 5.0,
+            block_count,
+            hit_players,
+            is_small: false,
+            play_sound: true,
+        });
+    }
+
+    /// `RespawnAnchorBlock.explode` 的 `inWater`：四个水平邻居之一「会流的水」，
+    /// 或者上方是水（`FluidTags.WATER`）。
+    fn respawn_anchor_near_water(&self, anchor: BlockPos) -> bool {
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            if self.water_would_flow(anchor.offset(dx, 0, dz)) {
+                return true;
+            }
+        }
+        self.block_state(anchor.above()).fluid().is_water()
+    }
+
+    /// `RespawnAnchorBlock.isWaterThatWouldFlow`：源头水，或高度至少 2 且下方不是水的流水。
+    fn water_would_flow(&self, pos: BlockPos) -> bool {
+        let fluid = self.block_state(pos).fluid();
+        if !fluid.is_water() {
+            return false;
+        }
+        if fluid.is_source() {
+            return true;
+        }
+        if fluid.amount() < 2 {
+            return false;
+        }
+        !self.block_state(pos.below()).fluid().is_water()
+    }
+
+    /// `ServerExplosion.createFire`：每个被炸的格 1/3 概率，格子是空气且下方是完整渲染
+    /// 方块时就放火。
+    fn create_fire(&mut self, broken: &[BlockPos]) {
+        for pos in broken {
+            if self.random().next_int(3) != 0 {
+                continue;
+            }
+            if !self.block_state(*pos).is_air() {
+                continue;
+            }
+            if !self.block_state(pos.below()).is_solid_render() {
+                continue;
+            }
+            self.set_block_and_update(*pos, BlockState(blocks::FIRE));
+        }
+    }
+
     /// `ServerExplosion.interactWithBlocks`：打乱、逐格破坏、最后一起弹出掉落。
-    /// `decay` 是 `DESTROY_WITH_DECAY` 下交给战利品表的爆炸半径。
+    /// `decay` 是 `DESTROY_WITH_DECAY` 下交给战利品表的爆炸半径。打乱就地发生，
+    /// 后面的 `createFire` 按打乱后的顺序放火（官方用的是同一个列表）。
     ///
     /// `ServerExplosion.interactWithBlocks`: shuffle, break each block, then pop the drops.
-    /// `decay` is the radius handed to loot tables under `DESTROY_WITH_DECAY`.
-    fn interact_with_blocks(&mut self, mut broken: Vec<BlockPos>, decay: Option<f32>) {
+    /// `decay` is the radius handed to loot tables under `DESTROY_WITH_DECAY`. The shuffle
+    /// is in place, so `createFire` later walks the same shuffled order.
+    fn interact_with_blocks(&mut self, broken: &mut [BlockPos], decay: Option<f32>) {
         // `Util.shuffle(toBlow, level.random)`。
-        self.random().shuffle(&mut broken);
+        self.random().shuffle(broken);
         // `interactWithBlocks`：先收齐掉落，整圈方块处理完才 `popResource`。
         // `interactWithBlocks` collects drops, then `popResource`s them after every block.
         let mut drops = Vec::new();
-        for pos in broken {
+        for pos in broken.iter().copied() {
             let state = self.block_state(pos);
             if state.is_air() {
                 continue;
@@ -157,8 +235,16 @@ impl World<'_> {
     /// `ServerExplosion.calculateExplodedPositions`：从 16 立方网格最外层每一格朝外射一条线，
     /// 线上剩多少爆炸强度就炸掉沿途的方块。
     ///
+    /// `water_resistance` 是重生锚爆炸的水特判：被移除的那一格在近水时按水的抗性算
+    /// （`RespawnAnchorBlock$1.getBlockExplosionResistance`）。
+    ///
     /// 每条线开头从世界随机源取一个数，所以这个函数的调用次数和顺序都影响后续的随机数。
-    fn calculate_exploded_positions(&mut self, center: Vec3, radius: f32) -> Vec<BlockPos> {
+    fn calculate_exploded_positions(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        water_resistance: Option<(BlockPos, f32)>,
+    ) -> Vec<BlockPos> {
         let mut blown = PositionSet::default();
         for xx in 0..RAY_GRID {
             for yy in 0..RAY_GRID {
@@ -187,9 +273,14 @@ impl World<'_> {
                         if !self.is_in_world_bounds(pos) {
                             break;
                         }
-                        if !(state.is_air() && fluid.is_empty()) {
-                            let resistance = state.block().explosion_resistance;
-                            let resistance = resistance.max(fluid_resistance(fluid));
+                        let overridden = water_resistance
+                            .filter(|(anchor, _)| *anchor == pos)
+                            .map(|(_, resistance)| resistance);
+                        if overridden.is_some() || !(state.is_air() && fluid.is_empty()) {
+                            let resistance = overridden.unwrap_or_else(|| {
+                                let resistance = state.block().explosion_resistance;
+                                resistance.max(fluid_resistance(fluid))
+                            });
                             remaining -= (resistance + RESISTANCE_BONUS) * RESISTANCE_COST;
                         }
                         // `ExplosionDamageCalculator.shouldBlockExplode` 恒为真。
