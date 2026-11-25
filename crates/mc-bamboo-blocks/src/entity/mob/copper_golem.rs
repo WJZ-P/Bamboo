@@ -5,8 +5,14 @@
 //! oxidise over time, can be waxed, scraped with an axe, de-oxidised by lightning,
 //! and may turn into a statue block once fully oxidised.
 
-use mc_bamboo_core::BlockPos;
-use mc_bamboo_data::registries::attribute;
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
+use mc_bamboo_data::{
+    blocks, items,
+    registries::attribute,
+    sounds::{self, sound_event},
+    tags::item_tags,
+};
+use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
 
 use super::{
     Mob, MobType,
@@ -21,6 +27,16 @@ use super::{
         sensor::SensorKind,
         template_cache,
     },
+    interact::{MobInteractRequest, MobInteraction},
+    living,
+};
+use crate::{
+    InteractionResult,
+    entity::{
+        Entity,
+        ctx::{Command, EntityCtx},
+    },
+    state::{BlockState, COPPER_GOLEM_POSE, CopperGolemPose, HORIZONTAL_FACING, item_is_tagged},
 };
 
 /// `WeatheringCopper.WeatherState`：四个氧化等级，存档名和网络 id 都是这个顺序。
@@ -229,53 +245,41 @@ pub(super) fn attributes() -> Attributes {
     attributes
 }
 
-/// `CopperGolemOxidationLevels` 里 `UNAFFECTED` / `EXPOSED` 共用一组声音。
+/// `CopperGolemOxidationLevels` 里 `UNAFFECTED` / `EXPOSED` 共用一组声音；
+/// `WEATHERED` / `OXIDIZED` 各用自己的一组。
 ///
-/// `UNAFFECTED` / `EXPOSED` in `CopperGolemOxidationLevels` share one sound set.
-const fn sound_suffix(weather: WeatherState) -> &'static str {
+/// In `CopperGolemOxidationLevels`, `UNAFFECTED` / `EXPOSED` share one sound set;
+/// `WEATHERED` / `OXIDIZED` each use their own.
+pub const fn hurt_sound(weather: WeatherState) -> &'static str {
     match weather {
-        WeatherState::Unaffected | WeatherState::Exposed => "",
-        WeatherState::Weathered => "_weathered",
-        WeatherState::Oxidized => "_oxidized",
+        WeatherState::Unaffected | WeatherState::Exposed => "minecraft:entity.copper_golem.hurt",
+        WeatherState::Weathered => "minecraft:entity.copper_golem_weathered.hurt",
+        WeatherState::Oxidized => "minecraft:entity.copper_golem_oxidized.hurt",
     }
 }
 
-/// `getHurtSound(DamageSource)`。
-///
-/// `getHurtSound(DamageSource)`.
-pub fn hurt_sound(weather: WeatherState) -> String {
-    format!(
-        "minecraft:entity.copper_golem{}.hurt",
-        sound_suffix(weather)
-    )
+pub const fn death_sound(weather: WeatherState) -> &'static str {
+    match weather {
+        WeatherState::Unaffected | WeatherState::Exposed => "minecraft:entity.copper_golem.death",
+        WeatherState::Weathered => "minecraft:entity.copper_golem_weathered.death",
+        WeatherState::Oxidized => "minecraft:entity.copper_golem_oxidized.death",
+    }
 }
 
-/// `getDeathSound()`。
-pub fn death_sound(weather: WeatherState) -> String {
-    format!(
-        "minecraft:entity.copper_golem{}.death",
-        sound_suffix(weather)
-    )
+pub const fn step_sound(weather: WeatherState) -> &'static str {
+    match weather {
+        WeatherState::Unaffected | WeatherState::Exposed => "minecraft:entity.copper_golem.step",
+        WeatherState::Weathered => "minecraft:entity.copper_golem_weathered.step",
+        WeatherState::Oxidized => "minecraft:entity.copper_golem_oxidized.step",
+    }
 }
 
-/// `playStepSound` 的声音名。
-///
-/// The `playStepSound` sound name.
-pub fn step_sound(weather: WeatherState) -> String {
-    format!(
-        "minecraft:entity.copper_golem{}.step",
-        sound_suffix(weather)
-    )
-}
-
-/// `getSpinHeadSound()`（转头动画的声音）。
-///
-/// `getSpinHeadSound()` (the head-spin animation sound).
-pub fn spin_sound(weather: WeatherState) -> String {
-    format!(
-        "minecraft:entity.copper_golem{}.spin",
-        sound_suffix(weather)
-    )
+pub const fn spin_sound(weather: WeatherState) -> &'static str {
+    match weather {
+        WeatherState::Unaffected | WeatherState::Exposed => "minecraft:entity.copper_golem.spin",
+        WeatherState::Weathered => "minecraft:entity.copper_golem_weathered.spin",
+        WeatherState::Oxidized => "minecraft:entity.copper_golem_oxidized.spin",
+    }
 }
 
 /// `CopperGolem.BRAIN_PROVIDER`：两个传感器、核心与闲逛两个活动。
@@ -437,5 +441,367 @@ pub(super) fn custom_server_ai_step(
         brain.tick_by(me, mob, ctx, gap);
         brain.set_active_activity_to_first_valid(&[Activity::Idle]);
         mob.brain = Some(brain);
+    }
+}
+
+/// `CopperGolem.updateWeathering` 这一刻的结果。
+///
+/// What one tick of `CopperGolem.updateWeathering` decides.
+enum WeatheringOutcome {
+    None,
+    Statue { pose: u8, facing: Direction },
+}
+
+/// `CopperGolem.tick` 在 `super.tick()` 之后：只在服务端推进氧化计时，
+/// 完全氧化且脚下是空气、掷中几率时变成雕像。
+///
+/// The part of `CopperGolem.tick` after `super.tick()`: advance the weathering
+/// clock on the server and turn into a statue when fully oxidised, standing on
+/// air and the chance roll hits.
+pub(super) fn tick_after(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    if mob.mob_type != MobType::CopperGolem || me.removed {
+        return;
+    }
+    if let WeatheringOutcome::Statue { pose, facing } = update_weathering(me, mob, ctx) {
+        let pos = me.block_position();
+        ctx.emit(Command::CopperGolemStatue { pos, pose, facing }, me);
+    }
+}
+
+fn update_weathering(me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> WeatheringOutcome {
+    let blocks = ctx.blocks();
+    let game_time = blocks.game_time();
+    let span = (WEATHERING_TICK_TO - WEATHERING_TICK_FROM + 1) as i32;
+    let cg = &mut mob.copper_golem;
+    if cg.next_weathering_tick == IGNORE_WEATHERING_TICK {
+        return WeatheringOutcome::None;
+    }
+    if cg.next_weathering_tick == UNSET_WEATHERING_TICK {
+        // `nextIntBetweenInclusive(504000, 552000)`：`nextInt(48001) + 504000`。
+        cg.next_weathering_tick =
+            game_time + i64::from(blocks.level_random_int(span)) + WEATHERING_TICK_FROM;
+        return WeatheringOutcome::None;
+    }
+    let was_oxidized = cg.weather_state == WeatherState::Oxidized;
+    if game_time >= cg.next_weathering_tick && !was_oxidized {
+        let next = cg.weather_state.next();
+        let next_is_oxidized = next == WeatherState::Oxidized;
+        cg.weather_state = next;
+        cg.next_weathering_tick = if next_is_oxidized {
+            0
+        } else {
+            cg.next_weathering_tick
+                + i64::from(blocks.level_random_int(span))
+                + WEATHERING_TICK_FROM
+        };
+    }
+    if was_oxidized {
+        // `canTurnToStatue`：脚下方块是空气且 `level.random.nextFloat() <= 0.0058`。
+        let pos = me.block_position();
+        if blocks.block_state(pos).is_air() && blocks.level_random_float() <= TURN_TO_STATUE_CHANCE
+        {
+            let pose = me.random.next_int_bounded(4) as u8;
+            let facing = Direction::from_yaw(f64::from(me.y_rot));
+            return WeatheringOutcome::Statue { pose, facing };
+        }
+    }
+    WeatheringOutcome::None
+}
+
+/// `CopperGolemStatueBlock.Pose.values()[id]`。
+fn pose_from_id(id: u8) -> CopperGolemPose {
+    match id {
+        1 => CopperGolemPose::Sitting,
+        2 => CopperGolemPose::Running,
+        3 => CopperGolemPose::Star,
+        _ => CopperGolemPose::Standing,
+    }
+}
+
+/// `Command::CopperGolemStatue` 的落地：放氧化雕像、掉下携带物、播音效、移除实体。
+///
+/// Applying `Command::CopperGolemStatue`: place the oxidised statue, drop carried
+/// items, play the sound and discard the golem.
+pub(crate) fn apply_statue(
+    world: &mut crate::world::World,
+    me: &mut Entity,
+    pos: BlockPos,
+    pose: u8,
+    facing: Direction,
+) {
+    let state = BlockState(blocks::OXIDIZED_COPPER_GOLEM_STATUE)
+        .with(COPPER_GOLEM_POSE, pose_from_id(pose))
+        .with(HORIZONTAL_FACING, facing);
+    world.set_block_and_update(pos, state);
+    if let Some(mob) = me.kind.mob_mut() {
+        for slot in [EquipmentSlot::MainHand, EquipmentSlot::Saddle] {
+            let stack = mob.equipment.get(slot).clone();
+            if !stack.is_empty() {
+                world.spawn_at_location(me.position, stack);
+                mob.equipment.set(slot, ItemStack::empty());
+            }
+        }
+    }
+    world.play_sound(
+        Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.05,
+            f64::from(pos.z) + 0.5,
+        ),
+        sound_event("minecraft:entity.copper_golem_become_statue"),
+        sounds::NEUTRAL,
+        1.0,
+        1.0,
+        false,
+    );
+    me.discard();
+}
+
+/// `CopperGolem.mobInteract`：空手扔回携带物、剪下天线、蜜脾打蜡、斧头去蜡 / 刮锈。
+///
+/// `CopperGolem.mobInteract`: empty hand throws the carried item, shears remove the
+/// antenna, honeycomb waxes, an axe removes wax or scrapes one oxidation stage off.
+pub(super) fn interact(me: &Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
+    let held = req.held.item;
+    if held == items::AIR {
+        let carried = mob.equipment.get(EquipmentSlot::MainHand).clone();
+        if !carried.is_empty() {
+            mob.equipment
+                .set(EquipmentSlot::MainHand, ItemStack::empty());
+            living::play_sound(me, mob, "minecraft:entity.copper_golem.item_drop", 1.0, 1.0);
+            return MobInteraction {
+                result: InteractionResult::Success,
+                drop_stack: Some(carried),
+                ..MobInteraction::pass()
+            };
+        }
+    }
+    if held == items::SHEARS {
+        let antenna = mob.equipment.get(EquipmentSlot::Saddle).clone();
+        if item_is_tagged(antenna.item, item_tags::SHEARABLE_FROM_COPPER_GOLEM) {
+            mob.equipment.set(EquipmentSlot::Saddle, ItemStack::empty());
+            living::play_sound(me, mob, "minecraft:entity.copper_golem.shear", 1.0, 1.0);
+            return MobInteraction {
+                result: InteractionResult::Success,
+                drop_stack: Some(antenna),
+                damage_held: true,
+                ..MobInteraction::pass()
+            };
+        }
+    }
+    if held == items::HONEYCOMB && mob.copper_golem.next_weathering_tick != IGNORE_WEATHERING_TICK {
+        mob.copper_golem.next_weathering_tick = IGNORE_WEATHERING_TICK;
+        living::play_sound(me, mob, "minecraft:item.honeycomb.wax_on", 1.0, 1.0);
+        return MobInteraction {
+            result: InteractionResult::SuccessServer,
+            shrink_held: !req.creative,
+            ..MobInteraction::pass()
+        };
+    }
+    let is_axe = item_is_tagged(held, item_tags::AXES);
+    if is_axe && mob.copper_golem.next_weathering_tick == IGNORE_WEATHERING_TICK {
+        mob.copper_golem.next_weathering_tick = UNSET_WEATHERING_TICK;
+        living::play_sound(me, mob, "minecraft:item.axe.scrape", 1.0, 1.0);
+        return MobInteraction {
+            result: InteractionResult::SuccessServer,
+            damage_held: true,
+            ..MobInteraction::pass()
+        };
+    }
+    if is_axe && mob.copper_golem.weather_state != WeatherState::Unaffected {
+        mob.copper_golem.next_weathering_tick = UNSET_WEATHERING_TICK;
+        mob.copper_golem.weather_state = mob.copper_golem.weather_state.previous();
+        living::play_sound(me, mob, "minecraft:item.axe.scrape", 1.0, 1.0);
+        return MobInteraction {
+            result: InteractionResult::SuccessServer,
+            damage_held: true,
+            ..MobInteraction::pass()
+        };
+    }
+    MobInteraction::pass()
+}
+
+/// `CopperGolem.thunderHit`：同一道闪电只处理一次，非 `UNAFFECTED` 时退一级氧化。
+///
+/// `CopperGolem.thunderHit`: one bolt is handled once; a non-`UNAFFECTED` golem
+/// loses one oxidation stage.
+pub fn thunder_hit(mob: &mut Mob, bolt: [u8; 16]) {
+    if mob.copper_golem.last_lightning_uuid == Some(bolt) {
+        return;
+    }
+    mob.copper_golem.last_lightning_uuid = Some(bolt);
+    if mob.copper_golem.weather_state != WeatherState::Unaffected {
+        mob.copper_golem.next_weathering_tick = UNSET_WEATHERING_TICK;
+        mob.copper_golem.weather_state = mob.copper_golem.weather_state.previous();
+    }
+}
+
+/// `CopperGolem.actuallyHurt` 在 `super` 之后把状态设回 `IDLE`。
+///
+/// `CopperGolem.actuallyHurt` resets the state to `IDLE` after `super`.
+pub fn after_hurt(mob: &mut Mob) {
+    if mob.mob_type == MobType::CopperGolem {
+        mob.copper_golem.state = State::Idle;
+    }
+}
+
+/// `CarvedPumpkinBlock` 生成铜傀儡后 `CopperGolem.spawn(WeatherState)` 的那一半：
+/// 按图案里铜块的氧化等级设初始氧化状态（声音由方块动作负责）。
+///
+/// The `CopperGolem.spawn(WeatherState)` half after the pumpkin places a golem:
+/// set the initial oxidation stage from the copper block (the sound belongs to the
+/// block action).
+pub fn spawn(mob: &mut Mob, weather: WeatherState) {
+    mob.copper_golem.weather_state = weather;
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_core::Hand;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    use super::*;
+    use crate::entity::mob::nbt;
+
+    fn request(item: ItemStack) -> MobInteractRequest {
+        MobInteractRequest {
+            player_uid: 1,
+            player_uuid: [0; 16],
+            hand: Hand::Main,
+            held: item,
+            creative: false,
+            position: Vec3::default(),
+            sneaking: false,
+            difficulty: 2,
+        }
+    }
+
+    /// `living::play_sound` 只需要实体的位置，这里用一头牛当发声坐标。
+    fn dummy() -> Entity {
+        Entity::by_mob_type(MobType::Cow, Vec3::default())
+    }
+
+    #[test]
+    fn weather_and_state_ids_match_vanilla() {
+        assert_eq!(WeatherState::Unaffected.id(), 0);
+        assert_eq!(WeatherState::Oxidized.id(), 3);
+        assert_eq!(WeatherState::from_id(2), WeatherState::Weathered);
+        assert_eq!(
+            WeatherState::from_name("exposed"),
+            Some(WeatherState::Exposed)
+        );
+        assert_eq!(State::from_id(4), State::DroppingNoItem);
+        assert_eq!(State::DroppingItem.name(), "dropping_item");
+    }
+
+    #[test]
+    fn oxidation_steps_and_stops_at_the_ends() {
+        assert_eq!(WeatherState::Unaffected.next(), WeatherState::Exposed);
+        assert_eq!(WeatherState::Weathered.next(), WeatherState::Oxidized);
+        assert_eq!(WeatherState::Oxidized.next(), WeatherState::Oxidized);
+        assert_eq!(
+            WeatherState::Unaffected.previous(),
+            WeatherState::Unaffected
+        );
+        assert_eq!(WeatherState::Oxidized.previous(), WeatherState::Weathered);
+    }
+
+    #[test]
+    fn sounds_follow_the_oxidation_level() {
+        assert_eq!(
+            hurt_sound(WeatherState::Unaffected),
+            "minecraft:entity.copper_golem.hurt"
+        );
+        assert_eq!(
+            hurt_sound(WeatherState::Exposed),
+            "minecraft:entity.copper_golem.hurt"
+        );
+        assert_eq!(
+            death_sound(WeatherState::Weathered),
+            "minecraft:entity.copper_golem_weathered.death"
+        );
+        assert_eq!(
+            step_sound(WeatherState::Oxidized),
+            "minecraft:entity.copper_golem_oxidized.step"
+        );
+    }
+
+    #[test]
+    fn honeycomb_waxes_and_axe_unwaxes() {
+        let mut mob = Mob::new(MobType::CopperGolem);
+        let me = dummy();
+        assert_eq!(mob.copper_golem.next_weathering_tick, UNSET_WEATHERING_TICK);
+        let out = interact(&me, &mut mob, &request(ItemStack::new(items::HONEYCOMB, 1)));
+        assert_eq!(out.result, InteractionResult::SuccessServer);
+        assert!(out.shrink_held);
+        assert_eq!(
+            mob.copper_golem.next_weathering_tick,
+            IGNORE_WEATHERING_TICK
+        );
+        // 再打蜡一次无效（官方要求 `nextWeatheringTick != -2`）。
+        interact(&me, &mut mob, &request(ItemStack::new(items::HONEYCOMB, 1)));
+        assert_eq!(
+            mob.copper_golem.next_weathering_tick,
+            IGNORE_WEATHERING_TICK
+        );
+        let out = interact(
+            &me,
+            &mut mob,
+            &request(ItemStack::new(items::DIAMOND_AXE, 1)),
+        );
+        assert_eq!(out.result, InteractionResult::SuccessServer);
+        assert!(out.damage_held);
+        assert_eq!(mob.copper_golem.next_weathering_tick, UNSET_WEATHERING_TICK);
+    }
+
+    #[test]
+    fn axe_scrapes_one_oxidation_stage_off() {
+        let mut mob = Mob::new(MobType::CopperGolem);
+        mob.copper_golem.weather_state = WeatherState::Oxidized;
+        let me = dummy();
+        let out = interact(
+            &me,
+            &mut mob,
+            &request(ItemStack::new(items::DIAMOND_AXE, 1)),
+        );
+        assert_eq!(out.result, InteractionResult::SuccessServer);
+        assert_eq!(mob.copper_golem.weather_state, WeatherState::Weathered);
+        assert_eq!(mob.copper_golem.next_weathering_tick, UNSET_WEATHERING_TICK);
+    }
+
+    #[test]
+    fn thunder_deoxidises_once_per_bolt() {
+        let mut mob = Mob::new(MobType::CopperGolem);
+        mob.copper_golem.weather_state = WeatherState::Weathered;
+        let bolt = [7; 16];
+        thunder_hit(&mut mob, bolt);
+        assert_eq!(mob.copper_golem.weather_state, WeatherState::Exposed);
+        // 同一道闪电不再退。
+        thunder_hit(&mut mob, bolt);
+        assert_eq!(mob.copper_golem.weather_state, WeatherState::Exposed);
+    }
+
+    #[test]
+    fn hurt_resets_the_interaction_state() {
+        let mut mob = Mob::new(MobType::CopperGolem);
+        mob.copper_golem.state = State::GettingItem;
+        after_hurt(&mut mob);
+        assert_eq!(mob.copper_golem.state, State::Idle);
+    }
+
+    #[test]
+    fn save_round_trip_keeps_weather_state_and_clock() {
+        let mut entity = Entity::by_mob_type(MobType::CopperGolem, Vec3::default());
+        entity.with_mob(|_, mob| {
+            mob.copper_golem.weather_state = WeatherState::Weathered;
+            mob.copper_golem.next_weathering_tick = 123_456;
+        });
+        let tag = nbt::write_mob(&entity.split()).expect("write copper golem");
+        let mut loaded = Entity::by_mob_type(MobType::CopperGolem, Vec3::default());
+        nbt::load_into(&mut loaded, &tag).expect("load copper golem");
+        loaded.with_mob(|_, mob| {
+            assert_eq!(mob.copper_golem.weather_state, WeatherState::Weathered);
+            assert_eq!(mob.copper_golem.next_weathering_tick, 123_456);
+        });
     }
 }

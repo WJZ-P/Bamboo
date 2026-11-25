@@ -341,6 +341,13 @@ pub const ARMADILLO_STATE_SERIALIZER: i32 = 36;
 pub const FROG_VARIANT_SERIALIZER: i32 = 27;
 pub const FROG_TONGUE_TARGET_SERIALIZER: i32 = 19;
 pub const ZOMBIE_NAUTILUS_VARIANT_SERIALIZER: i32 = 32;
+// 铜傀儡的两项自有元数据：`CopperGolem.DATA_WEATHER_STATE` / `COPPER_GOLEM_STATE`
+// 的 `EntityDataAccessor.id()` 与 `EntityDataSerializers.getSerializedId(...)`。
+// Copper golem's own two metadata slots: the accessor ids and serializer ids.
+pub const COPPER_GOLEM_WEATHER_STATE: u8 = 16;
+pub const COPPER_GOLEM_STATE: u8 = 17;
+pub const COPPER_GOLEM_WEATHER_STATE_SERIALIZER: i32 = 38;
+pub const COPPER_GOLEM_STATE_SERIALIZER: i32 = 37;
 pub const CUBE_MOB_SIZE: u8 = 18;
 pub const SULFUR_CUBE_MAX_FUSE: u8 = 19;
 pub const SULFUR_CUBE_FROM_BUCKET: u8 = 20;

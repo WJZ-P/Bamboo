@@ -296,6 +296,9 @@ pub fn interact(
     if mob.mob_type == MobType::SnowGolem {
         return super::snow_golem::interact(mob, req);
     }
+    if mob.mob_type == MobType::CopperGolem {
+        return super::copper_golem::interact(me, mob, req);
+    }
     animal_interact(me, mob, req)
 }
 

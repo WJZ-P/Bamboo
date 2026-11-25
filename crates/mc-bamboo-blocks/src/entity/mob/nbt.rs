@@ -480,6 +480,20 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         );
         put(&mut out, "scute_time", Tag::Int(mob.armadillo.scute_time));
     }
+    if mob.mob_type == MobType::CopperGolem {
+        // `CopperGolem.addAdditionalSaveData`：两个键无条件写出。
+        // `CopperGolem.addAdditionalSaveData`: both keys are always written.
+        put(
+            &mut out,
+            "next_weather_age",
+            Tag::Long(mob.copper_golem.next_weathering_tick),
+        );
+        put(
+            &mut out,
+            "weather_state",
+            Tag::String(mob.copper_golem.weather_state.name().to_owned()),
+        );
+    }
     if mob.mob_type == MobType::Frog {
         // `Frog.addAdditionalSaveData`：`VariantUtils.writeVariant`。
         // `Frog.addAdditionalSaveData`: `VariantUtils.writeVariant`.
@@ -908,6 +922,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         if mob.mob_type == MobType::Armadillo {
             read_armadillo(mob, tag);
         }
+        if mob.mob_type == MobType::CopperGolem {
+            read_copper_golem(mob, tag);
+        }
         if mob.mob_type == MobType::Frog {
             // `Frog.readAdditionalSaveData`：读不出品种就保留原来的。
             // `Frog.readAdditionalSaveData`: an unreadable variant keeps the current one.
@@ -1243,6 +1260,22 @@ fn read_armadillo(mob: &mut super::Mob, tag: &Tag) {
         mob.armadillo.in_state_ticks = 0;
     }
     mob.armadillo.scute_time = tag::int_or(tag, "scute_time", mob.armadillo.scute_time);
+}
+
+/// `CopperGolem.readAdditionalSaveData`：`next_weather_age` 缺省 -1，`weather_state`
+/// 缺省 `unaffected`；读不出的字符串保留缺省值。
+///
+/// `CopperGolem.readAdditionalSaveData`: `next_weather_age` defaults to -1 and
+/// `weather_state` to `unaffected`; an unreadable string keeps the default.
+fn read_copper_golem(mob: &mut super::Mob, tag: &Tag) {
+    mob.copper_golem.next_weathering_tick = tag::long_or(
+        tag,
+        "next_weather_age",
+        super::copper_golem::UNSET_WEATHERING_TICK,
+    );
+    mob.copper_golem.weather_state = tag::string_or(tag, "weather_state")
+        .and_then(super::copper_golem::WeatherState::from_name)
+        .unwrap_or_default();
 }
 
 fn read_fox(mob: &mut super::Mob, tag: &Tag) {

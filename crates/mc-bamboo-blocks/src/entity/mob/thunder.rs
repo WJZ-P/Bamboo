@@ -22,3 +22,10 @@ pub fn mooshroom_hit(world: &mut World, uid: i32, bolt: [u8; 16]) {
         entity.with_mob(|me, mob| mooshroom::thunder_hit(me, mob, bolt));
     });
 }
+
+/// `CopperGolem.thunderHit`：非 `UNAFFECTED` 时退一级氧化，同一道闪电只处理一次。
+pub fn copper_golem_hit(world: &mut World, uid: i32, bolt: [u8; 16]) {
+    world.with_entity_mut(uid, &mut |entity| {
+        entity.with_mob(|_, mob| super::copper_golem::thunder_hit(mob, bolt));
+    });
+}

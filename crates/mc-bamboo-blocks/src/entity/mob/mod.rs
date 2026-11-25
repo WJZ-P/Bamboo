@@ -752,6 +752,7 @@ impl MobType {
                 | Self::Tadpole
                 | Self::Bee
                 | Self::IronGolem
+                | Self::CopperGolem
                 | Self::SulfurCube
         )
     }
@@ -3103,6 +3104,13 @@ impl Mob {
             navigation.required_path_length = 48.0;
             navigation.update_max_visited_nodes(follow_range);
         }
+        if mob_type == MobType::CopperGolem {
+            // `CopperGolem` 构造函数：能开门、要求路径长度 48。
+            // The `CopperGolem` constructor: doors and required path length 48.
+            navigation.flags.can_open_doors = true;
+            navigation.required_path_length = 48.0;
+            navigation.update_max_visited_nodes(follow_range);
+        }
         let goals = match mob_type {
             MobType::Cow | MobType::Mooshroom => GoalSelector::cow(&mut navigation),
             MobType::Rabbit => rabbit::goals(&mut navigation),
@@ -3374,6 +3382,15 @@ impl Mob {
                 // 蝙蝠直接继承 `Mob`，没有 `Animal` 的两项覆盖。
                 // Bats extend `Mob` directly, without the two `Animal` overrides.
                 MobType::Bat | MobType::Phantom => Malus::monster(),
+                MobType::CopperGolem => {
+                    // `CopperGolem` 构造函数的三项寻路代价。
+                    // The three pathfinding maluses from the `CopperGolem` constructor.
+                    let mut malus = Malus::animal();
+                    malus.set(mc_bamboo_data::PathType::FireInNeighbor, 16.0);
+                    malus.set(mc_bamboo_data::PathType::DamagingInNeighbor, 16.0);
+                    malus.set(mc_bamboo_data::PathType::Fire, -1.0);
+                    malus
+                }
                 _ => Malus::animal(),
             },
             persistence_required: false,
@@ -3528,6 +3545,11 @@ impl Mob {
             // `Armadillo` 构造函数里的 `getNavigation().setCanFloat(true)`。
             // The `Armadillo` constructor's `getNavigation().setCanFloat(true)`.
             mob.navigation.flags.can_float = true;
+        }
+        if mob_type == MobType::CopperGolem {
+            // `CopperGolem` 构造函数里的 `setPersistenceRequired()`。
+            // The `CopperGolem` constructor's `setPersistenceRequired()`.
+            mob.persistence_required = true;
         }
         if mob_type.is_camel() {
             camel::configure(&mut mob);
@@ -4085,6 +4107,11 @@ pub struct MobPublic {
     /// 硫磺方块怪的 `MAX_FUSE` / `FROM_BUCKET` 元数据。
     pub sulfur_cube_max_fuse: i32,
     pub sulfur_cube_from_bucket: bool,
+    /// `CopperGolem.DATA_WEATHER_STATE` / `COPPER_GOLEM_STATE` 的网络 ID。
+    ///
+    /// The network ids of `CopperGolem.DATA_WEATHER_STATE` / `COPPER_GOLEM_STATE`.
+    pub copper_golem_weather_state: i32,
+    pub copper_golem_state: i32,
     /// `Mob.isPersistenceRequired()`：持久化的生物不参与自然刷怪的计数。
     ///
     /// `Mob.isPersistenceRequired()`: persistent mobs are left out of the spawn counts.
@@ -4229,6 +4256,8 @@ impl MobPublic {
             cube_size: mob.cube.size,
             sulfur_cube_max_fuse: mob.sulfur_cube.max_fuse,
             sulfur_cube_from_bucket: mob.sulfur_cube.from_bucket,
+            copper_golem_weather_state: mob.copper_golem.weather_state.id(),
+            copper_golem_state: mob.copper_golem.state.id(),
             equipment: mob
                 .equipment
                 .iter()

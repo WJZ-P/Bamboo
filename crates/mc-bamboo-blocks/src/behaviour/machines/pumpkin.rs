@@ -162,6 +162,7 @@ fn spawn_golem(
     kind: crate::entity::mob::MobType,
     foot: BlockPos,
     player_created: bool,
+    weather: Option<crate::entity::mob::copper_golem::WeatherState>,
 ) {
     use crate::entity::{Entity, mob::iron_golem};
     let position = Vec3::new(
@@ -182,6 +183,10 @@ fn spawn_golem(
         mob.y_body_rot_o = 0.0;
         if player_created {
             iron_golem::mark_player_created(mob);
+        }
+        if let Some(weather) = weather {
+            // `CopperGolem.spawn(WeatherState)`：按图案里铜块的氧化等级设初始状态。
+            crate::entity::mob::copper_golem::spawn(mob, weather);
         }
     });
     world.add_prepared_entity(entity);
@@ -213,6 +218,25 @@ fn update_pattern_blocks(world: &mut World, cells: &PatternMatch) {
     }
 }
 
+/// `getWeatherStateFromPattern`：铜块的氧化等级（打蜡的按去蜡对应块取），
+/// 认不出的铜块回退到 `UNAFFECTED`。
+///
+/// `getWeatherStateFromPattern`: the copper block's oxidation stage (waxed blocks
+/// use their unwaxed counterpart); unknown copper falls back to `UNAFFECTED`.
+fn copper_weather(copper: BlockState) -> crate::entity::mob::copper_golem::WeatherState {
+    use crate::entity::mob::copper_golem::WeatherState as W;
+    use mc_bamboo_data::blocks as b;
+    if copper.is(b::EXPOSED_COPPER) || copper.is(b::WAXED_EXPOSED_COPPER) {
+        W::Exposed
+    } else if copper.is(b::WEATHERED_COPPER) || copper.is(b::WAXED_WEATHERED_COPPER) {
+        W::Weathered
+    } else if copper.is(b::OXIDIZED_COPPER) || copper.is(b::WAXED_OXIDIZED_COPPER) {
+        W::Oxidized
+    } else {
+        W::Unaffected
+    }
+}
+
 /// `replaceCopperBlockWithChest`：图案从上往下，第一格是南瓜，第二格是铜块。
 fn replace_copper_block_with_chest(world: &mut World, cells: &PatternMatch) {
     let (_, pumpkin) = cells[0];
@@ -231,19 +255,23 @@ fn try_spawn_golem(world: &mut World, top: BlockPos) {
     if let Some(cells) = find(world, SNOW_GOLEM, top) {
         let foot = cells[2].0;
         clear_pattern_blocks(world, &cells);
-        spawn_golem(world, MobType::SnowGolem, foot, false);
+        spawn_golem(world, MobType::SnowGolem, foot, false, None);
         update_pattern_blocks(world, &cells);
         return;
     }
     if let Some(cells) = find(world, IRON_GOLEM, top) {
         let foot = cells[5].0;
         clear_pattern_blocks(world, &cells);
-        spawn_golem(world, MobType::IronGolem, foot, true);
+        spawn_golem(world, MobType::IronGolem, foot, true, None);
         update_pattern_blocks(world, &cells);
         return;
     }
     if let Some(cells) = find(world, COPPER_GOLEM, top) {
+        let weather = copper_weather(cells[1].1);
+        let foot = cells[0].0;
         clear_pattern_blocks(world, &cells);
+        // 官方 `spawnGolemInWorld` 在南瓜格生成实体，随后铜块换成箱子、再 `spawn`。
+        spawn_golem(world, MobType::CopperGolem, foot, false, Some(weather));
         replace_copper_block_with_chest(world, &cells);
         update_pattern_blocks(world, &cells);
         // 官方生成铜傀儡后 `CopperGolem.spawn` 会报一声，位置是傀儡脚底往上 0.05 格。

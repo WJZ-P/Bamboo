@@ -1268,6 +1268,15 @@ pub enum Command {
         pos: mc_bamboo_core::BlockPos,
         eggs: i32,
     },
+    /// `CopperGolem.turnToStatue`：把铜傀儡换成氧化雕像方块（姿态、朝向）。
+    ///
+    /// `CopperGolem.turnToStatue`: replace the golem with an oxidised statue block
+    /// (pose and facing).
+    CopperGolemStatue {
+        pos: mc_bamboo_core::BlockPos,
+        pose: u8,
+        facing: mc_bamboo_core::Direction,
+    },
     /// `ServerLevel.destroyBlockProgress(breaker, pos, progress)`：`BreakDoorGoal` 的
     /// 门上裂纹，`progress` 为 -1 时清掉。
     DestroyProgress {
@@ -2058,6 +2067,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             source,
             amount,
         } => super::mob::frog::apply_eat(world, target, source, amount),
+        Command::CopperGolemStatue { pos, pose, facing } => {
+            super::mob::copper_golem::apply_statue(world, me, pos, pose, facing)
+        }
         Command::LayTurtleEgg { pos, eggs } => {
             let pitch = 0.9 + world.random().next_float() * 0.2;
             world.play_block_sound(
