@@ -1008,6 +1008,18 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
         ],
     );
     full(
+        "trial_spawner-inline-config",
+        "minecraft:trial_spawner",
+        "minecraft:trial_spawner",
+        vec![(
+            "normal_config".to_owned(),
+            Tag::Compound(vec![
+                ("spawn_range".to_owned(), Tag::Int(3)),
+                ("total_mobs".to_owned(), Tag::Float(5.0)),
+            ]),
+        )],
+    );
+    full(
         "sign-full",
         "minecraft:oak_sign",
         "minecraft:sign",
