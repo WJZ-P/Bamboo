@@ -97,6 +97,7 @@ pub mod turtle;
 pub mod villager;
 pub mod villager_ai;
 pub mod warden;
+pub mod warden_ai;
 pub mod warden_spawn;
 mod water;
 pub mod wild_spawn;
@@ -4328,6 +4329,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Axolotl => Some(Box::new(axolotl::brain())),
         MobType::Villager => Some(Box::new(villager_ai::brain(false, 0))),
         MobType::Nautilus | MobType::ZombieNautilus => Some(Box::new(nautilus_ai::brain(kind))),
+        MobType::Warden => Some(Box::new(warden_ai::brain())),
         _ => None,
     }
 }

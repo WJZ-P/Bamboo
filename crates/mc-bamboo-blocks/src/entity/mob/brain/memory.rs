@@ -113,13 +113,34 @@ pub enum MemoryType {
     /// The nautilus's `charge_cooldown_ticks` and `attack_target_cooldown`.
     ChargeCooldownTicks,
     AttackTargetCooldown,
+    /// 监守者的记忆，追加在末尾、按官方 `MemoryModuleType` 注册名。位掩码已升到 `u128`，
+    /// 这些种类让总数超过 64。全部不进存档（愤怒在 `anger` 键里单独存）。
+    ///
+    /// The warden's memories, appended last with their official registry names. The
+    /// masks are `u128`, so these push the total past 64. None of them is serialized
+    /// (anger is saved in its own `anger` key).
+    IsEmerging,
+    DigCooldown,
+    RoarTarget,
+    RoarSoundCooldown,
+    RoarSoundDelay,
+    IsSniffing,
+    SniffCooldown,
+    DisturbanceLocation,
+    SonicBoomCooldown,
+    SonicBoomSoundCooldown,
+    SonicBoomSoundDelay,
+    VibrationCooldown,
+    RecentProjectile,
+    TouchCooldown,
+    NearestVisibleNemesis,
 }
 
 impl MemoryType {
     /// 记忆种类的个数，槽表的长度。
     ///
     /// The number of memory types: the length of the slot table.
-    pub const COUNT: usize = 51;
+    pub const COUNT: usize = 66;
 
     /// 全部种类，按枚举顺序。
     ///
@@ -176,6 +197,21 @@ impl MemoryType {
         Self::ItemPickupCooldownTicks,
         Self::ChargeCooldownTicks,
         Self::AttackTargetCooldown,
+        Self::IsEmerging,
+        Self::DigCooldown,
+        Self::RoarTarget,
+        Self::RoarSoundCooldown,
+        Self::RoarSoundDelay,
+        Self::IsSniffing,
+        Self::SniffCooldown,
+        Self::DisturbanceLocation,
+        Self::SonicBoomCooldown,
+        Self::SonicBoomSoundCooldown,
+        Self::SonicBoomSoundDelay,
+        Self::VibrationCooldown,
+        Self::RecentProjectile,
+        Self::TouchCooldown,
+        Self::NearestVisibleNemesis,
     ];
 
     /// 官方注册名（不带命名空间）。
@@ -234,6 +270,21 @@ impl MemoryType {
             Self::ItemPickupCooldownTicks => "item_pickup_cooldown_ticks",
             Self::ChargeCooldownTicks => "charge_cooldown_ticks",
             Self::AttackTargetCooldown => "attack_target_cooldown",
+            Self::IsEmerging => "is_emerging",
+            Self::DigCooldown => "dig_cooldown",
+            Self::RoarTarget => "roar_target",
+            Self::RoarSoundCooldown => "roar_sound_cooldown",
+            Self::RoarSoundDelay => "roar_sound_delay",
+            Self::IsSniffing => "is_sniffing",
+            Self::SniffCooldown => "sniff_cooldown",
+            Self::DisturbanceLocation => "disturbance_location",
+            Self::SonicBoomCooldown => "sonic_boom_cooldown",
+            Self::SonicBoomSoundCooldown => "sonic_boom_sound_cooldown",
+            Self::SonicBoomSoundDelay => "sonic_boom_sound_delay",
+            Self::VibrationCooldown => "vibration_cooldown",
+            Self::RecentProjectile => "recent_projectile",
+            Self::TouchCooldown => "touch_cooldown",
+            Self::NearestVisibleNemesis => "nearest_visible_nemesis",
         }
     }
 

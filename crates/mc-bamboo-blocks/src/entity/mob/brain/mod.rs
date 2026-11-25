@@ -31,7 +31,7 @@
 //! the oracle reseeds both sides with the same formula.
 
 pub mod behavior;
-mod behaviors;
+pub(crate) mod behaviors;
 pub mod memory;
 pub mod nbt;
 pub mod sensor;
@@ -94,6 +94,15 @@ pub enum Activity {
     PreRaid,
     Hide,
     Celebrate,
+    /// 监守者的钻出 / 钻入 / 咆哮 / 调查 / 嗅探活动（`Activity.EMERGE / DIG / ROAR /
+    /// INVESTIGATE / SNIFF`）。
+    ///
+    /// The warden's emerge, dig, roar, investigate and sniff activities.
+    Emerge,
+    Dig,
+    Roar,
+    Investigate,
+    Sniff,
 }
 
 impl Activity {
@@ -120,6 +129,11 @@ impl Activity {
             Self::PreRaid => "pre_raid",
             Self::Hide => "hide",
             Self::Celebrate => "celebrate",
+            Self::Emerge => "emerge",
+            Self::Dig => "dig",
+            Self::Roar => "roar",
+            Self::Investigate => "investigate",
+            Self::Sniff => "sniff",
         }
     }
 
@@ -147,6 +161,11 @@ impl Activity {
             "pre_raid" => Some(Self::PreRaid),
             "hide" => Some(Self::Hide),
             "celebrate" => Some(Self::Celebrate),
+            "emerge" => Some(Self::Emerge),
+            "dig" => Some(Self::Dig),
+            "roar" => Some(Self::Roar),
+            "investigate" => Some(Self::Investigate),
+            "sniff" => Some(Self::Sniff),
             _ => None,
         }
     }
@@ -1106,19 +1125,19 @@ mod tests {
     /// `Arc<BrainTemplate>`: 32 slots had `Brain=664`, `Memories=536`; phase 3 grew to 49
     /// slots (+272) plus schedule fields (`Memories=808`, `Brain=952`), and the two
     /// nautilus memories add 32 more (`840` / `984`). Widening the three memory masks
-    /// and behaviour preconditions from `u64` to `u128` (memory types now exceed 64)
-    /// adds 24 bytes to `Memories`, `Brain`, `Node` and `Entry`.
+    /// to `u128` (memory types now exceed 64) and adding the 15 warden memories
+    /// (51→66 slots) brings `Memories` to 1104 and `Brain` to 1248.
     #[test]
     fn brain_and_memory_sizes_stay_small() {
         use crate::entity::mob::brain::behavior::Node;
         use crate::entity::mob::brain::memory::{Memories, MemoryValue};
-        // 三组记忆掩码和行为入口条件从 `u64` 升到 `u128`（记忆种类超过 64），
-        // `Memories` / `Brain` / `Node` / `Entry` 各多 24 字节。
-        // The three memory masks and behaviour preconditions widened from `u64` to
-        // `u128` (memory types exceed 64), adding 24 bytes to each of these structs.
+        // 三组掩码升到 `u128`，又加 15 个监守者记忆（槽表 51→66）：
+        // `Memories` 840→1104、`Brain` 984→1248，`Node` / `Entry` 各多 16 字节。
+        // Three masks widened to `u128` and 15 warden memories appended (51→66 slots):
+        // `Memories` 840→1104, `Brain` 984→1248, `Node` / `Entry` +16.
         assert_eq!(std::mem::size_of::<MemoryValue>(), 184);
-        assert_eq!(std::mem::size_of::<Memories>(), 864);
-        assert_eq!(std::mem::size_of::<Brain>(), 1008);
+        assert_eq!(std::mem::size_of::<Memories>(), 1104);
+        assert_eq!(std::mem::size_of::<Brain>(), 1248);
         assert_eq!(std::mem::size_of::<Node>(), 160);
         assert_eq!(std::mem::size_of::<Sensor>(), 16);
         assert_eq!(std::mem::size_of::<Entry>(), 176);

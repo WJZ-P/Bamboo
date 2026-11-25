@@ -162,6 +162,13 @@ impl AngerManagement {
         self.sort_and_update_highest();
     }
 
+    /// `getAngerLevel()`：按 `getActiveAnger(null)` 换算（活动切换用）。
+    ///
+    /// `getAngerLevel()`: from `getActiveAnger(null)` (used for activity switches).
+    pub fn anger_level(&self) -> AngerLevel {
+        AngerLevel::by_anger(self.highest_anger)
+    }
+
     /// `getActiveAnger(entity)`：没有目标时返回 `highestAnger`。
     ///
     /// `getActiveAnger(entity)`: without a target, return `highestAnger`.

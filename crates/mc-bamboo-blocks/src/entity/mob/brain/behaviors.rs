@@ -215,6 +215,10 @@ pub enum Kind {
     ///
     /// Villager-specific behaviours and Phase 4+ placeholders.
     Villager(super::super::villager_ai::Behavior),
+    /// 监守者专属行为。
+    ///
+    /// Warden-specific behaviours.
+    Warden(super::super::warden_ai::Behavior),
 }
 
 impl Kind {
@@ -355,6 +359,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.class(),
             Self::Nautilus(behavior) => behavior.class(),
             Self::Villager(behavior) => behavior.class(),
+            Self::Warden(behavior) => behavior.class(),
         }
     }
 
@@ -391,6 +396,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.required(),
             Self::Nautilus(behavior) => behavior.required(),
             Self::Villager(behavior) => behavior.required(),
+            Self::Warden(behavior) => behavior.required(),
         }
     }
 
@@ -432,6 +438,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.name(),
             Self::Nautilus(behavior) => behavior.name(),
             Self::Villager(behavior) => behavior.name(),
+            Self::Warden(behavior) => behavior.name(),
         }
     }
 
@@ -485,6 +492,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.extra_start(cx),
             Self::Nautilus(behavior) => behavior.extra_start(cx),
             Self::Villager(behavior) => behavior.extra_start(cx),
+            Self::Warden(behavior) => behavior.extra_start(cx),
             _ => true,
         }
     }
@@ -568,6 +576,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.start(cx),
             Self::Nautilus(behavior) => behavior.start(cx),
             Self::Villager(behavior) => behavior.start(cx),
+            Self::Warden(behavior) => behavior.start(cx),
             _ => {}
         }
     }
@@ -604,6 +613,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.can_still_use(cx),
             Self::Nautilus(behavior) => behavior.can_still_use(cx),
             Self::Villager(behavior) => behavior.can_still_use(cx),
+            Self::Warden(behavior) => behavior.can_still_use(cx),
             _ => false,
         }
     }
@@ -723,6 +733,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.tick(cx),
             Self::Nautilus(behavior) => behavior.tick(cx),
             Self::Villager(behavior) => behavior.tick(cx),
+            Self::Warden(behavior) => behavior.tick(cx),
             _ => {}
         }
     }
@@ -755,6 +766,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.stop(cx),
             Self::Nautilus(behavior) => behavior.stop(cx),
             Self::Villager(behavior) => behavior.stop(cx),
+            Self::Warden(behavior) => behavior.stop(cx),
             _ => {}
         }
     }
@@ -874,6 +886,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.trigger(cx),
             Self::Nautilus(behavior) => behavior.trigger(cx),
             Self::Villager(behavior) => behavior.trigger(cx),
+            Self::Warden(behavior) => behavior.trigger(cx),
             _ => false,
         }
     }
