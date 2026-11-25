@@ -933,6 +933,7 @@ fn snap_of(entity: Entity) -> OfficialEntity {
         EntityKind::SplashPotion(_) => ("splash_potion".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::Mob(_) => ("mob".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::LightningBolt(_) => ("lightning_bolt".to_owned(), -1, -1, -1, 0, -1, -1, -1),
+        EntityKind::LeashKnot(_) => ("leash_knot".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::ExperienceOrb(data) => (
             "experience_orb".to_owned(),
             -1,

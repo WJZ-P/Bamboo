@@ -787,6 +787,7 @@ mod tests {
             (SectionBlocksUpdate::ID, 86),
             (SetCursorItem::ID, 98),
             (SetEntityData::ID, 101),
+            (SetEntityLink::ID, 102),
             (SetEquipment::ID, 104),
             (SetExperience::ID, 105),
             (SetHealth::ID, 106),

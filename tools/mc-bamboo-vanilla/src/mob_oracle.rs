@@ -52,6 +52,7 @@ mod golem;
 mod grazing;
 mod guardian_scene;
 mod husk_jockey;
+mod leash;
 mod lightning;
 mod llama_spit;
 mod natural_spawn;
@@ -143,6 +144,7 @@ enum Line {
     PigBoost(pig_ride::BoostCase),
     PigDismount(pig_ride::DismountCase),
     LlamaSpit(Box<llama_spit::LlamaSpitCase>),
+    Leash(Box<leash::LeashCase>),
     WitchThrow(Box<witch_throw::WitchThrowCase>),
     NaturalSpawn(natural_spawn::Case),
     PatrolSpawn(patrol_spawn::Case),
@@ -1910,6 +1912,7 @@ impl Report {
                 Line::EquineDeath(case) => self.replay_equine_death(case),
                 Line::EquineSave(case) => self.replay_equine_save(case),
                 Line::LlamaSpit(case) => self.replay_llama_spit(&case),
+                Line::Leash(case) => self.replay_leash(&case),
                 Line::WitchThrow(case) => self.replay_witch_throw(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::PatrolSpawn(case) => self.replay_patrol_spawn(&case)?,
@@ -2110,6 +2113,8 @@ impl Report {
                         f64::from_bits(player.z as u64),
                     ),
                     delta: Vec3::default(),
+                    width: 0.6,
+                    height: 1.8,
                     eye_height: f32::from_bits(player.eye as u32),
                     health: 20.0,
                     look_direction: Vec3::view_vector(
@@ -2706,6 +2711,7 @@ impl Report {
                             f64::from_bits(player.y as u64),
                             f64::from_bits(player.z as u64),
                         ),
+                        player_height: 1.8,
                         sneaking: false,
                         difficulty: 2,
                     };
@@ -4788,6 +4794,7 @@ fn try_sleep(level: &mut MobLevel, ticks: &mut BlockTicks, case: &Case, head: Bl
     );
     let creative = case.player_creative;
     let actor = Actor {
+        uid: 0,
         uuid: ((1_u128 << 64) | 2).to_be_bytes(),
         position,
         yaw: 0.0,

@@ -466,6 +466,7 @@ impl Report {
             held: mc_bamboo_protocol::item::ItemStack::new(case.item, 1),
             creative: case.creative,
             position: Vec3::new(1.5, 64.0, 0.5),
+            player_height: 1.8,
             sneaking: case.sneak,
             difficulty: 2,
         };
