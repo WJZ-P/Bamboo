@@ -91,6 +91,7 @@ impl Report {
             short_hunger: false,
             ignore_bed_monsters: false,
             explosion_break: 0,
+            shoulder: Default::default(),
         };
         let mut ticks = BlockTicks::new();
         let mut spawner = spawner::WanderingTraderSpawner::with_random_seed(
@@ -332,6 +333,7 @@ impl SceneCase {
             short_hunger: false,
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
         }
     }
 
