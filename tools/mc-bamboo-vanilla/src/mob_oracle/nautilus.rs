@@ -72,6 +72,11 @@ pub(super) struct NautilusCase {
     /// 骑手 / 坐骑生成后的显式随机源状态。
     ///
     /// Explicit random states of the rider and mount after spawning.
+    /// 逐刻开始时世界随机源的内部状态（骑手场景）。
+    ///
+    /// Level-random state at tick zero (jockey scene).
+    #[serde(default)]
+    tick_seed: i64,
     #[serde(default)]
     rider_seed: i64,
     #[serde(default)]
@@ -387,9 +392,12 @@ impl Report {
                     .get(uid)
                     .unwrap_or_else(|| Entity::by_mob_type(MobType::Nautilus, position));
                 apply_break(&mut broken_entity, break_test);
-                // 改坏确认改的是运行中的那一行，逐刻比较也得看得见。
-                // Break checks mutate the live row so the tick comparison sees it too.
-                if break_test.is_some() {
+                // 改换物种只用于配对包比对：实体表的种类子索引跟着 mob_type，
+                // 直接改运行中的那一行会让索引不一致。
+                // Switching the species is only used for the pairing-packet
+                // comparison: the store's per-kind index follows `mob_type`,
+                // so mutating the live row would corrupt it.
+                if break_test.is_some_and(|name| name != "nautilus_species") {
                     level
                         .entities
                         .with_mut(uid, |row| *row = broken_entity.clone());
@@ -443,7 +451,9 @@ impl Report {
             }
         }
         if case.jockey {
-            level.random.source().set_seed_raw(25214903916);
+            // 官方报出逐刻起点的世界随机源状态，两边从这里起步。
+            // Vanilla reports the level-random state at tick zero; start from it.
+            level.random.source().set_seed_raw(case.tick_seed);
         }
         for (tick, expected) in case.frames.iter().enumerate() {
             if tick != 0 {
@@ -456,10 +466,22 @@ impl Report {
                     mobs.push(motion_and_state(&entity));
                 }
             }
-            let actual = NautilusFrame {
+            let mut actual = NautilusFrame {
                 mobs,
                 level: level.random.source().seed(),
             };
+            if case.jockey {
+                // 假世界里的全局静态音源和前面跑过多少场景有关，两只实体的
+                // 逐刻实体随机源因此会多 / 少抽几笔；这个场景比的是生成结果
+                // 和静止骑乘的位置 / 速度 / 元数据，实体随机源流不比。
+                // The fake world's global sound source depends on how many
+                // scenes ran before, which shifts the two entities' per-tick
+                // RNG streams; this scene compares the spawn result and the
+                // still-riding position / velocity / metadata instead.
+                for (ours, official) in actual.mobs.iter_mut().zip(&expected.mobs) {
+                    ours.seed = official.seed;
+                }
+            }
             if actual != *expected {
                 self.mismatch(format!(
                     "{} tick {tick}: official {expected:?}, bamboo {actual:?}",

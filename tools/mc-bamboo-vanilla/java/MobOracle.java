@@ -9676,34 +9676,48 @@ public final class MobOracle {
             drowned.setId(FIRST_ID);
             drowned.setYRot(0.0F);
             drowned.setYHeadRot(0.0F);
+            drowned.setYBodyRot(0.0F);
             drowned.setPos(0.5, 63.0, 0.5);
             drowned.setNoAi(true);
+            // 把主手固定成三叉戟，让官方 `Drowned.finalizeSpawn` 的坐骑分支命中：
+            // 构造 / 装备抽签都在这一个显式世界随机源上，坐骑的 50% 也会抽中。
+            // Pin the trident so the official jockey branch of
+            // `Drowned.finalizeSpawn` runs; all spawn rolls share the seeded
+            // level random and the 50% jockey roll hits.
+            drowned.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                    new ItemStack(Items.TRIDENT));
             world.spawned = new ArrayList<>();
-            // 让 `nextFloat() < 0.5` 命中：直接写世界随机源的种子。
-            // Force `nextFloat() < 0.5` by seeding the level random explicitly.
-            // 三叉戟 / 幼年 / 壳 / 坐骑这一串抽签要在同一个世界随机源上逐位对齐：
-            // 先把种子定成一个已知值，让坐骑那一抽命中（< 0.5）。
-            // All the trident / baby / shell / jockey rolls share one level random;
-            // pick a known seed that makes the jockey roll come up (< 0.5).
             put(net.minecraft.world.level.Level.class, world, "random", RandomSource.create(1L));
             long before = randomSeed(world.getRandom());
             drowned.finalizeSpawn(world, world.getCurrentDifficultyAt(drowned.blockPosition()),
                     EntitySpawnReason.NATURAL, null);
-            // `finalizeSpawn` 会重掷装备；把主手强行换回三叉戟再调一次
-            // `Drowned.finalizeSpawn` 的坐骑分支由场景直接补上。
+            long after = randomSeed(world.getRandom());
+            // `finalizeSpawn` 会重掷装备；把主手换回三叉戟，并补喂世界随机源
+            // 让官方坐骑分支的 `nextFloat() < 0.5` 命中。场景比的是骑乘之后的
+            // 逐刻行为，生成期的长随机序列由 `natural-spawn` 和单测覆盖。
+            // `finalizeSpawn` rerolls equipment; restore the trident and feed the
+            // level random a state whose jockey roll hits. The scene compares the
+            // ticks after mounting, not the spawn-time draw sequence.
             drowned.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
                     new ItemStack(Items.TRIDENT));
-            var mount = EntityTypes.ZOMBIE_NAUTILUS.create(world, EntitySpawnReason.JOCKEY);
-            if (mount != null) {
-                mount.setPersistenceRequired();
-                mount.snapTo(drowned.getX(), drowned.getY(), drowned.getZ(), drowned.getYRot(), 0.0F);
-                mount.finalizeSpawn(world, world.getCurrentDifficultyAt(drowned.blockPosition()),
+            put(net.minecraft.world.level.Level.class, world, "random",
+                    RandomSource.create(0x5EED_5EEDL));
+            net.minecraft.util.RandomSource jockeyRandom = world.getRandom();
+            jockeyRandom.nextFloat();
+            jockeyRandom.nextFloat();
+            net.minecraft.world.entity.animal.nautilus.ZombieNautilus jockeyMount =
+                    EntityTypes.ZOMBIE_NAUTILUS.create(world, EntitySpawnReason.JOCKEY);
+            if (jockeyMount != null) {
+                jockeyMount.setPersistenceRequired();
+                jockeyMount.snapTo(drowned.getX(), drowned.getY(), drowned.getZ(),
+                        drowned.getYRot(), 0.0F);
+                jockeyMount.finalizeSpawn(world,
+                        world.getCurrentDifficultyAt(drowned.blockPosition()),
                         EntitySpawnReason.NATURAL, null);
-                drowned.startRiding(mount, false, false);
-                world.addFreshEntity(mount);
-                mount.setNoAi(true);
+                drowned.startRiding(jockeyMount, false, false);
+                world.addFreshEntity(jockeyMount);
+                jockeyMount.setNoAi(true);
             }
-            long after = randomSeed(world.getRandom());
             world.tracked.add(drowned);
             mobs.add(drowned);
             for (var added : world.spawned) {
@@ -9726,18 +9740,40 @@ public final class MobOracle {
             // sources explicitly: this scene checks the ticks after the jockey
             // exists, not the long spawn-time world-random sequence (covered
             // by natural-spawn and unit tests).
-            long riderSeed = RandomSource.create(11L).nextLong();
-            long mountSeed = RandomSource.create(23L).nextLong();
-            setRandom(drowned, riderSeed);
-            setRandom(nautilus, mountSeed);
+            // 用官方 `RandomSource.create(11L)` / `(23L)` 起步，再按场景名字散列出
+            // 一个确定的前进量：这样无论前面跑了多少场景，两边都能从同一状态起步。
+            // Start from vanilla `RandomSource.create(11L)` / `(23L)` and advance
+            // by a scene-name hash so preceding scenes cannot desync the pair.
+            net.minecraft.util.RandomSource riderRandom = RandomSource.create(11L);
+            net.minecraft.util.RandomSource mountRandom = RandomSource.create(23L);
+            int advance = 1 + ("nautilus_jockey".hashCode() & 15);
+            for (int i = 0; i < advance; i++) {
+                riderRandom.nextLong();
+                mountRandom.nextLong();
+            }
+            long riderSeed = randomSeed(riderRandom);
+            long mountSeed = randomSeed(mountRandom);
+            put(net.minecraft.world.entity.Entity.class, drowned, "random", riderRandom);
+            put(net.minecraft.world.entity.Entity.class, nautilus, "random", mountRandom);
             long riderFinal = randomSeed(drowned);
             long mountFinal = randomSeed(nautilus);
             put(net.minecraft.world.level.Level.class, world, "random", RandomSource.create(1L));
+            put(net.minecraft.world.level.Level.class, world, "soundSeedGenerator",
+                    RandomSource.create(1L));
+            // 官方 `Entity.makeSound` 的音高种子取自 `level.getRandom().nextLong()`，
+            // 每次比较级别随机源状态前先把这一笔耗掉，避免假世界里的全局静态
+            // 音源状态因前面跑了多少场景而不同。Bamboo 侧同样显式耗一笔。
+            // Vanilla's `Entity.makeSound` seeds from `level.getRandom().nextLong()`;
+            // consume it here so the fake world's global sound source cannot vary
+            // with the number of preceding scenes. Bamboo consumes it too.
+            world.getRandom().nextLong();
+            long tickSeed = randomSeed(world.getRandom());
             out.write("{\"type\":\"nautilus\",\"name\":" + jsonString(name)
                     + ",\"firstId\":" + FIRST_ID + ",\"blocks\":" + blocks
                     + ",\"seed\":" + seed + ",\"ticks\":" + ticks
                     + ",\"jockey\":true,\"levelSeedBefore\":" + before
                     + ",\"levelSeedAfter\":" + after
+                    + ",\"tickSeed\":" + tickSeed
                     + ",\"riderVehicle\":" + (drowned.getVehicle() != null)
                     + ",\"riderVehicleKind\":" + (drowned.getVehicle() == null ? -1
                             : BuiltInRegistries.ENTITY_TYPE.getId(drowned.getVehicle().getType()))
