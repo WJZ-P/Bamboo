@@ -65,6 +65,74 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
     selector
 }
 
+/// `ItemBasedSteering`：胡萝卜钓竿加速的状态。`boost_time_total` 就是同步给客户端的
+/// `DATA_BOOST_TIME`。
+///
+/// `ItemBasedSteering`: the carrot-on-a-stick boost state. `boost_time_total` is
+/// the synced `DATA_BOOST_TIME`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Steering {
+    pub boosting: bool,
+    pub boost_time: i32,
+    pub boost_time_total: i32,
+}
+
+impl Steering {
+    /// `ItemBasedSteering.boost`：已在加速时返回假；否则开始加速，总时长 `nextInt(841) + 140`。
+    ///
+    /// `ItemBasedSteering.boost`: false while boosting, otherwise start a boost of
+    /// `nextInt(841) + 140` ticks.
+    pub fn boost(&mut self, random: &dyn crate::random::RandomSource) -> bool {
+        if self.boosting {
+            return false;
+        }
+        self.boosting = true;
+        self.boost_time = 0;
+        self.boost_time_total = random.next_int(841) + 140;
+        true
+    }
+
+    /// `ItemBasedSteering.tickBoost`：比较的是自增前的值。
+    ///
+    /// `ItemBasedSteering.tickBoost`: compares the value before the increment.
+    pub fn tick_boost(&mut self) {
+        if self.boosting {
+            let old = self.boost_time;
+            self.boost_time += 1;
+            if old > self.boost_time_total {
+                self.boosting = false;
+            }
+        }
+    }
+
+    /// `ItemBasedSteering.boostFactor`。
+    ///
+    /// `ItemBasedSteering.boostFactor`.
+    pub fn boost_factor(&self) -> f32 {
+        if self.boosting && self.boost_time_total > 0 {
+            let t = self.boost_time as f32 / self.boost_time_total as f32;
+            1.0 + 1.15 * mc_bamboo_core::mth::sin(f64::from(t * std::f32::consts::PI))
+        } else {
+            1.0
+        }
+    }
+}
+
+/// `Pig.tickRidden`：朝向跟骑手（俯仰取一半），旧朝向、身体、头对齐，再走 `tickBoost`。
+///
+/// `Pig.tickRidden`: face the rider (half pitch), snap previous/body/head yaw, then
+/// `tickBoost`.
+pub(super) fn tick_ridden(me: &mut Entity, mob: &mut Mob, yaw: f32, pitch: f32) {
+    let yaw = if yaw.is_finite() { yaw } else { me.y_rot };
+    let pitch = if pitch.is_finite() { pitch } else { 0.0 };
+    me.y_rot = yaw;
+    mob.x_rot = super::control::clamp_x_rot(pitch * 0.5, mob.x_rot);
+    mob.y_rot_o = yaw;
+    mob.y_body_rot = yaw;
+    mob.y_head_rot = yaw;
+    mob.pig_steering.tick_boost();
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SoundVariant {
     Big,
