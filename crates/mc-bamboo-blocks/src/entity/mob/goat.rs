@@ -1521,6 +1521,7 @@ pub(super) fn interact(mob: &mut Mob, req: &MobInteractRequest) -> Option<MobInt
         tamed: false,
         filled_bucket: false,
         self_hurt: None,
+        level_events: Vec::new(),
     })
 }
 
@@ -1649,6 +1650,7 @@ mod tests {
             tamed: false,
             filled_bucket: false,
             self_hurt: None,
+            level_events: Vec::new(),
         };
         assert_eq!(
             eating_sounds(&goat, &request(1, false, items::WHEAT), &fed(false)),

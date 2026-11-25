@@ -599,6 +599,8 @@ pub(super) fn interact(me: &Entity, mob: &mut Mob, req: &MobInteractRequest) -> 
         return MobInteraction {
             result: InteractionResult::SuccessServer,
             shrink_held: !req.creative,
+            // `level.levelEvent(this, 3003, blockPosition(), 0)`：打蜡粒子。
+            level_events: vec![(3003, me.block_position(), 0)],
             ..MobInteraction::pass()
         };
     }
@@ -609,6 +611,8 @@ pub(super) fn interact(me: &Entity, mob: &mut Mob, req: &MobInteractRequest) -> 
         return MobInteraction {
             result: InteractionResult::SuccessServer,
             damage_held: true,
+            // `level.levelEvent(this, 3004, blockPosition(), 0)`：去蜡粒子。
+            level_events: vec![(3004, me.block_position(), 0)],
             ..MobInteraction::pass()
         };
     }
@@ -619,6 +623,8 @@ pub(super) fn interact(me: &Entity, mob: &mut Mob, req: &MobInteractRequest) -> 
         return MobInteraction {
             result: InteractionResult::SuccessServer,
             damage_held: true,
+            // `level.levelEvent(this, 3005, blockPosition(), 0)`：刮锈粒子。
+            level_events: vec![(3005, me.block_position(), 0)],
             ..MobInteraction::pass()
         };
     }
@@ -738,6 +744,7 @@ mod tests {
         let out = interact(&me, &mut mob, &request(ItemStack::new(items::HONEYCOMB, 1)));
         assert_eq!(out.result, InteractionResult::SuccessServer);
         assert!(out.shrink_held);
+        assert_eq!(out.level_events, vec![(3003, me.block_position(), 0)]);
         assert_eq!(
             mob.copper_golem.next_weathering_tick,
             IGNORE_WEATHERING_TICK
@@ -755,6 +762,7 @@ mod tests {
         );
         assert_eq!(out.result, InteractionResult::SuccessServer);
         assert!(out.damage_held);
+        assert_eq!(out.level_events, vec![(3004, me.block_position(), 0)]);
         assert_eq!(mob.copper_golem.next_weathering_tick, UNSET_WEATHERING_TICK);
     }
 
@@ -769,6 +777,7 @@ mod tests {
             &request(ItemStack::new(items::DIAMOND_AXE, 1)),
         );
         assert_eq!(out.result, InteractionResult::SuccessServer);
+        assert_eq!(out.level_events, vec![(3005, me.block_position(), 0)]);
         assert_eq!(mob.copper_golem.weather_state, WeatherState::Weathered);
         assert_eq!(mob.copper_golem.next_weathering_tick, UNSET_WEATHERING_TICK);
     }

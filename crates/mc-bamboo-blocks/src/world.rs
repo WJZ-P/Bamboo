@@ -3900,6 +3900,11 @@ impl<'a> World<'a> {
                 amount,
             );
         }
+        // `level.levelEvent(this, event, blockPosition(), data)`：客户端靠这个包播
+        // 打蜡 / 去蜡 / 刮锈的粒子，世界里没有方块状态变化。
+        for (event, pos, data) in &outcome.level_events {
+            self.level_event(*event, *pos, *data);
+        }
         outcome
     }
 

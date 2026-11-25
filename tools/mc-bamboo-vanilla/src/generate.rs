@@ -4389,7 +4389,10 @@ fn entity_types_file(data: &VersionData) -> String {
         ("FROG_TONGUE_TARGET", facts.frog_tongue_target),
         ("SNIFFER_STATE", facts.sniffer_state),
         ("SNIFFER_DROP_SEED_AT_TICK", facts.sniffer_drop_seed_at_tick),
-        ("COPPER_GOLEM_WEATHER_STATE", facts.copper_golem_weather_state),
+        (
+            "COPPER_GOLEM_WEATHER_STATE",
+            facts.copper_golem_weather_state,
+        ),
         ("COPPER_GOLEM_STATE", facts.copper_golem_state),
         ("TURTLE_HAS_EGG", facts.turtle_has_egg),
         ("TURTLE_LAYING_EGG", facts.turtle_laying_egg),
