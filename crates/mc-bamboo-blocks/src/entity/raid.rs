@@ -179,6 +179,13 @@ pub struct Raid {
     pub raiders: std::collections::BTreeMap<i32, Vec<i32>>,
     /// `groupToLeaderMap`：每波队长实体 uid。
     pub leaders: std::collections::BTreeMap<i32, i32>,
+    /// `Raid.random` 的状态（Java Random 的 LCG）。官方构造时 `RandomSource.create()`，
+    /// 读盘时重建，所以不存档。对拍场景里预设 `waveSpawnPos` 能绕过位置随机。
+    ///
+    /// State of `Raid.random` (a Java-Random LCG). Vanilla creates it fresh in
+    /// the constructor and rebuilds it on load, so it is not saved. Scenes can
+    /// preset `waveSpawnPos` to bypass spawn-position randomness.
+    pub rng_state: u64,
 }
 
 impl Raid {
@@ -204,6 +211,7 @@ impl Raid {
             celebration_ticks: 0,
             raiders: std::collections::BTreeMap::new(),
             leaders: std::collections::BTreeMap::new(),
+            rng_state: random_seed(center),
         }
     }
 
@@ -250,6 +258,31 @@ impl Raid {
             .values()
             .map(|members| members.len() as i32)
             .sum()
+    }
+
+    /// `Random.nextInt(bits)` 的一次 LCG 取数。
+    pub fn next_bits(&mut self, bits: u32) -> i32 {
+        self.rng_state =
+            self.rng_state.wrapping_mul(0x5DEE_CE66D).wrapping_add(0xB) & ((1u64 << 48) - 1);
+        (self.rng_state >> (48 - bits)) as i32
+    }
+
+    /// `Random.nextInt(bound)`。袭击里只用到很小的 bound（2、3），省去官方
+    /// 的溢出回绕重试也不会改变取数。
+    pub fn next_int(&mut self, bound: i32) -> i32 {
+        if bound <= 0 {
+            return 0;
+        }
+        if (bound & (bound - 1)) == 0 {
+            ((i64::from(bound) * i64::from(self.next_bits(31))) >> 31) as i32
+        } else {
+            self.next_bits(31) % bound
+        }
+    }
+
+    /// `Random.nextFloat()`。
+    pub fn next_float(&mut self) -> f32 {
+        self.next_bits(24) as f32 / ((1 << 24) as f32)
     }
 
     /// `isOver()`：胜利或失败。
@@ -467,6 +500,7 @@ impl Raid {
                 celebration_ticks: 0,
                 raiders: std::collections::BTreeMap::new(),
                 leaders: std::collections::BTreeMap::new(),
+                rng_state: random_seed(center),
             },
         ))
     }
@@ -606,6 +640,16 @@ impl Raids {
             tick: *tick,
         }
     }
+}
+
+/// `Raid.random` 的初始种子：官方用 `RandomSource.create()`（每次都不同），
+/// 这里按中心派生一个确定值，逐刻场景可复现；官方不存档这个随机源。
+fn random_seed(center: BlockPos) -> u64 {
+    let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+    seed ^= (center.x as u64).wrapping_mul(0x100_0000_01B3);
+    seed ^= (center.y as u64).wrapping_mul(0x9E37_79B1);
+    seed ^= (center.z as u64).wrapping_mul(0x85EB_CA6B);
+    (seed ^ 0x5DEE_CE66D) & ((1u64 << 48) - 1)
 }
 
 /// `BlockPos.CODEC` 的 NBT：三个 int 的 `IntArray`。

@@ -3657,6 +3657,9 @@ fn run_island_simulation(
     // level random draws follow the random ticks and phantoms come before patrols.
     crate::phantom_spawn::tick(region);
     crate::patrol_spawn::tick(region);
+    // 官方 `ServerLevel.tick` 的 "raid" 阶段：自定义刷怪器之后跑袭击状态机。
+    // Vanilla's "raid" phase of `ServerLevel.tick`: after the custom spawners.
+    crate::raid::tick(region);
     region.profiler.lap(Phase::RandomTicks);
     region.profiler.begin_chunk_phase(ChunkPhase::BlockEvents);
     region.profiler.begin_partition_phase();
