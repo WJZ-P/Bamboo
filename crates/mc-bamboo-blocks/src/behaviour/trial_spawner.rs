@@ -13,8 +13,12 @@ use mc_bamboo_nbt::Tag;
 use crate::{
     LegacyRandom,
     archive::tag::{self, field, put},
-    entity::mob::spawn::SpawnReason,
+    entity::{
+        ctx::BlockView,
+        mob::{MobType, spawn::SpawnReason},
+    },
     level::Effect,
+    shape::{Aabb, CollisionContext},
     state::{OMINOUS, TRIAL_SPAWNER_STATE, TrialSpawnerState},
 };
 
@@ -1067,6 +1071,38 @@ impl TrialSpawnerContext for TrialSpawnerWorld<'_, '_> {
             f64::from(pos.y + random.next_int(3) - 1),
             f64::from(pos.z) + (random.next_double() - random.next_double()) * range + 0.5,
         );
+        // `noCollision(entityType.getSpawnAABB(x,y,z))`：生点周围不能撞方块。
+        let id = field(entity_tag, "id").and_then(|value| match value {
+            Tag::String(text) if !text.is_empty() => Some(text.as_str()),
+            _ => None,
+        })?;
+        let kind = MobType::by_name(id)?;
+        let (width, height, _) = kind.dimensions(false);
+        let half = f64::from(width / 2.0);
+        let spawn_box = Aabb::new(
+            position.x - half,
+            position.y,
+            position.z - half,
+            position.x + half,
+            position.y + f64::from(height),
+            position.z + half,
+        );
+        if !BlockView::block_collisions(&*self.world, spawn_box, CollisionContext::Empty).is_empty()
+        {
+            return None;
+        }
+        // `inLineOfSight(atCenterOf(pos), position)`：从生点到刷怪笼中心没有视觉遮挡。
+        let center = Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.5,
+            f64::from(pos.z) + 0.5,
+        );
+        if let Some(hit) =
+            BlockView::clip_collider(&*self.world, position, center, CollisionContext::Empty)
+            && hit.pos != BlockPos::containing(center)
+        {
+            return None;
+        }
         // `lambda$spawnMob$2`：朝向 (nextFloat*360, 0)。
         let yaw = random.next_float() * 360.0;
         let uuid = self.world.spawn_from_spawn_data(
