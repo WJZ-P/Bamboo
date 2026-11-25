@@ -440,7 +440,7 @@ fn wing_room(piece: &mut MonumentPiece<'_>, main_design: i32) {
         piece.place(light, 13, 7, 20);
         piece.box_at([6, 0, 21, 7, 4, 21], light, light);
         piece.box_at([15, 0, 21, 16, 4, 21], light, light);
-        let _ = piece.elder_position(11, 2, 16);
+        piece.spawn_elder(11, 2, 16);
     } else if main_design == 1 {
         piece.box_at([9, 3, 18, 13, 3, 20], light, light);
         piece.box_at([9, 0, 18, 9, 2, 18], light, light);
@@ -474,7 +474,7 @@ fn wing_room(piece: &mut MonumentPiece<'_>, main_design: i32) {
 
         piece.box_at([8, 3, 8, 8, 3, 13], black, black);
         piece.box_at([14, 3, 8, 14, 3, 13], black, black);
-        let _ = piece.elder_position(11, 5, 13);
+        piece.spawn_elder(11, 5, 13);
     }
 }
 
@@ -528,5 +528,5 @@ fn penthouse(piece: &mut MonumentPiece<'_>) {
     piece.box_at([8, 0, 10, 8, 2, 10], light, light);
     piece.box_at([6, -1, 7, 7, -1, 8], black, black);
     piece.water_box(6, -1, 3, 7, -1, 4);
-    let _ = piece.elder_position(6, 1, 6);
+    piece.spawn_elder(6, 1, 6);
 }

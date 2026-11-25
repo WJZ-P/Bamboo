@@ -53,6 +53,8 @@ fn scene_kind(kind: i32) -> MobType {
         72 => MobType::Axolotl,
         73 => MobType::Cod,
         75 => MobType::TropicalFish,
+        80 => MobType::Dolphin,
+        81 => MobType::Guardian,
         _ => unreachable!("unknown attack-target kind {kind}"),
     }
 }
@@ -109,6 +111,9 @@ struct MobFrame {
     death_time: i32,
     removed: i32,
     target: i32,
+    /// `AvoidEntityGoal` 是否正在跑。
+    #[serde(default)]
+    avoiding: bool,
 }
 
 impl AttackTargetCase {
@@ -330,10 +335,16 @@ fn frame_of(level: &MobLevel, id: i32) -> MobFrame {
             death_time: 0,
             removed: 1,
             target: -1,
+            avoiding: false,
         };
     };
     let mob = entity.kind.mob().expect("an attack-target mob");
     MobFrame {
+        avoiding: mob
+            .goals
+            .goals
+            .iter()
+            .any(|goal| goal.running && matches!(goal.goal, Goal::Avoid(_))),
         motion: [
             entity.position.x.to_bits() as i64,
             entity.position.y.to_bits() as i64,
@@ -403,6 +414,18 @@ impl Report {
             let label = format!("{} tick {tick}", case.name);
             compare_frame(self, &label, "attacker", &expected.attacker, &ours.attacker);
             compare_frame(self, &label, "victim", &expected.victim, &ours.victim);
+            // 海豚场景必须真的启动 `AvoidEntityGoal`，且守卫者不把海豚设为目标：
+            // 否则短场景会变成假绿。
+            // The dolphin scene must really start `AvoidEntityGoal` and the
+            // guardian must not target the dolphin, or the short scene is a false green.
+            if case.name == "attack_target_dolphin_guardian" {
+                if !case.frames.iter().any(|frame| frame.attacker.avoiding) {
+                    self.mismatch("dolphin avoid goal never ran in the official fixture".into());
+                }
+                if ours.victim.target == attacker {
+                    self.mismatch(format!("{label}: guardian targeted the dolphin"));
+                }
+            }
             self.steps += 1;
             if self.mismatches.len() >= self.show {
                 return;

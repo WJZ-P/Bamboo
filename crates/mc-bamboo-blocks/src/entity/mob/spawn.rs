@@ -514,6 +514,15 @@ fn finalize_spawn_in_group(
         super::pillager::finalize_spawn(world, entity, reason);
         return;
     }
+    // `Guardian` / `ElderGuardian` 没有自己的 `finalizeSpawn`，只走 `Monster` 继承的
+    // `Mob.finalizeSpawn`（跟随距离加成 + 左撇子，各取世界随机源一次）。
+    //
+    // Guardians have no `finalizeSpawn` override: only the inherited
+    // `Mob.finalizeSpawn` (follow-range bonus + left-handedness, two level draws).
+    if super::guardian::is_guardian(kind) {
+        super::creeper::finalize_spawn(entity, world.random());
+        return;
+    }
     if kind == MobType::Villager {
         super::villager::finalize_spawn(world, entity, reason, group);
         return;

@@ -2774,3 +2774,174 @@ pub static SNOW_GOLEM_MELTS: &[bool] = &[
     true, // minecraft:windswept_savanna
     true, // minecraft:wooded_badlands
 ];
+
+/// 官方 `StructureSpawnOverride.BoundingBoxType`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructureSpawnOverrideBox {
+    /// `STRUCTURE`：整个起点的包围盒。
+    Structure,
+    /// `PIECE`：某个结构件的包围盒。
+    Piece,
+}
+
+/// 一项结构刷怪覆盖。
+#[derive(Debug, Clone, Copy)]
+pub struct StructureSpawnOverride {
+    pub structure: &'static str,
+    pub bounding: StructureSpawnOverrideBox,
+    /// `MobCategory` 的判别值。
+    pub category: u8,
+    pub spawns: &'static [MobSpawnerDef],
+}
+
+/// `data/minecraft/worldgen/structure/*.json` 的 `spawn_overrides`，按结构名和类别排序。
+#[rustfmt::skip]
+pub static STRUCTURE_SPAWN_OVERRIDES: &[StructureSpawnOverride] = &[
+    // minecraft:ancient_city / monster
+    StructureSpawnOverride { structure: "minecraft:ancient_city", bounding: StructureSpawnOverrideBox::Structure, category: 0, spawns: SPAWN_OVERRIDE_LIST_0 },
+    // minecraft:ancient_city / creature
+    StructureSpawnOverride { structure: "minecraft:ancient_city", bounding: StructureSpawnOverrideBox::Structure, category: 1, spawns: SPAWN_OVERRIDE_LIST_1 },
+    // minecraft:ancient_city / ambient
+    StructureSpawnOverride { structure: "minecraft:ancient_city", bounding: StructureSpawnOverrideBox::Structure, category: 2, spawns: SPAWN_OVERRIDE_LIST_2 },
+    // minecraft:ancient_city / axolotls
+    StructureSpawnOverride { structure: "minecraft:ancient_city", bounding: StructureSpawnOverrideBox::Structure, category: 3, spawns: SPAWN_OVERRIDE_LIST_3 },
+    // minecraft:ancient_city / underground_water_creature
+    StructureSpawnOverride { structure: "minecraft:ancient_city", bounding: StructureSpawnOverrideBox::Structure, category: 4, spawns: SPAWN_OVERRIDE_LIST_4 },
+    // minecraft:ancient_city / water_creature
+    StructureSpawnOverride { structure: "minecraft:ancient_city", bounding: StructureSpawnOverrideBox::Structure, category: 5, spawns: SPAWN_OVERRIDE_LIST_5 },
+    // minecraft:ancient_city / water_ambient
+    StructureSpawnOverride { structure: "minecraft:ancient_city", bounding: StructureSpawnOverrideBox::Structure, category: 6, spawns: SPAWN_OVERRIDE_LIST_6 },
+    // minecraft:ancient_city / misc
+    StructureSpawnOverride { structure: "minecraft:ancient_city", bounding: StructureSpawnOverrideBox::Structure, category: 7, spawns: SPAWN_OVERRIDE_LIST_7 },
+    // minecraft:fortress / monster
+    StructureSpawnOverride { structure: "minecraft:fortress", bounding: StructureSpawnOverrideBox::Piece, category: 0, spawns: SPAWN_OVERRIDE_LIST_8 },
+    // minecraft:monument / monster
+    StructureSpawnOverride { structure: "minecraft:monument", bounding: StructureSpawnOverrideBox::Structure, category: 0, spawns: SPAWN_OVERRIDE_LIST_9 },
+    // minecraft:monument / axolotls
+    StructureSpawnOverride { structure: "minecraft:monument", bounding: StructureSpawnOverrideBox::Structure, category: 3, spawns: SPAWN_OVERRIDE_LIST_10 },
+    // minecraft:monument / underground_water_creature
+    StructureSpawnOverride { structure: "minecraft:monument", bounding: StructureSpawnOverrideBox::Structure, category: 4, spawns: SPAWN_OVERRIDE_LIST_11 },
+    // minecraft:pillager_outpost / monster
+    StructureSpawnOverride { structure: "minecraft:pillager_outpost", bounding: StructureSpawnOverrideBox::Structure, category: 0, spawns: SPAWN_OVERRIDE_LIST_12 },
+    // minecraft:swamp_hut / monster
+    StructureSpawnOverride { structure: "minecraft:swamp_hut", bounding: StructureSpawnOverrideBox::Piece, category: 0, spawns: SPAWN_OVERRIDE_LIST_13 },
+    // minecraft:swamp_hut / creature
+    StructureSpawnOverride { structure: "minecraft:swamp_hut", bounding: StructureSpawnOverrideBox::Piece, category: 1, spawns: SPAWN_OVERRIDE_LIST_14 },
+    // minecraft:trial_chambers / monster
+    StructureSpawnOverride { structure: "minecraft:trial_chambers", bounding: StructureSpawnOverrideBox::Piece, category: 0, spawns: SPAWN_OVERRIDE_LIST_15 },
+    // minecraft:trial_chambers / creature
+    StructureSpawnOverride { structure: "minecraft:trial_chambers", bounding: StructureSpawnOverrideBox::Piece, category: 1, spawns: SPAWN_OVERRIDE_LIST_16 },
+    // minecraft:trial_chambers / ambient
+    StructureSpawnOverride { structure: "minecraft:trial_chambers", bounding: StructureSpawnOverrideBox::Piece, category: 2, spawns: SPAWN_OVERRIDE_LIST_17 },
+    // minecraft:trial_chambers / axolotls
+    StructureSpawnOverride { structure: "minecraft:trial_chambers", bounding: StructureSpawnOverrideBox::Piece, category: 3, spawns: SPAWN_OVERRIDE_LIST_18 },
+    // minecraft:trial_chambers / underground_water_creature
+    StructureSpawnOverride { structure: "minecraft:trial_chambers", bounding: StructureSpawnOverrideBox::Piece, category: 4, spawns: SPAWN_OVERRIDE_LIST_19 },
+    // minecraft:trial_chambers / water_creature
+    StructureSpawnOverride { structure: "minecraft:trial_chambers", bounding: StructureSpawnOverrideBox::Piece, category: 5, spawns: SPAWN_OVERRIDE_LIST_20 },
+    // minecraft:trial_chambers / water_ambient
+    StructureSpawnOverride { structure: "minecraft:trial_chambers", bounding: StructureSpawnOverrideBox::Piece, category: 6, spawns: SPAWN_OVERRIDE_LIST_21 },
+    // minecraft:trial_chambers / misc
+    StructureSpawnOverride { structure: "minecraft:trial_chambers", bounding: StructureSpawnOverrideBox::Piece, category: 7, spawns: SPAWN_OVERRIDE_LIST_22 },
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_0: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_1: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_2: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_3: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_4: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_5: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_6: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_7: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_8: &[MobSpawnerDef] = &[
+    MobSpawnerDef { entity_type: 14, weight: 10, min: 2, max: 3 },
+    MobSpawnerDef { entity_type: 158, weight: 5, min: 4, max: 4 },
+    MobSpawnerDef { entity_type: 150, weight: 8, min: 5, max: 5 },
+    MobSpawnerDef { entity_type: 118, weight: 2, min: 5, max: 5 },
+    MobSpawnerDef { entity_type: 81, weight: 3, min: 4, max: 4 },
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_9: &[MobSpawnerDef] = &[
+    MobSpawnerDef { entity_type: 64, weight: 1, min: 2, max: 4 },
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_10: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_11: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_12: &[MobSpawnerDef] = &[
+    MobSpawnerDef { entity_type: 104, weight: 1, min: 1, max: 1 },
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_13: &[MobSpawnerDef] = &[
+    MobSpawnerDef { entity_type: 148, weight: 1, min: 1, max: 1 },
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_14: &[MobSpawnerDef] = &[
+    MobSpawnerDef { entity_type: 21, weight: 1, min: 1, max: 1 },
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_15: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_16: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_17: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_18: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_19: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_20: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_21: &[MobSpawnerDef] = &[
+];
+
+#[rustfmt::skip]
+const SPAWN_OVERRIDE_LIST_22: &[MobSpawnerDef] = &[
+];

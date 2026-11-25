@@ -493,6 +493,7 @@ fn generated_chunk(
         heightmaps: Default::default(),
         post_processing: Vec::new(),
         block_entities: Vec::new(),
+        entities: Vec::new(),
     })
 }
 

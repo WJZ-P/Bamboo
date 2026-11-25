@@ -1076,6 +1076,10 @@ impl PieceLevel for FeaturePieceLevel<'_, '_> {
         self.world.set_block_entity(x, y, z, nbt);
     }
 
+    fn add_generated_entity(&mut self, entity: crate::feature::GeneratedEntity) {
+        self.world.entities.push(entity);
+    }
+
     fn min_y(&self) -> i32 {
         self.world.min_y
     }

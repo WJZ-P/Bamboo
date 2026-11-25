@@ -538,7 +538,7 @@ public final class MobOracle {
                     || "natural_fish".equals(only)
                     || "witch_spawn".equals(only) || "drowned_spawn".equals(only)
                     || "stray_spawn".equals(only) || "bogged_spawn".equals(only)
-                    || "bat_spawn".equals(only)) {
+                    || "guardian_spawn".equals(only) || "bat_spawn".equals(only)) {
                 cases += playNaturalSpawns(official, out, only);
             }
             if ("gen_spawn".equals(only) || "gen_spawn_misc".equals(only) || "gen_spawn_panda".equals(only)) {
@@ -578,7 +578,8 @@ public final class MobOracle {
                     "attack_target_fox_fish", "attack_target_wolf_baby_turtle",
                     "attack_target_wolf_baby_turtle_water", "attack_target_spider_armadillo_idle",
                     "attack_target_spider_armadillo_scared", "attack_target_polar_bear_fox",
-                    "attack_target_polar_bear_fox_unreachable", "attack_target_llama_wolf")) {
+                    "attack_target_polar_bear_fox_unreachable", "attack_target_llama_wolf",
+                    "attack_target_dolphin_guardian")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playAttackTarget(official, out, name);
                 cases++;
@@ -6202,6 +6203,17 @@ public final class MobOracle {
         // need clay below.
         scenes.add(new NaturalScene("dolphin_ocean", EntityTypes.DOLPHIN, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("axolotl_lush", EntityTypes.AXOLOTL, "lush_caves", 2, 0, 0, 0, false, -32, 0, 289, true, false));
+        // 海底神殿：官方 `minecraft:monument` 的 MONSTER 覆盖是守卫者 ×2–4（full 盒）。
+        // 夹具直接把这一张表交给 `getMobsAt`；`_sky` 看得见水面天空、其余场景用不透明
+        // 屋顶挡住 `canSeeSkyFromBelowWater`，和平难度也单独覆盖。
+        //
+        // Ocean monument: the official MONSTER override is guardians ×2–4 (full box).
+        // The fixture passes that exact table to `getMobsAt`; `_sky` sees the sky through
+        // water, the other scenes put an opaque roof above the water, and peaceful is
+        // covered too.
+        scenes.add(new NaturalScene("monument_guardian", EntityTypes.GUARDIAN, "deep_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("monument_guardian_sky", EntityTypes.GUARDIAN, "deep_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("monument_guardian_peaceful", EntityTypes.GUARDIAN, "deep_ocean", 0, 15, 0, 0, false, -32, 0, 289, true, false));
         // 硫磺方块怪：sulfur_caves 的 monster 表首项，count 是 2..4 的均匀分布。
         // checkSulfurCubeSpawnRules 恒真；白天、亮处、和平难度各一支。
         // Sulfur cubes: the first monster entry of sulfur_caves with a uniform 2..4 count.
@@ -6223,6 +6235,7 @@ public final class MobOracle {
             if ("stray_spawn".equals(only) && scene.mob() != EntityTypes.STRAY) continue;
             if ("bat_spawn".equals(only) && scene.mob() != EntityTypes.BAT) continue;
             if ("bogged_spawn".equals(only) && scene.mob() != EntityTypes.BOGGED) continue;
+            if ("guardian_spawn".equals(only) && scene.mob() != EntityTypes.GUARDIAN) continue;
             if ("sulfur_cube".equals(only) && scene.mob() != EntityTypes.SULFUR_CUBE) continue;
             // 沼泽场景的起点高度要正好落在某层地面上才有戏；浅河和雪地流浪者
             // 有光 / 找天的门槛，命中概率低，多跑一些种子。
@@ -6568,11 +6581,23 @@ public final class MobOracle {
                 : scene.mob().getCategory();
         MobSpawnSettings settings = level.naturalBiome.value().getAttributes()
                 .applyModifier(EnvironmentAttributes.NATURAL_MOB_SPAWNS, MobSpawnSettings.EMPTY);
-        var entry = settings.getMobsToSpawn(category).unwrap().stream()
-                .filter(row -> row.value().type() == scene.mob()).findFirst().orElseThrow();
+        boolean monument = scene.name().startsWith("monument_guardian");
+        // 神殿夹具用官方 `minecraft:monument` 的 spawn_overrides 那张表，2–4 只一组。
+        // The monument fixture uses the official spawn_overrides list, 2–4 per group.
+        var monumentOverride = monument
+                ? official.registries.lookupOrThrow(Registries.STRUCTURE)
+                        .getOrThrow(BuiltinStructures.OCEAN_MONUMENT)
+                        .value().spawnOverrides().get(MobCategory.MONSTER).spawns()
+                : null;
+        var entry = monumentOverride != null
+                ? monumentOverride.unwrap().getFirst()
+                : settings.getMobsToSpawn(category).unwrap().stream()
+                        .filter(row -> row.value().type() == scene.mob()).findFirst().orElseThrow();
         var generator = allocate(NaturalSpawnGenerator.class);
         generator.category = category;
-        generator.table = WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
+        generator.table = monumentOverride != null
+                ? monumentOverride
+                : WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
         level.chunkSource.naturalGenerator = generator;
 
         boolean bat = scene.mob() == EntityTypes.BAT;
@@ -6580,7 +6605,8 @@ public final class MobOracle {
                 : scene.name().equals("ocelot_jungle_leaves")
                         ? Blocks.OAK_LEAVES.defaultBlockState()
                         : spawnFloor(scene.biome());
-        boolean aquatic = scene.name().contains("squid") || category == MobCategory.WATER_AMBIENT
+        boolean aquatic = scene.name().contains("squid") || monument
+                || category == MobCategory.WATER_AMBIENT
                 || category == MobCategory.WATER_CREATURE || category == MobCategory.AXOLOTLS;
         // 美西螈夹具把最底下的水换成黏土，`checkAxolotlSpawnRules` 才会通过。
         // The axolotl fixture swaps the bottom water layer for clay so
@@ -6588,6 +6614,7 @@ public final class MobOracle {
         boolean clayFloor = scene.mob() == EntityTypes.AXOLOTL;
         level.naturalSeaLevel = scene.name().equals("drowned_deep_ocean") ? -51
                 : scene.name().equals("ocelot_below_sea") ? -60
+                : monument ? -56
                 : (scene.mob() == EntityTypes.GLOW_SQUID || scene.name().equals("fish_tropical_lush") ? -20 : -63);
         for (int x = -16; x < 48; x++) {
             for (int z = -16; z < 32; z++) {
@@ -6612,6 +6639,20 @@ public final class MobOracle {
                 // camel husk or parched) and is no spawn surface; the 1.95-tall husk still fits.
                 if (scene.mob() == EntityTypes.HUSK || (bat && !scene.name().endsWith("_open"))) {
                     level.blocks.put(BlockPos.asLong(x, -60, z), Blocks.GLASS.defaultBlockState());
+                }
+                // 神殿夹具：水面（-56）到水柱（-62）之间铺满水；`_sky` 让
+                // `canSeeSkyFromBelowWater` 为真，其余场景在水面盖一层不透明石头，
+                // 只有 1/20 那一支能刷。
+                //
+                // Monument fixture: water from the sea level down to the column; `_sky`
+                // makes `canSeeSkyFromBelowWater` true, while the others put an opaque
+                // stone roof above the water so only the 1-in-20 branch can spawn.
+                if (monument) {
+                    boolean roof = !scene.name().endsWith("_sky");
+                    for (int y = -61; y <= -56; y++) {
+                        level.blocks.put(BlockPos.asLong(x, y, z),
+                                (roof && y == -56 ? Blocks.STONE : Blocks.WATER).defaultBlockState());
+                    }
                 }
             }
         }
@@ -6734,6 +6775,8 @@ public final class MobOracle {
         row.addProperty("nearbyRespawn", scene.nearbyRespawn());
         row.addProperty("aquatic", aquatic);
         row.addProperty("clayFloor", clayFloor);
+        row.addProperty("monument", monument);
+        row.addProperty("monumentRoof", monument && !scene.name().endsWith("_sky"));
         row.addProperty("halloween", net.minecraft.util.SpecialDates.isHalloween());
         row.addProperty("levelSeed", level.worldSeed);
         row.addProperty("waterDepth", waterDepth);
@@ -12326,6 +12369,26 @@ public final class MobOracle {
                 victimAt = new double[] {2.5, 61.0, 0.5};
                 ticks = 30;
             }
+            case "attack_target_dolphin_guardian" -> {
+                // 海豚和守卫者同处一片水域：`AvoidEntityGoal(Guardian, 8, 1, 1)`
+                // 让海豚游开；`GuardianAttackSelector` 只认玩家 / 鱿鱼 / 美西螈，
+                // 不会反过来把海豚设为目标（守卫者设 NoAI，只比较目标字段）。
+                // A dolphin and a guardian share one pool: the dolphin flees via
+                // `AvoidEntityGoal(Guardian, 8, 1, 1)` while `GuardianAttackSelector`
+                // accepts only players / squid / axolotls, never dolphins. The
+                // guardian is NoAI; only its target field is compared.
+                attackerKind = 80;
+                victimKind = 81;
+                attackerAt = new double[] {0.5, 61.0, 0.5};
+                victimAt = new double[] {4.5, 61.0, 0.5};
+                water = true;
+                // 海豚在水里自由游动的竖直浮力还有已知末位差（见 README），
+                // 两刻足够覆盖 `AvoidEntityGoal` 的启动和守卫者目标筛选。
+                // Free-swimming dolphins still have a known vertical-buoyancy
+                // last-bit gap (README); two ticks cover the avoid goal's start
+                // and the guardian's target filter without reaching it.
+                ticks = 2;
+            }
             default -> throw new IllegalArgumentException("unknown attack-target scene " + name);
         }
         official.server.sequences = new RandomSequences();
@@ -12350,9 +12413,18 @@ public final class MobOracle {
             }
         }
         if (water) {
-            for (int x = 2; x <= 5; x++) {
-                for (int z = -2; z <= 2; z++) {
-                    world.blocks.put(BlockPos.asLong(x, 61, z), Blocks.WATER.defaultBlockState());
+            // 海豚场景要整片水池：海豚会游出原先 2..5 的小水坑。
+            // The dolphin scene needs a full pool: it swims out of the small
+            // 2..5 pocket used by the other water scenes.
+            int waterMin = name.equals("attack_target_dolphin_guardian") ? -12 : 2;
+            int waterMax = name.equals("attack_target_dolphin_guardian") ? 12 : 5;
+            int waterZMin = name.equals("attack_target_dolphin_guardian") ? -12 : -2;
+            int waterZMax = name.equals("attack_target_dolphin_guardian") ? 12 : 2;
+            for (int x = waterMin; x <= waterMax; x++) {
+                for (int z = waterZMin; z <= waterZMax; z++) {
+                    for (int y = 61; y <= 63; y++) {
+                        world.blocks.put(BlockPos.asLong(x, y, z), Blocks.WATER.defaultBlockState());
+                    }
                 }
             }
         }
@@ -12490,6 +12562,8 @@ public final class MobOracle {
             case 71 -> EntityTypes.IRON_GOLEM.create(world, EntitySpawnReason.COMMAND);
             case 72 -> EntityTypes.AXOLOTL.create(world, EntitySpawnReason.COMMAND);
             case 73 -> EntityTypes.COD.create(world, EntitySpawnReason.COMMAND);
+            case 80 -> EntityTypes.DOLPHIN.create(world, EntitySpawnReason.COMMAND);
+            case 81 -> EntityTypes.GUARDIAN.create(world, EntitySpawnReason.COMMAND);
             default -> throw new IllegalArgumentException("unknown attack-target kind " + kind);
         };
     }
@@ -12510,6 +12584,12 @@ public final class MobOracle {
         net.minecraft.world.phys.Vec3 p = mob.position();
         net.minecraft.world.phys.Vec3 v = mob.getDeltaMovement();
         net.minecraft.world.entity.LivingEntity target = mob.getTarget();
+        // 场景里的 `AvoidEntityGoal` 是否正在跑：海豚躲守卫者的直接判据。
+        // Whether an `AvoidEntityGoal` is running: the direct check for a dolphin
+        // fleeing a guardian.
+        boolean avoiding = mob.getGoalSelector().getAvailableGoals().stream().anyMatch(
+                goal -> goal.isRunning() && goal.getGoal().getClass().getSimpleName()
+                        .equals("AvoidEntityGoal"));
         return "{\"motion\":[" + Double.doubleToRawLongBits(p.x) + ',' + Double.doubleToRawLongBits(p.y)
                 + ',' + Double.doubleToRawLongBits(p.z) + ',' + Double.doubleToRawLongBits(v.x)
                 + ',' + Double.doubleToRawLongBits(v.y) + ',' + Double.doubleToRawLongBits(v.z) + ']'
@@ -12517,7 +12597,8 @@ public final class MobOracle {
                 + ",\"hurtTime\":" + mob.hurtTime
                 + ",\"deathTime\":" + mob.deathTime
                 + ",\"removed\":" + (mob.isRemoved() ? 1 : 0)
-                + ",\"target\":" + (target == null ? -1 : target.getId()) + '}';
+                + ",\"target\":" + (target == null ? -1 : target.getId())
+                + ",\"avoiding\":" + avoiding + '}';
     }
 
     /**

@@ -150,7 +150,20 @@ pub(super) fn goals() -> GoalSelector {
         (8, Goal::Dolphin(D::PlayWithItems)),
         (8, Goal::Dolphin(D::FollowRidden)),
         (8, Goal::Dolphin(D::FollowRidden)),
-        (9, Goal::Dolphin(D::AvoidGuardian)),
+        // `AvoidEntityGoal(Guardian.class, 8.0F, 1.0D, 1.0D)`：守卫者已在模型里，
+        // 这一条走通用的 `AvoidEntity` 真行为，不再是保住取数的占位。
+        // `AvoidEntityGoal(Guardian.class, 8.0F, 1.0D, 1.0D)`: guardians are
+        // modelled now, so this runs the shared `AvoidEntity` implementation
+        // instead of the stub that only kept the draw count.
+        (
+            9,
+            Goal::Avoid(super::avoid::AvoidEntity::new(
+                super::avoid::AvoidClass::Guardian,
+                8.0,
+                1.0,
+                1.0,
+            )),
+        ),
     ];
     let mut selector = GoalSelector::default();
     selector.goals = registered

@@ -23,7 +23,12 @@ use std::{
     },
 };
 
-use mc_bamboo_core::ChunkPos;
+use mc_bamboo_blocks::entity::{
+    ENTITY_RANDOM_SEED, Entity, EntityStore, JavaRandom,
+    mob::MobType,
+    store::{ChunkEntities, EntityRow},
+};
+use mc_bamboo_core::{ChunkPos, Vec3};
 use mc_bamboo_data::{blocks, registries};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_world::{
@@ -89,6 +94,13 @@ pub struct GeneratedChunk {
     /// keys a feature or structure supplied (no `id` or coordinates; assembly adds
     /// them from the block state). At most one per cell.
     pub block_entities: Vec<GeneratedBlockEntity>,
+    /// `FEATURES` 阶段结构件写进区块的实体（远古守卫者一类）。按来源中心的固定
+    /// 先后追加，组装时变成 `ChunkEntities` 的行。
+    ///
+    /// Entities structure pieces wrote into the chunk during `FEATURES` (elder
+    /// guardians and the like). Appended in fixed source-center order and turned
+    /// into `ChunkEntities` rows at assembly.
+    pub entities: Vec<mc_bamboo_worldgen::feature::GeneratedEntity>,
 }
 
 /// 一条生成期方块实体：世界坐标 `(x, y, z)` 和自定义键的复合标签。
@@ -362,6 +374,9 @@ pub fn generated_chunk_from_column(column: &RegionColumn, pos: ChunkPos) -> Gene
         // 读盘柱子的方块实体由 `adopt_upper_content` 从盘上内容装回。
         // A disk column's block entities come back through `adopt_upper_content`.
         block_entities: Vec::new(),
+        // 实体同样从盘上内容装回，不从生成期重新造。
+        // Entities likewise come back from the disk content.
+        entities: Vec::new(),
     }
 }
 
@@ -434,6 +449,7 @@ fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
         heightmaps,
         post_processing: Vec::new(),
         block_entities: Vec::new(),
+        entities: Vec::new(),
     }
 }
 
@@ -1345,6 +1361,7 @@ pub fn generate_chunk_with_beardifier(
             heightmaps,
             post_processing: terrain.post_processing,
             block_entities: Vec::new(),
+            entities: Vec::new(),
         })
     })
 }
@@ -1366,6 +1383,7 @@ pub fn generate_biomes(config: &WorldGenConfig, x: i32, z: i32) -> Result<Genera
             heightmaps,
             post_processing: Vec::new(),
             block_entities: Vec::new(),
+            entities: Vec::new(),
         })
     })
 }
@@ -1506,7 +1524,7 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
         block_items: Default::default(),
         command_blocks: Default::default(),
         books: Default::default(),
-        entities: Default::default(),
+        entities: generated_entity_box(chunk, 0),
         poi: Default::default(),
         poi_version_changed: false,
     };
@@ -1527,6 +1545,77 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
         }
     }
     Ok(RegionColumn::from_parts(parts))
+}
+
+/// 结构生成期的实体行转成一张 `ChunkEntities` 盒子。`world_seed` 目前只在调用方
+/// 拿到世界种子时用；`build_region_column` 是纯方块入口，传 0，UUID 仍可重放，
+/// 放进岛时会重新取号取种子。
+///
+/// Turn structure-generated entity descriptors into a `ChunkEntities` box.
+/// `world_seed` is for callers that have the world seed; `build_region_column`
+/// is a pure block entry point and passes 0, so UUIDs stay reproducible and
+/// inserting the box into an island reassigns ids and seeds.
+///
+/// 官方的 UUID / 朝向来自 `RandomSource.create()` 的实体随机源，世界生成时没种子、
+/// 不可逐位复现；这里按世界种子和区块坐标给每只实体派生一份可重放的种子。
+/// 类型、位置、`PersistenceRequired` 和满血这几项照官方填，其他状态用新实体的缺省。
+///
+/// Turn structure-generated entity descriptors into a `ChunkEntities` box.
+/// Vanilla's UUID / yaw come from an unseeded `RandomSource.create()` entity
+/// source and cannot be replayed bit-for-bit during world generation; each entity
+/// gets a reproducible random derived from the world seed and chunk position.
+/// Type, position, `PersistenceRequired` and full health follow vanilla; the
+/// remaining state is a fresh entity's default.
+fn generated_entity_box(chunk: &GeneratedChunk, seed: i64) -> ChunkEntities {
+    let Some(first) = chunk.entities.first() else {
+        return ChunkEntities::default();
+    };
+    let owner = ChunkPos::new(first.pos.0 >> 4, first.pos.2 >> 4);
+    let mut store = EntityStore::new();
+    // 种子源从世界种子和归属区块派生，放进岛时再按行重新取号 / 取种子。
+    // The seed source derives from the world seed and owning chunk; inserting
+    // the box into an island assigns fresh ids and seeds in row order.
+    let chunk_seed = seed
+        ^ i64::from(owner.x).wrapping_mul(0x2F0F_1F25_37C5_4E1B)
+        ^ i64::from(owner.z).wrapping_mul(0x5851_F42D_4C95_7F2D);
+    store.set_entity_seed_source(JavaRandom::new(chunk_seed));
+    let mut rows = Vec::new();
+    for entity in &chunk.entities {
+        let (x, y, z) = entity.pos;
+        if ChunkPos::new(x >> 4, z >> 4) != owner || !(MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
+            continue;
+        }
+        let Some(kind) = MobType::by_entity_type(entity.entity_type) else {
+            continue;
+        };
+        let mut mob = Entity::by_mob_type(
+            kind,
+            Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5),
+        );
+        mob.random = JavaRandom::new(ENTITY_RANDOM_SEED);
+        // `snapTo(x+0.5, y, z+0.5, 0, 0)`：yRot / xRot 都归零。
+        // `snapTo(x+0.5, y, z+0.5, 0, 0)`: both rotations are zero.
+        mob.y_rot = 0.0;
+        mob.with_mob(|_, state| {
+            state.x_rot = 0.0;
+            state.y_rot_o = 0.0;
+            state.x_rot_o = 0.0;
+            state.persistence_required = entity.persistence_required;
+        });
+        let mut prepared = store.prepare(mob);
+        // `elder.heal(getMaxHealth())`：构造时本来就是满血，这里显式写一遍，
+        // 以后改了属性表也不会悄悄少一截。
+        // `elder.heal(getMaxHealth())`: a fresh mob is already at full health;
+        // set it explicitly so an attribute-table change cannot silently reduce it.
+        if entity.full_health {
+            prepared.with_mob(|_, state| {
+                state.health = state.attributes.value(registries::attribute::MAX_HEALTH) as f32;
+            });
+        }
+        let row: EntityRow = prepared.split();
+        rows.push(row);
+    }
+    ChunkEntities::from_parts(rows, Vec::new())
 }
 
 /// 一条装进柱子的方块实体：区块内 `x`、世界 `y`、区块内 `z`、类型、完整条目。

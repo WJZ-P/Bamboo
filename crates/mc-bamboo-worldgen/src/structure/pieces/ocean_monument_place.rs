@@ -6,8 +6,8 @@
 //! `block != FILL_BLOCK` 的状态比较）、`generateBoxOnFillOnly`、`generateDefaultFloor`、
 //! `chunkIntersects`（只用 XZ）都照抄。
 //!
-//! 远古守卫者（`spawnElder`）只做 `chunkBB.isInside(pos)` 的位置判定，不建实体：官方这里
-//! 的随机取数全在 `level.getRandom()`（`WorldGenRegion` 的位置随机源）上，不消耗
+//! 远古守卫者（`spawnElder`）在 `chunkBB.isInside(pos)` 命中时记一只实体进区块：官方
+//! 这里的随机取数全在 `level.getRandom()`（`WorldGenRegion` 的位置随机源）上，不消耗
 //! `postProcess` 的 `random`，也不写任何方块，所以对逐方块对拍没有影响。
 //!
 //! `postProcess` of every `OceanMonumentPieces` structure piece, translated line by line
@@ -18,7 +18,7 @@
 //! comparison), `generateBoxOnFillOnly`, `generateDefaultFloor` and `chunkIntersects`
 //! (XZ only) are transcribed too.
 //!
-//! `spawnElder` only performs the `chunkBB.isInside(pos)` check and creates no entity:
+//! `spawnElder` records one entity in the chunk when `chunkBB.isInside(pos)` holds:
 //! vanilla draws there exclusively from `level.getRandom()` (the `WorldGenRegion`'s
 //! positional source), never from the `postProcess` `random`, and writes no blocks, so it
 //! cannot affect the per-block oracle.
@@ -249,19 +249,31 @@ impl MonumentPiece<'_> {
         max_x >= bb[0] && min_x <= bb[3] && max_z >= bb[2] && min_z <= bb[5]
     }
 
-    /// `OceanMonumentPiece.spawnElder` 的远古守卫者位置（实体不比，所以只算坐标）。
+    /// `OceanMonumentPiece.spawnElder`：落点在 `chunkBB` 里时把一只远古守卫者记进
+    /// 区块。官方 `ElderGuardian` 构造时 `setPersistenceRequired()`，`spawnElder` 再
+    /// `heal(getMaxHealth())` 并按 `(x+0.5, y, z+0.5, 0, 0)` 调 `snapTo`；
+    /// `finalizeSpawn(STRUCTURE)` 的取数全在 `level.getRandom()`（`WorldGenRegion` 的
+    /// 位置随机源）上，不消耗 `postProcess` 的 `random`，也不写方块。
     ///
-    /// 官方在这里 `EntityTypes.ELDER_GUARDIAN.create(level.getLevel(), ...)` 并把它加进
-    /// 世界；实体不比，它也不写方块，`finalizeSpawn` 的取数全在 `level.getRandom()` 上
-    /// （`WorldGenRegion` 的位置随机源），不消耗 `postProcess` 的 `random`。
-    ///
-    /// The elder guardian position of `OceanMonumentPiece.spawnElder` (entities are not
-    /// compared, so only the coordinate is computed). Vanilla creates an
-    /// `ELDER_GUARDIAN` and adds it to the world; entities are not compared, no block is
-    /// written, and `finalizeSpawn`'s draws all come from `level.getRandom()` (the
-    /// `WorldGenRegion`'s positional source), never from the `postProcess` `random`.
-    pub(super) fn elder_position(&self, x: i32, y: i32, z: i32) -> (i32, i32, i32) {
-        self.ctx.world_pos(x, y, z)
+    /// `OceanMonumentPiece.spawnElder`: when the block position is inside `chunkBB`,
+    /// record one elder guardian in the chunk. Vanilla's constructor calls
+    /// `setPersistenceRequired()`, then `spawnElder` heals to full health and snaps
+    /// to `(x+0.5, y, z+0.5, 0, 0)`. `finalizeSpawn(STRUCTURE)` draws only from
+    /// `level.getRandom()` (the `WorldGenRegion`'s positional source), never from the
+    /// `postProcess` `random`, and writes no blocks.
+    pub(super) fn spawn_elder(&mut self, x: i32, y: i32, z: i32) {
+        let (wx, wy, wz) = self.ctx.world_pos(x, y, z);
+        let bb = self.chunk_bb;
+        if !super::super::piece_place::box_is_inside(&bb, wx, wy, wz) {
+            return;
+        }
+        self.level
+            .add_generated_entity(crate::feature::GeneratedEntity {
+                entity_type: mc_bamboo_data::registries::entity_type::ELDER_GUARDIAN,
+                pos: (wx, wy, wz),
+                persistence_required: true,
+                full_health: true,
+            });
     }
 }
 

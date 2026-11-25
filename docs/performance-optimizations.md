@@ -4180,7 +4180,7 @@ cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocaptu
    `terrainAdaptation` 12 格外扩）+ 结构件盒」，存进 `Region.structure_spawn_index`
    （`RefCell`，岛拆分 / 合并时按区块搬行），之后只查表。世界生成配置一变，
    `Global::publish` 清空整张索引，下一次查询按新配置重算。前哨站、女巫小屋和猫用的
-   `PIECE` 路径都受益；海底神殿等以后往 `STRUCTURE_SPAWN_OVERRIDES` 追加一行即可。
+   `PIECE` 路径都受益；海底神殿的 `STRUCTURE` 覆盖也走同一张按区块拍平的索引。
 2. **目标搜索按类型筛**（`entity/mob/goals.rs`、`entity/store.rs`）：
    `NearestAttackableTargetGoal<LivingEntity>` 的候选里全是别的守卫者。新增
    `EntityCtx::for_each_other_of_types_in`，`EntityStore` 用按注册表类型的子索引在
@@ -4197,13 +4197,18 @@ cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocaptu
 ### 30.2 怎么复现
 
 ```text
-# 两个场景 × 5 种线程数 × 3 轮中位数，缺省打开三项优化
-MOB_STRESS_SCENE="guardian-tower-300,structure-spawn" \
+# 三个场景 × 5 种线程数 × 3 轮中位数，缺省打开三项优化
+MOB_STRESS_SCENE="guardian-tower-300,structure-spawn,monument-spawn" \
 MOB_STRESS_THREADS="0,1,2,4,8" MOB_STRESS_MEASURE=30 \
 cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
 
 # 同一个二进制的「改之前」：三项优化都走朴素路径
-MOB_STRESS_NAIVE=1 MOB_STRESS_SCENE="guardian-tower-300,structure-spawn" \
+MOB_STRESS_NAIVE=1 MOB_STRESS_SCENE="guardian-tower-300,structure-spawn,monument-spawn" \
+MOB_STRESS_THREADS="0,1,2,4,8" MOB_STRESS_MEASURE=30 \
+cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
+
+# 只量两个结构刷怪场景（本节的 monument-spawn 数字）
+MOB_STRESS_SCENE="structure-spawn,monument-spawn" \
 MOB_STRESS_THREADS="0,1,2,4,8" MOB_STRESS_MEASURE=30 \
 cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
 
@@ -4215,7 +4220,13 @@ cargo test -p mc-bamboo-game --release --lib structure_query_cost -- --ignored -
 目标搜索全量扫描、视线每刻真射线。正式构建里这个开关恒为假，热路径连一次环境变量
 读取都没有；`span!` / `record_*!` 在 `cfg(not(test))` 下全部展开成空宏。
 
-场景口径：`guardian-tower-300` 用「召唤」（`World::spawn_entity`）放 300 只守卫者进
+场景口径：`monument-spawn` 是第二段新加的神殿旁版本，用种子 42 的噪声主世界，
+`(-12,-148)` 区块有一座**真实海底神殿**（`docs/worldgen-structures-e2e.md` 的代表区块），
+玩家站在神殿上方绕圈走，开着自然刷怪；每刻对玩家周围 8 区块方形的 289 个区块按
+`Monster` / `Creature` / `Axolotls` / `UndergroundWaterCreature` 四类各查一次结构覆盖
+（后两类是神殿的空表，专测「空表也挡住群系表」那条路径），合计 9215.7 次查询 / 刻
+（含自然刷怪自身的查询）。冒烟测试断言真实神殿命中守卫者表、两张空表返回空静态表。
+`guardian-tower-300` 用「召唤」（`World::spawn_entity`）放 300 只守卫者进
 18×18 的三格深水坑，被量到的玩家在 30 格外，另有一名 8 格外的诱饵玩家当激光目标；
 场景关掉守卫者的游走 / 环顾目标并固定重力，模拟真实刷怪塔里被水柱夹住、攻击时
 站定的守卫者（预热 600 刻让推挤沉降，其余场景 200 刻）。`structure-spawn` 用种子 42 的
@@ -4257,6 +4268,29 @@ y 64..70、z 352..358，`docs/worldgen-structures-e2e.md` 的代表区块），�
 | 推挤命令数 / 刻（塔） | 全部 | 0.0 | 0.0 |
 | 推挤命令数 / 刻（结构） | 0 | 1.3 | 1.3 |
 | | 1/2/4/8 | 1.4 | 1.4 |
+
+第二段新加的 `monument-spawn` 用同一套命令、同一台机器连跑优化 / 朴素两遍
+（`ROUNDS=3` 中位数、测量 30 刻、预热 200 刻，机器 1 分钟负载 10.9–19.6）：
+
+| 指标 | 线程 | 朴素路径 | 索引路径 |
+|---|---:|---:|---:|
+| `monument-spawn` tick p50（ms） | 0 | 430.283 | 2.113 |
+| | 1 | 432.200 | 2.312 |
+| | 2 | 396.812 | 2.004 |
+| | 4 | 397.308 | 1.967 |
+| | 8 | 398.269 | 1.947 |
+| 结构查询次数 / 刻 | 全部 | 9215.7 | 9215.7 |
+| 结构查询耗时（ms / 刻） | 0 | 439.549 | 0.311 |
+| | 1 | 441.449 | 0.311 |
+| | 2 | 408.928 | 0.305 |
+| | 4 | 445.743 | 0.306 |
+| | 8 | 409.941 | 0.310 |
+
+同一次运行里 `structure-spawn` 的对照：索引路径 p50 2.153 / 2.251 / 2.142 / 1.943 /
+1.895 ms（0/1/2/4/8 线程），朴素路径 155.248 / 142.203 / 148.819 / 139.548 /
+137.886 ms；结构查询都是 8694.0 次 / 刻。神殿的 `full` 盒比女巫小屋的 `PIECE` 盒大得多，
+朴素路径每刻重建的起点集合也更多，所以 0 线程的 p50 差到约 2.8 倍；索引路径把两者
+压到同一个量级（1.9–2.3 ms / 刻），结构查询段稳定在 0.29–0.31 ms / 刻。
 
 `guardian-tower-300` 的整刻 p50 前后大多只差 0.01–0.19 ms（4 线程那次差 0.276 ms，
 属于同机负载抖动）：塔里的瓶颈是 300 只实体的物理 / 推挤 / 方块效果，目标搜索和视线
@@ -4303,17 +4337,21 @@ release 构建、20 万次查询、单次运行 3 轮交替取中位数；上表
 
 ### 30.6 验收与已知限制
 
-- `cargo fmt --all --check` 通过、`cargo clippy --workspace --all-targets` 0 警告、
-  `cargo test --workspace` 全绿（exit 0）。`natural-spawn java` 1727 例 0 不一致，
-  `structure-e2e java` 的 `gen-world` 60 区块 0 不一致。探针用缺省配置
-  （`PROBE_ISLAND_THREADS=default PROBE_ISLANDS=default`）在端口 28661 上
+- 第二段合进 `origin/main`（马骑乘统一、焦骸 / 尸壳骆驼、对拍夹具）之后重跑：
+  `cargo fmt --all --check` 通过、`cargo clippy --workspace --all-targets` 0 警告、
+  `cargo test --workspace` 全绿（exit 0，含 `mc-bamboo-game` 1374 例 / `mc-bamboo-blocks`
+  1044 例 / `mc-bamboo-worldgen` 358 例）。`natural-spawn java` **1888 例 0 不一致**，
+  `structure-e2e java` 的 `gen-world` 60 区块 / 53084160 方块 / 4743 结构件 0 不一致，
+  `gen-world java` 0 不一致，`chunk-content java` **565 checks passed**，
+  `structure-place java` **0 mismatches**，`tools/check-generated.sh` 两遍全量导出无 diff。
+  探针用缺省配置（`PROBE_ISLAND_THREADS=default PROBE_ISLANDS=default`）在端口 29021 上
   **770/770**，正常关服、`world-dir` 官方解码器通过。
-- `mob-oracle java --show 2000`：合进 `origin/main`（村民第 3 期）**之前**是 46 处不一致，
-  即已知的 12 处 `Mth.COS_TAB` / `ASIN_TAB` 末位差加 34 处 `frog_lily_31` /
-  `frog_long_jump` 的 `dy` 末位差，守卫者全部场景 0 帧差异。合进 main **之后**总数变成
-  252：新增的 206 处全部是 `frog_lily_41` 的 `x` / `z` / `dx` / `dz` 末位差，来自 main 的
-  村民大脑改动，与本分支的三项优化无关（`--only guardian` / `--only laser` 在合并后仍只
-  剩那 12 处全局三角函数表差，0 帧差异）。这是 main 的基线回归，需要单独收敛，见报告里的疑点。
+- `mob-oracle java --show 2000`：合并后 **46 处不一致**，即已知的 12 处
+  `Mth.COS_TAB` / `ASIN_TAB` 末位差加 34 处 `frog_lily_31` / `frog_long_jump` 的
+  `dy` 末位差；`frog_lily_41` 那次偶发的 206 处 `x/z` 末位差这次没有复现。
+  `--only guardian` / `--only laser` / `--only guardian_spawn` /
+  `--only attack_target_dolphin_guardian` / `--only structure_spawn` /
+  `--only dolphin` / `--only water_mob` 各自都只剩那 12 处全局三角函数表差、0 帧差异。
 - 朴素路径只在 `cfg(test)` 下通过 `MOB_STRESS_NAIVE=1` 启用，正式二进制没有开关、
   没有配置、没有环境变量读取；三项优化都缺省打开。
 - 视线缓存的键除了规格里的三样，还带 `CollisionContext` 里真正影响碰撞形状的两项
@@ -4322,5 +4360,5 @@ release 构建、20 万次查询、单次运行 3 轮交替取中位数；上表
 - `guardian-tower-300` 为了让守卫者攻击时站定，关掉了游走 / 环顾目标并固定重力，
   是压测场景的构造，不是生产行为；它的整刻数字只能用来比较三项优化本身，不能当成
   真实刷怪塔的帧时间。
-- `structure-spawn` 用的是已有的前哨站 / 女巫小屋覆盖表；海底神殿的守卫者刷怪表要等
-  第二段（神殿结构刷怪、远古守卫者随结构生成）合进来，届时可以往同一张索引追加场景。
+- `structure-spawn` / `monument-spawn` 用同一张按岛的结构刷怪索引；神殿的
+  `full` 盒覆盖和三张表（守卫者 + 两张空表）都由官方数据包生成，不需要单独维护。

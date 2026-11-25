@@ -138,8 +138,29 @@ pub struct FeatureResult {
     /// 官方 `PostProcessing` 的世界坐标列表，按 `markPosForPostProcessing` 调用顺序。
     /// Official `PostProcessing` positions in `markPosForPostProcessing` call order.
     pub post_processing: Vec<(i32, i32, i32)>,
+    /// 结构件在世界生成期放进区块的实体（`addFreshEntityWithPassengers`），按调用顺序。
+    ///
+    /// Entities placed into chunks by structure pieces during world generation
+    /// (`addFreshEntityWithPassengers`), in call order.
+    pub entities: Vec<GeneratedEntity>,
     /// 本区块涉及了未移植的地物 / 修饰器 / 谓词，对拍时不参与逐方块比较。
     pub unsupported: bool,
+}
+
+/// 结构生成实体的一行：注册名、格中心位置、是否持久、是否满血。构造时的 UUID 和
+/// 朝向来自官方 `RandomSource.create()` 的无种子随机源，逐位不可复现，这里只保留
+/// 可比的字段。满血由调用方按实体类型的 `MAX_HEALTH` 补齐。
+///
+/// One structure-generated entity: registry name, block-centre position, persistence and
+/// full-health flag. The constructor's UUID and yaw come from vanilla's unseeded
+/// `RandomSource.create()` and cannot be replayed bit-for-bit, so only comparable
+/// fields are kept. The caller fills full health from the type's `MAX_HEALTH`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GeneratedEntity {
+    pub entity_type: i32,
+    pub pos: (i32, i32, i32),
+    pub persistence_required: bool,
+    pub full_health: bool,
 }
 
 #[cfg(test)]

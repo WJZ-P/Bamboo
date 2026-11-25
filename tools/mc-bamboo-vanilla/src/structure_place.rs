@@ -197,12 +197,14 @@ struct Section {
     pieces: Vec<String>,
     invocations: Vec<Invocation>,
     blocks: Vec<String>,
+    entities: Vec<String>,
 }
 
 fn parse_output(stdout: &str) -> Result<Vec<Section>, String> {
     let mut sections: Vec<Section> = Vec::new();
     let mut current: Option<Section> = None;
     let mut expected_blocks: Option<usize> = None;
+    let mut expected_entities: Option<usize> = None;
 
     for line in stdout.lines() {
         if line.is_empty() {
@@ -212,6 +214,7 @@ fn parse_output(stdout: &str) -> Result<Vec<Section>, String> {
         if fields[0] == "Q" {
             if let Some(section) = current.take() {
                 check_block_count(&section, expected_blocks)?;
+                check_entity_count(&section, expected_entities)?;
                 sections.push(section);
             }
             current = Some(Section {
@@ -219,8 +222,10 @@ fn parse_output(stdout: &str) -> Result<Vec<Section>, String> {
                 pieces: Vec::new(),
                 invocations: Vec::new(),
                 blocks: Vec::new(),
+                entities: Vec::new(),
             });
             expected_blocks = None;
+            expected_entities = None;
             continue;
         }
         // 第一个 `Q` 之前只会是官方日志（读府邸模板时箱子物品的反序列化警告），跳过。
@@ -263,17 +268,34 @@ fn parse_output(stdout: &str) -> Result<Vec<Section>, String> {
                     .push(rest);
             }
             "B" => expected_blocks = Some(number(1)? as usize),
-            // 方块行以坐标开头（数字），其余才是关键字。
-            // Block lines start with a coordinate; anything else is a keyword.
+            "E" => expected_entities = Some(number(1)? as usize),
+            // 方块行以坐标开头（数字），实体行以实体名开头，其余才是关键字。
+            // Block lines start with a coordinate, entity lines with an entity name.
             other if other.parse::<i32>().is_ok() => section.blocks.push(line.to_owned()),
+            other if other.starts_with("minecraft:") && expected_entities.is_some() => {
+                section.entities.push(line.to_owned());
+            }
             other => return Err(format!("unknown oracle line kind {other}: {line}")),
         }
     }
     if let Some(section) = current.take() {
         check_block_count(&section, expected_blocks)?;
+        check_entity_count(&section, expected_entities)?;
         sections.push(section);
     }
     Ok(sections)
+}
+
+fn check_entity_count(section: &Section, expected: Option<usize>) -> Result<(), String> {
+    match expected {
+        Some(count) if count != section.entities.len() => Err(format!(
+            "Q {}: claimed {count} entities, got {}",
+            section.key,
+            section.entities.len()
+        )),
+        None => Err(format!("Q {}: no E header", section.key)),
+        _ => Ok(()),
+    }
 }
 
 fn check_block_count(section: &Section, expected: Option<usize>) -> Result<(), String> {
@@ -295,6 +317,7 @@ struct RustResult {
     pieces: Vec<String>,
     invocations: Vec<Invocation>,
     blocks: Vec<String>,
+    entities: Vec<String>,
 }
 
 fn rust_result(q: &Query) -> Result<RustResult, String> {
@@ -378,6 +401,7 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
         pieces: layout.iter().map(piece_line).collect(),
         invocations,
         blocks: level.snapshot(),
+        entities: level.entities.clone(),
     })
 }
 
@@ -647,6 +671,11 @@ struct FlatLevel {
     /// Stand-in for `WorldGenRegion.getRandom()`: like Java, one `RandomSource.create(0)`
     /// per query.
     level_random: mc_bamboo_worldgen::random::WorldgenRandom,
+    /// 结构件放进世界的实体，按调用顺序：`id x y z persistence full_health`。
+    ///
+    /// Entities structure pieces added, in call order:
+    /// `id x y z persistence full_health`.
+    entities: Vec<String>,
 }
 
 /// 初始填充的最高一层（`stone` / `caves`）。
@@ -664,6 +693,7 @@ impl FlatLevel {
             piece_writes: Vec::new(),
             heights: RefCell::new(HashMap::new()),
             level_random: pieces::legacy_random(0),
+            entities: Vec::new(),
         }
     }
 
@@ -799,6 +829,17 @@ impl PieceLevel for FlatLevel {
 
     fn level_random(&self) -> &mc_bamboo_worldgen::random::WorldgenRandom {
         &self.level_random
+    }
+
+    fn add_generated_entity(&mut self, entity: mc_bamboo_worldgen::feature::GeneratedEntity) {
+        let id = mc_bamboo_data::registries::entity_type::name_of(entity.entity_type)
+            .unwrap_or("minecraft:unknown");
+        let (x, y, z) = entity.pos;
+        self.entities.push(format!(
+            "{id} {x} {y} {z} {} {}",
+            i32::from(entity.persistence_required),
+            i32::from(entity.full_health)
+        ));
     }
 }
 
@@ -1035,7 +1076,26 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
         for line in &rust_only {
             all_diffs.push(format!("[{key}] only in rust: {line}"));
         }
-        per_query.push((key, list_mismatches + block_mismatches, write_mismatches));
+        // 实体按有序多重集合比：调用顺序和字段都要一致。
+        // Entities compare as ordered sequences: call order and fields both matter.
+        let mut entity_mismatches = 0;
+        for index in 0..section.entities.len().max(ours.entities.len()) {
+            let java = section.entities.get(index).map(String::as_str);
+            let rust = ours.entities.get(index).map(String::as_str);
+            if java != rust {
+                entity_mismatches += 1;
+                push(
+                    &mut failures,
+                    format!("[{key}] entity {index}: java {java:?} | rust {rust:?}"),
+                );
+            }
+        }
+        total.block_mismatches += entity_mismatches;
+        per_query.push((
+            key,
+            list_mismatches + block_mismatches + entity_mismatches,
+            write_mismatches,
+        ));
     }
 
     if std::env::var("STRUCTURE_PLACE_PER_QUERY").is_ok() {

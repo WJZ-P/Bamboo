@@ -99,6 +99,13 @@ pub struct FeatureWrites {
     /// `features` (last one per cell). Assembly keeps the one from the source
     /// that won the cell's block, see [`merge_feature_writes`].
     pub block_entities: Vec<GeneratedBlockEntity>,
+    /// 这一中心跑 `features` 时结构件放进目标区块的实体（远古守卫者等）。
+    /// 组装时按来源中心的固定先后追加，见 [`merge_feature_writes`]。
+    ///
+    /// Entities structure pieces placed inside the target chunk during
+    /// `features` (elder guardians and the like). Assembly appends them in
+    /// fixed source-center order, see [`merge_feature_writes`].
+    pub entities: Vec<mc_bamboo_worldgen::feature::GeneratedEntity>,
 }
 
 /// 按中心的固定先后合并一组写：中心自己（`CENTER`）最先，其余 8 个来源按
@@ -144,7 +151,17 @@ pub fn merge_feature_writes(
         u8,
         std::collections::HashMap<(i32, i32, i32), Tag>,
     > = std::collections::BTreeMap::new();
+    let mut generated_entities: std::collections::BTreeMap<
+        u8,
+        Vec<mc_bamboo_worldgen::feature::GeneratedEntity>,
+    > = std::collections::BTreeMap::new();
     for group in groups {
+        if !group.entities.is_empty() {
+            generated_entities
+                .entry(group.slot)
+                .or_default()
+                .extend(group.entities);
+        }
         if !group.block_entities.is_empty() {
             entities
                 .entry(group.slot)
@@ -201,6 +218,15 @@ pub fn merge_feature_writes(
         let changed: std::collections::BTreeSet<(i32, i32, i32)> = placed.keys().copied().collect();
         chunk.block_entities.retain(|(at, _)| !changed.contains(at));
         chunk.block_entities.extend(placed);
+    }
+    // 结构实体按同一份来源先后追加（中心先、slot 升序），组内保持调用顺序。
+    // Structure entities follow the same source order (center first, then
+    // ascending slots) with call order preserved inside each source.
+    let mut entity_order: Vec<(u8, Vec<mc_bamboo_worldgen::feature::GeneratedEntity>)> =
+        generated_entities.into_iter().collect();
+    entity_order.sort_by_key(|(slot, _)| source_order(slot));
+    for (_, rows) in entity_order {
+        chunk.entities.extend(rows);
     }
     let mut out: Vec<BlockDelta> = winners
         .into_iter()
@@ -568,6 +594,7 @@ pub fn game_pipeline(
             heightmaps: Default::default(),
             post_processing: Vec::new(),
             block_entities: Vec::new(),
+            entities: Vec::new(),
         })
     });
     let (_result, stats) = run_features_filtered(
@@ -652,6 +679,11 @@ struct FeatureRun {
     /// `PostProcessing` marks newly recorded by this run, split by target cell
     /// (3×3 index) in call order; input terrain marks are excluded.
     marks: [Vec<MarkPos>; 9],
+    /// 结构件放进世界的实体，按目标格（3×3 下标）分开，组内保持调用顺序。
+    ///
+    /// Entities structure pieces added, split by target cell (3×3 index) with
+    /// call order preserved.
+    entities: [Vec<mc_bamboo_worldgen::feature::GeneratedEntity>; 9],
 }
 
 type FeatureCacheKey = (
@@ -1029,6 +1061,8 @@ fn compute_feature_run(
     deltas[CENTER] = own;
     let marks = split_new_marks(cx, cz, &result.post_processing, input_marks);
     let mut block_entities: [Vec<GeneratedBlockEntity>; 9] = std::array::from_fn(|_| Vec::new());
+    let mut entities: [Vec<mc_bamboo_worldgen::feature::GeneratedEntity>; 9] =
+        std::array::from_fn(|_| Vec::new());
     for ((x, y, z), tag) in result.block_entities {
         let dx = (x >> 4) - cx;
         let dz = (z >> 4) - cz;
@@ -1036,10 +1070,19 @@ fn compute_feature_run(
             block_entities[((dz + 1) * 3 + dx + 1) as usize].push(((x, y, z), tag));
         }
     }
+    for entity in result.entities {
+        let (x, _, z) = entity.pos;
+        let dx = (x >> 4) - cx;
+        let dz = (z >> 4) - cz;
+        if (-1..=1).contains(&dx) && (-1..=1).contains(&dz) {
+            entities[((dz + 1) * 3 + dx + 1) as usize].push(entity);
+        }
+    }
     Ok(Arc::new(FeatureRun {
         deltas,
         block_entities,
         marks,
+        entities,
     }))
 }
 
@@ -1106,6 +1149,7 @@ pub fn feature_writes_into(
         deltas: own.deltas[CENTER].clone(),
         marks: own.marks[CENTER].clone(),
         block_entities: own.block_entities[CENTER].clone(),
+        entities: own.entities[CENTER].clone(),
     }];
     for dz in -1..=1 {
         for dx in -1..=1 {
@@ -1122,6 +1166,7 @@ pub fn feature_writes_into(
                 deltas: run.deltas[index].clone(),
                 marks: run.marks[index].clone(),
                 block_entities: run.block_entities[index].clone(),
+                entities: run.entities[index].clone(),
             });
         }
     }
@@ -1501,6 +1546,88 @@ mod tests {
         assert_eq!(a.deltas, b.deltas);
     }
 
+    /// 种子 42 的两座海底神殿：每座三只远古守卫者，类型 / 位置 / 持久 / 满血
+    /// 都随交付盒子落到实体行里；方块结果不受影响。
+    ///
+    /// Seed 42's two ocean monuments: three elder guardians each, whose type,
+    /// position, persistence and full health reach the delivered column's entity
+    /// rows without changing any block.
+    #[test]
+    fn monument_elders_arrive_with_the_chunk() {
+        use mc_bamboo_blocks::entity::store::KindPublic;
+        use mc_bamboo_data::registries::entity_type;
+
+        let config = normal(42);
+        let mut total = 0;
+        for (cx, cz) in [(-12, -148), (49, -11)] {
+            // 官方景点 `spawnElder` 只把落点写进它所在的区块，所以扫整座神殿
+            // 的 4×4 区块盒。每只实体恰好被一个中心记下一次。
+            // `spawnElder` writes into the chunk owning the block position, so
+            // scan the monument's 4×4 chunk box; each elder is recorded once.
+            let mut seen = std::collections::BTreeSet::new();
+            for dx in -2..=2 {
+                for dz in -2..=2 {
+                    let result = game_features(&config, cx + dx, cz + dz, None).unwrap();
+                    for entity in &result.entities {
+                        assert_eq!(entity.entity_type, entity_type::ELDER_GUARDIAN);
+                        assert!(entity.persistence_required);
+                        assert!(entity.full_health);
+                        assert!(
+                            seen.insert(entity.pos),
+                            "elder recorded twice: {:?}",
+                            entity.pos
+                        );
+                    }
+                }
+            }
+            assert_eq!(seen.len(), 3, "monument at ({cx},{cz}) has three elders");
+            total += seen.len();
+            // 交付盒子按归属区块分组：每只都写进它所在那格的实体表。
+            // The delivered column groups by owning chunk: each elder lands
+            // in the entity box of its own chunk.
+            let mut by_chunk: std::collections::BTreeMap<
+                ChunkPos,
+                Vec<mc_bamboo_worldgen::feature::GeneratedEntity>,
+            > = std::collections::BTreeMap::new();
+            for &(x, y, z) in &seen {
+                by_chunk
+                    .entry(ChunkPos::new(x >> 4, z >> 4))
+                    .or_default()
+                    .push(mc_bamboo_worldgen::feature::GeneratedEntity {
+                        entity_type: entity_type::ELDER_GUARDIAN,
+                        pos: (x, y, z),
+                        persistence_required: true,
+                        full_health: true,
+                    });
+            }
+            for entities in by_chunk.values() {
+                let column = crate::worldgen::build_region_column(&GeneratedChunk {
+                    blocks: vec![vec![mc_bamboo_data::blocks::AIR; 256]; WORLD_HEIGHT as usize],
+                    biomes: vec![vec![0; 64]; mc_bamboo_world::SECTION_COUNT],
+                    heightmaps: Default::default(),
+                    post_processing: Vec::new(),
+                    block_entities: Vec::new(),
+                    entities: entities.clone(),
+                })
+                .unwrap();
+                let rows = column.parts().entities.rows();
+                assert_eq!(rows.len(), entities.len());
+                for row in rows {
+                    let KindPublic::Mob(mob) = &row.public.kind else {
+                        panic!("structure entity is not a mob");
+                    };
+                    assert_eq!(
+                        mob.mob_type,
+                        mc_bamboo_blocks::entity::mob::MobType::ElderGuardian
+                    );
+                    assert!(mob.persistence_required);
+                    assert_eq!(mob.health, 80.0);
+                }
+            }
+        }
+        assert_eq!(total, 6);
+    }
+
     /// 结构区块跑完游戏里完整流水线不报错：起点/引用/Beardifier/features 全链路。
     /// The full game pipeline runs on a structure chunk without errors.
     #[test]
@@ -1548,6 +1675,7 @@ mod tests {
                 heightmaps: Default::default(),
                 post_processing: Vec::new(),
                 block_entities: Vec::new(),
+                entities: Vec::new(),
             })
         });
         let view_real = std::array::from_fn(|_| {
@@ -1557,6 +1685,7 @@ mod tests {
                 heightmaps: Default::default(),
                 post_processing: Vec::new(),
                 block_entities: Vec::new(),
+                entities: Vec::new(),
             })
         });
         let a = run_features(&config, cx, cz, view_empty).unwrap();
@@ -1637,6 +1766,7 @@ mod tests {
             deltas: Default::default(),
             marks: Default::default(),
             block_entities: Default::default(),
+            entities: Default::default(),
         });
         let shard = std::sync::Mutex::new(FeatureShard::default());
         let ours: FeatureSlot = Arc::new(OnceLock::new());
@@ -1739,6 +1869,7 @@ mod tests {
                     deltas: vec![(3, 0, 5, 100 + slot as u32), (slot as i32, 1, 6, 222)],
                     marks: Vec::new(),
                     block_entities: Vec::new(),
+                    entities: Vec::new(),
                 })
                 .collect::<Vec<_>>()
         };
@@ -1752,6 +1883,7 @@ mod tests {
             deltas: vec![(3, 0, 5, 999)],
             marks: Vec::new(),
             block_entities: Vec::new(),
+            entities: Vec::new(),
         });
         let ca = assemble_feature_column(&terrain, &mut a).unwrap();
         let cb = assemble_feature_column(&terrain, &mut b).unwrap();
@@ -1860,12 +1992,14 @@ mod tests {
             heightmaps: Default::default(),
             post_processing: vec![(0, 1, 0)],
             block_entities: Vec::new(),
+            entities: Vec::new(),
         };
         let group = |slot: u8, marks: Vec<(i32, i32, i32)>| FeatureWrites {
             slot,
             deltas: Vec::new(),
             marks,
             block_entities: Vec::new(),
+            entities: Vec::new(),
         };
         let groups = vec![
             group(7, vec![(7, 0, 0)]),
