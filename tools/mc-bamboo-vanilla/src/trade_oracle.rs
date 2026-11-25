@@ -107,6 +107,9 @@ impl Report {
     }
 
     fn compare(&self, case: &Value) -> Result<(), String> {
+        if case["kind"] == "wandering_trade" {
+            return self.compare_wandering(case);
+        }
         let profession = case["profession"].as_str().unwrap_or("?");
         let level: i32 = case["level"]
             .as_i64()
@@ -154,6 +157,48 @@ impl Report {
         if canonical(&ours) != canonical(expected) {
             return Err(format!(
                 "{profession}/{level}/{variant}/{seed}\n  official: {expected}\n  bamboo:   {ours}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// `WanderingTrader.updateTrades`：buying → uncommon → common 三张集，
+    /// 共用一条按世界种子建的 `RandomSequences`（名字不同，互不干扰）。
+    ///
+    /// `WanderingTrader.updateTrades`: buying → uncommon → common, all on the
+    /// same world-seeded `RandomSequences` (distinct sequence names).
+    fn compare_wandering(&self, case: &Value) -> Result<(), String> {
+        let seed: i64 = case["seed"]
+            .as_str()
+            .unwrap_or("0")
+            .parse()
+            .map_err(|_| "bad seed".to_owned())?;
+        let sequences = RandomSequences::new(seed);
+        let fallback = mc_bamboo_blocks::random::XoroshiroRandom::new(seed, seed ^ 0x9e37_79b9);
+        let params = TradeParams {
+            world_seed: seed,
+            origin: mc_bamboo_loot::Position::new(1.5, 64.0, 2.5),
+            villager_type: mc_bamboo_data::villager::DEFAULT_TYPE,
+        };
+        let mut offers = Vec::new();
+        for name in mc_bamboo_game::merchant::WANDERING_TRADE_SETS {
+            let set = TradeSet::parse(name).map_err(|error| format!("{name}: {error}"))?;
+            add_offers_from_trade_set(&set, &params, Some(&sequences), &fallback, &mut offers)
+                .map_err(|error| format!("wandering_trader/{seed}/{name}: {error}"))?;
+        }
+        let encoded = encode_offers(
+            &offers
+                .iter()
+                .map(to_merchant_offer)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("wandering_trader/{seed}: {error}"))?,
+        )
+        .map_err(|error| format!("wandering_trader/{seed}: {error}"))?;
+        let ours = dyn_to_json(&encoded);
+        let expected = &case["offers"];
+        if canonical(&ours) != canonical(expected) {
+            return Err(format!(
+                "wandering_trader/{seed}\n  official: {expected}\n  bamboo:   {ours}"
             ));
         }
         Ok(())
