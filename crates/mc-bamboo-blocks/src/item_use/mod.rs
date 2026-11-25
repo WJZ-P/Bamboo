@@ -140,6 +140,12 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         _ if ctx.item == items::VILLAGER_SPAWN_EGG => {
             spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Villager)
         }
+        _ if ctx.item == items::WANDERING_TRADER_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::WanderingTrader)
+        }
+        _ if ctx.item == items::TRADER_LLAMA_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::TraderLlama)
+        }
         _ if ctx.item == items::ZOMBIE_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Zombie)
         }

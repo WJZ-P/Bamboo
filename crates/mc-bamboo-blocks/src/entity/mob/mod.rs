@@ -842,7 +842,12 @@ impl MobType {
     pub const fn removes_when_far_away(self) -> bool {
         // `AbstractGolem.removeWhenFarAway` 恒假。
         // `AbstractGolem.removeWhenFarAway` is always false.
-        if matches!(self, Self::IronGolem | Self::SnowGolem) {
+        if matches!(
+            self,
+            Self::IronGolem | Self::SnowGolem | Self::WanderingTrader
+        ) {
+            // `WanderingTrader.removeWhenFarAway()` 直接返回 false。
+            // `WanderingTrader.removeWhenFarAway()` returns false.
             return false;
         }
         // 鱿鱼、海豚（`AgeableWaterCreature`）、鱼（`WaterAnimal`）和蝙蝠不是 `Animal`，沿用
@@ -1661,7 +1666,10 @@ impl MobType {
             // `EntityType.VILLAGER` 是 `MobCategory.MISC`。
             //
             // `EntityType.VILLAGER` is `MobCategory.MISC`.
-            Self::Villager => MobCategory::Misc,
+            // `EntityType.VILLAGER` / `WANDERING_TRADER` 都是 `MobCategory.MISC`。
+            //
+            // `EntityType.VILLAGER` / `WANDERING_TRADER` are `MobCategory.MISC`.
+            Self::Villager | Self::WanderingTrader => MobCategory::Misc,
             _ if self.is_enemy() => MobCategory::Monster,
             _ => MobCategory::Creature,
         }

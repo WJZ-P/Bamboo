@@ -125,7 +125,10 @@ mod tests {
         let kind = MobType::WanderingTrader;
         let mob = Mob::new(kind);
 
-        (crate::entity::Entity::by_mob_type(kind, Default::default()), mob)
+        (
+            crate::entity::Entity::by_mob_type(kind, Default::default()),
+            mob,
+        )
     }
 
     #[test]

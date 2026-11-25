@@ -863,6 +863,11 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
         // `Villager.getAmbientSound`：睡觉时返回 null，不出声也不取音高。
         // `Villager.getAmbientSound`: returns null while sleeping, drawing no pitch.
         super::MobType::Villager if mob.villager.sleeping => None,
+        // `WanderingTrader.getAmbientSound`：交易中换成 `...trade`。
+        // `WanderingTrader.getAmbientSound`: the trading variant while trading.
+        super::MobType::WanderingTrader if mob.villager.is_trading() => {
+            Some("minecraft:entity.wandering_trader.trade")
+        }
         // `Sniffer.getAmbientSound`：挖掘 / 搜寻时不叫。
         // `Sniffer.getAmbientSound`: silent while digging or searching.
         super::MobType::Sniffer => super::sniffer::ambient_voice(mob),
