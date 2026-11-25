@@ -984,3 +984,52 @@ fn passenger_list_changes_send_exactly_one_set_passengers() {
             .all(|w| w != full)
     );
 }
+
+/// 村民入睡时元数据发出 `Pose::Sleeping` 与 `SleepingPos(Some(pos))`，醒来时回退到
+/// `Pose::Standing` 与 `SleepingPos(None)`，客户端能看到村民躺床和起床。
+#[test]
+fn villager_sleeping_metadata_syncs_pose_and_bed_pos() {
+    use mc_bamboo_blocks::entity::{Entity, mob::MobType};
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_protocol::packet::play::{EntityData, Pose};
+
+    let bed = BlockPos::new(4, 64, 2);
+    let mut villager = Entity::by_mob_type(MobType::Villager, Vec3::new(4.5, 64.6875, 2.5));
+    villager.id = 42;
+    villager.with_mob(|_, mob| {
+        mob.villager.sleeping = true;
+        mob.villager.sleeping_pos = Some(bed);
+    });
+    let sleeping_public = villager.clone().split().public;
+    let sleeping_snap = Snapshot::of(&sleeping_public);
+    let sleeping_data = sleeping_snap.data.pairing_values();
+    assert!(sleeping_data.contains(&EntityData::Pose(Pose::Sleeping)));
+    assert!(sleeping_data.contains(&EntityData::SleepingPos(Some(bed))));
+
+    let mut tracked = TrackedEntity::new(&sleeping_snap);
+    // 先消费出生首刻的 `pending_dirty`（含初始血量），再测试起床时的增量元数据。
+    let _ = tracked.step(&sleeping_snap, false, false);
+    villager.with_mob(|_, mob| {
+        mob.villager.sleeping = false;
+        mob.villager.sleeping_pos = None;
+    });
+    let awake_public = villager.split().public;
+    let awake_snap = Snapshot::of(&awake_public);
+    let packets = tracked.step(&awake_snap, false, false);
+    let expected =
+        mc_bamboo_protocol::frame::packet_body(&mc_bamboo_protocol::packet::play::SetEntityData {
+            entity_id: 42,
+            items: &[
+                EntityData::Pose(Pose::Standing),
+                EntityData::SleepingPos(None),
+            ],
+        });
+    assert!(
+        packets.contains(&expected),
+        "waking villager should send Pose::Standing + SleepingPos(None)"
+    );
+    assert_eq!(
+        default_data_for_type(14, MobType::Villager),
+        EntityData::SleepingPos(None)
+    );
+}

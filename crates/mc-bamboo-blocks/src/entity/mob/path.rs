@@ -337,11 +337,29 @@ pub struct PathRequest {
     pub max_visited_nodes_multiplier: f32,
 }
 
+/// 多目标寻路请求：对应官方 `PathFinder.findPath(PathNavigationRegion, Mob, Set<BlockPos>, ...)`。
+/// 一次 A\* 同时追踪全部候选终点，`h` 取到最近目标的距离，到达任一目标即停。
+///
+/// Multi-target path request matching vanilla `PathFinder.findPath(..., Set<BlockPos>, ...)`.
+/// A single A\* search tracks all candidate goals, using the minimum distance as `h` and
+/// stopping as soon as any goal is reached.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MultiTargetPathRequest<'a> {
+    pub mob: PathMob,
+    pub flags: EvaluatorFlags,
+    pub targets: &'a [BlockPos],
+    pub max_distance_from_start: f32,
+    pub reach_range: i32,
+    pub max_visited_nodes: i32,
+    pub max_visited_nodes_multiplier: f32,
+}
+
 /// 一次搜索的终点，`Target`。
 struct Target {
     x: i32,
     y: i32,
     z: i32,
+    pos: BlockPos,
     best_heuristic: f32,
     best_node: Option<usize>,
     reached: bool,
@@ -388,6 +406,7 @@ pub fn find_path_with_nodes(view: &dyn BlockView, request: &PathRequest) -> (Opt
             x: node.x,
             y: node.y,
             z: node.z,
+            pos: request.target,
             best_heuristic: f32::MAX,
             best_node: None,
             reached: false,
@@ -411,17 +430,148 @@ pub fn find_path_with_nodes(view: &dyn BlockView, request: &PathRequest) -> (Opt
     let Some(best) = target.best_node else {
         return (None, visited);
     };
-    let mut chain = vec![search.nodes[best]];
-    let mut current = search.nodes[best].came_from;
-    while let Some(index) = current {
-        chain.push(search.nodes[index]);
-        current = search.nodes[index].came_from;
-    }
-    chain.reverse();
+    let chain = search.reconstruct(best);
     (
         Some(Path::new(chain, request.target, target.reached)),
         visited,
     )
+}
+
+/// 官方 `PathFinder.findPath(PathNavigationRegion, Mob, Set<BlockPos>, ...)`：
+/// 一次多目标 A\*，结果顺序与官方 `HashMap<Target, BlockPos>` /
+/// `Sets.newHashSetWithExpectedSize` 桶序及 `Stream.min` 比较规则逐位一致。
+///
+/// Vanilla `PathFinder.findPath(..., Set<BlockPos>, ...)`: a single multi-target A\*
+/// search whose tie-breaking matches vanilla's `HashMap<Target, BlockPos>` and
+/// `Sets.newHashSetWithExpectedSize` bucket order and `Stream.min` comparators.
+pub fn find_path_to_targets(
+    view: &dyn BlockView,
+    request: &MultiTargetPathRequest<'_>,
+) -> Option<Path> {
+    if request.targets.is_empty() {
+        return None;
+    }
+    super::timing::span!(Path);
+    let mut search = Search::new(view, request.mob, request.flags);
+    let start = if request.flags.swim.is_some() {
+        search.swim_start()
+    } else if request.flags.fly {
+        search.fly_start()
+    } else {
+        search.get_start()
+    };
+    // 去重并按 Java `HashMap<Target, BlockPos>` 桶序排列（`Target.hashCode() = Node.createHash`）。
+    // Deduplicate and order by Java's `HashMap<Target, BlockPos>` bucket order.
+    let mut unique: Vec<BlockPos> = Vec::with_capacity(request.targets.len());
+    for &pos in request.targets {
+        if !unique.contains(&pos) {
+            unique.push(pos);
+        }
+    }
+    java_hashmap_order(&mut unique, 16, |p| Node::create_hash(p.x, p.y, p.z));
+    let mut targets: Vec<Target> = unique
+        .into_iter()
+        .map(|pos| {
+            let node = search.get_node(pos.x, pos.y, pos.z);
+            let node = search.nodes[node];
+            Target {
+                x: node.x,
+                y: node.y,
+                z: node.z,
+                pos,
+                best_heuristic: f32::MAX,
+                best_node: None,
+                reached: false,
+            }
+        })
+        .collect();
+    let (visited, mut reached_indices) = search.run_multi(start, &mut targets, request);
+    #[cfg(test)]
+    {
+        use super::timing::imp::PathKey;
+        let start_node = search.nodes[start];
+        let first = targets[0].pos;
+        let key = PathKey {
+            start: (start_node.x, start_node.y, start_node.z),
+            target: (first.x, first.y, first.z),
+            size: (request.mob.width.to_bits(), request.mob.height.to_bits()),
+            nav: request.flags.nav_id(),
+        };
+        let any_ok = !reached_indices.is_empty() || targets.iter().any(|t| t.best_node.is_some());
+        super::timing::record_path!(key, visited, any_ok);
+    }
+    let _ = visited;
+    if !reached_indices.is_empty() {
+        // `Sets.newHashSetWithExpectedSize(targetSet.size())` 的初始容量。
+        let cap = guava_hashset_capacity(targets.len());
+        java_hashmap_order(&mut reached_indices, cap, |&idx| {
+            let t = &targets[idx];
+            Node::create_hash(t.x, t.y, t.z)
+        });
+        let mut best: Option<Path> = None;
+        for idx in reached_indices {
+            let t = &targets[idx];
+            let Some(best_node) = t.best_node else {
+                continue;
+            };
+            let path = Path::new(search.reconstruct(best_node), t.pos, true);
+            let better = best
+                .as_ref()
+                .is_none_or(|cur| path.node_count() < cur.node_count());
+            if better {
+                best = Some(path);
+            }
+        }
+        return best;
+    }
+    // 未达任一目标：按 `(dist_to_target as f64, node_count)` 取最小，并列保留遍历序第一个。
+    let mut best: Option<Path> = None;
+    for t in &targets {
+        let Some(best_node) = t.best_node else {
+            continue;
+        };
+        let path = Path::new(search.reconstruct(best_node), t.pos, false);
+        let better = best.as_ref().is_none_or(|cur| {
+            let cmp = f64::from(path.dist_to_target).total_cmp(&f64::from(cur.dist_to_target));
+            cmp.is_lt() || (cmp.is_eq() && path.node_count() < cur.node_count())
+        });
+        if better {
+            best = Some(path);
+        }
+    }
+    best
+}
+
+/// Guava `Sets.newHashSetWithExpectedSize(expected)` -> `Maps.capacity(expected)` ->
+/// Java `HashMap.tableSizeFor(cap)`。
+fn guava_hashset_capacity(expected: usize) -> usize {
+    let cap = if expected < 3 {
+        expected + 1
+    } else {
+        ((expected as f32) / 0.75 + 1.0) as usize
+    };
+    cap.max(1).next_power_of_two()
+}
+
+/// 按 Java `HashMap` 桶序稳定排序：`spread = h ^ (h >>> 16)`，桶号 `spread & (cap - 1)`，
+/// 同桶保留插入顺序。
+fn java_hashmap_order<T>(items: &mut Vec<T>, initial_cap: usize, hash: impl Fn(&T) -> i32) {
+    let mut cap = initial_cap.max(1).next_power_of_two();
+    while items.len() > cap * 3 / 4 {
+        cap *= 2;
+    }
+    let mask = cap - 1;
+    let mut keyed: Vec<(usize, usize, T)> = items
+        .drain(..)
+        .enumerate()
+        .map(|(idx, item)| {
+            let h = hash(&item) as u32;
+            let spread = h ^ (h >> 16);
+            ((spread as usize) & mask, idx, item)
+        })
+        .collect();
+    keyed.sort_by_key(|&(bucket, idx, _)| (bucket, idx));
+    items.extend(keyed.into_iter().map(|(_, _, item)| item));
 }
 
 impl<'a> Search<'a> {
@@ -572,6 +722,17 @@ impl<'a> Search<'a> {
 
     // ---- `PathFinder.findPath` 的主循环 ----
 
+    fn reconstruct(&self, best: usize) -> Vec<Node> {
+        let mut chain = vec![self.nodes[best]];
+        let mut current = self.nodes[best].came_from;
+        while let Some(index) = current {
+            chain.push(self.nodes[index]);
+            current = self.nodes[index].came_from;
+        }
+        chain.reverse();
+        chain
+    }
+
     fn best_h(&self, node: usize, target: &mut Target) -> f32 {
         let distance = self.nodes[node].distance_to(target.x, target.y, target.z);
         if distance < target.best_heuristic {
@@ -579,6 +740,90 @@ impl<'a> Search<'a> {
             target.best_node = Some(node);
         }
         mth::java_min_f32(distance, f32::MAX)
+    }
+
+    fn best_h_multi(&self, node: usize, targets: &mut [Target]) -> f32 {
+        let mut min = f32::MAX;
+        for target in targets.iter_mut() {
+            let distance = self.nodes[node].distance_to(target.x, target.y, target.z);
+            if distance < target.best_heuristic {
+                target.best_heuristic = distance;
+                target.best_node = Some(node);
+            }
+            min = mth::java_min_f32(distance, min);
+        }
+        min
+    }
+
+    /// 多目标版本的 `PathFinder.findPath` 主循环。
+    fn run_multi(
+        &mut self,
+        start: usize,
+        targets: &mut [Target],
+        request: &MultiTargetPathRequest<'_>,
+    ) -> (u64, Vec<usize>) {
+        self.nodes[start].g = 0.0;
+        let h = self.best_h_multi(start, targets);
+        self.nodes[start].h = h;
+        self.nodes[start].f = h;
+        self.heap.clear();
+        self.heap_insert(start);
+        let max_visited =
+            (request.max_visited_nodes as f32 * request.max_visited_nodes_multiplier) as i32;
+        let max_distance = request.max_distance_from_start;
+        let mut visited = 0;
+        let mut reached = Vec::new();
+        let mut neighbours = Vec::with_capacity(8);
+        while !self.heap.is_empty() {
+            visited += 1;
+            if visited >= max_visited {
+                break;
+            }
+            let current = self.heap_pop();
+            self.nodes[current].closed = true;
+            let node = self.nodes[current];
+            for (idx, target) in targets.iter_mut().enumerate() {
+                if node.distance_manhattan(target.x, target.y, target.z)
+                    <= request.reach_range as f32
+                {
+                    target.reached = true;
+                    reached.push(idx);
+                }
+            }
+            if !reached.is_empty() {
+                break;
+            }
+            let start_node = self.nodes[start];
+            if node.distance_to(start_node.x, start_node.y, start_node.z) >= max_distance {
+                continue;
+            }
+            neighbours.clear();
+            self.get_neighbors(current, &mut neighbours);
+            for &neighbour in &neighbours {
+                let other = self.nodes[neighbour];
+                let current_node = self.nodes[current];
+                let distance = current_node.distance_to(other.x, other.y, other.z);
+                self.nodes[neighbour].walked_distance = current_node.walked_distance + distance;
+                let g = current_node.g + distance + other.cost_malus;
+                let in_open = self.nodes[neighbour].in_open_set();
+                if self.nodes[neighbour].walked_distance < max_distance
+                    && (!in_open || g < self.nodes[neighbour].g)
+                {
+                    self.nodes[neighbour].came_from = Some(current);
+                    self.nodes[neighbour].g = g;
+                    let h = self.best_h_multi(neighbour, targets) * 1.5;
+                    self.nodes[neighbour].h = h;
+                    let f = g + h;
+                    if in_open {
+                        self.change_cost(neighbour, f);
+                    } else {
+                        self.nodes[neighbour].f = f;
+                        self.heap_insert(neighbour);
+                    }
+                }
+            }
+        }
+        (visited.max(0) as u64, reached)
     }
 
     /// 返回这一轮从开放表里弹出的节点数，也就是 A\* 展开的节点数。

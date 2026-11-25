@@ -31,6 +31,10 @@ const SERIALIZER_OPTIONAL_COMPONENT: i32 = 6;
 const SERIALIZER_ITEM_STACK: i32 = 7;
 const SERIALIZER_BOOLEAN: i32 = 8;
 const SERIALIZER_BLOCK_POS: i32 = 10;
+/// `EntityDataSerializers.OPTIONAL_BLOCK_POS`，注册顺序里的第 12 个（ID 11）。
+///
+/// `EntityDataSerializers.OPTIONAL_BLOCK_POS`, serializer id 11.
+const SERIALIZER_OPTIONAL_BLOCK_POS: i32 = 11;
 /// `EntityDataSerializers.OPTIONAL_LIVING_ENTITY_REFERENCE`，注册顺序第 13 个。
 const SERIALIZER_OPTIONAL_LIVING_ENTITY_REFERENCE: i32 = 13;
 const SERIALIZER_BLOCK_STATE: i32 = 14;
@@ -165,6 +169,10 @@ pub enum EntityData {
     EffectParticles(Vec<i32>),
     /// index 11，BOOLEAN。`LivingEntity.DATA_EFFECT_AMBIENCE_ID`。
     EffectAmbience(bool),
+    /// index 14，OPTIONAL_BLOCK_POS。`LivingEntity.SLEEPING_POS_ID`。
+    ///
+    /// index 14, OPTIONAL_BLOCK_POS. `LivingEntity.SLEEPING_POS_ID`.
+    SleepingPos(Option<BlockPos>),
     /// index 15，HUMANOID_ARM。
     MainHand(HumanoidArm),
     /// index 16，BYTE。皮肤外层的掩码。
@@ -466,6 +474,14 @@ pub enum EntityData {
     WolfVariant(i32),
     /// `Wolf.DATA_SOUND_VARIANT_ID`：`wolf_sound_variant` 注册表 ID。
     WolfSoundVariant(i32),
+    /// `AbstractNautilus.DASH`（index 20，BOOLEAN）。
+    ///
+    /// `AbstractNautilus.DASH` (index 20, BOOLEAN).
+    NautilusDash(bool),
+    /// `ZombieNautilus.DATA_VARIANT_ID`（index 21，注册表 ID）。
+    ///
+    /// `ZombieNautilus.DATA_VARIANT_ID` (index 21, a registry id).
+    ZombieNautilusVariant(i32),
     /// `Guardian.DATA_ID_MOVING`（BOOLEAN，索引 16）。
     ///
     /// `Guardian.DATA_ID_MOVING` (BOOLEAN, index 16).
@@ -516,6 +532,7 @@ impl EntityData {
             Self::TntBlockState(_) | Self::Health(_) => 9,
             Self::EffectParticles(_) => 10,
             Self::EffectAmbience(_) => 11,
+            Self::SleepingPos(_) => 14,
             Self::MobFlags(_) => 15,
             Self::MainHand(_) | Self::Baby(_) => 16,
             Self::ModelCustomisation(_)
@@ -604,6 +621,8 @@ impl EntityData {
             Self::AxolotlVariant(_) => mc_bamboo_data::entity_types::AXOLOTL_VARIANT,
             Self::AxolotlPlayingDead(_) => mc_bamboo_data::entity_types::AXOLOTL_PLAYING_DEAD,
             Self::AxolotlFromBucket(_) => mc_bamboo_data::entity_types::AXOLOTL_FROM_BUCKET,
+            Self::NautilusDash(_) => mc_bamboo_data::entity_types::NAUTILUS_DASH,
+            Self::ZombieNautilusVariant(_) => mc_bamboo_data::entity_types::ZOMBIE_NAUTILUS_VARIANT,
             Self::GuardianMoving(_) => mc_bamboo_data::entity_types::GUARDIAN_MOVING,
             Self::GuardianAttackTarget(_) => mc_bamboo_data::entity_types::GUARDIAN_ATTACK_TARGET,
         }
@@ -742,6 +761,13 @@ impl EntityData {
             Self::EffectAmbience(ambient) => {
                 write_data_header(out, 11, SERIALIZER_BOOLEAN);
                 write_bool(out, *ambient);
+            }
+            Self::SleepingPos(pos) => {
+                write_data_header(out, 14, SERIALIZER_OPTIONAL_BLOCK_POS);
+                write_bool(out, pos.is_some());
+                if let Some(pos) = pos {
+                    write_block_pos(out, *pos);
+                }
             }
             Self::MainHand(arm) => {
                 write_data_header(out, 15, SERIALIZER_HUMANOID_ARM);
@@ -1029,6 +1055,18 @@ impl EntityData {
             Self::WitchUsingItem(using) => {
                 write_data_header(out, 17, SERIALIZER_BOOLEAN);
                 write_bool(out, *using);
+            }
+            Self::NautilusDash(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::ZombieNautilusVariant(variant) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::ZOMBIE_NAUTILUS_VARIANT_SERIALIZER,
+                );
+                write_varint(out, *variant);
             }
             Self::GuardianMoving(moving) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);

@@ -44,9 +44,51 @@ fn is_proper_hit(state: BlockState, clicked: Direction, click_y: f64) -> bool {
     }
 }
 
-/// `attemptToRing`。官方要先有钟的方块实体才响，钟放下时总会建一个，这里当它一直在。
-fn ring(world: &mut World, pos: BlockPos) {
+/// `attemptToRing` / `BellBlockEntity.updateEntities`：敲钟发声并通知 32 格内活着的
+/// 带大脑生物写 `HEARD_BELL_TIME`。
+///
+/// `attemptToRing` / `BellBlockEntity.updateEntities`: plays the bell sound and sets
+/// `HEARD_BELL_TIME` on alive brained mobs within 32 blocks of the bell center.
+pub fn ring(world: &mut World, pos: BlockPos) {
     world.play_block_sound(pos, sound_event("minecraft:block.bell.use"), 2.0, 1.0);
+    let now = world.game_time();
+    let area = mc_bamboo_core::Aabb::new(
+        f64::from(pos.x) - 48.0,
+        f64::from(pos.y) - 48.0,
+        f64::from(pos.z) - 48.0,
+        f64::from(pos.x + 1) + 48.0,
+        f64::from(pos.y + 1) + 48.0,
+        f64::from(pos.z + 1) + 48.0,
+    );
+    let cx = f64::from(pos.x) + 0.5;
+    let cy = f64::from(pos.y) + 0.5;
+    let cz = f64::from(pos.z) + 0.5;
+    let mut targets = Vec::new();
+    world.level().for_each_entity_in(area, &mut |public| {
+        if !public.removed
+            && let crate::entity::KindPublic::Mob(mob) = &public.kind
+            && mob.is_alive()
+        {
+            let dx = cx - public.position.x;
+            let dy = cy - public.position.y;
+            let dz = cz - public.position.z;
+            if dx * dx + dy * dy + dz * dz < 32.0 * 32.0 {
+                targets.push(public.uid);
+            }
+        }
+    });
+    for uid in targets {
+        world.with_entity_mut(uid, &mut |entity| {
+            entity.with_mob(|_, mob| {
+                if let Some(brain) = mob.brain.as_mut() {
+                    brain.memories.set(
+                        crate::entity::mob::brain::memory::MemoryType::HeardBellTime,
+                        crate::entity::mob::brain::memory::MemoryValue::Long(now),
+                    );
+                }
+            });
+        });
+    }
 }
 
 /// 点在顶面或者底面：立在地上或者挂在天花板上。
