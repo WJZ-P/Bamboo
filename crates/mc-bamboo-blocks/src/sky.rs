@@ -111,6 +111,17 @@ pub fn bees_stay_in_hive(total_ticks: i64) -> bool {
         .contains(&ticks)
 }
 
+/// 主世界的 `EnvironmentAttributes.CREAKING_ACTIVE`：`day` 时间线用 `or`
+/// 叠在缺省值假上，取值就是两条关键帧之间的那一段（夜里）。
+///
+/// The overworld `CREAKING_ACTIVE`: true between the two `day` keyframes.
+pub fn creaking_active(total_ticks: i64) -> bool {
+    let ticks = total_ticks.rem_euclid(mc_bamboo_data::environment::DAY_PERIOD_TICKS);
+    (mc_bamboo_data::environment::CREAKING_ACTIVE_START_TICK
+        ..mc_bamboo_data::environment::CREAKING_ACTIVE_END_TICK)
+        .contains(&ticks)
+}
+
 /// 按周期关键帧表（官方 `KeyframeTrackSampler` + `LerpFunction.ofConstant()`）查当前活动：
 /// `[from, to)` 取 `from` 的值，首帧之前（`0..first`）绕回最后一帧的值。
 ///

@@ -364,6 +364,12 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         );
         put(&mut out, "fuse", Tag::Int(mob.sulfur_cube.fuse));
     }
+    // ---- Creaking ----
+    if mob.mob_type == MobType::Creaking
+        && let Some(home) = mob.creaking.home_pos
+    {
+        put(&mut out, "home_pos", super::creaking::home_tag(home));
+    }
     // ---- Skeleton / Bogged ----
     if mob.mob_type == MobType::Skeleton {
         // `ConversionTracker.addAdditionalSaveData`：`isAfflicted` 是存档这一刻的
@@ -874,6 +880,10 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Endermite {
             mob.endermite.life = tag::int_or(tag, "Lifetime", 0);
+        }
+        if mob.mob_type == MobType::Creaking {
+            mob.creaking.home_pos =
+                tag::field(tag, "home_pos").and_then(super::creaking::home_from_tag);
         }
         if mob.mob_type == MobType::SulfurCube {
             let state = &mut mob.sulfur_cube;

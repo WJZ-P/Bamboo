@@ -113,6 +113,14 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
             .additional(),
             BEEHIVE_OMIT,
         ),
+        "minecraft:creaking_heart" => (
+            crate::behaviour::misc::creaking_heart_entity::CreakingHeartEntity::read(
+                mc_bamboo_core::BlockPos::new(0, 0, 0),
+                raw,
+            )
+            .additional(),
+            CREAKING_HEART_OMIT,
+        ),
         "minecraft:jigsaw" => (jigsaw(raw, state), &[][..]),
         "minecraft:end_gateway" => (end_gateway(raw), &[][..]),
         "minecraft:sculk_catalyst" => (sculk_catalyst(raw), &[][..]),
@@ -132,9 +140,10 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
     Some(Resaved::new(fields, omit))
 }
 
-/// 蜂巢的 `flower_pos` 只在有值时写。
-/// A beehive writes `flower_pos` only when it has one.
+/// 蜂巢的 `flower_pos`、心的 `creaking` 都只在有值时写。
+/// These two optional keys are written only when the live value is present.
 const BEEHIVE_OMIT: &[&str] = &["flower_pos"];
+const CREAKING_HEART_OMIT: &[&str] = &["creaking"];
 
 /// 官方认识、可选且当前状态不写的键：编码时从读盘条目里删掉，避免带上旧值。
 /// 不在这张表里的未知键按 D9 原样保留。

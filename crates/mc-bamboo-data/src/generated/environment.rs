@@ -6,3 +6,6 @@
 pub const DAY_PERIOD_TICKS: i64 = 24000;
 pub const BEES_STAY_IN_HIVE_START_TICK: i64 = 12542;
 pub const BEES_STAY_IN_HIVE_END_TICK: i64 = 23460;
+/// 主世界「嘎枝之心激活」时间线的关键帧。
+pub const CREAKING_ACTIVE_START_TICK: i64 = 12600;
+pub const CREAKING_ACTIVE_END_TICK: i64 = 23401;

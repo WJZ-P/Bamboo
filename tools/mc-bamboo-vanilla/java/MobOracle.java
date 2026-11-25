@@ -123,6 +123,7 @@ import net.minecraft.world.entity.animal.sheep.Sheep;
 import net.minecraft.world.entity.animal.chicken.Chicken;
 import net.minecraft.world.entity.animal.polarbear.PolarBear;
 import net.minecraft.world.item.DyeColor;
+import net.minecraft.world.entity.monster.creaking.Creaking;
 import net.minecraft.world.entity.monster.zombie.Zombie;
 import net.minecraft.world.entity.monster.zombie.Husk;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
@@ -642,6 +643,13 @@ public final class MobOracle {
                     "elder_home_far")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playGuardian(official, out, name);
+                cases++;
+            }
+            for (String name : List.of("creaking_night", "creaking_watched", "creaking_unwatched",
+                    "creaking_hurt", "creaking_heart_broken", "creaking_chase",
+                    "creaking_heart_removed")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playCreaking(official, out, name);
                 cases++;
             }
             if (only == null || only.startsWith("sculk_sensor")) {
@@ -2100,13 +2108,25 @@ public final class MobOracle {
         }
 
         /**
-         * 把每个传感器的起始延迟都设成同一个值：这些延迟取自 `Sensor` 不带种子的静态随机源，
-         * 定下来之后场景每次跑都一样，才能把伤害安排在固定的某一刻。
+         * 官方 `Brain.Provider.makeBrain` 传实体随机源进 `Brain` 构造函数，其中每个
+         * `SensorType.create()` 后调一次 `randomlyDelayStart`，两个 20 刻传感器共消耗两次
+         * `nextInt(20)`。夹具在实体构造后覆盖随机源，所以这里按官方顺序重放这两次取数、
+         * 把延迟定成 1（场景才能复现、伤害能排在固定某一刻），并按推进之后的随机源状态
+         * 重设闸门洗牌（官方那个是不带种子的静态随机源）。Bamboo 一侧的
+         * `randomly_delay_start` / `seed_shuffles` 走同一条取数链。
          *
-         * <p>Sets every sensor's start delay to one value. The delays come from the unseeded
-         * static random in `Sensor`; fixing them makes the scene repeatable, so a hurt can be
-         * scheduled on a known tick.
+         * <p>Replays the two `nextInt(20)` draws vanilla's lazy brain construction takes
+         * after the fixture overwrites the entity random, fixes sensor delays to one for
+         * repeatable scenes, and reseeds the shuffle randoms that vanilla creates from an
+         * unseeded static source. Bamboo replays the same draw chain.
          */
+        static void alignCreakingBrain(net.minecraft.world.entity.monster.creaking.Creaking mob)
+                throws Exception {
+            for (int sensor = 0; sensor < 2; sensor++) mob.getRandom().nextInt(20);
+            BrainOracle.fixSensorDelays(mob, 1L);
+            BrainOracle.reseedShuffles(mob, randomSeed(mob));
+        }
+
         static void fixSensorDelays(Mob mob, long delay) throws Exception {
             Field sensorsField = net.minecraft.world.entity.ai.Brain.class.getDeclaredField("sensors");
             sensorsField.setAccessible(true);
@@ -20296,6 +20316,238 @@ public final class MobOracle {
             cases++;
         }
         return cases;
+    }
+
+    /**
+     * 嘎枝 / 嘎枝之心：逐刻比心的昼夜状态、绑定的嘎枝、被看着冻结、受伤放树脂和
+     * 心被破坏后的拆解死亡。和 {@code bee_full} 一样走真实环境属性时间线，夜里
+     * {@code creaking_active} 为真。
+     */
+    private static void playCreaking(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        try {
+            playCreakingInner(official, level, out, name);
+        } finally {
+            official.attributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+        }
+    }
+
+    private static void playCreakingInner(Official official, FakeLevel level, Writer out, String name)
+            throws Exception {
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.nextId = FIRST_ID;
+        level.gameTime = START_TIME;
+        level.injectedCanSeeSky = true;
+        level.clock = 12600L;
+
+        int ticks = switch (name) {
+            case "creaking_night" -> 40;
+            case "creaking_heart_broken" -> 55;
+            case "creaking_chase" -> 60;
+            case "creaking_heart_removed" -> 30;
+            default -> 20;
+        };
+
+        // 石地板 y=60，心在 (0,64,0)，两头各一根同轴苍白橡木原木。
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        for (int x = -16; x <= 16; x++) {
+            for (int z = -16; z <= 16; z++) {
+                level.blocks.put(BlockPos.asLong(x, 60, z), stone);
+            }
+        }
+        BlockPos heartPos = new BlockPos(0, 64, 0);
+        BlockState heartState = Blocks.CREAKING_HEART.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.CreakingHeartBlock.AXIS, Direction.Axis.Y)
+                .setValue(net.minecraft.world.level.block.CreakingHeartBlock.STATE,
+                        net.minecraft.world.level.block.state.properties.CreakingHeartState.DORMANT);
+        level.blocks.put(heartPos.asLong(), heartState);
+        BlockState log = Blocks.PALE_OAK_LOG.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.CreakingHeartBlock.AXIS, Direction.Axis.Y);
+        level.blocks.put(heartPos.above().asLong(), log);
+        level.blocks.put(heartPos.below().asLong(), log);
+        var heartBe = new net.minecraft.world.level.block.entity.CreakingHeartBlockEntity(heartPos, heartState);
+        level.putBlockEntity(heartBe);
+
+        // 环境属性：day 时间线的 `creaking_active` 在夜里为真。
+        EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder().addStaticLayers(level);
+        net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+            public long totalTicks() { return level.clock; }
+            public float partialTick() { return 0.0F; }
+            public float rate() { return 1.0F; }
+            public boolean isPaused() { return false; }
+        };
+        for (Holder<net.minecraft.world.timeline.Timeline> timeline : level.dimensionType().timelines()) {
+            builder.addTimelineLayer(timeline, clocks);
+        }
+        net.minecraft.world.attribute.WeatherAttributes.addBuiltinLayers(builder,
+                net.minecraft.world.attribute.WeatherAttributes.WeatherAccess.from(level));
+        official.attributes = builder.build();
+        put(ServerLevel.class, level, "environmentAttributes", official.attributes);
+        level.getRandom().setSeed(1L);
+        put(Level.class, level, "soundSeedGenerator", RandomSource.create(12345L));
+
+        // 玩家站在 (4.5, 61, 0.5)，盯着负 X 方向的嘎枝（yaw 90 = -X）。
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "CreakingWatcher"),
+                ClientInformation.createDefault());
+        player.setPos(name.equals("creaking_chase") ? 6.5 : 4.5, 61.0, 0.5);
+        setRandom(player, 0x0DDB1A5E5BAD5EEDL);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        player.setGameMode(GameType.SURVIVAL);
+        player.damageCooldownTime = 0;
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = new Bytes(official.registries);
+        put(ServerPlayer.class, player, "connection", connection);
+        level.playersList().add(player);
+        level.tracked.add(player);
+
+        // 预绑定场景：一只 UUID (0,1) 的嘎枝绑在心上；`creaking_night` 让心自己刷。
+        boolean preBound = !name.startsWith("creaking_night");
+        Creaking creaking = null;
+        if (preBound) {
+            creaking = EntityTypes.CREAKING.create(level, EntitySpawnReason.COMMAND);
+            creaking.setUUID(new UUID(0L, 1L));
+            setRandom(creaking, 0x5EED_5EEDL);
+            // 官方构造时两个传感器各取一次 `nextInt(20)`，起始延迟再被夹具定成 1；
+            // 闸门洗牌随机源是不带种子的静态源，按同一个种子在两边重设。
+            BrainOracle.alignCreakingBrain(creaking);
+            creaking.snapTo(3.5, 61.0, 0.5, 0.0F, 0.0F);
+            creaking.setYHeadRot(0.0F);
+            creaking.setYBodyRot(0.0F);
+            creaking.setTransient(heartPos);
+            heartBe.setCreakingInfo(new UUID(0L, 1L));
+            level.tracked.add(creaking);
+        }
+
+        // 反射拿 Creaking 的三个布尔元数据 accessor、挥击动画刻数和心的 creakingInfo。
+        // `attackAnimationRemainingTicks` 反映每次 `doHurtTarget` 的挥击（冷却 40 刻），
+        // 用来确认攻击冷却真的被逐刻对拍覆盖（改坏成 1 会立刻报不一致）。
+        Field attackAnimF = net.minecraft.world.entity.monster.creaking.Creaking.class
+                .getDeclaredField("attackAnimationRemainingTicks");
+        attackAnimF.setAccessible(true);
+        Field canMoveF = net.minecraft.world.entity.monster.creaking.Creaking.class.getDeclaredField("CAN_MOVE");
+        canMoveF.setAccessible(true);
+        var CAN_MOVE = (net.minecraft.network.syncher.EntityDataAccessor<Boolean>) canMoveF.get(null);
+        Field activeF = net.minecraft.world.entity.monster.creaking.Creaking.class.getDeclaredField("IS_ACTIVE");
+        activeF.setAccessible(true);
+        var IS_ACTIVE = (net.minecraft.network.syncher.EntityDataAccessor<Boolean>) activeF.get(null);
+        Field tearingF = net.minecraft.world.entity.monster.creaking.Creaking.class.getDeclaredField("IS_TEARING_DOWN");
+        tearingF.setAccessible(true);
+        var IS_TEARING_DOWN = (net.minecraft.network.syncher.EntityDataAccessor<Boolean>) tearingF.get(null);
+        Field infoF = net.minecraft.world.level.block.entity.CreakingHeartBlockEntity.class
+                .getDeclaredField("creakingInfo");
+        infoF.setAccessible(true);
+
+        String initialBlocks = blockArray(level.blocks);
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick != 0) {
+                level.gameTime = START_TIME + tick;
+                level.clock = 12600L;
+                // `creaking_chase`：前几刻看着（激活 + 冻结），中段转头（追击 + 攻击），
+                // 末段再转回来看（验证「玩家转头看它时停住」）。
+                boolean watch = name.equals("creaking_watched")
+                        || (name.equals("creaking_chase") && (tick < 5 || tick >= 45));
+                player.setYRot(watch ? 90.0F : -90.0F);
+                player.setXRot(0.0F);
+                player.setYHeadRot(watch ? 90.0F : -90.0F);
+                if (name.equals("creaking_night")) {
+                    // 夜里刷出的嘎枝落点随机，让玩家抬头避免正好对视。
+                    player.setYRot(0.0F);
+                    player.setXRot(-90.0F);
+                    player.setYHeadRot(0.0F);
+                }
+                level.spawned.clear();
+                // 先实体，后方块实体（`ServerLevel.tick` 顺序）。
+                if (creaking != null && !creaking.isRemoved()) {
+                    creaking.checkDespawn();
+                    creaking.commonTick();
+                    creaking.tick();
+                }
+                if (level.getBlockState(heartPos).is(Blocks.CREAKING_HEART)) {
+                    net.minecraft.world.level.block.entity.CreakingHeartBlockEntity.serverTick(
+                            level, heartPos, level.getBlockState(heartPos), heartBe);
+                }
+                if (name.equals("creaking_hurt") && tick == 5 && creaking != null) {
+                    creaking.hurtServer(level, level.damageSources().playerAttack(player), 3.0F);
+                }
+                if (name.equals("creaking_heart_broken") && tick == 3) {
+                    heartBe.removeProtector(level.damageSources().playerAttack(player));
+                    level.removeBlock(heartPos, false);
+                }
+                if (name.equals("creaking_heart_removed") && tick == 3) {
+                    // 心被活塞 / 爆炸这类非玩家方式移走：`preRemoveSideEffects → removeProtector(null)`。
+                    heartBe.removeProtector(null);
+                    level.removeBlock(heartPos, false);
+                }
+                // 夜里心刷出来的嘎枝这一刻接进名单，之后逐刻跟着 tick。
+                if (creaking == null) {
+                    for (Entity entity : level.spawned) {
+                        if (entity instanceof net.minecraft.world.entity.monster.creaking.Creaking found
+                                && !found.isRemoved()) {
+                            creaking = found;
+                            // 夜里心自己刷出来的那只也用同一套场景初值。
+                            setRandom(creaking, 0x5EED_5EEDL);
+                            BrainOracle.alignCreakingBrain(creaking);
+                            level.tracked.add(creaking);
+                            break;
+                        }
+                    }
+                }
+            }
+            BlockState hs = level.getBlockState(heartPos);
+            String heartStateName = hs.is(Blocks.CREAKING_HEART)
+                    ? ((net.minecraft.world.level.block.state.properties.CreakingHeartState)
+                            hs.getValue(net.minecraft.world.level.block.CreakingHeartBlock.STATE)).getSerializedName()
+                    : "air";
+            boolean bound = infoF.get(heartBe) != null;
+            boolean present = creaking != null && !creaking.isRemoved();
+            boolean canMove = present && creaking.getEntityData().get(CAN_MOVE);
+            boolean active = present && creaking.getEntityData().get(IS_ACTIVE);
+            boolean tearing = present && creaking.getEntityData().get(IS_TEARING_DOWN);
+            int attackAnim = present ? attackAnimF.getInt(creaking) : 0;
+            long xBits = present ? Double.doubleToRawLongBits(creaking.getX()) : 0L;
+            long zBits = present ? Double.doubleToRawLongBits(creaking.getZ()) : 0L;
+            int resin = 0;
+            for (int x = -6; x <= 6; x++) {
+                for (int y = 58; y <= 66; y++) {
+                    for (int z = -6; z <= 6; z++) {
+                        if (level.getBlockState(new BlockPos(x, y, z)).is(Blocks.RESIN_CLUMP)) {
+                            resin++;
+                        }
+                    }
+                }
+            }
+            if (tick > 0) frames.append(',');
+            // 位置、生命、动画和所有离散字段都逐刻原始位严格相等，没有任何放宽窗口。
+            // 生命下降证明「嘎枝从 3 格外走进近战范围并攻击」；挥击动画刻数证明攻击
+            // 冷却（40 刻）真的在对拍里——改坏成 1 会每刻挥击、动画常驻 15。玩家不 tick，
+            // 首次命中后进入永久无敌，生命只在命中那一刻 20→17 一次。
+            frames.append("{\"heartState\":\"").append(heartStateName)
+                    .append("\",\"bound\":").append(bound)
+                    .append(",\"creakingPresent\":").append(present)
+                    .append(",\"canMove\":").append(canMove)
+                    .append(",\"active\":").append(active)
+                    .append(",\"tearingDown\":").append(tearing)
+                    .append(",\"resin\":").append(resin)
+                    .append(",\"playerHealth\":")
+                    .append(Float.floatToRawIntBits(player.getHealth()))
+                    .append(",\"attackAnimation\":").append(attackAnim)
+                    .append(",\"x\":").append(xBits)
+                    .append(",\"z\":").append(zBits)
+                    .append('}');
+        }
+        frames.append(']');
+        out.write("{\"type\":\"creaking\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID + ",\"blocks\":" + initialBlocks
+                + ",\"frames\":" + frames + "}\n");
     }
 
     private static final class Official {

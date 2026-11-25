@@ -1148,36 +1148,8 @@ fn environment_file(data: &VersionData) -> Result<String, String> {
         .get("period_ticks")
         .and_then(Value::as_i64)
         .ok_or("the day timeline has no period_ticks")?;
-    let track = day
-        .get("tracks")
-        .and_then(|tracks| tracks.get("minecraft:gameplay/bees_stay_in_hive"))
-        .ok_or("BEES_STAY_IN_HIVE is not in the day timeline")?;
-    let modifier = track
-        .get("modifier")
-        .and_then(Value::as_str)
-        .unwrap_or("or");
-    if modifier != "or" {
-        return Err(format!("unexpected BEES_STAY_IN_HIVE modifier: {modifier}"));
-    }
-    let mut frames = Vec::new();
-    for frame in track
-        .get("keyframes")
-        .and_then(Value::as_array)
-        .ok_or("BEES_STAY_IN_HIVE has no keyframes")?
-    {
-        let ticks = frame
-            .get("ticks")
-            .and_then(Value::as_i64)
-            .ok_or("a BEES_STAY_IN_HIVE keyframe has no ticks")?;
-        let value = frame
-            .get("value")
-            .and_then(Value::as_bool)
-            .ok_or("a BEES_STAY_IN_HIVE keyframe has no boolean value")?;
-        frames.push((ticks, value));
-    }
-    if frames.len() != 2 || !frames[0].1 || frames[1].1 {
-        return Err("unexpected BEES_STAY_IN_HIVE keyframes".to_owned());
-    }
+    let bees = or_bool_window(&day, "minecraft:gameplay/bees_stay_in_hive")?;
+    let creaking = or_bool_window(&day, "minecraft:gameplay/creaking_active")?;
     let mut out = String::new();
     let _ = writeln!(out, "/// 主世界「蜜蜂留在巢里」时间线的关键帧。");
     let _ = writeln!(out, "///");
@@ -1186,14 +1158,61 @@ fn environment_file(data: &VersionData) -> Result<String, String> {
     let _ = writeln!(
         out,
         "pub const BEES_STAY_IN_HIVE_START_TICK: i64 = {};",
-        frames[0].0
+        bees.0
     );
     let _ = writeln!(
         out,
         "pub const BEES_STAY_IN_HIVE_END_TICK: i64 = {};",
-        frames[1].0
+        bees.1
+    );
+    let _ = writeln!(out, "/// 主世界「嘎枝之心激活」时间线的关键帧。");
+    let _ = writeln!(
+        out,
+        "pub const CREAKING_ACTIVE_START_TICK: i64 = {};",
+        creaking.0
+    );
+    let _ = writeln!(
+        out,
+        "pub const CREAKING_ACTIVE_END_TICK: i64 = {};",
+        creaking.1
     );
     Ok(out)
+}
+
+/// 读一条 `or` 叠加的布尔轨迹：恰好两帧，先真后假，返回 `(真起点, 假起点)`。
+fn or_bool_window(day: &serde_json::Value, name: &str) -> Result<(i64, i64), String> {
+    use serde_json::Value;
+    let track = day
+        .get("tracks")
+        .and_then(|tracks| tracks.get(name))
+        .ok_or_else(|| format!("{name} is not in the day timeline"))?;
+    let modifier = track
+        .get("modifier")
+        .and_then(Value::as_str)
+        .unwrap_or("or");
+    if modifier != "or" {
+        return Err(format!("unexpected {name} modifier: {modifier}"));
+    }
+    let mut frames = Vec::new();
+    for frame in track
+        .get("keyframes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{name} has no keyframes"))?
+    {
+        let ticks = frame
+            .get("ticks")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| format!("a {name} keyframe has no ticks"))?;
+        let value = frame
+            .get("value")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("a {name} keyframe has no boolean value"))?;
+        frames.push((ticks, value));
+    }
+    if frames.len() != 2 || !frames[0].1 || frames[1].1 {
+        return Err(format!("unexpected {name} keyframes"));
+    }
+    Ok((frames[0].0, frames[1].0))
 }
 
 fn module_file() -> String {
@@ -4528,6 +4547,25 @@ fn entity_types_file(data: &VersionData) -> String {
         "pub const SLIME_EYE_HEIGHT: f32 = {};",
         float_literal(facts.slime_eye_height)
     );
+    // `Creaking` 的元数据 / 属性常量由官方类的字节码顺序与 `createAttributes()` 得出。
+    for (name, value) in [
+        ("CREAKING_CAN_MOVE", 16),
+        ("CREAKING_IS_ACTIVE", 17),
+        ("CREAKING_IS_TEARING_DOWN", 18),
+        ("CREAKING_HOME_POS", 19),
+    ] {
+        let _ = writeln!(out, "pub const {name}: u8 = {value};");
+    }
+    for (name, value) in [
+        ("CREAKING_MAX_HEALTH", 1.0),
+        ("CREAKING_MOVEMENT_SPEED", 0.4000000059604645),
+        ("CREAKING_ATTACK_DAMAGE", 3.0),
+        ("CREAKING_FOLLOW_RANGE", 32.0),
+        ("CREAKING_STEP_HEIGHT", 1.0625),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
+    }
+    let _ = writeln!(out, "pub const CREAKING_EYE_HEIGHT: f32 = 2.3;");
     mooshroom_facts(&mut out, facts);
     // 敌对生物自己定义的元数据 index 和眼高，按常量名排序。
     // Hostile-mob metadata indices and eye heights, sorted by constant name.
