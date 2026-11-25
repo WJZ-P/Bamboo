@@ -384,11 +384,13 @@ impl SceneCase {
                 ]);
             }
         });
-        for i in 0..2 {
+        for (i, slot) in ids.iter_mut().enumerate() {
+            let i = i as i64;
             let pos = Vec3::new(2.5 + i as f64, 64.0, 0.5);
-            ids[i] = world.spawn_entity(Entity::by_mob_type(MobType::TraderLlama, pos));
-            world.with_entity_mut(ids[i], &mut |e| {
-                e.random = JavaRandom::new(100 + i as i64);
+            *slot = world.spawn_entity(Entity::by_mob_type(MobType::TraderLlama, pos));
+            let uid = *slot;
+            world.with_entity_mut(uid, &mut |e| {
+                e.random = JavaRandom::new(100 + i);
                 e.y_rot = 0.0;
                 if let Some(mob) = e.kind.mob_mut() {
                     mob.uuid = (2 + i as u128).to_be_bytes();
