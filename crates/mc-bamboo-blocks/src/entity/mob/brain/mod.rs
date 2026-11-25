@@ -246,7 +246,7 @@ pub struct BrainTemplate {
     requirements: Vec<(Activity, Vec<(MemoryType, MemoryStatus)>)>,
     erase_when_stopped: Vec<(Activity, Vec<MemoryType>)>,
     default_activity: Activity,
-    registered: u64,
+    registered: u128,
     /// 活动 → 该活动的行为下标（按优先级升序）。`startEachNonRunning` 把核心桶和当前
     /// 活动桶拼成要尝试启动的下标表，不再全表过滤。
     ///
@@ -1105,17 +1105,23 @@ mod tests {
     /// Pins the key struct sizes. After boxing values and moving the structure table into
     /// `Arc<BrainTemplate>`: 32 slots had `Brain=664`, `Memories=536`; phase 3 grew to 49
     /// slots (+272) plus schedule fields (`Memories=808`, `Brain=952`), and the two
-    /// nautilus memories add 32 more (`840` / `984`).
+    /// nautilus memories add 32 more (`840` / `984`). Widening the three memory masks
+    /// and behaviour preconditions from `u64` to `u128` (memory types now exceed 64)
+    /// adds 24 bytes to `Memories`, `Brain`, `Node` and `Entry`.
     #[test]
     fn brain_and_memory_sizes_stay_small() {
         use crate::entity::mob::brain::behavior::Node;
         use crate::entity::mob::brain::memory::{Memories, MemoryValue};
+        // 三组记忆掩码和行为入口条件从 `u64` 升到 `u128`（记忆种类超过 64），
+        // `Memories` / `Brain` / `Node` / `Entry` 各多 24 字节。
+        // The three memory masks and behaviour preconditions widened from `u64` to
+        // `u128` (memory types exceed 64), adding 24 bytes to each of these structs.
         assert_eq!(std::mem::size_of::<MemoryValue>(), 184);
-        assert_eq!(std::mem::size_of::<Memories>(), 840);
-        assert_eq!(std::mem::size_of::<Brain>(), 984);
-        assert_eq!(std::mem::size_of::<Node>(), 136);
+        assert_eq!(std::mem::size_of::<Memories>(), 864);
+        assert_eq!(std::mem::size_of::<Brain>(), 1008);
+        assert_eq!(std::mem::size_of::<Node>(), 160);
         assert_eq!(std::mem::size_of::<Sensor>(), 16);
-        assert_eq!(std::mem::size_of::<Entry>(), 144);
+        assert_eq!(std::mem::size_of::<Entry>(), 176);
     }
 
     /// 同一缓存槽构造两只大脑，它们共享同一份模板（`Arc::ptr_eq`），但记忆和运行态
