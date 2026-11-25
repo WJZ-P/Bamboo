@@ -125,6 +125,7 @@ struct ClockEntry {
     paused: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode(
     java: &str,
     game_rules: &Path,
