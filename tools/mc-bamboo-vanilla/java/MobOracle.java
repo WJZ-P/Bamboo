@@ -603,8 +603,134 @@ public final class MobOracle {
                 playGuardian(official, out, name);
                 cases++;
             }
+            if (only == null || only.startsWith("sculk_sensor")) {
+                for (String name : List.of(
+                        "sculk_sensor_step",
+                        "sculk_sensor_wool",
+                        "sculk_sensor_cooldown",
+                        "sculk_sensor_calibrated_match",
+                        "sculk_sensor_calibrated_mismatch")) {
+                    if (only != null && !name.startsWith(only)) continue;
+                    playSculkSensor(official, out, name);
+                    cases++;
+                }
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
+        }
+    }
+
+    /** 幽匿感测体：真实 `SculkSensorBlockEntity` + `VibrationSystem`，逐刻驱动振动。 */
+    private static void playSculkSensor(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        try {
+            level.nextId = FIRST_ID;
+            level.gameTime = START_TIME;
+
+            BlockPos sensor = new BlockPos(4, 64, 0);
+            BlockPos source = new BlockPos(1, 64, 0);
+            BlockPos wool = new BlockPos(2, 64, 0);
+            boolean calibrated = name.contains("calibrated");
+            int ticks = switch (name) {
+                case "sculk_sensor_cooldown" -> 70;
+                default -> 20;
+            };
+
+            // 平坦石地板，保证振动射线和落点都有真实地面。
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -12; x <= 12; x++) {
+                for (int z = -12; z <= 12; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            BlockState sensorState = calibrated
+                    ? Blocks.CALIBRATED_SCULK_SENSOR.defaultBlockState()
+                            .setValue(net.minecraft.world.level.block.CalibratedSculkSensorBlock.FACING,
+                                    Direction.NORTH)
+                    : Blocks.SCULK_SENSOR.defaultBlockState();
+            level.blocks.put(sensor.asLong(), sensorState);
+            if (name.equals("sculk_sensor_wool")) {
+                level.blocks.put(wool.asLong(), Blocks.WOOL.white().defaultBlockState());
+            }
+            if (name.contains("calibrated")) {
+                // 校频体朝北，背面（南，z+1）放红石块给满强度 15。
+                level.blocks.put(new BlockPos(4, 64, 1).asLong(), Blocks.REDSTONE_BLOCK.defaultBlockState());
+            }
+
+            net.minecraft.world.level.block.entity.SculkSensorBlockEntity be = calibrated
+                    ? new net.minecraft.world.level.block.entity.CalibratedSculkSensorBlockEntity(sensor, sensorState)
+                    : new net.minecraft.world.level.block.entity.SculkSensorBlockEntity(sensor, sensorState);
+            level.putBlockEntity(be);
+            // 计划刻需要一个区块容器：官方 `scheduleTick` 找不到容器会静默丢弃。
+            net.minecraft.core.SectionPos section = net.minecraft.core.SectionPos.of(sensor);
+            level.getBlockTicks().addContainer(
+                    new net.minecraft.world.level.ChunkPos(section.x(), section.z()),
+                    new net.minecraft.world.ticks.LevelChunkTicks<>());
+
+            // 要发的事件与时刻。
+            int fireTick = 1;
+            int fire2Tick = name.equals("sculk_sensor_cooldown") ? 45 : -1;
+            Holder<GameEvent> event = switch (name) {
+                case "sculk_sensor_calibrated_match" -> GameEvent.ENTITY_DIE; // 频率 15，与背面 15 匹配
+                default -> GameEvent.STEP; // 频率 1
+            };
+            int eventId = official.registries
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.GAME_EVENT)
+                    .getId(event.value());
+            int stepEventId = official.registries
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.GAME_EVENT)
+                    .getId(GameEvent.STEP.value());
+
+            Vec3 sourceCenter = new Vec3(source.getX() + 0.5, source.getY() + 0.5, source.getZ() + 0.5);
+
+            // 初始方块必须在 tick 之前快照：tick 会改掉感测体的相位。
+            String initialBlocks = blockArray(level.blocks);
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime = START_TIME + tick;
+                    if (tick == fireTick) {
+                        // 官方 `GameEventDispatcher.post` 只做区段路由和距离排序，单个监听者时
+                        // 等价于直接调 `VibrationSystem.Listener.handleGameEvent`。这里直接走这条
+                        // 路径，避开假世界 `setBlock` 清空区块缓存会连带丢掉监听者登记表的问题。
+                        be.getListener().handleGameEvent(level, event, new GameEvent.Context(null, null), sourceCenter);
+                    }
+                    if (tick == fire2Tick) {
+                        be.getListener().handleGameEvent(level, GameEvent.STEP, new GameEvent.Context(null, null), sourceCenter);
+                    }
+                    // 方块实体 tick：`VibrationSystem.Ticker.tick`（getTicker 的 lambda）。
+                    net.minecraft.world.level.gameevent.vibrations.VibrationSystem.Ticker.tick(
+                            level, be.getVibrationData(), be.getVibrationUser());
+                    // 计划刻：ACTIVE 30 刻后转 COOLDOWN，再 10 刻转 INACTIVE。
+                    level.getBlockTicks().tick(level.gameTime, Integer.MAX_VALUE, (p, block) -> {
+                        BlockState st = level.getBlockState(p);
+                        if (st.is(block)) {
+                            st.tick(level, p, level.getRandom());
+                        }
+                    });
+                }
+                if (tick > 0) frames.append(',');
+                BlockState st = level.getBlockState(sensor);
+                int phase = st.getValue(net.minecraft.world.level.block.SculkSensorBlock.PHASE).ordinal();
+                int power = st.getValue(net.minecraft.world.level.block.SculkSensorBlock.POWER);
+                int freq = be.getLastVibrationFrequency();
+                frames.append('[').append(phase).append(',').append(power).append(',').append(freq).append(']');
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"sculkSensor\",\"name\":" + jsonString(name)
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"blocks\":" + initialBlocks
+                    + ",\"sensor\":" + Arrays.toString(new int[] {sensor.getX(), sensor.getY(), sensor.getZ()})
+                    + ",\"calibrated\":" + calibrated
+                    + ",\"events\":[" + fireTick + ',' + eventId + ','
+                    + source.getX() + ',' + source.getY() + ',' + source.getZ() + "],\"event2\":"
+                    + (fire2Tick < 0 ? "null" : "[" + fire2Tick + ',' + stepEventId + ',' + source.getX() + ',' + source.getY() + ',' + source.getZ() + "]")
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            level.closeRealPoi();
         }
     }
 
@@ -18860,6 +18986,12 @@ public final class MobOracle {
         /** 假世界没有玩家地图；`canSpreadFireAround` 按 Bamboo 的恒真实现短路。 */
         @Override
         public boolean canSpreadFireAround(BlockPos pos) {
+            return true;
+        }
+
+        /** 振动到达要查 3x3 区块是否都在 tick；假世界全部视为在 tick。 */
+        @Override
+        public boolean shouldTickBlocksAt(long chunkPos) {
             return true;
         }
 
