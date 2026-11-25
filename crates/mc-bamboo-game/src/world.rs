@@ -467,8 +467,12 @@ impl World {
     /// Collect every parked island's `Raids` for `raids.dat`. Islands still away
     /// from the master are skipped, like their chunk snapshots.
     fn raid_tables(&self) -> Vec<(u32, mc_bamboo_blocks::entity::raid::Raids)> {
+        // `parked()` 只遍历停放着的岛；关服时岛还卡在 tick 线程上，用 `iter()`
+        // 会因为 `IslandSlot` 的 Deref 断言而 panic。
+        // `parked()` only visits islands at home; during shutdown an island can
+        // still be away on its tick thread, where `iter()`'s Deref would panic.
         self.islands
-            .iter()
+            .parked()
             .map(|island| (island.id, island.region.raids.clone()))
             .collect()
     }
