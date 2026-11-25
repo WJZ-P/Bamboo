@@ -254,7 +254,8 @@ impl Report {
                 ticks.set_time(case.start_time + tick as i64);
                 if case.name == "happy_ghast_ai_ride" {
                     if tick == 2 {
-                        let player_uid = level.players.first().map(|player| player.uid).unwrap_or(0);
+                        let player_uid =
+                            level.players.first().map(|player| player.uid).unwrap_or(0);
                         World::new(&mut level, &mut ticks).with_entity_mut(id, &mut |entity| {
                             if let Some(mob) = entity.kind.mob_mut() {
                                 let was_vehicle = !mob.passengers.is_empty();
@@ -310,10 +311,7 @@ fn snapshot(level: &MobLevel, id: i32) -> Option<HappyGhastAiFrame> {
         }
         values
     });
-    let home = mob.home.unwrap_or((
-        BlockPos::new(0, 0, 0),
-        -1,
-    ));
+    let home = mob.home.unwrap_or((BlockPos::new(0, 0, 0), -1));
     Some(HappyGhastAiFrame {
         pos: [
             entity.position.x.to_bits() as i64,

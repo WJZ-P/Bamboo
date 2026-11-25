@@ -852,6 +852,7 @@ fn player_target(
         bounds: aabb(bounds),
         spectator: false,
         entity_type: entity_type::PLAYER,
+        baby: false,
         equipment: [
             Some(held_stack(names, main)?),
             empty.clone(),

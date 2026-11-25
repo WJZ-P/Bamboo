@@ -18,8 +18,6 @@ use mc_bamboo_protocol::packet::play::EquipmentSlot;
 use super::{
     Attributes, Mob, MobEvent, MobType,
     attributes::Attribute,
-    control::Operation,
-    goals::{Goal, GoalSelector, WrappedGoal},
     brain::{
         Activity, ActivityData, Brain, BrainTemplate, TemplateCache,
         behavior::{Gate, Kind, MoveToTargetSink, Speed},
@@ -27,6 +25,8 @@ use super::{
         sensor::SensorKind,
         template_cache,
     },
+    control::Operation,
+    goals::{Goal, GoalSelector, WrappedGoal},
     interact::{MobInteractRequest, MobInteraction},
     living,
 };
@@ -251,7 +251,9 @@ pub fn goals() -> GoalSelector {
         WrappedGoal {
             priority: 5,
             running: false,
-            goal: Goal::HappyGhastFloatAround { distance_to_blocks: 16 },
+            goal: Goal::HappyGhastFloatAround {
+                distance_to_blocks: 16,
+            },
         },
     ])
 }
@@ -304,13 +306,11 @@ pub fn float_can_use(me: &Entity, mob: &Mob) -> bool {
 /// player's eyes by `nextDouble()` and hand it to the move control.
 pub fn tempt_navigate(me: &mut Entity, mob: &mut Mob, player: Vec3, speed: f64) {
     let scale = me.random.next_double();
-    let at = me
-        .position
-        .add(Vec3::new(
-            (player.x - me.position.x) * scale,
-            (player.y - me.position.y) * scale,
-            (player.z - me.position.z) * scale,
-        ));
+    let at = me.position.add(Vec3::new(
+        (player.x - me.position.x) * scale,
+        (player.y - me.position.y) * scale,
+        (player.z - me.position.z) * scale,
+    ));
     mob.mover.set_wanted_position(at.x, at.y, at.z, speed);
 }
 
@@ -1046,8 +1046,7 @@ fn move_can_reach(
                 );
                 for box_ in boxes.iter() {
                     let world_box = box_.at(pos);
-                    if inflated.intersects(world_box)
-                        || swept_intersects(bounds, wanted, world_box)
+                    if inflated.intersects(world_box) || swept_intersects(bounds, wanted, world_box)
                     {
                         return false;
                     }
@@ -1071,8 +1070,7 @@ fn swept_intersects(
 ) -> bool {
     let steps = (wanted.x.abs().max(wanted.y.abs()).max(wanted.z.abs()) / 0.5)
         .ceil()
-        .max(1.0)
-        .min(256.0) as i32;
+        .clamp(1.0, 256.0) as i32;
     for step in 0..=steps {
         let t = f64::from(step) / f64::from(steps);
         let shifted = bounds.moved(wanted.x * t, wanted.y * t, wanted.z * t);
@@ -1367,5 +1365,103 @@ mod tests {
         assert!(!is_harness(items::WHITE_HARNESS - 1));
         assert!(!is_harness(items::BLACK_HARNESS + 1));
         assert!(is_food(items::SNOWBALL));
+    }
+    /// 成年 `registerGoals()` 的优先级、官方类名和标志位。
+    /// The adult `registerGoals()` priorities, vanilla class names and flags.
+    #[test]
+    fn adult_goals_follow_the_official_table() {
+        let table = goals();
+        let rows: Vec<_> = table
+            .goals
+            .iter()
+            .map(|wrapped| {
+                (
+                    wrapped.priority,
+                    wrapped.goal.name(),
+                    wrapped
+                        .goal
+                        .flags()
+                        .iter()
+                        .map(|flag| 1_i32 << (*flag as i32))
+                        .sum::<i32>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (3, "HappyGhastFloatGoal", 4),
+                (4, "ForNonPathfinders", 3),
+                (5, "RandomFloatAroundGoal", 1),
+            ]
+        );
+    }
+
+    /// `ageBoundaryReached` 换成幼年 / 成年那套目标、导航和大脑。
+    /// `ageBoundaryReached` swaps the baby / adult goals, navigation and brain.
+    #[test]
+    fn the_age_boundary_switches_controls_and_goals() {
+        let mut entity = Entity::by_mob_type(MobType::HappyGhast, Vec3::default());
+        entity.with_mob(|_, mob| {
+            mob.age = 1;
+            mob.navigation.stop();
+            mob.goals = goals();
+            age_boundary_reached(mob);
+            assert!(!mob.goals.goals.is_empty());
+            assert!(!mob.navigation.flags.fly);
+            assert_eq!(mob.navigation.required_path_length, 16.0);
+            assert!(
+                mob.brain
+                    .as_ref()
+                    .is_some_and(|brain| brain.running_names().is_empty())
+            );
+            mob.age = -24_000;
+            age_boundary_reached(mob);
+            assert!(mob.goals.goals.is_empty());
+            assert!(mob.navigation.flags.fly);
+            assert!(mob.navigation.flags.can_float);
+            assert_eq!(mob.navigation.required_path_length, 48.0);
+        });
+    }
+
+    /// `continuousHeal`：缺血时在云 / 降水里每 20 刻回 1 点，其余每 600 刻回 1 点。
+    /// `continuousHeal`: heal 1 point every 20 ticks in clouds / precipitation,
+    /// or every 600 ticks otherwise.
+    #[test]
+    fn cloud_and_slow_healing_periods_follow_the_official_constants() {
+        let mut entity = Entity::by_mob_type(MobType::HappyGhast, Vec3::default());
+        entity.with_mob(|me, mob| {
+            mob.health = 13.0;
+            me.tick_count = 19;
+            continuous_heal(me, mob, true);
+            assert_eq!(mob.health, 13.0);
+            me.tick_count = 20;
+            continuous_heal(me, mob, true);
+            assert_eq!(mob.health, 14.0);
+            continuous_heal(me, mob, false);
+            assert_eq!(mob.health, 14.0);
+            me.tick_count = 600;
+            continuous_heal(me, mob, false);
+            assert_eq!(mob.health, 15.0);
+        });
+    }
+
+    /// `Mth.wrapDegrees90` 和 `getHappyGhastRestrictionRadius` 的官方取值。
+    /// The official `Mth.wrapDegrees90` and home-radius values.
+    #[test]
+    fn angle_folding_and_home_radius_match_the_official_constants() {
+        assert_eq!(wrap_degrees90(80.0), -10.0);
+        assert_eq!(wrap_degrees90(-80.0), 10.0);
+        assert_eq!(wrap_degrees90(44.0), 44.0);
+        let adult = Mob::new(MobType::HappyGhast);
+        assert_eq!(restriction_radius(&adult), LARGE_RESTRICTION_RADIUS);
+        let mut adult = adult;
+        adult
+            .equipment
+            .set(EquipmentSlot::Body, ItemStack::new(items::RED_HARNESS, 1));
+        assert_eq!(restriction_radius(&adult), SMALL_RESTRICTION_RADIUS);
+        let mut baby = Mob::new(MobType::HappyGhast);
+        baby.age = -24_000;
+        assert_eq!(restriction_radius(&baby), SMALL_RESTRICTION_RADIUS);
     }
 }

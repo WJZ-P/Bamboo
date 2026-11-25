@@ -1383,7 +1383,11 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
     // `HappyGhast.aiStep` after `super.aiStep()`: heal on the cloud / precipitation
     // period.
     if mob.mob_type == super::MobType::HappyGhast {
-        let fast = ctx.blocks().biome_precipitates(me.block_position());
+        // `continuousHeal`：`isInClouds()` 或所在群系会降水时每 20 刻回血。
+        // `continuousHeal`: heal every 20 ticks in clouds or a precipitating biome.
+        let view = ctx.blocks();
+        let fast = view.is_in_clouds(me.position.y, me.dimensions.1)
+            || view.biome_precipitates(me.block_position());
         super::happy_ghast::continuous_heal(me, mob, fast);
     }
 }
@@ -1538,7 +1542,9 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
             // `HappyGhast.travel`：用 `FLYING_SPEED * 5/3` 走 `travelFlying`。
             // `HappyGhast.travel`: `travelFlying` with `FLYING_SPEED * 5/3`.
             let speed = super::happy_ghast::travel_speed(
-                mob.attributes.value(mc_bamboo_data::registries::attribute::FLYING_SPEED) as f32,
+                mob.attributes
+                    .value(mc_bamboo_data::registries::attribute::FLYING_SPEED)
+                    as f32,
             );
             super::happy_ghast::travel_flying(me, mob, ctx, input, speed);
         } else {

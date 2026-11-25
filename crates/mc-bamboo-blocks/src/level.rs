@@ -44,6 +44,10 @@ pub struct EquipTarget {
     pub spectator: bool,
     /// `minecraft:entity_type` 的注册表 ID。
     pub entity_type: i32,
+    /// `AgeableMob.isBaby()`：快乐恶魂幼年不能穿 BODY 槽的挽具。
+    ///
+    /// `AgeableMob.isBaby()`: a baby happy ghast cannot wear a BODY harness.
+    pub baby: bool,
     pub equipment: [Option<ItemStack>; 8],
 }
 

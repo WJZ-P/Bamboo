@@ -1579,12 +1579,15 @@ fn mob_equip_target(public: &mc_bamboo_blocks::entity::EntityPublic) -> Option<E
     let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind else {
         return None;
     };
-    // 猪只能用发射器上鞍（幼猪不行）；狼只能用发射器穿身体铠甲（`canUseSlot` 恒真，不限年龄）。
+    // 猪只能用发射器上鞍（幼猪不行）；狼只能用发射器穿身体铠甲（`canUseSlot` 恒真，
+    // 不限年龄）；快乐恶魂成年才能穿 BODY 槽的挽具（`canUseSlot`）。
     // Pigs take a saddle from a dispenser (not babies); wolves take body armour
-    // (Wolf.canUseSlot is always true, so no age restriction).
+    // (Wolf.canUseSlot is always true, so no age restriction); only adult happy
+    // ghasts take a BODY harness from a dispenser (`canUseSlot`).
     let (slot, index) = match mob.mob_type {
         MobType::Pig if !mob.baby => (EquipmentSlot::Saddle, 7),
         MobType::Wolf => (EquipmentSlot::Body, 6),
+        MobType::HappyGhast if !mob.baby => (EquipmentSlot::Body, 6),
         _ => return None,
     };
     let (width, height) = public.kind.dimensions();
@@ -1609,6 +1612,7 @@ fn mob_equip_target(public: &mc_bamboo_blocks::entity::EntityPublic) -> Option<E
         ),
         spectator: false,
         entity_type: mob.mob_type.entity_type(),
+        baby: mob.baby,
         equipment,
     })
 }
@@ -1626,6 +1630,7 @@ fn equip_target(player: &Player) -> EquipTarget {
         bounds: player.bounding_box(),
         spectator: player.game_mode == GameMode::Spectator,
         entity_type: entity_type::PLAYER,
+        baby: false,
         equipment: [
             worn(MainHand),
             worn(Feet),

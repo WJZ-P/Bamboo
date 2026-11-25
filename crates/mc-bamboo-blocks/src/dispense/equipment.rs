@@ -102,11 +102,16 @@ fn equippable(stack: &ItemStack) -> Option<mc_bamboo_protocol::components::value
 ///
 /// `LivingEntity.canEquipWithDispenser`. `canUseSlot` is true for a player, except a slot
 /// the entity does not have.
-fn can_equip(
+pub(super) fn can_equip(
     target: &EquipTarget,
     equippable: &mc_bamboo_protocol::components::value::Equippable,
 ) -> bool {
     if target.spectator || !equippable.dispensable {
+        return false;
+    }
+    // `HappyGhast.canUseSlot(BODY)`：幼年快乐恶魂不能穿挽具。
+    // `HappyGhast.canUseSlot(BODY)`: baby happy ghasts cannot wear a harness.
+    if target.baby && target.entity_type == mc_bamboo_data::registries::entity_type::HAPPY_GHAST {
         return false;
     }
     let Some(slot) = usize::try_from(equippable.slot).ok() else {

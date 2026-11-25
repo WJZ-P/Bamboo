@@ -254,6 +254,25 @@ pub trait BlockView {
         false
     }
 
+    /// `EnvironmentAttributes.CLOUD_HEIGHT`：主世界缺省 192。没有环境属性表的
+    /// 视图按主世界算；别的维度可以覆盖。
+    ///
+    /// `EnvironmentAttributes.CLOUD_HEIGHT`: the overworld default is 192. Views
+    /// without the attribute table use the overworld value; other dimensions override.
+    fn cloud_height(&self) -> f32 {
+        192.0
+    }
+
+    /// `Entity.isInClouds()`：云的颜色 alpha 不为 0，且实体从脚底到头顶跨过
+    /// `[cloudHeight, cloudHeight + 4]`。快乐恶魂据此选快 / 慢回血周期。
+    ///
+    /// `Entity.isInClouds()`: non-zero cloud colour alpha and an entity spanning
+    /// `[cloudHeight, cloudHeight + 4]`. Happy ghasts use it to pick the heal period.
+    fn is_in_clouds(&self, y: f64, height: f32) -> bool {
+        let cloud = f64::from(self.cloud_height());
+        y + f64::from(height) >= cloud && y <= cloud + 4.0
+    }
+
     /// `Level.isThundering()`：担心基因的熊猫在雷雨天会坐下。
     ///
     /// `Level.isThundering()`: a worried panda sits down during a thunderstorm.
