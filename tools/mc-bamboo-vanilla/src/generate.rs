@@ -4389,6 +4389,8 @@ fn entity_types_file(data: &VersionData) -> String {
         ("FROG_TONGUE_TARGET", facts.frog_tongue_target),
         ("SNIFFER_STATE", facts.sniffer_state),
         ("SNIFFER_DROP_SEED_AT_TICK", facts.sniffer_drop_seed_at_tick),
+        ("COPPER_GOLEM_WEATHER_STATE", facts.copper_golem_weather_state),
+        ("COPPER_GOLEM_STATE", facts.copper_golem_state),
         ("TURTLE_HAS_EGG", facts.turtle_has_egg),
         ("TURTLE_LAYING_EGG", facts.turtle_laying_egg),
         ("DOLPHIN_GOT_FISH", facts.dolphin_got_fish),
@@ -4491,6 +4493,14 @@ fn entity_types_file(data: &VersionData) -> String {
             facts.frog_tongue_target_serializer,
         ),
         ("SNIFFER_STATE_SERIALIZER", facts.sniffer_state_serializer),
+        (
+            "COPPER_GOLEM_WEATHER_STATE_SERIALIZER",
+            facts.copper_golem_weather_state_serializer,
+        ),
+        (
+            "COPPER_GOLEM_STATE_SERIALIZER",
+            facts.copper_golem_state_serializer,
+        ),
         (
             "ZOMBIE_NAUTILUS_VARIANT_SERIALIZER",
             facts.zombie_nautilus_variant_serializer,
