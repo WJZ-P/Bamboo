@@ -358,6 +358,9 @@ struct Case {
     /// 玩家受伤场景：难度、起始血量 / 吸收 / 消耗、装备和动作。
     #[serde(default)]
     difficulty: i32,
+    /// 袭击行为场景：{centerX, centerY, centerZ, status(0 ongoing/1 victory/2 loss/3 stopped), started, active, groupsSpawned, omenLevel}。
+    #[serde(default)]
+    raid: Option<[i32; 8]>,
     #[serde(default)]
     player_health: i32,
     #[serde(default)]
@@ -1087,6 +1090,8 @@ struct MobLevel {
     /// The fake world's player 0 shoulder parrots (option A), written step by step
     /// through Bamboo's own goal and command pipeline.
     shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState,
+    /// 袭击行为场景注入的袭击快照；`raid_at` 就近返回它。
+    raid: Option<mc_bamboo_blocks::entity::raid::RaidView>,
 }
 
 impl MobLevel {
@@ -1117,6 +1122,32 @@ fn poi_occupancy(code: u8) -> Option<mc_bamboo_world::poi::Occupancy> {
         1 => Some(Occupancy::IsOccupied),
         2 => Some(Occupancy::Any),
         _ => None,
+    }
+}
+
+/// 把 `Case.raid` 的 `[i32; 8]` 配置转成 `RaidView`，供袭击行为场景的 `raid_at` 返回。
+fn raid_view_from(raid: [i32; 8]) -> mc_bamboo_blocks::entity::raid::RaidView {
+    let [cx, cy, cz, status, _started, active, groups_spawned, omen] = raid;
+    let enchant_odds = match omen {
+        2 => 0.1,
+        3 => 0.25,
+        4 => 0.5,
+        5 => 0.75,
+        _ => 0.0,
+    };
+    mc_bamboo_blocks::entity::raid::RaidView {
+        id: 1,
+        center: BlockPos::new(cx, cy, cz),
+        has_first_wave_spawned: groups_spawned > 0,
+        is_between_waves: false,
+        is_victory: status == 1,
+        active: active != 0,
+        is_over: status == 1 || status == 2,
+        is_loss: status == 2,
+        is_stopped: status == 3,
+        enchant_odds,
+        leaders: [0; 8],
+        leader_count: 0,
     }
 }
 
@@ -1169,6 +1200,15 @@ impl EntityTables for MobLevel {
 }
 
 impl Level for MobLevel {
+    fn raid_at(&self, pos: BlockPos) -> Option<mc_bamboo_blocks::entity::raid::RaidView> {
+        self.raid.filter(|raid| {
+            let dx = f64::from(raid.center.x - pos.x);
+            let dy = f64::from(raid.center.y - pos.y);
+            let dz = f64::from(raid.center.z - pos.z);
+            dx * dx + dy * dy + dz * dz < 9216.0
+        })
+    }
+
     fn explosion_break(&self) -> u8 {
         self.explosion_break
     }
@@ -2291,6 +2331,7 @@ impl Report {
             ignore_bed_monsters: false,
             explosion_break: 0,
             shoulder: shoulder::ShoulderState::empty(),
+            raid: None,
         };
         // 和 Java 夹具一样铺一格草地，鹦鹉站着不动才能一直和玩家包围盒相交。
         for x in -1..=1 {
@@ -2684,6 +2725,7 @@ impl Report {
                 _ => 0,
             },
             shoulder: Default::default(),
+            raid: case.raid.map(raid_view_from),
         };
         for &[x, y, z, state] in &case.blocks {
             level
@@ -2756,6 +2798,9 @@ impl Report {
                     51 => mc_bamboo_blocks::entity::mob::MobType::Witch,
                     52 => mc_bamboo_blocks::entity::mob::MobType::Drowned,
                     53 => mc_bamboo_blocks::entity::mob::MobType::Pillager,
+                    54 => mc_bamboo_blocks::entity::mob::MobType::Vindicator,
+                    55 => mc_bamboo_blocks::entity::mob::MobType::Ravager,
+                    56 => mc_bamboo_blocks::entity::mob::MobType::Villager,
                     60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
                     61 => mc_bamboo_blocks::entity::mob::MobType::Parched,
                     62 => mc_bamboo_blocks::entity::mob::MobType::CamelHusk,
@@ -2839,6 +2884,28 @@ impl Report {
                             }
                         }
                         pillager::setup(&case.name, index, mob);
+                        if case.raid.is_some() && mob.mob_type.is_raider() {
+                            // 袭击行为场景：生物已经加入袭击（和 Java 侧 `setCurrentRaid` 对齐）。
+                            mob.raider.raid_id = Some(1);
+                            mob.raider.wave = 1;
+                            mob.raider.can_join_raid = true;
+                            // 改坏确认：把波次改错，状态串从第一刻起就不一致。
+                            if matches!(break_test, Some("raid_mob_wave")) {
+                                mob.raider.wave = 2;
+                            }
+                            // 改坏确认：不加入袭击，破门 / 穿村等袭击目标永远不启动。
+                            if matches!(break_test, Some("raid_mob_join")) {
+                                mob.raider.raid_id = None;
+                            }
+                            // 改坏确认：把队长标志置位，状态串里 `is_captain` 直接不一致。
+                            if matches!(break_test, Some("raid_mob_captain")) {
+                                mob.raider.patrol_leader = true;
+                            }
+                            // 改坏确认：把劫掠兽的咆哮计时改错，状态串的计时列不一致。
+                            if matches!(break_test, Some("raid_mob_stun")) {
+                                mob.ravager.roar_tick = 3;
+                            }
+                        }
                         mob.creeper.powered = cow.creeper & 1 != 0;
                         mob.creeper.ignited = cow.creeper & 2 != 0;
                         if cow.carried != 0 {
@@ -5823,6 +5890,19 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
             )
         }
         MobType::Pillager => pillager::state(mob),
+        MobType::Ravager => format!(
+            "ravager:{}:{}:{}:{}:{}",
+            mob.raider.wave,
+            mc_bamboo_blocks::entity::mob::raider::is_captain(mob),
+            mob.ravager.attack_tick,
+            mob.ravager.stunned_tick,
+            mob.ravager.roar_tick
+        ),
+        MobType::Vindicator => format!(
+            "raider:{}:{}",
+            mob.raider.wave,
+            mc_bamboo_blocks::entity::mob::raider::is_captain(mob)
+        ),
         MobType::Sheep => format!(
             "{}{}",
             sheep::color(mob).name(),

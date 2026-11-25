@@ -614,6 +614,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         effects: Default::default(),
     };
     Ok(MobLevel {
+        raid: None,
         blocks,
         random: LevelRandom::new(case.seed),
         loot_sequences: mc_bamboo_loot::RandomSequences::new(0),

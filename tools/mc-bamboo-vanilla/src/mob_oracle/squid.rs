@@ -60,6 +60,7 @@ struct SquidState {
 impl SquidCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()

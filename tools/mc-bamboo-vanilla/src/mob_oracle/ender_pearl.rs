@@ -96,6 +96,7 @@ impl PearlCase {
         // 官方场景里主人朝向固定成 yaw 45、pitch 12.5，末影螨 `snapTo` 要读。
         game.set_rotation(self.player_id(), 45.0, 12.5);
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()

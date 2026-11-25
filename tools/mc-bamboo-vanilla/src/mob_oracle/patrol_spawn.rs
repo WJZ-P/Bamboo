@@ -179,6 +179,7 @@ fn fixture(case: &Case) -> MobLevel {
         }
     }
     MobLevel {
+        raid: None,
         blocks: cells,
         random: LevelRandom::new(case.seed),
         loot_sequences: mc_bamboo_loot::RandomSequences::new(0),

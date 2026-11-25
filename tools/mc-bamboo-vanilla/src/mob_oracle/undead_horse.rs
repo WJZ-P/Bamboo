@@ -61,6 +61,7 @@ pub(super) struct UndeadHorseDeathCase {
 
 fn level(blocks: &[[i32; 4]], first_id: i32) -> MobLevel {
     MobLevel {
+        raid: None,
         blocks: blocks
             .iter()
             .map(|&[x, y, z, state]| (BlockPos::new(x, y, z), BlockState(state as u32)))

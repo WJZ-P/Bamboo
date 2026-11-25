@@ -127,6 +127,7 @@ impl Report {
             return;
         };
         let level = MobLevel {
+            raid: None,
             blocks: std::collections::HashMap::new(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -275,6 +276,7 @@ impl Report {
     pub(super) fn replay_villager_death(&mut self, case: &VillagerDeathCase) {
         self.cases += 1;
         let mut level = MobLevel {
+            raid: None,
             blocks: std::collections::HashMap::new(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -386,6 +388,7 @@ impl Report {
             }
         }
         let mut level = MobLevel {
+            raid: None,
             blocks,
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -682,6 +685,7 @@ impl Report {
             blocks.insert(bell_pos, BlockState(blocks::BELL));
 
             let mut check_level = MobLevel {
+                raid: None,
                 blocks,
                 random: LevelRandom::new(1),
                 loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -795,6 +799,7 @@ impl Report {
         blocks.insert(ws_pos, BlockState(blocks::COMPOSTER));
 
         let mut level = MobLevel {
+            raid: None,
             blocks,
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -1104,6 +1109,7 @@ impl Report {
             rules.mob_griefing = false;
         }
         let mut level = MobLevel {
+            raid: None,
             blocks: blocks_map,
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -1567,6 +1573,7 @@ impl Report {
             Vec::new()
         };
         let mut level = MobLevel {
+            raid: None,
             blocks: blocks_map,
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),

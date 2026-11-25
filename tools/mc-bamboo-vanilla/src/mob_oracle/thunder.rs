@@ -62,6 +62,7 @@ fn fresh_level(
     difficulty: i32,
 ) -> MobLevel {
     MobLevel {
+        raid: None,
         blocks: blocks
             .iter()
             .map(|&[x, y, z, state]| (BlockPos::new(x, y, z), BlockState(state as u32)))

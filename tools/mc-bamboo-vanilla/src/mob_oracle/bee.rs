@@ -43,6 +43,7 @@ struct BeeFrame {
 impl BeeCase {
     fn level(&self, broken: &str) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()

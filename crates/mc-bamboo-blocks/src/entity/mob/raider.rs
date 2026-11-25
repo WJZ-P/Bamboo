@@ -208,7 +208,7 @@ pub(super) fn finalize_patrol(
 ///
 /// `Raider.isCaptain()`: a patrol leader whose head item `ItemStack.matches` the ominous
 /// banner.
-pub(crate) fn is_captain(mob: &Mob) -> bool {
+pub fn is_captain(mob: &Mob) -> bool {
     mob.raider.patrol_leader
         && mob
             .equipment

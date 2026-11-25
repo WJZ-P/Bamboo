@@ -65,6 +65,7 @@ struct ExtraEntry {
 impl WitchThrowCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()

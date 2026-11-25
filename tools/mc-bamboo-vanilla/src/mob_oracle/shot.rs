@@ -163,6 +163,7 @@ impl ShotCase {
 
     fn replay_dispenser(&self, report: &mut Report) {
         let mut level = MobLevel {
+            raid: None,
             natural_spawn: None,
             biome: None,
             blocks: HashMap::new(),

@@ -144,6 +144,7 @@ impl Report {
         self.cases += 1;
         self.skeleton_spawns.record(case);
         let mut level = MobLevel {
+            raid: None,
             natural_spawn: None,
             biome: None,
             blocks: HashMap::new(),

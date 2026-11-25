@@ -1253,6 +1253,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::GuardianElderEffect { .. }
             | Effect::TrialSpawnerTransformBadOmen { .. }
             | Effect::RaiderDied { .. }
+            | Effect::RaidSetLeader { .. }
             // 爆炸包发给附近玩家，方块题不比较。
             | Effect::Explode { .. }
             | Effect::PlayerShoulder { .. }
@@ -1385,7 +1386,8 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::Explode { .. }
             | Effect::PlayerShoulder { .. }
             | Effect::VibrationParticle { .. }
-            | Effect::RaiderDied { .. } => {}
+            | Effect::RaiderDied { .. }
+            | Effect::RaidSetLeader { .. } => {}
         }
     }
     (events, sounds)
