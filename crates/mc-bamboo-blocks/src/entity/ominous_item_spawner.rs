@@ -222,7 +222,7 @@ fn spawn_projectile(world: &mut World<'_>, facts: &SpawnerTick) {
             };
             world.spawn_wind_charge_shot(&shot);
         }
-        items::EGG | items::SNOWBALL | items::ENDER_PEARL | items::EXPERIENCE_BOTTLE => {
+        items::EGG | items::SNOWBALL | items::ENDER_PEARL => {
             let projectile = match stack.item {
                 items::SNOWBALL => super::thrown_egg::ThrowableKind::Snowball,
                 items::ENDER_PEARL => super::thrown_egg::ThrowableKind::EnderPearl,
@@ -241,7 +241,8 @@ fn spawn_projectile(world: &mut World<'_>, facts: &SpawnerTick) {
             };
             world.spawn_egg_shot(&shot);
         }
-        // 火焰弹（`SmallFireball`）和其余 `ProjectileItem` 尚未建模，按掉落物处理。
+        // 火焰弹（`SmallFireball`）和附魔之瓶（`ThrownExperienceBottle`）尚未建模，
+        // 官方在这里分别射出这两枚投射物，Bamboo 按普通掉落物处理（README 有记录）。
         _ => {
             world.spawn_entity(Entity::ground_item(facts.position, stack.clone()));
         }

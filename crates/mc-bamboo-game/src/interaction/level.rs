@@ -1890,4 +1890,32 @@ mod tests {
             1
         );
     }
+
+    /// 不祥物品生成器掉的表用 `level.getSeed() + lowResolutionPosition(pos).asLong()`
+    /// 做种子：同一个世界随机源下，只换世界种子就会换掉掉落表的 uniform 数量权重。
+    #[test]
+    fn ominous_dispensing_seeds_from_the_level_seed() {
+        use mc_bamboo_blocks::Level;
+        use mc_bamboo_core::BlockPos;
+
+        let pos = BlockPos::new(0, 64, 0);
+        let loot_table = "minecraft:spawners/trial_chamber/items_to_drop_when_ominous";
+
+        let mut region = Region::new(2, 20, false);
+        let (mut level, _ticks) = region.block_level();
+
+        level.random.source().set_seed(42);
+        level.world_seed = 0;
+        let first = level.trial_spawner_dispensing(pos, loot_table);
+
+        level.random.source().set_seed(42);
+        level.world_seed = 1;
+        let second = level.trial_spawner_dispensing(pos, loot_table);
+
+        assert!(!first.is_empty() && !second.is_empty(), "the table resolves");
+        assert_ne!(
+            first, second,
+            "the level seed must feed the dispensing loot table"
+        );
+    }
 }
