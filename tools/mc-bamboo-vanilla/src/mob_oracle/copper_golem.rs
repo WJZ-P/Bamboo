@@ -38,9 +38,11 @@ struct CopperGolemFrame {
     chests: Vec<Vec<[i32; 2]>>,
     golem: Vec<i64>,
     brain: Vec<String>,
-    /// 官方本刻开始时的世界随机源状态，逐刻注入后不参与比较。
+    /// 官方本刻开始时的世界随机源状态，逐刻注入 Bamboo。
     #[serde(default)]
     start_seed: i64,
+    /// 官方本刻结束时的世界随机源状态，逐刻逐位比较。
+    level_seed: i64,
     spawns: Vec<(String, i32)>,
 }
 
@@ -242,6 +244,7 @@ impl Report {
                 &[build, build.above(), source, dest, statue],
             );
             ours.start_seed = expected.start_seed;
+            ours.level_seed = level.random.source().seed();
             ours.spawns = if tick == 1 {
                 spawned_this_tick.clone()
             } else {
@@ -334,6 +337,7 @@ fn copper_frame(level: &MobLevel, golem_id: i32, cells: &[BlockPos]) -> CopperGo
         golem,
         brain,
         start_seed: 0,
+        level_seed: level.random.source().seed(),
         spawns: Vec::new(),
     }
 }

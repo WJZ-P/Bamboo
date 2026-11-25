@@ -70,6 +70,13 @@ impl LegacyRandom {
     ///
     /// 官方 `WorldgenRandom` 包着这个源时直接调用它，所以这里是公开的。
     pub fn next(&self, bits: u32) -> i32 {
+        if std::env::var_os("CG_RNG").is_some() {
+            eprintln!(
+                "RNG next({bits}) from {} stack {}",
+                self.seed.get(),
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
         let seed = self
             .seed
             .get()
