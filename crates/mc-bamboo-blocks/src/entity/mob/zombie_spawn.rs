@@ -191,6 +191,8 @@ fn roll_chicken_jockey(
             position,
             yaw,
             rider_is_vehicle: true,
+            reason: None,
+            persistent: false,
         });
     }
 }

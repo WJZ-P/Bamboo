@@ -139,6 +139,10 @@ fn passenger_attachment(vehicle: &EntityPublic, index: usize) -> Vec3 {
         MobType::Horse => (0.0, 1.443750023841858, 0.0),
         MobType::Donkey => (0.0, 1.1124999523162842, 0.0),
         MobType::Mule => (0.0, 1.212499976158142, 0.0),
+        // `EntityTypes.NAUTILUS` / `ZOMBIE_NAUTILUS` 的 `passengerAttachments(1.1375F)`。
+        // `EntityTypes.NAUTILUS` / `ZOMBIE_NAUTILUS` register
+        // `passengerAttachments(1.1375F)`.
+        MobType::Nautilus | MobType::ZombieNautilus => (0.0, 1.137_500_047_683_715_8, 0.0),
         _ => (0.0, f64::from(height), 0.0),
     };
     let _ = index; // 已建模的载具都只有一个附着点，`getClamped` 恒取 0 号。

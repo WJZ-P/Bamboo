@@ -119,11 +119,6 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Skeleton {
         super::conversion::tick_freezing(me, mob, ctx);
     }
-    // `AbstractNautilus.tick` 在 `super.tick()` 之后：冲刺冷却、气泡取数。
-    // `AbstractNautilus.tick` runs after `super.tick()`: dash cooldown and bubbles.
-    if super::nautilus::is_nautilus(mob.mob_type) {
-        super::nautilus::tick(me, mob);
-    }
     // `Creeper.tick` 在 `super.tick()` 之前推进膨胀，可能当刻爆炸。
     // `Creeper.tick` advances the swell before `super.tick()` and may explode here.
     if mob.mob_type == super::MobType::Creeper {
@@ -176,6 +171,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     // `Spider.tick` records this tick's `horizontalCollision` after `super.tick()`.
     if mob.mob_type.climbs_walls() && !me.removed {
         super::spider::tick(me, mob);
+    }
+    // `AbstractNautilus.tick` 在 `super.tick()` 之后：冲刺冷却、气泡取数。
+    // `AbstractNautilus.tick` runs after `super.tick()`: dash cooldown and bubbles.
+    if super::nautilus::is_nautilus(mob.mob_type) && !me.removed {
+        super::nautilus::tick(me, mob);
     }
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
     body_rotation_tick(me, mob, ctx.blocks().game_time());

@@ -475,6 +475,13 @@ public final class MobOracle {
                 playWaterMob(official, out, name);
                 cases++;
             }
+            for (String name : List.of("nautilus_swim", "nautilus_brain",
+                    "nautilus_tame", "nautilus_saddle",
+                    "nautilus_jockey")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playNautilus(official, out, name);
+                cases++;
+            }
             if (only == null || only.startsWith("bee_ai")) {
                 for (String name : List.of("bee_ai_pollinate", "bee_ai_hive",
                         "bee_ai_pollinate_crop", "bee_ai_sting", "bee_ai_follow_flower",
@@ -9548,6 +9555,276 @@ public final class MobOracle {
                 + (dolphin ? "" : ",\"brain\":" + brainTable(mob))
                 + ",\"frames\":" + frames + "]}\n");
         out.flush();
+    }
+
+    /**
+     * 鹦鹉螺 / 僵尸鹦鹉螺逐刻场景：游动 + 大脑结构表、驯服 / 上鞍、以及
+     * 溺尸骑僵尸鹦鹉螺的静止骑乘。方块是 17×17 的水池，两边都用显式实体随机源。
+     *
+     * <p>Nautilus / zombie-nautilus tick scenes: swimming with the brain structure
+     * table, taming / saddling, and a still drowned rider on a zombie nautilus. The
+     * fixture is a 17×17 water tank with explicit entity random seeds on both sides.
+     */
+    private static void playNautilus(Official official, Writer out, String name) throws Exception {
+        boolean swim = name.equals("nautilus_swim");
+        boolean brain = name.equals("nautilus_brain");
+        boolean tame = name.equals("nautilus_tame");
+        boolean saddle = name.equals("nautilus_saddle");
+        boolean jockey = name.equals("nautilus_jockey");
+        int ticks = jockey ? 40 : 120;
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -8; x <= 8; x++) {
+            for (int z = -8; z <= 8; z++) {
+                boolean wall = Math.abs(x) == 8 || Math.abs(z) == 8;
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+                for (int y = 61; y <= 66; y++) {
+                    world.blocks.put(BlockPos.asLong(x, y, z),
+                            wall ? Blocks.STONE.defaultBlockState() : Blocks.WATER.defaultBlockState());
+                }
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        long seed = 0x5EED_5EEDL;
+        var mobs = new ArrayList<net.minecraft.world.entity.Mob>();
+        net.minecraft.world.entity.animal.nautilus.AbstractNautilus nautilus = null;
+        if (jockey) {
+            // `Drowned.finalizeSpawn` 的坐骑分支：溺尸拿三叉戟、自然生成、非幼年、
+            // 不在 `#more_frequent_drowned_spawns`，再让 50% 那一抽命中。
+            // The jockey branch of `Drowned.finalizeSpawn`: a trident-carrying,
+            // adult, naturally spawned drowned outside the frequent-spawn biomes.
+            var drowned = new net.minecraft.world.entity.monster.zombie.Drowned(EntityTypes.DROWNED, world);
+            world.entitySeeds.nextLong();
+            setRandom(drowned, seed);
+            drowned.setUUID(new UUID(1L, 2L));
+            drowned.setId(FIRST_ID);
+            drowned.setYRot(0.0F);
+            drowned.setYHeadRot(0.0F);
+            drowned.setPos(0.5, 63.0, 0.5);
+            drowned.setNoAi(true);
+            world.spawned = new ArrayList<>();
+            // 让 `nextFloat() < 0.5` 命中：直接写世界随机源的种子。
+            // Force `nextFloat() < 0.5` by seeding the level random explicitly.
+            // 三叉戟 / 幼年 / 壳 / 坐骑这一串抽签要在同一个世界随机源上逐位对齐：
+            // 先把种子定成一个已知值，让坐骑那一抽命中（< 0.5）。
+            // All the trident / baby / shell / jockey rolls share one level random;
+            // pick a known seed that makes the jockey roll come up (< 0.5).
+            put(net.minecraft.world.level.Level.class, world, "random", RandomSource.create(1L));
+            long before = randomSeed(world.getRandom());
+            drowned.finalizeSpawn(world, world.getCurrentDifficultyAt(drowned.blockPosition()),
+                    EntitySpawnReason.NATURAL, null);
+            // `finalizeSpawn` 会重掷装备；把主手强行换回三叉戟再调一次
+            // `Drowned.finalizeSpawn` 的坐骑分支由场景直接补上。
+            drowned.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                    new ItemStack(Items.TRIDENT));
+            var mount = EntityTypes.ZOMBIE_NAUTILUS.create(world, EntitySpawnReason.JOCKEY);
+            if (mount != null) {
+                mount.setPersistenceRequired();
+                mount.snapTo(drowned.getX(), drowned.getY(), drowned.getZ(), drowned.getYRot(), 0.0F);
+                mount.finalizeSpawn(world, world.getCurrentDifficultyAt(drowned.blockPosition()),
+                        EntitySpawnReason.NATURAL, null);
+                drowned.startRiding(mount, false, false);
+                world.addFreshEntity(mount);
+                mount.setNoAi(true);
+            }
+            long after = randomSeed(world.getRandom());
+            world.tracked.add(drowned);
+            mobs.add(drowned);
+            for (var added : world.spawned) {
+                if (added instanceof net.minecraft.world.entity.animal.nautilus.ZombieNautilus zn) {
+                    nautilus = zn;
+                    zn.setNoAi(true);
+                    mobs.add(zn);
+                }
+            }
+            if (nautilus == null) {
+                throw new IllegalStateException("drowned jockey did not create a zombie nautilus");
+            }
+            int jockeyVariant = ((net.minecraft.world.entity.animal.nautilus.ZombieNautilus) nautilus)
+                    .getVariant().unwrapKey().map(key -> key.identifier().toString())
+                    .orElse("minecraft:temperate").equals("minecraft:warm") ? 1 : 0;
+            // 构造 / `finalizeSpawn` 的熵取完后把两边的随机源显式对齐：
+            // 场景要比的是「骑手已经生成并静止骑乘」之后的逐刻行为，不是
+            // 生成期那一长串世界随机源取数（那些由 `natural-spawn` 和单测覆盖）。
+            // After construction / `finalizeSpawn`, align both sides' random
+            // sources explicitly: this scene checks the ticks after the jockey
+            // exists, not the long spawn-time world-random sequence (covered
+            // by natural-spawn and unit tests).
+            long riderSeed = RandomSource.create(11L).nextLong();
+            long mountSeed = RandomSource.create(23L).nextLong();
+            setRandom(drowned, riderSeed);
+            setRandom(nautilus, mountSeed);
+            long riderFinal = randomSeed(drowned);
+            long mountFinal = randomSeed(nautilus);
+            put(net.minecraft.world.level.Level.class, world, "random", RandomSource.create(1L));
+            out.write("{\"type\":\"nautilus\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID + ",\"blocks\":" + blocks
+                    + ",\"seed\":" + seed + ",\"ticks\":" + ticks
+                    + ",\"jockey\":true,\"levelSeedBefore\":" + before
+                    + ",\"levelSeedAfter\":" + after
+                    + ",\"riderVehicle\":" + (drowned.getVehicle() != null)
+                    + ",\"riderVehicleKind\":" + (drowned.getVehicle() == null ? -1
+                            : BuiltInRegistries.ENTITY_TYPE.getId(drowned.getVehicle().getType()))
+                    + ",\"variant\":" + jockeyVariant
+                    + ",\"riderSeed\":" + riderFinal + ",\"mountSeed\":" + mountFinal
+                    + ",\"frames\":" + nautilusFrames(world, mobs, ticks)
+                    + "}\n");
+            out.flush();
+            return;
+        }
+        nautilus = EntityTypes.NAUTILUS.create(world, EntitySpawnReason.COMMAND);
+        setRandom(nautilus, seed);
+        net.minecraft.util.RandomSource nautilusRandom = nautilus.getRandom();
+        nautilus.setUUID(net.minecraft.util.Mth.createInsecureUUID(nautilusRandom));
+        float nautilusYaw = nautilusRandom.nextFloat() * 6.2831855F;
+        nautilus.setYRot(nautilusYaw);
+        nautilus.setYHeadRot(nautilusYaw);
+        // 构造函数里 `makeBrain` 的五个传感器起始延迟也按官方取。
+        // The five brain sensor start delays from `makeBrain` are drawn too.
+        java.lang.reflect.Field brainSensors = net.minecraft.world.entity.ai.Brain.class
+                .getDeclaredField("sensors");
+        brainSensors.setAccessible(true);
+        var sensorMap = (java.util.Map<?, ?>) brainSensors.get(nautilus.getBrain());
+        java.lang.reflect.Field delay = net.minecraft.world.entity.ai.sensing.Sensor.class
+                .getDeclaredField("timeToTick");
+        delay.setAccessible(true);
+        for (var sensor : sensorMap.values()) {
+            delay.setLong(sensor, nautilusRandom.nextInt(20));
+        }
+        nautilus.setYRot(0.0F);
+        nautilus.setYHeadRot(0.0F);
+        nautilus.setYBodyRot(0.0F);
+        nautilus.setId(FIRST_ID);
+        nautilus.setYRot(0.0F);
+        nautilus.setYHeadRot(0.0F);
+        nautilus.setYBodyRot(0.0F);
+        nautilus.setPos(0.5, 63.0, 0.5);
+        nautilus.setNoAi(true);
+        // 服务端 `addParticle` 不取数：把气泡概率那一支跳过，两边都只留
+        // `Mob.baseTick` 的取数。见 README 的已知限制。
+        mobs.add(nautilus);
+        world.tracked.add(nautilus);
+        String brainTable = brain ? brainTable(nautilus) : "null";
+        // 让两边从构造取数之后的同一个随机源状态起步：报出这个状态，
+        // 再把 Java 侧的实体随机源设回它（RandomSource.create 会先异或乘子）。
+        long initialSeed = randomSeed(nautilus);
+        // 再按构造函数取一遍，让传感器延迟等熵也落在同一个随机源上。
+        net.minecraft.util.RandomSource drawRandom = nautilus.getRandom();
+        nautilus.setUUID(net.minecraft.util.Mth.createInsecureUUID(drawRandom));
+        drawRandom.nextFloat();
+        for (int i = 0; i < 5; i++) drawRandom.nextInt(20);
+        long postConstruction = randomSeed(nautilus);
+        long originalState = postConstruction;
+        long state = postConstruction ^ 0x5DEECE66DL;
+        long afterInteraction = postConstruction;
+        put(net.minecraft.world.entity.Entity.class, nautilus, "random", RandomSource.create(state));
+        String data = "null";
+        if (tame || saddle) {
+            // 官方 `mobInteract`：驯服用河豚（1/3）、上鞍用鞍。两边都显式固定种子。
+            // Vanilla `mobInteract`: pufferfish tames (one in three), a saddle equips.
+            GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+            ServerPlayer player = new ServerPlayer(official.server, world, profile,
+                    ClientInformation.createDefault());
+            player.setPos(1.5, 63.0, 0.5);
+            ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+            put(ServerGamePacketListenerImpl.class, connection, "player", player);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "server", official.server);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+            ((RecordingListener) connection).bytes = new Bytes(official.registries);
+            put(ServerPlayer.class, player, "connection", connection);
+            var stack = new ItemStack(tame ? Items.PUFFERFISH : Items.SADDLE);
+            player.setItemInHand(InteractionHand.MAIN_HAND, stack);
+            // 让驯服的三分之一命中：河豚场景显式设实体随机源。
+            // Make the one-in-three taming roll succeed with an explicit seed.
+            // 驯服那一抽 `nextInt(3) == 0` 要命中：从构造后的状态里挑一个
+            // 已知种子；上鞍场景没有抽签，沿用构造后的状态。
+            // The taming roll `nextInt(3) == 0` must hit: use a known seed;
+            // saddling has no roll and keeps the construction state.
+            put(net.minecraft.world.entity.Entity.class, nautilus, "random",
+                    RandomSource.create(tame ? 25287679568082L ^ 0x5DEECE66DL
+                            : postConstruction ^ 0x5DEECE66DL));
+            long preInteraction = randomSeed(nautilus);
+            player.interactOn(nautilus, InteractionHand.MAIN_HAND, nautilus.position());
+            data = "\"" + pairingData(official, nautilus) + "\"";
+            afterInteraction = randomSeed(nautilus);
+            player.removeVehicle();
+        }
+        out.write("{\"type\":\"nautilus\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID + ",\"blocks\":" + blocks
+                + ",\"seed\":" + (tame ? 1L : 0)
+                + ",\"preSeed\":" + (tame ? 25287679568082L : originalState)
+                + ",\"postSeed\":" + (tame || saddle ? afterInteraction : originalState)
+                + ",\"ticks\":" + ticks
+                + ",\"jockey\":false,\"brain\":" + brainTable
+                + ",\"sensors\":" + BrainOracle.sensorDelays(nautilus)
+                + ",\"data\":" + data
+                + ",\"state\":" + nautilusState(nautilus)
+                + ",\"frames\":" + nautilusFrames(world, mobs, ticks)
+                + "}\n");
+        out.flush();
+    }
+
+    /** 鹦鹉螺场景的逐刻状态：位置 / 速度 / 朝向 / 随机源 / 血量 / 氧气 / 元数据。 */
+    private static String nautilusFrames(FakeLevel world, List<net.minecraft.world.entity.Mob> mobs, int ticks)
+            throws Exception {
+        var frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                world.gameTime++;
+                for (var mob : mobs) {
+                    if (mob.isRemoved()) continue;
+                    mob.checkDespawn();
+                    if (mob.isPassenger()) {
+                        // `Entity.rideTick`：清零速度、跑自己的 tick、再按载具定位。
+                        // `Entity.rideTick`: zero velocity, tick, then position on
+                        // the vehicle, matching the real server's tick loop.
+                        mob.rideTick();
+                    } else {
+                        mob.commonTick();
+                        mob.tick();
+                    }
+                }
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"mobs\":[");
+            boolean first = true;
+            for (var mob : mobs) {
+                if (!first) frames.append(',');
+                first = false;
+                frames.append("{\"motion\":").append(projectileMotion(mob))
+                        .append(",\"seed\":").append(randomSeed(mob))
+                        .append(",\"hp\":").append(Float.floatToRawIntBits(mob.getHealth()))
+                        .append(",\"air\":").append(mob.getAirSupply())
+                        .append(",\"water\":").append(mob.isInWater() ? 1 : 0)
+                        .append(",\"state\":").append(nautilusState(mob))
+                        .append('}');
+            }
+            frames.append("],\"level\":").append(randomSeed(world.getRandom())).append('}');
+        }
+        return frames.append(']').toString();
+    }
+
+    /** 鹦鹉螺的元数据状态：驯服位、主人、鞍、身体、DASH、变种。 */
+    private static String nautilusState(net.minecraft.world.entity.Mob mob) {
+        if (!(mob instanceof net.minecraft.world.entity.animal.nautilus.AbstractNautilus nautilus)) {
+            // 骑手（溺尸）：只比驯服 / 主人 / 鞍 / 身体 / DASH / 变种的 0 值。
+            // The rider (a drowned): all six nautilus-only fields stay zero.
+            return Arrays.toString(new int[] {0, 0, 0, 0, 0, 0});
+        }
+        int variant = mob instanceof net.minecraft.world.entity.animal.nautilus.ZombieNautilus zn
+                ? (zn.getVariant().unwrapKey().map(key -> key.identifier().toString())
+                        .orElse("minecraft:temperate").equals("minecraft:warm") ? 1 : 0)
+                : 0;
+        return Arrays.toString(new int[] {
+                nautilus.isTame() ? 1 : 0,
+                nautilus.getOwnerReference() == null ? 0 : 1,
+                nautilus.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.SADDLE).isEmpty() ? 0 : 1,
+                nautilus.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.BODY).isEmpty() ? 0 : 1,
+                nautilus.isDashing() ? 1 : 0,
+                variant});
     }
 
     /**

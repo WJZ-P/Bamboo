@@ -250,6 +250,8 @@ fn finalize_spawn_with_random(
             position,
             yaw,
             rider_is_vehicle: false,
+            reason: None,
+            persistent: false,
         });
     }
     if fresh {

@@ -282,12 +282,12 @@ pub fn tick(me: &mut Entity, mob: &mut Mob) {
 /// `spawnBubbles`: one `nextFloat` for the probability and four more draws on a hit.
 /// The server keeps only the draws, not the particle packet.
 fn spawn_bubbles(me: &mut Entity) {
-    let _speed = me.delta.length();
-    let probability = (_speed * 2.0).clamp(0.150_000_005_960_464_48, 1.0);
-    if me.random.next_float() as f64 >= probability {
+    let speed = me.delta.length();
+    let probability = (speed * 2.0).clamp(0.150_000_005_960_464_48, 1.0);
+    if f64::from(me.random.next_float()) >= probability {
         return;
     }
-    let _spread = me.random.next_double() * 0.8 * (1.0 + _speed);
+    let _spread = me.random.next_double() * 0.8 * (1.0 + speed);
     let _ = me.random.next_float();
     let _ = me.random.next_float();
     let _ = me.random.next_float();

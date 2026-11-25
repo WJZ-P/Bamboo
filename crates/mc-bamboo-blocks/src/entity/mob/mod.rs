@@ -1036,6 +1036,10 @@ impl MobType {
         // `Guardian.getAmbientSoundInterval()` = 160.
         if matches!(self, Self::Guardian | Self::ElderGuardian) {
             160
+        } else if matches!(self, Self::Nautilus) {
+            // `Mob.getAmbientSoundInterval()` 的缺省 80：鹦鹉螺没有覆写。
+            // `Mob.getAmbientSoundInterval()`'s default 80: nautiluses do not override.
+            80
         } else if matches!(self, Self::Ocelot) {
             900
         } else if self.is_equine() {
