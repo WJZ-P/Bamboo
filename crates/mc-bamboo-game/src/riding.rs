@@ -446,6 +446,7 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
         return;
     }
     let (yaw, pitch, position) = (public.yaw, mob.x_rot, public.position);
+    let (box_width, box_height) = public.kind.dimensions();
     let Some(player) = region.players.get(&id) else {
         return;
     };
@@ -482,11 +483,41 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
     player.riding.last_good = position;
     // 官方 `Entity.addPassenger`：玩家乘客由服务端插到生物乘客前面，名单是
     // 一份，玩家和生物共用。先设 `vehicle` 再挂名单，正是 `startRiding` 的前提。
-    region.entities.with_mut(vehicle, |entity| {
-        entity.with_mob(|_, mob| {
-            mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, id.0, true);
-        })
-    });
+    // 快乐恶魂另跑 `HappyGhast.addPassenger` 的护目镜音效和悬停超时。
+    // Happy ghasts also run `HappyGhast.addPassenger`'s goggle sound and hover.
+    if happy_ghast {
+        let (min, max) = mc_bamboo_blocks::entity::mob::happy_ghast::player_above_box(
+            position, box_width, box_height,
+        );
+        let player_above = region.players.values().any(|other| {
+            other.id != id
+                && other.game_mode != mc_bamboo_protocol::packet::play::GameMode::Spectator
+                && other.riding.vehicle != Some(vehicle)
+                && mc_bamboo_blocks::entity::mob::happy_ghast::is_above(other.position(), min, max)
+        });
+        region.entities.with_mut(vehicle, |entity| {
+            let was_vehicle = entity
+                .kind
+                .mob()
+                .is_some_and(|mob| !mob.passengers.is_empty());
+            let at = entity.position;
+            entity.with_mob(|_, mob| {
+                mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, id.0, true);
+                mc_bamboo_blocks::entity::mob::happy_ghast::after_add_passenger(
+                    at,
+                    mob,
+                    was_vehicle,
+                    player_above,
+                );
+            });
+        });
+    } else {
+        region.entities.with_mut(vehicle, |entity| {
+            entity.with_mob(|_, mob| {
+                mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, id.0, true);
+            })
+        });
+    }
     // 官方 `StartRidingTrigger.trigger(ServerPlayer)`。
     crate::advancement_triggers::record(
         region,
@@ -551,6 +582,18 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
             return None;
         };
         let (width, height, _) = mob.mob_type.dimensions(mob.baby);
+        // `HappyGhast.getDismountLocationForPassenger` = `(x, bb.maxY, z)`，
+        // 不是 `Animal` 的八邻格版本。
+        // `HappyGhast.getDismountLocationForPassenger` = `(x, bb.maxY, z)`,
+        // not `Animal`'s eight-neighbour version.
+        if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::HappyGhast {
+            return Some(
+                mc_bamboo_blocks::entity::mob::happy_ghast::dismount_location(
+                    public.position,
+                    height,
+                ),
+            );
+        }
         // 猪没有自己的下车逻辑，走 `Animal` 的八邻格版本；马科走 `AbstractHorse` 的。
         //
         // Pigs have no dismount of their own and use `Animal`'s eight-neighbour version;
@@ -590,7 +633,20 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
         player.set_position(&mut region.player_grid, target);
     }
     region.entities.with_mut(vehicle, |entity| {
-        entity.with_mob(|_, mob| mob.passengers.retain(|passenger| *passenger != id.0))
+        let at = entity.position;
+        let happy = entity
+            .kind
+            .mob()
+            .is_some_and(|mob| mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::HappyGhast);
+        entity.with_mob(|_, mob| {
+            mob.passengers.retain(|passenger| *passenger != id.0);
+            // `HappyGhast.removePassenger`：设 10 刻悬停、没人时清家并抬起护目镜。
+            // `HappyGhast.removePassenger`: ten ticks of hover, clear the home and
+            // raise the goggles once empty.
+            if happy {
+                mc_bamboo_blocks::entity::mob::happy_ghast::after_remove_passenger(at, mob);
+            }
+        })
     });
 }
 

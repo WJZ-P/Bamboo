@@ -51,6 +51,7 @@ mod gen_spawn;
 mod golem;
 mod grazing;
 mod guardian_scene;
+mod happy_ghast;
 mod husk_jockey;
 mod leash;
 mod lightning;
@@ -147,6 +148,8 @@ enum Line {
     PigDismount(pig_ride::DismountCase),
     LlamaSpit(Box<llama_spit::LlamaSpitCase>),
     Leash(Box<leash::LeashCase>),
+    HappyGhast(Box<happy_ghast::HappyGhastCase>),
+    HappyGhastSave(happy_ghast::HappyGhastSaveCase),
     WitchThrow(Box<witch_throw::WitchThrowCase>),
     NaturalSpawn(natural_spawn::Case),
     PatrolSpawn(patrol_spawn::Case),
@@ -2119,6 +2122,8 @@ impl Report {
                 Line::EquineSave(case) => self.replay_equine_save(case),
                 Line::LlamaSpit(case) => self.replay_llama_spit(&case),
                 Line::Leash(case) => self.replay_leash(&case),
+                Line::HappyGhast(case) => self.replay_happy_ghast(&case),
+                Line::HappyGhastSave(case) => self.replay_happy_ghast_save(&case),
                 Line::WitchThrow(case) => self.replay_witch_throw(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::PatrolSpawn(case) => self.replay_patrol_spawn(&case)?,

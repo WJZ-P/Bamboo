@@ -362,6 +362,9 @@ public final class MobOracle {
                 playLlamaSpit(official, out, "llama_spit_near", 3.5, 4207L);
                 cases += 2;
             }
+            if (only == null || "happy_ghast".startsWith(only) || only.startsWith("happy_ghast")) {
+                cases += playHappyGhast(official, out, only);
+            }
             if (only == null || "leash".startsWith(only) || only.startsWith("leash")) {
                 cases += playLeash(official, out, only);
             }
@@ -8425,7 +8428,7 @@ public final class MobOracle {
                 + ",\"blockLight\":" + (lit ? 15 : -1)
                 + ",\"egg\":" + egg
                 + ",\"ticks\":" + ticks
-                + ",\"frames\":" + frames + "]}\n");
+                + ",\"frames\":" + frames + "}\n");
         out.flush();
     }
 
@@ -8608,7 +8611,7 @@ public final class MobOracle {
                 + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"dir\":" + Arrays.toString(dir)
                 + ",\"item\":" + BuiltInRegistries.ITEM.getId(stack.getItem()) + ",\"forced\":" + forced
                 + ",\"cow\":" + cowHit + ",\"owner\":" + (owned ? owner.getId() : -1)
-                + ",\"fireTicks\":" + fireTicks + ",\"frames\":" + frames + "]}\n");
+                + ",\"fireTicks\":" + fireTicks + ",\"frames\":" + frames + "}\n");
         out.flush();
     }
 
@@ -10129,7 +10132,7 @@ public final class MobOracle {
         }
         out.write("{\"type\":\"squid\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
                 + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"glow\":" + glow
-                + ",\"hurt\":" + hurt + ",\"baby\":" + baby + ",\"frames\":" + frames + "]}\n");
+                + ",\"hurt\":" + hurt + ",\"baby\":" + baby + ",\"frames\":" + frames + "}\n");
         out.flush();
     }
 
@@ -10284,7 +10287,7 @@ public final class MobOracle {
         out.write("{\"type\":\"fish\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
                 + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"kind\":"
                 + jsonString(kind) + ",\"variant\":0,\"puffState\":0,\"cow\":" + (cow != null)
-                + ",\"frames\":" + frames + "]}\n");
+                + ",\"frames\":" + frames + "}\n");
         out.flush();
     }
 
@@ -10448,7 +10451,7 @@ public final class MobOracle {
                 + ",\"dolphin\":" + dolphin + ",\"baby\":" + baby + ",\"variant\":" + variant
                 + ",\"registered\":" + registeredGoals(mob.getGoalSelector())
                 + (dolphin ? "" : ",\"brain\":" + brainTable(mob))
-                + ",\"frames\":" + frames + "]}\n");
+                + ",\"frames\":" + frames + "}\n");
         out.flush();
     }
 
@@ -12191,7 +12194,7 @@ public final class MobOracle {
                 + ",\"angry\":" + angry + ",\"grow\":" + grow
                 + ",\"hive\":" + hive + ",\"follow\":" + follow
                 + ",\"sting\":" + sting
-                + ",\"frames\":" + frames + "]}\n");
+                + ",\"frames\":" + frames + "}\n");
         out.flush();
         official.attributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
     }
@@ -12303,7 +12306,7 @@ public final class MobOracle {
         }
         out.write("{\"type\":\"beeRelease\",\"name\":" + jsonString(name)
                 + ",\"players\":" + playerCount + ",\"campfire\":" + campfire
-                + ",\"destroy\":" + destroy + ",\"frames\":" + frames + "]}\n");
+                + ",\"destroy\":" + destroy + ",\"frames\":" + frames + "}\n");
         out.flush();
         official.attributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
     }
@@ -12432,7 +12435,7 @@ public final class MobOracle {
                 + ",\"night\":" + night
                 + ",\"rain\":" + rain
                 + ",\"campfire\":" + campfire
-                + ",\"frames\":" + frames + "]}\n");
+                + ",\"frames\":" + frames + "}\n");
         out.flush();
         official.attributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
     }
@@ -12594,7 +12597,7 @@ public final class MobOracle {
                 + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"hurt\":" + hurt
                 + ",\"playerId\":" + playerId + ",\"playerTick\":" + playerTick
                 + ",\"playerFar\":" + Arrays.toString(playerFar) + ",\"playerNear\":" + Arrays.toString(playerNear)
-                + ",\"frames\":" + frames + "]}\n");
+                + ",\"frames\":" + frames + "}\n");
         out.flush();
     }
 
@@ -12783,7 +12786,7 @@ public final class MobOracle {
                 + ",\"start\":" + Arrays.toString(start)
                 + ",\"silverfish\":" + silverfish
                 + ",\"melee\":" + melee + ",\"persistent\":" + persistent
-                + ",\"enderman\":" + target + ",\"frames\":" + frames + "]}\n");
+                + ",\"enderman\":" + target + ",\"frames\":" + frames + "}\n");
         out.flush();
     }
 
@@ -15214,7 +15217,7 @@ public final class MobOracle {
                 + ",\"iron\":" + iron + ",\"prey\":" + (prey != null)
                 + ",\"playerId\":" + player.getId() + ",\"raining\":" + wet
                 + ",\"hot\":" + hot + ",\"noGrief\":" + noGrief
-                + ",\"frames\":" + frames + "]}\n");
+                + ",\"frames\":" + frames + "}\n");
         out.flush();
     }
 
@@ -15736,6 +15739,265 @@ public final class MobOracle {
                 + ",\"playerId\":" + playerId + ",\"playerX\":" + playerX + ",\"seed\":" + seed
                 + ",\"blocks\":" + blocks + ",\"shots\":" + spits.size() + ",\"frames\":" + frames + "]"
                 + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
+    }
+
+    /**
+     * 快乐恶魂：干恶魂方块孵化、幼年长大、穿 / 脱挽具、四名乘客的悬停与朝向、
+     * 大脑结构表、四点拴绳偏移，以及存档往返。每刻比状态、属性、元数据、装备和 NBT。
+     *
+     * Happy ghasts: dried ghast hatching, growing up, harness equip / shear, four-passenger
+     * hover and facing, the brain structure table, quad leash offsets and save round trips.
+     * Each tick compares state, attributes, metadata, equipment and NBT.
+     */
+    private static int playHappyGhast(Official official, Writer out, String only) throws Exception {
+        String[] names = {"happy_ghast_hatch", "happy_ghast_grow", "happy_ghast_harness",
+                "happy_ghast_ride", "happy_ghast_quad", "happy_ghast_save"};
+        int cases = 0;
+        for (String name : names) {
+            if (only != null && !name.startsWith(only)) continue;
+            FakeLevel world = FakeLevel.create(official);
+            world.nextId = FIRST_ID;
+            world.gameTime = START_TIME;
+            ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+            // 平坦石地板：干恶魂方块在 (1,64,0)，地面在 y=63。
+            for (int x = -6; x <= 12; x++)
+                for (int z = -6; z <= 6; z++)
+                    world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            BlockPos dried = new BlockPos(1, 64, 0);
+            boolean hatch = name.equals("happy_ghast_hatch");
+            if (hatch) {
+                world.blocks.put(dried.asLong(), Blocks.DRIED_GHAST.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.DriedGhastBlock.WATERLOGGED, true)
+                        .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties
+                                .DRIED_GHAST_HYDRATION_LEVELS, 3));
+            }
+            String blocks = blockArray(world.blocks);
+
+            long seed = 0x48415050_59475_31L;
+            var ghast = (net.minecraft.world.entity.animal.happyghast.HappyGhast)
+                    EntityTypes.HAPPY_GHAST.create(world, EntitySpawnReason.COMMAND);
+            world.entitySeeds.nextLong();
+            setRandom(ghast, seed);
+            ghast.setId(FIRST_ID);
+            ghast.setUUID(new UUID(0L, 1L));
+            ghast.setPersistenceRequired();
+            ghast.snapTo(2.5, 64.0, 0.5, 0.0F, 0.0F);
+            ghast.setYHeadRot(0.0F);
+            ghast.setYBodyRot(0.0F);
+            boolean baby = name.equals("happy_ghast_grow") || name.equals("happy_ghast_hatch");
+            if (baby) ghast.setBaby(true);
+            // 全部场景关 AI：逐刻比确定性的状态变化（孵化、长大、挽具、悬停、四点
+            // 弹簧、骑乘朝向）；大脑本身用结构表逐字核对，运行时行为不逐刻比。
+            // All scenes disable AI: per-tick comparison covers the deterministic state
+            // (hatching, growth, harness, hover, quad spring, riding rotation); the
+            // brain itself is checked through the structural table.
+            ghast.setNoAi(true);
+            world.tracked.add(ghast);
+
+            // 玩家：挽具交互和骑乘用，位置固定在恶魂身边。
+            ServerPlayer player = new ServerPlayer(official.server, world,
+                    new GameProfile(new UUID(1L, 2L), "GhastOracle"), ClientInformation.createDefault());
+            player.setId(FIRST_ID - 1024);
+            player.setPos(2.5, 68.0, 0.5);
+            player.setYRot(0.0F);
+            setRandom(player, ENTITY_RANDOM_SEED);
+            // 玩家上车时 `ServerPlayer.startRiding` 要给连接发一个传送包。
+            // `ServerPlayer.startRiding` teleports through the player's connection.
+            ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+            put(ServerGamePacketListenerImpl.class, connection, "player", player);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "server", official.server);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+            ((RecordingListener) connection).bytes = new Bytes(official.registries);
+            put(ServerPlayer.class, player, "connection", connection);
+            world.playersList().add(player);
+            world.tracked.add(player);
+
+            // 快乐恶魂的大脑结构表（传感器、行为、进入条件、退出清的记忆）。
+            String brainTable = brainTable(ghast);
+            int harness = BuiltInRegistries.ITEM.getId(Items.HARNESS.white());
+            int shears = BuiltInRegistries.ITEM.getId(Items.SHEARS);
+            int snowball = BuiltInRegistries.ITEM.getId(Items.SNOWBALL);
+
+            // 四点拴绳：一头牛拴到快乐恶魂身上，牛离得远时产生弹性拉扯。
+            Cow tied = null;
+            if (name.equals("happy_ghast_quad")) {
+                tied = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+                world.entitySeeds.nextLong();
+                setRandom(tied, 0x54494544L);
+                tied.setId(FIRST_ID + 1);
+                tied.setUUID(new UUID(0L, 3L));
+                tied.setPersistenceRequired();
+                tied.setNoAi(true);
+                tied.snapTo(10.5, 64.0, 0.5, 0.0F, 0.0F);
+                tied.setLeashedTo(ghast, true);
+                world.tracked.add(tied);
+            }
+
+            // 存档往返场景：按官方 `saveWithoutId` / `load` 比逐键 NBT。
+            if (name.equals("happy_ghast_save")) {
+                ghast.setHealth(13.0F);
+                putInt(net.minecraft.world.entity.animal.happyghast.HappyGhast.class, ghast,
+                        "serverStillTimeout", 7);
+                var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                ghast.saveWithoutId(output);
+                String tag = output.buildResult().toString();
+                var copy = (net.minecraft.world.entity.animal.happyghast.HappyGhast)
+                        EntityTypes.HAPPY_GHAST.create(world, EntitySpawnReason.LOAD);
+                copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries,
+                        output.buildResult()));
+                var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                copy.saveWithoutId(again);
+                out.write("{\"type\":\"happyGhastSave\",\"name\":" + jsonString(name)
+                        + ",\"nbt\":" + jsonString(tag)
+                        + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+                cases++;
+                continue;
+            }
+
+            int ticks = switch (name) {
+                // 幼年喂雪球后只需观察年龄、强制成长计时和尺寸，不跑到成年。
+                // Snowball feeding only needs age / forced-age / size, not full growth.
+                case "happy_ghast_grow" -> 60;
+                case "happy_ghast_hatch" -> 6;
+                case "happy_ghast_ride" -> 60;
+                case "happy_ghast_quad" -> 40;
+                default -> 40;
+            };
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    world.gameTime = START_TIME + tick;
+                    // 干恶魂方块：每刻跑一次计划刻推进水合阶段并孵出幼崽。
+                    if (hatch && tick <= 4) {
+                        BlockState state = world.getBlockState(dried);
+                        if (!state.isAir() && state.is(Blocks.DRIED_GHAST)) {
+                            state.tick(world, dried, world.getRandom());
+                        }
+                    }
+                    // 幼年喂雪球：第 3 刻加速成长。
+                    if (name.equals("happy_ghast_grow") && tick == 3) {
+                        player.setItemInHand(InteractionHand.MAIN_HAND,
+                                new ItemStack(Items.SNOWBALL));
+                        player.interactOn(ghast, InteractionHand.MAIN_HAND, ghast.position());
+                        player.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+                    }
+                    // 穿挽具 / 脱挽具 / 上车。
+                    if (name.equals("happy_ghast_harness")) {
+                        if (tick == 3) {
+                            player.setItemInHand(InteractionHand.MAIN_HAND,
+                                    new ItemStack(Items.HARNESS.white()));
+                            player.interactOn(ghast, InteractionHand.MAIN_HAND, ghast.position());
+                            player.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+                        } else if (tick == 10) {
+                            player.setItemInHand(InteractionHand.MAIN_HAND,
+                                    new ItemStack(Items.SHEARS));
+                            player.interactOn(ghast, InteractionHand.MAIN_HAND, ghast.position());
+                            player.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+                        }
+                    }
+                    if (name.equals("happy_ghast_ride")) {
+                        if (tick == 2) {
+                            ghast.setItemSlot(net.minecraft.world.entity.EquipmentSlot.BODY,
+                                    new ItemStack(Items.HARNESS.red()));
+                        } else if (tick == 3) {
+                            player.startRiding(ghast);
+                        }
+                    }
+                    if (name.equals("happy_ghast_quad") && tick > 0) {
+                        // 牛每刻走远一点，快乐恶魂的 holder 四点偏移参与弹簧。
+                        tied.setPos(10.5 + tick * 0.15, 64.0, 0.5);
+                    }
+                    // 骑乘场景：玩家位置由客户端权威决定，夹具只推进载具的 tickRidden。
+                    if (name.equals("happy_ghast_ride") && tick > 3) {
+                        player.setYRot(12.0F);
+                        player.setXRot(20.0F);
+                    }
+                    for (net.minecraft.world.entity.Entity e
+                            : new java.util.ArrayList<>(world.tracked)) {
+                        if (e instanceof net.minecraft.world.entity.Mob mob
+                                && !(e instanceof ServerPlayer) && !mob.isRemoved()
+                                && !mob.isPassenger()) {
+                            mob.checkDespawn();
+                            mob.commonTick();
+                            mob.tick();
+                        }
+                    }
+                }
+                if (tick > 0) frames.append(',');
+                frames.append(happyGhastFrame(ghast, tied, world, name, tick));
+            }
+            frames.append(']');
+            out.write("{\"type\":\"happyGhast\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"seed\":" + seed
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"blocks\":" + blocks
+                    + ",\"baby\":" + baby
+                    + ",\"brain\":" + brainTable
+                    + ",\"harness\":" + harness
+                    + ",\"shears\":" + shears
+                    + ",\"snowball\":" + snowball
+                    + ",\"dried\":[" + dried.getX() + ',' + dried.getY() + ',' + dried.getZ() + ']'
+                    + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
+    /** 一帧的快乐恶魂状态：位置、朝向、血量、年龄、尺寸、装备、元数据、绳状态、方块状态。 */
+    private static String happyGhastFrame(
+            net.minecraft.world.entity.animal.happyghast.HappyGhast ghast, Cow tied,
+            FakeLevel world, String name, int tick) throws Exception {
+        Vec3 p = ghast.position();
+        var dims = ghast.getDimensions(net.minecraft.world.entity.Pose.STANDING);
+        int body = BuiltInRegistries.ITEM.getId(
+                ghast.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.BODY).getItem());
+        var out = new StringBuilder("{\"pos\":[");
+        out.append(Double.doubleToRawLongBits(p.x)).append(',')
+                .append(Double.doubleToRawLongBits(p.y)).append(',')
+                .append(Double.doubleToRawLongBits(p.z)).append(']');
+        out.append(",\"rot\":[")
+                .append(Float.floatToRawIntBits(ghast.getYRot())).append(',')
+                .append(Float.floatToRawIntBits(ghast.getXRot())).append(',')
+                .append(Float.floatToRawIntBits(ghast.getYHeadRot())).append(',')
+                .append(Float.floatToRawIntBits(ghast.yBodyRot)).append(']');
+        out.append(",\"health\":").append(Float.floatToRawIntBits(ghast.getHealth()));
+        out.append(",\"age\":").append(ghast.getAge());
+        out.append(",\"dims\":[")
+                .append(Float.floatToRawIntBits(dims.width())).append(',')
+                .append(Float.floatToRawIntBits(dims.height())).append(',')
+                .append(Float.floatToRawIntBits(ghast.getEyeHeight())).append(']');
+        out.append(",\"body\":").append(body);
+        out.append(",\"passengers\":").append(ghast.getPassengers().size());
+        out.append(",\"staysStill\":").append(ghast.staysStill());
+        out.append(",\"isLeashHolder\":").append(ghast.isLeashHolder());
+        out.append(",\"stillTimeout\":").append(getInt(
+                net.minecraft.world.entity.animal.happyghast.HappyGhast.class, ghast,
+                "serverStillTimeout"));
+        out.append(",\"brain\":").append(jsonString(BrainOracle.dump(ghast)));
+        out.append(",\"seed\":").append(randomSeed(ghast));
+        if (tied != null) {
+            Vec3 q = tied.position();
+            out.append(",\"tied\":[").append(Double.doubleToRawLongBits(q.x)).append(',')
+                    .append(Double.doubleToRawLongBits(q.y)).append(',')
+                    .append(Double.doubleToRawLongBits(q.z)).append(']');
+            out.append(",\"tiedLeashed\":").append(tied.isLeashed());
+        }
+        if (name.equals("happy_ghast_hatch")) {
+            // 只比方块还在不在：官方假世界 `removeBlock` 留空气，Bamboo 按
+            // `getFluidState` 留下水，都是「干恶魂方块已移除」。
+            // Only compare whether the block is gone: the vanilla fake world leaves
+            // air and Bamboo leaves the water fluid, both meaning "block removed".
+            out.append(",\"driedGone\":").append(
+                    !world.getBlockState(new BlockPos(1, 64, 0)).is(Blocks.DRIED_GHAST));
+        }
+        return out.append('}').toString();
     }
 
     /**
@@ -18803,7 +19065,7 @@ public final class MobOracle {
             }
             out.write("{\"type\":\"sulfurCube\",\"name\":" + jsonString(name)
                     + ",\"firstId\":" + FIRST_ID + ",\"blocks\":" + blocks
-                    + ",\"frames\":" + frames + "]}\n");
+                    + ",\"frames\":" + frames + "}\n");
             out.flush();
             cases++;
         }

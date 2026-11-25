@@ -407,6 +407,11 @@ fn on_elastic_leash_pull(me: &mut Entity, mob: &mut Mob, time: i64) {
     {
         equine.eating = false;
     }
+    // `HappyGhast.onElasticLeashPull`：`super` 之后让移动控制停下。
+    // `HappyGhast.onElasticLeashPull`: after `super`, stop the move control.
+    if mob.mob_type == MobType::HappyGhast {
+        mob.mover.operation = super::control::Operation::Wait;
+    }
     // `Camel.onElasticLeashPull`：坐着、不在换姿势、能换姿势时站起来。`Camel` 的子类
     // `CamelHusk` 一并覆盖。Bamboo 的 `canCamelChangePose` 在开阔平地恒真。
     if matches!(mob.mob_type, MobType::Camel | MobType::CamelHusk)

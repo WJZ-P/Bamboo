@@ -1484,32 +1484,39 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     if mob.effects.has(mob_effect::SLOW_FALLING) || mob.effects.has(mob_effect::LEVITATION) {
         me.fall_distance = 0.0;
     }
-    if !mob.no_ai {
+    // 官方 `LivingEntity.aiStep`：`getControllingPassenger()` 是玩家且自己活着时无条件走
+    // `travelRidden`，连 `NoAI` 的载具也照跑 `tickRidden`；其余 `travel` 分支才看
+    // `canSimulateMovement()` 和 `isEffectiveAi()`。
+    //
+    // Vanilla `LivingEntity.aiStep`: with a living player controlling passenger it
+    // always goes through `travelRidden`, even for a NoAI vehicle; the other `travel`
+    // branches are the ones gated on `canSimulateMovement()` / `isEffectiveAi()`.
+    let ridden = mob.controlling_passenger().and_then(|rider| {
+        let view = ctx.player(rider)?;
+        Some((view.yaw, view.pitch))
+    });
+    if let Some((yaw, pitch)) = ridden {
         timing::span!(Travel);
-        // 官方 `LivingEntity.travel`：有人控制时走 `travelRidden`，服务端不模拟载具的运动，
-        // 只跑 `tickRidden` 再把速度清零；位置由客户端的 `move_vehicle` 决定。
-        //
-        // Vanilla `LivingEntity.travel`: with a controlling passenger it goes through
-        // `travelRidden`; the server does not simulate the vehicle, it only runs
-        // `tickRidden` and zeroes the velocity. The position comes from the client's
-        // `move_vehicle` packet.
-        if let Some(rider) = mob.controlling_passenger() {
-            if let Some(view) = ctx.player(rider) {
-                if mob.mob_type.is_equine() {
-                    super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
-                } else if mob.mob_type == super::MobType::Pig {
-                    super::pig::tick_ridden(me, mob, view.yaw, view.pitch);
-                } else if super::nautilus::is_nautilus(mob.mob_type) {
-                    super::nautilus_ai::ridden_rotation(me, mob, view.yaw, view.pitch);
-                } else if mob.mob_type == super::MobType::HappyGhast {
-                    // `HappyGhast.tickRidden`：0.08 插值车身朝向，头 / 身一起抄过去。
-                    // `HappyGhast.tickRidden`: lerp the yaw by 0.08 and copy it
-                    // into head and body rotations.
-                    super::happy_ghast::tick_ridden(me, mob, view.pitch, view.yaw);
-                }
-            }
-            me.delta = Vec3::default();
-        } else if mob.mob_type == super::MobType::Phantom {
+        // `travelRidden` 的服务端只跑 `tickRidden` 再清零速度；位置由客户端的
+        // `move_vehicle` 决定。
+        // The server only runs `tickRidden` and zeroes velocity; the client's
+        // `move_vehicle` decides the position.
+        if mob.mob_type.is_equine() {
+            super::equine::tick_ridden(me, mob, yaw, pitch);
+        } else if mob.mob_type == super::MobType::Pig {
+            super::pig::tick_ridden(me, mob, yaw, pitch);
+        } else if super::nautilus::is_nautilus(mob.mob_type) {
+            super::nautilus_ai::ridden_rotation(me, mob, yaw, pitch);
+        } else if mob.mob_type == super::MobType::HappyGhast {
+            // `HappyGhast.tickRidden`：0.08 插值车身朝向，头 / 身一起抄过去。
+            // `HappyGhast.tickRidden`: lerp the yaw by 0.08 and copy it
+            // into head and body rotations.
+            super::happy_ghast::tick_ridden(me, mob, pitch, yaw);
+        }
+        me.delta = Vec3::default();
+    } else if !mob.no_ai {
+        timing::span!(Travel);
+        if mob.mob_type == super::MobType::Phantom {
             super::phantom::travel(me, mob, ctx, input);
         } else if super::squid::is_squid(mob.mob_type) {
             // `Squid.travel`：只有 `move(SELF, deltaMovement)`。

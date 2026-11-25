@@ -4040,6 +4040,41 @@ impl<'a> World<'a> {
         outcome
     }
 
+    /// 只跑 `mobInteract`，跳过 `Entity.interact` 的拴绳分支。快乐恶魂对拍夹具用：
+    /// 官方那一边直接调 `HappyGhast.mobInteract`，不走 `Entity.interact` 的剪装备路径。
+    ///
+    /// Runs only `mobInteract`, skipping the leash branches of `Entity.interact`.
+    /// The happy ghast oracle calls vanilla `HappyGhast.mobInteract` directly, so its
+    /// replay must use the same entry point.
+    pub fn interact_mob_only(
+        &mut self,
+        id: i32,
+        request: &crate::entity::mob::interact::MobInteractRequest,
+    ) -> crate::entity::mob::interact::MobInteraction {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return crate::entity::mob::interact::MobInteraction::pass();
+        };
+        let thundering = self.is_thundering();
+        let now = self.game_time();
+        let outcome = entity
+            .with_mob(|me, mob| {
+                crate::entity::mob::interact::interact(
+                    me,
+                    mob,
+                    request,
+                    now,
+                    thundering,
+                    &mut || self.random().next_float(),
+                )
+            })
+            .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
+        if let Some(stack) = outcome.drop_stack.clone() {
+            self.spawn_at_location(entity.position.add(outcome.drop_offset), stack);
+        }
+        self.level.put_entity(entity);
+        outcome
+    }
+
     /// `LeashFenceKnotEntity.interact`：剪刀剪断结上所有绳子，或把玩家牵着的生物拴到
     /// 结上 / 把结上的生物解回玩家。
     ///

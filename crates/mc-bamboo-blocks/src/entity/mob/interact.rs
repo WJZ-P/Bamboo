@@ -391,6 +391,17 @@ pub fn leash_interact(
             ..MobInteraction::pass()
         });
     }
+    // `Mob.attemptToShearEquipment`：可剪下的 BODY 装备（挽具）。官方在
+    // `Entity.interact` 的拴绳剪断之后、`mobInteract` 之前处理。
+    // `Mob.attemptToShearEquipment`: a shearable BODY item (harness). Vanilla
+    // handles it after the leash shear and before `mobInteract`.
+    if req.held.item == items::SHEARS
+        && !req.sneaking
+        && mob.mob_type == MobType::HappyGhast
+        && let Some(outcome) = super::happy_ghast::shear_harness(me, mob, req)
+    {
+        return Some(outcome);
+    }
     if !living::is_alive(me, mob) {
         return None;
     }

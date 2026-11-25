@@ -230,7 +230,7 @@ pub(in crate::entity::mob) fn brain() -> Brain {
                 SensorKind::NearestLivingEntities,
                 SensorKind::HurtBy,
                 SensorKind::FoodTemptations,
-                SensorKind::NearestAdult,
+                SensorKind::NearestAdultAnyType,
                 SensorKind::NearestPlayers,
             ],
             vec![core_activity(), idle_activity(), panic_activity()],
@@ -450,16 +450,8 @@ pub fn interact(
     // `ItemStack.interactLivingEntity` 的 equippable 组件：挽具穿上或剪刀脱下都由物品处理。
     // The equippable component of `ItemStack.interactLivingEntity`: equipping a harness
     // and shearing one off are both handled by the item.
-    if !req.held.is_empty() {
-        if is_harness(req.held.item) && can_equip_harness(mob) {
-            return equip_harness(me, mob, req);
-        }
-        if req.held.item == items::SHEARS
-            && is_wearing_harness(mob)
-            && let Some(outcome) = shear_harness(me, mob, req)
-        {
-            return outcome;
-        }
+    if !req.held.is_empty() && is_harness(req.held.item) && can_equip_harness(mob) {
+        return equip_harness(me, mob, req);
     }
     if is_wearing_harness(mob) && !req.sneaking {
         return MobInteraction {
@@ -482,13 +474,14 @@ fn equip_harness(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mo
     let worn = mob.equipment.get(EquipmentSlot::Body).clone();
     mob.equipment
         .set(EquipmentSlot::Body, ItemStack::new(req.held.item, 1));
-    living::play_sound(
-        me,
-        mob,
-        "minecraft:entity.happy_ghast.equip",
-        sound_volume(mob),
-        1.0,
-    );
+    // `LivingEntity.onEquipItem`：装备声用生物随机源取一次 `nextLong` 当种子。
+    // 构造 / 读档那一刻（`firstTick`）官方不出声也不取数。
+    // `LivingEntity.onEquipItem`: the equip sound draws one `nextLong` seed from
+    // the mob random. The first tick (construction / load) draws nothing.
+    if me.tick_count > 0 && !mob.silent {
+        let _seed = me.random.next_long();
+        living::play_sound(me, mob, "minecraft:entity.happy_ghast.equip", 1.0, 1.0);
+    }
     MobInteraction {
         result: InteractionResult::Success,
         shrink_held: !req.creative,
@@ -497,11 +490,13 @@ fn equip_harness(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mo
     }
 }
 
-/// 剪刀脱下挽具：BODY 槽清空、放 unequip 音、把原物品丢出来、扣一点耐久。
+/// `Equippable.canBeSheared` / `Mob.attemptToShearEquipment`：剪刀脱下 BODY 槽的挽具，
+/// 清空槽、放 `shearingSound`、把原物品丢出来、扣一点耐久。
 ///
-/// Shear a harness off: clear BODY, play the unequip sound, drop the stack and spend
+/// `Equippable.canBeSheared` / `Mob.attemptToShearEquipment`: shears off the BODY
+/// harness, clears the slot, plays the shearing sound, drops the stack and spends
 /// one durability point.
-fn shear_harness(
+pub fn shear_harness(
     me: &mut Entity,
     mob: &mut Mob,
     _req: &MobInteractRequest,
@@ -511,13 +506,13 @@ fn shear_harness(
         return None;
     }
     mob.equipment.set(EquipmentSlot::Body, ItemStack::empty());
-    living::play_sound(
-        me,
-        mob,
-        "minecraft:entity.happy_ghast.unequip",
-        sound_volume(mob),
-        1.0,
-    );
+    // `Mob.attemptToShearEquipment` 的 shearingSound 是 `Entity.playSound(SoundEvent)`：
+    // 固定音量 1、音高 1，不取随机数。槽清空时 `onEquipItem` 的新物品为空，
+    // 没有可装备组件，也不取 `nextLong`。
+    // `Mob.attemptToShearEquipment`'s shearingSound is `Entity.playSound(SoundEvent)`:
+    // fixed volume/pitch 1 and no random draw. Clearing the slot leaves an empty
+    // new stack with no equippable component, so `onEquipItem` draws no `nextLong`.
+    living::play_sound(me, mob, "minecraft:entity.happy_ghast.unequip", 1.0, 1.0);
     Some(MobInteraction {
         result: InteractionResult::Success,
         damage_held: true,
@@ -530,7 +525,7 @@ fn shear_harness(
 /// `getPassengerRidingPosition` 的四个点均值（剪马具时掉落物的偏移）。
 ///
 /// The mean of the four passenger points (drop offset when shearing equipment off).
-fn average_passenger_attachment() -> Vec3 {
+pub fn average_passenger_attachment() -> Vec3 {
     let mut out = Vec3::default();
     for point in PASSENGER_ATTACHMENTS {
         out = out.add(point);
@@ -595,15 +590,16 @@ pub enum Voice {
 /// `HappyGhast.addPassenger` / `removePassenger` 的护目镜音效和悬停超时。
 ///
 /// The goggle sounds and hover timeout of `HappyGhast.addPassenger` / `removePassenger`.
-pub fn after_add_passenger(me: &mut Entity, mob: &mut Mob, was_vehicle: bool, player_above: bool) {
+pub fn after_add_passenger(position: Vec3, mob: &mut Mob, was_vehicle: bool, player_above: bool) {
     if !was_vehicle {
-        living::play_sound(
-            me,
-            mob,
-            voice(Voice::GogglesDown, false),
-            sound_volume(mob),
-            1.0,
-        );
+        mob.events.push(MobEvent::Sound {
+            sound: voice(Voice::GogglesDown, false),
+            volume: 1.0,
+            pitch: 1.0,
+            position,
+            hostile: false,
+            seed: None,
+        });
     }
     if !player_above {
         mob.happy_ghast.set_still_timeout(0);
@@ -616,17 +612,18 @@ pub fn after_add_passenger(me: &mut Entity, mob: &mut Mob, was_vehicle: bool, pl
 ///
 /// `HappyGhast.removePassenger`: ten ticks of hover, and when empty clear the home
 /// and play the goggle-up sound.
-pub fn after_remove_passenger(me: &mut Entity, mob: &mut Mob) {
+pub fn after_remove_passenger(position: Vec3, mob: &mut Mob) {
     mob.happy_ghast.set_still_timeout(MAX_STILL_TIMEOUT);
     if mob.passengers.is_empty() {
         mob.home = None;
-        living::play_sound(
-            me,
-            mob,
-            voice(Voice::GogglesUp, false),
-            sound_volume(mob),
-            1.0,
-        );
+        mob.events.push(MobEvent::Sound {
+            sound: voice(Voice::GogglesUp, false),
+            volume: 1.0,
+            pitch: 1.0,
+            position,
+            hostile: false,
+            seed: None,
+        });
     }
 }
 
@@ -903,6 +900,85 @@ mod tests {
             0.05,
         );
         assert!((jump.y - 0.5 * 3.900_000_095_367_431_6 * 0.05).abs() < 1e-12);
+    }
+
+    /// 属性覆盖值和四项乘客点都照官方字节码。
+    /// Attribute overrides and the four passenger points follow the bytecode.
+    #[test]
+    fn attributes_and_passenger_points_match_the_official_table() {
+        use mc_bamboo_data::registries::attribute as a;
+        let mob = Mob::new(MobType::HappyGhast);
+        assert_eq!(mob.attributes.value(a::MAX_HEALTH), 20.0);
+        assert_eq!(mob.attributes.value(a::TEMPT_RANGE), 16.0);
+        assert_eq!(mob.attributes.value(a::FLYING_SPEED), 0.05);
+        assert_eq!(mob.attributes.value(a::MOVEMENT_SPEED), 0.05);
+        assert_eq!(mob.attributes.value(a::FOLLOW_RANGE), 16.0);
+        assert_eq!(mob.attributes.value(a::CAMERA_DISTANCE), 8.0);
+        assert_eq!(PASSENGER_ATTACHMENTS[0], Vec3::new(0.0, 4.0, 1.7));
+        assert_eq!(PASSENGER_ATTACHMENTS[3], Vec3::new(1.7, 4.0, 0.0));
+        assert_eq!(average_passenger_attachment(), Vec3::new(0.0, 4.0, 0.0));
+        assert_eq!(travel_speed(0.05), 0.05 * 5.0 / 3.0);
+    }
+
+    /// 四名乘客上限、悬停超时同步标志和声音分派。
+    /// Four-passenger cap, hover-timeout synced flag and sound dispatch.
+    #[test]
+    fn hover_and_sound_state_follow_the_official_constants() {
+        assert!(can_add_passenger(3));
+        assert!(!can_add_passenger(4));
+        let mut state = initial_state();
+        assert_eq!(state.still_timeout, 0);
+        assert!(!state.stays_still);
+        state.set_still_timeout(10);
+        assert!(state.stays_still);
+        assert!(state.is_on_still_timeout());
+        state.set_still_timeout(0);
+        assert!(!state.is_on_still_timeout());
+        assert_eq!(
+            voice(Voice::Ambient, true),
+            "minecraft:entity.ghastling.ambient"
+        );
+        assert_eq!(
+            voice(Voice::Hurt, false),
+            "minecraft:entity.happy_ghast.hurt"
+        );
+        assert_eq!(
+            voice(Voice::Spawn, false),
+            "minecraft:entity.ghastling.spawn"
+        );
+        assert_eq!(walk_target_value(false, false, false), 0.0);
+        assert_eq!(walk_target_value(true, true, true), 10.0);
+        assert_eq!(walk_target_value(true, false, true), 5.0);
+    }
+
+    /// 幼年喂雪球长大：拿错物品不会加速，雪球走 `AgeableMob.ageUp`。
+    /// Feeding a baby a snowball speeds growth; a wrong item does nothing.
+    #[test]
+    fn snowball_speeds_up_a_baby() {
+        let mut entity = Entity::by_mob_type(MobType::HappyGhast, Vec3::default());
+        entity.with_mob(|me, mob| {
+            let (w, h, eye) = MobType::HappyGhast.dimensions(true);
+            me.dimensions = (w, h);
+            mob.eye_height = eye;
+            mob.age = -24_000;
+        });
+        let request = MobInteractRequest {
+            player_uid: 1,
+            player_uuid: [0; 16],
+            hand: mc_bamboo_core::Hand::Main,
+            held: ItemStack::new(items::SNOWBALL, 1),
+            creative: false,
+            position: Vec3::default(),
+            player_height: 1.8,
+            sneaking: false,
+            difficulty: 2,
+        };
+        let outcome = entity
+            .with_mob(|me, mob| interact(me, mob, &request, &mut || 0.0))
+            .expect("happy ghast is a mob");
+        assert!(outcome.result.consumes_action());
+        assert!(outcome.shrink_held);
+        entity.with_mob(|_, mob| assert!(mob.age > -24_000));
     }
 
     #[test]
