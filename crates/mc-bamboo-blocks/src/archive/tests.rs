@@ -94,6 +94,9 @@ fn every_block_entity_kind_round_trips() {
             BlockEntityKind::Beehive => {
                 Box::new(crate::behaviour::machines::beehive_entity::BeehiveEntity::new(POS))
             }
+            BlockEntityKind::CreakingHeart => Box::new(
+                crate::behaviour::misc::creaking_heart_entity::CreakingHeartEntity::new(POS),
+            ),
         };
         let first = write_block_entity_additional(entity.as_ref()).expect("写出成功");
         let second = round_trip(entity, kind.name());

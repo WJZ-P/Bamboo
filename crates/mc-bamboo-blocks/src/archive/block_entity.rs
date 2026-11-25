@@ -23,6 +23,7 @@ use crate::{
         BrewingStandEntity, CampfireEntity, FurnaceEntity, PistonMoving, ShulkerBoxEntity,
         beehive_entity::BeehiveEntity,
     },
+    behaviour::misc::creaking_heart_entity::CreakingHeartEntity,
     hopper::HopperEntity,
 };
 
@@ -39,6 +40,7 @@ pub enum BlockEntityKind {
     Campfire,
     Piston,
     Beehive,
+    CreakingHeart,
 }
 
 impl BlockEntityKind {
@@ -55,6 +57,7 @@ impl BlockEntityKind {
             "minecraft:soul_campfire" => Self::Campfire,
             "minecraft:piston" => Self::Piston,
             "minecraft:beehive" => Self::Beehive,
+            "minecraft:creaking_heart" => Self::CreakingHeart,
             _ => return None,
         })
     }
@@ -75,12 +78,13 @@ impl BlockEntityKind {
             Self::Campfire => "minecraft:campfire",
             Self::Piston => "minecraft:piston",
             Self::Beehive => "minecraft:beehive",
+            Self::CreakingHeart => "minecraft:creaking_heart",
         }
     }
 
     /// 每种会动的机器各造一次，测试用它盯住工厂分支不要漏。
     /// 只保留存档态的四种由 [`PassiveKind::ALL`] 单独覆盖。
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Furnace,
         Self::BlastFurnace,
         Self::Smoker,
@@ -90,6 +94,7 @@ impl BlockEntityKind {
         Self::Campfire,
         Self::Piston,
         Self::Beehive,
+        Self::CreakingHeart,
     ];
 }
 
@@ -167,6 +172,7 @@ pub fn create_block_entity(
             }
         }
         BlockEntityKind::Beehive => Box::new(BeehiveEntity::read(pos, tag)) as Box<dyn BlockEntity>,
+        BlockEntityKind::CreakingHeart => Box::new(CreakingHeartEntity::read(pos, tag)),
         BlockEntityKind::Piston => {
             let moved = match tag::field(tag, "blockState") {
                 Some(value) => tag::decode_block_state(value)?,
@@ -268,6 +274,7 @@ pub fn state_matches(state: BlockState, id: &str) -> bool {
         kinds::CAMPFIRE => state.is(blocks::CAMPFIRE) || state.is(blocks::SOUL_CAMPFIRE),
         kinds::PISTON => state.is(blocks::MOVING_PISTON),
         kinds::BEEHIVE => state.is(blocks::BEEHIVE) || state.is(blocks::BEE_NEST),
+        kinds::CREAKING_HEART => state.is(blocks::CREAKING_HEART),
         _ => true,
     }
 }
