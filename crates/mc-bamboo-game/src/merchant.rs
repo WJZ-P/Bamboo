@@ -1116,6 +1116,72 @@ mod e2e_tests {
         let _ = items::AIR;
     }
 
+    /// 交易经验跨过阈值后升级：追加新等级交易、等级 +1、挂 200 刻再生、经验累加。
+    #[test]
+    fn a_trade_that_reaches_the_xp_threshold_levels_up() {
+        use mc_bamboo_data::registries::mob_effect;
+
+        let (mut region, id, villager_id, _sink) = fixture();
+        region.entities.with_mut(villager_id, |entity| {
+            if let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &mut entity.kind {
+                mob.villager.xp = 9;
+            }
+        });
+        crate::interaction::on_interact_entity(
+            &mut region,
+            id,
+            villager_id,
+            mc_bamboo_core::Hand::Main,
+            false,
+        );
+        let offers = region
+            .entities
+            .get(villager_id)
+            .and_then(|entity| match &entity.kind {
+                mc_bamboo_blocks::entity::EntityKind::Mob(mob) => mob.villager.offers.clone(),
+                _ => None,
+            })
+            .expect("村民应该懒生成了交易表");
+        let offer = offers[0].clone();
+        let container_id = region.menus[&id].container_id;
+        if let Some(state) = region.menus.get_mut(&id).and_then(|m| m.merchant.as_mut()) {
+            state.payment[0] = ItemStack::new(offer.base_cost_a.item, offer.base_cost_a.count);
+            if let Some(cost) = &offer.cost_b {
+                state.payment[1] = ItemStack::new(cost.item, cost.count);
+            }
+        }
+        crate::menu::broadcast_merchant_state(&mut region, id);
+        let packet = ClickPacket {
+            container_id,
+            state_id: region.menus[&id].state_id,
+            slot: 2,
+            button: 0,
+            input: ContainerInput::Pickup,
+            changed_slots: Default::default(),
+            carried: mc_bamboo_protocol::packet::play::HashedStack::Empty,
+        };
+        crate::menu::on_click(&mut region, id, packet);
+        let (level, xp, offers_len, regen) = region
+            .entities
+            .get(villager_id)
+            .and_then(|entity| match &entity.kind {
+                mc_bamboo_blocks::entity::EntityKind::Mob(mob) => Some((
+                    mob.villager.level,
+                    mob.villager.xp,
+                    mob.villager.offers.as_ref().map_or(0, Vec::len),
+                    mob.effects
+                        .get(mob_effect::REGENERATION)
+                        .map(|instance| instance.duration),
+                )),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(level, 2, "经验过阈值应升到 2 级");
+        assert_eq!(xp, 9 + offer.xp, "经验累加");
+        assert!(offers_len > offers.len(), "升级应追加新等级交易");
+        assert_eq!(regen, Some(200), "升级应挂 200 刻再生");
+    }
+
     /// 幼年村民右键摇头，不打开交易界面。
     #[test]
     fn a_baby_villager_does_not_open_the_trade() {
