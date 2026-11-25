@@ -692,6 +692,12 @@ public final class MobOracle {
             if (only == null || only.startsWith("warden")) {
                 cases += playWardenSave(official, out);
             }
+            if (only == null || only.startsWith("allay")) {
+                cases += playAllay(official, out, only);
+            }
+            if (only == null || only.startsWith("allay_save")) {
+                cases += playAllaySave(official, out);
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -13977,6 +13983,215 @@ public final class MobOracle {
             cases++;
         }
         out.flush();
+        return cases;
+    }
+
+
+    /** 悦灵逐刻场景：捡同种掉落物送给玩家、音符盒改送点、唱片机跳舞、紫水晶复制。 */
+    private static int playAllay(Official official, Writer out, String only) throws Exception {
+        record AScene(String name, int ticks, int[] note, int[] jukeboxStart,
+                int[] jukeboxStop, int[] interact, int[] drop, boolean player) {}
+        List<AScene> scenes = List.of(
+                new AScene("allay_give_player", 180, null, null, null,
+                        new int[] {1, 0, 0}, new int[] {30, 6, 64, 0, 2, 0}, true),
+                new AScene("allay_note_block", 220, new int[] {20, 4, 64, 0}, null, null,
+                        new int[] {1, 0, 0}, new int[] {60, 6, 64, 0, 3, 0}, true),
+                new AScene("allay_dance", 140, null, new int[] {10, 2, 64, 0},
+                        new int[] {90, 2, 64, 0}, new int[] {1, 0, 0}, null, true),
+                new AScene("allay_duplicate", 140, null, new int[] {10, 2, 64, 0},
+                        null, new int[] {30, 1, 0}, null, true)
+        );
+        int cases = 0;
+        for (AScene scene : scenes) {
+            if (only != null && !scene.name().startsWith(only)) continue;
+            FakeLevel world = FakeLevel.create(official);
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels =
+                    java.util.Map.of(Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            world.enableGameEvents();
+            world.gameTime = 1000L;
+            world.nextId = FIRST_ID;
+            world.getRandom().setSeed(1L);
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            // 音符盒 / 唱片机放在地面上方，振动分发和 shouldDepositItemsAtLikedNoteblock 才看得到。
+            if (scene.note() != null) {
+                world.blocks.put(BlockPos.asLong(scene.note()[1], scene.note()[2], scene.note()[3]),
+                        Blocks.NOTE_BLOCK.defaultBlockState());
+            }
+            if (scene.jukeboxStart() != null) {
+                world.blocks.put(BlockPos.asLong(scene.jukeboxStart()[1], scene.jukeboxStart()[2],
+                        scene.jukeboxStart()[3]), Blocks.JUKEBOX.defaultBlockState());
+            }
+
+            ServerPlayer player = null;
+            if (scene.player()) {
+                player = pigPlayer(official, world);
+                player.setPos(2.5, 64.0, 0.5);
+                player.setId(FIRST_ID + 1);
+                player.setUUID(new UUID(0L, 2L));
+                world.tracked.add(player);
+                world.playersList().add(player);
+            }
+            net.minecraft.world.entity.animal.allay.Allay allay =
+                    (net.minecraft.world.entity.animal.allay.Allay) EntityTypes.ALLAY.create(
+                            world, EntitySpawnReason.COMMAND);
+            allay.setId(FIRST_ID);
+            allay.setUUID(new UUID(0L, 1L));
+            allay.snapTo(0.5, 64.5, 0.5, 0.0F, 0.0F);
+            setRandom(allay, 5L);
+            BrainOracle.fixSensorDelays(allay, 1L);
+            BrainOracle.reseedShuffles(allay, randomSeed(allay));
+            world.tracked.add(allay);
+            // 官方把悦灵的两个动态监听者登记到眼睛所在区段（假世界没有 entityManager）。
+            allay.updateDynamicGameEventListener((dynamic, level) -> dynamic.add(level));
+
+            long mobSeed = randomSeed(allay);
+            long levelSeed = randomSeed(world.getRandom());
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= scene.ticks(); tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    if (scene.note() != null && tick == scene.note()[0]) {
+                        Vec3 at = new Vec3(scene.note()[1] + 0.5, scene.note()[2] + 0.5,
+                                scene.note()[3] + 0.5);
+                        world.gameEvent(GameEvent.NOTE_BLOCK_PLAY, at,
+                                new GameEvent.Context(null, null));
+                    }
+                    if (scene.jukeboxStart() != null && tick == scene.jukeboxStart()[0]) {
+                        Vec3 at = new Vec3(scene.jukeboxStart()[1] + 0.5,
+                                scene.jukeboxStart()[2] + 0.5, scene.jukeboxStart()[3] + 0.5);
+                        world.gameEvent(GameEvent.JUKEBOX_PLAY, at,
+                                new GameEvent.Context(null, null));
+                    }
+                    if (scene.jukeboxStop() != null && tick == scene.jukeboxStop()[0]) {
+                        Vec3 at = new Vec3(scene.jukeboxStop()[1] + 0.5,
+                                scene.jukeboxStop()[2] + 0.5, scene.jukeboxStop()[3] + 0.5);
+                        world.gameEvent(GameEvent.JUKEBOX_STOP_PLAY, at,
+                                new GameEvent.Context(null, null));
+                    }
+                    if (scene.interact() != null && tick == scene.interact()[0]) {
+                        player.getInventory().setItem(player.getInventory().getSelectedSlot(),
+                                new ItemStack(scene.interact()[1] == 0
+                                        ? Items.WHEAT_SEEDS : Items.AMETHYST_SHARD, 4));
+                        player.interactOn(allay, InteractionHand.MAIN_HAND, allay.position());
+                    }
+                    if (scene.drop() != null && tick == scene.drop()[0]) {
+                        var dropped = new net.minecraft.world.entity.item.ItemEntity(world,
+                                scene.drop()[1], scene.drop()[2] + 0.2, scene.drop()[3],
+                                new ItemStack(Items.WHEAT_SEEDS, scene.drop()[4]), 0.0, 0.0, 0.0);
+                        dropped.setId(FIRST_ID + 10 + tick);
+                        dropped.setNoPickUpDelay();
+                        world.tracked.add(dropped);
+                    }
+                    List<Entity> snapshot = new ArrayList<>(world.tracked);
+                    for (Entity entity : snapshot) {
+                        if (entity.isRemoved()) continue;
+                        entity.commonTick();
+                        entity.tick();
+                    }
+                    world.tracked.removeIf(Entity::isRemoved);
+                }
+                if (tick > 0) frames.append(',');
+                frames.append("{\"brain\":").append(jsonString(BrainOracle.dump(allay)))
+                        .append(",\"motion\":").append(projectileMotion(allay))
+                        .append(",\"dancing\":").append(allay.isDancing())
+                        .append(",\"canDuplicate\":").append(allay.getEntityData().get(
+                                allayCanDuplicateAccessor()))
+                        .append(",\"cooldown\":").append(allayDuplicationCooldown(allay))
+                        .append(",\"held\":").append(allay.getItemBySlot(
+                                net.minecraft.world.entity.EquipmentSlot.MAINHAND)
+                                .getCount())
+                        .append(",\"inventory\":").append(allay.getInventory().getItem(0).getCount())
+                        .append(",\"playerHeld\":").append(player == null ? -1
+                                : player.getInventory().getItem(
+                                        player.getInventory().getSelectedSlot()).getCount())
+                        .append(",\"allays\":").append((int) world.tracked.stream()
+                                .filter(e -> e instanceof net.minecraft.world.entity.animal.allay.Allay)
+                                .count())
+                        .append(",\"items\":").append((int) world.tracked.stream()
+                                .filter(e -> e instanceof net.minecraft.world.entity.item.ItemEntity)
+                                .count())
+                        .append(",\"mobSeed\":").append(randomSeed(allay))
+                        .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
+                        .append('}');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"allay\",\"name\":" + jsonString(scene.name())
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"startTime\":1000"
+                    + ",\"mobSeed\":" + mobSeed
+                    + ",\"levelSeed\":" + levelSeed
+                    + ",\"hasPlayer\":" + scene.player()
+                    + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static net.minecraft.network.syncher.EntityDataAccessor<Boolean> allayCanDuplicateAccessor()
+            throws Exception {
+        java.lang.reflect.Field field = net.minecraft.world.entity.animal.allay.Allay.class
+                .getDeclaredField("DATA_CAN_DUPLICATE");
+        field.setAccessible(true);
+        return (net.minecraft.network.syncher.EntityDataAccessor<Boolean>) field.get(null);
+    }
+
+    private static long allayDuplicationCooldown(
+            net.minecraft.world.entity.animal.allay.Allay allay) throws Exception {
+        java.lang.reflect.Field field = net.minecraft.world.entity.animal.allay.Allay.class
+                .getDeclaredField("duplicationCooldown");
+        field.setAccessible(true);
+        return field.getLong(allay);
+    }
+
+    /** 悦灵存档：`saveWithoutId` 的 SNBT 和读回后再写出的 SNBT。 */
+    private static int playAllaySave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean filled : new boolean[] {false, true}) {
+            FakeLevel world = FakeLevel.create(official);
+            var allay = (net.minecraft.world.entity.animal.allay.Allay) EntityTypes.ALLAY.create(
+                    world, EntitySpawnReason.COMMAND);
+            setRandom(allay, world.entitySeeds.nextLong());
+            allay.setPos(1.5, 64.0, 2.5);
+            allay.setYRot(37.0F);
+            allay.setXRot(12.0F);
+            allay.setHealth(13.0F);
+            if (filled) {
+                allay.getInventory().addItem(new ItemStack(Items.WHEAT_SEEDS, 3));
+                allay.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                        new ItemStack(Items.WHEAT_SEEDS));
+                var info = new net.minecraft.world.level.gameevent.vibrations.VibrationInfo(
+                        GameEvent.NOTE_BLOCK_PLAY, 7.0F,
+                        new Vec3(3.5, 64.5, 2.5), new UUID(0L, 2L), null);
+                allay.getVibrationData().setCurrentVibration(info);
+                allay.getVibrationData().setTravelTimeInTicks(23);
+                put(net.minecraft.world.entity.animal.allay.Allay.class, allay,
+                        "duplicationCooldown", 6000L);
+            }
+            var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            allay.saveWithoutId(output);
+            var copy = (net.minecraft.world.entity.animal.allay.Allay) EntityTypes.ALLAY.create(
+                    world, EntitySpawnReason.LOAD);
+            copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries,
+                    output.buildResult()));
+            var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            copy.saveWithoutId(again);
+            out.write("{\"type\":\"allaySave\",\"filled\":" + filled
+                    + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                    + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+            cases++;
+        }
         return cases;
     }
 

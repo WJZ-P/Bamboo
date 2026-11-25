@@ -537,9 +537,13 @@ fn entity_event_18(mob: &mut Mob) {
     mob.events.push(MobEvent::EntityEvent { event: 18 });
 }
 
-/// `Allay` 投掷时交给游戏层的命令。
-pub(super) fn throw_command(stack: ItemStack, delta: Vec3) -> Command {
-    Command::DropItemWithDelta { stack, delta }
+/// `Allay` 投掷时交给游戏层的命令（起点在眼高 - 0.2）。
+pub(super) fn throw_command(stack: ItemStack, position: Vec3, delta: Vec3) -> Command {
+    Command::AllayThrow {
+        stack,
+        position,
+        delta,
+    }
 }
 
 /// `EntityTypes.ALLAY` 的 id，供注册与对拍断言用。

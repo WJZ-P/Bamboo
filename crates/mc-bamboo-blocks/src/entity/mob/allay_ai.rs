@@ -429,10 +429,7 @@ fn throw_item(cx: &mut Cx, at: Vec3) {
     let direction = target.subtract(cx.me.position).normalize();
     let delta = direction.multiply(0.2, 0.3, 0.2);
     cx.ctx
-        .emit(super::allay::throw_command(stack, delta), cx.me);
-    // `BehaviorUtils.throwItem` 的实体从眼高 - 0.2 出发，`DropItemWithDelta` 用生物坐标，
-    // 这里按同一位置补一个偏移命令（游戏层在同一个位置生成掉落物）。
-    let _ = origin;
+        .emit(super::allay::throw_command(stack, origin, delta), cx.me);
     let time = cx.ctx.blocks().game_time();
     if time % 7 == 0 {
         let roll = cx.level_next_int(10);

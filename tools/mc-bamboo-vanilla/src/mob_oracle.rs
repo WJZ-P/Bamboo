@@ -35,6 +35,7 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod allay;
 mod attack_target;
 mod bat;
 mod bee;
@@ -238,6 +239,8 @@ enum Line {
     SculkShrieker(sculk_sensor::SculkShriekerCase),
     Warden(Box<warden::WardenCase>),
     WardenSave(warden::WardenSaveCase),
+    Allay(Box<allay::AllayCase>),
+    AllaySave(allay::AllaySaveCase),
     End(End),
 }
 
@@ -2159,6 +2162,8 @@ impl Report {
                 Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),
                 Line::Warden(case) => self.replay_warden(&case),
                 Line::WardenSave(case) => self.replay_warden_save(&case),
+                Line::Allay(case) => self.replay_allay(&case),
+                Line::AllaySave(case) => self.replay_allay_save(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),

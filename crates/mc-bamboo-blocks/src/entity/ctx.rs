@@ -1584,6 +1584,12 @@ pub enum Command {
         stack: ItemStack,
         delta: Vec3,
     },
+    /// `AllayAi.throwItem`：从眼睛下方 0.2 格朝目标上方扔出一个掉落物。
+    AllayThrow {
+        stack: ItemStack,
+        position: Vec3,
+        delta: Vec3,
+    },
     /// `HurtByTargetGoal.alertOthers`：把 `enemy` 设成这些同伴的目标（已有目标的跳过）。
     ///
     /// `HurtByTargetGoal.alertOthers`: make `enemy` the target of these allies, skipping
@@ -2039,6 +2045,13 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         ),
         Command::DropItemWithDelta { stack, delta } => {
             world.spawn_entity(Entity::ground_item_with_delta(me.position, stack, delta));
+        }
+        Command::AllayThrow {
+            stack,
+            position,
+            delta,
+        } => {
+            world.spawn_entity(Entity::ground_item_with_delta(position, stack, delta));
         }
         Command::DropEntityLoot(request) => {
             let origin = request.origin;
