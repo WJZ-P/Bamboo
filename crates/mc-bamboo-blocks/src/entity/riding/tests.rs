@@ -184,12 +184,17 @@ fn non_controlling_passengers_do_not_borrow_the_vehicle_navigation() {
     let mut ticks = crate::BlockTicks::new();
     let view = crate::World::new(&mut level, &mut ticks);
 
-    // 史莱姆在 #non_controlling_rider 里。
+    // 史莱姆和硫磺方块怪都在 #non_controlling_rider 里（岩浆怪未建模）。
     let mut spider = entity(1, MobType::Spider, 0.5);
     let mut slime = entity(2, MobType::Slime, 10.0);
     slime.vehicle = Some(1);
     spider.kind.mob_mut().unwrap().passengers.push(2);
     assert!(!begin_nav_borrow(&mut slime, &spider, &view));
+
+    let mut sulfur_cube = entity(4, MobType::SulfurCube, 10.0);
+    sulfur_cube.vehicle = Some(1);
+    spider.kind.mob_mut().unwrap().passengers = vec![4];
+    assert!(!begin_nav_borrow(&mut sulfur_cube, &spider, &view));
 
     // NoAI 载具不产生控制乘客。
     spider.kind.mob_mut().unwrap().no_ai = true;

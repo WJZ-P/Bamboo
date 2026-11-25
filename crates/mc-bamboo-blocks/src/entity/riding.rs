@@ -307,9 +307,10 @@ pub fn stop_riding(
 // ---- 骑手借载具导航（`Mob.getNavigation` / `getMoveControl` 的转交）----
 
 /// 官方 `Mob.getControllingPassenger()`：载具不是 `NoAI`、第一位乘客就是这个实体、
-/// 乘客是生物且 `canControlVehicle()`（不在 `#non_controlling_rider` 里；建模范围内
-/// 只有史莱姆在标签里）。满足时载具的 `getNavigation()` / `getMoveControl()` 会转给
-/// 这个乘客所在的载具链顶端，所以骑手的目标与大脑用的是**载具**的导航。
+/// 乘客是生物且 `canControlVehicle()`（不在 `#non_controlling_rider` 里；26.3 标签是
+/// 史莱姆 / 岩浆怪 / 硫磺方块怪，建模范围内是史莱姆和硫磺方块怪）。满足时载具的
+/// `getNavigation()` / `getMoveControl()` 会转给这个乘客所在的载具链顶端，所以骑手的
+/// 目标与大脑用的是**载具**的导航。
 ///
 /// Vanilla `Mob.getControllingPassenger()`: the vehicle is not NoAI, its first
 /// passenger is this rider, and the rider can control vehicles. When true the
@@ -318,7 +319,7 @@ pub(crate) fn controls_vehicle(vehicle_mob: &Mob, rider_uid: EntityUid, rider_mo
     if vehicle_mob.no_ai || vehicle_mob.first_passenger() != Some(rider_uid) {
         return false;
     }
-    !matches!(rider_mob.mob_type, MobType::Slime)
+    !matches!(rider_mob.mob_type, MobType::Slime | MobType::SulfurCube)
 }
 
 /// 乘客 tick 之前：若它控制载具，就把载具的 `Navigation` / `MoveControl` 和按载具
