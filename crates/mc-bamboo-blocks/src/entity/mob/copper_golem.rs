@@ -513,8 +513,13 @@ fn update_weathering(me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Wea
     if was_oxidized {
         // `canTurnToStatue`：脚下方块是空气且 `level.random.nextFloat() <= 0.0058`。
         let pos = me.block_position();
-        if blocks.block_state(pos).is_air() && blocks.level_random_float() <= TURN_TO_STATUE_CHANCE
-        {
+        let air = blocks.block_state(pos).is_air();
+        let roll = blocks.level_random_float();
+        eprintln!(
+            "DBG2 was_oxidized={} air={} roll={} chance={}",
+            was_oxidized, air, roll, TURN_TO_STATUE_CHANCE
+        );
+        if air && roll <= TURN_TO_STATUE_CHANCE {
             let pose = me.random.next_int_bounded(4) as u8;
             let facing = Direction::from_yaw(f64::from(me.y_rot));
             return WeatheringOutcome::Statue { pose, facing };
@@ -930,6 +935,71 @@ mod statue_tests {
 
     use super::*;
     use crate::{testing::TestLevel, ticks::BlockTicks, world::World};
+
+    /// `canTurnToStatue`：`level.random.nextFloat() <= 0.0058` 掷中时发
+    /// `CopperGolemStatue` 命令，和官方在同一位置取一次世界随机数。
+    /// `LegacyRandomSource(5125).nextFloat()` 约 0.0057137，必定掷中；
+    /// 换个种子让 `nextFloat` 大于 0.0058 就必定不中。
+    #[test]
+    fn statue_roll_uses_one_level_random_float() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        ticks.set_time(1000);
+        let pos = BlockPos::new(1, 64, 2);
+        let mut entity = Entity::by_mob_type(MobType::CopperGolem, Vec3::new(1.5, 64.0, 2.5));
+        entity.with_mob(|_, mob| {
+            mob.copper_golem.weather_state = WeatherState::Oxidized;
+            mob.copper_golem.next_weathering_tick = 0;
+        });
+        let mut mob = entity.kind.mob_mut().unwrap().clone();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            // `LegacyRandomSource(5125)` 首个 `nextFloat()` 约 0.0057137，
+            // 小于官方 `TURN_TO_STATUE_CHANCE` 的 0.0058。
+            world.random().set_seed(5125);
+            let seed_before = world.random().seed();
+            let mut ctx = crate::entity::ctx::PreciseCtx::new(&mut world, entity.id);
+            tick_after(&mut entity, &mut mob, &mut ctx);
+            // 掷中后世界随机源恰好前进一格（只取了一个 `nextFloat()`）。
+            assert_ne!(world.random().seed(), seed_before);
+        }
+        // 精确驱动的 `emit` 当场落地：雕像方块已放、实体已消失。
+        eprintln!(
+            "DBG state={:?} removed={} pos_block={:?}",
+            level.get(pos),
+            entity.removed,
+            entity.block_position()
+        );
+        assert!(
+            level
+                .get(pos)
+                .is(mc_bamboo_data::blocks::OXIDIZED_COPPER_GOLEM_STATUE)
+        );
+        assert!(entity.removed);
+    }
+
+    /// 同一段路径在 `nextFloat()` 大于 0.0058 时不发命令、不改方块。
+    #[test]
+    fn statue_roll_miss_leaves_the_golem() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        ticks.set_time(1000);
+        let mut entity = Entity::by_mob_type(MobType::CopperGolem, Vec3::new(1.5, 64.0, 2.5));
+        entity.with_mob(|_, mob| {
+            mob.copper_golem.weather_state = WeatherState::Oxidized;
+            mob.copper_golem.next_weathering_tick = 0;
+        });
+        let mut mob = entity.kind.mob_mut().unwrap().clone();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            // 种子 42 的首个 `nextFloat()` 远大于 0.0058，必定不中。
+            world.random().set_seed(42);
+            let mut ctx = crate::entity::ctx::PreciseCtx::new(&mut world, entity.id);
+            tick_after(&mut entity, &mut mob, &mut ctx);
+        }
+        assert!(!entity.removed);
+        assert!(level.get(BlockPos::new(1, 64, 2)).is_air());
+    }
 
     /// `createStatue` 把铜傀儡的自定义名写进雕像的组件表。
     #[test]
