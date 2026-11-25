@@ -28,6 +28,7 @@ pub mod chicken;
 pub mod control;
 pub mod conversion;
 pub mod creaking;
+mod creaking_ai;
 pub mod creeper;
 pub mod crossbow;
 pub mod damage;
@@ -2995,21 +2996,6 @@ pub enum MobEvent {
 }
 
 /// 官方大脑由 `CreakingAi` 驱动；Bamboo 用近战目标 + 冻结标志近似 FIGHT/IDLE。
-fn creaking_goals(_navigation: &mut Navigation) -> GoalSelector {
-    GoalSelector::from_goals(vec![
-        goals::WrappedGoal {
-            priority: 1,
-            goal: goals::Goal::Float,
-            running: false,
-        },
-        goals::WrappedGoal {
-            priority: 2,
-            goal: goals::Goal::melee(1.0, false),
-            running: false,
-        },
-    ])
-}
-
 impl Mob {
     /// `EntityType.create`：构造函数链。随机数（UUID 两个 `nextLong`、`yRot` 一个
     /// `nextFloat`）由调用方在实体拿到 ID 之后取，见 [`super::Entity::cow`]。
@@ -3118,7 +3104,6 @@ impl Mob {
             }
             MobType::Slime => slime::goals(&mut navigation),
             MobType::SulfurCube => sulfur_cube::goals(&mut navigation),
-            MobType::Creaking => creaking_goals(&mut navigation),
             MobType::PolarBear => polar_bear::goals(&mut navigation),
             MobType::Panda => panda::goals(&mut navigation),
             MobType::Ocelot => ocelot::goals(&mut navigation),
@@ -3151,7 +3136,8 @@ impl Mob {
             | MobType::CamelHusk
             | MobType::Villager
             | MobType::Nautilus
-            | MobType::ZombieNautilus => GoalSelector::default(),
+            | MobType::ZombieNautilus
+            | MobType::Creaking => GoalSelector::default(),
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
             // alongside the brain.
@@ -4305,6 +4291,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Axolotl => Some(Box::new(axolotl::brain())),
         MobType::Villager => Some(Box::new(villager_ai::brain(false, 0))),
         MobType::Nautilus | MobType::ZombieNautilus => Some(Box::new(nautilus_ai::brain(kind))),
+        MobType::Creaking => Some(Box::new(creaking_ai::brain())),
         _ => None,
     }
 }

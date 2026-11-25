@@ -1289,10 +1289,12 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
     if super::guardian::is_guardian(mob.mob_type) {
         super::guardian::ai_step(me, mob);
     }
-    animal_ai_step(me, mob, ctx, plan);
+    // `Creaking.aiStep` 在 `super.aiStep()` 之前：先 `checkCanMove`（读上一刻的大脑记忆），
+    // 再走 `Monster.aiStep`（`customServerAiStep` 跑大脑、传感器）。
     if mob.mob_type == super::MobType::Creaking {
         super::creaking::ai_step(me, mob, ctx);
     }
+    animal_ai_step(me, mob, ctx, plan);
     if mob.mob_type == super::MobType::Bee {
         let target_close = super::goals::combat_target(mob, ctx)
             .is_some_and(|target| target.position.distance_to_sqr(me.position) < 4.0);
@@ -2019,6 +2021,9 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     if super::nautilus::is_nautilus(mob.mob_type) {
         super::nautilus_ai::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Creaking {
+        super::creaking_ai::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::ElderGuardian {
         // `ElderGuardian.customServerAiStep`：范围挖掘疲劳和家。
         // `ElderGuardian.customServerAiStep`: area mining fatigue and home.
@@ -2045,6 +2050,11 @@ pub(crate) fn set_speed(mob: &mut Mob, speed: f32) {
 
 /// `MoveControl.tick`（牛不横移，`STRAFE` 走不到）。
 pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
+    // `CreakingMoveControl.tick`：冻结时整个跳过 `MoveControl.tick`。
+    // `CreakingMoveControl.tick`: skip `MoveControl.tick` entirely while frozen.
+    if mob.mob_type == super::MobType::Creaking && !mob.creaking.can_move {
+        return;
+    }
     // `Panda.PandaMoveControl.tick`：做不了动作时不响应移动控制。
     // `Panda.PandaMoveControl.tick`: no move control while an action is playing.
     if mob.mob_type == super::MobType::Panda && !mob.panda_can_perform_action(view.is_thundering())

@@ -10,9 +10,12 @@
 use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::{entity_types, registries::attribute};
 
-use super::{DamageKind, DamageSource, Mob, attributes::Attributes, living};
+use super::{
+    DamageKind, DamageSource, Mob, attributes::Attributes, brain::memory::MemoryType, goals,
+    living,
+};
 use crate::{
-    entity::{Entity, ctx::EntityCtx},
+    entity::{Entity, EntityUid, ctx::EntityCtx},
     shape::CollisionContext,
 };
 
@@ -48,6 +51,8 @@ pub struct CreakingState {
     pub player_stuck_counter: i32,
     /// `invulnerabilityAnimationRemainingTicks`。
     pub invulnerability_animation: i32,
+    /// `attackAnimationRemainingTicks`。
+    pub attack_animation: i32,
     /// `deathTime` 超过 45 且拆解时真正移除。
     pub tear_down_time: i32,
 }
@@ -110,6 +115,12 @@ pub(super) fn hurt_server(me: &Entity, mob: &mut Mob, source: &DamageSource) -> 
 
 /// `Creaking.aiStep`：被玩家看着时 `CAN_MOVE=false`，看着的玩家走开后解冻。
 pub(super) fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) {
+    if mob.creaking.invulnerability_animation > 0 {
+        mob.creaking.invulnerability_animation -= 1;
+    }
+    if mob.creaking.attack_animation > 0 {
+        mob.creaking.attack_animation -= 1;
+    }
     let was = mob.creaking.can_move;
     let can_move = check_can_move(me, mob, ctx);
     if was != can_move {
@@ -130,12 +141,10 @@ pub(super) fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) {
             mob.zza = 0.0;
             mob.jumping = false;
             mob.speed = 0.0;
+            mob.navigation.stop();
         }
     }
     mob.creaking.can_move = can_move;
-    if mob.creaking.invulnerability_animation > 0 {
-        mob.creaking.invulnerability_animation -= 1;
-    }
     if let Some(home) = mob.creaking.home_pos {
         // `BlockView` 的并行快照没有方块实体表；精确视图用 `has_block_entity` 认出心还在。
         // 拆解流程由 `removeProtector(null)` 自己置位，这里不误判成心消失。
@@ -178,20 +187,27 @@ fn looking_at_me(
     false
 }
 
-/// `Creaking.checkCanMove`：任一可攻击玩家盯着 12 格内的嘎枝时冻结。
+/// `Creaking.checkCanMove`：读大脑的 `NEAREST_PLAYERS` 记忆，任一可攻击玩家盯着
+/// 12 格内的嘎枝时冻结。
 fn check_can_move(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
-    let mut players = Vec::new();
-    ctx.blocks()
-        .for_each_player(&mut |player| players.push(*player));
+    let view = ctx.blocks();
+    let players = mob
+        .brain
+        .as_deref()
+        .and_then(|brain| brain.memories.entities(MemoryType::NearestPlayers))
+        .map(|list| list.to_vec())
+        .unwrap_or_default();
     if players.is_empty() {
         if mob.creaking.active {
             deactivate(mob);
         }
         return true;
     }
-    let view = ctx.blocks();
     let mut any_attackable = false;
-    for player in players {
+    for uid in players {
+        let Some(player) = goals::player_by_uid(view, uid) else {
+            continue;
+        };
         if !player.alive || player.spectator || player.creative {
             continue;
         }
@@ -201,7 +217,7 @@ fn check_can_move(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
                 return false;
             }
             if player.position.distance_to_sqr(me.position) < 144.0 {
-                activate(mob);
+                activate(mob, uid);
                 return false;
             }
         }
@@ -212,7 +228,12 @@ fn check_can_move(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
     true
 }
 
-fn activate(mob: &mut Mob) {
+fn activate(mob: &mut Mob, player: EntityUid) {
+    if let Some(brain) = mob.brain.as_mut() {
+        brain
+            .memories
+            .set(MemoryType::AttackTarget, crate::entity::mob::brain::memory::MemoryValue::Entity(player));
+    }
     mob.creaking.active = true;
     mob.events.push(super::MobEvent::Sound {
         sound: "minecraft:entity.creaking.activate",
@@ -225,6 +246,9 @@ fn activate(mob: &mut Mob) {
 }
 
 fn deactivate(mob: &mut Mob) {
+    if let Some(brain) = mob.brain.as_mut() {
+        brain.memories.erase(MemoryType::AttackTarget);
+    }
     mob.creaking.active = false;
     mob.events.push(super::MobEvent::Sound {
         sound: "minecraft:entity.creaking.deactivate",
@@ -234,6 +258,19 @@ fn deactivate(mob: &mut Mob) {
         hostile: true,
         seed: None,
     });
+}
+
+/// `Creaking.doHurtTarget`：非活体返回假；挥击动画 15 刻 + 事件 4，再走
+/// `Monster.doHurtTarget`。
+pub(super) fn swing_and_hurt(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    target: EntityUid,
+) {
+    mob.creaking.attack_animation = 15;
+    mob.events.push(super::MobEvent::EntityEvent { event: 4 });
+    living::do_hurt_target(me, mob, ctx, target);
 }
 
 /// `tickDeath` 的拆解分支：45 刻后播死亡声、广播 Poof 并移除，不走普通 20 刻死亡。

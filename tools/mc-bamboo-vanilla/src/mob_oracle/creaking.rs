@@ -154,11 +154,21 @@ pub(super) fn replay_creaking(report: &mut Report, case: &CreakingCase) {
         entity.id = case.first_id;
         entity.random = JavaRandom::new(0x5EED_5EED);
         entity.y_rot = 0.0;
-        entity.with_mob(|_, mob| {
+        entity.with_mob(|me, mob| {
             mob.y_head_rot = 0.0;
             mob.y_body_rot = 0.0;
             mob.uuid = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
             mc_bamboo_blocks::entity::mob::creaking::bind(mob, home);
+            // 官方 `setRandom` 后第一次 `getBrain` 时取传感器起始延迟和闸门洗牌种子；
+            // Bamboo 在构造时就取过一轮（用 ENTITY_RANDOM_SEED），这里按场景种子重取，
+            // 再把起始延迟定成 Java 一侧 `fixSensorDelays` 的 1。
+            if let Some(brain) = mob.brain.as_mut() {
+                brain.seed_shuffles(me.random.state());
+                brain.randomly_delay_start(&mut me.random);
+                for sensor in &mut brain.sensors {
+                    sensor.time_to_tick = 1;
+                }
+            }
         });
         heart.set_creaking_info([0, 0, 0, 1], false);
         level.entities.insert_row_preserving(entity.split());
@@ -183,14 +193,14 @@ pub(super) fn replay_creaking(report: &mut Report, case: &CreakingCase) {
             world.tick_entities();
             let _ =
                 world.with_block_entity::<CreakingHeartEntity, _>(home, |be, world| be.tick(world));
-            if case.name == "creaking_hurt" && tick == 1 {
+            if case.name == "creaking_hurt" && tick == 5 {
                 let mut source = DamageSource::player(1025, Vec3::new(4.5, 61.0, 0.5), false);
                 source.attacker_uuid = Some(((1_u128 << 64) | 2).to_be_bytes());
                 let _ = world.hurt_mob(id, source, 3.0);
             }
             if case.name == "creaking_heart_broken" && tick == 3 {
                 let _ = world.with_block_entity::<CreakingHeartEntity, _>(home, |be, world| {
-                    be.remove_protector(world)
+                    be.remove_protector_by_player(world)
                 });
                 world.set_block_and_update(home, BlockState::AIR);
             }

@@ -70,7 +70,7 @@ impl Behaviour for CreakingHeart {
         let had_be = world
             .with_block_entity::<creaking_heart_entity::CreakingHeartEntity, _>(
                 pos,
-                |heart, world| heart.remove_protector(world),
+                |heart, world| heart.remove_protector_by_player(world),
             )
             .is_some();
         if had_be && !player.prevents_block_drops && state.try_get(NATURAL).unwrap_or(false) {

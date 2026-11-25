@@ -18307,9 +18307,7 @@ public final class MobOracle {
         BlockState heartState = Blocks.CREAKING_HEART.defaultBlockState()
                 .setValue(net.minecraft.world.level.block.CreakingHeartBlock.AXIS, Direction.Axis.Y)
                 .setValue(net.minecraft.world.level.block.CreakingHeartBlock.STATE,
-                        name.equals("creaking_hurt")
-                                ? net.minecraft.world.level.block.state.properties.CreakingHeartState.AWAKE
-                                : net.minecraft.world.level.block.state.properties.CreakingHeartState.DORMANT);
+                        net.minecraft.world.level.block.state.properties.CreakingHeartState.DORMANT);
         level.blocks.put(heartPos.asLong(), heartState);
         BlockState log = Blocks.PALE_OAK_LOG.defaultBlockState()
                 .setValue(net.minecraft.world.level.block.CreakingHeartBlock.AXIS, Direction.Axis.Y);
@@ -18365,17 +18363,14 @@ public final class MobOracle {
             creaking = EntityTypes.CREAKING.create(level, EntitySpawnReason.COMMAND);
             creaking.setUUID(new UUID(0L, 1L));
             setRandom(creaking, 0x5EED_5EEDL);
+            // 传感器起始延迟取自不带种子的静态随机源，定成 1 让场景每次跑都一致。
+            BrainOracle.fixSensorDelays(creaking, 1L);
             creaking.snapTo(3.5, 61.0, 0.5, 0.0F, 0.0F);
             creaking.setYHeadRot(0.0F);
             creaking.setYBodyRot(0.0F);
             creaking.setTransient(heartPos);
             heartBe.setCreakingInfo(new UUID(0L, 1L));
             level.tracked.add(creaking);
-            // 官方 `checkCanMove` 读大脑的 NEAREST_PLAYERS 记忆（传感器每 ~20 刻才刷新，
-            // 首刻为空）。Bamboo 逐刻读玩家，这里直接把玩家写进记忆对齐。
-            creaking.getBrain().setMemory(
-                    net.minecraft.world.entity.ai.memory.MemoryModuleType.NEAREST_PLAYERS,
-                    List.of(player));
         }
 
         // 反射拿 Creaking 的三个布尔元数据 accessor 和心的 creakingInfo。
@@ -18419,7 +18414,7 @@ public final class MobOracle {
                     net.minecraft.world.level.block.entity.CreakingHeartBlockEntity.serverTick(
                             level, heartPos, level.getBlockState(heartPos), heartBe);
                 }
-                if (name.equals("creaking_hurt") && tick == 1 && creaking != null) {
+                if (name.equals("creaking_hurt") && tick == 5 && creaking != null) {
                     creaking.hurtServer(level, level.damageSources().playerAttack(player), 3.0F);
                 }
                 if (name.equals("creaking_heart_broken") && tick == 3) {

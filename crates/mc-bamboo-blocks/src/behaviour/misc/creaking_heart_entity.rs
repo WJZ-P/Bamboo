@@ -332,12 +332,56 @@ impl CreakingHeartEntity {
         None
     }
 
-    /// `preRemoveSideEffects` / `playerWillDestroy`：心没了，绑定的嘎枝直接拆解。
+    /// `preRemoveSideEffects` → `removeProtector(null)`：`tearDown()` 当场移除嘎枝。
     pub fn remove_protector(&mut self, world: &mut World) {
         if let Some((id, _, _)) = self.protector(world) {
+            self.tear_down_now(world, id);
+        }
+        self.clear_creaking_info();
+    }
+
+    /// `playerWillDestroy` → `removeProtector(damageSource)`：45 刻拆解。
+    pub fn remove_protector_by_player(&mut self, world: &mut World) {
+        if let Some((id, _, _)) = self.protector(world) {
+            self.creaking_death_effects(world, id);
             self.tear_down_creaking(world, id);
         }
         self.clear_creaking_info();
+    }
+
+    /// `tearDown()`：死亡声加 `remove(DISCARDED)`，当场从世界移除。
+    fn tear_down_now(&mut self, world: &mut World, id: i32) {
+        world.with_entity_mut(id, &mut |entity| {
+            let position = entity.position;
+            entity.with_mob(|_, mob| {
+                mob.events.push(crate::entity::mob::MobEvent::Sound {
+                    sound: "minecraft:entity.creaking.death",
+                    volume: 1.0,
+                    pitch: 1.0,
+                    position,
+                    hostile: true,
+                    seed: None,
+                });
+            });
+        });
+        world.remove_entity(id);
+    }
+
+    /// `creakingDeathEffects`：`die(damageSource)`（空战利品、0 经验）+ 咿呀声。
+    fn creaking_death_effects(&self, world: &mut World, id: i32) {
+        world.with_entity_mut(id, &mut |entity| {
+            let position = entity.position;
+            entity.with_mob(|_, mob| {
+                mob.events.push(crate::entity::mob::MobEvent::Sound {
+                    sound: "minecraft:entity.creaking.twitch",
+                    volume: 1.0,
+                    pitch: 1.0,
+                    position,
+                    hostile: true,
+                    seed: None,
+                });
+            });
+        });
     }
 
     fn tear_down_creaking(&self, world: &mut World, id: i32) {
