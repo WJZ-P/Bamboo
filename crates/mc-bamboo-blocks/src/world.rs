@@ -3796,9 +3796,13 @@ impl<'a> World<'a> {
         self.level.trial_spawner_eject_reward(pos, loot_table)
     }
 
-    /// 见 [`Level::trial_spawner_spawn_ominous_item`]。
-    pub fn trial_spawner_spawn_ominous_item(&mut self, pos: BlockPos, loot_table: &str) -> bool {
-        self.level.trial_spawner_spawn_ominous_item(pos, loot_table)
+    /// 见 [`Level::trial_spawner_dispensing`]。
+    pub fn trial_spawner_dispensing(
+        &mut self,
+        pos: BlockPos,
+        loot_table: &str,
+    ) -> Vec<(ItemStack, i32)> {
+        self.level.trial_spawner_dispensing(pos, loot_table)
     }
 
     /// 见 [`Level::trial_spawner_discard_mobs`]。

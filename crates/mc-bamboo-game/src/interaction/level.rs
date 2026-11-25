@@ -408,6 +408,41 @@ impl Level for RegionLevel<'_> {
         }
     }
 
+    fn trial_spawner_dispensing(
+        &mut self,
+        pos: BlockPos,
+        loot_table: &str,
+    ) -> Vec<(mc_bamboo_protocol::item::ItemStack, i32)> {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return Vec::new();
+        };
+        // `lowResolutionPosition(level, pos)`：坐标分别除以 30 / 20 / 30 后 floor，
+        // `level.getSeed() + blockPos.asLong()` 就是 `LootTable.getRandomItems(params, seed)`。
+        let low = BlockPos::new(
+            (pos.x as f32 / 30.0).floor() as i32,
+            (pos.y as f32 / 20.0).floor() as i32,
+            (pos.z as f32 / 30.0).floor() as i32,
+        );
+        let seed = self.world_seed.wrapping_add(low.pack());
+        let params = mc_bamboo_loot::LootParams::new(0.0);
+        let Ok(stacks) = table.get_random_items_with_seed(
+            &params,
+            seed,
+            Some(self.loot_sequences),
+            self.random.source(),
+        ) else {
+            return Vec::new();
+        };
+        stacks
+            .into_iter()
+            .map(|mut stack| {
+                let weight = stack.count.max(0);
+                stack.count = 1;
+                (crate::loot_stacks::loot_stack(&stack), weight)
+            })
+            .collect()
+    }
+
     fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
         let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
             return false;
