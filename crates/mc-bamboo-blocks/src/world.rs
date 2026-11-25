@@ -8,6 +8,7 @@ use mc_bamboo_core::{
     BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3, mth, sign::SignContent,
 };
 use mc_bamboo_data::{Block, BlockAncestor, CollisionShapeKind, blocks, sounds};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 use tracing::{error, warn};
 
@@ -3709,6 +3710,145 @@ impl<'a> World<'a> {
         self.level.has_mob_uuid(uuid)
     }
 
+    // 试炼刷怪笼的副作用，转发给 [`Level`] 的钩子；游戏层覆盖成真实现。
+
+    /// 见 [`Level::trial_spawner_players`]。
+    pub fn trial_spawner_players(
+        &self,
+        pos: BlockPos,
+        range: f64,
+    ) -> Vec<crate::level::TrialSpawnerPlayer> {
+        self.level.trial_spawner_players(pos, range)
+    }
+
+    /// `SpawnData.entityToSpawn` 一步到位的路径（试炼刷怪笼用）：按 `entity_tag`
+    /// 构造实体、`snapTo(position, yaw, pitch)`，再走 [`Self::commit_spawn_data_entity`]
+    /// 提交，返回 UUID。
+    ///
+    /// The one-shot `SpawnData.entityToSpawn` path (used by the trial spawner):
+    /// build the entity from `entity_tag`, `snapTo`, then commit via
+    /// [`Self::commit_spawn_data_entity`] and return its UUID.
+    pub fn spawn_from_spawn_data(
+        &mut self,
+        entity_tag: &Tag,
+        position: Vec3,
+        yaw: f32,
+        pitch: f32,
+        reason: crate::entity::mob::spawn::SpawnReason,
+        equipment: Option<&Tag>,
+    ) -> Option<[u8; 16]> {
+        use crate::entity::mob::{MobType, nbt::load_into, spawn::snap_to};
+        let id = crate::archive::tag::field(entity_tag, "id").and_then(|value| match value {
+            Tag::String(text) if !text.is_empty() => Some(text.as_str()),
+            _ => None,
+        })?;
+        let kind = MobType::by_name(id)?;
+        let is_id_only = matches!(entity_tag, Tag::Compound(entries) if entries.len() == 1);
+        let mut entity = self.prepare_entity(Entity::by_mob_type(kind, Vec3::default()));
+        if load_into(&mut entity, entity_tag).is_err() {
+            return None;
+        }
+        snap_to(&mut entity, position, yaw, pitch);
+        Some(
+            self.commit_spawn_data_entity(entity, kind, is_id_only, reason, true, equipment)
+                .0,
+        )
+    }
+
+    /// `SpawnData.entityToSpawn` 的提交阶段：只有 `id` 时跑 `finalizeSpawn`、可选的
+    /// 持久化标记和装备表、放进世界、收尾骑士。普通刷怪笼和试炼刷怪笼共用这一份，
+    /// 让 `finalizeSpawn` / `add_prepared_entity` / `finish_jockeys` 只有一处实现；
+    /// 两者构造实体和随机朝向的时机不同（各自照官方字节码），所以构造仍分开。
+    /// 返回 `(UUID, 实体 ID)`。
+    ///
+    /// The commit stage of `SpawnData.entityToSpawn`: `finalizeSpawn` (id-only),
+    /// optional persistence / equipment, add to world, finish jockeys. Shared by
+    /// the vanilla and trial spawners so the finalize/add code exists once; the
+    /// two build their entity and roll facing at different times (per their own
+    /// vanilla bytecode), so construction stays separate. Returns `(UUID, id)`.
+    pub(crate) fn commit_spawn_data_entity(
+        &mut self,
+        mut entity: Entity,
+        kind: crate::entity::mob::MobType,
+        is_id_only: bool,
+        reason: crate::entity::mob::spawn::SpawnReason,
+        persistent: bool,
+        equipment: Option<&Tag>,
+    ) -> ([u8; 16], crate::entity::EntityUid) {
+        use crate::entity::mob::spawn::finalize_spawn;
+        if is_id_only {
+            finalize_spawn(self, kind, &mut entity, reason);
+        }
+        if persistent {
+            entity.with_mob(|_, mob| mob.persistence_required = true);
+        }
+        if let Some(equipment) = equipment {
+            self.level.equip_mob(&mut entity, equipment);
+        }
+        let uuid = entity.kind.mob().map(|mob| mob.uuid).unwrap_or_default();
+        let uid = self.add_prepared_entity(entity);
+        self.finish_jockeys(uid);
+        (uuid, uid)
+    }
+
+    /// 见 [`Level::trial_spawner_eject_reward`]。
+    pub fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
+        self.level.trial_spawner_eject_reward(pos, loot_table)
+    }
+
+    /// 见 [`Level::trial_spawner_spawn_ominous_item`]。
+    pub fn trial_spawner_spawn_ominous_item(&mut self, pos: BlockPos, loot_table: &str) -> bool {
+        self.level.trial_spawner_spawn_ominous_item(pos, loot_table)
+    }
+
+    /// 见 [`Level::trial_spawner_discard_mobs`]。
+    pub fn trial_spawner_discard_mobs(&mut self, mobs: &[[u8; 16]]) {
+        self.level.trial_spawner_discard_mobs(mobs);
+    }
+
+    /// 见 [`Level::trial_spawner_mob_untracked`]。
+    pub fn trial_spawner_mob_untracked(&self, uuid: [u8; 16], pos: BlockPos) -> bool {
+        self.level.trial_spawner_mob_untracked(uuid, pos)
+    }
+
+    /// 见 [`Level::trial_spawner_has_display_entity`]。
+    pub fn trial_spawner_has_display_entity(&self) -> bool {
+        self.level.trial_spawner_has_display_entity()
+    }
+
+    // 宝库的世界副作用，转发给 [`Level`] 的钩子；游戏层覆盖成真实现。
+
+    /// 见 [`Level::vault_players`]。
+    pub fn vault_players(&self, pos: BlockPos, range: f64) -> Vec<[u8; 16]> {
+        self.level.vault_players(pos, range)
+    }
+
+    /// 见 [`Level::vault_resolve_reward`]。
+    pub fn vault_resolve_reward(
+        &mut self,
+        pos: BlockPos,
+        player: [u8; 16],
+        key: &mc_bamboo_protocol::item::ItemStack,
+        loot_table: &str,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.level
+            .vault_resolve_reward(pos, player, key, loot_table)
+    }
+
+    /// 见 [`Level::vault_random_display_item`]。
+    pub fn vault_random_display_item(
+        &mut self,
+        loot_table: &str,
+        pos: BlockPos,
+    ) -> mc_bamboo_protocol::item::ItemStack {
+        self.level.vault_random_display_item(loot_table, pos)
+    }
+
+    /// 见 [`Level::vault_consume_key`]。
+    pub fn vault_consume_key(&mut self, player: [u8; 16], count: i32) {
+        self.level.vault_consume_key(player, count);
+    }
+
     /// `level.getBiome(pos)` 的注册表 ID。
     pub fn biome_id(&self, pos: BlockPos) -> i32 {
         self.level.biome_id(pos)
@@ -4988,6 +5128,7 @@ mod tests {
                 | Effect::KilledByArrow { .. }
                 | Effect::EnderPearlTeleport { .. }
                 | Effect::GuardianElderEffect { .. }
+                | Effect::TrialSpawnerTransformBadOmen { .. }
                 | Effect::Explode { .. }
                 | Effect::VibrationParticle { .. } => None,
             })

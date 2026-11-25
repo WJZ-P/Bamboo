@@ -22,7 +22,7 @@ use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, Container, EntityStore, EntityTables,
     Level, LevelRandom, LevelTables, World,
     entity::{
-        Entities, Entity, EntityKind, JavaRandom,
+        Entities, Entity, EntityKind, EntityUid, JavaRandom, KindPublic,
         ctx::PlayerView,
         mob::{DamageSource, Mob, spawn},
     },
@@ -72,7 +72,9 @@ mod squid;
 mod structure_spawn;
 mod sulfur_cube;
 mod thunder;
+mod trial_spawner;
 mod undead_horse;
+mod vault;
 mod villager;
 mod water_mob;
 mod witch_throw;
@@ -198,6 +200,8 @@ enum Line {
     WaterMob(Box<water_mob::WaterMobCase>),
     Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
+    TrialSpawner(Box<trial_spawner::TrialSpawnerCase>),
+    Vault(Box<vault::VaultCase>),
     SculkSensor(sculk_sensor::SculkSensorCase),
     SculkSensorOrder(sculk_sensor::SculkSensorOrderCase),
     SculkShrieker(sculk_sensor::SculkShriekerCase),
@@ -1676,6 +1680,207 @@ impl Level for MobLevel {
         }
     }
 
+    fn trial_spawner_players(
+        &self,
+        pos: BlockPos,
+        range: f64,
+    ) -> Vec<mc_bamboo_blocks::level::TrialSpawnerPlayer> {
+        let views: Vec<PlayerView> = if let Some(game) = &self.game {
+            game.views()
+        } else {
+            self.players.clone()
+        };
+        let mut out = Vec::new();
+        for player in &views {
+            if player.spectator || player.creative {
+                continue;
+            }
+            // 官方 `PlayerDetector.NO_CREATIVE_PLAYERS`：`blockPosition().closerThan(pos, range)`
+            // 用整块坐标的平方距离，`< range²`。
+            let block = BlockPos::containing(player.position);
+            let dx = i64::from(block.x - pos.x);
+            let dy = i64::from(block.y - pos.y);
+            let dz = i64::from(block.z - pos.z);
+            if (dx * dx + dy * dy + dz * dz) as f64 >= range * range {
+                continue;
+            }
+            let eye = Vec3::new(
+                player.position.x,
+                player.position.y + f64::from(player.eye_height),
+                player.position.z,
+            );
+            out.push(mc_bamboo_blocks::level::TrialSpawnerPlayer {
+                uuid: player.uuid.unwrap_or_default(),
+                trial_omen: false,
+                bad_omen_amplifier: None,
+                eye_position: eye,
+            });
+        }
+        out
+    }
+
+    fn trial_spawner_mob_untracked(&self, uuid: [u8; 16], pos: BlockPos) -> bool {
+        let Some(public) = self
+            .entities
+            .iter_public()
+            .find(|public| match &public.kind {
+                KindPublic::Mob(mob) => mob.uuid == uuid,
+                _ => false,
+            })
+        else {
+            return true;
+        };
+        if public.removed {
+            return true;
+        }
+        let block = BlockPos::containing(public.position);
+        let dx = i64::from(block.x - pos.x);
+        let dy = i64::from(block.y - pos.y);
+        let dz = i64::from(block.z - pos.z);
+        dx * dx + dy * dy + dz * dz > 2_209
+    }
+
+    fn trial_spawner_discard_mobs(&mut self, mobs: &[[u8; 16]]) {
+        let doomed: Vec<EntityUid> = self
+            .entities
+            .iter_public()
+            .filter(|public| match &public.kind {
+                KindPublic::Mob(mob) => mobs.contains(&mob.uuid),
+                _ => false,
+            })
+            .map(|public| public.uid)
+            .collect();
+        for uid in doomed {
+            let _ = mc_bamboo_blocks::level::LevelEntities::discard_entity(self, uid);
+        }
+    }
+
+    fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return false;
+        };
+        let params = mc_bamboo_loot::LootParams::new(0.0);
+        let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
+            return false;
+        };
+        if stacks.is_empty() {
+            return false;
+        }
+        for stack in stacks {
+            let stack = mc_bamboo_game::loot_stack(&stack);
+            // `DefaultDispenseItemBehavior.spawnItem(level, stack, 2, UP,
+            // atBottomCenterOf(pos).relative(UP, 1.2))`。
+            let position = Vec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 1.2 - 0.125,
+                f64::from(pos.z) + 0.5,
+            );
+            let random = self.random.source();
+            let _g = random.next_double() * 0.1 + 0.2;
+            let spread = 0.017_227_5 * 2.0;
+            let velocity = Vec3::new(
+                random.triangle(0.0, spread),
+                random.triangle(0.2, spread),
+                random.triangle(0.0, spread),
+            );
+            let uid = mc_bamboo_blocks::level::LevelEntities::spawn_entity(
+                self,
+                Entity::ground_item(position, stack),
+            );
+            mc_bamboo_blocks::level::LevelEntities::with_just_spawned(self, uid, &mut |entity| {
+                entity.delta = velocity;
+            });
+        }
+        true
+    }
+
+    fn vault_players(&self, pos: BlockPos, range: f64) -> Vec<[u8; 16]> {
+        // `INCLUDING_CREATIVE_PLAYERS`：整块坐标平方距离、只排旁观者（创造也算）。
+        let squared = range * range;
+        self.players
+            .iter()
+            .filter(|player| !player.spectator)
+            .filter(|player| {
+                let block = BlockPos::containing(player.position);
+                let dx = i64::from(block.x - pos.x);
+                let dy = i64::from(block.y - pos.y);
+                let dz = i64::from(block.z - pos.z);
+                (dx * dx + dy * dy + dz * dz) as f64 < squared
+            })
+            .filter_map(|player| player.uuid)
+            .collect()
+    }
+
+    fn vault_resolve_reward(
+        &mut self,
+        pos: BlockPos,
+        player: [u8; 16],
+        key: &ItemStack,
+        loot_table: &str,
+    ) -> Vec<ItemStack> {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return Vec::new();
+        };
+        // `resolveItemsToEject`：VAULT 参数集走表的 `random_sequence`（世界种子 0）。
+        let mut params =
+            mc_bamboo_loot::LootParams::new(0.0).with_origin(mc_bamboo_loot::Position::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ));
+        params.tool = Some(mc_bamboo_loot::LootStack::new(key.item, key.count));
+        params.this_entity = Some(
+            self.players
+                .iter()
+                .find(|p| p.uuid == Some(player))
+                .map(|p| {
+                    let mut view = mc_bamboo_loot::EntityView::new(
+                        mc_bamboo_data::registries::entity_type::PLAYER,
+                    );
+                    view.is_living = true;
+                    view.position = Some(mc_bamboo_loot::Position::new(
+                        p.position.x,
+                        p.position.y,
+                        p.position.z,
+                    ));
+                    view
+                })
+                .unwrap_or_else(|| {
+                    mc_bamboo_loot::EntityView::new(mc_bamboo_data::registries::entity_type::PLAYER)
+                }),
+        );
+        let Ok(stacks) = table.get_random_items_with_seed(
+            &params,
+            0,
+            Some(&self.loot_sequences),
+            self.random.source(),
+        ) else {
+            return Vec::new();
+        };
+        stacks.iter().map(mc_bamboo_game::loot_stack).collect()
+    }
+
+    fn vault_random_display_item(&mut self, loot_table: &str, pos: BlockPos) -> ItemStack {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return ItemStack::empty();
+        };
+        // `getRandomDisplayItemFromLootTable`：世界随机源滚表，再 `nextInt` 取一件。
+        let params =
+            mc_bamboo_loot::LootParams::new(0.0).with_origin(mc_bamboo_loot::Position::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ));
+        let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
+            return ItemStack::empty();
+        };
+        if stacks.is_empty() {
+            return ItemStack::empty();
+        }
+        let index = self.random.source().next_int(stacks.len() as i32) as usize;
+        mc_bamboo_game::loot_stack(&stacks[index])
+    }
+
     fn player_mob_attack(
         &self,
         uid: i32,
@@ -1898,6 +2103,8 @@ impl Report {
                 Line::WaterMob(case) => self.replay_water_mob(&case),
                 Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
+                Line::TrialSpawner(case) => self.replay_trial_spawner(&case),
+                Line::Vault(case) => self.replay_vault(&case),
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
                 Line::SculkSensorOrder(case) => self.replay_sculk_sensor_order(&case),
                 Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),

@@ -70,6 +70,15 @@ pub trait BlockView {
         context: CollisionContext,
     ) -> Option<BlockHit>;
     fn clip_collider(&self, from: Vec3, to: Vec3, context: CollisionContext) -> Option<BlockHit>;
+    /// `ClipContext.Block.VISUAL` 的视线 clip：用 [`mc_bamboo_data::visual_shape`]
+    /// 而不是碰撞形状，玻璃 / 铁栏杆 / 细雪等透明方块不挡视线。默认实现逐格读
+    /// [`Self::block_state`]。
+    fn clip_visual(&self, from: Vec3, to: Vec3) -> Option<BlockHit> {
+        crate::world::traverse_blocks(from, to, |pos| {
+            let boxes = crate::shape::visual_boxes(self.block_state(pos), pos);
+            crate::shape::clip(&boxes, from, to, pos)
+        })
+    }
     /// 岛级的方块变更版本戳：方块或影响射线形状的方块实体一变就换一个值。
     /// 没有版本戳的视图给 0（这时缓存不会命中，行为等同于没有缓存）。
     ///

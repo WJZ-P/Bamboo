@@ -17,6 +17,7 @@ use mc_bamboo_data::{
     registries::{block_entity_type as entities, data_component_type as kinds, entity_type},
 };
 use mc_bamboo_loot::block_experience_set;
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{
     components::{ComponentPatch, ComponentValue},
     item::ItemStack,
@@ -259,6 +260,290 @@ impl Level for RegionLevel<'_> {
         self.players
             .get(&PlayerId(uid))
             .is_some_and(|player| player.sleep.is_some())
+    }
+
+    /// `Mob.equip(EquipmentTable)`：按装备表给一只还没进世界的生物套上装备。
+    ///
+    /// 官方先给八个槽设掉落几率（`slot_drop_chances`，缺省 0，也接受一个浮点值表示
+    /// 所有槽同一个值），再滚战利品表，每件按 `equippable` 组件的槽位走
+    /// `equipItemIfPossible`：槽位能穿才套，套上后 `setGuaranteedDrop` 把掉落几率设成
+    /// 2.0（必掉）。新生的生物槽位是空的，`canReplaceCurrentItem` 的盔甲 / 武器比较和
+    /// 「掉出已有装备」的分支走不到。
+    fn equip_mob(&mut self, entity: &mut mc_bamboo_blocks::entity::Entity, equipment: &Tag) {
+        use mc_bamboo_blocks::entity::mob::equipment::{GUARANTEED_DROP_CHANCE, SLOTS, slot_name};
+        use mc_bamboo_protocol::packet::play::EquipmentSlot;
+
+        let Tag::Compound(values) = equipment else {
+            return;
+        };
+        let get = |key: &str| {
+            values
+                .iter()
+                .rev()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value)
+        };
+        let Some(Tag::String(loot_table)) = get("loot_table") else {
+            return;
+        };
+        let mut chances = std::collections::BTreeMap::new();
+        match get("slot_drop_chances") {
+            Some(Tag::Compound(entries)) => {
+                for (name, value) in entries {
+                    if let Ok(chance) = mc_bamboo_blocks::archive::tag::java_f32(value) {
+                        chances.insert(name.clone(), chance);
+                    }
+                }
+            }
+            // `DROP_CHANCES_CODEC` 也接受一个浮点：所有槽同一个值。
+            Some(value) => {
+                if let Ok(chance) = mc_bamboo_blocks::archive::tag::java_f32(value) {
+                    for slot in SLOTS {
+                        chances.insert(slot_name(slot).to_owned(), chance);
+                    }
+                }
+            }
+            None => {}
+        }
+        let Some(mob_type) = entity.kind.mob().map(|mob| mob.mob_type) else {
+            return;
+        };
+        let origin =
+            mc_bamboo_loot::Position::new(entity.position.x, entity.position.y, entity.position.z);
+        let mob = entity.kind.mob_mut().expect("mob type checked above");
+        for slot in SLOTS {
+            mob.equipment
+                .set_drop_chance(slot, chances.get(slot_name(slot)).copied().unwrap_or(0.0));
+        }
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return;
+        };
+        let mut params = mc_bamboo_loot::LootParams::new(0.0);
+        params.this_entity = Some(mc_bamboo_loot::EntityView::new(mob_type.entity_type()));
+        params.origin = Some(origin);
+        let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
+            return;
+        };
+        for stack in stacks {
+            let stack = crate::loot_stacks::loot_stack(&stack);
+            let slot_id = mc_bamboo_recipes::equipment_slot_for_item(&stack);
+            if !mc_bamboo_recipes::is_equippable_in_slot(&stack, slot_id) {
+                continue;
+            }
+            let slot = SLOTS
+                .get(slot_id as usize)
+                .copied()
+                .unwrap_or(EquipmentSlot::MainHand);
+            mob.equipment.set(slot, stack);
+            // `setItemSlotAndDropWhenKilled` 里的 `setGuaranteedDrop`。
+            mob.equipment.set_drop_chance(slot, GUARANTEED_DROP_CHANCE);
+        }
+    }
+
+    fn trial_spawner_players(
+        &self,
+        pos: BlockPos,
+        range: f64,
+    ) -> Vec<mc_bamboo_blocks::level::TrialSpawnerPlayer> {
+        use mc_bamboo_data::registries::mob_effect;
+        let center = Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.5,
+            f64::from(pos.z) + 0.5,
+        );
+        let squared = range * range;
+        let mut out = Vec::new();
+        for player in self.players.values() {
+            let position = player.position();
+            if position.distance_to_sqr(center) > squared {
+                continue;
+            }
+            let eye = Vec3::new(position.x, position.y + player.eye_height(), position.z);
+            out.push(mc_bamboo_blocks::level::TrialSpawnerPlayer {
+                uuid: *player.uuid.as_bytes(),
+                trial_omen: player.effects.has(mob_effect::TRIAL_OMEN),
+                bad_omen_amplifier: player.effects.amplifier(mob_effect::BAD_OMEN),
+                eye_position: eye,
+            });
+        }
+        out
+    }
+
+    fn trial_spawner_mob_untracked(&self, uuid: [u8; 16], pos: BlockPos) -> bool {
+        use mc_bamboo_blocks::entity::KindPublic;
+        let Some(public) = self
+            .entities
+            .iter_public()
+            .find(|public| match &public.kind {
+                KindPublic::Mob(mob) => mob.uuid == uuid,
+                _ => false,
+            })
+        else {
+            return true;
+        };
+        if public.removed {
+            return true;
+        }
+        // `blockPosition().distSqr(pos) > MAX_MOB_TRACKING_DISTANCE_SQR`（47²）。
+        let mob = public.block_position();
+        let dx = i64::from(mob.x - pos.x);
+        let dy = i64::from(mob.y - pos.y);
+        let dz = i64::from(mob.z - pos.z);
+        dx * dx + dy * dy + dz * dz > 2_209
+    }
+
+    fn trial_spawner_discard_mobs(&mut self, mobs: &[[u8; 16]]) {
+        use mc_bamboo_blocks::entity::KindPublic;
+        let doomed: Vec<mc_bamboo_blocks::entity::EntityUid> = self
+            .entities
+            .iter_public()
+            .filter(|public| match &public.kind {
+                KindPublic::Mob(mob) => mobs.contains(&mob.uuid),
+                _ => false,
+            })
+            .map(|public| public.uid)
+            .collect();
+        for uid in doomed {
+            let _ = mc_bamboo_blocks::level::LevelEntities::discard_entity(self, uid);
+        }
+    }
+
+    fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return false;
+        };
+        let params = mc_bamboo_loot::LootParams::new(0.0);
+        let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
+            return false;
+        };
+        if stacks.is_empty() {
+            return false;
+        }
+        for stack in stacks {
+            let stack = crate::loot_stacks::loot_stack(&stack);
+            // `DefaultDispenseItemBehavior.spawnItem(level, stack, 2, UP, atBottomCenterOf(pos).relative(UP, 1.2))`。
+            let position = Vec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 1.2 - 0.125,
+                f64::from(pos.z) + 0.5,
+            );
+            let random = self.random.source();
+            // `spawnItem` 先取 `g = nextDouble * 0.1 + 0.2`，UP 方向 stepX/stepZ 是 0，
+            // 这个值用不上但取数仍要发生。
+            let _g = random.next_double() * 0.1 + 0.2;
+            let spread = 0.017_227_5 * 2.0;
+            let velocity = Vec3::new(
+                random.triangle(0.0, spread),
+                random.triangle(0.2, spread),
+                random.triangle(0.0, spread),
+            );
+            let uid = mc_bamboo_blocks::level::LevelEntities::spawn_entity(
+                self,
+                mc_bamboo_blocks::entity::Entity::ground_item(position, stack),
+            );
+            mc_bamboo_blocks::level::LevelEntities::with_just_spawned(self, uid, &mut |entity| {
+                entity.delta = velocity;
+            });
+        }
+        true
+    }
+
+    fn vault_players(&self, pos: BlockPos, range: f64) -> Vec<[u8; 16]> {
+        // `PlayerDetector.INCLUDING_CREATIVE_PLAYERS`：`blockPosition().closerThan(pos,range)`
+        // 用整块坐标平方距离、`< range²`，只排除旁观者，创造模式也算。
+        let squared = range * range;
+        self.players
+            .values()
+            .filter(|player| player.game_mode != GameMode::Spectator)
+            .filter(|player| {
+                let block = BlockPos::containing(player.position());
+                let dx = i64::from(block.x - pos.x);
+                let dy = i64::from(block.y - pos.y);
+                let dz = i64::from(block.z - pos.z);
+                (dx * dx + dy * dy + dz * dz) as f64 < squared
+            })
+            .map(|player| *player.uuid.as_bytes())
+            .collect()
+    }
+
+    fn vault_resolve_reward(
+        &mut self,
+        pos: BlockPos,
+        player: [u8; 16],
+        key: &ItemStack,
+        loot_table: &str,
+    ) -> Vec<ItemStack> {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return Vec::new();
+        };
+        // `resolveItemsToEject`：VAULT 参数集（ORIGIN / luck / THIS_ENTITY / TOOL），
+        // 官方 `getRandomItems(params)` 不带显式随机源，走表的 `random_sequence`。
+        let mut params =
+            mc_bamboo_loot::LootParams::new(0.0).with_origin(mc_bamboo_loot::Position::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ));
+        params.tool = Some(game_stack_to_loot(key));
+        params.this_entity = Some(
+            self.players
+                .values()
+                .find(|p| p.uuid.as_bytes() == &player)
+                .map(death_loot_player)
+                .unwrap_or_else(|| mc_bamboo_loot::EntityView::new(entity_type::PLAYER)),
+        );
+        let Ok(stacks) = table.get_random_items_with_seed(
+            &params,
+            0,
+            Some(self.loot_sequences),
+            self.random.source(),
+        ) else {
+            return Vec::new();
+        };
+        stacks.iter().map(crate::loot_stacks::loot_stack).collect()
+    }
+
+    fn vault_random_display_item(&mut self, loot_table: &str, pos: BlockPos) -> ItemStack {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return ItemStack::empty();
+        };
+        // `getRandomDisplayItemFromLootTable`：`LootParams(ORIGIN=atCenterOf(pos))`
+        // → `getRandomItems(params, level.getRandom())` → `Util.getRandom(list, level.random)`。
+        let params =
+            mc_bamboo_loot::LootParams::new(0.0).with_origin(mc_bamboo_loot::Position::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ));
+        let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
+            return ItemStack::empty();
+        };
+        if stacks.is_empty() {
+            return ItemStack::empty();
+        }
+        // `Util.getRandom(list, random)` = `list.get(random.nextInt(list.size()))`。
+        let index = self.random.source().next_int(stacks.len() as i32) as usize;
+        crate::loot_stacks::loot_stack(&stacks[index])
+    }
+
+    fn vault_consume_key(&mut self, player: [u8; 16], count: i32) {
+        // `ItemStack.consume(count, player)`：生存模式扣主手，创造模式不扣。
+        let Some(p) = self
+            .players
+            .values_mut()
+            .find(|p| p.uuid.as_bytes() == &player)
+        else {
+            return;
+        };
+        if p.game_mode == GameMode::Creative {
+            return;
+        }
+        let slot = p.inventory.hand_slot(mc_bamboo_core::Hand::Main);
+        let stack = &mut p.inventory.slots[slot];
+        stack.count -= count;
+        if stack.is_empty() {
+            *stack = ItemStack::empty();
+        }
     }
 
     /// 官方 `Block.tryDropExperience` + `Block.popExperience`：
@@ -1493,5 +1778,58 @@ mod tests {
             saw_loot |= !loot.is_empty();
         }
         assert!(saw_loot);
+    }
+
+    /// 宝库的四个 Level 钩子：探测范围内玩家、按 VAULT 战利品表解出奖励、
+    /// 随机展示物品、消耗主手钥匙。
+    #[test]
+    fn vault_hooks_detect_resolve_display_and_consume() {
+        use crate::{inbound::PlayerId, player::Player};
+        use mc_bamboo_blocks::Level;
+        use mc_bamboo_core::{BlockPos, Hand};
+        use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1026);
+        let uuid = uuid::Uuid::from_u128(77);
+        let position = Vec3::new(1.5, 64.0, 0.5);
+        let mut player = Player::new(
+            id,
+            uuid,
+            "VaultOpener".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            position,
+        );
+        let hand = player.inventory.hand_slot(Hand::Main);
+        player.inventory.slots[hand] = ItemStack::new(items::TRIAL_KEY, 2);
+        region.insert_player(player);
+
+        let (mut level, _ticks) = region.block_level();
+        let pos = BlockPos::new(0, 64, 0);
+        // `INCLUDING_CREATIVE_PLAYERS`：范围内玩家进候选。
+        assert_eq!(level.vault_players(pos, 4.5), vec![*uuid.as_bytes()]);
+        assert!(level.vault_players(pos, 0.5).is_empty());
+
+        // VAULT 战利品表能解出一组物品（用奖励表）。
+        let reward = level.vault_resolve_reward(
+            pos,
+            *uuid.as_bytes(),
+            &ItemStack::new(items::TRIAL_KEY, 1),
+            "minecraft:chests/trial_chambers/reward",
+        );
+        assert!(!reward.is_empty(), "reward table produced items");
+
+        // 随机展示物品非空。
+        let display =
+            level.vault_random_display_item("minecraft:chests/trial_chambers/reward", pos);
+        assert!(!display.is_empty(), "display item is not empty");
+
+        // 生存模式扣主手钥匙（默认 1 把）。
+        level.vault_consume_key(*uuid.as_bytes(), 1);
+        assert_eq!(
+            level.players.get(&id).unwrap().inventory.slots[hand].count,
+            1
+        );
     }
 }

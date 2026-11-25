@@ -751,6 +751,26 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     crate::player_effects::give(region, id, instance);
                 }
             }
+            Effect::TrialSpawnerTransformBadOmen { player, duration } => {
+                use mc_bamboo_data::registries::mob_effect;
+                let Some(id) = region
+                    .players
+                    .iter()
+                    .find(|(_, p)| p.uuid.as_bytes() == &player)
+                    .map(|(id, _)| *id)
+                else {
+                    return;
+                };
+                crate::player_effects::clear(region, id, Some(mob_effect::BAD_OMEN));
+                let instance = mc_bamboo_blocks::entity::mob::effects::EffectInstance::with_flags(
+                    mob_effect::TRIAL_OMEN,
+                    duration,
+                    0,
+                    false,
+                    true,
+                );
+                crate::player_effects::give(region, id, instance);
+            }
             Effect::HealPlayer { target, amount } => {
                 let id = crate::inbound::PlayerId(target);
                 if let Some(player) = region.players.get_mut(&id)
