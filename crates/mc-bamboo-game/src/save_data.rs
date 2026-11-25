@@ -1,4 +1,5 @@
-//! `level.dat` 的运行时字段、`data/minecraft/game_rules.dat` 和
+//! `level.dat` 的运行时字段、`data/minecraft/game_rules.dat`、
+//! `data/minecraft/raids.dat` 和
 //! `dimensions/minecraft/overworld/data/minecraft/world_border.dat` 的编解码。
 //!
 //! 这一层只做「运行时状态 ⇄ NBT 复合标签」的翻译，不碰世界目录（读写在
@@ -9,15 +10,16 @@
 //! - `WorldBorder.Settings.CODEC`（`RecordCodecBuilder`）：九个必填字段，
 //!   双精度是 `Double`、整数是 `Int`、`lerp_time` 是 `Long`。
 //! - `PackedClockStates.CODEC`：`minecraft:world_clocks` 的注册名 → `ClockState`。
+//! - `Raids.CODEC`：`raids.dat` 的 `raids` / `next_id` / `tick`。
 //! - `PrimaryLevelData.createTag`：`GameType` / `spawn` / `difficulty_settings`。
 //!
 //! Translation between runtime state and the NBT compounds for `level.dat`,
-//! `data/minecraft/game_rules.dat`, `data/minecraft/world_clocks.dat` and the
-//! overworld `world_border.dat`.
+//! `data/minecraft/game_rules.dat`, `data/minecraft/world_clocks.dat`,
+//! `data/minecraft/raids.dat` and the overworld `world_border.dat`.
 //! This layer only maps state to NBT; file IO lives in `SaveSession` and
 //! `mc-bamboo-storage`. Layout follows the 26.3 official codecs.
 
-use mc_bamboo_blocks::world_border::BorderSettings;
+use mc_bamboo_blocks::{entity::raid::Raids, world_border::BorderSettings};
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_storage::level_dat::LevelData;
@@ -315,6 +317,38 @@ pub(crate) fn apply_level_data(state: &mut WorldState, level: &LevelData) {
     state.difficulty_locked = level.difficulty.locked;
 }
 
+/// 把各岛的袭击汇总成一份 `raids.dat` 的 `data` 复合标签。
+///
+/// 官方一个维度一份 `Raids`，Bamboo 每岛一份，存盘时按袭击 id 汇总。各岛的
+/// `next_id` 可能撞号，所以重新分配全局 id：所有表的 `next_id` 最大值起步，
+/// 按 (岛编号, 原 id) 排序后逐场分配。`tick` 取所有表里的最大值。
+///
+/// Roll every island's raids into one `raids.dat` `data` compound. Bamboo has
+/// one `Raids` per island, so ids are reassigned globally (starting at the
+/// largest `next_id`, ordered by island and id) and `tick` is the maximum.
+pub(crate) fn raids_tag(islands: &[(u32, Raids)]) -> Tag {
+    let next_id = islands
+        .iter()
+        .map(|(_, raids)| raids.next_id)
+        .max()
+        .unwrap_or(1);
+    let tick = islands
+        .iter()
+        .map(|(_, raids)| raids.tick)
+        .max()
+        .unwrap_or(0);
+    let mut out = Raids::new();
+    out.next_id = next_id;
+    out.tick = tick;
+    for (_, raids) in islands {
+        for raid in raids.raids.values() {
+            let id = out.unique_id();
+            out.raids.insert(id, raid.clone());
+        }
+    }
+    out.to_tag()
+}
+
 /// 启动时从 `data/` 读到的 saved data，供 `World::build` 采用。
 /// Saved-data compounds loaded from `data/` at startup for `World::build`.
 #[derive(Debug, Default)]
@@ -322,6 +356,8 @@ pub(crate) struct StartupData {
     pub(crate) game_rules: Option<Tag>,
     pub(crate) world_border: Option<Tag>,
     pub(crate) world_clocks: Option<Tag>,
+    /// `raids.dat` 的 `data` 复合标签。官方覆盖整个维度，Bamboo 在家岛加载。
+    pub(crate) raids: Raids,
     /// 每个命名空间一份 `command_storage.dat` 的 `data` 复合标签。
     pub(crate) command_storage: Vec<(String, Tag)>,
 }
@@ -354,6 +390,10 @@ impl StartupData {
         for (namespace, tag) in &self.command_storage {
             global.command_storage.load_namespace(namespace, tag);
         }
+        // `raids.dat` 是维度级的：只有家岛在启动时加载，别的岛从它拆出去。
+        // `raids.dat` is dimension-wide: only the home island loads it at
+        // startup; other islands get their raids from a later split.
+        region.raids = self.raids.clone();
         global.publish(region);
     }
 }
@@ -642,5 +682,47 @@ mod tests {
         assert!(level.data_packs.is_none(), "DataPacks 是官方默认，不写键");
         assert_eq!(level.enabled_features, vec!["minecraft:vanilla".to_owned()]);
         assert!(level.singleplayer_uuid.is_none());
+    }
+
+    /// 两个岛的袭击汇总成一份 raids.dat：id 从各表 next_id 的最大值起重新分配，
+    /// tick 取最大值，读回后字段完整（运行时字段按官方清空）。
+    #[test]
+    fn raids_tag_rolls_up_islands_without_id_collisions() {
+        use mc_bamboo_blocks::entity::raid::{Raid, RaidStatus};
+        let mut first = Raids::new();
+        first.next_id = 4;
+        first.tick = 120;
+        let mut ongoing = Raid::new(BlockPos::new(0, 64, 0), 2);
+        ongoing.started = true;
+        ongoing.raid_omen_level = 3;
+        first.raids.insert(1, ongoing.clone());
+        let mut victory = Raid::new(BlockPos::new(100, 70, 0), 3);
+        victory.status = RaidStatus::Victory;
+        first.raids.insert(3, victory.clone());
+
+        let mut second = Raids::new();
+        second.next_id = 9;
+        second.tick = 300;
+        second.raids.insert(3, ongoing.clone());
+
+        let tag = raids_tag(&[(0, first), (1, second)]);
+        let decoded = Raids::from_tag(&tag);
+        assert_eq!(decoded.next_id, 12, "三场从 9 起分配，下一次用 12");
+        assert_eq!(decoded.tick, 300);
+        assert_eq!(decoded.raids.len(), 3, "三场袭击各占一个不冲突的 id");
+        let ids: Vec<i32> = decoded.raids.keys().copied().collect();
+        assert_eq!(ids, [9, 10, 11], "从最大 next_id 起重新分配");
+        // 按 (岛, 原 id) 顺序：家岛的 ongoing、victory，然后另一岛的 ongoing。
+        assert_eq!(decoded.raids[&9].center, ongoing.center);
+        assert_eq!(decoded.raids[&9].raid_omen_level, 3);
+        assert_eq!(decoded.raids[&10].status, RaidStatus::Victory);
+        assert_eq!(decoded.raids[&10].center, BlockPos::new(100, 70, 0));
+        assert!(decoded.raids[&9].raiders.is_empty(), "运行时名册不存档");
+    }
+
+    /// 没有岛时仍写出合法的空 raids.dat，字段形状照官方。
+    #[test]
+    fn raids_tag_without_islands_is_a_valid_empty_table() {
+        assert_eq!(raids_tag(&[]), Raids::new().to_tag());
     }
 }

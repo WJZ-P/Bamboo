@@ -25,11 +25,216 @@ use mc_bamboo_blocks::{
     },
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3, mth};
-use mc_bamboo_data::{gamerules::RAIDS, registries::mob_effect};
-use mc_bamboo_protocol::packet::play::GameMode;
+use mc_bamboo_data::{gamerules::RAIDS, registries::mob_effect, sounds};
+use mc_bamboo_protocol::{
+    packet::play::{BossAction, BossEvent, GameMode, Sound},
+    text::{Component, TranslateArg},
+};
 use mc_bamboo_world::poi::{Occupancy, PoiRecord, is_village_type};
+use uuid::Uuid;
 
-use crate::{inbound::PlayerId, region::Region};
+use crate::{inbound::PlayerId, links::encode_frames, region::Region};
+
+/// `Raid.raidEvent` 的 Boss 栏颜色（官方 RED）和分段样式（NOTCHED_10）。
+const RAID_BAR_COLOR: i32 = 2;
+const RAID_BAR_OVERLAY: i32 = 2;
+
+/// `Raid.raidEvent` 的名字组件。剩余数后缀照官方 `RAID_NAME_COMPONENT.copy()`
+/// 拼上 " - " 和 `event.minecraft.raid.raiders_remaining`。
+///
+/// The raid boss-bar name: the remaining-raiders suffix follows the official
+/// `RAID_NAME_COMPONENT.copy()` + " - " + translation.
+fn bar_name(name: mc_bamboo_blocks::entity::raid::RaidBarName, remaining: i32) -> Component {
+    use mc_bamboo_blocks::entity::raid::RaidBarName as Name;
+    let key = match name {
+        Name::Raid => "event.minecraft.raid",
+        Name::RaidersRemaining => "event.minecraft.raid",
+        Name::Victory => "event.minecraft.raid.victory.full",
+        Name::Defeat => "event.minecraft.raid.defeat.full",
+    };
+    let base = Component::translate(key, []);
+    if name == Name::RaidersRemaining {
+        base.extra(Component::text(" - "))
+            .extra(Component::translate(
+                "event.minecraft.raid.raiders_remaining",
+                [TranslateArg::from(remaining)],
+            ))
+    } else {
+        base
+    }
+}
+
+/// bossbar 的 add 包。
+fn add_frame(raid: &Raid) -> Vec<u8> {
+    let name = bar_name(raid.boss_name, raid.boss_raiders_remaining);
+    encode_frames(&BossEvent {
+        id: Uuid::from_bytes(raid.boss_uuid),
+        action: BossAction::Add {
+            name: &name,
+            progress: raid.boss_progress,
+            color: RAID_BAR_COLOR,
+            overlay: RAID_BAR_OVERLAY,
+            flags: 0,
+        },
+    })
+}
+
+/// bossbar 的 remove 包。
+fn remove_frame(raid: &Raid) -> Vec<u8> {
+    encode_frames(&BossEvent {
+        id: Uuid::from_bytes(raid.boss_uuid),
+        action: BossAction::Remove,
+    })
+}
+
+/// `ServerBossEvent.setProgress`：值变了才广播（官方 `fcmpl` 比较）。
+fn set_progress(raid: &mut Raid, progress: f32, out: &mut Vec<(PlayerId, Vec<u8>)>) {
+    if raid.boss_progress == progress {
+        return;
+    }
+    raid.boss_progress = progress;
+    if raid.boss_visible {
+        let frame = encode_frames(&BossEvent {
+            id: Uuid::from_bytes(raid.boss_uuid),
+            action: BossAction::UpdateProgress(progress),
+        });
+        for uid in &raid.boss_players {
+            out.push((PlayerId(*uid), frame.clone()));
+        }
+    }
+}
+
+/// `ServerBossEvent.setName`：名字和剩余数都变了才广播。
+fn set_name(
+    raid: &mut Raid,
+    name: mc_bamboo_blocks::entity::raid::RaidBarName,
+    remaining: i32,
+    out: &mut Vec<(PlayerId, Vec<u8>)>,
+) {
+    if raid.boss_name == name && raid.boss_raiders_remaining == remaining {
+        return;
+    }
+    raid.boss_name = name;
+    raid.boss_raiders_remaining = remaining;
+    if raid.boss_visible {
+        let component = bar_name(name, remaining);
+        let frame = encode_frames(&BossEvent {
+            id: Uuid::from_bytes(raid.boss_uuid),
+            action: BossAction::UpdateName(&component),
+        });
+        for uid in &raid.boss_players {
+            out.push((PlayerId(*uid), frame.clone()));
+        }
+    }
+}
+
+/// `ServerBossEvent.setVisible`：变了就给现有观众补 add / remove。
+fn set_visible(raid: &mut Raid, visible: bool, out: &mut Vec<(PlayerId, Vec<u8>)>) {
+    if raid.boss_visible == visible {
+        return;
+    }
+    raid.boss_visible = visible;
+    let frame = if visible {
+        add_frame(raid)
+    } else {
+        remove_frame(raid)
+    };
+    for uid in &raid.boss_players {
+        out.push((PlayerId(*uid), frame.clone()));
+    }
+}
+
+/// `Raids.getNearbyRaid` 的一层快照：`updatePlayers` 在 `raids.raids` 被可变借用时
+/// 也要按「离玩家最近的那场 active 袭击」判定观众，所以事先抽出 active 场的中心。
+fn nearest_raid(active: &[(i32, BlockPos)], pos: BlockPos) -> Option<i32> {
+    let mut best: Option<(i32, f64)> = None;
+    for &(id, center) in active {
+        let dx = f64::from(pos.x - center.x);
+        let dy = f64::from(pos.y - center.y);
+        let dz = f64::from(pos.z - center.z);
+        let dist = dx * dx + dy * dy + dz * dz;
+        if dist < f64::from(VALID_RAID_RADIUS_SQR) && best.is_none_or(|(_, d)| dist < d) {
+            best = Some((id, dist));
+        }
+    }
+    best.map(|(id, _)| id)
+}
+
+/// `Raid.updatePlayers`：只让活着、且 `getRaidAt(玩家位置) == 本场` 的玩家看血条。
+/// 玩家以实体 uid 记录，发包时映回 `PlayerId`；`Bamboo` 的玩家 uid 就是 `PlayerId`。
+///
+/// `Raid.updatePlayers`: only living players whose `getRaidAt(pos)` is this
+/// raid see the bar. Player uids and `PlayerId`s are the same value in Bamboo.
+fn update_players(
+    region: &Region,
+    active: &[(i32, BlockPos)],
+    raid_id: i32,
+    raid: &mut Raid,
+    out: &mut Vec<(PlayerId, Vec<u8>)>,
+) {
+    let mut valid = Vec::new();
+    for (&id, player) in &region.players {
+        if player.dead {
+            continue;
+        }
+        let pos = BlockPos::containing(player.position());
+        if nearest_raid(active, pos) == Some(raid_id) {
+            valid.push(id);
+        }
+    }
+    // 离开血条的人：发 remove（可见时）。
+    let mut staying = Vec::new();
+    for uid in std::mem::take(&mut raid.boss_players) {
+        let id = PlayerId(uid);
+        if valid.contains(&id) {
+            staying.push(uid);
+        } else if raid.boss_visible {
+            out.push((id, remove_frame(raid)));
+        }
+    }
+    // 新加入的人：发 add（可见时）。
+    let add = raid.boss_visible.then(|| add_frame(raid));
+    for id in valid {
+        let uid = id.0;
+        if !staying.contains(&uid) {
+            staying.push(uid);
+            if let Some(frame) = &add {
+                out.push((id, frame.clone()));
+            }
+        }
+    }
+    staying.sort_unstable();
+    raid.boss_players = staying;
+}
+
+/// `Raid.stop` 的 `removeAllPlayers`：给所有观众发 remove 再清空。
+fn stop_bar(raid: &mut Raid, out: &mut Vec<(PlayerId, Vec<u8>)>) {
+    if raid.boss_visible {
+        let frame = remove_frame(raid);
+        for uid in &raid.boss_players {
+            out.push((PlayerId(*uid), frame.clone()));
+        }
+    }
+    raid.boss_players.clear();
+    raid.active = false;
+    raid.status = RaidStatus::Stopped;
+}
+
+/// 首波刷出时的号角：`ClientboundSoundPacket(RAID_HORN, NEUTRAL, 64, 1, seed)`。
+fn raid_horn(region: &Region, pos: BlockPos) -> Vec<u8> {
+    let sound = Sound {
+        sound: i32::from(sounds::sound_event("minecraft:event.raid.horn")),
+        inline: None,
+        source: sounds::NEUTRAL,
+        x: f64::from(pos.x),
+        y: f64::from(pos.y),
+        z: f64::from(pos.z),
+        volume: 64.0,
+        pitch: 1.0,
+        seed: region.sound_seed_generator.source().next_long(),
+    };
+    encode_frames(&sound)
+}
 
 /// `BadOmenMobEffect.applyEffectTick`：玩家带不祥之兆时每刻调用。进村、非和平、
 /// 非旁观、且附近袭击没到不祥等级上限时，转成 600 刻的袭击之兆并记下村庄坐标，
@@ -169,7 +374,8 @@ struct SpawnPlan {
 ///
 /// Vanilla `Raids.tick`: gate on the raids rule, tick every raid, drop stopped
 /// ones. The work is staged: advance state on `&Region`, spawn entities in a
-/// short `World` borrow, then put the roster back and apply player effects.
+/// short `World` borrow, then put the roster back, send boss-bar / horn packets
+/// and apply player effects.
 pub(crate) fn tick(region: &mut Region) {
     let rules_on = region.global.rules.bool(RAIDS);
     let difficulty = region.global.difficulty as i32;
@@ -177,16 +383,33 @@ pub(crate) fn tick(region: &mut Region) {
     raids.tick += 1;
     let mut plans = Vec::new();
     let mut rewards: Vec<([u8; 16], i32)> = Vec::new();
+    let mut frames: Vec<(PlayerId, Vec<u8>)> = Vec::new();
+    let mut horns: Vec<(BlockPos, i32)> = Vec::new();
+    let active: Vec<(i32, BlockPos)> = raids
+        .raids
+        .iter()
+        .filter(|(_, raid)| raid.active)
+        .map(|(&id, raid)| (id, raid.center))
+        .collect();
     for (&raid_id, raid) in raids.raids.iter_mut() {
         if !rules_on {
-            raid.status = RaidStatus::Stopped;
-            raid.active = false;
+            stop_bar(raid, &mut frames);
             continue;
         }
         if raid.is_stopped() {
             continue;
         }
-        step_one(region, raid_id, raid, difficulty, &mut plans, &mut rewards);
+        step_one(
+            region,
+            &active,
+            raid_id,
+            raid,
+            difficulty,
+            &mut plans,
+            &mut rewards,
+            &mut frames,
+            &mut horns,
+        );
     }
 
     let effects = if plans.is_empty() {
@@ -201,10 +424,16 @@ pub(crate) fn tick(region: &mut Region) {
         }
         let fx = world.into_effects();
         for (raid_id, wave, members) in spawned {
+            let health: f32 = members.iter().map(|(_, hp)| *hp).sum();
             if let Some(raid) = raids.raids.get_mut(&raid_id) {
-                for (uid, health) in members {
-                    raid.add_wave_mob(wave, uid, health, true);
+                for (uid, hp) in members {
+                    raid.add_wave_mob(wave, uid, hp, true);
                 }
+                // 官方 spawnGroup 里实体已经进世界，updateBossbar 读到的是满血之和。
+                // The mobs are already in the world at official spawnGroup's
+                // updateBossbar, so the living health is the sum of full health.
+                let progress = raid.bossbar_progress(health);
+                set_progress(raid, progress, &mut frames);
             }
         }
         fx
@@ -212,27 +441,48 @@ pub(crate) fn tick(region: &mut Region) {
     raids.raids.retain(|_, raid| !raid.is_stopped());
     region.raids = raids;
     crate::interaction::send_effects(region, None, &effects);
+    // 首波号角：按官方 `playSound` 对附近玩家发一份 seed 相同的包。
+    for (pos, _) in horns {
+        let frame = raid_horn(region, pos);
+        for id in region.players.keys() {
+            if region.links.is_open(*id) {
+                region.links.send_frames(*id, &frame);
+            }
+        }
+    }
+    for (id, frame) in frames {
+        if region.links.is_open(id) {
+            region.links.send_frames(id, &frame);
+        }
+    }
     for (uuid, amplifier) in rewards {
         give_hero_of_the_village(region, uuid, amplifier);
     }
 }
 
-/// `Raid.tick` 的一刻，只推进自身状态并产出要刷的波次。
+/// `Raid.tick` 的一刻，推进自身状态、血条和要刷的波次。
+#[allow(clippy::too_many_arguments, reason = "忠实照官方 Raid.tick 的多项状态")]
 fn step_one(
     view: &Region,
+    active: &[(i32, BlockPos)],
     raid_id: i32,
     raid: &mut Raid,
     difficulty: i32,
     plans: &mut Vec<SpawnPlan>,
     rewards: &mut Vec<([u8; 16], i32)>,
+    frames: &mut Vec<(PlayerId, Vec<u8>)>,
+    horns: &mut Vec<(BlockPos, i32)>,
 ) {
     if raid.status == RaidStatus::Ongoing {
+        let was_active = raid.active;
         let center_chunk = ChunkPos::new(raid.center.x >> 4, raid.center.z >> 4);
         raid.active = view.chunks.is_loaded(center_chunk);
         if difficulty == DIFFICULTY_PEACEFUL {
-            raid.status = RaidStatus::Stopped;
-            raid.active = false;
+            stop_bar(raid, frames);
             return;
+        }
+        if was_active != raid.active {
+            set_visible(raid, raid.active, frames);
         }
         if !raid.active {
             return;
@@ -246,35 +496,54 @@ fn step_one(
             if raid.groups_spawned > 0 {
                 raid.status = RaidStatus::Loss;
             } else {
-                raid.status = RaidStatus::Stopped;
-                raid.active = false;
+                stop_bar(raid, frames);
             }
         }
         raid.ticks_active += 1;
         if raid.ticks_active >= RAID_TIMEOUT_TICKS {
-            raid.status = RaidStatus::Stopped;
-            raid.active = false;
+            stop_bar(raid, frames);
             return;
         }
         let alive = raid.total_raiders();
         if alive == 0 && raid.has_more_waves() {
             if raid.cooldown_ticks > 0 {
+                // 官方：波次位置缺失且 cooldown%5==0，或已有位置但不再实体 tick，
+                // 都重新找一次位置。这里只判前者（后者的区块档位还没建模）。
                 if raid.wave_spawn_pos.is_none() && raid.cooldown_ticks % 5 == 0 {
                     raid.wave_spawn_pos = find_random_spawn_pos(view, raid);
                 }
+                if raid.cooldown_ticks == DEFAULT_PRE_RAID_TICKS || raid.cooldown_ticks % 20 == 0 {
+                    update_players(view, active, raid_id, raid, frames);
+                }
                 raid.cooldown_ticks -= 1;
-            } else if raid.cooldown_ticks == 0 && raid.groups_spawned > 0 {
+                set_progress(raid, raid.cooldown_progress(), frames);
+            } else if raid.groups_spawned > 0 {
                 raid.cooldown_ticks = DEFAULT_PRE_RAID_TICKS;
+                set_name(
+                    raid,
+                    mc_bamboo_blocks::entity::raid::RaidBarName::Raid,
+                    0,
+                    frames,
+                );
                 return;
             }
         }
         if raid.ticks_active % 20 == 0 {
+            update_players(view, active, raid_id, raid, frames);
             update_raiders(view, raid);
+            use mc_bamboo_blocks::entity::raid::RaidBarName as Name;
+            let (name, remaining) = if (1..=2).contains(&alive) {
+                (Name::RaidersRemaining, alive)
+            } else {
+                (Name::Raid, 0)
+            };
+            set_name(raid, name, remaining, frames);
         }
         // `getTotalRaidersAlive()` 在官方循环里每轮重算；这里用刷出的成员数
         // 模拟名册增长，让一次 tick 只刷一波。
         let mut alive_now = alive;
         let mut failed = 0;
+        let mut first_sound = false;
         while raid.should_spawn_group(alive_now) {
             let pos = raid
                 .wave_spawn_pos
@@ -289,11 +558,14 @@ fn step_one(
                     pos,
                     members,
                 });
+                if !first_sound {
+                    horns.push((pos, raid_id));
+                    first_sound = true;
+                }
             } else {
                 failed += 1;
                 if failed > 5 {
-                    raid.status = RaidStatus::Stopped;
-                    raid.active = false;
+                    stop_bar(raid, frames);
                     break;
                 }
             }
@@ -312,8 +584,28 @@ fn step_one(
     } else if raid.is_over() {
         raid.celebration_ticks += 1;
         if raid.celebration_ticks >= MAX_CELEBRATION_TICKS {
-            raid.status = RaidStatus::Stopped;
-            raid.active = false;
+            stop_bar(raid, frames);
+            return;
+        }
+        if raid.celebration_ticks % 20 == 0 {
+            update_players(view, active, raid_id, raid, frames);
+            set_visible(raid, true, frames);
+            if raid.is_victory() {
+                set_progress(raid, 0.0, frames);
+                set_name(
+                    raid,
+                    mc_bamboo_blocks::entity::raid::RaidBarName::Victory,
+                    0,
+                    frames,
+                );
+            } else {
+                set_name(
+                    raid,
+                    mc_bamboo_blocks::entity::raid::RaidBarName::Defeat,
+                    0,
+                    frames,
+                );
+            }
         }
     }
 }
@@ -457,15 +749,58 @@ fn give_hero_of_the_village(region: &mut Region, uuid: [u8; 16], amplifier: i32)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{player::Player, region::Region, world_state::Difficulty};
+    use crate::{Outgoing, PlayerSink, player::Player, region::Region, world_state::Difficulty};
     use mc_bamboo_blocks::entity::mob::effects::EffectInstance;
     use mc_bamboo_core::Vec3;
     use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use std::sync::{Arc, Mutex};
     use uuid::Uuid;
 
-    fn region_with_player() -> (Region, PlayerId) {
+    #[derive(Clone, Default)]
+    struct Recorder(Arc<Mutex<Vec<u8>>>);
+
+    impl PlayerSink for Recorder {
+        fn send(&mut self, frames: Outgoing) -> bool {
+            self.0.lock().unwrap().extend(frames.to_raw_bytes());
+            true
+        }
+
+        fn close(&mut self) {}
+    }
+
+    impl Recorder {
+        fn bytes(&self) -> Vec<u8> {
+            self.0.lock().unwrap().clone()
+        }
+
+        /// 把攒下的帧拆成 (包 id, body)。
+        fn frames(&self) -> Vec<(i32, Vec<u8>)> {
+            use mc_bamboo_protocol::{
+                codec::Reader,
+                frame::{MAX_FRAME_LEN, find_frame},
+            };
+            let bytes = self.bytes();
+            let mut rest = bytes.as_slice();
+            let mut out = Vec::new();
+            while !rest.is_empty() {
+                let bounds = find_frame(rest, MAX_FRAME_LEN)
+                    .expect("合法的帧")
+                    .expect("完整的帧");
+                let end = bounds.header_len + bounds.payload_len;
+                let mut reader = Reader::new(&rest[bounds.header_len..end]);
+                let id = reader.varint().unwrap();
+                out.push((id, reader.rest().to_vec()));
+                rest = &rest[end..];
+            }
+            out
+        }
+    }
+
+    fn region_with_player() -> (Region, PlayerId, Recorder) {
         let mut region = Region::new(2, 20, false);
         let id = PlayerId(1);
+        let recorder = Recorder::default();
+        region.links.add(id, Box::new(recorder.clone()));
         let player = Player::new(
             id,
             Uuid::nil(),
@@ -476,7 +811,7 @@ mod tests {
         );
         region.insert_player(player);
         region.global.difficulty = Difficulty::Normal;
-        (region, id)
+        (region, id, recorder)
     }
 
     /// 在玩家脚下的段放一个被占用的「钟」POI，让 `isVillage` 成立。
@@ -505,7 +840,7 @@ mod tests {
     /// 进村把不祥之兆转成袭击之兆，沿用等级、记下坐标、移除不祥之兆。
     #[test]
     fn bad_omen_converts_to_raid_omen_in_a_village() {
-        let (mut region, id) = region_with_player();
+        let (mut region, id, _) = region_with_player();
         make_village(&mut region);
         give_bad_omen(&mut region, id, 2);
         bad_omen_check(&mut region, id, 2);
@@ -524,14 +859,14 @@ mod tests {
     #[test]
     fn bad_omen_stays_when_gates_fail() {
         // 无村庄 POI。
-        let (mut region, id) = region_with_player();
+        let (mut region, id, _) = region_with_player();
         give_bad_omen(&mut region, id, 0);
         bad_omen_check(&mut region, id, 0);
         assert!(region.players[&id].effects.has(mob_effect::BAD_OMEN));
         assert!(!region.players[&id].effects.has(mob_effect::RAID_OMEN));
 
         // 和平难度。
-        let (mut region, id) = region_with_player();
+        let (mut region, id, _) = region_with_player();
         make_village(&mut region);
         region.global.difficulty = Difficulty::Peaceful;
         give_bad_omen(&mut region, id, 0);
@@ -539,7 +874,7 @@ mod tests {
         assert!(region.players[&id].effects.has(mob_effect::BAD_OMEN));
 
         // 旁观者。
-        let (mut region, id) = region_with_player();
+        let (mut region, id, _) = region_with_player();
         make_village(&mut region);
         region.players.get_mut(&id).unwrap().game_mode = GameMode::Spectator;
         give_bad_omen(&mut region, id, 0);
@@ -550,7 +885,7 @@ mod tests {
     /// 附近已有满级不祥等级的袭击时不转换。
     #[test]
     fn bad_omen_stops_at_a_maxed_raid() {
-        let (mut region, id) = region_with_player();
+        let (mut region, id, _) = region_with_player();
         make_village(&mut region);
         let raid_id = region.raids.unique_id();
         let mut raid = Raid::new(BlockPos::new(0, 64, 0), 2);
@@ -565,7 +900,7 @@ mod tests {
     /// createOrExtendRaid 新建一场、吸收等级，再调用复用同一场并夹到上限。
     #[test]
     fn create_or_extend_raid_makes_then_reuses() {
-        let (mut region, id) = region_with_player();
+        let (mut region, id, _) = region_with_player();
         let poi = make_village(&mut region);
         let first = create_or_extend_raid(&mut region, id, poi, 2).unwrap();
         assert_eq!(region.raids.raids.len(), 1);
@@ -589,7 +924,7 @@ mod tests {
     /// 没有村庄 POI 时用玩家位置当中心。
     #[test]
     fn create_or_extend_raid_falls_back_to_player_position() {
-        let (mut region, id) = region_with_player();
+        let (mut region, id, _) = region_with_player();
         let pos = BlockPos::new(7, 64, -3);
         let raid_id = create_or_extend_raid(&mut region, id, pos, 0).unwrap();
         assert_eq!(region.raids.raids[&raid_id].center, pos);
@@ -599,7 +934,7 @@ mod tests {
     /// 冷却倒数到 0 后刷出第一波，实体进名册、类型只含掠夺者 / 女巫。
     #[test]
     fn raid_tick_spawns_first_wave_after_cooldown() {
-        let (mut region, _id) = region_with_player();
+        let (mut region, _id, _) = region_with_player();
         make_village(&mut region);
         let raid_id = region.raids.unique_id();
         let mut raid = Raid::new(BlockPos::new(0, 64, 0), 2);
@@ -626,7 +961,7 @@ mod tests {
     /// 所有波次刷完、名册清空后转胜利，并给英雄加 HERO_OF_THE_VILLAGE。
     #[test]
     fn raid_tick_wins_and_rewards_heroes() {
-        let (mut region, id) = region_with_player();
+        let (mut region, id, _) = region_with_player();
         make_village(&mut region);
         let uuid_bytes = *region.players[&id].uuid.as_bytes();
         let raid_id = region.raids.unique_id();
@@ -650,10 +985,70 @@ mod tests {
         );
     }
 
+    /// 首波之前：冷却第 300 刻给附近玩家发 boss_event add（RED / NOTCHED_10 /
+    /// 进度 0），之后每刻发 update_progress；进度按 `(300 - cooldown)/300` 走。
+    #[test]
+    fn raid_bossbar_adds_and_tracks_cooldown_progress() {
+        let (mut region, id, recorder) = region_with_player();
+        make_village(&mut region);
+        let raid_id = region.raids.unique_id();
+        let mut raid = Raid::new(BlockPos::new(0, 64, 0), 2);
+        raid.wave_spawn_pos = Some(BlockPos::new(0, 64, 0));
+        region.raids.raids.insert(raid_id, raid);
+        tick(&mut region);
+        region.links.flush();
+        let boss = mc_bamboo_data::packets::play::clientbound::BOSS_EVENT;
+        let frames: Vec<_> = recorder
+            .frames()
+            .into_iter()
+            .filter(|(packet, _)| *packet == boss)
+            .collect();
+        assert_eq!(frames.len(), 2, "add + 一次 update_progress");
+        let add = &frames[0].1;
+        // UUID(16) + 动作 0 + 名字组件 + 进度 float + 颜色 / 分段 / flags。
+        assert_eq!(add[16], 0, "ADD 动作");
+        let name_end = add.len() - 4 - 1 - 1 - 1;
+        assert_eq!(add[name_end..name_end + 4], 0.0_f32.to_be_bytes());
+        assert_eq!(add[name_end + 4], 2, "RED");
+        assert_eq!(add[name_end + 5], 2, "NOTCHED_10");
+        assert_eq!(frames[1].1[16], 2, "UPDATE_PROGRESS");
+        assert_eq!(
+            frames[1].1[17..21],
+            (1.0_f32 / 300.0).to_be_bytes(),
+            "冷却递减 1 刻"
+        );
+        // 观众集合里记着玩家。
+        assert_eq!(region.raids.raids[&raid_id].boss_players, vec![id.0]);
+    }
+
+    /// 首波刷出时：号角音效 + 血条进度变满；progress 用刷出的总血量算。
+    #[test]
+    fn first_wave_plays_horn_and_fills_the_bossbar() {
+        let (mut region, _id, recorder) = region_with_player();
+        make_village(&mut region);
+        let raid_id = region.raids.unique_id();
+        let mut raid = Raid::new(BlockPos::new(0, 64, 0), 2);
+        raid.wave_spawn_pos = Some(BlockPos::new(0, 64, 0));
+        region.raids.raids.insert(raid_id, raid);
+        for tick in 0..=DEFAULT_PRE_RAID_TICKS {
+            crate::raid::tick(&mut region);
+            if tick == DEFAULT_PRE_RAID_TICKS - 1 {
+                // 首波之前的进度已到 1。
+                assert_eq!(region.raids.raids[&raid_id].boss_progress, 1.0);
+            }
+        }
+        region.links.flush();
+        let sound = mc_bamboo_data::packets::play::clientbound::SOUND;
+        let frames = recorder.frames();
+        let horn = frames.iter().find(|(packet, _)| *packet == sound);
+        assert!(horn.is_some(), "首波有一份号角音效包");
+        assert_eq!(region.raids.raids[&raid_id].boss_progress, 1.0);
+    }
+
     /// 袭击之兆到期建袭击并清掉坐标。
     #[test]
     fn raid_omen_expire_starts_the_raid_and_clears_position() {
-        let (mut region, id) = region_with_player();
+        let (mut region, id, _) = region_with_player();
         make_village(&mut region);
         region.players.get_mut(&id).unwrap().raid_omen_position = Some(BlockPos::new(0, 64, 0));
         raid_omen_expire(&mut region, id, 1);

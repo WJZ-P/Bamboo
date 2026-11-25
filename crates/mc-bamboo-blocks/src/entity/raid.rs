@@ -186,6 +186,36 @@ pub struct Raid {
     /// the constructor and rebuilds it on load, so it is not saved. Scenes can
     /// preset `waveSpawnPos` to bypass spawn-position randomness.
     pub rng_state: u64,
+    /// `Raid.raidEvent` 的运行时状态。`ServerBossEvent` 不存档，读盘后重建。
+    /// `boss_uuid` 按官方 `Mth.createInsecureUUID(random)` 用同一随机源取两个 long。
+    ///
+    /// Runtime state of `Raid.raidEvent`. `ServerBossEvent` is not saved and is
+    /// rebuilt on load; `boss_uuid` follows official `Mth.createInsecureUUID`,
+    /// which draws two longs from the same random source.
+    pub boss_uuid: [u8; 16],
+    /// 收到过 add 包的玩家实体 uid（`ServerBossEvent.players`）。
+    pub boss_players: Vec<i32>,
+    /// `ServerBossEvent.visible`，构造时为 true。
+    pub boss_visible: bool,
+    /// `BossEvent.progress`，构造时为 0。
+    pub boss_progress: f32,
+    /// 当前血条名字，官方 `RAID_NAME_COMPONENT` 是 `event.minecraft.raid`。
+    pub boss_name: RaidBarName,
+    /// `event.minecraft.raid.raiders_remaining` 里的剩余数（0 表示不带这段后缀）。
+    pub boss_raiders_remaining: i32,
+}
+
+/// `Raid` 血条名字的四种取值，名字本身交给协议层按翻译键构造。
+///
+/// The four names a raid boss bar can show; the protocol layer builds the
+/// translated components from these keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RaidBarName {
+    #[default]
+    Raid,
+    RaidersRemaining,
+    Victory,
+    Defeat,
 }
 
 impl Raid {
@@ -194,7 +224,7 @@ impl Raid {
     /// Vanilla `Raid(center, difficulty)`: active, 300-tick cooldown, empty bar,
     /// ONGOING status.
     pub fn new(center: BlockPos, difficulty: i32) -> Self {
-        Self {
+        let mut raid = Self {
             started: false,
             active: true,
             ticks_active: 0,
@@ -212,7 +242,34 @@ impl Raid {
             raiders: std::collections::BTreeMap::new(),
             leaders: std::collections::BTreeMap::new(),
             rng_state: random_seed(center),
-        }
+            boss_uuid: [0; 16],
+            boss_players: Vec::new(),
+            boss_visible: true,
+            boss_progress: 0.0,
+            boss_name: RaidBarName::Raid,
+            boss_raiders_remaining: 0,
+        };
+        raid.boss_uuid = raid.insecure_uuid();
+        raid
+    }
+
+    /// `Mth.createInsecureUUID(random)`：两次 `nextLong()`（每次两个 32 位半字），
+    /// 最高有效 long 清掉版本 4 位再设 4，最低有效 long 设变体位。
+    ///
+    /// `Mth.createInsecureUUID(random)`: two `nextLong()` draws, with the
+    /// version-4 and variant bits applied.
+    pub fn insecure_uuid(&mut self) -> [u8; 16] {
+        let mut long = || -> i64 {
+            let high = i64::from(self.next_bits(32));
+            let low = i64::from(self.next_bits(32)) & 0xFFFF_FFFF;
+            (high << 32) | low
+        };
+        let msb = (long() & !0xF000) | 0x4000;
+        let lsb = (long() & 0x3FFF_FFFF_FFFF_FFFF) | i64::MIN;
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&msb.to_be_bytes());
+        bytes[8..].copy_from_slice(&lsb.to_be_bytes());
+        bytes
     }
 
     /// `addWaveMob`：把一名袭击者记进该波名册，可选累加总血量。名册按 uid 去重
@@ -380,6 +437,14 @@ impl Raid {
         (living_health / self.total_health).clamp(0.0, 1.0)
     }
 
+    /// `Raid` 冷却进度：`clamp((300 - cooldown) / 300, 0, 1)`，见 `Raid.tick`。
+    ///
+    /// Boss-bar progress during the pre-wave cooldown; see `Raid.tick`.
+    pub fn cooldown_progress(&self) -> f32 {
+        let elapsed = (DEFAULT_PRE_RAID_TICKS - self.cooldown_ticks) as f32;
+        (elapsed / DEFAULT_PRE_RAID_TICKS as f32).clamp(0.0, 1.0)
+    }
+
     /// `addHeroOfTheVillage(entity)`：按 UUID 去重。
     pub fn add_hero_of_the_village(&mut self, uuid: [u8; 16]) {
         if !self.heroes_of_the_village.contains(&uuid) {
@@ -481,28 +546,33 @@ impl Raid {
             Some(Tag::List(list)) => list.iter().filter_map(uuid_from).collect(),
             _ => return None,
         };
-        Some((
-            id,
-            Self {
-                started: tag::bool_or(raw, "started", false),
-                active: tag::bool_or(raw, "active", true),
-                ticks_active: tag::long_or(raw, "ticks_active", 0),
-                raid_omen_level: tag::int_or(raw, "raid_omen_level", 0),
-                groups_spawned: tag::int_or(raw, "groups_spawned", 0),
-                cooldown_ticks: tag::int_or(raw, "cooldown_ticks", DEFAULT_PRE_RAID_TICKS),
-                post_raid_ticks: tag::int_or(raw, "post_raid_ticks", 0),
-                total_health: tag::float_or(raw, "total_health", 0.0),
-                group_count: tag::int_or(raw, "group_count", 0),
-                status,
-                center,
-                heroes_of_the_village: heroes,
-                wave_spawn_pos: None,
-                celebration_ticks: 0,
-                raiders: std::collections::BTreeMap::new(),
-                leaders: std::collections::BTreeMap::new(),
-                rng_state: random_seed(center),
-            },
-        ))
+        let mut raid = Self {
+            started: tag::bool_or(raw, "started", false),
+            active: tag::bool_or(raw, "active", true),
+            ticks_active: tag::long_or(raw, "ticks_active", 0),
+            raid_omen_level: tag::int_or(raw, "raid_omen_level", 0),
+            groups_spawned: tag::int_or(raw, "groups_spawned", 0),
+            cooldown_ticks: tag::int_or(raw, "cooldown_ticks", DEFAULT_PRE_RAID_TICKS),
+            post_raid_ticks: tag::int_or(raw, "post_raid_ticks", 0),
+            total_health: tag::float_or(raw, "total_health", 0.0),
+            group_count: tag::int_or(raw, "group_count", 0),
+            status,
+            center,
+            heroes_of_the_village: heroes,
+            wave_spawn_pos: None,
+            celebration_ticks: 0,
+            raiders: std::collections::BTreeMap::new(),
+            leaders: std::collections::BTreeMap::new(),
+            rng_state: random_seed(center),
+            boss_uuid: [0; 16],
+            boss_players: Vec::new(),
+            boss_visible: true,
+            boss_progress: 0.0,
+            boss_name: RaidBarName::Raid,
+            boss_raiders_remaining: 0,
+        };
+        raid.boss_uuid = raid.insecure_uuid();
+        Some((id, raid))
     }
 }
 
