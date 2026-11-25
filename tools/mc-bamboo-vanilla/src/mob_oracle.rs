@@ -39,6 +39,7 @@ mod attack_target;
 mod bat;
 mod bee;
 mod bee_ai;
+mod bee_full;
 mod bee_locate;
 mod bee_release;
 mod brain;
@@ -50,6 +51,7 @@ mod gen_spawn;
 mod golem;
 mod grazing;
 mod guardian_scene;
+mod husk_jockey;
 mod lightning;
 mod llama_spit;
 mod natural_spawn;
@@ -68,6 +70,7 @@ mod undead_horse;
 mod villager;
 mod water_mob;
 mod witch_throw;
+mod zombie_villager;
 
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
@@ -111,6 +114,14 @@ enum Line {
         loyalty: u8,
         foil: u8,
     },
+    /// 官方 `ZombieVillager` 的三个元数据 index。
+    ///
+    /// Official `ZombieVillager` metadata indices.
+    ZombieVillagerMetadata {
+        converting: u8,
+        data: u8,
+        finalized: u8,
+    },
     Case(Box<Case>),
     Projectile(Box<projectile::ProjectileCase>),
     Shot(shot::ShotCase),
@@ -147,6 +158,7 @@ enum Line {
     UndeadHorseDeath(undead_horse::UndeadHorseDeathCase),
     Bee(Box<bee::BeeCase>),
     BeeAi(Box<bee_ai::BeeAiCase>),
+    BeeFull(Box<bee_full::BeeFullCase>),
     BeeLocate(Box<bee_locate::BeeLocateCase>),
     BeeRelease(Box<bee_release::BeeReleaseCase>),
     Golem(Box<golem::GolemCase>),
@@ -158,7 +170,11 @@ enum Line {
     VillagerSpawn(villager::VillagerSpawnCase),
     VillagerSave(villager::VillagerSaveCase),
     VillagerDeath(villager::VillagerDeathCase),
+    ZombieVillager(zombie_villager::Case),
+    ZombieVillagerSave(zombie_villager::SaveCase),
+    HuskJockey(husk_jockey::Case),
     VillagerBrain(Box<villager::VillagerBrainCase>),
+    VillagerPoi(Box<villager::VillagerPoiCase>),
     AttackTarget(Box<attack_target::AttackTargetCase>),
     Guardian(Box<guardian_scene::GuardianCase>),
     Fish(Box<fish::FishCase>),
@@ -223,6 +239,9 @@ struct Case {
     ride_passenger: i32,
     #[serde(default = "minus_one")]
     ride_vehicle: i32,
+    /// 第二位生物乘客（尸壳骆驼上的焦骸）。
+    #[serde(default = "minus_one")]
+    ride_passenger2: i32,
     /// 骑乘场景：所有生物都持久化，避开 `checkDespawn` 取数顺序的差异。
     ///
     /// Riding scenes: every mob is persistent, avoiding `checkDespawn` draw order.
@@ -821,6 +840,7 @@ struct CowStep {
 fn zombie_style(name: &str) -> bool {
     [
         "zombie_",
+        "parched_",
         "rabbit_",
         "fox_",
         "wolf_",
@@ -949,6 +969,10 @@ struct MobLevel {
     redstone: mc_bamboo_blocks::RedstoneMemory,
     block_entities: BlockEntities,
     block_events: BlockEvents,
+    /// 常驻 POI 索引表；未登记的场景保持为空，查询返回空。
+    ///
+    /// Persistent POI store; stays empty for scenes that do not register POIs.
+    poi: mc_bamboo_world::poi::PoiStore,
     entities: Entities,
     players: Vec<PlayerView>,
     /// 走真实受伤链路的玩家；有它时 `for_each_player` 和生物打玩家都交给它。
@@ -963,6 +987,37 @@ struct MobLevel {
     short_hunger: bool,
     /// 改坏确认 `zombie_bed`：床的怪物检查一律放行。
     ignore_bed_monsters: bool,
+}
+
+impl MobLevel {
+    /// 按 `(x, y, z)` 规范序把当前 `blocks` 里的全部 POI 方块登记到常驻 `poi` 表中，
+    /// 与 Java 侧 `FakeLevel.registerPoiFromBlocks()` 保持同一桶内插入序。
+    ///
+    /// Registers every POI block in `blocks` into the persistent `poi` store in
+    /// canonical `(x, y, z)` order, matching Java `FakeLevel.registerPoiFromBlocks()`.
+    pub(self) fn register_poi_from_blocks(&mut self) {
+        let mut entries: Vec<(BlockPos, u32)> = self
+            .blocks
+            .iter()
+            .map(|(&pos, &state)| (pos, state.0))
+            .collect();
+        entries.sort_by_key(|(pos, _)| (pos.x, pos.y, pos.z));
+        for (pos, state) in entries {
+            if let Some(kind) = mc_bamboo_data::poi::for_state(state) {
+                self.poi.add(pos, kind);
+            }
+        }
+    }
+}
+
+fn poi_occupancy(code: u8) -> Option<mc_bamboo_world::poi::Occupancy> {
+    use mc_bamboo_world::poi::Occupancy;
+    match code {
+        0 => Some(Occupancy::HasSpace),
+        1 => Some(Occupancy::IsOccupied),
+        2 => Some(Occupancy::Any),
+        _ => None,
+    }
 }
 
 impl LevelTables for MobLevel {
@@ -1013,45 +1068,65 @@ impl Level for MobLevel {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
             return false;
         }
+        let old = self.blocks.get(&pos).copied().unwrap_or(BlockState::AIR);
         if state.is_air() {
             self.blocks.remove(&pos);
         } else {
             self.blocks.insert(pos, state);
         }
+        let _ = self.poi.on_block_state_change(pos, old.0, state.0);
         true
     }
 
-    /// 官方 `PoiManager.getInRange(#bee_home, center, radius, ANY)`。假世界没有
-    /// 常驻的 POI 表，这里按 `blocks` 里当前登记的蜂巢 / 蜂箱状态现建一份
-    /// `PoiStore`，让 `bee_locate` 场景走和真实世界同一套 POI 遍历序。
-    /// 只匹配 `beehive` / `bee_nest` 两类，别的 POI 状态不进候选。
+    /// 官方 `PoiManager.getInRange(#bee_home, center, radius, ANY)`，直接读常驻 `PoiStore`。
+    /// 没登记 POI 的场景表为空，返回空表。
+    ///
+    /// Vanilla `PoiManager.getInRange(#bee_home, center, radius, ANY)` backed by the
+    /// persistent `PoiStore`; empty when the scene registered no POIs.
     fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
-        use mc_bamboo_world::poi::{Occupancy, PoiStore};
-        let beehive = mc_bamboo_data::poi::poi_type_id("beehive");
-        let bee_nest = mc_bamboo_data::poi::poi_type_id("bee_nest");
-        // 官方同一 HashSet 桶内的记录保持插入序；`self.blocks` 是 HashMap，
-        // 迭代序不确定。两边都按 (x,y,z) 排序后登记，并列桶序才可复现。
-        let mut entries: Vec<(BlockPos, u32)> = self
-            .blocks
-            .iter()
-            .map(|(&pos, &state)| (pos, state.0))
-            .collect();
-        entries.sort_by_key(|(pos, _)| (pos.x, pos.y, pos.z));
-        let mut poi = PoiStore::new();
-        for (pos, state) in entries {
-            if let Some(kind) = mc_bamboo_data::poi::for_state(state) {
-                poi.add(pos, kind);
-            }
-        }
-        poi.get_in_range(
-            |kind| Some(kind) == beehive || Some(kind) == bee_nest,
+        mc_bamboo_game::poi_query::bee_homes_in_range(&self.poi, center, radius)
+            .into_iter()
+            .map(|(_, pos)| pos)
+            .collect()
+    }
+
+    fn poi_type_at(&self, pos: BlockPos) -> Option<u8> {
+        self.poi.get_type(pos)
+    }
+
+    fn poi_count_in_range(&self, center: BlockPos, radius: i32, kind: u8, occupancy: u8) -> usize {
+        let Some(occupancy) = poi_occupancy(occupancy) else {
+            return 0;
+        };
+        self.poi
+            .get_count_in_range(|found| found == kind, center, radius, occupancy)
+    }
+
+    fn poi_find_closest(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        kind: u8,
+        occupancy: u8,
+        position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        let occupancy = poi_occupancy(occupancy)?;
+        self.poi.find_closest(
+            |found| found == kind,
+            position_filter,
             center,
             radius,
-            Occupancy::Any,
+            occupancy,
         )
-        .into_iter()
-        .map(|record| record.pos)
-        .collect()
+    }
+
+    fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
+        self.poi
+            .sections_to_village(mc_bamboo_world::light::SectionPos::of(pos))
+    }
+
+    fn poi_is_close_to_village(&self, pos: BlockPos, sections: i32) -> bool {
+        self.poi.is_close_to_village(pos, sections)
     }
 
     fn is_unobstructed(&self, _boxes: &[mc_bamboo_blocks::Aabb]) -> bool {
@@ -1649,6 +1724,11 @@ impl Report {
                 Line::TridentMetadata { loyalty, foil } => {
                     self.replay_trident_metadata(loyalty, foil);
                 }
+                Line::ZombieVillagerMetadata {
+                    converting,
+                    data,
+                    finalized,
+                } => self.replay_zombie_villager_metadata(converting, data, finalized),
                 Line::Case(case) => self.replay(&case),
                 Line::Projectile(case) => self.replay_projectile(&case),
                 Line::Shot(case) => self.replay_shot(&case),
@@ -1669,6 +1749,7 @@ impl Report {
                 Line::UndeadHorseDeath(case) => self.replay_undead_horse_death(&case),
                 Line::Bee(case) => self.replay_bee(&case),
                 Line::BeeAi(case) => self.replay_bee_ai(&case),
+                Line::BeeFull(case) => self.replay_bee_full(&case),
                 Line::BeeLocate(case) => self.replay_bee_locate(&case),
                 Line::BeeRelease(case) => self.replay_bee_release(&case),
                 Line::Golem(case) => self.replay_golem(&case),
@@ -1680,7 +1761,11 @@ impl Report {
                 Line::VillagerSpawn(case) => self.replay_villager_spawn(&case),
                 Line::VillagerSave(case) => self.replay_villager_save(&case),
                 Line::VillagerDeath(case) => self.replay_villager_death(&case),
+                Line::ZombieVillager(case) => self.replay_zombie_villager(&case),
+                Line::ZombieVillagerSave(case) => self.replay_zombie_villager_save(&case),
+                Line::HuskJockey(case) => self.replay_husk_jockey(&case),
                 Line::VillagerBrain(case) => self.replay_villager_brain(&case),
+                Line::VillagerPoi(case) => self.replay_villager_poi(&case),
                 Line::AttackTarget(case) => self.replay_attack_target(&case),
                 Line::Guardian(case) => self.replay_guardian(&case),
                 Line::Fish(case) => self.replay_fish(&case),
@@ -1787,6 +1872,24 @@ impl Report {
         }
     }
 
+    /// 实测核对僵尸村民的三个元数据 index。
+    ///
+    /// Verify the three zombie-villager metadata indices against the official jar.
+    fn replay_zombie_villager_metadata(&mut self, converting: u8, data: u8, finalized: u8) {
+        use mc_bamboo_data::villager;
+        let ours = (
+            villager::ZOMBIE_VILLAGER_CONVERTING_INDEX,
+            villager::ZOMBIE_VILLAGER_DATA_INDEX,
+            villager::ZOMBIE_VILLAGER_DATA_FINALIZED_INDEX,
+        );
+        if ours != (converting, data, finalized) {
+            self.mismatch(format!(
+                "zombie villager metadata indices: official {converting}/{data}/{finalized}, bamboo {}/{}/{}",
+                ours.0, ours.1, ours.2
+            ));
+        }
+    }
+
     fn replay(&mut self, case: &Case) {
         self.cases += 1;
         if case.spawn_result.is_some() {
@@ -1857,6 +1960,7 @@ impl Report {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(case.first_id),
             players: case
                 .players
@@ -2007,6 +2111,8 @@ impl Report {
                     52 => mc_bamboo_blocks::entity::mob::MobType::Drowned,
                     53 => mc_bamboo_blocks::entity::mob::MobType::Pillager,
                     60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
+                    61 => mc_bamboo_blocks::entity::mob::MobType::Parched,
+                    62 => mc_bamboo_blocks::entity::mob::MobType::CamelHusk,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
                 // 幼年标志和破门是僵尸一系专属的起始状态。
@@ -2286,6 +2392,16 @@ impl Report {
             {
                 world.start_riding(passenger, vehicle);
             }
+            // 尸壳骆驼的第二名乘客用放宽到两人的 `canAddPassenger`。
+            if case.ride_passenger2 >= 0
+                && case.ride_vehicle >= 0
+                && let (Some(&passenger), Some(&vehicle)) = (
+                    ids.get(case.ride_passenger2 as usize),
+                    ids.get(case.ride_vehicle as usize),
+                )
+            {
+                world.start_riding_with_limit(passenger, vehicle, 2);
+            }
         }
         let Some(first) = case.steps.first() else {
             self.mismatch(format!("{}: no steps", case.name));
@@ -2293,7 +2409,16 @@ impl Report {
         };
         set_zombie_clock(&mut level, case, 0, break_test);
         accumulate_inhabited(&mut level, 0, self.break_test.as_deref());
-        let ours = snapshot(&level, &ids);
+        let mut ours = snapshot(&level, &ids);
+        // 改坏确认：把第二名乘客的 z 挪一格，静止骑乘场景必须报不一致。
+        // Breakage check: shift the second rider's z; the static riding scene
+        // must report a mismatch.
+        if self.break_test.as_deref() == Some("camel_husk_ride")
+            && case.ride_passenger2 >= 0
+            && let Some(Some(row)) = ours.get_mut(case.ride_passenger2 as usize)
+        {
+            row.z = (f64::from_bits(row.z as u64) + 1.0).to_bits() as i64;
+        }
         self.compare(&case.name, 0, &ours, first);
         self.compare_zombie_player(case, &mut level, 0);
         // 场景开始时的牛也算「刚生成」，但它们在 tick 0 已经建过同步状态，
@@ -2431,6 +2556,7 @@ impl Report {
                             f64::from_bits(player.z as u64),
                         ),
                         sneaking: false,
+                        difficulty: 2,
                     };
                     let outcome = world.interact_mob(ids[cow as usize], &request);
                     let result = if outcome.result.consumes_action() {

@@ -335,7 +335,7 @@ fn mob_view(uid: EntityUid, position: Vec3, removed: bool, mob: &KindPublicMob) 
     // A sitting camel's `getEyeHeight()` follows the pose (2.275 → 0.845); a
     // watching baby's `LookControl` reads that live eye height, not a static
     // per-species value.
-    let eye_height = if mob.mob_type == MobType::Camel {
+    let eye_height = if mob.mob_type.is_camel() {
         camel::dimensions(mob.baby, mob.camel.pose == camel::Pose::Sitting).2
     } else {
         mob.mob_type.dimensions(mob.baby).2

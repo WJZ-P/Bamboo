@@ -913,3 +913,74 @@ fn turtle_metadata_defaults_are_the_two_booleans() {
         EntityData::TurtleLayingEgg(false)
     );
 }
+
+/// `ServerEntity.sendChanges`：玩家和生物共用一份乘客名单时，名单变化只发一次
+/// `set_passengers`，内容就是这一份名单；名单不变就不再发。
+#[test]
+fn passenger_list_changes_send_exactly_one_set_passengers() {
+    use mc_bamboo_blocks::entity::{Entity, FIRST_ENTITY_ID, mob::MobType};
+    use mc_bamboo_protocol::frame::packet_body;
+    use mc_bamboo_protocol::packet::play::SetPassengers;
+
+    use crate::{
+        inbound::{PlayerId, PlayerSink},
+        links::Links,
+        outgoing::Outgoing,
+    };
+
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl PlayerSink for Sink {
+        fn send(&mut self, frames: Outgoing) -> bool {
+            self.0.lock().unwrap().extend(frames.to_raw_bytes());
+            true
+        }
+        fn close(&mut self) {}
+        fn second_handle(&self) -> Option<Box<dyn PlayerSink>> {
+            Some(Box::new(self.clone()))
+        }
+    }
+
+    let vehicle = 1 << 24;
+    let player = 7;
+    let mob = FIRST_ENTITY_ID + 1;
+    let mut horse = Entity::by_mob_type(MobType::Horse, Vec3::new(8.5, 64.0, 8.5));
+    horse.id = vehicle;
+    horse.with_mob(|_, m| {
+        m.passengers.push(player);
+        m.passengers.push(mob);
+    });
+    let public = horse.split().public;
+    let mut links = Links::default();
+    let sink = Sink::default();
+    links.add(PlayerId(1), Box::new(sink.clone()));
+
+    let full = packet_body(&SetPassengers {
+        vehicle,
+        passengers: &[player, mob],
+    });
+    let snapshot = Snapshot::of(&public);
+    let mut tracked = TrackedEntity::new(&snapshot);
+    tracked.seen_by.insert(PlayerId(1));
+    // 从「空名单」到「玩家 + 生物」：发一次，内容含两份乘客。
+    tracked.last_passengers.clear();
+    send_changes(&snapshot, &mut tracked, &mut links);
+    links.flush();
+    let bytes = sink.0.lock().unwrap().clone();
+    assert_eq!(
+        bytes.windows(full.len()).filter(|w| *w == full).count(),
+        1,
+        "one set_passengers with the shared list"
+    );
+    // 名单没变时不再发。
+    sink.0.lock().unwrap().clear();
+    send_changes(&snapshot, &mut tracked, &mut links);
+    links.flush();
+    assert!(
+        sink.0
+            .lock()
+            .unwrap()
+            .windows(full.len())
+            .all(|w| w != full)
+    );
+}

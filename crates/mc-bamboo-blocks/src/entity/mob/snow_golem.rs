@@ -312,6 +312,7 @@ mod tests {
             held: ItemStack::new(items::SHEARS, 1),
             creative: false,
             sneaking: false,
+            difficulty: 2,
             position: Vec3::new(0.0, 64.0, 0.0),
         };
         let outcome = interact(&mob, &req);

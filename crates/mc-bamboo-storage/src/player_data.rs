@@ -123,6 +123,15 @@ pub struct PlayerData {
     /// `ServerPlayer.saveEnderPearls`: one full saved entity tag plus
     /// `ender_pearl_dimension` per in-flight pearl. The key is absent when empty.
     pub ender_pearls: Vec<Tag>,
+    /// `ServerPlayer.saveParentVehicle` 的 `RootVehicle`：`Attach` 是玩家直接骑着的
+    /// 那只实体的 UUID，`Entity` 是根载具的整棵 `Passengers` 存档。没骑东西时不写。
+    /// 整条标签由游戏层构造，本层只负责按官方的顶层键原样读写。
+    ///
+    /// `ServerPlayer.saveParentVehicle`'s `RootVehicle`: `Attach` is the UUID of
+    /// the entity the player rides directly, and `Entity` is the root vehicle's
+    /// whole `Passengers` tree. Absent when not riding. The game layer builds
+    /// the tag; this layer reads and writes the official top-level key verbatim.
+    pub root_vehicle: Option<Tag>,
     pub abilities: Abilities,
     pub seen_credits: bool,
     pub spawn_extra_particles_on_fall: bool,
@@ -218,6 +227,7 @@ impl Default for PlayerData {
             attributes: None,
             active_effects: None,
             ender_pearls: Vec::new(),
+            root_vehicle: None,
             abilities: Abilities::default(),
             seen_credits: false,
             spawn_extra_particles_on_fall: false,
@@ -265,6 +275,7 @@ const KNOWN_KEYS: &[&str] = &[
     "attributes",
     "active_effects",
     "ender_pearls",
+    "RootVehicle",
     "abilities",
     "EnderItems",
     "Dimension",
@@ -412,6 +423,10 @@ impl PlayerData {
                 Tag::List(self.ender_pearls.clone()),
             );
         }
+        // `saveParentVehicle`：只在骑着东西时写 `RootVehicle`。
+        if let Some(tag) = &self.root_vehicle {
+            push(&mut root, "RootVehicle", tag.clone());
+        }
         push(&mut root, "abilities", self.abilities_tag());
         if let Ok(items) = slots::encode_list(&self.ender_items) {
             push(&mut root, "EnderItems", items);
@@ -482,6 +497,11 @@ impl PlayerData {
         data.ender_pearls = match field_of(entries, "ender_pearls") {
             Some(Tag::List(list)) => list.clone(),
             _ => Vec::new(),
+        };
+        // 官方 `ValueInput.child("RootVehicle")` 只认复合标签；坏数据按没有处理。
+        data.root_vehicle = match field_of(entries, "RootVehicle") {
+            Some(tag @ Tag::Compound(_)) => Some(tag.clone()),
+            _ => None,
         };
         data.dimension = opt_string(entries, "Dimension", OVERWORLD)?;
         data.game_type = opt_int(entries, "playerGameType", DEFAULT_GAME_TYPE)?;
@@ -947,6 +967,43 @@ mod tests {
         assert_eq!(decoded.ender_items, data.ender_items);
         assert_eq!(decoded.abilities, data.abilities);
         assert_eq!(decoded.to_gzip().unwrap(), bytes);
+    }
+
+    /// `ServerPlayer.saveParentVehicle`：非空的 `RootVehicle` 连嵌套的 `Passengers`
+    /// 一起原样写回；没骑东西时顶层不能有这个键；坏类型按没有处理。
+    #[test]
+    fn root_vehicle_round_trips_with_nested_passengers() {
+        let mut data = sample();
+        let nested = Tag::Compound(vec![
+            ("id".to_owned(), Tag::String("minecraft:pig".to_owned())),
+            (
+                "Pos".to_owned(),
+                Tag::List(vec![
+                    Tag::Double(1.5),
+                    Tag::Double(64.0),
+                    Tag::Double(-3.25),
+                ]),
+            ),
+        ]);
+        let vehicle = Tag::Compound(vec![
+            ("Attach".to_owned(), Tag::IntArray(vec![1, 2, 3, 4])),
+            ("Entity".to_owned(), nested.clone()),
+        ]);
+        data.root_vehicle = Some(vehicle.clone());
+        let bytes = data.to_gzip().unwrap();
+        let decoded = PlayerData::from_gzip(&bytes).unwrap();
+        assert_eq!(decoded.root_vehicle, Some(vehicle.clone()));
+        assert_eq!(decoded.to_gzip().unwrap(), bytes);
+        assert_eq!(field(&data.encode(), "RootVehicle"), Some(&vehicle));
+        // 没骑东西时不写键（官方 `storeNullable` 的空分支）。
+        assert_eq!(field(&sample().encode(), "RootVehicle"), None);
+        // 客户端 / 存档里来的坏值不能 panic，也不能留一份假的 `RootVehicle`。
+        let bad = PlayerData::decode(&Tag::Compound(vec![(
+            "RootVehicle".to_owned(),
+            Tag::String("oops".to_owned()),
+        )]))
+        .unwrap();
+        assert_eq!(bad.root_vehicle, None);
     }
 
     #[test]

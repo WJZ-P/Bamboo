@@ -9,8 +9,8 @@ use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 use crate::command::{
     Action, CommandFn, Commands, IslandFn, admin, advancement, blocks, bossbar, clone, damage,
     data, effect, enchant, execute, experience, gamerule, items, kill, loot, particle, players,
-    playsound, random, save, scoreboard, stopsound, summon, team, teleport, text, time, title,
-    weather, world_border, world_settings,
+    playsound, random, ride, save, scoreboard, stopsound, summon, team, teleport, text, time,
+    title, weather, world_border, world_settings,
 };
 
 struct Builder {
@@ -140,6 +140,7 @@ pub(crate) fn build() -> Commands {
     register_weather(&mut builder, root);
     register_advancement(&mut builder, root);
     register_worldborder(&mut builder, root);
+    register_ride(&mut builder, root);
     Commands {
         graph: builder.graph,
         actions: builder.actions,
@@ -1939,6 +1940,17 @@ fn players_argument() -> ArgumentType {
         single: false,
         players_only: true,
     }
+}
+
+/// `RideCommand.register`：`<target> mount <vehicle>` / `<target> dismount`。
+fn register_ride(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "ride", permission::GAMEMASTERS);
+    let target = builder.argument(command, "target", entity_argument(), 0);
+    let dismount = builder.literal(target, "dismount", 0);
+    builder.run_island(dismount, ride::ride);
+    let mount = builder.literal(target, "mount", 0);
+    let vehicle = builder.argument(mount, "vehicle", entity_argument(), 0);
+    builder.run_island(vehicle, ride::ride);
 }
 
 fn entity_argument() -> ArgumentType {

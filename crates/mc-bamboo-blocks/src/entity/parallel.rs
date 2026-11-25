@@ -650,6 +650,10 @@ impl BlockView for ParallelBlockView<'_> {
         self.inner.max_local_raw_brightness(pos, darken)
     }
 
+    fn is_raining(&self) -> bool {
+        self.inner.is_raining()
+    }
+
     fn is_raining_at(&self, pos: BlockPos) -> bool {
         self.inner.is_raining_at(pos)
     }

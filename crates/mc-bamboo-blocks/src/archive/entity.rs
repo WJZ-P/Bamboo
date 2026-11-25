@@ -33,6 +33,22 @@ pub fn entity_uuid(id: i32) -> u128 {
     (u128::from(ENTITY_UUID_PREFIX) << 64) | u128::from(id as u32 as u64)
 }
 
+/// 一行公开数据里的实体 UUID：`read_mob` 把存档的 `UUID` 读进 `MobPublic.uuid`，
+/// 读回玩家档的 `RootVehicle/Attach` 时按它找到要重新骑上的那只载具。
+///
+/// The UUID in a row's public data: `read_mob` loads the saved `UUID` into
+/// `MobPublic.uuid`, which `RootVehicle/Attach` matches on rejoin.
+pub fn entity_uuid_of(row: &crate::entity::EntityRow) -> [u8; 16] {
+    match &row.public.kind {
+        crate::entity::KindPublic::Mob(mob) => mob.uuid,
+        crate::entity::KindPublic::Arrow(arrow) => arrow.uuid,
+        crate::entity::KindPublic::LlamaSpit(spit) => spit.uuid,
+        crate::entity::KindPublic::Egg(egg) => egg.uuid,
+        crate::entity::KindPublic::SplashPotion(potion) => potion.uuid,
+        _ => entity_uuid(row.public.uid).to_be_bytes(),
+    }
+}
+
 /// `UUIDUtil.CODEC` = `int[4]`（高位 32 位、低位 32 位、……）。
 pub fn entity_uuid_tag(id: i32) -> Tag {
     let uuid = entity_uuid(id);

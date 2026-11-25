@@ -533,6 +533,14 @@ impl Entity {
         mob.uuid = mob::insecure_uuid(&mut self.random);
         self.y_rot = self.random.next_float() * 6.283_185_5;
         mob.y_head_rot = self.y_rot;
+        if mob.mob_type == mob::MobType::ZombieVillager {
+            // `ZombieVillager.defineSynchedData` 在 `Entity` 构造函数里跑，
+            // 随机职业的 `nextInt(size)` 比 LivingEntity 的朝向更早。
+            //
+            // `ZombieVillager.defineSynchedData` runs in the `Entity` constructor;
+            // the random profession's `nextInt(size)` precedes the facing draw.
+            mob::zombie_villager::configure_new(mob, &mut self.random);
+        }
         if mob.mob_type == mob::MobType::Rabbit {
             // 兔子构造时抽取一次头部闲置动画延迟；只在客户端使用其结果。
             // The rabbit constructor draws a head-idle delay used only by the client.
@@ -553,9 +561,15 @@ impl Entity {
             mob.cube.move_y_rot = mob::slime::constructor_move_y_rot(self.y_rot);
         }
         if mob.mob_type == mob::MobType::Bee {
-            // `Bee` 构造函数的 `Mth.nextInt(random, 20, 60)`。
+            // `Mob.<init>` 调 `Bee.registerGoals`：`ValidateHiveGoal` 与 `ValidateFlowerGoal`
+            // 各抽一次 `Mth.nextInt(random, 20, 40)`；随后 `Bee.<init>` 字段初始化抽
+            // `Mth.nextInt(random, 20, 60)`。
+            // `Mob.<init>` calls `Bee.registerGoals` (`ValidateHiveGoal` and
+            // `ValidateFlowerGoal` each draw `Mth.nextInt(random, 20, 40)`), followed by
+            // `Bee.<init>` drawing `Mth.nextInt(random, 20, 60)`.
+            mob::bee_goals::init_validate_cooldowns(mob, &mut self.random);
             mob.bee.remaining_cooldown_before_locating_new_flower =
-                self.random.next_int_bounded(40) + 20;
+                self.random.next_int_bounded(41) + 20;
         }
         if let Some(brain) = mob.brain.as_mut() {
             // `LivingEntity` 构造函数最后的 `makeBrain`：每个传感器一次 `nextInt(scanRate)`。

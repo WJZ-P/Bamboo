@@ -109,6 +109,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     mob.y_rot_o = me.y_rot;
     mob.x_rot_o = mob.x_rot;
     me.tick_count += 1;
+    // `ZombieVillager.tick`：转化倒计时在 `super.tick()` 之前。
+    // `ZombieVillager.tick`: the cure countdown runs ahead of `super.tick()`.
+    if mob.mob_type == super::MobType::ZombieVillager {
+        super::zombie_villager::tick(me, mob, ctx);
+    }
     // `Skeleton.tick`：`freezingTracker.tick()` 在 `super.tick()` 之前。
     // `Skeleton.tick`: `freezingTracker.tick()` runs ahead of `super.tick()`.
     if mob.mob_type == super::MobType::Skeleton {
@@ -239,7 +244,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     }
     // `Camel.tick` 在 `super.tick()` 之后：冲刺、冷却、夹头、坐在水里站起。
     // `Camel.tick` after `super.tick()`: dash, cooldown, head clamp, stand up in water.
-    if mob.mob_type == super::MobType::Camel {
+    if mob.mob_type.is_camel() {
         super::camel::tick_after(me, mob, ctx);
     }
     // `AbstractHorse.tick` 在 `super.tick()` 之后推进计时器。
@@ -948,6 +953,11 @@ fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 ///
 /// `LivingEntity.canBeAffected`: filters out effects the mob type is immune to.
 pub fn can_be_affected(kind: super::MobType, effect: i32) -> bool {
+    // `Parched.canBeAffected`：对虚弱免疫（自己射的箭不会反过来削弱它）。
+    // `Parched.canBeAffected`: immune to weakness, so its own arrows cannot weaken it.
+    if kind == super::MobType::Parched && effect == mob_effect::WEAKNESS {
+        return false;
+    }
     if kind.in_entity_tag("minecraft:immune_to_infested") {
         return effect != mob_effect::INFESTED;
     }
@@ -1116,7 +1126,13 @@ pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
     let first = me.random.next_float();
     let second = me.random.next_float();
     let base = if mob.is_baby() { 1.5 } else { 1.0 };
-    let pitch = (first - second) * 0.2 + base;
+    let pitch = if mob.mob_type == super::MobType::ZombieVillager {
+        // `ZombieVillager.getVoicePitch()`：幼年 2.0、成年 1.0。
+        // `ZombieVillager.getVoicePitch()`: 2.0 for babies, 1.0 for adults.
+        (first - second) * 0.2 + if mob.is_baby() { 2.0 } else { 1.0 }
+    } else {
+        (first - second) * 0.2 + base
+    };
     if mob.mob_type == super::MobType::Bat {
         // `Bat.getVoicePitch()`：`super.getVoicePitch() * 0.95F`。
         // `Bat.getVoicePitch()`: `super.getVoicePitch() * 0.95F`.
@@ -1207,15 +1223,17 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
     }
     animal_ai_step(me, mob, ctx, plan);
     if mob.mob_type == super::MobType::Bee {
-        let mut target_close = false;
-        if let Some(uid) = mob.target {
-            ctx.blocks().for_each_player(&mut |player| {
-                if player.uid == uid && player.position.distance_to_sqr(me.position) < 4.0 {
-                    target_close = true;
-                }
-            });
-        }
-        super::bee::ai_step(mob, me.tick_count, me.in_water, target_close);
+        let target_close = super::goals::combat_target(mob, ctx)
+            .is_some_and(|target| target.position.distance_to_sqr(me.position) < 4.0);
+        let view = ctx.blocks();
+        let hive_valid = super::bee_goals::hive_valid(mob, view, me);
+        super::bee::ai_step(
+            mob,
+            me.tick_count,
+            view.game_time(),
+            hive_valid,
+            target_close,
+        );
     }
     // 铁傀儡与雪傀儡的 `aiStep` 先跑 `super.aiStep()`，再跑自己的那一段。
     // Golem `aiStep` overrides run their own part after `super.aiStep()`.
@@ -1717,7 +1735,10 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     } else {
         nav_mob(me, mob, ctx.blocks())
     };
-    if let Some((wanted, speed)) = mob.navigation.tick(ctx.blocks(), &nav) {
+    // `Bee$1.tick`：授粉期间跳过飞行导航 tick。
+    // `Bee$1.tick`: skip flying navigation tick while pollinating.
+    let skip_nav = mob.mob_type == super::MobType::Bee && mob.bee.pollinating;
+    if !skip_nav && let Some((wanted, speed)) = mob.navigation.tick(ctx.blocks(), &nav) {
         // 官方 `this.mob.getMoveControl()`：借导航时 getter 转到载具，而此时
         // `mob.mover` 仍是载具那份（控制段才临时换回自己的）。
         // Vanilla `this.mob.getMoveControl()`: while borrowing the getter resolves to
@@ -1807,8 +1828,16 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // `SmoothSwimmingLookControl(this, 10)`.
         super::smooth_swim::move_tick(me, mob, &super::smooth_swim::FROG);
         super::smooth_swim::look_tick(me, mob, 10.0);
+    } else if mob.mob_type == super::MobType::Bee {
+        // `Bee`: `FlyingMoveControl(this, 20, true)` + `BeeLookControl`（生气时跳过，授粉时不重置俯仰）。
+        // `Bee`: `FlyingMoveControl(this, 20, true)` + `BeeLookControl` (skipped while angry;
+        // keeps pitch while pollinating).
+        move_control_tick(me, mob, ctx.blocks());
+        if !mob.anger.is_angry(ctx.blocks().game_time()) {
+            look_control_tick_with(me, mob, !mob.bee.pollinating);
+        }
     } else {
-        if mob.mob_type == super::MobType::Camel {
+        if mob.mob_type.is_camel() {
             // `CamelMoveControl.tick` 在 `super.tick()` 之前。
             // `CamelMoveControl.tick` runs before `super.tick()`.
             super::camel::before_move_control(me, mob, ctx.blocks().game_time());
@@ -1836,7 +1865,7 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     if mob.mob_type == super::MobType::Tadpole {
         super::tadpole::custom_server_ai_step(me, mob, ctx);
     }
-    if mob.mob_type == super::MobType::Camel {
+    if mob.mob_type.is_camel() {
         super::camel::custom_server_ai_step(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::Axolotl {
@@ -1909,8 +1938,9 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
         return;
     }
     if mob.mob_type == super::MobType::Bee {
-        // `Bee` 也用 `FlyingMoveControl`（参数 20, true 的效果在配置里）。
-        super::parrot::move_control_tick(me, mob);
+        // `Bee` 用 `FlyingMoveControl(this, 20, true)`：最大俯仰步长 20°，空闲时原地悬停不恢复重力。
+        // `Bee` uses `FlyingMoveControl(this, 20, true)`: max turn 20°, hovers in place.
+        super::parrot::flying_move_control_tick(me, mob, 20.0, true);
         return;
     }
     if super::turtle::is_turtle(mob.mob_type) {
@@ -2013,7 +2043,7 @@ fn max_head_y_rot(mob: &Mob) -> f32 {
     } else if mob.mob_type == super::MobType::Frog {
         // `Frog.getMaxHeadYRot`。
         5.0
-    } else if mob.mob_type == super::MobType::Camel {
+    } else if mob.mob_type.is_camel() {
         // `Camel.getMaxHeadYRot()`。
         super::camel::max_head_y_rot()
     } else {
@@ -2033,7 +2063,7 @@ fn body_rotation_tick(me: &Entity, mob: &mut Mob, time: i64) {
         super::phantom::body_rotation_tick(me, mob);
         return;
     }
-    if mob.mob_type == super::MobType::Camel && super::camel::refuse_to_move(mob, time) {
+    if mob.mob_type.is_camel() && super::camel::refuse_to_move(mob, time) {
         return;
     }
     let dx = me.position.x - me.old_position.x;
@@ -2063,9 +2093,11 @@ fn body_rotation_tick(me: &Entity, mob: &mut Mob, time: i64) {
 
 // ---- 跳跃 ----
 
-/// `Mob.jumpInLiquid`：会浮水时加 `(double) 0.04F`。
+/// `Mob.jumpInLiquid`：会浮水时加 `(double) 0.04F`；蜜蜂固定加 `0.01`。
 fn jump_in_liquid(me: &mut Entity, mob: &Mob) {
-    let lift = if mob.navigation.can_float() {
+    let lift = if mob.mob_type == super::MobType::Bee {
+        0.01
+    } else if mob.navigation.can_float() {
         f64::from(0.04_f32)
     } else {
         0.3
@@ -2152,7 +2184,7 @@ fn travel(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, mut input: Ve
     // `Camel.travel`：`refuseToMove && onGround` 时把水平速度和输入清零，再跑 `super.travel`。
     // `Camel.travel`: zero horizontal velocity / input while refusing on ground, then
     // `super.travel`.
-    if mob.mob_type == super::MobType::Camel {
+    if mob.mob_type.is_camel() {
         super::camel::travel(me, mob, ctx.blocks().game_time(), &mut input);
     }
     let in_liquid = is_in_liquid(me, mob);
@@ -2703,6 +2735,11 @@ pub(crate) fn hurt_server(
     if mob.mob_type == super::MobType::Parrot {
         mob.tame.ordered_to_sit = false;
     }
+    // `Bee.hurtServer`：非无敌受伤时停止授粉。
+    // `Bee.hurtServer`: stop pollinating on non-invulnerable damage.
+    if mob.mob_type == super::MobType::Bee && !mob.invulnerable {
+        super::bee_goals::stop_pollinating(mob);
+    }
     // `Armadillo.hurtServer`：受惊时先把伤害变成 `(damage - 1) / 2`。
     // `Armadillo.hurtServer`: while scared, damage becomes `(damage - 1) / 2` first.
     let amount = if mob.mob_type == super::MobType::Armadillo {
@@ -2885,7 +2922,7 @@ fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource, ti
     // 放在 `super` 之后对可观察状态等价。
     // `Camel.actuallyHurt` calls `standUpInstantly()` before `super`; a pure state change
     // with no random draw, so after `super` is equivalent for observable state.
-    if mob.mob_type == super::MobType::Camel {
+    if mob.mob_type.is_camel() {
         super::camel::after_actually_hurt(mob, time);
     }
 }
@@ -2966,7 +3003,14 @@ pub(crate) fn do_hurt_target(
     if mob.mob_type == super::MobType::Creeper {
         return;
     }
-    let amount = mob.attributes.value(attribute::ATTACK_DAMAGE).max(0.0) as f32;
+    let raw_damage = mob.attributes.value(attribute::ATTACK_DAMAGE).max(0.0);
+    // `Bee.doHurtTarget` 把攻击力先截成整数再转浮点：`(float)(int)getAttributeValue(ATTACK_DAMAGE)`。
+    // `Bee.doHurtTarget` truncates attack damage to `int` before casting to `float`.
+    let amount = if mob.mob_type == super::MobType::Bee {
+        (raw_damage as i32) as f32
+    } else {
+        raw_damage as f32
+    };
     // `Panda.doHurtTarget`：不咬回去的好斗熊猫记下这一口，`PandaHurtByTargetGoal` 会停手。
     // `Panda.doHurtTarget`: a non-aggressive panda records the bite so its goal stops.
     let bites = mob.mob_type == super::MobType::Panda;
@@ -2982,6 +3026,7 @@ pub(crate) fn do_hurt_target(
     source.attacker = Some(me.id);
     source.direct = Some(me.id);
     source.attacker_uuid = Some(mob.uuid);
+    source.attacker_type = Some(mob.mob_type.entity_type());
     source.position = Some(me.position);
     if super::tame::is_tamable(mob.mob_type) && mob.tame.is_tame() {
         source.owner_credit = mob.tame.owner;
@@ -3064,8 +3109,38 @@ pub(crate) fn do_hurt_target(
         if bites && hurt {
             play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
         }
+        // `Bee.doHurtTarget`：只有 `hurtServer` 返回真时才置 `HasStung`、熄怒、播蜇刺声。
+        // `Bee.doHurtTarget`: set `HasStung`, stop anger, and play sting sound only on a landed hit.
+        if hurt && mob.mob_type == super::MobType::Bee {
+            super::bee::after_attack(mob);
+            play_sound(me, mob, "minecraft:entity.bee.sting", 1.0, 1.0);
+        }
     } else if let Some(other) = ctx.other(target) {
-        let _ = other;
+        // `Zombie.killedEntity`：普通难度下僵尸打村民要先抽一次自己的
+        // `nextBoolean()`，为真不转化；困难必转、简单不抽也不转。官方在
+        // 死亡那一刻按攻击者判定，Bamboo 的受害者在自己的 tick 里结算，
+        // 所以在这里预读「目标是不是将要死的村民」，把抽签结果放进伤害源。
+        //
+        // `Zombie.killedEntity`: on NORMAL a zombie rolls its own `nextBoolean()`
+        // before converting a villager; HARD always converts, EASY neither draws
+        // nor converts. Vanilla checks the attacker at death time; Bamboo settles
+        // death in the victim's tick, so carry the roll in the damage source.
+        let lethal_villager = {
+            let crate::entity::EntityPublic { kind, .. } = &other;
+            matches!(kind, crate::entity::KindPublic::Mob(public)
+                if public.mob_type == super::MobType::Villager
+                    && public.health > 0.0
+                    && public.health <= amount)
+        };
+        let difficulty = ctx.blocks().difficulty();
+        let mut source = source;
+        if lethal_villager && mob.mob_type.is_zombie() {
+            source.attacker_type = Some(mob.mob_type.entity_type());
+            source = source.with_zombie_attacker();
+            if difficulty == 2 {
+                source = source.with_villager_conversion_roll(me.random.next_boolean());
+            }
+        }
         ctx.emit(
             Command::HurtMob {
                 target,
@@ -3078,9 +3153,10 @@ pub(crate) fn do_hurt_target(
         if bites {
             play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
         }
-    }
-    if mob.mob_type == super::MobType::Bee {
-        super::bee::after_attack(mob);
+        if mob.mob_type == super::MobType::Bee {
+            super::bee::after_attack(mob);
+            play_sound(me, mob, "minecraft:entity.bee.sting", 1.0, 1.0);
+        }
     }
 }
 
@@ -3184,12 +3260,10 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     // Villagers are not `Animal`s: only the loot table (vanilla's
     // `entities/villager` is empty), and `xpReward` is 0 with no animal experience draw.
     if mob.mob_type == super::MobType::Villager {
-        // 僵尸杀死村民时官方走 `Zombie.killedEntity` 的转化分支；僵尸村民还没建模，
-        // 接口挂在死亡路径上，返回假表示按普通死亡处理。
-        // Vanilla routes a villager killed by a zombie through `Zombie.killedEntity`'s
-        // conversion branch; zombie villagers are not modelled, so the hook returns
-        // false and the normal death path runs.
-        if super::conversion::zombie_killed_villager(ctx, &source) {
+        // 僵尸杀死村民时官方走 `Zombie.killedEntity` 的转化分支。
+        // Vanilla routes a villager killed by a zombie through
+        // `Zombie.killedEntity`'s conversion branch.
+        if super::conversion::zombie_killed_villager(me, mob, ctx, &source) {
             return;
         }
         mob.events.push(MobEvent::Death);

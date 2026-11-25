@@ -369,6 +369,7 @@ fn spawn_level(seed: i64) -> MobLevel {
         redstone: mc_bamboo_blocks::RedstoneMemory::default(),
         block_entities: BlockEntities::default(),
         block_events: BlockEvents::default(),
+        poi: mc_bamboo_world::poi::PoiStore::new(),
         entities: Entities::with_next_id(1),
         players: Vec::new(),
         game: None,
@@ -462,6 +463,7 @@ impl Report {
             creative: case.creative,
             position: Vec3::new(1.5, 64.0, 0.5),
             sneaking: case.sneak,
+            difficulty: 2,
         };
         let outcome = entity
             .with_mob(|me, mob| interact::interact(me, mob, &request, 0, false))
@@ -511,6 +513,7 @@ impl Report {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(1),
             players: vec![player],
             game: None,

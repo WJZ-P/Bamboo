@@ -125,6 +125,12 @@ public final class AdvancementTriggerOracle {
         "minecraft:filled_bucket|{\"item\":\"minecraft:axolotl_bucket\"}",
         "minecraft:crafter_recipe_crafted|{\"recipes\":\"minecraft:crafter\"}",
         "minecraft:crafter_recipe_crafted|{\"recipes\":\"minecraft:stick\"}",
+        // 治疗僵尸村民：官方 `CuredZombieVillagerTrigger` 的判据带 zombie / villager
+        // 实体谓词；这里给一组满足、一组不满足的输入。
+        // Curing a zombie villager: the official trigger has zombie / villager
+        // predicates; give one matching and one non-matching input.
+        "minecraft:cured_zombie_villager|{\"zombie\":{\"type\":\"minecraft:zombie_villager\"},\"villager\":{\"type\":\"minecraft:villager\"}}",
+        "minecraft:cured_zombie_villager|{\"zombie\":{\"type\":\"minecraft:cow\"},\"villager\":{\"type\":\"minecraft:villager\"}}",
     };
 
     /** 事件里用到的实体类型名字 → 官方假世界里的空实体。 */
@@ -338,6 +344,11 @@ public final class AdvancementTriggerOracle {
                             PLAYER, stack(event, "item"), contextOf(event, "entity"));
                 case "minecraft:crafter_recipe_crafted":
                     return crafter(instance, event);
+                case "minecraft:cured_zombie_villager":
+                    return callBool(instance, "matches",
+                            new Class<?>[]{LootContext.class, LootContext.class},
+                            contextOf(event, "zombie"), contextOf(event, "villager"))
+                            && playerConditionMatches(instance);
                 default:
                     return false;
             }

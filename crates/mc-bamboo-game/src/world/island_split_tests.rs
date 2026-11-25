@@ -640,7 +640,8 @@ pub(super) fn fingerprint(
         let _ = writeln!(out[group(*pos)], "dirty {pos:?}");
     }
     for (id, player) in &region.players {
-        let save = encode_player_save(player).map(|(uuid, bytes)| (uuid, hash_of(&bytes)));
+        let save = encode_player_save(player, crate::riding::root_vehicle_save(region, *id))
+            .map(|(uuid, bytes)| (uuid, hash_of(&bytes)));
         let tracked: Vec<ChunkPos> = region
             .chunks
             .loaded_positions()

@@ -72,6 +72,7 @@ impl GolemCase {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(self.first_id),
             players: vec![super::bat::player_view(self.player_id, [2.5, 64.0, 0.5])],
             game: None,
@@ -330,6 +331,7 @@ fn interact(world: &mut World<'_>, id: i32, player: i32, held: ItemStack, wrong_
         creative: false,
         position: Vec3::new(2.5, 64.0, 0.5),
         sneaking: false,
+        difficulty: 2,
     };
     world.interact_mob(id, &request);
 }

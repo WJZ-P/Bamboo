@@ -68,6 +68,42 @@ struct VillagerBrainFrame {
     level_seed: i64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct VillagerPoiCase {
+    name: String,
+    first_id: i32,
+    clock_start: i64,
+    mob_seed: i64,
+    sensor_delay: i64,
+    workstation: [i32; 3],
+    first_claim_tick: usize,
+    phase3_until_tick: usize,
+    poi_checks: PoiTicketChecks,
+    brain_table: super::water_mob::BrainTable,
+    frames: Vec<VillagerPoiFrame>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct PoiTicketChecks {
+    workstation: [i32; 4],
+    bed: [i32; 5],
+    bell: [i32; 4],
+    bell_village_dist: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VillagerPoiFrame {
+    brain: String,
+    motion: [i64; 8],
+    seed: i64,
+    level_seed: i64,
+    poi_free_tickets: i32,
+    profession: String,
+}
+
 /// 村民自己的键，加上原样保留的 `Offers` / `Inventory` 和通用的 `Brain`。
 const SAVE_KEYS: &[&str] = &[
     "VillagerData",
@@ -105,6 +141,7 @@ impl Report {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(1 << 24),
             players: Vec::new(),
             game: None,
@@ -247,6 +284,7 @@ impl Report {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(1 << 24),
             players: Vec::new(),
             game: None,
@@ -353,6 +391,7 @@ impl Report {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(case.first_id),
             players: Vec::new(),
             game: None,
@@ -582,6 +621,334 @@ impl Report {
             }
         }
         println!("{}: {} ticks", case.name, case.frames.len());
+    }
+
+    /// 村民第 4 期 POI 夹具接口校验与最小 `AcquirePoi` 场景：
+    /// 1) 核对工作站、床（仅床头）、钟在 `MobLevel.poi` 里的登记、`take`/`release` 票数和村庄距离；
+    /// 2) 放一个堆肥桶和一只无业成年村民，跑真大脑到 `AcquirePoi` 认领前（`0..=phase3_until_tick`）
+    ///    全量逐刻比较，并在 `first_claim_tick` 核对第 3 期排期随机数；第 4 期接上真实认领行为后
+    ///    可直接放开 `phase3_until_tick` 截断做全 61 刻逐刻比较。
+    ///
+    /// Villager Phase 4 POI fixture verification and minimal `AcquirePoi` scene:
+    /// verifies workstation/bed/bell registration and `take`/`release` tickets on `MobLevel.poi`,
+    /// then compares the real-brain scene tick-by-tick through `phase3_until_tick` (plus
+    /// scheduling RNG at `first_claim_tick`). Phase 4 removes the cap for full-trace parity.
+    pub(super) fn replay_villager_poi(&mut self, case: &VillagerPoiCase) {
+        use mc_bamboo_blocks::entity::mob::villager_ai;
+        use mc_bamboo_core::Direction;
+        use mc_bamboo_data::blocks;
+        use mc_bamboo_world::light::SectionPos;
+
+        self.cases += 1;
+
+        // 1. 夹具工作站 / 床 / 钟 POI 登记与真实 take / release 票数校验。
+        {
+            let ws_pos = BlockPos::new(4, 64, 0);
+            let bed_head = BlockPos::new(0, 64, 4);
+            let bed_foot = BlockPos::new(0, 64, 5);
+            let bell_pos = BlockPos::new(-4, 64, 0);
+            let mut blocks = std::collections::HashMap::new();
+            blocks.insert(ws_pos, BlockState(blocks::COMPOSTER));
+            let bed_head_state = BlockState(blocks::RED_BED)
+                .with(mc_bamboo_blocks::state::FACING, Direction::North)
+                .with(
+                    mc_bamboo_blocks::state::BED_PART,
+                    mc_bamboo_blocks::state::BedPart::Head,
+                );
+            let bed_foot_state = BlockState(blocks::RED_BED)
+                .with(mc_bamboo_blocks::state::FACING, Direction::North)
+                .with(
+                    mc_bamboo_blocks::state::BED_PART,
+                    mc_bamboo_blocks::state::BedPart::Foot,
+                );
+            blocks.insert(bed_head, bed_head_state);
+            blocks.insert(bed_foot, bed_foot_state);
+            blocks.insert(bell_pos, BlockState(blocks::BELL));
+
+            let mut check_level = MobLevel {
+                blocks,
+                random: LevelRandom::new(1),
+                loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+                looting: Vec::new(),
+                biome: None,
+                rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+                facts: ZombieFacts {
+                    difficulty: 2,
+                    ..ZombieFacts::default()
+                },
+                natural_spawn: None,
+                redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+                block_entities: BlockEntities::default(),
+                block_events: BlockEvents::default(),
+                poi: mc_bamboo_world::poi::PoiStore::new(),
+                entities: Entities::with_next_id(case.first_id),
+                players: Vec::new(),
+                game: None,
+                inhabited: Default::default(),
+                mob_teams: Default::default(),
+                ignore_bed_monsters: false,
+                short_hunger: false,
+                wrong_was_hurt: false,
+            };
+            check_level.register_poi_from_blocks();
+
+            let free_or_absent = |level: &MobLevel, pos: BlockPos| -> i32 {
+                if level.poi.get_type(pos).is_some() {
+                    level.poi.free_tickets(pos)
+                } else {
+                    -1
+                }
+            };
+            let ws_init = free_or_absent(&check_level, ws_pos);
+            let _ = check_level
+                .poi
+                .take(|_| true, |_, p| p == ws_pos, ws_pos, 1);
+            let ws_after1 = free_or_absent(&check_level, ws_pos);
+            let ws_take2 = check_level
+                .poi
+                .take(|_| true, |_, p| p == ws_pos, ws_pos, 1)
+                .is_some();
+            let _ = check_level.poi.release(ws_pos);
+            let ws_after_rel = free_or_absent(&check_level, ws_pos);
+
+            let bed_init = free_or_absent(&check_level, bed_head);
+            let bed_foot_tickets = free_or_absent(&check_level, bed_foot);
+            let _ = check_level
+                .poi
+                .take(|_| true, |_, p| p == bed_head, bed_head, 1);
+            let bed_after1 = free_or_absent(&check_level, bed_head);
+            let bed_take2 = check_level
+                .poi
+                .take(|_| true, |_, p| p == bed_head, bed_head, 1)
+                .is_some();
+            let _ = check_level.poi.release(bed_head);
+            let bed_after_rel = free_or_absent(&check_level, bed_head);
+
+            let bell_init = free_or_absent(&check_level, bell_pos);
+            let _ = check_level
+                .poi
+                .take(|_| true, |_, p| p == bell_pos, bell_pos, 1);
+            let bell_after1 = free_or_absent(&check_level, bell_pos);
+            let _ = check_level
+                .poi
+                .take(|_| true, |_, p| p == bell_pos, bell_pos, 1);
+            let bell_after2 = free_or_absent(&check_level, bell_pos);
+            let _ = check_level.poi.release(bell_pos);
+            let bell_after_rel = free_or_absent(&check_level, bell_pos);
+            let bell_village_dist = check_level
+                .poi
+                .sections_to_village(SectionPos::of(bell_pos));
+
+            let ours_checks = PoiTicketChecks {
+                workstation: [ws_init, ws_after1, i32::from(ws_take2), ws_after_rel],
+                bed: [
+                    bed_init,
+                    bed_foot_tickets,
+                    bed_after1,
+                    i32::from(bed_take2),
+                    bed_after_rel,
+                ],
+                bell: [bell_init, bell_after1, bell_after2, bell_after_rel],
+                bell_village_dist,
+            };
+            if ours_checks != case.poi_checks {
+                self.mismatch(format!(
+                    "{} poiChecks: official {:?}, bamboo {:?}",
+                    case.name, case.poi_checks, ours_checks
+                ));
+            }
+        }
+
+        // 2. 最小真大脑场景：平地 + 工作站 + 无业成年村民。
+        let ws_pos = BlockPos::new(
+            case.workstation[0],
+            case.workstation[1],
+            case.workstation[2],
+        );
+        let mut blocks = std::collections::HashMap::new();
+        for x in -15..=15 {
+            for z in -15..=15 {
+                blocks.insert(BlockPos::new(x, 63, z), BlockState(blocks::STONE));
+            }
+        }
+        blocks.insert(ws_pos, BlockState(blocks::COMPOSTER));
+
+        let mut level = MobLevel {
+            blocks,
+            random: LevelRandom::new(1),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: Vec::new(),
+            biome: None,
+            rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+            facts: ZombieFacts {
+                clock: case.clock_start,
+                difficulty: 2,
+                ..ZombieFacts::default()
+            },
+            natural_spawn: None,
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            poi: mc_bamboo_world::poi::PoiStore::new(),
+            entities: Entities::with_next_id(case.first_id),
+            players: Vec::new(),
+            game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
+            wrong_was_hurt: false,
+        };
+        level.register_poi_from_blocks();
+
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(1000);
+        let set_clock = |level: &mut MobLevel, clock: i64| {
+            level.facts.clock = clock;
+            level.facts.villager_activity = Some(mc_bamboo_blocks::sky::villager_activity(clock));
+            level.facts.baby_villager_activity =
+                Some(mc_bamboo_blocks::sky::baby_villager_activity(clock));
+        };
+        set_clock(&mut level, case.clock_start);
+
+        let villager_id;
+        {
+            let mut entity = Entity::by_mob_type(MobType::Villager, Vec3::new(0.5, 64.0, 0.5));
+            let mut world = World::new(&mut level, &mut ticks);
+            entity.with_mob(|_, mob| {
+                villager_ai::register_brain_goals(mob, &world, 1000);
+            });
+            villager_id = world.spawn_entity(entity);
+            world.with_entity_mut(villager_id, &mut |entity| {
+                entity.y_rot = 0.0;
+                entity.old_position = Vec3::new(0.5, 64.0, 0.5);
+                entity.random = JavaRandom::new(case.mob_seed);
+                entity.with_mob(|me, mob| {
+                    mob.uuid = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+                    mob.x_rot = 0.0;
+                    mob.y_rot_o = 0.0;
+                    mob.x_rot_o = 0.0;
+                    mob.y_head_rot = 0.0;
+                    mob.y_head_rot_o = 0.0;
+                    mob.y_body_rot = 0.0;
+                    mob.y_body_rot_o = 0.0;
+                    if let Some(brain) = mob.brain.as_mut() {
+                        brain.seed_shuffles(me.random.state());
+                        for sensor in &mut brain.sensors {
+                            sensor.time_to_tick = case.sensor_delay;
+                        }
+                    }
+                });
+            });
+        }
+
+        let ours_table = level
+            .entities
+            .get(villager_id)
+            .and_then(|e| {
+                e.kind
+                    .mob()
+                    .and_then(|m| m.brain.as_deref())
+                    .map(|b| super::water_mob::brain_table(b, false))
+            })
+            .unwrap_or_default();
+        if ours_table != case.brain_table {
+            self.mismatch(format!(
+                "{} brain table: official {:?}, bamboo {ours_table:?}",
+                case.name, case.brain_table
+            ));
+        }
+
+        // 只逐刻比较第 3 期已实现的部分（0..=phase3_until_tick，含首刻 `AcquirePoi` 的排期随机抽取、
+        // 大脑、运动、随机源与 POI 票数）；第 `first_claim_tick` 刻起官方 `AcquirePoi` 会真认领工作站
+        // 并置 `POTENTIAL_JOB_SITE`（连带触发 `GoToPotentialJobSite` 等期 4 行为），第 4 期接上真实
+        // 行为后去掉该上限即可全量比对全部 61 刻。
+        let compare_limit = case
+            .phase3_until_tick
+            .min(case.frames.len().saturating_sub(1));
+        for (tick, expected) in case.frames.iter().enumerate().take(compare_limit + 1) {
+            if tick > 0 {
+                let tick_i64 = tick as i64;
+                ticks.set_time(1000 + tick_i64);
+                set_clock(&mut level, case.clock_start + tick_i64);
+                let mut world = World::new(&mut level, &mut ticks);
+                world.tick_entities();
+            }
+            let Some(entity) = level.entities.get(villager_id) else {
+                self.mismatch(format!("{} tick {tick}: villager missing", case.name));
+                return;
+            };
+            let mob = entity.kind.mob().expect("villager is mob");
+            let ours_level_seed = level.random.source().seed();
+            if ours_level_seed != expected.level_seed {
+                self.mismatch(format!(
+                    "{} tick {tick} level random: official {}, bamboo {ours_level_seed}",
+                    case.name, expected.level_seed
+                ));
+            }
+            let ours_brain = super::brain::dump(&level, &entity);
+            if ours_brain != expected.brain {
+                self.mismatch(format!(
+                    "{} tick {tick} brain: official {:?}, bamboo {:?}",
+                    case.name, expected.brain, ours_brain
+                ));
+            }
+            let (p, v) = (entity.position, entity.delta);
+            let ours_motion = [
+                p.x.to_bits() as i64,
+                p.y.to_bits() as i64,
+                p.z.to_bits() as i64,
+                v.x.to_bits() as i64,
+                v.y.to_bits() as i64,
+                v.z.to_bits() as i64,
+                i64::from(entity.y_rot.to_bits() as i32),
+                i64::from(mob.x_rot.to_bits() as i32),
+            ];
+            if ours_motion != expected.motion {
+                self.mismatch(format!(
+                    "{} tick {tick} motion: official {:?}, bamboo {:?}",
+                    case.name, expected.motion, ours_motion
+                ));
+            }
+            let ours_seed = entity.random.state();
+            if ours_seed != expected.seed {
+                self.mismatch(format!(
+                    "{} tick {tick} mob seed: official {}, bamboo {ours_seed}",
+                    case.name, expected.seed
+                ));
+            }
+            let ours_tickets = if level.poi.get_type(ws_pos).is_some() {
+                level.poi.free_tickets(ws_pos)
+            } else {
+                -1
+            };
+            if ours_tickets != expected.poi_free_tickets {
+                self.mismatch(format!(
+                    "{} tick {tick} poiFreeTickets: official {}, bamboo {ours_tickets}",
+                    case.name, expected.poi_free_tickets
+                ));
+            }
+            let ours_prof = mc_bamboo_data::villager::profession(mob.villager.profession)
+                .map_or("", |entry| entry.name);
+            if ours_prof != expected.profession {
+                self.mismatch(format!(
+                    "{} tick {tick} profession: official {:?}, bamboo {:?}",
+                    case.name, expected.profession, ours_prof
+                ));
+            }
+            self.steps += 1;
+            if self.mismatches.len() >= self.show {
+                return;
+            }
+        }
+        println!(
+            "{}: {} ticks compared (phase 3 until tick {}, official AcquirePoi claimed at tick {}, {} total recorded)",
+            case.name,
+            compare_limit + 1,
+            case.phase3_until_tick,
+            case.first_claim_tick,
+            case.frames.len()
+        );
     }
 }
 

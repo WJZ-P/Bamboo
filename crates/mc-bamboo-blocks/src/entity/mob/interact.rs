@@ -34,6 +34,10 @@ pub struct MobInteractRequest {
     ///
     /// `isSecondaryUseActive()`: the packet's `usingSecondaryAction` (sneaking).
     pub sneaking: bool,
+    /// `Level.getDifficulty().getId()`：治疗时力量效果的等级。
+    ///
+    /// `Level.getDifficulty().getId()`: the strength amplifier of a cure.
+    pub difficulty: i32,
 }
 
 /// 交互的后果，交给调用方改物品栏和发挥手动画。
@@ -136,6 +140,7 @@ pub(super) fn is_food(kind: MobType, item: i32) -> bool {
         // `Camel.isFood` 认 `#camel_food`（仙人掌），不走马科的 `horse_food`。
         // `Camel.isFood` uses `#camel_food` (cactus), not the equine `horse_food`.
         MobType::Camel => item_is_tagged(item, item_tags::CAMEL_FOOD),
+        MobType::CamelHusk => item_is_tagged(item, item_tags::CAMEL_HUSK_FOOD),
         kind if kind.is_equine() => {
             item_is_tagged(item, mc_bamboo_data::tags::item_tags::HORSE_FOOD)
         }
@@ -158,6 +163,14 @@ pub fn interact(
     now: i64,
     thundering: bool,
 ) -> MobInteraction {
+    // `ZombieVillager.mobInteract` 不是 `Animal`：金苹果 + 虚弱才转化。
+    // `ZombieVillager.mobInteract` is not `Animal`: golden apple + weakness cures.
+    if mob.mob_type == MobType::ZombieVillager
+        && let Some(outcome) =
+            super::zombie_villager::interact(mob, req, req.difficulty, &mut me.random)
+    {
+        return outcome;
+    }
     // `SkeletonHorse.mobInteract`：没驯服时连父类都不走。
     // `SkeletonHorse.mobInteract`: untamed skeleton horses return PASS.
     if mob.mob_type == MobType::SkeletonHorse
@@ -414,6 +427,7 @@ mod tests {
             creative: false,
             position: Vec3::default(),
             sneaking: false,
+            difficulty: 2,
         }
     }
 

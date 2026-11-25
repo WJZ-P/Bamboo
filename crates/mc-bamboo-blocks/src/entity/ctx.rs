@@ -216,6 +216,13 @@ pub trait BlockView {
         0
     }
 
+    /// `Level.isRaining()`：全局下雨（蜜蜂授粉目标按它停）。
+    ///
+    /// `Level.isRaining()`: global rain (stops bee pollination).
+    fn is_raining(&self) -> bool {
+        false
+    }
+
     /// `Level.isRainingAt(pos)`。
     fn is_raining_at(&self, _pos: BlockPos) -> bool {
         false
@@ -680,6 +687,10 @@ impl BlockView for World<'_> {
     fn max_local_raw_brightness(&self, pos: BlockPos, darken: i32) -> i32 {
         self.brightness(LightLayer::Block, pos)
             .max(self.brightness(LightLayer::Sky, pos) - darken)
+    }
+
+    fn is_raining(&self) -> bool {
+        World::is_raining(self)
     }
 
     fn is_raining_at(&self, pos: BlockPos) -> bool {
@@ -1392,6 +1403,8 @@ pub enum Command {
     /// 蜜蜂进巢：把当前生物存进 `BeehiveBlockEntity`，再把它从实体表里移除。
     BeeEnterHive {
         hive: BlockPos,
+        occupant: Box<crate::behaviour::machines::beehive_entity::Occupant>,
+        saved_flower: Option<BlockPos>,
     },
     /// 蜜蜂授粉作物：写方块状态并发 2011 事件。
     BeeGrowCrop {
@@ -1898,7 +1911,11 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::SetMobDelta { target, delta } => {
             world.with_listed_entity_mut(target, &mut |entity| entity.delta = delta);
         }
-        Command::BeeEnterHive { hive } => super::mob::bee_goals::apply_enter_hive(me, world, hive),
+        Command::BeeEnterHive {
+            hive,
+            occupant,
+            saved_flower,
+        } => super::mob::bee_goals::apply_enter_hive(me, world, hive, *occupant, saved_flower),
         Command::BeeGrowCrop { pos, state } => {
             world.level_event(2011, pos, 15);
             let _ = world.set_block_and_update(pos, state);

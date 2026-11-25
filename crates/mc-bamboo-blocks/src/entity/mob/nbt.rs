@@ -421,6 +421,9 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::Villager {
         mob.villager.write_nbt(&mut out);
     }
+    if mob.mob_type == MobType::ZombieVillager {
+        mob.zombie_villager.write_nbt(&mob.villager, &mut out);
+    }
     // ---- Sheep / Chicken ----
     if mob.mob_type == MobType::Sheep {
         put(
@@ -464,7 +467,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::Int(state.map_or(0, |state| state.trap_time)),
         );
     }
-    if mob.mob_type == MobType::Camel {
+    if mob.mob_type.is_camel() {
         // `Camel.addAdditionalSaveData`：`output.putLong("LastPoseTick", entityData.get(LAST_POSE_CHANGE_TICK))`。
         // `Camel.addAdditionalSaveData`: writes the synced pose tick as `LastPoseTick`.
         put(
@@ -854,7 +857,7 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             state.trap_time = tag::int_or(tag, "SkeletonTrapTime", 0);
             crate::entity::mob::skeleton_horse::set_trap(mob, trap);
         }
-        if mob.mob_type == MobType::Camel {
+        if mob.mob_type.is_camel() {
             // `Camel.readAdditionalSaveData`：读 `LastPoseTick`（缺省 0），负数设成坐姿。
             // `Camel.readAdditionalSaveData`: read `LastPoseTick` (default 0), negative
             // means sitting.
@@ -898,6 +901,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             // `Villager.readAdditionalSaveData` refreshes the brain for the loaded age and
             // profession, keeping serialisable memories read from the `Brain` tag.
             super::villager_ai::refresh_brain_offline(me, mob);
+        }
+        if mob.mob_type == MobType::ZombieVillager {
+            mob.zombie_villager.read_nbt(&mut mob.villager, tag);
         }
         if mob.mob_type == MobType::Chicken {
             mob.chicken_jockey = tag::bool_or(tag, "IsChickenJockey", false);

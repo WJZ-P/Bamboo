@@ -502,11 +502,21 @@ impl World {
         let origin = self.master.host.island_origin(to, chunk);
         let source = self.islands.get_mut(from).expect("在表里");
         // 只装这名玩家的小岛：随机源用不上（合进目标岛时丢掉）。
+        // 玩家骑着的整棵树单独搬（直接改实体表，避免把原岛的已加载区块拆开
+        // 而违反两部分的间隔前提）。
         // A one-player carrier; its random sources are dropped on the merge.
+        // The riding tree is moved separately through the entity tables so the
+        // carrier does not split off chunks that are adjacent to the old island.
+        let tree = crate::riding::riding_entities(&source.region, id);
         let random = source.region.derive_island_random(0, SectionPos::of(chunk));
-        let carrier = source
+        let mut carrier = source
             .split_off_island_boxed(to, &BTreeSet::new(), &BTreeSet::from([id]), random)
             .unwrap_or_else(|_| panic!("tick 边界上搬不走玩家 {id:?}"));
+        for uid in tree {
+            if let Some(row) = source.region.entities.take_row(uid) {
+                carrier.region.entities.insert_row_preserving(row);
+            }
+        }
         let target = self.islands.ensure(to, origin);
         let delta = target.region.tick.game_time() - carrier.region.tick.game_time();
         target.absorb_island_boxed(carrier, delta);
@@ -541,6 +551,25 @@ impl World {
                 if let Some(other) = players.insert(*id, island.id) {
                     panic!("玩家 {id:?} 同时在岛 {other} 和 {} 上", island.id);
                 }
+            }
+            // 玩家骑手、载具和整棵乘客树必须在同一个岛：每名在线玩家的
+            // `Riding.vehicle` 都能在本岛的实体表里找到，且名单双向一致。
+            let broken = crate::riding::check_consistency(&island.region);
+            assert!(
+                broken.is_empty(),
+                "岛 {} 的骑乘关系跨岛或不一致：{broken:?}",
+                island.id
+            );
+            for player in island.region.players.values() {
+                let Some(vehicle) = player.riding.vehicle else {
+                    continue;
+                };
+                assert!(
+                    island.region.entities.public_at(vehicle).is_some(),
+                    "玩家 {:?} 的载具 {vehicle} 不在岛 {} 上",
+                    player.id,
+                    island.id
+                );
             }
             for entity in island.region.entities.ids() {
                 assert!(entity_ids.insert(entity), "实体网络 ID {entity} 重复");
@@ -689,7 +718,7 @@ pub(crate) fn split_parts(
 /// cut postpones the split: placing a player directly can briefly put their
 /// position and view centre on opposite sides, and replaying then would carry
 /// them, with the old island's tracked chunks, to the new island.
-fn split_ready(
+pub(crate) fn split_ready(
     region: &crate::region::Region,
     players: &BTreeSet<PlayerId>,
     inside: &impl Fn(ChunkPos) -> bool,
@@ -726,6 +755,12 @@ fn split_ready(
             .iter()
             .any(|viewer| players.contains(viewer) != side)
         {
+            return false;
+        }
+        // 玩家骑手和整棵骑乘树是不可分的一组：树的每一个区块都必须在玩家
+        // 这一边。载具跑到切口对面时推迟拆分，等两边重新对齐（或玩家下车）。
+        let tree_chunks = crate::riding::riding_tree_chunks(region, player.id);
+        if tree_chunks.iter().any(|&pos| inside(pos) != side) {
             return false;
         }
     }

@@ -517,13 +517,36 @@ fn run_cases(
             case.error.is_none(),
             format!("entity {label}: {}", case.error.as_deref().unwrap_or("")),
         );
+        // 僵尸村民的官方 loader 会补/删 `attributes` / `active_effects` 的懒实例
+        // 与空表；只比其它键，僵尸村民的 7 个自有键仍逐键比到。
+        // The official loader adds / drops lazy attribute instances and empty
+        // effect lists; compare the rest, including all seven own keys.
+        let is_zombie_villager = entities.get(label).is_some_and(|tag| {
+            matches!(tag, Tag::Compound(fields) if fields.iter().any(|(key, value)| {
+                key == "id" && matches!(value, Tag::String(id) if id == "minecraft:zombie_villager")
+            }))
+        });
+        let comparable = |value: &Value| -> Value {
+            if !is_zombie_villager {
+                return value.clone();
+            }
+            let mut map = value.as_object().cloned().unwrap_or_default();
+            let Some(inner) = map.get_mut("values").and_then(Value::as_object_mut) else {
+                return Value::Object(map);
+            };
+            inner.remove("attributes");
+            inner.remove("active_effects");
+            Value::Object(map)
+        };
+        let original = case.original.as_ref().map(comparable);
+        let written = case.written.as_ref().map(comparable);
         report.check(
-            case.original.is_some() && case.original == case.written,
+            original.is_some() && original == written,
             format!(
                 "entity {label}: official load -> save changed the NBT: {}",
                 first_difference(
-                    case.original.as_ref().unwrap_or(&Value::Null),
-                    case.written.as_ref().unwrap_or(&Value::Null)
+                    original.as_ref().unwrap_or(&Value::Null),
+                    written.as_ref().unwrap_or(&Value::Null)
                 )
             ),
         );
@@ -556,26 +579,32 @@ fn run_cases(
                 let tree = read_entity_tree(&tag, &mut next)
                     .map_err(|error| error.to_string())?
                     .expect("jockey root is modelled");
+                let root_uid = tree[0].public.uid;
+                let passengers = match &tree[0].public.kind {
+                    mc_bamboo_blocks::entity::KindPublic::Mob(mob) => mob.passengers.clone(),
+                    _ => unreachable!("a jockey's vehicle is a mob"),
+                };
+                // 一名（鸡骑士）或两名（尸壳骆驼）乘客都要逐位对上。
+                // Compare one (chicken jockey) or two (camel husk) passengers.
                 report.check(
-                    tree.len() == 2,
+                    tree.len() == passengers.len() + 1,
                     format!(
-                        "entity {label}: Bamboo read {} rows, expected 2",
-                        tree.len()
+                        "entity {label}: Bamboo read {} rows, expected {}",
+                        tree.len(),
+                        passengers.len() + 1
                     ),
                 );
-                if tree.len() == 2 {
-                    let root_uid = tree[0].public.uid;
+                if tree.len() == passengers.len() + 1 {
                     report.check(
                         tree[0].public.vehicle.is_none()
-                            && tree[1].public.vehicle == Some(root_uid),
+                            && tree[1..]
+                                .iter()
+                                .all(|row| row.public.vehicle == Some(root_uid)),
                         format!("entity {label}: Bamboo lost the rider's vehicle link"),
                     );
-                    let passengers = match &tree[0].public.kind {
-                        mc_bamboo_blocks::entity::KindPublic::Mob(mob) => &mob.passengers,
-                        _ => unreachable!("a jockey's vehicle is a mob"),
-                    };
+                    let rider_ids: Vec<_> = tree[1..].iter().map(|row| row.public.uid).collect();
                     report.check(
-                        passengers.as_slice() == [tree[1].public.uid],
+                        passengers == rider_ids,
                         format!("entity {label}: Bamboo lost the vehicle's passenger list"),
                     );
                     let rows: std::collections::BTreeMap<_, _> = tree
@@ -1546,6 +1575,131 @@ fn entity_cases() -> Vec<Tag> {
     out.extend(fish_archive_cases());
     out.extend(jockey_archive_cases());
     out.extend(guardian_archive_cases());
+    out.extend(zombie_villager_archive_cases());
+    out.extend(parched_jockey_archive_cases());
+    out
+}
+
+/// 尸壳骆驼载两名乘客（尸壳、焦骸）的存档树：`Passengers` 嵌在载具里，
+/// 官方 `loadEntityRecursive` 逐层重存。
+///
+/// A camel husk carrying two passengers (husk and parched): `Passengers` is
+/// nested in the vehicle and the official recursive loader resaves each layer.
+fn parched_jockey_archive_cases() -> Vec<Tag> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+
+    let mut store = mc_bamboo_blocks::EntityStore::new();
+    let camel = store.spawn(Entity::by_mob_type(
+        MobType::CamelHusk,
+        Vec3::new(1.5, 64.0, -2.5),
+    ));
+    let husk = store.spawn(Entity::by_mob_type(
+        MobType::Husk,
+        Vec3::new(1.5, 64.0, -2.0),
+    ));
+    let parched = store.spawn(Entity::by_mob_type(
+        MobType::Parched,
+        Vec3::new(1.5, 64.0, -3.2),
+    ));
+    // 官方 `loadEntityRecursive` 用 `startRiding` 把乘客的朝向归零；夹具先对齐。
+    // The official recursive loader zeroes passenger facing via `startRiding`;
+    // align the fixture up front.
+    for uid in [camel, husk, parched] {
+        store.with_mut(uid, |entity| {
+            entity.y_rot = 0.0;
+            entity.with_mob(|_, mob| {
+                mob.y_head_rot = 0.0;
+                mob.y_body_rot = 0.0;
+                mob.x_rot = 0.0;
+            });
+        });
+    }
+    store.with_mut(camel, |entity| {
+        entity.with_mob(|_, mob| mob.passengers.extend([husk, parched]));
+    });
+    for rider in [husk, parched] {
+        store.with_mut(rider, |entity| {
+            entity.vehicle = Some(camel);
+        });
+    }
+    let rows: BTreeMap<i32, mc_bamboo_blocks::entity::EntityRow> =
+        [store.get(camel), store.get(husk), store.get(parched)]
+            .into_iter()
+            .flatten()
+            .map(|entity| {
+                let row = entity.split();
+                (row.public.uid, row)
+            })
+            .collect();
+    // 再读再写一遍：官方 `loadEntityRecursive` 会把乘客的朝向归零并补上懒创建的
+    // 属性实例，和鸡骑士夹具一样先归一化，两边比的才是存档层。
+    // Read and write once more: the official recursive loader zeroes passenger
+    // rotation and creates lazy attribute instances, so normalize first just
+    // like the chicken-jockey fixture.
+    let first = write_entity_tree(&rows[&camel], &|uid| rows.get(&uid).cloned()).unwrap();
+    let mut next = 1 << 24;
+    let tree = read_entity_tree(&first, &mut next).unwrap().unwrap();
+    let root = tree[0].public.uid;
+    let rebuilt: BTreeMap<i32, mc_bamboo_blocks::entity::EntityRow> =
+        tree.into_iter().map(|row| (row.public.uid, row)).collect();
+    vec![write_entity_tree(&rebuilt[&root], &|uid| rebuilt.get(&uid).cloned()).unwrap()]
+}
+
+/// 僵尸村民的存档：`VillagerData`、`VillagerDataFinalized`、`Offers`、`Gossips`、
+/// `ConversionTime`、`ConversionPlayer`、`Xp`，加上僵尸一系的 `IsBaby` /
+/// `CanBreakDoors` / 溺水计时。官方 `EntityType.loadEntityRecursive` 逐键重存。
+///
+/// Zombie-villager archive: the six villager keys plus the zombie branch's
+/// baby / door / drowning keys, resaved by the official entity loader.
+fn zombie_villager_archive_cases() -> Vec<Tag> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_nbt::Tag;
+
+    let mut out = Vec::new();
+    for converting in [false, true] {
+        let mut store = mc_bamboo_blocks::EntityStore::new();
+        let uid = store.spawn(Entity::by_mob_type(
+            MobType::ZombieVillager,
+            Vec3::new(1.5, 64.0, -3.5),
+        ));
+        store.with_mut(uid, |entity| {
+            entity.with_mob(|_, mob| {
+                mob.villager.kind =
+                    mc_bamboo_data::villager::type_id("minecraft:taiga").unwrap_or(0);
+                mob.villager.profession =
+                    mc_bamboo_data::villager::profession_id("minecraft:farmer").unwrap_or(0);
+                mob.villager.level = 3;
+                mob.villager.finalized = true;
+                mob.villager.xp = 42;
+                // `Offers` / `Gossips` 是原样保留的原文，官方 codec 会规范化
+                // 空列表；这里留空，由 mob-oracle 的存档场景逐键比。
+                // `Offers` / `Gossips` are verbatim tags; the official codec
+                // normalizes empty lists, so the dedicated mob-oracle scene
+                // compares those two keys instead.
+                mob.zombie_villager.converting = converting;
+                mob.zombie_villager.conversion_time = if converting { 123 } else { -1 };
+                mob.zombie_villager.conversion_player = if converting {
+                    Some([0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0])
+                } else {
+                    None
+                };
+                mob.zombie_baby = false;
+                mob.can_break_doors = true;
+            });
+        });
+        let mut tag = write_entity(&store.get(uid).expect("fresh zombie villager").split())
+            .expect("zombie villager archive");
+        // 官方 loader 会把懒创建的属性实例写回去（空的 `attributes` 键被补成
+        // 已实例化的条目），这里把 Bamboo 的空表去掉，避免把已知的懒创建差异
+        // 算成僵尸村民存档键的差异。
+        // The official loader writes back lazily instantiated attributes; drop
+        // Bamboo's empty list so the known lazy-attribute difference does not
+        // obscure the zombie-villager keys under test.
+        if let Tag::Compound(entries) = &mut tag {
+            entries.retain(|(key, _)| key != "attributes");
+        }
+        out.push(tag);
+    }
     out
 }
 
@@ -1966,13 +2120,67 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
         compound(vec![
             ("id", Tag::String("minecraft:cow".to_owned())),
             ("Pos", doubles([0.5, 64.0, 0.5])),
-            ("UUID", uuid),
+            ("UUID", uuid.clone()),
             ("InLove", Tag::Int(512)),
             ("Age", Tag::Int(4000)),
             ("variant", Tag::String("minecraft:cold".to_owned())),
         ]),
     ));
     out.extend(brain_resave_cases());
+    // 焦骸没有自己的存档键（`AbstractSkeleton.readAdditionalSaveData` 只调 super
+    // 再重挑武器目标），尸壳骆驼和普通骆驼共用 `LastPoseTick`。
+    // Parched has no own save keys; camel husks share `LastPoseTick` with camels.
+    out.push((
+        "parched_bare".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:parched".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+        ]),
+    ));
+    out.push((
+        "parched_equipped".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:parched".to_owned())),
+            ("Pos", doubles([1.5, 64.0, 2.5])),
+            ("UUID", uuid.clone()),
+            (
+                "Rotation",
+                Tag::List(vec![Tag::Float(37.0), Tag::Float(-12.0)]),
+            ),
+            ("Health", Tag::Float(9.0)),
+            ("LeftHanded", Tag::Byte(1)),
+            ("CanPickUpLoot", Tag::Byte(1)),
+            ("PersistenceRequired", Tag::Byte(1)),
+            (
+                "HandItems",
+                Tag::List(vec![
+                    compound(vec![
+                        ("id", Tag::String("minecraft:bow".to_owned())),
+                        ("count", Tag::Int(1)),
+                    ]),
+                    compound(vec![]),
+                ]),
+            ),
+        ]),
+    ));
+    out.push((
+        "camel_husk_bare".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:camel_husk".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+        ]),
+    ));
+    out.push((
+        "camel_husk_sitting".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:camel_husk".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid),
+            ("LastPoseTick", Tag::Long(-1000)),
+        ]),
+    ));
     let mut store = mc_bamboo_blocks::EntityStore::new();
     let uid = store.spawn(Entity::cow(Vec3::new(8.5, 65.0, 8.5)));
     let row = store.get(uid).expect("刚生成").split();

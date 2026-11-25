@@ -339,6 +339,16 @@ pub enum EntityData {
     ///
     /// `AbstractVillager.DATA_UNHAPPY_COUNTER` (index 18, an INT).
     VillagerUnhappy(i32),
+    /// `ZombieVillager.DATA_CONVERTING_ID`（index 19，BOOLEAN）。
+    ZombieVillagerConverting(bool),
+    /// `ZombieVillager.DATA_VILLAGER_DATA`（index 20）。
+    ZombieVillagerData {
+        kind: i32,
+        profession: i32,
+        level: i32,
+    },
+    /// `ZombieVillager.DATA_VILLAGER_DATA_FINALIZED`（index 21，BOOLEAN）。
+    ZombieVillagerDataFinalized(bool),
     /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
     ///
     /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
@@ -516,6 +526,13 @@ impl EntityData {
             Self::VillagerData { .. } => mc_bamboo_data::villager::VILLAGER_DATA_INDEX,
             Self::VillagerDataFinalized(_) => {
                 mc_bamboo_data::villager::VILLAGER_DATA_FINALIZED_INDEX
+            }
+            Self::ZombieVillagerConverting(_) => {
+                mc_bamboo_data::villager::ZOMBIE_VILLAGER_CONVERTING_INDEX
+            }
+            Self::ZombieVillagerData { .. } => mc_bamboo_data::villager::ZOMBIE_VILLAGER_DATA_INDEX,
+            Self::ZombieVillagerDataFinalized(_) => {
+                mc_bamboo_data::villager::ZOMBIE_VILLAGER_DATA_FINALIZED_INDEX
             }
             Self::RabbitVariant(_) => mc_bamboo_data::entity_types::RABBIT_VARIANT,
             Self::CowSoundVariant(_) => 19,
@@ -972,6 +989,28 @@ impl EntityData {
             Self::DrownedConverting(converting) => {
                 write_data_header(out, 18, SERIALIZER_BOOLEAN);
                 write_bool(out, *converting);
+            }
+            Self::ZombieVillagerConverting(converting) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *converting);
+            }
+            Self::ZombieVillagerData {
+                kind,
+                profession,
+                level,
+            } => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::villager::VILLAGER_DATA_SERIALIZER,
+                );
+                write_varint(out, *kind);
+                write_varint(out, *profession);
+                write_varint(out, *level);
+            }
+            Self::ZombieVillagerDataFinalized(finalized) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *finalized);
             }
             Self::WitchUsingItem(using) => {
                 write_data_header(out, 17, SERIALIZER_BOOLEAN);

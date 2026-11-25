@@ -50,6 +50,7 @@ mod particle;
 mod players;
 mod playsound;
 mod random;
+mod ride;
 mod save;
 mod scoreboard;
 pub(crate) mod select;
@@ -1482,6 +1483,7 @@ mod official_tree {
     const ADMIN_ROOTS: &[&str] = &[
         "data",
         "kill",
+        "ride",
         "summon",
         "op",
         "deop",

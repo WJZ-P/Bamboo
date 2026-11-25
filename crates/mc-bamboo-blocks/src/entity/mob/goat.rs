@@ -1632,6 +1632,7 @@ mod tests {
             creative,
             position: Vec3::new(1.0, 64.0, 0.0),
             sneaking: false,
+            difficulty: 2,
         };
         let fed = |creative: bool| MobInteraction {
             result: InteractionResult::SuccessServer,

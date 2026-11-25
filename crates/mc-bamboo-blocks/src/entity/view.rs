@@ -579,6 +579,10 @@ impl<T: BlockSource> BlockView for SourceView<T> {
             .max(self.brightness(LightLayer::Sky, pos) - darken)
     }
 
+    fn is_raining(&self) -> bool {
+        self.0.facts().weather.is_raining()
+    }
+
     fn is_raining_at(&self, pos: BlockPos) -> bool {
         let facts = self.0.facts();
         if !facts.weather.is_raining() || !self.can_see_sky(pos) {

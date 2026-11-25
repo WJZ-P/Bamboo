@@ -587,10 +587,22 @@ fn tree_pos(me: &Entity, mob: &Mob, view: &dyn BlockView) -> Option<Vec3> {
 
 // ---- 飞行的移动控制 ----
 
-/// `FlyingMoveControl(this, 10, false)`。
+/// `FlyingMoveControl(this, 10, false)`（鹦鹉）。
 ///
-/// `FlyingMoveControl(this, 10, false)`.
+/// `FlyingMoveControl(this, 10, false)` (parrot).
 pub(super) fn move_control_tick(me: &mut Entity, mob: &mut Mob) {
+    flying_move_control_tick(me, mob, 10.0, false);
+}
+
+/// `FlyingMoveControl(this, maxTurn, hoversInPlace)`。
+///
+/// `FlyingMoveControl(this, maxTurn, hoversInPlace)`.
+pub(super) fn flying_move_control_tick(
+    me: &mut Entity,
+    mob: &mut Mob,
+    max_turn: f32,
+    hovers_in_place: bool,
+) {
     if mob.mover.operation == super::control::Operation::MoveTo {
         mob.mover.operation = super::control::Operation::Wait;
         mob.no_gravity = true;
@@ -598,7 +610,7 @@ pub(super) fn move_control_tick(me: &mut Entity, mob: &mut Mob) {
         let dz = mob.mover.wanted_z - me.position.z;
         let dy = mob.mover.wanted_y - me.position.y;
         let distance = dx * dx + dy * dy + dz * dz;
-        if distance < 2.500_000_3e-7 {
+        if distance < 2.500_000_277_905_201e-7 {
             mob.yya = 0.0;
             mob.zza = 0.0;
             return;
@@ -614,11 +626,14 @@ pub(super) fn move_control_tick(me: &mut Entity, mob: &mut Mob) {
         let horizontal = (dx * dx + dz * dz).sqrt();
         if dy.abs() > f64::from(1.0e-5_f32) || horizontal.abs() > f64::from(1.0e-5_f32) {
             let pitch = (-(mth::atan2(dy, horizontal) * 57.295_776_367_187_5)) as f32;
-            mob.x_rot = super::control::move_rotlerp(mob.x_rot, pitch, 10.0);
+            let rotated = super::control::move_rotlerp(mob.x_rot, pitch, max_turn);
+            mob.x_rot = super::control::clamp_x_rot(rotated, mob.x_rot);
             mob.yya = if dy > 0.0 { speed } else { -speed };
         }
     } else {
-        mob.no_gravity = false;
+        if !hovers_in_place {
+            mob.no_gravity = false;
+        }
         mob.yya = 0.0;
         mob.zza = 0.0;
     }
