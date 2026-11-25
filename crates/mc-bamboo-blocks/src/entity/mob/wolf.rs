@@ -10,10 +10,12 @@
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{entity_types, items, registries::attribute, tags::item_tags};
 use mc_bamboo_protocol::item::ItemStack;
+use mc_bamboo_protocol::packet::play::EquipmentSlot;
 
 use super::{
     Mob, MobEvent, MobType,
     attributes::{Attribute, Attributes},
+    equipment::GUARANTEED_DROP_CHANCE,
     goals::{self, Goal, GoalSelector, WrappedGoal},
     interact::{MobInteractRequest, MobInteraction},
     living,
@@ -37,6 +39,12 @@ const DEFAULT_COLLAR: i32 = 14;
 const TAME_HEALTH: f32 = 40.0;
 /// `Wolf.START_HEALTH`。
 const START_HEALTH: f64 = 8.0;
+/// `SoundEvents.WOLF_ARMOR_REPAIR`：用鳞甲修狼铠。
+const SOUND_ARMOR_REPAIR: &str = "minecraft:item.wolf_armor.repair";
+/// `Equippable.equipSound`（wolf_armor）：穿狼铠。
+const SOUND_ARMOR_EQUIP: &str = "minecraft:item.armor.equip_wolf";
+/// `EquipmentSlot.BODY` 在 `equipment_slot` 组件枚举里的 ID。
+const BODY_SLOT: i32 = 6;
 
 /// `wolf_variant` 注册表里的条目名，下标就是同步用的注册表 ID。
 ///
@@ -501,6 +509,109 @@ pub(super) fn can_mate(mob: &Mob, partner: &super::MobPublic) -> bool {
             && partner.tame_flags & tame::FLAG_SITTING == 0)
 }
 
+// ---- 狼铠 ----
+
+/// `Mob.isWearingBodyArmor`：BODY 槽里有一件可用在该槽的可装备物品。
+///
+/// `Mob.isWearingBodyArmor`: the BODY slot holds a valid equippable item for it.
+pub(super) fn wearing_body_armor(mob: &Mob) -> bool {
+    let body = mob.equipment.get(EquipmentSlot::Body);
+    !body.is_empty() && body_equippable(body).is_some()
+}
+
+/// `LivingEntity.isEquippableInSlot(stack, BODY)` 对狼：可装备组件指向 BODY 且允许狼。
+///
+/// `isEquippableInSlot(stack, BODY)` for a wolf: the equippable component names BODY
+/// and allows the wolf entity type.
+fn body_equippable(stack: &ItemStack) -> Option<mc_bamboo_protocol::components::value::Equippable> {
+    use mc_bamboo_data::registries::data_component_type as kinds;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, defaults};
+    let patch = ComponentPatch::from_opaque(stack).ok()?;
+    match defaults::resolve(stack.item, &patch, kinds::EQUIPPABLE) {
+        Some(ComponentValue::Equippable(eq))
+            if eq.slot == BODY_SLOT
+                && crate::dispense::equippable_allows(
+                    eq.allowed_entities.as_ref(),
+                    MobType::Wolf.entity_type(),
+                ) =>
+        {
+            Some(eq.clone())
+        }
+        _ => None,
+    }
+}
+
+/// `ItemStack.isValidRepairItem`：狼铠的 `repairable` 组件包含手里这个物品。
+///
+/// `ItemStack.isValidRepairItem`: the armour's `repairable` component contains the held item.
+fn is_valid_repair(armor: &ItemStack, held: &ItemStack) -> bool {
+    use mc_bamboo_data::registries::data_component_type as kinds;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, defaults};
+    let Ok(patch) = ComponentPatch::from_opaque(armor) else {
+        return false;
+    };
+    match defaults::resolve(armor.item, &patch, kinds::REPAIRABLE) {
+        Some(ComponentValue::Repairable(set)) => repairable_contains(set, held.item),
+        _ => false,
+    }
+}
+
+fn repairable_contains(set: &mc_bamboo_protocol::components::cursor::HolderSet, item: i32) -> bool {
+    use mc_bamboo_protocol::components::cursor::HolderSet;
+    match set {
+        HolderSet::Ids(ids) => ids.contains(&item),
+        HolderSet::Tag(name) => {
+            let name = name.trim_start_matches('#');
+            mc_bamboo_data::tags::TAG_GROUPS
+                .iter()
+                .find(|group| group.registry == "minecraft:item")
+                .and_then(|group| {
+                    group
+                        .tags
+                        .iter()
+                        .find(|tag| tag.name.trim_start_matches('#') == name)
+                })
+                .is_some_and(|tag| tag.ids.contains(&item))
+        }
+    }
+}
+
+/// `ItemStack.getDamageValue`。
+fn body_damage(stack: &ItemStack) -> i32 {
+    crate::durability::damage_of(stack).unwrap_or(0)
+}
+
+/// `ItemStack.getMaxDamage`。
+fn body_max_damage(stack: &ItemStack) -> i32 {
+    use mc_bamboo_data::registries::data_component_type as kinds;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, defaults};
+    let Ok(patch) = ComponentPatch::from_opaque(stack) else {
+        return 0;
+    };
+    match defaults::resolve(stack.item, &patch, kinds::MAX_DAMAGE) {
+        Some(ComponentValue::MaxDamage(value)) => *value,
+        _ => 0,
+    }
+}
+
+/// `ItemStack.setDamageValue`：修复时把 BODY 槽的耐久损耗写回去。
+fn set_body_damage(mob: &mut Mob, damage: i32) {
+    use mc_bamboo_data::registries::data_component_type as kinds;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+    mob.equipment.edit(EquipmentSlot::Body, |stack| {
+        let Ok(mut patch) = ComponentPatch::from_opaque(stack) else {
+            return;
+        };
+        patch.put(
+            kinds::DAMAGE,
+            PatchEntry::Set(ComponentValue::Damage(damage.max(0))),
+        );
+        let (added, removed) = patch.to_opaque();
+        stack.added = added;
+        stack.removed = removed;
+    });
+}
+
 // ---- 交互 ----
 
 /// `Wolf.mobInteract`。`now` 是岛时钟，判断还在不在生气。
@@ -515,6 +626,17 @@ pub(super) fn interact(
 ) -> MobInteraction {
     let held = &req.held;
     let consume = !req.creative;
+    // `Mob.interact` 先走 `Entity.interact` 的剪刀卸装；`Wolf.canShearEquipment` 只认主人。
+    // `Mob.interact` runs `Entity.interact`'s equipment shearing first; the wolf override
+    // accepts only the owner.
+    if held.item == items::SHEARS
+        && !mob.is_vehicle()
+        && !req.sneaking
+        && mob.tame.is_owned_by(Some(req.player_uuid))
+        && let Some(outcome) = super::equine::interact::attempt_to_shear_equipment(me, mob, req)
+    {
+        return outcome;
+    }
     if mob.tame.is_tame() {
         let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;
         if is_food(held) && mob.health < max {
@@ -526,24 +648,58 @@ pub(super) fn interact(
             return outcome(InteractionResult::Success, consume);
         }
         let owned = mob.tame.is_owned_by(Some(req.player_uuid));
-        let dye = item_is_tagged(held.item, item_tags::WOLF_COLLAR_DYES);
-        if !dye || !owned {
-            let animal = super::interact::animal_interact(me, mob, req, level_next_float);
-            if !animal.result.consumes_action() && owned {
-                mob.tame.ordered_to_sit = !mob.tame.ordered_to_sit;
-                mob.jumping = false;
-                mob.navigation.stop();
-                mob.target = None;
-                return outcome(InteractionResult::Success, false);
+        // 项圈染料且是主人：换色；同色或没有 dye 组件时直接走 `super.mobInteract`
+        //（官方跳到染料分支之后的 super，不切换坐姿）。
+        // A collar dye from the owner recolours it; the same colour or no `dye` component
+        // goes straight to `super.mobInteract` (vanilla skips the sit toggle).
+        if item_is_tagged(held.item, item_tags::WOLF_COLLAR_DYES) && owned {
+            if let Some(color) = dye_of(held)
+                && color != mob.wolf.collar
+            {
+                mob.wolf.collar = color;
+                return outcome(InteractionResult::Success, consume);
             }
-            return animal;
+            return super::interact::animal_interact(me, mob, req, level_next_float);
         }
-        if let Some(color) = dye_of(held)
-            && color != mob.wolf.collar
-        {
-            mob.wolf.collar = color;
+        // `isEquippableInSlot(held, BODY)`、BODY 空、主人、成年：穿上狼铠。
+        // Equip the armour: `isEquippableInSlot(held, BODY)`, empty BODY, owner, adult.
+        if !wearing_body_armor(mob) && owned && !mob.is_baby() && body_equippable(held).is_some() {
+            let mut one = held.clone();
+            one.count = 1;
+            mob.equipment.set(EquipmentSlot::Body, one);
+            mob.equipment
+                .set_drop_chance(EquipmentSlot::Body, GUARANTEED_DROP_CHANCE);
+            // `onEquipItem`：非静音时先用生物随机源取一次 `nextLong` 当种子，再播装备声。
+            // `onEquipItem`: when not silent, draw a `nextLong` seed from the mob random first.
+            if !mob.silent {
+                let _ = me.random.next_long();
+                living::play_sound(me, mob, SOUND_ARMOR_EQUIP, 1.0, 1.0);
+            }
             return outcome(InteractionResult::Success, consume);
         }
+        // 用犰狳鳞甲修：坐着、穿着、主人、狼铠有损耗、手里是有效修复材料。
+        // Repair with an armadillo scute: sitting, armoured, owner, damaged, valid repair item.
+        if mob.tame.in_sitting_pose() && owned && wearing_body_armor(mob) {
+            let body = mob.equipment.get(EquipmentSlot::Body).clone();
+            if body_damage(&body) > 0 && is_valid_repair(&body, held) {
+                let repair = (body_max_damage(&body) as f32 * 0.125) as i32;
+                let new_damage = (body_damage(&body) - repair).max(0);
+                set_body_damage(mob, new_damage);
+                living::play_sound(me, mob, SOUND_ARMOR_REPAIR, 1.0, 1.0);
+                return outcome(InteractionResult::Success, true);
+            }
+        }
+        // `TamableAnimal.mobInteract`；主人且没消耗动作时再切换坐姿。
+        // `TamableAnimal.mobInteract`; the owner toggles sitting when the action is unused.
+        let animal = super::interact::animal_interact(me, mob, req, level_next_float);
+        if !animal.result.consumes_action() && owned {
+            mob.tame.ordered_to_sit = !mob.tame.ordered_to_sit;
+            mob.jumping = false;
+            mob.navigation.stop();
+            mob.target = None;
+            return outcome(InteractionResult::Success, false);
+        }
+        return animal;
     } else if held.item == items::BONE && !mob.wolf.is_angry(now) {
         let tamed = try_to_tame(me, mob, req.player_uuid);
         return MobInteraction {
@@ -1068,5 +1224,167 @@ mod tests {
         assert_eq!(sound(&mob, Sound::Growl), "minecraft:entity.wolf_big.growl");
         mob.age = -1;
         assert_eq!(sound(&mob, Sound::Step), "minecraft:entity.baby_wolf.step");
+    }
+
+    fn request_stack(held: ItemStack, player: u8) -> MobInteractRequest {
+        MobInteractRequest {
+            player_uid: 1,
+            player_uuid: [player; 16],
+            hand: mc_bamboo_core::Hand::Main,
+            held,
+            creative: false,
+            position: Vec3::default(),
+            sneaking: false,
+            difficulty: 2,
+        }
+    }
+
+    /// 主人给驯服的狼穿上狼铠：BODY 槽、必掉、消耗一个、播装备声。
+    #[test]
+    fn the_owner_equips_wolf_armor() {
+        let (mut me, mut mob) = tamed_wolf();
+        let outcome = interact(
+            &mut me,
+            &mut mob,
+            &request_stack(ItemStack::new(items::WOLF_ARMOR, 1), 7),
+            0,
+            &mut || 0.0,
+        );
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert!(outcome.shrink_held);
+        assert_eq!(
+            mob.equipment.get(EquipmentSlot::Body).item,
+            items::WOLF_ARMOR
+        );
+        assert!(mob.equipment.is_preserved(EquipmentSlot::Body));
+        assert!(mob.events.iter().any(|event| matches!(
+            event,
+            MobEvent::Sound { sound, .. } if *sound == SOUND_ARMOR_EQUIP
+        )));
+    }
+
+    /// 陌生人、幼崽、已经有铠时都不会把狼铠穿到 BODY 槽。
+    #[test]
+    fn wolf_armor_needs_owner_adult_and_a_free_slot() {
+        let (mut me, mut mob) = tamed_wolf();
+        let _ = interact(
+            &mut me,
+            &mut mob,
+            &request_stack(ItemStack::new(items::WOLF_ARMOR, 1), 8),
+            0,
+            &mut || 0.0,
+        );
+        assert!(mob.equipment.get(EquipmentSlot::Body).is_empty());
+        // 主人穿上后，再拿一件不会重复装备。
+        let _ = interact(
+            &mut me,
+            &mut mob,
+            &request_stack(ItemStack::new(items::WOLF_ARMOR, 1), 7),
+            0,
+            &mut || 0.0,
+        );
+        assert_eq!(
+            mob.equipment.get(EquipmentSlot::Body).item,
+            items::WOLF_ARMOR
+        );
+        let _ = interact(
+            &mut me,
+            &mut mob,
+            &request_stack(ItemStack::new(items::WOLF_ARMOR, 1), 7),
+            0,
+            &mut || 0.0,
+        );
+        assert_eq!(mob.equipment.get(EquipmentSlot::Body).count, 1);
+        // 幼崽穿不上。
+        let (mut me, mut baby) = tamed_wolf();
+        baby.age = -1;
+        let _ = interact(
+            &mut me,
+            &mut baby,
+            &request_stack(ItemStack::new(items::WOLF_ARMOR, 1), 7),
+            0,
+            &mut || 0.0,
+        );
+        assert!(baby.equipment.get(EquipmentSlot::Body).is_empty());
+    }
+
+    /// 剪刀把狼铠从 BODY 槽卸下并掉落。
+    #[test]
+    fn shears_take_wolf_armor_off_the_owner() {
+        let (mut me, mut mob) = tamed_wolf();
+        let _ = interact(
+            &mut me,
+            &mut mob,
+            &request_stack(ItemStack::new(items::WOLF_ARMOR, 1), 7),
+            0,
+            &mut || 0.0,
+        );
+        let outcome = interact(
+            &mut me,
+            &mut mob,
+            &request_stack(ItemStack::new(items::SHEARS, 1), 7),
+            0,
+            &mut || 0.0,
+        );
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert_eq!(
+            outcome.drop_stack.as_ref().map(|stack| stack.item),
+            Some(items::WOLF_ARMOR)
+        );
+        assert!(mob.equipment.get(EquipmentSlot::Body).is_empty());
+    }
+
+    /// 犰狳鳞甲在狼坐下时把狼铠的耐久损耗减 8（max_damage * 0.125）。
+    #[test]
+    fn an_armadillo_scute_repairs_worn_wolf_armor() {
+        let (mut me, mut mob) = tamed_wolf();
+        let mut armor = ItemStack::new(items::WOLF_ARMOR, 1);
+        crate::durability::set_damage_for_oracle(&mut armor, 20);
+        mob.equipment.set(EquipmentSlot::Body, armor);
+        mob.tame.set_in_sitting_pose(true);
+        let outcome = interact(
+            &mut me,
+            &mut mob,
+            &request_stack(ItemStack::new(items::ARMADILLO_SCUTE, 1), 7),
+            0,
+            &mut || 0.0,
+        );
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert!(outcome.shrink_held);
+        assert_eq!(
+            crate::durability::damage_of(mob.equipment.get(EquipmentSlot::Body)),
+            Some(12)
+        );
+        assert!(mob.events.iter().any(|event| matches!(
+            event,
+            MobEvent::Sound { sound, .. } if *sound == SOUND_ARMOR_REPAIR
+        )));
+    }
+
+    /// 狼铠（含耐久损耗）随通用的 `equipment` / `drop_chances` 键存档往返。
+    #[test]
+    fn wolf_armor_survives_a_save_and_load() {
+        let (mut me, mut mob) = tamed_wolf();
+        let mut armor = ItemStack::new(items::WOLF_ARMOR, 1);
+        crate::durability::set_damage_for_oracle(&mut armor, 30);
+        mob.equipment.set(EquipmentSlot::Body, armor);
+        mob.equipment
+            .set_drop_chance(EquipmentSlot::Body, GUARANTEED_DROP_CHANCE);
+        me.kind = crate::entity::EntityKind::Mob(Box::new(mob.clone()));
+        let tag = super::super::nbt::write_mob(&me.split()).expect("wolf saves");
+        let row = super::super::nbt::read_mob(&tag, "minecraft:wolf", 4)
+            .expect("reads")
+            .expect("a wolf");
+        let entity = row.into_entity();
+        let loaded = entity.kind.mob().expect("a mob");
+        assert_eq!(
+            loaded.equipment.get(EquipmentSlot::Body).item,
+            items::WOLF_ARMOR
+        );
+        assert_eq!(
+            crate::durability::damage_of(loaded.equipment.get(EquipmentSlot::Body)),
+            Some(30)
+        );
+        assert!(loaded.equipment.is_preserved(EquipmentSlot::Body));
     }
 }
