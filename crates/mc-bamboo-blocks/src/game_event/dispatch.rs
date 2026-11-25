@@ -26,6 +26,18 @@ pub struct EventContext {
     pub spectator: bool,
     /// `tryGetPlayer(sourceEntity)`：事件的源头是不是一名玩家。
     pub source_player: Option<crate::entity::EntityUid>,
+    /// `GameEvent.Context.sourceEntity()`：发出事件的实体，振动到达时按 UUID 找回，
+    /// 作为 `onReceiveVibration` 的第 4 个参数。
+    ///
+    /// `GameEvent.Context.sourceEntity()`: the entity that emitted the event, resolved
+    /// by UUID as the fourth `onReceiveVibration` argument.
+    pub source_entity: Option<crate::entity::EntityUid>,
+    /// `VibrationInfo.getProjectileOwner()`：振动由射弹产生时的射弹拥有者，
+    /// 作为 `onReceiveVibration` 的第 5 个参数；不是射弹时为 `None`。
+    ///
+    /// `VibrationInfo.getProjectileOwner()`: the projectile owner when a projectile
+    /// caused the vibration, as the fifth `onReceiveVibration` argument; `None` otherwise.
+    pub projectile_owner: Option<crate::entity::EntityUid>,
 }
 
 /// `GameEventListener.DeliveryMode`：感测体等都是 `BY_DISTANCE`。
