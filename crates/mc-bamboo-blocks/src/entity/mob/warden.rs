@@ -139,9 +139,11 @@ impl AngerManagement {
         let known = self.suspects.iter().position(|s| s.uid == uid);
         let base = known.map(|index| self.suspects[index].anger).unwrap_or(0);
         let mut anger = (base + amount).min(Self::MAX_ANGER);
-        if known.is_none() {
-            if let Some(index) = self.anger_by_uuid.iter().position(|(id, _)| *id == uuid) {
-                anger = (anger + self.anger_by_uuid.remove(index).1).min(Self::MAX_ANGER);
+        if let Some(index) = known {
+            self.suspects[index].anger = anger;
+        } else {
+            if let Some(staged) = self.anger_by_uuid.iter().position(|(id, _)| *id == uuid) {
+                anger = (anger + self.anger_by_uuid.remove(staged).1).min(Self::MAX_ANGER);
             }
             self.suspects.push(Suspect {
                 uid,
@@ -149,8 +151,6 @@ impl AngerManagement {
                 anger,
                 is_player,
             });
-        } else {
-            self.suspects[known.unwrap()].anger = anger;
         }
         self.sort_and_update_highest();
         anger
