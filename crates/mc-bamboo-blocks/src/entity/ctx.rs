@@ -400,6 +400,11 @@ pub trait BlockView {
         false
     }
 
+    /// `level.random.nextDouble()`，并行视图同上给 0。
+    fn level_random_double(&self) -> f64 {
+        0.0
+    }
+
     /// 生物身上装备的 `hurtAndBreak(amount, entity, slot)`：耐久附魔用 `level.random`。
     /// 返回装备是不是坏了。并行的只读视图没有世界随机源，按没有耐久附魔算
     /// （带耐久附魔的装备扣耐久的次数和原版不同，是性能模式差异）。
@@ -820,6 +825,10 @@ impl BlockView for World<'_> {
 
     fn level_random_boolean(&self) -> bool {
         self.random().next_boolean()
+    }
+
+    fn level_random_double(&self) -> f64 {
+        self.random().next_double()
     }
 
     fn hurt_mob_equipment(

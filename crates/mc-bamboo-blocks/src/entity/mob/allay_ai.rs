@@ -447,19 +447,17 @@ fn throw_item(cx: &mut Cx, at: Vec3) {
     cx.ctx
         .emit(super::allay::throw_command(stack, origin, delta), cx.me);
     let time = cx.ctx.blocks().game_time();
-    if time % 7 == 0 {
-        let roll = cx.level_next_int(10);
-        if roll != 9 {
-            let pitch =
-                THROW_SOUND_PITCHES[cx.level_next_int(THROW_SOUND_PITCHES.len() as i32) as usize];
-            super::living::play_sound(
-                cx.me,
-                cx.mob,
-                "minecraft:entity.allay.item_thrown",
-                1.0,
-                pitch,
-            );
-        }
+    // `level.random.nextDouble() < 0.9`，先抽一个 double 再抽音高下标。
+    if time % 7 == 0 && cx.ctx.blocks().level_random_double() < 0.9 {
+        let pitch =
+            THROW_SOUND_PITCHES[cx.level_next_int(THROW_SOUND_PITCHES.len() as i32) as usize];
+        super::living::play_sound(
+            cx.me,
+            cx.mob,
+            "minecraft:entity.allay.item_thrown",
+            1.0,
+            pitch,
+        );
     }
 }
 

@@ -742,6 +742,10 @@ impl BlockView for ParallelBlockView<'_> {
         self.next_random().next_boolean()
     }
 
+    fn level_random_double(&self) -> f64 {
+        self.next_random().next_double()
+    }
+
     fn hurt_mob_equipment(
         &self,
         stack: &mut mc_bamboo_protocol::item::ItemStack,
