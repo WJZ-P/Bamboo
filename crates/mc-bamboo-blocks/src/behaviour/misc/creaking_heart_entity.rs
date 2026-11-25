@@ -17,12 +17,13 @@ use mc_bamboo_nbt::Tag;
 use crate::{
     BlockEntity, BlockState, World,
     archive::tag::{self, Result},
+    behaviour::common::pipe_property,
     entity::{
         Entity,
         mob::{MobType, creaking as mob_creaking},
     },
     shape::{self, CollisionContext},
-    state::{AXIS, CREAKING_HEART_STATE, CreakingHeartState},
+    state::{AXIS, CREAKING_HEART_STATE, CreakingHeartState, WATERLOGGED},
 };
 
 /// `CreakingHeartBlockEntity` 存档里的 UUID（四个 int）。
@@ -72,7 +73,7 @@ impl CreakingHeartEntity {
             pos,
             creaking: None,
             loading: false,
-            ticker: 20,
+            ticker: 0,
             ticks_existed: 0,
             output_signal: 0,
             protector_distance: None,
@@ -93,7 +94,7 @@ impl CreakingHeartEntity {
             pos,
             creaking,
             loading: creaking.is_some(),
-            ticker: 20,
+            ticker: 0,
             ticks_existed: 0,
             output_signal: 0,
             protector_distance: None,
@@ -211,8 +212,10 @@ impl CreakingHeartEntity {
             world.update_neighbour_for_output_signal(self.pos, block);
         }
 
+        // 官方 `ticker-- >= 0`：先看旧值再减，旧值非负就返回，为负才做状态检查。
+        let proceed = self.ticker < 0;
         self.ticker -= 1;
-        if self.ticker >= 0 {
+        if !proceed {
             return;
         }
         self.ticker = 20 + world.random().next_int(5);
@@ -449,41 +452,46 @@ fn can_hold_protector(world: &World, at: BlockPos) -> bool {
     })
 }
 
-/// `spreadResin`：从心沿苍白橡木 BFS 两层，找到能放树脂团的邻格。
+/// `spreadResin`：`BlockPos.breadthFirstTraversal(heart, 2, 64, ...)` 沿苍白橡木
+/// 找能放树脂团的邻格。visitor 只处理原木：邻居是空气 / 水源 / 缺这个面的树脂团时
+/// 补上 `opposite` 面并停下。
 fn spread_resin(world: &mut World, heart: BlockPos) -> Option<BlockPos> {
-    let mut visited = vec![heart];
     let mut frontier = vec![heart];
-    for _ in 0..2 {
+    for _ in 0..=2 {
         let mut next = Vec::new();
         for pos in frontier {
-            for side in [
-                Direction::Up,
-                Direction::Down,
-                Direction::North,
-                Direction::South,
-                Direction::East,
-                Direction::West,
-            ] {
+            // visitor(pos)：只有苍白橡木这一层会往邻格放树脂。
+            if world.block_state(pos).is_tagged(block_tags::PALE_OAK_LOGS) {
+                for side in world.random().shuffled_directions() {
+                    let neighbor = pos.relative(side);
+                    let opposite = side.opposite();
+                    let state = world.block_state(neighbor);
+                    let candidate = if state.is_air() {
+                        Some(BlockState(blocks::RESIN_CLUMP))
+                    } else if state.is(blocks::WATER) && world.fluid_state(neighbor).is_source() {
+                        Some(BlockState(blocks::RESIN_CLUMP).with(WATERLOGGED, true))
+                    } else if state.is(blocks::RESIN_CLUMP) {
+                        Some(state)
+                    } else {
+                        None
+                    };
+                    if let Some(candidate) = candidate
+                        && !candidate.get(pipe_property(opposite))
+                    {
+                        world.set_block_and_update(
+                            neighbor,
+                            candidate.with(pipe_property(opposite), true),
+                        );
+                        return Some(neighbor);
+                    }
+                }
+            }
+            // children(pos)：洗过的六个方向里，是苍白橡木的邻居。
+            for side in world.random().shuffled_directions() {
                 let neighbor = pos.relative(side);
-                if visited.contains(&neighbor)
-                    || !world.block_state(pos).is_tagged(block_tags::PALE_OAK_LOGS)
-                {
-                    continue;
+                if world.block_state(neighbor).is_tagged(block_tags::PALE_OAK_LOGS) {
+                    next.push(neighbor);
                 }
-                visited.push(neighbor);
-                let state = world.block_state(neighbor);
-                let clump = BlockState(blocks::RESIN_CLUMP)
-                    .default_state()
-                    .with(AXIS, side.axis());
-                if state.is_air() {
-                    world.set_block_and_update(neighbor, clump);
-                    return Some(neighbor);
-                }
-                if state.is(blocks::RESIN_CLUMP) {
-                    world.set_block_and_update(neighbor, clump);
-                    return Some(neighbor);
-                }
-                next.push(neighbor);
             }
         }
         frontier = next;
