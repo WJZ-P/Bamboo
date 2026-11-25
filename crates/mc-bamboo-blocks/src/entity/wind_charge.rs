@@ -310,7 +310,18 @@ pub fn impact(me: &Entity, world: &mut World<'_>, hit: WindChargeHit) {
         }
         _ => me.position,
     };
-    world.explode_wind_charge(center, variant.radius(), variant.knockback(), me.id);
+    // `ServerExplosion.canTriggerBlocks`：玩家风弹恒真，旋风人风弹看 `mob_griefing`。
+    let can_trigger_blocks = match variant {
+        WindChargeVariant::Player => true,
+        WindChargeVariant::Breeze => world.block_game_rules().mob_griefing,
+    };
+    world.explode_wind_charge(
+        center,
+        variant.radius(),
+        variant.knockback(),
+        me.id,
+        can_trigger_blocks,
+    );
     world.play_sound(
         center,
         sounds::sound_event(variant.sound()),

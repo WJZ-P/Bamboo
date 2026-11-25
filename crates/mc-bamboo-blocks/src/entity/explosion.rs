@@ -105,6 +105,7 @@ impl World<'_> {
         radius: f32,
         knockback: f32,
         source: EntityUid,
+        can_trigger_blocks: bool,
     ) {
         let mut broken = self.calculate_wind_charge_positions(center, radius);
         let block_count = broken.len() as i32;
@@ -114,10 +115,11 @@ impl World<'_> {
         let hit_players =
             hurt_living_by_explosion_with(self, damage, center, radius, false, knockback);
         // `interactWithBlocks`：打乱之后逐格 `onExplosionHit`。TRIGGER_BLOCK 时
-        // `BlockBehaviour.onExplosionHit` 在触发完方块效果后直接返回。
+        // `BlockBehaviour.onExplosionHit` 在触发完方块效果后直接返回；`canTriggerBlocks`
+        // 对 `BreezeWindCharge` 还看 `mob_griefing`，关着时门 / 按钮 / 拉杆不触发。
         self.random().shuffle(&mut broken);
         for pos in broken {
-            self.trigger_wind_charge_block(pos);
+            self.trigger_wind_charge_block(pos, can_trigger_blocks);
         }
         self.push_effect(Effect::Explode {
             center,
@@ -187,8 +189,13 @@ impl World<'_> {
     }
 
     /// `BlockBehaviour.onExplosionHit` 在 `TRIGGER_BLOCK` 下的门 / 按钮 / 拉杆 / 活板门
-    /// 触发。其它方块什么都不做，方块本身保留。
-    fn trigger_wind_charge_block(&mut self, pos: BlockPos) {
+    /// 触发。其它方块什么都不做，方块本身保留。`can_trigger_blocks` 是
+    /// `ServerExplosion.canTriggerBlocks`：`BreezeWindCharge` 在 `mob_griefing` 关着时
+    /// 不触发任何方块。
+    fn trigger_wind_charge_block(&mut self, pos: BlockPos, can_trigger_blocks: bool) {
+        if !can_trigger_blocks {
+            return;
+        }
         let state = self.block_state(pos);
         if state.is_air() {
             return;
@@ -892,7 +899,7 @@ mod wind_charge_tests {
             Vec3::new(1.0, 64.0, 0.5),
         ));
         let before = world.entity(cow).expect("cow").kind.mob().unwrap().health;
-        world.explode_wind_charge(Vec3::new(1.5, 64.5, 0.5), 1.2, 1.22, 0);
+        world.explode_wind_charge(Vec3::new(1.5, 64.5, 0.5), 1.2, 1.22, 0, true);
         let after = world.entity(cow).expect("cow still there");
         assert_eq!(
             after.kind.mob().unwrap().health,
