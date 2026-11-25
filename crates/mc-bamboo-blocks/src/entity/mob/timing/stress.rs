@@ -208,6 +208,8 @@ impl Terrain {
             game_mode: 0,
             mining_fatigue: None,
             creative: false,
+            flying: false,
+            explosion_knockback_resistance: 0.0,
             sneaking: false,
             sprinting: false,
             swimming: false,

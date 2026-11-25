@@ -136,6 +136,7 @@ impl Report {
             players: Vec::new(),
             game: None,
             wrong_was_hurt: false,
+            explosion_break: 0,
             inhabited: HashMap::new(),
             mob_teams: HashMap::new(),
             short_hunger: false,

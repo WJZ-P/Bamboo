@@ -88,6 +88,7 @@ fn level(blocks: &[[i32; 4]], first_id: i32) -> MobLevel {
         inhabited: Default::default(),
         mob_teams: Default::default(),
         wrong_was_hurt: false,
+        explosion_break: 0,
         short_hunger: false,
         ignore_bed_monsters: false,
     }

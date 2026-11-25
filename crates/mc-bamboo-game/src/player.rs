@@ -529,6 +529,10 @@ impl Player {
             alive: !self.health.is_dead_or_dying(),
             spectator: self.game_mode == GameMode::Spectator,
             creative: self.game_mode == GameMode::Creative,
+            flying: self.sync.flying,
+            explosion_knockback_resistance: self
+                .attributes
+                .value(mc_bamboo_data::registries::attribute::EXPLOSION_KNOCKBACK_RESISTANCE),
             game_mode: self.game_mode as i32,
             mining_fatigue: self
                 .effects
