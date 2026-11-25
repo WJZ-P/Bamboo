@@ -97,6 +97,7 @@ pub mod turtle;
 pub mod villager;
 pub mod villager_ai;
 pub mod warden;
+pub mod warden_spawn;
 mod water;
 pub mod wild_spawn;
 pub mod witch;

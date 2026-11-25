@@ -3,7 +3,8 @@
 //! 幽匿尖啸体自己不直接听脚步：它听感测体激活时发出的 `sculk_sensor_tendrils_clicking`，
 //! 源是玩家时 `tryShriek`。能响应（`can_summon` 且非和平且 `spawn_wardens` 开）时先给
 //! 玩家加一级警告，加上了才尖叫；加不上（冷却）就静默。90 刻后计划刻复位尖叫并
-//! `tryRespond`，按警告等级给附近玩家黑暗效果。召唤监守者这一步这轮留接口。
+//! `tryRespond`：警告等级到 4 时按 `SpawnUtil.trySpawnMob` 取点召唤监守者，没召唤成
+//! 才播回复音，最后按警告等级给附近玩家黑暗效果。
 
 use std::any::Any;
 
@@ -135,13 +136,17 @@ impl SculkShriekerEntity {
         );
     }
 
-    /// `tryRespond`：计划刻里 `warning_level > 0` 时尝试召唤监守者（留接口），
-    /// 并给附近玩家上黑暗。
+    /// `tryRespond`：计划刻里 `warning_level > 0` 时按 `SpawnUtil.trySpawnMob` 取点召唤
+    /// 监守者，没召唤成才播按等级的回复音，最后给附近玩家上黑暗。
     pub(crate) fn try_respond(&mut self, world: &mut World<'_>) {
         if self.warning_level <= 0 {
             return;
         }
-        // 监守者本体这一轮还没有，召唤这一步先留成空接口（见 README 已知限制）。
+        if crate::entity::mob::warden_spawn::try_summon_warden(world, self.pos, self.warning_level)
+            .is_none()
+        {
+            play_warden_reply_sound(world, self.pos, self.warning_level);
+        }
         let center = Vec3::new(
             f64::from(self.pos.x) + 0.5,
             f64::from(self.pos.y) + 0.5,
@@ -160,6 +165,33 @@ impl SculkShriekerEntity {
     fn take_shriek(&mut self) -> Option<Option<crate::entity::EntityUid>> {
         self.shriek.take()
     }
+}
+
+/// `playWardenReplySound`：按 `SOUND_BY_LEVEL` 选音效，三次 `[-10, 10]` 取随机偏移，
+/// 用 `SoundSource.HOSTILE` 在偏移后的位置播 5.0 / 1.0。
+///
+/// `playWardenReplySound`: pick the sound by `SOUND_BY_LEVEL`, draw three `[-10, 10]`
+/// offsets, and play at 5.0 / 1.0 in the `HOSTILE` category.
+fn play_warden_reply_sound(world: &mut World<'_>, pos: BlockPos, warning_level: i32) {
+    use mc_bamboo_data::sounds::{self, sound_event};
+
+    let name = match warning_level {
+        1 => "minecraft:entity.warden.nearby_close",
+        2 => "minecraft:entity.warden.nearby_closer",
+        3 => "minecraft:entity.warden.nearby_closest",
+        4 => "minecraft:entity.warden.listening_angry",
+        _ => return,
+    };
+    // `Mth.randomBetweenInclusive(random, -10, 10)`：`min + nextInt(21)`。
+    let dx = -10 + world.random().next_int(21);
+    let dy = -10 + world.random().next_int(21);
+    let dz = -10 + world.random().next_int(21);
+    let at = Vec3::new(
+        f64::from(pos.x + dx),
+        f64::from(pos.y + dy),
+        f64::from(pos.z + dz),
+    );
+    world.play_sound(at, sound_event(name), sounds::HOSTILE, 5.0, 1.0, false);
 }
 
 impl BlockEntity for SculkShriekerEntity {
