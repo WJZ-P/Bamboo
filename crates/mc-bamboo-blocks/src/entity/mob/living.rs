@@ -1864,16 +1864,23 @@ pub(crate) fn set_age(me: &mut Entity, mob: &mut Mob, age: i32) {
     let old = mob.age;
     mob.age = age;
     if (old < 0) != (age < 0) {
+        let old_width = me.dimensions.0;
         let old_height = me.dimensions.1;
         let (width, height, eye) = mob.mob_type.dimensions(age < 0);
         me.dimensions = (width, height);
         mob.eye_height = eye;
-        if mob.mob_type == super::MobType::HappyGhast {
-            // `Entity.fudgePositionAfterSizeChange`：换了尺寸之后
-            // `findFreePosition` 把脚底对齐到旧中心减新半高（空旷处的解）。
-            // `Entity.fudgePositionAfterSizeChange`: after the resize,
-            // `findFreePosition` puts the feet at old centre minus the new
-            // half-height (the open-space solution).
+        // `Entity.refreshDimensions` 只在「服务端、非首刻、非 noPhysics、尺寸变大且
+        // 不超过 4、不是玩家」时调 `fudgePositionAfterSizeChange`。读档时 `setAge`
+        // 从成年变幼年（变小）且 `firstTick` 为真，不该挪位置；只有游戏里长大（变大）
+        // 才对脚底。
+        // `Entity.refreshDimensions` calls `fudgePositionAfterSizeChange` only when
+        // server-side, not the first tick, not no-physics, growing (and at most
+        // 4 wide/tall), and not a player. Loading shrinks adult -> baby on the
+        // first tick, so it must not move; only in-game growth re-aligns the feet.
+        if mob.mob_type == super::MobType::HappyGhast
+            && !me.first_tick
+            && (width > old_width || height > old_height)
+        {
             me.position.y += f64::from(old_height) / 2.0 - f64::from(height) / 2.0;
         }
         if mob.mob_type == super::MobType::Goat {

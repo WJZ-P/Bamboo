@@ -1424,6 +1424,29 @@ mod tests {
         });
     }
 
+    /// `set_age` 读档（首刻、成年→幼年变小）不挪位置；游戏里长大（非首刻、变大）才
+    /// 按 `fudgePositionAfterSizeChange` 让中心保持不动、脚底下移。
+    /// `set_age` does not move on load (first tick, adult -> baby shrink); in-game
+    /// growth (not first tick, growing) keeps the centre fixed like the official
+    /// `fudgePositionAfterSizeChange`.
+    #[test]
+    fn set_age_fudges_the_position_only_on_in_game_growth() {
+        let mut entity = Entity::by_mob_type(MobType::HappyGhast, Vec3::new(3.5, 64.0, -7.25));
+        entity.with_mob(|me, mob| {
+            // 读档：成年(age 0) → 幼年(-24000)，首刻、变小，位置不动。
+            living::set_age(me, mob, -24_000);
+            assert_eq!(me.position.y, 64.0);
+            assert_eq!(me.dimensions, (0.95, 0.95));
+            // 游戏里长大：幼年(-1) → 成年(0)，非首刻、变大，中心不动、脚底下移。
+            me.first_tick = false;
+            mob.age = -1;
+            living::set_age(me, mob, 0);
+            let expected = 64.0 + f64::from(0.95_f32) / 2.0 - f64::from(4.0_f32) / 2.0;
+            assert!((me.position.y - expected).abs() < 1e-12);
+            assert_eq!(me.dimensions, (4.0, 4.0));
+        });
+    }
+
     /// `continuousHeal`：缺血时在云 / 降水里每 20 刻回 1 点，其余每 600 刻回 1 点。
     /// `continuousHeal`: heal 1 point every 20 ticks in clouds / precipitation,
     /// or every 600 ticks otherwise.
