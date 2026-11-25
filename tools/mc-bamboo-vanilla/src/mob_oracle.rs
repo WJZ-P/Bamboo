@@ -73,6 +73,7 @@ mod sulfur_cube;
 mod thunder;
 mod undead_horse;
 mod villager;
+mod warden;
 mod water_mob;
 mod witch_throw;
 mod zombie_villager;
@@ -198,6 +199,7 @@ enum Line {
     SculkSensor(sculk_sensor::SculkSensorCase),
     SculkSensorOrder(sculk_sensor::SculkSensorOrderCase),
     SculkShrieker(sculk_sensor::SculkShriekerCase),
+    Warden(Box<warden::WardenCase>),
     End(End),
 }
 
@@ -1897,6 +1899,7 @@ impl Report {
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
                 Line::SculkSensorOrder(case) => self.replay_sculk_sensor_order(&case),
                 Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),
+                Line::Warden(case) => self.replay_warden(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),

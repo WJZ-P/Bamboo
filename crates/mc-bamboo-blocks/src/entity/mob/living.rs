@@ -852,6 +852,16 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
         // `Sniffer.getAmbientSound`：挖掘 / 搜寻时不叫。
         // `Sniffer.getAmbientSound`: silent while digging or searching.
         super::MobType::Sniffer => super::sniffer::ambient_voice(mob),
+        // `Warden.getAmbientSound()`：咆哮 / 钻出 / 钻入时返回 null，`makeSound`
+        // 不取音高的两个随机数。
+        // `Warden.getAmbientSound()`: null while roaring / emerging / digging, so
+        // `makeSound` draws no pitch random values.
+        super::MobType::Warden
+            if mob.warden.pose == super::warden::WardenPose::Roaring
+                || mob.warden.pose.is_digging_or_emerging() =>
+        {
+            None
+        }
         _ => Some(voice_of(mob, Voice::Ambient, me.in_water)),
     }
 }

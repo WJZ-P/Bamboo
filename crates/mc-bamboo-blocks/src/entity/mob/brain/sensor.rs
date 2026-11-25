@@ -506,7 +506,7 @@ pub fn set_partner_memory(
 ///
 /// `NearestLivingEntitySensor.doTick`: living entities in the follow-range box, by
 /// distance. Players come before mobs (only matters for equal distances).
-fn sense_nearest_living(cx: &mut Cx) {
+pub(crate) fn sense_nearest_living(cx: &mut Cx) {
     let range = cx.mob.attributes.value(attribute::FOLLOW_RANGE);
     let area = cx.me.bounding_box().inflate(range, range, range);
     let me = cx.me.id;

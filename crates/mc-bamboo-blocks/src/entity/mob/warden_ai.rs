@@ -15,7 +15,7 @@ use super::{
     Mob, MobEvent,
     brain::{
         Activity, ActivityData, Brain,
-        behavior::{Class, Cx, Kind, MoveToTargetSink},
+        behavior::{Class, Cx, Gate, Kind, MoveToTargetSink},
         memory::{MemoryStatus, MemoryType, MemoryValue, PositionTracker, WalkTarget},
         sensor::SensorKind,
     },
@@ -545,7 +545,15 @@ fn activities() -> Vec<ActivityData> {
             vec![
                 w(Behavior::SetRoarTarget),
                 w(Behavior::TryToSniff),
-                Kind::RandomStroll { speed: 0.5 },
+                // `RunOne(IS_SNIFFING ABSENT; [RandomStroll(0.5) 权2, DoNothing(30,60) 权1])`。
+                // `RunOne(IS_SNIFFING ABSENT; [RandomStroll(0.5) w2, DoNothing(30,60) w1])`.
+                Kind::Gate(Box::new(Gate::run_one(
+                    vec![(M::IsSniffing, ValueAbsent)],
+                    vec![
+                        (Kind::RandomStroll { speed: 0.5 }, 2),
+                        (Kind::DoNothing { min: 30, max: 60 }, 1),
+                    ],
+                ))),
             ],
         ),
         ActivityData::sequential(Activity::Roar, 10, vec![w(Behavior::Roar)])
@@ -599,9 +607,19 @@ pub fn update_activity(brain: &mut Brain) {
     ]);
 }
 
-/// `WardenEntitySensor.doTick`：从 `NEAREST_LIVING_ENTITIES` 里先找玩家、再找非玩家，
-/// 写 `NEAREST_ATTACKABLE`；都没有就擦掉。
+/// `WardenEntitySensor.doTick`：先跑 super 的 `NearestLivingEntitySensor.doTick`
+/// 写 `NEAREST_LIVING_ENTITIES` / `NEAREST_VISIBLE_LIVING_ENTITIES`，再从前者里先找
+/// 玩家、再找非玩家，写 `NEAREST_ATTACKABLE`；都没有就擦掉。
 pub fn warden_entity_sensor(cx: &mut Cx) {
+    super::brain::sensor::sense_nearest_living(cx);
+    // 官方 `Brain.forEach` 对空集合走 `acceptEmpty`（不打印）；`mobs` 为空时擦掉，
+    // `visible_mobs` 是 `NearestVisibleLivingEntities` 对象，空也照样打印。
+    // Vanilla's `Brain.forEach` skips empty collections via `acceptEmpty`: erase `mobs`
+    // when empty, while `visible_mobs` (an object) is printed even when empty.
+    if matches!(cx.memories.get(M::NearestLivingEntities), Some(MemoryValue::Entities(ids)) if ids.is_empty())
+    {
+        cx.memories.erase(M::NearestLivingEntities);
+    }
     let candidates: Vec<_> = match cx.memories.get(M::NearestLivingEntities) {
         Some(MemoryValue::Entities(uids)) => uids.iter().copied().collect(),
         Some(MemoryValue::Visible(visible)) => visible.entities.iter().copied().collect(),

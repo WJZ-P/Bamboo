@@ -648,6 +648,9 @@ public final class MobOracle {
                     cases++;
                 }
             }
+            if (only == null || only.startsWith("warden")) {
+                cases += playWarden(official, out, only);
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -12974,6 +12977,148 @@ public final class MobOracle {
             log.println("warden_probe tick=" + tick + " pose=" + mob.getPose()
                     + " anger=" + mob.getClientAngerLevel() + " brain=" + brain);
         }
+    }
+
+    /** 监守者逐刻对拍：官方 Warden 在假世界里跑完钻出 / 调查 / 嗅探 / 发怒咆哮 /
+     *  近战 / 音波 / 钻回地下，每刻输出姿态、愤怒、大脑、坐标、随机源、玩家血量与效果。 */
+    private static int playWarden(Official official, Writer out, String only) throws Exception {
+        record WScene(String name, int ticks, boolean emerge, boolean player,
+                int anger, boolean attackTarget, boolean eraseSonic, boolean eraseDig,
+                int[] vibration) {}
+        List<WScene> scenes = List.of(
+                new WScene("warden_emerge", 150, true, false, 0, false, false, false, null),
+                new WScene("warden_investigate", 200, true, true, 0, false, false, false,
+                        new int[] {140, 5, 64, 0, 1, 0}),
+                new WScene("warden_sniff", 200, true, true, 0, false, false, false, null),
+                new WScene("warden_anger_roar", 200, true, true, 100, false, false, false, null),
+                new WScene("warden_melee", 200, true, true, 100, true, false, false, null),
+                new WScene("warden_sonic_boom", 210, true, true, 100, true, true, false, null),
+                new WScene("warden_dig_back", 130, false, false, 0, false, false, false, null));
+        int cases = 0;
+        for (WScene s : scenes) {
+            if (only != null && !s.name().startsWith(only)) continue;
+            FakeLevel world = FakeLevel.create(official);
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels =
+                    java.util.Map.of(Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            world.gameTime = 1000L;
+            world.getRandom().setSeed(1L);
+            Warden mob = (Warden) EntityTypes.WARDEN.create(world, EntitySpawnReason.TRIGGERED);
+            mob.setId(FIRST_ID);
+            mob.setUUID(new UUID(0L, 1L));
+            mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            setRandom(mob, 5L);
+            BrainOracle.fixSensorDelays(mob, 1L);
+            BrainOracle.reseedShuffles(mob, randomSeed(mob));
+            world.tracked.add(mob);
+
+            ServerPlayer player = null;
+            if (s.player()) {
+                player = pigPlayer(official, world);
+                player.setPos(2.5, 64.0, 0.5);
+                player.setId(FIRST_ID + 1);
+                player.setUUID(new UUID(0L, 2L));
+                world.tracked.add(player);
+                world.playersList().add(player);
+            }
+            if (s.emerge()) {
+                mob.setPose(net.minecraft.world.entity.Pose.EMERGING);
+                mob.getBrain().setMemoryWithExpiry(
+                        net.minecraft.world.entity.ai.memory.MemoryModuleType.IS_EMERGING,
+                        net.minecraft.util.Unit.INSTANCE, 134L);
+                mob.getBrain().setMemoryWithExpiry(
+                        net.minecraft.world.entity.ai.memory.MemoryModuleType.DIG_COOLDOWN,
+                        net.minecraft.util.Unit.INSTANCE, 1200L);
+            }
+            if (s.anger() > 0) {
+                mob.increaseAngerAt(player, s.anger(), false);
+            }
+            if (s.attackTarget()) {
+                mob.setAttackTarget(player);
+            }
+            if (s.eraseSonic()) {
+                mob.getBrain().eraseMemory(
+                        net.minecraft.world.entity.ai.memory.MemoryModuleType.SONIC_BOOM_COOLDOWN);
+            }
+            if (s.eraseDig()) {
+                mob.getBrain().eraseMemory(
+                        net.minecraft.world.entity.ai.memory.MemoryModuleType.DIG_COOLDOWN);
+            }
+
+            String sensors = BrainOracle.sensorDelays(mob);
+            long mobSeed = randomSeed(mob);
+            long levelSeed = randomSeed(world.getRandom());
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= s.ticks(); tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    int[] vib = s.vibration();
+                    if (vib != null && tick == vib[0]) {
+                        net.minecraft.world.entity.Entity source = vib[4] == 1 ? player : null;
+                        net.minecraft.world.entity.Entity owner = vib[5] == 1 ? player : null;
+                        mob.getVibrationUser().onReceiveVibration(world,
+                                new BlockPos(vib[1], vib[2], vib[3]),
+                                net.minecraft.world.level.gameevent.GameEvent.STEP,
+                                source, owner, 5.0F);
+                    }
+                    mob.commonTick();
+                    mob.tick();
+                }
+                if (tick > 0) frames.append(',');
+                StringBuilder effects = new StringBuilder("[");
+                if (player != null) {
+                    java.util.List<Integer> durations = new java.util.ArrayList<>();
+                    for (var e : player.getActiveEffects()) {
+                        durations.add(e.getDuration());
+                    }
+                    java.util.Collections.sort(durations);
+                    for (int i = 0; i < durations.size(); i++) {
+                        if (i > 0) effects.append(',');
+                        effects.append(durations.get(i));
+                    }
+                }
+                effects.append(']');
+                frames.append("{\"pose\":").append(jsonString(mob.getPose().name()))
+                        .append(",\"anger\":").append(mob.getClientAngerLevel())
+                        .append(",\"angerLevel\":").append(jsonString(mob.getAngerLevel().name()))
+                        .append(",\"brain\":").append(jsonString(BrainOracle.dump(mob)))
+                        .append(",\"motion\":").append(projectileMotion(mob))
+                        .append(",\"mobSeed\":").append(randomSeed(mob))
+                        .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
+                        .append(",\"playerHealth\":")
+                        .append(player == null ? -1 : Float.floatToRawIntBits(player.getHealth()))
+                        .append(",\"playerEffects\":").append(effects)
+                        .append(",\"removed\":").append(mob.isRemoved())
+                        .append('}');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"warden\",\"name\":" + jsonString(s.name())
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"startTime\":1000"
+                    + ",\"ticks\":" + s.ticks()
+                    + ",\"emerge\":" + s.emerge()
+                    + ",\"player\":" + s.player()
+                    + ",\"anger\":" + s.anger()
+                    + ",\"attackTarget\":" + s.attackTarget()
+                    + ",\"eraseSonic\":" + s.eraseSonic()
+                    + ",\"eraseDig\":" + s.eraseDig()
+                    + ",\"vibration\":"
+                    + (s.vibration() == null ? "null" : java.util.Arrays.toString(s.vibration()))
+                    + ",\"sensors\":" + sensors
+                    + ",\"mobSeed\":" + mobSeed
+                    + ",\"levelSeed\":" + levelSeed
+                    + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
     }
 
     private static int playVillagerBrain(Official official, Writer out, String only) throws Exception {
