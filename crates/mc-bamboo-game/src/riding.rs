@@ -13,7 +13,11 @@
 //! This module keeps that shape: [`tick`] handles dismounting and rider
 //! placement, [`on_move_vehicle`] takes the position the client reports.
 
-use mc_bamboo_blocks::entity::{EntityUid, KindPublic, no_block_collision, sweep_movement};
+use std::collections::BTreeMap;
+
+use mc_bamboo_blocks::entity::{
+    EntityUid, FIRST_ENTITY_ID, KindPublic, no_block_collision, sweep_movement,
+};
 use mc_bamboo_blocks::{CollisionContext, EntityContext, world::CollisionBlocks};
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::registries::attribute;
@@ -65,6 +69,338 @@ impl Riding {
     pub(crate) fn is_passenger(&self) -> bool {
         self.vehicle.is_some()
     }
+}
+
+/// 一份载具的乘客名单（官方 `Entity.getPassengers()`）。玩家和生物共用同一份
+/// `MobPublic.passengers`：玩家 ID 小于 [`FIRST_ENTITY_ID`]，生物 ID 不小于它。
+/// `getFirstPassenger()` 就是名单里的第 0 项，控制乘客由 `MobPublic` 按这份名单算。
+///
+/// One vehicle's passenger list (vanilla `Entity.getPassengers()`): players and
+/// mobs share `MobPublic.passengers`, with player ids below
+/// [`FIRST_ENTITY_ID`]. `getFirstPassenger()` is its first entry.
+pub(crate) fn passengers(region: &Region, vehicle: EntityUid) -> Vec<EntityUid> {
+    region
+        .entities
+        .public_at(vehicle)
+        .map(|public| match &public.kind {
+            KindPublic::Mob(mob) => mob.passengers.clone(),
+            _ => Vec::new(),
+        })
+        .unwrap_or_default()
+}
+
+/// 玩家 → 载具的完整索引，由唯一的乘客名单反推。玩家侧的 `Riding.vehicle` 必须
+/// 和这份名单双向一致；不一致的那一侧由 [`check_consistency`] 报出来。
+///
+/// The player→vehicle index derived from the one passenger list. A player's
+/// `Riding.vehicle` must agree; [`check_consistency`] reports mismatches.
+pub(crate) fn player_vehicles(region: &Region) -> BTreeMap<PlayerId, EntityUid> {
+    let mut out = BTreeMap::new();
+    for public in region.entities.iter_public() {
+        let KindPublic::Mob(mob) = &public.kind else {
+            continue;
+        };
+        for &passenger in &mob.passengers {
+            if passenger < FIRST_ENTITY_ID {
+                out.insert(PlayerId(passenger), public.uid);
+            }
+        }
+    }
+    out
+}
+
+/// 双向一致：每名在线玩家的 `Riding.vehicle` 恰好对应载具名单里的一个玩家 ID，
+/// 名单里的玩家 ID 也都有在线玩家的 `Riding.vehicle`。返回不一致的说明（调试
+/// 不变量检查和单测用），空表表示一致。
+///
+/// Bidirectional invariant: every online player's `Riding.vehicle` has that
+/// player in the vehicle's list and vice versa. Returns human-readable
+/// mismatches (empty when consistent).
+pub(crate) fn check_consistency(region: &Region) -> Vec<String> {
+    let mut problems = Vec::new();
+    let listed = player_vehicles(region);
+    for (id, player) in &region.players {
+        match (player.riding.vehicle, listed.get(id)) {
+            (Some(vehicle), Some(&other)) if vehicle == other => {}
+            (None, None) => {}
+            (vehicle, found) => problems.push(format!(
+                "player {:?}: riding.vehicle={vehicle:?}, passenger list={found:?}",
+                id.0
+            )),
+        }
+    }
+    for (id, vehicle) in &listed {
+        if !region.players.contains_key(id) {
+            problems.push(format!(
+                "passenger list has player {:?} on {vehicle} without an online player",
+                id.0
+            ));
+        }
+    }
+    problems
+}
+
+/// 玩家所在骑乘树的全部实体 uid（根 + 嵌套生物乘客，按 uid 升序）。
+/// 跨岛搬迁时按这张表把整棵树从原表搬到目标表，链接原样保留。
+///
+/// Every entity uid in the player's riding tree (root plus nested mob
+/// passengers, uid-ascending). Cross-island moves transfer the whole tree
+/// with the links intact.
+pub(crate) fn riding_entities(region: &Region, id: PlayerId) -> Vec<EntityUid> {
+    let Some(vehicle) = region.players.get(&id).and_then(|p| p.riding.vehicle) else {
+        return Vec::new();
+    };
+    let mut stack = vec![root_vehicle(region, vehicle)];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(uid) = stack.pop() {
+        if !seen.insert(uid) || seen.len() > 64 {
+            break;
+        }
+        stack.extend(
+            passengers(region, uid)
+                .into_iter()
+                .filter(|&passenger| passenger >= FIRST_ENTITY_ID),
+        );
+    }
+    seen.into_iter().collect()
+}
+
+/// 玩家所在骑乘树的全部实体所在区块（拆岛、跨岛搬迁时整组一起搬）。
+/// 玩家不在实体表里，从他直接骑的载具开始，按双向链接遍历整棵树。
+///
+/// All chunks of the riding tree the player belongs to (an island split or a
+/// cross-island move takes the whole group). Players are not in the entity
+/// table, so the walk starts at the player's direct vehicle.
+pub(crate) fn riding_tree_chunks(
+    region: &Region,
+    id: PlayerId,
+) -> std::collections::BTreeSet<mc_bamboo_core::ChunkPos> {
+    let mut out = std::collections::BTreeSet::new();
+    let Some(vehicle) = region.players.get(&id).and_then(|p| p.riding.vehicle) else {
+        return out;
+    };
+    let mut stack = vec![root_vehicle(region, vehicle)];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(uid) = stack.pop() {
+        if !seen.insert(uid) || seen.len() > 64 {
+            break;
+        }
+        if let Some(public) = region.entities.public_at(uid) {
+            out.insert(public.chunk_position());
+        }
+        stack.extend(
+            passengers(region, uid)
+                .into_iter()
+                .filter(|&passenger| passenger >= FIRST_ENTITY_ID),
+        );
+    }
+    out
+}
+
+/// 一棵骑乘树的根（官方 `Entity.getRootVehicle()`）：从玩家直接骑的载具沿
+/// `Entity.vehicle` 往上走。玩家不在实体表里，所以第一跳从玩家的载具开始。
+/// 坏数据里成环时停在 64 跳，不 panic。
+///
+/// The root of a riding tree (vanilla `Entity.getRootVehicle()`): walk up from
+/// the player's direct vehicle. Players are not in the entity table, so the
+/// first hop is their vehicle.
+pub(crate) fn root_vehicle(region: &Region, vehicle: EntityUid) -> EntityUid {
+    let mut root = vehicle;
+    let mut seen = 0;
+    while seen < 64
+        && let Some(public) = region.entities.public_at(root)
+        && let Some(next) = public.vehicle
+    {
+        root = next;
+        seen += 1;
+    }
+    root
+}
+
+/// 整棵树里的玩家乘客数（官方 `countPlayerPassengers` 的玩家侧近似：只数名单
+/// 里的玩家 ID）。`hasExactlyOnePlayerPassenger` 用它决定下线时是否移除载具。
+///
+/// How many player passengers the root's whole tree has (vanilla
+/// `countPlayerPassengers`). `hasExactlyOnePlayerPassenger` uses it on leave.
+pub(crate) fn player_passenger_count(region: &Region, root: EntityUid) -> usize {
+    let mut out = 0;
+    let mut stack = vec![root];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(uid) = stack.pop() {
+        if !seen.insert(uid) || seen.len() > 64 {
+            break;
+        }
+        for passenger in passengers(region, uid) {
+            if passenger < FIRST_ENTITY_ID {
+                out += 1;
+            } else {
+                stack.push(passenger);
+            }
+        }
+    }
+    out
+}
+
+/// 官方 `ServerPlayer.saveParentVehicle`：只有「骑着东西、根载具不是自己、整棵树
+/// 恰好一名玩家乘客」时写 `RootVehicle`。`Attach` 是玩家**直接**骑着的载具的 UUID，
+/// `Entity` 是根载具连整棵 `Passengers` 的存档（`Entity.save`）。
+///
+/// Vanilla `ServerPlayer.saveParentVehicle`: writes `RootVehicle` only while
+/// riding, when the root is not the player and the tree has exactly one player
+/// passenger. `Attach` is the UUID of the player's direct vehicle; `Entity` is
+/// the root's whole `Passengers` tree.
+pub(crate) fn root_vehicle_save(region: &Region, id: PlayerId) -> Option<mc_bamboo_nbt::Tag> {
+    use mc_bamboo_blocks::archive::entity::write_entity_tree;
+    use mc_bamboo_nbt::Tag;
+
+    let player = region.players.get(&id)?;
+    let vehicle = player.riding.vehicle?;
+    let root = root_vehicle(region, vehicle);
+    if root == id.0 || player_passenger_count(region, root) != 1 {
+        return None;
+    }
+    let root_row = entity_row(region, root)?;
+    let entity = write_entity_tree(&root_row, &|uid| entity_row(region, uid)).ok()?;
+    Some(Tag::Compound(vec![
+        ("Attach".to_owned(), attach_of(region, vehicle)?),
+        ("Entity".to_owned(), entity),
+    ]))
+}
+
+/// 存档里的 UUID（官方 `UUIDUtil.CODEC` 的四项 int array）。
+fn attach_of(region: &Region, vehicle: EntityUid) -> Option<mc_bamboo_nbt::Tag> {
+    let row = entity_row(region, vehicle)?;
+    let bytes = mc_bamboo_blocks::archive::entity::entity_uuid_of(&row);
+    let mut words = Vec::new();
+    for chunk in bytes.chunks(4) {
+        words.push(i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Some(mc_bamboo_nbt::Tag::IntArray(words))
+}
+
+fn entity_row(region: &Region, uid: EntityUid) -> Option<mc_bamboo_blocks::entity::EntityRow> {
+    let row = region.entities.row_of(uid)?;
+    region.entities.row_at(row).cloned()
+}
+
+/// 官方 `ServerPlayer.loadAndSpawnParentVehicle`：把 `RootVehicle/Entity` 的根载具
+/// 连整棵 `Passengers` 读回实体表，按 `Attach` 找到玩家该骑上的那一只，再
+/// `startRiding(vehicle, force=true)`。读不出、找不到挂载点或不是生物时不改世界。
+///
+/// Vanilla `ServerPlayer.loadAndSpawnParentVehicle`: load the root and its whole
+/// passenger tree, find the direct vehicle by `Attach` and mount the player.
+pub(crate) fn load_root_vehicle(region: &mut Region, id: PlayerId, tag: &mc_bamboo_nbt::Tag) {
+    use mc_bamboo_blocks::archive::entity::{entity_uuid_of, read_entity_tree};
+    use mc_bamboo_nbt::Tag;
+
+    let Tag::Compound(entries) = tag else {
+        return;
+    };
+    let attach = entries
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "Attach")
+        .and_then(|(_, value)| match value {
+            Tag::IntArray(words) if words.len() == 4 => {
+                let mut bytes = [0_u8; 16];
+                for (index, word) in words.iter().enumerate() {
+                    bytes[index * 4..index * 4 + 4].copy_from_slice(&(*word as u32).to_be_bytes());
+                }
+                Some(bytes)
+            }
+            _ => None,
+        });
+    let Some(entity_tag) = entries
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "Entity")
+        .map(|(_, value)| value)
+    else {
+        return;
+    };
+    let mut next_uid = FIRST_ENTITY_ID;
+    let Ok(Some(rows)) = read_entity_tree(entity_tag, &mut next_uid) else {
+        return;
+    };
+    if rows.is_empty() {
+        return;
+    }
+    // 官方 `loadEntityRecursive` 按 UUID 找挂载点；找不到时整棵树 discard。
+    let attach = match attach {
+        Some(bytes) => bytes,
+        None => entity_uuid_of(&rows[0]),
+    };
+    // `read_entity_tree` 给的是占位号；按块读盘时 `ChunkEntities::from_parts` 会
+    // 重新取号，这里也一样。号码计数器是各岛共用的原子量，别的岛可能同时在取号，
+    // 不能先预测号码再放：先把引用摘掉、逐行放进实体表拿到真正的号，再按
+    // 「占位号 → 新号」把整棵树里的 `vehicle` 和 `Passengers` 引用写回去。
+    //
+    // `read_entity_tree` hands out placeholder ids; chunk loading reassigns them in
+    // `ChunkEntities::from_parts`, and so do we. The id counter is an atomic shared by
+    // every island and another island may be allocating at the same time, so the ids
+    // cannot be predicted: strip the links, spawn each row to get its real id, then
+    // write the tree's `vehicle` and `Passengers` links back through the mapping.
+    let mut links = Vec::with_capacity(rows.len());
+    let mut spawned = Vec::with_capacity(rows.len());
+    for mut row in rows {
+        let uuid = entity_uuid_of(&row);
+        let placeholder = row.public.uid;
+        let vehicle = row.public.vehicle.take();
+        let passengers = match &mut row.public.kind {
+            mc_bamboo_blocks::entity::KindPublic::Mob(mob) => std::mem::take(&mut mob.passengers),
+            _ => Vec::new(),
+        };
+        if let mc_bamboo_blocks::entity::KindState::Mob(mob) = &mut row.state.kind {
+            mob.passengers.clear();
+        }
+        let uid = region.entities.spawn_row(row);
+        links.push((uid, vehicle, passengers));
+        spawned.push((uid, uuid, placeholder));
+    }
+    let remap: BTreeMap<EntityUid, EntityUid> = spawned
+        .iter()
+        .map(|&(uid, _, placeholder)| (placeholder, uid))
+        .collect();
+    for (uid, vehicle, passengers) in links {
+        let vehicle = vehicle.and_then(|old| remap.get(&old).copied());
+        let passengers: Vec<EntityUid> = passengers
+            .iter()
+            .filter_map(|old| remap.get(old).copied())
+            .collect();
+        if vehicle.is_none() && passengers.is_empty() {
+            continue;
+        }
+        region.entities.with_mut(uid, |entity| {
+            entity.vehicle = vehicle;
+            entity.with_mob(|_, mob| mob.passengers = passengers);
+        });
+    }
+    let spawned: Vec<(EntityUid, [u8; 16])> = spawned
+        .into_iter()
+        .map(|(uid, uuid, _)| (uid, uuid))
+        .collect();
+    let Some(&(vehicle, _)) = spawned.iter().find(|(_, uuid)| *uuid == attach) else {
+        for (uid, _) in spawned {
+            region.entities.remove(uid);
+        }
+        return;
+    };
+    // `startRiding(vehicle, true, false)`：强制上车，不看冷却和已有乘客。
+    // 玩家侧的 `Riding.vehicle` 和载具名单都从这一份状态建起来。
+    if let Some(player) = region.players.get_mut(&id) {
+        player.riding.vehicle = Some(vehicle);
+        player.riding.last_vehicle = Some(vehicle);
+        player.riding.boarding_cooldown = 0;
+        if let Some(public) = region.entities.public_at(vehicle) {
+            player.riding.first_good = public.position;
+            player.riding.last_good = public.position;
+        }
+    }
+    region.entities.with_mut(vehicle, |entity| {
+        entity.with_mob(|_, mob| {
+            mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, id.0, true);
+        })
+    });
 }
 
 /// 官方 `handleMoveVehicle` 的水平和竖直夹取（`clampHorizontal` / `clampVertical`）。
@@ -139,8 +475,12 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
     player.riding.last_vehicle = Some(vehicle);
     player.riding.first_good = position;
     player.riding.last_good = position;
+    // 官方 `Entity.addPassenger`：玩家乘客由服务端插到生物乘客前面，名单是
+    // 一份，玩家和生物共用。先设 `vehicle` 再挂名单，正是 `startRiding` 的前提。
     region.entities.with_mut(vehicle, |entity| {
-        entity.with_mob(|_, mob| mob.passengers.push(id.0))
+        entity.with_mob(|_, mob| {
+            mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, id.0, true);
+        })
     });
     // 官方 `StartRidingTrigger.trigger(ServerPlayer)`。
     crate::advancement_triggers::record(
@@ -149,6 +489,38 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
         "minecraft:started_riding",
         serde_json::json!({}),
     );
+}
+
+/// 方块层生物乘客的 `stopRiding`：摘掉乘客自己的 `vehicle`、给 60 刻冷却，
+/// 位置不动（官方只有玩家 `Avatar.removeVehicle` 会重新落位）。载具名单由
+/// 调用方在同一刻摘，和玩家侧共用一份名单。
+///
+/// The block-layer mob passenger's `stopRiding`: clear its `vehicle` link and
+/// set the 60-tick cooldown, without moving it (vanilla repositions only
+/// players). The caller drops the vehicle's list in the same step.
+pub(crate) fn entity_stop(region: &mut Region, passenger: EntityUid, vehicle: EntityUid) {
+    if passenger < FIRST_ENTITY_ID {
+        return;
+    }
+    region.entities.with_mut(passenger, |entity| {
+        if entity.vehicle == Some(vehicle) {
+            mc_bamboo_blocks::entity::riding::dismount(entity, None);
+        }
+    });
+}
+
+/// 共用的 `stopRiding` / `removePassenger`：载具死亡、被移除、`/ride dismount`、
+/// 按潜行键下车全走这里。玩家按官方 `getDismountLocationForPassenger` 找落点，
+/// 生物乘客由方块层在同一刻停原地；两边关系一起摘，`set_passengers` 由同步阶段
+/// 按名单变化发一次。
+///
+/// The shared `stopRiding` / `removePassenger`: vehicle death, removal,
+/// `/ride dismount` and sneaking all land here. Players use vanilla's
+/// `getDismountLocationForPassenger`; mob passengers stay put in the block
+/// layer. Both sides are cleared and `set_passengers` is sent once by the sync
+/// stage when the list changes.
+pub(crate) fn stop_riding(region: &mut Region, id: PlayerId) {
+    dismount(region, id);
 }
 
 /// 下车。官方 `Player.rideTick → stopRiding`：按载具的位置算好落点，清掉两边的关系，
@@ -277,6 +649,11 @@ pub(crate) fn tick(region: &mut Region) {
     for player in region.players.values_mut() {
         player.riding.boarding_cooldown = player.riding.boarding_cooldown.saturating_sub(1);
     }
+    // 载具在实体阶段死亡 / 被移除 / `ejectPassengers`：方块层只记下被甩的玩家，
+    // 官方的 `Avatar.removeVehicle` 落位在这里和玩家自己的阶段一起做。
+    for ejected in region.entities.take_ejected_players() {
+        stop_riding(region, PlayerId(ejected));
+    }
     let riders: Vec<PlayerId> = region
         .players
         .iter()
@@ -291,21 +668,21 @@ pub(crate) fn tick(region: &mut Region) {
         //
         // Vanilla `Player.rideTick`: the sneak key dismounts.
         if player.sync.shift_key_down {
-            dismount(region, id);
+            stop_riding(region, id);
             continue;
         }
         let vehicle = player.riding.vehicle.expect("刚刚筛过");
         let (is_passenger, position, offset) = {
             let Some(public) = region.entities.public_at(vehicle) else {
-                dismount(region, id);
+                stop_riding(region, id);
                 continue;
             };
             let KindPublic::Mob(mob) = &public.kind else {
-                dismount(region, id);
+                stop_riding(region, id);
                 continue;
             };
             (
-                mob.passengers.contains(&id.0),
+                passengers(region, vehicle).contains(&id.0),
                 public.position,
                 passenger_offset(mob, public.yaw),
             )
@@ -317,7 +694,7 @@ pub(crate) fn tick(region: &mut Region) {
         // holds this player, both sides are cleared. That is how
         // `RunAroundLikeCrazyGoal` throws the rider off an untamed equine.
         if !is_passenger {
-            dismount(region, id);
+            stop_riding(region, id);
             continue;
         }
         let target = position.add(offset);
@@ -350,6 +727,11 @@ pub(crate) fn tick(region: &mut Region) {
             player.set_position(&mut region.player_grid, target);
         }
     }
+    debug_assert!(
+        check_consistency(region).is_empty(),
+        "riding links disagree: {:?}",
+        check_consistency(region)
+    );
 }
 
 /// `handleMoveVehicle`：客户端报上来的载具位置。校验通过就落地，否则把它拉回去。

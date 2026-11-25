@@ -553,6 +553,19 @@ public final class PlayerDataOracle {
             fields.addProperty("ender_pearl_count",
                     input.childrenListOrEmpty("ender_pearls").stream().count());
             fields.add("ender_pearls", Oracle.canonical(original.getListOrEmpty("ender_pearls")));
+            // `ServerPlayer.loadAndSpawnParentVehicle` 读的是
+            // `ValueInput.child("RootVehicle")`；这里比官方读回的整条标签。
+            input.child("RootVehicle").ifPresent(child -> {
+                var attach = child.read("Attach", net.minecraft.core.UUIDUtil.CODEC)
+                        .map(value -> net.minecraft.core.UUIDUtil.CODEC
+                                .encodeStart(ops(), value).getOrThrow());
+                fields.add("root_vehicle_attach", attach
+                        .map(Oracle::canonical).orElseGet(JsonObject::new));
+                var root = original.getCompoundOrEmpty("RootVehicle");
+                fields.add("root_vehicle_entity",
+                        Oracle.canonical(root.getCompoundOrEmpty("Entity")));
+                fields.add("root_vehicle_tag", Oracle.canonical(root));
+            });
             return fields;
         }
 
@@ -773,6 +786,11 @@ public final class PlayerDataOracle {
                     pearls.add(readNbt(element.getAsString()));
                 }
                 tag.put("ender_pearls", pearls);
+            }
+            // `ServerPlayer.saveParentVehicle` 的 `RootVehicle`：整条复合标签由
+            // Bamboo 写出，官方的 `ValueInput.child` 读回后逐键比较。
+            if (spec.has("root_vehicle")) {
+                tag.put("RootVehicle", readNbt(spec.get("root_vehicle").getAsString()));
             }
             return tag;
         }

@@ -2583,6 +2583,11 @@ impl World {
         // `loadAndSpawnEnderPearls`：把存下来的飞行珍珠放回实体表并注册到玩家身上。
         if let Some(data) = &restored {
             crate::ender_pearl::load(region, id, data);
+            // `PrepareSpawnTask` 的 `loadAndSpawnParentVehicle`：把根载具连整棵
+            // 乘客树放回世界，按 `Attach` 重新骑上。
+            if let Some(tag) = &data.root_vehicle {
+                crate::riding::load_root_vehicle(region, id, tag);
+            }
         }
         // 官方 `PlayerList.placeNewPlayer` 构造 `PlayerAdvancements` 后由首 tick 发全量包。
         if let Some(player) = region.players.get_mut(&id) {
@@ -2729,6 +2734,12 @@ impl World {
 
     /// 存档一名在线玩家。文件写交给 IO 线程，世界线程不等待。
     fn save_one_player(&mut self, id: PlayerId) {
+        // 官方 `PlayerList.remove`：存盘发生在 `stopRiding` 之前，所以这时
+        // `RootVehicle` 还能看到玩家骑着的整棵树。
+        let root_vehicle = self
+            .islands
+            .parked()
+            .find_map(|island| crate::riding::root_vehicle_save(&island.region, id));
         let player = self
             .islands
             .parked()
@@ -2736,7 +2747,7 @@ impl World {
         let Some(player) = player else {
             return;
         };
-        let encoded = encode_player_save(player);
+        let encoded = encode_player_save(player, root_vehicle);
         let text = crate::advancements::encode_save(player);
         if let Some((uuid, bytes)) = encoded {
             self.master.host.submit_player_write(&uuid, bytes);
@@ -2762,10 +2773,23 @@ impl World {
             .flat_map(|island| island.region.players.values())
             .collect();
         players.sort_unstable_by_key(|player| player.id);
+        let roots: std::collections::BTreeMap<PlayerId, Option<mc_bamboo_nbt::Tag>> = self
+            .islands
+            .parked()
+            .flat_map(|island| {
+                island
+                    .region
+                    .players
+                    .keys()
+                    .map(|id| (*id, crate::riding::root_vehicle_save(&island.region, *id)))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         let encoded: Vec<([u8; 16], String, Vec<u8>)> = players
             .into_iter()
             .filter_map(|player| {
-                let (uuid, bytes) = encode_player_save(player)?;
+                let root_vehicle = roots.get(&player.id).cloned().flatten();
+                let (uuid, bytes) = encode_player_save(player, root_vehicle)?;
                 Some((*player.uuid.as_bytes(), uuid, bytes))
             })
             .collect();
@@ -2836,6 +2860,27 @@ impl World {
         let region = &mut self.islands.get_mut(island).expect("在表里").region;
         // 存完之后按 `UNLOADED_WITH_PLAYER` 把珍珠从世界里移除。
         crate::ender_pearl::remove_on_leave(region, id);
+        // 官方 `PlayerList.remove`：只有一名玩家乘客时先 `stopRiding`，再把根载具
+        // 和整棵树按 `UNLOADED_WITH_PLAYER` 移除；存档里已经留了 `RootVehicle`。
+        if let Some(vehicle) = region.players.get(&id).and_then(|p| p.riding.vehicle) {
+            let root = crate::riding::root_vehicle(region, vehicle);
+            if crate::riding::player_passenger_count(region, root) == 1 {
+                crate::riding::stop_riding(region, id);
+                let mut tree = vec![root];
+                let mut all = Vec::new();
+                while let Some(uid) = tree.pop() {
+                    all.push(uid);
+                    tree.extend(
+                        crate::riding::passengers(region, uid)
+                            .into_iter()
+                            .filter(|&p| p >= mc_bamboo_blocks::entity::FIRST_ENTITY_ID),
+                    );
+                }
+                for uid in all {
+                    region.entities.remove(uid);
+                }
+            }
+        }
         region.players.remove(&id);
         region.player_grid.remove(id);
         self.apply_ticket_ops([TicketOp::PlayerMoved {
@@ -3829,8 +3874,12 @@ fn island_access(drive: IslandDrive, islands: &mut Islands) -> IslandAccess<'_> 
 /// 返回带连字符的 uuid 和 gzip 字节，交给 [`World::save_all_players`] 提交给 IO 线程。
 /// Encode one live player's save (pure, so it does not conflict with the mutable
 /// borrow of `host`). Returns the hyphenated uuid and gzip bytes for submission.
-fn encode_player_save(player: &crate::player::Player) -> Option<(String, Vec<u8>)> {
-    let data = runtime_player_data(player);
+fn encode_player_save(
+    player: &crate::player::Player,
+    root_vehicle: Option<mc_bamboo_nbt::Tag>,
+) -> Option<(String, Vec<u8>)> {
+    let mut data = runtime_player_data(player);
+    data.root_vehicle = root_vehicle;
     match encode_player_data(&data) {
         Ok(bytes) => Some((player_uuid_string(player.uuid.as_bytes()), bytes)),
         Err(error) => {

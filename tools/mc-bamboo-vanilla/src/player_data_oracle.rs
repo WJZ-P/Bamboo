@@ -906,6 +906,32 @@ fn check_player_fields(report: &mut Report, name: &str, data: &PlayerData, field
             expected_pearls
         ),
     );
+    // `ServerPlayer.saveParentVehicle` / `loadAndSpawnParentVehicle`：官方按
+    // `ValueInput.child("RootVehicle")` 读回，整条标签和 `Entity` 子树逐键一致。
+    match &data.root_vehicle {
+        Some(tag) => {
+            report.check(
+                get("root_vehicle_tag") == canonical_tag(tag),
+                format!("{name}: RootVehicle official read differs from Bamboo's tag"),
+            );
+            if let Some(entity) = field(tag, "Entity") {
+                report.check(
+                    get("root_vehicle_entity") == canonical_tag(entity),
+                    format!("{name}: RootVehicle/Entity official read differs"),
+                );
+            }
+            if let Some(attach) = field(tag, "Attach") {
+                report.check(
+                    get("root_vehicle_attach") == canonical_tag(attach),
+                    format!("{name}: RootVehicle/Attach UUID codec differs"),
+                );
+            }
+        }
+        None => report.check(
+            get("root_vehicle_tag") == Value::Null,
+            format!("{name}: RootVehicle must not be written when not riding"),
+        ),
+    }
     report.check(
         get("selected_item_slot") == json!(data.selected_item_slot),
         format!("{name}: SelectedItemSlot"),
@@ -1364,7 +1390,66 @@ fn player_cases() -> Vec<(String, PlayerData)> {
         pearl(0.0, 320.0, 0.125, true),
     ];
     cases.push(("player two ender pearls".into(), two_pearls));
+
+    // `ServerPlayer.saveParentVehicle`：根载具连同嵌套的 `Passengers` 一起写进玩家档。
+    // 官方一侧按 `ValueInput.child("RootVehicle")` 读回，逐键和 Bamboo 写的比。
+    let mut mounted = cases[0].1.clone();
+    mounted.root_vehicle = Some(root_vehicle_tag(true));
+    cases.push(("player root vehicle with nested passengers".into(), mounted));
+    let mut simple_mount = cases[2].1.clone();
+    simple_mount.root_vehicle = Some(root_vehicle_tag(false));
+    cases.push((
+        "player root vehicle without passengers".into(),
+        simple_mount,
+    ));
     cases
+}
+
+/// 一份带 `Attach` 和 `Entity` 的 `RootVehicle`；`Passengers` 递归一层。
+fn root_vehicle_tag(nested: bool) -> Tag {
+    let mut entity = vec![
+        ("id".into(), Tag::String("minecraft:horse".into())),
+        (
+            "Pos".into(),
+            Tag::List(vec![
+                Tag::Double(2.5),
+                Tag::Double(64.0),
+                Tag::Double(-8.75),
+            ]),
+        ),
+        (
+            "Rotation".into(),
+            Tag::List(vec![Tag::Float(90.0), Tag::Float(0.0)]),
+        ),
+        (
+            "UUID".into(),
+            Tag::IntArray(vec![0, 0x0000_baab_u32 as i32, 0, 91]),
+        ),
+        ("SaddleItem".into(), Tag::Compound(vec![])),
+    ];
+    if nested {
+        entity.push((
+            "Passengers".into(),
+            Tag::List(vec![Tag::Compound(vec![
+                ("id".into(), Tag::String("minecraft:skeleton".into())),
+                (
+                    "Pos".into(),
+                    Tag::List(vec![
+                        Tag::Double(2.5),
+                        Tag::Double(65.0),
+                        Tag::Double(-8.75),
+                    ]),
+                ),
+            ])]),
+        ));
+    }
+    Tag::Compound(vec![
+        (
+            "Attach".into(),
+            Tag::IntArray(vec![0, 0x0000_baab_u32 as i32, 0, 91]),
+        ),
+        ("Entity".into(), Tag::Compound(entity)),
+    ])
 }
 
 fn player_spec(data: &PlayerData) -> Value {
@@ -1446,6 +1531,13 @@ fn player_spec(data: &PlayerData) -> Value {
             })
             .collect();
         spec["ender_pearls"] = json!(pearls);
+    }
+    if let Some(tag) = &data.root_vehicle {
+        // Java 侧用官方 `NbtIo.read` 解回整条复合标签；`Attach` 是 UUIDUtil.CODEC
+        // 的四项 int array，`Entity` 里可以有嵌套的 `Passengers`。
+        let mut bytes = Vec::new();
+        mc_bamboo_nbt::write_named("", tag, &mut bytes);
+        spec["root_vehicle"] = json!(b64(&bytes));
     }
     if !data.preserved.is_empty() {
         spec["unknown_tag"] = json!("keep");
