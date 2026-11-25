@@ -246,6 +246,115 @@ impl Level for RegionLevel<'_> {
             .is_some_and(|player| player.sleep.is_some())
     }
 
+    fn trial_spawner_players(
+        &self,
+        pos: BlockPos,
+        range: f64,
+        _line_of_sight: bool,
+    ) -> Vec<mc_bamboo_blocks::level::TrialSpawnerPlayer> {
+        use mc_bamboo_data::registries::mob_effect;
+        let center = Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.5,
+            f64::from(pos.z) + 0.5,
+        );
+        let squared = range * range;
+        let mut out = Vec::new();
+        for player in self.players.values() {
+            let position = player.position();
+            if position.distance_to_sqr(center) > squared {
+                continue;
+            }
+            let eye = Vec3::new(position.x, position.y + player.eye_height(), position.z);
+            out.push(mc_bamboo_blocks::level::TrialSpawnerPlayer {
+                uuid: *player.uuid.as_bytes(),
+                trial_omen: player.effects.has(mob_effect::TRIAL_OMEN),
+                bad_omen_amplifier: player.effects.amplifier(mob_effect::BAD_OMEN),
+                eye_block: BlockPos::containing(eye),
+            });
+        }
+        out
+    }
+
+    fn trial_spawner_mob_untracked(&self, uuid: [u8; 16], pos: BlockPos) -> bool {
+        use mc_bamboo_blocks::entity::KindPublic;
+        let Some(public) = self
+            .entities
+            .iter_public()
+            .find(|public| match &public.kind {
+                KindPublic::Mob(mob) => mob.uuid == uuid,
+                _ => false,
+            })
+        else {
+            return true;
+        };
+        if public.removed {
+            return true;
+        }
+        // `blockPosition().distSqr(pos) > MAX_MOB_TRACKING_DISTANCE_SQR`（47²）。
+        let mob = public.block_position();
+        let dx = i64::from(mob.x - pos.x);
+        let dy = i64::from(mob.y - pos.y);
+        let dz = i64::from(mob.z - pos.z);
+        dx * dx + dy * dy + dz * dz > 2_209
+    }
+
+    fn trial_spawner_discard_mobs(&mut self, mobs: &[[u8; 16]]) {
+        use mc_bamboo_blocks::entity::KindPublic;
+        let doomed: Vec<mc_bamboo_blocks::entity::EntityUid> = self
+            .entities
+            .iter_public()
+            .filter(|public| match &public.kind {
+                KindPublic::Mob(mob) => mobs.contains(&mob.uuid),
+                _ => false,
+            })
+            .map(|public| public.uid)
+            .collect();
+        for uid in doomed {
+            let _ = mc_bamboo_blocks::level::LevelEntities::discard_entity(self, uid);
+        }
+    }
+
+    fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return false;
+        };
+        let params = mc_bamboo_loot::LootParams::new(0.0);
+        let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
+            return false;
+        };
+        if stacks.is_empty() {
+            return false;
+        }
+        for stack in stacks {
+            let stack = crate::loot_stacks::loot_stack(&stack);
+            // `DefaultDispenseItemBehavior.spawnItem(level, stack, 2, UP, atBottomCenterOf(pos).relative(UP, 1.2))`。
+            let position = Vec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 1.2 - 0.125,
+                f64::from(pos.z) + 0.5,
+            );
+            let random = self.random.source();
+            // `spawnItem` 先取 `g = nextDouble * 0.1 + 0.2`，UP 方向 stepX/stepZ 是 0，
+            // 这个值用不上但取数仍要发生。
+            let _g = random.next_double() * 0.1 + 0.2;
+            let spread = 0.017_227_5 * 2.0;
+            let velocity = Vec3::new(
+                random.triangle(0.0, spread),
+                random.triangle(0.2, spread),
+                random.triangle(0.0, spread),
+            );
+            let uid = mc_bamboo_blocks::level::LevelEntities::spawn_entity(
+                self,
+                mc_bamboo_blocks::entity::Entity::ground_item(position, stack),
+            );
+            mc_bamboo_blocks::level::LevelEntities::with_just_spawned(self, uid, &mut |entity| {
+                entity.delta = velocity;
+            });
+        }
+        true
+    }
+
     /// 官方 `Block.tryDropExperience` + `Block.popExperience`：
     /// `xpRange.sample(level.random)`（常数区间不取数），然后
     /// `ExperienceOrb.award(level, Vec3.atCenterOf(pos), amount)` 拆成球。
