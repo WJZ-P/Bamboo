@@ -2488,6 +2488,10 @@ pub(crate) enum WorkKind {
     Anvil,
     Cartography,
     Enchantment,
+    /// `NautilusInventoryMenu`：两格（鞍、身体），没有箱子格。
+    ///
+    /// `NautilusInventoryMenu`: saddle and body, with no chest slots.
+    NautilusMount,
 }
 
 impl From<WorkKind> for Kind {
@@ -2507,6 +2511,7 @@ impl From<WorkKind> for Kind {
             WorkKind::Anvil => Self::Anvil,
             WorkKind::Cartography => Self::Cartography,
             WorkKind::Enchantment => Self::Enchantment,
+            WorkKind::NautilusMount => Self::Mount(0),
         }
     }
 }
@@ -2585,6 +2590,36 @@ pub(crate) fn prepare_replay(
 enum Cell {
     Menu(usize),
     Hidden(usize),
+}
+
+/// 坐骑物品栏的菜单重放：`NautilusInventoryMenu` 两格，生物已驯服成年，
+/// `saddle_usable = true`。装备写回生物这一步在真实游戏层做，重放里不比。
+///
+/// Replay of the nautilus mount inventory: two slots on a tame adult, with
+/// `saddle_usable = true`. Equipping the real mob is done by the game layer.
+pub(crate) fn prepare_mount_replay(
+    inventory: &[ItemStack],
+    seeds: &[(usize, ItemStack)],
+    creative: bool,
+) -> Station {
+    let mut station = Station::create(Kind::Mount(0), 1, BlockPos::new(0, 0, 0));
+    station.creative = creative;
+    station.load_player(inventory, 0);
+    station.mount = Some(mount::Mount {
+        entity: 1,
+        mob_type: mc_bamboo_blocks::entity::mob::MobType::Nautilus,
+        saddle_usable: true,
+        chested: false,
+        equips: Vec::new(),
+    });
+    station.suppress = true;
+    for &(index, ref stack) in seeds {
+        if index < station.slots.len() {
+            station.set_by_player(index, stack.clone());
+        }
+    }
+    station.suppress = false;
+    station
 }
 
 fn accepts_input(stack: &ItemStack) -> bool {

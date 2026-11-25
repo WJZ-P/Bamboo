@@ -78,6 +78,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
 
     let mut stats = Stats::default();
     let mut first = true;
+    let mut ocean_nautilus = 0;
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let value: Value =
             serde_json::from_str(line).map_err(|error| format!("bad oracle line: {error}"))?;
@@ -85,6 +86,32 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
             .get("type")
             .and_then(Value::as_str)
             .ok_or("oracle line has no type")?;
+        // 海洋群系的刷怪表里应当有 `minecraft:nautilus`，而且 Bamboo 已经建模。
+        // Ocean spawn tables should contain `minecraft:nautilus`, modelled by Bamboo.
+        if kind == "pick"
+            && value["biome"]
+                .as_str()
+                .is_some_and(|name| name.contains("ocean"))
+            && let Some(settings) = value["biome"].as_str().and_then(spawning::by_biome_name)
+        {
+            for row in settings.categories {
+                if row.entries.iter().any(|entry| {
+                    mc_bamboo_data::registries::entity_type::name_of(entry.entity_type)
+                        == Some("minecraft:nautilus")
+                }) {
+                    ocean_nautilus += 1;
+                    if mc_bamboo_blocks::entity::mob::MobType::by_entity_type(
+                        mc_bamboo_data::registries::entity_type::NAUTILUS,
+                    ) != Some(mc_bamboo_blocks::entity::mob::MobType::Nautilus)
+                    {
+                        stats.mismatches.push(
+                            "nautilus is in an ocean spawn table but Bamboo cannot spawn it"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+        }
         let mismatch = match kind {
             "pick" => replay_pick(&value, options.break_self_test && first)?,
             "shuffle" => replay_shuffle(&value, options.break_self_test && first)?,
@@ -98,6 +125,10 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
             stats.mismatches.push(message);
         }
     }
+    if ocean_nautilus == 0 && !options.break_self_test {
+        return Err("natural-spawn saw no ocean nautilus spawn entries".to_owned());
+    }
+    println!("natural-spawn: {ocean_nautilus} ocean nautilus tables covered");
     finish(stats, &options)
 }
 

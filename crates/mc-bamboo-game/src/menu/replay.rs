@@ -46,6 +46,10 @@ pub enum ReplayShape {
     Anvil,
     Cartography,
     Enchantment,
+    /// `NautilusInventoryMenu`，两格坐骑物品栏。
+    ///
+    /// `NautilusInventoryMenu`, the two-slot mount inventory.
+    NautilusMount,
 }
 
 /// 重放题里假世界的固定状态：附魔种子、地图比例/锁定、书架数和换出的新种子。
@@ -86,7 +90,8 @@ impl ReplayShape {
             | Self::Anvil
             | Self::Cartography
             | Self::Enchantment
-            | Self::Crafter => ContainerKind::Chest,
+            | Self::Crafter
+            | Self::NautilusMount => ContainerKind::Chest,
         }
     }
 
@@ -107,6 +112,7 @@ impl ReplayShape {
             Self::Anvil => Some(WorkKind::Anvil),
             Self::Cartography => Some(WorkKind::Cartography),
             Self::Enchantment => Some(WorkKind::Enchantment),
+            Self::NautilusMount => Some(WorkKind::NautilusMount),
             _ => None,
         }
     }
@@ -135,7 +141,8 @@ impl ReplayShape {
             | Self::Anvil
             | Self::Cartography
             | Self::Enchantment
-            | Self::Crafter => Some(index),
+            | Self::Crafter
+            | Self::NautilusMount => Some(index),
             _ => None,
         }
     }
@@ -231,6 +238,29 @@ impl Replay {
             creative,
             world,
         );
+        replay.station = Some(station);
+        replay
+    }
+
+    /// `NautilusInventoryMenu` 的重放：两格（鞍、身体）加玩家 36 格。
+    ///
+    /// Replay of `NautilusInventoryMenu`: saddle, body and the player's 36 slots.
+    pub fn nautilus_mount(
+        container: &[(i32, i32)],
+        inventory: &[(i32, i32)],
+        creative: bool,
+    ) -> Self {
+        let seeds: Vec<(usize, ItemStack)> = container
+            .iter()
+            .take(2)
+            .enumerate()
+            .filter(|(_, entry)| entry.0 != 0 && entry.1 > 0)
+            .map(|(index, &(item, count))| (index, stack(item, count)))
+            .collect();
+        let station =
+            super::station::prepare_mount_replay(&bamboo_inventory(inventory), &seeds, creative);
+        let mut replay = Self::new(ReplayShape::Chest(1), &[], &[]);
+        replay.creative = creative;
         replay.station = Some(station);
         replay
     }

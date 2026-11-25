@@ -31,21 +31,21 @@ const MOUNT_REACH_BUFFER: f64 = 4.0;
 ///
 /// The mount a menu points at.
 pub(super) struct Mount {
-    entity: i32,
-    mob_type: MobType,
+    pub(super) entity: i32,
+    pub(super) mob_type: MobType,
     /// 鞍位的 `canUseSlot`，每次读回时刷新。
     ///
     /// `canUseSlot` for the saddle, refreshed on every read.
-    saddle_usable: bool,
+    pub(super) saddle_usable: bool,
     /// 打开时有没有箱子。`hasInventoryChanged`：装上箱子会换掉整个物品栏。
     ///
     /// Whether a chest was fitted at open time. `hasInventoryChanged`: fitting a
     /// chest replaces the whole inventory.
-    chested: bool,
+    pub(super) chested: bool,
     /// 这次点击里 `ArmorSlot.setByPlayer` 的（格、之前、之后），按发生顺序。
     ///
     /// `ArmorSlot.setByPlayer` calls of this click as (slot, previous, new), in order.
-    equips: Vec<(EquipmentSlot, ItemStack, ItemStack)>,
+    pub(super) equips: Vec<(EquipmentSlot, ItemStack, ItemStack)>,
 }
 
 impl Station {

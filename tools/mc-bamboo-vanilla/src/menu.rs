@@ -277,6 +277,9 @@ impl Report {
         if case.shape == "lectern" {
             return self.replay_lectern(case);
         }
+        if case.shape == "nautilus_mount" {
+            return self.replay_nautilus_mount(case);
+        }
         let shape = shape_of(&case.shape)
             .ok_or_else(|| format!("case {}: unknown menu shape {:?}", case.id, case.shape))?;
         self.cases += 1;
@@ -367,6 +370,31 @@ impl Report {
             } else {
                 replay.click(step.slot, step.button, input)
             };
+            self.steps += 1;
+            self.compare(
+                &format!("case {} step {index}", case.id),
+                &snapshot,
+                &step.outcome,
+            );
+        }
+        Ok(())
+    }
+
+    /// `NautilusInventoryMenu`：两格（鞍、身体）和玩家 36 格逐步点击。
+    ///
+    /// `NautilusInventoryMenu`: saddle, body and the player's 36 slots, click by click.
+    fn replay_nautilus_mount(&mut self, case: &Case) -> Result<(), String> {
+        self.cases += 1;
+        let mut replay = Replay::nautilus_mount(
+            &pairs(&case.container),
+            &pairs(&case.inventory),
+            case.creative,
+        );
+        let snapshot = replay.open();
+        self.compare(&format!("case {} open", case.id), &snapshot, &case.open);
+        for (index, step) in case.steps.iter().enumerate() {
+            let input = ContainerInput::from_id(i32::from(step.input));
+            let snapshot = replay.click(step.slot, step.button, input);
             self.steps += 1;
             self.compare(
                 &format!("case {} step {index}", case.id),
