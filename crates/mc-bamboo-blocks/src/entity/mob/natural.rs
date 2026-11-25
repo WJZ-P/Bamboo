@@ -853,6 +853,9 @@ pub(super) fn check_spawn_rules(
         // `SulfurCube.checkSulfurCubeSpawnRules` 恒真：没有亮度 / 群系门槛。
         // `SulfurCube.checkSulfurCubeSpawnRules` is always true: no light or biome gate.
         MobType::SulfurCube => true,
+        // 嗅探兽不在任何群系刷怪表里：只从蛋孵出来或 `/summon` / 刷怪蛋生成。
+        // Sniffers are in no biome spawn table: only the egg or `/summon` / a spawn egg.
+        MobType::Sniffer => true,
         // 两种傀儡都不在群系刷怪表里，只保留命令 / 方块图案生成时共用的规则。
         // Neither golem is in a biome spawn table; only the shared rule remains.
         MobType::IronGolem | MobType::SnowGolem => animal_spawn_rules(world, pos),

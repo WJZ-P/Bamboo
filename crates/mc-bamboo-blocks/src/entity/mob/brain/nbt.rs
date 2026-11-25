@@ -53,6 +53,21 @@ fn value_tag(value: &MemoryValue) -> Option<Tag> {
                 Tag::IntArray(vec![pos.pos.x, pos.pos.y, pos.pos.z]),
             ),
         ])),
+        // `GlobalPos.CODEC.listOf()`：`List<Compound>`，每个是 `{dimension, pos}`。
+        // `GlobalPos.CODEC.listOf()`: a list of `{dimension, pos}` compounds.
+        MemoryValue::GlobalPosList(list) => Some(Tag::List(
+            list.iter()
+                .map(|pos| {
+                    Tag::Compound(vec![
+                        ("dimension".to_owned(), Tag::String(pos.dimension.clone())),
+                        (
+                            "pos".to_owned(),
+                            Tag::IntArray(vec![pos.pos.x, pos.pos.y, pos.pos.z]),
+                        ),
+                    ])
+                })
+                .collect(),
+        )),
         _ => None,
     }
 }
@@ -121,6 +136,26 @@ fn value_of(kind: MemoryType, raw: &Tag) -> Option<MemoryValue> {
         }
         MemoryType::LastWorkedAtPoi | MemoryType::LastSlept | MemoryType::LastWoken => {
             tag::java_i64(raw).ok().map(MemoryValue::Long)
+        }
+        MemoryType::SnifferExploredPositions => {
+            let Tag::List(entries) = raw else {
+                return None;
+            };
+            let mut list = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let dimension = tag::string_or(entry, "dimension")?.to_owned();
+                let Some(Tag::IntArray(coords)) = tag::field(entry, "pos") else {
+                    return None;
+                };
+                let [x, y, z] = coords.as_slice() else {
+                    return None;
+                };
+                list.push(GlobalPos {
+                    dimension,
+                    pos: BlockPos::new(*x, *y, *z),
+                });
+            }
+            Some(MemoryValue::GlobalPosList(list))
         }
         _ => tag::java_i32(raw).ok().map(MemoryValue::Int),
     }
