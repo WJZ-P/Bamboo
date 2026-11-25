@@ -79,6 +79,7 @@ mod trial_spawner;
 mod undead_horse;
 mod vault;
 mod villager;
+mod wandering_trader;
 mod warden;
 mod water_mob;
 mod witch_throw;
@@ -181,6 +182,9 @@ enum Line {
     NaturalSpawn(natural_spawn::Case),
     PatrolSpawn(patrol_spawn::Case),
     RaidScene(raid::Case),
+    WanderingTraderSpawner(wandering_trader::SpawnerCase),
+    WanderingTraderSave(wandering_trader::SaveCase),
+    WanderingTraderScene(wandering_trader::SceneCase),
     StructureSpawn(structure_spawn::Case),
     GenSpawn(gen_spawn::Case),
     PandaGenes(PandaGenesCase),
@@ -2205,6 +2209,9 @@ impl Report {
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::PatrolSpawn(case) => self.replay_patrol_spawn(&case)?,
                 Line::RaidScene(case) => self.replay_raid(&case),
+                Line::WanderingTraderSpawner(case) => self.replay_wandering_trader_spawner(&case),
+                Line::WanderingTraderSave(case) => self.replay_wandering_trader_save(&case),
+                Line::WanderingTraderScene(case) => self.replay_wandering_trader_scene(&case),
                 Line::StructureSpawn(case) => self.replay_structure_spawn(&case)?,
                 Line::GenSpawn(case) => self.replay_gen_spawn(&case),
                 Line::PandaGenes(case) => self.replay_panda_genes(&case),

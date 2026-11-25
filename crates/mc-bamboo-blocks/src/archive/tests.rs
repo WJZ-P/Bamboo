@@ -396,16 +396,16 @@ fn riders_are_saved_inside_their_vehicle() {
 
 #[test]
 fn unknown_entity_ids_are_left_to_the_caller() {
-    // `zombie_villager` 已建模，改用一个官方注册表里存在但 Bamboo 没有的类型。
-    // `zombie_villager` is modelled now, so use a real registry id Bamboo lacks.
+    // 官方注册表里存在但 Bamboo 没有建模的类型。
+    // A real registry id for an entity Bamboo does not model.
     let tag = Tag::Compound(vec![(
         "id".to_owned(),
-        Tag::String("minecraft:wandering_trader".to_owned()),
+        Tag::String("minecraft:blaze".to_owned()),
     )]);
     assert!(read_entity(&tag, 1).unwrap().is_none());
     assert_eq!(
         field(&tag, "id"),
-        Some(&Tag::String("minecraft:wandering_trader".to_owned()))
+        Some(&Tag::String("minecraft:blaze".to_owned()))
     );
 }
 
