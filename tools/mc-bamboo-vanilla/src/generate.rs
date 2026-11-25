@@ -4349,6 +4349,26 @@ fn entity_types_file(data: &VersionData) -> String {
     );
     let _ = writeln!(
         out,
+        "pub const SULFUR_CUBE_MAX_FUSE: u8 = {};",
+        facts.sulfur_cube_max_fuse
+    );
+    let _ = writeln!(
+        out,
+        "pub const SULFUR_CUBE_FROM_BUCKET: u8 = {};",
+        facts.sulfur_cube_from_bucket
+    );
+    let _ = writeln!(
+        out,
+        "pub const SULFUR_CUBE_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.sulfur_cube_eye_height)
+    );
+    let _ = writeln!(
+        out,
+        "pub const SULFUR_CUBE_SPAWN_DIMENSIONS_SCALE: f32 = {};",
+        float_literal(facts.sulfur_cube_spawn_dimensions_scale)
+    );
+    let _ = writeln!(
+        out,
         "pub const SLIME_EYE_HEIGHT: f32 = {};",
         float_literal(facts.slime_eye_height)
     );

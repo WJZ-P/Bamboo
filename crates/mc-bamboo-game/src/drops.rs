@@ -155,6 +155,20 @@ fn slime_touch(region: &mut Region, id: PlayerId, slime: mc_bamboo_blocks::entit
 /// `Pufferfish.playerTouch`: hurt and poison a player touching an inflated pufferfish,
 /// then send the `PUFFER_FISH_STING` game event to that player unless silenced. Vanilla
 /// calls it from `touch(entity)` in `Player.aiStep` with no melee-range check.
+/// `SulfurCube.playerTouch` 里 HOT 原型的接触伤害。
+fn sulfur_cube_touch(region: &mut Region, id: PlayerId, cube: mc_bamboo_blocks::entity::EntityUid) {
+    let alive = region
+        .players
+        .get(&id)
+        .is_some_and(|player| !player.health.is_dead_or_dying());
+    if !alive {
+        return;
+    }
+    let (mut level, ticks) = region.entity_level();
+    let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+    mc_bamboo_blocks::entity::mob::sulfur_cube::contact_player_touch(&mut world, cube, id.0);
+}
+
 fn puffer_touch(
     region: &mut Region,
     id: PlayerId,
@@ -239,6 +253,8 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
             }
             if mob_type == mc_bamboo_blocks::entity::mob::MobType::Slime {
                 slime_touch(region, id, entity_id);
+            } else if mob_type == mc_bamboo_blocks::entity::mob::MobType::SulfurCube {
+                sulfur_cube_touch(region, id, entity_id);
             } else if mob_type == mc_bamboo_blocks::entity::mob::MobType::Pufferfish {
                 puffer_touch(region, id, entity_id, silent);
             }

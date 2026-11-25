@@ -416,6 +416,10 @@ public final class MobOracle {
             if (only == null || only.equals("small_mob_death")) {
                 cases += playSmallMobDeath(official, out);
             }
+            if (only == null || only.startsWith("sulfur_cube_")) {
+                cases += playSulfurCube(official, out, only);
+                cases += playSulfurCubeSave(official, out);
+            }
             if (only == null || "villager".startsWith(only)) {
                 cases += playVillagerSpawn(official, out);
                 cases += playVillagerSave(official, out);
@@ -530,7 +534,7 @@ public final class MobOracle {
             if ("skeleton_halloween".equals(only)) {
                 cases += playHalloweenSpawns(official, out);
             }
-            if ("natural_spawn".equals(only) || "natural_spawn_panda".equals(only)
+            if ("sulfur_cube".equals(only) || "natural_spawn".equals(only) || "natural_spawn_panda".equals(only)
                     || "natural_fish".equals(only)
                     || "witch_spawn".equals(only) || "drowned_spawn".equals(only)
                     || "stray_spawn".equals(only) || "bogged_spawn".equals(only)
@@ -6198,6 +6202,14 @@ public final class MobOracle {
         // need clay below.
         scenes.add(new NaturalScene("dolphin_ocean", EntityTypes.DOLPHIN, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("axolotl_lush", EntityTypes.AXOLOTL, "lush_caves", 2, 0, 0, 0, false, -32, 0, 289, true, false));
+        // 硫磺方块怪：sulfur_caves 的 monster 表首项，count 是 2..4 的均匀分布。
+        // checkSulfurCubeSpawnRules 恒真；白天、亮处、和平难度各一支。
+        // Sulfur cubes: the first monster entry of sulfur_caves with a uniform 2..4 count.
+        // checkSulfurCubeSpawnRules is always true; day, bright light and peaceful variants.
+        scenes.add(new NaturalScene("sulfur_cube_night", EntityTypes.SULFUR_CUBE, "sulfur_caves", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("sulfur_cube_day", EntityTypes.SULFUR_CUBE, "sulfur_caves", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("sulfur_cube_lit", EntityTypes.SULFUR_CUBE, "sulfur_caves", 2, 15, 15, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("sulfur_cube_peaceful", EntityTypes.SULFUR_CUBE, "sulfur_caves", 0, 0, 0, 11, false, -32, 0, 289, true, false));
         return playNaturalSpawnScenes(official, out, scenes, only);
     }
 
@@ -6211,6 +6223,7 @@ public final class MobOracle {
             if ("stray_spawn".equals(only) && scene.mob() != EntityTypes.STRAY) continue;
             if ("bat_spawn".equals(only) && scene.mob() != EntityTypes.BAT) continue;
             if ("bogged_spawn".equals(only) && scene.mob() != EntityTypes.BOGGED) continue;
+            if ("sulfur_cube".equals(only) && scene.mob() != EntityTypes.SULFUR_CUBE) continue;
             // 沼泽场景的起点高度要正好落在某层地面上才有戏；浅河和雪地流浪者
             // 有光 / 找天的门槛，命中概率低，多跑一些种子。
             // Swamp scenes only get anywhere when the start height lands on a floor; the
@@ -6669,12 +6682,12 @@ public final class MobOracle {
                 // Slimes whose size is not 1: `setSize` snaps the yaw to the head yaw, which the
                 // vanilla constructor draws from an unseeded random. Not comparable; both sides
                 // record 0.
-                boolean unseededYaw = mob instanceof net.minecraft.world.entity.monster.cubemob.Slime big
+                boolean unseededYaw = mob instanceof net.minecraft.world.entity.monster.cubemob.AbstractCubeMob big
                         && big.getSize() != 1;
                 row.add(unseededYaw ? 0 : Float.floatToRawIntBits(mob.getYRot()));
                 // 史莱姆不会是幼年，这一列改放大小。
                 // Slimes are never babies; this column carries their size instead.
-                row.add(mob instanceof net.minecraft.world.entity.monster.cubemob.Slime cube ? cube.getSize()
+                row.add(mob instanceof net.minecraft.world.entity.monster.cubemob.AbstractCubeMob cube ? cube.getSize()
                         : mob.isBaby() ? 1 : 0);
                 row.add(mob.isLeftHanded() ? 1 : 0);
                 row.add(BuiltInRegistries.ITEM.getId(mob.getMainHandItem().getItem()));
@@ -16366,6 +16379,146 @@ public final class MobOracle {
      *
      * The variant or wool colour and sound of a spawned farm animal, null otherwise. A
      * chicken's egg timer comes from its unseeded entity random and is left out. */
+    /**
+     * 硫磺方块怪：移动跳跃、吞下物品后原型变化、接触伤害和爆炸四种场景，
+     * 逐刻比位置、速度、朝向、随机源、大小、fuse、吞下的物品和血量。
+     *
+     * Sulfur cubes: hopping, archetype change after swallowing an item, contact
+     * damage and the TNT fuse. Per-tick motion, random, size, fuse, body item and health.
+     */
+    private static int playSulfurCube(Official official, Writer out, String only) throws Exception {
+        String[] names = {"sulfur_cube_hop", "sulfur_cube_swallow", "sulfur_cube_hot",
+                "sulfur_cube_explosive", "sulfur_cube_fuse"};
+        int cases = 0;
+        for (String name : names) {
+            if (only != null && !name.startsWith(only)) continue;
+            int ticks = name.equals("sulfur_cube_fuse") ? 125 : 60;
+            FakeLevel world = FakeLevel.create(official);
+            ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+            world.levelEvents = new ArrayList<>();
+            for (int x = -6; x <= 6; x++) {
+                for (int z = -6; z <= 6; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+            String blocks = blockArray(world.blocks);
+            world.nextId = FIRST_ID;
+            world.spawned = new ArrayList<>();
+            var cube = (net.minecraft.world.entity.monster.cubemob.SulfurCube)
+                    EntityTypes.SULFUR_CUBE.create(world, EntitySpawnReason.COMMAND);
+            setRandom(cube, 0x5EED_5EEDL);
+            cube.setUUID(new UUID(1L, 2L));
+            cube.setYRot(0.0F);
+            cube.setYHeadRot(0.0F);
+            cube.setPos(0.5, 61.0, 0.5);
+            // 构造函数里的 `CubeMobMoveControl.yRot` 用的是不带种子的随机朝向；
+            // 对拍必须把它也钉成 0，否则第一跳的方向不可复现。
+            {
+                var control = cube.getMoveControl();
+                var field = Class.forName("net.minecraft.world.entity.monster.cubemob.AbstractCubeMob$CubeMobMoveControl")
+                        .getDeclaredField("yRot");
+                field.setAccessible(true);
+                field.setFloat(control, 0.0F);
+            }
+            cube.setSize(2, true);
+            // 吞下的方块用 setItemSlotAndDropWhenKilled 写进 BODY；官方的
+            // collectEquipmentChanges 在 setItemSlot 时重算原型。
+            if (name.equals("sulfur_cube_swallow") || name.equals("sulfur_cube_hot")
+                    || name.equals("sulfur_cube_explosive") || name.equals("sulfur_cube_fuse")) {
+                var item = name.equals("sulfur_cube_hot") ? Items.MAGMA_BLOCK
+                        : name.equals("sulfur_cube_swallow") ? Items.DIRT : Items.TNT;
+                cube.setItemSlot(net.minecraft.world.entity.EquipmentSlot.BODY, new ItemStack(item));
+            }
+            if (name.equals("sulfur_cube_fuse")) {
+                // `collectEquipmentChanges` 要到第一次 `commonTick` 才跑；夹具里
+                // 先把 explosionData 直接填成原型的那一支，再点燃。
+                var field = net.minecraft.world.entity.monster.cubemob.SulfurCube.class
+                        .getDeclaredField("explosionData");
+                field.setAccessible(true);
+                field.set(cube, java.util.Optional.of(
+                        new net.minecraft.world.entity.SulfurCubeArchetype.ExplosionData(3, false, 120)));
+                cube.primeTime(false);
+                // `makeSound` 抽两次 nextFloat 定音高；对拍里把随机源钉回
+                // 初始值，两边只比 fuse 和之后的逐刻取数。
+                setRandom(cube, 0x5EED_5EEDL);
+            }
+            world.tracked.add(cube);
+            var frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    world.gameTime++;
+                    world.spawned.clear();
+                    if (!cube.isRemoved()) {
+                        cube.checkDespawn();
+                        cube.commonTick();
+                        cube.tick();
+                    }
+                }
+                frames.append(tick == 0 ? "" : ",");
+                frames.append("{\"gone\":").append(cube.isRemoved());
+                if (!cube.isRemoved()) {
+                    frames.append(",\"motion\":").append(projectileMotion(cube))
+                            .append(",\"seed\":").append(randomSeed(cube))
+                            .append(",\"state\":").append(Arrays.toString(new int[] {
+                                    Float.floatToRawIntBits(cube.getHealth()), cube.hurtTime, cube.deathTime,
+                                    cube.getNoActionTime(), cube.getSize(), cube.getFuse(),
+                                    cube.onGround() ? 1 : 0,
+                                    BuiltInRegistries.ITEM.getId(cube.getItemBySlot(
+                                            net.minecraft.world.entity.EquipmentSlot.BODY).getItem())}));
+                }
+                frames.append(",\"levelSeed\":").append(randomSeed(world.getRandom()));
+                frames.append(",\"spawned\":").append(world.spawned.size());
+                frames.append('}');
+            }
+            out.write("{\"type\":\"sulfurCube\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID + ",\"blocks\":" + blocks
+                    + ",\"frames\":" + frames + "]}\n");
+            out.flush();
+            cases++;
+        }
+        return cases;
+    }
+
+    /** 硫磺方块怪存档：四种吞下的方块、两种 fuse 和 from_bucket，逐键比 SNBT。 */
+    private static int playSulfurCubeSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (int item : new int[] {0, 1, 2, 3}) {
+            for (int fuse : new int[] {-1, 120}) {
+                FakeLevel world = FakeLevel.create(official);
+                var cube = (net.minecraft.world.entity.monster.cubemob.SulfurCube)
+                        EntityTypes.SULFUR_CUBE.create(world, EntitySpawnReason.COMMAND);
+                setRandom(cube, world.entitySeeds.nextLong());
+                cube.setPos(1.5, 64.0, 2.5);
+                cube.setYRot(37.0F);
+                cube.setXRot(12.0F);
+                cube.setHealth(7.0F);
+                cube.setSize(2, true);
+                var blocks = new net.minecraft.world.level.ItemLike[] {Items.DIRT, Items.OAK_PLANKS, Items.TNT, Items.MAGMA_BLOCK};
+                if (item != 0) {
+                    cube.setItemSlot(net.minecraft.world.entity.EquipmentSlot.BODY, new ItemStack(blocks[item]));
+                }
+                if (fuse != -1) cube.primeTime(false);
+                cube.setFromBucket(fuse == 120);
+                var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                cube.saveWithoutId(output);
+                var copy = (net.minecraft.world.entity.monster.cubemob.SulfurCube)
+                        EntityTypes.SULFUR_CUBE.create(world, EntitySpawnReason.LOAD);
+                copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries, output.buildResult()));
+                var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                copy.saveWithoutId(again);
+                out.write("{\"type\":\"sulfurCubeSave\",\"item\":" + item
+                        + ",\"fuse\":" + fuse
+                        + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                        + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
     private static com.google.gson.JsonElement spawnVariants(Mob mob) throws Exception {
         if (mob instanceof net.minecraft.world.entity.animal.frog.Frog frog) {
             // 青蛙：按群系选的品种，和 `FrogAi.initMemories` 抽的长跳冷却。

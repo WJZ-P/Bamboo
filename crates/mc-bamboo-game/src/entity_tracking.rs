@@ -1875,6 +1875,14 @@ fn farm_default_data(
     match (kind, index) {
         (MobType::Sheep, facts::SHEEP_WOOL) => Some(EntityData::SheepWool(0)),
         (MobType::Slime, facts::CUBE_MOB_SIZE) => Some(EntityData::CubeMobSize(1)),
+        // `AbstractCubeMob.ID_SIZE` 也是硫磺方块怪的 index 18，默认是 1。
+        (MobType::SulfurCube, facts::CUBE_MOB_SIZE) => Some(EntityData::CubeMobSize(1)),
+        (MobType::SulfurCube, facts::SULFUR_CUBE_MAX_FUSE) => {
+            Some(EntityData::SulfurCubeMaxFuse(-1))
+        }
+        (MobType::SulfurCube, facts::SULFUR_CUBE_FROM_BUCKET) => {
+            Some(EntityData::SulfurCubeFromBucket(false))
+        }
         (MobType::Mooshroom, facts::MOOSHROOM_TYPE) => Some(EntityData::MooshroomType(0)),
         (MobType::PolarBear, facts::POLAR_BEAR_STANDING) => {
             Some(EntityData::PolarBearStanding(false))
@@ -2035,6 +2043,19 @@ fn farm_non_default_data(
         MobType::Slime => {
             if mob.cube_size != 1 {
                 out.push(EntityData::CubeMobSize(mob.cube_size));
+            }
+            true
+        }
+        // 硫磺方块怪：`ID_SIZE`、`MAX_FUSE`、`FROM_BUCKET` 三项元数据。
+        MobType::SulfurCube => {
+            if mob.cube_size != 1 {
+                out.push(EntityData::CubeMobSize(mob.cube_size));
+            }
+            if mob.sulfur_cube_max_fuse != -1 {
+                out.push(EntityData::SulfurCubeMaxFuse(mob.sulfur_cube_max_fuse));
+            }
+            if mob.sulfur_cube_from_bucket {
+                out.push(EntityData::SulfurCubeFromBucket(true));
             }
             true
         }

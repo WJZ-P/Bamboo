@@ -526,17 +526,28 @@ fn run_cases(
                 key == "id" && matches!(value, Tag::String(id) if id == "minecraft:zombie_villager")
             }))
         });
+        // 官方 `AttributeMap` 按哈希表顺序写 `attributes`，Bamboo 按注册表 ID；
+        // 两边都按属性名排序再比。僵尸村民的官方 loader 还会补/删懒实例。
+        let is_sulfur_cube = entities.get(label).is_some_and(|tag| {
+            matches!(tag, Tag::Compound(fields) if fields.iter().any(|(key, value)| {
+                key == "id" && matches!(value, Tag::String(id) if id == "minecraft:sulfur_cube")
+            }))
+        });
         let comparable = |value: &Value| -> Value {
+            let mut sorted = sorted_attributes(value.clone());
             if !is_zombie_villager {
-                return value.clone();
+                return sorted;
             }
-            let mut map = value.as_object().cloned().unwrap_or_default();
+            let Some(map) = sorted.as_object_mut() else {
+                return sorted;
+            };
             let Some(inner) = map.get_mut("values").and_then(Value::as_object_mut) else {
-                return Value::Object(map);
+                return sorted;
             };
             inner.remove("attributes");
             inner.remove("active_effects");
-            Value::Object(map)
+            let _ = is_sulfur_cube;
+            sorted
         };
         let original = case.original.as_ref().map(comparable);
         let written = case.written.as_ref().map(comparable);
@@ -1575,6 +1586,7 @@ fn entity_cases() -> Vec<Tag> {
     out.extend(fish_archive_cases());
     out.extend(jockey_archive_cases());
     out.extend(guardian_archive_cases());
+    out.extend(sulfur_cube_archive_cases());
     out.extend(zombie_villager_archive_cases());
     out.extend(parched_jockey_archive_cases());
     out
@@ -1729,6 +1741,46 @@ fn guardian_archive_cases() -> [Tag; 2] {
         });
         write_entity(&store.get(uid).expect("fresh guardian").split()).expect("guardian archive")
     })
+}
+
+/// 硫磺方块怪存档：`Size` / `wasOnGround` / `pickup_timer` / `from_bucket` /
+/// `fuse` 五项自有键，加上吞下的方块写进 `equipment.body`。
+fn sulfur_cube_archive_cases() -> Vec<Tag> {
+    use mc_bamboo_blocks::entity::mob::{MobType, sulfur_cube};
+    use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
+
+    let mut cases = Vec::new();
+    for (size, body, fuse, from_bucket) in [
+        (2, 0, -1, false),
+        (1, mc_bamboo_data::items::TNT, 120, true),
+        (2, mc_bamboo_data::items::MAGMA_BLOCK, 17, false),
+    ] {
+        let mut store = mc_bamboo_blocks::EntityStore::new();
+        let uid = store.spawn(Entity::by_mob_type(
+            MobType::SulfurCube,
+            Vec3::new(1.5, 63.0, -2.5),
+        ));
+        store.with_mut(uid, |entity| {
+            entity.with_mob(|me, mob| {
+                sulfur_cube::set_size(me, mob, size, true);
+                mob.sulfur_cube.pickup_timer = 37;
+                mob.sulfur_cube.fuse = fuse;
+                mob.sulfur_cube.max_fuse = fuse;
+                mob.sulfur_cube.from_bucket = from_bucket;
+                mob.cube.was_on_ground = true;
+                if body != 0 {
+                    mob.equipment
+                        .set(EquipmentSlot::Body, ItemStack::new(body, 1));
+                    sulfur_cube::collect_equipment_changes(mob, ItemStack::new(body, 1));
+                }
+            });
+        });
+        cases.push(
+            write_entity(&store.get(uid).expect("fresh sulfur cube").split())
+                .expect("sulfur cube archive"),
+        );
+    }
+    cases
 }
 
 /// 一只带乘客的鸡：`Passengers` 嵌在载具的存档里，乘客的 `Pos` 用载具的 x/z。

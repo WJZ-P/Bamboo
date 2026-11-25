@@ -1419,6 +1419,16 @@ public final class Extractor {
         out.addProperty("chickenVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenVariant.serializer()));
         out.addProperty("chickenSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenSound.serializer()));
         out.addProperty("cubeMobSize", entityAccessor(net.minecraft.world.entity.monster.cubemob.AbstractCubeMob.class, "ID_SIZE").id());
+        // 硫磺方块怪自己的两项元数据：MAX_FUSE (INT) 和 FROM_BUCKET (BOOLEAN)。
+        Class<?> sulfurCube = net.minecraft.world.entity.monster.cubemob.SulfurCube.class;
+        out.addProperty("sulfurCubeMaxFuse", entityAccessor(sulfurCube, "MAX_FUSE").id());
+        out.addProperty("sulfurCubeFromBucket", entityAccessor(sulfurCube, "FROM_BUCKET").id());
+        out.addProperty("sulfurCubeEyeHeight", net.minecraft.world.entity.EntityTypes.SULFUR_CUBE.getDimensions().eyeHeight());
+        {
+            var scale = net.minecraft.world.entity.EntityType.class.getDeclaredField("spawnDimensionsScale");
+            scale.setAccessible(true);
+            out.addProperty("sulfurCubeSpawnDimensionsScale", scale.getFloat(net.minecraft.world.entity.EntityTypes.SULFUR_CUBE));
+        }
         out.addProperty("slimeEyeHeight", net.minecraft.world.entity.EntityTypes.SLIME.getDimensions().eyeHeight());
         var armadilloState = entityAccessor(net.minecraft.world.entity.animal.armadillo.Armadillo.class, "ARMADILLO_STATE");
         out.addProperty("armadilloState", armadilloState.id());

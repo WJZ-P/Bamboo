@@ -35,6 +35,14 @@ use super::{
 /// 方法名和 [`World`] 的只读方法一致，实体逻辑改参数类型时函数体不用改。
 pub trait BlockView {
     fn block_state(&self, pos: BlockPos) -> BlockState;
+    /// `Level.getBestOwnOrNeighbourSignal(pos)`：`SulfurCube.primeWhenOnPoweredPosition`
+    /// 读它判断脚下有没有红石信号。默认没有信号。
+    ///
+    /// `Level.getBestOwnOrNeighbourSignal(pos)`, read by the sulfur cube's
+    /// powered-position prime check. Defaults to zero.
+    fn best_own_or_neighbour_signal(&self, _pos: BlockPos) -> i32 {
+        0
+    }
     /// `MovingPistonBlock.getCollisionShape`：这一格移动中活塞的方块实体算出的形状，
     /// 相对这一格的最小角。`None` 表示没有这样的方块实体，官方给 `Shapes.empty()`。
     ///
@@ -495,6 +503,10 @@ impl PlayerView {
 impl BlockView for World<'_> {
     fn block_state(&self, pos: BlockPos) -> BlockState {
         World::block_state(self, pos)
+    }
+
+    fn best_own_or_neighbour_signal(&self, pos: BlockPos) -> i32 {
+        World::best_own_or_neighbour_signal(self, pos)
     }
 
     fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<Aabb>> {
