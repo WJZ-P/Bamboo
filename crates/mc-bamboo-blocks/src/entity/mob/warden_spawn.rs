@@ -11,7 +11,7 @@ use crate::{
     world::World,
 };
 
-use super::{MobType, spawn, warden};
+use super::{MobType, spawn, warden, warden_ai};
 
 /// `WARDEN_SPAWN_ATTEMPTS`。
 const ATTEMPTS: i32 = 20;
@@ -56,7 +56,25 @@ pub fn try_summon_warden(
         );
         spawn::snap_to(&mut entity, center, 0.0, 0.0);
         entity.with_mob(|_, mob| {
+            // `Warden.finalizeSpawn(TRIGGERED)`：DIG_COOLDOWN 1200、IS_EMERGING 134、
+            // EMERGING 姿态（Java 侧 `EntityType.create` 不跑 finalizeSpawn，对拍场景要显式设）。
+            // `Warden.finalizeSpawn(TRIGGERED)`: DIG_COOLDOWN 1200, IS_EMERGING 134 and
+            // the EMERGING pose (Java's `EntityType.create` skips finalizeSpawn, so the
+            // oracle scene sets these explicitly too).
             mob.warden.pose = warden::WardenPose::Emerging;
+            if let Some(brain) = mob.brain.as_mut() {
+                use crate::entity::mob::brain::memory::{MemoryType, MemoryValue};
+                brain.memories.set_with_ttl(
+                    MemoryType::IsEmerging,
+                    MemoryValue::Unit,
+                    i64::from(warden_ai::EMERGE_DURATION),
+                );
+                brain.memories.set_with_ttl(
+                    MemoryType::DigCooldown,
+                    MemoryValue::Unit,
+                    i64::from(warden_ai::DIGGING_COOLDOWN),
+                );
+            }
         });
         return Some(world.add_prepared_entity(entity));
     }

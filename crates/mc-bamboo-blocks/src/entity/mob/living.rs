@@ -2032,6 +2032,11 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
         // `ElderGuardian.customServerAiStep`: area mining fatigue and home.
         super::guardian::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Warden {
+        // `Warden.customServerAiStep`：大脑、振动、愤怒衰减、活动重选。
+        // `Warden.customServerAiStep`: brain, vibration, anger decay, activity switch.
+        super::warden_ai::custom_server_ai_step(me, mob, ctx, decision_gap);
+    }
 }
 
 /// `Mob.getHeadRotSpeed()`：青蛙 35，其余 10。

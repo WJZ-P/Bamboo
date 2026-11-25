@@ -6,8 +6,13 @@
 
 use mc_bamboo_core::{BlockPos, Vec3};
 
+use crate::{
+    entity::{Entity, EntityUid, ctx::EntityCtx},
+    game_event::{GameEvent, vibration::VibrationUser},
+};
+
 use super::{
-    MobEvent,
+    Mob, MobEvent,
     brain::{
         Activity, ActivityData, Brain,
         behavior::{Class, Cx, Kind, MoveToTargetSink},
@@ -729,4 +734,147 @@ pub fn set_attack_target(cx: &mut Cx, uid: crate::entity::EntityUid) {
 pub fn sync_client_anger(cx: &mut Cx) {
     let target = cx.memories.entity(M::AttackTarget);
     cx.mob.warden.client_anger_level = cx.mob.warden.anger.get_active_anger(target);
+}
+
+/// `Warden.customServerAiStep`：跑大脑 → 推进振动监听者 → 每 20 刻衰减愤怒并同步
+/// 客户端等级 → 每刻末按官方顺序重选活动。
+///
+/// `Warden.customServerAiStep`: tick the brain, advance the vibration listener,
+/// decay anger and sync the client level every 20 ticks, then reselect the activity.
+pub fn custom_server_ai_step(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    decision_gap: i64,
+) {
+    if let Some(mut brain) = mob.brain.take() {
+        let replaced = brain.tick_by(me, mob, ctx, decision_gap.max(1));
+        mob.brain = Some(Box::new(replaced.unwrap_or(*brain)));
+    }
+    let now = ctx.blocks().game_time();
+    let eye = Vec3::new(
+        me.position.x,
+        me.position.y + f64::from(mob.eye_height),
+        me.position.z,
+    );
+    let mut data = mob
+        .entity_listener
+        .map(|listener| listener.vibration)
+        .unwrap_or_default();
+    {
+        let mut user = WardenVibrationUser { me: &*me, mob };
+        crate::game_event::vibration::tick(&mut data, &mut user, now, Some(eye), false);
+    }
+    if let Some(listener) = mob.entity_listener.as_mut() {
+        listener.vibration = data;
+    }
+    if me.tick_count % ANGER_TICK_DELAY == 0 {
+        mob.warden.anger.tick();
+        let target = mob
+            .brain
+            .as_ref()
+            .and_then(|brain| brain.memories.entity(M::AttackTarget));
+        mob.warden.client_anger_level = mob.warden.anger.get_active_anger(target);
+    }
+    if let Some(brain) = mob.brain.as_mut() {
+        update_activity(brain);
+    }
+}
+
+/// `Warden$VibrationUser`：半径 16、眼睛位置、收到振动加愤怒并设调查点。
+///
+/// `Warden$VibrationUser`: radius 16, eye position, anger and disturbance on arrival.
+struct WardenVibrationUser<'a> {
+    me: &'a Entity,
+    mob: &'a mut Mob,
+}
+
+impl VibrationUser for WardenVibrationUser<'_> {
+    fn radius(&self) -> i32 {
+        16
+    }
+
+    fn position(&self) -> Option<Vec3> {
+        Some(Vec3::new(
+            self.me.position.x,
+            self.me.position.y + f64::from(self.mob.eye_height),
+            self.me.position.z,
+        ))
+    }
+
+    fn can_receive(&self, _event: GameEvent, _source: BlockPos) -> bool {
+        if self.mob.no_ai || self.me.removed || self.mob.warden.pose.is_digging_or_emerging() {
+            return false;
+        }
+        !self
+            .mob
+            .brain
+            .as_ref()
+            .is_some_and(|brain| brain.memories.has(M::VibrationCooldown))
+    }
+
+    fn on_receive(
+        &mut self,
+        _event: GameEvent,
+        source: BlockPos,
+        source_player: Option<EntityUid>,
+        _distance: f32,
+    ) {
+        if self.me.removed {
+            return;
+        }
+        if let Some(brain) = self.mob.brain.as_mut() {
+            brain
+                .memories
+                .set_with_ttl(M::VibrationCooldown, MemoryValue::Unit, 40);
+            brain
+                .memories
+                .set_with_ttl(M::RecentProjectile, MemoryValue::Unit, 100);
+        }
+        self.mob.events.push(MobEvent::EntityEvent { event: 61 });
+        self.mob.events.push(MobEvent::Sound {
+            sound: "minecraft:entity.warden.tendril_clicks",
+            volume: 5.0,
+            pitch: 1.0,
+            position: self.me.position,
+            hostile: true,
+            seed: None,
+        });
+        if let Some(uid) = source_player {
+            let uuid = crate::archive::entity::entity_uuid(uid).to_be_bytes();
+            self.mob.warden.anger.increase_anger(
+                uid,
+                uuid,
+                35,
+                uid < crate::entity::FIRST_ENTITY_ID,
+            );
+            self.mob.warden.client_anger_level = self.mob.warden.anger.get_active_anger(None);
+        }
+        // 非 ANGRY 时设调查点；射弹分支的 10 点愤怒留给后续场景。
+        // Set the disturbance when not ANGRY; the projectile 10-anger branch is later.
+        if !self.mob.warden.anger.anger_level().is_angry()
+            && let Some(brain) = self.mob.brain.as_mut()
+        {
+            brain
+                .memories
+                .set_with_ttl(M::SniffCooldown, MemoryValue::Unit, 100);
+            brain.memories.set_with_ttl(
+                M::LookTarget,
+                MemoryValue::Look(PositionTracker::at_block(source)),
+                100,
+            );
+            brain
+                .memories
+                .set_with_ttl(M::DisturbanceLocation, MemoryValue::BlockPos(source), 100);
+            brain.memories.erase(M::WalkTarget);
+        }
+    }
+
+    fn requires_adjacent_chunks(&self) -> bool {
+        false
+    }
+
+    fn send_particles(&mut self, _from: Vec3, _to: Vec3, _travel: i32) -> usize {
+        0
+    }
 }

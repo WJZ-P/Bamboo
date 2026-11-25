@@ -156,6 +156,25 @@ impl AngerManagement {
         anger
     }
 
+    /// `AngerManagement.tick`：每 20 刻一次，嫌疑与按 UUID 暂存的愤怒各衰减 1、
+    /// 值到 1 就清掉，再重排。读档的 UUID→实体解析依赖世界查询，不在这里做
+    /// （对拍避开那几刻，见 README 已知限制）。
+    ///
+    /// `AngerManagement.tick`: once every 20 ticks, decay every suspect and staged
+    /// anger by 1, drop values reaching 1, then re-sort. UUID→entity resolution
+    /// needs a world lookup and is not done here (the oracle avoids those ticks).
+    pub fn tick(&mut self) {
+        self.suspects.retain_mut(|s| {
+            s.anger -= 1;
+            s.anger > 1
+        });
+        self.anger_by_uuid.retain_mut(|(_, anger)| {
+            *anger -= 1;
+            *anger > 1
+        });
+        self.sort_and_update_highest();
+    }
+
     /// `clearAnger(entity)`。
     pub fn clear_anger(&mut self, uid: EntityUid) {
         self.suspects.retain(|s| s.uid != uid);
