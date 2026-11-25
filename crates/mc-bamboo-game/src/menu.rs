@@ -20,6 +20,7 @@ use mc_bamboo_core::{Aabb, BlockPos, Hand, Vec3};
 use mc_bamboo_data::{BlockAncestor, blocks, registries::menu};
 use mc_bamboo_protocol::{
     item::ItemStack,
+    merchant::MerchantOffer,
     packet::play::{
         ContainerClose, ContainerInput, ContainerSetContent, ContainerSetSlot, GameMode,
         HashedStack, OpenScreen, SetCursorItem, SetPlayerInventory,
@@ -50,6 +51,8 @@ const DOUBLE_CHEST_TITLE: &str = "container.chestDouble";
 const PLAYER_SLOTS: usize = 36;
 /// 物品栏菜单里第一格的位置，`Inventory.slots` 是按菜单槽位存的。
 pub(crate) const INVENTORY_MENU_START: usize = 9;
+/// 商人菜单的结果格。
+const RESULT_SLOT: usize = 2;
 
 /// 菜单指向的方块。双箱要记住两半，打开和关闭都要作用在两边。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +255,16 @@ pub(crate) struct ClickPacket {
     pub(crate) carried: HashedStack,
 }
 
+/// 商人菜单借给点击逻辑的那部分：交易表和选中提示。结果格是 `container[2]`，
+/// 只读、取出时完成交易。
+///
+/// The merchant menu state the click logic borrows: the offers and the selection
+/// hint. `container[2]` is the read-only result slot, taken to complete the trade.
+struct MerchantCtx<'a> {
+    offers: &'a mut [MerchantOffer],
+    selection_hint: &'a mut i32,
+}
+
 /// 点击时菜单和物品栏的联合视图，对应官方 `doClick` 里能碰到的东西。
 struct Ctx<'a> {
     kind: ContainerKind,
@@ -267,6 +280,8 @@ struct Ctx<'a> {
     ///
     /// Stacks thrown by this click. Entities are spawned after the click finishes.
     thrown: &'a mut Vec<ItemStack>,
+    /// 商人菜单。`None` 是普通容器。
+    merchant: Option<MerchantCtx<'a>>,
 }
 
 impl Ctx<'_> {
@@ -301,12 +316,53 @@ impl Ctx<'_> {
         }
     }
 
-    /// 官方 `Slot.mayPlace`。只有潜影盒的槽拒绝潜影盒。
+    /// 官方 `Slot.mayPlace`。只有潜影盒的槽拒绝潜影盒；商人菜单的结果格（2）只读。
     fn may_place(&self, index: usize, stack: &ItemStack) -> bool {
+        if self.merchant.is_some() && index == RESULT_SLOT {
+            return false;
+        }
         if self.kind != ContainerKind::ShulkerBox || index >= self.container_size {
             return true;
         }
         !is_shulker_box_item(stack)
+    }
+
+    /// 取出结果格后完成交易（`MerchantResultSlot.onTake` 的扣付款 + 使用次数）。
+    fn merchant_take(&mut self) {
+        let Some(merchant) = &mut self.merchant else {
+            return;
+        };
+        let a = self.container[0].clone();
+        let b = self.container[1].clone();
+        let Some(index) =
+            crate::merchant::active_offer_index(merchant.offers, &a, &b, *merchant.selection_hint)
+        else {
+            return;
+        };
+        let mut a = a;
+        let mut b = b;
+        let offer = &merchant.offers[index];
+        if !(crate::merchant::offer_take(offer, &mut a, &mut b)
+            || crate::merchant::offer_take(offer, &mut b, &mut a))
+        {
+            return;
+        }
+        self.container[0] = a;
+        self.container[1] = b;
+        merchant.offers[index].uses += 1;
+    }
+
+    /// 商人菜单点击后重算结果格（`MerchantContainer.updateSellItem`）。
+    fn settle_merchant(&mut self) {
+        let Some(merchant) = &self.merchant else {
+            return;
+        };
+        let a = self.container[0].clone();
+        let b = self.container[1].clone();
+        self.container[2] =
+            crate::merchant::active_offer_index(merchant.offers, &a, &b, *merchant.selection_hint)
+                .map(|index| merchant.offers[index].result.clone())
+                .unwrap_or_else(ItemStack::empty);
     }
 
     /// 官方 `Slot.tryRemove`，`allowModification` 和 `mayPickup` 在我们的槽上恒为真。
@@ -522,6 +578,10 @@ fn do_click(ctx: &mut Ctx, slot_index: i32, button: i32, input: ContainerInput) 
     } else if input == ContainerInput::PickupAll && slot_index >= 0 {
         pickup_all(ctx, slot_index, button);
     }
+    // 商人菜单点击后重算结果格。
+    if ctx.merchant.is_some() {
+        ctx.settle_merchant();
+    }
 }
 
 fn pickup_or_quick_move(ctx: &mut Ctx, slot_index: i32, button: i32, quick: bool) {
@@ -564,6 +624,10 @@ fn pickup(ctx: &mut Ctx, index: usize, primary: bool) {
         };
         if let Some(taken) = ctx.try_remove(index, amount, i32::MAX) {
             *ctx.carried = taken;
+            // 结果格取出即完成交易：扣付款、加使用次数。
+            if index == RESULT_SLOT {
+                ctx.merchant_take();
+            }
         }
     } else if ctx.may_place(index, &carried) {
         if is_same_item_same_components(&clicked, &carried) {
@@ -1411,6 +1475,7 @@ pub(crate) fn on_click_default(region: &mut Region, id: PlayerId, packet: ClickP
             quickcraft_slots: &mut menu.quickcraft_slots,
             creative,
             thrown: &mut thrown,
+            merchant: None,
         };
         do_click(
             &mut ctx,

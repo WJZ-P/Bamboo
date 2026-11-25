@@ -386,7 +386,7 @@ fn try_move_items(region: &mut Region, player: PlayerId, menu: &mut Menu, slot: 
 ///
 /// `moveItemStackTo(stack, 3, 39, true)`: move a payment stack into the player's 36
 /// slots, back to front. Returns whether anything moved; a failure stops `tryMoveItems`.
-fn move_payment_to_inventory(
+pub(crate) fn move_payment_to_inventory(
     inventory: &mut crate::inventory::Inventory,
     stack: &mut ItemStack,
 ) -> bool {
@@ -424,7 +424,7 @@ fn move_payment_to_inventory(
 }
 
 /// `moveFromInventoryToPaymentSlot`：在背包里找匹配 `cost` 的堆，填进付款格。
-fn move_from_inventory_to_payment(
+pub(crate) fn move_from_inventory_to_payment(
     inventory: &mut crate::inventory::Inventory,
     payment: &mut ItemStack,
     cost: &ItemCost,
@@ -498,31 +498,45 @@ pub(crate) fn slots_changed(region: &Region, _player: PlayerId, menu: &mut Menu)
     let Some(offers) = villager_offers(region, villager_id) else {
         return;
     };
-    let (a, b) = if state.payment[0].is_empty() {
-        (state.payment[1].clone(), ItemStack::empty())
-    } else {
-        (state.payment[0].clone(), state.payment[1].clone())
-    };
-    if a.is_empty() || offers.is_empty() {
-        return;
-    }
-    let hint = state.selection_hint as usize;
-    let mut index = get_recipe_for(&offers, &a, &b, hint);
-    if index.is_none_or(|i| offers[i].is_out_of_stock()) {
-        index = get_recipe_for(&offers, &b, &a, hint);
-    }
-    let Some(index) = index else {
+    let a = state.payment[0].clone();
+    let b = state.payment[1].clone();
+    let Some(index) = active_offer_index(&offers, &a, &b, state.selection_hint) else {
         return;
     };
-    if offers[index].is_out_of_stock() {
-        return;
-    }
     state.active = Some(index);
     state.result = offers[index].result.clone();
 }
 
+/// `MerchantContainer.updateSellItem` 的纯逻辑：付款格 0 空就用 1，按
+/// `getRecipeFor(a, b, hint)` 找交易，不中或卖光再试对调的两格。返回应显示的交易下标。
+///
+/// The pure `MerchantContainer.updateSellItem`: fall back to slot 1 when slot 0 is
+/// empty, look up `getRecipeFor(a, b, hint)`, and retry with the payments swapped.
+/// Returns the offer index whose result should be shown.
+pub(crate) fn active_offer_index(
+    offers: &[MerchantOffer],
+    a: &ItemStack,
+    b: &ItemStack,
+    hint: i32,
+) -> Option<usize> {
+    let (a, b) = if a.is_empty() {
+        (b, &ItemStack::empty())
+    } else {
+        (a, b)
+    };
+    if a.is_empty() || offers.is_empty() {
+        return None;
+    }
+    let hint = hint as usize;
+    let mut index = get_recipe_for(offers, a, b, hint);
+    if index.is_none_or(|i| offers[i].is_out_of_stock()) {
+        index = get_recipe_for(offers, b, a, hint);
+    }
+    index.filter(|&i| !offers[i].is_out_of_stock())
+}
+
 /// `MerchantOffers.getRecipeFor(a, b, hint)`：hint 有效时只看那一条，不中直接 `None`。
-fn get_recipe_for(
+pub(crate) fn get_recipe_for(
     offers: &[MerchantOffer],
     a: &ItemStack,
     b: &ItemStack,
@@ -696,7 +710,7 @@ fn spawn_trade_xp(region: &mut Region, villager_id: i32, amount: i32, reward_exp
 }
 
 /// `MerchantOffer.getModifiedCostCount`。
-fn cost_count(offer: &MerchantOffer, cost: &ItemCost) -> i32 {
+pub(crate) fn cost_count(offer: &MerchantOffer, cost: &ItemCost) -> i32 {
     let demand = (cost.count * offer.demand) as f32 * offer.price_multiplier;
     let extra = demand.floor().max(0.0) as i32;
     (cost.count + extra + offer.special_price_diff).clamp(1, cost_stack_max(cost))
@@ -713,7 +727,7 @@ fn cost_stack_max(cost: &ItemCost) -> i32 {
 ///
 /// `MerchantOffer.satisfiedBy`: A uses `getModifiedCostCount`; B uses the raw
 /// `count` — vanilla does not discount the second cost (`getCostB` is `costB.itemStack()`).
-fn satisfied_by(offer: &MerchantOffer, a: &ItemStack, b: &ItemStack) -> bool {
+pub(crate) fn satisfied_by(offer: &MerchantOffer, a: &ItemStack, b: &ItemStack) -> bool {
     if !cost_matches(&offer.base_cost_a, a) || a.count < cost_count(offer, &offer.base_cost_a) {
         return false;
     }
@@ -726,7 +740,7 @@ fn satisfied_by(offer: &MerchantOffer, a: &ItemStack, b: &ItemStack) -> bool {
 /// `MerchantOffer.take(a, b)`：先 `satisfiedBy`，通过就从 `a` 扣 A、从 `b` 扣 B。
 ///
 /// `MerchantOffer.take(a, b)`: check `satisfiedBy`, then deduct A from `a` and B from `b`.
-fn offer_take(offer: &MerchantOffer, a: &mut ItemStack, b: &mut ItemStack) -> bool {
+pub(crate) fn offer_take(offer: &MerchantOffer, a: &mut ItemStack, b: &mut ItemStack) -> bool {
     if !satisfied_by(offer, a, b) {
         return false;
     }
@@ -744,7 +758,7 @@ fn offer_take(offer: &MerchantOffer, a: &mut ItemStack, b: &mut ItemStack) -> bo
 }
 
 /// `ItemCost.test`：同种物品且要求的组件完全相等。
-fn cost_matches(cost: &ItemCost, stack: &ItemStack) -> bool {
+pub(crate) fn cost_matches(cost: &ItemCost, stack: &ItemStack) -> bool {
     if stack.is_empty() || stack.item != cost.item {
         return false;
     }
