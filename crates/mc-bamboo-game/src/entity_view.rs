@@ -129,6 +129,28 @@ impl BlockSource for ReadOnlyWorld<'_> {
         )
     }
 
+    fn poi_in_range(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        type_mask: u32,
+        occupancy: u8,
+    ) -> Vec<(u8, BlockPos)> {
+        let Some(occupancy) = crate::poi_query::occupancy(occupancy) else {
+            return Vec::new();
+        };
+        self.poi
+            .get_in_range(
+                |found| (type_mask & (1_u32 << found)) != 0,
+                center,
+                radius,
+                occupancy,
+            )
+            .into_iter()
+            .map(|r| (r.kind, r.pos))
+            .collect()
+    }
+
     fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
         self.poi.sections_to_village(SectionPos::of(pos))
     }

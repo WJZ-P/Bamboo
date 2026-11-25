@@ -320,6 +320,20 @@ pub trait BlockView {
         None
     }
 
+    /// `PoiManager.getInRange`：按官方遍历序返回半径内匹配类型位掩码与占用口径的全部 `(kind, pos)`。
+    ///
+    /// `PoiManager.getInRange`: all `(kind, pos)` within `radius` matching `type_mask`
+    /// and `occupancy`, in vanilla traversal order.
+    fn poi_in_range(
+        &self,
+        _center: BlockPos,
+        _radius: i32,
+        _type_mask: u32,
+        _occupancy: u8,
+    ) -> Vec<(u8, BlockPos)> {
+        Vec::new()
+    }
+
     fn poi_sections_to_village(&self, _pos: BlockPos) -> i32 {
         7
     }
@@ -621,6 +635,17 @@ impl BlockView for World<'_> {
     ) -> Option<BlockPos> {
         self.level()
             .poi_find_closest(center, radius, kind, occupancy, position_filter)
+    }
+
+    fn poi_in_range(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        type_mask: u32,
+        occupancy: u8,
+    ) -> Vec<(u8, BlockPos)> {
+        self.level()
+            .poi_in_range(center, radius, type_mask, occupancy)
     }
 
     fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
@@ -1465,6 +1490,59 @@ pub enum Command {
     JumpMobs {
         others: Vec<EntityUid>,
     },
+    /// `PoiManager.take`：在 `pos` 处扣一张匹配 `type_mask` 的 POI 票。
+    ///
+    /// `PoiManager.take`: consumes one ticket for a matching POI at `pos`.
+    PoiTake {
+        pos: BlockPos,
+        type_mask: u32,
+    },
+    /// `PoiManager.release`：归还 `pos` 处 POI 的一张票。
+    ///
+    /// `PoiManager.release`: releases one ticket for the POI at `pos`.
+    PoiRelease {
+        pos: BlockPos,
+    },
+    /// `Villager.pickUpItem`（`InventoryCarrier.pickUpItem`）：把地上物品放进 8 格背包。
+    ///
+    /// `Villager.pickUpItem` (`InventoryCarrier.pickUpItem`): puts a ground item into
+    /// the villager's 8-slot inventory.
+    VillagerPickUpItem {
+        item: EntityUid,
+    },
+    /// `WorkAtComposter.compostItems`：操作堆肥桶（取骨粉或塞种子）并发 `levelEvent(1500)`。
+    ///
+    /// `WorkAtComposter.compostItems`: interacts with the composter and emits `levelEvent(1500)`.
+    VillagerCompost {
+        pos: BlockPos,
+    },
+    /// `ServerLevel.destroyBlock(pos, drop, entity)`：破坏方块并按需掉落。
+    ///
+    /// `ServerLevel.destroyBlock(pos, drop, entity)`: destroys a block, optionally dropping loot.
+    DestroyBlock {
+        pos: BlockPos,
+        drop: bool,
+    },
+    /// `HarvestFarmland` 播种：放置作物默认状态并播放 `minecraft:item.crop.plant`。
+    ///
+    /// `HarvestFarmland` planting: sets crop default state and plays `minecraft:item.crop.plant`.
+    PlantCrop {
+        pos: BlockPos,
+        state: BlockState,
+    },
+    /// `UseBonemeal`：`BoneMealItem.growCrop` + `Effect::BoneMealUsed`。
+    ///
+    /// `UseBonemeal`: `BoneMealItem.growCrop` + `Effect::BoneMealUsed`.
+    GrowCrop {
+        pos: BlockPos,
+    },
+    /// `Entity.spawnAtLocation(level, stack, yOffset)`。
+    ///
+    /// `Entity.spawnAtLocation(level, stack, yOffset)`.
+    DropAtLocation {
+        pos: Vec3,
+        stack: mc_bamboo_protocol::item::ItemStack,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -1943,6 +2021,40 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             // `blocks::TURTLE_EGG` is already the default state id, not a block registry index.
             let state = crate::state::BlockState(mc_bamboo_data::blocks::TURTLE_EGG);
             world.set_block(pos, state.with(crate::state::EGGS, eggs), 3);
+        }
+        Command::PoiTake { pos, type_mask } => {
+            let _ = world.poi_take(pos, type_mask);
+        }
+        Command::PoiRelease { pos } => {
+            let _ = world.poi_release(pos);
+        }
+        Command::VillagerPickUpItem { item } => {
+            super::mob::villager::apply_pick_up(world, item, me);
+        }
+        Command::VillagerCompost { pos } => {
+            super::mob::villager::apply_compost(world, pos, me);
+        }
+        Command::DestroyBlock { pos, drop } => {
+            let _ = world.destroy_block(pos, drop, 512);
+        }
+        Command::PlantCrop { pos, state } => {
+            let _ = world.set_block_and_update(pos, state);
+            world.play_sound(
+                Vec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z)),
+                mc_bamboo_data::sounds::sound_event("minecraft:item.crop.plant"),
+                mc_bamboo_data::sounds::BLOCKS,
+                1.0,
+                1.0,
+                false,
+            );
+        }
+        Command::GrowCrop { pos } => {
+            if crate::item_use::grow_crop(world, pos) {
+                world.push_effect(crate::level::Effect::BoneMealUsed { pos });
+            }
+        }
+        Command::DropAtLocation { pos, stack } => {
+            world.spawn_at_location(pos, stack);
         }
     }
 }

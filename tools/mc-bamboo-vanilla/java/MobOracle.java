@@ -11682,8 +11682,9 @@ public final class MobOracle {
         for (VScene scene : scenes) {
             if (only != null && !scene.name().startsWith(only)) continue;
             FakeLevel world = FakeLevel.create(official);
-            java.util.Map<Object, Object> levels = new java.util.LinkedHashMap<>();
-            levels.put(net.minecraft.world.level.Level.OVERWORLD, world);
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels = java.util.Map.of(
+                    net.minecraft.world.level.Level.OVERWORLD, world);
+            official.server.levels = levels;
             put(MinecraftServer.class, official.server, "levels", levels);
             BlockState stone = Blocks.STONE.defaultBlockState();
             for (int x = -15; x <= 15; x++) {
@@ -11876,8 +11877,9 @@ public final class MobOracle {
         // 2. 最小真大脑场景：平地 + 1 个堆肥桶 + 1 只无业成年村民，跑真大脑到 AcquirePoi。
         FakeLevel world = FakeLevel.create(official);
         try {
-            java.util.Map<Object, Object> levels = new java.util.LinkedHashMap<>();
-            levels.put(net.minecraft.world.level.Level.OVERWORLD, world);
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels = java.util.Map.of(
+                    net.minecraft.world.level.Level.OVERWORLD, world);
+            official.server.levels = levels;
             put(MinecraftServer.class, official.server, "levels", levels);
             BlockState stone = Blocks.STONE.defaultBlockState();
             for (int x = -15; x <= 15; x++) {
@@ -11937,8 +11939,12 @@ public final class MobOracle {
                     world.clock = clockStart + tick;
                     official.attributes.invalidateTickCache();
                     world.updateSkyBrightness();
+                    var prevBrain = mob.getBrain();
                     mob.commonTick();
                     mob.tick();
+                    if (mob.getBrain() != prevBrain) {
+                        BrainOracle.reseedShuffles(mob, randomSeed(mob));
+                    }
                     world.getPoiManager().tick(() -> true);
                 }
                 int freeTickets = world.poiFreeTickets(wsPos);
@@ -17366,7 +17372,27 @@ public final class MobOracle {
 
         @Override
         public net.minecraft.world.clock.ServerClockManager clockManager() {
-            return allocate(net.minecraft.world.clock.ServerClockManager.class);
+            net.minecraft.world.clock.ServerClockManager mgr = allocate(net.minecraft.world.clock.ServerClockManager.class);
+            net.minecraft.world.clock.ServerClockManager.ServerClockInstance inst =
+                    new net.minecraft.world.clock.ServerClockManager.ServerClockInstance() {
+                        @Override
+                        public long totalTicks() {
+                            ServerLevel lvl = FakeServer.this.getLevel(Level.OVERWORLD);
+                            return (lvl instanceof FakeLevel fake) ? fake.clock : 0L;
+                        }
+                    };
+            java.util.Map<Object, Object> map = new java.util.AbstractMap<>() {
+                @Override
+                public Object get(Object key) {
+                    return inst;
+                }
+                @Override
+                public java.util.Set<Entry<Object, Object>> entrySet() {
+                    return java.util.Set.of();
+                }
+            };
+            put(net.minecraft.world.clock.ServerClockManager.class, mgr, "clocks", map);
+            return mgr;
         }
 
         @Override

@@ -859,20 +859,31 @@ impl Report {
             ));
         }
 
-        // 只逐刻比较第 3 期已实现的部分（0..=phase3_until_tick，含首刻 `AcquirePoi` 的排期随机抽取、
-        // 大脑、运动、随机源与 POI 票数）；第 `first_claim_tick` 刻起官方 `AcquirePoi` 会真认领工作站
-        // 并置 `POTENTIAL_JOB_SITE`（连带触发 `GoToPotentialJobSite` 等期 4 行为），第 4 期接上真实
-        // 行为后去掉该上限即可全量比对全部 61 刻。
-        let compare_limit = case
-            .phase3_until_tick
-            .min(case.frames.len().saturating_sub(1));
-        for (tick, expected) in case.frames.iter().enumerate().take(compare_limit + 1) {
+        // 全量逐刻比较所有 61 刻（含 AcquirePoi 认领工作站、走向工作站与成为农民）。
+        let _ = case.phase3_until_tick;
+        let mut prev_prof = level
+            .entities
+            .get(villager_id)
+            .and_then(|e| e.kind.mob().map(|m| m.villager.profession))
+            .unwrap_or(0);
+        for (tick, expected) in case.frames.iter().enumerate() {
             if tick > 0 {
                 let tick_i64 = tick as i64;
                 ticks.set_time(1000 + tick_i64);
                 set_clock(&mut level, case.clock_start + tick_i64);
                 let mut world = World::new(&mut level, &mut ticks);
                 world.tick_entities();
+                world.with_entity_mut(villager_id, &mut |entity| {
+                    let seed = entity.random.state();
+                    entity.with_mob(|_, mob| {
+                        if mob.villager.profession != prev_prof {
+                            prev_prof = mob.villager.profession;
+                            if let Some(brain) = mob.brain.as_mut() {
+                                brain.seed_shuffles(seed);
+                            }
+                        }
+                    });
+                });
             }
             let Some(entity) = level.entities.get(villager_id) else {
                 self.mismatch(format!("{} tick {tick}: villager missing", case.name));
@@ -942,12 +953,10 @@ impl Report {
             }
         }
         println!(
-            "{}: {} ticks compared (phase 3 until tick {}, official AcquirePoi claimed at tick {}, {} total recorded)",
+            "{}: {} ticks compared (official AcquirePoi claimed at tick {})",
             case.name,
-            compare_limit + 1,
-            case.phase3_until_tick,
+            case.frames.len(),
             case.first_claim_tick,
-            case.frames.len()
         );
     }
 }

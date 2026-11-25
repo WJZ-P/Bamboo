@@ -48,18 +48,52 @@ fn layers_to_add(layers: CompostLayers, state: BlockState, world: &World) -> i32
     }
 }
 
-/// `addLayer`：没抽中时什么也不改，返回等级有没有变。
-fn add_layer(state: BlockState, world: &mut World, pos: BlockPos, layers: CompostLayers) -> bool {
+/// `addLayer`：没抽中时什么也不改，返回更新后的方块状态。
+pub(crate) fn add_layer_state(
+    state: BlockState,
+    world: &mut World,
+    pos: BlockPos,
+    layers: CompostLayers,
+) -> BlockState {
     let added = layers_to_add(layers, state, world);
     if added <= 0 {
-        return false;
+        return state;
     }
     let level = (state.get(LEVEL_COMPOSTER) + added).clamp(0, MAX_LEVEL);
-    world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, level));
+    let next = state.with(LEVEL_COMPOSTER, level);
+    world.set_block_and_update(pos, next);
     if level == MAX_LEVEL {
         world.schedule_tick(pos, state.block(), READY_DELAY);
     }
-    true
+    next
+}
+
+/// `addLayer`：没抽中时什么也不改，返回等级有没有变。
+fn add_layer(state: BlockState, world: &mut World, pos: BlockPos, layers: CompostLayers) -> bool {
+    add_layer_state(state, world, pos, layers) != state
+}
+
+/// `ComposterBlock.extractProduce`：产出骨粉、清零层数并播放清空音效，返回更新后的方块状态。
+pub(crate) fn extract_produce(state: BlockState, world: &mut World, pos: BlockPos) -> BlockState {
+    let dx = (world.random().next_float() - 0.5_f32) * 0.7_f32;
+    let dz = (world.random().next_float() - 0.5_f32) * 0.7_f32;
+    world.spawn_at_location(
+        mc_bamboo_core::Vec3::new(
+            f64::from(pos.x) + 0.5 + f64::from(dx),
+            f64::from(pos.y) + 1.01,
+            f64::from(pos.z) + 0.5 + f64::from(dz),
+        ),
+        mc_bamboo_protocol::item::ItemStack::new(mc_bamboo_data::items::BONE_MEAL, 1),
+    );
+    let next = state.with(LEVEL_COMPOSTER, 0);
+    world.set_block_and_update(pos, next);
+    world.play_block_sound(
+        pos,
+        sound_event("minecraft:block.composter.empty"),
+        1.0,
+        1.0,
+    );
+    next
 }
 
 /// `addLayer` 再加 `levelEvent(1500)`。玩家右键和漏斗塞东西都走这里。
@@ -117,23 +151,7 @@ impl Behaviour for Composter {
         // `extractProduce`: two `nextFloat`s pick the bone meal drop point, an item entity is
         // spawned, the level is cleared, and the `empty` sound follows with a null `except`.
         let pos = ctx.clicked_pos();
-        let dx = (world.random().next_float() - 0.5_f32) * 0.7_f32;
-        let dz = (world.random().next_float() - 0.5_f32) * 0.7_f32;
-        world.spawn_at_location(
-            mc_bamboo_core::Vec3::new(
-                f64::from(pos.x) + 0.5 + f64::from(dx),
-                f64::from(pos.y) + 1.01,
-                f64::from(pos.z) + 0.5 + f64::from(dz),
-            ),
-            mc_bamboo_protocol::item::ItemStack::new(mc_bamboo_data::items::BONE_MEAL, 1),
-        );
-        world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, 0));
-        world.play_block_sound(
-            pos,
-            sound_event("minecraft:block.composter.empty"),
-            1.0,
-            1.0,
-        );
+        extract_produce(state, world, pos);
         InteractionResult::Success
     }
 

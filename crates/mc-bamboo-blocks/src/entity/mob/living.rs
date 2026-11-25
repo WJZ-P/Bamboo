@@ -1500,6 +1500,35 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     if fox {
         super::fox::pick_up_items(me, mob, ctx);
     }
+    // `Mob.aiStep` 的捡东西那一段：村民（`InventoryCarrier.pickUpItem`）。
+    // The same `Mob.aiStep` pickup loop, for villagers (`InventoryCarrier.pickUpItem`).
+    if mob.mob_type == super::MobType::Villager
+        && mob.can_pick_up_loot
+        && is_alive(me, mob)
+        && !mob.dead
+        && ctx.blocks().block_game_rules().mob_griefing
+    {
+        let mut items = Vec::new();
+        ctx.for_each_other_in(me.bounding_box().inflate(1.0, 0.0, 1.0), &mut |other| {
+            if other.removed {
+                return;
+            }
+            if let KindPublic::Item {
+                stack,
+                pickup_delay,
+                ..
+            } = &other.kind
+                && !stack.is_empty()
+                && *pickup_delay <= 0
+                && mob.villager.wants_to_pick_up(stack)
+            {
+                items.push(other.uid);
+            }
+        });
+        for item in items {
+            ctx.emit(crate::entity::ctx::Command::VillagerPickUpItem { item }, me);
+        }
+    }
     // `AgeableMob.aiStep`：僵尸和鱼都不在这一层，年龄/求爱都不动。
     if mob.mob_type.is_ageable() && mob.forced_age_timer > 0 {
         if mob.forced_age_timer % 4 == 0 {

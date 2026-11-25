@@ -2076,6 +2076,20 @@ impl<'a> World<'a> {
         self.level.beehives_near(center, radius)
     }
 
+    /// `PoiManager.take`：在 `pos` 处扣一张匹配 `type_mask` 的 POI 票。
+    ///
+    /// `PoiManager.take`: consumes one ticket for a matching POI at `pos`.
+    pub fn poi_take(&mut self, pos: BlockPos, type_mask: u32) -> bool {
+        self.level.poi_take(pos, type_mask)
+    }
+
+    /// `PoiManager.release`：归还 `pos` 处 POI 的一张票。
+    ///
+    /// `PoiManager.release`: releases one ticket for the POI at `pos`.
+    pub fn poi_release(&mut self, pos: BlockPos) -> bool {
+        self.level.poi_release(pos)
+    }
+
     /// `EnvironmentAttributeSystem.getValue(BEES_STAY_IN_HIVE, pos)`：主世界时间线，
     /// 再叠上 `RAIN` / `THUNDER` 两张天气层（强度大于 0 就置真）。
     ///

@@ -14,11 +14,21 @@
 //! implements the core movement, panic, calm-down, schedule, raid RNG and look
 //! behaviours, and stubs Phase 4+ behaviours via [`Stub`].
 
-use mc_bamboo_core::{BlockPos, Vec3};
-use mc_bamboo_data::{spawning::MobCategory, villager as facts};
+use std::collections::BTreeMap;
+
+use mc_bamboo_core::{Aabb, BlockPos, Vec3};
+use mc_bamboo_data::{
+    blocks, items,
+    spawning::MobCategory,
+    tags::{block_tags, item_tags},
+    villager as facts,
+};
+use mc_bamboo_protocol::{
+    components::value::GlobalPos, item::ItemStack, packet::play::EquipmentSlot,
+};
 
 use super::{
-    Mob, MobType,
+    Mob, MobEvent, MobType,
     brain::{
         Activity, ActivityData, ActivitySchedule, Brain, BrainTemplate, TemplateCache,
         behavior::{Class, Cx, Gate, Kind, MoveToTargetSink, Speed},
@@ -31,9 +41,23 @@ use super::{
         sensor::{self, LivingView, SensorKind},
         template_cache,
     },
-    goals,
+    goals, living,
+    navigation::find_surface_position,
+    path::{self, EvaluatorFlags, Malus, Path, PathMob, PathRequest},
+    villager::{self, VillagerInventory},
 };
-use crate::entity::{Entity, ctx::BlockView, ctx::EntityCtx};
+use crate::{
+    behaviour::{
+        common::{block_by_id, default_state, item_of},
+        plants::{is_crop_block, is_crop_max_age},
+    },
+    entity::{
+        Entity, EntityPublic, EntityUid, KindPublic,
+        ctx::{BlockView, Command, EntityCtx},
+    },
+    shape::CollisionContext,
+    state::{OCCUPIED, item_is_tagged},
+};
 
 /// `Villager.SPEED_MODIFIER`。
 const SPEED_MODIFIER: f32 = 0.5;
@@ -79,10 +103,9 @@ impl LookFilter {
     }
 }
 
-/// `AcquirePoi` 占位的槽位种类：只保留官方的排期计时与世界随机数抽取，真正认领 POI 留到期 4。
+/// `AcquirePoi` 三个实例的槽位种类。
 ///
-/// Slot kind for the `AcquirePoi` scheduling stub: preserves vanilla's scheduling timer
-/// and level RNG draws while deferring actual POI claiming to Phase 4.
+/// Slot kind for the three `AcquirePoi` instances in `getCorePackage`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoiAcquireSlot {
     JobSite,
@@ -102,26 +125,166 @@ impl PoiAcquireSlot {
             Self::MeetingPoint => &[(MeetingPoint, ValueAbsent)],
         }
     }
+
+    const fn acquiring_memory(self) -> MemoryType {
+        match self {
+            Self::JobSite => PotentialJobSite,
+            Self::Home => Home,
+            Self::MeetingPoint => MeetingPoint,
+        }
+    }
+
+    const fn event_id(self) -> Option<u8> {
+        match self {
+            Self::JobSite => None,
+            Self::Home | Self::MeetingPoint => Some(14),
+        }
+    }
+
+    fn type_mask(self, profession: i32) -> u32 {
+        match self {
+            Self::JobSite => villager::acquirable_job_site_mask(profession),
+            Self::Home => villager::poi_name_mask("minecraft:home"),
+            Self::MeetingPoint => villager::poi_name_mask("minecraft:meeting"),
+        }
+    }
+
+    fn valid_poi(self, blocks: &dyn BlockView, pos: BlockPos) -> bool {
+        match self {
+            Self::Home => validate_bed_poi(blocks, pos),
+            Self::JobSite | Self::MeetingPoint => true,
+        }
+    }
+}
+
+/// `AcquirePoi$JitteredLinearRetry`：失败候选的抖动线性退避。
+///
+/// `AcquirePoi$JitteredLinearRetry`: jittered linear backoff for unreachable candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitteredLinearRetry {
+    previous_attempt: i64,
+    next_scheduled_attempt: i64,
+    current_delay: i32,
+}
+
+impl JitteredLinearRetry {
+    fn new(now: i64, random_40: i32) -> Self {
+        let mut retry = Self {
+            previous_attempt: 0,
+            next_scheduled_attempt: 0,
+            current_delay: 0,
+        };
+        retry.mark_attempt(now, random_40);
+        retry
+    }
+
+    fn mark_attempt(&mut self, now: i64, random_40: i32) {
+        self.previous_attempt = now;
+        let next = self.current_delay + random_40 + 40;
+        self.current_delay = next.min(400);
+        self.next_scheduled_attempt = now + i64::from(self.current_delay);
+    }
+
+    const fn is_still_valid(&self, now: i64) -> bool {
+        now - self.previous_attempt < 400
+    }
+
+    const fn should_retry(&self, now: i64) -> bool {
+        now >= self.next_scheduled_attempt
+    }
+}
+
+/// `AcquirePoi` 运行态（装箱存放，保持 `Node` 136 字节不增长）。
+///
+/// Boxed runtime state for `AcquirePoi` (keeps `Node` at 136 bytes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcquirePoiState {
+    pub slot: PoiAcquireSlot,
+    pub next_scheduled_start: i64,
+    pub retry_cache: BTreeMap<BlockPos, JitteredLinearRetry>,
+}
+
+impl AcquirePoiState {
+    fn new(slot: PoiAcquireSlot) -> Self {
+        Self {
+            slot,
+            next_scheduled_start: 0,
+            retry_cache: BTreeMap::new(),
+        }
+    }
+}
+
+/// `HarvestFarmland` 运行态（装箱存放，保持 `Node` 136 字节不增长）。
+///
+/// Boxed runtime state for `HarvestFarmland` (keeps `Node` at 136 bytes).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HarvestFarmlandState {
+    pub above_farmland: Option<BlockPos>,
+    pub next_ok_start: i64,
+    pub time_worked: i32,
+    pub valid_farmland: Vec<BlockPos>,
+}
+
+/// `UseBonemeal` 运行态（装箱存放，保持 `Node` 136 字节不增长）。
+///
+/// Boxed runtime state for `UseBonemeal` (keeps `Node` at 136 bytes).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UseBonemealState {
+    pub next_work_cycle: i64,
+    pub last_session: i64,
+    pub time_worked: i32,
+    pub crop_pos: Option<BlockPos>,
+}
+
+/// `ValidateNearbyPoi` 的四种槽位。
+///
+/// The four `ValidateNearbyPoi` slots across core / rest / meet packages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidatePoiSlot {
+    JobSite,
+    PotentialJobSite,
+    Home,
+    MeetingPoint,
+}
+
+impl ValidatePoiSlot {
+    const fn memory(self) -> MemoryType {
+        match self {
+            Self::JobSite => JobSite,
+            Self::PotentialJobSite => PotentialJobSite,
+            Self::Home => Home,
+            Self::MeetingPoint => MeetingPoint,
+        }
+    }
+
+    const fn required(self) -> &'static [(MemoryType, MemoryStatus)] {
+        match self {
+            Self::JobSite => REQ_JOB_PRESENT,
+            Self::PotentialJobSite => REQ_POTENTIAL_JOB_PRESENT,
+            Self::Home => REQ_HOME_PRESENT,
+            Self::MeetingPoint => REQ_MEETING_PRESENT,
+        }
+    }
+
+    fn type_mask(self, profession: i32) -> u32 {
+        match self {
+            Self::JobSite => villager::held_job_site_mask(profession),
+            Self::PotentialJobSite => villager::acquirable_job_site_mask(profession),
+            Self::Home => villager::poi_name_mask("minecraft:home"),
+            Self::MeetingPoint => villager::poi_name_mask("minecraft:meeting"),
+        }
+    }
 }
 
 /// 期 4 以后再实现的行为占位：保持官方的 `Class`、必需记忆表与对拍类名，永不启动。
 ///
-/// Placeholders for behaviours deferred to Phase 4+: preserve vanilla's `Class`,
+/// Placeholders for behaviours deferred to later phases: preserve vanilla's `Class`,
 /// required memories and oracle class name, and never start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stub {
     InteractWithDoor,
-    ValidateJobSite,
-    ValidatePotentialJobSite,
-    ValidateHome,
-    ValidateMeetingPoint,
-    PoiCompetitorScan,
     LookAndFollowTradingPlayerSink,
     GoToWantedItem,
-    GoToPotentialJobSite,
-    YieldJobSite,
-    AssignProfessionFromJobSite,
-    ResetProfession,
     WorkAtComposter,
     WorkAtPoi,
     StrollAroundJobSite,
@@ -188,6 +351,8 @@ const REQ_WORK_AT_POI: &[(MemoryType, MemoryStatus)] =
     &[(JobSite, ValuePresent), (LookTarget, Registered)];
 const REQ_STROLL_JOB: &[(MemoryType, MemoryStatus)] =
     &[(WalkTarget, Registered), (JobSite, ValuePresent)];
+const REQ_STROLL_MEETING: &[(MemoryType, MemoryStatus)] =
+    &[(WalkTarget, Registered), (MeetingPoint, ValuePresent)];
 const REQ_STROLL_SECONDARY: &[(MemoryType, MemoryStatus)] = &[
     (WalkTarget, Registered),
     (SecondaryJobSite, ValuePresent),
@@ -284,10 +449,6 @@ impl Stub {
                 min: i32::MAX,
                 max: i32::MAX,
             },
-            Self::GoToPotentialJobSite => Class::Timed {
-                min: 1200,
-                max: 1200,
-            },
             Self::WorkAtComposter | Self::WorkAtPoi => Class::Timed { min: 60, max: 60 },
             Self::HarvestFarmland => Class::Timed { min: 200, max: 200 },
             Self::UseBonemeal => Class::Timed { min: 60, max: 60 },
@@ -308,17 +469,8 @@ impl Stub {
     const fn required(self) -> &'static [(MemoryType, MemoryStatus)] {
         match self {
             Self::InteractWithDoor => REQ_DOOR,
-            Self::ValidateJobSite => REQ_JOB_PRESENT,
-            Self::ValidatePotentialJobSite => REQ_POTENTIAL_JOB_PRESENT,
-            Self::ValidateHome => REQ_HOME_PRESENT,
-            Self::ValidateMeetingPoint => REQ_MEETING_PRESENT,
-            Self::PoiCompetitorScan => REQ_POI_COMPETITOR,
             Self::LookAndFollowTradingPlayerSink => REQ_TRADING_SINK,
             Self::GoToWantedItem => REQ_WANTED_ITEM,
-            Self::GoToPotentialJobSite => REQ_POTENTIAL_JOB_PRESENT,
-            Self::YieldJobSite => REQ_YIELD_JOB,
-            Self::AssignProfessionFromJobSite => REQ_ASSIGN_PROF,
-            Self::ResetProfession => REQ_RESET_PROF,
             Self::WorkAtComposter | Self::WorkAtPoi => REQ_WORK_AT_POI,
             Self::StrollAroundJobSite | Self::StrollToJobSite => REQ_STROLL_JOB,
             Self::StrollToSecondaryJobSite => REQ_STROLL_SECONDARY,
@@ -349,7 +501,6 @@ impl Stub {
     const fn name(self) -> &'static str {
         match self {
             Self::LookAndFollowTradingPlayerSink => "LookAndFollowTradingPlayerSink",
-            Self::GoToPotentialJobSite => "GoToPotentialJobSite",
             Self::WorkAtComposter => "WorkAtComposter",
             Self::WorkAtPoi => "WorkAtPoi",
             Self::HarvestFarmland => "HarvestFarmland",
@@ -368,7 +519,7 @@ impl Stub {
 
 /// 村民专属行为与未接通占位。
 ///
-/// Villager-specific behaviours and Phase 4+ placeholders.
+/// Villager-specific behaviours and remaining placeholders.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Behavior {
     /// `VillagerPanicTrigger`：`Behavior(60, 60)`，受伤或身边有敌对时切到 `PANIC`。
@@ -407,12 +558,54 @@ pub enum Behavior {
     /// `MEET` 优先级 2 的 `TriggerGate(StrollAroundPoi, SocializeAtBell)` 占位：
     /// 保留 `SocializeAtBell` 对 `level.random.nextInt(100)` 的取数。
     MeetTriggerGate,
-    /// `AcquirePoi` 排期占位：按官方计时抽取 `level.random.nextInt(20)`，真正占领 POI 在期 4。
-    AcquirePoiStub {
-        slot: PoiAcquireSlot,
-        next_scheduled_start: i64,
+    /// `AcquirePoi`：最近 5 候选 + 一次多目标 A\* + 失败按候选建 `JitteredLinearRetry`。
+    AcquirePoi(Box<AcquirePoiState>),
+    /// `GoToPotentialJobSite`：`Behavior(1200, 1200)`，走向潜在工作站，停止时若未认领则归还票。
+    GoToPotentialJobSite { speed: f32 },
+    /// `AssignProfessionFromJobSite`：`OneShot`，2 格内认领工作站、发事件 14、设职业并重建大脑。
+    AssignProfessionFromJobSite,
+    /// `ValidateNearbyPoi`：`OneShot`，16 格内校验 POI 仍有效且床未被他人占用。
+    ValidateNearbyPoi(ValidatePoiSlot),
+    /// `YieldJobSite`：`OneShot`，无业村民把潜在工作站让给附近已有对应职业的同伴。
+    YieldJobSite { speed: f32 },
+    /// `ResetProfession`：`OneShot`，失去工作站且无经验、1 级时变回无业并重建大脑。
+    ResetProfession,
+    /// `PoiCompetitorScan`：`OneShot`，多个同职业村民共享同一工作站时高经验者胜出。
+    PoiCompetitorScan,
+    /// `GoToWantedItem.create(speed, false, maxDist)`：`OneShot`，走向 4 格内想捡的掉落物。
+    GoToWantedItem { speed: f32, max_dist: i32 },
+    /// `WorkAtPoi` / `WorkAtComposter`：`Behavior(60, 60)`，300 刻冷却、1/2 概率、1.73 格内工作。
+    WorkAtPoi { is_composter: bool, last_check: i64 },
+    /// `StrollAroundPoi.create(memory, speed, maxDist)`：`OneShot`，在 POI 周围 8×6 闲逛（180 刻冷却）。
+    StrollAroundPoi {
+        memory: MemoryType,
+        speed: f32,
+        max_dist: i32,
+        next_ok_start: i64,
     },
-    /// 期 4 以后行为占位（永不启动）。
+    /// `StrollToPoi.create(memory, speed, closeEnough, maxDist)`：`OneShot`，走向 POI（80 刻冷却）。
+    StrollToPoi {
+        memory: MemoryType,
+        speed: f32,
+        close_enough: i32,
+        max_dist: i32,
+        next_ok_start: i64,
+    },
+    /// `StrollToPoiList.create(listMemory, speed, closeEnough, maxDist, primaryMemory)`：`OneShot`，
+    /// 随机选一处副 POI（耕地）走去（100 刻冷却）。
+    StrollToPoiList {
+        list_memory: MemoryType,
+        primary_memory: MemoryType,
+        speed: f32,
+        close_enough: i32,
+        max_dist: i32,
+        next_ok_start: i64,
+    },
+    /// `HarvestFarmland`：`Behavior(60, 60)`，农民收割成熟作物并播种。
+    HarvestFarmland(Box<HarvestFarmlandState>),
+    /// `UseBonemeal`：`Behavior(60, 60)`，农民对未成熟作物施骨粉。
+    UseBonemeal(Box<UseBonemealState>),
+    /// 尚未实现的行为占位（永不启动）。
     Unavailable(Stub),
 }
 
@@ -434,7 +627,14 @@ const REQ_HEARD_BELL: &[(MemoryType, MemoryStatus)] = &[(HeardBellTime, ValuePre
 impl Behavior {
     pub(crate) fn class(&self) -> Class {
         match self {
-            Self::PanicTrigger => Class::Timed { min: 60, max: 60 },
+            Self::PanicTrigger
+            | Self::WorkAtPoi { .. }
+            | Self::HarvestFarmland(_)
+            | Self::UseBonemeal(_) => Class::Timed { min: 60, max: 60 },
+            Self::GoToPotentialJobSite { .. } => Class::Timed {
+                min: 1200,
+                max: 1200,
+            },
             Self::Unavailable(stub) => stub.class(),
             _ => Class::OneShot,
         }
@@ -462,7 +662,23 @@ impl Behavior {
                 Home => REQ_WALK_FROM_HOME,
                 _ => REQ_WALK_FROM_MEETING,
             },
-            Self::AcquirePoiStub { slot, .. } => slot.required(),
+            Self::AcquirePoi(state) => state.slot.required(),
+            Self::GoToPotentialJobSite { .. } => REQ_POTENTIAL_JOB_PRESENT,
+            Self::AssignProfessionFromJobSite => REQ_ASSIGN_PROF,
+            Self::ValidateNearbyPoi(slot) => slot.required(),
+            Self::YieldJobSite { .. } => REQ_YIELD_JOB,
+            Self::ResetProfession => REQ_RESET_PROF,
+            Self::PoiCompetitorScan => REQ_POI_COMPETITOR,
+            Self::GoToWantedItem { .. } => REQ_WANTED_ITEM,
+            Self::WorkAtPoi { .. } => REQ_WORK_AT_POI,
+            Self::StrollAroundPoi { memory, .. } | Self::StrollToPoi { memory, .. } => match memory
+            {
+                JobSite => REQ_STROLL_JOB,
+                _ => REQ_STROLL_MEETING,
+            },
+            Self::StrollToPoiList { .. } => REQ_STROLL_SECONDARY,
+            Self::HarvestFarmland(_) => REQ_HARVEST_FARMLAND,
+            Self::UseBonemeal(_) => REQ_USE_BONEMEAL,
             Self::Unavailable(stub) => stub.required(),
         }
     }
@@ -470,46 +686,166 @@ impl Behavior {
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::PanicTrigger => "VillagerPanicTrigger",
+            Self::GoToPotentialJobSite { .. } => "GoToPotentialJobSite",
+            Self::WorkAtPoi {
+                is_composter: true, ..
+            } => "WorkAtComposter",
+            Self::WorkAtPoi {
+                is_composter: false,
+                ..
+            } => "WorkAtPoi",
+            Self::HarvestFarmland(_) => "HarvestFarmland",
+            Self::UseBonemeal(_) => "UseBonemeal",
             Self::Unavailable(stub) => stub.name(),
             _ => "OneShot",
         }
     }
 
-    pub(crate) fn extra_start(&mut self, _cx: &mut Cx) -> bool {
+    pub(crate) fn extra_start(&mut self, cx: &mut Cx) -> bool {
         match self {
             Self::PanicTrigger => true,
+            Self::GoToPotentialJobSite { .. } => matches!(
+                cx.active_non_core_activity(),
+                None | Some(Activity::Idle | Activity::Work | Activity::Play)
+            ),
+            Self::WorkAtPoi { last_check, .. } => {
+                if cx.time - *last_check < 300 {
+                    return false;
+                }
+                if cx.level_next_int(2) != 0 {
+                    return false;
+                }
+                *last_check = cx.time;
+                cx.memories.global_pos(JobSite).is_some_and(|gp| {
+                    gp.dimension == "minecraft:overworld"
+                        && closer_to_center_than(gp.pos, cx.me.position, 1.73)
+                })
+            }
+            Self::HarvestFarmland(state) => harvest_extra_start(state, cx),
+            Self::UseBonemeal(state) => bonemeal_extra_start(state, cx),
             Self::Unavailable(_) => false,
             _ => false,
         }
     }
 
     pub(crate) fn start(&mut self, cx: &mut Cx) {
-        if let Self::PanicTrigger = self
-            && (is_hurt(cx) || has_hostile(cx))
-        {
-            if !cx.is_active(Activity::Panic) {
-                cx.memories.erase(Path);
-                cx.memories.erase(WalkTarget);
-                cx.memories.erase(LookTarget);
-                cx.memories.erase(BreedTarget);
-                cx.memories.erase(InteractionTarget);
+        match self {
+            Self::PanicTrigger => {
+                if is_hurt(cx) || has_hostile(cx) {
+                    if !cx.is_active(Activity::Panic) {
+                        cx.memories.erase(Path);
+                        cx.memories.erase(WalkTarget);
+                        cx.memories.erase(LookTarget);
+                        cx.memories.erase(BreedTarget);
+                        cx.memories.erase(InteractionTarget);
+                    }
+                    cx.set_active_activity_if_possible(Activity::Panic);
+                }
             }
-            cx.set_active_activity_if_possible(Activity::Panic);
+            Self::WorkAtPoi { is_composter, .. } => {
+                cx.memories.set(LastWorkedAtPoi, MemoryValue::Long(cx.time));
+                if let Some(gp) = cx.memories.global_pos(JobSite).cloned() {
+                    cx.memories.set(
+                        LookTarget,
+                        MemoryValue::Look(PositionTracker::at_block(gp.pos)),
+                    );
+                }
+                if let Some(sound) = villager::work_sound(cx.mob.villager.profession) {
+                    living::make_sound(cx.me, cx.mob, sound);
+                }
+                if *is_composter {
+                    use_composter_workstation(cx);
+                }
+                if cx.mob.villager.should_restock(cx.time) {
+                    cx.mob.villager.restock(cx.time);
+                }
+            }
+            Self::HarvestFarmland(state) => {
+                if cx.time > state.next_ok_start
+                    && let Some(pos) = state.above_farmland
+                {
+                    cx.memories.set(
+                        LookTarget,
+                        MemoryValue::Look(PositionTracker::at_block(pos)),
+                    );
+                    cx.memories.set(
+                        WalkTarget,
+                        MemoryValue::Walk(WalkTarget {
+                            target: PositionTracker::at_block(pos),
+                            speed: 0.5,
+                            close_enough: 1,
+                        }),
+                    );
+                }
+            }
+            Self::UseBonemeal(state) => {
+                set_bonemeal_crop_target(state.crop_pos, cx);
+                cx.mob
+                    .equipment
+                    .set(EquipmentSlot::MainHand, ItemStack::new(items::BONE_MEAL, 1));
+                state.next_work_cycle = cx.time;
+                state.time_worked = 0;
+            }
+            _ => {}
         }
     }
 
     pub(crate) fn can_still_use(&mut self, cx: &mut Cx) -> bool {
         match self {
             Self::PanicTrigger => is_hurt(cx) || has_hostile(cx),
+            Self::GoToPotentialJobSite { .. } => cx.memories.has(PotentialJobSite),
+            Self::WorkAtPoi { .. } => cx.memories.global_pos(JobSite).is_some_and(|gp| {
+                gp.dimension == "minecraft:overworld"
+                    && closer_to_center_than(gp.pos, cx.me.position, 1.73)
+            }),
+            Self::HarvestFarmland(state) => state.time_worked < 200,
+            Self::UseBonemeal(state) => state.time_worked < 80 && state.crop_pos.is_some(),
             _ => false,
         }
     }
 
-    pub(crate) fn tick(&mut self, _cx: &mut Cx) {
-        // `VillagerPanicTrigger.tick`：每 100 刻调 `spawnGolemIfNeeded(3)`，铁傀儡生成在期 6。
+    pub(crate) fn tick(&mut self, cx: &mut Cx) {
+        match self {
+            Self::PanicTrigger => {
+                // `VillagerPanicTrigger.tick`：每 100 刻调 `spawnGolemIfNeeded(3)`，铁傀儡生成在期 6。
+            }
+            Self::GoToPotentialJobSite { speed } => {
+                if let Some(gp) = cx.memories.global_pos(PotentialJobSite).cloned() {
+                    set_walk_and_look_target_block(cx, gp.pos, *speed, 1);
+                }
+            }
+            Self::HarvestFarmland(state) => harvest_tick(state, cx),
+            Self::UseBonemeal(state) => bonemeal_tick(state, cx),
+            _ => {}
+        }
     }
 
-    pub(crate) fn stop(&mut self, _cx: &mut Cx) {}
+    pub(crate) fn stop(&mut self, cx: &mut Cx) {
+        match self {
+            Self::GoToPotentialJobSite { .. } => {
+                if let Some(gp) = cx.memories.global_pos(PotentialJobSite).cloned()
+                    && gp.dimension == "minecraft:overworld"
+                    && cx.ctx.blocks().poi_type_at(gp.pos).is_some()
+                {
+                    cx.ctx.emit(Command::PoiRelease { pos: gp.pos }, cx.me);
+                }
+                cx.memories.erase(PotentialJobSite);
+            }
+            Self::HarvestFarmland(state) => {
+                cx.memories.erase(LookTarget);
+                cx.memories.erase(WalkTarget);
+                state.time_worked = 0;
+                state.next_ok_start = cx.time + 40;
+            }
+            Self::UseBonemeal(state) => {
+                cx.mob
+                    .equipment
+                    .set(EquipmentSlot::MainHand, ItemStack::empty());
+                state.last_session = i64::from(cx.me.tick_count);
+            }
+            _ => {}
+        }
+    }
 
     pub(crate) fn trigger(&mut self, cx: &mut Cx) -> bool {
         match self {
@@ -789,26 +1125,864 @@ impl Behavior {
                 }
                 true
             }
-            Self::AcquirePoiStub {
-                slot,
-                next_scheduled_start,
-            } => {
-                if slot.only_if_adult() && cx.mob.is_baby() {
-                    return false;
-                }
-                if *next_scheduled_start == 0 {
-                    *next_scheduled_start = cx.time + i64::from(cx.level_next_int(20));
-                    return false;
-                }
-                if cx.time < *next_scheduled_start {
-                    return false;
-                }
-                *next_scheduled_start = cx.time + 20 + i64::from(cx.level_next_int(20));
-                true
+            Self::AcquirePoi(state) => trigger_acquire_poi(state, cx),
+            Self::AssignProfessionFromJobSite => trigger_assign_profession(cx),
+            Self::ValidateNearbyPoi(slot) => trigger_validate_nearby_poi(*slot, cx),
+            Self::YieldJobSite { speed } => trigger_yield_job_site(*speed, cx),
+            Self::ResetProfession => trigger_reset_profession(cx),
+            Self::PoiCompetitorScan => trigger_poi_competitor_scan(cx),
+            Self::GoToWantedItem { speed, max_dist } => {
+                trigger_go_to_wanted_item(*speed, *max_dist, cx)
             }
-            Self::PanicTrigger | Self::Unavailable(_) => false,
+            Self::StrollAroundPoi {
+                memory,
+                speed,
+                max_dist,
+                next_ok_start,
+            } => trigger_stroll_around_poi(*memory, *speed, *max_dist, next_ok_start, cx),
+            Self::StrollToPoi {
+                memory,
+                speed,
+                close_enough,
+                max_dist,
+                next_ok_start,
+            } => {
+                trigger_stroll_to_poi(*memory, *speed, *close_enough, *max_dist, next_ok_start, cx)
+            }
+            Self::StrollToPoiList {
+                list_memory,
+                primary_memory,
+                speed,
+                close_enough,
+                max_dist,
+                next_ok_start,
+            } => trigger_stroll_to_poi_list(
+                *list_memory,
+                *primary_memory,
+                *speed,
+                *close_enough,
+                *max_dist,
+                next_ok_start,
+                cx,
+            ),
+            Self::PanicTrigger
+            | Self::GoToPotentialJobSite { .. }
+            | Self::WorkAtPoi { .. }
+            | Self::HarvestFarmland(_)
+            | Self::UseBonemeal(_)
+            | Self::Unavailable(_) => false,
         }
     }
+}
+
+fn trigger_go_to_wanted_item(speed: f32, max_dist: i32, cx: &mut Cx) -> bool {
+    if cx.memories.has(ItemPickupCooldownTicks) || !cx.mob.can_pick_up_loot {
+        return false;
+    }
+    let Some(item_uid) = cx.memories.entity(NearestVisibleWantedItem) else {
+        return false;
+    };
+    let Some(item) = cx.ctx.other(item_uid) else {
+        return false;
+    };
+    if item.removed {
+        return false;
+    }
+    let max_d = f64::from(max_dist);
+    if item.position.distance_to_sqr(cx.me.position) >= max_d * max_d {
+        return false;
+    }
+    cx.memories.set(
+        LookTarget,
+        MemoryValue::Look(PositionTracker::Entity {
+            uid: item_uid,
+            track_eye: true,
+            target_eye: false,
+        }),
+    );
+    cx.memories.set(
+        WalkTarget,
+        MemoryValue::Walk(WalkTarget {
+            target: PositionTracker::Entity {
+                uid: item_uid,
+                track_eye: false,
+                target_eye: false,
+            },
+            speed,
+            close_enough: 0,
+        }),
+    );
+    true
+}
+
+fn trigger_stroll_around_poi(
+    memory: MemoryType,
+    speed: f32,
+    max_dist: i32,
+    next_ok_start: &mut i64,
+    cx: &mut Cx,
+) -> bool {
+    let Some(gp) = cx.memories.global_pos(memory).cloned() else {
+        return false;
+    };
+    if gp.dimension != "minecraft:overworld"
+        || !closer_to_center_than(gp.pos, cx.me.position, f64::from(max_dist))
+    {
+        return false;
+    }
+    if cx.time <= *next_ok_start {
+        return true;
+    }
+    let pos = goals::land_random_pos(cx.me, cx.mob, cx.ctx.blocks(), 8, 6);
+    cx.memories.set_or_erase(
+        WalkTarget,
+        pos.map(|at| MemoryValue::Walk(WalkTarget::to_point(at, speed, 1))),
+    );
+    *next_ok_start = cx.time + 180;
+    true
+}
+
+fn trigger_stroll_to_poi(
+    memory: MemoryType,
+    speed: f32,
+    close_enough: i32,
+    max_dist: i32,
+    next_ok_start: &mut i64,
+    cx: &mut Cx,
+) -> bool {
+    let Some(gp) = cx.memories.global_pos(memory).cloned() else {
+        return false;
+    };
+    if gp.dimension != "minecraft:overworld"
+        || !closer_to_center_than(gp.pos, cx.me.position, f64::from(max_dist))
+    {
+        return false;
+    }
+    if cx.time <= *next_ok_start {
+        return true;
+    }
+    cx.memories.set(
+        WalkTarget,
+        MemoryValue::Walk(WalkTarget {
+            target: PositionTracker::at_block(gp.pos),
+            speed,
+            close_enough,
+        }),
+    );
+    *next_ok_start = cx.time + 80;
+    true
+}
+
+fn trigger_stroll_to_poi_list(
+    list_memory: MemoryType,
+    primary_memory: MemoryType,
+    speed: f32,
+    close_enough: i32,
+    max_dist: i32,
+    next_ok_start: &mut i64,
+    cx: &mut Cx,
+) -> bool {
+    let list_len = match cx.memories.get(list_memory) {
+        Some(MemoryValue::GlobalPosList(list)) => list.len(),
+        _ => 0,
+    };
+    if list_len == 0 {
+        return false;
+    }
+    let idx = cx.level_next_int(list_len as i32) as usize;
+    let picked = match cx.memories.get(list_memory) {
+        Some(MemoryValue::GlobalPosList(list)) => list.get(idx).cloned(),
+        _ => None,
+    };
+    let Some(picked) = picked else {
+        return false;
+    };
+    let Some(primary) = cx.memories.global_pos(primary_memory).cloned() else {
+        return false;
+    };
+    if picked.dimension != "minecraft:overworld"
+        || !closer_to_center_than(primary.pos, cx.me.position, f64::from(max_dist))
+    {
+        return false;
+    }
+    if cx.time > *next_ok_start {
+        cx.memories.set(
+            WalkTarget,
+            MemoryValue::Walk(WalkTarget {
+                target: PositionTracker::at_block(picked.pos),
+                speed,
+                close_enough,
+            }),
+        );
+        *next_ok_start = cx.time + 100;
+    }
+    true
+}
+
+/// `WorkAtComposter.useWorkstation`：磨面包 + 堆肥。
+fn use_composter_workstation(cx: &mut Cx) {
+    let Some(gp) = cx.memories.global_pos(JobSite).cloned() else {
+        return;
+    };
+    if !cx.ctx.blocks().block_state(gp.pos).is(blocks::COMPOSTER) {
+        return;
+    }
+    // `makeBread`
+    if cx.mob.villager.inventory.count_item(items::BREAD) <= 36 {
+        let wheat = cx.mob.villager.inventory.count_item(items::WHEAT);
+        let loaves = (wheat / 3).min(3);
+        if loaves > 0 {
+            let _ = cx
+                .mob
+                .villager
+                .inventory
+                .remove_item_type(items::WHEAT, loaves * 3);
+            let leftover = cx
+                .mob
+                .villager
+                .inventory
+                .add_item(ItemStack::new(items::BREAD, loaves));
+            if !leftover.is_empty() {
+                let drop_pos =
+                    Vec3::new(cx.me.position.x, cx.me.position.y + 0.5, cx.me.position.z);
+                cx.ctx.emit(
+                    Command::DropAtLocation {
+                        pos: drop_pos,
+                        stack: leftover,
+                    },
+                    cx.me,
+                );
+            }
+        }
+    }
+    // `compostItems`
+    cx.ctx.emit(Command::VillagerCompost { pos: gp.pos }, cx.me);
+}
+
+fn harvest_valid_pos(blocks: &dyn BlockView, pos: BlockPos) -> bool {
+    let state = blocks.block_state(pos);
+    let below = blocks.block_state(pos.below());
+    is_crop_max_age(state) || (state.is_air() && below.is(blocks::FARMLAND))
+}
+
+fn pick_valid_farmland(state: &HarvestFarmlandState, cx: &mut Cx) -> Option<BlockPos> {
+    if state.valid_farmland.is_empty() {
+        None
+    } else {
+        let idx = cx.level_next_int(state.valid_farmland.len() as i32) as usize;
+        state.valid_farmland.get(idx).copied()
+    }
+}
+
+fn harvest_extra_start(state: &mut HarvestFarmlandState, cx: &mut Cx) -> bool {
+    if !cx.ctx.blocks().block_game_rules().mob_griefing {
+        return false;
+    }
+    if cx.mob.villager.profession != facts::profession_id("minecraft:farmer").unwrap_or(-1) {
+        return false;
+    }
+    state.valid_farmland.clear();
+    let pos = cx.me.position;
+    let blocks = cx.ctx.blocks();
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                let target = BlockPos::containing(Vec3::new(
+                    pos.x + f64::from(dx),
+                    pos.y + f64::from(dy),
+                    pos.z + f64::from(dz),
+                ));
+                if harvest_valid_pos(blocks, target) {
+                    state.valid_farmland.push(target);
+                }
+            }
+        }
+    }
+    state.above_farmland = pick_valid_farmland(state, cx);
+    state.above_farmland.is_some()
+}
+
+fn harvest_tick(state: &mut HarvestFarmlandState, cx: &mut Cx) {
+    if let Some(target) = state.above_farmland
+        && !closer_to_center_than(target, cx.me.position, 1.0)
+    {
+        return;
+    }
+    if let Some(target) = state.above_farmland
+        && cx.time > state.next_ok_start
+    {
+        let block_state = cx.ctx.blocks().block_state(target);
+        let below_state = cx.ctx.blocks().block_state(target.below());
+        if is_crop_max_age(block_state) {
+            cx.ctx.emit(
+                Command::DestroyBlock {
+                    pos: target,
+                    drop: true,
+                },
+                cx.me,
+            );
+        }
+        if block_state.is_air()
+            && below_state.is(blocks::FARMLAND)
+            && cx.mob.villager.inventory.has_farm_seeds()
+        {
+            for slot_idx in 0..VillagerInventory::SIZE {
+                let stack = cx.mob.villager.inventory.get(slot_idx);
+                if stack.is_empty()
+                    || !item_is_tagged(stack.item, item_tags::VILLAGER_PLANTABLE_SEEDS)
+                {
+                    continue;
+                }
+                let Some(block_id) = item_of(stack.item).and_then(|info| info.block) else {
+                    continue;
+                };
+                let planted = default_state(block_by_id(block_id));
+                cx.ctx.emit(
+                    Command::PlantCrop {
+                        pos: target,
+                        state: planted,
+                    },
+                    cx.me,
+                );
+                cx.mob.villager.inventory.shrink_slot(slot_idx, 1);
+                break;
+            }
+        }
+        if is_crop_block(block_state) && !is_crop_max_age(block_state) {
+            state.valid_farmland.retain(|&p| p != target);
+            state.above_farmland = pick_valid_farmland(state, cx);
+            if let Some(next) = state.above_farmland {
+                state.next_ok_start = cx.time + 20;
+                cx.memories.set(
+                    WalkTarget,
+                    MemoryValue::Walk(WalkTarget {
+                        target: PositionTracker::at_block(next),
+                        speed: 0.5,
+                        close_enough: 1,
+                    }),
+                );
+                cx.memories.set(
+                    LookTarget,
+                    MemoryValue::Look(PositionTracker::at_block(next)),
+                );
+            }
+        }
+    }
+    state.time_worked += 1;
+}
+
+fn bonemeal_valid_pos(blocks: &dyn BlockView, pos: BlockPos) -> bool {
+    let state = blocks.block_state(pos);
+    is_crop_block(state) && !is_crop_max_age(state)
+}
+
+fn pick_bonemeal_target(cx: &mut Cx) -> Option<BlockPos> {
+    let base = cx.me.block_position();
+    let mut picked = None;
+    let mut seen = 0_i32;
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                let pos = base.offset(dx, dy, dz);
+                if bonemeal_valid_pos(cx.ctx.blocks(), pos) {
+                    seen += 1;
+                    if cx.level_next_int(seen) == 0 {
+                        picked = Some(pos);
+                    }
+                }
+            }
+        }
+    }
+    picked
+}
+
+fn set_bonemeal_crop_target(crop_pos: Option<BlockPos>, cx: &mut Cx) {
+    let Some(pos) = crop_pos else {
+        return;
+    };
+    let tracker = PositionTracker::at_block(pos);
+    cx.memories.set(LookTarget, MemoryValue::Look(tracker));
+    cx.memories.set(
+        WalkTarget,
+        MemoryValue::Walk(WalkTarget {
+            target: tracker,
+            speed: 0.5,
+            close_enough: 1,
+        }),
+    );
+}
+
+fn bonemeal_extra_start(state: &mut UseBonemealState, cx: &mut Cx) -> bool {
+    let tick = i64::from(cx.me.tick_count);
+    if tick % 10 != 0 || (state.last_session != 0 && state.last_session + 160 > tick) {
+        return false;
+    }
+    if cx.mob.villager.inventory.count_item(items::BONE_MEAL) <= 0 {
+        return false;
+    }
+    state.crop_pos = pick_bonemeal_target(cx);
+    state.crop_pos.is_some()
+}
+
+fn bonemeal_tick(state: &mut UseBonemealState, cx: &mut Cx) {
+    let Some(pos) = state.crop_pos else {
+        return;
+    };
+    if cx.time < state.next_work_cycle || !closer_to_center_than(pos, cx.me.position, 1.0) {
+        return;
+    }
+    let bonemeal_slot = (0..VillagerInventory::SIZE).find(|&i| {
+        let s = cx.mob.villager.inventory.get(i);
+        !s.is_empty() && s.item == items::BONE_MEAL
+    });
+    if let Some(slot_idx) = bonemeal_slot
+        && bonemeal_valid_pos(cx.ctx.blocks(), pos)
+    {
+        cx.mob.villager.inventory.shrink_slot(slot_idx, 1);
+        cx.ctx.emit(Command::GrowCrop { pos }, cx.me);
+        state.crop_pos = pick_bonemeal_target(cx);
+        set_bonemeal_crop_target(state.crop_pos, cx);
+        state.next_work_cycle = cx.time + 40;
+    }
+    state.time_worked += 1;
+}
+
+/// `AcquirePoi.findPathToPois`：把候选 `(PoiType, BlockPos)` 集合交给一次多目标 A\* 寻路。
+///
+/// `AcquirePoi.findPathToPois`: runs one multi-target A\* search across all candidate POIs.
+pub(crate) fn find_path_to_pois(cx: &mut Cx, candidates: &[(u8, BlockPos)]) -> Option<Path> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let mut reach = 1_i32;
+    let mut positions: Vec<BlockPos> = Vec::with_capacity(candidates.len());
+    for &(kind, pos) in candidates {
+        reach = reach.max(villager::poi_valid_range(kind));
+        if !positions.contains(&pos) {
+            positions.push(pos);
+        }
+    }
+    let blocks = cx.ctx.blocks();
+    let nav = living::nav_mob(cx.me, cx.mob, blocks);
+    cx.mob
+        .navigation
+        .create_path_to_targets(blocks, &nav, &positions, reach)
+}
+
+fn validate_bed_poi(blocks: &dyn BlockView, pos: BlockPos) -> bool {
+    let state = blocks.block_state(pos);
+    state.is_tagged(block_tags::VILLAGERS_CAN_SLEEP_ON_BED) && !state.get(OCCUPIED)
+}
+
+fn set_walk_and_look_target_block(cx: &mut Cx, pos: BlockPos, speed: f32, close_enough: i32) {
+    cx.memories.set(
+        WalkTarget,
+        MemoryValue::Walk(WalkTarget {
+            target: PositionTracker::at_block(pos),
+            speed,
+            close_enough,
+        }),
+    );
+    cx.memories.set(
+        LookTarget,
+        MemoryValue::Look(PositionTracker::at_block(pos)),
+    );
+}
+
+fn closer_to_center_than(block: BlockPos, pos: Vec3, radius: f64) -> bool {
+    let dx = f64::from(block.x) + 0.5 - pos.x;
+    let dy = f64::from(block.y) + 0.5 - pos.y;
+    let dz = f64::from(block.z) + 0.5 - pos.z;
+    dx * dx + dy * dy + dz * dz < radius * radius
+}
+
+fn block_dist_sqr(a: BlockPos, b: BlockPos) -> i64 {
+    let dx = i64::from(a.x - b.x);
+    let dy = i64::from(a.y - b.y);
+    let dz = i64::from(a.z - b.z);
+    dx * dx + dy * dy + dz * dz
+}
+
+fn trigger_acquire_poi(state: &mut AcquirePoiState, cx: &mut Cx) -> bool {
+    let slot = state.slot;
+    if slot.only_if_adult() && cx.mob.is_baby() {
+        return false;
+    }
+    if state.next_scheduled_start == 0 {
+        state.next_scheduled_start = cx.time + i64::from(cx.level_next_int(20));
+        return false;
+    }
+    if cx.time < state.next_scheduled_start {
+        return false;
+    }
+    state.next_scheduled_start = cx.time + 20 + i64::from(cx.level_next_int(20));
+
+    let now = cx.time;
+    state
+        .retry_cache
+        .retain(|_, retry| retry.is_still_valid(now));
+
+    let type_mask = slot.type_mask(cx.mob.villager.profession);
+    if type_mask == 0 {
+        return true;
+    }
+
+    const OCCUPANCY_HAS_SPACE: u8 = 0;
+    let origin = cx.me.block_position();
+    let in_range = cx
+        .ctx
+        .blocks()
+        .poi_in_range(origin, 48, type_mask, OCCUPANCY_HAS_SPACE);
+
+    // 精确复刻 `findAllClosestFirstWithType(..., retryFilter, origin, 48, HAS_SPACE).limit(5).filter(validPoi)`：
+    // `retryFilter` 作用在排序之前，到期条目会立刻调用 `markAttempt` 抽一次 `level.random.nextInt(40)`。
+    let mut filtered: Vec<(u8, BlockPos)> = Vec::new();
+    for (kind, pos) in in_range {
+        let pass = match state.retry_cache.get_mut(&pos) {
+            None => true,
+            Some(retry) => {
+                if !retry.should_retry(now) {
+                    false
+                } else {
+                    let r = cx.level_next_int(40);
+                    retry.mark_attempt(now, r);
+                    true
+                }
+            }
+        };
+        if pass {
+            filtered.push((kind, pos));
+        }
+    }
+    filtered.sort_by_key(|&(_, pos)| block_dist_sqr(origin, pos));
+    filtered.truncate(5);
+    let candidates: Vec<(u8, BlockPos)> = filtered
+        .into_iter()
+        .filter(|&(_, pos)| slot.valid_poi(cx.ctx.blocks(), pos))
+        .collect();
+
+    let path = find_path_to_pois(cx, &candidates);
+    if let Some(path) = path
+        && path.reached
+    {
+        let target = path.target;
+        if cx.ctx.blocks().poi_type_at(target).is_some() {
+            cx.ctx.emit(
+                Command::PoiTake {
+                    pos: target,
+                    type_mask,
+                },
+                cx.me,
+            );
+            cx.memories.set(
+                slot.acquiring_memory(),
+                MemoryValue::GlobalPos(GlobalPos {
+                    dimension: "minecraft:overworld".to_owned(),
+                    pos: target,
+                }),
+            );
+            if let Some(event) = slot.event_id() {
+                cx.mob.events.push(MobEvent::EntityEvent { event });
+            }
+            state.retry_cache.clear();
+        }
+    } else {
+        for &(_, pos) in &candidates {
+            if !state.retry_cache.contains_key(&pos) {
+                let r = cx.level_next_int(40);
+                state
+                    .retry_cache
+                    .insert(pos, JitteredLinearRetry::new(now, r));
+            }
+        }
+    }
+    true
+}
+
+fn trigger_assign_profession(cx: &mut Cx) -> bool {
+    let Some(gp) = cx.memories.global_pos(PotentialJobSite).cloned() else {
+        return false;
+    };
+    if !closer_to_center_than(gp.pos, cx.me.position, 2.0) {
+        return false;
+    }
+    cx.memories.erase(PotentialJobSite);
+    cx.memories.set(JobSite, MemoryValue::GlobalPos(gp.clone()));
+    cx.mob.events.push(MobEvent::EntityEvent { event: 14 });
+    let none_id = facts::profession_id(facts::NONE_PROFESSION).unwrap_or(0);
+    if cx.mob.villager.profession != none_id {
+        return true;
+    }
+    if gp.dimension == "minecraft:overworld"
+        && let Some(poi_kind) = cx.ctx.blocks().poi_type_at(gp.pos)
+        && let Some(new_prof) = villager::profession_for_poi(poi_kind)
+    {
+        cx.mob.villager.set_profession(new_prof);
+        cx.request_brain_refresh();
+    }
+    true
+}
+
+fn trigger_validate_nearby_poi(slot: ValidatePoiSlot, cx: &mut Cx) -> bool {
+    let mem = slot.memory();
+    let Some(gp) = cx.memories.global_pos(mem).cloned() else {
+        return false;
+    };
+    if gp.dimension != "minecraft:overworld" || !closer_to_center_than(gp.pos, cx.me.position, 16.0)
+    {
+        return false;
+    }
+    let mask = slot.type_mask(cx.mob.villager.profession);
+    let exists = cx
+        .ctx
+        .blocks()
+        .poi_type_at(gp.pos)
+        .is_some_and(|kind| (mask & (1_u32 << kind)) != 0);
+    if !exists {
+        cx.memories.erase(mem);
+    } else if bed_is_occupied_by_other(cx.ctx.blocks(), gp.pos, cx.mob.villager.sleeping) {
+        cx.memories.erase(mem);
+        if !bed_is_occupied_by_villager(cx, gp.pos) {
+            cx.ctx.emit(Command::PoiRelease { pos: gp.pos }, cx.me);
+        }
+    }
+    true
+}
+
+fn bed_is_occupied_by_other(blocks: &dyn BlockView, pos: BlockPos, self_sleeping: bool) -> bool {
+    let state = blocks.block_state(pos);
+    state.is_tagged(block_tags::VILLAGERS_CAN_SLEEP_ON_BED) && state.get(OCCUPIED) && !self_sleeping
+}
+
+fn bed_is_occupied_by_villager(cx: &Cx, pos: BlockPos) -> bool {
+    let area = Aabb::new(
+        f64::from(pos.x),
+        f64::from(pos.y),
+        f64::from(pos.z),
+        f64::from(pos.x + 1),
+        f64::from(pos.y + 1),
+        f64::from(pos.z + 1),
+    );
+    let mut found = false;
+    cx.ctx.for_each_other_in(area, &mut |other| {
+        if found || other.removed {
+            return;
+        }
+        if let KindPublic::Mob(mob) = &other.kind
+            && mob.mob_type == MobType::Villager
+            && mob.is_alive()
+        {
+            found = true;
+        }
+    });
+    found
+}
+
+fn trigger_yield_job_site(speed: f32, cx: &mut Cx) -> bool {
+    if cx.mob.is_baby() {
+        return false;
+    }
+    let none_id = facts::profession_id(facts::NONE_PROFESSION).unwrap_or(0);
+    if cx.mob.villager.profession != none_id {
+        return false;
+    }
+    let Some(gp) = cx.memories.global_pos(PotentialJobSite).cloned() else {
+        return false;
+    };
+    let pos = gp.pos;
+    let Some(poi_kind) = cx.ctx.blocks().poi_type_at(pos) else {
+        return true;
+    };
+    let Some(living_ids) = cx.memories.entities(NearestLivingEntities) else {
+        return true;
+    };
+    let ids: Vec<EntityUid> = living_ids.to_vec();
+    let valid_range = villager::poi_valid_range(poi_kind);
+    let mut chosen: Option<(EntityUid, bool)> = None;
+    for uid in ids {
+        if uid == cx.me.id {
+            continue;
+        }
+        let Some(other) = cx.ctx.other(uid) else {
+            continue;
+        };
+        if other.removed {
+            continue;
+        }
+        let KindPublic::Mob(mob_pub) = &other.kind else {
+            continue;
+        };
+        if mob_pub.mob_type != MobType::Villager || !mob_pub.is_alive() {
+            continue;
+        }
+        let Some(vp) = mob_pub.villager.as_deref() else {
+            continue;
+        };
+        if vp.potential_job_site.is_some() {
+            continue;
+        }
+        let held_mask = villager::held_job_site_mask(vp.profession);
+        if (held_mask & (1_u32 << poi_kind)) == 0 {
+            continue;
+        }
+        let wants = match &vp.job_site {
+            None => {
+                can_other_villager_reach(cx.ctx.blocks(), &other, mob_pub.baby, pos, valid_range)
+            }
+            Some(existing) => existing.pos == pos,
+        };
+        if wants {
+            chosen = Some((uid, vp.job_site.is_none()));
+            break;
+        }
+    }
+    if let Some((target_uid, had_no_job_site)) = chosen {
+        cx.memories.erase(WalkTarget);
+        cx.memories.erase(LookTarget);
+        cx.memories.erase(PotentialJobSite);
+        if had_no_job_site {
+            sensor::set_partner_memory(
+                cx,
+                target_uid,
+                WalkTarget,
+                Some(MemoryValue::Walk(WalkTarget {
+                    target: PositionTracker::at_block(pos),
+                    speed,
+                    close_enough: 1,
+                })),
+            );
+            sensor::set_partner_memory(
+                cx,
+                target_uid,
+                LookTarget,
+                Some(MemoryValue::Look(PositionTracker::at_block(pos))),
+            );
+            sensor::set_partner_memory(
+                cx,
+                target_uid,
+                PotentialJobSite,
+                Some(MemoryValue::GlobalPos(GlobalPos {
+                    dimension: "minecraft:overworld".to_owned(),
+                    pos,
+                })),
+            );
+        }
+    }
+    true
+}
+
+/// 替附近另一只村民评估 `YieldJobSite.canReachPos`（`GroundPathNavigation.createPath(pos, validRange)`）。
+fn can_other_villager_reach(
+    blocks: &dyn BlockView,
+    other: &EntityPublic,
+    baby: bool,
+    pos: BlockPos,
+    reach: i32,
+) -> bool {
+    if !blocks.is_loaded(pos) || other.position.y < f64::from(blocks.min_y()) {
+        return false;
+    }
+    let in_liquid = blocks.fluid_state(other.block_position()).is_water()
+        || blocks.fluid_state(other.block_position()).is_lava();
+    if !other.on_ground && !in_liquid {
+        return false;
+    }
+    let surface = find_surface_position(blocks, pos);
+    let (width, height, _) = MobType::Villager.dimensions(baby);
+    let flags = EvaluatorFlags {
+        can_pass_doors: true,
+        can_open_doors: true,
+        can_float: true,
+        ..EvaluatorFlags::default()
+    };
+    let request = PathRequest {
+        mob: PathMob {
+            position: other.position,
+            on_ground: other.on_ground,
+            in_floatable_fluid: in_liquid,
+            in_water: blocks.fluid_state(other.block_position()).is_water(),
+            width,
+            height,
+            max_up_step: 0.6,
+            max_fall_distance: 3,
+            malus: Malus::default(),
+            context: CollisionContext::Empty,
+        },
+        flags,
+        target: surface,
+        max_distance_from_start: 48.0,
+        reach_range: reach,
+        max_visited_nodes: 48 * 16,
+        max_visited_nodes_multiplier: 1.0,
+    };
+    path::find_path(blocks, &request).is_some_and(|p| p.reached)
+}
+
+fn trigger_reset_profession(cx: &mut Cx) -> bool {
+    let none_id = facts::profession_id(facts::NONE_PROFESSION).unwrap_or(0);
+    let nitwit_id = facts::profession_id("minecraft:nitwit").unwrap_or(-1);
+    let prof = cx.mob.villager.profession;
+    if prof != none_id && prof != nitwit_id && cx.mob.villager.xp == 0 && cx.mob.villager.level <= 1
+    {
+        cx.mob.villager.set_profession(none_id);
+        cx.request_brain_refresh();
+        true
+    } else {
+        false
+    }
+}
+
+fn trigger_poi_competitor_scan(cx: &mut Cx) -> bool {
+    let Some(gp) = cx.memories.global_pos(JobSite).cloned() else {
+        return false;
+    };
+    let Some(poi_kind) = cx.ctx.blocks().poi_type_at(gp.pos) else {
+        return true;
+    };
+    let Some(living_ids) = cx.memories.entities(NearestLivingEntities) else {
+        return true;
+    };
+    let ids: Vec<EntityUid> = living_ids.to_vec();
+    let mut winner_uid = cx.me.id;
+    let mut winner_xp = cx.mob.villager.xp;
+    for uid in ids {
+        if uid == cx.me.id {
+            continue;
+        }
+        let Some(other) = cx.ctx.other(uid) else {
+            continue;
+        };
+        if other.removed {
+            continue;
+        }
+        let KindPublic::Mob(mob_pub) = &other.kind else {
+            continue;
+        };
+        if mob_pub.mob_type != MobType::Villager || !mob_pub.is_alive() {
+            continue;
+        }
+        let Some(vp) = mob_pub.villager.as_deref() else {
+            continue;
+        };
+        let same_site = vp.job_site.as_ref().is_some_and(|site| site == &gp);
+        let matches_prof = (villager::held_job_site_mask(vp.profession) & (1_u32 << poi_kind)) != 0;
+        if !(same_site && matches_prof) {
+            continue;
+        }
+        // `PoiCompetitorScan.selectWinner(winner, other)`：严格大于胜出，否则后者胜出。
+        if winner_xp > vp.experience {
+            sensor::set_partner_memory(cx, uid, JobSite, None);
+        } else {
+            if winner_uid == cx.me.id {
+                cx.memories.erase(JobSite);
+            } else {
+                sensor::set_partner_memory(cx, winner_uid, JobSite, None);
+            }
+            winner_uid = uid;
+            winner_xp = vp.experience;
+        }
+    }
+    true
 }
 
 fn is_hurt(cx: &Cx) -> bool {
@@ -925,7 +2099,6 @@ fn minimal_look_behavior() -> (i32, Kind) {
 }
 
 fn core_package(speed: f32) -> ActivityData {
-    let _ = speed;
     ActivityData::with_priorities(
         Activity::Core,
         vec![
@@ -936,47 +2109,54 @@ fn core_package(speed: f32) -> ActivityData {
             (0, Kind::Villager(Behavior::WakeUp)),
             (0, Kind::Villager(Behavior::ReactToBell)),
             (0, Kind::Villager(Behavior::SetRaidStatus)),
-            (0, stub(Stub::ValidateJobSite)),
-            (0, stub(Stub::ValidatePotentialJobSite)),
+            (
+                0,
+                Kind::Villager(Behavior::ValidateNearbyPoi(ValidatePoiSlot::JobSite)),
+            ),
+            (
+                0,
+                Kind::Villager(Behavior::ValidateNearbyPoi(
+                    ValidatePoiSlot::PotentialJobSite,
+                )),
+            ),
             (1, Kind::MoveToTargetSink(MoveToTargetSink::new(false))),
-            (2, stub(Stub::PoiCompetitorScan)),
+            (2, Kind::Villager(Behavior::PoiCompetitorScan)),
             (3, stub(Stub::LookAndFollowTradingPlayerSink)),
-            (5, stub(Stub::GoToWantedItem)),
+            (
+                5,
+                Kind::Villager(Behavior::GoToWantedItem { speed, max_dist: 4 }),
+            ),
             (
                 6,
-                Kind::Villager(Behavior::AcquirePoiStub {
-                    slot: PoiAcquireSlot::JobSite,
-                    next_scheduled_start: 0,
-                }),
+                Kind::Villager(Behavior::AcquirePoi(Box::new(AcquirePoiState::new(
+                    PoiAcquireSlot::JobSite,
+                )))),
             ),
-            (7, stub(Stub::GoToPotentialJobSite)),
-            (8, stub(Stub::YieldJobSite)),
+            (7, Kind::Villager(Behavior::GoToPotentialJobSite { speed })),
+            (8, Kind::Villager(Behavior::YieldJobSite { speed })),
             (
                 10,
-                Kind::Villager(Behavior::AcquirePoiStub {
-                    slot: PoiAcquireSlot::Home,
-                    next_scheduled_start: 0,
-                }),
+                Kind::Villager(Behavior::AcquirePoi(Box::new(AcquirePoiState::new(
+                    PoiAcquireSlot::Home,
+                )))),
             ),
             (
                 10,
-                Kind::Villager(Behavior::AcquirePoiStub {
-                    slot: PoiAcquireSlot::MeetingPoint,
-                    next_scheduled_start: 0,
-                }),
+                Kind::Villager(Behavior::AcquirePoi(Box::new(AcquirePoiState::new(
+                    PoiAcquireSlot::MeetingPoint,
+                )))),
             ),
-            (10, stub(Stub::AssignProfessionFromJobSite)),
-            (10, stub(Stub::ResetProfession)),
+            (10, Kind::Villager(Behavior::AssignProfessionFromJobSite)),
+            (10, Kind::Villager(Behavior::ResetProfession)),
         ],
     )
 }
 
 fn work_package(is_farmer: bool, speed: f32) -> ActivityData {
-    let work_at_poi = if is_farmer {
-        stub(Stub::WorkAtComposter)
-    } else {
-        stub(Stub::WorkAtPoi)
-    };
+    let work_at_poi = Kind::Villager(Behavior::WorkAtPoi {
+        is_composter: is_farmer,
+        last_check: 0,
+    });
     let harvest_weight = if is_farmer { 2 } else { 5 };
     let bonemeal_weight = if is_farmer { 4 } else { 7 };
     ActivityData::with_priorities(
@@ -989,11 +2169,44 @@ fn work_package(is_farmer: bool, speed: f32) -> ActivityData {
                     Vec::new(),
                     vec![
                         (work_at_poi, 7),
-                        (stub(Stub::StrollAroundJobSite), 2),
-                        (stub(Stub::StrollToJobSite), 5),
-                        (stub(Stub::StrollToSecondaryJobSite), 5),
-                        (stub(Stub::HarvestFarmland), harvest_weight),
-                        (stub(Stub::UseBonemeal), bonemeal_weight),
+                        (
+                            Kind::Villager(Behavior::StrollAroundPoi {
+                                memory: JobSite,
+                                speed: 0.4,
+                                max_dist: 4,
+                                next_ok_start: 0,
+                            }),
+                            2,
+                        ),
+                        (
+                            Kind::Villager(Behavior::StrollToPoi {
+                                memory: JobSite,
+                                speed: 0.4,
+                                close_enough: 1,
+                                max_dist: 10,
+                                next_ok_start: 0,
+                            }),
+                            5,
+                        ),
+                        (
+                            Kind::Villager(Behavior::StrollToPoiList {
+                                list_memory: SecondaryJobSite,
+                                primary_memory: JobSite,
+                                speed,
+                                close_enough: 1,
+                                max_dist: 6,
+                                next_ok_start: 0,
+                            }),
+                            5,
+                        ),
+                        (
+                            Kind::Villager(Behavior::HarvestFarmland(Box::default())),
+                            harvest_weight,
+                        ),
+                        (
+                            Kind::Villager(Behavior::UseBonemeal(Box::default())),
+                            bonemeal_weight,
+                        ),
                     ],
                 ))),
             ),
@@ -1072,7 +2285,10 @@ fn rest_package(speed: f32) -> ActivityData {
                     too_long_unreachable: 1200,
                 }),
             ),
-            (3, stub(Stub::ValidateHome)),
+            (
+                3,
+                Kind::Villager(Behavior::ValidateNearbyPoi(ValidatePoiSlot::Home)),
+            ),
             (3, stub(Stub::SleepInBed)),
             (
                 5,
@@ -1116,7 +2332,10 @@ fn meet_package(speed: f32) -> ActivityData {
                 }),
             ),
             (3, stub(Stub::GiveGiftToHero)),
-            (3, stub(Stub::ValidateMeetingPoint)),
+            (
+                3,
+                Kind::Villager(Behavior::ValidateNearbyPoi(ValidatePoiSlot::MeetingPoint)),
+            ),
             (
                 3,
                 Kind::Gate(Box::new(Gate::ordered_run_one(
@@ -1519,8 +2738,8 @@ pub(super) fn custom_server_ai_step(
 
     if let Some(gap) = effective_gap {
         if let Some(mut brain) = mob.brain.take() {
-            brain.tick_by(me, mob, ctx, gap);
-            mob.brain = Some(brain);
+            let replaced = brain.tick_by(me, mob, ctx, gap);
+            mob.brain = Some(Box::new(replaced.unwrap_or(*brain)));
         }
         if !mob.no_ai {
             let _ = me.random.next_int_bounded(100);

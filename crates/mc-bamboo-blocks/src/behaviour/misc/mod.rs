@@ -11,7 +11,8 @@ mod cauldron;
 mod composter;
 
 pub(crate) use composter::{
-    MAX_LEVEL as COMPOST_MAX_LEVEL, READY as COMPOST_READY, compost_empty, compost_fill,
+    MAX_LEVEL as COMPOST_MAX_LEVEL, READY as COMPOST_READY, add_layer_state, compost_empty,
+    compost_fill, extract_produce,
 };
 mod copper;
 mod crafter;
