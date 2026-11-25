@@ -764,6 +764,54 @@ fn give_hero_of_the_village(region: &mut Region, uuid: [u8; 16], amplifier: i32)
     crate::player_effects::give(region, id, effect);
 }
 
+/// `Raider.die`：找到死者所在位置的活跃袭击，记英雄、从名册移除、清队长
+/// 旗帜的登记（`removeFromRaid(..., false)` 不扣总血量），再刷新血条进度。
+///
+/// `Raider.die`: find the active raid at the death position, credit the killer
+/// as a hero, remove the raider from the roster / leader map (without
+/// subtracting `totalHealth`) and refresh the bar's progress.
+pub(crate) fn raider_died(region: &mut Region, uid: i32, position: Vec3, killer: Option<[u8; 16]>) {
+    let pos = BlockPos::containing(position);
+    let Some(raid_id) = region
+        .raids
+        .nearby_raid(pos, f64::from(VALID_RAID_RADIUS_SQR))
+    else {
+        return;
+    };
+    let Some(raid) = region.raids.raids.get_mut(&raid_id) else {
+        return;
+    };
+    if let Some(uuid) = killer {
+        raid.add_hero_of_the_village(uuid);
+    }
+    // 官方 `Raider.die` 走 `removeFromRaid(level, raider, false)`：不扣
+    // `totalHealth`，血条分子随剩下的幸存者血量下降。
+    //
+    // Official `Raider.die` calls `removeFromRaid(level, raider, false)`:
+    // `totalHealth` stays, and the bar's numerator falls with the survivors.
+    for &wave in raid.raiders.clone().keys() {
+        if raid.remove_raider(wave, uid, 0.0, false) {
+            break;
+        }
+    }
+    if raid.leaders.values().any(|&leader| leader == uid) {
+        raid.leaders.retain(|_, leader| *leader != uid);
+    }
+    let living: f32 = raid
+        .raiders
+        .values()
+        .flatten()
+        .filter_map(|&member| {
+            let public = region.entities.public_at(member)?;
+            match &public.kind {
+                mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.health.max(0.0)),
+                _ => None,
+            }
+        })
+        .sum();
+    raid.boss_progress = raid.bossbar_progress(living);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1061,6 +1109,30 @@ mod tests {
         let horn = frames.iter().find(|(packet, _)| *packet == sound);
         assert!(horn.is_some(), "首波有一份号角音效包");
         assert_eq!(region.raids.raids[&raid_id].boss_progress, 1.0);
+    }
+
+    /// 袭击者死亡：记英雄、从名册移除、扣回血量、清队长登记。
+    #[test]
+    fn raider_death_credits_hero_and_leaves_the_roster() {
+        let (mut region, id, _) = region_with_player();
+        make_village(&mut region);
+        let uuid = *region.players[&id].uuid.as_bytes();
+        let raid_id = region.raids.unique_id();
+        let mut raid = Raid::new(BlockPos::new(0, 64, 0), 2);
+        raid.started = true;
+        raid.add_wave_mob(1, 42, 24.0, true);
+        raid.leaders.insert(1, 42);
+        region.raids.raids.insert(raid_id, raid);
+        // 死亡位置要落在袭击中心的半径内。
+        raider_died(&mut region, 42, Vec3::new(0.5, 64.0, 0.5), Some(uuid));
+        let raid = &region.raids.raids[&raid_id];
+        assert_eq!(raid.heroes_of_the_village, vec![uuid]);
+        assert!(raid.raiders.values().all(|members| members.is_empty()));
+        assert!(raid.leaders.is_empty());
+        assert_eq!(
+            raid.total_health, 24.0,
+            "官方 removeFromRaid(..., false) 不扣总血量"
+        );
     }
 
     /// 袭击之兆到期建袭击并清掉坐标。

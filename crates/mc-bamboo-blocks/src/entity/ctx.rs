@@ -1203,6 +1203,14 @@ pub enum Command {
     AwardDeathExperience {
         amount: i32,
     },
+    /// `Raider.die`：把英雄与离队信息交给游戏层。
+    ///
+    /// `Raider.die`: hand hero credit and roster removal to the game layer.
+    RaiderDied {
+        uid: EntityUid,
+        position: mc_bamboo_core::Vec3,
+        killer: Option<[u8; 16]>,
+    },
     /// `ExperienceOrb.scanForMerges`：周围同值的球合并到自己身上。
     MergeExperienceOrbs {
         others: Vec<EntityUid>,
@@ -1788,6 +1796,17 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             for stack in world.mob_loot_drops(loot, me.position) {
                 world.spawn_at_location(me.position, stack);
             }
+        }
+        Command::RaiderDied {
+            uid,
+            position,
+            killer,
+        } => {
+            world.push_effect(crate::Effect::RaiderDied {
+                uid,
+                position,
+                killer,
+            });
         }
         Command::AwardDeathExperience { amount } => {
             super::orb::award(world, me.position, amount);

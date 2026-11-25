@@ -797,6 +797,13 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     crate::sleep::on_sleep_in_bed(region, id, pos, set_spawn, problem);
                 }
             }
+            Effect::RaiderDied {
+                uid,
+                position,
+                killer,
+            } => {
+                crate::raid::raider_died(region, uid, position, killer);
+            }
             Effect::BredAnimals {
                 father,
                 mother,

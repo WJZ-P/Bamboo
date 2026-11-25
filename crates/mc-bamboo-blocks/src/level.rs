@@ -2826,6 +2826,16 @@ pub enum Effect {
     /// `transformBadOmenIntoTrialOmen`: replace the player's bad omen with trial omen.
     /// The game layer finds the player by UUID, removes `BAD_OMEN` and adds `TRIAL_OMEN`.
     TrialSpawnerTransformBadOmen { player: [u8; 16], duration: i32 },
+    /// `Raider.die`：一名袭击者死亡。游戏层按位置找活跃袭击、把击杀玩家记进
+    /// `heroesOfTheVillage`，并从袭击名册里移除这只实体。
+    ///
+    /// `Raider.die`: a raider died. The game layer finds the active raid at the
+    /// position, credits the killing player as a hero and removes the raider.
+    RaiderDied {
+        uid: i32,
+        position: mc_bamboo_core::Vec3,
+        killer: Option<[u8; 16]>,
+    },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///

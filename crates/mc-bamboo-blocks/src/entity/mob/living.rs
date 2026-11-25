@@ -3410,6 +3410,19 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         return;
     }
     mob.dead = true;
+    // `Raider.die` 在 `super.die` 之前：记英雄、离队、去队长旗帜。
+    // `Raider.die` runs before `super.die`: hero credit, roster removal, leader flag.
+    if mob.mob_type.is_raider() {
+        let credited = mob.last_hurt_by_player_memory_time > 0;
+        ctx.emit(
+            Command::RaiderDied {
+                uid: me.id,
+                position: me.position,
+                killer: mob.last_hurt_by_player_ref.filter(|_| credited),
+            },
+            me,
+        );
+    }
     // `AbstractVillager.die` → `stopTrading()`（覆盖普通死亡与僵尸转化分支）。
     // `AbstractVillager.die` → `stopTrading()` (covers regular death and zombie conversion).
     if mob.mob_type == super::MobType::Villager {

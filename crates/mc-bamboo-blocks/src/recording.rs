@@ -774,6 +774,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::VibrationParticle { .. } => 31,
         Effect::Explode { .. } => 32,
         Effect::TrialSpawnerTransformBadOmen { .. } => 33,
+        Effect::RaiderDied { .. } => 34,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -912,6 +913,17 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::TrialSpawnerTransformBadOmen { player, duration } => {
             player.hash(&mut hasher);
             duration.hash(&mut hasher);
+        }
+        Effect::RaiderDied {
+            uid,
+            position,
+            killer,
+        } => {
+            uid.hash(&mut hasher);
+            position.x.to_bits().hash(&mut hasher);
+            position.y.to_bits().hash(&mut hasher);
+            position.z.to_bits().hash(&mut hasher);
+            killer.hash(&mut hasher);
         }
         Effect::DestroyProgress {
             breaker,
