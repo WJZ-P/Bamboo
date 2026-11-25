@@ -258,6 +258,8 @@ impl ProjectileCase {
             MobType::Stray
         } else if self.name.starts_with("bogged_") {
             MobType::Bogged
+        } else if self.name.starts_with("parched_") {
+            MobType::Parched
         } else {
             MobType::Skeleton
         }

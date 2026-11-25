@@ -319,6 +319,7 @@ public final class MobOracle {
                     "arrow_water_crossing", "arrow_water_after_pierce", "arrow_tipped_hit", "arrow_tipped_fade", "arrow_spectral_hit", "arrow_power_punch_hit",
                     "skeleton_bow_normal", "skeleton_bow_hard",
                     "stray_bow_normal", "bogged_bow_normal", "bogged_bow_hard",
+                    "parched_bow_normal", "parched_bow_hard",
                     "skeleton_freeze", "bogged_shear",
                     "pillager_crossbow_normal", "pillager_crossbow_hard", "pillager_crossbow_multishot",
                     "trident_stick", "trident_loyalty", "trident_owner_offline",
@@ -5764,6 +5765,20 @@ public final class MobOracle {
         }
     }
 
+    /** 焦骸的箭也走官方 `getArrow`（600 刻虚弱），只是像流浪者 / 沼骸那样重新播种。 */
+    /** Parched arrows use vanilla `getArrow` (600-tick weakness), reseeded like strays. */
+    private static final class OracleParched extends net.minecraft.world.entity.monster.skeleton.Parched {
+        OracleParched(FakeLevel level) {
+            super(EntityTypes.PARCHED, level);
+        }
+
+        @Override
+        protected net.minecraft.world.entity.projectile.arrow.AbstractArrow getArrow(
+                ItemStack projectile, float power, ItemStack weapon) {
+            return seededArrow(this, projectile, power, weapon, () -> super.getArrow(projectile, power, weapon));
+        }
+    }
+
     /** 骷髅一支的逐刻状态：实体 ID、类型、index 16 的布尔（转化中 / 已剪）、冻结刻数、血量、主手物品。 */
     private static String skeletonKinState(Mob shooter) {
         boolean flag = shooter instanceof net.minecraft.world.entity.monster.skeleton.Skeleton skeleton
@@ -8402,6 +8417,7 @@ public final class MobOracle {
         // player that is never targeted.
         boolean stray = name.startsWith("stray_");
         boolean bogged = name.startsWith("bogged_");
+        boolean parched = name.startsWith("parched_");
         boolean freeze = name.equals("skeleton_freeze");
         boolean shear = name.equals("bogged_shear");
         boolean passive = freeze || shear;
@@ -8411,7 +8427,7 @@ public final class MobOracle {
         // Piercing. The shooter branches (ground, player position, per-tick shooter state)
         // are shared with the skeletons.
         boolean pillager = name.startsWith("pillager_crossbow");
-        boolean skeleton = name.startsWith("skeleton_") || stray || bogged || pillager;
+        boolean skeleton = name.startsWith("skeleton_") || stray || bogged || parched || pillager;
         boolean wall = name.equals("arrow_hits_wall");
         boolean overlap = name.equals("arrow_block_overlaps_flight");
         boolean noGravity = name.equals("arrow_no_gravity");
@@ -8578,7 +8594,8 @@ public final class MobOracle {
         var sync = new java.util.LinkedHashMap<Integer, Sync>();
         if (skeleton) {
             shooter = pillager ? OraclePillager.create(world)
-                    : stray ? new OracleStray(world) : bogged ? new OracleBogged(world) : new OracleSkeleton(world);
+                    : stray ? new OracleStray(world) : bogged ? new OracleBogged(world)
+                    : parched ? new OracleParched(world) : new OracleSkeleton(world);
             world.entitySeeds.nextLong();
             setRandom(shooter, 42L);
             shooter.setUUID(new UUID(0, 1));
@@ -8742,8 +8759,11 @@ public final class MobOracle {
         var playerStates = new StringBuilder("[");
         var playerPackets = new StringBuilder("[");
         float[] lastSentHealth = {-1.0e8F};
-        int ticks = (effectHit || enchanted) ? 4 : freeze ? 450 : shear ? 12 : bogged ? 150 : pillager ? 190 : skeleton ? 105
-                : (piercing || water) ? 3 : 26;
+        // 焦骸每 70 / 50 刻才射一次，要比骷髅的 105 刻跑得更久才能射出第二支箭。
+        // Parched shoot every 70 / 50 ticks, so they need longer than the skeleton's
+        // 105 ticks to fire a second arrow.
+        int ticks = (effectHit || enchanted) ? 4 : freeze ? 450 : shear ? 12 : bogged || parched ? 200
+                : pillager ? 190 : skeleton ? 105 : (piercing || water) ? 3 : 26;
         int conversions = 0;
         int sheared = 0;
         int embeds = 0;
@@ -9026,6 +9046,7 @@ public final class MobOracle {
                         || !shooter.getMainHandItem().is(Items.BOW))
                 || shear && (sheared != 1 || !((net.minecraft.world.entity.monster.skeleton.Bogged) shooter).isSheared())
                 || stray && !player.hasEffect(MobEffects.SLOWNESS) || bogged && !shear && !player.hasEffect(MobEffects.POISON)
+                || parched && !player.hasEffect(MobEffects.WEAKNESS)
                 || despawn && (embeds < 2 || !arrows.getFirst().isRemoved())
                 || fade && (puffs[0] != 1 || ((net.minecraft.world.entity.projectile.arrow.Arrow) arrows.getFirst()).getColor() != -1)) {
             throw new IllegalStateException("projectile scenario failed to exercise " + name);
