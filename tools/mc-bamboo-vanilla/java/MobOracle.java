@@ -14792,6 +14792,20 @@ public final class MobOracle {
                                 Blocks.AIR.defaultBlockState(), false);
                     }
                     if (!golem.isRemoved()) {
+                        // 雕像场景：`CarvedPumpkinBlock` 之外的假世界不会自动建
+                        // `CopperGolemStatueBlockEntity`，这里按其默认方块预置一个，
+                        // 再直接调官方私有 `turnToStatue`（等价于掷中 0.0058 后的分支）。
+                        if (name.equals("copper_golem_statue") && tick == 1) {
+                            BlockPos statuePos = golem.blockPosition();
+                            var statueState = Blocks.COPPER_GOLEM_STATUE.weathering().oxidized().defaultBlockState();
+                            var statueBe = new net.minecraft.world.level.block.entity.CopperGolemStatueBlockEntity(
+                                    statuePos, statueState);
+                            level.putBlockEntity(statueBe);
+                            var turn = net.minecraft.world.entity.animal.golem.CopperGolem.class
+                                    .getDeclaredMethod("turnToStatue", net.minecraft.server.level.ServerLevel.class);
+                            turn.setAccessible(true);
+                            turn.invoke(golem, level);
+                        }
                         golem.checkDespawn();
                         golem.commonTick();
                         golem.tick();

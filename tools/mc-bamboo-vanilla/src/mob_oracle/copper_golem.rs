@@ -205,6 +205,23 @@ impl Report {
             if tick > 0 {
                 ticks.set_time(START_TIME + tick as i64);
                 level.random.source().set_seed_raw(expected.start_seed);
+                if case.name == "copper_golem_statue" && tick == 1 {
+                    let mut world = World::new(&mut level, &mut ticks);
+                    let Some(mut golem) = world.take_entity_for_oracle(golem_id) else {
+                        return;
+                    };
+                    mc_bamboo_blocks::entity::ctx::apply(
+                        mc_bamboo_blocks::entity::ctx::Command::CopperGolemStatue {
+                            pos: statue,
+                            pose: 3,
+                            facing: mc_bamboo_core::Direction::South,
+                        },
+                        &mut golem,
+                        &mut world,
+                    );
+                    world.put_entity_for_oracle(golem);
+                    world.remove_entity(golem_id);
+                }
                 if case.name == "copper_golem_build" && tick == 1 {
                     let mut world = World::new(&mut level, &mut ticks);
                     // 官方夹具直接调 `CarvedPumpkinBlock.onPlace`；Bamboo 侧同一步。
@@ -230,6 +247,28 @@ impl Report {
             } else {
                 Vec::new()
             };
+            // 改坏确认：故意改错搬运场景的某一项，证明逐刻比较没放宽。
+            match self.break_test.as_deref() {
+                Some("cg_transport") => {
+                    if !ours.chests.is_empty() && !ours.chests[0].is_empty() {
+                        ours.chests[0][0][1] += 1;
+                    }
+                }
+                Some("cg_brain") => {
+                    ours.brain.push(String::from("!"));
+                }
+                Some("cg_weather") => {
+                    if ours.golem.len() > 1 {
+                        ours.golem[1] += 1;
+                    }
+                }
+                Some("cg_build") if case.name == "copper_golem_build" => {
+                    if !ours.blocks.is_empty() {
+                        ours.blocks[0] += 1;
+                    }
+                }
+                _ => {}
+            }
             if ours != *expected {
                 self.mismatch(format!(
                     "{} tick {tick}: official {expected:?}, bamboo {ours:?}",
