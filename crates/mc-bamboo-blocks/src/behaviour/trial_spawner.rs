@@ -1117,6 +1117,35 @@ impl TrialSpawnerContext for TrialSpawnerWorld<'_, '_> {
         {
             return None;
         }
+        // `SpawnPlacements.checkSpawnRules` 对 `TRIAL_SPAWNER` 恒真：`isSpawner()` 让
+        // `Mob.checkMobSpawnRules` 直接返回 true（跳过 `isValidSpawn`），而和平难度已经
+        // 被 `canSpawnInLevel` 挡掉。试炼密室的 `spawn_potentials` 不带
+        // `custom_spawn_rules`，`CustomSpawnRules.isValidPosition` 也用不上。
+        // `Mob.checkSpawnObstruction`：碰撞盒不在液体里、也不挡别的实体。
+        let min = BlockPos::new(
+            spawn_box.min_x.floor() as i32,
+            spawn_box.min_y.floor() as i32,
+            spawn_box.min_z.floor() as i32,
+        );
+        let max = BlockPos::new(
+            (spawn_box.max_x - 1.0e-7).floor() as i32,
+            (spawn_box.max_y - 1.0e-7).floor() as i32,
+            (spawn_box.max_z - 1.0e-7).floor() as i32,
+        );
+        let mut in_liquid = false;
+        'liquid_check: for y in min.y..=max.y {
+            for z in min.z..=max.z {
+                for x in min.x..=max.x {
+                    if !self.world.fluid_state(BlockPos::new(x, y, z)).is_empty() {
+                        in_liquid = true;
+                        break 'liquid_check;
+                    }
+                }
+            }
+        }
+        if in_liquid || !self.world.level().is_unobstructed(&[spawn_box]) {
+            return None;
+        }
         // `lambda$spawnMob$2`：朝向 (nextFloat*360, 0)。
         let yaw = random.next_float() * 360.0;
         let uuid = self.world.spawn_from_spawn_data(
