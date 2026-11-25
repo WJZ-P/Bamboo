@@ -1323,6 +1323,12 @@ pub trait Level: LevelSideState + LevelEntities {
             || self.block_weather().thunder_level > 0.0
     }
 
+    /// `EnvironmentAttributes.CREAKING_ACTIVE`：主世界按 `day` 时间线求值；
+    /// 有固定时间的维度没有这条时间线，恒假。
+    fn creaking_active(&self) -> bool {
+        !self.dimension_has_fixed_time() && crate::sky::creaking_active(self.clock_ticks())
+    }
+
     /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线在
     /// [`Level::clock_ticks`] 处求值；有固定时间的维度没有这条时间线，恒假。
     fn monsters_burn(&self) -> bool {
