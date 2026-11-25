@@ -263,11 +263,7 @@ pub fn run(java: &str) -> Result<(), String> {
 
     // 1. 官方 codec 能解码 Bamboo 写出的文件，且值一致。
     // The official codecs decode Bamboo's files and the values match.
-    let report = decode(
-        java,
-        &paths,
-        &noise_refs,
-    )?;
+    let report = decode(java, &paths, &noise_refs)?;
     check_rule(&report, "minecraft:random_tick_speed", "int", &json!(7))?;
     check_rule(&report, "minecraft:fire_damage", "bool", &json!(false))?;
     // `Raids.CODEC` 解出的两场袭击每个字段都和写出的示例一致。
@@ -315,13 +311,7 @@ pub fn run(java: &str) -> Result<(), String> {
     let broken_raids = corrupt_raid_status(&raids_tag);
     write_saved_data_at(&raids_path, &broken_raids)
         .map_err(|error| format!("cannot write broken raids.dat: {error}"))?;
-    if decode(
-        java,
-        &paths,
-        &noise_refs,
-    )
-    .is_ok()
-    {
+    if decode(java, &paths, &noise_refs).is_ok() {
         return Err("official codec accepted a raids.dat with a broken status".to_owned());
     }
     write_saved_data_at(&raids_path, &raids_tag)
@@ -440,13 +430,7 @@ pub fn run(java: &str) -> Result<(), String> {
     ));
     write_saved_data_at(&broken_noise_path, &broken)
         .map_err(|error| format!("cannot write broken noise world_gen_settings.dat: {error}"))?;
-    if decode(
-        java,
-        &paths,
-        &[broken_noise_path.as_path()],
-    )
-    .is_ok()
-    {
+    if decode(java, &paths, &[broken_noise_path.as_path()]).is_ok() {
         return Err(
             "official codec accepted a noise world_gen_settings.dat with a broken generator type"
                 .to_owned(),
@@ -471,13 +455,7 @@ pub fn run(java: &str) -> Result<(), String> {
         .collect();
     write_saved_data_at(&world_border_path, &Tag::Compound(renamed))
         .map_err(|error| format!("cannot write broken world_border.dat: {error}"))?;
-    if decode(
-        java,
-        &paths,
-        &[],
-    )
-    .is_ok()
-    {
+    if decode(java, &paths, &[]).is_ok() {
         return Err("official codec accepted a world_border.dat with a broken key".to_owned());
     }
 
@@ -514,13 +492,7 @@ pub fn run(java: &str) -> Result<(), String> {
     );
     write_saved_data_at(&world_clocks_path, &broken_clocks)
         .map_err(|error| format!("cannot write broken world_clocks.dat: {error}"))?;
-    if decode(
-        java,
-        &paths,
-        &[],
-    )
-    .is_ok()
-    {
+    if decode(java, &paths, &[]).is_ok() {
         return Err("official codec accepted a world_clocks.dat with a broken key".to_owned());
     }
 
