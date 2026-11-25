@@ -1167,7 +1167,7 @@ mod tests {
         use crate::entity::mob::brain::memory::{Memories, MemoryValue};
         assert_eq!(std::mem::size_of::<MemoryValue>(), 184);
         assert_eq!(std::mem::size_of::<Memories>(), 1216);
-        assert_eq!(std::mem::size_of::<Brain>(), 1312);
+        assert_eq!(std::mem::size_of::<Brain>(), 1360);
         assert_eq!(std::mem::size_of::<Node>(), 160);
         assert_eq!(std::mem::size_of::<Sensor>(), 16);
         assert_eq!(std::mem::size_of::<Entry>(), 176);
