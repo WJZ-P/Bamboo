@@ -100,6 +100,7 @@ pub mod turtle;
 pub mod villager;
 pub mod villager_ai;
 pub mod wandering_trader;
+pub mod wandering_trader_spawner;
 mod water;
 pub mod wild_spawn;
 pub mod witch;

@@ -200,6 +200,37 @@ pub(crate) fn parse_world_clocks(tag: &Tag) -> Option<Vec<(&'static str, Clock)>
     Some(parsed)
 }
 
+/// `WanderingTraderData.CODEC`：`spawn_delay` / `spawn_chance` 两个
+/// `optionalFieldOf` 字段，缺省 24000 / 25；值等于缺省时官方 codec 仍写入。
+///
+/// `WanderingTraderData.CODEC`: the two optional fields `spawn_delay` and
+/// `spawn_chance`, defaulting to 24000 / 25.
+pub fn wandering_trader_tag(data: mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData) -> Tag {
+    let (delay, chance) = data.tag();
+    Tag::Compound(vec![
+        ("spawn_delay".to_owned(), Tag::Int(delay)),
+        ("spawn_chance".to_owned(), Tag::Int(chance)),
+    ])
+}
+
+/// 解 `wandering_trader.dat`；坏档 / 缺字段走官方 `resultOrPartial` 的默认值。
+/// 未知字段按 codec 忽略。
+///
+/// Decode `wandering_trader.dat`; a missing or invalid field falls back to the
+/// official codec defaults. Unknown fields are ignored.
+pub fn parse_wandering_trader(tag: &Tag) -> mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData {
+    use mc_bamboo_blocks::entity::mob::wandering_trader_spawner as spawner;
+    let delay = match get(tag, "spawn_delay") {
+        Some(Tag::Int(value)) => *value,
+        _ => spawner::DEFAULT_SPAWN_DELAY,
+    };
+    let chance = match get(tag, "spawn_chance") {
+        Some(Tag::Int(value)) => *value,
+        _ => spawner::MIN_SPAWN_CHANCE,
+    };
+    spawner::WanderingTraderData::from_tag(delay, chance)
+}
+
 /// 把世界边界设置编成 `world_border.dat` 的 `data` 复合标签（九个必填字段）。
 /// Encode border settings into the `data` compound (nine required fields).
 pub(crate) fn world_border_tag(s: &BorderSettings) -> Tag {
@@ -322,6 +353,8 @@ pub(crate) struct StartupData {
     pub(crate) game_rules: Option<Tag>,
     pub(crate) world_border: Option<Tag>,
     pub(crate) world_clocks: Option<Tag>,
+    /// 全局 `data/minecraft/wandering_trader.dat` 的 `data` 复合标签。
+    pub(crate) wandering_trader: Option<Tag>,
     /// 每个命名空间一份 `command_storage.dat` 的 `data` 复合标签。
     pub(crate) command_storage: Vec<(String, Tag)>,
 }
@@ -350,6 +383,11 @@ impl StartupData {
             for (name, state) in clocks {
                 global.restore_clock(name, state);
             }
+        }
+        if let Some(tag) = &self.wandering_trader {
+            // `GlobalView` 是全服一份的权威副本，启动时读档只改它。
+            // `GlobalView` is the authoritative global copy; loading changes it.
+            region.global.wandering_trader_data = parse_wandering_trader(tag);
         }
         for (namespace, tag) in &self.command_storage {
             global.command_storage.load_namespace(namespace, tag);
@@ -545,6 +583,25 @@ mod tests {
         for tag in bad {
             assert!(parse_world_clocks(&tag).is_none(), "坏档 {tag:?}");
         }
+    }
+
+    #[test]
+    fn wandering_trader_saved_data_round_trips() {
+        use mc_bamboo_blocks::entity::mob::wandering_trader_spawner as spawner;
+        let data = spawner::WanderingTraderData::from_tag(12_000, 50);
+        let tag = wandering_trader_tag(data);
+        assert_eq!(parse_wandering_trader(&tag), data);
+        // 缺字段 / 类型坏都按官方 codec 的缺省值。
+        assert_eq!(
+            parse_wandering_trader(&Tag::Compound(vec![])),
+            spawner::WanderingTraderData::default()
+        );
+        let bad = Tag::Compound(vec![
+            ("spawn_delay".to_owned(), Tag::String("oops".to_owned())),
+            ("spawn_chance".to_owned(), Tag::Int(75)),
+        ]);
+        assert_eq!(parse_wandering_trader(&bad).spawn_delay, 24000);
+        assert_eq!(parse_wandering_trader(&bad).spawn_chance, 75);
     }
 
     #[test]

@@ -134,6 +134,7 @@ pub mod structure_spawn;
 mod tick_levels;
 mod weather;
 mod world;
+mod wandering_trader_spawn;
 mod world_gen_settings;
 pub mod world_options;
 mod world_state;
