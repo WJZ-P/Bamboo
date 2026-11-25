@@ -2529,6 +2529,7 @@ public final class MobOracle {
             // 卫道士劈门：袭击里的一只卫道士，村民在门后，困难难度，卫道士破门进屋。
             Scene door = new Scene("raid_mob_vindicator_door").ticks(320).difficulty(3);
             Scenes.ground(door, 24);
+            door.clockStart = 2000;
             door.raid(0, 64, 0, 0, 1, 1, 1, 3);
             door.fill(2, 64, 0, 3, 66, 0, Blocks.OAK_PLANKS.defaultBlockState());
             door.fill(2, 64, -3, 3, 66, 3, Blocks.OAK_PLANKS.defaultBlockState());
@@ -2538,6 +2539,7 @@ public final class MobOracle {
             // 劫掠兽咆哮踩树叶：袭击里的一只劫掠兽，身前一片树叶，水平碰撞时踩坏。
             Scene leaves = new Scene("raid_mob_ravager_roar").ticks(120).difficulty(2);
             Scenes.ground(leaves, 24);
+            leaves.clockStart = 2000;
             leaves.raid(0, 64, 0, 0, 1, 1, 1, 3);
             for (int x = 1; x <= 4; x++) {
                 leaves.fill(x, 64, -1, x, 64, 1, Blocks.OAK_LEAVES.defaultBlockState());
@@ -2547,6 +2549,7 @@ public final class MobOracle {
             // 袭击判负庆祝：一只掠夺者在已判负的袭击里，`RaiderCelebration` 开始庆祝。
             Scene celebrate = new Scene("raid_mob_celebration").ticks(160).difficulty(2);
             Scenes.ground(celebrate, 24);
+            celebrate.clockStart = 2000;
             celebrate.raid(0, 64, 0, 2, 1, 1, 1, 3);
             celebrate.mob(53, 0.5, 64.0, 0.5, 0.0F, 8301L, 0);
             scenes.add(celebrate);
