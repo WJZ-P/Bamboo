@@ -1150,18 +1150,28 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             _ => EntityData::SharedFlags(0),
         };
     }
-    if kind == mc_bamboo_blocks::entity::mob::MobType::Villager {
+    // `AbstractVillager.DATA_UNHAPPY_COUNTER` 也定义在流浪商人身上，index 相同。
+    // `AbstractVillager.DATA_UNHAPPY_COUNTER` also belongs to the wandering trader.
+    if matches!(
+        kind,
+        mc_bamboo_blocks::entity::mob::MobType::Villager
+            | mc_bamboo_blocks::entity::mob::MobType::WanderingTrader
+    ) {
         use mc_bamboo_data::villager;
         match index {
             villager::UNHAPPY_COUNTER_INDEX => return EntityData::VillagerUnhappy(0),
-            villager::VILLAGER_DATA_INDEX => {
+            villager::VILLAGER_DATA_INDEX
+                if kind == mc_bamboo_blocks::entity::mob::MobType::Villager =>
+            {
                 return EntityData::VillagerData {
                     kind: villager::type_id(villager::DEFAULT_TYPE).unwrap_or(0),
                     profession: villager::profession_id(villager::NONE_PROFESSION).unwrap_or(0),
                     level: villager::MIN_VILLAGER_LEVEL,
                 };
             }
-            villager::VILLAGER_DATA_FINALIZED_INDEX => {
+            villager::VILLAGER_DATA_FINALIZED_INDEX
+                if kind == mc_bamboo_blocks::entity::mob::MobType::Villager =>
+            {
                 return EntityData::VillagerDataFinalized(false);
             }
             _ => {}
@@ -1632,7 +1642,7 @@ fn equine_non_default_data(
     if equine.chested {
         out.push(EntityData::HorseChest(true));
     }
-    if kind == MobType::Llama {
+    if matches!(kind, MobType::Llama | MobType::TraderLlama) {
         if equine.strength != 0 {
             out.push(EntityData::LlamaStrength(equine.strength));
         }
@@ -1945,12 +1955,19 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         }
         return out;
     }
-    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Villager {
+    if matches!(
+        mob.mob_type,
+        mc_bamboo_blocks::entity::mob::MobType::Villager
+            | mc_bamboo_blocks::entity::mob::MobType::WanderingTrader
+    ) {
         use mc_bamboo_data::villager;
-        // 按 index 升序：18 不高兴计数、19 `VillagerData`、20 finalized。
-        // Ascending indices: 18 unhappy, 19 `VillagerData`, 20 finalized.
+        // 按 index 升序：18 不高兴计数、19 `VillagerData`、20 finalized（仅村民）。
+        // Ascending indices: 18 unhappy, 19 `VillagerData`, 20 finalized (villagers only).
         if mob.villager_unhappy != 0 {
             out.push(EntityData::VillagerUnhappy(mob.villager_unhappy));
+        }
+        if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::WanderingTrader {
+            return out;
         }
         let default_kind = villager::type_id(villager::DEFAULT_TYPE).unwrap_or(0);
         let default_profession = villager::profession_id(villager::NONE_PROFESSION).unwrap_or(0);

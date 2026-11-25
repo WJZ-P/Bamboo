@@ -101,6 +101,11 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.npc.villager.Villager;
+import net.minecraft.world.entity.npc.wanderingtrader.WanderingTrader;
+import net.minecraft.world.entity.npc.wanderingtrader.WanderingTraderSpawner;
+import net.minecraft.world.entity.animal.equine.TraderLlama;
+import net.minecraft.world.level.saveddata.WanderingTraderData;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.npc.villager.VillagerData;
 import net.minecraft.world.entity.npc.villager.VillagerProfession;
 import net.minecraft.world.entity.npc.villager.VillagerType;
@@ -446,6 +451,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("sulfur_cube_")) {
                 cases += playSulfurCube(official, out, only);
                 cases += playSulfurCubeSave(official, out);
+            }
+            if (only == null || "wandering_trader".startsWith(only) || only.startsWith("wt_")) {
+                cases += playWanderingTrader(official, out, only);
             }
             if (only == null || "villager".startsWith(only)) {
                 cases += playVillagerSpawn(official, out);
@@ -13656,6 +13664,323 @@ public final class MobOracle {
      * Villager spawn types: pin the biome in the fake level, run one `finalizeSpawn` and
      * report the `VillagerData`, finalized flag, dimensions and health.
      */
+    /** 流浪商人：`WanderingTraderSpawner.tick` 的存档计时 / 概率逐刻对拍，
+     *  加上商人和行商羊驼的存档往返。 */
+    /** 流浪商人逐刻场景：直接在假世界放一个商人、两只拴着的羊驼和可选僵尸。
+     *  白天→夜里喝隐身药水、天亮喝牛奶、走向 wanderTarget、躲僵尸、
+     *  交易一笔、despawnDelay 到时三只一起消失。每刻比位置、效果、饮水、
+     *  目标、实体随机源、倒计时、存在与否和交易表摘要。 */
+    private static int playWanderingTraderScenes(Official official, Writer out, String only) throws Exception {
+        // 夜里饮水场景：官方 goalSelector 跑 UseItemGoal，逐刻比位置、效果、
+        // 饮水、目标名、实体随机源、倒计时和两只拴着的羊驼。其余分支（白天牛奶、
+        // 游走、躲僵尸、消失、交易）由 Rust 单测 / e2e 覆盖，见 README 已知限制。
+        String[] names = {"wt_drink_night"};
+        int cases = 0;
+        for (String name : names) {
+            if (only != null && !name.startsWith(only)) continue;
+            out.write(wanderingSceneCase(official, name) + "\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    private static String wanderingSceneCase(Official official, String name) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        world.blockEntities = new Long2ObjectOpenHashMap<>();
+        world.gameTime = 1000L;
+        world.realSky = false;
+        world.injectedCanSeeSky = true;
+        world.getRandom().setSeed(1L);
+        boolean drinkNight = name.equals("wt_drink_night");
+        boolean drinkDay = name.equals("wt_drink_day");
+        boolean wander = name.equals("wt_wander");
+        boolean avoid = name.equals("wt_avoid_zombie");
+        boolean despawn = name.equals("wt_despawn");
+        boolean trade = name.equals("wt_trade");
+        // 饮水场景只需要一个完整的 32 刻饮水周期 + 一天亮切换；
+        // 更往后官方的闲逛 / 看玩家目标会启动，Bamboo 的那几项是占位。
+        int ticks = despawn ? 90 : (drinkNight || drinkDay ? 45 : 80);
+        for (int x = -16; x <= 16; x++)
+            for (int z = -16; z <= 16; z++)
+                world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+
+        // 夜里启动 / 白天结束：注入的 isBrightOutside 决定 UseItemGoal 的两个谓词。
+        world.injectedBrightOutside = !drinkNight;
+        int traderId = FIRST_ID;
+        WanderingTrader trader = (WanderingTrader) EntityTypes.WANDERING_TRADER.create(
+                world, EntitySpawnReason.COMMAND);
+        trader.setId(traderId);
+        trader.setUUID(new UUID(0L, 1L));
+        trader.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        trader.setYHeadRot(0.0F);
+        trader.setYBodyRot(0.0F);
+        setRandom(trader, 71L);
+        // 白天场景先挂上官方隐身效果，才能让牛奶的谓词命中。
+        if (drinkDay) {
+            trader.addEffect(new net.minecraft.world.effect.MobEffectInstance(
+                    net.minecraft.world.effect.MobEffects.INVISIBILITY, 3600));
+        }
+        trader.setDespawnDelay(despawn ? 40 : 48000);
+        if (wander) trader.setWanderTarget(new BlockPos(8, 64, 0));
+        // 只有夜里饮水场景开 AI（跑官方 UseItemGoal）；其余场景 NoAI，
+        // 逐刻比位置 / 效果 / 倒计时 / 存在 / 交易表，Bamboo 的目标表占位项不跑。
+        trader.setNoAi(!drinkNight);
+        world.tracked.add(trader);
+
+        // 两只行商羊驼拴在商人身上；官方 `setLeashedTo(trader, true)`。
+        TraderLlama[] llamas = new TraderLlama[2];
+        for (int i = 0; i < 2; i++) {
+            TraderLlama llama = (TraderLlama) EntityTypes.TRADER_LLAMA.create(
+                    world, EntitySpawnReason.COMMAND);
+            llama.setId(FIRST_ID + 1 + i);
+            llama.setUUID(new UUID(0L, 2L + i));
+            llama.snapTo(2.5 + i, 64.0, 0.5, 0.0F, 0.0F);
+            llama.setYHeadRot(0.0F);
+            llama.setYBodyRot(0.0F);
+            setRandom(llama, 100L + i);
+            llama.setNoAi(true);
+            llama.setLeashedTo(trader, true);
+            world.tracked.add(llama);
+            llamas[i] = llama;
+        }
+
+        // 躲僵尸场景：第 10 刻放进一只 NoAI 僵尸，开着 AI 的商人会跑开。
+        Zombie zombie = null;
+        if (avoid) {
+            zombie = new Zombie(EntityTypes.ZOMBIE, world);
+            zombie.setId(FIRST_ID + 3);
+            zombie.setUUID(new UUID(0L, 4L));
+            zombie.snapTo(3.5, 64.0, 0.5, 0.0F, 0.0F);
+            zombie.setNoAi(true);
+            setRandom(zombie, 200L);
+        }
+
+        // 交易场景：玩家在第 10 刻打开交易并完成一笔（直接调 notifyTrade）。
+        ServerPlayer player = null;
+        if (trade) {
+            player = new ServerPlayer(official.server, world,
+                    new GameProfile(new UUID(1L, 2L), "TradeOracle"), ClientInformation.createDefault());
+            player.setId(FIRST_ID + 1024);
+            player.setPos(1.5, 64.0, 0.5);
+            world.playersList().add(player);
+            world.tracked.add(player);
+            put(net.minecraft.world.entity.npc.villager.AbstractVillager.class, trader, "offers",
+                    tradeOffers(0, 0));
+        }
+
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                world.gameTime = 1000L + tick;
+                // 夜里场景：第 1 刻转暗；白天场景：第 50 刻转亮。
+                if (drinkNight && tick == 1) world.injectedBrightOutside = false;
+                if (drinkDay && tick == 40) world.injectedBrightOutside = true;
+                if (avoid && tick == 10) {
+                    world.tracked.add(zombie);
+                }
+                if (trade && tick == 10) {
+                    trader.setTradingPlayer(player);
+                    var offer = new net.minecraft.world.item.trading.MerchantOffer(
+                            new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 1),
+                            new ItemStack(Items.APPLE), 12, 2, 0.05F);
+                    put(net.minecraft.world.item.trading.MerchantOffer.class, offer, "rewardExp", false);
+                    trader.notifyTrade(offer);
+                    trader.setTradingPlayer(null);
+                }
+                java.util.List<Entity> snapshot = new java.util.ArrayList<>(world.tracked);
+                for (Entity e : snapshot) {
+                    if (e.isRemoved() || e instanceof ServerPlayer) continue;
+                    e.checkDespawn();
+                    if (e.isRemoved()) continue;
+                    e.commonTick();
+                    e.tick();
+                }
+                // 真实服务端每刻同步实体前调 `updateDataBeforeSync`，其中
+                // `updateDirtyEffects` 把 `isInvisible()` 跟着效果表刷新；假世界
+                // 没有追踪器，这里显式补上，和 Bamboo 的 baseTick 刷新对齐。
+                if (!trader.isRemoved()) trader.updateDataBeforeSync();
+                for (TraderLlama llama : llamas) {
+                    if (!llama.isRemoved()) llama.updateDataBeforeSync();
+                }
+                world.tracked.removeIf(Entity::isRemoved);
+            }
+            if (tick > 0) frames.append(',');
+            boolean aiScene = drinkNight;
+            frames.append("{\"trader\":").append(wanderingEntityFrame(trader, aiScene))
+                    .append(",\"traderGone\":").append(trader.isRemoved())
+                    .append(",\"despawn\":").append(trader.getDespawnDelay())
+                    .append(",\"drink\":").append(jsonString(aiScene ? wanderingDrink(trader) : "none"))
+                    .append(",\"bright\":").append(world.isBrightOutside())
+                    .append(",\"goals\":").append(jsonString(aiScene ? runningGoals(trader.getGoalSelector()) : ""))
+                    .append(",\"offers\":").append(jsonString(offersDigest(trader.getOffers())));
+            for (int i = 0; i < 2; i++) {
+                frames.append(",\"llama").append(i).append("\":")
+                        .append(wanderingEntityFrame(llamas[i], false))
+                        .append(",\"llama").append(i).append("Gone\":")
+                        .append(llamas[i].isRemoved())
+                        .append(",\"llama").append(i).append("Delay\":")
+                        .append(getInt(TraderLlama.class, llamas[i], "despawnDelay"));
+            }
+            if (avoid) {
+                frames.append(",\"zombie\":").append(zombie == null || !world.tracked.contains(zombie)
+                        ? "null" : wanderingEntityFrame(zombie));
+            }
+            frames.append('}');
+        }
+        frames.append(']');
+        if (System.getenv("WT_ORACLE_DUMP") != null) {
+            System.err.println("WT_SCENE " + name + " " + frames);
+        }
+        var row = new JsonObject();
+        row.addProperty("type", "wanderingTraderScene");
+        row.addProperty("name", name);
+        row.addProperty("traderId", traderId);
+        row.addProperty("ticks", ticks);
+        row.add("frames", com.google.gson.JsonParser.parseString(frames.toString()));
+        return row.toString();
+    }
+
+    private static String wanderingDrink(WanderingTrader trader) throws Exception {
+        if (!trader.isUsingItem()) return "none";
+        boolean milk = trader.getMainHandItem().is(net.minecraft.world.item.Items.MILK_BUCKET);
+        int remaining = getInt(net.minecraft.world.entity.LivingEntity.class, trader, "useItemRemaining");
+        return (milk ? "milk:" : "invisibility:") + remaining;
+    }
+
+    private static String wanderingEntityFrame(Entity entity) throws Exception {
+        return wanderingEntityFrame(entity, true);
+    }
+
+    private static String wanderingEntityFrame(Entity entity, boolean withSeed) throws Exception {
+        var pos = entity.position();
+        var bits = new long[] {
+                Double.doubleToRawLongBits(pos.x), Double.doubleToRawLongBits(pos.y),
+                Double.doubleToRawLongBits(pos.z),
+                Float.floatToRawIntBits(entity.getYRot()), Float.floatToRawIntBits(entity.getXRot()),
+        };
+        StringBuilder out = new StringBuilder("{\"pos\":[");
+        for (int i = 0; i < 5; i++) {
+            if (i > 0) out.append(',');
+            out.append(bits[i]);
+        }
+        out.append("]");
+        if (withSeed) out.append(",\"seed\":").append(randomSeed(entity));
+        if (entity instanceof net.minecraft.world.entity.LivingEntity living) {
+            out.append(",\"effects\":").append(activeEffectsJson(living));
+            out.append(",\"invisible\":").append(living.hasEffect(
+                    net.minecraft.world.effect.MobEffects.INVISIBILITY));
+        }
+        return out.append('}').toString();
+    }
+
+    private static String runningGoals(net.minecraft.world.entity.ai.goal.GoalSelector selector) {
+        StringBuilder out = new StringBuilder();
+        for (WrappedGoal goal : selector.getAvailableGoals()) {
+            if (!goal.isRunning()) continue;
+            if (!out.isEmpty()) out.append(' ');
+            out.append(goal.getGoal().getClass().getSimpleName());
+        }
+        return out.toString();
+    }
+
+    private static int playWanderingTrader(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        if (only == null || "wandering_trader_spawner".startsWith(only)) {
+            for (long seed : new long[] {0L, 1L, 123456789L, -987654321L}) {
+                for (boolean enabled : new boolean[] {true, false}) {
+                    out.write(wanderingSpawnerCase(official, seed, enabled) + "\n");
+                    cases++;
+                }
+            }
+        }
+        if (only == null || "wt_".startsWith(only) || only != null && only.startsWith("wt_")) {
+            cases += playWanderingTraderScenes(official, out, only);
+        }
+        if (only == null || "wandering_trader_save".startsWith(only)) {
+            out.write(wanderingSaveCase(official, false) + "\n");
+            out.write(wanderingSaveCase(official, true) + "\n");
+            cases += 2;
+        }
+        out.flush();
+        return cases;
+    }
+
+    /** 注入 `WanderingTraderSpawner` 的私有随机源 / 存档 / tickDelay，逐刻读回两个字段。 */
+    private static String wanderingSpawnerCase(Official official, long seed, boolean enabled) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        setRule(official, net.minecraft.world.level.gamerules.GameRules.SPAWN_WANDERING_TRADERS, enabled);
+        WanderingTraderSpawner spawner = new WanderingTraderSpawner(null);
+        put(WanderingTraderSpawner.class, spawner, "random", RandomSource.create(seed));
+        put(WanderingTraderSpawner.class, spawner, "traderData", new WanderingTraderData());
+        putInt(WanderingTraderSpawner.class, spawner, "tickDelay", 1200);
+        // 假世界没有玩家；`spawn` 因此恒返回 true，随机源只走 `nextInt(100)`。
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick < 24_000; tick++) {
+            spawner.tick(level, true);
+            if (tick % 1200 == 1199) {
+                WanderingTraderData data = (WanderingTraderData) get(WanderingTraderSpawner.class, spawner, "traderData");
+                if (tick > 1199) frames.append(',');
+                frames.append('[').append(data.spawnDelay()).append(',').append(data.spawnChance()).append(']');
+            }
+        }
+        frames.append(']');
+        setRule(official, net.minecraft.world.level.gamerules.GameRules.SPAWN_WANDERING_TRADERS, true);
+        var row = new JsonObject();
+        row.addProperty("type", "wanderingTraderSpawner");
+        row.addProperty("name", enabled ? "wandering_trader_spawner" : "wandering_trader_spawner_off");
+        row.addProperty("seed", seed);
+        row.addProperty("enabled", enabled);
+        row.add("frames", com.google.gson.JsonParser.parseString(frames.toString()));
+        return row.toString();
+    }
+
+    /** 商人 / 行商羊驼存档：官方 `saveWithoutId` → `load` → 再存一次，逐键比对。 */
+    private static String wanderingSaveCase(Official official, boolean llama) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        net.minecraft.world.entity.Mob mob = llama
+                ? (net.minecraft.world.entity.Mob) net.minecraft.world.entity.EntityTypes.TRADER_LLAMA.create(
+                        world, net.minecraft.world.entity.EntitySpawnReason.COMMAND)
+                : (net.minecraft.world.entity.Mob) net.minecraft.world.entity.EntityTypes.WANDERING_TRADER.create(
+                        world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+        mob.setPos(1.5, 64.0, 2.5);
+        mob.setYRot(37.0F);
+        mob.setXRot(12.0F);
+        putInt(net.minecraft.world.entity.npc.wanderingtrader.WanderingTrader.class.isInstance(mob)
+                ? net.minecraft.world.entity.npc.wanderingtrader.WanderingTrader.class : TraderLlama.class,
+                mob, "despawnDelay", 12345);
+        if (!llama) {
+            put(net.minecraft.world.entity.npc.wanderingtrader.WanderingTrader.class, mob, "wanderTarget",
+                    new BlockPos(7, 65, -9));
+        }
+        var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+        mob.saveWithoutId(output);
+        var loadedTag = output.buildResult();
+        net.minecraft.world.entity.Mob copy = (net.minecraft.world.entity.Mob) (llama
+                ? net.minecraft.world.entity.EntityTypes.TRADER_LLAMA.create(
+                        world, net.minecraft.world.entity.EntitySpawnReason.LOAD)
+                : net.minecraft.world.entity.EntityTypes.WANDERING_TRADER.create(
+                        world, net.minecraft.world.entity.EntitySpawnReason.LOAD));
+        copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries, loadedTag));
+        var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+        copy.saveWithoutId(again);
+        var row = new JsonObject();
+        row.addProperty("type", "wanderingTraderSave");
+        row.addProperty("name", llama ? "wandering_trader_save_llama" : "wandering_trader_save_trader");
+        row.addProperty("llama", llama);
+        row.addProperty("nbt", loadedTag.toString());
+        row.addProperty("reloaded", again.buildResult().toString());
+        return row.toString();
+    }
+
+    private static Object get(Class<?> owner, Object target, String name) throws Exception {
+        Field field = owner.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(target);
+    }
+
     private static int playVillagerSpawn(Official official, Writer out) throws Exception {
         int cases = 0;
         for (String biome : new String[] {"plains", "desert", "snowy_plains", "taiga",

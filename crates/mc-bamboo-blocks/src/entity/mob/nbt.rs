@@ -472,9 +472,29 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::SnowGolem {
         super::snow_golem::write_nbt(mob, &mut out);
     }
-    // ---- AbstractVillager / Villager ----
+    // ---- AbstractVillager / Villager / WanderingTrader / TraderLlama ----
+    if matches!(mob.mob_type, MobType::Villager | MobType::WanderingTrader) {
+        mob.villager.write_abstract_nbt(&mut out);
+    }
     if mob.mob_type == MobType::Villager {
-        mob.villager.write_nbt(&mut out);
+        mob.villager.write_villager_nbt(&mut out);
+    }
+    if mob.mob_type == MobType::WanderingTrader {
+        put(
+            &mut out,
+            "DespawnDelay",
+            Tag::Int(mob.wandering_trader.despawn_delay),
+        );
+        if let Some(target) = mob.wandering_trader.wander_target {
+            put(&mut out, "wander_target", block_pos_tag(target));
+        }
+    }
+    if mob.mob_type == MobType::TraderLlama {
+        put(
+            &mut out,
+            "DespawnDelay",
+            Tag::Int(mob.trader_llama.despawn_delay),
+        );
     }
     if mob.mob_type == MobType::ZombieVillager {
         mob.zombie_villager.write_nbt(&mob.villager, &mut out);
@@ -1035,13 +1055,30 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         if mob.mob_type == MobType::SnowGolem {
             super::snow_golem::read_nbt(mob, tag);
         }
+        if matches!(mob.mob_type, MobType::Villager | MobType::WanderingTrader) {
+            mob.villager.read_abstract_nbt(tag);
+        }
         if mob.mob_type == MobType::Villager {
-            mob.villager.read_nbt(tag);
+            mob.villager.read_villager_nbt(tag);
             // `Villager.readAdditionalSaveData` 末尾按读出的年龄与职业刷新大脑，
             // 保留从 `Brain` 标签读回的可序列化记忆。
             // `Villager.readAdditionalSaveData` refreshes the brain for the loaded age and
             // profession, keeping serialisable memories read from the `Brain` tag.
             super::villager_ai::refresh_brain_offline(me, mob);
+        }
+        if mob.mob_type == MobType::WanderingTrader {
+            mob.wandering_trader.despawn_delay = tag::int_or(tag, "DespawnDelay", 0);
+            let pos = tag::int_array(tag, "wander_target");
+            mob.wandering_trader.wander_target =
+                (pos.len() == 3).then(|| BlockPos::new(pos[0], pos[1], pos[2]));
+            mob.age = mob.age.max(0);
+        }
+        if mob.mob_type == MobType::TraderLlama {
+            mob.trader_llama.despawn_delay = tag::int_or(
+                tag,
+                "DespawnDelay",
+                super::trader_llama::DEFAULT_DESPAWN_DELAY,
+            );
         }
         if mob.mob_type == MobType::ZombieVillager {
             mob.zombie_villager.read_nbt(&mut mob.villager, tag);
