@@ -712,7 +712,7 @@ struct PlayerSetup {
     team: i32,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 struct CowStep {
     x: i64,
     y: i64,
@@ -2807,7 +2807,17 @@ impl Report {
             }
             // 死亡场景：逐刻比新生成的掉落物和经验球（种类、数量、位置）。
             if let Some(expected_spawns) = &case.spawns {
-                let ours_spawns = spawn_snapshot(&level, &spawn_public);
+                let mut ours_spawns = spawn_snapshot(&level, &spawn_public);
+                // 改坏确认：把挖出来的种子数量改错，证明掉落比较没放松。
+                // Deliberate breakage: corrupt the dug-up seed count to prove the
+                // spawn comparison is not relaxed.
+                if self.break_test.as_deref() == Some("sniffer_drop")
+                    && case.name.starts_with("sniffer_")
+                {
+                    for spawn in &mut ours_spawns {
+                        spawn.count = spawn.count.wrapping_add(1);
+                    }
+                }
                 compare_spawns(
                     &mut self.mismatches,
                     &self.show,
@@ -3000,6 +3010,27 @@ impl Report {
         ours: &[Option<CowStep>],
         official: &[CowStep],
     ) {
+        // 改坏确认：把 Bamboo 逐刻的 state / brain 记忆故意改错，证明比较没放松。
+        // Deliberate breakage: corrupt the per-tick state / brain memory to prove
+        // the comparison is not relaxed.
+        let tampered = match self.break_test.as_deref() {
+            Some("sniffer_state") if name.starts_with("sniffer_") => {
+                let mut steps = ours.to_vec();
+                for step in steps.iter_mut().flatten() {
+                    step.sniffer = step.sniffer.wrapping_add(1);
+                }
+                Some(steps)
+            }
+            Some("sniffer_brain") if name.starts_with("sniffer_") => {
+                let mut steps = ours.to_vec();
+                for step in steps.iter_mut().flatten() {
+                    step.brain.push('!');
+                }
+                Some(steps)
+            }
+            _ => None,
+        };
+        let ours: &[Option<CowStep>] = tampered.as_deref().unwrap_or(ours);
         for (cow, expected) in official.iter().enumerate() {
             let place = format!("{name} tick {index} cow {cow}");
             if std::env::var_os("MOB_ORACLE_BRAIN").is_some() && !expected.brain.is_empty() {

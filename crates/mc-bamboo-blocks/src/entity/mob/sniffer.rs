@@ -26,6 +26,7 @@ use super::{
         behavior::{Class, Gate, Kind, MoveToTargetSink, Speed},
         current_block_position, direction_from_rotation,
         memory::{
+            Memories,
             MemoryStatus::{self, ValueAbsent, ValuePresent},
             MemoryType::{self, *},
             MemoryValue, PositionTracker, WalkTarget,
@@ -534,6 +535,19 @@ fn can_dig(cx: &mut Cx) -> bool {
     can_dig_at(cx, get_head_block(cx.me, cx.mob).below())
 }
 
+/// 挖过的位置不再挖：`SNIFFER_EXPLORED_POSITIONS` 里有同维度的 `GlobalPos` 就跳过。
+///
+/// A dug position is not dug again: a matching `GlobalPos` in
+/// `SNIFFER_EXPLORED_POSITIONS` skips it.
+fn already_explored(memories: &Memories, pos: BlockPos) -> bool {
+    memories
+        .global_pos_list(SnifferExploredPositions)
+        .is_some_and(|list| {
+            list.iter()
+                .any(|gp| gp.dimension == "minecraft:overworld" && gp.pos == pos)
+        })
+}
+
 /// `Sniffer.canDig(BlockPos)`：在 `#sniffer_diggable_block` 里、没挖过、走得到。
 ///
 /// `Sniffer.canDig(BlockPos)`: in `#sniffer_diggable_block`, not yet explored, and
@@ -546,14 +560,7 @@ fn can_dig_at(cx: &mut Cx, pos: BlockPos) -> bool {
     {
         return false;
     }
-    let explored = cx
-        .memories
-        .global_pos_list(SnifferExploredPositions)
-        .is_some_and(|list| {
-            list.iter()
-                .any(|gp| gp.dimension == "minecraft:overworld" && gp.pos == pos)
-        });
-    if explored {
+    if already_explored(cx.memories, pos) {
         return false;
     }
     let nav = living::nav_mob(cx.me, cx.mob, view);
@@ -742,5 +749,37 @@ mod tests {
         let table = attributes();
         assert_eq!(table.value(attribute::MOVEMENT_SPEED), 0.1);
         assert_eq!(table.value(attribute::MAX_HEALTH), 14.0);
+    }
+
+    /// 挖过的位置记进 `SNIFFER_EXPLORED_POSITIONS` 后不再可挖；别的坐标和别的维度不算。
+    ///
+    /// A position recorded in `SNIFFER_EXPLORED_POSITIONS` is not dug again; other
+    /// coordinates and other dimensions do not count.
+    #[test]
+    fn explored_positions_are_not_diggable_again() {
+        use mc_bamboo_protocol::components::value::GlobalPos;
+
+        let dug = BlockPos::new(3, 63, -5);
+        let mut fresh = brain();
+        assert!(!already_explored(&fresh.memories, dug));
+        fresh.memories.set(
+            SnifferExploredPositions,
+            MemoryValue::GlobalPosList(vec![GlobalPos {
+                dimension: "minecraft:overworld".to_owned(),
+                pos: dug,
+            }]),
+        );
+        assert!(already_explored(&fresh.memories, dug));
+        assert!(!already_explored(&fresh.memories, BlockPos::new(4, 63, -5)));
+
+        let mut other_dimension = brain();
+        other_dimension.memories.set(
+            SnifferExploredPositions,
+            MemoryValue::GlobalPosList(vec![GlobalPos {
+                dimension: "minecraft:the_nether".to_owned(),
+                pos: dug,
+            }]),
+        );
+        assert!(!already_explored(&other_dimension.memories, dug));
     }
 }
