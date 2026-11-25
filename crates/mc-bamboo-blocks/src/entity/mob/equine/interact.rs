@@ -59,6 +59,7 @@ pub(in crate::entity::mob) fn interact(
     me: &mut Entity,
     mob: &mut Mob,
     req: &MobInteractRequest,
+    level_next_float: &mut dyn FnMut() -> f32,
 ) -> MobInteraction {
     if !living::is_alive(me, mob) {
         return MobInteraction::pass();
@@ -72,7 +73,7 @@ pub(in crate::entity::mob) fn interact(
     {
         return outcome;
     }
-    let outcome = mob_interact(me, mob, req);
+    let outcome = mob_interact(me, mob, req, level_next_float);
     if outcome.result.consumes_action() || req.held.is_empty() {
         return outcome;
     }
@@ -132,7 +133,12 @@ pub(in crate::entity::mob) fn attempt_to_shear_equipment(
     None
 }
 
-fn mob_interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
+fn mob_interact(
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+    level_next_float: &mut dyn FnMut() -> f32,
+) -> MobInteraction {
     let open_inventory = !mob.is_baby() && tame(mob) && req.sneaking;
     // `isHolding(GOLDEN_DANDELION)` 看两只手；请求里只有这一只手的物品。
     // `isHolding` checks both hands; the request only carries this hand's stack.
@@ -150,7 +156,7 @@ fn mob_interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             return success(true, req);
         }
     }
-    abstract_horse_interact(me, mob, req)
+    abstract_horse_interact(me, mob, req, level_next_float)
 }
 
 /// `AbstractHorse.mobInteract`：有人骑或幼崽交给 `Animal.mobInteract`；
@@ -163,9 +169,10 @@ fn abstract_horse_interact(
     me: &mut Entity,
     mob: &mut Mob,
     req: &MobInteractRequest,
+    level_next_float: &mut dyn FnMut() -> f32,
 ) -> MobInteraction {
     if mob.is_vehicle() {
-        return crate::entity::mob::interact::animal_interact(me, mob, req);
+        return crate::entity::mob::interact::animal_interact(me, mob, req, level_next_float);
     }
     if mob.is_baby() {
         return MobInteraction::pass();
@@ -568,7 +575,7 @@ mod tests {
                 state.tame = true;
                 mob.passengers.push(7);
 
-                let sneak = interact(me, mob, &req(ItemStack::empty(), true));
+                let sneak = interact(me, mob, &req(ItemStack::empty(), true), &mut || 0.0);
                 assert_eq!(sneak.result, InteractionResult::Pass);
                 assert!(!sneak.open_inventory);
 
@@ -576,15 +583,21 @@ mod tests {
                     me,
                     mob,
                     &req(ItemStack::new(items::IRON_HORSE_ARMOR, 1), false),
+                    &mut || 0.0,
                 );
                 assert_eq!(armor.result, InteractionResult::Pass);
                 assert!(mob.equipment.get(EquipmentSlot::Body).is_empty());
 
-                let empty = interact(me, mob, &req(ItemStack::empty(), false));
+                let empty = interact(me, mob, &req(ItemStack::empty(), false), &mut || 0.0);
                 assert_eq!(empty.result, InteractionResult::Pass);
                 assert!(!empty.ride);
 
-                let wheat = interact(me, mob, &req(ItemStack::new(items::WHEAT, 1), false));
+                let wheat = interact(
+                    me,
+                    mob,
+                    &req(ItemStack::new(items::WHEAT, 1), false),
+                    &mut || 0.0,
+                );
                 assert_eq!(wheat.result, InteractionResult::SuccessServer);
                 assert_eq!(mob.in_love, 600);
             })
@@ -611,14 +624,14 @@ mod tests {
 
                 // 潜行时不开卸装，走驯服坐骑开物品栏。
                 // Sneaking skips shearing and opens the mount inventory instead.
-                let sneak = interact(me, mob, &req(shears.clone(), true));
+                let sneak = interact(me, mob, &req(shears.clone(), true), &mut || 0.0);
                 assert!(sneak.open_inventory);
                 assert!(sneak.drop_stack.is_none());
                 assert_eq!(mob.equipment.get(EquipmentSlot::Body), &armor);
 
                 // 第一次剪下马铠，鞍还在。
                 // First shear removes the horse armor; the saddle stays on.
-                let first = interact(me, mob, &req(shears.clone(), false));
+                let first = interact(me, mob, &req(shears.clone(), false), &mut || 0.0);
                 assert_eq!(first.result, InteractionResult::Success);
                 assert!(first.damage_held);
                 assert!(!first.shrink_held);
@@ -639,7 +652,7 @@ mod tests {
 
                 // 第二次剪下鞍。
                 // Second shear removes the saddle.
-                let second = interact(me, mob, &req(shears.clone(), false));
+                let second = interact(me, mob, &req(shears.clone(), false), &mut || 0.0);
                 assert_eq!(second.result, InteractionResult::Success);
                 assert!(second.damage_held);
                 assert_eq!(second.drop_stack, Some(saddle.clone()));
@@ -674,12 +687,12 @@ mod tests {
                 );
                 (cursed.added, cursed.removed) = patch.to_opaque();
                 mob.equipment.set(EquipmentSlot::Saddle, cursed.clone());
-                let blocked = interact(me, mob, &req(shears.clone(), false));
+                let blocked = interact(me, mob, &req(shears.clone(), false), &mut || 0.0);
                 assert!(blocked.drop_stack.is_none());
                 assert_eq!(mob.equipment.get(EquipmentSlot::Saddle), &cursed);
                 let mut creative_req = req(shears.clone(), false);
                 creative_req.creative = true;
-                let removed = interact(me, mob, &creative_req);
+                let removed = interact(me, mob, &creative_req, &mut || 0.0);
                 assert_eq!(removed.result, InteractionResult::Success);
                 assert!(!removed.damage_held);
                 assert_eq!(removed.drop_stack, Some(cursed));
@@ -689,7 +702,7 @@ mod tests {
                 // A ridden horse cannot be sheared.
                 mob.equipment.set(EquipmentSlot::Saddle, saddle.clone());
                 mob.passengers.push(7);
-                let ridden = interact(me, mob, &req(shears.clone(), false));
+                let ridden = interact(me, mob, &req(shears.clone(), false), &mut || 0.0);
                 assert_eq!(ridden.result, InteractionResult::Pass);
                 assert_eq!(mob.equipment.get(EquipmentSlot::Saddle), &saddle);
             })
@@ -702,7 +715,7 @@ mod tests {
         llama
             .with_mob(|me, mob| {
                 mob.equipment.set(EquipmentSlot::Body, carpet.clone());
-                let sheared = interact(me, mob, &req(shears.clone(), false));
+                let sheared = interact(me, mob, &req(shears.clone(), false), &mut || 0.0);
                 assert_eq!(sheared.result, InteractionResult::Success);
                 assert!(sheared.damage_held);
                 assert_eq!(sheared.drop_stack, Some(carpet.clone()));
