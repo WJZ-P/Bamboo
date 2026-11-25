@@ -80,12 +80,11 @@ pub(super) fn finalize_spawn(entity: &mut Entity, random: &dyn crate::random::Ra
 /// look at player and random look. A witch never starts a patrol itself, but a patrol
 /// leader hands its target to every `PatrollingMonster` within 16 blocks.
 pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
-    let goals = vec![
-        (4, Goal::Raider(super::raider::RaiderGoal::patrol())),
-        (1, Goal::Unavailable("ObtainRaidLeaderBannerGoal")),
-        (3, Goal::Unavailable("PathfindToRaidGoal")),
-        (4, Goal::Unavailable("RaiderMoveThroughVillageGoal")),
-        (5, Goal::Unavailable("RaiderCelebration")),
+    let mut goals = vec![(4, Goal::Raider(super::raider::RaiderGoal::patrol()))];
+    goals.extend(super::raider::raider_goals(
+        super::raider::RaiderGoal::raid_goals(),
+    ));
+    goals.extend([
         (1, Goal::Float),
         (
             2,
@@ -122,7 +121,7 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
                 look_time: 0,
             },
         ),
-    ];
+    ]);
     navigation.flags.can_float = true;
     GoalSelector::from_ordered_pairs(goals)
 }

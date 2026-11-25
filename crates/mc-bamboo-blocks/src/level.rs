@@ -2852,6 +2852,15 @@ pub enum Effect {
         position: mc_bamboo_core::Vec3,
         killer: Option<[u8; 16]>,
     },
+    /// `Raid.setLeader(wave, raider)`：袭击者捡起灾厄旗帜后登记为这一波的队长。
+    ///
+    /// `Raid.setLeader(wave, raider)`: a raider picked up the ominous banner and
+    /// became this wave's leader.
+    RaidSetLeader {
+        id: i32,
+        wave: i32,
+        leader: crate::entity::EntityUid,
+    },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///

@@ -1,15 +1,17 @@
 //! 官方 `PatrollingMonster` → `Raider` 这两层的公共部分：巡逻状态、存档键、
-//! `LongDistancePatrolGoal`、`Raider.HoldGroundAttackGoal`、看别的生物的
-//! `LookAtPlayerGoal(Mob.class)`，以及队长头上的灾厄旗帜。女巫和掠夺者共用。
+//! 四个袭击目标、`LongDistancePatrolGoal`、`Raider.HoldGroundAttackGoal`、看别的生物的
+//! `LookAtPlayerGoal(Mob.class)`，以及队长头上的灾厄旗帜。女巫、掠夺者、卫道士和
+//! 劫掠兽共用。
 //!
-//! Bamboo 没有袭击系统：`Wave` / `CanJoinRaid` / `RaidId` 只当存档数据保存，
-//! `getCurrentRaid()` 恒为空，`hasActiveRaid()` 恒为假。
+//! 袭击状态由 [`crate::entity::raid::RaidView`] 的本刻快照提供；改状态（当队长、
+//! 死亡离队）走命令在游戏层落地。
 //!
 //! The shared part of vanilla `PatrollingMonster` → `Raider`: patrol state, save keys,
-//! `LongDistancePatrolGoal`, `Raider.HoldGroundAttackGoal`, the mob-watching
-//! `LookAtPlayerGoal(Mob.class)` and the ominous banner on a leader's head. Witches and
-//! pillagers share it. Bamboo has no raids: `Wave` / `CanJoinRaid` / `RaidId` are stored
-//! data only, `getCurrentRaid()` is always null and `hasActiveRaid()` always false.
+//! the four raid goals, `LongDistancePatrolGoal`, `Raider.HoldGroundAttackGoal`, the
+//! mob-watching `LookAtPlayerGoal(Mob.class)` and the ominous banner on a leader's head.
+//! Witches, pillagers, vindicators and ravagers share it. Raid state comes from the
+//! start-of-tick [`crate::entity::raid::RaidView`] snapshot; state changes are applied
+//! by the world thread.
 
 use mc_bamboo_core::{Aabb, BlockPos, Vec3, mth};
 use mc_bamboo_data::{items, registries::banner_pattern, tags::block_tags};
@@ -40,18 +42,29 @@ pub struct Raider {
     pub patrol_leader: bool,
     /// `patrolling`。
     pub patrolling: bool,
-    /// `Raider.wave`：只当存档数据。
+    /// `Raider.wave`：袭击里的波次，也是存档键。
     ///
-    /// `Raider.wave`: stored data only.
+    /// `Raider.wave`: the wave this raider joined, also a save key.
     pub wave: i32,
-    /// `Raider.canJoinRaid`：只当存档数据。
-    ///
-    /// `Raider.canJoinRaid`: stored data only.
+    /// `Raider.canJoinRaid`。
     pub can_join_raid: bool,
-    /// 存档里的 `RaidId`：官方读盘时拿它找袭击；这里原样保存。
+    /// `getCurrentRaid()`：按实体上的 `RaidId` 关联本刻快照；`None` 表示不在袭击里。
     ///
-    /// The saved `RaidId`: vanilla resolves the raid from it on load; kept verbatim here.
+    /// `getCurrentRaid()`: the raid id attached to the entity, matched against this
+    /// tick's snapshot; `None` means no raid.
     pub raid_id: Option<i32>,
+    /// `Raider.ticksOutsideRaid`。
+    pub ticks_outside_raid: i32,
+    /// `IS_CELEBRATING` 同步布尔（袭击者庆祝姿势）。
+    pub celebrating: bool,
+    /// `RaiderMoveThroughVillageGoal` 已到过的 POI（官方最多保留 3 个）。
+    pub visited: [Option<BlockPos>; 3],
+    /// `RaiderMoveThroughVillageGoal` 的卡住标志。
+    pub stuck: bool,
+    /// `ObtainRaidLeaderBannerGoal` 正在追的旗帜物品 uid。
+    pub pursued_banner: Option<EntityUid>,
+    /// `PathfindToRaidGoal` 的下一次招募刻（按实体 tickCount）。
+    pub recruitment_tick: i32,
 }
 
 impl Raider {
@@ -61,6 +74,29 @@ impl Raider {
     pub(crate) const fn set_patrol_target(&mut self, target: BlockPos) {
         self.patrol_target = Some(target);
         self.patrolling = true;
+    }
+
+    /// `PatrollingMonster.setPatrolLeader`：官方还会把 `patrolling` 置真。
+    pub(crate) const fn set_patrol_leader(&mut self, leader: bool) {
+        self.patrol_leader = leader;
+        self.patrolling = true;
+    }
+
+    /// `hasActiveRaid()`：有袭击、袭击还活着且本刻快照也是同一场。
+    pub(crate) fn has_active_raid(&self, view: &dyn BlockView, position: Vec3) -> bool {
+        raid_view(self, view, position).is_some_and(|raid| raid.active && !raid.is_stopped)
+    }
+
+    /// `getCurrentRaid()`：把实体上的 `RaidId` 和本刻的 `ServerLevel.getRaidAt` 对齐。
+    ///
+    /// `getCurrentRaid()`: match the saved/assigned `RaidId` against this tick's
+    /// `ServerLevel.getRaidAt` snapshot.
+    pub(crate) fn raid_view(
+        &self,
+        view: &dyn BlockView,
+        position: Vec3,
+    ) -> Option<crate::entity::raid::RaidView> {
+        raid_view(self, view, position)
     }
 
     /// `PatrollingMonster.addAdditionalSaveData` 加 `Raider.addAdditionalSaveData`。
@@ -108,14 +144,27 @@ impl Raider {
                 Some(Tag::Int(id)) => Some(*id),
                 _ => None,
             },
+            ..Self::default()
         }
     }
 }
 
-/// `PatrollingMonster.removeWhenFarAway`：没在巡逻、或离最近玩家超过 128 格才会消失。
+/// 本刻 `getCurrentRaid()`：实体记着 `RaidId` 且位置附近能查到同一场袭击。
+fn raid_view(
+    raider: &Raider,
+    view: &dyn BlockView,
+    position: Vec3,
+) -> Option<crate::entity::raid::RaidView> {
+    let id = raider.raid_id?;
+    let here = view.raid_at(BlockPos::containing(position))?;
+    (here.id == id).then_some(here)
+}
+
+/// `PatrollingMonster.removeWhenFarAway`：没在巡逻、或离最近玩家超过 128 格才会消失；
+/// `Raider` 覆写为加入袭击时不消失。
 ///
 /// `PatrollingMonster.removeWhenFarAway`: only when not patrolling, or more than 128
-/// blocks from the nearest player.
+/// blocks from the nearest player; `Raider` keeps mobs inside a raid.
 pub(super) fn removes_when_far_away(mob: &Mob, distance_sqr: f64) -> bool {
     !mob.raider.patrolling || distance_sqr > 16384.0
 }
@@ -289,6 +338,57 @@ pub enum RaiderGoal {
         look_at: Option<EntityUid>,
         look_time: i32,
     },
+    /// `Raider.ObtainRaidLeaderBannerGoal`（优先级 1）。
+    ObtainBanner {
+        /// 路径找不到的物品按官方缓存 600 刻；这里记 `(uid, 到期刻)`。
+        unreachable: Vec<(EntityUid, i64)>,
+        path: Option<Vec<BlockPos>>,
+    },
+    /// `PathfindToRaidGoal`（优先级 3）。
+    PathfindToRaid,
+    /// `Raider.RaiderMoveThroughVillageGoal(raider, 1.05, 1)`（优先级 4）。
+    MoveThroughVillage { poi: Option<BlockPos> },
+    /// `Raider.RaiderCelebration`（优先级 5）。
+    Celebration,
+    /// `AbstractIllager.RaiderOpenDoorGoal`（优先级 3，卫道士）。
+    OpenDoor,
+    /// `Vindicator.VindicatorBreakDoorGoal`（优先级 2）。
+    BreakDoor,
+    /// `Vindicator.VindicatorJohnnyAttackGoal`（目标优先级 4）。
+    Johnny {
+        interval: i32,
+        unseen_ticks: i32,
+        found: Option<EntityUid>,
+    },
+}
+
+/// 四个 `Raider` 通用目标和按官方优先级排好的构造。
+impl RaiderGoal {
+    /// `Raider.registerGoals` 的四个目标（按优先级）。
+    pub(super) fn raid_goals() -> [(i32, Self); 4] {
+        [
+            (
+                1,
+                Self::ObtainBanner {
+                    unreachable: Vec::new(),
+                    path: None,
+                },
+            ),
+            (3, Self::PathfindToRaid),
+            (4, Self::MoveThroughVillage { poi: None }),
+            (5, Self::Celebration),
+        ]
+    }
+}
+
+/// 把 `[(优先级, RaiderGoal)]` 包成 `Goal::Raider`，供各生物的 `goals()` 拼接。
+///
+/// Wraps `[(priority, RaiderGoal)]` into `Goal::Raider` for the per-mob `goals()`.
+pub(super) fn raider_goals(goals: [(i32, RaiderGoal); 4]) -> Vec<(i32, goals::Goal)> {
+    goals
+        .into_iter()
+        .map(|(priority, goal)| (priority, goals::Goal::Raider(goal)))
+        .collect()
 }
 
 impl RaiderGoal {
@@ -308,6 +408,13 @@ impl RaiderGoal {
             Self::LongDistancePatrol { .. } => &[Flag::Move],
             Self::HoldGround { .. } | Self::Crossbow(_) => &[Flag::Move, Flag::Look],
             Self::LookAtMob { .. } => &[Flag::Look],
+            Self::ObtainBanner { .. }
+            | Self::PathfindToRaid
+            | Self::MoveThroughVillage { .. }
+            | Self::Celebration => &[Flag::Move],
+            // `OpenDoorGoal` 和 `DoorInteractGoal` 都不设标志位。
+            Self::OpenDoor | Self::BreakDoor => &[],
+            Self::Johnny { .. } => &[Flag::Target],
         }
     }
 
@@ -315,7 +422,10 @@ impl RaiderGoal {
     ///
     /// `requiresUpdateEveryTick`: true for hold-ground and the crossbow goal.
     pub(super) const fn every_tick(&self) -> bool {
-        matches!(self, Self::HoldGround { .. } | Self::Crossbow(_))
+        matches!(
+            self,
+            Self::HoldGround { .. } | Self::Crossbow(_) | Self::BreakDoor
+        )
     }
 
     pub(super) const fn name(&self) -> &'static str {
@@ -324,6 +434,13 @@ impl RaiderGoal {
             Self::HoldGround { .. } => "HoldGroundAttackGoal",
             Self::Crossbow(_) => "RangedCrossbowAttackGoal",
             Self::LookAtMob { .. } => "LookAtPlayerGoal",
+            Self::ObtainBanner { .. } => "ObtainRaidLeaderBannerGoal",
+            Self::PathfindToRaid => "PathfindToRaidGoal",
+            Self::MoveThroughVillage { .. } => "RaiderMoveThroughVillageGoal",
+            Self::Celebration => "RaiderCelebration",
+            Self::OpenDoor => "RaiderOpenDoorGoal",
+            Self::BreakDoor => "VindicatorBreakDoorGoal",
+            Self::Johnny { .. } => "VindicatorJohnnyAttackGoal",
         }
     }
 
@@ -356,6 +473,37 @@ impl RaiderGoal {
                 *look_at = nearest_mob(me, mob, ctx, f64::from(*look_distance));
                 look_at.is_some()
             }
+            Self::ObtainBanner { unreachable, path } => {
+                obtain_banner_can_use(me, mob, ctx, unreachable, path)
+            }
+            Self::PathfindToRaid => pathfind_can_use(me, mob, ctx),
+            Self::MoveThroughVillage { poi } => {
+                update_visited(mob);
+                *poi = move_through_poi(me, mob, ctx);
+                poi.is_some()
+            }
+            Self::Celebration => celebration_can_use(me, mob, ctx),
+            Self::OpenDoor => {
+                mob.raider.has_active_raid(ctx.blocks(), me.position)
+                    && super::goals::door_interact_can_use(me, mob, ctx.blocks())
+            }
+            Self::BreakDoor => {
+                mob.raider.has_active_raid(ctx.blocks(), me.position)
+                    && me.random.next_int_bounded(goals::reduced_tick_delay(10)) == 0
+                    && super::goals::break_door_can_use(me, mob, ctx.blocks())
+            }
+            Self::Johnny {
+                interval, found, ..
+            } => {
+                if !mob.vindicator.johnny {
+                    return false;
+                }
+                if *interval > 0 && me.random.next_int_bounded(*interval) != 0 {
+                    return false;
+                }
+                *found = goals::nearest_attackable_any(me, mob, ctx);
+                found.is_some()
+            }
         }
     }
 
@@ -379,6 +527,48 @@ impl RaiderGoal {
                 let limit = f64::from(*look_distance * *look_distance);
                 alive && me.position.distance_to_sqr(target.position) <= limit && *look_time > 0
             }
+            Self::ObtainBanner { path, .. } => {
+                let Some(uid) = mob.raider.pursued_banner else {
+                    return false;
+                };
+                if path.is_none() || ctx.other(uid).is_none_or(|public| public.removed) {
+                    return false;
+                }
+                !mob.navigation.is_done() && !cannot_pick_up_banner(me, mob, ctx)
+            }
+            Self::PathfindToRaid => {
+                let Some(raid) = mob.raider.raid_view(ctx.blocks(), me.position) else {
+                    return false;
+                };
+                raid.active
+                    && !raid.is_over
+                    && !ctx.blocks().poi_is_close_to_village(me.block_position(), 1)
+            }
+            Self::MoveThroughVillage { poi } => {
+                let Some(pos) = *poi else {
+                    return false;
+                };
+                !mob.navigation.is_done()
+                    && goals::current_combat_target(mob, ctx).is_none()
+                    && !goals::closer_to_center_than(
+                        pos,
+                        me.position,
+                        mob.dimensions().0 as f64 + 1.0,
+                    )
+                    && !mob.raider.stuck
+            }
+            Self::Celebration => celebration_can_use(me, mob, ctx),
+            Self::BreakDoor => {
+                mob.raider.has_active_raid(ctx.blocks(), me.position)
+                    && super::goals::break_door_can_continue(me, mob, ctx.blocks())
+            }
+            Self::OpenDoor => {
+                mob.raider.has_active_raid(ctx.blocks(), me.position)
+                    && super::goals::break_door_can_continue(me, mob, ctx.blocks())
+            }
+            Self::Johnny { unseen_ticks, .. } => {
+                goals::target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 60)
+            }
             _ => self.can_use(me, mob, ctx),
         }
     }
@@ -392,6 +582,44 @@ impl RaiderGoal {
             }
             Self::LookAtMob { look_time, .. } => {
                 *look_time = goals::reduced_tick_delay(40 + me.random.next_int_bounded(40));
+            }
+            Self::ObtainBanner { path, .. } => {
+                if let Some(nodes) = path.take() {
+                    let nav = living::nav_mob(me, mob, ctx.blocks());
+                    let targets: Vec<BlockPos> = nodes;
+                    let found =
+                        mob.navigation
+                            .create_path_to_targets(ctx.blocks(), &nav, &targets, 1);
+                    mob.navigation.move_to_path(ctx.blocks(), &nav, found, 1.15);
+                }
+            }
+            Self::PathfindToRaid => {}
+            Self::MoveThroughVillage { poi } => {
+                if let Some(pos) = *poi {
+                    mob.no_action_time = 0;
+                    let nav = living::nav_mob(me, mob, ctx.blocks());
+                    mob.navigation.move_to(
+                        ctx.blocks(),
+                        &nav,
+                        Vec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z)),
+                        1.05,
+                    );
+                    mob.raider.stuck = false;
+                }
+            }
+            Self::Celebration => mob.raider.celebrating = true,
+            Self::BreakDoor | Self::OpenDoor => {
+                super::goals::break_door_start(me, mob, ctx.blocks());
+                mob.no_action_time = 0;
+            }
+            Self::Johnny {
+                found,
+                unseen_ticks,
+                ..
+            } => {
+                super::enderman::set_target(me, mob, *found);
+                *unseen_ticks = 0;
+                mob.no_action_time = 0;
             }
         }
     }
@@ -407,6 +635,27 @@ impl RaiderGoal {
             }
             Self::Crossbow(goal) => goal.stop(mob),
             Self::LookAtMob { look_at, .. } => *look_at = None,
+            Self::ObtainBanner { path, .. } => {
+                *path = None;
+                mob.raider.pursued_banner = None;
+            }
+            Self::MoveThroughVillage { poi } => {
+                if let Some(pos) = *poi
+                    && goals::closer_to_center_than(pos, me.position, 1.0)
+                {
+                    add_visited(mob, pos);
+                }
+                *poi = None;
+            }
+            Self::Celebration => mob.raider.celebrating = false,
+            Self::PathfindToRaid => {}
+            Self::BreakDoor | Self::OpenDoor => {
+                super::goals::break_door_stop(me, mob, ctx);
+            }
+            Self::Johnny { found, .. } => {
+                super::enderman::set_target(me, mob, None);
+                *found = None;
+            }
         }
     }
 
@@ -439,8 +688,260 @@ impl RaiderGoal {
                     *look_time -= 1;
                 }
             }
+            Self::ObtainBanner { .. } => {
+                let mut close = false;
+                if let Some(uid) = mob.raider.pursued_banner {
+                    ctx.with_other(uid, &mut |public| {
+                        close = me.position.distance_to_sqr(public.position) < 1.414 * 1.414;
+                    });
+                }
+                if close && let Some(uid) = mob.raider.pursued_banner {
+                    ctx.emit(Command::RaiderPickUpBanner { item: uid }, me);
+                }
+            }
+            Self::PathfindToRaid => pathfind_tick(me, mob, ctx),
+            Self::MoveThroughVillage { poi } => {
+                if !mob.navigation.is_done() {
+                    return;
+                }
+                let Some(pos) = *poi else {
+                    return;
+                };
+                let centre = Vec3::new(
+                    f64::from(pos.x) + 0.5,
+                    f64::from(pos.y),
+                    f64::from(pos.z) + 0.5,
+                );
+                let mut next =
+                    goals::pos_towards(me, mob, ctx.blocks(), 16, 7, centre, 0.3141592741012573);
+                if next.is_none() {
+                    next =
+                        goals::pos_towards(me, mob, ctx.blocks(), 8, 7, centre, 1.5707963705062866);
+                }
+                let Some(at) = next else {
+                    mob.raider.stuck = true;
+                    return;
+                };
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                mob.navigation.move_to(ctx.blocks(), &nav, at, 1.05);
+            }
+            Self::Celebration => {
+                if !mob.silent && me.random.next_int_bounded(goals::reduced_tick_delay(100)) == 0 {
+                    living::make_sound(me, mob, celebrate_sound(mob.mob_type));
+                }
+                if mob.raider.raid_id.is_none()
+                    && me.random.next_int_bounded(goals::reduced_tick_delay(50)) == 0
+                {
+                    mob.jump.jump = true;
+                }
+            }
+            Self::BreakDoor => super::goals::break_door_tick(me, mob, ctx),
+            Self::OpenDoor => super::goals::break_door_tick(me, mob, ctx),
+            Self::Johnny { .. } => {}
         }
     }
+}
+
+/// 袭击者自己的庆祝声，`RaiderCelebration.tick` 每 100 刻（折半）抽一次。
+fn celebrate_sound(kind: super::MobType) -> &'static str {
+    match kind {
+        super::MobType::Pillager => "minecraft:entity.pillager.celebrate",
+        super::MobType::Vindicator => "minecraft:entity.vindicator.celebrate",
+        super::MobType::Ravager => "minecraft:entity.ravager.celebrate",
+        _ => "minecraft:entity.witch.celebrate",
+    }
+}
+
+/// `RaiderCelebration.canUse`：活着、没有目标、袭击判负（村民输）。
+fn celebration_can_use(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> bool {
+    mob.health > 0.0
+        && goals::current_combat_target(mob, ctx).is_none()
+        && mob
+            .raider
+            .raid_view(ctx.blocks(), me.position)
+            .is_some_and(|raid| raid.is_loss)
+}
+
+/// `cannotPickUpBanner`：没有活跃袭击、袭击结束、不能当队长、已经戴着旗帜，
+/// 或这一波还有活着的队长。
+fn cannot_pick_up_banner(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> bool {
+    let Some(raid) = mob.raider.raid_view(ctx.blocks(), me.position) else {
+        return true;
+    };
+    if !raid.active || raid.is_over {
+        return true;
+    }
+    if matches!(
+        mob.mob_type,
+        super::MobType::Ravager | super::MobType::Witch
+    ) {
+        return true;
+    }
+    if mob
+        .equipment
+        .get(EquipmentSlot::Head)
+        .matches(&ominous_banner())
+    {
+        return true;
+    }
+    let wave = mob.raider.wave.max(0) as usize;
+    wave < raid.leaders.len()
+        && raid.leaders[wave] != 0
+        && ctx
+            .other(raid.leaders[wave])
+            .is_some_and(|public| !public.removed)
+}
+
+/// `ObtainRaidLeaderBannerGoal.canUse`：跟随距离内找可捡的灾厄旗帜掉落物，
+/// 到不了的物品缓存 600 刻（`Int2LongOpenHashMap`）。
+fn obtain_banner_can_use(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    unreachable: &mut Vec<(EntityUid, i64)>,
+    path: &mut Option<Vec<BlockPos>>,
+) -> bool {
+    if cannot_pick_up_banner(me, mob, ctx) {
+        return false;
+    }
+    let time = ctx.blocks().game_time();
+    unreachable.retain(|(_, until)| *until > time);
+    let range = mob
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
+    let mut candidates = Vec::new();
+    ctx.for_each_other_in(me.bounding_box().inflate(range, 8.0, range), &mut |other| {
+        if let crate::entity::KindPublic::Item {
+            stack,
+            pickup_delay,
+            ..
+        } = &other.kind
+            && !other.removed
+            && *pickup_delay == 0
+            && stack.matches(&ominous_banner())
+        {
+            candidates.push((other.uid, other.position));
+        }
+    });
+    let mut fresh = Vec::new();
+    for (uid, position) in candidates {
+        if unreachable.iter().any(|(blocked, _)| *blocked == uid) {
+            fresh.push((uid, time + 600));
+            continue;
+        }
+        let nav = living::nav_mob(me, mob, ctx.blocks());
+        let found =
+            mob.navigation
+                .create_path(ctx.blocks(), &nav, BlockPos::containing(position), 1);
+        if found.is_some_and(|p| p.reached) {
+            *path = Some(vec![BlockPos::containing(position)]);
+            mob.raider.pursued_banner = Some(uid);
+            return true;
+        }
+        fresh.push((uid, time + 600));
+    }
+    *unreachable = fresh;
+    false
+}
+
+/// `PathfindToRaidGoal.canUse`：没有目标、没有骑手控制、活跃袭击、不在村庄里。
+fn pathfind_can_use(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
+    goals::current_combat_target(mob, ctx).is_none()
+        && mob.controlling_passenger().is_none()
+        && mob
+            .raider
+            .raid_view(ctx.blocks(), me.position)
+            .is_some_and(|raid| raid.active && !raid.is_over)
+        && !ctx.blocks().poi_is_close_to_village(me.block_position(), 1)
+}
+
+/// `PathfindToRaidGoal.tick`：每 20 刻招募附近袭击者，没在寻路时朝袭击中心走。
+fn pathfind_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let Some(raid) = mob.raider.raid_view(ctx.blocks(), me.position) else {
+        return;
+    };
+    if raid.active {
+        if me.tick_count > mob.raider.recruitment_tick {
+            mob.raider.recruitment_tick = me.tick_count + 20;
+            // `recruitNearby`：16 格盒子里没有活跃袭击且能加入袭击的同类。
+            let mut others = Vec::new();
+            ctx.for_each_other_in(me.bounding_box().inflate(16.0, 16.0, 16.0), &mut |other| {
+                if let crate::entity::KindPublic::Mob(public) = &other.kind
+                    && public.mob_type.is_raider()
+                    && !other.removed
+                {
+                    others.push(other.uid);
+                }
+            });
+            if !others.is_empty() {
+                ctx.emit(
+                    Command::RaiderJoinRaid {
+                        id: raid.id,
+                        wave: mob.raider.wave,
+                        others,
+                    },
+                    me,
+                );
+            }
+        }
+        if !mob.navigation.is_done() {
+            return;
+        }
+        let centre = Vec3::new(
+            f64::from(raid.center.x) + 0.5,
+            f64::from(raid.center.y),
+            f64::from(raid.center.z) + 0.5,
+        );
+        if let Some(at) =
+            goals::default_random_pos_towards(me, mob, ctx.blocks(), 15, 4, centre, 1.5707964)
+        {
+            let nav = living::nav_mob(me, mob, ctx.blocks());
+            mob.navigation.move_to(ctx.blocks(), &nav, at, 1.0);
+        }
+    }
+}
+
+/// `RaiderMoveThroughVillageGoal.updateVisited`：最多留 3 个已到过的 POI。
+fn update_visited(mob: &mut Mob) {
+    if mob.raider.visited[2].is_some() {
+        mob.raider.visited.rotate_left(1);
+        mob.raider.visited[2] = None;
+    }
+}
+
+fn add_visited(mob: &mut Mob, pos: BlockPos) {
+    for slot in &mut mob.raider.visited {
+        if slot.is_none() {
+            *slot = Some(pos);
+            return;
+        }
+    }
+}
+
+/// `hasSuitablePoi`：半径 48 内随机挑一个没去过的 `home` POI，按官方洗牌顺序。
+fn move_through_poi(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> Option<BlockPos> {
+    let Some(raid) = mob.raider.raid_view(ctx.blocks(), me.position) else {
+        return None;
+    };
+    if !raid.active || raid.is_over || goals::current_combat_target(mob, ctx).is_some() {
+        return None;
+    }
+    let mask = super::villager::poi_name_mask("home");
+    let mut list: Vec<BlockPos> = ctx
+        .blocks()
+        .poi_in_range(me.block_position(), 48, mask, 2)
+        .into_iter()
+        .map(|(_, pos)| pos)
+        .filter(|pos| !mob.raider.visited.contains(&Some(*pos)))
+        .collect();
+    if list.is_empty() {
+        return None;
+    }
+    for i in (1..list.len()).rev() {
+        let j = me.random.next_int_bounded((i + 1) as i32) as usize;
+        list.swap(i, j);
+    }
+    Some(list[0])
 }
 
 /// `HoldGroundAttackGoal.canUse`：没在袭击里、在巡逻、有目标、还没进攻击状态，并且上次打它的
@@ -511,6 +1012,70 @@ fn shout(me: &mut Entity, mob: &Mob, ctx: &mut dyn EntityCtx, aggressive: bool) 
             },
             me,
         );
+    }
+}
+
+/// 落地 [`Command::RaiderPickUpBanner`]：`Raider.pickUpItem` 的灾厄旗帜分支。
+///
+/// 官方先按 `max(nextFloat() - 0.1, 0) < dropChance` 决定是否把旧头盔掉出来，
+/// 然后戴上新旗帜、清掉落物、`setLeader(wave, self)`、`setPatrolLeader(true)`。
+/// 袭击队的登记由游戏层在同一刻的命令落地阶段写回。
+///
+/// Applies [`Command::RaiderPickUpBanner`]: the ominous-banner branch of
+/// `Raider.pickUpItem`. The raid's leader map is updated by the world thread.
+pub(crate) fn apply_pick_up_banner(world: &mut World, item: EntityUid, me: &mut Entity) {
+    let Some(entity) = world.entity(item) else {
+        return;
+    };
+    let crate::entity::EntityKind::Item(ground) = &entity.kind else {
+        return;
+    };
+    if ground.stack.is_empty() || !ground.stack.matches(&ominous_banner()) {
+        return;
+    }
+    let stack = ground.stack.clone();
+    let old = me.kind.mob().map(|mob| {
+        (
+            mob.equipment.get(EquipmentSlot::Head).clone(),
+            mob.equipment.drop_chance(EquipmentSlot::Head),
+        )
+    });
+    let roll = (me.random.next_float() - 0.1_f32).max(0.0_f32);
+    if let Some((old, chance)) = old
+        && !old.is_empty()
+        && f64::from(roll) < f64::from(chance)
+    {
+        world.spawn_at_location(me.position, old);
+    }
+    let info = me.with_mob(|_, mob| {
+        mob.equipment.set(EquipmentSlot::Head, stack);
+        mob.equipment.set_drop_chance(EquipmentSlot::Head, 2.0);
+        mob.raider.set_patrol_leader(true);
+        (mob.raider.raid_id, mob.raider.wave)
+    });
+    if let Some((Some(id), wave)) = info {
+        world.push_effect(crate::Effect::RaidSetLeader {
+            id,
+            wave,
+            leader: me.id,
+        });
+    }
+    world.remove_entity(item);
+}
+
+/// 落地 [`Command::RaiderJoinRaid`]：把附近没参加袭击的袭击者登记进名册。
+pub(crate) fn apply_join_raid(world: &mut World, others: &[EntityUid], id: i32, wave: i32) {
+    for &other in others {
+        world.with_entity_mut(other, &mut |entity| {
+            entity.with_mob(|_, mob| {
+                if mob.mob_type.is_raider() && mob.raider.raid_id.is_none() {
+                    mob.raider.raid_id = Some(id);
+                    mob.raider.wave = wave;
+                    mob.raider.can_join_raid = true;
+                    mob.raider.ticks_outside_raid = 0;
+                }
+            });
+        });
     }
 }
 
@@ -786,6 +1351,7 @@ mod tests {
             wave: 3,
             can_join_raid: true,
             raid_id: Some(7),
+            ..Raider::default()
         };
         let mut out = Vec::new();
         state.save(&mut out);

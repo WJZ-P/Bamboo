@@ -53,12 +53,11 @@ pub(super) fn attributes() -> Attributes {
 /// The `Ravager.registerGoals` order: the four superclass raid goals, float,
 /// hold ground, melee, stroll and the two look goals.
 pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
-    let goals = vec![
-        (4, Goal::Raider(RaiderGoal::patrol())),
-        (1, Goal::Unavailable("ObtainRaidLeaderBannerGoal")),
-        (3, Goal::Unavailable("PathfindToRaidGoal")),
-        (4, Goal::Unavailable("RaiderMoveThroughVillageGoal")),
-        (5, Goal::Unavailable("RaiderCelebration")),
+    let mut goals = vec![(4, Goal::Raider(RaiderGoal::patrol()))];
+    goals.extend(super::raider::raider_goals(
+        super::raider::RaiderGoal::raid_goals(),
+    ));
+    goals.extend([
         (0, Goal::Float),
         (
             4,
@@ -95,7 +94,7 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
                 look_time: 0,
             }),
         ),
-    ];
+    ]);
     navigation.flags.can_float = true;
     GoalSelector::from_ordered_pairs(goals)
 }

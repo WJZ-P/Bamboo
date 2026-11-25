@@ -2845,6 +2845,10 @@ pub struct Mob {
     ///
     /// `Witch.DATA_USING_ITEM`: true while drinking, a separate synced boolean.
     pub witch_drinking: bool,
+    /// 卫道士的 Johnny 彩蛋与劫掠兽的三个计时器（都在这一个袭击者状态里）。
+    pub vindicator: vindicator::VindicatorState,
+    /// 劫掠兽的三个同步计时字段。
+    pub ravager: ravager::RavagerState,
     /// `PatrollingMonster` / `Raider` 的字段，女巫和掠夺者共用，见 [`raider::Raider`]。
     ///
     /// The `PatrollingMonster` / `Raider` fields shared by witches and pillagers, see
@@ -3584,6 +3588,8 @@ impl Mob {
             searching_for_land: false,
             witch: witch::WitchState::default(),
             witch_drinking: false,
+            vindicator: vindicator::VindicatorState::default(),
+            ravager: ravager::RavagerState::default(),
             raider: raider::Raider::default(),
             crossbow: crossbow::CrossbowUse::default(),
             pillager: pillager::Pillager::default(),

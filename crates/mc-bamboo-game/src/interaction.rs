@@ -811,6 +811,9 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
             } => {
                 crate::raid::raider_died(region, uid, position, killer);
             }
+            Effect::RaidSetLeader { id, wave, leader } => {
+                crate::raid::set_leader(region, id, wave, leader);
+            }
             Effect::BredAnimals {
                 father,
                 mother,

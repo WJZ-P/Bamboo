@@ -764,6 +764,17 @@ fn give_hero_of_the_village(region: &mut Region, uuid: [u8; 16], amplifier: i32)
     crate::player_effects::give(region, id, effect);
 }
 
+/// `Raid.setLeader(wave, raider)` 的镜像：捡起灾厄旗帜的袭击者成为这一波的队长。
+///
+/// Mirror of `Raid.setLeader(wave, raider)`: the raider that picked up the
+/// ominous banner becomes this wave's leader.
+pub(crate) fn set_leader(region: &mut Region, id: i32, wave: i32, leader: i32) {
+    if let Some(raid) = region.raids.raids.get_mut(&id) {
+        raid.leaders.insert(wave, leader);
+        raid.add_wave_mob(wave, leader, 0.0, false);
+    }
+}
+
 /// `Raider.die`：找到死者所在位置的活跃袭击，记英雄、从名册移除、清队长
 /// 旗帜的登记（`removeFromRaid(..., false)` 不扣总血量），再刷新血条进度。
 ///

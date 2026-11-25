@@ -49,17 +49,16 @@ pub(super) fn attributes() -> Attributes {
 ///
 /// The `Vindicator.registerGoals` order (superclass chain + its own goals).
 pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
-    let goals = vec![
-        (4, Goal::Raider(RaiderGoal::patrol())),
-        (1, Goal::Unavailable("ObtainRaidLeaderBannerGoal")),
-        (3, Goal::Unavailable("PathfindToRaidGoal")),
-        (4, Goal::Unavailable("RaiderMoveThroughVillageGoal")),
-        (5, Goal::Unavailable("RaiderCelebration")),
+    let mut goals = vec![(4, Goal::Raider(RaiderGoal::patrol()))];
+    goals.extend(super::raider::raider_goals(
+        super::raider::RaiderGoal::raid_goals(),
+    ));
+    goals.extend([
         (0, Goal::Float),
         (1, Goal::Unavailable("AvoidEntityGoal")),
         // `VindicatorBreakDoorGoal(2)`：只在有活跃袭击时能启动。
-        (2, Goal::Unavailable("VindicatorBreakDoorGoal")),
-        (3, Goal::Unavailable("RaiderOpenDoorGoal")),
+        (2, Goal::Raider(RaiderGoal::BreakDoor)),
+        (3, Goal::Raider(RaiderGoal::OpenDoor)),
         (
             4,
             Goal::Raider(RaiderGoal::HoldGround {
@@ -95,7 +94,7 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
                 look_time: 0,
             }),
         ),
-    ];
+    ]);
     navigation.flags.can_float = true;
     GoalSelector::from_ordered_pairs(goals)
 }
@@ -116,7 +115,14 @@ pub(super) fn targets() -> GoalSelector {
         (2, Goal::nearest_target(TargetType::Player)),
         (3, Goal::nearest_target_without_sight(TargetType::Villager)),
         (3, Goal::nearest_target(TargetType::IronGolem)),
-        (4, Goal::Unavailable("VindicatorJohnnyAttackGoal")),
+        (
+            4,
+            Goal::Raider(RaiderGoal::Johnny {
+                interval: 0,
+                unseen_ticks: 0,
+                found: None,
+            }),
+        ),
     ])
 }
 

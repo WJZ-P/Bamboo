@@ -1598,6 +1598,22 @@ pub enum Command {
     PickUpItem {
         item: EntityUid,
     },
+    /// `Raider.pickUpItem` 的灾厄旗帜分支：戴上旗帜、吃掉掉落物并登记为本波队长。
+    RaiderPickUpBanner {
+        item: EntityUid,
+    },
+    /// `PathfindToRaidGoal.recruitNearby`：附近没加入袭击的袭击者加入这场袭击。
+    RaiderJoinRaid {
+        id: i32,
+        wave: i32,
+        others: Vec<EntityUid>,
+    },
+    /// `Raid.setLeader(wave, raider)` 的镜像：把袭击的队长登记写回游戏层。
+    RaidSetLeader {
+        id: i32,
+        wave: i32,
+        leader: EntityUid,
+    },
     /// `Panda.afterSneeze`：附近的成年熊猫原地跳一下。
     ///
     /// `Panda.afterSneeze`: nearby adult pandas hop.
@@ -2051,6 +2067,15 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::PickUpItem { item } => {
             super::mob::panda::apply_pick_up(world, item, me);
+        }
+        Command::RaiderPickUpBanner { item } => {
+            super::mob::raider::apply_pick_up_banner(world, item, me);
+        }
+        Command::RaiderJoinRaid { id, wave, others } => {
+            super::mob::raider::apply_join_raid(world, &others, id, wave);
+        }
+        Command::RaidSetLeader { id, wave, leader } => {
+            world.push_effect(crate::Effect::RaidSetLeader { id, wave, leader });
         }
         Command::JumpMobs { others } => {
             for other in others {
