@@ -4180,7 +4180,7 @@ cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocaptu
    `terrainAdaptation` 12 格外扩）+ 结构件盒」，存进 `Region.structure_spawn_index`
    （`RefCell`，岛拆分 / 合并时按区块搬行），之后只查表。世界生成配置一变，
    `Global::publish` 清空整张索引，下一次查询按新配置重算。前哨站、女巫小屋和猫用的
-   `PIECE` 路径都受益；海底神殿等以后往 `STRUCTURE_SPAWN_OVERRIDES` 追加一行即可。
+   `PIECE` 路径都受益；海底神殿的 `STRUCTURE` 覆盖也走同一张按区块拍平的索引。
 2. **目标搜索按类型筛**（`entity/mob/goals.rs`、`entity/store.rs`）：
    `NearestAttackableTargetGoal<LivingEntity>` 的候选里全是别的守卫者。新增
    `EntityCtx::for_each_other_of_types_in`，`EntityStore` 用按注册表类型的子索引在

@@ -27,6 +27,7 @@ import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
@@ -55,6 +56,8 @@ import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.NaturalSpawner;
+import net.minecraft.world.level.levelgen.structure.Structure;
+import net.minecraft.world.level.levelgen.structure.StructureSpawnOverride;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.MobSpawnSettings;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -115,6 +118,7 @@ public final class NaturalSpawnOracle {
                 out.write(shuffleCase(seed).toString());
                 out.write('\n');
             }
+            writeStructureOverrideCases(out, registries);
             writePositionCases(out);
             out.flush();
         }
@@ -198,6 +202,55 @@ public final class NaturalSpawnOracle {
         @Override
         public int getHeight(Heightmap.Types type, int x, int z) {
             return empty ? -65 : 63 + (x & 15) - (z & 15);
+        }
+    }
+
+    /**
+     * 官方 `Structure.spawnOverrides()` 的每张加权表：结构名、类别、盒类型和加权
+     * 列表的取数结果。空表也要输出，Bamboo 侧用它挡住群系表。
+     *
+     * Every `Structure.spawnOverrides()` weighted list: structure, category, box type
+     * and the draw results. Empty lists are included because they suppress the biome table.
+     */
+    private static void writeStructureOverrideCases(Writer out, RegistryAccess.Frozen registries)
+            throws Exception {
+        Registry<Structure> structures = registries.lookupOrThrow(Registries.STRUCTURE);
+        for (Identifier name : structures.keySet().stream().sorted().toList()) {
+            Structure structure = structures.getValue(name);
+            for (Map.Entry<MobCategory, StructureSpawnOverride> entry
+                    : structure.spawnOverrides().entrySet()) {
+                MobCategory category = entry.getKey();
+                StructureSpawnOverride override = entry.getValue();
+                String bounding = override.boundingBox().getSerializedName();
+                WeightedList<MobSpawnSettings.SpawnerData> spawns = override.spawns();
+                for (long seed : SEEDS) {
+                    RandomSource random = RandomSource.create(seed);
+                    JsonArray picks = new JsonArray();
+                    for (int i = 0; i < PICKS_PER_CASE; i++) {
+                        Optional<MobSpawnSettings.SpawnerData> picked = spawns.getRandom(random);
+                        if (picked.isEmpty()) {
+                            picks.add("empty");
+                            continue;
+                        }
+                        MobSpawnSettings.SpawnerData data = picked.get();
+                        int count = data.count().sample(random);
+                        JsonArray pick = new JsonArray();
+                        pick.add(net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE
+                                .getKey(data.type()).toString());
+                        pick.add(count);
+                        picks.add(pick);
+                    }
+                    JsonObject row = new JsonObject();
+                    row.addProperty("type", "structureOverride");
+                    row.addProperty("structure", name.toString());
+                    row.addProperty("category", category.getName());
+                    row.addProperty("bounding", bounding);
+                    row.add("picks", picks);
+                    row.addProperty("seed", seed);
+                    row.addProperty("after", seedAfter(random));
+                    out.write(row + "\n");
+                }
+            }
         }
     }
 
