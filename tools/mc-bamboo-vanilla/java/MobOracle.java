@@ -683,6 +683,12 @@ public final class MobOracle {
                     cases++;
                 }
             }
+            if (only == null || only.startsWith("sculk_catalyst")) {
+                cases += playSculkCatalyst(official, out);
+            }
+            if (only == null || only.startsWith("sculk_catalyst")) {
+                cases += playSculkCatalystSave(official, out);
+            }
             if (only == null || only.startsWith("warden")) {
                 cases += playWarden(official, out, only);
             }
@@ -14091,6 +14097,133 @@ public final class MobOracle {
         return cases;
     }
 
+    /** 幽匿催发体：一只僵尸死在旁边，经验转成电荷，逐刻蔓延生成幽匿块 / 幽匿脉络。 */
+    private static int playSculkCatalyst(Official official, Writer out) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        try {
+            level.enableGameEvents();
+            level.nextId = FIRST_ID;
+            level.gameTime = START_TIME;
+
+            BlockPos catalyst = new BlockPos(0, 64, 0);
+            BlockPos die = new BlockPos(2, 64, 0);
+
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -8; x <= 8; x++) {
+                for (int z = -8; z <= 8; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            BlockState catalystState = Blocks.SCULK_CATALYST.defaultBlockState();
+            level.blocks.put(catalyst.asLong(), catalystState);
+
+            net.minecraft.world.level.block.entity.SculkCatalystBlockEntity be =
+                    new net.minecraft.world.level.block.entity.SculkCatalystBlockEntity(catalyst, catalystState);
+            level.putBlockEntity(be);
+            level.registerGameEventListener(catalyst, be.getListener());
+            net.minecraft.core.SectionPos section = net.minecraft.core.SectionPos.of(catalyst);
+            level.getBlockTicks().addContainer(
+                    new net.minecraft.world.level.ChunkPos(section.x(), section.z()),
+                    new net.minecraft.world.ticks.LevelChunkTicks<>());
+
+            net.minecraft.world.entity.monster.zombie.Zombie zombie =
+                    (net.minecraft.world.entity.monster.zombie.Zombie) EntityTypes.ZOMBIE.create(level, EntitySpawnReason.COMMAND);
+            zombie.setPos(die.getX() + 0.5, die.getY(), die.getZ() + 0.5);
+            zombie.setId(FIRST_ID);
+            zombie.setUUID(new UUID(0L, 3L));
+            level.tracked.add(zombie);
+
+            String initialBlocks = blockArrayXYZ(level.blocks);
+
+            StringBuilder frames = new StringBuilder("[");
+            int ticks = 20;
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime = START_TIME + tick;
+                    if (tick == 1) {
+                        level.gameEvent(GameEvent.ENTITY_DIE,
+                                new Vec3(die.getX() + 0.5, die.getY(), die.getZ() + 0.5),
+                                new GameEvent.Context(zombie, null));
+                    }
+                    net.minecraft.world.level.block.entity.SculkCatalystBlockEntity.serverTick(
+                            level, catalyst, level.getBlockState(catalyst), be);
+                    level.getBlockTicks().tick(level.gameTime, Integer.MAX_VALUE, (p, block) -> {
+                        BlockState st = level.getBlockState(p);
+                        if (st.is(block)) {
+                            st.tick(level, p, level.getRandom());
+                        }
+                    });
+                }
+                if (tick > 0) frames.append(',');
+                StringBuilder cursors = new StringBuilder("[");
+                var list = be.getListener().getSculkSpreader().getCursors();
+                for (int i = 0; i < list.size(); i++) {
+                    var cursor = list.get(i);
+                    if (i > 0) cursors.append(',');
+                    BlockPos pos = cursor.getPos();
+                    int updateDelay = (Integer) readField(
+                            net.minecraft.world.level.block.SculkSpreader.ChargeCursor.class, cursor, "updateDelay");
+                    int decayDelay = (Integer) readField(
+                            net.minecraft.world.level.block.SculkSpreader.ChargeCursor.class, cursor, "decayDelay");
+                    byte faces = cursor.getFacingData() == null
+                            ? 0
+                            : net.minecraft.world.level.block.MultifaceBlock.pack(cursor.getFacingData());
+                    cursors.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',').append(pos.getZ())
+                            .append(',').append(cursor.getCharge())
+                            .append(',').append(updateDelay)
+                            .append(',').append(decayDelay)
+                            .append(',').append(faces).append(']');
+                }
+                cursors.append(']');
+                frames.append("{\"cursors\":").append(cursors)
+                        .append(",\"blocks\":").append(blockArrayXYZ(level.blocks))
+                        .append(",\"levelSeed\":").append(randomSeed(level.getRandom()))
+                        .append('}');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"sculkCatalyst\",\"name\":\"sculk_catalyst_spread\""
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"blocks\":" + initialBlocks
+                    + ",\"catalyst\":" + Arrays.toString(new int[] {catalyst.getX(), catalyst.getY(), catalyst.getZ()})
+                    + ",\"die\":" + Arrays.toString(new int[] {die.getX(), die.getY(), die.getZ()})
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            level.closeRealPoi();
+        }
+        return 1;
+    }
+
+    /** 幽匿催发体存档：`saveCustomOnly` 的 SNBT 和读回后再写出的 SNBT。 */
+    private static int playSculkCatalystSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean filled : new boolean[] {false, true}) {
+            FakeLevel level = FakeLevel.create(official);
+            BlockPos pos = new BlockPos(1, 64, 2);
+            BlockState state = Blocks.SCULK_CATALYST.defaultBlockState();
+            net.minecraft.world.level.block.entity.SculkCatalystBlockEntity be =
+                    new net.minecraft.world.level.block.entity.SculkCatalystBlockEntity(pos, state);
+            if (filled) {
+                be.getListener().getSculkSpreader().addCursors(new BlockPos(3, 64, 3), 5);
+                be.getListener().getSculkSpreader().addCursors(new BlockPos(-2, 65, 1), 7);
+            }
+            var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            be.saveCustomOnly(output);
+            var copy = new net.minecraft.world.level.block.entity.SculkCatalystBlockEntity(pos, state);
+            copy.loadCustomOnly(net.minecraft.world.level.storage.TagValueInput.create(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries, output.buildResult()));
+            var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            copy.saveCustomOnly(again);
+            out.write("{\"type\":\"sculkCatalystSave\",\"filled\":" + filled
+                    + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                    + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
     private static int playVillagerBrain(Official official, Writer out, String only) throws Exception {
         record VScene(String name, long clockStart, int ticks, boolean baby, String profession,
                 boolean hasJobSite, boolean hasMeetingPoint, int hurtTick, boolean hasZombie,
@@ -19797,6 +19930,36 @@ public final class MobOracle {
             BlockPos pos = BlockPos.of(key);
             out.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',').append(pos.getZ())
                     .append(',').append(Block.getId(state)).append(']');
+        }
+        out.append(']');
+        return out.toString();
+    }
+
+    /** 和 {@link #blockArray} 一样，但按 `(x, y, z)` 三元组排序（催发体蔓延逐刻比方块）。 */
+    private static String blockArrayXYZ(Long2ObjectOpenHashMap<BlockState> blocks) {
+        long[] keys = blocks.keySet().toLongArray();
+        long[][] entries = new long[keys.length][];
+        int n = 0;
+        for (long key : keys) {
+            BlockState state = blocks.get(key);
+            if (state.isAir()) {
+                continue;
+            }
+            BlockPos pos = BlockPos.of(key);
+            entries[n++] = new long[] {pos.getX(), pos.getY(), pos.getZ(), Block.getId(state)};
+        }
+        java.util.Arrays.sort(entries, 0, n, (a, b) -> {
+            for (int i = 0; i < 3; i++) {
+                if (a[i] != b[i]) return Long.compare(a[i], b[i]);
+            }
+            return 0;
+        });
+        StringBuilder out = new StringBuilder();
+        out.append('[');
+        for (int i = 0; i < n; i++) {
+            if (i > 0) out.append(',');
+            out.append('[').append(entries[i][0]).append(',').append(entries[i][1]).append(',')
+                    .append(entries[i][2]).append(',').append(entries[i][3]).append(']');
         }
         out.append(']');
         return out.toString();
