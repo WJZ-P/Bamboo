@@ -147,10 +147,15 @@ pub const fn num_groups(difficulty: i32) -> i32 {
     }
 }
 
-/// 一场袭击的存档字段，外加两个不进存档、但状态机每刻要用的纯量字段。
+/// 一场袭击的存档字段，外加几个不进存档、但状态机每刻要用的运行时字段。
+/// 袭击者按实体 uid 引用（官方 `groupRaiderMap` / `groupToLeaderMap` 里存的是
+/// `Raider` 实例，这里按 id 存，世界线程按 uid 查实体）。这些字段官方不写进
+/// `raids.dat`，读盘后为空。
 ///
-/// One raid's saved fields plus two non-saved scalars the state machine ticks.
-/// [`Raid::wave_spawn_pos`] 和 [`Raid::celebration_ticks`] 官方不写进 `raids.dat`。
+/// One raid's saved fields plus a few non-saved runtime fields. Raiders are
+/// referenced by entity uid (vanilla stores `Raider` instances in its maps;
+/// here we keep ids and the world thread looks them up). None of these are
+/// written to `raids.dat`, so they start empty after a load.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Raid {
     pub started: bool,
@@ -170,6 +175,10 @@ pub struct Raid {
     pub wave_spawn_pos: Option<BlockPos>,
     /// `celebrationTicks`：官方不存档，读盘后为 0。
     pub celebration_ticks: i32,
+    /// `groupRaiderMap`：每波的袭击者实体 uid。
+    pub raiders: std::collections::BTreeMap<i32, Vec<i32>>,
+    /// `groupToLeaderMap`：每波队长实体 uid。
+    pub leaders: std::collections::BTreeMap<i32, i32>,
 }
 
 impl Raid {
@@ -193,7 +202,54 @@ impl Raid {
             heroes_of_the_village: Vec::new(),
             wave_spawn_pos: None,
             celebration_ticks: 0,
+            raiders: std::collections::BTreeMap::new(),
+            leaders: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// `addWaveMob`：把一名袭击者记进该波名册，可选累加总血量。名册按 uid 去重
+    /// （官方按 UUID 替换同名实例）。
+    ///
+    /// Vanilla `addWaveMob`: record a raider under its wave, optionally adding
+    /// its health. The roster is deduplicated by uid.
+    pub fn add_wave_mob(&mut self, wave: i32, uid: i32, health: f32, add_health: bool) {
+        let members = self.raiders.entry(wave).or_default();
+        if !members.contains(&uid) {
+            members.push(uid);
+        }
+        if add_health {
+            self.total_health += health;
+        }
+    }
+
+    /// `removeFromRaid`：从该波名册移除，可选扣回总血量，返回是否真的移除。
+    ///
+    /// Vanilla `removeFromRaid`: drop a raider from its wave, optionally
+    /// subtracting its health, and report whether it was present.
+    pub fn remove_raider(&mut self, wave: i32, uid: i32, health: f32, add_health: bool) -> bool {
+        let Some(members) = self.raiders.get_mut(&wave) else {
+            return false;
+        };
+        let Some(index) = members.iter().position(|&member| member == uid) else {
+            return false;
+        };
+        members.remove(index);
+        if add_health {
+            self.total_health -= health;
+        }
+        true
+    }
+
+    /// `getTotalRaidersAlive`：官方数的是袭击名册里所有波的袭击者数（死亡 /
+    /// 离队的由 `updateRaiders` 每 20 刻清掉）。
+    ///
+    /// Vanilla `getTotalRaidersAlive`: the number of raiders across all wave
+    /// rosters; dead / detached ones are culled by `updateRaiders` every 20 ticks.
+    pub fn total_raiders(&self) -> i32 {
+        self.raiders
+            .values()
+            .map(|members| members.len() as i32)
+            .sum()
     }
 
     /// `isOver()`：胜利或失败。
@@ -409,6 +465,8 @@ impl Raid {
                 heroes_of_the_village: heroes,
                 wave_spawn_pos: None,
                 celebration_ticks: 0,
+                raiders: std::collections::BTreeMap::new(),
+                leaders: std::collections::BTreeMap::new(),
             },
         ))
     }
@@ -886,6 +944,36 @@ mod tests {
         };
         let result = Raid::potential_bonus_spawns(raider, wave, difficulty, bonus, &mut roll);
         (result, bounds)
+    }
+
+    /// 袭击名册的加减与总血量记账。
+    #[test]
+    fn raider_roster_tracks_health() {
+        let mut raid = Raid::new(BlockPos::new(0, 0, 0), DIFFICULTY_NORMAL);
+        raid.add_wave_mob(1, 10, 24.0, true);
+        raid.add_wave_mob(1, 11, 24.0, true);
+        raid.add_wave_mob(2, 12, 100.0, true);
+        // 读盘恢复走 `addWaveMob(..., false)`：同 uid 不重复记账、不重复加血。
+        raid.add_wave_mob(1, 10, 24.0, false);
+        assert_eq!(raid.total_raiders(), 3);
+        assert_eq!(raid.total_health, 148.0);
+        assert!(raid.remove_raider(1, 11, 24.0, true));
+        assert_eq!(raid.total_raiders(), 2);
+        assert_eq!(raid.total_health, 124.0);
+        // 不在名册 / 波次不存在都返回假，不改血量。
+        assert!(!raid.remove_raider(1, 999, 24.0, true));
+        assert!(!raid.remove_raider(9, 12, 100.0, true));
+        assert_eq!(raid.total_health, 124.0);
+        // 读盘后名册清空（运行时字段不存档）。
+        let decoded = Raids::from_tag(
+            &Raids {
+                raids: std::collections::BTreeMap::from([(1, raid.clone())]),
+                ..Raids::new()
+            }
+            .to_tag(),
+        );
+        assert!(decoded.raids[&1].raiders.is_empty());
+        assert!(decoded.raids[&1].leaders.is_empty());
     }
 
     /// potential_bonus_spawns 的分支、结果与取数顺序照字节码。
