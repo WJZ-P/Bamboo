@@ -51,54 +51,60 @@ fn core_activity() -> ActivityData {
     )
 }
 
-/// `initIdleActivity`：`StartAttacking`（激活且看得见可攻击玩家时）+
-/// `SetEntityLookTargetSometimes(8.0, 30..60)` + `RunOne[RandomStroll(0.3),
-/// SetWalkTargetFromLookTarget(0.3, 3), DoNothing(30, 60)]`。
+/// `initIdleActivity`：官方 `ActivityData.create(IDLE, 10, ...)`；优先级是 10/11/12，
+/// 不是 CORE 的 0/1/2。javap 核对过 `initIdleActivity` 用的是 `bipush 10`。
+///
+/// 这个差距很要紧：`Brain.tick` 的 `startEachNonRunningBehavior` 按优先级升序遍历，且
+/// 读的是同一张实时记忆表。若 IDLE / FIGHT 也从 0 开始，FIGHT 的
+/// `SetWalkTargetFromAttackTargetIfTargetOutOfReach`（写 `WALK_TARGET`）会排在 CORE 的
+/// `MoveToTargetSink`（读 `WALK_TARGET`）之前，后者当刻就看到目标、当刻 `moveTo`，
+/// 比官方整整早一刻起步。把 IDLE / FIGHT 放到 10 之后，CORE 先跑、这一刻看不到
+/// `WALK_TARGET`，下一刻才起步，与官方一致。
 fn idle_activity() -> ActivityData {
-    ActivityData::with_priorities(
+    ActivityData::sequential(
         Activity::Idle,
+        10,
         vec![
-            (0, Kind::Creaking(Behavior::StartAttacking)),
-            (
-                1,
-                Kind::LookAtPlayerSometimes {
-                    max_dist: 8.0,
-                    min_interval: 30,
-                    max_interval: 60,
-                    ticks_until_next_start: 0,
-                },
-            ),
-            (
-                2,
-                Kind::Gate(Box::new(Gate::run_one(
-                    Vec::new(),
-                    vec![
-                        (Kind::RandomStroll { speed: 0.3 }, 2),
-                        (
-                            Kind::WalkTargetFromLook {
-                                speed: Speed::Fixed(0.3),
-                                close_enough: 3,
-                            },
-                            3,
-                        ),
-                        (Kind::DoNothing { min: 30, max: 60 }, 1),
-                    ],
-                ))),
-            ),
+            Kind::Creaking(Behavior::StartAttacking),
+            Kind::LookAtPlayerSometimes {
+                max_dist: 8.0,
+                min_interval: 30,
+                max_interval: 60,
+                ticks_until_next_start: 0,
+            },
+            Kind::Gate(Box::new(Gate::run_one(
+                Vec::new(),
+                vec![
+                    // 官方 `RunOne` 权重是 2/2/1（javap：`RandomStroll` 配 `iconst_2`、
+                    // `SetWalkTargetFromLookTarget(0.3, 3)` 配 `iconst_2`；那个 `iconst_3`
+                    // 是 closeEnough 参数，不是权重。`3` 会改变洗牌分布，让嘎枝挑错子行为。
+                    (Kind::RandomStroll { speed: 0.3 }, 2),
+                    (
+                        Kind::WalkTargetFromLook {
+                            speed: Speed::Fixed(0.3),
+                            close_enough: 3,
+                        },
+                        2,
+                    ),
+                    (Kind::DoNothing { min: 30, max: 60 }, 1),
+                ],
+            ))),
         ],
     )
 }
 
 /// `initFightActivity`：`SetWalkTargetFromAttackTargetIfTargetOutOfReach(1.0)` +
 /// `MeleeAttack(canMove, 40)` + `StopAttackingIfTargetInvalid(!reachable)`，进入条件是
-/// `ATTACK_TARGET` 有值。
+/// `ATTACK_TARGET` 有值。官方 `ActivityData.create(FIGHT, 10, ...)`，优先级 10/11/12
+/// （javap：`bipush 10`），原因见 `idle_activity`。
 fn fight_activity() -> ActivityData {
-    ActivityData::with_priorities(
+    ActivityData::sequential(
         Activity::Fight,
+        10,
         vec![
-            (0, Kind::Creaking(Behavior::SetWalkTargetFromAttackTarget)),
-            (1, Kind::Creaking(Behavior::MeleeAttack)),
-            (2, Kind::Creaking(Behavior::StopAttacking)),
+            Kind::Creaking(Behavior::SetWalkTargetFromAttackTarget),
+            Kind::Creaking(Behavior::MeleeAttack),
+            Kind::Creaking(Behavior::StopAttacking),
         ],
     )
     .when(vec![(AttackTarget, ValuePresent)])
@@ -220,9 +226,12 @@ fn set_walk_target_from_attack_target(cx: &mut Cx) -> bool {
     let Some(target) = cx.memories.entity(AttackTarget) else {
         return true;
     };
-    let view = sensor::living(cx, target);
-    let in_range = sensor::visible_contains(cx, target)
-        && view.is_some_and(|view| view.position.distance_to_sqr(cx.me.position) <= 1.0);
+    // 官方 `BehaviorUtils.isWithinAttackRange(mob, target, 1)` 对近战生物走
+    // `Mob.isWithinMeleeAttackRange`（Aabb 膨胀到 `DEFAULT_ATTACK_REACH` 后相交），
+    // 不是「中心距离 <= 1」。用同一套 `within_melee_range` 才会在同一刻收手。
+    let in_reach = goals::attack_candidate(cx.mob, &*cx.ctx, target)
+        .is_some_and(|combat| goals::within_melee_range(cx.me, cx.mob, combat, &*cx.ctx));
+    let in_range = in_reach && sensor::visible_contains(cx, target);
     if in_range {
         cx.memories.erase(WalkTargetMemory);
     } else {
@@ -361,5 +370,18 @@ mod tests {
                 .any(|(activity, _)| *activity == "fight")
         );
         assert_eq!(brain.active_names(), vec!["core", "idle"]);
+        // 优先级必须照官方 `ActivityData.create`：CORE 0/1/2，IDLE / FIGHT 10/11/12。
+        // 早先三个活动都从 0 起，FIGHT 写 `WALK_TARGET` 排在 CORE 的
+        // `MoveToTargetSink` 之前，导致嘎枝比官方早一刻起步（见 idle_activity 注释）。
+        let priorities = |activity: &str| -> Vec<i32> {
+            table
+                .iter()
+                .filter(|(_, name, _)| *name == activity)
+                .map(|(priority, _, _)| *priority)
+                .collect()
+        };
+        assert_eq!(priorities("core"), vec![0, 1, 2]);
+        assert_eq!(priorities("idle"), vec![10, 11, 12]);
+        assert_eq!(priorities("fight"), vec![10, 11, 12]);
     }
 }
