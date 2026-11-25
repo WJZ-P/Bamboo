@@ -234,7 +234,12 @@ impl Node {
                     return false;
                 }
                 self.status = Status::Running;
-                let duration = min + cx.level_next_int(max + 1 - min);
+                // 官方 `maxDuration + 1 - minDuration` 是 int 加减，会在 `Integer.MAX_VALUE`
+                // 时长（如 `LookAndFollowTradingPlayerSink`）上回绕成 1；这里也按 int 回绕算。
+                // Vanilla's `maxDuration + 1 - minDuration` is int arithmetic and wraps to 1
+                // for `Integer.MAX_VALUE` durations (e.g. `LookAndFollowTradingPlayerSink`).
+                let span = max.wrapping_add(1).wrapping_sub(min);
+                let duration = min.wrapping_add(cx.level_next_int(span));
                 self.end_timestamp = cx.time + i64::from(duration);
                 self.kind.start(cx);
                 true
