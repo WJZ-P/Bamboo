@@ -513,6 +513,12 @@ impl Ctx<'_> {
         {
             return ItemStack::empty();
         }
+        // 商人结果格 Shift 取出：搬进背包后完成一次交易并重算结果，官方
+        // `MerchantResultSlot.onTake` 的扣付款 + 使用次数 + `updateSellItem`。
+        if index == RESULT_SLOT && self.merchant.is_some() {
+            self.merchant_take();
+            self.settle_merchant();
+        }
         clicked
     }
 
@@ -599,18 +605,12 @@ fn pickup_or_quick_move(ctx: &mut Ctx, slot_index: i32, button: i32, quick: bool
         return;
     };
     if quick {
-        if index == RESULT_SLOT && ctx.merchant.is_some() {
-            // 结果格 Shift 取出：搬进背包后完成一次交易（`MerchantResultSlot.onTake`），
-            // 官方 `quickMoveStack` 不循环。
-            let clicked = ctx.quick_move(index);
-            if !clicked.is_empty() {
-                ctx.merchant_take();
-            }
-        } else {
-            let mut clicked = ctx.quick_move(index);
-            while !clicked.is_empty() && is_same_item(&ctx.get(index), &clicked) {
-                clicked = ctx.quick_move(index);
-            }
+        // `AbstractContainerMenu.doClick` 的 QUICK_MOVE 分支是一个循环：结果格取走后
+        // `slotsChanged` 按剩余付款重新填结果，Shift 点一下会一直交易到付款不够或
+        // 背包放不下为止。
+        let mut clicked = ctx.quick_move(index);
+        while !clicked.is_empty() && is_same_item(&ctx.get(index), &clicked) {
+            clicked = ctx.quick_move(index);
         }
     } else {
         pickup(ctx, index, button == 0);

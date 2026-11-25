@@ -1263,4 +1263,35 @@ mod e2e_tests {
             .unwrap();
         assert_eq!(unhappy, 40, "幼年村民应该摇头（unhappy 计数 40）");
     }
+
+    /// 睡觉的村民右键走通用 mobInteract，不打开交易界面也不摇头。
+    #[test]
+    fn a_sleeping_villager_does_not_open_the_trade() {
+        let (mut region, id, villager_id, _sink) = fixture();
+        region.entities.with_mut(villager_id, |entity| {
+            if let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &mut entity.kind {
+                mob.villager.sleeping = true;
+            }
+        });
+        crate::interaction::on_interact_entity(
+            &mut region,
+            id,
+            villager_id,
+            mc_bamboo_core::Hand::Main,
+            false,
+        );
+        assert!(
+            !region.menus.contains_key(&id),
+            "睡觉的村民不应该打开交易界面"
+        );
+        let unhappy = region
+            .entities
+            .get(villager_id)
+            .and_then(|entity| match &entity.kind {
+                mc_bamboo_blocks::entity::EntityKind::Mob(mob) => Some(mob.villager.unhappy),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(unhappy, 0, "睡觉的村民不应该摇头");
+    }
 }

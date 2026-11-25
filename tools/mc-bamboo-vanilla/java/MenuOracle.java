@@ -973,6 +973,7 @@ public final class MenuOracle {
         /**
          * 商人菜单：一组固定交易、把付款物品放进玩家背包，然后选交易 / 放物品 / 取结果 / Shift 点击。
          * 交易表里 `itemB == 0` 表示没有第二格付款，和 Rust 侧的 `[itemA, countA, itemB, countB, result, resultCount, maxUses]` 对齐。
+         * 三种变体：付款够做 1 次、够做 3 次、背包快满（只留一个空格）。
          */
         private JsonObject merchantCase(int id, Random random) {
             boolean creative = random.nextInt(4) != 0;
@@ -981,6 +982,7 @@ public final class MenuOracle {
 
             int emerald = BuiltInRegistries.ITEM.getId(Items.EMERALD);
             int apple = BuiltInRegistries.ITEM.getId(Items.APPLE);
+            int dirt = BuiltInRegistries.ITEM.getId(Items.DIRT);
 
             MerchantOffers offers = new MerchantOffers();
             offers.add(new MerchantOffer(
@@ -989,11 +991,18 @@ public final class MenuOracle {
 
             FakeMerchant merchant = new FakeMerchant(offers);
             MerchantMenu menu = new MerchantMenu(CONTAINER_ID, inventory, merchant);
-            menu.setSynchronizer(new Sync());
 
-            // 背包里放一堆付款物品，选中的自动填和手动放都覆盖到。
-            inventory.setItem(9, new ItemStack(Items.EMERALD, 2));
-            inventory.setItem(10, new ItemStack(Items.APPLE, 1));
+            int variant = id % 3;
+            // 付款数量：1 次 / 3 次。背包快满时只留一个空格给结果。
+            int emeralds = variant == 1 ? 3 : 1;
+            inventory.setItem(9, new ItemStack(Items.EMERALD, emeralds));
+            if (variant == 2) {
+                for (int slot = 10; slot < 35; slot++) {
+                    inventory.setItem(slot, new ItemStack(Items.DIRT, 64));
+                }
+            }
+            // 先填背包再装同步器，`sendAllDataToRemote` 把填好的槽都记进 remoteSlots。
+            menu.setSynchronizer(new Sync());
 
             JsonObject line = new JsonObject();
             line.addProperty("type", "case");
@@ -1010,10 +1019,8 @@ public final class MenuOracle {
             JsonArray steps = new JsonArray();
             // 选交易 0：自动把绿宝石填进付款格，结果格显示苹果。
             steps.add(tradeStep(menu, 0));
-            // 手动把绿宝石放回付款格，再取结果。
-            steps.add(clickStep(menu, player, 9, 0, 0));
-            steps.add(clickStep(menu, player, 0, 0, 0));
-            steps.add(clickStep(menu, player, 2, 0, 0));
+            // 结果格 Shift 取出：连做多笔，直到付款不够或背包放不下。
+            steps.add(clickStep(menu, player, 2, 0, 1));
             line.add("steps", steps);
             return line;
         }

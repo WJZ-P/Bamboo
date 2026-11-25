@@ -626,6 +626,24 @@ mod tests {
         assert!(after.slots[2].is_empty(), "结果格应该清空");
     }
 
+    /// 结果格 Shift 点击会连续交易，直到付款不够：2 个绿宝石换 2 个苹果。
+    #[test]
+    fn merchant_shift_click_trades_repeatedly() {
+        let mut replay = Replay::merchant(vec![emerald_for_apple()], &[(items::EMERALD, 2)], &[]);
+        replay.open();
+        let after = replay.click(2, 0, ContainerInput::QuickMove);
+        // 两次交易：付款扣光，两个苹果搬进背包（结果格清空）。
+        assert!(after.slots[0].is_empty(), "付款应该被扣光");
+        assert!(after.slots[2].is_empty(), "结果格应该清空");
+        let apples = after
+            .slots
+            .iter()
+            .filter(|stack| stack.item == items::APPLE)
+            .map(|stack| stack.count)
+            .sum::<i32>();
+        assert_eq!(apples, 2, "Shift 点击应该连续换到两个苹果");
+    }
+
     /// 打开后是全空的菜单，state_id 从 1 开始。
     #[test]
     fn opening_a_chest_starts_with_state_one() {
