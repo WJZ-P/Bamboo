@@ -941,6 +941,7 @@ pub fn custom_server_ai_step(
     decision_gap: i64,
 ) {
     let now = ctx.blocks().game_time();
+    mob.warden.tick_animations(me.tick_count);
     let eye = Vec3::new(
         me.position.x,
         me.position.y + f64::from(mob.eye_height),
@@ -1165,6 +1166,10 @@ impl VibrationUser for WardenVibrationUser<'_> {
                 .memories
                 .set_with_ttl(M::VibrationCooldown, MemoryValue::Unit, 40);
         }
+        // `Warden.handleEntityEvent(61)` 把触须动画置 10；事件本身仍发给客户端。
+        // `Warden.handleEntityEvent(61)` resets the tendril animation to 10;
+        // the event itself still goes to clients.
+        self.mob.warden.tendril_animation = 10;
         self.mob.events.push(MobEvent::EntityEvent { event: 61 });
         // `playSound(WARDEN_TENDRIL_CLICKS, 5.0, getVoicePitch())`：两次实体随机数。
         // `playSound(WARDEN_TENDRIL_CLICKS, 5.0, getVoicePitch())`: two entity draws.

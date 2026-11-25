@@ -336,6 +336,30 @@ impl Warden {
     pub fn anger_level(&self) -> AngerLevel {
         AngerLevel::by_anger(self.anger.get_active_anger(None))
     }
+
+    /// `Warden.getHeartBeatDelay()`：愤怒 0 时 40 刻，80 以上 10 刻。
+    ///
+    /// `Warden.getHeartBeatDelay()`: 40 ticks at zero anger, 10 at 80 or more.
+    pub fn heart_beat_delay(&self) -> i32 {
+        let fraction =
+            (self.client_anger_level as f32 / AngerLevel::ANGRY_MINIMUM as f32).clamp(0.0, 1.0);
+        40 - (30.0 * fraction).floor() as i32
+    }
+
+    /// `Warden.tick()` 的客户端心跳与触须动画推进：服务端也记下这两个计数器，
+    /// 供同步层读取；官方只在客户端播心跳声，这里不额外发声音事件。
+    ///
+    /// The client-side heartbeat and tendril animation counters from `Warden.tick()`:
+    /// the server tracks them too for the sync layer; vanilla plays the heartbeat
+    /// sound only on the client, so no extra sound event is emitted here.
+    pub fn tick_animations(&mut self, tick_count: i32) {
+        self.tendril_animation = self.tendril_animation.saturating_sub(1);
+        self.heart_animation = self.heart_animation.saturating_sub(1);
+        let delay = self.heart_beat_delay();
+        if delay > 0 && tick_count % delay == 0 {
+            self.heart_animation = 10;
+        }
+    }
 }
 
 /// `Warden.createAttributes()`：`Monster.createMonsterAttributes()` 上覆盖六个值。
@@ -442,5 +466,26 @@ mod tests {
         assert_eq!(MobType::Warden.sound_volume(), 4.0);
         assert!(MobType::Warden.fire_immune());
         assert!(!MobType::Warden.removes_when_far_away());
+    }
+
+    /// `getHeartBeatDelay` 与客户端心跳动画计数。
+    ///
+    /// `getHeartBeatDelay` and the client heartbeat animation counter.
+    #[test]
+    fn heart_beat_delay_follows_the_client_anger_level() {
+        let mut state = Warden::default();
+        assert_eq!(state.heart_beat_delay(), 40);
+        state.client_anger_level = 40;
+        assert_eq!(state.heart_beat_delay(), 25);
+        state.client_anger_level = 80;
+        assert_eq!(state.heart_beat_delay(), 10);
+        state.client_anger_level = 150;
+        assert_eq!(state.heart_beat_delay(), 10);
+        state.tendril_animation = 10;
+        state.tick_animations(10);
+        assert_eq!(state.tendril_animation, 9);
+        assert_eq!(state.heart_animation, 10);
+        state.tick_animations(11);
+        assert_eq!(state.heart_animation, 9);
     }
 }
