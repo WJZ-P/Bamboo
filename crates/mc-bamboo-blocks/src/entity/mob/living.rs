@@ -124,6 +124,10 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Creeper {
         super::creeper::tick(me, mob, ctx);
     }
+    // `SulfurCube.tick` 在 `super.tick()` 之前推进导火索 / 红石点燃。
+    if mob.mob_type == super::MobType::SulfurCube {
+        super::sulfur_cube::tick(me, mob, ctx);
+    }
     // `ShoulderRidingEntity.tick`：上肩冷却先加一。
     // `ShoulderRidingEntity.tick`: the shoulder cooldown goes up first.
     if mob.mob_type == super::MobType::Parrot {
@@ -207,8 +211,9 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
         mob.goals.set_control_flag(Flag::Jump, free);
         mob.goals.set_control_flag(Flag::Look, free);
     }
-    // `AbstractCubeMob.tick`：`super.tick()` 之后的落地判断。
-    // `AbstractCubeMob.tick`: the landing check after `super.tick()`.
+    // `AbstractCubeMob.tick`：`super.tick()` 之后的落地判断。硫磺方块怪的
+    // `getParticleType()` 是固定的 `sulfur_cube_goo`，这里用同一套取数顺序，
+    // 声音换成它自己的 squish / bounce。
     if matches!(
         mob.mob_type,
         super::MobType::Slime | super::MobType::SulfurCube
@@ -2299,7 +2304,11 @@ fn travel_in_air(
     // 0.91 的空气阻力，而不是 0.98。
     // `LivingEntity.travelInAir`: an `omnidirectionalAirMover()` (parrot, bee) uses the
     // 0.91 air drag vertically instead of 0.98.
-    let vertical = if matches!(mob.mob_type, super::MobType::Parrot | super::MobType::Bee) {
+    // `SulfurCube.omnidirectionalAirMover()` 是 `hasBodyItem()`，装了方块时
+    // 竖直方向也用 0.91 的空气阻力。
+    let vertical = if matches!(mob.mob_type, super::MobType::Parrot | super::MobType::Bee)
+        || (mob.mob_type == super::MobType::SulfurCube && super::sulfur_cube::has_body_item(mob))
+    {
         horizontal_air
     } else {
         modified_friction(0.98, air_drag)
@@ -2773,6 +2782,9 @@ pub(crate) fn hurt_server(
     } else {
         amount
     };
+    if mob.mob_type == super::MobType::SulfurCube {
+        super::sulfur_cube::prime_on_hurt(me, mob, &source);
+    }
     if mob.mob_type == super::MobType::IronGolem {
         return super::iron_golem::hurt_server(me, mob, ctx, source, amount);
     }

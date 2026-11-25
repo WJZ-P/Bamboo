@@ -8,6 +8,7 @@
 //! archetype table, the swallowed block, the fuse and the controls that stop
 //! jumping/turning once a block is equipped.
 
+use mc_bamboo_core::Vec3;
 use mc_bamboo_data::{entity_types, registries::attribute, tags::item_tags};
 use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
 
@@ -411,6 +412,10 @@ pub fn set_size(me: &mut Entity, mob: &mut Mob, size: i32, update_health: bool) 
             let _ = me.random.next_int_bounded(20);
         }
     }
+    // 官方 `AbstractCubeMob.setSize` 走 `getAttribute(...)`，会懒创建这两个实例，
+    // 存档时因此多写两条 `attributes`。
+    mob.attributes.instance(attribute::MAX_HEALTH);
+    mob.attributes.instance(attribute::MOVEMENT_SPEED);
     set_cube_mob_health(mob, actual);
     mob.attributes.set_base(
         attribute::MOVEMENT_SPEED,
@@ -494,12 +499,12 @@ pub fn apply_modifiers(mob: &mut Mob, old: &[Archetype], new: &[Archetype]) {
             ),
             (
                 attribute::FRICTION_MODIFIER,
-                facts.friction,
+                facts.friction - 1.0,
                 super::attributes::Operation::AddMultipliedTotal,
             ),
             (
                 attribute::AIR_DRAG_MODIFIER,
-                facts.air_drag,
+                facts.air_drag - 1.0,
                 super::attributes::Operation::AddMultipliedTotal,
             ),
         ];
@@ -630,10 +635,20 @@ pub fn is_swallowable(stack: &ItemStack) -> bool {
 /// item changes. Vanilla removes the old modifiers, clears the effects, then adds
 /// every newly matching archetype's modifiers (later matches overwrite singles).
 pub fn collect_equipment_changes(mob: &mut Mob, new_body: ItemStack) {
+    let old_archetypes = std::mem::take(&mut mob.sulfur_cube.archetypes);
     let state = &mut mob.sulfur_cube;
     state.body = new_body.clone();
     mob.equipment.set(EquipmentSlot::Body, new_body.clone());
     let matching = matching_archetypes(&new_body);
+    // `collectEquipmentChanges`：装了方块就 `removeAllGoals(goal -> true)` 并把
+    // speed 清零；卸下时 `registerGoals()` 重建目标表。
+    if !new_body.is_empty() {
+        mob.goals.clear_running();
+        mob.speed = 0.0;
+    } else {
+        let mut navigation = mob.navigation.clone();
+        mob.goals = goals(&mut navigation);
+    }
     state.floats_in_liquids = false;
     state.explosion = None;
     state.contact_damages.clear();
@@ -653,7 +668,8 @@ pub fn collect_equipment_changes(mob: &mut Mob, new_body: ItemStack) {
         state.knockback_modifiers = facts.knockback_modifiers;
         state.sound_settings = facts.sound_settings;
     }
-    state.archetypes = matching;
+    apply_modifiers(mob, &old_archetypes, &matching);
+    mob.sulfur_cube.archetypes = matching;
 }
 
 /// `equipItem`：成年、且还没吞过同种物品时把 1 个放进 BODY。
@@ -768,6 +784,285 @@ pub fn finalize_spawn(
         super::spawn::finalize_mob(random, mob);
         set_size(me, mob, if baby { 1 } else { 2 }, true);
     });
+}
+
+/// `AbstractCubeMob.tick` 在硫磺方块怪上的落地段：按 `sulfur_cube_goo`
+/// 粒子的个数取两笔 `nextFloat`，再取两次定音高；声音按大小和 BODY 分派。
+///
+/// The sulfur cube's landing branch of `AbstractCubeMob.tick`.
+pub fn after_tick(me: &mut Entity, mob: &mut Mob) {
+    if me.on_ground && !mob.cube.was_on_ground {
+        let count = me.dimensions.0 * 16.0;
+        let mut index = 0;
+        while (index as f32) < count {
+            me.random.next_float();
+            me.random.next_float();
+            index += 1;
+        }
+        let first = me.random.next_float();
+        let second = me.random.next_float();
+        let pitch = ((first - second) * 0.2 + 1.0) * if slime::is_tiny(mob) { 1.4 } else { 0.8 };
+        super::living::play_sound(me, mob, squish_sound(mob), slime::sound_volume(mob), pitch);
+    }
+    mob.cube.was_on_ground = me.on_ground;
+}
+
+/// `SulfurCubeContent`：把 BODY 槽里的物品包成一个模板组件，桶装时
+/// `copyFrom` 到桶物品上。
+///
+/// `SulfurCubeContent`: wrap the BODY item into an `ItemStackTemplate` component.
+pub fn content_of(mob: &Mob) -> Option<mc_bamboo_protocol::components::stack::ItemStackTemplate> {
+    if mob.sulfur_cube.body.is_empty() {
+        return None;
+    }
+    Some(mc_bamboo_protocol::components::stack::ItemStackTemplate {
+        item: mob.sulfur_cube.body.item,
+        count: 1,
+        components: mob.sulfur_cube.body.patch(),
+    })
+}
+
+/// `applyImplicitComponent(SULFUR_CUBE_CONTENT)`：把组件里的物品放回 BODY 槽。
+pub fn set_content(
+    mob: &mut Mob,
+    template: &mc_bamboo_protocol::components::stack::ItemStackTemplate,
+) {
+    let mut stack = mc_bamboo_protocol::item::ItemStack::new(template.item, template.count.max(1));
+    for (kind, entry) in template.components.entries() {
+        if let mc_bamboo_protocol::components::PatchEntry::Set(value) = entry {
+            let mut bytes = Vec::new();
+            value.write(&mut bytes);
+            stack.added.push((*kind, bytes));
+        } else {
+            stack.removed.push(*kind);
+        }
+    }
+    collect_equipment_changes(mob, stack);
+}
+
+/// `SulfurCube.mobInteract`：幼年用 slime_ball 长大；点火 / 火焰弹点燃可爆炸原型；
+/// 剪刀吐出吞下的方块并设 100 刻冷却；可吞物品进 BODY 并消费一个。
+///
+/// `SulfurCube.mobInteract`: a baby grows on slime balls; flint / fire charges prime
+/// explosive archetypes; shears eject the swallowed block and set the 100-tick
+/// pickup cooldown; swallowable items enter BODY and one is consumed.
+pub fn interact(
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &super::interact::MobInteractRequest,
+) -> Option<super::interact::MobInteraction> {
+    use crate::InteractionResult;
+    use mc_bamboo_data::{items, tags::item_tags};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let held = &req.held;
+    if mob.is_baby() {
+        if crate::state::item_is_tagged(held.item, item_tags::SULFUR_CUBE_FOOD) {
+            // `getSpeedUpSecondsWhenFeeding(-age)`：int 除法先算，再乘 0.1F 截成 int。
+            let seconds = (((-mob.age) / 20) as f32 * 0.1_f32) as i32;
+            super::interact::age_up(me, mob, seconds, true);
+            crate::entity::mob::living::play_sound(
+                me,
+                mob,
+                "minecraft:entity.small_sulfur_cube.eat",
+                1.0,
+                1.0,
+            );
+            return Some(super::interact::MobInteraction {
+                result: InteractionResult::Success,
+                shrink_held: !req.creative,
+                ..super::interact::MobInteraction::pass()
+            });
+        }
+        return Some(super::interact::MobInteraction::pass());
+    }
+    if is_primed(&mob.sulfur_cube) {
+        return Some(super::interact::MobInteraction::pass());
+    }
+    if can_explode(mob) && (held.item == items::FLINT_AND_STEEL || held.item == items::FIRE_CHARGE)
+    {
+        prime(me, mob, false);
+        return Some(super::interact::MobInteraction {
+            result: InteractionResult::SuccessServer,
+            shrink_held: held.item == items::FIRE_CHARGE && !req.creative,
+            damage_held: held.item == items::FLINT_AND_STEEL,
+            ..super::interact::MobInteraction::pass()
+        });
+    }
+    if held.item == items::SHEARS && has_body_item(mob) {
+        let old = mob.sulfur_cube.body.clone();
+        mob.sulfur_cube.pickup_timer = PICKUP_TIMER_DURATION;
+        collect_equipment_changes(mob, ItemStack::empty());
+        crate::entity::mob::living::play_sound(me, mob, EJECT_SOUND, 1.0, 1.0);
+        return Some(super::interact::MobInteraction {
+            result: InteractionResult::Success,
+            shear: true,
+            damage_held: true,
+            drop_stack: Some(old),
+            ..super::interact::MobInteraction::pass()
+        });
+    }
+    if is_swallowable(held) && equip_item(mob, held) {
+        crate::entity::mob::living::play_sound(me, mob, ABSORB_SOUND, 1.0, 1.0);
+        return Some(super::interact::MobInteraction {
+            result: InteractionResult::SuccessServer,
+            shrink_held: !req.creative,
+            ..super::interact::MobInteraction::pass()
+        });
+    }
+    None
+}
+
+/// `SulfurCube.tick`：先 `tickFuse()`，再 `primeWhenOnPoweredPosition()`，
+/// 最后才是父类 tick（父类那一段已经在 `living::tick_mob` 里）。
+/// `tickFuse` 把 fuse 从 120 减到 0，归零那一刻 `ExplosionInteraction.TNT`
+/// 走 [`Command::ExplodeMob`] 落地，然后 `discard()`。
+///
+/// `SulfurCube.tick`: `tickFuse()` then `primeWhenOnPoweredPosition()` ahead of
+/// the parent tick (which `living::tick_mob` runs). At fuse zero it emits a TNT
+/// interaction explosion and discards itself.
+pub fn tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn crate::entity::ctx::EntityCtx) {
+    use crate::entity::{EntityKind, EntityPublic, ctx::Command};
+    let state = &mut mob.sulfur_cube;
+    if state.pickup_timer > 0 {
+        state.pickup_timer -= 1;
+    }
+    if state.push_sound_cooldown > 0 {
+        state.push_sound_cooldown -= 1;
+    }
+    if state.fuse > 0 {
+        state.fuse -= 1;
+    }
+    let Some(data) = state.explosion else {
+        return;
+    };
+    if state.fuse == 0 {
+        let center = Vec3::new(me.position.x, me.y_at(0.0625), me.position.z);
+        let radius = data.power;
+        state.fuse = -1;
+        mob.dead = true;
+        let mut whole = me.clone();
+        whole.kind = EntityKind::Mob(Box::new(mob.clone()));
+        let source: Box<EntityPublic> = Box::new(whole.split().public);
+        ctx.emit(
+            Command::ExplodeMob {
+                center,
+                radius,
+                source,
+            },
+            me,
+        );
+        me.discard();
+        return;
+    }
+    // `primeWhenOnPoweredPosition`：能爆炸、活着、没点燃，脚下有红石信号就点燃。
+    if can_explode(mob)
+        && ctx
+            .blocks()
+            .best_own_or_neighbour_signal(me.block_position())
+            != 0
+    {
+        prime(me, mob, false);
+    }
+}
+
+/// `SulfurCube.canExplode()`：有爆炸数据、活着、还没点燃。
+pub fn can_explode(mob: &Mob) -> bool {
+    mob.sulfur_cube.explosion.is_some() && mob.health > 0.0 && !is_primed(&mob.sulfur_cube)
+}
+
+/// `SulfurCube.primeTime(shortFuse)`：gamerule `tntExplodes` 开着时把 fuse
+/// 设成原型的 fuse（短引信按 `PrimedTnt.getRandomShortFuse` 抽），同步
+/// `MAX_FUSE`、永久无敌并播 TNT_PRIMED。
+///
+/// `SulfurCube.primeTime(shortFuse)`: with `tntExplodes` on, set the fuse from
+/// the archetype (short fuse uses `PrimedTnt.getRandomShortFuse`), sync MAX_FUSE,
+/// make the cube permanently invulnerable and play TNT_PRIMED.
+pub fn prime(me: &mut Entity, mob: &mut Mob, short_fuse: bool) {
+    let Some(data) = mob.sulfur_cube.explosion else {
+        return;
+    };
+    if mob.health <= 0.0 || is_primed(&mob.sulfur_cube) {
+        return;
+    }
+    let fuse = data.fuse;
+    let fuse = if short_fuse {
+        // `PrimedTnt.getRandomShortFuse(fuse, random)`:
+        // nextInt(max(1, fuse / 4)) + fuse / 8。
+        let bound = (fuse / 4).max(1);
+        me.random.next_int_bounded(bound) + fuse / 8
+    } else {
+        fuse
+    };
+    let state = &mut mob.sulfur_cube;
+    state.fuse = fuse;
+    state.max_fuse = fuse;
+    mob.invulnerable = true;
+    crate::entity::mob::living::play_sound(me, mob, "minecraft:entity.tnt.primed", 1.0, 1.0);
+}
+
+/// `SulfurCube.hurtServer` 的点燃分支：装了方块且能爆炸、未点燃时，
+/// 火焰 / 着火箭 -> 普通引信，爆炸伤害 -> 短引信。
+pub fn prime_on_hurt(me: &mut Entity, mob: &mut Mob, source: &super::DamageSource) -> bool {
+    if !has_body_item(mob) || !can_explode(mob) {
+        return false;
+    }
+    if source.kind.is_fire()
+        || source.kind == super::DamageKind::Arrow && source.arrow_ignite_ticks > 0
+    {
+        prime(me, mob, false);
+        return true;
+    }
+    if source.kind == super::DamageKind::Explosion
+        || source.kind == super::DamageKind::PlayerExplosion
+    {
+        prime(me, mob, true);
+        return true;
+    }
+    false
+}
+
+/// `SulfurCube.applyContactDamage` 的玩家那一半：HOT 原型在真被推到时
+/// 造成 1 点 `sulfur_cube_hot` 伤害。`attributeToSource=false` 时给玩家
+/// 归因到这只立方体，其它实体不归因。
+///
+/// The player half of `SulfurCube.applyContactDamage`: the HOT archetype deals
+/// one point of `sulfur_cube_hot` damage on contact.
+pub fn contact_player_touch(
+    world: &mut crate::world::World<'_>,
+    uid: crate::entity::EntityUid,
+    player: crate::entity::EntityUid,
+) -> bool {
+    use crate::entity::mob::{DamageKind, DamageSource};
+    let Some(entity) = world.entity(uid) else {
+        return false;
+    };
+    let Some(mob) = entity.kind.mob() else {
+        return false;
+    };
+    if mob.mob_type != MobType::SulfurCube || !has_body_item(mob) {
+        return false;
+    }
+    let damages: Vec<f32> = mob
+        .sulfur_cube
+        .contact_damages
+        .iter()
+        .map(|entry| entry.amount)
+        .collect();
+    if damages.is_empty() {
+        return false;
+    }
+    let attacker = entity.clone().split().public;
+    let mut source = DamageSource::environment(DamageKind::SulfurCubeHot);
+    source.attacker = Some(uid);
+    source.direct = Some(uid);
+    source.attacker_uuid = Some(mob.uuid);
+    source.position = Some(entity.position);
+    let mut hurt = false;
+    for amount in damages {
+        hurt |= world.hurt_player_from_mob(player, source, amount, Some(&attacker));
+    }
+    hurt
 }
 
 #[cfg(test)]

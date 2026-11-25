@@ -64,6 +64,7 @@ mod skeleton_spawn;
 mod small_mob;
 mod squid;
 mod structure_spawn;
+mod sulfur_cube;
 mod thunder;
 mod undead_horse;
 mod villager;
@@ -165,6 +166,8 @@ enum Line {
     GolemSave(Box<golem::GolemSaveCase>),
     SmallMob(Box<small_mob::SmallMobCase>),
     SmallMobSave(small_mob::SmallMobSaveCase),
+    SulfurCube(Box<sulfur_cube::SulfurCubeCase>),
+    SulfurCubeSave(sulfur_cube::SulfurCubeSaveCase),
     SmallMobDeath(small_mob::SmallMobDeathCase),
     VillagerSpawn(villager::VillagerSpawnCase),
     VillagerSave(villager::VillagerSaveCase),
@@ -1751,6 +1754,8 @@ impl Report {
                 Line::GolemSave(case) => self.replay_golem_save(&case),
                 Line::SmallMob(case) => self.replay_small_mob(&case),
                 Line::SmallMobSave(case) => self.replay_small_mob_save(&case),
+                Line::SulfurCube(case) => self.replay_sulfur_cube(&case),
+                Line::SulfurCubeSave(case) => self.replay_sulfur_cube_save(&case),
                 Line::SmallMobDeath(case) => self.replay_small_mob_death(&case),
                 Line::VillagerSpawn(case) => self.replay_villager_spawn(&case),
                 Line::VillagerSave(case) => self.replay_villager_save(&case),

@@ -1377,6 +1377,16 @@ impl GoalSelector {
         }
     }
 
+    /// `GoalSelector.removeAllGoals(predicate)`：谓词恒真时清掉所有目标，
+    /// 同时释放三面标志位锁。`SulfurCube.collectEquipmentChanges` 装上方块时用。
+    pub fn clear_running(&mut self) {
+        for wrapped in &mut self.goals {
+            wrapped.running = false;
+        }
+        self.locked = [None; 4];
+        self.goals.clear();
+    }
+
     /// 对拍的改坏确认用：把目标按优先级排序（官方按注册顺序）。
     pub fn sort_by_priority_for_oracle(&mut self) {
         self.goals.sort_by_key(|wrapped| wrapped.priority);

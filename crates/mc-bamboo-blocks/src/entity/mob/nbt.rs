@@ -279,10 +279,16 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "equipment", mob.equipment.equipment_tag());
     }
     // ---- Mob ----
+    // `SulfurCube.canPickUpLoot()` = `!hasBodyItem()`，存档写的是覆写后的值。
+    let can_pick_up_loot = if mob.mob_type == MobType::SulfurCube {
+        !super::sulfur_cube::has_body_item(mob)
+    } else {
+        mob.can_pick_up_loot
+    };
     put(
         &mut out,
         "CanPickUpLoot",
-        Tag::Byte(i8::from(mob.can_pick_up_loot)),
+        Tag::Byte(i8::from(can_pick_up_loot)),
     );
     put(
         &mut out,

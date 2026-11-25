@@ -848,7 +848,16 @@ impl MobType {
             && !self.is_water_animal()
             && !matches!(
                 self,
-                Self::Bat | Self::Phantom | Self::IronGolem | Self::SnowGolem | Self::Villager
+                Self::Bat
+                | Self::Phantom
+                | Self::IronGolem
+                | Self::SnowGolem
+                | Self::Villager
+                // `AbstractCubeMob` 一支是 `AgeableMob` 但不是 `Animal`：
+                // 没有 `InLove` / `LoveCause` 存档键，也没有求爱目标。
+                // The cube-mob branch is `AgeableMob` but not `Animal`.
+                | Self::Slime
+                | Self::SulfurCube
             )
     }
 
@@ -1742,6 +1751,12 @@ pub enum DamageKind {
     ///
     /// A lightning strike, `minecraft:lightning_bolt`.
     LightningBolt,
+    /// HOT 原型硫磺方块怪的接触伤害，`minecraft:sulfur_cube_hot`。
+    /// 数据文件里是 burning、exhaustion 0.1、scaling
+    /// `when_caused_by_living_non_player`、message_id `sulfurCubeHot`。
+    ///
+    /// Contact damage of the HOT sulfur-cube archetype.
+    SulfurCubeHot,
 }
 
 impl DamageKind {
@@ -1780,6 +1795,7 @@ impl DamageKind {
             Self::PlayerExplosion => "minecraft:player_explosion",
             Self::EnderPearl => "minecraft:ender_pearl",
             Self::LightningBolt => "minecraft:lightning_bolt",
+            Self::SulfurCubeHot => "minecraft:sulfur_cube_hot",
         }
     }
 
@@ -1838,6 +1854,7 @@ impl DamageKind {
             Self::PlayerExplosion => "explosion.player",
             Self::EnderPearl => "fall",
             Self::LightningBolt => "lightningBolt",
+            Self::SulfurCubeHot => "sulfurCubeHot",
         }
     }
 
@@ -1878,6 +1895,7 @@ impl DamageKind {
             Self::PlayerExplosion,
             Self::EnderPearl,
             Self::LightningBolt,
+            Self::SulfurCubeHot,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -1987,7 +2005,8 @@ impl DamageKind {
             | Self::HotFloor
             | Self::SweetBerryBush
             | Self::DryOut
-            | Self::LightningBolt => TENTH,
+            | Self::LightningBolt
+            | Self::SulfurCubeHot => TENTH,
             _ => 0.0,
         }
     }

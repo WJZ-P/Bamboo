@@ -230,6 +230,13 @@ pub fn interact(
     {
         return outcome;
     }
+    // `SulfurCube.mobInteract`：幼年喂食、点燃、剪切和吞方块四支；桶装在
+    // `bucketable` 那一层单独处理，这里不重复。
+    if mob.mob_type == MobType::SulfurCube
+        && let Some(outcome) = super::sulfur_cube::interact(me, mob, req)
+    {
+        return outcome;
+    }
     if mob.mob_type.is_equine() {
         return super::equine::interact(me, mob, req);
     }
