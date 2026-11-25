@@ -2104,6 +2104,8 @@ impl Report {
                 .iter()
                 .enumerate()
                 .map(|(index, player)| PlayerView {
+                    shoulder_left: None,
+                    shoulder_right: None,
                     // 官方一侧的玩家 UUID 是 (1, 2 + 下标)；狼认主人要用它。
                     // The official players use UUID (1, 2 + index); wolves match owners by it.
                     uuid: Some(((1_u128 << 64) | (2 + index as u128)).to_be_bytes()),

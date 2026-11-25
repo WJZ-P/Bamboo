@@ -240,6 +240,8 @@ mod tests {
         level.light = Some((15, 0));
         level.random = crate::LevelRandom::new(seed);
         level.players.push(crate::entity::ctx::PlayerView {
+            shoulder_left: None,
+            shoulder_right: None,
             uid: 1,
             yaw: 0.0,
             pitch: 0.0,

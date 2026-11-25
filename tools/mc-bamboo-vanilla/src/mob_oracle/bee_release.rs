@@ -38,6 +38,8 @@ struct BeeReleaseFrame {
 
 fn player(index: i32) -> PlayerView {
     PlayerView {
+        shoulder_left: None,
+        shoulder_right: None,
         uuid: Some(((1_u128 << 64) | (2 + index as u128)).to_be_bytes()),
         uid: (1 << 24) + 1024 + index,
         yaw: 0.0,

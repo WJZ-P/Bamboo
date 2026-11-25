@@ -2590,6 +2590,8 @@ mod tests {
 
     fn return_player(uid: i32, position: Vec3, alive: bool) -> crate::entity::ctx::PlayerView {
         crate::entity::ctx::PlayerView {
+            shoulder_left: None,
+            shoulder_right: None,
             uid,
             uuid: Some([1; 16]),
             position,

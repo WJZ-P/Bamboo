@@ -773,9 +773,14 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::GuardianElderEffect { .. } => 30,
         Effect::VibrationParticle { .. } => 31,
         Effect::Explode { .. } => 32,
+        Effect::PlayerShoulder { .. } => 33,
     };
     tag.hash(&mut hasher);
     match *effect {
+        Effect::PlayerShoulder { player, ref tag } => {
+            player.hash(&mut hasher);
+            format!("{tag:?}").hash(&mut hasher);
+        }
         Effect::Destroyed {
             pos,
             state,

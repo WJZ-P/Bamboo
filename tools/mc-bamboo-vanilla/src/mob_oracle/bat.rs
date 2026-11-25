@@ -67,6 +67,8 @@ struct BatState {
 
 pub(super) fn player_view(uid: i32, [x, y, z]: [f64; 3]) -> PlayerView {
     PlayerView {
+        shoulder_left: None,
+        shoulder_right: None,
         uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
         uid,
         yaw: 0.0,

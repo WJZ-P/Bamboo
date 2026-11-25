@@ -385,7 +385,7 @@ impl ParrotGoal {
         }
     }
 
-    pub(super) fn tick(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) {
+    pub(super) fn tick(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         match self {
             Self::Wander { .. } => {}
             Self::LandOnShoulder {
@@ -400,14 +400,17 @@ impl ParrotGoal {
                 if !me.bounding_box().intersects(owner_box(&owner)) {
                     return;
                 }
-                // 官方 `setEntityOnShoulder` 把鹦鹉存进玩家的 `ShoulderEntityLeft` / `Right`
-                // 并 `discard()`。Bamboo 还没有玩家肩膀存档和同步，先不下车，避免鹦鹉凭空
-                // 消失（见 README 的已知限制）。
-                // Vanilla `setEntityOnShoulder` stores the parrot in the player's
-                // `ShoulderEntityLeft` / `Right` and `discard()`s it. Bamboo has no player
-                // shoulder storage or sync yet, so the parrot stays instead of vanishing
-                // (see the README's known limits).
-                *sitting_on_shoulder = false;
+                // 左右肩都满了 `setEntityOnShoulder` 会返回 false，别把鹦鹉弄丢。
+                if owner.shoulder_left.is_some() && owner.shoulder_right.is_some() {
+                    return;
+                }
+                // 官方 `setEntityOnShoulder`：把鹦鹉存进玩家的肩膀槽并 `discard()`。
+                // 命令落地时序列化整只鹦鹉、写玩家肩膀、把实体从世界移除。
+                ctx.emit(
+                    crate::entity::ctx::Command::SetEntityOnShoulder { player: owner.uid },
+                    me,
+                );
+                *sitting_on_shoulder = true;
             }
         }
     }

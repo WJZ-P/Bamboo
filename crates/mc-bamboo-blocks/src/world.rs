@@ -4938,6 +4938,7 @@ mod tests {
                 | Effect::EnderPearlTeleport { .. }
                 | Effect::GuardianElderEffect { .. }
                 | Effect::Explode { .. }
+                | Effect::PlayerShoulder { .. }
                 | Effect::VibrationParticle { .. } => None,
             })
             .collect()

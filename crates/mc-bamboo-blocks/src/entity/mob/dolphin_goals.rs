@@ -526,6 +526,8 @@ mod tests {
     /// 一名在 (x, y, z) 游泳的玩家。
     fn swimmer(uid: EntityUid, position: Vec3) -> PlayerView {
         PlayerView {
+            shoulder_left: None,
+            shoulder_right: None,
             uid,
             uuid: None,
             position,
@@ -622,6 +624,8 @@ mod tests {
     fn a_walking_player_does_not_start_the_goal() {
         let mut level = TestLevel::new();
         level.players.push(PlayerView {
+            shoulder_left: None,
+            shoulder_right: None,
             swimming: false,
             sprinting: false,
             ..swimmer(78, Vec3::new(6.5, 64.0, 0.5))

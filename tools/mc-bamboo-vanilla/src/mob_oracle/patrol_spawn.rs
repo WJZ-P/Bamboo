@@ -215,6 +215,8 @@ fn fixture(case: &Case) -> MobLevel {
 
 fn player() -> PlayerView {
     PlayerView {
+        shoulder_left: None,
+        shoulder_right: None,
         uid: 1,
         yaw: 0.0,
         pitch: 0.0,

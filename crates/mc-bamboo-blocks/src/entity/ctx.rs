@@ -497,6 +497,12 @@ pub struct PlayerView {
     ///
     /// Whether the target has slowness, poison or weakness, read by witches.
     pub effects: TargetEffects,
+    /// 左右肩上鹦鹉的品种 ID；`None` 表示空肩。鹦鹉上肩前判断有没有空位。
+    ///
+    /// Variant ids of the parrots on the left / right shoulder; `None` is an
+    /// empty shoulder, checked before a parrot perches.
+    pub shoulder_left: Option<i32>,
+    pub shoulder_right: Option<i32>,
 }
 
 /// 玩家的 `getLastHurtByMob` / `getLastHurtMob` 和两个时间戳（玩家自己的 tick 数），
@@ -965,6 +971,15 @@ pub struct LandFacts {
 /// `Spawn`、`Remove`、`ScheduleTick`、`Depart`。这次不实现。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    /// `ShoulderRidingEntity.setEntityOnShoulder`：这只鹦鹉（me）落到玩家肩上。
+    /// 落地时把整只鹦鹉序列化成 NBT 交给游戏层，随后把鹦鹉从世界移除。
+    ///
+    /// `ShoulderRidingEntity.setEntityOnShoulder`: this parrot (me) perches on a
+    /// player's shoulder. Landing serializes the whole parrot to NBT for the game
+    /// layer, then removes the parrot from the world.
+    SetEntityOnShoulder {
+        player: EntityUid,
+    },
     /// 实体移动 / 死亡等发出的游戏事件。并行驱动攒到落地阶段按 uid 顺序投递。
     GameEvent {
         event: crate::game_event::GameEvent,
@@ -1595,6 +1610,14 @@ pub enum Command {
 /// 改发出者，没有任何回写补丁。
 pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
     match command {
+        Command::SetEntityOnShoulder { player } => {
+            // 落地时 `me` 是完整的鹦鹉实体：按官方 `Entity.save` 写整份 NBT（含 `id`），
+            // 交给游戏层存进玩家肩膀，再把鹦鹉从世界移除。
+            let tag = super::mob::nbt::write_mob(&me.clone().split())
+                .unwrap_or(mc_bamboo_nbt::Tag::Compound(Vec::new()));
+            world.push_effect(crate::Effect::PlayerShoulder { player, tag });
+            me.discard();
+        }
         Command::GameEvent {
             event,
             position,

@@ -463,6 +463,13 @@ pub(crate) fn on_player_action(
 pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Effect]) {
     for effect in effects {
         match *effect {
+            Effect::PlayerShoulder { player, ref tag } => {
+                // `ShoulderRidingEntity.setEntityOnShoulder`：把鹦鹉 NBT 存进玩家肩膀。
+                let id = crate::inbound::PlayerId(player);
+                if let Some(shouldered) = region.players.get_mut(&id) {
+                    crate::player_shoulder::set_entity_on_shoulder(shouldered, tag.clone());
+                }
+            }
             Effect::Destroyed {
                 pos,
                 state,

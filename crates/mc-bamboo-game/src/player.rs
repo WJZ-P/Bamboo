@@ -566,6 +566,8 @@ impl Player {
             pitch: self.pitch,
             combat: self.combat_memory.view(self.entity_ticks),
             effects: mc_bamboo_blocks::entity::ctx::TargetEffects::from_map(&self.effects),
+            shoulder_left: crate::player_shoulder::variant_of(&self.shoulder_left),
+            shoulder_right: crate::player_shoulder::variant_of(&self.shoulder_right),
         }
     }
 

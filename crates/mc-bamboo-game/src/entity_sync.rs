@@ -72,19 +72,6 @@ struct Metadata {
     shoulder_right: Option<i32>,
 }
 
-/// `ShoulderEntity*` 的 `Variant`（旧版整数编码）；空肩 / 坏值返回 `None`。
-fn shoulder_variant(tag: &Option<mc_bamboo_nbt::Tag>) -> Option<i32> {
-    let mc_bamboo_nbt::Tag::Compound(entries) = tag.as_ref()? else {
-        return None;
-    };
-    entries.iter().find_map(|(key, value)| {
-        (key == "Variant" && matches!(value, mc_bamboo_nbt::Tag::Int(_))).then(|| match value {
-            mc_bamboo_nbt::Tag::Int(variant) => *variant,
-            _ => 0,
-        })
-    })
-}
-
 impl Metadata {
     /// 官方定义的默认值。血量的默认值是 1，玩家的构造函数才设成 20，所以配对时总要发。
     const DEFAULT: Self = Self {
@@ -117,8 +104,8 @@ impl Metadata {
             model_customisation: player.client.model_customisation,
             effect_particles: player.effects.particle_colors(),
             effect_ambience: player.effects.all_ambient(),
-            shoulder_left: shoulder_variant(&player.shoulder_left),
-            shoulder_right: shoulder_variant(&player.shoulder_right),
+            shoulder_left: crate::player_shoulder::variant_of(&player.shoulder_left),
+            shoulder_right: crate::player_shoulder::variant_of(&player.shoulder_right),
         }
     }
 
