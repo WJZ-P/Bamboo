@@ -99,10 +99,13 @@ pub mod tame;
 pub mod throttle;
 pub mod thunder;
 pub(crate) mod timing;
+pub mod trader_llama;
 pub mod turtle;
 pub mod villager;
 pub mod villager_ai;
 pub mod vindicator;
+pub mod wandering_trader;
+pub mod wandering_trader_spawner;
 pub mod warden;
 pub mod warden_ai;
 pub mod warden_spawn;
@@ -260,13 +263,21 @@ pub enum MobType {
     ///
     /// Ravager.
     Ravager,
+    /// 流浪商人，`WanderingTrader`，与村民共用 `AbstractVillager` 交易层。
+    ///
+    /// Wandering trader: shares the `AbstractVillager` trading layer with villagers.
+    WanderingTrader,
+    /// 行商羊驼，`TraderLlama`，继承羊驼、生成时拴在流浪商人身上。
+    ///
+    /// Trader llama: a llama variant leashed to a wandering trader on spawn.
+    TraderLlama,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 68] = [
+    pub const ALL: [Self; 70] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -335,6 +346,8 @@ impl MobType {
         Self::Breeze,
         Self::Vindicator,
         Self::Ravager,
+        Self::WanderingTrader,
+        Self::TraderLlama,
     ];
 
     /// 注册表 ID。
@@ -409,6 +422,8 @@ impl MobType {
             Self::Breeze => ids::BREEZE,
             Self::Vindicator => ids::VINDICATOR,
             Self::Ravager => ids::RAVAGER,
+            Self::WanderingTrader => ids::WANDERING_TRADER,
+            Self::TraderLlama => ids::TRADER_LLAMA,
         }
     }
 
@@ -483,6 +498,8 @@ impl MobType {
             Self::Breeze => "minecraft:breeze",
             Self::Vindicator => "minecraft:vindicator",
             Self::Ravager => "minecraft:ravager",
+            Self::WanderingTrader => "minecraft:wandering_trader",
+            Self::TraderLlama => "minecraft:trader_llama",
         }
     }
 
@@ -542,6 +559,7 @@ impl MobType {
                 | Self::Donkey
                 | Self::Mule
                 | Self::Llama
+                | Self::TraderLlama
                 | Self::Camel
                 | Self::CamelHusk
                 | Self::SkeletonHorse
@@ -600,6 +618,7 @@ impl MobType {
                 | Self::Donkey
                 | Self::Mule
                 | Self::Llama
+                | Self::TraderLlama
                 | Self::SkeletonHorse
                 | Self::ZombieHorse,
                 _,
@@ -677,12 +696,14 @@ impl MobType {
             //
             // `Villager.getDefaultDimensions`: 0.6 x 1.95 with eye height 1.62 as an
             // adult, 0.49 x 0.98 with eye height 0.63 as a baby.
-            (Self::Villager, false) => (
+            // 流浪商人沿用 `AbstractVillager` 的尺寸（成年 0.6 × 1.95 眼高 1.62）。
+            // Wandering traders keep the `AbstractVillager` dimensions.
+            (Self::Villager | Self::WanderingTrader, false) => (
                 mc_bamboo_data::villager::VILLAGER_WIDTH,
                 mc_bamboo_data::villager::VILLAGER_HEIGHT,
                 mc_bamboo_data::villager::VILLAGER_EYE_HEIGHT,
             ),
-            (Self::Villager, true) => (
+            (Self::Villager | Self::WanderingTrader, true) => (
                 mc_bamboo_data::villager::BABY_VILLAGER_WIDTH,
                 mc_bamboo_data::villager::BABY_VILLAGER_HEIGHT,
                 mc_bamboo_data::villager::BABY_VILLAGER_EYE_HEIGHT,
@@ -887,9 +908,12 @@ impl MobType {
     pub const fn removes_when_far_away(self) -> bool {
         // `AbstractGolem.removeWhenFarAway` 恒假。
         // `AbstractGolem.removeWhenFarAway` is always false.
-        // `Warden.removeWhenFarAway()` 恒假，监守者不因距离消失。
-        // `Warden.removeWhenFarAway()` is always false.
-        if matches!(self, Self::IronGolem | Self::SnowGolem | Self::Warden) {
+        // `Warden.removeWhenFarAway()` 和 `WanderingTrader.removeWhenFarAway()` 恒假。
+        // `Warden.removeWhenFarAway()` and `WanderingTrader.removeWhenFarAway()` are always false.
+        if matches!(
+            self,
+            Self::IronGolem | Self::SnowGolem | Self::Warden | Self::WanderingTrader
+        ) {
             return false;
         }
         // 鱿鱼、海豚（`AgeableWaterCreature`）、鱼（`WaterAnimal`）和蝙蝠不是 `Animal`，沿用
@@ -1180,6 +1204,8 @@ impl MobType {
             Self::Breeze => "minecraft:entities/breeze",
             Self::Vindicator => "minecraft:entities/vindicator",
             Self::Ravager => "minecraft:entities/ravager",
+            Self::WanderingTrader => "minecraft:entities/wandering_trader",
+            Self::TraderLlama => "minecraft:entities/trader_llama",
         }
     }
 
@@ -1206,7 +1232,9 @@ impl MobType {
             900
         } else if self.is_equine() {
             400
-        } else if self.is_enemy() || matches!(self, Self::Bat | Self::Villager) {
+        } else if self.is_enemy()
+            || matches!(self, Self::Bat | Self::Villager | Self::WanderingTrader)
+        {
             // `Mob.getAmbientSoundInterval()` 的缺省值；蝙蝠没有覆写。
             // The `Mob.getAmbientSoundInterval()` default, which bats keep.
             80
@@ -1338,6 +1366,10 @@ impl MobType {
             Self::Breeze => None,
             Self::Vindicator => Some("minecraft:entity.vindicator.ambient"),
             Self::Ravager => Some("minecraft:entity.ravager.ambient"),
+            // 交易中的叫声由 `living::ambient_voice` 按交易状态换成 `...trade`。
+            // Trading ambience is switched by `living::ambient_voice` while trading.
+            Self::WanderingTrader => Some("minecraft:entity.wandering_trader.ambient"),
+            Self::TraderLlama => Some("minecraft:entity.llama.ambient"),
         }
     }
 
@@ -1406,6 +1438,8 @@ impl MobType {
             Self::Breeze => Some("minecraft:entity.breeze.hurt"),
             Self::Vindicator => Some("minecraft:entity.vindicator.hurt"),
             Self::Ravager => Some("minecraft:entity.ravager.hurt"),
+            Self::WanderingTrader => Some("minecraft:entity.wandering_trader.hurt"),
+            Self::TraderLlama => Some("minecraft:entity.llama.hurt"),
         }
     }
 
@@ -1474,6 +1508,8 @@ impl MobType {
             Self::Breeze => Some("minecraft:entity.breeze.death"),
             Self::Vindicator => Some("minecraft:entity.vindicator.death"),
             Self::Ravager => Some("minecraft:entity.ravager.death"),
+            Self::WanderingTrader => Some("minecraft:entity.wandering_trader.death"),
+            Self::TraderLlama => Some("minecraft:entity.llama.death"),
         }
     }
 
@@ -1554,6 +1590,10 @@ impl MobType {
             // `AbstractIllager` / `Vindicator` 没有覆写脚步声；劫掠兽有自己的。
             Self::Vindicator => None,
             Self::Ravager => Some("minecraft:entity.ravager.step"),
+            // 流浪商人和村民一样用脚下方块的脚步声。
+            // Wandering traders, like villagers, use the block's step sound.
+            Self::WanderingTrader => None,
+            Self::TraderLlama => Some("minecraft:entity.llama.step"),
         }
     }
 
@@ -1629,6 +1669,8 @@ impl MobType {
             Self::Breeze => items::BREEZE_SPAWN_EGG,
             Self::Vindicator => items::VINDICATOR_SPAWN_EGG,
             Self::Ravager => items::RAVAGER_SPAWN_EGG,
+            Self::WanderingTrader => items::WANDERING_TRADER_SPAWN_EGG,
+            Self::TraderLlama => items::TRADER_LLAMA_SPAWN_EGG,
         }
     }
 
@@ -1703,6 +1745,8 @@ impl MobType {
             Self::Breeze => "entity.minecraft.breeze",
             Self::Vindicator => "entity.minecraft.vindicator",
             Self::Ravager => "entity.minecraft.ravager",
+            Self::WanderingTrader => "entity.minecraft.wandering_trader",
+            Self::TraderLlama => "entity.minecraft.trader_llama",
         }
     }
 
@@ -1738,7 +1782,10 @@ impl MobType {
             // `EntityType.VILLAGER` 是 `MobCategory.MISC`。
             //
             // `EntityType.VILLAGER` is `MobCategory.MISC`.
-            Self::Villager => MobCategory::Misc,
+            // `EntityType.VILLAGER` / `WANDERING_TRADER` 都是 `MobCategory.MISC`。
+            //
+            // `EntityType.VILLAGER` / `WANDERING_TRADER` are `MobCategory.MISC`.
+            Self::Villager | Self::WanderingTrader => MobCategory::Misc,
             _ if self.is_enemy() => MobCategory::Monster,
             _ => MobCategory::Creature,
         }
@@ -3054,10 +3101,16 @@ pub struct Mob {
     ///
     /// The sniffer's state machine and drop-seed tick; default for other mobs.
     pub sniffer: sniffer::Sniffer,
-    /// 旋风人的姿态和长跳计时；别的生物是缺省值。
+    /// 旋风人的姿态；别的生物是缺省值。
     ///
-    /// The breeze's pose and long-jump timer; default for other mobs.
+    /// The breeze's pose; default for other mobs.
     pub breeze: breeze::Breeze,
+    /// 流浪商人的专属状态（交易层共用 [`Self::villager`]）。
+    /// Wandering-trader-specific state (the trading layer is shared with `villager`).
+    pub wandering_trader: wandering_trader::WanderingTrader,
+    /// 行商羊驼的专属状态。
+    /// Trader-llama-specific state.
+    pub trader_llama: trader_llama::TraderLlama,
     /// 骆驼的姿势状态机同步值和冲刺计时。
     ///
     /// The camel's pose state machine synced values and dash timer.
@@ -3228,7 +3281,9 @@ impl Mob {
             MobType::SnowGolem => snow_golem::attributes(),
             MobType::Silverfish => silverfish::attributes(),
             MobType::Endermite => endermite::attributes(),
-            MobType::Villager => Attributes::villager(),
+            // `AbstractVillager.createAttributes()`：流浪商人沿用村民的属性表。
+            // `AbstractVillager.createAttributes()`: the trader shares villager attributes.
+            MobType::Villager | MobType::WanderingTrader => Attributes::villager(),
             MobType::Guardian => guardian::attributes(false),
             MobType::ElderGuardian => guardian::attributes(true),
             MobType::SulfurCube => sulfur_cube::attributes(),
@@ -3252,9 +3307,9 @@ impl Mob {
             // border, and land costs more (the maluses live in `Mob::malus`).
             navigation.flags.amphibious = true;
         }
-        if mob_type == MobType::Llama {
-            // `Llama` 构造函数：`this.getNavigation().setRequiredPathLength(40.0F)`。
-            // `Llama` constructor: `this.getNavigation().setRequiredPathLength(40.0F)`.
+        // `Llama` / `TraderLlama` 构造函数：`setRequiredPathLength(40.0F)`。
+        // The `Llama` / `TraderLlama` constructor sets the required path length to 40.
+        if matches!(mob_type, MobType::Llama | MobType::TraderLlama) {
             navigation.required_path_length = 40.0;
             navigation.update_max_visited_nodes(follow_range);
         }
@@ -3350,6 +3405,8 @@ impl Mob {
             // 监守者是脑驱动，没有 `registerGoals` 覆盖。
             // The warden is brain-driven and has no `registerGoals` override.
             MobType::Warden => GoalSelector::default(),
+            MobType::WanderingTrader => wandering_trader::goals(&mut navigation),
+            MobType::TraderLlama => trader_llama::goals(&mut navigation),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
@@ -3444,6 +3501,8 @@ impl Mob {
             MobType::Endermite => endermite::targets(),
             MobType::Guardian | MobType::ElderGuardian => guardian::target_goals(),
             MobType::Warden => GoalSelector::default(),
+            MobType::WanderingTrader => GoalSelector::default(),
+            MobType::TraderLlama => trader_llama::targets(),
             kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -3650,6 +3709,8 @@ impl Mob {
             nautilus: nautilus::NautilusState::default(),
             sniffer: sniffer::Sniffer::default(),
             breeze: breeze::Breeze::default(),
+            wandering_trader: wandering_trader::WanderingTrader::default(),
+            trader_llama: trader_llama::TraderLlama::default(),
             events: Vec::new(),
             needs_sync: false,
             knockback_sync: false,
@@ -4334,6 +4395,12 @@ pub struct MobPublic {
     ///
     /// The leash holder, sent as `set_entity_link` on pairing.
     pub leash_holder: Option<EntityUid>,
+    /// `WanderingTrader.despawnDelay`：被拴在商人身上的行商羊驼按官方
+    /// `maybeDespawn()` 读牵引者的倒计时。其它生物恒 0。
+    ///
+    /// `WanderingTrader.despawnDelay`: trader llamas read the holder's countdown
+    /// in `maybeDespawn()`; zero for other mobs.
+    pub trader_despawn_delay: i32,
 }
 
 impl MobPublic {
@@ -4477,6 +4544,7 @@ impl MobPublic {
                 .collect(),
             passengers: mob.passengers.clone(),
             leash_holder: leash::leash_holder(mob),
+            trader_despawn_delay: mob.wandering_trader.despawn_delay,
         }
     }
 
