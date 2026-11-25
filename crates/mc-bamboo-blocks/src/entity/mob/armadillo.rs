@@ -418,7 +418,11 @@ fn switch_to_state(mob: &mut Mob, state: State) {
 ///
 /// `canStayRolledUp`: not panicking, not in liquid, not leashed, no rider or vehicle.
 fn can_stay_rolled_up(me: &Entity, mob: &Mob, panicking: bool) -> bool {
-    !panicking && !living::is_in_liquid(me, mob)
+    !panicking
+        && !living::is_in_liquid(me, mob)
+        && !super::leash::is_leashed(mob)
+        && me.vehicle.is_none()
+        && mob.passengers.is_empty()
 }
 
 /// `rollUp`：停在原地、清掉求爱、`makeSound(ROLL)`、换成 `ROLLING`。

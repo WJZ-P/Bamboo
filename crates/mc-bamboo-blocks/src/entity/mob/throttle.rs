@@ -362,13 +362,13 @@ pub fn villager_throttle_exempt(mob: &Mob, now: i64) -> bool {
 /// 4.2 的豁免清单，命中就算全速档。
 ///
 /// 村民在 `PANIC` / `RAID` / `PRE_RAID` / `HIDE`、正在交易或 `HEARD_BELL_TIME` 有效期内
-/// 均豁免降频；拴绳（没有拴绳实体）、活塞推动（实体没有 `PISTON` 移动）还没建模。
-/// 「在水流里」用「浸水且会被水流推」近似：水流矢量不在实体状态里。
+/// 均豁免降频；活塞推动（实体没有 `PISTON` 移动）还没建模。「在水流里」用「浸水且
+/// 会被水流推」近似：水流矢量不在实体状态里。
 ///
 /// The 4.2 exemption list; a hit means the full tick rate. Villagers in `PANIC` /
 /// `RAID` / `PRE_RAID` / `HIDE`, currently trading, or within the `HEARD_BELL_TIME`
-/// window are always exempt. Leashes and piston pushes are not modelled yet, and
-/// "in a current" is approximated by "in water and pushed by fluid".
+/// window are always exempt. Piston pushes are not modelled yet, and "in a current"
+/// is approximated by "in water and pushed by fluid".
 pub fn exempt(
     mob: &Mob,
     now: i64,
@@ -387,6 +387,8 @@ pub fn exempt(
         // 幼年或求爱中。
         || mob.is_baby()
         || mob.in_love > 0
+        // 拴着。
+        || super::leash::is_leashed(mob)
         // 点燃的苦力怕。
         || (mob.mob_type == MobType::Creeper && mob.creeper.ignited)
         // 村民紧急 / 交易 / 钟声豁免。

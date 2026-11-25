@@ -3662,6 +3662,7 @@ impl Mob {
             || (fish::is_fish(self.mob_type) && self.fish.from_bucket)
             || (self.mob_type == MobType::Axolotl && self.axolotl.from_bucket)
             || self.enderman.carried.is_some()
+            || leash::is_leashed(self)
     }
 
     /// `isDeadOrDying`。
@@ -4254,6 +4255,7 @@ impl MobPublic {
         self.persistence_required
             || (fish::is_fish(self.mob_type) && self.fish_from_bucket)
             || self.enderman_carried.is_some()
+            || self.leash_holder.is_some()
     }
 
     pub fn is_alive(&self) -> bool {

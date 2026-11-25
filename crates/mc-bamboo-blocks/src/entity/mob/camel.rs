@@ -204,14 +204,14 @@ pub(super) fn after_actually_hurt(mob: &mut Mob, time: i64) {
     stand_up_instantly(mob, time);
 }
 
-/// `CamelMoveControl.tick`：坐着、过了换姿势过渡、移动控制还想走，就站起来
-/// （`super.tick()` 之前）。Bamboo 没有拴绳，所以 `!isLeashed()` 恒真。
+/// `CamelMoveControl.tick`：移动控制还想走、没拴绳、坐着、过了换姿势过渡，就站起来
+/// （`super.tick()` 之前）。
 ///
-/// `CamelMoveControl.tick`: before `super.tick()`, stand up when sitting, past the
-/// pose transition, and the move control still wants to move. Bamboo has no leash,
-/// so `!isLeashed()` always holds.
+/// `CamelMoveControl.tick`: before `super.tick()`, stand up when the move control
+/// still wants to move, the camel is unleashes, sitting and past the pose transition.
 pub(super) fn before_move_control(me: &mut Entity, mob: &mut Mob, time: i64) {
     if mob.mover.operation == super::control::Operation::MoveTo
+        && !super::leash::is_leashed(mob)
         && is_camel_sitting(mob)
         && !is_in_pose_transition(mob, time)
         && can_camel_change_pose(mob)
@@ -301,10 +301,9 @@ impl Behavior {
     /// `RandomSitting.checkExtraStartConditions`。
     pub(super) fn extra_start(&self, cx: &mut Cx) -> bool {
         let mob = &cx.mob;
-        // Bamboo 没有拴绳（leash），`!isLeashed()` 恒真，见已知限制。
-        // Bamboo has no leash, so `!isLeashed()` is always true (known limitation).
         !cx.me.in_water
             && pose_time(mob, cx.time) >= RANDOM_SITTING_MINIMAL_POSE_TICKS
+            && !super::leash::is_leashed(mob)
             && cx.me.on_ground
             && mob.controlling_passenger().is_none()
             && can_camel_change_pose(mob)
