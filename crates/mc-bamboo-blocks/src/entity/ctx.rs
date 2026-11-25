@@ -1543,6 +1543,13 @@ pub enum Command {
         pos: Vec3,
         stack: mc_bamboo_protocol::item::ItemStack,
     },
+    /// `LivingEntity.startSleeping` / `stopSleeping`：切换床的 `OCCUPIED` 属性。
+    ///
+    /// `LivingEntity.startSleeping` / `stopSleeping`: toggles a bed's `OCCUPIED` property.
+    SetBedOccupied {
+        pos: BlockPos,
+        occupied: bool,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -2055,6 +2062,13 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::DropAtLocation { pos, stack } => {
             world.spawn_at_location(pos, stack);
+        }
+        Command::SetBedOccupied { pos, occupied } => {
+            let state = world.block_state(pos);
+            if state.is_tagged(mc_bamboo_data::tags::block_tags::BEDS) {
+                let next = state.with(crate::state::OCCUPIED, occupied);
+                world.set_block_and_update(pos, next);
+            }
         }
     }
 }

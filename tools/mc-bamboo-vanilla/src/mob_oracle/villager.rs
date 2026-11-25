@@ -385,6 +385,7 @@ impl Report {
             facts: ZombieFacts {
                 clock: case.clock_start,
                 difficulty: 2,
+                can_see_sky: true,
                 ..ZombieFacts::default()
             },
             natural_spawn: None,
@@ -783,6 +784,7 @@ impl Report {
             facts: ZombieFacts {
                 clock: case.clock_start,
                 difficulty: 2,
+                can_see_sky: true,
                 ..ZombieFacts::default()
             },
             natural_spawn: None,

@@ -434,7 +434,9 @@ impl Kind {
     pub(super) fn never_times_out(&self) -> bool {
         matches!(
             self,
-            Self::CountDownCooldown(_) | Self::FollowTemptation { .. }
+            Self::CountDownCooldown(_)
+                | Self::FollowTemptation { .. }
+                | Self::Villager(super::super::villager_ai::Behavior::SleepInBed { .. })
         )
     }
 

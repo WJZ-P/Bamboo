@@ -517,6 +517,25 @@ impl Stub {
     }
 }
 
+/// `MEET` 优先级 2 的 `TriggerGate(StrollAroundPoi, SocializeAtBell)` 状态。
+///
+/// State for the `MEET` priority-2 `TriggerGate(StrollAroundPoi, SocializeAtBell)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeetGateState {
+    pub stroll_next_ok: i64,
+    pub flip: bool,
+}
+
+/// `SetClosestHomeAsWalkTarget` 的重试缓存（装箱以保持 `Node` 紧凑）。
+///
+/// Boxed retry cache for `SetClosestHomeAsWalkTarget`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClosestHomeState {
+    pub speed: f32,
+    pub last_update: i64,
+    pub batch_cache: Vec<(BlockPos, i64)>,
+}
+
 /// 村民专属行为与未接通占位。
 ///
 /// Villager-specific behaviours and remaining placeholders.
@@ -555,9 +574,26 @@ pub enum Behavior {
         too_far_distance: u16,
         too_long_unreachable: u16,
     },
-    /// `MEET` 优先级 2 的 `TriggerGate(StrollAroundPoi, SocializeAtBell)` 占位：
-    /// 保留 `SocializeAtBell` 对 `level.random.nextInt(100)` 的取数。
-    MeetTriggerGate,
+    /// `MEET` 优先级 2 的 `TriggerGate(StrollAroundPoi, SocializeAtBell)`。
+    MeetTriggerGate(Box<MeetGateState>),
+    /// `SleepInBed`：`Behavior(60, 60)` 且 `timedOut` 恒假，在床上入睡直到活动不再是 `REST`。
+    SleepInBed { next_ok_start_time: i64 },
+    /// `SetClosestHomeAsWalkTarget`：`OneShot`，无 `HOME` 记忆时找最近 5 张床并走去。
+    SetClosestHomeAsWalkTarget(Box<ClosestHomeState>),
+    /// `InsideBrownianWalk`：`OneShot`，看不到天空时在 3×3×3 范围内随机走一格。
+    InsideBrownianWalk { speed: f32 },
+    /// `LocateHidingPlace.create(radius, speed, closeEnough)`：`OneShot`，找藏身床位并走去。
+    LocateHidingPlace {
+        radius: i32,
+        speed: f32,
+        close_enough: i32,
+    },
+    /// `SetHiddenState.create(stayHiddenSeconds, closeEnough)`：`OneShot`，藏身计时与钟声超时退出 `HIDE`。
+    SetHiddenState {
+        stay_hidden_ticks: i32,
+        close_enough_dist: i32,
+        ticks_hidden: i32,
+    },
     /// `AcquirePoi`：最近 5 候选 + 一次多目标 A\* + 失败按候选建 `JitteredLinearRetry`。
     AcquirePoi(Box<AcquirePoiState>),
     /// `GoToPotentialJobSite`：`Behavior(1200, 1200)`，走向潜在工作站，停止时若未认领则归还票。
@@ -630,7 +666,8 @@ impl Behavior {
             Self::PanicTrigger
             | Self::WorkAtPoi { .. }
             | Self::HarvestFarmland(_)
-            | Self::UseBonemeal(_) => Class::Timed { min: 60, max: 60 },
+            | Self::UseBonemeal(_)
+            | Self::SleepInBed { .. } => Class::Timed { min: 60, max: 60 },
             Self::GoToPotentialJobSite { .. } => Class::Timed {
                 min: 1200,
                 max: 1200,
@@ -646,7 +683,12 @@ impl Behavior {
             | Self::UpdateActivityFromSchedule
             | Self::SetRaidStatus
             | Self::WakeUp
-            | Self::MeetTriggerGate => &[],
+            | Self::MeetTriggerGate(_) => &[],
+            Self::SleepInBed { .. } => REQ_SLEEP_IN_BED,
+            Self::SetClosestHomeAsWalkTarget(_) => REQ_CLOSEST_HOME,
+            Self::InsideBrownianWalk { .. } => REQ_WALK_ABSENT,
+            Self::LocateHidingPlace { .. } => REQ_LOCATE_HIDING,
+            Self::SetHiddenState { .. } => REQ_SET_HIDDEN,
             Self::CalmDown => REQ_CALM_DOWN,
             Self::WalkAwayFromEntity { memory, .. } => match memory {
                 NearestHostile => REQ_AWAY_HOSTILE,
@@ -696,6 +738,7 @@ impl Behavior {
             } => "WorkAtPoi",
             Self::HarvestFarmland(_) => "HarvestFarmland",
             Self::UseBonemeal(_) => "UseBonemeal",
+            Self::SleepInBed { .. } => "SleepInBed",
             Self::Unavailable(stub) => stub.name(),
             _ => "OneShot",
         }
@@ -723,6 +766,7 @@ impl Behavior {
             }
             Self::HarvestFarmland(state) => harvest_extra_start(state, cx),
             Self::UseBonemeal(state) => bonemeal_extra_start(state, cx),
+            Self::SleepInBed { .. } => sleep_extra_start(cx),
             Self::Unavailable(_) => false,
             _ => false,
         }
@@ -786,6 +830,17 @@ impl Behavior {
                 state.next_work_cycle = cx.time;
                 state.time_worked = 0;
             }
+            Self::SleepInBed { next_ok_start_time } => {
+                if cx.time > *next_ok_start_time
+                    && let Some(gp) = cx.memories.global_pos(Home).cloned()
+                {
+                    if villager::start_sleeping(cx.me, cx.mob, cx.ctx, gp.pos) {
+                        cx.memories.set(LastSlept, MemoryValue::Long(cx.time));
+                    }
+                    cx.memories.erase(WalkTarget);
+                    cx.memories.erase(CantReachWalkTargetSince);
+                }
+            }
             _ => {}
         }
     }
@@ -800,6 +855,11 @@ impl Behavior {
             }),
             Self::HarvestFarmland(state) => state.time_worked < 200,
             Self::UseBonemeal(state) => state.time_worked < 80 && state.crop_pos.is_some(),
+            Self::SleepInBed { .. } => cx.memories.global_pos(Home).is_some_and(|gp| {
+                cx.is_active(Activity::Rest)
+                    && cx.me.position.y > f64::from(gp.pos.y) + 0.4
+                    && closer_to_center_than(gp.pos, cx.me.position, 1.14)
+            }),
             _ => false,
         }
     }
@@ -842,6 +902,12 @@ impl Behavior {
                     .equipment
                     .set(EquipmentSlot::MainHand, ItemStack::empty());
                 state.last_session = i64::from(cx.me.tick_count);
+            }
+            Self::SleepInBed { next_ok_start_time } => {
+                if cx.mob.villager.sleeping {
+                    villager::stop_sleeping(cx.me, cx.mob, Some(cx.memories), cx.ctx);
+                    *next_ok_start_time = cx.time + 40;
+                }
             }
             _ => {}
         }
@@ -1027,8 +1093,7 @@ impl Behavior {
                 if cx.is_active(Activity::Rest) || !cx.mob.villager.sleeping {
                     return false;
                 }
-                cx.mob.villager.sleeping = false;
-                cx.memories.set(LastWoken, MemoryValue::Long(cx.time));
+                villager::stop_sleeping(cx.me, cx.mob, Some(cx.memories), cx.ctx);
                 true
             }
             Self::ReactToBell => {
@@ -1057,6 +1122,13 @@ impl Behavior {
                     cx.time.saturating_sub(since) > i64::from(*too_long_unreachable)
                 });
                 if wrong_dim || timed_out {
+                    villager::release_poi_from_memories(
+                        cx.me,
+                        cx.mob.villager.profession,
+                        cx.memories,
+                        cx.ctx,
+                        *memory,
+                    );
                     cx.memories.erase(*memory);
                     cx.memories
                         .set(CantReachWalkTargetSince, MemoryValue::Long(cx.time));
@@ -1089,6 +1161,13 @@ impl Behavior {
                         );
                         tries += 1;
                         if tries == 1000 {
+                            villager::release_poi_from_memories(
+                                cx.me,
+                                cx.mob.villager.profession,
+                                cx.memories,
+                                cx.ctx,
+                                *memory,
+                            );
                             cx.memories.erase(*memory);
                             cx.memories
                                 .set(CantReachWalkTargetSince, MemoryValue::Long(cx.time));
@@ -1113,18 +1192,19 @@ impl Behavior {
                 }
                 true
             }
-            Self::MeetTriggerGate => {
-                // `TriggerGate.triggerOneShuffled([StrollAroundPoi, SocializeAtBell])`：
-                // `SocializeAtBell` 在检查维度/距离前先抽 `level.random.nextInt(100)`，
-                // 期 3 保留这一取数以对齐世界随机序列；完整社交行为留到期 4。
-                if cx.memories.has(MeetingPoint)
-                    && cx.memories.has(NearestVisibleLivingEntities)
-                    && !cx.memories.has(InteractionTarget)
-                {
-                    let _ = cx.level_next_int(100);
-                }
-                true
-            }
+            Self::MeetTriggerGate(state) => trigger_meet_gate(state, cx),
+            Self::SetClosestHomeAsWalkTarget(state) => trigger_closest_home(state, cx),
+            Self::InsideBrownianWalk { speed } => trigger_inside_brownian_walk(*speed, cx),
+            Self::LocateHidingPlace {
+                radius,
+                speed,
+                close_enough,
+            } => trigger_locate_hiding_place(*radius, *speed, *close_enough, cx),
+            Self::SetHiddenState {
+                stay_hidden_ticks,
+                close_enough_dist,
+                ticks_hidden,
+            } => trigger_set_hidden_state(*stay_hidden_ticks, *close_enough_dist, ticks_hidden, cx),
             Self::AcquirePoi(state) => trigger_acquire_poi(state, cx),
             Self::AssignProfessionFromJobSite => trigger_assign_profession(cx),
             Self::ValidateNearbyPoi(slot) => trigger_validate_nearby_poi(*slot, cx),
@@ -1170,6 +1250,7 @@ impl Behavior {
             | Self::WorkAtPoi { .. }
             | Self::HarvestFarmland(_)
             | Self::UseBonemeal(_)
+            | Self::SleepInBed { .. }
             | Self::Unavailable(_) => false,
         }
     }
@@ -1600,6 +1681,321 @@ fn block_dist_sqr(a: BlockPos, b: BlockPos) -> i64 {
     let dx = i64::from(a.x - b.x);
     let dy = i64::from(a.y - b.y);
     let dz = i64::from(a.z - b.z);
+    dx * dx + dy * dy + dz * dz
+}
+
+fn sleep_extra_start(cx: &Cx) -> bool {
+    if cx.me.vehicle.is_some() {
+        return false;
+    }
+    let Some(gp) = cx.memories.global_pos(Home) else {
+        return false;
+    };
+    if gp.dimension != "minecraft:overworld" {
+        return false;
+    }
+    if let Some(last_woken) = cx.memories.long(LastWoken) {
+        let diff = cx.time - last_woken;
+        if diff > 0 && diff < 100 {
+            return false;
+        }
+    }
+    let state = cx.ctx.blocks().block_state(gp.pos);
+    closer_to_center_than(gp.pos, cx.me.position, 2.0)
+        && state.is_tagged(block_tags::VILLAGERS_CAN_SLEEP_ON_BED)
+        && !state.get(OCCUPIED)
+}
+
+fn trigger_closest_home(state: &mut ClosestHomeState, cx: &mut Cx) -> bool {
+    if cx.time - state.last_update < 20 {
+        return false;
+    }
+    let Some(home_kind) = mc_bamboo_data::poi::poi_type_id("home") else {
+        return false;
+    };
+    let origin = cx.me.block_position();
+    let Some(closest) = cx
+        .ctx
+        .blocks()
+        .poi_find_closest(origin, 48, home_kind, 2, &|_| true)
+    else {
+        return false;
+    };
+    if dist_sqr_block(closest, origin) <= 4.0 {
+        return false;
+    }
+    state.last_update = cx.time + i64::from(cx.level_next_int(20));
+    let mut tried = 0_i32;
+    let home_mask = 1_u32 << home_kind;
+    let mut targets = Vec::new();
+    for (kind, pos) in cx.ctx.blocks().poi_in_range(origin, 48, home_mask, 2) {
+        if state.batch_cache.iter().any(|(cached, _)| *cached == pos) {
+            continue;
+        }
+        tried += 1;
+        if tried >= 5 {
+            continue;
+        }
+        state.batch_cache.push((pos, state.last_update + 40));
+        targets.push((kind, pos));
+    }
+    if let Some(path) = find_path_to_pois(cx, &targets)
+        && path.reached
+        && cx.ctx.blocks().poi_type_at(path.target).is_some()
+    {
+        let target = path.target;
+        cx.memories.set(
+            WalkTarget,
+            MemoryValue::Walk(WalkTarget {
+                target: PositionTracker::at_block(target),
+                speed: state.speed,
+                close_enough: 1,
+            }),
+        );
+    } else if tried < 5 {
+        let cutoff = state.last_update;
+        state.batch_cache.retain(|(_, expiry)| *expiry >= cutoff);
+    }
+    true
+}
+
+fn trigger_inside_brownian_walk(speed: f32, cx: &mut Cx) -> bool {
+    let origin = cx.me.block_position();
+    if cx.ctx.blocks().can_see_sky(origin) {
+        return false;
+    }
+    let mut candidates = Vec::with_capacity(27);
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                candidates.push(BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz));
+            }
+        }
+    }
+    // `Collections.shuffle` 用独立随机源，避免污染实体或世界的随机序列。
+    let mut rng = crate::entity::JavaRandom::new(cx.time ^ i64::from(cx.me.id));
+    for i in (1..candidates.len()).rev() {
+        let j = rng.next_int_bounded((i + 1) as i32) as usize;
+        candidates.swap(i, j);
+    }
+    let blocks = cx.ctx.blocks();
+    let entity_box = cx.me.bounding_box();
+    let no_collision = {
+        let min_x = mc_bamboo_core::mth::floor(entity_box.min_x - 1.0e-7) - 1;
+        let max_x = mc_bamboo_core::mth::floor(entity_box.max_x + 1.0e-7) + 1;
+        let min_y = mc_bamboo_core::mth::floor(entity_box.min_y - 1.0e-7) - 1;
+        let max_y = mc_bamboo_core::mth::floor(entity_box.max_y + 1.0e-7) + 1;
+        let min_z = mc_bamboo_core::mth::floor(entity_box.min_z - 1.0e-7) - 1;
+        let max_z = mc_bamboo_core::mth::floor(entity_box.max_z + 1.0e-7) + 1;
+        let ctx_c = crate::shape::CollisionContext::Empty;
+        let mut hit = false;
+        'outer: for x in min_x..=max_x {
+            for y in min_y..=max_y {
+                for z in min_z..=max_z {
+                    let p = BlockPos::new(x, y, z);
+                    let st = blocks.block_state(p);
+                    if st.is_air() {
+                        continue;
+                    }
+                    for b in crate::shape::collision_boxes(st, p, ctx_c).iter() {
+                        if b.moved(f64::from(x), f64::from(y), f64::from(z))
+                            .intersects(entity_box)
+                        {
+                            hit = true;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        !hit
+    };
+    if no_collision {
+        for pos in candidates {
+            if !blocks.can_see_sky(pos)
+                && blocks.is_loaded(pos)
+                && !crate::shape::collision_boxes(
+                    blocks.block_state(pos.below()),
+                    pos.below(),
+                    crate::shape::CollisionContext::Empty,
+                )
+                .is_empty()
+            {
+                cx.memories.set(
+                    WalkTarget,
+                    MemoryValue::Walk(WalkTarget {
+                        target: PositionTracker::at_block(pos),
+                        speed,
+                        close_enough: 0,
+                    }),
+                );
+                break;
+            }
+        }
+    }
+    true
+}
+
+fn trigger_meet_gate(state: &mut MeetGateState, cx: &mut Cx) -> bool {
+    state.flip = !state.flip;
+    if state.flip {
+        if trigger_socialize_at_bell(cx) {
+            return true;
+        }
+        if !cx.memories.has(WalkTarget) && cx.memories.has(MeetingPoint) {
+            let _ = trigger_stroll_around_poi(MeetingPoint, 0.4, 40, &mut state.stroll_next_ok, cx);
+        }
+    } else {
+        if !cx.memories.has(WalkTarget)
+            && cx.memories.has(MeetingPoint)
+            && trigger_stroll_around_poi(MeetingPoint, 0.4, 40, &mut state.stroll_next_ok, cx)
+        {
+            return true;
+        }
+        let _ = trigger_socialize_at_bell(cx);
+    }
+    true
+}
+
+fn trigger_socialize_at_bell(cx: &mut Cx) -> bool {
+    if !cx.memories.has(MeetingPoint)
+        || !cx.memories.has(NearestVisibleLivingEntities)
+        || cx.memories.has(InteractionTarget)
+    {
+        return false;
+    }
+    let Some(gp) = cx.memories.global_pos(MeetingPoint).cloned() else {
+        return false;
+    };
+    if cx.level_next_int(100) != 0 {
+        return false;
+    }
+    if gp.dimension != "minecraft:overworld" || !closer_to_center_than(gp.pos, cx.me.position, 4.0)
+    {
+        return false;
+    }
+    let has_villager =
+        sensor::find_closest_visible(cx, &mut |view| view.mob_type == Some(MobType::Villager))
+            .is_some();
+    if !has_villager {
+        return false;
+    }
+    let self_pos = cx.me.position;
+    let target_uid = sensor::find_closest_visible(cx, &mut |view| {
+        view.mob_type == Some(MobType::Villager) && view.position.distance_to_sqr(self_pos) <= 32.0
+    });
+    if let Some(uid) = target_uid {
+        cx.memories.set(InteractionTarget, MemoryValue::Entity(uid));
+        cx.memories.set(
+            LookTarget,
+            MemoryValue::Look(PositionTracker::Entity {
+                uid,
+                track_eye: true,
+                target_eye: false,
+            }),
+        );
+        cx.memories.set(
+            WalkTarget,
+            MemoryValue::Walk(WalkTarget {
+                target: PositionTracker::Entity {
+                    uid,
+                    track_eye: false,
+                    target_eye: false,
+                },
+                speed: 0.3,
+                close_enough: 1,
+            }),
+        );
+    }
+    true
+}
+
+fn trigger_locate_hiding_place(radius: i32, speed: f32, close_enough: i32, cx: &mut Cx) -> bool {
+    let origin = cx.me.block_position();
+    let home_mask = villager::poi_name_mask("home");
+    let found = cx
+        .ctx
+        .blocks()
+        .poi_in_range(origin, close_enough + 1, home_mask, 2)
+        .into_iter()
+        .next()
+        .map(|(_, pos)| pos)
+        .filter(|&pos| closer_to_center_than(pos, cx.me.position, f64::from(close_enough)))
+        .or_else(|| {
+            let mut list: Vec<BlockPos> = cx
+                .ctx
+                .blocks()
+                .poi_in_range(origin, radius, home_mask, 2)
+                .into_iter()
+                .map(|(_, pos)| pos)
+                .collect();
+            if list.is_empty() {
+                return None;
+            }
+            for i in (1..list.len()).rev() {
+                let j = cx.me.random.next_int_bounded((i + 1) as i32) as usize;
+                list.swap(i, j);
+            }
+            Some(list[0])
+        })
+        .or_else(|| cx.memories.global_pos(Home).map(|gp| gp.pos));
+
+    if let Some(pos) = found {
+        cx.memories.erase(Path);
+        cx.memories.erase(LookTarget);
+        cx.memories.erase(BreedTarget);
+        cx.memories.erase(InteractionTarget);
+        cx.memories.set(
+            HidingPlace,
+            MemoryValue::GlobalPos(GlobalPos {
+                dimension: "minecraft:overworld".to_owned(),
+                pos,
+            }),
+        );
+        if !closer_to_center_than(pos, cx.me.position, f64::from(close_enough)) {
+            cx.memories.set(
+                WalkTarget,
+                MemoryValue::Walk(WalkTarget {
+                    target: PositionTracker::at_block(pos),
+                    speed,
+                    close_enough,
+                }),
+            );
+        }
+    }
+    true
+}
+
+fn trigger_set_hidden_state(
+    stay_hidden_ticks: i32,
+    close_enough_dist: i32,
+    ticks_hidden: &mut i32,
+    cx: &mut Cx,
+) -> bool {
+    let Some(heard) = cx.memories.long(HeardBellTime) else {
+        return false;
+    };
+    let bell_timed_out = heard + 300 <= cx.time;
+    if *ticks_hidden > stay_hidden_ticks || bell_timed_out {
+        cx.memories.erase(HeardBellTime);
+        cx.memories.erase(HidingPlace);
+        cx.update_activity_from_schedule();
+        *ticks_hidden = 0;
+        return true;
+    }
+    if let Some(gp) = cx.memories.global_pos(HidingPlace)
+        && dist_sqr_block(gp.pos, cx.me.block_position())
+            < f64::from(close_enough_dist * close_enough_dist)
+    {
+        *ticks_hidden += 1;
+    }
+    true
+}
+
+fn dist_sqr_block(a: BlockPos, b: BlockPos) -> f64 {
+    let dx = f64::from(a.x - b.x);
+    let dy = f64::from(a.y - b.y);
+    let dz = f64::from(a.z - b.z);
     dx * dx + dy * dy + dz * dz
 }
 
@@ -2289,14 +2685,28 @@ fn rest_package(speed: f32) -> ActivityData {
                 3,
                 Kind::Villager(Behavior::ValidateNearbyPoi(ValidatePoiSlot::Home)),
             ),
-            (3, stub(Stub::SleepInBed)),
+            (
+                3,
+                Kind::Villager(Behavior::SleepInBed {
+                    next_ok_start_time: 0,
+                }),
+            ),
             (
                 5,
                 Kind::Gate(Box::new(Gate::run_one(
                     vec![(Home, ValueAbsent)],
                     vec![
-                        (stub(Stub::SetClosestHomeAsWalkTarget), 1),
-                        (stub(Stub::InsideBrownianWalk), 4),
+                        (
+                            Kind::Villager(Behavior::SetClosestHomeAsWalkTarget(Box::new(
+                                ClosestHomeState {
+                                    speed,
+                                    last_update: 0,
+                                    batch_cache: Vec::new(),
+                                },
+                            ))),
+                            1,
+                        ),
+                        (Kind::Villager(Behavior::InsideBrownianWalk { speed }), 4),
                         (
                             Kind::Villager(Behavior::GoToClosestVillage {
                                 speed,
@@ -2318,7 +2728,13 @@ fn meet_package(speed: f32) -> ActivityData {
     ActivityData::with_priorities(
         Activity::Meet,
         vec![
-            (2, Kind::Villager(Behavior::MeetTriggerGate)),
+            (
+                2,
+                Kind::Villager(Behavior::MeetTriggerGate(Box::new(MeetGateState {
+                    stroll_next_ok: 0,
+                    flip: false,
+                }))),
+            ),
             (10, stub(Stub::ShowTradesToPlayer)),
             (10, stub(Stub::SetLookAndInteractPlayer)),
             (
@@ -2470,12 +2886,26 @@ fn raid_package(_speed: f32) -> ActivityData {
     )
 }
 
-fn hide_package(_speed: f32) -> ActivityData {
+fn hide_package(speed: f32) -> ActivityData {
     ActivityData::with_priorities(
         Activity::Hide,
         vec![
-            (0, stub(Stub::SetHiddenState)),
-            (1, stub(Stub::LocateHidingPlace)),
+            (
+                0,
+                Kind::Villager(Behavior::SetHiddenState {
+                    stay_hidden_ticks: 15 * 20,
+                    close_enough_dist: 3,
+                    ticks_hidden: 0,
+                }),
+            ),
+            (
+                1,
+                Kind::Villager(Behavior::LocateHidingPlace {
+                    radius: 32,
+                    speed: speed * 1.25,
+                    close_enough: 2,
+                }),
+            ),
             minimal_look_behavior(),
         ],
     )

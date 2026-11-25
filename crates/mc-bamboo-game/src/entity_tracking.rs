@@ -1291,6 +1291,7 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             7 => EntityData::TicksFrozen(0),
             8 => EntityData::LivingFlags(0),
             9 => EntityData::Health(1.0),
+            14 => EntityData::SleepingPos(None),
             15 => EntityData::MobFlags(0),
             16 => EntityData::Baby(false),
             17 => EntityData::AgeLocked(false),
@@ -1400,6 +1401,9 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     effect_data(mob, &mut out);
     if mob.using_item_flags != 0 {
         out.push(EntityData::LivingFlags(mob.using_item_flags));
+    }
+    if mob.sleeping_pos.is_some() {
+        out.push(EntityData::SleepingPos(mob.sleeping_pos));
     }
     let mut mob_flags = 0u8;
     if mob.no_ai {
@@ -1614,6 +1618,10 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         out.push(EntityData::Pose(
             mc_bamboo_protocol::packet::play::Pose::Dying,
         ));
+    } else if mob.sleeping_pos.is_some() {
+        out.push(EntityData::Pose(
+            mc_bamboo_protocol::packet::play::Pose::Sleeping,
+        ));
     } else if mob.goat.long_jumping {
         out.push(EntityData::Pose(
             mc_bamboo_protocol::packet::play::Pose::LongJumping,
@@ -1666,6 +1674,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     effect_data(mob, &mut out);
     if mob.using_item_flags != 0 {
         out.push(EntityData::LivingFlags(mob.using_item_flags));
+    }
+    if mob.sleeping_pos.is_some() {
+        out.push(EntityData::SleepingPos(mob.sleeping_pos));
     }
     let mut mob_flags = 0u8;
     if mob.no_ai {
