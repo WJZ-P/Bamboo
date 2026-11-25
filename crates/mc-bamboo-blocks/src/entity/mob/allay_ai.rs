@@ -337,7 +337,12 @@ fn trigger_go_to_wanted_item(cx: &mut Cx) -> bool {
     if cx.memories.has(WalkTarget) {
         return false;
     }
-    if !cx.mob.can_pick_up_loot {
+    // `entity.canPickUpLoot()`：悦灵的覆写 = 不在捡物冷却里且手里有模板物品。
+    // `entity.canPickUpLoot()`: the allay override = not on pickup cooldown and
+    // holding a template item.
+    if cx.memories.has(ItemPickupCooldownTicks)
+        || !super::allay::Allay::has_item_in_hand(&cx.mob.allay, cx.mob)
+    {
         return false;
     }
     let Some((uid, remembered)) = cx.memories.wanted_item() else {
