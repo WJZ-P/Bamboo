@@ -545,6 +545,15 @@ fn finalize_spawn_in_group(
         super::pillager::finalize_spawn(world, entity, reason);
         return;
     }
+    if matches!(kind, MobType::Vindicator | MobType::Ravager) {
+        let random = world.random();
+        if kind == MobType::Vindicator {
+            super::vindicator::finalize_spawn(entity, random);
+        } else {
+            super::ravager::finalize_spawn(entity, random);
+        }
+        return;
+    }
     // `Guardian` / `ElderGuardian` 没有自己的 `finalizeSpawn`，只走 `Monster` 继承的
     // `Mob.finalizeSpawn`（跟随距离加成 + 左撇子，各取世界随机源一次）。
     //

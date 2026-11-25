@@ -75,6 +75,7 @@ pub mod pillager;
 pub mod polar_bear;
 pub mod rabbit;
 pub mod raider;
+pub mod ravager;
 pub mod sheep;
 pub mod silverfish;
 pub mod skeleton;
@@ -97,6 +98,7 @@ pub(crate) mod timing;
 pub mod turtle;
 pub mod villager;
 pub mod villager_ai;
+pub mod vindicator;
 mod water;
 pub mod wild_spawn;
 pub mod witch;
@@ -233,13 +235,21 @@ pub enum MobType {
     ///
     /// The `Sniffer`.
     Sniffer,
+    /// 卫道士，`Vindicator`（`AbstractIllager` 一支，主手铁斧）。
+    ///
+    /// Vindicator, an `AbstractIllager` with an iron axe.
+    Vindicator,
+    /// 劫掠兽，`Ravager`。
+    ///
+    /// Ravager.
+    Ravager,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 63] = [
+    pub const ALL: [Self; 65] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -303,6 +313,8 @@ impl MobType {
         Self::Nautilus,
         Self::ZombieNautilus,
         Self::Sniffer,
+        Self::Vindicator,
+        Self::Ravager,
     ];
 
     /// 注册表 ID。
@@ -372,6 +384,8 @@ impl MobType {
             Self::Nautilus => ids::NAUTILUS,
             Self::ZombieNautilus => ids::ZOMBIE_NAUTILUS,
             Self::Sniffer => ids::SNIFFER,
+            Self::Vindicator => ids::VINDICATOR,
+            Self::Ravager => ids::RAVAGER,
         }
     }
 
@@ -441,6 +455,8 @@ impl MobType {
             Self::Nautilus => "minecraft:nautilus",
             Self::ZombieNautilus => "minecraft:zombie_nautilus",
             Self::Sniffer => "minecraft:sniffer",
+            Self::Vindicator => "minecraft:vindicator",
+            Self::Ravager => "minecraft:ravager",
         }
     }
 
@@ -596,6 +612,9 @@ impl MobType {
             (Self::ElderGuardian, _) => (1.9975, 1.9975, 0.99875),
             (Self::Nautilus | Self::ZombieNautilus, baby) => nautilus::dimensions(baby),
             (Self::Sniffer, baby) => sniffer::dimensions(baby),
+            // `EntityTypes.VINDICATOR` / `RAVAGER`：眼高用官方缺省的 height*0.85。
+            (Self::Vindicator, _) => (0.6, 1.95, 1.95 * 0.85),
+            (Self::Ravager, _) => (1.95, 2.2, 2.2 * 0.85),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -652,6 +671,8 @@ impl MobType {
                 | Self::ZombieVillager
                 | Self::Witch
                 | Self::Pillager
+                | Self::Vindicator
+                | Self::Ravager
                 | Self::Creeper
                 | Self::Spider
                 | Self::CaveSpider
@@ -671,7 +692,10 @@ impl MobType {
     /// pillagers. They share patrols, the unconditional `noActionTime += 2`, and the
     /// no-distance-despawn rule while patrolling.
     pub const fn is_raider(self) -> bool {
-        matches!(self, Self::Witch | Self::Pillager)
+        matches!(
+            self,
+            Self::Witch | Self::Pillager | Self::Vindicator | Self::Ravager
+        )
     }
 
     /// 是不是 `Zombie` 一支：僵尸、尸壳、溺尸共用近战、破门、增援和转化逻辑。
@@ -1104,6 +1128,8 @@ impl MobType {
             Self::Nautilus => "minecraft:entities/nautilus",
             Self::ZombieNautilus => "minecraft:entities/zombie_nautilus",
             Self::Sniffer => "minecraft:entities/sniffer",
+            Self::Vindicator => "minecraft:entities/vindicator",
+            Self::Ravager => "minecraft:entities/ravager",
         }
     }
 
@@ -1246,6 +1272,8 @@ impl MobType {
             // `Sniffer.getAmbientSound`: silent while digging or searching; see
             // `sniffer::ambient_voice`.
             Self::Sniffer => Some("minecraft:entity.sniffer.idle"),
+            Self::Vindicator => Some("minecraft:entity.vindicator.ambient"),
+            Self::Ravager => Some("minecraft:entity.ravager.ambient"),
         }
     }
 
@@ -1309,6 +1337,8 @@ impl MobType {
             | Self::Nautilus
             | Self::ZombieNautilus => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.hurt"),
+            Self::Vindicator => Some("minecraft:entity.vindicator.hurt"),
+            Self::Ravager => Some("minecraft:entity.ravager.hurt"),
         }
     }
 
@@ -1372,6 +1402,8 @@ impl MobType {
             | Self::Nautilus
             | Self::ZombieNautilus => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.death"),
+            Self::Vindicator => Some("minecraft:entity.vindicator.death"),
+            Self::Ravager => Some("minecraft:entity.ravager.death"),
         }
     }
 
@@ -1446,6 +1478,9 @@ impl MobType {
             | Self::Nautilus
             | Self::ZombieNautilus => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.step"),
+            // `AbstractIllager` / `Vindicator` 没有覆写脚步声；劫掠兽有自己的。
+            Self::Vindicator => None,
+            Self::Ravager => Some("minecraft:entity.ravager.step"),
         }
     }
 
@@ -1516,6 +1551,8 @@ impl MobType {
             Self::Nautilus => items::NAUTILUS_SPAWN_EGG,
             Self::ZombieNautilus => items::ZOMBIE_NAUTILUS_SPAWN_EGG,
             Self::Sniffer => items::SNIFFER_SPAWN_EGG,
+            Self::Vindicator => items::VINDICATOR_SPAWN_EGG,
+            Self::Ravager => items::RAVAGER_SPAWN_EGG,
         }
     }
 
@@ -1585,6 +1622,8 @@ impl MobType {
             Self::Nautilus => "entity.minecraft.nautilus",
             Self::ZombieNautilus => "entity.minecraft.zombie_nautilus",
             Self::Sniffer => "entity.minecraft.sniffer",
+            Self::Vindicator => "entity.minecraft.vindicator",
+            Self::Ravager => "entity.minecraft.ravager",
         }
     }
 
@@ -3072,6 +3111,8 @@ impl Mob {
             MobType::SulfurCube => sulfur_cube::attributes(),
             MobType::Nautilus | MobType::ZombieNautilus => nautilus::attributes(mob_type),
             MobType::Sniffer => sniffer::attributes(),
+            MobType::Vindicator => vindicator::attributes(),
+            MobType::Ravager => ravager::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3140,6 +3181,8 @@ impl Mob {
             MobType::Drowned => drowned::goals(&mut navigation),
             MobType::Witch => witch::goals(&mut navigation),
             MobType::Pillager => pillager::goals(&mut navigation),
+            MobType::Vindicator => vindicator::goals(&mut navigation),
+            MobType::Ravager => ravager::goals(&mut navigation),
             // 蝙蝠和骆驼没有覆写 `registerGoals`：两个选择器都是空的（骆驼不要 `equine::goals`）。
             // Bats and camels do not override `registerGoals`: both selectors stay empty
             // (no `equine::goals` for camels).
@@ -3255,6 +3298,8 @@ impl Mob {
             MobType::Phantom => phantom::target_goals(),
             MobType::Bee => bee_goals::target_goals(),
             MobType::Pillager => pillager::targets(),
+            MobType::Vindicator => vindicator::targets(),
+            MobType::Ravager => ravager::targets(),
             MobType::SkeletonHorse | MobType::ZombieHorse => GoalSelector::default(),
             MobType::IronGolem => iron_golem::target_goals(),
             MobType::SnowGolem => snow_golem::target_goals(),

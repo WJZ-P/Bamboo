@@ -370,7 +370,7 @@ struct SpawnPlan {
     raid_id: i32,
     wave: i32,
     pos: BlockPos,
-    /// 第一期只刷掠夺者、女巫；卫道士、劫掠兽、唤魔者留到第二期。
+    /// 第一期刷掠夺者、卫道士、劫掠兽、女巫；唤魔者留到第二期。
     members: Vec<MobType>,
 }
 
@@ -635,8 +635,11 @@ fn spawn_group_plan(raid: &mut Raid, difficulty: i32, pos: BlockPos, alive: i32)
             Raid::potential_bonus_spawns(kind, wave, difficulty, bonus, &mut |b| raid.next_int(b));
         let mob = match kind {
             RaiderType::Pillager => Some(MobType::Pillager),
+            RaiderType::Vindicator => Some(MobType::Vindicator),
+            RaiderType::Ravager => Some(MobType::Ravager),
             RaiderType::Witch => Some(MobType::Witch),
-            _ => None,
+            // 唤魔者留到第二期。
+            RaiderType::Evoker => None,
         };
         if let Some(mob) = mob {
             for _ in 0..(def + extra) {
