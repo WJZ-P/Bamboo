@@ -27,7 +27,7 @@ use crate::{
     archive::tag::{self, put},
     behaviour::{
         common::item_of,
-        misc::{COMPOST_MAX_LEVEL, COMPOST_READY, add_layer_state, extract_produce},
+        misc::{COMPOST_MAX_LEVEL, COMPOST_READY, extract_produce},
     },
     container::item_max,
     entity::{Entity, EntityKind, EntityUid},
@@ -642,94 +642,48 @@ pub fn work_sound(profession: i32) -> Option<&'static str> {
 /// 落地 [`crate::entity::ctx::Command::VillagerPickUpItem`]（`InventoryCarrier.pickUpItem`）。
 ///
 /// Applies [`crate::entity::ctx::Command::VillagerPickUpItem`] (`InventoryCarrier.pickUpItem`).
-pub(crate) fn apply_pick_up(world: &mut World, item: EntityUid, me: &mut Entity) {
-    let Some(entity) = world.entity(item) else {
-        return;
-    };
-    if entity.removed {
-        return;
-    }
-    let EntityKind::Item(ground) = &entity.kind else {
-        return;
-    };
-    if ground.stack.is_empty() || ground.pickup_delay > 0 {
-        return;
-    }
-    let stack = ground.stack.clone();
-    let mut leftover: Option<ItemStack> = None;
-    me.with_mob(|_, mob| {
-        if mob.villager.wants_to_pick_up(&stack) {
-            leftover = Some(mob.villager.inventory.add_item(stack.clone()));
-        }
-    });
-    let Some(remaining) = leftover else {
-        return;
-    };
+pub(crate) fn apply_pick_up(world: &mut World, item: EntityUid, remaining_count: i32) {
     world.with_entity_mut(item, &mut |entity| {
-        if remaining.is_empty() {
+        if entity.removed {
+            return;
+        }
+        if remaining_count <= 0 {
             entity.discard();
         } else if let EntityKind::Item(ground) = &mut entity.kind {
-            ground.stack.count = remaining.count;
+            ground.stack.count = remaining_count;
         }
     });
 }
 
-/// 落地 [`crate::entity::ctx::Command::VillagerCompost`]（`WorkAtComposter.compostItems`）。
+/// 落地 [`crate::entity::ctx::Command::VillagerCompostExtract`]（满桶产出骨粉并清空）。
 ///
-/// Applies [`crate::entity::ctx::Command::VillagerCompost`] (`WorkAtComposter.compostItems`).
-pub(crate) fn apply_compost(world: &mut World, pos: BlockPos, me: &mut Entity) {
-    const COMPOSTABLE_ITEMS: [i32; 2] = [items::WHEAT_SEEDS, items::BEETROOT_SEEDS];
-    let mut initial_state = world.block_state(pos);
-    if !initial_state.is_a(mc_bamboo_data::BlockAncestor::ComposterBlock) {
+/// Applies [`crate::entity::ctx::Command::VillagerCompostExtract`] (empties a ready composter).
+pub(crate) fn apply_compost_extract(world: &mut World, pos: BlockPos) {
+    let state = world.block_state(pos);
+    if state.is_a(mc_bamboo_data::BlockAncestor::ComposterBlock)
+        && state.get(LEVEL_COMPOSTER) == COMPOST_READY
+    {
+        let _ = extract_produce(state, world, pos);
+    }
+}
+
+/// 落地 [`crate::entity::ctx::Command::VillagerCompostFinish`]（写入新层数并发 `levelEvent(1500)`）。
+///
+/// Applies [`crate::entity::ctx::Command::VillagerCompostFinish`] (commits composter level and emits `levelEvent(1500)`).
+pub(crate) fn apply_compost_finish(world: &mut World, pos: BlockPos, level: i32, success: bool) {
+    let state = world.block_state(pos);
+    if !state.is_a(mc_bamboo_data::BlockAncestor::ComposterBlock) {
         return;
     }
-    if initial_state.get(LEVEL_COMPOSTER) == COMPOST_READY {
-        initial_state = extract_produce(initial_state, world, pos);
-    }
-    let mut remaining = 20_i32;
-    let mut seen = [0_i32; 2];
-    let mut state = initial_state;
-    for slot_idx in (0..VillagerInventory::SIZE).rev() {
-        if remaining <= 0 {
-            break;
-        }
-        let stack = me
-            .kind
-            .mob()
-            .map_or_else(ItemStack::empty, |m| m.villager.inventory.get(slot_idx));
-        let Some(kind_idx) = COMPOSTABLE_ITEMS.iter().position(|&id| id == stack.item) else {
-            continue;
-        };
-        let count = stack.count;
-        let total = seen[kind_idx] + count;
-        seen[kind_idx] = total;
-        let to_insert = (total - 10).min(remaining).min(count);
-        if to_insert <= 0 {
-            continue;
-        }
-        remaining -= to_insert;
-        let layers = item_of(stack.item).and_then(|info| info.compostable);
-        let Some(layers) = layers else {
-            continue;
-        };
-        for _ in 0..to_insert {
-            if state.get(LEVEL_COMPOSTER) < COMPOST_MAX_LEVEL {
-                state = add_layer_state(state, world, pos, layers);
-                me.with_mob(|_, mob| mob.villager.inventory.shrink_slot(slot_idx, 1));
-            }
-            if state.get(LEVEL_COMPOSTER) == COMPOST_MAX_LEVEL {
-                world.push_effect(Effect::ComposterFill {
-                    pos,
-                    success: state != initial_state,
-                });
-                return;
-            }
+    if success {
+        let clamped = level.clamp(0, COMPOST_MAX_LEVEL);
+        let next = state.with(LEVEL_COMPOSTER, clamped);
+        world.set_block_and_update(pos, next);
+        if clamped == COMPOST_MAX_LEVEL {
+            world.schedule_tick(pos, state.block(), 20);
         }
     }
-    world.push_effect(Effect::ComposterFill {
-        pos,
-        success: state != initial_state,
-    });
+    world.push_effect(Effect::ComposterFill { pos, success });
 }
 
 /// 把职业的 `held_job_site` 列表转成 POI 类型位掩码（`1 << kind`）。

@@ -1437,7 +1437,75 @@ fn use_composter_workstation(cx: &mut Cx) {
         }
     }
     // `compostItems`
-    cx.ctx.emit(Command::VillagerCompost { pos: gp.pos }, cx.me);
+    compost_items_at_workstation(gp.pos, cx);
+}
+
+fn compost_items_at_workstation(pos: BlockPos, cx: &mut Cx) {
+    use crate::behaviour::common::item_of;
+    use crate::behaviour::misc::{COMPOST_MAX_LEVEL, COMPOST_READY, roll_compost_layers};
+    use crate::state::LEVEL_COMPOSTER;
+
+    const COMPOSTABLE_ITEMS: [i32; 2] = [items::WHEAT_SEEDS, items::BEETROOT_SEEDS];
+    let mut initial_state = cx.ctx.blocks().block_state(pos);
+    if !initial_state.is_a(mc_bamboo_data::BlockAncestor::ComposterBlock) {
+        return;
+    }
+    if initial_state.get(LEVEL_COMPOSTER) == COMPOST_READY {
+        cx.ctx.emit(Command::VillagerCompostExtract { pos }, cx.me);
+        initial_state = initial_state.with(LEVEL_COMPOSTER, 0);
+    }
+    let initial_level = initial_state.get(LEVEL_COMPOSTER);
+    let mut level = initial_level;
+    let mut remaining = 20_i32;
+    let mut seen = [0_i32; 2];
+    for slot_idx in (0..villager::VillagerInventory::SIZE).rev() {
+        if remaining <= 0 {
+            break;
+        }
+        let stack = cx.mob.villager.inventory.get(slot_idx);
+        let Some(kind_idx) = COMPOSTABLE_ITEMS.iter().position(|&id| id == stack.item) else {
+            continue;
+        };
+        let count = stack.count;
+        let total = seen[kind_idx] + count;
+        seen[kind_idx] = total;
+        let to_insert = (total - 10).min(remaining).min(count);
+        if to_insert <= 0 {
+            continue;
+        }
+        remaining -= to_insert;
+        let Some(layers) = item_of(stack.item).and_then(|info| info.compostable) else {
+            continue;
+        };
+        for _ in 0..to_insert {
+            if level < COMPOST_MAX_LEVEL {
+                let added = roll_compost_layers(layers, level, |b| cx.level_next_int(b));
+                if added > 0 {
+                    level = (level + added).clamp(0, COMPOST_MAX_LEVEL);
+                }
+                cx.mob.villager.inventory.shrink_slot(slot_idx, 1);
+            }
+            if level == COMPOST_MAX_LEVEL {
+                cx.ctx.emit(
+                    Command::VillagerCompostFinish {
+                        pos,
+                        level,
+                        success: level != initial_level,
+                    },
+                    cx.me,
+                );
+                return;
+            }
+        }
+    }
+    cx.ctx.emit(
+        Command::VillagerCompostFinish {
+            pos,
+            level,
+            success: level != initial_level,
+        },
+        cx.me,
+    );
 }
 
 fn harvest_valid_pos(blocks: &dyn BlockView, pos: BlockPos) -> bool {

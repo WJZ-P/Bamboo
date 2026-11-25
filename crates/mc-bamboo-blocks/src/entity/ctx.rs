@@ -1503,18 +1503,27 @@ pub enum Command {
     PoiRelease {
         pos: BlockPos,
     },
-    /// `Villager.pickUpItem`（`InventoryCarrier.pickUpItem`）：把地上物品放进 8 格背包。
+    /// `Villager.pickUpItem`（`InventoryCarrier.pickUpItem`）：消耗或更新地上物品（背包已在 tick 内更新）。
     ///
-    /// `Villager.pickUpItem` (`InventoryCarrier.pickUpItem`): puts a ground item into
-    /// the villager's 8-slot inventory.
+    /// `Villager.pickUpItem` (`InventoryCarrier.pickUpItem`): discards or shrinks the
+    /// ground item after the villager's inventory has been updated.
     VillagerPickUpItem {
         item: EntityUid,
+        remaining_count: i32,
     },
-    /// `WorkAtComposter.compostItems`：操作堆肥桶（取骨粉或塞种子）并发 `levelEvent(1500)`。
+    /// `WorkAtComposter.compostItems`：先清空已满的堆肥桶产出骨粉。
     ///
-    /// `WorkAtComposter.compostItems`: interacts with the composter and emits `levelEvent(1500)`.
-    VillagerCompost {
+    /// `WorkAtComposter.compostItems`: empties a ready composter to drop bone meal.
+    VillagerCompostExtract {
         pos: BlockPos,
+    },
+    /// `WorkAtComposter.compostItems`：落地堆肥桶的新层数并发 `levelEvent(1500)`。
+    ///
+    /// `WorkAtComposter.compostItems`: commits the new composter level and emits `levelEvent(1500)`.
+    VillagerCompostFinish {
+        pos: BlockPos,
+        level: i32,
+        success: bool,
     },
     /// `ServerLevel.destroyBlock(pos, drop, entity)`：破坏方块并按需掉落。
     ///
@@ -2035,11 +2044,21 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::PoiRelease { pos } => {
             let _ = world.poi_release(pos);
         }
-        Command::VillagerPickUpItem { item } => {
-            super::mob::villager::apply_pick_up(world, item, me);
+        Command::VillagerPickUpItem {
+            item,
+            remaining_count,
+        } => {
+            super::mob::villager::apply_pick_up(world, item, remaining_count);
         }
-        Command::VillagerCompost { pos } => {
-            super::mob::villager::apply_compost(world, pos, me);
+        Command::VillagerCompostExtract { pos } => {
+            super::mob::villager::apply_compost_extract(world, pos);
+        }
+        Command::VillagerCompostFinish {
+            pos,
+            level,
+            success,
+        } => {
+            super::mob::villager::apply_compost_finish(world, pos, level, success);
         }
         Command::DestroyBlock { pos, drop } => {
             let _ = world.destroy_block(pos, drop, 512);

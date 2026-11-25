@@ -39,6 +39,34 @@ fn pick_weighted(distribution: &[(i32, i32)], random: &LegacyRandom) -> i32 {
     0
 }
 
+/// `compostable.layers().get(...)`：供村民堆肥等处按等级和随机抽样函数抽层数增量。
+///
+/// `compostable.layers().get(...)`: rolls compost layer increment for a given level.
+pub(crate) fn roll_layers(
+    layers: CompostLayers,
+    level: i32,
+    mut next_int: impl FnMut(i32) -> i32,
+) -> i32 {
+    match layers {
+        CompostLayers::Constant(layers) => layers,
+        CompostLayers::Weighted { when_empty, .. } if level == 0 => when_empty,
+        CompostLayers::Weighted { distribution, .. } => {
+            let total: i32 = distribution.iter().map(|&(_, weight)| weight).sum();
+            if total <= 0 {
+                return 0;
+            }
+            let mut roll = next_int(total);
+            for &(value, weight) in distribution {
+                roll -= weight;
+                if roll < 0 {
+                    return value;
+                }
+            }
+            0
+        }
+    }
+}
+
 /// `compostable.layers().get(...)`。战利品上下文没有给种子，用的是世界的随机数。
 fn layers_to_add(layers: CompostLayers, state: BlockState, world: &World) -> i32 {
     match layers {

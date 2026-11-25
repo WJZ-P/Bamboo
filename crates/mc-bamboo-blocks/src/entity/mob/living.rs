@@ -817,6 +817,9 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
         super::MobType::Axolotl => {
             super::axolotl::ambient_voice(mob.axolotl.playing_dead, me.in_water)
         }
+        // `Villager.getAmbientSound`：睡觉时返回 null，不出声也不取音高。
+        // `Villager.getAmbientSound`: returns null while sleeping, drawing no pitch.
+        super::MobType::Villager if mob.villager.sleeping => None,
         _ => Some(voice_of(mob, Voice::Ambient, me.in_water)),
     }
 }
@@ -1534,11 +1537,25 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
                 && *pickup_delay <= 0
                 && mob.villager.wants_to_pick_up(stack)
             {
-                items.push(other.uid);
+                items.push((other.uid, stack.clone()));
             }
         });
-        for item in items {
-            ctx.emit(crate::entity::ctx::Command::VillagerPickUpItem { item }, me);
+        for (item, stack) in items {
+            if mob.villager.wants_to_pick_up(&stack) {
+                let leftover = mob.villager.inventory.add_item(stack);
+                let remaining_count = if leftover.is_empty() {
+                    0
+                } else {
+                    leftover.count
+                };
+                ctx.emit(
+                    crate::entity::ctx::Command::VillagerPickUpItem {
+                        item,
+                        remaining_count,
+                    },
+                    me,
+                );
+            }
         }
     }
     // `AgeableMob.aiStep`：僵尸和鱼都不在这一层，年龄/求爱都不动。

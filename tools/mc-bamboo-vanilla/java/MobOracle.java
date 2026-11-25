@@ -432,6 +432,9 @@ public final class MobOracle {
             if (only == null || "villager_poi_acquire".startsWith(only) || only.startsWith("villager_poi")) {
                 cases += playVillagerPoi(official, out, only);
             }
+            if (only == null || "villager_p4".startsWith(only) || only.startsWith("villager_p4")) {
+                cases += playVillagerPhase4(official, out, only);
+            }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playBat(official, out, name);
@@ -11982,6 +11985,283 @@ public final class MobOracle {
                     + ",\"frames\":" + frames + "}\n");
             out.flush();
             return 1;
+        } finally {
+            world.closeRealPoi();
+        }
+    }
+
+    /**
+     * 村民第 4 期真实 POI 全量对拍场景：
+     * 1) `villager_p4_retry`：不可达候选失败建 `JitteredLinearRetry`，再放可达工作站认领成农民；
+     * 2) `villager_p4_compete`：两只无业村民抢同一个堆肥桶；
+     * 3) `villager_p4_unemploy`：成为农民后拆掉堆肥桶触发 `ValidateNearbyPoi` + `ResetProfession` 失业；
+     * 4) `villager_p4_sleep_wake`：夜里认领床、上床入睡（`OCCUPIED=true`、`sleepingPos`），天亮醒来；
+     * 5) `villager_p4_bell`：敲钟通知写 `HEARD_BELL_TIME`、`ReactToBell` 切 `HIDE`、`LocateHidingPlace` 躲床边；
+     * 6) `villager_p4_farmer`：农民收割成熟小麦、播种种子并捡起地上种子。
+     */
+    private static int playVillagerPhase4(Official official, Writer out, String only) throws Exception {
+        String[] scenes = {
+                "villager_p4_retry",
+                "villager_p4_compete",
+                "villager_p4_unemploy",
+                "villager_p4_sleep_wake",
+                "villager_p4_bell",
+                "villager_p4_farmer"
+        };
+        int count = 0;
+        for (String name : scenes) {
+            if (only != null && !name.startsWith(only)) {
+                continue;
+            }
+            playVillagerPhase4One(official, out, name);
+            count++;
+        }
+        return count;
+    }
+
+    private static void playVillagerPhase4One(Official official, Writer out, String name) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        try {
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels = java.util.Map.of(
+                    net.minecraft.world.level.Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            world.blockEntities = new Long2ObjectOpenHashMap<>();
+
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+
+            long clockStart = name.equals("villager_p4_sleep_wake") ? 12000L : 2000L;
+            int totalTicks = switch (name) {
+                case "villager_p4_retry" -> 110;
+                case "villager_p4_sleep_wake" -> 95;
+                case "villager_p4_bell" -> 75;
+                default -> 90;
+            };
+            long sensorDelay = 1L;
+            List<BlockPos> watchPois = new ArrayList<>();
+            List<BlockPos> watchBlocks = new ArrayList<>();
+
+            if (name.equals("villager_p4_retry")) {
+                BlockPos blocked = new BlockPos(3, 64, 0);
+                world.placeWorkstation(blocked, Blocks.COMPOSTER.defaultBlockState());
+                int[][] walls = {
+                        {2, 64, 0}, {4, 64, 0}, {3, 64, 1}, {3, 64, -1},
+                        {2, 65, 0}, {4, 65, 0}, {3, 65, 1}, {3, 65, -1},
+                        {3, 66, 0}
+                };
+                for (int[] w : walls) {
+                    world.blocks.put(BlockPos.asLong(w[0], w[1], w[2]), stone);
+                }
+                watchPois.add(blocked);
+                watchPois.add(new BlockPos(5, 64, 0));
+            } else if (name.equals("villager_p4_compete")) {
+                BlockPos ws = new BlockPos(4, 64, 0);
+                world.placeWorkstation(ws, Blocks.COMPOSTER.defaultBlockState());
+                watchPois.add(ws);
+            } else if (name.equals("villager_p4_unemploy")) {
+                BlockPos ws = new BlockPos(3, 64, 0);
+                world.placeWorkstation(ws, Blocks.COMPOSTER.defaultBlockState());
+                watchPois.add(ws);
+                watchBlocks.add(ws);
+            } else if (name.equals("villager_p4_sleep_wake")) {
+                BlockPos bed = new BlockPos(3, 64, 0);
+                world.placeBed(bed, Direction.NORTH);
+                watchPois.add(bed);
+                watchBlocks.add(bed);
+            } else if (name.equals("villager_p4_bell")) {
+                BlockPos bed = new BlockPos(-4, 64, 0);
+                BlockPos bell = new BlockPos(6, 64, 0);
+                world.placeBed(bed, Direction.NORTH);
+                world.placeBell(bell);
+                var bellBe = new net.minecraft.world.level.block.entity.BellBlockEntity(
+                        bell, Blocks.BELL.defaultBlockState());
+                bellBe.setLevel(world);
+                world.blockEntities.put(bell.asLong(), bellBe);
+                watchPois.add(bed);
+                watchPois.add(bell);
+            } else if (name.equals("villager_p4_farmer")) {
+                BlockPos ws = new BlockPos(0, 64, 4);
+                world.placeWorkstation(ws, Blocks.COMPOSTER.defaultBlockState());
+                BlockState wetFarm = Blocks.FARMLAND.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.MOISTURE, 7);
+                world.blocks.put(BlockPos.asLong(2, 63, 0), wetFarm);
+                world.blocks.put(BlockPos.asLong(3, 63, 0), wetFarm);
+                BlockState ripeWheat = Blocks.WHEAT.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.CropBlock.AGE, 7);
+                world.blocks.put(BlockPos.asLong(2, 64, 0), ripeWheat);
+                watchPois.add(ws);
+                watchBlocks.add(new BlockPos(2, 64, 0));
+                watchBlocks.add(new BlockPos(3, 64, 0));
+            }
+
+            world.enableRealPoi();
+            world.getPoiManager().tick(() -> true);
+
+            world.gameTime = 1000L;
+            world.realSky = true;
+            world.injectedCanSeeSky = true;
+            world.clock = clockStart;
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder()
+                    .addStaticLayers(world);
+            net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+                public long totalTicks() { return world.clock; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : world.dimensionType().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            official.attributes = builder.build();
+            put(ServerLevel.class, world, "environmentAttributes", official.attributes);
+            world.updateSkyBrightness();
+            world.getRandom().setSeed(1L);
+
+            List<Villager> villagers = new ArrayList<>();
+            java.util.function.BiConsumer<double[], Long> addVillager = (pos, seed) -> {
+                try {
+                    int idx = villagers.size();
+                    Villager v = (Villager) EntityTypes.VILLAGER.create(
+                            world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+                    v.setId(FIRST_ID + idx);
+                    v.setUUID(new UUID(0L, 1L + idx));
+                    v.snapTo(pos[0], pos[1], pos[2], 0.0F, 0.0F);
+                    v.setYHeadRot(0.0F);
+                    v.setYBodyRot(0.0F);
+                    put(net.minecraft.world.entity.ai.Brain.class, v.getBrain(), "lastScheduleUpdate", -9999L);
+                    v.getBrain().updateActivityFromSchedule(
+                            world.environmentAttributes(), world.getGameTime(), v.position());
+                    setRandom(v, seed);
+                    BrainOracle.reseedShuffles(v, randomSeed(v));
+                    BrainOracle.fixSensorDelays(v, sensorDelay);
+                    world.tracked.add(v);
+                    villagers.add(v);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            };
+
+            if (name.equals("villager_p4_compete")) {
+                addVillager.accept(new double[] {-0.5, 64.0, 0.5}, 71L);
+                addVillager.accept(new double[] {13.5, 64.0, 0.5}, 73L);
+            } else if (name.equals("villager_p4_farmer")) {
+                addVillager.accept(new double[] {1.5, 64.0, 0.5}, 71L);
+                Villager farmer = villagers.get(0);
+                var farmerProf = world.registryAccess()
+                        .lookupOrThrow(net.minecraft.core.registries.Registries.VILLAGER_PROFESSION)
+                        .getOrThrow(net.minecraft.world.entity.npc.villager.VillagerProfession.FARMER);
+                farmer.setVillagerData(farmer.getVillagerData().withProfession(farmerProf));
+                farmer.refreshBrain(world);
+                BlockPos ws = new BlockPos(0, 64, 4);
+                world.getPoiManager().take(h -> true, (h, p) -> p.equals(ws), ws, 1);
+                farmer.getBrain().setMemory(
+                        net.minecraft.world.entity.ai.memory.MemoryModuleType.JOB_SITE,
+                        net.minecraft.core.GlobalPos.of(net.minecraft.world.level.Level.OVERWORLD, ws));
+                put(net.minecraft.world.entity.ai.Brain.class, farmer.getBrain(), "lastScheduleUpdate", -9999L);
+                farmer.getBrain().updateActivityFromSchedule(
+                        world.environmentAttributes(), world.getGameTime(), farmer.position());
+                farmer.getInventory().addItem(new ItemStack(Items.WHEAT_SEEDS, 4));
+                setRandom(farmer, 71L);
+                BrainOracle.reseedShuffles(farmer, randomSeed(farmer));
+                BrainOracle.fixSensorDelays(farmer, sensorDelay);
+
+                var dropped = new net.minecraft.world.entity.item.ItemEntity(
+                        world, 1.5, 64.0, 1.5, new ItemStack(Items.WHEAT_SEEDS, 2), 0.0, 0.0, 0.0);
+                dropped.setId(FIRST_ID + 10);
+                dropped.setNoPickUpDelay();
+                world.tracked.add(dropped);
+            } else {
+                addVillager.accept(new double[] {0.5, 64.0, 0.5}, 71L);
+            }
+
+            long clockOffset = 0L;
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= totalTicks; tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    if (name.equals("villager_p4_sleep_wake") && tick == 60) {
+                        clockOffset = 12000L - 60L;
+                    }
+                    world.clock = clockStart + tick + clockOffset;
+                    official.attributes.invalidateTickCache();
+                    world.updateSkyBrightness();
+
+                    if (name.equals("villager_p4_retry") && tick == 25) {
+                        world.placeWorkstation(new BlockPos(5, 64, 0), Blocks.COMPOSTER.defaultBlockState());
+                        world.getPoiManager().tick(() -> true);
+                    } else if (name.equals("villager_p4_unemploy") && tick == 55) {
+                        world.removeBlock(new BlockPos(3, 64, 0), false);
+                        world.getPoiManager().tick(() -> true);
+                    } else if (name.equals("villager_p4_bell") && tick == 10) {
+                        BlockPos bell = new BlockPos(6, 64, 0);
+                        var be = (net.minecraft.world.level.block.entity.BellBlockEntity) world.blockEntities.get(bell.asLong());
+                        be.triggerEvent(1, Direction.NORTH.get3DDataValue());
+                    }
+
+                    List<Entity> snapshot = new ArrayList<>(world.tracked);
+                    for (Entity e : snapshot) {
+                        if (e.isRemoved()) continue;
+                        if (e instanceof Villager v) {
+                            var prevBrain = v.getBrain();
+                            v.commonTick();
+                            v.tick();
+                            if (v.getBrain() != prevBrain) {
+                                BrainOracle.reseedShuffles(v, randomSeed(v));
+                            }
+                        } else {
+                            e.tick();
+                        }
+                    }
+                    world.tracked.removeIf(Entity::isRemoved);
+                    world.getPoiManager().tick(() -> true);
+                }
+
+                if (tick > 0) frames.append(',');
+                frames.append("{\"levelSeed\":").append(randomSeed(world.getRandom()))
+                        .append(",\"villagers\":[");
+                for (int i = 0; i < villagers.size(); i++) {
+                    Villager v = villagers.get(i);
+                    if (i > 0) frames.append(',');
+                    String prof = v.getVillagerData().profession().unwrapKey().orElseThrow()
+                            .identifier().toString();
+                    var sleepOpt = v.getSleepingPos();
+                    String sleepJson = sleepOpt.isPresent()
+                            ? "[" + sleepOpt.get().getX() + "," + sleepOpt.get().getY() + "," + sleepOpt.get().getZ() + "]"
+                            : "null";
+                    int seeds = v.getInventory().countItem(Items.WHEAT_SEEDS);
+                    int wheat = v.getInventory().countItem(Items.WHEAT);
+                    frames.append("{\"brain\":").append(jsonString(BrainOracle.dump(v)))
+                            .append(",\"motion\":").append(projectileMotion(v))
+                            .append(",\"seed\":").append(randomSeed(v))
+                            .append(",\"profession\":").append(jsonString(prof))
+                            .append(",\"sleepingPos\":").append(sleepJson)
+                            .append(",\"inv\":[").append(seeds).append(',').append(wheat).append("]}");
+                }
+                frames.append("],\"poiTickets\":[");
+                for (int i = 0; i < watchPois.size(); i++) {
+                    if (i > 0) frames.append(',');
+                    frames.append(world.poiFreeTickets(watchPois.get(i)));
+                }
+                frames.append("],\"blocks\":[");
+                for (int i = 0; i < watchBlocks.size(); i++) {
+                    if (i > 0) frames.append(',');
+                    frames.append(Block.getId(world.getBlockState(watchBlocks.get(i))));
+                }
+                frames.append("]}");
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"villagerPhase4\",\"name\":" + jsonString(name)
+                    + ",\"clockStart\":" + clockStart
+                    + ",\"sensorDelay\":" + sensorDelay
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
         } finally {
             world.closeRealPoi();
         }
