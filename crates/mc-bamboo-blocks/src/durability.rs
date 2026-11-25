@@ -133,6 +133,17 @@ pub fn hurt_hand(world: &World, hand: Hand, amount: i32) {
     });
 }
 
+/// 这次动作里那只手当前的物品堆。
+///
+/// The stack in the hand for the current action.
+pub fn active_hand(hand: Hand) -> Option<ItemStack> {
+    HANDS.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|hands| hands.stack(hand).clone())
+    })
+}
+
 /// `hurtAndBreak(amount, level, null, onBreak)`。`onBreak` 是空的。
 ///
 /// `player == null` 时不看创造模式，耐久附魔仍走 `EnchantmentHelper.processDurabilityChange`，

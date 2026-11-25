@@ -339,6 +339,9 @@ public final class MobOracle {
                 playRiptide(official, out, name);
                 cases++;
             }
+            if (only == null || "pig_ride".startsWith(only)) {
+                cases += playPigRide(official, out);
+            }
             if (only == null || "equine".startsWith(only)) {
                 cases += playEquines(official, out);
             }
@@ -7305,6 +7308,191 @@ public final class MobOracle {
             setRule(official, GameRules.MOB_DROPS, previousMobDrops);
         }
         return cases;
+    }
+
+    /**
+     * 猪的骑乘：右键上猪（走官方 `Player.interactOn`）、胡萝卜钓竿加速（走 `ItemStack.use`，
+     * 再反射调 `Pig.tickRidden` / `getRiddenSpeed` 逐刻比）、下车落点（`getDismountLocationForPassenger`）。
+     * Pig riding: mounting through `Player.interactOn`, carrot-on-a-stick boosts through
+     * `ItemStack.use` plus reflective `Pig.tickRidden` / `getRiddenSpeed` per tick, and the
+     * dismount spot through `getDismountLocationForPassenger`.
+     */
+    private static int playPigRide(Official official, Writer out) throws Exception {
+        int cases = 0;
+        List<Item> pigItems = List.of(Items.AIR, Items.CARROT_ON_A_STICK, Items.CARROT, Items.SADDLE,
+                Items.STICK, Items.SHEARS);
+        for (int setup = 0; setup < 3; setup++) {
+            for (int itemIndex = 0; itemIndex < pigItems.size(); itemIndex++) {
+                for (int sneak = 0; sneak < 2; sneak++) {
+                    long seed = 31000L + setup * 100L + itemIndex * 3L + sneak;
+                    FakeLevel world = pigWorld(official);
+                    net.minecraft.world.entity.animal.pig.Pig pig = newPig(world, setup != 1, setup == 2, seed);
+                    ServerPlayer player = pigPlayer(official, world);
+                    player.setShiftKeyDown(sneak == 1);
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(pigItems.get(itemIndex)));
+                    var result = player.interactOn(pig, InteractionHand.MAIN_HAND, pig.position());
+                    String swing = result instanceof net.minecraft.world.InteractionResult.Success success
+                            ? success.swingSource().name() : "PASS";
+                    var saddle = pig.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.SADDLE);
+                    out.write("{\"type\":\"pigMount\",\"setup\":" + setup
+                            + ",\"item\":" + BuiltInRegistries.ITEM.getId(pigItems.get(itemIndex))
+                            + ",\"sneak\":" + (sneak == 1) + ",\"seed\":" + seed
+                            + ",\"swing\":\"" + swing + "\""
+                            + ",\"count\":" + player.getItemInHand(InteractionHand.MAIN_HAND).getCount()
+                            + ",\"vehicle\":" + (player.getVehicle() == pig)
+                            + ",\"controller\":" + (pig.getControllingPassenger() == player)
+                            + ",\"saddle\":" + (saddle.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(saddle.getItem()))
+                            + ",\"pigSeed\":" + randomSeed(pig) + "}\n");
+                    cases++;
+                }
+            }
+        }
+        var bootAccessor = net.minecraft.world.entity.animal.pig.Pig.class.getDeclaredField("DATA_BOOST_TIME");
+        bootAccessor.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        var boostData = (net.minecraft.network.syncher.EntityDataAccessor<Integer>) bootAccessor.get(null);
+        var tickRidden = net.minecraft.world.entity.animal.pig.Pig.class.getDeclaredMethod("tickRidden",
+                net.minecraft.world.entity.player.Player.class, Vec3.class);
+        tickRidden.setAccessible(true);
+        var riddenSpeed = net.minecraft.world.entity.animal.pig.Pig.class.getDeclaredMethod("getRiddenSpeed",
+                net.minecraft.world.entity.player.Player.class);
+        riddenSpeed.setAccessible(true);
+        var broken = net.minecraft.stats.Stats.ITEM_USED.get(Items.CARROT_ON_A_STICK);
+        for (int damage : new int[] {0, 7, 17, 18, 24}) {
+            long seed = 32000L + damage;
+            FakeLevel world = pigWorld(official);
+            net.minecraft.world.entity.animal.pig.Pig pig = newPig(world, true, false, seed);
+            ServerPlayer player = pigPlayer(official, world);
+            ItemStack rod = new ItemStack(Items.CARROT_ON_A_STICK);
+            rod.setDamageValue(damage);
+            player.setItemInHand(InteractionHand.MAIN_HAND, rod);
+            player.interactOn(pig, InteractionHand.MAIN_HAND, pig.position());
+            if (player.getVehicle() != pig) throw new IllegalStateException("pig boost: player did not mount");
+            StringBuilder uses = new StringBuilder();
+            for (int use = 0; use < 2; use++) {
+                ItemStack stack = player.getItemInHand(InteractionHand.MAIN_HAND);
+                if (!stack.is(Items.CARROT_ON_A_STICK)) break;
+                int usedBefore = player.getStats().getValue(broken);
+                var result = stack.use(world, player, InteractionHand.MAIN_HAND);
+                // 官方 `ServerPlayerGameMode.useItem` 把 `heldItemTransformedTo` 放回手里。
+                // Vanilla `ServerPlayerGameMode.useItem` puts `heldItemTransformedTo` back in hand.
+                if (result instanceof net.minecraft.world.InteractionResult.Success success
+                        && success.heldItemTransformedTo() != null) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, success.heldItemTransformedTo());
+                }
+                ItemStack held = player.getItemInHand(InteractionHand.MAIN_HAND);
+                if (uses.length() > 0) uses.append(',');
+                uses.append("{\"boosted\":").append(result instanceof net.minecraft.world.InteractionResult.Success)
+                        .append(",\"item\":").append(BuiltInRegistries.ITEM.getId(held.getItem()))
+                        .append(",\"damage\":").append(held.getDamageValue())
+                        .append(",\"count\":").append(held.getCount())
+                        .append(",\"boostTime\":").append(pig.getEntityData().get(boostData))
+                        .append(",\"itemUsed\":").append(player.getStats().getValue(broken) - usedBefore)
+                        .append(",\"seed\":").append(randomSeed(pig)).append('}');
+            }
+            int total = pig.getEntityData().get(boostData);
+            StringBuilder ticks = new StringBuilder();
+            for (int t = 0; t < Math.max(0, total + 3); t++) {
+                float yaw = -170.0F + 7.0F * t;
+                float pitch = (float) ((t % 90) - 45);
+                player.setYRot(yaw);
+                player.setXRot(pitch);
+                tickRidden.invoke(pig, player, Vec3.ZERO);
+                float speed = (Float) riddenSpeed.invoke(pig, player);
+                if (t > 0) ticks.append(',');
+                ticks.append('[').append(Float.floatToRawIntBits(speed))
+                        .append(',').append(Float.floatToRawIntBits(pig.getYRot()))
+                        .append(',').append(Float.floatToRawIntBits(pig.getXRot()))
+                        .append(',').append(Float.floatToRawIntBits(pig.yBodyRot))
+                        .append(',').append(Float.floatToRawIntBits(pig.yHeadRot))
+                        .append(',').append(Float.floatToRawIntBits(pig.yRotO)).append(']');
+            }
+            out.write("{\"type\":\"pigBoost\",\"damage\":" + damage + ",\"seed\":" + seed
+                    + ",\"uses\":[" + uses + "],\"ticks\":[" + ticks + "]}\n");
+            cases++;
+        }
+        float[] yaws = {0.0F, 90.0F, 37.0F, -135.0F, 180.0F};
+        for (int layout = 0; layout < 5; layout++) {
+            for (float yaw : yaws) {
+                FakeLevel world = pigWorld(official);
+                for (int x = -4; x <= 4; x++) {
+                    for (int z = -4; z <= 4; z++) {
+                        for (int y = -63; y <= -61; y++) {
+                            world.blocks.put(BlockPos.asLong(x, y, z), Blocks.STONE.defaultBlockState());
+                        }
+                    }
+                }
+                for (int x = -1; x <= 1; x++) {
+                    for (int z = -1; z <= 1; z++) {
+                        if (x == 0 && z == 0) continue;
+                        switch (layout) {
+                            case 1 -> {
+                                for (int y = -60; y <= -58; y++) {
+                                    world.blocks.put(BlockPos.asLong(x, y, z), Blocks.STONE.defaultBlockState());
+                                }
+                            }
+                            case 2 -> {
+                                if (x == -1) {
+                                    for (int y = -60; y <= -58; y++) {
+                                        world.blocks.put(BlockPos.asLong(x, y, z), Blocks.STONE.defaultBlockState());
+                                    }
+                                }
+                            }
+                            case 3 -> world.blocks.remove(BlockPos.asLong(x, -61, z));
+                            case 4 -> world.blocks.put(BlockPos.asLong(x, -59, z), Blocks.STONE.defaultBlockState());
+                            default -> { }
+                        }
+                    }
+                }
+                net.minecraft.world.entity.animal.pig.Pig pig = newPig(world, true, false, 1L);
+                pig.setPos(0.5, -60.0, 0.5);
+                pig.setYRot(yaw);
+                ServerPlayer player = pigPlayer(official, world);
+                player.setPos(0.5, -60.0, 0.5);
+                Vec3 spot = pig.getDismountLocationForPassenger(player);
+                out.write("{\"type\":\"pigDismount\",\"layout\":" + layout
+                        + ",\"yaw\":" + Float.floatToRawIntBits(yaw)
+                        + ",\"spot\":[" + Double.doubleToRawLongBits(spot.x) + ","
+                        + Double.doubleToRawLongBits(spot.y) + "," + Double.doubleToRawLongBits(spot.z) + "]}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
+    private static FakeLevel pigWorld(Official official) {
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.spawned = new ArrayList<>();
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+        level.getRandom().setSeed(1L);
+        return level;
+    }
+
+    private static net.minecraft.world.entity.animal.pig.Pig newPig(FakeLevel world, boolean saddled,
+            boolean baby, long seed) {
+        var pig = (net.minecraft.world.entity.animal.pig.Pig) EntityTypes.PIG.create(world, EntitySpawnReason.COMMAND);
+        pig.setPos(0.5, 64.0, 0.5);
+        if (saddled) pig.setItemSlot(net.minecraft.world.entity.EquipmentSlot.SADDLE, new ItemStack(Items.SADDLE));
+        if (baby) pig.setAge(-24000);
+        setRandom(pig, seed);
+        putBoolean(Entity.class, pig, "firstTick", false);
+        return pig;
+    }
+
+    private static ServerPlayer pigPlayer(Official official, FakeLevel world) {
+        ServerPlayer player = new ServerPlayer(official.server, world,
+                new GameProfile(new UUID(1L, 2L), "Oracle0"), ClientInformation.createDefault());
+        player.setPos(1.5, 64.0, 0.5);
+        ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+        ((RecordingListener) connection).bytes = new Bytes(official.registries);
+        put(ServerPlayer.class, player, "connection", connection);
+        return player;
     }
 
     /** 交互对拍用的物品，按顺序编号。 */

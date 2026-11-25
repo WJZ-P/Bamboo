@@ -1873,6 +1873,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         if sound != pig_sound_variant_default() {
             out.push(EntityData::PigSoundVariant(sound));
         }
+        if mob.pig_boost_time != 0 {
+            out.push(EntityData::PigBoostTime(mob.pig_boost_time));
+        }
     } else {
         if mob.variant.registry_id() != 1 {
             out.push(EntityData::CowVariant(mob.variant.registry_id()));

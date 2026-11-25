@@ -318,7 +318,7 @@ pub(super) fn animal_interact(
     let food = !req.held.is_empty() && is_food(mob.mob_type, req.held.item);
     if !food {
         return match mob.mob_type {
-            MobType::Pig => pig::equip_saddle(me, mob, req),
+            MobType::Pig => pig::interact_not_food(me, mob, req),
             MobType::Sheep => sheep::interact_dye(me, mob, req),
             _ => MobInteraction::pass(),
         };
