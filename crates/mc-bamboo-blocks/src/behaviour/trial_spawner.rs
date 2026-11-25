@@ -7,12 +7,14 @@
 
 use std::collections::BTreeSet;
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_nbt::Tag;
 
 use crate::{
     LegacyRandom,
     archive::tag::{self, field, put},
+    entity::mob::spawn::SpawnReason,
+    level::Effect,
     state::{OMINOUS, TRIAL_SPAWNER_STATE, TrialSpawnerState},
 };
 
@@ -1055,8 +1057,39 @@ impl TrialSpawnerContext for TrialSpawnerWorld<'_, '_> {
         ominous: bool,
         spawn_range: i32,
     ) -> Option<[u8; 16]> {
+        let entity_tag = field(spawn_data, "entity")?;
+        let equipment = field(spawn_data, "equipment");
+        // `lambda$spawnMob$1`：生点 (x + (d-d)*range + 0.5, y + nextInt(3) - 1, z + ...)。
+        let random = self.world.random();
+        let range = f64::from(spawn_range);
+        let position = Vec3::new(
+            f64::from(pos.x) + (random.next_double() - random.next_double()) * range + 0.5,
+            f64::from(pos.y + random.next_int(3) - 1),
+            f64::from(pos.z) + (random.next_double() - random.next_double()) * range + 0.5,
+        );
+        // `lambda$spawnMob$2`：朝向 (nextFloat*360, 0)。
+        let yaw = random.next_float() * 360.0;
+        let uuid = self.world.spawn_from_spawn_data(
+            entity_tag,
+            position,
+            yaw,
+            0.0,
+            SpawnReason::TrialSpawner,
+            equipment,
+        )?;
+        let flame = if ominous {
+            flame_particle::OMINOUS
+        } else {
+            flame_particle::NORMAL
+        };
         self.world
-            .trial_spawner_spawn_mob(pos, spawn_data, ominous, spawn_range)
+            .level_event(level_event::SPAWN_MOB_AT_SPAWNER, pos, flame);
+        self.world.level_event(
+            level_event::SPAWN_MOB_AT_MOB,
+            BlockPos::containing(position),
+            flame,
+        );
+        Some(uuid)
     }
 
     fn eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
@@ -1065,7 +1098,7 @@ impl TrialSpawnerContext for TrialSpawnerWorld<'_, '_> {
 
     fn transform_bad_omen(&mut self, player: [u8; 16], duration: i32) {
         self.world
-            .trial_spawner_transform_bad_omen(player, duration);
+            .push_effect(Effect::TrialSpawnerTransformBadOmen { player, duration });
     }
 
     fn spawn_ominous_item(&mut self, pos: BlockPos, loot_table: &str) -> bool {

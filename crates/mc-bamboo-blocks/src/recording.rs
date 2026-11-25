@@ -771,6 +771,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::KilledByArrow { .. } => 28,
         Effect::EnderPearlTeleport { .. } => 29,
         Effect::GuardianElderEffect { .. } => 30,
+        Effect::TrialSpawnerTransformBadOmen { .. } => 31,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -905,6 +906,10 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::GuardianElderEffect { target, silent } => {
             target.hash(&mut hasher);
             silent.hash(&mut hasher);
+        }
+        Effect::TrialSpawnerTransformBadOmen { player, duration } => {
+            player.hash(&mut hasher);
+            duration.hash(&mut hasher);
         }
         Effect::DestroyProgress {
             breaker,

@@ -1311,41 +1311,15 @@ pub trait Level: LevelSideState + LevelEntities {
         Vec::new()
     }
 
-    /// `TrialSpawner.spawnMob` 的试炼专属包装：算出生点（按 `spawn_range`）、做视线 /
-    /// 生成规则检查，再走 [`Self::spawner_spawn_entity`] 造实体。默认不生成。
-    fn trial_spawner_spawn_mob(
-        &mut self,
-        _pos: BlockPos,
-        _spawn_data: &Tag,
-        _ominous: bool,
-        _spawn_range: i32,
-    ) -> Option<[u8; 16]> {
-        None
-    }
-
-    /// `SpawnData.entityToSpawn` 造实体的通用路径：普通刷怪笼和试炼刷怪笼共用。
-    /// 按 `entity_tag`（含 `id`）构造实体、`snapTo(position, yaw, pitch)`、只有 `id`
-    /// 时跑 `finalizeSpawn`，可选套 `equipment` 装备表，放进世界并返回 UUID。默认不生成。
-    fn spawner_spawn_entity(
-        &mut self,
-        _entity_tag: &Tag,
-        _position: mc_bamboo_core::Vec3,
-        _yaw: f32,
-        _pitch: f32,
-        _reason: crate::entity::mob::spawn::SpawnReason,
-        _equipment: Option<&Tag>,
-    ) -> Option<[u8; 16]> {
-        None
-    }
+    /// `EquipmentTable` 套到一只还没放进世界的生物上：按战利品表给装备槽，写
+    /// 掉率。默认不做事。
+    fn equip_mob(&mut self, _entity: &mut crate::entity::Entity, _equipment: &Tag) {}
 
     /// `TrialSpawner.ejectReward`：按战利品表在 `pos` 弹出一组奖励，返回有没有弹过。
     /// 默认不弹。
     fn trial_spawner_eject_reward(&mut self, _pos: BlockPos, _loot_table: &str) -> bool {
         false
     }
-
-    /// `transformBadOmenIntoTrialOmen`：把玩家的不祥之兆换成试炼之兆。默认不做事。
-    fn trial_spawner_transform_bad_omen(&mut self, _player: [u8; 16], _duration: i32) {}
 
     /// `spawnOminousOminousItemSpawner`：在探测到的玩家上方生成不祥物品生成器。
     /// 默认不生成。
@@ -2706,6 +2680,12 @@ pub enum Effect {
     /// `ElderGuardian.customServerAiStep`: send the `GUARDIAN_ELDER_EFFECT` game event
     /// packet only to the player who received mining fatigue.
     GuardianElderEffect { target: EntityUid, silent: bool },
+    /// `transformBadOmenIntoTrialOmen`：把玩家的不祥之兆换成试炼之兆。游戏层按
+    /// `player` 找玩家、移除 `BAD_OMEN`、加上 `TRIAL_OMEN`（时长 `duration`）。
+    ///
+    /// `transformBadOmenIntoTrialOmen`: replace the player's bad omen with trial omen.
+    /// The game layer finds the player by UUID, removes `BAD_OMEN` and adds `TRIAL_OMEN`.
+    TrialSpawnerTransformBadOmen { player: [u8; 16], duration: i32 },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///

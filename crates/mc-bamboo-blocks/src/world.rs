@@ -3621,20 +3621,14 @@ impl<'a> World<'a> {
         self.level.trial_spawner_players(pos, range, line_of_sight)
     }
 
-    /// 见 [`Level::trial_spawner_spawn_mob`]。
-    pub fn trial_spawner_spawn_mob(
-        &mut self,
-        pos: BlockPos,
-        spawn_data: &Tag,
-        ominous: bool,
-        spawn_range: i32,
-    ) -> Option<[u8; 16]> {
-        self.level
-            .trial_spawner_spawn_mob(pos, spawn_data, ominous, spawn_range)
-    }
-
-    /// 见 [`Level::spawner_spawn_entity`]。
-    pub fn spawner_spawn_entity(
+    /// `SpawnData.entityToSpawn` 造实体的通用路径：普通刷怪笼和试炼刷怪笼共用。
+    /// 按 `entity_tag`（含 `id`）构造实体、`snapTo(position, yaw, pitch)`，只有 `id`
+    /// 时跑 `finalizeSpawn`，可选套 `equipment` 装备表，放进世界并返回 UUID。
+    ///
+    /// The shared entity construction path for `SpawnData.entityToSpawn`: build the
+    /// entity from `entity_tag`, snap it, run `finalizeSpawn` when the tag only holds
+    /// an `id`, optionally equip it, add it to the world and return its UUID.
+    pub fn spawn_from_spawn_data(
         &mut self,
         entity_tag: &Tag,
         position: Vec3,
@@ -3643,19 +3637,38 @@ impl<'a> World<'a> {
         reason: crate::entity::mob::spawn::SpawnReason,
         equipment: Option<&Tag>,
     ) -> Option<[u8; 16]> {
-        self.level
-            .spawner_spawn_entity(entity_tag, position, yaw, pitch, reason, equipment)
+        use crate::entity::mob::{
+            MobType,
+            nbt::load_into,
+            spawn::{finalize_spawn, snap_to},
+        };
+        let id = crate::archive::tag::field(entity_tag, "id").and_then(|value| match value {
+            Tag::String(text) if !text.is_empty() => Some(text.as_str()),
+            _ => None,
+        })?;
+        let kind = MobType::by_name(id)?;
+        let mut entity = self.prepare_entity(Entity::by_mob_type(kind, Vec3::default()));
+        if load_into(&mut entity, entity_tag).is_err() {
+            return None;
+        }
+        snap_to(&mut entity, position, yaw, pitch);
+        // 官方：entityToSpawn 只有 `id` 时才跑 finalizeSpawn 随机化。
+        if matches!(entity_tag, Tag::Compound(entries) if entries.len() == 1) {
+            finalize_spawn(self, kind, &mut entity, reason);
+        }
+        entity.with_mob(|_, mob| mob.persistence_required = true);
+        if let Some(equipment) = equipment {
+            self.level.equip_mob(&mut entity, equipment);
+        }
+        let uuid = entity.kind.mob().map(|mob| mob.uuid).unwrap_or_default();
+        let uid = self.add_prepared_entity(entity);
+        self.finish_jockeys(uid);
+        Some(uuid)
     }
 
     /// 见 [`Level::trial_spawner_eject_reward`]。
     pub fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
         self.level.trial_spawner_eject_reward(pos, loot_table)
-    }
-
-    /// 见 [`Level::trial_spawner_transform_bad_omen`]。
-    pub fn trial_spawner_transform_bad_omen(&mut self, player: [u8; 16], duration: i32) {
-        self.level
-            .trial_spawner_transform_bad_omen(player, duration);
     }
 
     /// 见 [`Level::trial_spawner_spawn_ominous_item`]。
@@ -4885,7 +4898,8 @@ mod tests {
                 | Effect::CrafterCrafted { .. }
                 | Effect::KilledByArrow { .. }
                 | Effect::EnderPearlTeleport { .. }
-                | Effect::GuardianElderEffect { .. } => None,
+                | Effect::GuardianElderEffect { .. }
+                | Effect::TrialSpawnerTransformBadOmen { .. } => None,
             })
             .collect()
     }
