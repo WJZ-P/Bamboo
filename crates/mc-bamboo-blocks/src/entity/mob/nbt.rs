@@ -279,10 +279,16 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "equipment", mob.equipment.equipment_tag());
     }
     // ---- Mob ----
+    // `SulfurCube.canPickUpLoot()` = `!hasBodyItem()`，存档写的是覆写后的值。
+    let can_pick_up_loot = if mob.mob_type == MobType::SulfurCube {
+        !super::sulfur_cube::has_body_item(mob)
+    } else {
+        mob.can_pick_up_loot
+    };
     put(
         &mut out,
         "CanPickUpLoot",
-        Tag::Byte(i8::from(mob.can_pick_up_loot)),
+        Tag::Byte(i8::from(can_pick_up_loot)),
     );
     put(
         &mut out,
@@ -324,13 +330,27 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         }
     }
     // ---- AbstractCubeMob ----
-    if mob.mob_type == MobType::Slime {
+    if matches!(mob.mob_type, MobType::Slime | MobType::SulfurCube) {
         put(&mut out, "Size", Tag::Int(mob.cube.size - 1));
         put(
             &mut out,
             "wasOnGround",
             Tag::Byte(i8::from(mob.cube.was_on_ground)),
         );
+    }
+    // ---- SulfurCube ----
+    if mob.mob_type == MobType::SulfurCube {
+        put(
+            &mut out,
+            "pickup_timer",
+            Tag::Int(mob.sulfur_cube.pickup_timer),
+        );
+        put(
+            &mut out,
+            "from_bucket",
+            Tag::Byte(i8::from(mob.sulfur_cube.from_bucket)),
+        );
+        put(&mut out, "fuse", Tag::Int(mob.sulfur_cube.fuse));
     }
     // ---- Skeleton / Bogged ----
     if mob.mob_type == MobType::Skeleton {
@@ -700,9 +720,13 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         // `super.readAdditionalSaveData` 之前，后面读到的 `attributes` 和 `Health` 盖在它上面。
         // `AbstractCubeMob.readAdditionalSaveData`: `setSize(Size + 1, false)` runs ahead of
         // `super.readAdditionalSaveData`, so the saved `attributes` and `Health` land on top.
-        if mob.mob_type == MobType::Slime {
+        if matches!(mob.mob_type, MobType::Slime | MobType::SulfurCube) {
             let size = tag::int_or(tag, "Size", 0).saturating_add(1);
-            super::slime::set_size(me, mob, size, false);
+            if mob.mob_type == MobType::SulfurCube {
+                super::sulfur_cube::set_size(me, mob, size, false);
+            } else {
+                super::slime::set_size(me, mob, size, false);
+            }
             mob.cube.was_on_ground = tag::bool_or(tag, "wasOnGround", false);
         }
         // ---- LivingEntity.readAdditionalSaveData ----
@@ -802,6 +826,20 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Endermite {
             mob.endermite.life = tag::int_or(tag, "Lifetime", 0);
+        }
+        if mob.mob_type == MobType::SulfurCube {
+            let state = &mut mob.sulfur_cube;
+            state.pickup_timer = tag::int_or(tag, "pickup_timer", 0);
+            state.from_bucket = tag::bool_or(tag, "from_bucket", false);
+            state.fuse = tag::int_or(tag, "fuse", -1);
+            state.max_fuse = state.fuse;
+            // BODY 槽里的物品决定原型派生值；读盘时不移除任何属性修饰，
+            // 存档里已经带着它们。
+            let body = mob
+                .equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Body)
+                .clone();
+            super::sulfur_cube::collect_equipment_changes(mob, body);
         }
         if mob.mob_type == MobType::Phantom {
             let pos = tag::int_array(tag, "anchor_pos");

@@ -85,6 +85,7 @@ pub mod spawn;
 pub mod spider;
 pub mod squid;
 pub mod stray;
+pub mod sulfur_cube;
 pub mod tadpole;
 pub mod tame;
 pub mod throttle;
@@ -215,13 +216,15 @@ pub enum MobType {
     ZombieVillager,
     Guardian,
     ElderGuardian,
+    /// 硫磺方块怪，`SulfurCube`。
+    SulfurCube,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 59] = [
+    pub const ALL: [Self; 60] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -281,6 +284,7 @@ impl MobType {
         Self::ZombieVillager,
         Self::Guardian,
         Self::ElderGuardian,
+        Self::SulfurCube,
     ];
 
     /// 注册表 ID。
@@ -346,6 +350,7 @@ impl MobType {
             Self::ZombieVillager => ids::ZOMBIE_VILLAGER,
             Self::Guardian => ids::GUARDIAN,
             Self::ElderGuardian => ids::ELDER_GUARDIAN,
+            Self::SulfurCube => ids::SULFUR_CUBE,
         }
     }
 
@@ -411,6 +416,7 @@ impl MobType {
             Self::ZombieVillager => "minecraft:zombie_villager",
             Self::Guardian => "minecraft:guardian",
             Self::ElderGuardian => "minecraft:elder_guardian",
+            Self::SulfurCube => "minecraft:sulfur_cube",
         }
     }
 
@@ -512,6 +518,7 @@ impl MobType {
             // 大小 1 的尺寸；别的大小看 [`Mob::dimensions`]。
             // Size 1; other sizes go through [`Mob::dimensions`].
             (Self::Slime, _) => slime::dimensions(1),
+            (Self::SulfurCube, _) => sulfur_cube::dimensions(2),
             (
                 Self::Horse
                 | Self::Donkey
@@ -717,6 +724,7 @@ impl MobType {
                 | Self::Tadpole
                 | Self::Bee
                 | Self::IronGolem
+                | Self::SulfurCube
         )
     }
 
@@ -732,6 +740,7 @@ impl MobType {
                 | Self::Slime
                 | Self::Phantom
                 | Self::Pillager
+                | Self::SulfurCube
                 | Self::Ocelot
                 | Self::Cat
         )
@@ -745,9 +754,15 @@ impl MobType {
         matches!(self, Self::Spider | Self::CaveSpider)
     }
 
-    /// `EntityType.isAllowedInPeaceful()`：牛为真，敌对生物为假。
+    /// `EntityType.isAllowedInPeaceful()`：`Builder` 缺省真，只有显式调过
+    /// `notInPeaceful()` 的类型为假。硫磺方块怪的 `EntityTypes.SULFUR_CUBE`
+    /// 没调它，所以和平难度照样刷（字节码里那一支紧挨着 `clientTrackingRange(10)`）。
+    ///
+    /// `EntityType.isAllowedInPeaceful()`: true by builder default; only types that
+    /// explicitly call `notInPeaceful()` are false. `SULFUR_CUBE` does not, so it
+    /// spawns even on peaceful.
     pub const fn allowed_in_peaceful(self) -> bool {
-        !self.is_enemy()
+        matches!(self, Self::SulfurCube) || !self.is_enemy()
     }
 
     /// `MobCategory.MONSTER` 的类型：`Monster` 一支加史莱姆（它是 `AgeableMob`，只实现
@@ -757,7 +772,11 @@ impl MobType {
     /// that only implements `Enemy`). Despawning, peaceful removal and the sound category
     /// follow it.
     pub const fn is_enemy(self) -> bool {
-        self.is_monster() || matches!(self, Self::Slime | Self::Phantom | Self::CamelHusk)
+        self.is_monster()
+            || matches!(
+                self,
+                Self::Slime | Self::Phantom | Self::SulfurCube | Self::CamelHusk
+            )
     }
 
     /// `EntityType.getCategory()` 的消失距离。牛是 `CREATURE`（32），
@@ -872,7 +891,16 @@ impl MobType {
             && !self.is_water_animal()
             && !matches!(
                 self,
-                Self::Bat | Self::Phantom | Self::IronGolem | Self::SnowGolem | Self::Villager
+                Self::Bat
+                | Self::Phantom
+                | Self::IronGolem
+                | Self::SnowGolem
+                | Self::Villager
+                // `AbstractCubeMob` 一支是 `AgeableMob` 但不是 `Animal`：
+                // 没有 `InLove` / `LoveCause` 存档键，也没有求爱目标。
+                // The cube-mob branch is `AgeableMob` but not `Animal`.
+                | Self::Slime
+                | Self::SulfurCube
             )
     }
 
@@ -953,6 +981,11 @@ impl MobType {
         if matches!(self, Self::Guardian | Self::ElderGuardian) {
             return 10;
         }
+        // 硫磺方块怪成年是 1 + rand(2)，幼年 0，见 `living::drop_loot`。
+        // Adult sulfur cubes give 1 + rand(2); babies give none.
+        if matches!(self, Self::SulfurCube) {
+            return 1;
+        }
         // `Phantom` 构造函数里也是 `xpReward = 5`。
         // The `Phantom` constructor sets `xpReward = 5` as well.
         if self.is_monster() || matches!(self, Self::Phantom) {
@@ -1024,6 +1057,7 @@ impl MobType {
             Self::ZombieVillager => "minecraft:entities/zombie_villager",
             Self::Guardian => "minecraft:entities/guardian",
             Self::ElderGuardian => "minecraft:entities/elder_guardian",
+            Self::SulfurCube => "minecraft:entities/sulfur_cube",
         }
     }
 
@@ -1153,7 +1187,7 @@ impl MobType {
             Self::ZombieVillager => Some("minecraft:entity.zombie_villager.ambient"),
             // 守卫者的环境音分水中 / 岸上两套，由 `guardian::ambient_sound` 按 `isInWater` 选。
             // Guardian ambience has water / land variants picked by `guardian::ambient_sound`.
-            Self::Guardian | Self::ElderGuardian => None,
+            Self::Guardian | Self::ElderGuardian | Self::SulfurCube => None,
         }
     }
 
@@ -1211,7 +1245,7 @@ impl MobType {
             Self::ZombieVillager => Some("minecraft:entity.zombie_villager.hurt"),
             // 守卫者的受伤音分水中 / 岸上两套，由 `guardian::hurt_sound` 按 `isInWater` 选。
             // Guardian hurt sounds have water / land variants picked by `guardian::hurt_sound`.
-            Self::Guardian | Self::ElderGuardian => None,
+            Self::Guardian | Self::ElderGuardian | Self::SulfurCube => None,
         }
     }
 
@@ -1269,7 +1303,7 @@ impl MobType {
             Self::ZombieVillager => Some("minecraft:entity.zombie_villager.death"),
             // 守卫者的死亡音分水中 / 岸上两套，由 `guardian::death_sound` 按 `isInWater` 选。
             // Guardian death sounds have water / land variants picked by `guardian::death_sound`.
-            Self::Guardian | Self::ElderGuardian => None,
+            Self::Guardian | Self::ElderGuardian | Self::SulfurCube => None,
         }
     }
 
@@ -1338,7 +1372,7 @@ impl MobType {
             Self::ZombieVillager => Some("minecraft:entity.zombie_villager.step"),
             // `Guardian.getMovementEmission()` = `EVENTS`：没有脚步声。
             // `Guardian.getMovementEmission()` = `EVENTS`: no step sound.
-            Self::Guardian | Self::ElderGuardian => None,
+            Self::Guardian | Self::ElderGuardian | Self::SulfurCube => None,
         }
     }
 
@@ -1405,6 +1439,7 @@ impl MobType {
             Self::ZombieVillager => items::ZOMBIE_VILLAGER_SPAWN_EGG,
             Self::Guardian => items::GUARDIAN_SPAWN_EGG,
             Self::ElderGuardian => items::ELDER_GUARDIAN_SPAWN_EGG,
+            Self::SulfurCube => items::SULFUR_CUBE_SPAWN_EGG,
         }
     }
 
@@ -1470,6 +1505,7 @@ impl MobType {
             Self::ZombieVillager => "entity.minecraft.zombie_villager",
             Self::Guardian => "entity.minecraft.guardian",
             Self::ElderGuardian => "entity.minecraft.elder_guardian",
+            Self::SulfurCube => "entity.minecraft.sulfur_cube",
         }
     }
 
@@ -1772,6 +1808,12 @@ pub enum DamageKind {
     ///
     /// A lightning strike, `minecraft:lightning_bolt`.
     LightningBolt,
+    /// HOT 原型硫磺方块怪的接触伤害，`minecraft:sulfur_cube_hot`。
+    /// 数据文件里是 burning、exhaustion 0.1、scaling
+    /// `when_caused_by_living_non_player`、message_id `sulfurCubeHot`。
+    ///
+    /// Contact damage of the HOT sulfur-cube archetype.
+    SulfurCubeHot,
 }
 
 impl DamageKind {
@@ -1810,6 +1852,7 @@ impl DamageKind {
             Self::PlayerExplosion => "minecraft:player_explosion",
             Self::EnderPearl => "minecraft:ender_pearl",
             Self::LightningBolt => "minecraft:lightning_bolt",
+            Self::SulfurCubeHot => "minecraft:sulfur_cube_hot",
         }
     }
 
@@ -1868,6 +1911,7 @@ impl DamageKind {
             Self::PlayerExplosion => "explosion.player",
             Self::EnderPearl => "fall",
             Self::LightningBolt => "lightningBolt",
+            Self::SulfurCubeHot => "sulfurCubeHot",
         }
     }
 
@@ -1908,6 +1952,7 @@ impl DamageKind {
             Self::PlayerExplosion,
             Self::EnderPearl,
             Self::LightningBolt,
+            Self::SulfurCubeHot,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -2017,7 +2062,8 @@ impl DamageKind {
             | Self::HotFloor
             | Self::SweetBerryBush
             | Self::DryOut
-            | Self::LightningBolt => TENTH,
+            | Self::LightningBolt
+            | Self::SulfurCubeHot => TENTH,
             _ => 0.0,
         }
     }
@@ -2700,6 +2746,10 @@ pub struct Mob {
     ///
     /// Guardian / elder guardian state; default for every other mob.
     pub guardian: guardian::GuardianState,
+    /// 硫磺方块怪的原型派生值、吞下的方块和导火索；别的生物是缺省值。
+    ///
+    /// Sulfur-cube archetype values, swallowed block and fuse; default elsewhere.
+    pub sulfur_cube: sulfur_cube::SulfurCubeState,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `Entity.needsSync`：这一刻 `jumpFromGround` 跳过，移动包要带上速度。
@@ -2912,6 +2962,7 @@ impl Mob {
             MobType::Villager => Attributes::villager(),
             MobType::Guardian => guardian::attributes(false),
             MobType::ElderGuardian => guardian::attributes(true),
+            MobType::SulfurCube => sulfur_cube::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -2958,6 +3009,7 @@ impl Mob {
                 GoalSelector::skeleton()
             }
             MobType::Slime => slime::goals(&mut navigation),
+            MobType::SulfurCube => sulfur_cube::goals(&mut navigation),
             MobType::PolarBear => polar_bear::goals(&mut navigation),
             MobType::Panda => panda::goals(&mut navigation),
             MobType::Ocelot => ocelot::goals(&mut navigation),
@@ -3074,6 +3126,7 @@ impl Mob {
                 GoalSelector::zombie_targets()
             }
             MobType::Slime => slime::targets(),
+            MobType::SulfurCube => GoalSelector::default(),
             MobType::Drowned => drowned::targets(),
             MobType::Witch => witch::targets(),
             MobType::Phantom => phantom::target_goals(),
@@ -3283,6 +3336,7 @@ impl Mob {
             dolphin: dolphin::DolphinState::new(),
             axolotl: axolotl::AxolotlState::new(),
             guardian: guardian::GuardianState::default(),
+            sulfur_cube: sulfur_cube::SulfurCubeState::default(),
             events: Vec::new(),
             needs_sync: false,
             knockback_sync: false,
@@ -3429,6 +3483,10 @@ impl Mob {
     pub fn dimensions(&self) -> (f32, f32) {
         if self.mob_type == MobType::Slime {
             let (width, height, _) = slime::dimensions(self.cube.size);
+            return (width, height);
+        }
+        if self.mob_type == MobType::SulfurCube {
+            let (width, height, _) = sulfur_cube::dimensions(self.cube.size);
             return (width, height);
         }
         if self.mob_type == MobType::Phantom {
@@ -3884,6 +3942,9 @@ pub struct MobPublic {
     ///
     /// `AbstractCubeMob.ID_SIZE`; always 1 for other mobs.
     pub cube_size: i32,
+    /// 硫磺方块怪的 `MAX_FUSE` / `FROM_BUCKET` 元数据。
+    pub sulfur_cube_max_fuse: i32,
+    pub sulfur_cube_from_bucket: bool,
     /// `Mob.isPersistenceRequired()`：持久化的生物不参与自然刷怪的计数。
     ///
     /// `Mob.isPersistenceRequired()`: persistent mobs are left out of the spawn counts.
@@ -4022,6 +4083,8 @@ impl MobPublic {
                 _ => false,
             },
             cube_size: mob.cube.size,
+            sulfur_cube_max_fuse: mob.sulfur_cube.max_fuse,
+            sulfur_cube_from_bucket: mob.sulfur_cube.from_bucket,
             equipment: mob
                 .equipment
                 .iter()
@@ -4035,6 +4098,10 @@ impl MobPublic {
     pub fn dimensions(&self) -> (f32, f32) {
         if self.mob_type == MobType::Slime {
             let (width, height, _) = slime::dimensions(self.cube_size);
+            return (width, height);
+        }
+        if self.mob_type == MobType::SulfurCube {
+            let (width, height, _) = sulfur_cube::dimensions(self.cube_size);
             return (width, height);
         }
         if self.mob_type == MobType::Phantom {

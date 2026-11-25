@@ -131,6 +131,7 @@ pub(super) struct Coverage {
     squid: usize,
     equines: usize,
     witches: usize,
+    sulfur_cubes: usize,
     without_spawn: usize,
     cap_off: usize,
     per_scene: std::collections::BTreeMap<String, usize>,
@@ -188,6 +189,11 @@ impl Coverage {
             .iter()
             .filter(|row| row[0] == entity_type::WITCH)
             .count();
+        self.sulfur_cubes += step
+            .spawned
+            .iter()
+            .filter(|row| row[0] == entity_type::SULFUR_CUBE)
+            .count();
         if case.name == "cow_no_local_cap" {
             self.cap_off += step.spawned.len();
         }
@@ -196,7 +202,7 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {:?} pigs/sheep/chickens, {} skeletons, {} zombies or husks, {} parched, {} slimes, {} squid or glow squid, {} equines, {} witches, {} empty ticks, {} spawns with local cap bypassed",
+                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {:?} pigs/sheep/chickens, {} skeletons, {} zombies or husks, {} parched, {} slimes, {} squid or glow squid, {} equines, {} witches, {} sulfur cubes, {} empty ticks, {} spawns with local cap bypassed",
                 self.cases,
                 self.ticks,
                 self.cows,
@@ -208,6 +214,7 @@ impl Coverage {
                 self.squid,
                 self.equines,
                 self.witches,
+                self.sulfur_cubes,
                 self.without_spawn,
                 self.cap_off
             );
@@ -268,6 +275,20 @@ impl Coverage {
             return Err(
                 "bat natural spawn fixtures must spawn under a roof but not in the open".into(),
             );
+        }
+        // 硫磺方块怪：暗处、白天、强光和和平难度都要刷（官方 EntityType builder
+        // 没调 notInPeaceful，checkSulfurCubeSpawnRules 恒真）。
+        // Sulfur cubes: dark, daylight, bright light and peaceful must all spawn
+        // (the vanilla builder skips notInPeaceful and the spawn predicate is true).
+        for scene in [
+            "sulfur_cube_night",
+            "sulfur_cube_day",
+            "sulfur_cube_lit",
+            "sulfur_cube_peaceful",
+        ] {
+            if self.per_scene.get(scene) == Some(&0) {
+                return Err(format!("sulfur cube fixture {scene} produced no mobs"));
+            }
         }
         // 熊猫单独的一组：亮场景必须刷、暗场景必须不刷。
         // The panda-only group: the bright scene must spawn and the dim one must not.
@@ -426,14 +447,14 @@ fn spawn_row(entity: Entity) -> [i32; 12] {
         // 大小不是 1 的史莱姆朝向来自构造函数的随机源，官方那边不带种子，两边都记 0。
         // The yaw of a slime whose size is not 1 comes from the constructor random, unseeded
         // in vanilla; both sides record 0.
-        if mob.mob_type == MobType::Slime && mob.cube.size != 1 {
+        if matches!(mob.mob_type, MobType::Slime | MobType::SulfurCube) && mob.cube.size != 1 {
             0
         } else {
             entity.y_rot.to_bits() as i32
         },
         // 史莱姆不会是幼年，这一列改放大小。
         // Slimes are never babies; this column carries their size instead.
-        if mob.mob_type == MobType::Slime {
+        if matches!(mob.mob_type, MobType::Slime | MobType::SulfurCube) {
             mob.cube.size
         } else {
             i32::from(mob.is_baby())

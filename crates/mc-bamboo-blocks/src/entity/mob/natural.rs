@@ -845,6 +845,9 @@ pub(super) fn check_spawn_rules(
         // below water, then non-peaceful and water both at the position and below
         // (natural spawning is not a spawner). Peaceful was rejected at the top.
         MobType::Guardian | MobType::ElderGuardian => guardian_spawn_rules(world, pos),
+        // `SulfurCube.checkSulfurCubeSpawnRules` 恒真：没有亮度 / 群系门槛。
+        // `SulfurCube.checkSulfurCubeSpawnRules` is always true: no light or biome gate.
+        MobType::SulfurCube => true,
         // 两种傀儡都不在群系刷怪表里，只保留命令 / 方块图案生成时共用的规则。
         // Neither golem is in a biome spawn table; only the shared rule remains.
         MobType::IronGolem | MobType::SnowGolem => animal_spawn_rules(world, pos),

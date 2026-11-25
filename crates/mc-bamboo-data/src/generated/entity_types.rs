@@ -339,6 +339,10 @@ pub const ARMADILLO_STATE_SERIALIZER: i32 = 36;
 pub const FROG_VARIANT_SERIALIZER: i32 = 27;
 pub const FROG_TONGUE_TARGET_SERIALIZER: i32 = 19;
 pub const CUBE_MOB_SIZE: u8 = 18;
+pub const SULFUR_CUBE_MAX_FUSE: u8 = 19;
+pub const SULFUR_CUBE_FROM_BUCKET: u8 = 20;
+pub const SULFUR_CUBE_EYE_HEIGHT: f32 = 0.175;
+pub const SULFUR_CUBE_SPAWN_DIMENSIONS_SCALE: f32 = 2.0;
 pub const SLIME_EYE_HEIGHT: f32 = 0.325;
 pub const MOOSHROOM_TYPE: u8 = 18;
 /// `SuspiciousEffectHolder`：(物品 ID, [(效果 ID, 刻数)])，按物品 ID 升序。
