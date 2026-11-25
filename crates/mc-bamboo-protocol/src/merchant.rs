@@ -246,6 +246,25 @@ mod tests {
         assert_eq!(decode_offers(&tag).unwrap(), offers);
     }
 
+    /// 非缺省字段和 `buyB` 存档后再读回，重新编码的结果逐字节相同。
+    #[test]
+    fn archive_round_trip_is_byte_stable() {
+        let mut full = offer();
+        full.cost_b = Some(ItemCost::new(2, 5));
+        full.uses = 3;
+        full.max_uses = 16;
+        full.reward_exp = false;
+        full.special_price_diff = -2;
+        full.demand = 7;
+        full.xp = 10;
+        let offers = vec![offer(), full];
+        let first = encode_offers(&offers).unwrap().to_tag();
+        let decoded = decode_offers(&first).unwrap();
+        assert_eq!(decoded, offers);
+        let second = encode_offers(&decoded).unwrap().to_tag();
+        assert_eq!(format!("{first:?}"), format!("{second:?}"));
+    }
+
     #[test]
     fn empty_offers_omit_recipes() {
         assert_eq!(encode_offers(&[]).unwrap(), Dyn::Map(Vec::new()));
