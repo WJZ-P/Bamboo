@@ -2,12 +2,17 @@
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::Block;
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    behaviour::{Behaviour, common::facing_the_player},
+    behaviour::{
+        Behaviour,
+        common::facing_the_player,
+        vault::{VaultBlockEntity, VaultWorld},
+    },
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
-    state::{BlockState, EYE, VAULT_STATE, VaultState},
+    state::{BlockState, EYE, OMINOUS, VAULT_STATE, VaultState},
     world::World,
 };
 
@@ -35,7 +40,8 @@ impl Behaviour for EndPortalFrame {
     }
 }
 
-/// `VaultBlock`。钥匙要对照方块实体里的配置和奖励，不在范围里，所以只吃掉点击。
+/// `VaultBlock`。空手或非 `ACTIVE` 交给空手交互，其余情况把钥匙交给
+/// [`VaultBlockEntity::vault_mut`] 的 `try_insert_key`，返回 `SUCCESS_SERVER`。
 pub(super) struct Vault;
 
 impl Behaviour for Vault {
@@ -51,13 +57,26 @@ impl Behaviour for Vault {
     fn use_item_on(
         &self,
         state: BlockState,
-        _world: &mut World,
+        world: &mut World,
         ctx: &UseContext,
     ) -> InteractionResult {
-        if !ctx.hand_is_empty() && state.get(VAULT_STATE) == VaultState::Active {
-            InteractionResult::SuccessServer
-        } else {
-            InteractionResult::TryEmptyHandInteraction
+        if ctx.hand_is_empty() || state.try_get(VAULT_STATE) != Some(VaultState::Active) {
+            return InteractionResult::TryEmptyHandInteraction;
         }
+        // `VaultBlock.useItemOn` 只在服务端跑 `Server.tryInsertKey`；方块层拿不到
+        // `ServerLevel` 的区分，但 `World` 只在服务端跑方块行为，这里直接驱动。
+        let pos = ctx.clicked_pos();
+        let ominous = state.try_get(OMINOUS).unwrap_or(false);
+        let key = ctx
+            .stack
+            .cloned()
+            .unwrap_or_else(|| ItemStack::new(ctx.item, 1));
+        world.with_block_entity::<VaultBlockEntity, _>(pos, |vault, world| {
+            let mut vctx = VaultWorld::new(world, pos);
+            vault
+                .vault_mut()
+                .try_insert_key(pos, ominous, ctx.actor.uuid, &key, &mut vctx);
+        });
+        InteractionResult::SuccessServer
     }
 }

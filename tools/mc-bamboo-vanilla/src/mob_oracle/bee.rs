@@ -80,6 +80,8 @@ impl BeeCase {
                 pitch: 0.0,
                 position: Vec3::new(0.5, 62.0, 0.5),
                 delta: Vec3::default(),
+                width: 0.6,
+                height: 1.8,
                 eye_height: 1.62,
                 health: 20.0,
                 look_direction: Vec3::view_vector(0.0, 0.0),

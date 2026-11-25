@@ -27,6 +27,7 @@ mod ender_eye;
 mod honeycomb;
 pub(crate) use honeycomb::waxed;
 mod ignite;
+mod lead;
 pub(crate) use ignite::can_light;
 mod shears;
 mod spawn_egg;
@@ -52,6 +53,7 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         // `BrushItem.useOn` 只开始使用物品，结果总是 `CONSUME`。
         ItemKind::Brush => InteractionResult::Consume,
         ItemKind::BoneMeal => bone_meal::use_on(world, ctx),
+        _ if ctx.item == items::LEAD => lead::use_on(world, ctx),
         // `SpawnEggItem.useOn`：被点格的碰撞形状为空时生成在那一格，否则沿点击面
         // 挪一格；流体方块直接放过。落点和 `shouldOffsetYMore` 见 `spawn_egg::use_egg`。
         // `SpawnEggItem.useOn`: spawn in the clicked cell when its collision shape is
