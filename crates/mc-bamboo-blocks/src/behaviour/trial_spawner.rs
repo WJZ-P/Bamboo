@@ -958,6 +958,11 @@ impl TrialSpawnerBlockEntity {
     pub fn new(pos: BlockPos, spawner: TrialSpawner) -> Self {
         Self { pos, spawner }
     }
+
+    /// 对拍用：读出当前的 [`TrialSpawner`] 状态机。
+    pub fn trial_spawner(&self) -> &TrialSpawner {
+        &self.spawner
+    }
 }
 
 impl crate::BlockEntity for TrialSpawnerBlockEntity {

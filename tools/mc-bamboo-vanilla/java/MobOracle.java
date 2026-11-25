@@ -540,6 +540,9 @@ public final class MobOracle {
                     cases++;
                 }
             }
+            if (only == null || only.startsWith("trial_spawner")) {
+                cases += playTrialSpawner(official, out, only);
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -10975,6 +10978,198 @@ public final class MobOracle {
                     + ",\"frames\":" + frames + "}\n");
             out.flush();
         }
+
+    /**
+     * 试炼刷怪笼完整流程逐刻对拍：等玩家 → 激活刷怪 → 怪被打死 → 等待弹奖励 → 弹出 →
+     * 冷却。逐刻比状态机（state/ominous）、`registered_players` / `current_mobs` 数量、
+     * 冷却计时、刷出的怪（类型 + 精确位置）、弹出的奖励、世界事件和世界随机源。
+     * 场景从 `waiting_for_players` 起步，避开还没建模的显示实体。
+     */
+    private static int playTrialSpawner(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("trial_spawner_full")) {
+            if (only != null && !name.startsWith(only)) continue;
+            playTrialSpawnerCase(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    private static void playTrialSpawnerCase(Official official, Writer out, String name) throws Exception {
+        EntityType<?> type = EntityTypes.ZOMBIE;
+        int cooldownLength = 100;
+        int playerRange = 14;
+        int totalMobs = 1;
+        int simultaneousMobs = 1;
+        int killTick = 70;
+        int ticks = 320;
+
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.injectedSkyDarken = 15;
+        level.injectedCanSeeSky = true;
+        level.levelEvents = new ArrayList<>();
+        // 石地板，让刷怪和碰撞检查有真实地面。
+        for (int x = -5; x <= 5; x++) {
+            for (int z = -5; z <= 5; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        BlockPos spawnerPos = new BlockPos(0, 64, 0);
+        BlockState spawnerState = Blocks.TRIAL_SPAWNER.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.TRIAL_SPAWNER_STATE,
+                        net.minecraft.world.level.block.entity.trialspawner.TrialSpawnerState.WAITING_FOR_PLAYERS);
+        level.blocks.put(spawnerPos.asLong(), spawnerState);
+        var be = new net.minecraft.world.level.block.entity.TrialSpawnerBlockEntity(spawnerPos, spawnerState);
+        be.setLevel(level);
+        // 自定义配置：只刷僵尸、一次一只、短冷却。
+        net.minecraft.nbt.CompoundTag entityTag = new net.minecraft.nbt.CompoundTag();
+        entityTag.putString("id", BuiltInRegistries.ENTITY_TYPE.getKey(type).toString());
+        var spawnData = new net.minecraft.world.level.SpawnData(entityTag,
+                java.util.Optional.empty(), java.util.Optional.empty());
+        var normalConfig = net.minecraft.world.level.block.entity.trialspawner.TrialSpawnerConfig.builder()
+                .totalMobs(totalMobs)
+                .simultaneousMobs(simultaneousMobs)
+                .totalMobsAddedPerPlayer(0)
+                .simultaneousMobsAddedPerPlayer(0)
+                .spawnPotentialsDefinition(WeightedList.of(spawnData))
+                .lootTablesToEject(WeightedList.of(
+                        net.minecraft.world.level.storage.loot.BuiltInLootTables.SPAWNER_TRIAL_CHAMBER_KEY))
+                .build();
+        var fullConfig = new net.minecraft.world.level.block.entity.trialspawner.TrialSpawner.FullConfig(
+                Holder.direct(normalConfig), Holder.direct(normalConfig), cooldownLength, playerRange);
+        Field tsField = net.minecraft.world.level.block.entity.TrialSpawnerBlockEntity.class
+                .getDeclaredField("trialSpawner");
+        tsField.setAccessible(true);
+        tsField.set(be, new net.minecraft.world.level.block.entity.trialspawner.TrialSpawner(
+                fullConfig, be,
+                net.minecraft.world.level.block.entity.trialspawner.PlayerDetector.NO_CREATIVE_PLAYERS,
+                net.minecraft.world.level.block.entity.trialspawner.PlayerDetector.EntitySelector.SELECT_FROM_LEVEL));
+        level.putBlockEntity(be);
+
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "TrialSpawnerOracle"), ClientInformation.createDefault());
+        player.setPos(0.5, 64.0, 0.5);
+        level.playersList().add(player);
+
+        // 循环前保存初始方块状态（tickServer 的 setState 之后会改方块状态），并
+        // 把世界随机源对齐到 Bamboo 的 LevelRandom::new(1) 初值。
+        String initialBlocks = blockArray(level.blocks);
+        level.getRandom().setSeed(1L);
+
+        // 反射读状态机内部字段。
+        var data = be.getTrialSpawner().getStateData();
+        Field fDetected = data.getClass().getDeclaredField("detectedPlayers");
+        fDetected.setAccessible(true);
+        Field fMobs = data.getClass().getDeclaredField("currentMobs");
+        fMobs.setAccessible(true);
+        Field fCooldown = data.getClass().getDeclaredField("cooldownEndsAt");
+        fCooldown.setAccessible(true);
+        Field fNext = data.getClass().getDeclaredField("nextMobSpawnsAt");
+        fNext.setAccessible(true);
+        Field fTotal = data.getClass().getDeclaredField("totalMobsSpawned");
+        fTotal.setAccessible(true);
+
+        java.util.Set<Integer> seen = new java.util.HashSet<>();
+        int maxState = 0;
+        int maxTotalSpawned = 0;
+        int maxRegistered = 0;
+        int totalEjected = 0;
+        int detectEvents = 0;
+        int spawnEvents = 0;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            List<int[]> events = new ArrayList<>();
+            if (tick > 0) {
+                level.gameTime = START_TIME + tick;
+                level.spawned.clear();
+                level.levelEvents.clear();
+                if (tick == killTick) {
+                    for (Entity e : new ArrayList<>(level.tracked)) {
+                        if (e instanceof Mob mob) {
+                            mob.discard();
+                        }
+                    }
+                }
+                boolean ominous = level.getBlockState(spawnerPos)
+                        .getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.OMINOUS);
+                be.getTrialSpawner().tickServer(level, spawnerPos, ominous);
+                events = new ArrayList<>(level.levelEvents);
+            }
+            JsonArray spawned = new JsonArray();
+            for (Entity e : level.tracked) {
+                if (e instanceof Mob mob && seen.add(mob.getId())) {
+                    JsonArray row = new JsonArray();
+                    row.add(BuiltInRegistries.ENTITY_TYPE.getId(mob.getType()));
+                    row.add(Double.doubleToRawLongBits(mob.getX()));
+                    row.add(Double.doubleToRawLongBits(mob.getY()));
+                    row.add(Double.doubleToRawLongBits(mob.getZ()));
+                    spawned.add(row);
+                }
+            }
+            JsonArray ejected = new JsonArray();
+            for (Entity e : level.spawned) {
+                if (e instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                    JsonArray row = new JsonArray();
+                    row.add(BuiltInRegistries.ITEM.getId(item.getItem().getItem()));
+                    row.add(item.getItem().getCount());
+                    ejected.add(row);
+                }
+            }
+            JsonArray eventsArr = new JsonArray();
+            for (int[] ev : events) {
+                JsonArray row = new JsonArray();
+                for (int value : ev) {
+                    row.add(value);
+                }
+                eventsArr.add(row);
+            }
+            maxState = Math.max(maxState, be.getTrialSpawner().getState().ordinal());
+            maxTotalSpawned = Math.max(maxTotalSpawned, fTotal.getInt(data));
+            maxRegistered = Math.max(maxRegistered, ((java.util.Set<?>) fDetected.get(data)).size());
+            totalEjected += ejected.size();
+            for (int[] ev : events) {
+                if (ev[0] == 3013) detectEvents++;
+                if (ev[0] == 3011 || ev[0] == 3012 || ev[0] == 3014) spawnEvents++;
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"state\":").append(be.getTrialSpawner().getState().ordinal())
+                    .append(",\"ominous\":").append(level.getBlockState(spawnerPos)
+                            .getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.OMINOUS))
+                    .append(",\"registered\":").append(((java.util.Set<?>) fDetected.get(data)).size())
+                    .append(",\"mobs\":").append(((java.util.Set<?>) fMobs.get(data)).size())
+                    .append(",\"cooldownEndsAt\":").append(fCooldown.getLong(data))
+                    .append(",\"nextMobSpawnsAt\":").append(fNext.getLong(data))
+                    .append(",\"totalMobsSpawned\":").append(fTotal.getInt(data))
+                    .append(",\"spawned\":").append(spawned)
+                    .append(",\"ejected\":").append(ejected)
+                    .append(",\"events\":").append(eventsArr)
+                    .append(",\"seed\":").append(levelSeed(level))
+                    .append('}');
+        }
+        frames.append(']');
+        // 确认这一轮真的走完了整条状态链、弹过奖励、发过探测/刷怪事件，防止空对拍。
+        if (maxState < 5 || maxTotalSpawned < 1 || maxRegistered < 1
+                || totalEjected < 1 || detectEvents < 1 || spawnEvents < 1) {
+            throw new IllegalStateException("trial_spawner_full missed the flow: maxState=" + maxState
+                    + " maxTotalSpawned=" + maxTotalSpawned + " maxRegistered=" + maxRegistered
+                    + " totalEjected=" + totalEjected + " detectEvents=" + detectEvents
+                    + " spawnEvents=" + spawnEvents);
+        }
+        out.write("{\"type\":\"trialSpawner\",\"name\":" + jsonString(name)
+                + ",\"pos\":[0,64,0]"
+                + ",\"blocks\":" + initialBlocks
+                + ",\"player\":[0.5,64.0,0.5]"
+                + ",\"difficulty\":2"
+                + ",\"entity\":\"minecraft:zombie\""
+                + ",\"totalMobs\":" + totalMobs
+                + ",\"simultaneousMobs\":" + simultaneousMobs
+                + ",\"cooldownLength\":" + cooldownLength
+                + ",\"playerRange\":" + playerRange
+                + ",\"killTick\":" + killTick
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+    }
 
     private static void playBeeLocate(Official official, Writer out, String name) throws Exception {
         FakeLevel level = FakeLevel.create(official);
