@@ -173,12 +173,17 @@ pub(super) fn replay_creaking(report: &mut Report, case: &CreakingCase) {
             ticks.set_time(1000 + tick as i64);
             let watching = case.name == "creaking_watched";
             player_looking(&mut level.players[0], watching);
+            if case.name == "creaking_night" {
+                // 夜里刷出的嘎枝落点随机，让玩家抬头避免正好对视。
+                level.players[0].look_direction = Vec3::view_vector(0.0, -90.0);
+                level.players[0].yaw = 0.0;
+            }
             let mut world = World::new(&mut level, &mut ticks);
             // `ServerLevel.tick` 顺序：先实体，后方块实体。
             world.tick_entities();
             let _ =
                 world.with_block_entity::<CreakingHeartEntity, _>(home, |be, world| be.tick(world));
-            if case.name == "creaking_hurt" && tick == 5 {
+            if case.name == "creaking_hurt" && tick == 1 {
                 let mut source = DamageSource::player(1025, Vec3::new(4.5, 61.0, 0.5), false);
                 source.attacker_uuid = Some(((1_u128 << 64) | 2).to_be_bytes());
                 let _ = world.hurt_mob(id, source, 3.0);

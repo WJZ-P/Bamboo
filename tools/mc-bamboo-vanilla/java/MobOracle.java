@@ -18307,7 +18307,9 @@ public final class MobOracle {
         BlockState heartState = Blocks.CREAKING_HEART.defaultBlockState()
                 .setValue(net.minecraft.world.level.block.CreakingHeartBlock.AXIS, Direction.Axis.Y)
                 .setValue(net.minecraft.world.level.block.CreakingHeartBlock.STATE,
-                        net.minecraft.world.level.block.state.properties.CreakingHeartState.DORMANT);
+                        name.equals("creaking_hurt")
+                                ? net.minecraft.world.level.block.state.properties.CreakingHeartState.AWAKE
+                                : net.minecraft.world.level.block.state.properties.CreakingHeartState.DORMANT);
         level.blocks.put(heartPos.asLong(), heartState);
         BlockState log = Blocks.PALE_OAK_LOG.defaultBlockState()
                 .setValue(net.minecraft.world.level.block.CreakingHeartBlock.AXIS, Direction.Axis.Y);
@@ -18362,6 +18364,7 @@ public final class MobOracle {
         if (preBound) {
             creaking = EntityTypes.CREAKING.create(level, EntitySpawnReason.COMMAND);
             creaking.setUUID(new UUID(0L, 1L));
+            setRandom(creaking, 0x5EED_5EEDL);
             creaking.snapTo(3.5, 61.0, 0.5, 0.0F, 0.0F);
             creaking.setYHeadRot(0.0F);
             creaking.setYBodyRot(0.0F);
@@ -18399,6 +18402,12 @@ public final class MobOracle {
                 player.setYRot(watch ? 90.0F : -90.0F);
                 player.setXRot(0.0F);
                 player.setYHeadRot(watch ? 90.0F : -90.0F);
+                if (name.equals("creaking_night")) {
+                    // 夜里刷出的嘎枝落点随机，让玩家抬头避免正好对视。
+                    player.setYRot(0.0F);
+                    player.setXRot(-90.0F);
+                    player.setYHeadRot(0.0F);
+                }
                 level.spawned.clear();
                 // 先实体，后方块实体（`ServerLevel.tick` 顺序）。
                 if (creaking != null && !creaking.isRemoved()) {
@@ -18410,7 +18419,7 @@ public final class MobOracle {
                     net.minecraft.world.level.block.entity.CreakingHeartBlockEntity.serverTick(
                             level, heartPos, level.getBlockState(heartPos), heartBe);
                 }
-                if (name.equals("creaking_hurt") && tick == 5 && creaking != null) {
+                if (name.equals("creaking_hurt") && tick == 1 && creaking != null) {
                     creaking.hurtServer(level, level.damageSources().playerAttack(player), 3.0F);
                 }
                 if (name.equals("creaking_heart_broken") && tick == 3) {

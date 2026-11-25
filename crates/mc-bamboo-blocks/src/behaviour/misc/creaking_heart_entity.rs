@@ -358,8 +358,7 @@ impl CreakingHeartEntity {
         if self.emitter > 0 {
             return;
         }
-        self.emitter = 100;
-        self.emitter_target = self.protector(world).map(|(_, position, _)| position);
+        emit_particles_random(world, 20);
         if world.block_state(self.pos).get(CREAKING_HEART_STATE) == CreakingHeartState::Awake {
             let count = world.random().next_int_between_inclusive(2, 3);
             for _ in 0..count {
@@ -373,10 +372,16 @@ impl CreakingHeartEntity {
                 }
             }
         }
+        self.emitter = 100;
+        self.emitter_target = self.protector(world).map(|(_, position, _)| position);
     }
 
     /// emitter>50 时每刻发两组连线粒子，每 10 刻沿心→嘎枝播一次心跳声。
     fn tick_emitter(&mut self, world: &mut World) {
+        if self.emitter > 50 {
+            emit_particles_random(world, 1);
+            emit_particles_random(world, 1);
+        }
         if self.emitter % 10 == 0
             && let Some(target) = self.emitter_target
         {
@@ -450,6 +455,20 @@ fn can_hold_protector(world: &World, at: BlockPos) -> bool {
             )
             .is_empty()
     })
+}
+
+/// `emitParticles` 的 level random 取数：官方每颗粒子抽 6 次 `nextDouble`（起止点）
+/// 和 1 次 `nextInt(40)`（拖尾寿命），服务端不发粒子但取数要照耗。
+fn emit_particles_random(world: &World, count: i32) {
+    for _ in 0..count {
+        world.random().next_double();
+        world.random().next_double();
+        world.random().next_double();
+        world.random().next_double();
+        world.random().next_double();
+        world.random().next_double();
+        world.random().next_int(40);
+    }
 }
 
 /// `spreadResin`：`BlockPos.breadthFirstTraversal(heart, 2, 64, ...)` 沿苍白橡木
