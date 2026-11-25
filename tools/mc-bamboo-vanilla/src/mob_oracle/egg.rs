@@ -140,6 +140,8 @@ impl EggCase {
                 game_mode: 0,
                 mining_fatigue: None,
                 creative: false,
+                flying: false,
+                explosion_knockback_resistance: 0.0,
                 sneaking: false,
                 // 投掷者站着扔蛋，没有疾跑；犰狳才读这个标志。
                 // The thrower stands still, not sprinting; only armadillos read this flag.

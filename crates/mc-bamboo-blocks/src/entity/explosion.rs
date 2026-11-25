@@ -282,7 +282,10 @@ fn hurt_living_by_explosion(
     for player in players {
         if let Some((amount, knock)) = player_blast(world, &player, center, double_radius, area) {
             world.hurt_player_from_mob(player.uid, damage, amount, source);
-            hit_players.push((player.uid, knock));
+            // 创造且飞行中的玩家照官方不进 `getHitPlayers`（伤害和 push 照给）。
+            if !(player.creative && player.flying) {
+                hit_players.push((player.uid, knock));
+            }
         }
     }
     hit_players
@@ -360,9 +363,9 @@ fn player_blast(
     }
     let exposure =
         crate::entity::item::seen_percent_of(world, center, bounds, CollisionContext::Empty);
-    // 玩家的爆炸击退抗性没建模，默认 0。
-    // Player explosion knockback resistance is not modelled, so it defaults to zero.
-    let push = (1.0 - dist) * f64::from(exposure);
+    // 爆炸击退抗性和生物一样，读 `EXPLOSION_KNOCKBACK_RESISTANCE`（爆炸保护、盔甲修饰符）。
+    let resistance = player.explosion_knockback_resistance;
+    let push = (1.0 - dist) * f64::from(exposure) * (1.0 - resistance);
     let knock = player
         .eye_position()
         .subtract(center)
@@ -440,4 +443,64 @@ fn block_pos_bucket(pos: BlockPos, capacity: usize) -> usize {
         .wrapping_add(pos.x);
     let spread = hash ^ ((hash as u32) >> 16) as i32;
     (spread as u32 & (capacity as u32 - 1)) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BlockTicks, testing::TestLevel};
+
+    /// 站在 `(2, 64, 0)` 的生存玩家视图，可改击退抗性和飞行状态。
+    fn player(uid: i32, resistance: f64, creative: bool, flying: bool) -> PlayerView {
+        let mut view = crate::entity::mob::throttle::test_player(uid, Vec3::new(2.0, 64.0, 0.0));
+        view.explosion_knockback_resistance = resistance;
+        view.creative = creative;
+        view.flying = flying;
+        view
+    }
+
+    /// 爆炸击退按 `1 - EXPLOSION_KNOCKBACK_RESISTANCE` 缩放：抗性 0.5 的玩家
+    /// 击退只有抗性 0 的一半。两个玩家站在同一格，曝光度和方向完全一致。
+    #[test]
+    fn blast_knockback_scales_with_explosion_resistance() {
+        let mut level = TestLevel::new();
+        level.players.push(player(0, 0.0, false, false));
+        level.players.push(player(1, 0.5, false, false));
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let damage = DamageSource::environment(DamageKind::Explosion);
+        let hit =
+            hurt_living_by_explosion(&mut world, None, damage, Vec3::new(0.0, 64.0, 0.0), 4.0);
+        let knock = |uid: i32| {
+            hit.iter()
+                .find(|(u, _)| *u == uid)
+                .map(|(_, k)| k.length())
+                .expect("the player is knocked back")
+        };
+        let full = knock(0);
+        let half = knock(1);
+        assert!(full > 0.0);
+        assert!(
+            (half - full * 0.5).abs() < 1.0e-6,
+            "half resistance halves the knockback: {half} vs {full}"
+        );
+    }
+
+    /// 创造且飞行中的玩家照官方不进 `getHitPlayers`，但同格子的普通玩家照常进。
+    #[test]
+    fn creative_flying_player_is_left_out_of_hit_players() {
+        let mut level = TestLevel::new();
+        level.players.push(player(0, 0.0, false, false));
+        level.players.push(player(1, 0.0, true, true));
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let damage = DamageSource::environment(DamageKind::Explosion);
+        let hit =
+            hurt_living_by_explosion(&mut world, None, damage, Vec3::new(0.0, 64.0, 0.0), 4.0);
+        assert_eq!(hit.len(), 1);
+        assert_eq!(
+            hit[0].0, 0,
+            "the creative flying player is left out of getHitPlayers"
+        );
+    }
 }

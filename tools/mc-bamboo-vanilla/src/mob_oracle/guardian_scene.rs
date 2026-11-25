@@ -253,6 +253,8 @@ impl GuardianCase {
                             .and_then(|f| f.existing)
                             .map(|[duration, amplifier]| (amplifier, duration)),
                         creative: setup.game_mode == 1,
+                        flying: false,
+                        explosion_knockback_resistance: 0.0,
                         sneaking: false,
                         sprinting: false,
                         swimming: false,

@@ -389,6 +389,25 @@ mod tests {
     }
 
     #[test]
+    fn explosion_damage_goes_through_armor_and_protection() {
+        let values = ArmorValues {
+            armor: 15.0,
+            toughness: 0.0,
+            protection: 16.0,
+            resistance: None,
+        };
+        // 爆炸（含苦力怕的 player_explosion）和普通攻击一样吃护甲和保护附魔：
+        // 20 点先被护甲减到 16，再被保护附魔减到 16 * 0.36。
+        let reduced = 16.0 * 0.36;
+        assert_eq!(values.reduce(20.0, DamageKind::Explosion), reduced);
+        assert_eq!(values.reduce(20.0, DamageKind::PlayerExplosion), reduced);
+        assert_eq!(
+            ArmorValues::default().reduce(20.0, DamageKind::Explosion),
+            20.0
+        );
+    }
+
+    #[test]
     fn resistance_multiplier_follows_the_official_formula() {
         let resistance = |amplifier| ArmorValues {
             resistance: Some(amplifier),

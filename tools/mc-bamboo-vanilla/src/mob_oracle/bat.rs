@@ -82,6 +82,8 @@ pub(super) fn player_view(uid: i32, [x, y, z]: [f64; 3]) -> PlayerView {
         game_mode: 0,
         mining_fatigue: None,
         creative: false,
+        flying: false,
+        explosion_knockback_resistance: 0.0,
         sneaking: false,
         sprinting: false,
         swimming: false,

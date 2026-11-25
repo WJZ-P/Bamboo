@@ -444,6 +444,16 @@ pub struct PlayerView {
     pub alive: bool,
     pub spectator: bool,
     pub creative: bool,
+    /// `getAbilities().flying`：创造且飞行中的玩家不被打进 `getHitPlayers`。
+    ///
+    /// `getAbilities().flying`: a creative, flying player is left out of `getHitPlayers`.
+    pub flying: bool,
+    /// `getAttributeValue(EXPLOSION_KNOCKBACK_RESISTANCE)`：爆炸击退抗性，
+    /// 爆炸保护附魔和盔甲修饰符会提高它。
+    ///
+    /// `getAttributeValue(EXPLOSION_KNOCKBACK_RESISTANCE)`; blast protection and
+    /// armor modifiers raise it.
+    pub explosion_knockback_resistance: f64,
     /// 官方 `GameType` 的 ID：0 生存、1 创造、2 冒险、3 旁观。
     /// `isSurvival()` 为真的是生存（0）和冒险（2）。
     ///
