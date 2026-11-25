@@ -1058,11 +1058,12 @@ fn set_random_dyes(
         }
         parts += 1;
     }
-    let average = totals.map(|total| total / parts);
-    let brightest = average[3] as f32;
-    let max = average[..3].iter().copied().max().unwrap_or(0) as f32;
+    // 官方先把三个通道的和整除份数，再用「亮度之和 / 份数」的浮点商放大。
+    let average: [i32; 3] = std::array::from_fn(|index| totals[index] / parts);
+    let brightest = totals[3] as f32 / parts as f32;
+    let max = average.iter().copied().max().unwrap_or(0) as f32;
     let mut channels = [0_i32; 3];
-    for (index, total) in average[..3].iter().enumerate() {
+    for (index, total) in average.iter().enumerate() {
         channels[index] = if max > 0.0 {
             (*total as f32 * brightest / max) as i32
         } else {

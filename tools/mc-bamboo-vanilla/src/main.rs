@@ -258,6 +258,8 @@ mod structures;
 #[cfg(feature = "oracle")]
 mod ticket_oracle;
 #[cfg(feature = "oracle")]
+mod trade_oracle;
+#[cfg(feature = "oracle")]
 mod transform;
 #[cfg(feature = "oracle")]
 mod world_block;
@@ -364,6 +366,8 @@ const STRUCTURE_TEMPLATED_PLACE_SOURCE: &str =
     "tools/mc-bamboo-vanilla/java/StructureTemplatedPlaceOracle.java";
 #[cfg(feature = "oracle")]
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
+#[cfg(feature = "oracle")]
+const TRADE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/TradeOracle.java";
 #[cfg(feature = "oracle")]
 const ENTITY_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/EntityOracle.java";
 #[cfg(feature = "oracle")]
@@ -500,6 +504,7 @@ fn run() -> Result<(), String> {
         ["predicate-oracle", java, ref options @ ..] => predicate_oracle(java, options),
         ["recipe-oracle", java, ref options @ ..] => recipe_oracle(java, options),
         ["loot-oracle", java, ref options @ ..] => loot_oracle(java, options),
+        ["trade-oracle", java, ref options @ ..] => trade_oracle(java, options),
         ["worldgen", java, ref options @ ..] => worldgen(java, options),
         ["chunkgen", java, ref options @ ..] => chunkgen_cli(java, options),
         ["structures", java, ref options @ ..] => structures_cli(java, options),
@@ -1094,6 +1099,11 @@ fn loot_oracle(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
+fn trade_oracle(java: &str, options: &[&str]) -> Result<(), String> {
+    trade_oracle::run(official_program(java, TRADE_ORACLE_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
 fn entity_oracle(java: &str) -> Result<(), String> {
     entity_oracle::run(official_program(java, ENTITY_ORACLE_SOURCE)?)
 }
@@ -1496,6 +1506,11 @@ fn light_pipeline_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn loot_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn trade_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
