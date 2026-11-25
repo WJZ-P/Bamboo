@@ -21,8 +21,9 @@ use mc_bamboo_data::BlockAncestor;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
+    Effect,
     entity::{
-        EntityKind, EntityPublic, KindPublic,
+        EntityKind, EntityPublic, EntityUid, KindPublic,
         ctx::PlayerView,
         mob::{DamageKind, DamageSource},
     },
@@ -42,47 +43,67 @@ const RESISTANCE_BONUS: f32 = 0.3;
 /// 每点抗性消耗多少爆炸强度，官方的 `0.3F`。
 const RESISTANCE_COST: f32 = 0.3;
 impl World<'_> {
-    /// `PrimedTnt.explode` 走到 `ServerLevel.explode` 和 `ServerExplosion.explode`，
-    /// 这里只保留破坏方块和连锁点燃 TNT。
+    /// `PrimedTnt.explode` 走到 `ServerLevel.explode` 和 `ServerExplosion.explode`：
+    /// 破坏方块、连锁点燃 TNT、伤害掉落物，还伤生物和玩家，并把爆炸包发给范围内玩家。
     ///
-    /// `center` 是爆炸中心，`radius` 是爆炸强度。不伤生物，也不给经验。
+    /// `center` 是爆炸中心，`radius` 是爆炸强度。`source` 是点燃的 TNT 的实体 ID，
+    /// 伤害来源是 `explosion`（TNT 没有 owner 建模，`direct` 指向 TNT、`causing` 为空）。
     ///
-    /// 官方把 `entity.generic.explode` 和爆炸粒子放进 `ClientboundExplodePacket`，不是 `playSound`。
-    /// 协议里还没有这个包，所以这里不另发一条声音，避免和 `playSeededSound` 对不上。
-    ///
-    /// `center` is the explosion centre and `radius` is its power. Mobs are not hurt and no
-    /// experience is dropped.
-    ///
-    /// Vanilla puts `entity.generic.explode` and the explosion particles on
-    /// `ClientboundExplodePacket`, not `playSound`. That packet is not in the protocol yet,
-    /// so this does not emit a sound that would disagree with `playSeededSound`.
-    pub fn explode_tnt(&mut self, center: Vec3, radius: f32) {
+    /// `center` is the explosion centre and `radius` is its power. `source` is the primed
+    /// TNT entity id; the damage source is `explosion` with the TNT as `direct` and no
+    /// `causing` entity (TNT ownership is not modelled).
+    pub fn explode_tnt(&mut self, center: Vec3, radius: f32, source: EntityUid) {
         let broken = self.calculate_exploded_positions(center, radius);
+        let block_count = broken.len() as i32;
         // `hurtEntities` 在打乱方块之前，而且不取 `level.random`。
         // `hurtEntities` runs before the block list is shuffled and does not draw `level.random`.
         crate::entity::item::hurt_items_by_explosion(self, center, radius);
+        let mut damage = DamageSource::environment(DamageKind::Explosion);
+        damage.direct = Some(source);
+        damage.position = Some(center);
+        let hit_players = hurt_living_by_explosion(self, None, damage, center, radius);
         self.interact_with_blocks(broken, None);
+        self.push_effect(Effect::Explode {
+            center,
+            radius,
+            block_count,
+            hit_players,
+            // TNT 总是破坏方块，`isSmall` 只看半径。
+            // TNT always interacts with blocks, so `isSmall` only looks at the radius.
+            is_small: radius < 2.0,
+            play_sound: true,
+        });
     }
 
     /// `ServerLevel.explode(source, ..., ExplosionInteraction.MOB)`：来源是一个生物。
     /// 射线之后先伤实体；`mobGriefing` 关着时方块不动（`BlockInteraction.KEEP`），
-    /// 开着时按 `mobExplosionDropDecay` 决定掉落带不带衰减。
-    /// `ClientboundExplodePacket`（声音、粒子、玩家击退）协议里还没有，不发。
+    /// 开着时按 `mobExplosionDropDecay` 决定掉落带不带衰减。爆炸包发给范围内玩家。
     ///
     /// `ServerLevel.explode(source, ..., ExplosionInteraction.MOB)` for a mob source.
     /// Entities are hurt after the rays; blocks stay under disabled `mobGriefing`
     /// (`BlockInteraction.KEEP`), otherwise `mobExplosionDropDecay` picks decayed drops.
-    /// `ClientboundExplodePacket` (sound, particles, player knockback) is not in the
-    /// protocol yet and is not sent.
+    /// The blast packet is sent to players in range.
     pub(crate) fn explode_mob(&mut self, source: &EntityPublic, center: Vec3, radius: f32) {
         let rules = self.block_game_rules();
         let broken = self.calculate_exploded_positions(center, radius);
+        let block_count = broken.len() as i32;
         crate::entity::item::hurt_items_by_explosion(self, center, radius);
-        hurt_living_by_explosion(self, source, center, radius);
-        if rules.mob_griefing {
+        let damage = blast_source(source);
+        let hit_players = hurt_living_by_explosion(self, Some(source), damage, center, radius);
+        let interacts = rules.mob_griefing;
+        if interacts {
             let decay = rules.mob_explosion_drop_decay.then_some(radius);
             self.interact_with_blocks(broken, decay);
         }
+        let silent = matches!(&source.kind, KindPublic::Mob(mob) if mob.silent);
+        self.push_effect(Effect::Explode {
+            center,
+            radius,
+            block_count,
+            hit_players,
+            is_small: radius < 2.0 || !interacts,
+            play_sound: !silent,
+        });
     }
 
     /// `ServerExplosion.interactWithBlocks`：打乱、逐格破坏、最后一起弹出掉落。
@@ -209,15 +230,26 @@ fn blast_source(source: &EntityPublic) -> DamageSource {
 }
 
 /// `ServerExplosion.hurtEntities` 里生物和玩家的那部分：按距离和曝光度算伤害，
-/// 生物再按爆炸击退抗性被推开。掉落物由 [`crate::entity::item::hurt_items_by_explosion`] 处理。
+/// 生物再按爆炸击退抗性被推开，玩家记下自己那份击退向量（`getHitPlayers`）。
+/// 掉落物由 [`crate::entity::item::hurt_items_by_explosion`] 处理。
 /// 官方按实体分区的遍历顺序走一遍；这里先生物（uid 升序）后玩家。
+/// 返回被击退的玩家 `(uid, 击退向量)`，供爆炸包逐玩家带一份。
 ///
 /// The mob and player part of `ServerExplosion.hurtEntities`: damage from distance and
-/// exposure, plus knockback for mobs scaled by explosion knockback resistance. Vanilla
-/// walks entity sections once; this goes mobs (ascending uid) then players.
-fn hurt_living_by_explosion(world: &mut World, source: &EntityPublic, center: Vec3, radius: f32) {
+/// exposure, plus knockback for mobs scaled by explosion knockback resistance; players
+/// record their own knockback (`getHitPlayers`). Items go through
+/// [`crate::entity::item::hurt_items_by_explosion`]. Vanilla walks entity sections once;
+/// this goes mobs (ascending uid) then players. Returns the hit players as
+/// `(uid, knockback)` for the per-player blast packet.
+fn hurt_living_by_explosion(
+    world: &mut World,
+    source: Option<&EntityPublic>,
+    damage: DamageSource,
+    center: Vec3,
+    radius: f32,
+) -> Vec<(EntityUid, Vec3)> {
     if radius < 1.0e-5 {
-        return;
+        return Vec::new();
     }
     let double_radius = f64::from(radius * 2.0);
     let floor = |value: f64| f64::from(mth::floor(value));
@@ -229,7 +261,6 @@ fn hurt_living_by_explosion(world: &mut World, source: &EntityPublic, center: Ve
         floor(center.y + double_radius + 1.0),
         floor(center.z + double_radius + 1.0),
     );
-    let damage = blast_source(source);
     for id in world.entity_ids() {
         if let Some((amount, knock)) = mob_blast(world, id, center, double_radius, area) {
             world.hurt_mob(id, damage, amount);
@@ -247,11 +278,14 @@ fn hurt_living_by_explosion(world: &mut World, source: &EntityPublic, center: Ve
     world
         .level()
         .for_each_player(&mut |player| players.push(*player));
+    let mut hit_players = Vec::new();
     for player in players {
-        if let Some(amount) = player_blast(world, &player, center, double_radius, area) {
-            world.hurt_player_from_mob(player.uid, damage, amount, Some(source));
+        if let Some((amount, knock)) = player_blast(world, &player, center, double_radius, area) {
+            world.hurt_player_from_mob(player.uid, damage, amount, source);
+            hit_players.push((player.uid, knock));
         }
     }
+    hit_players
 }
 
 /// 一头生物在爆炸里受的伤害和被推开的速度；不在范围里返回 `None`。
@@ -291,18 +325,18 @@ fn mob_blast(
     Some((blast_damage(dist, exposure, double_radius), knock))
 }
 
-/// 一名玩家在爆炸里受的伤害。旁观者和死人不算（`EntitySelector.NO_SPECTATORS`）。
-/// 玩家的击退走 `ClientboundExplodePacket`，这里没有。
+/// 一名玩家在爆炸里受的伤害和击退向量。旁观者和死人不算（`EntitySelector.NO_SPECTATORS`）。
+/// 击退向量就是 `getHitPlayers` 里那份，客户端按 `ClientboundExplodePacket` 推开玩家。
 ///
-/// The damage one player takes. Spectators and the dead are skipped; player knockback
-/// travels in `ClientboundExplodePacket`, which is not sent.
+/// The damage and knockback one player takes. Spectators and the dead are skipped; the
+/// knockback is the `getHitPlayers` entry the client applies from `ClientboundExplodePacket`.
 fn player_blast(
     world: &World,
     player: &PlayerView,
     center: Vec3,
     double_radius: f64,
     area: Aabb,
-) -> Option<f32> {
+) -> Option<(f32, Vec3)> {
     if player.spectator || !player.alive {
         return None;
     }
@@ -326,7 +360,15 @@ fn player_blast(
     }
     let exposure =
         crate::entity::item::seen_percent_of(world, center, bounds, CollisionContext::Empty);
-    Some(blast_damage(dist, exposure, double_radius))
+    // 玩家的爆炸击退抗性没建模，默认 0。
+    // Player explosion knockback resistance is not modelled, so it defaults to zero.
+    let push = (1.0 - dist) * f64::from(exposure);
+    let knock = player
+        .eye_position()
+        .subtract(center)
+        .normalize()
+        .scale(push);
+    Some((blast_damage(dist, exposure, double_radius), knock))
 }
 
 /// `ServerExplosion.addOrAppendStack`：先按 16 的上限并进已有的堆，剩下的另起一堆。

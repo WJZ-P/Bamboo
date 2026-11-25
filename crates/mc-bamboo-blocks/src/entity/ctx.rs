@@ -1579,7 +1579,7 @@ pub enum Command {
 /// 改发出者，没有任何回写补丁。
 pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
     match command {
-        Command::Explode { center, radius } => world.explode_tnt(center, radius),
+        Command::Explode { center, radius } => world.explode_tnt(center, radius, me.id),
         Command::ExplodeMob {
             center,
             radius,

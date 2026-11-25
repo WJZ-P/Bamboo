@@ -4850,7 +4850,8 @@ mod tests {
                 | Effect::CrafterCrafted { .. }
                 | Effect::KilledByArrow { .. }
                 | Effect::EnderPearlTeleport { .. }
-                | Effect::GuardianElderEffect { .. } => None,
+                | Effect::GuardianElderEffect { .. }
+                | Effect::Explode { .. } => None,
             })
             .collect()
     }

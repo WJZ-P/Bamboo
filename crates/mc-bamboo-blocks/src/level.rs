@@ -2452,7 +2452,7 @@ pub fn monster_prevents_rest_in<L: Level + ?Sized>(level: &L, pos: BlockPos) -> 
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
 ///
 /// The non-block results of one action, handed to the caller for delivery.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// `levelEvent(2001, pos, state)`。`except_initiator` 表示不用发给发起者，它自己已经预测过了。
     Destroyed {
@@ -2540,6 +2540,24 @@ pub enum Effect {
         except_initiator: bool,
         /// 显式给的种子。音符盒用 `Level.random.nextLong()`，其余由网络层另取。
         seed: Option<i64>,
+    },
+    /// `ServerLevel.explode` 发给范围内玩家的 `ClientboundExplodePacket`。
+    /// 游戏层按 `hit_players` 给每名玩家带上自己那份击退向量。
+    ///
+    /// `ServerLevel.explode` broadcasts `ClientboundExplodePacket` to players in range.
+    /// The game layer picks each player's own knockback out of `hit_players`.
+    Explode {
+        center: mc_bamboo_core::Vec3,
+        radius: f32,
+        block_count: i32,
+        /// 被击退的玩家 `(uid, 击退向量)`，和 `ServerExplosion.getHitPlayers` 对应。
+        ///
+        /// The knocked-back players `(uid, knockback)`, mirroring `getHitPlayers`.
+        hit_players: Vec<(crate::entity::EntityUid, mc_bamboo_core::Vec3)>,
+        /// `ServerExplosion.isSmall()`：小爆炸用 `EXPLOSION` 粒子。
+        is_small: bool,
+        /// `playSound`：来源实体不静音。
+        play_sound: bool,
     },
     /// `levelEvent`：客户端自己放粒子和声音。传播范围是 64 格，坐标是方块整数坐标。
     LevelEvent {
