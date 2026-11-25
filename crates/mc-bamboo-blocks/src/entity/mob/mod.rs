@@ -2994,13 +2994,20 @@ pub enum MobEvent {
     },
 }
 
-/// 官方大脑由 `CreakingAi` 驱动；Bamboo 逐刻场景落地前先只保留浮水。
+/// 官方大脑由 `CreakingAi` 驱动；Bamboo 用近战目标 + 冻结标志近似 FIGHT/IDLE。
 fn creaking_goals(_navigation: &mut Navigation) -> GoalSelector {
-    GoalSelector::from_goals(vec![goals::WrappedGoal {
-        priority: 1,
-        goal: goals::Goal::Float,
-        running: false,
-    }])
+    GoalSelector::from_goals(vec![
+        goals::WrappedGoal {
+            priority: 1,
+            goal: goals::Goal::Float,
+            running: false,
+        },
+        goals::WrappedGoal {
+            priority: 2,
+            goal: goals::Goal::melee(1.0, false),
+            running: false,
+        },
+    ])
 }
 
 impl Mob {
@@ -3241,7 +3248,11 @@ impl Mob {
             }
             MobType::Slime => slime::targets(),
             MobType::SulfurCube => GoalSelector::default(),
-            MobType::Creaking => GoalSelector::default(),
+            MobType::Creaking => GoalSelector::from_goals(vec![goals::WrappedGoal {
+                priority: 1,
+                goal: goals::Goal::nearest_target(goals::TargetType::Player),
+                running: false,
+            }]),
             MobType::Drowned => drowned::targets(),
             MobType::Witch => witch::targets(),
             MobType::Phantom => phantom::target_goals(),

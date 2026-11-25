@@ -1,16 +1,20 @@
 //! `Creaking`：和嘎枝之心绑定的敌对生物。
 //!
-//! 这里只落地官方构造函数、专属状态和 `home_pos` 存档。看着它时不能动、
-//! 攻击和树脂连线等逐刻行为由后续阶段接入。
+//! 这里有官方构造函数的属性、元数据缺省、`home_pos` 存档、被看着时的冻结、
+//! 不掉血而放树脂的受伤路径，以及心没了之后的拆解死亡。
 //!
 //! `Creaking`: the hostile bound to a creaking heart. This module ports the
-//! constructor, state and `home_pos` key; freeze, attack and resin effects are
-//! wired in later stages.
+//! constructor, state, `home_pos` key, freeze-on-gaze, no-damage hurt path and
+//! the tear-down death flow.
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::{entity_types, registries::attribute};
 
-use super::{Mob, attributes::Attributes};
+use super::{DamageKind, DamageSource, Mob, attributes::Attributes, living};
+use crate::{
+    entity::{Entity, ctx::EntityCtx},
+    shape::CollisionContext,
+};
 
 /// `Creaking.createAttributes()`：怪物属性上覆盖五个基础值。
 pub(super) fn attributes() -> Attributes {
@@ -40,10 +44,16 @@ pub struct CreakingState {
     pub tearing_down: bool,
     /// `HOME_POS`；没有绑定心时是空。
     pub home_pos: Option<BlockPos>,
+    /// `playerStuckCounter`：连续几刻有玩家眼睛在 AABB 里。
+    pub player_stuck_counter: i32,
+    /// `invulnerabilityAnimationRemainingTicks`。
+    pub invulnerability_animation: i32,
+    /// `deathTime` 超过 45 且拆解时真正移除。
+    pub tear_down_time: i32,
 }
 
-/// 官方 `defineSynchedData` 的缺省值；`Default` 给别的生物用 false 填满。
 impl CreakingState {
+    /// 官方 `defineSynchedData` 的缺省值；`Default` 给别的生物用 false 填满。
     pub fn new() -> Self {
         Self {
             can_move: true,
@@ -73,6 +83,179 @@ pub fn home_from_tag(tag: &mc_bamboo_nbt::Tag) -> Option<BlockPos> {
         return None;
     };
     (values.len() == 3).then(|| BlockPos::new(values[0], values[1], values[2]))
+}
+
+/// `hurtServer`：绑定心、非 bypass、不在无敌动画里时返回心坐标；调用方发树脂命令。
+pub(super) fn hurt_server(me: &Entity, mob: &mut Mob, source: &DamageSource) -> Option<BlockPos> {
+    let home = mob.creaking.home_pos?;
+    if source.kind.bypasses_invulnerability()
+        || living::is_invulnerable_to(me, mob, source)
+        || mob.creaking.invulnerability_animation > 0
+        || mob.dead
+    {
+        return None;
+    }
+    let player_credit = source.attacker_is_player || matches!(source.kind, DamageKind::Arrow);
+    if !player_credit && source.direct.is_none() && source.attacker.is_none() {
+        return None;
+    }
+    mob.creaking.invulnerability_animation = 8;
+    mob.events.push(super::MobEvent::EntityEvent { event: 66 });
+    mob.creaking.invulnerability_animation = 8;
+    if is_heart_bound(mob) {
+        living::play_sound(me, mob, "minecraft:entity.creaking.sway", 1.0, 1.0);
+    }
+    Some(home)
+}
+
+/// `Creaking.aiStep`：被玩家看着时 `CAN_MOVE=false`，看着的玩家走开后解冻。
+pub(super) fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) {
+    let was = mob.creaking.can_move;
+    let can_move = check_can_move(me, mob, ctx);
+    if was != can_move {
+        mob.events.push(super::MobEvent::Sound {
+            sound: if can_move {
+                "minecraft:entity.creaking.unfreeze"
+            } else {
+                "minecraft:entity.creaking.freeze"
+            },
+            volume: 1.0,
+            pitch: 1.0,
+            position: me.position,
+            hostile: true,
+            seed: None,
+        });
+        if !can_move {
+            mob.xxa = 0.0;
+            mob.zza = 0.0;
+            mob.jumping = false;
+            mob.speed = 0.0;
+        }
+    }
+    mob.creaking.can_move = can_move;
+    if mob.creaking.invulnerability_animation > 0 {
+        mob.creaking.invulnerability_animation -= 1;
+    }
+    if let Some(home) = mob.creaking.home_pos {
+        // `BlockView` 的并行快照没有方块实体表；精确视图用 `has_block_entity` 认出心还在。
+        // 拆解流程由 `removeProtector(null)` 自己置位，这里不误判成心消失。
+        if !ctx.blocks().has_block_entity(home) && !mob.creaking.tearing_down {
+            mob.health = 0.0;
+            mob.dead = true;
+        }
+    }
+}
+
+/// `isLookingAtMe(player, 0.5, false, true, [eyeY, y+0.5, mid])` 的 Bamboo 版。
+fn looking_at_me(
+    me: &Entity,
+    mob: &Mob,
+    player: &crate::entity::ctx::PlayerView,
+    view: &dyn crate::entity::ctx::BlockView,
+) -> bool {
+    if player.gaze_disguise {
+        return false;
+    }
+    let from = player.eye_position();
+    let eye = me.position.y + f64::from(mob.eye_height);
+    for target_y in [eye, me.position.y + 0.5, (eye + me.position.y) / 2.0] {
+        let to = Vec3::new(me.position.x, target_y, me.position.z);
+        let offset = to.subtract(from);
+        let length = offset.length();
+        if length <= 0.0 {
+            continue;
+        }
+        let direction = offset.normalize();
+        let look = player.look_direction.normalize();
+        if look.x * direction.x + look.y * direction.y + look.z * direction.z > 1.0 - 0.5 / length
+            && view
+                .clip_collider(from, to, CollisionContext::Empty)
+                .is_none()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// `Creaking.checkCanMove`：任一可攻击玩家盯着 12 格内的嘎枝时冻结。
+fn check_can_move(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
+    let mut players = Vec::new();
+    ctx.blocks()
+        .for_each_player(&mut |player| players.push(*player));
+    if players.is_empty() {
+        if mob.creaking.active {
+            deactivate(mob);
+        }
+        return true;
+    }
+    let view = ctx.blocks();
+    let mut any_attackable = false;
+    for player in players {
+        if !player.alive || player.spectator || player.creative {
+            continue;
+        }
+        any_attackable = true;
+        if looking_at_me(me, mob, &player, view) {
+            if mob.creaking.active {
+                return false;
+            }
+            if player.position.distance_to_sqr(me.position) < 144.0 {
+                activate(mob);
+                return false;
+            }
+        }
+    }
+    if !any_attackable && mob.creaking.active {
+        deactivate(mob);
+    }
+    true
+}
+
+fn activate(mob: &mut Mob) {
+    mob.creaking.active = true;
+    mob.events.push(super::MobEvent::Sound {
+        sound: "minecraft:entity.creaking.activate",
+        volume: 1.0,
+        pitch: 1.0,
+        position: Vec3::default(),
+        hostile: true,
+        seed: None,
+    });
+}
+
+fn deactivate(mob: &mut Mob) {
+    mob.creaking.active = false;
+    mob.events.push(super::MobEvent::Sound {
+        sound: "minecraft:entity.creaking.deactivate",
+        volume: 1.0,
+        pitch: 1.0,
+        position: Vec3::default(),
+        hostile: true,
+        seed: None,
+    });
+}
+
+/// `tickDeath` 的拆解分支：45 刻后播死亡声、广播 Poof 并移除，不走普通 20 刻死亡。
+pub(super) fn tear_down_death(me: &mut Entity, mob: &mut Mob) -> bool {
+    if !is_heart_bound(mob) || !mob.creaking.tearing_down {
+        return false;
+    }
+    mob.creaking.tear_down_time += 1;
+    if mob.creaking.tear_down_time <= 45 || me.removed {
+        return true;
+    }
+    mob.events.push(super::MobEvent::Sound {
+        sound: "minecraft:entity.creaking.death",
+        volume: 1.0,
+        pitch: 1.0,
+        position: me.position,
+        hostile: true,
+        seed: None,
+    });
+    mob.events.push(super::MobEvent::Poof);
+    me.discard();
+    true
 }
 
 /// 逐刻对拍用的状态行。

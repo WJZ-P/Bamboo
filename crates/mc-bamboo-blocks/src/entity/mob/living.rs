@@ -1228,6 +1228,9 @@ fn is_in_wall(me: &Entity, mob: &Mob, view: &dyn BlockView) -> bool {
 
 /// `tickDeath`：第 20 刻移除。
 fn tick_death(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    if mob.mob_type == super::MobType::Creaking && super::creaking::tear_down_death(me, mob) {
+        return;
+    }
     mob.death_time += 1;
     if mob.death_time >= 20 && !me.removed {
         mob.events.push(MobEvent::Poof);
@@ -1272,6 +1275,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
         super::guardian::ai_step(me, mob);
     }
     animal_ai_step(me, mob, ctx, plan);
+    if mob.mob_type == super::MobType::Creaking {
+        super::creaking::ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Bee {
         let target_close = super::goals::combat_target(mob, ctx)
             .is_some_and(|target| target.position.distance_to_sqr(me.position) < 4.0);
@@ -2805,6 +2811,13 @@ pub(crate) fn hurt_server(
     source: DamageSource,
     amount: f32,
 ) -> bool {
+    // `Creaking.hurtServer`：绑定心的嘎枝不掉血，改由心放树脂和连线效果。
+    if mob.mob_type == super::MobType::Creaking
+        && let Some(home) = super::creaking::hurt_server(me, mob, &source)
+    {
+        ctx.emit(super::super::ctx::Command::CreakingHeartHurt { home }, me);
+        return true;
+    }
     // `Panda.hurtServer`：先站起来，再做官方的无敌和冷却判定。
     // `Panda.hurtServer`: stand up first, then the vanilla invulnerability checks.
     if mob.mob_type == super::MobType::Panda {
