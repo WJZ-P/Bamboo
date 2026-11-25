@@ -160,6 +160,7 @@ impl VaultCase {
             mob_teams: HashMap::new(),
             short_hunger: false,
             ignore_bed_monsters: false,
+            containers: Default::default(),
             explosion_break: 0,
         }
     }

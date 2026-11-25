@@ -140,6 +140,7 @@ impl LeashCase {
             game_event_listeners: Default::default(),
             warden_warnings: Default::default(),
             darkness_ticks: 0,
+            containers: Default::default(),
             explosion_break: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(self.first_id),
