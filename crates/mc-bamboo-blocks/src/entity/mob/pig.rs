@@ -10,6 +10,7 @@ use mc_bamboo_protocol::packet::play::EquipmentSlot;
 use super::{
     Mob, MobType,
     attributes::Attributes,
+    equine,
     equipment::GUARANTEED_DROP_CHANCE,
     goals::{Goal, GoalSelector, WrappedGoal},
     interact::{MobInteractRequest, MobInteraction},
@@ -243,6 +244,18 @@ pub(super) fn interact_not_food(
     mob: &mut Mob,
     req: &MobInteractRequest,
 ) -> MobInteraction {
+    // `Entity.interact` 在 `mobInteract` 之前先用剪刀卸下可剪的装备；有人骑、
+    // 潜行或槽里没有可剪装备时什么也不做。
+    //
+    // `Entity.interact` tries shearing removable equipment before `mobInteract`;
+    // a rider, sneaking or no shearable slot makes it a no-op.
+    if req.held.item == items::SHEARS
+        && !mob.is_vehicle()
+        && !req.sneaking
+        && let Some(outcome) = equine::interact::attempt_to_shear_equipment(me, mob, req)
+    {
+        return outcome;
+    }
     let saddled = !mob.equipment.get(EquipmentSlot::Saddle).is_empty();
     if saddled && mob.passengers.is_empty() && !req.sneaking {
         return MobInteraction {

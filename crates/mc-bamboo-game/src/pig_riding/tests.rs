@@ -1,10 +1,13 @@
 //! 胡萝卜钓竿加速猪：骑乘、控制者、耐久和统计。
 
 use mc_bamboo_blocks::{
-    durability::set_damage_for_oracle,
-    entity::{Entity, mob::MobType},
+    BlockState, World,
+    dispense::dispense_from,
+    durability::{damage_of, set_damage_for_oracle},
+    entity::{Entity, EntityRandom, JavaRandom, mob::MobType},
+    state::FACING,
 };
-use mc_bamboo_core::{Hand, Vec3};
+use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
 use mc_bamboo_data::items;
 use mc_bamboo_protocol::{
     item::ItemStack,
@@ -13,6 +16,7 @@ use mc_bamboo_protocol::{
 use uuid::Uuid;
 
 use crate::{
+    container::ContainerKind,
     inbound::PlayerId,
     interaction::on_use_item,
     player::Player,
@@ -77,7 +81,7 @@ fn right_click_boosts_a_saddled_pig_and_spends_seven_durability() {
     assert!(needs_sync);
     let held = region.players[&id].inventory.held(Hand::Main);
     assert_eq!(held.item, items::CARROT_ON_A_STICK);
-    assert_eq!(mc_bamboo_blocks::durability::damage_of(held), Some(7));
+    assert_eq!(damage_of(held), Some(7));
 }
 
 #[test]
@@ -100,7 +104,7 @@ fn a_failed_boost_only_awards_the_item_used_stat() {
         vec![(items::CARROT_ON_A_STICK, 1)]
     );
     assert_eq!(
-        mc_bamboo_blocks::durability::damage_of(region.players[&id].inventory.held(Hand::Main)),
+        damage_of(region.players[&id].inventory.held(Hand::Main)),
         Some(0)
     );
 }
@@ -112,7 +116,7 @@ fn a_broken_carrot_on_a_stick_becomes_a_fishing_rod() {
     let held = region.players[&id].inventory.held(Hand::Main);
     assert_eq!(held.item, items::FISHING_ROD);
     assert_eq!(held.count, 1);
-    assert_eq!(mc_bamboo_blocks::durability::damage_of(held), Some(0));
+    assert_eq!(damage_of(held), Some(0));
 }
 
 #[test]
@@ -138,4 +142,100 @@ fn a_second_right_click_during_a_boost_does_not_start_another_one() {
 fn the_pig_is_the_player_controlled_vehicle() {
     let (region, id, pig_id) = setup(items::CARROT_ON_A_STICK, None);
     assert_eq!(player_vehicles(&region).get(&id), Some(&pig_id));
+}
+
+/// `Pig.tickRidden`：朝向跟着骑手，俯仰取一半；`getRiddenSpeed` 用 MOVEMENT_SPEED*0.225。
+#[test]
+fn ridden_rotation_and_speed_follow_the_rider() {
+    use mc_bamboo_blocks::entity::mob::pig;
+    use mc_bamboo_core::Vec3;
+
+    let mut entity = Entity::by_mob_type(MobType::Pig, Vec3::new(0.5, 64.0, 0.5));
+    entity.with_mob(|me, mob| {
+        let mut steering = mob.pig_steering;
+        assert!(steering.boost(&EntityRandom(std::cell::RefCell::new(JavaRandom::new(7)))));
+        mob.pig_steering = steering;
+        pig::tick_ridden(me, mob, 90.0, 60.0);
+        assert_eq!(me.y_rot, 90.0);
+        assert_eq!(mob.x_rot, 30.0);
+        assert_eq!(mob.y_rot_o, 90.0);
+        assert_eq!(mob.y_body_rot, 90.0);
+        assert_eq!(mob.y_head_rot, 90.0);
+        assert_eq!(mob.pig_steering.boost_time, 1);
+        assert_eq!(
+            pig::ridden_speed(0.25, &mob.pig_steering),
+            (0.25 * 0.225 * f64::from(mob.pig_steering.boost_factor())) as f32
+        );
+    });
+}
+
+/// `Entity.interact` 的剪刀卸装：被骑 / 潜行时不动，否则卸鞍、扣剪刀耐久并掉落。
+#[test]
+fn shears_remove_a_pig_saddle() {
+    use mc_bamboo_blocks::entity::mob::interact::{MobInteractRequest, interact};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let mut entity = Entity::by_mob_type(MobType::Pig, Vec3::new(0.5, 64.0, 0.5));
+    let saddle = ItemStack::new(items::SADDLE, 1);
+    entity.with_mob(|me, mob| {
+        mob.equipment.set(EquipmentSlot::Saddle, saddle.clone());
+        let request = MobInteractRequest {
+            player_uid: 1,
+            player_uuid: [0; 16],
+            hand: Hand::Main,
+            held: ItemStack::new(items::SHEARS, 1),
+            creative: false,
+            position: Vec3::default(),
+            sneaking: false,
+            difficulty: 2,
+        };
+        let outcome = interact(me, mob, &request, 0, false);
+        assert_eq!(outcome.result, mc_bamboo_blocks::InteractionResult::Success);
+        assert_eq!(outcome.drop_stack, Some(saddle));
+        assert!(outcome.damage_held);
+        assert!(mob.equipment.get(EquipmentSlot::Saddle).is_empty());
+    });
+}
+
+/// 发射器前方格里的成年空鞍猪拿走一个鞍，并标记必掉 / 持久化。
+#[test]
+fn dispenser_saddles_an_adult_pig() {
+    let mut region = Region::new(2, 20, false);
+    let pig_id = region
+        .entities
+        .spawn(Entity::by_mob_type(MobType::Pig, Vec3::new(1.5, 64.0, 0.5)));
+    let pos = BlockPos::new(0, 64, 0);
+    crate::container::entry_at(&mut region, pos, ContainerKind::Dispenser).slots[0] =
+        ItemStack::new(items::SADDLE, 1);
+    {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        let state = BlockState(mc_bamboo_data::blocks::DISPENSER)
+            .default_state()
+            .with(FACING, Direction::East);
+        world.set_block(pos, state, 0);
+        dispense_from(&mut world, pos, state);
+    }
+    assert_eq!(
+        crate::container::entry_at(&mut region, pos, ContainerKind::Dispenser).slots[0].count,
+        0
+    );
+    region
+        .entities
+        .public_at(pig_id)
+        .and_then(|public| match &public.kind {
+            mc_bamboo_blocks::entity::KindPublic::Mob(mob) => {
+                assert_eq!(
+                    mob.equipment
+                        .iter()
+                        .find(|(slot, _)| *slot == EquipmentSlot::Saddle)
+                        .map(|(_, stack)| stack.item),
+                    Some(items::SADDLE)
+                );
+                assert!(mob.persistence_required);
+                Some(())
+            }
+            _ => None,
+        })
+        .expect("pig");
 }
