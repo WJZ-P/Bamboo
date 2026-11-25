@@ -122,6 +122,29 @@ fn passenger_attachment(vehicle: &EntityPublic, index: usize) -> Vec3 {
         return Vec3::new(0.0, f64::from(height), 0.0);
     };
     let (_, height) = mob.dimensions();
+    if mob.mob_type.is_camel() {
+        // `Camel.getPassengerAttachmentPoint` 覆写了默认的 PASSENGER 点。
+        // 站直且不在换姿势过渡时 `getBodyAnchorAnimationYOffset` 返回
+        // `height - 0.375`；两名乘客时第一名在 z=+0.5，第二名在 z=-0.7
+        // （乘客是 `Animal` 时再加 0.2）。坐着 / 过渡的动画偏移留给已知限制。
+        //
+        // `Camel.getPassengerAttachmentPoint` overrides the default PASSENGER
+        // point. Standing and out of a pose transition, the body-anchor offset
+        // is `height - 0.375`; with two passengers the first sits at z=+0.5 and
+        // the second at z=-0.7 (plus 0.2 when the passenger is an `Animal`).
+        // Sitting / transition animation offsets remain a known limitation.
+        let first = index == 0;
+        // `f6` 是 f32：`0.5F` 或者 `-0.7F`（`Animal` 乘客再加 `0.2F`），
+        // 乘 `partialTick=1.0F` 后才转成双精度，所以 -0.7 要用 f32 的位。
+        // `f6` is f32: `0.5F` or `-0.7F` (plus `0.2F` for an `Animal`),
+        // multiplied by `partialTick=1.0F` before widening; keep the f32 bits.
+        let z = f64::from(if mob.passengers.len() <= 1 || first {
+            0.5_f32
+        } else {
+            -0.7_f32
+        });
+        return Vec3::new(0.0, f64::from(height - 0.375_f32), z);
+    }
     // 注册表里的 PASSENGER 点是 JSON 里的双精度数，按 f64 原样用；`ridingOffset`
     // 给 VEHICLE 点是 f32，两者不能混（0.7 和 0.7f 差 1.19e-8）。
     // Registered PASSENGER points are doubles from JSON and stay f64 here; the
@@ -157,7 +180,10 @@ fn passenger_attachment(vehicle: &EntityPublic, index: usize) -> Vec3 {
         MobType::Mule => (0.0, 1.212499976158142, 0.0),
         _ => (0.0, f64::from(height), 0.0),
     };
-    let _ = index; // 已建模的载具都只有一个附着点，`getClamped` 恒取 0 号。
+    // 除骆驼外，已建模的载具都只有一个附着点，`getClamped` 恒取 0 号。
+    // Other modelled vehicles have a single attachment point, so `getClamped`
+    // always returns index 0.
+    let _ = index;
     Vec3::new(x, y, z)
 }
 
@@ -195,7 +221,8 @@ fn vehicle_attachment(passenger: &EntityPublic) -> Vec3 {
         | MobType::Drowned
         | MobType::Skeleton
         | MobType::Stray
-        | MobType::Bogged => 0.7_f32,
+        | MobType::Bogged
+        | MobType::Parched => 0.7_f32,
         MobType::Pillager => 0.6_f32,
         MobType::Phantom => 0.125_f32,
         _ => 0.0,

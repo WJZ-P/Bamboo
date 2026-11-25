@@ -2371,7 +2371,11 @@ impl<'a> World<'a> {
         true
     }
 
-    fn start_riding_with_limit(
+    /// 同上，但允许载具带 `max_passengers` 名乘客（骆驼覆写 `canAddPassenger` 后是 2）。
+    ///
+    /// As above, but the vehicle may carry `max_passengers` riders (a camel's
+    /// `canAddPassenger` override allows 2).
+    pub fn start_riding_with_limit(
         &mut self,
         passenger: EntityUid,
         vehicle: EntityUid,

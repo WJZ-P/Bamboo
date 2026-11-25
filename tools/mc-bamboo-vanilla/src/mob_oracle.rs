@@ -234,6 +234,9 @@ struct Case {
     ride_passenger: i32,
     #[serde(default = "minus_one")]
     ride_vehicle: i32,
+    /// 第二位生物乘客（尸壳骆驼上的焦骸）。
+    #[serde(default = "minus_one")]
+    ride_passenger2: i32,
     /// 骑乘场景：所有生物都持久化，避开 `checkDespawn` 取数顺序的差异。
     ///
     /// Riding scenes: every mob is persistent, avoiding `checkDespawn` draw order.
@@ -832,6 +835,7 @@ struct CowStep {
 fn zombie_style(name: &str) -> bool {
     [
         "zombie_",
+        "parched_",
         "rabbit_",
         "fox_",
         "wolf_",
@@ -2043,6 +2047,8 @@ impl Report {
                     52 => mc_bamboo_blocks::entity::mob::MobType::Drowned,
                     53 => mc_bamboo_blocks::entity::mob::MobType::Pillager,
                     60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
+                    61 => mc_bamboo_blocks::entity::mob::MobType::Parched,
+                    62 => mc_bamboo_blocks::entity::mob::MobType::CamelHusk,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
                 // 幼年标志和破门是僵尸一系专属的起始状态。
@@ -2321,6 +2327,16 @@ impl Report {
                 )
             {
                 world.start_riding(passenger, vehicle);
+            }
+            // 尸壳骆驼的第二名乘客用放宽到两人的 `canAddPassenger`。
+            if case.ride_passenger2 >= 0
+                && case.ride_vehicle >= 0
+                && let (Some(&passenger), Some(&vehicle)) = (
+                    ids.get(case.ride_passenger2 as usize),
+                    ids.get(case.ride_vehicle as usize),
+                )
+            {
+                world.start_riding_with_limit(passenger, vehicle, 2);
             }
         }
         let Some(first) = case.steps.first() else {

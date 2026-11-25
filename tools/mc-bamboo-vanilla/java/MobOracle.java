@@ -829,6 +829,9 @@ public final class MobOracle {
          */
         int ridePassenger = -1;
         int rideVehicle = -1;
+        /** 第二位生物乘客（尸壳骆驼上的焦骸），-1 表示没有。 */
+        /** A second mob passenger (the parched on a camel husk), -1 for none. */
+        int ridePassenger2 = -1;
         /** 骑乘场景：所有生物都 `setPersistenceRequired`，避开 `checkDespawn` 的取数顺序差异。 */
         boolean persisted;
         /** 骑乘场景：所有生物都 `setNoAi(true)`，只比附着点和骑乘状态。 */
@@ -906,6 +909,13 @@ public final class MobOracle {
             this.ridePassenger = passenger;
             this.rideVehicle = vehicle;
             this.persisted = true;
+            return this;
+        }
+
+        /** 尸壳骆驼的第二名乘客：焦骸和尸壳同骑一头坐骑。 */
+        /** A camel husk's second passenger: parched and husk share one mount. */
+        Scene ride2(int passenger) {
+            this.ridePassenger2 = passenger;
             return this;
         }
 
@@ -3231,6 +3241,20 @@ public final class MobOracle {
                 scenes.add(jockey);
             }
             {
+                // 尸壳骆驼（静止）：尸壳与焦骸同骑一头骆驼，NoAI 只比附着点和乘客 tick。
+                // Static camel-husk jockey: husk and parched share one camel, with
+                // NoAI so only the attachment points and passenger ticks are compared.
+                Scene huskCamel = new Scene("camel_husk_ride_static").ticks(80).difficulty(2);
+                huskCamel.clockStart = 18000;
+                huskCamel.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                huskCamel.mob(62, 0.5, 64.0, 0.5, 0.0F, 831L, 0);
+                huskCamel.mob(2, 0.5, 64.0, 0.5, 0.0F, 832L, 0);
+                huskCamel.mob(61, 0.5, 64.0, 0.5, 0.0F, 833L, 0);
+                huskCamel.ride(1, 0).ride2(2).noAi();
+                huskCamel.player(40.5, 64.0, 0.5, Items.AIR);
+                scenes.add(huskCamel);
+            }
+            {
                 // 鸡骑士（静止）：同上，鸡的附着点在头后方。
                 // Static chicken jockey: the chicken's passenger point is behind its head.
                 Scene chicken = new Scene("zombie_ride_chicken").ticks(160).difficulty(2);
@@ -4275,6 +4299,21 @@ public final class MobOracle {
                 burn.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
                 burn.player(20.5, 64.0, 0.5, Items.AIR);
                 scenes.add(burn);
+                // 焦骸（16 血、弓、白天燃烧）：白天着火掉血，夜里不着火。
+                // Parched (16 health, bow, burns in daylight): burns by day, safe at night.
+                Scene parchedDay = new Scene("parched_burn_day").ticks(60).difficulty(2);
+                ground(parchedDay, 12);
+                parchedDay.clockStart = 1000;
+                parchedDay.mob(61, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+                parchedDay.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(parchedDay);
+                Scene parchedNight = new Scene("parched_burn_night").ticks(60).difficulty(2);
+                ground(parchedNight, 12);
+                parchedNight.clockStart = 18000;
+                parchedNight.monstersBurn = false;
+                parchedNight.mob(61, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+                parchedNight.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(parchedNight);
                 Scene night = new Scene("zombie_burn_night").ticks(40).difficulty(2);
                 ground(night, 12);
                 night.clockStart = 18000;
@@ -13245,6 +13284,10 @@ public final class MobOracle {
                 case 18 -> EntityTypes.FROG.create(level, EntitySpawnReason.COMMAND);
                 case 19 -> EntityTypes.TADPOLE.create(level, EntitySpawnReason.COMMAND);
                 case 20 -> EntityTypes.CAMEL.create(level, EntitySpawnReason.COMMAND);
+                // 61 焦骸、62 尸壳骆驼。
+                // 61 parched, 62 camel husk.
+                case 61 -> new net.minecraft.world.entity.monster.skeleton.Parched(EntityTypes.PARCHED, level);
+                case 62 -> new net.minecraft.world.entity.animal.camel.CamelHusk(EntityTypes.CAMEL_HUSK, level);
                 case 21 -> EntityTypes.OCELOT.create(level, EntitySpawnReason.COMMAND);
                 case 22 -> EntityTypes.CAT.create(level, EntitySpawnReason.COMMAND);
                 case 23 -> EntityTypes.PARROT.create(level, EntitySpawnReason.COMMAND);
@@ -13356,12 +13399,18 @@ public final class MobOracle {
                         mobs.get(scene.rideVehicle), false, false)) {
             throw new IllegalStateException("Mob rider could not mount in " + scene.name);
         }
+        if (scene.ridePassenger2 >= 0
+                && !mobs.get(scene.ridePassenger2).startRiding(
+                        mobs.get(scene.rideVehicle), false, false)) {
+            throw new IllegalStateException("Second mob rider could not mount in " + scene.name);
+        }
         StringBuilder line = new StringBuilder(1 << 18);
         line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
         line.append(",\"firstId\":").append(FIRST_ID);
         line.append(",\"rider\":").append(scene.rider);
         line.append(",\"ridePassenger\":").append(scene.ridePassenger);
         line.append(",\"rideVehicle\":").append(scene.rideVehicle);
+        line.append(",\"ridePassenger2\":").append(scene.ridePassenger2);
         line.append(",\"persisted\":").append(scene.persisted);
         line.append(",\"noAi\":").append(scene.noAi);
         line.append(",\"bowRider\":").append(scene.bowRider);
@@ -13675,6 +13724,15 @@ public final class MobOracle {
         }
         line.append("]");
         PillagerScenes.check(scene, mobs);
+        // 焦骸日晒场景必须真的着火掉血，夜间场景不能着火。
+        // The parched day scene must burn and take damage; the night scene must not.
+        if (scene.name.equals("parched_burn_day")
+                && (mobs.getFirst().getHealth() >= 16.0F || mobs.getFirst().getRemainingFireTicks() <= 0)) {
+            throw new IllegalStateException("parched day scene never burned");
+        }
+        if (scene.name.equals("parched_burn_night") && mobs.getFirst().getRemainingFireTicks() > 0) {
+            throw new IllegalStateException("parched night scene burned unexpectedly");
+        }
         if (scene.name.equals("witch_drink_fire")) {
             Mob witch = mobs.getFirst();
             if (!witch.hasEffect(net.minecraft.world.effect.MobEffects.FIRE_RESISTANCE) || witch.getHealth() != 26.0F) {
