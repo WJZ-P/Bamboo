@@ -121,12 +121,6 @@ impl Transport {
 
     /// `TransportItemsBetweenContainers.tick`。
     pub fn tick(&mut self, cx: &mut Cx) {
-        if std::env::var_os("CG_DEBUG").is_some() {
-            eprintln!(
-                "cg tick time={} state={:?} it={} target={:?}",
-                cx.time, self.transport_state, self.interaction_tick, self.target
-            );
-        }
         let invalid = self.update_invalid_target(cx);
         if self.target.is_none() {
             self.stop(cx);
@@ -217,7 +211,7 @@ impl Transport {
             return false;
         };
         let blocks = cx.ctx.blocks();
-        if !is_wanted_block(blocks, cx.mob, target.pos) || is_target_blocked(blocks, target.pos) {
+        if !is_wanted_block(blocks, cx.mob, target.pos) || is_target_blocked(cx, target.pos) {
             return false;
         }
         if self.transport_state != TransportState::Travelling {
@@ -312,16 +306,30 @@ impl Transport {
             match self.interaction_tick {
                 1 => {
                     // `ChestBlockEntity.startOpen` → `signalOpenCount` → `playSound`：
-                    // 世界随机源取一次 `nextFloat()` 算开盖音高。
+                    // 世界随机源取一次 `nextFloat()` 算开盖音高；打开者人数 +1。
                     let _ = cx.ctx.blocks().level_random_float();
                     cx.mob.copper_golem.opened_chest_pos = Some(target.pos);
                     cx.mob.copper_golem.state = state;
+                    cx.ctx.emit(
+                        Command::CopperGolemChestOpen {
+                            pos: target.pos,
+                            open: true,
+                        },
+                        cx.me,
+                    );
                 }
                 9 => living::play_sound(cx.me, cx.mob, sound, 1.0, 1.0),
                 60 => {
-                    // `stopOpen` 同样取一次世界随机数算关盖音高。
+                    // `stopOpen` 同样取一次世界随机数算关盖音高；打开者人数 -1。
                     let _ = cx.ctx.blocks().level_random_float();
                     cx.mob.copper_golem.opened_chest_pos = None;
+                    cx.ctx.emit(
+                        Command::CopperGolemChestOpen {
+                            pos: target.pos,
+                            open: false,
+                        },
+                        cx.me,
+                    );
                 }
                 _ => {}
             }
@@ -567,26 +575,11 @@ fn reached_interaction(cx: &Cx, pos: BlockPos) -> Interaction {
 }
 
 /// `isAnotherMobInteractingWithTarget` / `shouldQueueForTarget`：
-/// Bamboo 没有 `ChestBlockEntity.getEntitiesWithContainerOpen` 表，
-/// 用「别的铜傀儡当前开着的箱子位置」判定（同一个大箱子的两半也算）。
+/// `CopperGolemAi.shouldQueueForTarget`：官方读箱子方块实体的
+/// `getEntitiesWithContainerOpen().isEmpty()`；Bamboo 的
+/// `ContainerOpenersCounter.openCount` 就是那张表的计数（玩家和铜傀儡共用）。
 fn another_mob_interacting(cx: &Cx, pos: BlockPos) -> bool {
-    let mut found = false;
-    let area = Aabb::new(
-        f64::from(pos.x) - 2.0,
-        f64::from(pos.y) - 2.0,
-        f64::from(pos.z) - 2.0,
-        f64::from(pos.x) + 3.0,
-        f64::from(pos.y) + 3.0,
-        f64::from(pos.z) + 3.0,
-    );
-    cx.ctx.for_each_other_in(area, &mut |other| {
-        if let crate::entity::KindPublic::Mob(mob) = &other.kind
-            && mob.opened_chest_pos == Some(pos)
-        {
-            found = true;
-        }
-    });
-    found
+    cx.ctx.blocks().container_open_count(pos) > 0
 }
 
 /// `isWantedBlock`：空手找铜箱子（源），拿着物品找普通 / 陷阱箱子（目标）。
@@ -602,8 +595,31 @@ fn is_wanted_block(blocks: &dyn BlockView, mob: &crate::entity::mob::Mob, pos: B
 /// `ChestBlock.isChestBlockedAt`：`isBlockedChestByBlock` 这一段（上方一格是
 /// 红石导体）。`isCatSittingOnChest` 那一段没有猫的坐下位置表，按官方对拍夹具
 /// 的「没有猫」处理，见 README。
-fn is_target_blocked(blocks: &dyn BlockView, pos: BlockPos) -> bool {
-    blocks.block_state(pos.above()).is_redstone_conductor()
+/// `ChestBlock.isChestBlockedAt`：`isBlockedChestByBlock`（上方是红石导体）
+/// 或 `isCatSittingOnChest`（箱子上方一格盒内有坐下姿势的猫）。
+fn is_target_blocked(cx: &Cx, pos: BlockPos) -> bool {
+    let blocks = cx.ctx.blocks();
+    if blocks.block_state(pos.above()).is_redstone_conductor() {
+        return true;
+    }
+    let area = Aabb::new(
+        f64::from(pos.x),
+        f64::from(pos.y + 1),
+        f64::from(pos.z),
+        f64::from(pos.x + 1),
+        f64::from(pos.y + 2),
+        f64::from(pos.z + 1),
+    );
+    let mut sitting_cat = false;
+    cx.ctx.for_each_other_in(area, &mut |other| {
+        if let crate::entity::KindPublic::Mob(mob) = &other.kind
+            && mob.mob_type == MobType::Cat
+            && mob.tame_flags & crate::entity::mob::tame::FLAG_SITTING != 0
+        {
+            sitting_cat = true;
+        }
+    });
+    sitting_cat
 }
 
 /// `getTransportTarget`：搜索盒内全部箱子，按 `distToCenterSqr` 取最近的有效目标。
@@ -655,7 +671,7 @@ fn find_transport_target(cx: &Cx) -> Option<Target> {
         }) {
             continue;
         }
-        if is_target_blocked(blocks, pos) {
+        if is_target_blocked(cx, pos) {
             continue;
         }
         best = Some(Target { pos });

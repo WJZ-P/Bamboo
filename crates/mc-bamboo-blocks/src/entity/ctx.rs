@@ -178,6 +178,12 @@ pub trait BlockView {
         Vec::new()
     }
 
+    /// `ChestBlockEntity.getEntitiesWithContainerOpen()` 是否有打开者，
+    /// 铜傀儡排队判定用；精确驱动读当前容器表、并行驱动读本刻开始的快照。
+    fn container_open_count(&self, _pos: BlockPos) -> i32 {
+        0
+    }
+
     /// 官方 `EnvironmentAttributeSystem.getValue(BEES_STAY_IN_HIVE, pos)`。
     ///
     /// 主世界按时间线的两条关键帧给值；`RAIN` / `THUNDER` 两张天气覆盖层在雨强
@@ -742,6 +748,10 @@ impl BlockView for World<'_> {
 
     fn has_block_entity(&self, pos: BlockPos) -> bool {
         World::has_block_entity(self, pos)
+    }
+
+    fn container_open_count(&self, pos: BlockPos) -> i32 {
+        self.level().container_open_count(pos)
     }
 
     fn container_slots(&self, pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {
@@ -1366,6 +1376,12 @@ pub enum Command {
         pos: mc_bamboo_core::BlockPos,
         /// 主手在发出命令那一刻的物品堆（落地时箱子可能已被别的傀儡改过）。
         held: mc_bamboo_protocol::item::ItemStack,
+    },
+    /// `Container.startOpen/stopOpen`：铜傀儡开箱 / 关箱时改箱子的打开者人数。
+    /// `open` 为真 +1、为假 -1；落地阶段串行应用，别的铜傀儡下一刻就能读到。
+    CopperGolemChestOpen {
+        pos: mc_bamboo_core::BlockPos,
+        open: bool,
     },
     /// `ServerLevel.destroyBlockProgress(breaker, pos, progress)`：`BreakDoorGoal` 的
     /// 门上裂纹，`progress` 为 -1 时清掉。
@@ -2178,6 +2194,11 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::CopperGolemPutDown { pos, held } => {
             super::mob::copper_golem::apply_put_down(world, me, pos, &held);
+        }
+        Command::CopperGolemChestOpen { pos, open } => {
+            let _ = me;
+            let delta = if open { 1 } else { -1 };
+            world.change_container_open_count(pos, delta);
         }
         Command::LayTurtleEgg { pos, eggs } => {
             let pitch = 0.9 + world.random().next_float() * 0.2;

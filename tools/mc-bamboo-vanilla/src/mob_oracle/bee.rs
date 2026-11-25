@@ -107,6 +107,7 @@ impl BeeCase {
             game: None,
             wrong_was_hurt: false,
             containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             inhabited: std::collections::HashMap::new(),
             mob_teams: std::collections::HashMap::new(),

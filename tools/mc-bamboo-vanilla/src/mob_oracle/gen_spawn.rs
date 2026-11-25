@@ -419,6 +419,7 @@ fn fixture(case: &Case, biome_id: i32) -> MobLevel {
         short_hunger: false,
         wrong_was_hurt: false,
         containers: Default::default(),
+        container_open_counts: Default::default(),
         explosion_break: 0,
     }
 }

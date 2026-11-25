@@ -229,6 +229,10 @@ pub(crate) fn parallel_entity_ticks(
             .iter()
             .map(|(pos, entry)| (*pos, entry.slots.clone()))
             .collect();
+        let container_open_counts: Vec<_> = containers
+            .iter()
+            .map(|(pos, entry)| (*pos, entry.open_count))
+            .collect();
         let facts = ViewFacts {
             min_y: mc_bamboo_world::MIN_Y,
             max_y: mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1,
@@ -254,6 +258,7 @@ pub(crate) fn parallel_entity_ticks(
             shulker_box_shapes: block_entity_shapes.shulker_box_shapes,
             hopper_positions,
             container_snapshot,
+            container_open_counts,
             block_change_stamp: block_change_stamp.get(),
             world_border: global.world_border.clone(),
             players: player_views,

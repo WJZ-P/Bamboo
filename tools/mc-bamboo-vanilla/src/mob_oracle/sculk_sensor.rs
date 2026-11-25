@@ -133,6 +133,7 @@ fn mob_level(blocks: &[[i32; 4]]) -> MobLevel {
         mob_teams: HashMap::new(),
         wrong_was_hurt: false,
         containers: Default::default(),
+        container_open_counts: Default::default(),
         explosion_break: 0,
         short_hunger: false,
         ignore_bed_monsters: false,

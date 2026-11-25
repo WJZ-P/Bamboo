@@ -208,6 +208,11 @@ pub trait BlockSource: Sync {
         Vec::new()
     }
 
+    /// 本刻开始快照里的箱子开盖人数，见 [`super::ctx::BlockView::container_open_count`]。
+    fn container_open_count(&self, _pos: BlockPos) -> i32 {
+        0
+    }
+
     /// 这个区块里的实体现在 tick 不 tick。默认都 tick。
     ///
     /// 和 [`crate::Level::chunk_ticks_entities`] 必须给出同样的答案：精确驱动的
@@ -597,6 +602,10 @@ impl<T: BlockSource> BlockView for SourceView<T> {
 
     fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
         self.0.beehives_near(center, radius)
+    }
+
+    fn container_open_count(&self, pos: BlockPos) -> i32 {
+        self.0.container_open_count(pos)
     }
 
     fn container_slots(&self, pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {

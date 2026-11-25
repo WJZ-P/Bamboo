@@ -15119,6 +15119,7 @@ public final class MobOracle {
             level.gameTime = START_TIME;
             level.injectedCanSeeSky = true;
             level.getRandom().setSeed(1L);
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
             level.blockEntities = new Long2ObjectOpenHashMap<>();
             level.spawned = new ArrayList<>();
             level.levelEvents = new ArrayList<>();
@@ -15209,7 +15210,7 @@ public final class MobOracle {
             level.tracked.add(golem);
 
             int ticks = switch (name) {
-                case "copper_golem_build" -> 3;
+                case "copper_golem_build" -> 1;
                 case "copper_golem_transport" -> 62;
                 case "copper_golem_no_target" -> 62;
                 case "copper_golem_oxidize" -> 8;
@@ -15231,11 +15232,6 @@ public final class MobOracle {
                         onPlace.invoke(Blocks.CARVED_PUMPKIN, level.getBlockState(pumpkin), level, pumpkin,
                                 Blocks.AIR.defaultBlockState(), false);
                     }
-                    // 官方 `ServerLevel.tick` 按 uid 顺序 tick：原来的傀儡先，
-                    // 这一刻新生成的傀儡后（Bamboo 的 `tick_entities` 同序）。
-                    // Vanilla ticks in uid order: the original golem first, then
-                    // the golem spawned this tick.
-                    var newlySpawned = new java.util.ArrayList<>(level.spawned);
                     if (!golem.isRemoved()) {
                         // 雕像场景：`CarvedPumpkinBlock` 之外的假世界不会自动建
                         // `CopperGolemStatueBlockEntity`，这里按其默认方块预置一个，
@@ -15255,17 +15251,11 @@ public final class MobOracle {
                         golem.commonTick();
                         golem.tick();
                     }
-                    for (Entity spawnedEntity : newlySpawned) {
-                        if (!spawnedEntity.isRemoved()) {
-                            spawnedEntity.checkDespawn();
-                            spawnedEntity.commonTick();
-                            spawnedEntity.tick();
-                        }
-                    }
                 }
                 if (tick > 0) frames.append(',');
                 frames.append("{\"blocks\":").append(copperBlocks(level, build, source, dest, hasSource, hasDest));
                 frames.append(",\"chests\":").append(copperChests(level, sourceBe, destBe));
+                frames.append(",\"openCounts\":").append(copperOpenCounts(sourceBe, destBe));
                 frames.append(",\"golem\":").append(copperGolemState(level, golem));
                 frames.append(",\"brain\":").append(copperBrainSummary(golem));
                 frames.append(",\"startSeed\":").append(startSeed)
@@ -15291,6 +15281,13 @@ public final class MobOracle {
             out.append(Block.getId(level.getBlockState(cells[i])));
         }
         return out.append(']').toString();
+    }
+
+    /** `ChestBlockEntity.getEntitiesWithContainerOpen().size()`，即开盖者计数。 */
+    private static String copperOpenCounts(net.minecraft.world.level.block.entity.ChestBlockEntity source,
+            net.minecraft.world.level.block.entity.ChestBlockEntity dest) {
+        return "[" + (source == null ? 0 : source.getEntitiesWithContainerOpen().size())
+                + "," + (dest == null ? 0 : dest.getEntitiesWithContainerOpen().size()) + "]";
     }
 
     private static String copperChests(FakeLevel level, net.minecraft.world.level.block.entity.ChestBlockEntity source, net.minecraft.world.level.block.entity.ChestBlockEntity dest) {

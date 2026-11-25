@@ -1215,6 +1215,18 @@ pub trait Level: LevelSideState + LevelEntities {
         0
     }
 
+    /// `ChestBlockEntity.openersCounter.openCount`：这一刻有几个 `ContainerUser`
+    /// 开着这个箱子。铜傀儡排队判定读它；没有容器表时返回 0。
+    ///
+    /// The chest's `ContainerOpenersCounter.openCount`; read by the copper golem's
+    /// queue check. Worlds without a container table report zero.
+    fn container_open_count(&self, _pos: BlockPos) -> i32 {
+        0
+    }
+
+    /// `Container.startOpen/stopOpen`：开箱者人数增减 `delta`。
+    fn change_container_open_count(&mut self, _pos: BlockPos, _delta: i32) {}
+
     /// 这一格容器背后的方块位置：单箱是这一格，双箱是两半，见 `CompoundContainer.setChanged`。
     ///
     /// 和 [`Level::with_container`] 一样按能取到的那条规则算，被压住的箱子也算能取到。

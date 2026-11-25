@@ -482,6 +482,7 @@ impl ProjectileCase {
             short_hunger: false,
             wrong_was_hurt: false,
             containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
         }
     }

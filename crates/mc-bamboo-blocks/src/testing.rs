@@ -523,6 +523,12 @@ impl Level for TestLevel {
         self.containers.get(&pos).cloned().unwrap_or_default()
     }
 
+    fn container_open_count(&self, _pos: BlockPos) -> i32 {
+        0
+    }
+
+    fn change_container_open_count(&mut self, _pos: BlockPos, _delta: i32) {}
+
     fn container_positions_in(
         &self,
         center: BlockPos,

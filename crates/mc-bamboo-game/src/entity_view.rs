@@ -50,6 +50,8 @@ pub(crate) struct ReadOnlyWorld<'a> {
     ///
     /// Start-of-tick container snapshot for the copper golem's read-only queries.
     pub(crate) container_snapshot: Vec<(BlockPos, Vec<mc_bamboo_protocol::item::ItemStack>)>,
+    /// 算阶段开始时拷下来的箱子开盖人数快照（位置升序），和槽位快照同序。
+    pub(crate) container_open_counts: Vec<(BlockPos, i32)>,
     /// 这一维度的世界边界快照，实体的碰撞要读它。
     ///
     /// This dimension's world-border snapshot; entity collisions read it.
@@ -183,6 +185,14 @@ impl BlockSource for ReadOnlyWorld<'_> {
             .into_iter()
             .map(|(_, pos)| pos)
             .collect()
+    }
+
+    fn container_open_count(&self, pos: BlockPos) -> i32 {
+        self.container_open_counts
+            .binary_search_by_key(&pos, |(at, _)| *at)
+            .ok()
+            .and_then(|index| self.container_open_counts.get(index))
+            .map_or(0, |(_, count)| *count)
     }
 
     fn container_slots(&self, pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {

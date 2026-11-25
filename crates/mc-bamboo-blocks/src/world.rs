@@ -1601,6 +1601,13 @@ impl<'a> World<'a> {
     /// 这一格容器现在的槽位，见 [`Level::slots_at`]。
     ///
     /// The container slots at this position. See [`Level::slots_at`].
+    /// `ContainerOpenersCounter.incrementOpeners/decrementOpeners` 的落地。
+    pub(crate) fn change_container_open_count(&mut self, pos: BlockPos, delta: i32) {
+        self.note_access(pos, true);
+        self.level.change_container_open_count(pos, delta);
+        self.notify_changed(pos);
+    }
+
     pub(crate) fn slots_at(&self, pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {
         self.note_access(pos, false);
         self.level.slots_at(pos)

@@ -36,6 +36,7 @@ pub(super) struct CopperGolemCase {
 struct CopperGolemFrame {
     blocks: Vec<i32>,
     chests: Vec<Vec<[i32; 2]>>,
+    open_counts: Vec<i32>,
     golem: Vec<i64>,
     brain: Vec<String>,
     /// 官方本刻开始时的世界随机源状态，逐刻注入 Bamboo。
@@ -124,6 +125,7 @@ impl CopperGolemCase {
             short_hunger: false,
             wrong_was_hurt: false,
             containers,
+            container_open_counts: Default::default(),
             explosion_break: 0,
         }
     }
@@ -225,12 +227,19 @@ impl Report {
                     world.remove_entity(golem_id);
                 }
                 if case.name == "copper_golem_build" && tick == 1 {
+                    // 官方 `EntityTickList` 在刻末才把新生成的实体并进名单，
+                    // 所以这一刻生成的小傀儡要到下一刻才 tick。
                     let mut world = World::new(&mut level, &mut ticks);
+                    // 官方 `EntityTickList` 在刻末才把新生成的实体并进名单，
+                    // 所以这一刻生成的小傀儡要到下一刻才 tick。
+                    world.begin_entity_tick();
                     // 官方夹具直接调 `CarvedPumpkinBlock.onPlace`；Bamboo 侧同一步。
                     mc_bamboo_blocks::behaviour::machines::pumpkin::place_for_oracle(
                         &mut world,
                         build.above(),
                     );
+                    // 刻末合并 pending：`Level::end_entity_tick` 由下一次
+                    // `World::tick_entities` 开头补做，效果相同。
                 }
                 let mut world = World::new(&mut level, &mut ticks);
                 world.tick_entities();
@@ -286,6 +295,10 @@ fn copper_frame(level: &MobLevel, golem_id: i32, cells: &[BlockPos]) -> CopperGo
         .iter()
         .map(|&pos| level.block_state(pos).0 as i32)
         .collect();
+    let open_counts = vec![
+        level.container_open_count(BlockPos::new(3, 63, 0)),
+        level.container_open_count(BlockPos::new(4, 63, 0)),
+    ];
     let mut chests = Vec::new();
     for pos in [BlockPos::new(3, 63, 0), BlockPos::new(4, 63, 0)] {
         let slots = level.slots_at(pos);
@@ -334,6 +347,7 @@ fn copper_frame(level: &MobLevel, golem_id: i32, cells: &[BlockPos]) -> CopperGo
     CopperGolemFrame {
         blocks,
         chests,
+        open_counts,
         golem,
         brain,
         start_seed: 0,

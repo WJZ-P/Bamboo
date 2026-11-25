@@ -1170,6 +1170,21 @@ impl Level for RegionLevel<'_> {
             .unwrap_or_default()
     }
 
+    /// 精确驱动读当前 `ContainerEntry.open_count`。
+    fn container_open_count(&self, pos: BlockPos) -> i32 {
+        self.containers
+            .get(&pos)
+            .map_or(0, |entry| entry.open_count)
+    }
+
+    fn change_container_open_count(&mut self, pos: BlockPos, delta: i32) {
+        self.dirty.mark(pos.chunk());
+        self.notify_container(pos);
+        if let Some(entry) = self.containers.get_mut(&pos) {
+            entry.open_count = (entry.open_count + delta).max(0);
+        }
+    }
+
     /// 精确驱动读当前容器表；按方块位置升序（PosMap 遍历序）返回盒内位置。
     fn container_positions_in(
         &self,

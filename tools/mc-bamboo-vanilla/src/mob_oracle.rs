@@ -1048,6 +1048,8 @@ struct MobLevel {
     /// Container slots for copper golem transport scenes (mirrors the chests in the
     /// Java fake level). Empty for other scenes.
     containers: HashMap<BlockPos, Vec<ItemStack>>,
+    /// `ContainerOpenersCounter.openCount`，铜傀儡排队判定用。
+    container_open_counts: HashMap<BlockPos, i32>,
 }
 
 impl MobLevel {
@@ -1356,6 +1358,15 @@ impl Level for MobLevel {
 
     fn slots_at(&self, pos: BlockPos) -> Vec<ItemStack> {
         self.containers.get(&pos).cloned().unwrap_or_default()
+    }
+
+    fn container_open_count(&self, pos: BlockPos) -> i32 {
+        self.container_open_counts.get(&pos).copied().unwrap_or(0)
+    }
+
+    fn change_container_open_count(&mut self, pos: BlockPos, delta: i32) {
+        let count = self.container_open_counts.entry(pos).or_default();
+        *count = (*count + delta).max(0);
     }
 
     fn container_positions_in(
@@ -2447,6 +2458,7 @@ impl Report {
             short_hunger: matches!(break_test, Some("zombie_hunger")),
             wrong_was_hurt: matches!(break_test, Some("zombie_was_hurt")),
             containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: match break_test {
                 Some("explode_tnt_hurt") => 1,
                 Some("explode_tnt_center") => 2,
