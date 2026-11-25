@@ -31,6 +31,11 @@ pub struct MobInteractRequest {
     pub creative: bool,
     /// 玩家位置，`Player.playSound` 用它当音源坐标。
     pub position: Vec3,
+    /// 玩家碰撞盒高（`getBbHeight()`，成年玩家恒 1.8），拴绳算距离用。
+    ///
+    /// The player's box height (`getBbHeight()`, always 1.8 for adults), used by
+    /// the leash distance check.
+    pub player_height: f32,
     /// `isSecondaryUseActive()`：交互包里的 `usingSecondaryAction`（潜行）。
     ///
     /// `isSecondaryUseActive()`: the packet's `usingSecondaryAction` (sneaking).
@@ -401,13 +406,15 @@ pub fn leash_interact(
             me.position,
             me.dimensions.1,
             req.position,
-            1.8,
+            req.player_height,
             now,
         ) {
             return None;
         }
-        if super::leash::is_leashed(mob) {
-            super::leash::drop_leash(mob);
+        if super::leash::is_leashed(mob)
+            && let Some(old) = super::leash::drop_leash(mob)
+        {
+            crate::entity::leash_knot::notify_leashee_removed(world, old);
         }
         super::leash::set_leashed_to(
             mob,
@@ -437,20 +444,12 @@ fn leashed_to_player_in_area(world: &World, this_pos: Vec3, player: EntityUid) -
     for entity in world.live_entities() {
         if let Some(mob) = entity.kind.mob()
             && super::leash::leash_holder(mob) == Some(player)
-            && in_area(entity.position, this_pos)
+            && super::leash::in_leashable_area(entity.bounding_box(), this_pos)
         {
             out.push(entity.id);
         }
     }
     out
-}
-
-/// `AABB.ofSize(center, 32, 32, 32)` 的判定。
-fn in_area(position: Vec3, center: Vec3) -> bool {
-    let dx = position.x - center.x;
-    let dy = position.y - center.y;
-    let dz = position.z - center.z;
-    dx * dx + dy * dy + dz * dz <= 32.0 * 32.0
 }
 
 /// 牵引者是不是玩家。
@@ -465,8 +464,10 @@ fn leash_holder_is_player(world: &World, mob: &Mob) -> bool {
 fn shear_off_all(world: &mut World, me: &Entity, mob: &mut Mob, _req: &MobInteractRequest) -> bool {
     let others = leashed_to(world, me.id);
     let mut dropped = !others.is_empty();
-    if super::leash::is_leashed(mob) {
-        super::leash::drop_leash(mob);
+    if super::leash::is_leashed(mob)
+        && let Some(old) = super::leash::drop_leash(mob)
+    {
+        crate::entity::leash_knot::notify_leashee_removed(world, old);
         dropped = true;
     }
     for uid in others {
@@ -639,6 +640,7 @@ mod tests {
             held: ItemStack::new(item, 1),
             creative: false,
             position: Vec3::default(),
+            player_height: 1.8,
             sneaking: false,
             difficulty: 2,
         }

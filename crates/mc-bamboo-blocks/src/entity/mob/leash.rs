@@ -7,7 +7,7 @@
 //! [`tick_leash`] pulls or snaps it by distance every tick; attach, detach and snap
 //! each broadcast `set_entity_link` so clients draw the rope.
 
-use mc_bamboo_core::{BlockPos, Vec3, mth};
+use mc_bamboo_core::{Aabb, BlockPos, Vec3, mth};
 
 use super::{Mob, MobEvent, MobType};
 use crate::entity::{Entity, EntityUid, ctx::EntityCtx};
@@ -31,9 +31,6 @@ const ENTITY_ATTACHMENT_POINT: (f64, f64, f64) = (0.0, 0.5, 0.5);
 const LEASHER_ATTACHMENT_POINT: (f64, f64, f64) = (0.0, 0.5, 0.0);
 /// `0.017453292F`：官方角度转弧度的常量。
 const DEG_TO_RAD: f32 = (std::f64::consts::PI / 180.0) as f32;
-/// 玩家的碰撞盒宽和高（成年玩家恒定）。
-const PLAYER_WIDTH: f32 = 0.6;
-const PLAYER_HEIGHT: f32 = 1.8;
 
 /// 拴绳的牵引数据，官方的 `Leashable$LeashData`。
 #[derive(Debug, Clone, PartialEq)]
@@ -96,6 +93,20 @@ pub const fn leash_snap_distance() -> f64 {
 /// `leashElasticDistance()`。
 pub const fn leash_elastic_distance() -> f64 {
     LEASH_ELASTIC_DIST
+}
+
+/// `Leashable.leashableInArea` 的 32×32×32 区域判定：实体的碰撞盒和
+/// `AABB.ofSize(center, 32, 32, 32)` 相交。
+pub fn in_leashable_area(bounds: Aabb, center: Vec3) -> bool {
+    let area = Aabb::new(
+        center.x - 16.0,
+        center.y - 16.0,
+        center.z - 16.0,
+        center.x + 16.0,
+        center.y + 16.0,
+        center.z + 16.0,
+    );
+    bounds.intersects(area)
 }
 
 /// `Mob.canBeLeashed()` 和各生物的覆盖。`now` 是岛时钟（狼的愤怒要看还剩多久）。
@@ -207,8 +218,8 @@ fn resolve_holder(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<HolderInfo> {
         return Some(HolderInfo {
             position: view.position,
             delta: view.delta,
-            width: PLAYER_WIDTH,
-            height: PLAYER_HEIGHT,
+            width: view.width,
+            height: view.height,
             interactable: view.alive && !view.spectator,
             no_ai_mob: false,
         });
@@ -264,7 +275,9 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let holder = resolve_holder(ctx, holder_uid);
     let Some(holder) = holder else {
         // 牵引者不在这张表里（跨岛或已消失）：掉拴绳。
-        drop_leash(mob);
+        if let Some(old) = drop_leash(mob) {
+            ctx.emit(crate::entity::ctx::Command::NotifyLeasheeRemoved(old), me);
+        }
         ctx.emit(
             crate::entity::ctx::Command::DropItem { stack: lead_item() },
             me,
@@ -273,13 +286,15 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     };
     if !entity_interactable || !holder.interactable {
         if ctx.blocks().block_game_rules().entity_drops {
-            drop_leash(mob);
+            if let Some(old) = drop_leash(mob) {
+                ctx.emit(crate::entity::ctx::Command::NotifyLeasheeRemoved(old), me);
+            }
             ctx.emit(
                 crate::entity::ctx::Command::DropItem { stack: lead_item() },
                 me,
             );
-        } else {
-            remove_leash(mob);
+        } else if let Some(old) = remove_leash(mob) {
+            ctx.emit(crate::entity::ctx::Command::NotifyLeasheeRemoved(old), me);
         }
         return;
     }
@@ -296,7 +311,9 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             seed: None,
         });
         // `Mob.leashTooFarBehaviour()`：`dropLeash()` + `disableControlFlag(MOVE)`。
-        drop_leash(mob);
+        if let Some(old) = drop_leash(mob) {
+            ctx.emit(crate::entity::ctx::Command::NotifyLeasheeRemoved(old), me);
+        }
         ctx.emit(
             crate::entity::ctx::Command::DropItem { stack: lead_item() },
             me,
@@ -426,24 +443,36 @@ fn resolve_attachment(ctx: &dyn EntityCtx, attachment: LeashDelayed) -> Option<E
 }
 
 /// `setLeashedTo(entity, holder)`：把牵引者换成 `holder`，广播 `set_entity_link`。
-/// `attachment` 是牵引者身份（玩家 / 生物的 UUID），存档时原样写回。
-pub fn set_leashed_to(mob: &mut Mob, holder: EntityUid, attachment: LeashDelayed) {
+/// `attachment` 是牵引者身份（玩家 / 生物的 UUID），存档时原样写回。返回旧牵引者
+/// （`setLeashedTo` 里旧牵引者非空且不同时要 `notifyLeasheeRemoved`）。
+pub fn set_leashed_to(
+    mob: &mut Mob,
+    holder: EntityUid,
+    attachment: LeashDelayed,
+) -> Option<EntityUid> {
+    let old = leash_holder(mob);
     mob.leash = Some(LeashData::new(holder, attachment));
     mob.events.push(MobEvent::LeashLink {
         holder: Some(holder),
     });
+    old.filter(|&old| old != holder)
 }
 
 /// `dropLeash()`：解开并掉一根拴绳，广播 `set_entity_link` 断开。掉落物由调用方 emit。
-pub fn drop_leash(mob: &mut Mob) {
+/// 返回旧牵引者（要给 `notifyLeasheeRemoved`）。
+pub fn drop_leash(mob: &mut Mob) -> Option<EntityUid> {
+    let old = leash_holder(mob);
     clear_leash(mob);
     mob.events.push(MobEvent::LeashLink { holder: None });
+    old
 }
 
-/// `removeLeash()`：解开但**不**掉拴绳，广播 `set_entity_link` 断开。
-pub fn remove_leash(mob: &mut Mob) {
+/// `removeLeash()`：解开但**不**掉拴绳，广播 `set_entity_link` 断开。返回旧牵引者。
+pub fn remove_leash(mob: &mut Mob) -> Option<EntityUid> {
+    let old = leash_holder(mob);
     clear_leash(mob);
     mob.events.push(MobEvent::LeashLink { holder: None });
+    old
 }
 
 /// 清掉牵引数据，并跑 `Mob.onLeashRemoved()`（`getLeashData() == null` 时 `clearHome()`）。

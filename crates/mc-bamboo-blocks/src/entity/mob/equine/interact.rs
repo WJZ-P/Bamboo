@@ -550,6 +550,7 @@ mod tests {
             held,
             creative: false,
             position: Vec3::new(0.5, 64.0, 0.5),
+            player_height: 1.8,
             sneaking,
             difficulty: 2,
         }

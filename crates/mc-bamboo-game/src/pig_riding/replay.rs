@@ -99,6 +99,7 @@ pub fn replay_pig_mount(setup: i32, item: i32, sneak: bool, seed: i64) -> Replay
         held: held.clone(),
         creative: false,
         position: Vec3::new(1.5, 64.0, 0.5),
+        player_height: 1.8,
         sneaking: sneak,
         difficulty: 2,
     };

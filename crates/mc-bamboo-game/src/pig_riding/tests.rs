@@ -186,6 +186,7 @@ fn shears_remove_a_pig_saddle() {
             held: ItemStack::new(items::SHEARS, 1),
             creative: false,
             position: Vec3::default(),
+            player_height: 1.8,
             sneaking: false,
             difficulty: 2,
         };

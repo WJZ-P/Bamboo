@@ -48,9 +48,13 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         return;
     };
     if !survives(ctx, knot.pos) {
+        let position = me.position;
         me.discard();
-        // `LeashFenceKnotEntity.dropItem`：`playSound(LEAD_UNTIED, 1, 1)`。
-        // 音效属于非生物实体，这里不建模，只做消失。
+        // `LeashFenceKnotEntity.dropItem`：`playSound(LEAD_UNTIED, 1, 1)`（只放音不掉拴绳）。
+        ctx.emit(
+            crate::entity::ctx::Command::LeashKnotUntied { position },
+            me,
+        );
     }
 }
 
@@ -80,7 +84,7 @@ pub fn bind_player_mobs(world: &mut World, player: EntityUid, pos: BlockPos) -> 
     for entity in world.live_entities() {
         if let Some(mob) = entity.kind.mob()
             && leash::leash_holder(mob) == Some(player)
-            && in_area(entity.position, center)
+            && leash::in_leashable_area(entity.bounding_box(), center)
         {
             mobs.push(entity.id);
         }
@@ -131,14 +135,6 @@ pub fn bind_player_mobs(world: &mut World, player: EntityUid, pos: BlockPos) -> 
         }
         InteractionResult::Pass
     }
-}
-
-/// `leashableInArea` 的 32 格区域判定（`AABB.ofSize(center, 32, 32, 32)` 的近似）。
-fn in_area(position: mc_bamboo_core::Vec3, center: mc_bamboo_core::Vec3) -> bool {
-    let dx = position.x - center.x;
-    let dy = position.y - center.y;
-    let dz = position.z - center.z;
-    dx * dx + dy * dy + dz * dz <= 32.0 * 32.0
 }
 
 /// `LeashFenceKnotEntity.interact`：先试把玩家牵着的生物拴到结上；一个都没拴上且没
@@ -195,6 +191,10 @@ pub fn interact(
             untied = true;
         }
     }
+    if untied {
+        // `setLeashedTo` 的 `notifyLeasheeRemoved`：都解走后结消失。
+        notify_leashee_removed(world, knot);
+    }
     if tied || untied {
         world.play_sound(
             knot_position(pos),
@@ -210,15 +210,48 @@ pub fn interact(
     }
 }
 
-/// `notifyLeasheeRemoved`：没有生物还拴在结上时，结消失。
-pub fn notify_leashee_removed(world: &mut World, knot: EntityUid) {
+/// `notifyLeasheeRemoved`：`holder` 是拴绳结且没有生物还拴在它身上时，结消失。
+pub fn notify_leashee_removed(world: &mut World, holder: EntityUid) {
+    if !is_knot(world, holder) {
+        return;
+    }
     let empty = !world.live_entities().iter().any(|entity| {
         entity
             .kind
             .mob()
-            .is_some_and(|mob| leash::leash_holder(mob) == Some(knot))
+            .is_some_and(|mob| leash::leash_holder(mob) == Some(holder))
     });
     if empty {
-        world.remove_entity(knot);
+        world.remove_entity(holder);
     }
+}
+
+/// `holder` 是不是拴绳结。
+fn is_knot(world: &World, uid: EntityUid) -> bool {
+    world
+        .live_entities()
+        .iter()
+        .any(|entity| entity.id == uid && matches!(entity.kind, EntityKind::LeashKnot(_)))
+}
+
+/// `Leashable.leashableLeashedTo(holder)` 里的每个生物 `dropLeash()`，返回有没有掉。
+/// 剪刀剪结时用它。
+pub fn drop_all_leashed_to(world: &mut World, holder: EntityUid) -> bool {
+    let mut mobs = Vec::new();
+    for entity in world.live_entities() {
+        if let Some(mob) = entity.kind.mob()
+            && leash::leash_holder(mob) == Some(holder)
+        {
+            mobs.push(entity.id);
+        }
+    }
+    let dropped = !mobs.is_empty();
+    for uid in mobs {
+        world.with_entity_mut(uid, &mut |entity| {
+            entity.with_mob(|_, mob| {
+                leash::drop_leash(mob);
+            });
+        });
+    }
+    dropped
 }

@@ -2033,6 +2033,8 @@ impl Report {
                         f64::from_bits(player.z as u64),
                     ),
                     delta: Vec3::default(),
+                    width: 0.6,
+                    height: 1.8,
                     eye_height: f32::from_bits(player.eye as u32),
                     health: 20.0,
                     look_direction: Vec3::view_vector(
@@ -2609,6 +2611,7 @@ impl Report {
                             f64::from_bits(player.y as u64),
                             f64::from_bits(player.z as u64),
                         ),
+                        player_height: 1.8,
                         sneaking: false,
                         difficulty: 2,
                     };
