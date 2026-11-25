@@ -8446,16 +8446,6 @@ public final class MobOracle {
     }
 
     /** 读一个对象字段（含 protected / private），对拍夹具用它拿 `goalSelector`。 */
-    private static Object readField(Class<?> owner, Object target, String name) {
-        try {
-            java.lang.reflect.Field field = owner.getDeclaredField(name);
-            field.setAccessible(true);
-            return field.get(target);
-        } catch (ReflectiveOperationException error) {
-            throw new IllegalStateException(error);
-        }
-    }
-
     /** 六种初始状态：0 野生满血、1 野生残血高脾气、2 驯服满血、3 驯服残血带鞍带护甲带箱子、4 驯服幼崽残血、5 野生幼崽。 */
     private static void setupEquine(net.minecraft.world.entity.animal.equine.AbstractHorse mob, int setup) {
         boolean llama = mob instanceof net.minecraft.world.entity.animal.equine.Llama;
