@@ -293,6 +293,11 @@ pub fn outline_boxes(state: BlockState, pos: BlockPos) -> Boxes {
     at_position(mc_bamboo_data::outline_shape(state.0), state.block(), pos)
 }
 
+/// `getVisualShape`：视线 clip 用的形状，透明的方块没有形状。
+pub fn visual_boxes(state: BlockState, pos: BlockPos) -> Boxes {
+    at_position(mc_bamboo_data::visual_shape(state.0), state.block(), pos)
+}
+
 /// `getBlockSupportShape`。
 pub fn support_boxes(state: BlockState, pos: BlockPos) -> Boxes {
     at_position(mc_bamboo_data::support_shape(state.0), state.block(), pos)

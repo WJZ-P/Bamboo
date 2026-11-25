@@ -866,6 +866,11 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             "minecraft:spawner",
             "minecraft:mob_spawner",
         ),
+        (
+            "trial_spawner-bare",
+            "minecraft:trial_spawner",
+            "minecraft:trial_spawner",
+        ),
         ("sign-bare", "minecraft:oak_sign", "minecraft:sign"),
         (
             "hanging_sign-bare",
@@ -968,6 +973,52 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
                 ])]),
             ),
         ],
+    );
+    full(
+        "trial_spawner-full",
+        "minecraft:trial_spawner",
+        "minecraft:trial_spawner",
+        vec![
+            (
+                "registered_players".to_owned(),
+                Tag::List(vec![Tag::IntArray(vec![1, 2, 3, 4])]),
+            ),
+            (
+                "current_mobs".to_owned(),
+                Tag::List(vec![Tag::IntArray(vec![5, 6, 7, 8])]),
+            ),
+            ("cooldown_ends_at".to_owned(), Tag::Long(700)),
+            ("next_mob_spawns_at".to_owned(), Tag::Long(80)),
+            ("total_mobs_spawned".to_owned(), Tag::Int(3)),
+            (
+                "spawn_data".to_owned(),
+                Tag::Compound(vec![(
+                    "entity".to_owned(),
+                    Tag::Compound(vec![(
+                        "id".to_owned(),
+                        Tag::String("minecraft:zombie".to_owned()),
+                    )]),
+                )]),
+            ),
+            (
+                "ejecting_loot_table".to_owned(),
+                Tag::String("minecraft:spawners/trial_chamber/key".to_owned()),
+            ),
+            ("target_cooldown_length".to_owned(), Tag::Int(100)),
+            ("required_player_range".to_owned(), Tag::Int(5)),
+        ],
+    );
+    full(
+        "trial_spawner-inline-config",
+        "minecraft:trial_spawner",
+        "minecraft:trial_spawner",
+        vec![(
+            "normal_config".to_owned(),
+            Tag::Compound(vec![
+                ("spawn_range".to_owned(), Tag::Int(3)),
+                ("total_mobs".to_owned(), Tag::Float(5.0)),
+            ]),
+        )],
     );
     full(
         "sign-full",
@@ -1264,6 +1315,103 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
                 ),
                 ("weight".to_owned(), Tag::Int(2)),
             ])]),
+        )],
+    );
+    // `custom_spawn_rules` 的 `block_light_limit` / `sky_light_limit` 走官方
+    // `InclusiveRange.INT`：单 int、[min,max] 列表、{min_inclusive,max_inclusive}
+    // 复合标签三种输入形状，逐一核对 load -> save 之后写回的形状。
+    full(
+        "spawner-custom-light-limits",
+        "minecraft:spawner",
+        "minecraft:mob_spawner",
+        vec![(
+            "SpawnPotentials".to_owned(),
+            Tag::List(vec![
+                Tag::Compound(vec![
+                    (
+                        "data".to_owned(),
+                        Tag::Compound(vec![
+                            (
+                                "entity".to_owned(),
+                                Tag::Compound(vec![(
+                                    "id".to_owned(),
+                                    Tag::String("minecraft:zombie".to_owned()),
+                                )]),
+                            ),
+                            (
+                                "custom_spawn_rules".to_owned(),
+                                Tag::Compound(vec![
+                                    ("block_light_limit".to_owned(), Tag::Int(7)),
+                                    ("sky_light_limit".to_owned(), Tag::Int(9)),
+                                ]),
+                            ),
+                        ]),
+                    ),
+                    ("weight".to_owned(), Tag::Int(1)),
+                ]),
+                Tag::Compound(vec![
+                    (
+                        "data".to_owned(),
+                        Tag::Compound(vec![
+                            (
+                                "entity".to_owned(),
+                                Tag::Compound(vec![(
+                                    "id".to_owned(),
+                                    Tag::String("minecraft:skeleton".to_owned()),
+                                )]),
+                            ),
+                            (
+                                "custom_spawn_rules".to_owned(),
+                                Tag::Compound(vec![
+                                    (
+                                        "block_light_limit".to_owned(),
+                                        Tag::List(vec![Tag::Int(3), Tag::Int(10)]),
+                                    ),
+                                    (
+                                        "sky_light_limit".to_owned(),
+                                        Tag::List(vec![Tag::Int(5), Tag::Int(12)]),
+                                    ),
+                                ]),
+                            ),
+                        ]),
+                    ),
+                    ("weight".to_owned(), Tag::Int(2)),
+                ]),
+                Tag::Compound(vec![
+                    (
+                        "data".to_owned(),
+                        Tag::Compound(vec![
+                            (
+                                "entity".to_owned(),
+                                Tag::Compound(vec![(
+                                    "id".to_owned(),
+                                    Tag::String("minecraft:husk".to_owned()),
+                                )]),
+                            ),
+                            (
+                                "custom_spawn_rules".to_owned(),
+                                Tag::Compound(vec![
+                                    (
+                                        "block_light_limit".to_owned(),
+                                        Tag::Compound(vec![
+                                            ("min_inclusive".to_owned(), Tag::Int(2)),
+                                            ("max_inclusive".to_owned(), Tag::Int(8)),
+                                        ]),
+                                    ),
+                                    (
+                                        "sky_light_limit".to_owned(),
+                                        Tag::Compound(vec![
+                                            ("min_inclusive".to_owned(), Tag::Int(4)),
+                                            ("max_inclusive".to_owned(), Tag::Int(4)),
+                                        ]),
+                                    ),
+                                ]),
+                            ),
+                        ]),
+                    ),
+                    ("weight".to_owned(), Tag::Int(3)),
+                ]),
+            ]),
         )],
     );
     full(

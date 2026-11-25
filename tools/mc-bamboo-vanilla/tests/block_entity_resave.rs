@@ -58,6 +58,7 @@ fn chunk_with(entries: &[Tag]) -> Tag {
         "minecraft:calibrated_sculk_sensor",
         "minecraft:sculk_shrieker",
         "minecraft:spawner",
+        "minecraft:trial_spawner",
         "minecraft:oak_sign",
         "minecraft:oak_hanging_sign",
         "minecraft:beehive",
@@ -80,16 +81,16 @@ fn chunk_with(entries: &[Tag]) -> Tag {
         .iter()
         .map(|name| Tag::Compound(vec![("Name".to_owned(), Tag::String((*name).to_owned()))]))
         .collect();
-    // 24 个调色板项按官方磁盘配置用 5 位：每格 5 位，一个 long 装 12 格，
+    // 25 个调色板项按官方磁盘配置用 5 位：每格 5 位，一个 long 装 12 格，
     // 整段 342 个 long。
-    // 24 palette entries use 5 bits per cell: 12 cells per long, 342 longs.
+    // 25 palette entries use 5 bits per cell: 12 cells per long, 342 longs.
     let base = 4 * 256;
     let mut data = vec![0_i64; 342];
-    // 一行只有 16 格：前 15 个方块实体放第 0 行（下标 1..15），后 8 个放第 1 行
-    // 的前 8 格。容器下标是 (y*256 + z*16 + x)。
+    // 一行只有 16 格：前 15 个方块实体放第 0 行（下标 1..15），后 9 个放第 1 行
+    // 的前 9 格。容器下标是 (y*256 + z*16 + x)。
     // A row is 16 cells: the first 15 block entities sit on row 0 (indices 1..15),
-    // the last 8 on row 1. Container index = y*256 + z*16 + x.
-    for (slot, palette_index) in (1_i64..=23).enumerate() {
+    // the last 9 on row 1. Container index = y*256 + z*16 + x.
+    for (slot, palette_index) in (1_i64..=24).enumerate() {
         let (x, z) = if slot < 15 {
             (slot as i64 + 1, 0_i64)
         } else {
@@ -228,6 +229,7 @@ fn bare_defaults() -> Vec<(&'static str, Vec<(String, Tag)>)> {
                 ),
             ],
         ),
+        ("minecraft:trial_spawner", Vec::new()),
         (
             "minecraft:sign",
             vec![
@@ -550,7 +552,7 @@ fn bare_entries_resave_against_vanilla_save_additional() {
         .map(|(id, _)| entry(id, x_of(id), Vec::new()))
         .collect();
     let written = resave(&entries);
-    assert_eq!(written.len(), 23, "each entry survives the round trip");
+    assert_eq!(written.len(), 24, "each entry survives the round trip");
     for (id, fields) in &defaults {
         let _ = position_of(id);
         let mut want = expected(fields.clone());
@@ -680,7 +682,7 @@ fn full_entries_resave_with_vanilla_codec_rules() {
             .map(|(_, fields)| fields.clone())
             .unwrap_or_else(|| panic!("{id} was written"))
     };
-    assert_eq!(written.len(), 23, "each entry survives the round trip");
+    assert_eq!(written.len(), 24, "each entry survives the round trip");
 
     assert_eq!(
         by_id("minecraft:vault"),
@@ -812,7 +814,7 @@ fn full_entries_resave_with_vanilla_codec_rules() {
 fn generated_block_entities_write_defaults_without_a_disk_entry() {
     let written = resave(&[]);
     let defaults = bare_defaults();
-    assert_eq!(written.len(), 23, "every block entity state is written");
+    assert_eq!(written.len(), 24, "every block entity state is written");
     for (id, fields) in &defaults {
         let _ = position_of(id);
         let mut want = expected(fields.clone());
