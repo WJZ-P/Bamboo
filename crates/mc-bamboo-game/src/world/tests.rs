@@ -5115,6 +5115,7 @@ fn melee_hit_awards_damage_dealt_on_request_stats() {
     let expected_body = body_of(encode_frames(&AwardStats {
         item_used: &[(items::DIAMOND_SWORD, 1)],
         damage_dealt: Some(expected),
+        custom: &[],
     }));
     assert_eq!(
         stats[0].body, expected_body,

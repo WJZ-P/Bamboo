@@ -62,10 +62,12 @@ mod phantom;
 mod pig_ride;
 mod pillager;
 mod projectile;
+mod sculk_sensor;
 mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
 mod small_mob;
+mod spawner;
 mod squid;
 mod structure_spawn;
 mod sulfur_cube;
@@ -174,6 +176,7 @@ enum Line {
     GolemSave(Box<golem::GolemSaveCase>),
     SmallMob(Box<small_mob::SmallMobCase>),
     SmallMobSave(small_mob::SmallMobSaveCase),
+    Spawner(Box<spawner::SpawnerCase>),
     SulfurCube(Box<sulfur_cube::SulfurCubeCase>),
     SulfurCubeSave(sulfur_cube::SulfurCubeSaveCase),
     SmallMobDeath(small_mob::SmallMobDeathCase),
@@ -194,6 +197,9 @@ enum Line {
     WaterMob(Box<water_mob::WaterMobCase>),
     Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
+    SculkSensor(sculk_sensor::SculkSensorCase),
+    SculkSensorOrder(sculk_sensor::SculkSensorOrderCase),
+    SculkShrieker(sculk_sensor::SculkShriekerCase),
     End(End),
 }
 
@@ -930,6 +936,11 @@ struct ZombieFacts {
     /// 村民日程活动（主世界时钟求值；`None` 时按 `clock` 现场算）。
     villager_activity: Option<mc_bamboo_blocks::entity::mob::brain::Activity>,
     baby_villager_activity: Option<mc_bamboo_blocks::entity::mob::brain::Activity>,
+    /// 刷怪笼对拍：注入 (天空光, 方块光)，缺省用 MobLevel 的 `brightness` 默认值。
+    ///
+    /// Spawner parity: injected (sky, block) light; the default keeps the
+    /// `MobLevel::brightness` defaults.
+    spawner_light: Option<(i32, i32)>,
 }
 
 /// 给生物穿上带指定附魔的靴子，和官方场景的 `ItemStack.enchant` 一致。
@@ -981,6 +992,15 @@ struct MobLevel {
     redstone: mc_bamboo_blocks::RedstoneMemory,
     block_entities: BlockEntities,
     block_events: BlockEvents,
+    /// 游戏事件监听者登记表；只有幽匿感测体这类场景会用到。
+    game_event_listeners: mc_bamboo_blocks::game_event::registry::GameEventListeners,
+    /// 尖啸体场景的玩家监守者警告等级，按玩家 uid。
+    warden_warnings: HashMap<
+        mc_bamboo_blocks::entity::EntityUid,
+        mc_bamboo_blocks::behaviour::misc::warden::WardenSpawnTracker,
+    >,
+    /// 尖啸体场景玩家身上黑暗效果剩下的刻数（`tryRespond` 给 260 刻）。
+    darkness_ticks: i32,
     /// 常驻 POI 索引表；未登记的场景保持为空，查询返回空。
     ///
     /// Persistent POI store; stays empty for scenes that do not register POIs.
@@ -1055,6 +1075,18 @@ impl LevelTables for MobLevel {
 
     fn redstone_table_mut(&mut self) -> &mut mc_bamboo_blocks::RedstoneMemory {
         &mut self.redstone
+    }
+
+    fn game_event_listeners(
+        &self,
+    ) -> Option<&mc_bamboo_blocks::game_event::registry::GameEventListeners> {
+        Some(&self.game_event_listeners)
+    }
+
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut mc_bamboo_blocks::game_event::registry::GameEventListeners> {
+        Some(&mut self.game_event_listeners)
     }
 }
 
@@ -1215,6 +1247,12 @@ impl Level for MobLevel {
     }
 
     fn brightness(&self, layer: LightLayer, _pos: BlockPos) -> i32 {
+        if let Some((sky, block)) = self.facts.spawner_light {
+            return match layer {
+                LightLayer::Sky => sky,
+                LightLayer::Block => block,
+            };
+        }
         match layer {
             LightLayer::Sky => self.natural_spawn.as_ref().map_or(15, |scene| scene.sky),
             LightLayer::Block => self.natural_spawn.as_ref().map_or(0, |scene| scene.block),
@@ -1306,6 +1344,11 @@ impl Level for MobLevel {
         target: mc_bamboo_blocks::entity::EntityUid,
         instance: &mc_bamboo_blocks::entity::mob::effects::EffectInstance,
     ) -> bool {
+        // 尖啸体的黑暗：没有真实玩家时在这里记下剩余刻数。
+        if instance.effect == mc_bamboo_data::registries::mob_effect::DARKNESS {
+            self.darkness_ticks = self.darkness_ticks.max(instance.duration);
+            return true;
+        }
         let Some(game) = self.game.as_mut() else {
             return false;
         };
@@ -1331,6 +1374,10 @@ impl Level for MobLevel {
         };
         game.heal(target, amount);
         true
+    }
+
+    fn warn_warden(&mut self, target: mc_bamboo_blocks::entity::EntityUid) -> Option<i32> {
+        self.warden_warnings.entry(target).or_default().try_warn()
     }
 
     fn teleport_player_now(
@@ -1809,6 +1856,7 @@ impl Report {
                 Line::GolemSave(case) => self.replay_golem_save(&case),
                 Line::SmallMob(case) => self.replay_small_mob(&case),
                 Line::SmallMobSave(case) => self.replay_small_mob_save(&case),
+                Line::Spawner(case) => self.replay_spawner(&case),
                 Line::SulfurCube(case) => self.replay_sulfur_cube(&case),
                 Line::SulfurCubeSave(case) => self.replay_sulfur_cube_save(&case),
                 Line::SmallMobDeath(case) => self.replay_small_mob_death(&case),
@@ -1829,6 +1877,9 @@ impl Report {
                 Line::WaterMob(case) => self.replay_water_mob(&case),
                 Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
+                Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
+                Line::SculkSensorOrder(case) => self.replay_sculk_sensor_order(&case),
+                Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
@@ -2011,12 +2062,16 @@ impl Report {
                 raining: case.raining,
                 thundering: false,
                 bees_stay: None,
+                spawner_light: None,
             },
             natural_spawn: None,
             biome: None,
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(case.first_id),
             players: case

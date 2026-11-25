@@ -78,6 +78,7 @@ mod links;
 mod lock;
 mod loot_stacks;
 mod menu;
+mod merchant;
 mod movement;
 mod natural_spawn;
 mod outgoing;

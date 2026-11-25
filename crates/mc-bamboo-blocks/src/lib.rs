@@ -27,6 +27,7 @@ pub mod dispenser;
 pub mod durability;
 pub mod entity;
 pub mod fluid;
+pub mod game_event;
 pub mod gamerules;
 pub mod hopper;
 pub mod interact;

@@ -543,6 +543,12 @@ public final class PlayerDataOracle {
             fields.addProperty("seen_credits", input.getBooleanOr("seenCredits", false));
             fields.addProperty("spawn_extra_particles_on_fall",
                     input.getBooleanOr("spawn_extra_particles_on_fall", false));
+            // `ServerPlayer` 的 `warden_spawn_tracker`：WardenSpawnTracker.CODEC 恒写。
+            fields.add("warden_spawn_tracker", canonical(input.read("warden_spawn_tracker",
+                    net.minecraft.world.entity.monster.warden.WardenSpawnTracker.CODEC)
+                    .map(value -> net.minecraft.world.entity.monster.warden.WardenSpawnTracker.CODEC
+                            .encodeStart(ops(), value).getOrThrow())
+                    .orElse(new CompoundTag())));
             // `LastDeathLocation` 是 GlobalPos.CODEC：只有 Optional 非空才写。
             fields.add("last_death_location", input.read("LastDeathLocation",
                     net.minecraft.core.GlobalPos.CODEC)
@@ -626,6 +632,11 @@ public final class PlayerDataOracle {
             tag.putBoolean("seenCredits", input.getBooleanOr("seenCredits", false));
             tag.putBoolean("spawn_extra_particles_on_fall",
                     input.getBooleanOr("spawn_extra_particles_on_fall", false));
+            putCodec(tag, "warden_spawn_tracker",
+                    net.minecraft.world.entity.monster.warden.WardenSpawnTracker.CODEC,
+                    input.read("warden_spawn_tracker",
+                            net.minecraft.world.entity.monster.warden.WardenSpawnTracker.CODEC)
+                            .orElseGet(net.minecraft.world.entity.monster.warden.WardenSpawnTracker::new));
             tag.putInt("DataVersion", SharedConstants.getCurrentVersion().dataVersion().version());
             // 官方读时忽略的键，Bamboo 会原样保留：官方的写回里也把它们带上，方便按键比较。
             for (String key : original.keySet()) {
@@ -774,6 +785,15 @@ public final class PlayerDataOracle {
             tag.putBoolean("seenCredits", spec.get("seen_credits").getAsBoolean());
             tag.putBoolean("spawn_extra_particles_on_fall",
                     spec.get("spawn_extra_particles_on_fall").getAsBoolean());
+            if (spec.has("warden_spawn_tracker")) {
+                JsonObject w = spec.getAsJsonObject("warden_spawn_tracker");
+                putCodec(tag, "warden_spawn_tracker",
+                        net.minecraft.world.entity.monster.warden.WardenSpawnTracker.CODEC,
+                        new net.minecraft.world.entity.monster.warden.WardenSpawnTracker(
+                                w.get("ticks_since_last_warning").getAsInt(),
+                                w.get("warning_level").getAsInt(),
+                                w.get("cooldown_ticks").getAsInt()));
+            }
             // 官方有而 Bamboo 不认识的键，用来测 D9 原样保留。
             if (spec.has("unknown_tag")) {
                 tag.put("bamboo:unknown", StringTag.valueOf(spec.get("unknown_tag").getAsString()));

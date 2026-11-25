@@ -16,6 +16,7 @@ use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{
     components::{archive::slots as item_slots, value::GlobalPos},
     item::ItemStack,
+    merchant::{self, MerchantOffer},
 };
 
 use super::{
@@ -288,12 +289,16 @@ pub struct Villager {
     pub food_level: i8,
     pub xp: i32,
     pub last_restock: i64,
+    /// `Villager.lastRestockCheckDay`：`shouldRestock` 每刻写，判断跨天。不存档。
+    ///
+    /// `Villager.lastRestockCheckDay`, rewritten every `shouldRestock` tick; not saved.
+    pub last_restock_check_day: i64,
     pub last_gossip_decay: i64,
     pub restocks_today: i32,
     /// `Gossips` 原文。期 2 不解析，读进来原样写回。
     pub gossips: Option<Tag>,
-    /// `Offers` 原文。交易在期 5。
-    pub offers: Option<Tag>,
+    /// `AbstractVillager.offers`：`None` 表示还没生成（官方 `offers == null`）。
+    pub offers: Option<Vec<MerchantOffer>>,
     /// `AbstractVillager.inventory`：8 格物品栏。
     ///
     /// `AbstractVillager.inventory`: 8-slot villager inventory.
@@ -328,6 +333,7 @@ impl Default for Villager {
             food_level: 0,
             xp: 0,
             last_restock: 0,
+            last_restock_check_day: 0,
             last_gossip_decay: 0,
             restocks_today: 0,
             gossips: None,
@@ -561,8 +567,10 @@ impl Villager {
     /// `Offers` / `Inventory`. Vanilla writes `Offers` only when non-null and `Inventory`
     /// only when non-empty.
     pub fn write_nbt(&self, out: &mut Vec<(String, Tag)>) {
-        if let Some(offers) = &self.offers {
-            put(out, "Offers", offers.clone());
+        if let Some(offers) = &self.offers
+            && let Ok(encoded) = merchant::encode_offers(offers)
+        {
+            put(out, "Offers", encoded.to_tag());
         }
         put(out, "Inventory", self.inventory.to_nbt());
         put(out, "VillagerData", self.data_tag());
@@ -600,7 +608,8 @@ impl Villager {
         self.last_restock = tag::long_or(tag, "LastRestock", 0);
         self.last_gossip_decay = tag::long_or(tag, "LastGossipDecay", 0);
         self.restocks_today = tag::int_or(tag, "RestocksToday", 0);
-        self.offers = tag::field(tag, "Offers").cloned();
+        self.offers =
+            tag::field(tag, "Offers").and_then(|offers| merchant::decode_offers(offers).ok());
         self.inventory.read_nbt(tag::field(tag, "Inventory"));
     }
 }
@@ -1300,10 +1309,7 @@ mod tests {
             villager.last_gossip_decay = 5678;
             villager.restocks_today = 2;
             villager.gossips = Some(Tag::List(Vec::new()));
-            villager.offers = Some(Tag::Compound(vec![(
-                "Recipes".to_owned(),
-                Tag::List(Vec::new()),
-            )]));
+            villager.offers = Some(Vec::new());
             villager.inventory.add_item(ItemStack::new(items::WHEAT, 3));
         });
         let tag = nbt::write_mob(&entity.split()).expect("写村民");

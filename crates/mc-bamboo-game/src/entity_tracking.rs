@@ -2561,6 +2561,15 @@ fn send_mob_events(
 ///
 /// `ServerLevel.sendParticles(player, false, x, y, z, packet)`: only players whose block
 /// centre is within 32 blocks get the packet (`BlockPos.closerToCenterThan`).
+/// 方块实体发出的振动粒子包，距离判定和普通粒子包一样。
+pub(crate) fn send_vibration_particle(
+    region: &mut Region,
+    body: &[u8],
+    position: mc_bamboo_core::Vec3,
+) {
+    send_particles(region, body, position);
+}
+
 fn send_particles(region: &mut Region, body: &[u8], position: mc_bamboo_core::Vec3) {
     let frames = frame_from_body(body);
     let near: Vec<_> = region
