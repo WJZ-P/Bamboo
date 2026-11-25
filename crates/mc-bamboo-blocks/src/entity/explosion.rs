@@ -595,3 +595,36 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tnt_tests {
+    use super::*;
+    use crate::{
+        BlockTicks,
+        entity::{Entity, mob::MobType},
+        testing::TestLevel,
+    };
+
+    /// TNT 也伤生物：爆炸范围内的牛掉血，并被推开（速度变了）。
+    #[test]
+    fn tnt_hurts_a_nearby_mob() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let id = world.spawn_entity(Entity::by_mob_type(MobType::Cow, Vec3::new(2.0, 64.0, 0.0)));
+        let before = world.entity(id).expect("the cow is in the world");
+        let before_health = before.kind.mob().expect("a cow is a mob").health;
+        world.explode_tnt(Vec3::new(0.0, 64.0, 0.0), 4.0, 0);
+        let after = world.entity(id).expect("the cow survives");
+        let after_mob = after.kind.mob().expect("a cow is a mob");
+        assert!(
+            after_mob.health < before_health,
+            "the TNT blast should hurt the cow: {before_health} -> {}",
+            after_mob.health
+        );
+        assert_ne!(
+            after.delta, before.delta,
+            "the blast should knock the cow back"
+        );
+    }
+}
