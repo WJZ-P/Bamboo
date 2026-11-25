@@ -28,8 +28,7 @@ use super::{
         sensor::{self, SensorKind},
         template_cache,
     },
-    goat,
-    living,
+    goat, living,
 };
 use crate::entity::{
     Entity,
@@ -446,7 +445,11 @@ fn random_point_behind_target(
     let radians = yaw * (std::f32::consts::PI / 180.0);
     let sin = f64::from(mth::sin(f64::from(radians)));
     let cos = f64::from(mth::cos(f64::from(radians)));
-    view.position.add(Vec3::new(sin * f64::from(distance), 0.0, cos * f64::from(distance)))
+    view.position.add(Vec3::new(
+        sin * f64::from(distance),
+        0.0,
+        cos * f64::from(distance),
+    ))
 }
 
 /// `LongJump.snapToSurface`：从一点先朝下 10 格、再朝上 10 格 clip，取命中格上方。
@@ -486,7 +489,10 @@ fn has_line_of_sight(cx: &Cx, point: Vec3) -> bool {
 fn can_jump_from_current_position(cx: &Cx) -> bool {
     let view = cx.ctx.blocks();
     let pos = cx.me.block_position();
-    if view.block_state(pos).is(mc_bamboo_data::blocks::HONEY_BLOCK) {
+    if view
+        .block_state(pos)
+        .is(mc_bamboo_data::blocks::HONEY_BLOCK)
+    {
         return false;
     }
     for i in 1..=4 {
@@ -506,17 +512,16 @@ fn calculate_optimal_jump_vector(cx: &mut Cx, target: Vec3) -> Option<Vec3> {
     cx.me.random.shuffle(&mut angles);
     let jump_power = 0.058_333_334_f32 * cx.mob.attributes.value(attribute::FOLLOW_RANGE) as f32;
     for angle in angles {
-        let Some(vector) = goat::jump_vector_for_angle(
-            &*cx,
-            target,
-            jump_power,
-            angle,
-            (0.6, 1.77),
-            false,
-        ) else {
+        let Some(vector) =
+            goat::jump_vector_for_angle(&*cx, target, jump_power, angle, (0.6, 1.77), false)
+        else {
             continue;
         };
-        if cx.mob.effects.has(mc_bamboo_data::registries::mob_effect::JUMP_BOOST) {
+        if cx
+            .mob
+            .effects
+            .has(mc_bamboo_data::registries::mob_effect::JUMP_BOOST)
+        {
             let boost = vector.normalize().y * f64::from(living::jump_boost_power(cx.mob));
             return Some(vector.add(Vec3::new(0.0, boost, 0.0)));
         }

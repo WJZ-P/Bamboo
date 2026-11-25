@@ -1912,7 +1912,10 @@ mod tests {
         level.world_seed = 1;
         let second = level.trial_spawner_dispensing(pos, loot_table);
 
-        assert!(!first.is_empty() && !second.is_empty(), "the table resolves");
+        assert!(
+            !first.is_empty() && !second.is_empty(),
+            "the table resolves"
+        );
         assert_ne!(
             first, second,
             "the level seed must feed the dispensing loot table"

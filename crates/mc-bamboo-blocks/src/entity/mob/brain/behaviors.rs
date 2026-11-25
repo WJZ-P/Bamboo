@@ -1148,8 +1148,7 @@ fn move_sink_stop(sink: &mut MoveToTargetSink, cx: &mut Cx) {
         // `BreezeAi$SlideToTargetSink.stop`：回站立；还在攻击就给 `BREEZE_SHOOT` 60 刻。
         cx.mob.breeze.pose = super::super::breeze::Pose::Standing;
         if cx.memories.has(AttackTarget) {
-            cx.memories
-                .set_with_ttl(BreezeShoot, MemoryValue::Unit, 60);
+            cx.memories.set_with_ttl(BreezeShoot, MemoryValue::Unit, 60);
         }
     }
 }

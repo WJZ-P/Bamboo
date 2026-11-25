@@ -312,7 +312,13 @@ pub fn living(cx: &Cx, uid: EntityUid) -> Option<LivingView> {
     let mut mob = None;
     cx.ctx.with_other(uid, &mut |public| {
         if let KindPublic::Mob(m) = &public.kind {
-            mob = Some(mob_view(public.uid, public.position, public.yaw, public.removed, m));
+            mob = Some(mob_view(
+                public.uid,
+                public.position,
+                public.yaw,
+                public.removed,
+                m,
+            ));
         }
     });
     if mob.is_some() {
