@@ -914,6 +914,59 @@ fn turtle_metadata_defaults_are_the_two_booleans() {
     );
 }
 
+/// 嗅探兽的两项元数据按官方下标同步：非默认时出现在配对包里，变回默认时
+/// `default_data_for_type` 发 0，而不是落到牛的花色/叫声上。
+///
+/// The sniffer's two metadata items sync at the vanilla indices: they appear in
+/// the pairing packet when non-default, and `default_data_for_type` sends 0 when
+/// they return to default instead of falling through to the cow variants.
+#[test]
+fn sniffer_metadata_uses_state_and_drop_seed_indices() {
+    use mc_bamboo_blocks::entity::{
+        Entity,
+        mob::{MobType, sniffer},
+    };
+    use mc_bamboo_data::entity_types as facts;
+    use mc_bamboo_protocol::packet::play::EntityData;
+
+    // 非默认：状态 DIGGING(5)、掉种子时刻 120。
+    // Non-default: state DIGGING (5) and drop-seed tick 120.
+    let mut entity = Entity::by_mob_type(MobType::Sniffer, Vec3::new(0.5, 64.0, 0.5));
+    entity.with_mob(|_, mob| {
+        mob.sniffer.state = sniffer::State::Digging;
+        mob.sniffer.drop_seed_at_tick = 120;
+    });
+    let data = Snapshot::of(&entity.split().public).data.pairing_values();
+    assert!(data.contains(&EntityData::SnifferState(5)));
+    assert!(data.contains(&EntityData::SnifferDropSeedAtTick(120)));
+    // 没有落到牛的 18/19。
+    // They do not fall through to the cow variants at 18/19.
+    assert!(!data.iter().any(|item| matches!(
+        item,
+        EntityData::CowVariant(_) | EntityData::CowSoundVariant(_)
+    )));
+
+    // 默认：只有通用项，两项都不发。
+    // Default: only the shared items; neither sniffer item is sent.
+    let idle = Entity::by_mob_type(MobType::Sniffer, Vec3::new(0.5, 64.0, 0.5));
+    let data = Snapshot::of(&idle.split().public).data.pairing_values();
+    assert!(!data.iter().any(|item| matches!(
+        item,
+        EntityData::SnifferState(_) | EntityData::SnifferDropSeedAtTick(_)
+    )));
+
+    // 变回默认时发的两条默认值。
+    // The two defaults sent when they return to default.
+    assert_eq!(
+        default_data_for_type(facts::SNIFFER_STATE, MobType::Sniffer),
+        EntityData::SnifferState(0)
+    );
+    assert_eq!(
+        default_data_for_type(facts::SNIFFER_DROP_SEED_AT_TICK, MobType::Sniffer),
+        EntityData::SnifferDropSeedAtTick(0)
+    );
+}
+
 /// `ServerEntity.sendChanges`：玩家和生物共用一份乘客名单时，名单变化只发一次
 /// `set_passengers`，内容就是这一份名单；名单不变就不再发。
 #[test]

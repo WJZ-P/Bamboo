@@ -1454,6 +1454,11 @@ public final class Extractor {
         out.addProperty("frogTongueTarget", frogTongue.id());
         out.addProperty("frogTongueTargetSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(frogTongue.serializer()));
         out.addProperty("mooshroomType", entityAccessor(net.minecraft.world.entity.animal.cow.MushroomCow.class, "DATA_TYPE").id());
+        Class<?> sniffer = net.minecraft.world.entity.animal.sniffer.Sniffer.class;
+        var snifferState = entityAccessor(sniffer, "DATA_STATE");
+        out.addProperty("snifferState", snifferState.id());
+        out.addProperty("snifferStateSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(snifferState.serializer()));
+        out.addProperty("snifferDropSeedAtTick", entityAccessor(sniffer, "DATA_DROP_SEED_AT_TICK").id());
         out.add("stewFlowers", stewFlowers());
         out.addProperty("polarBearStanding", entityAccessor(net.minecraft.world.entity.animal.polarbear.PolarBear.class, "DATA_STANDING_ID").id());
         Class<?> panda = net.minecraft.world.entity.animal.panda.Panda.class;

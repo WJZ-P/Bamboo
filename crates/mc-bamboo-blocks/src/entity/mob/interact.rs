@@ -483,7 +483,16 @@ mod tests {
     fn an_axolotl_fed_a_tropical_fish_bucket_gets_a_water_bucket_back() {
         let mut entity = Entity::by_mob_type(MobType::Axolotl, Vec3::new(0.5, 62.0, 0.5));
         let outcome = entity
-            .with_mob(|me, mob| interact(me, mob, &request(items::TROPICAL_FISH_BUCKET), 0, false))
+            .with_mob(|me, mob| {
+                interact(
+                    me,
+                    mob,
+                    &request(items::TROPICAL_FISH_BUCKET),
+                    0,
+                    false,
+                    &mut || 0.0,
+                )
+            })
             .expect("an axolotl mob");
         assert_eq!(outcome.result, InteractionResult::SuccessServer);
         assert!(!outcome.shrink_held);
@@ -501,7 +510,16 @@ mod tests {
     fn an_axolotl_fed_something_else_just_shrinks_the_stack() {
         let mut entity = Entity::by_mob_type(MobType::Axolotl, Vec3::new(0.5, 62.0, 0.5));
         let outcome = entity
-            .with_mob(|me, mob| interact(me, mob, &request(items::TROPICAL_FISH), 0, false))
+            .with_mob(|me, mob| {
+                interact(
+                    me,
+                    mob,
+                    &request(items::TROPICAL_FISH),
+                    0,
+                    false,
+                    &mut || 0.0,
+                )
+            })
             .expect("an axolotl mob");
         assert_eq!(outcome.result, InteractionResult::Pass);
     }

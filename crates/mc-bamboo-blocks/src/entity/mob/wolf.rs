@@ -966,7 +966,7 @@ mod tests {
         let mut me = Entity::by_mob_type(MobType::Wolf, Vec3::default());
         let mut mob = Mob::new(MobType::Wolf);
         for _ in 0..64 {
-            let outcome = interact(&mut me, &mut mob, &request(items::BONE, 7), 0);
+            let outcome = interact(&mut me, &mut mob, &request(items::BONE, 7), 0, &mut || 0.0);
             assert_eq!(outcome.result, InteractionResult::SuccessServer);
             assert!(outcome.shrink_held);
             if mob.tame.is_tame() {
@@ -990,11 +990,11 @@ mod tests {
     #[test]
     fn the_owner_toggles_sitting_but_strangers_do_not() {
         let (mut me, mut mob) = tamed_wolf();
-        let outcome = interact(&mut me, &mut mob, &request(items::AIR, 7), 0);
+        let outcome = interact(&mut me, &mut mob, &request(items::AIR, 7), 0, &mut || 0.0);
         assert_eq!(outcome.result, InteractionResult::Success);
         assert!(!outcome.shrink_held);
         assert!(!mob.tame.ordered_to_sit);
-        let outcome = interact(&mut me, &mut mob, &request(items::AIR, 8), 0);
+        let outcome = interact(&mut me, &mut mob, &request(items::AIR, 8), 0, &mut || 0.0);
         assert_eq!(outcome.result, InteractionResult::Pass);
         assert!(!mob.tame.ordered_to_sit);
     }
@@ -1003,12 +1003,12 @@ mod tests {
     fn dyes_recolour_the_collar_once() {
         let (mut me, mut mob) = tamed_wolf();
         let blue = items_with_dye(11)[0];
-        let outcome = interact(&mut me, &mut mob, &request(blue, 7), 0);
+        let outcome = interact(&mut me, &mut mob, &request(blue, 7), 0, &mut || 0.0);
         assert!(outcome.shrink_held);
         assert_eq!(mob.wolf.collar, 11);
         // 同色染料走 `Animal.mobInteract`，什么都不做，也不切换坐姿。
         let sitting = mob.tame.ordered_to_sit;
-        let outcome = interact(&mut me, &mut mob, &request(blue, 7), 0);
+        let outcome = interact(&mut me, &mut mob, &request(blue, 7), 0, &mut || 0.0);
         assert_eq!(outcome.result, InteractionResult::Pass);
         assert_eq!(mob.tame.ordered_to_sit, sitting);
     }
@@ -1017,7 +1017,7 @@ mod tests {
     fn meat_heals_twice_its_nutrition() {
         let (mut me, mut mob) = tamed_wolf();
         mob.health = 10.0;
-        let outcome = interact(&mut me, &mut mob, &request(items::BEEF, 9), 0);
+        let outcome = interact(&mut me, &mut mob, &request(items::BEEF, 9), 0, &mut || 0.0);
         assert_eq!(outcome.result, InteractionResult::Success);
         assert_eq!(mob.health, 16.0);
     }
@@ -1027,7 +1027,7 @@ mod tests {
         let mut me = Entity::by_mob_type(MobType::Wolf, Vec3::default());
         let mut mob = Mob::new(MobType::Wolf);
         mob.wolf.anger_end_time = 50;
-        let outcome = interact(&mut me, &mut mob, &request(items::BONE, 7), 10);
+        let outcome = interact(&mut me, &mut mob, &request(items::BONE, 7), 10, &mut || 0.0);
         assert_eq!(outcome.result, InteractionResult::Pass);
         assert!(!mob.tame.is_tame());
     }

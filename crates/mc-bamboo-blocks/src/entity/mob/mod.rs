@@ -3971,6 +3971,10 @@ pub struct MobPublic {
     ///
     /// The sniffer's state (smaller dimensions while digging).
     pub sniffer_state: sniffer::State,
+    /// 嗅探兽掉种子的时刻（`DATA_DROP_SEED_AT_TICK`）。
+    ///
+    /// The sniffer's drop-seed tick (`DATA_DROP_SEED_AT_TICK`).
+    pub sniffer_drop_seed_at_tick: i32,
     /// `IronGolem.DATA_FLAGS_ID` / `SnowGolem.DATA_PUMPKIN_ID`，都是 BYTE。
     pub golem_flags: u8,
     /// 村民的 `VillagerData` 三项、`VillagerDataFinalized` 和 `DATA_UNHAPPY_COUNTER`。
@@ -4164,6 +4168,7 @@ impl MobPublic {
             nautilus_dashing: mob.nautilus.dashing,
             nautilus_variant: mob.nautilus.variant,
             sniffer_state: mob.sniffer.state,
+            sniffer_drop_seed_at_tick: mob.sniffer.drop_seed_at_tick,
             bat_flags: mob.bat.flags,
             golem_flags: if mob.mob_type == MobType::IronGolem {
                 mob.iron_golem.flags
