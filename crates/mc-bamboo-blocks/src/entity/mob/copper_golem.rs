@@ -590,12 +590,7 @@ fn clear_transport_memories(mob: &mut Mob) {
 ///
 /// 只读查询决定要取之后才发这条命令；落地阶段按 uid 顺序串行应用，若另一只傀儡
 /// 已经把东西取走，这里读到空箱子就什么都不做（官方「先到先得」）。
-pub(crate) fn apply_pick_up(
-    world: &mut crate::world::World,
-    me: &mut Entity,
-    pos: BlockPos,
-    expected: &ItemStack,
-) {
+pub(crate) fn apply_pick_up(world: &mut crate::world::World, me: &mut Entity, pos: BlockPos) {
     let mut taken = ItemStack::empty();
     let found = world.with_container(pos, &mut |container| {
         for slot in 0..container.size() {
@@ -617,7 +612,6 @@ pub(crate) fn apply_pick_up(
         mob.equipment.set(EquipmentSlot::MainHand, taken.clone());
         clear_transport_memories(mob);
     }
-    let _ = expected;
 }
 
 /// `TransportItemsBetweenContainers.addItemsToContainer` 的落地：主手物品进箱子，
@@ -986,20 +980,8 @@ mod transport_tests {
         let mut first = golem(1);
         let mut second = golem(2);
         // 落地阶段按 uid 升序串行应用，正是 `parallel.rs` 的循环语义。
-        let expected = ItemStack::new(items::STONE, 3);
-        ctx::apply(
-            Command::CopperGolemPickUp {
-                pos,
-                expected: expected.clone(),
-            },
-            &mut first,
-            &mut world,
-        );
-        ctx::apply(
-            Command::CopperGolemPickUp { pos, expected },
-            &mut second,
-            &mut world,
-        );
+        ctx::apply(Command::CopperGolemPickUp { pos }, &mut first, &mut world);
+        ctx::apply(Command::CopperGolemPickUp { pos }, &mut second, &mut world);
 
         assert_eq!(
             first
@@ -1031,14 +1013,7 @@ mod transport_tests {
         let mut ticks = BlockTicks::new();
         let mut world = World::new(&mut level, &mut ticks);
         let mut golem = golem(1);
-        ctx::apply(
-            Command::CopperGolemPickUp {
-                pos,
-                expected: ItemStack::new(items::STONE, 16),
-            },
-            &mut golem,
-            &mut world,
-        );
+        ctx::apply(Command::CopperGolemPickUp { pos }, &mut golem, &mut world);
         assert_eq!(
             golem
                 .kind

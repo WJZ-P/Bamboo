@@ -347,13 +347,8 @@ impl Transport {
                         let mut capped = taken.clone();
                         capped.count = capped.count.min(TRANSPORTED_ITEM_MAX_STACK_SIZE);
                         cx.mob.equipment.set(EquipmentSlot::MainHand, capped);
-                        cx.ctx.emit(
-                            Command::CopperGolemPickUp {
-                                pos: target.pos,
-                                expected: taken,
-                            },
-                            cx.me,
-                        );
+                        cx.ctx
+                            .emit(Command::CopperGolemPickUp { pos: target.pos }, cx.me);
                         self.clear_memories_after_match(cx);
                     } else {
                         self.stop_targeting_current_target(cx);
