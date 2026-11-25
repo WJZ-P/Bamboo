@@ -43,6 +43,14 @@ pub fn try_summon_warden(
         if !move_to_possible_spawn_position(world, &mut pos) {
             continue;
         }
+        // `SpawnUtil` 里 `mob.checkSpawnRules(levelAccessor, reason)`（Warden 没覆写，恒真）
+        // 和 `mob.checkSpawnObstruction(levelReader)`（Warden 覆写成
+        // `super.checkSpawnObstruction() && noCollision(getSpawnAABB(...))`）。
+        // `SpawnUtil`: `mob.checkSpawnRules` (not overridden, always true) and
+        // `mob.checkSpawnObstruction` (warden adds `noCollision(getSpawnAABB(...))`).
+        if !spawn_obstruction_clear(world, pos) {
+            continue;
+        }
         // `EntityType.create(level, null, pos, TRIGGERED, false, false)`：
         // 实体脚落在 `pos` 的格心（y 不加 0.5），`finalizeSpawn` 置 EMERGING 姿态。
         // `EntityType.create(...)`: the mob's feet sit at the centre of `pos`
@@ -76,9 +84,37 @@ pub fn try_summon_warden(
                 );
             }
         });
-        return Some(world.add_prepared_entity(entity));
+        let uid = world.add_prepared_entity(entity);
+        // `SpawnUtil` 里 `mob.playAmbientSound()`：刚生成的愤怒为 CALM，环境音是
+        // `WARDEN_AMBIENT`、音量 `getSoundVolume()` = 4.0、音高取实体声音音高（简化为 1.0）。
+        // `SpawnUtil`: `mob.playAmbientSound()` — a fresh warden is CALM, so the ambient
+        // is `WARDEN_AMBIENT` at `getSoundVolume()` = 4.0 (pitch simplified to 1.0).
+        world.play_sound(
+            center,
+            mc_bamboo_data::sounds::sound_event("minecraft:entity.warden.ambient"),
+            mc_bamboo_data::sounds::HOSTILE,
+            4.0,
+            1.0,
+            false,
+        );
+        return Some(uid);
     }
     None
+}
+
+/// `Warden.checkSpawnObstruction` 的 `noCollision` 部分：脚上方 2.9 格（宽 0.9 落在
+/// 同一格列）里不能有带碰撞的方块。`checkSpawnRules` 对 TRIGGERED 恒真。
+///
+/// The `noCollision` part of `Warden.checkSpawnObstruction`: the 2.9-tall box above the
+/// feet (0.9 wide, inside the same column) must contain no colliding blocks.
+fn spawn_obstruction_clear(world: &World<'_>, pos: BlockPos) -> bool {
+    for dy in 0..3 {
+        let state = world.block_state(BlockPos::new(pos.x, pos.y + dy, pos.z));
+        if !mc_bamboo_data::collision_shape(state.0).is_empty() {
+            return false;
+        }
+    }
+    true
 }
 
 /// `SpawnUtil.moveToPossibleSpawnPosition` 配 `ON_TOP_OF_COLLIDER`：
