@@ -433,6 +433,10 @@ fn finalize_spawn_in_group(
         super::slime::finalize_spawn(world, entity, group);
         return;
     }
+    if kind == MobType::SulfurCube {
+        super::sulfur_cube::finalize_spawn(world, entity, group);
+        return;
+    }
     if kind == MobType::Phantom {
         super::phantom::finalize_spawn(entity, world.random());
         return;

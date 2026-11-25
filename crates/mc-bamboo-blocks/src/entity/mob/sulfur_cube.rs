@@ -737,6 +737,39 @@ pub const CONTENT_COMPONENT: &str = "minecraft:sulfur_cube_content";
 /// 推挤距离阈值，`SulfurCube.PUSH_DISTANCE_THRESHOLD`。
 pub const PUSH_DISTANCE_THRESHOLD: f64 = 1.2999999523162842;
 
+/// `SulfurCube.finalizeSpawn`：`AgeableMob` 那一层用 `AgeableMobGroupData(true)`
+/// （组里第二只起按 0.05 概率成为幼崽），`Mob.finalizeSpawn` 给跟随距离加成
+/// 和左撇子，最后 `setSpawnSize` 按幼年设 1、成年设 2 并回满血。
+/// 与史莱姆不同，这里**不**抽 `nextInt(3)` 的大小档。
+///
+/// `SulfurCube.finalizeSpawn`: the `AgeableMob` layer uses
+/// `AgeableMobGroupData(true)` (second and later group members are babies with 0.05
+/// chance), `Mob.finalizeSpawn` adds the follow-range bonus and left-handedness,
+/// then `setSpawnSize` picks 1 for babies / 2 for adults and refills health.
+/// Unlike slimes there is **no** `nextInt(3)` size roll.
+pub fn finalize_spawn(
+    world: &mut crate::world::World<'_>,
+    entity: &mut Entity,
+    group: &mut Option<super::spawn::SpawnGroup>,
+) {
+    use super::spawn::{AgeableGroupData, SpawnGroup};
+    let random = world.random();
+    if !matches!(group, Some(SpawnGroup::Ageable(_))) {
+        *group = Some(SpawnGroup::Ageable(AgeableGroupData::new(0.05)));
+    }
+    let baby = match group {
+        Some(SpawnGroup::Ageable(data)) => data.roll_baby(random),
+        _ => false,
+    };
+    entity.with_mob(|me, mob| {
+        if baby {
+            super::living::set_age(me, mob, super::spawn::BABY_START_AGE);
+        }
+        super::spawn::finalize_mob(random, mob);
+        set_size(me, mob, if baby { 1 } else { 2 }, true);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

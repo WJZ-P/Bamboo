@@ -529,7 +529,7 @@ public final class MobOracle {
             if ("skeleton_halloween".equals(only)) {
                 cases += playHalloweenSpawns(official, out);
             }
-            if ("natural_spawn".equals(only) || "natural_spawn_panda".equals(only)
+            if ("sulfur_cube".equals(only) || "natural_spawn".equals(only) || "natural_spawn_panda".equals(only)
                     || "natural_fish".equals(only)
                     || "witch_spawn".equals(only) || "drowned_spawn".equals(only)
                     || "stray_spawn".equals(only) || "bogged_spawn".equals(only)
@@ -6129,6 +6129,14 @@ public final class MobOracle {
         // need clay below.
         scenes.add(new NaturalScene("dolphin_ocean", EntityTypes.DOLPHIN, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("axolotl_lush", EntityTypes.AXOLOTL, "lush_caves", 2, 0, 0, 0, false, -32, 0, 289, true, false));
+        // 硫磺方块怪：sulfur_caves 的 monster 表首项，count 是 2..4 的均匀分布。
+        // checkSulfurCubeSpawnRules 恒真；白天、亮处、和平难度各一支。
+        // Sulfur cubes: the first monster entry of sulfur_caves with a uniform 2..4 count.
+        // checkSulfurCubeSpawnRules is always true; day, bright light and peaceful variants.
+        scenes.add(new NaturalScene("sulfur_cube_night", EntityTypes.SULFUR_CUBE, "sulfur_caves", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("sulfur_cube_day", EntityTypes.SULFUR_CUBE, "sulfur_caves", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("sulfur_cube_lit", EntityTypes.SULFUR_CUBE, "sulfur_caves", 2, 15, 15, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("sulfur_cube_peaceful", EntityTypes.SULFUR_CUBE, "sulfur_caves", 0, 0, 0, 11, false, -32, 0, 289, true, false));
         return playNaturalSpawnScenes(official, out, scenes, only);
     }
 
@@ -6142,6 +6150,7 @@ public final class MobOracle {
             if ("stray_spawn".equals(only) && scene.mob() != EntityTypes.STRAY) continue;
             if ("bat_spawn".equals(only) && scene.mob() != EntityTypes.BAT) continue;
             if ("bogged_spawn".equals(only) && scene.mob() != EntityTypes.BOGGED) continue;
+            if ("sulfur_cube".equals(only) && scene.mob() != EntityTypes.SULFUR_CUBE) continue;
             // 沼泽场景的起点高度要正好落在某层地面上才有戏；浅河和雪地流浪者
             // 有光 / 找天的门槛，命中概率低，多跑一些种子。
             // Swamp scenes only get anywhere when the start height lands on a floor; the
@@ -6600,12 +6609,12 @@ public final class MobOracle {
                 // Slimes whose size is not 1: `setSize` snaps the yaw to the head yaw, which the
                 // vanilla constructor draws from an unseeded random. Not comparable; both sides
                 // record 0.
-                boolean unseededYaw = mob instanceof net.minecraft.world.entity.monster.cubemob.Slime big
+                boolean unseededYaw = mob instanceof net.minecraft.world.entity.monster.cubemob.AbstractCubeMob big
                         && big.getSize() != 1;
                 row.add(unseededYaw ? 0 : Float.floatToRawIntBits(mob.getYRot()));
                 // 史莱姆不会是幼年，这一列改放大小。
                 // Slimes are never babies; this column carries their size instead.
-                row.add(mob instanceof net.minecraft.world.entity.monster.cubemob.Slime cube ? cube.getSize()
+                row.add(mob instanceof net.minecraft.world.entity.monster.cubemob.AbstractCubeMob cube ? cube.getSize()
                         : mob.isBaby() ? 1 : 0);
                 row.add(mob.isLeftHanded() ? 1 : 0);
                 row.add(BuiltInRegistries.ITEM.getId(mob.getMainHandItem().getItem()));

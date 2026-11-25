@@ -717,9 +717,15 @@ impl MobType {
         matches!(self, Self::Spider | Self::CaveSpider)
     }
 
-    /// `EntityType.isAllowedInPeaceful()`：牛为真，敌对生物为假。
+    /// `EntityType.isAllowedInPeaceful()`：`Builder` 缺省真，只有显式调过
+    /// `notInPeaceful()` 的类型为假。硫磺方块怪的 `EntityTypes.SULFUR_CUBE`
+    /// 没调它，所以和平难度照样刷（字节码里那一支紧挨着 `clientTrackingRange(10)`）。
+    ///
+    /// `EntityType.isAllowedInPeaceful()`: true by builder default; only types that
+    /// explicitly call `notInPeaceful()` are false. `SULFUR_CUBE` does not, so it
+    /// spawns even on peaceful.
     pub const fn allowed_in_peaceful(self) -> bool {
-        !self.is_enemy()
+        matches!(self, Self::SulfurCube) || !self.is_enemy()
     }
 
     /// `MobCategory.MONSTER` 的类型：`Monster` 一支加史莱姆（它是 `AgeableMob`，只实现
@@ -729,7 +735,7 @@ impl MobType {
     /// that only implements `Enemy`). Despawning, peaceful removal and the sound category
     /// follow it.
     pub const fn is_enemy(self) -> bool {
-        self.is_monster() || matches!(self, Self::Slime | Self::Phantom)
+        self.is_monster() || matches!(self, Self::Slime | Self::Phantom | Self::SulfurCube)
     }
 
     /// `EntityType.getCategory()` 的消失距离。牛是 `CREATURE`（32），
