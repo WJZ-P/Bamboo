@@ -47,6 +47,7 @@ pub(crate) struct TestLevel {
     pub(crate) containers: HashMap<BlockPos, Vec<ItemStack>>,
     block_entities: BlockEntities,
     block_events: BlockEvents,
+    game_event_listeners: crate::game_event::registry::GameEventListeners,
     entities: Entities,
     /// 发射器能穿装备的生物。
     pub(crate) living: Vec<EquipTarget>,
@@ -94,6 +95,7 @@ impl TestLevel {
             containers: HashMap::new(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
             entities: Entities::default(),
             living: Vec::new(),
             rules: crate::gamerules::BlockGameRules::vanilla(),
@@ -226,6 +228,16 @@ impl LevelTables for TestLevel {
 
     fn redstone_table_mut(&mut self) -> &mut RedstoneMemory {
         &mut self.redstone
+    }
+
+    fn game_event_listeners(&self) -> Option<&crate::game_event::registry::GameEventListeners> {
+        Some(&self.game_event_listeners)
+    }
+
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut crate::game_event::registry::GameEventListeners> {
+        Some(&mut self.game_event_listeners)
     }
 }
 

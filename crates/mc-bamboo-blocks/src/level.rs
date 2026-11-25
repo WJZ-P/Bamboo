@@ -277,6 +277,17 @@ pub trait LevelTables {
     /// Game layer hook: mark a chunk as possibly changed. Called from every
     /// positional write in the blanket impl; over-marking is harmless.
     fn mark_chunk_dirty(&mut self, _pos: ChunkPos) {}
+    /// 这一岛的游戏事件监听者登记表。没有登记表的世界（世界生成、压测）返回 `None`，
+    /// 游戏事件在那里不投递。
+    fn game_event_listeners(&self) -> Option<&crate::game_event::registry::GameEventListeners> {
+        None
+    }
+    /// 见 [`LevelTables::game_event_listeners`]。
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut crate::game_event::registry::GameEventListeners> {
+        None
+    }
 }
 
 impl<T: LevelTables + ?Sized> LevelSideState for T {
