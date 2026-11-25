@@ -805,7 +805,12 @@ pub(super) fn finalize_spawn(
 /// `Parrot.mobInteract`: seeds tame with a 1-in-10 chance, cookies poison and may kill,
 /// and a tamed parrot's owner toggles sitting. Parrots have no `BreedGoal`; `canMate`
 /// and `isFood` are always false.
-pub(super) fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
+pub(super) fn interact(
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+    level_next_float: &mut dyn FnMut() -> f32,
+) -> MobInteraction {
     let held = &req.held;
     let consume = !req.creative;
     if !mob.tame.is_tame() && is_tagged(held, item_tags::PARROT_FOOD) {
@@ -852,7 +857,7 @@ pub(super) fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest)
         mob.tame.ordered_to_sit = !mob.tame.ordered_to_sit;
         return outcome(InteractionResult::Success, false);
     }
-    super::interact::animal_interact(me, mob, req)
+    super::interact::animal_interact(me, mob, req, level_next_float)
 }
 
 fn is_tagged(stack: &ItemStack, tag: mc_bamboo_data::ItemTag) -> bool {

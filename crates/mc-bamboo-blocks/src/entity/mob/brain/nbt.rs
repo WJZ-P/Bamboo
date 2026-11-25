@@ -53,6 +53,21 @@ fn value_tag(value: &MemoryValue) -> Option<Tag> {
                 Tag::IntArray(vec![pos.pos.x, pos.pos.y, pos.pos.z]),
             ),
         ])),
+        // `GlobalPos.CODEC.listOf()`：`List<Compound>`，每个是 `{dimension, pos}`。
+        // `GlobalPos.CODEC.listOf()`: a list of `{dimension, pos}` compounds.
+        MemoryValue::GlobalPosList(list) => Some(Tag::List(
+            list.iter()
+                .map(|pos| {
+                    Tag::Compound(vec![
+                        ("dimension".to_owned(), Tag::String(pos.dimension.clone())),
+                        (
+                            "pos".to_owned(),
+                            Tag::IntArray(vec![pos.pos.x, pos.pos.y, pos.pos.z]),
+                        ),
+                    ])
+                })
+                .collect(),
+        )),
         _ => None,
     }
 }
@@ -95,9 +110,11 @@ fn value_of(kind: MemoryType, raw: &Tag) -> Option<MemoryValue> {
             Tag::Byte(value) => Some(MemoryValue::Bool(*value != 0)),
             _ => None,
         },
-        // `Unit.CODEC` 存成空 compound，读回来是 `Unit`。
-        // `Unit.CODEC` writes an empty compound; reading it back yields `Unit`.
-        MemoryType::IsInWater | MemoryType::IsPregnant => match raw {
+        // `Unit.CODEC` 存成空 compound，读回来是 `Unit`。嗅探兽的 `sniff_cooldown`
+        // 也是 Unit（`SNIFF_COOLDOWN`），不是整数。
+        // `Unit.CODEC` writes an empty compound; reading it back yields `Unit`. The
+        // sniffer's `sniff_cooldown` is a Unit too, not an int.
+        MemoryType::IsInWater | MemoryType::IsPregnant | MemoryType::SniffCooldown => match raw {
             Tag::Compound(_) => Some(MemoryValue::Unit),
             _ => None,
         },
@@ -121,6 +138,26 @@ fn value_of(kind: MemoryType, raw: &Tag) -> Option<MemoryValue> {
         }
         MemoryType::LastWorkedAtPoi | MemoryType::LastSlept | MemoryType::LastWoken => {
             tag::java_i64(raw).ok().map(MemoryValue::Long)
+        }
+        MemoryType::SnifferExploredPositions => {
+            let Tag::List(entries) = raw else {
+                return None;
+            };
+            let mut list = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let dimension = tag::string_or(entry, "dimension")?.to_owned();
+                let Some(Tag::IntArray(coords)) = tag::field(entry, "pos") else {
+                    return None;
+                };
+                let [x, y, z] = coords.as_slice() else {
+                    return None;
+                };
+                list.push(GlobalPos {
+                    dimension,
+                    pos: BlockPos::new(*x, *y, *z),
+                });
+            }
+            Some(MemoryValue::GlobalPosList(list))
         }
         _ => tag::java_i32(raw).ok().map(MemoryValue::Int),
     }
@@ -249,5 +286,54 @@ mod tests {
             Some(40)
         );
         assert!(!loaded.memories.has(MemoryType::NearestHostile));
+    }
+
+    /// 嗅探兽两项可序列化记忆按官方 `Brain.Packed` 格式往返：`sniffer_explored_positions`
+    /// 是 `GlobalPos.CODEC.listOf()`，`sniff_cooldown` 是 `Unit.CODEC` 加 ttl；挖掘标志不写盘。
+    ///
+    /// The sniffer's two serialisable memories round-trip in vanilla's `Brain.Packed`
+    /// format: `sniffer_explored_positions` is a `GlobalPos` list and `sniff_cooldown` a
+    /// Unit with a ttl; the digging flag is not saved.
+    #[test]
+    fn sniffer_serializable_memories_round_trip() {
+        let build = || super::super::super::sniffer::brain();
+        let mut brain = build();
+        let positions = vec![
+            GlobalPos {
+                dimension: "minecraft:overworld".to_owned(),
+                pos: BlockPos::new(3, 63, -5),
+            },
+            GlobalPos {
+                dimension: "minecraft:overworld".to_owned(),
+                pos: BlockPos::new(8, 62, 2),
+            },
+        ];
+        brain.memories.set(
+            MemoryType::SnifferExploredPositions,
+            MemoryValue::GlobalPosList(positions.clone()),
+        );
+        brain
+            .memories
+            .set_with_ttl(MemoryType::SniffCooldown, MemoryValue::Unit, 9600);
+        brain
+            .memories
+            .set(MemoryType::SnifferDigging, MemoryValue::Bool(true));
+
+        let saved = write(Some(&brain));
+        let mut loaded = build();
+        read(&mut loaded, &saved);
+
+        assert_eq!(
+            loaded
+                .memories
+                .global_pos_list(MemoryType::SnifferExploredPositions),
+            Some(positions.as_slice())
+        );
+        assert!(loaded.memories.has(MemoryType::SniffCooldown));
+        assert_eq!(
+            loaded.memories.time_until_expiry(MemoryType::SniffCooldown),
+            9600
+        );
+        assert!(!loaded.memories.has(MemoryType::SnifferDigging));
     }
 }

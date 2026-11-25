@@ -47,7 +47,9 @@ use crate::entity::{Entity, ctx::EntityCtx};
 use std::sync::{Arc, OnceLock};
 
 pub use behavior::Cx;
-pub(in crate::entity::mob) use behaviors::current_position;
+pub(in crate::entity::mob) use behaviors::{
+    current_block_position, current_position, direction_from_rotation,
+};
 
 /// 一份大脑模板缓存槽：每种生物一个 `OnceLock`，整张结构表只算一次、用 `Arc` 共享。
 ///
@@ -94,6 +96,11 @@ pub enum Activity {
     PreRaid,
     Hide,
     Celebrate,
+    /// 嗅探兽的嗅闻和挖掘活动（`Activity.SNIFF / DIG`）。
+    ///
+    /// The sniffer's sniff and dig activities (`Activity.SNIFF / DIG`).
+    Sniff,
+    Dig,
 }
 
 impl Activity {
@@ -120,6 +127,8 @@ impl Activity {
             Self::PreRaid => "pre_raid",
             Self::Hide => "hide",
             Self::Celebrate => "celebrate",
+            Self::Sniff => "sniff",
+            Self::Dig => "dig",
         }
     }
 
@@ -147,6 +156,8 @@ impl Activity {
             "pre_raid" => Some(Self::PreRaid),
             "hide" => Some(Self::Hide),
             "celebrate" => Some(Self::Celebrate),
+            "sniff" => Some(Self::Sniff),
+            "dig" => Some(Self::Dig),
             _ => None,
         }
     }
@@ -261,7 +272,26 @@ impl BrainTemplate {
     /// Orders behaviours like vanilla, registers every memory and builds the activity
     /// buckets; the caller caches the whole structure for reuse.
     pub fn new(sensors: &[SensorKind], activities: Vec<ActivityData>) -> Self {
+        Self::new_with_memories(sensors, &[], activities)
+    }
+
+    /// [`Self::new`] 的扩展：先登记官方 `Brain.provider(memoryTypes, ..)` 里的那些记忆，
+    /// 再登记传感器和行为要的记忆。嗅探兽的 `sniffer_explored_positions` 只有生物方法
+    /// 自己读写、不进任何传感器 / 行为的 `requires()`，靠这一项登记。
+    ///
+    /// [`Self::new`] plus the vanilla `Brain.provider(memoryTypes, ..)` memories,
+    /// registered before the sensors and behaviours. The sniffer's
+    /// `sniffer_explored_positions` is read/written only by the entity's own methods and
+    /// appears in no sensor / behaviour `requires()`, so it is registered here.
+    pub fn new_with_memories(
+        sensors: &[SensorKind],
+        memory_types: &[MemoryType],
+        activities: Vec<ActivityData>,
+    ) -> Self {
         let mut memories = Memories::default();
+        for &memory in memory_types {
+            memories.register(memory);
+        }
         let sensors: Vec<SensorKind> = sensors.to_vec();
         for &kind in &sensors {
             for &memory in kind.requires() {
@@ -1099,20 +1129,22 @@ mod tests {
     /// 钉住关键结构的大小。优化前 `Brain=6528`、`Memories=6400`（32 个槽每个都内联
     /// 184 字节的 `MemoryValue`）；把值装箱、把整张结构表挪进 `Arc<BrainTemplate>` 后
     /// 32 槽时 `Brain=664`、`Memories=536`，期 3 扩到 49 槽（+17×16 = +272）加日程字段后
-    /// `Memories=808`、`Brain=952`；鹦鹉螺再加两个记忆槽（+32）后是 `840` / `984`。
+    /// `Memories=808`、`Brain=952`；鹦鹉螺再加两个记忆槽（+32）后是 `840` / `984`；
+    /// 嗅探兽再加五个记忆槽（+5×16 = +80）后是 `920` / `1064`。
     /// 这些数字变了就说明有人又把大对象塞回了实例。
     ///
     /// Pins the key struct sizes. After boxing values and moving the structure table into
     /// `Arc<BrainTemplate>`: 32 slots had `Brain=664`, `Memories=536`; phase 3 grew to 49
-    /// slots (+272) plus schedule fields (`Memories=808`, `Brain=952`), and the two
-    /// nautilus memories add 32 more (`840` / `984`).
+    /// slots (+272) plus schedule fields (`Memories=808`, `Brain=952`), the two nautilus
+    /// memories add 32 more (`840` / `984`), and the five sniffer memories add 80 more
+    /// (`920` / `1064`).
     #[test]
     fn brain_and_memory_sizes_stay_small() {
         use crate::entity::mob::brain::behavior::Node;
         use crate::entity::mob::brain::memory::{Memories, MemoryValue};
         assert_eq!(std::mem::size_of::<MemoryValue>(), 184);
-        assert_eq!(std::mem::size_of::<Memories>(), 840);
-        assert_eq!(std::mem::size_of::<Brain>(), 984);
+        assert_eq!(std::mem::size_of::<Memories>(), 920);
+        assert_eq!(std::mem::size_of::<Brain>(), 1064);
         assert_eq!(std::mem::size_of::<Node>(), 136);
         assert_eq!(std::mem::size_of::<Sensor>(), 16);
         assert_eq!(std::mem::size_of::<Entry>(), 144);
@@ -1177,6 +1209,8 @@ mod tests {
         assert_eq!(Activity::PreRaid.java_hash(), -1_294_762_074);
         assert_eq!(Activity::Hide.java_hash(), 3_202_370);
         assert_eq!(Activity::Celebrate.java_hash(), 1_432_511_431);
+        assert_eq!(Activity::Sniff.java_hash(), 109_586_094);
+        assert_eq!(Activity::Dig.java_hash(), 99_458);
         assert_eq!(Activity::Swim.name(), "swim");
         assert_eq!(Activity::LaySpawn.name(), "lay_spawn");
         assert_eq!(Activity::Tongue.name(), "tongue");
