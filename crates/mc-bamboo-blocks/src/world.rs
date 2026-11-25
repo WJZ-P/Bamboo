@@ -3830,7 +3830,14 @@ impl<'a> World<'a> {
                 {
                     return outcome;
                 }
-                crate::entity::mob::interact::interact(me, mob, request, now, thundering)
+                crate::entity::mob::interact::interact(
+                    me,
+                    mob,
+                    request,
+                    now,
+                    thundering,
+                    &mut || self.random().next_float(),
+                )
             })
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
         let armadillo = entity

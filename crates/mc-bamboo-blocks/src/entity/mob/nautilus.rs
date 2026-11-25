@@ -428,6 +428,7 @@ pub fn interact(
     me: &mut Entity,
     mob: &mut Mob,
     req: &super::interact::MobInteractRequest,
+    level_next_float: &mut dyn FnMut() -> f32,
 ) -> super::interact::MobInteraction {
     use super::interact::MobInteraction;
 
@@ -435,7 +436,7 @@ pub fn interact(
     // `AbstractNautilus.interact` marks the mob persistent first.
     mob.persistence_required = true;
     if mob.is_baby() {
-        return super::interact::animal_interact(me, mob, req);
+        return super::interact::animal_interact(me, mob, req, level_next_float);
     }
     if mob.tame.is_tame() && req.sneaking {
         return MobInteraction {
@@ -487,7 +488,7 @@ pub fn interact(
             ..MobInteraction::pass()
         };
     }
-    super::interact::animal_interact(me, mob, req)
+    super::interact::animal_interact(me, mob, req, level_next_float)
 }
 
 /// `AbstractNautilus.checkRestriction`：已驯服、没被骑、没拴绳时把家限制在

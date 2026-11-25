@@ -247,6 +247,15 @@ pub enum EntityData {
     /// `Frog.DATA_TONGUE_TARGET_ID` (`OPTIONAL_UNSIGNED_INT`): the tongue target's
     /// entity id.
     FrogTongueTarget(Option<i32>),
+    /// `Sniffer.DATA_STATE`：`Sniffer.State` 的网络 ID（自己的 `SNIFFER_STATE` 序列化器，VarInt）。
+    ///
+    /// `Sniffer.DATA_STATE`: the `Sniffer.State` network id (its own `SNIFFER_STATE`
+    /// serializer, a VarInt).
+    SnifferState(i32),
+    /// `Sniffer.DATA_DROP_SEED_AT_TICK`，INT。
+    ///
+    /// `Sniffer.DATA_DROP_SEED_AT_TICK`, an INT.
+    SnifferDropSeedAtTick(i32),
     /// `MushroomCow.DATA_TYPE`（INT）：0 红色，1 棕色。
     ///
     /// `MushroomCow.DATA_TYPE` (INT): 0 red, 1 brown.
@@ -585,6 +594,10 @@ impl EntityData {
             Self::GoatRightHorn(_) => mc_bamboo_data::entity_types::GOAT_RIGHT_HORN,
             Self::FrogVariant(_) => mc_bamboo_data::entity_types::FROG_VARIANT,
             Self::FrogTongueTarget(_) => mc_bamboo_data::entity_types::FROG_TONGUE_TARGET,
+            Self::SnifferState(_) => mc_bamboo_data::entity_types::SNIFFER_STATE,
+            Self::SnifferDropSeedAtTick(_) => {
+                mc_bamboo_data::entity_types::SNIFFER_DROP_SEED_AT_TICK
+            }
             Self::MooshroomType(_) => mc_bamboo_data::entity_types::MOOSHROOM_TYPE,
             Self::PolarBearStanding(_) => mc_bamboo_data::entity_types::POLAR_BEAR_STANDING,
             Self::PandaUnhappy(_) => mc_bamboo_data::entity_types::PANDA_UNHAPPY,
@@ -903,6 +916,18 @@ impl EntityData {
                     mc_bamboo_data::entity_types::ARMADILLO_STATE_SERIALIZER,
                 );
                 write_varint(out, *state);
+            }
+            Self::SnifferState(state) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::SNIFFER_STATE_SERIALIZER,
+                );
+                write_varint(out, *state);
+            }
+            Self::SnifferDropSeedAtTick(tick) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *tick);
             }
             Self::ChickenVariant(value) | Self::ChickenSoundVariant(value) => {
                 use mc_bamboo_data::entity_types as facts;
@@ -1502,6 +1527,48 @@ mod tests {
         assert_eq!(
             set_entity_data(ENTITY, &[EntityData::TntBlockState(300)]),
             hex("07 09 0e ac 02 ff")
+        );
+    }
+
+    /// 嗅探兽的两项元数据按官方下标和序列化器编码：`DATA_STATE` 是 index 18、
+    /// 35 号 `SNIFFER_STATE` 序列化器（VarInt 写状态 id），`DATA_DROP_SEED_AT_TICK`
+    /// 是 index 19、INT 序列化器。数字从官方 jar 的反射探针导出。
+    ///
+    /// The sniffer's two metadata items use the vanilla indices and serializers:
+    /// `DATA_STATE` is index 18 with serializer 35 (`SNIFFER_STATE`, a VarInt state
+    /// id) and `DATA_DROP_SEED_AT_TICK` is index 19 with the INT serializer. The
+    /// numbers come from a reflection probe over the official jar.
+    #[test]
+    fn sniffer_metadata_matches_official_indices_and_serializers() {
+        use mc_bamboo_data::entity_types as facts;
+        assert_eq!(facts::SNIFFER_STATE, 18);
+        assert_eq!(facts::SNIFFER_DROP_SEED_AT_TICK, 19);
+        assert_eq!(facts::SNIFFER_STATE_SERIALIZER, 35);
+        assert_eq!(EntityData::SnifferState(5).index(), 18);
+        assert_eq!(EntityData::SnifferDropSeedAtTick(120).index(), 19);
+        // entity 7、index 18 / 35 号序列化器 / DIGGING 状态 5，最后 0xff 收尾。
+        // Entity 7, index 18 / serializer 35 / state DIGGING (5), then the 0xff end.
+        assert_eq!(
+            set_entity_data(ENTITY, &[EntityData::SnifferState(5)]),
+            hex("07 12 23 05 ff")
+        );
+        // entity 7、index 19 / INT 序列化器 1 / tick 120，最后 0xff 收尾。
+        // Entity 7, index 19 / INT serializer 1 / tick 120, then the 0xff end.
+        assert_eq!(
+            set_entity_data(ENTITY, &[EntityData::SnifferDropSeedAtTick(120)]),
+            hex("07 13 01 78 ff")
+        );
+        // 两项一起，按 index 升序。
+        // Both together, in ascending index order.
+        assert_eq!(
+            set_entity_data(
+                ENTITY,
+                &[
+                    EntityData::SnifferState(5),
+                    EntityData::SnifferDropSeedAtTick(120),
+                ]
+            ),
+            hex("07 12 23 05 13 01 78 ff")
         );
     }
 

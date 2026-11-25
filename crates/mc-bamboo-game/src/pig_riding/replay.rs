@@ -106,7 +106,7 @@ pub fn replay_pig_mount(setup: i32, item: i32, sneak: bool, seed: i64) -> Replay
     let outcome = region
         .entities
         .with_mut(pig_id, |entity| {
-            entity.with_mob(|me, mob| interact::interact(me, mob, &request, 0, false))
+            entity.with_mob(|me, mob| interact::interact(me, mob, &request, 0, false, &mut || 0.0))
         })
         .flatten()
         .expect("pig interaction");
