@@ -1347,6 +1347,12 @@ pub enum Command {
         pos: mc_bamboo_core::BlockPos,
         data: i32,
     },
+    /// `RingBell` 的 `BellBlock.attemptToRing(entity, level, pos, null)`：村民敲响钟。
+    ///
+    /// `RingBell`'s `BellBlock.attemptToRing(entity, level, pos, null)`.
+    RingBell {
+        pos: mc_bamboo_core::BlockPos,
+    },
     /// `TurtleLayEggGoal` 的 `level.setBlockAndUpdate` 加产蛋音效。
     ///
     /// `TurtleLayEggGoal`'s `level.setBlockAndUpdate` plus the egg-laying sound.
@@ -1975,6 +1981,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 except_initiator: false,
             });
         }
+        Command::RingBell { pos } => crate::behaviour::attached::bell::ring(world, pos),
         Command::RabbitEatCarrots { pos } => super::mob::rabbit::eat_carrots(world, pos),
         Command::FoxPickUpItem {
             item,

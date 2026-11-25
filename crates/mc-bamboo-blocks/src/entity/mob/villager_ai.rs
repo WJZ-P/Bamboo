@@ -304,14 +304,6 @@ pub enum Stub {
     InsideBrownianWalk,
     TradeWithVillager,
     VillagerMakeLove,
-    RingBell,
-    PreRaidTriggerGate,
-    ResetRaidStatus,
-    RaidCelebrateTriggerGate,
-    CelebrateVillagersSurvivedRaid,
-    RaidLocateHidingPlace,
-    SetHiddenState,
-    LocateHidingPlace,
 }
 
 const REQ_DOOR: &[(MemoryType, MemoryStatus)] = &[
@@ -456,7 +448,6 @@ impl Stub {
             Self::SleepInBed => Class::Timed { min: 60, max: 60 },
             Self::TradeWithVillager => Class::Timed { min: 60, max: 60 },
             Self::VillagerMakeLove => Class::Timed { min: 350, max: 350 },
-            Self::CelebrateVillagersSurvivedRaid => Class::Timed { min: 600, max: 600 },
             _ => Class::OneShot,
         }
     }
@@ -480,15 +471,8 @@ impl Stub {
             Self::SleepInBed => REQ_SLEEP_IN_BED,
             Self::SetClosestHomeAsWalkTarget => REQ_CLOSEST_HOME,
             Self::InsideBrownianWalk => REQ_WALK_ABSENT,
-            Self::PreRaidTriggerGate
-            | Self::ResetRaidStatus
-            | Self::RaidCelebrateTriggerGate
-            | Self::CelebrateVillagersSurvivedRaid => &[],
             Self::TradeWithVillager => REQ_TRADE_VILLAGER,
             Self::VillagerMakeLove => REQ_MAKE_LOVE,
-            Self::RingBell => REQ_MEETING_PRESENT,
-            Self::RaidLocateHidingPlace | Self::LocateHidingPlace => REQ_LOCATE_HIDING,
-            Self::SetHiddenState => REQ_SET_HIDDEN,
         }
     }
 
@@ -504,7 +488,6 @@ impl Stub {
             Self::SleepInBed => "SleepInBed",
             Self::TradeWithVillager => "TradeWithVillager",
             Self::VillagerMakeLove => "VillagerMakeLove",
-            Self::CelebrateVillagersSurvivedRaid => "CelebrateVillagersSurvivedRaid",
             _ => "OneShot",
         }
     }
@@ -555,6 +538,23 @@ pub enum Behavior {
     GoToClosestVillage { speed: f32, close_enough: i32 },
     /// `SetRaidStatus`：`OneShot`，每刻抽 `level.random.nextInt(20)`，保持世界随机序列对齐。
     SetRaidStatus,
+    /// `RingBell`：`OneShot`，每刻抽 `level.random.nextFloat()`，> 0.95 且钟在 3 格内时敲钟。
+    RingBell,
+    /// `ResetRaidStatus`：`OneShot`，每刻抽 `level.random.nextInt(20)`，命中且袭击
+    /// 已停 / 判负 / 不在时回 IDLE。
+    ResetRaidStatus,
+    /// `CelebrateVillagersSurvivedRaid(600, 600)`：袭击胜利后的庆祝，放烟花、播庆祝声。
+    CelebrateVillagersSurvivedRaid,
+    /// `RaidLocateHidingPlace`：`LocateHidingPlace.create(24, speed, 1)` 带「袭击进行中」
+    /// 的前置条件。
+    RaidLocateHidingPlace {
+        radius: i32,
+        speed: f32,
+        close_enough: i32,
+    },
+    /// `RaidCelebrateTriggerGate`：袭击胜利后 `triggerOneShuffled([MoveToSkySeeingSpot,
+    /// VillageBoundRandomStroll])`。`MoveToSkySeeingSpot` 未建模，先按村内闲逛近似。
+    RaidCelebrateTriggerGate { speed: f32 },
     /// `SetEntityLookTarget.create(filter, maxDist)`。
     SetEntityLookTarget { filter: LookFilter, max_dist: f32 },
     /// `InteractWith.of(type, maxDist, INTERACTION_TARGET, speed, closeEnough)`：`OneShot`。
@@ -678,6 +678,7 @@ impl Behavior {
                 min: i32::MAX,
                 max: i32::MAX,
             },
+            Self::CelebrateVillagersSurvivedRaid => Class::Timed { min: 600, max: 600 },
             Self::Unavailable(stub) => stub.class(),
             _ => Class::OneShot,
         }
@@ -689,11 +690,17 @@ impl Behavior {
             | Self::UpdateActivityFromSchedule
             | Self::SetRaidStatus
             | Self::WakeUp
+            | Self::ResetRaidStatus
+            | Self::CelebrateVillagersSurvivedRaid
+            | Self::RaidCelebrateTriggerGate { .. }
             | Self::MeetTriggerGate(_) => &[],
             Self::SleepInBed { .. } => REQ_SLEEP_IN_BED,
             Self::SetClosestHomeAsWalkTarget(_) => REQ_CLOSEST_HOME,
             Self::InsideBrownianWalk { .. } => REQ_WALK_ABSENT,
-            Self::LocateHidingPlace { .. } => REQ_LOCATE_HIDING,
+            Self::LocateHidingPlace { .. } | Self::RaidLocateHidingPlace { .. } => {
+                REQ_LOCATE_HIDING
+            }
+            Self::RingBell => REQ_MEETING_PRESENT,
             Self::SetHiddenState { .. } => REQ_SET_HIDDEN,
             Self::CalmDown => REQ_CALM_DOWN,
             Self::WalkAwayFromEntity { memory, .. } => match memory {
@@ -748,6 +755,7 @@ impl Behavior {
             Self::UseBonemeal(_) => "UseBonemeal",
             Self::SleepInBed { .. } => "SleepInBed",
             Self::LookAndFollowTradingPlayerSink { .. } => "LookAndFollowTradingPlayerSink",
+            Self::CelebrateVillagersSurvivedRaid => "CelebrateVillagersSurvivedRaid",
             Self::Unavailable(stub) => stub.name(),
             _ => "OneShot",
         }
@@ -777,6 +785,7 @@ impl Behavior {
             Self::HarvestFarmland(state) => harvest_extra_start(state, cx),
             Self::UseBonemeal(state) => bonemeal_extra_start(state, cx),
             Self::SleepInBed { .. } => sleep_extra_start(cx),
+            Self::CelebrateVillagersSurvivedRaid => celebrate_can_use(cx),
             Self::Unavailable(_) => false,
             _ => false,
         }
@@ -878,6 +887,7 @@ impl Behavior {
                     && cx.me.position.y > f64::from(gp.pos.y) + 0.4
                     && closer_to_center_than(gp.pos, cx.me.position, 1.14)
             }),
+            Self::CelebrateVillagersSurvivedRaid => celebrate_can_continue(cx),
             _ => false,
         }
     }
@@ -895,6 +905,7 @@ impl Behavior {
             }
             Self::HarvestFarmland(state) => harvest_tick(state, cx),
             Self::UseBonemeal(state) => bonemeal_tick(state, cx),
+            Self::CelebrateVillagersSurvivedRaid => celebrate_tick(cx),
             _ => {}
         }
     }
@@ -929,6 +940,9 @@ impl Behavior {
             Self::SleepInBed { next_ok_start_time } if cx.mob.villager.sleeping => {
                 villager::stop_sleeping(cx.me, cx.mob, Some(cx.memories), cx.ctx);
                 *next_ok_start_time = cx.time + 40;
+            }
+            Self::CelebrateVillagersSurvivedRaid => {
+                cx.update_activity_from_schedule();
             }
             _ => {}
         }
@@ -1012,40 +1026,7 @@ impl Behavior {
                 speed,
                 max_xz,
                 max_y,
-            } => {
-                let block_pos = cx.me.block_position();
-                let blocks = cx.ctx.blocks();
-                let pos = if blocks.poi_is_close_to_village(block_pos, 1) {
-                    goals::land_random_pos(cx.me, cx.mob, blocks, *max_xz, *max_y)
-                } else {
-                    let current = section_of(block_pos);
-                    let closest = find_section_closest_to_village(blocks, current, 2);
-                    if closest != current {
-                        let center = section_center(closest);
-                        let towards = Vec3::new(
-                            f64::from(center.x) + 0.5,
-                            f64::from(center.y),
-                            f64::from(center.z) + 0.5,
-                        );
-                        goals::default_random_pos_towards(
-                            cx.me,
-                            cx.mob,
-                            blocks,
-                            *max_xz,
-                            *max_y,
-                            towards,
-                            std::f32::consts::FRAC_PI_2,
-                        )
-                    } else {
-                        goals::land_random_pos(cx.me, cx.mob, blocks, *max_xz, *max_y)
-                    }
-                };
-                cx.memories.set_or_erase(
-                    WalkTarget,
-                    pos.map(|at| MemoryValue::Walk(WalkTarget::to_point(at, *speed, 0))),
-                );
-                true
-            }
+            } => trigger_village_bound_random_stroll(*speed, *max_xz, *max_y, cx),
             Self::GoToClosestVillage {
                 speed,
                 close_enough,
@@ -1102,6 +1083,78 @@ impl Behavior {
                     cx.set_active_activity_if_possible(activity);
                 }
                 true
+            }
+            Self::RingBell => {
+                // `RingBell`：每刻先抽 `level.random.nextFloat()`（不管距离和钟都取数），
+                // 大于 0.95 且 MEETING_POINT 在 3 格内且那一格是钟才敲。
+                //
+                // `RingBell`: draw `level.random.nextFloat()` every tick, then ring only
+                // past 0.95 when the meeting point is within 3 blocks and holds a bell.
+                if cx.ctx.blocks().level_random_float() <= 0.95 {
+                    return true;
+                }
+                let Some(gp) = cx.memories.global_pos(MeetingPoint).cloned() else {
+                    return true;
+                };
+                if gp.dimension != "minecraft:overworld"
+                    || !closer_to_center_than(gp.pos, cx.me.position, 3.0)
+                {
+                    return true;
+                }
+                if cx.ctx.blocks().block_state(gp.pos).is(blocks::BELL) {
+                    cx.ctx.emit(Command::RingBell { pos: gp.pos }, cx.me);
+                }
+                true
+            }
+            Self::ResetRaidStatus => {
+                // `ResetRaidStatus`：每刻抽 `level.random.nextInt(20)`，命中且袭击
+                // 不在 / 已停 / 判负时回 IDLE 并按日程刷新。
+                //
+                // `ResetRaidStatus`: draw `nextInt(20)`; on a hit, reset to IDLE when
+                // the raid is absent, stopped or lost.
+                if cx.level_next_int(20) != 0 {
+                    return false;
+                }
+                let pos = BlockPos::containing(cx.me.position);
+                let gone = cx
+                    .ctx
+                    .blocks()
+                    .raid_at(pos)
+                    .is_none_or(|raid| raid.is_stopped || raid.is_loss);
+                if gone {
+                    cx.set_default_activity(Activity::Idle);
+                    cx.update_activity_from_schedule();
+                }
+                true
+            }
+            Self::RaidLocateHidingPlace {
+                radius,
+                speed,
+                close_enough,
+            } => {
+                // `LocateHidingPlace` 带「袭击进行中」的前置：只在袭击活跃且未定胜负时躲。
+                let pos = BlockPos::containing(cx.me.position);
+                let active = cx
+                    .ctx
+                    .blocks()
+                    .raid_at(pos)
+                    .is_some_and(|raid| raid.active && !raid.is_victory && !raid.is_loss);
+                if !active {
+                    return false;
+                }
+                trigger_locate_hiding_place(*radius, *speed, *close_enough, cx)
+            }
+            Self::RaidCelebrateTriggerGate { speed } => {
+                // 袭击胜利后往空旷处走；`MoveToSkySeeingSpot` 未建模，先按村内闲逛近似。
+                let victory = cx
+                    .ctx
+                    .blocks()
+                    .raid_at(cx.me.block_position())
+                    .is_some_and(|raid| raid.is_victory);
+                if !victory {
+                    return false;
+                }
+                trigger_village_bound_random_stroll(*speed, 10, 7, cx)
             }
             Self::SetEntityLookTarget { filter, max_dist } => {
                 let max_sqr = f64::from(*max_dist * *max_dist);
@@ -1338,6 +1391,7 @@ impl Behavior {
             | Self::UseBonemeal(_)
             | Self::SleepInBed { .. }
             | Self::LookAndFollowTradingPlayerSink { .. }
+            | Self::CelebrateVillagersSurvivedRaid
             | Self::Unavailable(_) => false,
         }
     }
@@ -2073,6 +2127,41 @@ fn trigger_socialize_at_bell(cx: &mut Cx) -> bool {
     true
 }
 
+fn trigger_village_bound_random_stroll(speed: f32, max_xz: i32, max_y: i32, cx: &mut Cx) -> bool {
+    let block_pos = cx.me.block_position();
+    let blocks = cx.ctx.blocks();
+    let pos = if blocks.poi_is_close_to_village(block_pos, 1) {
+        goals::land_random_pos(cx.me, cx.mob, blocks, max_xz, max_y)
+    } else {
+        let current = section_of(block_pos);
+        let closest = find_section_closest_to_village(blocks, current, 2);
+        if closest != current {
+            let center = section_center(closest);
+            let towards = Vec3::new(
+                f64::from(center.x) + 0.5,
+                f64::from(center.y),
+                f64::from(center.z) + 0.5,
+            );
+            goals::default_random_pos_towards(
+                cx.me,
+                cx.mob,
+                blocks,
+                max_xz,
+                max_y,
+                towards,
+                std::f32::consts::FRAC_PI_2,
+            )
+        } else {
+            goals::land_random_pos(cx.me, cx.mob, blocks, max_xz, max_y)
+        }
+    };
+    cx.memories.set_or_erase(
+        WalkTarget,
+        pos.map(|at| MemoryValue::Walk(WalkTarget::to_point(at, speed, 0))),
+    );
+    true
+}
+
 fn trigger_locate_hiding_place(radius: i32, speed: f32, close_enough: i32, cx: &mut Cx) -> bool {
     let origin = cx.me.block_position();
     let home_mask = villager::poi_name_mask("home");
@@ -2160,6 +2249,46 @@ fn dist_sqr_block(a: BlockPos, b: BlockPos) -> f64 {
     let dy = f64::from(a.y - b.y);
     let dz = f64::from(a.z - b.z);
     dx * dx + dy * dy + dz * dz
+}
+
+/// `MoveToSkySeeingSpot.hasNoBlocksAbove`：看得见天，且 MOTION_BLOCKING 高度图
+/// 不超过村民的脚。
+///
+/// `MoveToSkySeeingSpot.hasNoBlocksAbove`: open sky and the MOTION_BLOCKING
+/// heightmap does not rise above the villager's feet.
+fn has_no_blocks_above(cx: &Cx) -> bool {
+    let pos = cx.me.block_position();
+    let view = cx.ctx.blocks();
+    view.can_see_sky(pos) && f64::from(view.motion_blocking_y(pos)) <= cx.me.position.y
+}
+
+/// `CelebrateVillagersSurvivedRaid.checkExtraStartConditions`：袭击胜利且头顶无方块。
+fn celebrate_can_use(cx: &mut Cx) -> bool {
+    cx.ctx
+        .blocks()
+        .raid_at(cx.me.block_position())
+        .is_some_and(|raid| raid.is_victory && has_no_blocks_above(cx))
+}
+
+/// `CelebrateVillagersSurvivedRaid.canStillUse`：袭击还在、还没停。
+fn celebrate_can_continue(cx: &mut Cx) -> bool {
+    cx.ctx
+        .blocks()
+        .raid_at(cx.me.block_position())
+        .is_some_and(|raid| !raid.is_stopped)
+}
+
+/// `CelebrateVillagersSurvivedRaid.tick`：每刻 `nextInt(100)==0` 播庆祝声，
+/// `nextInt(200)==0` 且头顶无方块时放烟花（随机颜色 + 0..3 飞行时长；烟花实体
+/// 本身没建模，只保持取数次数对齐）。
+fn celebrate_tick(cx: &mut Cx) {
+    if cx.me.random.next_int_bounded(100) == 0 {
+        living::make_sound(cx.me, cx.mob, "minecraft:entity.villager.celebrate");
+    }
+    if cx.me.random.next_int_bounded(200) == 0 && has_no_blocks_above(cx) {
+        let _ = cx.me.random.next_int_bounded(16);
+        let _ = cx.me.random.next_int_bounded(3);
+    }
 }
 
 fn trigger_acquire_poi(state: &mut AcquirePoiState, cx: &mut Cx) -> bool {
@@ -3086,27 +3215,62 @@ fn panic_package(speed: f32) -> ActivityData {
     )
 }
 
-fn pre_raid_package(_speed: f32) -> ActivityData {
+fn pre_raid_package(speed: f32) -> ActivityData {
     ActivityData::with_priorities(
         Activity::PreRaid,
         vec![
-            (0, stub(Stub::RingBell)),
-            (0, stub(Stub::PreRaidTriggerGate)),
+            (0, Kind::Villager(Behavior::RingBell)),
+            (
+                0,
+                Kind::Gate(Box::new(Gate::run_one(
+                    Vec::new(),
+                    vec![
+                        (
+                            Kind::Villager(Behavior::WalkTargetFromBlockMemory {
+                                memory: MeetingPoint,
+                                speed: speed * 1.5,
+                                close_enough: 2,
+                                too_far_distance: 150,
+                                too_long_unreachable: 200,
+                            }),
+                            1,
+                        ),
+                        (
+                            Kind::Villager(Behavior::VillageBoundRandomStroll {
+                                speed: speed * 1.5,
+                                max_xz: 10,
+                                max_y: 7,
+                            }),
+                            1,
+                        ),
+                    ],
+                ))),
+            ),
             minimal_look_behavior(),
-            (99, stub(Stub::ResetRaidStatus)),
+            (99, Kind::Villager(Behavior::ResetRaidStatus)),
         ],
     )
 }
 
-fn raid_package(_speed: f32) -> ActivityData {
+fn raid_package(speed: f32) -> ActivityData {
     ActivityData::with_priorities(
         Activity::Raid,
         vec![
-            (0, stub(Stub::RaidCelebrateTriggerGate)),
-            (0, stub(Stub::CelebrateVillagersSurvivedRaid)),
-            (2, stub(Stub::RaidLocateHidingPlace)),
+            (
+                0,
+                Kind::Villager(Behavior::RaidCelebrateTriggerGate { speed: speed * 1.1 }),
+            ),
+            (0, Kind::Villager(Behavior::CelebrateVillagersSurvivedRaid)),
+            (
+                2,
+                Kind::Villager(Behavior::RaidLocateHidingPlace {
+                    radius: 24,
+                    speed: speed * 1.4,
+                    close_enough: 1,
+                }),
+            ),
             minimal_look_behavior(),
-            (99, stub(Stub::ResetRaidStatus)),
+            (99, Kind::Villager(Behavior::ResetRaidStatus)),
         ],
     )
 }
