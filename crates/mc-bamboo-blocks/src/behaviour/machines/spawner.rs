@@ -243,7 +243,8 @@ impl SpawnerBlockEntity {
             let Tag::Compound(_) = value else {
                 return fallback;
             };
-            let Some(data) = tag::field(value, "data").filter(|tag| matches!(tag, Tag::Compound(_)))
+            let Some(data) =
+                tag::field(value, "data").filter(|tag| matches!(tag, Tag::Compound(_)))
             else {
                 return fallback;
             };
@@ -306,6 +307,36 @@ impl SpawnerBlockEntity {
         }
     }
 
+    /// 对拍/测试用：直接把倒计时拨到 `delay`（跳过构造器的 20）。
+    ///
+    /// Test hook: set the countdown to `delay`, skipping the constructor's 20.
+    #[doc(hidden)]
+    pub fn set_delay_for_test(&mut self, delay: i32) {
+        self.spawn_delay = delay;
+    }
+
+    /// 对拍/测试用：读出当前倒计时。
+    ///
+    /// Test hook: the current countdown.
+    #[doc(hidden)]
+    pub fn delay_for_test(&self) -> i32 {
+        self.spawn_delay
+    }
+
+    /// 对拍/测试用：当前 `SpawnData` 的实体类型名（没有时是空串）。
+    ///
+    /// Test hook: the current `SpawnData` entity type name, or empty.
+    #[doc(hidden)]
+    pub fn entity_for_test(&self) -> String {
+        self.next_spawn_data
+            .as_ref()
+            .and_then(|data| match tag::field(&data.entity, "id") {
+                Some(Tag::String(id)) => Some(id.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     /// `getOrCreateNextSpawnData` 的「缺省才抽」那半：从加权表抽一份，表空时用空数据。
     ///
     /// The pick-on-demand half of `getOrCreateNextSpawnData`.
@@ -351,7 +382,9 @@ impl SpawnerBlockEntity {
             self.min_spawn_delay
         } else {
             self.min_spawn_delay
-                + world.random().next_int(self.max_spawn_delay - self.min_spawn_delay)
+                + world
+                    .random()
+                    .next_int(self.max_spawn_delay - self.min_spawn_delay)
         };
         // `spawnPotentials.getRandom(random).ifPresent(setNextSpawnData)`：只在抽得到时换。
         let picked = weighted(&self.spawn_potentials, world.random()).cloned();

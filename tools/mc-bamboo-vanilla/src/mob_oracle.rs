@@ -64,6 +64,7 @@ mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
 mod small_mob;
+mod spawner;
 mod squid;
 mod structure_spawn;
 mod sulfur_cube;
@@ -168,6 +169,7 @@ enum Line {
     GolemSave(Box<golem::GolemSaveCase>),
     SmallMob(Box<small_mob::SmallMobCase>),
     SmallMobSave(small_mob::SmallMobSaveCase),
+    Spawner(Box<spawner::SpawnerCase>),
     SulfurCube(Box<sulfur_cube::SulfurCubeCase>),
     SulfurCubeSave(sulfur_cube::SulfurCubeSaveCase),
     SmallMobDeath(small_mob::SmallMobDeathCase),
@@ -924,6 +926,11 @@ struct ZombieFacts {
     /// 村民日程活动（主世界时钟求值；`None` 时按 `clock` 现场算）。
     villager_activity: Option<mc_bamboo_blocks::entity::mob::brain::Activity>,
     baby_villager_activity: Option<mc_bamboo_blocks::entity::mob::brain::Activity>,
+    /// 刷怪笼对拍：注入 (天空光, 方块光)，缺省用 MobLevel 的 `brightness` 默认值。
+    ///
+    /// Spawner parity: injected (sky, block) light; the default keeps the
+    /// `MobLevel::brightness` defaults.
+    spawner_light: Option<(i32, i32)>,
 }
 
 /// 给生物穿上带指定附魔的靴子，和官方场景的 `ItemStack.enchant` 一致。
@@ -1209,6 +1216,12 @@ impl Level for MobLevel {
     }
 
     fn brightness(&self, layer: LightLayer, _pos: BlockPos) -> i32 {
+        if let Some((sky, block)) = self.facts.spawner_light {
+            return match layer {
+                LightLayer::Sky => sky,
+                LightLayer::Block => block,
+            };
+        }
         match layer {
             LightLayer::Sky => self.natural_spawn.as_ref().map_or(15, |scene| scene.sky),
             LightLayer::Block => self.natural_spawn.as_ref().map_or(0, |scene| scene.block),
@@ -1800,6 +1813,7 @@ impl Report {
                 Line::GolemSave(case) => self.replay_golem_save(&case),
                 Line::SmallMob(case) => self.replay_small_mob(&case),
                 Line::SmallMobSave(case) => self.replay_small_mob_save(&case),
+                Line::Spawner(case) => self.replay_spawner(&case),
                 Line::SulfurCube(case) => self.replay_sulfur_cube(&case),
                 Line::SulfurCubeSave(case) => self.replay_sulfur_cube_save(&case),
                 Line::SmallMobDeath(case) => self.replay_small_mob_death(&case),
@@ -2001,6 +2015,7 @@ impl Report {
                 raining: case.raining,
                 thundering: false,
                 bees_stay: None,
+                spawner_light: None,
             },
             natural_spawn: None,
             biome: None,
