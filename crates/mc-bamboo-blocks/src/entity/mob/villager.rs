@@ -12,6 +12,7 @@ use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::villager as facts;
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::components::value::GlobalPos;
+use mc_bamboo_protocol::merchant::{self, MerchantOffer};
 
 use super::{
     brain::{Brain, memory::MemoryType},
@@ -46,8 +47,8 @@ pub struct Villager {
     pub restocks_today: i32,
     /// `Gossips` 原文。期 2 不解析，读进来原样写回。
     pub gossips: Option<Tag>,
-    /// `Offers` 原文。交易在期 5。
-    pub offers: Option<Tag>,
+    /// `AbstractVillager.offers`：`None` 表示还没生成（官方 `offers == null`）。
+    pub offers: Option<Vec<MerchantOffer>>,
     /// `Inventory` 原文。拾取物品在期 3。
     pub inventory: Option<Tag>,
     /// `LivingEntity.isSleeping()`：睡在床上时为真（睡觉行为第 4 期接入）。
@@ -217,8 +218,10 @@ impl Villager {
     /// The eight `Villager.addAdditionalSaveData` keys plus `AbstractVillager`'s
     /// `Offers` / `Inventory`. Vanilla writes `Offers` only when it is non-null.
     pub fn write_nbt(&self, out: &mut Vec<(String, Tag)>) {
-        if let Some(offers) = &self.offers {
-            put(out, "Offers", offers.clone());
+        if let Some(offers) = &self.offers
+            && let Ok(encoded) = merchant::encode_offers(offers)
+        {
+            put(out, "Offers", encoded.to_tag());
         }
         if let Some(inventory) = &self.inventory {
             put(out, "Inventory", inventory.clone());
@@ -258,7 +261,8 @@ impl Villager {
         self.last_restock = tag::long_or(tag, "LastRestock", 0);
         self.last_gossip_decay = tag::long_or(tag, "LastGossipDecay", 0);
         self.restocks_today = tag::int_or(tag, "RestocksToday", 0);
-        self.offers = tag::field(tag, "Offers").cloned();
+        self.offers =
+            tag::field(tag, "Offers").and_then(|offers| merchant::decode_offers(offers).ok());
         self.inventory = tag::field(tag, "Inventory").cloned();
     }
 }
@@ -390,10 +394,7 @@ mod tests {
             villager.last_gossip_decay = 5678;
             villager.restocks_today = 2;
             villager.gossips = Some(Tag::List(Vec::new()));
-            villager.offers = Some(Tag::Compound(vec![(
-                "Recipes".to_owned(),
-                Tag::List(Vec::new()),
-            )]));
+            villager.offers = Some(Vec::new());
             villager.inventory = Some(Tag::List(Vec::new()));
         });
         let tag = nbt::write_mob(&entity.split()).expect("写村民");

@@ -83,8 +83,10 @@ impl ZombieVillagerState {
             "VillagerDataFinalized",
             Tag::Byte(i8::from(villager.finalized)),
         );
-        if let Some(offers) = &villager.offers {
-            put(out, "Offers", offers.clone());
+        if let Some(offers) = &villager.offers
+            && let Ok(encoded) = mc_bamboo_protocol::merchant::encode_offers(offers)
+        {
+            put(out, "Offers", encoded.to_tag());
         }
         if let Some(gossips) = &villager.gossips {
             put(out, "Gossips", gossips.clone());
@@ -120,7 +122,8 @@ impl ZombieVillagerState {
                 initialize_data(villager, 0);
             }
         }
-        villager.offers = tag::field(source, "Offers").cloned();
+        villager.offers = tag::field(source, "Offers")
+            .and_then(|offers| mc_bamboo_protocol::merchant::decode_offers(offers).ok());
         villager.gossips = tag::field(source, "Gossips").cloned();
         let time = tag::int_or(source, "ConversionTime", -1);
         if time == -1 {
