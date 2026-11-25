@@ -612,6 +612,8 @@ mod tests {
             uuid: None,
             position: Vec3::new(10.5, 64.0, 0.5),
             delta: Vec3::default(),
+            width: 0.6,
+            height: 1.8,
             eye_height: 1.62,
             health: 20.0,
             look_direction: Vec3::default(),

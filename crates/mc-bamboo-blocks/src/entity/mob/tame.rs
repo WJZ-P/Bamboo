@@ -135,11 +135,13 @@ pub fn refuses_target(mob: &Mob, target_uuid: Option<[u8; 16]>) -> bool {
     is_tamable(mob.mob_type) && mob.tame.is_owned_by(target_uuid)
 }
 
-/// `unableToMoveToOwner`：坐着、骑着、拴着（后两样 Bamboo 还没有）或主人是旁观者。
+/// `unableToMoveToOwner`：坐着、骑着、拴着（`isPassenger` 还没建模）或主人是旁观者。
 ///
-/// `unableToMoveToOwner`; riding and leashes do not exist in Bamboo yet.
+/// `unableToMoveToOwner`: sitting, a passenger, leashed or the owner is a spectator.
 pub fn unable_to_move_to_owner(mob: &Mob, view: &dyn BlockView) -> bool {
-    mob.tame.ordered_to_sit || owner(mob, view).is_some_and(|owner| owner.spectator)
+    mob.tame.ordered_to_sit
+        || super::leash::may_be_leashed(mob)
+        || owner(mob, view).is_some_and(|owner| owner.spectator)
 }
 
 /// `shouldTryTeleportToOwner`：主人离开 12 格。

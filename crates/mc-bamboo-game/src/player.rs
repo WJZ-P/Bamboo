@@ -511,6 +511,16 @@ impl Player {
         }
     }
 
+    /// 碰撞盒高，`getBbHeight()`。成年玩家恒 1.8：官方 `getDimensions(Pose)` 只有
+    /// `SLEEPING` 缩成 0.2×0.2，潜行 / 游泳只改眼高、不改碰撞盒。
+    ///
+    /// The box height, `getBbHeight()`. An adult player is always 1.8 tall: vanilla
+    /// `getDimensions(Pose)` shrinks only `SLEEPING` to 0.2×0.2; crouching and
+    /// swimming change the eye height, not the box.
+    pub(crate) fn height(&self) -> f32 {
+        STANDING_HEIGHT as f32
+    }
+
     /// 实体逻辑看到的玩家视图，对应官方 `Level.players()` 里的一个 `Player`。
     /// 这里不筛选旁观者或死亡状态：`getNearestPlayer` 的谓词、
     /// `TargetingConditions` 和 `ExperienceOrb.followNearbyPlayer` 各自按官方条件过滤。
@@ -527,6 +537,8 @@ impl Player {
             uuid: Some(*self.uuid.as_bytes()),
             position: self.position,
             delta: self.motion.delta,
+            width: (HALF_WIDTH * 2.0) as f32,
+            height: STANDING_HEIGHT as f32,
             eye_height: self.eye_height() as f32,
             health: self.health.health,
             look_direction: Vec3::view_vector(self.yaw, self.pitch),

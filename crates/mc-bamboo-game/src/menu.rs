@@ -1154,10 +1154,10 @@ fn finish_menu(region: &mut Region, id: PlayerId, menu: &mut Menu, return_items:
                 place_item_back_in_inventory(region, id, stack);
             }
         }
-        // `stopTrading`：菜单关了就不再算交易中，降频豁免随之解除。
+        // `MerchantMenu.removed` → `stopTrading()`：菜单关了就不再算交易中，降频豁免随之解除。
         region.entities.with_mut(state.villager, |entity| {
             if let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &mut entity.kind {
-                mob.villager.trading = false;
+                mob.villager.stop_trading();
             }
         });
         return;

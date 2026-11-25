@@ -589,6 +589,8 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         uuid: None,
         position: Vec3::new(case.player_x, f64::from(case.floors[0] + 1), 8.5),
         delta: Vec3::default(),
+        width: 0.6,
+        height: 1.8,
         eye_height: 1.62,
         health: 20.0,
         look_direction: Vec3::default(),

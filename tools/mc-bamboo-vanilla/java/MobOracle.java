@@ -185,6 +185,11 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.ticks.LevelTicks;
 import sun.misc.Unsafe;
+import net.minecraft.world.level.block.entity.vault.VaultBlockEntity;
+import net.minecraft.world.level.block.entity.vault.VaultConfig;
+import net.minecraft.world.level.block.entity.vault.VaultServerData;
+import net.minecraft.world.level.block.entity.vault.VaultSharedData;
+import net.minecraft.world.level.block.entity.vault.VaultState;
 
 /**
  * 官方牛在假世界里逐刻的状态。每个场景一行 JSON：场景本身（方块、牛、玩家、伤害动作）加上
@@ -360,6 +365,9 @@ public final class MobOracle {
                 playLlamaSpit(official, out, "llama_spit_near", 3.5, 4207L);
                 cases += 2;
             }
+            if (only == null || "leash".startsWith(only) || only.startsWith("leash")) {
+                cases += playLeash(official, out, only);
+            }
             if (only == null || "witch_throw".startsWith(only)) {
                 OracleWitch.checkAim(official);
                 playWitchThrow(official, out, "witch_throw_far", 9.5, 20.0F, 73L, 220, false);
@@ -448,6 +456,9 @@ public final class MobOracle {
             }
             if (only == null || "villager_p4".startsWith(only) || only.startsWith("villager_p4")) {
                 cases += playVillagerPhase4(official, out, only);
+            }
+            if (only == null || "villager_trade".startsWith(only) || only.startsWith("villager_trade")) {
+                cases += playVillagerTrade(official, out, only);
             }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
@@ -545,6 +556,12 @@ public final class MobOracle {
                     playBeeFull(official, out, name);
                     cases++;
                 }
+            }
+            if (only == null || only.startsWith("trial_spawner")) {
+                cases += playTrialSpawner(official, out, only);
+            }
+            if (only == null || only.startsWith("vault")) {
+                cases += playVault(official, out, only);
             }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
@@ -11646,6 +11663,408 @@ public final class MobOracle {
             out.flush();
         }
 
+    /**
+     * 试炼刷怪笼完整流程逐刻对拍：等玩家 → 激活刷怪 → 怪被打死 → 等待弹奖励 → 弹出 →
+     * 冷却。逐刻比状态机（state/ominous）、`registered_players` / `current_mobs` 数量、
+     * 冷却计时、刷出的怪（类型 + 精确位置）、弹出的奖励、世界事件和世界随机源。
+     * 场景从 `waiting_for_players` 起步，避开还没建模的显示实体。
+     */
+    private static int playTrialSpawner(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("trial_spawner_full")) {
+            if (only != null && !name.startsWith(only)) continue;
+            playTrialSpawnerCase(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    private static void playTrialSpawnerCase(Official official, Writer out, String name) throws Exception {
+        EntityType<?> type = EntityTypes.ZOMBIE;
+        int cooldownLength = 100;
+        int playerRange = 14;
+        int totalMobs = 1;
+        int simultaneousMobs = 1;
+        int killTick = 70;
+        int ticks = 320;
+
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.injectedSkyDarken = 15;
+        level.injectedCanSeeSky = true;
+        level.levelEvents = new ArrayList<>();
+        // 石地板，让刷怪和碰撞检查有真实地面。
+        for (int x = -5; x <= 5; x++) {
+            for (int z = -5; z <= 5; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        BlockPos spawnerPos = new BlockPos(0, 64, 0);
+        BlockState spawnerState = Blocks.TRIAL_SPAWNER.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.TRIAL_SPAWNER_STATE,
+                        net.minecraft.world.level.block.entity.trialspawner.TrialSpawnerState.WAITING_FOR_PLAYERS);
+        level.blocks.put(spawnerPos.asLong(), spawnerState);
+        var be = new net.minecraft.world.level.block.entity.TrialSpawnerBlockEntity(spawnerPos, spawnerState);
+        be.setLevel(level);
+        // 自定义配置：只刷僵尸、一次一只、短冷却。
+        net.minecraft.nbt.CompoundTag entityTag = new net.minecraft.nbt.CompoundTag();
+        entityTag.putString("id", BuiltInRegistries.ENTITY_TYPE.getKey(type).toString());
+        var spawnData = new net.minecraft.world.level.SpawnData(entityTag,
+                java.util.Optional.empty(), java.util.Optional.empty());
+        var normalConfig = net.minecraft.world.level.block.entity.trialspawner.TrialSpawnerConfig.builder()
+                .totalMobs(totalMobs)
+                .simultaneousMobs(simultaneousMobs)
+                .totalMobsAddedPerPlayer(0)
+                .simultaneousMobsAddedPerPlayer(0)
+                .spawnPotentialsDefinition(WeightedList.of(spawnData))
+                .lootTablesToEject(WeightedList.of(
+                        net.minecraft.world.level.storage.loot.BuiltInLootTables.SPAWNER_TRIAL_CHAMBER_KEY))
+                .build();
+        var fullConfig = new net.minecraft.world.level.block.entity.trialspawner.TrialSpawner.FullConfig(
+                Holder.direct(normalConfig), Holder.direct(normalConfig), cooldownLength, playerRange);
+        Field tsField = net.minecraft.world.level.block.entity.TrialSpawnerBlockEntity.class
+                .getDeclaredField("trialSpawner");
+        tsField.setAccessible(true);
+        tsField.set(be, new net.minecraft.world.level.block.entity.trialspawner.TrialSpawner(
+                fullConfig, be,
+                net.minecraft.world.level.block.entity.trialspawner.PlayerDetector.NO_CREATIVE_PLAYERS,
+                net.minecraft.world.level.block.entity.trialspawner.PlayerDetector.EntitySelector.SELECT_FROM_LEVEL));
+        level.putBlockEntity(be);
+
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "TrialSpawnerOracle"), ClientInformation.createDefault());
+        player.setPos(0.5, 64.0, 0.5);
+        level.playersList().add(player);
+
+        // 循环前保存初始方块状态（tickServer 的 setState 之后会改方块状态），并
+        // 把世界随机源对齐到 Bamboo 的 LevelRandom::new(1) 初值。
+        String initialBlocks = blockArray(level.blocks);
+        level.getRandom().setSeed(1L);
+
+        // 反射读状态机内部字段。
+        var data = be.getTrialSpawner().getStateData();
+        Field fDetected = data.getClass().getDeclaredField("detectedPlayers");
+        fDetected.setAccessible(true);
+        Field fMobs = data.getClass().getDeclaredField("currentMobs");
+        fMobs.setAccessible(true);
+        Field fCooldown = data.getClass().getDeclaredField("cooldownEndsAt");
+        fCooldown.setAccessible(true);
+        Field fNext = data.getClass().getDeclaredField("nextMobSpawnsAt");
+        fNext.setAccessible(true);
+        Field fTotal = data.getClass().getDeclaredField("totalMobsSpawned");
+        fTotal.setAccessible(true);
+
+        java.util.Set<Integer> seen = new java.util.HashSet<>();
+        int maxState = 0;
+        int maxTotalSpawned = 0;
+        int maxRegistered = 0;
+        int totalEjected = 0;
+        int detectEvents = 0;
+        int spawnEvents = 0;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            List<int[]> events = new ArrayList<>();
+            if (tick > 0) {
+                level.gameTime = START_TIME + tick;
+                level.spawned.clear();
+                level.levelEvents.clear();
+                if (tick == killTick) {
+                    for (Entity e : new ArrayList<>(level.tracked)) {
+                        if (e instanceof Mob mob) {
+                            mob.discard();
+                        }
+                    }
+                }
+                boolean ominous = level.getBlockState(spawnerPos)
+                        .getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.OMINOUS);
+                be.getTrialSpawner().tickServer(level, spawnerPos, ominous);
+                events = new ArrayList<>(level.levelEvents);
+            }
+            JsonArray spawned = new JsonArray();
+            for (Entity e : level.tracked) {
+                if (e instanceof Mob mob && seen.add(mob.getId())) {
+                    JsonArray row = new JsonArray();
+                    row.add(BuiltInRegistries.ENTITY_TYPE.getId(mob.getType()));
+                    row.add(Double.doubleToRawLongBits(mob.getX()));
+                    row.add(Double.doubleToRawLongBits(mob.getY()));
+                    row.add(Double.doubleToRawLongBits(mob.getZ()));
+                    spawned.add(row);
+                }
+            }
+            JsonArray ejected = new JsonArray();
+            for (Entity e : level.spawned) {
+                if (e instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                    JsonArray row = new JsonArray();
+                    row.add(BuiltInRegistries.ITEM.getId(item.getItem().getItem()));
+                    row.add(item.getItem().getCount());
+                    ejected.add(row);
+                }
+            }
+            JsonArray eventsArr = new JsonArray();
+            for (int[] ev : events) {
+                JsonArray row = new JsonArray();
+                for (int value : ev) {
+                    row.add(value);
+                }
+                eventsArr.add(row);
+            }
+            maxState = Math.max(maxState, be.getTrialSpawner().getState().ordinal());
+            maxTotalSpawned = Math.max(maxTotalSpawned, fTotal.getInt(data));
+            maxRegistered = Math.max(maxRegistered, ((java.util.Set<?>) fDetected.get(data)).size());
+            totalEjected += ejected.size();
+            for (int[] ev : events) {
+                if (ev[0] == 3013) detectEvents++;
+                if (ev[0] == 3011 || ev[0] == 3012 || ev[0] == 3014) spawnEvents++;
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"state\":").append(be.getTrialSpawner().getState().ordinal())
+                    .append(",\"ominous\":").append(level.getBlockState(spawnerPos)
+                            .getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.OMINOUS))
+                    .append(",\"registered\":").append(((java.util.Set<?>) fDetected.get(data)).size())
+                    .append(",\"mobs\":").append(((java.util.Set<?>) fMobs.get(data)).size())
+                    .append(",\"cooldownEndsAt\":").append(fCooldown.getLong(data))
+                    .append(",\"nextMobSpawnsAt\":").append(fNext.getLong(data))
+                    .append(",\"totalMobsSpawned\":").append(fTotal.getInt(data))
+                    .append(",\"spawned\":").append(spawned)
+                    .append(",\"ejected\":").append(ejected)
+                    .append(",\"events\":").append(eventsArr)
+                    .append(",\"seed\":").append(levelSeed(level))
+                    .append('}');
+        }
+        frames.append(']');
+        // 确认这一轮真的走完了整条状态链、弹过奖励、发过探测/刷怪事件，防止空对拍。
+        if (maxState < 5 || maxTotalSpawned < 1 || maxRegistered < 1
+                || totalEjected < 1 || detectEvents < 1 || spawnEvents < 1) {
+            throw new IllegalStateException("trial_spawner_full missed the flow: maxState=" + maxState
+                    + " maxTotalSpawned=" + maxTotalSpawned + " maxRegistered=" + maxRegistered
+                    + " totalEjected=" + totalEjected + " detectEvents=" + detectEvents
+                    + " spawnEvents=" + spawnEvents);
+        }
+        out.write("{\"type\":\"trialSpawner\",\"name\":" + jsonString(name)
+                + ",\"pos\":[0,64,0]"
+                + ",\"blocks\":" + initialBlocks
+                + ",\"player\":[0.5,64.0,0.5]"
+                + ",\"difficulty\":2"
+                + ",\"entity\":\"minecraft:zombie\""
+                + ",\"totalMobs\":" + totalMobs
+                + ",\"simultaneousMobs\":" + simultaneousMobs
+                + ",\"cooldownLength\":" + cooldownLength
+                + ",\"playerRange\":" + playerRange
+                + ",\"killTick\":" + killTick
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+    }
+
+    /** `[item,count]`；空堆统一成 `[0,0]`。 */
+    private static String vaultStack(net.minecraft.world.item.ItemStack stack) {
+        if (stack.isEmpty()) return "[0,0]";
+        return "[" + BuiltInRegistries.ITEM.getId(stack.getItem()) + "," + stack.getCount() + "]";
+    }
+
+    private static int[] vaultUuid(UUID uuid) {
+        long msb = uuid.getMostSignificantBits();
+        long lsb = uuid.getLeastSignificantBits();
+        return new int[] { (int) (msb >>> 32), (int) msb, (int) (lsb >>> 32), (int) lsb };
+    }
+
+    /** UUID 集合按四个 int 排序，和 Rust 侧一致（官方是 HashSet，不能比顺序）。 */
+    private static String vaultUuidSet(java.util.Set<UUID> uuids) {
+        List<int[]> rows = new ArrayList<>();
+        for (UUID uuid : uuids) rows.add(vaultUuid(uuid));
+        rows.sort((a, b) -> {
+            for (int i = 0; i < 4; i++) if (a[i] != b[i]) return Integer.compare(a[i], b[i]);
+            return 0;
+        });
+        StringBuilder out = new StringBuilder("[");
+        for (int i = 0; i < rows.size(); i++) {
+            if (i > 0) out.append(',');
+            int[] r = rows.get(i);
+            out.append('[').append(r[0]).append(',').append(r[1]).append(',')
+                    .append(r[2]).append(',').append(r[3]).append(']');
+        }
+        return out.append(']').toString();
+    }
+
+    private static String vaultItemList(List<net.minecraft.world.item.ItemStack> items) {
+        StringBuilder out = new StringBuilder("[");
+        for (int i = 0; i < items.size(); i++) {
+            if (i > 0) out.append(',');
+            out.append(vaultStack(items.get(i)));
+        }
+        return out.append(']').toString();
+    }
+
+    /**
+     * 宝库完整流程逐刻对拍：探测玩家激活 → 插钥匙解锁 → 弹出奖励 → 回到未激活。
+     * 逐刻比方块状态、ServerData、SharedData、世界事件、声音、弹出的物品和世界随机源。
+     */
+    private static int playVault(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("vault_full")) {
+            if (only != null && !name.startsWith(only)) continue;
+            playVaultCase(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void playVaultCase(Official official, Writer out, String name) throws Exception {
+        int insertTick = 5;
+        int ticks = 240;
+
+        FakeLevel level = FakeLevel.create(official);
+        level.levelEvents = new ArrayList<>();
+        level.soundLog = new ArrayList<>();
+        // 石地板，让 getBlockState / setBlockAndUpdate 有真实地面（同试炼刷怪笼场景）。
+        for (int x = -4; x <= 4; x++) {
+            for (int z = -4; z <= 4; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        BlockPos pos = new BlockPos(0, 64, 0);
+        BlockState inactive = Blocks.VAULT.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.VaultBlock.STATE, VaultState.INACTIVE)
+                .setValue(net.minecraft.world.level.block.VaultBlock.OMINOUS, false);
+        level.blocks.put(pos.asLong(), inactive);
+
+        VaultConfig config = VaultConfig.DEFAULT;
+        VaultServerData serverData = new VaultServerData();
+        VaultSharedData sharedData = new VaultSharedData();
+        net.minecraft.world.item.ItemStack key = config.keyItem().copy();
+
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "VaultOracle"), ClientInformation.createDefault());
+        player.setPos(0.5, 64.0, 0.5);
+        level.playersList().add(player);
+
+        // 循环前存初始方块状态（setVaultState 之后会改），世界随机源对齐 Bamboo 的
+        // LevelRandom::new(1)，战利品随机序列对齐 RandomSequences::new(0)。
+        String initialBlocks = blockArray(level.blocks);
+        level.getRandom().setSeed(1L);
+        official.server.sequences = new RandomSequences();
+
+        Field fRewarded = VaultServerData.class.getDeclaredField("rewardedPlayers");
+        Field fResumes = VaultServerData.class.getDeclaredField("stateUpdatingResumesAt");
+        Field fItems = VaultServerData.class.getDeclaredField("itemsToEject");
+        Field fTotal = VaultServerData.class.getDeclaredField("totalEjectionsNeeded");
+        Field fDisplay = VaultSharedData.class.getDeclaredField("displayItem");
+        Field fConnected = VaultSharedData.class.getDeclaredField("connectedPlayers");
+        Field fParticles = VaultSharedData.class.getDeclaredField("connectedParticlesRange");
+        fRewarded.setAccessible(true);
+        fResumes.setAccessible(true);
+        fItems.setAccessible(true);
+        fTotal.setAccessible(true);
+        fDisplay.setAccessible(true);
+        fConnected.setAccessible(true);
+        fParticles.setAccessible(true);
+
+        int maxState = 0;
+        int maxRewarded = 0;
+        int totalEjected = 0;
+        int activateEvents = 0;
+        int deactivateEvents = 0;
+        int ejectEvents = 0;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            List<int[]> events = new ArrayList<>();
+            List<long[]> sounds = new ArrayList<>();
+            List<net.minecraft.world.item.ItemStack> ejected = new ArrayList<>();
+            if (tick > 0) {
+                level.gameTime = START_TIME + tick;
+                level.spawned.clear();
+                level.levelEvents.clear();
+                level.soundLog.clear();
+                BlockState blockState = level.getBlockState(pos);
+                VaultBlockEntity.Server.tick(level, pos, blockState, config, serverData, sharedData);
+                if (tick == insertTick) {
+                    blockState = level.getBlockState(pos);
+                    VaultBlockEntity.Server.tryInsertKey(level, pos, blockState,
+                            config, serverData, sharedData, player, key);
+                }
+                events = new ArrayList<>(level.levelEvents);
+                sounds = new ArrayList<>(level.soundLog);
+                for (Entity e : level.spawned) {
+                    if (e instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                        ejected.add(item.getItem());
+                    }
+                }
+            }
+            int state = level.getBlockState(pos)
+                    .getValue(net.minecraft.world.level.block.VaultBlock.STATE).ordinal();
+            java.util.Set<UUID> rewarded = (java.util.Set<UUID>) fRewarded.get(serverData);
+            java.util.Set<UUID> connected = (java.util.Set<UUID>) fConnected.get(sharedData);
+            List<net.minecraft.world.item.ItemStack> items =
+                    (List<net.minecraft.world.item.ItemStack>) fItems.get(serverData);
+            maxState = Math.max(maxState, state);
+            maxRewarded = Math.max(maxRewarded, rewarded.size());
+            totalEjected += ejected.size();
+            for (int[] ev : events) {
+                if (ev[0] == 3015) activateEvents++;
+                if (ev[0] == 3016) deactivateEvents++;
+                if (ev[0] == 3017) ejectEvents++;
+            }
+
+            StringBuilder eventsArr = new StringBuilder("[");
+            for (int i = 0; i < events.size(); i++) {
+                if (i > 0) eventsArr.append(',');
+                int[] ev = events.get(i);
+                eventsArr.append('[');
+                for (int j = 0; j < ev.length; j++) {
+                    if (j > 0) eventsArr.append(',');
+                    eventsArr.append(ev[j]);
+                }
+                eventsArr.append(']');
+            }
+            eventsArr.append(']');
+            StringBuilder soundsArr = new StringBuilder("[");
+            for (int i = 0; i < sounds.size(); i++) {
+                if (i > 0) soundsArr.append(',');
+                long[] s = sounds.get(i);
+                // [soundId, volumeBits, pitchBits]；位置 / source 不参与比较。
+                soundsArr.append('[').append(s[0]).append(',').append(s[5]).append(',').append(s[6]).append(']');
+            }
+            soundsArr.append(']');
+            StringBuilder ejectedArr = new StringBuilder("[");
+            for (int i = 0; i < ejected.size(); i++) {
+                if (i > 0) ejectedArr.append(',');
+                ejectedArr.append(vaultStack(ejected.get(i)));
+            }
+            ejectedArr.append(']');
+
+            if (tick > 0) frames.append(',');
+            frames.append("{\"state\":").append(state)
+                    .append(",\"rewarded\":").append(vaultUuidSet(rewarded))
+                    .append(",\"resumesAt\":").append(fResumes.getLong(serverData))
+                    .append(",\"itemsToEject\":").append(vaultItemList(items))
+                    .append(",\"totalEjections\":").append(fTotal.getInt(serverData))
+                    .append(",\"display\":").append(vaultStack((net.minecraft.world.item.ItemStack) fDisplay.get(sharedData)))
+                    .append(",\"connected\":").append(vaultUuidSet(connected))
+                    .append(",\"particlesBits\":").append(Double.doubleToRawLongBits(fParticles.getDouble(sharedData)))
+                    .append(",\"events\":").append(eventsArr)
+                    .append(",\"sounds\":").append(soundsArr)
+                    .append(",\"ejected\":").append(ejectedArr)
+                    .append(",\"seed\":").append(levelSeed(level))
+                    .append('}');
+        }
+        frames.append(']');
+        // 确认真的走完了整条状态链、弹过奖励、发过激活/失效/弹出事件，防空对拍。
+        if (maxState < 3 || maxRewarded < 1 || totalEjected < 1
+                || activateEvents < 1 || deactivateEvents < 1 || ejectEvents < 1) {
+            throw new IllegalStateException("vault_full missed the flow: maxState=" + maxState
+                    + " maxRewarded=" + maxRewarded + " totalEjected=" + totalEjected
+                    + " activateEvents=" + activateEvents + " deactivateEvents=" + deactivateEvents
+                    + " ejectEvents=" + ejectEvents);
+        }
+        out.write("{\"type\":\"vault\",\"name\":" + jsonString(name)
+                + ",\"pos\":[0,64,0]"
+                + ",\"blocks\":" + initialBlocks
+                + ",\"player\":[0.5,64.0,0.5]"
+                + ",\"insertTick\":" + insertTick
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+    }
+
     private static void playBeeLocate(Official official, Writer out, String name) throws Exception {
         FakeLevel level = FakeLevel.create(official);
         int[][] hives = beeLocateHives(name);  // [x, y, z, kind]  kind 0 = beehive, 1 = bee_nest
@@ -13653,6 +14072,208 @@ public final class MobOracle {
         }
     }
 
+    /**
+     * 村民交易接进大脑的逐刻对拍：玩家打开/关闭交易、工作站补货、交易后升级。
+     * 一侧在假 `ServerLevel` 里跑官方 `Villager`，每刻记下大脑、位移、随机源、
+     * 交易表摘要、经验/等级、再生效果、血量；Bamboo 侧重放同一场景并逐位比较。
+     *
+     * Villager-trading tick-by-tick comparison: opening/closing a trade, restocking at a
+     * workstation and levelling up after a trade. The official `Villager` runs in a fake
+     * `ServerLevel`; each tick records brain, motion, RNG, an offer digest, xp/level,
+     * regeneration and health. Bamboo replays the same scene bit for bit.
+     */
+    private static int playVillagerTrade(Official official, Writer out, String only) throws Exception {
+        String[] scenes = {"villager_trade_follow", "villager_trade_restock", "villager_trade_levelup"};
+        int count = 0;
+        for (String name : scenes) {
+            if (only != null && !name.startsWith(only)) continue;
+            playVillagerTradeOne(official, out, name);
+            count++;
+        }
+        return count;
+    }
+
+    private static net.minecraft.world.item.trading.MerchantOffers tradeOffers(int... uses) {
+        var offers = new net.minecraft.world.item.trading.MerchantOffers();
+        for (int u : uses) {
+            var offer = new net.minecraft.world.item.trading.MerchantOffer(
+                    new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 1),
+                    new ItemStack(Items.APPLE), 12, 1, 0.05F);
+            for (int i = 0; i < u; i++) offer.increaseUses();
+            offers.add(offer);
+        }
+        return offers;
+    }
+
+    private static String offersDigest(net.minecraft.world.item.trading.MerchantOffers offers) {
+        int uses = 0, demand = 0, special = 0;
+        for (var offer : offers) {
+            uses += offer.getUses();
+            demand += offer.getDemand();
+            special += offer.getSpecialPriceDiff();
+        }
+        return "[" + offers.size() + "," + uses + "," + demand + "," + special + "]";
+    }
+
+    private static void playVillagerTradeOne(Official official, Writer out, String name) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        try {
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels = java.util.Map.of(Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            world.blockEntities = new Long2ObjectOpenHashMap<>();
+
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+
+            boolean follow = name.equals("villager_trade_follow");
+            boolean restock = name.equals("villager_trade_restock");
+            boolean levelup = name.equals("villager_trade_levelup");
+            long clockStart = 2000L;
+            int totalTicks = levelup ? 260 : (follow ? 120 : 90);
+            // 传感器关掉：ShowTradesToPlayer 等村民间交互行为要靠传感器记忆才启动，
+            // 关掉后官方与 Bamboo 的占位都不跑；交易 sink 直接读 tradingPlayer，不受影响。
+            // Sensors off: villager-to-villager interaction behaviours need sensor memories
+            // to start, so with sensors off both the official ones and Bamboo's stubs stay
+            // idle; the trading sink reads tradingPlayer directly and is unaffected.
+            long sensorDelay = 1_000_000L;
+            int playerId = FIRST_ID + 1024;
+            int eventTick = restock ? 20 : 10;
+            int closeTick = follow ? 60 : -1;
+
+            world.gameTime = 1000L;
+            world.realSky = true;
+            world.injectedCanSeeSky = true;
+            world.clock = clockStart;
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder().addStaticLayers(world);
+            net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+                public long totalTicks() { return world.clock; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : world.dimensionType().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            official.attributes = builder.build();
+            put(ServerLevel.class, world, "environmentAttributes", official.attributes);
+            world.updateSkyBrightness();
+            world.getRandom().setSeed(1L);
+
+            ServerPlayer player = null;
+            if (follow) {
+                player = new ServerPlayer(official.server, world,
+                        new GameProfile(new UUID(1L, 2L), "TradeOracle"), ClientInformation.createDefault());
+                player.setId(playerId);
+                player.setPos(2.5, 64.0, 0.5);
+                player.setYRot(0.0F);
+                player.setYHeadRot(0.0F);
+                player.setYBodyRot(0.0F);
+                world.playersList().add(player);
+                // `NearestLivingEntitySensor` 走 `getEntitiesOfClass`（读 `tracked`）。
+                world.tracked.add(player);
+            }
+
+            Villager v = (Villager) EntityTypes.VILLAGER.create(world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+            v.setId(FIRST_ID);
+            v.setUUID(new UUID(0L, 1L));
+            v.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            v.setYHeadRot(0.0F);
+            v.setYBodyRot(0.0F);
+            put(net.minecraft.world.entity.ai.Brain.class, v.getBrain(), "lastScheduleUpdate", -9999L);
+            v.getBrain().updateActivityFromSchedule(world.environmentAttributes(), world.getGameTime(), v.position());
+            setRandom(v, 71L);
+            BrainOracle.reseedShuffles(v, randomSeed(v));
+            BrainOracle.fixSensorDelays(v, sensorDelay);
+            if (levelup) {
+                v.setHealth(10.0F);
+                v.setVillagerXp(9); // 9 + offer.xp(2) = 11 >= 10 → 升级
+            }
+            v.setOffers(restock ? tradeOffers(3, 1) : tradeOffers(0));
+            world.tracked.add(v);
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= totalTicks; tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    world.clock = clockStart + tick;
+                    official.attributes.invalidateTickCache();
+                    world.updateSkyBrightness();
+
+                    if (tick == eventTick) {
+                        if (follow) {
+                            // `Villager.startTrading` 里记下交易玩家。
+                            v.setTradingPlayer(player);
+                        } else if (restock) {
+                            // `WorkAtPoi.useWorkstation` 末尾的补货判定（直接调同一对方法）。
+                            if (v.shouldRestock(world)) v.restock();
+                        } else {
+                            // `MerchantResultSlot.onTake` → `notifyTrade`；rewardExp 关掉，
+                            // 免得在假世界里撒经验球。声望为 none 职业，updateTrades 不生成交易。
+                            var offer = new net.minecraft.world.item.trading.MerchantOffer(
+                                    new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 1),
+                                    new ItemStack(Items.APPLE), 12, 2, 0.05F);
+                            put(net.minecraft.world.item.trading.MerchantOffer.class, offer, "rewardExp", false);
+                            v.notifyTrade(offer);
+                            // `increaseMerchantCareer` 追加的新等级交易（受控夹具）。
+                            v.setOffers(tradeOffers(0, 0, 0));
+                        }
+                    }
+                    if (tick == closeTick) {
+                        // `MerchantMenu.removed` → `stopTrading()`。
+                        v.setTradingPlayer(null);
+                    }
+
+                    List<Entity> snapshot = new ArrayList<>(world.tracked);
+                    for (Entity e : snapshot) {
+                        if (e.isRemoved()) continue;
+                        if (e instanceof Villager villager) {
+                            var prevBrain = villager.getBrain();
+                            villager.commonTick();
+                            villager.tick();
+                            if (villager.getBrain() != prevBrain) BrainOracle.reseedShuffles(villager, randomSeed(villager));
+                        } else if (!(e instanceof ServerPlayer)) {
+                            // 玩家保持静止，和 Bamboo 一侧的 PlayerView 快照一致。
+                            e.tick();
+                        }
+                    }
+                    world.tracked.removeIf(Entity::isRemoved);
+                }
+
+                if (tick > 0) frames.append(',');
+                var regen = v.getEffect(MobEffects.REGENERATION);
+                frames.append("{\"brain\":").append(jsonString(BrainOracle.dump(v)))
+                        .append(",\"motion\":").append(projectileMotion(v))
+                        .append(",\"seed\":").append(randomSeed(v))
+                        .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
+                        .append(",\"xp\":").append(v.getVillagerXp())
+                        .append(",\"level\":").append(v.getVillagerData().level())
+                        .append(",\"regen\":").append(regen == null ? -1 : regen.getDuration())
+                        .append(",\"health\":").append(Float.floatToRawIntBits(v.getHealth()))
+                        .append(",\"offers\":").append(offersDigest(v.getOffers()))
+                        .append(",\"trading\":").append(v.getTradingPlayer() != null ? 1 : 0)
+                        .append("}");
+            }
+            frames.append(']');
+
+            out.write("{\"type\":\"villagerTrade\",\"name\":" + jsonString(name)
+                    + ",\"clockStart\":" + clockStart
+                    + ",\"sensorDelay\":" + sensorDelay
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"playerId\":" + playerId
+                    + ",\"eventTick\":" + eventTick
+                    + ",\"closeTick\":" + closeTick
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            world.closeRealPoi();
+        }
+    }
+
     /** `Silverfish.friendsGoal` 的私有字段。 */
     private static Object friendsOf(Mob mob) throws Exception {
         Field field = net.minecraft.world.entity.monster.Silverfish.class.getDeclaredField("friendsGoal");
@@ -15229,6 +15850,200 @@ public final class MobOracle {
                 + ",\"playerId\":" + playerId + ",\"playerX\":" + playerX + ",\"seed\":" + seed
                 + ",\"blocks\":" + blocks + ",\"shots\":" + spits.size() + ",\"frames\":" + frames + "]"
                 + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
+    }
+
+    /**
+     * 拴绳逐刻对拍：一头牛拴到玩家或栅栏结上，玩家逐刻走远触发弹性拉扯 / 超距断绳，
+     * 或在中途剪绳 / 解回 / 拆栅栏。每刻比牛的位置、速度、四个朝向、随机源、绳状态和掉落。
+     *
+     * Tick-by-tick leash replay: a cow leashed to a player or a fence knot; the player
+     * walks away (elastic pull + snap), or the rope is sheared / untied / the fence broken.
+     */
+    private static int playLeash(Official official, Writer out, String only) throws Exception {
+        String[] names = {"leash_player_walk", "leash_player_shear", "leash_fence_hold",
+                "leash_fence_untie", "leash_fence_break",
+                "leash_ai_follow", "leash_ai_stop", "leash_ai_snap"};
+        int written = 0;
+        for (String name : names) {
+            if (only != null && !name.startsWith(only)) continue;
+            // `leash_ai_*` 开着牛的 AI，逐刻比牛朝牵引者走过来、停在附近、超距断绳
+            // 时的位置 / 速度 / 朝向 / 寻路目标 / 运行目标 / 随机源；其余场景沿用 NoAI
+            // 只比拴绳物理。
+            boolean ai = name.startsWith("leash_ai_");
+            boolean fence = name.startsWith("leash_fence");
+            int fx = 8, fy = 64, fz = 0;
+            BlockPos fencePos = new BlockPos(fx, fy, fz);
+            FakeLevel world = FakeLevel.create(official);
+            ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+            for (int x = -2; x <= 40; x++)
+                for (int z = -4; z <= 4; z++)
+                    world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            if (fence)
+                world.blocks.put(BlockPos.asLong(fx, fy, fz), Blocks.OAK_FENCE.defaultBlockState());
+            String blocks = blockArray(world.blocks);
+            int playerId = FIRST_ID + 1024;
+            ServerPlayer player = new ServerPlayer(official.server, world,
+                    new GameProfile(new UUID(1L, 2L), "LeashOracle"), ClientInformation.createDefault());
+            player.setId(playerId);
+            player.setPos(2.5, 64.0, 0.5);
+            setRandom(player, ENTITY_RANDOM_SEED);
+            player.setYRot(0.0F);
+            player.setYHeadRot(0.0F);
+            player.setYBodyRot(0.0F);
+            world.playersList().add(player);
+            world.tracked.add(player);
+            world.nextId = FIRST_ID;
+            Cow cow = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            world.entitySeeds.nextLong();
+            long cowSeed = 0x0DDB1A5E5BAD5EEDL ^ 0x4C45415348L;
+            setRandom(cow, cowSeed);
+            cow.setUUID(new UUID(0L, 1L));
+            cow.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            cow.setYHeadRot(0.0F);
+            cow.setYBodyRot(0.0F);
+            // `leash_ai_*` 开着牛的 AI：官方 `PathfinderMob.closeRangeLeashBehaviour`
+            // 会让被拴的牛自己朝牵引者走过来，逐刻比得到导航 / 目标 / 随机源。
+            // 其余场景沿用 NoAI，只比拴绳物理。
+            cow.setNoAi(!ai);
+            world.tracked.add(cow);
+            net.minecraft.world.entity.decoration.LeashFenceKnotEntity knot = null;
+            if (fence) {
+                knot = new net.minecraft.world.entity.decoration.LeashFenceKnotEntity(world, fencePos);
+                knot.setId(FIRST_ID + 512);
+                world.tracked.add(knot);
+            }
+            int startLeash = fence ? 2 : 1;
+            if (startLeash == 1) cow.setLeashedTo(player, true);
+            else cow.setLeashedTo(knot, true);
+
+            int ticks = 80;
+            StringBuilder frames = new StringBuilder("[");
+            StringBuilder playerMotion = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                // 玩家轨迹按场景分：
+                // - `leash_ai_follow`：慢慢走（每刻 0.12），牛始终在弹性距离内，靠
+                //   `closeRangeLeashBehaviour` 自己跟着走。
+                // - `leash_ai_stop`：走 20 刻后停下，牛走到附近后停住。
+                // - `leash_ai_snap` / 其余场景：每刻 0.4 一直走远，直到超距断绳。
+                double px;
+                double vx;
+                if (name.equals("leash_ai_follow")) {
+                    px = 2.5 + tick * 0.12;
+                    vx = tick == 0 ? 0.0 : 0.12;
+                } else if (name.equals("leash_ai_stop")) {
+                    double walked = Math.min(tick, 20) * 0.12;
+                    px = 2.5 + walked;
+                    vx = (tick == 0 || tick > 20) ? 0.0 : 0.12;
+                } else {
+                    px = 2.5 + tick * 0.4;
+                    vx = tick == 0 ? 0.0 : 0.4;
+                }
+                if (tick > 0) {
+                    world.gameTime++;
+                    player.setPos(px, 64.0, 0.5);
+                    player.setDeltaMovement(vx, 0.0, 0.0);
+                    if (tick == 10) {
+                        if (name.equals("leash_player_shear")) {
+                            cow.dropLeash();
+                        } else if (name.equals("leash_fence_untie")) {
+                            cow.setLeashedTo(player, true);
+                        } else if (name.equals("leash_fence_break")) {
+                            world.blocks.put(BlockPos.asLong(fx, fy, fz), Blocks.AIR.defaultBlockState());
+                            knot.discard();
+                        }
+                    }
+                    cow.checkDespawn();
+                    cow.commonTick();
+                    cow.tick();
+                }
+                if (tick > 0) playerMotion.append(',');
+                playerMotion.append('[')
+                        .append(Double.doubleToRawLongBits(px)).append(',')
+                        .append(Double.doubleToRawLongBits(64.0)).append(',')
+                        .append(Double.doubleToRawLongBits(0.5)).append(',')
+                        .append(Double.doubleToRawLongBits(vx)).append(',')
+                        .append(Double.doubleToRawLongBits(0.0)).append(',')
+                        .append(Double.doubleToRawLongBits(0.0)).append(']');
+                if (tick > 0) frames.append(',');
+                appendLeashFrame(frames, cow, world, knot);
+            }
+            frames.append(']');
+            playerMotion.append(']');
+            String knotJson = fence ? "[" + fx + "," + fy + "," + fz + "]" : "null";
+            out.write("{\"type\":\"leash\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID + ",\"playerId\":" + playerId
+                    + ",\"cowSeed\":" + cowSeed
+                    + ",\"cow\":[" + Double.doubleToRawLongBits(0.5) + ","
+                    + Double.doubleToRawLongBits(64.0) + "," + Double.doubleToRawLongBits(0.5) + "]"
+                    + ",\"playerStart\":[" + Double.doubleToRawLongBits(2.5) + ","
+                    + Double.doubleToRawLongBits(64.0) + "," + Double.doubleToRawLongBits(0.5) + "]"
+                    + ",\"blocks\":" + blocks
+                    + ",\"knotPos\":" + knotJson
+                    + ",\"startLeash\":" + startLeash
+                    + ",\"playerMotion\":" + playerMotion
+                    + ",\"frames\":" + frames + "}\n");
+            written++;
+        }
+        return written;
+    }
+
+    /** 一刻的牛状态和绳状态，字段见 Rust 侧 `LeashFrame`。 */
+    private static void appendLeashFrame(StringBuilder out, Cow cow, FakeLevel world,
+            net.minecraft.world.entity.decoration.LeashFenceKnotEntity knot) throws Exception {
+        Vec3 p = cow.position();
+        Vec3 d = cow.getDeltaMovement();
+        boolean leashed = cow.isLeashed();
+        boolean may = cow.mayBeLeashed();
+        Entity holder = cow.getLeashHolder();
+        int kind = holder instanceof ServerPlayer ? 1
+                : holder instanceof net.minecraft.world.entity.decoration.LeashFenceKnotEntity ? 2 : 0;
+        double am = cow.getLeashData() == null ? 0.0 : cow.getLeashData().angularMomentum;
+        int items = 0;
+        for (Entity e : world.spawned) {
+            if (e instanceof net.minecraft.world.entity.item.ItemEntity ie
+                    && ie.getItem().is(Items.LEAD)) items++;
+        }
+        out.append("{\"cow\":[")
+                .append(Double.doubleToRawLongBits(p.x)).append(',')
+                .append(Double.doubleToRawLongBits(p.y)).append(',')
+                .append(Double.doubleToRawLongBits(p.z)).append(',')
+                .append(Double.doubleToRawLongBits(d.x)).append(',')
+                .append(Double.doubleToRawLongBits(d.y)).append(',')
+                .append(Double.doubleToRawLongBits(d.z)).append(']');
+        out.append(",\"rot\":[")
+                .append(Float.floatToRawIntBits(cow.getYRot())).append(',')
+                .append(Float.floatToRawIntBits(cow.getXRot())).append(',')
+                .append(Float.floatToRawIntBits(cow.getYHeadRot())).append(',')
+                .append(Float.floatToRawIntBits(cow.yBodyRot)).append(']');
+        out.append(",\"ground\":").append(cow.onGround());
+        out.append(",\"seed\":").append(randomSeed(cow));
+        out.append(",\"leash\":[").append(leashed ? 1 : 0).append(',').append(may ? 1 : 0)
+                .append(',').append(kind).append(',').append(Double.doubleToRawLongBits(am)).append(']');
+        out.append(",\"items\":").append(items);
+        out.append(",\"knotAlive\":").append(knot != null && !knot.isRemoved());
+        // 开 AI 的场景逐刻比正在跑的目标和导航路径：牛跟着牵引者走时这两个都要对上。
+        StringBuilder goals = new StringBuilder();
+        boolean firstGoal = true;
+        for (WrappedGoal goal : cow.getGoalSelector().getAvailableGoals()) {
+            if (!goal.isRunning()) continue;
+            if (!firstGoal) goals.append(' ');
+            firstGoal = false;
+            goals.append(goal.getGoal().getClass().getSimpleName());
+        }
+        out.append(",\"goals\":").append(jsonString(goals.toString()));
+        net.minecraft.world.level.pathfinder.Path path = cow.getNavigation().getPath();
+        out.append(",\"path\":");
+        if (path == null) {
+            out.append("null");
+        } else {
+            out.append('[').append(path.getNextNodeIndex());
+            for (int n = 0; n < path.getNodeCount(); n++) {
+                net.minecraft.world.level.pathfinder.Node node = path.getNode(n);
+                out.append(',').append(node.x).append(',').append(node.y).append(',').append(node.z);
+            }
+            out.append(']');
+        }
+        out.append('}');
     }
 
     /**

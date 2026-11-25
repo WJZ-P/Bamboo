@@ -255,11 +255,12 @@ pub(crate) fn apply_convert(
     }
 }
 
-/// `SINGLE.convert` 里装备以下的部分加 `convertCommon`。乘客、载具、拴绳、睡觉位置和
-/// 队伍 Bamboo 没有建模。
+/// `SINGLE.convert` 里装备以下的部分加 `convertCommon`。乘客、载具、睡觉位置和队伍
+/// Bamboo 没有建模；拴绳和官方一样不在转化时转移。
 ///
 /// The part of `SINGLE.convert` from the equipment on, plus `convertCommon`. Passengers,
-/// vehicles, leashes, sleeping positions and teams are not modelled.
+/// vehicles, sleeping positions and teams are not modelled; leashes are not carried
+/// over, matching vanilla.
 fn copy_state(from: &Mob, to: &mut Mob) {
     for slot in SLOTS {
         let stack = from.equipment.get(slot);

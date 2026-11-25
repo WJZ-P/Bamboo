@@ -242,6 +242,8 @@ impl GuardianCase {
                         uuid: None,
                         position,
                         delta: Vec3::default(),
+                        width: 0.6,
+                        height: 1.8,
                         eye_height: 1.62,
                         health: f32::from_bits(setup.health as u32),
                         look_direction: Vec3::default(),

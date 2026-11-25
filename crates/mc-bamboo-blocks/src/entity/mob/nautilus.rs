@@ -497,7 +497,7 @@ pub fn interact(
 /// `AbstractNautilus.checkRestriction`: a tame, unridden, unleashed nautilus keeps
 /// a home at its current position: 32 blocks for unsaddled adults, 16 otherwise.
 pub fn check_restriction(me: &Entity, mob: &mut Mob) {
-    if mob.is_vehicle() || !mob.tame.is_tame() {
+    if super::leash::is_leashed(mob) || mob.is_vehicle() || !mob.tame.is_tame() {
         return;
     }
     let saddled = !mob.equipment.get(EquipmentSlot::Saddle).is_empty();

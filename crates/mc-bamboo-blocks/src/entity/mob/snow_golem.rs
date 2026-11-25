@@ -311,6 +311,7 @@ mod tests {
             hand: mc_bamboo_core::Hand::Main,
             held: ItemStack::new(items::SHEARS, 1),
             creative: false,
+            player_height: 1.8,
             sneaking: false,
             difficulty: 2,
             position: Vec3::new(0.0, 64.0, 0.0),

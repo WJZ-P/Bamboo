@@ -10,6 +10,7 @@ use mc_bamboo_core::{
     sign::{SignContent, SignTextSlot},
 };
 use mc_bamboo_data::SoundSource;
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -44,6 +45,26 @@ pub struct EquipTarget {
     /// `minecraft:entity_type` 的注册表 ID。
     pub entity_type: i32,
     pub equipment: [Option<ItemStack>; 8],
+}
+
+/// 试炼刷怪笼一次玩家探测看到的一名玩家：UUID、眼睛位置和身上的不祥效果。
+///
+/// 效果信息在游戏层（`PlayerView` 没有它），所以 [`Level::trial_spawner_players`]
+/// 负责距离筛选并给出眼睛位置；视线遮挡由方块层用 [`World::clip_visual`] 再滤一遍。
+///
+/// One player seen by the trial spawner's detector: its UUID, eye position and
+/// ominous effects. The effect facts live in the game layer, so
+/// [`Level::trial_spawner_players`] filters by distance and reports the eye
+/// position; the block layer then applies the line-of-sight clip.
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub struct TrialSpawnerPlayer {
+    pub uuid: [u8; 16],
+    /// 身上有 `TRIAL_OMEN`。
+    pub trial_omen: bool,
+    /// 身上的 `BAD_OMEN` 等级；没有时是 `None`。
+    pub bad_omen_amplifier: Option<i32>,
+    /// 眼睛位置，`levelEvent(3020, ...)` 用 `BlockPos::containing`。
+    pub eye_position: mc_bamboo_core::Vec3,
 }
 
 /// 一次触发的种类。
@@ -1313,6 +1334,81 @@ pub trait Level: LevelSideState + LevelEntities {
     fn player_sleeping(&self, _uid: EntityUid) -> bool {
         false
     }
+
+    // 试炼刷怪笼的世界副作用。方块层只跑状态机，这些副作用里需要游戏层数据
+    // （玩家的不祥效果、装备表、战利品表、实体位置）的都由游戏层实现；缺省是
+    // 「没有玩家 / 不生成 / 不掉落」，只读测试世界和方块 oracle 走这一条。
+    // The trial spawner's world side effects. The block layer only runs the state
+    // machine; hooks that need game-layer data default to no players / no spawn /
+    // no drops, which the block oracle and read-only test worlds use.
+
+    /// `PlayerDetector.detect` 的候选玩家：`pos` 附近 `range` 格内、带不祥效果和眼睛
+    /// 位置的玩家。视线遮挡由方块层用 [`World::clip_visual`] 再滤。默认没有玩家。
+    fn trial_spawner_players(&self, _pos: BlockPos, _range: f64) -> Vec<TrialSpawnerPlayer> {
+        Vec::new()
+    }
+
+    /// `EquipmentTable` 套到一只还没放进世界的生物上：按战利品表给装备槽，写
+    /// 掉率。默认不做事。
+    fn equip_mob(&mut self, _entity: &mut crate::entity::Entity, _equipment: &Tag) {}
+
+    /// `TrialSpawner.ejectReward`：按战利品表在 `pos` 弹出一组奖励，返回有没有弹过。
+    /// 默认不弹。
+    fn trial_spawner_eject_reward(&mut self, _pos: BlockPos, _loot_table: &str) -> bool {
+        false
+    }
+
+    /// `spawnOminousOminousItemSpawner`：在探测到的玩家上方生成不祥物品生成器。
+    /// 默认不生成。
+    fn trial_spawner_spawn_ominous_item(&mut self, _pos: BlockPos, _loot_table: &str) -> bool {
+        false
+    }
+
+    /// `resetAfterBecomingOminous`：变成不祥试炼时让已记录的生物消失。默认不做事。
+    fn trial_spawner_discard_mobs(&mut self, _mobs: &[[u8; 16]]) {}
+
+    /// `shouldMobBeUntracked`：这只已记录的生物是否已经不活 / 太远 / 换维度。
+    /// 默认只在实体不存在时算「已不活」。
+    fn trial_spawner_mob_untracked(&self, uuid: [u8; 16], _pos: BlockPos) -> bool {
+        !self.has_mob_uuid(&uuid)
+    }
+
+    /// `getOrCreateDisplayEntity` 能不能造出显示实体。默认可以，让刷怪笼从
+    /// `inactive` 推进到 `waiting_for_players`。
+    fn trial_spawner_has_display_entity(&self) -> bool {
+        true
+    }
+
+    // 宝库的世界副作用。方块层只跑状态机；需要游戏层数据的（玩家探测、VAULT
+    // 战利品表、世界随机源、玩家物品栏）由游戏层实现，缺省是「没有玩家 / 空奖励 /
+    // 不消耗」，只读测试世界和方块 oracle 走这一条。
+
+    /// `PlayerDetector.detect` 的候选玩家：`pos` 附近 `range` 格内的玩家 UUID
+    /// （`INCLUDING_CREATIVE_PLAYERS`、`lineOfSight=false`）。默认没有玩家。
+    fn vault_players(&self, _pos: BlockPos, _range: f64) -> Vec<[u8; 16]> {
+        Vec::new()
+    }
+
+    /// `resolveItemsToEject`：按 VAULT 战利品表（玩家 luck / this_entity / 钥匙 tool）
+    /// 弹出一组物品。默认空。
+    fn vault_resolve_reward(
+        &mut self,
+        _pos: BlockPos,
+        _player: [u8; 16],
+        _key: &ItemStack,
+        _loot_table: &str,
+    ) -> Vec<ItemStack> {
+        Vec::new()
+    }
+
+    /// `getRandomDisplayItemFromLootTable`：用世界随机源从表里取一件展示物品。
+    /// 默认空。
+    fn vault_random_display_item(&mut self, _loot_table: &str, _pos: BlockPos) -> ItemStack {
+        ItemStack::empty()
+    }
+
+    /// `ItemStack.consume`：消耗玩家手里的 `count` 把钥匙。默认不消耗。
+    fn vault_consume_key(&mut self, _player: [u8; 16], _count: i32) {}
 
     /// 现实中的本地日期，不是世界时间。
     ///
@@ -2725,6 +2821,12 @@ pub enum Effect {
     /// `ElderGuardian.customServerAiStep`: send the `GUARDIAN_ELDER_EFFECT` game event
     /// packet only to the player who received mining fatigue.
     GuardianElderEffect { target: EntityUid, silent: bool },
+    /// `transformBadOmenIntoTrialOmen`：把玩家的不祥之兆换成试炼之兆。游戏层按
+    /// `player` 找玩家、移除 `BAD_OMEN`、加上 `TRIAL_OMEN`（时长 `duration`）。
+    ///
+    /// `transformBadOmenIntoTrialOmen`: replace the player's bad omen with trial omen.
+    /// The game layer finds the player by UUID, removes `BAD_OMEN` and adds `TRIAL_OMEN`.
+    TrialSpawnerTransformBadOmen { player: [u8; 16], duration: i32 },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///

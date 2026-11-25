@@ -283,7 +283,6 @@ impl ValidatePoiSlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stub {
     InteractWithDoor,
-    LookAndFollowTradingPlayerSink,
     GoToWantedItem,
     WorkAtComposter,
     WorkAtPoi,
@@ -445,10 +444,6 @@ const REQ_SET_HIDDEN: &[(MemoryType, MemoryStatus)] =
 impl Stub {
     const fn class(self) -> Class {
         match self {
-            Self::LookAndFollowTradingPlayerSink => Class::Timed {
-                min: i32::MAX,
-                max: i32::MAX,
-            },
             Self::WorkAtComposter | Self::WorkAtPoi => Class::Timed { min: 60, max: 60 },
             Self::HarvestFarmland => Class::Timed { min: 200, max: 200 },
             Self::UseBonemeal => Class::Timed { min: 60, max: 60 },
@@ -469,7 +464,6 @@ impl Stub {
     const fn required(self) -> &'static [(MemoryType, MemoryStatus)] {
         match self {
             Self::InteractWithDoor => REQ_DOOR,
-            Self::LookAndFollowTradingPlayerSink => REQ_TRADING_SINK,
             Self::GoToWantedItem => REQ_WANTED_ITEM,
             Self::WorkAtComposter | Self::WorkAtPoi => REQ_WORK_AT_POI,
             Self::StrollAroundJobSite | Self::StrollToJobSite => REQ_STROLL_JOB,
@@ -500,7 +494,6 @@ impl Stub {
 
     const fn name(self) -> &'static str {
         match self {
-            Self::LookAndFollowTradingPlayerSink => "LookAndFollowTradingPlayerSink",
             Self::WorkAtComposter => "WorkAtComposter",
             Self::WorkAtPoi => "WorkAtPoi",
             Self::HarvestFarmland => "HarvestFarmland",
@@ -547,6 +540,8 @@ pub enum Behavior {
     CalmDown,
     /// `UpdateActivityFromSchedule`：`OneShot`，按 20 刻节流刷新日程活动。
     UpdateActivityFromSchedule,
+    /// `LookAndFollowTradingPlayerSink`：`Behavior(MAX, MAX)`，交易中的村民停下看着玩家。
+    LookAndFollowTradingPlayerSink { speed: f32 },
     /// `SetWalkTargetAwayFrom.entity(memory, speed, desiredDist, checkNoWalkTarget)`。
     WalkAwayFromEntity {
         memory: MemoryType,
@@ -679,6 +674,10 @@ impl Behavior {
                 min: 1200,
                 max: 1200,
             },
+            Self::LookAndFollowTradingPlayerSink { .. } => Class::Timed {
+                min: i32::MAX,
+                max: i32::MAX,
+            },
             Self::Unavailable(stub) => stub.class(),
             _ => Class::OneShot,
         }
@@ -729,6 +728,7 @@ impl Behavior {
             Self::StrollToPoiList { .. } => REQ_STROLL_SECONDARY,
             Self::HarvestFarmland(_) => REQ_HARVEST_FARMLAND,
             Self::UseBonemeal(_) => REQ_USE_BONEMEAL,
+            Self::LookAndFollowTradingPlayerSink { .. } => REQ_TRADING_SINK,
             Self::Unavailable(stub) => stub.required(),
         }
     }
@@ -747,6 +747,7 @@ impl Behavior {
             Self::HarvestFarmland(_) => "HarvestFarmland",
             Self::UseBonemeal(_) => "UseBonemeal",
             Self::SleepInBed { .. } => "SleepInBed",
+            Self::LookAndFollowTradingPlayerSink { .. } => "LookAndFollowTradingPlayerSink",
             Self::Unavailable(stub) => stub.name(),
             _ => "OneShot",
         }
@@ -755,6 +756,7 @@ impl Behavior {
     pub(crate) fn extra_start(&mut self, cx: &mut Cx) -> bool {
         match self {
             Self::PanicTrigger => true,
+            Self::LookAndFollowTradingPlayerSink { .. } => trading_sink_can_use(cx),
             Self::GoToPotentialJobSite { .. } => matches!(
                 cx.active_non_core_activity(),
                 None | Some(Activity::Idle | Activity::Work | Activity::Play)
@@ -782,6 +784,7 @@ impl Behavior {
 
     pub(crate) fn start(&mut self, cx: &mut Cx) {
         match self {
+            Self::LookAndFollowTradingPlayerSink { speed } => follow_trading_player(cx, *speed),
             Self::PanicTrigger => {
                 if is_hurt(cx) || has_hostile(cx) {
                     if !cx.is_active(Activity::Panic) {
@@ -808,7 +811,13 @@ impl Behavior {
                 if *is_composter {
                     use_composter_workstation(cx);
                 }
-                if cx.mob.villager.should_restock(cx.time) {
+                // `Villager.shouldRestock(ServerLevel)` 的 `day` 来自 OVERWORLD_DAY
+                // 时间线的周期数（`clockTicks / 24000`），与 game_time 不是同一个时钟。
+                // `Villager.shouldRestock(ServerLevel)`'s `day` is the OVERWORLD_DAY
+                // timeline period count (`clockTicks / 24000`), a different clock from
+                // game_time.
+                let day = cx.ctx.blocks().clock_ticks() / 24_000;
+                if cx.mob.villager.should_restock(cx.time, day) {
                     cx.mob.villager.restock(cx.time);
                 }
             }
@@ -855,6 +864,7 @@ impl Behavior {
 
     pub(crate) fn can_still_use(&mut self, cx: &mut Cx) -> bool {
         match self {
+            Self::LookAndFollowTradingPlayerSink { .. } => trading_sink_can_use(cx),
             Self::PanicTrigger => is_hurt(cx) || has_hostile(cx),
             Self::GoToPotentialJobSite { .. } => cx.memories.has(PotentialJobSite),
             Self::WorkAtPoi { .. } => cx.memories.global_pos(JobSite).is_some_and(|gp| {
@@ -874,6 +884,7 @@ impl Behavior {
 
     pub(crate) fn tick(&mut self, cx: &mut Cx) {
         match self {
+            Self::LookAndFollowTradingPlayerSink { speed } => follow_trading_player(cx, *speed),
             Self::PanicTrigger => {
                 // `VillagerPanicTrigger.tick`：每 100 刻调 `spawnGolemIfNeeded(3)`，铁傀儡生成在期 6。
             }
@@ -890,6 +901,10 @@ impl Behavior {
 
     pub(crate) fn stop(&mut self, cx: &mut Cx) {
         match self {
+            Self::LookAndFollowTradingPlayerSink { .. } => {
+                cx.memories.erase(WalkTarget);
+                cx.memories.erase(LookTarget);
+            }
             Self::GoToPotentialJobSite { .. } => {
                 if let Some(gp) = cx.memories.global_pos(PotentialJobSite).cloned()
                     && gp.dimension == "minecraft:overworld"
@@ -1301,6 +1316,7 @@ impl Behavior {
             | Self::HarvestFarmland(_)
             | Self::UseBonemeal(_)
             | Self::SleepInBed { .. }
+            | Self::LookAndFollowTradingPlayerSink { .. }
             | Self::Unavailable(_) => false,
         }
     }
@@ -2554,6 +2570,58 @@ fn find_section_closest_to_village(
     best
 }
 
+/// `LookAndFollowTradingPlayerSink.checkExtraStartConditions` / `canStillUse`：
+/// 活着、有交易玩家、不在水里、没刚受伤、且离玩家不超过 4 格（距离平方 <= 16）。
+///
+/// `LookAndFollowTradingPlayerSink.checkExtraStartConditions` / `canStillUse`: alive, has a
+/// trading player, not in water, not recently hurt, and within 4 blocks (squared <= 16) of
+/// the player.
+fn trading_sink_can_use(cx: &Cx) -> bool {
+    let Some(uid) = cx.mob.villager.trading_player() else {
+        return false;
+    };
+    if cx.me.removed || cx.mob.health <= 0.0 || cx.me.is_in_water() || cx.mob.hurt_time > 0 {
+        return false;
+    }
+    let mut player_pos = None;
+    cx.ctx.blocks().for_each_player(&mut |player| {
+        if player.uid == uid {
+            player_pos = Some(player.position);
+        }
+    });
+    player_pos.is_some_and(|pos| cx.me.position.distance_to_sqr(pos) <= 16.0)
+}
+
+/// `LookAndFollowTradingPlayerSink.followPlayer`：把 WALK_TARGET / LOOK_TARGET 指到交易玩家。
+///
+/// `LookAndFollowTradingPlayerSink.followPlayer`: points WALK_TARGET / LOOK_TARGET at the
+/// trading player.
+fn follow_trading_player(cx: &mut Cx, speed: f32) {
+    let Some(uid) = cx.mob.villager.trading_player() else {
+        return;
+    };
+    cx.memories.set(
+        WalkTarget,
+        MemoryValue::Walk(WalkTarget {
+            target: PositionTracker::Entity {
+                uid,
+                track_eye: false,
+                target_eye: false,
+            },
+            speed,
+            close_enough: 2,
+        }),
+    );
+    cx.memories.set(
+        LookTarget,
+        MemoryValue::Look(PositionTracker::Entity {
+            uid,
+            track_eye: true,
+            target_eye: false,
+        }),
+    );
+}
+
 fn interact_with(kind: MobType, speed: f32) -> Kind {
     Kind::Villager(Behavior::InteractWith {
         kind,
@@ -2650,7 +2718,10 @@ fn core_package(speed: f32) -> ActivityData {
             ),
             (1, Kind::MoveToTargetSink(MoveToTargetSink::new(false))),
             (2, Kind::Villager(Behavior::PoiCompetitorScan)),
-            (3, stub(Stub::LookAndFollowTradingPlayerSink)),
+            (
+                3,
+                Kind::Villager(Behavior::LookAndFollowTradingPlayerSink { speed }),
+            ),
             (
                 5,
                 Kind::Villager(Behavior::GoToWantedItem { speed, max_dist: 4 }),
@@ -3308,6 +3379,21 @@ pub(super) fn custom_server_ai_step(
             let _ = me.random.next_int_bounded(100);
         }
     }
+
+    // `Villager.customServerAiStep` 末尾：上一笔交易玩家用于声望事件（期 6 接，这里只清），
+    // 交易表为空却仍在交易时按官方 `stopTrading()`。
+    // End of `Villager.customServerAiStep`: the last traded player feeds the reputation
+    // event (phase 6; cleared here), and an empty offer list while trading triggers the
+    // official `stopTrading()`.
+    mob.villager.last_traded_player = None;
+    let offers_empty = mob
+        .villager
+        .offers
+        .as_ref()
+        .is_none_or(|offers| offers.is_empty());
+    if offers_empty && mob.villager.is_trading() {
+        mob.villager.stop_trading();
+    }
 }
 
 #[cfg(test)]
@@ -3686,9 +3772,9 @@ mod tests {
         assert!(!throttle::exempt(&mob, 1000, true, false, 0));
 
         // 正在交易。
-        mob.villager.trading = true;
+        mob.villager.set_trading_player(Some(7));
         assert!(throttle::exempt(&mob, 1000, true, false, 0));
-        mob.villager.trading = false;
+        mob.villager.stop_trading();
 
         // 四种紧急活动。
         for act in [

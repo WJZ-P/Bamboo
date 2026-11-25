@@ -64,6 +64,8 @@ fn player(x: f64, z: f64) -> PlayerView {
         uuid: None,
         position: Vec3::new(x, 64.0, z),
         delta: Vec3::default(),
+        width: 0.6,
+        height: 1.8,
         eye_height: 1.62,
         health: 20.0,
         look_direction: Vec3::default(),

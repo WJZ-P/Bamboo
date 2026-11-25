@@ -126,10 +126,10 @@ impl SpawnState {
             let KindPublic::Mob(mob) = &public.kind else {
                 continue;
             };
-            // `Mob.requiresCustomPersistence()` 只认载具和拴绳，Bamboo 都没有；鱼从桶里
-            // 放出来的那种、搬着方块的末影人要算进来。
-            // Vanilla `requiresCustomPersistence()` needs a vehicle or a leash; fish
-            // released from a bucket and endermen carrying a block count as well.
+            // `Mob.requiresCustomPersistence()`：拴着的（或从桶里放出来、搬着方块的）
+            // 不算进刷怪上限。
+            // Vanilla `requiresCustomPersistence()`: leashed mobs (plus bucketed fish
+            // and endermen carrying a block) are exempt from the cap.
             if mob.requires_custom_persistence() {
                 continue;
             }
@@ -1279,6 +1279,8 @@ mod tests {
             pitch: 0.0,
             position,
             delta: Vec3::default(),
+            width: 0.6,
+            height: 1.8,
             eye_height: 1.62,
             health: 20.0,
             look_direction: Vec3::default(),
