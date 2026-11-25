@@ -2279,6 +2279,52 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
             ("LastPoseTick", Tag::Long(-1000)),
         ]),
     ));
+    // 拴绳存档往返：官方 `loadEntityRecursive -> save` 与 Bamboo `read_entity ->
+    // write_entity` 逐键比。`LeashData.CODEC` 的两种形态都要还原：
+    // 实体牵引者 `{UUID:[I;...]}`，拴绳结 `[I;x,y,z]`。
+    let leash_uuid = Tag::IntArray(vec![0x1111_2222, -0x3333_4444, 0x5555_6666, 0x0777_0888]);
+    let leash_cow = |leash: Tag| {
+        compound(vec![
+            ("id", Tag::String("minecraft:cow".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", mc_bamboo_blocks::archive::entity_uuid_tag(99)),
+            ("leash", leash),
+        ])
+    };
+    out.push((
+        "leash entity holder".to_owned(),
+        leash_cow(compound(vec![("UUID", leash_uuid.clone())])),
+    ));
+    out.push((
+        "leash knot holder".to_owned(),
+        leash_cow(Tag::IntArray(vec![7, 64, -3])),
+    ));
+    // 一头 Bamboo 生成后写出的拴绳牛，验证 `leash_tag` 的写出格式能被官方逐键还原。
+    {
+        let mut store = mc_bamboo_blocks::EntityStore::new();
+        let uid = store.spawn(Entity::cow(Vec3::new(1.5, 64.0, 2.5)));
+        let mut entity = store.get(uid).expect("leash cow");
+        entity.kind.mob_mut().unwrap().leash =
+            Some(mc_bamboo_blocks::entity::mob::leash::LeashData::new(
+                1,
+                mc_bamboo_blocks::entity::mob::leash::LeashDelayed::Entity([0x11; 16]),
+            ));
+        out.push((
+            "leash spawned entity".to_owned(),
+            write_entity(&entity.split()).expect("leash cow writes"),
+        ));
+        let uid2 = store.spawn(Entity::cow(Vec3::new(1.5, 64.0, 2.5)));
+        let mut entity2 = store.get(uid2).expect("leash cow");
+        entity2.kind.mob_mut().unwrap().leash =
+            Some(mc_bamboo_blocks::entity::mob::leash::LeashData::new(
+                2,
+                mc_bamboo_blocks::entity::mob::leash::LeashDelayed::Knot(BlockPos::new(9, 70, -5)),
+            ));
+        out.push((
+            "leash spawned knot".to_owned(),
+            write_entity(&entity2.split()).expect("leash cow writes"),
+        ));
+    }
     let mut store = mc_bamboo_blocks::EntityStore::new();
     let uid = store.spawn(Entity::cow(Vec3::new(8.5, 65.0, 8.5)));
     let row = store.get(uid).expect("刚生成").split();

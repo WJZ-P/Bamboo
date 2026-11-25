@@ -189,7 +189,10 @@ impl Report {
         let mut level = case.level();
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
-        let knot_uid = case.setup(&mut World::new(&mut level, &mut ticks), break_test.as_deref());
+        let knot_uid = case.setup(
+            &mut World::new(&mut level, &mut ticks),
+            break_test.as_deref(),
+        );
         // 起步状态由 setup 直接写字段，清掉同步/生成事件，避免干扰。
         let _ = level.entities.take_mob_events();
         let _ = level.entities.take_spawn_snapshots();
@@ -213,10 +216,11 @@ impl Report {
                     }
                 }
                 // 拆栅栏场景：动作刻移除栅栏方块。
-                if case.name == "leash_fence_break" && tick == ACTION_TICK {
-                    if let Some(p) = case.knot_pos {
-                        level.blocks.remove(&BlockPos::new(p[0], p[1], p[2]));
-                    }
+                if case.name == "leash_fence_break"
+                    && tick == ACTION_TICK
+                    && let Some(p) = case.knot_pos
+                {
+                    level.blocks.remove(&BlockPos::new(p[0], p[1], p[2]));
                 }
                 ticks.set_time(1000 + tick as i64);
                 {
@@ -230,7 +234,10 @@ impl Report {
                                     }
                                 });
                                 // 掉落物只比数量，不比坐标，用牛的起点即可。
-                                world.spawn_at_location(v3(&case.cow), ItemStack::new(items::LEAD, 1));
+                                world.spawn_at_location(
+                                    v3(&case.cow),
+                                    ItemStack::new(items::LEAD, 1),
+                                );
                             }
                             "leash_fence_untie" => {
                                 // 官方 `setLeashedTo(player)` 内部对旧 holder（结）调
@@ -253,12 +260,10 @@ impl Report {
                                     );
                                 }
                             }
-                            "leash_fence_break" => {
+                            "leash_fence_break" if knot_uid >= 0 => {
                                 // 和官方一致：结先消失，牛这一刻 tickLeash 看到牵引者
                                 // 已 removed → dropLeash。
-                                if knot_uid >= 0 {
-                                    world.with_entity_mut(knot_uid, &mut |e| e.discard());
-                                }
+                                world.with_entity_mut(knot_uid, &mut |e| e.discard());
                             }
                             _ => {}
                         }
