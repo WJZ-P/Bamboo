@@ -178,6 +178,13 @@ fn passenger_attachment(vehicle: &EntityPublic, index: usize) -> Vec3 {
         MobType::Horse => (0.0, 1.443750023841858, 0.0),
         MobType::Donkey => (0.0, 1.1124999523162842, 0.0),
         MobType::Mule => (0.0, 1.212499976158142, 0.0),
+        // `EntityTypes.SKELETON_HORSE` / `ZOMBIE_HORSE` 都注册
+        // `passengerAttachments([1.31875f])`，和马的高度 1.6 不同；没上鞍被生物骑时
+        // `AbstractHorse.getPassengerAttachmentPoint` 的 standAnim 偏移为 0，退化成这个点。
+        // Both SKELETON_HORSE and ZOMBIE_HORSE register
+        // passengerAttachments([1.31875f]), unlike the horse's 1.6 height; with
+        // standAnimO == 0 the AbstractHorse override reduces to this point.
+        MobType::SkeletonHorse | MobType::ZombieHorse => (0.0, 1.318750023841858, 0.0),
         // `EntityTypes.NAUTILUS` / `ZOMBIE_NAUTILUS` 的 `passengerAttachments(1.1375F)`。
         // `EntityTypes.NAUTILUS` / `ZOMBIE_NAUTILUS` register
         // `passengerAttachments(1.1375F)`.
