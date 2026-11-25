@@ -8,8 +8,8 @@ use uuid::Uuid;
 use super::{HumanoidArm, write_lp_vec3};
 use crate::{
     codec::{
-        write_block_pos, write_bool, write_f32, write_f64, write_string, write_uuid, write_varint,
-        write_vec3,
+        write_block_pos, write_bool, write_f32, write_f64, write_i32, write_string, write_uuid,
+        write_varint, write_vec3,
     },
     item::ItemStack,
     packet::ClientboundPacket,
@@ -1128,6 +1128,26 @@ impl ClientboundPacket for SetPassengers<'_> {
     }
 }
 
+/// 拴绳的牵引关系，`ClientboundSetEntityLinkPacket`：被拴的实体和牵引者，牵引者空时是 0。
+/// 两个字段都是 4 字节定长整数（官方 `writeInt`，不是 varint）。
+///
+/// A leash link: the leashed entity and its holder, 0 when there is none. Both
+/// fields are four-byte ints (vanilla `writeInt`, not varint).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetEntityLink {
+    pub source_id: i32,
+    pub dest_id: i32,
+}
+
+impl ClientboundPacket for SetEntityLink {
+    const ID: i32 = clientbound::SET_ENTITY_LINK;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_i32(out, self.source_id);
+        write_i32(out, self.dest_id);
+    }
+}
+
 /// 玩家捡起地上的物品，`ClientboundTakeItemEntityPacket`。
 ///
 /// 三个 varint：物品实体、捡起它的玩家、这次拿走的数量。
@@ -1421,6 +1441,25 @@ mod tests {
             entity_ids: &[7, 300],
         };
         assert_eq!(body(&packet), hex("02 07 ac 02"));
+    }
+
+    #[test]
+    fn set_entity_link_writes_two_four_byte_ints() {
+        assert_eq!(
+            body(&SetEntityLink {
+                source_id: 7,
+                dest_id: 300,
+            }),
+            hex("00 00 00 07 00 00 01 2c")
+        );
+        // 牵引者空时 dest_id 是 0。
+        assert_eq!(
+            body(&SetEntityLink {
+                source_id: 7,
+                dest_id: 0,
+            }),
+            hex("00 00 00 07 00 00 00 00")
+        );
     }
 
     #[test]
