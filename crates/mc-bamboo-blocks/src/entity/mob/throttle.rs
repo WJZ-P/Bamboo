@@ -340,7 +340,7 @@ pub fn nearest_player_distance_sqr(position: Vec3, players: &[PlayerView]) -> Op
 /// Villager throttling exemptions: active in `PANIC` / `RAID` / `PRE_RAID` / `HIDE`,
 /// currently trading, or `HEARD_BELL_TIME` within the 300-tick valid window.
 pub fn villager_throttle_exempt(mob: &Mob, now: i64) -> bool {
-    if mob.villager.trading {
+    if mob.villager.is_trading() {
         return true;
     }
     let Some(brain) = mob.brain.as_deref() else {
