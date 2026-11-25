@@ -317,7 +317,14 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     // 史莱姆和鱿鱼一支是 `AgeableMob` 但不是 `Animal`，没有求爱的两个键。
     // Slimes and the squid branch are `AgeableMob`s but not `Animal`s, so they
     // lack the two love keys.
-    if mob.mob_type.is_animal() && mob.mob_type != MobType::Slime {
+    // `ZombieNautilus` 虽然是 `Monster`，但它继承的 `Animal.addAdditionalSaveData`
+    // 仍写 `InLove`；Bamboo 的 `is_animal()` 只对非怪物为真，这里显式补上。
+    // `ZombieNautilus` is a `Monster`, yet its inherited
+    // `Animal.addAdditionalSaveData` still writes `InLove`; `is_animal()` is
+    // false for monsters, so include it explicitly here.
+    if (mob.mob_type.is_animal() || mob.mob_type == MobType::ZombieNautilus)
+        && mob.mob_type != MobType::Slime
+    {
         put(&mut out, "InLove", Tag::Int(mob.in_love));
         if let Some(uuid) = &mob.love_cause {
             put(&mut out, "LoveCause", uuid_tag(uuid));
@@ -775,7 +782,7 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
             mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
         }
-        if mob.mob_type.is_animal() {
+        if mob.mob_type.is_animal() || mob.mob_type == MobType::ZombieNautilus {
             mob.in_love = tag::int_or(tag, "InLove", 0);
             mob.love_cause = uuid_field(tag, "LoveCause");
         }

@@ -1569,8 +1569,54 @@ fn entity_cases() -> Vec<Tag> {
     out.extend(fish_archive_cases());
     out.extend(jockey_archive_cases());
     out.extend(guardian_archive_cases());
+    out.extend(nautilus_archive_cases());
     out.extend(zombie_villager_archive_cases());
     out
+}
+
+/// 鹦鹉螺 / 僵尸鹦鹉螺的存档往返：驯服的主人、鞍、铠甲、大脑记忆、
+/// 冲刺标志和僵尸变种。官方 `EntityType.loadEntityRecursive` 逐键重存。
+///
+/// Nautilus / zombie-nautilus save round-trip: tame owner, saddle, armor,
+/// brain memories, dash flag and the zombie variant, resaved by vanilla.
+fn nautilus_archive_cases() -> Vec<Tag> {
+    use mc_bamboo_blocks::entity::mob::{MobType, brain::memory::MemoryType, tame};
+    use mc_bamboo_data::items;
+
+    [MobType::Nautilus, MobType::ZombieNautilus]
+        .into_iter()
+        .map(|kind| {
+            let mut store = mc_bamboo_blocks::EntityStore::new();
+            let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(1.5, 63.0, -2.5)));
+            store.with_mut(uid, |entity| {
+                entity.with_mob(|_, mob| {
+                    tame::set_tame(mob, true, false);
+                    mob.tame.owner = Some((uid as u128 + 1).to_be_bytes());
+                    mob.equipment.set(
+                        mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle,
+                        ItemStack::new(items::SADDLE, 1),
+                    );
+                    mob.equipment.set(
+                        mc_bamboo_protocol::packet::play::EquipmentSlot::Body,
+                        ItemStack::new(items::IRON_NAUTILUS_ARMOR, 1),
+                    );
+                    mob.nautilus.dashing = true;
+                    mob.nautilus.dash_cooldown = 31;
+                    if kind == MobType::ZombieNautilus {
+                        mob.nautilus.variant = 1;
+                    }
+                    if let Some(brain) = mob.brain.as_mut() {
+                        brain.memories.set(
+                            MemoryType::AttackTargetCooldown,
+                            mc_bamboo_blocks::entity::mob::brain::memory::MemoryValue::Int(2700),
+                        );
+                    }
+                });
+            });
+            write_entity(&store.get(uid).expect("fresh nautilus").split())
+                .expect("nautilus archive")
+        })
+        .collect()
 }
 
 /// 僵尸村民的存档：`VillagerData`、`VillagerDataFinalized`、`Offers`、`Gossips`、
