@@ -582,43 +582,15 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 ref hit_players,
                 is_small,
                 play_sound,
-            } => {
-                let particle = if is_small {
-                    mc_bamboo_data::registries::particle_type::EXPLOSION
-                } else {
-                    mc_bamboo_data::registries::particle_type::EXPLOSION_EMITTER
-                };
-                let sound = i32::from(sounds::sound_event("minecraft:entity.generic.explode"));
-                // `ServerLevel.explode`：遍历所有玩家，距离平方小于 4096（64 格）才发，
-                // 每名玩家带上 `getHitPlayers` 里自己那份击退向量。
-                //
-                // `ServerLevel.explode` walks every player and sends to those within
-                // 4096 squared distance (64 blocks), each carrying their own knockback.
-                for player in region.players.values() {
-                    let Vec3 { x, y, z } = player.position();
-                    let dx = center.x - x;
-                    let dy = center.y - y;
-                    let dz = center.z - z;
-                    if dx * dx + dy * dy + dz * dz >= 64.0 * 64.0 {
-                        continue;
-                    }
-                    let knockback = hit_players
-                        .iter()
-                        .find(|(uid, _)| *uid == player.id.0)
-                        .map(|(_, knock)| *knock);
-                    let packet = Explode {
-                        center,
-                        radius,
-                        block_count,
-                        player_knockback: knockback,
-                        explosion_particle: particle,
-                        explosion_sound: sound,
-                        block_particles: DEFAULT_EXPLOSION_BLOCK_PARTICLES,
-                        play_sound,
-                    };
-                    region.links.send(player.id, &packet);
-                }
-            }
+            } => send_explode(
+                region,
+                center,
+                radius,
+                block_count,
+                hit_players,
+                is_small,
+                play_sound,
+            ),
             Effect::LevelEvent {
                 event,
                 pos,
@@ -1009,6 +981,52 @@ pub(crate) fn hears_level_event(player: &Player, pos: BlockPos) -> bool {
     let dy = f64::from(pos.y) - y;
     let dz = f64::from(pos.z) - z;
     dx * dx + dy * dy + dz * dz < LEVEL_EVENT_RADIUS * LEVEL_EVENT_RADIUS
+}
+
+/// `ServerLevel.explode` 把 `ClientboundExplodePacket` 发给 64 格内的每名玩家，
+/// 各带 `getHitPlayers` 里自己那份击退向量。
+///
+/// `ServerLevel.explode` sends `ClientboundExplodePacket` to every player within
+/// 64 blocks, each carrying their own `getHitPlayers` knockback.
+pub(crate) fn send_explode(
+    region: &mut Region,
+    center: Vec3,
+    radius: f32,
+    block_count: i32,
+    hit_players: &[(i32, Vec3)],
+    is_small: bool,
+    play_sound: bool,
+) {
+    let particle = if is_small {
+        mc_bamboo_data::registries::particle_type::EXPLOSION
+    } else {
+        mc_bamboo_data::registries::particle_type::EXPLOSION_EMITTER
+    };
+    let sound = i32::from(sounds::sound_event("minecraft:entity.generic.explode"));
+    for player in region.players.values() {
+        let Vec3 { x, y, z } = player.position();
+        let dx = center.x - x;
+        let dy = center.y - y;
+        let dz = center.z - z;
+        if dx * dx + dy * dy + dz * dz >= 64.0 * 64.0 {
+            continue;
+        }
+        let knockback = hit_players
+            .iter()
+            .find(|(uid, _)| *uid == player.id.0)
+            .map(|(_, knock)| *knock);
+        let packet = Explode {
+            center,
+            radius,
+            block_count,
+            player_knockback: knockback,
+            explosion_particle: particle,
+            explosion_sound: sound,
+            block_particles: DEFAULT_EXPLOSION_BLOCK_PARTICLES,
+            play_sound,
+        };
+        region.links.send(player.id, &packet);
+    }
 }
 
 fn block_update(pos: BlockPos, state: u32) -> BlockUpdate {

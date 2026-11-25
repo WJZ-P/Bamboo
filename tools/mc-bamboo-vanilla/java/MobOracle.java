@@ -15366,7 +15366,7 @@ public final class MobOracle {
 
     /** 玩家自己收到的包里要比的那几种：受伤动画、进入 / 离开战斗、死亡界面、血量。 */
     private static final java.util.Set<Integer> ZOMBIE_SELF_PACKETS = java.util.Set.of(
-            43, 67, 68, 69, 106);
+            36, 43, 67, 68, 69, 106);
     /** 尸壳饥饿场景额外比 `update_mob_effect`（135，VarInt 首字节 0x87）。 */
     private static final java.util.Set<Integer> EFFECT_PACKET = java.util.Set.of(135);
 

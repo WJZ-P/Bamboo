@@ -2731,6 +2731,30 @@ impl Report {
                 world.tick_entities();
                 tick_effects = world.into_effects();
             }
+            // 爆炸包走游戏层正式入口：把 `Effect::Explode` 发给区域里的玩家，
+            // `compare_zombie_player` 再和官方逐字节比（含击退向量）。
+            if let Some(game) = level.game.as_mut() {
+                for effect in &tick_effects {
+                    if let mc_bamboo_blocks::Effect::Explode {
+                        center,
+                        radius,
+                        block_count,
+                        hit_players,
+                        is_small,
+                        play_sound,
+                    } = effect
+                    {
+                        game.send_explode(
+                            *center,
+                            *radius,
+                            *block_count,
+                            hit_players,
+                            *is_small,
+                            *play_sound,
+                        );
+                    }
+                }
+            }
             // 这一刻新生成的实体：快照是在 `addFreshEntity` 时记下的，官方
             // `ChunkMap.addEntity` 也在同一时刻建 `ServerEntity`。
             // Newly spawned entities: the snapshot is taken at `addFreshEntity`,
@@ -2941,7 +2965,7 @@ impl Report {
 
     /// 真实玩家的僵尸场景：比 0 号玩家的状态和它自己收到的那几种包。
     fn compare_zombie_player(&mut self, case: &Case, level: &mut MobLevel, index: usize) {
-        const SELF_PACKETS: [u8; 6] = [43, 67, 68, 69, 106, 135];
+        const SELF_PACKETS: [u8; 7] = [36, 43, 67, 68, 69, 106, 135];
         let (Some(game), Some(player)) = (level.game.as_mut(), case.players.first()) else {
             return;
         };
