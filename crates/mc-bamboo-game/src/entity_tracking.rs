@@ -246,6 +246,21 @@ pub struct TrackedEntity {
 impl TrackedEntity {
     /// 和 `ServerEntity` 的构造函数一样，记下实体现在的样子当作已经发过。
     fn new(snapshot: &Snapshot) -> Self {
+        let last_data = snapshot.data.pairing_values();
+        let mut pending_dirty = last_data.clone();
+        // 官方 `SynchedEntityData.packDirty`：若某字段在出生前被改过又改回默认值
+        // （如出巢蜜蜂先读入 `HasNectar=true` 再由 `dropOffNectar` 清回 0），
+        // `getNonDefaultValues` 不含它，但首次 `packDirty` 仍会发出该脏项。
+        // Vanilla `SynchedEntityData.packDirty`: a field modified before spawn and reset to its
+        // default (e.g. a released bee loading `HasNectar=true` then cleared by `dropOffNectar`)
+        // is omitted from `getNonDefaultValues` yet still emitted by the first `packDirty`.
+        if let KindData::Mob(mob) = &snapshot.data
+            && mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Bee
+            && mob.bee_flags_dirty
+            && mob.bee_flags == 0
+        {
+            pending_dirty.push(EntityData::BeeFlags(0));
+        }
         Self {
             base: snapshot.position,
             last_movement: snapshot.delta,
@@ -253,8 +268,8 @@ impl TrackedEntity {
             last_yaw: pack_degrees(snapshot.yaw),
             last_pitch: snapshot.data.mob_x_rot().map_or(0, pack_degrees),
             last_head: snapshot.data.mob_head_rot().map_or(0, pack_degrees),
-            last_data: snapshot.data.pairing_values(),
-            pending_dirty: snapshot.data.pairing_values(),
+            last_data,
+            pending_dirty,
             last_attributes: Vec::new(),
             teleport_delay: 0,
             ticks_since_step: -1,

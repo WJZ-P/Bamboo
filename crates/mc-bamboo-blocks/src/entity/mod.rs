@@ -561,9 +561,15 @@ impl Entity {
             mob.cube.move_y_rot = mob::slime::constructor_move_y_rot(self.y_rot);
         }
         if mob.mob_type == mob::MobType::Bee {
-            // `Bee` 构造函数的 `Mth.nextInt(random, 20, 60)`。
+            // `Mob.<init>` 调 `Bee.registerGoals`：`ValidateHiveGoal` 与 `ValidateFlowerGoal`
+            // 各抽一次 `Mth.nextInt(random, 20, 40)`；随后 `Bee.<init>` 字段初始化抽
+            // `Mth.nextInt(random, 20, 60)`。
+            // `Mob.<init>` calls `Bee.registerGoals` (`ValidateHiveGoal` and
+            // `ValidateFlowerGoal` each draw `Mth.nextInt(random, 20, 40)`), followed by
+            // `Bee.<init>` drawing `Mth.nextInt(random, 20, 60)`.
+            mob::bee_goals::init_validate_cooldowns(mob, &mut self.random);
             mob.bee.remaining_cooldown_before_locating_new_flower =
-                self.random.next_int_bounded(40) + 20;
+                self.random.next_int_bounded(41) + 20;
         }
         if let Some(brain) = mob.brain.as_mut() {
             // `LivingEntity` 构造函数最后的 `makeBrain`：每个传感器一次 `nextInt(scanRate)`。

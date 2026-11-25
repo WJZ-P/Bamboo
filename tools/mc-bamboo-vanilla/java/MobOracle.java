@@ -429,6 +429,9 @@ public final class MobOracle {
             if (only == null || "villager_brain".startsWith(only) || only.startsWith("villager_brain")) {
                 cases += playVillagerBrain(official, out, only);
             }
+            if (only == null || "villager_poi_acquire".startsWith(only) || only.startsWith("villager_poi")) {
+                cases += playVillagerPoi(official, out, only);
+            }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playBat(official, out, name);
@@ -503,6 +506,19 @@ public final class MobOracle {
                         "bee_locate_nest", "bee_locate_breaks")) {
                     if (only != null && !name.startsWith(only)) continue;
                     playBeeLocate(official, out, name);
+                    cases++;
+                }
+            }
+            if (only == null || only.startsWith("bee_full")) {
+                for (String name : List.of(
+                        "bee_full_hive_cycle",
+                        "bee_full_pollinate_crop",
+                        "bee_full_switch_hive",
+                        "bee_full_anger_swarm",
+                        "bee_full_night",
+                        "bee_full_rain")) {
+                    if (only != null && !name.startsWith(only)) continue;
+                    playBeeFull(official, out, name);
                     cases++;
                 }
             }
@@ -9720,6 +9736,611 @@ public final class MobOracle {
      *  `full[i]` 就是 `isFull()` 的结果），再按
      *  `Comparator.comparingDouble(blockPos.distSqr(pos))` 稳定排序。每刻只改哪些巢满，
      *  逐刻比整张有序候选表：POI 遍历序、等距并列、满巢换巢、整数距离排序都在这里钉死。 */
+        /** 按指定种子重放 `Bee` 构造期的全部随机数取数（与 Bamboo `EntityStore::prepare` 对齐）。 */
+        private static void reseedBee(net.minecraft.world.entity.animal.bee.Bee bee, long seed) throws Exception {
+            setRandom(bee, seed);
+            RandomSource r = bee.getRandom();
+            bee.setUUID(Mth.createInsecureUUID(r));
+            float yaw = r.nextFloat() * 6.2831855F;
+            bee.setYRot(yaw);
+            bee.yRotO = yaw;
+            bee.setYHeadRot(yaw);
+            // `Bee.registerGoals` 里 `ValidateHiveGoal` 与 `ValidateFlowerGoal` 各取一次 `Mth.nextInt(r, 20, 40)`。
+            // `Bee.registerGoals`: `ValidateHiveGoal` and `ValidateFlowerGoal` each draw `Mth.nextInt(r, 20, 40)`.
+            Field goalsField = Mob.class.getDeclaredField("goalSelector");
+            goalsField.setAccessible(true);
+            var selector = (net.minecraft.world.entity.ai.goal.GoalSelector) goalsField.get(bee);
+            for (var wrapped : selector.getAvailableGoals()) {
+                var g = wrapped.getGoal();
+                String simple = g.getClass().getSimpleName();
+                if (simple.equals("ValidateHiveGoal")) {
+                    put(g.getClass(), g, "VALIDATE_HIVE_COOLDOWN", Mth.nextInt(r, 20, 40));
+                } else if (simple.equals("ValidateFlowerGoal")) {
+                    put(g.getClass(), g, "validateFlowerCooldown", Mth.nextInt(r, 20, 40));
+                }
+            }
+            // `Bee.<init>`：`Mth.nextInt(r, 20, 60)`。
+            put(net.minecraft.world.entity.animal.bee.Bee.class, bee,
+                    "remainingCooldownBeforeLocatingNewFlower", Mth.nextInt(r, 20, 60));
+        }
+
+        /** 真实 POI、真实方块实体、真目标链（不开 NoAi）的蜜蜂全量逐刻对拍。 */
+        private static void playBeeFull(Official official, Writer out, String name) throws Exception {
+            FakeLevel level = FakeLevel.create(official);
+            try {
+                playBeeFullInner(official, level, out, name);
+            } finally {
+                level.closeRealPoi();
+                official.attributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+            }
+        }
+
+        private static void playBeeFullInner(Official official, FakeLevel level, Writer out, String name) throws Exception {
+            ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+            level.nextId = FIRST_ID;
+            level.gameTime = START_TIME;
+            level.realSky = true;
+            level.injectedCanSeeSky = true;
+            level.levelEvents = new ArrayList<>();
+
+            long clockStart = name.equals("bee_full_night") ? 12540L : 1000L;
+            boolean startRaining = name.equals("bee_full_rain");
+            int rainStopTick = name.equals("bee_full_rain") ? 660 : -1;
+            int ticks = switch (name) {
+                case "bee_full_pollinate_crop" -> 3050;
+                case "bee_full_switch_hive" -> 220;
+                case "bee_full_anger_swarm" -> 120;
+                case "bee_full_night" -> 160;
+                case "bee_full_rain" -> 700;
+                default -> 700;
+            };
+            level.clock = clockStart;
+            level.rainLevel = startRaining ? 1.0F : 0.0F;
+            level.injectedRaining = startRaining;
+
+            // 平坦石地板 y=63，保证飞行寻路和落点搜索有真实地面。
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -12; x <= 12; x++) {
+                for (int z = -12; z <= 12; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+
+            List<BlockPos> hivePositions = new ArrayList<>();
+            List<net.minecraft.world.level.block.entity.BeehiveBlockEntity> hives = new ArrayList<>();
+            List<int[][]> hiveInitOccupants = new ArrayList<>();
+            List<BlockPos> watchedBlocks = new ArrayList<>();
+
+            if (name.equals("bee_full_hive_cycle") || name.equals("bee_full_rain")) {
+                BlockPos hivePos = new BlockPos(4, 65, 0);
+                BlockState hiveState = Blocks.BEEHIVE.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.BeehiveBlock.FACING, Direction.SOUTH)
+                        .setValue(net.minecraft.world.level.block.BeehiveBlock.HONEY_LEVEL, 0);
+                level.blocks.put(hivePos.asLong(), hiveState);
+                var hiveBe = new net.minecraft.world.level.block.entity.BeehiveBlockEntity(hivePos, hiveState);
+                level.putBlockEntity(hiveBe);
+                hivePositions.add(hivePos);
+                hives.add(hiveBe);
+                hiveInitOccupants.add(new int[0][]);
+            } else if (name.equals("bee_full_night")) {
+                BlockPos hivePos = new BlockPos(4, 65, 0);
+                BlockState hiveState = Blocks.BEEHIVE.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.BeehiveBlock.FACING, Direction.SOUTH)
+                        .setValue(net.minecraft.world.level.block.BeehiveBlock.HONEY_LEVEL, 0);
+                level.blocks.put(hivePos.asLong(), hiveState);
+                var hiveBe = new net.minecraft.world.level.block.entity.BeehiveBlockEntity(hivePos, hiveState);
+                // 预置一只已满 595 刻的蜂：进夜后到 600 刻也不能出巢。
+                hiveBe.storeBee(net.minecraft.world.level.block.entity.BeehiveBlockEntity.Occupant.create(595));
+                level.putBlockEntity(hiveBe);
+                hivePositions.add(hivePos);
+                hives.add(hiveBe);
+                hiveInitOccupants.add(new int[][] {{595, 600, 0}});
+            } else if (name.equals("bee_full_pollinate_crop")) {
+                // 花在 (-2, 64, 0)，小麦在 (0..3, 64, 0) 位于采蜜回巢路径下方，蜂巢在 (5, 65, 0)。
+                level.blocks.put(BlockPos.asLong(-2, 63, 0), Blocks.GRASS_BLOCK.defaultBlockState());
+                level.blocks.put(BlockPos.asLong(-2, 64, 0), Blocks.DANDELION.defaultBlockState());
+                for (int x = 0; x <= 3; x++) {
+                    for (int z = -1; z <= 1; z++) {
+                        level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.FARMLAND.defaultBlockState());
+                        BlockPos crop = new BlockPos(x, 64, z);
+                        level.blocks.put(crop.asLong(), Blocks.WHEAT.defaultBlockState());
+                        watchedBlocks.add(crop);
+                    }
+                }
+                BlockPos hivePos = new BlockPos(5, 65, 0);
+                BlockState hiveState = Blocks.BEEHIVE.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.BeehiveBlock.FACING, Direction.SOUTH)
+                        .setValue(net.minecraft.world.level.block.BeehiveBlock.HONEY_LEVEL, 0);
+                level.blocks.put(hivePos.asLong(), hiveState);
+                var hiveBe = new net.minecraft.world.level.block.entity.BeehiveBlockEntity(hivePos, hiveState);
+                level.putBlockEntity(hiveBe);
+                hivePositions.add(hivePos);
+                hives.add(hiveBe);
+                hiveInitOccupants.add(new int[0][]);
+            } else if (name.equals("bee_full_switch_hive")) {
+                // 巢 0（近）满 3 只，巢 1（远）空。
+                BlockPos hive0Pos = new BlockPos(3, 65, 0);
+                BlockState hive0State = Blocks.BEEHIVE.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.BeehiveBlock.FACING, Direction.SOUTH)
+                        .setValue(net.minecraft.world.level.block.BeehiveBlock.HONEY_LEVEL, 0);
+                level.blocks.put(hive0Pos.asLong(), hive0State);
+                var hive0 = new net.minecraft.world.level.block.entity.BeehiveBlockEntity(hive0Pos, hive0State);
+                for (int i = 0; i < 3; i++) {
+                    hive0.storeBee(net.minecraft.world.level.block.entity.BeehiveBlockEntity.Occupant.create(0));
+                }
+                level.putBlockEntity(hive0);
+                hivePositions.add(hive0Pos);
+                hives.add(hive0);
+                hiveInitOccupants.add(new int[][] {{0, 600, 0}, {0, 600, 0}, {0, 600, 0}});
+
+                BlockPos hive1Pos = new BlockPos(0, 65, 4);
+                BlockState hive1State = Blocks.BEEHIVE.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.BeehiveBlock.FACING, Direction.SOUTH)
+                        .setValue(net.minecraft.world.level.block.BeehiveBlock.HONEY_LEVEL, 0);
+                level.blocks.put(hive1Pos.asLong(), hive1State);
+                var hive1 = new net.minecraft.world.level.block.entity.BeehiveBlockEntity(hive1Pos, hive1State);
+                level.putBlockEntity(hive1);
+                hivePositions.add(hive1Pos);
+                hives.add(hive1);
+                hiveInitOccupants.add(new int[0][]);
+            }
+
+            level.enableRealPoi();
+            String initialBlocks = blockArray(level.blocks);
+
+            java.util.Map<Object, Object> levels = new java.util.LinkedHashMap<>();
+            levels.put(net.minecraft.world.level.Level.OVERWORLD, level);
+            put(MinecraftServer.class, official.server, "levels", levels);
+
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder()
+                    .addStaticLayers(level);
+            net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+                public long totalTicks() { return level.clock; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : level.dimensionType().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            net.minecraft.world.attribute.WeatherAttributes.addBuiltinLayers(builder,
+                    net.minecraft.world.attribute.WeatherAttributes.WeatherAccess.from(level));
+            official.attributes = builder.build();
+            put(ServerLevel.class, level, "environmentAttributes", official.attributes);
+            level.updateSkyBrightness();
+            level.getRandom().setSeed(1L);
+            put(Level.class, level, "soundSeedGenerator", RandomSource.create(12345L));
+
+            Bytes events = new Bytes(official.registries);
+            LifePlayer player = null;
+            int playerId = FIRST_ID + 1024;
+            int attackTick = name.equals("bee_full_anger_swarm") ? 5 : -1;
+            double[] playerPos = new double[] {3.5, 64.0, 0.5};
+            level.packets = packet -> {
+                // 玩家自己的受击事件与玩家受伤音效由游戏层 `ReplayPlayers` 发给玩家自己，
+                // 不混入生物世界广播包。
+                if (packet instanceof net.minecraft.network.protocol.game.ClientboundDamageEventPacket de
+                        && de.entityId() == playerId) {
+                    return;
+                }
+                if (packet instanceof net.minecraft.network.protocol.game.ClientboundSoundPacket sp
+                        && sp.getSource() == net.minecraft.sounds.SoundSource.PLAYERS) {
+                    return;
+                }
+                events.add(packet);
+            };
+            level.chunkSource.events = packet -> {
+                // 近战挥手动画 Bamboo 不建模（见 `goals.rs`），与僵尸对拍一致跳过挥手包。
+                if (packet instanceof net.minecraft.network.protocol.game.ClientboundAnimatePacket
+                        || packet instanceof net.minecraft.network.protocol.game.ClientboundSwingAnimationPacket) {
+                    return;
+                }
+                events.add(packet);
+            };
+            if (name.equals("bee_full_anger_swarm")) {
+                player = new LifePlayer(official.server, level,
+                        new GameProfile(new UUID(1L, 2L), "BeeSwarmTarget"),
+                        ClientInformation.createDefault(), level);
+                player.setId(playerId);
+                player.setPos(playerPos[0], playerPos[1], playerPos[2]);
+                setRandom(player, 42002L);
+                player.setYRot(0.0F);
+                player.setYHeadRot(0.0F);
+                player.setYBodyRot(0.0F);
+                player.setGameMode(GameType.SURVIVAL);
+                player.damageCooldownTime = 0;
+                RecordingListener connection = allocate(RecordingListener.class);
+                put(ServerGamePacketListenerImpl.class, connection, "player", player);
+                put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                        connection, "server", official.server);
+                put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                        connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+                connection.bytes = new Bytes(official.registries);
+                put(ServerPlayer.class, player, "connection", connection);
+                level.playersList().add(player);
+                level.tracked.add(player);
+                level.nextId = FIRST_ID;
+            }
+
+            // 生成起始蜜蜂：不设 NoAi，跑真目标链和飞行导航。
+            List<net.minecraft.world.entity.animal.bee.Bee> liveBees = new ArrayList<>();
+            java.util.Map<Integer, Sync> syncMap = new java.util.LinkedHashMap<>();
+            StringBuilder initBeesJson = new StringBuilder("[");
+            double[][] beeCoords;
+            int[] beeNoNectar;
+            BlockPos[] beeInitHive;
+            if (name.equals("bee_full_hive_cycle")) {
+                beeCoords = new double[][] {{0.5, 65.0, 0.5}};
+                beeNoNectar = new int[] {3600};
+                beeInitHive = new BlockPos[] {null};
+            } else if (name.equals("bee_full_pollinate_crop")) {
+                beeCoords = new double[][] {{-1.5, 65.0, 0.5}};
+                beeNoNectar = new int[] {0};
+                beeInitHive = new BlockPos[] {null};
+            } else if (name.equals("bee_full_switch_hive")) {
+                beeCoords = new double[][] {{0.5, 65.0, 0.5}, {1.5, 65.0, 0.5}};
+                beeNoNectar = new int[] {3600, 3600};
+                beeInitHive = new BlockPos[] {null, new BlockPos(3, 65, 0)};
+            } else if (name.equals("bee_full_anger_swarm")) {
+                beeCoords = new double[][] {{0.5, 65.0, 0.5}, {1.5, 65.0, 1.5}, {-0.5, 65.0, 1.5}};
+                beeNoNectar = new int[] {0, 0, 0};
+                beeInitHive = new BlockPos[] {null, null, null};
+            } else {
+                // bee_full_night / bee_full_rain
+                beeCoords = new double[][] {{0.5, 65.0, 0.5}};
+                beeNoNectar = new int[] {0};
+                beeInitHive = new BlockPos[] {null};
+            }
+            for (int i = 0; i < beeCoords.length; i++) {
+                var bee = EntityTypes.BEE.create(level, EntitySpawnReason.COMMAND);
+                long seed = level.entitySeeds.nextLong();
+                reseedBee(bee, seed);
+                bee.snapTo(beeCoords[i][0], beeCoords[i][1], beeCoords[i][2], bee.getYRot(), 0.0F);
+                put(net.minecraft.world.entity.animal.bee.Bee.class, bee,
+                        "ticksWithoutNectarSinceExitingHive", beeNoNectar[i]);
+                if (beeInitHive[i] != null) {
+                    bee.setHivePos(beeInitHive[i]);
+                }
+                level.tracked.add(bee);
+                liveBees.add(bee);
+                if (i > 0) initBeesJson.append(',');
+                initBeesJson.append("{\"x\":").append(Double.doubleToRawLongBits(bee.getX()))
+                        .append(",\"y\":").append(Double.doubleToRawLongBits(bee.getY()))
+                        .append(",\"z\":").append(Double.doubleToRawLongBits(bee.getZ()))
+                        .append(",\"hasNectar\":false,\"ticksWithoutNectar\":").append(beeNoNectar[i])
+                        .append(",\"stayOut\":0,\"hivePos\":")
+                        .append(beeInitHive[i] == null ? "null"
+                                : "[" + beeInitHive[i].getX() + "," + beeInitHive[i].getY() + "," + beeInitHive[i].getZ() + "]")
+                        .append('}');
+            }
+            initBeesJson.append(']');
+
+            // 反射访问 Bee / BeehiveBlockEntity 内部字段。
+            Field fNoNectar = net.minecraft.world.entity.animal.bee.Bee.class
+                    .getDeclaredField("ticksWithoutNectarSinceExitingHive");
+            fNoNectar.setAccessible(true);
+            Field fStayOut = net.minecraft.world.entity.animal.bee.Bee.class
+                    .getDeclaredField("stayOutOfHiveCountdown");
+            fStayOut.setAccessible(true);
+            Field fCrops = net.minecraft.world.entity.animal.bee.Bee.class
+                    .getDeclaredField("numCropsGrownSincePollination");
+            fCrops.setAccessible(true);
+            Field fHiveCd = net.minecraft.world.entity.animal.bee.Bee.class
+                    .getDeclaredField("remainingCooldownBeforeLocatingNewHive");
+            fHiveCd.setAccessible(true);
+            Field fFlowerCd = net.minecraft.world.entity.animal.bee.Bee.class
+                    .getDeclaredField("remainingCooldownBeforeLocatingNewFlower");
+            fFlowerCd.setAccessible(true);
+            Field fGoalSelector = Mob.class.getDeclaredField("goalSelector");
+            fGoalSelector.setAccessible(true);
+            Field fStored = net.minecraft.world.level.block.entity.BeehiveBlockEntity.class
+                    .getDeclaredField("stored");
+            fStored.setAccessible(true);
+            Field fDataFlags = net.minecraft.world.entity.animal.bee.Bee.class.getDeclaredField("DATA_FLAGS_ID");
+            fDataFlags.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            var flagsKey = (net.minecraft.network.syncher.EntityDataAccessor<Byte>) fDataFlags.get(null);
+
+            // tick 0 配对包。
+            List<String> tick0Packets = new ArrayList<>();
+            List<String> tick0Flags = new ArrayList<>();
+            for (var bee : liveBees) {
+                Sync sync = new Sync(level, bee, official.registries);
+                syncMap.put(bee.getId(), sync);
+                sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
+                tick0Packets.addAll(sync.take());
+                tick0Flags.add(flags(bee));
+            }
+            events.take();
+
+            boolean reachedNectar = false;
+            boolean reachedCrop = false;
+            int releasedCount = 0;
+            int maxAngryCount = 0;
+            int stungCount = 0;
+            int enteredCount = 0;
+
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                List<String> tickPackets = new ArrayList<>();
+                List<String> tickFlags = new ArrayList<>();
+                level.levelEvents.clear();
+                if (tick == 0) {
+                    tickPackets = tick0Packets;
+                    tickFlags = tick0Flags;
+                } else {
+                    level.gameTime = START_TIME + tick;
+                    level.clock = clockStart + tick;
+                    if (rainStopTick > 0 && tick == rainStopTick) {
+                        level.rainLevel = 0.0F;
+                        level.injectedRaining = false;
+                    }
+                    official.attributes.invalidateTickCache();
+                    level.updateSkyBrightness();
+                    level.spawned.clear();
+                    events.take();
+                    if (player != null) {
+                        player.hurtTime = Math.max(0, player.hurtTime - 1);
+                        player.damageCooldownTime = Math.max(0, player.damageCooldownTime - 1);
+                    }
+                    if (attackTick > 0 && tick == attackTick && !liveBees.isEmpty() && player != null) {
+                        liveBees.get(0).hurtServer(level, level.damageSources().playerAttack(player), 1.0F);
+                    }
+
+                    // 1. 实体 tick（和 ServerLevel.tick 顺序一致：先实体，后方块实体）。
+                    int beforeLive = liveBees.size();
+                    for (var bee : new ArrayList<>(liveBees)) {
+                        if (bee.isRemoved()) continue;
+                        bee.checkDespawn();
+                        if (bee.isRemoved()) continue;
+                        bee.commonTick();
+                        bee.tick();
+                    }
+
+                    // 2. 方块实体 tick（蜂巢计数、释放蜜蜂）。
+                    for (var hive : hives) {
+                        BlockPos pos = hive.getBlockPos();
+                        net.minecraft.world.level.block.entity.BeehiveBlockEntity.serverTick(
+                                level, pos, level.getBlockState(pos), hive);
+                    }
+
+                    // 3. 收集本刻新出巢的蜜蜂：重播构造随机数（实体 ID 已由 createEntity 分配）、发配对包。
+                    List<String> spawnPairings = new ArrayList<>();
+                    for (Entity spawned : level.spawned) {
+                        if (spawned instanceof net.minecraft.world.entity.animal.bee.Bee newBee) {
+                            releasedCount++;
+                            long seed = level.entitySeeds.nextLong();
+                            reseedBee(newBee, seed);
+                            newBee.snapTo(newBee.getX(), newBee.getY(), newBee.getZ(),
+                                    newBee.getYRot(), newBee.getXRot());
+                            level.tracked.add(newBee);
+                            liveBees.add(newBee);
+                            Sync sync = new Sync(level, newBee, official.registries);
+                            syncMap.put(newBee.getId(), sync);
+                            sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
+                            spawnPairings.addAll(sync.take());
+                        }
+                    }
+
+                    // 4. 按与 Bamboo `replay` 相同的顺序拼包：新实体配对 → 事件/音效 → 移除 → 同步。
+                    tickPackets.addAll(spawnPairings);
+                    tickPackets.addAll(events.take());
+                    List<Integer> goneIds = new ArrayList<>();
+                    for (var it = liveBees.iterator(); it.hasNext(); ) {
+                        var bee = it.next();
+                        if (bee.isRemoved()) {
+                            enteredCount++;
+                            goneIds.add(bee.getId());
+                            syncMap.remove(bee.getId());
+                            level.tracked.remove(bee);
+                            it.remove();
+                        }
+                    }
+                    if (!goneIds.isEmpty()) {
+                        int[] arr = goneIds.stream().mapToInt(Integer::intValue).toArray();
+                        Bytes rm = new Bytes(official.registries);
+                        rm.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(arr));
+                        tickPackets.addAll(rm.take());
+                    }
+                    liveBees.sort(java.util.Comparator.comparingInt(Entity::getId));
+                    int angryNow = 0;
+                    for (var bee : liveBees) {
+                        if (bee.hasNectar()) reachedNectar = true;
+                        if (fCrops.getInt(bee) > 0) reachedCrop = true;
+                        if (bee.isAngry()) angryNow++;
+                        if (bee.hasStung()) stungCount++;
+                        Sync sync = syncMap.get(bee.getId());
+                        tickFlags.add(flags(bee));
+                        sync.entity.sendChanges();
+                        tickPackets.addAll(sync.take());
+                    }
+                    maxAngryCount = Math.max(maxAngryCount, angryNow);
+                    int _unused = beforeLive;
+                }
+
+                // 序列化本刻帧。
+                if (tick > 0) frames.append(',');
+                frames.append("{\"bees\":[");
+                for (int i = 0; i < liveBees.size(); i++) {
+                    if (i > 0) frames.append(',');
+                    var bee = liveBees.get(i);
+                    var selector = (net.minecraft.world.entity.ai.goal.GoalSelector) fGoalSelector.get(bee);
+                    String goals = selector.getAvailableGoals().stream()
+                            .filter(net.minecraft.world.entity.ai.goal.WrappedGoal::isRunning)
+                            .map(g -> g.getGoal().getClass().getSimpleName())
+                            .collect(java.util.stream.Collectors.joining(" "));
+                    byte beeFlags = bee.getEntityData().get(flagsKey);
+                    Vec3 pos = bee.position();
+                    Vec3 vel = bee.getDeltaMovement();
+                    BlockPos hp = bee.getHivePos();
+                    BlockPos fp = bee.getSavedFlowerPos();
+                    frames.append("{\"id\":").append(bee.getId())
+                            .append(",\"x\":").append(Double.doubleToRawLongBits(pos.x))
+                            .append(",\"y\":").append(Double.doubleToRawLongBits(pos.y))
+                            .append(",\"z\":").append(Double.doubleToRawLongBits(pos.z))
+                            .append(",\"dx\":").append(Double.doubleToRawLongBits(vel.x))
+                            .append(",\"dy\":").append(Double.doubleToRawLongBits(vel.y))
+                            .append(",\"dz\":").append(Double.doubleToRawLongBits(vel.z))
+                            .append(",\"yr\":").append(Float.floatToRawIntBits(bee.getYRot()))
+                            .append(",\"xr\":").append(Float.floatToRawIntBits(bee.getXRot()))
+                            .append(",\"hr\":").append(Float.floatToRawIntBits(bee.getYHeadRot()))
+                            .append(",\"br\":").append(Float.floatToRawIntBits(bee.yBodyRot))
+                            .append(",\"hp\":").append(Float.floatToRawIntBits(bee.getHealth()))
+                            .append(",\"g\":").append(bee.onGround())
+                            .append(",\"flags\":").append(beeFlags & 0xFF)
+                            .append(",\"angerEnd\":").append(bee.getPersistentAngerEndTime())
+                            .append(",\"target\":").append(bee.getTarget() == null ? -1 : bee.getTarget().getId())
+                            .append(",\"hivePos\":").append(hp == null ? "null"
+                                    : "[" + hp.getX() + "," + hp.getY() + "," + hp.getZ() + "]")
+                            .append(",\"flowerPos\":").append(fp == null ? "null"
+                                    : "[" + fp.getX() + "," + fp.getY() + "," + fp.getZ() + "]")
+                            .append(",\"noNectar\":").append(fNoNectar.getInt(bee))
+                            .append(",\"stayOut\":").append(fStayOut.getInt(bee))
+                            .append(",\"crops\":").append(fCrops.getInt(bee))
+                            .append(",\"hiveCd\":").append(fHiveCd.getInt(bee))
+                            .append(",\"flowerCd\":").append(fFlowerCd.getInt(bee))
+                            .append(",\"goals\":").append(jsonString(goals))
+                            .append(",\"seed\":").append(randomSeed(bee))
+                            .append('}');
+                }
+                frames.append("],\"hives\":[");
+                for (int i = 0; i < hives.size(); i++) {
+                    if (i > 0) frames.append(',');
+                    var hive = hives.get(i);
+                    @SuppressWarnings("unchecked")
+                    List<Object> stored = (List<Object>) fStored.get(hive);
+                    frames.append("{\"bees\":[");
+                    for (int j = 0; j < stored.size(); j++) {
+                        if (j > 0) frames.append(',');
+                        Object data = stored.get(j);
+                        Field fOcc = data.getClass().getDeclaredField("occupant");
+                        fOcc.setAccessible(true);
+                        Field fT = data.getClass().getDeclaredField("ticksInHive");
+                        fT.setAccessible(true);
+                        Method mN = data.getClass().getDeclaredMethod("hasNectar");
+                        mN.setAccessible(true);
+                        var occ = (net.minecraft.world.level.block.entity.BeehiveBlockEntity.Occupant) fOcc.get(data);
+                        boolean has = (Boolean) mN.invoke(data);
+                        frames.append('[').append(fT.getInt(data)).append(',')
+                                .append(occ.minTicksInHive()).append(',')
+                                .append(has ? 1 : 0).append(']');
+                    }
+                    int honey = level.getBlockState(hive.getBlockPos())
+                            .getValue(net.minecraft.world.level.block.BeehiveBlock.HONEY_LEVEL);
+                    frames.append("],\"honey\":").append(honey).append('}');
+                }
+                frames.append("],\"watched\":[");
+                for (int i = 0; i < watchedBlocks.size(); i++) {
+                    if (i > 0) frames.append(',');
+                    frames.append(net.minecraft.world.level.block.Block.getId(level.getBlockState(watchedBlocks.get(i))));
+                }
+                frames.append("],\"levelEvents\":[");
+                for (int i = 0; i < level.levelEvents.size(); i++) {
+                    if (i > 0) frames.append(',');
+                    frames.append(Arrays.toString(level.levelEvents.get(i)));
+                }
+                frames.append("],\"playerHp\":")
+                        .append(player == null ? 0 : Float.floatToRawIntBits(player.getHealth()));
+                frames.append(",\"playerEffects\":[");
+                if (player != null) {
+                    List<int[]> effs = new ArrayList<>();
+                    for (var eff : player.getActiveEffects()) {
+                        int eid = official.registries.lookupOrThrow(Registries.MOB_EFFECT)
+                                .getId(eff.getEffect().value());
+                        effs.add(new int[] {eid, eff.getDuration(), eff.getAmplifier()});
+                    }
+                    effs.sort(java.util.Comparator.comparingInt(a -> a[0]));
+                    for (int i = 0; i < effs.size(); i++) {
+                        if (i > 0) frames.append(',');
+                        frames.append(Arrays.toString(effs.get(i)));
+                    }
+                }
+                frames.append("],\"levelSeed\":").append(levelSeed(level));
+                frames.append(",\"packets\":[");
+                for (int i = 0; i < tickPackets.size(); i++) {
+                    if (i > 0) frames.append(',');
+                    frames.append(jsonString(tickPackets.get(i)));
+                }
+                frames.append("],\"syncFlags\":[");
+                for (int i = 0; i < tickFlags.size(); i++) {
+                    if (i > 0) frames.append(',');
+                    frames.append(jsonString(tickFlags.get(i)));
+                }
+                frames.append("]}");
+            }
+            frames.append(']');
+
+            // 确认每个场景确实跑通了目标分支，防止空对拍。
+            if (name.equals("bee_full_hive_cycle") && (enteredCount < 1 || releasedCount < 1)) {
+                throw new IllegalStateException("bee_full_hive_cycle missed enter/exit: entered=" + enteredCount + " released=" + releasedCount);
+            }
+            if (name.equals("bee_full_pollinate_crop")) {
+                int honey = level.getBlockState(hivePositions.get(0))
+                        .getValue(net.minecraft.world.level.block.BeehiveBlock.HONEY_LEVEL);
+                if (!reachedNectar || !reachedCrop || honey < 1) {
+                    throw new IllegalStateException("bee_full_pollinate_crop missed branch: nectar=" + reachedNectar
+                            + " crop=" + reachedCrop + " honey=" + honey);
+                }
+            }
+            if (name.equals("bee_full_switch_hive") && (hives.get(0).getOccupantCount() != 3 || hives.get(1).getOccupantCount() != 2)) {
+                throw new IllegalStateException("bee_full_switch_hive missed switch: h0=" + hives.get(0).getOccupantCount()
+                        + " h1=" + hives.get(1).getOccupantCount());
+            }
+            if (name.equals("bee_full_anger_swarm") && (maxAngryCount < 3 || stungCount < 1)) {
+                throw new IllegalStateException("bee_full_anger_swarm missed swarm/sting: maxAngry=" + maxAngryCount + " stung=" + stungCount);
+            }
+            if (name.equals("bee_full_night") && (enteredCount < 1 || releasedCount > 0 || hives.get(0).getOccupantCount() < 2)) {
+                throw new IllegalStateException("bee_full_night missed night stay: entered=" + enteredCount
+                        + " released=" + releasedCount + " occ=" + hives.get(0).getOccupantCount());
+            }
+            if (name.equals("bee_full_rain") && (enteredCount < 1 || releasedCount < 1)) {
+                throw new IllegalStateException("bee_full_rain missed rain cycle: entered=" + enteredCount + " released=" + releasedCount);
+            }
+
+            StringBuilder hivesSetup = new StringBuilder("[");
+            for (int i = 0; i < hivePositions.size(); i++) {
+                if (i > 0) hivesSetup.append(',');
+                BlockPos p = hivePositions.get(i);
+                hivesSetup.append("{\"pos\":[").append(p.getX()).append(',').append(p.getY()).append(',')
+                        .append(p.getZ()).append("],\"honey\":0,\"occupants\":[");
+                int[][] occs = hiveInitOccupants.get(i);
+                for (int j = 0; j < occs.length; j++) {
+                    if (j > 0) hivesSetup.append(',');
+                    hivesSetup.append('[').append(occs[j][0]).append(',').append(occs[j][1]).append(',').append(occs[j][2]).append(']');
+                }
+                hivesSetup.append("]}");
+            }
+            hivesSetup.append(']');
+
+            StringBuilder watchedJson = new StringBuilder("[");
+            for (int i = 0; i < watchedBlocks.size(); i++) {
+                if (i > 0) watchedJson.append(',');
+                BlockPos p = watchedBlocks.get(i);
+                watchedJson.append('[').append(p.getX()).append(',').append(p.getY()).append(',').append(p.getZ()).append(']');
+            }
+            watchedJson.append(']');
+
+            String playerJson = player == null ? "null"
+                    : "{\"uid\":" + playerId + ",\"pos\":["
+                    + Double.doubleToRawLongBits(playerPos[0]) + ","
+                    + Double.doubleToRawLongBits(playerPos[1]) + ","
+                    + Double.doubleToRawLongBits(playerPos[2]) + "],\"attackTick\":" + attackTick + "}";
+
+            out.write("{\"type\":\"beeFull\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"clockStart\":" + clockStart
+                    + ",\"raining\":" + startRaining
+                    + ",\"rainStopTick\":" + rainStopTick
+                    + ",\"player\":" + playerJson
+                    + ",\"watchedBlocks\":" + watchedJson
+                    + ",\"blocks\":" + initialBlocks
+                    + ",\"hives\":" + hivesSetup
+                    + ",\"bees\":" + initBeesJson
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        }
+
     private static void playBeeLocate(Official official, Writer out, String name) throws Exception {
         FakeLevel level = FakeLevel.create(official);
         int[][] hives = beeLocateHives(name);  // [x, y, z, kind]  kind 0 = beehive, 1 = bee_nest
@@ -11183,6 +11804,181 @@ public final class MobOracle {
         }
         out.flush();
         return cases;
+    }
+
+    /**
+     * 村民第 4 期 POI 夹具验证与最小 `AcquirePoi` 场景：
+     * 1) 在真 `PoiManager` 上验证工作站、床（仅床头）、钟的登记与 `take` / `release` 票数及村庄距离；
+     * 2) 放一个工作站（堆肥桶）加一只无业成年村民，不开 NoAi 跑真大脑到 `AcquirePoi` 认领，
+     *    逐刻记录大脑、运动、随机源、职业与工作站剩余票数，并标出第 3 期排期截止刻 `phase3UntilTick`。
+     */
+    private static int playVillagerPoi(Official official, Writer out, String only) throws Exception {
+        String name = "villager_poi_acquire";
+        if (only != null && !name.startsWith(only)) {
+            return 0;
+        }
+        // 1. 验证夹具对工作站、床、钟的 POI 登记和真实 take / release 票数。
+        String poiChecksJson;
+        FakeLevel checkLevel = FakeLevel.create(official);
+        try {
+            BlockPos wsPos = new BlockPos(4, 64, 0);
+            BlockPos bedHead = new BlockPos(0, 64, 4);
+            BlockPos bedFoot = new BlockPos(0, 64, 5);
+            BlockPos bellPos = new BlockPos(-4, 64, 0);
+            checkLevel.placeWorkstation(wsPos, Blocks.COMPOSTER.defaultBlockState());
+            checkLevel.placeBed(bedHead, Direction.NORTH);
+            checkLevel.placeBell(bellPos);
+            checkLevel.enableRealPoi();
+            checkLevel.getPoiManager().tick(() -> true);
+
+            int wsInit = checkLevel.poiFreeTickets(wsPos);
+            boolean wsTake1 = checkLevel.getPoiManager().take(h -> true, (h, p) -> p.equals(wsPos), wsPos, 1).isPresent();
+            int wsAfter1 = checkLevel.poiFreeTickets(wsPos);
+            boolean wsTake2 = checkLevel.getPoiManager().take(h -> true, (h, p) -> p.equals(wsPos), wsPos, 1).isPresent();
+            boolean wsRel = checkLevel.getPoiManager().release(wsPos);
+            int wsAfterRel = checkLevel.poiFreeTickets(wsPos);
+
+            int bedInit = checkLevel.poiFreeTickets(bedHead);
+            int bedFootTickets = checkLevel.poiFreeTickets(bedFoot);
+            boolean bedTake1 = checkLevel.getPoiManager().take(h -> true, (h, p) -> p.equals(bedHead), bedHead, 1).isPresent();
+            int bedAfter1 = checkLevel.poiFreeTickets(bedHead);
+            boolean bedTake2 = checkLevel.getPoiManager().take(h -> true, (h, p) -> p.equals(bedHead), bedHead, 1).isPresent();
+            boolean bedRel = checkLevel.getPoiManager().release(bedHead);
+            int bedAfterRel = checkLevel.poiFreeTickets(bedHead);
+
+            int bellInit = checkLevel.poiFreeTickets(bellPos);
+            boolean bellTake1 = checkLevel.getPoiManager().take(h -> true, (h, p) -> p.equals(bellPos), bellPos, 1).isPresent();
+            int bellAfter1 = checkLevel.poiFreeTickets(bellPos);
+            boolean bellTake2 = checkLevel.getPoiManager().take(h -> true, (h, p) -> p.equals(bellPos), bellPos, 1).isPresent();
+            int bellAfter2 = checkLevel.poiFreeTickets(bellPos);
+            boolean bellRel = checkLevel.getPoiManager().release(bellPos);
+            int bellAfterRel = checkLevel.poiFreeTickets(bellPos);
+            int villageDist = checkLevel.getPoiManager().sectionsToVillage(
+                    net.minecraft.core.SectionPos.of(bellPos));
+
+            if (wsInit != 1 || !wsTake1 || wsAfter1 != 0 || wsTake2 || !wsRel || wsAfterRel != 1
+                    || bedInit != 1 || bedFootTickets != -1 || !bedTake1 || bedAfter1 != 0 || bedTake2 || !bedRel || bedAfterRel != 1
+                    || bellInit != 32 || !bellTake1 || bellAfter1 != 31 || !bellTake2 || bellAfter2 != 30 || !bellRel || bellAfterRel != 31
+                    || villageDist != 0) {
+                throw new IllegalStateException("POI fixture ticket check failed: ws=" + wsInit + "/" + wsAfter1 + "/" + wsAfterRel
+                        + " bed=" + bedInit + "/" + bedFootTickets + "/" + bedAfter1 + "/" + bedAfterRel
+                        + " bell=" + bellInit + "/" + bellAfter1 + "/" + bellAfter2 + "/" + bellAfterRel
+                        + " villageDist=" + villageDist);
+            }
+            poiChecksJson = "{\"workstation\":[" + wsInit + "," + wsAfter1 + "," + (wsTake2 ? 1 : 0) + "," + wsAfterRel + "]"
+                    + ",\"bed\":[" + bedInit + "," + bedFootTickets + "," + bedAfter1 + "," + (bedTake2 ? 1 : 0) + "," + bedAfterRel + "]"
+                    + ",\"bell\":[" + bellInit + "," + bellAfter1 + "," + bellAfter2 + "," + bellAfterRel + "]"
+                    + ",\"bellVillageDist\":" + villageDist + "}";
+        } finally {
+            checkLevel.closeRealPoi();
+        }
+
+        // 2. 最小真大脑场景：平地 + 1 个堆肥桶 + 1 只无业成年村民，跑真大脑到 AcquirePoi。
+        FakeLevel world = FakeLevel.create(official);
+        try {
+            java.util.Map<Object, Object> levels = new java.util.LinkedHashMap<>();
+            levels.put(net.minecraft.world.level.Level.OVERWORLD, world);
+            put(MinecraftServer.class, official.server, "levels", levels);
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            BlockPos wsPos = new BlockPos(4, 64, 0);
+            world.placeWorkstation(wsPos, Blocks.COMPOSTER.defaultBlockState());
+            world.enableRealPoi();
+            world.getPoiManager().tick(() -> true);
+
+            long clockStart = 2000L;
+            long mobSeed = 71L;
+            long sensorDelay = 1L;
+            int totalTicks = 60;
+            world.gameTime = 1000L;
+            world.realSky = true;
+            world.injectedCanSeeSky = true;
+            world.clock = clockStart;
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder()
+                    .addStaticLayers(world);
+            net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+                public long totalTicks() { return world.clock; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : world.dimensionType().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            official.attributes = builder.build();
+            put(ServerLevel.class, world, "environmentAttributes", official.attributes);
+            world.updateSkyBrightness();
+            world.getRandom().setSeed(1L);
+
+            Villager mob = (Villager) EntityTypes.VILLAGER.create(
+                    world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+            mob.setId(FIRST_ID);
+            mob.setUUID(new UUID(0L, 1L));
+            mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            mob.setYHeadRot(0.0F);
+            mob.setYBodyRot(0.0F);
+            put(net.minecraft.world.entity.ai.Brain.class, mob.getBrain(), "lastScheduleUpdate", -9999L);
+            mob.getBrain().updateActivityFromSchedule(world.environmentAttributes(), world.getGameTime(), mob.position());
+            setRandom(mob, mobSeed);
+            BrainOracle.reseedShuffles(mob, randomSeed(mob));
+            BrainOracle.fixSensorDelays(mob, sensorDelay);
+            world.tracked.add(mob);
+
+            String table = brainTable(mob);
+            int firstClaimTick = -1;
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= totalTicks; tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    world.clock = clockStart + tick;
+                    official.attributes.invalidateTickCache();
+                    world.updateSkyBrightness();
+                    mob.commonTick();
+                    mob.tick();
+                    world.getPoiManager().tick(() -> true);
+                }
+                int freeTickets = world.poiFreeTickets(wsPos);
+                if (firstClaimTick < 0 && (freeTickets == 0
+                        || mob.getBrain().hasMemoryValue(
+                                net.minecraft.world.entity.ai.memory.MemoryModuleType.POTENTIAL_JOB_SITE))) {
+                    firstClaimTick = tick;
+                }
+                String prof = mob.getVillagerData().profession().unwrapKey().orElseThrow()
+                        .identifier().toString();
+                if (tick > 0) frames.append(',');
+                frames.append("{\"brain\":").append(jsonString(BrainOracle.dump(mob)))
+                        .append(",\"motion\":").append(projectileMotion(mob))
+                        .append(",\"seed\":").append(randomSeed(mob))
+                        .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
+                        .append(",\"poiFreeTickets\":").append(freeTickets)
+                        .append(",\"profession\":").append(jsonString(prof))
+                        .append('}');
+            }
+            frames.append(']');
+            if (firstClaimTick <= 0 || world.poiFreeTickets(wsPos) != 0) {
+                throw new IllegalStateException("villager_poi_acquire did not claim workstation: firstClaimTick="
+                        + firstClaimTick + " freeTickets=" + world.poiFreeTickets(wsPos));
+            }
+            out.write("{\"type\":\"villagerPoi\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"clockStart\":" + clockStart
+                    + ",\"mobSeed\":" + mobSeed
+                    + ",\"sensorDelay\":" + sensorDelay
+                    + ",\"workstation\":[" + wsPos.getX() + "," + wsPos.getY() + "," + wsPos.getZ() + "]"
+                    + ",\"firstClaimTick\":" + firstClaimTick
+                    + ",\"phase3UntilTick\":" + (firstClaimTick - 1)
+                    + ",\"poiChecks\":" + poiChecksJson
+                    + ",\"brainTable\":" + table
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+            return 1;
+        } finally {
+            world.closeRealPoi();
+        }
     }
 
     /** `Silverfish.friendsGoal` 的私有字段。 */
@@ -16698,6 +17494,9 @@ public final class MobOracle {
 
         @Override
         public net.minecraft.world.entity.ai.village.poi.PoiManager getPoiManager() {
+            if (level.realPoi != null) {
+                return level.realPoi;
+            }
             if (poiManager == null) {
                 try {
                     var dir = java.nio.file.Files.createTempDirectory("bamboo-bee-poi-");
@@ -16752,6 +17551,31 @@ public final class MobOracle {
                 level.mobPackets.accept(packet);
             }
         }
+    }
+
+    /** 真实目标链 / 村民第 4 期用的 `PoiManager`：真索引、真票数、真村庄距离，
+     * 只把 `ensureLoadedAndValid` 留空（场景方块都在内存里，由夹具按规范序预先登记并随写同步）。 */
+    private static final class RealPoi extends net.minecraft.world.entity.ai.village.poi.PoiManager {
+        RealPoi(java.nio.file.Path dir, RegistryAccess registries) {
+            super(new net.minecraft.world.level.chunk.storage.RegionStorageInfo(
+                    "mob-oracle", Level.OVERWORLD, "poi"),
+                    dir,
+                    net.minecraft.util.datafix.DataFixers.getDataFixer(),
+                    false,
+                    registries,
+                    new net.minecraft.world.level.chunk.storage.ChunkIOErrorReporter() {
+                        @Override public void reportChunkLoadFailure(Throwable error,
+                                net.minecraft.world.level.chunk.storage.RegionStorageInfo info,
+                                ChunkPos pos) {}
+                        @Override public void reportChunkSaveFailure(Throwable error,
+                                net.minecraft.world.level.chunk.storage.RegionStorageInfo info,
+                                ChunkPos pos) {}
+                    },
+                    net.minecraft.world.level.LevelHeightAccessor.create(MIN_Y, HEIGHT));
+        }
+
+        @Override
+        public void ensureLoadedAndValid(net.minecraft.world.level.LevelReader level, BlockPos center, int radius) {}
     }
 
     /** `findLightningRod` 用的空 POI：`allocate` 不跑构造器，覆写 `findClosest` 直接返回空。 */
@@ -16873,6 +17697,11 @@ public final class MobOracle {
         private List<Entity> tracked;
         /** 空 POI 表；延迟到 `create`（`System.setOut` 重定向之后）再建，免得日志绑错流。 */
         private net.minecraft.world.entity.ai.village.poi.PoiManager emptyPoi;
+        /** 开启真 POI 的场景使用；空时退回 `emptyPoi`，不影响旧场景。 */
+        private RealPoi realPoi;
+        private java.nio.file.Path realPoiDir;
+        /** 方块实体表；开启后 `getBlockEntity(pos)` 能拿到蜂巢等活方块实体。 */
+        private Long2ObjectOpenHashMap<net.minecraft.world.level.block.entity.BlockEntity> blockEntities;
         private long gameTime;
         private int nextId;
         /** Bamboo 的岛实体种子源，按生成先后取数。 */
@@ -16946,7 +17775,124 @@ public final class MobOracle {
             // `allocate` skips field initializers; set superflat's default sea level -63 explicitly.
             level.injectedSeaLevel = -63;
             level.emptyPoi = allocate(EmptyPoi.class);
+            level.blockEntities = new Long2ObjectOpenHashMap<>();
+            put(ServerLevel.class, level, "debugSynchronizers",
+                    new net.minecraft.util.debug.LevelDebugSynchronizers(level));
             return level;
+        }
+
+        /** 开启真 POI 管理器，把 `blocks` 里已放好的方块按 (x,y,z) 规范序登记。 */
+        void enableRealPoi() throws Exception {
+            if (realPoi == null) {
+                realPoiDir = java.nio.file.Files.createTempDirectory("bamboo-mob-poi-");
+                realPoi = new RealPoi(realPoiDir, official.registries);
+            }
+            registerPoiFromBlocks();
+        }
+
+        /** 按 (x,y,z) 排序把 `blocks` 里的 POI 方块登记进 `realPoi`，与 Bamboo 桶内插入序对齐。 */
+        void registerPoiFromBlocks() {
+            if (realPoi == null) return;
+            List<BlockPos> keys = new ArrayList<>();
+            blocks.keySet().forEach((long packed) -> keys.add(BlockPos.of(packed)));
+            keys.sort(java.util.Comparator.comparingInt((BlockPos p) -> p.getX())
+                    .thenComparingInt(p -> p.getY())
+                    .thenComparingInt(p -> p.getZ()));
+            for (BlockPos pos : keys) {
+                BlockState state = blocks.get(pos.asLong());
+                if (state == null) continue;
+                var poiType = net.minecraft.world.entity.ai.village.poi.PoiTypes.forState(state);
+                if (poiType.isPresent() && !realPoi.exists(pos, h -> true)) {
+                    realPoi.add(pos, poiType.get());
+                }
+            }
+        }
+
+        /** 同步方块变化到 `realPoi`（对应 `ServerLevel.updatePOIOnBlockStateChange`，同刻生效）。 */
+        void updateRealPoi(BlockPos pos, BlockState oldState, BlockState newState) {
+            if (realPoi == null) return;
+            var oldPoi = net.minecraft.world.entity.ai.village.poi.PoiTypes.forState(oldState);
+            var newPoi = net.minecraft.world.entity.ai.village.poi.PoiTypes.forState(newState);
+            if (java.util.Objects.equals(oldPoi, newPoi)) return;
+            if (oldPoi.isPresent()) {
+                realPoi.remove(pos);
+            }
+            if (newPoi.isPresent()) {
+                realPoi.add(pos, newPoi.get());
+            }
+        }
+
+        /** 村民第 4 期夹具接口：放置工作站方块并在真 POI 已开启时同步登记。 */
+        void placeWorkstation(BlockPos pos, BlockState state) {
+            BlockState old = blocks.getOrDefault(pos.asLong(), Blocks.AIR.defaultBlockState());
+            blocks.put(pos.asLong(), state);
+            updateRealPoi(pos, old, state);
+        }
+
+        /** 村民第 4 期夹具接口：按朝向放置床头与床尾（仅 `PART=HEAD` 登记 `home` POI，1 票）。 */
+        void placeBed(BlockPos headPos, Direction facing) {
+            BlockPos footPos = headPos.relative(facing.getOpposite());
+            BlockState head = Blocks.BED.red().defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.BedBlock.FACING, facing)
+                    .setValue(net.minecraft.world.level.block.BedBlock.PART,
+                            net.minecraft.world.level.block.state.properties.BedPart.HEAD);
+            BlockState foot = Blocks.BED.red().defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.BedBlock.FACING, facing)
+                    .setValue(net.minecraft.world.level.block.BedBlock.PART,
+                            net.minecraft.world.level.block.state.properties.BedPart.FOOT);
+            placeWorkstation(headPos, head);
+            placeWorkstation(footPos, foot);
+        }
+
+        /** 村民第 4 期夹具接口：放置钟（登记 `meeting` POI，32 票、村庄中心）。 */
+        void placeBell(BlockPos pos) {
+            placeWorkstation(pos, Blocks.BELL.defaultBlockState());
+        }
+
+        /** 读取真 POI 管理器中该格的剩余票数；不存在该格记录时返回 -1。 */
+        int poiFreeTickets(BlockPos pos) {
+            if (realPoi == null) return -1;
+            return realPoi.getInSquare(h -> true, pos, 1,
+                    net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy.ANY)
+                    .filter(r -> r.getPos().equals(pos))
+                    .mapToInt(net.minecraft.world.entity.ai.village.poi.PoiRecord::getFreeTickets)
+                    .findFirst()
+                    .orElse(-1);
+        }
+
+        /** 把方块实体登记进假世界表，供 `getBlockEntity(pos)` / `Bee.doesHiveHaveSpace` 读取。 */
+        void putBlockEntity(net.minecraft.world.level.block.entity.BlockEntity be) {
+            be.setLevel(this);
+            blockEntities.put(be.getBlockPos().asLong(), be);
+        }
+
+        /** 关闭真 POI 管理器并清理临时目录。 */
+        void closeRealPoi() {
+            if (realPoi != null) {
+                try { realPoi.close(); } catch (Exception ignored) {}
+                realPoi = null;
+            }
+            if (realPoiDir != null) {
+                try (var walk = java.nio.file.Files.walk(realPoiDir)) {
+                    walk.sorted(java.util.Comparator.reverseOrder())
+                            .forEach(p -> { try { java.nio.file.Files.deleteIfExists(p); } catch (Exception ignored) {} });
+                } catch (Exception ignored) {}
+                realPoiDir = null;
+            }
+        }
+
+        @Override
+        public net.minecraft.world.level.block.entity.BlockEntity getBlockEntity(BlockPos pos) {
+            if (!isInsideBuildHeight(pos)) {
+                return null;
+            }
+            if (blockEntities != null) {
+                var be = blockEntities.get(pos.asLong());
+                if (be != null) {
+                    return be;
+                }
+            }
+            return super.getBlockEntity(pos);
         }
 
         @SuppressWarnings("unchecked")
@@ -17050,10 +17996,12 @@ public final class MobOracle {
             return realSky ? super.isBrightOutside() : injectedBrightOutside;
         }
 
-        /** 假世界没有 POI / 村庄数据；`MoveThroughVillageGoal.canUse` 在这里
-         *  短路，不取随机源，和 Bamboo 的空注册项一致。 */
+        /** 假世界默认没有 POI / 村庄数据；开启 `realPoi` 时走官方 `sectionsToVillage` 判定。 */
         @Override
         public boolean isCloseToVillage(BlockPos pos, int sections) {
+            if (realPoi != null) {
+                return sections <= 6 && sectionsToVillage(net.minecraft.core.SectionPos.of(pos)) <= sections;
+            }
             return false;
         }
 
@@ -17084,6 +18032,17 @@ public final class MobOracle {
                 levelEvent(null, 2012, pos, 15);
             }
             blocks.put(pos.asLong(), state);
+            if (blockEntities != null) {
+                var be = blockEntities.get(pos.asLong());
+                if (be != null) {
+                    if (be.isValidBlockState(state)) {
+                        be.setBlockState(state);
+                    } else {
+                        blockEntities.remove(pos.asLong());
+                    }
+                }
+            }
+            updateRealPoi(pos, old, state);
             chunkCache.clear();
             if (shapeUpdates && old != state && (flags & 16) == 0 && limit > 0) {
                 old.updateIndirectNeighbourShapes(this, pos, 2, 511);
@@ -17097,6 +18056,10 @@ public final class MobOracle {
         public boolean removeBlock(BlockPos pos, boolean moving) {
             BlockState old = getBlockState(pos);
             blocks.remove(pos.asLong());
+            if (blockEntities != null) {
+                blockEntities.remove(pos.asLong());
+            }
+            updateRealPoi(pos, old, Blocks.AIR.defaultBlockState());
             chunkCache.clear();
             if (shapeUpdates) {
                 // 官方 `Level.setBlock` → `markAndNotifyBlock` 的形状更新（flags 3 去掉 1 和 32）：
@@ -17133,6 +18096,9 @@ public final class MobOracle {
          *  这样 `isVillage` 为假、村庄段列表为空，两个村庄目标都走没有村庄的真实路径。 */
         @Override
         public int sectionsToVillage(net.minecraft.core.SectionPos section) {
+            if (realPoi != null) {
+                return realPoi.sectionsToVillage(section);
+            }
             return golemFixture ? Integer.MAX_VALUE : super.sectionsToVillage(section);
         }
 
@@ -17462,10 +18428,10 @@ public final class MobOracle {
             return tickRate;
         }
 
-        /** 假世界没有 POI 索引表；`findLightningRod` 查不到避雷针，走活物列表。 */
+        /** 默认返回空 POI 表；开启 `realPoi` 后返回真 `PoiManager`。 */
         @Override
         public net.minecraft.world.entity.ai.village.poi.PoiManager getPoiManager() {
-            return emptyPoi;
+            return realPoi != null ? realPoi : emptyPoi;
         }
 
         /** 假世界没有袭击系统；`SetRaidStatus` / `Villager.customServerAiStep` 查袭击返回 null。 */

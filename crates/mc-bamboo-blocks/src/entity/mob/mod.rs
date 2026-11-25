@@ -697,7 +697,6 @@ impl MobType {
                 | Self::Pillager
                 | Self::Ocelot
                 | Self::Cat
-                | Self::Bee
         )
     }
 
@@ -3604,6 +3603,7 @@ impl Mob {
 pub struct MobPublic {
     /// `Bee.DATA_FLAGS_ID` 和 `DATA_ANGER_END_TIME`。
     pub bee_flags: u8,
+    pub bee_flags_dirty: bool,
     pub bee_anger_end_time: i64,
     pub mob_type: MobType,
     pub uuid: [u8; 16],
@@ -3845,6 +3845,7 @@ impl MobPublic {
     pub fn of(mob: &Mob, in_water: bool) -> Self {
         Self {
             bee_flags: mob.bee.flags,
+            bee_flags_dirty: mob.bee.flags_dirty,
             bee_anger_end_time: mob.bee.anger_end_time,
             mob_type: mob.mob_type,
             uuid: mob.uuid,

@@ -24,6 +24,11 @@ pub const FLAG_HAS_NECTAR: u8 = 8;
 pub struct Bee {
     /// 元数据字节；只用到第 2、4、8 位。
     pub flags: u8,
+    /// 构造后 `DATA_FLAGS_ID` 是否发生过变更（即使随后改回 0，首次 `packDirty` 仍会发）。
+    ///
+    /// Whether `DATA_FLAGS_ID` changed after construction (still emitted by the first `packDirty`
+    /// even if reset back to 0, e.g. `HasNectar` loaded then cleared by `dropOffNectar`).
+    pub flags_dirty: bool,
     /// `DATA_ANGER_END_TIME`，绝对时刻；-1 表示没在生气。
     pub anger_end_time: i64,
     pub time_since_sting: i32,
@@ -46,6 +51,7 @@ impl Default for Bee {
     fn default() -> Self {
         Self {
             flags: 0,
+            flags_dirty: false,
             anger_end_time: -1,
             time_since_sting: 0,
             ticks_without_nectar: 0,
@@ -70,10 +76,14 @@ impl Bee {
     }
 
     pub fn set_flag(&mut self, flag: u8, value: bool) {
-        if value {
-            self.flags |= flag;
+        let next = if value {
+            self.flags | flag
         } else {
-            self.flags &= !flag;
+            self.flags & !flag
+        };
+        if next != self.flags {
+            self.flags = next;
+            self.flags_dirty = true;
         }
     }
 
@@ -121,6 +131,7 @@ pub(super) fn attributes() -> Attributes {
 /// 构造函数里 `FlyingPathNavigation` 和寻路代价，以及三个倒计时的初值抽取。
 pub(super) fn configure(mob: &mut Mob) {
     use mc_bamboo_data::PathType;
+    mob.anger.end_time = -1;
     mob.navigation.flags.fly = true;
     mob.navigation.flags.can_float = false;
     mob.navigation.flags.can_open_doors = false;
@@ -204,15 +215,24 @@ pub fn set_stay_out_of_hive(mob: &mut Mob, ticks: i32) {
     mob.bee.stay_out_of_hive = ticks;
 }
 
-/// `Bee.dropOffNectar`：清掉花蜜、授粉计数归零。
+/// `Bee.dropOffNectar`：清掉花蜜并重置催熟计数。
+///
+/// `Bee.dropOffNectar`: clear nectar and reset crops grown since pollination.
 pub fn drop_off_nectar(mob: &mut Mob) {
     mob.bee.set_flag(FLAG_HAS_NECTAR, false);
     mob.bee.crops_grown = 0;
-    mob.bee.ticks_without_nectar = 0;
 }
 
-/// `Bee.aiStep` 里的三个倒计时、翻滚和巢有效性检查。
-pub fn ai_step(mob: &mut Mob, tick_count: i32, in_water: bool, target_close: bool) {
+/// `Bee.aiStep` 里的三个倒计时、翻滚和每 20 刻一次的巢有效性检查。
+///
+/// `Bee.aiStep`: the three countdowns, rolling flag, and the 20-tick `isHiveValid` check.
+pub fn ai_step(
+    mob: &mut Mob,
+    tick_count: i32,
+    game_time: i64,
+    hive_valid: bool,
+    target_close: bool,
+) {
     let bee = &mut mob.bee;
     if bee.stay_out_of_hive > 0 {
         bee.stay_out_of_hive -= 1;
@@ -225,9 +245,11 @@ pub fn ai_step(mob: &mut Mob, tick_count: i32, in_water: bool, target_close: boo
     }
     bee.set_flag(
         FLAG_ROLL,
-        mob.anger.is_angry(0) && !bee.has_stung() && target_close,
+        mob.anger.is_angry(game_time) && !bee.has_stung() && target_close,
     );
-    let _ = (tick_count, in_water);
+    if tick_count % 20 == 0 && !hive_valid {
+        bee.hive_pos = None;
+    }
 }
 
 /// `Bee.customServerAiStep`：溺水、蜇后死亡抽签、没蜜时的计时和愤怒更新。

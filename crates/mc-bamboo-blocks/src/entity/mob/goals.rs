@@ -1225,11 +1225,23 @@ impl GoalSelector {
 
     pub(crate) fn rebase_clock(&mut self, delta: i64) {
         for goal in &mut self.goals {
-            if let Goal::MeleeAttack {
-                last_can_use_check, ..
-            } = &mut goal.goal
-            {
-                *last_can_use_check = last_can_use_check.saturating_add(delta);
+            match &mut goal.goal {
+                Goal::MeleeAttack {
+                    last_can_use_check, ..
+                } => {
+                    *last_can_use_check = last_can_use_check.saturating_add(delta);
+                }
+                Goal::Bee(
+                    super::bee_goals::BeeGoal::ValidateHive {
+                        last_validate_tick, ..
+                    }
+                    | super::bee_goals::BeeGoal::ValidateFlower {
+                        last_validate_tick, ..
+                    },
+                ) if *last_validate_tick >= 0 => {
+                    *last_validate_tick = last_validate_tick.saturating_add(delta);
+                }
+                _ => {}
             }
         }
     }
@@ -2117,7 +2129,12 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 BlockPos::containing(target.position),
                 0,
             );
-            start_path.is_some() || within_melee_range(me, mob, target, ctx)
+            let ok = start_path.is_some() || within_melee_range(me, mob, target, ctx);
+            if mob.mob_type == super::MobType::Bee {
+                ok && mob.anger.is_angry(now) && !mob.bee.has_stung()
+            } else {
+                ok
+            }
         }
         Goal::HurtByTarget { timestamp, .. } => {
             let last = mob.last_hurt_by_mob;
@@ -2733,10 +2750,15 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             {
                 return false;
             }
-            if *track_target {
+            let ok = if *track_target {
                 within_home(mob, BlockPos::containing(target.position))
             } else {
                 !mob.navigation.is_done()
+            };
+            if mob.mob_type == super::MobType::Bee {
+                ok && mob.anger.is_angry(ctx.blocks().game_time()) && !mob.bee.has_stung()
+            } else {
+                ok
             }
         }
         Goal::NearestAttackableTarget {
@@ -4807,6 +4829,15 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     if mob.mob_type.is_monster() {
         return monster_walk_target_value(view, pos);
     }
+    if mob.mob_type == super::MobType::Bee {
+        // `Bee.getWalkTargetValue`：空气格 10，否则 0。
+        // `Bee.getWalkTargetValue`: 10 for air cells, 0 otherwise.
+        return if view.block_state(pos).is_air() {
+            10.0
+        } else {
+            0.0
+        };
+    }
     if mob.mob_type == super::MobType::Mooshroom {
         return super::mooshroom::walk_target_value(view, pos);
     }
@@ -4992,6 +5023,11 @@ pub(crate) fn default_random_pos_away(
 /// The navigation's `isStableDestination`; a turtle with a travel target
 /// (`TurtlePathNavigation`) only accepts water cells.
 fn stable_destination(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
+    if mob.mob_type == super::MobType::Bee {
+        // `Bee$1.isStableDestination`：下面一格不是空气即可。
+        // `Bee$1.isStableDestination`: the block below is not air.
+        return !view.block_state(pos.below()).is_air();
+    }
     if super::turtle::is_turtle(mob.mob_type) && mob.turtle.travel_pos.is_some() {
         return view.block_state(pos).is(blocks::WATER);
     }
@@ -5185,6 +5221,44 @@ pub(crate) fn hover_random_pos(
             + hover_min_height;
         let pos = move_up_to_above_solid(view, pos, above);
         if view.fluid_state(pos).is_tagged(fluid_tags::WATER) || has_malus(mob, view, pos) {
+            return None;
+        }
+        Some(pos)
+    })
+}
+
+/// `AirRandomPos.getPosTowards`：朝目标点方向找不在水里的空中落点。
+///
+/// `AirRandomPos.getPosTowards`: an air spot (excluding water) towards `towards`.
+#[expect(clippy::too_many_arguments, reason = "官方方法就是这几个参数")]
+pub(crate) fn air_random_pos_towards(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    horizontal: i32,
+    vertical: i32,
+    flying_height: i32,
+    towards: Vec3,
+    max_radians: f64,
+) -> Option<Vec3> {
+    let dir = towards.subtract(me.position);
+    let restricted = mob_restricted(me, mob, f64::from(horizontal));
+    pick_best(mob, view, || {
+        let direction = random_direction_within_radians(
+            me,
+            (0.0, f64::from(horizontal)),
+            vertical,
+            flying_height,
+            dir.x,
+            dir.z,
+            max_radians,
+        )?;
+        let pos = toward_direction(me, mob, f64::from(horizontal), direction);
+        if outside_limits(view, pos) || (restricted && !within_home(mob, pos)) {
+            return None;
+        }
+        let pos = move_up_out_of_solid(view, pos);
+        if has_malus(mob, view, pos) || view.fluid_state(pos).is_tagged(fluid_tags::WATER) {
             return None;
         }
         Some(pos)

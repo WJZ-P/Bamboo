@@ -114,6 +114,7 @@ impl BatCase {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(self.first_id),
             players: if self.player_tick > 0 {
                 vec![player_view(self.player_id, self.player_far)]

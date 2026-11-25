@@ -1218,15 +1218,17 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
     }
     animal_ai_step(me, mob, ctx, plan);
     if mob.mob_type == super::MobType::Bee {
-        let mut target_close = false;
-        if let Some(uid) = mob.target {
-            ctx.blocks().for_each_player(&mut |player| {
-                if player.uid == uid && player.position.distance_to_sqr(me.position) < 4.0 {
-                    target_close = true;
-                }
-            });
-        }
-        super::bee::ai_step(mob, me.tick_count, me.in_water, target_close);
+        let target_close = super::goals::combat_target(mob, ctx)
+            .is_some_and(|target| target.position.distance_to_sqr(me.position) < 4.0);
+        let view = ctx.blocks();
+        let hive_valid = super::bee_goals::hive_valid(mob, view, me);
+        super::bee::ai_step(
+            mob,
+            me.tick_count,
+            view.game_time(),
+            hive_valid,
+            target_close,
+        );
     }
     // 铁傀儡与雪傀儡的 `aiStep` 先跑 `super.aiStep()`，再跑自己的那一段。
     // Golem `aiStep` overrides run their own part after `super.aiStep()`.
@@ -1728,7 +1730,10 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     } else {
         nav_mob(me, mob, ctx.blocks())
     };
-    if let Some((wanted, speed)) = mob.navigation.tick(ctx.blocks(), &nav) {
+    // `Bee$1.tick`：授粉期间跳过飞行导航 tick。
+    // `Bee$1.tick`: skip flying navigation tick while pollinating.
+    let skip_nav = mob.mob_type == super::MobType::Bee && mob.bee.pollinating;
+    if !skip_nav && let Some((wanted, speed)) = mob.navigation.tick(ctx.blocks(), &nav) {
         // 官方 `this.mob.getMoveControl()`：借导航时 getter 转到载具，而此时
         // `mob.mover` 仍是载具那份（控制段才临时换回自己的）。
         // Vanilla `this.mob.getMoveControl()`: while borrowing the getter resolves to
@@ -1818,6 +1823,14 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // `SmoothSwimmingLookControl(this, 10)`.
         super::smooth_swim::move_tick(me, mob, &super::smooth_swim::FROG);
         super::smooth_swim::look_tick(me, mob, 10.0);
+    } else if mob.mob_type == super::MobType::Bee {
+        // `Bee`: `FlyingMoveControl(this, 20, true)` + `BeeLookControl`（生气时跳过，授粉时不重置俯仰）。
+        // `Bee`: `FlyingMoveControl(this, 20, true)` + `BeeLookControl` (skipped while angry;
+        // keeps pitch while pollinating).
+        move_control_tick(me, mob, ctx.blocks());
+        if !mob.anger.is_angry(ctx.blocks().game_time()) {
+            look_control_tick_with(me, mob, !mob.bee.pollinating);
+        }
     } else {
         if mob.mob_type == super::MobType::Camel {
             // `CamelMoveControl.tick` 在 `super.tick()` 之前。
@@ -1920,8 +1933,9 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
         return;
     }
     if mob.mob_type == super::MobType::Bee {
-        // `Bee` 也用 `FlyingMoveControl`（参数 20, true 的效果在配置里）。
-        super::parrot::move_control_tick(me, mob);
+        // `Bee` 用 `FlyingMoveControl(this, 20, true)`：最大俯仰步长 20°，空闲时原地悬停不恢复重力。
+        // `Bee` uses `FlyingMoveControl(this, 20, true)`: max turn 20°, hovers in place.
+        super::parrot::flying_move_control_tick(me, mob, 20.0, true);
         return;
     }
     if super::turtle::is_turtle(mob.mob_type) {
@@ -2074,9 +2088,11 @@ fn body_rotation_tick(me: &Entity, mob: &mut Mob, time: i64) {
 
 // ---- 跳跃 ----
 
-/// `Mob.jumpInLiquid`：会浮水时加 `(double) 0.04F`。
+/// `Mob.jumpInLiquid`：会浮水时加 `(double) 0.04F`；蜜蜂固定加 `0.01`。
 fn jump_in_liquid(me: &mut Entity, mob: &Mob) {
-    let lift = if mob.navigation.can_float() {
+    let lift = if mob.mob_type == super::MobType::Bee {
+        0.01
+    } else if mob.navigation.can_float() {
         f64::from(0.04_f32)
     } else {
         0.3
@@ -2714,6 +2730,11 @@ pub(crate) fn hurt_server(
     if mob.mob_type == super::MobType::Parrot {
         mob.tame.ordered_to_sit = false;
     }
+    // `Bee.hurtServer`：非无敌受伤时停止授粉。
+    // `Bee.hurtServer`: stop pollinating on non-invulnerable damage.
+    if mob.mob_type == super::MobType::Bee && !mob.invulnerable {
+        super::bee_goals::stop_pollinating(mob);
+    }
     // `Armadillo.hurtServer`：受惊时先把伤害变成 `(damage - 1) / 2`。
     // `Armadillo.hurtServer`: while scared, damage becomes `(damage - 1) / 2` first.
     let amount = if mob.mob_type == super::MobType::Armadillo {
@@ -2977,7 +2998,14 @@ pub(crate) fn do_hurt_target(
     if mob.mob_type == super::MobType::Creeper {
         return;
     }
-    let amount = mob.attributes.value(attribute::ATTACK_DAMAGE).max(0.0) as f32;
+    let raw_damage = mob.attributes.value(attribute::ATTACK_DAMAGE).max(0.0);
+    // `Bee.doHurtTarget` 把攻击力先截成整数再转浮点：`(float)(int)getAttributeValue(ATTACK_DAMAGE)`。
+    // `Bee.doHurtTarget` truncates attack damage to `int` before casting to `float`.
+    let amount = if mob.mob_type == super::MobType::Bee {
+        (raw_damage as i32) as f32
+    } else {
+        raw_damage as f32
+    };
     // `Panda.doHurtTarget`：不咬回去的好斗熊猫记下这一口，`PandaHurtByTargetGoal` 会停手。
     // `Panda.doHurtTarget`: a non-aggressive panda records the bite so its goal stops.
     let bites = mob.mob_type == super::MobType::Panda;
@@ -3076,6 +3104,12 @@ pub(crate) fn do_hurt_target(
         if bites && hurt {
             play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
         }
+        // `Bee.doHurtTarget`：只有 `hurtServer` 返回真时才置 `HasStung`、熄怒、播蜇刺声。
+        // `Bee.doHurtTarget`: set `HasStung`, stop anger, and play sting sound only on a landed hit.
+        if hurt && mob.mob_type == super::MobType::Bee {
+            super::bee::after_attack(mob);
+            play_sound(me, mob, "minecraft:entity.bee.sting", 1.0, 1.0);
+        }
     } else if let Some(other) = ctx.other(target) {
         // `Zombie.killedEntity`：普通难度下僵尸打村民要先抽一次自己的
         // `nextBoolean()`，为真不转化；困难必转、简单不抽也不转。官方在
@@ -3114,9 +3148,10 @@ pub(crate) fn do_hurt_target(
         if bites {
             play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
         }
-    }
-    if mob.mob_type == super::MobType::Bee {
-        super::bee::after_attack(mob);
+        if mob.mob_type == super::MobType::Bee {
+            super::bee::after_attack(mob);
+            play_sound(me, mob, "minecraft:entity.bee.sting", 1.0, 1.0);
+        }
     }
 }
 
