@@ -65,6 +65,16 @@ pub trait BlockEntity: Any + Send {
 
     fn as_any_mut(&mut self) -> &mut dyn Any;
 
+    /// `GameEventListener.getListenerRadius`：不是监听者返回 `None`。
+    fn listener_radius(&self) -> Option<i32> {
+        None
+    }
+
+    /// `GameEventListener.getDeliveryMode`：不是监听者返回 `None`。
+    fn delivery_mode(&self) -> Option<crate::game_event::dispatch::DeliveryMode> {
+        None
+    }
+
     /// 官方 `saveAdditional`：写这个方块实体自己的键（不含 `id`、`x/y/z` 和 `components`）。
     ///
     /// 没有默认实现：新加一种方块实体时编译器会要求补上，内容不会悄悄漏存。

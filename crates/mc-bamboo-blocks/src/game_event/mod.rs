@@ -1,6 +1,8 @@
 //! 游戏事件：`GameEvent` 注册表、通知半径和振动频率表（`VibrationSystem`）。
 
+pub mod dispatch;
 pub mod registry;
+pub mod vibration;
 
 /// `GameEvent` 注册表里的条目，顺序就是注册顺序，判别值即网络 / 注册表 id。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -268,6 +270,16 @@ impl GameEvent {
         (id >= first).then_some(id - first + 1)
     }
 
+    /// `#minecraft:vibrations`：`VibrationUser.getListenableEvents` 的缺省标签。
+    pub fn in_vibrations_tag(self) -> bool {
+        game_event_tag_contains("minecraft:vibrations", self.id())
+    }
+
+    /// `#minecraft:ignore_vibrations_sneaking`。
+    pub fn in_ignore_vibrations_sneaking_tag(self) -> bool {
+        game_event_tag_contains("minecraft:ignore_vibrations_sneaking", self.id())
+    }
+
     /// `VibrationSystem.RESONANCE_EVENTS[frequency - 1]`。
     pub fn resonate(frequency: i32) -> Option<Self> {
         if !(1..=15).contains(&frequency) {
@@ -277,6 +289,15 @@ impl GameEvent {
         let offset = u8::try_from(frequency - 1).ok()?;
         Self::from_id(E::Resonate1.id() + offset)
     }
+}
+
+/// 查 `minecraft:game_event` 注册表组里的一个标签。
+fn game_event_tag_contains(name: &str, id: u8) -> bool {
+    mc_bamboo_data::tags::TAG_GROUPS
+        .iter()
+        .find(|group| group.registry == "minecraft:game_event")
+        .and_then(|group| group.tags.iter().find(|tag| tag.name == name))
+        .is_some_and(|tag| tag.ids.contains(&i32::from(id)))
 }
 
 /// `VibrationSystem.getRedstoneStrengthForDistance`。

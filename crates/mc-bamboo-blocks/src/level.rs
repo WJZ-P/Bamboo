@@ -232,6 +232,18 @@ pub trait LevelSideState {
     /// 把这一刻世界边界的方块盒交给方块实体表，离开边界的睡眠实体暂停，见
     /// [`BlockEntities::sync_border`]。
     fn sync_block_entity_border(&mut self, border: BlockBox);
+    /// 这一岛的游戏事件监听者登记表。没有登记表的世界（世界生成、压测）返回 `None`，
+    /// 游戏事件在那里不投递。
+    fn game_event_listeners(&self) -> Option<&crate::game_event::registry::GameEventListeners> {
+        None
+    }
+    /// 见 [`LevelSideState::game_event_listeners`]。
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut crate::game_event::registry::GameEventListeners> {
+        None
+    }
+
     /// 这一格的方块或容器内容变了：叫醒关注它的睡眠条目，见 [`BlockEntities::notify_cell`]。
     /// 默认什么都不做（没有休眠的世界）。
     fn notify_block_entity_cell(&mut self, _pos: BlockPos) {}
@@ -277,12 +289,11 @@ pub trait LevelTables {
     /// Game layer hook: mark a chunk as possibly changed. Called from every
     /// positional write in the blanket impl; over-marking is harmless.
     fn mark_chunk_dirty(&mut self, _pos: ChunkPos) {}
-    /// 这一岛的游戏事件监听者登记表。没有登记表的世界（世界生成、压测）返回 `None`，
-    /// 游戏事件在那里不投递。
+    /// 见 [`LevelSideState::game_event_listeners`]。
     fn game_event_listeners(&self) -> Option<&crate::game_event::registry::GameEventListeners> {
         None
     }
-    /// 见 [`LevelTables::game_event_listeners`]。
+    /// 见 [`LevelSideState::game_event_listeners`]。
     fn game_event_listeners_mut(
         &mut self,
     ) -> Option<&mut crate::game_event::registry::GameEventListeners> {
@@ -480,6 +491,16 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
         &mut self,
     ) -> Option<std::collections::HashSet<(i32, i32, i32)>> {
         self.block_entities_table_mut().take_watched_sections()
+    }
+
+    fn game_event_listeners(&self) -> Option<&crate::game_event::registry::GameEventListeners> {
+        LevelTables::game_event_listeners(self)
+    }
+
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut crate::game_event::registry::GameEventListeners> {
+        LevelTables::game_event_listeners_mut(self)
     }
 
     fn begin_block_entity_tick(&mut self, now: i64) {
