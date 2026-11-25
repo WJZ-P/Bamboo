@@ -791,6 +791,7 @@ mod tests {
             held: item,
             creative: false,
             position: Vec3::default(),
+            player_height: 1.8,
             sneaking: false,
             difficulty: 2,
         }
