@@ -2100,23 +2100,17 @@ public final class MobOracle {
         }
 
         /**
-         * 把每个传感器的起始延迟都设成同一个值：这些延迟取自实体随机源，定下来之后场景
-         * 每次跑都一样，才能把伤害安排在固定的某一刻。
-         *
-         * <p>Sets every sensor's start delay to one value. The delays are drawn from the
-         * entity random; fixing them makes the scene repeatable, so a hurt can be
-         * scheduled on a known tick.
-         */
-        /**
          * 官方 `Brain.Provider.makeBrain` 传实体随机源进 `Brain` 构造函数，其中每个
          * `SensorType.create()` 后调一次 `randomlyDelayStart`，两个 20 刻传感器共消耗两次
          * `nextInt(20)`。夹具在实体构造后覆盖随机源，所以这里按官方顺序重放这两次取数、
-         * 把延迟定成 1，并按推进之后的随机源状态重设闸门洗牌（官方那个是不带种子的
-         * 静态随机源）。Bamboo 一侧的 `randomly_delay_start` 走同一条取数链。
+         * 把延迟定成 1（场景才能复现、伤害能排在固定某一刻），并按推进之后的随机源状态
+         * 重设闸门洗牌（官方那个是不带种子的静态随机源）。Bamboo 一侧的
+         * `randomly_delay_start` / `seed_shuffles` 走同一条取数链。
          *
          * <p>Replays the two `nextInt(20)` draws vanilla's lazy brain construction takes
-         * after the fixture overwrites the entity random, fixes sensor delays to one and
-         * reseeds the shuffle randoms that vanilla creates from an unseeded static source.
+         * after the fixture overwrites the entity random, fixes sensor delays to one for
+         * repeatable scenes, and reseeds the shuffle randoms that vanilla creates from an
+         * unseeded static source. Bamboo replays the same draw chain.
          */
         static void alignCreakingBrain(net.minecraft.world.entity.monster.creaking.Creaking mob)
                 throws Exception {
