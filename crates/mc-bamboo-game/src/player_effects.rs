@@ -13,7 +13,8 @@ use mc_bamboo_blocks::entity::mob::{
     DamageKind, DamageSource,
     effects::{EffectAction, EffectChange, EffectInstance, EffectState},
 };
-use mc_bamboo_protocol::packet::play::{RemoveMobEffect, UpdateMobEffect};
+use mc_bamboo_data::{registries::mob_effect, sounds};
+use mc_bamboo_protocol::packet::play::{RemoveMobEffect, Sound, UpdateMobEffect};
 
 use crate::{inbound::PlayerId, player::Player, region::Region};
 
@@ -21,7 +22,31 @@ use crate::{inbound::PlayerId, player::Player, region::Region};
 ///
 /// One effect application; flags come from the caller.
 pub(crate) fn give(region: &mut Region, id: PlayerId, instance: EffectInstance) -> bool {
+    let effect = instance.effect;
     let changed = give_in(&mut region.players, &mut region.links, id, instance);
+    // `MobEffect.onEffectAdded`：三种不祥之兆带 `soundOnAdded`，
+    // 按官方 `Level.playSound(null, x, y, z, sound, PLAYERS, 1, 1)` 发一份。
+    //
+    // `MobEffect.onEffectAdded`: the three omen effects carry `soundOnAdded`,
+    // sent through official `Level.playSound(null, ..., PLAYERS, 1, 1)`.
+    if changed && let Some(name) = apply_effect_sound(effect) {
+        let Some(player) = region.players.get(&id) else {
+            return changed;
+        };
+        let at = player.position();
+        let packet = Sound {
+            sound: i32::from(sounds::sound_event(name)),
+            inline: None,
+            source: sounds::PLAYERS,
+            x: at.x,
+            y: at.y,
+            z: at.z,
+            volume: 1.0,
+            pitch: 1.0,
+            seed: region.sound_seed_generator.source().next_long(),
+        };
+        crate::interaction::send_sound(region, None, &packet);
+    }
     if changed {
         // 官方 `EffectsChangedTrigger.trigger(ServerPlayer)`。
         crate::advancement_triggers::record(
@@ -32,6 +57,18 @@ pub(crate) fn give(region: &mut Region, id: PlayerId, instance: EffectInstance) 
         );
     }
     changed
+}
+
+/// `MobEffects` 里带 `withSoundOnAdded` 的效果名。
+///
+/// Effect names registered with `withSoundOnAdded` in `MobEffects`.
+fn apply_effect_sound(effect: i32) -> Option<&'static str> {
+    match effect {
+        mob_effect::BAD_OMEN => Some("minecraft:event.mob_effect.bad_omen"),
+        mob_effect::RAID_OMEN => Some("minecraft:event.mob_effect.raid_omen"),
+        mob_effect::TRIAL_OMEN => Some("minecraft:event.mob_effect.trial_omen"),
+        _ => None,
+    }
 }
 
 /// 不借用整张 `Region` 的施加入口，供精确驱动的 `RegionLevel` 当场落地药水效果。
