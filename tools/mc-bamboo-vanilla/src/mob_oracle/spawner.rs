@@ -80,6 +80,9 @@ impl SpawnerCase {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             poi: mc_bamboo_world::poi::PoiStore::new(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             entities: EntityStore::new(),
             players: vec![PlayerView {
                 uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),

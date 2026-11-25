@@ -864,6 +864,46 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     }
                 }
             }
+            Effect::VibrationParticle {
+                pos,
+                x,
+                y,
+                z,
+                travel,
+            } => {
+                // VibrationParticleOption.STREAM_CODEC:
+                // particle type id, position-source type id 0 (minecraft:block),
+                // BlockPos(long), arrivalInTicks(VarInt).
+                let mut options = Vec::new();
+                mc_bamboo_protocol::codec::write_varint(
+                    &mut options,
+                    mc_bamboo_data::registries::particle_type::VIBRATION,
+                );
+                mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+                mc_bamboo_protocol::codec::write_block_pos(&mut options, pos);
+                mc_bamboo_protocol::codec::write_varint(&mut options, travel);
+                let body = mc_bamboo_protocol::frame::packet_body(
+                    &mc_bamboo_protocol::packet::play::LevelParticles {
+                        options: &options,
+                        override_limiter: false,
+                        always_show: false,
+                        x,
+                        y,
+                        z,
+                        x_dist: 0.0,
+                        y_dist: 0.0,
+                        z_dist: 0.0,
+                        max_speed: 0.0,
+                        count: 1,
+                        randomization: mc_bamboo_protocol::packet::play::Randomization::Default,
+                    },
+                );
+                crate::entity_tracking::send_vibration_particle(
+                    region,
+                    &body,
+                    mc_bamboo_core::Vec3::new(x, y, z),
+                );
+            }
             Effect::CrafterCrafted { recipe, position } => {
                 // `CrafterBlock.dispenseFrom`：17x17x17 的盒子里每名玩家。
                 let ids: Vec<PlayerId> = region
@@ -1510,6 +1550,19 @@ pub(crate) fn on_interact_entity(
             let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
             world.interact_mob(entity_id, &request)
         });
+        // 村民不由 `mobInteract` 处理：右键按 `Villager.mobInteract` 分支走
+        // （幼年摇头、`NONE` 职业摇头 + 消耗、有职业进交易菜单）。
+        // Bamboo's mobInteract does not implement villagers; handle `Villager.mobInteract`
+        // here before the generic "pass" filter.
+        if !using_secondary_action
+            && let Some(target) = region.entities.public_at(entity_id)
+            && matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
+            && let Some(result) =
+                crate::merchant::interact(region, id, entity_id, try_hand == Hand::Main)
+        {
+            swing(region, id, try_hand, result);
+            return;
+        }
         if !outcome.result.consumes_action() {
             continue;
         }

@@ -1831,6 +1831,16 @@ fn hit_block(me: &mut Entity, world: &mut World<'_>, hit: BlockHit) {
         channeling_strike(world, &stack, hit.location, hit.pos, owner_uid, true, state);
     }
     play_hit_sound(me, world);
+    // `Projectile.onHit` 的 BLOCK 分支：`gameEvent(PROJECTILE_LAND, 命中格心,
+    // Context.of(projectile, 命中格的状态))`。
+    world.game_event(
+        crate::game_event::GameEvent::ProjectileLand,
+        crate::world::block_center_public(hit.pos),
+        crate::game_event::dispatch::EventContext {
+            affected_state: Some(world.block_state(hit.pos)),
+            ..Default::default()
+        },
+    );
 }
 
 fn play_hit_sound(me: &mut Entity, world: &mut World<'_>) {

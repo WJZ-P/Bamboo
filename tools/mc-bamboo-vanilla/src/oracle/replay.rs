@@ -1251,7 +1251,8 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::EnderPearlTeleport { .. }
             | Effect::GuardianElderEffect { .. }
             // 爆炸包发给附近玩家，方块题不比较。
-            | Effect::Explode { .. } => None,
+            | Effect::Explode { .. }
+            | Effect::VibrationParticle { .. } => None,
         })
         .collect()
 }
@@ -1376,7 +1377,8 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::CrafterCrafted { .. }
             | Effect::EnderPearlTeleport { .. }
             | Effect::GuardianElderEffect { .. }
-            | Effect::Explode { .. } => {}
+            | Effect::Explode { .. }
+            | Effect::VibrationParticle { .. } => {}
         }
     }
     (events, sounds)

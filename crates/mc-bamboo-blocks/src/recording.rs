@@ -771,7 +771,8 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::KilledByArrow { .. } => 28,
         Effect::EnderPearlTeleport { .. } => 29,
         Effect::GuardianElderEffect { .. } => 30,
-        Effect::Explode { .. } => 31,
+        Effect::VibrationParticle { .. } => 31,
+        Effect::Explode { .. } => 32,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -977,6 +978,19 @@ fn hash_effect(effect: &Effect) -> u64 {
             set_spawn.hash(&mut hasher);
             core::mem::discriminant(&problem).hash(&mut hasher);
         }
+        Effect::VibrationParticle {
+            pos,
+            x,
+            y,
+            z,
+            travel,
+        } => {
+            pos.hash(&mut hasher);
+            x.to_bits().hash(&mut hasher);
+            y.to_bits().hash(&mut hasher);
+            z.to_bits().hash(&mut hasher);
+            travel.hash(&mut hasher);
+        }
         Effect::Explode {
             center,
             radius,
@@ -1080,6 +1094,16 @@ pub fn entity_facts(entity: &dyn BlockEntity) -> u64 {
 }
 
 impl LevelSideState for Recording<'_> {
+    fn game_event_listeners(&self) -> Option<&crate::game_event::registry::GameEventListeners> {
+        self.level.game_event_listeners()
+    }
+
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut crate::game_event::registry::GameEventListeners> {
+        self.level.game_event_listeners_mut()
+    }
+
     fn comparator_output(&self, pos: BlockPos) -> i32 {
         let value = self.level.comparator_output(pos);
         self.read(Some(pos), K_REDSTONE, (0_u8, value));

@@ -208,13 +208,14 @@ pub(crate) fn log_player_broadcast(trusted: bool, chat_type_id: i32, name: &str,
 /// ignored.
 pub(crate) fn on_client_command(region: &mut Region, id: PlayerId, action: ClientCommandKind) {
     if action == ClientCommandKind::RequestStats {
-        let (item_used, damage_dealt) = {
+        let (item_used, damage_dealt, custom) = {
             let Some(player) = region.players.get_mut(&id) else {
                 return;
             };
             (
                 player.item_use_stats.take_dirty(),
                 player.item_use_stats.take_dirty_damage_dealt(),
+                player.item_use_stats.take_dirty_custom(),
             )
         };
         region.links.send(
@@ -222,6 +223,7 @@ pub(crate) fn on_client_command(region: &mut Region, id: PlayerId, action: Clien
             &AwardStats {
                 item_used: &item_used,
                 damage_dealt,
+                custom: &custom,
             },
         );
     } else if action == ClientCommandKind::PerformRespawn {

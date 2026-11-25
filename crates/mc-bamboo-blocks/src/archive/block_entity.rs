@@ -107,9 +107,19 @@ pub fn create_block_entity(
     tag: &Tag,
 ) -> Result<Option<Box<dyn BlockEntity>>> {
     if let Some(passive) = PassiveKind::from_name(id) {
-        return Ok(Some(Box::new(PassiveBlockEntity::read(
-            passive, pos, _state, tag,
-        )?)));
+        return Ok(Some(match passive {
+            PassiveKind::SculkSensor | PassiveKind::CalibratedSculkSensor => Box::new(
+                crate::behaviour::misc::sculk_entity::SculkSensorEntity::read(
+                    pos,
+                    passive == PassiveKind::CalibratedSculkSensor,
+                    tag,
+                )?,
+            ),
+            PassiveKind::SculkShrieker => Box::new(
+                crate::behaviour::misc::sculk_shrieker::SculkShriekerEntity::read(pos, tag)?,
+            ),
+            _ => Box::new(PassiveBlockEntity::read(passive, pos, _state, tag)?),
+        }));
     }
     let Some(kind) = BlockEntityKind::from_name(id) else {
         return Ok(None);

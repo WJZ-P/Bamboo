@@ -853,6 +853,29 @@ fn check_player_fields(report: &mut Report, name: &str, data: &PlayerData, field
         get("last_death_location") == expected_death,
         format!("{name}: LastDeathLocation"),
     );
+    // `warden_spawn_tracker`：WardenSpawnTracker.CODEC 的三个非负整数，恒写。
+    let expected_warden = canonical_tag(&Tag::Compound(vec![
+        (
+            "ticks_since_last_warning".to_owned(),
+            Tag::Int(data.warden_spawn_tracker.ticks_since_last_warning),
+        ),
+        (
+            "warning_level".to_owned(),
+            Tag::Int(data.warden_spawn_tracker.warning_level),
+        ),
+        (
+            "cooldown_ticks".to_owned(),
+            Tag::Int(data.warden_spawn_tracker.cooldown_ticks),
+        ),
+    ]));
+    report.check(
+        get("warden_spawn_tracker") == expected_warden,
+        format!(
+            "{name}: warden_spawn_tracker official={} bamboo={}",
+            get("warden_spawn_tracker"),
+            expected_warden
+        ),
+    );
     report.check(
         get("food_level") == json!(data.food_level),
         format!("{name}: foodLevel"),
@@ -1231,6 +1254,15 @@ fn player_cases() -> Vec<(String, PlayerData)> {
     extreme_food.food_exhaustion = 39.5;
     cases.push(("player extreme health and food".into(), extreme_food));
 
+    // 监守者警告等级：WardenSpawnTracker.CODEC 的三个非负整数，带非默认值往返。
+    let mut warned = cases[0].1.clone();
+    warned.warden_spawn_tracker = player_data::WardenSpawnTracker {
+        ticks_since_last_warning: 12345,
+        warning_level: 3,
+        cooldown_ticks: 200,
+    };
+    cases.push(("player warden warning".into(), warned));
+
     // 1b：`LastDeathLocation` 只有 Optional 非空才写，`GlobalPos.CODEC` 是
     // dimension 字符串 + pos 三个 int 的复合标签。
     let mut died = cases[0].1.clone();
@@ -1517,6 +1549,11 @@ fn player_spec(data: &PlayerData) -> Value {
         "game_type": data.game_type,
         "seen_credits": data.seen_credits,
         "spawn_extra_particles_on_fall": data.spawn_extra_particles_on_fall,
+        "warden_spawn_tracker": {
+            "ticks_since_last_warning": data.warden_spawn_tracker.ticks_since_last_warning,
+            "warning_level": data.warden_spawn_tracker.warning_level,
+            "cooldown_ticks": data.warden_spawn_tracker.cooldown_ticks,
+        },
     });
     if let Some(previous) = data.previous_game_type {
         spec["previous_game_type"] = json!(previous);

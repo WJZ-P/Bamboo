@@ -38,6 +38,8 @@ mod redstone_ore;
 mod respawn_anchor;
 mod scaffolding;
 mod sculk;
+pub mod sculk_entity;
+pub mod sculk_shrieker;
 mod sea_pickle;
 mod sniffer_egg;
 mod snow;
@@ -47,6 +49,7 @@ mod sponge;
 mod test_block;
 mod tnt;
 pub(crate) mod turtle_egg;
+pub mod warden;
 mod waterlogged;
 
 use mc_bamboo_core::BlockPos;

@@ -54,6 +54,8 @@ pub struct BlockGameRules {
     ///
     /// `GameRules.SPAWN_PHANTOMS`, read at the top of `PhantomSpawner.tick`.
     pub spawn_phantoms: bool,
+    /// `GameRules.SPAWN_WARDENS`。幽匿尖啸体 `canRespond` 读它。
+    pub spawn_wardens: bool,
     /// `GameRules.MOB_GRIEFING`。
     pub mob_griefing: bool,
     /// `GameRules.MOB_DROPS`：生物死时掉不掉战利品和经验。
@@ -125,6 +127,7 @@ impl BlockGameRules {
             spawn_monsters: bool_default(gamerules::SPAWN_MONSTERS),
             ender_pearls_vanish_on_death: bool_default(gamerules::ENDER_PEARLS_VANISH_ON_DEATH),
             spawn_phantoms: bool_default(gamerules::SPAWN_PHANTOMS),
+            spawn_wardens: bool_default(gamerules::SPAWN_WARDENS),
             mob_griefing: bool_default(gamerules::MOB_GRIEFING),
             mob_drops: bool_default(gamerules::MOB_DROPS),
             mob_explosion_drop_decay: bool_default(gamerules::MOB_EXPLOSION_DROP_DECAY),
@@ -226,6 +229,7 @@ fn assign_bool(rules: &mut BlockGameRules, name: &str, value: bool) {
         "spread_vines" => rules.spread_vines = value,
         "spawn_mobs" => rules.spawn_mobs = value,
         "spawn_phantoms" => rules.spawn_phantoms = value,
+        "spawn_wardens" => rules.spawn_wardens = value,
         "mob_griefing" => rules.mob_griefing = value,
         "mob_drops" => rules.mob_drops = value,
         "mob_explosion_drop_decay" => rules.mob_explosion_drop_decay = value,
@@ -298,6 +302,10 @@ mod tests {
             RULES[gamerules::MAX_SNOW_ACCUMULATION_HEIGHT].default_int
         );
         assert_eq!(rules.spawn_mobs, RULES[gamerules::SPAWN_MOBS].default_bool);
+        assert_eq!(
+            rules.spawn_wardens,
+            RULES[gamerules::SPAWN_WARDENS].default_bool
+        );
     }
 
     #[test]
