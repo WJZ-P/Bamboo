@@ -120,7 +120,7 @@ pub use replay_players::{ReplayPlayerSetup, ReplayPlayers};
 #[cfg(feature = "oracle-samples")]
 #[doc(hidden)]
 pub mod resume_replay;
-mod save_data;
+pub mod save_data;
 pub mod save_session;
 mod scoreboard;
 mod secure_chat;

@@ -1,13 +1,13 @@
 //! `mc-bamboo-vanilla saved-data <java 路径>`：把 Bamboo 编码器写出的
 //! `game_rules.dat` / `world_border.dat` / `world_clocks.dat` /
-//! `world_gen_settings.dat` 交给官方 `GameRuleMap.CODEC` /
+//! `wandering_trader.dat` / `world_gen_settings.dat` 交给官方 `GameRuleMap.CODEC` /
 //! `WorldBorder.Settings.CODEC` / `PackedClockStates.CODEC` /
-//! `WorldGenSettings.CODEC` 解码，逐项核对；超平坦和三种噪声世界的
+//! `WanderingTraderData.CODEC` / `WorldGenSettings.CODEC` 解码，逐项核对；超平坦和三种噪声世界的
 //! `world_gen_settings.dat` 都复核，再故意写坏一个键、一个噪声生成器类型，
 //! 确认官方 codec 会报错。
 //!
 //! Compare Bamboo's `game_rules.dat` / `world_border.dat` / `world_clocks.dat` /
-//! `world_gen_settings.dat` against the official codecs: decode them and check
+//! `wandering_trader.dat` / `world_gen_settings.dat` against the official codecs: decode them and check
 //! the values. Both the flat and the three noise `world_gen_settings.dat` shapes
 //! are validated; then deliberately break one key and one noise generator type
 //! to confirm the oracle rejects them.
@@ -32,6 +32,15 @@ struct Report {
     world_clocks: Vec<ClockEntry>,
     world_gen_settings: GenReport,
     noise_generators: Vec<NoiseGenReport>,
+    wandering_trader: TraderReport,
+}
+
+/// 官方 `WanderingTraderData.CODEC` 解出的两个字段。
+/// The two fields decoded by the official `WanderingTraderData.CODEC`.
+#[derive(Debug, Deserialize)]
+struct TraderReport {
+    spawn_delay: i32,
+    spawn_chance: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +106,7 @@ fn decode(
     world_border: &Path,
     world_clocks: &Path,
     world_gen_settings: &Path,
+    wandering_trader: &Path,
     noise_files: &[&Path],
 ) -> Result<Report, String> {
     let mut command = crate::official_program(java, SOURCE)?;
@@ -104,7 +114,8 @@ fn decode(
         .arg(game_rules)
         .arg(world_border)
         .arg(world_clocks)
-        .arg(world_gen_settings);
+        .arg(world_gen_settings)
+        .arg(wandering_trader);
     for path in noise_files {
         command.arg(path);
     }
@@ -140,6 +151,10 @@ fn check_rule(report: &Report, name: &str, kind: &str, value: &Value) -> Result<
 
 pub fn run(java: &str) -> Result<(), String> {
     let (game_rules_tag, world_border_tag, world_clocks_tag) = mc_bamboo_game::saved_data_samples();
+    use mc_bamboo_blocks::entity::mob::wandering_trader_spawner as wt_spawner;
+    let wandering_trader_tag = mc_bamboo_game::save_data::wandering_trader_tag(
+        wt_spawner::WanderingTraderData::from_tag(12_000, 50),
+    );
     let dir = crate::workspace_root().join("target/vanilla/saved-data-check");
     let _ = fs::remove_dir_all(&dir);
     let world = WorldDir::new(&dir);
@@ -150,6 +165,7 @@ pub fn run(java: &str) -> Result<(), String> {
     let world_border_path = world.world_border_dat();
     let world_clocks_path = world.saved_data("minecraft:world_clocks");
     let world_gen_path = world.saved_data("minecraft:world_gen_settings");
+    let wandering_trader_path = world.saved_data("minecraft:wandering_trader");
     write_saved_data_at(&game_rules_path, &game_rules_tag)
         .map_err(|error| format!("cannot write game_rules.dat: {error}"))?;
     write_saved_data_at(&world_border_path, &world_border_tag)
@@ -160,6 +176,8 @@ pub fn run(java: &str) -> Result<(), String> {
         .map_err(|error| format!("cannot parse generated world_gen_settings SNBT: {error}"))?;
     write_saved_data_at(&world_gen_path, &world_gen_tag)
         .map_err(|error| format!("cannot write world_gen_settings.dat: {error}"))?;
+    write_saved_data_at(&wandering_trader_path, &wandering_trader_tag)
+        .map_err(|error| format!("cannot write wandering_trader.dat: {error}"))?;
 
     // 三种噪声世界各写一份 world_gen_settings.dat，交给官方 WorldGenSettings.CODEC 复核形状。
     // Write one world_gen_settings.dat per noise world for the official codec to validate.
@@ -210,10 +228,18 @@ pub fn run(java: &str) -> Result<(), String> {
         &world_border_path,
         &world_clocks_path,
         &world_gen_path,
+        &wandering_trader_path,
         &noise_refs,
     )?;
     check_rule(&report, "minecraft:random_tick_speed", "int", &json!(7))?;
     check_rule(&report, "minecraft:fire_damage", "bool", &json!(false))?;
+    // `WanderingTraderData.CODEC` 解出的两个字段要和 Bamboo 编码器写出的值一致。
+    if report.wandering_trader.spawn_delay != 12_000 || report.wandering_trader.spawn_chance != 50 {
+        return Err(format!(
+            "wandering_trader.dat differs: {:?}",
+            report.wandering_trader
+        ));
+    }
     // 两份世界时钟的四个字段都要和 Bamboo 编码器写出的值一致。
     // All four fields of both world clocks must match Bamboo's encoder.
     let expected_clocks = [
@@ -327,6 +353,7 @@ pub fn run(java: &str) -> Result<(), String> {
         &world_border_path,
         &world_clocks_path,
         &world_gen_path,
+        &wandering_trader_path,
         &[broken_noise_path.as_path()],
     )
     .is_ok()
@@ -361,6 +388,7 @@ pub fn run(java: &str) -> Result<(), String> {
         &world_border_path,
         &world_clocks_path,
         &world_gen_path,
+        &wandering_trader_path,
         &[],
     )
     .is_ok()
@@ -407,6 +435,7 @@ pub fn run(java: &str) -> Result<(), String> {
         &world_border_path,
         &world_clocks_path,
         &world_gen_path,
+        &wandering_trader_path,
         &[],
     )
     .is_ok()
@@ -416,7 +445,7 @@ pub fn run(java: &str) -> Result<(), String> {
 
     let _ = fs::remove_dir_all(&dir);
     println!(
-        "SAVED-DATA RESULT: game_rules.dat, world_border.dat, world_clocks.dat, the flat and three noise world_gen_settings.dat match the official codecs; broken keys and broken noise generator rejected"
+        "SAVED-DATA RESULT: game_rules.dat, world_border.dat, world_clocks.dat, wandering_trader.dat, the flat and three noise world_gen_settings.dat match the official codecs; broken keys and broken noise generator rejected"
     );
     Ok(())
 }
