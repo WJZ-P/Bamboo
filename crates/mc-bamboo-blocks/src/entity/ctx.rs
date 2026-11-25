@@ -1274,6 +1274,16 @@ pub enum Command {
         others: Vec<EntityUid>,
         target: EntityUid,
     },
+    /// `Warden.applyDarknessAround`：给半径内的玩家上黑暗效果，落地阶段按
+    /// 当前位置查询，避免算阶段重复遍历玩家。
+    ///
+    /// `Warden.applyDarknessAround`: darkness on nearby players; resolved in the
+    /// landing phase against current positions.
+    WardenDarkness {
+        center: Vec3,
+        radius: i32,
+        ticks: i32,
+    },
     /// `Mob.doHurtTarget` 打到玩家：本刻实体循环内按玩家 `hurtServer` 的正式入口落地。
     HurtPlayer {
         target: EntityUid,
@@ -1863,6 +1873,13 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         ),
         Command::WolfAlert { others, target } => {
             super::mob::wolf_goals::apply_alert(world, &others, target);
+        }
+        Command::WardenDarkness {
+            center,
+            radius,
+            ticks,
+        } => {
+            world.darkness_around(center, radius, ticks);
         }
         Command::HurtPlayer {
             target,

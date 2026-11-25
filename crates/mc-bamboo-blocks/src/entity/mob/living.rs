@@ -477,9 +477,18 @@ pub(crate) fn is_in_liquid(me: &Entity, mob: &Mob) -> bool {
     me.in_water || is_in_lava(me, mob)
 }
 
-/// `getEyeY()`。
+/// `getEyeY()`：钻出 / 钻入的监守者把高度压成 1，眼睛高度跟着 `getDimensions` 变。
+///
+/// `getEyeY()`: an emerging / digging warden is flattened to height 1, so its eye
+/// height follows the current pose dimensions.
 pub(crate) fn eye_y(me: &Entity, mob: &Mob) -> f64 {
-    me.position.y + f64::from(mob.eye_height)
+    let eye = if mob.mob_type == super::MobType::Warden && mob.warden.pose.is_digging_or_emerging()
+    {
+        mob.dimensions().1 * 0.85
+    } else {
+        mob.eye_height
+    };
+    me.position.y + f64::from(eye)
 }
 
 /// `getLastDamageSource()`：40 刻以内的那一次。
@@ -858,6 +867,16 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
         // `Sniffer.getAmbientSound`：挖掘 / 搜寻时不叫。
         // `Sniffer.getAmbientSound`: silent while digging or searching.
         super::MobType::Sniffer => super::sniffer::ambient_voice(mob),
+        // `Warden.getAmbientSound()`：咆哮 / 钻出 / 钻入时返回 null，`makeSound`
+        // 不取音高的两个随机数。
+        // `Warden.getAmbientSound()`: null while roaring / emerging / digging, so
+        // `makeSound` draws no pitch random values.
+        super::MobType::Warden
+            if mob.warden.pose == super::warden::WardenPose::Roaring
+                || mob.warden.pose.is_digging_or_emerging() =>
+        {
+            None
+        }
         _ => Some(voice_of(mob, Voice::Ambient, me.in_water)),
     }
 }
@@ -1094,6 +1113,15 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
     if super::armadillo::is_scared(mob) {
         return;
     }
+    // `Warden.getAmbientSound()` 在 ROARING / 钻出 / 钻入时返回 null，不出声也不取音高。
+    // `Warden.getAmbientSound()` is null while ROARING / emerging / digging: no sound
+    // and no pitch draws.
+    if mob.mob_type == super::MobType::Warden
+        && (mob.warden.pose == super::warden::WardenPose::Roaring
+            || mob.warden.pose.is_digging_or_emerging())
+    {
+        return;
+    }
     if mob.mob_type == super::MobType::Wolf {
         // 刚生成的狼还没有仇恨，时刻不影响叫声。
         // A fresh wolf has no anger, so the clock does not matter.
@@ -1179,6 +1207,9 @@ fn ambient_sound(mob: &Mob, in_water: bool) -> &'static str {
         );
     }
     match mob.mob_type {
+        // `Warden.getAmbientSound()` 按愤怒等级选（null 姿态由 play_ambient_sound 拦掉）。
+        // `Warden.getAmbientSound()` picks by anger level (null poses are filtered above).
+        super::MobType::Warden => mob.warden.anger_level().ambient_sound(),
         super::MobType::Goat => super::goat::voice(mob, Voice::Ambient),
         super::MobType::Enderman if mob.enderman.creepy => "minecraft:entity.enderman.scream",
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
@@ -2048,6 +2079,11 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
         // `ElderGuardian.customServerAiStep`: area mining fatigue and home.
         super::guardian::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Warden {
+        // `Warden.customServerAiStep`：大脑、振动、愤怒衰减、活动重选。
+        // `Warden.customServerAiStep`: brain, vibration, anger decay, activity switch.
+        super::warden_ai::custom_server_ai_step(me, mob, ctx, decision_gap);
+    }
 }
 
 /// `Mob.getHeadRotSpeed()`：青蛙 35，其余 10。
@@ -2751,6 +2787,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // Skip own passengers and a rider just ejected this tick.
     let ejected = mob.ejected_passenger.take();
     let mut players = Vec::new();
+    let mut pushed_players = Vec::new();
     ctx.blocks().for_each_player(&mut |player| {
         if player.alive
             && !player.spectator
@@ -2759,6 +2796,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             && super::avoid::player_box(player).intersects(bounds)
         {
             players.push(player.position);
+            pushed_players.push((player.uid, player.position));
         }
     });
     // `maxEntityCramming` 的伤害判定用的是**没截断**的名单：Paper 的
@@ -2797,6 +2835,13 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         );
     }
     timing::record_push!(others.len() as u64);
+    // `Warden.doPush` 在逐个推开之前先按「实体、再玩家」的枚举顺序记账。
+    // `Warden.doPush` runs before the pushes, in the entity-then-player iteration order.
+    if mob.mob_type == super::MobType::Warden {
+        let mut pushed: Vec<_> = others.iter().map(|(uid, pos)| (*uid, *pos)).collect();
+        pushed.extend_from_slice(&pushed_players);
+        super::warden_ai::do_push(me, mob, &pushed);
+    }
     // `Entity.push(Entity)` 只有 `!entity.isVehicle()` 才推得动自己这一半；载具和它的
     // 乘客共享 root vehicle，整对被 `isPassengerOfSameVehicle` 跳过，所以这里也不推。
     // `Entity.push(Entity)` pushes its own half only when `!entity.isVehicle()`; a
@@ -2970,7 +3015,14 @@ pub(crate) fn hurt_server(
 /// The modelled part of `isInvulnerableTo`: removed, or invulnerable to a source that
 /// does not bypass it.
 pub(super) fn is_invulnerable_to(me: &Entity, mob: &Mob, source: &DamageSource) -> bool {
+    // `Warden.isInvulnerableTo`：钻出 / 钻入时，除 `BYPASSES_INVULNERABILITY` 外一律无敌。
+    // `Warden.isInvulnerableTo`: invulnerable while emerging or digging, except for
+    // damage tagged `BYPASSES_INVULNERABILITY`.
+    let digging_invulnerable = mob.mob_type == super::MobType::Warden
+        && mob.warden.pose.is_digging_or_emerging()
+        && !source.kind.bypasses_invulnerability();
     me.removed
+        || digging_invulnerable
         || ((mob.invulnerable || mob.invulnerable_time > 0)
             && !source.kind.bypasses_invulnerability()
             && !source.creative_player)
@@ -3252,6 +3304,15 @@ pub(crate) fn do_hurt_target(
             whole.split().public
         };
         let hurt = ctx.hurt_player(target, source, amount, me, &attacker);
+        // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`：ATTACK_KNOCKBACK
+        // 大于 0 且这一下打中时，攻击者自己的水平速度被压到 0.6 倍（监守者是 1.5）。
+        // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`: with a positive
+        // ATTACK_KNOCKBACK and a landed hit, the attacker's horizontal velocity is
+        // scaled by 0.6 (the warden has 1.5).
+        if hurt && mob.attributes.value(attribute::ATTACK_KNOCKBACK) > 0.0 {
+            me.delta.x *= 0.6;
+            me.delta.z *= 0.6;
+        }
         // `CaveSpider.doHurtTarget`：打中之后按难度给中毒。
         // `CaveSpider.doHurtTarget`: poison the target after a landed hit.
         if hurt && let Some(effect) = super::bee::poison_instance(mob, ctx.blocks().difficulty()) {

@@ -3,7 +3,7 @@
 //! 官方每个区块的每个区段一个 `ArrayList`，按登记先后遍历；这里用
 //! `(区块, sectionY)` 做键，拆岛 / 合岛按区块搬行。
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use mc_bamboo_core::{BlockPos, ChunkPos};
 
@@ -22,6 +22,13 @@ pub enum ListenerRef {
 #[derive(Clone, Debug, Default)]
 pub struct GameEventListeners {
     sections: HashMap<(ChunkPos, i32), Vec<ListenerRef>>,
+    /// 实体监听者当前登记在哪个区段，对应官方 `DynamicGameEventListener.lastSection`。
+    /// 用 `BTreeMap` 让每刻的同步按 uid 升序，精确与并行驱动逐位一致。
+    ///
+    /// Which section each entity listener is registered in, the counterpart of vanilla
+    /// `DynamicGameEventListener.lastSection`. A `BTreeMap` keeps the per-tick sync in
+    /// ascending uid order so precise and parallel drives agree bit for bit.
+    entity_sections: BTreeMap<EntityUid, (ChunkPos, i32)>,
 }
 
 impl GameEventListeners {
@@ -59,9 +66,49 @@ impl GameEventListeners {
             .is_some_and(|l| l.contains(&listener))
     }
 
+    /// `DynamicGameEventListener.move`：区段没变就不动，变了就注销旧的、登记新的。
+    ///
+    /// `DynamicGameEventListener.move`: a no-op when the section is unchanged;
+    /// otherwise unregister the old one and register the new one.
+    pub fn sync_entity(&mut self, uid: EntityUid, chunk: ChunkPos, section_y: i32) {
+        let key = (chunk, section_y);
+        if self.entity_sections.get(&uid).copied() == Some(key) {
+            return;
+        }
+        let listener = ListenerRef::Entity(uid);
+        if let Some((old_chunk, old_y)) = self.entity_sections.insert(uid, key) {
+            self.unregister(old_chunk, old_y, listener);
+        }
+        self.register(chunk, section_y, listener);
+    }
+
+    /// `DynamicGameEventListener.remove`：按记录的区段注销。
+    ///
+    /// `DynamicGameEventListener.remove`: unregister from the recorded section.
+    pub fn remove_entity(&mut self, uid: EntityUid) {
+        if let Some((chunk, y)) = self.entity_sections.remove(&uid) {
+            self.unregister(chunk, y, ListenerRef::Entity(uid));
+        }
+    }
+
+    /// 当前跟踪的实体监听者 uid，按升序。
+    ///
+    /// The tracked entity-listener uids, in ascending order.
+    pub fn entity_listener_uids(&self) -> Vec<EntityUid> {
+        self.entity_sections.keys().copied().collect()
+    }
+
+    /// 某实体监听者当前登记的区段。
+    ///
+    /// The section an entity listener is currently registered in.
+    pub fn entity_section(&self, uid: EntityUid) -> Option<(ChunkPos, i32)> {
+        self.entity_sections.get(&uid).copied()
+    }
+
     /// 区块卸载：丢掉这一列的全部区段。
     pub fn remove_chunk(&mut self, chunk: ChunkPos) {
         self.sections.retain(|(c, _), _| *c != chunk);
+        self.entity_sections.retain(|_, (c, _)| *c != chunk);
     }
 
     /// 拆岛：把这些区块的行搬到新表。
@@ -75,12 +122,21 @@ impl GameEventListeners {
                 true
             }
         });
+        self.entity_sections.retain(|uid, key| {
+            if chunks.contains(&key.0) {
+                moved.entity_sections.insert(*uid, *key);
+                false
+            } else {
+                true
+            }
+        });
         moved
     }
 
     /// 合岛：把另一张表的行并进来。两边区块不相交。
     pub fn absorb(&mut self, other: Self) {
         self.sections.extend(other.sections);
+        self.entity_sections.extend(other.entity_sections);
     }
 
     /// 不变量：没有空列表，每行的区块都在 `chunks` 里。
@@ -93,12 +149,24 @@ impl GameEventListeners {
                 return Err(format!("listener section {chunk:?} y={y} outside island"));
             }
         }
+        for (uid, (chunk, y)) in &self.entity_sections {
+            if !chunks.contains(chunk) {
+                return Err(format!("entity listener {uid} outside island"));
+            }
+            if !self
+                .sections
+                .get(&(*chunk, *y))
+                .is_some_and(|list| list.contains(&ListenerRef::Entity(*uid)))
+            {
+                return Err(format!("entity listener {uid} missing from its section"));
+            }
+        }
         Ok(())
     }
 
     /// 登记表是否为空。
     pub fn is_empty(&self) -> bool {
-        self.sections.is_empty()
+        self.sections.is_empty() && self.entity_sections.is_empty()
     }
 }
 
@@ -123,5 +191,48 @@ mod tests {
         t.unregister(c, 0, a);
         t.unregister(c, 0, b);
         assert!(t.is_empty());
+    }
+
+    #[test]
+    fn entity_listener_moves_across_sections_and_survives_island_changes() {
+        let a = ChunkPos::new(0, 0);
+        let b = ChunkPos::new(1, 0);
+        let uid = 7;
+        let mut t = GameEventListeners::default();
+        t.sync_entity(uid, a, 4);
+        assert_eq!(t.entity_section(uid), Some((a, 4)));
+        assert_eq!(t.section(a, 4), vec![ListenerRef::Entity(uid)]);
+        // 同区段是幂等的 `move`。
+        t.sync_entity(uid, a, 4);
+        assert_eq!(t.section(a, 4), vec![ListenerRef::Entity(uid)]);
+        // 跨区段：旧区段注销、新区段登记。
+        t.sync_entity(uid, a, 5);
+        assert!(t.section(a, 4).is_empty());
+        assert_eq!(t.section(a, 5), vec![ListenerRef::Entity(uid)]);
+        assert_eq!(t.entity_section(uid), Some((a, 5)));
+        // 拆岛把实体记录按区块一起搬走。
+        let moved = t.split_off(&[a].into_iter().collect());
+        assert!(t.is_empty());
+        assert_eq!(moved.entity_section(uid), Some((a, 5)));
+        assert!(moved.check_invariants(&[a].into_iter().collect()).is_ok());
+        // 合岛并进另一张表的实体记录，uid 仍升序。
+        let mut other = GameEventListeners::default();
+        other.sync_entity(9, b, 2);
+        let mut joined = GameEventListeners::default();
+        joined.absorb(moved);
+        joined.absorb(other);
+        assert_eq!(joined.entity_listener_uids(), vec![7, 9]);
+        assert!(
+            joined
+                .check_invariants(&[a, b].into_iter().collect())
+                .is_ok()
+        );
+        // 移除与区块卸载都清掉记录。
+        joined.remove_entity(7);
+        assert_eq!(joined.entity_section(7), None);
+        assert!(joined.section(a, 5).is_empty());
+        joined.remove_chunk(b);
+        assert_eq!(joined.entity_section(9), None);
+        assert!(joined.is_empty());
     }
 }

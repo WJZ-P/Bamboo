@@ -121,6 +121,7 @@ import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.entity.monster.creaking.Creaking;
 import net.minecraft.world.entity.monster.zombie.Zombie;
 import net.minecraft.world.entity.monster.zombie.Husk;
+import net.minecraft.world.entity.monster.warden.Warden;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.flag.FeatureFlags;
@@ -295,6 +296,10 @@ public final class MobOracle {
             out.write(Integer.toString(SharedConstants.getCurrentVersion().protocolVersion()));
             out.write(",\"tables\":" + tableHashes());
             out.write("}\n");
+            if ("warden_probe".equals(only)) {
+                playWardenProbe(official, log);
+                return;
+            }
             // 实测核对三叉戟的两个元数据索引，不靠类层级推导。
             // Cross-check the trident metadata indices against the official jar.
             out.write(tridentMetadataIds());
@@ -672,6 +677,15 @@ public final class MobOracle {
                     playSculkShrieker(official, out, name);
                     cases++;
                 }
+            }
+            if (only == null || only.startsWith("warden")) {
+                cases += playWarden(official, out, only);
+            }
+            if (only == null || only.startsWith("warden")) {
+                cases += playWardenSummon(official, out);
+            }
+            if (only == null || only.startsWith("warden")) {
+                cases += playWardenSave(official, out);
             }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
@@ -13608,6 +13622,303 @@ public final class MobOracle {
      * baby schedule transitions (3000/6000/10000/12000), panic from hurt and nearby zombie
      * plus calm-down, and idle strolling.
      */
+    /** 官方 Warden 在假世界里的可行性探针：跑 100 刻，看完整大脑能否运行。 */
+    private static void playWardenProbe(Official official, PrintStream log) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        java.util.Map<ResourceKey<Level>, ServerLevel> levels =
+                java.util.Map.of(Level.OVERWORLD, world);
+        official.server.levels = levels;
+        put(MinecraftServer.class, official.server, "levels", levels);
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        for (int x = -15; x <= 15; x++) {
+            for (int z = -15; z <= 15; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+            }
+        }
+        world.gameTime = 1000L;
+        world.getRandom().setSeed(1L);
+        Warden mob = (Warden) EntityTypes.WARDEN.create(world, EntitySpawnReason.TRIGGERED);
+        mob.setId(FIRST_ID);
+        mob.setUUID(new UUID(0L, 1L));
+        mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        world.tracked.add(mob);
+        for (int tick = 0; tick <= 100; tick++) {
+            if (tick > 0) {
+                world.gameTime = 1000L + tick;
+                mob.commonTick();
+                mob.tick();
+            }
+            String brain;
+            try {
+                brain = BrainOracle.dump(mob);
+            } catch (Exception error) {
+                brain = "dump-failed:" + error;
+            }
+            log.println("warden_probe tick=" + tick + " pose=" + mob.getPose()
+                    + " anger=" + mob.getClientAngerLevel() + " brain=" + brain);
+        }
+    }
+
+    /** 监守者逐刻对拍：官方 Warden 在假世界里跑完钻出 / 调查 / 嗅探 / 发怒咆哮 /
+     *  近战 / 音波 / 钻回地下，每刻输出姿态、愤怒、大脑、坐标、随机源、玩家血量与效果。 */
+    private static int playWarden(Official official, Writer out, String only) throws Exception {
+        record WScene(String name, int ticks, boolean emerge, boolean player,
+                int anger, boolean attackTarget, boolean eraseSonic, boolean eraseDig,
+                int[] vibration, int[] vibration2) {}
+        List<WScene> scenes = List.of(
+                new WScene("warden_emerge", 150, true, false, 0, false, false, false, null, null),
+                new WScene("warden_investigate", 200, true, true, 0, false, false, false,
+                        new int[] {140, 5, 64, 0, 1, 0}, null),
+                new WScene("warden_sniff", 200, true, true, 0, false, false, false, null, null),
+                new WScene("warden_anger_roar", 200, true, true, 100, false, false, false, null, null),
+                new WScene("warden_melee", 200, true, true, 100, true, false, false, null, null),
+                new WScene("warden_sonic_boom", 210, true, true, 100, true, true, false, null, null),
+                new WScene("warden_dig_back", 130, false, false, 0, false, false, false, null, null),
+                new WScene("warden_projectile", 200, true, true, 0, false, false, false,
+                        new int[] {140, 5, 64, 0, 0, 1}, null),
+                new WScene("warden_recent_projectile", 200, true, true, 0, false, false, false,
+                        new int[] {140, 5, 64, 0, 0, 1}, new int[] {160, 5, 64, 0, 0, 1}));
+        int cases = 0;
+        for (WScene s : scenes) {
+            if (only != null && !s.name().startsWith(only)) continue;
+            FakeLevel world = FakeLevel.create(official);
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels =
+                    java.util.Map.of(Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            world.gameTime = 1000L;
+            world.getRandom().setSeed(1L);
+            Warden mob = (Warden) EntityTypes.WARDEN.create(world, EntitySpawnReason.TRIGGERED);
+            mob.setId(FIRST_ID);
+            mob.setUUID(new UUID(0L, 1L));
+            mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            setRandom(mob, 5L);
+            BrainOracle.fixSensorDelays(mob, 1L);
+            BrainOracle.reseedShuffles(mob, randomSeed(mob));
+            world.tracked.add(mob);
+
+            ServerPlayer player = null;
+            if (s.player()) {
+                player = pigPlayer(official, world);
+                player.setPos(2.5, 64.0, 0.5);
+                player.setId(FIRST_ID + 1);
+                player.setUUID(new UUID(0L, 2L));
+                world.tracked.add(player);
+                world.playersList().add(player);
+            }
+            if (s.emerge()) {
+                mob.setPose(net.minecraft.world.entity.Pose.EMERGING);
+                mob.getBrain().setMemoryWithExpiry(
+                        net.minecraft.world.entity.ai.memory.MemoryModuleType.IS_EMERGING,
+                        net.minecraft.util.Unit.INSTANCE, 134L);
+                mob.getBrain().setMemoryWithExpiry(
+                        net.minecraft.world.entity.ai.memory.MemoryModuleType.DIG_COOLDOWN,
+                        net.minecraft.util.Unit.INSTANCE, 1200L);
+            }
+            if (s.anger() > 0) {
+                mob.increaseAngerAt(player, s.anger(), false);
+            }
+            if (s.attackTarget()) {
+                mob.setAttackTarget(player);
+            }
+            if (s.eraseSonic()) {
+                mob.getBrain().eraseMemory(
+                        net.minecraft.world.entity.ai.memory.MemoryModuleType.SONIC_BOOM_COOLDOWN);
+            }
+            if (s.eraseDig()) {
+                mob.getBrain().eraseMemory(
+                        net.minecraft.world.entity.ai.memory.MemoryModuleType.DIG_COOLDOWN);
+            }
+
+            String sensors = BrainOracle.sensorDelays(mob);
+            long mobSeed = randomSeed(mob);
+            long levelSeed = randomSeed(world.getRandom());
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= s.ticks(); tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    for (int[] vib : new int[][] {s.vibration(), s.vibration2()}) {
+                        if (vib != null && tick == vib[0]) {
+                            net.minecraft.world.entity.Entity source = vib[4] == 1 ? player : null;
+                            net.minecraft.world.entity.Entity owner = vib[5] == 1 ? player : null;
+                            mob.getVibrationUser().onReceiveVibration(world,
+                                    new BlockPos(vib[1], vib[2], vib[3]),
+                                    net.minecraft.world.level.gameevent.GameEvent.STEP,
+                                    source, owner, 5.0F);
+                        }
+                    }
+                    mob.commonTick();
+                    mob.tick();
+                }
+                if (tick > 0) frames.append(',');
+                StringBuilder effects = new StringBuilder("[");
+                if (player != null) {
+                    java.util.List<Integer> durations = new java.util.ArrayList<>();
+                    for (var e : player.getActiveEffects()) {
+                        durations.add(e.getDuration());
+                    }
+                    java.util.Collections.sort(durations);
+                    for (int i = 0; i < durations.size(); i++) {
+                        if (i > 0) effects.append(',');
+                        effects.append(durations.get(i));
+                    }
+                }
+                effects.append(']');
+                frames.append("{\"pose\":").append(jsonString(mob.getPose().name()))
+                        .append(",\"anger\":").append(mob.getClientAngerLevel())
+                        .append(",\"angerLevel\":").append(jsonString(mob.getAngerLevel().name()))
+                        .append(",\"brain\":").append(jsonString(BrainOracle.dump(mob)))
+                        .append(",\"motion\":").append(projectileMotion(mob))
+                        .append(",\"mobSeed\":").append(randomSeed(mob))
+                        .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
+                        .append(",\"playerHealth\":")
+                        .append(player == null ? -1 : Float.floatToRawIntBits(player.getHealth()))
+                        .append(",\"playerEffects\":").append(effects)
+                        .append(",\"removed\":").append(mob.isRemoved())
+                        .append('}');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"warden\",\"name\":" + jsonString(s.name())
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"startTime\":1000"
+                    + ",\"ticks\":" + s.ticks()
+                    + ",\"emerge\":" + s.emerge()
+                    + ",\"player\":" + s.player()
+                    + ",\"anger\":" + s.anger()
+                    + ",\"attackTarget\":" + s.attackTarget()
+                    + ",\"eraseSonic\":" + s.eraseSonic()
+                    + ",\"eraseDig\":" + s.eraseDig()
+                    + ",\"vibration\":"
+                    + (s.vibration() == null ? "null" : java.util.Arrays.toString(s.vibration()))
+                    + ",\"vibration2\":"
+                    + (s.vibration2() == null ? "null" : java.util.Arrays.toString(s.vibration2()))
+                    + ",\"sensors\":" + sensors
+                    + ",\"mobSeed\":" + mobSeed
+                    + ",\"levelSeed\":" + levelSeed
+                    + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
+    /** 尖啸体四级警告：官方 `SpawnUtil.trySpawnMob` 取点召唤监守者并钻出地面。 */
+    private static int playWardenSummon(Official official, Writer out) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        java.util.Map<ResourceKey<Level>, ServerLevel> levels =
+                java.util.Map.of(Level.OVERWORLD, world);
+        official.server.levels = levels;
+        put(MinecraftServer.class, official.server, "levels", levels);
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        for (int x = -15; x <= 15; x++) {
+            for (int z = -15; z <= 15; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+            }
+        }
+        world.gameTime = 1000L;
+        world.getRandom().setSeed(1L);
+        world.spawnerScene = true;
+        world.spawnDifficulty = new net.minecraft.world.DifficultyInstance(
+                net.minecraft.world.Difficulty.NORMAL, 0L, 0L, 0.0F);
+        var summoned = net.minecraft.util.SpawnUtil.trySpawnMob(
+                EntityTypes.WARDEN, EntitySpawnReason.TRIGGERED, world,
+                new BlockPos(0, 64, 0), 20, 5, 6,
+                net.minecraft.util.SpawnUtil.Strategy.ON_TOP_OF_COLLIDER, false);
+        Warden mob = summoned.orElseThrow(() -> new IllegalStateException("warden did not spawn"));
+        mob.setId(FIRST_ID);
+        mob.setUUID(new UUID(0L, 1L));
+        setRandom(mob, 5L);
+        BrainOracle.fixSensorDelays(mob, 1L);
+        BrainOracle.reseedShuffles(mob, randomSeed(mob));
+        String sensors = BrainOracle.sensorDelays(mob);
+        long mobSeed = randomSeed(mob);
+        long levelSeed = randomSeed(world.getRandom());
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= 150; tick++) {
+            if (tick > 0) {
+                world.gameTime = 1000L + tick;
+                mob.commonTick();
+                mob.tick();
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"pose\":").append(jsonString(mob.getPose().name()))
+                    .append(",\"anger\":").append(mob.getClientAngerLevel())
+                    .append(",\"angerLevel\":").append(jsonString(mob.getAngerLevel().name()))
+                    .append(",\"brain\":").append(jsonString(BrainOracle.dump(mob)))
+                    .append(",\"motion\":").append(projectileMotion(mob))
+                    .append(",\"mobSeed\":").append(randomSeed(mob))
+                    .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
+                    .append(",\"playerHealth\":-1")
+                    .append(",\"playerEffects\":[]")
+                    .append(",\"removed\":").append(mob.isRemoved())
+                    .append('}');
+        }
+        frames.append(']');
+        out.write("{\"type\":\"warden\",\"name\":\"warden_summon\""
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"startTime\":1000"
+                + ",\"ticks\":150"
+                + ",\"emerge\":false,\"player\":false,\"anger\":0"
+                + ",\"attackTarget\":false,\"eraseSonic\":false,\"eraseDig\":false"
+                + ",\"summon\":true"
+                + ",\"vibration\":null,\"vibration2\":null"
+                + ",\"sensors\":" + sensors
+                + ",\"mobSeed\":" + mobSeed
+                + ",\"levelSeed\":" + levelSeed
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+        return 1;
+    }
+
+    /** 监守者存档：`saveWithoutId` 的 SNBT 和读回后再写出的 SNBT。 */
+    private static int playWardenSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean filled : new boolean[] {false, true}) {
+            FakeLevel world = FakeLevel.create(official);
+            Warden mob = (Warden) EntityTypes.WARDEN.create(world, EntitySpawnReason.COMMAND);
+            setRandom(mob, world.entitySeeds.nextLong());
+            mob.setPos(1.5, 64.0, 2.5);
+            mob.setYRot(37.0F);
+            mob.setXRot(12.0F);
+            mob.setHealth(317.0F);
+            if (filled) {
+                ServerPlayer player = pigPlayer(official, world);
+                player.setPos(4.5, 64.0, 2.5);
+                player.setId(FIRST_ID + 1);
+                player.setUUID(new UUID(0L, 2L));
+                world.tracked.add(player);
+                world.playersList().add(player);
+                mob.increaseAngerAt(player, 95, false);
+                var info = new net.minecraft.world.level.gameevent.vibrations.VibrationInfo(
+                        net.minecraft.world.level.gameevent.GameEvent.STEP,
+                        7.0F, new net.minecraft.world.phys.Vec3(3.5, 64.5, 2.5),
+                        new UUID(0L, 2L), null);
+                mob.getVibrationData().setCurrentVibration(info);
+                mob.getVibrationData().setTravelTimeInTicks(23);
+            }
+            var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            mob.saveWithoutId(output);
+            var copy = (Warden) EntityTypes.WARDEN.create(world, EntitySpawnReason.LOAD);
+            copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries, output.buildResult()));
+            var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            copy.saveWithoutId(again);
+            out.write("{\"type\":\"wardenSave\",\"filled\":" + filled
+                    + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                    + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
     private static int playVillagerBrain(Official official, Writer out, String only) throws Exception {
         record VScene(String name, long clockStart, int ticks, boolean baby, String profession,
                 boolean hasJobSite, boolean hasMeetingPoint, int hurtTick, boolean hasZombie,
