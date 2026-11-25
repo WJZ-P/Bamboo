@@ -81,6 +81,12 @@ pub enum SensorKind {
     ///
     /// `GolemSensor` (200-tick scan; writes `GOLEM_DETECTED_RECENTLY` with TTL 599 if an iron golem is nearby).
     GolemDetected,
+    /// `SensorType.WARDEN_ENTITY_SENSOR`：`NearestLivingEntitySensor` 的子类，
+    /// 从 `NEAREST_LIVING_ENTITIES` 里按玩家 / 非玩家选 `NEAREST_ATTACKABLE`。
+    ///
+    /// `SensorType.WARDEN_ENTITY_SENSOR`: a `NearestLivingEntitySensor` subclass that
+    /// picks `NEAREST_ATTACKABLE` (player first, then other mobs).
+    WardenEntitySensor,
 }
 
 impl SensorKind {
@@ -152,6 +158,14 @@ impl SensorKind {
                 MemoryType::NearestLivingEntities,
                 MemoryType::GolemDetectedRecently,
             ],
+            // `WardenEntitySensor.requires()` = 视线表 + `NEAREST_ATTACKABLE`。
+            // `WardenEntitySensor.requires()`: the visible-entity table plus
+            // `NEAREST_ATTACKABLE`.
+            Self::WardenEntitySensor => &[
+                MemoryType::NearestLivingEntities,
+                MemoryType::NearestVisibleLivingEntities,
+                MemoryType::NearestAttackable,
+            ],
         }
     }
 
@@ -178,6 +192,7 @@ impl SensorKind {
             Self::VillagerBabies => "VillagerBabiesSensor",
             Self::SecondaryPois => "SecondaryPoiSensor",
             Self::GolemDetected => "GolemSensor",
+            Self::WardenEntitySensor => "WardenEntitySensor",
         }
     }
 }
@@ -241,6 +256,7 @@ impl Sensor {
             SensorKind::VillagerBabies => sense_villager_babies(cx),
             SensorKind::SecondaryPois => sense_secondary_pois(cx),
             SensorKind::GolemDetected => sense_golem_detected(cx),
+            SensorKind::WardenEntitySensor => super::super::warden_ai::warden_entity_sensor(cx),
         }
     }
 }
@@ -498,7 +514,7 @@ pub fn set_partner_memory(
 ///
 /// `NearestLivingEntitySensor.doTick`: living entities in the follow-range box, by
 /// distance. Players come before mobs (only matters for equal distances).
-fn sense_nearest_living(cx: &mut Cx) {
+pub(crate) fn sense_nearest_living(cx: &mut Cx) {
     let range = cx.mob.attributes.value(attribute::FOLLOW_RANGE);
     let area = cx.me.bounding_box().inflate(range, range, range);
     let me = cx.me.id;

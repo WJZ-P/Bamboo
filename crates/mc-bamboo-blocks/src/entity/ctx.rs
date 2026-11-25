@@ -387,6 +387,11 @@ pub trait BlockView {
         false
     }
 
+    /// `ServerLevel.getRaidAt(pos)`。默认没有袭击。
+    fn raid_at(&self, _pos: BlockPos) -> Option<crate::entity::raid::RaidView> {
+        None
+    }
+
     /// `getOverworldClockTime()`：主世界时钟的整数刻。没有时钟的视图给 0。
     fn clock_ticks(&self) -> i64 {
         0
@@ -730,6 +735,10 @@ impl BlockView for World<'_> {
 
     fn poi_is_close_to_village(&self, pos: BlockPos, sections: i32) -> bool {
         self.level().poi_is_close_to_village(pos, sections)
+    }
+
+    fn raid_at(&self, pos: BlockPos) -> Option<crate::entity::raid::RaidView> {
+        self.level().raid_at(pos)
     }
 
     fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
@@ -1251,6 +1260,14 @@ pub enum Command {
     AwardDeathExperience {
         amount: i32,
     },
+    /// `Raider.die`：把英雄与离队信息交给游戏层。
+    ///
+    /// `Raider.die`: hand hero credit and roster removal to the game layer.
+    RaiderDied {
+        uid: EntityUid,
+        position: mc_bamboo_core::Vec3,
+        killer: Option<[u8; 16]>,
+    },
     /// `ExperienceOrb.scanForMerges`：周围同值的球合并到自己身上。
     MergeExperienceOrbs {
         others: Vec<EntityUid>,
@@ -1305,6 +1322,16 @@ pub enum Command {
     WolfAlert {
         others: Vec<EntityUid>,
         target: EntityUid,
+    },
+    /// `Warden.applyDarknessAround`：给半径内的玩家上黑暗效果，落地阶段按
+    /// 当前位置查询，避免算阶段重复遍历玩家。
+    ///
+    /// `Warden.applyDarknessAround`: darkness on nearby players; resolved in the
+    /// landing phase against current positions.
+    WardenDarkness {
+        center: Vec3,
+        radius: i32,
+        ticks: i32,
     },
     /// `Mob.doHurtTarget` 打到玩家：本刻实体循环内按玩家 `hurtServer` 的正式入口落地。
     HurtPlayer {
@@ -1851,6 +1878,17 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 world.spawn_at_location(me.position, stack);
             }
         }
+        Command::RaiderDied {
+            uid,
+            position,
+            killer,
+        } => {
+            world.push_effect(crate::Effect::RaiderDied {
+                uid,
+                position,
+                killer,
+            });
+        }
         Command::AwardDeathExperience { amount } => {
             super::orb::award(world, me.position, amount);
         }
@@ -1895,6 +1933,13 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         ),
         Command::WolfAlert { others, target } => {
             super::mob::wolf_goals::apply_alert(world, &others, target);
+        }
+        Command::WardenDarkness {
+            center,
+            radius,
+            ticks,
+        } => {
+            world.darkness_around(center, radius, ticks);
         }
         Command::HurtPlayer {
             target,

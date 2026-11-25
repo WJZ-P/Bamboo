@@ -79,6 +79,7 @@ pub mod pillager;
 pub mod polar_bear;
 pub mod rabbit;
 pub mod raider;
+pub mod ravager;
 pub mod sheep;
 pub mod silverfish;
 pub mod skeleton;
@@ -101,6 +102,10 @@ pub(crate) mod timing;
 pub mod turtle;
 pub mod villager;
 pub mod villager_ai;
+pub mod vindicator;
+pub mod warden;
+pub mod warden_ai;
+pub mod warden_spawn;
 mod water;
 pub mod wild_spawn;
 pub mod witch;
@@ -235,8 +240,11 @@ pub enum MobType {
     ///
     /// The `ZombieNautilus`.
     ZombieNautilus,
-    /// 嗅探兽，`Sniffer`。
+    /// 监守者，`Warden`。`Monster` → `Warden`，脑驱动，自己是振动监听者。
     ///
+    /// The `Warden`. A `Monster` → `Warden`, brain-driven, itself a vibration listener.
+    Warden,
+    /// 嗅探兽，`Sniffer`。
     /// The `Sniffer`.
     Sniffer,
     /// 快乐恶魂，`HappyGhast`。可养大的可骑乘飞行生物；幼年用大脑，成年用目标，
@@ -245,13 +253,21 @@ pub enum MobType {
     /// The `HappyGhast`: a growable rideable flying mob. Babies use a brain, adults use
     /// goals, and a harnessed adult carries up to four players.
     HappyGhast,
+    /// 卫道士，`Vindicator`（`AbstractIllager` 一支，主手铁斧）。
+    ///
+    /// Vindicator, an `AbstractIllager` with an iron axe.
+    Vindicator,
+    /// 劫掠兽，`Ravager`。
+    ///
+    /// Ravager.
+    Ravager,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 65] = [
+    pub const ALL: [Self; 68] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -315,8 +331,11 @@ impl MobType {
         Self::Nautilus,
         Self::ZombieNautilus,
         Self::Creaking,
+        Self::Warden,
         Self::Sniffer,
         Self::HappyGhast,
+        Self::Vindicator,
+        Self::Ravager,
     ];
 
     /// 注册表 ID。
@@ -386,8 +405,11 @@ impl MobType {
             Self::Creaking => ids::CREAKING,
             Self::Nautilus => ids::NAUTILUS,
             Self::ZombieNautilus => ids::ZOMBIE_NAUTILUS,
+            Self::Warden => ids::WARDEN,
             Self::Sniffer => ids::SNIFFER,
             Self::HappyGhast => ids::HAPPY_GHAST,
+            Self::Vindicator => ids::VINDICATOR,
+            Self::Ravager => ids::RAVAGER,
         }
     }
 
@@ -457,8 +479,11 @@ impl MobType {
             Self::Creaking => "minecraft:creaking",
             Self::Nautilus => "minecraft:nautilus",
             Self::ZombieNautilus => "minecraft:zombie_nautilus",
+            Self::Warden => "minecraft:warden",
             Self::Sniffer => "minecraft:sniffer",
             Self::HappyGhast => "minecraft:happy_ghast",
+            Self::Vindicator => "minecraft:vindicator",
+            Self::Ravager => "minecraft:ravager",
         }
     }
 
@@ -625,6 +650,9 @@ impl MobType {
             (Self::ElderGuardian, _) => (1.9975, 1.9975, 0.99875),
             (Self::Nautilus | Self::ZombieNautilus, baby) => nautilus::dimensions(baby),
             (Self::Sniffer, baby) => sniffer::dimensions(baby),
+            // `EntityTypes.VINDICATOR` / `RAVAGER`：眼高用官方缺省的 height*0.85。
+            (Self::Vindicator, _) => (0.6, 1.95, 1.95 * 0.85),
+            (Self::Ravager, _) => (1.95, 2.2, 2.2 * 0.85),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -662,6 +690,9 @@ impl MobType {
                 mc_bamboo_data::villager::BABY_VILLAGER_EYE_HEIGHT,
             ),
             (Self::HappyGhast, baby) => happy_ghast::dimensions(baby),
+            // `EntityTypes.WARDEN`：`sized(0.9F, 2.9F)`，未显式给眼高，取缺省 `height * 0.85F`。
+            // `EntityTypes.WARDEN`: `sized(0.9F, 2.9F)` with the default eye height.
+            (Self::Warden, _) => (0.9, 2.9, 2.9 * 0.85),
         }
     }
 
@@ -682,6 +713,8 @@ impl MobType {
                 | Self::ZombieVillager
                 | Self::Witch
                 | Self::Pillager
+                | Self::Vindicator
+                | Self::Ravager
                 | Self::Creeper
                 | Self::Spider
                 | Self::CaveSpider
@@ -691,6 +724,7 @@ impl MobType {
                 | Self::Guardian
                 | Self::ElderGuardian
                 | Self::ZombieNautilus
+                | Self::Warden
         ) || self.is_skeleton()
     }
 
@@ -701,7 +735,10 @@ impl MobType {
     /// pillagers. They share patrols, the unconditional `noActionTime += 2`, and the
     /// no-distance-despawn rule while patrolling.
     pub const fn is_raider(self) -> bool {
-        matches!(self, Self::Witch | Self::Pillager)
+        matches!(
+            self,
+            Self::Witch | Self::Pillager | Self::Vindicator | Self::Ravager
+        )
     }
 
     /// 是不是 `Zombie` 一支：僵尸、尸壳、溺尸共用近战、破门、增援和转化逻辑。
@@ -852,7 +889,9 @@ impl MobType {
     pub const fn removes_when_far_away(self) -> bool {
         // `AbstractGolem.removeWhenFarAway` 恒假。
         // `AbstractGolem.removeWhenFarAway` is always false.
-        if matches!(self, Self::IronGolem | Self::SnowGolem) {
+        // `Warden.removeWhenFarAway()` 恒假，监守者不因距离消失。
+        // `Warden.removeWhenFarAway()` is always false.
+        if matches!(self, Self::IronGolem | Self::SnowGolem | Self::Warden) {
             return false;
         }
         // 鱿鱼、海豚（`AgeableWaterCreature`）、鱼（`WaterAnimal`）和蝙蝠不是 `Animal`，沿用
@@ -1144,8 +1183,11 @@ impl MobType {
             Self::Creaking => "minecraft:entities/creaking",
             Self::Nautilus => "minecraft:entities/nautilus",
             Self::ZombieNautilus => "minecraft:entities/zombie_nautilus",
+            Self::Warden => "minecraft:entities/warden",
             Self::Sniffer => "minecraft:entities/sniffer",
             Self::HappyGhast => "minecraft:entities/happy_ghast",
+            Self::Vindicator => "minecraft:entities/vindicator",
+            Self::Ravager => "minecraft:entities/ravager",
         }
     }
 
@@ -1185,6 +1227,11 @@ impl MobType {
 
     /// `Mob.getSoundVolume()`。牛 0.4，僵尸 1.0（`Monster` 用 `getSoundVolume` 缺省）。
     pub const fn sound_volume(self) -> f32 {
+        // `Warden.getSoundVolume()` 覆写成 4.0。
+        // `Warden.getSoundVolume()` overrides it to 4.0.
+        if matches!(self, Self::Warden) {
+            return 4.0;
+        }
         if self.is_equine() {
             0.8
         } else if matches!(self, Self::Bat) {
@@ -1208,6 +1255,12 @@ impl MobType {
     /// `living::ambient_sound` pick by age.
     pub const fn ambient_sound(self) -> Option<&'static str> {
         match self {
+            // `Warden.getAmbientSound()` 按愤怒等级选，且在咆哮 / 钻地时返回 null，
+            // 由 `warden::ambient_sound` 按状态分派；静态表里不写死。
+            //
+            // `Warden.getAmbientSound()` depends on the anger level and is null while
+            // roaring or digging; `warden::ambient_sound` dispatches by state.
+            Self::Warden => None,
             Self::Rabbit => Some("minecraft:entity.rabbit.ambient"),
             Self::Fox => Some("minecraft:entity.fox.ambient"),
             // 狼的叫声按叫声品种和幼年换，见 [`wolf::sound`]。
@@ -1294,11 +1347,14 @@ impl MobType {
             // `HappyGhast.getAmbientSound`: baby/adult variants; adult here, baby is
             // swapped to `entity.ghastling.ambient` in `living::voice_of`.
             Self::HappyGhast => Some("minecraft:entity.happy_ghast.ambient"),
+            Self::Vindicator => Some("minecraft:entity.vindicator.ambient"),
+            Self::Ravager => Some("minecraft:entity.ravager.ambient"),
         }
     }
 
     pub const fn hurt_sound(self) -> Option<&'static str> {
         match self {
+            Self::Warden => Some("minecraft:entity.warden.hurt"),
             Self::Rabbit => Some("minecraft:entity.rabbit.hurt"),
             Self::Fox => Some("minecraft:entity.fox.hurt"),
             Self::Wolf => Some("minecraft:entity.wolf.hurt"),
@@ -1359,11 +1415,14 @@ impl MobType {
             | Self::Creaking => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.hurt"),
             Self::HappyGhast => Some("minecraft:entity.happy_ghast.hurt"),
+            Self::Vindicator => Some("minecraft:entity.vindicator.hurt"),
+            Self::Ravager => Some("minecraft:entity.ravager.hurt"),
         }
     }
 
     pub const fn death_sound(self) -> Option<&'static str> {
         match self {
+            Self::Warden => Some("minecraft:entity.warden.death"),
             Self::Rabbit => Some("minecraft:entity.rabbit.death"),
             Self::Fox => Some("minecraft:entity.fox.death"),
             Self::Wolf => Some("minecraft:entity.wolf.death"),
@@ -1424,11 +1483,14 @@ impl MobType {
             | Self::ZombieNautilus => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.death"),
             Self::HappyGhast => Some("minecraft:entity.happy_ghast.death"),
+            Self::Vindicator => Some("minecraft:entity.vindicator.death"),
+            Self::Ravager => Some("minecraft:entity.ravager.death"),
         }
     }
 
     pub const fn step_sound(self) -> Option<&'static str> {
         match self {
+            Self::Warden => Some("minecraft:entity.warden.step"),
             Self::Rabbit | Self::Fox | Self::Wolf | Self::Slime => None,
             Self::Cow
             | Self::Mooshroom
@@ -1502,6 +1564,9 @@ impl MobType {
             // `HappyGhast.playStepSound` 空实现，没有脚步声。
             // `HappyGhast.playStepSound` is empty, so there is no step sound.
             Self::HappyGhast => None,
+            // `AbstractIllager` / `Vindicator` 没有覆写脚步声；劫掠兽有自己的。
+            Self::Vindicator => None,
+            Self::Ravager => Some("minecraft:entity.ravager.step"),
         }
     }
 
@@ -1509,6 +1574,7 @@ impl MobType {
     pub const fn spawn_egg(self) -> i32 {
         use mc_bamboo_data::items;
         match self {
+            Self::Warden => items::WARDEN_SPAWN_EGG,
             Self::Cow => items::COW_SPAWN_EGG,
             Self::Mooshroom => items::MOOSHROOM_SPAWN_EGG,
             Self::Rabbit => items::RABBIT_SPAWN_EGG,
@@ -1574,12 +1640,15 @@ impl MobType {
             Self::ZombieNautilus => items::ZOMBIE_NAUTILUS_SPAWN_EGG,
             Self::Sniffer => items::SNIFFER_SPAWN_EGG,
             Self::HappyGhast => items::HAPPY_GHAST_SPAWN_EGG,
+            Self::Vindicator => items::VINDICATOR_SPAWN_EGG,
+            Self::Ravager => items::RAVAGER_SPAWN_EGG,
         }
     }
 
     /// `/summon` 成功反馈里的翻译键。
     pub const fn translation_key(self) -> &'static str {
         match self {
+            Self::Warden => "entity.minecraft.warden",
             Self::Cow => "entity.minecraft.cow",
             Self::Mooshroom => "entity.minecraft.mooshroom",
             Self::Rabbit => "entity.minecraft.rabbit",
@@ -1645,6 +1714,8 @@ impl MobType {
             Self::ZombieNautilus => "entity.minecraft.zombie_nautilus",
             Self::Sniffer => "entity.minecraft.sniffer",
             Self::HappyGhast => "entity.minecraft.happy_ghast",
+            Self::Vindicator => "entity.minecraft.vindicator",
+            Self::Ravager => "entity.minecraft.ravager",
         }
     }
 
@@ -1703,11 +1774,11 @@ impl MobType {
         ) || matches!(self, Self::Pillager)
     }
 
-    /// `EntityType.fireImmune()`：已支持的自然生成生物均不防火。
+    /// `EntityType.fireImmune()`：监守者的 `Builder` 调了 `fireImmune()`。
     ///
-    /// `EntityType.fireImmune()`: all modelled natural spawns are vulnerable to fire.
+    /// `EntityType.fireImmune()`: the warden's `Builder` calls `fireImmune()`.
     pub const fn fire_immune(self) -> bool {
-        false
+        matches!(self, Self::Warden)
     }
 
     /// `LivingEntity.getMaxAirSupply()`：海豚 4800、美西螈 6000，其余 300。
@@ -1961,6 +2032,10 @@ pub enum DamageKind {
     /// the overworld. `INTENTIONAL_GAME_DESIGN`, exhaustion 0.1, `always`
     /// scaling, `message_id` `badRespawnPoint`.
     BadRespawnPoint,
+    /// 监守者的音波，`minecraft:sonic_boom`：穿墙、绕过护甲。
+    ///
+    /// The warden's `minecraft:sonic_boom`: passes through walls and armor.
+    SonicBoom,
 }
 
 impl DamageKind {
@@ -2001,6 +2076,7 @@ impl DamageKind {
             Self::LightningBolt => "minecraft:lightning_bolt",
             Self::SulfurCubeHot => "minecraft:sulfur_cube_hot",
             Self::BadRespawnPoint => "minecraft:bad_respawn_point",
+            Self::SonicBoom => "minecraft:sonic_boom",
         }
     }
 
@@ -2062,6 +2138,7 @@ impl DamageKind {
             Self::LightningBolt => "lightningBolt",
             Self::SulfurCubeHot => "sulfurCubeHot",
             Self::BadRespawnPoint => "badRespawnPoint",
+            Self::SonicBoom => "sonic_boom",
         }
     }
 
@@ -2104,6 +2181,7 @@ impl DamageKind {
             Self::LightningBolt,
             Self::SulfurCubeHot,
             Self::BadRespawnPoint,
+            Self::SonicBoom,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -2142,6 +2220,7 @@ impl DamageKind {
                 | Self::IndirectMagic
                 | Self::Wither
                 | Self::EnderPearl
+                | Self::SonicBoom
         )
     }
 
@@ -2152,7 +2231,7 @@ impl DamageKind {
 
     /// `#bypasses_enchantments`：保护附魔不生效。
     pub const fn bypasses_enchantments(self) -> bool {
-        matches!(self, Self::OutOfWorld | Self::GenericKill)
+        matches!(self, Self::OutOfWorld | Self::GenericKill | Self::SonicBoom)
     }
 
     /// `#is_fire`。
@@ -2193,7 +2272,7 @@ impl DamageKind {
     pub const fn scales_with_difficulty(self) -> bool {
         matches!(
             self,
-            Self::Explosion | Self::PlayerExplosion | Self::BadRespawnPoint
+            Self::Explosion | Self::PlayerExplosion | Self::BadRespawnPoint | Self::SonicBoom
         )
     }
 
@@ -2999,6 +3078,15 @@ pub struct Mob {
     /// `Tadpole.age`: a frog at 24000. Tadpoles are not `AgeableMob`s, so this is
     /// separate from `age`.
     pub tadpole_age: i32,
+    /// 监守者的愤怒管理、振动监听者、姿态和客户端愤怒等级；别的生物是缺省值。
+    ///
+    /// The warden's anger management, vibration listener, pose and client anger
+    /// level; default for every other mob.
+    pub warden: warden::Warden,
+    /// 实体自带的游戏事件监听者（监守者等）；别的生物是 `None`。
+    ///
+    /// The mob's own game-event listener (the warden and similar); `None` otherwise.
+    pub entity_listener: Option<crate::game_event::dispatch::EntityListener>,
     /// `LivingEntity.discardFriction`：长跳途中 `travelInAir` 不乘摩擦。
     ///
     /// `LivingEntity.discardFriction`: `travelInAir` skips friction during a long jump.
@@ -3155,8 +3243,11 @@ impl Mob {
             MobType::SulfurCube => sulfur_cube::attributes(),
             MobType::Creaking => creaking::attributes(),
             MobType::Nautilus | MobType::ZombieNautilus => nautilus::attributes(mob_type),
+            MobType::Warden => warden::attributes(),
             MobType::Sniffer => sniffer::attributes(),
             MobType::HappyGhast => happy_ghast::attributes(),
+            MobType::Vindicator => vindicator::attributes(),
+            MobType::Ravager => ravager::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3235,6 +3326,8 @@ impl Mob {
             MobType::Drowned => drowned::goals(&mut navigation),
             MobType::Witch => witch::goals(&mut navigation),
             MobType::Pillager => pillager::goals(&mut navigation),
+            MobType::Vindicator => vindicator::goals(&mut navigation),
+            MobType::Ravager => ravager::goals(&mut navigation),
             // 蝙蝠和骆驼没有覆写 `registerGoals`：两个选择器都是空的（骆驼不要 `equine::goals`）。
             // Bats and camels do not override `registerGoals`: both selectors stay empty
             // (no `equine::goals` for camels).
@@ -3279,6 +3372,9 @@ impl Mob {
             MobType::Silverfish => silverfish::goals(&mut navigation),
             MobType::Endermite => endermite::goals(&mut navigation),
             MobType::Guardian | MobType::ElderGuardian => guardian::goals(mob_type),
+            // 监守者是脑驱动，没有 `registerGoals` 覆盖。
+            // The warden is brain-driven and has no `registerGoals` override.
+            MobType::Warden => GoalSelector::default(),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
@@ -3364,12 +3460,15 @@ impl Mob {
             MobType::Phantom => phantom::target_goals(),
             MobType::Bee => bee_goals::target_goals(),
             MobType::Pillager => pillager::targets(),
+            MobType::Vindicator => vindicator::targets(),
+            MobType::Ravager => ravager::targets(),
             MobType::SkeletonHorse | MobType::ZombieHorse => GoalSelector::default(),
             MobType::IronGolem => iron_golem::target_goals(),
             MobType::SnowGolem => snow_golem::target_goals(),
             MobType::Silverfish => silverfish::targets(),
             MobType::Endermite => endermite::targets(),
             MobType::Guardian | MobType::ElderGuardian => guardian::target_goals(),
+            MobType::Warden => GoalSelector::default(),
             kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -3470,6 +3569,7 @@ impl Mob {
                 // Guardians must precede the `is_monster` arm or water costs are not zero.
                 MobType::Guardian | MobType::ElderGuardian => guardian::malus(),
                 MobType::Nautilus | MobType::ZombieNautilus => nautilus::malus(),
+                MobType::Warden => warden::malus(),
                 _ if mob_type.is_monster() => Malus::monster(),
                 MobType::Chicken => chicken::malus(),
                 MobType::Enderman => enderman::malus(),
@@ -3591,6 +3691,8 @@ impl Mob {
             villager: villager::Villager::default(),
             zombie_villager: zombie_villager::ZombieVillagerState::default(),
             tadpole_age: 0,
+            warden: warden::Warden::default(),
+            entity_listener: None,
             discard_friction: false,
             leash: None,
             passengers: Vec::new(),
@@ -3638,6 +3740,18 @@ impl Mob {
             // `Tadpole.fromBucket()` is always true (`setFromBucket` does nothing), so
             // tadpoles never despawn.
             mob.fish.from_bucket = true;
+        }
+        if mob_type == MobType::Warden {
+            // `Warden` 构造函数里的 `getNavigation().setCanFloat(true)` 和
+            // `VibrationSystem.Listener`（半径 16、眼睛位置、`BY_DISTANCE`）。
+            // The `Warden` constructor's `getNavigation().setCanFloat(true)` and its
+            // `VibrationSystem.Listener` (radius 16, eye position, `BY_DISTANCE`).
+            mob.navigation.flags.can_float = true;
+            mob.entity_listener = Some(crate::game_event::dispatch::EntityListener {
+                radius: 16,
+                delivery_mode: crate::game_event::dispatch::DeliveryMode::ByDistance,
+                vibration: Default::default(),
+            });
         }
         if mob_type == MobType::Armadillo {
             // `Armadillo` 构造函数里的 `getNavigation().setCanFloat(true)`。
@@ -3755,6 +3869,12 @@ impl Mob {
         }
         if self.mob_type == MobType::Villager && self.villager.sleeping_pos.is_some() {
             return (0.2, 0.2);
+        }
+        if self.mob_type == MobType::Warden && self.warden.pose.is_digging_or_emerging() {
+            // `Warden.getDefaultDimensions`：钻出 / 钻入时 `fixed(width, 1.0F)`。
+            // `Warden.getDefaultDimensions`: `fixed(width, 1.0F)` while emerging or digging.
+            let (width, _, _) = self.mob_type.dimensions(false);
+            return (width, 1.0);
         }
         let (width, height, _) = self.mob_type.dimensions(self.is_baby());
         (width, height)
@@ -3995,6 +4115,10 @@ pub struct MobPublic {
     pub baby: bool,
     /// `AgeableMob.AGE_LOCKED` 元数据。
     pub age_locked: bool,
+    /// `Warden.CLIENT_ANGER_LEVEL` 元数据（`getActiveAnger()`）。
+    ///
+    /// `Warden.CLIENT_ANGER_LEVEL` metadata (`getActiveAnger()`).
+    pub client_anger_level: i32,
     pub x_rot: f32,
     pub y_head_rot: f32,
     pub y_body_rot: f32,
@@ -4264,6 +4388,7 @@ impl MobPublic {
             status_effects: mob.effects.clone(),
             baby: mob.is_baby(),
             age_locked: mob.age_locked,
+            client_anger_level: mob.warden.client_anger_level,
             x_rot: mob.x_rot,
             y_head_rot: mob.y_head_rot,
             y_body_rot: mob.y_body_rot,
@@ -4465,6 +4590,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Villager => Some(Box::new(villager_ai::brain(false, 0))),
         MobType::Nautilus | MobType::ZombieNautilus => Some(Box::new(nautilus_ai::brain(kind))),
         MobType::Creaking => Some(Box::new(creaking_ai::brain())),
+        MobType::Warden => Some(Box::new(warden_ai::brain())),
         MobType::Sniffer => Some(Box::new(sniffer::brain())),
         MobType::HappyGhast => Some(Box::new(happy_ghast::brain())),
         _ => None,

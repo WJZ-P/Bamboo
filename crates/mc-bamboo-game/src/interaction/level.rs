@@ -70,6 +70,8 @@ pub(crate) struct RegionLevel<'a> {
     /// 村民 / 幼年村民日程活动快照，和 `sky_darken` 一同从 `GlobalView` 读入。
     pub(crate) villager_activity: mc_bamboo_blocks::entity::mob::brain::Activity,
     pub(crate) baby_villager_activity: mc_bamboo_blocks::entity::mob::brain::Activity,
+    /// 本岛袭击表的只读快照：`SetRaidStatus` / `ReactToBell` 按中心位置查。
+    pub(crate) raids: mc_bamboo_blocks::entity::raid::Raids,
     /// `getOverworldClockTime()`：主世界时钟的整数刻，`MONSTERS_BURN` 和区域难度读它。
     pub(crate) clock_ticks: i64,
     /// `WorldGenLevel.getSeed()`：世界种子，史莱姆区块读它。
@@ -924,6 +926,19 @@ impl Level for RegionLevel<'_> {
 
     fn poi_is_close_to_village(&self, pos: BlockPos, sections: i32) -> bool {
         self.poi.is_close_to_village(pos, sections)
+    }
+
+    fn raid_at(&self, pos: BlockPos) -> Option<mc_bamboo_blocks::entity::raid::RaidView> {
+        let id = self.raids.nearby_raid(
+            pos,
+            f64::from(mc_bamboo_blocks::entity::raid::VALID_RAID_RADIUS_SQR),
+        )?;
+        let raid = self.raids.raids.get(&id)?;
+        Some(mc_bamboo_blocks::entity::raid::RaidView {
+            has_first_wave_spawned: raid.has_first_wave_spawned(),
+            is_between_waves: raid.is_between_waves(raid.total_raiders()),
+            is_victory: raid.is_victory(),
+        })
     }
 
     /// 精确驱动里生物打玩家：拼出和区域入口同一组借用，当场走玩家受伤的正式入口。

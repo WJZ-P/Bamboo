@@ -840,6 +840,9 @@ pub(super) fn check_spawn_rules(
                 && valid_mob_spawn_block(world, kind, pos)
                 && world.level().can_see_sky(pos)
         }
+        // 监守者不在任何群系刷怪表里，也不登记 `SpawnPlacements`：只由尖啸体召唤。
+        // Wardens appear in no biome spawn table and have no `SpawnPlacements` entry.
+        MobType::Warden => true,
         // 村民不在任何群系刷怪表里，只由结构 / 命令 / 刷怪蛋生成。
         // Villagers are in no biome spawn table; structures, commands and eggs make them.
         MobType::Villager => true,
@@ -859,6 +862,9 @@ pub(super) fn check_spawn_rules(
         // Happy ghasts likewise never spawn naturally: only the dried ghast block,
         // `/summon` or a spawn egg make one.
         MobType::Sniffer | MobType::HappyGhast => true,
+        // 卫道士 / 劫掠兽只从袭击波次、命令和刷怪蛋生成，不在群系刷怪表里。
+        // Vindicators / ravagers only come from raid waves, commands and spawn eggs.
+        MobType::Vindicator | MobType::Ravager => true,
         // 两种傀儡都不在群系刷怪表里，只保留命令 / 方块图案生成时共用的规则。
         // Neither golem is in a biome spawn table; only the shared rule remains.
         MobType::IronGolem | MobType::SnowGolem => animal_spawn_rules(world, pos),

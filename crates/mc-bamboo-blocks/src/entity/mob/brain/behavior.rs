@@ -130,9 +130,9 @@ pub enum Class {
 /// A behaviour's entry conditions precompiled into three bit masks; checking is bit-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Preconditions {
-    pub present: u64,
-    pub absent: u64,
-    pub registered: u64,
+    pub present: u128,
+    pub absent: u128,
+    pub registered: u128,
 }
 
 impl Preconditions {

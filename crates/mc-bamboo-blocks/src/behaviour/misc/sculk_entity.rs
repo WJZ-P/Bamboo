@@ -229,6 +229,10 @@ impl SculkSensorEntity {
             distance: source.distance_to_sqr(listener_pos).sqrt() as f32,
             pos: source,
             source_player,
+            source_entity: None,
+            projectile_owner: None,
+            source_uuid: None,
+            projectile_owner_uuid: None,
         };
         vibration::add_candidate(&mut self.listener, info, game_time, &mut || {});
     }

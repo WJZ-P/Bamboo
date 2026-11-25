@@ -1,11 +1,11 @@
-// 用官方 codec 读 Bamboo 写出的 saved data（游戏规则、世界边界、世界时钟、超平坦
-// 和若干噪声 world_gen_settings.dat），报告解码结果；读不动就非 0 退出。只加载
-// 官方类、不启动服务端、不接受 EULA。
+// 用官方 codec 读 Bamboo 写出的 saved data（游戏规则、世界边界、世界时钟、袭击表、
+// 超平坦和若干噪声 world_gen_settings.dat），报告解码结果；读不动就非 0 退出。
+// 只加载官方类、不启动服务端、不接受 EULA。
 //
-// Decode Bamboo's saved-data files (game rules, world border, world clocks, a
-// flat and several noise world_gen_settings.dat) with the official codecs and
-// report the result; exit non-zero when a file cannot be decoded. No server,
-// no EULA.
+// Decode Bamboo's saved-data files (game rules, world border, world clocks,
+// raids, a flat and several noise world_gen_settings.dat) with the official
+// codecs and report the result; exit non-zero when a file cannot be decoded.
+// No server, no EULA.
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -53,6 +53,7 @@ import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.WorldGenSettings;
 import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
 import net.minecraft.world.level.levelgen.FlatLevelSource;
+import net.minecraft.world.entity.raid.Raids;
 
 public final class SavedDataOracle {
     private static JsonObject result0;
@@ -99,11 +100,11 @@ public final class SavedDataOracle {
                 new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected())) {
         RegistryAccess.Frozen registries = loadRegistries(resources);
         RegistryOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, registries);
-        if (args.length < 4) {
-            throw new IllegalArgumentException("usage: SavedDataOracle <game_rules.dat> <world_border.dat> <world_clocks.dat> <flat_world_gen_settings.dat> [noise_world_gen_settings.dat ...]");
+        if (args.length < 5) {
+            throw new IllegalArgumentException("usage: SavedDataOracle <game_rules.dat> <world_border.dat> <world_clocks.dat> <raids.dat> <flat_world_gen_settings.dat> [noise_world_gen_settings.dat ...]");
         }
 
-        CompoundTag genRoot = NbtIo.readCompressed(Path.of(args[3]), NbtAccounter.unlimitedHeap());
+        CompoundTag genRoot = NbtIo.readCompressed(Path.of(args[4]), NbtAccounter.unlimitedHeap());
         Tag genData = genRoot.get("data");
         if (genData == null) {
             throw new IllegalStateException("world_gen_settings.dat has no data tag");
@@ -133,7 +134,7 @@ public final class SavedDataOracle {
         // Every extra world_gen_settings.dat must be a minecraft:noise generator that
         // the official WorldGenSettings.CODEC accepts; report its decoded shape.
         JsonArray noiseGens = new JsonArray();
-        for (int i = 4; i < args.length; i++) {
+        for (int i = 5; i < args.length; i++) {
             CompoundTag noiseRoot = NbtIo.readCompressed(Path.of(args[i]), NbtAccounter.unlimitedHeap());
             Tag noiseData = noiseRoot.get("data");
             if (noiseData == null) {
@@ -201,7 +202,51 @@ public final class SavedDataOracle {
             clocksArray.add(clock);
         }
 
+        // raids.dat：先让官方 `Raids.CODEC` 解一遍（坏状态名等会让 getOrThrow 抛错），
+        // 再从同一份 data 标签逐字段报告，Rust 侧按写出的示例逐项断言。
+        // raids.dat: the official `Raids.CODEC` must parse it first (a bad status
+        // name makes getOrThrow throw); then report every field from the data tag.
+        CompoundTag raidsRoot = NbtIo.readCompressed(Path.of(args[3]), NbtAccounter.unlimitedHeap());
+        Tag raidsData = raidsRoot.get("data");
+        if (raidsData == null) {
+            throw new IllegalStateException("raids.dat has no data tag");
+        }
+        Raids.CODEC.parse(NbtOps.INSTANCE, raidsData).getOrThrow();
+        JsonObject raids = new JsonObject();
+        raids.addProperty("next_id", ((CompoundTag) raidsData).getIntOr("next_id", 0));
+        raids.addProperty("tick", ((CompoundTag) raidsData).getIntOr("tick", 0));
+        JsonArray raidEntries = new JsonArray();
+        for (Tag raw : ((CompoundTag) raidsData).getListOrEmpty("raids")) {
+            CompoundTag entry = (CompoundTag) raw;
+            JsonObject one = new JsonObject();
+            one.addProperty("id", entry.getIntOr("id", 0));
+            one.addProperty("started", entry.getBooleanOr("started", false));
+            one.addProperty("active", entry.getBooleanOr("active", false));
+            one.addProperty("ticks_active", entry.getLongOr("ticks_active", 0));
+            one.addProperty("raid_omen_level", entry.getIntOr("raid_omen_level", 0));
+            one.addProperty("groups_spawned", entry.getIntOr("groups_spawned", 0));
+            one.addProperty("cooldown_ticks", entry.getIntOr("cooldown_ticks", 0));
+            one.addProperty("post_raid_ticks", entry.getIntOr("post_raid_ticks", 0));
+            one.addProperty("total_health", entry.getFloatOr("total_health", 0));
+            one.addProperty("group_count", entry.getIntOr("group_count", 0));
+            one.addProperty("status", entry.getStringOr("status", ""));
+            JsonArray center = new JsonArray();
+            for (int coordinate : entry.getIntArray("center").orElse(new int[0])) {
+                center.add(coordinate);
+            }
+            one.add("center", center);
+            JsonArray heroes = new JsonArray();
+            for (Tag hero : entry.getListOrEmpty("heroes_of_the_village")) {
+                heroes.add(net.minecraft.core.UUIDUtil.uuidFromIntArray(
+                        ((net.minecraft.nbt.IntArrayTag) hero).getAsIntArray()).toString());
+            }
+            one.add("heroes", heroes);
+            raidEntries.add(one);
+        }
+        raids.add("entries", raidEntries);
+
         JsonObject result = new JsonObject();
+        result.add("raids", raids);
         JsonArray rulesArray = new JsonArray();
         for (GameRule<?> rule : rules.keySet()) {
             Identifier id = BuiltInRegistries.GAME_RULE.getKey(rule);

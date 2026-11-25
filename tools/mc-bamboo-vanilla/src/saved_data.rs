@@ -1,16 +1,16 @@
 //! `mc-bamboo-vanilla saved-data <java 路径>`：把 Bamboo 编码器写出的
-//! `game_rules.dat` / `world_border.dat` / `world_clocks.dat` /
+//! `game_rules.dat` / `world_border.dat` / `world_clocks.dat` / `raids.dat` /
 //! `world_gen_settings.dat` 交给官方 `GameRuleMap.CODEC` /
-//! `WorldBorder.Settings.CODEC` / `PackedClockStates.CODEC` /
+//! `WorldBorder.Settings.CODEC` / `PackedClockStates.CODEC` / `Raids.CODEC` /
 //! `WorldGenSettings.CODEC` 解码，逐项核对；超平坦和三种噪声世界的
-//! `world_gen_settings.dat` 都复核，再故意写坏一个键、一个噪声生成器类型，
-//! 确认官方 codec 会报错。
+//! `world_gen_settings.dat` 都复核，再故意写坏一个键、一个噪声生成器类型和
+//! `raids.dat` 的一条状态名，确认官方 codec 会报错。
 //!
 //! Compare Bamboo's `game_rules.dat` / `world_border.dat` / `world_clocks.dat` /
-//! `world_gen_settings.dat` against the official codecs: decode them and check
-//! the values. Both the flat and the three noise `world_gen_settings.dat` shapes
-//! are validated; then deliberately break one key and one noise generator type
-//! to confirm the oracle rejects them.
+//! `raids.dat` / `world_gen_settings.dat` against the official codecs: decode
+//! them and check the values. Both the flat and the three noise
+//! `world_gen_settings.dat` shapes are validated; then deliberately break one
+//! key, one noise generator type and one raid status to confirm rejection.
 
 use std::{
     fs,
@@ -30,8 +30,33 @@ struct Report {
     game_rules: Vec<RuleEntry>,
     world_border: BorderReport,
     world_clocks: Vec<ClockEntry>,
+    raids: RaidReport,
     world_gen_settings: GenReport,
     noise_generators: Vec<NoiseGenReport>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RaidReport {
+    next_id: i32,
+    tick: i32,
+    entries: Vec<RaidEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RaidEntry {
+    id: i32,
+    started: bool,
+    active: bool,
+    ticks_active: i64,
+    raid_omen_level: i32,
+    groups_spawned: i32,
+    cooldown_ticks: i32,
+    post_raid_ticks: i32,
+    total_health: f32,
+    group_count: i32,
+    status: String,
+    center: [i32; 3],
+    heroes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +121,7 @@ fn decode(
     game_rules: &Path,
     world_border: &Path,
     world_clocks: &Path,
+    raids: &Path,
     world_gen_settings: &Path,
     noise_files: &[&Path],
 ) -> Result<Report, String> {
@@ -104,6 +130,7 @@ fn decode(
         .arg(game_rules)
         .arg(world_border)
         .arg(world_clocks)
+        .arg(raids)
         .arg(world_gen_settings);
     for path in noise_files {
         command.arg(path);
@@ -149,6 +176,7 @@ pub fn run(java: &str) -> Result<(), String> {
     let game_rules_path = world.saved_data("minecraft:game_rules");
     let world_border_path = world.world_border_dat();
     let world_clocks_path = world.saved_data("minecraft:world_clocks");
+    let raids_path = world.saved_data("minecraft:raids");
     let world_gen_path = world.saved_data("minecraft:world_gen_settings");
     write_saved_data_at(&game_rules_path, &game_rules_tag)
         .map_err(|error| format!("cannot write game_rules.dat: {error}"))?;
@@ -156,6 +184,9 @@ pub fn run(java: &str) -> Result<(), String> {
         .map_err(|error| format!("cannot write world_border.dat: {error}"))?;
     write_saved_data_at(&world_clocks_path, &world_clocks_tag)
         .map_err(|error| format!("cannot write world_clocks.dat: {error}"))?;
+    let raids_tag = mc_bamboo_game::raids_sample();
+    write_saved_data_at(&raids_path, &raids_tag)
+        .map_err(|error| format!("cannot write raids.dat: {error}"))?;
     let world_gen_tag = mc_bamboo_nbt::parse_snbt(mc_bamboo_data::saved_world::WORLD_GEN_SETTINGS)
         .map_err(|error| format!("cannot parse generated world_gen_settings SNBT: {error}"))?;
     write_saved_data_at(&world_gen_path, &world_gen_tag)
@@ -209,11 +240,72 @@ pub fn run(java: &str) -> Result<(), String> {
         &game_rules_path,
         &world_border_path,
         &world_clocks_path,
+        &raids_path,
         &world_gen_path,
         &noise_refs,
     )?;
     check_rule(&report, "minecraft:random_tick_speed", "int", &json!(7))?;
     check_rule(&report, "minecraft:fire_damage", "bool", &json!(false))?;
+    // `Raids.CODEC` 解出的两场袭击每个字段都和写出的示例一致。
+    // Every field of both raids decoded by `Raids.CODEC` matches the sample.
+    if report.raids.next_id != 12 || report.raids.tick != 777 {
+        return Err(format!("raids.dat counters differ: {:?}", report.raids));
+    }
+    if report.raids.entries.len() != 2 {
+        return Err(format!(
+            "raids.dat has {} entries, expected 2",
+            report.raids.entries.len()
+        ));
+    }
+    let first = &report.raids.entries[0];
+    if first.id != 1
+        || !first.started
+        || !first.active
+        || first.ticks_active != 1234
+        || first.raid_omen_level != 3
+        || first.groups_spawned != 2
+        || first.cooldown_ticks != 42
+        || first.post_raid_ticks != 0
+        || first.total_health != 96.5
+        || first.group_count != 5
+        || first.status != "ongoing"
+        || first.center != [16, 68, -32]
+        || first.heroes != vec!["a1a1a1a1-a1a1-a1a1-a1a1-a1a1a1a1a1a1".to_owned()]
+    {
+        return Err(format!("raids.dat first raid differs: {first:?}"));
+    }
+    let second = &report.raids.entries[1];
+    if second.id != 7
+        || second.started
+        || second.active
+        || second.post_raid_ticks != 40
+        || second.total_health != 0.0
+        || second.group_count != 7
+        || second.status != "victory"
+        || second.center != [-100, 72, 240]
+        || second.heroes != vec!["5e5e5e5e-5e5e-5e5e-5e5e-5e5e5e5e5e5e".to_owned()]
+    {
+        return Err(format!("raids.dat second raid differs: {second:?}"));
+    }
+    // 故意把 raids.dat 的一条状态名写坏，官方 codec 必须拒绝整个文件。
+    let broken_raids = corrupt_raid_status(&raids_tag);
+    write_saved_data_at(&raids_path, &broken_raids)
+        .map_err(|error| format!("cannot write broken raids.dat: {error}"))?;
+    if decode(
+        java,
+        &game_rules_path,
+        &world_border_path,
+        &world_clocks_path,
+        &raids_path,
+        &world_gen_path,
+        &noise_refs,
+    )
+    .is_ok()
+    {
+        return Err("official codec accepted a raids.dat with a broken status".to_owned());
+    }
+    write_saved_data_at(&raids_path, &raids_tag)
+        .map_err(|error| format!("cannot restore raids.dat: {error}"))?;
     // 两份世界时钟的四个字段都要和 Bamboo 编码器写出的值一致。
     // All four fields of both world clocks must match Bamboo's encoder.
     let expected_clocks = [
@@ -326,6 +418,7 @@ pub fn run(java: &str) -> Result<(), String> {
         &game_rules_path,
         &world_border_path,
         &world_clocks_path,
+        &raids_path,
         &world_gen_path,
         &[broken_noise_path.as_path()],
     )
@@ -360,6 +453,7 @@ pub fn run(java: &str) -> Result<(), String> {
         &game_rules_path,
         &world_border_path,
         &world_clocks_path,
+        &raids_path,
         &world_gen_path,
         &[],
     )
@@ -406,6 +500,7 @@ pub fn run(java: &str) -> Result<(), String> {
         &game_rules_path,
         &world_border_path,
         &world_clocks_path,
+        &raids_path,
         &world_gen_path,
         &[],
     )
@@ -416,9 +511,41 @@ pub fn run(java: &str) -> Result<(), String> {
 
     let _ = fs::remove_dir_all(&dir);
     println!(
-        "SAVED-DATA RESULT: game_rules.dat, world_border.dat, world_clocks.dat, the flat and three noise world_gen_settings.dat match the official codecs; broken keys and broken noise generator rejected"
+        "SAVED-DATA RESULT: game_rules.dat, world_border.dat, world_clocks.dat, raids.dat and the flat and three noise world_gen_settings.dat match the official codecs; broken keys, broken raid status and broken noise generator rejected"
     );
     Ok(())
+}
+
+/// 把 `raids.dat` 里第一条袭击的 `status` 改成一个不存在的序列化名。
+/// Replace the first raid's `status` with a name the official codec rejects.
+fn corrupt_raid_status(tag: &Tag) -> Tag {
+    match tag {
+        Tag::Compound(entries) => Tag::Compound(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    let value = match (key.as_str(), value) {
+                        ("status", Tag::String(_)) => Tag::String("not_a_raid_status".to_owned()),
+                        ("raids", Tag::List(list)) => Tag::List(
+                            list.iter()
+                                .enumerate()
+                                .map(|(index, entry)| {
+                                    if index == 0 {
+                                        corrupt_raid_status(entry)
+                                    } else {
+                                        entry.clone()
+                                    }
+                                })
+                                .collect(),
+                        ),
+                        _ => value.clone(),
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// 把 `data` 复合标签里 `minecraft:noise` 的 generator `type` 换成一个不存在的注册名，
