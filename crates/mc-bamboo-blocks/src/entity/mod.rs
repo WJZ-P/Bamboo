@@ -15,6 +15,7 @@ pub mod leash_knot;
 pub mod lightning;
 pub mod mob;
 pub mod parallel;
+pub mod raid;
 pub mod random;
 pub mod riding;
 pub mod shoulder;

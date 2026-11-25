@@ -36,6 +36,11 @@ const PASSTHROUGH: &[&str] = &[
     "HasVisualFire",
     "locator_bar_icon",
     "current_explosion_impact_pos",
+    // 卫道士的 Johnny 彩蛋和劫掠兽的三个计时字段：读盘原样保留写回。
+    "Johnny",
+    "AttackTick",
+    "StunTick",
+    "RoarTick",
 ];
 
 /// `MobEffectInstance.CODEC` 的一项：`id` 加 `Details` 的六个字段（可递归的
@@ -392,6 +397,12 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     }
     if mob.mob_type == MobType::Pillager {
         super::pillager::save(mob, &mut out);
+    }
+    if mob.mob_type == MobType::Vindicator {
+        super::vindicator::save(mob, &mut out);
+    }
+    if mob.mob_type == MobType::Ravager {
+        super::ravager::save(mob, &mut out);
     }
     if mob.mob_type == MobType::GlowSquid {
         put(
@@ -860,6 +871,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Pillager {
             super::pillager::load(mob, tag);
+        }
+        if mob.mob_type == MobType::Vindicator {
+            let _ = super::vindicator::load_johnny(tag);
+        }
+        if mob.mob_type == MobType::Ravager {
+            let _ = super::ravager::load(tag);
         }
         if mob.mob_type == MobType::GlowSquid {
             mob.squid.dark_ticks = tag::int_or(tag, "DarkTicksRemaining", 0);

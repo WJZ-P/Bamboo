@@ -359,6 +359,11 @@ pub trait BlockView {
         false
     }
 
+    /// `ServerLevel.getRaidAt(pos)`。默认没有袭击。
+    fn raid_at(&self, _pos: BlockPos) -> Option<crate::entity::raid::RaidView> {
+        None
+    }
+
     /// `getOverworldClockTime()`：主世界时钟的整数刻。没有时钟的视图给 0。
     fn clock_ticks(&self) -> i64 {
         0
@@ -702,6 +707,10 @@ impl BlockView for World<'_> {
 
     fn poi_is_close_to_village(&self, pos: BlockPos, sections: i32) -> bool {
         self.level().poi_is_close_to_village(pos, sections)
+    }
+
+    fn raid_at(&self, pos: BlockPos) -> Option<crate::entity::raid::RaidView> {
+        self.level().raid_at(pos)
     }
 
     fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
@@ -1218,6 +1227,14 @@ pub enum Command {
     },
     AwardDeathExperience {
         amount: i32,
+    },
+    /// `Raider.die`：把英雄与离队信息交给游戏层。
+    ///
+    /// `Raider.die`: hand hero credit and roster removal to the game layer.
+    RaiderDied {
+        uid: EntityUid,
+        position: mc_bamboo_core::Vec3,
+        killer: Option<[u8; 16]>,
     },
     /// `ExperienceOrb.scanForMerges`：周围同值的球合并到自己身上。
     MergeExperienceOrbs {
@@ -1828,6 +1845,17 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             for stack in world.mob_loot_drops(loot, me.position) {
                 world.spawn_at_location(me.position, stack);
             }
+        }
+        Command::RaiderDied {
+            uid,
+            position,
+            killer,
+        } => {
+            world.push_effect(crate::Effect::RaiderDied {
+                uid,
+                position,
+                killer,
+            });
         }
         Command::AwardDeathExperience { amount } => {
             super::orb::award(world, me.position, amount);

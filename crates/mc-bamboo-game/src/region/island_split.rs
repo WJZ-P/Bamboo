@@ -593,6 +593,9 @@ impl Region {
         let block_change_stamp = Cell::new(next_stamp.wrapping_add(1));
         let structure_spawn_index =
             RefCell::new(self.structure_spawn_index.borrow_mut().split_off(chunks));
+        // 一场袭击整个跟着中心所在的区块搬到新岛。
+        // A raid moves whole with the chunk holding its center.
+        let raids = self.raids.split_off(inside);
         Ok(Region {
             players: new_players,
             player_grid,
@@ -633,6 +636,7 @@ impl Region {
             villager_lobotomize_wait_trade_lock: self.villager_lobotomize_wait_trade_lock,
             villager_sleep_brain_interval: self.villager_sleep_brain_interval,
             patrol_spawner: self.patrol_spawner,
+            raids,
             loot_sequences,
             sound_seed_generator,
             entities,
@@ -812,6 +816,7 @@ impl Region {
             villager_lobotomize_wait_trade_lock: _,
             villager_sleep_brain_interval: _,
             patrol_spawner: _,
+            raids: other_raids,
             loot_sequences,
             sound_seed_generator,
             entities,
@@ -848,6 +853,9 @@ impl Region {
         self.structure_spawn_index
             .borrow_mut()
             .absorb(structure_spawn_index.into_inner());
+        // 被吸收岛的袭击并进来，重分配 id 避免和本岛撞号。
+        // Absorb the other island's raids with fresh ids.
+        self.raids.absorb(other_raids);
         // 被吸收岛带过来的实体可能带着按旧戳算出的视线缓存；换一个新戳强制重算。
         // Entities arriving from the absorbed island may carry sight caches
         // computed under its stamp, so bump ours to force a fresh ray.

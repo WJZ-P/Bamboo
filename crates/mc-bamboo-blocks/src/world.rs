@@ -5192,6 +5192,7 @@ mod tests {
                 | Effect::EnderPearlTeleport { .. }
                 | Effect::GuardianElderEffect { .. }
                 | Effect::TrialSpawnerTransformBadOmen { .. }
+                | Effect::RaiderDied { .. }
                 | Effect::Explode { .. }
                 | Effect::PlayerShoulder { .. }
                 | Effect::VibrationParticle { .. } => None,

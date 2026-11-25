@@ -1591,6 +1591,15 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
+    /// `ServerLevel.getRaidAt(pos)`：`Raids.getNearbyRaid` 找到的那场袭击。
+    /// 默认没有袭击（夹具 / 非主世界）。
+    ///
+    /// `ServerLevel.getRaidAt(pos)`: the raid found by `Raids.getNearbyRaid`;
+    /// none by default (fixtures / non-overworld dimensions).
+    fn raid_at(&self, _pos: BlockPos) -> Option<crate::entity::raid::RaidView> {
+        None
+    }
+
     /// `Level.isDarkOutside()`：没有固定时间的维度里 `skyDarken >= 4`。
     /// 主世界没有 `hasFixedTime`，床的 `when_dark` 规则走这个判断。
     ///
@@ -2833,6 +2842,16 @@ pub enum Effect {
     /// `transformBadOmenIntoTrialOmen`: replace the player's bad omen with trial omen.
     /// The game layer finds the player by UUID, removes `BAD_OMEN` and adds `TRIAL_OMEN`.
     TrialSpawnerTransformBadOmen { player: [u8; 16], duration: i32 },
+    /// `Raider.die`：一名袭击者死亡。游戏层按位置找活跃袭击、把击杀玩家记进
+    /// `heroesOfTheVillage`，并从袭击名册里移除这只实体。
+    ///
+    /// `Raider.die`: a raider died. The game layer finds the active raid at the
+    /// position, credits the killing player as a hero and removes the raider.
+    RaiderDied {
+        uid: i32,
+        position: mc_bamboo_core::Vec3,
+        killer: Option<[u8; 16]>,
+    },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///

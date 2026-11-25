@@ -139,6 +139,9 @@ impl SaveSession {
             game_rules: read_saved_data(&dir, "minecraft:game_rules"),
             world_border: read_saved_data_at(&dir.world_border_dat()),
             world_clocks: read_saved_data(&dir, "minecraft:world_clocks"),
+            raids: read_saved_data(&dir, "minecraft:raids")
+                .map(|tag| mc_bamboo_blocks::entity::raid::Raids::from_tag(&tag))
+                .unwrap_or_default(),
             command_storage: read_command_storage(&dir),
         };
         let loaded_level = matches!(loaded.source, LevelSource::Primary | LevelSource::Fallback);
@@ -226,6 +229,7 @@ impl SaveSession {
     pub(crate) fn encode_saves(
         &mut self,
         global: &Global,
+        islands: &[(u32, mc_bamboo_blocks::entity::raid::Raids)],
         last_played: i64,
     ) -> io::Result<Vec<EncodedFile>> {
         crate::save_data::sync_level_data(
@@ -274,6 +278,13 @@ impl SaveSession {
             backup: None,
             bytes: encode_saved_data(&crate::world_gen_settings::encode(&self.world_gen))?,
         });
+        // `Raids.TYPE` 的文件 id 是 `minecraft:raids`，每岛的袭击汇总成一份。
+        // `Raids.TYPE` uses `minecraft:raids`; every island's raids are rolled up.
+        files.push(EncodedFile {
+            path: self.dir.saved_data("minecraft:raids"),
+            backup: None,
+            bytes: encode_saved_data(&crate::save_data::raids_tag(islands))?,
+        });
         files.push(EncodedFile {
             path: self.dir.chunk_tickets(),
             backup: None,
@@ -307,7 +318,7 @@ impl SaveSession {
     /// Test-only: write `encode_saves` bytes synchronously, standing in for the IO thread.
     #[cfg(test)]
     pub(crate) fn save_all(&mut self, global: &Global, last_played: i64) -> io::Result<()> {
-        for file in self.encode_saves(global, last_played)? {
+        for file in self.encode_saves(global, &[], last_played)? {
             mc_bamboo_storage::world_dir::safe_replace(
                 &file.path,
                 &file.bytes,
@@ -416,7 +427,7 @@ mod tests {
         let (mut session, _) = SaveSession::open(&tmp.0).unwrap();
         assert!(!session.dir().level_dat().exists());
         let global = Global::default();
-        let files = session.encode_saves(&global, 777).unwrap();
+        let files = session.encode_saves(&global, &[], 777).unwrap();
         assert!(
             files
                 .iter()

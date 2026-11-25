@@ -106,6 +106,8 @@ import net.minecraft.world.entity.npc.villager.VillagerProfession;
 import net.minecraft.world.entity.npc.villager.VillagerType;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.MobCategory;
+import net.minecraft.world.entity.raid.Raid;
+import net.minecraft.world.entity.raid.Raids;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
@@ -590,6 +592,9 @@ public final class MobOracle {
             }
             if (only == null || "patrol_spawn".equals(only) || "patrol".equals(only)) {
                 cases += playPatrolSpawns(official, out, only);
+            }
+            if (only == null || only.startsWith("raid_")) {
+                cases += playRaidScenes(official, out, only);
             }
             if (only == null || "structure_spawn".equals(only)) {
                 cases += playStructureSpawns(official, out, only);
@@ -6976,6 +6981,183 @@ public final class MobOracle {
             case "frozen_ocean" -> Blocks.ICE.defaultBlockState();
             default -> Blocks.GRASS_BLOCK.defaultBlockState();
         };
+    }
+
+    // ---- 袭击（`Raids` / `Raid`）----
+
+    /**
+     * 袭击状态机场景：真 POI（一个被占用的钟）、官方 `Raids` / `Raid`、固定随机源，
+     * 逐刻比袭击表的纯状态（字段、波次、名册、英雄）和每波刷出的袭击者。
+     * 刷怪点用反射预设 `waveSpawnPos`，绕开 findRandomSpawnPos 的地形差异。
+     *
+     * Raid state-machine scenes: real POI (an occupied bell), official `Raids`/`Raid`,
+     * fixed RNG. Compare the saved state tick by tick plus every spawned raider.
+     * `waveSpawnPos` is preset to skip the terrain-dependent position search.
+     */
+    private static int playRaidScenes(Official official, Writer out, String only) throws Exception {
+        List<String> names = List.of(
+                "raid_trigger_normal", "raid_trigger_easy",
+                "raid_bonus_wave", "raid_victory", "raid_gamerule_off");
+        int count = 0;
+        for (String name : names) {
+            if (only != null && !name.startsWith(only)) continue;
+            out.write(raidSceneCase(official, name) + "\n");
+            count++;
+        }
+        return count;
+    }
+
+    private static Object readField(Class<?> owner, Object target, String name) {
+        try {
+            Field field = owner.getDeclaredField(name);
+            field.setAccessible(true);
+            return field.get(target);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static String raidSceneCase(Official official, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        // 平地 + 一个被占用的钟（#village POI）：isVillage / createOrExtendRaid 都能走真路径。
+        for (int x = -80; x <= 80; x++) {
+            for (int z = -80; z <= 80; z++) {
+                level.blocks.put(BlockPos.asLong(x, -63, z), Blocks.GRASS_BLOCK.defaultBlockState());
+            }
+        }
+        BlockPos bell = new BlockPos(0, -62, 0);
+        level.blocks.put(bell.asLong(), Blocks.BELL.defaultBlockState());
+        level.enableRealPoi();
+        level.getPoiManager().tick(() -> true);
+        level.getPoiManager().take(h -> true, (h, p) -> p.equals(bell), bell, 1);
+        level.getPoiManager().tick(() -> true);
+        int difficulty = name.contains("easy") ? 1 : 2;
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.byId(difficulty);
+        level.spawnDifficulty = new DifficultyInstance(Difficulty.byId(difficulty), 0L, 0L, 0.0F);
+        setRule(official, GameRules.RAIDS, !name.endsWith("off"));
+
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "RaidOracle"), ClientInformation.createDefault());
+        player.setPos(0.5, -60.0, 0.5);
+        player.setGameMode(GameType.SURVIVAL);
+        level.playersList().add(player);
+        // ServerBossEvent.addPlayer 要给玩家的 connection.send 发包，装一个只收包的桩。
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = new Bytes(official.registries);
+        put(ServerPlayer.class, player, "connection", connection);
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+
+        // 固定随机源：官方 Raid 构造里抽两次 nextLong 造 bossbar UUID，之后是刷怪点的取数。
+        long raidSeed = 0x4242_4242L;
+        Raids raids = new Raids();
+        put(ServerLevel.class, level, "raids", raids);
+        // createOrExtendRaid 用玩家的 RAID_OMEN 效果等级，没效果时只建表，等级后面按场景注入。
+        int omenLevel = name.contains("bonus") ? 3 : 1;
+        omenLevelForScene = omenLevel;
+        net.minecraft.world.entity.raid.Raid raid =
+                raids.createOrExtendRaid(player, player.blockPosition());
+        if (raid == null) {
+            // `/gamerule doRaids false` 的官方行为就是不建袭击；报一份空表场景。
+            var empty = new JsonObject();
+            empty.addProperty("type", "raidScene");
+            empty.addProperty("name", name);
+            empty.addProperty("difficulty", difficulty);
+            empty.addProperty("omenLevel", omenLevel);
+            empty.addProperty("raidsRule", false);
+            empty.addProperty("seed", raidSeed);
+            empty.addProperty("ticks", 0);
+            empty.addProperty("spawnX", 0);
+            empty.addProperty("spawnY", 0);
+            empty.addProperty("spawnZ", 0);
+            empty.add("steps", new JsonArray());
+            return empty.toString();
+        }
+        put(net.minecraft.world.entity.raid.Raid.class, raid, "random", RandomSource.create(raidSeed));
+        put(net.minecraft.world.entity.raid.Raid.class, raid, "raidOmenLevel", omenLevel);
+        put(net.minecraft.world.entity.raid.Raid.class, raid, "started", name.startsWith("raid_victory"));
+        if (name.startsWith("raid_victory")) {
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "groupsSpawned",
+                    raid.getNumGroups(Difficulty.byId(difficulty)));
+        }
+        // 每刻都把 waveSpawnPos 预设成固定点，让 shouldSpawnGroup 的刷怪分支可复现。
+        BlockPos spawnAt = new BlockPos(3, -61, 4);
+        put(net.minecraft.world.entity.raid.Raid.class, raid, "waveSpawnPos",
+                java.util.Optional.of(spawnAt));
+
+        JsonArray steps = new JsonArray();
+        int ticks = name.startsWith("raid_victory") ? 60 : 340;
+        for (int tick = 0; tick < ticks; tick++) {
+            level.gameTime = tick;
+            level.spawned.clear();
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "waveSpawnPos",
+                    java.util.Optional.of(spawnAt));
+            raids.tick(level);
+            var row = new JsonObject();
+            row.addProperty("tick", tick);
+            row.add("raids", raidStateJson(raids, raid));
+            JsonArray spawned = new JsonArray();
+            for (Entity entity : level.spawned) {
+                var one = new JsonArray();
+                one.add(BuiltInRegistries.ENTITY_TYPE.getId(entity.getType()));
+                one.add((int) (entity.getX() * 2));
+                one.add((int) entity.getY());
+                one.add((int) (entity.getZ() * 2));
+                spawned.add(one);
+            }
+            row.add("spawned", spawned);
+            steps.add(row);
+        }
+        var scene = new JsonObject();
+        scene.addProperty("type", "raidScene");
+        scene.addProperty("name", name);
+        scene.addProperty("difficulty", difficulty);
+        scene.addProperty("omenLevel", omenLevel);
+        scene.addProperty("raidsRule", !name.endsWith("off"));
+        scene.addProperty("seed", raidSeed);
+        scene.addProperty("ticks", ticks);
+        scene.addProperty("spawnX", spawnAt.getX());
+        scene.addProperty("spawnY", spawnAt.getY());
+        scene.addProperty("spawnZ", spawnAt.getZ());
+        scene.add("steps", steps);
+        return scene.toString();
+    }
+
+    /** 官方 `Raid` 的存档字段 + 名册数，逐刻比。 */
+    private static int omenLevelForScene;
+
+    private static JsonObject raidStateJson(Raids raids,
+            net.minecraft.world.entity.raid.Raid raid) throws Exception {
+        var state = new JsonObject();
+        state.addProperty("started", raid.isStarted());
+        state.addProperty("active", true);
+        state.addProperty("ticksActive", (Long) readField(
+                net.minecraft.world.entity.raid.Raid.class, raid, "ticksActive"));
+        state.addProperty("raidOmenLevel", omenLevelForScene);
+        state.addProperty("groupsSpawned", raid.getGroupsSpawned());
+        state.addProperty("cooldownTicks", getInt(net.minecraft.world.entity.raid.Raid.class, raid, "raidCooldownTicks"));
+        state.addProperty("postRaidTicks", getInt(net.minecraft.world.entity.raid.Raid.class, raid, "postRaidTicks"));
+        state.addProperty("totalHealth", Float.floatToRawIntBits(raid.getTotalHealth()));
+        state.addProperty("groupCount", getInt(
+                net.minecraft.world.entity.raid.Raid.class, raid, "numGroups"));
+        state.addProperty("status", ((Enum<?>) readField(
+                net.minecraft.world.entity.raid.Raid.class, raid, "status")).name());
+        state.addProperty("centerX", raid.getCenter().getX());
+        state.addProperty("centerY", raid.getCenter().getY());
+        state.addProperty("centerZ", raid.getCenter().getZ());
+        state.addProperty("raidersAlive", raid.getTotalRaidersAlive());
+        state.addProperty("heroes", readField(
+                net.minecraft.world.entity.raid.Raid.class, raid, "heroesOfTheVillage") instanceof java.util.Set<?> set
+                ? set.size() : -1);
+        state.addProperty("nextId", getInt(Raids.class, raids, "nextId"));
+        state.addProperty("raidTick", getInt(Raids.class, raids, "tick"));
+        state.addProperty("mapSize", ((java.util.Map<?, ?>) readField(
+                Raids.class, raids, "raidMap")).size());
+        return state;
     }
 
     // ---- 掠夺者巡逻队（`PatrolSpawner`）----

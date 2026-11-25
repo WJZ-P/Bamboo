@@ -150,6 +150,27 @@ pub(crate) fn complete(region: &mut Region, id: PlayerId, hand: mc_bamboo_core::
     }
     // 物品的 `potion_contents` / `suspicious_stew_effects` 自定义效果。
     apply_item_effects(region, id, item, &patch);
+    // 官方 `OminousBottleAmplifier`（`ConsumableListener.onConsume`）：喝不祥之瓶给
+    // 120000 刻 BAD_OMEN，等级取组件值，ambient=false、visible=false、showIcon=true。
+    //
+    // Vanilla `OminousBottleAmplifier.onConsume`: 120000-tick BAD_OMEN at the
+    // component amplifier, ambient=false, visible=false, showIcon=true.
+    if let Some(ComponentValue::OminousBottleAmplifier(amplifier)) =
+        defaults::resolve(item, &patch, kinds::OMINOUS_BOTTLE_AMPLIFIER)
+    {
+        use mc_bamboo_blocks::entity::mob::effects::EffectInstance;
+        let mut effect = EffectInstance::with_flags(
+            mc_bamboo_data::registries::mob_effect::BAD_OMEN,
+            120000,
+            *amplifier,
+            false,
+            false,
+        );
+        // 官方六参数构造把 showIcon 单独设为 true，与 visible 分开。
+        // The six-argument constructor sets showIcon=true independently of visible.
+        effect.show_icon = true;
+        crate::player_effects::give(region, id, effect);
+    }
     // `Consumable.onConsume` 的 `on_consume_effects`。
     if let Some(ComponentValue::Consumable {
         on_consume_effects, ..
@@ -413,6 +434,59 @@ mod tests {
                 .effects
                 .amplifier(mob_effect::REGENERATION),
             Some(1)
+        );
+    }
+
+    fn ominous_bottle(amplifier: i32) -> ItemStack {
+        let mut patch = mc_bamboo_protocol::components::ComponentPatch::new();
+        patch.put(
+            kinds::OMINOUS_BOTTLE_AMPLIFIER,
+            mc_bamboo_protocol::components::PatchEntry::Set(
+                ComponentValue::OminousBottleAmplifier(amplifier),
+            ),
+        );
+        let (added, removed) = patch.to_opaque();
+        ItemStack {
+            added,
+            removed,
+            ..ItemStack::new(items::OMINOUS_BOTTLE, 1)
+        }
+    }
+
+    /// 喝不祥之瓶按 `OminousBottleAmplifier.onConsume` 给 BAD_OMEN。
+    #[test]
+    fn drinking_an_ominous_bottle_gives_bad_omen() {
+        let (mut region, id) = region_with_item(items::OMINOUS_BOTTLE, 1);
+        let slot = region.players[&id].inventory.hand_slot(Hand::Main);
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = ominous_bottle(0);
+        complete(&mut region, id, Hand::Main, items::OMINOUS_BOTTLE);
+        let instance = region.players[&id]
+            .effects
+            .get(mob_effect::BAD_OMEN)
+            .expect("bad omen");
+        assert_eq!(instance.effect, mob_effect::BAD_OMEN);
+        assert_eq!(instance.duration, 120000);
+        assert_eq!(instance.amplifier, 0);
+        assert!(!instance.ambient);
+        assert!(!instance.visible);
+        assert!(instance.show_icon);
+    }
+
+    /// 带等级的瓶子把 amplifier 原样传过去。
+    #[test]
+    fn ominous_bottle_amplifier_is_carried_over() {
+        let (mut region, id) = region_with_item(items::OMINOUS_BOTTLE, 1);
+        let slot = region.players[&id].inventory.hand_slot(Hand::Main);
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = ominous_bottle(3);
+        complete(&mut region, id, Hand::Main, items::OMINOUS_BOTTLE);
+        assert_eq!(
+            region.players[&id].effects.amplifier(mob_effect::BAD_OMEN),
+            Some(3)
+        );
+        // 改坏确认：把等级写死成 0 会翻。
+        assert_ne!(
+            region.players[&id].effects.amplifier(mob_effect::BAD_OMEN),
+            Some(0)
         );
     }
 }
