@@ -1438,6 +1438,8 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
             if let Some(view) = ctx.player(rider) {
                 if mob.mob_type.is_equine() {
                     super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
+                } else if mob.mob_type == super::MobType::Pig {
+                    super::pig::tick_ridden(me, mob, view.yaw, view.pitch);
                 } else if super::nautilus::is_nautilus(mob.mob_type) {
                     super::nautilus_ai::ridden_rotation(me, mob, view.yaw, view.pitch);
                 }

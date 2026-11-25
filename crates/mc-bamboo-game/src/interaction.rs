@@ -1368,6 +1368,46 @@ pub(crate) fn on_use_item(
         swing(region, id, hand, InteractionResult::Success);
         return;
     }
+    // `FoodOnAStickItem.use`：拿着胡萝卜钓竿、骑着由自己控制的猪时，右键
+    // 让猪加速并扣 7 点耐久；没加速成则只记一次使用统计。
+    //
+    // `FoodOnAStickItem.use`: with a carrot on a stick while riding a
+    // player-controlled pig, right-click boosts the pig and spends seven
+    // durability points; a failed use only awards the item-use stat.
+    if held.item == items::CARROT_ON_A_STICK {
+        let vehicle = crate::riding::player_vehicles(region).get(&id).copied();
+        let boosted = vehicle.is_some_and(|vehicle| {
+            region
+                .entities
+                .with_mut(vehicle, |entity| {
+                    entity.with_mob(|me, mob| {
+                        if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::Pig
+                            || mob.controlling_passenger() != Some(id.0)
+                        {
+                            return false;
+                        }
+                        let random = mc_bamboo_blocks::entity::EntityRandom(
+                            std::cell::RefCell::new(me.random),
+                        );
+                        let boosted = mob.pig_steering.boost(&random);
+                        me.random = random.0.into_inner();
+                        if boosted {
+                            mob.needs_sync = true;
+                        }
+                        boosted
+                    })
+                })
+                .flatten()
+                .unwrap_or(false)
+        });
+        if boosted {
+            durability::hurt_and_convert_on_break(region, id, hand);
+            swing(region, id, hand, InteractionResult::SuccessServer);
+        } else {
+            crate::item_use_stats::award(region, id, held.item);
+        }
+        return;
+    }
 
     let (mut level, ticks) = region.block_level();
     let outcome = mc_bamboo_blocks::use_item_with_stack(&mut level, ticks, &actor, hand, &held);
