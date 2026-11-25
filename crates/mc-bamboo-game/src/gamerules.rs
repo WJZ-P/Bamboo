@@ -152,6 +152,7 @@ impl GameRuleSet {
             mob_griefing: self.bool(gamerules::MOB_GRIEFING),
             mob_drops: self.bool(gamerules::MOB_DROPS),
             mob_explosion_drop_decay: self.bool(gamerules::MOB_EXPLOSION_DROP_DECAY),
+            spawner_blocks_work: self.bool(gamerules::SPAWNER_BLOCKS_WORK),
             max_entity_cramming: self.int(gamerules::MAX_ENTITY_CRAMMING),
             max_entity_collisions: 0,
             mob_throttle_distance: 0,

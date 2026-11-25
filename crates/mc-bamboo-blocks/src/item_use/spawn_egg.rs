@@ -1,6 +1,7 @@
 //! 刷怪蛋的 `useOn`：`EntityType.spawn` 走 [`crate::entity::mob::spawn`]。
 
 use crate::{
+    behaviour::machines::spawner::SpawnerBlockEntity,
     context::UseContext,
     entity::mob::{MobType, spawn},
     interact::InteractionResult,
@@ -25,6 +26,21 @@ pub(super) fn use_egg(world: &mut World, ctx: &UseContext, kind: MobType) -> Int
     let clicked = ctx.clicked_pos();
     let face = ctx.clicked_face();
     let state = world.block_state(clicked);
+    // `SpawnEggItem.useOn` 先看被点格的方块实体是不是 `Spawner`：是就改刷怪笼的实体，
+    // 不生成生物。`isSpawnerBlockEnabled` 关着时直接失败（官方还给 op 玩家发一条消息）。
+    // `SpawnEggItem.useOn` checks whether the clicked cell holds a `Spawner` first and
+    // rewrites its entity instead of spawning. A disabled spawner fails outright.
+    if world.block_entity::<SpawnerBlockEntity>(clicked).is_some() {
+        if !world.block_game_rules().spawner_blocks_work {
+            return InteractionResult::Fail;
+        }
+        let _ = world.with_block_entity::<SpawnerBlockEntity, _>(clicked, |spawner, world| {
+            spawner.set_entity_id(kind, world);
+        });
+        // `SpawnEggItem.useOn` 的 `itemStack.shrink(1)`：生存模式减一个。
+        world.set_item_exchange(crate::item_exchange::ItemExchange::Shrink);
+        return InteractionResult::Success;
+    }
     // 官方 `SpawnEggItem.useOn` 不检查流体：`spawnEggItem.useOn` 只看被点格的
     // 碰撞形状（水方块为空），所以水方块上照样生成。
     // Vanilla `SpawnEggItem.useOn` does not check fluids: it only looks at the
