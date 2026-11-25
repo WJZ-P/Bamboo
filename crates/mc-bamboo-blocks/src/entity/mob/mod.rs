@@ -1218,6 +1218,11 @@ impl MobType {
         ) || self.is_skeleton()
     }
 
+    /// `EntityTypeTags.DEFLECTS_PROJECTILES`：现在只有旋风人，把射来的投射物弹回。
+    pub const fn deflects_projectiles(self) -> bool {
+        matches!(self, Self::Breeze)
+    }
+
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
     pub const fn ambient_sound_interval(self) -> i32 {
         // `Guardian.getAmbientSoundInterval()` = 160。

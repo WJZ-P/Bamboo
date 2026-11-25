@@ -1091,7 +1091,42 @@ pub(super) fn play_extinguished_sound(me: &Entity, world: &mut World<'_>, pitch:
     );
 }
 
+/// `Entity.deflection`：目标是 `deflects_projectiles`（现在只有旋风人）时按
+/// `ProjectileDeflection.REVERSE` 弹回（速度 × -0.5、偏航 +170..190），放
+/// `BREEZE_DEFLECT` 音，不造成伤害。`Breeze.deflection` 对风弹返回 NONE，但箭和三叉戟
+/// 不是风弹，走这一支。
+fn deflect_off_target(me: &mut Entity, world: &mut World<'_>, uid: EntityUid) -> bool {
+    let deflects = world
+        .entity(uid)
+        .is_some_and(|entity| {
+            entity
+                .kind
+                .mob()
+                .is_some_and(|mob| mob.mob_type.deflects_projectiles())
+        });
+    if !deflects {
+        return false;
+    }
+    world.play_sound(
+        me.position,
+        sounds::sound_event("minecraft:entity.breeze.deflect"),
+        sounds::HOSTILE,
+        1.0,
+        1.0,
+        false,
+    );
+    me.delta = me.delta.multiply(-0.5, -0.5, -0.5);
+    me.y_rot += 170.0 + me.random.next_float() * 20.0;
+    if let EntityKind::Arrow(arrow) = &mut me.kind {
+        arrow.needs_sync = true;
+    }
+    true
+}
+
 fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bool {
+    if deflect_off_target(me, world, hit.uid) {
+        return false;
+    }
     let EntityKind::Arrow(arrow) = &me.kind else {
         return false;
     };
