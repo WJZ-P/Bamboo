@@ -113,6 +113,12 @@ pub struct MobInteraction {
     /// Damage the interaction deals to the mob itself (a parrot eating a cookie): the
     /// caller resolves it as a player attack once the mob is back in the world.
     pub self_hurt: Option<f32>,
+    /// `Allay.duplicateAllay()`：调用方在同一位置生成第二只悦灵。
+    pub duplicate_allay: bool,
+    /// `Level.broadcastEntityEvent`：调用方发出的实体事件编号。
+    pub entity_event: Option<u8>,
+    /// `Allay.mobInteract` 空手取回物品时把背包里剩下的全部扔出来。
+    pub thrown_stacks: Vec<ItemStack>,
 }
 
 impl MobInteraction {
@@ -134,6 +140,9 @@ impl MobInteraction {
             tamed: false,
             filled_bucket: false,
             self_hurt: None,
+            duplicate_allay: false,
+            entity_event: None,
+            thrown_stacks: Vec::new(),
         }
     }
 }
@@ -246,6 +255,11 @@ pub fn interact(
     }
     if mob.mob_type == MobType::Parrot {
         return super::parrot::interact(me, mob, req, level_next_float);
+    }
+    if mob.mob_type == MobType::Allay
+        && let Some(outcome) = super::allay::interact(me, mob, req)
+    {
+        return outcome;
     }
     if mob.mob_type == MobType::Armadillo
         && let Some(outcome) = super::armadillo::interact(me, mob, req)

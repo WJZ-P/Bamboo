@@ -1159,14 +1159,14 @@ mod tests {
     /// Pins the key struct sizes. After boxing values and moving the structure table into
     /// `Arc<BrainTemplate>`: 32 slots gave `Brain=664` / `Memories=536`, 49 slots plus
     /// schedule fields gave `808` / `952`, and the nautilus memories gave `840` / `984`.
-    /// Widening the masks to `u128` and adding 15 warden plus 4 sniffer memories
-    /// (`sniff_cooldown` shared, 51→70 slots) gives `Memories=1168` / `Brain=1312`.
+    /// Widening the masks to `u128` and adding 15 warden, 4 sniffer and 3 allay
+    /// memories (`sniff_cooldown` shared, 51→73 slots) gives `Memories=1216` / `Brain=1312`.
     #[test]
     fn brain_and_memory_sizes_stay_small() {
         use crate::entity::mob::brain::behavior::Node;
         use crate::entity::mob::brain::memory::{Memories, MemoryValue};
         assert_eq!(std::mem::size_of::<MemoryValue>(), 184);
-        assert_eq!(std::mem::size_of::<Memories>(), 1168);
+        assert_eq!(std::mem::size_of::<Memories>(), 1216);
         assert_eq!(std::mem::size_of::<Brain>(), 1312);
         assert_eq!(std::mem::size_of::<Node>(), 160);
         assert_eq!(std::mem::size_of::<Sensor>(), 16);

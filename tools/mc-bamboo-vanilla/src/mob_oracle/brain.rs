@@ -105,6 +105,10 @@ fn ids_text(ids: &[i32]) -> String {
 
 fn value_text(level: &MobLevel, value: &MemoryValue) -> String {
     match value {
+        MemoryValue::Uuid(uuid) => {
+            let hex: String = uuid.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
+        }
         MemoryValue::Bool(value) => value.to_string(),
         MemoryValue::Int(value) => value.to_string(),
         MemoryValue::Long(value) => value.to_string(),

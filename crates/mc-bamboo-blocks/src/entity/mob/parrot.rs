@@ -509,7 +509,11 @@ fn wander_position(me: &mut Entity, mob: &Mob, view: &dyn BlockView) -> Option<V
 /// `WaterAvoidingRandomFlyingGoal.getPosition`：先试悬停点，再试空中 / 水里。
 ///
 /// `WaterAvoidingRandomFlyingGoal.getPosition`: hover first, then air or water.
-fn flying_wander_position(me: &mut Entity, mob: &Mob, view: &dyn BlockView) -> Option<Vec3> {
+pub(super) fn flying_wander_position(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+) -> Option<Vec3> {
     // `Vec3.directionFromRotation(xRot, yRot)`，全程 f32。
     // `Vec3.directionFromRotation(xRot, yRot)`, all in f32.
     let scale = std::f32::consts::PI / 180.0;

@@ -1216,6 +1216,7 @@ fn ambient_sound(mob: &Mob, in_water: bool) -> &'static str {
         // `Warden.getAmbientSound()` 按愤怒等级选（null 姿态由 play_ambient_sound 拦掉）。
         // `Warden.getAmbientSound()` picks by anger level (null poses are filtered above).
         super::MobType::Warden => mob.warden.anger_level().ambient_sound(),
+        super::MobType::Allay => super::allay::ambient_sound(mob),
         super::MobType::Goat => super::goat::voice(mob, Voice::Ambient),
         super::MobType::Enderman if mob.enderman.creepy => "minecraft:entity.enderman.scream",
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
@@ -1323,6 +1324,10 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
     // `Monster.aiStep` light handling.
     if mob.mob_type == super::MobType::Witch {
         super::witch::ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Allay {
+        // `Allay.aiStep` 在 `super.aiStep()` 之后：每 10 刻回血、每 20 刻停舞、复制冷却。
+        super::allay::ai_step(me, mob, ctx);
     }
     let fox = mob.mob_type == super::MobType::Fox;
     if fox {
@@ -1493,7 +1498,10 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
         // `travelRidden`; the server does not simulate the vehicle, it only runs
         // `tickRidden` and zeroes the velocity. The position comes from the client's
         // `move_vehicle` packet.
-        if let Some(rider) = mob.controlling_passenger() {
+        if mob.mob_type == super::MobType::Allay {
+            // `Allay.travel` 是 `travelFlying(input, getSpeed())`，没有重力。
+            super::allay::travel(me, mob, ctx, input);
+        } else if let Some(rider) = mob.controlling_passenger() {
             if let Some(view) = ctx.player(rider) {
                 if mob.mob_type.is_equine() {
                     super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
@@ -1664,6 +1672,55 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
         for (item, stack) in items {
             if mob.villager.wants_to_pick_up(&stack) {
                 let leftover = mob.villager.inventory.add_item(stack);
+                let remaining_count = if leftover.is_empty() {
+                    0
+                } else {
+                    leftover.count
+                };
+                ctx.emit(
+                    crate::entity::ctx::Command::VillagerPickUpItem {
+                        item,
+                        remaining_count,
+                    },
+                    me,
+                );
+            }
+        }
+    }
+    // `Mob.aiStep` 的捡东西那一段：悦灵（`InventoryCarrier.pickUpItem`）。
+    // `Allay.canPickUpLoot()` 还要求手里有模板物品、不在捡物冷却里。
+    if mob.mob_type == super::MobType::Allay
+        && mob.can_pick_up_loot
+        && super::allay::Allay::has_item_in_hand(&mob.allay, mob)
+        && is_alive(me, mob)
+        && !mob.dead
+        && ctx.blocks().block_game_rules().mob_griefing
+        && !mob
+            .brain
+            .as_ref()
+            .is_some_and(|brain| brain.memories.has(super::brain::memory::MemoryType::ItemPickupCooldownTicks))
+    {
+        let rules = ctx.blocks().block_game_rules();
+        let mut items = Vec::new();
+        ctx.for_each_other_in(me.bounding_box().inflate(1.0, 1.0, 1.0), &mut |other| {
+            if other.removed {
+                return;
+            }
+            if let KindPublic::Item {
+                stack,
+                pickup_delay,
+                ..
+            } = &other.kind
+                && !stack.is_empty()
+                && *pickup_delay <= 0
+                && super::allay::wants_to_pick_up(mob, stack, &rules)
+            {
+                items.push((other.uid, stack.clone()));
+            }
+        });
+        for (item, stack) in items {
+            if super::allay::wants_to_pick_up(mob, &stack, &rules) {
+                let leftover = mob.allay.add_item(stack);
                 let remaining_count = if leftover.is_empty() {
                     0
                 } else {
@@ -2090,6 +2147,10 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
         // `Warden.customServerAiStep`: brain, vibration, anger decay, activity switch.
         super::warden_ai::custom_server_ai_step(me, mob, ctx, decision_gap);
     }
+    if mob.mob_type == super::MobType::Allay {
+        // `Allay.customServerAiStep`：振动到达、大脑、活动重选。
+        super::allay::custom_server_ai_step(me, mob, ctx, decision_gap);
+    }
 }
 
 /// `Mob.getHeadRotSpeed()`：青蛙 35，其余 10。
@@ -2136,6 +2197,11 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
         // `Parrot` 用 `FlyingMoveControl`。
         // Parrots use `FlyingMoveControl`.
         super::parrot::move_control_tick(me, mob);
+        return;
+    }
+    if mob.mob_type == super::MobType::Allay {
+        // `Allay` 构造函数：`FlyingMoveControl(this, 20, false)`。
+        super::parrot::flying_move_control_tick(me, mob, 20.0, false);
         return;
     }
     if mob.mob_type == super::MobType::Bee {
@@ -3682,6 +3748,12 @@ fn animal_death_drops(
     loot: bool,
 ) {
     let by_player = mob.last_hurt_by_player_memory_time > 0;
+    // `Allay.dropEquipment`：背包和主手各掉一份，且不受 `PREVENT_EQUIPMENT_DROP` 之外的规则影响。
+    if mob.mob_type == super::MobType::Allay {
+        for stack in super::allay::drop_equipment(mob) {
+            ctx.emit(Command::DropItem { stack }, me);
+        }
+    }
     if loot {
         ctx.emit(
             Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),

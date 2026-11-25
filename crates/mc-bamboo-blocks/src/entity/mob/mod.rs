@@ -12,6 +12,8 @@
 //! out of `Entity.kind` so it can be borrowed apart from the entity; sizes
 //! therefore live on [`Entity::dimensions`].
 
+pub mod allay;
+mod allay_ai;
 pub mod armadillo;
 pub mod attributes;
 pub mod avoid;
@@ -254,13 +256,17 @@ pub enum MobType {
     ///
     /// Ravager.
     Ravager,
+    /// 悦灵，`Allay`：脑驱动的飞行生物，自己是振动监听者。
+    ///
+    /// The `Allay`: a brain-driven flying mob that listens for vibrations.
+    Allay,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 67] = [
+    pub const ALL: [Self; 68] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -328,6 +334,7 @@ impl MobType {
         Self::Sniffer,
         Self::Vindicator,
         Self::Ravager,
+        Self::Allay,
     ];
 
     /// 注册表 ID。
@@ -401,6 +408,7 @@ impl MobType {
             Self::Sniffer => ids::SNIFFER,
             Self::Vindicator => ids::VINDICATOR,
             Self::Ravager => ids::RAVAGER,
+            Self::Allay => ids::ALLAY,
         }
     }
 
@@ -474,6 +482,7 @@ impl MobType {
             Self::Sniffer => "minecraft:sniffer",
             Self::Vindicator => "minecraft:vindicator",
             Self::Ravager => "minecraft:ravager",
+            Self::Allay => "minecraft:allay",
         }
     }
 
@@ -640,6 +649,8 @@ impl MobType {
             // `EntityTypes.VINDICATOR` / `RAVAGER`：眼高用官方缺省的 height*0.85。
             (Self::Vindicator, _) => (0.6, 1.95, 1.95 * 0.85),
             (Self::Ravager, _) => (1.95, 2.2, 2.2 * 0.85),
+            // `EntityTypes.ALLAY`：`sized(0.35, 0.6).eyeHeight(0.36)`。
+            (Self::Allay, _) => (0.35, 0.6, 0.36),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -877,7 +888,7 @@ impl MobType {
         // `AbstractGolem.removeWhenFarAway` is always false.
         // `Warden.removeWhenFarAway()` 恒假，监守者不因距离消失。
         // `Warden.removeWhenFarAway()` is always false.
-        if matches!(self, Self::IronGolem | Self::SnowGolem | Self::Warden) {
+        if matches!(self, Self::IronGolem | Self::SnowGolem | Self::Warden | Self::Allay) {
             return false;
         }
         // 鱿鱼、海豚（`AgeableWaterCreature`）、鱼（`WaterAnimal`）和蝙蝠不是 `Animal`，沿用
@@ -992,6 +1003,7 @@ impl MobType {
                 | Self::IronGolem
                 | Self::SnowGolem
                 | Self::Villager
+                | Self::Allay
                 // `AbstractCubeMob` 一支是 `AgeableMob` 但不是 `Animal`：
                 // 没有 `InLove` / `LoveCause` 存档键，也没有求爱目标。
                 // The cube-mob branch is `AgeableMob` but not `Animal`.
@@ -1167,6 +1179,7 @@ impl MobType {
             Self::Sniffer => "minecraft:entities/sniffer",
             Self::Vindicator => "minecraft:entities/vindicator",
             Self::Ravager => "minecraft:entities/ravager",
+            Self::Allay => "minecraft:entities/allay",
         }
     }
 
@@ -1218,7 +1231,13 @@ impl MobType {
             0.1
         } else if matches!(
             self,
-            Self::Cow | Self::Mooshroom | Self::Squid | Self::GlowSquid | Self::Wolf | Self::Bee
+            Self::Cow
+                | Self::Mooshroom
+                | Self::Squid
+                | Self::GlowSquid
+                | Self::Wolf
+                | Self::Bee
+                | Self::Allay
         ) {
             0.4
         } else {
@@ -1322,6 +1341,8 @@ impl MobType {
             // `sniffer::ambient_voice`.
             Self::Sniffer => Some("minecraft:entity.sniffer.idle"),
             Self::Vindicator => Some("minecraft:entity.vindicator.ambient"),
+            // `Allay.getAmbientSound()` 按主手有没有物品分派，见 `allay::ambient_sound`。
+            Self::Allay => None,
             Self::Ravager => Some("minecraft:entity.ravager.ambient"),
         }
     }
@@ -1389,6 +1410,7 @@ impl MobType {
             | Self::Creaking => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.hurt"),
             Self::Vindicator => Some("minecraft:entity.vindicator.hurt"),
+            Self::Allay => Some("minecraft:entity.allay.hurt"),
             Self::Ravager => Some("minecraft:entity.ravager.hurt"),
         }
     }
@@ -1456,6 +1478,7 @@ impl MobType {
             | Self::ZombieNautilus => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.death"),
             Self::Vindicator => Some("minecraft:entity.vindicator.death"),
+            Self::Allay => Some("minecraft:entity.allay.death"),
             Self::Ravager => Some("minecraft:entity.ravager.death"),
         }
     }
@@ -1536,6 +1559,9 @@ impl MobType {
             // `AbstractIllager` / `Vindicator` 没有覆写脚步声；劫掠兽有自己的。
             Self::Vindicator => None,
             Self::Ravager => Some("minecraft:entity.ravager.step"),
+            // `Allay.playStepSound()` 覆写成空方法。
+            // `Allay.playStepSound()` 覆写成空方法。
+            Self::Allay => None,
         }
     }
 
@@ -1610,6 +1636,7 @@ impl MobType {
             Self::Sniffer => items::SNIFFER_SPAWN_EGG,
             Self::Vindicator => items::VINDICATOR_SPAWN_EGG,
             Self::Ravager => items::RAVAGER_SPAWN_EGG,
+            Self::Allay => items::ALLAY_SPAWN_EGG,
         }
     }
 
@@ -1683,6 +1710,7 @@ impl MobType {
             Self::Sniffer => "entity.minecraft.sniffer",
             Self::Vindicator => "entity.minecraft.vindicator",
             Self::Ravager => "entity.minecraft.ravager",
+            Self::Allay => "entity.minecraft.allay",
         }
     }
 
@@ -3045,9 +3073,11 @@ pub struct Mob {
     /// The warden's anger management, vibration listener, pose and client anger
     /// level; default for every other mob.
     pub warden: warden::Warden,
-    /// 实体自带的游戏事件监听者（监守者等）；别的生物是 `None`。
+    /// 悦灵自己的状态：背包、跳舞 / 复制冷却、唱片机位置；别的生物是缺省值。
+    pub allay: allay::Allay,
+    /// 实体自带的游戏事件监听者（监守者、悦灵）；别的生物是 `None`。
     ///
-    /// The mob's own game-event listener (the warden and similar); `None` otherwise.
+    /// The mob's own game-event listener (wardens and allays); `None` otherwise.
     pub entity_listener: Option<crate::game_event::dispatch::EntityListener>,
     /// `LivingEntity.discardFriction`：长跳途中 `travelInAir` 不乘摩擦。
     ///
@@ -3209,6 +3239,7 @@ impl Mob {
             MobType::Sniffer => sniffer::attributes(),
             MobType::Vindicator => vindicator::attributes(),
             MobType::Ravager => ravager::attributes(),
+            MobType::Allay => allay::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3318,7 +3349,7 @@ impl Mob {
             MobType::Guardian | MobType::ElderGuardian => guardian::goals(mob_type),
             // 监守者是脑驱动，没有 `registerGoals` 覆盖。
             // The warden is brain-driven and has no `registerGoals` override.
-            MobType::Warden => GoalSelector::default(),
+            MobType::Warden | MobType::Allay => GoalSelector::default(),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
@@ -3411,7 +3442,7 @@ impl Mob {
             MobType::Silverfish => silverfish::targets(),
             MobType::Endermite => endermite::targets(),
             MobType::Guardian | MobType::ElderGuardian => guardian::target_goals(),
-            MobType::Warden => GoalSelector::default(),
+            MobType::Warden | MobType::Allay => GoalSelector::default(),
             kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -3634,6 +3665,7 @@ impl Mob {
             zombie_villager: zombie_villager::ZombieVillagerState::default(),
             tadpole_age: 0,
             warden: warden::Warden::default(),
+            allay: allay::Allay::default(),
             entity_listener: None,
             discard_friction: false,
             leash: None,
@@ -3711,6 +3743,9 @@ impl Mob {
         }
         if mob_type == MobType::Bee {
             bee::configure(&mut mob);
+        }
+        if mob_type == MobType::Allay {
+            allay::configure(&mut mob);
         }
         if mob_type == MobType::Wolf {
             wolf::configure(&mut mob);
@@ -4029,6 +4064,9 @@ impl Mob {
 /// 别的实体和追踪同步能读到的生物数据。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MobPublic {
+    /// `Allay.DATA_DANCING` / `DATA_CAN_DUPLICATE`。
+    pub allay_dancing: bool,
+    pub allay_can_duplicate: bool,
     /// `Bee.DATA_FLAGS_ID` 和 `DATA_ANGER_END_TIME`。
     pub bee_flags: u8,
     pub bee_flags_dirty: bool,
@@ -4306,6 +4344,8 @@ pub struct MobPublic {
 impl MobPublic {
     pub fn of(mob: &Mob, in_water: bool) -> Self {
         Self {
+            allay_dancing: mob.allay.dancing,
+            allay_can_duplicate: mob.allay.can_duplicate,
             bee_flags: mob.bee.flags,
             bee_flags_dirty: mob.bee.flags_dirty,
             bee_anger_end_time: mob.bee.anger_end_time,
@@ -4518,6 +4558,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Creaking => Some(Box::new(creaking_ai::brain())),
         MobType::Warden => Some(Box::new(warden_ai::brain())),
         MobType::Sniffer => Some(Box::new(sniffer::brain())),
+        MobType::Allay => Some(Box::new(allay_ai::brain())),
         _ => None,
     }
 }

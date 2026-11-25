@@ -663,6 +663,8 @@ fn sense_items(cx: &mut Cx) {
     let area = cx.me.bounding_box().inflate(32.0, 16.0, 32.0);
     let position = cx.me.position;
     let is_villager = cx.mob.mob_type == MobType::Villager;
+    let is_allay = cx.mob.mob_type == MobType::Allay;
+    let rules = cx.ctx.blocks().block_game_rules();
     let mut items: Vec<(f64, EntityUid, Vec3)> = Vec::new();
     cx.ctx.for_each_other_in(area, &mut |other| {
         if other.removed {
@@ -670,6 +672,10 @@ fn sense_items(cx: &mut Cx) {
         }
         if let KindPublic::Item { stack, .. } = &other.kind {
             if is_villager && !cx.mob.villager.wants_to_pick_up(stack) {
+                return;
+            }
+            // `Allay.wantsToPickUp` 用主手那一份当模板，只捡同种物品。
+            if is_allay && !super::super::allay::wants_to_pick_up(cx.mob, stack, &rules) {
                 return;
             }
             items.push((

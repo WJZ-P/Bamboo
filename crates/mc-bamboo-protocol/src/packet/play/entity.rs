@@ -216,6 +216,10 @@ pub enum EntityData {
     ///
     /// index 16, INT. `Warden.CLIENT_ANGER_LEVEL` (`getActiveAnger()`).
     ClientAngerLevel(i32),
+    /// index 16，BOOLEAN。`Allay.DATA_DANCING`。
+    AllayDancing(bool),
+    /// index 17，BOOLEAN。`Allay.DATA_CAN_DUPLICATE`。
+    AllayCanDuplicate(bool),
     /// index 17，BOOLEAN。`AgeableMob.AGE_LOCKED`。
     AgeLocked(bool),
     /// index 18，COW_VARIANT。`Cow.DATA_VARIANT_ID`，值是注册表 ID 的 VarInt。
@@ -564,9 +568,13 @@ impl EntityData {
             Self::EffectAmbience(_) => 11,
             Self::SleepingPos(_) => 14,
             Self::MobFlags(_) => 15,
-            Self::MainHand(_) | Self::Baby(_) | Self::ClientAngerLevel(_) => 16,
+            Self::MainHand(_)
+            | Self::Baby(_)
+            | Self::ClientAngerLevel(_)
+            | Self::AllayDancing(_) => 16,
             Self::ModelCustomisation(_)
             | Self::AgeLocked(_)
+            | Self::AllayCanDuplicate(_)
             | Self::SpecialType(_)
             | Self::WitchUsingItem(_) => 17,
             Self::CowVariant(_) | Self::DrownedConverting(_) => 18,
@@ -740,6 +748,10 @@ impl EntityData {
             Self::ArrowColor(value) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *value);
+            }
+            Self::AllayDancing(value) | Self::AllayCanDuplicate(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                out.push(u8::from(*value));
             }
             Self::ArrowInGround(value)
             | Self::TridentFoil(value)

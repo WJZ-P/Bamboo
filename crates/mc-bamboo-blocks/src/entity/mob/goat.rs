@@ -1507,6 +1507,9 @@ pub(super) fn interact(mob: &mut Mob, req: &MobInteractRequest) -> Option<MobInt
         position: req.position,
     });
     Some(MobInteraction {
+        duplicate_allay: false,
+        entity_event: None,
+        thrown_stacks: Vec::new(),
         result: InteractionResult::Success,
         shrink_held: !req.creative,
         shrink_even_creative: false,
@@ -1637,6 +1640,9 @@ mod tests {
             difficulty: 2,
         };
         let fed = |creative: bool| MobInteraction {
+            duplicate_allay: false,
+            entity_event: None,
+            thrown_stacks: Vec::new(),
             result: InteractionResult::SuccessServer,
             shrink_held: !creative,
             shrink_even_creative: false,

@@ -232,6 +232,8 @@ pub enum Kind {
     ///
     /// Sniffer-specific behaviours.
     Sniffer(super::super::sniffer::Behavior),
+    /// 悦灵专属行为（`GoToWantedItem` / `GoAndGiveItemsToTarget` / `StayCloseToTarget` / `RandomStroll.fly`）。
+    Allay(super::super::allay_ai::Behavior),
 }
 
 impl Kind {
@@ -376,6 +378,7 @@ impl Kind {
             Self::Creaking(behavior) => behavior.class(),
             Self::Warden(behavior) => behavior.class(),
             Self::Sniffer(behavior) => behavior.class(),
+            Self::Allay(behavior) => behavior.class(),
         }
     }
 
@@ -417,6 +420,7 @@ impl Kind {
             Self::Creaking(behavior) => behavior.required(),
             Self::Warden(behavior) => behavior.required(),
             Self::Sniffer(behavior) => behavior.required(),
+            Self::Allay(behavior) => behavior.required(),
         }
     }
 
@@ -462,6 +466,7 @@ impl Kind {
             Self::Creaking(behavior) => behavior.name(),
             Self::Warden(behavior) => behavior.name(),
             Self::Sniffer(behavior) => behavior.name(),
+            Self::Allay(behavior) => behavior.name(),
         }
     }
 
@@ -521,6 +526,7 @@ impl Kind {
             Self::Creaking(behavior) => behavior.extra_start(cx),
             Self::Warden(behavior) => behavior.extra_start(cx),
             Self::Sniffer(behavior) => behavior.extra_start(cx),
+            Self::Allay(behavior) => behavior.extra_start(cx),
             _ => true,
         }
     }
@@ -607,6 +613,7 @@ impl Kind {
             Self::Creaking(behavior) => behavior.start(cx),
             Self::Warden(behavior) => behavior.start(cx),
             Self::Sniffer(behavior) => behavior.start(cx),
+            Self::Allay(behavior) => behavior.start(cx),
             _ => {}
         }
     }
@@ -646,6 +653,7 @@ impl Kind {
             Self::Creaking(behavior) => behavior.can_still_use(cx),
             Self::Warden(behavior) => behavior.can_still_use(cx),
             Self::Sniffer(behavior) => behavior.can_still_use(cx),
+            Self::Allay(behavior) => behavior.can_still_use(cx),
             _ => false,
         }
     }
@@ -768,6 +776,7 @@ impl Kind {
             Self::Creaking(behavior) => behavior.tick(cx),
             Self::Warden(behavior) => behavior.tick(cx),
             Self::Sniffer(behavior) => behavior.tick(cx),
+            Self::Allay(behavior) => behavior.tick(cx),
             _ => {}
         }
     }
@@ -803,6 +812,7 @@ impl Kind {
             Self::Creaking(behavior) => behavior.stop(cx),
             Self::Warden(behavior) => behavior.stop(cx, timed_out),
             Self::Sniffer(behavior) => behavior.stop(cx, timed_out),
+            Self::Allay(behavior) => behavior.stop(cx),
             _ => {}
         }
     }
@@ -943,6 +953,7 @@ impl Kind {
             Self::Creaking(behavior) => behavior.trigger(cx),
             Self::Warden(behavior) => behavior.trigger(cx),
             Self::Sniffer(behavior) => behavior.trigger(cx),
+            Self::Allay(behavior) => behavior.trigger(cx),
             _ => false,
         }
     }
