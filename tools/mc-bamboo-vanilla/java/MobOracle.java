@@ -1717,6 +1717,10 @@ public final class MobOracle {
         out.append(",\"wolfBeg\":").append(wolf.isInterested());
         out.append(",\"wolfCollar\":").append(wolf.getCollarColor().getId());
         out.append(",\"wolfMaxHp\":").append(Float.floatToRawIntBits(wolf.getMaxHealth()));
+        var body = wolf.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.BODY);
+        out.append(",\"wolfBodyItem\":").append(BuiltInRegistries.ITEM.getId(body.getItem()));
+        out.append(",\"wolfBodyDamage\":").append(body.getDamageValue());
+        out.append(",\"wolfBodyCount\":").append(body.getCount());
     }
 
     /** `SleepGoal.countdown` 在构造时用随机种子取，对拍时报给 Bamboo 一侧照填。 */
@@ -2843,6 +2847,45 @@ public final class MobOracle {
             sheep.mob(8, 0.5, 64.0, 0.5, 0.0F, 53L, 0);
             sheep.mob(4, 8.5, 64.0, 0.5, 0.0F, 54L, 0);
             scenes.add(sheep);
+            // 狼铠：主人给驯服的狼穿上，狼挨打时铠吸收伤害并逐次开裂，鳞甲修回耐久。
+            // Wolf armour: the owner equips a tamed wolf, hits are absorbed (durability
+            // grows, never health), and an armadillo scute repairs the damage.
+            int armor = BuiltInRegistries.ITEM.getId(Items.WOLF_ARMOR);
+            int scute = BuiltInRegistries.ITEM.getId(Items.ARMADILLO_SCUTE);
+            // 种子 61 的四次喂骨头必驯服（和 wolf_tame_61 共用同一随机序列）。
+            // Seed 61 tames within four bones (same draw sequence as wolf_tame_61).
+            for (int variant = 0; variant < 3; variant++) {
+                String name = switch (variant) {
+                    case 0 -> "wolf_armor_equip";
+                    case 1 -> "wolf_armor_absorb";
+                    default -> "wolf_armor_repair";
+                };
+                Scene armorScene = new Scene(name).ticks(90);
+                Scenes.ground(armorScene, 15);
+                armorScene.mob(8, 0.5, 64.0, 0.5, 0.0F, 61L, 0);
+                armorScene.player(2.5, 64.0, 0.5, Items.AIR);
+                for (int t = 2; t <= 14; t += 4) armorScene.interact(t, 0, 0, bone, 0);
+                armorScene.interact(30, 0, 0, armor, 0);
+                if (variant == 1) {
+                    // playerAttack 不在 bypasses_wolf_armor 里：5/20/25 三次伤害把耐久
+                    // 推到 5/25/50，跨过 NONE→LOW→MEDIUM→HIGH 三个开裂阶段，血量不变。
+                    // playerAttack is not in bypasses_wolf_armor: hits of 5/20/25 push
+                    // durability to 5/25/50 (NONE→LOW→MEDIUM→HIGH), health never changes.
+                    armorScene.hurts.add(new double[] {40, 0, 5.0, 0});
+                    armorScene.hurts.add(new double[] {50, 0, 20.0, 0});
+                    armorScene.hurts.add(new double[] {60, 0, 25.0, 0});
+                }
+                if (variant == 2) {
+                    // 一次伤害打出 20 点损耗；hurtServer 站起来，空手右键切回坐下，
+                    // 等坐姿 goal 落地后用鳞甲修回 8 点（maxDamage * 0.125）。
+                    // One hit spends 20 durability; hurtServer stands the wolf up, an
+                    // empty-hand click sits it again, then a scute repairs 8 points.
+                    armorScene.hurts.add(new double[] {40, 0, 20.0, 0});
+                    armorScene.interact(45, 0, 0, air, 0);
+                    armorScene.interact(70, 0, 0, scute, 0);
+                }
+                scenes.add(armorScene);
+            }
         }
     }
 

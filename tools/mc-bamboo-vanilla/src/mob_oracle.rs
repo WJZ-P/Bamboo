@@ -818,6 +818,15 @@ struct CowStep {
     wolf_collar: i32,
     #[serde(default, rename = "wolfMaxHp")]
     wolf_max_hp: i64,
+    /// 狼铠：BODY 槽的物品 id、耐久损耗、数量；没穿时全是 0。
+    ///
+    /// Wolf armour: BODY slot item id, damage and count; all 0 when unarmoured.
+    #[serde(default, rename = "wolfBodyItem")]
+    wolf_body_item: i32,
+    #[serde(default, rename = "wolfBodyDamage")]
+    wolf_body_damage: i32,
+    #[serde(default, rename = "wolfBodyCount")]
+    wolf_body_count: i32,
     /// 马科场景：`DATA_ID_FLAGS` 字节和脾气值，其余生物是 0。
     ///
     /// Equine scenes: the `DATA_ID_FLAGS` byte and the temper; 0 for other mobs.
@@ -3182,6 +3191,20 @@ impl Report {
                 }
                 Some(steps)
             }
+            Some("wolf_armor_damage") if name.starts_with("wolf_armor_") => {
+                let mut steps = ours.to_vec();
+                for step in steps.iter_mut().flatten() {
+                    step.wolf_body_damage = step.wolf_body_damage.wrapping_add(1);
+                }
+                Some(steps)
+            }
+            Some("wolf_armor_item") if name.starts_with("wolf_armor_") => {
+                let mut steps = ours.to_vec();
+                for step in steps.iter_mut().flatten() {
+                    step.wolf_body_item = 0;
+                }
+                Some(steps)
+            }
             _ => None,
         };
         let ours: &[Option<CowStep>] = tampered.as_deref().unwrap_or(ours);
@@ -3284,6 +3307,9 @@ impl Report {
                 plain!(wolf_beg);
                 plain!(wolf_collar);
                 plain!(wolf_max_hp);
+                plain!(wolf_body_item);
+                plain!(wolf_body_damage);
+                plain!(wolf_body_count);
             }
             if name.starts_with("zombie_") || name.starts_with("drowned_") {
                 if name.starts_with("zombie_inhabited_") {
@@ -5138,6 +5164,29 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
                 .attributes
                 .value(mc_bamboo_data::registries::attribute::MAX_HEALTH);
             i64::from((max as f32).to_bits())
+        } else {
+            0
+        },
+        wolf_body_item: if is_wolf(mob) {
+            mob.equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Body)
+                .item
+        } else {
+            0
+        },
+        wolf_body_damage: if is_wolf(mob) {
+            mc_bamboo_blocks::durability::damage_of(
+                mob.equipment
+                    .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Body),
+            )
+            .unwrap_or(0)
+        } else {
+            0
+        },
+        wolf_body_count: if is_wolf(mob) {
+            mob.equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Body)
+                .count
         } else {
             0
         },
