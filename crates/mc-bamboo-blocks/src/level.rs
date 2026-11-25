@@ -1441,6 +1441,35 @@ pub trait Level: LevelSideState + LevelEntities {
         None
     }
 
+    /// `PoiManager.getInRange`：按官方遍历序返回半径内匹配类型位掩码（`1 << kind`）
+    /// 与占用口径的全部 `(kind, pos)`。默认为空。
+    ///
+    /// `PoiManager.getInRange`: all `(kind, pos)` within `radius` matching `type_mask`
+    /// (`1 << kind`) and `occupancy`, in vanilla traversal order. Empty by default.
+    fn poi_in_range(
+        &self,
+        _center: BlockPos,
+        _radius: i32,
+        _type_mask: u32,
+        _occupancy: u8,
+    ) -> Vec<(u8, BlockPos)> {
+        Vec::new()
+    }
+
+    /// `PoiManager.take`：在 `pos` 处若存在匹配 `type_mask` 且 `HAS_SPACE` 的 POI 则扣一张票。
+    ///
+    /// `PoiManager.take`: consumes one ticket at `pos` if a matching `HAS_SPACE` POI exists.
+    fn poi_take(&mut self, _pos: BlockPos, _type_mask: u32) -> bool {
+        false
+    }
+
+    /// `PoiManager.release`：归还 `pos` 处 POI 的一张票。
+    ///
+    /// `PoiManager.release`: releases one ticket for the POI at `pos`.
+    fn poi_release(&mut self, _pos: BlockPos) -> bool {
+        false
+    }
+
     /// `ServerLevel.sectionsToVillage(SectionPos.of(pos))`。默认 7（不可达）。
     fn poi_sections_to_village(&self, _pos: BlockPos) -> i32 {
         7

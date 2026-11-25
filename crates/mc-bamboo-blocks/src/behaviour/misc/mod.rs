@@ -12,6 +12,7 @@ mod composter;
 
 pub(crate) use composter::{
     MAX_LEVEL as COMPOST_MAX_LEVEL, READY as COMPOST_READY, compost_empty, compost_fill,
+    extract_produce, roll_layers as roll_compost_layers,
 };
 mod copper;
 mod crafter;

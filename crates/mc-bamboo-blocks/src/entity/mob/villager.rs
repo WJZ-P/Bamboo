@@ -8,10 +8,15 @@
 //! unhappy counter, food / experience / restock times and gossips. Phase 2 keeps
 //! `Offers` and `Inventory` verbatim; trading and gossip semantics come later.
 
+use std::collections::BTreeMap;
+
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_data::villager as facts;
+use mc_bamboo_data::{items, poi as poi_data, tags::item_tags, villager as facts};
 use mc_bamboo_nbt::Tag;
-use mc_bamboo_protocol::components::value::GlobalPos;
+use mc_bamboo_protocol::{
+    components::{archive::slots as item_slots, value::GlobalPos},
+    item::ItemStack,
+};
 
 use super::{
     brain::{Brain, memory::MemoryType},
@@ -20,9 +25,250 @@ use super::{
 };
 use crate::{
     archive::tag::{self, put},
-    entity::Entity,
+    behaviour::{
+        common::item_of,
+        misc::{COMPOST_MAX_LEVEL, COMPOST_READY, extract_produce},
+    },
+    container::item_max,
+    entity::{Entity, EntityKind, EntityUid},
+    level::Effect,
+    state::{LEVEL_COMPOSTER, item_is_tagged},
     world::World,
 };
+
+/// 幼年村民 `NearestBedSensor` 的重试缓存（放进 `Villager` 保持 `Sensor` 16 字节、`Brain` 952 字节）。
+///
+/// Baby villager `NearestBedSensor` retry cache (stored on `Villager` so `Sensor` stays
+/// 16 bytes and `Brain` stays 952 bytes).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NearestBedCache {
+    pub batch_cache: BTreeMap<BlockPos, i64>,
+    pub tried_count: i32,
+    pub last_update: i64,
+}
+
+/// `AbstractVillager.inventory`：8 格 `SimpleContainer`，空背包不分配堆内存。
+///
+/// `AbstractVillager.inventory`: an 8-slot `SimpleContainer` with lazy heap allocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VillagerInventory {
+    slots: Option<Box<[ItemStack; 8]>>,
+}
+
+impl VillagerInventory {
+    /// 槽位数（`AbstractVillager` 固定为 8）。
+    pub const SIZE: usize = 8;
+
+    /// 读取第 `index` 格物品（越界或空背包返回空堆）。
+    pub fn get(&self, index: usize) -> ItemStack {
+        self.slots
+            .as_deref()
+            .and_then(|s| s.get(index))
+            .cloned()
+            .unwrap_or_else(ItemStack::empty)
+    }
+
+    /// 写入第 `index` 格物品。
+    pub fn set(&mut self, index: usize, stack: ItemStack) {
+        if index >= Self::SIZE {
+            return;
+        }
+        if stack.is_empty() {
+            if let Some(slots) = self.slots.as_deref_mut() {
+                slots[index] = ItemStack::empty();
+            }
+            return;
+        }
+        let slots = self
+            .slots
+            .get_or_insert_with(|| Box::new(std::array::from_fn(|_| ItemStack::empty())));
+        slots[index] = stack;
+    }
+
+    /// 所有槽是否都为空。
+    pub fn is_empty(&self) -> bool {
+        self.slots
+            .as_deref()
+            .is_none_or(|slots| slots.iter().all(ItemStack::is_empty))
+    }
+
+    /// `SimpleContainer.canAddItem(ItemStack)`。
+    pub fn can_add_item(&self, stack: &ItemStack) -> bool {
+        if stack.is_empty() {
+            return false;
+        }
+        let Some(slots) = self.slots.as_deref() else {
+            return true;
+        };
+        let max = item_max(stack).min(64);
+        for slot in slots {
+            if slot.is_empty() || (same_item_components(slot, stack) && slot.count < max) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `SimpleContainer.addItem(ItemStack)`：先合入已有同类槽，再放进空槽，返回剩余部分。
+    pub fn add_item(&mut self, stack: ItemStack) -> ItemStack {
+        if stack.is_empty() {
+            return ItemStack::empty();
+        }
+        let mut leftover = stack;
+        let max = item_max(&leftover).min(64);
+        let slots = self
+            .slots
+            .get_or_insert_with(|| Box::new(std::array::from_fn(|_| ItemStack::empty())));
+        // `moveItemToOccupiedSlotsWithSameType`
+        for slot in slots.iter_mut() {
+            if same_item_components(slot, &leftover) && slot.count < max {
+                let take = leftover.count.min(max - slot.count);
+                if take > 0 {
+                    slot.count += take;
+                    leftover.count -= take;
+                    if leftover.count <= 0 {
+                        return ItemStack::empty();
+                    }
+                }
+            }
+        }
+        // `moveItemToEmptySlots`
+        for slot in slots.iter_mut() {
+            if slot.is_empty() {
+                let take = leftover.count.min(max);
+                let mut placed = leftover.clone();
+                placed.count = take;
+                *slot = placed;
+                leftover.count -= take;
+                if leftover.count <= 0 {
+                    return ItemStack::empty();
+                }
+            }
+        }
+        leftover
+    }
+
+    /// `SimpleContainer.countItem(Item)`。
+    pub fn count_item(&self, item: i32) -> i32 {
+        let Some(slots) = self.slots.as_deref() else {
+            return 0;
+        };
+        slots
+            .iter()
+            .filter(|s| !s.is_empty() && s.item == item)
+            .map(|s| s.count)
+            .sum()
+    }
+
+    /// `SimpleContainer.removeItemType(Item, int)`：按槽序倒扣，返回实际扣出的物品堆。
+    pub fn remove_item_type(&mut self, item: i32, mut count: i32) -> ItemStack {
+        let mut removed = 0;
+        if let Some(slots) = self.slots.as_deref_mut() {
+            for slot in slots.iter_mut() {
+                if count <= 0 {
+                    break;
+                }
+                if !slot.is_empty() && slot.item == item {
+                    let take = slot.count.min(count);
+                    slot.count -= take;
+                    count -= take;
+                    removed += take;
+                    if slot.count <= 0 {
+                        *slot = ItemStack::empty();
+                    }
+                }
+            }
+        }
+        if removed > 0 {
+            ItemStack::new(item, removed)
+        } else {
+            ItemStack::empty()
+        }
+    }
+
+    /// 从第 `index` 格减去 `amount` 个物品。
+    pub fn shrink_slot(&mut self, index: usize, amount: i32) {
+        if let Some(slots) = self.slots.as_deref_mut()
+            && let Some(slot) = slots.get_mut(index)
+        {
+            slot.count -= amount;
+            if slot.count <= 0 {
+                *slot = ItemStack::empty();
+            }
+        }
+    }
+
+    /// `Villager.hasFarmSeeds()`。
+    pub fn has_farm_seeds(&self) -> bool {
+        self.slots.as_deref().is_some_and(|slots| {
+            slots.iter().any(|s| {
+                !s.is_empty() && item_is_tagged(s.item, item_tags::VILLAGER_PLANTABLE_SEEDS)
+            })
+        })
+    }
+
+    /// `Villager.countFoodPointsInInventory()`。
+    pub fn count_food_points(&self) -> i32 {
+        let Some(slots) = self.slots.as_deref() else {
+            return 0;
+        };
+        slots
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.count * villager_food_nutrition(s.item))
+            .sum()
+    }
+
+    /// 编成官方 `Inventory` NBT 列表（`SimpleContainer.storeAsItemList`）；空背包写空列表。
+    pub fn to_nbt(&self) -> Tag {
+        let mut list = Vec::new();
+        if let Some(slots) = self.slots.as_deref() {
+            for stack in slots {
+                if stack.is_empty() {
+                    continue;
+                }
+                if let Ok(tag) = item_slots::encode_item(stack) {
+                    list.push(tag);
+                }
+            }
+        }
+        Tag::List(list)
+    }
+
+    /// 从官方 `Inventory` NBT 列表读回（`SimpleContainer.fromItemList`）。
+    pub fn read_nbt(&mut self, tag: Option<&Tag>) {
+        self.slots = None;
+        let Some(Tag::List(entries)) = tag else {
+            return;
+        };
+        for entry in entries {
+            if let Ok(stack) = item_slots::decode_item(entry)
+                && !stack.is_empty()
+            {
+                let _ = self.add_item(stack);
+            }
+        }
+    }
+}
+
+fn same_item_components(a: &ItemStack, b: &ItemStack) -> bool {
+    !a.is_empty()
+        && !b.is_empty()
+        && a.item == b.item
+        && a.added == b.added
+        && a.removed == b.removed
+}
+
+/// `DataComponents.VILLAGER_FOOD` 对应的营养值（面包 4，胡萝卜/马铃薯/甜菜根 1）。
+///
+/// Nutrition value from `DataComponents.VILLAGER_FOOD` (bread 4; carrot/potato/beetroot 1).
+pub const fn villager_food_nutrition(item: i32) -> i32 {
+    match item {
+        items::BREAD => 4,
+        items::CARROT | items::POTATO | items::BEETROOT => 1,
+        _ => 0,
+    }
+}
 
 /// 村民自己的状态。默认 `(plains, none, 1)`，`VillagerDataFinalized` 缺省假。
 ///
@@ -48,17 +294,27 @@ pub struct Villager {
     pub gossips: Option<Tag>,
     /// `Offers` 原文。交易在期 5。
     pub offers: Option<Tag>,
-    /// `Inventory` 原文。拾取物品在期 3。
-    pub inventory: Option<Tag>,
-    /// `LivingEntity.isSleeping()`：睡在床上时为真（睡觉行为第 4 期接入）。
+    /// `AbstractVillager.inventory`：8 格物品栏。
     ///
-    /// `LivingEntity.isSleeping()`: true while resting in a bed (sleep behaviour lands in phase 4).
+    /// `AbstractVillager.inventory`: 8-slot villager inventory.
+    pub inventory: VillagerInventory,
+    /// `LivingEntity.isSleeping()`：睡在床上时为真。
+    ///
+    /// `LivingEntity.isSleeping()`: true while resting in a bed.
     pub sleeping: bool,
+    /// `LivingEntity.SLEEPING_POS_ID`：睡在床上时的床头坐标。
+    ///
+    /// `LivingEntity.SLEEPING_POS_ID`: the bed head position while sleeping.
+    pub sleeping_pos: Option<BlockPos>,
     /// 当前是否正在与玩家交易（交易系统第 5 期接入；村民降频豁免看它）。
     ///
     /// True while trading with a player (trading lands in phase 5; villager throttling
     /// exempts trading villagers).
     pub trading: bool,
+    /// `NearestBedSensor`（仅幼年村民使用）的批次缓存，按需装箱。
+    ///
+    /// Lazily boxed batch cache for baby villagers' `NearestBedSensor`.
+    pub nearest_bed_cache: Option<Box<NearestBedCache>>,
 }
 
 impl Default for Villager {
@@ -76,9 +332,11 @@ impl Default for Villager {
             restocks_today: 0,
             gossips: None,
             offers: None,
-            inventory: None,
+            inventory: VillagerInventory::default(),
             sleeping: false,
+            sleeping_pos: None,
             trading: false,
+            nearest_bed_cache: None,
         }
     }
 }
@@ -173,6 +431,68 @@ impl VillagerPublic {
 }
 
 impl Villager {
+    /// `VillagerData.withProfession` / `Villager.setVillagerData`：
+    /// 职业变化时按官方清空 `offers`（下次 `getOffers()` 重新生成）。
+    ///
+    /// `VillagerData.withProfession` / `Villager.setVillagerData`: clears `offers`
+    /// whenever the profession changes, matching vanilla.
+    pub fn set_profession(&mut self, profession: i32) {
+        if self.profession != profession {
+            self.offers = None;
+        }
+        self.profession = profession;
+    }
+
+    /// `VillagerData.withLevel`：等级夹在 `MIN_VILLAGER_LEVEL..=MAX_VILLAGER_LEVEL`。
+    ///
+    /// `VillagerData.withLevel`: clamps level to `MIN_VILLAGER_LEVEL..=MAX_VILLAGER_LEVEL`.
+    pub fn with_level(&mut self, level: i32) {
+        self.level = level.clamp(facts::MIN_VILLAGER_LEVEL, facts::MAX_VILLAGER_LEVEL);
+    }
+
+    /// `VillagerData.canLevelUp(level)`。
+    pub const fn can_level_up(level: i32) -> bool {
+        level >= facts::MIN_VILLAGER_LEVEL && level < facts::MAX_VILLAGER_LEVEL
+    }
+
+    /// `VillagerData.getMinXpPerLevel(level)`。
+    pub fn min_xp_per_level(level: i32) -> i32 {
+        if Self::can_level_up(level) {
+            facts::NEXT_LEVEL_XP_THRESHOLDS[(level - 1) as usize]
+        } else {
+            0
+        }
+    }
+
+    /// `VillagerData.getMaxXpPerLevel(level)`。
+    pub fn max_xp_per_level(level: i32) -> i32 {
+        if Self::can_level_up(level) {
+            facts::NEXT_LEVEL_XP_THRESHOLDS[level as usize]
+        } else {
+            0
+        }
+    }
+
+    /// `Villager.shouldIncreaseLevel()`。
+    pub fn should_increase_level(&self) -> bool {
+        Self::can_level_up(self.level) && self.xp >= Self::max_xp_per_level(self.level)
+    }
+
+    /// `Villager.shouldRestock(ServerLevel)` 占位接口（第 5 期接真实交易表和补货）。
+    ///
+    /// Placeholder for `Villager.shouldRestock(ServerLevel)` (wired to real trades in Phase 5).
+    pub fn should_restock(&mut self, _game_time: i64) -> bool {
+        false
+    }
+
+    /// `Villager.restock()` 占位接口（第 5 期接真实交易表和补货）。
+    ///
+    /// Placeholder for `Villager.restock()` (wired to real trades in Phase 5).
+    pub fn restock(&mut self, game_time: i64) {
+        self.last_restock = game_time;
+        self.restocks_today += 1;
+    }
+
     /// `VillagerData` 的完整默认值。
     pub fn is_default_data(&self) -> bool {
         self.kind == facts::type_id(facts::DEFAULT_TYPE).unwrap_or(0)
@@ -211,18 +531,40 @@ impl Villager {
         }
     }
 
+    /// `Villager.hasExcessFood()`。
+    pub fn has_excess_food(&self) -> bool {
+        self.inventory.count_food_points() >= 24
+    }
+
+    /// `Villager.wantsMoreFood()`。
+    pub fn wants_more_food(&self) -> bool {
+        self.inventory.count_food_points() < 12
+    }
+
+    /// `Villager.wantsToPickUp(ServerLevel, ItemStack)`。
+    ///
+    /// `Villager.wantsToPickUp(ServerLevel, ItemStack)`.
+    pub fn wants_to_pick_up(&self, stack: &ItemStack) -> bool {
+        if stack.is_empty() {
+            return false;
+        }
+        let wanted = item_is_tagged(stack.item, item_tags::VILLAGER_PICKS_UP)
+            || villager_food_nutrition(stack.item) > 0
+            || profession_requests_item(self.profession, stack.item);
+        wanted && self.inventory.can_add_item(stack)
+    }
+
     /// `Villager.addAdditionalSaveData` 的 8 个键，加上 `AbstractVillager` 的 `Offers` /
-    /// `Inventory`。官方只在 `offers != null` 时写 `Offers`。
+    /// `Inventory`。官方只在 `offers != null` 时写 `Offers`，非空背包才写 `Inventory`。
     ///
     /// The eight `Villager.addAdditionalSaveData` keys plus `AbstractVillager`'s
-    /// `Offers` / `Inventory`. Vanilla writes `Offers` only when it is non-null.
+    /// `Offers` / `Inventory`. Vanilla writes `Offers` only when non-null and `Inventory`
+    /// only when non-empty.
     pub fn write_nbt(&self, out: &mut Vec<(String, Tag)>) {
         if let Some(offers) = &self.offers {
             put(out, "Offers", offers.clone());
         }
-        if let Some(inventory) = &self.inventory {
-            put(out, "Inventory", inventory.clone());
-        }
+        put(out, "Inventory", self.inventory.to_nbt());
         put(out, "VillagerData", self.data_tag());
         put(
             out,
@@ -242,7 +584,7 @@ impl Villager {
     }
 
     /// `Villager.readAdditionalSaveData`：有 `VillagerData`（或已经标记 finalized）时
-    /// finalized 置真。`Offers` / `Inventory` 原样保留。
+    /// finalized 置真。`Offers` 原样保留，`Inventory` 解入 8 格物品栏。
     pub fn read_nbt(&mut self, tag: &Tag) {
         let data = tag::field(tag, "VillagerData");
         let finalized = tag::bool_or(tag, "VillagerDataFinalized", false);
@@ -259,8 +601,576 @@ impl Villager {
         self.last_gossip_decay = tag::long_or(tag, "LastGossipDecay", 0);
         self.restocks_today = tag::int_or(tag, "RestocksToday", 0);
         self.offers = tag::field(tag, "Offers").cloned();
-        self.inventory = tag::field(tag, "Inventory").cloned();
+        self.inventory.read_nbt(tag::field(tag, "Inventory"));
     }
+}
+
+/// `VillagerProfession.requestedItems().contains(item)`。
+pub fn profession_requests_item(profession: i32, item: i32) -> bool {
+    let Some(entry) = facts::profession(profession) else {
+        return false;
+    };
+    let Some(item_info) = item_of(item) else {
+        return false;
+    };
+    entry.requested_items.contains(&item_info.name)
+}
+
+/// `VillagerProfession.workSound()`：13 个有工作站的职业对应的工作音效名。
+///
+/// `VillagerProfession.workSound()`: work sound id for each of the 13 working professions.
+pub fn work_sound(profession: i32) -> Option<&'static str> {
+    let entry = facts::profession(profession)?;
+    match entry.name {
+        "minecraft:armorer" => Some("minecraft:entity.villager.work_armorer"),
+        "minecraft:butcher" => Some("minecraft:entity.villager.work_butcher"),
+        "minecraft:cartographer" => Some("minecraft:entity.villager.work_cartographer"),
+        "minecraft:cleric" => Some("minecraft:entity.villager.work_cleric"),
+        "minecraft:farmer" => Some("minecraft:entity.villager.work_farmer"),
+        "minecraft:fisherman" => Some("minecraft:entity.villager.work_fisherman"),
+        "minecraft:fletcher" => Some("minecraft:entity.villager.work_fletcher"),
+        "minecraft:leatherworker" => Some("minecraft:entity.villager.work_leatherworker"),
+        "minecraft:librarian" => Some("minecraft:entity.villager.work_librarian"),
+        "minecraft:mason" => Some("minecraft:entity.villager.work_mason"),
+        "minecraft:shepherd" => Some("minecraft:entity.villager.work_shepherd"),
+        "minecraft:toolsmith" => Some("minecraft:entity.villager.work_toolsmith"),
+        "minecraft:weaponsmith" => Some("minecraft:entity.villager.work_weaponsmith"),
+        _ => None,
+    }
+}
+
+/// 落地 [`crate::entity::ctx::Command::VillagerPickUpItem`]（`InventoryCarrier.pickUpItem`）。
+///
+/// Applies [`crate::entity::ctx::Command::VillagerPickUpItem`] (`InventoryCarrier.pickUpItem`).
+pub(crate) fn apply_pick_up(world: &mut World, item: EntityUid, remaining_count: i32) {
+    world.with_entity_mut(item, &mut |entity| {
+        if entity.removed {
+            return;
+        }
+        if remaining_count <= 0 {
+            entity.discard();
+        } else if let EntityKind::Item(ground) = &mut entity.kind {
+            ground.stack.count = remaining_count;
+        }
+    });
+}
+
+/// 落地 [`crate::entity::ctx::Command::VillagerCompostExtract`]（满桶产出骨粉并清空）。
+///
+/// Applies [`crate::entity::ctx::Command::VillagerCompostExtract`] (empties a ready composter).
+pub(crate) fn apply_compost_extract(world: &mut World, pos: BlockPos) {
+    let state = world.block_state(pos);
+    if state.is_a(mc_bamboo_data::BlockAncestor::ComposterBlock)
+        && state.get(LEVEL_COMPOSTER) == COMPOST_READY
+    {
+        let _ = extract_produce(state, world, pos);
+    }
+}
+
+/// 落地 [`crate::entity::ctx::Command::VillagerCompostFinish`]（写入新层数并发 `levelEvent(1500)`）。
+///
+/// Applies [`crate::entity::ctx::Command::VillagerCompostFinish`] (commits composter level and emits `levelEvent(1500)`).
+pub(crate) fn apply_compost_finish(world: &mut World, pos: BlockPos, level: i32, success: bool) {
+    let state = world.block_state(pos);
+    if !state.is_a(mc_bamboo_data::BlockAncestor::ComposterBlock) {
+        return;
+    }
+    if success {
+        let clamped = level.clamp(0, COMPOST_MAX_LEVEL);
+        let next = state.with(LEVEL_COMPOSTER, clamped);
+        world.set_block_and_update(pos, next);
+        if clamped == COMPOST_MAX_LEVEL {
+            world.schedule_tick(pos, state.block(), 20);
+        }
+    }
+    world.push_effect(Effect::ComposterFill { pos, success });
+}
+
+/// 把职业的 `held_job_site` 列表转成 POI 类型位掩码（`1 << kind`）。
+///
+/// Converts a profession's `held_job_site` names into a POI type bitmask (`1 << kind`).
+pub fn held_job_site_mask(profession: i32) -> u32 {
+    let Some(entry) = facts::profession(profession) else {
+        return 0;
+    };
+    poi_names_to_mask(entry.held_job_site)
+}
+
+/// 把职业的 `acquirable_job_site` 列表转成 POI 类型位掩码（`1 << kind`）。
+///
+/// Converts a profession's `acquirable_job_site` names into a POI type bitmask (`1 << kind`).
+pub fn acquirable_job_site_mask(profession: i32) -> u32 {
+    let Some(entry) = facts::profession(profession) else {
+        return 0;
+    };
+    poi_names_to_mask(entry.acquirable_job_site)
+}
+
+/// 遍历 `VILLAGER_PROFESSION` 注册表找第一个 `held_job_site` 包含 `poi_kind` 的职业 ID，
+/// 对应 `AssignProfessionFromJobSite`。
+///
+/// Finds the first profession in registry order whose `held_job_site` matches `poi_kind`,
+/// matching `AssignProfessionFromJobSite`.
+pub fn profession_for_poi(poi_kind: u8) -> Option<i32> {
+    let poi_name = poi_data::POI_TYPES.get(usize::from(poi_kind))?.name;
+    facts::PROFESSIONS
+        .iter()
+        .position(|entry| {
+            entry
+                .held_job_site
+                .iter()
+                .any(|name| name.strip_prefix("minecraft:").unwrap_or(name) == poi_name)
+        })
+        .map(|idx| idx as i32)
+}
+
+/// `PoiType.validRange()`，未知类型回退 1。
+///
+/// `PoiType.validRange()`, falling back to 1 for unknown ids.
+pub fn poi_valid_range(poi_kind: u8) -> i32 {
+    poi_data::POI_TYPES
+        .get(usize::from(poi_kind))
+        .map_or(1, |entry| entry.valid_range)
+}
+
+/// 单个 POI 名字转位掩码。
+///
+/// Single POI name to bitmask.
+pub fn poi_name_mask(name: &str) -> u32 {
+    poi_data::poi_type_id(name).map_or(0, |id| 1_u32 << id)
+}
+
+fn poi_names_to_mask(names: &[&str]) -> u32 {
+    let mut mask = 0_u32;
+    for name in names {
+        if let Some(id) = poi_data::poi_type_id(name) {
+            mask |= 1_u32 << id;
+        }
+    }
+    mask
+}
+
+/// `Villager.POI_MEMORIES` 对应的 POI 类型掩码。
+///
+/// POI type bitmask for each entry of `Villager.POI_MEMORIES`.
+pub fn poi_memory_mask(profession: i32, memory: MemoryType) -> u32 {
+    match memory {
+        MemoryType::Home => poi_name_mask("home"),
+        MemoryType::JobSite => held_job_site_mask(profession),
+        MemoryType::PotentialJobSite => {
+            // `PoiType.ALL_ACQUIRABLE_JOBS`：与 `none` 职业的可获取工作站掩码一致。
+            let none = facts::profession_id(facts::NONE_PROFESSION).unwrap_or(0);
+            acquirable_job_site_mask(none)
+        }
+        MemoryType::MeetingPoint => poi_name_mask("meeting"),
+        _ => 0,
+    }
+}
+
+/// `Villager.releasePoi(MemoryModuleType)`：从指定记忆表查 `GlobalPos`，若该处仍是对应
+/// POI 类型则归还一张票。
+///
+/// `Villager.releasePoi(MemoryModuleType)`: releases one ticket at the remembered
+/// `GlobalPos` when the POI at that position still matches `POI_MEMORIES`.
+pub fn release_poi_from_memories(
+    me: &mut Entity,
+    profession: i32,
+    memories: &super::brain::memory::Memories,
+    ctx: &mut dyn crate::entity::ctx::EntityCtx,
+    memory: MemoryType,
+) {
+    let mask = poi_memory_mask(profession, memory);
+    if mask == 0 {
+        return;
+    }
+    let Some(gp) = memories.global_pos(memory) else {
+        return;
+    };
+    if gp.dimension != "minecraft:overworld" {
+        return;
+    }
+    if ctx
+        .blocks()
+        .poi_type_at(gp.pos)
+        .is_some_and(|kind| (mask & (1_u32 << kind)) != 0)
+    {
+        ctx.emit(crate::entity::ctx::Command::PoiRelease { pos: gp.pos }, me);
+    }
+}
+
+/// `Villager.releasePoi`：当 `mob.brain` 仍在 `mob` 上时使用。
+///
+/// `Villager.releasePoi` when `mob.brain` is attached to `mob`.
+pub fn release_poi(
+    me: &mut Entity,
+    mob: &super::Mob,
+    ctx: &mut dyn crate::entity::ctx::EntityCtx,
+    memory: MemoryType,
+) {
+    let Some(brain) = mob.brain.as_deref() else {
+        return;
+    };
+    release_poi_from_memories(me, mob.villager.profession, &brain.memories, ctx, memory);
+}
+
+/// `Villager.releaseAllPois()`：依次归还 `HOME`、`JOB_SITE`、`POTENTIAL_JOB_SITE`、
+/// `MEETING_POINT` 四个槽位的 POI 票。
+///
+/// `Villager.releaseAllPois()`: releases tickets for `HOME`, `JOB_SITE`,
+/// `POTENTIAL_JOB_SITE`, and `MEETING_POINT`.
+pub fn release_all_pois(
+    me: &mut Entity,
+    mob: &super::Mob,
+    ctx: &mut dyn crate::entity::ctx::EntityCtx,
+) {
+    for memory in [
+        MemoryType::Home,
+        MemoryType::JobSite,
+        MemoryType::PotentialJobSite,
+        MemoryType::MeetingPoint,
+    ] {
+        release_poi(me, mob, ctx, memory);
+    }
+}
+
+/// `AbstractBedBlock.getSleepHeight`：床的轮廓最高 Y（普通床为 `9/16 = 0.5625`）。
+///
+/// `AbstractBedBlock.getSleepHeight`: maximum Y of the bed outline (`0.5625` for beds).
+fn bed_sleep_height(blocks: &dyn crate::entity::ctx::BlockView, pos: BlockPos) -> Option<f64> {
+    let state = blocks.block_state(pos);
+    if !state.is_tagged(mc_bamboo_data::tags::block_tags::BEDS) {
+        return None;
+    }
+    let boxes = crate::shape::outline_boxes(state, pos);
+    boxes
+        .iter()
+        .map(|b| b.max_y)
+        .fold(None, |acc: Option<f64>, y| {
+            Some(acc.map_or(y, |m| m.max(y)))
+        })
+}
+
+/// `LivingEntity.checkBedExists()`。
+///
+/// `LivingEntity.checkBedExists()`.
+pub fn check_bed_exists(mob: &super::Mob, blocks: &dyn crate::entity::ctx::BlockView) -> bool {
+    mob.villager
+        .sleeping_pos
+        .is_some_and(|pos| bed_sleep_height(blocks, pos).is_some())
+}
+
+/// `LivingEntity.startSleeping(BlockPos)`：贴床定位、置 `OCCUPIED=true`、切 `SLEEPING` 姿势
+/// 与 `0.2 x 0.2` 碰撞箱、清零速度并标同步。
+///
+/// `LivingEntity.startSleeping(BlockPos)`: snaps to the bed, sets `OCCUPIED=true`, switches
+/// to sleeping pose and `0.2 x 0.2` dimensions, zeroes velocity, and marks sync.
+pub fn start_sleeping(
+    me: &mut Entity,
+    mob: &mut super::Mob,
+    ctx: &mut dyn crate::entity::ctx::EntityCtx,
+    pos: BlockPos,
+) -> bool {
+    let Some(sleep_height) = bed_sleep_height(ctx.blocks(), pos) else {
+        return false;
+    };
+    me.position = mc_bamboo_core::Vec3::new(
+        pos.x as f64 + 0.5,
+        pos.y as f64 + sleep_height + 0.125,
+        pos.z as f64 + 0.5,
+    );
+    ctx.emit(
+        crate::entity::ctx::Command::SetBedOccupied {
+            pos,
+            occupied: true,
+        },
+        me,
+    );
+    mob.villager.sleeping_pos = Some(pos);
+    mob.villager.sleeping = true;
+    me.dimensions = (0.2, 0.2);
+    mob.eye_height = 0.2;
+    me.delta = mc_bamboo_core::Vec3::default();
+    mob.needs_sync = true;
+    true
+}
+
+/// `Villager.stopSleeping()` / `LivingEntity.stopSleeping()`：清床 `OCCUPIED`、按
+/// `AbstractBedBlock.findStandUpPosition` 找站起位置并面向床、恢复碰撞箱并写 `LAST_WOKEN`。
+///
+/// `Villager.stopSleeping()` / `LivingEntity.stopSleeping()`: clears bed `OCCUPIED`,
+/// moves to `AbstractBedBlock.findStandUpPosition` facing the bed, restores dimensions,
+/// and records `LAST_WOKEN`.
+pub fn stop_sleeping(
+    me: &mut Entity,
+    mob: &mut super::Mob,
+    memories: Option<&mut super::brain::memory::Memories>,
+    ctx: &mut dyn crate::entity::ctx::EntityCtx,
+) {
+    let Some(pos) = mob.villager.sleeping_pos.take() else {
+        mob.villager.sleeping = false;
+        return;
+    };
+    mob.villager.sleeping = false;
+    let (width, height, eye) = mob.mob_type.dimensions(mob.is_baby());
+    me.dimensions = (width, height);
+    mob.eye_height = eye;
+
+    let state = ctx.blocks().block_state(pos);
+    if state.is_tagged(mc_bamboo_data::tags::block_tags::BEDS) {
+        let facing = state.get(crate::state::HORIZONTAL_FACING);
+        ctx.emit(
+            crate::entity::ctx::Command::SetBedOccupied {
+                pos,
+                occupied: false,
+            },
+            me,
+        );
+        let stand =
+            find_stand_up_position(ctx.blocks(), pos, facing, me.y_rot).unwrap_or_else(|| {
+                mc_bamboo_core::Vec3::new(
+                    pos.x as f64 + 0.5,
+                    (pos.y + 1) as f64 + 0.1,
+                    pos.z as f64 + 0.5,
+                )
+            });
+        let bed_bottom =
+            mc_bamboo_core::Vec3::new(pos.x as f64 + 0.5, pos.y as f64, pos.z as f64 + 0.5);
+        let dir = bed_bottom.subtract(stand).normalize();
+        // `57.2957763671875` 是字节码常量 `(double)(180.0F / (float)Math.PI)`。
+        let mut yaw = mc_bamboo_core::mth::atan2(dir.z, dir.x) * 57.295_776_367_187_5 - 90.0;
+        yaw %= 360.0;
+        if yaw >= 180.0 {
+            yaw -= 360.0;
+        }
+        if yaw < -180.0 {
+            yaw += 360.0;
+        }
+        me.position = stand;
+        me.y_rot = yaw as f32;
+        mob.x_rot = 0.0;
+    }
+
+    let now = ctx.blocks().game_time();
+    if let Some(mem) = memories {
+        mem.set(
+            MemoryType::LastWoken,
+            super::brain::memory::MemoryValue::Long(now),
+        );
+    } else if let Some(brain) = mob.brain.as_mut() {
+        brain.memories.set(
+            MemoryType::LastWoken,
+            super::brain::memory::MemoryValue::Long(now),
+        );
+    }
+}
+
+/// `AbstractBedBlock.findStandUpPosition`（村民默认尺寸 `0.6 x 1.95`）。
+fn find_stand_up_position(
+    blocks: &dyn crate::entity::ctx::BlockView,
+    pos: BlockPos,
+    bed_facing: mc_bamboo_core::Direction,
+    y_rot: f32,
+) -> Option<mc_bamboo_core::Vec3> {
+    let cw = bed_facing.clockwise();
+    let preferred = if direction_is_facing_angle(cw, y_rot) {
+        cw.opposite()
+    } else {
+        cw
+    };
+    let is_bunk = blocks
+        .block_state(pos.below())
+        .is_tagged(mc_bamboo_data::tags::block_tags::BEDS);
+    if is_bunk {
+        let surround = bed_surround_offsets(bed_facing, preferred);
+        let above = bed_above_offsets(bed_facing);
+        for check_dangerous in [true, false] {
+            if let Some(v) = find_stand_up_at_offsets(blocks, pos, &surround, check_dangerous) {
+                return Some(v);
+            }
+            if let Some(v) =
+                find_stand_up_at_offsets(blocks, pos.below(), &surround, check_dangerous)
+            {
+                return Some(v);
+            }
+            if let Some(v) = find_stand_up_at_offsets(blocks, pos, &above, check_dangerous) {
+                return Some(v);
+            }
+        }
+        return None;
+    }
+    let surround = bed_surround_offsets(bed_facing, preferred);
+    let above = bed_above_offsets(bed_facing);
+    for check_dangerous in [true, false] {
+        if let Some(v) = find_stand_up_at_offsets(blocks, pos, &surround, check_dangerous) {
+            return Some(v);
+        }
+        if let Some(v) = find_stand_up_at_offsets(blocks, pos, &above, check_dangerous) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn dir_step_xz(dir: mc_bamboo_core::Direction) -> (i32, i32) {
+    match dir {
+        mc_bamboo_core::Direction::North => (0, -1),
+        mc_bamboo_core::Direction::South => (0, 1),
+        mc_bamboo_core::Direction::West => (-1, 0),
+        mc_bamboo_core::Direction::East => (1, 0),
+        _ => (0, 0),
+    }
+}
+
+fn direction_is_facing_angle(dir: mc_bamboo_core::Direction, degrees: f32) -> bool {
+    let radians = f64::from(degrees * (std::f32::consts::PI / 180.0));
+    let sin = -mc_bamboo_core::mth::sin(radians);
+    let cos = mc_bamboo_core::mth::cos(radians);
+    let (sx, sz) = dir_step_xz(dir);
+    (sx as f32) * sin + (sz as f32) * cos > 0.0
+}
+
+fn bed_surround_offsets(
+    facing: mc_bamboo_core::Direction,
+    side: mc_bamboo_core::Direction,
+) -> [(i32, i32); 10] {
+    let (fx, fz) = dir_step_xz(facing);
+    let (sx, sz) = dir_step_xz(side);
+    [
+        (sx, sz),
+        (sx - fx, sz - fz),
+        (sx - 2 * fx, sz - 2 * fz),
+        (-2 * fx, -2 * fz),
+        (-sx - 2 * fx, -sz - 2 * fz),
+        (-sx - fx, -sz - fz),
+        (-sx, -sz),
+        (-sx + fx, -sz + fz),
+        (fx, fz),
+        (sx + fx, sz + fz),
+    ]
+}
+
+fn bed_above_offsets(facing: mc_bamboo_core::Direction) -> [(i32, i32); 2] {
+    let (fx, fz) = dir_step_xz(facing);
+    [(0, 0), (-fx, -fz)]
+}
+
+fn find_stand_up_at_offsets(
+    blocks: &dyn crate::entity::ctx::BlockView,
+    origin: BlockPos,
+    offsets: &[(i32, i32)],
+    check_dangerous: bool,
+) -> Option<mc_bamboo_core::Vec3> {
+    for &(dx, dz) in offsets {
+        let pos = BlockPos::new(origin.x + dx, origin.y, origin.z + dz);
+        if let Some(v) = find_safe_dismount_location(blocks, pos, check_dangerous) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// `DismountHelper.findSafeDismountLocation`（对应村民成人默认碰撞箱 `0.6 x 1.95`）。
+fn find_safe_dismount_location(
+    blocks: &dyn crate::entity::ctx::BlockView,
+    pos: BlockPos,
+    check_dangerous: bool,
+) -> Option<mc_bamboo_core::Vec3> {
+    if check_dangerous && is_block_dangerous(blocks.block_state(pos)) {
+        return None;
+    }
+    let floor = block_floor_height(blocks, pos);
+    if floor.is_infinite() || floor >= 1.0 {
+        return None;
+    }
+    if check_dangerous && floor <= 0.0 && is_block_dangerous(blocks.block_state(pos.below())) {
+        return None;
+    }
+    let candidate =
+        mc_bamboo_core::Vec3::new(pos.x as f64 + 0.5, pos.y as f64 + floor, pos.z as f64 + 0.5);
+    let aabb = mc_bamboo_core::Aabb::new(
+        candidate.x - 0.3,
+        candidate.y,
+        candidate.z - 0.3,
+        candidate.x + 0.3,
+        candidate.y + 1.95,
+        candidate.z + 0.3,
+    );
+    if has_block_collision(blocks, aabb) {
+        return None;
+    }
+    Some(candidate)
+}
+
+fn is_block_dangerous(state: crate::state::BlockState) -> bool {
+    use mc_bamboo_data::{blocks, tags::block_tags};
+    state.is_tagged(block_tags::FIRE)
+        || state.is(blocks::MAGMA_BLOCK)
+        || state.is(blocks::CAMPFIRE)
+        || state.is(blocks::SOUL_CAMPFIRE)
+        || state.is(blocks::LAVA)
+        || state.is(blocks::SWEET_BERRY_BUSH)
+        || state.is(blocks::CACTUS)
+        || state.is(blocks::WITHER_ROSE)
+        || state.is(blocks::POWDER_SNOW)
+}
+
+fn non_climbable_max_y(blocks: &dyn crate::entity::ctx::BlockView, pos: BlockPos) -> Option<f64> {
+    let state = blocks.block_state(pos);
+    if state.is_tagged(mc_bamboo_data::tags::block_tags::CLIMBABLE) {
+        return None;
+    }
+    if state.is_tagged(mc_bamboo_data::tags::block_tags::TRAPDOORS) && state.get(crate::state::OPEN)
+    {
+        return None;
+    }
+    let boxes = crate::shape::collision_boxes(state, pos, crate::shape::CollisionContext::Empty);
+    boxes
+        .iter()
+        .map(|b| b.max_y)
+        .fold(None, |acc: Option<f64>, y| {
+            Some(acc.map_or(y, |m| m.max(y)))
+        })
+}
+
+fn block_floor_height(blocks: &dyn crate::entity::ctx::BlockView, pos: BlockPos) -> f64 {
+    if let Some(y) = non_climbable_max_y(blocks, pos) {
+        return y;
+    }
+    if let Some(y) = non_climbable_max_y(blocks, pos.below()) {
+        return y - 1.0;
+    }
+    f64::NEG_INFINITY
+}
+
+fn has_block_collision(
+    blocks: &dyn crate::entity::ctx::BlockView,
+    aabb: mc_bamboo_core::Aabb,
+) -> bool {
+    let min_x = mc_bamboo_core::mth::floor(aabb.min_x - 1.0e-7) - 1;
+    let max_x = mc_bamboo_core::mth::floor(aabb.max_x + 1.0e-7) + 1;
+    let min_y = mc_bamboo_core::mth::floor(aabb.min_y - 1.0e-7) - 1;
+    let max_y = mc_bamboo_core::mth::floor(aabb.max_y + 1.0e-7) + 1;
+    let min_z = mc_bamboo_core::mth::floor(aabb.min_z - 1.0e-7) - 1;
+    let max_z = mc_bamboo_core::mth::floor(aabb.max_z + 1.0e-7) + 1;
+    let ctx = crate::shape::CollisionContext::Empty;
+    for x in min_x..=max_x {
+        for y in min_y..=max_y {
+            for z in min_z..=max_z {
+                let pos = BlockPos::new(x, y, z);
+                let state = blocks.block_state(pos);
+                if state.is_air() {
+                    continue;
+                }
+                for b in crate::shape::collision_boxes(state, pos, ctx).iter() {
+                    let world_box = b.moved(x as f64, y as f64, z as f64);
+                    if world_box.intersects(aabb) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// `Villager.finalizeSpawn`：繁殖时职业清空，未 finalized 时按群系选品种，然后走
@@ -394,7 +1304,7 @@ mod tests {
                 "Recipes".to_owned(),
                 Tag::List(Vec::new()),
             )]));
-            villager.inventory = Some(Tag::List(Vec::new()));
+            villager.inventory.add_item(ItemStack::new(items::WHEAT, 3));
         });
         let tag = nbt::write_mob(&entity.split()).expect("写村民");
         let mc_bamboo_nbt::Tag::Compound(entries) = &tag else {
@@ -435,7 +1345,7 @@ mod tests {
             assert_eq!(mob.villager.last_gossip_decay, 5678);
             assert_eq!(mob.villager.restocks_today, 2);
             assert!(mob.villager.offers.is_some());
-            assert!(mob.villager.inventory.is_some());
+            assert_eq!(mob.villager.inventory.count_item(items::WHEAT), 3);
         });
     }
 
@@ -463,6 +1373,195 @@ mod tests {
         let villager = super::super::Mob::new(MobType::Villager);
         assert!(villager.brain.is_some());
         assert_eq!(villager.dimensions(), (0.6, 1.95));
+    }
+
+    /// 村民入睡置床 `OCCUPIED`、缩碰撞箱与 `sleeping_pos` 存档往返，醒来清占用并写 `LAST_WOKEN`。
+    #[test]
+    fn villager_sleep_and_wake_updates_bed_dimensions_and_nbt() {
+        use crate::level::LevelEntities;
+        use crate::state::{BED_PART, BedPart, BlockState, HORIZONTAL_FACING, OCCUPIED};
+        use mc_bamboo_core::Direction;
+        use mc_bamboo_data::blocks;
+
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(200);
+        let mut world = World::new(&mut level, &mut ticks);
+        for x in -4..=4 {
+            for z in -4..=4 {
+                world.set_block(BlockPos::new(x, 63, z), BlockState(blocks::STONE), 2);
+            }
+        }
+        let head = BlockPos::new(1, 64, 0);
+        let foot = BlockPos::new(1, 64, 1);
+        world.set_block(
+            head,
+            BlockState(blocks::RED_BED)
+                .with(HORIZONTAL_FACING, Direction::North)
+                .with(BED_PART, BedPart::Head)
+                .with(OCCUPIED, false),
+            2,
+        );
+        world.set_block(
+            foot,
+            BlockState(blocks::RED_BED)
+                .with(HORIZONTAL_FACING, Direction::North)
+                .with(BED_PART, BedPart::Foot)
+                .with(OCCUPIED, false),
+            2,
+        );
+        let uid = spawn::summon_mob(
+            &mut world,
+            MobType::Villager,
+            Vec3::new(0.5, 64.0, 0.5),
+            None,
+        )
+        .unwrap();
+
+        drop(world);
+        let mut me = level.take_entity(uid).unwrap();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut ctx = crate::entity::ctx::PreciseCtx::new(&mut world, uid);
+        let slept = me
+            .with_mob(|me, mob| start_sleeping(me, mob, &mut ctx, head))
+            .unwrap();
+        assert!(slept);
+        assert_eq!(me.dimensions, (0.2, 0.2));
+        assert!((me.position.y - 64.6875).abs() < 1.0e-6);
+        let mob = me.kind.mob().unwrap();
+        assert!(mob.villager.sleeping);
+        assert_eq!(mob.villager.sleeping_pos, Some(head));
+        assert!(world.block_state(head).get(OCCUPIED));
+
+        // 存档往返保留 `sleeping_pos` 与睡眠尺寸。
+        let saved = nbt::write_mob(&me.clone().split()).unwrap();
+        let reloaded = nbt::read_mob(&saved, "minecraft:villager", 7)
+            .unwrap()
+            .unwrap();
+        let reloaded_mob = match &reloaded.state.kind {
+            crate::entity::KindState::Mob(m) => m,
+            _ => panic!("expected mob"),
+        };
+        assert!(reloaded_mob.villager.sleeping);
+        assert_eq!(reloaded_mob.villager.sleeping_pos, Some(head));
+        assert_eq!(reloaded_mob.dimensions(), (0.2, 0.2));
+
+        // 起床恢复尺寸、清床占用并记录 `LAST_WOKEN`。
+        let mut ctx = crate::entity::ctx::PreciseCtx::new(&mut world, uid);
+        me.with_mob(|me, mob| stop_sleeping(me, mob, None, &mut ctx));
+        assert_eq!(me.dimensions, (0.6, 1.95));
+        let mob = me.kind.mob().unwrap();
+        assert!(!mob.villager.sleeping);
+        assert_eq!(mob.villager.sleeping_pos, None);
+        assert_eq!(
+            mob.brain
+                .as_deref()
+                .and_then(|b| b.memories.long(MemoryType::LastWoken)),
+            Some(200)
+        );
+        assert!(!world.block_state(head).get(OCCUPIED));
+    }
+
+    /// 敲钟通知 32 格内活着的村民写 `HEARD_BELL_TIME`，32 格外不通知。
+    #[test]
+    fn bell_ring_notifies_villagers_within_32_blocks() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(555);
+        let mut world = World::new(&mut level, &mut ticks);
+        let near = spawn::summon_mob(
+            &mut world,
+            MobType::Villager,
+            Vec3::new(10.5, 64.0, 0.5),
+            None,
+        )
+        .unwrap();
+        let far = spawn::summon_mob(
+            &mut world,
+            MobType::Villager,
+            Vec3::new(40.5, 64.0, 0.5),
+            None,
+        )
+        .unwrap();
+        crate::behaviour::attached::bell::ring(&mut world, BlockPos::new(0, 64, 0));
+        let near_heard = world.entity(near).and_then(|e| {
+            e.kind
+                .mob()
+                .and_then(|m| m.brain.as_deref())
+                .and_then(|b| b.memories.long(MemoryType::HeardBellTime))
+        });
+        let far_heard = world.entity(far).and_then(|e| {
+            e.kind
+                .mob()
+                .and_then(|m| m.brain.as_deref())
+                .and_then(|b| b.memories.long(MemoryType::HeardBellTime))
+        });
+        assert_eq!(near_heard, Some(555));
+        assert_eq!(far_heard, None);
+    }
+
+    /// 村民死亡和僵尸转化都会归还持有的 POI 票数。
+    #[test]
+    fn villager_death_and_conversion_release_all_poi_tickets() {
+        use crate::entity::mob::{DamageKind, DamageSource, brain::memory::MemoryValue, living};
+        use crate::level::LevelEntities;
+        use crate::state::BlockState;
+        use mc_bamboo_data::blocks;
+        use mc_bamboo_protocol::components::value::GlobalPos;
+
+        for convert in [false, true] {
+            let mut level = TestLevel::new();
+            let composter = BlockPos::new(3, 64, 0);
+            let farmer_poi = mc_bamboo_data::poi::poi_type_id("farmer").unwrap();
+
+            let mut ticks = BlockTicks::default();
+            let mut world = World::new(&mut level, &mut ticks);
+            world.set_block(composter, BlockState(blocks::COMPOSTER), 2);
+            assert!(world.poi_take(composter, 1_u32 << farmer_poi));
+            let uid = spawn::summon_mob(
+                &mut world,
+                MobType::Villager,
+                Vec3::new(0.5, 64.0, 0.5),
+                None,
+            )
+            .unwrap();
+            let farmer_prof = facts::profession_id("minecraft:farmer").unwrap();
+            world.with_entity_mut(uid, &mut |entity| {
+                entity.with_mob(|_, mob| {
+                    mob.villager.set_profession(farmer_prof);
+                    if let Some(brain) = mob.brain.as_mut() {
+                        brain.memories.set(
+                            MemoryType::JobSite,
+                            MemoryValue::GlobalPos(GlobalPos {
+                                dimension: "minecraft:overworld".to_owned(),
+                                pos: composter,
+                            }),
+                        );
+                    }
+                });
+            });
+
+            let source = if convert {
+                DamageSource::environment(DamageKind::MobAttack)
+                    .with_zombie_attacker()
+                    .with_villager_conversion_roll(false)
+            } else {
+                DamageSource::environment(DamageKind::GenericKill)
+            };
+            drop(world);
+            let mut me = level.take_entity(uid).unwrap();
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = crate::entity::ctx::PreciseCtx::new(&mut world, uid);
+            me.with_mob(|me, mob| {
+                living::hurt_server(me, mob, &mut ctx, source, 100.0);
+            });
+            drop(world);
+            assert_eq!(
+                level.poi.free_tickets(composter),
+                1,
+                "convert={convert} should release job site ticket"
+            );
+        }
     }
 
     /// `VillagerPublic` 挂在 `KindPublic::Mob` 下，只给村民装箱，非村民为 `None`，

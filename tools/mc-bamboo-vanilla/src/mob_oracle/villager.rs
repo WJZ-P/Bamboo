@@ -387,6 +387,7 @@ impl Report {
             facts: ZombieFacts {
                 clock: case.clock_start,
                 difficulty: 2,
+                can_see_sky: true,
                 ..ZombieFacts::default()
             },
             natural_spawn: None,
@@ -787,6 +788,7 @@ impl Report {
             facts: ZombieFacts {
                 clock: case.clock_start,
                 difficulty: 2,
+                can_see_sky: true,
                 ..ZombieFacts::default()
             },
             natural_spawn: None,
@@ -864,20 +866,31 @@ impl Report {
             ));
         }
 
-        // 只逐刻比较第 3 期已实现的部分（0..=phase3_until_tick，含首刻 `AcquirePoi` 的排期随机抽取、
-        // 大脑、运动、随机源与 POI 票数）；第 `first_claim_tick` 刻起官方 `AcquirePoi` 会真认领工作站
-        // 并置 `POTENTIAL_JOB_SITE`（连带触发 `GoToPotentialJobSite` 等期 4 行为），第 4 期接上真实
-        // 行为后去掉该上限即可全量比对全部 61 刻。
-        let compare_limit = case
-            .phase3_until_tick
-            .min(case.frames.len().saturating_sub(1));
-        for (tick, expected) in case.frames.iter().enumerate().take(compare_limit + 1) {
+        // 全量逐刻比较所有 61 刻（含 AcquirePoi 认领工作站、走向工作站与成为农民）。
+        let _ = case.phase3_until_tick;
+        let mut prev_prof = level
+            .entities
+            .get(villager_id)
+            .and_then(|e| e.kind.mob().map(|m| m.villager.profession))
+            .unwrap_or(0);
+        for (tick, expected) in case.frames.iter().enumerate() {
             if tick > 0 {
                 let tick_i64 = tick as i64;
                 ticks.set_time(1000 + tick_i64);
                 set_clock(&mut level, case.clock_start + tick_i64);
                 let mut world = World::new(&mut level, &mut ticks);
                 world.tick_entities();
+                world.with_entity_mut(villager_id, &mut |entity| {
+                    let seed = entity.random.state();
+                    entity.with_mob(|_, mob| {
+                        if mob.villager.profession != prev_prof {
+                            prev_prof = mob.villager.profession;
+                            if let Some(brain) = mob.brain.as_mut() {
+                                brain.seed_shuffles(seed);
+                            }
+                        }
+                    });
+                });
             }
             let Some(entity) = level.entities.get(villager_id) else {
                 self.mismatch(format!("{} tick {tick}: villager missing", case.name));
@@ -947,14 +960,479 @@ impl Report {
             }
         }
         println!(
-            "{}: {} ticks compared (phase 3 until tick {}, official AcquirePoi claimed at tick {}, {} total recorded)",
+            "{}: {} ticks compared (official AcquirePoi claimed at tick {})",
             case.name,
-            compare_limit + 1,
-            case.phase3_until_tick,
+            case.frames.len(),
             case.first_claim_tick,
-            case.frames.len()
         );
     }
+
+    /// 村民第 4 期真实 POI 全量对拍：多候选失败重试、抢工作站、拆站失业、夜间上床与天亮醒来、
+    /// 听钟声藏身、农民收割播种与捡种子，附带 5 处 `--break-self-test` 改坏确认。
+    pub(super) fn replay_villager_phase4(&mut self, case: &VillagerPhase4Case) {
+        use mc_bamboo_blocks::entity::mob::{
+            brain::memory::{MemoryType, MemoryValue},
+            villager_ai,
+        };
+        use mc_bamboo_blocks::state::{BED_PART, BedPart, HORIZONTAL_FACING, MOISTURE, OCCUPIED};
+        use mc_bamboo_core::Direction;
+        use mc_bamboo_data::{blocks, items, villager as villager_data};
+        use mc_bamboo_protocol::components::value::GlobalPos;
+        use mc_bamboo_protocol::item::ItemStack;
+
+        self.cases += 1;
+        let break_test = self.break_test.clone();
+        let name = case.name.as_str();
+        let mut blocks_map = std::collections::HashMap::new();
+        for x in -15..=15 {
+            for z in -15..=15 {
+                blocks_map.insert(BlockPos::new(x, 63, z), BlockState(blocks::STONE));
+            }
+        }
+        let mut watch_pois = Vec::new();
+        let mut watch_blocks = Vec::new();
+
+        match name {
+            "villager_p4_retry" => {
+                let blocked = BlockPos::new(3, 64, 0);
+                blocks_map.insert(blocked, BlockState(blocks::COMPOSTER));
+                for (wx, wy, wz) in [
+                    (2, 64, 0),
+                    (4, 64, 0),
+                    (3, 64, 1),
+                    (3, 64, -1),
+                    (2, 65, 0),
+                    (4, 65, 0),
+                    (3, 65, 1),
+                    (3, 65, -1),
+                    (3, 66, 0),
+                ] {
+                    blocks_map.insert(BlockPos::new(wx, wy, wz), BlockState(blocks::STONE));
+                }
+                watch_pois.push(blocked);
+                watch_pois.push(BlockPos::new(5, 64, 0));
+            }
+            "villager_p4_compete" => {
+                let ws = BlockPos::new(4, 64, 0);
+                blocks_map.insert(ws, BlockState(blocks::COMPOSTER));
+                watch_pois.push(ws);
+            }
+            "villager_p4_unemploy" => {
+                let ws = BlockPos::new(3, 64, 0);
+                blocks_map.insert(ws, BlockState(blocks::COMPOSTER));
+                watch_pois.push(ws);
+                watch_blocks.push(ws);
+            }
+            "villager_p4_sleep_wake" => {
+                let bed = BlockPos::new(3, 64, 0);
+                let foot = BlockPos::new(3, 64, 1);
+                let occupied = break_test.as_deref() == Some("villager_p4_no_sleep");
+                blocks_map.insert(
+                    bed,
+                    BlockState(blocks::RED_BED)
+                        .with(HORIZONTAL_FACING, Direction::North)
+                        .with(BED_PART, BedPart::Head)
+                        .with(OCCUPIED, occupied),
+                );
+                blocks_map.insert(
+                    foot,
+                    BlockState(blocks::RED_BED)
+                        .with(HORIZONTAL_FACING, Direction::North)
+                        .with(BED_PART, BedPart::Foot)
+                        .with(OCCUPIED, occupied),
+                );
+                watch_pois.push(bed);
+                watch_blocks.push(bed);
+            }
+            "villager_p4_bell" => {
+                let bed = BlockPos::new(-4, 64, 0);
+                let foot = BlockPos::new(-4, 64, 1);
+                let bell = BlockPos::new(6, 64, 0);
+                blocks_map.insert(
+                    bed,
+                    BlockState(blocks::RED_BED)
+                        .with(HORIZONTAL_FACING, Direction::North)
+                        .with(BED_PART, BedPart::Head),
+                );
+                blocks_map.insert(
+                    foot,
+                    BlockState(blocks::RED_BED)
+                        .with(HORIZONTAL_FACING, Direction::North)
+                        .with(BED_PART, BedPart::Foot),
+                );
+                blocks_map.insert(bell, BlockState(blocks::BELL));
+                watch_pois.push(bed);
+                watch_pois.push(bell);
+            }
+            "villager_p4_farmer" => {
+                let ws = BlockPos::new(0, 64, 4);
+                blocks_map.insert(ws, BlockState(blocks::COMPOSTER));
+                let wet_farm = BlockState(blocks::FARMLAND).with(MOISTURE, 7);
+                blocks_map.insert(BlockPos::new(2, 63, 0), wet_farm);
+                blocks_map.insert(BlockPos::new(3, 63, 0), wet_farm);
+                let ripe_wheat = BlockState(blocks::WHEAT).with(mc_bamboo_blocks::state::AGE_7, 7);
+                blocks_map.insert(BlockPos::new(2, 64, 0), ripe_wheat);
+                watch_pois.push(ws);
+                watch_blocks.push(BlockPos::new(2, 64, 0));
+                watch_blocks.push(BlockPos::new(3, 64, 0));
+            }
+            _ => {}
+        }
+
+        let mut rules = mc_bamboo_blocks::BlockGameRules::vanilla();
+        if name == "villager_p4_farmer" && break_test.as_deref() == Some("villager_p4_no_harvest") {
+            rules.mob_griefing = false;
+        }
+        let mut level = MobLevel {
+            blocks: blocks_map,
+            random: LevelRandom::new(1),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: Vec::new(),
+            biome: None,
+            rules,
+            facts: ZombieFacts {
+                clock: case.clock_start,
+                difficulty: 2,
+                can_see_sky: true,
+                ..ZombieFacts::default()
+            },
+            natural_spawn: None,
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            poi: mc_bamboo_world::poi::PoiStore::new(),
+            entities: Entities::with_next_id(case.first_id),
+            players: Vec::new(),
+            game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
+            wrong_was_hurt: false,
+        };
+        if !(name == "villager_p4_retry" && break_test.as_deref() == Some("villager_p4_no_take")) {
+            level.register_poi_from_blocks();
+        }
+
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(1000);
+        let set_clock = |level: &mut MobLevel, clock: i64| {
+            level.facts.clock = clock;
+            level.facts.villager_activity = Some(mc_bamboo_blocks::sky::villager_activity(clock));
+            level.facts.baby_villager_activity =
+                Some(mc_bamboo_blocks::sky::baby_villager_activity(clock));
+        };
+        set_clock(&mut level, case.clock_start);
+
+        let mut villager_ids = Vec::new();
+        let spawn_villager =
+            |level: &mut MobLevel, ticks: &mut BlockTicks, pos: Vec3, seed: i64, idx: u8| {
+                let mut entity = Entity::by_mob_type(MobType::Villager, pos);
+                let mut world = World::new(level, ticks);
+                entity.with_mob(|_, mob| {
+                    villager_ai::register_brain_goals(mob, &world, 1000);
+                });
+                let id = world.spawn_entity(entity);
+                world.with_entity_mut(id, &mut |entity| {
+                    entity.y_rot = 0.0;
+                    entity.old_position = pos;
+                    entity.random = JavaRandom::new(seed);
+                    entity.with_mob(|me, mob| {
+                        mob.uuid = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 + idx];
+                        mob.x_rot = 0.0;
+                        mob.y_rot_o = 0.0;
+                        mob.x_rot_o = 0.0;
+                        mob.y_head_rot = 0.0;
+                        mob.y_head_rot_o = 0.0;
+                        mob.y_body_rot = 0.0;
+                        mob.y_body_rot_o = 0.0;
+                        if let Some(brain) = mob.brain.as_mut() {
+                            brain.seed_shuffles(me.random.state());
+                            for sensor in &mut brain.sensors {
+                                sensor.time_to_tick = case.sensor_delay;
+                            }
+                        }
+                    });
+                });
+                id
+            };
+
+        if name == "villager_p4_compete" {
+            villager_ids.push(spawn_villager(
+                &mut level,
+                &mut ticks,
+                Vec3::new(-0.5, 64.0, 0.5),
+                71,
+                0,
+            ));
+            villager_ids.push(spawn_villager(
+                &mut level,
+                &mut ticks,
+                Vec3::new(13.5, 64.0, 0.5),
+                73,
+                1,
+            ));
+        } else if name == "villager_p4_farmer" {
+            let farmer_prof = villager_data::profession_id("minecraft:farmer").unwrap();
+            let ws = BlockPos::new(0, 64, 4);
+            let _ = level.poi.take(|_| true, |_, p| p == ws, ws, 1);
+            let pos = Vec3::new(1.5, 64.0, 0.5);
+            let mut entity = Entity::by_mob_type(MobType::Villager, pos);
+            let mut world = World::new(&mut level, &mut ticks);
+            entity.with_mob(|_, mob| {
+                mob.villager.set_profession(farmer_prof);
+                let mut brain = villager_ai::brain(false, farmer_prof);
+                brain.memories.set(
+                    MemoryType::JobSite,
+                    MemoryValue::GlobalPos(GlobalPos {
+                        dimension: "minecraft:overworld".to_owned(),
+                        pos: ws,
+                    }),
+                );
+                mob.brain = Some(Box::new(brain));
+                mob.villager
+                    .inventory
+                    .add_item(ItemStack::new(items::WHEAT_SEEDS, 4));
+                villager_ai::register_brain_goals(mob, &world, 1000);
+            });
+            let id = world.spawn_entity(entity);
+            world.with_entity_mut(id, &mut |entity| {
+                entity.y_rot = 0.0;
+                entity.old_position = pos;
+                entity.random = JavaRandom::new(71);
+                entity.with_mob(|me, mob| {
+                    mob.uuid = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+                    mob.x_rot = 0.0;
+                    mob.y_rot_o = 0.0;
+                    mob.x_rot_o = 0.0;
+                    mob.y_head_rot = 0.0;
+                    mob.y_head_rot_o = 0.0;
+                    mob.y_body_rot = 0.0;
+                    mob.y_body_rot_o = 0.0;
+                    if let Some(brain) = mob.brain.as_mut() {
+                        brain.seed_shuffles(me.random.state());
+                        for sensor in &mut brain.sensors {
+                            sensor.time_to_tick = case.sensor_delay;
+                        }
+                    }
+                });
+            });
+            villager_ids.push(id);
+            let mut dropped = Entity::ground_item_with_delta(
+                Vec3::new(1.5, 64.0, 1.5),
+                ItemStack::new(items::WHEAT_SEEDS, 2),
+                Vec3::default(),
+            );
+            dropped.id = case.first_id + 10;
+            world.add_prepared_entity(dropped);
+        } else {
+            villager_ids.push(spawn_villager(
+                &mut level,
+                &mut ticks,
+                Vec3::new(0.5, 64.0, 0.5),
+                71,
+                0,
+            ));
+        }
+
+        let mut prev_profs: Vec<i32> = villager_ids
+            .iter()
+            .map(|&id| {
+                level
+                    .entities
+                    .get(id)
+                    .and_then(|e| e.kind.mob().map(|m| m.villager.profession))
+                    .unwrap_or(0)
+            })
+            .collect();
+
+        let mut clock_offset = 0_i64;
+        for (tick, expected) in case.frames.iter().enumerate() {
+            if tick > 0 {
+                let tick_i64 = tick as i64;
+                ticks.set_time(1000 + tick_i64);
+                if name == "villager_p4_sleep_wake" && tick == 60 {
+                    clock_offset = 12_000 - 60;
+                }
+                set_clock(&mut level, case.clock_start + tick_i64 + clock_offset);
+
+                if name == "villager_p4_retry"
+                    && tick == 25
+                    && break_test.as_deref() != Some("villager_p4_no_take")
+                {
+                    let mut world = World::new(&mut level, &mut ticks);
+                    world.set_block_and_update(
+                        BlockPos::new(5, 64, 0),
+                        BlockState(blocks::COMPOSTER),
+                    );
+                } else if name == "villager_p4_unemploy"
+                    && tick == 55
+                    && break_test.as_deref() != Some("villager_p4_no_unemploy")
+                {
+                    let mut world = World::new(&mut level, &mut ticks);
+                    world.set_block_and_update(BlockPos::new(3, 64, 0), BlockState::AIR);
+                } else if name == "villager_p4_bell"
+                    && tick == 10
+                    && break_test.as_deref() != Some("villager_p4_no_bell")
+                {
+                    let mut world = World::new(&mut level, &mut ticks);
+                    mc_bamboo_blocks::behaviour::attached::bell::ring(
+                        &mut world,
+                        BlockPos::new(6, 64, 0),
+                    );
+                }
+
+                let mut world = World::new(&mut level, &mut ticks);
+                world.tick_entities();
+                for (i, &vid) in villager_ids.iter().enumerate() {
+                    world.with_entity_mut(vid, &mut |entity| {
+                        let seed = entity.random.state();
+                        entity.with_mob(|_, mob| {
+                            if mob.villager.profession != prev_profs[i] {
+                                prev_profs[i] = mob.villager.profession;
+                                if let Some(brain) = mob.brain.as_mut() {
+                                    brain.seed_shuffles(seed);
+                                }
+                            }
+                        });
+                    });
+                }
+            }
+
+            let ours_level_seed = level.random.source().seed();
+            if ours_level_seed != expected.level_seed {
+                self.mismatch(format!(
+                    "{} tick {tick} level random: official {}, bamboo {ours_level_seed}",
+                    case.name, expected.level_seed
+                ));
+            }
+            for (i, (&vid, exp_v)) in villager_ids.iter().zip(&expected.villagers).enumerate() {
+                let Some(entity) = level.entities.get(vid) else {
+                    self.mismatch(format!("{} tick {tick} v{i}: missing", case.name));
+                    return;
+                };
+                let mob = entity.kind.mob().expect("villager is mob");
+                let ours_brain = super::brain::dump(&level, &entity);
+                if ours_brain != exp_v.brain {
+                    self.mismatch(format!(
+                        "{} tick {tick} v{i} brain: official {:?}, bamboo {:?}",
+                        case.name, exp_v.brain, ours_brain
+                    ));
+                }
+                let (p, v) = (entity.position, entity.delta);
+                let ours_motion = [
+                    p.x.to_bits() as i64,
+                    p.y.to_bits() as i64,
+                    p.z.to_bits() as i64,
+                    v.x.to_bits() as i64,
+                    v.y.to_bits() as i64,
+                    v.z.to_bits() as i64,
+                    i64::from(entity.y_rot.to_bits() as i32),
+                    i64::from(mob.x_rot.to_bits() as i32),
+                ];
+                if ours_motion != exp_v.motion {
+                    self.mismatch(format!(
+                        "{} tick {tick} v{i} motion: official {:?}, bamboo {:?}",
+                        case.name, exp_v.motion, ours_motion
+                    ));
+                }
+                let ours_seed = entity.random.state();
+                if ours_seed != exp_v.seed {
+                    self.mismatch(format!(
+                        "{} tick {tick} v{i} seed: official {}, bamboo {ours_seed}",
+                        case.name, exp_v.seed
+                    ));
+                }
+                let ours_prof = villager_data::profession(mob.villager.profession)
+                    .map_or("", |entry| entry.name);
+                if ours_prof != exp_v.profession {
+                    self.mismatch(format!(
+                        "{} tick {tick} v{i} profession: official {:?}, bamboo {:?}",
+                        case.name, exp_v.profession, ours_prof
+                    ));
+                }
+                let ours_sleep = mob.villager.sleeping_pos.map(|p| [p.x, p.y, p.z]);
+                if ours_sleep != exp_v.sleeping_pos {
+                    self.mismatch(format!(
+                        "{} tick {tick} v{i} sleepingPos: official {:?}, bamboo {:?}",
+                        case.name, exp_v.sleeping_pos, ours_sleep
+                    ));
+                }
+                let ours_inv = [
+                    mob.villager.inventory.count_item(items::WHEAT_SEEDS),
+                    mob.villager.inventory.count_item(items::WHEAT),
+                ];
+                if ours_inv != exp_v.inv {
+                    self.mismatch(format!(
+                        "{} tick {tick} v{i} inv: official {:?}, bamboo {:?}",
+                        case.name, exp_v.inv, ours_inv
+                    ));
+                }
+            }
+            let ours_pois: Vec<i32> = watch_pois
+                .iter()
+                .map(|&pos| {
+                    if level.poi.get_type(pos).is_some() {
+                        level.poi.free_tickets(pos)
+                    } else {
+                        -1
+                    }
+                })
+                .collect();
+            if ours_pois != expected.poi_tickets {
+                self.mismatch(format!(
+                    "{} tick {tick} poiTickets: official {:?}, bamboo {:?}",
+                    case.name, expected.poi_tickets, ours_pois
+                ));
+            }
+            let ours_blocks: Vec<u32> = watch_blocks
+                .iter()
+                .map(|&pos| level.blocks.get(&pos).copied().unwrap_or(BlockState::AIR).0)
+                .collect();
+            if ours_blocks != expected.blocks {
+                self.mismatch(format!(
+                    "{} tick {tick} blocks: official {:?}, bamboo {:?}",
+                    case.name, expected.blocks, ours_blocks
+                ));
+            }
+            self.steps += 1;
+            if self.mismatches.len() >= self.show {
+                return;
+            }
+        }
+        println!("{}: {} ticks compared", case.name, case.frames.len());
+    }
+}
+
+/// 村民第 4 期真实 POI 全量对拍用例。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct VillagerPhase4Case {
+    pub name: String,
+    pub clock_start: i64,
+    pub sensor_delay: i64,
+    pub first_id: i32,
+    pub frames: Vec<VillagerPhase4Frame>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct VillagerPhase4Frame {
+    pub level_seed: i64,
+    pub villagers: Vec<VillagerPhase4Entity>,
+    pub poi_tickets: Vec<i32>,
+    pub blocks: Vec<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct VillagerPhase4Entity {
+    pub brain: String,
+    pub motion: [i64; 8],
+    pub seed: i64,
+    pub profession: String,
+    pub sleeping_pos: Option<[i32; 3]>,
+    pub inv: [i32; 2],
 }
 
 /// 复合标签的键按名字排序，便于和官方的哈希表顺序比较。

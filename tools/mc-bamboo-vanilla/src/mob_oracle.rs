@@ -55,8 +55,10 @@ mod husk_jockey;
 mod lightning;
 mod llama_spit;
 mod natural_spawn;
+mod nautilus;
 mod patrol_spawn;
 mod phantom;
+mod pig_ride;
 mod pillager;
 mod projectile;
 mod sculk_sensor;
@@ -136,6 +138,9 @@ enum Line {
     EquineInteract(equine::InteractCase),
     EquineDeath(equine::DeathCase),
     EquineSave(equine::SaveCase),
+    PigMount(pig_ride::MountCase),
+    PigBoost(pig_ride::BoostCase),
+    PigDismount(pig_ride::DismountCase),
     LlamaSpit(Box<llama_spit::LlamaSpitCase>),
     WitchThrow(Box<witch_throw::WitchThrowCase>),
     NaturalSpawn(natural_spawn::Case),
@@ -179,12 +184,14 @@ enum Line {
     HuskJockey(husk_jockey::Case),
     VillagerBrain(Box<villager::VillagerBrainCase>),
     VillagerPoi(Box<villager::VillagerPoiCase>),
+    VillagerPhase4(Box<villager::VillagerPhase4Case>),
     AttackTarget(Box<attack_target::AttackTargetCase>),
     Guardian(Box<guardian_scene::GuardianCase>),
     Fish(Box<fish::FishCase>),
     PhantomSpawn(Box<phantom::PhantomSpawnCase>),
     Phantom(Box<phantom::PhantomCase>),
     WaterMob(Box<water_mob::WaterMobCase>),
+    Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
     SculkSensor(sculk_sensor::SculkSensorCase),
     End(End),
@@ -1139,6 +1146,43 @@ impl Level for MobLevel {
         )
     }
 
+    fn poi_in_range(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        type_mask: u32,
+        occupancy: u8,
+    ) -> Vec<(u8, BlockPos)> {
+        let Some(occupancy) = poi_occupancy(occupancy) else {
+            return Vec::new();
+        };
+        self.poi
+            .get_in_range(
+                |found| (type_mask & (1_u32 << found)) != 0,
+                center,
+                radius,
+                occupancy,
+            )
+            .into_iter()
+            .map(|r| (r.kind, r.pos))
+            .collect()
+    }
+
+    fn poi_take(&mut self, pos: BlockPos, type_mask: u32) -> bool {
+        self.poi
+            .take(
+                |found| (type_mask & (1_u32 << found)) != 0,
+                |_, p| p == pos,
+                pos,
+                1,
+            )
+            .is_some()
+    }
+
+    fn poi_release(&mut self, pos: BlockPos) -> bool {
+        self.poi.release(pos)
+    }
+
     fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
         self.poi
             .sections_to_village(mc_bamboo_world::light::SectionPos::of(pos))
@@ -1751,6 +1795,9 @@ impl Report {
                 Line::Case(case) => self.replay(&case),
                 Line::Projectile(case) => self.replay_projectile(&case),
                 Line::Shot(case) => self.replay_shot(&case),
+                Line::PigMount(case) => self.replay_pig_mount(&case),
+                Line::PigBoost(case) => self.replay_pig_boost(&case),
+                Line::PigDismount(case) => self.replay_pig_dismount(&case),
                 Line::Egg(case) => self.replay_egg(&case),
                 Line::EggThrow(case) => self.replay_egg_throw(&case),
                 Line::EggDispense(case) => self.replay_egg_dispense(&case),
@@ -1787,12 +1834,14 @@ impl Report {
                 Line::HuskJockey(case) => self.replay_husk_jockey(&case),
                 Line::VillagerBrain(case) => self.replay_villager_brain(&case),
                 Line::VillagerPoi(case) => self.replay_villager_poi(&case),
+                Line::VillagerPhase4(case) => self.replay_villager_phase4(&case),
                 Line::AttackTarget(case) => self.replay_attack_target(&case),
                 Line::Guardian(case) => self.replay_guardian(&case),
                 Line::Fish(case) => self.replay_fish(&case),
                 Line::PhantomSpawn(case) => self.replay_phantom_spawn(&case),
                 Line::Phantom(case) => self.replay_phantom(&case),
                 Line::WaterMob(case) => self.replay_water_mob(&case),
+                Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),

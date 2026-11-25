@@ -23,7 +23,8 @@ use crate::{
 mod death;
 mod goals;
 pub(super) mod horse;
-mod interact;
+pub(super) mod interact;
+pub(in crate::entity::mob) use interact::{equip_on_target, equippable};
 pub mod inventory;
 mod life;
 mod llama;
@@ -195,6 +196,10 @@ pub fn passenger_attachment(kind: MobType) -> (f32, f32) {
         MobType::Donkey => (1.112_5, 0.0),
         MobType::Mule => (1.212_5, 0.0),
         MobType::Llama => (1.37, -0.3),
+        // `EntityTypes.NAUTILUS` / `ZOMBIE_NAUTILUS` 的 `passengerAttachments(1.1375F)`。
+        // `EntityTypes.NAUTILUS` / `ZOMBIE_NAUTILUS` register
+        // `passengerAttachments(1.1375F)`.
+        MobType::Nautilus | MobType::ZombieNautilus => (f32::from_bits(0x3f91_a3d7), 0.0),
         _ => (0.0, 0.0),
     }
 }
@@ -206,7 +211,20 @@ pub fn passenger_attachment(kind: MobType) -> (f32, f32) {
 /// The drop offset for sheared equipment, `EntityAttachments.getAverage(PASSENGER)`
 /// (unrotated): [`passenger_attachment`] for adults, and the scaled `BABY_DIMENSIONS`
 /// passenger attachment for babies.
-pub(super) fn shear_drop_offset(kind: MobType, baby: bool) -> mc_bamboo_core::Vec3 {
+pub fn shear_drop_offset(kind: MobType, baby: bool) -> mc_bamboo_core::Vec3 {
+    // 官方 `EntityTypes.PIG` 的 PASSENGER 附着点；`EntityAttachments.getAverage`
+    // 对猪是 (0, 0.86875, 0)，幼年按 BABY_DIMENSIONS 缩放。
+    //
+    // Vanilla `EntityTypes.PIG`'s PASSENGER attachment: `EntityAttachments.getAverage`
+    // is (0, 0.86875, 0), scaled by BABY_DIMENSIONS for a baby.
+    if kind == MobType::Pig {
+        let y = if baby {
+            0.8687499761581421 * 0.45 / 0.9
+        } else {
+            0.8687499761581421
+        };
+        return mc_bamboo_core::Vec3::new(0.0, y, 0.0);
+    }
     let (y, z) = if !baby {
         passenger_attachment(kind)
     } else {

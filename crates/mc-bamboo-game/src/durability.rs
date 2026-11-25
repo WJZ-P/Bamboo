@@ -8,7 +8,10 @@
 //! Creative mode restores only the used hand's count; damage stays. A break sends an entity
 //! event, and the slot is sent when no menu is open.
 
-use mc_bamboo_blocks::durability::{ActiveHands, with_player_hands};
+use mc_bamboo_blocks::{
+    World,
+    durability::{ActiveHands, with_player_hands},
+};
 use mc_bamboo_core::Hand;
 use mc_bamboo_protocol::packet::play::{EntityEvent, GameMode};
 
@@ -78,6 +81,45 @@ pub(crate) fn run<R>(
     }
     finish(region, id, hand, prepared.used_count, hands);
     result
+}
+
+/// `FoodOnAStickItem.use` 的 `ItemStack.hurtAndConvertOnBreak`：扣 7 点耐久；
+/// 物品用坏时按官方 `transmuteCopyIgnoreEmpty(FISHING_ROD, 1)` 保留组件，
+/// 再把新钓竿的 `DAMAGE` 设为 0，交回给这次动作替换手里的物品堆。
+///
+/// `FoodOnAStickItem.use`'s `ItemStack.hurtAndConvertOnBreak`: spend seven
+/// durability points. On break, `transmuteCopyIgnoreEmpty(FISHING_ROD, 1)`
+/// carries the components over and resets the new rod's damage to zero; the
+/// returned stack replaces the held one.
+pub(crate) fn hurt_and_convert_on_break(region: &mut Region, id: PlayerId, hand: Hand) {
+    // `ServerPlayerGameMode.useItem` 在 `ItemStack.use` 之后才把变换过的物品堆
+    // 放回手上；这里同样先让 `run` 把破损状态和破损事件落地，再写变换结果。
+    //
+    // `ServerPlayerGameMode.useItem` writes the transformed stack back only
+    // after `ItemStack.use`; likewise, let `run` settle the broken stack and
+    // its break event before replacing it.
+    let replacement = run(region, id, hand, |region| {
+        let (mut level, ticks) = region.block_level();
+        let world = World::new(&mut level, ticks);
+        mc_bamboo_blocks::durability::hurt_hand(&world, hand, 7);
+        mc_bamboo_blocks::durability::active_hand(hand).and_then(|stack| {
+            stack.is_empty().then(|| {
+                let mut rod = stack.clone();
+                rod.item = mc_bamboo_data::items::FISHING_ROD;
+                rod.count = 1;
+                mc_bamboo_blocks::durability::set_damage_for_oracle(&mut rod, 0);
+                rod
+            })
+        })
+    });
+    let Some(replacement) = replacement else {
+        return;
+    };
+    if let Some(player) = region.players.get_mut(&id) {
+        let slot = player.inventory.hand_slot(hand);
+        player.inventory.slots[slot] = replacement;
+        crate::inventory::send_slot(player, &mut region.links, slot);
+    }
 }
 
 fn prepare(region: &Region, id: PlayerId, hand: Hand) -> Option<Prepared> {

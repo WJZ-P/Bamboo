@@ -143,6 +143,14 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
         super::crossbow::use_tick(me, mob, ctx);
     }
     detect_equipment_updates(me, mob, ctx);
+    // `LivingEntity.tick`：睡在床上但床没了时立刻起床。
+    // `LivingEntity.tick`: wake up if sleeping and the bed no longer exists.
+    if mob.mob_type == super::MobType::Villager
+        && mob.villager.sleeping
+        && !super::villager::check_bed_exists(mob, ctx.blocks())
+    {
+        super::villager::stop_sleeping(me, mob, None, ctx);
+    }
     // `Drowned.updateSwimming()` 在 `Entity.baseTick` 里，紧跟流体跟踪之后。
     // `Drowned.updateSwimming()` runs in `Entity.baseTick`, right after the fluid update.
     if mob.mob_type == super::MobType::Drowned {
@@ -176,12 +184,19 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type.climbs_walls() && !me.removed {
         super::spider::tick(me, mob);
     }
+    // `AbstractNautilus.tick` 在 `super.tick()` 之后：冲刺冷却、气泡取数。
+    // `AbstractNautilus.tick` runs after `super.tick()`: dash cooldown and bubbles.
+    if super::nautilus::is_nautilus(mob.mob_type) && !me.removed {
+        super::nautilus::tick(me, mob);
+    }
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
     body_rotation_tick(me, mob, ctx.blocks().game_time());
     range_checks(me, mob);
-    // `LivingEntity.tick`：睡着的生物（只有狐狸）抬头角清零。
-    // `LivingEntity.tick`: a sleeping mob (only foxes) levels its head.
-    if mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping() {
+    // `LivingEntity.tick`：睡着的生物（狐狸、村民）抬头角清零。
+    // `LivingEntity.tick`: a sleeping mob (fox or villager) levels its head.
+    if (mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping())
+        || (mob.mob_type == super::MobType::Villager && mob.villager.sleeping)
+    {
         mob.x_rot = 0.0;
     }
     // `refreshDirtyAttributes` → `onAttributeUpdated(MAX_HEALTH)`：`/summon` 出来的马科
@@ -546,7 +561,12 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `EnchantmentHelper.tickEffects` at the head of vanilla `LivingEntity.baseTick`.
     super::enchantment_wiring::tick(me, mob, ctx);
     mob_base_tick(me, mob, ctx);
-    if super::squid::is_squid(mob.mob_type) || super::fish::is_fish(mob.mob_type) {
+    if super::nautilus::is_nautilus(mob.mob_type) {
+        // `Nautilus.handleAirSupply`：水里回满 300，离水每刻掉 1，到 -20 受 2 点干死伤害。
+        // `Nautilus.handleAirSupply`: refill to 300 in water, decrement on land,
+        // and take two dry-out damage at -20.
+        super::water::handle_air_supply(me, mob, ctx, pre_tick_air);
+    } else if super::squid::is_squid(mob.mob_type) || super::fish::is_fish(mob.mob_type) {
         // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply`（鱿鱼和鱼）。
         // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply` (squid and fish).
         super::water::handle_air_supply(me, mob, ctx, pre_tick_air);
@@ -806,6 +826,12 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
     match mob.mob_type {
         kind if kind.has_no_ambient_sound() => None,
+        // `Nautilus.getAmbientSound`：幼年 / 成年、水下 / 岸上四套；僵尸版两套。
+        // `Nautilus.getAmbientSound`: four water/land and baby/adult variants;
+        // the zombie version has two.
+        kind if super::nautilus::is_nautilus(kind) => {
+            super::nautilus::ambient_voice(kind, mob.is_baby(), me.in_water)
+        }
         super::MobType::Turtle if me.in_water || !me.on_ground || mob.is_baby() => None,
         // `Dolphin.getAmbientSound`：水里 / 水外两种。
         // `Dolphin.getAmbientSound`: water / land variants.
@@ -815,6 +841,9 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
         super::MobType::Axolotl => {
             super::axolotl::ambient_voice(mob.axolotl.playing_dead, me.in_water)
         }
+        // `Villager.getAmbientSound`：睡觉时返回 null，不出声也不取音高。
+        // `Villager.getAmbientSound`: returns null while sleeping, drawing no pitch.
+        super::MobType::Villager if mob.villager.sleeping => None,
         _ => Some(voice_of(mob, Voice::Ambient, me.in_water)),
     }
 }
@@ -832,6 +861,16 @@ fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
     // 守卫者 / 远古守卫者：环境、受伤、死亡音都分水中 / 岸上两套。
     // Guardian / elder guardian: ambient, hurt and death sounds all have water / land
     // variants.
+    if super::nautilus::is_nautilus(mob.mob_type) {
+        let which = match voice {
+            Voice::Ambient => super::nautilus::Voice::Ambient,
+            Voice::Hurt => super::nautilus::Voice::Hurt,
+            Voice::Death => super::nautilus::Voice::Death,
+            Voice::Eat => super::nautilus::Voice::Eat,
+            Voice::Angry => super::nautilus::Voice::Hurt,
+        };
+        return super::nautilus::voice(mob.mob_type, mob.is_baby(), in_water, which);
+    }
     if super::guardian::is_guardian(mob.mob_type) {
         let elder = mob.mob_type == super::MobType::ElderGuardian;
         return match voice {
@@ -1165,9 +1204,11 @@ pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
 
 /// `Entity.isInWall`：眼睛那一小片和会让人窒息的方块重叠。
 fn is_in_wall(me: &Entity, mob: &Mob, view: &dyn BlockView) -> bool {
-    // `LivingEntity.isInWall`：睡着的不窒息（只有狐狸会睡）。
-    // `LivingEntity.isInWall`: sleepers never suffocate (only foxes sleep).
-    if mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping() {
+    // `LivingEntity.isInWall`：睡着的不窒息（狐狸与村民）。
+    // `LivingEntity.isInWall`: sleepers never suffocate (foxes and villagers).
+    if (mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping())
+        || (mob.mob_type == super::MobType::Villager && mob.villager.sleeping)
+    {
         return false;
     }
     let width = f64::from(me.dimensions.0 * 0.8);
@@ -1394,10 +1435,14 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
         // `tickRidden` and zeroes the velocity. The position comes from the client's
         // `move_vehicle` packet.
         if let Some(rider) = mob.controlling_passenger() {
-            if let Some(view) = ctx.player(rider)
-                && mob.mob_type.is_equine()
-            {
-                super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
+            if let Some(view) = ctx.player(rider) {
+                if mob.mob_type.is_equine() {
+                    super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
+                } else if mob.mob_type == super::MobType::Pig {
+                    super::pig::tick_ridden(me, mob, view.yaw, view.pitch);
+                } else if super::nautilus::is_nautilus(mob.mob_type) {
+                    super::nautilus_ai::ridden_rotation(me, mob, view.yaw, view.pitch);
+                }
             }
             me.delta = Vec3::default();
         } else if mob.mob_type == super::MobType::Phantom {
@@ -1531,6 +1576,49 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     // The same `Mob.aiStep` pickup loop, for foxes.
     if fox {
         super::fox::pick_up_items(me, mob, ctx);
+    }
+    // `Mob.aiStep` 的捡东西那一段：村民（`InventoryCarrier.pickUpItem`）。
+    // The same `Mob.aiStep` pickup loop, for villagers (`InventoryCarrier.pickUpItem`).
+    if mob.mob_type == super::MobType::Villager
+        && mob.can_pick_up_loot
+        && is_alive(me, mob)
+        && !mob.dead
+        && ctx.blocks().block_game_rules().mob_griefing
+    {
+        let mut items = Vec::new();
+        ctx.for_each_other_in(me.bounding_box().inflate(1.0, 0.0, 1.0), &mut |other| {
+            if other.removed {
+                return;
+            }
+            if let KindPublic::Item {
+                stack,
+                pickup_delay,
+                ..
+            } = &other.kind
+                && !stack.is_empty()
+                && *pickup_delay <= 0
+                && mob.villager.wants_to_pick_up(stack)
+            {
+                items.push((other.uid, stack.clone()));
+            }
+        });
+        for (item, stack) in items {
+            if mob.villager.wants_to_pick_up(&stack) {
+                let leftover = mob.villager.inventory.add_item(stack);
+                let remaining_count = if leftover.is_empty() {
+                    0
+                } else {
+                    leftover.count
+                };
+                ctx.emit(
+                    crate::entity::ctx::Command::VillagerPickUpItem {
+                        item,
+                        remaining_count,
+                    },
+                    me,
+                );
+            }
+        }
     }
     // `AgeableMob.aiStep`：僵尸和鱼都不在这一层，年龄/求爱都不动。
     if mob.mob_type.is_ageable() && mob.forced_age_timer > 0 {
@@ -1858,6 +1946,11 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // `SmoothSwimmingLookControl(this, 10)`.
         super::smooth_swim::move_tick(me, mob, &super::smooth_swim::FROG);
         super::smooth_swim::look_tick(me, mob, 10.0);
+    } else if super::nautilus::is_nautilus(mob.mob_type) {
+        // `AbstractNautilus` 的 `SmoothSwimmingMoveControl` / `SmoothSwimmingLookControl`。
+        // The `AbstractNautilus` smooth-swimming move and look controls.
+        super::smooth_swim::move_tick(me, mob, &super::nautilus::MOVE_PARAMS);
+        super::smooth_swim::look_tick(me, mob, 10.0);
     } else if mob.mob_type == super::MobType::Bee {
         // `Bee`: `FlyingMoveControl(this, 20, true)` + `BeeLookControl`（生气时跳过，授粉时不重置俯仰）。
         // `Bee`: `FlyingMoveControl(this, 20, true)` + `BeeLookControl` (skipped while angry;
@@ -1918,6 +2011,9 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     }
     if mob.mob_type == super::MobType::Villager {
         super::villager_ai::custom_server_ai_step(me, mob, ctx, decision_gap);
+    }
+    if super::nautilus::is_nautilus(mob.mob_type) {
+        super::nautilus_ai::custom_server_ai_step(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::ElderGuardian {
         // `ElderGuardian.customServerAiStep`：范围挖掘疲劳和家。
@@ -2433,6 +2529,10 @@ fn handle_on_climbable(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView, del
 fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) {
     // `AbstractFish.travelInWater` 整个换掉了水里的推进。
     // `AbstractFish.travelInWater` replaces the whole in-water path.
+    if me.in_water && super::nautilus::is_nautilus(mob.mob_type) {
+        super::nautilus::travel_in_water(me, mob, ctx, input);
+        return;
+    }
     if me.in_water && super::fish::is_fish(mob.mob_type) {
         super::fish::travel_in_water(me, mob, ctx, input);
         return;
@@ -2665,8 +2765,10 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Entity.push(Entity)` pushes its own half only when `!entity.isVehicle()`; a
     // vehicle and its passenger share a root vehicle and the pair is skipped by
     // `isPassengerOfSameVehicle`, so a ridden mob stays put.
-    let pushable_self =
-        is_alive(me, mob) && !on_climbable(me, mob, ctx.blocks()) && !mob.is_vehicle();
+    let pushable_self = is_alive(me, mob)
+        && !on_climbable(me, mob, ctx.blocks())
+        && !mob.is_vehicle()
+        && !(mob.mob_type == super::MobType::Villager && mob.villager.sleeping);
     // 玩家排在生物后面（官方先实体后玩家）；上限只保留前面的名额。
     let mut handled = 0;
     // `IronGolem.doPush` 在挤压伤害那次取数之后、逐个推开时取 `nextInt(20)`；
@@ -2873,6 +2975,11 @@ fn hurt_living(
     // Fire Resistance rejects fire damage before cooldowns, sounds, or attacker bookkeeping.
     if source.kind.is_fire() && mob.effects.has(mob_effect::FIRE_RESISTANCE) {
         return false;
+    }
+    // `LivingEntity.hurtServer`：睡在床上受伤先起床。
+    // `LivingEntity.hurtServer`: wake up before taking damage.
+    if mob.mob_type == super::MobType::Villager && mob.villager.sleeping {
+        super::villager::stop_sleeping(me, mob, None, ctx);
     }
     mob.no_action_time = 0;
     let mut amount = if amount < 0.0 { 0.0 } else { amount };
@@ -3303,6 +3410,13 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     // Villagers are not `Animal`s: only the loot table (vanilla's
     // `entities/villager` is empty), and `xpReward` is 0 with no animal experience draw.
     if mob.mob_type == super::MobType::Villager {
+        if mob.villager.sleeping {
+            super::villager::stop_sleeping(me, mob, None, ctx);
+        }
+        // `Villager.die` 在 `super.die` 之前归还全部 POI 票（覆盖普通死亡与僵尸转化）。
+        // `Villager.die` releases all POI tickets before `super.die` (covers both
+        // regular death and zombie conversion).
+        super::villager::release_all_pois(me, mob, ctx);
         // 僵尸杀死村民时官方走 `Zombie.killedEntity` 的转化分支。
         // Vanilla routes a villager killed by a zombie through
         // `Zombie.killedEntity`'s conversion branch.
@@ -3770,10 +3884,14 @@ pub(crate) fn apply_push(
     let Some(target) = world.entity(other) else {
         return;
     };
-    // `LivingEntity.push(Entity)`：睡着的（狐狸）谁也推不动，也不把人推回去。
-    // `LivingEntity.push(Entity)`: a sleeper (a fox) is not pushed and pushes nobody back.
-    if matches!(&target.kind, EntityKind::Mob(mob) if mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping())
-    {
+    // `LivingEntity.push(Entity)`：睡着的（狐狸、村民）谁也推不动，也不把人推回去。
+    // `LivingEntity.push(Entity)`: a sleeper (fox or villager) is not pushed and pushes nobody back.
+    if matches!(
+        &target.kind,
+        EntityKind::Mob(mob)
+            if (mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping())
+                || (mob.mob_type == super::MobType::Villager && mob.villager.sleeping)
+    ) {
         return;
     }
     let Some((dx, dz)) = push_amount(target.position, me.position) else {

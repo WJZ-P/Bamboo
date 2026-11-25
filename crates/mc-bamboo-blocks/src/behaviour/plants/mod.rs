@@ -12,6 +12,7 @@ mod chorus;
 mod cocoa;
 mod coral;
 mod crop;
+pub(crate) use crop::{is_crop_block, is_crop_max_age};
 mod double_plant;
 mod dripleaf;
 mod grass;
