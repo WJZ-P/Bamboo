@@ -59,6 +59,8 @@ pub(super) fn player_view() -> PlayerView {
         game_mode: 0,
         mining_fatigue: None,
         creative: false,
+        flying: false,
+        explosion_knockback_resistance: 0.0,
         sneaking: false,
         sprinting: false,
         swimming: false,
@@ -149,6 +151,7 @@ impl Report {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
         };
         let mut ticks = BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);

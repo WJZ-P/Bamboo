@@ -1874,6 +1874,14 @@ pub enum DamageKind {
     ///
     /// Contact damage of the HOT sulfur-cube archetype.
     SulfurCubeHot,
+    /// `minecraft:bad_respawn_point`：主世界用重生锚重生失败时的爆炸伤害。
+    /// 数据文件里是 `INTENTIONAL_GAME_DESIGN`、exhaustion 0.1、scaling
+    /// `always`、message_id `badRespawnPoint`。
+    ///
+    /// `minecraft:bad_respawn_point`: the blast from using a respawn anchor in
+    /// the overworld. `INTENTIONAL_GAME_DESIGN`, exhaustion 0.1, `always`
+    /// scaling, `message_id` `badRespawnPoint`.
+    BadRespawnPoint,
 }
 
 impl DamageKind {
@@ -1913,6 +1921,7 @@ impl DamageKind {
             Self::EnderPearl => "minecraft:ender_pearl",
             Self::LightningBolt => "minecraft:lightning_bolt",
             Self::SulfurCubeHot => "minecraft:sulfur_cube_hot",
+            Self::BadRespawnPoint => "minecraft:bad_respawn_point",
         }
     }
 
@@ -1925,6 +1934,7 @@ impl DamageKind {
     pub const fn death_message_type(self) -> DeathMessageType {
         match self {
             Self::Fall | Self::EnderPearl => DeathMessageType::FallVariants,
+            Self::BadRespawnPoint => DeathMessageType::IntentionalGameDesign,
             _ => DeathMessageType::Default,
         }
     }
@@ -1972,6 +1982,7 @@ impl DamageKind {
             Self::EnderPearl => "fall",
             Self::LightningBolt => "lightningBolt",
             Self::SulfurCubeHot => "sulfurCubeHot",
+            Self::BadRespawnPoint => "badRespawnPoint",
         }
     }
 
@@ -2013,6 +2024,7 @@ impl DamageKind {
             Self::EnderPearl,
             Self::LightningBolt,
             Self::SulfurCubeHot,
+            Self::BadRespawnPoint,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -2100,7 +2112,10 @@ impl DamageKind {
     /// `DamageSource.scalesWithDifficulty()`: only `always`, or
     /// `when_caused_by_living_non_player` with a non-player living cause.
     pub const fn scales_with_difficulty(self) -> bool {
-        matches!(self, Self::Explosion | Self::PlayerExplosion)
+        matches!(
+            self,
+            Self::Explosion | Self::PlayerExplosion | Self::BadRespawnPoint
+        )
     }
 
     /// `DamageType.exhaustion`：受伤后累加的饥饿消耗。
@@ -2123,7 +2138,8 @@ impl DamageKind {
             | Self::SweetBerryBush
             | Self::DryOut
             | Self::LightningBolt
-            | Self::SulfurCubeHot => TENTH,
+            | Self::SulfurCubeHot
+            | Self::BadRespawnPoint => TENTH,
             _ => 0.0,
         }
     }

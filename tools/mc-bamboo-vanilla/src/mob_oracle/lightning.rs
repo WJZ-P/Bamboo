@@ -75,6 +75,7 @@ impl LightningCase {
             players: Vec::new(),
             game: None,
             wrong_was_hurt: false,
+            explosion_break: 0,
             natural_spawn: None,
             inhabited: Default::default(),
             mob_teams: Default::default(),
@@ -194,6 +195,7 @@ impl Report {
             players: Vec::new(),
             game: None,
             wrong_was_hurt: false,
+            explosion_break: 0,
             natural_spawn: None,
             inhabited: Default::default(),
             mob_teams: Default::default(),
@@ -308,6 +310,7 @@ impl Report {
             inhabited: Default::default(),
             mob_teams: Default::default(),
             wrong_was_hurt: false,
+            explosion_break: 0,
             short_hunger: false,
             ignore_bed_monsters: false,
         };

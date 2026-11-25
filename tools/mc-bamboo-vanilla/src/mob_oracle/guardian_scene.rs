@@ -258,6 +258,8 @@ impl GuardianCase {
                             .and_then(|f| f.existing)
                             .map(|[duration, amplifier]| (amplifier, duration)),
                         creative: setup.game_mode == 1,
+                        flying: false,
+                        explosion_knockback_resistance: 0.0,
                         sneaking: false,
                         sprinting: false,
                         swimming: false,
@@ -317,6 +319,7 @@ impl GuardianCase {
             inhabited: Default::default(),
             mob_teams: Default::default(),
             wrong_was_hurt: false,
+            explosion_break: 0,
             short_hunger: false,
             ignore_bed_monsters: false,
         }

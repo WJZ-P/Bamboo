@@ -4981,6 +4981,7 @@ mod tests {
                 | Effect::KilledByArrow { .. }
                 | Effect::EnderPearlTeleport { .. }
                 | Effect::GuardianElderEffect { .. }
+                | Effect::Explode { .. }
                 | Effect::VibrationParticle { .. } => None,
             })
             .collect()
