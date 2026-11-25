@@ -895,6 +895,7 @@ fn actor_of(action: &Action, names: &Names) -> Result<Actor, String> {
     };
     Ok(Actor {
         // 假世界每次 `getBlockEntity` 都新建空告示牌，编辑器登记不上，UUID 看不出来。
+        uid: 0,
         uuid: [0; 16],
         position: Vec3::new(x, y, z),
         yaw: action.yaw.0,

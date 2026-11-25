@@ -4559,6 +4559,7 @@ fn try_sleep(level: &mut MobLevel, ticks: &mut BlockTicks, case: &Case, head: Bl
     );
     let creative = case.player_creative;
     let actor = Actor {
+        uid: 0,
         uuid: ((1_u128 << 64) | 2).to_be_bytes(),
         position,
         yaw: 0.0,
