@@ -23,6 +23,7 @@ mod predicate;
 mod random_sequence;
 mod stack;
 mod table;
+pub mod trade;
 
 pub use condition::{FloatRangePredicate, IntRangePredicate, LootCondition};
 pub use context::{
@@ -38,10 +39,12 @@ pub use function::{LootFunction, mob_spawn_enchantments};
 pub use names::{
     EnchantmentDef, Registry, biome_id, block_experience_set, block_id, block_name,
     enchantment_def, enchantment_defs_all, enchantment_id, enchantment_name, entity_type_id,
-    entity_type_name, has_repair_with_xp, instrument_name, item_id, item_name, mob_effect_name,
-    potion_name, repair_with_xp_factor, tag_ids,
+    entity_type_name, has_repair_with_xp, holder_set, instrument_name, item_id, item_name,
+    mob_effect_name, potion_name, repair_with_xp_factor, tag_ids,
 };
-pub use number::{FloatProvider, IntProvider, LevelBasedValue};
+pub use number::{
+    FloatProvider, IntProvider, LevelBasedValue, parse_float_provider, parse_int_provider,
+};
 pub use pool::LootPool;
 pub use predicate::{
     BlockPredicate, ComponentMatchers, DamageSourcePredicate, DistancePredicate, DoubleBounds,

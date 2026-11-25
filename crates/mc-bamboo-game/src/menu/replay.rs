@@ -13,7 +13,7 @@ use mc_bamboo_protocol::{
     packet::play::{ContainerInput, HashedItem},
 };
 
-use super::{Ctx, HashedStack, Menu, Target};
+use super::{Ctx, HashedStack, Menu, MerchantCtx, Target};
 use crate::{
     container::ContainerKind,
     inventory::{HOTBAR_START, Inventory, OFF_HAND},
@@ -46,6 +46,10 @@ pub enum ReplayShape {
     Anvil,
     Cartography,
     Enchantment,
+    /// 商人菜单：三格（付款两格 + 结果格）加玩家 36 格。
+    ///
+    /// The merchant menu: three container slots (two payments and a result) plus 36 player slots.
+    Merchant,
     /// `NautilusInventoryMenu`，两格坐骑物品栏。
     ///
     /// `NautilusInventoryMenu`, the two-slot mount inventory.
@@ -91,7 +95,8 @@ impl ReplayShape {
             | Self::Cartography
             | Self::Enchantment
             | Self::Crafter
-            | Self::NautilusMount => ContainerKind::Chest,
+            | Self::NautilusMount
+            | Self::Merchant => ContainerKind::Chest,
         }
     }
 
@@ -150,6 +155,7 @@ impl ReplayShape {
     fn slots(self) -> usize {
         match self {
             Self::Chest(rows) => rows * 9,
+            Self::Merchant => 3,
             _ => self.kind().slots(),
         }
     }
@@ -175,6 +181,13 @@ pub struct Replay {
     inventory: Inventory,
     creative: bool,
     station: Option<super::station::Station>,
+    merchant: Option<MerchantReplay>,
+}
+
+/// 商人菜单的重放状态：交易表和选中提示。付款格和结果格在 `container[0..3]` 里。
+pub struct MerchantReplay {
+    pub offers: Vec<mc_bamboo_protocol::merchant::MerchantOffer>,
+    pub selection_hint: i32,
 }
 
 impl Replay {
@@ -203,7 +216,82 @@ impl Replay {
             inventory: player,
             creative: true,
             station: None,
+            merchant: None,
         }
+    }
+
+    /// 商人菜单：`offers` 是固定交易表，付款两格和结果格是 `container` 的前三格。
+    ///
+    /// A merchant menu: `offers` is the fixed trade list; the two payment slots and
+    /// the result slot are the first three container slots.
+    pub fn merchant(
+        offers: Vec<mc_bamboo_protocol::merchant::MerchantOffer>,
+        container: &[(i32, i32)],
+        inventory: &[(i32, i32)],
+    ) -> Self {
+        let mut replay = Self::new(ReplayShape::Merchant, container, inventory);
+        replay.merchant = Some(MerchantReplay {
+            offers,
+            selection_hint: 0,
+        });
+        // 打开时先按付款重算一次结果格。
+        replay.settle();
+        replay
+    }
+
+    /// 按当前付款和选中提示重算结果格。
+    fn settle(&mut self) {
+        let Some(merchant) = &self.merchant else {
+            return;
+        };
+        let a = self.container[0].clone();
+        let b = self.container[1].clone();
+        self.container[2] =
+            crate::merchant::active_offer_index(&merchant.offers, &a, &b, merchant.selection_hint)
+                .map(|index| merchant.offers[index].result.clone())
+                .unwrap_or_else(ItemStack::empty);
+    }
+
+    /// 选中的交易（`ServerboundSelectTradePacket`），自动填付款格。
+    pub fn select_trade(&mut self, slot: i32) {
+        let Some(merchant) = &mut self.merchant else {
+            return;
+        };
+        merchant.selection_hint = slot.max(0);
+        if slot < 0 || slot as usize >= merchant.offers.len() {
+            return;
+        }
+        // 旧付款搬回背包，两格都空时按选中交易自动填。
+        for payment in [0, 1] {
+            if self.container[payment].is_empty() {
+                continue;
+            }
+            let mut stack = std::mem::take(&mut self.container[payment]);
+            if !crate::merchant::move_payment_to_inventory(&mut self.inventory, &mut stack) {
+                self.container[payment] = stack;
+                return;
+            }
+        }
+        if self.container[0].is_empty() && self.container[1].is_empty() {
+            let offer = &merchant.offers[slot as usize];
+            crate::merchant::move_from_inventory_to_payment(
+                &mut self.inventory,
+                &mut self.container[0],
+                &offer.base_cost_a,
+            );
+            if let Some(cost) = &offer.cost_b {
+                crate::merchant::move_from_inventory_to_payment(
+                    &mut self.inventory,
+                    &mut self.container[1],
+                    cost,
+                );
+            }
+        }
+        self.settle();
+        // `broadcastChanges`：为每个变过的槽加 state_id，和点击一样。
+        let slots = self.menu_slots();
+        self.menu.take_slot_changes(&slots);
+        self.menu.take_carried_change();
     }
 
     /// 工作台菜单。`grid` 是菜单自己的材料格，空位用 `(0, 0)`，按顺序放进去。
@@ -337,6 +425,10 @@ impl Replay {
             quickcraft_slots: &mut self.menu.quickcraft_slots,
             creative: self.creative,
             thrown: &mut thrown,
+            merchant: self.merchant.as_mut().map(|m| MerchantCtx {
+                offers: &mut m.offers,
+                selection_hint: &mut m.selection_hint,
+            }),
         };
         super::do_click(&mut ctx, i32::from(slot), i32::from(button), input);
         // 客户端从不预测，回传的总是空光标。
@@ -385,6 +477,10 @@ impl Replay {
             quickcraft_slots: &mut self.menu.quickcraft_slots,
             creative: self.creative,
             thrown: &mut thrown,
+            merchant: self.merchant.as_mut().map(|m| MerchantCtx {
+                offers: &mut m.offers,
+                selection_hint: &mut m.selection_hint,
+            }),
         };
         super::do_click(&mut ctx, i32::from(slot), i32::from(button), input);
         let after = self.menu_slots();
@@ -499,8 +595,54 @@ fn stack(item: i32, count: i32) -> ItemStack {
 #[cfg(test)]
 mod tests {
     use mc_bamboo_data::items;
+    use mc_bamboo_protocol::merchant::{ItemCost, MerchantOffer};
 
     use super::*;
+
+    fn emerald_for_apple() -> MerchantOffer {
+        MerchantOffer {
+            base_cost_a: ItemCost::new(items::EMERALD, 1),
+            cost_b: None,
+            result: ItemStack::new(items::APPLE, 1),
+            uses: 0,
+            max_uses: 12,
+            reward_exp: true,
+            special_price_diff: 0,
+            demand: 0,
+            price_multiplier: 0.0,
+            xp: 1,
+        }
+    }
+
+    /// 商人菜单：付款放进结果格，取出即完成交易。
+    #[test]
+    fn merchant_take_completes_the_trade() {
+        let mut replay = Replay::merchant(vec![emerald_for_apple()], &[(items::EMERALD, 1)], &[]);
+        let snapshot = replay.open();
+        assert_eq!(snapshot.slots[2], ItemStack::new(items::APPLE, 1));
+        let after = replay.click(2, 0, ContainerInput::Pickup);
+        assert_eq!(after.carried, ItemStack::new(items::APPLE, 1));
+        assert!(after.slots[0].is_empty(), "付款应该被扣掉");
+        assert!(after.slots[2].is_empty(), "结果格应该清空");
+    }
+
+    /// 结果格 Shift 点击会连续交易，直到付款不够：2 个绿宝石换 2 个苹果。
+    #[test]
+    fn merchant_shift_click_trades_repeatedly() {
+        let mut replay = Replay::merchant(vec![emerald_for_apple()], &[(items::EMERALD, 2)], &[]);
+        replay.open();
+        let after = replay.click(2, 0, ContainerInput::QuickMove);
+        // 两次交易：付款扣光，两个苹果搬进背包（结果格清空）。
+        assert!(after.slots[0].is_empty(), "付款应该被扣光");
+        assert!(after.slots[2].is_empty(), "结果格应该清空");
+        let apples = after
+            .slots
+            .iter()
+            .filter(|stack| stack.item == items::APPLE)
+            .map(|stack| stack.count)
+            .sum::<i32>();
+        assert_eq!(apples, 2, "Shift 点击应该连续换到两个苹果");
+    }
 
     /// 打开后是全空的菜单，state_id 从 1 开始。
     #[test]

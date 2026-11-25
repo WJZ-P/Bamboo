@@ -1448,6 +1448,19 @@ pub(crate) fn on_interact_entity(
             let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
             world.interact_mob(entity_id, &request)
         });
+        // 村民不由 `mobInteract` 处理：右键按 `Villager.mobInteract` 分支走
+        // （幼年摇头、`NONE` 职业摇头 + 消耗、有职业进交易菜单）。
+        // Bamboo's mobInteract does not implement villagers; handle `Villager.mobInteract`
+        // here before the generic "pass" filter.
+        if !using_secondary_action
+            && let Some(target) = region.entities.public_at(entity_id)
+            && matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
+            && let Some(result) =
+                crate::merchant::interact(region, id, entity_id, try_hand == Hand::Main)
+        {
+            swing(region, id, try_hand, result);
+            return;
+        }
         if !outcome.result.consumes_action() {
             continue;
         }

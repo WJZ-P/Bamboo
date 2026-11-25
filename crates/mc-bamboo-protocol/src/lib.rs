@@ -12,6 +12,7 @@ pub mod compression;
 mod deep_stack;
 pub mod frame;
 pub mod item;
+pub mod merchant;
 pub mod packet;
 pub mod text;
 

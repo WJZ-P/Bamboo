@@ -869,7 +869,8 @@ fn every_function_kind_evaluates() {
         stone.clone(),
         &stored,
     );
-    assert!(matches!(map, Err(LootError::Unsupported(_))));
+    // 假世界里找不到结构，官方原样退回输入物品堆。
+    assert_eq!(map.unwrap(), stone);
     let lore = apply(
         json!({"type":"minecraft:set_lore","lore":[{"text":"line"}]}),
         stone.clone(),

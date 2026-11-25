@@ -160,7 +160,7 @@ pub struct TypedComponent {
 }
 
 impl TypedComponent {
-    fn read(cursor: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+    pub(crate) fn read(cursor: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         let kind = cursor.registry_id(Registry::DATA_COMPONENT_TYPE)?;
         Ok(Self {
             kind,
@@ -168,7 +168,7 @@ impl TypedComponent {
         })
     }
 
-    fn write(out: &mut Vec<u8>, value: &Self) {
+    pub(crate) fn write(out: &mut Vec<u8>, value: &Self) {
         write_varint(out, value.kind);
         value.value.write(out);
     }

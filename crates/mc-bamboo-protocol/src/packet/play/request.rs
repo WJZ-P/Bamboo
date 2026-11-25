@@ -294,6 +294,10 @@ pub enum PlayRequest {
         conditional: bool,
         automatic: bool,
     },
+    /// `ServerboundSelectTradePacket`：选中交易界面里的第几条。
+    SelectTrade {
+        slot: i32,
+    },
     /// 服务端不解码的包，内容是包 ID。
     Other(i32),
 }
@@ -430,6 +434,9 @@ impl PlayRequest {
                 include_data: reader.bool()?,
             },
             serverbound::CONTAINER_CLICK => read_container_click(&mut reader)?,
+            serverbound::SELECT_TRADE => Self::SelectTrade {
+                slot: reader.varint()?,
+            },
             serverbound::CONTAINER_CLOSE => Self::ContainerClose {
                 container_id: reader.varint()?,
             },
