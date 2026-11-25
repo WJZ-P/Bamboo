@@ -453,6 +453,16 @@ pub struct PlayerView {
     pub alive: bool,
     pub spectator: bool,
     pub creative: bool,
+    /// `getAbilities().flying`：创造且飞行中的玩家不被打进 `getHitPlayers`。
+    ///
+    /// `getAbilities().flying`: a creative, flying player is left out of `getHitPlayers`.
+    pub flying: bool,
+    /// `getAttributeValue(EXPLOSION_KNOCKBACK_RESISTANCE)`：爆炸击退抗性，
+    /// 爆炸保护附魔和盔甲修饰符会提高它。
+    ///
+    /// `getAttributeValue(EXPLOSION_KNOCKBACK_RESISTANCE)`; blast protection and
+    /// armor modifiers raise it.
+    pub explosion_knockback_resistance: f64,
     /// 官方 `GameType` 的 ID：0 生存、1 创造、2 冒险、3 旁观。
     /// `isSurvival()` 为真的是生存（0）和冒险（2）。
     ///
@@ -964,6 +974,12 @@ pub struct LandFacts {
 /// `Spawn`、`Remove`、`ScheduleTick`、`Depart`。这次不实现。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    /// 实体移动 / 死亡等发出的游戏事件。并行驱动攒到落地阶段按 uid 顺序投递。
+    GameEvent {
+        event: crate::game_event::GameEvent,
+        position: Vec3,
+        context: crate::game_event::dispatch::EventContext,
+    },
     ShootMobArrow {
         position: Vec3,
         direction: Vec3,
@@ -1588,7 +1604,12 @@ pub enum Command {
 /// 改发出者，没有任何回写补丁。
 pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
     match command {
-        Command::Explode { center, radius } => world.explode_tnt(center, radius),
+        Command::GameEvent {
+            event,
+            position,
+            context,
+        } => world.game_event(event, position, context),
+        Command::Explode { center, radius } => world.explode_tnt(center, radius, me.id),
         Command::ExplodeMob {
             center,
             radius,

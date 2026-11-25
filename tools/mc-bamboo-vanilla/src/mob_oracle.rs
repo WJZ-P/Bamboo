@@ -61,6 +61,7 @@ mod phantom;
 mod pig_ride;
 mod pillager;
 mod projectile;
+mod sculk_sensor;
 mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
@@ -196,6 +197,9 @@ enum Line {
     Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
     TrialSpawner(Box<trial_spawner::TrialSpawnerCase>),
+    SculkSensor(sculk_sensor::SculkSensorCase),
+    SculkSensorOrder(sculk_sensor::SculkSensorOrderCase),
+    SculkShrieker(sculk_sensor::SculkShriekerCase),
     End(End),
 }
 
@@ -421,6 +425,12 @@ struct Case {
     /// 每刻 0 号玩家自己收到的那几种包（受伤动画、战斗进出、死亡界面、血量）。
     #[serde(default)]
     zombie_player_packets: Option<Vec<Vec<String>>>,
+    /// TNT 场景：{x, y, z} 方块坐标，TNT 生成在方块底心。
+    #[serde(default)]
+    tnt: Option<[i32; 3]>,
+    /// TNT 场景：逐刻 [x,y,z 的 f64 位, fuse]；爆炸后那刻起是 null。
+    #[serde(default)]
+    tnt_steps: Option<Vec<Option<[i64; 4]>>>,
     /// S2 玩家效果场景的规则与动作。
     #[serde(default)]
     effect_scene: Option<EffectScene>,
@@ -868,6 +878,7 @@ fn zombie_style(name: &str) -> bool {
         "spider_",
         "cave_spider_",
         "enderman_",
+        "tnt_blast_",
         "slime_",
         "witch_drink_",
         "pillager_",
@@ -988,6 +999,15 @@ struct MobLevel {
     redstone: mc_bamboo_blocks::RedstoneMemory,
     block_entities: BlockEntities,
     block_events: BlockEvents,
+    /// 游戏事件监听者登记表；只有幽匿感测体这类场景会用到。
+    game_event_listeners: mc_bamboo_blocks::game_event::registry::GameEventListeners,
+    /// 尖啸体场景的玩家监守者警告等级，按玩家 uid。
+    warden_warnings: HashMap<
+        mc_bamboo_blocks::entity::EntityUid,
+        mc_bamboo_blocks::behaviour::misc::warden::WardenSpawnTracker,
+    >,
+    /// 尖啸体场景玩家身上黑暗效果剩下的刻数（`tryRespond` 给 260 刻）。
+    darkness_ticks: i32,
     /// 常驻 POI 索引表；未登记的场景保持为空，查询返回空。
     ///
     /// Persistent POI store; stays empty for scenes that do not register POIs.
@@ -1006,6 +1026,8 @@ struct MobLevel {
     short_hunger: bool,
     /// 改坏确认 `zombie_bed`：床的怪物检查一律放行。
     ignore_bed_monsters: bool,
+    /// 改坏确认爆炸：位 0 跳过 `hurtEntities`，位 1 丢掉爆炸中心的 0.0625 抬升。
+    explosion_break: u8,
 }
 
 impl MobLevel {
@@ -1063,6 +1085,18 @@ impl LevelTables for MobLevel {
     fn redstone_table_mut(&mut self) -> &mut mc_bamboo_blocks::RedstoneMemory {
         &mut self.redstone
     }
+
+    fn game_event_listeners(
+        &self,
+    ) -> Option<&mc_bamboo_blocks::game_event::registry::GameEventListeners> {
+        Some(&self.game_event_listeners)
+    }
+
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut mc_bamboo_blocks::game_event::registry::GameEventListeners> {
+        Some(&mut self.game_event_listeners)
+    }
 }
 
 impl EntityTables for MobLevel {
@@ -1076,6 +1110,10 @@ impl EntityTables for MobLevel {
 }
 
 impl Level for MobLevel {
+    fn explosion_break(&self) -> u8 {
+        self.explosion_break
+    }
+
     fn block_state(&self, pos: BlockPos) -> BlockState {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
             return BlockState(mc_bamboo_data::blocks::VOID_AIR);
@@ -1319,6 +1357,11 @@ impl Level for MobLevel {
         target: mc_bamboo_blocks::entity::EntityUid,
         instance: &mc_bamboo_blocks::entity::mob::effects::EffectInstance,
     ) -> bool {
+        // 尖啸体的黑暗：没有真实玩家时在这里记下剩余刻数。
+        if instance.effect == mc_bamboo_data::registries::mob_effect::DARKNESS {
+            self.darkness_ticks = self.darkness_ticks.max(instance.duration);
+            return true;
+        }
         let Some(game) = self.game.as_mut() else {
             return false;
         };
@@ -1344,6 +1387,10 @@ impl Level for MobLevel {
         };
         game.heal(target, amount);
         true
+    }
+
+    fn warn_warden(&mut self, target: mc_bamboo_blocks::entity::EntityUid) -> Option<i32> {
+        self.warden_warnings.entry(target).or_default().try_warn()
     }
 
     fn teleport_player_now(
@@ -1958,6 +2005,9 @@ impl Report {
                 Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
                 Line::TrialSpawner(case) => self.replay_trial_spawner(&case),
+                Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
+                Line::SculkSensorOrder(case) => self.replay_sculk_sensor_order(&case),
+                Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
@@ -2146,6 +2196,9 @@ impl Report {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(case.first_id),
             players: case
@@ -2177,6 +2230,8 @@ impl Report {
                     game_mode: 0,
                     mining_fatigue: None,
                     creative: false,
+                    flying: false,
+                    explosion_knockback_resistance: 0.0,
                     sneaking: false,
                     sprinting: false,
                     swimming: false,
@@ -2228,6 +2283,11 @@ impl Report {
             ignore_bed_monsters: matches!(break_test, Some("zombie_bed")),
             short_hunger: matches!(break_test, Some("zombie_hunger")),
             wrong_was_hurt: matches!(break_test, Some("zombie_was_hurt")),
+            explosion_break: match break_test {
+                Some("explode_tnt_hurt") => 1,
+                Some("explode_tnt_center") => 2,
+                _ => 0,
+            },
         };
         for &[x, y, z, state] in &case.blocks {
             level
@@ -2246,6 +2306,8 @@ impl Report {
         let mut ticks = BlockTicks::new();
         ticks.set_time(case.start_time);
         let mut ids = Vec::new();
+        // TNT 场景：额外实体的 ID，排在所有牛之后（和官方 setId(FIRST_ID + mobs.size()) 一致）。
+        let mut tnt_id: Option<i32> = None;
         let mut tracking = EntityTracking::default();
         let sound_source = mc_bamboo_blocks::LegacyRandom::new(12345);
         {
@@ -2588,6 +2650,14 @@ impl Report {
             {
                 world.start_riding_with_limit(passenger, vehicle, 2);
             }
+            // TNT 场景：照官方 `PrimedTnt(level, x+0.5, y, z+0.5, null)` 构造函数起一个
+            // 点燃的 TNT。构造时从 `level.random` 取一次 `next_double` 算朝向，位次和官方
+            // 一致，后面射线/洗牌的世界随机源仍对齐。
+            if let Some([x, y, z]) = case.tnt {
+                let position = Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5);
+                let angle = world.random().next_double();
+                tnt_id = Some(world.spawn_entity(Entity::primed_tnt(position, angle)));
+            }
         }
         let Some(first) = case.steps.first() else {
             self.mismatch(format!("{}: no steps", case.name));
@@ -2607,6 +2677,7 @@ impl Report {
         }
         self.compare(&case.name, 0, &ours, first);
         self.compare_zombie_player(case, &mut level, 0);
+        self.compare_tnt(case, &level, 0, tnt_id);
         // 场景开始时的牛也算「刚生成」，但它们在 tick 0 已经建过同步状态，
         // 不该出现在后面逐刻的新实体比对里。
         let _ = level.entities.take_spawn_snapshots();
@@ -2870,6 +2941,48 @@ impl Report {
                 world.tick_entities();
                 tick_effects = world.into_effects();
             }
+            // 爆炸包走游戏层正式入口：把 `Effect::Explode` 发给区域里的玩家，
+            // `compare_zombie_player` 再和官方逐字节比（含击退向量）。
+            if let Some(game) = level.game.as_mut() {
+                for effect in &tick_effects {
+                    if let mc_bamboo_blocks::Effect::Explode {
+                        center,
+                        radius,
+                        block_count,
+                        hit_players,
+                        is_small,
+                        play_sound,
+                    } = effect
+                    {
+                        // 改坏确认：粒子、方块数和击退向量各有一处故意改错。
+                        let break_test = self.break_test.as_deref();
+                        let is_small = if break_test == Some("explode_particle") {
+                            !*is_small
+                        } else {
+                            *is_small
+                        };
+                        let block_count = if break_test == Some("explode_block_count") {
+                            *block_count + 1
+                        } else {
+                            *block_count
+                        };
+                        let empty: Vec<(i32, mc_bamboo_core::Vec3)> = Vec::new();
+                        let knock = if break_test == Some("explode_knockback") {
+                            empty.as_slice()
+                        } else {
+                            hit_players.as_slice()
+                        };
+                        game.send_explode(
+                            *center,
+                            *radius,
+                            block_count,
+                            knock,
+                            is_small,
+                            *play_sound,
+                        );
+                    }
+                }
+            }
             // 这一刻新生成的实体：快照是在 `addFreshEntity` 时记下的，官方
             // `ChunkMap.addEntity` 也在同一时刻建 `ServerEntity`。
             // Newly spawned entities: the snapshot is taken at `addFreshEntity`,
@@ -2967,6 +3080,7 @@ impl Report {
             self.compare(&case.name, index, &ours, expected);
             self.compare_blocks(case, &level, index);
             self.compare_zombie_player(case, &mut level, index);
+            self.compare_tnt(case, &level, index, tnt_id);
             if let Some(expected) = case.level_events.as_ref().and_then(|all| all.get(index)) {
                 let ours: Vec<[i32; 6]> = tick_effects
                     .iter()
@@ -3078,9 +3192,34 @@ impl Report {
         }
     }
 
+    /// TNT 场景：逐刻比 TNT 的位置（f64 位）和引信；爆炸那刻实体离表，官方记 null。
+    fn compare_tnt(&mut self, case: &Case, level: &MobLevel, index: usize, tnt_id: Option<i32>) {
+        let Some(expected) = case.tnt_steps.as_ref().and_then(|all| all.get(index)) else {
+            return;
+        };
+        let ours: Option<[i64; 4]> =
+            tnt_id
+                .and_then(|id| level.entities.get(id))
+                .and_then(|entity| match &entity.kind {
+                    EntityKind::Tnt(data) => Some([
+                        entity.position.x.to_bits() as i64,
+                        entity.position.y.to_bits() as i64,
+                        entity.position.z.to_bits() as i64,
+                        i64::from(data.fuse),
+                    ]),
+                    _ => None,
+                });
+        if &ours != expected && self.mismatches.len() < self.show {
+            self.mismatches.push(format!(
+                "{} tick {index} tnt: official {expected:?} bamboo {ours:?}",
+                case.name
+            ));
+        }
+    }
+
     /// 真实玩家的僵尸场景：比 0 号玩家的状态和它自己收到的那几种包。
     fn compare_zombie_player(&mut self, case: &Case, level: &mut MobLevel, index: usize) {
-        const SELF_PACKETS: [u8; 6] = [43, 67, 68, 69, 106, 135];
+        const SELF_PACKETS: [u8; 7] = [36, 43, 67, 68, 69, 106, 135];
         let (Some(game), Some(player)) = (level.game.as_mut(), case.players.first()) else {
             return;
         };

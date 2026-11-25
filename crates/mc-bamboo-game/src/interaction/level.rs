@@ -56,6 +56,9 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) redstone: &'a mut RedstoneMemory,
     pub(crate) block_entities: &'a mut BlockEntities,
     pub(crate) block_events: &'a mut BlockEvents,
+    /// 这一岛的游戏事件监听者登记表。
+    pub(crate) game_event_listeners:
+        &'a mut mc_bamboo_blocks::game_event::registry::GameEventListeners,
     pub(crate) containers: &'a mut crate::pos_map::PosMap<ContainerEntry>,
     pub(crate) entities: &'a mut Entities,
     pub(crate) loot_sequences: &'a mc_bamboo_loot::RandomSequences,
@@ -143,6 +146,18 @@ impl LevelTables for RegionLevel<'_> {
 
     fn block_events_table_mut(&mut self) -> &mut BlockEvents {
         self.block_events
+    }
+
+    fn game_event_listeners(
+        &self,
+    ) -> Option<&mc_bamboo_blocks::game_event::registry::GameEventListeners> {
+        Some(self.game_event_listeners)
+    }
+
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut mc_bamboo_blocks::game_event::registry::GameEventListeners> {
+        Some(self.game_event_listeners)
     }
 
     fn redstone_table(&self) -> &RedstoneMemory {

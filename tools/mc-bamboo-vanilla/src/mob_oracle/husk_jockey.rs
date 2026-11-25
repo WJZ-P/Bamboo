@@ -59,6 +59,9 @@ impl Case {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: mc_bamboo_blocks::BlockEntities::default(),
             block_events: mc_bamboo_blocks::BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: EntityStore::with_next_id(1 << 24),
             players: Vec::new(),
@@ -68,6 +71,7 @@ impl Case {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
         }
     }
 }

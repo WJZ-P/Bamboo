@@ -102,6 +102,7 @@ import net.minecraft.server.network.Filterable;
 import net.minecraft.util.Mth;
 import net.minecraft.world.inventory.LecternMenu;
 import net.minecraft.world.inventory.MenuType;
+import net.minecraft.world.inventory.MerchantMenu;
 import net.minecraft.world.inventory.RemoteSlot;
 import net.minecraft.world.inventory.ShulkerBoxMenu;
 import net.minecraft.world.inventory.SimpleContainerData;
@@ -119,6 +120,12 @@ import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.trading.ItemCost;
+import net.minecraft.world.item.trading.Merchant;
+import net.minecraft.world.item.trading.MerchantOffer;
+import net.minecraft.world.item.trading.MerchantOffers;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundEvents;
 import net.minecraft.world.item.enchantment.Enchantment;
 import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.item.enchantment.ItemEnchantments;
@@ -368,6 +375,9 @@ public final class MenuOracle {
             Shape shape = Shape.values()[random.nextInt(Shape.values().length)];
             if (shape == Shape.LECTERN) {
                 return lecternCase(id, random);
+            }
+            if (shape == Shape.MERCHANT) {
+                return merchantCase(id, random);
             }
             boolean creative = random.nextInt(4) != 0;
             FakePlayer player = FakePlayer.create(creative);
@@ -961,6 +971,108 @@ public final class MenuOracle {
         }
 
         /**
+         * 商人菜单：一组固定交易、把付款物品放进玩家背包，然后选交易 / 放物品 / 取结果 / Shift 点击。
+         * 交易表里 `itemB == 0` 表示没有第二格付款，和 Rust 侧的 `[itemA, countA, itemB, countB, result, resultCount, maxUses]` 对齐。
+         * 三种变体：付款够做 1 次、够做 3 次、背包快满（只留一个空格）。
+         */
+        private JsonObject merchantCase(int id, Random random) {
+            boolean creative = random.nextInt(4) != 0;
+            FakePlayer player = FakePlayer.create(creative);
+            Inventory inventory = player.getInventory();
+
+            int emerald = BuiltInRegistries.ITEM.getId(Items.EMERALD);
+            int apple = BuiltInRegistries.ITEM.getId(Items.APPLE);
+            int dirt = BuiltInRegistries.ITEM.getId(Items.DIRT);
+
+            MerchantOffers offers = new MerchantOffers();
+            offers.add(new MerchantOffer(
+                    new ItemCost(Items.EMERALD, 1), Optional.empty(), new ItemStack(Items.APPLE),
+                    0, 12, 1, 0.0f));
+
+            FakeMerchant merchant = new FakeMerchant(offers);
+            MerchantMenu menu = new MerchantMenu(CONTAINER_ID, inventory, merchant);
+
+            int variant = id % 3;
+            // 付款数量：1 次 / 3 次。背包快满时只留一个空格给结果。
+            int emeralds = variant == 1 ? 3 : 1;
+            inventory.setItem(9, new ItemStack(Items.EMERALD, emeralds));
+            if (variant == 2) {
+                for (int slot = 10; slot < 35; slot++) {
+                    inventory.setItem(slot, new ItemStack(Items.DIRT, 64));
+                }
+            }
+            // 先填背包再装同步器，`sendAllDataToRemote` 把填好的槽都记进 remoteSlots。
+            menu.setSynchronizer(new Sync());
+
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "case");
+            line.addProperty("id", id);
+            line.addProperty("shape", "merchant");
+            line.addProperty("creative", creative);
+            line.add("container", emptyContainer(3));
+            line.add("inventory", inventoryItems(inventory));
+            JsonArray offersJson = new JsonArray();
+            offersJson.add(offerJson(emerald, 1, 0, 0, apple, 1, 12));
+            line.add("offers", offersJson);
+            line.add("open", outcome(menu));
+
+            JsonArray steps = new JsonArray();
+            // 选交易 0：自动把绿宝石填进付款格，结果格显示苹果。
+            steps.add(tradeStep(menu, 0));
+            // 结果格 Shift 取出：连做多笔，直到付款不够或背包放不下。
+            steps.add(clickStep(menu, player, 2, 0, 1));
+            line.add("steps", steps);
+            return line;
+        }
+
+        private static JsonArray emptyContainer(int size) {
+            JsonArray container = new JsonArray();
+            for (int i = 0; i < size; i++) {
+                JsonArray empty = new JsonArray();
+                empty.add(0);
+                empty.add(0);
+                container.add(empty);
+            }
+            return container;
+        }
+
+        private static JsonArray offerJson(int a, int ca, int b, int cb, int result, int cr, int uses) {
+            JsonArray offer = new JsonArray();
+            offer.add(a);
+            offer.add(ca);
+            offer.add(b);
+            offer.add(cb);
+            offer.add(result);
+            offer.add(cr);
+            offer.add(uses);
+            return offer;
+        }
+
+        private JsonObject tradeStep(MerchantMenu menu, int slot) {
+            menu.setSelectionHint(slot);
+            menu.tryMoveItems(slot);
+            menu.broadcastChanges();
+            JsonObject step = new JsonObject();
+            step.addProperty("slot", 0);
+            step.addProperty("button", 0);
+            step.addProperty("input", 0);
+            step.addProperty("selectTrade", slot);
+            step.add("outcome", outcome(menu));
+            return step;
+        }
+
+        private JsonObject clickStep(AbstractContainerMenu menu, FakePlayer player, int slot, int button, int input) {
+            menu.clicked(slot, button, INPUTS[input], player);
+            menu.broadcastChanges();
+            JsonObject step = new JsonObject();
+            step.addProperty("slot", slot);
+            step.addProperty("button", button);
+            step.addProperty("input", input);
+            step.add("outcome", outcome(menu));
+            return step;
+        }
+
+        /**
          * 官方 {@link LecternMenu} 的按钮。不创建 {@code LecternBlockEntity}：它的 {@code setPage} 会改方块，
          * {@code stillValid} 没有世界时永远是假。页码夹取和 {@code removeItemNoUpdate} 清页写在旁边的容器里。
          */
@@ -1027,7 +1139,8 @@ public final class MenuOracle {
         GRINDSTONE(2, "grindstone", true, false),
         ANVIL(2, "anvil", true, false),
         CARTOGRAPHY(2, "cartography", true, false),
-        ENCHANTMENT(2, "enchantment", true, false);
+        ENCHANTMENT(2, "enchantment", true, false),
+        MERCHANT(3, "merchant", false, false);
 
         final int size;
         final String id;
@@ -1057,6 +1170,7 @@ public final class MenuOracle {
                 case DISPENSER -> new DispenserMenu(CONTAINER_ID, inventory, container);
                 case SHULKER -> new ShulkerBoxMenu(CONTAINER_ID, inventory, container);
                 case LECTERN -> throw new IllegalStateException("lectern cases build their own menu");
+                case MERCHANT -> throw new IllegalStateException("merchant cases build their own menu");
                 case INVENTORY -> new InventoryMenu(inventory, true, player);
                 case CRAFTING -> new CraftingMenu(CONTAINER_ID, inventory, ContainerLevelAccess.create(player.level(), BlockPos.ZERO));
                 // 合成器的九格是 3x3 的 CraftingContainer，ContainerData 有 9 个禁用位和 1 个 triggered。
@@ -1969,6 +2083,72 @@ public final class MenuOracle {
 
         @Override
         public void send(Packet<?> packet, ChannelFutureListener listener) {}
+    }
+
+    /** 假商人。交易表固定，`notifyTrade` 记使用次数（影响售罄状态）。 */
+    private static final class FakeMerchant implements Merchant {
+        private final MerchantOffers offers;
+        private Player tradingPlayer;
+
+        FakeMerchant(MerchantOffers offers) {
+            this.offers = offers;
+        }
+
+        @Override
+        public void setTradingPlayer(Player player) {
+            this.tradingPlayer = player;
+        }
+
+        @Override
+        public Player getTradingPlayer() {
+            return tradingPlayer;
+        }
+
+        @Override
+        public MerchantOffers getOffers() {
+            return offers;
+        }
+
+        @Override
+        public void overrideOffers(MerchantOffers merchantOffers) {}
+
+        @Override
+        public void notifyTrade(MerchantOffer offer) {
+            offer.increaseUses();
+        }
+
+        @Override
+        public void notifyTradeUpdated(ItemStack stack) {}
+
+        @Override
+        public int getVillagerXp() {
+            return 0;
+        }
+
+        @Override
+        public void overrideXp(int xp) {}
+
+        @Override
+        public boolean showProgressBar() {
+            return true;
+        }
+
+        @Override
+        public SoundEvent getNotifyTradeSound() {
+            return SoundEvents.VILLAGER_YES;
+        }
+
+        @Override
+        public boolean isClientSide() {
+            // `playTradeSound` 只在服务端把商人 cast 成 Entity 取坐标；假商人不是实体，
+            // 让这一支按客户端跳过，菜单比较不看声音。
+            return true;
+        }
+
+        @Override
+        public boolean stillValid(Player player) {
+            return true;
+        }
     }
 
     /** 假玩家。继承 ServerPlayer 的理由和 BlockOracle 一样，只补菜单用得到的字段。 */

@@ -519,7 +519,15 @@ impl SpawnerBlockEntity {
                 None,
             );
             world.level_event(2004, self.pos, 0);
-            // `gameEvent(ENTITY_PLACE)`：Bamboo 没有 sculk 振动系统，不建模。
+            // `gameEvent(entity, ENTITY_PLACE, BlockPos.containing(落点))`：源头是新刷出的实体，
+            // 位置取落点所在格的格心。
+            // `gameEvent(entity, ENTITY_PLACE, BlockPos.containing(spawn))`, sourced from the new
+            // entity at the centre of the block it landed in.
+            world.game_event(
+                crate::game_event::GameEvent::EntityPlace,
+                crate::world::block_center_public(block_pos),
+                crate::game_event::dispatch::EventContext::default(),
+            );
             if is_mob {
                 world.with_entity_mut(uid, &mut |entity| {
                     entity.with_mob(|_, mob| {

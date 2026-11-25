@@ -151,6 +151,15 @@ fn place(
     } else {
         world.play_block_sound(pos, sound, volume, pitch);
     }
+    // `BlockItem.place` 在放完方块、发完音效之后发 BLOCK_PLACE。
+    world.game_event(
+        crate::game_event::GameEvent::BlockPlace,
+        crate::world::block_center_public(pos),
+        crate::game_event::dispatch::EventContext {
+            affected_state: Some(placed),
+            ..Default::default()
+        },
+    );
     InteractionResult::Success
 }
 

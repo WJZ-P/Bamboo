@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::{inbound::PlayerId, region::Region};
 
-/// 已经接上游戏事件来源的触发器（30 种）。其余 28 种见 `docs/advancements.md` 的表。
+/// 已经接上游戏事件来源的触发器。其余见 `docs/advancements.md` 的表。
 pub const CONNECTED_TRIGGERS: &[&str] = &[
     "minecraft:tick",
     "minecraft:location",
@@ -46,6 +46,7 @@ pub const CONNECTED_TRIGGERS: &[&str] = &[
     "minecraft:filled_bucket",
     "minecraft:crafter_recipe_crafted",
     "minecraft:cured_zombie_villager",
+    "minecraft:villager_trade",
 ];
 
 /// 借用被拆开的地方（实体 tick、`HurtParts`）只压一条事件，玩家 tick 末尾统一 dispatch。
@@ -219,6 +220,16 @@ pub(crate) fn matches(trigger: &str, payload: &Value, conditions: &Value) -> boo
         | "minecraft:player_interacted_with_entity" => {
             known_conditions(&["entity", "victims", "source", "damage"])
                 && matches_entity(conditions, payload)
+        }
+        // 交易：`TradeTrigger` 判据带结果物品谓词和村民实体谓词。
+        "minecraft:villager_trade" => {
+            known_conditions(&["item", "villager"])
+                && fields
+                    .get("item")
+                    .is_none_or(|item| item_predicate_matches(item, payload.get("item")))
+                && fields.get("villager").is_none_or(|villager| {
+                    entity_predicate_matches(villager, payload.get("villager"))
+                })
         }
         // 下面这一组是本期新接的入口。
         "minecraft:enchanted_item" => {
@@ -674,7 +685,7 @@ mod tests {
         let tree = AdvancementTree::global();
         let set: std::collections::BTreeSet<&str> = CONNECTED_TRIGGERS.iter().copied().collect();
         assert_eq!(set.len(), CONNECTED_TRIGGERS.len());
-        assert_eq!(CONNECTED_TRIGGERS.len(), 32);
+        assert_eq!(CONNECTED_TRIGGERS.len(), 33);
         for trigger in CONNECTED_TRIGGERS {
             assert!(tree.triggers.contains(trigger), "{trigger} 不在注册表里");
         }

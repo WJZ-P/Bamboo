@@ -771,7 +771,9 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::KilledByArrow { .. } => 28,
         Effect::EnderPearlTeleport { .. } => 29,
         Effect::GuardianElderEffect { .. } => 30,
-        Effect::TrialSpawnerTransformBadOmen { .. } => 31,
+        Effect::VibrationParticle { .. } => 31,
+        Effect::Explode { .. } => 32,
+        Effect::TrialSpawnerTransformBadOmen { .. } => 33,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -981,6 +983,41 @@ fn hash_effect(effect: &Effect) -> u64 {
             set_spawn.hash(&mut hasher);
             core::mem::discriminant(&problem).hash(&mut hasher);
         }
+        Effect::VibrationParticle {
+            pos,
+            x,
+            y,
+            z,
+            travel,
+        } => {
+            pos.hash(&mut hasher);
+            x.to_bits().hash(&mut hasher);
+            y.to_bits().hash(&mut hasher);
+            z.to_bits().hash(&mut hasher);
+            travel.hash(&mut hasher);
+        }
+        Effect::Explode {
+            center,
+            radius,
+            block_count,
+            ref hit_players,
+            is_small,
+            play_sound,
+        } => {
+            center.x.to_bits().hash(&mut hasher);
+            center.y.to_bits().hash(&mut hasher);
+            center.z.to_bits().hash(&mut hasher);
+            radius.to_bits().hash(&mut hasher);
+            block_count.hash(&mut hasher);
+            for (uid, knock) in hit_players {
+                uid.hash(&mut hasher);
+                knock.x.to_bits().hash(&mut hasher);
+                knock.y.to_bits().hash(&mut hasher);
+                knock.z.to_bits().hash(&mut hasher);
+            }
+            is_small.hash(&mut hasher);
+            play_sound.hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -1062,6 +1099,16 @@ pub fn entity_facts(entity: &dyn BlockEntity) -> u64 {
 }
 
 impl LevelSideState for Recording<'_> {
+    fn game_event_listeners(&self) -> Option<&crate::game_event::registry::GameEventListeners> {
+        self.level.game_event_listeners()
+    }
+
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut crate::game_event::registry::GameEventListeners> {
+        self.level.game_event_listeners_mut()
+    }
+
     fn comparator_output(&self, pos: BlockPos) -> i32 {
         let value = self.level.comparator_output(pos);
         self.read(Some(pos), K_REDSTONE, (0_u8, value));

@@ -1,8 +1,9 @@
 //! `RespawnAnchorBlock`。
 //!
-//! 主世界里用充能的重生锚官方会爆炸，爆炸不在范围里：这里吃掉点击，方块留在原地。
+//! 主世界里用充能的重生锚空手右键会爆炸（`RespawnAnchorBlock.explode`，强度 5、带火、
+//! `bad_respawn_point` 伤害、`BLOCK` 交互）；Bamboo 只有主世界，所以充能后空手右键必爆。
 
-use mc_bamboo_core::{BlockPos, Direction, Hand};
+use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{items, sounds::sound_event};
 
 use crate::{
@@ -62,14 +63,22 @@ impl Behaviour for RespawnAnchor {
     fn use_without_item(
         &self,
         state: BlockState,
-        _world: &mut World,
-        _ctx: &UseContext,
+        world: &mut World,
+        ctx: &UseContext,
     ) -> InteractionResult {
         if state.get(RESPAWN_ANCHOR_CHARGES) == 0 {
-            InteractionResult::Pass
-        } else {
-            InteractionResult::SuccessServer
+            return InteractionResult::Pass;
         }
+        // 主世界用充能的重生锚会爆炸（Bamboo 只有主世界，`canSetSpawn` 恒假）。
+        // `Vec3.atCenterOf(pos)`，强度 5、带火，伤害类型 `bad_respawn_point`。
+        let pos = ctx.clicked_pos();
+        let center = Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.5,
+            f64::from(pos.z) + 0.5,
+        );
+        world.explode_respawn_anchor(center, pos);
+        InteractionResult::SuccessServer
     }
 
     fn analog_output_signal(
@@ -90,15 +99,36 @@ mod tests {
     use super::*;
     use crate::testing::{TestLevel, actor_holding, top_hit, use_item};
 
-    /// 官方这里爆炸，oracle 比不了，这里固定下来：什么也不发生，但是点击被吃掉。
+    /// 主世界用充能的重生锚空手右键会爆炸：重生锚被移除，旁边的石头被炸掉。
     #[test]
-    fn a_charged_anchor_does_not_explode() {
+    fn a_charged_anchor_explodes() {
         let pos = BlockPos::new(0, 64, 0);
         let charged = BlockState(blocks::RESPAWN_ANCHOR).with(RESPAWN_ANCHOR_CHARGES, 1);
         let mut level = TestLevel::new();
         level.set(pos, charged);
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            level.set(pos.offset(dx, 0, dz), BlockState(blocks::STONE));
+        }
         let outcome = use_item(&mut level, &actor_holding(items::AIR), top_hit(pos));
         assert_eq!(outcome.result, InteractionResult::SuccessServer);
-        assert_eq!(level.get(pos), charged);
+        // 重生锚被移除。
+        assert!(level.get(pos).is_air());
+        // 至少一块相邻的石头被炸掉。
+        let broken = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .into_iter()
+            .any(|(dx, dz)| level.get(pos.offset(dx, 0, dz)).is_air());
+        assert!(broken, "the blast should break the surrounding stone");
+    }
+
+    /// 没充能的重生锚空手右键什么也不发生。
+    #[test]
+    fn an_uncharged_anchor_does_not_explode() {
+        let pos = BlockPos::new(0, 64, 0);
+        let uncharged = BlockState(blocks::RESPAWN_ANCHOR);
+        let mut level = TestLevel::new();
+        level.set(pos, uncharged);
+        let outcome = use_item(&mut level, &actor_holding(items::AIR), top_hit(pos));
+        assert_eq!(outcome.result, InteractionResult::Pass);
+        assert_eq!(level.get(pos), uncharged);
     }
 }

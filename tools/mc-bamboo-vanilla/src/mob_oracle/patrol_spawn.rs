@@ -197,6 +197,9 @@ fn fixture(case: &Case) -> MobLevel {
         redstone: Default::default(),
         block_entities: BlockEntities::default(),
         block_events: BlockEvents::default(),
+        game_event_listeners: Default::default(),
+        warden_warnings: Default::default(),
+        darkness_ticks: 0,
         poi: mc_bamboo_world::poi::PoiStore::new(),
         entities: Entities::with_next_id(2),
         players: vec![player()],
@@ -206,6 +209,7 @@ fn fixture(case: &Case) -> MobLevel {
         ignore_bed_monsters: false,
         short_hunger: false,
         wrong_was_hurt: false,
+        explosion_break: 0,
     }
 }
 
@@ -226,6 +230,8 @@ fn player() -> PlayerView {
         game_mode: 0,
         mining_fatigue: None,
         creative: false,
+        flying: false,
+        explosion_knockback_resistance: 0.0,
         sneaking: false,
         sprinting: false,
         swimming: false,

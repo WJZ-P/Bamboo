@@ -121,9 +121,19 @@ pub fn create_block_entity(
         return Ok(Some(Box::new(VaultBlockEntity::new(pos, vault))));
     }
     if let Some(passive) = PassiveKind::from_name(id) {
-        return Ok(Some(Box::new(PassiveBlockEntity::read(
-            passive, pos, state, tag,
-        )?)));
+        return Ok(Some(match passive {
+            PassiveKind::SculkSensor | PassiveKind::CalibratedSculkSensor => Box::new(
+                crate::behaviour::misc::sculk_entity::SculkSensorEntity::read(
+                    pos,
+                    passive == PassiveKind::CalibratedSculkSensor,
+                    tag,
+                )?,
+            ),
+            PassiveKind::SculkShrieker => Box::new(
+                crate::behaviour::misc::sculk_shrieker::SculkShriekerEntity::read(pos, tag)?,
+            ),
+            _ => Box::new(PassiveBlockEntity::read(passive, pos, state, tag)?),
+        }));
     }
     if id == "minecraft:trial_spawner" {
         // 官方 `loadAdditional`：`state` 和 `ominous` 来自方块状态，其余两组

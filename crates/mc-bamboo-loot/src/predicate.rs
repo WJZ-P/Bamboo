@@ -196,6 +196,8 @@ pub enum PartialComponent {
     },
     /// 组件存在即可。
     Present(String),
+    /// 变种类子谓词（如 `minecraft:villager/variant`）：组件值是集合里的某个名字。
+    OneOf { name: String, values: Vec<String> },
     /// 本实现还没实现的谓词类型。
     Unsupported(String),
 }
@@ -277,6 +279,19 @@ impl ComponentMatchers {
                     },
                 })
             }
+            "minecraft:villager/variant" => Ok(PartialComponent::OneOf {
+                name: name.to_owned(),
+                values: super::json::string_or_list(value, what)?
+                    .into_iter()
+                    .map(|raw| {
+                        if raw.contains(':') {
+                            raw.to_owned()
+                        } else {
+                            format!("minecraft:{raw}")
+                        }
+                    })
+                    .collect(),
+            }),
             other => {
                 // `AnyValue` 类型（比如 `minecraft:map_id`）的 codec 只接受空对象。
                 if value.as_object().is_some_and(Map::is_empty) {
@@ -338,6 +353,15 @@ impl ComponentMatchers {
                     durability.matches(max_damage - damage_value) && damage.matches(damage_value)
                 }
                 PartialComponent::Present(name) => components.contains_key(name),
+                PartialComponent::OneOf { name, values } => components
+                    .get(name)
+                    .and_then(Value::as_str)
+                    .is_some_and(|actual| {
+                        let actual = actual.strip_prefix("minecraft:").unwrap_or(actual);
+                        values.iter().any(|value| {
+                            value.strip_prefix("minecraft:").unwrap_or(value) == actual
+                        })
+                    }),
                 PartialComponent::Unsupported(name) => {
                     return Err(unsupported(format!("component predicate `{name}`")));
                 }

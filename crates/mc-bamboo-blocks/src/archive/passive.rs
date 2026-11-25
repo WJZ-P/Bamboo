@@ -459,6 +459,34 @@ fn read_listener(input: Option<&Tag>) -> Result<Tag> {
     Ok(Tag::Compound(out))
 }
 
+/// `VibrationSystem.Data` 的运行时状态：codec 读完就交给方块实体的 ticker。
+/// 按 codec 读 `listener`，坏数据一律回到默认值。行为层从这里还原飞行中的振动。
+pub fn read_listener_for_vibration(tag: &Tag) -> crate::game_event::vibration::VibrationData {
+    use crate::game_event::vibration::{VibrationData, VibrationInfo, VibrationSelector};
+    let Tag::Compound(values) = tag else {
+        return VibrationData::new();
+    };
+    let current = entry(values, "event").and_then(VibrationInfo::read_codec);
+    let Some(Tag::Compound(selector_values)) = entry(values, "selector") else {
+        return VibrationData::new();
+    };
+    let candidate = entry(selector_values, "event").and_then(VibrationInfo::read_codec);
+    let Some(tick) = entry(selector_values, "tick").and_then(|tag| tag::java_i64(tag).ok()) else {
+        return VibrationData::new();
+    };
+    let mut selector = VibrationSelector::default();
+    if let Some(info) = candidate {
+        selector.add_candidate(info, tick);
+    }
+    let Some(travel) = entry(values, "event_delay").and_then(|tag| tag::java_i32(tag).ok()) else {
+        return VibrationData::new();
+    };
+    if travel < 0 {
+        return VibrationData::new();
+    }
+    VibrationData::from_codec(current, selector, travel)
+}
+
 /// `VibrationSelector.CODEC`：`event` 可省，`tick` 是必写的 `Codec.LONG`。
 fn read_selector(input: Option<&Tag>) -> Option<Tag> {
     let Tag::Compound(values) = input? else {

@@ -162,6 +162,9 @@ impl Report {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(1),
             players: Vec::new(),
@@ -171,6 +174,7 @@ impl Report {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            explosion_break: 0,
         };
         let mut ticks = BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);

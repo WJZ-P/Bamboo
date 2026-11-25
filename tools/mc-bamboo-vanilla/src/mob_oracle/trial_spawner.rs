@@ -101,6 +101,8 @@ impl TrialSpawnerCase {
             sprinting: false,
             swimming: false,
             invisible: false,
+            flying: false,
+            explosion_knockback_resistance: 0.0,
             armor_cover: 0.0,
             main_hand: 0,
             off_hand: 0,
@@ -131,6 +133,9 @@ impl TrialSpawnerCase {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: EntityStore::new(),
             players: vec![player],
@@ -140,6 +145,7 @@ impl TrialSpawnerCase {
             mob_teams: HashMap::new(),
             short_hunger: false,
             ignore_bed_monsters: false,
+            explosion_break: 0,
         }
     }
 

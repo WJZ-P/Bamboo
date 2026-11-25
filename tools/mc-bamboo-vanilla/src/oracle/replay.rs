@@ -981,7 +981,7 @@ pub fn replay(
                 f64::from(target.z) + 0.5,
             );
             let mut world = mc_bamboo_blocks::World::new(&mut level, &mut ticks);
-            world.explode_tnt(centre, 1.0);
+            world.explode_tnt(centre, 1.0, 0);
             mc_bamboo_blocks::Outcome {
                 result: mc_bamboo_blocks::InteractionResult::Success,
                 used_without_item: false,
@@ -1250,7 +1250,10 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // 末影珍珠的传送意图不属于方块题，游戏层单独处理。
             | Effect::EnderPearlTeleport { .. }
             | Effect::GuardianElderEffect { .. }
-            | Effect::TrialSpawnerTransformBadOmen { .. } => None,
+            | Effect::TrialSpawnerTransformBadOmen { .. }
+            // 爆炸包发给附近玩家，方块题不比较。
+            | Effect::Explode { .. }
+            | Effect::VibrationParticle { .. } => None,
         })
         .collect()
 }
@@ -1375,7 +1378,9 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::CrafterCrafted { .. }
             | Effect::EnderPearlTeleport { .. }
             | Effect::GuardianElderEffect { .. }
-            | Effect::TrialSpawnerTransformBadOmen { .. } => {}
+            | Effect::TrialSpawnerTransformBadOmen { .. }
+            | Effect::Explode { .. }
+            | Effect::VibrationParticle { .. } => {}
         }
     }
     (events, sounds)

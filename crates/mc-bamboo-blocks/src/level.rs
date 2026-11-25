@@ -253,6 +253,18 @@ pub trait LevelSideState {
     /// 把这一刻世界边界的方块盒交给方块实体表，离开边界的睡眠实体暂停，见
     /// [`BlockEntities::sync_border`]。
     fn sync_block_entity_border(&mut self, border: BlockBox);
+    /// 这一岛的游戏事件监听者登记表。没有登记表的世界（世界生成、压测）返回 `None`，
+    /// 游戏事件在那里不投递。
+    fn game_event_listeners(&self) -> Option<&crate::game_event::registry::GameEventListeners> {
+        None
+    }
+    /// 见 [`LevelSideState::game_event_listeners`]。
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut crate::game_event::registry::GameEventListeners> {
+        None
+    }
+
     /// 这一格的方块或容器内容变了：叫醒关注它的睡眠条目，见 [`BlockEntities::notify_cell`]。
     /// 默认什么都不做（没有休眠的世界）。
     fn notify_block_entity_cell(&mut self, _pos: BlockPos) {}
@@ -298,6 +310,16 @@ pub trait LevelTables {
     /// Game layer hook: mark a chunk as possibly changed. Called from every
     /// positional write in the blanket impl; over-marking is harmless.
     fn mark_chunk_dirty(&mut self, _pos: ChunkPos) {}
+    /// 见 [`LevelSideState::game_event_listeners`]。
+    fn game_event_listeners(&self) -> Option<&crate::game_event::registry::GameEventListeners> {
+        None
+    }
+    /// 见 [`LevelSideState::game_event_listeners`]。
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut crate::game_event::registry::GameEventListeners> {
+        None
+    }
 }
 
 impl<T: LevelTables + ?Sized> LevelSideState for T {
@@ -490,6 +512,16 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
         &mut self,
     ) -> Option<std::collections::HashSet<(i32, i32, i32)>> {
         self.block_entities_table_mut().take_watched_sections()
+    }
+
+    fn game_event_listeners(&self) -> Option<&crate::game_event::registry::GameEventListeners> {
+        LevelTables::game_event_listeners(self)
+    }
+
+    fn game_event_listeners_mut(
+        &mut self,
+    ) -> Option<&mut crate::game_event::registry::GameEventListeners> {
+        LevelTables::game_event_listeners_mut(self)
     }
 
     fn begin_block_entity_tick(&mut self, now: i64) {
@@ -951,6 +983,15 @@ pub trait Level: LevelSideState + LevelEntities {
     /// stays in the world and remains visible to other entities; only its own tick is skipped.
     fn chunk_ticks_entities(&self, _chunk: ChunkPos) -> bool {
         true
+    }
+
+    /// 爆炸对拍的改坏确认钩子：正式世界恒为 0。位 0 让 `explode_tnt` 跳过
+    /// `hurtEntities`，位 1 让它丢掉爆炸中心的 `getY(0.0625)` 抬升。
+    ///
+    /// Oracle break-test hook for explosions; real levels always return 0. Bit 0 makes
+    /// `explode_tnt` skip `hurtEntities`; bit 1 drops the `getY(0.0625)` centre lift.
+    fn explosion_break(&self) -> u8 {
+        0
     }
 
     /// 这一格的方块实体这一刻要不要跑。默认要跑。
@@ -1625,6 +1666,13 @@ pub trait Level: LevelSideState + LevelEntities {
     /// `false` means this level cannot, and the caller falls back to [`Effect::HealPlayer`].
     fn heal_player_now(&mut self, _target: crate::entity::EntityUid, _amount: f32) -> bool {
         false
+    }
+
+    /// 幽匿尖啸体 `tryToWarn`：给这名玩家加一级监守者警告，返回警告后的等级。
+    /// `None` 表示没加成（冷却中，或这个世界不存玩家警告等级）。默认不做，
+    /// 测试和游戏层各自覆盖。
+    fn warn_warden(&mut self, _target: crate::entity::EntityUid) -> Option<i32> {
+        None
     }
 
     /// `ServerPlayer.startSleepInBed` 的怪物查询：以床的 `Vec3.atBottomCenterOf(pos)` 为中心、
@@ -2548,13 +2596,22 @@ pub fn monster_prevents_rest_in<L: Level + ?Sized>(level: &L, pos: BlockPos) -> 
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
 ///
 /// The non-block results of one action, handed to the caller for delivery.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// `levelEvent(2001, pos, state)`。`except_initiator` 表示不用发给发起者，它自己已经预测过了。
     Destroyed {
         pos: BlockPos,
         state: BlockState,
         except_initiator: bool,
+    },
+    /// 振动飞行粒子：`VibrationParticleOption(BlockPositionSource(pos), travel)`。
+    /// 游戏层按位置源补上目标格，广播给 32 格内的玩家。
+    VibrationParticle {
+        pos: BlockPos,
+        x: f64,
+        y: f64,
+        z: f64,
+        travel: i32,
     },
     /// `levelEvent(1502, pos, 0)`：红石火把开关得太频繁，烧坏时冒的那股烟。
     TorchBurnout { pos: BlockPos },
@@ -2636,6 +2693,24 @@ pub enum Effect {
         except_initiator: bool,
         /// 显式给的种子。音符盒用 `Level.random.nextLong()`，其余由网络层另取。
         seed: Option<i64>,
+    },
+    /// `ServerLevel.explode` 发给范围内玩家的 `ClientboundExplodePacket`。
+    /// 游戏层按 `hit_players` 给每名玩家带上自己那份击退向量。
+    ///
+    /// `ServerLevel.explode` broadcasts `ClientboundExplodePacket` to players in range.
+    /// The game layer picks each player's own knockback out of `hit_players`.
+    Explode {
+        center: mc_bamboo_core::Vec3,
+        radius: f32,
+        block_count: i32,
+        /// 被击退的玩家 `(uid, 击退向量)`，和 `ServerExplosion.getHitPlayers` 对应。
+        ///
+        /// The knocked-back players `(uid, knockback)`, mirroring `getHitPlayers`.
+        hit_players: Vec<(crate::entity::EntityUid, mc_bamboo_core::Vec3)>,
+        /// `ServerExplosion.isSmall()`：小爆炸用 `EXPLOSION` 粒子。
+        is_small: bool,
+        /// `playSound`：来源实体不静音。
+        play_sound: bool,
     },
     /// `levelEvent`：客户端自己放粒子和声音。传播范围是 64 格，坐标是方块整数坐标。
     LevelEvent {
