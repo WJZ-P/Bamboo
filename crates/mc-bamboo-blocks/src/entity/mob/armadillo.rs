@@ -364,7 +364,14 @@ fn idle_activity() -> ActivityData {
                 Kind::Gate(Box::new(Gate::run_one(
                     vec![(MemoryType::WalkTarget, ValueAbsent)],
                     vec![
-                        (Kind::RandomStroll { speed: 1.0 }, 1),
+                        (
+                            Kind::RandomStroll {
+                                speed: 1.0,
+                                horizontal: 10,
+                                vertical: 7,
+                            },
+                            1,
+                        ),
                         (
                             Kind::WalkTargetFromLook {
                                 speed: Speed::fixed(1.0),

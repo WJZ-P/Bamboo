@@ -133,6 +133,13 @@ pub enum Kind {
     MoveToTargetSink(MoveToTargetSink),
     /// `CountDownCooldownTicks(memory)`。
     CountDownCooldown(MemoryType),
+    /// `InteractWithDoor.create()`：声明式 `OneShot`（对拍类名 `OneShot`）。
+    /// 铜傀儡 CORE 活动里有这一项；开关门本身由寻路 / 方块行为负责，见 README。
+    ///
+    /// `InteractWithDoor.create()`: a declarative `OneShot` (dumped as `OneShot`).
+    /// The copper golem's CORE activity includes it; opening doors is handled by the
+    /// pathfinding / block behaviour, see README.
+    InteractWithDoor,
     /// `SetEntityLookTargetSometimes.create(PLAYER, maxDist, interval)`。
     LookAtPlayerSometimes {
         max_dist: f32,
@@ -172,8 +179,13 @@ pub enum Kind {
         min_pitch: f32,
         pitch_range: f32,
     },
-    /// `RandomStroll.stroll(speed)`。
-    RandomStroll { speed: f32 },
+    /// `RandomStroll.stroll(speed)`；`horizontal` / `vertical` 是
+    /// `stroll(speed, horizontal, vertical)` 的两个半径（铜傀儡用 2/2）。
+    RandomStroll {
+        speed: f32,
+        horizontal: i32,
+        vertical: i32,
+    },
     /// `SetWalkTargetFromLookTarget.create(speed, closeEnough)`。
     WalkTargetFromLook { speed: Speed, close_enough: i32 },
     /// `DoNothing(min, max)`。
@@ -358,7 +370,8 @@ impl Kind {
             | Self::RandomStroll { .. }
             | Self::WalkTargetFromLook { .. }
             | Self::TriggerIf(_)
-            | Self::TriggerIfWrapped { .. } => Class::OneShot,
+            | Self::TriggerIfWrapped { .. }
+            | Self::InteractWithDoor => Class::OneShot,
             Self::DoNothing { min, max } => Class::DoNothing {
                 min: *min,
                 max: *max,
@@ -381,7 +394,10 @@ impl Kind {
     /// `getRequiredMemories()` with each entry status.
     pub(super) fn required(&self) -> &[(MemoryType, MemoryStatus)] {
         match self {
-            Self::Swim { .. } | Self::DoNothing { .. } | Self::TriggerIf(_) => &[],
+            Self::Swim { .. }
+            | Self::DoNothing { .. }
+            | Self::TriggerIf(_)
+            | Self::InteractWithDoor => &[],
             // `sequence` 的必需记忆 = 谓词的（空）+ 被包住那个行为的。
             // `sequence`'s memories = the predicate's (empty) + the wrapped behaviour's.
             Self::TriggerIfWrapped { inner, .. } => inner.required(),
@@ -443,7 +459,8 @@ impl Kind {
             | Self::RandomStroll { .. }
             | Self::WalkTargetFromLook { .. }
             | Self::TriggerIf(_)
-            | Self::TriggerIfWrapped { .. } => "OneShot",
+            | Self::TriggerIfWrapped { .. }
+            | Self::InteractWithDoor => "OneShot",
             Self::MakeLove { .. } => "AnimalMakeLove",
             Self::FollowTemptation { .. } => "FollowTemptation",
             Self::RandomLookAround { .. } => "RandomLookAround",
@@ -468,6 +485,7 @@ impl Kind {
         matches!(
             self,
             Self::CountDownCooldown(_)
+                | Self::CopperGolem(super::super::copper_golem::Behavior::Transport(_))
                 | Self::FollowTemptation { .. }
                 | Self::Villager(super::super::villager_ai::Behavior::SleepInBed { .. })
                 | Self::Villager(
@@ -893,8 +911,13 @@ impl Kind {
                     false
                 }
             }
-            Self::RandomStroll { speed } => {
-                let pos = goals::land_random_pos(cx.me, cx.mob, cx.ctx.blocks(), 10, 7);
+            Self::RandomStroll {
+                speed,
+                horizontal,
+                vertical,
+            } => {
+                let pos =
+                    goals::land_random_pos(cx.me, cx.mob, cx.ctx.blocks(), *horizontal, *vertical);
                 cx.memories.set_or_erase(
                     WalkTarget,
                     pos.map(|pos| MemoryValue::Walk(WalkTarget::to_point(pos, *speed, 0))),
@@ -1327,7 +1350,11 @@ mod tests {
     fn wrapped_trigger_if_takes_inner_memories() {
         let kind = Kind::trigger_if(
             BodyPredicate::CamelNotRefuseToMove,
-            Kind::RandomStroll { speed: 2.0 },
+            Kind::RandomStroll {
+                speed: 2.0,
+                horizontal: 10,
+                vertical: 7,
+            },
         );
         assert!(matches!(kind.class(), Class::OneShot));
         assert_eq!(kind.name(), "OneShot");

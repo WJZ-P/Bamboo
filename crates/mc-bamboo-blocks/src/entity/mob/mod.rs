@@ -4155,6 +4155,11 @@ pub struct MobPublic {
     /// The network ids of `CopperGolem.DATA_WEATHER_STATE` / `COPPER_GOLEM_STATE`.
     pub copper_golem_weather_state: i32,
     pub copper_golem_state: i32,
+    /// `ContainerUser` 当前开着的箱子位置，别的铜傀儡排队时要读。
+    ///
+    /// The chest this `ContainerUser` currently has open; other copper golems read it
+    /// when deciding whether to queue for a target.
+    pub opened_chest_pos: Option<BlockPos>,
     /// `Mob.isPersistenceRequired()`：持久化的生物不参与自然刷怪的计数。
     ///
     /// `Mob.isPersistenceRequired()`: persistent mobs are left out of the spawn counts.
@@ -4303,6 +4308,7 @@ impl MobPublic {
             sulfur_cube_from_bucket: mob.sulfur_cube.from_bucket,
             copper_golem_weather_state: mob.copper_golem.weather_state.id(),
             copper_golem_state: mob.copper_golem.state.id(),
+            opened_chest_pos: mob.copper_golem.opened_chest_pos,
             equipment: mob
                 .equipment
                 .iter()

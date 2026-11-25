@@ -256,7 +256,14 @@ fn idle_activity() -> ActivityData {
                 Kind::Gate(Box::new(Gate::run_one(
                     Vec::new(),
                     vec![
-                        (Kind::RandomStroll { speed: 1.0 }, 2),
+                        (
+                            Kind::RandomStroll {
+                                speed: 1.0,
+                                horizontal: 10,
+                                vertical: 7,
+                            },
+                            2,
+                        ),
                         (
                             Kind::WalkTargetFromLook {
                                 speed: Speed::fixed(1.0),

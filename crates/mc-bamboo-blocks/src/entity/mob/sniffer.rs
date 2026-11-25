@@ -394,7 +394,14 @@ fn idle_activity() -> ActivityData {
                         (Kind::Sniffer(Behavior::Scenting), 1),
                         (Kind::Sniffer(Behavior::Sniffing), 1),
                         (Kind::LookAtPlayer { max_dist: 6.0 }, 1),
-                        (Kind::RandomStroll { speed: 1.0 }, 1),
+                        (
+                            Kind::RandomStroll {
+                                speed: 1.0,
+                                horizontal: 10,
+                                vertical: 7,
+                            },
+                            1,
+                        ),
                         (Kind::DoNothing { min: 5, max: 20 }, 2),
                     ],
                 ))),

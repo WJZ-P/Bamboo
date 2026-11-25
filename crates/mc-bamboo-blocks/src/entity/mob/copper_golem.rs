@@ -21,7 +21,7 @@ use super::{
         Activity, ActivityData, Brain, BrainTemplate, Cx, TemplateCache,
         behavior::{Class, Gate, Kind, MoveToTargetSink},
         memory::{
-            MemoryStatus::{ValueAbsent, ValuePresent},
+            MemoryStatus::{Registered, ValueAbsent, ValuePresent},
             MemoryType,
         },
         sensor::SensorKind,
@@ -30,6 +30,8 @@ use super::{
     interact::{MobInteractRequest, MobInteraction},
     living,
 };
+mod transport;
+
 use crate::{
     InteractionResult,
     entity::{
@@ -318,6 +320,7 @@ fn core_activity() -> ActivityData {
             },
             Kind::LookAtTargetSink { min: 45, max: 90 },
             Kind::MoveToTargetSink(MoveToTargetSink::new(false)),
+            Kind::InteractWithDoor,
             Kind::CountDownCooldown(MemoryType::GazeCooldownTicks),
             Kind::CountDownCooldown(MemoryType::TransportItemsCooldownTicks),
         ],
@@ -331,10 +334,7 @@ fn idle_activity() -> ActivityData {
         vec![
             (
                 0,
-                Kind::CopperGolem(Behavior::Transport {
-                    phase: TransportPhase::Searching,
-                    interaction_tick: 0,
-                }),
+                Kind::CopperGolem(Behavior::Transport(transport::Transport::default())),
             ),
             (
                 1,
@@ -353,7 +353,14 @@ fn idle_activity() -> ActivityData {
                         (MemoryType::TransportItemsCooldownTicks, ValuePresent),
                     ],
                     vec![
-                        (Kind::RandomStroll { speed: 1.0 }, 1),
+                        (
+                            Kind::RandomStroll {
+                                speed: 1.0,
+                                horizontal: 10,
+                                vertical: 7,
+                            },
+                            1,
+                        ),
                         (Kind::DoNothing { min: 30, max: 60 }, 1),
                     ],
                 ))),
@@ -362,43 +369,32 @@ fn idle_activity() -> ActivityData {
     )
 }
 
-/// `TransportItemsBetweenContainers` 的一次搬运所处的阶段。
-///
-/// The phase of one `TransportItemsBetweenContainers` run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TransportPhase {
-    /// 找源铜箱子 / 目标箱子。
-    #[default]
-    Searching,
-    /// 走向目标箱子。
-    Travelling,
-    /// 到达后开箱、取/放物品的 60 刻动画。
-    Interacting,
-}
-
 /// 铜傀儡大脑里的专属行为（目前只有 `TransportItemsBetweenContainers`）。
 ///
 /// The copper golem's brain-only behaviour (`TransportItemsBetweenContainers`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Behavior {
     /// 在铜箱子与普通箱子之间搬运物品。
-    Transport {
-        phase: TransportPhase,
-        interaction_tick: i32,
-    },
+    Transport(transport::Transport),
 }
 
 impl Behavior {
     pub(super) fn class(&self) -> Class {
-        // `TransportItemsBetweenContainers` 是 `Behavior`，时长取自世界随机源；
-        // 这里用一个足够长的固定区间，由 `can_still_use` 决定何时真正停止。
-        Class::Timed { min: 200, max: 200 }
+        // `Behavior(Map)` 的默认时长 60..60；官方覆写了 `timedOut` 恒假，
+        // 所以这里只影响 `tryStart` 消耗的那一次世界随机数（见 behaviors.rs）。
+        Class::Timed { min: 60, max: 60 }
     }
 
+    /// 官方构造器的四项入口条件。
     pub(super) fn required(
         &self,
     ) -> &'static [(MemoryType, crate::entity::mob::brain::memory::MemoryStatus)] {
-        &[]
+        &[
+            (MemoryType::VisitedBlockPositions, Registered),
+            (MemoryType::UnreachableTransportBlockPositions, Registered),
+            (MemoryType::TransportItemsCooldownTicks, ValueAbsent),
+            (MemoryType::IsPanicking, ValueAbsent),
+        ]
     }
 
     pub(super) fn name(&self) -> &'static str {
@@ -409,31 +405,38 @@ impl Behavior {
         false
     }
 
+    /// `checkExtraStartConditions`：`!isLeashed`（拴绳未建模）。
     pub(super) fn extra_start(&mut self, cx: &mut Cx) -> bool {
         cx.mob.mob_type == MobType::CopperGolem
-            && !cx.memories.has(MemoryType::IsPanicking)
-            && cx
-                .memories
-                .int(MemoryType::TransportItemsCooldownTicks)
-                .unwrap_or(0)
-                == 0
     }
 
-    pub(super) fn start(&mut self, _cx: &mut Cx) {}
+    /// `start`：`GroundPathNavigation.setCanPathToTargetsBelowSurface(true)`。
+    pub(super) fn start(&mut self, cx: &mut Cx) {
+        let Self::Transport(state) = self;
+        state.target = None;
+        state.transport_state = transport::TransportState::Travelling;
+        state.interaction = None;
+        state.interaction_tick = 0;
+        cx.mob.navigation.flags.can_open_doors = true;
+    }
 
+    /// `canStillUse`：冷却无值、不恐慌、没被拴住。
     pub(super) fn can_still_use(&mut self, cx: &mut Cx) -> bool {
-        let Self::Transport { phase, .. } = self;
-        *phase != TransportPhase::Searching
-            || cx
-                .memories
-                .int(MemoryType::TransportItemsCooldownTicks)
-                .unwrap_or(0)
-                == 0
+        let Self::Transport(state) = self;
+        state.can_use(cx)
     }
 
-    pub(super) fn tick(&mut self, _cx: &mut Cx) {}
+    pub(super) fn tick(&mut self, cx: &mut Cx) {
+        let Self::Transport(state) = self;
+        state.tick(cx);
+    }
 
-    pub(super) fn stop(&mut self, _cx: &mut Cx) {}
+    /// `stop`：`onStartTravelling` + 关掉地下寻路开关。
+    pub(super) fn stop(&mut self, cx: &mut Cx) {
+        let Self::Transport(state) = self;
+        state.stop(cx);
+        cx.mob.navigation.flags.can_open_doors = false;
+    }
 }
 
 /// `customServerAiStep` 里铜傀儡的部分：跑大脑、把活动切到 `IDLE`。
