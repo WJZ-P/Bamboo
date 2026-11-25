@@ -60,6 +60,9 @@ pub fn runtime_player_data(player: &Player) -> PlayerData {
     }
     // `ServerPlayer.saveEnderPearls`：空集合不写 `ender_pearls` 键。
     data.ender_pearls = player.saved_ender_pearls.clone();
+    // `ServerPlayer.addAdditionalSaveData`：非空肩才写 ShoulderEntityLeft / Right。
+    data.shoulder_left = player.shoulder_left.clone();
+    data.shoulder_right = player.shoulder_right.clone();
     // `dead` 是运行时标志（官方 `dead` 不存档），重生后由 health 字段推：
     // 官方读档时 Health<=0 会立刻进入死亡状态，这里按官方存档字段保留。
     data
@@ -170,6 +173,11 @@ pub fn restore_inventory(player: &mut Player, data: &PlayerData) {
     player.pitch = data.rotation[1];
     player.head_yaw = data.rotation[0];
     player.on_ground = data.on_ground;
+    // `ServerPlayer.readAdditionalSaveData`：把肩膀鹦鹉读回运行时状态。
+    player.shoulder_left = data.shoulder_left.clone();
+    player.shoulder_right = data.shoulder_right.clone();
+    // 读档没有「刚上肩」的冷却，立刻允许离肩。
+    player.shoulder_since = i32::MAX;
 }
 
 #[cfg(test)]

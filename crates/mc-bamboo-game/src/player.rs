@@ -285,6 +285,19 @@ pub(crate) struct Player {
     pub(crate) riding: crate::riding::Riding,
     /// 官方 `ServerPlayer.getAdvancements()` 的可变状态，跟着玩家在岛之间搬动。
     pub(crate) advancements: crate::advancements::PlayerAdvancements,
+    /// `ServerPlayer.shoulderEntityLeft` / `Right`：整只鹦鹉的 `saveWithoutId` NBT。
+    /// 空肩是 `None`（官方存空 `CompoundTag`，不写进玩家档）。
+    ///
+    /// `ServerPlayer.shoulderEntityLeft` / `Right`: the whole parrot's
+    /// `saveWithoutId` tag. `None` means an empty shoulder.
+    pub(crate) shoulder_left: Option<mc_bamboo_nbt::Tag>,
+    pub(crate) shoulder_right: Option<mc_bamboo_nbt::Tag>,
+    /// 上肩后经过的相对刻数。官方 `timeEntitySatOnShoulder` 是绝对游戏时刻，
+    /// 这里用相对计数，`> 20` 才允许离肩，避免拆岛 / 并岛时钟平移。
+    ///
+    /// Relative ticks since the last perch. Vanilla uses an absolute game time;
+    /// a relative count avoids island clock rebasing and allows removal past 20.
+    pub(crate) shoulder_since: i32,
 }
 
 impl Player {
@@ -373,6 +386,9 @@ impl Player {
             awaiting_respawn: false,
             riding: crate::riding::Riding::default(),
             advancements: crate::advancements::PlayerAdvancements::default(),
+            shoulder_left: None,
+            shoulder_right: None,
+            shoulder_since: i32::MAX,
         };
         crate::player_attributes::rebuild_player(&mut player, false);
         player

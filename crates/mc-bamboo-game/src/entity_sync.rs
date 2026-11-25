@@ -67,6 +67,22 @@ struct Metadata {
     effect_particles: Vec<i32>,
     /// `LivingEntity.DATA_EFFECT_AMBIENCE_ID`。
     effect_ambience: bool,
+    /// `Player.DATA_SHOULDER_PARROT_LEFT` / `RIGHT`：肩膀上鹦鹉的品种 ID。
+    shoulder_left: Option<i32>,
+    shoulder_right: Option<i32>,
+}
+
+/// `ShoulderEntity*` 的 `Variant`（旧版整数编码）；空肩 / 坏值返回 `None`。
+fn shoulder_variant(tag: &Option<mc_bamboo_nbt::Tag>) -> Option<i32> {
+    let mc_bamboo_nbt::Tag::Compound(entries) = tag.as_ref()? else {
+        return None;
+    };
+    entries.iter().find_map(|(key, value)| {
+        (key == "Variant" && matches!(value, mc_bamboo_nbt::Tag::Int(_))).then(|| match value {
+            mc_bamboo_nbt::Tag::Int(variant) => *variant,
+            _ => 0,
+        })
+    })
 }
 
 impl Metadata {
@@ -80,6 +96,8 @@ impl Metadata {
         model_customisation: 0,
         effect_particles: Vec::new(),
         effect_ambience: false,
+        shoulder_left: None,
+        shoulder_right: None,
     };
 
     fn of(player: &Player) -> Self {
@@ -99,6 +117,8 @@ impl Metadata {
             model_customisation: player.client.model_customisation,
             effect_particles: player.effects.particle_colors(),
             effect_ambience: player.effects.all_ambient(),
+            shoulder_left: shoulder_variant(&player.shoulder_left),
+            shoulder_right: shoulder_variant(&player.shoulder_right),
         }
     }
 
@@ -111,6 +131,8 @@ impl Metadata {
         let model = self.model_customisation != previous.model_customisation;
         let particles = self.effect_particles != previous.effect_particles;
         let ambience = self.effect_ambience != previous.effect_ambience;
+        let shoulder_left = self.shoulder_left != previous.shoulder_left;
+        let shoulder_right = self.shoulder_right != previous.shoulder_right;
         [
             flags.then_some(EntityData::SharedFlags(self.shared_flags)),
             pose.then_some(EntityData::Pose(self.pose)),
@@ -121,6 +143,8 @@ impl Metadata {
             model.then_some(EntityData::ModelCustomisation(self.model_customisation)),
             particles.then_some(EntityData::EffectParticles(self.effect_particles.clone())),
             ambience.then_some(EntityData::EffectAmbience(self.effect_ambience)),
+            shoulder_left.then_some(EntityData::ShoulderParrotLeft(self.shoulder_left)),
+            shoulder_right.then_some(EntityData::ShoulderParrotRight(self.shoulder_right)),
         ]
         .into_iter()
         .flatten()
