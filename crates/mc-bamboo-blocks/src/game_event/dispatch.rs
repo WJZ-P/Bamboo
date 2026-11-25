@@ -339,8 +339,17 @@ impl World<'_> {
                     source_player: context.source_player,
                     source_entity: context.source_entity,
                     projectile_owner: context.projectile_owner,
-                    source_uuid: None,
-                    projectile_owner_uuid: None,
+                    // `VibrationInfo(Holder, float, Vec3, Entity)` 把源实体 UUID
+                    // 和射弹拥有者 UUID 一起存进 `listener`。
+                    // `VibrationInfo(Holder, float, Vec3, Entity)` persists the
+                    // source entity UUID and projectile owner UUID in `listener`.
+                    source_uuid: context
+                        .source_entity
+                        .or(context.source_player)
+                        .map(|uid| crate::archive::entity::entity_uuid(uid).to_be_bytes()),
+                    projectile_owner_uuid: context
+                        .projectile_owner
+                        .map(|uid| crate::archive::entity::entity_uuid(uid).to_be_bytes()),
                 };
                 let mut record = |entity: &mut crate::entity::Entity| {
                     entity.with_mob(|_, mob| {
