@@ -7,6 +7,7 @@
 //! [`tick_leash`] pulls or snaps it by distance every tick; attach, detach and snap
 //! each broadcast `set_entity_link` so clients draw the rope.
 
+#[cfg(feature = "oracle-samples")]
 use std::cell::Cell;
 
 use mc_bamboo_core::{Aabb, BlockPos, Vec3, mth};
@@ -14,6 +15,7 @@ use mc_bamboo_core::{Aabb, BlockPos, Vec3, mth};
 use super::{Mob, MobEvent, MobType, goals};
 use crate::entity::{Entity, EntityUid, ctx::EntityCtx};
 
+#[cfg(feature = "oracle-samples")]
 thread_local! {
     /// 仅供 `mob-oracle --break-self-test leash_nav`：命中时让
     /// `close_range_leash_behaviour` 跳过导航，模拟「被拴生物不自己跟着走」这个回归，
@@ -22,8 +24,22 @@ thread_local! {
 }
 
 /// 改坏确认开关，只由 `mob-oracle` 调用；默认 false。
+#[cfg(feature = "oracle-samples")]
 pub fn set_oracle_skip_leash_nav(value: bool) {
     SKIP_LEASH_NAV.with(|flag| flag.set(value));
+}
+
+/// 正式构建里改坏开关恒关，不占用热路径之外的任何状态。
+///
+/// The break switch is always off in production builds.
+#[cfg(not(feature = "oracle-samples"))]
+const fn oracle_skip_leash_nav() -> bool {
+    false
+}
+
+#[cfg(feature = "oracle-samples")]
+fn oracle_skip_leash_nav() -> bool {
+    SKIP_LEASH_NAV.with(|flag| flag.get())
 }
 
 /// `LEASH_TOO_FAR_DIST`：超过这个距离绳子断掉。
@@ -348,7 +364,7 @@ fn close_range_leash_behaviour(
     let view = ctx.blocks();
     let nav = super::living::nav_mob(me, mob, view);
     // `mob-oracle --break-self-test leash_nav`：故意不调导航（其余逻辑照旧）。
-    if SKIP_LEASH_NAV.with(|flag| flag.get()) {
+    if oracle_skip_leash_nav() {
         return;
     }
     mob.navigation

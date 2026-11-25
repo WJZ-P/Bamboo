@@ -439,8 +439,10 @@ fn is_broken(stack: &ItemStack) -> bool {
         && damage_value(stack.item, &patch) >= max_damage(stack.item, &patch)
 }
 
-/// `ItemStack.setDamageValue`：对拍和测试给物品设初始耐久损耗。
-pub fn set_damage_for_oracle(stack: &mut ItemStack, damage: i32) {
+/// `ItemStack.setDamageValue`：把物品堆的 `DAMAGE` 组件设成给定值。
+///
+/// `ItemStack.setDamageValue`: write the stack's `DAMAGE` component.
+pub fn set_damage_value(stack: &mut ItemStack, damage: i32) {
     let _ = write_damage(stack, damage);
 }
 

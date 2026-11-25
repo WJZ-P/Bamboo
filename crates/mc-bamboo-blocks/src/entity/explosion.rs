@@ -42,6 +42,19 @@ const STEP: f32 = 0.3;
 const RESISTANCE_BONUS: f32 = 0.3;
 /// 每点抗性消耗多少爆炸强度，官方的 `0.3F`。
 const RESISTANCE_COST: f32 = 0.3;
+/// 改坏确认的取值；正式构建里恒为 0，连 `Level` 上的钩子都不存在。
+///
+/// The break-test value; always 0 in production, where the `Level` hook is absent.
+#[cfg(feature = "oracle-samples")]
+fn explosion_break(world: &World<'_>) -> u8 {
+    world.level().explosion_break()
+}
+
+#[cfg(not(feature = "oracle-samples"))]
+const fn explosion_break(_world: &World<'_>) -> u8 {
+    0
+}
+
 impl World<'_> {
     /// `PrimedTnt.explode` 走到 `ServerLevel.explode` 和 `ServerExplosion.explode`：
     /// 破坏方块、连锁点燃 TNT、伤害掉落物，还伤生物和玩家，并把爆炸包发给范围内玩家。
@@ -53,8 +66,8 @@ impl World<'_> {
     /// TNT entity id; the damage source is `explosion` with the TNT as `direct` and no
     /// `causing` entity (TNT ownership is not modelled).
     pub fn explode_tnt(&mut self, center: Vec3, radius: f32, source: EntityUid) {
-        // 对拍的改坏确认钩子，正式世界恒为 0（`Level::explosion_break`）。
-        let brk = self.level().explosion_break();
+        // 对拍的改坏确认钩子，正式构建里恒为 0（`Level::explosion_break`）。
+        let brk = explosion_break(self);
         // 位 1：丢掉 `PrimedTnt.getY(0.0625)` 的抬升（TNT 高 0.98）。
         let center = if brk & 2 != 0 {
             Vec3::new(center.x, center.y - f64::from(0.98_f32) * 0.0625, center.z)

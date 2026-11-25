@@ -1393,6 +1393,7 @@ impl GoalSelector {
     }
 
     /// 对拍的改坏确认用：把目标按优先级排序（官方按注册顺序）。
+    #[cfg(feature = "oracle-samples")]
     pub fn sort_by_priority_for_oracle(&mut self) {
         self.goals.sort_by_key(|wrapped| wrapped.priority);
     }
@@ -1723,11 +1724,21 @@ fn light_dependent_magic(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> f32 {
 ///
 /// `Guardian.getAttackDuration()` with a scene-level break-self-test override.
 fn guardian_attack_duration(mob: &Mob) -> i32 {
-    if mob.guardian.attack_duration_override != 0 {
-        mob.guardian.attack_duration_override
+    if let Some(override_value) = guardian_attack_duration_override(mob) {
+        override_value
     } else {
         super::guardian::attack_duration(mob.mob_type)
     }
+}
+
+#[cfg(feature = "oracle-samples")]
+fn guardian_attack_duration_override(mob: &Mob) -> Option<i32> {
+    (mob.guardian.attack_duration_override != 0).then_some(mob.guardian.attack_duration_override)
+}
+
+#[cfg(not(feature = "oracle-samples"))]
+const fn guardian_attack_duration_override(_mob: &Mob) -> Option<i32> {
+    None
 }
 
 fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {

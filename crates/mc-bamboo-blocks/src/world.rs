@@ -4193,6 +4193,7 @@ impl<'a> World<'a> {
     ///
     /// Takes an entity out of the table so an oracle or command can run a whole-row
     /// operation such as `finalizeSpawn`; [`Self::put_taken_entity`] puts it back.
+    #[cfg(feature = "oracle-samples")]
     pub fn take_entity_for_oracle(&mut self, id: i32) -> Option<crate::entity::Entity> {
         self.level.take_entity(id)
     }
@@ -4200,6 +4201,7 @@ impl<'a> World<'a> {
     /// [`Self::take_entity_for_oracle`] 的放回。
     ///
     /// Puts an entity taken by [`Self::take_entity_for_oracle`] back.
+    #[cfg(feature = "oracle-samples")]
     pub fn put_entity_for_oracle(&mut self, entity: crate::entity::Entity) {
         self.level.put_entity(entity);
     }

@@ -990,6 +990,7 @@ pub trait Level: LevelSideState + LevelEntities {
     ///
     /// Oracle break-test hook for explosions; real levels always return 0. Bit 0 makes
     /// `explode_tnt` skip `hurtEntities`; bit 1 drops the `getY(0.0625)` centre lift.
+    #[cfg(feature = "oracle-samples")]
     fn explosion_break(&self) -> u8 {
         0
     }

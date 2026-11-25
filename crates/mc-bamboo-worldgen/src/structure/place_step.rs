@@ -38,6 +38,7 @@ use crate::{
 
 // 对拍改坏确认：关掉结构件的 `SHAPE_CHECK_BLOCKS` 标记。
 // Oracle break confirmation: suppress structure-piece `SHAPE_CHECK_BLOCKS` marks.
+#[cfg(feature = "perf")]
 thread_local! {
     static SKIP_SHAPE_CHECK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -45,6 +46,7 @@ thread_local! {
 /// 关掉 / 恢复结构件的 `PostProcessing` 形状检查标记；仅供对拍改坏确认。
 /// Disable / restore structure-piece `PostProcessing` shape-check marks;
 /// only for the oracle's break confirmation.
+#[cfg(feature = "perf")]
 pub fn set_skip_shape_check(skip: bool) {
     SKIP_SHAPE_CHECK.with(|slot| slot.set(skip));
 }
@@ -52,8 +54,14 @@ pub fn set_skip_shape_check(skip: bool) {
 /// 当前是否关掉了结构件的形状检查标记；`place.rs` 复用同一个开关。
 /// Whether structure-piece shape-check marks are currently suppressed;
 /// `place.rs` shares the switch.
+#[cfg(feature = "perf")]
 pub(crate) fn skip_shape_check_public() -> bool {
     SKIP_SHAPE_CHECK.with(|slot| slot.get())
+}
+
+#[cfg(not(feature = "perf"))]
+pub(crate) const fn skip_shape_check_public() -> bool {
+    false
 }
 
 /// 本轮已经逐方块对拍 0 不一致的结构类型；其余起点和引用照官方生成，但放置标
