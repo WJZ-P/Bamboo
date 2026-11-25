@@ -554,6 +554,9 @@ public final class MobOracle {
                     cases++;
                 }
             }
+            if (only == null || only.startsWith("ominous_item_spawner")) {
+                cases += playOminousItemSpawner(official, out, only);
+            }
             if (only == null || only.startsWith("trial_spawner")) {
                 cases += playTrialSpawner(official, out, only);
             }
@@ -11572,6 +11575,90 @@ public final class MobOracle {
                     + ",\"frames\":" + frames + "}\n");
             out.flush();
         }
+
+    /**
+     * 不祥物品生成器逐刻对拍：固定一件普通物品和一个到点刻数，逐刻比
+     * `tickCount` / `DATA_ITEM` / 3021 世界事件 / 新生成的物品实体 / 世界随机源。
+     */
+    private static int playOminousItemSpawner(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("ominous_item_spawner_drop", "ominous_item_spawner_empty")) {
+            if (only != null && !name.startsWith(only)) continue;
+            FakeLevel level = FakeLevel.create(official);
+            ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+            level.nextId = FIRST_ID;
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            level.spawned = new ArrayList<>();
+            level.tracked = new ArrayList<>();
+            level.levelEvents = new ArrayList<>();
+            level.getRandom().setSeed(1L);
+            level.gameTime = START_TIME;
+            for (int x = -3; x <= 3; x++) {
+                for (int z = -3; z <= 3; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+            boolean empty = name.endsWith("empty");
+            var stack = empty ? net.minecraft.world.item.ItemStack.EMPTY
+                    : new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.STONE, 3);
+            var spawner = net.minecraft.world.entity.OminousItemSpawner.create(level, stack);
+            // 固定到点刻数，绕开 `create` 里的 `nextIntBetweenInclusive(60, 120)`。
+            put(net.minecraft.world.entity.OminousItemSpawner.class, spawner,
+                    "spawnItemAfterTicks", Long.valueOf(60L));
+            // `create` 从 level.random 抽了一次到点刻数；这里固定刻数，把世界随机源
+            // 复位到 Bamboo 的 LevelRandom::new(1) 初值，两边才从同一状态起步。
+            level.getRandom().setSeed(1L);
+            setRandom(spawner, 7L);
+            spawner.setUUID(new UUID(0L, 1L));
+            spawner.setId(FIRST_ID);
+            spawner.snapTo(0.5, 70.0, 0.5);
+            level.tracked.add(spawner);
+            int ticks = 80;
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime++;
+                    level.spawned.clear();
+                    level.levelEvents.clear();
+                    if (!spawner.isRemoved()) {
+                        spawner.commonTick();
+                        spawner.tick();
+                    }
+                }
+                int itemId = BuiltInRegistries.ITEM.getId(spawner.getItem().getItem());
+                int itemCount = spawner.getItem().getCount();
+                int event3021 = 0;
+                for (int[] event : level.levelEvents) {
+                    if (event[0] == 3021) event3021++;
+                }
+                int born = 0;
+                long bornX = 0L, bornY = 0L, bornZ = 0L;
+                for (Entity entity : level.spawned) {
+                    if (entity instanceof net.minecraft.world.entity.item.ItemEntity) {
+                        born++;
+                        bornX = Double.doubleToRawLongBits(entity.getX());
+                        bornY = Double.doubleToRawLongBits(entity.getY());
+                        bornZ = Double.doubleToRawLongBits(entity.getZ());
+                    }
+                }
+                if (tick > 0) frames.append(',');
+                frames.append('[').append(spawner.tickCount).append(',')
+                        .append(itemId).append(',').append(itemCount).append(',')
+                        .append(spawner.isRemoved() ? 1 : 0).append(',')
+                        .append(event3021).append(',').append(born).append(',')
+                        .append(bornX).append(',').append(bornY).append(',').append(bornZ)
+                        .append(',').append(randomSeed(level.getRandom())).append(']');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"ominousItemSpawner\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"item\":" + (empty ? 0 : BuiltInRegistries.ITEM.getId(net.minecraft.world.item.Items.STONE))
+                    + ",\"count\":" + (empty ? 0 : 3)
+                    + ",\"delay\":60,\"start\":[0.5,70.0,0.5],\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        return cases;
+    }
 
     /**
      * 试炼刷怪笼完整流程逐刻对拍：等玩家 → 激活刷怪 → 怪被打死 → 等待弹奖励 → 弹出 →

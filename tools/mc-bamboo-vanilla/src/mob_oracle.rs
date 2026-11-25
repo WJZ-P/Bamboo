@@ -57,6 +57,7 @@ mod lightning;
 mod llama_spit;
 mod natural_spawn;
 mod nautilus;
+mod ominous_item_spawner;
 mod patrol_spawn;
 mod phantom;
 mod pig_ride;
@@ -200,6 +201,7 @@ enum Line {
     WaterMob(Box<water_mob::WaterMobCase>),
     Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
+    OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawnerCase>),
     TrialSpawner(Box<trial_spawner::TrialSpawnerCase>),
     Vault(Box<vault::VaultCase>),
     SculkSensor(sculk_sensor::SculkSensorCase),
@@ -2137,6 +2139,7 @@ impl Report {
                 Line::WaterMob(case) => self.replay_water_mob(&case),
                 Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
+                Line::OminousItemSpawner(case) => self.replay_ominous_item_spawner(&case),
                 Line::TrialSpawner(case) => self.replay_trial_spawner(&case),
                 Line::Vault(case) => self.replay_vault(&case),
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
