@@ -888,7 +888,10 @@ impl MobType {
         // `AbstractGolem.removeWhenFarAway` is always false.
         // `Warden.removeWhenFarAway()` 恒假，监守者不因距离消失。
         // `Warden.removeWhenFarAway()` is always false.
-        if matches!(self, Self::IronGolem | Self::SnowGolem | Self::Warden | Self::Allay) {
+        if matches!(
+            self,
+            Self::IronGolem | Self::SnowGolem | Self::Warden | Self::Allay
+        ) {
             return false;
         }
         // 鱿鱼、海豚（`AgeableWaterCreature`）、鱼（`WaterAnimal`）和蝙蝠不是 `Animal`，沿用

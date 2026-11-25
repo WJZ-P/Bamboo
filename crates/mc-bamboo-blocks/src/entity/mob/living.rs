@@ -1695,10 +1695,11 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
         && is_alive(me, mob)
         && !mob.dead
         && ctx.blocks().block_game_rules().mob_griefing
-        && !mob
-            .brain
-            .as_ref()
-            .is_some_and(|brain| brain.memories.has(super::brain::memory::MemoryType::ItemPickupCooldownTicks))
+        && !mob.brain.as_ref().is_some_and(|brain| {
+            brain
+                .memories
+                .has(super::brain::memory::MemoryType::ItemPickupCooldownTicks)
+        })
     {
         let rules = ctx.blocks().block_game_rules();
         let mut items = Vec::new();

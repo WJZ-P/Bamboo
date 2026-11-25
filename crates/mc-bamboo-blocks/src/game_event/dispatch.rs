@@ -327,6 +327,27 @@ impl World<'_> {
                 }
             }
             ListenerRef::Entity(uid) => {
+                // `Allay$JukeboxListener`：唱片机事件不进振动候选池，当场改跳舞状态。
+                // `Allay$JukeboxListener`: jukebox events update dancing immediately.
+                if matches!(event, GameEvent::JukeboxPlay | GameEvent::JukeboxStopPlay)
+                    && let Some(allay) = self.entity(uid).as_ref().and_then(|e| e.kind.mob())
+                    && allay.mob_type == crate::entity::mob::MobType::Allay
+                {
+                    let pos = BlockPos::containing(source);
+                    let mut apply = |entity: &mut crate::entity::Entity| {
+                        entity.with_mob(|_, mob| {
+                            crate::entity::mob::allay::set_jukebox_playing(
+                                mob,
+                                pos,
+                                event == GameEvent::JukeboxPlay,
+                            );
+                        });
+                    };
+                    if !self.with_listed_entity_mut(uid, &mut apply) {
+                        self.with_entity_mut(uid, &mut apply);
+                    }
+                    return;
+                }
                 // `VibrationSystem.Listener.handleGameEvent`：记成候选，到达时由实体自己的
                 // `VibrationSystem.Ticker` 回调 `User.onReceiveVibration`。
                 //
@@ -351,6 +372,27 @@ impl World<'_> {
                         .projectile_owner
                         .map(|uid| crate::archive::entity::entity_uuid(uid).to_be_bytes()),
                 };
+                // `VibrationSystem.User.isValidVibration` 里的可听事件标签：监守者用
+                // `#vibrations`，悦灵用 `#allay_can_listen`。
+                let (is_allay, can_receive) = self
+                    .entity(uid)
+                    .and_then(|entity| {
+                        entity.kind.mob().map(|mob| {
+                            (
+                                mob.mob_type == crate::entity::mob::MobType::Allay,
+                                crate::entity::mob::allay::can_receive_vibration(
+                                    mob,
+                                    event,
+                                    BlockPos::containing(source),
+                                ),
+                            )
+                        })
+                    })
+                    .unwrap_or((false, true));
+                let valid_event = !is_allay || (event.in_allay_can_listen_tag() && can_receive);
+                if !valid_event {
+                    return;
+                }
                 let mut record = |entity: &mut crate::entity::Entity| {
                     entity.with_mob(|_, mob| {
                         if let Some(listener) = mob.entity_listener.as_mut()

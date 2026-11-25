@@ -49,8 +49,6 @@ pub const NOTEBLOCK_COOLDOWN: i32 = 600;
 pub const ITEM_PICKUP_COOLDOWN: i32 = 60;
 /// `VibrationUser.VIBRATION_EVENT_LISTENER_RANGE`。
 pub const LISTENER_RADIUS: i32 = 16;
-/// `AllayAi.MAX_NOTEBLOCK_DISTANCE` 的平方（32 格）。
-const NOTEBLOCK_DISTANCE_SQR: f64 = 1024.0 * 1024.0;
 
 /// 悦灵自己的状态：每个 `Mob` 都带一份，字段只在 `Allay` 分支读写。
 #[derive(Debug, Clone, PartialEq)]
@@ -98,7 +96,11 @@ impl Allay {
         if stack.is_empty() {
             return false;
         }
-        let slot = self.inventory.first().cloned().unwrap_or_else(ItemStack::empty);
+        let slot = self
+            .inventory
+            .first()
+            .cloned()
+            .unwrap_or_else(ItemStack::empty);
         slot.is_empty()
             || (slot.item == stack.item
                 && slot.is_same_item_same_components(stack)
@@ -335,11 +337,14 @@ pub(super) fn interact(
     }
     // 主手空手 + 悦灵手里有东西：取回并丢出背包里的全部物品。
     if !held.is_empty() && req.hand == mc_bamboo_core::Hand::Main && req.held.is_empty() {
-        mob.equipment.set(EquipmentSlot::MainHand, ItemStack::empty());
+        mob.equipment
+            .set(EquipmentSlot::MainHand, ItemStack::empty());
         super::living::play_sound(me, mob, "minecraft:entity.allay.item_taken", 2.0, 1.0);
         let thrown = mob.allay.remove_all();
         if let Some(brain) = mob.brain.as_mut() {
-            brain.memories.erase(super::brain::memory::MemoryType::LikedPlayer);
+            brain
+                .memories
+                .erase(super::brain::memory::MemoryType::LikedPlayer);
         }
         return Some(MobInteraction {
             result: InteractionResult::Success,
@@ -358,9 +363,7 @@ pub(super) fn wants_to_pick_up(mob: &Mob, stack: &ItemStack, rules: &BlockGameRu
         return false;
     }
     let held = mob.equipment.get(EquipmentSlot::MainHand);
-    held.is_empty()
-        || !allay_considers_item_equal(held, stack)
-        || !mob.allay.can_add_item(stack)
+    held.is_empty() || !allay_considers_item_equal(held, stack) || !mob.allay.can_add_item(stack)
 }
 
 /// `Allay.allayConsidersItemEqual`：`ItemStack.isSameItem` 且药水成分相同。
@@ -414,6 +417,24 @@ fn tick_vibration(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, now: 
     }
 }
 
+/// `Allay$VibrationUser.canReceiveVibration` 的静态部分：不开 AI、不是音符盒事件、
+/// 或已记下的音符盒仍在冷却期且事件与那一格不符时拒绝。
+pub fn can_receive_vibration(mob: &Mob, event: GameEvent, source: BlockPos) -> bool {
+    if mob.no_ai || event != GameEvent::NoteBlockPlay {
+        return false;
+    }
+    let Some(brain) = mob.brain.as_ref() else {
+        return true;
+    };
+    match brain
+        .memories
+        .global_pos(super::brain::memory::MemoryType::LikedNoteblockPosition)
+    {
+        None => true,
+        Some(gp) => gp.dimension == "minecraft:overworld" && gp.pos == source,
+    }
+}
+
 /// `Allay$VibrationUser`：半径 16、眼睛位置、只认 `#allay_can_listen` 的事件。
 struct AllayVibrationUser<'a> {
     me: &'a mut Entity,
@@ -435,24 +456,7 @@ impl VibrationUser for AllayVibrationUser<'_> {
     }
 
     fn can_receive(&self, event: GameEvent, source: BlockPos) -> bool {
-        if self.mob.no_ai || event != GameEvent::NoteBlockPlay {
-            return false;
-        }
-        let Some(brain) = self.mob.brain.as_ref() else {
-            return true;
-        };
-        match brain
-            .memories
-            .global_pos(super::brain::memory::MemoryType::LikedNoteblockPosition)
-        {
-            None => true,
-            Some(gp) => {
-                // `GlobalPos.isCloseEnough(dimension, pos, 1024)` 用平方距离。
-                gp.dimension == "minecraft:overworld"
-                    && global_pos_sqr(gp.pos, self.me.position) <= NOTEBLOCK_DISTANCE_SQR
-                    && gp.pos == source
-            }
-        }
+        can_receive_vibration(self.mob, event, source)
     }
 
     fn on_receive(
@@ -472,15 +476,6 @@ impl VibrationUser for AllayVibrationUser<'_> {
     }
 }
 
-/// `GlobalPos.isCloseEnough` 用 `BlockPos.distSqr(Position)` 的平方距离。
-fn global_pos_sqr(pos: BlockPos, at: Vec3) -> f64 {
-    let block = BlockPos::containing(at);
-    let dx = f64::from(pos.x - block.x);
-    let dy = f64::from(pos.y - block.y);
-    let dz = f64::from(pos.z - block.z);
-    dx * dx + dy * dy + dz * dz
-}
-
 /// `Allay.addAdditionalSaveData`：`Inventory` / `listener` / `DuplicationCooldown`。
 pub fn write_nbt(mob: &Mob, out: &mut Vec<(String, Tag)>) {
     let items: Vec<Tag> = mob
@@ -488,9 +483,7 @@ pub fn write_nbt(mob: &Mob, out: &mut Vec<(String, Tag)>) {
         .inventory
         .iter()
         .filter(|stack| !stack.is_empty())
-        .filter_map(|stack| {
-            mc_bamboo_protocol::components::archive::slots::encode_item(stack).ok()
-        })
+        .filter_map(|stack| mc_bamboo_protocol::components::archive::slots::encode_item(stack).ok())
         .collect();
     crate::archive::tag::put(out, "Inventory", Tag::List(items));
     let listener = mob
@@ -533,7 +526,8 @@ pub(super) fn drop_equipment(mob: &mut Mob) -> Vec<ItemStack> {
     let held = mob.equipment.get(EquipmentSlot::MainHand).clone();
     if !held.is_empty() {
         out.push(held);
-        mob.equipment.set(EquipmentSlot::MainHand, ItemStack::empty());
+        mob.equipment
+            .set(EquipmentSlot::MainHand, ItemStack::empty());
     }
     out
 }
@@ -564,7 +558,10 @@ mod tests {
         assert_eq!(MobType::Allay.entity_type(), ids::ALLAY);
         assert_eq!(MobType::Allay.dimensions(false), (0.35, 0.6, 0.36));
         assert_eq!(mob.attributes.base(attribute::MAX_HEALTH), 20.0);
-        assert_eq!(mob.attributes.base(attribute::FLYING_SPEED), f64::from(0.1_f32));
+        assert_eq!(
+            mob.attributes.base(attribute::FLYING_SPEED),
+            f64::from(0.1_f32)
+        );
         assert!(mob.can_pick_up_loot);
         assert!(mob.navigation.flags.fly);
         assert!(mob.navigation.flags.can_float);

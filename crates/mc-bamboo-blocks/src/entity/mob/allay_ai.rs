@@ -267,10 +267,7 @@ pub fn hear_noteblock(mob: &mut Mob, ctx: &dyn EntityCtx, pos: BlockPos) {
 /// `AllayAi.getItemDepositPosition`：优先 1024 格内、仍是音符盒、冷却没过期的
 /// 音符盒上方；否则擦掉那份记忆，改送喜欢的玩家。
 fn item_deposit_position(cx: &mut Cx) -> Option<PositionTracker> {
-    if let Some(gp) = cx
-        .memories
-        .global_pos(M::LikedNoteblockPosition)
-        .cloned()
+    if let Some(gp) = cx.memories.global_pos(M::LikedNoteblockPosition).cloned()
         && should_deposit_at_noteblock(cx, &gp)
     {
         return Some(PositionTracker::at_block(gp.pos.above()));
@@ -325,8 +322,7 @@ fn can_throw_item_to_target(cx: &mut Cx) -> bool {
 
 /// `BehaviorUtils.setWalkAndLookTargetMemories(entity, tracker, speed, closeEnough)`。
 fn set_walk_and_look(cx: &mut Cx, tracker: PositionTracker, speed: f32, close: i32) {
-    cx.memories
-        .set(LookTarget, MemoryValue::Look(tracker));
+    cx.memories.set(LookTarget, MemoryValue::Look(tracker));
     cx.memories.set(
         WalkTarget,
         MemoryValue::Walk(WalkTarget {
@@ -425,7 +421,11 @@ fn throw_item(cx: &mut Cx, at: Vec3) {
     }
     let target = at.add(Vec3::new(0.0, 1.0, 0.0));
     let eye_y = cx.me.position.y + f64::from(cx.mob.eye_height);
-    let origin = Vec3::new(cx.me.position.x, eye_y - f64::from(0.2_f32), cx.me.position.z);
+    let origin = Vec3::new(
+        cx.me.position.x,
+        eye_y - f64::from(0.2_f32),
+        cx.me.position.z,
+    );
     let direction = target.subtract(cx.me.position).normalize();
     let delta = direction.multiply(0.2, 0.3, 0.2);
     cx.ctx
@@ -437,17 +437,22 @@ fn throw_item(cx: &mut Cx, at: Vec3) {
     if time % 7 == 0 {
         let roll = cx.level_next_int(10);
         if roll != 9 {
-            let pitch = THROW_SOUND_PITCHES[cx.level_next_int(THROW_SOUND_PITCHES.len() as i32)
-                as usize];
-            super::living::play_sound(cx.me, cx.mob, "minecraft:entity.allay.item_thrown", 1.0, pitch);
+            let pitch =
+                THROW_SOUND_PITCHES[cx.level_next_int(THROW_SOUND_PITCHES.len() as i32) as usize];
+            super::living::play_sound(
+                cx.me,
+                cx.mob,
+                "minecraft:entity.allay.item_thrown",
+                1.0,
+                pitch,
+            );
         }
     }
 }
 
 /// `Allay.THROW_SOUND_PITCHES`，16 个音高。
 const THROW_SOUND_PITCHES: [f32; 16] = [
-    0.5625, 0.625, 0.75, 0.9375, 1.0, 1.0, 1.125, 1.25, 1.5, 1.875, 2.0, 2.25, 2.5, 3.0, 3.75,
-    4.0,
+    0.5625, 0.625, 0.75, 0.9375, 1.0, 1.0, 1.125, 1.25, 1.5, 1.875, 2.0, 2.25, 2.5, 3.0, 3.75, 4.0,
 ];
 
 #[cfg(test)]
