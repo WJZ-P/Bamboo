@@ -301,8 +301,14 @@ impl Behavior {
                 }
             }
             Self::SonicBoom => {
-                if let Some(target) = cx.memories.entity(M::AttackTarget) {
-                    look_at_entity(cx, target);
+                // `SonicBoom.tick` 的 `getLookControl().setLookAt(target.position())`
+                // 追的是脚底位置（没有眼睛高度）。
+                // `SonicBoom.tick`'s `getLookControl().setLookAt(target.position())`
+                // tracks the feet rather than the eyes.
+                if let Some(target) = cx.memories.entity(M::AttackTarget)
+                    && let Some(pos) = entity_position(cx, target)
+                {
+                    cx.mob.look.set_look_at_default(pos.x, pos.y, pos.z);
                 }
                 if cx.memories.has(M::SonicBoomSoundDelay)
                     || cx.memories.has(M::SonicBoomSoundCooldown)
@@ -499,13 +505,25 @@ impl Behavior {
                 let Some(target) = cx.memories.entity(M::AttackTarget) else {
                     return false;
                 };
-                let Some(pos) = entity_position(cx, target) else {
-                    return false;
-                };
-                cx.memories.set(
-                    M::WalkTarget,
-                    MemoryValue::Walk(WalkTarget::to_point(pos, 1.2, 0)),
-                );
+                // 看得见且在近战范围里就擦掉行走目标，否则追着 EntityTracker 走。
+                // Erase the walk target when visible and within melee reach;
+                // otherwise follow an EntityTracker.
+                if within_melee_reach(cx, target) {
+                    cx.memories.erase(M::WalkTarget);
+                } else {
+                    cx.memories.set(
+                        M::LookTarget,
+                        MemoryValue::Look(PositionTracker::Entity {
+                            uid: target,
+                            track_eye: true,
+                            target_eye: false,
+                        }),
+                    );
+                    cx.memories.set(
+                        M::WalkTarget,
+                        MemoryValue::Walk(WalkTarget::to_entity(target, 1.2, 0)),
+                    );
+                }
                 true
             }
             Self::MeleeAttack => {
@@ -515,26 +533,19 @@ impl Behavior {
                 if cx.memories.has(M::AttackCoolingDown) || !can_target_entity(cx, target) {
                     return false;
                 }
-                // `Mob.isWithinMeleeAttackRange`：`getBoundingBox().inflate(DEFAULT_ATTACK_REACH, 0, ...)`
-                // 与目标 hitbox 相交。`DEFAULT_ATTACK_REACH = sqrt(2.04) - 0.6`.
-                let reach = 2.04_f64.sqrt() - 0.6000000238418579_f64;
-                let attack_box = cx.me.bounding_box().inflate(reach, 0.0, reach);
-                let Some(view) = super::brain::sensor::living(cx, target) else {
-                    return false;
-                };
-                if !attack_box.intersects(view.bounding_box) {
+                if !within_melee_reach(cx, target) {
                     return false;
                 }
-                // `NearestVisibleLivingEntities.contains(target)`。
-                let visible = cx
-                    .memories
-                    .get(M::NearestVisibleLivingEntities)
-                    .is_some_and(|value| {
-                        matches!(value, MemoryValue::Visible(list) if list.entities.contains(&target))
-                    });
-                if !visible {
-                    return false;
-                }
+                // `MeleeAttack` 把 LOOK_TARGET 设成眼睛追踪器。
+                // `MeleeAttack` sets LOOK_TARGET to an eye-height EntityTracker.
+                cx.memories.set(
+                    M::LookTarget,
+                    MemoryValue::Look(PositionTracker::Entity {
+                        uid: target,
+                        track_eye: true,
+                        target_eye: false,
+                    }),
+                );
                 entity_event(cx, 4);
                 cx.memories
                     .set_with_ttl(M::AttackCoolingDown, MemoryValue::Bool(true), 18);
@@ -714,20 +725,34 @@ fn can_target_entity(cx: &Cx, uid: crate::entity::EntityUid) -> bool {
     view.mob_type != Some(MobType::Warden)
 }
 
+/// `BehaviorUtils.isWithinAttackRange` 与 `MeleeAttack` 共用的判定：看得见且在
+/// `getBoundingBox().inflate(DEFAULT_ATTACK_REACH, 0, ...)` 命中范围内。
+///
+/// The shared check for `BehaviorUtils.isWithinAttackRange` and `MeleeAttack`:
+/// visible and inside the inflated attack bounding box.
+fn within_melee_reach(cx: &Cx, uid: crate::entity::EntityUid) -> bool {
+    let visible = cx
+        .memories
+        .get(M::NearestVisibleLivingEntities)
+        .is_some_and(
+            |value| matches!(value, MemoryValue::Visible(list) if list.entities.contains(&uid)),
+        );
+    if !visible {
+        return false;
+    }
+    let Some(view) = super::brain::sensor::living(cx, uid) else {
+        return false;
+    };
+    let reach = 2.04_f64.sqrt() - 0.6000000238418579_f64;
+    cx.me
+        .bounding_box()
+        .inflate(reach, 0.0, reach)
+        .intersects(view.bounding_box)
+}
+
 /// 只读实体位置（`EntityCtx` 提供视图）。
 fn entity_position(cx: &Cx, uid: crate::entity::EntityUid) -> Option<Vec3> {
     super::brain::sensor::living(cx, uid).map(|view| view.position)
-}
-
-fn look_at_entity(cx: &mut Cx, uid: crate::entity::EntityUid) {
-    // `BehaviorUtils.lookAtEntity` / `LookAtTargetSink`：追踪目标的眼睛位置，
-    // 用 `getHeadRotSpeed()` = 10、`getMaxHeadXRot()` = 40 的默认转速。
-    if let Some(view) = super::brain::sensor::living(cx, uid) {
-        let eye = view
-            .position
-            .add(Vec3::new(0.0, f64::from(view.eye_height), 0.0));
-        cx.mob.look.set_look_at_default(eye.x, eye.y, eye.z);
-    }
 }
 
 fn entity_event(cx: &mut Cx, event: u8) {

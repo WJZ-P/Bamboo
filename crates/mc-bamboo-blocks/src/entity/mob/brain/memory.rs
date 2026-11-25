@@ -466,6 +466,23 @@ impl WalkTarget {
             close_enough,
         }
     }
+
+    /// `new WalkTarget(new EntityTracker(entity, false), speed, closeEnough)`：
+    /// 目标移动时行走点跟着变。
+    ///
+    /// `new WalkTarget(new EntityTracker(entity, false), speed, closeEnough)`:
+    /// the walk point follows a moving entity.
+    pub fn to_entity(uid: crate::entity::EntityUid, speed: f32, close_enough: i32) -> Self {
+        Self {
+            target: PositionTracker::Entity {
+                uid,
+                track_eye: false,
+                target_eye: false,
+            },
+            speed,
+            close_enough,
+        }
+    }
 }
 
 /// `NearestVisibleLivingEntities`：附近的活体按距离排好，视线判定第一次问到时才算，
