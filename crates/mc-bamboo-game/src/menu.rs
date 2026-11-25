@@ -49,7 +49,7 @@ const DOUBLE_CHEST_TITLE: &str = "container.chestDouble";
 /// 物品栏菜单里快捷栏第一格的槽位，玩家部分的 36 格从这里开始。
 const PLAYER_SLOTS: usize = 36;
 /// 物品栏菜单里第一格的位置，`Inventory.slots` 是按菜单槽位存的。
-const INVENTORY_MENU_START: usize = 9;
+pub(crate) const INVENTORY_MENU_START: usize = 9;
 
 /// 菜单指向的方块。双箱要记住两半，打开和关闭都要作用在两边。
 #[derive(Debug, Clone, PartialEq, Eq)]

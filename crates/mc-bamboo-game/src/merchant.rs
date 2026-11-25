@@ -5,10 +5,10 @@
 //! 取出结果时扣两格付款、累加使用次数、发经验和升级。4 格距离之外或村民死了
 //! 菜单就失效。
 
+use mc_bamboo_blocks::InteractionResult;
 use mc_bamboo_blocks::RandomSource;
 use mc_bamboo_blocks::entity::mob::MobType;
 use mc_bamboo_blocks::entity::mob::villager::Villager;
-use mc_bamboo_blocks::InteractionResult;
 use mc_bamboo_core::Vec3;
 use mc_bamboo_data::{registries, villager as data};
 use mc_bamboo_loot::{
@@ -321,16 +321,137 @@ fn open_screen(
     crate::menu::broadcast_merchant_state(region, player);
 }
 
-/// `ServerboundSelectTradePacket`：记下客户端选的是第几条，然后重算结果格。
+/// `ServerboundSelectTradePacket`：记下选中的交易、重算结果，再把背包里匹配的
+/// 付款物品自动填进付款格（`MerchantMenu.tryMoveItems`）。
+///
+/// `ServerboundSelectTradePacket`: record the selection, recompute the result, then
+/// auto-fill the payment slots from the inventory (`MerchantMenu.tryMoveItems`).
 pub(crate) fn on_select_trade(region: &mut Region, player: PlayerId, slot: i32) {
     let Some(mut menu) = region.menus.remove(&player) else {
         return;
     };
     if let Some(state) = menu.merchant.as_mut() {
         state.selection_hint = slot.max(0);
+        try_move_items(region, player, &mut menu, slot);
         slots_changed(region, player, &mut menu);
     }
     region.menus.insert(player, menu);
+}
+
+/// `MerchantMenu.tryMoveItems(slot)`：先把旧的付款搬回背包，两格都空时按选中交易的
+/// A / B 成本从背包自动填付款格。
+///
+/// `MerchantMenu.tryMoveItems(slot)`: move any existing payment back to the inventory,
+/// then auto-fill both payment slots from the inventory when they are empty.
+fn try_move_items(region: &mut Region, player: PlayerId, menu: &mut Menu, slot: i32) {
+    if slot < 0 {
+        return;
+    }
+    let Some(villager_id) = menu.target.villager() else {
+        return;
+    };
+    let Some(offers) = villager_offers(region, villager_id) else {
+        return;
+    };
+    if slot as usize >= offers.len() {
+        return;
+    }
+    let Some(player_data) = region.players.get_mut(&player) else {
+        return;
+    };
+    let inventory = &mut player_data.inventory;
+    let Some(state) = menu.merchant.as_mut() else {
+        return;
+    };
+    // 旧的付款搬回背包；搬不动就停下，不自动填。
+    for payment in [0, 1] {
+        if state.payment[payment].is_empty() {
+            continue;
+        }
+        if !move_payment_to_inventory(inventory, &mut state.payment[payment]) {
+            return;
+        }
+    }
+    if state.payment[0].is_empty() && state.payment[1].is_empty() {
+        let offer = &offers[slot as usize];
+        move_from_inventory_to_payment(inventory, &mut state.payment[0], &offer.base_cost_a);
+        if let Some(cost) = &offer.cost_b {
+            move_from_inventory_to_payment(inventory, &mut state.payment[1], cost);
+        }
+    }
+}
+
+/// `moveItemStackTo(stack, 3, 39, true)`：把付款格的一堆搬进玩家 36 格，从后往前。
+/// 返回是否搬动了任何东西；没搬动时 `tryMoveItems` 停下，不自动填。
+///
+/// `moveItemStackTo(stack, 3, 39, true)`: move a payment stack into the player's 36
+/// slots, back to front. Returns whether anything moved; a failure stops `tryMoveItems`.
+fn move_payment_to_inventory(
+    inventory: &mut crate::inventory::Inventory,
+    stack: &mut ItemStack,
+) -> bool {
+    let mut moved = false;
+    if stack.is_stackable() {
+        for index in (crate::menu::INVENTORY_MENU_START..crate::inventory::OFF_HAND).rev() {
+            let target = &mut inventory.slots[index];
+            if target.is_empty() || !target.is_same_item_same_components(stack) {
+                continue;
+            }
+            let max = target.max_stack_size();
+            let total = target.count + stack.count;
+            if total <= max {
+                target.count = total;
+                *stack = ItemStack::empty();
+                return true;
+            }
+            if target.count < max {
+                let added = max - target.count;
+                stack.count -= added;
+                target.count = max;
+                moved = true;
+            }
+        }
+    }
+    if !stack.is_empty() {
+        for index in (crate::menu::INVENTORY_MENU_START..crate::inventory::OFF_HAND).rev() {
+            if inventory.slots[index].is_empty() {
+                inventory.slots[index] = std::mem::take(stack);
+                return true;
+            }
+        }
+    }
+    moved
+}
+
+/// `moveFromInventoryToPaymentSlot`：在背包里找匹配 `cost` 的堆，填进付款格。
+fn move_from_inventory_to_payment(
+    inventory: &mut crate::inventory::Inventory,
+    payment: &mut ItemStack,
+    cost: &ItemCost,
+) {
+    for index in crate::menu::INVENTORY_MENU_START..crate::inventory::OFF_HAND {
+        let stack = &mut inventory.slots[index];
+        if stack.is_empty() || !cost_matches(cost, stack) {
+            continue;
+        }
+        if !payment.is_empty() && !payment.is_same_item_same_components(stack) {
+            continue;
+        }
+        let max = stack.max_stack_size();
+        let amount = (max - payment.count).min(stack.count);
+        let mut combined = stack.clone();
+        combined.count = payment.count + amount;
+        stack.count -= amount;
+        if stack.count <= 0 {
+            *stack = ItemStack::empty();
+        }
+        let filled = combined.count;
+        *payment = combined;
+        if filled < max {
+            continue;
+        }
+        return;
+    }
 }
 
 /// 玩家点击了商人菜单的槽位。付款格用普通点击逻辑改，结果格只在能交易时取出。
@@ -359,7 +480,12 @@ pub(crate) fn on_click(region: &mut Region, player: PlayerId, packet: ClickPacke
     true
 }
 
-/// `MerchantContainer.updateSellItem`：找到选中且能支付、没卖光的交易，算出结果堆。
+/// `MerchantContainer.updateSellItem`：付款格 0 空就用 1；按 `getRecipeFor(a, b, hint)`
+/// 找交易，不中或卖光再试 `getRecipeFor(b, a, hint)`（付款两格对调）。
+///
+/// `MerchantContainer.updateSellItem`: fall back to slot 1 when slot 0 is empty;
+/// look up `getRecipeFor(a, b, hint)` and retry with the two payments swapped when
+/// the hint misses or is out of stock.
 pub(crate) fn slots_changed(region: &Region, _player: PlayerId, menu: &mut Menu) {
     let Some(state) = menu.merchant.as_mut() else {
         return;
@@ -369,40 +495,43 @@ pub(crate) fn slots_changed(region: &Region, _player: PlayerId, menu: &mut Menu)
     let Some(villager_id) = menu.target.villager() else {
         return;
     };
-    let Some(offers) = region
-        .entities
-        .public_at(villager_id)
-        .and_then(|_| villager_offers(region, villager_id))
-    else {
+    let Some(offers) = villager_offers(region, villager_id) else {
         return;
     };
-    let a = state.payment[0].clone();
-    let b = state.payment[1].clone();
-    if a.is_empty() {
+    let (a, b) = if state.payment[0].is_empty() {
+        (state.payment[1].clone(), ItemStack::empty())
+    } else {
+        (state.payment[0].clone(), state.payment[1].clone())
+    };
+    if a.is_empty() || offers.is_empty() {
         return;
     }
-    // `MerchantOffers.getRecipeFor(a, b, hint)`：hint > 0 时先只看那一条，
-    // 卖光或付不起就退回从第一条开始扫。
     let hint = state.selection_hint as usize;
-    let matches = |candidates: &[MerchantOffer]| -> Option<usize> {
-        candidates
-            .iter()
-            .enumerate()
-            .find(|(_, offer)| !offer.is_out_of_stock() && satisfied_by(offer, &a, &b))
-            .map(|(i, _)| i)
-    };
-    let index = if hint > 0 && hint < offers.len() {
-        matches(&offers[hint..hint + 1])
-            .map(|i| hint + i)
-            .or_else(|| matches(&offers))
-    } else {
-        matches(&offers)
-    };
+    let mut index = get_recipe_for(&offers, &a, &b, hint);
+    if index.is_none_or(|i| offers[i].is_out_of_stock()) {
+        index = get_recipe_for(&offers, &b, &a, hint);
+    }
     let Some(index) = index else {
         return;
     };
+    if offers[index].is_out_of_stock() {
+        return;
+    }
     state.active = Some(index);
     state.result = offers[index].result.clone();
+}
+
+/// `MerchantOffers.getRecipeFor(a, b, hint)`：hint 有效时只看那一条，不中直接 `None`。
+fn get_recipe_for(
+    offers: &[MerchantOffer],
+    a: &ItemStack,
+    b: &ItemStack,
+    hint: usize,
+) -> Option<usize> {
+    if hint > 0 && hint < offers.len() {
+        return satisfied_by(&offers[hint], a, b).then_some(hint);
+    }
+    offers.iter().position(|offer| satisfied_by(offer, a, b))
 }
 
 /// 只读地取出村民的交易表。
@@ -447,7 +576,8 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
         return false;
     }
     let cost_a = cost_count(&offer, &offer.base_cost_a);
-    let cost_b = offer.cost_b.as_ref().map(|cost| cost_count(&offer, cost));
+    // B 不打折：`getCostB().count` 是原始 `count`，不走 `getModifiedCostCount`。
+    let cost_b = offer.cost_b.as_ref().map(|cost| cost.count);
     state.payment[0].count -= cost_a;
     if state.payment[0].count <= 0 {
         state.payment[0] = ItemStack::empty();
@@ -527,8 +657,13 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
     // and a level-up appends a new tier.
     spawn_trade_xp(region, villager_id, orb_amount, offer.reward_exp);
     send_offers(region, player, menu);
-    // `Stats.TRADED_WITH_VILLAGER` 在 Bamboo 还没有通用统计表，
-    // 触发器和进度用同一个事件；统计计数待期 6 的统计表接入。
+    // `Stats.TRADED_WITH_VILLAGER`：自定义统计，随 `RequestStats` 一起发。
+    crate::item_use_stats::award_custom(
+        region,
+        player,
+        registries::custom_stat::TRADED_WITH_VILLAGER,
+        1,
+    );
     true
 }
 
@@ -583,13 +718,17 @@ fn cost_stack_max(cost: &ItemCost) -> i32 {
         .map_or(99, |item| item.max_stack_size)
 }
 
-/// `MerchantOffer.satisfiedBy`：物品和精确组件一致，数量够；B 存在时第二格也要够。
+/// `MerchantOffer.satisfiedBy`：A 按 `getModifiedCostCount` 比数量，B 按原始 `count`。
+/// 官方 B 的价格不打折（`getCostB` 是 `costB.itemStack()`，数量不变）。
+///
+/// `MerchantOffer.satisfiedBy`: A uses `getModifiedCostCount`; B uses the raw
+/// `count` — vanilla does not discount the second cost (`getCostB` is `costB.itemStack()`).
 fn satisfied_by(offer: &MerchantOffer, a: &ItemStack, b: &ItemStack) -> bool {
     if !cost_matches(&offer.base_cost_a, a) || a.count < cost_count(offer, &offer.base_cost_a) {
         return false;
     }
     match &offer.cost_b {
-        Some(cost) => cost_matches(cost, b) && b.count >= cost_count(offer, cost),
+        Some(cost) => cost_matches(cost, b) && b.count >= cost.count,
         None => b.is_empty(),
     }
 }
@@ -865,6 +1004,34 @@ mod tests {
             "跨天重置后 uses 已经清零，不需要补"
         );
         assert_eq!(v.restocks_today, 0);
+    }
+
+    /// `moveFromInventoryToPaymentSlot` 把整堆匹配物品搬进付款格（不只 `cost.count`）。
+    #[test]
+    fn auto_fill_moves_the_whole_matching_stack() {
+        let mut inventory = crate::inventory::Inventory::default();
+        inventory.slots[crate::menu::INVENTORY_MENU_START] = ItemStack::new(items::EMERALD, 4);
+        let mut payment = ItemStack::empty();
+        move_from_inventory_to_payment(
+            &mut inventory,
+            &mut payment,
+            &ItemCost::new(items::EMERALD, 3),
+        );
+        assert_eq!(payment.item, items::EMERALD);
+        assert_eq!(payment.count, 4);
+        assert!(inventory.slots[crate::menu::INVENTORY_MENU_START].is_empty());
+    }
+
+    /// `moveItemStackTo(stack, 3, 39, true)` 从后往前搬回背包的最后一格。
+    #[test]
+    fn payment_moves_back_to_the_last_inventory_slot() {
+        let mut inventory = crate::inventory::Inventory::default();
+        let mut payment = ItemStack::new(items::EMERALD, 4);
+        assert!(move_payment_to_inventory(&mut inventory, &mut payment));
+        assert!(payment.is_empty());
+        let slot = crate::inventory::OFF_HAND - 1;
+        assert_eq!(inventory.slots[slot].item, items::EMERALD);
+        assert_eq!(inventory.slots[slot].count, 4);
     }
 }
 
