@@ -1320,6 +1320,18 @@ impl<'a> World<'a> {
         self.level.note_block_sound(pos)
     }
 
+    /// `CopperGolemStatueBlockEntity` 组件表里的自定义名文本标签。
+    pub fn statue_custom_name(&self, pos: BlockPos) -> Option<mc_bamboo_nbt::Tag> {
+        self.note_access(pos, false);
+        self.level.statue_custom_name(pos)
+    }
+
+    /// 把铜傀儡的自定义名写进雕像方块实体的组件表（`createStatue`）。
+    pub fn set_statue_custom_name(&mut self, pos: BlockPos, name: Option<mc_bamboo_nbt::Tag>) {
+        self.note_access(pos, true);
+        self.level.set_statue_custom_name(pos, name);
+    }
+
     /// `getBlockEntity(pos)` 之后按类型取。
     pub fn block_entity<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
         self.note_access(pos, false);

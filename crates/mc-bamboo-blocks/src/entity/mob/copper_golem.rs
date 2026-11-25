@@ -533,6 +533,10 @@ pub(crate) fn apply_statue(
         .with(COPPER_GOLEM_POSE, pose_from_id(pose))
         .with(HORIZONTAL_FACING, facing);
     world.set_block_and_update(pos, state);
+    // `CopperGolemStatueBlockEntity.createStatue`：把自定义名搬进雕像的组件表。
+    // `createStatue` copies the golem's custom name into the statue's components.
+    let custom_name = me.kind.mob().and_then(|mob| mob.custom_name.clone());
+    world.set_statue_custom_name(pos, custom_name);
     if let Some(mob) = me.kind.mob_mut() {
         for slot in [EquipmentSlot::MainHand, EquipmentSlot::Saddle] {
             let stack = mob.equipment.get(slot).clone();
@@ -803,5 +807,30 @@ mod tests {
             assert_eq!(mob.copper_golem.weather_state, WeatherState::Weathered);
             assert_eq!(mob.copper_golem.next_weathering_tick, 123_456);
         });
+    }
+}
+
+#[cfg(test)]
+mod statue_tests {
+    use mc_bamboo_nbt::Tag;
+
+    use super::*;
+    use crate::{testing::TestLevel, ticks::BlockTicks, world::World};
+
+    /// `createStatue` 把铜傀儡的自定义名写进雕像的组件表。
+    #[test]
+    fn statue_creation_copies_the_custom_name() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let pos = BlockPos::new(1, 64, 2);
+        let name = Tag::String("Copper Nick".to_owned());
+        let mut entity = Entity::by_mob_type(MobType::CopperGolem, Vec3::new(1.5, 64.0, 2.5));
+        entity.with_mob(|_, mob| mob.custom_name = Some(name.clone()));
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            apply_statue(&mut world, &mut entity, pos, 2, Direction::North);
+        }
+        assert_eq!(level.statue_names.get(&pos), Some(&name));
+        assert!(entity.removed);
     }
 }

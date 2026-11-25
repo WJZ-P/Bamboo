@@ -197,6 +197,10 @@ fn revive_statue(state: BlockState, world: &mut World, ctx: &UseContext) -> Inte
         y: f64::from(pos.y),
         z: f64::from(pos.z) + 0.5,
     };
+    // `removeStatue` 把雕像组件表里的自定义名搬回铜傀儡；要在移除方块之前读。
+    // `removeStatue` copies the statue's custom name back onto the golem; read it
+    // before the block (and its block entity) are removed.
+    let custom_name = world.statue_custom_name(pos);
     // `prepare_entity` 会调 `finish_mob_random` 覆写朝向，朝向要在之后设。
     // `prepare_entity` calls `finish_mob_random`, which overwrites the facing, so
     // set it afterwards.
@@ -210,6 +214,7 @@ fn revive_statue(state: BlockState, world: &mut World, ctx: &UseContext) -> Inte
         mob.y_body_rot = facing;
         mob.y_head_rot_o = facing;
         mob.y_body_rot_o = facing;
+        mob.custom_name = custom_name.clone();
     });
     world.add_prepared_entity(entity);
     world.play_sound(
@@ -279,5 +284,45 @@ impl Behaviour for WeatheringCopperGolemStatue {
         _direction: Direction,
     ) -> i32 {
         pose_signal(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_data::{blocks, items};
+    use mc_bamboo_nbt::Tag;
+
+    use super::*;
+    use crate::{
+        state::BlockState,
+        testing::{TestLevel, actor_holding, top_hit, use_item},
+    };
+
+    /// `removeStatue` 把雕像组件表里的自定义名搬回新生成的铜傀儡。
+    #[test]
+    fn revive_copies_the_statue_custom_name_onto_the_golem() {
+        let mut level = TestLevel::new();
+        let pos = BlockPos::new(1, 64, 2);
+        level.set(pos, BlockState(blocks::COPPER_GOLEM_STATUE));
+        let name = Tag::String("Copper Nick".to_owned());
+        level.statue_names.insert(pos, name.clone());
+
+        let actor = actor_holding(items::DIAMOND_AXE);
+        let _outcome = use_item(&mut level, &actor, top_hit(pos));
+
+        let golems: Vec<_> = level
+            .entities()
+            .iter()
+            .filter(|entity| {
+                entity
+                    .kind
+                    .mob()
+                    .is_some_and(|mob| mob.mob_type == MobType::CopperGolem)
+            })
+            .collect();
+        assert_eq!(golems.len(), 1);
+        assert_eq!(golems[0].kind.mob().unwrap().custom_name, Some(name));
+        // 方块没了就看不到名字了（和 `Level::sign` 一样）。
+        assert!(level.get(pos).is_air());
     }
 }

@@ -35,6 +35,8 @@ pub(crate) struct TestLevel {
     pub(crate) signs: HashMap<BlockPos, SignContent>,
     /// 头颅方块实体的 `note_block_sound`，只有那一格还是头颅时才读得到。
     pub(crate) note_block_sounds: HashMap<BlockPos, String>,
+    /// 铜傀儡雕像组件表里的自定义名文本标签（`createStatue` / `removeStatue` 单测用）。
+    pub(crate) statue_names: HashMap<BlockPos, mc_bamboo_nbt::Tag>,
     /// 按写入顺序记下每一格写过什么，测试连锁顺序时用。
     pub(crate) writes: Vec<(BlockPos, BlockState)>,
     /// 假装有实体挡在任何有碰撞的方块上。
@@ -90,6 +92,7 @@ impl TestLevel {
             frozen_chunks: HashSet::new(),
             signs: HashMap::new(),
             note_block_sounds: HashMap::new(),
+            statue_names: HashMap::new(),
             writes: Vec::new(),
             obstructed: false,
             random: LevelRandom::new(0),
@@ -312,6 +315,7 @@ impl Level for TestLevel {
         if !old.is_same_block(state) {
             self.signs.remove(&pos);
             self.note_block_sounds.remove(&pos);
+            self.statue_names.remove(&pos);
         }
         self.blocks.insert(pos, state);
         self.poi.on_block_state_change(pos, old.0, state.0);
@@ -472,6 +476,21 @@ impl Level for TestLevel {
             return None;
         }
         self.note_block_sounds.get(&pos).cloned()
+    }
+
+    fn statue_custom_name(&self, pos: BlockPos) -> Option<mc_bamboo_nbt::Tag> {
+        self.statue_names.get(&pos).cloned()
+    }
+
+    fn set_statue_custom_name(&mut self, pos: BlockPos, name: Option<mc_bamboo_nbt::Tag>) {
+        match name {
+            Some(name) => {
+                self.statue_names.insert(pos, name);
+            }
+            None => {
+                self.statue_names.remove(&pos);
+            }
+        }
     }
 
     fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {

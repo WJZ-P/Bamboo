@@ -481,6 +481,38 @@ impl Level for RegionLevel<'_> {
         }
     }
 
+    /// `CopperGolemStatueBlockEntity` 的自定义名在 `components` 组件表里，
+    /// 由 [`Self::block_items`] 的 `CUSTOM_NAME` 补丁建模。
+    fn statue_custom_name(&self, pos: BlockPos) -> Option<mc_bamboo_nbt::Tag> {
+        let statue = block_of_state(self.chunks.block(pos)?)?.block_entity_type
+            == Some(entities::COPPER_GOLEM_STATUE);
+        if !statue {
+            return None;
+        }
+        match self.block_items.get(&pos)?.get(kinds::CUSTOM_NAME)? {
+            ComponentValue::CustomName(component) => Some(component.tag().clone()),
+            _ => None,
+        }
+    }
+
+    /// `createStatue` 把铜傀儡的自定义名搬进雕像方块实体；`None` 时清掉补丁。
+    fn set_statue_custom_name(&mut self, pos: BlockPos, name: Option<mc_bamboo_nbt::Tag>) {
+        let Some(value) = name else {
+            return;
+        };
+        let Ok(component) = mc_bamboo_protocol::components::archive::text::decode(&value) else {
+            return;
+        };
+        self.dirty.mark(pos.chunk());
+        let patch = self
+            .block_items
+            .get_or_insert_with(pos, ComponentPatch::new);
+        patch.put(
+            kinds::CUSTOM_NAME,
+            mc_bamboo_protocol::components::PatchEntry::Set(ComponentValue::CustomName(component)),
+        );
+    }
+
     fn block_game_rules(&self) -> BlockGameRules {
         self.block_rules
     }

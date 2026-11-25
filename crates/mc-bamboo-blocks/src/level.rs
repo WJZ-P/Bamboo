@@ -939,6 +939,21 @@ pub trait Level: LevelSideState + LevelEntities {
     /// `None`，官方对应 `null`。
     fn note_block_sound(&self, pos: BlockPos) -> Option<String>;
 
+    /// `CopperGolemStatueBlockEntity.components().get(CUSTOM_NAME)` 对应的文本组件标签。
+    /// 官方把它存进 `components` 组件表；没建模的世界返回 `None`。
+    ///
+    /// The text-component tag behind a statue's `CUSTOM_NAME`. Vanilla stores it in the
+    /// `components` map; unmodelled worlds return `None`.
+    fn statue_custom_name(&self, _pos: BlockPos) -> Option<mc_bamboo_nbt::Tag> {
+        None
+    }
+
+    /// 把铜傀儡的自定义名写进雕像方块实体的组件表。没建模的世界什么都不做。
+    ///
+    /// Write a copper golem's custom name into the statue block entity's components.
+    /// Unmodelled worlds do nothing.
+    fn set_statue_custom_name(&mut self, _pos: BlockPos, _name: Option<mc_bamboo_nbt::Tag>) {}
+
     /// 这个区块现在跑不跑方块逻辑（计划刻、流体刻、方块事件、方块实体）。默认都跑。
     ///
     /// 到期的计划刻在不能跑的区块里留在队列里，等这个区块重新能跑时按原来的排序键执行。
