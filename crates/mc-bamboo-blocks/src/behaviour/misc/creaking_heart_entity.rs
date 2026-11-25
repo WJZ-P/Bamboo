@@ -295,21 +295,23 @@ impl CreakingHeartEntity {
     /// `spawnProtector`：`SpawnUtil.trySpawnMob` 的 5 次尝试和 16×8 取点。
     fn spawn_protector(&self, world: &mut World) -> Option<(i32, Vec3, [u8; 16])> {
         for _ in 0..5 {
-            let dx = world.random().next_int(33) - 16;
-            let dz = world.random().next_int(33) - 16;
+            let dx = world.random().next_int_between_inclusive(-16, 16);
+            let dz = world.random().next_int_between_inclusive(-16, 16);
             let mut at = self.pos.offset(dx, 8, dz);
-            let mut below = world.block_state(at);
+            let mut landing = None;
             for _ in 0..=16 {
-                let above = at.above();
-                let state = world.block_state(above);
-                if can_spawn_on(world, above, state, at, below) {
-                    at = above.above();
+                at = at.below();
+                let lower = world.block_state(at);
+                let upper_pos = at.above();
+                let upper = world.block_state(upper_pos);
+                if can_spawn_on(world, at, lower, upper_pos, upper) {
+                    landing = Some(upper_pos);
                     break;
                 }
-                at = at.below();
-                below = state;
             }
-            // 循环走完仍未 break 视为没有落点；下面再检查一次落脚格。
+            let Some(at) = landing else {
+                continue;
+            };
             if !can_hold_protector(world, at) {
                 continue;
             }
@@ -403,25 +405,32 @@ impl CreakingHeartEntity {
     }
 }
 
-/// `SpawnUtil.Strategy.ON_TOP_OF_COLLIDER_NO_LEAVES`：上面一格空、脚下是完整顶面且不是树叶。
+/// `SpawnUtil.Strategy.ON_TOP_OF_COLLIDER_NO_LEAVES`：上方无碰撞、脚下是完整顶面且不是树叶。
 fn can_spawn_on(
     world: &World,
-    _above: BlockPos,
-    state: BlockState,
-    at: BlockPos,
-    below: BlockState,
+    lower_pos: BlockPos,
+    lower: BlockState,
+    upper_pos: BlockPos,
+    upper: BlockState,
 ) -> bool {
-    if !state.is_air() {
+    let upper_boxes = shape::block_collision_boxes(
+        upper,
+        upper_pos,
+        CollisionContext::Empty,
+        world.moving_piston_shape(upper_pos).as_deref(),
+        world.shulker_box_shape(upper_pos),
+    );
+    if !upper_boxes.is_empty() || lower.is_tagged(block_tags::LEAVES) {
         return false;
     }
-    let support = shape::block_collision_boxes(
-        below,
-        at,
+    let lower_boxes = shape::block_collision_boxes(
+        lower,
+        lower_pos,
         CollisionContext::Empty,
-        world.moving_piston_shape(at).as_deref(),
-        world.shulker_box_shape(at),
+        world.moving_piston_shape(lower_pos).as_deref(),
+        world.shulker_box_shape(lower_pos),
     );
-    !below.is_tagged(block_tags::LEAVES) && shape::is_face_full(&support, Direction::Up)
+    shape::is_face_full(&lower_boxes, Direction::Up)
 }
 
 /// 嘎枝落脚格的 AABB 不能与方块碰撞；简化为落脚格与上一格都是空气 / 无碰撞。
@@ -566,6 +575,12 @@ mod tests {
         let log = BlockState(blocks::PALE_OAK_LOG).with(AXIS, mc_bamboo_core::Axis::Y);
         level.set(POS.above(), log);
         level.set(POS.below(), log);
+        // 33×33 石台：5 次 16 格取点都能找到落脚位置。
+        for x in -16..=16 {
+            for z in -16..=16 {
+                level.set(BlockPos::new(x, 60, z), BlockState(blocks::STONE));
+            }
+        }
         (level, BlockTicks::new())
     }
 
