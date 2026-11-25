@@ -85,7 +85,7 @@ mod pacing;
 mod partition_stats;
 mod patrol_spawn;
 mod phantom_spawn;
-mod pig_riding;
+pub mod pig_riding;
 mod player;
 mod player_attack;
 mod player_attributes;

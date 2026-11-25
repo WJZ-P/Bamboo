@@ -2,3 +2,8 @@
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "oracle-samples")]
+mod replay;
+#[cfg(feature = "oracle-samples")]
+pub use replay::*;

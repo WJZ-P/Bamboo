@@ -134,10 +134,17 @@ pub fn ridden_speed(movement_speed: f64, steering: &Steering) -> f32 {
 /// `Pig.tickRidden`: face the rider (half pitch), snap previous/body/head yaw, then
 /// `tickBoost`.
 pub fn tick_ridden(me: &mut Entity, mob: &mut Mob, yaw: f32, pitch: f32) {
-    let yaw = if yaw.is_finite() { yaw } else { me.y_rot };
+    // `Entity.setRot` 先把两个角取 `% 360`。
+    //
+    // `Entity.setRot` takes both angles `% 360` first.
+    let yaw = if yaw.is_finite() {
+        yaw % 360.0
+    } else {
+        me.y_rot
+    };
     let pitch = if pitch.is_finite() { pitch } else { 0.0 };
     me.y_rot = yaw;
-    mob.x_rot = super::control::clamp_x_rot(pitch * 0.5, mob.x_rot);
+    mob.x_rot = super::control::clamp_x_rot((pitch * 0.5) % 360.0, mob.x_rot);
     mob.y_rot_o = yaw;
     mob.y_body_rot = yaw;
     mob.y_head_rot = yaw;
@@ -234,6 +241,15 @@ pub(super) fn step_sound(baby: bool) -> &'static str {
     }
 }
 
+/// `Mob.isSaddled`：鞍槽里有鞍，且 `Pig.canUseSlot` 认可（活着、不是幼年）。
+///
+/// `Mob.isSaddled`: a saddle in the slot that `Pig.canUseSlot` accepts (alive, not a baby).
+pub fn is_saddled(mob: &Mob) -> bool {
+    !mob.equipment.get(EquipmentSlot::Saddle).is_empty()
+        && !mob.is_baby()
+        && !mob.is_dead_or_dying()
+}
+
 /// `Pig.mobInteract` 手里不是食物时：上了鞍、没人在骑、没潜行就骑上去（SUCCESS），
 /// 否则走装鞍分支。
 ///
@@ -256,7 +272,7 @@ pub(super) fn interact_not_food(
     {
         return outcome;
     }
-    let saddled = !mob.equipment.get(EquipmentSlot::Saddle).is_empty();
+    let saddled = is_saddled(mob);
     if saddled && mob.passengers.is_empty() && !req.sneaking {
         return MobInteraction {
             result: InteractionResult::Success,

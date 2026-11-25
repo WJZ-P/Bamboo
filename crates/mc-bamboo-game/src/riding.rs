@@ -546,6 +546,20 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
             return None;
         };
         let (width, height, _) = mob.mob_type.dimensions(mob.baby);
+        // 猪没有自己的下车逻辑，走 `Animal` 的八邻格版本；马科走 `AbstractHorse` 的。
+        //
+        // Pigs have no dismount of their own and use `Animal`'s eight-neighbour version;
+        // equines use `AbstractHorse`'s.
+        if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Pig {
+            return Some(dismount::animal_dismount_location(
+                &region.chunks,
+                &region.global.world_border,
+                player,
+                public.position,
+                f64::from(height),
+                public.yaw,
+            ));
+        }
         dismount::dismount_location(
             &region.chunks,
             &region.global.world_border,
@@ -708,30 +722,7 @@ pub(crate) fn tick(region: &mut Region) {
         // `AbstractHorse.getControllingPassenger` needs a saddle. An unsaddled
         // mount can be ridden but its AI owns the position; `move_vehicle` is never
         // accepted for it.
-        // `Pig.getControllingPassenger` 另外要求第一位乘客手里（任一只手）拿着胡萝卜钓竿。
-        let holds_stick = region.players.get(&id).is_some_and(|player| {
-            [Hand::Main, Hand::Off].into_iter().any(|hand| {
-                player.inventory.held(hand).item == mc_bamboo_data::items::CARROT_ON_A_STICK
-            })
-        });
-        let first_passenger = passengers(region, vehicle).first() == Some(&id.0);
-        let saddled = region
-            .entities
-            .with_mut(vehicle, |row| {
-                row.with_mob(|_, mob| {
-                    let has_saddle = !mob
-                        .equipment
-                        .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)
-                        .is_empty();
-                    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Pig {
-                        has_saddle && first_passenger && holds_stick
-                    } else {
-                        has_saddle
-                    }
-                })
-            })
-            .flatten()
-            .unwrap_or(false);
+        let saddled = controls_vehicle(region, id, vehicle);
         if let Some(player) = region.players.get_mut(&id) {
             player.motion.fall_distance = 0.0;
             player.riding.first_good = position;
@@ -745,6 +736,38 @@ pub(crate) fn tick(region: &mut Region) {
         "riding links disagree: {:?}",
         check_consistency(region)
     );
+}
+
+/// 官方 `getControllingPassenger() == player`：载具上了鞍，猪还要求这名玩家是第一位乘客、
+/// 任一只手拿着胡萝卜钓竿。
+///
+/// Vanilla `getControllingPassenger() == player`: the vehicle is saddled, and a pig
+/// additionally needs this player as first passenger holding a carrot on a stick in
+/// either hand.
+pub(crate) fn controls_vehicle(region: &mut Region, id: PlayerId, vehicle: EntityUid) -> bool {
+    let holds_stick = region.players.get(&id).is_some_and(|player| {
+        [Hand::Main, Hand::Off].into_iter().any(|hand| {
+            player.inventory.held(hand).item == mc_bamboo_data::items::CARROT_ON_A_STICK
+        })
+    });
+    let first_passenger = passengers(region, vehicle).first() == Some(&id.0);
+    region
+        .entities
+        .with_mut(vehicle, |row| {
+            row.with_mob(|_, mob| {
+                if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Pig {
+                    mc_bamboo_blocks::entity::mob::pig::is_saddled(mob)
+                        && first_passenger
+                        && holds_stick
+                } else {
+                    !mob.equipment
+                        .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)
+                        .is_empty()
+                }
+            })
+        })
+        .flatten()
+        .unwrap_or(false)
 }
 
 /// `handleMoveVehicle`：客户端报上来的载具位置。校验通过就落地，否则把它拉回去。

@@ -239,3 +239,114 @@ fn dispenser_saddles_an_adult_pig() {
         })
         .expect("pig");
 }
+
+/// 猪脚下 y=63 铺一层石头，让相邻格有地面。
+fn floor(region: &mut Region) {
+    for x in -3..=3 {
+        for z in -3..=3 {
+            region
+                .chunks
+                .set_block(BlockPos::new(x, 63, z), mc_bamboo_data::blocks::STONE);
+        }
+    }
+}
+
+/// 官方 `Animal.getDismountLocationForPassenger`：落在相邻格的正中，不是马科的逃逸向量落点。
+/// 朝向 0（南）时右手一侧是 -x 那一格。
+#[test]
+fn a_dismount_from_a_pig_lands_at_the_centre_of_the_neighbouring_block() {
+    let (mut region, id, _) = setup(items::CARROT_ON_A_STICK, None);
+    region.use_infinite_flat_chunks();
+    floor(&mut region);
+    crate::riding::dismount(&mut region, id);
+    let spot = region.players[&id].position();
+    assert_eq!((spot.x, spot.y, spot.z), (-0.5, 64.0, 0.5));
+}
+
+/// 四周都堵死时落在猪的包围盒顶上（`Entity.getDismountLocationForPassenger` 的退路）。
+#[test]
+fn a_boxed_in_pig_drops_the_rider_on_top_of_itself() {
+    use mc_bamboo_data::blocks;
+    let (mut region, id, _) = setup(items::CARROT_ON_A_STICK, None);
+    region.use_infinite_flat_chunks();
+    floor(&mut region);
+    for x in -1..=1 {
+        for z in -1..=1 {
+            if (x, z) != (0, 0) {
+                for y in 64..=66 {
+                    region
+                        .chunks
+                        .set_block(BlockPos::new(x, y, z), blocks::STONE);
+                }
+            }
+        }
+    }
+    crate::riding::dismount(&mut region, id);
+    let spot = region.players[&id].position();
+    assert_eq!(
+        (spot.x, spot.y, spot.z),
+        (0.5, 64.0 + f64::from(0.9_f32), 0.5)
+    );
+}
+
+/// 官方 `Mob.isSaddled` 要 `Pig.canUseSlot`：幼年猪鞍槽里有鞍也不算上了鞍，右键骑不上去。
+#[test]
+fn a_saddled_baby_pig_is_not_saddled() {
+    let mut pig = Entity::by_mob_type(MobType::Pig, Vec3::new(0.5, 64.0, 0.5));
+    pig.with_mob(|_, mob| {
+        mob.equipment
+            .set(EquipmentSlot::Saddle, ItemStack::new(items::SADDLE, 1));
+        assert!(mc_bamboo_blocks::entity::mob::pig::is_saddled(mob));
+        mob.age = -24000;
+        assert!(!mc_bamboo_blocks::entity::mob::pig::is_saddled(mob));
+    });
+}
+
+/// 官方 `Entity.setRot` 先取 `% 360`，所以 `tickRidden` 之后朝向落在 (-360, 360) 里。
+#[test]
+fn tick_ridden_wraps_the_rider_yaw_like_set_rot() {
+    let mut pig = Entity::by_mob_type(MobType::Pig, Vec3::new(0.5, 64.0, 0.5));
+    pig.with_mob(|me, mob| {
+        mc_bamboo_blocks::entity::mob::pig::tick_ridden(me, mob, 362.0, 10.0);
+        assert_eq!(me.y_rot, 2.0);
+        assert_eq!(mob.y_head_rot, 2.0);
+        assert_eq!(mob.x_rot, 5.0);
+    });
+}
+
+/// 骑着上鞍的猪下线再上线：`RootVehicle` 带回猪（鞍、血量）和玩家的乘客关系，
+/// 重新手持胡萝卜钓竿后仍是猪的控制者。
+#[test]
+fn a_rider_on_a_saddled_pig_survives_a_save_and_load() {
+    use crate::riding::{controls_vehicle, load_root_vehicle, root_vehicle_save};
+
+    let (mut region, id, pig_id) = setup(items::CARROT_ON_A_STICK, None);
+    region.entities.with_mut(pig_id, |entity| {
+        entity.with_mob(|_, mob| mob.health = 4.0);
+    });
+    let tag = root_vehicle_save(&region, id).expect("riding player saves RootVehicle");
+    region.entities.remove(pig_id);
+    region.players.get_mut(&id).unwrap().riding.vehicle = None;
+    load_root_vehicle(&mut region, id, &tag);
+    let vehicle = region.players[&id].riding.vehicle.expect("remounted");
+    assert!(crate::riding::check_consistency(&region).is_empty());
+    assert_eq!(crate::riding::passengers(&region, vehicle), vec![id.0]);
+    let (saddled, health, pig_type) = region
+        .entities
+        .with_mut(vehicle, |entity| {
+            entity.with_mob(|_, mob| {
+                (
+                    mc_bamboo_blocks::entity::mob::pig::is_saddled(mob),
+                    mob.health,
+                    mob.mob_type,
+                )
+            })
+        })
+        .flatten()
+        .expect("pig came back");
+    assert_eq!(pig_type, MobType::Pig);
+    assert!(saddled);
+    assert_eq!(health, 4.0);
+    assert!(controls_vehicle(&mut region, id, vehicle));
+    assert_eq!(root_vehicle_save(&region, id), Some(tag));
+}
