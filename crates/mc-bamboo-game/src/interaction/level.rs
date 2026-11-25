@@ -17,6 +17,7 @@ use mc_bamboo_data::{
     registries::{block_entity_type as entities, data_component_type as kinds, entity_type},
 };
 use mc_bamboo_loot::block_experience_set;
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{
     components::{ComponentPatch, ComponentValue},
     item::ItemStack,
@@ -244,6 +245,66 @@ impl Level for RegionLevel<'_> {
         self.players
             .get(&PlayerId(uid))
             .is_some_and(|player| player.sleep.is_some())
+    }
+
+    /// `Mob.equip(EquipmentTable)`：按装备表给一只还没进世界的生物套上装备。
+    ///
+    /// 官方先给八个槽设掉落几率（缺省 0），再滚战利品表，每件按 `equippable` 组件的
+    /// 槽位套进去。新生的生物槽位是空的，`equipItemIfPossible` 里「已有装备时掉出 /
+    /// 换到主手」的分支走不到，这里只做直接套槽。
+    fn equip_mob(&mut self, entity: &mut mc_bamboo_blocks::entity::Entity, equipment: &Tag) {
+        use mc_bamboo_blocks::entity::mob::equipment::{SLOTS, slot_name};
+        use mc_bamboo_protocol::packet::play::EquipmentSlot;
+
+        let Tag::Compound(values) = equipment else {
+            return;
+        };
+        let get = |key: &str| {
+            values
+                .iter()
+                .rev()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value)
+        };
+        let Some(Tag::String(loot_table)) = get("loot_table") else {
+            return;
+        };
+        let mut chances = std::collections::BTreeMap::new();
+        if let Some(Tag::Compound(entries)) = get("slot_drop_chances") {
+            for (name, value) in entries {
+                if let Ok(chance) = mc_bamboo_blocks::archive::tag::java_f32(value) {
+                    chances.insert(name.clone(), chance);
+                }
+            }
+        }
+        let Some(mob_type) = entity.kind.mob().map(|mob| mob.mob_type) else {
+            return;
+        };
+        let origin =
+            mc_bamboo_loot::Position::new(entity.position.x, entity.position.y, entity.position.z);
+        let mob = entity.kind.mob_mut().expect("mob type checked above");
+        for slot in SLOTS {
+            mob.equipment
+                .set_drop_chance(slot, chances.get(slot_name(slot)).copied().unwrap_or(0.0));
+        }
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return;
+        };
+        let mut params = mc_bamboo_loot::LootParams::new(0.0);
+        params.this_entity = Some(mc_bamboo_loot::EntityView::new(mob_type.entity_type()));
+        params.origin = Some(origin);
+        let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
+            return;
+        };
+        for stack in stacks {
+            let stack = crate::loot_stacks::loot_stack(&stack);
+            let slot_id = mc_bamboo_recipes::equipment_slot_for_item(&stack);
+            let slot = SLOTS
+                .get(slot_id as usize)
+                .copied()
+                .unwrap_or(EquipmentSlot::MainHand);
+            mob.equipment.set(slot, stack);
+        }
     }
 
     fn trial_spawner_players(
