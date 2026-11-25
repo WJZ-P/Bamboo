@@ -470,7 +470,7 @@ impl Report {
             difficulty: 2,
         };
         let outcome = entity
-            .with_mob(|me, mob| interact::interact(me, mob, &request, 0, false))
+            .with_mob(|me, mob| interact::interact(me, mob, &request, 0, false, &mut || 0.0))
             .unwrap();
         let swing = match outcome.result {
             InteractionResult::Success => "PREDICTED",

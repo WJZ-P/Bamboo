@@ -742,6 +742,7 @@ fn run_cases(
         MobType::Pufferfish,
         MobType::Witch,
         MobType::Pillager,
+        MobType::Sniffer,
     ] {
         let mut store = mc_bamboo_blocks::EntityStore::new();
         let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, -3.5)));
@@ -2270,6 +2271,50 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
             ("UUID", uuid.clone()),
             ("anger_end_time", Tag::Long(9876543210)),
             ("angry_at", Tag::IntArray(vec![1, 2, 3, 4])),
+        ]),
+    ));
+    // 嗅探兽：`Brain` 里两条可序列化记忆——`sniffer_explored_positions`（GlobalPos 列表）
+    // 和 `sniff_cooldown`（Unit 带 ttl）。官方 load->save 和 Bamboo read->write 逐键比。
+    out.push((
+        "sniffer explored positions and cooldown".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:sniffer".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+            (
+                "Brain",
+                compound(vec![(
+                    "memories",
+                    compound(vec![
+                        (
+                            "minecraft:sniffer_explored_positions",
+                            compound(vec![(
+                                "value",
+                                Tag::List(vec![
+                                    compound(vec![
+                                        (
+                                            "dimension",
+                                            Tag::String("minecraft:overworld".to_owned()),
+                                        ),
+                                        ("pos", Tag::IntArray(vec![3, 63, -5])),
+                                    ]),
+                                    compound(vec![
+                                        (
+                                            "dimension",
+                                            Tag::String("minecraft:overworld".to_owned()),
+                                        ),
+                                        ("pos", Tag::IntArray(vec![8, 62, 2])),
+                                    ]),
+                                ]),
+                            )]),
+                        ),
+                        (
+                            "minecraft:sniff_cooldown",
+                            compound(vec![("value", compound(vec![])), ("ttl", Tag::Long(9600))]),
+                        ),
+                    ]),
+                )]),
+            ),
         ]),
     ));
     out.push((

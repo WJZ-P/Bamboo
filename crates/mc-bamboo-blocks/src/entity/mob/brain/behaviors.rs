@@ -140,6 +140,11 @@ pub enum Kind {
         max_interval: i32,
         ticks_until_next_start: i32,
     },
+    /// `SetEntityLookTarget.create(PLAYER, maxDist)`：没有间隔计时器，每次都直接找最近的玩家。
+    ///
+    /// `SetEntityLookTarget.create(PLAYER, maxDist)`: no interval ticker; it looks for the
+    /// nearest player every time.
+    LookAtPlayer { max_dist: f32 },
     /// `AnimalMakeLove(partnerType, speed, closeEnough)`。
     MakeLove {
         partner: MobType,
@@ -215,6 +220,10 @@ pub enum Kind {
     ///
     /// Villager-specific behaviours and Phase 4+ placeholders.
     Villager(super::super::villager_ai::Behavior),
+    /// 嗅探兽专属行为。
+    ///
+    /// Sniffer-specific behaviours.
+    Sniffer(super::super::sniffer::Behavior),
 }
 
 impl Kind {
@@ -338,6 +347,7 @@ impl Kind {
             },
             Self::MakeLove { .. } => Class::Timed { min: 110, max: 110 },
             Self::LookAtPlayerSometimes { .. }
+            | Self::LookAtPlayer { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
             | Self::WalkTargetFromLook { .. }
@@ -355,6 +365,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.class(),
             Self::Nautilus(behavior) => behavior.class(),
             Self::Villager(behavior) => behavior.class(),
+            Self::Sniffer(behavior) => behavior.class(),
         }
     }
 
@@ -376,7 +387,9 @@ impl Kind {
                 LongJumpCooldownTicks => LONG_JUMP_COOLDOWN,
                 _ => RAM_COOLDOWN,
             },
-            Self::LookAtPlayerSometimes { .. } => LOOK_SOMETIMES_REQUIRED,
+            Self::LookAtPlayerSometimes { .. } | Self::LookAtPlayer { .. } => {
+                LOOK_SOMETIMES_REQUIRED
+            }
             Self::MakeLove { .. } => MAKE_LOVE_REQUIRED,
             Self::FollowTemptation { .. } => TEMPT_REQUIRED,
             Self::BabyFollowAdult { .. } => FOLLOW_ADULT_REQUIRED,
@@ -391,6 +404,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.required(),
             Self::Nautilus(behavior) => behavior.required(),
             Self::Villager(behavior) => behavior.required(),
+            Self::Sniffer(behavior) => behavior.required(),
         }
     }
 
@@ -415,6 +429,7 @@ impl Kind {
             Self::MoveToTargetSink(_) => "MoveToTargetSink",
             Self::CountDownCooldown(_) => "CountDownCooldownTicks",
             Self::LookAtPlayerSometimes { .. }
+            | Self::LookAtPlayer { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
             | Self::WalkTargetFromLook { .. }
@@ -432,6 +447,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.name(),
             Self::Nautilus(behavior) => behavior.name(),
             Self::Villager(behavior) => behavior.name(),
+            Self::Sniffer(behavior) => behavior.name(),
         }
     }
 
@@ -485,6 +501,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.extra_start(cx),
             Self::Nautilus(behavior) => behavior.extra_start(cx),
             Self::Villager(behavior) => behavior.extra_start(cx),
+            Self::Sniffer(behavior) => behavior.extra_start(cx),
             _ => true,
         }
     }
@@ -568,6 +585,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.start(cx),
             Self::Nautilus(behavior) => behavior.start(cx),
             Self::Villager(behavior) => behavior.start(cx),
+            Self::Sniffer(behavior) => behavior.start(cx),
             _ => {}
         }
     }
@@ -604,6 +622,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.can_still_use(cx),
             Self::Nautilus(behavior) => behavior.can_still_use(cx),
             Self::Villager(behavior) => behavior.can_still_use(cx),
+            Self::Sniffer(behavior) => behavior.can_still_use(cx),
             _ => false,
         }
     }
@@ -723,14 +742,15 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.tick(cx),
             Self::Nautilus(behavior) => behavior.tick(cx),
             Self::Villager(behavior) => behavior.tick(cx),
+            Self::Sniffer(behavior) => behavior.tick(cx),
             _ => {}
         }
     }
 
-    /// `Behavior.stop`。
+    /// `Behavior.stop`；`timed_out` 是 `gameTime > endTimestamp`。
     ///
-    /// `Behavior.stop`.
-    pub(super) fn stop(&mut self, cx: &mut Cx) {
+    /// `Behavior.stop`; `timed_out` is `gameTime > endTimestamp`.
+    pub(super) fn stop(&mut self, cx: &mut Cx, timed_out: bool) {
         match self {
             Self::AnimalPanic { .. } => cx.memories.erase(IsPanicking),
             Self::LookAtTargetSink { .. } => cx.memories.erase(LookTarget),
@@ -755,6 +775,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.stop(cx),
             Self::Nautilus(behavior) => behavior.stop(cx),
             Self::Villager(behavior) => behavior.stop(cx),
+            Self::Sniffer(behavior) => behavior.stop(cx, timed_out),
             _ => {}
         }
     }
@@ -764,6 +785,24 @@ impl Kind {
     /// The `OneShot.trigger` lambda that runs after the memory conditions.
     pub(super) fn trigger(&mut self, cx: &mut Cx) -> bool {
         match self {
+            Self::LookAtPlayer { max_dist } => {
+                let max_sqr = f64::from(*max_dist * *max_dist);
+                let position = cx.me.position;
+                let Some(target) = sensor::find_closest_visible(cx, &mut |view| {
+                    view.player && view.position.distance_to_sqr(position) <= max_sqr
+                }) else {
+                    return false;
+                };
+                cx.memories.set(
+                    LookTarget,
+                    MemoryValue::Look(PositionTracker::Entity {
+                        uid: target,
+                        track_eye: true,
+                        target_eye: false,
+                    }),
+                );
+                true
+            }
             Self::LookAtPlayerSometimes {
                 max_dist,
                 min_interval,
@@ -874,6 +913,7 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.trigger(cx),
             Self::Nautilus(behavior) => behavior.trigger(cx),
             Self::Villager(behavior) => behavior.trigger(cx),
+            Self::Sniffer(behavior) => behavior.trigger(cx),
             _ => false,
         }
     }
@@ -882,7 +922,7 @@ impl Kind {
 /// `Vec3.directionFromRotation(xRot, yRot)`：乘法在 `float` 上做。
 ///
 /// `Vec3.directionFromRotation(xRot, yRot)`, multiplied in `float`.
-fn direction_from_rotation(x_rot: f32, y_rot: f32) -> Vec3 {
+pub(crate) fn direction_from_rotation(x_rot: f32, y_rot: f32) -> Vec3 {
     const DEG: f32 = (std::f64::consts::PI / 180.0) as f32;
     const PI: f32 = std::f64::consts::PI as f32;
     let y_cos = mth::cos(f64::from(-y_rot * DEG - PI));
@@ -933,7 +973,10 @@ pub(in crate::entity::mob) fn current_position(cx: &Cx, target: PositionTracker)
 /// `PositionTracker.currentBlockPosition`。
 ///
 /// `PositionTracker.currentBlockPosition`.
-pub(super) fn current_block_position(cx: &Cx, target: PositionTracker) -> Option<BlockPos> {
+pub(in crate::entity::mob) fn current_block_position(
+    cx: &Cx,
+    target: PositionTracker,
+) -> Option<BlockPos> {
     match target {
         PositionTracker::Block { pos, .. } => Some(pos),
         PositionTracker::Entity {
