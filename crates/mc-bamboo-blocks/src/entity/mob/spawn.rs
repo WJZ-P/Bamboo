@@ -126,6 +126,14 @@ pub enum SpawnGroup {
     /// `Llama.LlamaGroupData`: the colour id shared by the group.
     Llama(AgeableGroupData, i32),
     Zombie(super::zombie_spawn::ZombieGroupData),
+    /// `Husk.HuskGroupData`：僵尸组数据加「这一组已经试过骆驼尸壳」。
+    ///
+    /// `Husk.HuskGroupData`: zombie group data plus "this group already tried
+    /// to spawn a camel husk".
+    Husk {
+        zombie: super::zombie_spawn::ZombieGroupData,
+        tried_to_spawn_camel_husk: bool,
+    },
     Spider(SpiderGroupData),
     /// 鱼群共享领头鱼；热带鱼还共享花纹。
     ///

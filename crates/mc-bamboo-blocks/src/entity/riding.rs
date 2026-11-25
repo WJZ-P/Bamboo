@@ -77,6 +77,22 @@ pub fn can_start_riding(
     !passenger_is_sneaking && passenger_cooldown <= 0 && vehicle_passengers.is_empty()
 }
 
+/// `Camel.canAddPassenger` 放宽到两个乘客；`startRiding(force=true)` 还会跳过
+/// `canRide` / `canAddPassenger`，所以这里只保留防环和冷却。
+///
+/// `Camel.canAddPassenger` allows two passengers. `startRiding(force=true)` also
+/// skips `canRide` / `canAddPassenger`, leaving only the cycle and cooldown checks.
+pub fn can_start_riding_camel(
+    passenger: EntityUid,
+    passenger_vehicle: Option<EntityUid>,
+    vehicle_chain: &[EntityUid],
+    vehicle_passengers: &[EntityUid],
+) -> bool {
+    passenger_vehicle.is_none()
+        && !vehicle_chain.contains(&passenger)
+        && vehicle_passengers.len() < 2
+}
+
 /// `EntityAttachments.transformPoint`：`Vec3.yRot(-yRot * 0.017453292f)`，全 f32 乘法。
 ///
 /// `EntityAttachments.transformPoint`: `Vec3.yRot(-yRot * 0.017453292f)` in f32.
