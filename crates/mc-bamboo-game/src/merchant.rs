@@ -403,7 +403,7 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
         player,
         "minecraft:villager_trade",
         serde_json::json!({
-            "item": {"id": mc_bamboo_loot::item_name(result.item).unwrap_or("")},
+            "item": mc_bamboo_loot::item_name(result.item).unwrap_or(""),
             "villager": {"type": "minecraft:villager"}
         }),
     );
