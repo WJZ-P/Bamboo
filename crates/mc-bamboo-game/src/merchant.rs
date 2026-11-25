@@ -5,8 +5,10 @@
 //! 取出结果时扣两格付款、累加使用次数、发经验和升级。4 格距离之外或村民死了
 //! 菜单就失效。
 
+use mc_bamboo_blocks::RandomSource;
 use mc_bamboo_blocks::entity::mob::MobType;
 use mc_bamboo_blocks::entity::mob::villager::Villager;
+use mc_bamboo_blocks::InteractionResult;
 use mc_bamboo_core::Vec3;
 use mc_bamboo_data::{registries, villager as data};
 use mc_bamboo_loot::{
@@ -21,7 +23,7 @@ use mc_bamboo_protocol::{
     },
     item::ItemStack,
     merchant::{ItemCost, MerchantOffer},
-    packet::play::{MerchantOffersPacket, OpenScreen},
+    packet::play::{MerchantOffersPacket, OpenScreen, Sound},
     text::Component,
 };
 use serde_json::Value;
@@ -170,36 +172,106 @@ fn json_to_tag(value: &Value) -> mc_bamboo_protocol::components::archive::Dyn {
     }
 }
 
-/// 空手右键有职业的成年村民：生成交易、发 `open_screen` 和交易列表、装好菜单。
-pub(crate) fn open(region: &mut Region, player: PlayerId, villager_id: i32) -> bool {
+/// `Villager.mobInteract`。返回 `None` 表示这次点击不消费（非村民、睡觉、已在交易），
+/// 走通用 `mobInteract`。幼年摇头、`NONE` 职业摇头 + 消耗、有职业打开交易界面。
+///
+/// `Villager.mobInteract`. `None` means the click is not consumed (not a villager,
+/// sleeping, or already trading) and falls through to the generic mob interaction.
+/// A baby shakes its head; a `NONE` villager shakes its head and consumes the click;
+/// a professional villager opens the trading screen.
+pub(crate) fn interact(
+    region: &mut Region,
+    player: PlayerId,
+    villager_id: i32,
+    main_hand: bool,
+) -> Option<InteractionResult> {
     if !region.players.contains_key(&player) {
-        return false;
+        return None;
     }
-    let Some(public) = region.entities.public_at(villager_id) else {
-        return false;
-    };
+    let public = region.entities.public_at(villager_id)?;
     if public.removed || !matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) {
-        return false;
+        return None;
     }
     let position = public.position;
-    // 懒生成：借一次实体表就够了，`random_sequence` 走区域的序列缓存。
-    let generated = {
-        let Some(entity) = region.entities.get(villager_id) else {
-            return false;
-        };
+    // 懒生成交易表，顺便拿到幼年标志。睡觉 / 交易中走通用路径。
+    let (villager, offers, baby) = {
+        let entity = region.entities.get(villager_id)?;
         let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &entity.kind else {
-            return false;
+            return None;
         };
-        if mob.mob_type != MobType::Villager || mob.villager.profession <= 0 {
-            return false;
+        if mob.mob_type != MobType::Villager {
+            return None;
         }
+        if mob.villager.sleeping || mob.villager.trading {
+            return None;
+        }
+        let baby = mob.is_baby();
         let mut villager = mob.villager.clone();
         ensure_offers(&mut villager, position, &region.loot_sequences);
-        Some((villager, position))
+        let offers = villager.offers.clone().unwrap_or_default();
+        (villager, offers, baby)
     };
-    let Some((villager, position)) = generated else {
-        return false;
-    };
+    if baby {
+        set_unhappy(region, villager_id, position);
+        return Some(InteractionResult::Success);
+    }
+    // `Stats.TALKED_TO_VILLAGER` 只在主手交互时记。
+    if main_hand {
+        crate::item_use_stats::award_custom(
+            region,
+            player,
+            registries::custom_stat::TALKED_TO_VILLAGER,
+            1,
+        );
+    }
+    if offers.is_empty() {
+        set_unhappy(region, villager_id, position);
+        return Some(InteractionResult::Consume);
+    }
+    open_screen(region, player, villager_id, villager, offers);
+    Some(InteractionResult::Success)
+}
+
+/// `Villager.setUnhappy`：`setUnhappyCounter(40)` + `makeSound(VILLAGER_NO)`。
+/// 摇头动画由客户端按 `DATA_UNHAPPY_COUNTER` 播放；计数递减在村民大脑里做。
+///
+/// `Villager.setUnhappy`: `setUnhappyCounter(40)` plus `makeSound(VILLAGER_NO)`.
+/// The client plays the head-shake from `DATA_UNHAPPY_COUNTER`; the countdown
+/// runs in the villager brain.
+fn set_unhappy(region: &mut Region, villager_id: i32, position: Vec3) {
+    region.entities.with_mut(villager_id, |entity| {
+        if let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &mut entity.kind {
+            mob.villager.unhappy = 40;
+        }
+    });
+    crate::interaction::send_sound(
+        region,
+        None,
+        &Sound {
+            sound: i32::from(mc_bamboo_data::sounds::sound_event("entity.villager.no")),
+            inline: None,
+            source: mc_bamboo_data::sounds::NEUTRAL,
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            volume: 1.0,
+            pitch: 1.0,
+            seed: region.sound_seed_generator.source().next_long(),
+        },
+    );
+}
+
+/// 有职业的成年村民：把生成好的交易表写回、发 `open_screen` 和交易列表、装好菜单。
+///
+/// `Villager.startTrading` + `openTradingScreen`: write back the generated offers,
+/// send the screen and offers, and install the menu.
+fn open_screen(
+    region: &mut Region,
+    player: PlayerId,
+    villager_id: i32,
+    villager: Villager,
+    offers: Vec<MerchantOffer>,
+) {
     let level = villager.level;
     let xp = villager.xp;
     let title = {
@@ -208,27 +280,19 @@ pub(crate) fn open(region: &mut Region, player: PlayerId, villager_id: i32) -> b
             .unwrap_or("minecraft:none");
         Component::translate(format!("entity.minecraft.villager.{name}"), [])
     };
-    let offers = villager.offers.clone().unwrap_or_default();
-    if offers.is_empty() {
-        return false;
-    }
-    let _ = position;
-    let written = region.entities.with_mut(villager_id, |entity| {
+    region.entities.with_mut(villager_id, |entity| {
         if let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &mut entity.kind {
             mob.villager.offers = villager.offers.clone();
             // `startTrading` 记下正在交易，村民降频豁免看它。
             mob.villager.trading = true;
         }
     });
-    if written.is_none() {
-        return false;
-    }
     if region.menus.contains_key(&player) {
         crate::menu::close_menu(region, player);
     }
     let container_id = {
         let Some(p) = region.players.get_mut(&player) else {
-            return false;
+            return;
         };
         p.container_counter = p.container_counter % 100 + 1;
         p.container_counter
@@ -255,7 +319,6 @@ pub(crate) fn open(region: &mut Region, player: PlayerId, villager_id: i32) -> b
         },
     );
     crate::menu::broadcast_merchant_state(region, player);
-    true
 }
 
 /// `ServerboundSelectTradePacket`：记下客户端选的是第几条，然后重算结果格。
@@ -408,7 +471,7 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
         }),
     );
     let mut level_up = false;
-    let mut xp = 0;
+    let mut orb_amount = 0;
     region.entities.with_mut(villager_id, |entity| {
         let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &mut entity.kind else {
             return;
@@ -420,8 +483,12 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
             return;
         };
         offer.uses += 1;
+        // `rewardTradeXp` 先按村民自己的随机源抽经验球数量，再加经验、查升级。
+        // `rewardTradeXp` draws the orb count from the villager's own random first.
+        let random = mc_bamboo_blocks::entity::EntityRandom(std::cell::RefCell::new(entity.random));
+        orb_amount = 3 + random.next_int(4);
+        entity.random = random.0.into_inner();
         mob.villager.xp += offer.xp;
-        xp = offer.xp;
         if should_increase_level(mob.villager.level, mob.villager.xp)
             && let Some(profession) = data::profession(mob.villager.profession)
         {
@@ -451,14 +518,14 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
                 }
                 mob.villager.level = next;
                 level_up = true;
+                orb_amount += 5;
             }
         }
     });
-    let _ = xp;
     // 交易完成后把新的使用次数 / 等级 / 交易表发给客户端，`uses` 变化会改「售罄」状态。
     // After a trade, resend the updated offers: `uses` changes the out-of-stock state
     // and a level-up appends a new tier.
-    spawn_trade_xp(region, villager_id, level_up, offer.reward_exp);
+    spawn_trade_xp(region, villager_id, orb_amount, offer.reward_exp);
     send_offers(region, player, menu);
     // `Stats.TRADED_WITH_VILLAGER` 在 Bamboo 还没有通用统计表，
     // 触发器和进度用同一个事件；统计计数待期 6 的统计表接入。
@@ -476,13 +543,13 @@ fn should_increase_level(level: i32, xp: i32) -> bool {
     level < 5 && xp >= need
 }
 
-/// `Villager.rewardTradeXp`：`rewardExp` 为真时在村民头上撒 `3 + nextInt(4)` 点
-/// 经验球，升级再 +5（再生 200 刻在升级分支里已经给了）。
+/// `Villager.rewardTradeXp`：`rewardExp` 为真时在村民头顶 `(x, y+0.5, z)` 撒
+/// `amount` 点经验球。数量已经由调用方按村民自己的随机源算好（升级再 +5）。
 ///
-/// `Villager.rewardTradeXp`: if `rewardExp`, drop `3 + nextInt(4)` experience at the
-/// villager, plus 5 on a level-up (the 200-tick regeneration is applied in the level-up
-/// branch already).
-fn spawn_trade_xp(region: &mut Region, villager_id: i32, level_up: bool, reward_exp: bool) {
+/// `Villager.rewardTradeXp`: if `rewardExp`, drop `amount` experience at the villager's
+/// head. The amount was already drawn from the villager's own random by the caller
+/// (plus 5 on a level-up).
+fn spawn_trade_xp(region: &mut Region, villager_id: i32, amount: i32, reward_exp: bool) {
     if !reward_exp {
         return;
     }
@@ -494,7 +561,6 @@ fn spawn_trade_xp(region: &mut Region, villager_id: i32, level_up: bool, reward_
         public.position.y + 0.5,
         public.position.z,
     );
-    let amount = 3 + region.random.source().next_int(4) + if level_up { 5 } else { 0 };
     let effects = {
         let (mut level, ticks) = region.block_level();
         let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
