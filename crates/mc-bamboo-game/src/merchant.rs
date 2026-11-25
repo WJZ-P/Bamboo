@@ -570,24 +570,14 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
     else {
         return false;
     };
-    let a = state.payment[0].clone();
-    let b = state.payment[1].clone();
-    if !satisfied_by(&offer, &a, &b) {
+    // `MerchantResultSlot.onTake`：先 `take(a, b)`，付款对调时再 `take(b, a)`。
+    let mut a = state.payment[0].clone();
+    let mut b = state.payment[1].clone();
+    if !(offer_take(&offer, &mut a, &mut b) || offer_take(&offer, &mut b, &mut a)) {
         return false;
     }
-    let cost_a = cost_count(&offer, &offer.base_cost_a);
-    // B 不打折：`getCostB().count` 是原始 `count`，不走 `getModifiedCostCount`。
-    let cost_b = offer.cost_b.as_ref().map(|cost| cost.count);
-    state.payment[0].count -= cost_a;
-    if state.payment[0].count <= 0 {
-        state.payment[0] = ItemStack::empty();
-    }
-    if let Some(count) = cost_b {
-        state.payment[1].count -= count;
-        if state.payment[1].count <= 0 {
-            state.payment[1] = ItemStack::empty();
-        }
-    }
+    state.payment[0] = a;
+    state.payment[1] = b;
     if let Some(player_data) = region.players.get_mut(&player) {
         let _ = player_data.inventory.receive(result.clone(), false);
     }
@@ -731,6 +721,26 @@ fn satisfied_by(offer: &MerchantOffer, a: &ItemStack, b: &ItemStack) -> bool {
         Some(cost) => cost_matches(cost, b) && b.count >= cost.count,
         None => b.is_empty(),
     }
+}
+
+/// `MerchantOffer.take(a, b)`：先 `satisfiedBy`，通过就从 `a` 扣 A、从 `b` 扣 B。
+///
+/// `MerchantOffer.take(a, b)`: check `satisfiedBy`, then deduct A from `a` and B from `b`.
+fn offer_take(offer: &MerchantOffer, a: &mut ItemStack, b: &mut ItemStack) -> bool {
+    if !satisfied_by(offer, a, b) {
+        return false;
+    }
+    a.count -= cost_count(offer, &offer.base_cost_a);
+    if a.count <= 0 {
+        *a = ItemStack::empty();
+    }
+    if let Some(cost) = &offer.cost_b {
+        b.count -= cost.count;
+        if b.count <= 0 {
+            *b = ItemStack::empty();
+        }
+    }
+    true
 }
 
 /// `ItemCost.test`：同种物品且要求的组件完全相等。
