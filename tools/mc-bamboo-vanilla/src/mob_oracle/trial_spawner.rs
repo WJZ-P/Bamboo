@@ -89,6 +89,8 @@ impl TrialSpawnerCase {
             position: Vec3::new(self.player[0], self.player[1], self.player[2]),
             delta: Vec3::default(),
             eye_height: 1.62,
+            width: 0.6,
+            height: 1.8,
             health: 20.0,
             look_direction: Vec3::view_vector(0.0, 0.0),
             gaze_disguise: false,

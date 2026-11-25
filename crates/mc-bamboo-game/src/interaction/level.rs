@@ -460,7 +460,7 @@ impl Level for RegionLevel<'_> {
                 let dx = i64::from(block.x - pos.x);
                 let dy = i64::from(block.y - pos.y);
                 let dz = i64::from(block.z - pos.z);
-                (dx * dx + dy * dy + dz * dz) as f64 < squared
+                ((dx * dx + dy * dy + dz * dz) as f64) < squared
             })
             .map(|player| *player.uuid.as_bytes())
             .collect()
