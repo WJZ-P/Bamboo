@@ -1720,13 +1720,31 @@ public final class MobOracle {
         }
 
         /**
-         * 把每个传感器的起始延迟都设成同一个值：这些延迟取自 `Sensor` 不带种子的静态随机源，
-         * 定下来之后场景每次跑都一样，才能把伤害安排在固定的某一刻。
+         * 把每个传感器的起始延迟都设成同一个值：这些延迟取自实体随机源，定下来之后场景
+         * 每次跑都一样，才能把伤害安排在固定的某一刻。
          *
-         * <p>Sets every sensor's start delay to one value. The delays come from the unseeded
-         * static random in `Sensor`; fixing them makes the scene repeatable, so a hurt can be
+         * <p>Sets every sensor's start delay to one value. The delays are drawn from the
+         * entity random; fixing them makes the scene repeatable, so a hurt can be
          * scheduled on a known tick.
          */
+        /**
+         * 官方 `Brain.Provider.makeBrain` 传实体随机源进 `Brain` 构造函数，其中每个
+         * `SensorType.create()` 后调一次 `randomlyDelayStart`，两个 20 刻传感器共消耗两次
+         * `nextInt(20)`。夹具在实体构造后覆盖随机源，所以这里按官方顺序重放这两次取数、
+         * 把延迟定成 1，并按推进之后的随机源状态重设闸门洗牌（官方那个是不带种子的
+         * 静态随机源）。Bamboo 一侧的 `randomly_delay_start` 走同一条取数链。
+         *
+         * <p>Replays the two `nextInt(20)` draws vanilla's lazy brain construction takes
+         * after the fixture overwrites the entity random, fixes sensor delays to one and
+         * reseeds the shuffle randoms that vanilla creates from an unseeded static source.
+         */
+        static void alignCreakingBrain(net.minecraft.world.entity.monster.creaking.Creaking mob)
+                throws Exception {
+            for (int sensor = 0; sensor < 2; sensor++) mob.getRandom().nextInt(20);
+            BrainOracle.fixSensorDelays(mob, 1L);
+            BrainOracle.reseedShuffles(mob, randomSeed(mob));
+        }
+
         static void fixSensorDelays(Mob mob, long delay) throws Exception {
             Field sensorsField = net.minecraft.world.entity.ai.Brain.class.getDeclaredField("sensors");
             sensorsField.setAccessible(true);
@@ -18366,8 +18384,9 @@ public final class MobOracle {
             creaking = EntityTypes.CREAKING.create(level, EntitySpawnReason.COMMAND);
             creaking.setUUID(new UUID(0L, 1L));
             setRandom(creaking, 0x5EED_5EEDL);
-            // 传感器起始延迟取自不带种子的静态随机源，定成 1 让场景每次跑都一致。
-            BrainOracle.fixSensorDelays(creaking, 1L);
+            // 官方构造时两个传感器各取一次 `nextInt(20)`，起始延迟再被夹具定成 1；
+            // 闸门洗牌随机源是不带种子的静态源，按同一个种子在两边重设。
+            BrainOracle.alignCreakingBrain(creaking);
             creaking.snapTo(3.5, 61.0, 0.5, 0.0F, 0.0F);
             creaking.setYHeadRot(0.0F);
             creaking.setYBodyRot(0.0F);
@@ -18443,6 +18462,9 @@ public final class MobOracle {
                         if (entity instanceof net.minecraft.world.entity.monster.creaking.Creaking found
                                 && !found.isRemoved()) {
                             creaking = found;
+                            // 夜里心自己刷出来的那只也用同一套场景初值。
+                            setRandom(creaking, 0x5EED_5EEDL);
+                            BrainOracle.alignCreakingBrain(creaking);
                             level.tracked.add(creaking);
                             break;
                         }
@@ -18460,6 +18482,8 @@ public final class MobOracle {
             boolean active = present && creaking.getEntityData().get(IS_ACTIVE);
             boolean tearing = present && creaking.getEntityData().get(IS_TEARING_DOWN);
             int attackAnim = present ? attackAnimF.getInt(creaking) : 0;
+            long xBits = present ? Double.doubleToRawLongBits(creaking.getX()) : 0L;
+            long zBits = present ? Double.doubleToRawLongBits(creaking.getZ()) : 0L;
             int resin = 0;
             for (int x = -6; x <= 6; x++) {
                 for (int y = 58; y <= 66; y++) {
@@ -18471,7 +18495,7 @@ public final class MobOracle {
                 }
             }
             if (tick > 0) frames.append(',');
-            // 不比逐刻浮点坐标：两条独立的寻路/物理链有亚毫格浮点末位差和一刻相位差。
+            // 位置、生命、动画和所有离散字段都逐刻原始位严格相等，没有任何放宽窗口。
             // 生命下降证明「嘎枝从 3 格外走进近战范围并攻击」；挥击动画刻数证明攻击
             // 冷却（40 刻）真的在对拍里——改坏成 1 会每刻挥击、动画常驻 15。玩家不 tick，
             // 首次命中后进入永久无敌，生命只在命中那一刻 20→17 一次。
@@ -18485,6 +18509,8 @@ public final class MobOracle {
                     .append(",\"playerHealth\":")
                     .append(Float.floatToRawIntBits(player.getHealth()))
                     .append(",\"attackAnimation\":").append(attackAnim)
+                    .append(",\"x\":").append(xBits)
+                    .append(",\"z\":").append(zBits)
                     .append('}');
         }
         frames.append(']');
