@@ -627,6 +627,37 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 };
                 send_level_event(region, except, pos, &packet);
             }
+            Effect::Particles {
+                particle,
+                position,
+                offset,
+                speed,
+                count,
+            } => {
+                let mut options = Vec::new();
+                mc_bamboo_protocol::codec::write_varint(&mut options, particle);
+                let packet = mc_bamboo_protocol::packet::play::LevelParticles {
+                    options: &options,
+                    override_limiter: false,
+                    always_show: false,
+                    x: position.x,
+                    y: position.y,
+                    z: position.z,
+                    x_dist: offset.x as f32,
+                    y_dist: offset.y as f32,
+                    z_dist: offset.z as f32,
+                    max_speed: speed,
+                    count,
+                    randomization: mc_bamboo_protocol::packet::play::Randomization::Default,
+                };
+                let frames = encode_frames(&packet);
+                for player in region.players.values() {
+                    let delta = player.position().subtract(position);
+                    if delta.length_sqr() < 32.0 * 32.0 {
+                        region.links.send_frames(player.id, &frames);
+                    }
+                }
+            }
             // 音符盒的声音在方块事件里算好了，这里换成音效包。粒子仍靠方块事件。
             Effect::NoteBlockPlayed {
                 pos,

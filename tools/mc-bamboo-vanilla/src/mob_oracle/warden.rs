@@ -24,6 +24,10 @@ pub(super) struct WardenCase {
     vibration: Option<Vec<i32>>,
     vibration2: Option<Vec<i32>>,
     #[serde(default)]
+    compare_player_motion: bool,
+    #[serde(default)]
+    mob: bool,
+    #[serde(default)]
     summon: bool,
     sensors: Vec<i64>,
     mob_seed: i64,
@@ -39,6 +43,11 @@ pub(super) struct WardenFrame {
     anger_level: String,
     brain: String,
     motion: [i64; 8],
+    /// 这一刻发给玩家的速度包（`SetEntityMotion` 的 `[dx, dy, dz]` 原始位）。
+    /// 只有近战 / 音波打中的那一刻有值；碰撞推挤不发速度包。没有玩家时是 `null`。
+    player_motion: Option<[i64; 3]>,
+    /// 音波把生物击飞：目标生物这一刻的速度 `[dx, dy, dz]`。没有生物目标时是 `null`。
+    mob_motion: Option<[i64; 3]>,
     mob_seed: i64,
     level_seed: i64,
     player_health: i32,
@@ -250,9 +259,23 @@ impl Report {
                     }
                 });
             });
+            if case.mob {
+                // 音波把生物击飞：一只僵尸站在玩家位置，当监守者的攻击目标。
+                // 官方一侧只 `mob.tick()` 监守者、不 tick 僵尸；这里关掉僵尸的 AI
+                // 和重力，只让它被音波的 `push` 推动。
+                // `Entities::with_next_id(case.first_id)` 给监守者 `first_id`，
+                // 这只僵尸紧接着拿到 `first_id + 1`，和官方一侧一致。
+                let mut zombie = Entity::by_mob_type(MobType::Zombie, Vec3::new(2.5, 64.0, 0.5));
+                zombie.with_mob(|_, mob| {
+                    mob.no_ai = true;
+                    mob.no_gravity = true;
+                });
+                world.spawn_entity(zombie);
+            }
             id
         };
 
+        let mut player_motion: Option<Vec3> = None;
         for (tick, expected) in case.frames.iter().enumerate() {
             if tick > 0 {
                 let now = case.start_time + tick as i64;
@@ -292,6 +315,11 @@ impl Report {
                 }
                 let mut world = World::new(&mut level, &mut ticks);
                 world.tick_entities();
+                // 这一击退事件发给玩家的速度包，逐刻读走。
+                player_motion = level
+                    .game
+                    .as_mut()
+                    .and_then(|game| game.take_motion_packet());
             }
             // `brain::dump` 用 `MobLevel.players` 解析 `EntityTracker`；真实受伤链路
             // 的玩家状态在 `game` 里，这里每刻同步一份只读视图。
@@ -345,6 +373,28 @@ impl Report {
             }
             player_effects.sort_unstable();
             let removed = entity.removed;
+            let mut player_motion = if case.compare_player_motion {
+                player_motion.map(|v| {
+                    [
+                        v.x.to_bits() as i64,
+                        v.y.to_bits() as i64,
+                        v.z.to_bits() as i64,
+                    ]
+                })
+            } else {
+                None
+            };
+            let mob_motion = if case.mob {
+                level.entities.get(case.first_id + 1).map(|zombie| {
+                    [
+                        zombie.delta.x.to_bits() as i64,
+                        zombie.delta.y.to_bits() as i64,
+                        zombie.delta.z.to_bits() as i64,
+                    ]
+                })
+            } else {
+                None
+            };
 
             if broken == Some("warden_pose") && tick == 3 {
                 pose = "STANDING".to_owned();
@@ -357,6 +407,9 @@ impl Report {
             }
             if broken == Some("warden_motion") && tick == 3 {
                 motion[0] = motion[0].wrapping_add(1);
+            }
+            if broken == Some("warden_player_knockback") {
+                player_motion = None;
             }
             if broken == Some("warden_health") && tick == 3 {
                 player_health = player_health.wrapping_add(1);
@@ -394,6 +447,18 @@ impl Report {
                 self.mismatch(format!(
                     "{} tick {tick} motion: official {:?}, bamboo {:?}",
                     case.name, expected.motion, motion
+                ));
+            }
+            if player_motion != expected.player_motion {
+                self.mismatch(format!(
+                    "{} tick {tick} player motion: official {:?}, bamboo {player_motion:?}",
+                    case.name, expected.player_motion
+                ));
+            }
+            if mob_motion != expected.mob_motion {
+                self.mismatch(format!(
+                    "{} tick {tick} mob motion: official {:?}, bamboo {mob_motion:?}",
+                    case.name, expected.mob_motion
                 ));
             }
             if mob_seed != expected.mob_seed {

@@ -3355,12 +3355,27 @@ pub(crate) fn do_hurt_target(
             whole.split().public
         };
         let hurt = ctx.hurt_player(target, source, amount, me, &attacker);
-        // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`：ATTACK_KNOCKBACK
-        // 大于 0 且这一下打中时，攻击者自己的水平速度被压到 0.6 倍（监守者是 1.5）。
+        // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`：ATTACK_KNOCKBACK / 2
+        // 大于 0 且这一下打中时，先按攻击者朝向给受害者补一次 `knockback`，再把
+        // 攻击者自己的水平速度压到 0.6 倍（监守者 / 劫掠兽是 1.5）。
         // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`: with a positive
-        // ATTACK_KNOCKBACK and a landed hit, the attacker's horizontal velocity is
-        // scaled by 0.6 (the warden has 1.5).
-        if hurt && mob.attributes.value(attribute::ATTACK_KNOCKBACK) > 0.0 {
+        // ATTACK_KNOCKBACK and a landed hit, knock the victim back along the
+        // attacker's facing, then scale the attacker's horizontal velocity by 0.6.
+        let knockback = (mob.attributes.value(attribute::ATTACK_KNOCKBACK) as f32) / 2.0;
+        if hurt && knockback > 0.0 {
+            let angle = f64::from(me.y_rot * 0.017_453_292_f32);
+            let dx = f64::from(mth::sin(angle));
+            let dz = -f64::from(mth::cos(angle));
+            ctx.emit(
+                Command::ExtraKnockback {
+                    target,
+                    player: true,
+                    strength: f64::from(knockback),
+                    dx,
+                    dz,
+                },
+                me,
+            );
             me.delta.x *= 0.6;
             me.delta.z *= 0.6;
         }
@@ -3466,6 +3481,26 @@ pub(crate) fn do_hurt_target(
             },
             me,
         );
+        // `Mob.doHurtTarget` 的 `causeExtraKnockback` 不看 `hurtServer` 的返回值：
+        // 只要 ATTACK_KNOCKBACK 为正就给受害者补一次击退，并压平攻击者自己。
+        // `Mob.doHurtTarget`'s `causeExtraKnockback` does not check the hurt result:
+        // a positive ATTACK_KNOCKBACK always pushes the victim and damps the attacker.
+        let knockback = (mob.attributes.value(attribute::ATTACK_KNOCKBACK) as f32) / 2.0;
+        if knockback > 0.0 {
+            let angle = f64::from(me.y_rot * 0.017_453_292_f32);
+            ctx.emit(
+                Command::ExtraKnockback {
+                    target,
+                    player: false,
+                    strength: f64::from(knockback),
+                    dx: f64::from(mth::sin(angle)),
+                    dz: -f64::from(mth::cos(angle)),
+                },
+                me,
+            );
+            me.delta.x *= 0.6;
+            me.delta.z *= 0.6;
+        }
         if bites {
             play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
         }
@@ -3549,6 +3584,21 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         return;
     }
     mob.dead = true;
+    // `LivingEntity.die` 在掉落之前发 `ENTITY_DIE`：上下文的 `sourceEntity` 是死者，
+    // 附近的幽匿催发体用它换经验充能。命令在伤害命令之后落地，但仍在同刻。
+    // `LivingEntity.die` posts `ENTITY_DIE` before drops; catalyst listeners turn
+    // the dying mob's experience into charge.
+    ctx.emit(
+        Command::GameEvent {
+            event: crate::game_event::GameEvent::EntityDie,
+            position: me.position,
+            context: crate::game_event::dispatch::EventContext {
+                source_entity: Some(me.id),
+                ..Default::default()
+            },
+        },
+        me,
+    );
     // `Raider.die` 在 `super.die` 之前：记英雄、离队、去队长旗帜。
     // `Raider.die` runs before `super.die`: hero credit, roster removal, leader flag.
     if mob.mob_type.is_raider() {

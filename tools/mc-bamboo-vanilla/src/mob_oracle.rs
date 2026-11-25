@@ -65,6 +65,7 @@ mod pig_ride;
 mod pillager;
 mod projectile;
 mod raid;
+mod sculk_catalyst;
 mod sculk_sensor;
 mod shot;
 mod skeleton_death;
@@ -242,6 +243,8 @@ enum Line {
     SculkSensor(sculk_sensor::SculkSensorCase),
     SculkSensorOrder(sculk_sensor::SculkSensorOrderCase),
     SculkShrieker(sculk_sensor::SculkShriekerCase),
+    SculkCatalyst(sculk_catalyst::SculkCatalystCase),
+    SculkCatalystSave(sculk_catalyst::SculkCatalystSaveCase),
     Warden(Box<warden::WardenCase>),
     WardenSave(warden::WardenSaveCase),
     End(End),
@@ -1472,6 +1475,31 @@ impl Level for MobLevel {
         Some(outcome)
     }
 
+    fn push_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        push: mc_bamboo_core::Vec3,
+    ) -> bool {
+        let Some(game) = self.game.as_mut() else {
+            return false;
+        };
+        game.push(target, push);
+        true
+    }
+
+    fn knock_back_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        strength: f64,
+        (dx, dz): (f64, f64),
+    ) -> bool {
+        let Some(game) = self.game.as_mut() else {
+            return false;
+        };
+        game.knock_back(target, strength, dx, dz);
+        true
+    }
+
     fn ignite_player_now(
         &mut self,
         target: mc_bamboo_blocks::entity::EntityUid,
@@ -2231,6 +2259,8 @@ impl Report {
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
                 Line::SculkSensorOrder(case) => self.replay_sculk_sensor_order(&case),
                 Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),
+                Line::SculkCatalyst(case) => self.replay_sculk_catalyst(&case),
+                Line::SculkCatalystSave(case) => self.replay_sculk_catalyst_save(&case),
                 Line::Warden(case) => self.replay_warden(&case),
                 Line::WardenSave(case) => self.replay_warden_save(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),

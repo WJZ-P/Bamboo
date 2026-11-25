@@ -116,6 +116,11 @@ pub fn create_block_entity(
     state: BlockState,
     tag: &Tag,
 ) -> Result<Option<Box<dyn BlockEntity>>> {
+    if id == "minecraft:sculk_catalyst" {
+        return Ok(Some(Box::new(
+            crate::behaviour::misc::sculk_catalyst::SculkCatalystEntity::read(pos, tag),
+        )));
+    }
     if id == "minecraft:vault" {
         // 官方 `loadAdditional`：`state` 来自方块状态，三份 codec 读同一条目。
         // The state comes from the block state; the three codecs read one entry.

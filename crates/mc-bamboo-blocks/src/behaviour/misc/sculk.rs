@@ -9,7 +9,7 @@ use crate::{
     behaviour::{
         Behaviour,
         common::{default_state, is_water_source, tick_water_if_waterlogged},
-        misc::sculk_entity,
+        misc::{sculk_catalyst, sculk_entity},
     },
     context::PlaceContext,
     state::{
@@ -266,6 +266,13 @@ impl Behaviour for SculkCatalyst {
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         if state.get(BLOOM) {
             world.set_block_and_update(pos, state.with(BLOOM, false));
+        }
+    }
+
+    /// `SculkCatalystBlock.newBlockEntity`：挂上会听 `ENTITY_DIE` 的方块实体。
+    fn on_place(&self, _state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
+        if !world.has_block_entity(pos) {
+            world.set_block_entity(sculk_catalyst::create_block_entity(pos));
         }
     }
 }

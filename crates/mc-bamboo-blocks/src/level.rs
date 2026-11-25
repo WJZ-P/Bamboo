@@ -1696,6 +1696,15 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
+    /// 精确驱动当场给玩家加一次 `Entity.push(dx, dy, dz)`（音波命中）。
+    fn push_player_now(
+        &mut self,
+        _target: crate::entity::EntityUid,
+        _push: mc_bamboo_core::Vec3,
+    ) -> bool {
+        false
+    }
+
     /// 精确驱动当场给玩家点火（`Entity.igniteForSeconds`）。`false` 表示不能当场做，
     /// 调用方改成延后的 [`Effect::IgnitePlayer`]。
     fn ignite_player_now(&mut self, _target: crate::entity::EntityUid, _ticks: i32) -> bool {
@@ -2785,6 +2794,17 @@ pub enum Effect {
         pos: BlockPos,
         data: i32,
         except_initiator: bool,
+    },
+    /// `ServerLevel.sendParticles`：一个简单粒子包（幽匿催发体的 `sculk_soul`）。
+    /// 游戏层发给 32 格内的玩家。
+    ///
+    /// A simple `ServerLevel.sendParticles` packet (the catalyst's `sculk_soul`).
+    Particles {
+        particle: i32,
+        position: mc_bamboo_core::Vec3,
+        offset: mc_bamboo_core::Vec3,
+        speed: f32,
+        count: i32,
     },
     /// 音符盒响了，`NoteBlock.triggerEvent`。`pitch` 是官方的 `getPitchFromNote(note)`，
     /// `seed` 是官方传给 `playSeededSound` 的那个随机数。

@@ -694,6 +694,12 @@ public final class MobOracle {
                     cases++;
                 }
             }
+            if (only == null || only.startsWith("sculk_catalyst")) {
+                cases += playSculkCatalyst(official, out);
+            }
+            if (only == null || only.startsWith("sculk_catalyst")) {
+                cases += playSculkCatalystSave(official, out);
+            }
             if (only == null || only.startsWith("warden")) {
                 cases += playWarden(official, out, only);
             }
@@ -14164,20 +14170,21 @@ public final class MobOracle {
     private static int playWarden(Official official, Writer out, String only) throws Exception {
         record WScene(String name, int ticks, boolean emerge, boolean player,
                 int anger, boolean attackTarget, boolean eraseSonic, boolean eraseDig,
-                int[] vibration, int[] vibration2) {}
+                int[] vibration, int[] vibration2, boolean comparePlayerMotion, boolean mob) {}
         List<WScene> scenes = List.of(
-                new WScene("warden_emerge", 150, true, false, 0, false, false, false, null, null),
+                new WScene("warden_emerge", 150, true, false, 0, false, false, false, null, null, false, false),
                 new WScene("warden_investigate", 200, true, true, 0, false, false, false,
-                        new int[] {140, 5, 64, 0, 1, 0}, null),
-                new WScene("warden_sniff", 200, true, true, 0, false, false, false, null, null),
-                new WScene("warden_anger_roar", 200, true, true, 100, false, false, false, null, null),
-                new WScene("warden_melee", 200, true, true, 100, true, false, false, null, null),
-                new WScene("warden_sonic_boom", 210, true, true, 100, true, true, false, null, null),
-                new WScene("warden_dig_back", 130, false, false, 0, false, false, false, null, null),
+                        new int[] {140, 5, 64, 0, 1, 0}, null, false, false),
+                new WScene("warden_sniff", 200, true, true, 0, false, false, false, null, null, false, false),
+                new WScene("warden_anger_roar", 200, true, true, 100, false, false, false, null, null, false, false),
+                new WScene("warden_melee", 200, true, true, 100, true, false, false, null, null, true, false),
+                new WScene("warden_sonic_boom", 210, true, true, 100, true, true, false, null, null, false, false),
+                new WScene("warden_sonic_boom_mob", 190, true, false, 100, true, true, false, null, null, false, true),
+                new WScene("warden_dig_back", 130, false, false, 0, false, false, false, null, null, false, false),
                 new WScene("warden_projectile", 200, true, true, 0, false, false, false,
-                        new int[] {140, 5, 64, 0, 0, 1}, null),
+                        new int[] {140, 5, 64, 0, 0, 1}, null, false, false),
                 new WScene("warden_recent_projectile", 200, true, true, 0, false, false, false,
-                        new int[] {140, 5, 64, 0, 0, 1}, new int[] {160, 5, 64, 0, 0, 1}));
+                        new int[] {140, 5, 64, 0, 0, 1}, new int[] {160, 5, 64, 0, 0, 1}, false, false));
         int cases = 0;
         for (WScene s : scenes) {
             if (only != null && !s.name().startsWith(only)) continue;
@@ -14212,6 +14219,16 @@ public final class MobOracle {
                 world.tracked.add(player);
                 world.playersList().add(player);
             }
+            net.minecraft.world.entity.monster.zombie.Zombie zombie = null;
+            if (s.mob()) {
+                zombie = (net.minecraft.world.entity.monster.zombie.Zombie) EntityTypes.ZOMBIE.create(
+                        world, EntitySpawnReason.COMMAND);
+                zombie.setPos(2.5, 64.0, 0.5);
+                zombie.setId(FIRST_ID + 1);
+                zombie.setUUID(new UUID(0L, 2L));
+                world.tracked.add(zombie);
+            }
+            net.minecraft.world.entity.LivingEntity target = s.mob() ? zombie : player;
             if (s.emerge()) {
                 mob.setPose(net.minecraft.world.entity.Pose.EMERGING);
                 mob.getBrain().setMemoryWithExpiry(
@@ -14222,10 +14239,10 @@ public final class MobOracle {
                         net.minecraft.util.Unit.INSTANCE, 1200L);
             }
             if (s.anger() > 0) {
-                mob.increaseAngerAt(player, s.anger(), false);
+                mob.increaseAngerAt(target, s.anger(), false);
             }
             if (s.attackTarget()) {
-                mob.setAttackTarget(player);
+                mob.setAttackTarget(target);
             }
             if (s.eraseSonic()) {
                 mob.getBrain().eraseMemory(
@@ -14270,11 +14287,32 @@ public final class MobOracle {
                     }
                 }
                 effects.append(']');
+                // 击退那一刻的 `SetEntityMotion` 速度包：`needsSync` 在 `knockback` 和
+                // `push` 都会置位，只有近战场景（监守者从攻击距离出手、不推挤玩家）比它。
+                // 碰撞推挤（生物推玩家）在别的场景会改写速度，那条 Bamboo 没建模，不比。
+                String playerMotion = "null";
+                if (s.comparePlayerMotion() && player != null && player.needsSync) {
+                    Vec3 v = player.getDeltaMovement();
+                    playerMotion = "[" + Double.doubleToRawLongBits(v.x) + ','
+                            + Double.doubleToRawLongBits(v.y) + ','
+                            + Double.doubleToRawLongBits(v.z) + ']';
+                    player.needsSync = false;
+                }
+                // 音波把生物击飞：直接比生物这一刻的速度。
+                String mobMotion = "null";
+                if (zombie != null) {
+                    Vec3 v = zombie.getDeltaMovement();
+                    mobMotion = "[" + Double.doubleToRawLongBits(v.x) + ','
+                            + Double.doubleToRawLongBits(v.y) + ','
+                            + Double.doubleToRawLongBits(v.z) + ']';
+                }
                 frames.append("{\"pose\":").append(jsonString(mob.getPose().name()))
                         .append(",\"anger\":").append(mob.getClientAngerLevel())
                         .append(",\"angerLevel\":").append(jsonString(mob.getAngerLevel().name()))
                         .append(",\"brain\":").append(jsonString(BrainOracle.dump(mob)))
                         .append(",\"motion\":").append(projectileMotion(mob))
+                        .append(",\"playerMotion\":").append(playerMotion)
+                        .append(",\"mobMotion\":").append(mobMotion)
                         .append(",\"mobSeed\":").append(randomSeed(mob))
                         .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
                         .append(",\"playerHealth\":")
@@ -14294,6 +14332,8 @@ public final class MobOracle {
                     + ",\"attackTarget\":" + s.attackTarget()
                     + ",\"eraseSonic\":" + s.eraseSonic()
                     + ",\"eraseDig\":" + s.eraseDig()
+                    + ",\"comparePlayerMotion\":" + s.comparePlayerMotion()
+                    + ",\"mob\":" + s.mob()
                     + ",\"vibration\":"
                     + (s.vibration() == null ? "null" : java.util.Arrays.toString(s.vibration()))
                     + ",\"vibration2\":"
@@ -14352,6 +14392,8 @@ public final class MobOracle {
                     .append(",\"angerLevel\":").append(jsonString(mob.getAngerLevel().name()))
                     .append(",\"brain\":").append(jsonString(BrainOracle.dump(mob)))
                     .append(",\"motion\":").append(projectileMotion(mob))
+                    .append(",\"playerMotion\":null")
+                    .append(",\"mobMotion\":null")
                     .append(",\"mobSeed\":").append(randomSeed(mob))
                     .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
                     .append(",\"playerHealth\":-1")
@@ -14412,6 +14454,133 @@ public final class MobOracle {
                     net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
             copy.saveWithoutId(again);
             out.write("{\"type\":\"wardenSave\",\"filled\":" + filled
+                    + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                    + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    /** 幽匿催发体：一只僵尸死在旁边，经验转成电荷，逐刻蔓延生成幽匿块 / 幽匿脉络。 */
+    private static int playSculkCatalyst(Official official, Writer out) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        try {
+            level.enableGameEvents();
+            level.nextId = FIRST_ID;
+            level.gameTime = START_TIME;
+
+            BlockPos catalyst = new BlockPos(0, 64, 0);
+            BlockPos die = new BlockPos(2, 64, 0);
+
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -8; x <= 8; x++) {
+                for (int z = -8; z <= 8; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            BlockState catalystState = Blocks.SCULK_CATALYST.defaultBlockState();
+            level.blocks.put(catalyst.asLong(), catalystState);
+
+            net.minecraft.world.level.block.entity.SculkCatalystBlockEntity be =
+                    new net.minecraft.world.level.block.entity.SculkCatalystBlockEntity(catalyst, catalystState);
+            level.putBlockEntity(be);
+            level.registerGameEventListener(catalyst, be.getListener());
+            net.minecraft.core.SectionPos section = net.minecraft.core.SectionPos.of(catalyst);
+            level.getBlockTicks().addContainer(
+                    new net.minecraft.world.level.ChunkPos(section.x(), section.z()),
+                    new net.minecraft.world.ticks.LevelChunkTicks<>());
+
+            net.minecraft.world.entity.monster.zombie.Zombie zombie =
+                    (net.minecraft.world.entity.monster.zombie.Zombie) EntityTypes.ZOMBIE.create(level, EntitySpawnReason.COMMAND);
+            zombie.setPos(die.getX() + 0.5, die.getY(), die.getZ() + 0.5);
+            zombie.setId(FIRST_ID);
+            zombie.setUUID(new UUID(0L, 3L));
+            level.tracked.add(zombie);
+
+            String initialBlocks = blockArrayXYZ(level.blocks);
+
+            StringBuilder frames = new StringBuilder("[");
+            int ticks = 20;
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime = START_TIME + tick;
+                    if (tick == 1) {
+                        level.gameEvent(GameEvent.ENTITY_DIE,
+                                new Vec3(die.getX() + 0.5, die.getY(), die.getZ() + 0.5),
+                                new GameEvent.Context(zombie, null));
+                    }
+                    net.minecraft.world.level.block.entity.SculkCatalystBlockEntity.serverTick(
+                            level, catalyst, level.getBlockState(catalyst), be);
+                    level.getBlockTicks().tick(level.gameTime, Integer.MAX_VALUE, (p, block) -> {
+                        BlockState st = level.getBlockState(p);
+                        if (st.is(block)) {
+                            st.tick(level, p, level.getRandom());
+                        }
+                    });
+                }
+                if (tick > 0) frames.append(',');
+                StringBuilder cursors = new StringBuilder("[");
+                var list = be.getListener().getSculkSpreader().getCursors();
+                for (int i = 0; i < list.size(); i++) {
+                    var cursor = list.get(i);
+                    if (i > 0) cursors.append(',');
+                    BlockPos pos = cursor.getPos();
+                    int updateDelay = (Integer) readField(
+                            net.minecraft.world.level.block.SculkSpreader.ChargeCursor.class, cursor, "updateDelay");
+                    int decayDelay = (Integer) readField(
+                            net.minecraft.world.level.block.SculkSpreader.ChargeCursor.class, cursor, "decayDelay");
+                    byte faces = cursor.getFacingData() == null
+                            ? 0
+                            : net.minecraft.world.level.block.MultifaceBlock.pack(cursor.getFacingData());
+                    cursors.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',').append(pos.getZ())
+                            .append(',').append(cursor.getCharge())
+                            .append(',').append(updateDelay)
+                            .append(',').append(decayDelay)
+                            .append(',').append(faces).append(']');
+                }
+                cursors.append(']');
+                frames.append("{\"cursors\":").append(cursors)
+                        .append(",\"blocks\":").append(blockArrayXYZ(level.blocks))
+                        .append(",\"levelSeed\":").append(randomSeed(level.getRandom()))
+                        .append('}');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"sculkCatalyst\",\"name\":\"sculk_catalyst_spread\""
+                    + ",\"startTime\":" + START_TIME
+                    + ",\"blocks\":" + initialBlocks
+                    + ",\"catalyst\":" + Arrays.toString(new int[] {catalyst.getX(), catalyst.getY(), catalyst.getZ()})
+                    + ",\"die\":" + Arrays.toString(new int[] {die.getX(), die.getY(), die.getZ()})
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            level.closeRealPoi();
+        }
+        return 1;
+    }
+
+    /** 幽匿催发体存档：`saveCustomOnly` 的 SNBT 和读回后再写出的 SNBT。 */
+    private static int playSculkCatalystSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean filled : new boolean[] {false, true}) {
+            FakeLevel level = FakeLevel.create(official);
+            BlockPos pos = new BlockPos(1, 64, 2);
+            BlockState state = Blocks.SCULK_CATALYST.defaultBlockState();
+            net.minecraft.world.level.block.entity.SculkCatalystBlockEntity be =
+                    new net.minecraft.world.level.block.entity.SculkCatalystBlockEntity(pos, state);
+            if (filled) {
+                be.getListener().getSculkSpreader().addCursors(new BlockPos(3, 64, 3), 5);
+                be.getListener().getSculkSpreader().addCursors(new BlockPos(-2, 65, 1), 7);
+            }
+            var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            be.saveCustomOnly(output);
+            var copy = new net.minecraft.world.level.block.entity.SculkCatalystBlockEntity(pos, state);
+            copy.loadCustomOnly(net.minecraft.world.level.storage.TagValueInput.create(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries, output.buildResult()));
+            var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            copy.saveCustomOnly(again);
+            out.write("{\"type\":\"sculkCatalystSave\",\"filled\":" + filled
                     + ",\"nbt\":" + jsonString(output.buildResult().toString())
                     + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
             cases++;
@@ -20414,6 +20583,36 @@ public final class MobOracle {
             BlockPos pos = BlockPos.of(key);
             out.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',').append(pos.getZ())
                     .append(',').append(Block.getId(state)).append(']');
+        }
+        out.append(']');
+        return out.toString();
+    }
+
+    /** 和 {@link #blockArray} 一样，但按 `(x, y, z)` 三元组排序（催发体蔓延逐刻比方块）。 */
+    private static String blockArrayXYZ(Long2ObjectOpenHashMap<BlockState> blocks) {
+        long[] keys = blocks.keySet().toLongArray();
+        long[][] entries = new long[keys.length][];
+        int n = 0;
+        for (long key : keys) {
+            BlockState state = blocks.get(key);
+            if (state.isAir()) {
+                continue;
+            }
+            BlockPos pos = BlockPos.of(key);
+            entries[n++] = new long[] {pos.getX(), pos.getY(), pos.getZ(), Block.getId(state)};
+        }
+        java.util.Arrays.sort(entries, 0, n, (a, b) -> {
+            for (int i = 0; i < 3; i++) {
+                if (a[i] != b[i]) return Long.compare(a[i], b[i]);
+            }
+            return 0;
+        });
+        StringBuilder out = new StringBuilder();
+        out.append('[');
+        for (int i = 0; i < n; i++) {
+            if (i > 0) out.append(',');
+            out.append('[').append(entries[i][0]).append(',').append(entries[i][1]).append(',')
+                    .append(entries[i][2]).append(',').append(entries[i][3]).append(']');
         }
         out.append(']');
         return out.toString();

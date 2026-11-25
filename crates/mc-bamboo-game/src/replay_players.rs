@@ -51,6 +51,9 @@ impl crate::inbound::PlayerSink for Capture {
 pub struct ReplayPlayers {
     region: Region,
     captures: Vec<(PlayerId, Capture)>,
+    /// 这一「击退事件」里发给玩家的速度包（额外击退 / 音波冲量）。
+    /// 对拍逐刻读走后清空，只看击退那一刻有没有值。
+    motion_packet: Option<Vec3>,
 }
 
 impl ReplayPlayers {
@@ -86,7 +89,11 @@ impl ReplayPlayers {
             region.insert_player(player);
             captures.push((id, capture));
         }
-        Self { region, captures }
+        Self {
+            region,
+            captures,
+            motion_packet: None,
+        }
     }
 
     /// 生物读到的玩家视图，和正式驱动的 `for_each_player` 同一个构造。
@@ -111,6 +118,33 @@ impl ReplayPlayers {
         let (hurt, death_drops) =
             crate::player_hurt::hurt_player_by_mob(&mut parts, PlayerId(target), source, amount);
         PlayerHurtNow { hurt, death_drops }
+    }
+
+    /// 音波命中给玩家的速度冲量：`Entity.push(dx, dy, dz)`。
+    pub fn push(&mut self, target: EntityUid, push: Vec3) {
+        let sent = {
+            let mut parts = self.region.hurt_parts();
+            crate::player_hurt::push_player(&mut parts, PlayerId(target), push)
+        };
+        if sent.is_some() {
+            self.motion_packet = sent;
+        }
+    }
+
+    /// 读走这一击退事件发给玩家的速度包；没有就 `None`。
+    pub fn take_motion_packet(&mut self) -> Option<Vec3> {
+        self.motion_packet.take()
+    }
+
+    /// 生物给玩家的额外击退：`LivingEntity.knockback(strength, dx, dz)`。
+    pub fn knock_back(&mut self, target: EntityUid, strength: f64, dx: f64, dz: f64) {
+        let sent = {
+            let mut parts = self.region.hurt_parts();
+            crate::player_hurt::knock_back_player(&mut parts, PlayerId(target), strength, (dx, dz))
+        };
+        if sent.is_some() {
+            self.motion_packet = sent;
+        }
     }
 
     /// 生物给玩家点火。
