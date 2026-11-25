@@ -1465,6 +1465,14 @@ WebView2 的渲染进程不算在内。
   铲子扑灭先发 `levelEvent(1009)`，再灭掉，再按 `hurtAndBreak(1)` 扣耐久（创造模式不取耐久附魔的随机数）。
   被水浇灭时先放 `entity.generic.extinguish_fire`。没有粒子、统计和 `gameEvent`。客户端的 `particleTick` 不在服务端跑。
   不记统计、不发配方音效、不触发进度。有限合成（`limited_crafting`）没做，默认和官方一样是关的。
+- 幽匿与监守者（本轮接入）的限制：游戏事件注册表、按岛登记的监听者表和振动系统（选择器、飞行延迟、
+  频率表、羊毛遮挡）已接进世界；幽匿感测体和校频幽匿感测体是真的振动监听者，能激活、给红石强度和比较器
+  频率、冷却、共鸣，逐刻对拍覆盖激活 / 羊毛遮挡 / 冷却 / 校频过滤，加了两只感测体到发声点距离不同的
+  投递顺序场景。幽匿尖啸体听感测体激活发出的 `sculk_sensor_tendrils_clicking`（源是玩家才响应），能警告
+  玩家、置 `shrieking` 状态并给附近玩家黑暗；`WardenSpawnTracker` 的警告等级累积、200 刻冷却和 12000 刻
+  衰减已实现，逐刻对拍覆盖警告加一 / 冷却期不再加 / 衰减 / 黑暗，并写进玩家档的 `warden_spawn_tracker` 键
+  （`player-data` 双向往返）。**没做的**：幽匿催发体的蔓延（`SculkSpreader`）、监守者本体
+  （`Warden` / `WardenAi` / 音波等）、召唤监守者（`trySummonWarden` 留空接口）。
 - 正版验证的限制：`server.properties` 的 `online-mode` 官方默认 true，命令行版和桌面端都读同一份文件、
   设置页里可以改；`ServerConfig::default()`（不读配置文件的嵌入用法）是 false。
   和代理转发互斥：打开转发时正版验证会被关掉，因为代理已经替服务端验过了。

@@ -799,6 +799,34 @@ impl<'a> World<'a> {
         }
     }
 
+    /// 幽匿尖啸体 `tryToWarn`：给这名玩家加一级监守者警告，返回警告后的等级。
+    pub fn warn_player(&mut self, target: crate::entity::EntityUid) -> Option<i32> {
+        self.level.warn_warden(target)
+    }
+
+    /// `Warden.applyDarknessAround`：给半径内的玩家上黑暗效果。
+    pub fn darkness_around(&mut self, center: Vec3, radius: i32, ticks: i32) {
+        let targets: Vec<crate::entity::EntityUid> = {
+            let mut ids = Vec::new();
+            let radius = f64::from(radius);
+            self.level.for_each_player(&mut |player| {
+                if player.position.distance_to_sqr(center) <= radius * radius {
+                    ids.push(player.uid);
+                }
+            });
+            ids
+        };
+        for target in targets {
+            self.give_player_effect(
+                target,
+                crate::entity::mob::effects::EffectInstance::new(
+                    mc_bamboo_data::registries::mob_effect::DARKNESS,
+                    ticks,
+                ),
+            );
+        }
+    }
+
     /// 给一头生物挂效果（`LivingEntity.addEffect`）。
     ///
     /// Adds an effect to a mob (`LivingEntity.addEffect`).
@@ -1081,6 +1109,27 @@ impl<'a> World<'a> {
         self.level.block_state(pos)
     }
 
+    /// 这一格在合法高度内时的状态；越界 / 未加载时返回 `None`。
+    pub fn block_state_if_valid(&self, pos: BlockPos) -> Option<BlockState> {
+        self.is_loaded(pos).then(|| self.block_state(pos))
+    }
+
+    /// 游戏事件在 26.3 当场投递，见 [`crate::game_event::dispatch::post`]。
+    ///
+    /// 精确 / 并行驱动各自保证落地顺序：并行阶段把事件当命令攒起来，
+    /// 按 uid 顺序投递；这里不排队、不留到刻末。
+    pub fn game_event(
+        &mut self,
+        event: crate::game_event::GameEvent,
+        source: Vec3,
+        context: crate::game_event::dispatch::EventContext,
+    ) {
+        let deliveries = crate::game_event::dispatch::post(self, event, source, context);
+        for delivery in deliveries {
+            self.deliver_game_event(delivery);
+        }
+    }
+
     /// `getFluidState`。
     pub fn fluid_state(&self, pos: BlockPos) -> FluidState {
         self.block_state(pos).fluid()
@@ -1104,6 +1153,10 @@ impl<'a> World<'a> {
     /// 这次操作背后的可变存储。测试里要把借出去的实体原样放回去。
     #[cfg(test)]
     pub(crate) fn level_mut_for_test(&mut self) -> &mut dyn Level {
+        self.level
+    }
+    /// 这次操作背后的可变存储。登记表这类岛级数据要在触发里改。
+    pub fn level_mut(&mut self) -> &mut dyn Level {
         self.level
     }
 
@@ -1593,6 +1646,13 @@ impl<'a> World<'a> {
             return;
         }
         self.level.insert_block_entity(entity);
+        if let Some(table) = self.level.game_event_listeners_mut() {
+            table.register(
+                pos.chunk(),
+                pos.y >> 4,
+                crate::game_event::registry::ListenerRef::BlockEntity(pos),
+            );
+        }
     }
 
     /// `Level.removeBlockEntity`。
@@ -1601,6 +1661,13 @@ impl<'a> World<'a> {
         self.level.wake_block_entity(pos);
         self.notify_changed(pos);
         let _ = self.level.remove_block_entity(pos);
+        if let Some(table) = self.level.game_event_listeners_mut() {
+            table.unregister(
+                pos.chunk(),
+                pos.y >> 4,
+                crate::game_event::registry::ListenerRef::BlockEntity(pos),
+            );
+        }
     }
 
     /// 带着这一格的方块实体运行一段代码。这段时间它不在表里，[`BlockEntities::get`] 是 `None`，
@@ -3288,7 +3355,19 @@ impl<'a> World<'a> {
             self.spawn_after_break(state, pos, &mc_bamboo_protocol::item::ItemStack::empty());
         }
         let fluid = self.fluid_state(pos);
-        self.set_block_limited(pos, fluid.legacy_block(), UPDATE_ALL, limit)
+        let removed = self.set_block_limited(pos, fluid.legacy_block(), UPDATE_ALL, limit);
+        if removed {
+            // `Level.destroyBlock` 只在真的换掉这一格时发 BLOCK_DESTROY。
+            self.game_event(
+                crate::game_event::GameEvent::BlockDestroy,
+                crate::world::block_center_public(pos),
+                crate::game_event::dispatch::EventContext {
+                    affected_state: Some(state),
+                    ..Default::default()
+                },
+            );
+        }
+        removed
     }
 
     /// `Block.updateOrDestroy`。
@@ -4850,7 +4929,8 @@ mod tests {
                 | Effect::CrafterCrafted { .. }
                 | Effect::KilledByArrow { .. }
                 | Effect::EnderPearlTeleport { .. }
-                | Effect::GuardianElderEffect { .. } => None,
+                | Effect::GuardianElderEffect { .. }
+                | Effect::VibrationParticle { .. } => None,
             })
             .collect()
     }

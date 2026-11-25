@@ -242,6 +242,8 @@ pub(crate) struct Region {
     pub(crate) block_entities: BlockEntities,
     /// 等这一刻末尾处理的方块事件，官方的 `Level.blockEvents`。
     block_events: BlockEvents,
+    /// 这一岛的游戏事件监听者，按区段登记。
+    pub(crate) game_event_listeners: mc_bamboo_blocks::game_event::registry::GameEventListeners,
     /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
     pub(crate) random: LevelRandom,
     /// 红石缓存，一个 region 一份；开关从 `bamboo.toml` 读，默认关。
@@ -478,6 +480,7 @@ impl Region {
             lecterns: crate::lectern::Tables::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
             random: LevelRandom::new(unique_seed()),
             redstone_cache: mc_bamboo_blocks::cache::RedstoneCache::new(
                 mc_bamboo_blocks::cache::CacheConfig::default(),
@@ -740,6 +743,7 @@ impl Region {
             redstone: &mut self.redstone,
             block_entities: &mut self.block_entities,
             block_events: &mut self.block_events,
+            game_event_listeners: &mut self.game_event_listeners,
             containers: &mut self.containers,
             entities: &mut self.entities,
             loot_sequences: &self.loot_sequences,
