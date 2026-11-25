@@ -266,6 +266,8 @@ pub struct MoveToTargetSink {
     pub min: i32,
     pub max: i32,
     pub armadillo: bool,
+    /// `BreezeAi$SlideToTargetSink`：启动时进滑行姿态、放 `BREEZE_SLIDE`，收尾回站立。
+    pub breeze: bool,
     remaining_cooldown: i32,
     path: Option<super::super::path::Path>,
     path_version: u32,
@@ -289,11 +291,20 @@ impl MoveToTargetSink {
             min,
             max,
             armadillo,
+            breeze: false,
             remaining_cooldown: 0,
             path: None,
             path_version: 0,
             last_target_pos: None,
             speed: 0.0,
+        }
+    }
+
+    /// `BreezeAi$SlideToTargetSink`：`with_duration(min, max)` 加滑行姿态标记。
+    pub fn breeze(min: i32, max: i32) -> Self {
+        Self {
+            breeze: true,
+            ..Self::with_duration(min, max, false)
         }
     }
 }
@@ -1133,6 +1144,14 @@ fn move_sink_stop(sink: &mut MoveToTargetSink, cx: &mut Cx) {
     cx.memories.erase(Path);
     sink.path = None;
     sink.path_version = cx.mob.navigation.path_version;
+    if sink.breeze {
+        // `BreezeAi$SlideToTargetSink.stop`：回站立；还在攻击就给 `BREEZE_SHOOT` 60 刻。
+        cx.mob.breeze.pose = super::super::breeze::Pose::Standing;
+        if cx.memories.has(AttackTarget) {
+            cx.memories
+                .set_with_ttl(BreezeShoot, MemoryValue::Unit, 60);
+        }
+    }
 }
 
 fn move_sink_start(sink: &mut MoveToTargetSink, cx: &mut Cx) {
@@ -1144,6 +1163,11 @@ fn move_sink_start(sink: &mut MoveToTargetSink, cx: &mut Cx) {
         .navigation
         .move_to_path(cx.ctx.blocks(), &nav, path, f64::from(sink.speed));
     sink.path_version = cx.mob.navigation.path_version;
+    if sink.breeze {
+        // `BreezeAi$SlideToTargetSink.start`：进滑行姿态、放 `BREEZE_SLIDE`。
+        living::play_sound(cx.me, cx.mob, "minecraft:entity.breeze.slide", 1.0, 1.0);
+        cx.mob.breeze.pose = super::super::breeze::Pose::Sliding;
+    }
 }
 
 fn move_sink_tick(sink: &mut MoveToTargetSink, cx: &mut Cx) {

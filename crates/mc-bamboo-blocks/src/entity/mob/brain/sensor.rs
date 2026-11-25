@@ -270,6 +270,10 @@ pub struct LivingView {
     pub mob_type: Option<MobType>,
     pub position: Vec3,
     pub eye_height: f32,
+    /// `yHeadRot`：旋风人 `randomPointBehindTarget` 读目标朝向算落点。
+    ///
+    /// `yHeadRot`, read by the breeze's `randomPointBehindTarget` to place the jump.
+    pub y_head_rot: f32,
     pub bounding_box: Aabb,
     /// `isAlive()`：没被移除且血量大于 0。
     ///
@@ -308,7 +312,7 @@ pub fn living(cx: &Cx, uid: EntityUid) -> Option<LivingView> {
     let mut mob = None;
     cx.ctx.with_other(uid, &mut |public| {
         if let KindPublic::Mob(m) = &public.kind {
-            mob = Some(mob_view(public.uid, public.position, public.removed, m));
+            mob = Some(mob_view(public.uid, public.position, public.yaw, public.removed, m));
         }
     });
     if mob.is_some() {
@@ -340,6 +344,7 @@ fn player_view(player: &crate::entity::ctx::PlayerView) -> LivingView {
         mob_type: None,
         position: player.position,
         eye_height: player.eye_height,
+        y_head_rot: player.yaw,
         bounding_box: Aabb::new(
             player.position.x - 0.3,
             player.position.y,
@@ -359,7 +364,13 @@ fn player_view(player: &crate::entity::ctx::PlayerView) -> LivingView {
     }
 }
 
-fn mob_view(uid: EntityUid, position: Vec3, removed: bool, mob: &KindPublicMob) -> LivingView {
+fn mob_view(
+    uid: EntityUid,
+    position: Vec3,
+    yaw: f32,
+    removed: bool,
+    mob: &KindPublicMob,
+) -> LivingView {
     let (width, height) = mob.dimensions();
     let half = f64::from(width) / 2.0;
     // 骆驼坐下时 `getEyeHeight()` 跟着姿势变（2.275 → 0.845），看它的幼崽的
@@ -378,6 +389,7 @@ fn mob_view(uid: EntityUid, position: Vec3, removed: bool, mob: &KindPublicMob) 
         mob_type: Some(mob.mob_type),
         position,
         eye_height,
+        y_head_rot: yaw,
         bounding_box: Aabb::new(
             position.x - half,
             position.y,

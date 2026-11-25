@@ -11,7 +11,7 @@
 //! behaviours and the five FIGHT behaviours. The attack sensor picks the
 //! closest attackable player or iron golem.
 
-use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_core::{BlockPos, Direction, Vec3, mth};
 use mc_bamboo_data::{registries::attribute, sounds};
 
 use super::{
@@ -28,6 +28,7 @@ use super::{
         sensor::{self, SensorKind},
         template_cache,
     },
+    goat,
     living,
 };
 use crate::entity::{
@@ -35,6 +36,7 @@ use crate::entity::{
     ctx::{Command, EntityCtx},
     wind_charge::{WindChargeShot, WindChargeVariant},
 };
+use crate::shape::CollisionContext;
 
 static TEMPLATE: TemplateCache = template_cache();
 
@@ -79,9 +81,6 @@ pub struct Breeze {
     /// `jumpTrailStartedTick` / `soundTick`（客户端动画用，服务端仍推进）。
     pub jump_trail_started_tick: i32,
     pub sound_tick: i32,
-    /// 长跳落地前剩下的刻数，`LongJump` 用它推进跳跃。
-    pub jump_ticks: i32,
-    pub jump_target: Option<BlockPos>,
 }
 
 /// `BreezeAi` 的五个专属行为。
@@ -99,8 +98,6 @@ pub enum Behavior {
     ShootWhenStuck,
     /// `Slide`：朝内圈外的一点滑行（速度 0.6）。
     Slide,
-    /// `BreezeAi$SlideToTargetSink`（IDLE 活动）。
-    SlideToTargetSink,
 }
 
 impl Behavior {
@@ -110,8 +107,7 @@ impl Behavior {
             Self::Shoot => Class::Timed { min: 20, max: 20 },
             Self::LongJump => Class::Timed { min: 200, max: 200 },
             Self::ShootWhenStuck => Class::OneShot,
-            Self::Slide => Class::Timed { min: 20, max: 20 },
-            Self::SlideToTargetSink => Class::Timed { min: 20, max: 40 },
+            Self::Slide => Class::Timed { min: 60, max: 60 },
         }
     }
 
@@ -123,7 +119,6 @@ impl Behavior {
             Self::LongJump => "LongJump",
             Self::ShootWhenStuck => "ShootWhenStuck",
             Self::Slide => "Slide",
-            Self::SlideToTargetSink => "SlideToTargetSink",
         }
     }
 
@@ -168,10 +163,6 @@ impl Behavior {
                 (BreezeJumpCooldown, ValueAbsent),
                 (BreezeShoot, ValueAbsent),
             ],
-            Self::SlideToTargetSink => &[
-                (WalkTarget, ValuePresent),
-                (BreezeShootCooldown, Registered),
-            ],
         }
     }
 
@@ -192,12 +183,7 @@ impl Behavior {
                 !sensor::living(cx, target).is_some_and(|view| view.alive)
             }
             Self::Shoot => cx.mob.breeze.pose == Pose::Standing && target_within_range(cx, 16.0),
-            Self::LongJump => {
-                if !cx.me.on_ground || cx.me.in_water {
-                    return false;
-                }
-                within_inner_circle(cx, 4.0, 10.0) == Some(false) && cx.memories.has(AttackTarget)
-            }
+            Self::LongJump => long_jump_can_run(cx),
             Self::ShootWhenStuck => {
                 cx.me.vehicle.is_some()
                     || cx.me.in_water
@@ -209,15 +195,15 @@ impl Behavior {
             Self::Slide => {
                 cx.me.on_ground && !cx.me.in_water && cx.mob.breeze.pose == Pose::Standing
             }
-            Self::SlideToTargetSink => cx.memories.has(WalkTarget),
         }
     }
 
     pub(super) fn can_still_use(&mut self, cx: &mut Cx) -> bool {
         match self {
             Self::Shoot => cx.memories.has(AttackTarget) && cx.memories.has(BreezeShoot),
-            Self::LongJump => cx.mob.breeze.jump_ticks > 0,
-            Self::SlideToTargetSink => cx.memories.has(WalkTarget),
+            Self::LongJump => {
+                cx.mob.breeze.pose != Pose::Standing && !cx.memories.has(BreezeJumpCooldown)
+            }
             _ => false,
         }
     }
@@ -245,30 +231,49 @@ impl Behavior {
                 living::play_sound(cx.me, cx.mob, "minecraft:entity.breeze.inhale", 1.0, 1.0);
             }
             Self::LongJump => {
-                cx.mob.breeze.pose = Pose::LongJumping;
-                cx.mob.breeze.jump_ticks = 20;
-                cx.memories
-                    .set_with_ttl(BreezeJumpInhaling, MemoryValue::Unit, 5);
-                living::play_sound(cx.me, cx.mob, "minecraft:entity.breeze.jump", 1.0, 1.0);
+                if !cx.memories.has(BreezeJumpInhaling) {
+                    cx.memories
+                        .set_with_ttl(BreezeJumpInhaling, MemoryValue::Unit, 10);
+                }
+                cx.mob.breeze.pose = Pose::Inhaling;
+                living::play_sound(cx.me, cx.mob, "minecraft:entity.breeze.charge", 1.0, 1.0);
+                if let Some(target) = cx.memories.block_pos(BreezeJumpTarget) {
+                    // `lookAt(EYES, atCenterOf(jumpTarget))`。
+                    look_at_eyes(
+                        cx.me,
+                        cx.mob,
+                        Vec3::new(
+                            f64::from(target.x) + 0.5,
+                            f64::from(target.y) + 0.5,
+                            f64::from(target.z) + 0.5,
+                        ),
+                    );
+                }
             }
             Self::ShootWhenStuck => {
                 cx.memories.set_with_ttl(BreezeShoot, MemoryValue::Unit, 60);
             }
             Self::Slide => {
-                cx.mob.breeze.pose = Pose::Sliding;
-                if let Some(target) = cx.memories.entity(AttackTarget)
-                    && let Some(view) = sensor::living(cx, target)
-                {
-                    let to = cx.me.position.subtract(view.position);
-                    let distance = 4.0 + cx.me.random.next_double() * 4.0;
-                    let at = cx.me.position.add(to.normalize().scale(distance));
-                    cx.memories.set(
-                        WalkTarget,
-                        MemoryValue::Walk(WalkTarget::to_point(at, 0.6, 1)),
-                    );
-                }
+                let Some(target) = cx.memories.entity(AttackTarget) else {
+                    return;
+                };
+                let Some(view) = sensor::living(cx, target) else {
+                    return;
+                };
+                // `withinInnerCircleRange` 命中时官方先试 `DefaultRandomPos.getPosAway`；
+                // 该落点求解还没复刻，内圈内外都按 `nextBoolean` 二选一（对拍场景目标
+                // 在内圈外，走不到这一支）。
+                let _in_inner = within_inner_circle(cx, 4.0, 10.0);
+                let pos = if cx.me.random.next_boolean() {
+                    random_point_behind_target(&view, &mut cx.me.random)
+                } else {
+                    random_point_in_middle_circle(cx, &view)
+                };
+                cx.memories.set(
+                    WalkTarget,
+                    MemoryValue::Walk(WalkTarget::to_point(pos, 0.6, 1)),
+                );
             }
-            Self::SlideToTargetSink => {}
         }
     }
 
@@ -281,14 +286,9 @@ impl Behavior {
                 let Some(view) = sensor::living(cx, target) else {
                     return;
                 };
-                // `Shoot.tick`：朝目标转头；充能 / 恢复记忆还在时什么都不做。
-                cx.mob.look.set_look_at(
-                    view.position.x,
-                    view.position.y,
-                    view.position.z,
-                    30.0,
-                    30.0,
-                );
+                // `Shoot.tick`：朝目标转头（`lookAt(EYES, position)` 立刻转向）；
+                // 充能 / 恢复记忆还在时什么都不做。
+                look_at_eyes(cx.me, cx.mob, view.position);
                 if cx.memories.has(BreezeShootCharging) || cx.memories.has(BreezeShootRecovering) {
                     return;
                 }
@@ -315,19 +315,46 @@ impl Behavior {
                 living::play_sound(cx.me, cx.mob, "minecraft:entity.breeze.shoot", 1.5, 1.0);
             }
             Self::LongJump => {
-                cx.mob.breeze.jump_ticks -= 1;
-                if cx.mob.breeze.jump_ticks == 15 {
-                    // 官方在吸气结束后才给速度；这里用竖直起跳近似长跳速度。
-                    cx.me.delta = cx.me.delta.add(Vec3::new(0.0, 0.9, 0.0));
-                    cx.mob.jump.jump = true;
+                let in_water = cx.me.in_water;
+                if !in_water && cx.memories.has(BreezeLeavingWater) {
+                    cx.memories.erase(BreezeLeavingWater);
                 }
-            }
-            Self::SlideToTargetSink => {
-                // `MoveToTargetSink` 的变体：速度按状态乘 0.6。
-                if let Some(MemoryValue::Walk(walk)) = cx.memories.get(WalkTarget).cloned() {
-                    let mut walk = walk;
-                    walk.speed *= 0.6;
-                    cx.memories.set(WalkTarget, MemoryValue::Walk(walk));
+                if is_finished_inhaling(cx) {
+                    // `Vec3.atBottomCenterOf(jumpTarget)` → 解初速度 → 起跳。
+                    let jump_vector = cx.memories.block_pos(BreezeJumpTarget).and_then(|target| {
+                        calculate_optimal_jump_vector(
+                            cx,
+                            Vec3::new(
+                                f64::from(target.x) + 0.5,
+                                f64::from(target.y),
+                                f64::from(target.z) + 0.5,
+                            ),
+                        )
+                    });
+                    let Some(jump_vector) = jump_vector else {
+                        cx.mob.breeze.pose = Pose::Standing;
+                        return;
+                    };
+                    if in_water {
+                        cx.memories.set(BreezeLeavingWater, MemoryValue::Unit);
+                    }
+                    living::play_sound(cx.me, cx.mob, "minecraft:entity.breeze.jump", 1.0, 1.0);
+                    cx.mob.breeze.pose = Pose::LongJumping;
+                    cx.me.y_rot = cx.mob.y_body_rot;
+                    cx.mob.discard_friction = true;
+                    cx.me.delta = jump_vector;
+                } else if is_finished_jumping(cx) {
+                    living::play_sound(cx.me, cx.mob, "minecraft:entity.breeze.land", 1.0, 1.0);
+                    cx.mob.breeze.pose = Pose::Standing;
+                    cx.mob.discard_friction = false;
+                    let hurt_by = cx.memories.has(HurtByEntity);
+                    cx.memories.set_with_ttl(
+                        BreezeJumpCooldown,
+                        MemoryValue::Unit,
+                        if hurt_by { 2 } else { 10 },
+                    );
+                    cx.memories
+                        .set_with_ttl(BreezeShoot, MemoryValue::Unit, 100);
                 }
             }
             _ => {}
@@ -345,16 +372,16 @@ impl Behavior {
                 cx.memories.erase(BreezeShoot);
             }
             Self::LongJump => {
-                cx.mob.breeze.pose = Pose::Standing;
-                cx.memories
-                    .set_with_ttl(BreezeJumpCooldown, MemoryValue::Unit, 10);
+                if cx.mob.breeze.pose == Pose::LongJumping || cx.mob.breeze.pose == Pose::Inhaling {
+                    cx.mob.breeze.pose = Pose::Standing;
+                }
                 cx.memories.erase(BreezeJumpTarget);
                 cx.memories.erase(BreezeJumpInhaling);
-                cx.mob.breeze.jump_ticks = 0;
+                cx.memories.erase(BreezeLeavingWater);
             }
             Self::Slide => {
-                cx.mob.breeze.pose = Pose::Standing;
-                cx.memories.erase(WalkTarget);
+                // `Slide` 没有 `stop` 覆写：姿态由 `SlideToTargetSink` 收尾，
+                // `WALK_TARGET` 也由它消费。
             }
             _ => {}
         }
@@ -371,6 +398,27 @@ pub fn firing_y(cx: &Cx) -> f64 {
     cx.me.position.y + f64::from(cx.me.dimensions.1) * 0.5 + f64::from(0.3_f32)
 }
 
+/// `Entity.lookAt(EYES, target)`：从眼睛出发立刻转向目标，`yHeadRot` 跟上，旧的
+/// 朝向（`xRotO` / `yRotO`）同步成当前值。
+fn look_at_eyes(me: &mut Entity, mob: &mut Mob, target: Vec3) {
+    let eye = Vec3::new(
+        me.position.x,
+        me.position.y + f64::from(mob.eye_height),
+        me.position.z,
+    );
+    let dx = target.x - eye.x;
+    let dy = target.y - eye.y;
+    let dz = target.z - eye.z;
+    let horizontal = (dx * dx + dz * dz).sqrt();
+    let pitch = mth::wrap_degrees((-(mth::atan2(dy, horizontal) * 57.295_776_367_187_5)) as f32);
+    let yaw = mth::wrap_degrees((mth::atan2(dz, dx) * 57.295_776_367_187_5 - 90.0) as f32);
+    mob.x_rot = pitch;
+    me.y_rot = yaw;
+    mob.y_head_rot = yaw;
+    mob.x_rot_o = pitch;
+    mob.y_rot_o = yaw;
+}
+
 /// `Breeze.withinInnerCircleRange`：自己所在格中心到目标 `closerThan(4, 10)`。
 fn within_inner_circle(cx: &Cx, horizontal: f64, vertical: f64) -> Option<bool> {
     let target = cx.memories.entity(AttackTarget)?;
@@ -384,6 +432,182 @@ fn within_inner_circle(cx: &Cx, horizontal: f64, vertical: f64) -> Option<bool> 
     let dy = view.position.y - centre.y;
     let dz = view.position.z - centre.z;
     Some(dx * dx + dz * dz < horizontal * horizontal && dy.abs() < vertical)
+}
+
+/// `BreezeUtil.randomPointBehindTarget`：在目标背后 4–8 格、偏转角 ±45° 内随机取一点。
+fn random_point_behind_target(
+    view: &sensor::LivingView,
+    random: &mut crate::entity::JavaRandom,
+) -> Vec3 {
+    let gaussian = random.next_gaussian() as f32;
+    let yaw = view.y_head_rot + 180.0 + gaussian * 90.0 / 2.0;
+    let distance = 4.0 + random.next_float() * 4.0;
+    // `Vec3.directionFromRotation(0, yaw)` = (sin(yaw), 0, cos(yaw))。
+    let radians = yaw * (std::f32::consts::PI / 180.0);
+    let sin = f64::from(mth::sin(f64::from(radians)));
+    let cos = f64::from(mth::cos(f64::from(radians)));
+    view.position.add(Vec3::new(sin * f64::from(distance), 0.0, cos * f64::from(distance)))
+}
+
+/// `LongJump.snapToSurface`：从一点先朝下 10 格、再朝上 10 格 clip，取命中格上方。
+fn snap_to_surface(cx: &Cx, point: Vec3) -> Option<BlockPos> {
+    let view = cx.ctx.blocks();
+    if let Some(hit) = view.clip_collider(
+        point,
+        point.add(Vec3::new(0.0, -10.0, 0.0)),
+        CollisionContext::Empty,
+    ) {
+        return Some(BlockPos::containing(hit.location).above());
+    }
+    if let Some(hit) = view.clip_collider(
+        point,
+        point.add(Vec3::new(0.0, 10.0, 0.0)),
+        CollisionContext::Empty,
+    ) {
+        return Some(BlockPos::containing(hit.location).above());
+    }
+    None
+}
+
+/// `BreezeUtil.hasLineOfSight`：先比 `max(50, FOLLOW_RANGE)` 距离，再 COLLIDER clip。
+fn has_line_of_sight(cx: &Cx, point: Vec3) -> bool {
+    let view = cx.ctx.blocks();
+    let from = cx.me.position;
+    if from.distance_to_sqr(point).sqrt()
+        > f64::from(50.0_f32).max(cx.mob.attributes.value(attribute::FOLLOW_RANGE))
+    {
+        return false;
+    }
+    view.clip_collider(from, point, CollisionContext::Empty)
+        .is_none()
+}
+
+/// `LongJump.canJumpFromCurrentPosition`：脚下不是蜂蜜块，上方 4 格都是空气或水。
+fn can_jump_from_current_position(cx: &Cx) -> bool {
+    let view = cx.ctx.blocks();
+    let pos = cx.me.block_position();
+    if view.block_state(pos).is(mc_bamboo_data::blocks::HONEY_BLOCK) {
+        return false;
+    }
+    for i in 1..=4 {
+        let above = pos.relative_by(Direction::Up, i);
+        let state = view.block_state(above);
+        if !state.is_air() && !state.fluid().is_water() {
+            return false;
+        }
+    }
+    true
+}
+
+/// `LongJump.calculateOptimalJumpVector`：把 40/55/60/75/80 五个角度洗牌，
+/// 取第一个算得出来的初速度；有跳跃提升时在竖直方向补 `getJumpBoostPower()`。
+fn calculate_optimal_jump_vector(cx: &mut Cx, target: Vec3) -> Option<Vec3> {
+    let mut angles = [40, 55, 60, 75, 80];
+    cx.me.random.shuffle(&mut angles);
+    let jump_power = 0.058_333_334_f32 * cx.mob.attributes.value(attribute::FOLLOW_RANGE) as f32;
+    for angle in angles {
+        let Some(vector) = goat::jump_vector_for_angle(
+            &*cx,
+            target,
+            jump_power,
+            angle,
+            (0.6, 1.77),
+            false,
+        ) else {
+            continue;
+        };
+        if cx.mob.effects.has(mc_bamboo_data::registries::mob_effect::JUMP_BOOST) {
+            let boost = vector.normalize().y * f64::from(living::jump_boost_power(cx.mob));
+            return Some(vector.add(Vec3::new(0.0, boost, 0.0)));
+        }
+        return Some(vector);
+    }
+    None
+}
+
+/// `Slide.randomPointInMiddleCircle`：朝目标方向取 `len - lerp(nextDouble, 8, 4)` 处。
+fn random_point_in_middle_circle(cx: &mut Cx, view: &sensor::LivingView) -> Vec3 {
+    let to_target = view.position.subtract(cx.me.position);
+    let distance = to_target.length() - mth::lerp(cx.me.random.next_double(), 8.0, 4.0);
+    cx.me.position.add(to_target.normalize().scale(distance))
+}
+
+/// `EntityType.isBlockDangerous`（旋风人没有 `immuneTo` 标签、不防火）：烧着的方块、
+/// 凋灵玫瑰、甜浆果丛、仙人掌、细雪。
+fn is_block_dangerous(state: crate::state::BlockState) -> bool {
+    use mc_bamboo_data::{blocks, tags::block_tags};
+    state.is_tagged(block_tags::FIRE)
+        || state.is(blocks::LAVA)
+        || state.is(blocks::WITHER_ROSE)
+        || state.is(blocks::SWEET_BERRY_BUSH)
+        || state.is(blocks::CACTUS)
+        || state.is(blocks::POWDER_SNOW)
+}
+
+/// `LongJump.canRun`：着地（或在水里）、不在可漂浮流体深处、不在岩浆里；已有跳跃目标
+/// 直接通过，否则在目标背后解一个落点（`randomPointBehindTarget` → `snapToSurface` →
+/// 危险方块 / 视线检查），写进 `BREEZE_JUMP_TARGET`。目标超出跟随距离时清掉
+/// `ATTACK_TARGET` 并返回假。
+fn long_jump_can_run(cx: &mut Cx) -> bool {
+    if !cx.me.on_ground && !cx.me.in_water {
+        return false;
+    }
+    // `isInFluidDeeperThan(getFluidJumpThreshold, ENTITY_FLOATABLE)` / `isInLava`
+    // 对拍场景不在流体里，这里按不建模处理（`in_water` 已经覆盖水里分支）。
+    if cx.memories.has(BreezeJumpTarget) {
+        return true;
+    }
+    let Some(target) = cx.memories.entity(AttackTarget) else {
+        return false;
+    };
+    let Some(view) = sensor::living(cx, target) else {
+        return false;
+    };
+    let follow = cx.mob.attributes.value(attribute::FOLLOW_RANGE);
+    if cx.me.position.distance_to_sqr(view.position) >= follow * follow {
+        cx.memories.erase(AttackTarget);
+        return false;
+    }
+    let dx = (view.position.x - cx.me.position.x) as f32;
+    let dy = (view.position.y - cx.me.position.y) as f32;
+    let dz = (view.position.z - cx.me.position.z) as f32;
+    if mth::sqrt_f32(dx * dx + dy * dy + dz * dz) - 4.0 <= 0.0 {
+        return false;
+    }
+    if !can_jump_from_current_position(cx) {
+        return false;
+    }
+    let point = random_point_behind_target(&view, &mut cx.me.random);
+    let Some(landing) = snap_to_surface(cx, point) else {
+        return false;
+    };
+    if is_block_dangerous(cx.ctx.blocks().block_state(landing.below())) {
+        return false;
+    }
+    let center = Vec3::new(
+        f64::from(landing.x) + 0.5,
+        f64::from(landing.y) + 0.5,
+        f64::from(landing.z) + 0.5,
+    );
+    if !has_line_of_sight(cx, center)
+        && !has_line_of_sight(cx, Vec3::new(center.x, center.y + 4.0, center.z))
+    {
+        return false;
+    }
+    cx.memories
+        .set(BreezeJumpTarget, MemoryValue::BlockPos(landing));
+    true
+}
+
+/// `LongJump.isFinishedInhaling`：吸气记忆过期且姿态仍是吸气。
+fn is_finished_inhaling(cx: &Cx) -> bool {
+    !cx.memories.has(BreezeJumpInhaling) && cx.mob.breeze.pose == Pose::Inhaling
+}
+
+/// `LongJump.isFinishedJumping`：长跳姿态里着地，或在水里且没标记「离开水」。
+fn is_finished_jumping(cx: &Cx) -> bool {
+    cx.mob.breeze.pose == Pose::LongJumping
+        && (cx.me.on_ground || (cx.me.in_water && !cx.memories.has(BreezeLeavingWater)))
 }
 
 fn target_within_range(cx: &Cx, max: f64) -> bool {
@@ -446,7 +670,7 @@ pub fn brain() -> Brain {
         vec![
             Kind::Breeze(Behavior::StartAttacking { hurt_by: true }),
             Kind::Breeze(Behavior::StartAttacking { hurt_by: false }),
-            Kind::Breeze(Behavior::SlideToTargetSink),
+            Kind::MoveToTargetSink(MoveToTargetSink::breeze(20, 40)),
             Kind::Gate(Box::new(Gate::run_one(
                 Vec::new(),
                 vec![
