@@ -40,7 +40,11 @@ use mc_bamboo_protocol::components::{
 };
 
 use super::tag::{self, put};
-use crate::{BlockState, state::ORIENTATION};
+use crate::{
+    BlockState,
+    behaviour::trial_spawner::TrialSpawner,
+    state::{OMINOUS, ORIENTATION, TRIAL_SPAWNER_STATE},
+};
 
 /// 一条读盘条目往返后的结果。
 /// The result of round-tripping one disk entry.
@@ -75,6 +79,16 @@ impl Resaved {
 pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resaved> {
     let (fields, omit) = match id {
         "minecraft:mob_spawner" => (spawner(raw), SPAWNER_OMIT),
+        // 试炼刷怪笼的 `state` / `ominous` 来自方块状态，其余两组 codec 读同一条目；
+        // 重存和活实例走同一份 `TrialSpawner::additional`，存档格式只有一份实现。
+        // The trial spawner's state and ominous come from the block state; the
+        // other two codecs share one entry. Resaving and the live entity use the
+        // same `TrialSpawner::additional`, so there is one format.
+        "minecraft:trial_spawner" => (
+            TrialSpawner::read(raw, state.get(TRIAL_SPAWNER_STATE), state.get(OMINOUS))
+                .additional(),
+            &[][..],
+        ),
         "minecraft:sign" | "minecraft:hanging_sign" => (sign(raw), SIGN_OMIT),
         // 蜂巢由活方块实体读写；重存走同一条 `read` → `saveAdditional` 路径，
         // 存档格式只有一份实现。

@@ -19,11 +19,15 @@ use super::{
 };
 use crate::{
     BlockEntity, BlockState,
-    behaviour::machines::{
-        BrewingStandEntity, CampfireEntity, FurnaceEntity, PistonMoving, ShulkerBoxEntity,
-        beehive_entity::BeehiveEntity,
+    behaviour::{
+        machines::{
+            BrewingStandEntity, CampfireEntity, FurnaceEntity, PistonMoving, ShulkerBoxEntity,
+            beehive_entity::BeehiveEntity,
+        },
+        trial_spawner::{TrialSpawner, TrialSpawnerBlockEntity},
     },
     hopper::HopperEntity,
+    state::{OMINOUS, TRIAL_SPAWNER_STATE},
 };
 
 /// Bamboo 会实例化的会动的方块实体类型。读盘还认 [`PassiveKind`] 那四种只保留
@@ -99,13 +103,19 @@ impl BlockEntityKind {
 pub fn create_block_entity(
     id: &str,
     pos: BlockPos,
-    _state: BlockState,
+    state: BlockState,
     tag: &Tag,
 ) -> Result<Option<Box<dyn BlockEntity>>> {
     if let Some(passive) = PassiveKind::from_name(id) {
         return Ok(Some(Box::new(PassiveBlockEntity::read(
-            passive, pos, _state, tag,
+            passive, pos, state, tag,
         )?)));
+    }
+    if id == "minecraft:trial_spawner" {
+        // 官方 `loadAdditional`：`state` 和 `ominous` 来自方块状态，其余两组
+        // codec 读同一条目。
+        let spawner = TrialSpawner::read(tag, state.get(TRIAL_SPAWNER_STATE), state.get(OMINOUS));
+        return Ok(Some(Box::new(TrialSpawnerBlockEntity::new(pos, spawner))));
     }
     let Some(kind) = BlockEntityKind::from_name(id) else {
         return Ok(None);

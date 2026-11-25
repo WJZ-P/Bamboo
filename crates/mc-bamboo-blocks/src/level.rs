@@ -10,6 +10,7 @@ use mc_bamboo_core::{
     sign::{SignContent, SignTextSlot},
 };
 use mc_bamboo_data::SoundSource;
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -44,6 +45,25 @@ pub struct EquipTarget {
     /// `minecraft:entity_type` 的注册表 ID。
     pub entity_type: i32,
     pub equipment: [Option<ItemStack>; 8],
+}
+
+/// 试炼刷怪笼一次玩家探测看到的一名玩家：UUID、身上的不祥效果和眼睛所在方块。
+///
+/// 效果信息在游戏层（`PlayerView` 没有它），所以整次探测由 [`Level::trial_spawner_players`]
+/// 落地，方块层只拿结果跑状态机。
+///
+/// One player seen by the trial spawner's detector: its UUID, the ominous
+/// effects it carries, and the block its eyes are in. The effect facts live in
+/// the game layer, so [`Level::trial_spawner_players`] performs the whole scan.
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+pub struct TrialSpawnerPlayer {
+    pub uuid: [u8; 16],
+    /// 身上有 `TRIAL_OMEN`。
+    pub trial_omen: bool,
+    /// 身上的 `BAD_OMEN` 等级；没有时是 `None`。
+    pub bad_omen_amplifier: Option<i32>,
+    /// 眼睛所在的方块，`levelEvent(3020, ...)` 用它。
+    pub eye_block: BlockPos,
 }
 
 /// 一次触发的种类。
@@ -1271,6 +1291,65 @@ pub trait Level: LevelSideState + LevelEntities {
     /// ender pearl decides whether it may teleport its owner.
     fn player_sleeping(&self, _uid: EntityUid) -> bool {
         false
+    }
+
+    // 试炼刷怪笼的世界副作用。方块层只跑状态机，这些副作用里需要游戏层数据
+    // （玩家的不祥效果、装备表、战利品表、实体位置）的都由游戏层实现；缺省是
+    // 「没有玩家 / 不生成 / 不掉落」，只读测试世界和方块 oracle 走这一条。
+    // The trial spawner's world side effects. The block layer only runs the state
+    // machine; hooks that need game-layer data default to no players / no spawn /
+    // no drops, which the block oracle and read-only test worlds use.
+
+    /// `PlayerDetector.detect`：`pos` 附近 `range` 格内（`line_of_sight` 为真时还要
+    /// 看得见方块中心）的玩家，带上不祥效果和眼睛方块。默认没有玩家。
+    fn trial_spawner_players(
+        &self,
+        _pos: BlockPos,
+        _range: f64,
+        _line_of_sight: bool,
+    ) -> Vec<TrialSpawnerPlayer> {
+        Vec::new()
+    }
+
+    /// `TrialSpawner.spawnMob`：按 `SpawnData` 生成一只带装备的生物，返回它的 UUID。
+    /// 默认不生成。
+    fn trial_spawner_spawn_mob(
+        &mut self,
+        _pos: BlockPos,
+        _spawn_data: &Tag,
+        _ominous: bool,
+    ) -> Option<[u8; 16]> {
+        None
+    }
+
+    /// `TrialSpawner.ejectReward`：按战利品表在 `pos` 弹出一组奖励，返回有没有弹过。
+    /// 默认不弹。
+    fn trial_spawner_eject_reward(&mut self, _pos: BlockPos, _loot_table: &str) -> bool {
+        false
+    }
+
+    /// `transformBadOmenIntoTrialOmen`：把玩家的不祥之兆换成试炼之兆。默认不做事。
+    fn trial_spawner_transform_bad_omen(&mut self, _player: [u8; 16], _duration: i32) {}
+
+    /// `spawnOminousOminousItemSpawner`：在探测到的玩家上方生成不祥物品生成器。
+    /// 默认不生成。
+    fn trial_spawner_spawn_ominous_item(&mut self, _pos: BlockPos, _loot_table: &str) -> bool {
+        false
+    }
+
+    /// `resetAfterBecomingOminous`：变成不祥试炼时让已记录的生物消失。默认不做事。
+    fn trial_spawner_discard_mobs(&mut self, _mobs: &[[u8; 16]]) {}
+
+    /// `shouldMobBeUntracked`：这只已记录的生物是否已经不活 / 太远 / 换维度。
+    /// 默认只在实体不存在时算「已不活」。
+    fn trial_spawner_mob_untracked(&self, uuid: [u8; 16], _pos: BlockPos) -> bool {
+        !self.has_mob_uuid(&uuid)
+    }
+
+    /// `getOrCreateDisplayEntity` 能不能造出显示实体。默认可以，让刷怪笼从
+    /// `inactive` 推进到 `waiting_for_players`。
+    fn trial_spawner_has_display_entity(&self) -> bool {
+        true
     }
 
     /// 现实中的本地日期，不是世界时间。

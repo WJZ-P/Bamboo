@@ -6,6 +6,7 @@ use std::{borrow::BorrowMut, collections::VecDeque};
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, mth, sign::SignContent};
 use mc_bamboo_data::{Block, BlockAncestor, CollisionShapeKind, blocks, sounds};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 use tracing::{error, warn};
 
@@ -3606,6 +3607,59 @@ impl<'a> World<'a> {
     /// 世界里有没有这个 UUID 的生物。
     pub fn has_mob_uuid(&self, uuid: &[u8; 16]) -> bool {
         self.level.has_mob_uuid(uuid)
+    }
+
+    // 试炼刷怪笼的副作用，转发给 [`Level`] 的钩子；游戏层覆盖成真实现。
+
+    /// 见 [`Level::trial_spawner_players`]。
+    pub fn trial_spawner_players(
+        &self,
+        pos: BlockPos,
+        range: f64,
+        line_of_sight: bool,
+    ) -> Vec<crate::level::TrialSpawnerPlayer> {
+        self.level.trial_spawner_players(pos, range, line_of_sight)
+    }
+
+    /// 见 [`Level::trial_spawner_spawn_mob`]。
+    pub fn trial_spawner_spawn_mob(
+        &mut self,
+        pos: BlockPos,
+        spawn_data: &Tag,
+        ominous: bool,
+    ) -> Option<[u8; 16]> {
+        self.level.trial_spawner_spawn_mob(pos, spawn_data, ominous)
+    }
+
+    /// 见 [`Level::trial_spawner_eject_reward`]。
+    pub fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
+        self.level.trial_spawner_eject_reward(pos, loot_table)
+    }
+
+    /// 见 [`Level::trial_spawner_transform_bad_omen`]。
+    pub fn trial_spawner_transform_bad_omen(&mut self, player: [u8; 16], duration: i32) {
+        self.level
+            .trial_spawner_transform_bad_omen(player, duration);
+    }
+
+    /// 见 [`Level::trial_spawner_spawn_ominous_item`]。
+    pub fn trial_spawner_spawn_ominous_item(&mut self, pos: BlockPos, loot_table: &str) -> bool {
+        self.level.trial_spawner_spawn_ominous_item(pos, loot_table)
+    }
+
+    /// 见 [`Level::trial_spawner_discard_mobs`]。
+    pub fn trial_spawner_discard_mobs(&mut self, mobs: &[[u8; 16]]) {
+        self.level.trial_spawner_discard_mobs(mobs);
+    }
+
+    /// 见 [`Level::trial_spawner_mob_untracked`]。
+    pub fn trial_spawner_mob_untracked(&self, uuid: [u8; 16], pos: BlockPos) -> bool {
+        self.level.trial_spawner_mob_untracked(uuid, pos)
+    }
+
+    /// 见 [`Level::trial_spawner_has_display_entity`]。
+    pub fn trial_spawner_has_display_entity(&self) -> bool {
+        self.level.trial_spawner_has_display_entity()
     }
 
     /// `level.getBiome(pos)` 的注册表 ID。

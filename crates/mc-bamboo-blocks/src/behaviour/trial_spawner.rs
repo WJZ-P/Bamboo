@@ -13,7 +13,7 @@ use mc_bamboo_nbt::Tag;
 use crate::{
     LegacyRandom,
     archive::tag::{self, field, put},
-    state::TrialSpawnerState,
+    state::{OMINOUS, TRIAL_SPAWNER_STATE, TrialSpawnerState},
 };
 
 /// 官方 `TrialSpawnerConfig.DEFAULT.ticksBetweenItemSpawners()`。
@@ -932,6 +932,156 @@ fn spawn_data_has_id(tag: &Tag) -> bool {
     field(tag, "entity")
         .and_then(|entity| field(entity, "id"))
         .is_some_and(|id| matches!(id, Tag::String(text) if !text.is_empty()))
+}
+
+/// 试炼刷怪笼方块实体：持有 [`TrialSpawner`]，逐刻跑一次状态机，存档走
+/// [`TrialSpawner::additional`]。方块状态里的 `trial_spawner_state` 和 `ominous`
+/// 由 `set_state` / `set_ominous` 写回。
+pub struct TrialSpawnerBlockEntity {
+    pos: BlockPos,
+    spawner: TrialSpawner,
+}
+
+impl TrialSpawnerBlockEntity {
+    pub fn new(pos: BlockPos, spawner: TrialSpawner) -> Self {
+        Self { pos, spawner }
+    }
+}
+
+impl crate::BlockEntity for TrialSpawnerBlockEntity {
+    fn pos(&self) -> BlockPos {
+        self.pos
+    }
+
+    fn tick(&mut self, world: &mut crate::World) {
+        // 官方 `tickServer` 每刻从方块状态读回 `state`，`ominous` 由调用方传入。
+        let block = world.block_state(self.pos);
+        self.spawner.state = block.get(TRIAL_SPAWNER_STATE);
+        let ominous = block.get(OMINOUS);
+        let mut ctx = TrialSpawnerWorld {
+            world,
+            pos: self.pos,
+        };
+        self.spawner.tick(self.pos, ominous, &mut ctx);
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
+        Ok(self.spawner.additional())
+    }
+}
+
+/// [`TrialSpawnerContext`] 在 [`crate::World`] 上的实现。能直接做的读写直接做；
+/// 需要游戏层数据的（不祥效果、装备表、战利品表、实体位置）转发给 [`crate::Level`]
+/// 的钩子，缺省是不刷怪、不掉落、没有玩家。
+struct TrialSpawnerWorld<'a, 'w> {
+    world: &'a mut crate::World<'w>,
+    pos: BlockPos,
+}
+
+impl TrialSpawnerWorld<'_, '_> {
+    fn shutter(&mut self, open: bool) {
+        let name = if open {
+            "minecraft:block.trial_spawner.open_shutter"
+        } else {
+            "minecraft:block.trial_spawner.close_shutter"
+        };
+        self.world.play_block_sound(
+            self.pos,
+            mc_bamboo_data::sounds::sound_event(name),
+            1.0,
+            1.0,
+        );
+    }
+}
+
+impl TrialSpawnerContext for TrialSpawnerWorld<'_, '_> {
+    fn game_time(&self) -> i64 {
+        self.world.game_time()
+    }
+
+    fn random(&self) -> &LegacyRandom {
+        self.world.random()
+    }
+
+    fn can_spawn_in_level(&self) -> bool {
+        let rules = self.world.block_game_rules();
+        rules.spawner_blocks_work && self.world.difficulty_id() != 0 && rules.spawn_mobs
+    }
+
+    fn detect_players(
+        &self,
+        pos: BlockPos,
+        range: f64,
+        line_of_sight: bool,
+    ) -> Vec<DetectedPlayer> {
+        self.world
+            .trial_spawner_players(pos, range, line_of_sight)
+            .into_iter()
+            .map(|player| DetectedPlayer {
+                uuid: player.uuid,
+                trial_omen: player.trial_omen,
+                bad_omen_amplifier: player.bad_omen_amplifier,
+                eye_block: player.eye_block,
+            })
+            .collect()
+    }
+
+    fn has_display_entity(&self, _state: TrialSpawnerState, _spawn_data: Option<&Tag>) -> bool {
+        self.world.trial_spawner_has_display_entity()
+    }
+
+    fn mob_untracked(&self, uuid: [u8; 16], pos: BlockPos) -> bool {
+        self.world.trial_spawner_mob_untracked(uuid, pos)
+    }
+
+    fn spawn_mob(&mut self, pos: BlockPos, spawn_data: &Tag, ominous: bool) -> Option<[u8; 16]> {
+        self.world.trial_spawner_spawn_mob(pos, spawn_data, ominous)
+    }
+
+    fn eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
+        self.world.trial_spawner_eject_reward(pos, loot_table)
+    }
+
+    fn transform_bad_omen(&mut self, player: [u8; 16], duration: i32) {
+        self.world
+            .trial_spawner_transform_bad_omen(player, duration);
+    }
+
+    fn spawn_ominous_item(&mut self, pos: BlockPos, loot_table: &str) -> bool {
+        self.world.trial_spawner_spawn_ominous_item(pos, loot_table)
+    }
+
+    fn level_event(&mut self, event: i32, pos: BlockPos, data: i32) {
+        self.world.level_event(event, pos, data);
+    }
+
+    fn shutter_sound(&mut self, _pos: BlockPos, open: bool) {
+        self.shutter(open);
+    }
+
+    fn set_state(&mut self, state: TrialSpawnerState) {
+        let block = self.world.block_state(self.pos);
+        self.world
+            .set_block_and_update(self.pos, block.with(TRIAL_SPAWNER_STATE, state));
+    }
+
+    fn set_ominous(&mut self, ominous: bool) {
+        let block = self.world.block_state(self.pos);
+        self.world
+            .set_block_and_update(self.pos, block.with(OMINOUS, ominous));
+    }
+
+    fn discard_tracked_mobs(&mut self, mobs: &[[u8; 16]]) {
+        self.world.trial_spawner_discard_mobs(mobs);
+    }
 }
 
 #[cfg(test)]

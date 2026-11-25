@@ -865,6 +865,11 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             "minecraft:spawner",
             "minecraft:mob_spawner",
         ),
+        (
+            "trial_spawner-bare",
+            "minecraft:trial_spawner",
+            "minecraft:trial_spawner",
+        ),
         ("sign-bare", "minecraft:oak_sign", "minecraft:sign"),
         (
             "hanging_sign-bare",
@@ -966,6 +971,40 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
                     ("weight".to_owned(), Tag::Int(3)),
                 ])]),
             ),
+        ],
+    );
+    full(
+        "trial_spawner-full",
+        "minecraft:trial_spawner",
+        "minecraft:trial_spawner",
+        vec![
+            (
+                "registered_players".to_owned(),
+                Tag::List(vec![Tag::IntArray(vec![1, 2, 3, 4])]),
+            ),
+            (
+                "current_mobs".to_owned(),
+                Tag::List(vec![Tag::IntArray(vec![5, 6, 7, 8])]),
+            ),
+            ("cooldown_ends_at".to_owned(), Tag::Long(700)),
+            ("next_mob_spawns_at".to_owned(), Tag::Long(80)),
+            ("total_mobs_spawned".to_owned(), Tag::Int(3)),
+            (
+                "spawn_data".to_owned(),
+                Tag::Compound(vec![(
+                    "entity".to_owned(),
+                    Tag::Compound(vec![(
+                        "id".to_owned(),
+                        Tag::String("minecraft:zombie".to_owned()),
+                    )]),
+                )]),
+            ),
+            (
+                "ejecting_loot_table".to_owned(),
+                Tag::String("minecraft:spawners/trial_chamber/key".to_owned()),
+            ),
+            ("target_cooldown_length".to_owned(), Tag::Int(100)),
+            ("required_player_range".to_owned(), Tag::Int(5)),
         ],
     );
     full(
