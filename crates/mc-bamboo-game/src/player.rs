@@ -287,17 +287,12 @@ pub(crate) struct Player {
     pub(crate) advancements: crate::advancements::PlayerAdvancements,
     /// `ServerPlayer.shoulderEntityLeft` / `Right`：整只鹦鹉的 `saveWithoutId` NBT。
     /// 空肩是 `None`（官方存空 `CompoundTag`，不写进玩家档）。
+    /// 上肩后经过的相对刻数也在共享状态里（`> 20` 才允许离肩）。
     ///
     /// `ServerPlayer.shoulderEntityLeft` / `Right`: the whole parrot's
-    /// `saveWithoutId` tag. `None` means an empty shoulder.
-    pub(crate) shoulder_left: Option<mc_bamboo_nbt::Tag>,
-    pub(crate) shoulder_right: Option<mc_bamboo_nbt::Tag>,
-    /// 上肩后经过的相对刻数。官方 `timeEntitySatOnShoulder` 是绝对游戏时刻，
-    /// 这里用相对计数，`> 20` 才允许离肩，避免拆岛 / 并岛时钟平移。
-    ///
-    /// Relative ticks since the last perch. Vanilla uses an absolute game time;
-    /// a relative count avoids island clock rebasing and allows removal past 20.
-    pub(crate) shoulder_since: i32,
+    /// `saveWithoutId` tag. `None` means an empty shoulder. The shared state
+    /// also holds the relative tick count since the last perch.
+    pub(crate) shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState,
 }
 
 impl Player {
@@ -386,9 +381,7 @@ impl Player {
             awaiting_respawn: false,
             riding: crate::riding::Riding::default(),
             advancements: crate::advancements::PlayerAdvancements::default(),
-            shoulder_left: None,
-            shoulder_right: None,
-            shoulder_since: i32::MAX,
+            shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState::empty(),
         };
         crate::player_attributes::rebuild_player(&mut player, false);
         player
@@ -578,9 +571,26 @@ impl Player {
             pitch: self.pitch,
             combat: self.combat_memory.view(self.entity_ticks),
             effects: mc_bamboo_blocks::entity::ctx::TargetEffects::from_map(&self.effects),
-            shoulder_left: crate::player_shoulder::variant_of(&self.shoulder_left),
-            shoulder_right: crate::player_shoulder::variant_of(&self.shoulder_right),
+            shoulder_left: self.shoulder.left_variant(),
+            shoulder_right: self.shoulder.right_variant(),
         }
+    }
+
+    /// 把肩膀字段拆成共享状态，交给 `mc-bamboo-blocks` 的同一份生产逻辑。
+    pub(crate) fn shoulder_state(&self) -> mc_bamboo_blocks::entity::shoulder::ShoulderState {
+        mc_bamboo_blocks::entity::shoulder::ShoulderState {
+            left: self.shoulder.left.clone(),
+            right: self.shoulder.right.clone(),
+            since: self.shoulder.since,
+        }
+    }
+
+    /// 把共享状态写回玩家的三个肩膀字段。
+    pub(crate) fn apply_shoulder_state(
+        &mut self,
+        state: mc_bamboo_blocks::entity::shoulder::ShoulderState,
+    ) {
+        self.shoulder = state;
     }
 
     /// [`view`](Self::view) 加上按名字查到的队伍。

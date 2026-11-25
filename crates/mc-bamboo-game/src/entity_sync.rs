@@ -104,8 +104,8 @@ impl Metadata {
             model_customisation: player.client.model_customisation,
             effect_particles: player.effects.particle_colors(),
             effect_ambience: player.effects.all_ambient(),
-            shoulder_left: crate::player_shoulder::variant_of(&player.shoulder_left),
-            shoulder_right: crate::player_shoulder::variant_of(&player.shoulder_right),
+            shoulder_left: player.shoulder.left_variant(),
+            shoulder_right: player.shoulder.right_variant(),
         }
     }
 

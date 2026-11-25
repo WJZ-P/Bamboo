@@ -1,92 +1,97 @@
-//! 玩家肩膀上的鹦鹉：上肩、离肩条件、把鹦鹉放回世界。
+//! 真实玩家的肩膀状态：把 [`ShoulderState`] 接到 `Player` / `Region` 上。
 //!
-//! Parrots perched on a player's shoulders: perching, removal conditions and
-//! respawning the parrot back into the world.
+//! Real players' shoulder state: wiring the shared [`ShoulderState`] to
+//! `Player` and `Region`. The perching, removal and respawn rules themselves live
+//! in `mc-bamboo-blocks`, so the oracle fake world runs the same production code.
 
+use mc_bamboo_blocks::entity::shoulder;
 use mc_bamboo_core::Vec3;
 use mc_bamboo_nbt::Tag;
 
 use crate::{player::Player, region::Region};
 
-/// `ShoulderEntity*` 的 `Variant`（旧版整数编码）；空肩 / 坏值返回 `None`。
-///
-/// The `Variant` of a shoulder entity (legacy integer coding); `None` for an
-/// empty shoulder or a malformed tag.
-pub fn variant_of(tag: &Option<Tag>) -> Option<i32> {
-    let Tag::Compound(entries) = tag.as_ref()? else {
-        return None;
-    };
-    entries
-        .iter()
-        .find_map(|(key, value)| match (key.as_str(), value) {
-            ("Variant", Tag::Int(variant)) => Some(*variant),
-            _ => None,
-        })
+/// 一次离肩要造回世界的鹦鹉：位置、NBT、主人 UUID。
+struct SpawnBack {
+    position: Vec3,
+    tags: Vec<Tag>,
+    owner: Option<[u8; 16]>,
 }
 
-/// `ServerPlayer.setEntityOnShoulder`：左肩空先左，右肩空再右，都满返回 false。
-/// 成功时把相对倒计时归零（官方上肩后 20 刻内不因离肩条件落下）。
-///
-/// `ServerPlayer.setEntityOnShoulder`: left first, then right, false when both
-/// are occupied. A successful perch resets the relative 20-tick removal lock.
+/// `ServerPlayer.setEntityOnShoulder`。
 pub fn set_entity_on_shoulder(player: &mut Player, tag: Tag) -> bool {
-    let slot = if player.shoulder_left.is_none() {
-        &mut player.shoulder_left
-    } else if player.shoulder_right.is_none() {
-        &mut player.shoulder_right
-    } else {
-        return false;
-    };
-    *slot = Some(tag);
-    player.shoulder_since = 0;
-    true
+    let mut state = player.shoulder_state();
+    let ok = shoulder::set_entity_on_shoulder(&mut state, tag);
+    player.apply_shoulder_state(state);
+    ok
 }
 
-/// `ServerPlayer.handleShoulderEntities`：每刻推进相对倒计时；上肩 20 刻后遇到离肩
-/// 判据就把两只鹦鹉放回世界（官方 `timeEntitySatOnShoulder + 20 < gameTime`）。
+/// `ServerPlayer.handleShoulderEntities`：每刻推进相对倒计时；上肩 20 刻后遇到
+/// 离肩判据就把两只鹦鹉放回世界。
 ///
 /// `ServerPlayer.handleShoulderEntities`: advance the relative counter and, after
 /// 20 ticks, respawn both parrots when a removal condition holds.
 pub fn tick(region: &mut Region) {
-    let mut respawns: Vec<(Vec3, Tag)> = Vec::new();
+    let mut spawn_back = Vec::new();
     for player in region.players.values_mut() {
-        player.shoulder_since = player.shoulder_since.saturating_add(1);
-        if player.shoulder_left.is_none() && player.shoulder_right.is_none() {
-            continue;
+        let mut state = player.shoulder_state();
+        let facts = shoulder::RemovalFacts {
+            fall_distance: player.motion.fall_distance,
+            in_water: player.motion.swimming,
+            flying: player.sync.flying,
+            sleeping: player.sleep.is_some(),
+            in_powder_snow: player.environment.in_powder_snow,
+            hurt: false,
+        };
+        if let Some(removed) = shoulder::step(&mut state, facts, player.position()) {
+            spawn_back.push(SpawnBack {
+                position: removed.position,
+                tags: removed.tags,
+                owner: Some(*player.uuid.as_bytes()),
+            });
         }
-        if player.shoulder_since > 20 && should_remove(player) {
-            let pos = player.position();
-            if let Some(tag) = player.shoulder_left.take() {
-                respawns.push((pos, tag));
-            }
-            if let Some(tag) = player.shoulder_right.take() {
-                respawns.push((pos, tag));
-            }
-            player.shoulder_since = i32::MAX;
-        }
+        player.apply_shoulder_state(state);
     }
-    for (pos, tag) in respawns {
-        respawn(region, pos, &tag);
+    for batch in spawn_back {
+        respawn_into(&mut region.entities, batch);
     }
 }
 
-/// `ServerPlayer.handleShoulderEntities` 的离肩判据：摔落距离、在水里 / 游泳、飞行、
-/// 睡觉、细雪。
-fn should_remove(player: &Player) -> bool {
-    player.motion.fall_distance > 0.5
-        || player.motion.swimming
-        || player.sync.flying
-        || player.sleep.is_some()
-        || player.environment.in_powder_snow
+/// `Player.hurtServer` 一开头就调 `removeEntitiesOnShoulder()`：受伤立刻离肩，
+/// 不看 `handleShoulderEntities` 的判据，也不看 20 刻锁。
+///
+/// `Player.hurtServer` calls `removeEntitiesOnShoulder()` first thing: being hurt
+/// removes the parrots right away, bypassing the 20-tick lock.
+pub fn remove_on_hurt(
+    player: &mut Player,
+    entities: &mut mc_bamboo_blocks::entity::Entities,
+) {
+    let mut state = player.shoulder_state();
+    let facts = shoulder::RemovalFacts {
+        hurt: true,
+        ..shoulder::RemovalFacts::default()
+    };
+    let position = player.position();
+    state.since = i32::MAX;
+    if let Some(removed) = shoulder::step(&mut state, facts, position) {
+        player.apply_shoulder_state(state);
+        respawn_into(
+            entities,
+            SpawnBack {
+                position: removed.position,
+                tags: removed.tags,
+                owner: Some(*player.uuid.as_bytes()),
+            },
+        );
+    } else {
+        player.apply_shoulder_state(state);
+    }
 }
 
-/// `ServerPlayer.respawnEntityOnShoulder`：`EntityType.create(LOAD)` 从 NBT 造回鹦鹉，
-/// 放到玩家位置。坏 NBT 直接跳过，不 panic。
-fn respawn(region: &mut Region, position: Vec3, tag: &Tag) {
-    if let Ok(Some(row)) = mc_bamboo_blocks::entity::mob::nbt::read_mob(tag, "minecraft:parrot", 0)
-    {
-        let mut entity = row.into_entity();
-        entity.position = position;
-        region.entities.spawn(entity);
+/// `ServerPlayer.respawnEntityOnShoulder`：从 NBT 造回鹦鹉，认回主人。
+fn respawn_into(entities: &mut mc_bamboo_blocks::entity::Entities, batch: SpawnBack) {
+    for tag in batch.tags {
+        if let Some(entity) = shoulder::respawn(&tag, batch.position, batch.owner) {
+            entities.spawn(entity);
+        }
     }
 }

@@ -1650,7 +1650,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             let tag = super::mob::nbt::write_mob(&me.clone().split())
                 .unwrap_or(mc_bamboo_nbt::Tag::Compound(Vec::new()));
             world.push_effect(crate::Effect::PlayerShoulder { player, tag });
-            me.discard();
+            if !super::shoulder::keep_entity_on_perch() {
+                me.discard();
+            }
         }
         Command::GameEvent {
             event,
