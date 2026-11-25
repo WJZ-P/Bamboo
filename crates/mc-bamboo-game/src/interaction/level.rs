@@ -433,6 +433,104 @@ impl Level for RegionLevel<'_> {
         true
     }
 
+    fn vault_players(&self, pos: BlockPos, range: f64) -> Vec<[u8; 16]> {
+        // `PlayerDetector.INCLUDING_CREATIVE_PLAYERS`：`blockPosition().closerThan(pos,range)`
+        // 用整块坐标平方距离、`< range²`，只排除旁观者，创造模式也算。
+        let squared = range * range;
+        self.players
+            .values()
+            .filter(|player| player.game_mode != GameMode::Spectator)
+            .filter(|player| {
+                let block = BlockPos::containing(player.position());
+                let dx = i64::from(block.x - pos.x);
+                let dy = i64::from(block.y - pos.y);
+                let dz = i64::from(block.z - pos.z);
+                (dx * dx + dy * dy + dz * dz) as f64 <= squared
+            })
+            .map(|player| *player.uuid.as_bytes())
+            .collect()
+    }
+
+    fn vault_resolve_reward(
+        &mut self,
+        pos: BlockPos,
+        player: [u8; 16],
+        key: &ItemStack,
+        loot_table: &str,
+    ) -> Vec<ItemStack> {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return Vec::new();
+        };
+        // `resolveItemsToEject`：VAULT 参数集（ORIGIN / luck / THIS_ENTITY / TOOL），
+        // 官方 `getRandomItems(params)` 不带显式随机源，走表的 `random_sequence`。
+        let mut params =
+            mc_bamboo_loot::LootParams::new(0.0).with_origin(mc_bamboo_loot::Position::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ));
+        params.tool = Some(game_stack_to_loot(key));
+        params.this_entity = Some(
+            self.players
+                .values()
+                .find(|p| p.uuid.as_bytes() == &player)
+                .map(death_loot_player)
+                .unwrap_or_else(|| mc_bamboo_loot::EntityView::new(entity_type::PLAYER)),
+        );
+        let Ok(stacks) = table.get_random_items_with_seed(
+            &params,
+            0,
+            Some(self.loot_sequences),
+            self.random.source(),
+        ) else {
+            return Vec::new();
+        };
+        stacks.iter().map(crate::loot_stacks::loot_stack).collect()
+    }
+
+    fn vault_random_display_item(&mut self, loot_table: &str, pos: BlockPos) -> ItemStack {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return ItemStack::empty();
+        };
+        // `getRandomDisplayItemFromLootTable`：`LootParams(ORIGIN=atCenterOf(pos))`
+        // → `getRandomItems(params, level.getRandom())` → `Util.getRandom(list, level.random)`。
+        let params =
+            mc_bamboo_loot::LootParams::new(0.0).with_origin(mc_bamboo_loot::Position::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ));
+        let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
+            return ItemStack::empty();
+        };
+        if stacks.is_empty() {
+            return ItemStack::empty();
+        }
+        // `Util.getRandom(list, random)` = `list.get(random.nextInt(list.size()))`。
+        let index = self.random.source().next_int(stacks.len() as i32) as usize;
+        crate::loot_stacks::loot_stack(&stacks[index])
+    }
+
+    fn vault_consume_key(&mut self, player: [u8; 16], count: i32) {
+        // `ItemStack.consume(count, player)`：生存模式扣主手，创造模式不扣。
+        let Some(p) = self
+            .players
+            .values_mut()
+            .find(|p| p.uuid.as_bytes() == &player)
+        else {
+            return;
+        };
+        if p.game_mode == GameMode::Creative {
+            return;
+        }
+        let slot = p.inventory.hand_slot(mc_bamboo_core::Hand::Main);
+        let stack = &mut p.inventory.slots[slot];
+        stack.count -= count;
+        if stack.is_empty() {
+            *stack = ItemStack::empty();
+        }
+    }
+
     /// 官方 `Block.tryDropExperience` + `Block.popExperience`：
     /// `xpRange.sample(level.random)`（常数区间不取数），然后
     /// `ExperienceOrb.award(level, Vec3.atCenterOf(pos), amount)` 拆成球。
@@ -1665,5 +1763,58 @@ mod tests {
             saw_loot |= !loot.is_empty();
         }
         assert!(saw_loot);
+    }
+
+    /// 宝库的四个 Level 钩子：探测范围内玩家、按 VAULT 战利品表解出奖励、
+    /// 随机展示物品、消耗主手钥匙。
+    #[test]
+    fn vault_hooks_detect_resolve_display_and_consume() {
+        use crate::{inbound::PlayerId, player::Player};
+        use mc_bamboo_blocks::Level;
+        use mc_bamboo_core::{BlockPos, Hand};
+        use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1026);
+        let uuid = uuid::Uuid::from_u128(77);
+        let position = Vec3::new(1.5, 64.0, 0.5);
+        let mut player = Player::new(
+            id,
+            uuid,
+            "VaultOpener".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            position,
+        );
+        let hand = player.inventory.hand_slot(Hand::Main);
+        player.inventory.slots[hand] = ItemStack::new(items::TRIAL_KEY, 2);
+        region.insert_player(player);
+
+        let (mut level, _ticks) = region.block_level();
+        let pos = BlockPos::new(0, 64, 0);
+        // `INCLUDING_CREATIVE_PLAYERS`：范围内玩家进候选。
+        assert_eq!(level.vault_players(pos, 4.5), vec![*uuid.as_bytes()]);
+        assert!(level.vault_players(pos, 0.5).is_empty());
+
+        // VAULT 战利品表能解出一组物品（用奖励表）。
+        let reward = level.vault_resolve_reward(
+            pos,
+            *uuid.as_bytes(),
+            &ItemStack::new(items::TRIAL_KEY, 1),
+            "minecraft:chests/trial_chambers/reward",
+        );
+        assert!(!reward.is_empty(), "reward table produced items");
+
+        // 随机展示物品非空。
+        let display =
+            level.vault_random_display_item("minecraft:chests/trial_chambers/reward", pos);
+        assert!(!display.is_empty(), "display item is not empty");
+
+        // 生存模式扣主手钥匙（默认 1 把）。
+        level.vault_consume_key(*uuid.as_bytes(), 1);
+        assert_eq!(
+            level.players.get(&id).unwrap().inventory.slots[hand].count,
+            1
+        );
     }
 }
