@@ -377,6 +377,7 @@ impl Report {
                         held: ItemStack::new(held, 1),
                         creative: false,
                         position: Vec3::new(1.5, 63.0, 0.5),
+                        player_height: 1.8,
                         sneaking: false,
                         difficulty: 2,
                     };

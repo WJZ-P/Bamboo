@@ -210,19 +210,22 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     clamp_health(mob);
     // `Mob.tick`：每 5 刻按乘客和载具重设控制标志。官方 `Mob.updateControlFlags`：
     // 控制乘客是生物、且不在 `#non_controlling_rider` 里时，MOVE / JUMP / LOOK 都关掉
-    // （史莱姆不在建模范围外，只有史莱姆在标签里）。玩家骑手不算生物，标志保持打开；
-    // 船不在建模范围，JUMP 和 MOVE 同值。
+    // （26.3 标签是史莱姆 / 岩浆怪 / 硫磺方块怪，建模范围内是史莱姆和硫磺方块怪；
+    // 岩浆怪不在建模范围）。玩家骑手不算生物，标志保持打开；船不在建模范围，
+    // JUMP 和 MOVE 同值。
     //
     // Vanilla `Mob.updateControlFlags`: a mob passenger outside
-    // `#non_controlling_rider` (only slimes here) disables MOVE / JUMP / LOOK. A
-    // player rider is not a mob, so the flags stay on; boats are out of scope.
+    // `#non_controlling_rider` (slime, magma cube, sulfur cube; slime and sulfur
+    // cube are modeled here) disables MOVE / JUMP / LOOK. A player rider is not a
+    // mob, so the flags stay on; boats are out of scope.
     if me.tick_count % 5 == 0 {
         let mob_rider = !mob.no_ai
             && mob.first_passenger().is_some_and(|uid| {
                 ctx.other(uid).is_some_and(|public| match &public.kind {
-                    crate::entity::KindPublic::Mob(rider) => {
-                        rider.mob_type != super::MobType::Slime
-                    }
+                    crate::entity::KindPublic::Mob(rider) => !matches!(
+                        rider.mob_type,
+                        super::MobType::Slime | super::MobType::SulfurCube
+                    ),
                     _ => false,
                 })
             });
@@ -676,6 +679,9 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Entity.baseTick`：服务端每刻按剩余着火刻数重写共享标志位。
     // `Entity.baseTick`: the server rewrites the shared flag from the remaining fire ticks.
     mob.visible_fire = me.remaining_fire_ticks > 0;
+    // `Entity.baseTick` 末尾的 `Leashable.tickLeash`（服务端且自己是 Leashable）。
+    // The `Leashable.tickLeash` at the end of `Entity.baseTick`.
+    super::leash::tick_leash(me, mob, ctx);
     // `LivingEntity.baseTick` 自己的部分。
     if is_alive(me, mob) {
         if is_in_wall(me, mob, ctx.blocks()) {

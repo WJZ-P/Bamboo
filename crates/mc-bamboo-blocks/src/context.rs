@@ -12,6 +12,8 @@ use crate::{state::BlockState, world::World};
 /// 发起动作的玩家。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Actor {
+    /// 玩家的实体 ID（拴绳用它找玩家牵着的生物）。
+    pub uid: i32,
     /// `player.getUUID()`。告示牌用它认出登记的编辑者。
     pub uuid: [u8; 16],
     pub position: Vec3,
@@ -163,6 +165,7 @@ pub struct PlaceContext<'a> {
 /// `DirectionalPlaceContext` has no player. Placement checks never read this stand-in.
 /// `preventsBlockDrops` is false when there is no player.
 static NOBODY: LazyLock<Actor> = LazyLock::new(|| Actor {
+    uid: 0,
     uuid: [0; 16],
     position: Vec3::new(0.0, 0.0, 0.0),
     yaw: 0.0,

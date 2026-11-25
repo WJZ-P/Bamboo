@@ -1639,6 +1639,7 @@ mod tests {
             held: ItemStack::new(item, count),
             creative,
             position: Vec3::new(1.0, 64.0, 0.0),
+            player_height: 1.8,
             sneaking: false,
             difficulty: 2,
         };

@@ -37,6 +37,29 @@ fn a_chicken_jockey_sits_behind_the_chickens_head() {
 }
 
 #[test]
+fn a_skeleton_rider_uses_the_undead_horse_passenger_point() {
+    // `EntityTypes.SKELETON_HORSE` / `ZOMBIE_HORSE` 都注册
+    // `passengerAttachments([1.31875f])`，不是马的高度 1.6；骷髅的 VEHICLE 点是
+    // `ridingOffset(-0.7f)`。两处都是 f32，转成 f64 后相减，和官方逐位一致。
+    // Both undead horses register passengerAttachments([1.31875f]), not the
+    // horse's 1.6 height; the skeleton's VEHICLE point is ridingOffset(-0.7f).
+    let expected = 64.0 + f64::from(1.31875_f32) - f64::from(0.7_f32);
+    for mount in [MobType::SkeletonHorse, MobType::ZombieHorse] {
+        let mut horse = entity(1, mount, 0.5).split().public;
+        horse.yaw = 0.0;
+        let mut skeleton = entity(2, MobType::Skeleton, 10.0).split().public;
+        skeleton.yaw = 0.0;
+        let at = rider_position(&horse, &skeleton, 0);
+        assert_eq!(at.x, 0.5, "{mount:?}");
+        assert_eq!(at.z, 0.5, "{mount:?}");
+        assert!(
+            (at.y - expected).abs() < 1.0e-12,
+            "{mount:?}: {at:?} != {expected}"
+        );
+    }
+}
+
+#[test]
 fn a_baby_chicken_jockey_uses_the_baby_vehicle_attachment_point() {
     let mut chicken = entity(1, MobType::Chicken, 0.5).split().public;
     chicken.yaw = 0.0;
@@ -184,12 +207,17 @@ fn non_controlling_passengers_do_not_borrow_the_vehicle_navigation() {
     let mut ticks = crate::BlockTicks::new();
     let view = crate::World::new(&mut level, &mut ticks);
 
-    // 史莱姆在 #non_controlling_rider 里。
+    // 史莱姆和硫磺方块怪都在 #non_controlling_rider 里（岩浆怪未建模）。
     let mut spider = entity(1, MobType::Spider, 0.5);
     let mut slime = entity(2, MobType::Slime, 10.0);
     slime.vehicle = Some(1);
     spider.kind.mob_mut().unwrap().passengers.push(2);
     assert!(!begin_nav_borrow(&mut slime, &spider, &view));
+
+    let mut sulfur_cube = entity(4, MobType::SulfurCube, 10.0);
+    sulfur_cube.vehicle = Some(1);
+    spider.kind.mob_mut().unwrap().passengers = vec![4];
+    assert!(!begin_nav_borrow(&mut sulfur_cube, &spider, &view));
 
     // NoAI 载具不产生控制乘客。
     spider.kind.mob_mut().unwrap().no_ai = true;

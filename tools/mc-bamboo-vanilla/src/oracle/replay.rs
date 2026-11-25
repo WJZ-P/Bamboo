@@ -895,6 +895,7 @@ fn actor_of(action: &Action, names: &Names) -> Result<Actor, String> {
     };
     Ok(Actor {
         // 假世界每次 `getBlockEntity` 都新建空告示牌，编辑器登记不上，UUID 看不出来。
+        uid: 0,
         uuid: [0; 16],
         position: Vec3::new(x, y, z),
         yaw: action.yaw.0,
@@ -1250,6 +1251,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // 末影珍珠的传送意图不属于方块题，游戏层单独处理。
             | Effect::EnderPearlTeleport { .. }
             | Effect::GuardianElderEffect { .. }
+            | Effect::TrialSpawnerTransformBadOmen { .. }
             // 爆炸包发给附近玩家，方块题不比较。
             | Effect::Explode { .. }
             | Effect::VibrationParticle { .. } => None,
@@ -1377,6 +1379,7 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::CrafterCrafted { .. }
             | Effect::EnderPearlTeleport { .. }
             | Effect::GuardianElderEffect { .. }
+            | Effect::TrialSpawnerTransformBadOmen { .. }
             | Effect::Explode { .. }
             | Effect::VibrationParticle { .. } => {}
         }

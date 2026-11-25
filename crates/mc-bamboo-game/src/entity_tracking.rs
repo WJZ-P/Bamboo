@@ -394,6 +394,15 @@ impl TrackedEntity {
             {
                 out.push(packet_body(&packet));
             }
+            // `sendPairingData`：拴着就发 `set_entity_link`，客户端才画得出绳子。
+            if let Some(holder) = mob.leash_holder {
+                out.push(packet_body(
+                    &mc_bamboo_protocol::packet::play::SetEntityLink {
+                        source_id: snapshot.id,
+                        dest_id: holder,
+                    },
+                ));
+            }
         }
         // 官方 `sendPairingData` 最后两句：自己有乘客就发自己的名单，自己在骑就发
         // 载具的名单（乘客那一侧客户端才知道自己挂在谁身上）。
@@ -819,6 +828,10 @@ pub enum KindData {
     ///
     /// Llama spit, with no metadata of its own.
     LlamaSpit(mc_bamboo_blocks::entity::spit::LlamaSpitPublic),
+    /// 拴绳结：没有自己的元数据。
+    ///
+    /// A fence leash knot, with no metadata of its own.
+    LeashKnot,
     Egg(Box<mc_bamboo_blocks::entity::thrown_egg::EggPublic>),
     SplashPotion(Box<mc_bamboo_blocks::entity::splash_potion::SplashPotionPublic>),
 }
@@ -898,7 +911,8 @@ impl Snapshot {
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
             | KindData::Mob(_)
-            | KindData::LightningBolt => 0,
+            | KindData::LightningBolt
+            | KindData::LeashKnot => 0,
         }
     }
 
@@ -923,6 +937,7 @@ impl KindData {
             KindPublic::Egg(egg) => Self::Egg(egg.clone()),
             KindPublic::SplashPotion(potion) => Self::SplashPotion(potion.clone()),
             KindPublic::LightningBolt(_) => Self::LightningBolt,
+            KindPublic::LeashKnot { .. } => Self::LeashKnot,
         }
     }
 
@@ -948,7 +963,8 @@ impl KindData {
             | Self::LlamaSpit(_)
             | Self::Egg(_)
             | Self::SplashPotion(_)
-            | Self::LightningBolt => None,
+            | Self::LightningBolt
+            | Self::LeashKnot => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -964,7 +980,8 @@ impl KindData {
             | Self::LlamaSpit(_)
             | Self::Egg(_)
             | Self::SplashPotion(_)
-            | Self::LightningBolt => None,
+            | Self::LightningBolt
+            | Self::LeashKnot => None,
         }
     }
 
@@ -1016,7 +1033,10 @@ impl KindData {
             Self::ExperienceOrb { value } if *value != 0 => {
                 vec![EntityData::ExperienceValue(*value)]
             }
-            Self::ExperienceOrb { .. } | Self::LlamaSpit(_) | Self::LightningBolt => Vec::new(),
+            Self::ExperienceOrb { .. }
+            | Self::LlamaSpit(_)
+            | Self::LightningBolt
+            | Self::LeashKnot => Vec::new(),
             Self::Arrow(arrow) => {
                 let mut data = Vec::new();
                 if arrow.on_fire {
@@ -2414,6 +2434,12 @@ fn event_packet(
                 None => EventPacket::Nothing,
             }
         }
+        MobEvent::LeashLink { holder } => EventPacket::Tracking(packet_body(
+            &mc_bamboo_protocol::packet::play::SetEntityLink {
+                source_id: id,
+                dest_id: holder.unwrap_or(0),
+            },
+        )),
         MobEvent::MilkSound { position } => {
             player_sound("minecraft:entity.cow.milk", *position, sound_seed())
         }

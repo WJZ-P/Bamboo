@@ -606,6 +606,7 @@ impl Level for TestLevel {
 /// 站在原点、看着南方的玩家，主手拿着 `item`。UUID 全是零，创造模式。
 pub(crate) fn actor_holding(item: i32) -> Actor {
     Actor {
+        uid: 0,
         uuid: [0; 16],
         position: Vec3::new(0.5, 70.0, 0.5),
         yaw: 0.0,

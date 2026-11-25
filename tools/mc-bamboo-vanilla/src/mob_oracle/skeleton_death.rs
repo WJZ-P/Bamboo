@@ -48,6 +48,8 @@ pub(super) fn player_view() -> PlayerView {
         uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
         position: Vec3::new(2.5, 64.0, 0.5),
         delta: Vec3::default(),
+        width: 0.6,
+        height: 1.8,
         eye_height: 1.62,
         health: 20.0,
         look_direction: Vec3::default(),
