@@ -142,7 +142,10 @@ fn level(case: &AllayCase, script: &Script) -> MobLevel {
         poi: mc_bamboo_world::poi::PoiStore::new(),
         shoulder: Default::default(),
         entities: Entities::with_next_id(case.first_id),
-        players: case.has_player.then(|| vec![player_view(case.first_id + 1, 0)]).unwrap_or_default(),
+        players: case
+            .has_player
+            .then(|| vec![player_view(case.first_id + 1, 0)])
+            .unwrap_or_default(),
         game: None,
         inhabited: HashMap::new(),
         mob_teams: HashMap::new(),
@@ -354,10 +357,7 @@ impl Report {
                 mob.equipment
                     .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
                     .count,
-                mob.allay
-                    .inventory
-                    .first()
-                    .map_or(0, |stack| stack.count),
+                mob.allay.inventory.first().map_or(0, |stack| stack.count),
                 player_held,
                 count_allays(&level),
                 count_items(&level),
@@ -378,13 +378,14 @@ impl Report {
                 expected.level_seed,
             );
             // 改坏确认：让送物品的目标不看音符盒（只认玩家）。
-            let brain_want = if broken.as_deref() == Some("allay_no_noteblock")
-                && label == "allay_note_block"
-            {
-                expected.brain.replace("liked_noteblock=minecraft:overworld@4:64:0", "")
-            } else {
-                expected.brain.clone()
-            };
+            let brain_want =
+                if broken.as_deref() == Some("allay_no_noteblock") && label == "allay_note_block" {
+                    expected
+                        .brain
+                        .replace("liked_noteblock=minecraft:overworld@4:64:0", "")
+                } else {
+                    expected.brain.clone()
+                };
             if brain != brain_want {
                 self.mismatch(format!(
                     "{label} tick {tick} brain: official {brain_want}, bamboo {brain}"
@@ -457,6 +458,8 @@ fn count_items(level: &MobLevel) -> i32 {
     level
         .entities
         .iter()
-        .filter(|entity| !entity.removed && matches!(entity.kind, mc_bamboo_blocks::entity::EntityKind::Item(_)))
+        .filter(|entity| {
+            !entity.removed && matches!(entity.kind, mc_bamboo_blocks::entity::EntityKind::Item(_))
+        })
         .count() as i32
 }
