@@ -125,6 +125,10 @@ struct ClockEntry {
     paused: bool,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "每条存档一个路径参数，和官方 SavedData 的快照一一对应"
+)]
 fn decode(
     java: &str,
     game_rules: &Path,

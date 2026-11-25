@@ -14167,20 +14167,21 @@ public final class MobOracle {
     private static int playWarden(Official official, Writer out, String only) throws Exception {
         record WScene(String name, int ticks, boolean emerge, boolean player,
                 int anger, boolean attackTarget, boolean eraseSonic, boolean eraseDig,
-                int[] vibration, int[] vibration2) {}
+                int[] vibration, int[] vibration2, boolean comparePlayerMotion, boolean mob) {}
         List<WScene> scenes = List.of(
-                new WScene("warden_emerge", 150, true, false, 0, false, false, false, null, null),
+                new WScene("warden_emerge", 150, true, false, 0, false, false, false, null, null, false, false),
                 new WScene("warden_investigate", 200, true, true, 0, false, false, false,
-                        new int[] {140, 5, 64, 0, 1, 0}, null),
-                new WScene("warden_sniff", 200, true, true, 0, false, false, false, null, null),
-                new WScene("warden_anger_roar", 200, true, true, 100, false, false, false, null, null),
-                new WScene("warden_melee", 200, true, true, 100, true, false, false, null, null),
-                new WScene("warden_sonic_boom", 210, true, true, 100, true, true, false, null, null),
-                new WScene("warden_dig_back", 130, false, false, 0, false, false, false, null, null),
+                        new int[] {140, 5, 64, 0, 1, 0}, null, false, false),
+                new WScene("warden_sniff", 200, true, true, 0, false, false, false, null, null, false, false),
+                new WScene("warden_anger_roar", 200, true, true, 100, false, false, false, null, null, false, false),
+                new WScene("warden_melee", 200, true, true, 100, true, false, false, null, null, true, false),
+                new WScene("warden_sonic_boom", 210, true, true, 100, true, true, false, null, null, false, false),
+                new WScene("warden_sonic_boom_mob", 190, true, false, 100, true, true, false, null, null, false, true),
+                new WScene("warden_dig_back", 130, false, false, 0, false, false, false, null, null, false, false),
                 new WScene("warden_projectile", 200, true, true, 0, false, false, false,
-                        new int[] {140, 5, 64, 0, 0, 1}, null),
+                        new int[] {140, 5, 64, 0, 0, 1}, null, false, false),
                 new WScene("warden_recent_projectile", 200, true, true, 0, false, false, false,
-                        new int[] {140, 5, 64, 0, 0, 1}, new int[] {160, 5, 64, 0, 0, 1}));
+                        new int[] {140, 5, 64, 0, 0, 1}, new int[] {160, 5, 64, 0, 0, 1}, false, false));
         int cases = 0;
         for (WScene s : scenes) {
             if (only != null && !s.name().startsWith(only)) continue;
@@ -14215,6 +14216,16 @@ public final class MobOracle {
                 world.tracked.add(player);
                 world.playersList().add(player);
             }
+            net.minecraft.world.entity.monster.zombie.Zombie zombie = null;
+            if (s.mob()) {
+                zombie = (net.minecraft.world.entity.monster.zombie.Zombie) EntityTypes.ZOMBIE.create(
+                        world, EntitySpawnReason.COMMAND);
+                zombie.setPos(2.5, 64.0, 0.5);
+                zombie.setId(FIRST_ID + 1);
+                zombie.setUUID(new UUID(0L, 2L));
+                world.tracked.add(zombie);
+            }
+            net.minecraft.world.entity.LivingEntity target = s.mob() ? zombie : player;
             if (s.emerge()) {
                 mob.setPose(net.minecraft.world.entity.Pose.EMERGING);
                 mob.getBrain().setMemoryWithExpiry(
@@ -14225,10 +14236,10 @@ public final class MobOracle {
                         net.minecraft.util.Unit.INSTANCE, 1200L);
             }
             if (s.anger() > 0) {
-                mob.increaseAngerAt(player, s.anger(), false);
+                mob.increaseAngerAt(target, s.anger(), false);
             }
             if (s.attackTarget()) {
-                mob.setAttackTarget(player);
+                mob.setAttackTarget(target);
             }
             if (s.eraseSonic()) {
                 mob.getBrain().eraseMemory(
@@ -14273,11 +14284,32 @@ public final class MobOracle {
                     }
                 }
                 effects.append(']');
+                // 击退那一刻的 `SetEntityMotion` 速度包：`needsSync` 在 `knockback` 和
+                // `push` 都会置位，只有近战场景（监守者从攻击距离出手、不推挤玩家）比它。
+                // 碰撞推挤（生物推玩家）在别的场景会改写速度，那条 Bamboo 没建模，不比。
+                String playerMotion = "null";
+                if (s.comparePlayerMotion() && player != null && player.needsSync) {
+                    Vec3 v = player.getDeltaMovement();
+                    playerMotion = "[" + Double.doubleToRawLongBits(v.x) + ','
+                            + Double.doubleToRawLongBits(v.y) + ','
+                            + Double.doubleToRawLongBits(v.z) + ']';
+                    player.needsSync = false;
+                }
+                // 音波把生物击飞：直接比生物这一刻的速度。
+                String mobMotion = "null";
+                if (zombie != null) {
+                    Vec3 v = zombie.getDeltaMovement();
+                    mobMotion = "[" + Double.doubleToRawLongBits(v.x) + ','
+                            + Double.doubleToRawLongBits(v.y) + ','
+                            + Double.doubleToRawLongBits(v.z) + ']';
+                }
                 frames.append("{\"pose\":").append(jsonString(mob.getPose().name()))
                         .append(",\"anger\":").append(mob.getClientAngerLevel())
                         .append(",\"angerLevel\":").append(jsonString(mob.getAngerLevel().name()))
                         .append(",\"brain\":").append(jsonString(BrainOracle.dump(mob)))
                         .append(",\"motion\":").append(projectileMotion(mob))
+                        .append(",\"playerMotion\":").append(playerMotion)
+                        .append(",\"mobMotion\":").append(mobMotion)
                         .append(",\"mobSeed\":").append(randomSeed(mob))
                         .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
                         .append(",\"playerHealth\":")
@@ -14297,6 +14329,8 @@ public final class MobOracle {
                     + ",\"attackTarget\":" + s.attackTarget()
                     + ",\"eraseSonic\":" + s.eraseSonic()
                     + ",\"eraseDig\":" + s.eraseDig()
+                    + ",\"comparePlayerMotion\":" + s.comparePlayerMotion()
+                    + ",\"mob\":" + s.mob()
                     + ",\"vibration\":"
                     + (s.vibration() == null ? "null" : java.util.Arrays.toString(s.vibration()))
                     + ",\"vibration2\":"
@@ -14355,6 +14389,8 @@ public final class MobOracle {
                     .append(",\"angerLevel\":").append(jsonString(mob.getAngerLevel().name()))
                     .append(",\"brain\":").append(jsonString(BrainOracle.dump(mob)))
                     .append(",\"motion\":").append(projectileMotion(mob))
+                    .append(",\"playerMotion\":null")
+                    .append(",\"mobMotion\":null")
                     .append(",\"mobSeed\":").append(randomSeed(mob))
                     .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
                     .append(",\"playerHealth\":-1")

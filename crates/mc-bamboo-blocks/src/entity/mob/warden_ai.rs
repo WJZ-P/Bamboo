@@ -812,15 +812,13 @@ fn melee_damage(cx: &mut Cx, target: crate::entity::EntityUid) {
 /// `SonicBoom.lambda$tick$2`：从胸口附着点到目标眼睛发一串 `sonic_boom` 粒子，
 /// 播放音爆声，再打 10 点 `sonic_boom` 伤害；打中才补一次 `push`。
 fn sonic_boom_damage(cx: &mut Cx, target: crate::entity::EntityUid, eye: Vec3) {
-    // `EntityAttachments.get(WARDEN_CHEST, 0, yRot)`：相对脚底 (0, 1.6, 0)，
-    // 按 `-yRot` 在 f32 下旋转；立正的监守者只有 X/Z 偏移。
-    let angle = -cx.me.y_rot * 0.017_453_292_f32;
-    let cos = f64::from(mth::cos(f64::from(angle)));
-    let sin = f64::from(mth::sin(f64::from(angle)));
+    // `EntityAttachments.get(WARDEN_CHEST, 0, yRot)`：官方胸口附着点是相对脚底
+    // 的 (0, 1.6, 0)，X/Z 都是 0，绕 Y 旋转后不变。官方把 1.6 按 f32 存，
+    // 转成 f64 是 1.600000023841858，这里照用这个值。
     let chest = Vec3::new(
-        cx.me.position.x + 1.6 * sin,
-        cx.me.position.y + 1.6,
-        cx.me.position.z + 1.6 * cos,
+        cx.me.position.x,
+        cx.me.position.y + f64::from(1.6_f32),
+        cx.me.position.z,
     );
     let to_eye = eye.subtract(chest);
     let length = to_eye.length();
@@ -845,14 +843,26 @@ fn sonic_boom_damage(cx: &mut Cx, target: crate::entity::EntityUid, eye: Vec3) {
     source.attacker_type = Some(cx.mob.mob_type.entity_type());
     source.position = Some(cx.me.position);
     let is_player = cx.ctx.player(target).is_some();
-    cx.ctx.emit(
-        Command::HurtPlayer {
-            target,
-            source,
-            amount: 10.0,
-        },
-        cx.me,
-    );
+    if is_player {
+        cx.ctx.emit(
+            Command::HurtPlayer {
+                target,
+                source,
+                amount: 10.0,
+            },
+            cx.me,
+        );
+    } else {
+        cx.ctx.emit(
+            Command::HurtMob {
+                target,
+                source,
+                amount: 10.0,
+                on_hit: None,
+            },
+            cx.me,
+        );
+    }
     // 官方 `push` 用受害者的 KNOCKBACK_RESISTANCE 分别缩放水平 / 竖直量。
     // 玩家视图没有击退抗性字段，正式入口在同步层按官方值算；这里照对拍夹具
     // （无抗性修饰）按 0 处理。生物直接从公开属性表读。

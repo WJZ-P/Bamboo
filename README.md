@@ -1497,9 +1497,9 @@ WebView2 的渲染进程不算在内。
   （含 `noCollision` 生成盒）和生成后的环境音也照官方；没召唤成才播按等级的回复音。
   幽匿催发体是活的方块实体：`ENTITY_DIE` 游戏事件把死者的基础经验转成电荷，`bloom`
   动画（`PULSE` 8 刻复位、两枚 `sculk_soul` 粒子、一声 bloom），`SculkSpreader` 逐刻
-  推进电荷游标、把幽匿块 / 幽匿脉络铺开，`cursors` 用同一份 codec 存档往返。催发体存档
-  往返有 `mob-oracle --only sculk_catalyst`（`sculk_catalyst_save`）；逐刻蔓延对拍
-  （`sculk_catalyst_spread`）仍在调，见「监守者」一节的已知限制。
+  推进电荷游标、把幽匿块 / 幽匿脉络铺开，`cursors` 用同一份 codec 存档往返。对拍
+  `mob-oracle --only sculk_catalyst`：`sculk_catalyst_save` 存档往返，`sculk_catalyst_spread`
+  一只僵尸死在旁边、逐刻比游标 / 方块变化 / 世界随机源，只差已知的三角函数表末位差。
 - **监守者**：`MobType::Warden`（生命 500、移速 0.3、击退抗性 1、攻击 30、跟随 24、防火、
   不因距离消失）；`WardenAi` 的 8 个活动（CORE / EMERGE / DIG / IDLE / ROAR / FIGHT / INVESTIGATE / SNIFF）、
   两个传感器、15 个记忆和全部行为，含咆哮 / 嗅探 / 近战 / 音波 / 钻出钻入、愤怒管理
@@ -1513,14 +1513,15 @@ WebView2 的渲染进程不算在内。
   击退属性的第二下击退）、黑暗光环、心跳与按姿态变化的环境音、射弹拥有者分支
   （10 / 35 点愤怒与 `RECENT_PROJECTILE`）都已落地。`canTargetEntity` 的过滤
   （创造 / 旁观、无敌、世界边界、不是另一个监守者）也已接上。`mob-oracle --only warden` 覆盖召唤后钻出、听振动去调查、嗅探、发怒咆哮、近战、
-  音波、无目标钻回地下、射弹与重复射弹、以及 `anger` / `listener` 的存档往返，共 10 个逐刻场景
-  和 2 个存档场景，逐刻比姿态、愤怒、大脑、坐标 / 速度 / 朝向、两种随机源、玩家血量与效果；
-  7 个 `--break-self-test`（姿态 / 愤怒 / 大脑 / 位移 / 血量 / 黑暗 / 存档）都能报出不一致。
-  **已知限制**：幽匿催发体的蔓延（`SculkSpreader`）已接上活方块实体和 `cursors` 存档
-  往返（见「幽匿」一节），但逐刻蔓延对拍仍在调；`AngerManagement.conversionDelay` 初值用官方线程本地随机源、自身不可复现，读档后
+  音波、无目标钻回地下、射弹与重复射弹、音波把一只僵尸击飞、以及 `anger` / `listener`
+  的存档往返，共 11 个逐刻场景和 2 个存档场景，逐刻比姿态、愤怒、大脑、坐标 / 速度 / 朝向、
+  两种随机源、玩家血量与效果、近战打中那一刻发给玩家的速度包、被音波击飞的生物速度；
+  8 个 `--break-self-test`（姿态 / 愤怒 / 大脑 / 位移 / 血量 / 黑暗 / 存档 / 玩家击退包）都能报出不一致。
+  **已知限制**：`AngerManagement.conversionDelay` 初值用官方线程本地随机源、自身不可复现，读档后
   UUID→嫌疑转换那几刻不对拍（只比存档字节）；召唤时环境音的音高随机数、
-  `canTargetEntity` 里盔甲架 / 同队这几项过滤（Bamboo 还没有盔甲架生物、生物不加入队伍）还没接；
-  声音事件由同步层发出，音效参数不逐位对拍。
+  `canTargetEntity` 里盔甲架 / 同队这几项过滤（Bamboo 还没有盔甲架生物、生物不加入队伍）、
+  生物碰撞推挤别的实体（`Entity.pushEntities` 那一套物理推挤）还没建模——推挤只改速度、
+  不归到击退对拍里；声音事件由同步层发出，音效参数不逐位对拍。
 - 正版验证的限制：`server.properties` 的 `online-mode` 官方默认 true，命令行版和桌面端都读同一份文件、
   设置页里可以改；`ServerConfig::default()`（不读配置文件的嵌入用法）是 false。
   和代理转发互斥：打开转发时正版验证会被关掉，因为代理已经替服务端验过了。
