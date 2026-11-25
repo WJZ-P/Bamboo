@@ -43,6 +43,10 @@ pub struct Villager {
     pub food_level: i8,
     pub xp: i32,
     pub last_restock: i64,
+    /// `Villager.lastRestockCheckDay`：`shouldRestock` 每刻写，判断跨天。不存档。
+    ///
+    /// `Villager.lastRestockCheckDay`, rewritten every `shouldRestock` tick; not saved.
+    pub last_restock_check_day: i64,
     pub last_gossip_decay: i64,
     pub restocks_today: i32,
     /// `Gossips` 原文。期 2 不解析，读进来原样写回。
@@ -73,6 +77,7 @@ impl Default for Villager {
             food_level: 0,
             xp: 0,
             last_restock: 0,
+            last_restock_check_day: 0,
             last_gossip_decay: 0,
             restocks_today: 0,
             gossips: None,
