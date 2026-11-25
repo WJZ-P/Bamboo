@@ -466,6 +466,14 @@ pub enum EntityData {
     WolfVariant(i32),
     /// `Wolf.DATA_SOUND_VARIANT_ID`：`wolf_sound_variant` 注册表 ID。
     WolfSoundVariant(i32),
+    /// `AbstractNautilus.DASH`（index 20，BOOLEAN）。
+    ///
+    /// `AbstractNautilus.DASH` (index 20, BOOLEAN).
+    NautilusDash(bool),
+    /// `ZombieNautilus.DATA_VARIANT_ID`（index 21，注册表 ID）。
+    ///
+    /// `ZombieNautilus.DATA_VARIANT_ID` (index 21, a registry id).
+    ZombieNautilusVariant(i32),
     /// `Guardian.DATA_ID_MOVING`（BOOLEAN，索引 16）。
     ///
     /// `Guardian.DATA_ID_MOVING` (BOOLEAN, index 16).
@@ -604,6 +612,8 @@ impl EntityData {
             Self::AxolotlVariant(_) => mc_bamboo_data::entity_types::AXOLOTL_VARIANT,
             Self::AxolotlPlayingDead(_) => mc_bamboo_data::entity_types::AXOLOTL_PLAYING_DEAD,
             Self::AxolotlFromBucket(_) => mc_bamboo_data::entity_types::AXOLOTL_FROM_BUCKET,
+            Self::NautilusDash(_) => mc_bamboo_data::entity_types::NAUTILUS_DASH,
+            Self::ZombieNautilusVariant(_) => mc_bamboo_data::entity_types::ZOMBIE_NAUTILUS_VARIANT,
             Self::GuardianMoving(_) => mc_bamboo_data::entity_types::GUARDIAN_MOVING,
             Self::GuardianAttackTarget(_) => mc_bamboo_data::entity_types::GUARDIAN_ATTACK_TARGET,
         }
@@ -1029,6 +1039,18 @@ impl EntityData {
             Self::WitchUsingItem(using) => {
                 write_data_header(out, 17, SERIALIZER_BOOLEAN);
                 write_bool(out, *using);
+            }
+            Self::NautilusDash(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::ZombieNautilusVariant(variant) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::ZOMBIE_NAUTILUS_VARIANT_SERIALIZER,
+                );
+                write_varint(out, *variant);
             }
             Self::GuardianMoving(moving) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);

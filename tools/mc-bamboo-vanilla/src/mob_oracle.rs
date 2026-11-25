@@ -55,6 +55,7 @@ mod husk_jockey;
 mod lightning;
 mod llama_spit;
 mod natural_spawn;
+mod nautilus;
 mod patrol_spawn;
 mod phantom;
 mod pillager;
@@ -184,6 +185,7 @@ enum Line {
     PhantomSpawn(Box<phantom::PhantomSpawnCase>),
     Phantom(Box<phantom::PhantomCase>),
     WaterMob(Box<water_mob::WaterMobCase>),
+    Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
     End(End),
 }
@@ -1777,6 +1779,7 @@ impl Report {
                 Line::PhantomSpawn(case) => self.replay_phantom_spawn(&case),
                 Line::Phantom(case) => self.replay_phantom(&case),
                 Line::WaterMob(case) => self.replay_water_mob(&case),
+                Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),

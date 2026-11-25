@@ -323,7 +323,14 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     // 史莱姆和鱿鱼一支是 `AgeableMob` 但不是 `Animal`，没有求爱的两个键。
     // Slimes and the squid branch are `AgeableMob`s but not `Animal`s, so they
     // lack the two love keys.
-    if mob.mob_type.is_animal() && mob.mob_type != MobType::Slime {
+    // `ZombieNautilus` 虽然是 `Monster`，但它继承的 `Animal.addAdditionalSaveData`
+    // 仍写 `InLove`；Bamboo 的 `is_animal()` 只对非怪物为真，这里显式补上。
+    // `ZombieNautilus` is a `Monster`, yet its inherited
+    // `Animal.addAdditionalSaveData` still writes `InLove`; `is_animal()` is
+    // false for monsters, so include it explicitly here.
+    if (mob.mob_type.is_animal() || mob.mob_type == MobType::ZombieNautilus)
+        && mob.mob_type != MobType::Slime
+    {
         put(&mut out, "InLove", Tag::Int(mob.in_love));
         if let Some(uuid) = &mob.love_cause {
             put(&mut out, "LoveCause", uuid_tag(uuid));
@@ -427,6 +434,12 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     }
     if super::tame::is_tamable(mob.mob_type) {
         write_tame(&mut out, mob);
+    }
+    if mob.mob_type == MobType::ZombieNautilus {
+        // `VariantUtils.writeVariant`：僵尸鹦鹉螺的 `variant` 键。
+        // `VariantUtils.writeVariant`: the zombie nautilus's `variant` key.
+        let name = super::nautilus::Variant::from_id(mob.nautilus.variant).name();
+        put(&mut out, "variant", Tag::String(name.to_owned()));
     }
     if mob.mob_type == MobType::Wolf {
         write_wolf(&mut out, mob);
@@ -793,7 +806,7 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
             mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
         }
-        if mob.mob_type.is_animal() {
+        if mob.mob_type.is_animal() || mob.mob_type == MobType::ZombieNautilus {
             mob.in_love = tag::int_or(tag, "InLove", 0);
             mob.love_cause = uuid_field(tag, "LoveCause");
         }
@@ -866,6 +879,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if super::tame::is_tamable(mob.mob_type) {
             read_tame(mob, tag);
+        }
+        if mob.mob_type == MobType::ZombieNautilus
+            && let Some(variant) =
+                tag::string_or(tag, "variant").and_then(super::nautilus::Variant::from_name)
+        {
+            mob.nautilus.variant = variant.registry_id();
         }
         if mob.mob_type == MobType::Wolf {
             read_wolf(mob, tag);
