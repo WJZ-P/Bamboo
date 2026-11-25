@@ -510,19 +510,6 @@ pub(super) fn after_zombie_finalize(world: &World<'_>, entity: &mut Entity, reas
     }
 }
 
-/// `SpawnPlacementTypes.IN_WATER.isSpawnPositionOk`：水格里、上面一格不是红石导体。
-///
-/// `SpawnPlacementTypes.IN_WATER.isSpawnPositionOk`: a water block whose block above is
-/// not a redstone conductor.
-pub(super) fn placement_ok(world: &World, pos: BlockPos) -> bool {
-    if !world.world_border().is_within_bounds_pos(pos) {
-        return false;
-    }
-    let above = BlockPos::new(pos.x, pos.y + 1, pos.z);
-    world.fluid_state(pos).is_tagged(fluid_tags::WATER)
-        && !world.block_state(above).is_redstone_conductor()
-}
-
 /// `Drowned.checkDrownedSpawnRules`：脚下必须是水；浅水里只有 1/40（沼泽类群系 1/15），
 /// 并且海平面 5 格以下。
 ///

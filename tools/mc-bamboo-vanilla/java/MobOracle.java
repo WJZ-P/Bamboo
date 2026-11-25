@@ -496,7 +496,7 @@ public final class MobOracle {
                     || "natural_fish".equals(only)
                     || "witch_spawn".equals(only) || "drowned_spawn".equals(only)
                     || "stray_spawn".equals(only) || "bogged_spawn".equals(only)
-                    || "bat_spawn".equals(only)) {
+                    || "guardian_spawn".equals(only) || "bat_spawn".equals(only)) {
                 cases += playNaturalSpawns(official, out, only);
             }
             if ("gen_spawn".equals(only) || "gen_spawn_misc".equals(only) || "gen_spawn_panda".equals(only)) {
@@ -6085,6 +6085,17 @@ public final class MobOracle {
         // need clay below.
         scenes.add(new NaturalScene("dolphin_ocean", EntityTypes.DOLPHIN, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("axolotl_lush", EntityTypes.AXOLOTL, "lush_caves", 2, 0, 0, 0, false, -32, 0, 289, true, false));
+        // 海底神殿：官方 `minecraft:monument` 的 MONSTER 覆盖是守卫者 ×2–4（full 盒）。
+        // 夹具直接把这一张表交给 `getMobsAt`；`_sky` 看得见水面天空、其余场景用不透明
+        // 屋顶挡住 `canSeeSkyFromBelowWater`，和平难度也单独覆盖。
+        //
+        // Ocean monument: the official MONSTER override is guardians ×2–4 (full box).
+        // The fixture passes that exact table to `getMobsAt`; `_sky` sees the sky through
+        // water, the other scenes put an opaque roof above the water, and peaceful is
+        // covered too.
+        scenes.add(new NaturalScene("monument_guardian", EntityTypes.GUARDIAN, "deep_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("monument_guardian_sky", EntityTypes.GUARDIAN, "deep_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("monument_guardian_peaceful", EntityTypes.GUARDIAN, "deep_ocean", 0, 15, 0, 0, false, -32, 0, 289, true, false));
         return playNaturalSpawnScenes(official, out, scenes, only);
     }
 
@@ -6098,6 +6109,7 @@ public final class MobOracle {
             if ("stray_spawn".equals(only) && scene.mob() != EntityTypes.STRAY) continue;
             if ("bat_spawn".equals(only) && scene.mob() != EntityTypes.BAT) continue;
             if ("bogged_spawn".equals(only) && scene.mob() != EntityTypes.BOGGED) continue;
+            if ("guardian_spawn".equals(only) && scene.mob() != EntityTypes.GUARDIAN) continue;
             // 沼泽场景的起点高度要正好落在某层地面上才有戏；浅河和雪地流浪者
             // 有光 / 找天的门槛，命中概率低，多跑一些种子。
             // Swamp scenes only get anywhere when the start height lands on a floor; the
@@ -6442,11 +6454,23 @@ public final class MobOracle {
                 : scene.mob().getCategory();
         MobSpawnSettings settings = level.naturalBiome.value().getAttributes()
                 .applyModifier(EnvironmentAttributes.NATURAL_MOB_SPAWNS, MobSpawnSettings.EMPTY);
-        var entry = settings.getMobsToSpawn(category).unwrap().stream()
-                .filter(row -> row.value().type() == scene.mob()).findFirst().orElseThrow();
+        boolean monument = scene.name().startsWith("monument_guardian");
+        // 神殿夹具用官方 `minecraft:monument` 的 spawn_overrides 那张表，2–4 只一组。
+        // The monument fixture uses the official spawn_overrides list, 2–4 per group.
+        var monumentOverride = monument
+                ? official.registries.lookupOrThrow(Registries.STRUCTURE)
+                        .getOrThrow(BuiltinStructures.OCEAN_MONUMENT)
+                        .value().spawnOverrides().get(MobCategory.MONSTER).spawns()
+                : null;
+        var entry = monumentOverride != null
+                ? monumentOverride.unwrap().getFirst()
+                : settings.getMobsToSpawn(category).unwrap().stream()
+                        .filter(row -> row.value().type() == scene.mob()).findFirst().orElseThrow();
         var generator = allocate(NaturalSpawnGenerator.class);
         generator.category = category;
-        generator.table = WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
+        generator.table = monumentOverride != null
+                ? monumentOverride
+                : WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
         level.chunkSource.naturalGenerator = generator;
 
         boolean bat = scene.mob() == EntityTypes.BAT;
@@ -6454,7 +6478,8 @@ public final class MobOracle {
                 : scene.name().equals("ocelot_jungle_leaves")
                         ? Blocks.OAK_LEAVES.defaultBlockState()
                         : spawnFloor(scene.biome());
-        boolean aquatic = scene.name().contains("squid") || category == MobCategory.WATER_AMBIENT
+        boolean aquatic = scene.name().contains("squid") || monument
+                || category == MobCategory.WATER_AMBIENT
                 || category == MobCategory.WATER_CREATURE || category == MobCategory.AXOLOTLS;
         // 美西螈夹具把最底下的水换成黏土，`checkAxolotlSpawnRules` 才会通过。
         // The axolotl fixture swaps the bottom water layer for clay so
@@ -6462,6 +6487,7 @@ public final class MobOracle {
         boolean clayFloor = scene.mob() == EntityTypes.AXOLOTL;
         level.naturalSeaLevel = scene.name().equals("drowned_deep_ocean") ? -51
                 : scene.name().equals("ocelot_below_sea") ? -60
+                : monument ? -56
                 : (scene.mob() == EntityTypes.GLOW_SQUID || scene.name().equals("fish_tropical_lush") ? -20 : -63);
         for (int x = -16; x < 48; x++) {
             for (int z = -16; z < 32; z++) {
@@ -6486,6 +6512,20 @@ public final class MobOracle {
                 // camel husk or parched) and is no spawn surface; the 1.95-tall husk still fits.
                 if (scene.mob() == EntityTypes.HUSK || (bat && !scene.name().endsWith("_open"))) {
                     level.blocks.put(BlockPos.asLong(x, -60, z), Blocks.GLASS.defaultBlockState());
+                }
+                // 神殿夹具：水面（-56）到水柱（-62）之间铺满水；`_sky` 让
+                // `canSeeSkyFromBelowWater` 为真，其余场景在水面盖一层不透明石头，
+                // 只有 1/20 那一支能刷。
+                //
+                // Monument fixture: water from the sea level down to the column; `_sky`
+                // makes `canSeeSkyFromBelowWater` true, while the others put an opaque
+                // stone roof above the water so only the 1-in-20 branch can spawn.
+                if (monument) {
+                    boolean roof = !scene.name().endsWith("_sky");
+                    for (int y = -61; y <= -56; y++) {
+                        level.blocks.put(BlockPos.asLong(x, y, z),
+                                (roof && y == -56 ? Blocks.STONE : Blocks.WATER).defaultBlockState());
+                    }
                 }
             }
         }
@@ -6608,6 +6648,8 @@ public final class MobOracle {
         row.addProperty("nearbyRespawn", scene.nearbyRespawn());
         row.addProperty("aquatic", aquatic);
         row.addProperty("clayFloor", clayFloor);
+        row.addProperty("monument", monument);
+        row.addProperty("monumentRoof", monument && !scene.name().endsWith("_sky"));
         row.addProperty("halloween", net.minecraft.util.SpecialDates.isHalloween());
         row.addProperty("levelSeed", level.worldSeed);
         row.addProperty("waterDepth", waterDepth);

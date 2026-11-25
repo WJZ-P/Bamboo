@@ -71,6 +71,17 @@ pub(super) struct Case {
     /// Axolotl fixture: the bottom of the three "water" layers is clay.
     #[serde(default)]
     clay_floor: bool,
+    /// 海底神殿夹具：用 `minecraft:monument` 的覆盖表，水面以上到水柱铺水。
+    ///
+    /// Ocean monument fixture: use the monument override table and fill the
+    /// water column up to the sea level.
+    #[serde(default)]
+    monument: bool,
+    /// 神殿夹具在水面盖一层石头，挡住 `canSeeSkyFromBelowWater`。
+    ///
+    /// The monument fixture puts a stone roof at sea level to block sky visibility.
+    #[serde(default)]
+    monument_roof: bool,
     steps: Vec<Step>,
 }
 
@@ -246,6 +257,18 @@ impl Coverage {
             } else {
                 Err("panda natural spawn fixtures must spawn at raw brightness 15 but not 8".into())
             };
+        }
+        // 神殿正例必须真的刷出守卫者，和平难度不能刷；两个露天/封顶场景都要有结果。
+        // The monument positives must spawn guardians, peaceful must not, and both
+        // the open-sky and roofed scenes must be exercised.
+        if let Some(&count) = self.per_scene.get("monument_guardian_sky")
+            && (count == 0
+                || self.per_scene.get("monument_guardian_peaceful") != Some(&0)
+                || self.per_scene.get("monument_guardian") == Some(&0))
+        {
+            return Err(
+                "monument guardian natural spawn fixtures did not exercise the spawn rules".into(),
+            );
         }
         for name in [
             "fish_cod",
@@ -434,11 +457,24 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
     } else {
         kind.mob_category()
     };
-    let entry = spawning::for_biome_id(biome)
-        .mobs_to_spawn(category)
-        .iter()
-        .find(|entry| entry.entity_type == case.entity_type)
-        .ok_or_else(|| format!("{} has no spawn entry for {}", case.biome, case.entity_type))?;
+    // 神殿夹具用生成的官方覆盖表（守卫者 ×2–4），其余夹具从群系表里挑单一条目。
+    // The monument fixture uses the generated official override (guardians ×2–4);
+    // the rest pick one entry from the biome table.
+    let entry = if case.monument {
+        spawning::structure_spawn_override("minecraft:monument", category)
+            .and_then(|table| {
+                table
+                    .iter()
+                    .find(|entry| entry.entity_type == case.entity_type)
+            })
+            .ok_or("monument guardian override is missing")?
+    } else {
+        spawning::for_biome_id(biome)
+            .mobs_to_spawn(category)
+            .iter()
+            .find(|entry| entry.entity_type == case.entity_type)
+            .ok_or_else(|| format!("{} has no spawn entry for {}", case.biome, case.entity_type))?
+    };
     // 尸壳夹具多一层 -60 的玻璃顶，挡住官方的骆驼尸壳分支（见 `MobOracle.java`）。
     // The husk fixture adds a glass roof at -60 to block vanilla's camel-husk branch.
     // 蝙蝠夹具：石头地面，除了 `_open` 都有同样的玻璃顶。
@@ -453,6 +489,8 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         spawn_floor(biome)
     };
     let aquatic = case.aquatic;
+    let monument = case.monument;
+    let monument_roof = case.monument_roof;
     let floors = case.floors.clone();
     let water_depth = case.water_depth;
     let blocks = (-16..48)
@@ -460,6 +498,16 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
             let floors = floors.clone();
             (-16..32).flat_map(move |z| {
                 let mut column = Vec::new();
+                if monument {
+                    for y in -61..=-56 {
+                        let state = if monument_roof && y == -56 {
+                            blocks::STONE
+                        } else {
+                            blocks::WATER
+                        };
+                        column.push((BlockPos::new(x, y, z), BlockState(state)));
+                    }
+                }
                 for &y in &floors {
                     column.push((BlockPos::new(x, y, z), BlockState(blocks::GRASS_BLOCK)));
                 }

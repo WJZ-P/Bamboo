@@ -23,7 +23,7 @@ use mc_bamboo_core::{Axis, BlockPos, ChunkPos, LightLayer, Vec3, mth};
 use mc_bamboo_data::BlockAncestor;
 use mc_bamboo_data::blocks::{CACTUS, LAVA, LAVA_CAULDRON, MAGMA_BLOCK, POWDER_SNOW};
 use mc_bamboo_data::spawning::{self, MobCategory, MobSpawnSettings, MobSpawnerDef};
-use mc_bamboo_data::tags::block_tags;
+use mc_bamboo_data::tags::{block_tags, fluid_tags};
 
 #[cfg(test)]
 use super::timing::record_structure_query;
@@ -586,14 +586,9 @@ pub fn sample(entry: &MobSpawnerDef, random: &dyn crate::random::RandomSource) -
 ///
 /// The modelled natural spawns use the `ON_GROUND` placement.
 fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
-    // 溺尸登记的是 `SpawnPlacementTypes.IN_WATER`，其余已支持的都是 `ON_GROUND`。
-    // Drowned register `SpawnPlacementTypes.IN_WATER`; the rest use `ON_GROUND`.
-    if kind == MobType::Drowned {
-        return super::drowned::placement_ok(world, pos);
-    }
-    // 水生生物登记的是 `SpawnPlacementTypes.IN_WATER`。
-    // Aquatic mobs are registered with `SpawnPlacementTypes.IN_WATER`.
-    if kind.spawns_in_water() {
+    // 溺尸、守卫者、远古守卫者和水生生物登记的都是 `SpawnPlacementTypes.IN_WATER`。
+    // Drowned, guardians, elder guardians and aquatic mobs all register `IN_WATER`.
+    if kind == MobType::Drowned || kind.spawns_in_water() {
         return super::water::in_water_position_ok(world, pos);
     }
     // 狐狸和幻翼注册的是 `NO_RESTRICTIONS`，位置恒可用。
@@ -838,16 +833,56 @@ pub(super) fn check_spawn_rules(
         // 村民不在任何群系刷怪表里，只由结构 / 命令 / 刷怪蛋生成。
         // Villagers are in no biome spawn table; structures, commands and eggs make them.
         MobType::Villager => true,
-        // 守卫者的自然生成规则（`checkGuardianSpawnRules` / 海底神殿）属于后续段落；
-        // 这里先按"不在群系刷怪表"处理，由命令 / 刷怪蛋 / 结构生成。
-        // Guardian natural-spawn rules (`checkGuardianSpawnRules` / ocean monuments) belong to
-        // a later phase; treat them as absent from biome tables for now (commands, eggs,
-        // structures).
-        MobType::Guardian | MobType::ElderGuardian => true,
+        // `Guardian.checkGuardianSpawnRules`：1/20 或者水下看不见天，然后非和平、
+        // 上下两格都是水（自然生成不是刷怪笼）。和平难度在函数开头已经挡掉。
+        //
+        // `Guardian.checkGuardianSpawnRules`: one in twenty or no sky visible from
+        // below water, then non-peaceful and water both at the position and below
+        // (natural spawning is not a spawner). Peaceful was rejected at the top.
+        MobType::Guardian | MobType::ElderGuardian => guardian_spawn_rules(world, pos),
         // 两种傀儡都不在群系刷怪表里，只保留命令 / 方块图案生成时共用的规则。
         // Neither golem is in a biome spawn table; only the shared rule remains.
         MobType::IronGolem | MobType::SnowGolem => animal_spawn_rules(world, pos),
     }
+}
+
+/// `LevelReader.canSeeSkyFromBelowWater`：水面以上看得见天，且从海平面往下到
+/// 落点之间不能有「挡光又不是液体」的方块。
+///
+/// `LevelReader.canSeeSkyFromBelowWater`: the sky is visible at/above sea level and
+/// no light-dampening non-liquid block sits between the sea level and the position.
+fn can_see_sky_from_below_water(world: &World, pos: BlockPos) -> bool {
+    if pos.y >= world.sea_level() {
+        return world.level().can_see_sky(pos);
+    }
+    let mut cursor = BlockPos::new(pos.x, world.sea_level(), pos.z);
+    if !world.level().can_see_sky(cursor) {
+        return false;
+    }
+    cursor = cursor.below();
+    while cursor.y > pos.y {
+        let state = world.block_state(cursor);
+        if state.light_dampening() > 0 && !state.is_liquid() {
+            return false;
+        }
+        cursor = cursor.below();
+    }
+    true
+}
+
+/// `Guardian.checkGuardianSpawnRules`。第一笔 `nextInt(20)` 恒取，短路的
+/// `canSeeSkyFromBelowWater` 不取随机数；自然生成不是刷怪笼，所以落点自己也要是水。
+///
+/// `Guardian.checkGuardianSpawnRules`. The `nextInt(20)` draw always happens;
+/// `canSeeSkyFromBelowWater` draws nothing. Natural spawning is not a spawner,
+/// so the position itself must be water too.
+fn guardian_spawn_rules(world: &World, pos: BlockPos) -> bool {
+    let shallow_or_dark =
+        world.random().next_int(20) == 0 || !can_see_sky_from_below_water(world, pos);
+    shallow_or_dark
+        && world.level().difficulty_id() != 0
+        && world.fluid_state(pos).is_tagged(fluid_tags::WATER)
+        && world.fluid_state(pos.below()).is_tagged(fluid_tags::WATER)
 }
 
 /// `Animal.checkAnimalSpawnRules`：脚下在 `animals_spawnable_on` 里，且 `getRawBrightness(pos, 0) > 8`。
@@ -941,6 +976,9 @@ fn is_valid_position_for_mob(
             // 美西螈的 `checkSpawnObstruction` 也只剩 `isUnobstructed`，不查液体。
             // The axolotl's `checkSpawnObstruction` is `isUnobstructed` alone, no liquid check.
             || kind == MobType::Axolotl
+            // `Guardian.checkSpawnObstruction` 同样只查实体遮挡。
+            // `Guardian.checkSpawnObstruction` also checks entity obstruction only.
+            || super::guardian::is_guardian(kind)
             || !contains_any_liquid(world, bounds))
         && is_unobstructed_by_entities(world, bounds)
 }
