@@ -599,9 +599,18 @@ fn pickup_or_quick_move(ctx: &mut Ctx, slot_index: i32, button: i32, quick: bool
         return;
     };
     if quick {
-        let mut clicked = ctx.quick_move(index);
-        while !clicked.is_empty() && is_same_item(&ctx.get(index), &clicked) {
-            clicked = ctx.quick_move(index);
+        if index == RESULT_SLOT && ctx.merchant.is_some() {
+            // 结果格 Shift 取出：搬进背包后完成一次交易（`MerchantResultSlot.onTake`），
+            // 官方 `quickMoveStack` 不循环。
+            let clicked = ctx.quick_move(index);
+            if !clicked.is_empty() {
+                ctx.merchant_take();
+            }
+        } else {
+            let mut clicked = ctx.quick_move(index);
+            while !clicked.is_empty() && is_same_item(&ctx.get(index), &clicked) {
+                clicked = ctx.quick_move(index);
+            }
         }
     } else {
         pickup(ctx, index, button == 0);

@@ -288,6 +288,10 @@ impl Replay {
             }
         }
         self.settle();
+        // `broadcastChanges`：为每个变过的槽加 state_id，和点击一样。
+        let slots = self.menu_slots();
+        self.menu.take_slot_changes(&slots);
+        self.menu.take_carried_change();
     }
 
     /// 工作台菜单。`grid` 是菜单自己的材料格，空位用 `(0, 0)`，按顺序放进去。
