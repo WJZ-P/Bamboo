@@ -934,10 +934,32 @@ impl Level for RegionLevel<'_> {
             f64::from(mc_bamboo_blocks::entity::raid::VALID_RAID_RADIUS_SQR),
         )?;
         let raid = self.raids.raids.get(&id)?;
+        let mut leaders = [0; 8];
+        let mut leader_count = 0;
+        for (&wave, &uid) in &raid.leaders {
+            if (0..8).contains(&wave)
+                && self
+                    .entities
+                    .public_at(uid)
+                    .is_some_and(|public| !public.removed)
+            {
+                leaders[wave as usize] = uid;
+                leader_count += 1;
+            }
+        }
         Some(mc_bamboo_blocks::entity::raid::RaidView {
+            id,
+            center: raid.center,
             has_first_wave_spawned: raid.has_first_wave_spawned(),
             is_between_waves: raid.is_between_waves(raid.total_raiders()),
             is_victory: raid.is_victory(),
+            active: raid.active,
+            is_over: raid.is_over(),
+            is_loss: raid.is_loss(),
+            is_stopped: raid.is_stopped(),
+            enchant_odds: raid.enchant_odds(),
+            leaders,
+            leader_count,
         })
     }
 
