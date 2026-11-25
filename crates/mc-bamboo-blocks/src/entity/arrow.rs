@@ -1096,14 +1096,12 @@ pub(super) fn play_extinguished_sound(me: &Entity, world: &mut World<'_>, pitch:
 /// `BREEZE_DEFLECT` 音，不造成伤害。`Breeze.deflection` 对风弹返回 NONE，但箭和三叉戟
 /// 不是风弹，走这一支。
 fn deflect_off_target(me: &mut Entity, world: &mut World<'_>, uid: EntityUid) -> bool {
-    let deflects = world
-        .entity(uid)
-        .is_some_and(|entity| {
-            entity
-                .kind
-                .mob()
-                .is_some_and(|mob| mob.mob_type.deflects_projectiles())
-        });
+    let deflects = world.entity(uid).is_some_and(|entity| {
+        entity
+            .kind
+            .mob()
+            .is_some_and(|mob| mob.mob_type.deflects_projectiles())
+    });
     if !deflects {
         return false;
     }
