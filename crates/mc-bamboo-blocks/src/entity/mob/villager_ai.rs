@@ -562,6 +562,13 @@ pub enum Behavior {
     SetRaidStatus,
     /// `SetEntityLookTarget.create(filter, maxDist)`。
     SetEntityLookTarget { filter: LookFilter, max_dist: f32 },
+    /// `InteractWith.of(type, maxDist, INTERACTION_TARGET, speed, closeEnough)`：`OneShot`。
+    InteractWith {
+        kind: MobType,
+        max_dist: i32,
+        speed: f32,
+        close_enough: i32,
+    },
     /// `WakeUp`：`OneShot`，非 `REST` 活动时叫醒正在睡觉的村民。
     WakeUp,
     /// `ReactToBell`：`OneShot`，听到钟声且无袭击时切到 `HIDE`。
@@ -698,6 +705,7 @@ impl Behavior {
                 REQ_WALK_ABSENT
             }
             Self::SetEntityLookTarget { .. } => REQ_LOOK_ENTITY,
+            Self::InteractWith { .. } => REQ_INTERACT_TARGET,
             Self::ReactToBell => REQ_HEARD_BELL,
             Self::WalkTargetFromBlockMemory { memory, .. } => match memory {
                 JobSite => REQ_WALK_FROM_JOB,
@@ -1087,6 +1095,50 @@ impl Behavior {
                         target_eye: false,
                     }),
                 );
+                true
+            }
+            Self::InteractWith {
+                kind,
+                max_dist,
+                speed,
+                close_enough,
+            } => {
+                let kind = *kind;
+                // 官方先用 contains 判断是否有可见的该类型实体，没有就不触发。
+                if sensor::find_closest_visible(cx, &mut |view| view.mob_type == Some(kind))
+                    .is_none()
+                {
+                    return false;
+                }
+                let max_sqr = f64::from(*max_dist * *max_dist);
+                let self_pos = cx.me.position;
+                let target = sensor::find_closest_visible(cx, &mut |view| {
+                    view.mob_type == Some(kind)
+                        && view.position.distance_to_sqr(self_pos) <= max_sqr
+                });
+                if let Some(uid) = target {
+                    cx.memories.set(InteractionTarget, MemoryValue::Entity(uid));
+                    cx.memories.set(
+                        LookTarget,
+                        MemoryValue::Look(PositionTracker::Entity {
+                            uid,
+                            track_eye: true,
+                            target_eye: false,
+                        }),
+                    );
+                    cx.memories.set(
+                        WalkTarget,
+                        MemoryValue::Walk(WalkTarget {
+                            target: PositionTracker::Entity {
+                                uid,
+                                track_eye: false,
+                                target_eye: false,
+                            },
+                            speed: *speed,
+                            close_enough: *close_enough,
+                        }),
+                    );
+                }
                 true
             }
             Self::WakeUp => {
@@ -2498,6 +2550,15 @@ fn find_section_closest_to_village(
     best
 }
 
+fn interact_with(kind: MobType, speed: f32) -> Kind {
+    Kind::Villager(Behavior::InteractWith {
+        kind,
+        max_dist: 8,
+        speed,
+        close_enough: 2,
+    })
+}
+
 fn stub(which: Stub) -> Kind {
     Kind::Villager(Behavior::Unavailable(which))
 }
@@ -2708,8 +2769,8 @@ fn play_package(speed: f32) -> ActivityData {
                 Kind::Gate(Box::new(Gate::run_one(
                     vec![(VisibleVillagerBabies, ValueAbsent)],
                     vec![
-                        (stub(Stub::InteractWithVillager), 2),
-                        (stub(Stub::InteractWithCat), 1),
+                        (interact_with(MobType::Villager, speed), 2),
+                        (interact_with(MobType::Cat, speed), 1),
                         (
                             Kind::Villager(Behavior::VillageBoundRandomStroll {
                                 speed,
@@ -2844,9 +2905,9 @@ fn idle_package(speed: f32) -> ActivityData {
                 Kind::Gate(Box::new(Gate::run_one(
                     Vec::new(),
                     vec![
-                        (stub(Stub::InteractWithVillager), 2),
+                        (interact_with(MobType::Villager, speed), 2),
                         (stub(Stub::InteractWithBreedVillager), 1),
-                        (stub(Stub::InteractWithCat), 1),
+                        (interact_with(MobType::Cat, speed), 1),
                         (
                             Kind::Villager(Behavior::VillageBoundRandomStroll {
                                 speed,
