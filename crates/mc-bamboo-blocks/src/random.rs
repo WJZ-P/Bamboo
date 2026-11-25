@@ -39,6 +39,18 @@ impl LegacyRandom {
         random
     }
 
+    /// 从另一个随机源的 `seed()`（内部种子）复制一份状态，不再异或多重常数。
+    ///
+    /// Copy another source's `seed()` (its internal state) without XORing the
+    /// multiplier a second time.
+    pub fn from_raw_seed(seed: i64) -> Self {
+        let random = Self {
+            seed: Cell::new(seed & MODULUS_MASK),
+            next_gaussian: Cell::new(None),
+        };
+        random
+    }
+
     /// `setSeed`。
     pub fn set_seed(&self, seed: i64) {
         self.seed.set((seed ^ MULTIPLIER) & MODULUS_MASK);

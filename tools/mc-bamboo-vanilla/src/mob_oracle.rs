@@ -50,6 +50,7 @@ mod gen_spawn;
 mod golem;
 mod grazing;
 mod guardian_scene;
+mod husk_jockey;
 mod lightning;
 mod llama_spit;
 mod natural_spawn;
@@ -169,6 +170,7 @@ enum Line {
     VillagerDeath(villager::VillagerDeathCase),
     ZombieVillager(zombie_villager::Case),
     ZombieVillagerSave(zombie_villager::SaveCase),
+    HuskJockey(husk_jockey::Case),
     VillagerBrain(Box<villager::VillagerBrainCase>),
     AttackTarget(Box<attack_target::AttackTargetCase>),
     Guardian(Box<guardian_scene::GuardianCase>),
@@ -1702,6 +1704,7 @@ impl Report {
                 Line::VillagerDeath(case) => self.replay_villager_death(&case),
                 Line::ZombieVillager(case) => self.replay_zombie_villager(&case),
                 Line::ZombieVillagerSave(case) => self.replay_zombie_villager_save(&case),
+                Line::HuskJockey(case) => self.replay_husk_jockey(&case),
                 Line::VillagerBrain(case) => self.replay_villager_brain(&case),
                 Line::AttackTarget(case) => self.replay_attack_target(&case),
                 Line::Guardian(case) => self.replay_guardian(&case),

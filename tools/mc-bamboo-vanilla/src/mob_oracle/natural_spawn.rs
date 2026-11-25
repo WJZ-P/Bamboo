@@ -115,6 +115,7 @@ pub(super) struct Coverage {
     farm: [usize; 3],
     skeletons: usize,
     zombies: usize,
+    parched: usize,
     slimes: usize,
     squid: usize,
     equines: usize,
@@ -151,6 +152,11 @@ impl Coverage {
             .iter()
             .filter(|row| row[0] == entity_type::ZOMBIE || row[0] == entity_type::HUSK)
             .count();
+        self.parched += step
+            .spawned
+            .iter()
+            .filter(|row| row[0] == entity_type::PARCHED)
+            .count();
         self.slimes += step
             .spawned
             .iter()
@@ -179,13 +185,14 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {:?} pigs/sheep/chickens, {} skeletons, {} zombies or husks, {} slimes, {} squid or glow squid, {} equines, {} witches, {} empty ticks, {} spawns with local cap bypassed",
+                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {:?} pigs/sheep/chickens, {} skeletons, {} zombies or husks, {} parched, {} slimes, {} squid or glow squid, {} equines, {} witches, {} empty ticks, {} spawns with local cap bypassed",
                 self.cases,
                 self.ticks,
                 self.cows,
                 self.farm,
                 self.skeletons,
                 self.zombies,
+                self.parched,
                 self.slimes,
                 self.squid,
                 self.equines,
@@ -220,12 +227,25 @@ impl Coverage {
         // 流浪者和沼骸的正例必须真的刷出生物，否则找天 / 黑暗规则没被覆盖。
         // The stray and bogged positive scenes must really spawn, or the sky / darkness
         // rules went untested.
-        for (scene, creature) in [("stray_night", "strays"), ("bogged_night", "bogged")] {
+        for (scene, creature) in [
+            ("stray_night", "strays"),
+            ("bogged_night", "bogged"),
+            ("parched_night", "parched"),
+        ] {
             if let Some(&count) = self.per_scene.get(scene)
                 && count == 0
             {
                 return Err(format!(
                     "natural spawn fixture {scene} did not spawn any {creature}"
+                ));
+            }
+        }
+        // 焦骸：夜里看得见天必须刷，白天 / 没天 / 和平必须不刷。
+        // Parched: open sky at night must spawn; day, no sky and peaceful must not.
+        for name in ["parched_day", "parched_no_sky", "parched_peaceful"] {
+            if self.per_scene.get(name) != Some(&0) {
+                return Err(format!(
+                    "natural spawn fixture {name} must not spawn parched"
                 ));
             }
         }

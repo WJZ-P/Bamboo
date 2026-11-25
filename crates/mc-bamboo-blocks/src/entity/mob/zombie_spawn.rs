@@ -59,7 +59,7 @@ pub(super) fn finalize_spawn(
         entity.block_position(),
     ));
     // 和蜘蛛骑士一样：副本随机源取完数再写回，好让闭包里能 `&mut World` 排队。
-    let random = crate::random::LegacyRandom::new(world.random().seed());
+    let random = crate::random::LegacyRandom::from_raw_seed(world.random().seed());
     // 官方在这里读的是 `getBoundingBox()`（幼年尺寸），闭包里 `entity` 被借走，
     // 先按值拷出来。
     let (position, yaw) = (entity.position, entity.y_rot);
@@ -309,19 +309,22 @@ fn husk_finalize_spawn(
 ) {
     let can_pick_up_loot = world.random().next_float() < 0.55 * special;
     entity.with_mob(|_, mob| mob.can_pick_up_loot = can_pick_up_loot);
-    // `Husk.HuskGroupData(ZombieGroupData)`：新组按生成的理由定标志，旧组原样沿用。
+    // 官方对**每个非空**组数据都新建一份 `HuskGroupData`（连已经是
+    // `HuskGroupData` 的也再包一层），所以同一组里第二只尸壳会再试一次。
+    // `triedToSpawnCamelHusk` 按生成理由重新初始化（非自然生成直接为真）。
+    //
+    // Vanilla wraps *every* non-null group in a fresh `HuskGroupData` (even an
+    // existing one), so the second husk of a group tries again; the flag is
+    // reinitialized from the spawn reason.
     let tried = match group {
-        Some(SpawnGroup::Husk {
-            tried_to_spawn_camel_husk,
-            ..
-        }) => *tried_to_spawn_camel_husk,
-        Some(SpawnGroup::Zombie(data)) => {
+        Some(SpawnGroup::Zombie(data)) | Some(SpawnGroup::Husk { zombie: data, .. }) => {
             let data = *data;
+            let tried = reason != SpawnReason::Natural;
             *group = Some(SpawnGroup::Husk {
                 zombie: data,
-                tried_to_spawn_camel_husk: reason != SpawnReason::Natural,
+                tried_to_spawn_camel_husk: tried,
             });
-            reason != SpawnReason::Natural
+            tried
         }
         _ => reason != SpawnReason::Natural,
     };

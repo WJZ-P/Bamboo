@@ -545,6 +545,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("undead_horse")) {
                 cases += playUndeadHorse(official, out, only);
             }
+            if (only == null || "husk_jockey".startsWith(only)) {
+                cases += playHuskJockey(official, out, only);
+            }
             if (only == null || "skeleton_death".startsWith(only)) {
                 cases += playSkeletonDeaths(official, out);
             }
@@ -6078,6 +6081,18 @@ public final class MobOracle {
         scenes.add(new NaturalScene("zombie_villager_day", EntityTypes.ZOMBIE_VILLAGER, "plains",
                 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("husk_night", EntityTypes.HUSK, "desert", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        // 焦骸：沙漠表里的 50 权重条目，和尸壳同走 `checkSurfaceMonstersSpawnRules`
+        // （暗 + 看得见天）。没有玻璃顶，尸壳骆驼分支不会影响这一组。
+        // Parched: the 50-weight desert entry, using the same surface-monster
+        // rules as husks. No glass roof; the camel-husk branch is not involved.
+        scenes.add(new NaturalScene("parched_night", EntityTypes.PARCHED, "desert", 2, 15, 0, 11,
+                false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("parched_day", EntityTypes.PARCHED, "desert", 2, 15, 0, 0,
+                false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("parched_no_sky", EntityTypes.PARCHED, "desert", 2, 0, 0, 11,
+                false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("parched_peaceful", EntityTypes.PARCHED, "desert", 0, 15, 0, 11,
+                false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("skeleton_day", EntityTypes.SKELETON, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("skeleton_torch", EntityTypes.SKELETON, "plains", 2, 0, 1, 11, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("skeleton_thunder", EntityTypes.SKELETON, "desert", 3, 15, 0, 10, true, -32, 0, 289, true, false));
@@ -10704,6 +10719,90 @@ public final class MobOracle {
                 cases++;
             }
         }
+        return cases;
+    }
+
+
+    /**
+     * 尸壳自然生成的骑士分支：直接跑官方 `Husk.finalizeSpawn(NATURAL, null)`，
+     * 记录它往假世界里加的实体（尸壳、尸壳骆驼、焦骸）及世界随机源。
+     * `group` 在一组里复用，第二只尸壳不会再试坐骑；带 `_blocked` 的场景在
+     * 头顶放玻璃让生成盒通不过 `noCollision`。
+     *
+     * The camel-husk jockey branch of natural husks: run vanilla
+     * `Husk.finalizeSpawn(NATURAL, null)` and record the entities it adds plus
+     * the level random seed. Group data is reused, so the second husk of a group
+     * never retries the mount; `_blocked` scenes put glass overhead so the
+     * `noCollision` check fails.
+     */
+    private static int playHuskJockey(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (long seed : new long[] {0L, 1L, 2L, 7L, 42L, 12345L, -1L}) {
+            for (String suffix : new String[] {"", "_blocked", "_group"}) {
+                String name = "husk_jockey_" + seed + suffix;
+                if (only != null && !name.startsWith(only)) continue;
+                FakeLevel world = FakeLevel.create(official);
+                world.getRandom().setSeed(seed);
+                world.spawnDifficulty = new DifficultyInstance(Difficulty.NORMAL, 0L, 0L, 0.0F);
+                world.levelEvents = new ArrayList<>();
+                var json = new JsonObject();
+                json.addProperty("initialSeed", levelSeed(world));
+                world.spawned = new ArrayList<>();
+                world.injectedCanSeeSky = false;
+                world.injectedMonstersBurn = false;
+                for (int x = -6; x <= 6; x++) {
+                    for (int z = -6; z <= 6; z++) {
+                        world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                        if (suffix.equals("_blocked")) {
+                            world.blocks.put(BlockPos.asLong(x, 65, z), Blocks.GLASS.defaultBlockState());
+                        }
+                    }
+                }
+                int count = suffix.equals("_group") ? 2 : 1;
+                net.minecraft.world.entity.SpawnGroupData group = null;
+                for (int index = 0; index < count; index++) {
+                    var husk = (net.minecraft.world.entity.monster.zombie.Husk)
+                            EntityTypes.HUSK.create(world, EntitySpawnReason.NATURAL);
+                    husk.snapTo(0.5 + index * 3.0, 64.0, 0.5, 0.0F, 0.0F);
+                    husk.setUUID(new UUID(0L, index + 1));
+                    group = husk.finalizeSpawn(world, world.spawnDifficulty,
+                            EntitySpawnReason.NATURAL, group);
+                    world.addFreshEntity(husk);
+                }
+                var rows = new JsonArray();
+                for (Entity entity : world.spawned) {
+                    var row = new JsonArray();
+                    row.add(BuiltInRegistries.ENTITY_TYPE.getId(entity.getType()));
+                    row.add(Double.doubleToRawLongBits(entity.getX()));
+                    row.add(Double.doubleToRawLongBits(entity.getY()));
+                    row.add(Double.doubleToRawLongBits(entity.getZ()));
+                    // 骆驼尸壳的朝向来自构造时不带种子的随机源，这里只比另外两只。
+                    // A camel husk's facing comes from its unseeded constructor
+                    // random, so only compare the other two mobs here.
+                    boolean camelHusk = entity.getType() == EntityTypes.CAMEL_HUSK;
+                    row.add(camelHusk ? 0 : Float.floatToRawIntBits(entity.getYRot()));
+                    if (entity instanceof net.minecraft.world.entity.LivingEntity living) {
+                        row.add(Float.floatToRawIntBits(living.getHealth()));
+                        row.add(BuiltInRegistries.ITEM.getId(
+                                living.getMainHandItem().getItem()));
+                        row.add(living.isBaby() ? 1 : 0);
+                    } else {
+                        row.add(0); row.add(0); row.add(0);
+                    }
+                    rows.add(row);
+                }
+                json.addProperty("type", "huskJockey");
+                json.addProperty("name", name);
+                json.addProperty("seed", seed);
+                json.addProperty("blocked", suffix.equals("_blocked"));
+                json.addProperty("group", suffix.equals("_group"));
+                json.addProperty("worldSeed", levelSeed(world));
+                json.add("rows", rows);
+                out.write(json + "\n");
+                cases++;
+            }
+        }
+        out.flush();
         return cases;
     }
 
