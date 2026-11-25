@@ -2191,6 +2191,7 @@ impl DamageKind {
                 | Self::Thrown
                 | Self::Thorns
                 | Self::IndirectMagic
+                | Self::WindCharge
         ) || matches!(self, Self::Wither)
     }
 

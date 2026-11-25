@@ -22,8 +22,8 @@ pub(super) struct WindChargeCase {
     pub(super) mob: bool,
     pub(super) start: [f64; 3],
     pub(super) velocity: [f64; 3],
-    /// 每刻：`[x,y,z,dx,dy,dz,yRot,xRot,removed,cowHealth,levelSeed]`。
-    pub(super) frames: Vec<[i64; 11]>,
+    /// 每刻：`[x,y,z,dx,dy,dz,yRot,xRot,removed,cowHealth,cowDx,cowDy,cowDz,levelSeed]`。
+    pub(super) frames: Vec<[i64; 14]>,
     /// 结束时场景方块 `[x,y,z,state]`，顺序与官方一致。
     pub(super) final_blocks: Vec<[i32; 4]>,
 }
@@ -142,18 +142,18 @@ impl Report {
                 }
                 None => (Vec3::default(), Vec3::default(), 0.0, 0.0, 1),
             };
-            let (cow_health, _cow_dx) = if case.mob {
+            let (cow_health, cow_delta) = if case.mob {
                 match level
                     .entities
                     .get(cow_id)
                     .or(last_cow.clone())
-                    .and_then(|entity| entity.kind.mob().map(|mob| (mob.health, entity.delta.x)))
+                    .and_then(|entity| entity.kind.mob().map(|mob| (mob.health, entity.delta)))
                 {
-                    Some((health, dx)) => (health.to_bits() as i32 as i64, dx.to_bits() as i64),
-                    None => (0, 0),
+                    Some((health, delta)) => (health.to_bits() as i32 as i64, delta),
+                    None => (0, Vec3::default()),
                 }
             } else {
-                (0, 0)
+                (0, Vec3::default())
             };
             let mut ours = [
                 position.x.to_bits() as i64,
@@ -166,6 +166,9 @@ impl Report {
                 i64::from(pitch.to_bits() as i32),
                 removed,
                 cow_health,
+                cow_delta.x.to_bits() as i64,
+                cow_delta.y.to_bits() as i64,
+                cow_delta.z.to_bits() as i64,
                 level.random.source().seed(),
             ];
             if broken {

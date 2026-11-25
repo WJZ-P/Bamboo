@@ -12063,6 +12063,9 @@ public final class MobOracle {
                         .append(Float.floatToRawIntBits(charge.getXRot())).append(',')
                         .append(charge.isRemoved() ? 1 : 0).append(',')
                         .append(mob ? Float.floatToRawIntBits(cow.getHealth()) : 0).append(',')
+                        .append(mob ? Double.doubleToRawLongBits(cow.getDeltaMovement().x) : 0L).append(',')
+                        .append(mob ? Double.doubleToRawLongBits(cow.getDeltaMovement().y) : 0L).append(',')
+                        .append(mob ? Double.doubleToRawLongBits(cow.getDeltaMovement().z) : 0L).append(',')
                         .append(randomSeed(level.getRandom())).append(']');
             }
             frames.append(']');
