@@ -11,7 +11,10 @@ use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{PathType, tags::block_tags, tags::fluid_tags};
 
 use super::{
-    path::{EvaluatorFlags, Path, PathMob, PathRequest, find_path, max_y},
+    path::{
+        EvaluatorFlags, MultiTargetPathRequest, Path, PathMob, PathRequest, find_path,
+        find_path_to_targets, max_y,
+    },
     pathfinding::{self, Action, NavRequest, Replay},
 };
 use crate::{
@@ -306,6 +309,58 @@ impl Navigation {
         let pos = find_surface_position(view, pos);
         let max_path_length = self.max_path_length(mob.follow_range);
         self.create_path_to(view, mob, pos, reach, max_path_length)
+    }
+
+    /// `PathNavigation.createPath(Set<BlockPos>, int)`：`GroundPathNavigation` 不覆写它，
+    /// 不找地表，直接把全部候选终点交给一次多目标 A\* 搜索。
+    ///
+    /// `PathNavigation.createPath(Set<BlockPos>, int)`: not overridden by
+    /// `GroundPathNavigation`, so no surface search is performed and all candidate goals
+    /// go into one multi-target A\* search.
+    pub fn create_path_to_targets(
+        &mut self,
+        view: &dyn BlockView,
+        mob: &NavMob,
+        targets: &[BlockPos],
+        reach: i32,
+    ) -> Option<Path> {
+        if targets.is_empty() {
+            return None;
+        }
+        if mob.path.position.y < f64::from(view.min_y()) {
+            return None;
+        }
+        if !self.can_update_path(mob) {
+            return None;
+        }
+        if let Some(path) = &self.path
+            && !path.is_done()
+            && self
+                .target_pos
+                .is_some_and(|target| targets.contains(&target))
+        {
+            return Some(path.clone());
+        }
+        let max_path_length = self.max_path_length(mob.follow_range);
+        let request = MultiTargetPathRequest {
+            mob: mob.path,
+            flags: self.flags,
+            targets,
+            max_distance_from_start: max_path_length,
+            reach_range: reach,
+            max_visited_nodes: self.max_visited_nodes,
+            max_visited_nodes_multiplier: self.max_visited_nodes_multiplier,
+        };
+        if self.flags.amphibious {
+            self.cleared_water_malus = true;
+        }
+        let path = find_path_to_targets(view, &request);
+        if let Some(path) = &path {
+            self.target_pos = Some(path.target);
+            self.reach_range = reach;
+            self.reset_stuck_timeout();
+        }
+        path
     }
 
     /// `PathNavigation.createPath(BlockPos, reachRange, maxPathLength)`：`GroundPathNavigation`
@@ -845,7 +900,7 @@ fn should_target_next_node_in_direction(
 }
 
 /// `GroundPathNavigation.findSurfacePosition`。
-fn find_surface_position(view: &dyn BlockView, pos: BlockPos) -> BlockPos {
+pub(super) fn find_surface_position(view: &dyn BlockView, pos: BlockPos) -> BlockPos {
     let min_y = view.min_y();
     let max_y = view.max_y();
     let mut pos = pos;

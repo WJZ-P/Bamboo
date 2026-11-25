@@ -512,7 +512,8 @@ impl Entity {
         let mut entity = Self::new(EntityKind::Mob(Box::new(mob::Mob::new(kind))), position);
         // `Panda` 构造函数：成年时打开捡物。
         // The `Panda` constructor enables loot pickup for adults.
-        if kind == mob::MobType::Panda
+        // `Villager` 构造函数无条件打开捡物。
+        if matches!(kind, mob::MobType::Panda | mob::MobType::Villager)
             && let Some(mob) = entity.kind.mob_mut()
         {
             mob.can_pick_up_loot = true;

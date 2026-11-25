@@ -365,6 +365,13 @@ impl ActivityState<'_> {
         self.active.contains(&activity)
     }
 
+    pub(super) fn active_non_core_activity(&self) -> Option<Activity> {
+        self.active
+            .iter()
+            .copied()
+            .find(|&act| act != Activity::Core)
+    }
+
     pub(super) fn set_default_activity(&mut self, activity: Activity) {
         *self.default_activity = activity;
     }
@@ -614,7 +621,14 @@ impl Brain {
     /// `Brain.pack()` → `new Brain(..., packed)`. Per `Brain$1`, only memories with
     /// `canSerialize() == true` are copied, filtered by the new brain's registered slots.
     pub fn copy_packed_memories_from(&mut self, old: &Brain) {
-        for (kind, value, ttl) in old.memories.filled() {
+        self.copy_packed_memories_from_memories(&old.memories);
+    }
+
+    /// 从记忆表拷贝可序列化记忆（供 `Brain::tick_by` 中途 `refreshBrain` 使用）。
+    ///
+    /// Copies serialisable memories from a `Memories` table (used by mid-tick `refreshBrain`).
+    pub fn copy_packed_memories_from_memories(&mut self, old: &Memories) {
+        for (kind, value, ttl) in old.filled() {
             if !kind.serializable() {
                 continue;
             }
@@ -726,7 +740,7 @@ impl Brain {
     ///
     /// `Brain.tick`: expire memories, sensors, start, then tick (exact single tick).
     pub fn tick(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-        self.tick_by(me, mob, ctx, 1);
+        let _ = self.tick_by(me, mob, ctx, 1);
     }
 
     /// 降频档用的跳刻版 `Brain.tick`：记忆过期与传感器倒计时按 `gap`（至少 1）推进，
@@ -734,11 +748,23 @@ impl Brain {
     /// （`ctx.blocks().game_time()`），不受 `gap` 影响。精确档传 `gap = 1` 与
     /// [`Self::tick`] 逐位一致。
     ///
+    /// 若本刻中有行为调用了 `request_brain_refresh()`（如 `AssignProfessionFromJobSite` /
+    /// `ResetProfession`），照官方 `Villager.refreshBrain` 当场停掉旧大脑里正在跑的行为、
+    /// 构造并初始化新大脑返回，同时继续把旧大脑本刻剩余的启动 / 推进跑完。
+    ///
     /// Throttled `Brain.tick`: advances memory expiry and sensor countdowns by `gap`
     /// (clamped to >= 1) so 20-tick sensors do not slow down 4× under 4-tick throttling.
     /// Behaviour end timestamps use absolute `game_time` and are unaffected. Passing
     /// `gap = 1` (precise mode) is bit-identical to [`Self::tick`].
-    pub fn tick_by(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, gap: i64) {
+    ///
+    /// Returns `Some(fresh_brain)` when a behaviour invoked `request_brain_refresh()`.
+    pub fn tick_by(
+        &mut self,
+        me: &mut Entity,
+        mob: &mut Mob,
+        ctx: &mut dyn EntityCtx,
+        gap: i64,
+    ) -> Option<Brain> {
         crate::entity::mob::timing::record_brain_tick!();
         let step = gap.max(1);
         self.memories.tick_by(step);
@@ -770,6 +796,7 @@ impl Brain {
                 switched: false,
             },
             time,
+            refresh_requested: false,
         };
         {
             crate::entity::mob::timing::span!(BrainSensors);
@@ -777,6 +804,7 @@ impl Brain {
                 sensor.tick_by(&mut cx, step);
             }
         }
+        let mut replaced: Option<Brain> = None;
         // `startEachNonRunning`：只遍历核心 + 当前活动桶，按优先级顺序。新启动的行为
         // 按序插进持久的 running 表，保持官方遍历顺序；若某个行为在启动时切换了活动
         // （如 `VillagerPanicTrigger` / `VillagerCalmDown`），立刻按新桶定位到下一个
@@ -792,8 +820,37 @@ impl Brain {
             while pos < cx.activity.start_bucket.len() {
                 let index = cx.activity.start_bucket[pos];
                 cx.activity.switched = false;
-                let node = &mut nodes[index];
-                if node.status == Status::Stopped && node.try_start(&mut cx) {
+                cx.refresh_requested = false;
+                let started = {
+                    let node = &mut nodes[index];
+                    node.status == Status::Stopped && node.try_start(&mut cx)
+                };
+                if cx.refresh_requested {
+                    cx.refresh_requested = false;
+                    // 官方 `Villager.refreshBrain` 在 `OneShot.trigger` 返回 `true` 之前调用：
+                    // 当场停掉所有正在跑的行为（不含刚刚触发的 `index`），用当前可序列化记忆
+                    // 构造新大脑并注册日程。
+                    for (idx, other) in nodes.iter_mut().enumerate() {
+                        if idx != index && other.status == Status::Running {
+                            other.do_stop(&mut cx);
+                        }
+                    }
+                    running.clear();
+                    let mut fresh =
+                        super::villager_ai::brain(cx.mob.is_baby(), cx.mob.villager.profession);
+                    fresh.seed_shuffles(cx.me.random.state());
+                    fresh.randomly_delay_start(&mut cx.me.random);
+                    fresh.copy_packed_memories_from_memories(cx.memories);
+                    let sched = if cx.mob.is_baby() {
+                        ActivitySchedule::BabyVillager
+                    } else {
+                        ActivitySchedule::Villager
+                    };
+                    fresh.set_schedule(Some(sched));
+                    fresh.update_activity_from_schedule(cx.ctx.blocks(), time);
+                    replaced = Some(fresh);
+                }
+                if started {
                     crate::entity::mob::timing::record_behavior_start!();
                     let at = running.partition_point(|&other| other < index);
                     running.insert(at, index);
@@ -821,6 +878,7 @@ impl Brain {
                 }
             }
         }
+        replaced
     }
 
     /// `Brain.stopAll`：按下标顺序停掉所有正在跑的行为，并清空 running 表。
@@ -854,6 +912,7 @@ impl Brain {
                 switched: false,
             },
             time,
+            refresh_requested: false,
         };
         for node in nodes.iter_mut() {
             if node.status == Status::Running {

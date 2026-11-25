@@ -157,6 +157,16 @@ pub trait BlockSource: Sync {
         None
     }
 
+    fn poi_in_range(
+        &self,
+        _center: BlockPos,
+        _radius: i32,
+        _type_mask: u32,
+        _occupancy: u8,
+    ) -> Vec<(u8, BlockPos)> {
+        Vec::new()
+    }
+
     fn poi_sections_to_village(&self, _pos: BlockPos) -> i32 {
         7
     }
@@ -529,6 +539,16 @@ impl<T: BlockSource> BlockView for SourceView<T> {
     ) -> Option<BlockPos> {
         self.0
             .poi_find_closest(center, radius, kind, occupancy, position_filter)
+    }
+
+    fn poi_in_range(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        type_mask: u32,
+        occupancy: u8,
+    ) -> Vec<(u8, BlockPos)> {
+        self.0.poi_in_range(center, radius, type_mask, occupancy)
     }
 
     fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {

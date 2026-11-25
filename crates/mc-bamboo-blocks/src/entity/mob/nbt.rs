@@ -36,7 +36,6 @@ const PASSTHROUGH: &[&str] = &[
     "data",
     "HasVisualFire",
     "locator_bar_icon",
-    "sleeping_pos",
     "current_explosion_impact_pos",
 ];
 
@@ -277,6 +276,9 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     // `LivingEntity`：装备非空才写 `equipment`（`EntityEquipment.CODEC`）。
     if !mob.equipment.is_empty() {
         put(&mut out, "equipment", mob.equipment.equipment_tag());
+    }
+    if let Some(pos) = mob.villager.sleeping_pos {
+        put(&mut out, "sleeping_pos", block_pos_tag(pos));
     }
     // ---- Mob ----
     // `SulfurCube.canPickUpLoot()` = `!hasBodyItem()`，存档写的是覆写后的值。
@@ -770,6 +772,14 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         mob.impulse_grace_time = tag::int_or(tag, "current_impulse_context_reset_grace_time", 0);
         // `equipment`：官方读失败时取部分结果，坏的条目丢掉、好的留下。
         mob.equipment.read_equipment(tag::field(tag, "equipment"));
+        let sleep = tag::int_array(tag, "sleeping_pos");
+        if sleep.len() == 3 && mob.mob_type == MobType::Villager {
+            let pos = BlockPos::new(sleep[0], sleep[1], sleep[2]);
+            mob.villager.sleeping_pos = Some(pos);
+            mob.villager.sleeping = true;
+            me.dimensions = (0.2, 0.2);
+            mob.eye_height = 0.2;
+        }
         // ---- Mob.readAdditionalSaveData ----
         mob.can_pick_up_loot = tag::bool_or(tag, "CanPickUpLoot", false);
         mob.persistence_required = tag::bool_or(tag, "PersistenceRequired", false);

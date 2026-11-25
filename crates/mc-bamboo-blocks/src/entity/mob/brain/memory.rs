@@ -323,6 +323,20 @@ pub enum PositionTracker {
         track_eye: bool,
         target_eye: bool,
     },
+    /// 跟着 `ItemEntity` 的 `EntityTracker`：官方的 tracker 直接持有实体对象，掉落物被
+    /// 捡走、行离开实体表之后仍能报出最后的位置、`isVisibleBy` 也恒为真。这里存下
+    /// 写入记忆时的坐标当作离表后的快照；实体还在时用表里的实时坐标。
+    ///
+    /// An `EntityTracker` following an `ItemEntity`: vanilla holds the entity object,
+    /// so a picked-up item still reports its last position and is always visible.
+    /// The stored position is the fallback once its row leaves the table; while it
+    /// remains, the live table position is used.
+    Item {
+        uid: EntityUid,
+        pos: Vec3,
+        track_eye: bool,
+        target_eye: bool,
+    },
 }
 
 impl PositionTracker {
@@ -471,6 +485,17 @@ pub enum MemoryValue {
     GlobalPosList(Vec<GlobalPos>),
     /// `BlockPos`（`nearest_bed`）。
     BlockPos(BlockPos),
+    /// `NEAREST_VISIBLE_WANTED_ITEM`：官方记忆里直接持有 `ItemEntity` 对象，实体被捡走
+    /// 之后 `GoToWantedItem` 仍能用它最后的位置继续判断。这里把 uid 和当时的坐标一起
+    /// 存下来；对拍打印时仍只输出 uid。
+    ///
+    /// `NEAREST_VISIBLE_WANTED_ITEM`: vanilla stores the `ItemEntity` itself, so
+    /// `GoToWantedItem` can still use its last position after the item is picked up.
+    /// Keep the uid plus its position; the oracle dump still prints just the uid.
+    WantedItem {
+        uid: EntityUid,
+        pos: Vec3,
+    },
 }
 
 impl MemoryValue {
@@ -819,6 +844,20 @@ impl Memories {
     pub fn entity(&self, kind: MemoryType) -> Option<EntityUid> {
         match self.get(kind) {
             Some(MemoryValue::Entity(uid)) => Some(*uid),
+            Some(MemoryValue::WantedItem { uid, .. }) => Some(*uid),
+            _ => None,
+        }
+    }
+
+    /// `NEAREST_VISIBLE_WANTED_ITEM` 持有的 `ItemEntity` 快照：表里的实时坐标优先，
+    /// 实体已经离表时用记忆里的最后坐标。
+    ///
+    /// The `ItemEntity` held by `NEAREST_VISIBLE_WANTED_ITEM`: prefer the live table
+    /// position, falling back to the stored last position once it leaves the table.
+    pub fn wanted_item(&self) -> Option<(EntityUid, Vec3)> {
+        match self.get(MemoryType::NearestVisibleWantedItem) {
+            Some(MemoryValue::WantedItem { uid, pos }) => Some((*uid, *pos)),
+            Some(MemoryValue::Entity(uid)) => Some((*uid, Vec3::default())),
             _ => None,
         }
     }

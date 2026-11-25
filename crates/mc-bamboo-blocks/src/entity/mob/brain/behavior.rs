@@ -29,6 +29,12 @@ pub struct Cx<'a> {
     pub memories: &'a mut Memories,
     pub(super) activity: ActivityState<'a>,
     pub time: i64,
+    /// 行为在 `Brain.tick` 中途请求 `Villager.refreshBrain`：由 `Brain::tick_by` 立即
+    /// 执行 `stopAll` + 重建新大脑，保持官方随机源与活动顺序一致。
+    ///
+    /// Set by a behaviour that triggers `Villager.refreshBrain` mid-tick; handled right
+    /// after `try_start` inside `Brain::tick_by` to preserve vanilla RNG and stop order.
+    pub(super) refresh_requested: bool,
 }
 
 impl Cx<'_> {
@@ -44,6 +50,20 @@ impl Cx<'_> {
     /// `Brain.isActive`.
     pub fn is_active(&self, activity: Activity) -> bool {
         self.activity.is_active(activity)
+    }
+
+    /// `Brain.getActiveNonCoreActivity()`：返回当前第一个非 `CORE` 活动。
+    ///
+    /// `Brain.getActiveNonCoreActivity()`: returns the first active non-`CORE` activity.
+    pub fn active_non_core_activity(&self) -> Option<Activity> {
+        self.activity.active_non_core_activity()
+    }
+
+    /// 请求 `Brain::tick_by` 立即照 `Villager.refreshBrain` 重建大脑。
+    ///
+    /// Requests `Brain::tick_by` to rebuild the brain per `Villager.refreshBrain`.
+    pub fn request_brain_refresh(&mut self) {
+        self.refresh_requested = true;
     }
 
     /// `Brain.setDefaultActivity`。
