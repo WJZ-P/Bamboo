@@ -3091,10 +3091,14 @@ fn hurt_living(
         }
         die(me, mob, ctx, source);
     } else if full_hit {
-        // `Mob.playHurtSound`：先重置叫声计时，再取音高。
+        // `Mob.playHurtSound`：先重置叫声计时，再取音高；狼铠吸收时换成铠甲受伤声。
         mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
         let pitch = voice_pitch(me, mob);
-        let sound = voice_of(mob, Voice::Hurt, me.in_water);
+        let sound = if super::wolf::can_armor_absorb(mob, source) {
+            super::wolf::SOUND_ARMOR_DAMAGE
+        } else {
+            voice_of(mob, Voice::Hurt, me.in_water)
+        };
         play_sound(me, mob, sound, sound_volume(mob), pitch);
     }
     mob.last_damage_source = Some(source);
@@ -3123,6 +3127,12 @@ fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource, ti
 
 /// `Animal.actuallyHurt` → `LivingEntity.actuallyHurt`。没有护甲、效果和吸收。
 fn actually_hurt(me: &mut Entity, mob: &mut Mob, source: DamageSource, amount: f32) {
+    // `Wolf.actuallyHurt`：狼铠把这次伤害全吸收掉，只扣耐久、不掉血。
+    // `Wolf.actuallyHurt`: wolf armour absorbs the hit, spending durability only.
+    if super::wolf::can_armor_absorb(mob, source) {
+        super::wolf::absorb_hurt(me, mob, amount);
+        return;
+    }
     mob.in_love = 0;
     let _ = me;
     let mut amount = amount;

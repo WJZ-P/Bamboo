@@ -141,7 +141,7 @@ pub(crate) struct HurtParts<'a> {
     pub players: &'a mut BTreeMap<PlayerId, Player>,
     pub links: &'a mut Links,
     pub sound_seeds: &'a LevelRandom,
-    pub entities: &'a Entities,
+    pub entities: &'a mut Entities,
     pub difficulty: i32,
     pub rules: &'a GameRuleSet,
     /// 正在 tick、不在实体表里的攻击者（精确驱动里打人的生物）。
@@ -164,7 +164,7 @@ impl Region {
             players: &mut self.players,
             links: &mut self.links,
             sound_seeds: &self.sound_seed_generator,
-            entities: &self.entities,
+            entities: &mut self.entities,
             difficulty: self.global.difficulty as i32,
             rules: &self.global.rules,
             attacker: None,
@@ -333,6 +333,11 @@ fn hurt_player_damage(
     {
         return (false, None);
     }
+    // 官方 `Player.hurtServer` 在这两道判据之后、结算伤害之前无条件
+    // `removeEntitiesOnShoulder()`：受伤立刻把肩上的鹦鹉放回世界。
+    // Vanilla `Player.hurtServer` calls `removeEntitiesOnShoulder()` here,
+    // before resolving damage: being hurt drops shoulder parrots at once.
+    crate::player_shoulder::remove_on_hurt(player, parts.entities);
     // `LivingEntity.hurtServer`：`#is_fire` 的伤害被抗火效果完全挡下。
     // `LivingEntity.hurtServer`: fire resistance blocks all `#is_fire` damage.
     if source.kind.is_fire()

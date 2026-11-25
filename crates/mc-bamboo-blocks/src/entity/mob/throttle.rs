@@ -613,6 +613,8 @@ pub fn sleep_mob_timers(me: &mut Entity, mob: &mut Mob) {
 #[cfg(test)]
 pub fn test_player(uid: EntityUid, position: Vec3) -> PlayerView {
     PlayerView {
+        shoulder_left: None,
+        shoulder_right: None,
         uid,
         uuid: None,
         position,

@@ -212,6 +212,26 @@ fn player_at(pos: BlockPos, spectator: bool, head: ItemStack) -> EquipTarget {
     }
 }
 
+/// 前方格子里的一头狼：只有 BODY 槽（6）能装备。
+fn wolf_at(pos: BlockPos) -> EquipTarget {
+    let mut equipment: [Option<ItemStack>; 8] = std::array::from_fn(|_| None);
+    equipment[6] = Some(ItemStack::empty());
+    EquipTarget {
+        entity_id: 7,
+        bounds: Aabb::new(
+            f64::from(pos.x),
+            f64::from(pos.y),
+            f64::from(pos.z),
+            f64::from(pos.x) + 1.0,
+            f64::from(pos.y) + 1.0,
+            f64::from(pos.z) + 1.0,
+        ),
+        spectator: false,
+        entity_type: crate::entity::mob::MobType::Wolf.entity_type(),
+        equipment,
+    }
+}
+
 #[test]
 fn an_empty_dispenser_plays_1001_and_draws_nothing() {
     let mut level = TestLevel::new();
@@ -1084,6 +1104,42 @@ fn a_boat_and_a_minecart_are_consumed_only_when_they_can_be_placed() {
             .filter(|event| event.0 == 1000)
             .count(),
         2
+    );
+}
+
+/// 发射器把狼铠穿到前方格子里的狼身上（Body 槽 6）。
+#[test]
+fn wolf_armor_equips_the_wolf_in_the_front_cell() {
+    let target = POS.relative(Direction::East);
+    let mut level = TestLevel::new();
+    level.living.push(wolf_at(target));
+    let worn = fire_id(&mut level, Direction::East, items::WOLF_ARMOR);
+    assert!(worn.left.is_empty());
+    assert_eq!(
+        level.living[0].equipment[6]
+            .as_ref()
+            .map(|stack| stack.item),
+        Some(items::WOLF_ARMOR)
+    );
+    assert!(worn.effects.iter().any(|effect| matches!(
+        effect,
+        Effect::DispenserEquipped {
+            entity_id: 7,
+            menu_slot: 6
+        }
+    )));
+
+    // 已经穿着狼铠时发射器穿不上，物品被抛出。
+    let mut level = TestLevel::new();
+    let mut occupied = wolf_at(target);
+    occupied.equipment[6] = Some(ItemStack::new(items::WOLF_ARMOR, 1));
+    level.living.push(occupied);
+    let fired = fire_id(&mut level, Direction::East, items::WOLF_ARMOR);
+    assert!(
+        !fired
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::DispenserEquipped { .. }))
     );
 }
 

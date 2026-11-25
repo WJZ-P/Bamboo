@@ -351,6 +351,11 @@ public final class MobOracle {
             if (only == null || "equine".startsWith(only)) {
                 cases += playEquines(official, out);
             }
+            if (only == null || "parrot_shoulder".startsWith(only)) {
+                cases += playParrotShoulder(official, out, null);
+            } else if (only.startsWith("parrot_shoulder_")) {
+                cases += playParrotShoulder(official, out, only);
+            }
             if (only == null || "panda".startsWith(only)) {
                 cases += playPandaGenes(official, out);
             }
@@ -1742,6 +1747,10 @@ public final class MobOracle {
         out.append(",\"wolfBeg\":").append(wolf.isInterested());
         out.append(",\"wolfCollar\":").append(wolf.getCollarColor().getId());
         out.append(",\"wolfMaxHp\":").append(Float.floatToRawIntBits(wolf.getMaxHealth()));
+        var body = wolf.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.BODY);
+        out.append(",\"wolfBodyItem\":").append(BuiltInRegistries.ITEM.getId(body.getItem()));
+        out.append(",\"wolfBodyDamage\":").append(body.getDamageValue());
+        out.append(",\"wolfBodyCount\":").append(body.getCount());
     }
 
     /** `SleepGoal.countdown` 在构造时用随机种子取，对拍时报给 Bamboo 一侧照填。 */
@@ -2880,6 +2889,45 @@ public final class MobOracle {
             sheep.mob(8, 0.5, 64.0, 0.5, 0.0F, 53L, 0);
             sheep.mob(4, 8.5, 64.0, 0.5, 0.0F, 54L, 0);
             scenes.add(sheep);
+            // 狼铠：主人给驯服的狼穿上，狼挨打时铠吸收伤害并逐次开裂，鳞甲修回耐久。
+            // Wolf armour: the owner equips a tamed wolf, hits are absorbed (durability
+            // grows, never health), and an armadillo scute repairs the damage.
+            int armor = BuiltInRegistries.ITEM.getId(Items.WOLF_ARMOR);
+            int scute = BuiltInRegistries.ITEM.getId(Items.ARMADILLO_SCUTE);
+            // 种子 61 的四次喂骨头必驯服（和 wolf_tame_61 共用同一随机序列）。
+            // Seed 61 tames within four bones (same draw sequence as wolf_tame_61).
+            for (int variant = 0; variant < 3; variant++) {
+                String name = switch (variant) {
+                    case 0 -> "wolf_armor_equip";
+                    case 1 -> "wolf_armor_absorb";
+                    default -> "wolf_armor_repair";
+                };
+                Scene armorScene = new Scene(name).ticks(90);
+                Scenes.ground(armorScene, 15);
+                armorScene.mob(8, 0.5, 64.0, 0.5, 0.0F, 61L, 0);
+                armorScene.player(2.5, 64.0, 0.5, Items.AIR);
+                for (int t = 2; t <= 14; t += 4) armorScene.interact(t, 0, 0, bone, 0);
+                armorScene.interact(30, 0, 0, armor, 0);
+                if (variant == 1) {
+                    // playerAttack 不在 bypasses_wolf_armor 里：5/20/25 三次伤害把耐久
+                    // 推到 5/25/50，跨过 NONE→LOW→MEDIUM→HIGH 三个开裂阶段，血量不变。
+                    // playerAttack is not in bypasses_wolf_armor: hits of 5/20/25 push
+                    // durability to 5/25/50 (NONE→LOW→MEDIUM→HIGH), health never changes.
+                    armorScene.hurts.add(new double[] {40, 0, 5.0, 0});
+                    armorScene.hurts.add(new double[] {50, 0, 20.0, 0});
+                    armorScene.hurts.add(new double[] {60, 0, 25.0, 0});
+                }
+                if (variant == 2) {
+                    // 一次伤害打出 20 点损耗；hurtServer 站起来，空手右键切回坐下，
+                    // 等坐姿 goal 落地后用鳞甲修回 8 点（maxDamage * 0.125）。
+                    // One hit spends 20 durability; hurtServer stands the wolf up, an
+                    // empty-hand click sits it again, then a scute repairs 8 points.
+                    armorScene.hurts.add(new double[] {40, 0, 20.0, 0});
+                    armorScene.interact(45, 0, 0, air, 0);
+                    armorScene.interact(70, 0, 0, scute, 0);
+                }
+                scenes.add(armorScene);
+            }
         }
     }
 
@@ -8047,6 +8095,169 @@ public final class MobOracle {
             }
         }
         return cases;
+    }
+
+    /**
+     * 鹦鹉站肩膀：官方鹦鹉自己跑 `LandOnOwnersShoulderGoal`（100 刻冷却 + 碰撞箱相交），
+     * 走 `setEntityOnShoulder` 把整只鹦鹉 `saveWithoutId` 存进左右肩并 discard；
+     * 之后按官方的离肩判据（跳起 / 落水 / 飞行 / 睡觉 / 细雪 / 受伤）由
+     * `removeEntitiesOnShoulder` 从 NBT 造回世界。每刻输出左右肩的品种、还在世界的
+     * 鹦鹉数、以及造回来的位置，让 Bamboo 一侧真跑自己的目标和肩膀生产逻辑逐刻对拍。
+     *
+     * Parrots run the real `LandOnOwnersShoulderGoal`: after the 100-tick cooldown
+     * and an AABB overlap they perch via `setEntityOnShoulder`, then removal
+     * conditions respawn them from NBT. Each tick emits both shoulder variants,
+     * how many parrots remain in the world and their positions, so Bamboo's own
+     * goal and shoulder production code are compared step by step.
+     */
+    private static int playParrotShoulder(Official official, Writer out, String only) throws Exception {
+        String[] names = {"parrot_shoulder_jump", "parrot_shoulder_water",
+                "parrot_shoulder_hurt", "parrot_shoulder_sleep", "parrot_shoulder_snow",
+                "parrot_shoulder_flying"};
+        int written = 0;
+        for (int scene = 0; scene < names.length; scene++) {
+            if (only != null && !names[scene].startsWith(only) && !"parrot_shoulder".startsWith(only)) {
+                continue;
+            }
+            FakeLevel world = FakeLevel.create(official);
+            GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+            ServerPlayer player = new ServerPlayer(official.server, world, profile,
+                    ClientInformation.createDefault());
+            player.setId(1024);
+            player.setPos(0.5, 64.0, 0.5);
+            // 假世界不跑物理，显式让官方 `setEntityOnShoulder` 的 onGround 条件成立。
+            player.setOnGround(true);
+            ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+            put(ServerGamePacketListenerImpl.class, connection, "player", player);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "server", official.server);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+            ((RecordingListener) connection).bytes = new Bytes(official.registries);
+            put(ServerPlayer.class, player, "connection", connection);
+            world.playersList().add(player);
+            world.tracked.add(player);
+            // 假世界没有地面，鹦鹉会一直往下掉，到冷却结束时早就离开玩家的包围盒。
+            // 铺一格草地并关掉重力，让两只鹦鹉停在与玩家相交的位置。
+            for (int x = -1; x <= 1; x++) {
+                for (int z = -1; z <= 1; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.GRASS_BLOCK.defaultBlockState());
+                }
+            }
+
+            @SuppressWarnings("unchecked")
+            var variantId = (net.minecraft.network.syncher.EntityDataAccessor<Integer>) readStatic(
+                    net.minecraft.world.entity.animal.parrot.Parrot.class, "DATA_VARIANT_ID");
+            @SuppressWarnings("unchecked")
+            var sleepingId = (net.minecraft.network.syncher.EntityDataAccessor<java.util.Optional<net.minecraft.core.BlockPos>>) readStatic(
+                    net.minecraft.world.entity.LivingEntity.class, "SLEEPING_POS_ID");
+            net.minecraft.world.entity.animal.parrot.Parrot[] parrots =
+                    new net.minecraft.world.entity.animal.parrot.Parrot[2];
+            int[] variants = {2, 4};
+            for (int i = 0; i < parrots.length; i++) {
+                var parrot = EntityTypes.PARROT.create(world, EntitySpawnReason.COMMAND);
+                parrot.setUUID(new UUID(0L, 100 + i));
+                parrot.setId(1 + i);
+                parrot.setPos(0.5, 64.0, 0.5);
+                setRandom(parrot, 77001L + i);
+                parrot.getEntityData().set(variantId, variants[i]);
+                parrot.setTame(true, false);
+                parrot.setOwner(player);
+                parrot.setNoGravity(true);
+                // 只留官方的 `LandOnOwnersShoulderGoal`：其余目标会挪动鹦鹉、取随机数，
+                // 假世界没有寻路 / 地形，逐刻位置会发散。
+                var selector = (net.minecraft.world.entity.ai.goal.GoalSelector) readField(
+                        net.minecraft.world.entity.Mob.class, parrot, "goalSelector");
+                selector.removeAllGoals(goal -> !(goal instanceof net.minecraft.world.entity.ai.goal.LandOnOwnersShoulderGoal));
+                world.tracked.add(parrot);
+                parrots[i] = parrot;
+            }
+            StringBuilder steps = new StringBuilder("[");
+            for (int tick = 1; tick <= 130; tick++) {
+                world.gameTime++;
+                // 受伤是最早的离肩判据之一，但要等两只都上肩且过了 20 刻锁。
+                if (scene == 2 && tick == 130) {
+                    player.hurtServer(world, world.damageSources().generic(), 1.0f);
+                }
+                if (tick == 130) {
+                    switch (scene) {
+                        case 0 -> put(net.minecraft.world.entity.Entity.class, player,
+                                "fallDistance", Double.valueOf(1.0));
+                        case 1 -> put(net.minecraft.world.entity.Entity.class, player,
+                                "wasTouchingWater", Boolean.TRUE);
+                        case 3 -> player.getEntityData().set(sleepingId,
+                                java.util.Optional.of(new net.minecraft.core.BlockPos(0, 64, 0)));
+                        case 4 -> put(net.minecraft.world.entity.Entity.class, player,
+                                "isInPowderSnow", Boolean.TRUE);
+                        case 5 -> player.getAbilities().flying = true;
+                        default -> { }
+                    }
+                }
+                // 官方 `Entity.tick` 里依次跑 `commonTick + tick`，目标在 `serverAiStep` 里。
+                for (var parrot : parrots) {
+                    if (!parrot.isRemoved()) {
+                        parrot.commonTick();
+                        parrot.tick();
+                    }
+                }
+                player.handleShoulderEntities();
+                int left = player.getShoulderEntityLeft().isEmpty() ? -1
+                        : player.getShoulderEntityLeft().getIntOr("Variant", -1);
+                int right = player.getShoulderEntityRight().isEmpty() ? -1
+                        : player.getShoulderEntityRight().getIntOr("Variant", -1);
+                // 世界里还在的鹦鹉（含从肩膀造回来的），以及造回来的位置。
+                // `respawnEntityOnShoulder` 走 FakeLevel.addWithUUID → spawned；
+                // 只在世界里、还没被丢弃的鹦鹉才算。按位置排序，两侧实体 ID 本就不同。
+                java.util.List<String> positions = new java.util.ArrayList<>();
+                for (var entity : world.tracked) {
+                    if (entity instanceof net.minecraft.world.entity.animal.parrot.Parrot
+                            && !entity.isRemoved()) {
+                        positions.add("[" + Double.doubleToRawLongBits(entity.getX()) + ","
+                                + Double.doubleToRawLongBits(entity.getY()) + ","
+                                + Double.doubleToRawLongBits(entity.getZ()) + "]");
+                    }
+                }
+                for (var entity : world.spawned) {
+                    if (entity instanceof net.minecraft.world.entity.animal.parrot.Parrot
+                            && !entity.isRemoved() && !world.tracked.contains(entity)) {
+                        positions.add("[" + Double.doubleToRawLongBits(entity.getX()) + ","
+                                + Double.doubleToRawLongBits(entity.getY()) + ","
+                                + Double.doubleToRawLongBits(entity.getZ()) + "]");
+                    }
+                }
+                java.util.Collections.sort(positions);
+                StringBuilder present = new StringBuilder("[");
+                for (int i = 0; i < positions.size(); i++) {
+                    if (i > 0) present.append(',');
+                    present.append(positions.get(i));
+                }
+                present.append(']');
+                if (tick > 1) steps.append(',');
+                steps.append("{\"left\":").append(left)
+                        .append(",\"right\":").append(right)
+                        .append(",\"parrots\":").append(present).append('}');
+            }
+            steps.append(']');
+            written++;
+            out.write("{\"type\":\"parrotShoulder\",\"name\":\"" + names[scene] + "\","
+                    + "\"removal\":\"" + new String[] {"jump", "water", "hurt", "sleep", "snow", "flying"}[scene] + "\","
+                    + "\"playerX\":" + Double.doubleToRawLongBits(player.getX())
+                    + ",\"playerY\":" + Double.doubleToRawLongBits(player.getY())
+                    + ",\"playerZ\":" + Double.doubleToRawLongBits(player.getZ())
+                    + ",\"steps\":" + steps + "}\n");
+        }
+        return written;
+    }
+
+    /** 读一个对象字段（含 protected / private），对拍夹具用它拿 `goalSelector`。 */
+    private static Object readField(Class<?> owner, Object target, String name) {
+        try {
+            java.lang.reflect.Field field = owner.getDeclaredField(name);
+            field.setAccessible(true);
+            return field.get(target);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     /** 六种初始状态：0 野生满血、1 野生残血高脾气、2 驯服满血、3 驯服残血带鞍带护甲带箱子、4 驯服幼崽残血、5 野生幼崽。 */
@@ -21306,6 +21517,15 @@ public final class MobOracle {
             }
             spawned.add(entity);
             return true;
+        }
+
+        @Override
+        public boolean addWithUUID(net.minecraft.world.entity.Entity entity) {
+            // 官方 `ServerPlayer.respawnEntityOnShoulder` 走 addWithUUID；假世界没有
+            // entityManager，接到 addFreshEntity 收集实体即可，避免空指针。
+            // Vanilla's respawnEntityOnShoulder calls addWithUUID; the fake world has
+            // no entityManager, so route it to addFreshEntity.
+            return addFreshEntity(entity);
         }
 
         /** 按幼崽 / 掉落物的构造顺序给新实体换上岛的种子源，并重放构造取数。 */

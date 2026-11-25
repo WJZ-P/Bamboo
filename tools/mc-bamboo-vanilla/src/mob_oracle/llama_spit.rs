@@ -97,6 +97,7 @@ impl LlamaSpitCase {
             short_hunger: false,
             wrong_was_hurt: false,
             explosion_break: 0,
+            shoulder: Default::default(),
         }
     }
 
