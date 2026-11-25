@@ -109,6 +109,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 crate::entity::KindPublic::LlamaSpit(spit) => spit.pitch,
                 crate::entity::KindPublic::Egg(egg) => egg.x_rot,
                 crate::entity::KindPublic::SplashPotion(potion) => potion.x_rot,
+                crate::entity::KindPublic::WindCharge(charge) => charge.pitch,
                 _ => 0.0,
             }),
         ]),

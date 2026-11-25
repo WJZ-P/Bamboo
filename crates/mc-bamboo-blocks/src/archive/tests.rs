@@ -900,3 +900,65 @@ fn a_loaded_cow_keeps_running_from_its_saved_state() {
     assert!(adult_after.tick_count > 0);
     assert_ne!(adult_after.position, adult_start);
 }
+
+/// 风弹的官方存档键（Projectile + AbstractHurtingProjectile）写 → 读 → 写不变，
+/// 两种注册表类型分别走 `minecraft:wind_charge` / `minecraft:breeze_wind_charge`。
+#[test]
+fn wind_charge_save_round_trip_keeps_variant_and_owner() {
+    for variant in [
+        crate::entity::wind_charge::WindChargeVariant::Player,
+        crate::entity::wind_charge::WindChargeVariant::Breeze,
+    ] {
+        let mut charge = crate::entity::wind_charge::WindCharge::new(variant);
+        charge.uuid = [7_u8; 16];
+        charge.owner_uuid = Some([9_u8; 16]);
+        charge.left_owner = true;
+        charge.has_been_shot = true;
+        charge.pitch = 12.5;
+        let row = entity_row(
+            EntityKind::WindCharge(Box::new(charge)),
+            Vec3::new(1.5, 70.25, -2.0),
+        );
+        let tag = write_entity(&row).unwrap();
+        let rebuilt = read_entity(&tag, 99).unwrap().unwrap();
+        let again = write_entity(&rebuilt).unwrap();
+        let normalize = |tag: Tag| match tag {
+            Tag::Compound(mut values) => {
+                values.retain(|(key, _)| key != "UUID");
+                Tag::Compound(values)
+            }
+            other => other,
+        };
+        assert_eq!(normalize(tag), normalize(again));
+        let restored = rebuilt.clone().into_entity();
+        if let EntityKind::WindCharge(charge) = &restored.kind {
+            assert_eq!(charge.variant, variant);
+            assert!(charge.left_owner && charge.has_been_shot);
+            assert_eq!(charge.pitch, 12.5);
+        } else {
+            panic!("wind charge round trip lost its kind");
+        }
+    }
+}
+
+/// 旋风人走通用生物存档，额外字段（Pose 之类客户端状态）不写。
+#[test]
+fn breeze_mob_save_round_trip_keeps_pose_default() {
+    let mut entity = crate::entity::Entity::by_mob_type(
+        crate::entity::mob::MobType::Breeze,
+        Vec3::new(2.5, 64.0, 0.5),
+    );
+    entity.with_mob(|_, mob| mob.breeze.pose = crate::entity::mob::breeze::Pose::Shooting);
+    let row = entity.split();
+    let tag = write_entity(&row).unwrap();
+    let rebuilt = read_entity(&tag, 99).unwrap().unwrap();
+    let again = write_entity(&rebuilt).unwrap();
+    let normalize = |tag: Tag| match tag {
+        Tag::Compound(mut values) => {
+            values.retain(|(key, _)| key != "UUID");
+            Tag::Compound(values)
+        }
+        other => other,
+    };
+    assert_eq!(normalize(tag), normalize(again));
+}
