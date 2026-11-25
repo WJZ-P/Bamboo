@@ -132,9 +132,9 @@ pub(crate) mod spawn_landing;
 /// The structure spawn override (`ChunkGenerator.getMobsAt`), also used by the oracle.
 pub mod structure_spawn;
 mod tick_levels;
+mod wandering_trader_spawn;
 mod weather;
 mod world;
-mod wandering_trader_spawn;
 mod world_gen_settings;
 pub mod world_options;
 mod world_state;

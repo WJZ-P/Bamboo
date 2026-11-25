@@ -205,7 +205,9 @@ pub(crate) fn parse_world_clocks(tag: &Tag) -> Option<Vec<(&'static str, Clock)>
 ///
 /// `WanderingTraderData.CODEC`: the two optional fields `spawn_delay` and
 /// `spawn_chance`, defaulting to 24000 / 25.
-pub fn wandering_trader_tag(data: mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData) -> Tag {
+pub fn wandering_trader_tag(
+    data: mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData,
+) -> Tag {
     let (delay, chance) = data.tag();
     Tag::Compound(vec![
         ("spawn_delay".to_owned(), Tag::Int(delay)),
@@ -218,7 +220,9 @@ pub fn wandering_trader_tag(data: mc_bamboo_blocks::entity::mob::wandering_trade
 ///
 /// Decode `wandering_trader.dat`; a missing or invalid field falls back to the
 /// official codec defaults. Unknown fields are ignored.
-pub fn parse_wandering_trader(tag: &Tag) -> mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData {
+pub fn parse_wandering_trader(
+    tag: &Tag,
+) -> mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData {
     use mc_bamboo_blocks::entity::mob::wandering_trader_spawner as spawner;
     let delay = match get(tag, "spawn_delay") {
         Some(Tag::Int(value)) => *value,

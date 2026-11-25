@@ -366,31 +366,29 @@ pub(crate) struct Region {
     ///
     /// `PhantomSpawner.nextTick`: the custom spawner's countdown, kept across ticks.
     pub(crate) phantom_spawner: mc_bamboo_blocks::entity::mob::phantom_spawner::PhantomSpawner,
-    /// `WanderingTraderSpawner` 的内存状态：`tickDelay` 和两个随机源种子。
+    /// `WanderingTraderSpawner` 的内存状态：`tickDelay` 和随机源内部种子。
     /// 存档的两个字段在 `GlobalView::wandering_trader_data` 里，全服一份。
     ///
-    /// `WanderingTraderSpawner`'s in-memory state: `tickDelay` and the two
-    /// random-source seeds; the two saved fields are the global snapshot.
+    /// `WanderingTraderSpawner`'s in-memory state: `tickDelay` and the RNG's
+    /// internal seed; the two saved fields are the global snapshot.
     pub(crate) wandering_trader_spawner: WanderingTraderSpawnerState,
 }
 
-/// 刷新器在岛上的内存状态（不存档；随机源拆成两个 i64 种子便于克隆）。
+/// 刷新器在岛上的内存状态（不存档；只存随机源的内部种子，便于克隆）。
 ///
-/// The spawner's per-island in-memory state (not saved; the RNG is split into
-/// two i64 seeds so the state stays cloneable).
+/// The spawner's per-island in-memory state (not saved; only the RNG's
+/// internal seed, so it stays cloneable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WanderingTraderSpawnerState {
     pub(crate) tick_delay: i32,
     pub(crate) random_seed: i64,
-    pub(crate) lo: i64,
 }
 
 impl Default for WanderingTraderSpawnerState {
     fn default() -> Self {
         Self {
             tick_delay: mc_bamboo_blocks::entity::mob::wandering_trader_spawner::TICK_DELAY,
-            random_seed: crate::region::unique_seed(),
-            lo: 0,
+            random_seed: mc_bamboo_blocks::random::LegacyRandom::new(unique_seed()).seed(),
         }
     }
 }

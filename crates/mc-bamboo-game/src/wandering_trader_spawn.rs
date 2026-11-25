@@ -42,19 +42,17 @@ pub(crate) fn tick(region: &mut Region, port: &mut GlobalPort<'_>) {
         state.tick_delay,
         state.random_seed,
     );
-    // 恢复上一次 tick 之后的内部 128 位状态；`from_seed` 只作初始值。
-    spawner.random = mc_bamboo_blocks::random::XoroshiroRandom::new(state.lo, state.random_seed);
+    // `Region` 存的是 LCG 的内部种子（`LegacyRandom::seed()`），不是 `setSeed`
+    // 的输入种子；恢复内部状态后取数序列才接着上一刻。
+    spawner.random = mc_bamboo_blocks::random::LegacyRandom::from_raw_seed(state.random_seed);
     let effects = {
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
         spawner.tick(&mut world, &players, enabled);
         world.into_effects()
     };
-    let (lo, hi) = spawner.random.seed();
-    // `XoroshiroRandom` 的内部状态是 (lo, hi)；存成两个 i64 以便不依赖随机源的可克隆性。
     region.wandering_trader_spawner.tick_delay = spawner.tick_delay;
-    region.wandering_trader_spawner.lo = lo;
-    region.wandering_trader_spawner.random_seed = hi;
+    region.wandering_trader_spawner.random_seed = spawner.random.seed();
     let data: WanderingTraderData = spawner.data;
     if data != region.global.wandering_trader_data {
         region.global.wandering_trader_data = data;

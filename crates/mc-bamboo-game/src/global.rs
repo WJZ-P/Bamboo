@@ -270,7 +270,8 @@ pub(crate) struct Global {
     /// 全服一份的 `WanderingTraderData`（`data/minecraft/wandering_trader.dat`）。
     ///
     /// The one `WanderingTraderData` (`data/minecraft/wandering_trader.dat`).
-    pub(crate) wandering_trader_data: mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData,
+    pub(crate) wandering_trader_data:
+        mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData,
     /// 权威的世界生成参数（种子、世界类型、flat 预设、结构开关）。启动时定下来，
     /// 发布到岛上的全局快照，之后整局不变。
     ///
@@ -859,7 +860,8 @@ pub(crate) struct GlobalView {
     pub(crate) idle_timeout_minutes: i32,
     pub(crate) scoreboard: Arc<Scoreboard>,
     /// 全服的 `WanderingTraderData`，写盘时用。
-    pub(crate) wandering_trader_data: mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData,
+    pub(crate) wandering_trader_data:
+        mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData,
 }
 
 impl Default for GlobalView {

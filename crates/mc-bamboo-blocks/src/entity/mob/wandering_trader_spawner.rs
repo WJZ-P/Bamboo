@@ -17,9 +17,8 @@ use mc_bamboo_data::tags;
 
 use super::{MobType, leash, natural, spawn, wandering_trader};
 use crate::{
-    RandomSource,
     entity::{Entity, ctx::BlockView},
-    random::XoroshiroRandom,
+    random::LegacyRandom,
     world::World,
 };
 
@@ -82,12 +81,12 @@ impl WanderingTraderData {
     }
 }
 
-/// 刷新器的内存 + 存档状态。`random` 官方是 `RandomSource.create()`（无种子），
-/// 对拍时用 [`Self::with_random_seed`] 注入同种子的一条 `XoroshiroRandom`。
+/// 刷新器的内存 + 存档状态。`random` 官方是 `RandomSource.create()`，也就是
+/// `LegacyRandomSource`（48 位线性同余）；对拍时注入同种子的一条 `LegacyRandom`。
 ///
-/// The spawner's in-memory and saved state. Vanilla's `random` is an unseeded
-/// `RandomSource.create()`; [`Self::with_random_seed`] injects a seeded
-/// `XoroshiroRandom` for the oracle.
+/// The spawner's in-memory and saved state. Vanilla's `random` is
+/// `RandomSource.create()`, a `LegacyRandomSource` (48-bit LCG); the oracle
+/// injects a seeded `LegacyRandom` with the same algorithm.
 #[derive(Debug)]
 pub struct WanderingTraderSpawner {
     /// `WanderingTraderSpawner.tickDelay`，构造时 1200、不存档。
@@ -95,7 +94,7 @@ pub struct WanderingTraderSpawner {
     /// `WanderingTraderData`，存档。
     pub data: WanderingTraderData,
     /// 刷新器自己的随机源（和世界随机源分开）。
-    pub random: XoroshiroRandom,
+    pub random: LegacyRandom,
 }
 
 impl Default for WanderingTraderSpawner {
@@ -103,7 +102,7 @@ impl Default for WanderingTraderSpawner {
         Self {
             tick_delay: TICK_DELAY,
             data: WanderingTraderData::default(),
-            random: XoroshiroRandom::from_seed(0),
+            random: LegacyRandom::new(0),
         }
     }
 }
@@ -116,7 +115,7 @@ impl WanderingTraderSpawner {
         Self {
             tick_delay,
             data,
-            random: XoroshiroRandom::from_seed(seed),
+            random: LegacyRandom::new(seed),
         }
     }
 
@@ -396,7 +395,7 @@ mod tests {
         // `nextInt(100) <= 25` 且 `nextInt(10) == 0`，再用它重放整次 tick。
         let seed = (0..4096_i64)
             .find(|&seed| {
-                let r = XoroshiroRandom::from_seed(seed);
+                let r = LegacyRandom::new(seed);
                 r.next_int(100) <= MIN_SPAWN_CHANCE && r.next_int(SPAWN_ONE_IN_X_CHANCE) == 0
             })
             .expect("存在一个通过两道概率门的种子");

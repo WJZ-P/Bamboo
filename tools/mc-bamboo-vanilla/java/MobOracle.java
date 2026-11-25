@@ -101,6 +101,11 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.npc.villager.Villager;
+import net.minecraft.world.entity.npc.wanderingtrader.WanderingTrader;
+import net.minecraft.world.entity.npc.wanderingtrader.WanderingTraderSpawner;
+import net.minecraft.world.entity.animal.equine.TraderLlama;
+import net.minecraft.world.level.saveddata.WanderingTraderData;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.npc.villager.VillagerData;
 import net.minecraft.world.entity.npc.villager.VillagerProfession;
 import net.minecraft.world.entity.npc.villager.VillagerType;
@@ -433,6 +438,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("sulfur_cube_")) {
                 cases += playSulfurCube(official, out, only);
                 cases += playSulfurCubeSave(official, out);
+            }
+            if (only == null || "wandering_trader".startsWith(only)) {
+                cases += playWanderingTrader(official, out, only);
             }
             if (only == null || "villager".startsWith(only)) {
                 cases += playVillagerSpawn(official, out);
@@ -13212,6 +13220,103 @@ public final class MobOracle {
      * Villager spawn types: pin the biome in the fake level, run one `finalizeSpawn` and
      * report the `VillagerData`, finalized flag, dimensions and health.
      */
+    /** 流浪商人：`WanderingTraderSpawner.tick` 的存档计时 / 概率逐刻对拍，
+     *  加上商人和行商羊驼的存档往返。 */
+    private static int playWanderingTrader(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        if (only == null || "wandering_trader_spawner".startsWith(only)) {
+            for (long seed : new long[] {0L, 1L, 123456789L, -987654321L}) {
+                for (boolean enabled : new boolean[] {true, false}) {
+                    out.write(wanderingSpawnerCase(official, seed, enabled) + "\n");
+                    cases++;
+                }
+            }
+        }
+        if (only == null || "wandering_trader_save".startsWith(only)) {
+            out.write(wanderingSaveCase(official, false) + "\n");
+            out.write(wanderingSaveCase(official, true) + "\n");
+            cases += 2;
+        }
+        out.flush();
+        return cases;
+    }
+
+    /** 注入 `WanderingTraderSpawner` 的私有随机源 / 存档 / tickDelay，逐刻读回两个字段。 */
+    private static String wanderingSpawnerCase(Official official, long seed, boolean enabled) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        setRule(official, net.minecraft.world.level.gamerules.GameRules.SPAWN_WANDERING_TRADERS, enabled);
+        WanderingTraderSpawner spawner = new WanderingTraderSpawner(null);
+        put(WanderingTraderSpawner.class, spawner, "random", RandomSource.create(seed));
+        put(WanderingTraderSpawner.class, spawner, "traderData", new WanderingTraderData());
+        putInt(WanderingTraderSpawner.class, spawner, "tickDelay", 1200);
+        // 假世界没有玩家；`spawn` 因此恒返回 true，随机源只走 `nextInt(100)`。
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick < 24_000; tick++) {
+            spawner.tick(level, true);
+            if (tick % 1200 == 1199) {
+                WanderingTraderData data = (WanderingTraderData) get(WanderingTraderSpawner.class, spawner, "traderData");
+                if (tick > 1199) frames.append(',');
+                frames.append('[').append(data.spawnDelay()).append(',').append(data.spawnChance()).append(']');
+            }
+        }
+        frames.append(']');
+        setRule(official, net.minecraft.world.level.gamerules.GameRules.SPAWN_WANDERING_TRADERS, true);
+        var row = new JsonObject();
+        row.addProperty("type", "wanderingTraderSpawner");
+        row.addProperty("name", enabled ? "wandering_trader_spawner" : "wandering_trader_spawner_off");
+        row.addProperty("seed", seed);
+        row.addProperty("enabled", enabled);
+        row.add("frames", com.google.gson.JsonParser.parseString(frames.toString()));
+        return row.toString();
+    }
+
+    /** 商人 / 行商羊驼存档：官方 `saveWithoutId` → `load` → 再存一次，逐键比对。 */
+    private static String wanderingSaveCase(Official official, boolean llama) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        net.minecraft.world.entity.Mob mob = llama
+                ? (net.minecraft.world.entity.Mob) net.minecraft.world.entity.EntityTypes.TRADER_LLAMA.create(
+                        world, net.minecraft.world.entity.EntitySpawnReason.COMMAND)
+                : (net.minecraft.world.entity.Mob) net.minecraft.world.entity.EntityTypes.WANDERING_TRADER.create(
+                        world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+        mob.setPos(1.5, 64.0, 2.5);
+        mob.setYRot(37.0F);
+        mob.setXRot(12.0F);
+        putInt(net.minecraft.world.entity.npc.wanderingtrader.WanderingTrader.class.isInstance(mob)
+                ? net.minecraft.world.entity.npc.wanderingtrader.WanderingTrader.class : TraderLlama.class,
+                mob, "despawnDelay", 12345);
+        if (!llama) {
+            put(net.minecraft.world.entity.npc.wanderingtrader.WanderingTrader.class, mob, "wanderTarget",
+                    new BlockPos(7, 65, -9));
+        }
+        var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+        mob.saveWithoutId(output);
+        var loadedTag = output.buildResult();
+        net.minecraft.world.entity.Mob copy = (net.minecraft.world.entity.Mob) (llama
+                ? net.minecraft.world.entity.EntityTypes.TRADER_LLAMA.create(
+                        world, net.minecraft.world.entity.EntitySpawnReason.LOAD)
+                : net.minecraft.world.entity.EntityTypes.WANDERING_TRADER.create(
+                        world, net.minecraft.world.entity.EntitySpawnReason.LOAD));
+        copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries, loadedTag));
+        var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+        copy.saveWithoutId(again);
+        var row = new JsonObject();
+        row.addProperty("type", "wanderingTraderSave");
+        row.addProperty("name", llama ? "wandering_trader_save_llama" : "wandering_trader_save_trader");
+        row.addProperty("llama", llama);
+        row.addProperty("nbt", loadedTag.toString());
+        row.addProperty("reloaded", again.buildResult().toString());
+        return row.toString();
+    }
+
+    private static Object get(Class<?> owner, Object target, String name) throws Exception {
+        Field field = owner.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(target);
+    }
+
     private static int playVillagerSpawn(Official official, Writer out) throws Exception {
         int cases = 0;
         for (String biome : new String[] {"plains", "desert", "snowy_plains", "taiga",

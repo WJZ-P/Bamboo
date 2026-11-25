@@ -16,10 +16,12 @@ use crate::entity::{Entity, ctx::EntityCtx};
 /// The `despawnDelay` set by `WanderingTraderSpawner.spawn`.
 pub const SPAWNED_DESPAWN_DELAY: i32 = 48000;
 
-/// 一次 `UseItemGoal` 的饮水时长：隐身药水和牛奶桶都是 32 刻。
+/// `Consumables.DEFAULT_DRINK` / `MILK_BUCKET` 的 `consumeSeconds = 1.6`，
+/// 也就是 32 刻；`UseItemGoal.startUsingItem` 到 `completeUsingItem` 正好这段。
 ///
-/// The `UseItemGoal` duration: both the invisibility potion and the milk bucket take 32 ticks.
-const DRINK_DURATION: i32 = 32;
+/// `Consumables.DEFAULT_DRINK` / `MILK_BUCKET` have `consumeSeconds = 1.6`
+/// (32 ticks) between `UseItemGoal.startUsingItem` and `completeUsingItem`.
+pub const DRINK_DURATION: i32 = 32;
 
 /// 当前正在使用的消耗品（官方 `UseItemGoal` 的 `startUsingItem` 状态）。
 ///
