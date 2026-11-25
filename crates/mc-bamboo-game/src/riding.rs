@@ -331,43 +331,54 @@ pub(crate) fn load_root_vehicle(region: &mut Region, id: PlayerId, tag: &mc_bamb
         None => entity_uuid_of(&rows[0]),
     };
     // `read_entity_tree` 给的是占位号；按块读盘时 `ChunkEntities::from_parts` 会
-    // 重新取号，这里也一样：先把整棵树里的 `vehicle` 和 `Passengers` 引用映射到
-    // 即将分配的新号，再逐行放进实体表。
-    let old_ids: Vec<EntityUid> = rows.iter().map(|row| row.public.uid).collect();
-    // 先按行序问出真正的号（不消耗），再逐行 spawn；`spawn_row` 每次消耗一个。
-    let fresh: Vec<EntityUid> = {
-        let mut at = region.entities.ids_handle().peek();
-        let mut out = Vec::with_capacity(rows.len());
-        for _ in 0..rows.len() {
-            out.push(at);
-            at = at.saturating_add(1);
-        }
-        out
-    };
-    let remap: BTreeMap<EntityUid, EntityUid> =
-        old_ids.iter().copied().zip(fresh.iter().copied()).collect();
-    let mut spawned = Vec::new();
+    // 重新取号，这里也一样。号码计数器是各岛共用的原子量，别的岛可能同时在取号，
+    // 不能先预测号码再放：先把引用摘掉、逐行放进实体表拿到真正的号，再按
+    // 「占位号 → 新号」把整棵树里的 `vehicle` 和 `Passengers` 引用写回去。
+    //
+    // `read_entity_tree` hands out placeholder ids; chunk loading reassigns them in
+    // `ChunkEntities::from_parts`, and so do we. The id counter is an atomic shared by
+    // every island and another island may be allocating at the same time, so the ids
+    // cannot be predicted: strip the links, spawn each row to get its real id, then
+    // write the tree's `vehicle` and `Passengers` links back through the mapping.
+    let mut links = Vec::with_capacity(rows.len());
+    let mut spawned = Vec::with_capacity(rows.len());
     for mut row in rows {
         let uuid = entity_uuid_of(&row);
-        if let Some(vehicle) = row.public.vehicle {
-            row.public.vehicle = remap.get(&vehicle).copied();
-        }
-        let mob_passengers = |list: &mut Vec<EntityUid>| {
-            for passenger in list.iter_mut() {
-                if let Some(&fresh) = remap.get(passenger) {
-                    *passenger = fresh;
-                }
-            }
+        let placeholder = row.public.uid;
+        let vehicle = row.public.vehicle.take();
+        let passengers = match &mut row.public.kind {
+            mc_bamboo_blocks::entity::KindPublic::Mob(mob) => std::mem::take(&mut mob.passengers),
+            _ => Vec::new(),
         };
-        if let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &mut row.public.kind {
-            mob_passengers(&mut mob.passengers);
-        }
         if let mc_bamboo_blocks::entity::KindState::Mob(mob) = &mut row.state.kind {
-            mob_passengers(&mut mob.passengers);
+            mob.passengers.clear();
         }
         let uid = region.entities.spawn_row(row);
-        spawned.push((uid, uuid));
+        links.push((uid, vehicle, passengers));
+        spawned.push((uid, uuid, placeholder));
     }
+    let remap: BTreeMap<EntityUid, EntityUid> = spawned
+        .iter()
+        .map(|&(uid, _, placeholder)| (placeholder, uid))
+        .collect();
+    for (uid, vehicle, passengers) in links {
+        let vehicle = vehicle.and_then(|old| remap.get(&old).copied());
+        let passengers: Vec<EntityUid> = passengers
+            .iter()
+            .filter_map(|old| remap.get(old).copied())
+            .collect();
+        if vehicle.is_none() && passengers.is_empty() {
+            continue;
+        }
+        region.entities.with_mut(uid, |entity| {
+            entity.vehicle = vehicle;
+            entity.with_mob(|_, mob| mob.passengers = passengers);
+        });
+    }
+    let spawned: Vec<(EntityUid, [u8; 16])> = spawned
+        .into_iter()
+        .map(|(uid, uuid, _)| (uid, uuid))
+        .collect();
     let Some(&(vehicle, _)) = spawned.iter().find(|(_, uuid)| *uuid == attach) else {
         for (uid, _) in spawned {
             region.entities.remove(uid);
