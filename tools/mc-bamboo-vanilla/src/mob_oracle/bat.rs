@@ -132,6 +132,7 @@ impl BatCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            containers: Default::default(),
             explosion_break: 0,
             natural_spawn: None,
             biome: None,

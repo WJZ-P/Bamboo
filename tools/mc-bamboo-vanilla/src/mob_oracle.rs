@@ -1033,6 +1033,12 @@ struct MobLevel {
     ignore_bed_monsters: bool,
     /// 改坏确认爆炸：位 0 跳过 `hurtEntities`，位 1 丢掉爆炸中心的 0.0625 抬升。
     explosion_break: u8,
+    /// 铜傀儡搬运场景的容器槽位表（位置 → 槽位），Java 假世界里的铜箱子 / 箱子。
+    /// 其余场景为空。`World::with_container` 与只读查询都走这一份。
+    ///
+    /// Container slots for copper golem transport scenes (mirrors the chests in the
+    /// Java fake level). Empty for other scenes.
+    containers: HashMap<BlockPos, Vec<ItemStack>>,
 }
 
 impl MobLevel {
@@ -1314,8 +1320,42 @@ impl Level for MobLevel {
         None
     }
 
-    fn with_container(&mut self, _pos: BlockPos, _f: &mut dyn FnMut(&mut dyn Container)) -> bool {
-        false
+    fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
+        let Some(slots) = self.containers.get_mut(&pos) else {
+            return false;
+        };
+        let mut container = mc_bamboo_blocks::Slots::new(slots);
+        f(&mut container);
+        true
+    }
+
+    fn slots_at(&self, pos: BlockPos) -> Vec<ItemStack> {
+        self.containers.get(&pos).cloned().unwrap_or_default()
+    }
+
+    fn container_positions_in(
+        &self,
+        center: BlockPos,
+        horizontal: i32,
+        vertical: i32,
+    ) -> Vec<BlockPos> {
+        let mut out: Vec<_> = self
+            .containers
+            .keys()
+            .copied()
+            .filter(|pos| {
+                (pos.x - center.x).abs() <= horizontal
+                    && (pos.y - center.y).abs() <= vertical
+                    && (pos.z - center.z).abs() <= horizontal
+            })
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    fn statue_custom_name(&self, pos: BlockPos) -> Option<mc_bamboo_nbt::Tag> {
+        let _ = pos;
+        None
     }
 
     fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
@@ -2174,6 +2214,7 @@ impl Report {
             ignore_bed_monsters: matches!(break_test, Some("zombie_bed")),
             short_hunger: matches!(break_test, Some("zombie_hunger")),
             wrong_was_hurt: matches!(break_test, Some("zombie_was_hurt")),
+            containers: Default::default(),
             explosion_break: match break_test {
                 Some("explode_tnt_hurt") => 1,
                 Some("explode_tnt_center") => 2,

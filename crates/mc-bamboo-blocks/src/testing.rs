@@ -523,6 +523,26 @@ impl Level for TestLevel {
         self.containers.get(&pos).cloned().unwrap_or_default()
     }
 
+    fn container_positions_in(
+        &self,
+        center: BlockPos,
+        horizontal: i32,
+        vertical: i32,
+    ) -> Vec<BlockPos> {
+        let mut out: Vec<_> = self
+            .containers
+            .keys()
+            .copied()
+            .filter(|pos| {
+                (pos.x - center.x).abs() <= horizontal
+                    && (pos.y - center.y).abs() <= vertical
+                    && (pos.z - center.z).abs() <= horizontal
+            })
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
     fn clear_container(&mut self, pos: BlockPos) {
         self.containers.remove(&pos);
     }

@@ -209,6 +209,7 @@ pub(crate) fn parallel_entity_ticks(
             poi,
             entities,
             block_entities,
+            containers,
             global,
             tick_levels,
             profiler,
@@ -222,6 +223,12 @@ pub(crate) fn parallel_entity_ticks(
         // 这里只用实体表，不需要完整的 `RegionLevel`：区块表接下来要借给只读视图。
         entities.begin_tick();
         let hopper_positions = crate::entity_view::hopper_positions(chunks);
+        // 算阶段开始的容器槽位快照（按位置升序），铜傀儡只读查询用它；
+        // 精确驱动读的是当前容器表。
+        let container_snapshot: Vec<_> = containers
+            .iter()
+            .map(|(pos, entry)| (*pos, entry.slots.clone()))
+            .collect();
         let facts = ViewFacts {
             min_y: mc_bamboo_world::MIN_Y,
             max_y: mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1,
@@ -246,6 +253,7 @@ pub(crate) fn parallel_entity_ticks(
             moving_piston_shapes: block_entity_shapes.moving_piston_shapes,
             shulker_box_shapes: block_entity_shapes.shulker_box_shapes,
             hopper_positions,
+            container_snapshot,
             block_change_stamp: block_change_stamp.get(),
             world_border: global.world_border.clone(),
             players: player_views,

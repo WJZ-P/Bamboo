@@ -191,6 +191,15 @@ pub const TURN_TO_STATUE_CHANCE: f32 = 0.0058;
 /// 构造时 `TRANSPORT_ITEMS_COOLDOWN_TICKS` 的 `[60, 100)`。
 pub const SPAWN_COOLDOWN_MIN: i32 = 60;
 pub const SPAWN_COOLDOWN_MAX: i32 = 100;
+/// `TransportItemsBetweenContainers` 的常量（`javap -constants`）。
+pub const TARGET_INTERACTION_TIME: i32 = 60;
+pub const TRANSPORTED_ITEM_MAX_STACK_SIZE: i32 = 16;
+pub const IDLE_COOLDOWN: i32 = 140;
+pub const MAX_VISITED_POSITIONS: usize = 10;
+pub const MAX_UNREACHABLE_POSITIONS: usize = 50;
+pub const VISITED_POSITIONS_MEMORY_TIME: i64 = 6000;
+pub const HORIZONTAL_SEARCH_RADIUS: i32 = 32;
+pub const VERTICAL_SEARCH_RADIUS: i32 = 8;
 
 /// 铜傀儡自己的字段，别的生物恒为缺省值。
 ///
@@ -561,6 +570,88 @@ pub(crate) fn apply_statue(
     me.discard();
 }
 
+/// `clearMemoriesAfterMatchingTargetFound`：清掉搬运用的两处位置集合记忆。
+fn clear_transport_memories(mob: &mut Mob) {
+    if let Some(brain) = mob.brain.as_mut() {
+        brain.memories.erase(MemoryType::VisitedBlockPositions);
+        brain
+            .memories
+            .erase(MemoryType::UnreachableTransportBlockPositions);
+    }
+}
+
+/// `TransportItemsBetweenContainers.pickUpItems` 的落地：从箱子取最多 16 个进主手。
+///
+/// 只读查询决定要取之后才发这条命令；落地阶段按 uid 顺序串行应用，若另一只傀儡
+/// 已经把东西取走，这里读到空箱子就什么都不做（官方「先到先得」）。
+pub(crate) fn apply_pick_up(world: &mut crate::world::World, me: &mut Entity, pos: BlockPos) {
+    let mut taken = ItemStack::empty();
+    let found = world.with_container(pos, &mut |container| {
+        for slot in 0..container.size() {
+            let stack = container.get(slot);
+            if !stack.is_empty() {
+                taken =
+                    container.remove_item(slot, stack.count.min(TRANSPORTED_ITEM_MAX_STACK_SIZE));
+                break;
+            }
+        }
+    });
+    if !found || taken.is_empty() {
+        return;
+    }
+    if let Some(mob) = me.kind.mob_mut() {
+        mob.equipment.set(EquipmentSlot::MainHand, taken);
+        clear_transport_memories(mob);
+    }
+}
+
+/// `TransportItemsBetweenContainers.addItemsToContainer` 的落地：主手物品进箱子，
+/// 剩余留主手。逐槽合并 / 填空，和官方一样用「可容纳空间」而不是实际移动数去减主手。
+pub(crate) fn apply_put_down(world: &mut crate::world::World, me: &mut Entity, pos: BlockPos) {
+    let Some(mob) = me.kind.mob_mut() else {
+        return;
+    };
+    let mut held = mob.equipment.get(EquipmentSlot::MainHand).clone();
+    if held.is_empty() {
+        return;
+    }
+    let mut remaining = held.clone();
+    let found = world.with_container(pos, &mut |container| {
+        for slot in 0..container.size() {
+            let stack = container.get(slot);
+            if stack.is_empty() {
+                container.set(slot, held.clone());
+                remaining = ItemStack::empty();
+                return;
+            }
+            if crate::container::same_item_same_components(&stack, &held)
+                && stack.count < container.max_stack_size_of(&stack)
+            {
+                let space = container.max_stack_size_of(&stack) - stack.count;
+                let moved = space.min(held.count);
+                let mut merged = stack.clone();
+                merged.count += moved;
+                container.set(slot, merged);
+                // 官方写的是 `hand.count -= space`（不是 moved）。
+                held.count -= space;
+                if held.is_empty() {
+                    remaining = ItemStack::empty();
+                    return;
+                }
+            }
+        }
+        remaining = held.clone();
+    });
+    if !found {
+        return;
+    }
+    mob.equipment
+        .set(EquipmentSlot::MainHand, remaining.clone());
+    if remaining.is_empty() {
+        clear_transport_memories(mob);
+    }
+}
+
 /// `CopperGolem.mobInteract`：空手扔回携带物、剪下天线、蜜脾打蜡、斧头去蜡 / 刮锈。
 ///
 /// `CopperGolem.mobInteract`: empty hand throws the carried item, shears remove the
@@ -841,5 +932,83 @@ mod statue_tests {
         }
         assert_eq!(level.statue_names.get(&pos), Some(&name));
         assert!(entity.removed);
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use mc_bamboo_data::items;
+
+    use super::*;
+    use crate::{
+        entity::ctx::{self, Command},
+        level::Level,
+        testing::TestLevel,
+        ticks::BlockTicks,
+        world::World,
+    };
+
+    fn golem(id: i32) -> Entity {
+        let mut entity = Entity::by_mob_type(MobType::CopperGolem, Vec3::new(0.5, 64.0, 0.5));
+        entity.id = id;
+        entity
+    }
+
+    /// 两条取物命令冲突时按 uid 顺序落地：先到的拿走，后到的读到空箱子，什么都不做。
+    #[test]
+    fn conflicting_pickups_are_first_come_first_served() {
+        let pos = BlockPos::new(2, 64, 3);
+        let mut level = TestLevel::new();
+        level.set_container(pos, vec![ItemStack::new(items::STONE, 3)]);
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+
+        let mut first = golem(1);
+        let mut second = golem(2);
+        // 落地阶段按 uid 升序串行应用，正是 `parallel.rs` 的循环语义。
+        ctx::apply(Command::CopperGolemPickUp { pos }, &mut first, &mut world);
+        ctx::apply(Command::CopperGolemPickUp { pos }, &mut second, &mut world);
+
+        assert_eq!(
+            first
+                .kind
+                .mob()
+                .unwrap()
+                .equipment
+                .get(EquipmentSlot::MainHand),
+            &ItemStack::new(items::STONE, 3)
+        );
+        assert!(
+            second
+                .kind
+                .mob()
+                .unwrap()
+                .equipment
+                .get(EquipmentSlot::MainHand)
+                .is_empty()
+        );
+        assert!(level.slots_at(pos).iter().all(ItemStack::is_empty));
+    }
+
+    /// 一次最多取 16 个（`TRANSPORTED_ITEM_MAX_STACK_SIZE`）。
+    #[test]
+    fn pickup_is_capped_at_sixteen() {
+        let pos = BlockPos::new(2, 64, 3);
+        let mut level = TestLevel::new();
+        level.set_container(pos, vec![ItemStack::new(items::STONE, 40)]);
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut golem = golem(1);
+        ctx::apply(Command::CopperGolemPickUp { pos }, &mut golem, &mut world);
+        assert_eq!(
+            golem
+                .kind
+                .mob()
+                .unwrap()
+                .equipment
+                .get(EquipmentSlot::MainHand),
+            &ItemStack::new(items::STONE, 16)
+        );
+        assert_eq!(level.slots_at(pos)[0], ItemStack::new(items::STONE, 24));
     }
 }

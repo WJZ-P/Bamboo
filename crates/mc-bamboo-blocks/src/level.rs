@@ -1201,6 +1201,21 @@ pub trait Level: LevelSideState + LevelEntities {
         vec![pos]
     }
 
+    /// `TransportItemsBetweenContainers.getTransportTarget` 的只读查询：以 `center`
+    /// 的方块为中心、`horizontal`/`vertical` 为半径的盒子里所有容器方块位置。
+    /// 没有容器表的世界返回空表。
+    ///
+    /// Read-only query for `getTransportTarget`: container positions inside the search
+    /// box. Worlds without a container table return an empty list.
+    fn container_positions_in(
+        &self,
+        _center: BlockPos,
+        _horizontal: i32,
+        _vertical: i32,
+    ) -> Vec<BlockPos> {
+        Vec::new()
+    }
+
     /// 带着这一格的漏斗方块实体运行一段代码。这一格没有漏斗实体时不调用 `f`，返回 `false`。
     ///
     /// 实体正在 tick 时已经从表里拿出来了，这里取不到。漏斗的物品在槽位表，不在这个实体上。

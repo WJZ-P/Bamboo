@@ -93,6 +93,7 @@ impl SulfurCubeCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            containers: Default::default(),
             explosion_break: 0,
         }
     }

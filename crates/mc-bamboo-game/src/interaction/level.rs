@@ -885,6 +885,24 @@ impl Level for RegionLevel<'_> {
             .unwrap_or_default()
     }
 
+    /// 精确驱动读当前容器表；按方块位置升序（PosMap 遍历序）返回盒内位置。
+    fn container_positions_in(
+        &self,
+        center: BlockPos,
+        horizontal: i32,
+        vertical: i32,
+    ) -> Vec<BlockPos> {
+        self.containers
+            .keys()
+            .copied()
+            .filter(|pos| {
+                (pos.x - center.x).abs() <= horizontal
+                    && (pos.y - center.y).abs() <= vertical
+                    && (pos.z - center.z).abs() <= horizontal
+            })
+            .collect()
+    }
+
     fn clear_container(&mut self, pos: BlockPos) {
         self.dirty.mark(pos.chunk());
         self.notify_container(pos);

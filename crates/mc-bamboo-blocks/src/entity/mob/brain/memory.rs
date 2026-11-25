@@ -117,6 +117,13 @@ pub enum MemoryType {
     /// The copper golem's `transport_items_cooldown_ticks` (registered without a
     /// codec, so it is not saved). Appended last to keep existing indices.
     TransportItemsCooldownTicks,
+    /// `TransportItemsBetweenContainers` 的 `VISITED_BLOCK_POSITIONS` /
+    /// `UNREACHABLE_TRANSPORT_BLOCK_POSITIONS`：官方 `Set<GlobalPos>`，
+    /// 都带 `GlobalPos.CODEC.listOf()` 编解码器，进存档。追加在末尾。
+    ///
+    /// The transport behaviour's visited / unreachable position sets, both saved.
+    VisitedBlockPositions,
+    UnreachableTransportBlockPositions,
     /// 嗅探兽的记忆。带编解码器的进存档：`sniffer_explored_positions`
     /// （`GlobalPos.CODEC.listOf()`）和 `sniff_cooldown`（`Unit.CODEC`）；其余
     /// （`sniffer_sniffing_target` / `sniffer_digging` / `sniffer_happy`）用
@@ -137,7 +144,7 @@ impl MemoryType {
     /// 记忆种类的个数，槽表的长度。
     ///
     /// The number of memory types: the length of the slot table.
-    pub const COUNT: usize = 57;
+    pub const COUNT: usize = 59;
 
     /// 全部种类，按枚举顺序。
     ///
@@ -195,6 +202,8 @@ impl MemoryType {
         Self::ChargeCooldownTicks,
         Self::AttackTargetCooldown,
         Self::TransportItemsCooldownTicks,
+        Self::VisitedBlockPositions,
+        Self::UnreachableTransportBlockPositions,
         Self::SnifferExploredPositions,
         Self::SnifferSniffingTarget,
         Self::SnifferDigging,
@@ -259,6 +268,8 @@ impl MemoryType {
             Self::ChargeCooldownTicks => "charge_cooldown_ticks",
             Self::AttackTargetCooldown => "attack_target_cooldown",
             Self::TransportItemsCooldownTicks => "transport_items_cooldown_ticks",
+            Self::VisitedBlockPositions => "visited_block_positions",
+            Self::UnreachableTransportBlockPositions => "unreachable_transport_block_positions",
             Self::SnifferExploredPositions => "sniffer_explored_positions",
             Self::SnifferSniffingTarget => "sniffer_sniffing_target",
             Self::SnifferDigging => "sniffer_digging",
@@ -302,6 +313,8 @@ impl MemoryType {
                 | Self::ItemPickupCooldownTicks
                 | Self::SnifferExploredPositions
                 | Self::SniffCooldown
+                | Self::VisitedBlockPositions
+                | Self::UnreachableTransportBlockPositions
         )
     }
 
