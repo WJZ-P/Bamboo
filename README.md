@@ -1600,11 +1600,15 @@ WebView2 的渲染进程不算在内。
   **Boss 血条**：`ServerBossEvent` 每只凋灵一根栏，game 层每刻跟着 `EntityTracking.seen_by` 给新进入
   跟踪范围的玩家发 `BossEvent` add（PURPLE / PROGRESS / `setDarkenScreen(true)`）、离开的发 remove、进度变化的发
   update，凋灵消失时给所有观众发 remove；拆岛 / 合岛时血条跟着实体搬。
-  **已知限制**：`AbstractHurtingProjectile.applyInertia` 的水中分支（`getLiquidInertia=0.8` 和气泡粒子）、
-  `onHitEntity` 里目标死亡时 `owner.heal(5)` 与 `doPostAttackEffects`、`DATA_DANGEROUS` 的客户端元数据同步包、
-  侧头 `getNearbyEntities` 只收生物（玩家由 `NearestAttackableTargetGoal` 负责）、Boss 栏 UUID 用实体 UUID
-  （官方另用 `Mth.createInsecureUUID(random)`）还没接；**没有新增逐刻对拍场景，也没有 4 处改坏确认**——
-  召唤 / 无敌期 / 爆炸 / 射凋灵之首 / 半血弹箭 / 破坏方块 / 存档往返的官方逐刻对拍留待下一步。
+  **逐刻对拍（已闭环的部分）**：`mob-oracle --only wither` 的存档往返场景把官方 `WitherBoss` 的 NBT
+  （`Invul` 取 0 / 137 / 220）逐键对拍 0 差异；4 处改坏确认 `wither_save_invul` / `wither_save_health` /
+  `wither_save_pos` / `wither_save_rotation` 都会报不一致。
+  **已知限制（本轮未做）**：召唤图案 / 无敌期爆炸 / 射凋灵之首命中牛 / 半血弹箭 / 破坏方块的官方逐刻对拍场景
+  留待下一步——`MobOracle.FakeLevel` 要补 `explode` / `globalLevelEvent` / `getNearbyEntities` / `destroyBlock`
+  和凋灵之首 `addFreshEntity` 的 `entitySeeds` 播种，再写对应的 Rust 重放。另外上述
+  `AbstractHurtingProjectile.applyInertia` 水中分支、`onHitEntity` 里目标死亡时 `owner.heal(5)` 与
+  `doPostAttackEffects`、`DATA_DANGEROUS` 客户端元数据同步包、侧头 `getNearbyEntities` 只收生物、Boss 栏 UUID
+  用实体 UUID（官方另用 `Mth.createInsecureUUID(random)`）都还没接。
 - 正版验证的限制：`server.properties` 的 `online-mode` 官方默认 true，命令行版和桌面端都读同一份文件、
   设置页里可以改；`ServerConfig::default()`（不读配置文件的嵌入用法）是 false。
   和代理转发互斥：打开转发时正版验证会被关掉，因为代理已经替服务端验过了。
