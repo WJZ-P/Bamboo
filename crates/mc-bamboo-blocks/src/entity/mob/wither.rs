@@ -17,6 +17,7 @@ use mc_bamboo_data::{registries::attribute, tags::block_tags};
 use crate::{
     entity::{
         Entity, EntityKind, KindPublic,
+        arrow::player_box,
         ctx::{Command, EntityCtx},
         wither_skull::WitherSkullShot,
     },
@@ -563,8 +564,11 @@ fn side_head_attacks(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 mob.wither.targets[i] = 0;
             }
         } else {
-            // `getNearbyEntities(..., AABB.inflate(20, 8, 20))`：只收非亡灵的活体生物。
-            // `getNearbyEntities(..., AABB.inflate(20, 8, 20))`: non-undead living mobs.
+            // `getNearbyEntities(LivingEntity, ..., AABB.inflate(20, 8, 20))`：官方收所有
+            // 符合 `LIVING_ENTITY_SELECTOR` 的 `LivingEntity`，玩家也算（侧头会自己打玩家）。
+            // `getNearbyEntities(LivingEntity, ..., AABB.inflate(20, 8, 20))`: vanilla
+            // collects every `LivingEntity` matching `LIVING_ENTITY_SELECTOR`, players
+            // included (side heads target players on their own).
             let area = me.bounding_box().inflate(20.0, 8.0, 20.0);
             let mut candidates = Vec::new();
             ctx.for_each_other_in(area, &mut |other| {
@@ -575,6 +579,19 @@ fn side_head_attacks(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                     && !is_wither_friend(public.mob_type)
                 {
                     candidates.push(other.uid);
+                }
+            });
+            ctx.blocks().for_each_player(&mut |player| {
+                // 玩家不是 `#wither_friends`；`attackable()` 排除旁观 / 创造模式，
+                // 包围盒要落在扫描范围内。
+                // A player is not `#wither_friends`; `attackable()` drops spectators
+                // and creative players, and the box must lie in the scanned area.
+                if player.alive
+                    && !player.spectator
+                    && !player.creative
+                    && player_box(player).intersects(area)
+                {
+                    candidates.push(player.uid);
                 }
             });
             if !candidates.is_empty() {
