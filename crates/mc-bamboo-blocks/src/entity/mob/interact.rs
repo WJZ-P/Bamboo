@@ -51,6 +51,10 @@ pub struct MobInteractRequest {
     /// stand uses its height to pick a slot. Absent for interactions that carry
     /// no target point, and unused by other mobs.
     pub hit_pos: Option<Vec3>,
+    /// `Player.isSpectator()`：`ArmorStand.interact` 对旁观者直接返回 `SUCCESS`。
+    ///
+    /// `Player.isSpectator()`: `ArmorStand.interact` returns `SUCCESS` at once.
+    pub spectator: bool,
 }
 
 /// 交互的后果，交给调用方改物品栏和发挥手动画。
@@ -752,6 +756,7 @@ mod tests {
             sneaking: false,
             difficulty: 2,
             hit_pos: None,
+            spectator: false,
         }
     }
 

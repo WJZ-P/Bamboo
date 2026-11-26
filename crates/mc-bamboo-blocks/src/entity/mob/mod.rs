@@ -2612,6 +2612,11 @@ pub struct DamageSource {
     /// 攻击者的 UUID，存进 `last_hurt_by_*`。
     pub attacker_uuid: Option<[u8; 16]>,
     /// 造成伤害的是非玩家生物：`when_caused_by_living_non_player` 缩放要读它。
+    /// `Player.getAbilities().mayBuild`：冒险 / 旁观模式为假，`ArmorStand.hurtServer` 要读。
+    ///
+    /// `Player.getAbilities().mayBuild`: false in adventure / spectator, read by
+    /// `ArmorStand.hurtServer`.
+    pub attacker_may_build: bool,
     pub scale_when_non_player: bool,
     /// 主手武器带来的附魔（这一期只读破甲之外的效果，见 `damage::protection`）。
     /// 空表示没有武器。
@@ -2672,6 +2677,7 @@ impl DamageSource {
             raw_position: None,
             sprint_yaw: None,
             attacker_uuid: None,
+            attacker_may_build: true,
             scale_when_non_player: false,
             weapon: None,
             armor_effectiveness: 0.0,
@@ -2762,6 +2768,7 @@ impl DamageSource {
     pub(crate) fn with_player_mob_attack(mut self, player: PlayerMobAttack) -> Self {
         self.attacker_uuid = Some(player.uuid);
         self.looting_level = player.looting;
+        self.attacker_may_build = player.may_build;
         self
     }
 
@@ -2778,6 +2785,7 @@ impl DamageSource {
             raw_position: None,
             sprint_yaw: None,
             attacker_uuid: None,
+            attacker_may_build: true,
             scale_when_non_player: false,
             weapon: None,
             armor_effectiveness: 0.0,
@@ -2805,6 +2813,8 @@ impl DamageSource {
 pub struct PlayerMobAttack {
     pub uuid: [u8; 16],
     pub looting: i32,
+    /// `Player.getAbilities().mayBuild`。
+    pub may_build: bool,
 }
 
 /// 掉落表区分致死来源和最近伤害过它的玩家。

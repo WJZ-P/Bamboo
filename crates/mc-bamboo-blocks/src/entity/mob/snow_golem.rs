@@ -315,6 +315,7 @@ mod tests {
             sneaking: false,
             difficulty: 2,
             hit_pos: None,
+            spectator: false,
             position: Vec3::new(0.0, 64.0, 0.0),
         };
         let outcome = interact(&mob, &req);

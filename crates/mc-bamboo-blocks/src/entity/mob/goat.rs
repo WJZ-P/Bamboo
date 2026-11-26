@@ -1654,6 +1654,7 @@ mod tests {
             sneaking: false,
             difficulty: 2,
             hit_pos: None,
+            spectator: false,
         };
         let fed = |creative: bool| MobInteraction {
             duplicate_allay: false,

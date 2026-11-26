@@ -794,6 +794,7 @@ mod tests {
             sneaking: false,
             difficulty: 2,
             hit_pos: None,
+            spectator: false,
         }
     }
 

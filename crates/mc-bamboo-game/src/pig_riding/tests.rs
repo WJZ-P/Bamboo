@@ -190,6 +190,7 @@ fn shears_remove_a_pig_saddle() {
             sneaking: false,
             difficulty: 2,
             hit_pos: None,
+            spectator: false,
         };
         let outcome = interact(me, mob, &request, 0, false, &mut || 0.0);
         assert_eq!(outcome.result, mc_bamboo_blocks::InteractionResult::Success);

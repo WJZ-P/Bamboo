@@ -1183,6 +1183,7 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
             .as_ref()
             .map_or(0, |weapon| enchantment_level(weapon, "minecraft:punch")),
         attacker_uuid: arrow.owner_uuid,
+        attacker_may_build: true,
         scale_when_non_player: owner
             .as_ref()
             .is_some_and(|p| matches!(p.kind, KindPublic::Mob(_))),
@@ -1300,6 +1301,7 @@ fn hit_entity_trident(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHi
         position: Some(me.position),
         projectile_motion: Some(me.delta),
         attacker_uuid: me_owner_uuid(me),
+        attacker_may_build: true,
         scale_when_non_player: owner
             .as_ref()
             .is_some_and(|p| matches!(p.kind, KindPublic::Mob(_))),

@@ -557,6 +557,7 @@ mod tests {
             sneaking,
             difficulty: 2,
             hit_pos: None,
+            spectator: false,
         }
     }
 

@@ -1666,6 +1666,7 @@ fn shear_shooter(world: &mut World<'_>, case: &ProjectileCase) -> (bool, Vec<[i6
         sneaking: false,
         difficulty: 2,
         hit_pos: None,
+        spectator: false,
         position: Vec3::new(case.player_x, 64.0, 0.5),
     };
     let outcome = world.interact_mob(case.first_id, &request);

@@ -1663,6 +1663,11 @@ impl Level for RegionLevel<'_> {
         Some(mc_bamboo_blocks::entity::mob::PlayerMobAttack {
             uuid: *player.uuid.as_bytes(),
             looting,
+            may_build: !matches!(
+                player.game_mode,
+                mc_bamboo_protocol::packet::play::GameMode::Adventure
+                    | mc_bamboo_protocol::packet::play::GameMode::Spectator
+            ),
         })
     }
 

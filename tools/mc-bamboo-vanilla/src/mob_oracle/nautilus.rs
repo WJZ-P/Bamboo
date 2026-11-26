@@ -384,6 +384,7 @@ impl Report {
                         sneaking: false,
                         difficulty: 2,
                         hit_pos: None,
+                        spectator: false,
                     };
                     level.entities.with_mut(uid, |row| {
                         row.with_mob(|me, mob| {

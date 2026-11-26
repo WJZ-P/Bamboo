@@ -264,8 +264,17 @@ impl ArmorStand {
 /// the click height, then put on / take off / swap equipment; `DisabledSlots`, the
 /// marker flag and hand slots without arms block it.
 pub fn interact(mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
-    if mob.armor_stand.is_marker() {
+    // `isMarker() || stack.is(NAME_TAG)` → `LivingEntity.interact`，不做装备交互。
+    // `isMarker() || stack.is(NAME_TAG)` → `LivingEntity.interact`, no equipment change.
+    if mob.armor_stand.is_marker() || req.held.item == items::NAME_TAG {
         return MobInteraction::pass();
+    }
+    // `player.isSpectator()` → `SUCCESS`（不改装备、不消耗物品）。
+    // `player.isSpectator()` → `SUCCESS` (no equipment change, no item use).
+    if req.spectator {
+        let mut out = MobInteraction::pass();
+        out.result = InteractionResult::Success;
+        return out;
     }
     let held = &req.held;
     let item_slot = super::equipment::equippable_slot(held);
@@ -415,8 +424,15 @@ pub fn hurt_server(
     if me.removed {
         return false;
     }
-    // `mobGriefing` 关着且来源是生物时完全不受伤。
-    if !ctx.blocks().block_game_rules().mob_griefing && source.scale_when_non_player {
+    // `mobGriefing` 关着且 `DamageSource.getEntity()` 是 `Mob` 时完全不受伤：
+    // 照字节码查来源实体的类型，不拿伤害类型的难度缩放标志近似。
+    // With `mobGriefing` off and `DamageSource.getEntity()` a `Mob`, no hurt at
+    // all: look up the source entity's kind rather than a scaling flag.
+    let source_is_mob = source
+        .attacker
+        .and_then(|uid| ctx.other(uid))
+        .is_some_and(|public| matches!(public.kind, crate::entity::KindPublic::Mob(_)));
+    if !ctx.blocks().block_game_rules().mob_griefing && source_is_mob {
         return false;
     }
     if source.kind.bypasses_invulnerability() {
@@ -449,6 +465,11 @@ pub fn hurt_server(
     let can_break = damage_in_tag(source.kind, "minecraft:can_break_armor_stand");
     let always_kill = damage_in_tag(source.kind, "minecraft:always_kills_armor_stands");
     if !can_break && !always_kill {
+        return false;
+    }
+    // `Player.getAbilities().mayBuild` 为假（冒险 / 旁观）时不受伤。
+    // A player without `mayBuild` (adventure / spectator) cannot break it.
+    if source.attacker_is_player && !source.attacker_may_build {
         return false;
     }
     if source.creative_player {
@@ -716,6 +737,7 @@ mod tests {
             sneaking: false,
             difficulty: 2,
             hit_pos,
+            spectator: false,
         }
     }
 
@@ -881,5 +903,50 @@ mod tests {
         name.write_network(&mut expected);
         assert_eq!(stack.added[0].1, expected);
         assert!(broken_stand_item(None).added.is_empty());
+    }
+
+    #[test]
+    fn a_spectator_gets_success_without_changing_equipment() {
+        let mut entity = armour_stand();
+        let mut req = interact_request(ItemStack::new(items::DIAMOND_HELMET, 1), false, None);
+        req.spectator = true;
+        let outcome = entity
+            .with_mob(|_, mob| interact(mob, &req))
+            .expect("a mob");
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert!(
+            entity
+                .kind
+                .mob()
+                .expect("a mob")
+                .equipment
+                .get(EquipmentSlot::Head)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_name_tag_does_not_start_an_equipment_interaction() {
+        let mut entity = armour_stand();
+        let req = interact_request(ItemStack::new(items::NAME_TAG, 1), false, None);
+        let outcome = entity
+            .with_mob(|_, mob| interact(mob, &req))
+            .expect("a mob");
+        assert_eq!(outcome.result, InteractionResult::Pass);
+    }
+
+    #[test]
+    fn a_player_without_may_build_cannot_break_a_stand() {
+        use crate::{BlockTicks, World, testing::TestLevel};
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let uid =
+            world.add_prepared_entity(Entity::by_mob_type(MobType::ArmorStand, Vec3::default()));
+        let mut source = DamageSource::player(1, Vec3::default(), false);
+        source.attacker_may_build = false;
+        assert!(!world.hurt_mob(uid, source, 1.0));
+        let source = DamageSource::player(1, Vec3::default(), false);
+        assert!(world.hurt_mob(uid, source, 1.0));
     }
 }

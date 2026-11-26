@@ -245,6 +245,7 @@ fn do_interact(world: &mut mc_bamboo_blocks::World<'_>, id: i32, item: i32, play
         sneaking: false,
         difficulty: 2,
         hit_pos: None,
+        spectator: false,
     };
     let _ = world.interact_mob(id, &request);
 }

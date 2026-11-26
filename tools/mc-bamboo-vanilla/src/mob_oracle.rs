@@ -2162,6 +2162,7 @@ impl Level for MobLevel {
         Some(mc_bamboo_blocks::entity::mob::PlayerMobAttack {
             uuid: self.players[index].uuid?,
             looting: self.looting.get(index).copied().unwrap_or(0),
+            may_build: true,
         })
     }
 }
@@ -3510,6 +3511,7 @@ impl Report {
                         sneaking: false,
                         difficulty: 2,
                         hit_pos: None,
+                        spectator: false,
                     };
                     let outcome = world.interact_mob(ids[cow as usize], &request);
                     let result = if outcome.result.consumes_action() {

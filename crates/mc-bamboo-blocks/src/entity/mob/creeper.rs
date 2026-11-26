@@ -478,6 +478,7 @@ mod tests {
             sneaking: false,
             difficulty: 2,
             hit_pos: None,
+            spectator: false,
         };
         let mut entity = Entity::by_mob_type(MobType::Creeper, Vec3::default());
         entity.with_mob(|me, mob| {

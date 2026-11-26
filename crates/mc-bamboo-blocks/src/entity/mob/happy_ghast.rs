@@ -1376,6 +1376,7 @@ mod tests {
             sneaking: false,
             difficulty: 2,
             hit_pos: None,
+            spectator: false,
         };
         let outcome = entity
             .with_mob(|me, mob| interact(me, mob, &request, &mut || 0.0))

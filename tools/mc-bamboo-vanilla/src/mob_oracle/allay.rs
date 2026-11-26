@@ -361,6 +361,7 @@ impl Report {
                         sneaking: false,
                         difficulty: 2,
                         hit_pos: None,
+                        spectator: false,
                     };
                     let outcome = world.interact_mob(allay_id, &request);
                     if outcome.shrink_held {
