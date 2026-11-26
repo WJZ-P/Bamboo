@@ -13668,10 +13668,9 @@ public final class MobOracle {
      *  交易一笔、despawnDelay 到时三只一起消失。每刻比位置、效果、饮水、
      *  目标、实体随机源、倒计时、存在与否和交易表摘要。 */
     private static int playWanderingTraderScenes(Official official, Writer out, String only) throws Exception {
-        // 夜里饮水场景：官方 goalSelector 跑 UseItemGoal，逐刻比位置、效果、
-        // 饮水、目标名、实体随机源、倒计时和两只拴着的羊驼。其余分支（白天牛奶、
-        // 游走、躲僵尸、消失、交易）由 Rust 单测 / e2e 覆盖，见 README 已知限制。
-        String[] names = {"wt_drink_night"};
+        // 六个场景都开着 AI 跑官方整张目标表，逐刻比位置、效果、饮水、目标名、
+        // 实体随机源、倒计时、存在与否和两只拴着的羊驼。
+        String[] names = {"wt_drink_night", "wt_drink_day", "wt_wander", "wt_avoid_zombie", "wt_despawn", "wt_trade"};
         int cases = 0;
         for (String name : names) {
             if (only != null && !name.startsWith(only)) continue;
@@ -13719,9 +13718,8 @@ public final class MobOracle {
         }
         trader.setDespawnDelay(despawn ? 40 : 48000);
         if (wander) trader.setWanderTarget(new BlockPos(8, 64, 0));
-        // 只有夜里饮水场景开 AI（跑官方 UseItemGoal）；其余场景 NoAI，
-        // 逐刻比位置 / 效果 / 倒计时 / 存在 / 交易表，Bamboo 的目标表占位项不跑。
-        trader.setNoAi(!drinkNight);
+        // 六个场景都开 AI，跑官方整张目标表。
+        trader.setNoAi(false);
         world.tracked.add(trader);
 
         // 两只行商羊驼拴在商人身上；官方 `setLeashedTo(trader, true)`。
@@ -13735,10 +13733,19 @@ public final class MobOracle {
             llama.setYHeadRot(0.0F);
             llama.setYBodyRot(0.0F);
             setRandom(llama, 100L + i);
-            llama.setNoAi(true);
+            llama.setNoAi(false);
             llama.setLeashedTo(trader, true);
             world.tracked.add(llama);
             llamas[i] = llama;
+        }
+
+        // 官方 `ServerEntity.sendChanges` 在每刻 `tick()` 之后调
+        // `updateDataBeforeSync`，把 `isInvisible()` 跟着效果表刷新；这里用假的
+        // 同步器重放这一步，不再额外显式调 `updateDataBeforeSync`。
+        Sync traderSync = new Sync(world, trader, official.registries);
+        Sync[] llamaSyncs = new Sync[2];
+        for (int i = 0; i < 2; i++) {
+            llamaSyncs[i] = new Sync(world, llamas[i], official.registries);
         }
 
         // 躲僵尸场景：第 10 刻放进一只 NoAI 僵尸，开着 AI 的商人会跑开。
@@ -13792,17 +13799,15 @@ public final class MobOracle {
                     e.commonTick();
                     e.tick();
                 }
-                // 真实服务端每刻同步实体前调 `updateDataBeforeSync`，其中
-                // `updateDirtyEffects` 把 `isInvisible()` 跟着效果表刷新；假世界
-                // 没有追踪器，这里显式补上，和 Bamboo 的 baseTick 刷新对齐。
-                if (!trader.isRemoved()) trader.updateDataBeforeSync();
-                for (TraderLlama llama : llamas) {
-                    if (!llama.isRemoved()) llama.updateDataBeforeSync();
+                // 同步阶段：`ServerEntity.sendChanges` 先跑 `updateDataBeforeSync`。
+                if (!trader.isRemoved()) traderSync.entity.sendChanges();
+                for (int i = 0; i < 2; i++) {
+                    if (!llamas[i].isRemoved()) llamaSyncs[i].entity.sendChanges();
                 }
                 world.tracked.removeIf(Entity::isRemoved);
             }
             if (tick > 0) frames.append(',');
-            boolean aiScene = drinkNight;
+            boolean aiScene = true;
             frames.append("{\"trader\":").append(wanderingEntityFrame(trader, aiScene))
                     .append(",\"traderGone\":").append(trader.isRemoved())
                     .append(",\"despawn\":").append(trader.getDespawnDelay())
@@ -13812,7 +13817,7 @@ public final class MobOracle {
                     .append(",\"offers\":").append(jsonString(offersDigest(trader.getOffers())));
             for (int i = 0; i < 2; i++) {
                 frames.append(",\"llama").append(i).append("\":")
-                        .append(wanderingEntityFrame(llamas[i], false))
+                        .append(wanderingEntityFrame(llamas[i], true))
                         .append(",\"llama").append(i).append("Gone\":")
                         .append(llamas[i].isRemoved())
                         .append(",\"llama").append(i).append("Delay\":")

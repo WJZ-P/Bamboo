@@ -353,12 +353,12 @@ impl SceneCase {
                 if self.name == "wt_wander" {
                     mob.wandering_trader.wander_target = Some(BlockPos::new(8, 64, 0));
                 }
-                mob.no_ai = self.name == "wt_despawn";
+                mob.no_ai = false;
                 if self.name == "wt_drink_day" {
                     add_invisibility(mob);
-                    // 官方夹具在 tick 0 之前 `addEffect` + `updateDataBeforeSync`，
-                    // 共享标志位已经是真，牛奶的谓词从第一刻就命中。
-                    mob.wandering_trader.invisible = true;
+                    // 官方 `addEffect` 置 `effectsDirty`，第一个同步阶段才把
+                    // `isInvisible()` 刷成真；Bamboo 的 `add_effect` 不碰这个标志。
+                    mob.wandering_trader.effects_dirty = true;
                 }
                 // 官方夹具构造时调了 `getOffers()`（三张集共 9 笔）。这里只比数量，
                 // 用 9 个空的 `MerchantOffer` 占位，实际内容由 trade-oracle 逐项对拍。
@@ -396,7 +396,7 @@ impl SceneCase {
                 e.y_rot = 0.0;
                 if let Some(mob) = e.kind.mob_mut() {
                     mob.uuid = (2 + i as u128).to_be_bytes();
-                    mob.no_ai = true;
+                    mob.no_ai = false;
                     mc_bamboo_blocks::entity::mob::leash::set_leashed_to(
                         mob,
                         trader_id,
@@ -431,6 +431,7 @@ impl Report {
         let llamas = case.setup(&mut mc_bamboo_blocks::World::new(&mut level, &mut ticks));
         let _ = level.entities.take_mob_events();
         let _ = level.entities.take_spawn_snapshots();
+        let mut zombie_uid = None;
 
         for (tick, expected) in case.frames.iter().enumerate() {
             if tick > 0 {
@@ -443,6 +444,22 @@ impl Report {
                 }
                 ticks.set_time(1000 + tick as i64);
                 let mut world = mc_bamboo_blocks::World::new(&mut level, &mut ticks);
+                // 躲僵尸场景：第 10 刻放进一只 NoAI 僵尸（官方夹具同刻加入 tracked）。
+                if case.name == "wt_avoid_zombie" && tick == 10 {
+                    zombie_uid = Some(world.spawn_entity(Entity::by_mob_type(
+                        MobType::Zombie,
+                        Vec3::new(3.5, 64.0, 0.5),
+                    )));
+                    let uid = zombie_uid.expect("zombie uid");
+                    world.with_entity_mut(uid, &mut |e| {
+                        e.random = JavaRandom::new(200);
+                        e.y_rot = 0.0;
+                        if let Some(mob) = e.kind.mob_mut() {
+                            mob.uuid = 4_u128.to_be_bytes();
+                            mob.no_ai = true;
+                        }
+                    });
+                }
                 world.tick_entities();
                 world.drain_effects();
             }
@@ -476,8 +493,6 @@ impl Report {
                         .as_ref()
                         .and_then(|e| e.kind.mob())
                         .map_or(0, |m| m.trader_llama.despawn_delay);
-                    let mut frame = frame;
-                    frame.seed = None;
                     (frame, removed, delay)
                 })
                 .collect();
@@ -495,7 +510,10 @@ impl Report {
                 llama1: llama_frames[1].0.clone(),
                 llama1_gone: llama_frames[1].1,
                 llama1_delay: llama_frames[1].2,
-                zombie: None,
+                zombie: zombie_uid
+                    .and_then(|uid| level.entities.get(uid))
+                    .filter(|e| !e.removed)
+                    .and_then(|e| entity_frame(&e)),
             };
             // 两处改坏确认：故意改掉倒计时 / 效果，对拍必须报不一致。
             let mut compared = ours;

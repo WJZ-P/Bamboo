@@ -589,10 +589,6 @@ pub(crate) fn max_up_step(mob: &Mob) -> f32 {
 /// `super.baseTick()`; every other mob only runs the latter.
 fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let pre_tick_air = mob.air_supply;
-    // `LivingEntity.baseTick` 里的 `updateDirtyEffects`（隐身共享标志位）。
-    if mob.mob_type == super::MobType::WanderingTrader {
-        super::wandering_trader::update_invisibility(mob);
-    }
     // 官方 `LivingEntity.baseTick` 开头的 `EnchantmentHelper.tickEffects`（TICK 组件）。
     // `EnchantmentHelper.tickEffects` at the head of vanilla `LivingEntity.baseTick`.
     super::enchantment_wiring::tick(me, mob, ctx);

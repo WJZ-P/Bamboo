@@ -4363,6 +4363,19 @@ impl<'a> World<'a> {
                     .unwrap_or(crate::entity::ctx::ThrottlePlan::FULL);
                 let mut ctx = crate::entity::ctx::PreciseCtx::with_plan(self, id, plan);
                 entity.tick(&mut ctx);
+                // `LivingEntity.updateDataBeforeSync`：`updateDirtyEffects` 把流浪商人
+                // 的 `isInvisible()` 共享标志位跟着效果表刷新。官方在 `tick()` 之后、
+                // 同步实体之前跑，所以这一刻目标表看到的还是旧值。
+                // `LivingEntity.updateDataBeforeSync`: `updateDirtyEffects` refreshes the
+                // wandering trader's `isInvisible()` flag from the effect map. Vanilla runs
+                // it after `tick()` and before syncing, so the goals still see the old value.
+                if !entity.removed {
+                    entity.with_mob(|_, mob| {
+                        if mob.mob_type == crate::entity::mob::MobType::WanderingTrader {
+                            crate::entity::mob::wandering_trader::update_invisibility(mob);
+                        }
+                    });
+                }
             }
             if entity.removed {
                 // 行离表之后事件就没了：先把这一刻攒下的生物事件交给实体表，
