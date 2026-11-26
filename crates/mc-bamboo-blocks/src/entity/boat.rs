@@ -127,6 +127,13 @@ pub struct Boat {
     pub land_friction: f32,
     pub status: Status,
     pub old_status: Status,
+    /// 官方构造时 `status` / `oldStatus` 都是 null，第一刻 `oldStatus == IN_AIR`
+    /// 不成立；这里显式记「有没有 tick 过」，避免第一刻误进「空中→水」分支。
+    ///
+    /// Vanilla leaves `status` / `oldStatus` null until the first tick, so
+    /// `oldStatus == IN_AIR` is false on that tick. This flag avoids entering
+    /// the air-to-water branch on the very first tick.
+    pub status_initialized: bool,
     /// `lastYd`。
     pub last_yd: f64,
     pub is_above_bubble_column: bool,
@@ -165,6 +172,7 @@ impl Boat {
             land_friction: 0.0,
             status: Status::InAir,
             old_status: Status::InAir,
+            status_initialized: false,
             last_yd: 0.0,
             is_above_bubble_column: false,
             bubble_column_direction_is_down: false,
@@ -406,8 +414,12 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     let mut boat = (**boat_box).clone();
     let view = ctx.blocks();
 
-    boat.old_status = boat.status;
+    let had_status = boat.status_initialized;
+    if had_status {
+        boat.old_status = boat.status;
+    }
     boat.status = get_status(&mut boat, me, view);
+    boat.status_initialized = true;
     if matches!(boat.status, Status::UnderWater | Status::UnderFlowingWater) {
         boat.out_of_control_ticks += 1.0;
     } else {
@@ -421,12 +433,18 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         boat.damage -= 1.0;
     }
 
+    // 官方 `Entity.tick()` 的 `updateFluidInteraction`（super.tick）在
+    // `floatBoat` 之前：水流先加进 delta，再被 `floatBoat` 的阻力乘一次。
+    apply_water_current(&mut boat, me, view);
+
     // 服务端 `isLocalInstanceAuthoritative()` = `!isClientAuthoritative()`，后者
     // 只在控制者是玩家时为真。无人 / 动物控制的船由服务端跑 `floatBoat` + `move`。
     if !first_passenger_is_player(&boat) {
         boat.paddle_left = false;
         boat.paddle_right = false;
-        float_boat(&mut boat, me, view);
+        float_boat(&mut boat, me, view, had_status);
+        // `AbstractBoat.checkFallDamage`：记的是 `move` 碰撞清零之前的速度 y。
+        boat.last_yd = me.delta.y;
         me.move_entity(view, me.delta);
     } else {
         me.delta = Vec3::default();
@@ -436,10 +454,9 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     me.apply_effects_from_blocks(view);
     me.apply_effects_from_blocks(view);
     detect_bubble_column(&mut boat, me, view);
-    apply_water_current(&mut boat, me, view);
     // 官方 `Entity.baseTick` 的岩浆 / 火：每刻调一次 `hurtServer`
     // （岩浆 4.0、火 1.0），伤害累计到阈值就破坏并掉物品。
-    let env_amount = environment_damage(me, view);
+    let (env_amount, env_hits) = environment_damage(me, view);
     // `Entity.baseTick`：伤害判断用递减前的值，之后每刻 `remainingFireTicks--`。
     if me.remaining_fire_ticks > 0 {
         me.remaining_fire_ticks -= 1;
@@ -486,6 +503,7 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         // && !entity.is(CANNOT_BE_PUSHED_ONTO_BOATS)`。
         if can_board
             && boat.passengers.len() + board_targets.len() < max_passengers
+            && !boat.eye_in_water
             && public.vehicle.is_none()
             && let KindPublic::Mob(mob) = &public.kind
             && !mob
@@ -530,7 +548,9 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         );
     }
     if env_amount > 0.0 {
-        hurt_from_environment(&mut boat, me, env_amount, ctx);
+        for _ in 0..env_hits {
+            hurt_from_environment(&mut boat, me, env_amount, ctx);
+        }
     }
 
     if let super::EntityKind::Boat(boat_box) = &mut me.kind {
@@ -709,7 +729,7 @@ fn get_ground_friction(me: &Entity, view: &dyn BlockView) -> f32 {
 }
 
 /// `floatBoat`：按状态算这一刻的加速度和阻力，必要时把船直接抬到水面。
-fn float_boat(boat: &mut Boat, me: &mut Entity, view: &dyn BlockView) {
+fn float_boat(boat: &mut Boat, me: &mut Entity, view: &dyn BlockView, had_status: bool) {
     let mut gravity = -DEFAULT_GRAVITY;
     let mut lift = 0.0f64;
     // 官方初值 `0.05f` 在走完状态分支前从不会被读：每个分支都会覆盖它。
@@ -717,7 +737,8 @@ fn float_boat(boat: &mut Boat, me: &mut Entity, view: &dyn BlockView) {
     let drag: f32;
     let bb = me.bounding_box();
     let height = f64::from(me.dimensions.1);
-    if boat.old_status == Status::InAir
+    if had_status
+        && boat.old_status == Status::InAir
         && boat.status != Status::InAir
         && boat.status != Status::OnLand
     {
@@ -999,11 +1020,14 @@ fn first_passenger_is_player(boat: &Boat) -> bool {
         .is_some_and(|&uid| uid < super::FIRST_ENTITY_ID)
 }
 
-/// `Entity.baseTick`：船 AABB 里有岩浆 → 岩浆伤害 4.0；还剩着火刻数 → 火伤害 1.0。
+/// 返回这一刻的环境伤害量和它发生的次数：官方 `AbstractBoat.tick` 把
+/// `applyEffectsFromBlocks()` 调两次，每次穿过岩浆都 `lavaHurt()` 一次，
+/// 所以岩浆是两次 4.0；火伤害只在 `baseTick` 里每 20 刻一次 1.0。
 ///
-/// `Entity.baseTick`: lava touching the boat's AABB deals 4.0, remaining fire
-/// ticks deal 1.0.
-fn environment_damage(me: &Entity, view: &dyn BlockView) -> f32 {
+/// Returns the damage and how many times it lands: `AbstractBoat.tick` calls
+/// `applyEffectsFromBlocks()` twice, each lava crossing deals 4.0, so lava hits
+/// twice; fire damage lands once every 20 ticks.
+fn environment_damage(me: &Entity, view: &dyn BlockView) -> (f32, usize) {
     let bb = me.bounding_box();
     let mut in_lava = false;
     for x in mth::floor(bb.min_x)..mth::ceil(bb.max_x) {
@@ -1018,16 +1042,17 @@ fn environment_damage(me: &Entity, view: &dyn BlockView) -> f32 {
             }
         }
     }
-    // `Entity.lavaHurt()`：`hurtServer(damageSources.lava(), 4.0F)`，每刻都来。
+    // `Entity.lavaHurt()`：`hurtServer(damageSources.lava(), 4.0F)`，
+    // `applyEffectsFromBlocks()` 两次各来一次。
     if in_lava {
-        return 4.0;
+        return (4.0, 2);
     }
     // `Entity.baseTick`：`remainingFireTicks % 20 == 0 && !isInLava()` 时
     // `hurtServer(damageSources.onFire(), 1.0F)`；其余刻只递减火刻数。
     if me.remaining_fire_ticks > 0 && me.remaining_fire_ticks % 20 == 0 {
-        return 1.0;
+        return (1.0, 1);
     }
-    0.0
+    (0.0, 0)
 }
 
 /// `VehicleEntity.hurtServer` 的环境伤害路径：累计伤害、翻转方向，破坏时丢弃实体
@@ -1151,7 +1176,7 @@ mod tests {
     #[test]
     fn in_air_uses_0_9_drag_and_gravity() {
         let (mut me, mut boat) = scenario(Status::InAir);
-        float_boat(&mut boat, &mut me, &EmptyView);
+        float_boat(&mut boat, &mut me, &EmptyView, true);
         assert_eq!(me.delta.x, f64::from(0.9_f32));
         assert_eq!(me.delta.y, 0.5 - 0.04);
         assert_eq!(me.delta.z, -f64::from(0.9_f32));
@@ -1161,7 +1186,7 @@ mod tests {
     #[test]
     fn under_water_uses_0_45_drag_and_0_01_lift() {
         let (mut me, mut boat) = scenario(Status::UnderWater);
-        float_boat(&mut boat, &mut me, &EmptyView);
+        float_boat(&mut boat, &mut me, &EmptyView, true);
         let expected_y = (0.5 - 0.04 + 0.009_999_999_776_482_582_f64 * (0.04 / 0.65)) * 0.75;
         assert_eq!(me.delta.x, f64::from(0.45_f32));
         assert_eq!(me.delta.y, expected_y);
@@ -1172,7 +1197,7 @@ mod tests {
     #[test]
     fn under_flowing_water_uses_0_9_drag_and_small_gravity() {
         let (mut me, mut boat) = scenario(Status::UnderFlowingWater);
-        float_boat(&mut boat, &mut me, &EmptyView);
+        float_boat(&mut boat, &mut me, &EmptyView, true);
         assert_eq!(me.delta.x, f64::from(0.9_f32));
         assert_eq!(me.delta.y, 0.5 - 0.0007);
         assert_eq!(me.delta.z, -f64::from(0.9_f32));
@@ -1182,7 +1207,7 @@ mod tests {
     #[test]
     fn in_water_uses_0_9_drag_and_water_level_lift() {
         let (mut me, mut boat) = scenario(Status::InWater);
-        float_boat(&mut boat, &mut me, &EmptyView);
+        float_boat(&mut boat, &mut me, &EmptyView, true);
         let lift = (boat.water_level - me.position.y) / f64::from(me.dimensions.1);
         let expected_y = (0.5 - 0.04 + lift * (0.04 / 0.65)) * 0.75;
         assert_eq!(me.delta.x, f64::from(0.9_f32));
