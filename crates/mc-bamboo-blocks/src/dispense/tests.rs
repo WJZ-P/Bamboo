@@ -1145,6 +1145,43 @@ fn wolf_armor_equips_the_wolf_in_the_front_cell() {
     );
 }
 
+/// 前方的盔甲架：六个人形 / 手槽可用，BODY / SADDLE 是 `None`。
+fn armour_stand_at(pos: BlockPos) -> EquipTarget {
+    let mut equipment: [Option<ItemStack>; 8] = std::array::from_fn(|_| Some(ItemStack::empty()));
+    equipment[6] = None;
+    equipment[7] = None;
+    EquipTarget {
+        entity_id: 7,
+        bounds: Aabb::new(
+            f64::from(pos.x),
+            f64::from(pos.y),
+            f64::from(pos.z),
+            f64::from(pos.x) + 1.0,
+            f64::from(pos.y) + 1.0,
+            f64::from(pos.z) + 1.0,
+        ),
+        spectator: false,
+        entity_type: crate::entity::mob::MobType::ArmorStand.entity_type(),
+        baby: false,
+        equipment,
+    }
+}
+
+#[test]
+fn a_dispenser_equips_an_armour_stand_head_slot() {
+    let target = POS.relative(Direction::East);
+    let mut level = TestLevel::new();
+    level.living.push(armour_stand_at(target));
+    let fired = fire_id(&mut level, Direction::East, items::DIAMOND_HELMET);
+    assert!(fired.left.is_empty());
+    assert_eq!(
+        level.living[0].equipment[4]
+            .as_ref()
+            .map(|stack| stack.item),
+        Some(items::DIAMOND_HELMET)
+    );
+}
+
 #[test]
 fn armour_equips_the_first_living_target_in_the_front_cell() {
     let target = POS.relative(Direction::East);
