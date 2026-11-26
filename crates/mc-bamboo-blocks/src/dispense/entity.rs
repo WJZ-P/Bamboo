@@ -53,6 +53,9 @@ pub(super) fn execute(
     if matches!(item, items::EGG | items::BLUE_EGG | items::BROWN_EGG) {
         return egg(world, pos, facing, stack);
     }
+    if item == items::FIREWORK_ROCKET {
+        return firework(world, pos, facing, stack);
+    }
     if is_projectile(item) {
         return Shot::plain(throw_one(world, pos, facing, stack));
     }
@@ -190,13 +193,30 @@ fn arrow(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) 
     Shot::with_event(without_one(&stack), 1002)
 }
 
+/// `FireworkRocketItem.createDispenseConfig`：位置是 `blockSource.center()` 沿朝向
+/// 外移 `0.5000099999997474`，力度 0.5、散布 1、事件 1004。`asProjectile` 生成的是
+/// `shotAtAngle` 的烟花。
+///
+/// `FireworkRocketItem.createDispenseConfig`: the position is `blockSource.center()`
+/// plus the facing step times `0.5000099999997474`, power 0.5, uncertainty 1 and event
+/// 1004. `asProjectile` produces a `shotAtAngle` firework.
+fn firework(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -> Shot {
+    let (sx, sy, sz) = facing.normal();
+    let position = Vec3::new(
+        f64::from(pos.x) + 0.5 + f64::from(sx) * 0.500_009_999_999_747_4,
+        f64::from(pos.y) + 0.5 + f64::from(sy) * 0.500_009_999_999_747_4,
+        f64::from(pos.z) + 0.5 + f64::from(sz) * 0.500_009_999_999_747_4,
+    );
+    crate::item_use::firework::spawn_dispensed(world, position, (sx, sy, sz), &stack);
+    Shot::with_event(without_one(&stack), 1004)
+}
+
 /// `EggItem.asProjectile` 加默认的 `ProjectileItem.DispenseConfig`：位置同箭，力度 1.1，
 /// 散布 6，事件 1002。
 ///
 /// `EggItem.asProjectile` with the default `DispenseConfig`: the arrow's position,
 /// power 1.1, uncertainty 6 and event 1002.
-fn egg(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -> Shot {
-    let (x, y, z) = facing.normal();
+fn egg(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -> Shot {    let (x, y, z) = facing.normal();
     let (x, y, z) = (f64::from(x), f64::from(y), f64::from(z));
     let shot = crate::entity::thrown_egg::EggShot {
         position: Vec3::new(

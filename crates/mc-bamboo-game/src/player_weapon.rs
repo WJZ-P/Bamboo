@@ -504,7 +504,7 @@ fn release_bow(region: &mut Region, id: PlayerId, hand: Hand, power: f32) {
     );
     shot.source_movement = player_movement(region, id);
     spawn_arrow(region, shot);
-    hurt_weapon(region, id, hand);
+    hurt_weapon(region, id, hand, 1);
     sync_slots(region, id, consumed);
     let pitch = 1.0 / (level_random_float(region) * 0.4 + 1.2) + power * 0.5;
     play_sound(
@@ -544,9 +544,15 @@ fn shoot_crossbow(region: &mut Region, id: PlayerId, hand: Hand) {
         return;
     }
     let projectiles: Vec<ItemStack> = charged.iter().filter_map(item_stack).collect();
-    if projectiles.is_empty() || projectiles.iter().any(|stack| !supported_projectile(stack)) {
+    if projectiles.is_empty() || projectiles.iter().any(|stack| !held_projectile(stack)) {
         return;
     }
+    // `CrossbowItem.getShootingPower`：装的是烟花火箭力度 1.6，否则 3.15。
+    let power = if charged.iter().any(|t| t.item == items::FIREWORK_ROCKET) {
+        1.6
+    } else {
+        3.15
+    };
     let slot = player.inventory.hand_slot(hand);
     clear_component(
         &mut player.inventory.slots[slot],
@@ -558,6 +564,12 @@ fn shoot_crossbow(region: &mut Region, id: PlayerId, hand: Hand) {
     };
     let player = &region.players[&id];
     let (yaw, pitch) = (player.head_yaw, player.pitch);
+    // 烟花火箭的起点是 `getEyeY() - 0.15F`，不是箭的 `getEyeY() - 0.1F`。
+    let firework_position = Vec3::new(
+        player.position().x,
+        player.position().y + f64::from(player.eye_height() as f32) - f64::from(0.15_f32),
+        player.position().z,
+    );
     let spread = projectile_spread(&weapon);
     let angle_step = if projectiles.len() == 1 {
         0.0
@@ -574,25 +586,40 @@ fn shoot_crossbow(region: &mut Region, id: PlayerId, hand: Hand) {
         } else {
             rotated_view_vector(pitch, yaw, angle)
         };
-        let shot = prepare_shot(
-            &region.players[&id],
-            position,
-            dir,
-            3.15,
-            projectile,
-            region.players[&id].inventory.held(hand).clone(),
-            true,
-        );
-        spawn_arrow(region, shot);
-        let pitch = shot_pitch(region, id, index);
-        play_sound(
-            region,
-            player_position(region, id),
-            "minecraft:item.crossbow.shoot",
-            1.0,
-            pitch,
-        );
-        hurt_weapon(region, id, hand);
+        if projectile.item == items::FIREWORK_ROCKET {
+            // `CrossbowItem.getDurabilityUse`：烟花火箭扣 3 点，箭扣 1 点。
+            let durability_use = 3;
+            spawn_firework_crossbow(region, id, firework_position, dir, power, projectile);
+            let pitch = shot_pitch(region, id, index);
+            play_sound(
+                region,
+                player_position(region, id),
+                "minecraft:item.crossbow.shoot",
+                1.0,
+                pitch,
+            );
+            hurt_weapon(region, id, hand, durability_use);
+        } else {
+            let shot = prepare_shot(
+                &region.players[&id],
+                position,
+                dir,
+                power,
+                projectile,
+                region.players[&id].inventory.held(hand).clone(),
+                true,
+            );
+            spawn_arrow(region, shot);
+            let pitch = shot_pitch(region, id, index);
+            play_sound(
+                region,
+                player_position(region, id),
+                "minecraft:item.crossbow.shoot",
+                1.0,
+                pitch,
+            );
+            hurt_weapon(region, id, hand, 1);
+        }
         if region
             .players
             .get(&id)
@@ -607,11 +634,11 @@ fn shoot_crossbow(region: &mut Region, id: PlayerId, hand: Hand) {
     crate::item_use_stats::award(region, id, items::CROSSBOW);
 }
 
-fn hurt_weapon(region: &mut Region, id: PlayerId, hand: Hand) {
+fn hurt_weapon(region: &mut Region, id: PlayerId, hand: Hand, amount: i32) {
     crate::durability::run(region, id, hand, |region| {
         let (mut level, ticks) = region.block_level();
         let world = World::new(&mut level, ticks);
-        mc_bamboo_blocks::durability::hurt_hand(&world, hand, 1);
+        mc_bamboo_blocks::durability::hurt_hand(&world, hand, amount);
     });
 }
 
@@ -662,15 +689,48 @@ fn spawn_arrow(region: &mut Region, shot: ArrowShot) {
     }
 }
 
-/// 找到这份武器能用的弹药：副手、主手，再按 `Inventory` 下标扫背包。
+/// 弩射出一枚烟花火箭：`CrossbowItem.createProjectile` 生成 `shotAtAngle` 的烟花，
+/// 位置在眼睛下方 0.15 格，然后 `Projectile.shoot`。
 ///
-/// `Player.getProjectile`: off hand, main hand, then the inventory indices.
+/// A crossbow fires a firework rocket: `CrossbowItem.createProjectile` makes a
+/// `shotAtAngle` firework 0.15 below the eye, then `Projectile.shoot`.
+fn spawn_firework_crossbow(
+    region: &mut Region,
+    shooter: PlayerId,
+    position: Vec3,
+    direction: Vec3,
+    power: f32,
+    ammo: ItemStack,
+) {
+    let owner = region.players.get(&shooter).map(|player| *player.uuid.as_bytes());
+    {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        world.spawn_firework(&mc_bamboo_blocks::entity::firework_rocket::FireworkShot {
+            position,
+            owner: Some(shooter.0),
+            owner_uuid: owner,
+            item: ammo,
+            shot_at_angle: true,
+            shoot: Some(mc_bamboo_blocks::entity::firework_rocket::FireworkShoot {
+                direction,
+                power,
+                uncertainty: 1.0,
+            }),
+        });
+    }
+}
+
+/// `Player.getProjectile`：副手、主手（箭或烟花），再按 `Inventory` 下标扫背包（只认箭）。
+///
+/// `Player.getProjectile`: off hand, main hand (arrows or fireworks), then the inventory
+/// indices (arrows only).
 fn find_projectile(player: &Player) -> Option<(usize, ItemStack)> {
     let off = player.inventory.hand_slot(Hand::Off);
     let main = player.inventory.hand_slot(Hand::Main);
     for slot in [off, main] {
         let stack = &player.inventory.slots[slot];
-        if supported_projectile(stack) {
+        if held_projectile(stack) {
             return Some((slot, stack.clone()));
         }
     }
@@ -702,8 +762,21 @@ fn container_slot(index: usize) -> usize {
     }
 }
 
+/// `CrossbowItem.getAllSupportedProjectiles` 的 `ARROW_ONLY`：背包搜索只认箭。
+///
+/// `CrossbowItem.getAllSupportedProjectiles`'s `ARROW_ONLY`: the inventory search
+/// only accepts arrows.
 fn supported_projectile(stack: &ItemStack) -> bool {
     !stack.is_empty() && mc_bamboo_blocks::state::item_is_tagged(stack.item, item_tags::ARROWS)
+}
+
+/// `CrossbowItem.getSupportedHeldProjectiles` 的 `ARROW_OR_FIREWORK`：副手 / 主手
+/// 可以拿烟花火箭装填。
+///
+/// `CrossbowItem.getSupportedHeldProjectiles`'s `ARROW_OR_FIREWORK`: the held hand
+/// may load a firework rocket.
+fn held_projectile(stack: &ItemStack) -> bool {
+    supported_projectile(stack) || stack.item == items::FIREWORK_ROCKET
 }
 
 /// `ProjectileWeaponItem.draw` + `useAmmo`：返回这一发要用的弹药物品，并扣数量。
