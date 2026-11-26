@@ -29,7 +29,7 @@ pub(in crate::entity::mob) fn finalize_spawn(
         let state = mob.equine.as_mut().expect("equine spawn state");
         let age = match mob.mob_type {
             MobType::Horse => horse_group(state, random, group),
-            MobType::Llama => llama_group(state, random, group),
+            MobType::Llama | MobType::TraderLlama => llama_group(state, random, group),
             _ => chested_horse_group(group),
         };
         // `Camel` 没有覆盖 `AbstractHorse.randomizeAttributes`（基类是空的），所以骆驼不抽属性。

@@ -1499,6 +1499,13 @@ pub(crate) fn on_use_item(
         swing(region, id, hand, InteractionResult::Success);
         return;
     }
+    // `FireworkRocketItem.use`：仅在玩家 `isFallFlying()`（鞘翅滑翔）时生成附着烟花加速。
+    // Bamboo 尚未建模鞘翅滑翔，此路径恒为 `PASS`。
+    // `FireworkRocketItem.use`: only spawns an attached boost rocket while fall flying.
+    // Bamboo has no elytra gliding yet, so this always passes.
+    if held.item == items::FIREWORK_ROCKET {
+        return;
+    }
     // `FoodOnAStickItem.use`：拿着胡萝卜钓竿、骑着由自己控制的猪时，右键
     // 让猪加速并扣 7 点耐久；没加速成则只记一次使用统计。
     //

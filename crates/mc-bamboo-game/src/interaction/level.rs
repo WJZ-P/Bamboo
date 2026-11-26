@@ -1821,6 +1821,7 @@ fn loot_position(pos: Vec3) -> mc_bamboo_loot::Position {
 fn death_loot_player(player: &Player) -> mc_bamboo_loot::EntityView {
     let mut view = mc_bamboo_loot::EntityView::new(entity_type::PLAYER);
     view.is_living = true;
+    view.is_fall_flying = player.sync.is_fall_flying();
     view.position = Some(loot_position(player.position()));
     view.equipment[mc_bamboo_loot::EquipmentSlot::Mainhand.index()] = Some(game_stack_to_loot(
         player.inventory.held(mc_bamboo_core::Hand::Main),

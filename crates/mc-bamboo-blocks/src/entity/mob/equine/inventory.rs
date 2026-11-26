@@ -45,7 +45,7 @@ pub fn columns(mob: &Mob) -> i32 {
     }
     match mob.mob_type {
         MobType::Donkey | MobType::Mule => 5,
-        MobType::Llama => state.strength,
+        MobType::Llama | MobType::TraderLlama => state.strength,
         _ => 0,
     }
 }

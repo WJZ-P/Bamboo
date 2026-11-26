@@ -146,6 +146,8 @@ pub enum KindPublic {
     OminousItemSpawner(ItemStack),
     /// 风弹：同步要的 UUID、主人、种类和俯仰角。
     WindCharge(super::wind_charge::WindChargePublic),
+    /// 烟花火箭：同步要的 UUID、主人、俯仰角和物品堆。
+    FireworkRocket(super::firework_rocket::FireworkRocketPublic),
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
     Arrow(super::arrow::ArrowPublic),
@@ -181,6 +183,7 @@ impl KindPublic {
                 mc_bamboo_data::registries::entity_type::OMINOUS_ITEM_SPAWNER
             }
             Self::WindCharge(charge) => charge.variant.entity_type(),
+            Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -258,6 +261,8 @@ pub enum KindState {
     OminousItemSpawner(Box<super::ominous_item_spawner::OminousItemSpawner>),
     /// 风弹的全部状态。
     WindCharge(Box<super::wind_charge::WindCharge>),
+    /// 烟花火箭的全部状态。
+    FireworkRocket(Box<super::firework_rocket::FireworkRocket>),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
     Arrow(Box<super::arrow::Arrow>),
@@ -401,6 +406,9 @@ impl EntityRow {
             (KindPublic::WindCharge(_), KindState::WindCharge(charge)) => {
                 EntityKind::WindCharge(charge)
             }
+            (KindPublic::FireworkRocket(_), KindState::FireworkRocket(firework)) => {
+                EntityKind::FireworkRocket(firework)
+            }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
@@ -504,6 +512,10 @@ impl Entity {
             EntityKind::WindCharge(charge) => (
                 KindPublic::WindCharge(charge.public(self.remaining_fire_ticks)),
                 KindState::WindCharge(charge),
+            ),
+            EntityKind::FireworkRocket(firework) => (
+                KindPublic::FireworkRocket(firework.public()),
+                KindState::FireworkRocket(firework),
             ),
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
@@ -1235,6 +1247,9 @@ impl EntityStore {
         if let EntityKind::SplashPotion(potion) = &mut entity.kind {
             potion.uuid = super::mob::insecure_uuid(&mut entity.random);
         }
+        if let EntityKind::FireworkRocket(firework) = &mut entity.kind {
+            firework.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
         if matches!(entity.kind, super::EntityKind::LightningBolt(_)) {
             super::lightning::finish_spawn(&mut entity);
         }
@@ -1678,6 +1693,19 @@ impl EntityStore {
                 (
                     ChunkPos::containing(entity.position.x, entity.position.z),
                     vec![super::mob::MobEvent::EntityEvent { event: 3 }],
+                ),
+            );
+        }
+        // 烟花爆炸那一刻消失；`broadcastEntityEvent(this, 17)` 跟死亡事件走同一条路。
+        // A firework vanishes when it explodes; event 17 takes the same path as death events.
+        if let EntityKind::FireworkRocket(firework) = &entity.kind
+            && firework.exploded
+        {
+            self.departed_mob_events.insert(
+                entity.id,
+                (
+                    ChunkPos::containing(entity.position.x, entity.position.z),
+                    vec![super::mob::MobEvent::EntityEvent { event: 17 }],
                 ),
             );
         }
