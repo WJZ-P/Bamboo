@@ -2949,6 +2949,9 @@ impl Report {
                     54 => mc_bamboo_blocks::entity::mob::MobType::Vindicator,
                     55 => mc_bamboo_blocks::entity::mob::MobType::Ravager,
                     56 => mc_bamboo_blocks::entity::mob::MobType::Villager,
+                    63 => mc_bamboo_blocks::entity::mob::MobType::Evoker,
+                    64 => mc_bamboo_blocks::entity::mob::MobType::Vex,
+                    65 => mc_bamboo_blocks::entity::mob::MobType::Illusioner,
                     60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
                     61 => mc_bamboo_blocks::entity::mob::MobType::Parched,
                     62 => mc_bamboo_blocks::entity::mob::MobType::CamelHusk,
@@ -6068,6 +6071,23 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
             )
         }
         MobType::Pillager => pillager::state(mob),
+        MobType::Evoker => format!(
+            "evoker:{}:{}:{}",
+            mob.spellcaster.spell_casting_tick_count,
+            mob.spellcaster.current_spell.id(),
+            mob.evoker.wololo_target.map_or_else(|| "-".to_owned(), |uid| uid.to_string()),
+        ),
+        MobType::Vex => format!(
+            "vex:{}:{}:{}",
+            mob.vex.charging,
+            mob.vex.has_limited_life,
+            mob.vex.limited_life_ticks,
+        ),
+        MobType::Illusioner => format!(
+            "illusioner:{}:{}",
+            mob.spellcaster.spell_casting_tick_count,
+            mob.spellcaster.current_spell.id(),
+        ),
         MobType::Ravager => format!(
             "ravager:{}:{}:{}:{}:{}",
             mob.raider.wave,
