@@ -965,3 +965,69 @@ fn breeze_mob_save_round_trip_keeps_pose_default() {
     };
     assert_eq!(normalize(tag), normalize(again));
 }
+
+/// 运输船的物品栏存档往返：27 格里非零的槽位、物品和数量都回来。
+#[test]
+fn chest_boat_save_round_trip_keeps_items() {
+    let mut entity = Entity::boat(
+        mc_bamboo_data::registries::entity_type::OAK_CHEST_BOAT,
+        Vec3::new(1.5, 63.0, -2.0),
+    );
+    if let EntityKind::Boat(boat) = &mut entity.kind {
+        let chest = boat.chest.as_mut().unwrap();
+        chest.items[0] = ItemStack::new(STONE, 3);
+        chest.items[13] = ItemStack::new(WIND_CHARGE, 7);
+    } else {
+        panic!("boat constructor lost its kind");
+    }
+    let row = entity.split();
+    let tag = write_entity(&row).unwrap();
+    let rebuilt = read_entity(&tag, 99).unwrap().unwrap();
+    let again = write_entity(&rebuilt).unwrap();
+    let normalize = |tag: Tag| match tag {
+        Tag::Compound(mut values) => {
+            values.retain(|(key, _)| key != "UUID");
+            Tag::Compound(values)
+        }
+        other => other,
+    };
+    assert_eq!(normalize(tag), normalize(again));
+    let restored = rebuilt.into_entity();
+    if let EntityKind::Boat(boat) = &restored.kind {
+        let chest = boat.chest.as_ref().unwrap();
+        assert_eq!(chest.items[0], ItemStack::new(STONE, 3));
+        assert_eq!(chest.items[13], ItemStack::new(WIND_CHARGE, 7));
+        assert!(chest.items[1..13].iter().all(ItemStack::is_empty));
+        assert!(chest.loot_table.is_none());
+    } else {
+        panic!("boat round trip lost its kind");
+    }
+}
+
+/// 运输船有战利品表时只写 LootTable / LootTableSeed，不写 Items。
+#[test]
+fn chest_boat_save_round_trip_keeps_loot_table() {
+    let mut entity = Entity::boat(
+        mc_bamboo_data::registries::entity_type::SPRUCE_CHEST_BOAT,
+        Vec3::new(-4.0, 62.5, 8.0),
+    );
+    if let EntityKind::Boat(boat) = &mut entity.kind {
+        let chest = boat.chest.as_mut().unwrap();
+        chest.loot_table = Some("minecraft:chests/shipwreck_supply".to_owned());
+        chest.loot_table_seed = 123_456_789;
+    }
+    let tag = write_entity(&entity.split()).unwrap();
+    assert!(field(&tag, "Items").is_none());
+    let rebuilt = read_entity(&tag, 99).unwrap().unwrap();
+    let restored = rebuilt.into_entity();
+    if let EntityKind::Boat(boat) = &restored.kind {
+        let chest = boat.chest.as_ref().unwrap();
+        assert_eq!(
+            chest.loot_table.as_deref(),
+            Some("minecraft:chests/shipwreck_supply")
+        );
+        assert_eq!(chest.loot_table_seed, 123_456_789);
+    } else {
+        panic!("boat round trip lost its kind");
+    }
+}
