@@ -1266,6 +1266,8 @@ public final class MobOracle {
         final List<String[]> attackEnchants = new ArrayList<>();
         /** 攻击场景：这些下标的生物是 0 号玩家驯服的狼（范围击退要排除它）。 */
         final List<Integer> tamedWolves = new ArrayList<>();
+        /** 长矛场景：在这一刻触发 `PiercingWeapon.attack(player, MAINHAND)`，-1 不触发。 */
+        int stabTick = -1;
         /**
          * 攻击场景：跳过每刻的 `cow.tick()`，这样牛的击退速度和 hurtTime 不被
          * 重力 / AI / 计时衰减污染，可以和 Bamboo 的受伤重放逐位比。
@@ -1674,6 +1676,12 @@ public final class MobOracle {
         /** 攻击场景：把第 `mobIndex` 头生物标记成 0 号玩家驯服的狼。 */
         Scene tamedWolf(int mobIndex) {
             tamedWolves.add(mobIndex);
+            return this;
+        }
+
+        /** 长矛场景：在第 `tick` 刻触发 `PiercingWeapon.attack(player, MAINHAND)`。 */
+        Scene stab(int tick) {
+            stabTick = tick;
             return this;
         }
     }
@@ -4760,6 +4768,17 @@ public final class MobOracle {
                 pet.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
                 pet.attackSetup(33, false, 5.0, false).attack(1, 0);
                 scenes.add(pet);
+                // 长矛左键穿刺：一次打到排成一线的两头牛（射线穿过两头的包围盒）。
+                int spear = BuiltInRegistries.ITEM.getId(Items.IRON_SPEAR);
+                Scene stab = new Scene("player_attack_spear_stab").ticks(6)
+                        .playerPackets().packets();
+                ground(stab, 4);
+                stab.player(0.5, 64.0, 0.5, Items.IRON_SPEAR);
+                stab.cow(2.5, 64.0, 0.5, 0.0F, 247L);
+                stab.cow(4.5, 64.0, 0.5, 0.0F, 248L);
+                stab.equipment(new int[] {0, 0, 0, 0, spear}, new int[] {0, 0, 0, 0});
+                stab.attackSetup(33, false, 0.0, true).stab(1);
+                scenes.add(stab);
             }
             // ---- 1b：死亡、掉落、重生与回血 ----
             // keepInventory × immediateRespawn × 等级经验 × 消失诅咒。
@@ -6010,6 +6029,25 @@ public final class MobOracle {
                         attacker.attack(target);
                     }
                 }
+                if (scene.stabTick == tick) {
+                    // `handlePlayerAction` 的 STAB 分支：`cannotAttackWithItem` 之后
+                    // `PiercingWeapon.attack(player, MAINHAND)`。
+                    ServerPlayer attacker = players.get(0);
+                    putInt(net.minecraft.world.entity.LivingEntity.class, attacker,
+                            "attackStrengthTicker", scene.attackCharge);
+                    attacker.setSprinting(scene.attackSprint);
+                    attacker.fallDistance = scene.attackFall;
+                    putBoolean(net.minecraft.world.entity.Entity.class, attacker,
+                            "onGround", scene.attackGround);
+                    net.minecraft.world.item.ItemStack weapon = attacker.getMainHandItem();
+                    if (!attacker.cannotAttackWithItem(weapon, 5)) {
+                        net.minecraft.world.item.component.PiercingWeapon piercing =
+                                weapon.get(net.minecraft.core.component.DataComponents.PIERCING_WEAPON);
+                        if (piercing != null) {
+                            piercing.attack(attacker, net.minecraft.world.entity.EquipmentSlot.MAINHAND);
+                        }
+                    }
+                }
                 // 只推进 1a 建模的三处：`ServerPlayer.tick` 递减 damageCooldownTime，
                 // `LivingEntity.baseTick` 递减 hurtTime，以及 `ServerPlayer.doTick`
                 // 里 `lastSentHealth` 变了就补 `set_health`。不跑 FoodData.tick /
@@ -6186,6 +6224,7 @@ public final class MobOracle {
         line.append(",\"attackSprint\":").append(scene.attackSprint);
         line.append(",\"attackFall\":").append(Double.doubleToRawLongBits(scene.attackFall));
         line.append(",\"attackGround\":").append(scene.attackGround);
+        line.append(",\"stabTick\":").append(scene.stabTick);
         line.append(",\"attackEnchants\":[");
         for (int i = 0; i < scene.attackEnchants.size(); i++) {
             if (i > 0) line.append(',');

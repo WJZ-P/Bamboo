@@ -403,6 +403,9 @@ struct Case {
     attack_ground: bool,
     #[serde(default)]
     attack_enchants: Vec<(String, i32)>,
+    /// 长矛场景：这一刻触发 `PiercingWeapon.attack`，-1 表示不触发。
+    #[serde(default = "minus_one")]
+    stab_tick: i32,
     /// 1b 玩家生命场景的规则与动作。
     #[serde(default)]
     life: Option<LifeSetup>,
@@ -4107,6 +4110,7 @@ impl Report {
             attack_fall: f64::from_bits(case.attack_fall as u64),
             attack_ground: case.attack_ground,
             attack_enchants: case.attack_enchants.clone(),
+            stab_tick: case.stab_tick,
             extra_cow_positions: case
                 .cows
                 .iter()
@@ -4157,6 +4161,8 @@ impl Report {
             Some("mace_aoe") => scene.extra_cow_positions.clear(),
             // 重锤宠物改坏：把驯服狼的主人剥掉，让它重新被范围击退（和官方分叉）。
             Some("mace_pet") => scene.mob_owners.fill(-1),
+            // 长矛改坏：取消刺击，两头牛都不受伤（和官方分叉）。
+            Some("spear_stab") => scene.stab_tick = -1,
             _ => {}
         }
         let output = replay_player_hurt(&scene);

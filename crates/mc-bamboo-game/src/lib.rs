@@ -1345,6 +1345,13 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
     observer_packets.push(observer_only);
 
     for tick in 1..=scene.ticks {
+        if scene.stab_tick == tick as i32 {
+            entity_tracking::sync(&mut region);
+            let _ = std::mem::take(&mut *capture.0.lock().unwrap());
+            let _ = std::mem::take(&mut *observer_capture.0.lock().unwrap());
+            player_attack::on_stab(&mut region, id);
+            entity_tracking::drain_events_for_oracle(&mut region, observer);
+        }
         for action in scene.actions.iter().filter(|action| action.tick == tick) {
             if action.attack_cow {
                 if let Some(cow) = cow {
@@ -1945,6 +1952,8 @@ pub struct ReplayPlayerHurt {
     pub attack_ground: bool,
     pub attack_enchants: Vec<(String, i32)>,
     pub extra_cow_positions: Vec<(f64, f64, f64)>,
+    /// 长矛场景：这一刻触发 `PiercingWeapon.attack`，-1 表示不触发。
+    pub stab_tick: i32,
     /// 每头参战牛的随机源初始状态，按位置顺序；官方场景给每头牛设了同一种子。
     ///
     /// Initial random state of each scene cow, in position order; the official
