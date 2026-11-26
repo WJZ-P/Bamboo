@@ -731,6 +731,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("warden")) {
                 cases += playWardenSave(official, out);
             }
+            if (only == null || only.startsWith("wither")) {
+                cases += playWitherSave(official, out);
+            }
             if (only == null || only.startsWith("breeze")) {
                 cases += playBreeze(official, out, only);
             }
@@ -15585,6 +15588,38 @@ public final class MobOracle {
                     net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
             copy.saveWithoutId(again);
             out.write("{\"type\":\"wardenSave\",\"filled\":" + filled
+                    + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                    + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    /** 凋灵存档往返：`Invul`（无敌刻数）以及通用键逐键对拍。 */
+    private static int playWitherSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (int invul : new int[] {0, 137, 220}) {
+            FakeLevel world = FakeLevel.create(official);
+            var mob = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                    EntityTypes.WITHER.create(world, EntitySpawnReason.COMMAND);
+            setRandom(mob, world.entitySeeds.nextLong());
+            mob.setPos(1.5, 64.0, 2.5);
+            mob.setYRot(37.0F);
+            mob.setXRot(12.0F);
+            mob.setHealth(180.0F);
+            mob.setInvulnerableTicks(invul);
+            var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            mob.saveWithoutId(output);
+            var copy = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                    EntityTypes.WITHER.create(world, EntitySpawnReason.LOAD);
+            copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries,
+                    output.buildResult()));
+            var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            copy.saveWithoutId(again);
+            out.write("{\"type\":\"witherSave\",\"invul\":" + invul
                     + ",\"nbt\":" + jsonString(output.buildResult().toString())
                     + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
             cases++;

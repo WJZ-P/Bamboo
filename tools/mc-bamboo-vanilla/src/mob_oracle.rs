@@ -92,6 +92,7 @@ mod warden;
 mod water_mob;
 mod wind_charge;
 mod witch_throw;
+mod wither;
 mod zombie_villager;
 
 const MIN_Y: i32 = -64;
@@ -263,6 +264,7 @@ enum Line {
     SculkCatalystSave(sculk_catalyst::SculkCatalystSaveCase),
     Warden(Box<warden::WardenCase>),
     WardenSave(warden::WardenSaveCase),
+    WitherSave(wither::WitherSaveCase),
     Breeze(Box<breeze::BreezeCase>),
     Allay(Box<allay::AllayCase>),
     AllaySave(allay::AllaySaveCase),
@@ -2392,6 +2394,7 @@ impl Report {
                 Line::SculkCatalystSave(case) => self.replay_sculk_catalyst_save(&case),
                 Line::Warden(case) => self.replay_warden(&case),
                 Line::WardenSave(case) => self.replay_warden_save(&case),
+                Line::WitherSave(case) => self.replay_wither_save(&case),
                 Line::Breeze(case) => self.replay_breeze(&case),
                 Line::Allay(case) => self.replay_allay(&case),
                 Line::AllaySave(case) => self.replay_allay_save(&case),
