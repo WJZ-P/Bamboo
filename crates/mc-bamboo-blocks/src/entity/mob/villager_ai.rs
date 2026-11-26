@@ -502,6 +502,20 @@ pub struct MeetGateState {
     pub flip: bool,
 }
 
+/// `PRE_RAID` 优先级 0 的 `TriggerGate.triggerOneShuffled([SetWalkTargetFromBlockMemory,
+/// VillageBoundRandomStroll])` 状态。官方 `ShufflingList` 用无种子的随机源，对拍场景里
+/// 两个触发只有一个能成、顺序不影响取数，这里和 `MEET` 闸门一样用翻转近似。
+///
+/// State for `PRE_RAID`'s priority-0 `TriggerGate.triggerOneShuffled([SetWalkTargetFromBlockMemory,
+/// VillageBoundRandomStroll])`. Vanilla seeds the `ShufflingList` from an unseeded random; in the
+/// oracle scenes only one trigger can fire and the order never changes the draws, so like the
+/// `MEET` gate this approximates the shuffle with a flip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreRaidGateState {
+    pub speed: f32,
+    pub flip: bool,
+}
+
 /// `SetClosestHomeAsWalkTarget` 的重试缓存（装箱以保持 `Node` 紧凑）。
 ///
 /// Boxed retry cache for `SetClosestHomeAsWalkTarget`.
@@ -578,6 +592,9 @@ pub enum Behavior {
     },
     /// `MEET` 优先级 2 的 `TriggerGate(StrollAroundPoi, SocializeAtBell)`。
     MeetTriggerGate(Box<MeetGateState>),
+    /// `PRE_RAID` 优先级 0 的 `TriggerGate.triggerOneShuffled([SetWalkTargetFromBlockMemory,
+    /// VillageBoundRandomStroll])`：`OneShot`，走向钟（集合点）或在村里闲逛。
+    PreRaidTriggerGate(Box<PreRaidGateState>),
     /// `SleepInBed`：`Behavior(60, 60)` 且 `timedOut` 恒假，在床上入睡直到活动不再是 `REST`。
     SleepInBed { next_ok_start_time: i64 },
     /// `SetClosestHomeAsWalkTarget`：`OneShot`，无 `HOME` 记忆时找最近 5 张床并走去。
@@ -693,7 +710,8 @@ impl Behavior {
             | Self::ResetRaidStatus
             | Self::CelebrateVillagersSurvivedRaid
             | Self::RaidCelebrateTriggerGate { .. }
-            | Self::MeetTriggerGate(_) => &[],
+            | Self::MeetTriggerGate(_)
+            | Self::PreRaidTriggerGate(_) => &[],
             Self::SleepInBed { .. } => REQ_SLEEP_IN_BED,
             Self::SetClosestHomeAsWalkTarget(_) => REQ_CLOSEST_HOME,
             Self::InsideBrownianWalk { .. } => REQ_WALK_ABSENT,
@@ -1247,90 +1265,15 @@ impl Behavior {
                 close_enough,
                 too_far_distance,
                 too_long_unreachable,
-            } => {
-                let Some(MemoryValue::GlobalPos(global_pos)) = cx.memories.get(*memory).cloned()
-                else {
-                    return false;
-                };
-                let cant_reach = match cx.memories.get(CantReachWalkTargetSince) {
-                    Some(MemoryValue::Long(since)) => Some(*since),
-                    _ => None,
-                };
-                let wrong_dim = global_pos.dimension != "minecraft:overworld";
-                let timed_out = cant_reach.is_some_and(|since| {
-                    cx.time.saturating_sub(since) > i64::from(*too_long_unreachable)
-                });
-                if wrong_dim || timed_out {
-                    villager::release_poi_from_memories(
-                        cx.me,
-                        cx.mob.villager.profession,
-                        cx.memories,
-                        cx.ctx,
-                        *memory,
-                    );
-                    cx.memories.erase(*memory);
-                    cx.memories
-                        .set(CantReachWalkTargetSince, MemoryValue::Long(cx.time));
-                    return true;
-                }
-                let mob_pos = cx.me.block_position();
-                let dist = manhattan(global_pos.pos, mob_pos);
-                let too_far = i32::from(*too_far_distance);
-                let close = i32::from(*close_enough);
-                if dist > too_far {
-                    let towards = Vec3::new(
-                        f64::from(global_pos.pos.x) + 0.5,
-                        f64::from(global_pos.pos.y),
-                        f64::from(global_pos.pos.z) + 0.5,
-                    );
-                    let blocks = cx.ctx.blocks();
-                    let mut picked: Option<Vec3> = None;
-                    let mut tries = 0;
-                    while picked
-                        .is_none_or(|p| manhattan(BlockPos::containing(p), mob_pos) > too_far)
-                    {
-                        picked = goals::default_random_pos_towards(
-                            cx.me,
-                            cx.mob,
-                            blocks,
-                            15,
-                            7,
-                            towards,
-                            std::f32::consts::FRAC_PI_2,
-                        );
-                        tries += 1;
-                        if tries == 1000 {
-                            villager::release_poi_from_memories(
-                                cx.me,
-                                cx.mob.villager.profession,
-                                cx.memories,
-                                cx.ctx,
-                                *memory,
-                            );
-                            cx.memories.erase(*memory);
-                            cx.memories
-                                .set(CantReachWalkTargetSince, MemoryValue::Long(cx.time));
-                            return true;
-                        }
-                    }
-                    if let Some(target) = picked {
-                        cx.memories.set(
-                            WalkTarget,
-                            MemoryValue::Walk(WalkTarget::to_point(target, *speed, close)),
-                        );
-                    }
-                } else if dist > close {
-                    cx.memories.set(
-                        WalkTarget,
-                        MemoryValue::Walk(WalkTarget {
-                            target: PositionTracker::at_block(global_pos.pos),
-                            speed: *speed,
-                            close_enough: close,
-                        }),
-                    );
-                }
-                true
-            }
+            } => trigger_walk_target_from_block_memory(
+                *memory,
+                *speed,
+                *close_enough,
+                *too_far_distance,
+                *too_long_unreachable,
+                cx,
+            ),
+            Self::PreRaidTriggerGate(state) => trigger_pre_raid_gate(state, cx),
             Self::MeetTriggerGate(state) => trigger_meet_gate(state, cx),
             Self::SetClosestHomeAsWalkTarget(state) => trigger_closest_home(state, cx),
             Self::InsideBrownianWalk { speed } => trigger_inside_brownian_walk(*speed, cx),
@@ -2070,6 +2013,123 @@ fn trigger_meet_gate(state: &mut MeetGateState, cx: &mut Cx) -> bool {
             return true;
         }
         let _ = trigger_socialize_at_bell(cx);
+    }
+    true
+}
+
+/// `SetWalkTargetFromBlockMemory.create(memory, speed, closeEnough, tooFar, tooLong)`：
+/// 走向记忆里的方块；太远时往那个方向随机挑一格，走不通太久则放弃并释放 POI。
+///
+/// `SetWalkTargetFromBlockMemory.create(memory, speed, closeEnough, tooFar, tooLong)`:
+/// walk to the remembered block; when too far pick a random point towards it, and on a
+/// long stall give up and release the POI.
+fn trigger_walk_target_from_block_memory(
+    memory: MemoryType,
+    speed: f32,
+    close_enough: u16,
+    too_far_distance: u16,
+    too_long_unreachable: u16,
+    cx: &mut Cx,
+) -> bool {
+    let Some(MemoryValue::GlobalPos(global_pos)) = cx.memories.get(memory).cloned() else {
+        return false;
+    };
+    let cant_reach = match cx.memories.get(CantReachWalkTargetSince) {
+        Some(MemoryValue::Long(since)) => Some(*since),
+        _ => None,
+    };
+    let wrong_dim = global_pos.dimension != "minecraft:overworld";
+    let timed_out = cant_reach
+        .is_some_and(|since| cx.time.saturating_sub(since) > i64::from(too_long_unreachable));
+    if wrong_dim || timed_out {
+        villager::release_poi_from_memories(
+            cx.me,
+            cx.mob.villager.profession,
+            cx.memories,
+            cx.ctx,
+            memory,
+        );
+        cx.memories.erase(memory);
+        cx.memories
+            .set(CantReachWalkTargetSince, MemoryValue::Long(cx.time));
+        return true;
+    }
+    let mob_pos = cx.me.block_position();
+    let dist = manhattan(global_pos.pos, mob_pos);
+    let too_far = i32::from(too_far_distance);
+    let close = i32::from(close_enough);
+    if dist > too_far {
+        let towards = Vec3::new(
+            f64::from(global_pos.pos.x) + 0.5,
+            f64::from(global_pos.pos.y),
+            f64::from(global_pos.pos.z) + 0.5,
+        );
+        let blocks = cx.ctx.blocks();
+        let mut picked: Option<Vec3> = None;
+        let mut tries = 0;
+        while picked.is_none_or(|p| manhattan(BlockPos::containing(p), mob_pos) > too_far) {
+            picked = goals::default_random_pos_towards(
+                cx.me,
+                cx.mob,
+                blocks,
+                15,
+                7,
+                towards,
+                std::f32::consts::FRAC_PI_2,
+            );
+            tries += 1;
+            if tries == 1000 {
+                villager::release_poi_from_memories(
+                    cx.me,
+                    cx.mob.villager.profession,
+                    cx.memories,
+                    cx.ctx,
+                    memory,
+                );
+                cx.memories.erase(memory);
+                cx.memories
+                    .set(CantReachWalkTargetSince, MemoryValue::Long(cx.time));
+                return true;
+            }
+        }
+        if let Some(target) = picked {
+            cx.memories.set(
+                WalkTarget,
+                MemoryValue::Walk(WalkTarget::to_point(target, speed, close)),
+            );
+        }
+    } else if dist > close {
+        cx.memories.set(
+            WalkTarget,
+            MemoryValue::Walk(WalkTarget {
+                target: PositionTracker::at_block(global_pos.pos),
+                speed,
+                close_enough: close,
+            }),
+        );
+    }
+    true
+}
+
+/// `PreRaidTriggerGate`：`TriggerGate.triggerOneShuffled` 的两个触发翻转各试一遍，
+/// 先命中（成功设下步行目标）的那个停止，和 `MEET` 闸门用同一套确定性近似。
+///
+/// `PreRaidTriggerGate`: try the two `TriggerGate.triggerOneShuffled` triggers in the
+/// two flip orders and stop at the first that fires (sets a walk target), using the same
+/// deterministic approximation as the `MEET` gate.
+fn trigger_pre_raid_gate(state: &mut PreRaidGateState, cx: &mut Cx) -> bool {
+    state.flip = !state.flip;
+    let speed = state.speed * 1.5;
+    if state.flip {
+        if trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx) {
+            return true;
+        }
+        let _ = trigger_village_bound_random_stroll(speed, 10, 7, cx);
+    } else {
+        if trigger_village_bound_random_stroll(speed, 10, 7, cx) {
+            return true;
+        }
+        let _ = trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx);
     }
     true
 }
@@ -3222,29 +3282,10 @@ fn pre_raid_package(speed: f32) -> ActivityData {
             (0, Kind::Villager(Behavior::RingBell)),
             (
                 0,
-                Kind::Gate(Box::new(Gate::run_one(
-                    Vec::new(),
-                    vec![
-                        (
-                            Kind::Villager(Behavior::WalkTargetFromBlockMemory {
-                                memory: MeetingPoint,
-                                speed: speed * 1.5,
-                                close_enough: 2,
-                                too_far_distance: 150,
-                                too_long_unreachable: 200,
-                            }),
-                            1,
-                        ),
-                        (
-                            Kind::Villager(Behavior::VillageBoundRandomStroll {
-                                speed: speed * 1.5,
-                                max_xz: 10,
-                                max_y: 7,
-                            }),
-                            1,
-                        ),
-                    ],
-                ))),
+                Kind::Villager(Behavior::PreRaidTriggerGate(Box::new(PreRaidGateState {
+                    speed,
+                    flip: false,
+                }))),
             ),
             minimal_look_behavior(),
             (99, Kind::Villager(Behavior::ResetRaidStatus)),
