@@ -1656,8 +1656,8 @@ impl EntityStore {
                 // `EvokerFangs.tick`：第一次生效时广播 4 号实体事件（尖牙动画）。
                 // `EvokerFangs.tick`: broadcast entity event 4 the first time it activates.
                 super::KindState::EvokerFangs(fangs) => {
-                    if fangs.sent_spike_event {
-                        fangs.sent_spike_event = false;
+                    if fangs.pending_spike_event {
+                        fangs.pending_spike_event = false;
                         Some((
                             row.public.uid,
                             vec![super::mob::MobEvent::EntityEvent { event: 4 }],

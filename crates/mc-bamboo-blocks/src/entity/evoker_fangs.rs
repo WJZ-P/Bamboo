@@ -27,8 +27,10 @@ const LIFE_TICKS: i32 = 22;
 pub struct EvokerFangs {
     /// `warmupDelayTicks`。
     pub warmup_delay_ticks: i32,
-    /// `sentSpikeEvent`。
+    /// `sentSpikeEvent`：服务端是否已经触发过 4 号事件（永久标志，不复位）。
     pub sent_spike_event: bool,
+    /// 这一刻刚触发的 4 号事件，由实体表取走广播后清零。
+    pub(crate) pending_spike_event: bool,
     /// `lifeTicks`，构造时为 22。
     pub life_ticks: i32,
     /// `owner`：召唤它的唤魔者。
@@ -45,6 +47,7 @@ impl EvokerFangs {
         Self {
             warmup_delay_ticks,
             sent_spike_event: false,
+            pending_spike_event: false,
             life_ticks: LIFE_TICKS,
             owner,
             owner_uuid,
@@ -61,14 +64,14 @@ pub(crate) fn spawn(
     owner: EntityUid,
     owner_uuid: [u8; 16],
 ) {
-    let mut entity = Entity::new(
+    let mut entity = world.prepare_entity(Entity::new(
         super::EntityKind::EvokerFangs(Box::new(EvokerFangs::new(
             delay,
             Some(owner),
             Some(owner_uuid),
         ))),
         position,
-    );
+    ));
     entity.y_rot = y_rot * 57.295_776;
     world.add_prepared_entity(entity);
 }
@@ -88,6 +91,7 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
             }
             if !fangs.sent_spike_event {
                 fangs.sent_spike_event = true;
+                fangs.pending_spike_event = true;
             }
             fangs.life_ticks -= 1;
             if fangs.life_ticks < 0 {
@@ -112,6 +116,12 @@ fn damage_nearby(
     owner_uuid: Option<[u8; 16]>,
 ) {
     let area = me.bounding_box().inflate(0.2, 0.0, 0.2);
+    let owner_is_evoker = owner.and_then(|uid| ctx.other(uid)).is_some_and(|other| {
+        matches!(
+            &other.kind,
+            super::KindPublic::Mob(public) if public.mob_type == super::mob::MobType::Evoker
+        )
+    });
     let mut targets = Vec::new();
     ctx.for_each_other_in(area, &mut |other| {
         if other.removed || other.uid == me.id || owner == Some(other.uid) {
@@ -120,6 +130,20 @@ fn damage_nearby(
         let super::KindPublic::Mob(public) = &other.kind else {
             return;
         };
+        // `Evoker.considersEntityAsAlly`：`#illager_friends` 和自己召唤的恼鬼都是盟友，不受尖牙伤。
+        // `Evoker.considersEntityAsAlly`: `#illager_friends` and its vexes are allies, exempt from fangs.
+        if owner_is_evoker
+            && matches!(
+                public.mob_type,
+                super::mob::MobType::Evoker
+                    | super::mob::MobType::Illusioner
+                    | super::mob::MobType::Pillager
+                    | super::mob::MobType::Vindicator
+                    | super::mob::MobType::Vex
+            )
+        {
+            return;
+        }
         if public.is_alive() {
             targets.push(other.uid);
         }

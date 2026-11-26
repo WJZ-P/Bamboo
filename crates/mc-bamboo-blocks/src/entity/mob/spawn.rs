@@ -569,8 +569,8 @@ fn finalize_spawn_in_group(
         return;
     }
     if kind == MobType::Vex {
-        // `Vex.populateDefaultEquipmentSlots`（铁剑、掉落率 0）+ `Mob.finalizeSpawn`。
-        super::vex::finalize_spawn(entity, world.random());
+        // `Vex.finalizeSpawn`：主手铁剑（掉落率 0）、装备附魔 + `Mob.finalizeSpawn`。
+        super::vex::finalize_spawn(world, entity);
         return;
     }
     // `Guardian` / `ElderGuardian` 没有自己的 `finalizeSpawn`，只走 `Monster` 继承的

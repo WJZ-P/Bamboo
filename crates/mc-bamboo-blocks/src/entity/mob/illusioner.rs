@@ -39,7 +39,7 @@ pub struct IllusionerState {}
 
 /// `Illusioner.createAttributes()`：`Monster` 的缺省加 0.5 移速、18 跟随距离、32 血。
 pub(super) fn attributes() -> Attributes {
-    let mut table = Attributes::skeleton();
+    let mut table = Attributes::monster();
     table.set_base(attribute::MOVEMENT_SPEED, f64::from(0.5_f32));
     table.set_base(attribute::FOLLOW_RANGE, 18.0);
     table.set_base(attribute::MAX_HEALTH, 32.0);
@@ -109,8 +109,9 @@ impl IllusionerGoal {
                 if Some(target) == *last_target_id {
                     return false;
                 }
-                // 只在中等级以上难度用致盲。
-                ctx.blocks().difficulty() > crate::entity::raid::DIFFICULTY_NORMAL
+                // 只在局部难度高于普通（`Difficulty.NORMAL.ordinal() = 2`）时用致盲。
+                // Only cast blindness when effective difficulty exceeds `Difficulty.NORMAL.ordinal()` (2.0).
+                ctx.blocks().effective_difficulty(me.block_position()) > 2.0
             }
         }
     }

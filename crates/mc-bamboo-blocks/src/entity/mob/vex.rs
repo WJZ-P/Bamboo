@@ -52,7 +52,7 @@ pub struct VexState {
 
 /// `Vex.createAttributes()`：`Monster` 的缺省加 14 血、4 攻击。
 pub(super) fn attributes() -> Attributes {
-    let mut table = Attributes::skeleton();
+    let mut table = Attributes::monster();
     table.set_base(attribute::MAX_HEALTH, 14.0);
     table.set_base(attribute::ATTACK_DAMAGE, 4.0);
     table
@@ -73,9 +73,11 @@ pub enum VexGoal {
 
 impl VexGoal {
     pub(super) const fn flags(&self) -> &'static [Flag] {
+        // `VexCopyOwnerTargetGoal` 直接继承 `TargetGoal`，两者都没调 `setFlags`（不锁 TARGET）。
+        // `VexCopyOwnerTargetGoal` extends `TargetGoal` directly; neither calls `setFlags`.
         match self {
             Self::ChargeAttack | Self::RandomMove => &[Flag::Move],
-            Self::CopyOwnerTarget => &[Flag::Target],
+            Self::CopyOwnerTarget => &[],
         }
     }
 
@@ -119,7 +121,7 @@ impl VexGoal {
 
     pub(super) fn can_continue(
         &mut self,
-        _me: &mut Entity,
+        me: &mut Entity,
         mob: &mut Mob,
         ctx: &mut dyn EntityCtx,
     ) -> bool {
@@ -133,7 +135,19 @@ impl VexGoal {
                         .is_some_and(|(_, alive)| alive)
             }
             Self::RandomMove => false,
-            Self::CopyOwnerTarget => mob.target.is_some(),
+            Self::CopyOwnerTarget => {
+                // `TargetGoal.canContinueToUse`（`mustSee = false`）：目标活着且在跟随距离内。
+                // `TargetGoal.canContinueToUse` (`mustSee = false`): target alive and within follow range.
+                let Some((target, alive)) = mob.target.and_then(|uid| goals::target_view(ctx, uid))
+                else {
+                    return false;
+                };
+                if !alive {
+                    return false;
+                }
+                let follow = mob.attributes.value(attribute::FOLLOW_RANGE);
+                me.position.distance_to_sqr(target.position) <= follow * follow
+            }
         }
     }
 
@@ -153,33 +167,7 @@ impl VexGoal {
                 mob.vex.charging = true;
                 living::play_sound(me, mob, "minecraft:entity.vex.charge", 1.0, 1.0);
             }
-            Self::RandomMove => {
-                let anchor = mob.vex.bound_origin.unwrap_or_else(|| me.block_position());
-                for _ in 0..3 {
-                    let x = anchor.x - 7 + me.random.next_int_bounded(15);
-                    let y = anchor.y - 5 + me.random.next_int_bounded(11);
-                    let z = anchor.z - 7 + me.random.next_int_bounded(15);
-                    let pos = BlockPos::new(x, y, z);
-                    if ctx.blocks().block_state(pos).is_air() {
-                        mob.mover.set_wanted_position(
-                            f64::from(x) + 0.5,
-                            f64::from(y) + 0.5,
-                            f64::from(z) + 0.5,
-                            0.25,
-                        );
-                        if mob.target.is_none() {
-                            mob.look.set_look_at(
-                                f64::from(x) + 0.5,
-                                f64::from(y) + 0.5,
-                                f64::from(z) + 0.5,
-                                180.0,
-                                20.0,
-                            );
-                        }
-                        break;
-                    }
-                }
-            }
+            Self::RandomMove => {}
             Self::CopyOwnerTarget => {
                 let target = copy_owner_target(mob, ctx);
                 mob.target = target;
@@ -192,7 +180,12 @@ impl VexGoal {
             Self::ChargeAttack => {
                 mob.vex.charging = false;
             }
-            Self::RandomMove | Self::CopyOwnerTarget => {}
+            Self::RandomMove => {}
+            Self::CopyOwnerTarget => {
+                // `TargetGoal.stop`：停掉时把生物的攻击目标清空。
+                // `TargetGoal.stop`: clear the mob's target on stop.
+                mob.target = None;
+            }
         }
     }
 
@@ -224,7 +217,34 @@ impl VexGoal {
                     );
                 }
             }
-            Self::RandomMove | Self::CopyOwnerTarget => {}
+            Self::RandomMove => {
+                let anchor = mob.vex.bound_origin.unwrap_or_else(|| me.block_position());
+                for _ in 0..3 {
+                    let x = anchor.x + me.random.next_int_bounded(15) - 7;
+                    let y = anchor.y + me.random.next_int_bounded(11) - 5;
+                    let z = anchor.z + me.random.next_int_bounded(15) - 7;
+                    let pos = BlockPos::new(x, y, z);
+                    if ctx.blocks().block_state(pos).is_air() {
+                        mob.mover.set_wanted_position(
+                            f64::from(x) + 0.5,
+                            f64::from(y) + 0.5,
+                            f64::from(z) + 0.5,
+                            0.25,
+                        );
+                        if mob.target.is_none() {
+                            mob.look.set_look_at(
+                                f64::from(x) + 0.5,
+                                f64::from(y) + 0.5,
+                                f64::from(z) + 0.5,
+                                180.0,
+                                20.0,
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+            Self::CopyOwnerTarget => {}
         }
     }
 }
@@ -289,17 +309,22 @@ pub(super) fn targets() -> GoalSelector {
     ])
 }
 
-/// `Vex.populateDefaultEquipmentSlots`：主手铁剑、掉落率 0。之后走 `Monster.finalizeSpawn`。
-pub(super) fn finalize_spawn(entity: &mut Entity, random: &dyn crate::random::RandomSource) {
+/// `Vex.finalizeSpawn`：主手铁剑（掉落率 0）、装备附魔，然后 `Monster.finalizeSpawn`。
+pub(super) fn finalize_spawn(world: &mut World<'_>, entity: &mut Entity) {
+    let special = ((crate::entity::ctx::BlockView::effective_difficulty(
+        world,
+        entity.block_position(),
+    ) - 2.0)
+        / 2.0)
+        .clamp(0.0, 1.0);
+    let random = world.random();
     entity.with_mob(|_, mob| {
         mob.equipment.set(
             EquipmentSlot::MainHand,
             ItemStack::new(mc_bamboo_data::items::IRON_SWORD, 1),
         );
         mob.equipment.set_drop_chance(EquipmentSlot::MainHand, 0.0);
-        // 恼鬼穿墙飞行、无重力。
-        mob.no_physics = true;
-        mob.no_gravity = true;
+        super::skeleton::enchant_spawn_equipment(world, mob, random, special);
         super::spawn::finalize_mob(random, mob);
     });
 }
@@ -347,22 +372,19 @@ pub(super) fn load(mob: &mut Mob, tag: &Tag) {
 /// The part of `Vex.tick` after `super.tick()`: `setNoGravity(true)` and the limited
 /// life. The wall-phasing `noPhysics` is handled by `move_living` via `mob.no_physics`
 /// (always true for a vex).
+/// `Vex.tick` 在 `super.tick()` 之后的那一段：复位 `noPhysics`、`setNoGravity(true)` 和有限生命扣血。
+///
+/// The part of `Vex.tick` after `super.tick()`: clear `noPhysics`, `setNoGravity(true)`
+/// and the limited life.
 pub(super) fn tick_after(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    mob.no_physics = false;
     mob.no_gravity = true;
     if mob.vex.has_limited_life {
         mob.vex.limited_life_ticks -= 1;
         if mob.vex.limited_life_ticks <= 0 {
             mob.vex.limited_life_ticks = 20;
             let source = super::DamageSource::environment(super::DamageKind::Starve);
-            ctx.emit(
-                Command::HurtMob {
-                    target: me.id,
-                    source,
-                    amount: 1.0,
-                    on_hit: None,
-                },
-                me,
-            );
+            living::hurt_server(me, mob, ctx, source, 1.0);
         }
     }
 }
@@ -377,7 +399,10 @@ pub(super) fn move_control_tick(me: &mut Entity, mob: &mut Mob, ctx: &dyn Entity
     let dy = mob.mover.wanted_y - me.position.y;
     let dz = mob.mover.wanted_z - me.position.z;
     let length = (dx * dx + dy * dy + dz * dz).sqrt();
-    let box_size = f64::from(me.dimensions.0.max(me.dimensions.1));
+    // `AABB.getSize()` = `(xSize + ySize + zSize) / 3.0`。
+    let aabb = me.bounding_box();
+    let box_size =
+        ((aabb.max_x - aabb.min_x) + (aabb.max_y - aabb.min_y) + (aabb.max_z - aabb.min_z)) / 3.0;
     if length < box_size {
         mob.mover.operation = super::control::Operation::Wait;
         me.delta = me.delta.scale(0.5);
@@ -393,7 +418,7 @@ pub(super) fn move_control_tick(me: &mut Entity, mob: &mut Mob, ctx: &dyn Entity
         ),
         None => (me.delta.x, me.delta.z),
     };
-    let yaw = -(mth::atan2(tz, tx) * 57.295_776_367_187_5) as f32;
+    let yaw = -(mth::atan2(tx, tz) as f32) * 57.295_776_f32;
     me.y_rot = yaw;
     mob.y_body_rot = yaw;
 }
@@ -406,9 +431,10 @@ pub(crate) fn summon(
     owner_uuid: [u8; 16],
 ) {
     for summon in summons {
+        // `Entity.snapTo(BlockPos, 0.0F, 0.0F)`：X/Z 居中，Y 不加 0.5。
         let position = Vec3::new(
             f64::from(summon.position.x) + 0.5,
-            f64::from(summon.position.y) + 0.5,
+            f64::from(summon.position.y),
             f64::from(summon.position.z) + 0.5,
         );
         let mut entity = world.prepare_entity(Entity::by_mob_type(super::MobType::Vex, position));

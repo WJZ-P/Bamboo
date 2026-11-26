@@ -42,7 +42,7 @@ pub struct EvokerState {
 /// `Evoker.createAttributes()`: the monster defaults plus 0.5 speed, a follow
 /// range of 12 and 24 health.
 pub(super) fn attributes() -> Attributes {
-    let mut table = Attributes::skeleton();
+    let mut table = Attributes::monster();
     table.set_base(attribute::MOVEMENT_SPEED, f64::from(0.5_f32));
     table.set_base(attribute::FOLLOW_RANGE, 12.0);
     table.set_base(attribute::MAX_HEALTH, 24.0);
@@ -101,11 +101,11 @@ impl EvokerGoal {
                 if !use_spell_can_use(me, mob, spell) {
                     return false;
                 }
-                // 16 格内的恼鬼数不超过 `nextInt(8) + 1` 才召唤。
-                // Summon only while the vexes within 16 blocks do not exceed
+                // 16 格内的恼鬼数严格小于 `nextInt(8) + 1` 才召唤。
+                // Summon only while the vexes within 16 blocks are fewer than
                 // `nextInt(8) + 1`.
                 let count = count_nearby_vexes(me, mob, ctx);
-                count <= me.random.next_int_bounded(8) + 1
+                me.random.next_int_bounded(8) + 1 > count
             }
             Self::WololoSpell { spell } => {
                 if mob.target.is_some()
@@ -373,7 +373,7 @@ fn spawn_fangs(
     delay: i32,
 ) {
     let view = ctx.blocks();
-    let mut pos = BlockPos::containing(Vec3::new(x, min_y, z));
+    let mut pos = BlockPos::containing(Vec3::new(x, max_y, z));
     let mut offset = 0.0;
     let mut found = false;
     loop {
@@ -391,14 +391,14 @@ fn spawn_fangs(
                     .iter()
                     .max_by(|a, b| a.max_y.partial_cmp(&b.max_y).unwrap())
                 {
-                    offset = bb.max_y;
+                    offset = bb.max_y - f64::from(pos.y);
                 }
             }
             found = true;
             break;
         }
         pos = pos.below();
-        if pos.y < mth::floor(max_y - 1.0) {
+        if pos.y < mth::floor(min_y) - 1 {
             break;
         }
     }
@@ -409,7 +409,7 @@ fn spawn_fangs(
     ctx.emit(
         Command::SpawnFangs {
             position: Vec3::new(x, y, z),
-            y_rot: yaw * 57.295_776,
+            y_rot: yaw,
             delay,
             owner: me.id,
             owner_uuid: mob.uuid,

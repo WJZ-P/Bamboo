@@ -155,6 +155,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Breeze {
         super::breeze::tick(me, mob);
     }
+    // `Vex.tick` 在 `super.tick()` 之前把 `noPhysics` 打开，穿墙飞行。
+    // `Vex.tick` enables `noPhysics` ahead of `super.tick()` so it phases through blocks.
+    if mob.mob_type == super::MobType::Vex {
+        mob.no_physics = true;
+    }
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
     // `LivingEntity.tick`：`updatingUsingItem()` 紧跟 `super.tick()`，在装备比较和
@@ -225,11 +230,6 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     // `AbstractNautilus.tick` runs after `super.tick()`: dash cooldown and bubbles.
     if super::nautilus::is_nautilus(mob.mob_type) && !me.removed {
         super::nautilus::tick(me, mob);
-    }
-    // `Vex.tick` 在 `super.tick()` 之后：`setNoGravity(true)` 和有限生命扣血。
-    // `Vex.tick` after `super.tick()`: `setNoGravity(true)` and the limited life.
-    if mob.mob_type == super::MobType::Vex && !me.removed {
-        super::vex::tick_after(me, mob, ctx);
     }
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
     body_rotation_tick(me, mob, ctx.blocks().game_time());
@@ -374,6 +374,15 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     // `CopperGolem.tick` after `super.tick()`: the weathering clock and statue conversion.
     if mob.mob_type == super::MobType::CopperGolem && !me.removed {
         super::copper_golem::tick_after(me, mob, ctx);
+    }
+    // `Vex.tick` 在 `super.tick()` 之后：复位 `noPhysics`、`setNoGravity(true)` 和有限生命扣血。
+    // `Vex.tick` after `super.tick()`: clear `noPhysics`, `setNoGravity(true)` and limited life.
+    if mob.mob_type == super::MobType::Vex {
+        if !me.removed {
+            super::vex::tick_after(me, mob, ctx);
+        } else {
+            mob.no_physics = false;
+        }
     }
 }
 
@@ -1379,6 +1388,11 @@ pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
 
 /// `Entity.isInWall`：眼睛那一小片和会让人窒息的方块重叠。
 fn is_in_wall(me: &Entity, mob: &Mob, view: &dyn BlockView) -> bool {
+    // `Entity.isInWall`：`noPhysics`（恼鬼穿墙）从不窒息。
+    // `Entity.isInWall`: `noPhysics` (phasing vexes) never suffocates.
+    if mob.no_physics {
+        return false;
+    }
     // `LivingEntity.isInWall`：睡着的不窒息（狐狸与村民）。
     // `LivingEntity.isInWall`: sleepers never suffocate (foxes and villagers).
     if (mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping())
@@ -3050,7 +3064,9 @@ fn root_vehicle(uid: EntityUid, vehicle: Option<EntityUid>, ctx: &dyn EntityCtx)
 }
 
 fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    if !mob.mob_type.is_pushable() {
+    // `Entity.push(Entity)`：`this.noPhysics`（恼鬼在 `Vex.tick` 里为真）不互相推挤。
+    // `Entity.push(Entity)`: `this.noPhysics` (true during `Vex.tick`) skips pushing.
+    if !mob.mob_type.is_pushable() || mob.no_physics {
         return;
     }
     let my_root = root_vehicle(me.id, me.vehicle, ctx);

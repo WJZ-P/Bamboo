@@ -896,7 +896,7 @@ impl MobType {
     /// Whether `TargetGoal.canContinueToUse` tracks how long the target has been unseen.
     /// Zombies join the hostile mobs that use the full `mustSee` memory.
     pub const fn uses_target_memory(self) -> bool {
-        self.full_target_rules() || matches!(self, Self::Slime) || self.is_zombie()
+        self.full_target_rules() || matches!(self, Self::Slime | Self::Vex) || self.is_zombie()
     }
 
     /// `Mob.getAmbientSound()` 返回 null 的种类：`makeSound(null)` 不出声，也不取音高的随机数。
