@@ -160,6 +160,8 @@ pub enum KindPublic {
     WindCharge(super::wind_charge::WindChargePublic),
     /// 烟花火箭：同步要的 UUID、主人、俯仰角和物品堆。
     FireworkRocket(super::firework_rocket::FireworkRocketPublic),
+    /// 钓鱼浮漂：同步要的 UUID、主人、俯仰角、被钩实体与咬钩标记。
+    FishingHook(super::fishing_hook::FishingHookPublic),
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
     Arrow(super::arrow::ArrowPublic),
@@ -199,6 +201,7 @@ impl KindPublic {
             }
             Self::WindCharge(charge) => charge.variant.entity_type(),
             Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
+            Self::FishingHook(_) => mc_bamboo_data::registries::entity_type::FISHING_BOBBER,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -284,6 +287,8 @@ pub enum KindState {
     WindCharge(Box<super::wind_charge::WindCharge>),
     /// 烟花火箭的全部状态。
     FireworkRocket(Box<super::firework_rocket::FireworkRocket>),
+    /// 钓鱼浮漂的全部状态。
+    FishingHook(Box<super::fishing_hook::FishingHook>),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
     Arrow(Box<super::arrow::Arrow>),
@@ -443,6 +448,9 @@ impl EntityRow {
             (KindPublic::FireworkRocket(_), KindState::FireworkRocket(firework)) => {
                 EntityKind::FireworkRocket(firework)
             }
+            (KindPublic::FishingHook(_), KindState::FishingHook(hook)) => {
+                EntityKind::FishingHook(hook)
+            }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
@@ -561,6 +569,10 @@ impl Entity {
             EntityKind::FireworkRocket(firework) => (
                 KindPublic::FireworkRocket(firework.public()),
                 KindState::FireworkRocket(firework),
+            ),
+            EntityKind::FishingHook(hook) => (
+                KindPublic::FishingHook(hook.public()),
+                KindState::FishingHook(hook),
             ),
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
@@ -1295,6 +1307,7 @@ impl EntityStore {
         if let EntityKind::FireworkRocket(firework) = &mut entity.kind {
             firework.uuid = super::mob::insecure_uuid(&mut entity.random);
         }
+        entity.finish_fishing_hook_random();
         if let EntityKind::Painting(painting) = &mut entity.kind {
             painting.uuid = super::mob::insecure_uuid(&mut entity.random);
         }
@@ -1719,6 +1732,17 @@ impl EntityStore {
                         None
                     }
                 }
+                super::KindState::FishingHook(hook) => {
+                    if hook.pending_pull_event {
+                        hook.pending_pull_event = false;
+                        Some((
+                            row.public.uid,
+                            vec![super::mob::MobEvent::EntityEvent { event: 31 }],
+                        ))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         };
@@ -1770,6 +1794,19 @@ impl EntityStore {
                 (
                     ChunkPos::containing(entity.position.x, entity.position.z),
                     vec![super::mob::MobEvent::EntityEvent { event: 17 }],
+                ),
+            );
+        }
+        // 浮漂收竿拉拽实体那一刻立刻消失；`broadcastEntityEvent(this, 31)` 走同一条路。
+        // A fishing hook vanishes when retrieving a hooked entity; event 31 shares this path.
+        if let EntityKind::FishingHook(hook) = &entity.kind
+            && hook.pending_pull_event
+        {
+            self.departed_mob_events.insert(
+                entity.id,
+                (
+                    ChunkPos::containing(entity.position.x, entity.position.z),
+                    vec![super::mob::MobEvent::EntityEvent { event: 31 }],
                 ),
             );
         }

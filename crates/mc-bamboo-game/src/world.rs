@@ -2876,6 +2876,7 @@ impl World {
         let region = &mut self.islands.get_mut(island).expect("在表里").region;
         // 存完之后按 `UNLOADED_WITH_PLAYER` 把珍珠从世界里移除。
         crate::ender_pearl::remove_on_leave(region, id);
+        crate::player_fishing::remove_on_leave(region, id);
         // 官方 `PlayerList.remove`：只有一名玩家乘客时先 `stopRiding`，再把根载具
         // 和整棵树按 `UNLOADED_WITH_PLAYER` 移除；存档里已经留了 `RootVehicle`。
         if let Some(vehicle) = region.players.get(&id).and_then(|p| p.riding.vehicle) {
@@ -3753,6 +3754,7 @@ fn run_island_simulation(
     crate::player_auto_spin::tick(region);
     // `Player.tick` 的 `cooldowns.tick()`、清掉已经离表的珍珠和每刻的存档快照。
     crate::ender_pearl::tick(region);
+    crate::player_fishing::tick(region);
     // 官方 `ServerPlayer.doTick` 里 `set_health` 在 `set_experience` 之前。
     // 伤害冷却递减、按需补 `set_health`。
     //

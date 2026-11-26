@@ -431,6 +431,7 @@ impl World {
                 crate::entity_tracking::on_leave(region, id);
                 crate::menu::on_leave(region, id);
                 crate::lectern::on_leave(region, id);
+                crate::player_fishing::remove_on_leave(region, id);
             }
             self.move_player(from, to, id, chunk);
             self.master.transit.remove(&id);

@@ -261,7 +261,13 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
         })
     };
     for row in rows {
-        if written_under_vehicle(row) {
+        if written_under_vehicle(row)
+            || matches!(
+                row.public.kind,
+                mc_bamboo_blocks::entity::KindPublic::LightningBolt(_)
+                    | mc_bamboo_blocks::entity::KindPublic::FishingHook(_)
+            )
+        {
             continue;
         }
         let tag = write_entity_tree(row, &|uid| by_uid.get(&uid).cloned());

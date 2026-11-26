@@ -47,6 +47,7 @@ pub const CONNECTED_TRIGGERS: &[&str] = &[
     "minecraft:crafter_recipe_crafted",
     "minecraft:cured_zombie_villager",
     "minecraft:villager_trade",
+    "minecraft:fishing_rod_hooked",
 ];
 
 /// 借用被拆开的地方（实体 tick、`HurtParts`）只压一条事件，玩家 tick 末尾统一 dispatch。
@@ -312,6 +313,31 @@ pub(crate) fn matches(trigger: &str, payload: &Value, conditions: &Value) -> boo
             known_conditions(&["item", "entity"])
                 && matches_item_field(conditions, payload)
                 && entity_field_matches(conditions, payload, "entity")
+        }
+        // `FishingRodHookedTrigger`：`rod`、`entity`（被钩实体或浮漂）与 `item`（钓上物品或被钩掉落物）。
+        "minecraft:fishing_rod_hooked" => {
+            known_conditions(&["rod", "entity", "item"])
+                && fields
+                    .get("rod")
+                    .is_none_or(|rod| item_predicate_matches(rod, payload.get("rod")))
+                && fields
+                    .get("entity")
+                    .is_none_or(|entity| entity_predicate_matches(entity, payload.get("entity")))
+                && fields.get("item").is_none_or(|expected| {
+                    let hooked_match = payload
+                        .get("hooked_item")
+                        .is_some_and(|actual| item_predicate_matches(expected, Some(actual)));
+                    let caught_match =
+                        payload
+                            .get("items")
+                            .and_then(Value::as_array)
+                            .is_some_and(|items| {
+                                items
+                                    .iter()
+                                    .any(|actual| item_predicate_matches(expected, Some(actual)))
+                            });
+                    hooked_match || caught_match
+                })
         }
         _ => object.is_some_and(|map| map.is_empty()),
     }
@@ -685,7 +711,7 @@ mod tests {
         let tree = AdvancementTree::global();
         let set: std::collections::BTreeSet<&str> = CONNECTED_TRIGGERS.iter().copied().collect();
         assert_eq!(set.len(), CONNECTED_TRIGGERS.len());
-        assert_eq!(CONNECTED_TRIGGERS.len(), 33);
+        assert_eq!(CONNECTED_TRIGGERS.len(), 34);
         for trigger in CONNECTED_TRIGGERS {
             assert!(tree.triggers.contains(trigger), "{trigger} 不在注册表里");
         }

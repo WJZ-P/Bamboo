@@ -631,6 +631,11 @@ impl TrackedEntity {
                     10 => EntityData::ItemFrameRotation(0),
                     _ => continue,
                 },
+                None if matches!(snapshot.data, KindData::FishingHook(_)) => match index {
+                    8 => EntityData::FishingHookedEntity(0),
+                    9 => EntityData::FishingBiting(false),
+                    _ => continue,
+                },
                 None if before.is_some() => default_data_for_type(
                     index,
                     match &snapshot.data {
@@ -885,6 +890,8 @@ pub enum KindData {
     WindCharge(mc_bamboo_blocks::entity::wind_charge::WindChargePublic),
     /// 烟花火箭：`add_entity` 的 data 用主人 ID，元数据带物品堆、附着目标和斜射标志。
     FireworkRocket(mc_bamboo_blocks::entity::firework_rocket::FireworkRocketPublic),
+    /// 钓鱼浮漂：`add_entity` 的 data 用主人 ID（无主人时用自身 ID），元数据带被钩实体与咬钩标记。
+    FishingHook(mc_bamboo_blocks::entity::fishing_hook::FishingHookPublic),
     /// 羊驼口水：没有自己的元数据。
     ///
     /// Llama spit, with no metadata of its own.
@@ -956,6 +963,7 @@ impl Snapshot {
                 KindPublic::SplashPotion(potion) => potion.needs_sync,
                 KindPublic::WindCharge(charge) => charge.needs_sync,
                 KindPublic::FireworkRocket(firework) => firework.needs_sync,
+                KindPublic::FishingHook(hook) => hook.needs_sync,
                 KindPublic::Painting(painting) => painting.needs_sync,
                 KindPublic::ItemFrame(frame) => frame.needs_sync,
                 _ => false,
@@ -966,6 +974,7 @@ impl Snapshot {
                 KindPublic::SplashPotion(potion) => potion.sync_velocity,
                 KindPublic::WindCharge(charge) => charge.sync_velocity,
                 KindPublic::FireworkRocket(firework) => firework.sync_velocity,
+                KindPublic::FishingHook(hook) => hook.sync_velocity,
                 _ => false,
             },
             sync_position: false,
@@ -988,6 +997,7 @@ impl Snapshot {
             KindData::SplashPotion(potion) => potion.owner.unwrap_or(0),
             KindData::WindCharge(charge) => charge.owner.unwrap_or(0),
             KindData::FireworkRocket(firework) => firework.owner.unwrap_or(0),
+            KindData::FishingHook(hook) => hook.owner.unwrap_or(self.id),
             KindData::Painting(painting) => painting.direction.id(),
             KindData::ItemFrame(frame) => frame.direction.id(),
             KindData::Tnt { .. }
@@ -1025,6 +1035,7 @@ impl KindData {
             KindPublic::OminousItemSpawner(stack) => Self::OminousItemSpawner(stack.clone()),
             KindPublic::WindCharge(charge) => Self::WindCharge(*charge),
             KindPublic::FireworkRocket(firework) => Self::FireworkRocket(firework.clone()),
+            KindPublic::FishingHook(hook) => Self::FishingHook(*hook),
             KindPublic::LeashKnot { .. } => Self::LeashKnot,
             KindPublic::EvokerFangs => Self::EvokerFangs,
             KindPublic::Painting(painting) => Self::Painting(painting.clone()),
@@ -1076,6 +1087,7 @@ impl KindData {
             | Self::OminousItemSpawner(_)
             | Self::WindCharge(_)
             | Self::FireworkRocket(_)
+            | Self::FishingHook(_)
             | Self::Painting(_)
             | Self::ItemFrame(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
@@ -1098,6 +1110,7 @@ impl KindData {
             | Self::EvokerFangs
             | Self::WindCharge(_)
             | Self::FireworkRocket(_)
+            | Self::FishingHook(_)
             | Self::Painting(_)
             | Self::ItemFrame(_) => None,
         }
@@ -1113,6 +1126,7 @@ impl KindData {
             Self::SplashPotion(potion) => Some(potion.uuid),
             Self::WindCharge(charge) => Some(charge.uuid),
             Self::FireworkRocket(firework) => Some(firework.uuid),
+            Self::FishingHook(hook) => Some(hook.uuid),
             Self::Painting(painting) => Some(painting.uuid),
             Self::ItemFrame(frame) => Some(frame.uuid),
             _ => None,
@@ -1129,6 +1143,7 @@ impl KindData {
             Self::SplashPotion(potion) => Some(potion.x_rot),
             Self::WindCharge(charge) => Some(charge.pitch),
             Self::FireworkRocket(firework) => Some(firework.pitch),
+            Self::FishingHook(hook) => Some(hook.pitch),
             Self::ItemFrame(frame) => Some(frame.x_rot),
             _ => None,
         }
@@ -1210,6 +1225,16 @@ impl KindData {
                 }
                 if firework.shot_at_angle {
                     data.push(EntityData::FireworksShotAtAngle(true));
+                }
+                data
+            }
+            Self::FishingHook(hook) => {
+                let mut data = Vec::new();
+                if hook.hooked_entity_data != 0 {
+                    data.push(EntityData::FishingHookedEntity(hook.hooked_entity_data));
+                }
+                if hook.biting {
+                    data.push(EntityData::FishingBiting(true));
                 }
                 data
             }

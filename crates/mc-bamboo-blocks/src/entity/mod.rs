@@ -13,6 +13,7 @@ pub mod arrow;
 pub mod ctx;
 pub mod evoker_fangs;
 pub mod firework_rocket;
+pub mod fishing_hook;
 pub mod hanging;
 pub mod leash_knot;
 pub mod lightning;
@@ -278,6 +279,10 @@ pub enum EntityKind {
     ///
     /// A firework rocket, vanilla `FireworkRocketEntity`.
     FireworkRocket(Box<firework_rocket::FireworkRocket>),
+    /// 钓鱼浮漂，`FishingHook`。
+    ///
+    /// A fishing bobber, vanilla `FishingHook`.
+    FishingHook(Box<fishing_hook::FishingHook>),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -306,6 +311,7 @@ impl EntityKind {
             }
             Self::WindCharge(charge) => charge.variant.entity_type(),
             Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
+            Self::FishingHook(_) => mc_bamboo_data::registries::entity_type::FISHING_BOBBER,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -549,6 +555,7 @@ impl Entity {
             }
             EntityKind::WindCharge(_) => wind_charge::tick(self, ctx),
             EntityKind::FireworkRocket(_) => firework_rocket::tick(self, ctx),
+            EntityKind::FishingHook(_) => fishing_hook::tick(self, ctx),
             EntityKind::LeashKnot(_) => leash_knot::tick(self, ctx),
             EntityKind::Painting(_) => hanging::tick_painting(self, ctx),
             EntityKind::ItemFrame(_) => hanging::tick_item_frame(self, ctx),
