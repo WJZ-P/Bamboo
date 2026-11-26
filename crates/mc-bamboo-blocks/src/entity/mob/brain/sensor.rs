@@ -715,10 +715,12 @@ fn is_liked_player(cx: &Cx, view: &LivingView) -> bool {
 const ITEM_EYE_HEIGHT: f32 = 0.2125;
 
 /// `NearestItemSensor.doTick`：32×16×32 里的掉落物按距离排好，取第一个想捡
-/// （`Mob.wantsToPickUp` 缺省恒真）、32 格内、看得见的。
+/// （`Mob.wantsToPickUp` 缺省恒真）、32 格内、看得见的（官方过滤链是
+/// `wantsToPickUp`、`closerThan(32)`、`LivingEntity.hasLineOfSight`）。
 ///
 /// `NearestItemSensor.doTick`: dropped items within 32×16×32 by distance; the first that
-/// is wanted (`Mob.wantsToPickUp` defaults to true), within 32 blocks and in sight.
+/// is wanted (`Mob.wantsToPickUp` defaults to true), within 32 blocks and in sight (the
+/// vanilla filter chain is `wantsToPickUp`, `closerThan(32)`, `hasLineOfSight`).
 fn sense_items(cx: &mut Cx) {
     let area = cx.me.bounding_box().inflate(32.0, 16.0, 32.0);
     let position = cx.me.position;
