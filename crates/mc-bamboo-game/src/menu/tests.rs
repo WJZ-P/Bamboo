@@ -1442,3 +1442,40 @@ fn chest_boat_menu_uses_the_entity_inventory() {
         .spawn(Entity::boat(ids::OAK_BOAT, position));
     assert!(!open_boat(&mut fixture.region, fixture.id, plain));
 }
+
+/// 运输船菜单标题是船实体自己的显示名（`Entity.getDisplayName()`），不是
+/// `container.chest`。官方 26.3 `AbstractChestBoat.createMenu` 返回
+/// `ChestMenu.threeRows`，`ServerPlayer.openMenu` 用 provider（船）的
+/// `getDisplayName()` 发 OpenScreen；船没覆写，就是 `EntityType.getDescriptionId()`。
+#[test]
+fn chest_boat_menu_uses_the_boat_display_name_as_title() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_data::registries::entity_type as ids;
+
+    let mut fixture = Fixture::new();
+    let position = Vec3::new(0.5, f64::from(flat::surface_y()), 0.5);
+    for (entity_type, key) in [
+        (ids::OAK_CHEST_BOAT, "entity.minecraft.oak_chest_boat"),
+        (ids::SPRUCE_CHEST_BOAT, "entity.minecraft.spruce_chest_boat"),
+        (ids::BAMBOO_CHEST_RAFT, "entity.minecraft.bamboo_chest_raft"),
+    ] {
+        let boat = fixture
+            .region
+            .entities
+            .spawn(Entity::boat(entity_type, position));
+        assert!(open_boat(&mut fixture.region, fixture.id, boat));
+        let container_id = fixture.menu().container_id;
+        let frames = fixture.take_frames();
+        let open_frame = frames
+            .iter()
+            .find(|frame| frame.id == clientbound::OPEN_SCREEN)
+            .expect("open screen");
+        let mut open = open_frame.reader();
+        assert_eq!(open.varint(), Ok(container_id));
+        assert_eq!(open.varint(), Ok(menu_types::GENERIC_9X3));
+        let expected = Component::translate(key, []);
+        let mut title = Vec::new();
+        expected.write(&mut title);
+        assert_eq!(open.rest(), title, "标题应该是船自己的显示名 {key}");
+    }
+}

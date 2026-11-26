@@ -1005,16 +1005,19 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bo
 /// the chest boat's 27-slot menu. Spectators get no menu. The loot table is
 /// unpacked with the player (`THIS_ENTITY` + `getLuck()`) before opening.
 pub(crate) fn open_boat(region: &mut Region, id: PlayerId, boat: i32) -> bool {
-    let (alive, is_chest) = match region.entities.public_at(boat) {
-        Some(public) => (
-            !public.removed,
-            matches!(
-                &public.kind,
-                mc_bamboo_blocks::entity::KindPublic::Boat(data)
-                    if mc_bamboo_blocks::entity::boat::is_chest(data.entity_type)
-            ),
-        ),
-        None => (false, false),
+    let (alive, is_chest, entity_type) = match region.entities.public_at(boat) {
+        Some(public) => {
+            let data = match &public.kind {
+                mc_bamboo_blocks::entity::KindPublic::Boat(data) => Some(data),
+                _ => None,
+            };
+            (
+                !public.removed,
+                data.is_some_and(|d| mc_bamboo_blocks::entity::boat::is_chest(d.entity_type)),
+                data.map(|d| d.entity_type),
+            )
+        }
+        None => (false, false, None),
     };
     if !alive || !is_chest || !region.players.contains_key(&id) {
         return false;
@@ -1049,7 +1052,17 @@ pub(crate) fn open_boat(region: &mut Region, id: PlayerId, boat: i32) -> bool {
     region
         .menus
         .insert(id, Menu::chest_boat(container_id, boat));
-    let title = Component::translate(ContainerKind::Chest.title(), []);
+    // 官方菜单标题是船自己的显示名（`Entity.getDisplayName()` →
+    // `EntityType.getDescriptionId()`），不是 `container.chest`。
+    //
+    // The vanilla title is the boat's own display name (`Entity.getDisplayName()` →
+    // `EntityType.getDescriptionId()`), not `container.chest`.
+    let title = Component::translate(
+        entity_type
+            .map(mc_bamboo_blocks::entity::boat::display_name_key)
+            .unwrap_or_else(|| "entity.minecraft.oak_chest_boat".to_owned()),
+        [],
+    );
     region.links.send(
         id,
         &OpenScreen {

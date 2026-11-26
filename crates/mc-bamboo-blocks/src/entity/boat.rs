@@ -245,6 +245,21 @@ pub const fn is_chest(entity_type: i32) -> bool {
     )
 }
 
+/// 官方 `EntityType.getDescriptionId()`：实体默认显示名的翻译键
+/// `entity.minecraft.<type>`。`AbstractChestBoat` 没有覆写 `getDisplayName()`，
+/// 菜单 provider 就是船自己，27 格菜单标题走这个键，不是 `container.chest`。
+///
+/// Vanilla `EntityType.getDescriptionId()`: the default display-name key
+/// `entity.minecraft.<type>`. `AbstractChestBoat` does not override
+/// `getDisplayName()`, so the menu title uses this key, not `container.chest`.
+pub fn display_name_key(entity_type: i32) -> String {
+    let name = mc_bamboo_data::entity_types::FACTS
+        .get(entity_type as usize)
+        .map(|facts| facts.name)
+        .unwrap_or("minecraft:oak_chest_boat");
+    format!("entity.{}", name.replace(':', "."))
+}
+
 /// 这个注册表实体类型是不是船（含竹筏和运输船）。
 pub const fn is_boat_entity_type(entity_type: i32) -> bool {
     use mc_bamboo_data::registries::entity_type as ids;
