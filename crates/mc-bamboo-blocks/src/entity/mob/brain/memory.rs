@@ -330,7 +330,7 @@ impl MemoryType {
             Self::BreezeLeavingWater => "breeze_leaving_water",
             Self::BreezeShoot => "breeze_shoot",
             Self::BreezeShootCharging => "breeze_shoot_charging",
-            Self::BreezeShootRecovering => "breeze_shoot_recovering",
+            Self::BreezeShootRecovering => "breeze_shoot_recover",
             Self::BreezeShootCooldown => "breeze_shoot_cooldown",
         }
     }

@@ -455,7 +455,13 @@ impl Kind {
                 }
             }
             Self::LookAtTargetSink { .. } => "LookAtTargetSink",
-            Self::MoveToTargetSink(_) => "MoveToTargetSink",
+            Self::MoveToTargetSink(sink) => {
+                if sink.breeze {
+                    "SlideToTargetSink"
+                } else {
+                    "MoveToTargetSink"
+                }
+            }
             Self::CountDownCooldown(_) => "CountDownCooldownTicks",
             Self::LookAtPlayerSometimes { .. }
             | Self::LookAtPlayer { .. }

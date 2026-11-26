@@ -44,6 +44,7 @@ mod bee_full;
 mod bee_locate;
 mod bee_release;
 mod brain;
+mod breeze;
 mod creaking;
 mod egg;
 mod ender_pearl;
@@ -248,6 +249,7 @@ enum Line {
     SculkShrieker(sculk_sensor::SculkShriekerCase),
     Warden(Box<warden::WardenCase>),
     WardenSave(warden::WardenSaveCase),
+    Breeze(Box<breeze::BreezeCase>),
     End(End),
 }
 
@@ -2205,6 +2207,7 @@ impl Report {
                 Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),
                 Line::Warden(case) => self.replay_warden(&case),
                 Line::WardenSave(case) => self.replay_warden_save(&case),
+                Line::Breeze(case) => self.replay_breeze(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),

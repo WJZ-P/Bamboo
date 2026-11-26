@@ -138,6 +138,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Sniffer {
         super::sniffer::tick_before(me, mob, ctx);
     }
+    // `Breeze.tick` 在 `Monster.tick()` 之前推进 `soundTick`（取一次随机）。
+    // `Breeze.tick` advances `soundTick` (one random draw) before `Monster.tick()`.
+    if mob.mob_type == super::MobType::Breeze {
+        super::breeze::tick(me, mob);
+    }
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
     // `LivingEntity.tick`：`updatingUsingItem()` 紧跟 `super.tick()`，在装备比较和

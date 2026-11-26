@@ -403,8 +403,60 @@ impl Behavior {
     }
 
     pub(super) fn trigger(&mut self, cx: &mut Cx) -> bool {
-        // OneShot 的 `trigger`：入口条件已由位掩码检查，这里只补实体谓词。
-        self.extra_start(cx)
+        // OneShot 行为的工作发生在 `trigger` 里（`try_start` 对 OneShot 只调
+        // `trigger`，不调 `start`）。Timed 行为走 `extra_start` + `start`。
+        match self {
+            Self::StartAttacking { hurt_by } => {
+                // 官方 `StartAttacking`：找目标 → `canAttack`（玩家 / 铁傀儡、活着、
+                // 非创造 / 旁观）→ 设 `ATTACK_TARGET` → 清 `CANT_REACH_WALK_TARGET_SINCE`。
+                let source = if *hurt_by {
+                    cx.memories.entity(HurtByEntity)
+                } else {
+                    cx.memories.entity(NearestAttackable)
+                };
+                let Some(target) = source else {
+                    return false;
+                };
+                if !sensor::living(cx, target).is_some_and(|view| {
+                    view.alive
+                        && !view.creative
+                        && !view.spectator
+                        && (view.player || view.mob_type == Some(MobType::IronGolem))
+                }) {
+                    return false;
+                }
+                cx.memories.set(AttackTarget, MemoryValue::Entity(target));
+                cx.memories.erase(CantReachWalkTargetSince);
+                true
+            }
+            Self::StopAttackingIfTargetInvalid => {
+                // 官方 `StopAttackingIfTargetInvalid`：目标死了 / 不活时清掉
+                // `ATTACK_TARGET` 和 `mob.target`。
+                let Some(target) = cx.memories.entity(AttackTarget) else {
+                    return false;
+                };
+                if sensor::living(cx, target).is_some_and(|view| view.alive) {
+                    return false;
+                }
+                cx.memories.erase(AttackTarget);
+                cx.mob.target = None;
+                true
+            }
+            Self::ShootWhenStuck => {
+                // 官方 `ShootWhenStuck`：卡住（载具 / 水里 / 漂浮）时申请一次射击。
+                let stuck = cx.me.vehicle.is_some()
+                    || cx.me.in_water
+                    || cx
+                        .mob
+                        .effects
+                        .has(mc_bamboo_data::registries::mob_effect::LEVITATION);
+                if stuck {
+                    cx.memories.set_with_ttl(BreezeShoot, MemoryValue::Unit, 60);
+                }
+                stuck
+            }
+            _ => self.extra_start(cx),
+        }
     }
 }
 
@@ -450,19 +502,24 @@ fn within_inner_circle(cx: &Cx, horizontal: f64, vertical: f64) -> Option<bool> 
 }
 
 /// `BreezeUtil.randomPointBehindTarget`：在目标背后 4–8 格、偏转角 ±45° 内随机取一点。
+/// 全 f32 算术：`yaw = yHeadRot + 180 + gaussian*45`，`distance = lerp(nextFloat, 4, 8)`，
+/// 方向用 `Vec3.directionFromRotation(0, yaw)` 的 sin/cos 表。
 fn random_point_behind_target(
     view: &sensor::LivingView,
     random: &mut crate::entity::JavaRandom,
 ) -> Vec3 {
     let gaussian = random.next_gaussian() as f32;
-    let yaw = view.y_head_rot + 180.0 + gaussian * 90.0 / 2.0;
-    let distance = 4.0 + random.next_float() * 4.0;
-    // `Vec3.directionFromRotation(0, yaw)` = (sin(yaw), 0, cos(yaw))。
-    let radians = yaw * (std::f32::consts::PI / 180.0);
+    let yaw: f32 = view.y_head_rot + 180.0 + gaussian * 90.0 / 2.0;
+    let distance: f32 = mth::lerp_f32(random.next_float(), 4.0, 8.0);
+    // 官方 `RAD = (float)(Math.PI / 180.0)`；`directionFromRotation(0, yaw)` =
+    // (sin(yaw*RAD), 0, cos(yaw*RAD))，乘法在 f32 上做完再进 f64 表。
+    let radians: f32 = yaw * ((std::f64::consts::PI / 180.0) as f32);
     let sin = f64::from(mth::sin(f64::from(radians)));
     let cos = f64::from(mth::cos(f64::from(radians)));
+    // 官方 `Vec3.directionFromRotation(0, yaw)` = (-sin(yaw*RAD), 0, cos(yaw*RAD))，
+    // x 分量带负号（字节码里 `-yaw*RAD - PI` 再取 sin/cos）。
     view.position.add(Vec3::new(
-        sin * f64::from(distance),
+        -sin * f64::from(distance),
         0.0,
         cos * f64::from(distance),
     ))
@@ -652,6 +709,36 @@ pub(super) fn sense_attackables(cx: &mut Cx) {
         .set_or_erase(NearestAttackable, found.map(MemoryValue::Entity));
 }
 
+/// `Breeze.tick`：`Monster.tick` 之前推进 `soundTick`（0 时抽 1..=80，否则减一），
+/// 减到 0 那一下放 `BREEZE_WHIRL`（音高 / 音量各取一次 `nextFloat`）。
+///
+/// `Breeze.tick`: advance `soundTick` before `Monster.tick` (draw 1..=80 when it is
+/// zero, otherwise decrement); when it reaches zero, play `BREEZE_WHIRL` (one
+/// `nextFloat` for the pitch and one for the volume).
+pub(super) fn tick(me: &mut Entity, mob: &mut Mob) {
+    // `Breeze.tick()` 的姿态开关：STANDING / SHOOTING / INHALING 取一次 `nextInt(1)`
+    // （`emitGroundParticles(1 + nextInt(1))` 的粒子数量），SLIDING / LONG_JUMPING 不取。
+    // The pose switch of `Breeze.tick()`: STANDING / SHOOTING / INHALING draw one
+    // `nextInt(1)` (the `emitGroundParticles(1 + nextInt(1))` count); SLIDING /
+    // LONG_JUMPING do not.
+    if matches!(
+        mob.breeze.pose,
+        Pose::Standing | Pose::Shooting | Pose::Inhaling
+    ) {
+        let _ = me.random.next_int_bounded(1);
+    }
+    if mob.breeze.sound_tick == 0 {
+        mob.breeze.sound_tick = me.random.next_int_bounded(80) + 1;
+    } else {
+        mob.breeze.sound_tick -= 1;
+    }
+    if mob.breeze.sound_tick == 0 {
+        let pitch = 0.7 + me.random.next_float() * 0.4;
+        let volume = 0.8 + me.random.next_float() * 0.2;
+        living::play_sound(me, mob, "minecraft:entity.breeze.whirl", volume, pitch);
+    }
+}
+
 /// `Breeze.customServerAiStep`：大脑 tick → `updateActivity(FIGHT, IDLE)`。
 pub(super) fn custom_server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if let Some(mut brain) = mob.brain.take() {
@@ -660,7 +747,6 @@ pub(super) fn custom_server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dy
         brain.set_active_activity_to_first_valid(&[Activity::Fight, Activity::Idle]);
         mob.brain = Some(brain);
     }
-    mob.breeze.sound_tick += 1;
     mob.breeze.jump_trail_started_tick = mob.breeze.jump_trail_started_tick.max(0);
     // `getAmbientSound` 落地 / 空中两种，由 living 层按 on_ground 调这里。
     let _ = (me, sounds::NEUTRAL);

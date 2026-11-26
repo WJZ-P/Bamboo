@@ -709,6 +709,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("warden")) {
                 cases += playWardenSave(official, out);
             }
+            if (only == null || only.startsWith("breeze")) {
+                cases += playBreeze(official, out, only);
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -14692,6 +14695,87 @@ public final class MobOracle {
                     + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
             cases++;
         }
+        return cases;
+    }
+
+    /**
+     * 旋风人逐刻对拍：官方 Breeze 在假世界里开着 AI 跑，逐刻比姿态、大脑记忆、坐标 /
+     * 速度 / 朝向、两种随机源。三个场景分别把玩家放在射击距离内、长跳距离、贴脸。
+     */
+    private static int playBreeze(Official official, Writer out, String only) throws Exception {
+        record BScene(String name, int ticks, double px, double py, double pz) {}
+        List<BScene> scenes = List.of(
+                new BScene("breeze_shoot", 120, 6.5, 64.0, 0.5),
+                new BScene("breeze_jump", 160, 10.5, 64.0, 0.5),
+                new BScene("breeze_slide", 120, 6.5, 64.0, 0.5));
+        int cases = 0;
+        for (BScene s : scenes) {
+            if (only != null && !s.name().startsWith(only)) continue;
+            FakeLevel world = FakeLevel.create(official);
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels =
+                    java.util.Map.of(Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            world.gameTime = 1000L;
+            world.getRandom().setSeed(1L);
+            var mob = (net.minecraft.world.entity.monster.breeze.Breeze)
+                    EntityTypes.BREEZE.create(world, EntitySpawnReason.EVENT);
+            mob.setId(FIRST_ID);
+            mob.setUUID(new UUID(0L, 1L));
+            mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            setRandom(mob, 5L);
+            BrainOracle.fixSensorDelays(mob, 1L);
+            BrainOracle.reseedShuffles(mob, randomSeed(mob));
+            world.tracked.add(mob);
+
+            ServerPlayer player = pigPlayer(official, world);
+            player.setPos(s.px(), s.py(), s.pz());
+            player.setYRot(0.0F);
+            player.setYHeadRot(0.0F);
+            player.setYBodyRot(0.0F);
+            player.setId(FIRST_ID + 1);
+            player.setUUID(new UUID(0L, 2L));
+            world.tracked.add(player);
+            world.playersList().add(player);
+
+            String sensors = BrainOracle.sensorDelays(mob);
+            long mobSeed = randomSeed(mob);
+            long levelSeed = randomSeed(world.getRandom());
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= s.ticks(); tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    mob.commonTick();
+                    mob.tick();
+                }
+                if (tick > 0) frames.append(',');
+                frames.append("{\"pose\":").append(jsonString(mob.getPose().name()))
+                        .append(",\"brain\":").append(jsonString(BrainOracle.dump(mob)))
+                        .append(",\"motion\":").append(projectileMotion(mob))
+                        .append(",\"mobSeed\":").append(randomSeed(mob))
+                        .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
+                        .append(",\"removed\":").append(mob.isRemoved())
+                        .append('}');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"breeze\",\"name\":" + jsonString(s.name())
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"startTime\":1000"
+                    + ",\"ticks\":" + s.ticks()
+                    + ",\"player\":[" + s.px() + "," + s.py() + "," + s.pz() + "]"
+                    + ",\"sensors\":" + sensors
+                    + ",\"mobSeed\":" + mobSeed
+                    + ",\"levelSeed\":" + levelSeed
+                    + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        out.flush();
         return cases;
     }
 
