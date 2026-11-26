@@ -604,3 +604,168 @@ impl Report {
         println!("{}: {} ticks", case.name, case.frames.len());
     }
 }
+
+/// 半血凋灵弹箭的逐刻帧：`[x,y,z,dx,dy,dz,yRot,xRot,removed,witherHealth,
+/// arrowSeed,levelSeed]`（浮点是原始位）。
+///
+/// Frame of the half-health wither deflecting an arrow (raw float/double bits).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WitherArrowCase {
+    name: String,
+    first_id: i32,
+    frames: Vec<[i64; 12]>,
+}
+
+impl WitherArrowCase {
+    fn level(&self) -> MobLevel {
+        let mut blocks = Vec::new();
+        for x in -4..=4 {
+            for z in -4..=4 {
+                blocks.push((
+                    BlockPos::new(x, 63, z),
+                    BlockState(mc_bamboo_data::blocks::STONE),
+                ));
+            }
+        }
+        MobLevel {
+            raid: None,
+            blocks: blocks.into_iter().collect(),
+            random: LevelRandom::new(1),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: Vec::new(),
+            rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+            facts: ZombieFacts {
+                difficulty: 2,
+                ..ZombieFacts::default()
+            },
+            natural_spawn: None,
+            biome: None,
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
+            poi: mc_bamboo_world::poi::PoiStore::new(),
+            entities: Entities::with_next_id(self.first_id),
+            players: Vec::new(),
+            game: None,
+            wrong_was_hurt: false,
+            inhabited: HashMap::new(),
+            mob_teams: HashMap::new(),
+            short_hunger: false,
+            ignore_bed_monsters: false,
+            explosion_break: 0,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
+            shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState::empty(),
+        }
+    }
+}
+
+impl Report {
+    /// 逐刻重放半血凋灵把箭弹开：箭轨迹、凋灵血量（不减）、两种随机源。
+    ///
+    /// Replay a half-health wither deflecting an arrow: arrow track, wither
+    /// health (unchanged) and both random sources.
+    pub(super) fn replay_wither_arrow(&mut self, case: &WitherArrowCase) {
+        use mc_bamboo_blocks::{
+            BlockTicks, World,
+            entity::{Entity, EntityKind, JavaRandom, mob::MobType},
+        };
+        use mc_bamboo_core::Vec3;
+
+        self.cases += 1;
+        let broken = self.break_test.as_deref() == Some("wither_arrow");
+        let mut level = case.level();
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(1000);
+        let velocity = Vec3::new(0.8, 0.0, 0.0);
+        let start = Vec3::new(0.5, 64.5, 0.5);
+        let (arrow_id, wither_id) = {
+            let mut world = World::new(&mut level, &mut ticks);
+            let wither = Entity::by_mob_type(MobType::Wither, Vec3::new(3.5, 64.0, 0.5));
+            let wither_id = world.spawn_entity(wither);
+            // 半血（150 / 300）触发 `isPowered()` 的箭免疫。
+            // Half health (150 / 300) triggers the arrow immunity of `isPowered()`.
+            world.with_entity_mut(wither_id, &mut |entity| {
+                entity.with_mob(|_, mob| mob.health = 150.0);
+            });
+            let mut arrow = Entity::arrow(start);
+            arrow.delta = velocity;
+            let arrow_id = world.spawn_entity(arrow);
+            // 官方场景生成后把箭的随机源钉死成 `RandomSource.create(11)`。
+            // The official fixture pins the arrow random after spawning.
+            world.with_entity_mut(arrow_id, &mut |entity| {
+                entity.random = JavaRandom::new(11);
+                entity.y_rot = 0.0;
+                if let EntityKind::Arrow(arrow) = &mut entity.kind {
+                    arrow.pitch = 0.0;
+                }
+            });
+            (arrow_id, wither_id)
+        };
+        let mut last_arrow: Option<Entity> = None;
+        for (tick, expected) in case.frames.iter().enumerate() {
+            if tick > 0 {
+                ticks.set_time(1000 + tick as i64);
+                let mut world = World::new(&mut level, &mut ticks);
+                if let Some(kept) = world.tick_one_entity_kept(arrow_id) {
+                    last_arrow = Some(kept);
+                }
+                let _ = world.drain_effects();
+            }
+            let entity = level.entities.get(arrow_id).or(last_arrow.clone());
+            let (position, delta, yaw, pitch, removed, arrow_seed) = match &entity {
+                Some(entity) => {
+                    let pitch = match &entity.kind {
+                        EntityKind::Arrow(arrow) => arrow.pitch,
+                        _ => 0.0,
+                    };
+                    (
+                        entity.position,
+                        entity.delta,
+                        entity.y_rot,
+                        pitch,
+                        i64::from(entity.removed),
+                        entity.random.state(),
+                    )
+                }
+                None => (Vec3::default(), Vec3::default(), 0.0, 0.0, 1, 0),
+            };
+            let wither_health = level
+                .entities
+                .get(wither_id)
+                .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+                .map_or(0, |health| health.to_bits() as i32 as i64);
+            let mut ours = [
+                position.x.to_bits() as i64,
+                position.y.to_bits() as i64,
+                position.z.to_bits() as i64,
+                delta.x.to_bits() as i64,
+                delta.y.to_bits() as i64,
+                delta.z.to_bits() as i64,
+                i64::from(yaw.to_bits() as i32),
+                i64::from(pitch.to_bits() as i32),
+                removed,
+                wither_health,
+                arrow_seed,
+                level.random.source().seed(),
+            ];
+            if broken {
+                // 改坏确认：把箭的 dx 改一位。
+                // Break check: shift the arrow's dx by one bit.
+                ours[3] = ours[3].wrapping_add(1);
+            }
+            if &ours != expected {
+                self.mismatch(format!(
+                    "{} tick {tick}: official {expected:?}, bamboo {ours:?}",
+                    case.name
+                ));
+            }
+            self.steps += 1;
+        }
+        println!("{}: {} ticks", case.name, case.frames.len());
+    }
+}

@@ -743,6 +743,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("wither_skull")) {
                 cases += playWitherSkull(official, out, only);
             }
+            if (only == null || only.startsWith("wither_arrow")) {
+                cases += playWitherArrow(official, out, only);
+            }
             if (only == null || only.startsWith("breeze")) {
                 cases += playBreeze(official, out, only);
             }
@@ -16124,6 +16127,79 @@ public final class MobOracle {
                 + ",\"firstId\":" + FIRST_ID
                 + ",\"start\":[" + hx + "," + hy + "," + hz + "]"
                 + ",\"direction\":[" + dx + "," + dy + "," + dz + "]"
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+        return 1;
+    }
+
+    /** 半血凋灵弹箭：逐刻比箭的轨迹、凋灵血量（不减）、两种随机源。 */
+    private static int playWitherArrow(Official official, Writer out, String only) throws Exception {
+        String name = "wither_arrow_deflect";
+        if (only != null && !name.startsWith(only)) return 0;
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.nextId = FIRST_ID;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        level.spawned = new ArrayList<>();
+        level.tracked = new ArrayList<>();
+        level.levelEvents = new ArrayList<>();
+        level.getRandom().setSeed(1L);
+        level.gameTime = START_TIME;
+        for (int x = -4; x <= 4; x++) {
+            for (int z = -4; z <= 4; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        // 半血凋灵（150 / 300）在 (3.5, 64, 0.5)，只作目标、不 tick AI。
+        // 半血时 `WitherBoss.hurtServer` 对 `AbstractArrow` 直接返回 false。
+        var wither = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                EntityTypes.WITHER.create(level, EntitySpawnReason.TRIGGERED);
+        setRandom(wither, 7L);
+        wither.setUUID(new UUID(0L, 2L));
+        wither.setId(FIRST_ID + 2);
+        wither.snapTo(3.5, 64.0, 0.5, 0.0F, 0.0F);
+        wither.setHealth(150.0F);
+        wither.setPersistenceRequired();
+        level.tracked.add(wither);
+        var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(
+                level, 0.5, 64.5, 0.5,
+                new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.ARROW), null);
+        setRandom(arrow, 11L);
+        arrow.setUUID(new UUID(0L, 1L));
+        arrow.setId(FIRST_ID);
+        arrow.setDeltaMovement(0.8, 0.0, 0.0);
+        arrow.setYRot(0.0F);
+        arrow.setXRot(0.0F);
+        level.tracked.add(arrow);
+        int ticks = 8;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                level.levelEvents.clear();
+                if (!arrow.isRemoved()) {
+                    arrow.commonTick();
+                    arrow.tick();
+                }
+            }
+            if (tick > 0) frames.append(',');
+            frames.append('[')
+                    .append(Double.doubleToRawLongBits(arrow.getX())).append(',')
+                    .append(Double.doubleToRawLongBits(arrow.getY())).append(',')
+                    .append(Double.doubleToRawLongBits(arrow.getZ())).append(',')
+                    .append(Double.doubleToRawLongBits(arrow.getDeltaMovement().x)).append(',')
+                    .append(Double.doubleToRawLongBits(arrow.getDeltaMovement().y)).append(',')
+                    .append(Double.doubleToRawLongBits(arrow.getDeltaMovement().z)).append(',')
+                    .append(Float.floatToRawIntBits(arrow.getYRot())).append(',')
+                    .append(Float.floatToRawIntBits(arrow.getXRot())).append(',')
+                    .append(arrow.isRemoved() ? 1 : 0).append(',')
+                    .append(Float.floatToRawIntBits(wither.getHealth())).append(',')
+                    .append(randomSeed(arrow)).append(',')
+                    .append(randomSeed(level.getRandom())).append(']');
+        }
+        frames.append(']');
+        out.write("{\"type\":\"witherArrow\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
                 + ",\"frames\":" + frames + "}\n");
         out.flush();
         return 1;
