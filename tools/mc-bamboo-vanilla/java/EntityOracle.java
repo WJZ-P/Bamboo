@@ -182,6 +182,12 @@ public final class EntityOracle {
             cases += dynamicShapeCollision(official, out);
             cases += minecartStraight(official, out);
             cases += minecartPowered(official, out);
+            cases += minecartBrake(official, out);
+            cases += minecartSlope(official, out);
+            cases += minecartTurn(official, out);
+            cases += minecartSave(official, out);
+            cases += minecartDetector(official, out);
+            cases += minecartTnt(official, out);
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -1114,6 +1120,7 @@ public final class EntityOracle {
         double vx, vy, vz;
         int ticks = 16;
         long levelSeed = 1L;
+        int saveAt = -1;
         Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
     }
 
@@ -1136,6 +1143,10 @@ public final class EntityOracle {
         return playMinecart(official, out, spec);
     }
 
+    private static BlockState rail(RailShape shape) {
+        return Blocks.RAIL.defaultBlockState().setValue(BlockStateProperties.RAIL_SHAPE, shape);
+    }
+
     /** 通电的动力铁轨把矿车沿轨道加速。 */
     private static int minecartPowered(Official official, Writer out) throws Exception {
         MinecartSpec spec = new MinecartSpec();
@@ -1146,6 +1157,104 @@ public final class EntityOracle {
         spec.pz = 0.5;
         spec.vz = 0.02;
         spec.ticks = 16;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 没通电的动力铁轨每刻把矿车刹车。 */
+    private static int minecartBrake(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_brake";
+        rails(spec, -6, 6, Blocks.POWERED_RAIL.defaultBlockState()
+                .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH)
+                .setValue(BlockStateProperties.POWERED, false));
+        spec.pz = 0.5;
+        spec.vz = 0.3;
+        spec.ticks = 12;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 中间一格是斜坡：矿车爬坡时 `getPos` 抬高位置、斜坡加速度改变速度。 */
+    private static int minecartSlope(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_slope";
+        for (int z = -6; z <= 6; z++) {
+            RailShape shape = z == 0 ? RailShape.ASCENDING_SOUTH : RailShape.NORTH_SOUTH;
+            spec.blocks.put(BlockPos.asLong(0, 64, z), rail(shape));
+            spec.blocks.put(BlockPos.asLong(0, 63, z), Blocks.STONE.defaultBlockState());
+        }
+        spec.pz = -3.5;
+        spec.vz = 0.3;
+        spec.ticks = 20;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 从北边进、向东出的东南弯：过弯时速度重新投影到新的一格方向。 */
+    private static int minecartTurn(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_turn";
+        for (int z = -6; z <= -1; z++) {
+            spec.blocks.put(BlockPos.asLong(0, 64, z), rail(RailShape.NORTH_SOUTH));
+            spec.blocks.put(BlockPos.asLong(0, 63, z), Blocks.STONE.defaultBlockState());
+        }
+        spec.blocks.put(BlockPos.asLong(0, 64, 0), rail(RailShape.SOUTH_EAST));
+        spec.blocks.put(BlockPos.asLong(0, 63, 0), Blocks.STONE.defaultBlockState());
+        for (int x = 1; x <= 6; x++) {
+            spec.blocks.put(BlockPos.asLong(x, 64, 0), rail(RailShape.EAST_WEST));
+            spec.blocks.put(BlockPos.asLong(x, 63, 0), Blocks.STONE.defaultBlockState());
+        }
+        spec.pz = -2.5;
+        spec.vz = 0.3;
+        spec.ticks = 20;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 存档往返：第一次 tick 之前写出再读回，之后逐刻状态保持一致。 */
+    private static int minecartSave(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_save";
+        rails(spec, -6, 6, rail(RailShape.NORTH_SOUTH));
+        spec.pz = 0.5;
+        spec.vz = 0.2;
+        spec.saveAt = 0;
+        spec.ticks = 12;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 探测铁轨：矿车压过时 `POWERED` 置真，红石输出 15。 */
+    private static int minecartDetector(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_detector";
+        for (int z = -6; z <= 6; z++) {
+            BlockState cell = z == 0
+                    ? Blocks.DETECTOR_RAIL.defaultBlockState()
+                            .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH)
+                    : rail(RailShape.NORTH_SOUTH);
+            spec.blocks.put(BlockPos.asLong(0, 64, z), cell);
+            spec.blocks.put(BlockPos.asLong(0, 63, z), Blocks.STONE.defaultBlockState());
+        }
+        spec.pz = -3.5;
+        spec.vz = 0.3;
+        spec.ticks = 20;
+        return playMinecart(official, out, spec);
+    }
+
+    /** TNT 矿车经过通电的激活铁轨后点燃，引信归零时爆炸。 */
+    private static int minecartTnt(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_tnt";
+        spec.type = EntityTypes.TNT_MINECART;
+        for (int z = -6; z <= 6; z++) {
+            BlockState cell = z == 0
+                    ? Blocks.ACTIVATOR_RAIL.defaultBlockState()
+                            .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH)
+                            .setValue(BlockStateProperties.POWERED, true)
+                    : rail(RailShape.NORTH_SOUTH);
+            spec.blocks.put(BlockPos.asLong(0, 64, z), cell);
+            spec.blocks.put(BlockPos.asLong(0, 63, z), Blocks.STONE.defaultBlockState());
+        }
+        spec.pz = -3.5;
+        spec.vz = 0.3;
+        spec.ticks = 100;
         return playMinecart(official, out, spec);
     }
 
@@ -1194,6 +1303,7 @@ public final class EntityOracle {
         out.write(",\"entityType\":" + BuiltInRegistries.ENTITY_TYPE.getId(spec.type));
         out.write(",\"px\":" + spec.px + ",\"py\":" + spec.py + ",\"pz\":" + spec.pz);
         out.write(",\"vx\":" + spec.vx + ",\"vy\":" + spec.vy + ",\"vz\":" + spec.vz);
+        out.write(",\"saveAt\":" + spec.saveAt);
         out.write(",\"blocks\":");
         writeBlocks(out, spec.blocks);
         out.append(",\"steps\":");

@@ -12,7 +12,7 @@ use crate::{
     BlockState,
     entity::{
         Entity, EntityKind, EntityUid, PrimedTnt,
-        ctx::{BlockView, EntityCtx},
+        ctx::{BlockView, Command, EntityCtx},
     },
     state::{POWERED, RAIL_SHAPE, RailShape},
 };
@@ -379,6 +379,48 @@ fn apply_natural_slowdown(me: &Entity, cart: &Minecart, v: Vec3) -> Vec3 {
     result
 }
 
+/// `DetectorRailBlock.getSearchBB` 里的格子：碰撞盒和 `(pos+0.2 .. pos+0.8)` 相交的
+/// 未点亮探测铁轨。
+///
+/// Cells of `DetectorRailBlock.getSearchBB`: unpowered detector rails whose
+/// `(pos+0.2 .. pos+0.8)` box intersects the cart's bounding box.
+fn detector_rails(blocks: &dyn BlockView, me: &Entity) -> Vec<BlockPos> {
+    let half = f64::from(me.dimensions.0) / 2.0;
+    let min = Vec3::new(me.position.x - half, me.position.y, me.position.z - half);
+    let max = Vec3::new(
+        me.position.x + half,
+        me.position.y + f64::from(me.dimensions.1),
+        me.position.z + half,
+    );
+    let mut found = Vec::new();
+    for y in floor_i(min.y)..=floor_i(max.y) {
+        for z in floor_i(min.z)..=floor_i(max.z) {
+            for x in floor_i(min.x)..=floor_i(max.x) {
+                let state = blocks.block_state(BlockPos::new(x, y, z));
+                if !state.is(blocks::DETECTOR_RAIL) || state.try_get(POWERED).unwrap_or(false) {
+                    continue;
+                }
+                let lo_x = f64::from(x) + 0.2;
+                let hi_x = f64::from(x) + 0.8;
+                let lo_y = f64::from(y);
+                let hi_y = f64::from(y) + 0.8;
+                let lo_z = f64::from(z) + 0.2;
+                let hi_z = f64::from(z) + 0.8;
+                if min.x < hi_x
+                    && max.x > lo_x
+                    && min.y < hi_y
+                    && max.y > lo_y
+                    && min.z < hi_z
+                    && max.z > lo_z
+                {
+                    found.push(BlockPos::new(x, y, z));
+                }
+            }
+        }
+    }
+    found
+}
+
 /// `isRedstoneConductor`。
 fn is_redstone_conductor(ctx: &dyn BlockView, pos: BlockPos) -> bool {
     ctx.block_state(pos).is_redstone_conductor()
@@ -605,6 +647,12 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     } else {
         come_off_track(me, &cart, ctx.blocks());
     }
+    // `DetectorRailBlock.checkPressed`：矿车碰撞盒和探测格内部盒相交时点亮它。
+    // `DetectorRailBlock.checkPressed`: power a detector rail while the cart's box
+    // overlaps that cell's search box.
+    for at in detector_rails(blocks, me) {
+        ctx.emit(Command::MinecartDetectorRail { pos: at }, me);
+    }
     me.apply_effects_from_blocks(ctx.blocks());
 
     let dx = me.old_position.x - me.position.x;
@@ -624,6 +672,58 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     me.set_requires_precise_position(me.horizontal_collision || me.vertical_collision);
     me.first_tick = false;
     me.kind = EntityKind::Minecart(cart);
+    tick_tnt(me, ctx);
+}
+
+/// `MinecartTNT.tick`：引信递减、归零爆炸，以及撞击时的爆炸。
+///
+/// `MinecartTNT.tick`: count down the fuse, explode at zero, and on a hard impact.
+fn tick_tnt(me: &mut Entity, ctx: &mut dyn EntityCtx) {
+    let is_tnt = matches!(&me.kind, EntityKind::Minecart(cart) if cart.kind() == MinecartKind::Tnt);
+    if !is_tnt {
+        return;
+    }
+    let speed_sqr = me.delta.x * me.delta.x + me.delta.z * me.delta.z;
+    let fuse = match &me.kind {
+        EntityKind::Minecart(cart) => cart.fuse,
+        _ => -1,
+    };
+    let mut explode = false;
+    if fuse > 0 {
+        if let EntityKind::Minecart(cart) = &mut me.kind {
+            cart.fuse -= 1;
+        }
+    } else if fuse == 0 {
+        explode = true;
+    }
+    if me.horizontal_collision && speed_sqr >= 0.01 {
+        explode = true;
+    }
+    if !explode {
+        return;
+    }
+    let (power, factor) = match &me.kind {
+        EntityKind::Minecart(cart) => (cart.explosion_power, cart.explosion_speed_factor),
+        _ => (4.0, 1.0),
+    };
+    // 官方：`explosionPowerBase + explosionSpeedFactor * random.nextDouble() * 1.5
+    //        * min(sqrt(speed²), 5)`，结果转成 float。
+    // Vanilla: `explosionPowerBase + explosionSpeedFactor * random.nextDouble() * 1.5
+    //          * min(sqrt(speed²), 5)`, as a float.
+    let radius = (f64::from(power)
+        + f64::from(factor) * me.random.next_double() * 1.5 * speed_sqr.sqrt().min(5.0))
+        as f32;
+    let source = Box::new(me.clone().split().public);
+    me.discard();
+    ctx.emit(
+        Command::MinecartExplode {
+            center: me.position,
+            radius,
+            source,
+            owner: None,
+        },
+        me,
+    );
 }
 
 /// `activateMinecart`：激活铁轨通电时各子类的反应。

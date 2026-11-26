@@ -1991,6 +1991,21 @@ pub enum Command {
         pos: BlockPos,
         occupied: bool,
     },
+    /// `DetectorRailBlock.checkPressed`：矿车压过探测铁轨时把它点亮。
+    ///
+    /// `DetectorRailBlock.checkPressed`: power a detector rail while a minecart is on it.
+    MinecartDetectorRail {
+        pos: BlockPos,
+    },
+    /// `MinecartTNT.explode`：半径随速度变化，且铁轨不参与破坏。
+    ///
+    /// `MinecartTNT.explode`: speed-dependent radius, with rails left intact.
+    MinecartExplode {
+        center: Vec3,
+        radius: f32,
+        source: Box<EntityPublic>,
+        owner: Option<EntityUid>,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -2742,6 +2757,20 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 world.set_block_and_update(pos, next);
             }
         }
+        Command::MinecartDetectorRail { pos } => {
+            let state = world.block_state(pos);
+            if state.is(mc_bamboo_data::blocks::DETECTOR_RAIL)
+                && !state.try_get(crate::state::POWERED).unwrap_or(false)
+            {
+                world.set_block_and_update(pos, state.with(crate::state::POWERED, true));
+            }
+        }
+        Command::MinecartExplode {
+            center,
+            radius,
+            source,
+            owner,
+        } => world.explode_minecart(center, radius, source, owner),
     }
 }
 

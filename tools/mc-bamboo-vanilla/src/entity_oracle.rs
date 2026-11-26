@@ -152,6 +152,11 @@ struct Case {
     vy: f64,
     #[serde(default)]
     vz: f64,
+    /// 矿车存档往返发生在第几步之前；-1 表示不做。
+    ///
+    /// The step before which a minecart archive round trip runs; -1 disables it.
+    #[serde(default = "unknown_item")]
+    save_at: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -897,6 +902,9 @@ impl Report {
         let hoppers: Vec<BlockPos> = Vec::new();
         self.compare_step(&case.name, 0, &mut world, None, &case.steps[0], &hoppers);
         for (index, step) in case.steps.iter().enumerate().skip(1) {
+            if case.save_at >= 0 && index - 1 == case.save_at as usize {
+                minecart_archive_roundtrip(&mut world, id);
+            }
             let ticked = world.tick_entities_kept();
             self.steps += 1;
             self.compare_step(&case.name, index, &mut world, Some(&ticked), step, &hoppers);
@@ -980,6 +988,29 @@ impl Report {
         );
         Ok(())
     }
+}
+
+/// 矿车存档往返：写出 NBT、读回实体、放回实体表，再继续逐刻比较。
+///
+/// Minecart archive round trip: write NBT, read the row back, replace the entity
+/// and keep comparing tick by tick.
+fn minecart_archive_roundtrip(world: &mut World, id: i32) {
+    let Some(entity) = world.entity(id) else {
+        return;
+    };
+    let row = entity.split();
+    let Ok(tag) = mc_bamboo_blocks::archive::write_entity(&row) else {
+        return;
+    };
+    let Ok(Some(restored)) = mc_bamboo_blocks::archive::read_entity(&tag, id) else {
+        return;
+    };
+    let mut restored = Some(restored.into_entity());
+    world.with_listed_entity_mut(id, &mut |entity| {
+        if let Some(value) = restored.take() {
+            *entity = value;
+        }
+    });
 }
 
 fn entity_key(entity: &OfficialEntity) -> (String, i64, i64, i64, bool) {
