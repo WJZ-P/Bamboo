@@ -219,6 +219,8 @@ pub struct MinecartPublic {
     pub hurt_time: i32,
     pub hurt_dir: i32,
     pub damage: f32,
+    /// `DATA_ID_CUSTOM_DISPLAY_BLOCK`，方块状态 ID。
+    pub custom_display_block: Option<i32>,
     pub display_offset: i32,
     /// `MinecartFurnace.DATA_ID_FUEL`。
     pub has_fuel: bool,
@@ -235,8 +237,9 @@ impl MinecartPublic {
             hurt_time: cart.hurt_time,
             hurt_dir: cart.hurt_dir,
             damage: cart.damage,
+            custom_display_block: cart.custom_display_block.map(|state| state.0 as i32),
             display_offset: cart.display_offset,
-            has_fuel: cart.fuel > 0,
+            has_fuel: cart.kind().is_furnace() && cart.fuel > 0,
         }
     }
 }

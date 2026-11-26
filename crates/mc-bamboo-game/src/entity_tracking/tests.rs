@@ -52,6 +52,71 @@ fn dangerous_wither_skull_syncs_metadata() {
     );
 }
 
+/// 矿车同步 `VehicleEntity` 的 8/9/10（与船共用）和自己的 11/12/13；
+/// 全是默认值时一条都不发。
+///
+/// A minecart syncs the shared `VehicleEntity` fields 8/9/10 (same as boats) and
+/// its own 11/12/13; nothing is sent while every value is the default.
+#[test]
+fn minecart_syncs_vehicle_and_own_metadata() {
+    use mc_bamboo_blocks::entity::{Entity, EntityKind, minecart::MinecartKind};
+
+    let mut entity = Entity::minecart(MinecartKind::Furnace, Vec3::new(0.5, 64.0, 0.5));
+    if let EntityKind::Minecart(cart) = &mut entity.kind {
+        cart.hurt_time = 7;
+        cart.hurt_dir = -1;
+        cart.damage = 12.0;
+        cart.custom_display_block = Some(BlockState(blocks::STONE));
+        cart.display_offset = 9;
+        cart.fuel = 100;
+    }
+    let data = Snapshot::of(&entity.split().public).data.pairing_values();
+    assert!(data.contains(&EntityData::BoatHurtTime(7)));
+    assert!(data.contains(&EntityData::BoatHurtDir(-1)));
+    assert!(data.contains(&EntityData::BoatDamage(12.0)));
+    assert!(data.contains(&EntityData::MinecartDisplayBlock(Some(
+        blocks::STONE as i32
+    ))));
+    assert!(data.contains(&EntityData::MinecartDisplayOffset(9)));
+    assert!(data.contains(&EntityData::MinecartFuel(true)));
+
+    // 默认矿车：只有共享项，矿车自己的四项都不发。
+    let idle = Entity::minecart(MinecartKind::Rideable, Vec3::new(0.5, 64.0, 0.5));
+    let data = Snapshot::of(&idle.split().public).data.pairing_values();
+    assert!(
+        data.iter().all(|item| !matches!(
+            item,
+            EntityData::BoatHurtTime(_)
+                | EntityData::BoatHurtDir(_)
+                | EntityData::BoatDamage(_)
+                | EntityData::MinecartDisplayBlock(_)
+                | EntityData::MinecartDisplayOffset(_)
+                | EntityData::MinecartFuel(_)
+        )),
+        "a default minecart sends no vehicle metadata",
+    );
+
+    // 变回默认时发的默认值，运输矿车的展示偏移默认是 8。
+    let chest_public = mc_bamboo_blocks::entity::minecart::MinecartPublic {
+        entity_type: entity_type::CHEST_MINECART,
+        passengers: Vec::new(),
+        hurt_time: 0,
+        hurt_dir: 1,
+        damage: 0.0,
+        custom_display_block: None,
+        display_offset: 8,
+        has_fuel: false,
+    };
+    assert_eq!(
+        minecart_default_data(12, &chest_public),
+        EntityData::MinecartDisplayOffset(8)
+    );
+    assert_eq!(
+        minecart_default_data(11, &chest_public),
+        EntityData::MinecartDisplayBlock(None)
+    );
+}
+
 /// 带物品参数的粒子包按官方 `ItemStackTemplate.STREAM_CODEC` 追加
 /// 物品 ID、数量 1、空组件补丁（两个 0 varint）。
 #[test]
