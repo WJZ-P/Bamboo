@@ -311,11 +311,30 @@ WebView2 的渲染进程不算在内。
   对生物和玩家受击路径都生效。**对拍**：`mob-oracle --only player_attack_mace` 覆盖 2 / 5 / 10
   格下砸（比伤害、目标血量、目标速度和攻击者速度 / 摔落距离）、范围击退（旁边两头牛）、
   致密 III（低充能压低基础伤害，让致密决定牛死不死），`--break-self-test mace_smash` /
-  `mace_density` / `mace_aoe` 三处改坏都报不一致；破甲走单测（`breach_reduces_armor_effectiveness`，
-  对拍夹具的牛没有护甲）。
-- **玩家近战攻击的已知限制**：`PIERCING_WEAPON`（长矛，`KineticWeapon` 蓄力冲刺 /
-  `post_piercing_attack` 的 `lunge` 也一样）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应
-  武器的行为；风爆 `post_attack`（下砸时把攻击者炸起来）未接；暴击前置判定里
+  `mace_density` / `mace_aoe` 三处改坏都报不一致；破甲对拍 `player_attack_mace_breach0/4`
+  给目标牛穿铁胸甲、带 / 不带破甲各砸一次比伤害（`--break-self-test mace_breach` 能抓到
+  剥掉破甲的改坏）。风爆 `wind_burst` 按官方 `post_attack` 的 `explode`：下砸且
+  `fall_distance ≥ 1.5` 时以攻击者为圆心半径 3.5 的爆炸，只按 `knockback_multiplier`
+  （lookup `[1.2, 1.75, 2.2]`、fallback `1.5 + 0.35×(L−1)`）推开范围内的实体、不伤不破坏
+  方块，攻击者自己那份 `pushFromExplosion` 写进服务端速度、爆炸包（gust 粒子和
+  `wind_burst` 音效）`connection.send` 给自己；对拍 `player_attack_mace_wind_burst`
+  比攻击者被弹起的速度（`--break-self-test mace_wind_burst` 能抓到剥掉风爆的改坏）。
+- **长矛**按官方 `PiercingWeapon` / `KineticWeapon`：左键穿刺走 `PlayerActionKind::Stab` →
+  `PiercingWeapon.attack`，射线（`getHitEntitiesAlong` + 擦边 margin + 方块遮挡）逐个
+  `stabAttack`（伤害、两下击退、可下马），命中后 `postPiercingAttack` 接 `lunge` 的
+  `post_piercing_attack`（前冲、扣耐久、饥饿、音效），`MINIMUM_ATTACK_CHARGE` 门槛、
+  破甲伤害源都接；挥手的动画读 `attack_animation` 组件（长矛是刺击 `stab` 时长 19）。
+  右键蓄力走 `KineticWeapon.damageEntities`：`Item.use` 开始使用并播蓄力音，逐刻
+  射线接触伤害（`contactCooldownTicks` 跳过刚刺中的实体、三组 `Condition` 按时长 /
+  绝对速度 / 相对速度判定），`baseDamage` 用属性**基础值**加 `floor(rel × damage_multiplier)`、
+  正在使用时伤害不乘充能，命中后实体事件 2（客户端播命中音）、`SPEAR_MOBS_TRIGGER`、
+  耐久 / 统计 / 饥饿。对拍：`player_attack_spear_stab`（穿刺）和
+  `player_attack_spear_charge`（蓄力逐刻接触伤害，`--break-self-test spear_charge` 能抓到
+  取消蓄力的改坏）。
+- **宠物继承主人的队伍**：`TamableAnimal.getTeam()` 覆写——驯服动物自己没队时返回
+  `getRootOwner().getTeam()`，Bamboo 的 `goals.rs` 同盟判定和重锤范围击退的候选过滤都补上
+  这一层回退（`mob_team_index` 单测钉住，全量 mob-oracle 仍是 46）。
+- **玩家近战攻击的已知限制**：暴击前置判定里
   `onClimbable` / `isInWater` 按缺省值（Bamboo 没有梯子 / 水中状态），失明用 `EffectMap`、
   骑乘用 `riding.vehicle` 分别判 `isMobilityRestricted()` / `isPassenger()`（后两条真判了）；
   节肢杀手的缓慢时长按 `ApplyMobEffect` 从**受害者自己的随机源**取三次
