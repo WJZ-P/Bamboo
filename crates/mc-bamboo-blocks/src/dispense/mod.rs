@@ -1,16 +1,16 @@
 //! `DispenserBlock.dispenseFrom` 和 `DispenseItemBehavior.bootStrap`。
 //!
-//! 生成实体的行为不建实体。船和矿车在放得下的时候只扣物品、放一次 1000 和 2000；
-//! 放不下时走官方的失败分支，也就是再套一层 `DefaultDispenseItemBehavior.dispense`。
-//! 箭、刷怪蛋、盔甲架走官方在生成失败时的分支。TNT 在 `tnt_explodes` 为真时生成点燃的实体，见各文件。
+//! 船和矿车在放得下的时候只扣物品、放一次 1000 和 2000；放不下时走官方的失败分支，
+//! 再套一层 `DefaultDispenseItemBehavior.dispense`。箭、刷怪蛋走官方在生成失败时的分支；
+//! 盔甲架按 `DispenseItemBehavior$1` 真的生成实体，TNT 在 `tnt_explodes` 为真时生成点燃的实体。
 //!
 //! `DispenserBlock.dispenseFrom` and `DispenseItemBehavior.bootStrap`.
 //!
-//! Behaviours that spawn an entity do not create one, except primed TNT. A boat or minecart that
-//! can be placed only consumes the item and plays 1000 then 2000 once. When it cannot, the
-//! official failure branch runs, which nests another `DefaultDispenseItemBehavior.dispense`.
-//! Arrows, spawn eggs and armour stands follow the branch official uses when the spawn fails.
-//! TNT spawns a primed entity when `tnt_explodes` is true.
+//! A boat or minecart that can be placed only consumes the item and plays 1000 then 2000 once.
+//! When it cannot, the official failure branch runs, which nests another
+//! `DefaultDispenseItemBehavior.dispense`. Arrows and spawn eggs follow the branch official uses
+//! when the spawn fails; an armour stand really spawns the entity (`DispenseItemBehavior$1`),
+//! and TNT spawns a primed entity when `tnt_explodes` is true.
 
 mod bone;
 mod bottle;

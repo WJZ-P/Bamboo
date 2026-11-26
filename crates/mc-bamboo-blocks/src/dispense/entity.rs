@@ -1,34 +1,46 @@
-//! 会生成实体的注册表行为。船、矿车、盔甲架、刷怪蛋和弹射物仍不生成实体。
-//! TNT 物品在规则为真时生成点燃的 TNT。
+//! 会生成实体的注册表行为。刷怪蛋和弹射物仍不生成实体。
+//! 盔甲架在发射器正前方生成，TNT 物品在规则为真时生成点燃的 TNT。
 //!
 //! 船和矿车放得下时只扣物品，不取 `level.random`，外层一次 1000 和 2000。放不下时套一层默认抛出。
-//! 盔甲架和带实体数据的刷怪蛋走 `spawn` 返回 null：物品留着，一次 1000。
+//! 盔甲架照 `DispenseItemBehavior$1` 生成实体、应用 `entity_data`、扣一个，取一次 `level.random`；
+//! 带实体数据的刷怪蛋走 `spawn` 返回 null：物品留着，一次 1000。
 //! 没有实体数据的刷怪蛋是默认抛出。TNT 物品在 `tntExplodes` 为真时生成 `PrimedTnt`。
 //! 箭、蛋、雪球、药水、烟花、火焰弹和风弹走默认抛出。官方那些用的是弹射物事件，不是这套随机数。
 //!
-//! Registry behaviours that spawn an entity. Boats, minecarts, armour stands, spawn eggs and
-//! projectiles still do not create one. A TNT item spawns primed TNT when the rule is true.
+//! Registry behaviours that spawn an entity. Spawn eggs and projectiles still do not create one.
+//! An armour stand spawns in front of the dispenser; a TNT item spawns primed TNT when the
+//! rule is true.
 //!
 //! A boat or minecart that can be placed only consumes the item. It does not draw from
 //! `level.random`, and the outer dispense plays 1000 and 2000 once. Otherwise it nests a
-//! default throw. An armour stand, and a spawn egg that carries entity data, follow `spawn`
-//! returning null: the item stays and 1000 plays once. A spawn egg without entity data is a
-//! default throw. A TNT item spawns a `PrimedTnt` when `tntExplodes` is true.
-//! Arrows, eggs, snowballs, potions, fireworks, fire charges and wind charges take the default
-//! throw. Official uses a projectile event for those, not these random draws.
+//! default throw. An armour stand follows `DispenseItemBehavior$1`: spawn the entity, apply
+//! `entity_data`, shrink one item and draw one `level.random` value. A spawn egg that carries
+//! entity data follows `spawn` returning null: the item stays and 1000 plays once. A spawn egg
+//! without entity data is a default throw. A TNT item spawns a `PrimedTnt` when `tntExplodes`
+//! is true. Arrows, eggs, snowballs, potions, fireworks, fire charges and wind charges take
+//! the default throw. Official uses a projectile event for those, not these random draws.
 
 use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::{
-    items, registries::data_component_type as kinds, tags::block_tags, tags::fluid_tags,
+    items, registries::data_component_type as kinds, registries::entity_type, tags::block_tags,
+    tags::fluid_tags,
 };
-use mc_bamboo_protocol::{components::defaults, item::ItemStack};
+use mc_bamboo_nbt::Tag;
+use mc_bamboo_protocol::{
+    components::{ComponentPatch, ComponentValue, defaults},
+    item::ItemStack,
+};
 
 use super::{Shot, nested_default, throw_one};
 use crate::{
     behaviour::common::item_of,
     container::copy_with_count,
     dispenser::without_one,
-    entity::arrow::{ArrowShot, Pickup},
+    entity::{
+        Entity,
+        arrow::{ArrowShot, Pickup},
+        mob::{MobType, nbt},
+    },
     world::World,
 };
 
@@ -60,11 +72,7 @@ pub(super) fn execute(
         return Shot::plain(throw_one(world, pos, facing, stack));
     }
     if item == items::ARMOR_STAND {
-        // `EntityType.spawn` 返回 null：不减数量。外层仍放 1000 和 2000。
-        //
-        // `EntityType.spawn` returned null: the count stays. The outer dispense still plays
-        // 1000 and 2000.
-        return Shot::plain(stack);
+        return armor_stand(world, pos, facing, stack);
     }
     if item == items::TNT {
         return dispense_tnt(world, pos, facing, stack);
@@ -73,6 +81,64 @@ pub(super) fn execute(
         return boat(world, pos, facing, stack);
     }
     minecart(world, pos, facing, stack)
+}
+
+/// `DispenseItemBehavior$1`（`Items.ARMOR_STAND`）：在发射器正前方一格生成盔甲架。
+///
+/// `EntityType.create` 先用 `level.random` 抽一次初始朝向（随后被 `PostSpawnProcessor`
+/// 的 `setYRot` 覆盖），照样取一次。链上三步依次是 `setYRot(facing.toYRot())`、
+/// `applyComponentsFromItemStack`（物品的 `CUSTOM_NAME`）和 `updateCustomEntityTag`
+/// （`ENTITY_DATA`，只在类型匹配时 `load`）；实体落在方块中心、`y` 取方块底面。
+/// 生成成功后 `stack.shrink(1)`，声音和冒烟由外层 `dispense` 统一放 1000 / 2000。
+///
+/// `DispenseItemBehavior$1` (`Items.ARMOR_STAND`): spawn an armour stand one cell in front.
+/// `EntityType.create` draws one `level.random` value for the initial yaw (later overwritten
+/// by the `PostSpawnProcessor`'s `setYRot`), so take one draw too. The chain applies
+/// `setYRot(facing.toYRot())`, `applyComponentsFromItemStack` (the item's `CUSTOM_NAME`) and
+/// `updateCustomEntityTag` (`ENTITY_DATA`, loaded only when the type matches), in that order.
+/// The entity lands at the cell centre with `y` at the block bottom. On success the stack
+/// shrinks by one; the outer `dispense` plays 1000 / 2000.
+fn armor_stand(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -> Shot {
+    let target = pos.relative(facing);
+    let _ = world.next_random_float();
+    let center = Vec3::new(
+        f64::from(target.x) + 0.5,
+        f64::from(target.y),
+        f64::from(target.z) + 0.5,
+    );
+    let mut entity = world.prepare_entity(Entity::by_mob_type(MobType::ArmorStand, center));
+    // `PostSpawnProcessor` 第一步：`setYRot(Direction.toYRot())`。
+    entity.y_rot = facing.to_yaw();
+    let patch = ComponentPatch::from_opaque(&stack).unwrap_or_default();
+    // 第二步 `applyComponentsFromItemStack`：`CUSTOM_NAME` → `setCustomName`。
+    if let Some(ComponentValue::CustomName(name)) = patch.get(kinds::CUSTOM_NAME) {
+        let custom_name = name.tag().clone();
+        entity.with_mob(|_, mob| {
+            mob.custom_name = Some(custom_name);
+            mob.needs_sync = true;
+        });
+    }
+    // 第三步 `updateCustomEntityTag`：`TypedEntityData.loadInto` 是
+    // `saveWithoutId` → `merge(ENTITY_DATA)` → `load`，所以物品的 `CUSTOM_NAME`、
+    // 朝向等当前状态会保留，只有 `ENTITY_DATA` 里的键覆盖。类型不符时整步跳过。
+    if let Some(ComponentValue::EntityData(data)) = patch.get(kinds::ENTITY_DATA)
+        && data.kind == entity_type::ARMOR_STAND
+    {
+        let mut entries = match nbt::write_mob(&entity.clone().split()) {
+            Ok(Tag::Compound(entries)) => entries,
+            _ => Vec::new(),
+        };
+        for (key, value) in &data.tag {
+            if let Some(slot) = entries.iter_mut().find(|(name, _)| name == key) {
+                slot.1 = value.clone();
+            } else {
+                entries.push((key.clone(), value.clone()));
+            }
+        }
+        let _ = nbt::load_into(&mut entity, &Tag::Compound(entries));
+    }
+    world.add_prepared_entity(entity);
+    Shot::plain(without_one(&stack))
 }
 
 pub(super) fn is_spawn_egg(item: i32) -> bool {

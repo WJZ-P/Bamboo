@@ -1003,7 +1003,7 @@ fn a_brush_fails_when_nothing_is_in_front() {
 }
 
 #[test]
-fn arrows_spawn_a_projectile_and_burn_armour_stands_and_spawn_eggs_take_the_fallback() {
+fn arrows_spawn_a_projectile_armour_stands_spawn_an_entity_and_spawn_eggs_take_the_fallback() {
     // `ProjectileDispenseBehavior`：箭真的生成实体，位置比抛出多 0.1 的 y，
     // 事件换成 1002，不取世界随机源。
     //
@@ -1023,10 +1023,20 @@ fn arrows_spawn_a_projectile_and_burn_armour_stands_and_spawn_eggs_take_the_fall
     assert_pair(&level_events(&arrow.effects), 1002, Direction::East);
     assert_eq!(arrow.seed, seed_after(slot_roll));
 
+    // `DispenseItemBehavior$1`：生成盔甲架、扣一个、`EntityType.create` 取一次 `nextFloat`。
+    //
+    // `DispenseItemBehavior$1`: spawn the stand, shrink one, and draw one `nextFloat`
+    // in `EntityType.create`.
     let stand = fire_id(&mut TestLevel::new(), Direction::East, items::ARMOR_STAND);
-    assert_eq!(stand.left, ItemStack::new(items::ARMOR_STAND, 1));
+    assert!(stand.left.is_empty());
     assert_pair(&level_events(&stand.effects), 1000, Direction::East);
-    assert_eq!(stand.seed, seed_after(slot_roll));
+    assert_eq!(
+        stand.seed,
+        seed_after(|random| {
+            slot_roll(random);
+            let _ = random.next_float();
+        })
+    );
 
     let egg = fire_id(
         &mut TestLevel::new(),
@@ -1284,4 +1294,106 @@ fn a_dispenser_equips_only_an_adult_happy_ghast() {
     };
     assert!(super::equipment::can_equip(&target(false), &equippable));
     assert!(!super::equipment::can_equip(&target(true), &equippable));
+}
+
+/// `DispenseItemBehavior$1`：正前方生成盔甲架、扣一个、取一次 `level.random` 的初始朝向、
+/// 朝向按 `Direction.toYRot()`，外层放 1000 和 2000。
+#[test]
+fn a_dispenser_places_an_armour_stand_in_front() {
+    use crate::entity::mob::MobType;
+
+    let mut level = TestLevel::new();
+    let mut slots = empty(9);
+    slots[0] = ItemStack::new(items::ARMOR_STAND, 2);
+    level.set_container(POS, slots);
+    let mut ticks = BlockTicks::new();
+    let mut world = World::new(&mut level, &mut ticks);
+    place_dispenser(&mut world, Direction::East);
+    let state = world.block_state(POS);
+    dispense_from(&mut world, POS, state);
+    assert_pair(&level_events(&world.drain_effects()), 1000, Direction::East);
+    assert_eq!(slot(&mut world, POS, 0).count, 1, "one item is consumed");
+    assert_eq!(
+        world.random().seed(),
+        seed_after(|random| {
+            slot_roll(random);
+            let _ = random.next_float();
+        }),
+        "EntityType.create draws one nextFloat for the initial yaw"
+    );
+    drop(world);
+    let stands: Vec<_> = level
+        .entities()
+        .iter()
+        .filter(|entity| {
+            entity
+                .kind
+                .mob()
+                .is_some_and(|mob| mob.mob_type == MobType::ArmorStand)
+        })
+        .collect();
+    assert_eq!(stands.len(), 1, "one armour stand is spawned");
+    assert_eq!(stands[0].position, Vec3::new(1.5, 64.0, 0.5));
+    assert_eq!(stands[0].y_rot, 270.0, "Direction.East.toYRot()");
+}
+
+/// `applyComponentsFromItemStack` 的 `CUSTOM_NAME` 和 `updateCustomEntityTag` 的
+/// `ENTITY_DATA` 都作用到生成的盔甲架上；没有 `Rotation` 时朝向仍是发射器朝向。
+#[test]
+fn a_dispenser_applies_entity_data_and_custom_name_to_the_stand() {
+    use mc_bamboo_nbt::Tag;
+    use mc_bamboo_protocol::{
+        components::{ComponentPatch, ComponentValue, PatchEntry, TypedEntityData},
+        text::Component,
+    };
+
+    let mut stack = ItemStack::new(items::ARMOR_STAND, 1);
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        kinds::ENTITY_DATA,
+        PatchEntry::Set(ComponentValue::EntityData(TypedEntityData {
+            kind: entity_type::ARMOR_STAND,
+            tag: vec![
+                ("Small".to_owned(), Tag::Byte(1)),
+                ("Marker".to_owned(), Tag::Byte(1)),
+            ],
+        })),
+    );
+    patch.put(
+        kinds::CUSTOM_NAME,
+        PatchEntry::Set(ComponentValue::CustomName(Component::text("Hall Monitor"))),
+    );
+    let (added, removed) = patch.to_opaque();
+    stack.added = added;
+    stack.removed = removed;
+
+    let mut level = TestLevel::new();
+    let mut slots = empty(9);
+    slots[0] = stack;
+    level.set_container(POS, slots);
+    let mut ticks = BlockTicks::new();
+    let mut world = World::new(&mut level, &mut ticks);
+    place_dispenser(&mut world, Direction::North);
+    let state = world.block_state(POS);
+    dispense_from(&mut world, POS, state);
+    drop(world);
+    let stands: Vec<_> = level
+        .entities()
+        .iter()
+        .filter(|entity| {
+            entity
+                .kind
+                .mob()
+                .is_some_and(|mob| mob.mob_type == crate::entity::mob::MobType::ArmorStand)
+        })
+        .collect();
+    assert_eq!(stands.len(), 1, "one armour stand is spawned");
+    let mob = stands[0].kind.mob().expect("armour stand is a mob");
+    assert!(mob.armor_stand.is_marker(), "ENTITY_DATA Marker is applied");
+    assert_eq!(
+        mob.custom_name,
+        Some(Tag::String("Hall Monitor".to_owned())),
+        "CUSTOM_NAME component is applied"
+    );
+    assert_eq!(stands[0].y_rot, 180.0, "Direction.North.toYRot()");
 }
