@@ -36,6 +36,7 @@ use serde::Deserialize;
 use crate::oracle::collect_log;
 
 mod allay;
+mod armor_stand;
 mod arrow_deflect;
 mod attack_target;
 mod bat;
@@ -266,6 +267,7 @@ enum Line {
     Breeze(Box<breeze::BreezeCase>),
     Allay(Box<allay::AllayCase>),
     AllaySave(allay::AllaySaveCase),
+    ArmorStandSave(armor_stand::ArmorStandSaveCase),
     SpellcasterSave(SpellcasterSaveCase),
     End(End),
 }
@@ -2479,6 +2481,7 @@ impl Report {
                 Line::Breeze(case) => self.replay_breeze(&case),
                 Line::Allay(case) => self.replay_allay(&case),
                 Line::AllaySave(case) => self.replay_allay_save(&case),
+                Line::ArmorStandSave(case) => self.replay_armor_stand_save(&case),
                 Line::SpellcasterSave(case) => self.replay_spellcaster_save(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),

@@ -740,6 +740,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("allay_save")) {
                 cases += playAllaySave(official, out);
             }
+            if (only == null || only.startsWith("armor_stand")) {
+                cases += playArmorStand(official, out, only);
+            }
             if (only == null || only.startsWith("spellcaster_save")
                     || only.startsWith("evoker") || only.startsWith("vex")
                     || only.startsWith("illusioner")) {
@@ -15640,6 +15643,80 @@ public final class MobOracle {
             cases++;
         }
         return cases;
+    }
+
+    /** 盔甲架对拍入口：存档往返和逐刻场景。 */
+    private static int playArmorStand(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        if (only == null || "armor_stand_save".startsWith(only)) {
+            cases += playArmorStandSaves(official, out);
+        }
+        return cases;
+    }
+
+    /** 盔甲架存档往返：官方 `saveWithoutId` 的整份 SNBT 和读回后再写出的 SNBT。 */
+    private static int playArmorStandSaves(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (int setup = 0; setup < 3; setup++) {
+            FakeLevel world = FakeLevel.create(official);
+            var stand = (net.minecraft.world.entity.decoration.ArmorStand) EntityTypes.ARMOR_STAND
+                    .create(world, EntitySpawnReason.COMMAND);
+            setRandom(stand, world.entitySeeds.nextLong());
+            stand.setPos(1.5, 64.0, 2.5);
+            stand.setYRot(37.0F);
+            stand.setXRot(12.0F);
+            stand.setHealth(13.0F);
+            stand.setCustomName(net.minecraft.network.chat.Component.literal("Hall Monitor"));
+            if (setup >= 1) {
+                stand.setInvisible(true);
+                stand.setShowArms(true);
+                stand.setNoBasePlate(true);
+                setArmorStandFlag(stand, "setSmall", true);
+                if (setup >= 2) {
+                    setArmorStandFlag(stand, "setMarker", true);
+                }
+                stand.setHeadPose(new net.minecraft.core.Rotations(11.0F, 22.0F, 33.0F));
+                stand.setBodyPose(new net.minecraft.core.Rotations(-1.0F, -2.0F, -3.0F));
+                stand.setLeftArmPose(new net.minecraft.core.Rotations(4.0F, 5.0F, 6.0F));
+                stand.setRightArmPose(new net.minecraft.core.Rotations(7.0F, 8.0F, 9.0F));
+                stand.setLeftLegPose(new net.minecraft.core.Rotations(10.0F, 11.0F, 12.0F));
+                stand.setRightLegPose(new net.minecraft.core.Rotations(13.0F, 14.0F, 15.0F));
+                put(net.minecraft.world.entity.decoration.ArmorStand.class, stand,
+                        "disabledSlots", 0x123456);
+                stand.setItemSlot(net.minecraft.world.entity.EquipmentSlot.HEAD,
+                        new ItemStack(Items.DIAMOND_HELMET));
+                stand.setItemSlot(net.minecraft.world.entity.EquipmentSlot.CHEST,
+                        new ItemStack(Items.IRON_CHESTPLATE));
+                stand.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                        new ItemStack(Items.DIAMOND_SWORD));
+            }
+            var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            stand.saveWithoutId(output);
+            var copy = (net.minecraft.world.entity.decoration.ArmorStand) EntityTypes.ARMOR_STAND
+                    .create(world, EntitySpawnReason.LOAD);
+            copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries,
+                    output.buildResult()));
+            var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            copy.saveWithoutId(again);
+            out.write("{\"type\":\"armorStandSave\",\"name\":"
+                    + jsonString("armor_stand_save_" + setup)
+                    + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                    + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    /** 盔甲架的 `setSmall` / `setMarker` 是私有方法，反射调用设置客户端标志位。 */
+    private static void setArmorStandFlag(net.minecraft.world.entity.decoration.ArmorStand stand,
+            String name, boolean value) throws Exception {
+        var method = net.minecraft.world.entity.decoration.ArmorStand.class
+                .getDeclaredMethod(name, boolean.class);
+        method.setAccessible(true);
+        method.invoke(stand, value);
     }
 
     /** 唤魔者 / 恼鬼 / 幻术师存档：`saveWithoutId` 的 SNBT 和读回后再写出的 SNBT。 */

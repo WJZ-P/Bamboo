@@ -221,15 +221,25 @@ impl ArmorStand {
         if self.is_marker() {
             put(out, "Marker", Tag::Byte(1));
         }
-        let pose = Tag::Compound(vec![
-            ("Head".to_owned(), self.head_pose.to_tag()),
-            ("Body".to_owned(), self.body_pose.to_tag()),
-            ("LeftArm".to_owned(), self.left_arm_pose.to_tag()),
-            ("RightArm".to_owned(), self.right_arm_pose.to_tag()),
-            ("LeftLeg".to_owned(), self.left_leg_pose.to_tag()),
-            ("RightLeg".to_owned(), self.right_leg_pose.to_tag()),
-        ]);
-        put(out, "Pose", pose);
+        // `ArmorStandPose.CODEC` 用 `optionalFieldOf(default)`：六个姿势里等于缺省值的
+        // 字段省略，全是缺省值时 `Pose` 是空复合标签。
+        //
+        // `ArmorStandPose.CODEC` uses `optionalFieldOf(default)`: a pose field equal
+        // to its default is omitted, so an all-default stand saves an empty `Pose`.
+        let mut pose = Vec::new();
+        for (name, value, default) in [
+            ("Head", self.head_pose, DEFAULT_HEAD_POSE),
+            ("Body", self.body_pose, DEFAULT_BODY_POSE),
+            ("LeftArm", self.left_arm_pose, DEFAULT_LEFT_ARM_POSE),
+            ("RightArm", self.right_arm_pose, DEFAULT_RIGHT_ARM_POSE),
+            ("LeftLeg", self.left_leg_pose, DEFAULT_LEFT_LEG_POSE),
+            ("RightLeg", self.right_leg_pose, DEFAULT_RIGHT_LEG_POSE),
+        ] {
+            if value != default {
+                pose.push((name.to_owned(), value.to_tag()));
+            }
+        }
+        put(out, "Pose", Tag::Compound(pose));
         let _ = mob;
     }
 
