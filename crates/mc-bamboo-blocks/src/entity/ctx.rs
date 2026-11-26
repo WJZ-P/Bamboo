@@ -1205,6 +1205,19 @@ pub enum Command {
     OminousItemSpawnerTick(super::ominous_item_spawner::SpawnerTick),
     /// 风弹这一刻命中：`AbstractWindCharge.onHitBlock` / `onHitEntity` 的爆炸。
     WindChargeImpact(super::wind_charge::WindChargeHit),
+    /// 烟花火箭这一刻爆炸：`FireworkRocketEntity.explode`（实体事件 17、伤害、消失）。
+    ///
+    /// A firework rocket exploding this tick: `FireworkRocketEntity.explode`
+    /// (entity event 17, damage, discard).
+    FireworkRocketExplode {
+        hit: Option<super::firework_rocket::FireworkHit>,
+    },
+    /// 烟花火箭第一刻的发射音 `entity.firework_rocket.launch`。
+    ///
+    /// The launch sound on the firework's first tick.
+    FireworkRocketLaunch {
+        position: Vec3,
+    },
     /// `Breeze.Shoot`：朝目标射出一枚旋风人风弹。
     ShootBreezeWindCharge(Box<super::wind_charge::WindChargeShot>),
     /// 骷髅陷阱马被玩家触发：视觉闪电和四名骷髅骑士。
@@ -1991,6 +2004,19 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             super::ominous_item_spawner::apply(me, world, facts);
         }
         Command::WindChargeImpact(hit) => super::wind_charge::impact(me, world, hit),
+        Command::FireworkRocketExplode { hit } => {
+            super::firework_rocket::explode(me, world, hit);
+        }
+        Command::FireworkRocketLaunch { position } => {
+            world.play_sound(
+                position,
+                mc_bamboo_data::sounds::sound_event("minecraft:entity.firework_rocket.launch"),
+                mc_bamboo_data::sounds::AMBIENT,
+                3.0,
+                1.0,
+                false,
+            );
+        }
         Command::ShootBreezeWindCharge(shot) => {
             world.spawn_wind_charge_shot(&shot);
         }

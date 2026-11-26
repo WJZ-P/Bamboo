@@ -162,6 +162,14 @@ pub enum EntityData {
     ///
     /// index 8, ITEM_STACK. The stack a ground item entity is carrying.
     Item(ItemStack),
+    /// index 9，OPTIONAL_UNSIGNED_INT。烟花火箭附着的目标实体 ID。
+    ///
+    /// index 9, OPTIONAL_UNSIGNED_INT. The firework rocket's attached entity id.
+    FireworksAttached(Option<i32>),
+    /// index 10，BOOLEAN。烟花火箭是不是斜射出去的（弩 / 发射器）。
+    ///
+    /// index 10, BOOLEAN. Whether the firework rocket was shot at an angle.
+    FireworksShotAtAngle(bool),
     /// index 8，BLOCK_POS。下落的方块从哪一格掉下来。
     FallingBlockStart(BlockPos),
     /// index 8，INT。点燃的 TNT 还剩多少 tick 爆炸。
@@ -587,8 +595,8 @@ impl EntityData {
             Self::ArrowColor(_) => mc_bamboo_data::entity_types::ARROW_COLOR,
             Self::TridentLoyalty(_) => mc_bamboo_data::entity_types::TRIDENT_LOYALTY,
             Self::TridentFoil(_) => mc_bamboo_data::entity_types::TRIDENT_FOIL,
-            Self::TntBlockState(_) | Self::Health(_) => 9,
-            Self::EffectParticles(_) => 10,
+            Self::TntBlockState(_) | Self::Health(_) | Self::FireworksAttached(_) => 9,
+            Self::EffectParticles(_) | Self::FireworksShotAtAngle(_) => 10,
             Self::EffectAmbience(_) => 11,
             Self::SleepingPos(_) => 14,
             Self::MobFlags(_) => 15,
@@ -708,7 +716,9 @@ impl EntityData {
 
     fn write(&self, out: &mut Vec<u8>) {
         match self {
-            Self::ShoulderParrotLeft(variant) | Self::ShoulderParrotRight(variant) => {
+            Self::ShoulderParrotLeft(variant)
+            | Self::ShoulderParrotRight(variant)
+            | Self::FireworksAttached(variant) => {
                 write_data_header(out, self.index(), SERIALIZER_OPTIONAL_UNSIGNED_INT);
                 // 官方 OptionalInt：空写 0，有值写品种 ID + 1。
                 write_varint(out, variant.map_or(0, |value| value + 1));
@@ -848,6 +858,10 @@ impl EntityData {
             Self::EffectAmbience(ambient) => {
                 write_data_header(out, 11, SERIALIZER_BOOLEAN);
                 write_bool(out, *ambient);
+            }
+            Self::FireworksShotAtAngle(value) => {
+                write_data_header(out, 10, SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
             }
             Self::SleepingPos(pos) => {
                 write_data_header(out, 14, SERIALIZER_OPTIONAL_BLOCK_POS);

@@ -2203,6 +2203,12 @@ pub enum DamageKind {
     /// `when_caused_by_living_non_player`, and in `#no_knockback` (knockback is
     /// the explicit `causeExtraKnockback` in `stabAttack`, not the default hurt knockback).
     Spear,
+    /// 烟花火箭爆炸，`minecraft:fireworks`。数据文件里 exhaustion 0.1、
+    /// message_id `fireworks`、scaling `when_caused_by_living_non_player`。
+    ///
+    /// A firework rocket blast, `minecraft:fireworks`. exhaustion 0.1,
+    /// message_id `fireworks`, scaling `when_caused_by_living_non_player`.
+    Fireworks,
 }
 
 impl DamageKind {
@@ -2247,6 +2253,7 @@ impl DamageKind {
             Self::SonicBoom => "minecraft:sonic_boom",
             Self::Mace => "minecraft:mace_smash",
             Self::Spear => "minecraft:spear",
+            Self::Fireworks => "minecraft:fireworks",
         }
     }
 
@@ -2312,6 +2319,7 @@ impl DamageKind {
             Self::SonicBoom => "sonic_boom",
             Self::Mace => "mace_smash",
             Self::Spear => "spear",
+            Self::Fireworks => "fireworks",
         }
     }
 
@@ -2357,6 +2365,7 @@ impl DamageKind {
             Self::SonicBoom,
             Self::Mace,
             Self::Spear,
+            Self::Fireworks,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -2378,6 +2387,7 @@ impl DamageKind {
                 | Self::WindCharge
                 | Self::SonicBoom
                 | Self::Mace
+                | Self::Fireworks
         ) || matches!(self, Self::Wither)
     }
 
@@ -2477,7 +2487,8 @@ impl DamageKind {
             | Self::SulfurCubeHot
             | Self::BadRespawnPoint
             | Self::Mace
-            | Self::Spear => TENTH,
+            | Self::Spear
+            | Self::Fireworks => TENTH,
             _ => 0.0,
         }
     }

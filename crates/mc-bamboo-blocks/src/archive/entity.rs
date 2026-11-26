@@ -45,6 +45,7 @@ pub fn entity_uuid_of(row: &crate::entity::EntityRow) -> [u8; 16] {
         crate::entity::KindPublic::LlamaSpit(spit) => spit.uuid,
         crate::entity::KindPublic::Egg(egg) => egg.uuid,
         crate::entity::KindPublic::SplashPotion(potion) => potion.uuid,
+        crate::entity::KindPublic::FireworkRocket(firework) => firework.uuid,
         _ => entity_uuid(row.public.uid).to_be_bytes(),
     }
 }
@@ -86,6 +87,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
             crate::entity::wind_charge::WindChargeVariant::Player => kinds::WIND_CHARGE,
             crate::entity::wind_charge::WindChargeVariant::Breeze => kinds::BREEZE_WIND_CHARGE,
         },
+        crate::entity::KindPublic::FireworkRocket(_) => kinds::FIREWORK_ROCKET,
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
     put(
@@ -110,6 +112,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 crate::entity::KindPublic::Egg(egg) => egg.x_rot,
                 crate::entity::KindPublic::SplashPotion(potion) => potion.x_rot,
                 crate::entity::KindPublic::WindCharge(charge) => charge.pitch,
+                crate::entity::KindPublic::FireworkRocket(firework) => firework.pitch,
                 _ => 0.0,
             }),
         ]),
@@ -130,6 +133,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::LlamaSpit(spit) => uuid_tag(&spit.uuid),
         crate::entity::KindPublic::Egg(egg) => uuid_tag(&egg.uuid),
         crate::entity::KindPublic::SplashPotion(potion) => uuid_tag(&potion.uuid),
+        crate::entity::KindPublic::FireworkRocket(firework) => uuid_tag(&firework.uuid),
         _ => entity_uuid_tag(public.uid),
     };
     put(&mut out, "UUID", uuid);
@@ -233,6 +237,24 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 &mut out,
                 "HasBeenShot",
                 Tag::Byte(i8::from(saved.has_been_shot)),
+            );
+        }
+        crate::entity::KindPublic::FireworkRocket(_) => {
+            let crate::entity::KindState::FireworkRocket(saved) = &state.kind else {
+                return Err(Error::new("mismatched firework rocket entity halves"));
+            };
+            // 官方 `addAdditionalSaveData` 的顺序：Life、LifeTime、FireworksItem、ShotAtAngle。
+            put(&mut out, "Life", Tag::Int(saved.life));
+            put(&mut out, "LifeTime", Tag::Int(saved.lifetime));
+            put(
+                &mut out,
+                "FireworksItem",
+                slots::encode_item(&saved.item).map_err(|error| Error::new(error.to_string()))?,
+            );
+            put(
+                &mut out,
+                "ShotAtAngle",
+                Tag::Byte(i8::from(saved.shot_at_angle)),
             );
         }
         crate::entity::KindPublic::ExperienceOrb { value } => {
@@ -526,6 +548,29 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                     crate::entity::ominous_item_spawner::OminousItemSpawner {
                         item,
                         spawn_item_after_ticks: tag::long_or(tag, "spawn_item_after_ticks", 0),
+                    },
+                ))
+            }
+            "minecraft:firework_rocket" => {
+                let item = tag::field(tag, "FireworksItem")
+                    .and_then(|value| slots::decode_item(value).ok())
+                    .unwrap_or_else(ItemStack::empty);
+                EntityKind::FireworkRocket(Box::new(
+                    crate::entity::firework_rocket::FireworkRocket {
+                        uuid: arrow::uuid_from(tag, "UUID").unwrap_or([0; 16]),
+                        owner: None,
+                        owner_uuid: arrow::uuid_from(tag, "Owner"),
+                        item,
+                        attached_to_target: None,
+                        shot_at_angle: tag::bool_or(tag, "ShotAtAngle", false),
+                        life: tag::int_or(tag, "Life", 0),
+                        lifetime: tag::int_or(tag, "LifeTime", 0),
+                        left_owner: tag::bool_or(tag, "LeftOwner", false),
+                        has_been_shot: tag::bool_or(tag, "HasBeenShot", false),
+                        pitch: rotation[1],
+                        needs_sync: false,
+                        sync_velocity: false,
+                        exploded: false,
                     },
                 ))
             }
