@@ -136,6 +136,9 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import net.minecraft.core.Direction;
 import net.minecraft.core.component.DataComponents;import net.minecraft.world.item.BowItem;
+import net.minecraft.world.item.component.FireworkExplosion;
+import net.minecraft.world.item.component.Fireworks;
+import it.unimi.dsi.fastutil.ints.IntList;
 import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -584,6 +587,12 @@ public final class MobOracle {
             }
             if (only == null || only.startsWith("wind_charge")) {
                 cases += playWindCharge(official, out, only);
+            }
+            if (only == null || only.startsWith("firework")) {
+                cases += playFirework(official, out, only);
+                if (only == null || "firework_save".startsWith(only)) {
+                    cases += playFireworkSave(official, out);
+                }
             }
             if (only == null || only.startsWith("arrow_deflect")) {
                 cases += playArrowDeflect(official, out, only);
@@ -12516,6 +12525,205 @@ public final class MobOracle {
                     + ",\"mob\":" + mob + ",\"start\":[0.5,64.5,0.5]"
                     + ",\"velocity\":[0.8,0.0,0.0],\"frames\":" + frames
                     + ",\"finalBlocks\":" + blocks + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    /**
+     * 烟花火箭逐刻对拍：三个场景（竖直无星、带星炸牛、弩斜射撞墙）逐刻比位置、
+     * 速度、朝向、是否消失、`life` / `lifetime`、消失那一刻的实体事件 17、牛的血量与
+     * 击退速度、世界随机源和最终方块。烟花实体的随机源照 `OracleSkeleton.getArrow` 从
+     * `level.entitySeeds` 取：先构造官方实体，再换成带种子的随机源、重抽 UUID，并把
+     * 构造函数的初速 / 寿命逻辑在带种子的随机源上重跑一遍。
+     */
+    private static int playFirework(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("firework_vertical", "firework_star_cow", "firework_crossbow_wall")) {
+            if (only != null && !name.startsWith(only)) continue;
+            boolean star = name.equals("firework_star_cow");
+            boolean crossbow = name.equals("firework_crossbow_wall");
+            boolean hasStar = star || crossbow;
+            FakeLevel level = FakeLevel.create(official);
+            ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+            level.nextId = FIRST_ID;
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            level.spawned = new ArrayList<>();
+            level.tracked = new ArrayList<>();
+            level.levelEvents = new ArrayList<>();
+            level.getRandom().setSeed(1L);
+            level.gameTime = START_TIME;
+            for (int x = -4; x <= 4; x++) {
+                for (int z = -4; z <= 4; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+            // 带星炸牛场景：在 (0, 66, 0) 放一块石顶，让带星烟花在牛旁 2 格左右撞顶爆炸。
+            if (star) {
+                level.blocks.put(BlockPos.asLong(0, 66, 0), Blocks.STONE.defaultBlockState());
+            }
+            // 斜射场景：命中面在 (2, 64, 0) 的一堵石墙，带星烟花撞墙即爆。
+            if (crossbow) {
+                level.blocks.put(BlockPos.asLong(2, 64, 0), Blocks.STONE.defaultBlockState());
+            }
+            // 烟花起点：竖直 / 带星在 (0.5, 64.5, 0.5)，斜射从 (0.5, 64.5, 0.5) 朝 +X 飞。
+            double[] start = new double[] {0.5, 64.5, 0.5};
+            double[] dir = new double[] {1.0, 0.0, 0.0};
+            ItemStack stack = new ItemStack(Items.FIREWORK_ROCKET, 1);
+            if (hasStar) {
+                stack.set(DataComponents.FIREWORKS, new Fireworks(1,
+                        List.of(new FireworkExplosion(FireworkExplosion.Shape.SMALL_BALL,
+                                IntList.of(0xFFFFFF), IntList.of(), false, false))));
+            }
+            net.minecraft.world.entity.projectile.FireworkRocketEntity firework;
+            if (crossbow) {
+                firework = new net.minecraft.world.entity.projectile.FireworkRocketEntity(
+                        level, stack, start[0], start[1], start[2], true);
+            } else {
+                firework = new net.minecraft.world.entity.projectile.FireworkRocketEntity(
+                        level, start[0], start[1], start[2], stack);
+            }
+            // 烟花先取种子（和 Bamboo 的生成顺序一致），牛后取。
+            setRandom(firework, level.entitySeeds.nextLong());
+            firework.setUUID(Mth.createInsecureUUID(firework.getRandom()));
+            // 构造函数的初速和寿命在带种子的随机源上重跑一遍。
+            firework.setDeltaMovement(
+                    firework.getRandom().triangle(0.0, 0.002297), 0.05,
+                    firework.getRandom().triangle(0.0, 0.002297));
+            int flight = 1;
+            Fireworks component = stack.get(DataComponents.FIREWORKS);
+            if (component != null) flight += component.flightDuration();
+            putInt(net.minecraft.world.entity.projectile.FireworkRocketEntity.class, firework,
+                    "lifetime", 10 * flight + firework.getRandom().nextInt(6)
+                            + firework.getRandom().nextInt(7));
+            if (crossbow) {
+                firework.shoot(dir[0], dir[1], dir[2], 1.6F, 1.0F);
+            }
+            firework.setId(FIRST_ID);
+            level.tracked.add(firework);
+            net.minecraft.world.entity.animal.cow.Cow cow = null;
+            if (star) {
+                cow = EntityTypes.COW.create(level, EntitySpawnReason.EVENT);
+                setRandom(cow, level.entitySeeds.nextLong());
+                RandomSource random = cow.getRandom();
+                cow.setUUID(Mth.createInsecureUUID(random));
+                float yaw = random.nextFloat() * 6.2831855F;
+                cow.setYRot(yaw);
+                cow.setYHeadRot(yaw);
+                cow.setId(FIRST_ID + 2);
+                cow.setPos(1.5, 64.0, 0.5);
+                cow.setPersistenceRequired();
+                cow.setNoAi(true);
+                level.tracked.add(cow);
+            }
+            // 记录消失那一刻的实体事件 17。
+            final boolean[] event17 = {false};
+            level.packets = packet -> {
+                if (packet instanceof ClientboundEntityEventPacket ev
+                        && ev.getEventId() == 17
+                        && getInt(ClientboundEntityEventPacket.class, ev, "entityId") == firework.getId()) {
+                    event17[0] = true;
+                }
+            };
+            int ticks = crossbow ? 12 : 30;
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime++;
+                    event17[0] = false;
+                    if (!firework.isRemoved()) {
+                        firework.commonTick();
+                        firework.tick();
+                    }
+                }
+                if (tick > 0) frames.append(',');
+                frames.append('[')
+                        .append(Double.doubleToRawLongBits(firework.getX())).append(',')
+                        .append(Double.doubleToRawLongBits(firework.getY())).append(',')
+                        .append(Double.doubleToRawLongBits(firework.getZ())).append(',')
+                        .append(Double.doubleToRawLongBits(firework.getDeltaMovement().x)).append(',')
+                        .append(Double.doubleToRawLongBits(firework.getDeltaMovement().y)).append(',')
+                        .append(Double.doubleToRawLongBits(firework.getDeltaMovement().z)).append(',')
+                        .append(Float.floatToRawIntBits(firework.getYRot())).append(',')
+                        .append(Float.floatToRawIntBits(firework.getXRot())).append(',')
+                        .append(firework.isRemoved() ? 1 : 0).append(',')
+                        .append(getInt(net.minecraft.world.entity.projectile.FireworkRocketEntity.class,
+                                firework, "life")).append(',')
+                        .append(getInt(net.minecraft.world.entity.projectile.FireworkRocketEntity.class,
+                                firework, "lifetime")).append(',')
+                        .append(event17[0] ? 1 : 0).append(',')
+                        .append(star ? Float.floatToRawIntBits(cow.getHealth()) : 0).append(',')
+                        .append(star ? Double.doubleToRawLongBits(cow.getDeltaMovement().x) : 0L).append(',')
+                        .append(star ? Double.doubleToRawLongBits(cow.getDeltaMovement().y) : 0L).append(',')
+                        .append(star ? Double.doubleToRawLongBits(cow.getDeltaMovement().z) : 0L).append(',')
+                        .append(randomSeed(level.getRandom())).append(']');
+            }
+            frames.append(']');
+            long[] keys = level.blocks.keySet().toLongArray();
+            Arrays.sort(keys);
+            StringBuilder blocks = new StringBuilder("[");
+            for (int i = 0; i < keys.length; i++) {
+                if (i > 0) blocks.append(',');
+                BlockPos pos = BlockPos.of(keys[i]);
+                blocks.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',')
+                        .append(pos.getZ()).append(',')
+                        .append(Block.getId(level.getBlockState(pos))).append(']');
+            }
+            blocks.append(']');
+            out.write("{\"type\":\"firework\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"star\":" + star + ",\"crossbow\":" + crossbow
+                    + ",\"start\":[0.5,64.5,0.5],\"direction\":[1.0,0.0,0.0]"
+                    + ",\"frames\":" + frames
+                    + ",\"finalBlocks\":" + blocks + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    /** 烟花火箭存档往返：官方 `saveWithoutId` 的 SNBT 和读回后再写出的 SNBT。 */
+    private static int playFireworkSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean filled : new boolean[] {false, true}) {
+            FakeLevel world = FakeLevel.create(official);
+            ItemStack stack = new ItemStack(Items.FIREWORK_ROCKET, 1);
+            if (filled) {
+                stack.set(DataComponents.FIREWORKS, new Fireworks(2,
+                        List.of(new FireworkExplosion(FireworkExplosion.Shape.LARGE_BALL,
+                                IntList.of(0xFF0000, 0x00FF00), IntList.of(0x0000FF), true, true))));
+            }
+            var firework = new net.minecraft.world.entity.projectile.FireworkRocketEntity(
+                    world, stack, 1.5, 65.25, 2.5, filled);
+            firework.setUUID(new UUID(0L, filled ? 11L : 10L));
+            firework.setDeltaMovement(0.25, 0.5, -0.125);
+            firework.setYRot(45.0F);
+            firework.setXRot(-15.0F);
+            putInt(net.minecraft.world.entity.projectile.FireworkRocketEntity.class, firework,
+                    "life", filled ? 5 : 0);
+            putInt(net.minecraft.world.entity.projectile.FireworkRocketEntity.class, firework,
+                    "lifetime", filled ? 22 : 14);
+            if (filled) {
+                var owner = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+                owner.setUUID(new UUID(0L, 99L));
+                firework.setOwner(owner);
+                put(net.minecraft.world.entity.projectile.Projectile.class, firework,
+                        "leftOwner", true);
+                put(net.minecraft.world.entity.projectile.Projectile.class, firework,
+                        "hasBeenShot", true);
+            }
+            var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            firework.saveWithoutId(output);
+            var copy = EntityTypes.FIREWORK_ROCKET.create(world, EntitySpawnReason.LOAD);
+            copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries,
+                    output.buildResult()));
+            var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            copy.saveWithoutId(again);
+            out.write("{\"type\":\"fireworkSave\",\"filled\":" + filled
+                    + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                    + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
             cases++;
         }
         return cases;
