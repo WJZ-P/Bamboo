@@ -326,10 +326,15 @@ impl TrackedEntity {
             head_yaw: self.last_head,
             data: snapshot.add_data(),
         })];
-        // 官方箭的 trackedDataValues 为空时不发；其它类型保留现有空表包行为。
-        // Vanilla skips empty arrow metadata; other types retain their existing empty packet.
-        if !matches!(snapshot.data, KindData::Arrow(_) | KindData::LlamaSpit(_))
-            || !self.last_data.is_empty()
+        // 官方 `trackedDataValues` 为空（全默认值）时不发 `set_entity_data`；其它旧类型保留现有空表包行为。
+        // Vanilla skips empty metadata in `sendPairingData`; keep existing empty-packet behaviour for legacy kinds.
+        if !matches!(
+            snapshot.data,
+            KindData::Arrow(_)
+                | KindData::LlamaSpit(_)
+                | KindData::Painting(_)
+                | KindData::ItemFrame(_)
+        ) || !self.last_data.is_empty()
         {
             out.push(packet_body(&SetEntityData {
                 entity_id: snapshot.id,
@@ -439,6 +444,34 @@ impl TrackedEntity {
         sync_velocity: bool,
     ) -> Vec<Vec<u8>> {
         let mut packets = Vec::new();
+        // 官方 `ServerEntity.sendChanges` 开头：`ItemFrame` 每 10 刻（含第 0 刻）先发一次
+        // 脏元数据（`sendDirtyEntityData`），再进入移动/朝向判定分支。
+        // Vanilla `ServerEntity.sendChanges`: for `ItemFrame`, every 10 ticks (including tick 0)
+        // flush dirty entity data before the movement/rotation branch.
+        if matches!(snapshot.data, KindData::ItemFrame(_)) && self.tick_count % 10 == 0 {
+            let data = snapshot.data.pairing_values();
+            let mut items = if data != self.last_data {
+                self.dirty_items(snapshot)
+            } else {
+                Vec::new()
+            };
+            for item in std::mem::take(&mut self.pending_dirty) {
+                if !items
+                    .iter()
+                    .any(|other| EntityData::index(other) == EntityData::index(&item))
+                {
+                    items.push(item);
+                }
+            }
+            items.sort_by_key(EntityData::index);
+            self.last_data = data;
+            if !items.is_empty() {
+                packets.push(packet_body(&SetEntityData {
+                    entity_id: snapshot.id,
+                    items: &items,
+                }));
+            }
+        }
         // `SteppedInterpolationTracker.updateTracking` 每刻都加一，`getPositionPath`
         // 在发位置包时把攒下的刻数记成一步，然后清空。
         if !snapshot.data.is_projectile() {

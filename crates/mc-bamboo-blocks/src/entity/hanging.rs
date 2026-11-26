@@ -106,7 +106,7 @@ impl Painting {
             variant,
             custom_name: None,
             ticks_since_last_check: 0,
-            needs_sync: false,
+            needs_sync: true,
         }
     }
 
@@ -200,7 +200,7 @@ impl ItemFrame {
             custom_name: None,
             ticks_since_last_check: 0,
             x_rot,
-            needs_sync: false,
+            needs_sync: true,
         }
     }
 
@@ -661,7 +661,9 @@ pub(crate) fn tick_painting(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     }
     let old = match &mut me.kind {
         EntityKind::Painting(p) => {
-            p.needs_sync = false;
+            if me.tick_count > 1 {
+                p.needs_sync = false;
+            }
             let old = p.ticks_since_last_check;
             p.ticks_since_last_check += 1;
             old
@@ -721,7 +723,9 @@ pub(crate) fn tick_item_frame(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     }
     let old = match &mut me.kind {
         EntityKind::ItemFrame(f) => {
-            f.needs_sync = false;
+            if me.tick_count > 1 {
+                f.needs_sync = false;
+            }
             let old = f.ticks_since_last_check;
             f.ticks_since_last_check += 1;
             old
