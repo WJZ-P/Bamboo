@@ -1303,6 +1303,27 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
                 });
             }
         }
+        // 破甲对拍：给指定生物穿一件胸甲，`detect_updates` 把盔甲属性刷进去。
+        // Breach oracle: equip a chestplate and run `detect_updates` so the armor
+        // attribute picks up the item's modifier.
+        for (index, &chest) in scene.cow_chests.iter().enumerate() {
+            if chest == 0 {
+                continue;
+            }
+            if let Some(&uid) = real.get(index) {
+                region.entities.with_mut(uid, |entity| {
+                    let Some(mob) = entity.kind.mob_mut() else {
+                        return;
+                    };
+                    use mc_bamboo_protocol::packet::play::EquipmentSlot;
+                    mob.equipment.set(
+                        EquipmentSlot::Chest,
+                        mc_bamboo_protocol::item::ItemStack::new(chest, 1),
+                    );
+                    mob.equipment.detect_updates(&mut mob.attributes);
+                });
+            }
+        }
         (real.first().copied(), real)
     } else {
         (None, Vec::new())
@@ -1968,6 +1989,11 @@ pub struct ReplayPlayerHurt {
     /// The owning player index of each scene mob (-1 unless a tamed wolf), aligned
     /// with [`Self::cow_seeds`].
     pub mob_owners: Vec<i32>,
+    /// 每头参战生物胸口穿的盔甲物品 ID（0 是空），和 [`Self::cow_seeds`] 对齐。
+    ///
+    /// The chest armor item id of each scene mob (0 for none), aligned with
+    /// [`Self::cow_seeds`].
+    pub cow_chests: Vec<i32>,
 }
 
 /// 攻击场景里每头牛的逐刻状态，全部用原始位比较。

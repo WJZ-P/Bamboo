@@ -705,6 +705,11 @@ struct CowSetup {
     /// For attack scenes, the player index that owns this tamed wolf; -1 otherwise.
     #[serde(default = "minus_one")]
     owner: i32,
+    /// 攻击场景目标牛（0 号）胸口穿的盔甲物品 ID，0 是空（破甲对拍用）。
+    ///
+    /// The chest armor item id of the target cow (index 0), 0 for none (breach oracle).
+    #[serde(default)]
+    chest: i32,
     /// 僵尸场景的队伍编号，-1 不在队伍里。
     #[serde(default = "minus_one")]
     team: i32,
@@ -4126,6 +4131,7 @@ impl Report {
             cow_seeds: case.cows.iter().map(|cow| cow.seed).collect(),
             mob_kinds: case.cows.iter().map(|cow| cow.kind).collect(),
             mob_owners: case.cows.iter().map(|cow| cow.owner).collect(),
+            cow_chests: case.cows.iter().map(|cow| cow.chest).collect(),
         };
         // 故意改坏：难度缩放、护甲公式（用空装备）、保护附魔等级、
         // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置）、攻击充能值
@@ -4163,6 +4169,10 @@ impl Report {
             Some("mace_pet") => scene.mob_owners.fill(-1),
             // 长矛改坏：取消刺击，两头牛都不受伤（和官方分叉）。
             Some("spear_stab") => scene.stab_tick = -1,
+            // 破甲改坏：从武器上剥掉破甲，穿甲的牛伤害和官方分叉。
+            Some("mace_breach") => scene
+                .attack_enchants
+                .retain(|(name, _)| name != "minecraft:breach"),
             _ => {}
         }
         let output = replay_player_hurt(&scene);

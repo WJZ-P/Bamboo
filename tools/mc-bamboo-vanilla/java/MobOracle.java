@@ -1244,6 +1244,8 @@ public final class MobOracle {
         /** 僵尸场景：每只生物头上戴的东西（`null` 是空）和它的初始耐久损耗。 */
         Item helmet;
         int helmetDamage;
+        /** 攻击场景：目标牛（0 号）胸口穿的盔甲，0 是空（破甲对拍用）。 */
+        int targetChest;
         /** 苦力怕场景：第 0 位带电，第 1 位已点燃。 */
         int creeperFlags;
         /** 末影人场景：初始搬着的方块，`null` 表示空手。 */
@@ -1682,6 +1684,12 @@ public final class MobOracle {
         /** 长矛场景：在第 `tick` 刻触发 `PiercingWeapon.attack(player, MAINHAND)`。 */
         Scene stab(int tick) {
             stabTick = tick;
+            return this;
+        }
+
+        /** 攻击场景：给目标牛（0 号）穿一件胸甲（破甲对拍用）。 */
+        Scene targetChest(int item) {
+            targetChest = item;
             return this;
         }
     }
@@ -4768,6 +4776,23 @@ public final class MobOracle {
                 pet.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
                 pet.attackSetup(33, false, 5.0, false).attack(1, 0);
                 scenes.add(pet);
+                // 破甲：目标牛穿铁甲，带 / 不带破甲各砸一次，比伤害。低充能
+                // （ticker 0）压低基础伤害，2 格摔落下砸加伤 8 + 基础 1.2 不到 10 点，
+                // 牛活着；铁胸甲(6)把无破甲的伤害从 9.2 减到约 8.7，破甲 IV(-0.6)
+                // 把减伤比例压到 0、伤害回到 9.2，两场景的血量差可观察。
+                int ironChest = BuiltInRegistries.ITEM.getId(Items.IRON_CHESTPLATE);
+                for (int breach : new int[] {0, 4}) {
+                    Scene breachScene = new Scene("player_attack_mace_breach" + breach).ticks(6)
+                            .playerPackets().packets();
+                    ground(breachScene, 4);
+                    breachScene.player(0.5, 64.0, 0.5, Items.MACE);
+                    breachScene.cow(2.5, 64.0, 0.5, 0.0F, 249L + breach);
+                    breachScene.targetChest(ironChest);
+                    breachScene.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
+                    if (breach > 0) breachScene.attackEnchant("minecraft:breach", breach);
+                    breachScene.attackSetup(0, false, 2.0, true).attack(1, 0);
+                    scenes.add(breachScene);
+                }
                 // 长矛左键穿刺：一次打到排成一线的两头牛（射线穿过两头的包围盒）。
                 int spear = BuiltInRegistries.ITEM.getId(Items.IRON_SPEAR);
                 Scene stab = new Scene("player_attack_spear_stab").ticks(6)
@@ -5737,6 +5762,14 @@ public final class MobOracle {
             cow.snapTo(at[0], at[1], at[2], scene.yaws.get(i)[0], 0.0F);
             cow.setYHeadRot(scene.yaws.get(i)[0]);
             cow.setYBodyRot(scene.yaws.get(i)[0]);
+            if (scene.targetChest != 0 && i == 0) {
+                // 破甲对拍：目标牛穿一件胸甲，`detectEquipmentUpdates` 刷进盔甲属性。
+                cow.setItemSlot(net.minecraft.world.entity.EquipmentSlot.CHEST,
+                        new ItemStack(Item.byId(scene.targetChest)));
+                java.lang.reflect.Method detect = LivingEntity.class.getDeclaredMethod("detectEquipmentUpdates");
+                detect.setAccessible(true);
+                detect.invoke(cow);
+            }
             if (!scene.bootEnchantment.isEmpty() && i == 0) {
                 // 冰霜行者 / 灵魂疾行场景：靴子附魔，站在水面上方。
                 ItemStack boots = new ItemStack(Items.DIAMOND_BOOTS);
@@ -5822,6 +5855,7 @@ public final class MobOracle {
             line.append(",\"kind\":").append(scene.tamedWolves.contains(i)
                     ? 8 : animalKind(scene.name));
             line.append(",\"owner\":").append(scene.tamedWolves.contains(i) ? 0 : -1);
+            line.append(",\"chest\":").append(i == 0 ? scene.targetChest : 0);
             line.append(",\"wool\":").append(cows.get(i) instanceof Sheep sheep
                     ? (sheep.getColor().getId() | (sheep.isSheared() ? 16 : 0))
                     : scene.name.startsWith("mooshroom_") ? scene.wool : 0);
