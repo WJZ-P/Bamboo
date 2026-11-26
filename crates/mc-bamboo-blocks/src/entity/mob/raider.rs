@@ -566,11 +566,13 @@ impl RaiderGoal {
                 let limit = f64::from(*look_distance * *look_distance);
                 alive && me.position.distance_to_sqr(target.position) <= limit && *look_time > 0
             }
-            Self::ObtainBanner { path, .. } => {
+            Self::ObtainBanner { .. } => {
+                // 官方 `canContinueToUse` 查 `pathToBanner != null`（start 没清它），
+                // 这里 `path` 字段在 `start` 里已经取走，改成查导航路径没走完。
                 let Some(uid) = mob.raider.pursued_banner else {
                     return false;
                 };
-                if path.is_none() || ctx.other(uid).is_none_or(|public| public.removed) {
+                if ctx.other(uid).is_none_or(|public| public.removed) {
                     return false;
                 }
                 !mob.navigation.is_done() && !cannot_pick_up_banner(me, mob, ctx)
@@ -740,6 +742,36 @@ impl RaiderGoal {
                     });
                 }
                 if close && let Some(uid) = mob.raider.pursued_banner {
+                    // 官方 `Raider.pickUpItem` 的灾厄旗帜分支在目标里直接改自己（`mob`
+                    // 在这里可用），只把掉旧头盔、登记队长和移除掉落物作为命令发出去。
+                    let Some(banner) = ctx.other(uid).and_then(|public| match &public.kind {
+                        crate::entity::KindPublic::Item { stack, .. } => Some(stack.clone()),
+                        _ => None,
+                    }) else {
+                        return;
+                    };
+                    let old = mob.equipment.get(EquipmentSlot::Head).clone();
+                    let chance = mob.equipment.drop_chance(EquipmentSlot::Head);
+                    // `!old.isEmpty()` 短路：旧头盔空着时不抽 `nextFloat`。
+                    if !old.is_empty() {
+                        let roll = (me.random.next_float() - 0.1_f32).max(0.0_f32);
+                        if f64::from(roll) < f64::from(chance) {
+                            ctx.emit(Command::DropItem { stack: old }, me);
+                        }
+                    }
+                    mob.equipment.set(EquipmentSlot::Head, banner);
+                    mob.equipment.set_drop_chance(EquipmentSlot::Head, 2.0);
+                    mob.raider.set_patrol_leader(true);
+                    if let Some(id) = mob.raider.raid_id {
+                        ctx.emit(
+                            Command::RaidSetLeader {
+                                id,
+                                wave: mob.raider.wave,
+                                leader: me.id,
+                            },
+                            me,
+                        );
+                    }
                     ctx.emit(Command::RaiderPickUpBanner { item: uid }, me);
                 }
             }
@@ -1060,51 +1092,15 @@ fn shout(me: &mut Entity, mob: &Mob, ctx: &mut dyn EntityCtx, aggressive: bool) 
     }
 }
 
-/// 落地 [`Command::RaiderPickUpBanner`]：`Raider.pickUpItem` 的灾厄旗帜分支。
+/// 落地 [`Command::RaiderPickUpBanner`]：只移除掉落物。戴旗、当队长、掉旧头盔和
+/// 登记队长都在目标 `tick` 里改 `mob` / 发对应命令（`apply` 拿到的 `me` 是占位实体，
+/// 改不了自己的装备）。
 ///
-/// 官方先按 `max(nextFloat() - 0.1, 0) < dropChance` 决定是否把旧头盔掉出来，
-/// 然后戴上新旗帜、清掉落物、`setLeader(wave, self)`、`setPatrolLeader(true)`。
-/// 袭击队的登记由游戏层在同一刻的命令落地阶段写回。
-///
-/// Applies [`Command::RaiderPickUpBanner`]: the ominous-banner branch of
-/// `Raider.pickUpItem`. The raid's leader map is updated by the world thread.
-pub(crate) fn apply_pick_up_banner(world: &mut World, item: EntityUid, me: &mut Entity) {
-    let Some(entity) = world.entity(item) else {
-        return;
-    };
-    let crate::entity::EntityKind::Item(ground) = &entity.kind else {
-        return;
-    };
-    if ground.stack.is_empty() || !ground.stack.matches(&ominous_banner()) {
-        return;
-    }
-    let stack = ground.stack.clone();
-    let old = me.kind.mob().map(|mob| {
-        (
-            mob.equipment.get(EquipmentSlot::Head).clone(),
-            mob.equipment.drop_chance(EquipmentSlot::Head),
-        )
-    });
-    let roll = (me.random.next_float() - 0.1_f32).max(0.0_f32);
-    if let Some((old, chance)) = old
-        && !old.is_empty()
-        && f64::from(roll) < f64::from(chance)
-    {
-        world.spawn_at_location(me.position, old);
-    }
-    let info = me.with_mob(|_, mob| {
-        mob.equipment.set(EquipmentSlot::Head, stack);
-        mob.equipment.set_drop_chance(EquipmentSlot::Head, 2.0);
-        mob.raider.set_patrol_leader(true);
-        (mob.raider.raid_id, mob.raider.wave)
-    });
-    if let Some((Some(id), wave)) = info {
-        world.push_effect(crate::Effect::RaidSetLeader {
-            id,
-            wave,
-            leader: me.id,
-        });
-    }
+/// Applies [`Command::RaiderPickUpBanner`] by discarding the item. Putting on the
+/// banner, becoming the leader, dropping the old helmet and registering the leader
+/// all happen in the goal `tick`, where `mob` is available; `apply` only sees a
+/// placeholder `me`.
+pub(crate) fn apply_pick_up_banner(world: &mut World, item: EntityUid, _me: &mut Entity) {
     world.remove_entity(item);
 }
 

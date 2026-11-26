@@ -1241,6 +1241,20 @@ public final class MobOracle {
             return this;
         }
 
+        /** 队长捡旗场景：开局放一件灾厄旗帜掉落物。 */
+        double[] banner;
+        Scene banner(double x, double y, double z) {
+            this.banner = new double[] {x, y, z};
+            return this;
+        }
+
+        /** 开局把生物放在地面上（`setOnGround(true)`），躲开首刻寻路的 onGround 门槛。 */
+        boolean onGround;
+        Scene onGround() {
+            this.onGround = true;
+            return this;
+        }
+
         /** 僵尸场景：第 `sleepTick` 刻开头 0 号玩家右键床头 `bed`（`startSleepInBed`）。 */
         int sleepTick = -1;
         int[] bed;
@@ -2602,6 +2616,14 @@ public final class MobOracle {
                     net.minecraft.world.level.block.state.properties.BedPart.HEAD));
             village.mob(53, 0.5, 64.0, 0.5, 0.0F, 8401L, 0);
             scenes.add(village);
+            // 队长捡旗：袭击里一只掠夺者站在地上，脚边一件灾厄旗帜，捡起来当队长。
+            Scene banner = new Scene("raid_mob_banner").ticks(80).difficulty(2).onGround();
+            Scenes.ground(banner, 24);
+            banner.clockStart = 2000;
+            banner.raid(0, 64, 0, 0, 1, 1, 1, 3);
+            banner.mob(53, 0.5, 64.0, 0.5, 0.0F, 8501L, 0);
+            banner.banner(1.5, 64.0, 0.5);
+            scenes.add(banner);
         }
     }
 
@@ -5780,6 +5802,9 @@ public final class MobOracle {
             }
             if (scene.fireTicks > 0) {
                 cow.setRemainingFireTicks(scene.fireTicks);
+            }
+            if (scene.onGround) {
+                cow.setOnGround(true);
             }
             int age = scene.cowAges.get(i);
             if (age != 0) {
@@ -18155,6 +18180,7 @@ public final class MobOracle {
                 BrainOracle.fixSensorDelays(mob, scene.sensorDelay);
             }
             if (scene.fireTicks > 0) mob.setRemainingFireTicks(scene.fireTicks);
+            if (scene.onGround) mob.setOnGround(true);
             if (mob instanceof Zombie zombie) {
                 zombie.setBaby(scene.cowAges.get(i) != 0);
                 zombie.setCanBreakDoors(scene.difficulty == 3);
@@ -18218,6 +18244,17 @@ public final class MobOracle {
             // 显式构造（不跑 finalize）一致。
             mobs.add(mob);
             level.tracked.add(mob);
+        }
+        if (scene.banner != null) {
+            // 队长捡旗场景：一件灾厄旗帜掉落物，零速度、立刻可捡。
+            var bannerGetter = official.registries.lookupOrThrow(
+                    net.minecraft.core.registries.Registries.BANNER_PATTERN);
+            ItemStack banner = net.minecraft.world.entity.raid.Raid
+                    .getOminousBannerInstance(bannerGetter);
+            var dropped = new net.minecraft.world.entity.item.ItemEntity(
+                    level, scene.banner[0], scene.banner[1], scene.banner[2], banner, 0.0, 0.0, 0.0);
+            dropped.setNoPickUpDelay();
+            level.tracked.add(dropped);
         }
         if (scene.bowRider >= 0 && scene.bowRider < mobs.size()) {
             mobs.get(scene.bowRider).setItemSlot(
@@ -18338,6 +18375,11 @@ public final class MobOracle {
             line.append('[').append(at[0]).append(',').append(at[1]).append(',').append(at[2]).append(']');
         }
         line.append(']');
+        line.append(",\"banner\":").append(scene.banner == null ? "null"
+                : "[" + Double.doubleToRawLongBits(scene.banner[0]) + ","
+                        + Double.doubleToRawLongBits(scene.banner[1]) + ","
+                        + Double.doubleToRawLongBits(scene.banner[2]) + "]");
+        line.append(",\"onGround\":").append(scene.onGround);
         line.append(",\"difficulty\":").append(scene.difficulty);
         line.append(",\"skyDarken\":").append(scene.skyDarken);
         line.append(",\"raining\":").append(scene.raining);

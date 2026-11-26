@@ -376,6 +376,12 @@ struct Case {
     /// 开局就占用的 POI 方块（床/钟/工作站），袭击者穿村的 `isVillage` 按占用计。
     #[serde(default)]
     poi_take: Vec<[i32; 3]>,
+    /// 队长捡旗场景：开局放一件灾厄旗帜掉落物的位置（f64 位模式）。
+    #[serde(default)]
+    banner: Option<[i64; 3]>,
+    /// 开局把生物放在地面上，躲开首刻寻路的 onGround 门槛。
+    #[serde(default)]
+    on_ground: bool,
     #[serde(default)]
     player_health: i32,
     #[serde(default)]
@@ -2943,6 +2949,9 @@ impl Report {
                     entity.random = JavaRandom::new(cow.seed);
                     entity.y_rot = yaw;
                     entity.old_position = position;
+                    if case.on_ground {
+                        entity.on_ground = true;
+                    }
                     // 改坏确认 `frost_radius`：不给 0 号生物穿靴子，结冰格子必须全对不上。
                     // Break check `frost_radius`: no boots means no frozen cells.
                     if !case.boot_enchantment.is_empty()
@@ -3247,6 +3256,18 @@ impl Report {
                 let position = Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5);
                 let angle = world.random().next_double();
                 tnt_id = Some(world.spawn_entity(Entity::primed_tnt(position, angle)));
+            }
+            // 队长捡旗场景：一件灾厄旗帜掉落物，零速度、立即可捡，和 Java 侧
+            // `new ItemEntity(..., banner, 0, 0, 0)` + `setNoPickUpDelay()` 对齐。
+            if let Some(bits) = case.banner {
+                let position = Vec3::new(
+                    f64::from_bits(bits[0] as u64),
+                    f64::from_bits(bits[1] as u64),
+                    f64::from_bits(bits[2] as u64),
+                );
+                let stack = mc_bamboo_blocks::entity::mob::raider::ominous_banner();
+                let item = Entity::ground_item_with_delta(position, stack, Vec3::default());
+                world.spawn_entity(item);
             }
         }
         let Some(first) = case.steps.first() else {
