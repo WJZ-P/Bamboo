@@ -44,6 +44,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -377,6 +378,8 @@ public final class Probe {
     private static final int METADATA_SHARED_FLAGS = 0;
     private static final int METADATA_POSE = 6;
     private static final int METADATA_HEALTH = 9;
+    /** 烟花火箭 `DATA_ATTACHED_TO_TARGET`：index 9 的 OPTIONAL_UNSIGNED_INT。 */
+    private static final int METADATA_FIREWORKS_ATTACHED = 9;
     private static final int METADATA_MAIN_HAND = 15;
     private static final int METADATA_SKIN_PARTS = 16;
     private static final byte FLAG_SHIFT = 0x02;
@@ -881,6 +884,10 @@ public final class Probe {
                 section("chat" + names, () -> chat(actor, observer));
             }
 
+            // 放在所有 `chat` 的 `REQUEST_STATS` 之后：官方 `FireworkRocketItem.use`
+            // 会记 `ITEM_USED.FIREWORK_ROCKET`，若放在前面会让「统计为空」的断言
+            // 读到这项统计。单独成段，滑翔右键后其它客户端收到带附着 id 的元数据。
+            section("firework boost", () -> fireworkBoost(kitten, mochi));
             section("tool durability", () -> toolDurability(kitten, mochi));
             section("world entities", () -> worldEntities(kitten, mochi));
             section("books", () -> books(kitten));
@@ -1307,6 +1314,43 @@ public final class Probe {
             await("metadata: the skin parts come back",
                     () -> Byte.valueOf((byte) ALL_SKIN_PARTS).equals(dataValue(observer, actor, METADATA_SKIN_PARTS)));
             await("tab: the hat comes back", () -> Boolean.TRUE.equals(observer.hats.get(actor.uuid)));
+        }
+
+        /** 滑翔中右键烟花：其它客户端收到 `DATA_ATTACHED_TO_TARGET`（index 9）里带玩家实体 id 的元数据。 */
+        private void fireworkBoost(Join actor, Join observer) throws IOException {
+            Vec3 ground = actor.position;
+            actor.send(new ServerboundSetCreativeModeSlotPacket(6, new ItemStack(Items.ELYTRA)));
+            await("firework: the elytra is equipped",
+                    () -> holds(observer.remote(actor), EquipmentSlot.CHEST, Items.ELYTRA, 1));
+            actor.moveTo(ground.add(0.0, 3.0, 0.0), false);
+            actor.send(actor.playerCommand(ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+            await("firework: the observer sees the gliding pose",
+                    () -> Byte.valueOf(FLAG_FALL_FLYING).equals(dataValue(observer, actor, METADATA_SHARED_FLAGS))
+                            && dataValue(observer, actor, METADATA_POSE) == Pose.FALL_FLYING);
+
+            actor.send(new ServerboundSetCreativeModeSlotPacket(
+                    HOTBAR_START + 2, new ItemStack(Items.FIREWORK_ROCKET)));
+            actor.send(new ServerboundSetCarriedItemPacket(2));
+            // 创造模式改槽没有回包；先让服务端把栏位处理完再发 use_item。
+            pumpFor(SETTLE_MILLIS);
+            int sequence = actor.nextSequence();
+            int before = observer.lastFireworkId;
+            actor.send(new ServerboundUseItemPacket(InteractionHand.MAIN_HAND, sequence, 0.0f, 0.0f));
+            await("firework: " + observer.player + " sees " + actor.player
+                            + " rocket attached to its own id",
+                    () -> observer.lastFireworkId != before
+                            && OptionalInt.of(actor.entityId).equals(
+                                    observer.metadata
+                                            .getOrDefault(observer.lastFireworkId, Map.of())
+                                            .get(METADATA_FIREWORKS_ATTACHED)));
+
+            // 复位：落地、卸下鞘翅、清掉烟花和选中的栏位，别影响后面的用例。
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 2, ItemStack.EMPTY));
+            actor.moveTo(ground, true);
+            actor.send(new ServerboundSetCreativeModeSlotPacket(6, ItemStack.EMPTY));
+            await("firework: the elytra comes off",
+                    () -> isEmpty(observer.remote(actor), EquipmentSlot.CHEST));
         }
 
         private void swing(Join actor, Join observer) throws IOException {
@@ -3281,6 +3325,8 @@ public final class Probe {
         /** 最近一次出现的物品实体。 */
         int lastItemId = -1;
         int lastCowId = -1;
+        /** 最近一次出现的烟花火箭实体。 */
+        int lastFireworkId = -1;
         /** 世界里自然刷出来的生物（牛以外的也算）。它们的属性和元数据包不算进玩家相关的检查。 */
         final Set<Integer> mobIds = new HashSet<>();
         int cowAdds;
@@ -4255,14 +4301,18 @@ public final class Probe {
             boolean tnt = packet.getType() == EntityTypes.TNT;
             boolean item = packet.getType() == EntityTypes.ITEM;
             boolean cow = packet.getType() == EntityTypes.COW;
+            boolean firework = packet.getType() == EntityTypes.FIREWORK_ROCKET;
             // 生成期和自然刷怪会带来各种动物和怪物，类别不是 MISC 的都算生物。
             // Generation-time and natural spawning bring all kinds of mobs: anything outside MISC.
             boolean mob = packet.getType().getCategory() != MobCategory.MISC;
             if (mob) {
                 mobIds.add(packet.getId());
             }
-            check("entity: only players, falling blocks, primed tnt, items and mobs are added",
-                    player || falling || tnt || item || mob);
+            check("entity: only players, falling blocks, primed tnt, items, mobs and fireworks are added",
+                    player || falling || tnt || item || mob || firework);
+            if (firework) {
+                lastFireworkId = packet.getId();
+            }
             if (cow) {
                 lastCowId = packet.getId();
                 cowAdds += 1;

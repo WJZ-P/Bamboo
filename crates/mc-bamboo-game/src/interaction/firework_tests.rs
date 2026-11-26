@@ -6,10 +6,11 @@
 
 use mc_bamboo_blocks::entity::KindPublic;
 use mc_bamboo_core::Hand;
-use mc_bamboo_data::items;
+use mc_bamboo_data::{items, registries::stat_type};
 use mc_bamboo_protocol::{
+    codec::write_varint,
     item::ItemStack,
-    packet::play::{GameMode, PlayRequest},
+    packet::play::{ClientCommandKind, GameMode, PlayRequest},
 };
 
 use super::*;
@@ -61,6 +62,23 @@ fn rockets(server: &mut Harness) -> Vec<(Option<i32>, Option<i32>)> {
         .collect()
 }
 
+/// 让客户端请求统计，返回所有 `AWARD_STATS` 包的正文。
+fn request_stats(server: &mut Harness, client: &Client) -> Vec<Vec<u8>> {
+    server.request(
+        client,
+        PlayRequest::ClientCommand {
+            action: ClientCommandKind::RequestStats,
+        },
+    );
+    server.tick();
+    client
+        .take_frames()
+        .into_iter()
+        .filter(|frame| frame.id == clientbound::AWARD_STATS)
+        .map(|frame| frame.body)
+        .collect()
+}
+
 #[test]
 fn gliding_spawns_an_attached_firework_and_spends_one() {
     let (mut server, client) = settled();
@@ -80,6 +98,12 @@ fn gliding_spawns_an_attached_firework_and_spends_one() {
         2,
         "生存模式扣一个"
     );
+    // `FireworkRocketItem.use` 记一次 `Stats.ITEM_USED`。
+    let mut body = Vec::new();
+    for value in [1, stat_type::USED, items::FIREWORK_ROCKET, 1] {
+        write_varint(&mut body, value);
+    }
+    assert_eq!(request_stats(&mut server, &client), [body], "记了使用统计");
 }
 
 #[test]
