@@ -552,6 +552,7 @@ impl Player {
         PlayerView {
             uid: id.0,
             uuid: Some(*self.uuid.as_bytes()),
+            fall_flying: self.sync.is_fall_flying(),
             position: self.position,
             delta: self.motion.delta,
             width: (HALF_WIDTH * 2.0) as f32,

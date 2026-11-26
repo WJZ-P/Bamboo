@@ -36,6 +36,7 @@ fn pearl_shot(position: Vec3, owner: u32) -> EggShot {
 
 fn player(uid: u32, position: Vec3, yaw: f32) -> crate::entity::ctx::PlayerView {
     crate::entity::ctx::PlayerView {
+        fall_flying: false,
         shoulder_left: None,
         shoulder_right: None,
         uid: uid as i32,

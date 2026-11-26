@@ -737,6 +737,7 @@ fn spawn_firework_crossbow(
             owner_uuid: owner,
             item: ammo,
             shot_at_angle: true,
+            attached_to_target: None,
             shoot: Some(mc_bamboo_blocks::entity::firework_rocket::FireworkShoot {
                 direction,
                 power,

@@ -1292,6 +1292,7 @@ mod tests {
 
     fn player(uid: i32, position: Vec3) -> PlayerView {
         PlayerView {
+            fall_flying: false,
             shoulder_left: None,
             shoulder_right: None,
             uuid: None,

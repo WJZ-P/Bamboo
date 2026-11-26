@@ -1721,6 +1721,20 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
+    /// 精确驱动当场把附着烟花算出的加速速度写进玩家 `getDeltaMovement()`（鞘翅滑翔）。
+    /// `false` 表示这一层做不到，这次加速就丢了。默认不改，游戏层和对拍夹具各自覆盖。
+    ///
+    /// Lands an attached firework's boosted velocity on the player's `getDeltaMovement()`
+    /// at once in the precise driver (elytra gliding). `false` means this level cannot and
+    /// the boost is dropped. The default is a no-op; the game layer and the oracle override it.
+    fn set_player_delta_now(
+        &mut self,
+        _target: crate::entity::EntityUid,
+        _delta: mc_bamboo_core::Vec3,
+    ) -> bool {
+        false
+    }
+
     /// 精确驱动当场给玩家点火（`Entity.igniteForSeconds`）。`false` 表示不能当场做，
     /// 调用方改成延后的 [`Effect::IgnitePlayer`]。
     fn ignite_player_now(&mut self, _target: crate::entity::EntityUid, _ticks: i32) -> bool {

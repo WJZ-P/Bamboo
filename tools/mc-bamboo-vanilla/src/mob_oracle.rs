@@ -2493,6 +2493,7 @@ impl Report {
             entities: Entities::with_next_id(1),
             // 官方夹具里只有 0 号玩家；肩膀状态挂在 MobLevel 上（选 A）。
             players: vec![PlayerView {
+                fall_flying: false,
                 uid: 1024,
                 uuid: Some(player_uuid.to_be_bytes()),
                 position: player_pos,
@@ -2842,6 +2843,7 @@ impl Report {
                 .iter()
                 .enumerate()
                 .map(|(index, player)| PlayerView {
+                    fall_flying: false,
                     shoulder_left: None,
                     shoulder_right: None,
                     // 官方一侧的玩家 UUID 是 (1, 2 + 下标)；狼认主人要用它。

@@ -75,6 +75,7 @@ impl BeeCase {
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: EntityStore::new(),
             players: vec![PlayerView {
+                fall_flying: false,
                 shoulder_left: None,
                 shoulder_right: None,
                 uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),

@@ -739,6 +739,7 @@ mod bench {
         for px in (-half..half).step_by(32) {
             for pz in (-half..half).step_by(32) {
                 level.players.push(PlayerView {
+                    fall_flying: false,
                     shoulder_left: None,
                     shoulder_right: None,
                     uuid: None,

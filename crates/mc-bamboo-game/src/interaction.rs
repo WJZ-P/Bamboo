@@ -1293,6 +1293,14 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     let actor = actor_of(player, id);
     // `can_place_on` 要在借出 `level` 之前从物品栏读出来。
     let held = player.inventory.held(packet.hand).clone();
+    // `FireworkRocketItem.useOn`：`player.isFallFlying()` 时官方直接 `PASS`，不生成
+    // 烟花也不扣物品。滑翔时的加速交给 `use`（对着空气右键）那条路径。
+    //
+    // `FireworkRocketItem.useOn`: vanilla returns `PASS` directly while the player is
+    // fall flying, spawning and consuming nothing. Gliding boosts go through `use`.
+    if player.sync.is_fall_flying() && held.item == items::FIREWORK_ROCKET {
+        return;
+    }
     let is_placement_attempt = rules::is_placement_attempt(&held);
     let armed_book = lectern::arm_book(region, id, packet.pos, packet.hand);
 
@@ -1500,10 +1508,42 @@ pub(crate) fn on_use_item(
         return;
     }
     // `FireworkRocketItem.use`：仅在玩家 `isFallFlying()`（鞘翅滑翔）时生成附着烟花加速。
-    // Bamboo 尚未建模鞘翅滑翔，此路径恒为 `PASS`。
+    // 滑翔时生成附着在玩家身上的烟花、扣物品（创造模式不扣）、记使用统计并返回 `SUCCESS`；
+    // 不滑翔官方返回 `PASS`，什么都不做。
+    //
     // `FireworkRocketItem.use`: only spawns an attached boost rocket while fall flying.
-    // Bamboo has no elytra gliding yet, so this always passes.
+    // While gliding it spawns a rocket attached to the player, consumes one (not in
+    // creative), awards the use stat and returns `SUCCESS`; vanilla returns `PASS`
+    // and does nothing otherwise.
     if held.item == items::FIREWORK_ROCKET {
+        let Some((position, owner_uuid, fall_flying)) = region.players.get(&id).map(|player| {
+            (
+                player.position(),
+                *player.uuid.as_bytes(),
+                player.sync.is_fall_flying(),
+            )
+        }) else {
+            return;
+        };
+        if !fall_flying {
+            return;
+        }
+        {
+            let (mut level, ticks) = region.block_level();
+            let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            world.spawn_firework(&mc_bamboo_blocks::entity::firework_rocket::FireworkShot {
+                position,
+                owner: Some(id.0),
+                owner_uuid: Some(owner_uuid),
+                item: held.clone(),
+                shot_at_angle: false,
+                attached_to_target: Some(id.0),
+                shoot: None,
+            });
+        }
+        crate::item_use_stats::award(region, id, held.item);
+        crate::inventory::shrink_held(region, id, hand);
+        swing(region, id, hand, InteractionResult::Success);
         return;
     }
     // `FoodOnAStickItem.use`：拿着胡萝卜钓竿、骑着由自己控制的猪时，右键

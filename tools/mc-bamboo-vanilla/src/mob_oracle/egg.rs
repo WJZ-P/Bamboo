@@ -125,6 +125,7 @@ impl EggCase {
             .collect();
         if self.owner >= 0 {
             level.players.push(PlayerView {
+                fall_flying: false,
                 shoulder_left: None,
                 shoulder_right: None,
                 uuid: Some(EGG_OWNER_UUID.to_be_bytes()),

@@ -170,6 +170,7 @@ fn level(case: &AllayCase, script: &Script) -> MobLevel {
 fn player_view(uid: i32, held: i32) -> mc_bamboo_blocks::entity::ctx::PlayerView {
     use mc_bamboo_blocks::entity::ctx::PlayerView;
     PlayerView {
+        fall_flying: false,
         uid,
         uuid: Some(2_u128.to_be_bytes()),
         position: Vec3::new(2.5, 64.0, 0.5),

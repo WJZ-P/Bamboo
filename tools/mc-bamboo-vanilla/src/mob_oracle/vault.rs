@@ -95,6 +95,7 @@ fn sorted_uuids(uuids: &[[u8; 16]]) -> Vec<[i32; 4]> {
 impl VaultCase {
     fn level(&self, broken: &str) -> MobLevel {
         let mut player = PlayerView {
+            fall_flying: false,
             uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
             uid: (1 << 24) + 1024,
             yaw: 0.0,

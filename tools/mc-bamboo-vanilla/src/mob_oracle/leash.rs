@@ -82,6 +82,7 @@ fn v3(bits: &[i64]) -> Vec3 {
 
 fn player_view(uid: i32, position: Vec3) -> PlayerView {
     PlayerView {
+        fall_flying: false,
         uid,
         uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
         position,

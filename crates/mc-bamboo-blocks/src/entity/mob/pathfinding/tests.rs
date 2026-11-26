@@ -58,6 +58,7 @@ fn pending(uid: i32, local: u32, target: BlockPos) -> Pending {
 
 fn player(x: f64, z: f64) -> PlayerView {
     PlayerView {
+        fall_flying: false,
         shoulder_left: None,
         shoulder_right: None,
         uid: 1,

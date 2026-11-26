@@ -86,6 +86,7 @@ impl SpawnerCase {
             darkness_ticks: 0,
             entities: EntityStore::new(),
             players: vec![PlayerView {
+                fall_flying: false,
                 shoulder_left: None,
                 shoulder_right: None,
                 uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),

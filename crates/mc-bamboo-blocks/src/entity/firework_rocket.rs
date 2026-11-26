@@ -1,11 +1,12 @@
 //! 烟花火箭，官方 `FireworkRocketEntity`（`Projectile` 的子类）。
 //!
 //! 三种飞行方式：竖直发射（无 `shotAtAngle`，每刻 x/z 乘 1.15、y 加 0.04）、
-//! 斜射（`shotAtAngle`，弩 / 发射器，匀速直线）、附着跟随（鞘翅滑翔，这里没建模，
-//! `attached_to_target` 恒为空）。寿命 `lifetime = 10 * flight + nextInt(6) + nextInt(7)`，
+//! 斜射（`shotAtAngle`，弩 / 发射器，匀速直线）、附着跟随（鞘翅滑翔右键加速，
+//! `attached_to_target` 指向滑翔玩家）。附着时每刻跟随玩家手持位置的偏移、按官方
+//! 公式给玩家加速度并同步自己速度。寿命 `lifetime = 10 * flight + nextInt(6) + nextInt(7)`，
 //! `life` 每刻加一，超过寿命就 `explode`。命中实体时也 `explode`，命中方块时只有
 //! 带爆炸成分（有烟花之星）才 `explode`。`explode` 广播实体事件 17、按 5 格范围和
-//! 视线用 `fireworks` 伤害类型伤活体，然后消失。
+//! 视线用 `fireworks` 伤害类型伤活体（附带着目标），然后消失。
 
 use mc_bamboo_core::{Aabb, Vec3};
 use mc_bamboo_data::registries::data_component_type as kinds;
@@ -15,14 +16,14 @@ use mc_bamboo_protocol::item::ItemStack;
 use super::{
     Entity, EntityKind, EntityUid, KindPublic,
     arrow::{clip_entity, clip_including_border, player_box, resolve_owner},
-    ctx::{BlockView, Command, EntityCtx},
+    ctx::{BlockView, Command, EntityCtx, PlayerView},
     mob::{DamageKind, DamageSource},
 };
 use crate::World;
 
 thread_local! {
-    /// 对拍的改坏确认开关：0 正常，1 寿命、2 竖直加速、3 爆炸伤害。正式构建里
-    /// `set_oracle_break` 不会被调用，恒为 0。
+    /// 对拍的改坏确认开关：0 正常，1 寿命、2 竖直加速、3 爆炸伤害、4 滑翔加速、
+    /// 5 附着偏移。正式构建里 `set_oracle_break` 不会被调用，恒为 0。
     static ORACLE_BREAK: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
@@ -36,6 +37,8 @@ pub fn set_oracle_break(name: &str) {
         "firework_lifetime" => 1,
         "firework_shot" => 2,
         "firework_damage" => 3,
+        "firework_boost" => 4,
+        "firework_attached" => 5,
         _ => 0,
     };
     ORACLE_BREAK.with(|cell| cell.set(value));
@@ -55,7 +58,8 @@ pub struct FireworkRocket {
     pub owner_uuid: Option<[u8; 16]>,
     /// `DATA_ID_FIREWORKS_ITEM`：构造时存的一份物品堆拷贝。
     pub item: ItemStack,
-    /// `DATA_ATTACHED_TO_TARGET`（`OptionalInt`）。鞘翅滑翔没建模，恒为 `None`。
+    /// `DATA_ATTACHED_TO_TARGET`（`OptionalInt`，实体 id）。鞘翅滑翔加速时指向
+    /// 附着的玩家；其余生成路径为 `None`。
     pub attached_to_target: Option<EntityUid>,
     /// `DATA_SHOT_AT_ANGLE`。
     pub shot_at_angle: bool,
@@ -81,7 +85,7 @@ impl FireworkRocket {
             owner: shot.owner,
             owner_uuid: shot.owner_uuid,
             item: shot.item.clone(),
-            attached_to_target: None,
+            attached_to_target: shot.attached_to_target,
             shot_at_angle: shot.shot_at_angle,
             life: 0,
             lifetime: 0,
@@ -141,6 +145,12 @@ pub struct FireworkShot {
     pub owner_uuid: Option<[u8; 16]>,
     pub item: ItemStack,
     pub shot_at_angle: bool,
+    /// `DATA_ATTACHED_TO_TARGET`：鞘翅滑翔右键加速时附着在玩家身上的目标。其余
+    /// 生成路径（`useOn`、发射器、弩）恒为 `None`。
+    ///
+    /// `DATA_ATTACHED_TO_TARGET`: the target a gliding boost rocket is attached to.
+    /// The other spawn paths (`useOn`, dispenser, crossbow) always leave this `None`.
+    pub attached_to_target: Option<EntityUid>,
     /// 生成后再走一次 `Projectile.shoot`（发射器 / 弩）。
     ///
     /// An optional `Projectile.shoot` after spawning (dispenser / crossbow).
@@ -278,8 +288,30 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     check_left_owner(me, ctx, owner);
     base_tick(me, ctx.blocks());
 
-    let hit = if attached.is_some() {
-        // 附着跟随（鞘翅滑翔）没建模：`attached_to_target` 恒为空，这段不会走。
+    let hit = if let Some(attached) = attached {
+        // `FireworkRocketEntity.tick` 的 `isAttachedToEntity()` 分支：读附着玩家这一刻的
+        // 公开视图，滑翔时按官方公式给玩家加速、按手持位置算偏移，跟随玩家并取新速度，
+        // 再做一次碰撞查询。目标已不在本岛时官方只保留原位置并照样查碰撞。
+        //
+        // The `isAttachedToEntity()` branch of `FireworkRocketEntity.tick`: read the
+        // attached player's public view, boost them with the vanilla formula while
+        // gliding, follow to the hand-held offset, adopt the new velocity, then run one
+        // collision query. When the target has left, vanilla keeps the old position and
+        // still queries collisions.
+        if let Some(player) = ctx.player(attached) {
+            let (new_delta, offset, boosted) = attached_motion(&player);
+            if boosted {
+                ctx.emit(
+                    Command::SetPlayerDelta {
+                        target: attached,
+                        delta: new_delta,
+                    },
+                    me,
+                );
+            }
+            me.position = player.position.add(offset);
+            me.delta = new_delta;
+        }
         find_hit(me, ctx, owner)
     } else {
         if !shot_at_angle && oracle_break() != 2 {
@@ -330,6 +362,48 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     if firework.life > firework.lifetime {
         ctx.emit(Command::FireworkRocketExplode { hit: None }, me);
     }
+}
+
+/// `FireworkRocketEntity.tick` 附着分支这一步：滑翔玩家按官方公式得到的新速度、烟花
+/// 相对玩家的偏移，以及要不要把新速度写回玩家（没在滑翔就不写）。
+///
+/// One attached-branch step of `FireworkRocketEntity.tick`: the boosted velocity for a
+/// gliding player, the firework's offset from the player, and whether the velocity is
+/// actually written back (it is not once the player stops gliding).
+fn attached_motion(player: &PlayerView) -> (Vec3, Vec3, bool) {
+    if !player.fall_flying {
+        return (player.delta, Vec3::default(), false);
+    }
+    let look = player.look_direction;
+    let delta = player.delta;
+    // 官方逐轴：`delta + look*0.1 + (look*1.5 - delta)*0.5`。化简虽然等于
+    // `0.5*delta + 0.85*look`，但按原式逐项算，浮点末位才和字节码一致。
+    //
+    // Vanilla, per axis: `delta + look*0.1 + (look*1.5 - delta)*0.5`. The last-bit
+    // rounding only matches the bytecode when computed term by term like this.
+    let boost = if oracle_break() == 4 {
+        // 改坏确认：丢掉 `0.5` 收敛项。
+        Vec3::new(look.x * 0.1, look.y * 0.1, look.z * 0.1)
+    } else {
+        Vec3::new(
+            look.x * 0.1 + (look.x * 1.5 - delta.x) * 0.5,
+            look.y * 0.1 + (look.y * 1.5 - delta.y) * 0.5,
+            look.z * 0.1 + (look.z * 1.5 - delta.z) * 0.5,
+        )
+    };
+    // `Entity.getHandHoldingItemAngle(FIREWORK_ROCKET)`：`calculateViewVector(0, yRot ± 80)`
+    // 乘 0.5。`getMainArm()` 默认右手取 +80；Bamboo 没建模左右手，恒按右手。
+    //
+    // `Entity.getHandHoldingItemAngle(FIREWORK_ROCKET)`:
+    // `calculateViewVector(0, yRot ± 80)` scaled by 0.5. The default right main arm
+    // takes +80; Bamboo does not model handedness, so it is always +80.
+    let offset = if oracle_break() == 5 {
+        // 改坏确认：丢掉手持偏移。
+        Vec3::default()
+    } else {
+        Vec3::view_vector(player.yaw + 80.0, 0.0).scale(0.5)
+    };
+    (delta.add(boost), offset, true)
 }
 
 /// `Projectile.checkLeftOwner`：主人（含玩家）不再碰到「当前碰撞盒沿速度展开再外扩 1」时离开。
@@ -537,7 +611,7 @@ fn deal_explosion_damage(me: &mut Entity, world: &mut World<'_>) {
             .is_some_and(|entity| matches!(entity.kind, EntityKind::Mob(_)));
         damage
     };
-    // 附着目标（鞘翅滑翔没建模，恒为空）。
+    // 附着的滑翔玩家先吃满额伤害（官方 `attachedToEntity.hurtServer`）。
     if let Some(target) = attached {
         let _ = world.hurt_player_from_mob(target, source(world, owner), f, None);
     }

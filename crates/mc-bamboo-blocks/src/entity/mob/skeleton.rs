@@ -604,6 +604,7 @@ mod tests {
         let mut shooter =
             Entity::by_mob_type(super::super::MobType::Skeleton, Vec3::new(0.5, 64.0, 0.5));
         let player = PlayerView {
+            fall_flying: false,
             shoulder_left: None,
             shoulder_right: None,
             uid: 123,

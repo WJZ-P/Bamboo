@@ -138,6 +138,7 @@ impl Report {
             owner_uuid: None,
             item: case.stack(),
             shot_at_angle: case.crossbow,
+            attached_to_target: None,
             shoot: case.crossbow.then_some(FireworkShoot {
                 direction,
                 power: 1.6,
