@@ -1173,6 +1173,7 @@ fn raid_view_from(raid: [i32; 8]) -> mc_bamboo_blocks::entity::raid::RaidView {
         id: 1,
         center: BlockPos::new(cx, cy, cz),
         has_first_wave_spawned: groups_spawned > 0,
+        // Java 夹具把 `raidCooldownTicks` 清零，官方 `isBetweenWaves()` 恒为 false。
         is_between_waves: false,
         is_victory: status == 1,
         active: active != 0,

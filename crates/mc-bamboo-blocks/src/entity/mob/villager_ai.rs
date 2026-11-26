@@ -52,7 +52,7 @@ use crate::{
         plants::{is_crop_block, is_crop_max_age},
     },
     entity::{
-        Entity, EntityPublic, EntityUid, KindPublic,
+        Entity, EntityPublic, EntityUid, JavaRandom, KindPublic,
         ctx::{BlockView, Command, EntityCtx},
     },
     shape::CollisionContext,
@@ -499,21 +499,38 @@ impl Stub {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeetGateState {
     pub stroll_next_ok: i64,
-    pub flip: bool,
+    /// 触发闸门的洗牌随机源，`seed_shuffles` 按官方注册顺序播种。
+    ///
+    /// The trigger gate's shuffle random, seeded by `seed_shuffles` in the official order.
+    pub random: JavaRandom,
 }
 
 /// `PRE_RAID` 优先级 0 的 `TriggerGate.triggerOneShuffled([SetWalkTargetFromBlockMemory,
-/// VillageBoundRandomStroll])` 状态。官方 `ShufflingList` 用无种子的随机源，对拍场景里
-/// 两个触发只有一个能成、顺序不影响取数，这里和 `MEET` 闸门一样用翻转近似。
+/// VillageBoundRandomStroll])` 状态。
 ///
 /// State for `PRE_RAID`'s priority-0 `TriggerGate.triggerOneShuffled([SetWalkTargetFromBlockMemory,
-/// VillageBoundRandomStroll])`. Vanilla seeds the `ShufflingList` from an unseeded random; in the
-/// oracle scenes only one trigger can fire and the order never changes the draws, so like the
-/// `MEET` gate this approximates the shuffle with a flip.
+/// VillageBoundRandomStroll])`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreRaidGateState {
     pub speed: f32,
-    pub flip: bool,
+    /// 触发闸门的洗牌随机源，`seed_shuffles` 按官方注册顺序播种。
+    ///
+    /// The trigger gate's shuffle random, seeded by `seed_shuffles` in the official order.
+    pub random: JavaRandom,
+}
+
+/// `RAID` 优先级 0 的 `RaidCelebrateTriggerGate`（`sequence(triggerIf, triggerOneShuffled(
+/// [MoveToSkySeeingSpot, VillageBoundRandomStroll]))`）状态。
+///
+/// State for `RAID`'s priority-0 `RaidCelebrateTriggerGate` (`sequence(triggerIf,
+/// triggerOneShuffled([MoveToSkySeeingSpot, VillageBoundRandomStroll]))`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RaidCelebrateGateState {
+    pub speed: f32,
+    /// 触发闸门的洗牌随机源，`seed_shuffles` 按官方注册顺序播种。
+    ///
+    /// The trigger gate's shuffle random, seeded by `seed_shuffles` in the official order.
+    pub random: JavaRandom,
 }
 
 /// `SetClosestHomeAsWalkTarget` 的重试缓存（装箱以保持 `Node` 紧凑）。
@@ -567,8 +584,8 @@ pub enum Behavior {
         close_enough: i32,
     },
     /// `RaidCelebrateTriggerGate`：袭击胜利后 `triggerOneShuffled([MoveToSkySeeingSpot,
-    /// VillageBoundRandomStroll])`。`MoveToSkySeeingSpot` 未建模，先按村内闲逛近似。
-    RaidCelebrateTriggerGate { speed: f32 },
+    /// VillageBoundRandomStroll])`。
+    RaidCelebrateTriggerGate(Box<RaidCelebrateGateState>),
     /// `SetEntityLookTarget.create(filter, maxDist)`。
     SetEntityLookTarget { filter: LookFilter, max_dist: f32 },
     /// `InteractWith.of(type, maxDist, INTERACTION_TARGET, speed, closeEnough)`：`OneShot`。
@@ -709,7 +726,7 @@ impl Behavior {
             | Self::WakeUp
             | Self::ResetRaidStatus
             | Self::CelebrateVillagersSurvivedRaid
-            | Self::RaidCelebrateTriggerGate { .. }
+            | Self::RaidCelebrateTriggerGate(_)
             | Self::MeetTriggerGate(_)
             | Self::PreRaidTriggerGate(_) => &[],
             Self::SleepInBed { .. } => REQ_SLEEP_IN_BED,
@@ -1162,18 +1179,7 @@ impl Behavior {
                 }
                 trigger_locate_hiding_place(*radius, *speed, *close_enough, cx)
             }
-            Self::RaidCelebrateTriggerGate { speed } => {
-                // 袭击胜利后往空旷处走；`MoveToSkySeeingSpot` 未建模，先按村内闲逛近似。
-                let victory = cx
-                    .ctx
-                    .blocks()
-                    .raid_at(cx.me.block_position())
-                    .is_some_and(|raid| raid.is_victory);
-                if !victory {
-                    return false;
-                }
-                trigger_village_bound_random_stroll(*speed, 10, 7, cx)
-            }
+            Self::RaidCelebrateTriggerGate(state) => trigger_raid_celebrate_gate(state, cx),
             Self::SetEntityLookTarget { filter, max_dist } => {
                 let max_sqr = f64::from(*max_dist * *max_dist);
                 let self_pos = cx.me.position;
@@ -1997,8 +2003,10 @@ fn trigger_inside_brownian_walk(speed: f32, cx: &mut Cx) -> bool {
 }
 
 fn trigger_meet_gate(state: &mut MeetGateState, cx: &mut Cx) -> bool {
-    state.flip = !state.flip;
-    if state.flip {
+    // `ShufflingList.shuffle` 洗出两个触发（StrollAroundPoi w2、SocializeAtBell w2）的顺序，
+    // 先命中的那个停止。
+    let socialize_first = shuffle_first(&mut state.random, [2, 2]) == 1;
+    if socialize_first {
         if trigger_socialize_at_bell(cx) {
             return true;
         }
@@ -2111,25 +2119,115 @@ fn trigger_walk_target_from_block_memory(
     true
 }
 
-/// `PreRaidTriggerGate`：`TriggerGate.triggerOneShuffled` 的两个触发翻转各试一遍，
-/// 先命中（成功设下步行目标）的那个停止，和 `MEET` 闸门用同一套确定性近似。
+/// `PreRaidTriggerGate`：`TriggerGate.triggerOneShuffled` 按权重洗牌，先命中（成功设下
+/// 步行目标）的那个停止。
 ///
-/// `PreRaidTriggerGate`: try the two `TriggerGate.triggerOneShuffled` triggers in the
-/// two flip orders and stop at the first that fires (sets a walk target), using the same
-/// deterministic approximation as the `MEET` gate.
+/// `PreRaidTriggerGate`: `TriggerGate.triggerOneShuffled` shuffles by weight and stops at
+/// the first trigger that fires (sets a walk target).
 fn trigger_pre_raid_gate(state: &mut PreRaidGateState, cx: &mut Cx) -> bool {
-    state.flip = !state.flip;
     let speed = state.speed * 1.5;
-    if state.flip {
-        if trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx) {
-            return true;
-        }
-        let _ = trigger_village_bound_random_stroll(speed, 10, 7, cx);
-    } else {
+    // SetWalkTargetFromBlockMemory 权重 6，VillageBoundRandomStroll 权重 2。
+    let stroll_first = shuffle_first(&mut state.random, [6, 2]) == 1;
+    if stroll_first {
         if trigger_village_bound_random_stroll(speed, 10, 7, cx) {
             return true;
         }
         let _ = trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx);
+    } else {
+        if trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx) {
+            return true;
+        }
+        let _ = trigger_village_bound_random_stroll(speed, 10, 7, cx);
+    }
+    true
+}
+
+/// `ShufflingList.shuffle` 对两个触发的结果：每个触发取一次 `nextFloat`，权重
+/// `-pow(r, 1.0f/weight)`（float 除法，与 `Gate::shuffle` 一致），升序稳定排序后返回
+/// 排在前面的下标。
+///
+/// The `ShufflingList.shuffle` order of two triggers: one `nextFloat` each, key
+/// `-pow(r, 1.0f/weight)` (float division, like `Gate::shuffle`), stable ascending sort;
+/// returns the index that sorts first.
+fn shuffle_first(random: &mut JavaRandom, weights: [i32; 2]) -> usize {
+    let mut order = [0_usize, 1_usize];
+    let mut keys = [0.0_f64; 2];
+    for (i, &weight) in weights.iter().enumerate() {
+        let r = f64::from(random.next_float());
+        keys[i] = if weight == 1 {
+            -r
+        } else {
+            -r.powf(f64::from(1.0_f32 / weight as f32))
+        };
+    }
+    order.sort_by(|&a, &b| keys[a].total_cmp(&keys[b]));
+    order[0]
+}
+
+/// `RaidCelebrateTriggerGate`：`sequence(triggerIf(raidExistsAndNotVictory),
+/// triggerOneShuffled([MoveToSkySeeingSpot w5, VillageBoundRandomStroll w2]))`。袭击胜利时
+/// 按权重洗牌，先命中的那个设下步行目标。
+///
+/// `RaidCelebrateTriggerGate`: `sequence(triggerIf(raidExistsAndNotVictory),
+/// triggerOneShuffled([MoveToSkySeeingSpot w5, VillageBoundRandomStroll w2]))`; on a victory
+/// shuffle by weight and stop at the first trigger that fires.
+fn trigger_raid_celebrate_gate(state: &mut RaidCelebrateGateState, cx: &mut Cx) -> bool {
+    let victory = cx
+        .ctx
+        .blocks()
+        .raid_at(cx.me.block_position())
+        .is_some_and(|raid| raid.is_victory);
+    if !victory {
+        return false;
+    }
+    // MoveToSkySeeingSpot 权重 5，VillageBoundRandomStroll 权重 2。
+    let stroll_first = shuffle_first(&mut state.random, [5, 2]) == 1;
+    if stroll_first {
+        if trigger_village_bound_random_stroll(state.speed, 10, 7, cx) {
+            return true;
+        }
+        let _ = trigger_move_to_sky_seeing_spot(state.speed, cx);
+    } else {
+        if trigger_move_to_sky_seeing_spot(state.speed, cx) {
+            return true;
+        }
+        let _ = trigger_village_bound_random_stroll(state.speed, 10, 7, cx);
+    }
+    true
+}
+
+/// `MoveToSkySeeingSpot.create(speed)`：已经看得见天就不动；否则最多试 10 个随机偏移，
+/// 找头顶无方块的位置设步行目标。候选取数照 `getOutdoorPosition`（实体的随机源）。
+///
+/// `MoveToSkySeeingSpot.create(speed)`: stay put when the sky is already visible; otherwise
+/// try up to ten random offsets for a position with no blocks above and set a walk target.
+/// The candidate draws follow `getOutdoorPosition` (the entity's random).
+fn trigger_move_to_sky_seeing_spot(speed: f32, cx: &mut Cx) -> bool {
+    let base = cx.me.block_position();
+    if cx.ctx.blocks().can_see_sky(base) {
+        return false;
+    }
+    let mut target: Option<Vec3> = None;
+    for _ in 0..10 {
+        let candidate = BlockPos::new(
+            base.x + cx.me.random.next_int_bounded(20) - 10,
+            base.y + cx.me.random.next_int_bounded(6) - 3,
+            base.z + cx.me.random.next_int_bounded(20) - 10,
+        );
+        if has_no_blocks_above_at(cx, candidate) {
+            target = Some(Vec3::new(
+                f64::from(candidate.x) + 0.5,
+                f64::from(candidate.y),
+                f64::from(candidate.z) + 0.5,
+            ));
+            break;
+        }
+    }
+    if let Some(at) = target {
+        cx.memories.set(
+            WalkTarget,
+            MemoryValue::Walk(WalkTarget::to_point(at, speed, 0)),
+        );
     }
     true
 }
@@ -2317,7 +2415,13 @@ fn dist_sqr_block(a: BlockPos, b: BlockPos) -> f64 {
 /// `MoveToSkySeeingSpot.hasNoBlocksAbove`: open sky and the MOTION_BLOCKING
 /// heightmap does not rise above the villager's feet.
 fn has_no_blocks_above(cx: &Cx) -> bool {
-    let pos = cx.me.block_position();
+    has_no_blocks_above_at(cx, cx.me.block_position())
+}
+
+/// 对某个候选方块做 `hasNoBlocksAbove`（`MoveToSkySeeingSpot.getOutdoorPosition` 用）。
+///
+/// `hasNoBlocksAbove` for a candidate block (`MoveToSkySeeingSpot.getOutdoorPosition`).
+fn has_no_blocks_above_at(cx: &Cx, pos: BlockPos) -> bool {
     let view = cx.ctx.blocks();
     view.can_see_sky(pos) && f64::from(view.motion_blocking_y(pos)) <= cx.me.position.y
 }
@@ -3146,7 +3250,7 @@ fn meet_package(speed: f32) -> ActivityData {
                 2,
                 Kind::Villager(Behavior::MeetTriggerGate(Box::new(MeetGateState {
                     stroll_next_ok: 0,
-                    flip: false,
+                    random: JavaRandom::new(0),
                 }))),
             ),
             (10, stub(Stub::ShowTradesToPlayer)),
@@ -3284,7 +3388,7 @@ fn pre_raid_package(speed: f32) -> ActivityData {
                 0,
                 Kind::Villager(Behavior::PreRaidTriggerGate(Box::new(PreRaidGateState {
                     speed,
-                    flip: false,
+                    random: JavaRandom::new(0),
                 }))),
             ),
             minimal_look_behavior(),
@@ -3299,7 +3403,12 @@ fn raid_package(speed: f32) -> ActivityData {
         vec![
             (
                 0,
-                Kind::Villager(Behavior::RaidCelebrateTriggerGate { speed: speed * 1.1 }),
+                Kind::Villager(Behavior::RaidCelebrateTriggerGate(Box::new(
+                    RaidCelebrateGateState {
+                        speed: speed * 1.1,
+                        random: JavaRandom::new(0),
+                    },
+                ))),
             ),
             (0, Kind::Villager(Behavior::CelebrateVillagersSurvivedRaid)),
             (

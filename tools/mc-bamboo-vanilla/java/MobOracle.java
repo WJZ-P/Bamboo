@@ -2154,16 +2154,55 @@ public final class MobOracle {
 
         static void reseed(net.minecraft.world.entity.ai.behavior.BehaviorControl<?> behavior, long base, long[] index)
                 throws Exception {
-            if (!(behavior instanceof net.minecraft.world.entity.ai.behavior.GateBehavior<?> gate)) return;
-            Field listField = net.minecraft.world.entity.ai.behavior.GateBehavior.class.getDeclaredField("behaviors");
-            listField.setAccessible(true);
-            var list = (net.minecraft.world.entity.ai.behavior.ShufflingList<?>) listField.get(gate);
-            put(net.minecraft.world.entity.ai.behavior.ShufflingList.class, list, "random",
-                    RandomSource.create(shuffleSeed(base, index[0])));
-            index[0]++;
-            for (Object child : list) {
-                reseed((net.minecraft.world.entity.ai.behavior.BehaviorControl<?>) child, base, index);
+            if (behavior instanceof net.minecraft.world.entity.ai.behavior.GateBehavior<?> gate) {
+                Field listField = net.minecraft.world.entity.ai.behavior.GateBehavior.class.getDeclaredField("behaviors");
+                listField.setAccessible(true);
+                var list = (net.minecraft.world.entity.ai.behavior.ShufflingList<?>) listField.get(gate);
+                put(net.minecraft.world.entity.ai.behavior.ShufflingList.class, list, "random",
+                        RandomSource.create(shuffleSeed(base, index[0])));
+                index[0]++;
+                for (Object child : list) {
+                    reseed((net.minecraft.world.entity.ai.behavior.BehaviorControl<?>) child, base, index);
+                }
+                return;
             }
+            reseedTriggerShuffle(behavior, base, index);
+        }
+
+        /**
+         * `TriggerGate.triggerOneShuffled` 返回的 `OneShot` 里藏着一个 `ShufflingList`，
+         * 官方用无种子的随机源建它。这里沿匿名类对象图把它揪出来、用同一个
+         * `shuffle_seed(base, k)` 覆写 `random`，序号和 Bamboo 的 `seed_shuffles` 对齐。
+         *
+         * <p>对象图：`BehaviorBuilder$1.val$resolvedBuilder`（`Constant$1` 等
+         * `TriggerWithResult` 实现）→ `val$a`（`TriggerGate` 的 `Trigger` lambda）→
+         * 合成字段里的 `ShufflingList`。`sequence` 拼出来的 `BehaviorBuilder$2` 有两个
+         * `OneShot` 字段，递归就能找到里面的 `triggerOneShuffled`。`triggerIf` 的 lambda
+         * 只捕获 `BiPredicate`、没有 `ShufflingList`，自然跳过（不占序号）。找到第一个
+         * 就停：每个触发闸门只有一个 `ShufflingList`。
+         */
+        static void reseedTriggerShuffle(Object behavior, long base, long[] index) throws Exception {
+            findTriggerShuffle(behavior, new java.util.HashSet<>(), base, index);
+        }
+
+        static boolean findTriggerShuffle(Object obj, java.util.Set<Object> seen, long base, long[] index)
+                throws Exception {
+            if (obj == null || !seen.add(obj)) return false;
+            if (obj instanceof net.minecraft.world.entity.ai.behavior.ShufflingList<?> list) {
+                put(net.minecraft.world.entity.ai.behavior.ShufflingList.class, list, "random",
+                        RandomSource.create(shuffleSeed(base, index[0])));
+                index[0]++;
+                return true;
+            }
+            Class<?> type = obj.getClass();
+            // 只往下钻进官方行为对象图，跳过静态字段和 JDK/依赖库类型。
+            if (!type.getName().startsWith("net.minecraft.")) return false;
+            for (Field field : type.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+                field.setAccessible(true);
+                if (findTriggerShuffle(field.get(obj), seen, base, index)) return true;
+            }
+            return false;
         }
 
         /** 每个传感器构造时取的 `timeToTick`，按登记顺序。 */
@@ -2556,6 +2595,9 @@ public final class MobOracle {
             put(net.minecraft.world.entity.raid.Raid.class, raid, "status", raidStatus(config[3]));
             put(net.minecraft.world.entity.raid.Raid.class, raid, "groupsSpawned", config[6]);
             put(net.minecraft.world.entity.raid.Raid.class, raid, "raidOmenLevel", config[7]);
+            // 冷却清零：村民 `SetRaidStatus` 看 `isBetweenWaves()`，清零后首波已刷的袭击
+            // （胜利场景）会切 `RAID` 而不是卡在 `PRE_RAID`。
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "raidCooldownTicks", 0);
             level.setRaid(raid);
         }
 
