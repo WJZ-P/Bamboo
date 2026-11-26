@@ -276,6 +276,34 @@ pub trait BlockView {
         false
     }
 
+    /// `ServerLevel.precipitationAt(pos) != Biome.Precipitation.NONE`：
+    /// 快乐恶魂在会降水的群系里回血更快。没有群系表的视图按「不降水」。
+    ///
+    /// `ServerLevel.precipitationAt(pos) != Biome.Precipitation.NONE`: happy ghasts
+    /// heal faster where the biome precipitates. Views without biome data say no.
+    fn biome_precipitates(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
+    /// `EnvironmentAttributes.CLOUD_HEIGHT`：主世界缺省 192。没有环境属性表的
+    /// 视图按主世界算；别的维度可以覆盖。
+    ///
+    /// `EnvironmentAttributes.CLOUD_HEIGHT`: the overworld default is 192. Views
+    /// without the attribute table use the overworld value; other dimensions override.
+    fn cloud_height(&self) -> f32 {
+        192.0
+    }
+
+    /// `Entity.isInClouds()`：云的颜色 alpha 不为 0，且实体从脚底到头顶跨过
+    /// `[cloudHeight, cloudHeight + 4]`。快乐恶魂据此选快 / 慢回血周期。
+    ///
+    /// `Entity.isInClouds()`: non-zero cloud colour alpha and an entity spanning
+    /// `[cloudHeight, cloudHeight + 4]`. Happy ghasts use it to pick the heal period.
+    fn is_in_clouds(&self, y: f64, height: f32) -> bool {
+        let cloud = f64::from(self.cloud_height());
+        y + f64::from(height) >= cloud && y <= cloud + 4.0
+    }
+
     /// `Level.isThundering()`：担心基因的熊猫在雷雨天会坐下。
     ///
     /// `Level.isThundering()`: a worried panda sits down during a thunderstorm.
@@ -829,6 +857,10 @@ impl BlockView for World<'_> {
         self.level().is_raining_at(pos)
     }
 
+    fn biome_precipitates(&self, pos: BlockPos) -> bool {
+        self.level().precipitation_facts(pos).precipitation != crate::weather::Precipitation::None
+    }
+
     fn is_thundering(&self) -> bool {
         World::is_thundering(self)
     }
@@ -1195,6 +1227,16 @@ pub enum Command {
     Explode {
         center: Vec3,
         radius: f32,
+        /// 发出者（点燃的 TNT）这一刻的公开数据：它已经被 `discard` 出表，
+        /// 死亡消息要靠它拿 `entity.minecraft.tnt` 的显示名和 `show_entity`。
+        ///
+        /// The emitter (primed TNT) public data: it has been discarded from the table,
+        /// so the death message needs it for the `entity.minecraft.tnt` name and `show_entity`.
+        source: Box<EntityPublic>,
+        /// 点燃它的活体（打火石点着的玩家），没有就是 `None`。
+        ///
+        /// The living entity that lit it (a player with flint and steel), if any.
+        owner: Option<EntityUid>,
     },
     /// 生物引发的爆炸（`Level.ExplosionInteraction.MOB`）：射线、伤害生物和玩家、
     /// 按 `mobGriefing` 破坏方块。发出者就是爆炸的来源实体。
@@ -1828,7 +1870,12 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             position,
             context,
         } => world.game_event(event, position, context),
-        Command::Explode { center, radius } => world.explode_tnt(center, radius, me.id),
+        Command::Explode {
+            center,
+            radius,
+            source,
+            owner,
+        } => world.explode_tnt(center, radius, source, owner),
         Command::ExplodeMob {
             center,
             radius,

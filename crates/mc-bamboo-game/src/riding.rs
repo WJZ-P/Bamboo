@@ -431,16 +431,22 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
     let Some(public) = region.entities.public_at(vehicle) else {
         return;
     };
-    // 官方 `canAddPassenger`：一只载具只坐一个人。
+    // 官方 `canAddPassenger`：默认只坐一个人；`HappyGhast` 覆写成最多四人。
     //
-    // Vanilla `canAddPassenger`: one passenger per vehicle.
+    // Vanilla `canAddPassenger`: one by default; `HappyGhast` allows up to four.
     let KindPublic::Mob(mob) = &public.kind else {
         return;
     };
-    if !mob.passengers.is_empty() {
+    let happy_ghast = mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::HappyGhast;
+    if happy_ghast {
+        if !mc_bamboo_blocks::entity::mob::happy_ghast::can_add_passenger(mob.passengers.len()) {
+            return;
+        }
+    } else if !mob.passengers.is_empty() {
         return;
     }
     let (yaw, pitch, position) = (public.yaw, mob.x_rot, public.position);
+    let (box_width, box_height) = public.kind.dimensions();
     let Some(player) = region.players.get(&id) else {
         return;
     };
@@ -477,11 +483,41 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
     player.riding.last_good = position;
     // 官方 `Entity.addPassenger`：玩家乘客由服务端插到生物乘客前面，名单是
     // 一份，玩家和生物共用。先设 `vehicle` 再挂名单，正是 `startRiding` 的前提。
-    region.entities.with_mut(vehicle, |entity| {
-        entity.with_mob(|_, mob| {
-            mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, id.0, true);
-        })
-    });
+    // 快乐恶魂另跑 `HappyGhast.addPassenger` 的护目镜音效和悬停超时。
+    // Happy ghasts also run `HappyGhast.addPassenger`'s goggle sound and hover.
+    if happy_ghast {
+        let (min, max) = mc_bamboo_blocks::entity::mob::happy_ghast::player_above_box(
+            position, box_width, box_height,
+        );
+        let player_above = region.players.values().any(|other| {
+            other.id != id
+                && other.game_mode != mc_bamboo_protocol::packet::play::GameMode::Spectator
+                && other.riding.vehicle != Some(vehicle)
+                && mc_bamboo_blocks::entity::mob::happy_ghast::is_above(other.position(), min, max)
+        });
+        region.entities.with_mut(vehicle, |entity| {
+            let was_vehicle = entity
+                .kind
+                .mob()
+                .is_some_and(|mob| !mob.passengers.is_empty());
+            let at = entity.position;
+            entity.with_mob(|_, mob| {
+                mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, id.0, true);
+                mc_bamboo_blocks::entity::mob::happy_ghast::after_add_passenger(
+                    at,
+                    mob,
+                    was_vehicle,
+                    player_above,
+                );
+            });
+        });
+    } else {
+        region.entities.with_mut(vehicle, |entity| {
+            entity.with_mob(|_, mob| {
+                mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, id.0, true);
+            })
+        });
+    }
     // 官方 `StartRidingTrigger.trigger(ServerPlayer)`。
     crate::advancement_triggers::record(
         region,
@@ -546,6 +582,18 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
             return None;
         };
         let (width, height, _) = mob.mob_type.dimensions(mob.baby);
+        // `HappyGhast.getDismountLocationForPassenger` = `(x, bb.maxY, z)`，
+        // 不是 `Animal` 的八邻格版本。
+        // `HappyGhast.getDismountLocationForPassenger` = `(x, bb.maxY, z)`,
+        // not `Animal`'s eight-neighbour version.
+        if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::HappyGhast {
+            return Some(
+                mc_bamboo_blocks::entity::mob::happy_ghast::dismount_location(
+                    public.position,
+                    height,
+                ),
+            );
+        }
         // 猪没有自己的下车逻辑，走 `Animal` 的八邻格版本；马科走 `AbstractHorse` 的。
         //
         // Pigs have no dismount of their own and use `Animal`'s eight-neighbour version;
@@ -585,7 +633,20 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
         player.set_position(&mut region.player_grid, target);
     }
     region.entities.with_mut(vehicle, |entity| {
-        entity.with_mob(|_, mob| mob.passengers.retain(|passenger| *passenger != id.0))
+        let at = entity.position;
+        let happy = entity
+            .kind
+            .mob()
+            .is_some_and(|mob| mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::HappyGhast);
+        entity.with_mob(|_, mob| {
+            mob.passengers.retain(|passenger| *passenger != id.0);
+            // `HappyGhast.removePassenger`：设 10 刻悬停、没人时清家并抬起护目镜。
+            // `HappyGhast.removePassenger`: ten ticks of hover, clear the home and
+            // raise the goggles once empty.
+            if happy {
+                mc_bamboo_blocks::entity::mob::happy_ghast::after_remove_passenger(at, mob);
+            }
+        })
     });
 }
 
@@ -633,14 +694,24 @@ pub(crate) fn open_vehicle_inventory(region: &mut Region, id: PlayerId) {
 /// Where the rider sits on the vehicle: vanilla `AbstractHorse.getPassengerAttachmentPoint`
 /// (the default point plus the rearing offset) minus the rider's own `VEHICLE`
 /// attachment point (the feet, zero for a player). Llamas override it without rearing.
-fn passenger_offset(mob: &mc_bamboo_blocks::entity::mob::MobPublic, yaw: f32) -> Vec3 {
-    let (y, z) = mc_bamboo_blocks::entity::mob::equine::passenger_attachment(mob.mob_type);
+fn passenger_offset(
+    mob: &mc_bamboo_blocks::entity::mob::MobPublic,
+    yaw: f32,
+    index: usize,
+) -> Vec3 {
     // `Vec3.yRot(-yRot * PI / 180)`，和官方附着点的旋转方向相同。
     //
     // `Vec3.yRot(-yRot * PI / 180)`, the same direction as the vanilla attachment point.
     let angle = -yaw * (std::f32::consts::PI / 180.0);
     let sin = f64::from(mth::sin(f64::from(angle)));
     let cos = f64::from(mth::cos(f64::from(angle)));
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::HappyGhast {
+        // `EntityTypes.HAPPY_GHAST` 的四个 PASSENGER 点；按乘客下标 clamp。
+        // The four PASSENGER points of `EntityTypes.HAPPY_GHAST`, clamped by index.
+        let at = mc_bamboo_blocks::entity::mob::happy_ghast::passenger_attachment(index);
+        return Vec3::new(at.x * cos + at.z * sin, at.y, at.z * cos - at.x * sin);
+    }
+    let (y, z) = mc_bamboo_blocks::entity::mob::equine::passenger_attachment(mob.mob_type);
     let mut offset = Vec3::new(f64::from(z) * sin, f64::from(y), f64::from(z) * cos);
     if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::Llama
         && let Some(equine) = mob.equine
@@ -651,6 +722,16 @@ fn passenger_offset(mob: &mc_bamboo_blocks::entity::mob::MobPublic, yaw: f32) ->
         offset = offset.add(Vec3::new(rear_z * sin, 0.15 * stand, rear_z * cos));
     }
     offset
+}
+
+/// 这名玩家在同一份乘客名单里的下标（`getPassengers().indexOf`）。
+///
+/// This player's index in the shared passenger list (`getPassengers().indexOf`).
+fn passenger_index(region: &Region, vehicle: EntityUid, player: EntityUid) -> usize {
+    passengers(region, vehicle)
+        .iter()
+        .position(|&uid| uid == player)
+        .unwrap_or(0)
 }
 
 /// 每刻一趟：要下车的下车，其余骑手的位置跟到载具上，最后记下这一刻末的载具位置。
@@ -700,7 +781,7 @@ pub(crate) fn tick(region: &mut Region) {
             (
                 passengers(region, vehicle).contains(&id.0),
                 public.position,
-                passenger_offset(mob, public.yaw),
+                passenger_offset(mob, public.yaw, passenger_index(region, vehicle, id.0)),
             )
         };
         // 官方 `ejectPassengers`：载具的乘客名单里没有这名玩家了，就当场摘掉两边的关系。
@@ -761,6 +842,15 @@ pub(crate) fn controls_vehicle(region: &mut Region, id: PlayerId, vehicle: Entit
                     mc_bamboo_blocks::entity::mob::pig::is_saddled(mob)
                         && first_passenger
                         && holds_stick
+                } else if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::HappyGhast {
+                    // `HappyGhast.getControllingPassenger`：穿了挽具、不在悬停超时、
+                    // 第一位乘客是玩家。
+                    // `HappyGhast.getControllingPassenger`: harnessed, out of the
+                    // hover timeout, with a player as first passenger.
+                    mc_bamboo_blocks::entity::mob::happy_ghast::controls(
+                        mob,
+                        first_passenger.then_some(id.0),
+                    )
                 } else {
                     !mob.equipment
                         .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)

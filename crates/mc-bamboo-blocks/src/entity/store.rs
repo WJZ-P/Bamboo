@@ -344,7 +344,9 @@ impl EntityRow {
                     fall_damage_max: private.fall_damage_max,
                 })
             }
-            (KindPublic::Tnt { fuse }, KindState::Tnt) => EntityKind::Tnt(PrimedTnt { fuse }),
+            (KindPublic::Tnt { fuse }, KindState::Tnt) => {
+                EntityKind::Tnt(PrimedTnt { fuse, owner: None })
+            }
             (
                 KindPublic::Item {
                     stack,

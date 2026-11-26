@@ -115,7 +115,7 @@ fn dispense_tnt(world: &mut World, pos: BlockPos, facing: Direction, stack: Item
         return Shot::optional(stack, false);
     }
     let target = pos.relative(facing);
-    if world.spawn_tnt(target) < 0 {
+    if world.spawn_tnt(target, None) < 0 {
         return Shot::optional(stack, false);
     }
     Shot::optional(without_one(&stack), true)

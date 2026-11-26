@@ -7,6 +7,7 @@
 //! [`tick_leash`] pulls or snaps it by distance every tick; attach, detach and snap
 //! each broadcast `set_entity_link` so clients draw the rope.
 
+#[cfg(feature = "oracle-samples")]
 use std::cell::Cell;
 
 use mc_bamboo_core::{Aabb, BlockPos, Vec3, mth};
@@ -14,6 +15,7 @@ use mc_bamboo_core::{Aabb, BlockPos, Vec3, mth};
 use super::{Mob, MobEvent, MobType, goals};
 use crate::entity::{Entity, EntityUid, ctx::EntityCtx};
 
+#[cfg(feature = "oracle-samples")]
 thread_local! {
     /// 仅供 `mob-oracle --break-self-test leash_nav`：命中时让
     /// `close_range_leash_behaviour` 跳过导航，模拟「被拴生物不自己跟着走」这个回归，
@@ -22,8 +24,22 @@ thread_local! {
 }
 
 /// 改坏确认开关，只由 `mob-oracle` 调用；默认 false。
+#[cfg(feature = "oracle-samples")]
 pub fn set_oracle_skip_leash_nav(value: bool) {
     SKIP_LEASH_NAV.with(|flag| flag.set(value));
+}
+
+/// 正式构建里改坏开关恒关，不占用热路径之外的任何状态。
+///
+/// The break switch is always off in production builds.
+#[cfg(not(feature = "oracle-samples"))]
+const fn oracle_skip_leash_nav() -> bool {
+    false
+}
+
+#[cfg(feature = "oracle-samples")]
+fn oracle_skip_leash_nav() -> bool {
+    SKIP_LEASH_NAV.with(|flag| flag.get())
 }
 
 /// `LEASH_TOO_FAR_DIST`：超过这个距离绳子断掉。
@@ -109,6 +125,30 @@ pub const fn leash_elastic_distance() -> f64 {
     LEASH_ELASTIC_DIST
 }
 
+/// `Leashable` 的两个距离覆写：`HappyGhast.leashElasticDistance()=10`、
+/// `leashSnapDistance()=16`，其余沿用缺省的 6 / 12。
+///
+/// The two `Leashable` distance overrides: `HappyGhast.leashElasticDistance()=10`
+/// and `leashSnapDistance()=16`; the rest keep the 6 / 12 defaults.
+pub fn elastic_distance_of(kind: MobType) -> f64 {
+    if kind == MobType::HappyGhast {
+        super::happy_ghast::LEASH_ELASTIC_DISTANCE
+    } else {
+        LEASH_ELASTIC_DIST
+    }
+}
+
+/// 按种类取 `leashSnapDistance()`。
+///
+/// Per-kind `leashSnapDistance()`.
+pub fn snap_distance_of(kind: MobType) -> f64 {
+    if kind == MobType::HappyGhast {
+        super::happy_ghast::LEASH_SNAP_DISTANCE
+    } else {
+        LEASH_TOO_FAR_DIST
+    }
+}
+
 /// `Leashable.leashableInArea` 的 32×32×32 区域判定：实体的碰撞盒和
 /// `AABB.ofSize(center, 32, 32, 32)` 相交。
 pub fn in_leashable_area(bounds: Aabb, center: Vec3) -> bool {
@@ -187,7 +227,7 @@ pub fn can_have_a_leash_attached_to(
         entity_height,
         holder_position,
         holder_height,
-    ) <= leash_snap_distance()
+    ) <= snap_distance_of(mob.mob_type)
         && can_be_leashed(mob, now)
 }
 
@@ -221,6 +261,10 @@ struct HolderInfo {
     interactable: bool,
     /// `getHolderMovement` 返回零：NoAI 的生物。
     no_ai_mob: bool,
+    /// `Entity.supportQuadLeashAsHolder()`：目前只有快乐恶魂。
+    quad_holder: bool,
+    /// `Entity.getQuadLeashHolderOffsets()`：快乐恶魂的四个实体坐标偏移。
+    quad_offsets: Option<[Vec3; 4]>,
 }
 
 /// 按 uid 找牵引者。玩家优先（uid 可能同时指向玩家和实体表里的某一行）。
@@ -246,11 +290,18 @@ fn resolve_holder(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<HolderInfo> {
             height: view.height,
             interactable: view.alive && !view.spectator,
             no_ai_mob: false,
+            quad_holder: false,
+            quad_offsets: None,
         });
     }
     let mut out = None;
     ctx.with_other(uid, &mut |public| {
         let (width, height) = public.kind.dimensions();
+        let happy = matches!(
+            &public.kind,
+            crate::entity::KindPublic::Mob(mob)
+                if mob.mob_type == MobType::HappyGhast
+        );
         out = Some(HolderInfo {
             position: public.position,
             delta: public.delta,
@@ -261,6 +312,8 @@ fn resolve_holder(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<HolderInfo> {
                 &public.kind,
                 crate::entity::KindPublic::Mob(mob) if mob.no_ai
             ),
+            quad_holder: happy,
+            quad_offsets: happy.then(|| super::happy_ghast::quad_holder_offsets(width, height)),
         });
     });
     out
@@ -272,9 +325,9 @@ fn lead_item() -> mc_bamboo_protocol::item::ItemStack {
 }
 
 /// `PathfinderMob.shouldStayCloseToLeashHolder()`：默认 true；`Allay` / `HappyGhast`
-/// 覆盖成 false。Bamboo 没建模这两个实体，其余寻路生物恒 true。
-fn should_stay_close_to_leash_holder(_kind: MobType) -> bool {
-    true
+/// 覆盖成 false。Bamboo 只建模了快乐恶魂，悦灵不在表里。
+fn should_stay_close_to_leash_holder(kind: MobType) -> bool {
+    kind != MobType::HappyGhast
 }
 
 /// `PathfinderMob.followLeashSpeed()`：默认 1.0；`Llama`（含继承它的行商羊驼）覆盖成 2.0。
@@ -316,7 +369,7 @@ fn when_leashed_to(mob: &mut Mob, holder: &HolderInfo) {
     }
     mob.home = Some((
         BlockPos::containing(holder.position),
-        leash_elastic_distance() as i32 - 1,
+        elastic_distance_of(mob.mob_type) as i32 - 1,
     ));
 }
 
@@ -355,7 +408,7 @@ fn close_range_leash_behaviour(
     let view = ctx.blocks();
     let nav = super::living::nav_mob(me, mob, view);
     // `mob-oracle --break-self-test leash_nav`：故意不调导航（其余逻辑照旧）。
-    if SKIP_LEASH_NAV.with(|flag| flag.get()) {
+    if oracle_skip_leash_nav() {
         return;
     }
     mob.navigation
@@ -376,6 +429,11 @@ fn on_elastic_leash_pull(me: &mut Entity, mob: &mut Mob, time: i64) {
         && equine.eating
     {
         equine.eating = false;
+    }
+    // `HappyGhast.onElasticLeashPull`：`super` 之后让移动控制停下。
+    // `HappyGhast.onElasticLeashPull`: after `super`, stop the move control.
+    if mob.mob_type == MobType::HappyGhast {
+        mob.mover.operation = super::control::Operation::Wait;
     }
     // `Camel.onElasticLeashPull`：坐着、不在换姿势、能换姿势时站起来。`Camel` 的子类
     // `CamelHusk` 一并覆盖。Bamboo 的 `canCamelChangePose` 在开阔平地恒真。
@@ -443,7 +501,7 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `whenLeashedTo(holder)`：官方在算完 `leashDistanceTo` 之后、判断 snap / elastic
     // 之前每刻无条件调用（`setHomeTo`），让被拴的寻路生物把游荡目标限制在牵引者附近。
     when_leashed_to(mob, &holder);
-    if dist > leash_snap_distance() {
+    if dist > snap_distance_of(mob.mob_type) {
         // `level.playSound(null, holder.pos, LEAD_BREAK, NEUTRAL, 1, 1)`。
         mob.events.push(MobEvent::Sound {
             sound: "minecraft:item.lead.break",
@@ -471,7 +529,7 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         return;
     }
     let elastic_threshold =
-        leash_elastic_distance() - f64::from(holder.width) - f64::from(me.dimensions.0);
+        elastic_distance_of(mob.mob_type) - f64::from(holder.width) - f64::from(me.dimensions.0);
     if dist > elastic_threshold && elastic_interactions(me, mob, &holder) {
         // `onElasticLeashPull()`：默认 `checkFallDistanceAccumulation()`，马科 / 骆驼
         // 另有附加行为。
@@ -500,7 +558,12 @@ fn angular_friction(me: &Entity, ctx: &dyn EntityCtx) -> f32 {
     }
 }
 
-/// `checkElasticInteractions`：弹性拉扯，返回有没有拉。
+/// `Leashable.checkElasticInteractions`：四方拴绳时按四个角分别算弹簧再累加，
+/// 合力乘 0.25；单点拴绳沿用老路径。
+///
+/// `Leashable.checkElasticInteractions`: with a quad leash each of the four corners
+/// contributes a spring whose accumulated wrench is scaled by 0.25; single-point
+/// leashes keep the old path.
 fn elastic_interactions(me: &mut Entity, mob: &mut Mob, holder: &HolderInfo) -> bool {
     // `getHolderMovement(holder)`：STIFFNESS 项用。NoAI 生物 / 服务端玩家都是 ZERO。
     let holder_movement = if holder.no_ai_mob {
@@ -509,32 +572,98 @@ fn elastic_interactions(me: &mut Entity, mob: &mut Mob, holder: &HolderInfo) -> 
         holder.delta
     };
     // `computeDampenedSpringInteraction` 的 dampening 判断用「被拴生物」自己的
-    // `getHolderMovement`（NoAI→ZERO），不是 holder 的。
+    // `getKnownMovement`（NoAI→ZERO），不是 holder 的。
     let leashed_movement = if mob.no_ai { Vec3::default() } else { me.delta };
-    // 单点附着，不做四方拴绳（快乐恶魂、船之间的四点拴绳还没建模）。
-    let entity_offset = y_rot(
-        Vec3::new(
-            ENTITY_ATTACHMENT_POINT.0 * f64::from(me.dimensions.0),
-            ENTITY_ATTACHMENT_POINT.1 * f64::from(me.dimensions.1),
-            ENTITY_ATTACHMENT_POINT.2 * f64::from(me.dimensions.0),
-        ),
-        -(me.y_rot * DEG_TO_RAD),
-    );
-    let holder_offset = y_rot(
-        Vec3::new(
-            LEASHER_ATTACHMENT_POINT.0 * f64::from(holder.width),
-            LEASHER_ATTACHMENT_POINT.1 * f64::from(holder.height),
-            LEASHER_ATTACHMENT_POINT.2 * f64::from(holder.width),
-        ),
-        0.0,
-    );
-    let entity_point = me.position.add(entity_offset);
-    let holder_point = holder.position.add(holder_offset);
-    let Some((force, torque)) =
-        dampened_spring(entity_point, holder_point, leashed_movement, entity_offset)
-    else {
+    // `Entity.supportQuadLeashAsHolder() && this.supportQuadLeash()`：
+    // 只有「牵引者是快乐恶魂且被拴的一方也支持四点」时走四点。26.3 里
+    // `HappyGhast` 没有覆盖 `supportQuadLeash`，所以被拴的一方恒为单点。
+    let quad = holder.quad_holder && super::happy_ghast::SUPPORTS_QUAD_AS_LEASHED;
+    let elastic = elastic_distance_of(mob.mob_type);
+    let mut force = Vec3::default();
+    let mut torque = 0.0;
+    let mut pulled = false;
+    if quad {
+        let holder_scale = Vec3::new(
+            f64::from(holder.width),
+            f64::from(holder.height),
+            f64::from(holder.width),
+        );
+        let leashed_scale = Vec3::new(
+            f64::from(me.dimensions.0),
+            f64::from(me.dimensions.1),
+            f64::from(me.dimensions.0),
+        );
+        for index in 0..4 {
+            let entity_offset = y_rot(
+                super::happy_ghast::SHARED_QUAD_ATTACHMENT_POINTS[index].multiply(
+                    leashed_scale.x,
+                    leashed_scale.y,
+                    leashed_scale.z,
+                ),
+                -(me.y_rot * DEG_TO_RAD),
+            );
+            let holder_offset = y_rot(
+                holder.quad_offsets.map_or_else(
+                    || {
+                        super::happy_ghast::SHARED_QUAD_ATTACHMENT_POINTS[index].multiply(
+                            holder_scale.x,
+                            holder_scale.y,
+                            holder_scale.z,
+                        )
+                    },
+                    |offsets| offsets[index],
+                ),
+                0.0,
+            );
+            let Some((point_force, point_torque)) = quad_spring(
+                me.position.add(entity_offset),
+                holder.position.add(holder_offset),
+                leashed_movement,
+                entity_offset,
+                elastic,
+            ) else {
+                continue;
+            };
+            force = force.add(point_force);
+            torque += point_torque;
+            pulled = true;
+        }
+        // `Wrench.scale(quad ? 0.25 : 1.0)`。
+        force = force.scale(0.25);
+        torque *= 0.25;
+    } else {
+        let entity_offset = y_rot(
+            Vec3::new(
+                ENTITY_ATTACHMENT_POINT.0 * f64::from(me.dimensions.0),
+                ENTITY_ATTACHMENT_POINT.1 * f64::from(me.dimensions.1),
+                ENTITY_ATTACHMENT_POINT.2 * f64::from(me.dimensions.0),
+            ),
+            -(me.y_rot * DEG_TO_RAD),
+        );
+        let holder_offset = y_rot(
+            Vec3::new(
+                LEASHER_ATTACHMENT_POINT.0 * f64::from(holder.width),
+                LEASHER_ATTACHMENT_POINT.1 * f64::from(holder.height),
+                LEASHER_ATTACHMENT_POINT.2 * f64::from(holder.width),
+            ),
+            0.0,
+        );
+        let Some((single_force, single_torque)) = dampened_spring(
+            me.position.add(entity_offset),
+            holder.position.add(holder_offset),
+            leashed_movement,
+            entity_offset,
+            elastic,
+        ) else {
+            return false;
+        };
+        force = single_force;
+        torque = single_torque;
+        pulled = true;
+    }
+    if !pulled {
         return false;
-    };
+    }
     let Some(data) = mob.leash.as_mut() else {
         return false;
     };
@@ -549,15 +678,46 @@ fn elastic_interactions(me: &mut Entity, mob: &mut Mob, holder: &HolderInfo) -> 
     true
 }
 
-/// `computeDampenedSpringInteraction`：超过弹性距离时给一个（力，力矩）。
+/// `Leashable.computeElasticInteraction` 里每个角的弹簧：
+/// `holderPoint.distanceTo(entityPoint) >= elastic` 才出力，力指向 holder；
+/// dampening 判 `dot(getHolderMovement(holder), force) >= 0`，力矩按附着点算。
+///
+/// One corner spring in `Leashable.computeElasticInteraction`: it only pushes when
+/// `holderPoint.distanceTo(entityPoint) >= elastic`, the force points to the holder,
+/// dampening reads `dot(getHolderMovement(holder), force) >= 0`, and the torque
+/// comes from the attachment point.
+fn quad_spring(
+    entity_point: Vec3,
+    holder_point: Vec3,
+    holder_movement: Vec3,
+    attachment_point: Vec3,
+    elastic: f64,
+) -> Option<(Vec3, f64)> {
+    let dist = distance_to(holder_point, entity_point);
+    if dist < elastic {
+        return None;
+    }
+    let mut force = entity_point
+        .subtract(holder_point)
+        .normalize()
+        .scale(dist - elastic);
+    let torque = attachment_point.z * force.x - attachment_point.x * force.z;
+    if dot(holder_movement, force) >= 0.0 {
+        force = force.scale(SPRING_DAMPENING);
+    }
+    Some((force, torque))
+}
+
+/// `computeDampenedSpringInteraction`（单点路径）：超过弹性距离时给一个（力，力矩）。
 fn dampened_spring(
     entity_point: Vec3,
     holder_point: Vec3,
     holder_movement: Vec3,
     attachment_point: Vec3,
+    elastic: f64,
 ) -> Option<(Vec3, f64)> {
     let dist = distance_to(entity_point, holder_point);
-    if dist < leash_elastic_distance() {
+    if dist < elastic {
         return None;
     }
     // `computeDampenedSpringInteraction(holderPoint, entityPoint, ...)`：
@@ -565,7 +725,7 @@ fn dampened_spring(
     let mut force = holder_point
         .subtract(entity_point)
         .normalize()
-        .scale(dist - leash_elastic_distance());
+        .scale(dist - elastic);
     let torque = attachment_point.z * force.x - attachment_point.x * force.z;
     if dot(holder_movement, force) >= 0.0 {
         force = force.scale(SPRING_DAMPENING);

@@ -107,7 +107,7 @@ pub(crate) fn hurt_and_convert_on_break(region: &mut Region, id: PlayerId, hand:
                 let mut rod = stack.clone();
                 rod.item = mc_bamboo_data::items::FISHING_ROD;
                 rod.count = 1;
-                mc_bamboo_blocks::durability::set_damage_for_oracle(&mut rod, 0);
+                mc_bamboo_blocks::durability::set_damage_value(&mut rod, 0);
                 rod
             })
         })

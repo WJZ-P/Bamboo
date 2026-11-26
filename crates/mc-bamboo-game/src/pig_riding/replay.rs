@@ -4,7 +4,7 @@
 //! rotation, and the dismount spot. Compiled under `oracle-samples` only.
 
 use mc_bamboo_blocks::{
-    durability::{damage_of, set_damage_for_oracle},
+    durability::{damage_of, set_damage_value},
     entity::{
         Entity, JavaRandom,
         mob::{MobType, interact, pig},
@@ -178,7 +178,7 @@ pub fn replay_pig_boost(damage: i32, seed: i64) -> (Vec<ReplayPigUse>, Vec<Repla
     let id = PlayerId(1);
     let mut player = new_player(Vec3::new(0.5, 64.0, 0.5));
     let mut held = ItemStack::new(items::CARROT_ON_A_STICK, 1);
-    set_damage_for_oracle(&mut held, damage);
+    set_damage_value(&mut held, damage);
     let slot = player.inventory.hand_slot(Hand::Main);
     player.inventory.slots[slot] = held;
     region.insert_player(player);

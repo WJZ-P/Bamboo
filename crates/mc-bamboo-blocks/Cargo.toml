@@ -9,6 +9,12 @@ description = "Block behaviour of the Bamboo Minecraft server: placement, shape 
 keywords = ["minecraft"]
 categories = ["games"]
 
+[features]
+default = []
+# 只给 mc-bamboo-vanilla 的官方行为改坏确认用；正式构建里这些钩子不存在。
+# Only for mc-bamboo-vanilla's deliberate-breakage checks; absent in production.
+oracle-samples = []
+
 [dependencies]
 mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true

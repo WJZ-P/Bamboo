@@ -512,7 +512,7 @@ impl Report {
                 BlockPos::new(case.x, case.y, case.z),
                 BlockState(case.state as u32),
             ),
-            "tnt" => world.spawn_tnt(BlockPos::new(case.x, case.y, case.z)),
+            "tnt" => world.spawn_tnt(BlockPos::new(case.x, case.y, case.z), None),
             "item" => {
                 spawn_ground_item(
                     &mut world,

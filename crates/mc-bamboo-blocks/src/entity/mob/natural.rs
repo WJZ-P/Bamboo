@@ -858,7 +858,10 @@ pub(super) fn check_spawn_rules(
         MobType::SulfurCube => true,
         // 嗅探兽不在任何群系刷怪表里：只从蛋孵出来或 `/summon` / 刷怪蛋生成。
         // Sniffers are in no biome spawn table: only the egg or `/summon` / a spawn egg.
-        MobType::Sniffer => true,
+        // 快乐恶魂同样不自然生成，只从干恶魂方块孵化或由命令 / 刷怪蛋生成。
+        // Happy ghasts likewise never spawn naturally: only the dried ghast block,
+        // `/summon` or a spawn egg make one.
+        MobType::Sniffer | MobType::HappyGhast => true,
         // 卫道士 / 劫掠兽只从袭击波次、命令和刷怪蛋生成，不在群系刷怪表里。
         // Vindicators / ravagers only come from raid waves, commands and spawn eggs.
         MobType::Vindicator | MobType::Ravager => true,
@@ -1210,7 +1213,10 @@ pub(super) fn create_mob(world: &mut World, kind: MobType) -> Option<Entity> {
 ///
 /// `Mob.getMaxSpawnClusterSize()` with per-species cluster limits.
 fn max_spawn_cluster_size(kind: MobType) -> i32 {
-    if kind.is_water_animal() {
+    if kind == MobType::HappyGhast {
+        // `HappyGhast.getMaxSpawnClusterSize()` = 1。
+        super::happy_ghast::MAX_SPAWN_CLUSTER_SIZE
+    } else if kind.is_water_animal() {
         super::fish::max_school_size(kind)
     } else if kind.is_equine() {
         6

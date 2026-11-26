@@ -93,15 +93,17 @@ pub struct GuardianState {
     /// `clientSideTouchedGround`。
     pub touched_ground: bool,
     /// 场景级改坏确认用：非 0 时覆盖 `Guardian.getAttackDuration()`。
-    /// 正常路径恒为 0。
+    /// 正常路径恒为 0，只在 `oracle-samples` 下编进结构体。
     ///
     /// Scene-level break-self-test hook: overrides `Guardian.getAttackDuration()`
-    /// when nonzero. Always 0 on the normal path.
+    /// when nonzero. Always 0 on the normal path; compiled only under `oracle-samples`.
+    #[cfg(feature = "oracle-samples")]
     pub attack_duration_override: i32,
     /// 场景级改坏确认用：为真时尖刺忽略「没在动」条件。正常路径恒为假。
     ///
     /// Scene-level break-self-test hook: ignores the "not moving" thorns
     /// condition when true. Always false on the normal path.
+    #[cfg(feature = "oracle-samples")]
     pub thorns_ignore_moving: bool,
     /// 激光视线的跨刻缓存。三样键（守卫者眼睛位、目标眼睛位、岛级方块版本戳）
     /// 都没变时复用上一次的射线结果；不存档、不同步。
@@ -602,9 +604,20 @@ fn player_gets_fatigue(
 /// outside `#avoids_guardian_thorns` and not thorns. "The direct entity is living"
 /// needs the entity table and is checked by [`hurt_server`].
 pub fn thorns_reflects(mob: &Mob, kind: DamageKind) -> bool {
-    (mob.guardian.thorns_ignore_moving || !mob.guardian.moving)
+    let ignore_moving = thorns_ignore_moving(mob);
+    (ignore_moving || !mob.guardian.moving)
         && !super::goals::damage_type_tagged("minecraft:avoids_guardian_thorns", kind)
         && kind != DamageKind::Thorns
+}
+
+#[cfg(feature = "oracle-samples")]
+fn thorns_ignore_moving(mob: &Mob) -> bool {
+    mob.guardian.thorns_ignore_moving
+}
+
+#[cfg(not(feature = "oracle-samples"))]
+const fn thorns_ignore_moving(_mob: &Mob) -> bool {
+    false
 }
 
 /// `Guardian.hurtServer`：没在动、伤害不在 `#avoids_guardian_thorns`、不是 thorns、

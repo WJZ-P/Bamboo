@@ -1999,7 +1999,7 @@ mod tests {
         // 耐久：攻击扣 5 点耐久写入 `DAMAGE` 组件，物品 ID 不变。
         // Durability: a 5-point hit writes the `DAMAGE` component; item id unchanged.
         let mut damaged = bare.clone();
-        mc_bamboo_blocks::durability::set_damage_for_oracle(&mut damaged, 5);
+        mc_bamboo_blocks::durability::set_damage_value(&mut damaged, 5);
         assert!(damaged.is_same_item(&bare), "same sword id");
         assert_ne!(damaged, bare, "a durability hit changes the components");
         region.players.get_mut(&id).unwrap().inventory.slots[slot] = damaged.clone();

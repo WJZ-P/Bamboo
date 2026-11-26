@@ -344,6 +344,9 @@ pub fn interact(
         }
         return outcome;
     }
+    if mob.mob_type == MobType::HappyGhast {
+        return super::happy_ghast::interact(me, mob, req, level_next_float);
+    }
     animal_interact(me, mob, req, level_next_float)
 }
 
@@ -416,6 +419,17 @@ pub fn leash_interact(
             damage_held: true,
             ..MobInteraction::pass()
         });
+    }
+    // `Mob.attemptToShearEquipment`：可剪下的 BODY 装备（挽具）。官方在
+    // `Entity.interact` 的拴绳剪断之后、`mobInteract` 之前处理。
+    // `Mob.attemptToShearEquipment`: a shearable BODY item (harness). Vanilla
+    // handles it after the leash shear and before `mobInteract`.
+    if req.held.item == items::SHEARS
+        && !req.sneaking
+        && mob.mob_type == MobType::HappyGhast
+        && let Some(outcome) = super::happy_ghast::shear_harness(me, mob, req)
+    {
+        return Some(outcome);
     }
     if !living::is_alive(me, mob) {
         return None;
@@ -571,9 +585,12 @@ pub(super) fn animal_interact(
         };
     }
     let age = mob.age;
-    // `Turtle.canFallInLove`：身上有蛋时不进求爱。
-    // `Turtle.canFallInLove`: no love while carrying an egg.
-    let can_fall_in_love = mob.mob_type != MobType::Turtle || !mob.turtle.has_egg;
+    // `Turtle.canFallInLove`：身上有蛋时不进求爱；
+    // `HappyGhast.canFallInLove()` 恒假（成年不繁殖也不求爱）。
+    // `Turtle.canFallInLove`: no love while carrying an egg;
+    // `HappyGhast.canFallInLove()` is always false (adults never breed).
+    let can_fall_in_love = mob.mob_type != MobType::HappyGhast
+        && (mob.mob_type != MobType::Turtle || !mob.turtle.has_egg);
     // `Axolotl.usePlayerItem`：热带鱼桶喂完换成水桶（创造模式手里不变）。
     // `Axolotl.usePlayerItem`: the tropical fish bucket turns into a water bucket
     // (creative keeps the bucket).
