@@ -110,6 +110,153 @@ impl World<'_> {
         });
     }
 
+    /// `ServerLevel.explode(..., ExplosionInteraction.TRIGGER)`：风弹的爆炸。
+    ///
+    /// `SimpleExplosionDamageCalculator(true, false, knockback, immuneBlocks)`
+    /// 不伤实体，但仍按曝光度击退；`explodesBlocks=true` 所以方块进 `toBlow`，
+    /// `TRIGGER_BLOCK` 让 `BlockBehaviour.onExplosionHit` 只触发门 / 按钮 / 拉杆，
+    /// 然后直接返回（不掉落、不破坏）。射线照旧取世界随机源，`interactWithBlocks`
+    /// 的打乱不发生。
+    ///
+    /// Wind charge explosions (`TRIGGER`): no entity damage but exposure-scaled
+    /// knockback; blocks are gathered by the rays and only doors, buttons and
+    /// levers are toggled, without drops or removal.
+    pub fn explode_wind_charge(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        knockback: f32,
+        source: EntityUid,
+        can_trigger_blocks: bool,
+    ) {
+        let mut broken = self.calculate_wind_charge_positions(center, radius);
+        let block_count = broken.len() as i32;
+        let mut damage = DamageSource::environment(DamageKind::WindCharge);
+        damage.direct = Some(source);
+        damage.position = Some(center);
+        let hit_players =
+            hurt_living_by_explosion_with(self, damage, center, radius, false, knockback);
+        // `interactWithBlocks`：打乱之后逐格 `onExplosionHit`。TRIGGER_BLOCK 时
+        // `BlockBehaviour.onExplosionHit` 在触发完方块效果后直接返回；`canTriggerBlocks`
+        // 对 `BreezeWindCharge` 还看 `mob_griefing`，关着时门 / 按钮 / 拉杆不触发。
+        self.random().shuffle(&mut broken);
+        for pos in broken {
+            self.trigger_wind_charge_block(pos, can_trigger_blocks);
+        }
+        self.push_effect(Effect::Explode {
+            center,
+            radius,
+            block_count,
+            hit_players,
+            is_small: true,
+            play_sound: true,
+        });
+    }
+
+    /// `ServerExplosion.calculateExplodedPositions`，按 `SimpleExplosionDamageCalculator`
+    /// 的免疫方块标签把抗性换成 3600000.0f（射线到此为止）。
+    fn calculate_wind_charge_positions(&mut self, center: Vec3, radius: f32) -> Vec<BlockPos> {
+        let mut blown = PositionSet::default();
+        for xx in 0..RAY_GRID {
+            for yy in 0..RAY_GRID {
+                for zz in 0..RAY_GRID {
+                    if xx != 0
+                        && xx != RAY_GRID - 1
+                        && yy != 0
+                        && yy != RAY_GRID - 1
+                        && zz != 0
+                        && zz != RAY_GRID - 1
+                    {
+                        continue;
+                    }
+                    let xd = f64::from(xx as f32 / 15.0 * 2.0 - 1.0);
+                    let yd = f64::from(yy as f32 / 15.0 * 2.0 - 1.0);
+                    let zd = f64::from(zz as f32 / 15.0 * 2.0 - 1.0);
+                    let length = (xd * xd + yd * yd + zd * zd).sqrt();
+                    let (xd, yd, zd) = (xd / length, yd / length, zd / length);
+                    let mut remaining = radius * (0.7 + self.random().next_float() * 0.6);
+                    let (mut xp, mut yp, mut zp) = (center.x, center.y, center.z);
+                    while remaining > 0.0 {
+                        let pos = BlockPos::new(mth::floor(xp), mth::floor(yp), mth::floor(zp));
+                        if !self.is_in_world_bounds(pos) {
+                            break;
+                        }
+                        let state = self.block_state(pos);
+                        let fluid = state.fluid();
+                        // `SimpleExplosionDamageCalculator.getBlockExplosionResistance`：
+                        // `immuneBlocks` 存在时只判这个标签，命中给 3600000.0f，
+                        // 没命中直接返回 `Optional.empty()`，**不**回退到基类的
+                        // `max(方块抗性, 流体抗性)`（风弹就是这种计算器）。
+                        let resistance = state
+                            .is_tagged(
+                                mc_bamboo_data::tags::block_tags::BLOCKS_WIND_CHARGE_EXPLOSIONS,
+                            )
+                            .then_some(3_600_000.0_f32);
+                        let _ = fluid;
+                        if let Some(resistance) = resistance {
+                            remaining -= (resistance + RESISTANCE_BONUS) * RESISTANCE_COST;
+                        }
+                        if remaining > 0.0 {
+                            blown.insert(pos);
+                        }
+                        xp += xd * f64::from(STEP);
+                        yp += yd * f64::from(STEP);
+                        zp += zd * f64::from(STEP);
+                        remaining -= POWER_PER_STEP;
+                    }
+                }
+            }
+        }
+        blown.into_java_order()
+    }
+
+    /// `BlockBehaviour.onExplosionHit` 在 `TRIGGER_BLOCK` 下的门 / 按钮 / 拉杆 / 活板门
+    /// 触发。其它方块什么都不做，方块本身保留。`can_trigger_blocks` 是
+    /// `ServerExplosion.canTriggerBlocks`：`BreezeWindCharge` 在 `mob_griefing` 关着时
+    /// 不触发任何方块。
+    fn trigger_wind_charge_block(&mut self, pos: BlockPos, can_trigger_blocks: bool) {
+        if !can_trigger_blocks {
+            return;
+        }
+        let state = self.block_state(pos);
+        if state.is_air() {
+            return;
+        }
+        if state.is_a(BlockAncestor::LeverBlock) {
+            let pulled = state.cycle(crate::state::POWERED);
+            self.set_block_and_update(pos, pulled);
+            self.play_block_sound(
+                pos,
+                mc_bamboo_data::sounds::sound_event("minecraft:block.lever.click"),
+                0.3,
+                if pulled.get(crate::state::POWERED) {
+                    0.6
+                } else {
+                    0.5
+                },
+            );
+        } else if state.is_a(BlockAncestor::ButtonBlock) && !state.get(crate::state::POWERED) {
+            self.set_block_and_update(pos, state.with(crate::state::POWERED, true));
+            self.schedule_tick(
+                pos,
+                state.block(),
+                crate::behaviour::common::field_int(state.block(), "ticksToStayPressed"),
+            );
+        } else if state.is_a(BlockAncestor::DoorBlock)
+            && state.get(crate::state::DOUBLE_BLOCK_HALF) == crate::state::DoubleBlockHalf::Lower
+            && !state.get(crate::state::POWERED)
+            && wind_charge_can_open(state)
+        {
+            let toggled = state.cycle(crate::state::OPEN);
+            self.set_block_and_update(pos, toggled);
+        } else if state.is_a(BlockAncestor::TrapDoorBlock)
+            && !state.get(crate::state::POWERED)
+            && wind_charge_can_open(state)
+        {
+            self.set_block_and_update(pos, state.cycle(crate::state::OPEN));
+        }
+    }
+
     /// `ServerLevel.explode(source, ..., ExplosionInteraction.MOB)`：来源是一个生物。
     /// 射线之后先伤实体；`mobGriefing` 关着时方块不动（`BlockInteraction.KEEP`），
     /// 开着时按 `mobExplosionDropDecay` 决定掉落带不带衰减。爆炸包发给范围内玩家。
@@ -397,6 +544,40 @@ fn hurt_living_by_explosion(
     center: Vec3,
     radius: f32,
 ) -> Vec<(EntityUid, Vec3)> {
+    hurt_living_by_explosion_with_source(world, source, damage, center, radius, true, 1.0)
+}
+
+/// `ServerExplosion.hurtEntities` 的通用入口：`damages_entities` 决定是否扣血，
+/// `knockback_multiplier` 是 `SimpleExplosionDamageCalculator` 的可选倍率
+/// （风弹是 1.22f，旋风人风弹用基类缺省 1）。
+fn hurt_living_by_explosion_with(
+    world: &mut World,
+    damage: DamageSource,
+    center: Vec3,
+    radius: f32,
+    damages_entities: bool,
+    knockback_multiplier: f32,
+) -> Vec<(EntityUid, Vec3)> {
+    hurt_living_by_explosion_with_source(
+        world,
+        None,
+        damage,
+        center,
+        radius,
+        damages_entities,
+        knockback_multiplier,
+    )
+}
+
+fn hurt_living_by_explosion_with_source(
+    world: &mut World,
+    source: Option<&EntityPublic>,
+    damage: DamageSource,
+    center: Vec3,
+    radius: f32,
+    damages_entities: bool,
+    knockback_multiplier: f32,
+) -> Vec<(EntityUid, Vec3)> {
     if radius < 1.0e-5 {
         return Vec::new();
     }
@@ -410,18 +591,26 @@ fn hurt_living_by_explosion(
         floor(center.y + double_radius + 1.0),
         floor(center.z + double_radius + 1.0),
     );
+    let blast = Blast {
+        damage,
+        center,
+        double_radius,
+        area,
+        damages_entities,
+        knockback_multiplier,
+    };
     for id in world.entity_ids() {
-        if let Some((amount, knock)) = mob_blast(world, id, center, double_radius, area) {
-            world.hurt_mob(id, damage, amount);
-            world.with_entity_mut(id, &mut |entity| {
-                entity.delta = entity.delta.add(knock);
-                // `Entity.push(Vec3)` 置 `needsSync`：速度要同步出去。
-                // `Entity.push(Vec3)` sets `needsSync` so the velocity is sent.
-                if let Some(mob) = entity.kind.mob_mut() {
-                    mob.hurt_marked = true;
-                }
-            });
-        }
+        let Some(knock) = blast_entity(world, blast, id) else {
+            continue;
+        };
+        world.with_entity_mut(id, &mut |entity| {
+            entity.delta = entity.delta.add(knock);
+            // `Entity.push(Vec3)` 置 `needsSync`：速度要同步出去。
+            // `Entity.push(Vec3)` sets `needsSync` so the velocity is sent.
+            if let Some(mob) = entity.kind.mob_mut() {
+                mob.hurt_marked = true;
+            }
+        });
     }
     let mut players = Vec::new();
     world
@@ -429,15 +618,49 @@ fn hurt_living_by_explosion(
         .for_each_player(&mut |player| players.push(*player));
     let mut hit_players = Vec::new();
     for player in players {
-        if let Some((amount, knock)) = player_blast(world, &player, center, double_radius, area) {
-            world.hurt_player_from_mob(player.uid, damage, amount, source);
-            // 创造且飞行中的玩家照官方不进 `getHitPlayers`（伤害和 push 照给）。
-            if !(player.creative && player.flying) {
-                hit_players.push((player.uid, knock));
-            }
+        let Some(knock) = blast_player(world, blast, source, &player) else {
+            continue;
+        };
+        // 创造且飞行中的玩家照官方不进 `getHitPlayers`（伤害和 push 照给）。
+        if !(player.creative && player.flying) {
+            hit_players.push((player.uid, knock));
         }
     }
     hit_players
+}
+
+/// 一次爆炸里所有实体共用的判据。
+#[derive(Debug, Clone, Copy)]
+struct Blast {
+    damage: DamageSource,
+    center: Vec3,
+    double_radius: f64,
+    area: Aabb,
+    damages_entities: bool,
+    knockback_multiplier: f32,
+}
+
+/// 一头生物在爆炸里的伤害和击退，顺手把伤害落地（共用一份 damage source）。
+fn blast_entity(world: &mut World, blast: Blast, id: i32) -> Option<Vec3> {
+    let (amount, knock) = mob_blast(world, id, blast.center, blast.double_radius, blast.area)?;
+    if blast.damages_entities {
+        world.hurt_mob(id, blast.damage, amount);
+    }
+    Some(knock.scale(f64::from(blast.knockback_multiplier)))
+}
+
+fn blast_player(
+    world: &mut World,
+    blast: Blast,
+    source: Option<&EntityPublic>,
+    player: &PlayerView,
+) -> Option<Vec3> {
+    let (amount, knock) =
+        player_blast(world, player, blast.center, blast.double_radius, blast.area)?;
+    if blast.damages_entities {
+        world.hurt_player_from_mob(player.uid, blast.damage, amount, source);
+    }
+    Some(knock.scale(f64::from(blast.knockback_multiplier)))
 }
 
 /// 一头生物在爆炸里受的伤害和被推开的速度；不在范围里返回 `None`。
@@ -542,6 +765,21 @@ fn collect_drop(stacks: &mut Vec<(BlockPos, ItemStack)>, pos: BlockPos, mut stac
 /// `FluidState.getExplosionResistance()`, from the generated fluid table.
 fn fluid_resistance(fluid: FluidState) -> f32 {
     fluid.explosion_resistance()
+}
+
+/// `BlockSetType.canOpenByWindCharge()`：门用 `type.setType.*`，活板门用
+/// `type.*`；字段不存在时按官方缺省（false）处理，不让坏数据包触发 panic。
+fn wind_charge_can_open(state: BlockState) -> bool {
+    let block = state.block();
+    for name in [
+        "type.setType.canOpenByWindCharge",
+        "type.canOpenByWindCharge",
+    ] {
+        if let Some(value) = crate::behaviour::common::try_bool(block, name) {
+            return value;
+        }
+    }
+    false
 }
 
 /// 爆炸破坏的方块表，官方的 `HashSet<BlockPos>`。
@@ -725,5 +963,36 @@ mod tnt_tests {
             after.delta, before.delta,
             "the blast should knock the cow back"
         );
+    }
+}
+
+#[cfg(test)]
+mod wind_charge_tests {
+    use super::*;
+    use crate::{BlockTicks, entity::Entity, testing::TestLevel};
+    use mc_bamboo_data::blocks;
+
+    /// TRIGGER 爆炸不伤生物、不破坏方块，但把生物推开；方块仍在世界里。
+    #[test]
+    fn wind_charge_only_knocks_back_and_keeps_blocks() {
+        let mut level = TestLevel::new();
+        let pos = BlockPos::new(0, 63, 0);
+        level.set(pos, BlockState(blocks::STONE));
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let cow = world.spawn_entity(Entity::by_mob_type(
+            crate::entity::mob::MobType::Cow,
+            Vec3::new(1.0, 64.0, 0.5),
+        ));
+        let before = world.entity(cow).expect("cow").kind.mob().unwrap().health;
+        world.explode_wind_charge(Vec3::new(1.5, 64.5, 0.5), 1.2, 1.22, 0, true);
+        let after = world.entity(cow).expect("cow still there");
+        assert_eq!(
+            after.kind.mob().unwrap().health,
+            before,
+            "TRIGGER explosions deal no damage"
+        );
+        assert_ne!(after.delta, Vec3::default(), "the cow is pushed");
+        assert_eq!(world.block_state(pos), BlockState(blocks::STONE));
     }
 }

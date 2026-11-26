@@ -82,6 +82,11 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         // Vanilla lightning bolts are not serialized; do not write them out.
         crate::entity::KindPublic::LightningBolt(_) => return Ok(Tag::Compound(Vec::new())),
         crate::entity::KindPublic::EvokerFangs => kinds::EVOKER_FANGS,
+        crate::entity::KindPublic::OminousItemSpawner(_) => kinds::OMINOUS_ITEM_SPAWNER,
+        crate::entity::KindPublic::WindCharge(charge) => match charge.variant {
+            crate::entity::wind_charge::WindChargeVariant::Player => kinds::WIND_CHARGE,
+            crate::entity::wind_charge::WindChargeVariant::Breeze => kinds::BREEZE_WIND_CHARGE,
+        },
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
     put(
@@ -105,6 +110,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 crate::entity::KindPublic::LlamaSpit(spit) => spit.pitch,
                 crate::entity::KindPublic::Egg(egg) => egg.x_rot,
                 crate::entity::KindPublic::SplashPotion(potion) => potion.x_rot,
+                crate::entity::KindPublic::WindCharge(charge) => charge.pitch,
                 _ => 0.0,
             }),
         ]),
@@ -203,6 +209,41 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
             if let Some(uuid) = saved.owner_uuid {
                 put(&mut out, "Owner", uuid_tag(&uuid));
             }
+        }
+        crate::entity::KindPublic::OminousItemSpawner(stack) => {
+            let crate::entity::KindState::OminousItemSpawner(saved) = &state.kind else {
+                return Err(Error::new("mismatched ominous item spawner entity halves"));
+            };
+            // 官方 `addAdditionalSaveData` 的顺序：`item`（非空才写）、`spawn_item_after_ticks`。
+            if !stack.is_empty() {
+                put(
+                    &mut out,
+                    "item",
+                    slots::encode_item(stack).map_err(|error| Error::new(error.to_string()))?,
+                );
+            }
+            put(
+                &mut out,
+                "spawn_item_after_ticks",
+                Tag::Long(saved.spawn_item_after_ticks),
+            );
+        }
+        crate::entity::KindPublic::WindCharge(_) => {
+            let crate::entity::KindState::WindCharge(saved) = &state.kind else {
+                return Err(Error::new("mismatched wind charge entity halves"));
+            };
+            put(&mut out, "acceleration_power", Tag::Double(0.0));
+            if let Some(uuid) = saved.owner_uuid {
+                put(&mut out, "Owner", uuid_tag(&uuid));
+            }
+            if saved.left_owner {
+                put(&mut out, "LeftOwner", Tag::Byte(1));
+            }
+            put(
+                &mut out,
+                "HasBeenShot",
+                Tag::Byte(i8::from(saved.has_been_shot)),
+            );
         }
         crate::entity::KindPublic::ExperienceOrb { value } => {
             let crate::entity::KindState::ExperienceOrb(saved) = &state.kind else {
@@ -483,6 +524,33 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                 })
             }
             "minecraft:lightning_bolt" => EntityKind::LightningBolt(Box::default()),
+            "minecraft:wind_charge" | "minecraft:breeze_wind_charge" => {
+                let variant = if id == "minecraft:breeze_wind_charge" {
+                    crate::entity::wind_charge::WindChargeVariant::Breeze
+                } else {
+                    crate::entity::wind_charge::WindChargeVariant::Player
+                };
+                EntityKind::WindCharge(Box::new(crate::entity::wind_charge::WindCharge {
+                    uuid: arrow::uuid_from(tag, "UUID").unwrap_or([0; 16]),
+                    variant,
+                    owner_uuid: arrow::uuid_from(tag, "Owner"),
+                    pitch: rotation[1],
+                    left_owner: tag::bool_or(tag, "LeftOwner", false),
+                    has_been_shot: tag::bool_or(tag, "HasBeenShot", false),
+                    ..crate::entity::wind_charge::WindCharge::new(variant)
+                }))
+            }
+            "minecraft:ominous_item_spawner" => {
+                let item = tag::field(tag, "item")
+                    .and_then(|value| slots::decode_item(value).ok())
+                    .unwrap_or_else(ItemStack::empty);
+                EntityKind::OminousItemSpawner(Box::new(
+                    crate::entity::ominous_item_spawner::OminousItemSpawner {
+                        item,
+                        spawn_item_after_ticks: tag::long_or(tag, "spawn_item_after_ticks", 0),
+                    },
+                ))
+            }
             "minecraft:leash_knot" => {
                 let words = tag::int_array(tag, "block_pos");
                 let pos = if words.len() == 3 {

@@ -21,6 +21,7 @@ pub mod bee;
 pub mod bee_goals;
 pub mod bogged;
 pub mod brain;
+pub mod breeze;
 pub mod bucketable;
 pub mod camel;
 pub mod cat;
@@ -259,9 +260,13 @@ pub enum MobType {
     /// 嗅探兽，`Sniffer`。
     /// The `Sniffer`.
     Sniffer,
+    /// 旋风人，`Breeze`。试炼密室的敌对生物，射风弹、长跳和滑动。
+    ///
+    /// The breeze: a trial-chambers hostile that shoots wind charges, long-jumps
+    /// and slides.
+    Breeze,
     /// 快乐恶魂，`HappyGhast`。可养大的可骑乘飞行生物；幼年用大脑，成年用目标，
     /// 套挽具后最多载四名玩家。
-    ///
     /// The `HappyGhast`: a growable rideable flying mob. Babies use a brain, adults use
     /// goals, and a harnessed adult carries up to four players.
     HappyGhast,
@@ -299,7 +304,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 74] = [
+    pub const ALL: [Self; 75] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -366,6 +371,7 @@ impl MobType {
         Self::Creaking,
         Self::Warden,
         Self::Sniffer,
+        Self::Breeze,
         Self::HappyGhast,
         Self::Vindicator,
         Self::Ravager,
@@ -447,6 +453,7 @@ impl MobType {
             Self::Warden => ids::WARDEN,
 
             Self::Sniffer => ids::SNIFFER,
+            Self::Breeze => ids::BREEZE,
             Self::HappyGhast => ids::HAPPY_GHAST,
             Self::Vindicator => ids::VINDICATOR,
             Self::Ravager => ids::RAVAGER,
@@ -528,6 +535,7 @@ impl MobType {
             Self::Warden => "minecraft:warden",
 
             Self::Sniffer => "minecraft:sniffer",
+            Self::Breeze => "minecraft:breeze",
             Self::HappyGhast => "minecraft:happy_ghast",
             Self::Vindicator => "minecraft:vindicator",
             Self::Ravager => "minecraft:ravager",
@@ -705,6 +713,8 @@ impl MobType {
             (Self::Nautilus | Self::ZombieNautilus, baby) => nautilus::dimensions(baby),
             (Self::CopperGolem, baby) => copper_golem::dimensions(baby),
             (Self::Sniffer, baby) => sniffer::dimensions(baby),
+            // `EntityTypes.BREEZE`：`sized(0.6F, 1.77F).eyeHeight(1.385F)`。
+            (Self::Breeze, _) => (0.6, 1.77, 1.385),
             // `EntityTypes.VINDICATOR` / `RAVAGER`：眼高用官方缺省的 height*0.85。
             (Self::Vindicator, _) => (0.6, 1.95, 1.95 * 0.85),
             (Self::Ravager, _) => (1.95, 2.2, 2.2 * 0.85),
@@ -788,6 +798,7 @@ impl MobType {
                 | Self::Guardian
                 | Self::ElderGuardian
                 | Self::ZombieNautilus
+                | Self::Breeze
                 | Self::Warden
         ) || self.is_skeleton()
     }
@@ -1148,6 +1159,23 @@ impl MobType {
         )
     }
 
+    /// `EntityTypeTags.FALL_DAMAGE_IMMUNE`：`LivingEntity.calculateFallDamage` 恒 0，
+    /// 摔落不再掉血（但仍会累计、清零摔落距离，旋风人还会放 `BREEZE_LAND` 音）。
+    ///
+    /// `EntityTypeTags.FALL_DAMAGE_IMMUNE`: `LivingEntity.calculateFallDamage` always
+    /// returns 0, so a fall deals no damage (the fall distance still accumulates and
+    /// resets, and a breeze still plays its `BREEZE_LAND` sound).
+    pub fn fall_damage_immune(self) -> bool {
+        // 直接查生成的官方实体标签，新加的生物（悦灵、凋灵……）自动跟上。
+        // Read the generated vanilla entity-type tag so new mobs follow automatically.
+        let id = self.entity_type();
+        mc_bamboo_data::tags::TAG_GROUPS
+            .iter()
+            .filter(|group| group.registry == "minecraft:entity_type")
+            .flat_map(|group| group.tags.iter())
+            .any(|tag| tag.name == "minecraft:fall_damage_immune" && tag.ids.contains(&id))
+    }
+
     /// `SpawnPlacements` 里登记成 `IN_WATER` 的类型。
     ///
     /// Types registered as `IN_WATER` in `SpawnPlacements`.
@@ -1170,7 +1198,10 @@ impl MobType {
         }
         // 守卫者构造函数里 `xpReward = 10`，覆盖 `Monster` 的 5。
         // The guardian constructor sets `xpReward = 10`, overriding the monster's 5.
-        if matches!(self, Self::Guardian | Self::ElderGuardian | Self::Evoker) {
+        if matches!(
+            self,
+            Self::Guardian | Self::ElderGuardian | Self::Evoker | Self::Breeze
+        ) {
             return 10;
         }
         // `Vex` 构造函数里 `xpReward = 3`，覆盖 `Monster` 的 5。
@@ -1265,6 +1296,7 @@ impl MobType {
             Self::Warden => "minecraft:entities/warden",
 
             Self::Sniffer => "minecraft:entities/sniffer",
+            Self::Breeze => "minecraft:entities/breeze",
             Self::HappyGhast => "minecraft:entities/happy_ghast",
             Self::Vindicator => "minecraft:entities/vindicator",
             Self::Ravager => "minecraft:entities/ravager",
@@ -1283,6 +1315,11 @@ impl MobType {
             self,
             Self::Zombie | Self::Drowned | Self::ZombieVillager | Self::Phantom
         ) || self.is_skeleton()
+    }
+
+    /// `EntityTypeTags.DEFLECTS_PROJECTILES`：现在只有旋风人，把射来的投射物弹回。
+    pub const fn deflects_projectiles(self) -> bool {
+        matches!(self, Self::Breeze)
     }
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
@@ -1431,6 +1468,10 @@ impl MobType {
             // `Sniffer.getAmbientSound`: silent while digging or searching; see
             // `sniffer::ambient_voice`.
             Self::Sniffer => Some("minecraft:entity.sniffer.idle"),
+            // `Breeze.playAmbientSound` 覆写走 `playLocalSound`（服务端空操作），不经过这张表。
+            // `Breeze.playAmbientSound` is overridden to `playLocalSound` (a server-side
+            // no-op), so it never reaches this table.
+            Self::Breeze => None,
             // `HappyGhast.getAmbientSound`：幼年 / 成年两套，成年值在此，幼年由
             // `living::voice_of` 换成 `entity.ghastling.ambient`。
             // `HappyGhast.getAmbientSound`: baby/adult variants; adult here, baby is
@@ -1512,6 +1553,7 @@ impl MobType {
             Self::Creaking => None,
 
             Self::Sniffer => Some("minecraft:entity.sniffer.hurt"),
+            Self::Breeze => Some("minecraft:entity.breeze.hurt"),
             Self::HappyGhast => Some("minecraft:entity.happy_ghast.hurt"),
             Self::Vindicator => Some("minecraft:entity.vindicator.hurt"),
             Self::Ravager => Some("minecraft:entity.ravager.hurt"),
@@ -1586,6 +1628,7 @@ impl MobType {
             | Self::ZombieNautilus
             | Self::CopperGolem => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.death"),
+            Self::Breeze => Some("minecraft:entity.breeze.death"),
             Self::HappyGhast => Some("minecraft:entity.happy_ghast.death"),
             Self::Vindicator => Some("minecraft:entity.vindicator.death"),
             Self::Ravager => Some("minecraft:entity.ravager.death"),
@@ -1673,6 +1716,7 @@ impl MobType {
             | Self::ZombieNautilus
             | Self::CopperGolem => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.step"),
+            Self::Breeze => None,
             // `HappyGhast.playStepSound` 空实现，没有脚步声。
             // `HappyGhast.playStepSound` is empty, so there is no step sound.
             Self::HappyGhast => None,
@@ -1756,6 +1800,7 @@ impl MobType {
             Self::ZombieNautilus => items::ZOMBIE_NAUTILUS_SPAWN_EGG,
             Self::CopperGolem => items::COPPER_GOLEM_SPAWN_EGG,
             Self::Sniffer => items::SNIFFER_SPAWN_EGG,
+            Self::Breeze => items::BREEZE_SPAWN_EGG,
             Self::HappyGhast => items::HAPPY_GHAST_SPAWN_EGG,
             Self::Vindicator => items::VINDICATOR_SPAWN_EGG,
             Self::Ravager => items::RAVAGER_SPAWN_EGG,
@@ -1838,6 +1883,7 @@ impl MobType {
             Self::ZombieNautilus => "entity.minecraft.zombie_nautilus",
             Self::CopperGolem => "entity.minecraft.copper_golem",
             Self::Sniffer => "entity.minecraft.sniffer",
+            Self::Breeze => "entity.minecraft.breeze",
             Self::HappyGhast => "entity.minecraft.happy_ghast",
             Self::Vindicator => "entity.minecraft.vindicator",
             Self::Ravager => "entity.minecraft.ravager",
@@ -2165,6 +2211,8 @@ pub enum DamageKind {
     /// the overworld. `INTENTIONAL_GAME_DESIGN`, exhaustion 0.1, `always`
     /// scaling, `message_id` `badRespawnPoint`.
     BadRespawnPoint,
+    /// 风弹命中实体，`minecraft:wind_charge`。
+    WindCharge,
     /// 监守者的音波，`minecraft:sonic_boom`：穿墙、绕过护甲。
     ///
     /// The warden's `minecraft:sonic_boom`: passes through walls and armor.
@@ -2230,6 +2278,7 @@ impl DamageKind {
             Self::LightningBolt => "minecraft:lightning_bolt",
             Self::SulfurCubeHot => "minecraft:sulfur_cube_hot",
             Self::BadRespawnPoint => "minecraft:bad_respawn_point",
+            Self::WindCharge => "minecraft:wind_charge",
             Self::SonicBoom => "minecraft:sonic_boom",
             Self::Mace => "minecraft:mace_smash",
             Self::Spear => "minecraft:spear",
@@ -2294,6 +2343,7 @@ impl DamageKind {
             Self::LightningBolt => "lightningBolt",
             Self::SulfurCubeHot => "sulfurCubeHot",
             Self::BadRespawnPoint => "badRespawnPoint",
+            Self::WindCharge => "windCharge",
             Self::SonicBoom => "sonic_boom",
             Self::Mace => "mace_smash",
             Self::Spear => "spear",
@@ -2360,6 +2410,7 @@ impl DamageKind {
                 | Self::Thrown
                 | Self::Thorns
                 | Self::IndirectMagic
+                | Self::WindCharge
                 | Self::SonicBoom
                 | Self::Mace
         ) || matches!(self, Self::Wither)
@@ -3279,8 +3330,11 @@ pub struct Mob {
     ///
     /// The sniffer's state machine and drop-seed tick; default for other mobs.
     pub sniffer: sniffer::Sniffer,
-    /// 快乐恶魂的悬停超时、牵引者计时和两项同步布尔；别的生物是缺省值。
+    /// 旋风人的姿态；别的生物是缺省值。
     ///
+    /// The breeze's pose; default for other mobs.
+    pub breeze: breeze::Breeze,
+    /// 快乐恶魂的悬停超时、牵引者计时和两项同步布尔；别的生物是缺省值。
     /// The happy ghast's hover timeout, holder timer and two synced booleans;
     /// default for other mobs.
     pub happy_ghast: happy_ghast::HappyGhastState,
@@ -3472,6 +3526,7 @@ impl Mob {
             MobType::Warden => warden::attributes(),
 
             MobType::Sniffer => sniffer::attributes(),
+            MobType::Breeze => breeze::attributes(),
             MobType::HappyGhast => happy_ghast::attributes(),
             MobType::Vindicator => vindicator::attributes(),
             MobType::Ravager => ravager::attributes(),
@@ -3582,15 +3637,14 @@ impl Mob {
             | MobType::ZombieNautilus
             | MobType::Creaking
             | MobType::Sniffer
+            | MobType::Breeze => GoalSelector::default(),
             // 成年快乐恶魂的 `registerGoals` 只在 `adultGhastSetup` 里跑；
             // 构造出来后 `setBaby(true)` 会走 `babyGhastSetup` 把目标全清掉，
             // 所以这里（等价构造后尚未跨年龄边界）保持空表。
             // An adult's `registerGoals` only runs from `adultGhastSetup`;
             // `setBaby(true)` runs `babyGhastSetup` and clears them, so the
             // constructor-equivalent table here stays empty.
-            | MobType::HappyGhast
-            | MobType::CopperGolem => GoalSelector::default(),
-
+            MobType::HappyGhast | MobType::CopperGolem => GoalSelector::default(),
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
             // alongside the brain.
@@ -3666,8 +3720,8 @@ impl Mob {
             | MobType::Nautilus
             | MobType::ZombieNautilus
             | MobType::Sniffer
-            | MobType::HappyGhast
-            | MobType::CopperGolem => GoalSelector::default(),
+            | MobType::Breeze => GoalSelector::default(),
+            MobType::HappyGhast | MobType::CopperGolem => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Ocelot => ocelot::target_goals(),
@@ -3943,6 +3997,7 @@ impl Mob {
             creaking: creaking::CreakingState::new(),
             nautilus: nautilus::NautilusState::default(),
             sniffer: sniffer::Sniffer::default(),
+            breeze: breeze::Breeze::default(),
             happy_ghast: happy_ghast::initial_state(),
             wandering_trader: wandering_trader::WanderingTrader::default(),
             trader_llama: trader_llama::TraderLlama::default(),
@@ -4897,6 +4952,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Warden => Some(Box::new(warden_ai::brain())),
 
         MobType::Sniffer => Some(Box::new(sniffer::brain())),
+        MobType::Breeze => Some(Box::new(breeze::brain())),
         MobType::HappyGhast => Some(Box::new(happy_ghast::brain())),
         _ => None,
     }

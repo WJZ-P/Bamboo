@@ -15,6 +15,7 @@ pub mod evoker_fangs;
 pub mod leash_knot;
 pub mod lightning;
 pub mod mob;
+pub mod ominous_item_spawner;
 pub mod parallel;
 pub mod raid;
 pub mod random;
@@ -25,6 +26,7 @@ pub mod splash_potion;
 pub mod store;
 pub mod thrown_egg;
 pub mod view;
+pub mod wind_charge;
 
 mod explosion;
 mod falling;
@@ -254,6 +256,14 @@ pub enum EntityKind {
     ///
     /// Evoker fangs, vanilla `EvokerFangs`.
     EvokerFangs(Box<evoker_fangs::EvokerFangs>),
+    /// 不祥物品生成器，`OminousItemSpawner`。
+    ///
+    /// An ominous item spawner, vanilla `OminousItemSpawner`.
+    OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawner>),
+    /// 风弹，`WindCharge` / `BreezeWindCharge`。
+    ///
+    /// A wind charge, vanilla `WindCharge` / `BreezeWindCharge`.
+    WindCharge(Box<wind_charge::WindCharge>),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -275,6 +285,10 @@ impl EntityKind {
             Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
             Self::LightningBolt(_) => mc_bamboo_data::registries::entity_type::LIGHTNING_BOLT,
             Self::EvokerFangs(_) => mc_bamboo_data::registries::entity_type::EVOKER_FANGS,
+            Self::OminousItemSpawner(_) => {
+                mc_bamboo_data::registries::entity_type::OMINOUS_ITEM_SPAWNER
+            }
+            Self::WindCharge(charge) => charge.variant.entity_type(),
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -509,6 +523,10 @@ impl Entity {
             EntityKind::SplashPotion(_) => splash_potion::tick(self, ctx),
             EntityKind::LightningBolt(_) => lightning::tick(self, ctx),
             EntityKind::EvokerFangs(_) => evoker_fangs::tick(self, ctx),
+            EntityKind::OminousItemSpawner(_) => {
+                ominous_item_spawner::tick(self, ctx);
+            }
+            EntityKind::WindCharge(_) => wind_charge::tick(self, ctx),
             EntityKind::LeashKnot(_) => leash_knot::tick(self, ctx),
             EntityKind::Mob(_) => {}
         }

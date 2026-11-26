@@ -888,18 +888,22 @@ fn optimal_jump_vector(
     let max_velocity = (strength * f64::from(MAX_JUMP_VELOCITY_MULTIPLIER)) as f32;
     angles
         .into_iter()
-        .find_map(|angle| jump_vector_for_angle(cx, target, max_velocity, angle, dimensions))
+        .find_map(|angle| jump_vector_for_angle(cx, target, max_velocity, angle, dimensions, true))
 }
 
-/// `LongJumpUtil.calculateJumpVectorForAngle(body, target, maxVelocity, angle, true)`。
+/// `LongJumpUtil.calculateJumpVectorForAngle(body, target, maxVelocity, angle,
+/// allowUnsafe)`。山羊传 `true`（沿途碰撞箱检测），旋风人传 `false`（只算初速度）。
 ///
-/// `LongJumpUtil.calculateJumpVectorForAngle(body, target, maxVelocity, angle, true)`.
-fn jump_vector_for_angle(
+/// `LongJumpUtil.calculateJumpVectorForAngle(body, target, maxVelocity, angle,
+/// allowUnsafe)`. Goats pass `true` (per-step collision checks); breezes pass
+/// `false` (velocity only).
+pub(super) fn jump_vector_for_angle(
     cx: &Cx,
     target: Vec3,
     max_velocity: f32,
     angle: i32,
     (width, height): (f32, f32),
+    allow_unsafe: bool,
 ) -> Option<Vec3> {
     let from = cx.me.position;
     let plane = Vec3::new(target.x - from.x, 0.0, target.z - from.z)
@@ -929,19 +933,21 @@ fn jump_vector_for_angle(
     }
     let v0r = v0 * cos;
     let v0y = v0 * sin;
-    let samples = mth::ceil(r / v0r) * 2;
-    let mut ri = 0.0;
-    let mut previous: Option<Vec3> = None;
-    for _ in 0..samples - 1 {
-        ri += r / f64::from(samples);
-        let yi = sin / cos * ri - ri * ri * gravity / (2.0 * v0_squared * (cos * cos));
-        let sample = Vec3::new(from.x + ri * cos_xz, from.y + yi, from.z + ri * sin_xz);
-        if let Some(previous) = previous
-            && !clear_transition(cx, (width, height), previous, sample)
-        {
-            return None;
+    if allow_unsafe {
+        let samples = mth::ceil(r / v0r) * 2;
+        let mut ri = 0.0;
+        let mut previous: Option<Vec3> = None;
+        for _ in 0..samples - 1 {
+            ri += r / f64::from(samples);
+            let yi = sin / cos * ri - ri * ri * gravity / (2.0 * v0_squared * (cos * cos));
+            let sample = Vec3::new(from.x + ri * cos_xz, from.y + yi, from.z + ri * sin_xz);
+            if let Some(previous) = previous
+                && !clear_transition(cx, (width, height), previous, sample)
+            {
+                return None;
+            }
+            previous = Some(sample);
         }
-        previous = Some(sample);
     }
     Some(Vec3::new(v0r * cos_xz, v0y, v0r * sin_xz).scale(f64::from(0.95_f32)))
 }

@@ -1412,10 +1412,14 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
-    /// `spawnOminousOminousItemSpawner`：在探测到的玩家上方生成不祥物品生成器。
-    /// 默认不生成。
-    fn trial_spawner_spawn_ominous_item(&mut self, _pos: BlockPos, _loot_table: &str) -> bool {
-        false
+    /// `TrialSpawnerStateData.getDispensingItems`：按战利品表和 lowResolutionPosition
+    /// 求出一组（数量为 1 的物品堆，权重 = 原数量）。默认空。
+    fn trial_spawner_dispensing(
+        &mut self,
+        _pos: BlockPos,
+        _loot_table: &str,
+    ) -> Vec<(ItemStack, i32)> {
+        Vec::new()
     }
 
     /// `resetAfterBecomingOminous`：变成不祥试炼时让已记录的生物消失。默认不做事。
