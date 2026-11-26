@@ -383,7 +383,10 @@ pub(super) fn custom_server_ai_step(
     decision_gap: i64,
 ) {
     let now = ctx.blocks().game_time();
-    tick_vibration(me, mob, ctx, now);
+    // 官方 `Allay.tick` 在服务端先 `PathfinderMob.tick`（里面跑 `customServerAiStep`：
+    // 大脑 + 活动重选），之后才 `VibrationSystem.Ticker.tick`，最后恐慌停舞。
+    // `Allay.tick` on the server runs `PathfinderMob.tick` (brain + activity) first,
+    // then `VibrationSystem.Ticker.tick`, then the panic stop.
     if let Some(mut brain) = mob.brain.take() {
         let replaced = brain.tick_by(me, mob, ctx, decision_gap.max(1));
         mob.brain = Some(Box::new(replaced.unwrap_or(*brain)));
@@ -391,6 +394,7 @@ pub(super) fn custom_server_ai_step(
     if let Some(brain) = mob.brain.as_mut() {
         super::allay_ai::update_activity(brain);
     }
+    tick_vibration(me, mob, ctx, now);
     // `Allay.tick` 还在恐慌时立刻停舞。
     if mob.is_panicking() {
         set_dancing(mob, false);

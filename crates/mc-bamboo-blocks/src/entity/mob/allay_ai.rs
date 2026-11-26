@@ -14,7 +14,7 @@ use super::{
     brain::{
         Activity, ActivityData, Brain, BrainTemplate, Cx, TemplateCache,
         behavior::{Class, Gate, Kind, MoveToTargetSink, Speed},
-        current_position,
+        current_position, direction_from_rotation,
         memory::{
             MemoryStatus::{self, Registered, ValueAbsent, ValuePresent},
             MemoryType::{self, *},
@@ -403,7 +403,9 @@ fn trigger_stay_close(cx: &mut Cx) -> bool {
     let Some(at) = current_position(cx, tracker) else {
         return false;
     };
-    if cx.me.position.distance_to_sqr(at) < 4.0 * 4.0 {
+    // `closerThan(tracker.currentPosition(), tooFar=16)`：16 格内就不跟了。
+    // `closerThan(tracker.currentPosition(), tooFar=16)`: no need to follow within 16.
+    if cx.me.position.distance_to_sqr(at) < 16.0 * 16.0 {
         return false;
     }
     cx.memories.set(LookTarget, MemoryValue::Look(tracker));
@@ -412,15 +414,31 @@ fn trigger_stay_close(cx: &mut Cx) -> bool {
         MemoryValue::Walk(WalkTarget {
             target: tracker,
             speed: 2.25,
-            close_enough: 16,
+            close_enough: 4,
         }),
     );
     true
 }
 
-/// `RandomStroll.fly(1)`：飞行随机落点（复用飞行导航的空域候选）。
+/// `RandomStroll.fly(1)`：`getTargetFlyPos(mob, 10, 7)` →
+/// `AirAndWaterRandomPos.getPos(mob, 10, 7, -2, dir.x, dir.z, PI/2)`。
 fn trigger_fly_stroll(cx: &mut Cx) -> bool {
-    let pos = super::parrot::flying_wander_position(cx.me, cx.mob, cx.ctx.blocks());
+    // `getViewVector(0)`：partialTick=0 时俯仰是身体 `x_rot_o`，偏航是 `LivingEntity`
+    // 覆写后的头部 `y_head_rot_o`（不是身体 `y_rot_o`）。
+    // `getViewVector(0)`: at partialTick 0 the pitch is the body `x_rot_o` while the yaw
+    // is the head `y_head_rot_o` (the `LivingEntity` override), not the body `y_rot_o`.
+    let dir = direction_from_rotation(cx.mob.x_rot_o, cx.mob.y_head_rot_o);
+    let pos = super::goals::air_and_water_random_pos(
+        cx.me,
+        cx.mob,
+        cx.ctx.blocks(),
+        10,
+        7,
+        -2,
+        dir.x,
+        dir.z,
+        f64::from(std::f32::consts::FRAC_PI_2),
+    );
     cx.memories.set_or_erase(
         WalkTarget,
         pos.map(|pos| MemoryValue::Walk(WalkTarget::to_point(pos, 1.0, 0))),
