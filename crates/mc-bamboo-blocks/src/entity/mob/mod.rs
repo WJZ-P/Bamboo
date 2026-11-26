@@ -1140,7 +1140,9 @@ impl MobType {
     /// `LivingEntity.isPushable()`, overridden to false by bats, which neither push nor
     /// get pushed.
     pub const fn is_pushable(self) -> bool {
-        !matches!(self, Self::Bat)
+        // 蝙蝠和盔甲架都不推别人也不被推。
+        // Bats and armour stands neither push nor get pushed.
+        !matches!(self, Self::Bat | Self::ArmorStand)
     }
 
     /// 把 `checkFallDamage` 覆写成空方法的类型（鹦鹉、蝙蝠、幻翼、蜜蜂、快乐恶魂）。
@@ -4178,6 +4180,12 @@ impl Mob {
             let (width, _, _) = self.mob_type.dimensions(false);
             return (width, 1.0);
         }
+        if self.mob_type == MobType::ArmorStand {
+            // 普通 / 小型 / 标记三种尺寸由 `DATA_CLIENT_FLAGS` 决定。
+            // Normal / small / marker sizes come from `DATA_CLIENT_FLAGS`.
+            let (width, height, _) = self.armor_stand.dimensions();
+            return (width, height);
+        }
         let (width, height, _) = self.mob_type.dimensions(self.is_baby());
         (width, height)
     }
@@ -4694,6 +4702,10 @@ pub struct MobPublic {
     /// `WanderingTrader.despawnDelay`: trader llamas read the holder's countdown
     /// in `maybeDespawn()`; zero for other mobs.
     pub trader_despawn_delay: i32,
+    /// 盔甲架的同步状态（客户端标志与六个姿势）；别的生物是缺省值。
+    ///
+    /// The armour stand's synced state (client flags and six poses); default elsewhere.
+    pub armor_stand: armor_stand::ArmorStand,
 }
 
 impl MobPublic {
@@ -4846,6 +4858,7 @@ impl MobPublic {
             passengers: mob.passengers.clone(),
             leash_holder: leash::leash_holder(mob),
             trader_despawn_delay: mob.wandering_trader.despawn_delay,
+            armor_stand: mob.armor_stand,
         }
     }
 
@@ -4882,6 +4895,10 @@ impl MobPublic {
         }
         if self.mob_type == MobType::Villager && self.sleeping_pos.is_some() {
             return (0.2, 0.2);
+        }
+        if self.mob_type == MobType::ArmorStand {
+            let (width, height, _) = self.armor_stand.dimensions();
+            return (width, height);
         }
         let (width, height, _) = self.mob_type.dimensions(self.baby);
         (width, height)

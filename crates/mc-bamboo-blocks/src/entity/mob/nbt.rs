@@ -710,6 +710,11 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         }
         _ => {}
     }
+    if mob.mob_type == MobType::ArmorStand {
+        // `ArmorStand.addAdditionalSaveData`：六个布尔、`DisabledSlots` 与 `Pose`。
+        // `ArmorStand.addAdditionalSaveData`: the six booleans, `DisabledSlots` and `Pose`.
+        mob.armor_stand.write_nbt(mob, &mut out);
+    }
     for (key, value) in &mob.passthrough {
         out.retain(|(existing, _)| existing != key);
         out.push((key.clone(), value.clone()));
@@ -1192,6 +1197,15 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Enderman {
             super::enderman::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::ArmorStand {
+            // `ArmorStand.readAdditionalSaveData`：读专属键，`NoAI` 恒真，并按标志恢复尺寸。
+            // `ArmorStand.readAdditionalSaveData`: the keys, no AI, and the flag-driven size.
+            mob.armor_stand.read_nbt(tag);
+            mob.no_ai = true;
+            let (width, height, eye) = mob.armor_stand.dimensions();
+            me.dimensions = (width, height);
+            mob.eye_height = eye;
         }
         mob.passthrough = match tag {
             Tag::Compound(entries) => entries

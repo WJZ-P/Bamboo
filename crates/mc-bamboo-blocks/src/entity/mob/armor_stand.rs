@@ -235,3 +235,97 @@ impl ArmorStand {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        archive::tag,
+        entity::{
+            Entity,
+            mob::{MobType, nbt},
+        },
+    };
+    use mc_bamboo_core::Vec3;
+
+    #[test]
+    fn dimensions_follow_the_client_flags() {
+        let mut entity = Entity::by_mob_type(MobType::ArmorStand, Vec3::default());
+        assert_eq!(entity.kind.dimensions(), (0.5, 1.975));
+        entity.with_mob(|_, mob| mob.armor_stand.set_small(true));
+        assert_eq!(entity.kind.dimensions(), (0.25, 0.9875));
+        entity.with_mob(|_, mob| mob.armor_stand.set_marker(true));
+        assert_eq!(entity.kind.dimensions(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn armour_stand_state_survives_a_save_and_load() {
+        let mut entity = Entity::by_mob_type(MobType::ArmorStand, Vec3::new(0.5, 62.0, 0.5));
+        entity.with_mob(|_, mob| {
+            let stand = &mut mob.armor_stand;
+            stand.set_small(true);
+            stand.set_show_arms(true);
+            stand.set_no_base_plate(true);
+            stand.set_marker(true);
+            stand.invisible = true;
+            stand.disabled_slots = 0x00ff_ffff;
+            stand.head_pose = Rotations::new(1.0, 2.0, 3.0);
+            stand.body_pose = Rotations::new(-4.0, -5.0, -6.0);
+            stand.left_arm_pose = Rotations::new(7.0, 8.0, 9.0);
+            stand.right_arm_pose = Rotations::new(10.0, 11.0, 12.0);
+            stand.left_leg_pose = Rotations::new(13.0, 14.0, 15.0);
+            stand.right_leg_pose = Rotations::new(16.0, 17.0, 18.0);
+        });
+        let saved = nbt::write_mob(&entity.split()).expect("an armour stand saves");
+        assert_eq!(tag::byte_or(&saved, "Invisible", 0), 1);
+        assert_eq!(tag::byte_or(&saved, "Small", 0), 1);
+        assert_eq!(tag::byte_or(&saved, "ShowArms", 0), 1);
+        assert_eq!(tag::byte_or(&saved, "NoBasePlate", 0), 1);
+        assert_eq!(tag::byte_or(&saved, "Marker", 0), 1);
+        assert_eq!(tag::int_or(&saved, "DisabledSlots", 0), 0x00ff_ffff);
+        let pose = tag::field(&saved, "Pose").expect("Pose is written");
+        let entries = tag::entries(pose).expect("Pose is a compound");
+        let head = entries
+            .iter()
+            .find(|(key, _)| key == "Head")
+            .map(|(_, value)| value)
+            .expect("Head pose is written");
+        assert_eq!(
+            Rotations::from_tag(head, DEFAULT_HEAD_POSE),
+            Rotations::new(1.0, 2.0, 3.0)
+        );
+
+        let row = nbt::read_mob(&saved, "minecraft:armor_stand", 7)
+            .expect("the tag loads")
+            .expect("armour stands are modelled");
+        let entity = row.into_entity();
+        let mob = entity.kind.mob().expect("a mob");
+        assert!(mob.no_ai);
+        assert_eq!(
+            mob.armor_stand.client_flags,
+            CLIENT_FLAG_SMALL
+                | CLIENT_FLAG_SHOW_ARMS
+                | CLIENT_FLAG_NO_BASEPLATE
+                | CLIENT_FLAG_MARKER
+        );
+        assert!(mob.armor_stand.invisible);
+        assert_eq!(mob.armor_stand.disabled_slots, 0x00ff_ffff);
+        assert_eq!(mob.armor_stand.head_pose, Rotations::new(1.0, 2.0, 3.0));
+        assert_eq!(mob.armor_stand.body_pose, Rotations::new(-4.0, -5.0, -6.0));
+        assert_eq!(mob.armor_stand.left_arm_pose, Rotations::new(7.0, 8.0, 9.0));
+        assert_eq!(
+            mob.armor_stand.right_arm_pose,
+            Rotations::new(10.0, 11.0, 12.0)
+        );
+        assert_eq!(
+            mob.armor_stand.left_leg_pose,
+            Rotations::new(13.0, 14.0, 15.0)
+        );
+        assert_eq!(
+            mob.armor_stand.right_leg_pose,
+            Rotations::new(16.0, 17.0, 18.0)
+        );
+        // 标记盔甲架的碰撞盒是 (0, 0)。
+        assert_eq!(entity.dimensions, (0.0, 0.0));
+    }
+}
