@@ -341,14 +341,17 @@ struct MaceTarget {
 
 /// `MaceItem.knockbackPredicate` 里的候选收集：主目标碰撞盒 inflate(3.5) 与
 /// 候选碰撞盒相交、距主目标 ≤ 3.5 的其它 `LivingEntity`（玩家也算，攻击者和
-/// 主目标不算）。Bamboo 没有队伍和驯服关系，标记盔甲架 / 旁观者 / 飞行中的
-/// 创造玩家都不在候选里（旁观者和创造飞行玩家由攻击路径排除，盔甲架不建模）。
+/// 主目标不算）。和攻击者同队的、攻击者自己驯服的、以及主目标驯服的宠物都不
+/// 算（`isAlliedTo` 和 `isOwnedBy(target)`）；标记盔甲架 / 旁观者 / 飞行中的
+/// 创造玩家同样不在候选里（旁观者和创造飞行玩家由攻击路径排除，盔甲架不建模）。
 /// 玩家排在生物之后（玩家不在实体表里）。
 ///
 /// The `MaceItem.knockbackPredicate` candidates: other `LivingEntity`s whose box
 /// intersects the target's inflated by 3.5 and that are within 3.5 of the target
-/// (players included, attacker and main target excluded). Bamboo has no teams or
-/// pets; spectators, marker armour stands and creative flying players are excluded.
+/// (players included, attacker and main target excluded). Teammates, the attacker's
+/// own pets and pets owned by the main target are excluded (`isAlliedTo` and
+/// `isOwnedBy(target)`); spectators, marker armour stands and creative flying
+/// players are excluded too.
 fn collect_mace_targets(
     region: &Region,
     attacker: PlayerId,
@@ -362,16 +365,25 @@ fn collect_mace_targets(
     );
     let radius_sq = SMASH_KNOCKBACK_RADIUS * SMASH_KNOCKBACK_RADIUS;
     let within = |position: Vec3| position.distance_to_sqr(target.position) <= radius_sq;
+    // `attacker.isAlliedTo(candidate)` 里的两份事实：攻击者的队伍和 UUID。
+    //
+    // The attacker's team and UUID, the two facts behind `attacker.isAlliedTo(candidate)`.
+    let attacker_player = region.players.get(&attacker);
+    let attacker_team = attacker_player
+        .and_then(|player| region.global.scoreboard.team_index_of(&player.name));
+    let attacker_uuid = attacker_player.map(|player| *player.uuid.as_bytes());
     let mut out: Vec<MaceTarget> = region
         .entities
         .iter_public()
         .filter(|public| {
             let bounds = entity_bounds(public.position, public.kind.dimensions());
-            matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
-                && !public.removed
-                && public.uid != main_target
-                && public.uid != attacker.0
-                && area.intersects_coords(
+            let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind else {
+                return false;
+            };
+            if public.removed
+                || public.uid == main_target
+                || public.uid == attacker.0
+                || !area.intersects_coords(
                     bounds.min_x,
                     bounds.min_y,
                     bounds.min_z,
@@ -379,7 +391,23 @@ fn collect_mace_targets(
                     bounds.max_y,
                     bounds.max_z,
                 )
-                && within(public.position)
+                || !within(public.position)
+            {
+                return false;
+            }
+            // `TamableAnimal.isTame()`：驯服位。
+            let tame = mob.tame_flags & mc_bamboo_blocks::entity::mob::tame::FLAG_TAME != 0;
+            // `attacker.isAlliedTo(candidate)`：同队，或候选是攻击者驯服的宠物
+            // （`TamableAnimal.considersEntityAsAlly` 认主人）。
+            //
+            // `attacker.isAlliedTo(candidate)`: same team, or a pet the attacker owns
+            // (`TamableAnimal.considersEntityAsAlly` treats its owner as an ally).
+            let candidate_team = region.global.scoreboard.entity_team_index(&mob.uuid);
+            let allied = (attacker_team.is_some() && candidate_team == attacker_team)
+                || (tame && mob.owner == attacker_uuid);
+            // `isOwnedBy(target)`：候选是主目标驯服的宠物。
+            let owned_by_target = tame && mob.owner == target.uuid;
+            !allied && !owned_by_target
         })
         .map(|public| {
             let resistance = match &public.kind {
@@ -398,6 +426,11 @@ fn collect_mace_targets(
         .collect();
     for player in region.players.values() {
         if player.id == attacker || player.id.0 == main_target {
+            continue;
+        }
+        // `attacker.isAlliedTo(player)`：玩家不是宠物，只比队伍。
+        let candidate_team = region.global.scoreboard.team_index_of(&player.name);
+        if attacker_team.is_some() && candidate_team == attacker_team {
             continue;
         }
         let bounds = player.bounding_box();
@@ -575,6 +608,10 @@ struct TargetInfo {
     health: f32,
     dimensions: (f32, f32),
     on_ground: bool,
+    /// 目标的 UUID，重锤范围击退的 `isOwnedBy(target)` 用它比候选宠物。
+    ///
+    /// The target's UUID, compared by the mace area knockback's `isOwnedBy(target)`.
+    uuid: Option<[u8; 16]>,
 }
 
 fn mob_target(public: &mc_bamboo_blocks::entity::EntityPublic) -> TargetInfo {
@@ -583,6 +620,10 @@ fn mob_target(public: &mc_bamboo_blocks::entity::EntityPublic) -> TargetInfo {
         mc_bamboo_blocks::entity::KindPublic::Mob(mob) => mob.health,
         _ => 0.0,
     };
+    let uuid = match &public.kind {
+        mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.uuid),
+        _ => None,
+    };
     TargetInfo {
         position: public.position,
         entity_type: public.kind.entity_type(),
@@ -590,6 +631,7 @@ fn mob_target(public: &mc_bamboo_blocks::entity::EntityPublic) -> TargetInfo {
         health,
         dimensions: public.kind.dimensions(),
         on_ground: public.on_ground,
+        uuid,
     }
 }
 
@@ -801,6 +843,7 @@ fn resolve_target(
                 (bounds.max_y - bounds.min_y) as f32,
             ),
             on_ground: other.on_ground,
+            uuid: Some(*other.uuid.as_bytes()),
         })
 }
 
