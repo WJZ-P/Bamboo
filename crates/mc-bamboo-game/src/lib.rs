@@ -1243,6 +1243,9 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
         );
     }
     region.sound_seed_generator = mc_bamboo_blocks::LevelRandom::new(12345);
+    // 官方假世界的 `Level.random` 是 `RandomSource.create(1)`（爆炸方块射线读它），
+    // `soundSeedGenerator` 是 12345。风爆的爆炸要读 `world.random()`，这里对齐种子。
+    region.random = mc_bamboo_blocks::LevelRandom::new(1);
     // 第一头 dummy 只用来对齐官方假世界的实体 ID；`real_cows` 是 Java
     // `stepJson(cows)` 里真正逐刻比较的那几头。
     //

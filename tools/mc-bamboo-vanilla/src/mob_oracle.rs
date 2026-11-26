@@ -4173,6 +4173,10 @@ impl Report {
             Some("mace_breach") => scene
                 .attack_enchants
                 .retain(|(name, _)| name != "minecraft:breach"),
+            // 风爆改坏：从武器上剥掉 wind_burst，攻击者不再被弹起（和官方分叉）。
+            Some("mace_wind_burst") => scene
+                .attack_enchants
+                .retain(|(name, _)| name != "minecraft:wind_burst"),
             _ => {}
         }
         let output = replay_player_hurt(&scene);
@@ -5060,7 +5064,8 @@ fn is_attack_scene(name: &str) -> bool {
     name.ends_with("attack_cow") || name.starts_with("player_attack_")
 }
 
-/// 只发给玩家自己的包：`player_combat_enter` / `hurt_animation` / `set_health`。
+/// 只发给玩家自己的包：`player_combat_enter` / `hurt_animation` / `set_health` /
+/// `set_entity_motion` / 爆炸包（`ServerLevel.explode` 走 `connection.send`）。
 fn is_self_packet(bytes: &[u8]) -> bool {
     matches!(
         packet_id(bytes),
@@ -5069,6 +5074,7 @@ fn is_self_packet(bytes: &[u8]) -> bool {
                 | mc_bamboo_data::packets::play::clientbound::HURT_ANIMATION
                 | mc_bamboo_data::packets::play::clientbound::SET_HEALTH
                 | mc_bamboo_data::packets::play::clientbound::SET_ENTITY_MOTION
+                | mc_bamboo_data::packets::play::clientbound::EXPLODE
         )
     )
 }

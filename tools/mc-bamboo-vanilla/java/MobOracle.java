@@ -4804,6 +4804,17 @@ public final class MobOracle {
                 stab.equipment(new int[] {0, 0, 0, 0, spear}, new int[] {0, 0, 0, 0});
                 stab.attackSetup(33, false, 0.0, true).stab(1);
                 scenes.add(stab);
+                // 风爆：带 wind_burst 的重锤下砸，爆炸把攻击者弹起来。5 格摔落
+                // 满足 `fall_distance >= 1.5`，攻击者竖直速度 +1.2（等级 1 的 lookup）。
+                Scene windBurst = new Scene("player_attack_mace_wind_burst").ticks(6)
+                        .playerPackets().packets();
+                ground(windBurst, 4);
+                windBurst.player(0.5, 64.0, 0.5, Items.MACE);
+                windBurst.cow(2.5, 64.0, 0.5, 0.0F, 253L);
+                windBurst.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
+                windBurst.attackEnchant("minecraft:wind_burst", 1)
+                        .attackSetup(33, false, 5.0, false).attack(1, 0);
+                scenes.add(windBurst);
             }
             // ---- 1b：死亡、掉落、重生与回血 ----
             // keepInventory × immediateRespawn × 等级经验 × 消失诅咒。

@@ -141,6 +141,29 @@ impl World<'_> {
         });
     }
 
+    /// 风爆 `wind_burst` 的 `explode`：只按 `knockback_multiplier` 推开范围内的实体，
+    /// 不伤、不破坏方块（`ExplosionInteraction.TRIGGER`），也不发爆炸包（客户端由
+    /// `post_attack` 自己处理）。返回 `(被炸到的方块数, 被推开的玩家 (uid, 击退向量))`，
+    /// 调用方把攻击者那一份写进自己的速度、方块数带进爆炸包。
+    ///
+    /// The wind burst `explode`: push entities by `knockback_multiplier` without
+    /// hurting or breaking blocks (`ExplosionInteraction.TRIGGER`) and without a
+    /// blast packet. Returns `(block count, pushed players (uid, knockback))`; the
+    /// caller writes the attacker's entry into its velocity and the block count
+    /// into the blast packet.
+    pub fn explode_wind_burst(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        knockback_multiplier: f32,
+    ) -> (i32, Vec<(EntityUid, Vec3)>) {
+        // `ServerExplosion.explode` 先算方块射线（风爆用 TRIGGER，不真正破坏），
+        // 再伤实体。射线消耗世界随机源，必须和官方同一条路径。
+        let broken = self.calculate_exploded_positions(center, radius, None);
+        let block_count = broken.len() as i32;
+        (block_count, explode_wind_burst(self, center, radius, knockback_multiplier))
+    }
+
     /// `RespawnAnchorBlock.explode` 走到 `ServerLevel.explode(..., BLOCK)`：强度 5、带火，
     /// 伤害类型 `bad_respawn_point`。`anchor` 是被移除的重生锚那格，近水时按水的抗性算。
     ///
@@ -397,6 +420,23 @@ fn hurt_living_by_explosion(
     center: Vec3,
     radius: f32,
 ) -> Vec<(EntityUid, Vec3)> {
+    hurt_living_by_explosion_with(world, source, damage, center, radius, 1.0, true)
+}
+
+/// `hurt_living_by_explosion` 的参数化版本：`multiplier` 是击退倍率（风爆的
+/// `knockback_multiplier` lookup），`do_damage` 为假时只推开不伤（风弹 / 风爆爆炸）。
+///
+/// `hurt_living_by_explosion` with a knockback multiplier and a damage flag; the
+/// wind charge / wind burst blast pushes without hurting.
+fn hurt_living_by_explosion_with(
+    world: &mut World,
+    source: Option<&EntityPublic>,
+    damage: DamageSource,
+    center: Vec3,
+    radius: f32,
+    multiplier: f32,
+    do_damage: bool,
+) -> Vec<(EntityUid, Vec3)> {
     if radius < 1.0e-5 {
         return Vec::new();
     }
@@ -411,8 +451,10 @@ fn hurt_living_by_explosion(
         floor(center.z + double_radius + 1.0),
     );
     for id in world.entity_ids() {
-        if let Some((amount, knock)) = mob_blast(world, id, center, double_radius, area) {
-            world.hurt_mob(id, damage, amount);
+        if let Some((amount, knock)) = mob_blast(world, id, center, double_radius, area, multiplier) {
+            if do_damage {
+                world.hurt_mob(id, damage, amount);
+            }
             world.with_entity_mut(id, &mut |entity| {
                 entity.delta = entity.delta.add(knock);
                 // `Entity.push(Vec3)` 置 `needsSync`：速度要同步出去。
@@ -429,8 +471,12 @@ fn hurt_living_by_explosion(
         .for_each_player(&mut |player| players.push(*player));
     let mut hit_players = Vec::new();
     for player in players {
-        if let Some((amount, knock)) = player_blast(world, &player, center, double_radius, area) {
-            world.hurt_player_from_mob(player.uid, damage, amount, source);
+        if let Some((amount, knock)) =
+            player_blast(world, &player, center, double_radius, area, multiplier)
+        {
+            if do_damage {
+                world.hurt_player_from_mob(player.uid, damage, amount, source);
+            }
             // 创造且飞行中的玩家照官方不进 `getHitPlayers`（伤害和 push 照给）。
             if !(player.creative && player.flying) {
                 hit_players.push((player.uid, knock));
@@ -440,15 +486,36 @@ fn hurt_living_by_explosion(
     hit_players
 }
 
+/// 风爆 `wind_burst` 的 `explode`：`SimpleExplosionDamageCalculator` 的
+/// `damagesEntities=false`，只按 `knockback_multiplier` 推开范围内的实体，不破坏方块
+/// （`ExplosionInteraction.TRIGGER`）。返回被推开的玩家 `(uid, 击退向量)`。
+///
+/// The wind burst `explode`: `damagesEntities=false`, so entities are only pushed
+/// by `knockback_multiplier` and blocks are left intact (`ExplosionInteraction.TRIGGER`).
+/// Returns the pushed players `(uid, knockback)`.
+pub(crate) fn explode_wind_burst(
+    world: &mut World,
+    center: Vec3,
+    radius: f32,
+    knockback_multiplier: f32,
+) -> Vec<(EntityUid, Vec3)> {
+    let damage = DamageSource::environment(DamageKind::Explosion);
+    hurt_living_by_explosion_with(world, None, damage, center, radius, knockback_multiplier, false)
+}
+
 /// 一头生物在爆炸里受的伤害和被推开的速度；不在范围里返回 `None`。
+/// `multiplier` 是 `ExplosionDamageCalculator.getKnockbackMultiplier`（风爆是 lookup，
+/// 普通爆炸是 1）。
 ///
 /// The damage and push one mob takes from a blast, or `None` when out of range.
+/// `multiplier` is `getKnockbackMultiplier` (the wind burst lookup, else 1).
 fn mob_blast(
     world: &World,
     id: i32,
     center: Vec3,
     double_radius: f64,
     area: Aabb,
+    multiplier: f32,
 ) -> Option<(f32, Vec3)> {
     let entity = world.entity(id)?;
     let EntityKind::Mob(mob) = &entity.kind else {
@@ -472,7 +539,7 @@ fn mob_blast(
     let resistance = mob
         .attributes
         .value(mc_bamboo_data::registries::attribute::EXPLOSION_KNOCKBACK_RESISTANCE);
-    let push = (1.0 - dist) * f64::from(exposure) * (1.0 - resistance);
+    let push = (1.0 - dist) * f64::from(exposure) * f64::from(multiplier) * (1.0 - resistance);
     let knock = eye.subtract(center).normalize().scale(push);
     Some((blast_damage(dist, exposure, double_radius), knock))
 }
@@ -488,6 +555,7 @@ fn player_blast(
     center: Vec3,
     double_radius: f64,
     area: Aabb,
+    multiplier: f32,
 ) -> Option<(f32, Vec3)> {
     if player.spectator || !player.alive {
         return None;
@@ -514,7 +582,7 @@ fn player_blast(
         crate::entity::item::seen_percent_of(world, center, bounds, CollisionContext::Empty);
     // 爆炸击退抗性和生物一样，读 `EXPLOSION_KNOCKBACK_RESISTANCE`（爆炸保护、盔甲修饰符）。
     let resistance = player.explosion_knockback_resistance;
-    let push = (1.0 - dist) * f64::from(exposure) * (1.0 - resistance);
+    let push = (1.0 - dist) * f64::from(exposure) * f64::from(multiplier) * (1.0 - resistance);
     let knock = player
         .eye_position()
         .subtract(center)

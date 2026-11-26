@@ -30,7 +30,7 @@ use mc_bamboo_protocol::{
     components::{ComponentPatch, ComponentValue, cursor::Holder, defaults, value::KineticCondition},
     item::ItemStack,
     packet::play::{
-        Animate, EntityEvent, GameMode, LevelParticles, Randomization, SetEntityMotion,
+        Animate, EntityEvent, Explode, GameMode, LevelParticles, Randomization, SetEntityMotion,
         SwingAnimationType,
     },
 };
@@ -294,6 +294,47 @@ const SMASH_IMPULSE_Y: f64 = 0.009_999_999_776_482_582;
 /// players have no elytra gliding, so `isFallFlying` is always false.
 fn can_smash_attack(player: &Player) -> bool {
     player.motion.fall_distance > SMASH_FALL_THRESHOLD
+}
+
+/// 风爆 `wind_burst` 的击退倍率：`knockback_multiplier` lookup `[1.2, 1.75, 2.2]`，
+/// 超出等级走 linear `base 1.5 / +0.35`。没有风爆时返回 `None`。
+///
+/// The wind burst knockback multiplier: the `[1.2, 1.75, 2.2]` lookup with a
+/// `base 1.5 / +0.35` linear fallback; `None` without the enchantment.
+fn wind_burst_multiplier(held: &ItemStack) -> Option<f32> {
+    match enchantment_level(held, "minecraft:wind_burst").max(0) {
+        0 => None,
+        1 => Some(1.2),
+        2 => Some(1.75),
+        3 => Some(2.2),
+        level => Some(1.5 + 0.35 * (level - 1) as f32),
+    }
+}
+
+/// `ServerLevel.explode` 给攻击者自己发一份 `ClientboundExplodePacket`：风爆的
+/// gust 大粒子和 `wind_burst` 音效，`block_particles` 空（不破坏方块）。
+///
+/// `ServerLevel.explode` sends the attacker its own `ClientboundExplodePacket`
+/// with the gust particle and `wind_burst` sound; no block particles.
+fn send_wind_burst_explode(
+    region: &mut Region,
+    id: PlayerId,
+    center: Vec3,
+    radius: f32,
+    block_count: i32,
+    knock: Option<Vec3>,
+) {
+    let packet = Explode {
+        center,
+        radius,
+        block_count,
+        player_knockback: knock,
+        explosion_particle: particle_type::GUST_EMITTER_LARGE,
+        explosion_sound: i32::from(sounds::sound_event("minecraft:entity.wind_charge.wind_burst")),
+        block_particles: &[],
+        play_sound: true,
+    };
+    region.links.send_frames(id, &encode_frames(&packet));
 }
 
 /// `MaceItem.getAttackDamageBonus` 的分段摔落加伤（不含致密）：
@@ -769,7 +810,8 @@ fn attack_inner(
     let Some(plan) = plan_attack(region, &target, &request) else {
         return;
     };
-    let (was_hurt, actual_damage) = land_attack(region, id, entity_id, &target, &plan);
+    let (was_hurt, actual_damage, wind_burst_knock, wind_burst_block_count) =
+        land_attack(region, id, entity_id, &target, &plan);
     if was_hurt {
         // 官方 `PlayerHurtEntityTrigger` / `KilledTrigger`（玩家攻击实体）。
         let kind = region
@@ -788,7 +830,16 @@ fn attack_inner(
             payload.clone(),
         );
         crate::advancement_triggers::record(region, id, "minecraft:player_killed_entity", payload);
-        finish_hit(region, id, entity_id, &target, &plan, actual_damage);
+        finish_hit(
+            region,
+            id,
+            entity_id,
+            &target,
+            &plan,
+            actual_damage,
+            wind_burst_knock,
+            wind_burst_block_count,
+        );
     }
     // `PlayerInteractTrigger`：玩家右键实体在 `interaction::on_interact_entity` 里报，
     // 这里是左键攻击，报 `any_block_use` 之外的交互事件。
@@ -1114,7 +1165,7 @@ fn land_attack(
     entity_id: i32,
     target: &TargetInfo,
     plan: &AttackPlan,
-) -> (bool, f32) {
+) -> (bool, f32, Option<Vec3>, i32) {
     let hits_player = player_target(region, entity_id);
     // 官方在 `hurtOrSimulate` 之前记下目标的旧速度，最后用
     // `ServerPlayer.syncVelocity` 那一支把服务端速度改回去，只把新速度发给客户端。
@@ -1126,6 +1177,9 @@ fn land_attack(
         .then(|| region.players.get(&PlayerId(entity_id)))
         .flatten()
         .map(|player| player.motion.delta);
+    // 风爆把攻击者自己弹起来的那一下速度和爆炸方块数，先在这个块里算出来。
+    let mut wind_burst_knock = None;
+    let mut wind_burst_block_count = 0;
     let hit = {
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
@@ -1190,6 +1244,19 @@ fn land_attack(
             if plan.smash {
                 mace_smash_effects(&mut world, plan);
             }
+            // 风爆 `wind_burst`：post_attack 的 explode，对攻击者生效。需求是
+            // `direct_attacker !is_flying && fall_distance >= 1.5`（下砸才有）。
+            if plan.smash
+                && let Some(multiplier) = wind_burst_multiplier(&plan.held)
+            {
+                let (block_count, hit_players) =
+                    world.explode_wind_burst(plan.position, 3.5, multiplier);
+                wind_burst_block_count = block_count;
+                wind_burst_knock = hit_players
+                    .iter()
+                    .find(|(uid, _)| *uid == id.0)
+                    .map(|(_, knock)| *knock);
+            }
             post_attack_effects(
                 &mut world,
                 entity_id,
@@ -1214,7 +1281,14 @@ fn land_attack(
     {
         player.motion.delta = old;
     }
-    (hit, damage_taken(region, entity_id, target.health))
+    // 风爆把攻击者自己弹起来的那一下速度和爆炸包，交给 `finish_hit` 在
+    // 重锤下砸冲量（`set_entity_motion`）之后发。
+    (
+        hit,
+        damage_taken(region, entity_id, target.health),
+        wind_burst_knock,
+        wind_burst_block_count,
+    )
 }
 
 /// 命中之后：衰减攻击者速度 / 取消疾跑、暴击 / 附魔暴击动画、横扫 / 伤害指示
@@ -1230,6 +1304,8 @@ fn finish_hit(
     target: &TargetInfo,
     plan: &AttackPlan,
     actual_damage: f32,
+    wind_burst_knock: Option<Vec3>,
+    wind_burst_block_count: i32,
 ) {
     // `Player.causeExtraKnockback` 在命中之后衰减攻击者速度并取消疾跑，
     // 力道大于 0 才做；它和伤害、横扫、动画的先后顺序不影响后面读到的状态。
@@ -1327,6 +1403,15 @@ fn finish_hit(
             movement,
         });
         region.links.send_frames(id, &packet);
+    }
+    // 风爆 `wind_burst` 的 `pushFromExplosion` 在 `hurtEnemy` 之后：爆炸包
+    // `connection.send` 给自己，然后只改服务端速度（客户端由爆炸包拿击退），
+    // 所以 `set_entity_motion` 里还是下砸冲量。
+    if let Some(knock) = wind_burst_knock {
+        send_wind_burst_explode(region, id, plan.position, 3.5, wind_burst_block_count, Some(knock));
+        if let Some(player) = region.players.get_mut(&id) {
+            player.motion.delta = player.motion.delta.add(knock);
+        }
     }
     player_exhaustion::add_in(region, id, ATTACK_EXHAUSTION);
     entity_sync::broadcast_swing(region, id, Hand::Main);
