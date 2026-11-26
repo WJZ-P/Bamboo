@@ -178,6 +178,14 @@ pub enum EntityData {
     ///
     /// index 10, BOOLEAN. Whether the firework rocket was shot at an angle.
     FireworksShotAtAngle(bool),
+    /// index 8，INT。`FishingHook.DATA_HOOKED_ENTITY`：0 表示没钩住，否则是目标实体 ID + 1。
+    ///
+    /// index 8, INT. `FishingHook.DATA_HOOKED_ENTITY`: 0 when unhooked, else entity id + 1.
+    FishingHookedEntity(i32),
+    /// index 9，BOOLEAN。`FishingHook.DATA_BITING`：鱼正在咬钩。
+    ///
+    /// index 9, BOOLEAN. `FishingHook.DATA_BITING`: a fish is biting the bobber.
+    FishingBiting(bool),
     /// index 8，BLOCK_POS。下落的方块从哪一格掉下来。
     FallingBlockStart(BlockPos),
     /// index 8，INT。点燃的 TNT 还剩多少 tick 爆炸。
@@ -612,7 +620,8 @@ impl EntityData {
             | Self::TntFuse(_)
             | Self::LivingFlags(_)
             | Self::ExperienceValue(_)
-            | Self::HangingDirection(_) => 8,
+            | Self::HangingDirection(_)
+            | Self::FishingHookedEntity(_) => 8,
             Self::ArrowFlags(_) => mc_bamboo_data::entity_types::ARROW_FLAGS,
             Self::ArrowPierce(_) => mc_bamboo_data::entity_types::ARROW_PIERCE,
             Self::ArrowInGround(_) => mc_bamboo_data::entity_types::ARROW_IN_GROUND,
@@ -628,7 +637,8 @@ impl EntityData {
             | Self::Health(_)
             | Self::FireworksAttached(_)
             | Self::ItemFrameItem(_)
-            | Self::PaintingVariant(_) => 9,
+            | Self::PaintingVariant(_)
+            | Self::FishingBiting(_) => 9,
             Self::EffectParticles(_)
             | Self::FireworksShotAtAngle(_)
             | Self::ItemFrameRotation(_) => 10,
@@ -863,9 +873,13 @@ impl EntityData {
                 write_data_header(out, 8, SERIALIZER_INT);
                 write_varint(out, *fuse);
             }
-            Self::ExperienceValue(value) => {
+            Self::ExperienceValue(value) | Self::FishingHookedEntity(value) => {
                 write_data_header(out, 8, SERIALIZER_INT);
                 write_varint(out, *value);
+            }
+            Self::FishingBiting(biting) => {
+                write_data_header(out, 9, SERIALIZER_BOOLEAN);
+                write_bool(out, *biting);
             }
             Self::TntBlockState(state) => {
                 write_data_header(out, 9, SERIALIZER_BLOCK_STATE);
@@ -1993,6 +2007,20 @@ mod tests {
         assert_eq!(
             set_entity_data(7, &[loyalty, foil]),
             hex("07 0b 00 03 0c 08 01 ff")
+        );
+    }
+
+    #[test]
+    fn fishing_hook_metadata_matches_official_serializers_and_indices() {
+        // index 8 INT=1 值 42 (0x2a); index 9 BOOLEAN=8 值 true (0x01)，0xff 结尾。
+        // index 8 INT=1 value 42 (0x2a); index 9 BOOLEAN=8 value true (0x01), 0xff terminator.
+        let hooked = EntityData::FishingHookedEntity(42);
+        let biting = EntityData::FishingBiting(true);
+        assert_eq!(hooked.index(), 8);
+        assert_eq!(biting.index(), 9);
+        assert_eq!(
+            set_entity_data(7, &[hooked, biting]),
+            hex("07 08 01 2a 09 08 01 ff")
         );
     }
 

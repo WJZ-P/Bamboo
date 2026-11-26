@@ -46,6 +46,7 @@ pub fn entity_uuid_of(row: &crate::entity::EntityRow) -> [u8; 16] {
         crate::entity::KindPublic::Egg(egg) => egg.uuid,
         crate::entity::KindPublic::SplashPotion(potion) => potion.uuid,
         crate::entity::KindPublic::FireworkRocket(firework) => firework.uuid,
+        crate::entity::KindPublic::FishingHook(hook) => hook.uuid,
         crate::entity::KindPublic::Painting(painting) => painting.uuid,
         crate::entity::KindPublic::ItemFrame(frame) => frame.uuid,
         _ => entity_uuid(row.public.uid).to_be_bytes(),
@@ -83,9 +84,11 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::LlamaSpit(_) => kinds::LLAMA_SPIT,
         crate::entity::KindPublic::Egg(egg) => egg.kind.entity_type(),
         crate::entity::KindPublic::SplashPotion(_) => kinds::SPLASH_POTION,
-        // 官方闪电实体不写进存档（`EntityType.canSerialize` 为假），这里不导出它。
-        // Vanilla lightning bolts are not serialized; do not write them out.
-        crate::entity::KindPublic::LightningBolt(_) => return Ok(Tag::Compound(Vec::new())),
+        // 官方闪电与钓鱼浮漂不写进存档（`EntityType.canSerialize` / `noSave` 为假），这里不导出它们。
+        // Vanilla lightning bolts and fishing hooks are not serialized (`noSave()`); skip them.
+        crate::entity::KindPublic::LightningBolt(_) | crate::entity::KindPublic::FishingHook(_) => {
+            return Ok(Tag::Compound(Vec::new()));
+        }
         crate::entity::KindPublic::EvokerFangs => kinds::EVOKER_FANGS,
         crate::entity::KindPublic::OminousItemSpawner(_) => kinds::OMINOUS_ITEM_SPAWNER,
         crate::entity::KindPublic::WindCharge(charge) => match charge.variant {
@@ -179,7 +182,9 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 tag::encode_block_state(BlockState(blocks::TNT)),
             );
         }
-        crate::entity::KindPublic::Mob(_) | crate::entity::KindPublic::LightningBolt(_) => {}
+        crate::entity::KindPublic::Mob(_)
+        | crate::entity::KindPublic::LightningBolt(_)
+        | crate::entity::KindPublic::FishingHook(_) => {}
         crate::entity::KindPublic::LeashKnot { pos } => {
             // `BlockAttachedEntity.addAdditionalSaveData`：`block_pos` 键。
             put(

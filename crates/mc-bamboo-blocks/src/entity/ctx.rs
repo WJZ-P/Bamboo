@@ -1251,6 +1251,10 @@ pub enum Command {
     FireworkRocketLaunch {
         position: Vec3,
     },
+    /// 钓鱼浮漂在 `catchingFish` 里产生的粒子和溅水音。
+    ///
+    /// Particle and splash-sound side effects from `FishingHook.catchingFish`.
+    FishingEffects(Vec<super::fishing_hook::FishingEffect>),
     /// 生成一枚烟花火箭。`CelebrateVillagersSurvivedRaid` 的庆祝烟花以后从这里走；
     /// 现在没有调用方，是给 raid-1c 留的接口。
     ///
@@ -2072,6 +2076,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 false,
             );
         }
+        Command::FishingEffects(effects) => super::fishing_hook::apply_effects(world, effects),
         Command::SpawnFireworkRocket(shot) => {
             let _ = world.spawn_firework(&shot);
         }

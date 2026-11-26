@@ -53,6 +53,7 @@ mod ender_pearl;
 mod equine;
 mod firework;
 mod fish;
+mod fishing;
 mod gen_spawn;
 mod golem;
 mod grazing;
@@ -253,6 +254,7 @@ enum Line {
     WindCharge(Box<wind_charge::WindChargeCase>),
     Firework(Box<firework::FireworkCase>),
     FireworkSave(firework::FireworkSaveCase),
+    Fishing(Box<fishing::FishingCase>),
     ArrowDeflect(Box<arrow_deflect::ArrowDeflectCase>),
     OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawnerCase>),
     Hanging(Box<hanging::HangingCase>),
@@ -2466,6 +2468,7 @@ impl Report {
                 Line::WindCharge(case) => self.replay_wind_charge(&case),
                 Line::Firework(case) => self.replay_firework(&case),
                 Line::FireworkSave(case) => self.replay_firework_save(&case),
+                Line::Fishing(case) => self.replay_fishing(&case),
                 Line::ArrowDeflect(case) => self.replay_arrow_deflect(&case),
                 Line::OminousItemSpawner(case) => self.replay_ominous_item_spawner(&case),
                 Line::Hanging(case) => self.replay_hanging(&case),

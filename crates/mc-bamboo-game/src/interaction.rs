@@ -1499,6 +1499,12 @@ pub(crate) fn on_use_item(
         swing(region, id, hand, InteractionResult::Success);
         return;
     }
+    // `FishingRodItem.use`：抛竿或收竿，返回 `SUCCESS`。
+    // `FishingRodItem.use`: cast or retrieve the fishing bobber, returning `SUCCESS`.
+    if crate::player_fishing::use_rod(region, id, hand) {
+        swing(region, id, hand, InteractionResult::Success);
+        return;
+    }
     // `FireworkRocketItem.use`：仅在玩家 `isFallFlying()`（鞘翅滑翔）时生成附着烟花加速。
     // Bamboo 尚未建模鞘翅滑翔，此路径恒为 `PASS`。
     // `FireworkRocketItem.use`: only spawns an attached boost rocket while fall flying.
