@@ -737,6 +737,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("wither_invul")) {
                 cases += playWitherInvul(official, out, only);
             }
+            if (only == null || only.startsWith("wither_explode")) {
+                cases += playWitherExplode(official, out, only);
+            }
             if (only == null || only.startsWith("breeze")) {
                 cases += playBreeze(official, out, only);
             }
@@ -15935,6 +15938,105 @@ public final class MobOracle {
         return cases;
     }
 
+    /** 凋灵无敌期结束爆炸：逐刻比 16 个状态字段，以及爆炸 / 1023 / levelEvent。 */
+    private static int playWitherExplode(Official official, Writer out, String only) throws Exception {
+        record WxScene(String name, int invul) {}
+        List<WxScene> scenes = List.of(
+                new WxScene("wither_explode_short", 2),
+                new WxScene("wither_explode_long", 6));
+        int cases = 0;
+        for (WxScene s : scenes) {
+            if (only != null && !s.name().startsWith(only)) continue;
+            FakeLevel world = FakeLevel.create(official);
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels =
+                    java.util.Map.of(Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            // 基岩地板（#wither_immune，爆炸不破坏方块），只验证爆炸触发与事件。
+            // Bedrock floor (#wither_immune): the blast destroys nothing, so the
+            // scene only checks that the explosion and events fire.
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.BEDROCK.defaultBlockState());
+                }
+            }
+            world.gameTime = 1000L;
+            world.getRandom().setSeed(1L);
+            world.witherScene = true;
+            world.levelEvents = new ArrayList<>();
+            var mob = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                    EntityTypes.WITHER.create(world, EntitySpawnReason.TRIGGERED);
+            mob.setId(FIRST_ID);
+            mob.setUUID(new UUID(0L, 1L));
+            mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            setRandom(mob, 5L);
+            mob.setHealth(100.0F);
+            mob.setInvulnerableTicks(s.invul());
+            world.tracked.add(mob);
+            long mobSeed0 = randomSeed(mob);
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= s.invul(); tick++) {
+                if (tick > 0) {
+                    world.levelEvents.clear();
+                    world.globalEvents.clear();
+                    world.explosions.clear();
+                    world.gameTime = 1000L + tick;
+                    mob.commonTick();
+                    mob.tick();
+                }
+                if (tick > 0) frames.append(',');
+                Vec3 d = mob.getDeltaMovement();
+                float[] hx = mob.getHeadXRots();
+                float[] hy = mob.getHeadYRots();
+                frames.append("{\"w\":[").append(mob.getInvulnerableTicks()).append(',')
+                        .append(Float.floatToRawIntBits(mob.getHealth())).append(',')
+                        .append(Double.doubleToRawLongBits(mob.getX())).append(',')
+                        .append(Double.doubleToRawLongBits(mob.getY())).append(',')
+                        .append(Double.doubleToRawLongBits(mob.getZ())).append(',')
+                        .append(Double.doubleToRawLongBits(d.x)).append(',')
+                        .append(Double.doubleToRawLongBits(d.y)).append(',')
+                        .append(Double.doubleToRawLongBits(d.z)).append(',')
+                        .append(Float.floatToRawIntBits(mob.getYRot())).append(',')
+                        .append(Float.floatToRawIntBits(mob.getXRot())).append(',')
+                        .append(Float.floatToRawIntBits(hx[0])).append(',')
+                        .append(Float.floatToRawIntBits(hx[1])).append(',')
+                        .append(Float.floatToRawIntBits(hy[0])).append(',')
+                        .append(Float.floatToRawIntBits(hy[1])).append(',')
+                        .append(randomSeed(mob)).append(',')
+                        .append(randomSeed(world.getRandom())).append(']');
+                // 事件编码：1=explode(半径位)，2=globalLevelEvent，3=levelEvent。按字典序排序。
+                // Event codes: 1=explode (radius bits), 2=globalLevelEvent, 3=levelEvent; sorted.
+                List<long[]> ev = new ArrayList<>();
+                for (int[] e : world.levelEvents) {
+                    ev.add(new long[] {3, e[0], e[1], e[2], e[3], e[4]});
+                }
+                ev.addAll(world.globalEvents);
+                ev.addAll(world.explosions);
+                ev.sort((a, b) -> {
+                    for (int i = 0; i < Math.min(a.length, b.length); i++) {
+                        if (a[i] != b[i]) return Long.compare(a[i], b[i]);
+                    }
+                    return Integer.compare(a.length, b.length);
+                });
+                frames.append(",\"ev\":[");
+                for (int i = 0; i < ev.size(); i++) {
+                    if (i > 0) frames.append(',');
+                    frames.append(Arrays.toString(ev.get(i)));
+                }
+                frames.append("]}");
+            }
+            frames.append(']');
+            out.write("{\"type\":\"witherExplode\",\"name\":" + jsonString(s.name())
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"invul\":" + s.invul()
+                    + ",\"mobSeed\":" + mobSeed0 + ",\"levelSeed\":1"
+                    + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
     /**
      * 旋风人逐刻对拍：官方 Breeze 在假世界里开着 AI 跑，逐刻比姿态、大脑记忆、坐标 /
      * 速度 / 朝向、两种随机源。三个场景分别把玩家放在射击距离内、长跳距离、贴脸。
@@ -24486,6 +24588,12 @@ public final class MobOracle {
         float rainLevel;
         /** `InhabitedTime` 场景：按区块记逐刻累加值，供 `getCurrentDifficultyAt` 读。 */
         java.util.Map<Long, Long> inhabitedTimes;
+        /** 凋灵逐刻场景：这一刻的 `globalLevelEvent`（type / 坐标 / data）。 */
+        List<long[]> globalEvents;
+        /** 凋灵逐刻场景：这一刻的 `explode`（半径原始位）。 */
+        List<long[]> explosions;
+        /** 凋灵逐刻场景开关：拦下 `explode` / `globalLevelEvent`，不跑假世界里的官方爆炸。 */
+        boolean witherScene;
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
@@ -24529,6 +24637,8 @@ public final class MobOracle {
             level.nextId = 1;
             level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
             level.inhabitedTimes = new java.util.HashMap<>();
+            level.globalEvents = new ArrayList<>();
+            level.explosions = new ArrayList<>();
             // `allocate` 不跑字段初始值，显式给超平坦默认海平面 -63。
             // `allocate` skips field initializers; set superflat's default sea level -63 explicitly.
             level.injectedSeaLevel = -63;
@@ -25347,6 +25457,26 @@ public final class MobOracle {
             if (zombieLevelEvents != null) {
                 zombieLevelEvents.accept(new int[] {0, type, pos.getX(), pos.getY(), pos.getZ(), data});
             }
+        }
+
+        /** 凋灵场景：记下 1023 号全服事件，不放官方音效包（假世界没有玩家连接）。 */
+        @Override
+        public void globalLevelEvent(int type, BlockPos pos, int data) {
+            if (witherScene && globalEvents != null) {
+                globalEvents.add(new long[] {2, type, pos.getX(), pos.getY(), pos.getZ(), data});
+            } else {
+                super.globalLevelEvent(type, pos, data);
+            }
+        }
+
+        /** 凋灵场景：记下爆炸半径（位），再跑官方爆炸（射线消耗世界随机源，必须和 Bamboo 对齐）。 */
+        @Override
+        public void explode(Entity source, double x, double y, double z, float radius,
+                boolean fire, net.minecraft.world.level.Level.ExplosionInteraction interaction) {
+            if (witherScene && explosions != null) {
+                explosions.add(new long[] {1, Integer.toUnsignedLong(Float.floatToRawIntBits(radius))});
+            }
+            super.explode(source, x, y, z, radius, fire, interaction);
         }
 
         /** 非空时记下这一刻的 `levelEvent`（转化音效）。 */

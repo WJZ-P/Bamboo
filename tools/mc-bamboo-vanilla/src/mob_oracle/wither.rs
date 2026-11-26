@@ -227,3 +227,202 @@ impl Report {
         println!("{}: {} ticks", case.name, case.frames.len());
     }
 }
+
+/// 无敌期结束爆炸场景的逐刻帧：16 个凋灵字段 + 事件表。
+///
+/// A frame of the explosion scene: 16 wither fields plus the event table.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WitherExplodeFrame {
+    w: [i64; 16],
+    ev: Vec<Vec<i64>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WitherExplodeCase {
+    name: String,
+    first_id: i32,
+    invul: i32,
+    mob_seed: i64,
+    level_seed: i64,
+    frames: Vec<WitherExplodeFrame>,
+}
+
+impl WitherExplodeCase {
+    fn level(&self) -> MobLevel {
+        // 基岩地板是 `#wither_immune`，爆炸不破坏方块，场景只验证触发与事件。
+        // The bedrock floor is `#wither_immune`, so the blast destroys nothing.
+        let mut blocks = Vec::new();
+        for x in -15..=15 {
+            for z in -15..=15 {
+                blocks.push((
+                    BlockPos::new(x, 63, z),
+                    BlockState(mc_bamboo_data::blocks::BEDROCK),
+                ));
+            }
+        }
+        MobLevel {
+            raid: None,
+            blocks: blocks.into_iter().collect(),
+            random: LevelRandom::new(self.level_seed),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: Vec::new(),
+            rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+            facts: ZombieFacts {
+                difficulty: 2,
+                ..ZombieFacts::default()
+            },
+            natural_spawn: None,
+            biome: None,
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
+            poi: mc_bamboo_world::poi::PoiStore::new(),
+            entities: Entities::with_next_id(self.first_id),
+            players: Vec::new(),
+            game: None,
+            wrong_was_hurt: false,
+            inhabited: HashMap::new(),
+            mob_teams: HashMap::new(),
+            short_hunger: false,
+            ignore_bed_monsters: false,
+            explosion_break: 0,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
+            shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState::empty(),
+        }
+    }
+}
+
+/// 把这一刻的 `Effect` 规范化成和 Java 侧一致的事件表（按字典序排序）。
+///
+/// Normalize this tick's `Effect`s into the same event table as the Java side.
+fn normalize_effects(effects: Vec<mc_bamboo_blocks::Effect>) -> Vec<Vec<i64>> {
+    use mc_bamboo_blocks::Effect;
+    let mut out = Vec::new();
+    for effect in effects {
+        match effect {
+            Effect::Explode { radius, .. } => {
+                out.push(vec![1, i64::from(radius.to_bits())]);
+            }
+            Effect::GlobalLevelEvent { event, pos, data } => {
+                out.push(vec![
+                    2,
+                    i64::from(event),
+                    i64::from(pos.x),
+                    i64::from(pos.y),
+                    i64::from(pos.z),
+                    i64::from(data),
+                ]);
+            }
+            Effect::LevelEvent {
+                event, pos, data, ..
+            } => {
+                out.push(vec![
+                    3,
+                    i64::from(event),
+                    i64::from(pos.x),
+                    i64::from(pos.y),
+                    i64::from(pos.z),
+                    i64::from(data),
+                ]);
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out
+}
+
+impl Report {
+    /// 逐刻重放无敌期结束：Invul 递减、爆炸、1023 全服事件、两种随机源。
+    ///
+    /// Replay the end of the invulnerability phase: Invul decay, explosion,
+    /// the global 1023 event, and both random sources.
+    pub(super) fn replay_wither_explode(&mut self, case: &WitherExplodeCase) {
+        use mc_bamboo_blocks::{
+            BlockTicks, World,
+            entity::{Entity, JavaRandom, mob::MobType},
+        };
+        use mc_bamboo_core::Vec3;
+
+        self.cases += 1;
+        let mut level = case.level();
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(1000);
+        let id = {
+            let mut world = World::new(&mut level, &mut ticks);
+            let entity = Entity::by_mob_type(MobType::Wither, Vec3::new(0.5, 64.0, 0.5));
+            let id = world.spawn_entity(entity);
+            world.with_entity_mut(id, &mut |entity| {
+                entity.y_rot = 0.0;
+                entity.old_position = Vec3::new(0.5, 64.0, 0.5);
+                entity.random = JavaRandom::from_state(case.mob_seed);
+                entity.with_mob(|_, mob| {
+                    mob.uuid = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+                    mob.health = 100.0;
+                    mob.x_rot = 0.0;
+                    mob.wither.invulnerable_ticks = case.invul;
+                });
+            });
+            id
+        };
+        let _ = level.entities.take_spawn_snapshots();
+        let broken = self.break_test.as_deref() == Some("wither_explode");
+        for (tick, expected) in case.frames.iter().enumerate() {
+            let mut ev = Vec::new();
+            if tick > 0 {
+                ticks.set_time(1000 + tick as i64);
+                let mut world = World::new(&mut level, &mut ticks);
+                world.tick_entities();
+                ev = normalize_effects(world.drain_effects());
+            }
+            let Some(entity) = level.entities.get(id) else {
+                self.mismatch(format!("{} tick {tick}: wither missing", case.name));
+                self.steps += 1;
+                continue;
+            };
+            if broken {
+                // 改坏确认：把爆炸事件的半径位清零，只有爆炸那一刻会报差异。
+                // Break check: zero the explosion radius bits; only the
+                // explosion tick reports a mismatch.
+                for event in &mut ev {
+                    if event.first() == Some(&1) {
+                        event[1] = 0;
+                    }
+                }
+            }
+            let mob = entity.kind.mob().expect("wither is a mob");
+            let ours = [
+                i64::from(mob.wither.invulnerable_ticks),
+                i64::from(mob.health.to_bits() as i32),
+                entity.position.x.to_bits() as i64,
+                entity.position.y.to_bits() as i64,
+                entity.position.z.to_bits() as i64,
+                entity.delta.x.to_bits() as i64,
+                entity.delta.y.to_bits() as i64,
+                entity.delta.z.to_bits() as i64,
+                i64::from(entity.y_rot.to_bits() as i32),
+                i64::from(mob.x_rot.to_bits() as i32),
+                i64::from(mob.wither.x_rot_heads[0].to_bits() as i32),
+                i64::from(mob.wither.x_rot_heads[1].to_bits() as i32),
+                i64::from(mob.wither.y_rot_heads[0].to_bits() as i32),
+                i64::from(mob.wither.y_rot_heads[1].to_bits() as i32),
+                entity.random.state(),
+                level.random.source().seed(),
+            ];
+            if ours != expected.w || ev != expected.ev {
+                self.mismatch(format!(
+                    "{} tick {tick}: official w {:?} ev {:?}, bamboo w {:?} ev {:?}",
+                    case.name, expected.w, expected.ev, ours, ev
+                ));
+            }
+            self.steps += 1;
+        }
+        println!("{}: {} ticks", case.name, case.frames.len());
+    }
+}
