@@ -1264,6 +1264,10 @@ public final class MobOracle {
         boolean attackGround;
         /** 攻击场景：主手武器上的附魔，成对存 (名字, 等级)。 */
         final List<String[]> attackEnchants = new ArrayList<>();
+        /** 攻击场景：这些下标的生物是 0 号玩家驯服的狼（范围击退要排除它）。 */
+        final List<Integer> tamedWolves = new ArrayList<>();
+        /** 长矛场景：在这一刻触发 `PiercingWeapon.attack(player, MAINHAND)`，-1 不触发。 */
+        int stabTick = -1;
         /**
          * 攻击场景：跳过每刻的 `cow.tick()`，这样牛的击退速度和 hurtTime 不被
          * 重力 / AI / 计时衰减污染，可以和 Bamboo 的受伤重放逐位比。
@@ -1666,6 +1670,18 @@ public final class MobOracle {
         /** 攻击场景：主手武器加一条附魔。 */
         Scene attackEnchant(String name, int level) {
             attackEnchants.add(new String[] {name, Integer.toString(level)});
+            return this;
+        }
+
+        /** 攻击场景：把第 `mobIndex` 头生物标记成 0 号玩家驯服的狼。 */
+        Scene tamedWolf(int mobIndex) {
+            tamedWolves.add(mobIndex);
+            return this;
+        }
+
+        /** 长矛场景：在第 `tick` 刻触发 `PiercingWeapon.attack(player, MAINHAND)`。 */
+        Scene stab(int tick) {
+            stabTick = tick;
             return this;
         }
     }
@@ -4704,6 +4720,65 @@ public final class MobOracle {
                             .attackSetup(20, false, 0.0, true).attack(1, 0);
                     scenes.add(s);
                 }
+                // 重锤下砸：2 / 5 / 10 格摔落（下砸加伤 + 摔落清零 + 竖直速度），
+                // 旁边两头牛吃范围击退，以及致密 III 的每格加成。
+                int mace = BuiltInRegistries.ITEM.getId(Items.MACE);
+                for (double fall : new double[] {2.0, 5.0, 10.0}) {
+                    Scene s = new Scene("player_attack_mace_fall" + (int) fall).ticks(6)
+                            .playerPackets().packets();
+                    ground(s, 4);
+                    s.player(0.5, 64.0, 0.5, Items.MACE);
+                    s.cow(2.5, 64.0, 0.5, 0.0F, 230L + (long) fall);
+                    s.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
+                    s.attackSetup(33, false, fall, false).attack(1, 0);
+                    scenes.add(s);
+                }
+                Scene aoe = new Scene("player_attack_mace_aoe").ticks(6)
+                        .playerPackets().packets();
+                ground(aoe, 4);
+                aoe.player(0.5, 64.0, 0.5, Items.MACE);
+                aoe.cow(2.5, 64.0, 0.5, 0.0F, 240L);
+                aoe.cow(3.5, 64.0, 0.5, 0.0F, 241L);
+                aoe.cow(2.5, 64.0, 2.5, 0.0F, 242L);
+                aoe.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
+                aoe.attackSetup(33, false, 5.0, false).attack(1, 0);
+                scenes.add(aoe);
+                // 低充能（ticker 0）压低基础伤害，让致密 III 决定牛死不死：没有
+                // 致密时摔落加伤 8 + 基础 1.2 不到 10 点，牛活着；有致密 III 时
+                // 再加 3 点、牛死掉。这样改坏确认才看得到差异。
+                Scene density = new Scene("player_attack_mace_density").ticks(6)
+                        .playerPackets().packets();
+                ground(density, 4);
+                density.player(0.5, 64.0, 0.5, Items.MACE);
+                density.cow(2.5, 64.0, 0.5, 0.0F, 243L);
+                density.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
+                density.attackEnchant("minecraft:density", 3)
+                        .attackSetup(0, false, 2.0, true).attack(1, 0);
+                scenes.add(density);
+                // 攻击者带着自己驯服的狼下砸：狼（isAlliedTo 的主人）不被击退，
+                // 旁边那只野牛照常被击退。
+                Scene pet = new Scene("player_attack_mace_pet").ticks(6)
+                        .playerPackets().packets();
+                ground(pet, 4);
+                pet.player(0.5, 64.0, 0.5, Items.MACE);
+                pet.cow(2.5, 64.0, 0.5, 0.0F, 244L);
+                pet.mob(8, 2.5, 64.0, 2.5, 0.0F, 245L, 0);
+                pet.cow(3.5, 64.0, 0.5, 0.0F, 246L);
+                pet.tamedWolf(1);
+                pet.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
+                pet.attackSetup(33, false, 5.0, false).attack(1, 0);
+                scenes.add(pet);
+                // 长矛左键穿刺：一次打到排成一线的两头牛（射线穿过两头的包围盒）。
+                int spear = BuiltInRegistries.ITEM.getId(Items.IRON_SPEAR);
+                Scene stab = new Scene("player_attack_spear_stab").ticks(6)
+                        .playerPackets().packets();
+                ground(stab, 4);
+                stab.player(0.5, 64.0, 0.5, Items.IRON_SPEAR);
+                stab.cow(2.5, 64.0, 0.5, 0.0F, 247L);
+                stab.cow(4.5, 64.0, 0.5, 0.0F, 248L);
+                stab.equipment(new int[] {0, 0, 0, 0, spear}, new int[] {0, 0, 0, 0});
+                stab.attackSetup(33, false, 0.0, true).stab(1);
+                scenes.add(stab);
             }
             // ---- 1b：死亡、掉落、重生与回血 ----
             // keepInventory × immediateRespawn × 等级经验 × 消失诅咒。
@@ -5647,7 +5722,11 @@ public final class MobOracle {
             }
         }
         for (int i = 0; i < scene.cows.size(); i++) {
-            Animal cow = animalType(scene.name).create(level, EntitySpawnReason.COMMAND);
+            // 攻击场景的「驯服狼」用狼代替按名字推出的动物类型，主人是 0 号玩家。
+            boolean tamedWolf = scene.tamedWolves.contains(i);
+            Animal cow = tamedWolf
+                    ? EntityTypes.WOLF.create(level, EntitySpawnReason.COMMAND)
+                    : animalType(scene.name).create(level, EntitySpawnReason.COMMAND);
             double[] at = scene.cows.get(i);
             // Bamboo 生成这头牛时从种子源取过一个数，随后被场景的种子盖掉；这里照样消耗一个。
             // Bamboo draws one seed when spawning it before the scene seed overrides it.
@@ -5699,6 +5778,13 @@ public final class MobOracle {
                             new ItemStack(hold, 1));
                 }
             }
+            if (tamedWolf) {
+                // `TamableAnimal.setTame(true, false)` 只设驯服位、`setOwner` 只写 owner
+                // UUID，都不带副作用，和 Bamboo 一侧直接填 `tame.flags` / `tame.owner` 对齐。
+                net.minecraft.world.entity.TamableAnimal tamable = (net.minecraft.world.entity.TamableAnimal) cow;
+                tamable.setTame(true, false);
+                tamable.setOwner(players.get(0));
+            }
             cows.add(cow);
             level.tracked.add(cow);
         }
@@ -5733,7 +5819,9 @@ public final class MobOracle {
             line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
             line.append(",\"seed\":").append(scene.seeds.get(i));
-            line.append(",\"kind\":").append(animalKind(scene.name));
+            line.append(",\"kind\":").append(scene.tamedWolves.contains(i)
+                    ? 8 : animalKind(scene.name));
+            line.append(",\"owner\":").append(scene.tamedWolves.contains(i) ? 0 : -1);
             line.append(",\"wool\":").append(cows.get(i) instanceof Sheep sheep
                     ? (sheep.getColor().getId() | (sheep.isSheared() ? 16 : 0))
                     : scene.name.startsWith("mooshroom_") ? scene.wool : 0);
@@ -5941,6 +6029,25 @@ public final class MobOracle {
                         attacker.attack(target);
                     }
                 }
+                if (scene.stabTick == tick) {
+                    // `handlePlayerAction` 的 STAB 分支：`cannotAttackWithItem` 之后
+                    // `PiercingWeapon.attack(player, MAINHAND)`。
+                    ServerPlayer attacker = players.get(0);
+                    putInt(net.minecraft.world.entity.LivingEntity.class, attacker,
+                            "attackStrengthTicker", scene.attackCharge);
+                    attacker.setSprinting(scene.attackSprint);
+                    attacker.fallDistance = scene.attackFall;
+                    putBoolean(net.minecraft.world.entity.Entity.class, attacker,
+                            "onGround", scene.attackGround);
+                    net.minecraft.world.item.ItemStack weapon = attacker.getMainHandItem();
+                    if (!attacker.cannotAttackWithItem(weapon, 5)) {
+                        net.minecraft.world.item.component.PiercingWeapon piercing =
+                                weapon.get(net.minecraft.core.component.DataComponents.PIERCING_WEAPON);
+                        if (piercing != null) {
+                            piercing.attack(attacker, net.minecraft.world.entity.EquipmentSlot.MAINHAND);
+                        }
+                    }
+                }
                 // 只推进 1a 建模的三处：`ServerPlayer.tick` 递减 damageCooldownTime，
                 // `LivingEntity.baseTick` 递减 hurtTime，以及 `ServerPlayer.doTick`
                 // 里 `lastSentHealth` 变了就补 `set_health`。不跑 FoodData.tick /
@@ -6117,6 +6224,7 @@ public final class MobOracle {
         line.append(",\"attackSprint\":").append(scene.attackSprint);
         line.append(",\"attackFall\":").append(Double.doubleToRawLongBits(scene.attackFall));
         line.append(",\"attackGround\":").append(scene.attackGround);
+        line.append(",\"stabTick\":").append(scene.stabTick);
         line.append(",\"attackEnchants\":[");
         for (int i = 0; i < scene.attackEnchants.size(); i++) {
             if (i > 0) line.append(',');
@@ -20731,8 +20839,14 @@ public final class MobOracle {
             stew.setAccessible(true);
             return mooshroom.getVariant().getSerializedName() + (stew.get(mooshroom) != null ? "|stew" : "");
         }
-        Holder<?> variant = animal instanceof Pig pig ? pig.getVariant() : ((Cow) animal).getVariant();
-        return variant.unwrapKey().orElseThrow().identifier().toString();
+        if (animal instanceof Pig pig) {
+            return pig.getVariant().unwrapKey().orElseThrow().identifier().toString();
+        }
+        if (animal instanceof Cow cow) {
+            return cow.getVariant().unwrapKey().orElseThrow().identifier().toString();
+        }
+        // 狼等非农场动物：攻击场景只比简化状态列，花纹列不参与，给个占位。
+        return "";
     }
 
     /** 刷出来的农场动物的花色 / 羊毛颜色和叫声；别的生物为 null。鸡的下蛋计时取自实体
@@ -20908,7 +21022,8 @@ public final class MobOracle {
                 || animal instanceof net.minecraft.world.entity.animal.cow.MushroomCow
                 || animal instanceof net.minecraft.world.entity.animal.panda.Panda
                 || animal instanceof net.minecraft.world.entity.animal.feline.Ocelot
-                || animal instanceof net.minecraft.world.entity.animal.parrot.Parrot) {
+                || animal instanceof net.minecraft.world.entity.animal.parrot.Parrot
+                || animal instanceof net.minecraft.world.entity.animal.wolf.Wolf) {
             return "";
         }
         Method sound = animal.getClass().getDeclaredMethod("getSoundVariant");

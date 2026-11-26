@@ -921,7 +921,7 @@ fn clip_entity_with_margin(
     })
 }
 
-pub(crate) fn clip_including_border(
+pub fn clip_including_border(
     view: &dyn BlockView,
     from: Vec3,
     to: Vec3,
@@ -984,7 +984,7 @@ pub(crate) fn player_box(player: &PlayerView) -> Aabb {
 
 // AABB.clip 只接受线段内部的入射面交点，不把盒内起点当成命中。
 // AABB.clip only accepts entering faces strictly within the segment.
-pub(crate) fn clip_entity(bb: Aabb, from: Vec3, to: Vec3) -> Option<Vec3> {
+pub fn clip_entity(bb: Aabb, from: Vec3, to: Vec3) -> Option<Vec3> {
     let start = [from.x, from.y, from.z];
     let d = to.subtract(from);
     let steps = [d.x, d.y, d.z];
