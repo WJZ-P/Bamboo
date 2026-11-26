@@ -14,6 +14,7 @@ pub mod ctx;
 pub mod leash_knot;
 pub mod lightning;
 pub mod mob;
+pub mod ominous_item_spawner;
 pub mod parallel;
 pub mod raid;
 pub mod random;
@@ -24,6 +25,7 @@ pub mod splash_potion;
 pub mod store;
 pub mod thrown_egg;
 pub mod view;
+pub mod wind_charge;
 
 mod explosion;
 mod falling;
@@ -129,6 +131,14 @@ pub struct LeashKnot {
 pub struct PrimedTnt {
     /// `fuse`，默认 80 tick。
     pub fuse: i32,
+    /// `owner`：点燃它的活体的实体 ID，官方 `PrimedTnt.owner`。
+    /// 只有玩家用打火石 / 火焰弹点着时才记；红石、发射器、火焰和爆炸点燃的都是 `None`。
+    /// 不存档。
+    ///
+    /// `owner`: the id of the living entity that lit this TNT, vanilla
+    /// `PrimedTnt.owner`. Set only for a player using flint and steel or a fire
+    /// charge; redstone, dispensers, fire and explosions leave it `None`. Not saved.
+    pub owner: Option<EntityUid>,
 }
 
 impl PrimedTnt {
@@ -137,6 +147,7 @@ impl PrimedTnt {
     pub const fn new() -> Self {
         Self {
             fuse: Self::DEFAULT_FUSE,
+            owner: None,
         }
     }
 }
@@ -240,6 +251,14 @@ pub enum EntityKind {
     ///
     /// A lightning bolt, vanilla `LightningBolt`.
     LightningBolt(Box<lightning::LightningBolt>),
+    /// 不祥物品生成器，`OminousItemSpawner`。
+    ///
+    /// An ominous item spawner, vanilla `OminousItemSpawner`.
+    OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawner>),
+    /// 风弹，`WindCharge` / `BreezeWindCharge`。
+    ///
+    /// A wind charge, vanilla `WindCharge` / `BreezeWindCharge`.
+    WindCharge(Box<wind_charge::WindCharge>),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -260,6 +279,10 @@ impl EntityKind {
             Self::Egg(egg) => egg.kind.entity_type(),
             Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
             Self::LightningBolt(_) => mc_bamboo_data::registries::entity_type::LIGHTNING_BOLT,
+            Self::OminousItemSpawner(_) => {
+                mc_bamboo_data::registries::entity_type::OMINOUS_ITEM_SPAWNER
+            }
+            Self::WindCharge(charge) => charge.variant.entity_type(),
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -493,6 +516,10 @@ impl Entity {
             EntityKind::Egg(_) => thrown_egg::tick(self, ctx),
             EntityKind::SplashPotion(_) => splash_potion::tick(self, ctx),
             EntityKind::LightningBolt(_) => lightning::tick(self, ctx),
+            EntityKind::OminousItemSpawner(_) => {
+                ominous_item_spawner::tick(self, ctx);
+            }
+            EntityKind::WindCharge(_) => wind_charge::tick(self, ctx),
             EntityKind::LeashKnot(_) => leash_knot::tick(self, ctx),
             EntityKind::Mob(_) => {}
         }
@@ -598,6 +625,23 @@ impl Entity {
             brain.seed_shuffles(self.random.state());
             brain.randomly_delay_start(&mut self.random);
         }
+        if mob.mob_type == mob::MobType::CopperGolem {
+            // `CopperGolem` 构造函数：`brain.setMemory(TRANSPORT_ITEMS_COOLDOWN_TICKS,
+            // random.nextInt(60, 100))`，在传感器延迟之后取一次随机数。
+            //
+            // The `CopperGolem` constructor sets the transport cooldown from one
+            // `nextInt(60, 100)` draw after the sensor delays.
+            use mob::brain::memory::{MemoryType, MemoryValue};
+            let cooldown = self.random.next_int_bounded(
+                mob::copper_golem::SPAWN_COOLDOWN_MAX - mob::copper_golem::SPAWN_COOLDOWN_MIN,
+            ) + mob::copper_golem::SPAWN_COOLDOWN_MIN;
+            if let Some(brain) = mob.brain.as_mut() {
+                brain.memories.set(
+                    MemoryType::TransportItemsCooldownTicks,
+                    MemoryValue::Int(cooldown),
+                );
+            }
+        }
         if mob.mob_type == mob::MobType::Armadillo {
             // `Armadillo` 构造函数最后的 `scuteTime = pickNextScuteDropTime()`。
             // The `Armadillo` constructor's trailing `scuteTime = pickNextScuteDropTime()`.
@@ -652,6 +696,13 @@ impl Entity {
     pub fn set_fuse(&mut self, fuse: i32) {
         if let EntityKind::Tnt(data) = &mut self.kind {
             data.fuse = fuse;
+        }
+    }
+
+    /// `PrimedTnt.setOwner`：记下点燃它的活体（玩家）。
+    pub fn set_tnt_owner(&mut self, owner: EntityUid) {
+        if let EntityKind::Tnt(data) = &mut self.kind {
+            data.owner = Some(owner);
         }
     }
 

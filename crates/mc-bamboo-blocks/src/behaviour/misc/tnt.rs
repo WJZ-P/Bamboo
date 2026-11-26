@@ -31,7 +31,7 @@ fn prime_if_powered(world: &mut World, pos: BlockPos) {
     //
     // `TntBlock.neighborChanged` calls `removeBlock` only when `prime` succeeds.
     // A false rule draws no random.
-    if world.has_neighbor_signal(pos) && world.spawn_tnt(pos) >= 0 {
+    if world.has_neighbor_signal(pos) && world.spawn_tnt(pos, None) >= 0 {
         world.remove_block(pos);
     }
 }
@@ -75,9 +75,11 @@ impl Behaviour for Tnt {
             return InteractionResult::Pass;
         }
         // 官方的 `prime` 先放实体（`spawn_tnt` 里接着放点燃声），再用 11 号标志位把方块换成空气。
+        // 打火石 / 火焰弹点着的 TNT 记下点它的玩家当 owner（死亡消息的 `player_explosion` 用它）。
         // Official `prime` spawns the entity (and `spawn_tnt` then plays the primed sound),
-        // then `setBlock` with flags 11 replaces the block with air.
-        world.spawn_tnt(ctx.clicked_pos());
+        // then `setBlock` with flags 11 replaces the block with air. The player who lit it
+        // becomes the owner (`player_explosion` deaths credit them).
+        world.spawn_tnt(ctx.clicked_pos(), Some(ctx.actor.uid));
         world.set_block(ctx.clicked_pos(), BlockState::AIR, UPDATE_ALL_IMMEDIATE);
         // 打火石 `hurtAndBreak(1)`，火焰弹 `consume(1)`。都在方块消失之后。
         //

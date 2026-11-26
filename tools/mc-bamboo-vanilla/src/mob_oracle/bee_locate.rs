@@ -114,6 +114,7 @@ impl Report {
         let origin = BlockPos::new(case.center[0], case.center[1], case.center[2]);
         let bee_pos = Vec3::new(case.bee_pos[0], case.bee_pos[1], case.bee_pos[2]);
         let mut level = MobLevel {
+            raid: None,
             blocks: HashMap::new(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -136,6 +137,8 @@ impl Report {
             players: Vec::new(),
             game: None,
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
             inhabited: HashMap::new(),

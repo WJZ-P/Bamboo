@@ -106,6 +106,7 @@ fn fire(world: &mut World<'_>, event: &[i32; 5]) {
 
 fn mob_level(blocks: &[[i32; 4]]) -> MobLevel {
     MobLevel {
+        raid: None,
         blocks: blocks
             .iter()
             .map(|&[x, y, z, state]| (BlockPos::new(x, y, z), BlockState(state as u32)))
@@ -134,6 +135,8 @@ fn mob_level(blocks: &[[i32; 4]]) -> MobLevel {
         inhabited: HashMap::new(),
         mob_teams: HashMap::new(),
         wrong_was_hurt: false,
+        containers: Default::default(),
+        container_open_counts: Default::default(),
         explosion_break: 0,
         shoulder: Default::default(),
         short_hunger: false,

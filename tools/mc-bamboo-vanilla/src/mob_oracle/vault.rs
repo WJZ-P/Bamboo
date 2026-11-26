@@ -131,6 +131,7 @@ impl VaultCase {
             player.position = Vec3::new(self.player[0] + 30.0, self.player[1], self.player[2]);
         }
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()
@@ -162,6 +163,8 @@ impl VaultCase {
             mob_teams: HashMap::new(),
             short_hunger: false,
             ignore_bed_monsters: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
         }

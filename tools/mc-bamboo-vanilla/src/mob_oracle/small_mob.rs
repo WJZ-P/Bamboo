@@ -57,6 +57,7 @@ struct SmallState {
 impl SmallMobCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()
@@ -87,6 +88,8 @@ impl SmallMobCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
         }
@@ -412,6 +415,7 @@ impl Report {
             MobType::Endermite
         };
         let mut level = MobLevel {
+            raid: None,
             blocks: std::collections::HashMap::new(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -438,6 +442,8 @@ impl Report {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
         };

@@ -114,6 +114,7 @@ pub enum AvoidFilter {
     /// The inverse of the spider's `!isScared()` gate: flee rolled-up armadillos and
     /// ignore `IDLE` ones. Not official behaviour; only for the `mob-oracle`
     /// deliberate-breakage self-test, to prove the oracle catches a wrong target.
+    #[cfg(feature = "oracle-samples")]
     ArmadilloScared,
 }
 
@@ -451,6 +452,7 @@ fn current_position(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<Vec3> {
 fn armadillo_avoided(filter: AvoidFilter, armadillo_state: i32) -> bool {
     match filter {
         AvoidFilter::ArmadilloNotScared => armadillo_state == super::armadillo::State::Idle.id(),
+        #[cfg(feature = "oracle-samples")]
         AvoidFilter::ArmadilloScared => armadillo_state != super::armadillo::State::Idle.id(),
         _ => true,
     }
@@ -502,6 +504,7 @@ mod tests {
                 state == State::Idle,
                 "official gate, {state:?}"
             );
+            #[cfg(feature = "oracle-samples")]
             assert_eq!(
                 armadillo_avoided(AvoidFilter::ArmadilloScared, id),
                 state != State::Idle,

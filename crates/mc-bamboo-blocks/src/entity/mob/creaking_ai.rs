@@ -66,7 +66,7 @@ fn idle_activity() -> ActivityData {
         10,
         vec![
             Kind::Creaking(Behavior::StartAttacking),
-            Kind::LookAtPlayerSometimes {
+            Kind::LookAtEntitySometimes {
                 max_dist: 8.0,
                 min_interval: 30,
                 max_interval: 60,
@@ -78,7 +78,14 @@ fn idle_activity() -> ActivityData {
                     // 官方 `RunOne` 权重是 2/2/1（javap：`RandomStroll` 配 `iconst_2`、
                     // `SetWalkTargetFromLookTarget(0.3, 3)` 配 `iconst_2`；那个 `iconst_3`
                     // 是 closeEnough 参数，不是权重。`3` 会改变洗牌分布，让嘎枝挑错子行为。
-                    (Kind::RandomStroll { speed: 0.3 }, 2),
+                    (
+                        Kind::RandomStroll {
+                            speed: 0.3,
+                            horizontal: 10,
+                            vertical: 7,
+                        },
+                        2,
+                    ),
                     (
                         Kind::WalkTargetFromLook {
                             speed: Speed::Fixed(0.3),

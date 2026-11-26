@@ -358,6 +358,7 @@ struct GroupMember {
 /// Empty level for spawn scenes: only the level random matters.
 fn spawn_level(seed: i64) -> MobLevel {
     MobLevel {
+        raid: None,
         blocks: HashMap::new(),
         random: LevelRandom::new(seed),
         loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -381,6 +382,8 @@ fn spawn_level(seed: i64) -> MobLevel {
         ignore_bed_monsters: false,
         short_hunger: false,
         wrong_was_hurt: false,
+        containers: Default::default(),
+        container_open_counts: Default::default(),
         explosion_break: 0,
         shoulder: Default::default(),
     }
@@ -505,6 +508,7 @@ impl Report {
         let player = super::skeleton_death::player_view();
         let looting = if case.mode == 4 { 3 } else { 0 };
         let mut level = MobLevel {
+            raid: None,
             blocks: HashMap::new(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -531,6 +535,8 @@ impl Report {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
         };

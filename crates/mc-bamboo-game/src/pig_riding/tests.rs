@@ -3,7 +3,7 @@
 use mc_bamboo_blocks::{
     BlockState, World,
     dispense::dispense_from,
-    durability::{damage_of, set_damage_for_oracle},
+    durability::{damage_of, set_damage_value},
     entity::{Entity, EntityRandom, JavaRandom, mob::MobType},
     state::FACING,
 };
@@ -37,7 +37,7 @@ fn setup(item: i32, damage: Option<i32>) -> (Region, PlayerId, i32) {
     ));
     let mut held = ItemStack::new(item, 1);
     if let Some(damage) = damage {
-        set_damage_for_oracle(&mut held, damage);
+        set_damage_value(&mut held, damage);
     }
     let slot = region.players[&id].inventory.hand_slot(Hand::Main);
     region.players.get_mut(&id).unwrap().inventory.slots[slot] = held;

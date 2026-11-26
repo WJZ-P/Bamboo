@@ -50,6 +50,7 @@ pub(super) struct TrapCase {
 impl LightningCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()
@@ -75,6 +76,8 @@ impl LightningCase {
             players: Vec::new(),
             game: None,
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
             natural_spawn: None,
@@ -175,6 +178,7 @@ impl Report {
         self.cases += 1;
         let broken = self.break_test.as_deref() == Some("trap");
         let mut level = MobLevel {
+            raid: None,
             blocks: std::collections::HashMap::new(),
             random: LevelRandom::new(0),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -196,6 +200,8 @@ impl Report {
             players: Vec::new(),
             game: None,
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
             natural_spawn: None,
@@ -288,6 +294,7 @@ impl Report {
         self.cases += 1;
         self.steps += 1;
         let mut level = MobLevel {
+            raid: None,
             blocks: std::collections::HashMap::new(),
             random: LevelRandom::new(case.seed),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -312,6 +319,8 @@ impl Report {
             inhabited: Default::default(),
             mob_teams: Default::default(),
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
             short_hunger: false,

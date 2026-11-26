@@ -49,6 +49,7 @@ struct CreakingFrame {
 impl CreakingCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()
@@ -72,6 +73,8 @@ impl CreakingCase {
             warden_warnings: Default::default(),
             darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             shoulder: Default::default(),
             entities: Entities::with_next_id(self.first_id),
             players: Vec::new(),

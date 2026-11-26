@@ -921,7 +921,7 @@ fn clip_entity_with_margin(
     })
 }
 
-pub(crate) fn clip_including_border(
+pub fn clip_including_border(
     view: &dyn BlockView,
     from: Vec3,
     to: Vec3,
@@ -984,7 +984,7 @@ pub(crate) fn player_box(player: &PlayerView) -> Aabb {
 
 // AABB.clip 只接受线段内部的入射面交点，不把盒内起点当成命中。
 // AABB.clip only accepts entering faces strictly within the segment.
-pub(crate) fn clip_entity(bb: Aabb, from: Vec3, to: Vec3) -> Option<Vec3> {
+pub fn clip_entity(bb: Aabb, from: Vec3, to: Vec3) -> Option<Vec3> {
     let start = [from.x, from.y, from.z];
     let d = to.subtract(from);
     let steps = [d.x, d.y, d.z];
@@ -1091,7 +1091,48 @@ pub(super) fn play_extinguished_sound(me: &Entity, world: &mut World<'_>, pitch:
     );
 }
 
+/// `hitTargetOrDeflectSelf` 的 REVERSE 弹回：目标是 `deflects_projectiles` 生物
+/// （现在只有旋风人）时按 `ProjectileDeflection.REVERSE` 弹回（速度 × -0.5、偏航
+/// +170..190），在目标身上放 `BREEZE_DEFLECT` 音，不造成伤害、继续飞行。
+/// `Breeze.deflection` 对风弹返回 NONE，但箭、三叉戟、雪球、鸡蛋、末影珍珠和喷溅
+/// 药水不是风弹，走这一支。返回是否弹回。
+pub(super) fn deflect_off_target(me: &mut Entity, world: &mut World<'_>, uid: EntityUid) -> bool {
+    let target = world.entity(uid);
+    let deflects = target.as_ref().is_some_and(|entity| {
+        entity
+            .kind
+            .mob()
+            .is_some_and(|mob| mob.mob_type.deflects_projectiles())
+    });
+    if !deflects {
+        return false;
+    }
+    // `Breeze.PROJECTILE_DEFLECTION`：先放音再 `REVERSE`；音在目标实体身上（
+    // `playSound(null, entity, ...)` → `entity.getX/Y/Z`），音源是目标的 HOSTILE。
+    let position = target.map_or(me.position, |entity| entity.position);
+    world.play_sound(
+        position,
+        sounds::sound_event("minecraft:entity.breeze.deflect"),
+        sounds::HOSTILE,
+        1.0,
+        1.0,
+        false,
+    );
+    me.delta = me.delta.multiply(-0.5, -0.5, -0.5);
+    me.y_rot += 170.0 + me.random.next_float() * 20.0;
+    match &mut me.kind {
+        EntityKind::Arrow(arrow) => arrow.needs_sync = true,
+        EntityKind::Egg(egg) => egg.needs_sync = true,
+        EntityKind::SplashPotion(potion) => potion.needs_sync = true,
+        _ => {}
+    }
+    true
+}
+
 fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bool {
+    if deflect_off_target(me, world, hit.uid) {
+        return false;
+    }
     let EntityKind::Arrow(arrow) = &me.kind else {
         return false;
     };

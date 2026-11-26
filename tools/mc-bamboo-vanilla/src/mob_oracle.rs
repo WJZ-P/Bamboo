@@ -35,6 +35,8 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod allay;
+mod arrow_deflect;
 mod attack_target;
 mod bat;
 mod bee;
@@ -43,6 +45,8 @@ mod bee_full;
 mod bee_locate;
 mod bee_release;
 mod brain;
+mod breeze;
+mod copper_golem;
 mod creaking;
 mod egg;
 mod ender_pearl;
@@ -52,18 +56,22 @@ mod gen_spawn;
 mod golem;
 mod grazing;
 mod guardian_scene;
+mod happy_ghast;
+mod happy_ghast_ai;
 mod husk_jockey;
 mod leash;
 mod lightning;
 mod llama_spit;
 mod natural_spawn;
 mod nautilus;
+mod ominous_item_spawner;
 mod patrol_spawn;
 mod phantom;
 mod pig_ride;
 mod pillager;
 mod projectile;
 mod raid;
+mod sculk_catalyst;
 mod sculk_sensor;
 mod shot;
 mod skeleton_death;
@@ -81,6 +89,7 @@ mod villager;
 mod wandering_trader;
 mod warden;
 mod water_mob;
+mod wind_charge;
 mod witch_throw;
 mod zombie_villager;
 
@@ -177,6 +186,9 @@ enum Line {
     PigDismount(pig_ride::DismountCase),
     LlamaSpit(Box<llama_spit::LlamaSpitCase>),
     Leash(Box<leash::LeashCase>),
+    HappyGhast(Box<happy_ghast::HappyGhastCase>),
+    HappyGhastSave(happy_ghast::HappyGhastSaveCase),
+    HappyGhastAi(Box<happy_ghast_ai::HappyGhastAiCase>),
     WitchThrow(Box<witch_throw::WitchThrowCase>),
     NaturalSpawn(natural_spawn::Case),
     PatrolSpawn(patrol_spawn::Case),
@@ -208,6 +220,7 @@ enum Line {
     BeeLocate(Box<bee_locate::BeeLocateCase>),
     BeeRelease(Box<bee_release::BeeReleaseCase>),
     Golem(Box<golem::GolemCase>),
+    CopperGolem(Box<copper_golem::CopperGolemCase>),
     GolemAttackRoll(golem::GolemAttackRollCase),
     GolemSave(Box<golem::GolemSaveCase>),
     SmallMob(Box<small_mob::SmallMobCase>),
@@ -235,13 +248,21 @@ enum Line {
     WaterMob(Box<water_mob::WaterMobCase>),
     Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
+    WindCharge(Box<wind_charge::WindChargeCase>),
+    ArrowDeflect(Box<arrow_deflect::ArrowDeflectCase>),
+    OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawnerCase>),
     TrialSpawner(Box<trial_spawner::TrialSpawnerCase>),
     Vault(Box<vault::VaultCase>),
     SculkSensor(sculk_sensor::SculkSensorCase),
     SculkSensorOrder(sculk_sensor::SculkSensorOrderCase),
     SculkShrieker(sculk_sensor::SculkShriekerCase),
+    SculkCatalyst(sculk_catalyst::SculkCatalystCase),
+    SculkCatalystSave(sculk_catalyst::SculkCatalystSaveCase),
     Warden(Box<warden::WardenCase>),
     WardenSave(warden::WardenSaveCase),
+    Breeze(Box<breeze::BreezeCase>),
+    Allay(Box<allay::AllayCase>),
+    AllaySave(allay::AllaySaveCase),
     End(End),
 }
 
@@ -362,6 +383,21 @@ struct Case {
     /// 玩家受伤场景：难度、起始血量 / 吸收 / 消耗、装备和动作。
     #[serde(default)]
     difficulty: i32,
+    /// 袭击行为场景：{centerX, centerY, centerZ, status(0 ongoing/1 victory/2 loss/3 stopped), started, active, groupsSpawned, omenLevel}。
+    #[serde(default)]
+    raid: Option<[i32; 8]>,
+    /// 把 `blocks` 里的 POI 方块（床/钟/工作站）登记进 `poi` 表，袭击者穿村/村民认领会用到。
+    #[serde(default)]
+    poi: bool,
+    /// 开局就占用的 POI 方块（床/钟/工作站），袭击者穿村的 `isVillage` 按占用计。
+    #[serde(default)]
+    poi_take: Vec<[i32; 3]>,
+    /// 队长捡旗场景：开局放一件灾厄旗帜掉落物的位置（f64 位模式）。
+    #[serde(default)]
+    banner: Option<[i64; 3]>,
+    /// 开局把生物放在地面上，躲开首刻寻路的 onGround 门槛。
+    #[serde(default)]
+    on_ground: bool,
     #[serde(default)]
     player_health: i32,
     #[serde(default)]
@@ -393,6 +429,9 @@ struct Case {
     attack_ground: bool,
     #[serde(default)]
     attack_enchants: Vec<(String, i32)>,
+    /// 长矛场景：这一刻触发 `PiercingWeapon.attack`，-1 表示不触发。
+    #[serde(default = "minus_one")]
+    stab_tick: i32,
     /// 1b 玩家生命场景的规则与动作。
     #[serde(default)]
     life: Option<LifeSetup>,
@@ -687,6 +726,11 @@ struct CowSetup {
     /// cow when absent.
     #[serde(default)]
     kind: i32,
+    /// 攻击场景里这头狼的主人是第几名玩家，-1 表示不是驯服狼。
+    ///
+    /// For attack scenes, the player index that owns this tamed wolf; -1 otherwise.
+    #[serde(default = "minus_one")]
+    owner: i32,
     /// 僵尸场景的队伍编号，-1 不在队伍里。
     #[serde(default = "minus_one")]
     team: i32,
@@ -1086,11 +1130,21 @@ struct MobLevel {
     ignore_bed_monsters: bool,
     /// 改坏确认爆炸：位 0 跳过 `hurtEntities`，位 1 丢掉爆炸中心的 0.0625 抬升。
     explosion_break: u8,
+    /// 铜傀儡搬运场景的容器槽位表（位置 → 槽位），Java 假世界里的铜箱子 / 箱子。
+    /// 其余场景为空。`World::with_container` 与只读查询都走这一份。
+    ///
+    /// Container slots for copper golem transport scenes (mirrors the chests in the
+    /// Java fake level). Empty for other scenes.
+    containers: HashMap<BlockPos, Vec<ItemStack>>,
+    /// `ContainerOpenersCounter.openCount`，铜傀儡排队判定用。
+    container_open_counts: HashMap<BlockPos, i32>,
     /// 0 号玩家左右肩上的鹦鹉（选 A）：逐刻由 Bamboo 自己的目标 / 命令落地写这份状态。
     ///
     /// The fake world's player 0 shoulder parrots (option A), written step by step
     /// through Bamboo's own goal and command pipeline.
     shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState,
+    /// 袭击行为场景注入的袭击快照；`raid_at` 就近返回它。
+    raid: Option<mc_bamboo_blocks::entity::raid::RaidView>,
 }
 
 impl MobLevel {
@@ -1121,6 +1175,33 @@ fn poi_occupancy(code: u8) -> Option<mc_bamboo_world::poi::Occupancy> {
         1 => Some(Occupancy::IsOccupied),
         2 => Some(Occupancy::Any),
         _ => None,
+    }
+}
+
+/// 把 `Case.raid` 的 `[i32; 8]` 配置转成 `RaidView`，供袭击行为场景的 `raid_at` 返回。
+fn raid_view_from(raid: [i32; 8]) -> mc_bamboo_blocks::entity::raid::RaidView {
+    let [cx, cy, cz, status, _started, active, groups_spawned, omen] = raid;
+    let enchant_odds = match omen {
+        2 => 0.1,
+        3 => 0.25,
+        4 => 0.5,
+        5 => 0.75,
+        _ => 0.0,
+    };
+    mc_bamboo_blocks::entity::raid::RaidView {
+        id: 1,
+        center: BlockPos::new(cx, cy, cz),
+        has_first_wave_spawned: groups_spawned > 0,
+        // Java 夹具把 `raidCooldownTicks` 清零，官方 `isBetweenWaves()` 恒为 false。
+        is_between_waves: false,
+        is_victory: status == 1,
+        active: active != 0,
+        is_over: status == 1 || status == 2,
+        is_loss: status == 2,
+        is_stopped: status == 3,
+        enchant_odds,
+        leaders: [0; 8],
+        leader_count: 0,
     }
 }
 
@@ -1173,6 +1254,15 @@ impl EntityTables for MobLevel {
 }
 
 impl Level for MobLevel {
+    fn raid_at(&self, pos: BlockPos) -> Option<mc_bamboo_blocks::entity::raid::RaidView> {
+        self.raid.filter(|raid| {
+            let dx = f64::from(raid.center.x - pos.x);
+            let dy = f64::from(raid.center.y - pos.y);
+            let dz = f64::from(raid.center.z - pos.z);
+            dx * dx + dy * dy + dz * dz < 9216.0
+        })
+    }
+
     fn explosion_break(&self) -> u8 {
         self.explosion_break
     }
@@ -1372,8 +1462,67 @@ impl Level for MobLevel {
         None
     }
 
-    fn with_container(&mut self, _pos: BlockPos, _f: &mut dyn FnMut(&mut dyn Container)) -> bool {
-        false
+    fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
+        let Some(slots) = self.containers.get_mut(&pos) else {
+            return false;
+        };
+        let mut container = mc_bamboo_blocks::Slots::new(slots);
+        f(&mut container);
+        true
+    }
+
+    fn with_slots(
+        &mut self,
+        pos: BlockPos,
+        len: usize,
+        f: &mut dyn FnMut(&mut [ItemStack]),
+    ) -> bool {
+        let Some(slots) = self.containers.get_mut(&pos) else {
+            return false;
+        };
+        if slots.len() != len {
+            return false;
+        }
+        f(slots);
+        true
+    }
+
+    fn slots_at(&self, pos: BlockPos) -> Vec<ItemStack> {
+        self.containers.get(&pos).cloned().unwrap_or_default()
+    }
+
+    fn container_open_count(&self, pos: BlockPos) -> i32 {
+        self.container_open_counts.get(&pos).copied().unwrap_or(0)
+    }
+
+    fn change_container_open_count(&mut self, pos: BlockPos, delta: i32) {
+        let count = self.container_open_counts.entry(pos).or_default();
+        *count = (*count + delta).max(0);
+    }
+
+    fn container_positions_in(
+        &self,
+        center: BlockPos,
+        horizontal: i32,
+        vertical: i32,
+    ) -> Vec<BlockPos> {
+        let mut out: Vec<_> = self
+            .containers
+            .keys()
+            .copied()
+            .filter(|pos| {
+                (pos.x - center.x).abs() <= horizontal
+                    && (pos.y - center.y).abs() <= vertical
+                    && (pos.z - center.z).abs() <= horizontal
+            })
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    fn statue_custom_name(&self, pos: BlockPos) -> Option<mc_bamboo_nbt::Tag> {
+        let _ = pos;
+        None
     }
 
     fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
@@ -1401,6 +1550,31 @@ impl Level for MobLevel {
             outcome.hurt = true;
         }
         Some(outcome)
+    }
+
+    fn push_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        push: mc_bamboo_core::Vec3,
+    ) -> bool {
+        let Some(game) = self.game.as_mut() else {
+            return false;
+        };
+        game.push(target, push);
+        true
+    }
+
+    fn knock_back_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        strength: f64,
+        (dx, dz): (f64, f64),
+    ) -> bool {
+        let Some(game) = self.game.as_mut() else {
+            return false;
+        };
+        game.knock_back(target, strength, dx, dz);
+        true
     }
 
     fn ignite_player_now(
@@ -1807,6 +1981,39 @@ impl Level for MobLevel {
         }
     }
 
+    fn trial_spawner_dispensing(
+        &mut self,
+        pos: BlockPos,
+        loot_table: &str,
+    ) -> Vec<(mc_bamboo_protocol::item::ItemStack, i32)> {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return Vec::new();
+        };
+        let low = BlockPos::new(
+            (pos.x as f32 / 30.0).floor() as i32,
+            (pos.y as f32 / 20.0).floor() as i32,
+            (pos.z as f32 / 30.0).floor() as i32,
+        );
+        let seed = self.facts.world_seed.wrapping_add(low.pack());
+        let params = mc_bamboo_loot::LootParams::new(0.0);
+        let Ok(stacks) = table.get_random_items_with_seed(
+            &params,
+            seed,
+            Some(&self.loot_sequences),
+            self.random.source(),
+        ) else {
+            return Vec::new();
+        };
+        stacks
+            .into_iter()
+            .map(|mut stack| {
+                let weight = stack.count.max(0);
+                stack.count = 1;
+                (mc_bamboo_game::loot_stack(&stack), weight)
+            })
+            .collect()
+    }
+
     fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
         let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
             return false;
@@ -2129,6 +2336,7 @@ impl Report {
                 Line::BeeLocate(case) => self.replay_bee_locate(&case),
                 Line::BeeRelease(case) => self.replay_bee_release(&case),
                 Line::Golem(case) => self.replay_golem(&case),
+                Line::CopperGolem(case) => self.replay_copper_golem(&case),
                 Line::GolemAttackRoll(case) => self.replay_golem_attack_roll(&case),
                 Line::GolemSave(case) => self.replay_golem_save(&case),
                 Line::SmallMob(case) => self.replay_small_mob(&case),
@@ -2156,13 +2364,21 @@ impl Report {
                 Line::WaterMob(case) => self.replay_water_mob(&case),
                 Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
+                Line::WindCharge(case) => self.replay_wind_charge(&case),
+                Line::ArrowDeflect(case) => self.replay_arrow_deflect(&case),
+                Line::OminousItemSpawner(case) => self.replay_ominous_item_spawner(&case),
                 Line::TrialSpawner(case) => self.replay_trial_spawner(&case),
                 Line::Vault(case) => self.replay_vault(&case),
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
                 Line::SculkSensorOrder(case) => self.replay_sculk_sensor_order(&case),
                 Line::SculkShrieker(case) => self.replay_sculk_shrieker(&case),
+                Line::SculkCatalyst(case) => self.replay_sculk_catalyst(&case),
+                Line::SculkCatalystSave(case) => self.replay_sculk_catalyst_save(&case),
                 Line::Warden(case) => self.replay_warden(&case),
                 Line::WardenSave(case) => self.replay_warden_save(&case),
+                Line::Breeze(case) => self.replay_breeze(&case),
+                Line::Allay(case) => self.replay_allay(&case),
+                Line::AllaySave(case) => self.replay_allay_save(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
@@ -2175,6 +2391,9 @@ impl Report {
                 Line::ParrotShoulder(case) => self.replay_parrot_shoulder(&case),
                 Line::LlamaSpit(case) => self.replay_llama_spit(&case),
                 Line::Leash(case) => self.replay_leash(&case),
+                Line::HappyGhast(case) => self.replay_happy_ghast(&case),
+                Line::HappyGhastSave(case) => self.replay_happy_ghast_save(&case),
+                Line::HappyGhastAi(case) => self.replay_happy_ghast_ai(&case),
                 Line::WitchThrow(case) => self.replay_witch_throw(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::PatrolSpawn(case) => self.replay_patrol_spawn(&case)?,
@@ -2296,8 +2515,11 @@ impl Report {
             wrong_was_hurt: false,
             short_hunger: false,
             ignore_bed_monsters: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: shoulder::ShoulderState::empty(),
+            raid: None,
         };
         // 和 Java 夹具一样铺一格草地，鹦鹉站着不动才能一直和玩家包围盒相交。
         for x in -1..=1 {
@@ -2685,17 +2907,28 @@ impl Report {
             ignore_bed_monsters: matches!(break_test, Some("zombie_bed")),
             short_hunger: matches!(break_test, Some("zombie_hunger")),
             wrong_was_hurt: matches!(break_test, Some("zombie_was_hurt")),
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: match break_test {
                 Some("explode_tnt_hurt") => 1,
                 Some("explode_tnt_center") => 2,
                 _ => 0,
             },
             shoulder: Default::default(),
+            raid: case.raid.map(raid_view_from),
         };
         for &[x, y, z, state] in &case.blocks {
             level
                 .blocks
                 .insert(BlockPos::new(x, y, z), BlockState(state as u32));
+        }
+        if case.poi {
+            level.register_poi_from_blocks();
+            for at in &case.poi_take {
+                let pos = BlockPos::new(at[0], at[1], at[2]);
+                // 和 Java 侧 `PoiManager.take` 一样占一张票，让 `isVillage` 按占用计。
+                level.poi_take(pos, u32::MAX);
+            }
         }
         if case.name.ends_with("_no_grief") {
             // 和 `MobOracle.play` 一样按场景名关掉 `mobGriefing`。
@@ -2763,6 +2996,9 @@ impl Report {
                     51 => mc_bamboo_blocks::entity::mob::MobType::Witch,
                     52 => mc_bamboo_blocks::entity::mob::MobType::Drowned,
                     53 => mc_bamboo_blocks::entity::mob::MobType::Pillager,
+                    54 => mc_bamboo_blocks::entity::mob::MobType::Vindicator,
+                    55 => mc_bamboo_blocks::entity::mob::MobType::Ravager,
+                    56 => mc_bamboo_blocks::entity::mob::MobType::Villager,
                     60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
                     61 => mc_bamboo_blocks::entity::mob::MobType::Parched,
                     62 => mc_bamboo_blocks::entity::mob::MobType::CamelHusk,
@@ -2780,6 +3016,9 @@ impl Report {
                     entity.random = JavaRandom::new(cow.seed);
                     entity.y_rot = yaw;
                     entity.old_position = position;
+                    if case.on_ground {
+                        entity.on_ground = true;
+                    }
                     // 改坏确认 `frost_radius`：不给 0 号生物穿靴子，结冰格子必须全对不上。
                     // Break check `frost_radius`: no boots means no frozen cells.
                     if !case.boot_enchantment.is_empty()
@@ -2846,6 +3085,28 @@ impl Report {
                             }
                         }
                         pillager::setup(&case.name, index, mob);
+                        if case.raid.is_some() && mob.mob_type.is_raider() {
+                            // 袭击行为场景：生物已经加入袭击（和 Java 侧 `setCurrentRaid` 对齐）。
+                            mob.raider.raid_id = Some(1);
+                            mob.raider.wave = 1;
+                            mob.raider.can_join_raid = true;
+                            // 改坏确认：把波次改错，状态串从第一刻起就不一致。
+                            if matches!(break_test, Some("raid_mob_wave")) {
+                                mob.raider.wave = 2;
+                            }
+                            // 改坏确认：不加入袭击，破门 / 穿村等袭击目标永远不启动。
+                            if matches!(break_test, Some("raid_mob_join")) {
+                                mob.raider.raid_id = None;
+                            }
+                            // 改坏确认：把队长标志置位，状态串里 `is_captain` 直接不一致。
+                            if matches!(break_test, Some("raid_mob_captain")) {
+                                mob.raider.patrol_leader = true;
+                            }
+                            // 改坏确认：把劫掠兽的咆哮计时改错，状态串的计时列不一致。
+                            if matches!(break_test, Some("raid_mob_stun")) {
+                                mob.ravager.roar_tick = 3;
+                            }
+                        }
                         mob.creeper.powered = cow.creeper & 1 != 0;
                         mob.creeper.ignited = cow.creeper & 2 != 0;
                         if cow.carried != 0 {
@@ -2976,7 +3237,7 @@ impl Report {
                                 let damage = case.helmet_damage
                                     + i32::from(matches!(break_test, Some("zombie_helmet")));
                                 if damage != 0 {
-                                    mc_bamboo_blocks::durability::set_damage_for_oracle(
+                                    mc_bamboo_blocks::durability::set_damage_value(
                                         &mut helmet,
                                         damage,
                                     );
@@ -3062,6 +3323,18 @@ impl Report {
                 let position = Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5);
                 let angle = world.random().next_double();
                 tnt_id = Some(world.spawn_entity(Entity::primed_tnt(position, angle)));
+            }
+            // 队长捡旗场景：一件灾厄旗帜掉落物，零速度、立即可捡，和 Java 侧
+            // `new ItemEntity(..., banner, 0, 0, 0)` + `setNoPickUpDelay()` 对齐。
+            if let Some(bits) = case.banner {
+                let position = Vec3::new(
+                    f64::from_bits(bits[0] as u64),
+                    f64::from_bits(bits[1] as u64),
+                    f64::from_bits(bits[2] as u64),
+                );
+                let stack = mc_bamboo_blocks::entity::mob::raider::ominous_banner();
+                let item = Entity::ground_item_with_delta(position, stack, Vec3::default());
+                world.spawn_entity(item);
             }
         }
         let Some(first) = case.steps.first() else {
@@ -3990,6 +4263,7 @@ impl Report {
             attack_fall: f64::from_bits(case.attack_fall as u64),
             attack_ground: case.attack_ground,
             attack_enchants: case.attack_enchants.clone(),
+            stab_tick: case.stab_tick,
             extra_cow_positions: case
                 .cows
                 .iter()
@@ -4003,6 +4277,8 @@ impl Report {
                 })
                 .collect(),
             cow_seeds: case.cows.iter().map(|cow| cow.seed).collect(),
+            mob_kinds: case.cows.iter().map(|cow| cow.kind).collect(),
+            mob_owners: case.cows.iter().map(|cow| cow.owner).collect(),
         };
         // 故意改坏：难度缩放、护甲公式（用空装备）、保护附魔等级、
         // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置）、攻击充能值
@@ -4029,6 +4305,17 @@ impl Report {
             Some("sweep_effects") => scene
                 .attack_enchants
                 .retain(|(name, _)| name != "minecraft:fire_aspect"),
+            // 重锤三处改坏：下砸阈值（摔落降到 1.0 不再下砸）、致密（从武器上
+            // 剥掉）和范围击退（候选牛挪出 3.5 格）。
+            Some("mace_smash") => scene.attack_fall = 1.0,
+            Some("mace_density") => scene
+                .attack_enchants
+                .retain(|(name, _)| name != "minecraft:density"),
+            Some("mace_aoe") => scene.extra_cow_positions.clear(),
+            // 重锤宠物改坏：把驯服狼的主人剥掉，让它重新被范围击退（和官方分叉）。
+            Some("mace_pet") => scene.mob_owners.fill(-1),
+            // 长矛改坏：取消刺击，两头牛都不受伤（和官方分叉）。
+            Some("spear_stab") => scene.stab_tick = -1,
             _ => {}
         }
         let output = replay_player_hurt(&scene);
@@ -4924,6 +5211,7 @@ fn is_self_packet(bytes: &[u8]) -> bool {
             mc_bamboo_data::packets::play::clientbound::PLAYER_COMBAT_ENTER
                 | mc_bamboo_data::packets::play::clientbound::HURT_ANIMATION
                 | mc_bamboo_data::packets::play::clientbound::SET_HEALTH
+                | mc_bamboo_data::packets::play::clientbound::SET_ENTITY_MOTION
         )
     )
 }
@@ -5830,6 +6118,19 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
             )
         }
         MobType::Pillager => pillager::state(mob),
+        MobType::Ravager => format!(
+            "ravager:{}:{}:{}:{}:{}",
+            mob.raider.wave,
+            mc_bamboo_blocks::entity::mob::raider::is_captain(mob),
+            mob.ravager.attack_tick,
+            mob.ravager.stunned_tick,
+            mob.ravager.roar_tick
+        ),
+        MobType::Vindicator => format!(
+            "raider:{}:{}",
+            mob.raider.wave,
+            mc_bamboo_blocks::entity::mob::raider::is_captain(mob)
+        ),
         MobType::Sheep => format!(
             "{}{}",
             sheep::color(mob).name(),

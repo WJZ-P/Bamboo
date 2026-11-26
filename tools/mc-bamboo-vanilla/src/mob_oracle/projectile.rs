@@ -436,6 +436,7 @@ impl ProjectileCase {
 
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             natural_spawn: None,
             biome: None,
             blocks: self
@@ -481,6 +482,8 @@ impl ProjectileCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
         }

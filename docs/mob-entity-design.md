@@ -1273,7 +1273,7 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
 - **已知限制与交接**：上肩只做到 `LandOnOwnersShoulderGoal` 运行（冷却、主人旁观者、没命令坐下），
   玩家 `ShoulderEntityLeft` / `Right` 存档与同步未建模，所以两箱相交时不 `discard()`；`FollowMobGoal`
   占位；`MOB_SOUND_MAP` 的 `HashMap` 迭代顺序按名字排序近似；悬停落点的随机源错位已在 §5.21 定位并修掉；
-  玩家的飞行 / 水里 / 细雪状态没进 `PlayerView`；拴绳未建模。
+  玩家的飞行 / 水里 / 细雪状态没进 `PlayerView`；拴绳（`Leashable`）已接入，`canBeLeashed` 按各生物覆盖。
 
 
 ### 5.21 第 17 轮：补上 `LandRandomPos.generateRandomPosTowardDirection` 的 `isNotStable`（op-misc，2026-11-22）
@@ -1795,7 +1795,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   僵尸/尸壳的 `finalizeSpawn` 沿用 9.3 的实现，随机序列和
   官方不同。`doMobSpawning` 为假时整段不跑（官方仍会打乱刷怪区块列表）。区块列表按坐标顺序
   收集而不是官方 `Long2ByteOpenHashMap` 的哈希顺序，官方还在刷怪列表内穿插雷击。
-  结构刷怪覆盖、`customSpawners`（只做了 `PatrolSpawner`）、下界要塞表未做。刷怪笼、猫和流浪商人仍未做。
+  结构刷怪覆盖和 `PatrolSpawner` 已接入，刷怪笼和猫已做成活的实体；下界要塞表、`customSpawners` 里的流浪商人仍未做。
   生成期刷怪已接入牛、猪、羊、鸡、马科、
   兔子、狐狸和狼；
   装饰随机源决定放置，区域随机源用于 `finalizeSpawn`，用 `mob-oracle --only gen_spawn` 分别比对。
@@ -2084,7 +2084,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `entity-oracle` 的快照都接上了。
 - **仓库外改动**：`mc-bamboo-protocol` 加了一个实体数据项；`mc-bamboo-storage` 的建模实体
   清单加了溺尸和女巫。
-- **没做的**：三叉戟投掷（没有 `ThrownTrident`）、鹦鹉僵尸（僵尸骑鹦鹉螺）、袭击、
+- **没做的**（本节写作时；后续已补的见下文和 README）：三叉戟投掷（`ThrownTrident` 已按箭变体接入）、鹦鹉僵尸（僵尸骑鹦鹉螺已接入）、袭击、
   女巫小屋刷怪、喷溅药水的灭火 / 美西螈 / `onHitBlock`（营火 / 蜡烛）、滞留药水云、
   喷溅水瓶对末影人的伤害。溺尸的对拍及未覆盖的水面、上岸边界见上文和 README。女巫四种自饮药水由
   `mob-oracle --only witch_drink` 逐刻比较位置、血量、效果时长、喝药状态和随机源
@@ -2533,7 +2533,7 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
   吸收方的。
 - 位置门槛由 `Level` 的两个钩子给：`can_pillager_patrol_spawn`（主世界时钟 ≥ 120000 且群系不是
   蘑菇岛）和 `patrol_chunks_loaded`（`hasChunksAt` 的四个角区块都已加载）。
-- **村庄检测跳过**：Bamboo 还没有村庄和 POI，`isCloseToVillage` 这一支按任务要求不判。
+- **村庄检测跳过**：村庄 / POI 已接入，但 `PatrolSpawner` 这条 `isCloseToVillage` 仍按任务要求不判（对拍夹具没有村庄数据）。
 - **阵营**：`spawn_monsters` 与 `spawn_patrols` 都为真才跑；任一为假时整段不取随机数、计时器不动。
 
 ### 12.4 结构刷怪覆盖
@@ -2651,7 +2651,7 @@ main 那次报 `769/770`，多出来的一项 `play: M2 sends handleDamageEvent`
 
 - 官方 `setPosRaw` 不刷新碰撞箱，开始倒挂的那一刻到下一刻 `travel` 里的 `move` 之间，碰撞箱还停在原来的高度（最多低 0.1 格）；Bamboo 的碰撞箱始终跟着位置。只影响这一小段里的流体检测和被打飞时的碰撞。
 - 击退发生在生物自己这一刻的 `aiStep` 之后时（别的生物的攻击命令落地），`needsSync` 晚一刻生效；只有蝙蝠（不跟踪速度）看得出来，表现是击退的速度包晚一刻。真实联机里生物的 `hurtMarked` 速度包本来就还没有接到同步层（既有差异）。
-- 拴绳（`canBeLeashed` 为假）和压力板 / 绊线（`isIgnoringBlockTriggers` 为真）：Bamboo 的生物本来就没有拴绳，也不触发这两种方块，所以没有要做的。
+- 蝙蝠的 `canBeLeashed` 为假（不能拴），`isIgnoringBlockTriggers` 为真（不触发压力板 / 绊线）；拴绳系统本身已接入其它生物。
 
 ## 幻翼的实施现状（cl-ambient，2026-11-22）
 
@@ -3048,7 +3048,7 @@ target_goals 三条分派；`spawn.rs::finalize_spawn_in_group` 复用 `Mob.fina
 世界随机源全部逐位比较。
 
 **已知限制**：细雪攀爬目标只占注册位；末影螨的 `PORTAL` 粒子是客户端专用；要塞的蠹虫刷怪笼
-（仓库还没有通用刷怪笼）没建模。
+已由通用 `SpawnerBlockEntity` / `BaseSpawner` 建模（见 README「刷怪笼」一节）。
 
 ### 5.26 铁傀儡、雪傀儡和雪球（`golem` 分支）
 
@@ -3098,8 +3098,8 @@ target_goals 三条分派；`spawn.rs::finalize_spawn_in_group` 复用 `Mob.fina
   猎物血量、铺雪、生成物和世界随机源，`--only golem` 只剩 ARM Mac 上已知的
   12 处 `Mth.COS_TAB`；官方那一侧的猎物移除后帧里记 `null`，和 Bamboo 的移除时刻对齐。
 
-**已知限制**：村民 / POI 还没有，村庄目标走的是「没有村庄」的官方路径；铜傀儡实体没做，只保留原有方块逻辑；
-玩家扔雪球没有冷却；`MoveTowardsTargetGoal` / `DefendVillageTargetGoal` 没建模；
+**已知限制**：村民 / POI 已接入，但村庄目标仍走的是夹具里「没有村庄」的官方路径；铜傀儡实体没做，只保留原有方块逻辑；
+玩家扔雪球没有冷却；`MoveTowardsTargetGoal` / `DefendVillageTargetGoal` 已按无村庄路径建模；
 `Level.is_raining_at` / `SNOW_GOLEM_MELTS` 的精确世界答案来自生成器导出的群系表，
 并行只读视图按区块调色板覆盖。
 

@@ -209,6 +209,7 @@ pub(crate) fn parallel_entity_ticks(
             poi,
             entities,
             block_entities,
+            containers,
             global,
             tick_levels,
             profiler,
@@ -222,6 +223,16 @@ pub(crate) fn parallel_entity_ticks(
         // 这里只用实体表，不需要完整的 `RegionLevel`：区块表接下来要借给只读视图。
         entities.begin_tick();
         let hopper_positions = crate::entity_view::hopper_positions(chunks);
+        // 算阶段开始的容器槽位快照（按位置升序），铜傀儡只读查询用它；
+        // 精确驱动读的是当前容器表。
+        let container_snapshot: Vec<_> = containers
+            .iter()
+            .map(|(pos, entry)| (*pos, entry.slots.clone()))
+            .collect();
+        let container_open_counts: Vec<_> = containers
+            .iter()
+            .map(|(pos, entry)| (*pos, entry.open_count))
+            .collect();
         let facts = ViewFacts {
             min_y: mc_bamboo_world::MIN_Y,
             max_y: mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1,
@@ -246,6 +257,8 @@ pub(crate) fn parallel_entity_ticks(
             moving_piston_shapes: block_entity_shapes.moving_piston_shapes,
             shulker_box_shapes: block_entity_shapes.shulker_box_shapes,
             hopper_positions,
+            container_snapshot,
+            container_open_counts,
             block_change_stamp: block_change_stamp.get(),
             world_border: global.world_border.clone(),
             players: player_views,
@@ -456,7 +469,7 @@ pub(crate) fn on_player_action(
             crate::player_consume::release(region, id);
             crate::player_weapon::release(region, id);
         }
-        PlayerActionKind::Stab => {}
+        PlayerActionKind::Stab => crate::player_attack::on_stab(region, id),
     }
 }
 
@@ -613,6 +626,37 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     global: false,
                 };
                 send_level_event(region, except, pos, &packet);
+            }
+            Effect::Particles {
+                particle,
+                position,
+                offset,
+                speed,
+                count,
+            } => {
+                let mut options = Vec::new();
+                mc_bamboo_protocol::codec::write_varint(&mut options, particle);
+                let packet = mc_bamboo_protocol::packet::play::LevelParticles {
+                    options: &options,
+                    override_limiter: false,
+                    always_show: false,
+                    x: position.x,
+                    y: position.y,
+                    z: position.z,
+                    x_dist: offset.x as f32,
+                    y_dist: offset.y as f32,
+                    z_dist: offset.z as f32,
+                    max_speed: speed,
+                    count,
+                    randomization: mc_bamboo_protocol::packet::play::Randomization::Default,
+                };
+                let frames = encode_frames(&packet);
+                for player in region.players.values() {
+                    let delta = player.position().subtract(position);
+                    if delta.length_sqr() < 32.0 * 32.0 {
+                        region.links.send_frames(player.id, &frames);
+                    }
+                }
             }
             // 音符盒的声音在方块事件里算好了，这里换成音效包。粒子仍靠方块事件。
             Effect::NoteBlockPlayed {
@@ -810,6 +854,9 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 killer,
             } => {
                 crate::raid::raider_died(region, uid, position, killer);
+            }
+            Effect::RaidSetLeader { id, wave, leader } => {
+                crate::raid::set_leader(region, id, wave, leader);
             }
             Effect::BredAnimals {
                 father,
@@ -1440,6 +1487,11 @@ pub(crate) fn on_use_item(
     // `EggItem.use`：扔出鸡蛋，返回 `SUCCESS`。
     // `EggItem.use`: throw the egg and return `SUCCESS`.
     if crate::player_egg::throw(region, id, hand) {
+        swing(region, id, hand, InteractionResult::Success);
+        return;
+    }
+    // `WindChargeItem.use`：扔出一枚风弹，返回 `SUCCESS`。
+    if crate::player_wind_charge::throw(region, id, hand) {
         swing(region, id, hand, InteractionResult::Success);
         return;
     }

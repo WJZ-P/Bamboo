@@ -4,7 +4,8 @@
 //! `setActiveActivityToFirstValid([EMERGE,DIG,ROAR,FIGHT,INVESTIGATE,SNIFF,IDLE])`。
 //! 每个行为的时长、记忆条件、姿态 / 愤怒 / 冷却都按 26.3 字节码。
 
-use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_core::{BlockPos, Vec3, mth};
+use mc_bamboo_data::registries::particle_type;
 
 use crate::{
     entity::{
@@ -322,9 +323,12 @@ impl Behavior {
                 );
                 if let Some(target) = cx.memories.entity(M::AttackTarget)
                     && can_target_entity(cx, target)
+                    && let Some(eye) = super::brain::sensor::living(cx, target).map(|view| {
+                        view.position
+                            .add(Vec3::new(0.0, f64::from(view.eye_height), 0.0))
+                    })
                 {
-                    sound(cx, "minecraft:entity.warden.sonic_boom", 3.0, 1.0);
-                    sonic_boom_damage(cx, target);
+                    sonic_boom_damage(cx, target, eye);
                 }
             }
             _ => {}
@@ -595,7 +599,14 @@ fn activities() -> Vec<ActivityData> {
                 Kind::Gate(Box::new(Gate::run_one(
                     vec![(M::IsSniffing, ValueAbsent)],
                     vec![
-                        (Kind::RandomStroll { speed: 0.5 }, 2),
+                        (
+                            Kind::RandomStroll {
+                                speed: 0.5,
+                                horizontal: 10,
+                                vertical: 7,
+                            },
+                            2,
+                        ),
                         (Kind::DoNothing { min: 30, max: 60 }, 1),
                     ],
                 ))),
@@ -701,10 +712,14 @@ pub fn warden_entity_sensor(cx: &mut Cx) {
 }
 
 /// `Warden.canTargetEntity`：活着的 LivingEntity、不是自己、不在创造 / 旁观模式、
-/// 不是另一个监守者、还没被移除。
+/// 不是另一个监守者、还没被移除、不是无敌、碰撞箱在世界边界内。
+/// （盔甲架和同队 `isAlliedTo` 两支 Bamboo 还没建模：没有盔甲架生物，
+/// 生物也不会加入队伍。）
 ///
 /// `Warden.canTargetEntity`: a living entity, not self, not creative / spectator,
-/// not another warden and not removed.
+/// not another warden, not removed, not invulnerable and inside the world border.
+/// (The armour-stand and `isAlliedTo` branches are not modelled yet: Bamboo has
+/// no armour stands and mobs never join teams.)
 fn can_target_entity(cx: &Cx, uid: crate::entity::EntityUid) -> bool {
     if uid == cx.me.id || cx.me.removed {
         return false;
@@ -722,7 +737,14 @@ fn can_target_entity(cx: &Cx, uid: crate::entity::EntityUid) -> bool {
             Some(1 | 3)
         );
     }
-    view.mob_type != Some(MobType::Warden)
+    if view.mob_type == Some(MobType::Warden) || view.invulnerable {
+        return false;
+    }
+    // `level().getWorldBorder().isWithinBounds(livingEntity.getBoundingBox())`。
+    cx.ctx
+        .blocks()
+        .world_border()
+        .is_within_bounds_aabb(view.bounding_box)
 }
 
 /// `BehaviorUtils.isWithinAttackRange` 与 `MeleeAttack` 共用的判定：看得见且在
@@ -794,20 +816,88 @@ fn melee_damage(cx: &mut Cx, target: crate::entity::EntityUid) {
     });
 }
 
-/// `target.hurtServer(damageSources().sonicBoom(warden), 10.0f)`：10 点穿墙伤害，
-/// 绕过护甲与保护附魔，伤害来源 `minecraft:sonic_boom`。
-fn sonic_boom_damage(cx: &mut Cx, target: crate::entity::EntityUid) {
+/// `SonicBoom.lambda$tick$2`：从胸口附着点到目标眼睛发一串 `sonic_boom` 粒子，
+/// 播放音爆声，再打 10 点 `sonic_boom` 伤害；打中才补一次 `push`。
+fn sonic_boom_damage(cx: &mut Cx, target: crate::entity::EntityUid, eye: Vec3) {
+    // `EntityAttachments.get(WARDEN_CHEST, 0, yRot)`：官方胸口附着点是相对脚底
+    // 的 (0, 1.6, 0)，X/Z 都是 0，绕 Y 旋转后不变。官方把 1.6 按 f32 存，
+    // 转成 f64 是 1.600000023841858，这里照用这个值。
+    let chest = Vec3::new(
+        cx.me.position.x,
+        cx.me.position.y + f64::from(1.6_f32),
+        cx.me.position.z,
+    );
+    let to_eye = eye.subtract(chest);
+    let length = to_eye.length();
+    let direction = to_eye.normalize();
+    let count = mth::floor(length) + 7;
+    for step in 1..count {
+        let at = chest.add(direction.scale(f64::from(step)));
+        cx.mob.events.push(MobEvent::Particles {
+            particle: particle_type::SONIC_BOOM,
+            item: None,
+            position: at,
+            offset: Vec3::default(),
+            speed: 0.0,
+            count: 1,
+        });
+    }
+    sound(cx, "minecraft:entity.warden.sonic_boom", 3.0, 1.0);
     let mut source = DamageSource::environment(DamageKind::SonicBoom).with_non_player_cause(true);
     source.attacker = Some(cx.me.id);
     source.direct = Some(cx.me.id);
     source.attacker_uuid = Some(cx.mob.uuid);
     source.attacker_type = Some(cx.mob.mob_type.entity_type());
     source.position = Some(cx.me.position);
+    let is_player = cx.ctx.player(target).is_some();
+    if is_player {
+        cx.ctx.emit(
+            Command::HurtPlayer {
+                target,
+                source,
+                amount: 10.0,
+            },
+            cx.me,
+        );
+    } else {
+        cx.ctx.emit(
+            Command::HurtMob {
+                target,
+                source,
+                amount: 10.0,
+                on_hit: None,
+            },
+            cx.me,
+        );
+    }
+    // 官方 `push` 用受害者的 KNOCKBACK_RESISTANCE 分别缩放水平 / 竖直量。
+    // 玩家视图没有击退抗性字段，正式入口在同步层按官方值算；这里照对拍夹具
+    // （无抗性修饰）按 0 处理。生物直接从公开属性表读。
+    // The official `push` scales the horizontal / vertical amounts by the victim's
+    // KNOCKBACK_RESISTANCE. Player views don't carry that attribute (the sync
+    // layer computes it), so fixtures use 0; mobs read it from their public
+    // attribute table.
+    let mut resistance = 0.0_f64;
+    if !is_player {
+        cx.ctx.with_other(target, &mut |public| {
+            if let crate::entity::KindPublic::Mob(mob) = &public.kind {
+                resistance = mob
+                    .attributes
+                    .value(mc_bamboo_data::registries::attribute::KNOCKBACK_RESISTANCE);
+            }
+        });
+    }
+    let horizontal = 2.5 * (1.0 - resistance);
+    let vertical = 0.5 * (1.0 - resistance);
     cx.ctx.emit(
-        Command::HurtPlayer {
+        Command::SonicBoomPush {
             target,
-            source,
-            amount: 10.0,
+            player: is_player,
+            push: Vec3::new(
+                direction.x * horizontal,
+                direction.y * vertical,
+                direction.z * horizontal,
+            ),
         },
         cx.me,
     );

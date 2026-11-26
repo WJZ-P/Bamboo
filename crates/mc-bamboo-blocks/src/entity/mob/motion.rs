@@ -196,6 +196,17 @@ fn cause_fall_damage(
         // The equine override plays its landing sound first; damage is unchanged.
         super::equine::land_sound(me, mob, distance);
     }
+    // `Breeze.causeFallDamage`：摔落超过 3 格先放 `BREEZE_LAND`（固定音量 / 音高），
+    // 再走 `super`。`FALL_DAMAGE_IMMUNE` 标签让 `calculateFallDamage` 恒 0。
+    // `Breeze.causeFallDamage`: a fall longer than 3 blocks plays `BREEZE_LAND` at a
+    // fixed volume and pitch before the super call; the `FALL_DAMAGE_IMMUNE` tag makes
+    // `calculateFallDamage` always return 0.
+    if mob.mob_type == super::MobType::Breeze && distance > 3.0 {
+        living::play_sound(me, mob, "minecraft:entity.breeze.land", 1.0, 1.0);
+    }
+    if mob.mob_type.fall_damage_immune() {
+        return;
+    }
     let power = distance + 1.0e-6 - mob.attributes.value(attribute::SAFE_FALL_DISTANCE);
     let mut damage = mth::floor(
         power * f64::from(multiplier) * mob.attributes.value(attribute::FALL_DAMAGE_MULTIPLIER),
@@ -393,7 +404,17 @@ fn step_effects(
     if !(me.on_ground || climbable) {
         return false;
     }
-    if play_sound && mob.mob_type == super::MobType::Slime {
+    if play_sound && mob.mob_type == super::MobType::CopperGolem {
+        // `CopperGolem.playStepSound` 用的是自己的脚步声，音量 1.0（不是通用的 0.15）。
+        // `CopperGolem.playStepSound` plays its own step sound at volume 1.0, not 0.15.
+        super::living::play_sound(
+            me,
+            mob,
+            super::copper_golem::step_sound(mob.copper_golem.weather_state),
+            1.0,
+            1.0,
+        );
+    } else if play_sound && mob.mob_type == super::MobType::Slime {
         // 史莱姆没有覆写 `playStepSound`：放脚下方块的脚步声，音量乘 0.15。
         // Slimes do not override `playStepSound`: the block's own step sound at 0.15 volume.
         let sounds = state.sound_type();
@@ -1331,5 +1352,27 @@ mod tests {
         // `ctx` 借着 `world`，两者都在这一段结束时离开作用域。
         // `ctx` borrows `world`; both leave scope at the end of this block.
         assert_eq!(level.get(EGG_POS).get(EGGS), 1);
+    }
+
+    /// 摔落免疫照官方 `minecraft:fall_damage_immune` 实体标签：旋风人、鸡、蜜蜂、铁傀儡
+    /// 在标签里，僵尸、牛不在。
+    ///
+    /// Fall immunity follows the vanilla `minecraft:fall_damage_immune` entity tag.
+    #[test]
+    fn fall_damage_immunity_follows_the_entity_tag() {
+        use crate::entity::mob::MobType;
+        for kind in [
+            MobType::Breeze,
+            MobType::Chicken,
+            MobType::Bee,
+            MobType::IronGolem,
+            MobType::CopperGolem,
+            MobType::HappyGhast,
+        ] {
+            assert!(kind.fall_damage_immune(), "{kind:?}");
+        }
+        for kind in [MobType::Zombie, MobType::Cow, MobType::Villager] {
+            assert!(!kind.fall_damage_immune(), "{kind:?}");
+        }
     }
 }

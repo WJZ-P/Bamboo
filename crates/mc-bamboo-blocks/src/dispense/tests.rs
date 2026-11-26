@@ -208,6 +208,7 @@ fn player_at(pos: BlockPos, spectator: bool, head: ItemStack) -> EquipTarget {
         ),
         spectator,
         entity_type: entity_type::PLAYER,
+        baby: false,
         equipment,
     }
 }
@@ -228,6 +229,7 @@ fn wolf_at(pos: BlockPos) -> EquipTarget {
         ),
         spectator: false,
         entity_type: crate::entity::mob::MobType::Wolf.entity_type(),
+        baby: false,
         equipment,
     }
 }
@@ -1212,4 +1214,37 @@ fn armour_equips_the_first_living_target_in_the_front_cell() {
             .iter()
             .all(|effect| !matches!(effect, Effect::DispenserEquipped { .. }))
     );
+}
+
+/// `EquipmentDispenseItemBehavior.canEquipWithDispenser`：成年快乐恶魂能穿挽具，
+/// 幼年不能（`HappyGhast.canUseSlot(BODY)`）。
+///
+/// `EquipmentDispenseItemBehavior.canEquipWithDispenser`: an adult happy ghast
+/// takes a harness from a dispenser, a baby does not.
+#[test]
+fn a_dispenser_equips_only_an_adult_happy_ghast() {
+    use mc_bamboo_protocol::components::{ComponentValue, defaults};
+
+    let stack = ItemStack::new(items::WHITE_HARNESS, 1);
+    let equippable = match defaults::resolve(stack.item, &stack.patch(), kinds::EQUIPPABLE)
+        .expect("harnesses are equippable")
+    {
+        ComponentValue::Equippable(value) => value.clone(),
+        _ => panic!("expected an equippable component"),
+    };
+    assert!(equippable.dispensable);
+    let target = |baby| {
+        let mut equipment: [Option<ItemStack>; 8] = std::array::from_fn(|_| None);
+        equipment[6] = Some(ItemStack::empty());
+        EquipTarget {
+            entity_id: 7,
+            bounds: Aabb::new(1.0, 64.0, 0.0, 2.0, 65.0, 1.0),
+            spectator: false,
+            entity_type: crate::entity::mob::MobType::HappyGhast.entity_type(),
+            baby,
+            equipment,
+        }
+    };
+    assert!(super::equipment::can_equip(&target(false), &equippable));
+    assert!(!super::equipment::can_equip(&target(true), &equippable));
 }

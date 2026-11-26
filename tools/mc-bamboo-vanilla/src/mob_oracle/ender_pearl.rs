@@ -96,6 +96,7 @@ impl PearlCase {
         // 官方场景里主人朝向固定成 yaw 45、pitch 12.5，末影螨 `snapTo` 要读。
         game.set_rotation(self.player_id(), 45.0, 12.5);
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()
@@ -125,6 +126,8 @@ impl PearlCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
             natural_spawn: None,

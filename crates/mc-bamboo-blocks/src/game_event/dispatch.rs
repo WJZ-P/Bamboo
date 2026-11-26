@@ -92,6 +92,13 @@ pub struct Delivery {
     pub source: Vec3,
     pub event: GameEvent,
     pub context: EventContext,
+    /// `GameEvent.Context.sourceEntity()`：死亡事件里发出事件的实体。
+    pub source_entity: Option<crate::entity::EntityUid>,
+    /// 死亡实体这一刻的基础经验值（`getExperienceReward` 的已建模部分）。
+    /// `None` 表示源不是会掉经验的生物。
+    ///
+    /// The dying mob's base experience reward; `None` for a non-mob source.
+    pub experience: Option<i32>,
 }
 
 /// 把游戏事件投递给能收到它的监听者，返回按官方顺序排好的投递列表。
@@ -107,6 +114,23 @@ pub fn post(
     let Some(table) = world.level().game_event_listeners() else {
         return Vec::new();
     };
+    // `ENTITY_DIE` 的上下文里带着发出事件的实体；催发体监听者要读它的经验值。
+    // 实体此刻正在 tick，可能已经从表里取走，所以从保存的公开视图里取基础经验。
+    // `ENTITY_DIE` carries the dying entity; catalyst listeners read its experience.
+    // The entity may be detached from the table while ticking, so take the base
+    // reward from the preserved public view.
+    let (source_entity, experience) = if event == GameEvent::EntityDie {
+        let uid = context.source_entity;
+        let reward = uid
+            .and_then(|uid| world.level().entity_public(uid))
+            .and_then(|public| match &public.kind {
+                crate::entity::KindPublic::Mob(mob) => Some(mob.mob_type.xp_reward()),
+                _ => None,
+            });
+        (uid, reward)
+    } else {
+        (None, None)
+    };
     collect_candidates(table, world, event, source, context)
         .into_iter()
         .map(|candidate| Delivery {
@@ -115,6 +139,8 @@ pub fn post(
             source,
             event,
             context,
+            source_entity,
+            experience,
         })
         .collect()
 }
@@ -302,9 +328,10 @@ pub fn valid_vibration(event: GameEvent, context: EventContext) -> bool {
 }
 
 impl World<'_> {
-    /// 把一条投递交给具体的监听者。方块实体临时取出，各监听者用
-    /// [`crate::BlockEntity::receive_vibration`] 当场决定是否记候选，和官方
-    /// `handleGameEvent` 一样。
+    /// 把一条投递交给具体的监听者。方块实体临时取出：每个监听者先在
+    /// [`crate::BlockEntity::receive_vibration`] 里按振动规则记候选，
+    /// 不匹配时再走 [`crate::BlockEntity::receive_game_event`] 的即时处理，
+    /// 和官方 `GameEventListener.handleGameEvent` 一样。
     pub(crate) fn deliver_game_event(&mut self, delivery: Delivery) {
         let event = delivery.event;
         let context = delivery.context;
@@ -320,13 +347,35 @@ impl World<'_> {
                     return;
                 };
                 let received =
-                    entity.receive_vibration(self, event, source, listener_pos, context, now);
+                    entity.receive_vibration(self, event, source, listener_pos, context, now)
+                        || entity.receive_game_event(self, &delivery);
                 self.level_mut().put_block_entity(pos, id, entity);
                 if received {
                     self.level_mut().wake_block_entity(pos);
                 }
             }
             ListenerRef::Entity(uid) => {
+                // `Allay$JukeboxListener`：唱片机事件不进振动候选池，当场改跳舞状态。
+                // `Allay$JukeboxListener`: jukebox events update dancing immediately.
+                if matches!(event, GameEvent::JukeboxPlay | GameEvent::JukeboxStopPlay)
+                    && let Some(allay) = self.entity(uid).as_ref().and_then(|e| e.kind.mob())
+                    && allay.mob_type == crate::entity::mob::MobType::Allay
+                {
+                    let pos = BlockPos::containing(source);
+                    let mut apply = |entity: &mut crate::entity::Entity| {
+                        entity.with_mob(|_, mob| {
+                            crate::entity::mob::allay::set_jukebox_playing(
+                                mob,
+                                pos,
+                                event == GameEvent::JukeboxPlay,
+                            );
+                        });
+                    };
+                    if !self.with_listed_entity_mut(uid, &mut apply) {
+                        self.with_entity_mut(uid, &mut apply);
+                    }
+                    return;
+                }
                 // `VibrationSystem.Listener.handleGameEvent`：记成候选，到达时由实体自己的
                 // `VibrationSystem.Ticker` 回调 `User.onReceiveVibration`。
                 //
@@ -351,6 +400,27 @@ impl World<'_> {
                         .projectile_owner
                         .map(|uid| crate::archive::entity::entity_uuid(uid).to_be_bytes()),
                 };
+                // `VibrationSystem.User.isValidVibration` 里的可听事件标签：监守者用
+                // `#vibrations`，悦灵用 `#allay_can_listen`。
+                let (is_allay, can_receive) = self
+                    .entity(uid)
+                    .and_then(|entity| {
+                        entity.kind.mob().map(|mob| {
+                            (
+                                mob.mob_type == crate::entity::mob::MobType::Allay,
+                                crate::entity::mob::allay::can_receive_vibration(
+                                    mob,
+                                    event,
+                                    BlockPos::containing(source),
+                                ),
+                            )
+                        })
+                    })
+                    .unwrap_or((false, true));
+                let valid_event = !is_allay || (event.in_allay_can_listen_tag() && can_receive);
+                if !valid_event {
+                    return;
+                }
                 let mut record = |entity: &mut crate::entity::Entity| {
                     entity.with_mob(|_, mob| {
                         if let Some(listener) = mob.entity_listener.as_mut()

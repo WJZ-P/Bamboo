@@ -35,7 +35,7 @@
 - 区块表是 `ChunkStore { template, edited, light, loaded, pristine }`（`mc-bamboo-world/src/store.rs`）。`template` 仍是超平坦生成器的输出；无限模式（只给测试和 oracle 用）下没改过的区块直接读它，正式入口 `loaded()` 下只有交付过的区块存在，每个已加载区块插进一份自己的 `ChunkColumn`，包体也各编一遍。`take_column` / `insert_column` 把方块、高度图、方块实体类型表、告示牌文字、`update tag` 和两层光照整柱搬走。**不给「没改过的超平坦区块」做共用模板（写时复制）**：真实地形下每个区块本来就各不相同，共用只在超平坦有用；`docs/profiling.md` 9.4 量到 `fly-20` 的 RSS 从约 135 MB 到约 622 MB（约 2.18 万个已加载区块），`docs/performance-optimizations.md` 第 9 节量到 `encode_body` 是 0.23 ms / p99 0.61 ms。
 - 票表和 Director 决定谁加载、谁 tick；收回的 `Box<RegionColumn>` 整盒停放在内存里，没改过的直接丢掉重新生成（`crates/mc-bamboo-game/src/region/parking.rs`）。
 - 带位置的上层状态在 region 里仍是整张表：`Region.containers`、`Region.block_ticks`、`Region.block_entities`、`Region.redstone`，另有按位置索引的四张表；它们各有按区块的取放接口，`RegionColumn` 把整批盒子（含 `ChunkEntities`）装在一起（`region/column.rs`）。存储内部仍是整张表，见 4.2。
-- 实体只有下落方块、点燃的 TNT 和掉落物，没有生物。实体存成 `EntityStore`（公开 / 私有分开、uid 索引、16³ 段的空间索引），逻辑走 `EntityCtx`，有精确和并行两个驱动，由 `bamboo.toml` 的 `entity_threads` 切换（0 = 精确，缺省；≥ 1 = 并行实验）；每个实体自带随机源（`mc-bamboo-blocks/src/entity/`）。
+- 实体不只有下落方块、点燃的 TNT 和掉落物：生物、箭（含三叉戟）、经验球、拴绳结、喷溅药水、鸡蛋、羊驼口水、闪电都已接入。实体存成 `EntityStore`（公开 / 私有分开、uid 索引、16³ 段的空间索引），逻辑走 `EntityCtx`，有精确和并行两个驱动，由 `bamboo.toml` 的 `entity_threads` 切换（0 = 精确，缺省；≥ 1 = 并行实验）；每个实体自带随机源（`mc-bamboo-blocks/src/entity/`）。
 - 区块包体在世界线程编码，按（位置，版本号）缓存；区块帧做成 `Arc<SharedFrames>`，压缩结果用 `OnceLock` 惰性缓存，第一条需要它的连接任务压一次，其余复用（`crates/mc-bamboo-game/src/outgoing.rs`）。
 - 出站是每名玩家一串片段：`PlayerSink::send(frames: Outgoing) -> bool`，`Outgoing` 区分普通帧和共享帧（`crates/mc-bamboo-game/src/inbound.rs`）。
 - 落后 2 秒以内连续追赶（`MAX_CATCH_UP`）。`TCP_NODELAY` 已开。节拍只用 `thread::sleep`（原来默认的 `hybrid` 先睡再自旋和世界线程 QoS 开关，2026-11-12 按用户决定删掉了）。实体线程数、区块计算线程数、红石缓存开关、交付 / 收回上限都在服务器目录的 `bamboo.toml` 里配，官方的键在 `server.properties`（`docs/configuration.md`），剖析器仍是环境变量 `BAMBOO_PROFILE`。没有自定义全局分配器。
@@ -492,7 +492,7 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 | 随机数 | 实体自带 `Entity.random`（原版每个实体也有自己的随机源 `[事实]`）；世界随机源不在这里，意图命令在 `apply` 里跑完整原逻辑，取数顺序和精确模式相同 |
 | 对世界和别的实体的影响 | `ctx.emit(command, me)`，进这个线程的命令缓冲 |
 
-**第 7 段（算）**：`compute(只读方块视图, &mut EntityStore, 执行器) -> Computed` 把实体状态移出表、并行执行 `tick`，产出新状态、命令和移除标记。**还没实现**：载具和它的乘客（2026-11-21：马科骑乘的载具和乘客已接上，见 `docs/mob-entity-design.md` 5.8；拴绳和生物骑生物仍没有）、被拴着的一串算一个单位、在同一个任务里按原版顺序跑这条规则；现有三种实体没有载具、拴绳和乘客。
+**第 7 段（算）**：`compute(只读方块视图, &mut EntityStore, 执行器) -> Computed` 把实体状态移出表、并行执行 `tick`，产出新状态、命令和移除标记。**还没实现**：被拴着的一串算一个单位、在同一个任务里按原版顺序跑这条规则；载具和乘客（含生物骑生物）以及拴绳已接上，见 `docs/mob-entity-design.md` 5.8 和 README「生物骑乘」「拴绳」两节。
 
 **第 8 段（落地）**：`commit(Computed, &mut World)` 先发布新公开状态、更新空间索引，再按（uid 升序，实体内序号）串行应用命令；`apply` 有整个 region 的 `&mut`，直接改世界、别的实体和发出者，没有回写补丁。发出者已被前面的命令移除时整批跳过。游戏层在两段之间重新构造 `World`，因为 `RegionLevel` 独占借着区块表。
 

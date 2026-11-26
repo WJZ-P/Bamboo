@@ -267,16 +267,18 @@ impl Level for RegionLevel<'_> {
     /// `Mob.equip(EquipmentTable)`：按装备表给一只还没进世界的生物套上装备。
     ///
     /// 官方先给八个槽设掉落几率（`slot_drop_chances`，缺省 0，也接受一个浮点值表示
-    /// 所有槽同一个值），再滚战利品表，每件按 `equippable` 组件的槽位走
-    /// `equipItemIfPossible`：槽位能穿才套，套上后 `setGuaranteedDrop` 把掉落几率设成
-    /// 2.0（必掉）。新生的生物槽位是空的，`canReplaceCurrentItem` 的盔甲 / 武器比较和
-    /// 「掉出已有装备」的分支走不到。
-    fn equip_mob(&mut self, entity: &mut mc_bamboo_blocks::entity::Entity, equipment: &Tag) {
-        use mc_bamboo_blocks::entity::mob::equipment::{GUARANTEED_DROP_CHANCE, SLOTS, slot_name};
-        use mc_bamboo_protocol::packet::play::EquipmentSlot;
+    /// 所有槽同一个值），再滚战利品表，每件走 `Mob.equipItemIfPossible`：能穿才套，
+    /// 套上后 `setGuaranteedDrop` 把掉落几率设成 2.0（必掉），换上更好的一件时旧的那件
+    /// 按掉落几率掉出来（返回给调用方 `spawnAtLocation`）。
+    fn equip_mob(
+        &mut self,
+        entity: &mut mc_bamboo_blocks::entity::Entity,
+        equipment: &Tag,
+    ) -> Vec<ItemStack> {
+        use mc_bamboo_blocks::entity::mob::equipment::{SLOTS, slot_name};
 
         let Tag::Compound(values) = equipment else {
-            return;
+            return Vec::new();
         };
         let get = |key: &str| {
             values
@@ -286,7 +288,7 @@ impl Level for RegionLevel<'_> {
                 .map(|(_, value)| value)
         };
         let Some(Tag::String(loot_table)) = get("loot_table") else {
-            return;
+            return Vec::new();
         };
         let mut chances = std::collections::BTreeMap::new();
         match get("slot_drop_chances") {
@@ -308,38 +310,41 @@ impl Level for RegionLevel<'_> {
             None => {}
         }
         let Some(mob_type) = entity.kind.mob().map(|mob| mob.mob_type) else {
-            return;
+            return Vec::new();
         };
         let origin =
             mc_bamboo_loot::Position::new(entity.position.x, entity.position.y, entity.position.z);
-        let mob = entity.kind.mob_mut().expect("mob type checked above");
-        for slot in SLOTS {
-            mob.equipment
-                .set_drop_chance(slot, chances.get(slot_name(slot)).copied().unwrap_or(0.0));
+        // 生物自己的随机源按值拷出，打完后写回：`equipItemIfPossible` 的掉落判定取它。
+        let mut random = entity.random;
+        let mut dropped = Vec::new();
+        {
+            let mob = entity.kind.mob_mut().expect("mob type checked above");
+            for slot in SLOTS {
+                mob.equipment
+                    .set_drop_chance(slot, chances.get(slot_name(slot)).copied().unwrap_or(0.0));
+            }
         }
         let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
-            return;
+            return Vec::new();
         };
         let mut params = mc_bamboo_loot::LootParams::new(0.0);
         params.this_entity = Some(mc_bamboo_loot::EntityView::new(mob_type.entity_type()));
         params.origin = Some(origin);
         let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
-            return;
+            return Vec::new();
         };
-        for stack in stacks {
-            let stack = crate::loot_stacks::loot_stack(&stack);
-            let slot_id = mc_bamboo_recipes::equipment_slot_for_item(&stack);
-            if !mc_bamboo_recipes::is_equippable_in_slot(&stack, slot_id) {
-                continue;
+        {
+            let mob = entity.kind.mob_mut().expect("mob type checked above");
+            for stack in stacks {
+                let stack = crate::loot_stacks::loot_stack(&stack);
+                let (_, replaced) = mob.equip_item_if_possible(&mut random, stack);
+                if let Some(replaced) = replaced {
+                    dropped.push(replaced);
+                }
             }
-            let slot = SLOTS
-                .get(slot_id as usize)
-                .copied()
-                .unwrap_or(EquipmentSlot::MainHand);
-            mob.equipment.set(slot, stack);
-            // `setItemSlotAndDropWhenKilled` 里的 `setGuaranteedDrop`。
-            mob.equipment.set_drop_chance(slot, GUARANTEED_DROP_CHANCE);
         }
+        entity.random = random;
+        dropped
     }
 
     fn trial_spawner_players(
@@ -408,6 +413,41 @@ impl Level for RegionLevel<'_> {
         for uid in doomed {
             let _ = mc_bamboo_blocks::level::LevelEntities::discard_entity(self, uid);
         }
+    }
+
+    fn trial_spawner_dispensing(
+        &mut self,
+        pos: BlockPos,
+        loot_table: &str,
+    ) -> Vec<(mc_bamboo_protocol::item::ItemStack, i32)> {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return Vec::new();
+        };
+        // `lowResolutionPosition(level, pos)`：坐标分别除以 30 / 20 / 30 后 floor，
+        // `level.getSeed() + blockPos.asLong()` 就是 `LootTable.getRandomItems(params, seed)`。
+        let low = BlockPos::new(
+            (pos.x as f32 / 30.0).floor() as i32,
+            (pos.y as f32 / 20.0).floor() as i32,
+            (pos.z as f32 / 30.0).floor() as i32,
+        );
+        let seed = self.world_seed.wrapping_add(low.pack());
+        let params = mc_bamboo_loot::LootParams::new(0.0);
+        let Ok(stacks) = table.get_random_items_with_seed(
+            &params,
+            seed,
+            Some(self.loot_sequences),
+            self.random.source(),
+        ) else {
+            return Vec::new();
+        };
+        stacks
+            .into_iter()
+            .map(|mut stack| {
+                let weight = stack.count.max(0);
+                stack.count = 1;
+                (crate::loot_stacks::loot_stack(&stack), weight)
+            })
+            .collect()
     }
 
     fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
@@ -768,6 +808,38 @@ impl Level for RegionLevel<'_> {
         }
     }
 
+    /// `CopperGolemStatueBlockEntity` 的自定义名在 `components` 组件表里，
+    /// 由 [`Self::block_items`] 的 `CUSTOM_NAME` 补丁建模。
+    fn statue_custom_name(&self, pos: BlockPos) -> Option<mc_bamboo_nbt::Tag> {
+        let statue = block_of_state(self.chunks.block(pos)?)?.block_entity_type
+            == Some(entities::COPPER_GOLEM_STATUE);
+        if !statue {
+            return None;
+        }
+        match self.block_items.get(&pos)?.get(kinds::CUSTOM_NAME)? {
+            ComponentValue::CustomName(component) => Some(component.tag().clone()),
+            _ => None,
+        }
+    }
+
+    /// `createStatue` 把铜傀儡的自定义名搬进雕像方块实体；`None` 时清掉补丁。
+    fn set_statue_custom_name(&mut self, pos: BlockPos, name: Option<mc_bamboo_nbt::Tag>) {
+        let Some(value) = name else {
+            return;
+        };
+        let Ok(component) = mc_bamboo_protocol::components::archive::text::decode(&value) else {
+            return;
+        };
+        self.dirty.mark(pos.chunk());
+        let patch = self
+            .block_items
+            .get_or_insert_with(pos, ComponentPatch::new);
+        patch.put(
+            kinds::CUSTOM_NAME,
+            mc_bamboo_protocol::components::PatchEntry::Set(ComponentValue::CustomName(component)),
+        );
+    }
+
     fn block_game_rules(&self) -> BlockGameRules {
         self.block_rules
     }
@@ -934,10 +1006,32 @@ impl Level for RegionLevel<'_> {
             f64::from(mc_bamboo_blocks::entity::raid::VALID_RAID_RADIUS_SQR),
         )?;
         let raid = self.raids.raids.get(&id)?;
+        let mut leaders = [0; 8];
+        let mut leader_count = 0;
+        for (&wave, &uid) in &raid.leaders {
+            if (0..8).contains(&wave)
+                && self
+                    .entities
+                    .public_at(uid)
+                    .is_some_and(|public| !public.removed)
+            {
+                leaders[wave as usize] = uid;
+                leader_count += 1;
+            }
+        }
         Some(mc_bamboo_blocks::entity::raid::RaidView {
+            id,
+            center: raid.center,
             has_first_wave_spawned: raid.has_first_wave_spawned(),
             is_between_waves: raid.is_between_waves(raid.total_raiders()),
             is_victory: raid.is_victory(),
+            active: raid.active,
+            is_over: raid.is_over(),
+            is_loss: raid.is_loss(),
+            is_stopped: raid.is_stopped(),
+            enchant_odds: raid.enchant_odds(),
+            leaders,
+            leader_count,
         })
     }
 
@@ -991,6 +1085,29 @@ impl Level for RegionLevel<'_> {
             pending_triggers: Some(side.pending_triggers),
         };
         crate::player_hurt::knock_back_player(&mut parts, PlayerId(target), strength, direction);
+        true
+    }
+
+    fn push_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        push: mc_bamboo_core::Vec3,
+    ) -> bool {
+        let Some(side) = self.player_side.as_mut() else {
+            return false;
+        };
+        let mut parts = crate::player_hurt::HurtParts {
+            players: &mut *self.players,
+            links: &mut *side.links,
+            sound_seeds: side.sound_seeds,
+            entities: &mut *self.entities,
+            difficulty: self.difficulty as i32,
+            rules: side.rules,
+            attacker: None,
+            defer_health: true,
+            pending_triggers: Some(side.pending_triggers),
+        };
+        crate::player_hurt::push_player(&mut parts, PlayerId(target), push);
         true
     }
 
@@ -1151,6 +1268,39 @@ impl Level for RegionLevel<'_> {
             .get(&pos)
             .map(|entry| entry.slots.clone())
             .unwrap_or_default()
+    }
+
+    /// 精确驱动读当前 `ContainerEntry.open_count`。
+    fn container_open_count(&self, pos: BlockPos) -> i32 {
+        self.containers
+            .get(&pos)
+            .map_or(0, |entry| entry.open_count)
+    }
+
+    fn change_container_open_count(&mut self, pos: BlockPos, delta: i32) {
+        self.dirty.mark(pos.chunk());
+        self.notify_container(pos);
+        if let Some(entry) = self.containers.get_mut(&pos) {
+            entry.open_count = (entry.open_count + delta).max(0);
+        }
+    }
+
+    /// 精确驱动读当前容器表；按方块位置升序（PosMap 遍历序）返回盒内位置。
+    fn container_positions_in(
+        &self,
+        center: BlockPos,
+        horizontal: i32,
+        vertical: i32,
+    ) -> Vec<BlockPos> {
+        self.containers
+            .keys()
+            .copied()
+            .filter(|pos| {
+                (pos.x - center.x).abs() <= horizontal
+                    && (pos.y - center.y).abs() <= vertical
+                    && (pos.z - center.z).abs() <= horizontal
+            })
+            .collect()
     }
 
     fn clear_container(&mut self, pos: BlockPos) {
@@ -1594,12 +1744,15 @@ fn mob_equip_target(public: &mc_bamboo_blocks::entity::EntityPublic) -> Option<E
     let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind else {
         return None;
     };
-    // 猪只能用发射器上鞍（幼猪不行）；狼只能用发射器穿身体铠甲（`canUseSlot` 恒真，不限年龄）。
+    // 猪只能用发射器上鞍（幼猪不行）；狼只能用发射器穿身体铠甲（`canUseSlot` 恒真，
+    // 不限年龄）；快乐恶魂成年才能穿 BODY 槽的挽具（`canUseSlot`）。
     // Pigs take a saddle from a dispenser (not babies); wolves take body armour
-    // (Wolf.canUseSlot is always true, so no age restriction).
+    // (Wolf.canUseSlot is always true, so no age restriction); only adult happy
+    // ghasts take a BODY harness from a dispenser (`canUseSlot`).
     let (slot, index) = match mob.mob_type {
         MobType::Pig if !mob.baby => (EquipmentSlot::Saddle, 7),
         MobType::Wolf => (EquipmentSlot::Body, 6),
+        MobType::HappyGhast if !mob.baby => (EquipmentSlot::Body, 6),
         _ => return None,
     };
     let (width, height) = public.kind.dimensions();
@@ -1624,6 +1777,7 @@ fn mob_equip_target(public: &mc_bamboo_blocks::entity::EntityPublic) -> Option<E
         ),
         spectator: false,
         entity_type: mob.mob_type.entity_type(),
+        baby: mob.baby,
         equipment,
     })
 }
@@ -1641,6 +1795,7 @@ fn equip_target(player: &Player) -> EquipTarget {
         bounds: player.bounding_box(),
         spectator: player.game_mode == GameMode::Spectator,
         entity_type: entity_type::PLAYER,
+        baby: false,
         equipment: [
             worn(MainHand),
             worn(Feet),
@@ -1853,6 +2008,37 @@ mod tests {
         assert_eq!(
             level.players.get(&id).unwrap().inventory.slots[hand].count,
             1
+        );
+    }
+
+    /// 不祥物品生成器掉的表用 `level.getSeed() + lowResolutionPosition(pos).asLong()`
+    /// 做种子：同一个世界随机源下，只换世界种子就会换掉掉落表的 uniform 数量权重。
+    #[test]
+    fn ominous_dispensing_seeds_from_the_level_seed() {
+        use mc_bamboo_blocks::Level;
+        use mc_bamboo_core::BlockPos;
+
+        let pos = BlockPos::new(0, 64, 0);
+        let loot_table = "minecraft:spawners/trial_chamber/items_to_drop_when_ominous";
+
+        let mut region = Region::new(2, 20, false);
+        let (mut level, _ticks) = region.block_level();
+
+        level.random.source().set_seed(42);
+        level.world_seed = 0;
+        let first = level.trial_spawner_dispensing(pos, loot_table);
+
+        level.random.source().set_seed(42);
+        level.world_seed = 1;
+        let second = level.trial_spawner_dispensing(pos, loot_table);
+
+        assert!(
+            !first.is_empty() && !second.is_empty(),
+            "the table resolves"
+        );
+        assert_ne!(
+            first, second,
+            "the level seed must feed the dispensing loot table"
         );
     }
 }

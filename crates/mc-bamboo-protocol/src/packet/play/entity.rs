@@ -58,6 +58,14 @@ const SERIALIZER_WOLF_VARIANT: i32 = 25;
 const SERIALIZER_WOLF_SOUND_VARIANT: i32 = 26;
 const SERIALIZER_HUMANOID_ARM: i32 = 42;
 
+/// `HappyGhast` 在 `Animal` 之后定义的两项布尔元数据：
+/// `Animal` 的 `DATA_BABY_ID`(16) / `AGE_LOCKED`(17) 之后依次是 18、19。
+///
+/// The two booleans `HappyGhast` defines after `Animal`: `DATA_BABY_ID`(16)
+/// / `AGE_LOCKED`(17), then 18 and 19.
+pub const HAPPY_GHAST_LEASH_HOLDER: u8 = 18;
+pub const HAPPY_GHAST_STAYS_STILL: u8 = 19;
+
 /// `set_entity_data` 的结束标记。
 const ENTITY_DATA_END: u8 = 0xff;
 
@@ -216,6 +224,10 @@ pub enum EntityData {
     ///
     /// index 16, INT. `Warden.CLIENT_ANGER_LEVEL` (`getActiveAnger()`).
     ClientAngerLevel(i32),
+    /// index 16，BOOLEAN。`Allay.DATA_DANCING`。
+    AllayDancing(bool),
+    /// index 17，BOOLEAN。`Allay.DATA_CAN_DUPLICATE`。
+    AllayCanDuplicate(bool),
     /// index 17，BOOLEAN。`AgeableMob.AGE_LOCKED`。
     AgeLocked(bool),
     /// index 18，COW_VARIANT。`Cow.DATA_VARIANT_ID`，值是注册表 ID 的 VarInt。
@@ -244,6 +256,14 @@ pub enum EntityData {
     ///
     /// `Armadillo.ARMADILLO_STATE`: the state'"'"'s network id (its own serializer, a VarInt).
     ArmadilloState(i32),
+    /// `CopperGolem.DATA_WEATHER_STATE`：`WeatherState` 的网络 ID（VarInt）。
+    ///
+    /// `CopperGolem.DATA_WEATHER_STATE`: the `WeatherState` network id (VarInt).
+    CopperGolemWeatherState(i32),
+    /// `CopperGolem.COPPER_GOLEM_STATE`：`CopperGolemState` 的网络 ID（VarInt）。
+    ///
+    /// `CopperGolem.COPPER_GOLEM_STATE`: the `CopperGolemState` network id (VarInt).
+    CopperGolemState(i32),
     /// `Goat` 的三个 BOOLEAN：尖叫、左角、右角（缺省假、真、真）。
     ///
     /// The three `Goat` booleans: screaming, left horn and right horn (false, true and
@@ -504,6 +524,14 @@ pub enum EntityData {
     ///
     /// `ZombieNautilus.DATA_VARIANT_ID` (index 21, a registry id).
     ZombieNautilusVariant(i32),
+    /// `HappyGhast.IS_LEASH_HOLDER`（BOOLEAN，index 18，缺省假）。
+    ///
+    /// `HappyGhast.IS_LEASH_HOLDER` (BOOLEAN, index 18, false by default).
+    HappyGhastLeashHolder(bool),
+    /// `HappyGhast.STAYS_STILL`（BOOLEAN，index 19，缺省假）。
+    ///
+    /// `HappyGhast.STAYS_STILL` (BOOLEAN, index 19, false by default).
+    HappyGhastStaysStill(bool),
     /// `Creaking.CAN_MOVE`（BOOLEAN，索引 16，缺省 true）。
     CreakingCanMove(bool),
     /// `Creaking.IS_ACTIVE`（BOOLEAN，索引 17，缺省 false）。
@@ -564,9 +592,13 @@ impl EntityData {
             Self::EffectAmbience(_) => 11,
             Self::SleepingPos(_) => 14,
             Self::MobFlags(_) => 15,
-            Self::MainHand(_) | Self::Baby(_) | Self::ClientAngerLevel(_) => 16,
+            Self::MainHand(_)
+            | Self::Baby(_)
+            | Self::ClientAngerLevel(_)
+            | Self::AllayDancing(_) => 16,
             Self::ModelCustomisation(_)
             | Self::AgeLocked(_)
+            | Self::AllayCanDuplicate(_)
             | Self::SpecialType(_)
             | Self::WitchUsingItem(_) => 17,
             Self::CowVariant(_) | Self::DrownedConverting(_) => 18,
@@ -612,6 +644,10 @@ impl EntityData {
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
             Self::ArmadilloState(_) => mc_bamboo_data::entity_types::ARMADILLO_STATE,
+            Self::CopperGolemWeatherState(_) => {
+                mc_bamboo_data::entity_types::COPPER_GOLEM_WEATHER_STATE
+            }
+            Self::CopperGolemState(_) => mc_bamboo_data::entity_types::COPPER_GOLEM_STATE,
             Self::GoatScreaming(_) => mc_bamboo_data::entity_types::GOAT_SCREAMING,
             Self::GoatLeftHorn(_) => mc_bamboo_data::entity_types::GOAT_LEFT_HORN,
             Self::GoatRightHorn(_) => mc_bamboo_data::entity_types::GOAT_RIGHT_HORN,
@@ -661,6 +697,8 @@ impl EntityData {
             Self::ZombieNautilusVariant(_) => mc_bamboo_data::entity_types::ZOMBIE_NAUTILUS_VARIANT,
             Self::GuardianMoving(_) => mc_bamboo_data::entity_types::GUARDIAN_MOVING,
             Self::GuardianAttackTarget(_) => mc_bamboo_data::entity_types::GUARDIAN_ATTACK_TARGET,
+            Self::HappyGhastLeashHolder(_) => HAPPY_GHAST_LEASH_HOLDER,
+            Self::HappyGhastStaysStill(_) => HAPPY_GHAST_STAYS_STILL,
             Self::CreakingCanMove(_) => mc_bamboo_data::entity_types::CREAKING_CAN_MOVE,
             Self::CreakingActive(_) => mc_bamboo_data::entity_types::CREAKING_IS_ACTIVE,
             Self::CreakingTearingDown(_) => mc_bamboo_data::entity_types::CREAKING_IS_TEARING_DOWN,
@@ -740,6 +778,10 @@ impl EntityData {
             Self::ArrowColor(value) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *value);
+            }
+            Self::AllayDancing(value) | Self::AllayCanDuplicate(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                out.push(u8::from(*value));
             }
             Self::ArrowInGround(value)
             | Self::TridentFoil(value)
@@ -949,6 +991,22 @@ impl EntityData {
                 );
                 write_varint(out, *state);
             }
+            Self::CopperGolemWeatherState(state) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::COPPER_GOLEM_WEATHER_STATE_SERIALIZER,
+                );
+                write_varint(out, *state);
+            }
+            Self::CopperGolemState(state) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::COPPER_GOLEM_STATE_SERIALIZER,
+                );
+                write_varint(out, *state);
+            }
             Self::SnifferState(state) => {
                 write_data_header(
                     out,
@@ -1146,6 +1204,10 @@ impl EntityData {
             Self::GuardianAttackTarget(target) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *target);
+            }
+            Self::HappyGhastLeashHolder(flag) | Self::HappyGhastStaysStill(flag) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *flag);
             }
         }
     }

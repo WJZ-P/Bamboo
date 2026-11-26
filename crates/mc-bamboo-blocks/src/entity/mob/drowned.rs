@@ -581,6 +581,7 @@ pub(super) const fn death_sound(in_water: bool) -> &'static str {
 ///
 /// Oracle helper: re-run the post-`finalizeSpawn` jockey branch for an existing
 /// drowned row so the whole spawn entry point can be replayed.
+#[cfg(feature = "oracle-samples")]
 pub fn after_zombie_finalize_for_oracle(world: &mut World<'_>, uid: i32) {
     let Some(entity) = world.take_entity_for_oracle(uid) else {
         return;

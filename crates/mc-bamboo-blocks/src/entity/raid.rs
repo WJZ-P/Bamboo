@@ -50,14 +50,36 @@ pub const OUTSIDE_RAID_BOUNDS_TIMEOUT: i32 = 30;
 /// `Raids.tick` 里强制 `setDirty` 的周期。
 pub const RAID_SAVE_INTERVAL: i32 = 200;
 
-/// `ServerLevel.getRaidAt(pos)` 给村民大脑的那两个判定。
+/// `ServerLevel.getRaidAt(pos)` 在本刻开始时的袭击快照，给村民大脑和袭击者目标读。
 ///
-/// The two predicates `ServerLevel.getRaidAt(pos)` provides to villager brains.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// 官方把整场 `Raid` 交给调用方；Bamboo 的实体逻辑只能读只读快照，所以这里把
+/// 生物会问到的字段一次带全。改袭击状态一律走命令 / `Effect` 写回游戏层。
+///
+/// The start-of-tick snapshot of `ServerLevel.getRaidAt(pos)` for villager brains
+/// and raider goals. Mobs only read it; raid state changes go back through
+/// commands / effects applied by the world thread.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RaidView {
+    /// `Raids.getId(raid)`，和实体存档的 `RaidId` 对齐。
+    pub id: i32,
+    pub center: BlockPos,
     pub has_first_wave_spawned: bool,
     pub is_between_waves: bool,
     pub is_victory: bool,
+    /// `Raid.isActive()`：袭击没被停止、没判负、还在这个村庄。
+    pub active: bool,
+    /// `Raid.isOver()` = VICTORY 或 LOSS。
+    pub is_over: bool,
+    /// `Raid.isLoss()`：袭击者赢，庆祝目标用它。
+    pub is_loss: bool,
+    /// `Raid.isStopped()`：`ResetRaidStatus` 和庆祝收尾用它。
+    pub is_stopped: bool,
+    /// `Raid.getEnchantOdds()`：袭击附魔的门槛。
+    pub enchant_odds: f32,
+    /// `Raid.getLeader(wave)` 的队长实体 uid，还活着才有。
+    pub leaders: [i32; 8],
+    /// `leaders` 里第几项有效（按波次 0..8 顺序）。
+    pub leader_count: i32,
 }
 
 /// `Raid.RaidStatus`，序列化名照 `getSerializedName`。
@@ -365,6 +387,11 @@ impl Raid {
     /// `isVictory()`。
     pub const fn is_victory(&self) -> bool {
         matches!(self.status, RaidStatus::Victory)
+    }
+
+    /// `isLoss()`。
+    pub const fn is_loss(&self) -> bool {
+        matches!(self.status, RaidStatus::Loss)
     }
 
     /// `hasFirstWaveSpawned()`：`groupsSpawned > 0`。

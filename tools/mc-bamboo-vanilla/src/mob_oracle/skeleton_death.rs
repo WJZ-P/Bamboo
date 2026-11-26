@@ -127,6 +127,7 @@ impl Report {
         rules.mob_drops = case.drops;
         let player = player_view();
         let mut level = MobLevel {
+            raid: None,
             natural_spawn: None,
             biome: None,
             blocks: HashMap::new(),
@@ -153,6 +154,8 @@ impl Report {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
         };

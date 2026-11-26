@@ -119,6 +119,7 @@ fn player_view(uid: i32, position: Vec3) -> PlayerView {
 impl LeashCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()
@@ -142,6 +143,8 @@ impl LeashCase {
             game_event_listeners: Default::default(),
             warden_warnings: Default::default(),
             darkness_ticks: 0,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
             poi: mc_bamboo_world::poi::PoiStore::new(),

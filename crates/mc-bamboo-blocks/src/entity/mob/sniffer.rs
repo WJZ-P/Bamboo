@@ -375,6 +375,7 @@ fn idle_activity() -> ActivityData {
                     speed: Speed::fixed(1.25),
                     close_adult: 3.5,
                     close_baby: 2.5,
+                    look_in_eyes: false,
                 },
             ),
             (2, Kind::LookAtTargetSink { min: 45, max: 90 }),
@@ -394,7 +395,14 @@ fn idle_activity() -> ActivityData {
                         (Kind::Sniffer(Behavior::Scenting), 1),
                         (Kind::Sniffer(Behavior::Sniffing), 1),
                         (Kind::LookAtPlayer { max_dist: 6.0 }, 1),
-                        (Kind::RandomStroll { speed: 1.0 }, 1),
+                        (
+                            Kind::RandomStroll {
+                                speed: 1.0,
+                                horizontal: 10,
+                                vertical: 7,
+                            },
+                            1,
+                        ),
                         (Kind::DoNothing { min: 5, max: 20 }, 2),
                     ],
                 ))),

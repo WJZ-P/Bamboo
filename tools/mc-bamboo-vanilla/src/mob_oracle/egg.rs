@@ -169,6 +169,7 @@ impl EggCase {
     /// A blockless normal-difficulty fake level whose level random is seeded with 1.
     fn empty_level(first_id: i32) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: HashMap::new(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -193,6 +194,8 @@ impl EggCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
             natural_spawn: None,

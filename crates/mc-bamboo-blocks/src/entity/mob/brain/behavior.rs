@@ -205,6 +205,29 @@ impl Node {
             jump.angle_random = JavaRandom::new(super::shuffle_seed(base, *index));
             *index += 1;
         }
+        // 村民的 `TriggerGate.triggerOneShuffled` 也带自己的 `ShufflingList` 随机源，
+        // 和闸门一样按官方注册顺序取一个序号播种。
+        // The villager `TriggerGate.triggerOneShuffled` gates carry their own `ShufflingList`
+        // random and take the next index in the official registration order.
+        if let Kind::Villager(super::super::villager_ai::Behavior::MeetTriggerGate(state)) =
+            &mut self.kind
+        {
+            state.random = JavaRandom::new(super::shuffle_seed(base, *index));
+            *index += 1;
+        }
+        if let Kind::Villager(super::super::villager_ai::Behavior::PreRaidTriggerGate(state)) =
+            &mut self.kind
+        {
+            state.random = JavaRandom::new(super::shuffle_seed(base, *index));
+            *index += 1;
+        }
+        if let Kind::Villager(super::super::villager_ai::Behavior::RaidCelebrateTriggerGate(
+            state,
+        )) = &mut self.kind
+        {
+            state.random = JavaRandom::new(super::shuffle_seed(base, *index));
+            *index += 1;
+        }
         if let Kind::Gate(gate) = &mut self.kind {
             gate.random = JavaRandom::new(super::shuffle_seed(base, *index));
             *index += 1;

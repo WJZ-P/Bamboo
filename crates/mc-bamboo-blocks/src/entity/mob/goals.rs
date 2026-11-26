@@ -443,6 +443,23 @@ pub enum Goal {
         wanted: Vec3,
         force_trigger: bool,
     },
+    /// `HappyGhast.HappyGhastFloatGoal`：`FloatGoal` 加上「悬停超时不许用」。
+    ///
+    /// `HappyGhast.HappyGhastFloatGoal`: `FloatGoal` gated on the hover timeout.
+    HappyGhastFloat,
+    /// `TemptGoal.ForNonPathfinders`：成年快乐恶魂跟着拿诱惑物品的玩家飞。
+    ///
+    /// `TemptGoal.ForNonPathfinders`: an adult happy ghast follows a tempting player.
+    HappyGhastTempt {
+        player: Option<EntityUid>,
+        calm_down: i32,
+    },
+    /// `Ghast.RandomFloatAroundGoal`：成年快乐恶魂在 16 格外挑一个随机飞行点。
+    ///
+    /// `Ghast.RandomFloatAroundGoal`: an adult picks a random flying spot.
+    HappyGhastFloatAround {
+        distance_to_blocks: i32,
+    },
     /// `RandomStrollGoal`（不避水）：`DefaultRandomPos.getPos(mob, 10, 7)`。
     ///
     /// `RandomStrollGoal` (not water avoiding): `DefaultRandomPos.getPos(mob, 10, 7)`.
@@ -832,6 +849,13 @@ impl Goal {
             | Self::CubeRandomDirection { .. }
             | Self::CubeKeepJumping => super::slime::flags(self),
             Self::SulfurCubeTempt { .. } | Self::SulfurCubeSearchForItems { .. } => &[Flag::Look],
+            // `HappyGhastFloatGoal` 继承 `FloatGoal`（JUMP）；
+            // `TemptGoal` 锁 MOVE|LOOK；`RandomFloatAroundGoal` 只锁 MOVE。
+            // `HappyGhastFloatGoal` inherits `FloatGoal` (JUMP); `TemptGoal` locks
+            // MOVE|LOOK; `RandomFloatAroundGoal` locks only MOVE.
+            Self::HappyGhastFloat => &[Flag::Jump],
+            Self::HappyGhastTempt { .. } => &[Flag::Move, Flag::Look],
+            Self::HappyGhastFloatAround { .. } => &[Flag::Move],
             Self::DrownedGoToWater { .. }
             | Self::RandomStroll { .. }
             | Self::SilverfishMergeWithStone { .. } => &[Flag::Move],
@@ -880,6 +904,7 @@ impl Goal {
         matches!(
             self,
             Self::Float
+                | Self::HappyGhastFloat
                 | Self::RabbitPowderSnow
                 | Self::RabbitRaid(_)
                 | Self::RandomLookAround { .. }
@@ -981,6 +1006,9 @@ impl Goal {
             Self::CubeKeepJumping => "CubeMobKeepOnJumpingGoal",
             Self::SulfurCubeTempt { .. } => "SulfurCubeTemptGoal",
             Self::SulfurCubeSearchForItems { .. } => "SulfurCubeSearchForItemsGoal",
+            Self::HappyGhastFloat => "HappyGhastFloatGoal",
+            Self::HappyGhastTempt { .. } => "ForNonPathfinders",
+            Self::HappyGhastFloatAround { .. } => "RandomFloatAroundGoal",
             Self::DrownedGoToWater { .. } => "DrownedGoToWaterGoal",
             Self::DrownedSwimUp { .. } => "DrownedSwimUpGoal",
             Self::DrownedGoToBeach { .. } => "DrownedGoToBeachGoal",
@@ -1445,6 +1473,7 @@ impl GoalSelector {
     }
 
     /// 对拍的改坏确认用：把目标按优先级排序（官方按注册顺序）。
+    #[cfg(feature = "oracle-samples")]
     pub fn sort_by_priority_for_oracle(&mut self) {
         self.goals.sort_by_key(|wrapped| wrapped.priority);
     }
@@ -1739,6 +1768,84 @@ fn raw_target(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<(EntityUid, Vec3, V
     Some((uid, other.position, eye))
 }
 
+/// `BlockPos.closerToCenterThan`：到方块中心（三个轴都加 0.5）的距离。
+pub(crate) fn closer_to_center_than(pos: BlockPos, at: Vec3, distance: f64) -> bool {
+    let dx = f64::from(pos.x) + 0.5 - at.x;
+    let dy = f64::from(pos.y) + 0.5 - at.y;
+    let dz = f64::from(pos.z) + 0.5 - at.z;
+    dx * dx + dy * dy + dz * dz < distance * distance
+}
+
+/// `NearestAttackableTargetGoal<LivingEntity>` 的 `findTarget`（Johnny 彩蛋）：
+/// 跟随距离内、看得见、能打的最近一个活体，玩家和生物一起排。
+///
+/// `NearestAttackableTargetGoal<LivingEntity>.findTarget` (the Johnny easter egg):
+/// the nearest visible, attackable living entity within follow range, players and
+/// mobs ranked together.
+pub(crate) fn nearest_attackable_any(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+) -> Option<crate::entity::EntityUid> {
+    if ctx.blocks().difficulty() == 0 {
+        return None;
+    }
+    let range = mob
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
+    let area = me.bounding_box().inflate(range, range, range);
+    let eye = Vec3::new(
+        me.position.x,
+        me.position.y + f64::from(mob.eye_height),
+        me.position.z,
+    );
+    let limit = mth::java_max(range, 2.0);
+    let mut best = -1.0_f64;
+    let mut found = None;
+    ctx.for_each_other_in(area, &mut |other| {
+        if other.removed || other.uid == me.id {
+            return;
+        }
+        let KindPublic::Mob(public) = &other.kind else {
+            return;
+        };
+        if !public.is_alive() {
+            return;
+        }
+        if me.position.distance_to_sqr(other.position) > limit * limit {
+            return;
+        }
+        let (_, _, target_eye_h) = public.mob_type.dimensions(public.baby);
+        let target_eye = Vec3::new(
+            other.position.x,
+            other.position.y + f64::from(target_eye_h),
+            other.position.z,
+        );
+        if !living::has_line_of_sight(me, mob, ctx.blocks(), other.uid, target_eye) {
+            return;
+        }
+        let distance = other.position.distance_to_sqr(eye);
+        if best == -1.0 || distance < best {
+            best = distance;
+            found = Some(other.uid);
+        }
+    });
+    let mut players = Vec::new();
+    ctx.blocks()
+        .for_each_player(&mut |player| players.push(*player));
+    for player in players {
+        if !targeting_test(me, mob, ctx.blocks(), &player, range, true, true) {
+            continue;
+        }
+        let distance = player.position.distance_to_sqr(eye);
+        if best == -1.0 || distance < best {
+            best = distance;
+            found = Some(player.uid);
+        }
+    }
+    found
+}
+
 /// `Goal.reducedTickDelay`。
 pub(crate) const fn reduced_tick_delay(ticks: i32) -> i32 {
     mth::positive_ceil_div(ticks, 2)
@@ -1775,11 +1882,21 @@ fn light_dependent_magic(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> f32 {
 ///
 /// `Guardian.getAttackDuration()` with a scene-level break-self-test override.
 fn guardian_attack_duration(mob: &Mob) -> i32 {
-    if mob.guardian.attack_duration_override != 0 {
-        mob.guardian.attack_duration_override
+    if let Some(override_value) = guardian_attack_duration_override(mob) {
+        override_value
     } else {
         super::guardian::attack_duration(mob.mob_type)
     }
+}
+
+#[cfg(feature = "oracle-samples")]
+fn guardian_attack_duration_override(mob: &Mob) -> Option<i32> {
+    (mob.guardian.attack_duration_override != 0).then_some(mob.guardian.attack_duration_override)
+}
+
+#[cfg(not(feature = "oracle-samples"))]
+const fn guardian_attack_duration_override(_mob: &Mob) -> Option<i32> {
+    None
 }
 
 fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
@@ -1838,6 +1955,36 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             super::skeleton::bow_slot(mob).is_some() && combat_target(mob, ctx).is_some()
         }
         Goal::Float => float_can_use(me, mob),
+        // `HappyGhastFloatGoal.canUse` 多了悬停超时闸门。
+        // `HappyGhastFloatGoal.canUse` adds the hover-timeout gate.
+        Goal::HappyGhastFloat => super::happy_ghast::float_can_use(me, mob),
+        Goal::HappyGhastTempt { player, calm_down } => {
+            // `TemptGoal.canUse`：冷静期先减一，再找拿着诱惑物品的最近玩家。
+            // `TemptGoal.canUse`: count down the calm-down timer, then find
+            // the nearest player holding a tempting item.
+            if *calm_down > 0 {
+                *calm_down -= 1;
+                return false;
+            }
+            let harnessed = super::happy_ghast::is_wearing_harness(mob);
+            if harnessed {
+                *player = super::goals::nearest_happy_ghast_tempting_player(me, mob, ctx);
+            } else {
+                *player = super::goals::nearest_tempting_player(me, mob, ctx, false);
+            }
+            player.is_some()
+        }
+        Goal::HappyGhastFloatAround { .. } => {
+            let mover = &mob.mover;
+            if !mover.has_wanted() {
+                return true;
+            }
+            let dx = mover.wanted_x - me.position.x;
+            let dy = mover.wanted_y - me.position.y;
+            let dz = mover.wanted_z - me.position.z;
+            let d2 = dx * dx + dy * dy + dz * dz;
+            d2 < 1.0 || d2 > 3600.0
+        }
         Goal::EndermanGaze(goal) => goal.can_use(me, mob, ctx),
         Goal::EndermanFreeze => super::enderman::freeze_target(me, mob, ctx).is_some(),
         Goal::EndermanBlock { place } => {
@@ -2579,12 +2726,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::SquidFlee { .. } => super::squid::flee_can_use(me, mob, ctx),
         // `BreakDoorGoal.canUse`：先 `DoorInteractGoal.canUse`（会写 `doorPos` / `hasDoor`），
         // 再看 `mobGriefing`、困难难度和门没开。
-        Goal::BreakDoor => {
-            door_interact_can_use(me, mob, ctx.blocks())
-                && ctx.blocks().block_game_rules().mob_griefing
-                && ctx.blocks().difficulty() == 3
-                && !door_is_open(mob, ctx.blocks())
-        }
+        Goal::BreakDoor => break_door_can_use(me, mob, ctx.blocks()),
         Goal::TurtleEgg { .. } => {
             // `RemoveBlockGoal.canUse` 覆写了 `MoveToBlockGoal`：
             // mobGriefing → 倒计时 → 先 `findNearestBlock()`，命中才设 10；
@@ -2871,12 +3013,17 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::MoveTowardsRestriction { .. } => !mob.navigation.is_done(),
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
         Goal::Float
+        | Goal::HappyGhastFloat
+        | Goal::HappyGhastTempt { .. }
         | Goal::Swell { .. }
         | Goal::CubeFloat
         | Goal::CubeRandomDirection { .. }
         | Goal::CubeKeepJumping
         | Goal::SulfurCubeTempt { .. }
         | Goal::SulfurCubeSearchForItems { .. } => can_use(goal, me, mob, ctx),
+        // `RandomFloatAroundGoal.canContinueToUse` 恒假：挑完目标那一刻就结束。
+        // `RandomFloatAroundGoal.canContinueToUse` is always false.
+        Goal::HappyGhastFloatAround { .. } => false,
         Goal::CubeAttack { grow_tired_timer } => {
             if combat_target(mob, ctx).is_none() {
                 return false;
@@ -3053,12 +3200,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         }
         Goal::FleeSun { .. } => !mob.navigation.is_done(),
         // `BreakDoorGoal.canContinueToUse`：没到时间、门没开、离门中心不到 2 格、仍是困难。
-        Goal::BreakDoor => {
-            mob.door_break_time <= DOOR_BREAK_TIME
-                && !door_is_open(mob, ctx.blocks())
-                && center_distance_sqr(mob.door_pos, me.position) < 4.0
-                && ctx.blocks().difficulty() == 3
-        }
+        Goal::BreakDoor => break_door_can_continue(me, mob, ctx.blocks()),
         Goal::EatBlock { eat_tick } => *eat_tick > 0,
         Goal::TurtleEgg { .. } => {
             // `MoveToBlockGoal.canContinueToUse`：尝试刻数在
@@ -3259,7 +3401,23 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
                 UseItemKind::Milk => super::wandering_trader::Drink::Milk { remaining },
             };
         }
+        Goal::HappyGhastTempt { .. } => {
+            // `TemptGoal.start` 记录玩家的朝向 / 位置并置 `isRunning=true`；
+            // 这里的每刻动作走 `tick_goal`。
+            // `TemptGoal.start` records the player's facing and sets isRunning;
+            // the per-tick work is in `tick_goal`.
+        }
+        Goal::HappyGhastFloatAround { distance_to_blocks } => {
+            let at = super::happy_ghast::suitable_fly_to_position(
+                me,
+                mob,
+                ctx.blocks(),
+                *distance_to_blocks,
+            );
+            mob.mover.set_wanted_position(at.x, at.y, at.z, 1.0);
+        }
         Goal::Float
+        | Goal::HappyGhastFloat
         | Goal::OcelotAttack { .. }
         | Goal::Unavailable(_)
         | Goal::SkeletonTrap
@@ -3376,14 +3534,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
         }
         // `DoorInteractGoal.start` 记下开门方向，`BreakDoorGoal.start` 清计时。
-        Goal::BreakDoor => {
-            mob.door_passed = false;
-            mob.door_open_dir = [
-                (f64::from(mob.door_pos.x) + 0.5 - me.position.x) as f32,
-                (f64::from(mob.door_pos.z) + 0.5 - me.position.z) as f32,
-            ];
-            mob.door_break_time = 0;
-        }
+        Goal::BreakDoor => break_door_start(me, mob, ctx.blocks()),
         Goal::EatBlock { eat_tick } => {
             // `start`：倒计时、实体事件 10（低头动画）、停下导航。
             // `start`: the countdown, entity event 10 (head-down animation), stop navigation.
@@ -3495,6 +3646,8 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::MoveTowardsRestriction { .. } => {}
         Goal::Swell { target } => *target = None,
         Goal::Float
+        | Goal::HappyGhastFloat
+        | Goal::HappyGhastFloatAround { .. }
         | Goal::RabbitRaid(_)
         | Goal::RabbitPowderSnow
         | Goal::Panic { .. }
@@ -3514,6 +3667,15 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::SulfurCubeTempt { player } => {
             *player = None;
             super::sulfur_cube::stop_tempt(mob);
+        }
+        Goal::HappyGhastTempt {
+            player, calm_down, ..
+        } => {
+            // `TemptGoal.stop`：10 刻冷静期、清玩家、`setWait()`。
+            // `TemptGoal.stop`: a 10-tick calm-down, clear the player, `setWait()`.
+            *calm_down = 10;
+            *player = None;
+            super::happy_ghast::tempt_stop(mob);
         }
         // `DrownedSwimUpGoal.stop` 关掉「正在找陆地」。
         Goal::DrownedSwimUp { .. } => mob.searching_for_land = false,
@@ -3600,15 +3762,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         }
         Goal::FleeSun { .. } | Goal::SquidRandomMovement | Goal::SquidFlee { .. } => {}
         // `BreakDoorGoal.stop`：清掉裂纹（`lastBreakProgress` 不重置）。
-        Goal::BreakDoor => {
-            ctx.emit(
-                crate::entity::ctx::Command::DestroyProgress {
-                    pos: mob.door_pos,
-                    progress: -1,
-                },
-                me,
-            );
-        }
+        Goal::BreakDoor => break_door_stop(me, mob, ctx),
         Goal::EatBlock { eat_tick } => *eat_tick = 0,
         Goal::TurtleEgg { .. } => {
             // `RemoveBlockGoal.stop`：落地前的摔落距离按 1 格算。
@@ -3855,11 +4009,24 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 bow.tick(me, mob, ctx, target);
             }
         }
-        Goal::Float => {
+        Goal::Float | Goal::HappyGhastFloat => {
             if me.random.next_float() < 0.8 {
                 mob.jump.jump = true;
             }
         }
+        Goal::HappyGhastTempt { player, .. } => {
+            // `TemptGoal.tick`：看向玩家，然后按 `ForNonPathfinders` 的
+            // 插值把目标点交给自己的移动控制。
+            // `TemptGoal.tick`: look at the player, then hand the interpolated
+            // point to the move control like `ForNonPathfinders` does.
+            let Some(found) = player.and_then(|uid| player_by_uid(ctx.blocks(), uid)) else {
+                return;
+            };
+            let eye = found.eye_position();
+            mob.look.set_look_at(eye.x, eye.y, eye.z, 10.0, 10.0);
+            super::happy_ghast::tempt_navigate(me, mob, eye, 1.0);
+        }
+        Goal::HappyGhastFloatAround { .. } => {}
         // 没有每刻逻辑的目标（`tick()` 是空方法）。
         Goal::DrownedGoToWater { .. }
         | Goal::RandomStroll { .. }
@@ -4231,44 +4398,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             }
         }
         Goal::FleeSun { .. } => {}
-        Goal::BreakDoor => {
-            // `DoorInteractGoal.tick`：走过门中心就记成已通过。
-            let to_x = (f64::from(mob.door_pos.x) + 0.5 - me.position.x) as f32;
-            let to_z = (f64::from(mob.door_pos.z) + 0.5 - me.position.z) as f32;
-            if mob.door_open_dir[0] * to_x + mob.door_open_dir[1] * to_z < 0.0 {
-                mob.door_passed = true;
-            }
-            // `BreakDoorGoal.tick`：1/20 敲门声（挥手动画不建模，不取随机数），
-            // 每十分之一进度发一次裂纹，到点在困难难度下拆门。
-            if me.random.next_int_bounded(20) == 0 {
-                ctx.emit(
-                    crate::entity::ctx::Command::MobLevelEvent {
-                        event: 1019,
-                        pos: mob.door_pos,
-                        data: 0,
-                    },
-                    me,
-                );
-            }
-            mob.door_break_time += 1;
-            let progress = (mob.door_break_time as f32 / DOOR_BREAK_TIME as f32 * 10.0) as i32;
-            if progress != mob.door_break_progress {
-                ctx.emit(
-                    crate::entity::ctx::Command::DestroyProgress {
-                        pos: mob.door_pos,
-                        progress,
-                    },
-                    me,
-                );
-                mob.door_break_progress = progress;
-            }
-            if mob.door_break_time == DOOR_BREAK_TIME && ctx.blocks().difficulty() == 3 {
-                ctx.emit(
-                    crate::entity::ctx::Command::BreakDoor { pos: mob.door_pos },
-                    me,
-                );
-            }
-        }
+        Goal::BreakDoor => break_door_tick(me, mob, ctx),
         Goal::TurtleEgg { speed } => {
             let Some(egg) = mob.turtle_egg_pos else {
                 return;
@@ -4404,7 +4534,7 @@ fn should_panic(mob: &Mob, ctx: &dyn EntityCtx) -> bool {
 /// `TargetGoal.canContinueToUse` with `mustSee`: the target is attackable and within the
 /// follow distance; it is dropped once unseen for more than `reducedTickDelay(memory)`
 /// full ticks.
-fn target_still_seen(
+pub(crate) fn target_still_seen(
     me: &Entity,
     mob: &mut Mob,
     ctx: &dyn EntityCtx,
@@ -4479,18 +4609,100 @@ pub(super) fn look_for_water(
     None
 }
 
+/// `BreakDoorGoal.canUse`：僵尸（任意难度）和袭击里的卫道士（普通 / 困难）共用。
+pub(crate) fn break_door_can_use(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> bool {
+    door_interact_can_use(me, mob, view)
+        && view.block_game_rules().mob_griefing
+        && (view.difficulty() == 3
+            || (view.difficulty() == 2 && mob.mob_type == super::MobType::Vindicator))
+        && !door_is_open(mob, view)
+}
+
+/// `BreakDoorGoal.canContinueToUse`：难度谓词对当前难度仍成立。
+pub(crate) fn break_door_can_continue(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> bool {
+    mob.door_break_time <= DOOR_BREAK_TIME
+        && !door_is_open(mob, view)
+        && center_distance_sqr(mob.door_pos, me.position) < 4.0
+        && (view.difficulty() == 3
+            || (view.difficulty() == 2 && mob.mob_type == super::MobType::Vindicator))
+}
+
+/// `DoorInteractGoal.start` 记下开门方向，`BreakDoorGoal.start` 清计时。
+pub(crate) fn break_door_start(me: &Entity, mob: &mut Mob, _view: &dyn BlockView) {
+    mob.door_passed = false;
+    mob.door_open_dir = [
+        (f64::from(mob.door_pos.x) + 0.5 - me.position.x) as f32,
+        (f64::from(mob.door_pos.z) + 0.5 - me.position.z) as f32,
+    ];
+    mob.door_break_time = 0;
+}
+
+/// `BreakDoorGoal.stop`：清掉裂纹（`lastBreakProgress` 不重置）。
+pub(crate) fn break_door_stop(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    ctx.emit(
+        crate::entity::ctx::Command::DestroyProgress {
+            pos: mob.door_pos,
+            progress: -1,
+        },
+        me,
+    );
+}
+
+/// `BreakDoorGoal.tick`：敲门声、裂纹进度和到点拆门。
+pub(crate) fn break_door_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    // `DoorInteractGoal.tick`：走过门中心就记成已通过。
+    let to_x = (f64::from(mob.door_pos.x) + 0.5 - me.position.x) as f32;
+    let to_z = (f64::from(mob.door_pos.z) + 0.5 - me.position.z) as f32;
+    if mob.door_open_dir[0] * to_x + mob.door_open_dir[1] * to_z < 0.0 {
+        mob.door_passed = true;
+    }
+    // `BreakDoorGoal.tick`：1/20 敲门声（挥手动画不建模，不取随机数），
+    // 每十分之一进度发一次裂纹，到点在有效难度下拆门。
+    if me.random.next_int_bounded(20) == 0 {
+        ctx.emit(
+            crate::entity::ctx::Command::MobLevelEvent {
+                event: 1019,
+                pos: mob.door_pos,
+                data: 0,
+            },
+            me,
+        );
+    }
+    mob.door_break_time += 1;
+    let progress = (mob.door_break_time as f32 / DOOR_BREAK_TIME as f32 * 10.0) as i32;
+    if progress != mob.door_break_progress {
+        ctx.emit(
+            crate::entity::ctx::Command::DestroyProgress {
+                pos: mob.door_pos,
+                progress,
+            },
+            me,
+        );
+        mob.door_break_progress = progress;
+    }
+    if mob.door_break_time == DOOR_BREAK_TIME
+        && (ctx.blocks().difficulty() == 3
+            || (ctx.blocks().difficulty() == 2 && mob.mob_type == super::MobType::Vindicator))
+    {
+        ctx.emit(
+            crate::entity::ctx::Command::BreakDoor { pos: mob.door_pos },
+            me,
+        );
+    }
+}
+
 /// `BreakDoorGoal.getDoorBreakTime()`：`max(240, doorBreakTime)`，僵尸用的构造函数给 -1。
 const DOOR_BREAK_TIME: i32 = 240;
 
 /// `DoorBlock.isWoodenDoor`：是门方块，且门的类型能用手开（铁门不行）。
-fn is_wooden_door(view: &dyn BlockView, pos: BlockPos) -> bool {
+pub(crate) fn is_wooden_door(view: &dyn BlockView, pos: BlockPos) -> bool {
     let state = view.block_state(pos);
     state.is_a(mc_bamboo_data::BlockAncestor::DoorBlock)
         && crate::behaviour::common::field_bool(state.block(), "type.canOpenByHand")
 }
 
 /// `DoorInteractGoal.isOpen`：没有门时假；门已经不是门时顺手清掉 `hasDoor`。
-fn door_is_open(mob: &mut Mob, view: &dyn BlockView) -> bool {
+pub(crate) fn door_is_open(mob: &mut Mob, view: &dyn BlockView) -> bool {
     if !mob.has_door {
         return false;
     }
@@ -4504,7 +4716,7 @@ fn door_is_open(mob: &mut Mob, view: &dyn BlockView) -> bool {
 
 /// `DoorInteractGoal.canUse`：撞墙了、路径没走完时，在当前和下一个节点里找离自己
 /// 1.5 格内的木门（按节点上方一格、水平距离用节点整数坐标）；都没有就看头顶这一格。
-fn door_interact_can_use(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> bool {
+pub(crate) fn door_interact_can_use(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> bool {
     if !me.horizontal_collision {
         return false;
     }
@@ -4542,7 +4754,7 @@ fn door_interact_can_use(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> bo
 }
 
 /// `Vec3i.distToCenterSqr`：到方块中心的距离平方。
-fn center_distance_sqr(pos: BlockPos, at: Vec3) -> f64 {
+pub(crate) fn center_distance_sqr(pos: BlockPos, at: Vec3) -> f64 {
     let dx = f64::from(pos.x) + 0.5 - at.x;
     let dy = f64::from(pos.y) + 0.5 - at.y;
     let dz = f64::from(pos.z) + 0.5 - at.z;
@@ -4921,6 +5133,47 @@ pub(super) fn nearest_tempting_player(
     found
 }
 
+/// `HappyGhast.registerGoals` 的 `TemptGoal.ForNonPathfinders` predicate：
+/// 穿了挽具的成年认 `#happy_ghast_tempt_items`（雪球不认）。
+///
+/// The predicate of `TemptGoal.ForNonPathfinders` in `HappyGhast.registerGoals`:
+/// a harnessed adult follows `#happy_ghast_tempt_items` instead of snowballs.
+pub(super) fn nearest_happy_ghast_tempting_player(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+) -> Option<EntityUid> {
+    let view = ctx.blocks();
+    let range = mob
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::TEMPT_RANGE);
+    let tag = super::happy_ghast::tempt_item_tag(true);
+    let mut players = Vec::new();
+    view.for_each_player(&mut |player| players.push(*player));
+    let mut best = f64::INFINITY;
+    let mut found = None;
+    for player in players {
+        if player.spectator || !player.alive {
+            continue;
+        }
+        if ![player.main_hand, player.off_hand]
+            .into_iter()
+            .any(|item| crate::state::item_is_tagged(item, tag))
+        {
+            continue;
+        }
+        if !targeting_test(me, mob, view, &player, range, false, false) {
+            continue;
+        }
+        let distance = player.position.distance_to_sqr(me.position);
+        if distance < best {
+            best = distance;
+            found = Some(player.uid);
+        }
+    }
+    found
+}
+
 /// `BreedGoal.getFreePartner`：8 格内同种、在发情、不在恐慌的，取最近的。
 /// 马科按 `canMate`：双方都 `canParent`，马和驴可以互配。
 ///
@@ -5214,10 +5467,7 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     // `PathfinderMob.getWalkTargetValue` 的缺省值 0。
     // Mobs that are not `Animal`s, plus the axolotl that overrides
     // `getWalkTargetValue` to 0, keep the `PathfinderMob` default of 0.
-    if mob.mob_type.is_ageable_water_creature()
-        || mob.mob_type.is_water_animal()
-        || mob.mob_type == super::MobType::Axolotl
-    {
+    if !mob.mob_type.is_animal() || mob.mob_type == super::MobType::Axolotl {
         return 0.0;
     }
     animal_walk_target_value(view, pos)
@@ -5731,7 +5981,7 @@ fn move_up_to_above_solid(view: &dyn BlockView, pos: BlockPos, above_solid: i32)
 ///
 /// A local attack target snapshot. Unavailable cross-island targets are absent.
 #[derive(Clone, Copy)]
-pub(crate) struct CombatTarget {
+pub struct CombatTarget {
     pub(crate) uid: EntityUid,
     pub(crate) position: Vec3,
     pub(crate) delta: Vec3,
@@ -5806,7 +6056,7 @@ impl CombatTarget {
     }
 }
 
-pub(super) fn combat_target(mob: &Mob, ctx: &dyn EntityCtx) -> Option<CombatTarget> {
+pub(crate) fn combat_target(mob: &Mob, ctx: &dyn EntityCtx) -> Option<CombatTarget> {
     target_by_uid(mob, ctx, mob.target?)
 }
 
@@ -5832,7 +6082,7 @@ pub(super) fn target_goal_can_continue(me: &Entity, mob: &Mob, ctx: &dyn EntityC
 /// `Mob.getMaxHeadXRot`：坐着的狼是 20，其余 40。
 ///
 /// `Mob.getMaxHeadXRot`: 20 for a sitting wolf, otherwise 40.
-pub(super) fn max_head_x_rot(mob: &Mob) -> f32 {
+pub(crate) fn max_head_x_rot(mob: &Mob) -> f32 {
     if mob.mob_type == super::MobType::Wolf {
         super::wolf::max_head_x_rot(mob)
     } else if super::guardian::is_guardian(mob.mob_type) {
@@ -6252,7 +6502,7 @@ pub(super) fn baby_turtle_on_land(public: &super::MobPublic) -> bool {
 ///
 /// The mob branch of `NearestAttackableTargetGoal.findTarget`: the nearest
 /// matching mob in sight within the follow range, measured from the eyes.
-pub(super) fn nearest_mob_target(
+pub(crate) fn nearest_mob_target(
     me: &Entity,
     mob: &mut Mob,
     ctx: &dyn EntityCtx,
@@ -6264,7 +6514,7 @@ pub(super) fn nearest_mob_target(
 /// 按完整 [`super::MobPublic`] 谓词找最近的可攻击生物目标。
 ///
 /// Find the nearest attackable mob target matching a full [`super::MobPublic`] predicate.
-pub(super) fn nearest_mob_target_with(
+pub(crate) fn nearest_mob_target_with(
     me: &Entity,
     mob: &mut Mob,
     ctx: &dyn EntityCtx,

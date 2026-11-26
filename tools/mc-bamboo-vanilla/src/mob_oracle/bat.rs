@@ -104,6 +104,7 @@ pub(super) fn player_view(uid: i32, [x, y, z]: [f64; 3]) -> PlayerView {
 impl BatCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()
@@ -136,6 +137,8 @@ impl BatCase {
             ignore_bed_monsters: false,
             short_hunger: false,
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
             natural_spawn: None,

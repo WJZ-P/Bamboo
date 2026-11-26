@@ -335,6 +335,7 @@ fn idle_activity() -> ActivityData {
                                 speed: Speed::fixed(1.25),
                                 close_adult: 2.0,
                                 close_baby: 1.0,
+                                look_in_eyes: false,
                             },
                             1,
                         ),
@@ -364,7 +365,14 @@ fn idle_activity() -> ActivityData {
                 Kind::Gate(Box::new(Gate::run_one(
                     vec![(MemoryType::WalkTarget, ValueAbsent)],
                     vec![
-                        (Kind::RandomStroll { speed: 1.0 }, 1),
+                        (
+                            Kind::RandomStroll {
+                                speed: 1.0,
+                                horizontal: 10,
+                                vertical: 7,
+                            },
+                            1,
+                        ),
                         (
                             Kind::WalkTargetFromLook {
                                 speed: Speed::fixed(1.0),

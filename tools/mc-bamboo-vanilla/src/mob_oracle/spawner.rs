@@ -50,6 +50,7 @@ impl SpawnerCase {
 
     fn level(&self, broken: &str) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()
@@ -119,6 +120,8 @@ impl SpawnerCase {
             }],
             game: None,
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
             inhabited: HashMap::new(),
