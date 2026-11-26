@@ -249,6 +249,14 @@ impl SculkSensorEntity {
             self.listener.current.map(|info| info.event),
         )
     }
+
+    /// 当前记下的振动候选（事件、源坐标、候选刻）。没有候选时是 `None`。
+    pub fn candidate(&self) -> Option<(GameEvent, Vec3, i64)> {
+        self.listener
+            .selector
+            .codec_event()
+            .map(|info| (info.event, info.pos, self.listener.selector.codec_tick()))
+    }
 }
 
 impl BlockEntity for SculkSensorEntity {

@@ -2,11 +2,14 @@
 //!
 //! 抛竿时播放 `entity.fishing_bobber.throw`、读取钓竿上的 `lure`（每级 -5 秒 = 100 刻）
 //! 与 `luck_of_the_sea`（每级 +1 幸运）、生成 `FishingHook` 并将 `player.fishing` 指向它、
-//! 记一次 `ITEM_USED` 统计。收竿时若钩住实体则拉拽并广播 31 号实体事件（掉落物扣 3 耐久，
-//! 其余实体扣 5 耐久）；若正在咬钩（`nibble > 0`）则按 `minecraft:gameplay/fishing` 战利品表
-//! 结算（`ORIGIN` / `TOOL` / `THIS_ENTITY` / `luck + player.getLuck()`），生成朝玩家飞去的
+//! 记一次 `ITEM_USED` 统计、发 `ITEM_INTERACT_START`。收竿时若钩住实体则拉拽并广播
+//! 31 号实体事件（掉落物扣 3 耐久，其余实体扣 5 耐久）；若正在咬钩（`nibble > 0`）则按
+//! `minecraft:gameplay/fishing` 战利品表结算
+//! （`ORIGIN` / `TOOL` / `THIS_ENTITY` / `luck + player.getLuck()`），生成朝玩家飞去的
 //! 掉落物、在 `(x, y + 0.5, z + 0.5)` 生成 `nextInt(6) + 1` 经验球、对 `#minecraft:fishes`
-//! 记 `FISH_CAUGHT` 统计并触发 `minecraft:fishing_rod_hooked` 进度；若浮漂落地则耐久改为 2。
+//! 记 `FISH_CAUGHT` 统计并触发 `minecraft:fishing_rod_hooked` 进度；若浮漂落地则耐久改为 2，
+//! 最后发 `ITEM_INTERACT_FINISH`。两个游戏事件都照 `ItemStack.causeUseVibration` 受
+//! `use_effects.interact_vibrations` 控制。
 //!
 //! Player casting and retrieving, matching vanilla 26.3 `FishingRodItem.use` and
 //! `FishingHook.retrieve`.
@@ -17,6 +20,7 @@ use mc_bamboo_blocks::{
         Entity, EntityKind, KindPublic,
         fishing_hook::{FishingHookCast, caught_item_velocity, should_stop_fishing},
     },
+    game_event::{GameEvent, dispatch::EventContext},
 };
 use mc_bamboo_core::{BlockPos, Hand, Vec3};
 use mc_bamboo_data::{
@@ -28,6 +32,7 @@ use mc_bamboo_loot::{EntityView, LevelView, LootParams, LootStack, LootTable, Po
 use mc_bamboo_protocol::{
     components::{ComponentValue, defaults},
     item::ItemStack,
+    packet::play::GameMode,
 };
 use mc_bamboo_world::store::ChunkStore;
 use tracing::debug;
@@ -77,6 +82,7 @@ pub(crate) fn use_rod(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
                 pitch,
             );
         }
+        cause_use_vibration(region, id, &stack, GameEvent::ItemInteractFinish);
     } else {
         let pitch = 0.4 / (level_random_float(region) * 0.4 + 0.8);
         if let Some(pos) = player_position(region, id) {
@@ -123,8 +129,55 @@ pub(crate) fn use_rod(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
             player.fishing = Some(hook_uid);
         }
         crate::item_use_stats::award(region, id, stack.item);
+        cause_use_vibration(region, id, &stack, GameEvent::ItemInteractStart);
     }
     true
+}
+
+/// `ItemStack.causeUseVibration(player, event)`：只有 `use_effects` 组件存在且
+/// `interact_vibrations` 为真时才发事件。物品的 `use_effects` 缺省来自官方
+/// `COMMON_ITEM_COMPONENTS`（`UseEffects.DEFAULT`，`interact_vibrations = true`），
+/// 被物品组件补丁移除或改假的都不发。
+///
+/// `ItemStack.causeUseVibration(player, event)`: emits only when the `use_effects`
+/// component is present with `interact_vibrations = true`.
+fn cause_use_vibration(region: &mut Region, id: PlayerId, stack: &ItemStack, event: GameEvent) {
+    // 对应 `FishingRodItem.use` 里对 `stack.causeUseVibration` 的调用。
+    #[cfg(test)]
+    tests::observe_use_vibration(event, stack);
+    let patch = stack.patch();
+    let emitting = matches!(
+        defaults::resolve(stack.item, &patch, data_component_type::USE_EFFECTS),
+        Some(ComponentValue::UseEffects {
+            interact_vibrations: true,
+            ..
+        })
+    );
+    if !emitting {
+        return;
+    }
+    let Some((position, context)) = region.players.get(&id).map(|player| {
+        (
+            player.position(),
+            EventContext {
+                sneaking: player.sync.is_crouching(),
+                spectator: player.game_mode == GameMode::Spectator,
+                source_player: Some(id.0),
+                source_entity: Some(id.0),
+                ..Default::default()
+            },
+        )
+    }) else {
+        return;
+    };
+    let effects = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        // `Entity.gameEvent(Holder)` 用实体精确坐标和 `Context.of(entity)`。
+        world.game_event(event, position, context);
+        world.into_effects()
+    };
+    crate::interaction::send_effects(region, Some(id), &effects);
 }
 
 /// 每刻清理已经消失的 `player.fishing` 引用。
@@ -297,6 +350,8 @@ fn evaluate_fishing_loot(
     let Ok(table) = LootTable::from_name("minecraft:gameplay/fishing") else {
         return Vec::new();
     };
+    #[cfg(test)]
+    tests::observe_fishing_luck(luck);
     let origin = Position::new(hook_pos.x, hook_pos.y, hook_pos.z);
     let view = FishingLevelView {
         chunks: &region.chunks,
@@ -473,12 +528,21 @@ impl LevelView for FishingLevelView<'_> {
 
 #[cfg(test)]
 mod tests {
-    use mc_bamboo_blocks::entity::{Entity, EntityKind, fishing_hook::FishHookState, mob::MobType};
+    use std::cell::RefCell;
+
+    use mc_bamboo_blocks::{
+        behaviour::misc::sculk_entity::{SculkSensorEntity, create_block_entity},
+        entity::{
+            Entity, EntityKind,
+            fishing_hook::FishHookState,
+            mob::{MobType, effects::EffectInstance},
+        },
+    };
     use mc_bamboo_core::{BlockPos, Hand, Vec3};
     use mc_bamboo_data::{
         blocks, items,
         packets::play::clientbound,
-        registries::{data_component_type, entity_type},
+        registries::{attribute, data_component_type, entity_type, mob_effect},
     };
     use mc_bamboo_protocol::{
         components::{ComponentPatch, ComponentValue, PatchEntry},
@@ -488,6 +552,42 @@ mod tests {
 
     use super::*;
     use crate::world::tests::Harness;
+
+    // 收竿结算时实际传进战利品表的幸运值；测试用它确认 `getLuck()` 的链路。
+    thread_local! {
+        static FISHING_LUCK: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
+        // `causeUseVibration` 的调用记录。`ITEM_INTERACT_START` 官方不在
+        // `#minecraft:vibrations` 里，感测体不会记成候选，所以这里直接记调用。
+        static USE_VIBRATIONS: RefCell<Vec<(GameEvent, ItemStack)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn observe_fishing_luck(luck: f32) {
+        FISHING_LUCK.with(|seen| seen.borrow_mut().push(luck));
+    }
+
+    fn take_fishing_luck() -> Vec<f32> {
+        FISHING_LUCK.with(|seen| std::mem::take(&mut *seen.borrow_mut()))
+    }
+
+    pub(super) fn observe_use_vibration(event: GameEvent, stack: &ItemStack) {
+        USE_VIBRATIONS.with(|seen| seen.borrow_mut().push((event, stack.clone())));
+    }
+
+    fn take_use_vibrations() -> Vec<(GameEvent, ItemStack)> {
+        USE_VIBRATIONS.with(|seen| std::mem::take(&mut *seen.borrow_mut()))
+    }
+
+    /// `ItemStack.causeUseVibration` 的门控：组件不存在或 `interact_vibrations = false`
+    /// 时不发事件。
+    fn emits_use_vibration(stack: &ItemStack) -> bool {
+        matches!(
+            defaults::resolve(stack.item, &stack.patch(), data_component_type::USE_EFFECTS),
+            Some(ComponentValue::UseEffects {
+                interact_vibrations: true,
+                ..
+            })
+        )
+    }
 
     fn enchanted_rod(enchants: &[(&str, i32)]) -> ItemStack {
         let mut stack = ItemStack::new(items::FISHING_ROD, 1);
@@ -772,6 +872,219 @@ mod tests {
             }),
             "retrieve hooked entity must broadcast entity event 31"
         );
+    }
+
+    #[test]
+    fn luck_potion_effect_raises_the_luck_passed_to_the_fishing_loot_table() {
+        // 两位玩家用同一根钓竿、同样的浮漂状态和同一条战利品表随机序列结算：
+        // 有幸运药水 II 的那位 `getLuck()` 应该是 3，没有的是 0。
+        fn retrieve_with_luck(effect: Option<EffectInstance>) -> f32 {
+            let mut server = Harness::new(2);
+            let client = server.join_and_settle("angler");
+            let pos = server.region().players.get(&client.id).unwrap().position();
+            let slot = {
+                let player = server.region().players.get_mut(&client.id).unwrap();
+                let slot = player.inventory.hand_slot(Hand::Main);
+                player.inventory.slots[slot] = ItemStack::new(items::FISHING_ROD, 1);
+                player.game_mode = GameMode::Survival;
+                if let Some(effect) = effect {
+                    player.effects.add(effect);
+                    // 官方 `onEffectAdded` 会刷新属性；Bamboo 每刻重建前也要能读到。
+                    crate::player_attributes::rebuild_player(player, false);
+                }
+                slot
+            };
+            let _ = slot;
+            server.request(
+                &client,
+                PlayRequest::UseItem {
+                    hand: Hand::Main,
+                    sequence: 1,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                },
+            );
+            server.tick();
+            let hook_uid = server
+                .region()
+                .players
+                .get(&client.id)
+                .unwrap()
+                .fishing
+                .expect("bobber cast");
+            {
+                let mut hook = server.region().entities.take(hook_uid).unwrap();
+                hook.position = Vec3::new(pos.x, pos.y + 0.5, pos.z + 1.0);
+                hook.on_ground = false;
+                if let EntityKind::FishingHook(state) = &mut hook.kind {
+                    state.state = FishHookState::Bobbing;
+                    state.nibble = 20;
+                    state.biting = true;
+                    state.open_water = true;
+                    state.luck = 2;
+                }
+                server.region().entities.put(hook);
+            }
+            server.request(
+                &client,
+                PlayRequest::UseItem {
+                    hand: Hand::Main,
+                    sequence: 2,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                },
+            );
+            server.tick();
+            let seen = take_fishing_luck();
+            assert_eq!(seen.len(), 1, "结算必须走一次战利品表求值");
+            seen[0]
+        }
+
+        let plain = retrieve_with_luck(None);
+        let lucky = retrieve_with_luck(Some(EffectInstance::with_amplifier(
+            mob_effect::LUCK,
+            600,
+            2,
+        )));
+        assert_eq!(plain, 2.0, "无效果时只有 luck_of_the_sea 类的浮漂幸运值");
+        assert_eq!(
+            lucky, 5.0,
+            "幸运药水 II 给 `generic.luck` +3，结算时加到浮漂幸运值上"
+        );
+
+        // 属性表本身也照官方 `MobEffect.addAttributeModifiers` 挂了修饰符。
+        let mut player = crate::player::Player::new(
+            crate::inbound::PlayerId(1),
+            uuid::Uuid::nil(),
+            "Lucky".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::default(),
+        );
+        player
+            .effects
+            .add(EffectInstance::with_amplifier(mob_effect::LUCK, 600, 2));
+        crate::player_attributes::rebuild_player(&mut player, false);
+        assert_eq!(player.attributes.value(attribute::LUCK), 3.0);
+        assert_eq!(player.attributes.value(attribute::LUCK) as f32, 3.0);
+    }
+
+    /// 在 `pos` 放一个幽匿感测体，按 `World::set_block_entity` 登记监听者。
+    fn place_sensor(region: &mut Region, pos: BlockPos) {
+        region.chunks.set_block(pos, blocks::SCULK_SENSOR);
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        world.set_block_entity(create_block_entity(pos, false));
+    }
+
+    /// 感测体当前记下的振动候选（事件、源坐标、候选刻）。
+    fn sensor_candidate(region: &mut Region, pos: BlockPos) -> Option<(GameEvent, Vec3, i64)> {
+        let (mut level, ticks) = region.block_level();
+        let world = World::new(&mut level, ticks);
+        world
+            .block_entity::<SculkSensorEntity>(pos)
+            .and_then(SculkSensorEntity::candidate)
+    }
+
+    #[test]
+    fn casting_and_retrieving_emit_the_two_item_interact_vibrations() {
+        // 直接调 `use_rod`，不跑方块实体刻，才能观察到 FINISH 记下的候选。
+        let mut server = Harness::new(2);
+        let client = server.join_and_settle("angler");
+        let region = server.player_region(&client);
+        let pos = region.players.get(&client.id).unwrap().position();
+        let sensor = BlockPos::containing(pos);
+        place_sensor(region, sensor);
+        {
+            let player = region.players.get_mut(&client.id).unwrap();
+            let slot = player.inventory.hand_slot(Hand::Main);
+            player.inventory.slots[slot] = ItemStack::new(items::FISHING_ROD, 1);
+            player.game_mode = GameMode::Survival;
+        }
+        let _ = take_use_vibrations();
+
+        // 抛竿：START。官方 `#minecraft:vibrations` 标签不含 START，感测体只收到
+        // post、不会记候选；这里比对调用记录。
+        assert!(use_rod(region, client.id, Hand::Main));
+        assert_eq!(
+            take_use_vibrations()
+                .iter()
+                .map(|(event, _)| *event)
+                .collect::<Vec<_>>(),
+            [GameEvent::ItemInteractStart]
+        );
+        assert!(
+            sensor_candidate(region, sensor).is_none(),
+            "官方 `ITEM_INTERACT_START` 不在 `#vibrations` 里，感测体不记候选"
+        );
+
+        // 收竿：FINISH 在 `#vibrations` 里，感测体应当记下候选，
+        // 源坐标是玩家的精确位置（感测体放在玩家脚下）。
+        assert!(use_rod(region, client.id, Hand::Main));
+        assert_eq!(
+            take_use_vibrations()
+                .iter()
+                .map(|(event, _)| *event)
+                .collect::<Vec<_>>(),
+            [GameEvent::ItemInteractFinish]
+        );
+        let (event, source, _) = sensor_candidate(region, sensor).expect("收竿振动");
+        assert_eq!(event, GameEvent::ItemInteractFinish);
+        assert_eq!(source, pos, "源坐标是玩家的精确位置");
+    }
+
+    #[test]
+    fn use_effects_component_gates_the_item_interact_vibrations() {
+        let mut rod = ItemStack::new(items::FISHING_ROD, 1);
+        assert!(
+            emits_use_vibration(&rod),
+            "缺省 `use_effects` 的 interact_vibrations 为真"
+        );
+
+        let mut disabled = ComponentPatch::new();
+        disabled.put(
+            data_component_type::USE_EFFECTS,
+            PatchEntry::Set(ComponentValue::UseEffects {
+                can_sprint: true,
+                interact_vibrations: false,
+                speed_multiplier: 1.0,
+            }),
+        );
+        let (added, removed) = disabled.to_opaque();
+        rod.added = added;
+        rod.removed = removed;
+        assert!(!emits_use_vibration(&rod));
+
+        let mut removed = ComponentPatch::new();
+        removed.put(data_component_type::USE_EFFECTS, PatchEntry::Removed);
+        let (added, gone) = removed.to_opaque();
+        rod.added = added;
+        rod.removed = gone;
+        assert!(
+            !emits_use_vibration(&rod),
+            "组件被移除时 `causeUseVibration` 直接返回"
+        );
+
+        // 真正抛竿一次：关掉 `interact_vibrations` 的钓竿不产生任何游戏事件。
+        let mut server = Harness::new(2);
+        let client = server.join_and_settle("angler");
+        let region = server.player_region(&client);
+        {
+            let player = region.players.get_mut(&client.id).unwrap();
+            let slot = player.inventory.hand_slot(Hand::Main);
+            player.inventory.slots[slot] = rod;
+            player.game_mode = GameMode::Survival;
+        }
+        let _ = take_use_vibrations();
+        assert!(use_rod(region, client.id, Hand::Main));
+        let seen = take_use_vibrations();
+        assert_eq!(
+            seen.len(),
+            1,
+            "`causeUseVibration` 被调用，但组件门控内部决定不 post"
+        );
+        assert_eq!(seen[0].0, GameEvent::ItemInteractStart);
+        assert!(!emits_use_vibration(&seen[0].1));
     }
 
     #[test]
