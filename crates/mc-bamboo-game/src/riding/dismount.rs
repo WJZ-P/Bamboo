@@ -188,6 +188,75 @@ pub(crate) fn dismount_location(
     Some(vehicle_position)
 }
 
+/// 官方 `AbstractBoat.getDismountLocationForPassenger`：用
+/// `getCollisionHorizontalEscapeVector(bbWidth * SQRT_OF_TWO, passengerWidth,
+/// passenger.getYRot())` 找一点，检查该格与下一格的地面高度，按三种姿势试
+/// `DismountHelper.canDismountTo`；脚下是水、或都不行时退回
+/// `VehicleEntity.getDismountLocationForPassenger`（船的 AABB 顶）。
+///
+/// Vanilla `AbstractBoat.getDismountLocationForPassenger`.
+pub(crate) fn boat_dismount_location(
+    chunks: &ChunkStore,
+    border: &WorldBorder,
+    player: &Player,
+    vehicle_position: Vec3,
+    vehicle_width: f64,
+    vehicle_box_max_y: f64,
+) -> Option<Vec3> {
+    let context = CollisionContext::Entity(EntityContext {
+        fall_distance: player.motion.fall_distance,
+        bottom: player.position().y,
+        falling_block: false,
+        descending: player.sync.shift_key_down,
+        placement: false,
+        powder_snow_walkable: false,
+    });
+    let mut state_at = |pos: BlockPos| BlockState(chunks.block(pos).unwrap_or(blocks::VOID_AIR));
+    // `Mth.SQRT_OF_TWO` 是 f32；`getBbWidth() * SQRT_OF_TWO` 先按 f32 乘再提升。
+    let escape = escape_vector(
+        f64::from((vehicle_width as f32) * std::f32::consts::SQRT_2),
+        PLAYER_POSES[0].0,
+        player.yaw,
+    );
+    let target_x = vehicle_position.x + escape.x;
+    let target_z = vehicle_position.z + escape.z;
+    let pos = BlockPos::containing(Vec3::new(target_x, vehicle_box_max_y, target_z));
+    let below = pos.below();
+    // `level.isWaterAt(below)`。
+    let water_below = state_at(below)
+        .fluid()
+        .is_tagged(mc_bamboo_data::tags::fluid_tags::WATER);
+    if !water_below {
+        let mut candidates = Vec::new();
+        let floor = block_floor_height(&mut state_at, pos);
+        if floor_valid(floor) {
+            candidates.push(Vec3::new(target_x, f64::from(pos.y) + floor, target_z));
+        }
+        let floor_below = block_floor_height(&mut state_at, below);
+        if floor_valid(floor_below) {
+            candidates.push(Vec3::new(
+                target_x,
+                f64::from(below.y) + floor_below,
+                target_z,
+            ));
+        }
+        for &(width, height) in &PLAYER_POSES {
+            for location in &candidates {
+                let bounds = pose_bounds(width, height, *location);
+                if !collides(&mut state_at, context, bounds) && border.is_within_bounds_aabb(bounds)
+                {
+                    return Some(*location);
+                }
+            }
+        }
+    }
+    Some(Vec3::new(
+        vehicle_position.x,
+        vehicle_box_max_y,
+        vehicle_position.z,
+    ))
+}
+
 /// 官方 `Animal.getDismountLocationForPassenger`：朝向 `Direction.fromYRot(yRot)`，按
 /// `DismountHelper.offsetsForDirection` 的八个相邻格（右、左、后右、后左、前右、前左、后、前）
 /// 依次试，每格对三种姿势取格子中心上方的落点；全都不行落在载具包围盒顶上。

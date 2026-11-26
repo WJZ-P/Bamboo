@@ -659,17 +659,16 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
     // already left the table leaves the player where it is, as vanilla does.
     let target = region.entities.public_at(vehicle).and_then(|public| {
         if matches!(public.kind, KindPublic::Boat(_)) {
-            // `AbstractBoat.getDismountLocationForPassenger`：官方走
-            // `getCollisionHorizontalEscapeVector` + `DismountHelper`，这里复用
-            // 马科的八邻格 `DismountHelper` 版本，参数用船的尺寸。
-            return dismount::dismount_location(
+            // `AbstractBoat.getDismountLocationForPassenger`：
+            // `getCollisionHorizontalEscapeVector(bbWidth*SQRT_OF_TWO, ...)` +
+            // `DismountHelper`，参数是船宽和船 AABB 顶。
+            return dismount::boat_dismount_location(
                 &region.chunks,
                 &region.global.world_border,
                 player,
                 public.position,
                 1.375,
-                0.5625,
-                public.yaw,
+                public.bounding_box().max_y,
             );
         }
         let KindPublic::Mob(mob) = &public.kind else {
