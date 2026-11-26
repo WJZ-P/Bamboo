@@ -719,6 +719,25 @@ impl Scoreboard {
         true
     }
 
+    /// 对拍用：只把 `member` 加进 `t{team}` 队伍，不发包（`create_team` + `join`
+    /// 的纯数据部分）。名字就是计分板的 holder（玩家名或实体 UUID 字符串）。
+    ///
+    /// Oracle-only: add `member` to team `t{team}` without sending packets (the
+    /// data half of `create_team` + `join`).
+    #[cfg(any(test, feature = "oracle-samples"))]
+    pub(crate) fn insert_team(&mut self, member: &str, team: i32) {
+        let name = format!("t{team}");
+        if !self.team_exists(&name) {
+            self.teams.push(Team::new(&name));
+        }
+        if !self.membership.contains_key(member) {
+            if let Some(team) = self.teams.iter_mut().find(|team| team.name == name) {
+                team.members.push(member.to_owned());
+            }
+            self.membership.insert(member.to_owned(), name);
+        }
+    }
+
     pub(crate) fn delete_team(&mut self, name: &str, region: &mut Region) -> Option<Component> {
         let formatted = self.formatted_team(name)?;
         let members = self

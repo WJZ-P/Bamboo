@@ -1181,6 +1181,10 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
     player.motion.fall_distance = scene.attack_fall;
     player.on_ground = scene.attack_ground;
     player.last_main_hand_item = player.inventory.held(mc_bamboo_core::Hand::Main).clone();
+    // 长矛蓄力：前向速度（官方 `setKnownMovement`，朝向 +Z），`getKnownSpeed` 读它。
+    if scene.kinetic_start >= 0 {
+        player.motion.known_movement = Vec3::new(0.0, 0.0, scene.kinetic_speed);
+    }
     // 六个装备槽按官方顺序构造，带默认组件（铁甲 / 保护附魔）。
     // Java 场景里的顺序是 [靴子, 护腿, 胸甲, 头盔, 主手]，
     // Bamboo 的菜单槽位是主手 36、副手 45、靴子 8、护腿 7、胸甲 6、头盔 5。
@@ -1228,6 +1232,17 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
         .add(observer, Box::new(observer_capture.clone()));
     region.insert_player(watcher);
     region.insert_player(player);
+    // 队伍：宠物继承主人的队伍，攻击场景也把玩家（0 攻击者 / 1 观察者）进队。
+    if scene.player_teams.iter().any(|&team| team >= 0) {
+        let scoreboard = std::sync::Arc::make_mut(&mut region.global.scoreboard);
+        for (index, &team) in scene.player_teams.iter().enumerate() {
+            if team < 0 {
+                continue;
+            }
+            let name = if index == 0 { "Kitten" } else { "Observer" };
+            scoreboard.insert_team(name, team);
+        }
+    }
     if scene.attack_sprint {
         entity_sync::set_sprinting(&mut region, id, true);
     }
@@ -1244,6 +1259,9 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
         );
     }
     region.sound_seed_generator = mc_bamboo_blocks::LevelRandom::new(12345);
+    // 官方假世界的 `Level.random` 是 `RandomSource.create(1)`（爆炸方块射线读它），
+    // `soundSeedGenerator` 是 12345。风爆的爆炸要读 `world.random()`，这里对齐种子。
+    region.random = mc_bamboo_blocks::LevelRandom::new(1);
     // 第一头 dummy 只用来对齐官方假世界的实体 ID；`real_cows` 是 Java
     // `stepJson(cows)` 里真正逐刻比较的那几头。
     //
@@ -1260,7 +1278,9 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
                 region
                     .entities
                     .spawn(mc_bamboo_blocks::entity::Entity::cow(Vec3::new(
-                        2.5, 64.0, 0.5,
+                        scene.main_cow_position.0,
+                        scene.main_cow_position.1,
+                        scene.main_cow_position.2,
                     ))),
             ];
         for (i, &(x, y, z)) in scene.extra_cow_positions.iter().enumerate() {
@@ -1274,11 +1294,22 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
                         mc_bamboo_blocks::entity::mob::MobType::Wolf,
                         Vec3::new(x, y, z),
                     ));
-                if scene.mob_owners.get(index).copied().unwrap_or(-1) == 0 {
+                if let Some(owner) = scene
+                    .mob_owners
+                    .get(index)
+                    .copied()
+                    .filter(|&owner| owner >= 0)
+                {
                     region.entities.with_mut(uid, |entity| {
                         if let Some(mob) = entity.kind.mob_mut() {
                             mob.tame.flags |= mc_bamboo_blocks::entity::mob::tame::FLAG_TAME;
-                            mob.tame.owner = Some(*Uuid::from_u128(1).as_bytes());
+                            // 玩家下标 0 是攻击者（UUID 1），1 是观察者（UUID 2）。
+                            let uuid = if owner == 0 {
+                                Uuid::from_u128(1)
+                            } else {
+                                Uuid::from_u128(2)
+                            };
+                            mob.tame.owner = Some(*uuid.as_bytes());
                         }
                     });
                 }
@@ -1301,6 +1332,27 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
             if let Some(&uid) = real.get(index) {
                 region.entities.with_mut(uid, |entity| {
                     entity.random = mc_bamboo_blocks::entity::JavaRandom::new(seed);
+                });
+            }
+        }
+        // 破甲对拍：给指定生物穿一件胸甲，`detect_updates` 把盔甲属性刷进去。
+        // Breach oracle: equip a chestplate and run `detect_updates` so the armor
+        // attribute picks up the item's modifier.
+        for (index, &chest) in scene.cow_chests.iter().enumerate() {
+            if chest == 0 {
+                continue;
+            }
+            if let Some(&uid) = real.get(index) {
+                region.entities.with_mut(uid, |entity| {
+                    let Some(mob) = entity.kind.mob_mut() else {
+                        return;
+                    };
+                    use mc_bamboo_protocol::packet::play::EquipmentSlot;
+                    mob.equipment.set(
+                        EquipmentSlot::Chest,
+                        mc_bamboo_protocol::item::ItemStack::new(chest, 1),
+                    );
+                    mob.equipment.detect_updates(&mut mob.attributes);
                 });
             }
         }
@@ -1351,6 +1403,25 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
             let _ = std::mem::take(&mut *capture.0.lock().unwrap());
             let _ = std::mem::take(&mut *observer_capture.0.lock().unwrap());
             player_attack::on_stab(&mut region, id);
+            entity_tracking::drain_events_for_oracle(&mut region, observer);
+        }
+        // 长矛蓄力：开始蓄力之后逐刻 `onUseTick` → `damageEntities`。
+        if scene.kinetic_start == tick as i32 {
+            entity_tracking::sync(&mut region);
+            let _ = std::mem::take(&mut *capture.0.lock().unwrap());
+            let _ = std::mem::take(&mut *observer_capture.0.lock().unwrap());
+            player_weapon::start(&mut region, id, mc_bamboo_core::Hand::Main);
+            entity_tracking::drain_events_for_oracle(&mut region, observer);
+        }
+        if scene.kinetic_start >= 0
+            && tick as i32 >= scene.kinetic_start
+            && region
+                .players
+                .get(&id)
+                .is_some_and(|player| player.weapon_use.is_some())
+        {
+            entity_tracking::sync(&mut region);
+            player_weapon::tick(&mut region);
             entity_tracking::drain_events_for_oracle(&mut region, observer);
         }
         for action in scene.actions.iter().filter(|action| action.tick == tick) {
@@ -1952,9 +2023,15 @@ pub struct ReplayPlayerHurt {
     pub attack_fall: f64,
     pub attack_ground: bool,
     pub attack_enchants: Vec<(String, i32)>,
+    /// 主目标牛（0 号）的位置。旧的场景都放在 (2.5, 64, 0.5)，这里按场景读。
+    pub main_cow_position: (f64, f64, f64),
     pub extra_cow_positions: Vec<(f64, f64, f64)>,
     /// 长矛场景：这一刻触发 `PiercingWeapon.attack`，-1 表示不触发。
     pub stab_tick: i32,
+    /// 长矛蓄力场景：这一刻 `startUsingItem` 开始蓄力，-1 不蓄力；`kinetic_speed`
+    /// 是玩家前向速度（`setKnownMovement`，方块 / tick）。
+    pub kinetic_start: i32,
+    pub kinetic_speed: f64,
     /// 每头参战牛的随机源初始状态，按位置顺序；官方场景给每头牛设了同一种子。
     ///
     /// Initial random state of each scene cow, in position order; the official
@@ -1969,6 +2046,15 @@ pub struct ReplayPlayerHurt {
     /// The owning player index of each scene mob (-1 unless a tamed wolf), aligned
     /// with [`Self::cow_seeds`].
     pub mob_owners: Vec<i32>,
+    /// 每头参战生物胸口穿的盔甲物品 ID（0 是空），和 [`Self::cow_seeds`] 对齐。
+    ///
+    /// The chest armor item id of each scene mob (0 for none), aligned with
+    /// [`Self::cow_seeds`].
+    pub cow_chests: Vec<i32>,
+    /// 每名玩家的队伍编号（-1 不在队伍里），按下标对齐（0 攻击者 / 1 观察者）。
+    ///
+    /// Each player's team (-1 for none), indexed like the players (0 attacker / 1 observer).
+    pub player_teams: Vec<i32>,
 }
 
 /// 攻击场景里每头牛的逐刻状态，全部用原始位比较。
