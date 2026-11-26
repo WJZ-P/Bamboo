@@ -827,6 +827,10 @@ fn celebrate_sound(kind: super::MobType) -> &'static str {
         super::MobType::Pillager => "minecraft:entity.pillager.celebrate",
         super::MobType::Vindicator => "minecraft:entity.vindicator.celebrate",
         super::MobType::Ravager => "minecraft:entity.ravager.celebrate",
+        super::MobType::Evoker => "minecraft:entity.evoker.celebrate",
+        // 幻术师不在袭击波次表里，不会庆祝；这里给它环境音当占位（和官方
+        // `Illusioner.getCelebrateSound()` 返回 `ILLUSIONER_AMBIENT` 一致）。
+        super::MobType::Illusioner => "minecraft:entity.illusioner.ambient",
         _ => "minecraft:entity.witch.celebrate",
     }
 }

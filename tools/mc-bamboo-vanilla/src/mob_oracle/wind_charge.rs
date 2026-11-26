@@ -46,7 +46,6 @@ impl WindChargeCase {
             ));
         }
         MobLevel {
-            raid: None,
             blocks: blocks.into_iter().collect(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -77,6 +76,7 @@ impl WindChargeCase {
             containers: Default::default(),
             container_open_counts: Default::default(),
             shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState::empty(),
+            raid: None,
         }
     }
 }

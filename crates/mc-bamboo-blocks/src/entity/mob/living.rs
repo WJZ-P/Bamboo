@@ -155,6 +155,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Breeze {
         super::breeze::tick(me, mob);
     }
+    // `Vex.tick` 在 `super.tick()` 之前把 `noPhysics` 打开，穿墙飞行。
+    // `Vex.tick` enables `noPhysics` ahead of `super.tick()` so it phases through blocks.
+    if mob.mob_type == super::MobType::Vex {
+        mob.no_physics = true;
+    }
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
     // `LivingEntity.tick`：`updatingUsingItem()` 紧跟 `super.tick()`，在装备比较和
@@ -366,6 +371,15 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     // `CopperGolem.tick` after `super.tick()`: the weathering clock and statue conversion.
     if mob.mob_type == super::MobType::CopperGolem && !me.removed {
         super::copper_golem::tick_after(me, mob, ctx);
+    }
+    // `Vex.tick` 在 `super.tick()` 之后：复位 `noPhysics`、`setNoGravity(true)` 和有限生命扣血。
+    // `Vex.tick` after `super.tick()`: clear `noPhysics`, `setNoGravity(true)` and limited life.
+    if mob.mob_type == super::MobType::Vex {
+        if !me.removed {
+            super::vex::tick_after(me, mob, ctx);
+        } else {
+            mob.no_physics = false;
+        }
     }
 }
 
@@ -1366,6 +1380,11 @@ pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
 
 /// `Entity.isInWall`：眼睛那一小片和会让人窒息的方块重叠。
 fn is_in_wall(me: &Entity, mob: &Mob, view: &dyn BlockView) -> bool {
+    // `Entity.isInWall`：`noPhysics`（恼鬼穿墙）从不窒息。
+    // `Entity.isInWall`: `noPhysics` (phasing vexes) never suffocates.
+    if mob.no_physics {
+        return false;
+    }
     // `LivingEntity.isInWall`：睡着的不窒息（狐狸与村民）。
     // `LivingEntity.isInWall`: sleepers never suffocate (foxes and villagers).
     if (mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping())
@@ -2233,6 +2252,11 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // `AxolotlMoveControl` / `AxolotlLookControl`: both stop while playing dead.
         super::axolotl::move_control_tick(me, mob);
         super::axolotl::look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Vex {
+        // `Vex` 用 `VexMoveControl`：穿墙飞行、无重力的移动控制。
+        // `Vex` uses `VexMoveControl`: the wall-phasing, gravity-free move control.
+        super::vex::move_control_tick(me, mob, ctx);
+        look_control_tick(me, mob);
     } else if mob.mob_type == super::MobType::Dolphin {
         // 海豚的 `SmoothSwimmingMoveControl(85, 10, 0.02F, 0.1F, true)` 与
         // `SmoothSwimmingLookControl(this, 10)`。
@@ -2344,6 +2368,14 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
         // `Warden.customServerAiStep`：大脑、振动、愤怒衰减、活动重选。
         // `Warden.customServerAiStep`: brain, vibration, anger decay, activity switch.
         super::warden_ai::custom_server_ai_step(me, mob, ctx, decision_gap);
+    }
+    if matches!(
+        mob.mob_type,
+        super::MobType::Evoker | super::MobType::Illusioner
+    ) {
+        // `SpellcasterIllager.customServerAiStep`：施法计时递减。
+        // `SpellcasterIllager.customServerAiStep`: count the casting timer down.
+        super::spellcaster::server_ai_step(mob);
     }
     if mob.mob_type == super::MobType::Allay {
         // `Allay.customServerAiStep`：振动到达、大脑、活动重选。
@@ -3024,7 +3056,9 @@ fn root_vehicle(uid: EntityUid, vehicle: Option<EntityUid>, ctx: &dyn EntityCtx)
 }
 
 fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    if !mob.mob_type.is_pushable() {
+    // `Entity.push(Entity)`：`this.noPhysics`（恼鬼在 `Vex.tick` 里为真）不互相推挤。
+    // `Entity.push(Entity)`: `this.noPhysics` (true during `Vex.tick`) skips pushing.
+    if !mob.mob_type.is_pushable() || mob.no_physics {
         return;
     }
     let my_root = root_vehicle(me.id, me.vehicle, ctx);
