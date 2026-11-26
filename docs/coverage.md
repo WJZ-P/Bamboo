@@ -77,7 +77,7 @@ ID 全部来自 `packets.json` 的 `play.serverbound`，共 69 个，`tablecheck
 - `LocalPlayer.aiStep` 先调 `tryToStartFallFlying`，本地置 index 0 的 `0x80`，再发包。
 - `LivingEntity.travel` 之后走 `travelFallFlying`，不读 WASD。
 - `updateFallFlying` 的清除分支要求 `!level().isClientSide()`，全部代码里客户端能走到的清除点只有 `travelFallFlying` 里的 `onClimbable()`。
-- 回应：只给发送者发 `set_entity_data`，index 0 写服务端当前标志字节，`0x80` 为 0。实体 7 是 `07 00 00 00 ff` [跑]。
+- 回应：拒绝时 `stopFallFlying()` 把 0 号标脏，下一个同步周期用 `set_entity_data` 把当前标志字节（`0x80` 为 0）发给本人和观察者。实体 7 是 `07 00 00 00 ff` [跑]，见 `entities.md` 第 10 节。
 
 原规格里只有这一项被标成忽略，却会卡住客户端。同类的 `autoSpinAttackTicks`（`LivingEntity` 里也只有服务端清 flag）要激流三叉戟和水，M2 走不到。
 

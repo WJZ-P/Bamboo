@@ -1272,15 +1272,18 @@ public final class Probe {
             await("metadata: the flag clears again",
                     () -> Byte.valueOf((byte) 0).equals(dataValue(observer, actor, METADATA_SHARED_FLAGS)));
 
-            // 滑翔被拒绝：只有自己收到一个不带滑翔位的 0 号。
+            // 滑翔被拒绝：0 号被强制标脏，本人和观察者都在下一个同步周期收到不带滑翔位的 0 号。
+            // `stopFallFlying` 先设再清这一位，`packDirty` 不看值是否变化，
+            // `sendDirtyEntityData` 用 `sendToTrackingPlayersAndSelf` 广播。
             int observerData = observer.entityDataPackets;
             int ownData = actor.entityDataPackets;
             actor.send(actor.playerCommand(ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
-            await("metadata: fall flying is refused to the sender", () -> actor.entityDataPackets > ownData);
-            check("metadata: the refusal clears the fall flying flag",
-                    Byte.valueOf((byte) 0).equals(dataValue(actor, actor, METADATA_SHARED_FLAGS)));
-            pumpFor(SETTLE_MILLIS);
-            check("metadata: the refusal stays private", observer.entityDataPackets == observerData);
+            await("metadata: the observer also receives the refused flag", () -> observer.entityDataPackets > observerData);
+            await("metadata: the sender receives the refused flag", () -> actor.entityDataPackets > ownData);
+            for (Join viewer : List.of(actor, observer)) {
+                await("metadata: " + viewer.player + " sees the cleared fall flying flag",
+                        () -> Byte.valueOf((byte) 0).equals(dataValue(viewer, actor, METADATA_SHARED_FLAGS)));
+            }
 
             Vec3 ground = actor.position;
             actor.send(new ServerboundSetCreativeModeSlotPacket(6, new ItemStack(Items.ELYTRA)));
