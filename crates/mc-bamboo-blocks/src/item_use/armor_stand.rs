@@ -56,12 +56,15 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
         return InteractionResult::Fail;
     }
     // `level.getEntities(null, aabb).isEmpty()`：方块、玩家和其它实体都不能占着。
-    // 官方的 `getEntities` 把玩家算进去；交互者由 `UseContext.actor` 给出，玩家碰撞盒
-    // 宽 0.6、高 1.8（潜行只改眼高，不改盒子）。
+    // 官方的 `getEntities` 把场景里所有玩家算进去；交互者由 `UseContext.actor` 给出，
+    // 玩家碰撞盒宽 0.6、高 1.8（潜行只改眼高，不改盒子），旁观玩家的盒由
+    // `Level::is_unobstructed` 查（真实服务端里它查所有在线玩家）。
     //
     // `level.getEntities(null, aabb).isEmpty()`: no block, player or other entity may
-    // occupy it. Vanilla counts the player; the actor comes from `UseContext.actor`,
-    // with a 0.6 x 1.8 box (crouching changes the eye height, not the box).
+    // occupy it. Vanilla counts every player in the scene; the actor comes from
+    // `UseContext.actor`, with a 0.6 x 1.8 box (crouching changes the eye height, not
+    // the box), and bystanders' boxes are checked through `Level::is_unobstructed`
+    // (all online players on a real server).
     let actor = ctx.actor;
     let player_blocks = {
         let hw = 0.3_f64;
@@ -91,7 +94,13 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
         );
         bounds.intersects(other)
     });
-    if player_blocks || entity_blocks {
+    // `getEntities` 里的旁观玩家：`OracleLevel` 把它们放在场景实体盒里，服务端是
+    // 在线玩家表，两种实现都由 `is_unobstructed` 统一回答。
+    //
+    // Bystander players in `getEntities`: the oracle keeps them as scene entity boxes,
+    // a real server as online players; both are answered by `is_unobstructed`.
+    let bystander_blocks = !world.level().is_unobstructed(std::slice::from_ref(&bounds));
+    if player_blocks || entity_blocks || bystander_blocks {
         return InteractionResult::Fail;
     }
 
@@ -299,6 +308,23 @@ mod tests {
         assert_eq!(public.position, Vec3::new(3.5, 63.0, 5.5));
         // floor((wrapDegrees(37 - 180) + 22.5) / 45) * 45 = -135.
         assert_eq!(public.yaw, -135.0);
+    }
+
+    /// 官方 `getEntities(null, aabb)` 把场景里所有玩家算进去；旁观玩家占着放置格时
+    /// `Level::is_unobstructed` 为假，放置必须失败（`use tripwire_hook` 那道题）。
+    #[test]
+    fn a_bystander_in_the_placement_cell_blocks_it() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        let pos = BlockPos::new(3, 64, 5);
+        // `is_unobstructed` 由旁观玩家盒决定；这里直接让场景里有实体挡着。
+        level.obstructed = true;
+        let a = actor(0.0);
+        let mut world = World::new(&mut level, &mut ticks);
+        let ctx = UseContext::new(&a, Hand::Main, hit(pos, Direction::Up));
+        assert_eq!(use_on(&mut world, &ctx), InteractionResult::Fail);
+        let _ = world.into_effects();
+        assert!(level.entities().ids().is_empty());
     }
 
     #[test]
