@@ -15,6 +15,7 @@
 pub mod allay;
 mod allay_ai;
 pub mod armadillo;
+pub mod armor_stand;
 pub mod attributes;
 pub mod avoid;
 pub mod axolotl;
@@ -288,13 +289,17 @@ pub enum MobType {
     ///
     /// Trader llama: a llama variant leashed to a wandering trader on spawn.
     TraderLlama,
+    /// 盔甲架，`ArmorStand`：`LivingEntity` 一支，没有 AI，靠两段式受伤破坏。
+    ///
+    /// The armour stand: a `LivingEntity` with no AI, broken by a two-hit hurt.
+    ArmorStand,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 73] = [
+    pub const ALL: [Self; 74] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -368,6 +373,7 @@ impl MobType {
         Self::Allay,
         Self::WanderingTrader,
         Self::TraderLlama,
+        Self::ArmorStand,
     ];
 
     /// 注册表 ID。
@@ -448,6 +454,7 @@ impl MobType {
             Self::Allay => ids::ALLAY,
             Self::WanderingTrader => ids::WANDERING_TRADER,
             Self::TraderLlama => ids::TRADER_LLAMA,
+            Self::ArmorStand => ids::ARMOR_STAND,
         }
     }
 
@@ -528,6 +535,7 @@ impl MobType {
             Self::Allay => "minecraft:allay",
             Self::WanderingTrader => "minecraft:wandering_trader",
             Self::TraderLlama => "minecraft:trader_llama",
+            Self::ArmorStand => "minecraft:armor_stand",
         }
     }
 
@@ -743,6 +751,16 @@ impl MobType {
                 mc_bamboo_data::villager::BABY_VILLAGER_EYE_HEIGHT,
             ),
             (Self::HappyGhast, baby) => happy_ghast::dimensions(baby),
+            // 盔甲架的普通 / 小型两种；标记尺寸在 [`Mob::dimensions`] 里按标志位覆盖。
+            // The armour stand's normal / small sizes; the marker size is handled
+            // by [`Mob::dimensions`] from the flag bit.
+            (Self::ArmorStand, baby) => {
+                if baby {
+                    armor_stand::BABY_DIMENSIONS
+                } else {
+                    armor_stand::NORMAL_DIMENSIONS
+                }
+            }
             // `EntityTypes.WARDEN`：`sized(0.9F, 2.9F)`，未显式给眼高，取缺省 `height * 0.85F`。
             // `EntityTypes.WARDEN`: `sized(0.9F, 2.9F)` with the default eye height.
             (Self::Warden, _) => (0.9, 2.9, 2.9 * 0.85),
@@ -1272,6 +1290,9 @@ impl MobType {
             Self::Allay => "minecraft:entities/allay",
             Self::WanderingTrader => "minecraft:entities/wandering_trader",
             Self::TraderLlama => "minecraft:entities/trader_llama",
+            // 盔甲架破坏时掉固定物品，不走死亡战利品表。
+            // A broken armour stand drops fixed items, not a death loot table.
+            Self::ArmorStand => "",
         }
     }
 
@@ -1460,6 +1481,7 @@ impl MobType {
             // Trading ambience is switched by `living::ambient_voice` while trading.
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.ambient"),
             Self::TraderLlama => Some("minecraft:entity.llama.ambient"),
+            Self::ArmorStand => None,
         }
     }
 
@@ -1534,6 +1556,7 @@ impl MobType {
             Self::Ravager => Some("minecraft:entity.ravager.hurt"),
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.hurt"),
             Self::TraderLlama => Some("minecraft:entity.llama.hurt"),
+            Self::ArmorStand => None,
         }
     }
 
@@ -1607,6 +1630,7 @@ impl MobType {
             Self::Ravager => Some("minecraft:entity.ravager.death"),
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.death"),
             Self::TraderLlama => Some("minecraft:entity.llama.death"),
+            Self::ArmorStand => None,
         }
     }
 
@@ -1698,6 +1722,7 @@ impl MobType {
             // Wandering traders, like villagers, use the block's step sound.
             Self::WanderingTrader => None,
             Self::TraderLlama => Some("minecraft:entity.llama.step"),
+            Self::ArmorStand => None,
         }
     }
 
@@ -1778,6 +1803,9 @@ impl MobType {
             Self::Allay => items::ALLAY_SPAWN_EGG,
             Self::WanderingTrader => items::WANDERING_TRADER_SPAWN_EGG,
             Self::TraderLlama => items::TRADER_LLAMA_SPAWN_EGG,
+            // 盔甲架没有刷怪蛋，占位成空气。
+            // The armour stand has no spawn egg; air stands in for it.
+            Self::ArmorStand => items::AIR,
         }
     }
 
@@ -1857,6 +1885,7 @@ impl MobType {
             Self::Allay => "entity.minecraft.allay",
             Self::WanderingTrader => "entity.minecraft.wandering_trader",
             Self::TraderLlama => "entity.minecraft.trader_llama",
+            Self::ArmorStand => "entity.minecraft.armor_stand",
         }
     }
 
@@ -3311,6 +3340,10 @@ pub struct Mob {
     ///
     /// `LivingEntity.discardFriction`: `travelInAir` skips friction during a long jump.
     pub discard_friction: bool,
+    /// 盔甲架的专属状态；别的生物恒为缺省值。
+    ///
+    /// The armour stand's own state; default for every other mob.
+    pub armor_stand: armor_stand::ArmorStand,
 }
 
 /// 要发给客户端的一次生物事件。
@@ -3841,7 +3874,9 @@ impl Mob {
             },
             persistence_required: false,
             left_handed: false,
-            no_ai: false,
+            // 盔甲架不是 `Mob`，`noAi` 恒为真。
+            // The armour stand is not a `Mob`, so `noAi` is always true.
+            no_ai: mob_type == MobType::ArmorStand,
             can_pick_up_loot: false,
             home: None,
             loot_table_seed: 0,
@@ -3962,6 +3997,7 @@ impl Mob {
                 .then(|| Box::new(equine::EquineState::default())),
             skeleton_horse: (mob_type == MobType::SkeletonHorse)
                 .then(|| Box::new(skeleton_horse::SkeletonHorseState::default())),
+            armor_stand: armor_stand::ArmorStand::default(),
         };
         if mob_type == MobType::Villager {
             // `Villager` 构造函数末尾的 `setCanPickUpLoot(true)`。

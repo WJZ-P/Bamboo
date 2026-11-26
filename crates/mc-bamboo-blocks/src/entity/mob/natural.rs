@@ -877,6 +877,9 @@ pub(super) fn check_spawn_rules(
         }
         // 嘎枝不在群系刷怪表里；心用 `SpawnUtil` 的落点规则单独刷出。
         MobType::Creaking => true,
+        // 盔甲架不自然生成，只由物品放置、命令或发射器召唤。
+        // Armour stands never spawn naturally: only placement, commands or dispensers.
+        MobType::ArmorStand => true,
     }
 }
 
