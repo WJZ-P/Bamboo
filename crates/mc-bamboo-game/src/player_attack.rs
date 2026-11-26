@@ -29,7 +29,7 @@ use mc_bamboo_protocol::{
     codec::write_varint,
     components::{ComponentPatch, ComponentValue, cursor::Holder, defaults},
     item::ItemStack,
-    packet::play::{Animate, GameMode, LevelParticles, Randomization, SetEntityMotion},
+    packet::play::{Animate, GameMode, LevelParticles, Randomization, SetEntityMotion, SwingAnimationType},
 };
 
 use crate::{
@@ -1781,8 +1781,30 @@ pub(crate) fn on_stab(region: &mut Region, id: PlayerId) {
     finish_stab(region, id, &setup, &hit_targets);
     // `postPiercingAttack()`：突进附魔 `lunge` 的前冲、耐久、饥饿和音效。
     post_piercing_attack(region, id, &setup);
-    // `swingAndResetAttackStrength(MAIN_HAND, swingAnim, false)`。
-    entity_sync::broadcast_swing(region, id, Hand::Main);
+    // `swingAndResetAttackStrength(MAIN_HAND, swingAnim, false)`：`swingAnim` 是
+    // 武器 `attack_animation` 组件给的动画（长矛是 `stab` + 对应时长），不是缺省挥手。
+    let (animation, duration) = attack_swing(&setup.held);
+    entity_sync::broadcast_swing_with(region, id, Hand::Main, animation, duration);
+}
+
+/// `ItemStack.getAttackAnimation()`：`attack_animation` 组件，没有时是
+/// `SwingAnimation.DEFAULT`（`whack`、时长 6）。
+///
+/// `ItemStack.getAttackAnimation()`: the `attack_animation` component, else
+/// `SwingAnimation.DEFAULT` (`whack`, duration 6).
+fn attack_swing(held: &ItemStack) -> (SwingAnimationType, i32) {
+    if !held.is_empty()
+        && let Ok(patch) = ComponentPatch::from_opaque(held)
+        && let Some(ComponentValue::AttackAnimation(swing)) =
+            defaults::resolve(held.item, &patch, kinds::ATTACK_ANIMATION)
+    {
+        let animation = match swing.kind {
+            2 => SwingAnimationType::Stab,
+            _ => SwingAnimationType::Whack,
+        };
+        return (animation, swing.duration);
+    }
+    (SwingAnimationType::Whack, 6)
 }
 
 /// `handlePlayerAction` STAB 分支的读玩家部分，也把 `PiercingWeapon.attack`
