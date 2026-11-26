@@ -4673,9 +4673,21 @@ pub(crate) fn center_distance_sqr(pos: BlockPos, at: Vec3) -> f64 {
 }
 
 /// `Entity.isAlliedTo(player)`：生物在队伍里，而且和玩家是同一队。
+/// `TamableAnimal.getTeam()` 覆写成：自己没队时，驯服动物返回主人的队
+/// （`getRootOwner().getTeam()`），所以这里补这一层回退。
+///
+/// `Entity.isAlliedTo(player)`: the mob is in a team and it is the player's team.
+/// `TamableAnimal.getTeam()` falls back to the root owner's team when the mob
+/// has none of its own, so mirror that here.
 fn allied(mob: &Mob, view: &dyn BlockView, player: &PlayerView) -> bool {
-    view.entity_team(&mob.uuid)
-        .is_some_and(|team| player.team == Some(team))
+    let team = view.entity_team(&mob.uuid).or_else(|| {
+        mob.tame
+            .is_tame()
+            .then(|| super::tame::owner(mob, view))
+            .flatten()
+            .and_then(|owner| owner.team)
+    });
+    team.is_some_and(|team| player.team == Some(team))
 }
 
 /// 按 uid 找一个玩家。

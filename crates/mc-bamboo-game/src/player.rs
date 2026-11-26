@@ -277,6 +277,15 @@ pub(crate) struct Player {
     ///
     /// Combat memory read by tamed wolves guarding their owner.
     pub(crate) combat_memory: crate::player_combat_memory::CombatMemory,
+    /// `LivingEntity.recentKineticEnemies`：长矛蓄力冲刺最近刺中的实体 → 那一刻的
+    /// 刻数（相对计数，随玩家整行搬）。`wasRecentlyStabbed` / `rememberStabbedEntity`
+    /// / `stabbedEntities` 都读它，接触冷却用它跳过 10 刻内刺过的实体。
+    ///
+    /// `LivingEntity.recentKineticEnemies`: entity → the tick it was last stabbed
+    /// (a relative counter moved with the player row). `wasRecentlyStabbed`,
+    /// `rememberStabbedEntity` and `stabbedEntities` all read it; the contact
+    /// cooldown skips an entity stabbed within the last 10 ticks.
+    pub(crate) recent_kinetic_enemies: std::collections::BTreeMap<i32, i32>,
     /// `ServerPlayer.respawnConfig` 之外，死亡后一律等待客户端发来的
     /// `PERFORM_RESPAWN`：`immediate_respawn` 只影响客户端要不要显示死亡界面，
     /// 服务端不自己重生，客户端不发就一直是死的。
@@ -385,6 +394,7 @@ impl Player {
             entity_ticks: 0,
             time_since_rest: 0,
             combat_memory: Default::default(),
+            recent_kinetic_enemies: std::collections::BTreeMap::new(),
             awaiting_respawn: false,
             riding: crate::riding::Riding::default(),
             advancements: crate::advancements::PlayerAdvancements::default(),
