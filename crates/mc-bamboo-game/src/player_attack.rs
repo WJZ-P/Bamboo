@@ -353,6 +353,26 @@ struct MaceTarget {
 /// own pets and pets owned by the main target are excluded (`isAlliedTo` and
 /// `isOwnedBy(target)`); spectators, marker armour stands and creative flying
 /// players are excluded too.
+/// 候选生物的有效队伍下标：先看自己所在的队；`TamableAnimal.getTeam()` 覆写——
+/// 驯服动物自己没队时返回主人的队，这里也回退到主人（玩家）的队伍。
+///
+/// The candidate mob's effective team index: its own team first; `TamableAnimal.getTeam()`
+/// falls back to the root owner's team when a tamed mob has none, mirrored here.
+fn mob_team_index(region: &Region, mob: &mc_bamboo_blocks::entity::mob::MobPublic, tame: bool) -> Option<u32> {
+    if let Some(team) = region.global.scoreboard.entity_team_index(&mob.uuid) {
+        return Some(team);
+    }
+    if !tame {
+        return None;
+    }
+    let owner = mob.owner?;
+    region
+        .players
+        .values()
+        .find(|player| *player.uuid.as_bytes() == owner)
+        .and_then(|player| region.global.scoreboard.team_index_of(&player.name))
+}
+
 fn collect_mace_targets(
     region: &Region,
     attacker: PlayerId,
@@ -403,7 +423,8 @@ fn collect_mace_targets(
             //
             // `attacker.isAlliedTo(candidate)`: same team, or a pet the attacker owns
             // (`TamableAnimal.considersEntityAsAlly` treats its owner as an ally).
-            let candidate_team = region.global.scoreboard.entity_team_index(&mob.uuid);
+            // 队伍继承 `TamableAnimal.getTeam()`：候选自己没队时，驯服动物用主人的队。
+            let candidate_team = mob_team_index(region, mob, tame);
             let allied = (attacker_team.is_some() && candidate_team == attacker_team)
                 || (tame && mob.owner == attacker_uuid);
             // `isOwnedBy(target)`：候选是主目标驯服的宠物。
