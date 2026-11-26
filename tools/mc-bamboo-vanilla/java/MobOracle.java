@@ -2751,6 +2751,9 @@ public final class MobOracle {
             Scenes.ground(circle, 16);
             circle.mob(63, 0.5, 64.0, 0.5, 0.0F, 8601L, 0);
             circle.player(2.5, 64.0, 0.5, Items.AIR);
+            // 圆形内圈的一头牛：尖牙对非袭击者生物造成 6 点伤害，逐刻比血量。
+            // A cow inside the inner ring: fangs deal 6 damage to non-raider mobs; compare health per tick.
+            circle.mob(0, 2.0, 64.0, 0.5, 0.0F, 8609L, 0);
             scenes.add(circle);
             // 远距离直线尖牙：玩家 8 格外，走直线（16 颗）；召唤结束后放直线尖牙。
             Scene line = new Scene("evoker_fangs_line").ticks(160).difficulty(2).drops();

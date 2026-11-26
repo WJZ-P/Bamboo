@@ -198,7 +198,12 @@ fn fangs_source(
     owner_uuid: Option<[u8; 16]>,
 ) -> DamageSource {
     // `EvokerFangs.dealDamageTo`：有主人是 `indirectMagic(owner, this)`，否则 `magic`。
-    let mut source = DamageSource::environment(DamageKind::Magic);
+    let kind = if owner.is_some() || owner_uuid.is_some() {
+        DamageKind::IndirectMagic
+    } else {
+        DamageKind::Magic
+    };
+    let mut source = DamageSource::environment(kind);
     source.direct = Some(me.id);
     source.position = Some(me.position);
     if let Some(owner) = owner {
