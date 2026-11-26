@@ -563,12 +563,7 @@ impl MobType {
     ///
     /// Whether this entity type is in a `minecraft:entity_type` tag.
     pub fn in_entity_tag(self, name: &str) -> bool {
-        let id = self.entity_type();
-        mc_bamboo_data::tags::TAG_GROUPS
-            .iter()
-            .filter(|group| group.registry == "minecraft:entity_type")
-            .flat_map(|group| group.tags.iter())
-            .any(|tag| tag.name == name && tag.ids.contains(&id))
+        mc_bamboo_data::in_tag("minecraft:entity_type", name, self.entity_type())
     }
 
     pub fn by_name(name: &str) -> Option<Self> {
@@ -824,13 +819,15 @@ impl MobType {
         self.in_entity_tag("minecraft:inverted_healing_and_harm")
     }
 
-    /// `Entity.canFreeze()` 的类型部分：`#freeze_immune_entity_types`（流浪者）和
-    /// `Skeleton.canFreeze()` 的覆写（恒假）。
+    /// `Entity.canFreeze()` 的类型部分：`Skeleton.canFreeze()` 覆写成恒假，其余看
+    /// `#freeze_immune_entity_types`（流浪者、北极熊、雪傀儡、凋灵）标签。
     ///
-    /// The type part of `Entity.canFreeze()`: `#freeze_immune_entity_types` (strays) and
-    /// the `Skeleton.canFreeze()` override (always false).
-    pub const fn can_freeze(self) -> bool {
-        !matches!(self, Self::Skeleton | Self::Stray)
+    /// The type part of `Entity.canFreeze()`: `Skeleton.canFreeze()` is overridden to
+    /// always be false; every other kind follows the `#freeze_immune_entity_types` tag
+    /// (strays, polar bears, snow golems, withers).
+    pub fn can_freeze(self) -> bool {
+        !matches!(self, Self::Skeleton)
+            && !self.in_entity_tag("minecraft:freeze_immune_entity_types")
     }
 
     /// 目标选择按官方 `TargetGoal` 的完整规则走（`mustSee` 的视线记忆、生物也能当目标、
@@ -965,28 +962,13 @@ impl MobType {
             || squid::is_squid(self)
             || matches!(self, Self::Bat | Self::Dolphin | Self::Axolotl)
     }
-    /// `LivingEntity.canBreatheUnderwater()`：`#can_breathe_under_water` 里已建模的水生生物。
-    /// 标签里还有 `#undead`，僵尸和骷髅的溺水行为沿用旧实现，这里不改。
+    /// `LivingEntity.canBreatheUnderwater()`：`#can_breathe_under_water` 标签。标签收进
+    /// 了 `#undead`，所以僵尸、骷髅一支都不溺水。
     ///
-    /// `LivingEntity.canBreatheUnderwater()` for the modelled aquatic members of
-    /// `#can_breathe_under_water`. The tag also holds `#undead`; zombie and skeleton
-    /// drowning keeps its earlier behaviour and is not changed here.
-    pub const fn can_breathe_under_water(self) -> bool {
-        // 守卫者在 `#can_breathe_under_water` 里。
-        // Guardians are in `#can_breathe_under_water`.
-        squid::is_squid(self)
-            || matches!(
-                self,
-                Self::Guardian | Self::ElderGuardian | Self::Nautilus | Self::ZombieNautilus
-            )
-            || fish::is_fish(self)
-            || turtle::is_turtle(self)
-            // 幻翼在 `#undead` 里，`#can_breathe_under_water` 收了整个标签。
-            // Phantoms are `#undead`, which `#can_breathe_under_water` includes.
-            || matches!(
-                self,
-                Self::Axolotl | Self::Frog | Self::Phantom | Self::SkeletonHorse
-            )
+    /// `LivingEntity.canBreatheUnderwater()`: the `#can_breathe_under_water` tag. The
+    /// tag includes `#undead`, so zombies, skeletons and their kin never drown.
+    pub fn can_breathe_under_water(self) -> bool {
+        self.in_entity_tag("minecraft:can_breathe_under_water")
     }
 
     /// 是不是官方 `WaterAnimal`（鱼）：有氧气处理、不吃水流、生成时不查液体，
@@ -1143,14 +1125,16 @@ impl MobType {
     /// returns 0, so a fall deals no damage (the fall distance still accumulates and
     /// resets, and a breeze still plays its `BREEZE_LAND` sound).
     pub fn fall_damage_immune(self) -> bool {
-        // 直接查生成的官方实体标签，新加的生物（悦灵、凋灵……）自动跟上。
-        // Read the generated vanilla entity-type tag so new mobs follow automatically.
-        let id = self.entity_type();
-        mc_bamboo_data::tags::TAG_GROUPS
-            .iter()
-            .filter(|group| group.registry == "minecraft:entity_type")
-            .flat_map(|group| group.tags.iter())
-            .any(|tag| tag.name == "minecraft:fall_damage_immune" && tag.ids.contains(&id))
+        self.in_entity_tag("minecraft:fall_damage_immune")
+    }
+
+    /// `Entity.canControlVehicle()`：不在 `#non_controlling_rider` 里的生物作为载具首位
+    /// 乘客时能接管载具导航并关闭载具自身的移动控制标志。
+    ///
+    /// `Entity.canControlVehicle()`: a mob outside `#non_controlling_rider` takes over
+    /// the vehicle's navigation and suppresses its control flags when riding first.
+    pub fn can_control_vehicle(self) -> bool {
+        !self.in_entity_tag("minecraft:non_controlling_rider")
     }
 
     /// `SpawnPlacements` 里登记成 `IN_WATER` 的类型。
@@ -1275,18 +1259,14 @@ impl MobType {
         }
     }
 
-    /// `EntityTypeTags.BURN_IN_DAYLIGHT` 加 `Zombie.isSunSensitive()`：
-    /// 尸壳不烧，僵尸、溺尸和骷髅一支烧。
-    pub const fn burns_in_daylight(self) -> bool {
-        matches!(
-            self,
-            Self::Zombie | Self::Drowned | Self::ZombieVillager | Self::Phantom
-        ) || self.is_skeleton()
+    /// `EntityTypeTags.BURN_IN_DAYLIGHT`：白天晒到太阳会着火。
+    pub fn burns_in_daylight(self) -> bool {
+        self.in_entity_tag("minecraft:burn_in_daylight")
     }
 
-    /// `EntityTypeTags.DEFLECTS_PROJECTILES`：现在只有旋风人，把射来的投射物弹回。
-    pub const fn deflects_projectiles(self) -> bool {
-        matches!(self, Self::Breeze)
+    /// `EntityTypeTags.DEFLECTS_PROJECTILES`：把射来的投射物弹回（现在只有旋风人）。
+    pub fn deflects_projectiles(self) -> bool {
+        self.in_entity_tag("minecraft:deflects_projectiles")
     }
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
@@ -2264,9 +2244,9 @@ impl DamageKind {
         }
     }
 
-    /// `DamageTypeTags.IS_FALL` / `ALWAYS_MOST_SIGNIFICANT_FALL`。
-    pub const fn is_fall(self) -> bool {
-        matches!(self, Self::Fall | Self::EnderPearl)
+    /// `DamageTypeTags.IS_FALL`：摔落伤害（`minecraft:fall` 和 `minecraft:ender_pearl`）。
+    pub fn is_fall(self) -> bool {
+        self.in_tag("minecraft:is_fall")
     }
 
     /// 官方 `DamageType.msgId()`，数据文件里的 `message_id`：死亡消息
@@ -2363,82 +2343,75 @@ impl DamageKind {
     }
 
     /// `#no_knockback`。
-    pub const fn no_knockback(self) -> bool {
-        !matches!(
-            self,
-            Self::PlayerAttack
-                | Self::MobAttack
-                | Self::MobAttackNoAggro
-                | Self::Arrow
-                | Self::Trident
-                | Self::Spit
-                | Self::Thrown
-                | Self::Thorns
-                | Self::IndirectMagic
-                | Self::WindCharge
-                | Self::SonicBoom
-                | Self::Mace
-        ) || matches!(self, Self::Wither)
+    pub fn no_knockback(self) -> bool {
+        self.in_tag("minecraft:no_knockback")
     }
 
     /// `#bypasses_armor`。
-    pub const fn bypasses_armor(self) -> bool {
-        matches!(
-            self,
-            Self::OnFire
-                | Self::InWall
-                | Self::Cramming
-                | Self::Drown
-                | Self::Generic
-                | Self::Fall
-                | Self::Freeze
-                | Self::OutOfWorld
-                | Self::GenericKill
-                | Self::Magic
-                | Self::IndirectMagic
-                | Self::Wither
-                | Self::EnderPearl
-                | Self::SonicBoom
-        )
+    pub fn bypasses_armor(self) -> bool {
+        self.in_tag("minecraft:bypasses_armor")
     }
 
     /// `#bypasses_effects`：抗性效果和保护附魔都不生效。
-    pub const fn bypasses_effects(self) -> bool {
-        matches!(self, Self::OutOfWorld | Self::GenericKill)
+    pub fn bypasses_effects(self) -> bool {
+        self.in_tag("minecraft:bypasses_effects")
     }
 
     /// `#bypasses_enchantments`：保护附魔不生效。
-    pub const fn bypasses_enchantments(self) -> bool {
-        matches!(self, Self::OutOfWorld | Self::GenericKill | Self::SonicBoom)
+    pub fn bypasses_enchantments(self) -> bool {
+        self.in_tag("minecraft:bypasses_enchantments")
     }
 
     /// `#is_fire`。
-    pub const fn is_fire(self) -> bool {
-        matches!(
-            self,
-            Self::InFire | Self::OnFire | Self::Lava | Self::HotFloor
-        )
+    pub fn is_fire(self) -> bool {
+        self.in_tag("minecraft:is_fire")
     }
 
     /// `#no_impact`。
-    pub const fn no_impact(self) -> bool {
-        matches!(self, Self::Drown)
+    pub fn no_impact(self) -> bool {
+        self.in_tag("minecraft:no_impact")
     }
 
-    /// `#bypasses_resistance`：26.3 里只有 `out_of_world` / `generic_kill`。
-    pub const fn bypasses_resistance(self) -> bool {
-        matches!(self, Self::OutOfWorld | Self::GenericKill)
+    /// `#bypasses_resistance`。
+    pub fn bypasses_resistance(self) -> bool {
+        self.in_tag("minecraft:bypasses_resistance")
     }
 
     /// `#bypasses_invulnerability`。
-    pub const fn bypasses_invulnerability(self) -> bool {
-        matches!(self, Self::OutOfWorld | Self::GenericKill)
+    pub fn bypasses_invulnerability(self) -> bool {
+        self.in_tag("minecraft:bypasses_invulnerability")
+    }
+
+    /// `#is_explosion`。
+    pub fn is_explosion(self) -> bool {
+        self.in_tag("minecraft:is_explosion")
+    }
+
+    /// `#is_projectile`。
+    pub fn is_projectile(self) -> bool {
+        self.in_tag("minecraft:is_projectile")
+    }
+
+    /// `#witch_resistant_to`：女巫对这个标签里的伤害只吃 15%。
+    ///
+    /// `#witch_resistant_to`: witches take only 15% of damage in this tag.
+    pub fn witch_resistant_to(self) -> bool {
+        self.in_tag("minecraft:witch_resistant_to")
     }
 
     /// `#bypasses_cooldown`：26.3 的数据包里这个标签是空的。
-    pub const fn bypasses_cooldown(self) -> bool {
-        let _ = self;
-        false
+    pub fn bypasses_cooldown(self) -> bool {
+        self.in_tag("minecraft:bypasses_cooldown")
+    }
+
+    /// 按名字查 `minecraft:damage_type` 标签，受伤路径上的共有入口。
+    ///
+    /// The shared hot-path entry that reads a `minecraft:damage_type` tag by name.
+    pub fn in_tag(self, tag: &str) -> bool {
+        let Some(id) = mc_bamboo_data::damage_type_id(self.name()) else {
+            return false;
+        };
+        mc_bamboo_data::in_tag("minecraft:damage_type", tag, id)
     }
 
     /// `DamageSource.scalesWithDifficulty()`：只有 `always` 缩放，以及
@@ -2485,51 +2458,22 @@ impl DamageKind {
     /// `#no_anger`：挨打的不记 `lastHurtByMob`。
     ///
     /// `#no_anger`: the victim does not record `lastHurtByMob`.
-    pub const fn no_anger(self) -> bool {
-        matches!(self, Self::MobAttackNoAggro)
+    pub fn no_anger(self) -> bool {
+        self.in_tag("minecraft:no_anger")
     }
 
-    /// `#panic_environmental_causes`（这里有的那几种；`sulfur_cube_hot` 还没有）。
+    /// `#panic_environmental_causes`。
     ///
-    /// `#panic_environmental_causes` (the kinds modelled here; `sulfur_cube_hot`
-    /// does not exist yet).
-    pub const fn panic_environmental_causes(self) -> bool {
-        matches!(
-            self,
-            Self::Cactus
-                | Self::Freeze
-                | Self::HotFloor
-                | Self::InFire
-                | Self::Lava
-                | Self::OnFire
-                | Self::LightningBolt
-        )
+    /// `#panic_environmental_causes`.
+    pub fn panic_environmental_causes(self) -> bool {
+        self.in_tag("minecraft:panic_environmental_causes")
     }
 
-    /// `#panic_causes`。没有 `mob_attack_no_aggro`（山羊冲撞不吓人）和 `thorns`。
+    /// `#panic_causes`。
     ///
-    /// `#panic_causes`, which lists neither `mob_attack_no_aggro` (goat rams) nor `thorns`.
-    pub const fn panic_causes(self) -> bool {
-        matches!(
-            self,
-            Self::PlayerAttack
-                | Self::Mace
-                | Self::Spear
-                | Self::MobAttack
-                | Self::Arrow
-                | Self::Thrown
-                | Self::Magic
-                | Self::IndirectMagic
-                | Self::Wither
-                | Self::Explosion
-                | Self::PlayerExplosion
-                | Self::Cactus
-                | Self::Freeze
-                | Self::HotFloor
-                | Self::InFire
-                | Self::Lava
-                | Self::OnFire
-        )
+    /// `#panic_causes`.
+    pub fn panic_causes(self) -> bool {
+        self.in_tag("minecraft:panic_causes")
     }
 }
 
@@ -4908,6 +4852,121 @@ mod tests {
     use super::*;
     use crate::entity::Entity;
     use mc_bamboo_data::registries::attribute;
+
+    /// `DamageKind` 的每个 `#xxx` 判断都读生成的官方标签：各挑几个在 / 不在标签里的例子。
+    ///
+    /// Every `#xxx` check on `DamageKind` reads the generated vanilla tag; this
+    /// samples members and non-members of each.
+    #[test]
+    fn damage_kind_tags_follow_the_vanilla_tags() {
+        use DamageKind as D;
+        assert!(D::Explosion.no_knockback());
+        assert!(!D::PlayerAttack.no_knockback());
+        assert!(!D::Sting.no_knockback());
+
+        assert!(D::Generic.bypasses_armor());
+        assert!(D::Starve.bypasses_armor());
+        assert!(!D::MobAttack.bypasses_armor());
+
+        assert!(D::Starve.bypasses_effects());
+        assert!(!D::OutOfWorld.bypasses_effects());
+        assert!(!D::Generic.bypasses_effects());
+
+        assert!(D::SonicBoom.bypasses_enchantments());
+        assert!(!D::OutOfWorld.bypasses_enchantments());
+        assert!(!D::Generic.bypasses_enchantments());
+
+        assert!(D::InFire.is_fire());
+        assert!(D::SulfurCubeHot.is_fire());
+        assert!(!D::Arrow.is_fire());
+
+        assert!(D::Drown.no_impact());
+        assert!(!D::Fall.no_impact());
+
+        assert!(D::OutOfWorld.bypasses_resistance());
+        assert!(D::GenericKill.bypasses_resistance());
+        assert!(!D::MobAttack.bypasses_resistance());
+
+        assert!(D::OutOfWorld.bypasses_invulnerability());
+        assert!(D::GenericKill.bypasses_invulnerability());
+        assert!(!D::MobAttack.bypasses_invulnerability());
+
+        assert!(!D::MobAttack.bypasses_cooldown());
+
+        assert!(D::MobAttackNoAggro.no_anger());
+        assert!(!D::MobAttack.no_anger());
+
+        assert!(D::Cactus.panic_environmental_causes());
+        assert!(D::SulfurCubeHot.panic_environmental_causes());
+        assert!(!D::MobAttack.panic_environmental_causes());
+
+        assert!(D::Trident.panic_causes());
+        assert!(D::MobAttack.panic_causes());
+        assert!(!D::MobAttackNoAggro.panic_causes());
+        assert!(!D::Thorns.panic_causes());
+
+        assert!(D::Fall.is_fall());
+        assert!(D::EnderPearl.is_fall());
+        assert!(!D::MobAttack.is_fall());
+
+        assert!(D::Explosion.is_explosion());
+        assert!(D::PlayerExplosion.is_explosion());
+        assert!(D::BadRespawnPoint.is_explosion());
+        assert!(!D::MobAttack.is_explosion());
+
+        assert!(D::Arrow.is_projectile());
+        assert!(D::Thrown.is_projectile());
+        assert!(D::WindCharge.is_projectile());
+        assert!(!D::MobAttack.is_projectile());
+
+        assert!(D::Magic.witch_resistant_to());
+        assert!(D::IndirectMagic.witch_resistant_to());
+        assert!(D::SonicBoom.witch_resistant_to());
+        assert!(D::Thorns.witch_resistant_to());
+        assert!(!D::MobAttack.witch_resistant_to());
+    }
+
+    /// `MobType` 的实体类型标签判断读官方标签：各挑几个在 / 不在标签里的例子。
+    ///
+    /// The `MobType` entity-type tag checks read the vanilla tags; this samples
+    /// members and non-members of each.
+    #[test]
+    fn mob_type_tags_follow_the_vanilla_tags() {
+        use MobType as M;
+        assert!(!M::Stray.can_freeze());
+        assert!(!M::PolarBear.can_freeze());
+        assert!(!M::SnowGolem.can_freeze());
+        assert!(!M::Skeleton.can_freeze());
+        assert!(M::Bogged.can_freeze());
+        assert!(M::Cow.can_freeze());
+
+        assert!(M::Squid.can_breathe_under_water());
+        assert!(M::Drowned.can_breathe_under_water());
+        assert!(M::Zombie.can_breathe_under_water());
+        assert!(!M::Cow.can_breathe_under_water());
+        assert!(!M::Dolphin.can_breathe_under_water());
+
+        assert!(M::Zombie.burns_in_daylight());
+        assert!(M::Phantom.burns_in_daylight());
+        assert!(M::ZombieHorse.burns_in_daylight());
+        assert!(!M::Husk.burns_in_daylight());
+        assert!(!M::Parched.burns_in_daylight());
+
+        assert!(M::Breeze.deflects_projectiles());
+        assert!(!M::Cow.deflects_projectiles());
+
+        assert!(!M::Slime.can_control_vehicle());
+        assert!(!M::SulfurCube.can_control_vehicle());
+        assert!(M::Zombie.can_control_vehicle());
+        assert!(M::Pillager.can_control_vehicle());
+
+        assert!(M::Pillager.in_entity_tag("minecraft:raiders"));
+        assert!(M::Witch.in_entity_tag("minecraft:raiders"));
+        assert!(!M::Zombie.in_entity_tag("minecraft:raiders"));
+
+        assert!(M::Pufferfish.in_entity_tag("minecraft:nautilus_hostiles"));
+        assert!(!M::Cod.in_entity_tag("minecraft:nautilus_hostiles"));
+    }
 
     /// 官方 `Zombie.createAttributes` 的四个覆盖值和元数据 index 都从字节码导出。
     #[test]

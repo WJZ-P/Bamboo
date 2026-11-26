@@ -104,7 +104,7 @@ pub enum WakeCategory {
 
 impl WakeCategory {
     /// 飞行怪物目前只有幻翼；末影龙 / 恶魂 / 快乐恶魂还没建模。
-    pub const fn of(kind: MobType) -> Self {
+    pub fn of(kind: MobType) -> Self {
         if matches!(kind, MobType::Phantom) {
             Self::FlyingMonster
         } else if kind.is_enemy() {

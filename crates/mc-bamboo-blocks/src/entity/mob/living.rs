@@ -259,12 +259,9 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
                 ctx.other(uid).is_some_and(|public| match &public.kind {
                     crate::entity::KindPublic::Mob(rider) => {
                         if mob.mob_type == super::MobType::Ravager {
-                            rider.mob_type.is_raider()
+                            rider.mob_type.in_entity_tag("minecraft:raiders")
                         } else {
-                            !matches!(
-                                rider.mob_type,
-                                super::MobType::Slime | super::MobType::SulfurCube
-                            )
+                            rider.mob_type.can_control_vehicle()
                         }
                     }
                     _ => false,
@@ -771,15 +768,14 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 .block_state(eye)
                 .is(mc_bamboo_data::blocks::BUBBLE_COLUMN)
         {
-            // 牛不能在水下呼吸，没有效果；`OXYGEN_BONUS` 是 0，不取随机数。溺尸在
-            // `#can_breathe_under_water` 里，水生生物和水呼吸效果同理不消耗空气，
+            // 牛不能在水下呼吸，没有效果；`OXYGEN_BONUS` 是 0，不取随机数。`#undead`
+            // 和水生生物都在 `#can_breathe_under_water` 里，水呼吸效果同理不消耗空气，
             // 反而按官方补气；海豚 / 美西螈的最大氧气和补气方式按类型分派。
             // A cow cannot breathe underwater and has no effect; `OXYGEN_BONUS` is zero so
-            // there is no draw. The drowned is in `#can_breathe_under_water`, and aquatic
-            // mobs and the water-breathing effect refill air as vanilla does; dolphins and
+            // there is no draw. `#undead` and aquatic mobs are in `#can_breathe_under_water`,
+            // and the water-breathing effect refills air as vanilla does; dolphins and
             // axolotls override the max and refill by kind.
-            let can_breathe = mob.mob_type == super::MobType::Drowned
-                || mob.mob_type.can_breathe_under_water()
+            let can_breathe = mob.mob_type.can_breathe_under_water()
                 || mob
                     .effects
                     .has(mc_bamboo_data::registries::mob_effect::WATER_BREATHING);
@@ -3339,10 +3335,7 @@ pub(super) fn living_hurt_server(
         return false;
     }
     if mob.mob_type == super::MobType::Enderman {
-        if matches!(
-            source.kind,
-            DamageKind::Arrow | DamageKind::Trident | DamageKind::Spit
-        ) {
+        if source.kind.is_projectile() {
             super::enderman::dodge_projectile(me, mob, ctx);
             return false;
         }

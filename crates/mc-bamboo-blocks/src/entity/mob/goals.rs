@@ -47,12 +47,7 @@ fn has_controlling_passenger(mob: &Mob, ctx: &dyn EntityCtx) -> bool {
         return true;
     }
     ctx.other(first).is_some_and(|public| match &public.kind {
-        // `#non_controlling_rider` 里建模的是史莱姆和硫磺方块怪（岩浆怪未建模）。
-        // The modelled #non_controlling_rider members are slime and sulfur cube.
-        KindPublic::Mob(rider) => !matches!(
-            rider.mob_type,
-            super::MobType::Slime | super::MobType::SulfurCube
-        ),
+        KindPublic::Mob(rider) => rider.mob_type.can_control_vehicle(),
         _ => false,
     })
 }
@@ -4402,14 +4397,7 @@ pub(crate) fn target_still_seen(
 
 /// 一种伤害在不在某个 `minecraft:damage_type` 标签里。
 pub(super) fn damage_type_tagged(tag: &str, kind: super::DamageKind) -> bool {
-    let Some(id) = mc_bamboo_data::damage_type_id(kind.name()) else {
-        return false;
-    };
-    mc_bamboo_data::tags::TAG_GROUPS
-        .iter()
-        .filter(|group| group.registry == "minecraft:damage_type")
-        .flat_map(|group| group.tags.iter())
-        .any(|entry| entry.name == tag && entry.ids.contains(&id))
+    kind.in_tag(tag)
 }
 
 /// `PanicGoal.lookForWater`：脚下没有碰撞时，按曼哈顿距离找最近的水。
