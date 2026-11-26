@@ -494,14 +494,32 @@ fn emit_damage_event(me: &mut Entity, ctx: &mut dyn EntityCtx, source: &DamageSo
 
 /// `brokenByPlayer`：掉一个带 `CustomName` 的盔甲架物品，再走 `brokenByAnything`。
 fn broken_by_player(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    // `custom_name` 组件没在这条掉落路径上复刻（见 README 已知限制）。
+    // `brokenByPlayer`：掉一个带 `CustomName` 的盔甲架物品，再走 `brokenByAnything`。
     ctx.emit(
         Command::DropItem {
-            stack: ItemStack::new(items::ARMOR_STAND, 1),
+            stack: broken_stand_item(mob.custom_name.as_ref()),
         },
         me,
     );
     broken_by_anything(me, mob, ctx);
+}
+
+/// `Block.popResource(level, blockPosition(), new ItemStack(Items.ARMOR_STAND))`：
+/// 有自定义名时 `set(CUSTOM_NAME, getCustomName())`，组件值就是文本标签的网络编码。
+///
+/// `Block.popResource(..., new ItemStack(Items.ARMOR_STAND))`: with a custom name,
+/// `set(CUSTOM_NAME, ...)`; the component value is the text tag's network encoding.
+fn broken_stand_item(custom_name: Option<&Tag>) -> ItemStack {
+    let mut stack = ItemStack::new(items::ARMOR_STAND, 1);
+    if let Some(name) = custom_name {
+        let mut bytes = Vec::new();
+        name.write_network(&mut bytes);
+        stack.added.push((
+            mc_bamboo_data::registries::data_component_type::CUSTOM_NAME,
+            bytes,
+        ));
+    }
+    stack
 }
 
 /// `brokenByAnything`：破坏音效、空战利品表（无掉落）、掉全部装备并清空槽位。
@@ -551,9 +569,16 @@ fn cause_damage(
 
 /// `showBreakingParticles`：橡木木板方块粒子。
 fn breaking_particles(me: &Entity, mob: &mut Mob) {
+    // `BlockParticleOption(ParticleTypes.BLOCK, Blocks.OAK_PLANKS.defaultBlockState())`：
+    // 参数是橡木木板的默认方块状态 ID。
+    // `BlockParticleOption(..., OAK_PLANKS.defaultBlockState())`: the argument is
+    // the oak planks default block-state id.
+    let oak_planks = crate::BlockState(mc_bamboo_data::blocks::OAK_PLANKS)
+        .default_state()
+        .0;
     mob.events.push(MobEvent::Particles {
         particle: mc_bamboo_data::registries::particle_type::BLOCK,
-        item: None,
+        item: Some(i32::try_from(oak_planks).unwrap_or(0)),
         position: Vec3::new(
             me.position.x,
             me.position.y + f64::from(me.dimensions.1) * (2.0 / 3.0),
@@ -839,5 +864,22 @@ mod tests {
                     .is_empty()
             );
         }
+    }
+
+    #[test]
+    fn the_broken_stand_item_carries_the_custom_name() {
+        let name = Tag::String("Hall Monitor".to_owned());
+        let stack = broken_stand_item(Some(&name));
+        assert_eq!(stack.item, items::ARMOR_STAND);
+        assert_eq!(stack.count, 1);
+        assert_eq!(stack.added.len(), 1);
+        assert_eq!(
+            stack.added[0].0,
+            mc_bamboo_data::registries::data_component_type::CUSTOM_NAME
+        );
+        let mut expected = Vec::new();
+        name.write_network(&mut expected);
+        assert_eq!(stack.added[0].1, expected);
+        assert!(broken_stand_item(None).added.is_empty());
     }
 }

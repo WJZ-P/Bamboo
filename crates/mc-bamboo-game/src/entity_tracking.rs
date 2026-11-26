@@ -2712,18 +2712,21 @@ fn event_packet(
             speed,
             count,
         } => {
-            // 简单粒子的 `ParticleTypes.STREAM_CODEC` 只有类型 ID；带物品的粒子
-            // （`ItemParticleOption`）再按 `ItemStackTemplate.STREAM_CODEC` 追加
-            // 物品 ID、数量 1、空的组件补丁（两个 0 varint）。
-            // A simple particle's codec is the type id alone; an item particle appends
-            // `ItemStackTemplate.STREAM_CODEC`: item id, count 1, empty component patch.
+            // 简单粒子只有类型 ID。`ItemParticleOption` 再按
+            // `ItemStackTemplate.STREAM_CODEC` 追加物品 ID、数量 1、空组件补丁；
+            // `BlockParticleOption`（`showBreakingParticles`）只追加一个方块状态 ID。
+            // A simple particle carries just the type id. `ItemParticleOption`
+            // appends the item id, count 1 and an empty patch; `BlockParticleOption`
+            // (`showBreakingParticles`) appends only a block-state id.
             let mut options = Vec::new();
             mc_bamboo_protocol::codec::write_varint(&mut options, *particle);
-            if let Some(item) = *item {
-                mc_bamboo_protocol::codec::write_varint(&mut options, item);
-                mc_bamboo_protocol::codec::write_varint(&mut options, 1);
-                mc_bamboo_protocol::codec::write_varint(&mut options, 0);
-                mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+            if let Some(argument) = *item {
+                mc_bamboo_protocol::codec::write_varint(&mut options, argument);
+                if *particle != mc_bamboo_data::registries::particle_type::BLOCK {
+                    mc_bamboo_protocol::codec::write_varint(&mut options, 1);
+                    mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+                    mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+                }
             }
             EventPacket::Particles {
                 body: packet_body(&mc_bamboo_protocol::packet::play::LevelParticles {
@@ -3308,5 +3311,40 @@ mod armour_stand_tests {
         assert!(data.contains(&EntityData::SharedFlags(
             mc_bamboo_protocol::packet::play::ENTITY_FLAG_INVISIBLE
         )));
+    }
+
+    #[test]
+    fn breaking_particles_encode_the_oak_planks_block_state() {
+        use mc_bamboo_protocol::codec::write_varint;
+        let oak = mc_bamboo_blocks::BlockState(mc_bamboo_data::blocks::OAK_PLANKS)
+            .default_state()
+            .0 as i32;
+        let event = mc_bamboo_blocks::entity::mob::MobEvent::Particles {
+            particle: mc_bamboo_data::registries::particle_type::BLOCK,
+            item: Some(oak),
+            position: Vec3::default(),
+            offset: Vec3::default(),
+            speed: 0.05,
+            count: 10,
+        };
+        let mut seed = || 0_i64;
+        let packet = event_packet(7, &event, &mut seed);
+        let EventPacket::Particles { body, .. } = packet else {
+            panic!("a particles packet");
+        };
+        let mut expected = Vec::new();
+        write_varint(
+            &mut expected,
+            mc_bamboo_data::packets::play::clientbound::LEVEL_PARTICLES,
+        );
+        write_varint(
+            &mut expected,
+            mc_bamboo_data::registries::particle_type::BLOCK,
+        );
+        write_varint(&mut expected, oak);
+        assert!(
+            body.starts_with(&expected),
+            "BLOCK particle options are the type id followed by the state id"
+        );
     }
 }
