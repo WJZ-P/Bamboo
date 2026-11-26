@@ -24,8 +24,8 @@ use mc_bamboo_blocks::{
         raid::{
             DEFAULT_PRE_RAID_TICKS, DIFFICULTY_NORMAL, DIFFICULTY_PEACEFUL,
             HERO_OF_THE_VILLAGE_DURATION, MAX_CELEBRATION_TICKS, MAX_RAID_OMEN_LEVEL,
-            POST_RAID_TICK_LIMIT, RAID_REMOVAL_THRESHOLD_SQR, RAID_TIMEOUT_TICKS, Raid,
-            RaidStatus, RaiderType, VALID_RAID_RADIUS_SQR, num_groups,
+            POST_RAID_TICK_LIMIT, RAID_REMOVAL_THRESHOLD_SQR, RAID_TIMEOUT_TICKS, Raid, RaidStatus,
+            RaiderType, VALID_RAID_RADIUS_SQR, num_groups,
         },
     },
 };
