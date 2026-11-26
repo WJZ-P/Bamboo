@@ -1102,6 +1102,24 @@ pub struct LandFacts {
 /// `Spawn`、`Remove`、`ScheduleTick`、`Depart`。这次不实现。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    /// `AbstractBoat.tickBubbleColumn` 的气泡柱冲量：广播实体事件（71/72），
+    /// down 方向还要 `ejectPassengers()`，把甩下来的乘客交给游戏层。
+    ///
+    /// `AbstractBoat.tickBubbleColumn`: broadcast an entity event (71/72) and,
+    /// for a downward column, eject the passengers.
+    BoatBubbleEvent {
+        event: u8,
+        ejected: Vec<EntityUid>,
+    },
+    /// `AbstractBoat.tick` 第 9 步的 `entity.startRiding(this)`：把乘客一侧的
+    /// `vehicle` 指向载具。船自己的乘客名单在 `boat::tick` 里写进本地状态。
+    ///
+    /// `AbstractBoat.tick`'s `entity.startRiding(this)`: point the passenger's
+    /// `vehicle` at the boat. The boat's passenger list is written locally in `boat::tick`.
+    BoardBoat {
+        passenger: EntityUid,
+        vehicle: EntityUid,
+    },
     /// `ShoulderRidingEntity.setEntityOnShoulder`：这只鹦鹉（me）落到玩家肩上。
     /// 落地时把整只鹦鹉序列化成 NBT 交给游戏层，随后把鹦鹉从世界移除。
     ///
@@ -1999,6 +2017,18 @@ pub enum Command {
 /// 改发出者，没有任何回写补丁。
 pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
     match command {
+        Command::BoatBubbleEvent { event, ejected } => {
+            world.push_effect(crate::Effect::BoatBubbleEvent {
+                entity: me.id,
+                event,
+                ejected,
+            });
+        }
+        Command::BoardBoat { passenger, vehicle } => {
+            world.with_entity_mut(passenger, &mut |rider| {
+                rider.vehicle = Some(vehicle);
+            });
+        }
         Command::SetEntityOnShoulder { player, tag } => {
             // 目标里已经按官方 `Entity.save` 写好整份 NBT（含 `id`）：交给游戏层
             // 存进玩家肩膀，再把鹦鹉从世界移除。

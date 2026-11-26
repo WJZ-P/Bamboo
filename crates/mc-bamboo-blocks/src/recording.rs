@@ -784,7 +784,8 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::RaidSetLeader { .. } => 36,
         Effect::Particles { .. } => 37,
         Effect::Firework { .. } => 38,
-        Effect::ConstructBeacon { .. } => 39,
+        Effect::BoatBubbleEvent { .. } => 39,
+        Effect::ConstructBeacon { .. } => 40,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -1086,6 +1087,15 @@ fn hash_effect(effect: &Effect) -> u64 {
                 bytes.hash(&mut hasher);
             }
             item.removed.hash(&mut hasher);
+        }
+        Effect::BoatBubbleEvent {
+            entity,
+            event,
+            ref ejected,
+        } => {
+            entity.hash(&mut hasher);
+            event.hash(&mut hasher);
+            ejected.hash(&mut hasher);
         }
     }
     hasher.finish()

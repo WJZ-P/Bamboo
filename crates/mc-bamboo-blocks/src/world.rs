@@ -116,6 +116,11 @@ fn block_center(pos: BlockPos) -> Vec3 {
 pub enum ClipFluid {
     None,
     SourceOnly,
+    /// `ClipContext.Fluid.ANY`：任何流体（含流动水）都算命中，船放置用它。
+    ///
+    /// `ClipContext.Fluid.ANY`: any fluid, including flowing water, counts as a
+    /// hit. Boat placement uses it.
+    Any,
 }
 
 /// `CollectingNeighborUpdater` 的一项更新。
@@ -3087,6 +3092,15 @@ impl<'a> World<'a> {
         self.level.unpack_loot_table(pos);
     }
 
+    /// `ContainerEntity.unpackChestVehicleLootTable(null)`：漏斗读实体容器
+    /// （运输船）之前填好战利品表，见 [`Level::unpack_boat_loot_table`]。
+    ///
+    /// `ContainerEntity.unpackChestVehicleLootTable(null)`: fill a container
+    /// entity's loot table before a hopper reads its slots.
+    pub fn unpack_boat_loot_table(&mut self, entity: i32) {
+        self.level.unpack_boat_loot_table(entity);
+    }
+
     /// 缓存重放：活塞音高照样从世界随机源取一个数，再发 `Effect::Sound`。
     pub fn replay_piston_sound(&mut self, effect: crate::cache::PistonSoundEffect) {
         let pitch = self.level.next_random_float() * f32::from_bits(effect.scale)
@@ -4635,6 +4649,10 @@ impl<'a> World<'a> {
             let passenger_public = passenger.clone().split().public;
             let at = crate::entity::riding::rider_position(&current, &passenger_public, index);
             passenger.position = at;
+            // `AbstractBoat.positionRider` 末尾的 `clampRotation`。
+            if matches!(current.kind, crate::entity::KindPublic::Boat(_)) {
+                crate::entity::boat::clamp_passenger_rotation(&mut passenger, &current);
+            }
             // `AbstractSkeleton.rideTick` / `Drowned.rideTick` 结尾：控制载具的骷髅/溺尸
             // 把载具的 `yBodyRot` 抄成自己的，让蜘蛛骑士朝向一致。
             if let Some(vehicle) = vehicle_snapshot.as_ref() {
@@ -4959,6 +4977,7 @@ impl<'a> World<'a> {
         let block_hit = clip_with_interaction_override(boxes, state, from, to, pos);
         let fluid_hit = match fluid {
             ClipFluid::SourceOnly => clip_source(state.fluid(), pos, from, to),
+            ClipFluid::Any => clip_any(state.fluid(), pos, from, to),
             ClipFluid::None => None,
         };
         let distance =
@@ -5032,6 +5051,17 @@ fn clip_with_interaction_override(
 /// 和后来的位置无关。这里固定用流体自己的高度，也就是上面没有同种流体时的高度，oracle 用同样的位置预热了缓存。
 fn clip_source(fluid: FluidState, pos: BlockPos, from: Vec3, to: Vec3) -> Option<BlockHit> {
     if !fluid.is_source() {
+        return None;
+    }
+    let bounds = shape::Aabb::new(0.0, 0.0, 0.0, 1.0, f64::from(fluid.own_height()), 1.0);
+    shape::clip(&[bounds], from, to, pos)
+}
+
+/// `ClipContext.Fluid.ANY`：任何非空流体都算命中，高度用流体自己的 `own_height`。
+///
+/// `ClipContext.Fluid.ANY`: any non-empty fluid hits, at the fluid's own height.
+fn clip_any(fluid: FluidState, pos: BlockPos, from: Vec3, to: Vec3) -> Option<BlockHit> {
+    if fluid.is_empty() {
         return None;
     }
     let bounds = shape::Aabb::new(0.0, 0.0, 0.0, 1.0, f64::from(fluid.own_height()), 1.0);
@@ -5385,7 +5415,8 @@ mod tests {
                 | Effect::PlayerShoulder { .. }
                 | Effect::Particles { .. }
                 | Effect::VibrationParticle { .. }
-                | Effect::Firework { .. } => None,
+                | Effect::Firework { .. }
+                | Effect::BoatBubbleEvent { .. } => None,
             })
             .collect()
     }

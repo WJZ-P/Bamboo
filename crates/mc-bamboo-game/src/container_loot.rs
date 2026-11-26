@@ -8,9 +8,11 @@
 //! from its table on the first read or write and clear the table. The random source
 //! follows `LootContext.Builder.create`.
 
-use mc_bamboo_blocks::LevelRandom;
+use mc_bamboo_blocks::{LevelRandom, entity::Entities};
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_loot::{ChestParams, LootContainer, LootStack, RandomSequences, chest_loot};
+use mc_bamboo_loot::{
+    ChestParams, EntityView, LootContainer, LootStack, RandomSequences, chest_loot,
+};
 use mc_bamboo_protocol::item::ItemStack;
 use mc_bamboo_world::store::ChunkStore;
 use tracing::debug;
@@ -87,6 +89,17 @@ pub(crate) struct Unpack<'a> {
     pub weather: mc_bamboo_blocks::BlockWeather,
 }
 
+/// 方块逻辑通过 `Level::unpack_boat_loot_table` 传进来的字段。
+///
+/// The fields block logic passes through `Level::unpack_boat_loot_table`.
+pub(crate) struct BoatUnpack<'a> {
+    pub entities: &'a mut Entities,
+    pub chunks: &'a ChunkStore,
+    pub sequences: &'a RandomSequences,
+    pub random: &'a LevelRandom,
+    pub weather: mc_bamboo_blocks::BlockWeather,
+}
+
 /// 把一张表的产出写进容器槽位。
 pub(crate) struct LevelSlots<'a> {
     pub(crate) slots: &'a mut [ItemStack],
@@ -152,6 +165,100 @@ pub(crate) fn unpack(state: Unpack<'_>, pos: BlockPos) -> bool {
         );
     }
     true
+}
+
+/// `ContainerEntity.unpackChestVehicleLootTable(player)`：第一次读内容（破坏、
+/// 菜单打开、漏斗读取）先求值填进 27 格、清表，再返回解包后的物品。菜单打开
+/// 带玩家（`THIS_ENTITY` + `getLuck()`），容器读写和破坏传 `None` / 0。
+/// 没有表时返回 `None`，调用方用原本的 `itemStacks`。
+///
+/// `ContainerEntity.unpackChestVehicleLootTable(player)`: on the first read
+/// (destruction, opening the menu, a hopper pulling) fill the 27 slots, clear
+/// the table and return the filled slots. Opening a menu passes the player
+/// (`THIS_ENTITY` + `getLuck()`); container reads and destruction pass
+/// `None` / 0. `None` means there was no table.
+pub(crate) fn unpack_boat(
+    region: &mut Region,
+    entity: i32,
+    player: Option<EntityView>,
+    luck: f32,
+) -> Option<Vec<ItemStack>> {
+    unpack_boat_with(
+        BoatUnpack {
+            entities: &mut region.entities,
+            chunks: &region.chunks,
+            sequences: &region.loot_sequences,
+            random: &region.random,
+            weather: region.global.block_weather,
+        },
+        entity,
+        player,
+        luck,
+    )
+}
+
+/// 方块逻辑（漏斗读实体容器）走这一份：借的是 `Region` 拆开的字段，不是整个
+/// `Region`。`player` / `luck` 在这里恒为空和零，对应
+/// `unpackChestVehicleLootTable(null)`。
+///
+/// The split-field entry for block logic (a hopper reading the entity container);
+/// `player` / `luck` are none / zero here, matching
+/// `unpackChestVehicleLootTable(null)`.
+pub(crate) fn unpack_boat_with(
+    state: BoatUnpack<'_>,
+    entity: i32,
+    player: Option<EntityView>,
+    luck: f32,
+) -> Option<Vec<ItemStack>> {
+    let position = state
+        .entities
+        .public_at(entity)
+        .map(|public| public.position)?;
+    let (table, seed, mut items) = state
+        .entities
+        .with_mut(entity, |e| {
+            if let mc_bamboo_blocks::entity::EntityKind::Boat(boat) = &mut e.kind {
+                let chest = boat.chest.as_mut()?;
+                let table = chest.loot_table.take()?;
+                let seed = std::mem::replace(&mut chest.loot_table_seed, 0);
+                Some((table, seed, chest.items.clone()))
+            } else {
+                None
+            }
+        })
+        .flatten()?;
+    let view = ChunkLevel {
+        chunks: state.chunks,
+        weather: state.weather,
+    };
+    let params = ChestParams {
+        pos: (
+            mc_bamboo_core::mth::floor(position.x),
+            mc_bamboo_core::mth::floor(position.y),
+            mc_bamboo_core::mth::floor(position.z),
+        ),
+        player,
+        luck,
+        level: &view,
+    };
+    let mut slots = LevelSlots { slots: &mut items };
+    let _ = chest_loot(
+        &table,
+        &mut slots,
+        &params,
+        seed,
+        Some(state.sequences),
+        state.random.source(),
+    );
+    // 把解包结果写回实体（实体可能已被 discard，这时写不进去也不影响掉落）。
+    state.entities.with_mut(entity, |e| {
+        if let mc_bamboo_blocks::entity::EntityKind::Boat(boat) = &mut e.kind
+            && let Some(chest) = &mut boat.chest
+        {
+            chest.items = items.clone();
+        }
+    });
+    Some(items)
 }
 
 /// `Region` 上的入口：菜单打开、破坏和容器表读写共用。

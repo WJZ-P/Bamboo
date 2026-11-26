@@ -477,6 +477,34 @@ pub(crate) fn on_player_action(
 pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Effect]) {
     for effect in effects {
         match *effect {
+            Effect::BoatBubbleEvent {
+                entity,
+                event,
+                ref ejected,
+            } => {
+                // `Level.broadcastEntityEvent(boat, 71/72)`：只发给跟踪这艘船的
+                // 玩家，再把 down 气泡柱甩下来的乘客按完整 `stopRiding` 落位。
+                let packet = mc_bamboo_protocol::packet::play::EntityEvent {
+                    entity_id: entity,
+                    event,
+                };
+                let viewers = region.entity_tracking.viewers(entity);
+                for id in viewers {
+                    region.links.send(id, &packet);
+                }
+                // `ejectPassengers()` 从后往前对每个乘客调 `stopRiding()`；载具名单
+                // 由方块层清空，这里补乘客一侧的完整落位（摘关系、冷却、下船位置）。
+                let vehicle_public = region.entities.public_at(entity).cloned();
+                for &uid in ejected {
+                    if uid < mc_bamboo_blocks::entity::FIRST_ENTITY_ID {
+                        region.entities.enqueue_ejected_player(uid);
+                    } else if let Some(vehicle) = &vehicle_public {
+                        region.entities.with_mut(uid, |rider| {
+                            mc_bamboo_blocks::entity::riding::stop_riding(rider, vehicle, None);
+                        });
+                    }
+                }
+            }
             Effect::PlayerShoulder { player, ref tag } => {
                 // `ShoulderRidingEntity.setEntityOnShoulder`：把鹦鹉 NBT 存进玩家肩膀。
                 let id = crate::inbound::PlayerId(player);
@@ -1513,6 +1541,40 @@ pub(crate) fn on_use_item(
     // 鱼桶要从这一堆上的组件还原鱼，先抄下来。
     // A fish bucket restores its fish from this stack's components, so copy it first.
     let held = player.inventory.held(hand).clone();
+    // `BoatItem.use`：`getPlayerPOVHitResult` 之前先查 5 格内 `CAN_BE_PICKED`
+    // 实体；玩家眼睛落在某个实体的盒子里就 `PASS`，不放船。
+    if mc_bamboo_blocks::entity::boat::entity_type_for_item(held.item).is_some() {
+        let view = mc_bamboo_core::Vec3::view_vector(yaw, pitch).scale(5.0);
+        let bb = player.bounding_box();
+        let area = mc_bamboo_core::Aabb::new(
+            bb.min_x + view.x.min(0.0),
+            bb.min_y + view.y.min(0.0),
+            bb.min_z + view.z.min(0.0),
+            bb.max_x + view.x.max(0.0),
+            bb.max_y + view.y.max(0.0),
+            bb.max_z + view.z.max(0.0),
+        )
+        .inflate(1.0, 1.0, 1.0);
+        let eye = mc_bamboo_core::Vec3::new(
+            player.position().x,
+            player.position().y + player.eye_height(),
+            player.position().z,
+        );
+        let mut blocked = false;
+        region.entities.for_each_in(area, &mut |public| {
+            // `EntitySelector.CAN_BE_PICKED` 就是 `Entity.isPickable()`，不是所有活实体。
+            if !public.is_pickable() {
+                return;
+            }
+            // `getPickRadius()` 对船 / 生物 / 矿车都是 0，直接用实体盒子判眼睛是否在内。
+            if public.bounding_box().contains(eye.x, eye.y, eye.z) {
+                blocked = true;
+            }
+        });
+        if blocked {
+            return;
+        }
+    }
     if crate::player_consume::start(region, id, hand) {
         return;
     }
@@ -1658,6 +1720,14 @@ pub(crate) fn on_use_item(
         crate::command_block::on_placed(region, placed);
     }
     send_effects(region, Some(id), &outcome.effects);
+    // 船放置成功时 `ItemStack.consume(1, player)`：生存模式减一个。方块层的
+    // `Item.use` 路径只有船会记 `item_exchange`。
+    //
+    // A successful boat placement consumes one item in survival. The boat is
+    // the only `Item.use` path that records an `item_exchange` in the block layer.
+    if let Some(exchange) = &outcome.item_exchange {
+        crate::inventory::apply_item_exchange(region, id, hand, exchange);
+    }
     let mut result = outcome.result;
     if !result.consumes_action() && book::use_in_hand(region, id, hand) {
         result = InteractionResult::Success;
@@ -1741,6 +1811,7 @@ pub(crate) fn on_interact_entity_at(
         target.kind,
         mc_bamboo_blocks::entity::KindPublic::LeashKnot { .. }
     );
+    let is_boat = matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Boat(_));
     let is_item_frame = matches!(
         target.kind,
         mc_bamboo_blocks::entity::KindPublic::ItemFrame(_)
@@ -1748,6 +1819,7 @@ pub(crate) fn on_interact_entity_at(
     if target.removed
         || !(matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
             || is_knot
+            || is_boat
             || is_item_frame)
     {
         return;
@@ -1767,6 +1839,28 @@ pub(crate) fn on_interact_entity_at(
         Hand::Main => Hand::Off,
         Hand::Off => Hand::Main,
     };
+    if is_boat {
+        let is_chest = matches!(
+            &target.kind,
+            mc_bamboo_blocks::entity::KindPublic::Boat(boat)
+                if mc_bamboo_blocks::entity::boat::is_chest(boat.entity_type)
+        );
+        // `AbstractBoat.interact`：`super.interact` 放行后，非潜行且
+        // `outOfControlTicks < 60` 时 `player.startRiding(this)`。
+        if !using_secondary_action {
+            crate::riding::mount(region, id, entity_id);
+            if crate::riding::passengers(region, entity_id).contains(&id.0) {
+                swing(region, id, hand, InteractionResult::Success);
+                return;
+            }
+        }
+        // `AbstractChestBoat.interact`：super 返回 PASS（没上成船或潜行）时
+        // `interactWithContainerVehicle(player)` 打开 27 格菜单。
+        if is_chest {
+            crate::menu::open_boat(region, id, entity_id);
+        }
+        return;
+    }
     if is_item_frame {
         // 物品展示框：空框放手上物品，已有物品则顺时针旋转 45 度。
         // Item frame: place held item when empty, otherwise rotate by 45 degrees.
