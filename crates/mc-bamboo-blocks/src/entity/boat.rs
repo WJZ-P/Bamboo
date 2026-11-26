@@ -19,7 +19,7 @@ use mc_bamboo_protocol::item::ItemStack;
 use crate::{shape::Aabb, state::DRAG};
 
 use super::{
-    Entity, EntityUid,
+    Entity, EntityPublic, EntityUid, KindPublic,
     ctx::{BlockView, Command, EntityCtx},
     item::{apply_current, flow_vector, friction},
 };
@@ -742,6 +742,49 @@ fn apply_water_current(me: &mut Entity, view: &dyn BlockView) {
     }
     if count > 0 {
         apply_current(me, &current, 0.014);
+    }
+}
+
+/// `AbstractBoat.positionRider` 末尾的 `clampRotation` / `calculatePassengerBodyYRot`：
+/// 动物且满员时身体朝向是船朝向 + 90/270（按乘客 ID 奇偶），否则就是船朝向。
+/// 生物乘客把 `yRot`/`yBodyRot` 设成它并 `clampHeadRotationToBody`；其它乘客
+/// （玩家）把与船朝向的差限制在 ±105°。
+///
+/// `AbstractBoat`'s `clampRotation` / `calculatePassengerBodyYRot`: animal
+/// passengers at full capacity face the boat yaw plus 90/270; mobs take that
+/// body yaw, other passengers are clamped to ±105° around it.
+pub fn clamp_passenger_rotation(passenger: &mut Entity, vehicle: &EntityPublic) {
+    let KindPublic::Boat(boat) = &vehicle.kind else {
+        return;
+    };
+    let max = if is_chest(boat.entity_type) { 1 } else { 2 };
+    let animal = passenger
+        .kind
+        .mob()
+        .is_some_and(|mob| mob.mob_type.is_animal());
+    let body_y_rot = if animal && boat.passengers.len() == max {
+        let offset = if passenger.id.rem_euclid(2) == 0 {
+            90.0
+        } else {
+            270.0
+        };
+        vehicle.yaw + offset
+    } else {
+        vehicle.yaw
+    };
+    if passenger.kind.mob().is_some() {
+        passenger.y_rot = body_y_rot;
+        if let Some(mob) = passenger.kind.mob_mut() {
+            mob.y_body_rot = body_y_rot;
+            // `Mob.clampHeadRotationToBody`。
+            let delta = mth::wrap_degrees(mob.y_body_rot - mob.y_head_rot);
+            let clamped = mth::clamp_f32(delta, -75.0, 75.0);
+            mob.y_head_rot += delta - clamped;
+        }
+    } else {
+        let diff = mth::wrap_degrees(passenger.y_rot - body_y_rot);
+        let clamped = mth::clamp_f32(diff, -105.0, 105.0);
+        passenger.y_rot += clamped - diff;
     }
 }
 

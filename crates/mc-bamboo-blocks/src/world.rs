@@ -4605,6 +4605,10 @@ impl<'a> World<'a> {
             let passenger_public = passenger.clone().split().public;
             let at = crate::entity::riding::rider_position(&current, &passenger_public, index);
             passenger.position = at;
+            // `AbstractBoat.positionRider` 末尾的 `clampRotation`。
+            if matches!(current.kind, crate::entity::KindPublic::Boat(_)) {
+                crate::entity::boat::clamp_passenger_rotation(&mut passenger, &current);
+            }
             // `AbstractSkeleton.rideTick` / `Drowned.rideTick` 结尾：控制载具的骷髅/溺尸
             // 把载具的 `yBodyRot` 抄成自己的，让蜘蛛骑士朝向一致。
             if let Some(vehicle) = vehicle_snapshot.as_ref() {
