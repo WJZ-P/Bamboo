@@ -162,11 +162,6 @@ impl HappyGhastAiCase {
                         0.06,
                     );
                 }
-                // 改坏确认 `happy_ghast_ai_grow`：长大时不换目标表。
-                // Break check: keep the baby goal table when growing up.
-                if break_test == Some("happy_ghast_ai_grow") {
-                    mob.happy_ghast.keep_baby_goals = true;
-                }
                 if self.baby {
                     // 洗牌种子和传感器延迟照官方夹具；两边都从一个已存在的
                     // `WALK_TARGET` 起步，这样 `RunOne` 的飞行闲逛不触发。
@@ -244,6 +239,12 @@ impl Report {
         let mut level = case.level();
         let mut ticks = BlockTicks::default();
         ticks.set_time(case.start_time);
+        // 改坏确认 `happy_ghast_ai_grow`：长大时不换目标表。每个场景开头都重设，
+        // 不会漏到别的场景。
+        // Break check: keep the baby goal table when growing up. Reset per scene.
+        mc_bamboo_blocks::entity::mob::happy_ghast::set_oracle_keep_baby_goals(
+            break_test.as_deref() == Some("happy_ghast_ai_grow"),
+        );
         let id = case.spawn(
             &mut World::new(&mut level, &mut ticks),
             break_test.as_deref(),

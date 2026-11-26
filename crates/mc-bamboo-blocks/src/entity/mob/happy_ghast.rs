@@ -89,10 +89,37 @@ pub struct HappyGhastState {
     ///
     /// `GhastMoveControl.floatDuration`: how often an adult re-rolls its impulse.
     pub float_duration: i32,
-    /// 对拍的改坏确认：长大时不换目标表。
+}
+
+#[cfg(feature = "oracle-samples")]
+thread_local! {
+    /// 仅供 `mob-oracle --break-self-test happy_ghast_ai_grow`：长大时不换目标表，
+    /// 逐刻对拍应报不一致。默认 false，正式构建里没有这个开关。
     ///
-    /// Oracle break check: skip the goal-table switch when growing up.
-    pub keep_baby_goals: bool,
+    /// Only for the `happy_ghast_ai_grow` break check: keep the baby goal table
+    /// when growing up. Absent from production builds.
+    static KEEP_BABY_GOALS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 改坏确认开关，只由 `mob-oracle` 调用；默认 false。
+///
+/// Break switch, set only by `mob-oracle`; false by default.
+#[cfg(feature = "oracle-samples")]
+pub fn set_oracle_keep_baby_goals(value: bool) {
+    KEEP_BABY_GOALS.with(|flag| flag.set(value));
+}
+
+#[cfg(feature = "oracle-samples")]
+fn oracle_keep_baby_goals() -> bool {
+    KEEP_BABY_GOALS.with(|flag| flag.get())
+}
+
+/// 正式构建里改坏开关恒关。
+///
+/// The break switch is always off in production builds.
+#[cfg(not(feature = "oracle-samples"))]
+const fn oracle_keep_baby_goals() -> bool {
+    false
 }
 
 impl HappyGhastState {
@@ -274,7 +301,7 @@ pub fn age_boundary_reached(mob: &mut Mob) {
     } else {
         // 改坏确认：长大时不换目标表，其它切换照旧。
         // Break check: keep the baby goal table but still switch the rest.
-        if !mob.happy_ghast.keep_baby_goals {
+        if !oracle_keep_baby_goals() {
             mob.goals = goals();
         }
         // `createNavigation(level)` 换掉整份导航对象，旧路径随之作废。
@@ -1218,7 +1245,6 @@ pub const fn initial_state() -> HappyGhastState {
         is_leash_holder: false,
         stays_still: false,
         float_duration: 0,
-        keep_baby_goals: false,
     }
 }
 
