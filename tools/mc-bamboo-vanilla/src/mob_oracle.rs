@@ -435,6 +435,12 @@ struct Case {
     /// 长矛场景：这一刻触发 `PiercingWeapon.attack`，-1 表示不触发。
     #[serde(default = "minus_one")]
     stab_tick: i32,
+    /// 长矛蓄力场景：这一刻 `startUsingItem` 开始蓄力，-1 不蓄力；前向速度是
+    /// `setKnownMovement` 的 x 分量（方块 / tick）。
+    #[serde(default = "minus_one")]
+    kinetic_start: i32,
+    #[serde(default)]
+    kinetic_speed: i64,
     /// 1b 玩家生命场景的规则与动作。
     #[serde(default)]
     life: Option<LifeSetup>,
@@ -734,6 +740,11 @@ struct CowSetup {
     /// For attack scenes, the player index that owns this tamed wolf; -1 otherwise.
     #[serde(default = "minus_one")]
     owner: i32,
+    /// 攻击场景目标牛（0 号）胸口穿的盔甲物品 ID，0 是空（破甲对拍用）。
+    ///
+    /// The chest armor item id of the target cow (index 0), 0 for none (breach oracle).
+    #[serde(default)]
+    chest: i32,
     /// 僵尸场景的队伍编号，-1 不在队伍里。
     #[serde(default = "minus_one")]
     team: i32,
@@ -4259,7 +4270,7 @@ impl Report {
             seed,
             equipment,
             protection,
-            attack_cow: actions.iter().any(|action| action.attack_cow),
+            attack_cow: actions.iter().any(|action| action.attack_cow) || case.kinetic_start >= 0,
             actions,
             no_cooldown: false,
             no_knockback: false,
@@ -4269,6 +4280,19 @@ impl Report {
             attack_ground: case.attack_ground,
             attack_enchants: case.attack_enchants.clone(),
             stab_tick: case.stab_tick,
+            kinetic_start: case.kinetic_start,
+            kinetic_speed: f64::from_bits(case.kinetic_speed as u64),
+            main_cow_position: case
+                .cows
+                .first()
+                .map(|cow| {
+                    (
+                        f64::from_bits(cow.x as u64),
+                        f64::from_bits(cow.y as u64),
+                        f64::from_bits(cow.z as u64),
+                    )
+                })
+                .unwrap_or((2.5, 64.0, 0.5)),
             extra_cow_positions: case
                 .cows
                 .iter()
@@ -4284,6 +4308,8 @@ impl Report {
             cow_seeds: case.cows.iter().map(|cow| cow.seed).collect(),
             mob_kinds: case.cows.iter().map(|cow| cow.kind).collect(),
             mob_owners: case.cows.iter().map(|cow| cow.owner).collect(),
+            cow_chests: case.cows.iter().map(|cow| cow.chest).collect(),
+            player_teams: case.players.iter().map(|player| player.team).collect(),
         };
         // 故意改坏：难度缩放、护甲公式（用空装备）、保护附魔等级、
         // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置）、攻击充能值
@@ -4321,6 +4347,16 @@ impl Report {
             Some("mace_pet") => scene.mob_owners.fill(-1),
             // 长矛改坏：取消刺击，两头牛都不受伤（和官方分叉）。
             Some("spear_stab") => scene.stab_tick = -1,
+            // 破甲改坏：从武器上剥掉破甲，穿甲的牛伤害和官方分叉。
+            Some("mace_breach") => scene
+                .attack_enchants
+                .retain(|(name, _)| name != "minecraft:breach"),
+            // 风爆改坏：从武器上剥掉 wind_burst，攻击者不再被弹起（和官方分叉）。
+            Some("mace_wind_burst") => scene
+                .attack_enchants
+                .retain(|(name, _)| name != "minecraft:wind_burst"),
+            // 长矛蓄力改坏：取消蓄力，牛不受伤（和官方分叉）。
+            Some("spear_charge") => scene.kinetic_start = -1,
             _ => {}
         }
         let output = replay_player_hurt(&scene);
@@ -5208,7 +5244,8 @@ fn is_attack_scene(name: &str) -> bool {
     name.ends_with("attack_cow") || name.starts_with("player_attack_")
 }
 
-/// 只发给玩家自己的包：`player_combat_enter` / `hurt_animation` / `set_health`。
+/// 只发给玩家自己的包：`player_combat_enter` / `hurt_animation` / `set_health` /
+/// `set_entity_motion` / 爆炸包（`ServerLevel.explode` 走 `connection.send`）。
 fn is_self_packet(bytes: &[u8]) -> bool {
     matches!(
         packet_id(bytes),
@@ -5217,6 +5254,7 @@ fn is_self_packet(bytes: &[u8]) -> bool {
                 | mc_bamboo_data::packets::play::clientbound::HURT_ANIMATION
                 | mc_bamboo_data::packets::play::clientbound::SET_HEALTH
                 | mc_bamboo_data::packets::play::clientbound::SET_ENTITY_MOTION
+                | mc_bamboo_data::packets::play::clientbound::EXPLODE
         )
     )
 }

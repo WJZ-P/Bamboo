@@ -153,6 +153,37 @@ impl World<'_> {
         });
     }
 
+    /// 风爆 `wind_burst` 的 `explode`：只按 `knockback_multiplier` 推开范围内的实体，
+    /// 不伤、不破坏方块（`ExplosionInteraction.TRIGGER`）。返回
+    /// `(被炸到的方块数, 被推开的玩家 (uid, 击退向量))`，调用方把攻击者那一份写进
+    /// 自己的速度、方块数带进爆炸包。
+    ///
+    /// The wind burst `explode`: push entities by `knockback_multiplier` without
+    /// hurting or breaking blocks (`ExplosionInteraction.TRIGGER`). Returns
+    /// `(block count, pushed players (uid, knockback))`; the caller writes the
+    /// attacker's entry into its velocity and the block count into the blast packet.
+    pub fn explode_wind_burst(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        knockback_multiplier: f32,
+    ) -> (i32, Vec<(EntityUid, Vec3)>) {
+        let broken = self.calculate_wind_charge_positions(center, radius);
+        let block_count = broken.len() as i32;
+        let damage = DamageSource::environment(DamageKind::Explosion);
+        (
+            block_count,
+            hurt_living_by_explosion_with(
+                self,
+                damage,
+                center,
+                radius,
+                false,
+                knockback_multiplier,
+            ),
+        )
+    }
+
     /// `ServerExplosion.calculateExplodedPositions`，按 `SimpleExplosionDamageCalculator`
     /// 的免疫方块标签把抗性换成 3600000.0f（射线到此为止）。
     fn calculate_wind_charge_positions(&mut self, center: Vec3, radius: f32) -> Vec<BlockPos> {
