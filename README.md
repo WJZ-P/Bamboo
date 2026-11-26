@@ -1566,7 +1566,7 @@ WebView2 的渲染进程不算在内。
   `canTargetEntity` 里盔甲架 / 同队这几项过滤（Bamboo 还没有盔甲架生物、生物不加入队伍）、
   生物碰撞推挤别的实体（`Entity.pushEntities` 那一套物理推挤）还没建模——推挤只改速度、
   不归到击退对拍里；声音事件由同步层发出，音效参数不逐位对拍。
-- **凋灵（本轮接入，部分完成）**：`MobType::Wither` 注册进类型表（`ALL` 74 种），属性照 `WitherBoss.createAttributes`
+- **凋灵（本轮接入）**：`MobType::Wither` 注册进类型表（`ALL` 74 种），属性照 `WitherBoss.createAttributes`
   （300 血 / 0.6 移速与飞行速度 / 40 跟随 / 4 护甲）、尺寸 0.9×3.5、50 经验、`Invul` 存档键往返。
   **召唤**照 `WitherSkullBlock.checkSpawn`：玩家放下凋灵骷髅头时用 `CarvedPumpkinBlock.clearPatternBlocks`
   那套 `BlockPattern` 检测灵魂沙 / 灵魂土 T 形加三个头的图案（`^^^` / `###` / `~#~`），清 9 格发 2001 事件、
@@ -1586,31 +1586,41 @@ WebView2 的渲染进程不算在内。
   `level.random.nextInt(4)`、无敌期再加 6 次高斯 + 3 次浮点）。死亡掉下界之星，`LivingEntity.createWitherRose`
   照字节码排在所有掉落命令之后：`mobGriefing` 且脚下方块是空气、且 `WitherRoseBlock.canSurvive`（走行为表
   `mayPlaceOn` 的 `#supports_wither_rose`）时种下玫瑰，否则按 `getX/getY/getZ` 的实体坐标掉玫瑰物品。
-  **凋灵之首**：`WitherSkull` 是新的投射物实体，飞行照 `AbstractHurtingProjectile.tick`（每刻按惯性缩放速度：
-  普通 0.95、蓝色危险 0.73，加速度 0、无重力），命中路径复用风弹的 `ProjectileUtil.getHitResultOnMoveVector`
-  加 `computeMargin`。命中实体造成 8 点 `wither_skull` 伤害，命中即发 1 格 `MOB` 爆炸；蓝色头把非
-  `#wither_immune` 方块的爆炸抗性压到 0.8，能真的炸掉方块；普通难度挂 200 刻、困难挂 800 刻的 2 级凋零
-  （简单 / 和平不挂）。`RangedAttackGoal` 每 40 刻射主头（head 0，0.1% 概率蓝色），`customServerAiStep`
+  **凋灵之首**：`WitherSkull` 是新的投射物实体，飞行照 `AbstractHurtingProjectile.tick`：
+  `applyInertia` 每刻沿速度方向加 `accelerationPower=0.1` 再按惯性缩放（普通 0.95、蓝色危险 0.73、
+  水中 `getLiquidInertia()=0.8` 并发 4 个气泡粒子），初速是归一化方向乘 0.1；构造用 owner 的朝向，
+  `rotateTowardsMovement` 先把上一刻角度平移到目标角度的 `[-180,180)` 邻域再按 0.2 插值。命中路径复用风弹的
+  `ProjectileUtil.getHitResultOnMoveVector` 加 `computeMargin`。命中实体造成 8 点 `wither_skull` 伤害
+  （无 owner 时 5 点 `magic()`），目标被打死时 `owner.heal(5)`、存活时跑 `EnchantmentHelper.doPostAttackEffects`
+  （遍历目标装备的 `POST_ATTACK` 附魔，凋灵之首 / 生物目标恒为空，Bamboo 暂无通用框架）；命中即发 1 格 `MOB` 爆炸；
+  蓝色头把非 `#wither_immune` 方块的爆炸抗性压到 0.8，能真的炸掉方块；普通难度挂 200 刻、困难挂 800 刻的
+  2 级凋零（简单 / 和平不挂）。`DATA_DANGEROUS` 是同步元数据 index 8 的 BOOLEAN，蓝色头客户端可见。
+  `RangedAttackGoal` 每 40 刻射主头（head 0，0.1% 概率蓝色），`customServerAiStep`
   里两个侧头按 `nextHeadUpdate` 索敌、空闲累计到 16 次朝随机点射蓝色头；每次发射先发 1024 号世界事件。
   存档写 `dangerous` 键。
   **验证**：`cargo test -p mc-bamboo-blocks -p mc-bamboo-game`、`cargo clippy --workspace --all-targets`、
   `cargo fmt --all --check` 全过；`mob-oracle java --show 2000` 267 处已知末位差（`frog_lily_41` 偶尔多约 206 行、
   复跑 `--only frog` 回到 46；无凋灵相关差异），
   `entity-oracle` / `player-data` / `chunk-content` 三个 Java 对拍全过。
-  **Boss 血条**：`ServerBossEvent` 每只凋灵一根栏，game 层每刻跟着 `EntityTracking.seen_by` 给新进入
-  跟踪范围的玩家发 `BossEvent` add（PURPLE / PROGRESS / `setDarkenScreen(true)`）、离开的发 remove、进度变化的发
-  update，凋灵消失时给所有观众发 remove；拆岛 / 合岛时血条跟着实体搬。
-  **逐刻对拍（已闭环的部分）**：`mob-oracle --only wither` 的存档往返场景把官方 `WitherBoss` 的 NBT
+  **Boss 血条**：`ServerBossEvent` 每只凋灵一根栏，栏 UUID 用 `Mth.createInsecureUUID(random)`（构造时消耗
+  实体随机源两次 `nextLong`，不存档、每只凋灵独立），game 层每刻跟着 `EntityTracking.seen_by` 给新进入
+  跟踪范围的玩家发 `BossEvent` add（PURPLE / PROGRESS / `setDarkenScreen(true)`，名字跟 `getDisplayName()`，
+  有自定义名就用它、否则 `entity.minecraft.wither`）、离开的发 remove、进度或名字变化的发 update，
+  凋灵消失时给所有观众发 remove；拆岛 / 合岛时血条跟着实体搬。
+  **逐刻对拍**：`mob-oracle --only wither` 的存档往返场景把官方 `WitherBoss` 的 NBT
   （`Invul` 取 0 / 137 / 220）逐键对拍 0 差异；`--only wither_invul` 的无敌期逐刻场景（2 例 46 刻）逐刻比
-  `Invul` / 血量 / 位置 / 速度 / 朝向 / 两侧头旋转和两种随机源，0 差异。5 处改坏确认
-  `wither_save_invul` / `wither_save_health` / `wither_save_pos` / `wither_save_rotation` / `wither_invul`
-  都报不一致。
-  **已知限制（本轮未做）**：召唤图案 / 无敌期结束的爆炸 / 射凋灵之首命中牛 / 半血弹箭 / 破坏方块的官方逐刻对拍场景
-  留待下一步——`MobOracle.FakeLevel` 要补 `explode` / `globalLevelEvent` / `getNearbyEntities` / `destroyBlock`
-  和凋灵之首 `addFreshEntity` 的 `entitySeeds` 播种，再写对应的 Rust 重放。另外上述
-  `AbstractHurtingProjectile.applyInertia` 水中分支、`onHitEntity` 里目标死亡时 `owner.heal(5)` 与
-  `doPostAttackEffects`、`DATA_DANGEROUS` 客户端元数据同步包、侧头 `getNearbyEntities` 只收生物、Boss 栏 UUID
-  用实体 UUID（官方另用 `Mth.createInsecureUUID(random)`）都还没接。
+  `Invul` / 血量 / 位置 / 速度 / 朝向 / 两侧头旋转和两种随机源；`--only wither_explode` 的无敌期结束爆炸场景
+  逐刻比 16 个状态字段 + 爆炸 / 1023 全服事件（2 例）；`--only wither_skull` 的射凋灵之首命中牛场景（21 刻）
+  逐刻比射弹轨迹 / 朝向、牛血量 / 击退、2 级凋零效果、世界随机源；`--only wither_arrow` 的半血弹箭场景（9 刻）
+  逐刻比箭的轨迹、凋灵血量（不减）、两种随机源；`--only wither_destroy` 的破坏方块场景（23 刻）逐刻比
+  包围盒扫描区 36 格方块状态与两种随机源（第 20 刻 32 格石头全被破坏）。以上场景都 0 差异。
+  改坏确认 `wither_save_invul` / `wither_save_health` / `wither_save_pos` / `wither_save_rotation` /
+  `wither_invul` / `wither_explode` / `wither_skull` / `wither_arrow` / `wither_destroy` 都报不一致。
+  **已知限制**：召唤图案（T 形方块检测）的官方逐刻对拍场景还没做（召唤逻辑本身已接，只是没有逐刻夹具）；
+  `EnchantmentHelper.doPostAttackEffects` 的通用 `POST_ATTACK` 附魔效果框架 Bamboo 暂无，凋灵之首命中
+  生物 / 无装备目标时恒为空、按字节码的空结果处理；气泡粒子用 `sendParticles` 包近似官方每刻 4 次
+  `addParticle`（水中分支的对拍场景未覆盖）；侧头 `getNearbyEntities` 已按字节码把玩家一并纳入候选，
+  但玩家目标的逐刻对拍场景未覆盖。
 - 正版验证的限制：`server.properties` 的 `online-mode` 官方默认 true，命令行版和桌面端都读同一份文件、
   设置页里可以改；`ServerConfig::default()`（不读配置文件的嵌入用法）是 false。
   和代理转发互斥：打开转发时正版验证会被关掉，因为代理已经替服务端验过了。
