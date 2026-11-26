@@ -2722,6 +2722,17 @@ pub enum Effect {
         position: mc_bamboo_core::Vec3,
         radius: f64,
     },
+    /// `CelebrateVillagersSurvivedRaid` 生成的烟花火箭。只记录、不落地实体
+    /// （烟花火箭实体另开任务）；`flight` 是飞行时长，`color` 是烟花色。
+    ///
+    /// A firework rocket spawned by `CelebrateVillagersSurvivedRaid`, recorded but not
+    /// spawned (the entity is a separate task); `flight` is the flight duration and
+    /// `color` the firework colour.
+    Firework {
+        position: mc_bamboo_core::Vec3,
+        flight: i32,
+        color: i32,
+    },
     /// 箭击中并杀死了实体：游戏层给射手触发 `KILLED_BY_ARROW`。
     ///
     /// An arrow killed an entity; the game layer credits the shooter's trigger.

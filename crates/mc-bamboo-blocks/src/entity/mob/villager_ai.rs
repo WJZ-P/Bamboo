@@ -62,6 +62,24 @@ use crate::{
 /// `Villager.SPEED_MODIFIER`。
 const SPEED_MODIFIER: f32 = 0.5;
 
+thread_local! {
+    /// `mob-oracle` 的 `--break-self-test` 改坏确认；0 表示不破坏，1 破坏袭击触发闸门
+    /// 的 `absent(WALK_TARGET)`，2 破坏庆祝烟花颜色。
+    static RAID_TAMPER: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// 由 `mob-oracle` 按 `--break-self-test` 设置，其他驱动不调用。
+///
+/// Set by `mob-oracle` from `--break-self-test`; no other driver calls this.
+pub fn set_raid_tamper(name: &str) {
+    let tamper = match name {
+        "villager_raid_gate" => 1,
+        "villager_raid_firework" => 2,
+        _ => 0,
+    };
+    RAID_TAMPER.with(|cell| cell.set(tamper));
+}
+
 /// `Villager.BRAIN_PROVIDER` 的 9 个传感器，严格按官方登记顺序。
 ///
 /// The 9 sensors of `Villager.BRAIN_PROVIDER`, in exact vanilla registration order.
@@ -2149,12 +2167,15 @@ fn trigger_pre_raid_gate(state: &mut PreRaidGateState, cx: &mut Cx) -> bool {
     // SetWalkTargetFromBlockMemory 权重 6，VillageBoundRandomStroll 权重 2。
     let stroll_first = shuffle_first(&mut state.order, &mut state.random, [6, 2]) == 1;
     // 两个触发都要求 `WALK_TARGET` 缺席；已有步行目标时两个都不触发，闸门空转。
-    if cx.memories.has(WalkTarget) {
+    // `--break-self-test villager_raid_gate` 改坏：跳过这个前置，有步行目标也照触发。
+    if cx.memories.has(WalkTarget) && RAID_TAMPER.with(|cell| cell.get()) != 1 {
         return true;
     }
-    if stroll_first {
-        let _ = trigger_village_bound_random_stroll(speed, 10, 7, cx);
-    } else if !trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx) {
+    // 洗牌先出 `VillageBoundRandomStroll`，或 `SetWalkTargetFromBlockMemory` 因记忆条件
+    // 没触发时，落到闲逛。
+    if stroll_first
+        || !trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx)
+    {
         let _ = trigger_village_bound_random_stroll(speed, 10, 7, cx);
     }
     true
@@ -2206,9 +2227,8 @@ fn trigger_raid_celebrate_gate(state: &mut RaidCelebrateGateState, cx: &mut Cx) 
     if cx.memories.has(WalkTarget) {
         return true;
     }
-    if stroll_first {
-        let _ = trigger_village_bound_random_stroll(stroll_speed, 10, 7, cx);
-    } else if !trigger_move_to_sky_seeing_spot(state.speed, cx) {
+    // 洗牌先出 `VillageBoundRandomStroll`，或 `MoveToSkySeeingSpot` 没触发时，落到闲逛。
+    if stroll_first || !trigger_move_to_sky_seeing_spot(state.speed, cx) {
         let _ = trigger_village_bound_random_stroll(stroll_speed, 10, 7, cx);
     }
     true
@@ -2461,15 +2481,35 @@ fn celebrate_can_continue(cx: &mut Cx) -> bool {
 }
 
 /// `CelebrateVillagersSurvivedRaid.tick`：每刻 `nextInt(100)==0` 播庆祝声，
-/// `nextInt(200)==0` 且头顶无方块时放烟花（随机颜色 + 0..3 飞行时长；烟花实体
-/// 本身没建模，只保持取数次数对齐）。
+/// `nextInt(200)==0` 且头顶无方块时生成一枚烟花火箭（BURST、随机颜色、0..3 飞行时长）。
+/// 烟花只发一个 `SpawnFirework` 事件记录位置与组件，不落地实体（烟花火箭实体另开任务）。
 fn celebrate_tick(cx: &mut Cx) {
     if cx.me.random.next_int_bounded(100) == 0 {
         living::make_sound(cx.me, cx.mob, "minecraft:entity.villager.celebrate");
     }
     if cx.me.random.next_int_bounded(200) == 0 && has_no_blocks_above(cx) {
-        let _ = cx.me.random.next_int_bounded(16);
-        let _ = cx.me.random.next_int_bounded(3);
+        // `Util.getRandom(DyeColor.values(), random)`（`nextInt(16)`）+ `nextInt(3)` 飞行时长。
+        let dye = mc_bamboo_core::sign::DyeColor::from_id(cx.me.random.next_int_bounded(16));
+        let flight = cx.me.random.next_int_bounded(3);
+        // `--break-self-test villager_raid_firework` 改坏：颜色固定成黑色。
+        let color = if RAID_TAMPER.with(|cell| cell.get()) == 2 {
+            mc_bamboo_core::sign::DyeColor::Black.firework_color()
+        } else {
+            dye.firework_color()
+        };
+        let position = Vec3::new(
+            cx.me.position.x,
+            living::eye_y(cx.me, cx.mob),
+            cx.me.position.z,
+        );
+        cx.ctx.emit(
+            Command::SpawnFirework {
+                position,
+                flight,
+                color,
+            },
+            cx.me,
+        );
     }
 }
 

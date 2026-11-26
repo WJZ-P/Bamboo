@@ -5288,7 +5288,8 @@ mod tests {
                 | Effect::Explode { .. }
                 | Effect::PlayerShoulder { .. }
                 | Effect::Particles { .. }
-                | Effect::VibrationParticle { .. } => None,
+                | Effect::VibrationParticle { .. }
+                | Effect::Firework { .. } => None,
             })
             .collect()
     }

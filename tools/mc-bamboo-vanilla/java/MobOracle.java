@@ -15420,6 +15420,10 @@ public final class MobOracle {
                 dropped.setId(FIRST_ID + 10);
                 dropped.setNoPickUpDelay();
                 world.tracked.add(dropped);
+            } else if (name.equals("villager_p4_raid_victory")) {
+                // 种子 75 让 `CelebrateVillagersSurvivedRaid` 在场景里真的放一枚烟花，
+                // 好对拍烟花生成事件。
+                addVillager.accept(new double[] {0.5, 64.0, 0.5}, 75L);
             } else {
                 addVillager.accept(new double[] {0.5, 64.0, 0.5}, 71L);
             }
@@ -15497,6 +15501,26 @@ public final class MobOracle {
                     if (i > 0) frames.append(',');
                     frames.append(Block.getId(world.getBlockState(watchBlocks.get(i))));
                 }
+                frames.append("],\"fireworks\":[");
+                boolean firstFirework = true;
+                for (Entity spawned : world.spawned) {
+                    if (!(spawned instanceof net.minecraft.world.entity.projectile.FireworkRocketEntity rocket)) {
+                        continue;
+                    }
+                    var fireworks = rocket.getItem().get(net.minecraft.core.component.DataComponents.FIREWORKS);
+                    if (fireworks == null) continue;
+                    var explosion = fireworks.explosions().getFirst();
+                    if (!firstFirework) frames.append(',');
+                    firstFirework = false;
+                    frames.append('[')
+                            .append(Double.doubleToLongBits(rocket.getX())).append(',')
+                            .append(Double.doubleToLongBits(rocket.getY())).append(',')
+                            .append(Double.doubleToLongBits(rocket.getZ())).append(',')
+                            .append(fireworks.flightDuration()).append(',')
+                            .append(explosion.colors().getInt(0))
+                            .append(']');
+                }
+                world.spawned.clear();
                 frames.append("]}");
             }
             frames.append(']');

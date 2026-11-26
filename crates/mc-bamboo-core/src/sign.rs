@@ -203,6 +203,28 @@ impl DyeColor {
             Self::Black => "black",
         }
     }
+
+    /// 官方 `DyeColor.getFireworkColor()`：烟花的颜色，和服务端版本绑定的 RGB 常量。
+    pub const fn firework_color(self) -> i32 {
+        match self {
+            Self::White => 0x00F0_F0F0,
+            Self::Orange => 0x00EB_8844,
+            Self::Magenta => 0x00C3_54CD,
+            Self::LightBlue => 0x0066_89D3,
+            Self::Yellow => 0x00DE_CF2A,
+            Self::Lime => 0x0041_CD34,
+            Self::Pink => 0x00D8_8198,
+            Self::Gray => 0x0043_4343,
+            Self::LightGray => 0x00AB_ABAB,
+            Self::Cyan => 0x0028_7697,
+            Self::Purple => 0x007B_2FBE,
+            Self::Blue => 0x0025_3192,
+            Self::Brown => 0x0051_301A,
+            Self::Green => 0x003B_511A,
+            Self::Red => 0x00B3_312C,
+            Self::Black => 0x001E_1B1B,
+        }
+    }
 }
 
 /// `ChatFormatting.stripFormatting`：去掉 `§` 加一个格式码。

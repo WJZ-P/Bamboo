@@ -1017,6 +1017,7 @@ impl Report {
 
         self.cases += 1;
         let break_test = self.break_test.clone();
+        villager_ai::set_raid_tamper(break_test.as_deref().unwrap_or(""));
         let name = case.name.as_str();
         let mut blocks_map = std::collections::HashMap::new();
         for x in -15..=15 {
@@ -1273,6 +1274,16 @@ impl Report {
             );
             dropped.id = case.first_id + 10;
             world.add_prepared_entity(dropped);
+        } else if name == "villager_p4_raid_victory" {
+            // 种子 75 让 `CelebrateVillagersSurvivedRaid` 在场景里真的放一枚烟花，
+            // 好对拍烟花生成事件。
+            villager_ids.push(spawn_villager(
+                &mut level,
+                &mut ticks,
+                Vec3::new(0.5, 64.0, 0.5),
+                75,
+                0,
+            ));
         } else {
             villager_ids.push(spawn_villager(
                 &mut level,
@@ -1296,6 +1307,7 @@ impl Report {
 
         let mut clock_offset = 0_i64;
         for (tick, expected) in case.frames.iter().enumerate() {
+            let mut ours_fireworks: Vec<[i64; 5]> = Vec::new();
             if tick > 0 {
                 let tick_i64 = tick as i64;
                 ticks.set_time(1000 + tick_i64);
@@ -1332,6 +1344,28 @@ impl Report {
 
                 let mut world = World::new(&mut level, &mut ticks);
                 world.tick_entities();
+                ours_fireworks = world
+                    .drain_effects()
+                    .iter()
+                    .filter_map(|effect| {
+                        if let mc_bamboo_blocks::Effect::Firework {
+                            position,
+                            flight,
+                            color,
+                        } = effect
+                        {
+                            Some([
+                                position.x.to_bits() as i64,
+                                position.y.to_bits() as i64,
+                                position.z.to_bits() as i64,
+                                i64::from(*flight),
+                                i64::from(*color),
+                            ])
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 for (i, &vid) in villager_ids.iter().enumerate() {
                     world.with_entity_mut(vid, &mut |entity| {
                         let seed = entity.random.state();
@@ -1443,6 +1477,12 @@ impl Report {
                     case.name, expected.blocks, ours_blocks
                 ));
             }
+            if ours_fireworks != expected.fireworks {
+                self.mismatch(format!(
+                    "{} tick {tick} fireworks: official {:?}, bamboo {:?}",
+                    case.name, expected.fireworks, ours_fireworks
+                ));
+            }
             self.steps += 1;
             if self.mismatches.len() >= self.show {
                 return;
@@ -1475,6 +1515,9 @@ pub(super) struct VillagerPhase4Frame {
     pub villagers: Vec<VillagerPhase4Entity>,
     pub poi_tickets: Vec<i32>,
     pub blocks: Vec<u32>,
+    /// 这一刻 `CelebrateVillagersSurvivedRaid` 生成的烟花：
+    /// `[x_bits, y_bits, z_bits, flight, color]`。
+    pub fireworks: Vec<[i64; 5]>,
 }
 
 #[derive(Debug, Deserialize)]

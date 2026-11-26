@@ -778,6 +778,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::RaiderDied { .. } => 35,
         Effect::RaidSetLeader { .. } => 36,
         Effect::Particles { .. } => 37,
+        Effect::Firework { .. } => 38,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -1058,6 +1059,17 @@ fn hash_effect(effect: &Effect) -> u64 {
             offset.z.to_bits().hash(&mut hasher);
             speed.to_bits().hash(&mut hasher);
             count.hash(&mut hasher);
+        }
+        Effect::Firework {
+            position,
+            flight,
+            color,
+        } => {
+            position.x.to_bits().hash(&mut hasher);
+            position.y.to_bits().hash(&mut hasher);
+            position.z.to_bits().hash(&mut hasher);
+            flight.hash(&mut hasher);
+            color.hash(&mut hasher);
         }
     }
     hasher.finish()

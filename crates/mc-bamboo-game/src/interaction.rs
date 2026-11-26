@@ -1008,6 +1008,10 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     );
                 }
             }
+            // 烟花火箭只记录、不落地实体（烟花火箭实体另开任务），游戏层不处理。
+            // A firework rocket is only recorded, not spawned (the entity is a separate
+            // task), so the game layer ignores it.
+            Effect::Firework { .. } => {}
         }
     }
 }
