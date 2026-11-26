@@ -252,6 +252,7 @@ enum Line {
     WindCharge(Box<wind_charge::WindChargeCase>),
     Firework(Box<firework::FireworkCase>),
     FireworkSave(firework::FireworkSaveCase),
+    FireworkElytra(Box<firework::FireworkElytraCase>),
     ArrowDeflect(Box<arrow_deflect::ArrowDeflectCase>),
     OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawnerCase>),
     TrialSpawner(Box<trial_spawner::TrialSpawnerCase>),
@@ -1578,6 +1579,22 @@ impl Level for MobLevel {
         true
     }
 
+    /// 附着烟花加速：把速度写回夹具里那名玩家的 `PlayerView.delta`，让下一刻
+    /// `ctx.player` 读到和官方 `setDeltaMovement` 一样的新速度。
+    fn set_player_delta_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        delta: mc_bamboo_core::Vec3,
+    ) -> bool {
+        for player in &mut self.players {
+            if player.uid == target {
+                player.delta = delta;
+                return true;
+            }
+        }
+        false
+    }
+
     fn knock_back_player_now(
         &mut self,
         target: mc_bamboo_blocks::entity::EntityUid,
@@ -2381,6 +2398,7 @@ impl Report {
                 Line::WindCharge(case) => self.replay_wind_charge(&case),
                 Line::Firework(case) => self.replay_firework(&case),
                 Line::FireworkSave(case) => self.replay_firework_save(&case),
+                Line::FireworkElytra(case) => self.replay_firework_elytra(&case),
                 Line::ArrowDeflect(case) => self.replay_arrow_deflect(&case),
                 Line::OminousItemSpawner(case) => self.replay_ominous_item_spawner(&case),
                 Line::TrialSpawner(case) => self.replay_trial_spawner(&case),
