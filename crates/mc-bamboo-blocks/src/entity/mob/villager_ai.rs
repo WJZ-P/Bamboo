@@ -503,6 +503,11 @@ pub struct MeetGateState {
     ///
     /// The trigger gate's shuffle random, seeded by `seed_shuffles` in the official order.
     pub random: JavaRandom,
+    /// `ShufflingList` 当前的表项顺序；官方每次 `shuffle()` 就地排序，顺序跨 tick 保留。
+    ///
+    /// The `ShufflingList`'s current entry order; vanilla's `shuffle()` sorts in place,
+    /// so the order persists across ticks.
+    pub order: [usize; 2],
 }
 
 /// `PRE_RAID` 优先级 0 的 `TriggerGate.triggerOneShuffled([SetWalkTargetFromBlockMemory,
@@ -517,6 +522,11 @@ pub struct PreRaidGateState {
     ///
     /// The trigger gate's shuffle random, seeded by `seed_shuffles` in the official order.
     pub random: JavaRandom,
+    /// `ShufflingList` 当前的表项顺序；官方每次 `shuffle()` 就地排序，顺序跨 tick 保留。
+    ///
+    /// The `ShufflingList`'s current entry order; vanilla's `shuffle()` sorts in place,
+    /// so the order persists across ticks.
+    pub order: [usize; 2],
 }
 
 /// `RAID` 优先级 0 的 `RaidCelebrateTriggerGate`（`sequence(triggerIf, triggerOneShuffled(
@@ -531,6 +541,11 @@ pub struct RaidCelebrateGateState {
     ///
     /// The trigger gate's shuffle random, seeded by `seed_shuffles` in the official order.
     pub random: JavaRandom,
+    /// `ShufflingList` 当前的表项顺序；官方每次 `shuffle()` 就地排序，顺序跨 tick 保留。
+    ///
+    /// The `ShufflingList`'s current entry order; vanilla's `shuffle()` sorts in place,
+    /// so the order persists across ticks.
+    pub order: [usize; 2],
 }
 
 /// `SetClosestHomeAsWalkTarget` 的重试缓存（装箱以保持 `Node` 紧凑）。
@@ -2005,7 +2020,7 @@ fn trigger_inside_brownian_walk(speed: f32, cx: &mut Cx) -> bool {
 fn trigger_meet_gate(state: &mut MeetGateState, cx: &mut Cx) -> bool {
     // `ShufflingList.shuffle` 洗出两个触发（StrollAroundPoi w2、SocializeAtBell w2）的顺序，
     // 先命中的那个停止。
-    let socialize_first = shuffle_first(&mut state.random, [2, 2]) == 1;
+    let socialize_first = shuffle_first(&mut state.order, &mut state.random, [2, 2]) == 1;
     if socialize_first {
         if trigger_socialize_at_bell(cx) {
             return true;
@@ -2120,23 +2135,26 @@ fn trigger_walk_target_from_block_memory(
 }
 
 /// `PreRaidTriggerGate`：`TriggerGate.triggerOneShuffled` 按权重洗牌，先命中（成功设下
-/// 步行目标）的那个停止。
+/// 步行目标）的那个停止。每个触发先查自己的记忆条件（`tryTrigger`）：两个触发
+/// （`VillageBoundRandomStroll` / `SetWalkTargetFromBlockMemory`）都要求 `WALK_TARGET`
+/// 缺席，后者还要求 `MEETING_POINT` 在场；不满足就跳过到下一个。
 ///
 /// `PreRaidTriggerGate`: `TriggerGate.triggerOneShuffled` shuffles by weight and stops at
-/// the first trigger that fires (sets a walk target).
+/// the first trigger that fires (sets a walk target). Each trigger checks its own memory
+/// condition first (`tryTrigger`): both (`VillageBoundRandomStroll` and
+/// `SetWalkTargetFromBlockMemory`) need `WALK_TARGET` absent, and the latter also needs
+/// `MEETING_POINT` present; a failed condition skips to the next trigger.
 fn trigger_pre_raid_gate(state: &mut PreRaidGateState, cx: &mut Cx) -> bool {
     let speed = state.speed * 1.5;
     // SetWalkTargetFromBlockMemory 权重 6，VillageBoundRandomStroll 权重 2。
-    let stroll_first = shuffle_first(&mut state.random, [6, 2]) == 1;
+    let stroll_first = shuffle_first(&mut state.order, &mut state.random, [6, 2]) == 1;
+    // 两个触发都要求 `WALK_TARGET` 缺席；已有步行目标时两个都不触发，闸门空转。
+    if cx.memories.has(WalkTarget) {
+        return true;
+    }
     if stroll_first {
-        if trigger_village_bound_random_stroll(speed, 10, 7, cx) {
-            return true;
-        }
-        let _ = trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx);
-    } else {
-        if trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx) {
-            return true;
-        }
+        let _ = trigger_village_bound_random_stroll(speed, 10, 7, cx);
+    } else if !trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx) {
         let _ = trigger_village_bound_random_stroll(speed, 10, 7, cx);
     }
     true
@@ -2144,20 +2162,21 @@ fn trigger_pre_raid_gate(state: &mut PreRaidGateState, cx: &mut Cx) -> bool {
 
 /// `ShufflingList.shuffle` 对两个触发的结果：每个触发取一次 `nextFloat`，权重
 /// `-pow(r, 1.0f/weight)`（float 除法，与 `Gate::shuffle` 一致），升序稳定排序后返回
-/// 排在前面的下标。
+/// 排在前面的下标。官方 `shuffle()` 就地排序，下一次取数按上一次排好的顺序进行，
+/// 所以 `order` 要跨 tick 保留。
 ///
 /// The `ShufflingList.shuffle` order of two triggers: one `nextFloat` each, key
 /// `-pow(r, 1.0f/weight)` (float division, like `Gate::shuffle`), stable ascending sort;
-/// returns the index that sorts first.
-fn shuffle_first(random: &mut JavaRandom, weights: [i32; 2]) -> usize {
-    let mut order = [0_usize, 1_usize];
+/// returns the index that sorts first. Vanilla sorts in place, so the next shuffle draws
+/// in the previous sorted order and `order` must persist across ticks.
+fn shuffle_first(order: &mut [usize; 2], random: &mut JavaRandom, weights: [i32; 2]) -> usize {
     let mut keys = [0.0_f64; 2];
-    for (i, &weight) in weights.iter().enumerate() {
+    for &idx in order.iter() {
         let r = f64::from(random.next_float());
-        keys[i] = if weight == 1 {
+        keys[idx] = if weights[idx] == 1 {
             -r
         } else {
-            -r.powf(f64::from(1.0_f32 / weight as f32))
+            -r.powf(f64::from(1.0_f32 / weights[idx] as f32))
         };
     }
     order.sort_by(|&a, &b| keys[a].total_cmp(&keys[b]));
@@ -2181,18 +2200,15 @@ fn trigger_raid_celebrate_gate(state: &mut RaidCelebrateGateState, cx: &mut Cx) 
         return false;
     }
     // MoveToSkySeeingSpot 权重 5，VillageBoundRandomStroll 权重 2。官方前者用 `speed`、
-    // 后者用 `speed * 1.1`。
+    // 后者用 `speed * 1.1`。两个触发都要求 `WALK_TARGET` 缺席。
     let stroll_speed = state.speed * 1.1;
-    let stroll_first = shuffle_first(&mut state.random, [5, 2]) == 1;
+    let stroll_first = shuffle_first(&mut state.order, &mut state.random, [5, 2]) == 1;
+    if cx.memories.has(WalkTarget) {
+        return true;
+    }
     if stroll_first {
-        if trigger_village_bound_random_stroll(stroll_speed, 10, 7, cx) {
-            return true;
-        }
-        let _ = trigger_move_to_sky_seeing_spot(state.speed, cx);
-    } else {
-        if trigger_move_to_sky_seeing_spot(state.speed, cx) {
-            return true;
-        }
+        let _ = trigger_village_bound_random_stroll(stroll_speed, 10, 7, cx);
+    } else if !trigger_move_to_sky_seeing_spot(state.speed, cx) {
         let _ = trigger_village_bound_random_stroll(stroll_speed, 10, 7, cx);
     }
     true
@@ -3253,6 +3269,7 @@ fn meet_package(speed: f32) -> ActivityData {
                 Kind::Villager(Behavior::MeetTriggerGate(Box::new(MeetGateState {
                     stroll_next_ok: 0,
                     random: JavaRandom::new(0),
+                    order: [0, 1],
                 }))),
             ),
             (10, stub(Stub::ShowTradesToPlayer)),
@@ -3391,6 +3408,7 @@ fn pre_raid_package(speed: f32) -> ActivityData {
                 Kind::Villager(Behavior::PreRaidTriggerGate(Box::new(PreRaidGateState {
                     speed,
                     random: JavaRandom::new(0),
+                    order: [0, 1],
                 }))),
             ),
             minimal_look_behavior(),
@@ -3409,6 +3427,7 @@ fn raid_package(speed: f32) -> ActivityData {
                     RaidCelebrateGateState {
                         speed,
                         random: JavaRandom::new(0),
+                        order: [0, 1],
                     },
                 ))),
             ),

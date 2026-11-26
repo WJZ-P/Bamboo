@@ -15231,6 +15231,8 @@ public final class MobOracle {
                 "villager_p4_unemploy",
                 "villager_p4_sleep_wake",
                 "villager_p4_bell",
+                "villager_p4_raid_bell",
+                "villager_p4_raid_victory",
                 "villager_p4_farmer"
         };
         int count = 0;
