@@ -1602,6 +1602,22 @@ fn block_entity_load_cases() -> Result<Vec<(String, &'static str, Tag)>, String>
         "minecraft:moving_piston",
         Tag::Compound(piston),
     ));
+    let mut beacon = meta("minecraft:beacon");
+    for (key, value) in [
+        ("primary_effect", Tag::String("minecraft:speed".to_owned())),
+        (
+            "secondary_effect",
+            Tag::String("minecraft:regeneration".to_owned()),
+        ),
+        ("Levels", Tag::Int(4)),
+    ] {
+        beacon.push((key.to_owned(), value));
+    }
+    out.push((
+        "beacon-full".to_owned(),
+        "minecraft:beacon",
+        Tag::Compound(beacon),
+    ));
     // 宝库 / 幽匿方块实体：只有坐标的裸条目、codec 默认值省略、非空列表和监听器。
     // Vault and sculk block entities: bare entries, codec default omission,
     // non-empty lists and vibration listeners.

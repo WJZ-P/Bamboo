@@ -20,11 +20,19 @@ use mc_bamboo_blocks::entity::EntityKind;
 use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, EntityStore, EntityTables, Level,
     LevelRandom, LevelTables, RedstoneMemory, World,
-    behaviour::machines::{BrewingStandEntity, CampfireEntity, FurnaceEntity},
-    entity::Entities,
+    behaviour::{
+        machines::{BrewingStandEntity, CampfireEntity, FurnaceEntity},
+        misc::beacon::{
+            BeaconBlockEntity, DATA_LEVELS, DATA_PRIMARY, DATA_SECONDARY, encode_effect,
+            validate_effects,
+        },
+    },
+    entity::{Entities, ctx::PlayerView},
+    level::Effect,
 };
-use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
-use mc_bamboo_data::{CookingKind, blocks, recipes};
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_data::{CookingKind, blocks, recipes, registries::mob_effect, sounds};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{
     components::{ComponentPatch, cursor::Cursor},
     item::ItemStack,
@@ -34,10 +42,62 @@ use serde::Deserialize;
 use crate::oracle::collect_log;
 
 const POS: BlockPos = BlockPos::new(0, 0, 0);
+const BEACON_POS: BlockPos = BlockPos::new(0, 64, 0);
 
 #[derive(Debug, Deserialize)]
 struct Document {
     runs: Vec<Run>,
+    #[serde(default)]
+    beacons: Vec<BeaconRun>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BeaconRun {
+    kind: String,
+    #[serde(default)]
+    ticks: Vec<BeaconFrame>,
+    #[serde(default)]
+    payments: Vec<BeaconPaymentCheck>,
+    #[serde(default, rename = "savedValid")]
+    saved_valid: Option<BeaconSaveFields>,
+    #[serde(default, rename = "resavedValid")]
+    resaved_valid: Option<BeaconSaveFields>,
+    #[serde(default, rename = "savedFiltered")]
+    saved_filtered: Option<BeaconSaveFields>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BeaconFrame {
+    #[serde(rename = "gameTime")]
+    game_time: i64,
+    data: Vec<i32>,
+    #[serde(rename = "beamSections")]
+    beam_sections: Vec<[i32; 2]>,
+    #[serde(rename = "rawBeamSections")]
+    raw_beam_sections: Vec<[i32; 2]>,
+    sounds: Vec<String>,
+    effects: Vec<[i32; 7]>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BeaconPaymentCheck {
+    #[serde(rename = "hasPayment")]
+    has_payment: bool,
+    primary: i32,
+    secondary: i32,
+    ok: bool,
+    #[serde(rename = "remainingPayment")]
+    remaining_payment: i32,
+    data: Vec<i32>,
+    sounds: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct BeaconSaveFields {
+    primary_effect: Option<String>,
+    secondary_effect: Option<String>,
+    #[serde(rename = "Levels")]
+    levels: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +149,8 @@ struct MachineLevel {
     ///
     /// Furnaces spawn no entities. A tick may still ask for the table; it stays empty.
     entities: Entities,
+    /// 信标对拍用的假玩家列表。
+    players: Vec<PlayerView>,
 }
 
 impl MachineLevel {
@@ -102,6 +164,27 @@ impl MachineLevel {
             block_events: BlockEvents::default(),
             redstone: RedstoneMemory::default(),
             entities: Entities::default(),
+            players: Vec::new(),
+        }
+    }
+
+    fn empty(seed: i64) -> Self {
+        Self {
+            blocks: std::collections::HashMap::new(),
+            random: LevelRandom::new(seed),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            redstone: RedstoneMemory::default(),
+            entities: Entities::default(),
+            players: Vec::new(),
+        }
+    }
+
+    fn set_block(&mut self, pos: BlockPos, state: BlockState) {
+        if state.is_air() {
+            self.blocks.remove(&pos);
+        } else {
+            self.blocks.insert(pos, state);
         }
     }
 }
@@ -193,6 +276,12 @@ impl Level for MachineLevel {
 
     fn note_block_sound(&self, _pos: BlockPos) -> Option<String> {
         None
+    }
+
+    fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
+        for player in &self.players {
+            visit(player);
+        }
     }
 }
 
@@ -318,7 +407,15 @@ fn compare(document: &Document) -> Result<(), String> {
     for run in &document.runs {
         replay(run, &mut ticks, &mut mismatches)?;
     }
-    println!("machine: {} runs, {ticks} ticks", document.runs.len());
+    let mut beacon_ticks = 0usize;
+    for run in &document.beacons {
+        replay_beacon(run, &mut beacon_ticks, &mut mismatches);
+    }
+    println!(
+        "machine: {} runs ({ticks} ticks), {} beacon runs ({beacon_ticks} ticks)",
+        document.runs.len(),
+        document.beacons.len()
+    );
     if mismatches.is_empty() {
         println!("MACHINE RESULT: 0 mismatches");
         Ok(())
@@ -327,6 +424,340 @@ fn compare(document: &Document) -> Result<(), String> {
             println!("MACHINE FAIL: {line}");
         }
         Err(format!("MACHINE RESULT: {} mismatches", mismatches.len()))
+    }
+}
+
+fn beacon_player(uid: i32, x: f64, y: f64, z: f64, spectator: bool) -> PlayerView {
+    PlayerView {
+        uid,
+        uuid: None,
+        fall_flying: false,
+        main_arm_right: true,
+        position: Vec3::new(x, y, z),
+        delta: Vec3::new(0.0, 0.0, 0.0),
+        width: 0.6,
+        height: 1.8,
+        eye_height: 1.62,
+        health: 20.0,
+        look_direction: Vec3::new(0.0, 0.0, 1.0),
+        gaze_disguise: false,
+        alive: true,
+        spectator,
+        creative: false,
+        flying: false,
+        explosion_knockback_resistance: 0.0,
+        game_mode: if spectator { 3 } else { 0 },
+        mining_fatigue: None,
+        sneaking: false,
+        sprinting: false,
+        swimming: false,
+        invisible: false,
+        armor_cover: 0.0,
+        main_hand: 0,
+        off_hand: 0,
+        team: None,
+        yaw: 0.0,
+        pitch: 0.0,
+        combat: Default::default(),
+        effects: Default::default(),
+        shoulder_left: None,
+        shoulder_right: None,
+    }
+}
+
+fn build_pyramid(level: &mut MachineLevel, pos: BlockPos, layers: i32, block: u32) {
+    let state = BlockState(block);
+    for layer in 1..=layers {
+        let cy = pos.y - layer;
+        for cx in (pos.x - layer)..=(pos.x + layer) {
+            for cz in (pos.z - layer)..=(pos.z + layer) {
+                level.set_block(BlockPos::new(cx, cy, cz), state);
+            }
+        }
+    }
+}
+
+fn sound_names(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Sound { sound, .. } => sounds::SOUND_EVENTS
+                .get(usize::try_from(*sound).ok()?)
+                .map(|s| s.name.to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn player_effect_rows(effects: &[Effect]) -> Vec<[i32; 7]> {
+    effects
+        .iter()
+        .filter_map(|e| match *e {
+            Effect::PlayerEffect {
+                target,
+                effect,
+                duration,
+                amplifier,
+                ambient,
+                visible,
+                show_icon,
+            } => Some([
+                target,
+                effect,
+                duration,
+                amplifier,
+                i32::from(ambient),
+                i32::from(visible),
+                i32::from(show_icon),
+            ]),
+            _ => None,
+        })
+        .collect()
+}
+
+fn save_fields_from(entries: &[(String, Tag)]) -> BeaconSaveFields {
+    let get_str = |key: &str| {
+        entries.iter().find_map(|(k, v)| match (k.as_str(), v) {
+            (k, Tag::String(s)) if k == key => Some(s.clone()),
+            _ => None,
+        })
+    };
+    let levels = entries
+        .iter()
+        .find_map(|(k, v)| match (k.as_str(), v) {
+            ("Levels", Tag::Int(n)) => Some(*n),
+            _ => None,
+        })
+        .unwrap_or(-1);
+    BeaconSaveFields {
+        primary_effect: get_str("primary_effect"),
+        secondary_effect: get_str("secondary_effect"),
+        levels,
+    }
+}
+
+fn replay_beacon(run: &BeaconRun, ticks: &mut usize, mismatches: &mut Vec<String>) {
+    if run.kind == "beacon_save_roundtrip" {
+        let mut valid = BeaconBlockEntity::new(BEACON_POS);
+        valid.set_data(DATA_LEVELS, 4, None);
+        valid.set_data(DATA_PRIMARY, encode_effect(Some(mob_effect::SPEED)), None);
+        valid.set_data(
+            DATA_SECONDARY,
+            encode_effect(Some(mob_effect::REGENERATION)),
+            None,
+        );
+        let saved_valid = valid.additional();
+        if let Some(expected) = &run.saved_valid {
+            let got = save_fields_from(&saved_valid);
+            if got != *expected {
+                mismatches.push(format!(
+                    "beacon_save_roundtrip savedValid {got:?} != {expected:?}"
+                ));
+            }
+        }
+        let reloaded = BeaconBlockEntity::read(BEACON_POS, &Tag::Compound(saved_valid));
+        let resaved_valid = reloaded.additional();
+        if let Some(expected) = &run.resaved_valid {
+            let got = save_fields_from(&resaved_valid);
+            if got != *expected {
+                mismatches.push(format!(
+                    "beacon_save_roundtrip resavedValid {got:?} != {expected:?}"
+                ));
+            }
+        }
+        let invalid_raw = Tag::Compound(vec![
+            (
+                "primary_effect".to_owned(),
+                Tag::String("minecraft:poison".to_owned()),
+            ),
+            (
+                "secondary_effect".to_owned(),
+                Tag::String("minecraft:haste".to_owned()),
+            ),
+            ("Levels".to_owned(), Tag::Int(4)),
+        ]);
+        let filtered = BeaconBlockEntity::read(BEACON_POS, &invalid_raw);
+        let saved_filtered = filtered.additional();
+        if let Some(expected) = &run.saved_filtered {
+            let got = save_fields_from(&saved_filtered);
+            if got != *expected {
+                mismatches.push(format!(
+                    "beacon_save_roundtrip savedFiltered {got:?} != {expected:?}"
+                ));
+            }
+        }
+        return;
+    }
+
+    let mut level = MachineLevel::empty(31);
+    level.set_block(BEACON_POS, BlockState(blocks::BEACON));
+    match run.kind.as_str() {
+        "beacon_tier1_to_4" => {}
+        "beacon_glass_and_block" => {
+            build_pyramid(&mut level, BEACON_POS, 4, blocks::IRON_BLOCK);
+            level.set_block(
+                BlockPos::new(0, 65, 0),
+                BlockState(blocks::RED_STAINED_GLASS),
+            );
+            level.set_block(
+                BlockPos::new(0, 66, 0),
+                BlockState(blocks::RED_STAINED_GLASS_PANE),
+            );
+            level.set_block(
+                BlockPos::new(0, 67, 0),
+                BlockState(blocks::BLUE_STAINED_GLASS),
+            );
+            level.set_block(BlockPos::new(0, 68, 0), BlockState(blocks::BEDROCK));
+            level.set_block(
+                BlockPos::new(0, 78, 0),
+                BlockState(blocks::GREEN_STAINED_GLASS),
+            );
+        }
+        "beacon_payment_tier4_regen" => {
+            build_pyramid(&mut level, BEACON_POS, 4, blocks::IRON_BLOCK);
+            level.players.push(beacon_player(1, 5.0, 64.0, 0.0, false));
+            level
+                .players
+                .push(beacon_player(2, 50.0, 200.0, 0.0, false));
+            level.players.push(beacon_player(3, 52.0, 64.0, 0.0, false));
+            level.players.push(beacon_player(4, 2.0, 64.0, 0.0, true));
+        }
+        "beacon_payment_tier4_level2_and_deactivate" => {
+            build_pyramid(&mut level, BEACON_POS, 4, blocks::EMERALD_BLOCK);
+            level.players.push(beacon_player(1, 10.0, 64.0, 0.0, false));
+        }
+        "beacon_payment_tier2_range_and_duration" => {
+            build_pyramid(&mut level, BEACON_POS, 2, blocks::IRON_BLOCK);
+            level.players.push(beacon_player(1, 30.0, 64.0, 0.0, false));
+            level.players.push(beacon_player(2, 32.0, 64.0, 0.0, false));
+        }
+        other => {
+            mismatches.push(format!("unknown beacon scenario {other}"));
+            return;
+        }
+    }
+
+    let mut entity = BeaconBlockEntity::new(BEACON_POS);
+    let mut scheduled = BlockTicks::new();
+
+    for frame in &run.ticks {
+        let t = frame.game_time;
+        match (run.kind.as_str(), t) {
+            ("beacon_tier1_to_4", 1) => {
+                build_pyramid(&mut level, BEACON_POS, 1, blocks::IRON_BLOCK)
+            }
+            ("beacon_tier1_to_4", 85) => {
+                build_pyramid(&mut level, BEACON_POS, 2, blocks::GOLD_BLOCK)
+            }
+            ("beacon_tier1_to_4", 165) => {
+                build_pyramid(&mut level, BEACON_POS, 3, blocks::DIAMOND_BLOCK)
+            }
+            ("beacon_tier1_to_4", 245) => {
+                build_pyramid(&mut level, BEACON_POS, 4, blocks::NETHERITE_BLOCK)
+            }
+            ("beacon_glass_and_block", 86) => {
+                level.set_block(BlockPos::new(0, 70, 0), BlockState(blocks::STONE));
+            }
+            ("beacon_glass_and_block", 166) => {
+                level.set_block(BlockPos::new(0, 70, 0), BlockState(blocks::AIR));
+            }
+            ("beacon_payment_tier4_level2_and_deactivate", 165) => {
+                level.set_block(BlockPos::new(0, 63, 0), BlockState(blocks::AIR));
+            }
+            _ => {}
+        }
+
+        scheduled.set_time(t);
+        let effects = {
+            let mut world = World::new(&mut level, &mut scheduled);
+            entity.server_tick(&mut world);
+            world.drain_effects()
+        };
+        *ticks += 1;
+
+        let label = format!("{} t={t}", run.kind);
+        let got_data = entity.data_values().to_vec();
+        if got_data != frame.data {
+            mismatches.push(format!("{label} data {got_data:?} != {:?}", frame.data));
+        }
+        let got_beam: Vec<[i32; 2]> = entity
+            .beam_sections()
+            .iter()
+            .map(|s| [s.color, s.height])
+            .collect();
+        if got_beam != frame.beam_sections {
+            mismatches.push(format!(
+                "{label} beamSections {got_beam:?} != {:?}",
+                frame.beam_sections
+            ));
+        }
+        let got_raw: Vec<[i32; 2]> = entity
+            .raw_beam_sections()
+            .iter()
+            .map(|s| [s.color, s.height])
+            .collect();
+        if got_raw != frame.raw_beam_sections {
+            mismatches.push(format!(
+                "{label} rawBeamSections {got_raw:?} != {:?}",
+                frame.raw_beam_sections
+            ));
+        }
+        let got_sounds = sound_names(&effects);
+        if got_sounds != frame.sounds {
+            mismatches.push(format!(
+                "{label} sounds {got_sounds:?} != {:?}",
+                frame.sounds
+            ));
+        }
+        let got_effects = player_effect_rows(&effects);
+        if got_effects != frame.effects {
+            mismatches.push(format!(
+                "{label} effects {got_effects:?} != {:?}",
+                frame.effects
+            ));
+        }
+
+        if t == 81 && !run.payments.is_empty() {
+            for (idx, check) in run.payments.iter().enumerate() {
+                let primary = (check.primary >= 0).then_some(check.primary);
+                let secondary = (check.secondary >= 0).then_some(check.secondary);
+                let mut payment_count = i32::from(check.has_payment);
+                let ok = payment_count > 0 && validate_effects(primary, secondary, entity.levels());
+                let pay_effects = if ok {
+                    let mut world = World::new(&mut level, &mut scheduled);
+                    entity.set_data(DATA_PRIMARY, encode_effect(primary), Some(&mut world));
+                    entity.set_data(DATA_SECONDARY, encode_effect(secondary), None);
+                    payment_count -= 1;
+                    world.drain_effects()
+                } else {
+                    Vec::new()
+                };
+                let pay_label = format!("{} payment[{idx}]", run.kind);
+                if ok != check.ok {
+                    mismatches.push(format!("{pay_label} ok {ok} != {}", check.ok));
+                }
+                if payment_count != check.remaining_payment {
+                    mismatches.push(format!(
+                        "{pay_label} remaining {payment_count} != {}",
+                        check.remaining_payment
+                    ));
+                }
+                let pay_data = entity.data_values().to_vec();
+                if pay_data != check.data {
+                    mismatches.push(format!("{pay_label} data {pay_data:?} != {:?}", check.data));
+                }
+                let pay_sounds = sound_names(&pay_effects);
+                if pay_sounds != check.sounds {
+                    mismatches.push(format!(
+                        "{pay_label} sounds {pay_sounds:?} != {:?}",
+                        check.sounds
+                    ));
+                }
+            }
+        }
+        if mismatches.len() > 40 {
+            return;
+        }
     }
 }
 
