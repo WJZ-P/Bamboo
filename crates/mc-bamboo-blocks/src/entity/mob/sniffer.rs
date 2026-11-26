@@ -375,6 +375,7 @@ fn idle_activity() -> ActivityData {
                     speed: Speed::fixed(1.25),
                     close_adult: 3.5,
                     close_baby: 2.5,
+                    look_in_eyes: false,
                 },
             ),
             (2, Kind::LookAtTargetSink { min: 45, max: 90 }),

@@ -150,6 +150,7 @@ fn idle_activity() -> ActivityData {
                                 speed: SPEED_IDLE,
                                 close_adult: 2.5,
                                 close_baby: 2.5,
+                                look_in_eyes: false,
                             },
                             1,
                         ),

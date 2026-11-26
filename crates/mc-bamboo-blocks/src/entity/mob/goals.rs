@@ -424,6 +424,23 @@ pub enum Goal {
         wanted: Vec3,
         force_trigger: bool,
     },
+    /// `HappyGhast.HappyGhastFloatGoal`：`FloatGoal` 加上「悬停超时不许用」。
+    ///
+    /// `HappyGhast.HappyGhastFloatGoal`: `FloatGoal` gated on the hover timeout.
+    HappyGhastFloat,
+    /// `TemptGoal.ForNonPathfinders`：成年快乐恶魂跟着拿诱惑物品的玩家飞。
+    ///
+    /// `TemptGoal.ForNonPathfinders`: an adult happy ghast follows a tempting player.
+    HappyGhastTempt {
+        player: Option<EntityUid>,
+        calm_down: i32,
+    },
+    /// `Ghast.RandomFloatAroundGoal`：成年快乐恶魂在 16 格外挑一个随机飞行点。
+    ///
+    /// `Ghast.RandomFloatAroundGoal`: an adult picks a random flying spot.
+    HappyGhastFloatAround {
+        distance_to_blocks: i32,
+    },
     /// `RandomStrollGoal`（不避水）：`DefaultRandomPos.getPos(mob, 10, 7)`。
     ///
     /// `RandomStrollGoal` (not water avoiding): `DefaultRandomPos.getPos(mob, 10, 7)`.
@@ -782,6 +799,13 @@ impl Goal {
             | Self::CubeRandomDirection { .. }
             | Self::CubeKeepJumping => super::slime::flags(self),
             Self::SulfurCubeTempt { .. } | Self::SulfurCubeSearchForItems { .. } => &[Flag::Look],
+            // `HappyGhastFloatGoal` 继承 `FloatGoal`（JUMP）；
+            // `TemptGoal` 锁 MOVE|LOOK；`RandomFloatAroundGoal` 只锁 MOVE。
+            // `HappyGhastFloatGoal` inherits `FloatGoal` (JUMP); `TemptGoal` locks
+            // MOVE|LOOK; `RandomFloatAroundGoal` locks only MOVE.
+            Self::HappyGhastFloat => &[Flag::Jump],
+            Self::HappyGhastTempt { .. } => &[Flag::Move, Flag::Look],
+            Self::HappyGhastFloatAround { .. } => &[Flag::Move],
             Self::DrownedGoToWater { .. }
             | Self::RandomStroll { .. }
             | Self::SilverfishMergeWithStone { .. } => &[Flag::Move],
@@ -830,6 +854,7 @@ impl Goal {
         matches!(
             self,
             Self::Float
+                | Self::HappyGhastFloat
                 | Self::RabbitPowderSnow
                 | Self::RabbitRaid(_)
                 | Self::RandomLookAround { .. }
@@ -929,6 +954,9 @@ impl Goal {
             Self::CubeKeepJumping => "CubeMobKeepOnJumpingGoal",
             Self::SulfurCubeTempt { .. } => "SulfurCubeTemptGoal",
             Self::SulfurCubeSearchForItems { .. } => "SulfurCubeSearchForItemsGoal",
+            Self::HappyGhastFloat => "HappyGhastFloatGoal",
+            Self::HappyGhastTempt { .. } => "ForNonPathfinders",
+            Self::HappyGhastFloatAround { .. } => "RandomFloatAroundGoal",
             Self::DrownedGoToWater { .. } => "DrownedGoToWaterGoal",
             Self::DrownedSwimUp { .. } => "DrownedSwimUpGoal",
             Self::DrownedGoToBeach { .. } => "DrownedGoToBeachGoal",
@@ -1797,6 +1825,36 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             super::skeleton::bow_slot(mob).is_some() && combat_target(mob, ctx).is_some()
         }
         Goal::Float => float_can_use(me, mob),
+        // `HappyGhastFloatGoal.canUse` 多了悬停超时闸门。
+        // `HappyGhastFloatGoal.canUse` adds the hover-timeout gate.
+        Goal::HappyGhastFloat => super::happy_ghast::float_can_use(me, mob),
+        Goal::HappyGhastTempt { player, calm_down } => {
+            // `TemptGoal.canUse`：冷静期先减一，再找拿着诱惑物品的最近玩家。
+            // `TemptGoal.canUse`: count down the calm-down timer, then find
+            // the nearest player holding a tempting item.
+            if *calm_down > 0 {
+                *calm_down -= 1;
+                return false;
+            }
+            let harnessed = super::happy_ghast::is_wearing_harness(mob);
+            if harnessed {
+                *player = super::goals::nearest_happy_ghast_tempting_player(me, mob, ctx);
+            } else {
+                *player = super::goals::nearest_tempting_player(me, mob, ctx, false);
+            }
+            player.is_some()
+        }
+        Goal::HappyGhastFloatAround { .. } => {
+            let mover = &mob.mover;
+            if !mover.has_wanted() {
+                return true;
+            }
+            let dx = mover.wanted_x - me.position.x;
+            let dy = mover.wanted_y - me.position.y;
+            let dz = mover.wanted_z - me.position.z;
+            let d2 = dx * dx + dy * dy + dz * dz;
+            d2 < 1.0 || d2 > 3600.0
+        }
         Goal::EndermanGaze(goal) => goal.can_use(me, mob, ctx),
         Goal::EndermanFreeze => super::enderman::freeze_target(me, mob, ctx).is_some(),
         Goal::EndermanBlock { place } => {
@@ -2782,12 +2840,17 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::MoveTowardsRestriction { .. } => !mob.navigation.is_done(),
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
         Goal::Float
+        | Goal::HappyGhastFloat
+        | Goal::HappyGhastTempt { .. }
         | Goal::Swell { .. }
         | Goal::CubeFloat
         | Goal::CubeRandomDirection { .. }
         | Goal::CubeKeepJumping
         | Goal::SulfurCubeTempt { .. }
         | Goal::SulfurCubeSearchForItems { .. } => can_use(goal, me, mob, ctx),
+        // `RandomFloatAroundGoal.canContinueToUse` 恒假：挑完目标那一刻就结束。
+        // `RandomFloatAroundGoal.canContinueToUse` is always false.
+        Goal::HappyGhastFloatAround { .. } => false,
         Goal::CubeAttack { grow_tired_timer } => {
             if combat_target(mob, ctx).is_none() {
                 return false;
@@ -3145,7 +3208,23 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
                 scare.pz = found.position.z;
             }
         }
+        Goal::HappyGhastTempt { .. } => {
+            // `TemptGoal.start` 记录玩家的朝向 / 位置并置 `isRunning=true`；
+            // 这里的每刻动作走 `tick_goal`。
+            // `TemptGoal.start` records the player's facing and sets isRunning;
+            // the per-tick work is in `tick_goal`.
+        }
+        Goal::HappyGhastFloatAround { distance_to_blocks } => {
+            let at = super::happy_ghast::suitable_fly_to_position(
+                me,
+                mob,
+                ctx.blocks(),
+                *distance_to_blocks,
+            );
+            mob.mover.set_wanted_position(at.x, at.y, at.z, 1.0);
+        }
         Goal::Float
+        | Goal::HappyGhastFloat
         | Goal::OcelotAttack { .. }
         | Goal::Unavailable(_)
         | Goal::SkeletonTrap
@@ -3362,6 +3441,8 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::MoveTowardsRestriction { .. } => {}
         Goal::Swell { target } => *target = None,
         Goal::Float
+        | Goal::HappyGhastFloat
+        | Goal::HappyGhastFloatAround { .. }
         | Goal::RabbitRaid(_)
         | Goal::RabbitPowderSnow
         | Goal::Panic { .. }
@@ -3381,6 +3462,15 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::SulfurCubeTempt { player } => {
             *player = None;
             super::sulfur_cube::stop_tempt(mob);
+        }
+        Goal::HappyGhastTempt {
+            player, calm_down, ..
+        } => {
+            // `TemptGoal.stop`：10 刻冷静期、清玩家、`setWait()`。
+            // `TemptGoal.stop`: a 10-tick calm-down, clear the player, `setWait()`.
+            *calm_down = 10;
+            *player = None;
+            super::happy_ghast::tempt_stop(mob);
         }
         // `DrownedSwimUpGoal.stop` 关掉「正在找陆地」。
         Goal::DrownedSwimUp { .. } => mob.searching_for_land = false,
@@ -3710,11 +3800,24 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 bow.tick(me, mob, ctx, target);
             }
         }
-        Goal::Float => {
+        Goal::Float | Goal::HappyGhastFloat => {
             if me.random.next_float() < 0.8 {
                 mob.jump.jump = true;
             }
         }
+        Goal::HappyGhastTempt { player, .. } => {
+            // `TemptGoal.tick`：看向玩家，然后按 `ForNonPathfinders` 的
+            // 插值把目标点交给自己的移动控制。
+            // `TemptGoal.tick`: look at the player, then hand the interpolated
+            // point to the move control like `ForNonPathfinders` does.
+            let Some(found) = player.and_then(|uid| player_by_uid(ctx.blocks(), uid)) else {
+                return;
+            };
+            let eye = found.eye_position();
+            mob.look.set_look_at(eye.x, eye.y, eye.z, 10.0, 10.0);
+            super::happy_ghast::tempt_navigate(me, mob, eye, 1.0);
+        }
+        Goal::HappyGhastFloatAround { .. } => {}
         // 没有每刻逻辑的目标（`tick()` 是空方法）。
         Goal::DrownedGoToWater { .. }
         | Goal::RandomStroll { .. }
@@ -4765,6 +4868,47 @@ pub(super) fn nearest_tempting_player(
         }
         let distance = player.position.distance_to_sqr(me.position);
         if best == -1.0 || distance < best {
+            best = distance;
+            found = Some(player.uid);
+        }
+    }
+    found
+}
+
+/// `HappyGhast.registerGoals` 的 `TemptGoal.ForNonPathfinders` predicate：
+/// 穿了挽具的成年认 `#happy_ghast_tempt_items`（雪球不认）。
+///
+/// The predicate of `TemptGoal.ForNonPathfinders` in `HappyGhast.registerGoals`:
+/// a harnessed adult follows `#happy_ghast_tempt_items` instead of snowballs.
+pub(super) fn nearest_happy_ghast_tempting_player(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+) -> Option<EntityUid> {
+    let view = ctx.blocks();
+    let range = mob
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::TEMPT_RANGE);
+    let tag = super::happy_ghast::tempt_item_tag(true);
+    let mut players = Vec::new();
+    view.for_each_player(&mut |player| players.push(*player));
+    let mut best = f64::INFINITY;
+    let mut found = None;
+    for player in players {
+        if player.spectator || !player.alive {
+            continue;
+        }
+        if ![player.main_hand, player.off_hand]
+            .into_iter()
+            .any(|item| crate::state::item_is_tagged(item, tag))
+        {
+            continue;
+        }
+        if !targeting_test(me, mob, view, &player, range, false, false) {
+            continue;
+        }
+        let distance = player.position.distance_to_sqr(me.position);
+        if distance < best {
             best = distance;
             found = Some(player.uid);
         }

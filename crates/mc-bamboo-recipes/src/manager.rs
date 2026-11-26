@@ -109,3 +109,76 @@ const fn type_index(kind: RecipeType) -> usize {
         RecipeType::Brewing => 7,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_data::{RecipeKind, items};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    use super::*;
+    use crate::CraftingInput;
+
+    /// 十六种挽具染色配方都在生成表里：白挽具加黑染料出黑挽具，
+    /// 黑挽具不能再染成黑色（官方把目标色排除在候选之外）。
+    ///
+    /// All sixteen harness dye recipes are in the generated table: a white
+    /// harness plus black dye yields a black harness, while a black harness
+    /// is excluded from that recipe's candidates.
+    #[test]
+    fn harness_dye_recipes_cover_all_sixteen_colours() {
+        let manager = RecipeManager::global();
+        let dye_names = [
+            "dye_white_harness",
+            "dye_orange_harness",
+            "dye_magenta_harness",
+            "dye_light_blue_harness",
+            "dye_yellow_harness",
+            "dye_lime_harness",
+            "dye_pink_harness",
+            "dye_gray_harness",
+            "dye_light_gray_harness",
+            "dye_cyan_harness",
+            "dye_purple_harness",
+            "dye_blue_harness",
+            "dye_brown_harness",
+            "dye_green_harness",
+            "dye_red_harness",
+            "dye_black_harness",
+        ];
+        for name in dye_names {
+            assert!(
+                manager.recipe(&format!("minecraft:{name}")).is_some(),
+                "missing {name}"
+            );
+        }
+        let input = CraftingInput::of(
+            2,
+            1,
+            &[
+                ItemStack::new(items::WHITE_HARNESS, 1),
+                ItemStack::new(items::BLACK_DYE, 1),
+            ],
+        );
+        let found = manager
+            .get_recipe_for(RecipeType::Crafting, &input, None)
+            .expect("white harness + black dye has a recipe");
+        assert_eq!(found.id, "minecraft:dye_black_harness");
+        let RecipeKind::Shapeless { result, .. } = found.kind else {
+            panic!("harness dyeing is shapeless");
+        };
+        assert_eq!(result.item, items::BLACK_HARNESS);
+        let black_input = CraftingInput::of(
+            2,
+            1,
+            &[
+                ItemStack::new(items::BLACK_HARNESS, 1),
+                ItemStack::new(items::BLACK_DYE, 1),
+            ],
+        );
+        assert!(
+            manager
+                .get_recipe_for(RecipeType::Crafting, &black_input, None)
+                .is_none()
+        );
+    }
+}

@@ -743,6 +743,7 @@ fn run_cases(
         MobType::Witch,
         MobType::Pillager,
         MobType::Sniffer,
+        MobType::HappyGhast,
     ] {
         let mut store = mc_bamboo_blocks::EntityStore::new();
         let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, -3.5)));
@@ -2477,6 +2478,50 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
             ("InLove", Tag::Int(512)),
             ("Age", Tag::Int(4000)),
             ("variant", Tag::String("minecraft:cold".to_owned())),
+        ]),
+    ));
+    // 快乐恶魂：`still_timeout` 无条件写；幼年 `Age`、BODY 挽具和元数据状态
+    // 在重存时都要保持原样。
+    // Happy ghasts: `still_timeout` is always written; baby `Age`, the BODY
+    // harness and the synced flags survive a resave.
+    out.push((
+        "happy ghast bare".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:happy_ghast".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+        ]),
+    ));
+    out.push((
+        "happy ghast harnessed and hovering".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:happy_ghast".to_owned())),
+            ("Pos", doubles([3.5, 78.0, -7.25])),
+            ("UUID", uuid.clone()),
+            ("still_timeout", Tag::Int(10)),
+            ("Health", Tag::Float(13.0)),
+            ("NoAI", Tag::Byte(1)),
+            (
+                "equipment",
+                compound(vec![(
+                    "body",
+                    compound(vec![
+                        ("id", Tag::String("minecraft:red_harness".to_owned())),
+                        ("count", Tag::Int(1)),
+                    ]),
+                )]),
+            ),
+        ]),
+    ));
+    out.push((
+        "happy ghast baby".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:happy_ghast".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+            ("Age", Tag::Int(-24000)),
+            ("ForcedAge", Tag::Int(1200)),
+            ("still_timeout", Tag::Int(0)),
         ]),
     ));
     out.extend(brain_resave_cases());
