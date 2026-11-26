@@ -77,11 +77,7 @@ impl CombatMemory {
 }
 
 fn damage_type_tagged(tag: &str, id: i32) -> bool {
-    mc_bamboo_data::tags::TAG_GROUPS
-        .iter()
-        .filter(|group| group.registry == "minecraft:damage_type")
-        .flat_map(|group| group.tags.iter())
-        .any(|entry| entry.name == tag && entry.ids.contains(&id))
+    mc_bamboo_data::in_tag("minecraft:damage_type", tag, id)
 }
 
 #[cfg(test)]

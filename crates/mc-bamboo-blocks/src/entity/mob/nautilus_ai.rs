@@ -300,7 +300,9 @@ fn start_attacking(cx: &mut Cx) -> bool {
     let position = cx.me.position;
     let Some(uid) = sensor::find_closest_visible(cx, &mut |view| {
         view.position.distance_to_sqr(position) <= 144.0
-            && view.mob_type == Some(MobType::Pufferfish)
+            && view
+                .mob_type
+                .is_some_and(|kind| kind.in_entity_tag("minecraft:nautilus_hostiles"))
     }) else {
         return false;
     };
