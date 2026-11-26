@@ -326,7 +326,7 @@ pub(crate) fn controls_vehicle(vehicle_mob: &Mob, rider_uid: EntityUid, rider_mo
     if vehicle_mob.no_ai || vehicle_mob.first_passenger() != Some(rider_uid) {
         return false;
     }
-    !matches!(rider_mob.mob_type, MobType::Slime | MobType::SulfurCube)
+    rider_mob.mob_type.can_control_vehicle()
 }
 
 /// 乘客 tick 之前：若它控制载具，就把载具的 `Navigation` / `MoveControl` 和按载具
