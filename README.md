@@ -343,9 +343,9 @@ WebView2 的渲染进程不算在内。
 - **宠物继承主人的队伍**：`TamableAnimal.getTeam()` 覆写——驯服动物自己没队时返回
   `getRootOwner().getTeam()`，Bamboo 的 `goals.rs` 同盟判定和重锤范围击退的候选过滤都补上
   这一层回退（`mob_team_index` 单测钉住，全量 mob-oracle 仍是 46）。
-- **玩家近战攻击的已知限制**：暴击前置判定里
-  `onClimbable` / `isInWater` 按缺省值（Bamboo 没有梯子 / 水中状态），失明用 `EffectMap`、
-  骑乘用 `riding.vehicle` 分别判 `isMobilityRestricted()` / `isPassenger()`（后两条真判了）；
+- **玩家近战攻击的已知限制**：暴击前置判定的
+  `onClimbable`（脚下的可攀爬方块）、`isInWater`（碰到水）、失明（`isMobilityRestricted()`）、
+  骑乘（`isPassenger()`）都照官方判断；
   节肢杀手的缓慢时长按 `ApplyMobEffect` 从**受害者自己的随机源**取三次
   （`nextInt(1)`、时长、等级），落在 `[30, 30 + 10×(L−1)]` 刻、等级恒为 3；`Stats.DAMAGE_DEALT`
   按官方 `awardStat` 在会话内累计、在 `RequestStats` 时作为 `minecraft:custom` 统计发给客户端，

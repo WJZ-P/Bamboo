@@ -224,9 +224,21 @@ fn sweeping_ratio(player: &Player) -> f32 {
 ///
 /// `Player.canCriticalAttack`: falling, not on ground / climbable / in water /
 /// blinded / riding / sprinting, and the target is living.
-fn can_critical(player: &Player, target_is_living: bool) -> bool {
+fn can_critical(
+    player: &Player,
+    blocks: &crate::player_move::PlayerBlocks<'_>,
+    target_is_living: bool,
+) -> bool {
     player.motion.fall_distance > 0.0
         && !player.on_ground
+        && !crate::player_glide::on_climbable(player, blocks)
+        // `Entity.isInWater()` 就是 `wasTouchingWater`：碰到水的流体高度。
+        // `Entity.isInWater()` is `wasTouchingWater`: touching water fluid.
+        && !crate::player_move::touches_fluid(
+            player,
+            blocks,
+            mc_bamboo_data::tags::fluid_tags::WATER,
+        )
         && !player.effects.has(mob_effect::BLINDNESS)
         && !player.sync.is_sprinting()
         && player.riding.vehicle.is_none()
@@ -1171,7 +1183,10 @@ fn plan_attack(
     if smash {
         base_damage += mace_attack_damage_bonus(held, smash_fall_distance);
     }
-    let critical = full && can_critical(player, target.is_living);
+    let critical = full && {
+        let blocks = crate::player_move::PlayerBlocks::new(&region.chunks, &region.block_entities);
+        can_critical(player, &blocks, target.is_living)
+    };
     if critical {
         base_damage *= CRIT_MULTIPLIER;
     }
@@ -2742,12 +2757,12 @@ mod tests {
     /// 官方 `Player.canCriticalAttack` 的六个已建模前置：下落中、不着地、无失明
     /// （`isMobilityRestricted`）、非疾跑（`isSprinting`）、无载具（`isPassenger`）、
     /// 目标是生物。`onClimbable` / `isInWater` 是 README 已知限制里按缺省值处理的
-    /// 两项，这里单独说明、不写进断言。
+    /// 两项也一起断言。
     ///
     /// Vanilla `Player.canCriticalAttack`'s six modelled preconditions: falling,
     /// off ground, no blindness (`isMobilityRestricted`), not sprinting
     /// (`isSprinting`), no vehicle (`isPassenger`), living target. `onClimbable` /
-    /// `isInWater` are the two README-known-limit defaults, noted but not asserted.
+    /// `isInWater` are asserted too.
     #[test]
     fn can_critical_requires_every_modelled_precondition() {
         use mc_bamboo_blocks::entity::mob::effects::{EffectInstance, EffectMap};
@@ -2765,7 +2780,11 @@ mod tests {
         player.motion.fall_distance = 1.0;
         player.on_ground = false;
         region.insert_player(player);
-        let crit = |region: &Region, living: bool| can_critical(&region.players[&id], living);
+        let crit = |region: &Region, living: bool| {
+            let blocks =
+                crate::player_move::PlayerBlocks::new(&region.chunks, &region.block_entities);
+            can_critical(&region.players[&id], &blocks, living)
+        };
 
         // 全部前置满足才算暴击；目标不是生物则否。
         // All preconditions met means crit; a non-living target cannot be crit.
@@ -2810,6 +2829,21 @@ mod tests {
         region.players.get_mut(&id).unwrap().riding.vehicle = Some(7);
         assert!(!crit(&region, true));
         region.players.get_mut(&id).unwrap().riding.vehicle = None;
+        assert!(crit(&region, true));
+
+        // 攀爬（`onClimbable`）：脚下是梯子。
+        // Climbing (`onClimbable`): a ladder at the feet.
+        let feet = mc_bamboo_core::BlockPos::new(0, 64, 0);
+        region
+            .chunks
+            .set_block(feet, mc_bamboo_data::blocks::LADDER);
+        assert!(!crit(&region, true));
+
+        // 在水里（`isInWater`）。
+        // In water (`isInWater`).
+        region.chunks.set_block(feet, mc_bamboo_data::blocks::WATER);
+        assert!(!crit(&region, true));
+        region.chunks.set_block(feet, mc_bamboo_data::blocks::AIR);
         assert!(crit(&region, true));
     }
 
