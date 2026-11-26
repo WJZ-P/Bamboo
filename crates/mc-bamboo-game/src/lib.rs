@@ -1180,6 +1180,10 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
     player.motion.fall_distance = scene.attack_fall;
     player.on_ground = scene.attack_ground;
     player.last_main_hand_item = player.inventory.held(mc_bamboo_core::Hand::Main).clone();
+    // 长矛蓄力：前向速度（官方 `setKnownMovement`，朝向 +Z），`getKnownSpeed` 读它。
+    if scene.kinetic_start >= 0 {
+        player.motion.known_movement = Vec3::new(0.0, 0.0, scene.kinetic_speed);
+    }
     // 六个装备槽按官方顺序构造，带默认组件（铁甲 / 保护附魔）。
     // Java 场景里的顺序是 [靴子, 护腿, 胸甲, 头盔, 主手]，
     // Bamboo 的菜单槽位是主手 36、副手 45、靴子 8、护腿 7、胸甲 6、头盔 5。
@@ -1262,7 +1266,9 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
                 region
                     .entities
                     .spawn(mc_bamboo_blocks::entity::Entity::cow(Vec3::new(
-                        2.5, 64.0, 0.5,
+                        scene.main_cow_position.0,
+                        scene.main_cow_position.1,
+                        scene.main_cow_position.2,
                     ))),
             ];
         for (i, &(x, y, z)) in scene.extra_cow_positions.iter().enumerate() {
@@ -1374,6 +1380,22 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
             let _ = std::mem::take(&mut *capture.0.lock().unwrap());
             let _ = std::mem::take(&mut *observer_capture.0.lock().unwrap());
             player_attack::on_stab(&mut region, id);
+            entity_tracking::drain_events_for_oracle(&mut region, observer);
+        }
+        // 长矛蓄力：开始蓄力之后逐刻 `onUseTick` → `damageEntities`。
+        if scene.kinetic_start == tick as i32 {
+            entity_tracking::sync(&mut region);
+            let _ = std::mem::take(&mut *capture.0.lock().unwrap());
+            let _ = std::mem::take(&mut *observer_capture.0.lock().unwrap());
+            player_weapon::start(&mut region, id, mc_bamboo_core::Hand::Main);
+            entity_tracking::drain_events_for_oracle(&mut region, observer);
+        }
+        if scene.kinetic_start >= 0
+            && tick as i32 >= scene.kinetic_start
+            && region.players.get(&id).is_some_and(|player| player.weapon_use.is_some())
+        {
+            entity_tracking::sync(&mut region);
+            player_weapon::tick(&mut region);
             entity_tracking::drain_events_for_oracle(&mut region, observer);
         }
         for action in scene.actions.iter().filter(|action| action.tick == tick) {
@@ -1975,9 +1997,15 @@ pub struct ReplayPlayerHurt {
     pub attack_fall: f64,
     pub attack_ground: bool,
     pub attack_enchants: Vec<(String, i32)>,
+    /// 主目标牛（0 号）的位置。旧的场景都放在 (2.5, 64, 0.5)，这里按场景读。
+    pub main_cow_position: (f64, f64, f64),
     pub extra_cow_positions: Vec<(f64, f64, f64)>,
     /// 长矛场景：这一刻触发 `PiercingWeapon.attack`，-1 表示不触发。
     pub stab_tick: i32,
+    /// 长矛蓄力场景：这一刻 `startUsingItem` 开始蓄力，-1 不蓄力；`kinetic_speed`
+    /// 是玩家前向速度（`setKnownMovement`，方块 / tick）。
+    pub kinetic_start: i32,
+    pub kinetic_speed: f64,
     /// 每头参战牛的随机源初始状态，按位置顺序；官方场景给每头牛设了同一种子。
     ///
     /// Initial random state of each scene cow, in position order; the official

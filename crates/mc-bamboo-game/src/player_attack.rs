@@ -2300,7 +2300,7 @@ pub(crate) fn kinetic_tick(region: &mut Region, id: PlayerId, time_held: i32) {
     let look = Vec3::view_vector(player.yaw, player.pitch);
     let movement = player.motion.known_movement;
     let speed = (look.x * movement.x + look.y * movement.y + look.z * movement.z) * 20.0;
-    let base = player.attributes.value(attribute::ATTACK_DAMAGE);
+    let base = player.attributes.base(attribute::ATTACK_DAMAGE);
     let knockback = attack_knockback_amount(player, &held);
     let entity_reach = player.attributes.value(attribute::ENTITY_INTERACTION_RANGE) as f32;
     let range = attack_range(&held, entity_reach);
@@ -2374,28 +2374,66 @@ pub(crate) fn kinetic_tick(region: &mut Region, id: PlayerId, time_held: i32) {
             player.recent_kinetic_enemies.insert(hit.id, now);
         }
     }
-    let mut hit_any = false;
+    let mut hit_targets: Vec<(SpearHit, f32)> = Vec::new();
     let effects = {
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
         for (hit, plan) in &to_hit {
-            if kinetic_stab_hit(&mut world, id, &setup, hit, plan).is_some() {
-                hit_any = true;
+            if let Some(magic) = kinetic_stab_hit(&mut world, id, &setup, hit, plan) {
+                hit_targets.push((*hit, magic));
             }
         }
         world.drain_effects()
     };
     interaction::send_effects(region, Some(id), &effects);
+    let hit_any = !hit_targets.is_empty();
+    // `Player.stabAttack` 命中后的收尾：附魔暴击动画、伤害统计、耐久、`lastHurtMob`
+    // 和饥饿（每命中目标一遍）。
+    for (target, magic) in &hit_targets {
+        if *magic > 0.0 {
+            send_animate(region, id, target.id, Animate::MAGIC_CRITICAL_HIT);
+        }
+        let actual_damage = damage_taken(region, target.id, target.health);
+        item_use_stats::award_damage_dealt(region, id, (actual_damage * 10.0).round() as i32);
+        // `damageStatsAndHearts`：`actualDamage > 2` 时发伤害指示粒子。
+        if actual_damage > 2.0 {
+            if let Some((position, height)) = kinetic_target_center(region, target) {
+                send_particles(
+                    region,
+                    ParticleSpec {
+                        particle: particle_type::DAMAGE_INDICATOR,
+                        position: Vec3::new(position.x, position.y + f64::from(height) * 0.5, position.z),
+                        spread: (0.1, 0.0, 0.1),
+                        speed: 0.2,
+                        count: (actual_damage * 0.5) as i32,
+                    },
+                );
+            }
+        }
+        if weapon_component(&setup.held) {
+            item_use_stats::award(region, id, setup.held.item);
+        }
+        durability::run(region, id, Hand::Main, |region| {
+            let (mut level, ticks) = region.block_level();
+            let world = World::new(&mut level, ticks);
+            mc_bamboo_blocks::durability::hurt_hand(&world, Hand::Main, 1);
+        });
+        if let Some(player) = region.players.get_mut(&id) {
+            let now = player.entity_ticks;
+            player.combat_memory.record_attack(target.id, now);
+            player.health_sync = player_hurt::HealthSync::of(player);
+        }
+        player_exhaustion::add_in(region, id, ATTACK_EXHAUSTION);
+    }
     if hit_any {
         // `broadcastEntityEvent(attacker, 2)`：HIT_FEEDBACK_TICKS，客户端据此播
-        // 命中音效（`onKineticHit` → `makeLocalHitSound`）。
+        // 命中音效（`onKineticHit` → `makeLocalHitSound`）。对拍里 `seen_by` 不建模，
+        // 走 `links.broadcast` 和官方 `FakeLevel` 的单流收集一致。
         let frames = encode_frames(&EntityEvent {
             entity_id: id.0,
             event: 2,
         });
-        if let Some(player) = region.players.get(&id) {
-            player.sync.send_to_viewers(&mut region.links, &frames);
-        }
+        region.links.broadcast(&frames);
         // `SPEAR_MOBS_TRIGGER.trigger(player, stabbedEntities(isAlive))`。
         let stabbed = region.players[&id]
             .recent_kinetic_enemies
@@ -2411,6 +2449,17 @@ pub(crate) fn kinetic_tick(region: &mut Region, id: PlayerId, time_held: i32) {
             );
         }
     }
+}
+
+/// 命中目标的位置和高度，伤害指示粒子的中心用它。
+fn kinetic_target_center(region: &Region, hit: &SpearHit) -> Option<(Vec3, f32)> {
+    if hit.is_player {
+        let player = region.players.get(&PlayerId(hit.id))?;
+        let bounds = player.bounding_box();
+        return Some((player.position(), (bounds.max_y - bounds.min_y) as f32));
+    }
+    let public = region.entities.public_at(hit.id)?;
+    Some((public.position, public.kind.dimensions().1))
 }
 
 /// 长矛蓄力冲刺命中一个实体时，它的速度（`getKnownSpeed().scale(20)`）：玩家读

@@ -1270,6 +1270,10 @@ public final class MobOracle {
         final List<Integer> tamedWolves = new ArrayList<>();
         /** 长矛场景：在这一刻触发 `PiercingWeapon.attack(player, MAINHAND)`，-1 不触发。 */
         int stabTick = -1;
+        /** 长矛蓄力场景：在这一刻 `startUsingItem` 开始蓄力，-1 不蓄力。 */
+        int kineticStart = -1;
+        /** 长矛蓄力场景：玩家的前向速度（`setKnownMovement` 的 x 分量，方块 / tick）。 */
+        double kineticSpeed;
         /**
          * 攻击场景：跳过每刻的 `cow.tick()`，这样牛的击退速度和 hurtTime 不被
          * 重力 / AI / 计时衰减污染，可以和 Bamboo 的受伤重放逐位比。
@@ -1690,6 +1694,13 @@ public final class MobOracle {
         /** 攻击场景：给目标牛（0 号）穿一件胸甲（破甲对拍用）。 */
         Scene targetChest(int item) {
             targetChest = item;
+            return this;
+        }
+
+        /** 长矛蓄力场景：在第 `start` 刻开始蓄力，前向速度 `speed`（方块 / tick）。 */
+        Scene kinetic(int start, double speed) {
+            kineticStart = start;
+            kineticSpeed = speed;
             return this;
         }
     }
@@ -4815,6 +4826,17 @@ public final class MobOracle {
                 windBurst.attackEnchant("minecraft:wind_burst", 1)
                         .attackSetup(33, false, 5.0, false).attack(1, 0);
                 scenes.add(windBurst);
+                // 长矛蓄力冲刺：玩家前向冲（`setKnownMovement`），第 1 刻开始蓄力，
+                // 延迟 12 刻后逐刻接触伤害打到前（+Z）的牛。
+                Scene charge = new Scene("player_attack_spear_charge").ticks(16)
+                        .playerPackets().packets();
+                ground(charge, 4);
+                charge.player(0.5, 64.0, 0.5, Items.IRON_SPEAR);
+                // 抬到 64.5 让水平射线（眼高 1.62 > 牛高 1.4）穿进牛的身体。
+                charge.cow(0.5, 64.5, 2.5, 0.0F, 254L);
+                charge.equipment(new int[] {0, 0, 0, 0, spear}, new int[] {0, 0, 0, 0});
+                charge.kinetic(1, 0.3).attackSetup(33, false, 0.0, true);
+                scenes.add(charge);
             }
             // ---- 1b：死亡、掉落、重生与回血 ----
             // keepInventory × immediateRespawn × 等级经验 × 消失诅咒。
@@ -5721,6 +5743,11 @@ public final class MobOracle {
             if (scene.playerExhaustion > 0.0F) {
                 player.getFoodData().addExhaustion(scene.playerExhaustion);
             }
+            if (scene.kineticStart >= 0) {
+                // 长矛蓄力：前向速度，`getKnownSpeed` 读 `lastKnownClientMovement`。
+                // 玩家朝向 +Z（yaw 0），前向速度也在 +Z。
+                player.setKnownMovement(new Vec3(0.0, 0.0, scene.kineticSpeed));
+            }
             players.add(player);
         }
         level.playersList().addAll(players);
@@ -6093,6 +6120,26 @@ public final class MobOracle {
                         }
                     }
                 }
+                if (scene.kineticStart >= 0 && tick >= scene.kineticStart) {
+                    // 长矛蓄力：`Item.use` 的 `startUsingItem` + `makeSound`，之后逐刻
+                    // `onUseTick` → `damageEntities`。
+                    ServerPlayer attacker = players.get(0);
+                    ItemStack weapon = attacker.getMainHandItem();
+                    if (tick == scene.kineticStart) {
+                        attacker.startUsingItem(InteractionHand.MAIN_HAND);
+                        net.minecraft.world.item.component.KineticWeapon kinetic =
+                                weapon.get(net.minecraft.core.component.DataComponents.KINETIC_WEAPON);
+                        if (kinetic != null) {
+                            kinetic.makeSound(attacker);
+                        }
+                    }
+                    if (attacker.isUsingItem()) {
+                        weapon.onUseTick(level, attacker, attacker.getUseItemRemainingTicks());
+                        int remaining = attacker.getUseItemRemainingTicks() - 1;
+                        putInt(net.minecraft.world.entity.LivingEntity.class, attacker,
+                                "useItemRemaining", remaining);
+                    }
+                }
                 // 只推进 1a 建模的三处：`ServerPlayer.tick` 递减 damageCooldownTime，
                 // `LivingEntity.baseTick` 递减 hurtTime，以及 `ServerPlayer.doTick`
                 // 里 `lastSentHealth` 变了就补 `set_health`。不跑 FoodData.tick /
@@ -6270,6 +6317,8 @@ public final class MobOracle {
         line.append(",\"attackFall\":").append(Double.doubleToRawLongBits(scene.attackFall));
         line.append(",\"attackGround\":").append(scene.attackGround);
         line.append(",\"stabTick\":").append(scene.stabTick);
+        line.append(",\"kineticStart\":").append(scene.kineticStart);
+        line.append(",\"kineticSpeed\":").append(Double.doubleToRawLongBits(scene.kineticSpeed));
         line.append(",\"attackEnchants\":[");
         for (int i = 0; i < scene.attackEnchants.size(); i++) {
             if (i > 0) line.append(',');

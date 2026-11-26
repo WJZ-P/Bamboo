@@ -406,6 +406,12 @@ struct Case {
     /// 长矛场景：这一刻触发 `PiercingWeapon.attack`，-1 表示不触发。
     #[serde(default = "minus_one")]
     stab_tick: i32,
+    /// 长矛蓄力场景：这一刻 `startUsingItem` 开始蓄力，-1 不蓄力；前向速度是
+    /// `setKnownMovement` 的 x 分量（方块 / tick）。
+    #[serde(default = "minus_one")]
+    kinetic_start: i32,
+    #[serde(default)]
+    kinetic_speed: i64,
     /// 1b 玩家生命场景的规则与动作。
     #[serde(default)]
     life: Option<LifeSetup>,
@@ -4106,7 +4112,7 @@ impl Report {
             seed,
             equipment,
             protection,
-            attack_cow: actions.iter().any(|action| action.attack_cow),
+            attack_cow: actions.iter().any(|action| action.attack_cow) || case.kinetic_start >= 0,
             actions,
             no_cooldown: false,
             no_knockback: false,
@@ -4116,6 +4122,19 @@ impl Report {
             attack_ground: case.attack_ground,
             attack_enchants: case.attack_enchants.clone(),
             stab_tick: case.stab_tick,
+            kinetic_start: case.kinetic_start,
+            kinetic_speed: f64::from_bits(case.kinetic_speed as u64),
+            main_cow_position: case
+                .cows
+                .first()
+                .map(|cow| {
+                    (
+                        f64::from_bits(cow.x as u64),
+                        f64::from_bits(cow.y as u64),
+                        f64::from_bits(cow.z as u64),
+                    )
+                })
+                .unwrap_or((2.5, 64.0, 0.5)),
             extra_cow_positions: case
                 .cows
                 .iter()
@@ -4177,6 +4196,8 @@ impl Report {
             Some("mace_wind_burst") => scene
                 .attack_enchants
                 .retain(|(name, _)| name != "minecraft:wind_burst"),
+            // 长矛蓄力改坏：取消蓄力，牛不受伤（和官方分叉）。
+            Some("spear_charge") => scene.kinetic_start = -1,
             _ => {}
         }
         let output = replay_player_hurt(&scene);
