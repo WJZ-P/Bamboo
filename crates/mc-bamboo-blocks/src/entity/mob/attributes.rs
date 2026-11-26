@@ -391,6 +391,7 @@ impl Attributes {
     }
 
     /// 对拍的改坏确认用：直接改一个属性的基础值。
+    #[cfg(any(test, feature = "oracle-samples"))]
     pub fn set_base_for_oracle(&mut self, id: i32, base: f64) {
         self.set_base(id, base);
     }

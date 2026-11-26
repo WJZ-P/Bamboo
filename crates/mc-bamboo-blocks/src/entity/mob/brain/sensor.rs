@@ -31,6 +31,10 @@ pub enum SensorKind {
     FoodTemptations,
     /// `AdultSensor`。
     NearestAdult,
+    /// `SensorType.NEAREST_ADULT_ANY_TYPE`：`AdultSensorAnyType`，不限同种。
+    ///
+    /// `SensorType.NEAREST_ADULT_ANY_TYPE`: `AdultSensorAnyType`, any species.
+    NearestAdultAnyType,
     /// `MobSensor(5, Armadillo::isScaredBy, Armadillo::canStayRolledUp, DANGER_DETECTED_RECENTLY, 80)`。
     ArmadilloScareDetected,
     /// `PlayerSensor`。
@@ -111,7 +115,7 @@ impl SensorKind {
             ],
             Self::HurtBy => &[MemoryType::HurtBy, MemoryType::HurtByEntity],
             Self::FoodTemptations => &[MemoryType::TemptingPlayer],
-            Self::NearestAdult => &[
+            Self::NearestAdult | Self::NearestAdultAnyType => &[
                 MemoryType::NearestVisibleAdult,
                 MemoryType::NearestVisibleLivingEntities,
             ],
@@ -179,6 +183,7 @@ impl SensorKind {
                 "TemptingSensor"
             }
             Self::NearestAdult => "AdultSensor",
+            Self::NearestAdultAnyType => "AdultSensorAnyType",
             Self::ArmadilloScareDetected => "MobSensor",
             Self::NearestPlayers => "PlayerSensor",
             Self::NearestItems => "NearestItemSensor",
@@ -230,6 +235,9 @@ impl Sensor {
             SensorKind::HurtBy => sense_hurt_by(cx),
             SensorKind::FoodTemptations => sense_temptations(cx),
             SensorKind::NearestAdult => sense_nearest_adult(cx),
+            // `AdultSensorAnyType` 不限种类，但仍要求成年且看得见。
+            // `AdultSensorAnyType` accepts any visible adult.
+            SensorKind::NearestAdultAnyType => sense_nearest_adult_any_type(cx),
             SensorKind::ArmadilloScareDetected => {
                 super::super::armadillo::sense_scare(cx);
             }
@@ -279,6 +287,10 @@ pub struct LivingView {
     ///
     /// `isAlive()`: not removed and health above 0.
     pub alive: bool,
+    /// `LivingEntity.isInvulnerable()`：NBT 的 `Invulnerable` 标志。
+    ///
+    /// `LivingEntity.isInvulnerable()`: the NBT `Invulnerable` flag.
+    pub invulnerable: bool,
     pub spectator: bool,
     /// 创造模式的玩家（`canBeSeenAsEnemy` 为假）。
     ///
@@ -361,6 +373,7 @@ fn player_view(player: &crate::entity::ctx::PlayerView) -> LivingView {
         ),
         alive: player.alive,
         spectator: player.spectator,
+        invulnerable: false,
         creative: player.creative,
         sprinting: player.sprinting,
         baby: false,
@@ -406,6 +419,7 @@ fn mob_view(
         ),
         alive: !removed && mob.is_alive(),
         spectator: false,
+        invulnerable: mob.invulnerable,
         creative: false,
         sprinting: false,
         baby: mob.baby,
@@ -622,6 +636,28 @@ fn sense_nearest_adult(cx: &mut Cx) {
     }
     let kind = cx.mob.mob_type;
     let adult = find_closest_visible(cx, &mut |view| view.mob_type == Some(kind) && !view.baby);
+    cx.memories.set_or_erase(
+        MemoryType::NearestVisibleAdult,
+        adult.map(MemoryValue::Entity),
+    );
+}
+
+/// `AdultSensorAnyType.doTick`：看得见的最近成年 `#followable_friendly_mobs`。
+/// 它不限种类，但玩家不在这个标签里。
+///
+/// `AdultSensorAnyType.doTick`: the nearest visible adult in
+/// `#followable_friendly_mobs`, regardless of species; players are not in that tag.
+fn sense_nearest_adult_any_type(cx: &mut Cx) {
+    if !cx.memories.has(MemoryType::NearestVisibleLivingEntities) {
+        return;
+    }
+    let adult = find_closest_visible(cx, &mut |view| {
+        !view.baby
+            && view.mob_type.is_some_and(|kind| {
+                mc_bamboo_data::entity_type_tag("minecraft:followable_friendly_mobs")
+                    .is_some_and(|ids| ids.contains(&kind.entity_type()))
+            })
+    });
     cx.memories.set_or_erase(
         MemoryType::NearestVisibleAdult,
         adult.map(MemoryValue::Entity),

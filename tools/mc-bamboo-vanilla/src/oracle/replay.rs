@@ -852,6 +852,7 @@ fn player_target(
         bounds: aabb(bounds),
         spectator: false,
         entity_type: entity_type::PLAYER,
+        baby: false,
         equipment: [
             Some(held_stack(names, main)?),
             empty.clone(),
@@ -982,7 +983,18 @@ pub fn replay(
                 f64::from(target.z) + 0.5,
             );
             let mut world = mc_bamboo_blocks::World::new(&mut level, &mut ticks);
-            world.explode_tnt(centre, 1.0, 0);
+            let source = Box::new(mc_bamboo_blocks::entity::EntityPublic {
+                uid: 0,
+                kind: mc_bamboo_blocks::entity::KindPublic::Tnt { fuse: 0 },
+                position: centre,
+                delta: Vec3::default(),
+                on_ground: false,
+                yaw: 0.0,
+                removed: false,
+                precise: false,
+                vehicle: None,
+            });
+            world.explode_tnt(centre, 1.0, source, None);
             mc_bamboo_blocks::Outcome {
                 result: mc_bamboo_blocks::InteractionResult::Success,
                 used_without_item: false,
@@ -1256,7 +1268,8 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // 爆炸包发给附近玩家，方块题不比较。
             | Effect::Explode { .. }
             | Effect::PlayerShoulder { .. }
-            | Effect::VibrationParticle { .. } => None,
+            | Effect::VibrationParticle { .. }
+            | Effect::Particles { .. } => None,
         })
         .collect()
 }
@@ -1385,6 +1398,7 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::Explode { .. }
             | Effect::PlayerShoulder { .. }
             | Effect::VibrationParticle { .. }
+            | Effect::Particles { .. }
             | Effect::RaiderDied { .. } => {}
         }
     }

@@ -1422,7 +1422,7 @@ mod tests {
     fn an_armadillo_scute_repairs_worn_wolf_armor() {
         let (mut me, mut mob) = tamed_wolf();
         let mut armor = ItemStack::new(items::WOLF_ARMOR, 1);
-        crate::durability::set_damage_for_oracle(&mut armor, 20);
+        crate::durability::set_damage_value(&mut armor, 20);
         mob.equipment.set(EquipmentSlot::Body, armor);
         mob.tame.set_in_sitting_pose(true);
         let outcome = interact(
@@ -1451,7 +1451,7 @@ mod tests {
     fn wolf_armor_survives_a_save_and_load() {
         let (mut me, mut mob) = tamed_wolf();
         let mut armor = ItemStack::new(items::WOLF_ARMOR, 1);
-        crate::durability::set_damage_for_oracle(&mut armor, 30);
+        crate::durability::set_damage_value(&mut armor, 30);
         mob.equipment.set(EquipmentSlot::Body, armor);
         mob.equipment
             .set_drop_chance(EquipmentSlot::Body, GUARANTEED_DROP_CHANCE);
@@ -1476,7 +1476,7 @@ mod tests {
     fn wolf_with_armor(damage: i32) -> (Entity, Mob) {
         let (me, mut mob) = tamed_wolf();
         let mut armor = ItemStack::new(items::WOLF_ARMOR, 1);
-        crate::durability::set_damage_for_oracle(&mut armor, damage);
+        crate::durability::set_damage_value(&mut armor, damage);
         mob.equipment.set(EquipmentSlot::Body, armor);
         (me, mob)
     }

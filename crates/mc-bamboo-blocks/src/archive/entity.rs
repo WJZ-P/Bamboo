@@ -477,6 +477,7 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
             }
             "minecraft:tnt" => EntityKind::Tnt(PrimedTnt {
                 fuse: i32::from(tag::short_or(tag, "fuse", 80)),
+                owner: None,
             }),
             "minecraft:item" => {
                 let stack = match tag::field(tag, "Item") {

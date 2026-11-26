@@ -123,7 +123,10 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
         ),
         "minecraft:jigsaw" => (jigsaw(raw, state), &[][..]),
         "minecraft:end_gateway" => (end_gateway(raw), &[][..]),
-        "minecraft:sculk_catalyst" => (sculk_catalyst(raw), &[][..]),
+        "minecraft:sculk_catalyst" => (
+            crate::behaviour::misc::sculk_catalyst::additional_from_tag(raw),
+            &[][..],
+        ),
         "minecraft:beacon" => (beacon(), &[][..]),
         "minecraft:potent_sulfur" => (potent_sulfur(raw), &[][..]),
         "minecraft:structure_block" => (structure_block(raw), &[][..]),
@@ -135,6 +138,11 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
         "minecraft:command_block" => (command_block(raw), COMMAND_BLOCK_OMIT),
         "minecraft:test_block" => (test_block(raw), TEST_BLOCK_OMIT),
         "minecraft:test_instance_block" => (test_instance_block(raw), TEST_INSTANCE_OMIT),
+        // `CopperGolemStatueBlockEntity` 不覆写 `saveAdditional`：自定义名在 `components`
+        // 组件表里，是元数据键，由游戏层的组件补丁写；这里没有任何自有键。
+        // A copper golem statue overrides no `saveAdditional`: its custom name lives in
+        // the `components` metadata key, written by the game layer's component patch.
+        "minecraft:copper_golem_statue" => (Vec::new(), &[][..]),
         _ => return None,
     };
     Some(Resaved::new(fields, omit))
@@ -399,75 +407,6 @@ fn end_gateway(raw: &Tag) -> Vec<(String, Tag)> {
         put(&mut out, "ExactTeleport", Tag::Byte(1));
     }
     out
-}
-
-// ---------------------------------------------------------------------------
-// SculkCatalystBlockEntity
-// ---------------------------------------------------------------------------
-
-fn sculk_catalyst(raw: &Tag) -> Vec<(String, Tag)> {
-    vec![("cursors".to_owned(), charge_cursors(entry(raw, "cursors")))]
-}
-
-/// `ChargeCursor.CODEC`：`pos` 必填，其余四个字段有默认值/范围。
-/// `Codec.listOf` 里一条坏数据让整个列表解码失败，`load` 回到空列表。
-/// `pos` is required; one bad entry resets the whole list to empty.
-fn charge_cursors(input: Option<&Tag>) -> Tag {
-    let Some(Tag::List(values)) = input else {
-        return Tag::List(Vec::new());
-    };
-    if values.len() > 32 {
-        return Tag::List(Vec::new());
-    }
-    let mut out = Vec::with_capacity(values.len());
-    for value in values {
-        let Tag::Compound(_) = value else {
-            return Tag::List(Vec::new());
-        };
-        let Some(Tag::IntArray(pos)) = entry(value, "pos") else {
-            return Tag::List(Vec::new());
-        };
-        if pos.len() != 3 {
-            return Tag::List(Vec::new());
-        }
-        let charge = tag::int_or(value, "charge", 0);
-        let decay = tag::int_or(value, "decay_delay", 1);
-        let update = tag::int_or(value, "update_delay", 0);
-        if !(0..=1000).contains(&charge) || !(0..=1).contains(&decay) || update < 0 {
-            return Tag::List(Vec::new());
-        }
-        let mut one = Vec::new();
-        put(&mut one, "pos", Tag::IntArray(pos.clone()));
-        if charge != 0 {
-            put(&mut one, "charge", Tag::Int(charge));
-        }
-        if decay != 1 {
-            put(&mut one, "decay_delay", Tag::Int(decay));
-        }
-        if update != 0 {
-            put(&mut one, "update_delay", Tag::Int(update));
-        }
-        if let Some(Tag::List(facings)) = entry(value, "facings") {
-            let mut keep = Vec::new();
-            for facing in facings {
-                let Tag::String(text) = facing else {
-                    return Tag::List(Vec::new());
-                };
-                if !matches!(
-                    text.as_str(),
-                    "down" | "up" | "north" | "south" | "west" | "east"
-                ) {
-                    return Tag::List(Vec::new());
-                }
-                keep.push(Tag::String(text.clone()));
-            }
-            if !keep.is_empty() {
-                put(&mut one, "facings", Tag::List(keep));
-            }
-        }
-        out.push(Tag::Compound(one));
-    }
-    Tag::List(out)
 }
 
 // ---------------------------------------------------------------------------

@@ -92,6 +92,20 @@ pub trait BlockEntity: Any + Send {
         false
     }
 
+    /// 游戏事件直接落地（不经过 `VibrationSystem` 的候选 / 飞行）：催发体监听
+    /// `ENTITY_DIE` 时用。返回是否要把这个方块实体叫醒。
+    ///
+    /// A game event handled immediately, without `VibrationSystem` candidates:
+    /// used by the sculk catalyst's `ENTITY_DIE` listener. Returns whether to wake
+    /// this block entity.
+    fn receive_game_event(
+        &mut self,
+        _world: &mut World,
+        _delivery: &crate::game_event::dispatch::Delivery,
+    ) -> bool {
+        false
+    }
+
     /// 官方 `saveAdditional`：写这个方块实体自己的键（不含 `id`、`x/y/z` 和 `components`）。
     ///
     /// 没有默认实现：新加一种方块实体时编译器会要求补上，内容不会悄悄漏存。

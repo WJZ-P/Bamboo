@@ -122,6 +122,7 @@ fn idle_activity(kind: MobType) -> ActivityData {
             speed: temptation_speed(kind),
             close_adult: 3.5,
             close_baby: 2.5,
+            look_in_eyes: false,
         },
     ));
     priority += 1;

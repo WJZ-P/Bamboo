@@ -125,7 +125,9 @@ struct ClockEntry {
     paused: bool,
 }
 
-// 官方 codec 要读的一串文件路径，逐个当参数传最直接，不需要打包。
+// 每个存档文件都是独立的命令行参数，逐个列名比打包成结构体更直白。
+// Each saved-data file is its own command-line argument; naming them one by one
+// reads clearer than bundling them into a struct.
 #[allow(clippy::too_many_arguments)]
 fn decode(
     java: &str,

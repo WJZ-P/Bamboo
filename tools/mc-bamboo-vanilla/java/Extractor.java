@@ -1626,6 +1626,16 @@ public final class Extractor {
         var snowDimensions = net.minecraft.world.entity.EntityTypes.SNOW_GOLEM.getDimensions();
         out.addProperty("ironGolemFlags", entityAccessor(iron, "DATA_FLAGS_ID").id());
         out.addProperty("snowGolemPumpkin", entityAccessor(snow, "DATA_PUMPKIN_ID").id());
+        // `CopperGolem.DATA_WEATHER_STATE` / `COPPER_GOLEM_STATE` 的 index 和序列化器 id。
+        Class<?> copper = net.minecraft.world.entity.animal.golem.CopperGolem.class;
+        var copperWeather = entityAccessor(copper, "DATA_WEATHER_STATE");
+        var copperState = entityAccessor(copper, "COPPER_GOLEM_STATE");
+        out.addProperty("copperGolemWeatherState", copperWeather.id());
+        out.addProperty("copperGolemState", copperState.id());
+        out.addProperty("copperGolemWeatherStateSerializer",
+                net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(copperWeather.serializer()));
+        out.addProperty("copperGolemStateSerializer",
+                net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(copperState.serializer()));
         out.addProperty("ironGolemEyeHeight", ironDimensions.eyeHeight());
         out.addProperty("snowGolemEyeHeight", snowDimensions.eyeHeight());
         out.addProperty("ironGolemMaxHealth", ironAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));

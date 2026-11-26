@@ -92,6 +92,13 @@ pub struct Delivery {
     pub source: Vec3,
     pub event: GameEvent,
     pub context: EventContext,
+    /// `GameEvent.Context.sourceEntity()`：死亡事件里发出事件的实体。
+    pub source_entity: Option<crate::entity::EntityUid>,
+    /// 死亡实体这一刻的基础经验值（`getExperienceReward` 的已建模部分）。
+    /// `None` 表示源不是会掉经验的生物。
+    ///
+    /// The dying mob's base experience reward; `None` for a non-mob source.
+    pub experience: Option<i32>,
 }
 
 /// 把游戏事件投递给能收到它的监听者，返回按官方顺序排好的投递列表。
@@ -107,6 +114,23 @@ pub fn post(
     let Some(table) = world.level().game_event_listeners() else {
         return Vec::new();
     };
+    // `ENTITY_DIE` 的上下文里带着发出事件的实体；催发体监听者要读它的经验值。
+    // 实体此刻正在 tick，可能已经从表里取走，所以从保存的公开视图里取基础经验。
+    // `ENTITY_DIE` carries the dying entity; catalyst listeners read its experience.
+    // The entity may be detached from the table while ticking, so take the base
+    // reward from the preserved public view.
+    let (source_entity, experience) = if event == GameEvent::EntityDie {
+        let uid = context.source_entity;
+        let reward = uid
+            .and_then(|uid| world.level().entity_public(uid))
+            .and_then(|public| match &public.kind {
+                crate::entity::KindPublic::Mob(mob) => Some(mob.mob_type.xp_reward()),
+                _ => None,
+            });
+        (uid, reward)
+    } else {
+        (None, None)
+    };
     collect_candidates(table, world, event, source, context)
         .into_iter()
         .map(|candidate| Delivery {
@@ -115,6 +139,8 @@ pub fn post(
             source,
             event,
             context,
+            source_entity,
+            experience,
         })
         .collect()
 }
@@ -302,9 +328,10 @@ pub fn valid_vibration(event: GameEvent, context: EventContext) -> bool {
 }
 
 impl World<'_> {
-    /// 把一条投递交给具体的监听者。方块实体临时取出，各监听者用
-    /// [`crate::BlockEntity::receive_vibration`] 当场决定是否记候选，和官方
-    /// `handleGameEvent` 一样。
+    /// 把一条投递交给具体的监听者。方块实体临时取出：每个监听者先在
+    /// [`crate::BlockEntity::receive_vibration`] 里按振动规则记候选，
+    /// 不匹配时再走 [`crate::BlockEntity::receive_game_event`] 的即时处理，
+    /// 和官方 `GameEventListener.handleGameEvent` 一样。
     pub(crate) fn deliver_game_event(&mut self, delivery: Delivery) {
         let event = delivery.event;
         let context = delivery.context;
@@ -320,7 +347,8 @@ impl World<'_> {
                     return;
                 };
                 let received =
-                    entity.receive_vibration(self, event, source, listener_pos, context, now);
+                    entity.receive_vibration(self, event, source, listener_pos, context, now)
+                        || entity.receive_game_event(self, &delivery);
                 self.level_mut().put_block_entity(pos, id, entity);
                 if received {
                     self.level_mut().wake_block_entity(pos);

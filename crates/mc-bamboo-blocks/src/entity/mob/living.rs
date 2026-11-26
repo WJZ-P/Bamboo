@@ -38,7 +38,13 @@ use crate::{
 
 /// 生物的一刻，`Entity.tick` 交到这里。`kind` 在这期间被换成一个占位。
 pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx, plan: ThrottlePlan) {
-    let mut kind = std::mem::replace(&mut me.kind, EntityKind::Tnt(PrimedTnt { fuse: 0 }));
+    let mut kind = std::mem::replace(
+        &mut me.kind,
+        EntityKind::Tnt(PrimedTnt {
+            fuse: 0,
+            owner: None,
+        }),
+    );
     if let EntityKind::Mob(mob) = &mut kind {
         // 计划（分档、豁免、补偿）由驱动在算阶段之前按同一份快照算好；这里不再
         // 重判状态，精确和并行两种驱动才能逐位一致。
@@ -67,7 +73,13 @@ pub(crate) fn with_mob<R>(
     me: &mut Entity,
     f: impl FnOnce(&mut Entity, &mut Mob) -> R,
 ) -> Option<R> {
-    let mut kind = std::mem::replace(&mut me.kind, EntityKind::Tnt(PrimedTnt { fuse: 0 }));
+    let mut kind = std::mem::replace(
+        &mut me.kind,
+        EntityKind::Tnt(PrimedTnt {
+            fuse: 0,
+            owner: None,
+        }),
+    );
     let result = match &mut kind {
         EntityKind::Mob(mob) => Some(f(me, mob)),
         _ => None,
@@ -322,10 +334,32 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Dolphin {
         super::dolphin::tick(me, mob, ctx);
     }
+    // `HappyGhast.tick()` 在 `super.tick()` 之后：牵引者标志、悬停超时、扫描头顶玩家。
+    // `HappyGhast.tick()` after `super.tick()`: holder flag, hover timeout and the
+    // player-above scan.
+    if mob.mob_type == super::MobType::HappyGhast {
+        let (min, max) =
+            super::happy_ghast::player_above_box(me.position, me.dimensions.0, me.dimensions.1);
+        let mut player_above = false;
+        ctx.blocks().for_each_player(&mut |view| {
+            if !view.spectator
+                && !mob.passengers.contains(&view.uid)
+                && super::happy_ghast::is_above(view.position, min, max)
+            {
+                player_above = true;
+            }
+        });
+        super::happy_ghast::tick_end(me, mob, player_above);
+    }
     // `Axolotl.customServerAiStep` 尾部：把 `PLAY_DEAD_TICKS` 记忆映射成元数据。
     // Tail of `Axolotl.customServerAiStep`: map the PLAY_DEAD_TICKS memory to metadata.
     if mob.mob_type == super::MobType::Axolotl {
         super::axolotl::sync_playing_dead(mob);
+    }
+    // `CopperGolem.tick` 在 `super.tick()` 之后：氧化计时与变雕像。
+    // `CopperGolem.tick` after `super.tick()`: the weathering clock and statue conversion.
+    if mob.mob_type == super::MobType::CopperGolem && !me.removed {
+        super::copper_golem::tick_after(me, mob, ctx);
     }
 }
 
@@ -822,7 +856,11 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         let time = mob.ambient_sound_time;
         mob.ambient_sound_time += 1;
         if roll < time {
-            mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
+            mob.ambient_sound_time = -if mob.mob_type == super::MobType::HappyGhast {
+                super::happy_ghast::ambient_sound_interval(mob)
+            } else {
+                mob.mob_type.ambient_sound_interval()
+            };
             if mob.mob_type == super::MobType::Fox {
                 super::fox::play_ambient_sound(me, mob, ctx.blocks());
                 return;
@@ -858,7 +896,7 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 return;
             };
             let pitch = voice_pitch(me, mob);
-            play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
+            play_sound(me, mob, sound, sound_volume(mob), pitch);
         }
     }
 }
@@ -921,6 +959,16 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
 /// Ambient, hurt and death sounds: equines by kind and age, others by type,
 /// cows by their sound variant.
 fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
+    // 铜傀儡的受伤 / 死亡音按氧化等级换，环境音恒无。
+    // A copper golem's hurt / death sounds depend on its oxidation stage; no ambient.
+    if mob.mob_type == super::MobType::CopperGolem {
+        let weather = mob.copper_golem.weather_state;
+        return match voice {
+            Voice::Hurt => super::copper_golem::hurt_sound(weather),
+            Voice::Death => super::copper_golem::death_sound(weather),
+            _ => "",
+        };
+    }
     // 硫磺方块怪按大小和是否吞了方块分派四种声音。
     // Sulfur cubes dispatch their four sounds by size and body item.
     if mob.mob_type == super::MobType::SulfurCube {
@@ -968,6 +1016,12 @@ fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
     match voice {
         Voice::Hurt if super::armadillo::is_scared(mob) => {
             "minecraft:entity.armadillo.hurt_reduced"
+        }
+        Voice::Hurt if mob.mob_type == super::MobType::HappyGhast => {
+            super::happy_ghast::voice(super::happy_ghast::Voice::Hurt, mob.is_baby())
+        }
+        Voice::Death if mob.mob_type == super::MobType::HappyGhast => {
+            super::happy_ghast::voice(super::happy_ghast::Voice::Death, mob.is_baby())
         }
         Voice::Hurt => mob
             .mob_type
@@ -1238,12 +1292,21 @@ fn sound_volume(mob: &Mob) -> f32 {
         super::MobType::Slime | super::MobType::SulfurCube
     ) {
         super::slime::sound_volume(mob)
+    } else if mob.mob_type == super::MobType::HappyGhast {
+        // `HappyGhast.getSoundVolume()`：幼年 1、成年 4。
+        // `HappyGhast.getSoundVolume()`: 1 for babies, 4 for adults.
+        super::happy_ghast::sound_volume(mob)
     } else {
         mob.mob_type.sound_volume()
     }
 }
 
 fn ambient_sound(mob: &Mob, in_water: bool) -> &'static str {
+    if mob.mob_type == super::MobType::HappyGhast {
+        // `HappyGhast.getAmbientSound`：幼年 / 成年两套。
+        // `HappyGhast.getAmbientSound`: baby and adult variants.
+        return super::happy_ghast::voice(super::happy_ghast::Voice::Ambient, mob.is_baby());
+    }
     // 守卫者的环境音按水 / 岸和种类分派（表里返回 `None`）。
     // Guardian ambience is dispatched by water / land and kind (the table returns
     // `None`).
@@ -1275,6 +1338,11 @@ fn ambient_sound(mob: &Mob, in_water: bool) -> &'static str {
 ///
 /// The voice pitch takes two draws and uses a higher base pitch for babies.
 pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
+    // `HappyGhast.getVoicePitch()` 恒 1.0，不取两次随机数。
+    // `HappyGhast.getVoicePitch()` is always 1.0 and draws no random numbers.
+    if mob.mob_type == super::MobType::HappyGhast {
+        return super::happy_ghast::VOICE_PITCH;
+    }
     let first = me.random.next_float();
     let second = me.random.next_float();
     let base = if mob.is_baby() { 1.5 } else { 1.0 };
@@ -1416,6 +1484,17 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
     if equine {
         super::equine::ai_step_end(me, mob, ctx);
     }
+    // `HappyGhast.aiStep` 在 `super.aiStep()` 之后按云 / 降水周期回血。
+    // `HappyGhast.aiStep` after `super.aiStep()`: heal on the cloud / precipitation
+    // period.
+    if mob.mob_type == super::MobType::HappyGhast {
+        // `continuousHeal`：`isInClouds()` 或所在群系会降水时每 20 刻回血。
+        // `continuousHeal`: heal every 20 ticks in clouds or a precipitating biome.
+        let view = ctx.blocks();
+        let fast = view.is_in_clouds(me.position.y, me.dimensions.1)
+            || view.biome_precipitates(me.block_position());
+        super::happy_ghast::continuous_heal(me, mob, fast);
+    }
 }
 
 /// `Animal.aiStep` 一路到 `LivingEntity.aiStep` 的公共部分。
@@ -1525,33 +1604,54 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     if mob.effects.has(mob_effect::SLOW_FALLING) || mob.effects.has(mob_effect::LEVITATION) {
         me.fall_distance = 0.0;
     }
-    if !mob.no_ai {
+    // 官方 `LivingEntity.aiStep`：`getControllingPassenger()` 是玩家且自己活着时无条件走
+    // `travelRidden`，连 `NoAI` 的载具也照跑 `tickRidden`；其余 `travel` 分支才看
+    // `canSimulateMovement()` 和 `isEffectiveAi()`。
+    //
+    // Vanilla `LivingEntity.aiStep`: with a living player controlling passenger it
+    // always goes through `travelRidden`, even for a NoAI vehicle; the other `travel`
+    // branches are the ones gated on `canSimulateMovement()` / `isEffectiveAi()`.
+    let ridden = mob.controlling_passenger().and_then(|rider| {
+        let view = ctx.player(rider)?;
+        Some((view.yaw, view.pitch))
+    });
+    if let Some((yaw, pitch)) = ridden {
         timing::span!(Travel);
-        // 官方 `LivingEntity.travel`：有人控制时走 `travelRidden`，服务端不模拟载具的运动，
-        // 只跑 `tickRidden` 再把速度清零；位置由客户端的 `move_vehicle` 决定。
-        //
-        // Vanilla `LivingEntity.travel`: with a controlling passenger it goes through
-        // `travelRidden`; the server does not simulate the vehicle, it only runs
-        // `tickRidden` and zeroes the velocity. The position comes from the client's
-        // `move_vehicle` packet.
-        if let Some(rider) = mob.controlling_passenger() {
-            if let Some(view) = ctx.player(rider) {
-                if mob.mob_type.is_equine() {
-                    super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
-                } else if mob.mob_type == super::MobType::Pig {
-                    super::pig::tick_ridden(me, mob, view.yaw, view.pitch);
-                } else if super::nautilus::is_nautilus(mob.mob_type) {
-                    super::nautilus_ai::ridden_rotation(me, mob, view.yaw, view.pitch);
-                }
-            }
-            me.delta = Vec3::default();
-        } else if mob.mob_type == super::MobType::Phantom {
+        // `travelRidden` 的服务端只跑 `tickRidden` 再清零速度；位置由客户端的
+        // `move_vehicle` 决定。
+        // The server only runs `tickRidden` and zeroes velocity; the client's
+        // `move_vehicle` decides the position.
+        if mob.mob_type.is_equine() {
+            super::equine::tick_ridden(me, mob, yaw, pitch);
+        } else if mob.mob_type == super::MobType::Pig {
+            super::pig::tick_ridden(me, mob, yaw, pitch);
+        } else if super::nautilus::is_nautilus(mob.mob_type) {
+            super::nautilus_ai::ridden_rotation(me, mob, yaw, pitch);
+        } else if mob.mob_type == super::MobType::HappyGhast {
+            // `HappyGhast.tickRidden`：0.08 插值车身朝向，头 / 身一起抄过去。
+            // `HappyGhast.tickRidden`: lerp the yaw by 0.08 and copy it
+            // into head and body rotations.
+            super::happy_ghast::tick_ridden(me, mob, pitch, yaw);
+        }
+        me.delta = Vec3::default();
+    } else if !mob.no_ai {
+        timing::span!(Travel);
+        if mob.mob_type == super::MobType::Phantom {
             super::phantom::travel(me, mob, ctx, input);
         } else if super::squid::is_squid(mob.mob_type) {
             // `Squid.travel`：只有 `move(SELF, deltaMovement)`。
             // `Squid.travel` is a bare `move(SELF, deltaMovement)`.
             let movement = me.delta;
             motion::move_living(me, mob, ctx, movement);
+        } else if mob.mob_type == super::MobType::HappyGhast {
+            // `HappyGhast.travel`：用 `FLYING_SPEED * 5/3` 走 `travelFlying`。
+            // `HappyGhast.travel`: `travelFlying` with `FLYING_SPEED * 5/3`.
+            let speed = super::happy_ghast::travel_speed(
+                mob.attributes
+                    .value(mc_bamboo_data::registries::attribute::FLYING_SPEED)
+                    as f32,
+            );
+            super::happy_ghast::travel_flying(me, mob, ctx, input, speed);
         } else {
             travel(me, mob, ctx, input);
         }
@@ -1751,6 +1851,12 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
         if was_baby != mob.is_baby() && mob.mob_type == super::MobType::Villager {
             super::villager_ai::refresh_brain(me, mob, ctx);
         }
+        // `HappyGhast.ageBoundaryReached`：换成幼年 / 成年那套控制器、寻路器和目标表。
+        // `HappyGhast.ageBoundaryReached`: swap the baby / adult controls,
+        // navigation and goal table.
+        if was_baby != mob.is_baby() && mob.mob_type == super::MobType::HappyGhast {
+            super::happy_ghast::age_boundary_reached(mob);
+        }
     }
     if super::turtle::is_turtle(mob.mob_type) {
         super::turtle::ai_step(me, mob, ctx);
@@ -1826,9 +1932,25 @@ pub(crate) fn set_age(me: &mut Entity, mob: &mut Mob, age: i32) {
     let old = mob.age;
     mob.age = age;
     if (old < 0) != (age < 0) {
+        let old_width = me.dimensions.0;
+        let old_height = me.dimensions.1;
         let (width, height, eye) = mob.mob_type.dimensions(age < 0);
         me.dimensions = (width, height);
         mob.eye_height = eye;
+        // `Entity.refreshDimensions` 只在「服务端、非首刻、非 noPhysics、尺寸变大且
+        // 不超过 4、不是玩家」时调 `fudgePositionAfterSizeChange`。读档时 `setAge`
+        // 从成年变幼年（变小）且 `firstTick` 为真，不该挪位置；只有游戏里长大（变大）
+        // 才对脚底。
+        // `Entity.refreshDimensions` calls `fudgePositionAfterSizeChange` only when
+        // server-side, not the first tick, not no-physics, growing (and at most
+        // 4 wide/tall), and not a player. Loading shrinks adult -> baby on the
+        // first tick, so it must not move; only in-game growth re-aligns the feet.
+        if mob.mob_type == super::MobType::HappyGhast
+            && !me.first_tick
+            && (width > old_width || height > old_height)
+        {
+            me.position.y += f64::from(old_height) / 2.0 - f64::from(height) / 2.0;
+        }
         if mob.mob_type == super::MobType::Goat {
             // 山羊的尺寸还看姿势；`ageBoundaryReached` 换攻击力。
             // Goat size also depends on the pose; `ageBoundaryReached` swaps the attack damage.
@@ -2059,6 +2181,15 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         if !mob.anger.is_angry(ctx.blocks().game_time()) {
             look_control_tick_with(me, mob, !mob.bee.pollinating);
         }
+    } else if mob.mob_type == super::MobType::HappyGhast {
+        move_control_tick(me, mob, ctx.blocks());
+        if mob.is_baby() {
+            look_control_tick(me, mob);
+        } else {
+            // `HappyGhastLookControl`：折角 / 直接写朝向 / 对着速度，不跑默认那支。
+            // `HappyGhastLookControl`: fold, direct or velocity facing.
+            super::happy_ghast::look_control_tick(me, mob);
+        }
     } else {
         if mob.mob_type.is_camel() {
             // `CamelMoveControl.tick` 在 `super.tick()` 之前。
@@ -2115,6 +2246,9 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     if super::nautilus::is_nautilus(mob.mob_type) {
         super::nautilus_ai::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::CopperGolem {
+        super::copper_golem::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Creaking {
         super::creaking_ai::custom_server_ai_step(me, mob, ctx);
     }
@@ -2128,6 +2262,11 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
         // `ElderGuardian.customServerAiStep`：范围挖掘疲劳和家。
         // `ElderGuardian.customServerAiStep`: area mining fatigue and home.
         super::guardian::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::HappyGhast {
+        // `HappyGhast.customServerAiStep`：幼年跑大脑，两种年龄都检查家的半径。
+        // `HappyGhast.customServerAiStep`: babies tick the brain, both ages check home.
+        super::happy_ghast::custom_server_ai_step(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::Warden {
         // `Warden.customServerAiStep`：大脑、振动、愤怒衰减、活动重选。
@@ -2186,6 +2325,17 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
         // `Bee` 用 `FlyingMoveControl(this, 20, true)`：最大俯仰步长 20°，空闲时原地悬停不恢复重力。
         // `Bee` uses `FlyingMoveControl(this, 20, true)`: max turn 20°, hovers in place.
         super::parrot::flying_move_control_tick(me, mob, 20.0, true);
+        return;
+    }
+    if mob.mob_type == super::MobType::HappyGhast {
+        // `HappyGhast.babyGhastSetup` 用 `FlyingMoveControl(this, 180, true)`；
+        // 成年 `adultGhastSetup` 换成 `GhastMoveControl(this, true, stillTimeout)`。
+        // Babies use `FlyingMoveControl(this, 180, true)`; adults use the ghast control.
+        if mob.is_baby() {
+            super::parrot::flying_move_control_tick(me, mob, 180.0, true);
+        } else {
+            super::happy_ghast::ghast_move_control_tick(me, mob, view);
+        }
         return;
     }
     if super::turtle::is_turtle(mob.mob_type) {
@@ -3194,7 +3344,11 @@ fn hurt_living(
         die(me, mob, ctx, source);
     } else if full_hit {
         // `Mob.playHurtSound`：先重置叫声计时，再取音高；狼铠吸收时换成铠甲受伤声。
-        mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
+        mob.ambient_sound_time = -if mob.mob_type == super::MobType::HappyGhast {
+            super::happy_ghast::ambient_sound_interval(mob)
+        } else {
+            mob.mob_type.ambient_sound_interval()
+        };
         let pitch = voice_pitch(me, mob);
         let sound = if super::wolf::can_armor_absorb(mob, source) {
             super::wolf::SOUND_ARMOR_DAMAGE
@@ -3217,6 +3371,9 @@ fn hurt_living(
 fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource, time: i64) {
     if mob.mob_type == super::MobType::Armadillo {
         super::armadillo::after_actually_hurt(me, mob, source);
+    }
+    if mob.mob_type == super::MobType::CopperGolem {
+        super::copper_golem::after_hurt(mob);
     }
     // `Camel.actuallyHurt` 在 `super` 之前 `standUpInstantly()`；纯状态改动、不取随机数，
     // 放在 `super` 之后对可观察状态等价。
@@ -3354,12 +3511,27 @@ pub(crate) fn do_hurt_target(
             whole.split().public
         };
         let hurt = ctx.hurt_player(target, source, amount, me, &attacker);
-        // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`：ATTACK_KNOCKBACK
-        // 大于 0 且这一下打中时，攻击者自己的水平速度被压到 0.6 倍（监守者是 1.5）。
+        // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`：ATTACK_KNOCKBACK / 2
+        // 大于 0 且这一下打中时，先按攻击者朝向给受害者补一次 `knockback`，再把
+        // 攻击者自己的水平速度压到 0.6 倍（监守者 / 劫掠兽是 1.5）。
         // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`: with a positive
-        // ATTACK_KNOCKBACK and a landed hit, the attacker's horizontal velocity is
-        // scaled by 0.6 (the warden has 1.5).
-        if hurt && mob.attributes.value(attribute::ATTACK_KNOCKBACK) > 0.0 {
+        // ATTACK_KNOCKBACK and a landed hit, knock the victim back along the
+        // attacker's facing, then scale the attacker's horizontal velocity by 0.6.
+        let knockback = (mob.attributes.value(attribute::ATTACK_KNOCKBACK) as f32) / 2.0;
+        if hurt && knockback > 0.0 {
+            let angle = f64::from(me.y_rot * 0.017_453_292_f32);
+            let dx = f64::from(mth::sin(angle));
+            let dz = -f64::from(mth::cos(angle));
+            ctx.emit(
+                Command::ExtraKnockback {
+                    target,
+                    player: true,
+                    strength: f64::from(knockback),
+                    dx,
+                    dz,
+                },
+                me,
+            );
             me.delta.x *= 0.6;
             me.delta.z *= 0.6;
         }
@@ -3465,6 +3637,26 @@ pub(crate) fn do_hurt_target(
             },
             me,
         );
+        // `Mob.doHurtTarget` 的 `causeExtraKnockback` 不看 `hurtServer` 的返回值：
+        // 只要 ATTACK_KNOCKBACK 为正就给受害者补一次击退，并压平攻击者自己。
+        // `Mob.doHurtTarget`'s `causeExtraKnockback` does not check the hurt result:
+        // a positive ATTACK_KNOCKBACK always pushes the victim and damps the attacker.
+        let knockback = (mob.attributes.value(attribute::ATTACK_KNOCKBACK) as f32) / 2.0;
+        if knockback > 0.0 {
+            let angle = f64::from(me.y_rot * 0.017_453_292_f32);
+            ctx.emit(
+                Command::ExtraKnockback {
+                    target,
+                    player: false,
+                    strength: f64::from(knockback),
+                    dx: f64::from(mth::sin(angle)),
+                    dz: -f64::from(mth::cos(angle)),
+                },
+                me,
+            );
+            me.delta.x *= 0.6;
+            me.delta.z *= 0.6;
+        }
         if bites {
             play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
         }
@@ -3548,6 +3740,21 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         return;
     }
     mob.dead = true;
+    // `LivingEntity.die` 在掉落之前发 `ENTITY_DIE`：上下文的 `sourceEntity` 是死者，
+    // 附近的幽匿催发体用它换经验充能。命令在伤害命令之后落地，但仍在同刻。
+    // `LivingEntity.die` posts `ENTITY_DIE` before drops; catalyst listeners turn
+    // the dying mob's experience into charge.
+    ctx.emit(
+        Command::GameEvent {
+            event: crate::game_event::GameEvent::EntityDie,
+            position: me.position,
+            context: crate::game_event::dispatch::EventContext {
+                source_entity: Some(me.id),
+                ..Default::default()
+            },
+        },
+        me,
+    );
     // `Raider.die` 在 `super.die` 之前：记英雄、离队、去队长旗帜。
     // `Raider.die` runs before `super.die`: hero credit, roster removal, leader flag.
     if mob.mob_type.is_raider() {

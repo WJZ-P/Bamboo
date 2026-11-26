@@ -355,6 +355,16 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::Byte(i8::from(mob.cube.was_on_ground)),
         );
     }
+    // ---- HappyGhast ----
+    if mob.mob_type == MobType::HappyGhast {
+        // `HappyGhast.addAdditionalSaveData`：无条件写 `still_timeout`。
+        // `HappyGhast.addAdditionalSaveData`: `still_timeout` is always written.
+        put(
+            &mut out,
+            super::happy_ghast::STILL_TIMEOUT_KEY,
+            Tag::Int(mob.happy_ghast.still_timeout),
+        );
+    }
     // ---- SulfurCube ----
     if mob.mob_type == MobType::SulfurCube {
         put(
@@ -519,6 +529,20 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::String(mob.armadillo.state.name().to_owned()),
         );
         put(&mut out, "scute_time", Tag::Int(mob.armadillo.scute_time));
+    }
+    if mob.mob_type == MobType::CopperGolem {
+        // `CopperGolem.addAdditionalSaveData`：两个键无条件写出。
+        // `CopperGolem.addAdditionalSaveData`: both keys are always written.
+        put(
+            &mut out,
+            "next_weather_age",
+            Tag::Long(mob.copper_golem.next_weathering_tick),
+        );
+        put(
+            &mut out,
+            "weather_state",
+            Tag::String(mob.copper_golem.weather_state.name().to_owned()),
+        );
     }
     if mob.mob_type == MobType::Warden {
         // `Warden.addAdditionalSaveData`：`anger` 走 `AngerManagement.codec`，
@@ -910,6 +934,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         if mob.mob_type == MobType::Endermite {
             mob.endermite.life = tag::int_or(tag, "Lifetime", 0);
         }
+        if mob.mob_type == MobType::HappyGhast {
+            // `HappyGhast.readAdditionalSaveData`：读 `still_timeout` 并同步标志。
+            // `HappyGhast.readAdditionalSaveData`: read `still_timeout` and sync the flag.
+            let timeout = tag::int_or(tag, super::happy_ghast::STILL_TIMEOUT_KEY, 0);
+            mob.happy_ghast.set_still_timeout(timeout);
+        }
         if mob.mob_type == MobType::Creaking {
             mob.creaking.home_pos =
                 tag::field(tag, "home_pos").and_then(super::creaking::home_from_tag);
@@ -971,6 +1001,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Armadillo {
             read_armadillo(mob, tag);
+        }
+        if mob.mob_type == MobType::CopperGolem {
+            read_copper_golem(mob, tag);
         }
         if mob.mob_type == MobType::Frog {
             // `Frog.readAdditionalSaveData`：读不出品种就保留原来的。
@@ -1364,6 +1397,22 @@ fn read_armadillo(mob: &mut super::Mob, tag: &Tag) {
         mob.armadillo.in_state_ticks = 0;
     }
     mob.armadillo.scute_time = tag::int_or(tag, "scute_time", mob.armadillo.scute_time);
+}
+
+/// `CopperGolem.readAdditionalSaveData`：`next_weather_age` 缺省 -1，`weather_state`
+/// 缺省 `unaffected`；读不出的字符串保留缺省值。
+///
+/// `CopperGolem.readAdditionalSaveData`: `next_weather_age` defaults to -1 and
+/// `weather_state` to `unaffected`; an unreadable string keeps the default.
+fn read_copper_golem(mob: &mut super::Mob, tag: &Tag) {
+    mob.copper_golem.next_weathering_tick = tag::long_or(
+        tag,
+        "next_weather_age",
+        super::copper_golem::UNSET_WEATHERING_TICK,
+    );
+    mob.copper_golem.weather_state = tag::string_or(tag, "weather_state")
+        .and_then(super::copper_golem::WeatherState::from_name)
+        .unwrap_or_default();
 }
 
 fn read_fox(mob: &mut super::Mob, tag: &Tag) {

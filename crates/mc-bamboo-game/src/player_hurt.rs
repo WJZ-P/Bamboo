@@ -227,45 +227,67 @@ fn knockback_resistance(player: &Player) -> f64 {
 }
 
 /// 山羊冲撞的 `LivingEntity.knockback(strength, dx, dz)`：不管这一下打没打中都推，
-/// 方向和力道由山羊给；推完把速度发给看得见的人和自己。
+/// 方向和力道由山羊给；推完把速度发给看得见的人和自己。返回这一下发出去的速度，
+/// 没推（力道归零）时是 `None`。
 ///
 /// A goat ram's `LivingEntity.knockback(strength, dx, dz)`, applied whether or not the
 /// hit landed, with the goat's direction and strength; the new velocity goes to the
-/// trackers and the player.
+/// trackers and the player. Returns the velocity sent, or `None` when nothing was pushed.
 pub(crate) fn knock_back_player(
     parts: &mut HurtParts<'_>,
     id: PlayerId,
     strength: f64,
     (mut dx, mut dz): (f64, f64),
-) {
-    let Some(player) = parts.players.get_mut(&id) else {
-        return;
+) -> Option<Vec3> {
+    let movement = {
+        let player = parts.players.get_mut(&id)?;
+        let strength = strength * (1.0 - knockback_resistance(player));
+        if strength <= 0.0 {
+            return None;
+        }
+        while dx * dx + dz * dz < f64::from(1.0e-5_f32) {
+            dx = (player.random.next_double() - player.random.next_double()) * 0.01;
+            dz = (player.random.next_double() - player.random.next_double()) * 0.01;
+        }
+        let length = (dx * dx + dz * dz).sqrt();
+        let delta = player.motion.delta;
+        let dy = if player.on_ground {
+            0.4_f64.min(delta.y / 2.0 + strength)
+        } else {
+            delta.y
+        };
+        player.motion.delta = Vec3::new(
+            delta.x / 2.0 - dx / length * strength,
+            dy,
+            delta.z / 2.0 - dz / length * strength,
+        );
+        player.motion.delta
     };
-    let strength = strength * (1.0 - knockback_resistance(player));
-    if strength <= 0.0 {
-        return;
-    }
-    while dx * dx + dz * dz < f64::from(1.0e-5_f32) {
-        dx = (player.random.next_double() - player.random.next_double()) * 0.01;
-        dz = (player.random.next_double() - player.random.next_double()) * 0.01;
-    }
-    let length = (dx * dx + dz * dz).sqrt();
-    let delta = player.motion.delta;
-    let dy = if player.on_ground {
-        0.4_f64.min(delta.y / 2.0 + strength)
-    } else {
-        delta.y
-    };
-    player.motion.delta = Vec3::new(
-        delta.x / 2.0 - dx / length * strength,
-        dy,
-        delta.z / 2.0 - dz / length * strength,
-    );
     let packet = crate::links::encode_frames(&SetEntityMotion {
         entity_id: id.0,
-        movement: player.motion.delta,
+        movement,
     });
     send_to_tracking_and_self(parts, id, &packet);
+    Some(movement)
+}
+
+/// `Entity.push(dx, dy, dz)` 给玩家：音波命中这类「直接加冲量」的击退。
+/// 不按 `knockback` 公式，直接把向量加到速度上，再广播运动包。返回加完的速度。
+///
+/// `Entity.push(dx, dy, dz)` for a player: an impulse knockback such as a landed
+/// sonic boom. It adds the vector to the velocity directly and broadcasts motion.
+pub(crate) fn push_player(parts: &mut HurtParts<'_>, id: PlayerId, push: Vec3) -> Option<Vec3> {
+    let movement = {
+        let player = parts.players.get_mut(&id)?;
+        player.motion.delta = player.motion.delta.add(push);
+        player.motion.delta
+    };
+    let packet = crate::links::encode_frames(&SetEntityMotion {
+        entity_id: id.0,
+        movement,
+    });
+    send_to_tracking_and_self(parts, id, &packet);
+    Some(movement)
 }
 
 fn apply_arrow_push(parts: &mut HurtParts<'_>, id: PlayerId, source: &DamageSource) {

@@ -47,6 +47,7 @@ pub use generated::sounds::{
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
 const ITEM_TAG_REGISTRY: &str = "minecraft:item";
+const ENTITY_TYPE_TAG_REGISTRY: &str = "minecraft:entity_type";
 
 /// `states::STATE_FACTS` 里每一位的含义。全部用 `EmptyBlockGetter` 在 `BlockPos.ZERO` 读取。
 ///
@@ -1021,6 +1022,19 @@ pub fn item_tag(name: &str) -> Option<&'static [i32]> {
     let group = tags::TAG_GROUPS
         .iter()
         .find(|group| group.registry == ITEM_TAG_REGISTRY)?;
+    let tag = group.tags.iter().find(|tag| tag.name == name)?;
+    Some(tag.ids)
+}
+
+/// 一个实体类型标签包含的实体类型注册表 ID，标签不存在时返回 `None`。
+///
+/// `name` 要带命名空间，比如 `minecraft:followable_friendly_mobs`。
+///
+/// The entity-type registry IDs of an entity type tag, or `None` if absent.
+pub fn entity_type_tag(name: &str) -> Option<&'static [i32]> {
+    let group = tags::TAG_GROUPS
+        .iter()
+        .find(|group| group.registry == ENTITY_TYPE_TAG_REGISTRY)?;
     let tag = group.tags.iter().find(|tag| tag.name == name)?;
     Some(tag.ids)
 }

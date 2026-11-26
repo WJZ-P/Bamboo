@@ -176,6 +176,7 @@ impl EntityTracking {
     }
 
     /// 逐刻对拍用：这个实体是不是已经有过同步状态。
+    #[cfg(feature = "oracle-samples")]
     pub fn has_tracked_for_oracle(&self, id: i32) -> bool {
         self.tracked.contains_key(&id)
     }
@@ -184,6 +185,7 @@ impl EntityTracking {
     ///
     /// The sync state of one entity for the tick-by-tick oracle. A fresh one is
     /// created from the entity's current appearance when absent.
+    #[cfg(feature = "oracle-samples")]
     pub fn tracked_for_oracle(&mut self, snapshot: &Snapshot) -> &mut TrackedEntity {
         self.tracked
             .entry(snapshot.id)
@@ -1145,6 +1147,28 @@ impl KindData {
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
     use mc_bamboo_data::entity_types as facts;
+    if kind == mc_bamboo_blocks::entity::mob::MobType::HappyGhast {
+        use mc_bamboo_protocol::packet::play::{HAPPY_GHAST_LEASH_HOLDER, HAPPY_GHAST_STAYS_STILL};
+        return match index {
+            HAPPY_GHAST_LEASH_HOLDER => EntityData::HappyGhastLeashHolder(false),
+            HAPPY_GHAST_STAYS_STILL => EntityData::HappyGhastStaysStill(false),
+            0 => EntityData::SharedFlags(0),
+            1 => EntityData::AirSupply(300),
+            3 => EntityData::CustomNameVisible(false),
+            4 => EntityData::Silent(false),
+            5 => EntityData::NoGravity(false),
+            6 => EntityData::Pose(mc_bamboo_protocol::packet::play::Pose::Standing),
+            7 => EntityData::TicksFrozen(0),
+            8 => EntityData::LivingFlags(0),
+            9 => EntityData::Health(1.0),
+            14 => EntityData::SleepingPos(None),
+            15 => EntityData::MobFlags(0),
+            16 => EntityData::Baby(false),
+            17 => EntityData::AgeLocked(false),
+            2 => EntityData::NoCustomName,
+            _ => EntityData::SharedFlags(0),
+        };
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::Creaking {
         return match index {
             facts::CREAKING_CAN_MOVE => EntityData::CreakingCanMove(true),
@@ -1222,6 +1246,16 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
         && index == mc_bamboo_data::entity_types::ARMADILLO_STATE
     {
         return EntityData::ArmadilloState(0);
+    }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::CopperGolem {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::COPPER_GOLEM_WEATHER_STATE => {
+                return EntityData::CopperGolemWeatherState(0);
+            }
+            facts::COPPER_GOLEM_STATE => return EntityData::CopperGolemState(0),
+            _ => {}
+        }
     }
     if kind == mc_bamboo_blocks::entity::mob::MobType::Frog {
         use mc_bamboo_data::entity_types as facts;
@@ -1873,6 +1907,20 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         }
         return out;
     }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::CopperGolem {
+        // 铜傀儡自有两项：氧化等级（缺省 UNAFFECTED=0）和交互动画状态（缺省 IDLE=0）。
+        // A copper golem adds two: the oxidation stage (UNAFFECTED=0) and the interaction
+        // state (IDLE=0).
+        if mob.copper_golem_weather_state != 0 {
+            out.push(EntityData::CopperGolemWeatherState(
+                mob.copper_golem_weather_state,
+            ));
+        }
+        if mob.copper_golem_state != 0 {
+            out.push(EntityData::CopperGolemState(mob.copper_golem_state));
+        }
+        return out;
+    }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Frog {
         // 青蛙多两项：品种（缺省温带）和舌头目标（缺省空）。
         // Frogs add two: the variant (temperate by default) and the tongue target (empty
@@ -1995,6 +2043,17 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         return out;
     }
     if water_mob_non_default_data(mob, &mut out) {
+        return out;
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::HappyGhast {
+        // `HappyGhast` 的 18、19 是两项 BOOLEAN，不是牛的花色和叫声。
+        // A happy ghast's 18 and 19 are two BOOLEANs, not cow variants.
+        if mob.happy_ghast_is_leash_holder {
+            out.push(EntityData::HappyGhastLeashHolder(true));
+        }
+        if mob.happy_ghast_stays_still {
+            out.push(EntityData::HappyGhastStaysStill(true));
+        }
         return out;
     }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Pig {

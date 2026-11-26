@@ -404,7 +404,17 @@ fn step_effects(
     if !(me.on_ground || climbable) {
         return false;
     }
-    if play_sound && mob.mob_type == super::MobType::Slime {
+    if play_sound && mob.mob_type == super::MobType::CopperGolem {
+        // `CopperGolem.playStepSound` 用的是自己的脚步声，音量 1.0（不是通用的 0.15）。
+        // `CopperGolem.playStepSound` plays its own step sound at volume 1.0, not 0.15.
+        super::living::play_sound(
+            me,
+            mob,
+            super::copper_golem::step_sound(mob.copper_golem.weather_state),
+            1.0,
+            1.0,
+        );
+    } else if play_sound && mob.mob_type == super::MobType::Slime {
         // 史莱姆没有覆写 `playStepSound`：放脚下方块的脚步声，音量乘 0.15。
         // Slimes do not override `playStepSound`: the block's own step sound at 0.15 volume.
         let sounds = state.sound_type();

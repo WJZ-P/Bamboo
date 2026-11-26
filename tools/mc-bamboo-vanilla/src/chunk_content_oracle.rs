@@ -203,7 +203,7 @@ fn run_cases(
     //    并检查 Bamboo 必写的 components / keepPacked 都在官方写出的键里。
     let answer = ask(stdin, lines, json!({"command": "block-entities"}))?;
     report.check(
-        answer.cases.len() >= 13,
+        answer.cases.len() >= 14,
         "official sent too few block entity cases",
     );
     for case in &answer.cases {
@@ -743,6 +743,7 @@ fn run_cases(
         MobType::Witch,
         MobType::Pillager,
         MobType::Sniffer,
+        MobType::HappyGhast,
     ] {
         let mut store = mc_bamboo_blocks::EntityStore::new();
         let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, -3.5)));
@@ -936,6 +937,11 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             "test_instance_block-bare",
             "minecraft:test_instance_block",
             "minecraft:test_instance_block",
+        ),
+        (
+            "copper_golem_statue-bare",
+            "minecraft:copper_golem_statue",
+            "minecraft:copper_golem_statue",
         ),
     ];
     let mut out: Vec<_> = bare
@@ -1456,6 +1462,24 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             ("auto".to_owned(), Tag::Byte(1)),
         ],
     );
+    // `CopperGolemStatueBlockEntity`：不覆写 `saveAdditional`，自定义名只在
+    // `components` 组件表里。`components` 是元数据键，重存比对不看它的值，
+    // 但这一题让官方 `loadStatic` 真的读回名字再写出。
+    let mut statue = meta("minecraft:copper_golem_statue");
+    statue.retain(|(key, _)| key != "components");
+    statue.push((
+        "components".to_owned(),
+        Tag::Compound(vec![(
+            "minecraft:custom_name".to_owned(),
+            Tag::String("Copper Nick".to_owned()),
+        )]),
+    ));
+    out.push((
+        "copper_golem_statue-named".to_owned(),
+        "minecraft:copper_golem_statue",
+        "minecraft:copper_golem_statue",
+        Tag::Compound(statue),
+    ));
     out
 }
 
@@ -1580,6 +1604,27 @@ fn block_entity_load_cases() -> Result<Vec<(String, &'static str, Tag)>, String>
     ] {
         out.push((name.to_owned(), id, Tag::Compound(meta(id))));
     }
+    // 铜傀儡雕像：`create_block_entity` 要认得 `minecraft:copper_golem_statue`，
+    // 且 `write_additional` 为空（官方不覆写 `saveAdditional`）。
+    out.push((
+        "copper_golem_statue-bare".to_owned(),
+        "minecraft:copper_golem_statue",
+        Tag::Compound(meta("minecraft:copper_golem_statue")),
+    ));
+    let mut statue_named = meta("minecraft:copper_golem_statue");
+    statue_named.retain(|(key, _)| key != "components");
+    statue_named.push((
+        "components".to_owned(),
+        Tag::Compound(vec![(
+            "minecraft:custom_name".to_owned(),
+            Tag::String("Copper Nick".to_owned()),
+        )]),
+    ));
+    out.push((
+        "copper_golem_statue-named".to_owned(),
+        "minecraft:copper_golem_statue",
+        Tag::Compound(statue_named),
+    ));
     let mut vault = meta("minecraft:vault");
     vault.push((
         "config".to_owned(),
@@ -1728,7 +1773,14 @@ fn entity_cases() -> Vec<Tag> {
     falling.cancel_drop = true;
     out.push(write_entity(&base(EntityKind::FallingBlock(falling), 21, pos)).unwrap());
     for fuse in [0, 80, i16::MAX as i32] {
-        out.push(write_entity(&base(EntityKind::Tnt(PrimedTnt { fuse }), 22, pos)).unwrap());
+        out.push(
+            write_entity(&base(
+                EntityKind::Tnt(PrimedTnt { fuse, owner: None }),
+                22,
+                pos,
+            ))
+            .unwrap(),
+        );
     }
     // 官方 UUIDUtil.CODEC 会不会把我们的 UUID 原样带回。
     let uuid = entity_uuid_tag(23);
@@ -2426,6 +2478,50 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
             ("InLove", Tag::Int(512)),
             ("Age", Tag::Int(4000)),
             ("variant", Tag::String("minecraft:cold".to_owned())),
+        ]),
+    ));
+    // 快乐恶魂：`still_timeout` 无条件写；幼年 `Age`、BODY 挽具和元数据状态
+    // 在重存时都要保持原样。
+    // Happy ghasts: `still_timeout` is always written; baby `Age`, the BODY
+    // harness and the synced flags survive a resave.
+    out.push((
+        "happy ghast bare".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:happy_ghast".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+        ]),
+    ));
+    out.push((
+        "happy ghast harnessed and hovering".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:happy_ghast".to_owned())),
+            ("Pos", doubles([3.5, 78.0, -7.25])),
+            ("UUID", uuid.clone()),
+            ("still_timeout", Tag::Int(10)),
+            ("Health", Tag::Float(13.0)),
+            ("NoAI", Tag::Byte(1)),
+            (
+                "equipment",
+                compound(vec![(
+                    "body",
+                    compound(vec![
+                        ("id", Tag::String("minecraft:red_harness".to_owned())),
+                        ("count", Tag::Int(1)),
+                    ]),
+                )]),
+            ),
+        ]),
+    ));
+    out.push((
+        "happy ghast baby".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:happy_ghast".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+            ("Age", Tag::Int(-24000)),
+            ("ForcedAge", Tag::Int(1200)),
+            ("still_timeout", Tag::Int(0)),
         ]),
     ));
     out.extend(brain_resave_cases());
