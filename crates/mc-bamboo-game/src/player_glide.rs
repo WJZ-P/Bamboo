@@ -54,16 +54,14 @@ fn can_glide_using(stack: &ItemStack, slot: EquipmentSlot) -> bool {
 }
 
 fn can_glide(player: &Player, blocks: &PlayerBlocks<'_>) -> bool {
-    let feet = BlockPos::containing(player.position());
-    let fluid = blocks.state(feet).fluid();
     !player.dead
         && player.spawn_pending.is_none()
         && !player.on_ground
         && !player.riding.is_passenger()
         && !player.sync.flying
         && !player.effects.has(mob_effect::LEVITATION)
-        && !fluid.is_tagged(fluid_tags::WATER)
-        && !fluid.is_tagged(fluid_tags::LAVA)
+        && !crate::player_move::touches_fluid(player, blocks, fluid_tags::WATER)
+        && !crate::player_move::touches_fluid(player, blocks, fluid_tags::LAVA)
         && !on_climbable(player, blocks)
         && gliders(player).next().is_some()
 }
@@ -119,7 +117,10 @@ pub(crate) fn tick(region: &mut Region) {
     let ids: Vec<_> = region
         .players
         .values()
-        .filter(|player| player.sync.is_fall_flying() || player.fall_fly_ticks != 0)
+        .filter(|player| {
+            player.spawn_pending.is_none()
+                && (player.sync.is_fall_flying() || player.fall_fly_ticks != 0)
+        })
         .map(|player| player.id)
         .collect();
     for id in ids {

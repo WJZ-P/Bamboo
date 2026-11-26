@@ -138,6 +138,7 @@ impl Stage {
             position,
         );
         player.sync.seen_by.insert(WATCHER);
+        player.motion.mark_loaded();
         region.insert_player(player);
 
         Self {
@@ -991,13 +992,18 @@ fn fall_flying_starts_and_sends_the_shared_flag_to_observers() {
     );
     assert!(stage.player().sync.is_fall_flying());
     stage.step();
+    assert_eq!(stage.player().height(), 0.6_f32);
+    assert_eq!(stage.player().eye_height(), f64::from(0.4_f32));
     assert_eq!(
         stage
             .take_received()
             .into_iter()
             .filter(|frame| frame.id == clientbound::SET_ENTITY_DATA)
             .collect::<Vec<_>>(),
-        [frame(clientbound::SET_ENTITY_DATA, "07 00 00 80 ff")],
+        [frame(
+            clientbound::SET_ENTITY_DATA,
+            "07 00 00 80 06 14 01 ff"
+        )],
     );
 
     on_player_command(
@@ -1014,7 +1020,10 @@ fn fall_flying_starts_and_sends_the_shared_flag_to_observers() {
             .into_iter()
             .filter(|frame| frame.id == clientbound::SET_ENTITY_DATA)
             .collect::<Vec<_>>(),
-        [frame(clientbound::SET_ENTITY_DATA, "07 00 00 00 ff")],
+        [frame(
+            clientbound::SET_ENTITY_DATA,
+            "07 00 00 00 06 14 00 ff"
+        )],
     );
 }
 
@@ -1022,7 +1031,11 @@ fn fall_flying_starts_and_sends_the_shared_flag_to_observers() {
 fn fall_flying_start_checks_equipment_and_environment() {
     use mc_bamboo_blocks::{durability::set_damage_value, entity::mob::effects::EffectInstance};
     use mc_bamboo_core::BlockPos;
-    use mc_bamboo_data::{blocks, items, registries::mob_effect};
+    use mc_bamboo_data::{
+        blocks, items,
+        registries::{data_component_type, mob_effect},
+    };
+    use mc_bamboo_protocol::components::{ComponentValue, PatchEntry};
 
     for condition in [
         "grounded",
@@ -1035,6 +1048,8 @@ fn fall_flying_start_checks_equipment_and_environment() {
         "empty",
         "wrong slot",
         "worn out",
+        "glider removed",
+        "invalid max damage",
     ] {
         let mut stage = Stage::at(POSITION);
         let feet = BlockPos::containing(POSITION);
@@ -1063,6 +1078,19 @@ fn fall_flying_start_checks_equipment_and_environment() {
             "empty" => player.inventory.slots[6] = ItemStack::empty(),
             "wrong slot" => player.inventory.slots.swap(6, HEAD_SLOT),
             "worn out" => set_damage_value(&mut player.inventory.slots[6], 431),
+            "glider removed" | "invalid max damage" => {
+                let glider = &mut player.inventory.slots[6];
+                let mut patch = glider.patch();
+                if condition == "glider removed" {
+                    patch.put(data_component_type::GLIDER, PatchEntry::Removed);
+                } else {
+                    patch.put(
+                        data_component_type::MAX_DAMAGE,
+                        PatchEntry::Set(ComponentValue::MaxDamage(i32::MIN)),
+                    );
+                }
+                (glider.added, glider.removed) = patch.to_opaque();
+            }
             _ => unreachable!(),
         }
         on_player_command(
@@ -1132,6 +1160,7 @@ fn fall_flying_stops_when_the_player_lands_enters_water_or_unequips() {
         match condition {
             "landed" => stage.player().on_ground = true,
             "water" => {
+                stage.shift(0.0, -0.25, 0.0);
                 let feet = BlockPos::containing(stage.player().position());
                 stage.region.chunks.set_block(feet, blocks::WATER);
             }

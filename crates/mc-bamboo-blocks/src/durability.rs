@@ -450,7 +450,7 @@ pub fn next_damage_will_break(stack: &ItemStack) -> bool {
         return false;
     };
     is_damageable(stack.item, &patch)
-        && damage_value(stack.item, &patch) >= max_damage(stack.item, &patch) - 1
+        && damage_value(stack.item, &patch) >= max_damage(stack.item, &patch).saturating_sub(1)
 }
 
 /// `ItemStack.hurtWithoutBreaking(amount, player)`：耐久附魔照常取数，但把损耗封顶在

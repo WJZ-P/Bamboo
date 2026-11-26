@@ -20,8 +20,9 @@ use mc_bamboo_blocks::{
 };
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{
-    blocks, gamerules, items,
-    registries::{attribute, mob_effect},
+    FluidTag, blocks, gamerules, items,
+    registries::{attribute, custom_stat, mob_effect},
+    tags::fluid_tags,
 };
 use mc_bamboo_protocol::{
     codec::Reader,
@@ -29,10 +30,7 @@ use mc_bamboo_protocol::{
     item::ItemStack,
     packet::{
         ClientboundPacket,
-        play::{
-            ClientInformation, ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SPRINTING, EquipmentSlot,
-            GameMode, PlayerPosition,
-        },
+        play::{ClientInformation, ENTITY_FLAG_SPRINTING, EquipmentSlot, GameMode, PlayerPosition},
     },
 };
 use mc_bamboo_world::store::ChunkStore;
@@ -55,6 +53,9 @@ const MAX_VERTICAL: f64 = 2.0e7;
 const STANDING_BODY: f64 = 1.8;
 const CROUCHING_BODY: f64 = 1.5;
 const SWIMMING_BODY: f64 = 0.6;
+/// 滑翔姿势的碰撞盒高度，对应 `Avatar.POSES`。
+/// The glide bounding-box height from `Avatar.POSES`.
+pub(crate) const FALL_FLYING_BODY: f64 = 0.6_f32 as f64;
 const HALF_WIDTH: f64 = 0.3;
 /// 专用服务器 `allow-flight` 的默认值。配置里没有这一项。
 ///
@@ -159,6 +160,12 @@ impl Motion {
     /// The client sent `player_loaded`, or the load timeout has elapsed.
     pub(crate) fn client_loaded(&self) -> bool {
         self.client_loaded_timeout <= 0
+    }
+
+    /// 当前的碰撞盒使用滑翔姿势。
+    /// Whether the collision box is in the fall-flying pose.
+    pub(crate) fn is_fall_flying_pose(&self) -> bool {
+        self.body_height == FALL_FLYING_BODY
     }
 
     pub(crate) fn mark_loaded(&mut self) {
@@ -714,7 +721,7 @@ fn apply_change(
     // `ServerPlayer.checkMovementStatistics`：按客户端报告的位移算消耗的厘米数。
     // 水 / 梯子 / 游泳的判定直接从玩家当前所在格和脚下格读方块状态，
     // 和官方 `isEyeInFluid` / `isInWater` / `onClimbable` 的方块查询一致。
-    let sprinting = player.sync.shared_flags & ENTITY_FLAG_SPRINTING != 0;
+    let sprinting = player.sync.is_sprinting();
     let feet = BlockPos::containing(change.target);
     let eye = BlockPos::containing(Vec3::new(
         change.target.x,
@@ -726,14 +733,22 @@ fn apply_change(
     let eye_in_water = eye_state
         .fluid()
         .is_tagged(mc_bamboo_data::tags::fluid_tags::WATER);
-    let in_water = feet_state
-        .fluid()
-        .is_tagged(mc_bamboo_data::tags::fluid_tags::WATER);
-    let on_climbable = feet_state.is_tagged(mc_bamboo_data::tags::block_tags::CLIMBABLE);
-    let swimming = player.sync.shared_flags & ENTITY_FLAG_FALL_FLYING == 0
-        && player.motion.body_height == SWIMMING_BODY
-        && !player.on_ground;
-    let fall_flying = player.sync.shared_flags & ENTITY_FLAG_FALL_FLYING != 0;
+    let fall_flying = player.sync.is_fall_flying();
+    let in_water = if fall_flying {
+        touches_fluid(player, change.blocks, fluid_tags::WATER)
+    } else {
+        feet_state.fluid().is_water()
+    };
+    let on_climbable = crate::player_glide::on_climbable(player, change.blocks);
+    let swimming = !fall_flying && player.motion.body_height == SWIMMING_BODY && !player.on_ground;
+    if fall_flying && !eye_in_water && !in_water && !on_climbable && !player.on_ground {
+        let centimeters = (client_delta.length_sqr().sqrt() as f32 * 100.0).round() as i32;
+        if centimeters > 0 {
+            player
+                .item_use_stats
+                .award_custom(custom_stat::AVIATE_ONE_CM, centimeters);
+        }
+    }
     if let Some(amount) = crate::player_exhaustion::movement(
         client_delta.x,
         client_delta.y,
@@ -1103,12 +1118,22 @@ fn context_at(player: &Player, bottom: f64, placement: bool) -> CollisionContext
 /// `Player.updatePlayerPose`。游泳姿势塞不进去就保持原样。
 ///
 /// `Player.updatePlayerPose`. The pose stays put when the swimming box does not fit.
-fn update_body(player: &mut Player, blocks: &PlayerBlocks<'_>) {
-    if !body_fits(player, SWIMMING_BODY, blocks) {
+/// 按当前位置和姿势更新移动碰撞盒。
+/// Resolve the movement box for the player's current position and pose.
+pub(crate) fn update_body(player: &mut Player, blocks: &PlayerBlocks<'_>) {
+    let gliding = player.sync.is_fall_flying();
+    let low_body = if gliding {
+        FALL_FLYING_BODY
+    } else {
+        SWIMMING_BODY
+    };
+    if !body_fits(player, low_body, blocks) {
         return;
     }
     let want_crouch = player.sync.shift_key_down && !player.sync.flying;
-    let desired = if want_crouch {
+    let desired = if gliding {
+        FALL_FLYING_BODY
+    } else if want_crouch {
         CROUCHING_BODY
     } else {
         STANDING_BODY
@@ -1168,6 +1193,32 @@ fn fluid_is_water(blocks: &PlayerBlocks<'_>, pos: BlockPos) -> bool {
         .is_tagged(mc_bamboo_data::tags::fluid_tags::WATER)
 }
 
+/// 判断玩家的流体交互盒是否接触该类型的流体。
+/// Whether the player's fluid interaction box touches fluid of this type.
+pub(crate) fn touches_fluid(player: &Player, blocks: &PlayerBlocks<'_>, tag: FluidTag) -> bool {
+    let aabb = movement_box(player).deflated(0.001);
+    for x in mth::floor(aabb.min_x)..(aabb.max_x.ceil() as i32) {
+        for z in mth::floor(aabb.min_z)..(aabb.max_z.ceil() as i32) {
+            for y in mth::floor(aabb.min_y)..(aabb.max_y.ceil() as i32) {
+                let pos = BlockPos::new(x, y, z);
+                let fluid = blocks.state(pos).fluid();
+                if !fluid.is_tagged(tag) {
+                    continue;
+                }
+                let height = if blocks.state(pos.above()).fluid().is_tagged(tag) {
+                    1.0
+                } else {
+                    f64::from(fluid.own_height())
+                };
+                if f64::from(y) + height >= aabb.min_y {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn body_fits(player: &Player, height: f64, blocks: &PlayerBlocks<'_>) -> bool {
     let box_ = body_box(player, height).deflated(1.0e-7);
     no_block_collision(
@@ -1187,7 +1238,7 @@ fn movement_box(player: &Player) -> Aabb {
 
 fn body_box(player: &Player, height: f64) -> Aabb {
     let feet = player.position();
-    let half_width = if player.sync.is_fall_flying() {
+    let half_width = if player.sync.is_fall_flying() || player.motion.is_fall_flying_pose() {
         f64::from(0.3_f32)
     } else {
         HALF_WIDTH

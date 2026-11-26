@@ -38,6 +38,7 @@ pub fn runtime_player_data(player: &Player) -> PlayerData {
         xp_seed: player.enchantment_seed,
         score: player.score,
     });
+    data.fall_flying = player.sync.is_fall_flying();
     player.health.save(&mut data);
     player.environment.save(&mut data);
     // `LivingEntity.addAdditionalSaveData`：总是写 `attributes`（只含已实例化属性的基础值和永久修饰符）。
@@ -173,6 +174,7 @@ pub fn restore_inventory(player: &mut Player, data: &PlayerData) {
     player.pitch = data.rotation[1];
     player.head_yaw = data.rotation[0];
     player.on_ground = data.on_ground;
+    player.sync.set_fall_flying(data.fall_flying);
     // `ServerPlayer.readAdditionalSaveData`：把肩膀鹦鹉读回运行时状态。
     player.shoulder.left = data.shoulder_left.clone();
     player.shoulder.right = data.shoulder_right.clone();
@@ -183,6 +185,24 @@ pub fn restore_inventory(player: &mut Player, data: &PlayerData) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fall_flying_round_trips_through_player_data() {
+        let mut player = Player::new(
+            crate::inbound::PlayerId(1),
+            uuid::Uuid::nil(),
+            "Glider".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            mc_bamboo_core::Vec3::default(),
+        );
+        player.sync.set_fall_flying(true);
+        let data = runtime_player_data(&player);
+        assert!(data.fall_flying);
+        player.sync.set_fall_flying(false);
+        restore_inventory(&mut player, &data);
+        assert!(player.sync.is_fall_flying());
+    }
 
     #[test]
     fn menu_and_disk_slot_mappings_are_inverses() {

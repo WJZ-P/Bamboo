@@ -20,11 +20,6 @@ use crate::{inbound::PlayerId, player::Player, region::Region};
 /// The `LIVING_ENTITY_FLAG_SPIN_ATTACK` bit (4) of `DATA_LIVING_ENTITY_FLAGS`.
 pub(crate) const LIVING_FLAG_SPIN_ATTACK: u8 = 0x04;
 
-/// 站立 / 潜行 / 游泳的碰撞盒高度，宽度固定 0.6（和 `player_move` 一致）。
-const STANDING_BODY: f64 = 1.8;
-const CROUCHING_BODY: f64 = 1.5;
-const HALF_WIDTH: f64 = 0.3;
-
 /// `LivingEntity.autoSpinAttackTicks` / `autoSpinAttackDmg` / `autoSpinAttackItemStack`。
 /// 另外记下上一刻的位置，`checkAutoSpinAttack` 用前后两盒的并集做扫掠。
 ///
@@ -101,13 +96,13 @@ pub(crate) fn tick(region: &mut Region) {
             continue;
         }
         let position = player.position();
-        let crouching = player.sync.is_crouching();
-        let last = player.auto_spin_attack.last_position;
+        let previous = player.auto_spin_attack.last_position.subtract(position);
+        let bounds = player.bounding_box();
         let damage = player.auto_spin_attack.damage;
         // 官方先 `autoSpinAttackTicks--`，再用「travel 前的盒」和「当前盒」的并集查询。
         // Vanilla decrements first, then queries the union of the pre-travel box
         // and the current box.
-        let area = union(player_box(last, crouching), player_box(position, crouching));
+        let area = union(bounds.moved(previous.x, previous.y, previous.z), bounds);
         let target = first_living_target(region, id, area);
 
         if let Some(uid) = target {
@@ -154,7 +149,7 @@ fn first_living_target(region: &Region, id: PlayerId, area: Aabb) -> Option<i32>
             if player.id == id {
                 continue;
             }
-            let bounds = player_box(player.position(), player.sync.is_crouching());
+            let bounds = player.bounding_box();
             if bounds.intersects(area) {
                 found = Some(player.id.0);
                 break;
@@ -162,22 +157,6 @@ fn first_living_target(region: &Region, id: PlayerId, area: Aabb) -> Option<i32>
         }
     }
     found
-}
-
-fn player_box(position: Vec3, crouching: bool) -> Aabb {
-    let height = if crouching {
-        CROUCHING_BODY
-    } else {
-        STANDING_BODY
-    };
-    Aabb::new(
-        position.x - HALF_WIDTH,
-        position.y,
-        position.z - HALF_WIDTH,
-        position.x + HALF_WIDTH,
-        position.y + height,
-        position.z + HALF_WIDTH,
-    )
 }
 
 fn union(a: Aabb, b: Aabb) -> Aabb {
@@ -250,8 +229,8 @@ mod tests {
 
     #[test]
     fn the_sweep_box_unions_the_old_and_new_positions() {
-        let a = player_box(Vec3::new(0.0, 64.0, 0.0), false);
-        let b = player_box(Vec3::new(1.0, 64.0, 0.0), false);
+        let a = Aabb::new(-0.3, 64.0, -0.3, 0.3, 65.8, 0.3);
+        let b = a.moved(1.0, 0.0, 0.0);
         let merged = union(a, b);
         assert_eq!(merged.min_x, a.min_x);
         assert_eq!(merged.max_x, b.max_x);
