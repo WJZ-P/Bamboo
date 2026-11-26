@@ -31,7 +31,7 @@ Non-player entities (falling blocks and primed TNT) are outside this spec. The w
 | 11 | `set_equipment` 的槽位是枚举 ordinal，不是 `EquipmentSlot.id`。副手是 1 不是 5 | 第 11 节 |
 | 12 | 客户端从不在本地设置皮肤部件和主手，只靠服务端回发 index 15、16 | 元数据必须也发给玩家自己 |
 | 13 | 不要发给自己 `add_entity`：`ClientLevel.addEntity` 会先按 ID 移除旧实体，也就是把 LocalPlayer 删掉 | 配对时跳过自己 |
-| 14 | `player_command` 的 `START_FALL_FLYING` 不能只忽略：客户端先在本地进入滑翔，这个状态只有服务端能清 | 回一个 `set_entity_data`，第 10 节 |
+| 14 | `player_command` 的 `START_FALL_FLYING` 不能只忽略：客户端先在本地进入滑翔，这个状态只有服务端能清 | 下一个元数据周期广播 `set_entity_data`，第 10 节 |
 
 ## 1. 公共编码
 
@@ -796,9 +796,15 @@ index 16 的位（`PlayerModelPart`）：`0x01` 披风、`0x02` 夹克、`0x04` 
 并在滑翔速度变化时向观察者发送 `set_entity_motion`。持续滑翔每 10 刻发出一次游戏事件，
 每 20 刻检查装备耐久。落地、进水、失去可用装备或其它条件结束滑翔后，同步清除标志。
 
-拒绝请求时清除滑翔位。观察者此前没有收到滑翔状态时，只给发送者回当前的标志字节。
+拒绝请求时 `stopFallFlying()` 先 `setSharedFlag(7, true)` 再 `setSharedFlag(7, false)`：同一刻值没变，
+但 `SynchedEntityData` 的 0 号被标脏。下一个 `ServerEntity.sendChanges` → `sendDirtyEntityData()`
+把这一项按 `packDirty` 的 index 升序写进 `set_entity_data`，用 `sendToTrackingPlayersAndSelf` 发给
+本人和所有观察者，不是请求到达时立刻私发。所以即使观察者此前没收到过滑翔状态，也会收到当前
+（不含 `0x80`）的标志字节。Bamboo 的同步状态里用「强制脏的 0 号」记这一项，和同周期真正变了的项
+合并成一个包；0 号排在其它项前面，值取周期开始时的当前字节。
 
-`[跑]` 实体 7，没有潜行和冲刺：`07 00 00 00 ff`，完整帧 `06 65 07 00 00 00 ff`。正在冲刺：`07 00 00 08 ff`。
+`[跑]` 实体 7 的下一个周期，没有潜行和冲刺：`07 00 00 00 ff`，完整帧 `06 65 07 00 00 00 ff`。
+正在冲刺（还没进过周期）：`07 00 00 08 ff`。
 
 官方的冲刺还会加 `movement_speed` 修饰符（`LivingEntity.setSprinting`），再用 `update_attributes` 同步。`RemotePlayer` 的位置来自插值，不跑移动物理（`noPhysics = true`，`aiStep` 不调 `travel`），所以对别人的画面没有影响。
 
