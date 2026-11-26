@@ -213,7 +213,7 @@ fn check_burn_out(world: &mut World, pos: BlockPos, chance: i32, age: i32) {
         // `TntBlock.prime`：方块已经 `removeBlock` 了，这里只生成实体并放点燃声。
         // `TntBlock.prime`: the block is already `removeBlock`ed. This only spawns the entity
         // and plays the primed sound.
-        world.spawn_tnt(pos);
+        world.spawn_tnt(pos, None);
     }
 }
 

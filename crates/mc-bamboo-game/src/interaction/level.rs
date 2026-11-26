@@ -267,16 +267,18 @@ impl Level for RegionLevel<'_> {
     /// `Mob.equip(EquipmentTable)`：按装备表给一只还没进世界的生物套上装备。
     ///
     /// 官方先给八个槽设掉落几率（`slot_drop_chances`，缺省 0，也接受一个浮点值表示
-    /// 所有槽同一个值），再滚战利品表，每件按 `equippable` 组件的槽位走
-    /// `equipItemIfPossible`：槽位能穿才套，套上后 `setGuaranteedDrop` 把掉落几率设成
-    /// 2.0（必掉）。新生的生物槽位是空的，`canReplaceCurrentItem` 的盔甲 / 武器比较和
-    /// 「掉出已有装备」的分支走不到。
-    fn equip_mob(&mut self, entity: &mut mc_bamboo_blocks::entity::Entity, equipment: &Tag) {
-        use mc_bamboo_blocks::entity::mob::equipment::{GUARANTEED_DROP_CHANCE, SLOTS, slot_name};
-        use mc_bamboo_protocol::packet::play::EquipmentSlot;
+    /// 所有槽同一个值），再滚战利品表，每件走 `Mob.equipItemIfPossible`：能穿才套，
+    /// 套上后 `setGuaranteedDrop` 把掉落几率设成 2.0（必掉），换上更好的一件时旧的那件
+    /// 按掉落几率掉出来（返回给调用方 `spawnAtLocation`）。
+    fn equip_mob(
+        &mut self,
+        entity: &mut mc_bamboo_blocks::entity::Entity,
+        equipment: &Tag,
+    ) -> Vec<ItemStack> {
+        use mc_bamboo_blocks::entity::mob::equipment::{SLOTS, slot_name};
 
         let Tag::Compound(values) = equipment else {
-            return;
+            return Vec::new();
         };
         let get = |key: &str| {
             values
@@ -286,7 +288,7 @@ impl Level for RegionLevel<'_> {
                 .map(|(_, value)| value)
         };
         let Some(Tag::String(loot_table)) = get("loot_table") else {
-            return;
+            return Vec::new();
         };
         let mut chances = std::collections::BTreeMap::new();
         match get("slot_drop_chances") {
@@ -308,38 +310,41 @@ impl Level for RegionLevel<'_> {
             None => {}
         }
         let Some(mob_type) = entity.kind.mob().map(|mob| mob.mob_type) else {
-            return;
+            return Vec::new();
         };
         let origin =
             mc_bamboo_loot::Position::new(entity.position.x, entity.position.y, entity.position.z);
-        let mob = entity.kind.mob_mut().expect("mob type checked above");
-        for slot in SLOTS {
-            mob.equipment
-                .set_drop_chance(slot, chances.get(slot_name(slot)).copied().unwrap_or(0.0));
+        // 生物自己的随机源按值拷出，打完后写回：`equipItemIfPossible` 的掉落判定取它。
+        let mut random = entity.random;
+        let mut dropped = Vec::new();
+        {
+            let mob = entity.kind.mob_mut().expect("mob type checked above");
+            for slot in SLOTS {
+                mob.equipment
+                    .set_drop_chance(slot, chances.get(slot_name(slot)).copied().unwrap_or(0.0));
+            }
         }
         let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
-            return;
+            return Vec::new();
         };
         let mut params = mc_bamboo_loot::LootParams::new(0.0);
         params.this_entity = Some(mc_bamboo_loot::EntityView::new(mob_type.entity_type()));
         params.origin = Some(origin);
         let Ok(stacks) = table.get_random_items(&params, self.random.source()) else {
-            return;
+            return Vec::new();
         };
-        for stack in stacks {
-            let stack = crate::loot_stacks::loot_stack(&stack);
-            let slot_id = mc_bamboo_recipes::equipment_slot_for_item(&stack);
-            if !mc_bamboo_recipes::is_equippable_in_slot(&stack, slot_id) {
-                continue;
+        {
+            let mob = entity.kind.mob_mut().expect("mob type checked above");
+            for stack in stacks {
+                let stack = crate::loot_stacks::loot_stack(&stack);
+                let (_, replaced) = mob.equip_item_if_possible(&mut random, stack);
+                if let Some(replaced) = replaced {
+                    dropped.push(replaced);
+                }
             }
-            let slot = SLOTS
-                .get(slot_id as usize)
-                .copied()
-                .unwrap_or(EquipmentSlot::MainHand);
-            mob.equipment.set(slot, stack);
-            // `setItemSlotAndDropWhenKilled` 里的 `setGuaranteedDrop`。
-            mob.equipment.set_drop_chance(slot, GUARANTEED_DROP_CHANCE);
         }
+        entity.random = random;
+        dropped
     }
 
     fn trial_spawner_players(

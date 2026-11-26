@@ -38,7 +38,13 @@ use crate::{
 
 /// 生物的一刻，`Entity.tick` 交到这里。`kind` 在这期间被换成一个占位。
 pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx, plan: ThrottlePlan) {
-    let mut kind = std::mem::replace(&mut me.kind, EntityKind::Tnt(PrimedTnt { fuse: 0 }));
+    let mut kind = std::mem::replace(
+        &mut me.kind,
+        EntityKind::Tnt(PrimedTnt {
+            fuse: 0,
+            owner: None,
+        }),
+    );
     if let EntityKind::Mob(mob) = &mut kind {
         // 计划（分档、豁免、补偿）由驱动在算阶段之前按同一份快照算好；这里不再
         // 重判状态，精确和并行两种驱动才能逐位一致。
@@ -67,7 +73,13 @@ pub(crate) fn with_mob<R>(
     me: &mut Entity,
     f: impl FnOnce(&mut Entity, &mut Mob) -> R,
 ) -> Option<R> {
-    let mut kind = std::mem::replace(&mut me.kind, EntityKind::Tnt(PrimedTnt { fuse: 0 }));
+    let mut kind = std::mem::replace(
+        &mut me.kind,
+        EntityKind::Tnt(PrimedTnt {
+            fuse: 0,
+            owner: None,
+        }),
+    );
     let result = match &mut kind {
         EntityKind::Mob(mob) => Some(f(me, mob)),
         _ => None,

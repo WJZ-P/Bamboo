@@ -61,6 +61,7 @@ pub enum LightInput {
     PostFeatures,
     /// 旧的 CARVERS 输入，只给改坏确认用。
     /// The old CARVERS input, only for break confirmation.
+    #[cfg(feature = "oracle-samples")]
     Carvers,
 }
 
@@ -187,6 +188,7 @@ pub fn generate_light_stage_with_input(
 /// For the whole-chunk light oracle: the exact 3x3 block layers the `LIGHT`
 /// stage hands to the engine, built through the game pipeline's own snapshot
 /// assembly and feature-write merge.
+#[cfg(feature = "oracle-samples")]
 pub fn post_features_blocks(
     config: &WorldGenConfig,
     cx: i32,
@@ -256,6 +258,7 @@ mod tests {
     /// 整块对拍的改坏确认就靠这个差异。
     /// The post-FEATURES view must give different light from CARVERS at a chunk
     /// with features; the whole-chunk oracle's break confirmation relies on it.
+    #[cfg(feature = "oracle-samples")]
     #[test]
     fn post_features_light_differs_from_carvers_light() {
         let config = WorldGenConfig {
@@ -264,13 +267,21 @@ mod tests {
             generate_structures: false,
             ..WorldGenConfig::default()
         };
-        let post =
-            generate_light_stage_with_input(&config, -2, -2, None, &[], LightInput::PostFeatures)
-                .unwrap();
-        let carvers =
-            generate_light_stage_with_input(&config, -2, -2, None, &[], LightInput::Carvers)
-                .unwrap();
-        assert_ne!(post.sky, carvers.sky);
+        {
+            let post = generate_light_stage_with_input(
+                &config,
+                -2,
+                -2,
+                None,
+                &[],
+                LightInput::PostFeatures,
+            )
+            .unwrap();
+            let carvers =
+                generate_light_stage_with_input(&config, -2, -2, None, &[], LightInput::Carvers)
+                    .unwrap();
+            assert_ne!(post.sky, carvers.sky);
+        }
     }
 
     /// 生成期光照的天空光和方块光都有数据层（不是全 `None`）。

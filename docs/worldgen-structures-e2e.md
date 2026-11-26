@@ -172,7 +172,7 @@ gen-world: 60 chunks, 0 quart cells, 53084160 blocks, 133 block entities,
 | 古城箱子多一个 `LootTableSeed` | `RandomizableContainer.tryLoadLootTable` 在没有 `LootTable` 时清掉整份状态，`trySaveLootTable` 不会单独存种子 |
 | 宝库 `config.loot_table` 官方没有 | `VaultConfig.CODEC.encode` 对等于默认 `TRIAL_CHAMBERS_REWARD` 的表省略该键 |
 | 熔炉 / 酿造台计时字段类型、告示牌文本 | 模板 nbt 用 short / byte / 组件对象，`saveAdditional` 用 `putInt`、`SignText.CODEC` 存纯字符串 |
-| 矿井 / 府邸刷怪笼、雪屋箱子缺实体 | 放置时没有 `setBlockEntity` 对应的记录 |
+| 矿井 / 府邸刷怪笼、雪屋箱子缺实体（历史记录；方块实体交付已补上） | 放置时没有 `setBlockEntity` 对应的记录 |
 
 可疑的沙子相关修复：`DesertPyramidStructure.afterPlace` 现在给刷扫方块实体设
 `minecraft:archaeology/desert_pyramid` 与 `pos.asLong()` 作种子（字节码里 lambda

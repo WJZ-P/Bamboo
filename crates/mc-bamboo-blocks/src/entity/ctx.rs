@@ -1195,6 +1195,16 @@ pub enum Command {
     Explode {
         center: Vec3,
         radius: f32,
+        /// 发出者（点燃的 TNT）这一刻的公开数据：它已经被 `discard` 出表，
+        /// 死亡消息要靠它拿 `entity.minecraft.tnt` 的显示名和 `show_entity`。
+        ///
+        /// The emitter (primed TNT) public data: it has been discarded from the table,
+        /// so the death message needs it for the `entity.minecraft.tnt` name and `show_entity`.
+        source: Box<EntityPublic>,
+        /// 点燃它的活体（打火石点着的玩家），没有就是 `None`。
+        ///
+        /// The living entity that lit it (a player with flint and steel), if any.
+        owner: Option<EntityUid>,
     },
     /// 生物引发的爆炸（`Level.ExplosionInteraction.MOB`）：射线、伤害生物和玩家、
     /// 按 `mobGriefing` 破坏方块。发出者就是爆炸的来源实体。
@@ -1798,7 +1808,12 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             position,
             context,
         } => world.game_event(event, position, context),
-        Command::Explode { center, radius } => world.explode_tnt(center, radius, me.id),
+        Command::Explode {
+            center,
+            radius,
+            source,
+            owner,
+        } => world.explode_tnt(center, radius, source, owner),
         Command::ExplodeMob {
             center,
             radius,

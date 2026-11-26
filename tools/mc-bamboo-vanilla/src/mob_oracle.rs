@@ -3080,7 +3080,7 @@ impl Report {
                                 let damage = case.helmet_damage
                                     + i32::from(matches!(break_test, Some("zombie_helmet")));
                                 if damage != 0 {
-                                    mc_bamboo_blocks::durability::set_damage_for_oracle(
+                                    mc_bamboo_blocks::durability::set_damage_value(
                                         &mut helmet,
                                         damage,
                                     );

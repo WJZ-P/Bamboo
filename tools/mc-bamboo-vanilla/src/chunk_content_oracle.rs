@@ -1772,7 +1772,14 @@ fn entity_cases() -> Vec<Tag> {
     falling.cancel_drop = true;
     out.push(write_entity(&base(EntityKind::FallingBlock(falling), 21, pos)).unwrap());
     for fuse in [0, 80, i16::MAX as i32] {
-        out.push(write_entity(&base(EntityKind::Tnt(PrimedTnt { fuse }), 22, pos)).unwrap());
+        out.push(
+            write_entity(&base(
+                EntityKind::Tnt(PrimedTnt { fuse, owner: None }),
+                22,
+                pos,
+            ))
+            .unwrap(),
+        );
     }
     // 官方 UUIDUtil.CODEC 会不会把我们的 UUID 原样带回。
     let uuid = entity_uuid_tag(23);

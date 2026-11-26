@@ -982,7 +982,18 @@ pub fn replay(
                 f64::from(target.z) + 0.5,
             );
             let mut world = mc_bamboo_blocks::World::new(&mut level, &mut ticks);
-            world.explode_tnt(centre, 1.0, 0);
+            let source = Box::new(mc_bamboo_blocks::entity::EntityPublic {
+                uid: 0,
+                kind: mc_bamboo_blocks::entity::KindPublic::Tnt { fuse: 0 },
+                position: centre,
+                delta: Vec3::default(),
+                on_ground: false,
+                yaw: 0.0,
+                removed: false,
+                precise: false,
+                vehicle: None,
+            });
+            world.explode_tnt(centre, 1.0, source, None);
             mc_bamboo_blocks::Outcome {
                 result: mc_bamboo_blocks::InteractionResult::Success,
                 used_without_item: false,

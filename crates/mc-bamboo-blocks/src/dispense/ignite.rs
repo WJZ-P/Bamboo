@@ -49,7 +49,7 @@ pub(super) fn execute(
         //
         // `removeBlock` runs only when `TntBlock.prime` succeeds. A false rule draws no yaw
         // `nextDouble`. The dispenser source is null, so the adventure-mode check does not run.
-        if world.spawn_tnt(target) >= 0 {
+        if world.spawn_tnt(target, None) >= 0 {
             world.remove_block(target);
         } else {
             success = false;

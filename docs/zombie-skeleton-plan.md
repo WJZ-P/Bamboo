@@ -52,7 +52,7 @@
   `CombatRules.getDamageAfterAbsorb`（`2+toughness/4`、`clamp(armor−amount/f, armor*0.2, 20)`、
   再乘 `1−f/25`，其中 `f` 被 `EnchantmentHelper.modifyArmorEffectiveness` 夹到 [0,1]）→
   `getDamageAfterMagicAbsorb`（抗性效果/保护附魔，clamp 0..20）→ 吸收血量 → 饥饿消耗、
-  `CombatTracker`、扣血、`ENTITY_DAMAGE` 游戏事件。Bamboo 没有「从 6 槽装备算护甲值/韧性/
+  `CombatTracker`、扣血、`ENTITY_DAMAGE` 游戏事件。Bamboo 已有玩家血量、伤害和死亡 / 重生流程；写作时尚无「从 6 槽装备算护甲值/韧性/
   保护附魔等级」的运行时代码（只有装备同步 `entity_sync.rs:332` 和物品组件表）。
 - `Player.dropEquipment`：`keepInventory` 为假 → `destroyVanishingCursedItems` + `Inventory.dropAll()`；
   `Player.getBaseExperienceReward`：`keepInventory || isSpectator ? 0 : min(level*7,100)`；

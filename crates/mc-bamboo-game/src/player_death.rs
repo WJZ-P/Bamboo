@@ -782,4 +782,30 @@ mod tests {
         assert!(text.contains("death.attack.badRespawnPoint.link"));
         assert!(text.contains("MCPE-28723"));
     }
+
+    /// TNT 直接炸死玩家时，`direct` 指向 TNT 实体，`attacker_name` 要给出
+    /// `entity.minecraft.tnt` 显示名和 `show_entity` 悬停，而不是空。
+    #[test]
+    fn tnt_direct_entity_names_the_death_message() {
+        use mc_bamboo_blocks::entity::{EntityPublic, KindPublic};
+        let players = BTreeMap::new();
+        let entities = mc_bamboo_blocks::entity::Entities::new();
+        let tnt = EntityPublic {
+            uid: 7,
+            kind: KindPublic::Tnt { fuse: 0 },
+            position: mc_bamboo_core::Vec3::default(),
+            delta: mc_bamboo_core::Vec3::default(),
+            on_ground: false,
+            yaw: 0.0,
+            removed: false,
+            precise: false,
+            vehicle: None,
+        };
+        let mut source = DamageSource::environment(DamageKind::Explosion);
+        source.direct = Some(7);
+        let name = attacker_name(&players, &entities, Some(&tnt), &source).expect("TNT has a name");
+        let text = format!("{name:?}");
+        assert!(text.contains("entity.minecraft.tnt"), "{text}");
+        assert!(text.contains("show_entity"), "{text}");
+    }
 }

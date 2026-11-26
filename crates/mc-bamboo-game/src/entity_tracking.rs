@@ -176,6 +176,7 @@ impl EntityTracking {
     }
 
     /// 逐刻对拍用：这个实体是不是已经有过同步状态。
+    #[cfg(feature = "oracle-samples")]
     pub fn has_tracked_for_oracle(&self, id: i32) -> bool {
         self.tracked.contains_key(&id)
     }
@@ -184,6 +185,7 @@ impl EntityTracking {
     ///
     /// The sync state of one entity for the tick-by-tick oracle. A fresh one is
     /// created from the entity's current appearance when absent.
+    #[cfg(feature = "oracle-samples")]
     pub fn tracked_for_oracle(&mut self, snapshot: &Snapshot) -> &mut TrackedEntity {
         self.tracked
             .entry(snapshot.id)
