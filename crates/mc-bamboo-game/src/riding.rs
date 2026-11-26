@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use mc_bamboo_blocks::entity::{
-    EntityUid, FIRST_ENTITY_ID, KindPublic, no_block_collision, sweep_movement,
+    EntityKind, EntityUid, FIRST_ENTITY_ID, KindPublic, no_block_collision, sweep_movement,
 };
 use mc_bamboo_blocks::{CollisionContext, EntityContext, world::CollisionBlocks};
 use mc_bamboo_core::{BlockPos, Hand, Vec3, mth};
@@ -84,6 +84,7 @@ pub(crate) fn passengers(region: &Region, vehicle: EntityUid) -> Vec<EntityUid> 
         .public_at(vehicle)
         .map(|public| match &public.kind {
             KindPublic::Mob(mob) => mob.passengers.clone(),
+            KindPublic::Boat(boat) => boat.passengers.clone(),
             _ => Vec::new(),
         })
         .unwrap_or_default()
@@ -97,10 +98,12 @@ pub(crate) fn passengers(region: &Region, vehicle: EntityUid) -> Vec<EntityUid> 
 pub(crate) fn player_vehicles(region: &Region) -> BTreeMap<PlayerId, EntityUid> {
     let mut out = BTreeMap::new();
     for public in region.entities.iter_public() {
-        let KindPublic::Mob(mob) = &public.kind else {
-            continue;
+        let list = match &public.kind {
+            KindPublic::Mob(mob) => &mob.passengers,
+            KindPublic::Boat(boat) => &boat.passengers,
+            _ => continue,
         };
-        for &passenger in &mob.passengers {
+        for &passenger in list {
             if passenger < FIRST_ENTITY_ID {
                 out.insert(PlayerId(passenger), public.uid);
             }
@@ -431,6 +434,10 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
     let Some(public) = region.entities.public_at(vehicle) else {
         return;
     };
+    if matches!(public.kind, KindPublic::Boat(_)) {
+        mount_boat(region, id, vehicle);
+        return;
+    }
     // 官方 `canAddPassenger`：默认只坐一个人；`HappyGhast` 覆写成最多四人。
     //
     // Vanilla `canAddPassenger`: one by default; `HappyGhast` allows up to four.
@@ -527,6 +534,79 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
     );
 }
 
+/// 官方 `AbstractBoat.interact` 里的 `player.startRiding(this)`。船最多两名乘客
+/// （运输船一名，`getMaxPassengers`），`canAddPassenger` 还要求眼睛不在水里；
+/// 玩家乘客按 `add_passenger` 插到名单最前。
+///
+/// Vanilla `AbstractBoat.interact`'s `player.startRiding(this)`: up to two
+/// passengers (one for a chest boat), with players inserted first in the list.
+fn mount_boat(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
+    // `AbstractBoat.interact` 要 `outOfControlTicks < 60`；`canAddPassenger` 要
+    // `getPassengers().size() < getMaxPassengers()` 且 `!isEyeInFluid(WATER)`。
+    let Some((entity_type, passengers, out_of_control, eye_in_water, yaw, position)) = region
+        .entities
+        .with_mut(vehicle, |entity| {
+            if let EntityKind::Boat(boat) = &entity.kind {
+                Some((
+                    boat.entity_type,
+                    boat.passengers.len(),
+                    boat.out_of_control_ticks,
+                    boat.eye_in_water,
+                    entity.y_rot,
+                    entity.position,
+                ))
+            } else {
+                None
+            }
+        })
+        .flatten()
+    else {
+        return;
+    };
+    let max = if mc_bamboo_blocks::entity::boat::is_chest(entity_type) {
+        1
+    } else {
+        2
+    };
+    if passengers >= max || out_of_control >= 60.0 || eye_in_water {
+        return;
+    }
+    let Some(player) = region.players.get(&id) else {
+        return;
+    };
+    if player.riding.vehicle == Some(vehicle) {
+        return;
+    }
+    // `canRide`：按着潜行键或还在下车冷却里就不能上。
+    if player.sync.shift_key_down || player.riding.boarding_cooldown > 0 {
+        return;
+    }
+    if player.riding.is_passenger() {
+        dismount(region, id);
+    }
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    player.yaw = yaw;
+    player.head_yaw = yaw;
+    player.pitch = 0.0;
+    player.riding.vehicle = Some(vehicle);
+    player.riding.last_vehicle = Some(vehicle);
+    player.riding.first_good = position;
+    player.riding.last_good = position;
+    region.entities.with_mut(vehicle, |entity| {
+        if let EntityKind::Boat(boat) = &mut entity.kind {
+            mc_bamboo_blocks::entity::riding::add_passenger(&mut boat.passengers, id.0, true);
+        }
+    });
+    crate::advancement_triggers::record(
+        region,
+        id,
+        "minecraft:started_riding",
+        serde_json::json!({}),
+    );
+}
+
 /// 方块层生物乘客的 `stopRiding`：摘掉乘客自己的 `vehicle`、给 60 刻冷却，
 /// 位置不动（官方只有玩家 `Avatar.removeVehicle` 会重新落位）。载具名单由
 /// 调用方在同一刻摘，和玩家侧共用一份名单。
@@ -578,6 +658,19 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
     // the spot from the vehicle's current pose, then clear the links. A vehicle that
     // already left the table leaves the player where it is, as vanilla does.
     let target = region.entities.public_at(vehicle).and_then(|public| {
+        if matches!(public.kind, KindPublic::Boat(_)) {
+            // `AbstractBoat.getDismountLocationForPassenger`：
+            // `getCollisionHorizontalEscapeVector(bbWidth*SQRT_OF_TWO, ...)` +
+            // `DismountHelper`，参数是船宽和船 AABB 顶。
+            return dismount::boat_dismount_location(
+                &region.chunks,
+                &region.global.world_border,
+                player,
+                public.position,
+                1.375,
+                public.bounding_box().max_y,
+            );
+        }
         let KindPublic::Mob(mob) = &public.kind else {
             return None;
         };
@@ -633,6 +726,10 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
         player.set_position(&mut region.player_grid, target);
     }
     region.entities.with_mut(vehicle, |entity| {
+        if let EntityKind::Boat(boat) = &mut entity.kind {
+            boat.passengers.retain(|passenger| *passenger != id.0);
+            return;
+        }
         let at = entity.position;
         let happy = entity
             .kind
@@ -646,7 +743,7 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
             if happy {
                 mc_bamboo_blocks::entity::mob::happy_ghast::after_remove_passenger(at, mob);
             }
-        })
+        });
     });
 }
 
@@ -724,16 +821,6 @@ fn passenger_offset(
     offset
 }
 
-/// 这名玩家在同一份乘客名单里的下标（`getPassengers().indexOf`）。
-///
-/// This player's index in the shared passenger list (`getPassengers().indexOf`).
-fn passenger_index(region: &Region, vehicle: EntityUid, player: EntityUid) -> usize {
-    passengers(region, vehicle)
-        .iter()
-        .position(|&uid| uid == player)
-        .unwrap_or(0)
-}
-
 /// 每刻一趟：要下车的下车，其余骑手的位置跟到载具上，最后记下这一刻末的载具位置。
 ///
 /// One pass per tick: riders that want off dismount, the rest follow their
@@ -774,15 +861,26 @@ pub(crate) fn tick(region: &mut Region) {
                 stop_riding(region, id);
                 continue;
             };
-            let KindPublic::Mob(mob) = &public.kind else {
-                stop_riding(region, id);
-                continue;
+            let listed = passengers(region, vehicle);
+            let index = listed.iter().position(|&uid| uid == id.0).unwrap_or(0);
+            let offset = match &public.kind {
+                KindPublic::Mob(mob) => passenger_offset(mob, public.yaw, index),
+                KindPublic::Boat(boat) => {
+                    // 玩家不是动物；`passenger_attachment_point` 已按 `-yRot` 旋转。
+                    mc_bamboo_blocks::entity::boat::passenger_attachment_point(
+                        boat.entity_type,
+                        public.yaw,
+                        index,
+                        listed.len(),
+                        false,
+                    )
+                }
+                _ => {
+                    stop_riding(region, id);
+                    continue;
+                }
             };
-            (
-                passengers(region, vehicle).contains(&id.0),
-                public.position,
-                passenger_offset(mob, public.yaw, passenger_index(region, vehicle, id.0)),
-            )
+            (listed.contains(&id.0), public.position, offset)
         };
         // 官方 `ejectPassengers`：载具的乘客名单里没有这名玩家了，就当场摘掉两边的关系。
         // 未驯服的马科被骑时 `RunAroundLikeCrazyGoal` 就是这样甩人的。
@@ -821,6 +919,34 @@ pub(crate) fn tick(region: &mut Region) {
     );
 }
 
+/// `ServerboundPaddleBoatPacket`：把左右桨状态写到玩家骑的船上。同步层按
+/// `pairing_values` 的前后帧 diff 把变化发给观察者。
+///
+/// `ServerboundPaddleBoatPacket`: write the left/right paddle state onto the
+/// player's boat. The sync layer sends the change via its metadata diff.
+pub(crate) fn set_paddle(region: &mut Region, id: PlayerId, left: bool, right: bool) {
+    let Some(vehicle) = region
+        .players
+        .get(&id)
+        .and_then(|player| player.riding.vehicle)
+    else {
+        return;
+    };
+    // `AbstractBoat.getControllingPassenger()`：第一乘客是这个玩家才收桨状态。
+    let controls = region.entities.public_at(vehicle).is_some_and(|public| {
+        matches!(&public.kind, KindPublic::Boat(boat) if boat.passengers.first() == Some(&id.0))
+    });
+    if !controls {
+        return;
+    }
+    region.entities.with_mut(vehicle, |entity| {
+        if let EntityKind::Boat(boat) = &mut entity.kind {
+            boat.paddle_left = left;
+            boat.paddle_right = right;
+        }
+    });
+}
+
 /// 官方 `getControllingPassenger() == player`：载具上了鞍，猪还要求这名玩家是第一位乘客、
 /// 任一只手拿着胡萝卜钓竿。
 ///
@@ -834,6 +960,14 @@ pub(crate) fn controls_vehicle(region: &mut Region, id: PlayerId, vehicle: Entit
         })
     });
     let first_passenger = passengers(region, vehicle).first() == Some(&id.0);
+    // `AbstractBoat.getControllingPassenger`：第一乘客是玩家时就是他，否则没有控制者。
+    if region
+        .entities
+        .public_at(vehicle)
+        .is_some_and(|public| matches!(public.kind, KindPublic::Boat(_)))
+    {
+        return first_passenger;
+    }
     region
         .entities
         .with_mut(vehicle, |row| {
@@ -901,6 +1035,7 @@ pub(crate) fn on_move_vehicle(
         let snap = region.entities.public_at(vehicle).map(|public| {
             let pitch = match &public.kind {
                 KindPublic::Mob(mob) => mob.x_rot,
+                KindPublic::Boat(_) => 0.0,
                 _ => player.pitch,
             };
             (public.position, public.yaw, pitch)
@@ -931,8 +1066,14 @@ pub(crate) fn on_move_vehicle(
     let Some(public) = region.entities.public_at(vehicle) else {
         return;
     };
-    let KindPublic::Mob(mob) = &public.kind else {
-        return;
+    let (step, vehicle_pitch): (f32, f32) = match &public.kind {
+        KindPublic::Mob(mob) => (
+            mob.attributes.value(attribute::STEP_HEIGHT) as f32,
+            mob.x_rot,
+        ),
+        // 船没有俯仰角，`maxUpStep` 为 0，不上台阶。
+        KindPublic::Boat(_) => (0.0, 0.0),
+        _ => return,
     };
     // 「移动太快」：和上一刻末的位置差太多就拉回去，官方阈值是 100 个平方格。
     //
@@ -951,7 +1092,7 @@ pub(crate) fn on_move_vehicle(
         let back = MoveVehicle {
             position: public.position,
             yaw: public.yaw,
-            pitch: mob.x_rot,
+            pitch: vehicle_pitch,
         };
         region.links.send(id, &back);
         return;
@@ -964,7 +1105,6 @@ pub(crate) fn on_move_vehicle(
     // simulates the vehicle; the server only validates here.
     let start = public.position;
     let old_box = public.bounding_box();
-    let step = mob.attributes.value(attribute::STEP_HEIGHT) as f32;
     let context = vehicle_context(start);
     let blocks = crate::player_move::PlayerBlocks::new(&region.chunks, &region.block_entities);
     let border = region.global.world_border.clone();

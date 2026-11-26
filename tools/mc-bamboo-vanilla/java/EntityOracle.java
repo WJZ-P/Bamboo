@@ -44,6 +44,7 @@ import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.util.AbortableIterationConsumer;
 import net.minecraft.util.RandomSource;
@@ -53,6 +54,7 @@ import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageSources;
 import net.minecraft.server.ServerScoreboard;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.ExperienceOrb;
@@ -62,6 +64,10 @@ import net.minecraft.world.entity.vehicle.minecart.MinecartChest;
 import net.minecraft.world.entity.vehicle.minecart.MinecartFurnace;
 import net.minecraft.world.entity.vehicle.minecart.MinecartHopper;
 import net.minecraft.world.entity.vehicle.minecart.MinecartTNT;
+import net.minecraft.world.entity.vehicle.boat.AbstractBoat;
+import net.minecraft.world.entity.vehicle.boat.AbstractChestBoat;
+import net.minecraft.world.entity.vehicle.boat.Boat;
+import net.minecraft.world.entity.vehicle.boat.ChestBoat;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
 import net.minecraft.world.entity.item.FallingBlockEntity;
 import net.minecraft.world.entity.item.ItemEntity;
@@ -107,6 +113,7 @@ import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.util.debug.ServerDebugSubscribers;
 import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.border.WorldBorder;
+import net.minecraft.server.ServerScoreboard;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.redstone.CollectingNeighborUpdater;
@@ -188,6 +195,12 @@ public final class EntityOracle {
             cases += minecartSave(official, out);
             cases += minecartDetector(official, out);
             cases += minecartTnt(official, out);
+            cases += boatStillWater(official, out);
+            cases += boatIceSlide(official, out);
+            cases += boatWaterCurrent(official, out);
+            cases += boatBreakDrop(official, out);
+            cases += boatChestSave(official, out);
+            cases += boatAnimalBoard(official, out);
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -1295,7 +1308,6 @@ public final class EntityOracle {
             scene.writeStep(steps);
         }
         steps.append(']');
-
         out.write("{\"type\":\"case\",\"name\":\"" + spec.name + "\",\"kind\":\"minecart\",\"state\":0");
         out.write(",\"x\":0,\"y\":0,\"z\":0");
         out.write(",\"levelSeed\":" + spec.levelSeed + ",\"entitySeed\":" + seed);
@@ -1305,6 +1317,203 @@ public final class EntityOracle {
         out.write(",\"vx\":" + spec.vx + ",\"vy\":" + spec.vy + ",\"vz\":" + spec.vz);
         out.write(",\"saveAt\":" + spec.saveAt);
         out.write(",\"blocks\":");
+        writeBlocks(out, spec.blocks);
+        out.append(",\"steps\":");
+        out.append(steps);
+        out.append("}\n");
+        return 1;
+    }
+
+    /** 一题船场景的参数。 */
+    private static final class BoatSpec {
+        String name;
+        boolean chestBoat;
+        double px = 0.5, py = 64.3, pz = 0.5;
+        double vx, vy, vz, yaw;
+        float initialDamage;
+        int initialFire;
+        int[][] chest = new int[0][];
+        double[][] animals = new double[0][];
+        Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+        int ticks = 12;
+        long levelSeed = 1L;
+        int saveAt = -1;
+    }
+
+    /** 静水里的船：漂浮、上下起伏、阻力。 */
+    private static int boatStillWater(Official official, Writer out) throws Exception {
+        BoatSpec spec = new BoatSpec();
+        spec.name = "boat_still_water";
+        for (int x = -2; x <= 2; x++) {
+            for (int z = -2; z <= 2; z++) {
+                spec.blocks.put(BlockPos.asLong(x, 64, z), Blocks.WATER.defaultBlockState());
+                spec.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        spec.py = 64.3;
+        spec.vx = 0.05;
+        spec.vy = -0.1;
+        spec.vz = -0.03;
+        spec.ticks = 20;
+        return playBoat(official, out, spec);
+    }
+
+    /** 冰面上的船：地面摩擦把水平速度一点点吃掉。 */
+    private static int boatIceSlide(Official official, Writer out) throws Exception {
+        BoatSpec spec = new BoatSpec();
+        spec.name = "boat_ice_slide";
+        for (int x = -2; x <= 2; x++) {
+            for (int z = -2; z <= 2; z++) {
+                spec.blocks.put(BlockPos.asLong(x, 63, z), Blocks.ICE.defaultBlockState());
+            }
+        }
+        spec.py = 64.0;
+        spec.vx = 0.3;
+        spec.vz = 0.15;
+        spec.ticks = 15;
+        return playBoat(official, out, spec);
+    }
+
+    /** 有水位梯度的流动水：`getFlow` 把船往低水位一侧推。 */
+    private static int boatWaterCurrent(Official official, Writer out) throws Exception {
+        BoatSpec spec = new BoatSpec();
+        spec.name = "boat_water_current";
+        for (int x = -2; x <= 2; x++) {
+            for (int z = -2; z <= 2; z++) {
+                // `LiquidBlock.LEVEL` 1..5：水位从西到东递减，形成稳定的水流。
+                BlockState water = Blocks.WATER.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.LiquidBlock.LEVEL, 1 + (x + 2));
+                spec.blocks.put(BlockPos.asLong(x, 64, z), water);
+            }
+        }
+        spec.py = 64.3;
+        spec.ticks = 12;
+        return playBoat(official, out, spec);
+    }
+
+    /** 岩浆里的船：环境伤害累计到阈值后 `destroy`，掉出船物品实体。 */
+    private static int boatBreakDrop(Official official, Writer out) throws Exception {
+        BoatSpec spec = new BoatSpec();
+        spec.name = "boat_break_drop";
+        for (int x = -1; x <= 1; x++) {
+            for (int z = -1; z <= 1; z++) {
+                spec.blocks.put(BlockPos.asLong(x, 64, z), Blocks.LAVA.defaultBlockState());
+            }
+        }
+        spec.py = 64.0;
+        spec.ticks = 4;
+        return playBoat(official, out, spec);
+    }
+
+    /** 运输船：存档里带来的 27 格物品逐刻保持不变。 */
+    private static int boatChestSave(Official official, Writer out) throws Exception {
+        BoatSpec spec = new BoatSpec();
+        spec.name = "boat_chest_save";
+        spec.chestBoat = true;
+        for (int x = -2; x <= 2; x++) {
+            for (int z = -2; z <= 2; z++) {
+                spec.blocks.put(BlockPos.asLong(x, 64, z), Blocks.WATER.defaultBlockState());
+            }
+        }
+        spec.py = 64.3;
+        spec.chest = new int[][] {
+                {0, BuiltInRegistries.ITEM.getId(Items.DIAMOND), 3},
+                {5, BuiltInRegistries.ITEM.getId(Items.BREAD), 1},
+                {26, BuiltInRegistries.ITEM.getId(Items.IRON_INGOT), 7},
+        };
+        // 第一次 tick 之前做存档往返：此时船的逐刻累积字段还没有值，
+        // 往返只验证 27 格物品栏和存档内容，不会重置 outOfControlTicks。
+        spec.saveAt = 0;
+        spec.ticks = 8;
+        return playBoat(official, out, spec);
+    }
+
+    /** 船里没骑东西的牛在 `AbstractBoat.tick` 末尾 `startRiding(boat)`。 */
+    private static int boatAnimalBoard(Official official, Writer out) throws Exception {
+        BoatSpec spec = new BoatSpec();
+        spec.name = "boat_animal_board";
+        // 陆地上眼睛不在水里，`canAddPassenger` 才允许牛上船。
+        for (int x = -2; x <= 2; x++) {
+            for (int z = -2; z <= 2; z++) {
+                spec.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        spec.py = 64.0;
+        spec.animals = new double[][] {{0.5, 64.0, 0.5}};
+        spec.ticks = 4;
+        return playBoat(official, out, spec);
+    }
+
+    /** 造一艘官方船、逐刻跑、把每刻的实体状态写成一题 case。 */
+    private static int playBoat(Official official, Writer out, BoatSpec spec) throws Exception {
+        FakeLevel level = FakeLevel.create(official, spec.levelSeed);
+        level.nextId = FIRST_ITEM_ID;
+        level.firstId = FIRST_ITEM_ID;
+        level.blocks.putAll(spec.blocks);
+        Scene scene = new Scene(level);
+        scene.keepFresh = true;
+        AbstractBoat boat = spec.chestBoat
+                ? new ChestBoat(EntityTypes.OAK_CHEST_BOAT, level, () -> Items.OAK_CHEST_BOAT)
+                : new Boat(EntityTypes.OAK_BOAT, level, () -> Items.OAK_BOAT);
+        level.addFreshEntity(boat);
+        boat.setPos(spec.px, spec.py, spec.pz);
+        boat.setYRot((float) spec.yaw);
+        boat.setDeltaMovement(spec.vx, spec.vy, spec.vz);
+        boat.setDamage(spec.initialDamage);
+        boat.setRemainingFireTicks(spec.initialFire);
+        long seed = level.entitySeed(boat.getId());
+        setRandom(boat, seed);
+        if (boat instanceof AbstractChestBoat chestBoat) {
+            for (int[] entry : spec.chest) {
+                chestBoat.setItem(entry[0], new ItemStack(Item.byId(entry[1]), entry[2]));
+            }
+        }
+        scene.active.add(boat);
+        for (double[] animal : spec.animals) {
+            Entity cow = EntityTypes.COW.create(level, EntitySpawnReason.SPAWN_ITEM_USE);
+            cow.setPos(animal[0], animal[1], animal[2]);
+            level.addFreshEntity(cow);
+            setRandom(cow, level.entitySeed(cow.getId()));
+            scene.active.add(cow);
+        }
+        level.fresh.clear();
+
+        StringBuilder steps = new StringBuilder();
+        steps.append('[');
+        scene.writeStep(steps);
+        for (int tick = 0; tick < spec.ticks; tick++) {
+            steps.append(',');
+            scene.tick();
+            scene.writeStep(steps);
+        }
+        steps.append(']');
+        out.write("{\"type\":\"case\",\"name\":\"" + spec.name + "\",\"kind\":\"boat\",\"state\":0");
+        out.write(",\"x\":0,\"y\":0,\"z\":0");
+        out.write(",\"levelSeed\":" + spec.levelSeed + ",\"entitySeed\":" + seed);
+        out.write(",\"hurts\":null,\"fuse\":null,\"firstEntityId\":" + FIRST_ITEM_ID);
+        out.write(",\"entityType\":" + (spec.chestBoat
+                ? BuiltInRegistries.ENTITY_TYPE.getId(EntityTypes.OAK_CHEST_BOAT)
+                : BuiltInRegistries.ENTITY_TYPE.getId(EntityTypes.OAK_BOAT)));
+        out.write(",\"px\":" + spec.px + ",\"py\":" + spec.py + ",\"pz\":" + spec.pz);
+        out.write(",\"vx\":" + spec.vx + ",\"vy\":" + spec.vy + ",\"vz\":" + spec.vz);
+        out.write(",\"yaw\":" + (float) spec.yaw);
+        out.write(",\"initialDamage\":" + spec.initialDamage + ",\"initialFire\":" + spec.initialFire);
+        out.write(",\"saveAt\":" + spec.saveAt);
+        out.append(",\"chest\":[");
+        for (int i = 0; i < spec.chest.length; i++) {
+            if (i > 0) {
+                out.append(',');
+            }
+            out.append("[" + spec.chest[i][0] + "," + spec.chest[i][1] + "," + spec.chest[i][2] + "]");
+        }
+        out.append("],\"animals\":[");
+        for (int i = 0; i < spec.animals.length; i++) {
+            if (i > 0) {
+                out.append(',');
+            }
+            out.append("[" + spec.animals[i][0] + "," + spec.animals[i][1] + "," + spec.animals[i][2] + "]");
+        }
+        out.append("],\"blocks\":");
         writeBlocks(out, spec.blocks);
         out.append(",\"steps\":");
         out.append(steps);
@@ -1327,6 +1536,8 @@ public final class EntityOracle {
         boolean ticked;
         /** 官方的 `spawnAtLocation` 已经设过拾取延迟；这一拍新生成的物品不用重取速度。 */
         boolean fallingDrops;
+        /** 船场景：破坏后掉出的物品实体也要留在快照里（官方 `spawnAtLocation`）。 */
+        boolean keepFresh;
 
         private Scene(FakeLevel level) {
             this.level = level;
@@ -1431,6 +1642,11 @@ public final class EntityOracle {
                     }
                 }
             }
+            // 官方 `ServerLevel.tick` 里实体名单在实体 tick 之前就可见；船 tick 末尾
+            // 要靠它找附近可上船的动物。非船场景保持原来的「tick 末尾才同步」。
+            if (keepFresh) {
+                level.tracked = active;
+            }
             List<Entity> ticking = new ArrayList<>(active);
             level.fresh.clear();
             snapshot.clear();
@@ -1447,7 +1663,7 @@ public final class EntityOracle {
             // Fresh falling blocks, TNT and items dropped by falling blocks all stay in the snapshot.
             for (Entity spawned : level.fresh) {
                 if (spawned instanceof ItemEntity item) {
-                    if (!fallingDrops) {
+                    if (!fallingDrops && !keepFresh) {
                         continue;
                     }
                     // `RandomSource.create()` 每次运行都换种子。改成和 Bamboo 一样从种子源
@@ -1544,7 +1760,9 @@ public final class EntityOracle {
                 : entity instanceof PrimedTnt ? "tnt"
                 : entity instanceof AbstractMinecart
                         ? BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath()
-                        : "falling";
+                : entity instanceof AbstractBoat ? "boat"
+                : entity instanceof net.minecraft.world.entity.LivingEntity ? "mob"
+                : "falling";
         int block = entity instanceof FallingBlockEntity falling ? Block.getId(falling.getBlockState()) : -1;
         int fuse = entity instanceof PrimedTnt tnt ? tnt.getFuse() : -1;
         int item = -1;
@@ -1576,7 +1794,66 @@ public final class EntityOracle {
         out.append(",\"age\":").append(age);
         out.append(",\"pickup\":").append(pickup);
         out.append(",\"health\":").append(health);
+        if (entity instanceof AbstractBoat boat) {
+            out.append(",\"entityType\":").append(BuiltInRegistries.ENTITY_TYPE.getId(boat.getType()));
+            // 官方构造时 `status` 还是 null，第一次 tick 才判成 IN_AIR(4)。Bamboo 的初值就是 IN_AIR。
+            Object status = read(boat, AbstractBoat.class, "status");
+            out.append(",\"status\":").append(status == null ? 4 : ((Enum<?>) status).ordinal());
+            out.append(",\"hurtTime\":").append(boat.getHurtTime());
+            out.append(",\"hurtDir\":").append(boat.getHurtDir());
+            out.append(",\"damage\":").append(Float.floatToRawIntBits(boat.getDamage()));
+            out.append(",\"yaw\":").append(Float.floatToRawIntBits(boat.getYRot()));
+            out.append(",\"eyeInWater\":").append(boat.isEyeInFluid(FluidTags.WATER));
+            out.append(",\"waterLevel\":")
+                    .append(Double.doubleToRawLongBits((Double) read(boat, AbstractBoat.class, "waterLevel")));
+            out.append(",\"lastYd\":")
+                    .append(Double.doubleToRawLongBits((Double) read(boat, AbstractBoat.class, "lastYd")));
+            out.append(",\"landFriction\":")
+                    .append(Float.floatToRawIntBits((Float) read(boat, AbstractBoat.class, "landFriction")));
+            out.append(",\"outOfControl\":")
+                    .append(Float.floatToRawIntBits((Float) read(boat, AbstractBoat.class, "outOfControlTicks")));
+            float[] paddles = (float[]) read(boat, AbstractBoat.class, "paddlePositions");
+            out.append(",\"paddle0\":").append(Float.floatToRawIntBits(paddles[0]));
+            out.append(",\"paddle1\":").append(Float.floatToRawIntBits(paddles[1]));
+            out.append(",\"passengers\":[");
+            List<Entity> riders = boat.getPassengers();
+            for (int i = 0; i < riders.size(); i++) {
+                if (i > 0) {
+                    out.append(',');
+                }
+                out.append(riders.get(i).getId());
+            }
+            out.append("],\"chest\":[");
+            if (boat instanceof AbstractChestBoat chestBoat) {
+                boolean first = true;
+                for (int slot = 0; slot < chestBoat.getContainerSize(); slot++) {
+                    ItemStack stack = chestBoat.getItem(slot);
+                    if (stack.isEmpty()) {
+                        continue;
+                    }
+                    if (!first) {
+                        out.append(',');
+                    }
+                    first = false;
+                    out.append('[').append(slot).append(',')
+                            .append(BuiltInRegistries.ITEM.getId(stack.getItem()))
+                            .append(',').append(stack.getCount()).append(']');
+                }
+            }
+            out.append(']');
+        }
         out.append('}');
+    }
+
+    /** 官方私有字段：`status`、`waterLevel`、`paddlePositions` 这些没有公共 getter。 */
+    private static Object read(Object target, Class<?> owner, String name) {
+        try {
+            Field field = owner.getDeclaredField(name);
+            field.setAccessible(true);
+            return field.get(target);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     private static int readInt(Object target, String name) {
@@ -1906,6 +2183,7 @@ public final class EntityOracle {
             level.blockTicks = new LevelTicks<>(key -> true);
             level.fluidTicks = new LevelTicks<>(key -> true);
             level.chunkSource = chunkSource();
+            set(FakeLevel.class, level, "scoreboard", new ServerScoreboard(official.server));
             set(Level.class, level, "neighborUpdater", new CollectingNeighborUpdater(level, 1_000_000));
             set(Level.class, level, "random", RandomSource.create(seed));
             set(Level.class, level, "soundSeedGenerator", RandomSource.createThreadSafe());

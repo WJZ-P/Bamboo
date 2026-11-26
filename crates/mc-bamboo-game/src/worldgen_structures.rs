@@ -513,6 +513,94 @@ fn sparse_fallback(
     Ok(out)
 }
 
+/// `ServerLevel.findNearestMapStructure(StructureTags.EYE_OF_ENDER_LOCATED, origin, 100, false)`：
+/// 26.3 里 `#minecraft:eye_of_ender_located` 只含 `minecraft:stronghold`，走
+/// `ChunkGenerator.getNearestGeneratedStructure(..., ConcentricRingsStructurePlacement)`。
+///
+/// 复用全进程共享的 [`WorldStructureState`] 与要塞环候选表，按官方顺序逐个比较
+/// `(cx * 16 + 8, 32, cz * 16 + 8)` 到 `origin` 的 3D 距离平方，只在距离更近时校验
+/// 该区块能否生成有效要塞起点；`generate-structures=false` 或无要塞结构集时返回 `None`。
+///
+/// `ServerLevel.findNearestMapStructure(StructureTags.EYE_OF_ENDER_LOCATED, origin, 100, false)`:
+/// `#minecraft:eye_of_ender_located` contains only `minecraft:stronghold` in 26.3.
+/// Walks the shared ring list, comparing 3D squared distance from `(cx*16+8, 32, cz*16+8)`
+/// to `origin`, verifying start validity only for closer candidates.
+pub fn find_nearest_eye_of_ender_structure(
+    config: &WorldGenConfig,
+    origin: mc_bamboo_core::BlockPos,
+) -> Option<mc_bamboo_core::BlockPos> {
+    if !config.generate_structures {
+        return None;
+    }
+    let result = with_thread(config, |thread| {
+        let Some(set) = thread.state.sets.sets().get("minecraft:strongholds") else {
+            return Ok(None);
+        };
+        let Some(positions) = thread.state.sets.ring_positions("minecraft:strongholds") else {
+            return Ok(None);
+        };
+        let locate_offset = match &set.placement {
+            mc_bamboo_worldgen::structure::Placement::ConcentricRings(rings) => {
+                rings.common.locate_offset
+            }
+            mc_bamboo_worldgen::structure::Placement::RandomSpread(spread) => {
+                spread.common.locate_offset
+            }
+        };
+        let dims = {
+            let s = thread.settings;
+            if config.level_type.is_flat() {
+                (
+                    mc_bamboo_world::MIN_Y,
+                    mc_bamboo_world::WORLD_HEIGHT,
+                    mc_bamboo_worldgen::feature::flat::SEA_LEVEL,
+                )
+            } else {
+                (s.min_y, s.height, s.sea_level)
+            }
+        };
+        let mut best: Option<mc_bamboo_core::BlockPos> = None;
+        let mut best_dist = f64::MAX;
+        for &(cx, cz) in positions {
+            let probe_x = (cx << 4) + 8;
+            let probe_y = 32;
+            let probe_z = (cz << 4) + 8;
+            let dx = f64::from(probe_x - origin.x);
+            let dy = f64::from(probe_y - origin.y);
+            let dz = f64::from(probe_z - origin.z);
+            let dist_sqr = dx * dx + dy * dy + dz * dz;
+            if best.is_some() && dist_sqr >= best_dist {
+                continue;
+            }
+            thread.preset.reset();
+            thread.router.reset_context();
+            thread.generator.reset_biome_state();
+            let mut resolver = mc_bamboo_worldgen::structure::rings::BiomeResolver {
+                router: &mut thread.router,
+                source: &thread.preset,
+            };
+            let context = mc_bamboo_worldgen::structure::pipeline::StartContext {
+                generator: &thread.generator,
+                state: &thread.state,
+                dims,
+            };
+            let valid = context
+                .generate_start(&mut resolver, "minecraft:stronghold", (cx, cz))?
+                .is_some_and(|start| !start.pieces.is_empty());
+            if valid {
+                best = Some(mc_bamboo_core::BlockPos::new(
+                    (cx << 4) + locate_offset[0],
+                    locate_offset[1],
+                    (cz << 4) + locate_offset[2],
+                ));
+                best_dist = dist_sqr;
+            }
+        }
+        Ok(best)
+    });
+    result.ok().flatten()
+}
+
 /// `ChunkStatus.STRUCTURE_STARTS`：`generate-structures=false` 时按官方跳过；
 /// 读盘带 `structures` 键时优先从存档恢复，否则按 `createStructures` 纯函数生成。
 ///

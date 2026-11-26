@@ -192,9 +192,14 @@ pub fn use_item(
     hand: Hand,
 ) -> Outcome {
     let mut world = World::new(level, ticks);
-    let result = match Bucket::of(actor.item_in(hand)) {
-        Some(bucket) => bucket::use_bucket(&mut world, actor, hand, bucket, None),
-        None => placement::use_in_air(&mut world, actor, hand),
+    let held = actor.item_in(hand);
+    let result = if crate::entity::boat::entity_type_for_item(held).is_some() {
+        crate::item_use::boat::use_in_air(&mut world, actor, hand)
+    } else {
+        match Bucket::of(held) {
+            Some(bucket) => bucket::use_bucket(&mut world, actor, hand, bucket, None),
+            None => placement::use_in_air(&mut world, actor, hand),
+        }
     };
     outcome_from(world, result, false)
 }
@@ -212,9 +217,14 @@ pub fn use_item_with_stack(
     stack: &ItemStack,
 ) -> Outcome {
     let mut world = World::new(level, ticks);
-    let result = match Bucket::of(actor.item_in(hand)) {
-        Some(bucket) => bucket::use_bucket(&mut world, actor, hand, bucket, Some(stack)),
-        None => placement::use_in_air(&mut world, actor, hand),
+    let held = actor.item_in(hand);
+    let result = if crate::entity::boat::entity_type_for_item(held).is_some() {
+        crate::item_use::boat::use_in_air(&mut world, actor, hand)
+    } else {
+        match Bucket::of(held) {
+            Some(bucket) => bucket::use_bucket(&mut world, actor, hand, bucket, Some(stack)),
+            None => placement::use_in_air(&mut world, actor, hand),
+        }
     };
     outcome_from(world, result, false)
 }

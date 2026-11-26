@@ -167,6 +167,7 @@ WebView2 的渲染进程不算在内。
 
 ## 现在能玩什么
 
+- **投掷末影之眼与框架装眼推实体**：`EnderEyeItem.use`、`EyeOfEnder` 与 `EndPortalFrameBlock` 装眼的 `Block.pushEntitiesUp` 照 26.3 字节码实现。右键末影之眼先做 `OUTLINE` 轮廓射线（`Fluid.NONE`），瞄着末地传送门框架时直接返回 `PASS` 交给 `useOn`；否则按 `ChunkGenerator.findNearestMapStructure` 在同心环候选区块里定位最近的 `#minecraft:eye_of_ender_located`（`minecraft:stronghold`），关闭结构或找不到要塞时返回 `CONSUME`（不生成、不扣物品、不播音、不记统计、不触发进度）；找到后在 `(player.x, player.getY(0.5), player.z)` 生成 `EyeOfEnder`，调用 `setItem`（空堆回退默认末影之眼、非空取数量 1）与 `signalTo(Vec3.atLowerCornerOf(target))`（水平距离超 12 格时截断至 12 格并抬升 +8 格，否则直飞目标点，并由实体随机源掷 `nextInt(5) > 0` 定 `surviveAfterDeath`），投递 `PROJECTILE_SHOOT` 游戏事件、触发 `minecraft:used_ender_eye` 进度判据（按水平距离平方比 `distance`）、播放 `entity.ender_eye.launch` 音效（音高 `Mth.lerp(level.random.nextFloat(), 0.33F, 0.5F)`；26.3 字节码无 1003 世界事件）、非创造扣 1 个、记 `ITEM_USED` 统计并返回 `SUCCESS_SERVER`。`EyeOfEnder` 每刻按 `updateDeltaMovement` 逐指令更新速度并移动，第 81 刻（`++life > 80`）播放 `entity.ender_eye.death`、移除自身，按 `surviveAfterDeath` 生成 `ItemEntity` 或发 2003 碎裂世界事件；同步 `DATA_ITEM_STACK`（index 8），按官方未设 `noSave()` 正常写入区块实体存档（`"Item"` 键）。装眼 `EnderEyeItem.useOn` 在写入 `HAS_EYE=true` 前执行 `Block.pushEntitiesUp`，把站在空框架新增眼柱碰撞盒上的非旁观者实体与玩家沿 Y 轴推到顶面（`+3/16` 格）并在非创造模式扣 1 个末影之眼。**对拍**：`mob-oracle --only ender_eye --show 2000` 4 个场景（`ender_eye_drop` 86 刻远距离飞行与第 81 刻掉落物品轨迹、`ender_eye_shatter` 86 刻近距离直飞与第 81 刻 2003 碎裂、`ender_eye_frame_push` 11 刻装眼只推起站中央的牛而旁侧对照牛不动、`ender_eye_save` 11 个 NBT 键双向往返），除 12 处已知三角函数表末位差外 0 不一致；3 处改坏确认（`ender_eye_life`、`ender_eye_target`、`ender_eye_push`）均稳定触发对拍失败。**已知限制**：为保持既有 `BlockOracle` 兼容，装满 12 眼开传送门时暂未额外发 1038 `globalLevelEvent`（`BlockOracle.java` 的 `globalLevelEvent` 为空）；客户端粒子轨迹由客户端本地渲染，服务端不发粒子包。
 - **钓鱼**：`FishingRodItem.use` 与 `FishingHook` 实体照 26.3 字节码实现。无浮漂时抛出（按眼高偏移、3× `triangle(0.5, 0.0103365)` 初速度与朝向，播放 `entity.fishing_bobber.throw`、记 `ITEM_USED` 统计，读取 `lure` 附魔每级减 100 刻与 `luck_of_the_sea` 每级加 1 幸运）；有浮漂时收竿（`retrieve` 扣耐久：咬钩 1、钩住实体 5、触地覆盖为 2，播放 `entity.fishing_bobber.retrieve`）。玩家保存 `fishing` 引用，换手不再持有钓竿、距离超 32 格、死亡 / 旁观或离服时按 `shouldStopFishing` 自动移除浮漂。`FishingHook` 具备三态状态机（`FLYING` / `HOOKED_IN_ENTITY` / `BOBBING`）、重力（`0.03F`）、浮力与阻尼、实体 / 方块 / 世界边界反弹碰撞、落地 1200 刻消失、钩住实体跟随与拉拽（`pullEntity`：生物与掉落物在服务端叠加速度，玩家广播 31 号实体事件），同步 `DATA_HOOKED_ENTITY`（index 8）与 `DATA_BITING`（index 9，触发 `onSyncedDataUpdated` 下沉初速），`AddEntity` 的 `data` 传主人实体 ID；照 `noSave()` 不写入 Anvil 区块存档。咬钩计时（`catchingFish`）每刻用 `uuid.lsb ^ gameTime` 重设 `synchronizedRandom`，涵盖 `timeUntilLured` / `timeUntilHooked` / `nibble`、下雨（25% 加速）与遮天（50% 减速）、服务端 `BUBBLE` / `FISHING` / `SPLASH` 粒子包与溅水音效，以及 5×4×5（`dy = -1..=2`）`calculateOpenWater` 露天判定。收竿按 `minecraft:gameplay/fishing` 战利品表求值（照 26.3 字节码传 `ORIGIN`、`TOOL`、`THIS_ENTITY` 与幸运值，不传钓者参数），露天钓鱼可出宝藏、非露天不出宝藏；渔获按官方速度公式朝玩家飞出，经验球生成于 `(owner.x, owner.y + 0.5, owner.z + 0.5)` 且经验值为 `hook.random.nextInt(6) + 1`；属 `#minecraft:fishes` 的渔获记 `FISH_CAUGHT` 统计，并触发 `minecraft:fishing_rod_hooked` 进度判据。**对拍**：`mob-oracle --only fishing --show 2000` 5 个逐刻场景（抛竿飞行落水 41 刻、完整咬钩收竿 146 刻、钩牛拉拽 9 刻含实体事件 31 与 5 点耐久、露天出宝藏 125 刻 + 30 次抽样、非露天 0 宝藏 125 刻 + 30 次抽样，共 446 刻逐刻比坐标/速度/朝向/状态/同步数据/计时器/粒子包/随机源与结算，除 12 处已知三角函数表末位差外 0 不一致）；3 处生产代码改坏确认（`fishing_gravity`、`fishing_open_water`、`fishing_pull`）均稳定触发对拍失败。结算的幸运值是 `luck_of_the_sea` 加上玩家的 `luck` 属性（幸运 / 霉运效果会改它）；抛竿 / 收竿照 `ItemStack.causeUseVibration` 发 `ITEM_INTERACT_START` / `ITEM_INTERACT_FINISH`，受 `use_effects.interact_vibrations` 控制，幽匿感测体能收到。**已知限制**：浮漂按官方 `noSave()` 不持久化到存档。
 - **盔甲架（`minecraft:armor_stand`）**：官方 `ArmorStand` 是 `LivingEntity` 一支、没有 AI，Bamboo 复用 `Mob` 结构并用 `noAi` 关掉 AI。普通 / 小型 / 标记三种尺寸由 `DATA_CLIENT_FLAGS`（index 15，BYTE）和 6 个姿势（index 16..21，ROTATIONS）同步；存档写 `Invisible` / `Small` / `ShowArms` / `NoBasePlate` / `Marker` / `Pose` / `DisabledSlots` 和装备。`ArmorStandItem.useOn` 按玩家朝向取整到 45°、查方块与实体碰撞、应用物品的 `entity_data` 组件、发放置音效与 `ENTITY_PLACE`；落点 y 由 `EntityType.create(..., SPAWN_ITEM_USE, true, true)` 的 `getYOffset` 决定（碰撞检查 AABB 用 `Vec3.atBottomCenterOf(clickedPos)`，`shouldOffsetYMore` 恒真）：点顶面、放置格下方有支撑时 `yOffset = 0`，盔甲架站在方块顶；点侧面或悬空时 `yOffset = -1`，低一格。`level.getEntities(null, aabb)` 把玩家也算进去，玩家占着放置格时放置失败。右键 `interactAt` 按点击高度或物品的 `equippable` 槽位穿戴 / 取下 / 交换装备，遵守 `DisabledSlots` 的取 / 放 / 总锁定位和标记 / 无手臂限制，创造模式只复制一个。`hurtServer` 走两段式：5 刻内第二下才破坏，创造一下移除，火 / 爆炸 / 箭各有特殊分支，破坏掉带 `CustomName` 组件的盔甲架物品和全部装备，播放破坏音效与带橡木木板状态参数的 `BLOCK` 粒子；标记或 `NoGravity` 的盔甲架没有物理、不掉落，`isPushable` 恒假。命令 `/summon armor_stand` 带 NBT 走通用读档路径。`hurtServer` 还照字节码接了 `Player.mayBuild`、`mobGriefing` 关闭且来源是 `Mob`、旁观者与命名牌的交互门控；存档照父类链只写到 `LivingEntity`（`Brain` 由 `LivingEntity` 无条件写，保留），不写 `Mob` / `AgeableMob` 层的 `CanPickUpLoot` / `NoAI` / `Age` / `InLove` 等键，战利品表用空的 `minecraft:entities/armor_stand`。发射器按 `EquipmentDispenseItemBehavior` 给前方盔甲架穿戴装备（`ArmorStand.canUseSlot` 排除 BODY / SADDLE 与 `DisabledSlots` 锁定的槽）；按 `DispenseItemBehavior$1` 在正前方一格生成盔甲架（`EntityType.create` 取一次 `level.random`，链上依次 `setYRot(Direction.toYRot())`、`applyComponentsFromItemStack` 的 `CUSTOM_NAME`、`TypedEntityData.loadInto` 的 `ENTITY_DATA`——后者是 `saveWithoutId` → `merge` → `load`，保留前两步的状态；扣一个，外层发 1000 / 2000），`oracle java` 有 3 个固定发射器题真比较余量、事件与世界随机源（0 差异），方块对拍里盔甲架的发射器排除已去掉。命名牌按 `NameTagItem.interactLivingEntity` 给盔甲架命名（有 `CUSTOM_NAME` 组件时写 `CustomName`、生存模式消耗一个；盔甲架是 `LivingEntity` 非 `Mob`，官方不设 `PersistenceRequired`）。**对拍**：`mob-oracle --only armor_stand --show 2000` 共 5 个场景（4 个逐刻：放置后掉落到石头地面、带点击高度穿戴 / 取下装备、两下打碎比掉落物与装备、被箭射；1 个存档往返：整棵 NBT 逐键比 `Pose` / `DisabledSlots` / `Invisible` / 标志 / 装备），逐刻比位置 / 速度 / 着地、八个装备槽与玩家手持、`lastHit` / 血量 / 掉落物，0 场景差异；5 处改坏确认 `armor_stand_no_physics` / `all_pose` / `no_break` / `arrow_damage` / `wrong_slot` 分别在对应场景报不一致（基线只有 12 处三角函数表末位差）。对拍还查出并修了两处生产 bug：全缺省的 `Pose` 应写成空复合标签（`ArmorStandPose.CODEC` 省略等于缺省值的字段），以及 `MobType::ArmorStand` 缺属性分支、曾落到马科缺省的 53 点血（官方 `createLivingAttributes()` 是 20 点血、台阶高度 0）。**已知限制**：官方 `ArmorStand.pushEntities()` 会主动把附近的可骑乘矿车推开（Bamboo 没有矿车实体，这一支未接），`isPushable()` 恒假、`doPush()` 空已照官方（`push_entities` 对盔甲架直接返回）；红石 / 方块 oracle 里带 `entity_data` 的刷怪蛋仍按「留在槽里、生成失败」排除整题。
 
@@ -819,7 +820,7 @@ WebView2 的渲染进程不算在内。
   世界随机源打乱（即使这一刻没有可刷的类别也照官方打乱）。**已知差异与未做**：
   - **只有已建模的生物会真的生成**（`MobType::ALL` 的 77 种；下表只列会自然生成的种类，盔甲架等只由 `/summon` 或物品放置，不出现在群系刷怪表里：牛、铜傀儡、哞菇、猪、羊、鸡、北极熊、熊猫、豹猫、猫、鹦鹉、马、驴、骡、羊驼、骆驼、尸壳骆驼、骷髅马、僵尸马、兔子、狐狸、狼、犰狳、山羊、青蛙、蝌蚪、僵尸、尸壳、骷髅、流浪者、沼骸、焦骸、史莱姆、溺尸、女巫、掠夺者、苦力怕、蜘蛛、洞穴蜘蛛、末影人、蠹虫、末影螨、铁傀儡、雪傀儡、鱿鱼、发光鱿鱼、鳕鱼、鲑鱼、热带鱼、河豚、海龟、海豚、美西螈、蝙蝠、幻翼、蜜蜂、村民、僵尸村民、守卫者、远古守卫者、硫磺方块怪、鹦鹉螺、僵尸鹦鹉螺、嗅探兽、嘎枝、监守者、卫道士、劫掠兽、旋风人、唤魔者、恼鬼、幻术师、流浪商人、行商羊驼；其中豹猫挂在丛林 / 竹林 `MONSTER` 表，猫不在群系刷怪表内，蝙蝠和幻翼各有自己的刷怪路径，掠夺者由巡逻队刷怪器和前哨站结构刷出）：群系刷怪表里其它条目仍占原版权重，抽完组大小后结束这一组。官方会继续尝试生成该物种、消耗后续随机数，并把实际生成的实体计入上限；所以**只有刷怪表里全是已建模物种的情形**逐刻产率和官方一致。`ON_GROUND` 按实体类型检查落脚块，冰和霜冰只允许北极熊通过此层，北极熊自己的群系与亮度规则仍须通过。已对拍的刷怪路径（`mob-oracle --only natural_spawn`，当前 830 例 3320 刻 0 不一致）覆盖单条目刷怪表、固定区块顺序、四档难度、日 / 夜 / 雷暴 / 火把、24/32/128 格、全局与局部上限、史莱姆区块和沼泽月相、流浪者找天和沼骸的雪地 / 沼泽群系表、焦骸的沙漠夜里 / 白天 / 遮天 / 和平四个场景、硫磺方块怪的 sulfur_caves 暗处 / 白天 / 强光 / 和平四个场景、犰狳与山羊、鱿鱼 / 发光鱿鱼 / 鱼类的水体夹具，鹦鹉的丛林白天与暗处，以及海豚 / 美西螈、青蛙 / 蝌蚪和野生动物的夹具；猪和鸡各有温带 / 暖 / 冷三种花色的白天场景（`pig_temperate`、`pig_day`、`pig_cold`、`chicken_day`、`chicken_warm`、`chicken_cold`），另比每只的花色 / 羊毛颜色和叫声，鸡的 `eggTime` 取自实体自己没播种的随机源不比，另有马、驴、羊驼各一个白天场景。水生生物的海平面由游戏层按世界类型给（超平坦 -63，噪声世界读设置，进程内只解析一次）。真实群系里混着未建模物种时，后续随机序列和产率仍会偏离，等这些生物合进来后自动对齐。幻翼不在群系刷怪表里，只由主世界的 `PhantomSpawner` 刷出；蠹虫、末影螨、铁傀儡和雪傀儡也不在群系刷怪表里，只由 `/summon`、刷怪蛋、虫蚀方块或雕刻南瓜图案生成。
   - 生成位置的实体阻挡照 `Mob.checkSpawnObstruction` 看所有 `blocksBuilding` 实体（生物、
-    TNT、下落方块和玩家）；`noCollision(AABB)` 只看方块和硬碰撞实体（Bamboo 还没有船、矿车）。
+    TNT、下落方块和玩家）；`noCollision(AABB)` 只看方块和硬碰撞实体（船已建模但不算这里的硬碰撞实体，矿车仍未建模）。
   - 僵尸和尸壳的 `finalizeSpawn` 已按 `Zombie` / `Husk.finalizeSpawn` 完整移植（跟随距离、左撇子、
     捡物、组内共享的幼年、鸡骑士判定、破门、盔甲与武器、附魔、万圣节头饰、`handleAttributes`、
     尸壳的二次捡物判定）。鸡骑士已生成并骑乘（见「生物骑乘」）；尸壳自然生成时照官方
@@ -1639,9 +1640,9 @@ WebView2 的渲染进程不算在内。
 - 系统消息的可见性按官方做，但官方 `ServerPlayer.sendSystemMessage` 还用
   `PacketSendListener.exceptionallySend` 在发包失败时补一条 `multiplayer.message_not_delivered`；
   Bamboo 的链路写失败时直接关连接，没有这个回调，所以不发这条补发消息。
-- 实体容器（矿车、船）没有移植，`EntityKind` 只有物品、下落方块和点燃的 TNT；
-  官方漏斗的 `getEntityContainer` 会读中心 1×1×1 盒里的容器实体，这一支连官方行为本身都缺，
-  闲置漏斗休眠也按「没有这类实体」处理。
+- 实体容器只移植了运输船：官方漏斗的 `getEntityContainer` 会读中心 1×1×1 盒里活着的
+  运输船，抽走一件并写回船的 27 格（见「船、竹筏和运输船」一节）；矿车容器仍未建模，
+  闲置漏斗休眠按「没有这类实体」处理运输船以外的情形。
 - 桌面端设置页保存这四个世界生成键时和官方的写法有两处差别（语义不变）：`level-type` 的旧名
   `default` / `largebiomes` 会归一成 `minecraft:normal` / `minecraft:large_biomes`，种子和
   `generator-settings` 的前后空白会去掉；官方保留文件里的原字符串。另外，世界类型是超平坦时，
@@ -2002,3 +2003,62 @@ Not an official Minecraft product. Not approved by or associated with Mojang or 
   `natural-spawn java` 的 1727 例仍 0 不一致。方块 oracle 的雷暴夜晚批
   （`--clock-ticks 18000 --weather thunder`）0 失败，雷击引火 / 铜除锈由
   `mob-oracle --only lightning` 的 `finalBlocks` 逐格比对。
+
+### 船、竹筏和运输船（分支 `boats`）
+
+- **实体**：11 种木船 / 竹筏及各自的运输船版本（`AbstractBoat` / `Boat` / `Raft` /
+  `AbstractChestBoat` / `ChestBoat` / `ChestRaft`）按注册表实体类型建模，尺寸
+  1.375×0.5625、眼高 0.5625（官方 `eyeHeight(0.5625f)`，不是 `height*0.85`）。
+  船不是生物，伤害走 `VehicleEntity` 的同步数据（受伤时间、方向、伤害值），另有左右桨
+  和气泡时间；`isEyeInFluid(WATER)` 与 `in_water`（`isInFluid`）分开记，前者给
+  `canAddPassenger` 用。运输船带 27 格物品栏和战利品表。存档按 `id` 名认船，运输船的
+  `Items` / `LootTable` / `LootTableSeed` 和 `Passengers` 往返都有单测。
+- **能玩起来**：`BoatItem.use` 用 `ClipContext.Fluid.ANY` 射线放置（含 `noCollision`
+  校验、消耗物品、5 格内 `CAN_BE_PICKED` 检查按官方 `Entity.isPickable()` 覆写分类）；
+  右键上船（普通船两名 / 运输船一名）、潜行下船、`clampRotation` 乘客朝向限制；
+  `AbstractBoat.tick` 第 9 步既推实体，也把附近没骑东西、比船窄、且船眼睛不在水里的
+  动物 `startRiding(boat)`。`Boat.passengers` 接到骑乘层，玩家控制时 `move_vehicle`
+  照马校验；`ServerboundPaddleBoatPacket` 写进船的左右桨并同步。船的 6 项 EntityData
+  （受伤时间 / 方向 / 伤害 / 左右桨 / 气泡时间）按 index 8–13 逐刻 diff 同步。
+- **运输船容器**：加 `Target::Boat`（参考 `Target::Villager` 实体菜单先例），满员或潜行
+  右键打开 27 格 `GENERIC_9x3` 菜单，点击写回船的 `chest.items`，玩家走远或船被移除就
+  关菜单；`ChestParams` 带打开菜单的玩家和幸运值。漏斗上方 1×1×1 格里没有方块容器时，
+  走 `getEntityContainer` / `CONTAINER_ENTITY_SELECTOR` 的实体容器路径，从运输船抽走
+  一件并写回船的 27 格。战利品表在破坏、菜单打开、漏斗读取三处都按
+  `unpackChestVehicleLootTable` 解包（后两者分别带玩家 / `null`）。
+- **服务端物理**：`AbstractBoat.tick` 的服务端路径，`getStatus` / `checkInWater` /
+  `isUnderwater` / `getWaterLevelAbove` / `getGroundFriction`（逐格 ±1 扫描、跳外圈
+  角落、碰撞形状相交）/ `floatBoat` / `tickBubbleColumn` 照官方字节码实现，含气泡柱
+  冲量、水流推动（`Entity.updateFluidInteraction`，在 `floatBoat` 之前）、冰面摩擦和
+  桨动画。控制者是玩家时服务端清速度、位置由 `move_vehicle` 决定。`floatBoat` 四个
+  状态分支有单测；`Entity.push` 两边都推（船没乘客时也反推，并按 `AbstractBoat.push`
+  的 AABB 高度门控）；气泡柱 71/72 事件只发给跟踪者，甩下来的 mob 乘客走完整
+  `stopRiding` 落位。
+- **受伤破坏**：玩家打船累计伤害（`damage > 40` 或创造模式破坏）、掉船物品与运输船
+  箱内物品；岩浆每刻两次 4.0 伤害（`applyEffectsFromBlocks()` 调两次）、火每 20 刻
+  1.0；官方船 `checkFallDamage` 只记 `lastYd` / `fallDistance`（不受摔落伤害）。
+- **逐刻 Java 对拍**：`EntityOracle.java` 在假世界里跑官方船，`entity_oracle.rs` 用
+  Bamboo 方块层逐刻重放，6 个场景（静水漂浮下沉、冰面滑、水位梯度水流推动、岩浆
+  破坏掉物、运输船存档往返、动物上船）共 46 题 811 刻，逐位比位置 / 速度 / 状态 /
+  伤害 / 朝向 / 流体字段 / 乘客 / 27 格物品 / 掉出的物品 / 方块，`entity-oracle java`
+  报 `46 cases, 811 steps, 0 mismatches`。Java 假世界补了记分板、
+  `isPositionEntityTicking`、实体名单在实体 tick 前可见、破坏掉物留快照，流体直接由
+  方块状态给出；船的随机源按 `entitySeed`（`entitySeeds`）取。对拍过程中修正了五处
+  真实物理偏差：构造时 `status` 为 null（第一刻不进「空中→水」分支）、
+  `checkFallDamage` 记 `move` 前速度、水流推动早于 `floatBoat`、岩浆伤害两次、
+  `canAddPassenger` 的眼睛在水里检查。**对拍层面的改坏确认** 5 处（重力 0.04、
+  水下阻力 0.45、水流推力 0.014、岩浆伤害次数、首刻状态标志）故意改坏生产代码，
+  `entity-oracle java` 每次都报 12 处不一致，恢复后回到 0 不一致。
+
+**已知限制**：
+
+- 玩家攻击伤害复用 `plan_attack`（对非生物目标的附魔加成按 0 处理）；玩家控制船时
+  位置由客户端 `move_vehicle` 决定，只比了校验（照现有马的做法），没有 Java 逐刻对拍。
+- 运输船菜单标题用 Bamboo 的 `container.chest`，不是官方的 `container.chestBoat`；
+  存档往返只验证 27 格物品 / 战利品表内容，没有逐键比官方 NBT 与 Bamboo 存档格式。
+- `getEntityContainer` 多个容器实体重叠时官方用 `level.random.nextInt` 随机选一个，
+  Bamboo 取最小实体 ID；漏斗实体容器路径没有接缓存录制 / 重放。
+- 甩下来的 mob 乘客落位用 blocks 层缺省的 `dismount_location`（载具 x / bb.maxY / z），
+  不是船专用 `getCollisionHorizontalEscapeVector` + `DismountHelper`；玩家侧走船专用落位。
+- 船之间的四点拴绳（`Leashable.supportQuadLeash`）、`isMobControlled()`（第一名乘客是
+  生物）仍未建模；`noCollision(AABB)` 和刷怪阻挡仍只看方块与硬碰撞实体，不含船。

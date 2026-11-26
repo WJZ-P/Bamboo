@@ -248,6 +248,22 @@ fn vehicle_attachment(passenger: &EntityPublic) -> Vec3 {
 /// The position computed by `Entity.positionRider`: vehicle position + the
 /// vehicle's rotated `PASSENGER` point − the passenger's rotated `VEHICLE` point.
 pub fn rider_position(vehicle: &EntityPublic, passenger: &EntityPublic, index: usize) -> Vec3 {
+    if let KindPublic::Boat(boat) = &vehicle.kind {
+        // 船覆写了 PASSENGER 附着点，`passenger_attachment_point` 内部已经按
+        // `-yRot` 旋转，不能再走通用的 `rotate`。
+        let animal = matches!(&passenger.kind, KindPublic::Mob(mob) if mob.mob_type.is_animal());
+        let mount = crate::entity::boat::passenger_attachment_point(
+            boat.entity_type,
+            vehicle.yaw,
+            index,
+            boat.passengers.len(),
+            animal,
+        );
+        return vehicle
+            .position
+            .add(mount)
+            .subtract(vehicle_attachment(passenger));
+    }
     let mount = rotate(passenger_attachment(vehicle, index), vehicle.yaw);
     let feet = vehicle_attachment(passenger);
     vehicle.position.add(mount).subtract(feet)

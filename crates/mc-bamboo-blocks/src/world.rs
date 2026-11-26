@@ -116,6 +116,11 @@ fn block_center(pos: BlockPos) -> Vec3 {
 pub enum ClipFluid {
     None,
     SourceOnly,
+    /// `ClipContext.Fluid.ANY`：任何流体（含流动水）都算命中，船放置用它。
+    ///
+    /// `ClipContext.Fluid.ANY`: any fluid, including flowing water, counts as a
+    /// hit. Boat placement uses it.
+    Any,
 }
 
 /// `CollectingNeighborUpdater` 的一项更新。
@@ -760,6 +765,85 @@ impl<'a> World<'a> {
         let _ = self
             .level
             .knock_back_player_now(target, strength, direction);
+    }
+
+    /// `Block.pushEntitiesUp(oldState, newState, level, pos)`：方块碰撞形状增高时，
+    /// 把落在新增碰撞盒里的非旁观者实体与玩家沿 Y 轴向上推到新顶面。
+    ///
+    /// `Block.pushEntitiesUp(oldState, newState, level, pos)`: when a block's
+    /// collision shape grows, lift non-spectator entities and players intersecting
+    /// the newly added shape upward to clear it.
+    pub fn push_entities_up(
+        &mut self,
+        pos: BlockPos,
+        old_state: BlockState,
+        new_state: BlockState,
+    ) {
+        let old_shape = shape::collision_boxes(old_state, pos, CollisionContext::Empty);
+        let new_shape = shape::collision_boxes(new_state, pos, CollisionContext::Empty);
+        let diff = shape::join_boxes(&old_shape, &new_shape, shape::BooleanOp::OnlySecond);
+        if diff.is_empty() {
+            return;
+        }
+        let moved = shape::moved(&diff, f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
+        let mut bounds = moved[0];
+        for &cell in &moved[1..] {
+            bounds = shape::Aabb::new(
+                bounds.min_x.min(cell.min_x),
+                bounds.min_y.min(cell.min_y),
+                bounds.min_z.min(cell.min_z),
+                bounds.max_x.max(cell.max_x),
+                bounds.max_y.max(cell.max_y),
+                bounds.max_z.max(cell.max_z),
+            );
+        }
+        let mut entities: Vec<(crate::entity::EntityUid, shape::Aabb)> = Vec::new();
+        self.level.for_each_entity_in(bounds, &mut |public| {
+            if !public.removed {
+                entities.push((public.uid, public.bounding_box()));
+            }
+        });
+        for (uid, bbox) in entities {
+            let d = crate::entity::collide_along(
+                mc_bamboo_core::Axis::Y,
+                bbox.moved(0.0, 1.0, 0.0),
+                &moved,
+                -1.0,
+            );
+            let dy = 1.0 + d;
+            self.with_entity_mut(uid, &mut |entity| {
+                entity.position.y += dy;
+                entity.old_position = entity.position;
+            });
+        }
+        let mut players: Vec<(crate::entity::EntityUid, Vec3, shape::Aabb)> = Vec::new();
+        self.level.for_each_player(&mut |player| {
+            if player.spectator {
+                return;
+            }
+            let half = f64::from(player.width) * 0.5;
+            let bbox = shape::Aabb::new(
+                player.position.x - half,
+                player.position.y,
+                player.position.z - half,
+                player.position.x + half,
+                player.position.y + f64::from(player.height),
+                player.position.z + half,
+            );
+            if bbox.intersects(bounds) {
+                players.push((player.uid, player.position, bbox));
+            }
+        });
+        for (uid, position, bbox) in players {
+            let d = crate::entity::collide_along(
+                mc_bamboo_core::Axis::Y,
+                bbox.moved(0.0, 1.0, 0.0),
+                &moved,
+                -1.0,
+            );
+            let target = Vec3::new(position.x, position.y + 1.0 + d, position.z);
+            self.teleport_player(uid, target);
+        }
     }
 
     /// 末影珍珠把主人放到 `position`：能当场做就当场做，否则记成延后的效果。
@@ -3087,6 +3171,15 @@ impl<'a> World<'a> {
         self.level.unpack_loot_table(pos);
     }
 
+    /// `ContainerEntity.unpackChestVehicleLootTable(null)`：漏斗读实体容器
+    /// （运输船）之前填好战利品表，见 [`Level::unpack_boat_loot_table`]。
+    ///
+    /// `ContainerEntity.unpackChestVehicleLootTable(null)`: fill a container
+    /// entity's loot table before a hopper reads its slots.
+    pub fn unpack_boat_loot_table(&mut self, entity: i32) {
+        self.level.unpack_boat_loot_table(entity);
+    }
+
     /// 缓存重放：活塞音高照样从世界随机源取一个数，再发 `Effect::Sound`。
     pub fn replay_piston_sound(&mut self, effect: crate::cache::PistonSoundEffect) {
         let pitch = self.level.next_random_float() * f32::from_bits(effect.scale)
@@ -4635,6 +4728,10 @@ impl<'a> World<'a> {
             let passenger_public = passenger.clone().split().public;
             let at = crate::entity::riding::rider_position(&current, &passenger_public, index);
             passenger.position = at;
+            // `AbstractBoat.positionRider` 末尾的 `clampRotation`。
+            if matches!(current.kind, crate::entity::KindPublic::Boat(_)) {
+                crate::entity::boat::clamp_passenger_rotation(&mut passenger, &current);
+            }
             // `AbstractSkeleton.rideTick` / `Drowned.rideTick` 结尾：控制载具的骷髅/溺尸
             // 把载具的 `yBodyRot` 抄成自己的，让蜘蛛骑士朝向一致。
             if let Some(vehicle) = vehicle_snapshot.as_ref() {
@@ -4897,6 +4994,13 @@ impl<'a> World<'a> {
         })
     }
 
+    /// `Item.getPlayerPOVHitResult(..., ClipContext.Fluid.NONE)`：`OUTLINE` 轮廓射线，忽略流体。
+    ///
+    /// `Item.getPlayerPOVHitResult(..., ClipContext.Fluid.NONE)`: outline raycast ignoring fluids.
+    pub fn clip_outline(&self, from: Vec3, to: Vec3, main_hand: i32) -> Option<BlockHit> {
+        self.clip(from, to, ClipFluid::None, main_hand)
+    }
+
     /// `ClipContext.Block.COLLIDER` 加 `Fluid.NONE`。爆炸的遮挡采样用它。
     ///
     /// `ClipContext.Block.COLLIDER` with `Fluid.NONE`. Explosion exposure samples use it.
@@ -4959,6 +5063,7 @@ impl<'a> World<'a> {
         let block_hit = clip_with_interaction_override(boxes, state, from, to, pos);
         let fluid_hit = match fluid {
             ClipFluid::SourceOnly => clip_source(state.fluid(), pos, from, to),
+            ClipFluid::Any => clip_any(state.fluid(), pos, from, to),
             ClipFluid::None => None,
         };
         let distance =
@@ -5032,6 +5137,17 @@ fn clip_with_interaction_override(
 /// 和后来的位置无关。这里固定用流体自己的高度，也就是上面没有同种流体时的高度，oracle 用同样的位置预热了缓存。
 fn clip_source(fluid: FluidState, pos: BlockPos, from: Vec3, to: Vec3) -> Option<BlockHit> {
     if !fluid.is_source() {
+        return None;
+    }
+    let bounds = shape::Aabb::new(0.0, 0.0, 0.0, 1.0, f64::from(fluid.own_height()), 1.0);
+    shape::clip(&[bounds], from, to, pos)
+}
+
+/// `ClipContext.Fluid.ANY`：任何非空流体都算命中，高度用流体自己的 `own_height`。
+///
+/// `ClipContext.Fluid.ANY`: any non-empty fluid hits, at the fluid's own height.
+fn clip_any(fluid: FluidState, pos: BlockPos, from: Vec3, to: Vec3) -> Option<BlockHit> {
+    if fluid.is_empty() {
         return None;
     }
     let bounds = shape::Aabb::new(0.0, 0.0, 0.0, 1.0, f64::from(fluid.own_height()), 1.0);
@@ -5384,7 +5500,8 @@ mod tests {
                 | Effect::PlayerShoulder { .. }
                 | Effect::Particles { .. }
                 | Effect::VibrationParticle { .. }
-                | Effect::Firework { .. } => None,
+                | Effect::Firework { .. }
+                | Effect::BoatBubbleEvent { .. } => None,
             })
             .collect()
     }

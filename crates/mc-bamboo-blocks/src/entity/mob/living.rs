@@ -4498,8 +4498,14 @@ pub(crate) fn apply_push(
     let Some((dx, dz)) = push_amount(target.position, me.position) else {
         return;
     };
-    let other_pushable =
-        matches!(&target.kind, EntityKind::Mob(mob) if mob.health > 0.0) && !target.removed;
+    let other_pushable = !target.removed
+        && match &target.kind {
+            EntityKind::Mob(mob) => mob.health > 0.0,
+            // `AbstractBoat.isPushable()` 为真；`Entity.push` 里 `!other.isVehicle()`，
+            // 所以有乘客的船不被推，空船会被推开。
+            EntityKind::Boat(boat) => boat.passengers.is_empty(),
+            _ => false,
+        };
     if other_pushable {
         world.with_entity_mut(other, &mut |entity| {
             entity.delta = entity.delta.add(Vec3::new(-dx, 0.0, -dz));

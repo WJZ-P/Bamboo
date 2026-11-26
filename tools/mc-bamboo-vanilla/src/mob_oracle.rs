@@ -50,6 +50,7 @@ mod breeze;
 mod copper_golem;
 mod creaking;
 mod egg;
+mod ender_eye;
 mod ender_pearl;
 mod equine;
 mod firework;
@@ -257,6 +258,9 @@ enum Line {
     Firework(Box<firework::FireworkCase>),
     FireworkSave(firework::FireworkSaveCase),
     Fishing(Box<fishing::FishingCase>),
+    EnderEyeFlight(Box<ender_eye::EnderEyeFlightCase>),
+    EnderEyeFramePush(Box<ender_eye::EnderEyeFramePushCase>),
+    EnderEyeSave(ender_eye::EnderEyeSaveCase),
     FireworkElytra(Box<firework::FireworkElytraCase>),
     ArrowDeflect(Box<arrow_deflect::ArrowDeflectCase>),
     OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawnerCase>),
@@ -2497,6 +2501,9 @@ impl Report {
                 Line::Firework(case) => self.replay_firework(&case),
                 Line::FireworkSave(case) => self.replay_firework_save(&case),
                 Line::Fishing(case) => self.replay_fishing(&case),
+                Line::EnderEyeFlight(case) => self.replay_ender_eye_flight(&case),
+                Line::EnderEyeFramePush(case) => self.replay_ender_eye_frame_push(&case),
+                Line::EnderEyeSave(case) => self.replay_ender_eye_save(&case),
                 Line::FireworkElytra(case) => self.replay_firework_elytra(&case),
                 Line::ArrowDeflect(case) => self.replay_arrow_deflect(&case),
                 Line::OminousItemSpawner(case) => self.replay_ominous_item_spawner(&case),

@@ -48,6 +48,7 @@ pub const CONNECTED_TRIGGERS: &[&str] = &[
     "minecraft:cured_zombie_villager",
     "minecraft:villager_trade",
     "minecraft:fishing_rod_hooked",
+    "minecraft:used_ender_eye",
 ];
 
 /// 借用被拆开的地方（实体 tick、`HurtParts`）只压一条事件，玩家 tick 末尾统一 dispatch。
@@ -339,6 +340,14 @@ pub(crate) fn matches(trigger: &str, payload: &Value, conditions: &Value) -> boo
                     hooked_match || caught_match
                 })
         }
+        // `UsedEnderEyeTrigger`：`distance` 是 `MinMaxBounds.Doubles`，按水平距离平方判定。
+        "minecraft:used_ender_eye" => {
+            known_conditions(&["distance"])
+                && bound_sqr_matches(
+                    fields.get("distance"),
+                    payload.get("distance_sqr").and_then(Value::as_f64),
+                )
+        }
         _ => object.is_some_and(|map| map.is_empty()),
     }
 }
@@ -437,6 +446,30 @@ fn bound_matches(expected: Option<&Value>, actual: Option<f64>) -> bool {
         .get("max")
         .and_then(Value::as_f64)
         .is_none_or(|max| actual <= max);
+    min_ok && max_ok
+}
+
+/// `MinMaxBounds.Doubles.matchesSqr`：比较 `distance_sqr` 与 `min^2` / `max^2`。
+///
+/// `MinMaxBounds.Doubles.matchesSqr`: compare `distance_sqr` against `min^2` and `max^2`.
+fn bound_sqr_matches(expected: Option<&Value>, actual_sqr: Option<f64>) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    let Some(actual_sqr) = actual_sqr else {
+        return false;
+    };
+    if let Some(exact) = expected.as_f64() {
+        return actual_sqr == exact * exact;
+    }
+    let min_ok = expected
+        .get("min")
+        .and_then(Value::as_f64)
+        .is_none_or(|min| actual_sqr >= min * min);
+    let max_ok = expected
+        .get("max")
+        .and_then(Value::as_f64)
+        .is_none_or(|max| actual_sqr <= max * max);
     min_ok && max_ok
 }
 
@@ -711,7 +744,7 @@ mod tests {
         let tree = AdvancementTree::global();
         let set: std::collections::BTreeSet<&str> = CONNECTED_TRIGGERS.iter().copied().collect();
         assert_eq!(set.len(), CONNECTED_TRIGGERS.len());
-        assert_eq!(CONNECTED_TRIGGERS.len(), 34);
+        assert_eq!(CONNECTED_TRIGGERS.len(), 35);
         for trigger in CONNECTED_TRIGGERS {
             assert!(tree.triggers.contains(trigger), "{trigger} 不在注册表里");
         }
@@ -748,6 +781,31 @@ mod tests {
         assert!(!matches(
             "minecraft:tame_animal",
             &serde_json::json!({"entity": {"type": "minecraft:wolf"}}),
+            &conditions,
+        ));
+    }
+
+    #[test]
+    fn used_ender_eye_matches_distance_squared_bounds() {
+        let conditions = serde_json::json!({"distance": {"min": 10.0, "max": 20.0}});
+        assert!(matches(
+            "minecraft:used_ender_eye",
+            &serde_json::json!({"distance_sqr": 100.0}),
+            &conditions,
+        ));
+        assert!(matches(
+            "minecraft:used_ender_eye",
+            &serde_json::json!({"distance_sqr": 400.0}),
+            &conditions,
+        ));
+        assert!(!matches(
+            "minecraft:used_ender_eye",
+            &serde_json::json!({"distance_sqr": 99.9}),
+            &conditions,
+        ));
+        assert!(!matches(
+            "minecraft:used_ender_eye",
+            &serde_json::json!({"distance_sqr": 400.1}),
             &conditions,
         ));
     }

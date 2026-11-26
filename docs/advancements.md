@@ -129,7 +129,7 @@
 | `impossible` | 不做 | 官方定义里没用到；永不触发 |
 | `brewed_potion` | 不做 | 酿造台出药水的玩家归因没做 |
 | `construct_beacon` | 不做 | 信标层级变化没做 |
-| `used_ender_eye` | 不做 | 末影之眼 / 要塞没做 |
+| `used_ender_eye` | 已接 | `player_ender_eye::use_eye`：抛出末影之眼后传水平距离平方，按 `MinMaxBounds.Doubles.matchesSqr` 判定 `distance` |
 | `cured_zombie_villager` | 不做 | 村民没做 |
 | `villager_trade` | 不做 | 村民交易没做 |
 | `hero_of_the_village` | 不做 | 袭击没做 |

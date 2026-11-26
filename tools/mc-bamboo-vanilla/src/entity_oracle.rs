@@ -141,9 +141,12 @@ struct Case {
     /// Present when a player picks the item up. The feet stay at (0.5, 64, 0.5).
     #[serde(default)]
     player: Option<PlayerSetup>,
-    /// 矿车场景：注册表实体类型与初速度。
+    /// 矿车 / 船场景：注册表实体类型、初速度、初始朝向、初始伤害 / 火刻数、
+    /// 在第几步做存档往返、箱内物品 `[槽位, 物品, 数量]`、动物 `[x, y, z]`。
     ///
-    /// Minecart scenes: the registry entity type and initial velocity.
+    /// Minecart / boat scenes: registry entity type, initial velocity / yaw /
+    /// damage / fire, the step that performs an archive round trip, chest items
+    /// and animals.
     #[serde(default = "unknown_item")]
     entity_type: i32,
     #[serde(default)]
@@ -152,11 +155,21 @@ struct Case {
     vy: f64,
     #[serde(default)]
     vz: f64,
-    /// 矿车存档往返发生在第几步之前；-1 表示不做。
+    #[serde(default)]
+    yaw: f32,
+    #[serde(default)]
+    initial_damage: f32,
+    #[serde(default)]
+    initial_fire: i32,
+    /// 存档往返发生在第几步之前；-1 表示不做。
     ///
-    /// The step before which a minecart archive round trip runs; -1 disables it.
-    #[serde(default = "unknown_item")]
+    /// The step before which an archive round trip runs; -1 disables it.
+    #[serde(default = "no_save")]
     save_at: i32,
+    #[serde(default)]
+    chest: Vec<[i32; 3]>,
+    #[serde(default)]
+    animals: Vec<[f64; 3]>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,7 +220,7 @@ struct Shulker {
     progress: f32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct Step {
     entities: Vec<OfficialEntity>,
     blocks: Vec<[i32; 4]>,
@@ -250,9 +263,48 @@ struct OfficialEntity {
     pickup: i32,
     #[serde(default = "unknown_item")]
     health: i32,
+    /// 船场景才有：状态、伤害、朝向、流体字段、乘客和 27 格物品栏。
+    #[serde(default = "unknown_item")]
+    entity_type: i32,
+    #[serde(default = "unknown_item")]
+    status: i32,
+    #[serde(default = "unknown_item")]
+    hurt_time: i32,
+    #[serde(default = "unknown_item")]
+    hurt_dir: i32,
+    #[serde(default = "unknown_item")]
+    damage: i32,
+    #[serde(default = "unknown_item")]
+    yaw: i32,
+    #[serde(default)]
+    eye_in_water: bool,
+    #[serde(default = "unknown_bits")]
+    water_level: i64,
+    #[serde(default = "unknown_bits")]
+    last_yd: i64,
+    #[serde(default = "unknown_item")]
+    land_friction: i32,
+    #[serde(default = "unknown_item")]
+    out_of_control: i32,
+    #[serde(default = "unknown_item")]
+    paddle0: i32,
+    #[serde(default = "unknown_item")]
+    paddle1: i32,
+    #[serde(default)]
+    passengers: Vec<i32>,
+    #[serde(default)]
+    chest: Vec<[i32; 3]>,
 }
 
 fn unknown_item() -> i32 {
+    -1
+}
+
+fn unknown_bits() -> i64 {
+    -1
+}
+
+fn no_save() -> i32 {
     -1
 }
 
@@ -278,6 +330,8 @@ struct Report {
     ///
     /// The named deliberate break for the self-test; `None` is a normal run.
     break_name: Option<String>,
+    /// 当前这题是不是船场景：只比船和掉出的物品，乘客落位在别处同步。
+    boat_only: bool,
 }
 
 struct PhysicsLevel {
@@ -455,6 +509,7 @@ pub fn run(mut command: Command, break_name: Option<&str>) -> Result<(), String>
         mismatches: Vec::new(),
         ended: false,
         break_name: break_name.map(str::to_owned),
+        boat_only: false,
     };
     let read = report.read(BufReader::new(stdout));
     if read.is_err() {
@@ -512,12 +567,17 @@ impl Report {
 
     fn replay(&mut self, case: &Case) {
         self.cases += 1;
+        self.boat_only = false;
         if case.kind == "orb_pickup" {
             self.replay_orb(case);
             return;
         }
         if case.kind == "minecart" {
             self.replay_minecart(case);
+            return;
+        }
+        if case.kind == "boat" {
+            self.replay_boat(case);
             return;
         }
         let mut level = PhysicsLevel::new(case.level_seed);
@@ -644,6 +704,12 @@ impl Report {
     ) {
         let mut ours = ours_entities(world, ticked);
         let mut expected = official.entities.clone();
+        if self.boat_only {
+            // 动物（mob）的乘客落位在 Bamboo 的游戏层，方块层只同步名单；
+            // 船场景比船和掉出的物品，乘客名单在船实体上比。
+            ours.retain(|entity| entity.kind == "boat" || entity.kind == "item");
+            expected.retain(|entity| entity.kind == "boat" || entity.kind == "item");
+        }
         ours.sort_by_key(entity_key);
         expected.sort_by_key(entity_key);
         if ours.len() != expected.len() {
@@ -802,6 +868,50 @@ impl Report {
                 official.health, ours.health
             ));
         }
+        self.field(&place, "entityType", official.entity_type, ours.entity_type);
+        self.field(&place, "status", official.status, ours.status);
+        self.field(&place, "hurtTime", official.hurt_time, ours.hurt_time);
+        self.field(&place, "hurtDir", official.hurt_dir, ours.hurt_dir);
+        self.field(&place, "damage", official.damage, ours.damage);
+        self.field(&place, "yaw", official.yaw, ours.yaw);
+        self.field(
+            &place,
+            "eyeInWater",
+            official.eye_in_water,
+            ours.eye_in_water,
+        );
+        self.field(&place, "waterLevel", official.water_level, ours.water_level);
+        self.field(&place, "lastYd", official.last_yd, ours.last_yd);
+        self.field(
+            &place,
+            "landFriction",
+            official.land_friction,
+            ours.land_friction,
+        );
+        self.field(
+            &place,
+            "outOfControl",
+            official.out_of_control,
+            ours.out_of_control,
+        );
+        self.field(&place, "paddle0", official.paddle0, ours.paddle0);
+        self.field(&place, "paddle1", official.paddle1, ours.paddle1);
+        self.field(&place, "passengers", &official.passengers, &ours.passengers);
+        self.field(&place, "chest", &official.chest, &ours.chest);
+    }
+
+    fn field<T: std::fmt::Debug + PartialEq>(
+        &mut self,
+        place: &str,
+        name: &str,
+        official: T,
+        ours: T,
+    ) {
+        if official != ours {
+            self.mismatch(format!(
+                "{place}: {name}: official {official:?}, bamboo {ours:?}"
+            ));
+        }
     }
 
     fn bits(&mut self, place: &str, field: &str, official: i64, ours: i64) {
@@ -914,6 +1024,62 @@ impl Report {
         }
     }
 
+    /// 船场景：用方块层实体 tick 重放官方 `AbstractBoat.tick`，逐刻比较位置、
+    /// 速度、状态、伤害、乘客和箱内物品。`saveAt` 那一步把船走一遍
+    /// `archive::write_entity` → `read_entity`，验证存档往返不丢状态。
+    ///
+    /// Boat scene: replay `AbstractBoat.tick` with the block-layer entity tick and
+    /// compare position, velocity, status, damage, passengers and chest contents.
+    /// At `saveAt` the boat goes through an archive write/read round trip.
+    fn replay_boat(&mut self, case: &Case) {
+        self.boat_only = true;
+        let mut level = PhysicsLevel::new(case.level_seed);
+        level.entities = Entities::with_next_id(case.first_entity_id);
+        level.place(&case.blocks);
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let boat = world.spawn_entity(Entity::boat(
+            case.entity_type,
+            Vec3::new(case.px, case.py, case.pz),
+        ));
+        world.with_entity_mut(boat, &mut |entity| {
+            entity.delta = Vec3::new(case.vx, case.vy, case.vz);
+            entity.y_rot = case.yaw;
+            entity.remaining_fire_ticks = case.initial_fire;
+            entity.random = JavaRandom::new(case.entity_seed);
+            if let EntityKind::Boat(data) = &mut entity.kind {
+                data.damage = case.initial_damage;
+                if let Some(chest) = &mut data.chest {
+                    for &[slot, item, count] in &case.chest {
+                        if let Some(stack) = chest.items.get_mut(slot as usize) {
+                            *stack = ItemStack::new(item, count);
+                        }
+                    }
+                }
+            }
+        });
+        for &[x, y, z] in &case.animals {
+            world.spawn_entity(Entity::cow(Vec3::new(x, y, z)));
+        }
+        if case.steps.is_empty() {
+            self.mismatch(format!("{}: no steps", case.name));
+            return;
+        }
+        let hoppers: Vec<BlockPos> = Vec::new();
+        self.compare_step(&case.name, 0, &mut world, None, &case.steps[0], &hoppers);
+        for (index, step) in case.steps.iter().enumerate().skip(1) {
+            if case.save_at >= 0 && index - 1 == case.save_at as usize {
+                boat_archive_roundtrip(&mut world, boat);
+            }
+            let ticked = world.tick_entities_kept();
+            self.steps += 1;
+            self.compare_step(&case.name, index, &mut world, Some(&ticked), step, &hoppers);
+            if self.mismatches.len() >= 12 {
+                return;
+            }
+        }
+    }
+
     /// 官方 `ExperienceOrb.playerTouch` 与游戏层拾取逻辑逐刻逐字段比较。
     ///
     /// Compares official `ExperienceOrb.playerTouch` with the game-layer pickup
@@ -1013,6 +1179,11 @@ fn minecart_archive_roundtrip(world: &mut World, id: i32) {
     });
 }
 
+/// 运输船存档往返：和运输矿车走同一段读回逻辑。
+fn boat_archive_roundtrip(world: &mut World, boat: i32) {
+    minecart_archive_roundtrip(world, boat);
+}
+
 fn entity_key(entity: &OfficialEntity) -> (String, i64, i64, i64, bool) {
     (
         entity.kind.clone(),
@@ -1034,7 +1205,84 @@ fn ours_entities(world: &World, ticked: Option<&[Entity]>) -> Vec<OfficialEntity
     listed.into_iter().map(snap_of).collect()
 }
 
+/// 船实体的逐刻状态；非船实体全用默认值（和 Java 侧没有输出这些字段一致）。
+#[derive(Clone)]
+struct BoatSnapshot {
+    entity_type: i32,
+    status: i32,
+    hurt_time: i32,
+    hurt_dir: i32,
+    damage: i32,
+    yaw: i32,
+    eye_in_water: bool,
+    water_level: i64,
+    last_yd: i64,
+    land_friction: i32,
+    out_of_control: i32,
+    paddle0: i32,
+    paddle1: i32,
+    passengers: Vec<i32>,
+    chest: Vec<[i32; 3]>,
+}
+
+fn boat_snapshot(entity: &Entity) -> BoatSnapshot {
+    let default = BoatSnapshot {
+        entity_type: -1,
+        status: -1,
+        hurt_time: -1,
+        hurt_dir: -1,
+        damage: -1,
+        yaw: -1,
+        eye_in_water: false,
+        water_level: -1,
+        last_yd: -1,
+        land_friction: -1,
+        out_of_control: -1,
+        paddle0: -1,
+        paddle1: -1,
+        passengers: Vec::new(),
+        chest: Vec::new(),
+    };
+    let EntityKind::Boat(boat) = &entity.kind else {
+        return default;
+    };
+    use mc_bamboo_blocks::entity::boat::Status;
+    let status = match boat.status {
+        Status::InWater => 0,
+        Status::UnderWater => 1,
+        Status::UnderFlowingWater => 2,
+        Status::OnLand => 3,
+        Status::InAir => 4,
+    };
+    let mut chest = Vec::new();
+    if let Some(data) = &boat.chest {
+        for (slot, stack) in data.items.iter().enumerate() {
+            if !stack.is_empty() {
+                chest.push([slot as i32, stack.item, stack.count]);
+            }
+        }
+    }
+    BoatSnapshot {
+        entity_type: boat.entity_type,
+        status,
+        hurt_time: boat.hurt_time,
+        hurt_dir: boat.hurt_dir,
+        damage: boat.damage.to_bits() as i32,
+        yaw: entity.y_rot.to_bits() as i32,
+        eye_in_water: boat.eye_in_water,
+        water_level: boat.water_level.to_bits() as i64,
+        last_yd: boat.last_yd.to_bits() as i64,
+        land_friction: boat.land_friction.to_bits() as i32,
+        out_of_control: boat.out_of_control_ticks.to_bits() as i32,
+        paddle0: boat.paddle_positions[0].to_bits() as i32,
+        paddle1: boat.paddle_positions[1].to_bits() as i32,
+        passengers: boat.passengers.clone(),
+        chest,
+    }
+}
+
 fn snap_of(entity: Entity) -> OfficialEntity {
+    let boat = boat_snapshot(&entity);
     let (kind, block, fuse, item, count, age, pickup, health) = match entity.kind {
         EntityKind::FallingBlock(data) => (
             "falling".to_owned(),
@@ -1070,6 +1318,7 @@ fn snap_of(entity: Entity) -> OfficialEntity {
         EntityKind::WitherSkull(_) => ("wither_skull".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::FireworkRocket(_) => ("firework_rocket".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::LeashKnot(_) => ("leash_knot".to_owned(), -1, -1, -1, 0, -1, -1, -1),
+        EntityKind::Boat(_) => ("boat".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::EvokerFangs(_) => ("evoker_fangs".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::Painting(_) => ("painting".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::ItemFrame(frame) => (
@@ -1111,6 +1360,7 @@ fn snap_of(entity: Entity) -> OfficialEntity {
             -1,
             -1,
         ),
+        EntityKind::EyeOfEnder(_) => ("eye_of_ender".to_owned(), -1, -1, -1, 0, -1, -1, -1),
     };
     OfficialEntity {
         kind,
@@ -1129,6 +1379,21 @@ fn snap_of(entity: Entity) -> OfficialEntity {
         age,
         pickup,
         health,
+        entity_type: boat.entity_type,
+        status: boat.status,
+        hurt_time: boat.hurt_time,
+        hurt_dir: boat.hurt_dir,
+        damage: boat.damage,
+        yaw: boat.yaw,
+        eye_in_water: boat.eye_in_water,
+        water_level: boat.water_level,
+        last_yd: boat.last_yd,
+        land_friction: boat.land_friction,
+        out_of_control: boat.out_of_control,
+        paddle0: boat.paddle0,
+        paddle1: boat.paddle1,
+        passengers: boat.passengers,
+        chest: boat.chest,
     }
 }
 

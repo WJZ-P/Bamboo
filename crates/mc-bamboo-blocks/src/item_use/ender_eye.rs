@@ -1,6 +1,9 @@
-//! `EnderEyeItem.useOn`：把末影之眼装进末地传送门框架，一圈框架都装满时生成传送门。
+//! `EnderEyeItem.useOn`：把末影之眼装进末地传送门框架，把站在框架上的实体往上推，
+//! 一圈框架都装满时生成传送门。
 //!
-//! 官方装眼时会把站在框架上的实体往上推，这里没有实体。
+//! `EnderEyeItem.useOn`: insert an eye of ender into an end portal frame, push
+//! standing entities up via `Block.pushEntitiesUp`, and open the portal once the
+//! ring is complete.
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::blocks;
@@ -8,6 +11,7 @@ use mc_bamboo_data::blocks;
 use crate::{
     context::UseContext,
     interact::InteractionResult,
+    item_exchange::ItemExchange,
     state::{BlockState, EYE, HORIZONTAL_FACING},
     world::{UPDATE_CLIENTS, UPDATE_LIMIT, World},
 };
@@ -26,8 +30,11 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
     if !state.is(blocks::END_PORTAL_FRAME) || state.get(EYE) {
         return InteractionResult::Pass;
     }
-    world.set_block(pos, state.with(EYE, true), UPDATE_CLIENTS);
+    let next = state.with(EYE, true);
+    world.push_entities_up(pos, state, next);
+    world.set_block(pos, next, UPDATE_CLIENTS);
     world.update_neighbour_for_output_signal(pos, state.block());
+    world.set_item_exchange(ItemExchange::Shrink);
     world.level_event(1503, pos, 0);
     if let Some(corner) = find_portal_frame(world, pos) {
         fill_portal(world, corner.offset(-3, 0, -3));
@@ -185,14 +192,50 @@ mod tests {
         let mut level = TestLevel::new();
         let frames = ring(&mut level, false);
         let eye = actor_holding(items::ENDER_EYE);
-        assert_eq!(
-            use_item(&mut level, &eye, top_hit(frames[0])).result,
-            InteractionResult::Success
-        );
+        let outcome = use_item(&mut level, &eye, top_hit(frames[0]));
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert_eq!(outcome.item_exchange, Some(ItemExchange::Shrink));
         assert!(level.get(BlockPos::new(2, 64, 2)).is_air());
         assert_eq!(
             use_item(&mut level, &eye, top_hit(frames[0])).result,
             InteractionResult::Pass
         );
+    }
+
+    #[test]
+    fn inserting_an_eye_pushes_standing_entities_up() {
+        use mc_bamboo_core::Vec3;
+
+        let mut level = TestLevel::new();
+        let pos = BlockPos::new(2, 64, 2);
+        level.set(
+            pos,
+            BlockState(blocks::END_PORTAL_FRAME)
+                .with(HORIZONTAL_FACING, Direction::North)
+                .with(EYE, false),
+        );
+        // 站在框架正中央（y = 64 + 13/16 = 64.8125）的牛应被推到 y = 65.0。
+        let (on_center, away) = {
+            let mut ticks = crate::BlockTicks::new();
+            let mut world = World::new(&mut level, &mut ticks);
+            let on_center =
+                world.spawn_entity(crate::entity::Entity::cow(Vec3::new(2.5, 64.8125, 2.5)));
+            // 站在远处（不与眼柱相交）的牛不被推。
+            let away = world.spawn_entity(crate::entity::Entity::cow(Vec3::new(5.5, 64.8125, 2.5)));
+            (on_center, away)
+        };
+
+        let eye = actor_holding(items::ENDER_EYE);
+        let outcome = use_item(&mut level, &eye, top_hit(pos));
+        assert_eq!(outcome.result, InteractionResult::Success);
+        let lifted = level.entities().get(on_center).expect("cow stays alive");
+        assert!(
+            (lifted.position.y - 65.0).abs() < 1e-12,
+            "expected y=65.0, got {}",
+            lifted.position.y
+        );
+        assert_eq!(lifted.old_position, lifted.position);
+        let untouched = level.entities().get(away).expect("away cow stays alive");
+        assert!((untouched.position.y - 64.8125).abs() < 1e-12);
     }
 }

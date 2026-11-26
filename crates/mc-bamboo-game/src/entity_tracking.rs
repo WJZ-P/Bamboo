@@ -117,6 +117,18 @@ impl EntityTracking {
         }
     }
 
+    /// `Level.broadcastEntityEvent` 的接收者：只有看得见这个实体的玩家。
+    /// 还没有跟踪条目时返回空（例如实体刚生成、还没配对）。
+    ///
+    /// Recipients of `Level.broadcastEntityEvent`: only the players tracking
+    /// this entity. Empty when the entity has no tracking entry yet.
+    pub(crate) fn viewers(&self, id: i32) -> Vec<PlayerId> {
+        self.tracked
+            .get(&id)
+            .map(|entry| entry.seen_by.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// 这名玩家还看着哪个实体（跨岛搬玩家之前要等它为假）。
     ///
     /// Whether this player still watches any entity (an island crossing waits
@@ -646,13 +658,11 @@ impl TrackedEntity {
                     9 => EntityData::FishingBiting(false),
                     _ => continue,
                 },
-                None if before.is_some() => default_data_for_type(
-                    index,
-                    match &snapshot.data {
-                        KindData::Mob(mob) => mob.mob_type,
-                        _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
-                    },
-                ),
+                None if before.is_some() => match &snapshot.data {
+                    KindData::Boat(_) => boat_default_data(index),
+                    KindData::Mob(mob) => default_data_for_type(index, mob.mob_type),
+                    _ => default_data_for_type(index, mc_bamboo_blocks::entity::mob::MobType::Cow),
+                },
                 _ => continue,
             };
             out.push(item);
@@ -903,10 +913,19 @@ pub enum KindData {
     /// A wither skull: `add_entity` data uses the owner id; `DATA_DANGEROUS` is a
     /// boolean synced value.
     WitherSkull(mc_bamboo_blocks::entity::wither_skull::WitherSkullPublic),
+    /// 船：乘客名单和同步数据（受伤、桨、气泡时间）；元数据项在协议步骤补齐。
+    ///
+    /// A boat: the passenger list and synced data (hurt, paddles, bubble time);
+    /// its metadata entries are filled in with the protocol step.
+    Boat(Box<mc_bamboo_blocks::entity::boat::BoatPublic>),
     /// 烟花火箭：`add_entity` 的 data 用主人 ID，元数据带物品堆、附着目标和斜射标志。
     FireworkRocket(mc_bamboo_blocks::entity::firework_rocket::FireworkRocketPublic),
     /// 钓鱼浮漂：`add_entity` 的 data 用主人 ID（无主人时用自身 ID），元数据带被钩实体与咬钩标记。
     FishingHook(mc_bamboo_blocks::entity::fishing_hook::FishingHookPublic),
+    /// 末影之眼：同步 UUID 与 `DATA_ITEM_STACK`（index 8）。
+    ///
+    /// An eye of ender: synced UUID and `DATA_ITEM_STACK` at index 8.
+    EyeOfEnder(mc_bamboo_blocks::entity::eye_of_ender::EyeOfEnderPublic),
     /// 羊驼口水：没有自己的元数据。
     ///
     /// Llama spit, with no metadata of its own.
@@ -1001,6 +1020,7 @@ impl Snapshot {
             passengers: match &public.kind {
                 KindPublic::Mob(mob) => mob.passengers.clone(),
                 KindPublic::Minecart(cart) => cart.passengers.clone(),
+                KindPublic::Boat(boat) => boat.passengers.clone(),
                 _ => Vec::new(),
             },
             vehicle: public.vehicle,
@@ -1026,10 +1046,12 @@ impl Snapshot {
             | KindData::ExperienceOrb { .. }
             | KindData::Mob(_)
             | KindData::LightningBolt
+            | KindData::OminousItemSpawner(_)
+            | KindData::Boat(_)
             | KindData::LeashKnot
             | KindData::EvokerFangs
             | KindData::Minecart(_)
-            | KindData::OminousItemSpawner(_) => 0,
+            | KindData::EyeOfEnder(_) => 0,
         }
     }
 
@@ -1057,8 +1079,10 @@ impl KindData {
             KindPublic::OminousItemSpawner(stack) => Self::OminousItemSpawner(stack.clone()),
             KindPublic::WindCharge(charge) => Self::WindCharge(*charge),
             KindPublic::WitherSkull(skull) => Self::WitherSkull(*skull),
+            KindPublic::Boat(boat) => Self::Boat(boat.clone()),
             KindPublic::FireworkRocket(firework) => Self::FireworkRocket(firework.clone()),
             KindPublic::FishingHook(hook) => Self::FishingHook(*hook),
+            KindPublic::EyeOfEnder(eye) => Self::EyeOfEnder(eye.clone()),
             KindPublic::LeashKnot { .. } => Self::LeashKnot,
             KindPublic::EvokerFangs => Self::EvokerFangs,
             KindPublic::Painting(painting) => Self::Painting(painting.clone()),
@@ -1112,8 +1136,10 @@ impl KindData {
             | Self::OminousItemSpawner(_)
             | Self::WindCharge(_)
             | Self::WitherSkull(_)
+            | Self::Boat(_)
             | Self::FireworkRocket(_)
             | Self::FishingHook(_)
+            | Self::EyeOfEnder(_)
             | Self::Painting(_)
             | Self::ItemFrame(_)
             | Self::Minecart(_) => None,
@@ -1124,6 +1150,7 @@ impl KindData {
     fn stack(&self) -> Option<&ItemStack> {
         match self {
             Self::Item(stack) | Self::OminousItemSpawner(stack) => Some(stack),
+            Self::EyeOfEnder(eye) => Some(&eye.item),
             Self::FallingBlock { .. }
             | Self::Tnt { .. }
             | Self::ExperienceOrb { .. }
@@ -1137,6 +1164,7 @@ impl KindData {
             | Self::EvokerFangs
             | Self::WindCharge(_)
             | Self::WitherSkull(_)
+            | Self::Boat(_)
             | Self::FireworkRocket(_)
             | Self::FishingHook(_)
             | Self::Painting(_)
@@ -1157,6 +1185,7 @@ impl KindData {
             Self::WitherSkull(skull) => Some(skull.uuid),
             Self::FireworkRocket(firework) => Some(firework.uuid),
             Self::FishingHook(hook) => Some(hook.uuid),
+            Self::EyeOfEnder(eye) => Some(eye.uuid),
             Self::Painting(painting) => Some(painting.uuid),
             Self::ItemFrame(frame) => Some(frame.uuid),
             _ => None,
@@ -1257,6 +1286,34 @@ impl KindData {
                 vec![EntityData::Item(stack.clone())]
             }
             Self::OminousItemSpawner(_) => Vec::new(),
+            Self::Boat(boat) => {
+                // `VehicleEntity` / `AbstractBoat.defineSynchedData` 的默认值：
+                // HURT=0、HURTDIR=1、DAMAGE=0、左右桨=false、BUBBLE_TIME=0。
+                let mut data = Vec::new();
+                if boat.hurt_time != 0 {
+                    data.push(EntityData::BoatHurtTime(boat.hurt_time));
+                }
+                if boat.hurt_dir != 1 {
+                    data.push(EntityData::BoatHurtDir(boat.hurt_dir));
+                }
+                if boat.damage != 0.0 {
+                    data.push(EntityData::BoatDamage(boat.damage));
+                }
+                if boat.paddle_left {
+                    data.push(EntityData::BoatPaddleLeft(true));
+                }
+                if boat.paddle_right {
+                    data.push(EntityData::BoatPaddleRight(true));
+                }
+                if boat.bubble_time != 0 {
+                    data.push(EntityData::BoatBubbleTime(boat.bubble_time));
+                }
+                data
+            }
+            Self::EyeOfEnder(eye) if !eye.item.is_empty() => {
+                vec![EntityData::Item(eye.item.clone())]
+            }
+            Self::EyeOfEnder(_) => Vec::new(),
             Self::FireworkRocket(firework) => {
                 let mut data = Vec::new();
                 if !firework.item.is_empty() {
@@ -1355,6 +1412,22 @@ impl KindData {
             // Minecart metadata is filled in with the sync step; none here yet.
             Self::Minecart(_) => Vec::new(),
         }
+    }
+}
+
+/// 船某一项元数据从非默认变回默认时要发的值（官方 `defineSynchedData` 的默认值）。
+///
+/// The default to send when a boat metadata entry returns to its default.
+fn boat_default_data(index: u8) -> EntityData {
+    match index {
+        8 => EntityData::BoatHurtTime(0),
+        9 => EntityData::BoatHurtDir(1),
+        10 => EntityData::BoatDamage(0.0),
+        11 => EntityData::BoatPaddleLeft(false),
+        12 => EntityData::BoatPaddleRight(false),
+        13 => EntityData::BoatBubbleTime(0),
+        // 船不会产生别的 index；给一个无害的兜底。
+        _ => EntityData::BoatHurtTime(0),
     }
 }
 
