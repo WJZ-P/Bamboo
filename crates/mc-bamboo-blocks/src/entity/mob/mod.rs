@@ -2214,6 +2214,12 @@ pub enum DamageKind {
     BadRespawnPoint,
     /// 风弹命中实体，`minecraft:wind_charge`。
     WindCharge,
+    /// 凋灵之首命中实体，`minecraft:wither_skull`。数据文件里 exhaustion 0.1、
+    /// message_id `witherSkull`、scaling `when_caused_by_living_non_player`。
+    ///
+    /// A wither skull hit, `minecraft:wither_skull`: exhaustion 0.1,
+    /// message_id `witherSkull`, scaling `when_caused_by_living_non_player`.
+    WitherSkull,
     /// 监守者的音波，`minecraft:sonic_boom`：穿墙、绕过护甲。
     ///
     /// The warden's `minecraft:sonic_boom`: passes through walls and armor.
@@ -2279,6 +2285,7 @@ impl DamageKind {
             Self::Magic => "minecraft:magic",
             Self::IndirectMagic => "minecraft:indirect_magic",
             Self::Wither => "minecraft:wither",
+            Self::WitherSkull => "minecraft:wither_skull",
             Self::Explosion => "minecraft:explosion",
             Self::DryOut => "minecraft:dry_out",
             Self::PlayerExplosion => "minecraft:player_explosion",
@@ -2346,6 +2353,7 @@ impl DamageKind {
             Self::Magic => "magic",
             Self::IndirectMagic => "indirectMagic",
             Self::Wither => "wither",
+            Self::WitherSkull => "witherSkull",
             Self::Explosion => "explosion",
             Self::DryOut => "dryout",
             Self::PlayerExplosion => "explosion.player",
@@ -2394,6 +2402,7 @@ impl DamageKind {
             Self::Magic,
             Self::IndirectMagic,
             Self::Wither,
+            Self::WitherSkull,
             Self::Explosion,
             Self::DryOut,
             Self::PlayerExplosion,
@@ -2526,6 +2535,7 @@ impl DamageKind {
             | Self::LightningBolt
             | Self::SulfurCubeHot
             | Self::BadRespawnPoint
+            | Self::WitherSkull
             | Self::Mace
             | Self::Spear
             | Self::Fireworks => TENTH,

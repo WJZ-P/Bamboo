@@ -1582,12 +1582,20 @@ WebView2 的渲染进程不算在内。
   `level.random.nextInt(4)`、无敌期再加 6 次高斯 + 3 次浮点）。死亡掉下界之星，`LivingEntity.createWitherRose`
   照字节码排在所有掉落命令之后：`mobGriefing` 且脚下方块是空气、且 `WitherRoseBlock.canSurvive`（走行为表
   `mayPlaceOn` 的 `#supports_wither_rose`）时种下玫瑰，否则按 `getX/getY/getZ` 的实体坐标掉玫瑰物品。
+  **凋灵之首**：`WitherSkull` 是新的投射物实体，飞行照 `AbstractHurtingProjectile.tick`（每刻按惯性缩放速度：
+  普通 0.95、蓝色危险 0.73，加速度 0、无重力），命中路径复用风弹的 `ProjectileUtil.getHitResultOnMoveVector`
+  加 `computeMargin`。命中实体造成 8 点 `wither_skull` 伤害，命中即发 1 格 `MOB` 爆炸；蓝色头把非
+  `#wither_immune` 方块的爆炸抗性压到 0.8，能真的炸掉方块；普通难度挂 200 刻、困难挂 800 刻的 2 级凋零
+  （简单 / 和平不挂）。`RangedAttackGoal` 每 40 刻射主头（head 0，0.1% 概率蓝色），`customServerAiStep`
+  里两个侧头按 `nextHeadUpdate` 索敌、空闲累计到 16 次朝随机点射蓝色头；每次发射先发 1024 号世界事件。
+  存档写 `dangerous` 键。
   **验证**：`cargo test -p mc-bamboo-blocks -p mc-bamboo-game`、`cargo clippy --workspace --all-targets`、
-  `cargo fmt --all --check` 全过；`mob-oracle java --show 2000` 仍是 267 处已知末位差（无凋灵相关差异），
+  `cargo fmt --all --check` 全过；`mob-oracle java --show 2000` 267 处已知末位差（`frog_lily_41` 偶尔多约 206 行、
+  复跑 `--only frog` 回到 46；无凋灵相关差异），
   `entity-oracle` / `player-data` / `chunk-content` 三个 Java 对拍全过。
-  **已知限制（本轮未做）**：`WitherSkull` 凋灵之首射弹实体、三个头的 `performRangedAttack`（普通 / 蓝色危险、
-  命中加凋零效果、蓝色破方块）和侧头 idle / 索敌射击都未建模，`RangedAttackGoal` 目前只追目标 / 计时、还不发射，
-  凋灵不会攻击；`ServerBossEvent`
+  **已知限制**：`AbstractHurtingProjectile.applyInertia` 的水中分支（`getLiquidInertia=0.8` 和气泡粒子）、
+  `onHitEntity` 里目标死亡时 `owner.heal(5)` 与 `doPostAttackEffects`、`DATA_DANGEROUS` 的客户端元数据同步包、
+  侧头 `getNearbyEntities` 只收生物（玩家由 `NearestAttackableTargetGoal` 负责）还没接；`ServerBossEvent`
   只在状态里记进度，没给跟踪范围内玩家发 add / remove / update 网络包；**没有新增逐刻对拍场景，也没有 4 处改坏确认**——
   召唤 / 无敌期 / 爆炸 / 射凋灵之首 / 半血弹箭 / 破坏方块 / 存档往返的官方逐刻对拍留待下一步。
 - 正版验证的限制：`server.properties` 的 `online-mode` 官方默认 true，命令行版和桌面端都读同一份文件、

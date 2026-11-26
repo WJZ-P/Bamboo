@@ -84,7 +84,7 @@ impl World<'_> {
         } else {
             center
         };
-        let mut broken = self.calculate_exploded_positions(center, radius, None);
+        let mut broken = self.calculate_exploded_positions(center, radius, None, None);
         let block_count = broken.len() as i32;
         // `hurtEntities` 在打乱方块之前，而且不取 `level.random`。
         // `hurtEntities` runs before the block list is shuffled and does not draw `level.random`.
@@ -296,9 +296,15 @@ impl World<'_> {
     /// Entities are hurt after the rays; blocks stay under disabled `mobGriefing`
     /// (`BlockInteraction.KEEP`), otherwise `mobExplosionDropDecay` picks decayed drops.
     /// The blast packet is sent to players in range.
-    pub(crate) fn explode_mob(&mut self, source: &EntityPublic, center: Vec3, radius: f32) {
+    pub(crate) fn explode_mob(
+        &mut self,
+        source: &EntityPublic,
+        center: Vec3,
+        radius: f32,
+        resistance_cap: Option<f32>,
+    ) {
         let rules = self.block_game_rules();
-        let mut broken = self.calculate_exploded_positions(center, radius, None);
+        let mut broken = self.calculate_exploded_positions(center, radius, None, resistance_cap);
         let block_count = broken.len() as i32;
         crate::entity::item::hurt_items_by_explosion(self, center, radius);
         let damage = blast_source(source);
@@ -333,7 +339,7 @@ impl World<'_> {
             anchor,
             BlockState(blocks::WATER).block().explosion_resistance,
         ));
-        let mut broken = self.calculate_exploded_positions(center, 5.0, water_resistance);
+        let mut broken = self.calculate_exploded_positions(center, 5.0, water_resistance, None);
         let block_count = broken.len() as i32;
         crate::entity::item::hurt_items_by_explosion(self, center, 5.0);
         let mut damage = DamageSource::environment(DamageKind::BadRespawnPoint);
@@ -457,6 +463,7 @@ impl World<'_> {
         center: Vec3,
         radius: f32,
         water_resistance: Option<(BlockPos, f32)>,
+        resistance_cap: Option<f32>,
     ) -> Vec<BlockPos> {
         let mut blown = PositionSet::default();
         for xx in 0..RAY_GRID {
@@ -490,10 +497,20 @@ impl World<'_> {
                             .filter(|(anchor, _)| *anchor == pos)
                             .map(|(_, resistance)| resistance);
                         if overridden.is_some() || !(state.is_air() && fluid.is_empty()) {
-                            let resistance = overridden.unwrap_or_else(|| {
+                            let mut resistance = overridden.unwrap_or_else(|| {
                                 let resistance = state.block().explosion_resistance;
                                 resistance.max(fluid_resistance(fluid))
                             });
+                            // `WitherSkull.getBlockExplosionResistance`：蓝色危险头把
+                            // `WitherBoss.canDestroy` 的方块抗性压到 0.8。
+                            //
+                            // `WitherSkull.getBlockExplosionResistance`: a dangerous
+                            // skull caps `WitherBoss.canDestroy` blocks' resistance at 0.8.
+                            if let Some(cap) = resistance_cap
+                                && super::mob::wither::can_destroy(state)
+                            {
+                                resistance = resistance.min(cap);
+                            }
                             remaining -= (resistance + RESISTANCE_BONUS) * RESISTANCE_COST;
                         }
                         // `ExplosionDamageCalculator.shouldBlockExplode` 恒为真。

@@ -1205,6 +1205,15 @@ pub enum Command {
     OminousItemSpawnerTick(super::ominous_item_spawner::SpawnerTick),
     /// 风弹这一刻命中：`AbstractWindCharge.onHitBlock` / `onHitEntity` 的爆炸。
     WindChargeImpact(super::wind_charge::WindChargeHit),
+    /// `WitherBoss.performRangedAttack`：射出一枚凋灵之首。
+    ///
+    /// `WitherBoss.performRangedAttack`: fire one wither skull.
+    ShootWitherSkull(Box<super::wither_skull::WitherSkullShot>),
+    /// 凋灵之首这一刻命中：`WitherSkull.onHitEntity` 的伤害 / 凋零效果和 `onHit` 的爆炸。
+    ///
+    /// A wither skull hit this tick: damage / wither effect of
+    /// `WitherSkull.onHitEntity` and the blast of `onHit`.
+    WitherSkullImpact(super::wither_skull::WitherSkullHit),
     /// 烟花火箭这一刻爆炸：`FireworkRocketEntity.explode`（实体事件 17、伤害、消失）。
     ///
     /// A firework rocket exploding this tick: `FireworkRocketEntity.explode`
@@ -1949,7 +1958,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             center,
             radius,
             source,
-        } => world.explode_mob(&source, center, radius),
+        } => world.explode_mob(&source, center, radius, None),
         Command::LandFallingBlock {
             data,
             entity_drops,
@@ -2037,6 +2046,10 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             super::ominous_item_spawner::apply(me, world, facts);
         }
         Command::WindChargeImpact(hit) => super::wind_charge::impact(me, world, hit),
+        Command::ShootWitherSkull(shot) => {
+            world.spawn_wither_skull_shot(&shot);
+        }
+        Command::WitherSkullImpact(hit) => super::wither_skull::impact(me, world, hit),
         Command::FireworkRocketExplode { hit } => {
             super::firework_rocket::explode(me, world, hit);
         }

@@ -16,8 +16,9 @@ use mc_bamboo_data::{registries::attribute, tags::block_tags};
 
 use crate::{
     entity::{
-        Entity, EntityKind,
+        Entity, EntityKind, KindPublic,
         ctx::{Command, EntityCtx},
+        wither_skull::WitherSkullShot,
     },
     state::BlockState,
 };
@@ -433,11 +434,154 @@ pub(super) fn ranged_attack_tick(
         if !seen {
             return;
         }
-        // 第 3 步接 `performRangedAttack(0, target, f)`（射凋灵之首）。
-        // Step 3 wires `performRangedAttack(0, target, f)` (fire a wither skull).
+        // `RangedAttackMob.performRangedAttack(target, f)` → 主头（head 0）。
+        // `RangedAttackMob.performRangedAttack(target, f)` → the main head (head 0).
+        perform_ranged_attack_entity(me, mob, ctx, 0, &target);
         *attack_time = RANGED_INTERVAL;
     } else if *attack_time < 0 {
         *attack_time = RANGED_INTERVAL;
+    }
+}
+
+/// `WitherBoss.performRangedAttack(head, x, y, z, dangerous)`：非静音时发 1024 号
+/// 世界事件，从该头的位置朝目标点生成一枚凋灵之首。
+///
+/// `WitherBoss.performRangedAttack(head, x, y, z, dangerous)`: send world event
+/// 1024 when not silent, then spawn a wither skull from the head towards the point.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "官方 performRangedAttack 就是这几个参数"
+)]
+fn perform_ranged_attack(
+    me: &mut Entity,
+    mob: &Mob,
+    ctx: &mut dyn EntityCtx,
+    head: i32,
+    tx: f64,
+    ty: f64,
+    tz: f64,
+    dangerous: bool,
+) {
+    if !mob.silent {
+        ctx.emit(
+            Command::MobLevelEvent {
+                event: 1024,
+                pos: me.block_position(),
+                data: 0,
+            },
+            me,
+        );
+    }
+    let hx = head_x(head, me.position.x, mob.y_body_rot, 1.0);
+    let hy = head_y(head, me.position.y, 1.0);
+    let hz = head_z(head, me.position.z, mob.y_body_rot, 1.0);
+    ctx.emit(
+        Command::ShootWitherSkull(Box::new(WitherSkullShot {
+            position: Vec3::new(hx, hy, hz),
+            direction: Vec3::new(tx - hx, ty - hy, tz - hz),
+            dangerous,
+            owner: Some(me.id),
+            owner_uuid: Some(mob.uuid),
+        })),
+        me,
+    );
+}
+
+/// `WitherBoss.performRangedAttack(head, LivingEntity)`：瞄准 `getY() + eyeHeight*0.5`，
+/// 主头（head 0）另有 0.1% 概率抽成蓝色危险头。
+///
+/// `WitherBoss.performRangedAttack(head, LivingEntity)`: aim at
+/// `getY() + eyeHeight*0.5`; the main head (head 0) has a 0.1% dangerous roll.
+fn perform_ranged_attack_entity(
+    me: &mut Entity,
+    mob: &Mob,
+    ctx: &mut dyn EntityCtx,
+    head: i32,
+    target: &CombatTarget,
+) {
+    let eye_height = target.eye_y() - target.position.y;
+    let ty = target.position.y + eye_height * 0.5;
+    let dangerous = head == 0 && me.random.next_float() < 0.001;
+    perform_ranged_attack(
+        me,
+        mob,
+        ctx,
+        head,
+        target.position.x,
+        ty,
+        target.position.z,
+        dangerous,
+    );
+}
+
+/// `WitherBoss.customServerAiStep` 里两个侧头（head 1 / 2）的射击循环：
+/// `nextHeadUpdate` 到点就抽 10 刻内的下次更新、NORMAL/HARD 下累计空闲射击到 16 次
+/// 朝随机点发蓝色头；有目标且可攻击 / 看得见就朝它射、清空闲计数；没目标就按
+/// `TARGETING_CONDITIONS` 找附近非亡灵活体随机设一个目标。
+///
+/// The two side-head firing loop of `WitherBoss.customServerAiStep`.
+fn side_head_attacks(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let difficulty = ctx.blocks().difficulty();
+    for i in 1..3usize {
+        if me.tick_count < mob.wither.next_head_update[i - 1] {
+            continue;
+        }
+        mob.wither.next_head_update[i - 1] = me.tick_count + 10 + me.random.next_int_bounded(10);
+        if difficulty == 2 || difficulty == 3 {
+            mob.wither.idle_head_updates[i - 1] += 1;
+            if mob.wither.idle_head_updates[i - 1] > 15 {
+                // `Mth.nextDouble(random, x-10, x+10)` 三连。
+                // Three `Mth.nextDouble(random, x-10, x+10)` draws.
+                let x = me.position.x - 10.0 + me.random.next_double() * 20.0;
+                let y = me.position.y - 5.0 + me.random.next_double() * 10.0;
+                let z = me.position.z - 10.0 + me.random.next_double() * 20.0;
+                perform_ranged_attack(me, mob, ctx, (i + 1) as i32, x, y, z, true);
+                mob.wither.idle_head_updates[i - 1] = 0;
+            }
+        }
+        let head = (i + 1) as i32;
+        let target_id = mob.wither.targets[i];
+        if target_id > 0 {
+            let found = super::goals::target_view(ctx, target_id);
+            let valid = found.as_ref().is_some_and(|(target, _)| {
+                me.position.distance_to_sqr(target.position) <= 900.0
+                    && living::has_line_of_sight(
+                        me,
+                        mob,
+                        ctx.blocks(),
+                        target_id,
+                        target.eye_position(),
+                    )
+            });
+            if valid {
+                let (target, _) = found.expect("checked above");
+                perform_ranged_attack_entity(me, mob, ctx, head, &target);
+                mob.wither.next_head_update[i - 1] =
+                    me.tick_count + 40 + me.random.next_int_bounded(20);
+                mob.wither.idle_head_updates[i - 1] = 0;
+            } else {
+                mob.wither.targets[i] = 0;
+            }
+        } else {
+            // `getNearbyEntities(..., AABB.inflate(20, 8, 20))`：只收非亡灵的活体生物。
+            // `getNearbyEntities(..., AABB.inflate(20, 8, 20))`: non-undead living mobs.
+            let area = me.bounding_box().inflate(20.0, 8.0, 20.0);
+            let mut candidates = Vec::new();
+            ctx.for_each_other_in(area, &mut |other| {
+                if let KindPublic::Mob(public) = &other.kind
+                    && other.uid != me.id
+                    && !other.removed
+                    && public.is_alive()
+                    && !is_wither_friend(public.mob_type)
+                {
+                    candidates.push(other.uid);
+                }
+            });
+            if !candidates.is_empty() {
+                let pick = me.random.next_int_bounded(candidates.len() as i32) as usize;
+                mob.wither.targets[i] = candidates[pick];
+            }
+        }
     }
 }
 
@@ -472,6 +616,10 @@ pub(super) fn custom_server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dy
         }
         return;
     }
+
+    // 两个侧头的射击循环（官方在 `setAlternativeTarget(0, ...)` 之前）。
+    // The two side-head firing loop (vanilla runs it before `setAlternativeTarget(0, ...)`).
+    side_head_attacks(me, mob, ctx);
 
     // `setAlternativeTarget(0, getTarget() == null ? 0 : getTarget().getId())`。
     // `setAlternativeTarget(0, getTarget() == null ? 0 : getTarget().getId())`.

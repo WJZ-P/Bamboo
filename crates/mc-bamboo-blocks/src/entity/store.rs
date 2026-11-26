@@ -146,6 +146,10 @@ pub enum KindPublic {
     OminousItemSpawner(ItemStack),
     /// 风弹：同步要的 UUID、主人、种类和俯仰角。
     WindCharge(super::wind_charge::WindChargePublic),
+    /// 凋灵之首：同步要的 UUID、主人、危险标志和俯仰角。
+    ///
+    /// A wither skull: the synced UUID, owner, dangerous flag and pitch.
+    WitherSkull(super::wither_skull::WitherSkullPublic),
     /// 烟花火箭：同步要的 UUID、主人、俯仰角和物品堆。
     FireworkRocket(super::firework_rocket::FireworkRocketPublic),
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
@@ -183,6 +187,7 @@ impl KindPublic {
                 mc_bamboo_data::registries::entity_type::OMINOUS_ITEM_SPAWNER
             }
             Self::WindCharge(charge) => charge.variant.entity_type(),
+            Self::WitherSkull(_) => mc_bamboo_data::registries::entity_type::WITHER_SKULL,
             Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
@@ -261,6 +266,10 @@ pub enum KindState {
     OminousItemSpawner(Box<super::ominous_item_spawner::OminousItemSpawner>),
     /// 风弹的全部状态。
     WindCharge(Box<super::wind_charge::WindCharge>),
+    /// 凋灵之首的全部状态。
+    ///
+    /// The full wither-skull state.
+    WitherSkull(Box<super::wither_skull::WitherSkull>),
     /// 烟花火箭的全部状态。
     FireworkRocket(Box<super::firework_rocket::FireworkRocket>),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
@@ -406,6 +415,9 @@ impl EntityRow {
             (KindPublic::WindCharge(_), KindState::WindCharge(charge)) => {
                 EntityKind::WindCharge(charge)
             }
+            (KindPublic::WitherSkull(_), KindState::WitherSkull(skull)) => {
+                EntityKind::WitherSkull(skull)
+            }
             (KindPublic::FireworkRocket(_), KindState::FireworkRocket(firework)) => {
                 EntityKind::FireworkRocket(firework)
             }
@@ -512,6 +524,10 @@ impl Entity {
             EntityKind::WindCharge(charge) => (
                 KindPublic::WindCharge(charge.public(self.remaining_fire_ticks)),
                 KindState::WindCharge(charge),
+            ),
+            EntityKind::WitherSkull(skull) => (
+                KindPublic::WitherSkull(skull.public()),
+                KindState::WitherSkull(skull),
             ),
             EntityKind::FireworkRocket(firework) => (
                 KindPublic::FireworkRocket(firework.public()),

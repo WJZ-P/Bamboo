@@ -832,6 +832,11 @@ pub enum KindData {
     OminousItemSpawner(ItemStack),
     /// 风弹：`add_entity` 的 data 用主人 ID。
     WindCharge(mc_bamboo_blocks::entity::wind_charge::WindChargePublic),
+    /// 凋灵之首：`add_entity` 的 data 用主人 ID；`DATA_DANGEROUS` 是布尔元数据。
+    ///
+    /// A wither skull: `add_entity` data uses the owner id; `DATA_DANGEROUS` is a
+    /// boolean synced value.
+    WitherSkull(mc_bamboo_blocks::entity::wither_skull::WitherSkullPublic),
     /// 烟花火箭：`add_entity` 的 data 用主人 ID，元数据带物品堆、附着目标和斜射标志。
     FireworkRocket(mc_bamboo_blocks::entity::firework_rocket::FireworkRocketPublic),
     /// 羊驼口水：没有自己的元数据。
@@ -922,6 +927,7 @@ impl Snapshot {
             KindData::Egg(egg) => egg.owner.unwrap_or(0),
             KindData::SplashPotion(potion) => potion.owner.unwrap_or(0),
             KindData::WindCharge(charge) => charge.owner.unwrap_or(0),
+            KindData::WitherSkull(skull) => skull.owner.unwrap_or(0),
             KindData::FireworkRocket(firework) => firework.owner.unwrap_or(0),
             KindData::Tnt { .. }
             | KindData::Item(_)
@@ -956,6 +962,7 @@ impl KindData {
             KindPublic::LightningBolt(_) => Self::LightningBolt,
             KindPublic::OminousItemSpawner(stack) => Self::OminousItemSpawner(stack.clone()),
             KindPublic::WindCharge(charge) => Self::WindCharge(*charge),
+            KindPublic::WitherSkull(skull) => Self::WitherSkull(*skull),
             KindPublic::FireworkRocket(firework) => Self::FireworkRocket(firework.clone()),
             KindPublic::LeashKnot { .. } => Self::LeashKnot,
         }
@@ -973,6 +980,7 @@ impl KindData {
                 | Self::LlamaSpit(_)
                 | Self::SplashPotion(_)
                 | Self::WindCharge(_)
+                | Self::WitherSkull(_)
                 | Self::FireworkRocket(_)
         )
     }
@@ -991,6 +999,7 @@ impl KindData {
             | Self::LightningBolt
             | Self::OminousItemSpawner(_)
             | Self::WindCharge(_)
+            | Self::WitherSkull(_)
             | Self::FireworkRocket(_)
             | Self::LeashKnot => None,
             Self::Tnt { fuse } => Some(*fuse),
@@ -1010,6 +1019,7 @@ impl KindData {
             | Self::SplashPotion(_)
             | Self::LightningBolt
             | Self::WindCharge(_)
+            | Self::WitherSkull(_)
             | Self::FireworkRocket(_)
             | Self::LeashKnot => None,
         }
@@ -1024,6 +1034,7 @@ impl KindData {
             Self::Egg(egg) => Some(egg.uuid),
             Self::SplashPotion(potion) => Some(potion.uuid),
             Self::WindCharge(charge) => Some(charge.uuid),
+            Self::WitherSkull(skull) => Some(skull.uuid),
             Self::FireworkRocket(firework) => Some(firework.uuid),
             _ => None,
         }
@@ -1038,6 +1049,7 @@ impl KindData {
             Self::Egg(egg) => Some(egg.x_rot),
             Self::SplashPotion(potion) => Some(potion.x_rot),
             Self::WindCharge(charge) => Some(charge.pitch),
+            Self::WitherSkull(skull) => Some(skull.pitch),
             Self::FireworkRocket(firework) => Some(firework.pitch),
             _ => None,
         }
@@ -1071,6 +1083,7 @@ impl KindData {
             | Self::LlamaSpit(_)
             | Self::LightningBolt
             | Self::WindCharge(_)
+            | Self::WitherSkull(_)
             | Self::LeashKnot => Vec::new(),
             Self::OminousItemSpawner(stack) if !stack.is_empty() => {
                 vec![EntityData::Item(stack.clone())]
