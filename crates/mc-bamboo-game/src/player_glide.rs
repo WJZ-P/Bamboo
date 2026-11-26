@@ -53,17 +53,30 @@ fn can_glide_using(stack: &ItemStack, slot: EquipmentSlot) -> bool {
         && !next_damage_will_break(stack)
 }
 
-fn can_glide(player: &Player, blocks: &PlayerBlocks<'_>) -> bool {
+/// `Player.canGlide`：不在能力飞行，加上 `LivingEntity.canGlide` 的不在地上、不是乘客、
+/// 没有飘浮，并且有能滑翔的装备。官方这里不看梯子，也不看水和岩浆；梯子由客户端的
+/// `travelFallFlying` 处理，液体只在开始滑翔时由 `tryToStartFallFlying` 拦。
+///
+/// `Player.canGlide`: not ability-flying, plus `LivingEntity.canGlide` (not on the
+/// ground, not a passenger, no levitation) and a usable glider. Vanilla checks neither
+/// ladders nor liquids here: ladders are the client's `travelFallFlying`, and liquids
+/// only block starting in `tryToStartFallFlying`.
+fn can_glide(player: &Player) -> bool {
     !player.dead
         && player.spawn_pending.is_none()
         && !player.on_ground
         && !player.riding.is_passenger()
         && !player.sync.flying
         && !player.effects.has(mob_effect::LEVITATION)
-        && !crate::player_move::touches_fluid(player, blocks, fluid_tags::WATER)
-        && !crate::player_move::touches_fluid(player, blocks, fluid_tags::LAVA)
-        && !on_climbable(player, blocks)
         && gliders(player).next().is_some()
+}
+
+/// `Entity.isInLiquid`：碰到水或岩浆。
+///
+/// `Entity.isInLiquid`: touching water or lava.
+fn in_liquid(player: &Player, blocks: &PlayerBlocks<'_>) -> bool {
+    crate::player_move::touches_fluid(player, blocks, fluid_tags::WATER)
+        || crate::player_move::touches_fluid(player, blocks, fluid_tags::LAVA)
 }
 
 fn gliders(player: &Player) -> impl Iterator<Item = EquipmentSlot> + '_ {
@@ -104,7 +117,8 @@ pub(crate) fn try_start(region: &mut Region, id: PlayerId) -> bool {
         return false;
     };
     let blocks = PlayerBlocks::new(&region.chunks, &region.block_entities);
-    if player.sync.is_fall_flying() || !can_glide(player, &blocks) {
+    // `Player.tryToStartFallFlying`：`!isFallFlying() && canGlide() && !isInLiquid()`。
+    if player.sync.is_fall_flying() || !can_glide(player) || in_liquid(player, &blocks) {
         return false;
     }
     player.sync.set_fall_flying(true);
@@ -137,8 +151,9 @@ fn update_fall_flying(region: &mut Region, id: PlayerId) -> bool {
     if player.sync.is_fall_flying() && player.motion.delta.y > -0.5 {
         player.motion.fall_distance = player.motion.fall_distance.min(1.0);
     }
-    let blocks = PlayerBlocks::new(&region.chunks, &region.block_entities);
-    if !player.sync.is_fall_flying() || !can_glide(player, &blocks) {
+    // `LivingEntity.updateFallFlying` 服务端只看 `canGlide()`。
+    // Server-side `LivingEntity.updateFallFlying` only checks `canGlide()`.
+    if !player.sync.is_fall_flying() || !can_glide(player) {
         player.sync.set_fall_flying(false);
         player.fall_fly_ticks = 0;
         return false;

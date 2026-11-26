@@ -1061,7 +1061,6 @@ fn fall_flying_start_checks_equipment_and_environment() {
         "levitating",
         "water",
         "lava",
-        "ladder",
         "empty",
         "wrong slot",
         "worn out",
@@ -1084,11 +1083,11 @@ fn fall_flying_start_checks_equipment_and_environment() {
                     0,
                 ));
             }
-            "water" | "lava" | "ladder" => {
-                let state = match condition {
-                    "water" => blocks::WATER,
-                    "lava" => blocks::LAVA,
-                    _ => blocks::LADDER,
+            "water" | "lava" => {
+                let state = if condition == "water" {
+                    blocks::WATER
+                } else {
+                    blocks::LAVA
                 };
                 stage.region.chunks.set_block(feet, state);
             }
@@ -1159,11 +1158,10 @@ fn fall_flying_spends_durability_every_twenty_ticks_in_survival() {
 }
 
 #[test]
-fn fall_flying_stops_when_the_player_lands_enters_water_or_unequips() {
-    use mc_bamboo_core::BlockPos;
-    use mc_bamboo_data::{blocks, items};
+fn fall_flying_stops_when_the_player_lands_or_unequips() {
+    use mc_bamboo_data::items;
 
-    for condition in ["landed", "water", "unequipped"] {
+    for condition in ["landed", "unequipped"] {
         let mut stage = Stage::at(POSITION);
         stage.player().inventory.slots[6] = ItemStack::new(items::ELYTRA, 1);
         on_player_command(
@@ -1176,11 +1174,6 @@ fn fall_flying_stops_when_the_player_lands_enters_water_or_unequips() {
         assert_eq!(stage.player().fall_fly_ticks, 1);
         match condition {
             "landed" => stage.player().on_ground = true,
-            "water" => {
-                stage.shift(0.0, -0.25, 0.0);
-                let feet = BlockPos::containing(stage.player().position());
-                stage.region.chunks.set_block(feet, blocks::WATER);
-            }
             "unequipped" => stage.player().inventory.slots[6] = ItemStack::empty(),
             _ => unreachable!(),
         }
@@ -1188,6 +1181,37 @@ fn fall_flying_stops_when_the_player_lands_enters_water_or_unequips() {
         assert!(!stage.player().sync.is_fall_flying(), "{condition}");
         assert_eq!(stage.player().fall_fly_ticks, 0, "{condition}");
     }
+}
+
+/// 官方 `tryToStartFallFlying` 不看梯子，`updateFallFlying` 服务端只看 `canGlide()`：
+/// 站在梯子格里也能开始滑翔，滑翔中碰到水也不会被服务端停下（液体只拦开始）。
+///
+/// Vanilla's `tryToStartFallFlying` ignores ladders and server-side `updateFallFlying`
+/// only checks `canGlide()`: a ladder does not block the start, and touching water does
+/// not stop an ongoing glide (liquids only block the start).
+#[test]
+fn ladders_do_not_block_gliding_and_water_does_not_stop_it() {
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::{blocks, items};
+
+    let mut stage = Stage::at(POSITION);
+    stage.player().inventory.slots[6] = ItemStack::new(items::ELYTRA, 1);
+    let feet = BlockPos::containing(stage.player().position());
+    stage.region.chunks.set_block(feet, blocks::LADDER);
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StartFallFlying,
+        0,
+    );
+    assert!(stage.player().sync.is_fall_flying(), "ladder");
+
+    stage.region.chunks.set_block(feet, blocks::AIR);
+    stage.shift(0.0, -0.25, 0.0);
+    let feet = BlockPos::containing(stage.player().position());
+    stage.region.chunks.set_block(feet, blocks::WATER);
+    crate::player_glide::tick(&mut stage.region);
+    assert!(stage.player().sync.is_fall_flying(), "water");
 }
 
 /// `entities.md` 第 9 节的 `[跑]`。
