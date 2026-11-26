@@ -299,8 +299,23 @@ WebView2 的渲染进程不算在内。
   `attack_range` 组件，`a_crouching_player_target_keeps_its_real_collision_box`
   锁住蹲下玩家目标的 1.5 高碰撞盒。每一条都做过改坏自检。
   `nodamage` 音效只有单测、仍没有对拍场景覆盖。
-- **玩家近战攻击的已知限制**：`Item.getAttackDamageBonus`（重锤等）、`PIERCING_WEAPON`
-  （长矛）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应武器的行为；暴击前置判定里
+- **重锤下砸**按官方 `MaceItem`：`canSmashAttack`（摔落 > 1.5 格且非鞘翅滑翔，Bamboo 无
+  鞘翅）、分段加伤 `fall≤3 → 4·fall`、`3<fall≤8 → 12 + 2·(fall−3)`、`fall>8 → 22 + fall − 8`
+  在暴击前加（不乘充能），致密 `smash_damage_per_fallen_block`（每级 0.5）乘摔落距离叠加；
+  下砸时伤害源换成 `minecraft:mace_smash`，范围击退取主目标碰撞盒 `inflate(3.5)` 里的其它
+  `LivingEntity`（玩家也算，攻击者 / 主目标 / 旁观者 / 同盟除外），沿「候选 − 主目标」方向
+  按 `(3.5 − dist) · 0.7 · (fall>5 ? 2 : 1) · (1 − 击退抗性)` 推开（竖直恒 0.7）；命中后
+  攻击者竖直速度设成下砸冲量 `0.009999999776482582`、摔落距离归零、发 `set_entity_motion`
+  给自己，落地音分三档（`mace.smash_air` / `smash_ground` / `smash_ground_heavy`），`levelEvent
+  2013` 地面撞击事件；破甲 `armor_effectiveness`（每级 -0.15）加进护甲减伤比例再夹 [0,1]，
+  对生物和玩家受击路径都生效。**对拍**：`mob-oracle --only player_attack_mace` 覆盖 2 / 5 / 10
+  格下砸（比伤害、目标血量、目标速度和攻击者速度 / 摔落距离）、范围击退（旁边两头牛）、
+  致密 III（低充能压低基础伤害，让致密决定牛死不死），`--break-self-test mace_smash` /
+  `mace_density` / `mace_aoe` 三处改坏都报不一致；破甲走单测（`breach_reduces_armor_effectiveness`，
+  对拍夹具的牛没有护甲）。
+- **玩家近战攻击的已知限制**：`PIERCING_WEAPON`（长矛，`KineticWeapon` 蓄力冲刺 /
+  `post_piercing_attack` 的 `lunge` 也一样）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应
+  武器的行为；风爆 `post_attack`（下砸时把攻击者炸起来）未接；暴击前置判定里
   `onClimbable` / `isInWater` 按缺省值（Bamboo 没有梯子 / 水中状态），失明用 `EffectMap`、
   骑乘用 `riding.vehicle` 分别判 `isMobilityRestricted()` / `isPassenger()`（后两条真判了）；
   节肢杀手的缓慢时长按 `ApplyMobEffect` 从**受害者自己的随机源**取三次

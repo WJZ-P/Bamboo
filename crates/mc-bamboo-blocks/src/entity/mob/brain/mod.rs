@@ -1178,7 +1178,10 @@ mod tests {
     fn brain_and_memory_sizes_stay_small() {
         use crate::entity::mob::brain::behavior::Node;
         use crate::entity::mob::brain::memory::{Memories, MemoryValue};
-        assert_eq!(std::mem::size_of::<MemoryValue>(), 184);
+        // 破甲附魔给 `DamageSource` 加了 `armor_effectiveness` 字段，`MemoryValue::Damage`
+        // 内联这份伤害源，所以它跟着涨 8 字节（184 → 192）。`Memories` / `Brain` 的值都
+        // 装箱，不受影响。
+        assert_eq!(std::mem::size_of::<MemoryValue>(), 192);
         assert_eq!(std::mem::size_of::<Memories>(), 1216);
         assert_eq!(std::mem::size_of::<Brain>(), 1360);
         assert_eq!(std::mem::size_of::<Node>(), 160);

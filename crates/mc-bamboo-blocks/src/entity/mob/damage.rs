@@ -57,16 +57,27 @@ pub fn scale_by_difficulty(amount: f32, difficulty: DifficultyId, scales: bool) 
     }
 }
 
-/// 官方 `CombatRules.getDamageAfterAbsorb` 在没有武器破甲效果时的式子。
-/// `armor` 是 `getArmorValue()` 取整后的结果，`toughness` 是 `ARMOR_TOUGHNESS`。
+/// 官方 `CombatRules.getDamageAfterAbsorb`：`factor = 2 + toughness/4`，
+/// `effective = clamp(armor - amount/factor, armor*0.2, 20)`，减伤比例是
+/// `effective/25` 加上破甲偏移后夹到 [0,1]，最后 `amount *= 1 - fraction`。
+/// `armor` 是 `getArmorValue()` 取整后的结果，`toughness` 是 `ARMOR_TOUGHNESS`，
+/// `armor_effectiveness` 是 `EnchantmentHelper.modifyArmorEffectiveness` 加上的
+/// 偏移（`breach` 每级 -0.15）。
 ///
-/// `CombatRules.getDamageAfterAbsorb` without a weapon's armor-effectiveness
-/// modifier: `factor = 2 + toughness/4`, `effective = clamp(armor - amount/factor,
-/// armor*0.2, 20)`, then `amount *= 1 - effective/25`.
-pub fn damage_after_absorb(amount: f32, armor: f32, toughness: f32) -> f32 {
+/// `CombatRules.getDamageAfterAbsorb`: `factor = 2 + toughness/4`,
+/// `effective = clamp(armor - amount/factor, armor*0.2, 20)`, the reduction
+/// fraction is `effective/25` plus the breach offset clamped to [0,1], then
+/// `amount *= 1 - fraction`.
+pub fn damage_after_absorb(
+    amount: f32,
+    armor: f32,
+    toughness: f32,
+    armor_effectiveness: f32,
+) -> f32 {
     let factor = 2.0 + toughness / 4.0;
     let effective = mth::clamp_f32(armor - amount / factor, armor * 0.2, 20.0);
-    amount * (1.0 - effective / 25.0)
+    let fraction = mth::clamp_f32(effective / 25.0 + armor_effectiveness, 0.0, 1.0);
+    amount * (1.0 - fraction)
 }
 
 /// 官方 `CombatRules.getDamageAfterMagicAbsorb`：`clamp(protection, 0, 20)`
@@ -95,13 +106,15 @@ pub struct ArmorValues {
 
 impl ArmorValues {
     /// 无武器破甲时扣掉护甲、保护附魔和抗性效果的那一份伤害。
+    /// `armor_effectiveness` 是破甲附魔的护甲削弱偏移（见
+    /// [`damage_after_absorb`]）。
     ///
     /// `LivingEntity.getDamageAfterMagicAbsorb`: resistance multiplies by
     /// `max(0, 25 - 5*(amplifier+1)) / 25`.
-    pub fn reduce(self, amount: f32, kind: DamageKind) -> f32 {
+    pub fn reduce(self, amount: f32, kind: DamageKind, armor_effectiveness: f32) -> f32 {
         let mut amount = amount;
         if !kind.bypasses_armor() {
-            amount = damage_after_absorb(amount, self.armor, self.toughness);
+            amount = damage_after_absorb(amount, self.armor, self.toughness, armor_effectiveness);
         }
         if !kind.bypasses_effects() {
             if !kind.bypasses_enchantments() && amount > 0.0 && self.protection > 0.0 {
@@ -245,6 +258,7 @@ pub fn hurt(
     hurt_time: i32,
     hurt_duration: i32,
     armor: ArmorValues,
+    armor_effectiveness: f32,
 ) -> Option<HurtOutcome> {
     hurt_with_max_health(
         amount,
@@ -260,6 +274,7 @@ pub fn hurt(
         hurt_duration,
         armor,
         MAX_HEALTH,
+        armor_effectiveness,
     )
 }
 
@@ -286,6 +301,7 @@ pub fn hurt_with_max_health(
     hurt_duration: i32,
     armor: ArmorValues,
     max_health: f32,
+    armor_effectiveness: f32,
 ) -> Option<HurtOutcome> {
     let scaled = scale_by_difficulty(amount, difficulty, scales);
     if scaled == 0.0 || health <= 0.0 {
@@ -301,7 +317,7 @@ pub fn hurt_with_max_health(
     }
     let full_hit = !cooldown_hit;
     let applied = if full_hit { amount } else { amount - last_hurt };
-    let reduced = armor.reduce(applied, kind).max(0.0);
+    let reduced = armor.reduce(applied, kind, armor_effectiveness).max(0.0);
     let (damage, new_absorption) = absorb(reduced, absorption);
     let new_exhaustion = if damage > 0.0 {
         (exhaustion + kind.exhaustion()).min(MAX_EXHAUSTION)
@@ -370,7 +386,7 @@ mod tests {
     #[test]
     fn armor_and_protection_shrink_damage() {
         // 铁甲全套：armor=15、toughness=0；20 点伤害 -> 20*(1-(15-10)/25)=16。
-        assert_eq!(damage_after_absorb(20.0, 15.0, 0.0), 16.0);
+        assert_eq!(damage_after_absorb(20.0, 15.0, 0.0, 0.0), 16.0);
         // 保护 IV 四件共 16 级 -> * (1 - 16/25) = 0.36。
         assert_eq!(damage_after_magic_absorb(16.0, 16.0), 16.0 * 0.36);
         let values = ArmorValues {
@@ -379,13 +395,26 @@ mod tests {
             protection: 16.0,
             resistance: None,
         };
-        assert_eq!(values.reduce(20.0, DamageKind::MobAttack), 16.0 * 0.36);
+        assert_eq!(values.reduce(20.0, DamageKind::MobAttack, 0.0), 16.0 * 0.36);
         // 绕过护甲的种类仍吃保护附魔，只有 `bypasses_enchantments` 才跳过。
-        assert_eq!(values.reduce(20.0, DamageKind::Generic), 20.0 * 0.36);
+        assert_eq!(values.reduce(20.0, DamageKind::Generic, 0.0), 20.0 * 0.36);
         assert_eq!(
-            ArmorValues::default().reduce(20.0, DamageKind::Generic),
+            ArmorValues::default().reduce(20.0, DamageKind::Generic, 0.0),
             20.0
         );
+    }
+
+    /// 破甲：`armor_effectiveness` 每级 -0.15 加到 `effective/25` 上，夹到 [0,1]。
+    /// 满铁甲 effective=15-10=5、fraction=0.2；破甲 IV（-0.6）后 fraction 夹到 0，
+    /// 20 点伤害全额穿透。
+    #[test]
+    fn breach_reduces_armor_effectiveness() {
+        // 无破甲：20*(1 - 5/25) = 16。
+        assert_eq!(damage_after_absorb(20.0, 15.0, 0.0, 0.0), 16.0);
+        // 破甲 II（-0.3）：fraction = 0.2 - 0.3 -> 夹到 0，全额 20。
+        assert_eq!(damage_after_absorb(20.0, 15.0, 0.0, -0.3), 20.0);
+        // 破甲 I（-0.15）：fraction = 0.2 - 0.15 = 0.05，20*(1-0.05) = 19。
+        assert_eq!(damage_after_absorb(20.0, 15.0, 0.0, -0.15), 19.0);
     }
 
     #[test]
@@ -399,10 +428,13 @@ mod tests {
         // 爆炸（含苦力怕的 player_explosion）和普通攻击一样吃护甲和保护附魔：
         // 20 点先被护甲减到 16，再被保护附魔减到 16 * 0.36。
         let reduced = 16.0 * 0.36;
-        assert_eq!(values.reduce(20.0, DamageKind::Explosion), reduced);
-        assert_eq!(values.reduce(20.0, DamageKind::PlayerExplosion), reduced);
+        assert_eq!(values.reduce(20.0, DamageKind::Explosion, 0.0), reduced);
         assert_eq!(
-            ArmorValues::default().reduce(20.0, DamageKind::Explosion),
+            values.reduce(20.0, DamageKind::PlayerExplosion, 0.0),
+            reduced
+        );
+        assert_eq!(
+            ArmorValues::default().reduce(20.0, DamageKind::Explosion, 0.0),
             20.0
         );
     }
@@ -414,13 +446,16 @@ mod tests {
             ..ArmorValues::default()
         };
         // `max(0, 25 - 5*(amp+1))/25`：0 级 20/25，1 级 15/25，4 级 0。
-        assert_eq!(resistance(0).reduce(20.0, DamageKind::MobAttack), 16.0);
-        assert_eq!(resistance(1).reduce(20.0, DamageKind::MobAttack), 12.0);
-        assert_eq!(resistance(4).reduce(20.0, DamageKind::MobAttack), 0.0);
+        assert_eq!(resistance(0).reduce(20.0, DamageKind::MobAttack, 0.0), 16.0);
+        assert_eq!(resistance(1).reduce(20.0, DamageKind::MobAttack, 0.0), 12.0);
+        assert_eq!(resistance(4).reduce(20.0, DamageKind::MobAttack, 0.0), 0.0);
         // 改坏确认：等级 1 不是 20/25 的倍率。
-        assert_ne!(resistance(1).reduce(20.0, DamageKind::MobAttack), 16.0);
+        assert_ne!(resistance(1).reduce(20.0, DamageKind::MobAttack, 0.0), 16.0);
         // 虚空的伤害绕过抗性。
-        assert_eq!(resistance(2).reduce(20.0, DamageKind::OutOfWorld), 20.0);
+        assert_eq!(
+            resistance(2).reduce(20.0, DamageKind::OutOfWorld, 0.0),
+            20.0
+        );
     }
 
     #[test]
@@ -447,6 +482,7 @@ mod tests {
                 0,
                 10,
                 ArmorValues::default(),
+                0.0,
             )
         };
         let first = args(6.0, 0, 0.0).unwrap();
@@ -479,6 +515,7 @@ mod tests {
                 0,
                 10,
                 ArmorValues::default(),
+                0.0,
             )
         };
         assert_eq!(

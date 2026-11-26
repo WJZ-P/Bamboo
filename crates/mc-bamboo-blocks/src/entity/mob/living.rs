@@ -3405,7 +3405,10 @@ fn actually_hurt(me: &mut Entity, mob: &mut Mob, source: DamageSource, amount: f
         let toughness = mob.attributes.value(attribute::ARMOR_TOUGHNESS) as f32;
         let factor = 2.0 + toughness / 4.0;
         let effective = mth::clamp_f32(armor - amount / factor, armor * 0.2, 20.0);
-        amount *= 1.0 - effective / 25.0;
+        // 破甲附魔：`effective/25` 加上武器偏移再夹到 [0,1]（同 `CombatRules`）。
+        // Breach: `effective/25` plus the weapon offset, clamped to [0,1].
+        let fraction = mth::clamp_f32(effective / 25.0 + source.armor_effectiveness, 0.0, 1.0);
+        amount *= 1.0 - fraction;
     }
     if amount <= 0.0 {
         amount = 0.0;

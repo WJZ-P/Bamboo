@@ -418,6 +418,9 @@ struct Case {
     attack_ground: bool,
     #[serde(default)]
     attack_enchants: Vec<(String, i32)>,
+    /// 长矛场景：这一刻触发 `PiercingWeapon.attack`，-1 表示不触发。
+    #[serde(default = "minus_one")]
+    stab_tick: i32,
     /// 1b 玩家生命场景的规则与动作。
     #[serde(default)]
     life: Option<LifeSetup>,
@@ -712,6 +715,11 @@ struct CowSetup {
     /// cow when absent.
     #[serde(default)]
     kind: i32,
+    /// 攻击场景里这头狼的主人是第几名玩家，-1 表示不是驯服狼。
+    ///
+    /// For attack scenes, the player index that owns this tamed wolf; -1 otherwise.
+    #[serde(default = "minus_one")]
+    owner: i32,
     /// 僵尸场景的队伍编号，-1 不在队伍里。
     #[serde(default = "minus_one")]
     team: i32,
@@ -4205,6 +4213,7 @@ impl Report {
             attack_fall: f64::from_bits(case.attack_fall as u64),
             attack_ground: case.attack_ground,
             attack_enchants: case.attack_enchants.clone(),
+            stab_tick: case.stab_tick,
             extra_cow_positions: case
                 .cows
                 .iter()
@@ -4218,6 +4227,8 @@ impl Report {
                 })
                 .collect(),
             cow_seeds: case.cows.iter().map(|cow| cow.seed).collect(),
+            mob_kinds: case.cows.iter().map(|cow| cow.kind).collect(),
+            mob_owners: case.cows.iter().map(|cow| cow.owner).collect(),
         };
         // 故意改坏：难度缩放、护甲公式（用空装备）、保护附魔等级、
         // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置）、攻击充能值
@@ -4244,6 +4255,17 @@ impl Report {
             Some("sweep_effects") => scene
                 .attack_enchants
                 .retain(|(name, _)| name != "minecraft:fire_aspect"),
+            // 重锤三处改坏：下砸阈值（摔落降到 1.0 不再下砸）、致密（从武器上
+            // 剥掉）和范围击退（候选牛挪出 3.5 格）。
+            Some("mace_smash") => scene.attack_fall = 1.0,
+            Some("mace_density") => scene
+                .attack_enchants
+                .retain(|(name, _)| name != "minecraft:density"),
+            Some("mace_aoe") => scene.extra_cow_positions.clear(),
+            // 重锤宠物改坏：把驯服狼的主人剥掉，让它重新被范围击退（和官方分叉）。
+            Some("mace_pet") => scene.mob_owners.fill(-1),
+            // 长矛改坏：取消刺击，两头牛都不受伤（和官方分叉）。
+            Some("spear_stab") => scene.stab_tick = -1,
             _ => {}
         }
         let output = replay_player_hurt(&scene);
@@ -5139,6 +5161,7 @@ fn is_self_packet(bytes: &[u8]) -> bool {
             mc_bamboo_data::packets::play::clientbound::PLAYER_COMBAT_ENTER
                 | mc_bamboo_data::packets::play::clientbound::HURT_ANIMATION
                 | mc_bamboo_data::packets::play::clientbound::SET_HEALTH
+                | mc_bamboo_data::packets::play::clientbound::SET_ENTITY_MOTION
         )
     )
 }

@@ -2105,6 +2105,27 @@ pub enum DamageKind {
     ///
     /// The warden's `minecraft:sonic_boom`: passes through walls and armor.
     SonicBoom,
+    /// 重锤下砸，`minecraft:mace_smash`：`MaceItem.getItemDamageSource` 在下砸时
+    /// 用这种伤害源。数据文件里 exhaustion 0.1、message_id `mace_smash`、
+    /// scaling `when_caused_by_living_non_player`（玩家攻击不随难度缩放）。
+    ///
+    /// A mace smash, `minecraft:mace_smash`, chosen by
+    /// `MaceItem.getItemDamageSource` during a smash. exhaustion 0.1,
+    /// message_id `mace_smash`, scaling `when_caused_by_living_non_player`
+    /// (a player attack does not scale with difficulty).
+    Mace,
+    /// 长矛刺击，`minecraft:spear`：带 `damage_type` 组件的长矛走
+    /// `PiercingWeapon.attack` / `KineticWeapon.damageEntities`。数据文件里
+    /// exhaustion 0.1、message_id `spear`、scaling
+    /// `when_caused_by_living_non_player`，且在 `#no_knockback` 里（击退由
+    /// `stabAttack` 的 `causeExtraKnockback` 显式给，不走受伤默认击退）。
+    ///
+    /// A spear stab, `minecraft:spear`, used by the spear's `damage_type`
+    /// component through `PiercingWeapon.attack` / `KineticWeapon.damageEntities`.
+    /// exhaustion 0.1, message_id `spear`, scaling
+    /// `when_caused_by_living_non_player`, and in `#no_knockback` (knockback is
+    /// the explicit `causeExtraKnockback` in `stabAttack`, not the default hurt knockback).
+    Spear,
 }
 
 impl DamageKind {
@@ -2146,6 +2167,8 @@ impl DamageKind {
             Self::SulfurCubeHot => "minecraft:sulfur_cube_hot",
             Self::BadRespawnPoint => "minecraft:bad_respawn_point",
             Self::SonicBoom => "minecraft:sonic_boom",
+            Self::Mace => "minecraft:mace_smash",
+            Self::Spear => "minecraft:spear",
         }
     }
 
@@ -2208,6 +2231,8 @@ impl DamageKind {
             Self::SulfurCubeHot => "sulfurCubeHot",
             Self::BadRespawnPoint => "badRespawnPoint",
             Self::SonicBoom => "sonic_boom",
+            Self::Mace => "mace_smash",
+            Self::Spear => "spear",
         }
     }
 
@@ -2251,6 +2276,8 @@ impl DamageKind {
             Self::SulfurCubeHot,
             Self::BadRespawnPoint,
             Self::SonicBoom,
+            Self::Mace,
+            Self::Spear,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -2270,6 +2297,7 @@ impl DamageKind {
                 | Self::Thorns
                 | Self::IndirectMagic
                 | Self::SonicBoom
+                | Self::Mace
         ) || matches!(self, Self::Wither)
     }
 
@@ -2367,7 +2395,9 @@ impl DamageKind {
             | Self::DryOut
             | Self::LightningBolt
             | Self::SulfurCubeHot
-            | Self::BadRespawnPoint => TENTH,
+            | Self::BadRespawnPoint
+            | Self::Mace
+            | Self::Spear => TENTH,
             _ => 0.0,
         }
     }
@@ -2403,6 +2433,8 @@ impl DamageKind {
         matches!(
             self,
             Self::PlayerAttack
+                | Self::Mace
+                | Self::Spear
                 | Self::MobAttack
                 | Self::Arrow
                 | Self::Thrown
@@ -2447,6 +2479,14 @@ pub struct DamageSource {
     /// 主手武器带来的附魔（这一期只读破甲之外的效果，见 `damage::protection`）。
     /// 空表示没有武器。
     pub weapon: Option<u16>,
+    /// 破甲附魔的护甲削弱量：`EnchantmentHelper.modifyArmorEffectiveness` 加到
+    /// 护甲减伤比例上的偏移（`breach` 每级 -0.15）。受击路径把
+    /// `effective/25` 加上这个偏移再夹到 [0,1]。默认 0。
+    ///
+    /// The `breach` armor-effectiveness offset (per level -0.15) added to the
+    /// armour-reduction fraction by `modifyArmorEffectiveness`. The hurt path
+    /// adds it to `effective/25` and clamps to [0,1]. Defaults to 0.
+    pub armor_effectiveness: f32,
     /// 火矢命中时，在受伤判定前尝试点燃目标的刻数。
     ///
     /// If nonzero, a flaming arrow tries to ignite the target before damage.
@@ -2497,6 +2537,7 @@ impl DamageSource {
             attacker_uuid: None,
             scale_when_non_player: false,
             weapon: None,
+            armor_effectiveness: 0.0,
             arrow_ignite_ticks: 0,
             arrow_punch: 0,
             owner_credit: None,
@@ -2570,6 +2611,14 @@ impl DamageSource {
         self
     }
 
+    /// 记录破甲附魔的护甲削弱偏移（`breach` 每级 -0.15）。
+    ///
+    /// Set the `breach` armor-effectiveness offset (per level -0.15).
+    pub const fn with_armor_effectiveness(mut self, offset: f32) -> Self {
+        self.armor_effectiveness = offset;
+        self
+    }
+
     /// 记录致因玩家的 UUID 和命中时的主手抢夺。
     ///
     /// Capture the causing player's UUID and their main-hand Looting at impact.
@@ -2594,6 +2643,7 @@ impl DamageSource {
             attacker_uuid: None,
             scale_when_non_player: false,
             weapon: None,
+            armor_effectiveness: 0.0,
             arrow_ignite_ticks: 0,
             arrow_punch: 0,
             owner_credit: None,

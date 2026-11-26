@@ -469,7 +469,7 @@ pub(crate) fn on_player_action(
             crate::player_consume::release(region, id);
             crate::player_weapon::release(region, id);
         }
-        PlayerActionKind::Stab => {}
+        PlayerActionKind::Stab => crate::player_attack::on_stab(region, id),
     }
 }
 
