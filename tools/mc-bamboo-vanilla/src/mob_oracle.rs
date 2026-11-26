@@ -35,6 +35,7 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod arrow_deflect;
 mod attack_target;
 mod bat;
 mod bee;
@@ -43,6 +44,7 @@ mod bee_full;
 mod bee_locate;
 mod bee_release;
 mod brain;
+mod breeze;
 mod copper_golem;
 mod creaking;
 mod egg;
@@ -61,6 +63,7 @@ mod lightning;
 mod llama_spit;
 mod natural_spawn;
 mod nautilus;
+mod ominous_item_spawner;
 mod patrol_spawn;
 mod phantom;
 mod pig_ride;
@@ -85,6 +88,7 @@ mod villager;
 mod wandering_trader;
 mod warden;
 mod water_mob;
+mod wind_charge;
 mod witch_throw;
 mod zombie_villager;
 
@@ -243,6 +247,9 @@ enum Line {
     WaterMob(Box<water_mob::WaterMobCase>),
     Nautilus(Box<nautilus::NautilusCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
+    WindCharge(Box<wind_charge::WindChargeCase>),
+    ArrowDeflect(Box<arrow_deflect::ArrowDeflectCase>),
+    OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawnerCase>),
     TrialSpawner(Box<trial_spawner::TrialSpawnerCase>),
     Vault(Box<vault::VaultCase>),
     SculkSensor(sculk_sensor::SculkSensorCase),
@@ -252,6 +259,7 @@ enum Line {
     SculkCatalystSave(sculk_catalyst::SculkCatalystSaveCase),
     Warden(Box<warden::WardenCase>),
     WardenSave(warden::WardenSaveCase),
+    Breeze(Box<breeze::BreezeCase>),
     End(End),
 }
 
@@ -1928,6 +1936,39 @@ impl Level for MobLevel {
         }
     }
 
+    fn trial_spawner_dispensing(
+        &mut self,
+        pos: BlockPos,
+        loot_table: &str,
+    ) -> Vec<(mc_bamboo_protocol::item::ItemStack, i32)> {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return Vec::new();
+        };
+        let low = BlockPos::new(
+            (pos.x as f32 / 30.0).floor() as i32,
+            (pos.y as f32 / 20.0).floor() as i32,
+            (pos.z as f32 / 30.0).floor() as i32,
+        );
+        let seed = self.facts.world_seed.wrapping_add(low.pack());
+        let params = mc_bamboo_loot::LootParams::new(0.0);
+        let Ok(stacks) = table.get_random_items_with_seed(
+            &params,
+            seed,
+            Some(&self.loot_sequences),
+            self.random.source(),
+        ) else {
+            return Vec::new();
+        };
+        stacks
+            .into_iter()
+            .map(|mut stack| {
+                let weight = stack.count.max(0);
+                stack.count = 1;
+                (mc_bamboo_game::loot_stack(&stack), weight)
+            })
+            .collect()
+    }
+
     fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
         let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
             return false;
@@ -2278,6 +2319,9 @@ impl Report {
                 Line::WaterMob(case) => self.replay_water_mob(&case),
                 Line::Nautilus(case) => self.replay_nautilus(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
+                Line::WindCharge(case) => self.replay_wind_charge(&case),
+                Line::ArrowDeflect(case) => self.replay_arrow_deflect(&case),
+                Line::OminousItemSpawner(case) => self.replay_ominous_item_spawner(&case),
                 Line::TrialSpawner(case) => self.replay_trial_spawner(&case),
                 Line::Vault(case) => self.replay_vault(&case),
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),
@@ -2287,6 +2331,7 @@ impl Report {
                 Line::SculkCatalystSave(case) => self.replay_sculk_catalyst_save(&case),
                 Line::Warden(case) => self.replay_warden(&case),
                 Line::WardenSave(case) => self.replay_warden_save(&case),
+                Line::Breeze(case) => self.replay_breeze(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),

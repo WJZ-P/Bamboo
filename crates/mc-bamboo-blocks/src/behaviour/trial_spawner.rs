@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 
 use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_nbt::Tag;
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     LegacyRandom,
@@ -76,6 +77,8 @@ pub struct Config {
     pub spawn_potentials: Vec<Weighted<Tag>>,
     pub loot_tables_to_eject: Vec<Weighted<String>>,
     pub items_to_drop_when_ominous: String,
+    /// `ticks_between_item_spawners`，官方缺省 160。
+    pub ticks_between_item_spawners: i64,
     /// 存档里的原始配置；注册表引用是字符串，内联配置是复合标签。
     pub raw: Tag,
 }
@@ -100,6 +103,7 @@ impl Default for Config {
                 Weighted::new(DEFAULT_KEY_LOOT_TABLE.to_owned(), 1),
             ],
             items_to_drop_when_ominous: DEFAULT_ITEMS_TO_DROP_WHEN_OMINOUS.to_owned(),
+            ticks_between_item_spawners: TICKS_BETWEEN_ITEM_SPAWNERS,
             raw: Tag::Compound(Vec::new()),
         }
     }
@@ -188,6 +192,11 @@ impl Config {
         if let Some(Tag::String(text)) = get("items_to_drop_when_ominous") {
             out.items_to_drop_when_ominous = text.clone();
         }
+        if let Some(value) = get("ticks_between_item_spawners")
+            && let Ok(ticks) = tag::java_i64(value)
+        {
+            out.ticks_between_item_spawners = ticks.max(0);
+        }
         out
     }
 
@@ -234,6 +243,18 @@ impl Config {
         }
         if let Some(Tag::List(items)) = get("loot_tables_to_eject") {
             put(&mut out, "loot_tables_to_eject", Tag::List(items.clone()));
+        }
+        if let Some(original) = get("ticks_between_item_spawners")
+            && self.ticks_between_item_spawners != TICKS_BETWEEN_ITEM_SPAWNERS
+        {
+            put(
+                &mut out,
+                "ticks_between_item_spawners",
+                match original {
+                    Tag::Int(_) => Tag::Int(self.ticks_between_item_spawners as i32),
+                    _ => Tag::Long(self.ticks_between_item_spawners),
+                },
+            );
         }
         if let Some(Tag::String(text)) = get("items_to_drop_when_ominous")
             && text != &self.items_to_drop_when_ominous
@@ -439,6 +460,11 @@ pub trait TrialSpawnerContext {
     fn transform_bad_omen(&mut self, player: [u8; 16], duration: i32);
     /// 生成 `OminousItemSpawner`，成功时返回真。
     fn spawn_ominous_item(&mut self, pos: BlockPos, loot_table: &str) -> bool;
+    /// `TrialSpawnerStateData.getDispensingItems` 的战利品表求值，返回
+    /// （数量为 1 的物品堆，权重 = 原数量）。
+    fn ominous_dispensing(&mut self, pos: BlockPos, loot_table: &str) -> Vec<(ItemStack, i32)>;
+    /// `calculatePositionToSpawnSpawner` 的候选实体：脚底位置、碰撞箱高度和是不是玩家。
+    fn ominous_candidates(&self, pos: BlockPos, range: i32) -> Vec<OminousCandidate>;
     /// `levelEvent(type, pos, data)`。
     fn level_event(&mut self, event: i32, pos: BlockPos, data: i32);
     /// 开关闸门的音效。
@@ -933,8 +959,9 @@ impl TrialSpawner {
             return;
         }
         if ctx.spawn_ominous_item(pos, &config.items_to_drop_when_ominous) {
-            self.data.cooldown_ends_at =
-                ctx.game_time().saturating_add(TICKS_BETWEEN_ITEM_SPAWNERS);
+            self.data.cooldown_ends_at = ctx
+                .game_time()
+                .saturating_add(config.ticks_between_item_spawners);
         }
     }
 }
@@ -943,6 +970,14 @@ fn spawn_data_has_id(tag: &Tag) -> bool {
     field(tag, "entity")
         .and_then(|entity| field(entity, "id"))
         .is_some_and(|id| matches!(id, Tag::String(text) if !text.is_empty()))
+}
+
+/// `calculatePositionToSpawnSpawner` 的一个候选实体。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OminousCandidate {
+    pub position: mc_bamboo_core::Vec3,
+    pub height: f32,
+    pub player: bool,
 }
 
 /// 试炼刷怪笼方块实体：持有 [`TrialSpawner`]，逐刻跑一次状态机，存档走
@@ -1158,7 +1193,111 @@ impl TrialSpawnerContext for TrialSpawnerWorld<'_, '_> {
     }
 
     fn spawn_ominous_item(&mut self, pos: BlockPos, loot_table: &str) -> bool {
-        self.world.trial_spawner_spawn_ominous_item(pos, loot_table)
+        let dispensing: Vec<Weighted<ItemStack>> = self
+            .ominous_dispensing(pos, loot_table)
+            .into_iter()
+            .map(|(stack, weight)| Weighted::new(stack, weight))
+            .collect();
+        let random = self.world.random();
+        let Some(stack) = pick(&dispensing, random) else {
+            return false;
+        };
+        if stack.is_empty() {
+            return false;
+        }
+        let candidates = self.ominous_candidates(pos, DEFAULT_REQUIRED_PLAYER_RANGE);
+        if candidates.is_empty() {
+            return false;
+        }
+        // `selectEntityToSpawnItemAbove`：`nextBoolean()` 在已记录生物和玩家之间二选一。
+        let prefer_mobs = random.next_boolean();
+        let pool: Vec<OminousCandidate> = candidates
+            .into_iter()
+            .filter(|candidate| candidate.player != prefer_mobs)
+            .collect();
+        let Some(chosen) = (if pool.is_empty() {
+            // 官方是 `Stream.toList()` 后再从这张表随机取；空表就返回 null。
+            None
+        } else if pool.len() == 1 {
+            Some(pool[0])
+        } else {
+            pool.get(random.next_int(pool.len() as i32) as usize)
+                .copied()
+        }) else {
+            return false;
+        };
+        // `calculatePositionAbove`：向上 `bbHeight + 2 + nextInt(4)` 格，
+        // VISUAL 视线 clip 之后回退一格；那一格碰撞形状非空则放弃。
+        let rise = f64::from(chosen.height) + 2.0 + f64::from(random.next_int(4));
+        let above = Vec3::new(
+            chosen.position.x,
+            chosen.position.y + rise,
+            chosen.position.z,
+        );
+        let center = BlockView::clip_visual(&*self.world, chosen.position, above)
+            .map_or(BlockPos::containing(above), |hit| hit.pos);
+        let target = Vec3::new(
+            f64::from(center.x) + 0.5,
+            f64::from(center.y) - 0.5,
+            f64::from(center.z) + 0.5,
+        );
+        let cell = BlockPos::containing(target);
+        // `getCollisionShape(..., CollisionContext.empty()).isEmpty()`。
+        let collision = crate::shape::collision_boxes(
+            self.world.block_state(cell),
+            cell,
+            crate::shape::CollisionContext::Empty,
+        );
+        if !collision.is_empty() {
+            return false;
+        }
+        let state = crate::entity::ominous_item_spawner::OminousItemSpawner::new(stack, random);
+        // 音高：`(nextFloat - nextFloat) * 0.2 + 1`，两个随机数取自 level.random。
+        let pitch = (random.next_float() - random.next_float()) * 0.2 + 1.0;
+        self.world
+            .spawn_entity(crate::entity::ominous_item_spawner::entity(target, state));
+        self.world.play_sound(
+            target,
+            mc_bamboo_data::sounds::sound_event("minecraft:block.trial_spawner.spawn_item_begin"),
+            mc_bamboo_data::sounds::BLOCKS,
+            1.0,
+            pitch,
+            false,
+        );
+        true
+    }
+
+    fn ominous_dispensing(&mut self, pos: BlockPos, loot_table: &str) -> Vec<(ItemStack, i32)> {
+        self.world.trial_spawner_dispensing(pos, loot_table)
+    }
+
+    fn ominous_candidates(&self, pos: BlockPos, range: i32) -> Vec<OminousCandidate> {
+        let mut out = Vec::new();
+        for player in self.world.trial_spawner_players(pos, f64::from(range)) {
+            // detectedPlayers 只记 UUID；这里用眼睛位置反推脚底（玩家视图没带高度字段）。
+            out.push(OminousCandidate {
+                position: Vec3::new(
+                    player.eye_position.x,
+                    player.eye_position.y - 1.62,
+                    player.eye_position.z,
+                ),
+                height: 1.8,
+                player: true,
+            });
+        }
+        for entity in self.world.live_entities() {
+            if let Some(mob) = entity.kind.mob()
+                && !entity.removed
+                && mob.health > 0.0
+            {
+                out.push(OminousCandidate {
+                    position: entity.position,
+                    height: entity.kind.dimensions().1,
+                    player: false,
+                });
+            }
+        }
+        out
     }
 
     fn level_event(&mut self, event: i32, pos: BlockPos, data: i32) {
@@ -1311,6 +1450,16 @@ mod tests {
         fn spawn_ominous_item(&mut self, _pos: BlockPos, _loot_table: &str) -> bool {
             self.ominous_items += 1;
             true
+        }
+        fn ominous_dispensing(
+            &mut self,
+            _pos: BlockPos,
+            _loot_table: &str,
+        ) -> Vec<(ItemStack, i32)> {
+            Vec::new()
+        }
+        fn ominous_candidates(&self, _pos: BlockPos, _range: i32) -> Vec<OminousCandidate> {
+            Vec::new()
         }
         fn level_event(&mut self, event: i32, pos: BlockPos, data: i32) {
             self.events.push((event, pos, data));

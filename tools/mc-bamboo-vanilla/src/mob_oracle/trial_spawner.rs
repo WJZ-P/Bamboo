@@ -180,6 +180,7 @@ impl TrialSpawnerCase {
             )],
             items_to_drop_when_ominous:
                 "minecraft:spawners/trial_chamber/items_to_drop_when_ominous".to_owned(),
+            ticks_between_item_spawners: 160,
             raw: Tag::Compound(Vec::new()),
         };
         let config = FullConfig {

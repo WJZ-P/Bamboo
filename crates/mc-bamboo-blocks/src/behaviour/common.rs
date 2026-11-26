@@ -67,6 +67,14 @@ pub fn field_block(block: &Block, name: &str) -> &'static Block {
     }
 }
 
+/// 官方类的布尔字段，字段没登记时返回 `None`（客户端给的配置不能触发 panic）。
+pub fn try_bool(block: &Block, name: &str) -> Option<bool> {
+    match block.field(name)? {
+        FieldValue::Bool(value) => Some(value),
+        _ => None,
+    }
+}
+
 /// 官方类的布尔字段，比如 `field_bool(block, "type.canOpenByHand")`。
 pub fn field_bool(block: &Block, name: &str) -> bool {
     match field(block, name) {
