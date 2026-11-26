@@ -613,6 +613,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("fishing")) {
                 cases += playFishing(official, out, only);
             }
+            if (only == null || only.startsWith("ender_eye")) {
+                cases += playEnderEye(official, out, only);
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -13229,6 +13232,245 @@ public final class MobOracle {
                     + ",\"item\":" + (empty ? 0 : BuiltInRegistries.ITEM.getId(net.minecraft.world.item.Items.STONE))
                     + ",\"count\":" + (empty ? 0 : 3)
                     + ",\"delay\":60,\"start\":[0.5,70.0,0.5],\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    /**
+     * 末影之眼逐刻对拍：
+     * 1. `ender_eye_drop`：远距离目标（>12 格，截断并抬升 +8），固定种子 `surviveAfterDeath=true`，
+     *    逐刻比 85 刻位置/速度/音效/第 81 刻掉出的 `ItemEntity` 轨迹；
+     * 2. `ender_eye_shatter`：近距离目标（<=12 格，直飞目标点），固定种子 `surviveAfterDeath=false`，
+     *    逐刻比 85 刻位置/速度/音效/第 81 刻 2003 事件；
+     * 3. `ender_eye_frame_push`：两头 `noAi` 牛分别站在框架中央与旁侧，装眼时推起中央那头牛。
+     */
+    private static int playEnderEye(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("ender_eye_drop", "ender_eye_shatter")) {
+            if (only != null && !name.startsWith(only)) continue;
+            boolean shatter = name.equals("ender_eye_shatter");
+            int skipSeeds = shatter ? 5 : 0;
+            double[] start = {0.5, 65.0, 0.5};
+            double[] target = shatter ? new double[] {5.0, 50.0, 8.0} : new double[] {100.0, 20.0, 60.0};
+
+            FakeLevel level = FakeLevel.create(official);
+            ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+            level.nextId = FIRST_ID;
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            level.enderEyeScene = true;
+            level.spawned = new ArrayList<>();
+            level.tracked = new ArrayList<>();
+            level.levelEvents = new ArrayList<>();
+            level.soundLog = new ArrayList<>();
+            level.getRandom().setSeed(1L);
+            level.gameTime = START_TIME;
+            for (int x = -16; x <= 24; x++) {
+                for (int z = -16; z <= 24; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+            for (int s = 0; s < skipSeeds; s++) {
+                level.entitySeeds.nextLong();
+                level.nextId++;
+            }
+
+            var eye = new net.minecraft.world.entity.projectile.EyeOfEnder(
+                    level, start[0], start[1], start[2]);
+            setRandom(eye, level.entitySeeds.nextLong());
+            eye.setUUID(Mth.createInsecureUUID(eye.getRandom()));
+            eye.setId(level.nextId++);
+            eye.setItem(new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.ENDER_EYE, 3));
+            eye.signalTo(new Vec3(target[0], target[1], target[2]));
+            level.tracked.add(eye);
+
+            int deathSoundId = BuiltInRegistries.SOUND_EVENT.getId(
+                    net.minecraft.sounds.SoundEvents.ENDER_EYE_DEATH);
+            net.minecraft.world.entity.item.ItemEntity dropped = null;
+            int ticks = 85;
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime++;
+                    level.spawned.clear();
+                    level.levelEvents.clear();
+                    level.soundLog.clear();
+                    List<Entity> snapshot = new ArrayList<>(level.tracked);
+                    for (Entity e : snapshot) {
+                        if (!e.isRemoved()) {
+                            e.commonTick();
+                            e.tick();
+                        }
+                    }
+                    for (Entity e : level.spawned) {
+                        if (e instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                            dropped = item;
+                        }
+                    }
+                }
+                int deathSounds = 0;
+                for (long[] s : level.soundLog) {
+                    if ((int) s[0] == deathSoundId) deathSounds++;
+                }
+                int event2003 = 0;
+                for (int[] ev : level.levelEvents) {
+                    if (ev[0] == 2003) event2003++;
+                }
+                int dropPresent = dropped != null && !dropped.isRemoved() ? 1 : 0;
+                long dx = dropPresent == 1 ? Double.doubleToRawLongBits(dropped.getX()) : 0L;
+                long dy = dropPresent == 1 ? Double.doubleToRawLongBits(dropped.getY()) : 0L;
+                long dz = dropPresent == 1 ? Double.doubleToRawLongBits(dropped.getZ()) : 0L;
+                long ddx = dropPresent == 1 ? Double.doubleToRawLongBits(dropped.getDeltaMovement().x) : 0L;
+                long ddy = dropPresent == 1 ? Double.doubleToRawLongBits(dropped.getDeltaMovement().y) : 0L;
+                long ddz = dropPresent == 1 ? Double.doubleToRawLongBits(dropped.getDeltaMovement().z) : 0L;
+                if (tick > 0) frames.append(',');
+                frames.append('[')
+                        .append(eye.tickCount).append(',')
+                        .append(eye.isRemoved() ? 1 : 0).append(',')
+                        .append(Double.doubleToRawLongBits(eye.getX())).append(',')
+                        .append(Double.doubleToRawLongBits(eye.getY())).append(',')
+                        .append(Double.doubleToRawLongBits(eye.getZ())).append(',')
+                        .append(Double.doubleToRawLongBits(eye.getDeltaMovement().x)).append(',')
+                        .append(Double.doubleToRawLongBits(eye.getDeltaMovement().y)).append(',')
+                        .append(Double.doubleToRawLongBits(eye.getDeltaMovement().z)).append(',')
+                        .append(deathSounds).append(',')
+                        .append(event2003).append(',')
+                        .append(dropPresent).append(',')
+                        .append(dx).append(',').append(dy).append(',').append(dz).append(',')
+                        .append(ddx).append(',').append(ddy).append(',').append(ddz).append(',')
+                        .append(randomSeed(level.getRandom()))
+                        .append(']');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"enderEyeFlight\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"skipSeeds\":" + skipSeeds
+                    + ",\"start\":[" + start[0] + "," + start[1] + "," + start[2] + "]"
+                    + ",\"target\":[" + target[0] + "," + target[1] + "," + target[2] + "]"
+                    + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+
+        if (only == null || "ender_eye_frame_push".startsWith(only)) {
+            FakeLevel level = FakeLevel.create(official);
+            ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+            level.nextId = FIRST_ID;
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            level.spawned = new ArrayList<>();
+            level.tracked = new ArrayList<>();
+            level.levelEvents = new ArrayList<>();
+            level.getRandom().setSeed(1L);
+            level.gameTime = START_TIME;
+            for (int x = -2; x <= 5; x++) {
+                for (int z = -2; z <= 5; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+            BlockPos framePos = new BlockPos(2, 64, 2);
+            BlockPos sideFramePos = new BlockPos(1, 64, 2);
+            BlockState emptyFrame = Blocks.END_PORTAL_FRAME.defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.EndPortalFrameBlock.FACING, Direction.NORTH)
+                    .setValue(net.minecraft.world.level.block.EndPortalFrameBlock.HAS_EYE, false);
+            level.blocks.put(framePos.asLong(), emptyFrame);
+            level.blocks.put(sideFramePos.asLong(), emptyFrame);
+
+            Cow centerCow = new Cow(EntityTypes.COW, level);
+            setRandom(centerCow, level.entitySeeds.nextLong());
+            centerCow.setUUID(Mth.createInsecureUUID(centerCow.getRandom()));
+            centerCow.getRandom().nextFloat();
+            centerCow.setId(level.nextId++);
+            centerCow.setNoAi(true);
+            centerCow.snapTo(2.5, 64.8125, 2.5, 0.0F, 0.0F);
+            centerCow.setOnGround(true);
+            level.tracked.add(centerCow);
+
+            Cow sideCow = new Cow(EntityTypes.COW, level);
+            setRandom(sideCow, level.entitySeeds.nextLong());
+            sideCow.setUUID(Mth.createInsecureUUID(sideCow.getRandom()));
+            sideCow.getRandom().nextFloat();
+            sideCow.setId(level.nextId++);
+            sideCow.setNoAi(true);
+            sideCow.snapTo(1.5, 64.8125, 2.5, 0.0F, 0.0F);
+            sideCow.setOnGround(true);
+            level.tracked.add(sideCow);
+
+            ServerPlayer player = new ServerPlayer(
+                    official.server,
+                    level,
+                    new GameProfile(new UUID(1L, 9L), "EnderEyeOracle"),
+                    ClientInformation.createDefault());
+            player.setId(FIRST_ID + 100);
+            player.setPos(2.5, 64.0, 4.5);
+            player.getAbilities().instabuild = false;
+            player.getAbilities().mayBuild = true;
+            player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.ENDER_EYE, 2));
+
+            int ticks = 10;
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                level.levelEvents.clear();
+                if (tick == 1) {
+                    var hit = new net.minecraft.world.phys.BlockHitResult(
+                            new Vec3(2.5, 64.8125, 2.5), Direction.UP, framePos, false);
+                    var ctx = new net.minecraft.world.item.context.UseOnContext(
+                            player, InteractionHand.MAIN_HAND, hit);
+                    Items.ENDER_EYE.useOn(ctx);
+                }
+                if (tick > 0) {
+                    level.gameTime++;
+                    for (Entity e : List.of(centerCow, sideCow)) {
+                        e.commonTick();
+                        e.tick();
+                    }
+                }
+                int hasEye = level.getBlockState(framePos)
+                        .getValue(net.minecraft.world.level.block.EndPortalFrameBlock.HAS_EYE) ? 1 : 0;
+                int event1503 = 0;
+                for (int[] ev : level.levelEvents) {
+                    if (ev[0] == 1503) event1503++;
+                }
+                if (tick > 0) frames.append(',');
+                frames.append('[')
+                        .append(Double.doubleToRawLongBits(centerCow.getX())).append(',')
+                        .append(Double.doubleToRawLongBits(centerCow.getY())).append(',')
+                        .append(Double.doubleToRawLongBits(centerCow.getZ())).append(',')
+                        .append(Double.doubleToRawLongBits(centerCow.getDeltaMovement().y)).append(',')
+                        .append(centerCow.onGround() ? 1 : 0).append(',')
+                        .append(Double.doubleToRawLongBits(sideCow.getX())).append(',')
+                        .append(Double.doubleToRawLongBits(sideCow.getY())).append(',')
+                        .append(Double.doubleToRawLongBits(sideCow.getZ())).append(',')
+                        .append(sideCow.onGround() ? 1 : 0).append(',')
+                        .append(hasEye).append(',')
+                        .append(event1503).append(',')
+                        .append(player.getMainHandItem().getCount())
+                        .append(']');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"enderEyeFramePush\",\"name\":\"ender_eye_frame_push\""
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+
+        if (only == null || "ender_eye_save".startsWith(only)) {
+            FakeLevel world = FakeLevel.create(official);
+            var eye = new net.minecraft.world.entity.projectile.EyeOfEnder(world, 1.5, 65.25, -2.5);
+            eye.setUUID(new UUID(0L, 77L));
+            eye.setDeltaMovement(0.125, 0.25, -0.0625);
+            eye.setItem(new ItemStack(Items.ENDER_EYE, 3));
+            var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            eye.saveWithoutId(output);
+            var copy = EntityTypes.EYE_OF_ENDER.create(world, EntitySpawnReason.LOAD);
+            copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries,
+                    output.buildResult()));
+            var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            copy.saveWithoutId(again);
+            out.write("{\"type\":\"enderEyeSave\",\"nbt\":"
+                    + jsonString(output.buildResult().toString())
+                    + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
             cases++;
         }
         return cases;
@@ -25999,6 +26241,8 @@ public final class MobOracle {
         int fishingNextId;
         List<Integer> fishingParticles;
         boolean fishingEvent31;
+        /** 末影之眼对拍：到点掉出的 `ItemEntity` 从 `entitySeeds` 换种并进 `tracked`。 */
+        boolean enderEyeScene;
         boolean injectedBrightOutside = true;
         int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
@@ -26669,6 +26913,15 @@ public final class MobOracle {
                         || entity instanceof net.minecraft.world.entity.ExperienceOrb) {
                     entity.setId(fishingNextId++);
                 }
+            }
+            if (enderEyeScene && entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                setRandom(item, entitySeeds.nextLong());
+                RandomSource r = item.getRandom();
+                r.nextFloat(); // bobOffs
+                item.setYRot(r.nextFloat() * 360.0F);
+                item.setDeltaMovement(r.nextDouble() * 0.2 - 0.1, 0.2, r.nextDouble() * 0.2 - 0.1);
+                item.setId(nextId++);
+                tracked.add(item);
             }
             spawned.add(entity);
             return true;
