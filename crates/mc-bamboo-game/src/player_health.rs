@@ -247,6 +247,7 @@ impl PlayerHealth {
             self.hurt_duration,
             armor,
             max_health,
+            source.armor_effectiveness,
         )?;
         self.health = outcome.health;
         self.absorption = outcome.absorption;
