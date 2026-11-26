@@ -1008,10 +1008,10 @@ fn no_collision(cx: &Cx, area: Aabb) -> bool {
 // ---- PrepareRamNearestTarget / RamTarget ----
 
 /// `RAM_TARGET_CONDITIONS.test(level, body, target)`：`forCombat()` 加选择器——不是山羊、
-/// 碰撞箱在世界边界内。（盔甲架 Bamboo 还没有。）
+/// 碰撞箱在世界边界内。（盔甲架已建模。）
 ///
 /// `RAM_TARGET_CONDITIONS.test(level, body, target)`: `forCombat()` plus the selector —
-/// not a goat and its box inside the world border. (Bamboo has no armour stands yet.)
+/// not a goat and its box inside the world border. (Bamboo models armour stands now.)
 fn ram_targetable(cx: &mut Cx, view: &LivingView) -> bool {
     if view.uid == cx.me.id || !view.alive || view.spectator {
         return false;

@@ -829,7 +829,7 @@ pub(super) fn before_hurt(mob: &mut Mob) {
 }
 
 /// `Wolf.wantsToAttack`：不打驯服的动物（同一个主人的狼也不打）和驯服的马科。
-/// 苦力怕、恶魂、盔甲架在 Bamboo 里还没有。
+/// 苦力怕、恶魂在 Bamboo 里还没有；盔甲架已建模。
 ///
 /// `Wolf.wantsToAttack`: tamed animals and tamed equines are spared.
 pub(super) fn wants_to_attack(ctx: &dyn EntityCtx, target: EntityUid, owner: &PlayerView) -> bool {

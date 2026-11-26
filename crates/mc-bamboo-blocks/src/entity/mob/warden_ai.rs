@@ -713,13 +713,12 @@ pub fn warden_entity_sensor(cx: &mut Cx) {
 
 /// `Warden.canTargetEntity`：活着的 LivingEntity、不是自己、不在创造 / 旁观模式、
 /// 不是另一个监守者、还没被移除、不是无敌、碰撞箱在世界边界内。
-/// （盔甲架和同队 `isAlliedTo` 两支 Bamboo 还没建模：没有盔甲架生物，
-/// 生物也不会加入队伍。）
+/// （盔甲架已建模，但同队 `isAlliedTo` 这一支 Bamboo 还没建模：生物不会加入队伍。）
 ///
 /// `Warden.canTargetEntity`: a living entity, not self, not creative / spectator,
 /// not another warden, not removed, not invulnerable and inside the world border.
-/// (The armour-stand and `isAlliedTo` branches are not modelled yet: Bamboo has
-/// no armour stands and mobs never join teams.)
+/// (Armour stands are modelled now; the `isAlliedTo` branch is not, as mobs
+/// never join teams.)
 fn can_target_entity(cx: &Cx, uid: crate::entity::EntityUid) -> bool {
     if uid == cx.me.id || cx.me.removed {
         return false;

@@ -392,7 +392,7 @@ struct MaceTarget {
 /// 候选碰撞盒相交、距主目标 ≤ 3.5 的其它 `LivingEntity`（玩家也算，攻击者和
 /// 主目标不算）。和攻击者同队的、攻击者自己驯服的、以及主目标驯服的宠物都不
 /// 算（`isAlliedTo` 和 `isOwnedBy(target)`）；标记盔甲架 / 旁观者 / 飞行中的
-/// 创造玩家同样不在候选里（旁观者和创造飞行玩家由攻击路径排除，盔甲架不建模）。
+/// 创造玩家同样不在候选里（旁观者和创造飞行玩家由攻击路径排除，标记盔甲架已建模并排除）。
 /// 玩家排在生物之后（玩家不在实体表里）。
 ///
 /// The `MaceItem.knockbackPredicate` candidates: other `LivingEntity`s whose box
