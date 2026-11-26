@@ -1102,8 +1102,18 @@ impl KindData {
             | Self::LightningBolt
             | Self::LeashKnot
             | Self::EvokerFangs
-            | Self::WindCharge(_)
-            | Self::WitherSkull(_) => Vec::new(),
+            | Self::WindCharge(_) => Vec::new(),
+            // `WitherSkull.DATA_DANGEROUS`：蓝色危险头同步 index 8 的 BOOLEAN true，
+            // 普通头不脏、不发这一项。
+            // `WitherSkull.DATA_DANGEROUS`: a dangerous (blue) skull syncs
+            // BOOLEAN true at index 8; a normal skull stays clean.
+            Self::WitherSkull(skull) => {
+                if skull.dangerous {
+                    vec![EntityData::WitherSkullDangerous(true)]
+                } else {
+                    Vec::new()
+                }
+            }
             Self::OminousItemSpawner(stack) if !stack.is_empty() => {
                 vec![EntityData::Item(stack.clone())]
             }
