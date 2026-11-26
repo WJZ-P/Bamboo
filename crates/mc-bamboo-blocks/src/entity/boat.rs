@@ -134,6 +134,10 @@ pub struct Boat {
     pub bubble_multiplier: f32,
     pub bubble_angle: f32,
     pub bubble_angle_o: f32,
+    /// `EntityFluidInteraction.isEyeInFluid(WATER)`：眼睛是否落在水里。它和
+    /// `Entity.in_water`（`isInFluid(WATER)`，碰到水）是两个独立状态，
+    /// `canAddPassenger` 用的是这一个。
+    pub eye_in_water: bool,
     /// 运输船的物品栏；普通船是 `None`。
     pub chest: Option<ChestBoat>,
 }
@@ -167,6 +171,7 @@ impl Boat {
             bubble_multiplier: 0.0,
             bubble_angle: 0.0,
             bubble_angle_o: 0.0,
+            eye_in_water: false,
             chest: is_chest(entity_type).then(ChestBoat::default),
         }
     }
@@ -431,7 +436,7 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     me.apply_effects_from_blocks(view);
     me.apply_effects_from_blocks(view);
     detect_bubble_column(&mut boat, me, view);
-    apply_water_current(me, view);
+    apply_water_current(&mut boat, me, view);
     // 官方 `Entity.baseTick` 的岩浆 / 火：每刻调一次 `hurtServer`
     // （岩浆 4.0、火 1.0），伤害累计到阈值就破坏并掉物品。
     let env_amount = environment_damage(me, view);
@@ -807,12 +812,14 @@ fn handle_bubble_column_effect(me: &mut Entity, down: bool) {
 
 /// `Entity.updateFluidInteraction` 的水流推动部分：扫 AABB 内每个水格，累加
 /// `flow_vector`，用累积的水面高度（Java `Math.max`）缩放不足 0.4 的推力，
-/// 最后 `apply_current`。船没有流体跟踪器，`in_water` 用累积水面高度 > 0 判定。
+/// 最后 `apply_current`。同时分别记下 `isInFluid(WATER)` 与
+/// `isEyeInFluid(WATER)` 两个独立状态。
 ///
 /// The water-current half of `Entity.updateFluidInteraction`: scan water cells,
 /// accumulate `flow_vector`, scale by the accumulated (Java max) fluid height
-/// below 0.4, and apply the current.
-fn apply_water_current(me: &mut Entity, view: &dyn BlockView) {
+/// below 0.4, and apply the current. It also records the two separate
+/// `isInFluid(WATER)` and `isEyeInFluid(WATER)` states.
+fn apply_water_current(boat: &mut Boat, me: &mut Entity, view: &dyn BlockView) {
     let bounds = me.bounding_box().deflated(0.001);
     let x0 = mth::floor(bounds.min_x);
     let x1 = mth::ceil(bounds.max_x) - 1;
@@ -827,8 +834,9 @@ fn apply_water_current(me: &mut Entity, view: &dyn BlockView) {
     let entity_min_y = me.position.y;
     let block_x = mth::floor(me.position.x);
     let block_z = mth::floor(me.position.z);
-    // `Entity.getEyeHeight()`：`dimensions.height * 0.85F`。
-    let eye = me.position.y + f64::from(me.dimensions.1 * 0.85_f32);
+    // `Entity.getEyePosition()`：船的 `eyeHeight` 是官方 `EntityTypes` 里的
+    // 0.5625（等于实体高度），不是 `EntityDimensions` 默认的 `height * 0.85`。
+    let eye = me.position.y + f64::from(me.eye_height());
     let mut eyes_inside = false;
     let mut current = Vec3::default();
     let mut height = 0.0f64;
@@ -864,9 +872,12 @@ fn apply_water_current(me: &mut Entity, view: &dyn BlockView) {
             }
         }
     }
-    // `isEyeInFluid(WATER)` 供 `canAddPassenger` 的 `!isEyeInFluid(WATER)` 门控。
-    me.in_water = eyes_inside;
-    // `isPushedByFluid()` 为真且 `in_water`（水面高度 > 0）才施力。
+    // `isInFluid(WATER)` = `getFluidHeight(WATER) > 0`，记在 `Entity.in_water`；
+    // `isEyeInFluid(WATER)` 是独立的眼睛跟踪器状态，记在船上，供
+    // `canAddPassenger` 的 `!isEyeInFluid(WATER)` 门控。
+    me.in_water = height > 0.0;
+    boat.eye_in_water = eyes_inside;
+    // `isPushedByFluid()` 为真且碰到水才施力。
     if height > 0.0 && count > 0 {
         apply_current(me, &current, 0.014);
     }

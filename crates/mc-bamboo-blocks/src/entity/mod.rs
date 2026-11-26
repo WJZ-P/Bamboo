@@ -706,6 +706,21 @@ impl Entity {
         self.in_water
     }
 
+    /// `Entity.getEyeHeight()`：生物按自己的 `eyeHeight`，船按官方 `EntityTypes` 的
+    /// `.sized(1.375f, 0.5625f).eyeHeight(0.5625f)`（眼高等于实体高度，不是默认的
+    /// `height * 0.85`），其余实体用 `EntityDimensions` 的默认 `height * 0.85`。
+    ///
+    /// `Entity.getEyeHeight()`: mobs use their own `eyeHeight`; boats use the
+    /// official `EntityTypes` `.eyeHeight(0.5625f)`, which equals their height
+    /// rather than the default `height * 0.85`; everything else uses the default.
+    pub fn eye_height(&self) -> f32 {
+        match &self.kind {
+            EntityKind::Mob(mob) => mob.eye_height,
+            EntityKind::Boat(_) => self.dimensions.1,
+            _ => self.dimensions.1 * 0.85_f32,
+        }
+    }
+
     /// `getRequiresPrecisePosition()`：上一 tick 撞到过东西，同步时必须发精确位置。
     pub const fn requires_precise_position(&self) -> bool {
         self.requires_precise_position

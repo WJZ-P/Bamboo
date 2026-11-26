@@ -551,7 +551,7 @@ fn mount_boat(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
                     boat.entity_type,
                     boat.passengers.len(),
                     boat.out_of_control_ticks,
-                    entity.in_water,
+                    boat.eye_in_water,
                     entity.y_rot,
                     entity.position,
                 ))
