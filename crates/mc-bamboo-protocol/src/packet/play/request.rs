@@ -106,6 +106,13 @@ pub enum PlayRequest {
         pitch: f32,
         on_ground: bool,
     },
+    /// 玩家划船的左右桨状态，官方 `ServerboundPaddleBoatPacket`。
+    ///
+    /// The player's left/right paddle state, vanilla `ServerboundPaddleBoatPacket`.
+    PaddleBoat {
+        left: bool,
+        right: bool,
+    },
     /// 聊天消息。签名、时间戳、盐和已读窗口都留着，校验在世界线程上做。
     ///
     /// A chat message. The signature, timestamp, salt, and seen-window stay attached;
@@ -366,6 +373,10 @@ impl PlayRequest {
                 yaw: reader.f32()?,
                 pitch: reader.f32()?,
                 on_ground: reader.bool()?,
+            },
+            serverbound::PADDLE_BOAT => Self::PaddleBoat {
+                left: reader.bool()?,
+                right: reader.bool()?,
             },
             serverbound::CHAT => read_chat(&mut reader)?,
             serverbound::CHAT_COMMAND => Self::ChatCommand {
@@ -1379,6 +1390,20 @@ mod tests {
                 yaw: 90.0,
                 pitch: 45.0,
                 on_ground: true,
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_paddle_boat() {
+        // 两个 bool：左桨、右桨。
+        //
+        // Two booleans: left paddle, right paddle.
+        assert_eq!(
+            decode_body(serverbound::PADDLE_BOAT, "01 00"),
+            Ok(PlayRequest::PaddleBoat {
+                left: true,
+                right: false,
             })
         );
     }
