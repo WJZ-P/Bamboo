@@ -1000,4 +1000,11 @@ mod tests {
             "minecraft:entities/armor_stand"
         );
     }
+
+    #[test]
+    fn an_armour_stand_is_not_pushable() {
+        // `ArmorStand.isPushable()` 恒假：不推别的实体，也不被推。
+        // `ArmorStand.isPushable()` is always false: it neither pushes nor is pushed.
+        assert!(!MobType::ArmorStand.is_pushable());
+    }
 }
