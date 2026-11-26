@@ -497,7 +497,7 @@ pub fn write_nbt(mob: &Mob, out: &mut Vec<(String, Tag)>) {
     let listener = mob
         .entity_listener
         .map(|state| state.vibration)
-        .unwrap_or_else(VibrationData::new);
+        .unwrap_or_default();
     crate::archive::tag::put(out, "listener", Tag::Compound(listener.write_codec()));
     crate::archive::tag::put(
         out,

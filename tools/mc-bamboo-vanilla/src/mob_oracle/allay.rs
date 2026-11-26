@@ -142,10 +142,11 @@ fn level(case: &AllayCase, script: &Script) -> MobLevel {
         poi: mc_bamboo_world::poi::PoiStore::new(),
         shoulder: Default::default(),
         entities: Entities::with_next_id(case.first_id),
-        players: case
-            .has_player
-            .then(|| vec![player_view(case.first_id + 1, 0)])
-            .unwrap_or_default(),
+        players: if case.has_player {
+            vec![player_view(case.first_id + 1, 0)]
+        } else {
+            Vec::new()
+        },
         game: None,
         inhabited: HashMap::new(),
         mob_teams: HashMap::new(),
@@ -160,7 +161,7 @@ fn player_view(uid: i32, held: i32) -> mc_bamboo_blocks::entity::ctx::PlayerView
     use mc_bamboo_blocks::entity::ctx::PlayerView;
     PlayerView {
         uid,
-        uuid: Some(((0_u128) << 64 | 2).to_be_bytes()),
+        uuid: Some(2_u128.to_be_bytes()),
         position: Vec3::new(2.5, 64.0, 0.5),
         delta: Vec3::default(),
         width: 0.6,
@@ -204,7 +205,7 @@ fn spawn_allay(world: &mut mc_bamboo_blocks::World<'_>, case: &AllayCase) -> i32
         entity.random = JavaRandom::from_state(case.mob_seed);
         entity.y_rot = 0.0;
         entity.with_mob(|_, mob| {
-            mob.uuid = ((0_u128) << 64 | 1).to_be_bytes();
+            mob.uuid = 1_u128.to_be_bytes();
             mob.x_rot = 0.0;
             mob.y_head_rot = 0.0;
             mob.y_body_rot = 0.0;
@@ -318,7 +319,7 @@ impl Report {
                     };
                     let request = MobInteractRequest {
                         player_uid: case.first_id + 1,
-                        player_uuid: ((0_u128) << 64 | 2).to_be_bytes(),
+                        player_uuid: 2_u128.to_be_bytes(),
                         hand: Hand::Main,
                         held: ItemStack::new(held, 4),
                         creative: false,
