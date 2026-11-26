@@ -10,16 +10,23 @@
 
 use std::collections::BTreeMap;
 
-use mc_bamboo_core::BlockPos;
-use mc_bamboo_data::component_registries::registry_names::MAP_DECORATION_TYPE;
+use mc_bamboo_blocks::{BlockState, SupportType, World as BlockWorld};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand};
+use mc_bamboo_data::{
+    blocks, component_registries::registry_names::MAP_DECORATION_TYPE, items,
+    registries::data_component_type as kinds, registries::fluid as fluid_reg, sounds, state_fluid,
+    state_map_color,
+};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{
-    components::text::checked_component,
-    packet::play::{MapDecoration, MapItemData, MapPatch},
+    components::{ComponentPatch, ComponentValue, PatchEntry, defaults, text::checked_component},
+    item::ItemStack,
+    packet::play::{GameMode, MapDecoration, MapItemData, MapPatch},
     text::Component,
 };
+use mc_bamboo_world::{MIN_Y, store::ChunkStore};
 
-use crate::inbound::PlayerId;
+use crate::{inbound::PlayerId, region::Region};
 
 /// 地图宽 / 高（像素数），官方 `MapItemSavedData.MAP_SIZE`。
 pub const MAP_SIZE: usize = 128;
@@ -983,6 +990,338 @@ impl MapStore {
     }
 }
 
+/// 构造一件带 `minecraft:map_id` 组件的已填充地图（数量 1）。
+///
+/// Build a single `filled_map` stack carrying `minecraft:map_id`.
+pub fn make_filled_map(map_id: i32) -> ItemStack {
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        kinds::MAP_ID,
+        PatchEntry::Set(ComponentValue::MapId(map_id)),
+    );
+    let (added, removed) = patch.to_opaque();
+    ItemStack {
+        item: items::FILLED_MAP,
+        count: 1,
+        added,
+        removed,
+    }
+}
+
+/// 读取物品堆上的 `minecraft:map_id` 组件值。
+///
+/// Read the `minecraft:map_id` component from an item stack, if present.
+pub fn stack_map_id(stack: &ItemStack) -> Option<i32> {
+    if stack.is_empty() {
+        return None;
+    }
+    let patch = ComponentPatch::from_opaque(stack).ok()?;
+    match defaults::resolve(stack.item, &patch, kinds::MAP_ID) {
+        Some(ComponentValue::MapId(id)) => Some(*id),
+        _ => None,
+    }
+}
+
+/// 官方 `MapItem.create(level, x, z, scale, trackingPosition, unlimitedTracking)`：
+/// 按比例网格对齐中心、分配新 `map_id`、存入地图表并返回带 `map_id` 的 `filled_map`。
+///
+/// Official `MapItem.create`: snap center onto the scale grid, allocate a new
+/// `map_id`, store the fresh `MapItemSavedData`, and return the `filled_map`.
+pub fn create_map(
+    maps: &mut MapStore,
+    x: i32,
+    z: i32,
+    scale: i8,
+    tracking_position: bool,
+    unlimited_tracking: bool,
+    dimension: &str,
+) -> ItemStack {
+    let data = MapItemSavedData::create_fresh(
+        f64::from(x),
+        f64::from(z),
+        scale,
+        tracking_position,
+        unlimited_tracking,
+        dimension,
+    );
+    let id = maps.next_map_id();
+    maps.insert(id, data);
+    make_filled_map(id)
+}
+
+/// 官方 `EmptyMapItem.use`：手持空地图（`minecraft:map`）右键时创建已填充地图。
+///
+/// 顺序照 26.3 字节码：`consume(1, player)` → `awardStat(ITEM_USED)` → 播
+/// `ui.cartography_table.take_result`（音源 `PLAYERS`）→ `MapItem.create` →
+/// 手里变空则就地替换为已填充地图，否则 `Inventory.add`（满则 `drop`）。
+///
+/// Official `EmptyMapItem.use`: consume one empty map (non-creative), award
+/// `ITEM_USED`, play `ui.cartography_table.take_result`, create the filled map,
+/// and replace the empty hand or add/drop into inventory.
+pub(crate) fn use_empty_map(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
+    let Some((held, creative, pos)) = region.players.get(&id).map(|player| {
+        (
+            player.inventory.held(hand).clone(),
+            player.game_mode == GameMode::Creative,
+            player.position(),
+        )
+    }) else {
+        return false;
+    };
+    if held.item != items::MAP {
+        return false;
+    }
+    if region
+        .players
+        .get(&id)
+        .is_some_and(|p| crate::ender_pearl::on_cooldown(p, &held))
+    {
+        return false;
+    }
+
+    // 1. `stack.consume(1, player)`
+    let hand_now_empty = if let Some(player) = region.players.get_mut(&id) {
+        let slot = player.inventory.hand_slot(hand);
+        if !creative {
+            let stack = &mut player.inventory.slots[slot];
+            stack.count -= 1;
+            if stack.count <= 0 {
+                *stack = ItemStack::empty();
+            }
+        }
+        player.inventory.slots[slot].is_empty()
+    } else {
+        return false;
+    };
+
+    // 2. `player.awardStat(Stats.ITEM_USED.get(this))`
+    crate::item_use_stats::award(region, id, items::MAP);
+
+    // 3. `serverLevel.playSound(null, player, UI_CARTOGRAPHY_TABLE_TAKE_RESULT, player.getSoundSource(), 1.0F, 1.0F)`
+    let effects = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = BlockWorld::new(&mut level, ticks);
+        world.play_sound(
+            pos,
+            sounds::sound_event("minecraft:ui.cartography_table.take_result"),
+            sounds::PLAYERS,
+            1.0,
+            1.0,
+            false,
+        );
+        world.drain_effects()
+    };
+    crate::interaction::send_effects(region, None, &effects);
+
+    // 4. `MapItem.create(serverLevel, player.getBlockX(), player.getBlockZ(), 0, true, false)`
+    let block_x = pos.x.floor() as i32;
+    let block_z = pos.z.floor() as i32;
+    let filled = create_map(
+        &mut region.maps,
+        block_x,
+        block_z,
+        0,
+        true,
+        false,
+        crate::region::DIMENSION,
+    );
+
+    // 5. 手里空了就地放进手里，否则进背包 / 丢地上。
+    if hand_now_empty {
+        if let Some(player) = region.players.get_mut(&id) {
+            let slot = player.inventory.hand_slot(hand);
+            player.inventory.slots[slot] = filled;
+            crate::player_weapon::sync_slots(region, id, [slot]);
+        }
+        crate::advancement_triggers::inventory_changed(region, id);
+    } else {
+        // 先同步手里因消耗减少的槽位（生存多于 1 张时）。
+        if !creative
+            && let Some(slot) = region.players.get(&id).map(|p| p.inventory.hand_slot(hand))
+        {
+            crate::player_weapon::sync_slots(region, id, [slot]);
+        }
+        crate::inventory::give_or_drop(region, id, filled);
+    }
+
+    if let Some(player) = region.players.get_mut(&id) {
+        crate::ender_pearl::apply_cooldown(player, &held);
+    }
+    true
+}
+
+/// 官方 `MapItem.getCorrectStateForFluidBlock`：含流体且顶面不是完整支撑面时改用流体方块本身的颜色。
+///
+/// Official `MapItem.getCorrectStateForFluidBlock`.
+#[inline]
+fn correct_state_for_fluid_block(state: u32) -> u32 {
+    let fluid = state_fluid(state);
+    if fluid.fluid != fluid_reg::EMPTY
+        && !BlockState(state).is_face_sturdy(Direction::Up, SupportType::Full)
+    {
+        fluid.legacy_block
+    } else {
+        state
+    }
+}
+
+/// 官方 `MapItem.update(level, entity, data)` 的逐列采样算法（主世界 `hasCeiling = false`）。
+///
+/// 每次调用使该玩家的 `HoldingPlayer.step` 加 1，只更新 `(x & 15) == (step & 15)` 或
+/// 上一列刚发生颜色变化的列；逐列算 `scale × scale` 区域内方块众数（平票取最先出现）
+/// 与水深 / 坡度亮度，并写回脏颜色。
+///
+/// Official `MapItem.update` column-sampling algorithm for non-ceiling dimensions.
+pub fn update_colors(
+    data: &mut MapItemSavedData,
+    player: PlayerId,
+    player_x: f64,
+    player_z: f64,
+    dimension: &str,
+    chunks: &ChunkStore,
+) {
+    if dimension != data.dimension {
+        return;
+    }
+    let scale: i32 = 1 << data.scale;
+    let center_x = data.center_x;
+    let center_z = data.center_z;
+    // Java `Mth.floor(x - centerX) / scale + 64`：整数除法向零截断，与 Rust `/` 一致。
+    let px = (player_x - f64::from(center_x)).floor() as i32 / scale + HALF_MAP_SIZE;
+    let pz = (player_z - f64::from(center_z)).floor() as i32 / scale + HALF_MAP_SIZE;
+    let radius = 128 / scale;
+
+    let step = {
+        let holder = data.holding_player_mut(player);
+        holder.step = holder.step.wrapping_add(1);
+        holder.step
+    };
+
+    let mut changed = false;
+    let scale_sq = scale * scale;
+    let edge_limit = (radius - 2) * (radius - 2);
+    let radius_sq = radius * radius;
+
+    for x in (px - radius + 1)..(px + radius) {
+        if (x & 15) != (step & 15) && !changed {
+            continue;
+        }
+        changed = false;
+        let mut prev_height: f64 = 0.0;
+
+        for z in (pz - radius - 1)..(pz + radius) {
+            if !(0..128).contains(&x) || !(-1..128).contains(&z) {
+                continue;
+            }
+            let dx_p = x - px;
+            let dz_p = z - pz;
+            let dist_sq = dx_p * dx_p + dz_p * dz_p;
+            let dither_edge = dist_sq > edge_limit;
+
+            let world_x = (center_x / scale + x - HALF_MAP_SIZE) * scale;
+            let world_z = (center_z / scale + z - HALF_MAP_SIZE) * scale;
+            let chunk_pos = ChunkPos::new(world_x >> 4, world_z >> 4);
+            if !chunks.is_loaded(chunk_pos) {
+                continue;
+            }
+
+            let mut water_depth: i32 = 0;
+            let mut avg_height: f64 = 0.0;
+            // 复现 Guava `LinkedHashMultiset` + `Multisets.copyHighestCountFirst`：
+            // 记下每种 MapColor（0..=63）的频次和首次出现顺序，平票取最先出现的颜色。
+            let mut counts = [0u32; 64];
+            let mut order = [0u8; 64];
+            let mut order_len = 0usize;
+
+            for ox in 0..scale {
+                for oz in 0..scale {
+                    let bx = world_x + ox;
+                    let bz = world_z + oz;
+                    let Some(mut y) = chunks.world_surface_y(BlockPos::new(bx, MIN_Y, bz)) else {
+                        continue;
+                    };
+                    let mut state: u32;
+                    if y > MIN_Y {
+                        loop {
+                            y -= 1;
+                            state = chunks
+                                .block(BlockPos::new(bx, y, bz))
+                                .unwrap_or(blocks::AIR);
+                            if state_map_color(state) != map_color::NONE || y <= MIN_Y {
+                                break;
+                            }
+                        }
+                        if y > MIN_Y && state_fluid(state).fluid != fluid_reg::EMPTY {
+                            let mut y2 = y - 1;
+                            loop {
+                                let state2 = chunks
+                                    .block(BlockPos::new(bx, y2, bz))
+                                    .unwrap_or(blocks::AIR);
+                                y2 -= 1;
+                                water_depth += 1;
+                                if y2 <= MIN_Y || state_fluid(state2).fluid == fluid_reg::EMPTY {
+                                    break;
+                                }
+                            }
+                            state = correct_state_for_fluid_block(state);
+                        }
+                    } else {
+                        state = blocks::BEDROCK;
+                    }
+
+                    avg_height += f64::from(y) / f64::from(scale_sq);
+                    let color_id = state_map_color(state) & 63;
+                    let idx = usize::from(color_id);
+                    if counts[idx] == 0 {
+                        order[order_len] = color_id;
+                        order_len += 1;
+                    }
+                    counts[idx] += 1;
+                }
+            }
+
+            water_depth /= scale_sq;
+            let mut best_color = map_color::NONE;
+            let mut best_count = 0u32;
+            for &color_id in &order[..order_len] {
+                let cnt = counts[usize::from(color_id)];
+                if cnt > best_count {
+                    best_count = cnt;
+                    best_color = color_id;
+                }
+            }
+
+            let brightness = if best_color == map_color::WATER {
+                let d = f64::from(water_depth) * 0.1 + f64::from((x + z) & 1) * 0.2;
+                if d < 0.5 {
+                    Brightness::High
+                } else if d > 0.9 {
+                    Brightness::Low
+                } else {
+                    Brightness::Normal
+                }
+            } else {
+                let d = (avg_height - prev_height) * 4.0 / f64::from(scale + 4)
+                    + (f64::from((x + z) & 1) - 0.5) * 0.4;
+                if d > 0.6 {
+                    Brightness::High
+                } else if d < -0.6 {
+                    Brightness::Low
+                } else {
+                    Brightness::Normal
+                }
+            };
+            prev_height = avg_height;
+
+            if z < 0 || dist_sq >= radius_sq || (dither_edge && ((x + z) & 1) == 0) {
+                continue;
+            }
+            changed |=
+                data.update_color(x as usize, z as usize, packed_color(best_color, brightness));
+        }
+    }
+}
+
 fn get<'a>(tag: &'a Tag, key: &str) -> Option<&'a Tag> {
     match tag {
         Tag::Compound(entries) => entries.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v),
@@ -1135,5 +1474,187 @@ mod tests {
         let dec_pkt = data.get_update_packet(0, p).expect("decorations on tick 5");
         assert!(dec_pkt.color_patch.is_none());
         assert_eq!(dec_pkt.decorations.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn use_empty_map_survival_single_multi_and_creative() {
+        use std::sync::{Arc, Mutex};
+
+        use mc_bamboo_core::Vec3;
+        use mc_bamboo_data::{items, packets::play::clientbound};
+        use mc_bamboo_protocol::{
+            codec::Reader,
+            frame::{MAX_FRAME_LEN, find_frame},
+            packet::play::ClientInformation,
+        };
+        use uuid::Uuid;
+
+        use crate::{inbound::PlayerSink, outgoing::Outgoing, player::Player};
+
+        #[derive(Default, Clone)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl PlayerSink for Sink {
+            fn send(&mut self, frames: Outgoing) -> bool {
+                self.0.lock().unwrap().extend(frames.to_raw_bytes());
+                true
+            }
+            fn close(&mut self) {}
+        }
+
+        let mut region = crate::region::Region::new(2, 20, false);
+        let p_id = PlayerId(1);
+        let player = Player::new(
+            p_id,
+            Uuid::from_u128(1),
+            "Alex".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::new(10.5, 64.0, -20.5),
+        );
+        region.insert_player(player);
+        let sink = Sink::default();
+        region.links.add(p_id, Box::new(sink.clone()));
+
+        // 1. 生存手里只有 1 张空地图 → 原槽位变成 filled_map(id=0)，记录统计并播放音效。
+        region.players.get_mut(&p_id).unwrap().inventory.slots[36] = ItemStack::new(items::MAP, 1);
+        assert!(use_empty_map(&mut region, p_id, Hand::Main));
+        region.links.flush();
+        let held = &region.players[&p_id].inventory.slots[36];
+        assert_eq!(held.item, items::FILLED_MAP);
+        assert_eq!(held.count, 1);
+        assert_eq!(stack_map_id(held), Some(0));
+        assert_eq!(region.maps.index.last_map_id, 0);
+        let data0 = region.maps.get(0).expect("map 0 created");
+        assert_eq!((data0.center_x, data0.center_z, data0.scale), (0, 0, 0));
+        assert!(data0.tracking_position);
+        assert!(!data0.unlimited_tracking);
+        let dirty_stats = region
+            .players
+            .get_mut(&p_id)
+            .unwrap()
+            .item_use_stats
+            .take_dirty();
+        assert_eq!(dirty_stats, vec![(items::MAP, 1)]);
+
+        let raw = std::mem::take(&mut *sink.0.lock().unwrap());
+        let mut rest = raw.as_slice();
+        let mut saw_sound = false;
+        while let Some(bounds) = find_frame(rest, MAX_FRAME_LEN).unwrap() {
+            let end = bounds.header_len + bounds.payload_len;
+            let mut r = Reader::new(&rest[bounds.header_len..end]);
+            if r.varint().unwrap() == clientbound::SOUND {
+                saw_sound = true;
+            }
+            rest = &rest[end..];
+        }
+        assert!(saw_sound, "should play cartography take_result sound");
+
+        // 2. 生存手里有 3 张空地图 → 扣 1 张剩 2 张，新地图（id=1）放进背包空位。
+        region.players.get_mut(&p_id).unwrap().inventory.slots[36] = ItemStack::new(items::MAP, 3);
+        assert!(use_empty_map(&mut region, p_id, Hand::Main));
+        assert_eq!(region.players[&p_id].inventory.slots[36].item, items::MAP);
+        assert_eq!(region.players[&p_id].inventory.slots[36].count, 2);
+        let found = region.players[&p_id]
+            .inventory
+            .slots
+            .iter()
+            .find(|s| s.item == items::FILLED_MAP && stack_map_id(s) == Some(1));
+        assert!(
+            found.is_some(),
+            "filled map id=1 should be added to inventory"
+        );
+
+        // 3. 创造模式 → 不扣空地图，仍创建新地图（id=2）并放入背包。
+        region.players.get_mut(&p_id).unwrap().game_mode = GameMode::Creative;
+        region.players.get_mut(&p_id).unwrap().inventory.slots[36] = ItemStack::new(items::MAP, 1);
+        assert!(use_empty_map(&mut region, p_id, Hand::Main));
+        assert_eq!(region.players[&p_id].inventory.slots[36].item, items::MAP);
+        assert_eq!(region.players[&p_id].inventory.slots[36].count, 1);
+        let found2 = region.players[&p_id]
+            .inventory
+            .slots
+            .iter()
+            .find(|s| s.item == items::FILLED_MAP && stack_map_id(s) == Some(2));
+        assert!(
+            found2.is_some(),
+            "creative should keep empty map and add filled map"
+        );
+    }
+
+    #[test]
+    fn update_colors_samples_terrain_slopes_water_depth_and_fluids() {
+        use mc_bamboo_blocks::{
+            BlockState,
+            state::{SLAB_TYPE, SlabType, WATERLOGGED},
+        };
+
+        // 构造平坦草地测试区 + 斜坡 + 浅水/深水 + 含水半砖。
+        let mut chunks = ChunkStore::flat();
+        // 在 (0..=3, *, -2..=4) 铺平到 y=64 石头。
+        for bx in 0..=3 {
+            for bz in -2..=4 {
+                chunks.set_block(BlockPos::new(bx, 64, bz), blocks::STONE);
+            }
+        }
+        // 上坡：(0, 65..=66, 1) 石头。
+        chunks.set_block(BlockPos::new(0, 65, 1), blocks::STONE);
+        chunks.set_block(BlockPos::new(0, 66, 1), blocks::STONE);
+
+        // 浅水：(1, 64, 1) 1 格水 → waterDepth = 1 → d = 0.1 + ((x+z)&1)*0.2 < 0.5 → High。
+        chunks.set_block(BlockPos::new(1, 64, 1), blocks::WATER);
+        // 深水：(2, 54..=64, 1) 11 格水 → waterDepth = 11 → d >= 1.1 > 0.9 → Low。
+        for y in 54..=64 {
+            chunks.set_block(BlockPos::new(2, y, 1), blocks::WATER);
+        }
+        // 含水半砖（顶面不完整支撑面）：(3, 64, 1) 用下置含水石半砖，地图应按水着色。
+        let waterlogged_slab = BlockState(blocks::STONE_SLAB)
+            .with(SLAB_TYPE, SlabType::Bottom)
+            .with(WATERLOGGED, true)
+            .0;
+        chunks.set_block(BlockPos::new(3, 64, 1), waterlogged_slab);
+
+        let mut data =
+            MapItemSavedData::create_fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
+        let p = PlayerId(1);
+        // 跑 16 次覆盖全部 `(x & 15)` 列。
+        for _ in 0..16 {
+            update_colors(&mut data, p, 0.5, 0.5, "minecraft:overworld", &chunks);
+        }
+
+        // pixel = world + 64
+        let px = |wx: i32| (wx + 64) as usize;
+        let pz = |wz: i32| (wz + 64) as usize;
+        let color_at = |wx: i32, wz: i32| data.colors[px(wx) + pz(wz) * 128];
+
+        // (0, 0): 平坦石头（z=-1 也是 y=64）→ STONE + Normal。
+        assert_eq!(
+            color_at(0, 0),
+            packed_color(map_color::STONE, Brightness::Normal)
+        );
+        // (0, 1): 上坡 +2 格 → d = 2*4/5 + 0.2 = 1.8 > 0.6 → STONE + High。
+        assert_eq!(
+            color_at(0, 1),
+            packed_color(map_color::STONE, Brightness::High)
+        );
+        // (0, 2): 下坡 -2 格 → d = -2*4/5 - 0.2 = -1.8 < -0.6 → STONE + Low。
+        assert_eq!(
+            color_at(0, 2),
+            packed_color(map_color::STONE, Brightness::Low)
+        );
+        // (1, 1): 浅水 → WATER + High。
+        assert_eq!(
+            color_at(1, 1),
+            packed_color(map_color::WATER, Brightness::High)
+        );
+        // (2, 1): 深水 → WATER + Low。
+        assert_eq!(
+            color_at(2, 1),
+            packed_color(map_color::WATER, Brightness::Low)
+        );
+        // (3, 1): 含水下置石半砖 → getCorrectStateForFluidBlock 返回水 → WATER + High。
+        assert_eq!(
+            color_at(3, 1),
+            packed_color(map_color::WATER, Brightness::High)
+        );
     }
 }

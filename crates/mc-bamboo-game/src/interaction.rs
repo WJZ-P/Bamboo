@@ -1607,6 +1607,12 @@ pub(crate) fn on_use_item(
         swing(region, id, hand, result);
         return;
     }
+    // `EmptyMapItem.use`：空地图右键创建已填充地图，返回 `SUCCESS`。
+    // `EmptyMapItem.use`: create a filled map from an empty map, returning `SUCCESS`.
+    if crate::map::use_empty_map(region, id, hand) {
+        swing(region, id, hand, InteractionResult::Success);
+        return;
+    }
     // `FireworkRocketItem.use`：仅在玩家 `isFallFlying()`（鞘翅滑翔）时生成附着烟花加速。
     // 滑翔时生成附着在玩家身上的烟花、扣物品（创造模式不扣）、记使用统计并返回 `SUCCESS`；
     // 不滑翔官方返回 `PASS`，什么都不做。
