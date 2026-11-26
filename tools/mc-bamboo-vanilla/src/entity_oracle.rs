@@ -940,6 +940,7 @@ fn snap_of(entity: Entity) -> OfficialEntity {
         EntityKind::FireworkRocket(_) => ("firework_rocket".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::LeashKnot(_) => ("leash_knot".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::Boat(_) => ("boat".to_owned(), -1, -1, -1, 0, -1, -1, -1),
+        EntityKind::EvokerFangs(_) => ("evoker_fangs".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::ExperienceOrb(data) => (
             "experience_orb".to_owned(),
             -1,

@@ -15,7 +15,6 @@ use mc_bamboo_data::{
     component_enums::{counts, sparse},
     entity_types::{self, TROPICAL_FISH_COMMON_VARIANTS},
     registries::attribute,
-    tags::TAG_GROUPS,
 };
 
 use super::{
@@ -582,21 +581,7 @@ pub fn puffer_player_poison(world: &mut World<'_>, player: EntityUid, seconds: i
 /// `Pufferfish.SCARY_MOB`: use the vanilla entity-type tag; the caller excludes
 /// creative players separately.
 fn scary_for_pufferfish(kind: MobType) -> bool {
-    static EXEMPT: std::sync::OnceLock<&[i32]> = std::sync::OnceLock::new();
-    !EXEMPT
-        .get_or_init(|| {
-            TAG_GROUPS
-                .iter()
-                .find(|group| group.registry == "minecraft:entity_type")
-                .and_then(|group| {
-                    group
-                        .tags
-                        .iter()
-                        .find(|tag| tag.name == "minecraft:not_scary_for_pufferfish")
-                })
-                .map_or(&[], |tag| tag.ids)
-        })
-        .contains(&kind.entity_type())
+    !kind.in_entity_tag("minecraft:not_scary_for_pufferfish")
 }
 
 /// `PufferfishPuffGoal.canUse`：2 格内有没有可瞄准的生物；`start` 把计数器置 1。

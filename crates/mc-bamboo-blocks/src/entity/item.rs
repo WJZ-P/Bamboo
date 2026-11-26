@@ -691,26 +691,13 @@ fn holder_contains(set: &HolderSet, id: i32) -> bool {
         HolderSet::Ids(ids) => ids.contains(&id),
         HolderSet::Tag(name) => {
             let name = name.trim_start_matches('#');
-            damage_tag(name).contains(&id)
+            mc_bamboo_data::in_tag("minecraft:damage_type", name, id)
         }
     }
 }
 
 fn damage_type_id(name: &str) -> i32 {
-    registries::SYNCED_REGISTRIES
-        .iter()
-        .find(|registry| registry.name == "minecraft:damage_type")
-        .and_then(|registry| registry.entries.iter().position(|entry| *entry == name))
-        .unwrap_or(0) as i32
-}
-
-fn damage_tag(name: &str) -> &'static [i32] {
-    mc_bamboo_data::tags::TAG_GROUPS
-        .iter()
-        .find(|group| group.registry == "minecraft:damage_type")
-        .and_then(|group| group.tags.iter().find(|tag| tag.name == name))
-        .map(|tag| tag.ids)
-        .unwrap_or(&[])
+    mc_bamboo_data::damage_type_id(name).unwrap_or(0)
 }
 
 pub(crate) fn friction(state: BlockState) -> f32 {

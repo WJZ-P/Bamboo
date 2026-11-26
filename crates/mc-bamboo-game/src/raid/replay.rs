@@ -28,17 +28,22 @@ pub struct ReplayRaidScene {
     pub spawn_y: i32,
     pub spawn_z: i32,
     pub victory: bool,
+    /// 起始已刷波数（`raid_wave7_hard` 设为 6，测困难第 7 波骑手）；0 表示首波开始。
+    pub start_wave: i32,
+    /// 起始波间冷却覆盖；空表示用默认 300 刻。
+    pub start_cooldown: Option<i32>,
 }
 
-/// 一名的袭击者的比较行：实体类型 ID、x*2、y、z*2。
+/// 一名袭击者的比较行：实体类型 ID、x*2、y、z*2、载具实体类型 ID（未骑乘为 -1）。
 ///
-/// One spawned raider's comparison row: entity type id, x*2, y, z*2.
+/// One spawned raider's comparison row: entity type id, x*2, y, z*2, vehicle type id (-1 if none).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplayRaidSpawn {
     pub entity_type: i32,
     pub x2: i32,
     pub y: i32,
     pub z2: i32,
+    pub vehicle_type: i32,
 }
 
 /// 官方 `Raid` / `Raids` 的逐刻快照，字段名和 Java 侧 `raidStateJson` 对齐。
@@ -168,8 +173,15 @@ pub fn replay_raid(scene: &ReplayRaidScene) -> Vec<ReplayRaidStep> {
     let mut raid = mc_bamboo_blocks::entity::raid::Raid::new(bell, scene.difficulty);
     raid.rng_state = (scene.seed as u64 ^ 0x5DEE_CE66D) & ((1u64 << 48) - 1);
     raid.raid_omen_level = scene.omen_level;
-    raid.started = scene.victory;
-    raid.groups_spawned = if scene.victory { raid.group_count } else { 0 };
+    raid.started = scene.victory || scene.start_wave > 0;
+    raid.groups_spawned = if scene.victory {
+        raid.group_count
+    } else {
+        scene.start_wave
+    };
+    if let Some(cd) = scene.start_cooldown {
+        raid.cooldown_ticks = cd;
+    }
     let spawn_at = BlockPos::new(scene.spawn_x, scene.spawn_y, scene.spawn_z);
     raid.wave_spawn_pos = Some(spawn_at);
     raids.raids.insert(raid_id, raid);
@@ -194,11 +206,22 @@ pub fn replay_raid(scene: &ReplayRaidScene) -> Vec<ReplayRaidStep> {
                 continue;
             }
             if let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind {
+                let vehicle_type = public
+                    .vehicle
+                    .and_then(|v| region.entities.public_at(v))
+                    .and_then(|vp| match &vp.kind {
+                        mc_bamboo_blocks::entity::KindPublic::Mob(vm) => {
+                            Some(vm.mob_type.entity_type())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(-1);
                 spawned.push(ReplayRaidSpawn {
                     entity_type: mob.mob_type.entity_type(),
                     x2: (public.position.x * 2.0) as i32,
                     y: public.position.y as i32,
                     z2: (public.position.z * 2.0) as i32,
+                    vehicle_type,
                 });
             }
         }

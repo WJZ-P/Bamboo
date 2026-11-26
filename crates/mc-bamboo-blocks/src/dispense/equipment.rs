@@ -12,7 +12,7 @@
 //! Pumpkins and wither skulls call [`equip`] only. A miss does not throw.
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{registries::data_component_type as kinds, tags};
+use mc_bamboo_data::registries::data_component_type as kinds;
 use mc_bamboo_protocol::{
     components::{ComponentValue, cursor::HolderSet, defaults},
     item::ItemStack,
@@ -135,14 +135,6 @@ pub(crate) fn allowed(set: Option<&HolderSet>, entity_type: i32) -> bool {
     };
     match set {
         HolderSet::Ids(ids) => ids.contains(&entity_type),
-        HolderSet::Tag(name) => entity_tag(name).is_some_and(|ids| ids.contains(&entity_type)),
+        HolderSet::Tag(name) => mc_bamboo_data::in_tag("minecraft:entity_type", name, entity_type),
     }
-}
-
-fn entity_tag(name: &str) -> Option<&'static [i32]> {
-    tags::TAG_GROUPS
-        .iter()
-        .find(|group| group.registry == "minecraft:entity_type")
-        .and_then(|group| group.tags.iter().find(|tag| tag.name == name))
-        .map(|tag| tag.ids)
 }

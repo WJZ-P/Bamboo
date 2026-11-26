@@ -101,6 +101,21 @@ pub const fn is_sheared(mob: &Mob) -> bool {
     mob.wool & SHEARED_BIT != 0
 }
 
+/// 落地 [`Command::SheepSetColor`]：`EvokerWololoSpellGoal` 把目标羊染成给定颜色。
+pub(crate) fn set_color_uid(
+    world: &mut crate::World<'_>,
+    target: crate::entity::EntityUid,
+    color: i32,
+) {
+    world.with_entity_mut(target, &mut |entity| {
+        entity.with_mob(|_, mob| {
+            if mob.mob_type == super::MobType::Sheep {
+                set_color(mob, DyeColor::from_id(color));
+            }
+        });
+    });
+}
+
 /// `Sheep.setSheared`。
 pub fn set_sheared(mob: &mut Mob, sheared: bool) {
     if sheared {

@@ -1013,9 +1013,7 @@ pub fn prime_on_hurt(me: &mut Entity, mob: &mut Mob, source: &super::DamageSourc
         prime(me, mob, false);
         return true;
     }
-    if source.kind == super::DamageKind::Explosion
-        || source.kind == super::DamageKind::PlayerExplosion
-    {
+    if source.kind.is_explosion() {
         prime(me, mob, true);
         return true;
     }
