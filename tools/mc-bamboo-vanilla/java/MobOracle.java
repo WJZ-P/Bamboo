@@ -734,6 +734,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("wither")) {
                 cases += playWitherSave(official, out);
             }
+            if (only == null || only.startsWith("wither_invul")) {
+                cases += playWitherInvul(official, out, only);
+            }
             if (only == null || only.startsWith("breeze")) {
                 cases += playBreeze(official, out, only);
             }
@@ -15852,6 +15855,83 @@ public final class MobOracle {
                     + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
             cases++;
         }
+        return cases;
+    }
+
+    /** 凋灵无敌期逐刻：`Invul` 递减、每 10 刻回血、头朝向和两种随机源。 */
+    private static int playWitherInvul(Official official, Writer out, String only) throws Exception {
+        record WiScene(String name, int ticks, int invul) {}
+        List<WiScene> scenes = List.of(
+                new WiScene("wither_invul_decay", 24, 220),
+                new WiScene("wither_invul_mid", 20, 100));
+        int cases = 0;
+        for (WiScene s : scenes) {
+            if (only != null && !s.name().startsWith(only)) continue;
+            FakeLevel world = FakeLevel.create(official);
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels =
+                    java.util.Map.of(Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+            world.gameTime = 1000L;
+            world.getRandom().setSeed(1L);
+            var mob = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                    EntityTypes.WITHER.create(world, EntitySpawnReason.TRIGGERED);
+            mob.setId(FIRST_ID);
+            mob.setUUID(new UUID(0L, 1L));
+            mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            setRandom(mob, 5L);
+            mob.setHealth(100.0F);
+            mob.setInvulnerableTicks(s.invul());
+            world.tracked.add(mob);
+            // `RandomSource.create(5)` 的内部 state 不是 5；记下 `randomSeed(mob)`
+            // 的实际值，Bamboo 侧 `JavaRandom::from_state` 用它。
+            // `RandomSource.create(5)` has an internal state other than 5; record
+            // the actual `randomSeed(mob)` for Bamboo's `JavaRandom::from_state`.
+            long mobSeed0 = randomSeed(mob);
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= s.ticks(); tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    mob.commonTick();
+                    mob.tick();
+                }
+                if (tick > 0) frames.append(',');
+                Vec3 d = mob.getDeltaMovement();
+                float[] hx = mob.getHeadXRots();
+                float[] hy = mob.getHeadYRots();
+                frames.append('[').append(mob.getInvulnerableTicks()).append(',')
+                        .append(Float.floatToRawIntBits(mob.getHealth())).append(',')
+                        .append(Double.doubleToRawLongBits(mob.getX())).append(',')
+                        .append(Double.doubleToRawLongBits(mob.getY())).append(',')
+                        .append(Double.doubleToRawLongBits(mob.getZ())).append(',')
+                        .append(Double.doubleToRawLongBits(d.x)).append(',')
+                        .append(Double.doubleToRawLongBits(d.y)).append(',')
+                        .append(Double.doubleToRawLongBits(d.z)).append(',')
+                        .append(Float.floatToRawIntBits(mob.getYRot())).append(',')
+                        .append(Float.floatToRawIntBits(mob.getXRot())).append(',')
+                        .append(Float.floatToRawIntBits(hx[0])).append(',')
+                        .append(Float.floatToRawIntBits(hx[1])).append(',')
+                        .append(Float.floatToRawIntBits(hy[0])).append(',')
+                        .append(Float.floatToRawIntBits(hy[1])).append(',')
+                        .append(randomSeed(mob)).append(',')
+                        .append(randomSeed(world.getRandom())).append(']');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"witherInvul\",\"name\":" + jsonString(s.name())
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"startTime\":1000"
+                    + ",\"ticks\":" + s.ticks()
+                    + ",\"invul\":" + s.invul()
+                    + ",\"mobSeed\":" + mobSeed0 + ",\"levelSeed\":1"
+                    + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        out.flush();
         return cases;
     }
 
