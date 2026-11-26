@@ -629,7 +629,10 @@ impl RaiderGoal {
                     let found =
                         mob.navigation
                             .create_path_to_targets(ctx.blocks(), &nav, &targets, 1);
-                    mob.navigation.move_to_path(ctx.blocks(), &nav, found, 1.15);
+                    // 官方 `moveTo(pathToBanner, 1.15F)`：速度倍率是 float `1.15F` 宽化的
+                    // double `1.149999976158142`。
+                    mob.navigation
+                        .move_to_path(ctx.blocks(), &nav, found, f64::from(1.15_f32));
                 }
             }
             Self::PathfindToRaid => {}
@@ -637,11 +640,13 @@ impl RaiderGoal {
                 if let Some(pos) = *poi {
                     mob.no_action_time = 0;
                     let nav = living::nav_mob(me, mob, ctx.blocks());
+                    // 官方构造 `RaiderMoveThroughVillageGoal(this, 1.05F, 1)`：速度倍率是
+                    // float `1.05F` 宽化成的 double `1.0499999523162842`，不是字面量 `1.05`。
                     mob.navigation.move_to(
                         ctx.blocks(),
                         &nav,
                         Vec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z)),
-                        1.05,
+                        f64::from(1.05_f32),
                     );
                     mob.raider.stuck = false;
                 }
@@ -762,7 +767,9 @@ impl RaiderGoal {
                     return;
                 };
                 let nav = living::nav_mob(me, mob, ctx.blocks());
-                mob.navigation.move_to(ctx.blocks(), &nav, at, 1.05);
+                // 速度倍率同 `start`：float `1.05F` 宽化成的 double。
+                mob.navigation
+                    .move_to(ctx.blocks(), &nav, at, f64::from(1.05_f32));
             }
             Self::Celebration => {
                 if !mob.silent && me.random.next_int_bounded(goals::reduced_tick_delay(100)) == 0 {

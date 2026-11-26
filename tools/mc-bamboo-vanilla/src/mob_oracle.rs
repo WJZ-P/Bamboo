@@ -373,6 +373,9 @@ struct Case {
     /// 把 `blocks` 里的 POI 方块（床/钟/工作站）登记进 `poi` 表，袭击者穿村/村民认领会用到。
     #[serde(default)]
     poi: bool,
+    /// 开局就占用的 POI 方块（床/钟/工作站），袭击者穿村的 `isVillage` 按占用计。
+    #[serde(default)]
+    poi_take: Vec<[i32; 3]>,
     #[serde(default)]
     player_health: i32,
     #[serde(default)]
@@ -2848,6 +2851,11 @@ impl Report {
         }
         if case.poi {
             level.register_poi_from_blocks();
+            for at in &case.poi_take {
+                let pos = BlockPos::new(at[0], at[1], at[2]);
+                // 和 Java 侧 `PoiManager.take` 一样占一张票，让 `isVillage` 按占用计。
+                level.poi_take(pos, u32::MAX);
+            }
         }
         if case.name.ends_with("_no_grief") {
             // 和 `MobOracle.play` 一样按场景名关掉 `mobGriefing`。

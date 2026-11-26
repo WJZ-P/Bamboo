@@ -1234,6 +1234,13 @@ public final class MobOracle {
             return this;
         }
 
+        /** 占用的 POI 方块（床/钟/工作站），袭击者穿村判定 `isVillage` 按占用计。 */
+        final List<int[]> poiTake = new ArrayList<>();
+        Scene poiTake(int x, int y, int z) {
+            this.poiTake.add(new int[] {x, y, z});
+            return this;
+        }
+
         /** 僵尸场景：第 `sleepTick` 刻开头 0 号玩家右键床头 `bed`（`startSleepInBed`）。 */
         int sleepTick = -1;
         int[] bed;
@@ -2582,6 +2589,19 @@ public final class MobOracle {
             celebrate.raid(0, 64, 0, 2, 1, 1, 1, 3);
             celebrate.mob(53, 0.5, 64.0, 0.5, 0.0F, 8301L, 0);
             scenes.add(celebrate);
+            // 袭击者穿过村庄：袭击中心在村庄里、床头（home POI 在床头）已被占用，
+            // 掠夺者从中心旁穿过村庄往床走。
+            Scene village = new Scene("raid_mob_village").ticks(200).difficulty(2).poi()
+                    .poiTake(5, 64, -1);
+            Scenes.ground(village, 24);
+            village.clockStart = 2000;
+            village.raid(0, 64, 0, 0, 1, 1, 1, 3);
+            village.set(5, 64, 0, Blocks.BED.red().defaultBlockState());
+            village.set(5, 64, -1, Blocks.BED.red().defaultBlockState().setValue(
+                    net.minecraft.world.level.block.state.properties.BlockStateProperties.BED_PART,
+                    net.minecraft.world.level.block.state.properties.BedPart.HEAD));
+            village.mob(53, 0.5, 64.0, 0.5, 0.0F, 8401L, 0);
+            scenes.add(village);
         }
     }
 
@@ -17900,6 +17920,14 @@ public final class MobOracle {
         level.blocks.putAll(scene.blocks);
         if (scene.poi) {
             level.enableRealPoi();
+            if (!scene.poiTake.isEmpty()) {
+                level.getPoiManager().tick(() -> true);
+                for (int[] at : scene.poiTake) {
+                    BlockPos pos = new BlockPos(at[0], at[1], at[2]);
+                    level.getPoiManager().take(h -> true, (h, p) -> p.equals(pos), pos, 1);
+                }
+                level.getPoiManager().tick(() -> true);
+            }
         }
         level.injectedSkyDarken = scene.skyDarken;
         level.injectedRaining = scene.raining;
@@ -18303,6 +18331,13 @@ public final class MobOracle {
                         + scene.raid[3] + "," + scene.raid[4] + "," + scene.raid[5] + ","
                         + scene.raid[6] + "," + scene.raid[7] + "]");
         line.append(",\"poi\":").append(scene.poi);
+        line.append(",\"poiTake\":[");
+        for (int i = 0; i < scene.poiTake.size(); i++) {
+            if (i > 0) line.append(',');
+            int[] at = scene.poiTake.get(i);
+            line.append('[').append(at[0]).append(',').append(at[1]).append(',').append(at[2]).append(']');
+        }
+        line.append(']');
         line.append(",\"difficulty\":").append(scene.difficulty);
         line.append(",\"skyDarken\":").append(scene.skyDarken);
         line.append(",\"raining\":").append(scene.raining);
