@@ -383,6 +383,8 @@ impl Report {
                         player_height: 1.8,
                         sneaking: false,
                         difficulty: 2,
+                        hit_pos: None,
+                        spectator: false,
                     };
                     level.entities.with_mut(uid, |row| {
                         row.with_mob(|me, mob| {

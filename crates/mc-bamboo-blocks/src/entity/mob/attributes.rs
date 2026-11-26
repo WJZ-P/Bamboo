@@ -399,6 +399,15 @@ impl Attributes {
     /// `Mob.createMobAttributes()`：生物的缺省属性表。没有 `Animal` 加的 `TEMPT_RANGE`，
     /// 血量和移动速度是注册表缺省值。
     ///
+    /// `ArmorStand.createAttributes()`：`createLivingAttributes()` 把台阶高度覆盖成 0。
+    ///
+    /// `ArmorStand.createAttributes()`: `createLivingAttributes()` with step height 0.
+    pub fn armor_stand() -> Self {
+        let mut attributes = Self::living();
+        attributes.set_base(attribute::STEP_HEIGHT, 0.0);
+        attributes
+    }
+
     /// `Mob.createMobAttributes()`: the plain mob defaults, without the `TEMPT_RANGE` that
     /// `Animal` adds and with registry-default health and movement speed.
     pub(super) fn mob() -> Self {

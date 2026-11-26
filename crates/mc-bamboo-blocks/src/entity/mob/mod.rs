@@ -15,6 +15,7 @@
 pub mod allay;
 mod allay_ai;
 pub mod armadillo;
+pub mod armor_stand;
 pub mod attributes;
 pub mod avoid;
 pub mod axolotl;
@@ -304,13 +305,17 @@ pub enum MobType {
     ///
     /// Trader llama: a llama variant leashed to a wandering trader on spawn.
     TraderLlama,
+    /// 盔甲架，`ArmorStand`：`LivingEntity` 一支，没有 AI，靠两段式受伤破坏。
+    ///
+    /// The armour stand: a `LivingEntity` with no AI, broken by a two-hit hurt.
+    ArmorStand,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 76] = [
+    pub const ALL: [Self; 77] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -387,6 +392,7 @@ impl MobType {
         Self::Allay,
         Self::WanderingTrader,
         Self::TraderLlama,
+        Self::ArmorStand,
     ];
 
     /// 注册表 ID。
@@ -470,6 +476,7 @@ impl MobType {
             Self::Allay => ids::ALLAY,
             Self::WanderingTrader => ids::WANDERING_TRADER,
             Self::TraderLlama => ids::TRADER_LLAMA,
+            Self::ArmorStand => ids::ARMOR_STAND,
         }
     }
 
@@ -553,6 +560,7 @@ impl MobType {
             Self::Allay => "minecraft:allay",
             Self::WanderingTrader => "minecraft:wandering_trader",
             Self::TraderLlama => "minecraft:trader_llama",
+            Self::ArmorStand => "minecraft:armor_stand",
         }
     }
 
@@ -774,6 +782,16 @@ impl MobType {
                 mc_bamboo_data::villager::BABY_VILLAGER_EYE_HEIGHT,
             ),
             (Self::HappyGhast, baby) => happy_ghast::dimensions(baby),
+            // 盔甲架的普通 / 小型两种；标记尺寸在 [`Mob::dimensions`] 里按标志位覆盖。
+            // The armour stand's normal / small sizes; the marker size is handled
+            // by [`Mob::dimensions`] from the flag bit.
+            (Self::ArmorStand, baby) => {
+                if baby {
+                    armor_stand::BABY_DIMENSIONS
+                } else {
+                    armor_stand::NORMAL_DIMENSIONS
+                }
+            }
             // `EntityTypes.WARDEN`：`sized(0.9F, 2.9F)`，未显式给眼高，取缺省 `height * 0.85F`。
             // `EntityTypes.WARDEN`: `sized(0.9F, 2.9F)` with the default eye height.
             (Self::Warden, _) => (0.9, 2.9, 2.9 * 0.85),
@@ -1148,7 +1166,9 @@ impl MobType {
     /// `LivingEntity.isPushable()`, overridden to false by bats, which neither push nor
     /// get pushed.
     pub const fn is_pushable(self) -> bool {
-        !matches!(self, Self::Bat)
+        // 蝙蝠和盔甲架都不推别人也不被推。
+        // Bats and armour stands neither push nor get pushed.
+        !matches!(self, Self::Bat | Self::ArmorStand)
     }
 
     /// 把 `checkFallDamage` 覆写成空方法的类型（鹦鹉、蝙蝠、幻翼、蜜蜂、快乐恶魂）。
@@ -1311,6 +1331,9 @@ impl MobType {
             Self::Allay => "minecraft:entities/allay",
             Self::WanderingTrader => "minecraft:entities/wandering_trader",
             Self::TraderLlama => "minecraft:entities/trader_llama",
+            // 盔甲架破坏时掉固定物品，不走死亡战利品表。
+            // A broken armour stand drops fixed items, not a death loot table.
+            Self::ArmorStand => "minecraft:entities/armor_stand",
         }
     }
 
@@ -1498,6 +1521,7 @@ impl MobType {
             // Trading ambience is switched by `living::ambient_voice` while trading.
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.ambient"),
             Self::TraderLlama => Some("minecraft:entity.llama.ambient"),
+            Self::ArmorStand => None,
         }
     }
 
@@ -1575,6 +1599,7 @@ impl MobType {
             Self::Illusioner => Some("minecraft:entity.illusioner.hurt"),
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.hurt"),
             Self::TraderLlama => Some("minecraft:entity.llama.hurt"),
+            Self::ArmorStand => None,
         }
     }
 
@@ -1651,6 +1676,7 @@ impl MobType {
             Self::Illusioner => Some("minecraft:entity.illusioner.death"),
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.death"),
             Self::TraderLlama => Some("minecraft:entity.llama.death"),
+            Self::ArmorStand => None,
         }
     }
 
@@ -1744,6 +1770,7 @@ impl MobType {
             // Wandering traders, like villagers, use the block's step sound.
             Self::WanderingTrader => None,
             Self::TraderLlama => Some("minecraft:entity.llama.step"),
+            Self::ArmorStand => None,
         }
     }
 
@@ -1829,6 +1856,9 @@ impl MobType {
             Self::Allay => items::ALLAY_SPAWN_EGG,
             Self::WanderingTrader => items::WANDERING_TRADER_SPAWN_EGG,
             Self::TraderLlama => items::TRADER_LLAMA_SPAWN_EGG,
+            // 盔甲架没有刷怪蛋，占位成空气。
+            // The armour stand has no spawn egg; air stands in for it.
+            Self::ArmorStand => items::AIR,
         }
     }
 
@@ -1911,6 +1941,7 @@ impl MobType {
             Self::Allay => "entity.minecraft.allay",
             Self::WanderingTrader => "entity.minecraft.wandering_trader",
             Self::TraderLlama => "entity.minecraft.trader_llama",
+            Self::ArmorStand => "entity.minecraft.armor_stand",
         }
     }
 
@@ -2589,6 +2620,11 @@ pub struct DamageSource {
     /// 攻击者的 UUID，存进 `last_hurt_by_*`。
     pub attacker_uuid: Option<[u8; 16]>,
     /// 造成伤害的是非玩家生物：`when_caused_by_living_non_player` 缩放要读它。
+    /// `Player.getAbilities().mayBuild`：冒险 / 旁观模式为假，`ArmorStand.hurtServer` 要读。
+    ///
+    /// `Player.getAbilities().mayBuild`: false in adventure / spectator, read by
+    /// `ArmorStand.hurtServer`.
+    pub attacker_may_build: bool,
     pub scale_when_non_player: bool,
     /// 主手武器带来的附魔（这一期只读破甲之外的效果，见 `damage::protection`）。
     /// 空表示没有武器。
@@ -2649,6 +2685,7 @@ impl DamageSource {
             raw_position: None,
             sprint_yaw: None,
             attacker_uuid: None,
+            attacker_may_build: true,
             scale_when_non_player: false,
             weapon: None,
             armor_effectiveness: 0.0,
@@ -2739,6 +2776,7 @@ impl DamageSource {
     pub(crate) fn with_player_mob_attack(mut self, player: PlayerMobAttack) -> Self {
         self.attacker_uuid = Some(player.uuid);
         self.looting_level = player.looting;
+        self.attacker_may_build = player.may_build;
         self
     }
 
@@ -2755,6 +2793,7 @@ impl DamageSource {
             raw_position: None,
             sprint_yaw: None,
             attacker_uuid: None,
+            attacker_may_build: true,
             scale_when_non_player: false,
             weapon: None,
             armor_effectiveness: 0.0,
@@ -2782,6 +2821,8 @@ impl DamageSource {
 pub struct PlayerMobAttack {
     pub uuid: [u8; 16],
     pub looting: i32,
+    /// `Player.getAbilities().mayBuild`。
+    pub may_build: bool,
 }
 
 /// 掉落表区分致死来源和最近伤害过它的玩家。
@@ -3369,6 +3410,10 @@ pub struct Mob {
     ///
     /// `LivingEntity.discardFriction`: `travelInAir` skips friction during a long jump.
     pub discard_friction: bool,
+    /// 盔甲架的专属状态；别的生物恒为缺省值。
+    ///
+    /// The armour stand's own state; default for every other mob.
+    pub armor_stand: armor_stand::ArmorStand,
 }
 
 /// 要发给客户端的一次生物事件。
@@ -3421,12 +3466,14 @@ pub enum MobEvent {
     /// measured from the centre of the player's block.
     Particles {
         particle: i32,
-        /// `ItemParticleOption` 的物品参数（物品注册表 ID）；简单粒子是 `None`。
-        /// 官方 `ItemStackTemplate.STREAM_CODEC`：物品 ID + 数量 1 + 空组件补丁。
+        /// 粒子参数：`ItemParticleOption` 是物品注册表 ID，`BlockParticleOption` 是
+        /// 方块状态 ID；简单粒子是 `None`。物品粒子按 `ItemStackTemplate.STREAM_CODEC`
+        /// 追加数量 1 和空组件补丁，方块粒子只写这一个状态 ID。
         ///
-        /// The `ItemParticleOption` item argument (item registry id); `None` for
-        /// simple particles. Vanilla's `ItemStackTemplate.STREAM_CODEC` writes the
-        /// item id, count 1 and an empty component patch.
+        /// Particle argument: the item registry id for `ItemParticleOption`, the
+        /// block-state id for `BlockParticleOption`; `None` for simple particles.
+        /// Item particles append count 1 and an empty patch; block particles write
+        /// only this state id.
         item: Option<i32>,
         position: Vec3,
         offset: Vec3,
@@ -3538,6 +3585,7 @@ impl Mob {
             MobType::Vex => vex::attributes(),
             MobType::Illusioner => illusioner::attributes(),
             MobType::Allay => allay::attributes(),
+            MobType::ArmorStand => Attributes::armor_stand(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3920,7 +3968,9 @@ impl Mob {
             },
             persistence_required: false,
             left_handed: false,
-            no_ai: false,
+            // 盔甲架不是 `Mob`，`noAi` 恒为真。
+            // The armour stand is not a `Mob`, so `noAi` is always true.
+            no_ai: mob_type == MobType::ArmorStand,
             can_pick_up_loot: false,
             home: None,
             loot_table_seed: 0,
@@ -4045,6 +4095,7 @@ impl Mob {
                 .then(|| Box::new(equine::EquineState::default())),
             skeleton_horse: (mob_type == MobType::SkeletonHorse)
                 .then(|| Box::new(skeleton_horse::SkeletonHorseState::default())),
+            armor_stand: armor_stand::ArmorStand::default(),
         };
         if mob_type == MobType::Villager {
             // `Villager` 构造函数末尾的 `setCanPickUpLoot(true)`。
@@ -4224,6 +4275,12 @@ impl Mob {
             // `Warden.getDefaultDimensions`: `fixed(width, 1.0F)` while emerging or digging.
             let (width, _, _) = self.mob_type.dimensions(false);
             return (width, 1.0);
+        }
+        if self.mob_type == MobType::ArmorStand {
+            // 普通 / 小型 / 标记三种尺寸由 `DATA_CLIENT_FLAGS` 决定。
+            // Normal / small / marker sizes come from `DATA_CLIENT_FLAGS`.
+            let (width, height, _) = self.armor_stand.dimensions();
+            return (width, height);
         }
         let (width, height, _) = self.mob_type.dimensions(self.is_baby());
         (width, height)
@@ -4666,6 +4723,11 @@ pub struct MobPublic {
     pub custom_name: Option<mc_bamboo_nbt::Tag>,
     pub custom_name_visible: bool,
     pub glowing: bool,
+    /// `Entity.FLAG_INVISIBLE`（共享标志 index 0 的 bit 5）；目前只有盔甲架置位。
+    ///
+    /// `Entity.FLAG_INVISIBLE` (bit 5 of the shared flags, index 0); only the
+    /// armour stand sets it today.
+    pub invisible: bool,
     pub left_handed: bool,
     pub dying: bool,
     /// `HappyGhast.IS_LEASH_HOLDER` / `STAYS_STILL`（index 18、19 的布尔）。
@@ -4745,6 +4807,10 @@ pub struct MobPublic {
     /// `WanderingTrader.despawnDelay`: trader llamas read the holder's countdown
     /// in `maybeDespawn()`; zero for other mobs.
     pub trader_despawn_delay: i32,
+    /// 盔甲架的同步状态（客户端标志与六个姿势）；别的生物是缺省值。
+    ///
+    /// The armour stand's synced state (client flags and six poses); default elsewhere.
+    pub armor_stand: armor_stand::ArmorStand,
     /// `Mob.getLastHurtByMob()`：行商羊驼的 `TraderLlamaDefendWanderingTraderGoal`
     /// 从牵引者身上读这个值。其它生物也能读，只是没目标会看。
     ///
@@ -4873,6 +4939,7 @@ impl MobPublic {
             custom_name: mob.custom_name.clone(),
             custom_name_visible: mob.custom_name_visible,
             glowing: mob.glowing,
+            invisible: mob.mob_type == MobType::ArmorStand && mob.armor_stand.invisible,
             left_handed: mob.left_handed,
             dying: mob.is_dead_or_dying(),
             happy_ghast_is_leash_holder: mob.happy_ghast.is_leash_holder,
@@ -4908,6 +4975,7 @@ impl MobPublic {
             passengers: mob.passengers.clone(),
             leash_holder: leash::leash_holder(mob),
             trader_despawn_delay: mob.wandering_trader.despawn_delay,
+            armor_stand: mob.armor_stand,
             last_hurt_by_mob: mob.last_hurt_by_mob,
             last_hurt_by_mob_timestamp: mob.last_hurt_by_mob_timestamp,
         }
@@ -4946,6 +5014,10 @@ impl MobPublic {
         }
         if self.mob_type == MobType::Villager && self.sleeping_pos.is_some() {
             return (0.2, 0.2);
+        }
+        if self.mob_type == MobType::ArmorStand {
+            let (width, height, _) = self.armor_stand.dimensions();
+            return (width, height);
         }
         let (width, height, _) = self.mob_type.dimensions(self.baby);
         (width, height)

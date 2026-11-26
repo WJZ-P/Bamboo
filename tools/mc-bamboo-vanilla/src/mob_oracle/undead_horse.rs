@@ -175,6 +175,8 @@ impl Report {
                     player_height: 1.8,
                     sneaking: false,
                     difficulty: 2,
+                    hit_pos: None,
+                    spectator: false,
                 };
                 let mut world = World::new(&mut level, &mut ticks);
                 result_code(world.interact_mob(id, &request).result)

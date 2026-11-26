@@ -1320,6 +1320,33 @@ impl KindData {
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
     use mc_bamboo_data::entity_types as facts;
+    if kind == mc_bamboo_blocks::entity::mob::MobType::ArmorStand {
+        use mc_bamboo_blocks::entity::mob::armor_stand as stand;
+        let rot = |r: stand::Rotations| [r.x, r.y, r.z];
+        return match index {
+            0 => EntityData::SharedFlags(0),
+            1 => EntityData::AirSupply(300),
+            2 => EntityData::NoCustomName,
+            3 => EntityData::CustomNameVisible(false),
+            4 => EntityData::Silent(false),
+            5 => EntityData::NoGravity(false),
+            6 => EntityData::Pose(mc_bamboo_protocol::packet::play::Pose::Standing),
+            7 => EntityData::TicksFrozen(0),
+            8 => EntityData::LivingFlags(0),
+            9 => EntityData::Health(1.0),
+            10 => EntityData::EffectParticles(Vec::new()),
+            11 => EntityData::EffectAmbience(false),
+            14 => EntityData::SleepingPos(None),
+            15 => EntityData::ArmorStandFlags(0),
+            16 => EntityData::ArmorStandHeadPose(rot(stand::DEFAULT_HEAD_POSE)),
+            17 => EntityData::ArmorStandBodyPose(rot(stand::DEFAULT_BODY_POSE)),
+            18 => EntityData::ArmorStandLeftArmPose(rot(stand::DEFAULT_LEFT_ARM_POSE)),
+            19 => EntityData::ArmorStandRightArmPose(rot(stand::DEFAULT_RIGHT_ARM_POSE)),
+            20 => EntityData::ArmorStandLeftLegPose(rot(stand::DEFAULT_LEFT_LEG_POSE)),
+            21 => EntityData::ArmorStandRightLegPose(rot(stand::DEFAULT_RIGHT_LEG_POSE)),
+            _ => EntityData::SharedFlags(0),
+        };
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::HappyGhast {
         use mc_bamboo_protocol::packet::play::{HAPPY_GHAST_LEASH_HOLDER, HAPPY_GHAST_STAYS_STILL};
         return match index {
@@ -1699,6 +1726,9 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     if mob.glowing {
         flags |= 1 << 6;
     }
+    if mob.invisible {
+        flags |= mc_bamboo_protocol::packet::play::ENTITY_FLAG_INVISIBLE;
+    }
     // `Entity.FLAG_SWIMMING` = 1<<4。
     // `Entity.FLAG_SWIMMING` is 1<<4.
     if mob.swimming {
@@ -1939,7 +1969,8 @@ fn wolf_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<
 
 fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
     use mc_bamboo_protocol::packet::play::{
-        ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING,
+        ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_INVISIBLE, ENTITY_FLAG_SHIFT_KEY_DOWN,
+        ENTITY_FLAG_SPRINTING,
     };
     let mut flags = 0u8;
     // `FLAG_ONFIRE` = 1<<0，`FLAG_GLOWING` = 1<<6。死亡时官方把 `Pose` 设成
@@ -1954,6 +1985,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     if mob.glowing {
         flags |= 1 << 6;
+    }
+    if mob.invisible {
+        flags |= ENTITY_FLAG_INVISIBLE;
     }
     let _ = (ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN);
     let mut out = Vec::new();
@@ -2024,27 +2058,81 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     if mob.sleeping_pos.is_some() {
         out.push(EntityData::SleepingPos(mob.sleeping_pos));
     }
-    let mut mob_flags = 0u8;
-    if mob.no_ai {
-        mob_flags |= 1;
+    // 盔甲架不是 `Mob`：索引 15 起是客户端标志和姿势，没有 Mob 层的三个标志。
+    // An armour stand is not a `Mob`: index 15 onward holds its flags and poses.
+    if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::ArmorStand {
+        let mut mob_flags = 0u8;
+        if mob.no_ai {
+            mob_flags |= 1;
+        }
+        if mob.left_handed {
+            mob_flags |= 2;
+        }
+        // `Mob.setAggressive` 也写这一位，官方对所有生物都同步（狼、狐狸用近战目标时置位）。
+        // `Mob.setAggressive` writes this bit too, for every mob (set while a wolf or fox
+        // melee goal runs).
+        if mob.aggressive {
+            mob_flags |= 4;
+        }
+        if mob_flags != 0 {
+            out.push(EntityData::MobFlags(mob_flags));
+        }
+        if mob.baby {
+            out.push(EntityData::Baby(true));
+        }
+        if mob.age_locked {
+            out.push(EntityData::AgeLocked(true));
+        }
     }
-    if mob.left_handed {
-        mob_flags |= 2;
-    }
-    // `Mob.setAggressive` 也写这一位，官方对所有生物都同步（狼、狐狸用近战目标时置位）。
-    // `Mob.setAggressive` writes this bit too, for every mob (set while a wolf or fox
-    // melee goal runs).
-    if mob.aggressive {
-        mob_flags |= 4;
-    }
-    if mob_flags != 0 {
-        out.push(EntityData::MobFlags(mob_flags));
-    }
-    if mob.baby {
-        out.push(EntityData::Baby(true));
-    }
-    if mob.age_locked {
-        out.push(EntityData::AgeLocked(true));
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::ArmorStand {
+        use mc_bamboo_blocks::entity::mob::armor_stand as stand;
+        let s = mob.armor_stand;
+        if s.client_flags != 0 {
+            out.push(EntityData::ArmorStandFlags(s.client_flags));
+        }
+        if s.head_pose != stand::DEFAULT_HEAD_POSE {
+            out.push(EntityData::ArmorStandHeadPose([
+                s.head_pose.x,
+                s.head_pose.y,
+                s.head_pose.z,
+            ]));
+        }
+        if s.body_pose != stand::DEFAULT_BODY_POSE {
+            out.push(EntityData::ArmorStandBodyPose([
+                s.body_pose.x,
+                s.body_pose.y,
+                s.body_pose.z,
+            ]));
+        }
+        if s.left_arm_pose != stand::DEFAULT_LEFT_ARM_POSE {
+            out.push(EntityData::ArmorStandLeftArmPose([
+                s.left_arm_pose.x,
+                s.left_arm_pose.y,
+                s.left_arm_pose.z,
+            ]));
+        }
+        if s.right_arm_pose != stand::DEFAULT_RIGHT_ARM_POSE {
+            out.push(EntityData::ArmorStandRightArmPose([
+                s.right_arm_pose.x,
+                s.right_arm_pose.y,
+                s.right_arm_pose.z,
+            ]));
+        }
+        if s.left_leg_pose != stand::DEFAULT_LEFT_LEG_POSE {
+            out.push(EntityData::ArmorStandLeftLegPose([
+                s.left_leg_pose.x,
+                s.left_leg_pose.y,
+                s.left_leg_pose.z,
+            ]));
+        }
+        if s.right_leg_pose != stand::DEFAULT_RIGHT_LEG_POSE {
+            out.push(EntityData::ArmorStandRightLegPose([
+                s.right_leg_pose.x,
+                s.right_leg_pose.y,
+                s.right_leg_pose.z,
+            ]));
+        }
+        return out;
     }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Allay {
         // `Allay` 的 16 / 17 两项是布尔元数据，缺省假 / 真。
@@ -2773,18 +2861,21 @@ fn event_packet(
             speed,
             count,
         } => {
-            // 简单粒子的 `ParticleTypes.STREAM_CODEC` 只有类型 ID；带物品的粒子
-            // （`ItemParticleOption`）再按 `ItemStackTemplate.STREAM_CODEC` 追加
-            // 物品 ID、数量 1、空的组件补丁（两个 0 varint）。
-            // A simple particle's codec is the type id alone; an item particle appends
-            // `ItemStackTemplate.STREAM_CODEC`: item id, count 1, empty component patch.
+            // 简单粒子只有类型 ID。`ItemParticleOption` 再按
+            // `ItemStackTemplate.STREAM_CODEC` 追加物品 ID、数量 1、空组件补丁；
+            // `BlockParticleOption`（`showBreakingParticles`）只追加一个方块状态 ID。
+            // A simple particle carries just the type id. `ItemParticleOption`
+            // appends the item id, count 1 and an empty patch; `BlockParticleOption`
+            // (`showBreakingParticles`) appends only a block-state id.
             let mut options = Vec::new();
             mc_bamboo_protocol::codec::write_varint(&mut options, *particle);
-            if let Some(item) = *item {
-                mc_bamboo_protocol::codec::write_varint(&mut options, item);
-                mc_bamboo_protocol::codec::write_varint(&mut options, 1);
-                mc_bamboo_protocol::codec::write_varint(&mut options, 0);
-                mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+            if let Some(argument) = *item {
+                mc_bamboo_protocol::codec::write_varint(&mut options, argument);
+                if *particle != mc_bamboo_data::registries::particle_type::BLOCK {
+                    mc_bamboo_protocol::codec::write_varint(&mut options, 1);
+                    mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+                    mc_bamboo_protocol::codec::write_varint(&mut options, 0);
+                }
             }
             EventPacket::Particles {
                 body: packet_body(&mc_bamboo_protocol::packet::play::LevelParticles {
@@ -3322,3 +3413,87 @@ pub(crate) fn on_leave(region: &mut Region, id: PlayerId) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod armour_stand_tests {
+    use super::*;
+    use mc_bamboo_blocks::entity::{
+        Entity,
+        mob::{MobPublic, MobType, armor_stand},
+    };
+    use mc_bamboo_core::Vec3;
+
+    #[test]
+    fn metadata_uses_client_flags_and_poses_not_mob_flags() {
+        let mut entity = Entity::by_mob_type(MobType::ArmorStand, Vec3::default());
+        entity.with_mob(|_, mob| {
+            mob.armor_stand.set_small(true);
+            mob.armor_stand.head_pose = armor_stand::Rotations::new(1.0, 2.0, 3.0);
+        });
+        let public = MobPublic::of(entity.kind.mob().expect("a mob"), false);
+        let data = mob_non_default_data(&public);
+        assert!(data.contains(&EntityData::ArmorStandFlags(1)));
+        assert!(data.contains(&EntityData::ArmorStandHeadPose([1.0, 2.0, 3.0])));
+        assert!(!data.iter().any(|d| matches!(d, EntityData::MobFlags(_))));
+        assert!(!data.iter().any(|d| matches!(d, EntityData::Baby(_))));
+        assert_eq!(
+            default_data_for_type(15, MobType::ArmorStand),
+            EntityData::ArmorStandFlags(0)
+        );
+        assert_eq!(
+            default_data_for_type(18, MobType::ArmorStand),
+            EntityData::ArmorStandLeftArmPose([-10.0, 0.0, -10.0])
+        );
+        assert_eq!(
+            default_data_for_type(21, MobType::ArmorStand),
+            EntityData::ArmorStandRightLegPose([1.0, 0.0, 1.0])
+        );
+    }
+
+    #[test]
+    fn an_invisible_stand_syncs_the_shared_invisible_flag() {
+        let mut entity = Entity::by_mob_type(MobType::ArmorStand, Vec3::default());
+        entity.with_mob(|_, mob| mob.armor_stand.invisible = true);
+        let public = MobPublic::of(entity.kind.mob().expect("a mob"), false);
+        assert!(public.invisible);
+        let data = mob_non_default_data(&public);
+        assert!(data.contains(&EntityData::SharedFlags(
+            mc_bamboo_protocol::packet::play::ENTITY_FLAG_INVISIBLE
+        )));
+    }
+
+    #[test]
+    fn breaking_particles_encode_the_oak_planks_block_state() {
+        use mc_bamboo_protocol::codec::write_varint;
+        let oak = mc_bamboo_blocks::BlockState(mc_bamboo_data::blocks::OAK_PLANKS)
+            .default_state()
+            .0 as i32;
+        let event = mc_bamboo_blocks::entity::mob::MobEvent::Particles {
+            particle: mc_bamboo_data::registries::particle_type::BLOCK,
+            item: Some(oak),
+            position: Vec3::default(),
+            offset: Vec3::default(),
+            speed: 0.05,
+            count: 10,
+        };
+        let mut seed = || 0_i64;
+        let packet = event_packet(7, &event, &mut seed);
+        let EventPacket::Particles { body, .. } = packet else {
+            panic!("a particles packet");
+        };
+        let mut expected = Vec::new();
+        write_varint(
+            &mut expected,
+            mc_bamboo_data::packets::play::clientbound::LEVEL_PARTICLES,
+        );
+        write_varint(
+            &mut expected,
+            mc_bamboo_data::registries::particle_type::BLOCK,
+        );
+        write_varint(&mut expected, oak);
+        assert!(
+            body.starts_with(&expected),
+            "BLOCK particle options are the type id followed by the state id"
+        );
+    }
+}

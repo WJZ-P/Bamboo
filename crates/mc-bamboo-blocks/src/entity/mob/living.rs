@@ -1671,9 +1671,17 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
             super::happy_ghast::tick_ridden(me, mob, pitch, yaw);
         }
         me.delta = Vec3::default();
-    } else if !mob.no_ai {
+    } else if !mob.no_ai || mob.mob_type == super::MobType::ArmorStand {
         timing::span!(Travel);
-        if mob.mob_type == super::MobType::Allay {
+        if mob.mob_type == super::MobType::ArmorStand {
+            // `ArmorStand.travel`：标记或 `NoGravity` 时没有物理，直接返回；
+            // 有物理时才走通用 travel 掉落。
+            // `ArmorStand.travel`: return early for markers / `NoGravity`;
+            // otherwise fall through the generic travel.
+            if mob.armor_stand.has_physics(mob.no_gravity) {
+                travel(me, mob, ctx, input);
+            }
+        } else if mob.mob_type == super::MobType::Allay {
             // `Allay.travel` 是 `travelFlying(input, getSpeed())`，没有重力。
             // `Allay.travel` is `travelFlying(input, getSpeed())` with no gravity.
             super::allay::travel(me, mob, ctx, input);
@@ -3325,6 +3333,12 @@ pub(crate) fn hurt_server(
     if mob.mob_type == super::MobType::Axolotl {
         let has_source = source.attacker.is_some() || source.direct.is_some();
         super::axolotl::maybe_play_dead(me, mob, amount, has_source);
+    }
+    // `ArmorStand.hurtServer`：两段式摇晃与破坏掉落，不走通用活体受伤。
+    // `ArmorStand.hurtServer`: the two-hit wobble and breaking drops, not the
+    // generic living hurt path.
+    if mob.mob_type == super::MobType::ArmorStand {
+        return super::armor_stand::hurt_server(me, mob, ctx, source, amount);
     }
     living_hurt_server(me, mob, ctx, source, amount)
 }

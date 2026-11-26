@@ -793,6 +793,8 @@ mod tests {
             player_height: 1.8,
             sneaking: false,
             difficulty: 2,
+            hit_pos: None,
+            spectator: false,
         }
     }
 

@@ -171,8 +171,8 @@ impl Rule {
                  and primed TNT need entities, projectiles, vibrations or lightning"
             }
             Self::Dispensing => {
-                "scope: a dispenser fired an unsupported projectile (1002 without arrow loss, or 1004/1018/1051) or an armour \
-                 stand or spawn egg left the dispenser. Primed TNT, other dispenser shots and \
+                "scope: a dispenser fired an unsupported projectile (1002 without arrow loss, or 1004/1018/1051) or a spawn \
+                 egg left the dispenser. Armour stands, primed TNT, other dispenser shots and \
                  crafters that crafted are all compared item by item"
             }
             Self::DaylightTimer => {
@@ -1169,9 +1169,12 @@ fn plays_primed_tnt(case: &Case) -> bool {
         .any(|sound| sound_name(sound.0) == Some("minecraft:entity.tnt.primed"))
 }
 
-/// 未实现的弹射物、盔甲架和刷怪蛋仍排除；箭和点燃的 TNT 照常比较。
+/// 未实现的弹射物和刷怪蛋仍排除；盔甲架、箭和点燃的 TNT 照常比较。
+/// 盔甲架的发射器行为已建模（`DispenseItemBehavior$1`），生成实体、扣物品、取一次随机数。
 ///
-/// Keep unsupported projectiles, armour stands and spawn eggs excluded, but compare arrows and primed TNT.
+/// Keep unsupported projectiles and spawn eggs excluded; compare armour stands, arrows and
+/// primed TNT. The armour-stand dispenser behaviour is modelled (`DispenseItemBehavior$1`):
+/// it spawns the entity, shrinks the stack and draws one random value.
 fn dispenser_dispenses(case: &Case) -> bool {
     let projectile = case.outcome.level_events.iter().any(|event| {
         let pos = BlockPos::new(event.1, event.2, event.3);
@@ -1210,12 +1213,11 @@ fn dispenser_dispenses(case: &Case) -> bool {
         return true;
     }
     dispenser_positions(case).iter().any(|&pos| {
-        lost_named(case, pos, "minecraft:armor_stand")
-            || case.contents.iter().any(|stack| {
-                stack.pos() == pos
-                    && stack.item().ends_with("_spawn_egg")
-                    && dispenser_lost(case, pos, stack.item())
-            })
+        case.contents.iter().any(|stack| {
+            stack.pos() == pos
+                && stack.item().ends_with("_spawn_egg")
+                && dispenser_lost(case, pos, stack.item())
+        })
     })
 }
 
@@ -1245,10 +1247,6 @@ fn total_after(case: &Case, pos: BlockPos) -> i32 {
         .filter(|stack| stack.pos() == pos)
         .map(|stack| stack.count())
         .sum()
-}
-
-fn lost_named(case: &Case, pos: BlockPos, item: &str) -> bool {
-    dispenser_lost(case, pos, item)
 }
 
 fn sound_name(id: i32) -> Option<&'static str> {

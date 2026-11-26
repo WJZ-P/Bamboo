@@ -2821,6 +2821,106 @@ fn a_cod_bucket_pours_water_and_spawns_a_cod() {
     );
 }
 
+/// `ServerboundInteractPacket` 的 `INTERACT_AT` 点击位置要传到盔甲架：点脚部不动，
+/// 点头部取下头盔。
+#[test]
+fn interact_at_click_height_reaches_the_armour_stand() {
+    let (mut server, client) = settled();
+    let uid = server.region().entities.spawn({
+        let mut entity = mc_bamboo_blocks::entity::Entity::by_mob_type(
+            mc_bamboo_blocks::entity::mob::MobType::ArmorStand,
+            Vec3::new(11.5, -59.0, 8.5),
+        );
+        entity.with_mob(|_, mob| {
+            mob.equipment.set(
+                mc_bamboo_protocol::packet::play::EquipmentSlot::Head,
+                ItemStack::new(items::DIAMOND_HELMET, 1),
+            );
+        });
+        entity
+    });
+    client.take_frames();
+
+    // 点脚部（相对高度 0.3）：没有脚部装备，交互落空，手里还是空的。
+    crate::interaction::on_interact_entity_at(
+        server.region(),
+        client.id,
+        uid,
+        Hand::Main,
+        false,
+        Vec3::new(0.0, 0.3, 0.0),
+    );
+    assert_eq!(
+        server.player(&client).inventory.held(Hand::Main).item,
+        items::AIR,
+        "a low click must not take the helmet off"
+    );
+
+    // 点头部（相对高度 1.8）：取下头盔到手里。
+    crate::interaction::on_interact_entity_at(
+        server.region(),
+        client.id,
+        uid,
+        Hand::Main,
+        false,
+        Vec3::new(0.0, 1.8, 0.0),
+    );
+    assert_eq!(
+        server.player(&client).inventory.held(Hand::Main).item,
+        items::DIAMOND_HELMET,
+        "a high click takes the helmet off"
+    );
+}
+
+/// `NameTagItem.interactLivingEntity`：带 `CUSTOM_NAME` 的命名牌给盔甲架命名，
+/// 生存模式消耗手里的命名牌。
+///
+/// `NameTagItem.interactLivingEntity`: a name tag with a `CUSTOM_NAME` component
+/// names the stand and is consumed in survival mode.
+#[test]
+fn a_name_tag_names_an_armour_stand_end_to_end() {
+    let (mut server, client) = settled();
+    player_mut(&mut server, &client).game_mode = GameMode::Survival;
+    let uid = server
+        .region()
+        .entities
+        .spawn(mc_bamboo_blocks::entity::Entity::by_mob_type(
+            mc_bamboo_blocks::entity::mob::MobType::ArmorStand,
+            Vec3::new(11.5, -59.0, 8.5),
+        ));
+    let mut bytes = Vec::new();
+    Component::text("Hall Monitor")
+        .tag()
+        .write_network(&mut bytes);
+    let mut tag = ItemStack::new(items::NAME_TAG, 1);
+    tag.added.push((kinds::CUSTOM_NAME, bytes));
+    hold_stack(&mut server, &client, tag);
+    client.take_frames();
+
+    crate::interaction::on_interact_entity_at(
+        server.region(),
+        client.id,
+        uid,
+        Hand::Main,
+        false,
+        Vec3::new(0.0, 1.0, 0.0),
+    );
+    assert_eq!(
+        server.player(&client).inventory.held(Hand::Main).item,
+        items::AIR,
+        "the name tag is consumed"
+    );
+    assert_eq!(
+        server
+            .region()
+            .entities
+            .get(uid)
+            .and_then(|entity| entity.kind.mob().and_then(|mob| mob.custom_name.clone())),
+        Some(Component::text("Hall Monitor").tag().clone()),
+        "the stand carries the custom name"
+    );
+}
+
 /// 玩家端到端流程：放画、放荧光物品展示框、生存模式下放物品并旋转、左键先打掉物品再打掉框。
 #[test]
 fn placing_interacting_and_punching_painting_and_item_frame() {

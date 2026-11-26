@@ -3107,14 +3107,15 @@ impl World {
             PlayRequest::Interact {
                 entity_id,
                 hand,
+                location,
                 using_secondary_action,
-                ..
-            } => interaction::on_interact_entity(
+            } => interaction::on_interact_entity_at(
                 region,
                 player,
                 entity_id,
                 hand,
                 using_secondary_action,
+                location,
             ),
             PlayRequest::SetCarriedItem { slot } => {
                 inventory::on_set_carried_item(region, player, slot);

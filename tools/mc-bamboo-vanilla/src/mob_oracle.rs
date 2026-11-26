@@ -36,6 +36,7 @@ use serde::Deserialize;
 use crate::oracle::collect_log;
 
 mod allay;
+mod armor_stand;
 mod arrow_deflect;
 mod attack_target;
 mod bat;
@@ -271,6 +272,8 @@ enum Line {
     Breeze(Box<breeze::BreezeCase>),
     Allay(Box<allay::AllayCase>),
     AllaySave(allay::AllaySaveCase),
+    ArmorStandSave(armor_stand::ArmorStandSaveCase),
+    ArmorStandScene(Box<armor_stand::ArmorStandCase>),
     SpellcasterSave(SpellcasterSaveCase),
     End(End),
 }
@@ -2193,6 +2196,7 @@ impl Level for MobLevel {
         Some(mc_bamboo_blocks::entity::mob::PlayerMobAttack {
             uuid: self.players[index].uuid?,
             looting: self.looting.get(index).copied().unwrap_or(0),
+            may_build: true,
         })
     }
 }
@@ -2502,6 +2506,8 @@ impl Report {
                 Line::Breeze(case) => self.replay_breeze(&case),
                 Line::Allay(case) => self.replay_allay(&case),
                 Line::AllaySave(case) => self.replay_allay_save(&case),
+                Line::ArmorStandSave(case) => self.replay_armor_stand_save(&case),
+                Line::ArmorStandScene(case) => self.replay_armor_stand_scene(&case),
                 Line::SpellcasterSave(case) => self.replay_spellcaster_save(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
@@ -3660,6 +3666,8 @@ impl Report {
                         player_height: 1.8,
                         sneaking: false,
                         difficulty: 2,
+                        hit_pos: None,
+                        spectator: false,
                     };
                     let outcome = world.interact_mob(ids[cow as usize], &request);
                     let result = if outcome.result.consumes_action() {

@@ -1682,6 +1682,11 @@ impl Level for RegionLevel<'_> {
         Some(mc_bamboo_blocks::entity::mob::PlayerMobAttack {
             uuid: *player.uuid.as_bytes(),
             looting,
+            may_build: !matches!(
+                player.game_mode,
+                mc_bamboo_protocol::packet::play::GameMode::Adventure
+                    | mc_bamboo_protocol::packet::play::GameMode::Spectator
+            ),
         })
     }
 
@@ -1715,11 +1720,20 @@ impl Level for RegionLevel<'_> {
             return u16::try_from(slot).ok();
         }
         // 官方 `EquipmentDispenseItemBehavior` 给生物上装备：`setItemSlot`、
-        // `setGuaranteedDrop` 和 `setPersistenceRequired`。身体是 6 号、鞍是 7 号装备槽。
+        // `setGuaranteedDrop` 和 `setPersistenceRequired`。参数是 `equippable.slot`
+        // 的注册表顺序（主手 / 靴子 / 护腿 / 胸甲 / 头盔 / 副手 / 身体 / 鞍）。
         //
         // Vanilla `EquipmentDispenseItemBehavior` equips mobs: `setItemSlot`,
-        // `setGuaranteedDrop` and `setPersistenceRequired`. Body is slot 6, saddle slot 7.
+        // `setGuaranteedDrop` and `setPersistenceRequired`. The argument is the
+        // `equippable.slot` registry order (main hand, feet, legs, chest, head,
+        // off hand, body, saddle).
         let slot = match component_slot {
+            0 => mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand,
+            1 => mc_bamboo_protocol::packet::play::EquipmentSlot::Feet,
+            2 => mc_bamboo_protocol::packet::play::EquipmentSlot::Legs,
+            3 => mc_bamboo_protocol::packet::play::EquipmentSlot::Chest,
+            4 => mc_bamboo_protocol::packet::play::EquipmentSlot::Head,
+            5 => mc_bamboo_protocol::packet::play::EquipmentSlot::OffHand,
             6 => mc_bamboo_protocol::packet::play::EquipmentSlot::Body,
             7 => mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle,
             _ => return None,
@@ -1768,6 +1782,11 @@ fn mob_equip_target(public: &mc_bamboo_blocks::entity::EntityPublic) -> Option<E
     // Pigs take a saddle from a dispenser (not babies); wolves take body armour
     // (Wolf.canUseSlot is always true, so no age restriction); only adult happy
     // ghasts take a BODY harness from a dispenser (`canUseSlot`).
+    // `ArmorStand.canUseSlot`：BODY / SADDLE 不可用，其余看 `isDisabled`。
+    // `ArmorStand.canUseSlot`: BODY / SADDLE are out, the rest honour `isDisabled`.
+    if mob.mob_type == MobType::ArmorStand {
+        return Some(armour_stand_equip_target(public, mob));
+    }
     let (slot, index) = match mob.mob_type {
         MobType::Pig if !mob.baby => (EquipmentSlot::Saddle, 7),
         MobType::Wolf => (EquipmentSlot::Body, 6),
@@ -1799,6 +1818,63 @@ fn mob_equip_target(public: &mc_bamboo_blocks::entity::EntityPublic) -> Option<E
         baby: mob.baby,
         equipment,
     })
+}
+
+/// `ArmorStand.canUseSlot` 在发射器目标里的形状：六个人形 / 手槽可用，
+/// `DisabledSlots` 锁住的槽与 BODY / SADDLE 是 `None`。
+///
+/// The dispenser target shape of `ArmorStand.canUseSlot`: six humanoid / hand
+/// slots are usable; locked slots and BODY / SADDLE are `None`.
+fn armour_stand_equip_target(
+    public: &mc_bamboo_blocks::entity::EntityPublic,
+    mob: &mc_bamboo_blocks::entity::mob::MobPublic,
+) -> EquipTarget {
+    use mc_bamboo_protocol::packet::play::EquipmentSlot;
+    // `equippable.slot` 注册表顺序 → (EquipmentSlot, `isDisabled` 用的 ordinal, 是否手槽)。
+    // `equippable.slot` registry order → (EquipmentSlot, ordinal for `isDisabled`, is hand).
+    const SLOTS: [(EquipmentSlot, i32, bool); 8] = [
+        (EquipmentSlot::MainHand, 0, true),
+        (EquipmentSlot::Feet, 2, false),
+        (EquipmentSlot::Legs, 3, false),
+        (EquipmentSlot::Chest, 4, false),
+        (EquipmentSlot::Head, 5, false),
+        (EquipmentSlot::OffHand, 1, true),
+        (EquipmentSlot::Body, 6, false),
+        (EquipmentSlot::Saddle, 7, false),
+    ];
+    let stand = mob.armor_stand;
+    let mut equipment: [Option<ItemStack>; 8] = std::array::from_fn(|_| None);
+    for (index, &(slot, ordinal, is_hand)) in SLOTS.iter().enumerate() {
+        if matches!(slot, EquipmentSlot::Body | EquipmentSlot::Saddle)
+            || stand.is_disabled(ordinal, is_hand)
+        {
+            continue;
+        }
+        equipment[index] = Some(
+            mob.equipment
+                .iter()
+                .find(|(candidate, _)| *candidate == slot)
+                .map(|(_, stack)| stack.clone())
+                .unwrap_or_else(ItemStack::empty),
+        );
+    }
+    let (width, height) = public.kind.dimensions();
+    let half = f64::from(width) / 2.0;
+    EquipTarget {
+        entity_id: public.uid,
+        bounds: Aabb::new(
+            public.position.x - half,
+            public.position.y,
+            public.position.z - half,
+            public.position.x + half,
+            public.position.y + f64::from(height),
+            public.position.z + half,
+        ),
+        spectator: false,
+        entity_type: mc_bamboo_blocks::entity::mob::MobType::ArmorStand.entity_type(),
+        baby: false,
+        equipment,
+    }
 }
 
 /// 一名玩家能被发射器看到的装备。身体和鞍是 `None`。

@@ -20,6 +20,7 @@
 //! Creative mode restores the count in the game layer after the action. When a player is installed, `hurtAndBreak` and `shrink` run where vanilla runs them.
 //! Sounds, drops and game events are still omitted. Bone meal particles are sent to the player.
 
+mod armor_stand;
 mod bone_meal;
 pub(crate) use bone_meal::{grow_crop, grow_water_plant};
 mod debug_stick;
@@ -57,6 +58,9 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         ItemKind::BoneMeal => bone_meal::use_on(world, ctx),
         _ if ctx.item == items::FIREWORK_ROCKET => firework::use_on(world, ctx),
         _ if ctx.item == items::LEAD => lead::use_on(world, ctx),
+        // `ArmorStandItem.useOn`：位置取整、朝向取整到 45°，应用物品上的实体数据。
+        // `ArmorStandItem.useOn`: snapped position, 45° facing and the item's entity data.
+        _ if ctx.item == items::ARMOR_STAND => armor_stand::use_on(world, ctx),
         _ if matches!(
             ctx.item,
             items::PAINTING | items::ITEM_FRAME | items::GLOW_ITEM_FRAME

@@ -3628,6 +3628,31 @@ public final class BlockOracle {
             return cases;
         }
 
+        /**
+         * 发射器放置盔甲架的固定题：`DispenseItemBehavior$1` 在正前方生成实体、
+         * 应用 entity_data、扣一个，并取一次 level.random。比较余量、事件、世界随机源。
+         *
+         * Fixed armour-stand dispenser fixtures: `DispenseItemBehavior$1` spawns a stand
+         * in front, applies entity data, shrinks one and draws one level.random value.
+         * Compare the remaining inventory, events and the level random.
+         */
+        List<Case> armorStandCases(int base) {
+            List<Case> cases = new ArrayList<>();
+            BlockPos pos = new BlockPos(0, 64, 0);
+            for (Direction direction : List.of(Direction.EAST, Direction.NORTH, Direction.UP)) {
+                Case c = new Case(base + cases.size(), Kind.TICK,
+                        new Subject(Blocks.DISPENSER, Items.ARMOR_STAND), height);
+                c.put(pos, Blocks.DISPENSER.defaultBlockState()
+                        .setValue(DispenserBlock.FACING, direction)
+                        .setValue(DispenserBlock.TRIGGERED, true));
+                c.putContents(pos, new ItemStack(Items.ARMOR_STAND, 3));
+                c.target = pos;
+                c.actor = new Vec3(4.5, 70.0, 4.5);
+                cases.add(c);
+            }
+            return cases;
+        }
+
         /** 爆炸炸掉虫蚀方块的固定题：直接跑 ServerExplosion，不走 FakeLevel.explode（那条路 skip）。 */
         private List<Case> explodeCases(int base) {
             List<Case> cases = new ArrayList<>();
@@ -4872,6 +4897,7 @@ public final class BlockOracle {
         private static final int DISPENSER_ARROW_CASE_BASE = 4_000_000;
         private static final int EXPLODE_CASE_BASE = 5_000_000;
         private static final int GOLEM_CASE_BASE = 6_000_000;
+        private static final int ARMOR_STAND_CASE_BASE = 7_000_000;
 
         void run() throws IOException {
             long start = System.nanoTime();
@@ -4879,6 +4905,7 @@ public final class BlockOracle {
             List<Case> hopperCases = generator.hopperCases(HOPPER_CASE_BASE);
             List<Case> crafterCases = generator.crafterCases(CRAFTER_CASE_BASE);
             List<Case> dispenserArrowCases = generator.dispenserArrowCases(DISPENSER_ARROW_CASE_BASE);
+            List<Case> armorStandCases = generator.armorStandCases(ARMOR_STAND_CASE_BASE);
             List<Case> explodeCases = generator.explodeCases(EXPLODE_CASE_BASE);
             List<Case> golemCases = generator.golemCases(GOLEM_CASE_BASE);
             boolean single = options.single >= 0;
@@ -4895,7 +4922,10 @@ public final class BlockOracle {
                     && options.single < EXPLODE_CASE_BASE
                     : options.only == null || Subjects.matches(options.only, Blocks.DISPENSER);
             boolean golems = single ? options.single >= GOLEM_CASE_BASE
+                    && options.single < ARMOR_STAND_CASE_BASE
                     : options.only == null || Subjects.matches(options.only, Blocks.CARVED_PUMPKIN);
+            boolean armorStands = single ? options.single >= ARMOR_STAND_CASE_BASE
+                    : options.only == null || Subjects.matches(options.only, Blocks.DISPENSER);
             List<MineSpec> mines = single ? List.of() : mineSpecs();
             writeHeader(single ? 1 : options.cases
                     + (pistons ? pistonCases.size() : 0)
@@ -4904,6 +4934,7 @@ public final class BlockOracle {
                     + (dispenserArrows ? dispenserArrowCases.size() : 0)
                     + (explodes ? explodeCases.size() : 0)
                     + (golems ? golemCases.size() : 0)
+                    + (armorStands ? armorStandCases.size() : 0)
                     + mines.size());            int first = Math.max(options.single, 0);
             int end = single && options.single < PISTON_CASE_BASE ? options.single + 1 : options.cases;
             for (int id = 0; id < end; id++) {
@@ -4922,6 +4953,13 @@ public final class BlockOracle {
             }
             if (golems) {
                 for (Case c : golemCases) {
+                    if (!single || c.id == options.single) {
+                        runBuilt(c, statsOf(c.subject));
+                    }
+                }
+            }
+            if (armorStands) {
+                for (Case c : armorStandCases) {
                     if (!single || c.id == options.single) {
                         runBuilt(c, statsOf(c.subject));
                     }

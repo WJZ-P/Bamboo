@@ -44,6 +44,17 @@ pub struct MobInteractRequest {
     ///
     /// `Level.getDifficulty().getId()`: the strength amplifier of a cure.
     pub difficulty: i32,
+    /// `Entity.interact` 的点击位置（`INTERACT_AT` 的目标点）；盔甲架按高度选槽位。
+    /// 没有点击位置时按缺省值处理，别的生物不读。
+    ///
+    /// The click position of `Entity.interact` (`INTERACT_AT` target); the armour
+    /// stand uses its height to pick a slot. Absent for interactions that carry
+    /// no target point, and unused by other mobs.
+    pub hit_pos: Option<Vec3>,
+    /// `Player.isSpectator()`：`ArmorStand.interact` 对旁观者直接返回 `SUCCESS`。
+    ///
+    /// `Player.isSpectator()`: `ArmorStand.interact` returns `SUCCESS` at once.
+    pub spectator: bool,
 }
 
 /// 交互的后果，交给调用方改物品栏和发挥手动画。
@@ -193,6 +204,11 @@ pub fn interact(
     thundering: bool,
     level_next_float: &mut dyn FnMut() -> f32,
 ) -> MobInteraction {
+    // `ArmorStand.interact`：装备交互不走 `mobInteract`。
+    // `ArmorStand.interact`: equipment interaction is not a `mobInteract`.
+    if mob.mob_type == MobType::ArmorStand {
+        return super::armor_stand::interact(mob, req);
+    }
     // `Mob.interact` / `Entity.interact`：剪刀卸装备先于任何 `mobInteract`。
     // `Wolf.canShearEquipment` 只认主人，和猪剪鞍走同一个 `attemptToShearEquipment`。
     // `Mob.interact` runs `attemptToShearEquipment` before `mobInteract`; the wolf
@@ -758,6 +774,8 @@ mod tests {
             player_height: 1.8,
             sneaking: false,
             difficulty: 2,
+            hit_pos: None,
+            spectator: false,
         }
     }
 

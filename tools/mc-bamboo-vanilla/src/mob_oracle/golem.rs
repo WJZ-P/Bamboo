@@ -341,6 +341,8 @@ fn interact(world: &mut World<'_>, id: i32, player: i32, held: ItemStack, wrong_
         player_height: 1.8,
         sneaking: false,
         difficulty: 2,
+        hit_pos: None,
+        spectator: false,
     };
     world.interact_mob(id, &request);
 }

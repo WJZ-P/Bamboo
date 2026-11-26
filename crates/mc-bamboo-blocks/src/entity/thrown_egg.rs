@@ -685,6 +685,7 @@ fn damage_source(me: &Entity, world: &World<'_>) -> DamageSource {
         position: Some(me.position),
         projectile_motion: Some(me.delta),
         attacker_uuid: egg.owner_uuid,
+        attacker_may_build: true,
         scale_when_non_player: owner_mob
             .as_ref()
             .is_some_and(|owner| matches!(owner.kind, KindPublic::Mob(_))),

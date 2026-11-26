@@ -361,6 +361,7 @@ pub(crate) fn hit_entity(me: &Entity, world: &mut World<'_>, hit: SpitHit) {
         position: Some(me.position),
         projectile_motion: Some(me.delta),
         attacker_uuid: Some(owner_mob.uuid),
+        attacker_may_build: true,
         scale_when_non_player: true,
         ..DamageSource::environment(DamageKind::Spit)
     };

@@ -279,66 +279,72 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if let Some(pos) = mob.villager.sleeping_pos {
         put(&mut out, "sleeping_pos", block_pos_tag(pos));
     }
-    // ---- Mob ----
-    // `SulfurCube.canPickUpLoot()` = `!hasBodyItem()`，存档写的是覆写后的值。
-    let can_pick_up_loot = if mob.mob_type == MobType::SulfurCube {
-        !super::sulfur_cube::has_body_item(mob)
-    } else {
-        mob.can_pick_up_loot
-    };
-    put(
-        &mut out,
-        "CanPickUpLoot",
-        Tag::Byte(i8::from(can_pick_up_loot)),
-    );
-    put(
-        &mut out,
-        "PersistenceRequired",
-        Tag::Byte(i8::from(mob.persistence_required)),
-    );
-    // `Mob`：掉落几率不是 `DropChances.DEFAULT` 才写，等于缺省值的槽省略。
-    if !mob.equipment.default_drop_chances() {
-        put(&mut out, "drop_chances", mob.equipment.drop_chances_tag());
-    }
-    // `Leashable.writeLeashData`：`leash` 键。
-    if let Some(data) = &mob.leash {
-        put(&mut out, "leash", leash_tag(&data.attachment));
-    }
-    if let Some((pos, radius)) = mob.home {
-        put(&mut out, "home_radius", Tag::Int(radius));
-        put(&mut out, "home_pos", block_pos_tag(pos));
-    }
-    put(&mut out, "LeftHanded", Tag::Byte(i8::from(mob.left_handed)));
-    if mob.loot_table_seed != 0 {
+    // 盔甲架不是 `Mob` / `AgeableMob`：官方父类链只到 `LivingEntity`，
+    // 这些 Mob 层和年龄 / 求爱键一概不写。
+    // The armour stand is not a `Mob` / `AgeableMob`: its parent chain stops at
+    // `LivingEntity`, so none of these Mob / age / love keys are written.
+    if mob.mob_type != MobType::ArmorStand {
+        // ---- Mob ----
+        // `SulfurCube.canPickUpLoot()` = `!hasBodyItem()`，存档写的是覆写后的值。
+        let can_pick_up_loot = if mob.mob_type == MobType::SulfurCube {
+            !super::sulfur_cube::has_body_item(mob)
+        } else {
+            mob.can_pick_up_loot
+        };
         put(
             &mut out,
-            "DeathLootTableSeed",
-            Tag::Long(mob.loot_table_seed),
+            "CanPickUpLoot",
+            Tag::Byte(i8::from(can_pick_up_loot)),
         );
-    }
-    if mob.no_ai {
-        put(&mut out, "NoAI", Tag::Byte(1));
-    }
-    // ---- AgeableMob / Animal / Cow ----
-    if mob.mob_type.is_ageable() && mob.mob_type.can_be_a_baby() {
-        put(&mut out, "Age", Tag::Int(mob.age));
-        put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
-        put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
-    }
-    // 史莱姆和鱿鱼一支是 `AgeableMob` 但不是 `Animal`，没有求爱的两个键。
-    // Slimes and the squid branch are `AgeableMob`s but not `Animal`s, so they
-    // lack the two love keys.
-    // `ZombieNautilus` 虽然是 `Monster`，但它继承的 `Animal.addAdditionalSaveData`
-    // 仍写 `InLove`；Bamboo 的 `is_animal()` 只对非怪物为真，这里显式补上。
-    // `ZombieNautilus` is a `Monster`, yet its inherited
-    // `Animal.addAdditionalSaveData` still writes `InLove`; `is_animal()` is
-    // false for monsters, so include it explicitly here.
-    if (mob.mob_type.is_animal() || mob.mob_type == MobType::ZombieNautilus)
-        && mob.mob_type != MobType::Slime
-    {
-        put(&mut out, "InLove", Tag::Int(mob.in_love));
-        if let Some(uuid) = &mob.love_cause {
-            put(&mut out, "LoveCause", uuid_tag(uuid));
+        put(
+            &mut out,
+            "PersistenceRequired",
+            Tag::Byte(i8::from(mob.persistence_required)),
+        );
+        // `Mob`：掉落几率不是 `DropChances.DEFAULT` 才写，等于缺省值的槽省略。
+        if !mob.equipment.default_drop_chances() {
+            put(&mut out, "drop_chances", mob.equipment.drop_chances_tag());
+        }
+        // `Leashable.writeLeashData`：`leash` 键。
+        if let Some(data) = &mob.leash {
+            put(&mut out, "leash", leash_tag(&data.attachment));
+        }
+        if let Some((pos, radius)) = mob.home {
+            put(&mut out, "home_radius", Tag::Int(radius));
+            put(&mut out, "home_pos", block_pos_tag(pos));
+        }
+        put(&mut out, "LeftHanded", Tag::Byte(i8::from(mob.left_handed)));
+        if mob.loot_table_seed != 0 {
+            put(
+                &mut out,
+                "DeathLootTableSeed",
+                Tag::Long(mob.loot_table_seed),
+            );
+        }
+        if mob.no_ai {
+            put(&mut out, "NoAI", Tag::Byte(1));
+        }
+        // ---- AgeableMob / Animal / Cow ----
+        if mob.mob_type.is_ageable() && mob.mob_type.can_be_a_baby() {
+            put(&mut out, "Age", Tag::Int(mob.age));
+            put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
+            put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
+        }
+        // 史莱姆和鱿鱼一支是 `AgeableMob` 但不是 `Animal`，没有求爱的两个键。
+        // Slimes and the squid branch are `AgeableMob`s but not `Animal`s, so they
+        // lack the two love keys.
+        // `ZombieNautilus` 虽然是 `Monster`，但它继承的 `Animal.addAdditionalSaveData`
+        // 仍写 `InLove`；Bamboo 的 `is_animal()` 只对非怪物为真，这里显式补上。
+        // `ZombieNautilus` is a `Monster`, yet its inherited
+        // `Animal.addAdditionalSaveData` still writes `InLove`; `is_animal()` is
+        // false for monsters, so include it explicitly here.
+        if (mob.mob_type.is_animal() || mob.mob_type == MobType::ZombieNautilus)
+            && mob.mob_type != MobType::Slime
+        {
+            put(&mut out, "InLove", Tag::Int(mob.in_love));
+            if let Some(uuid) = &mob.love_cause {
+                put(&mut out, "LoveCause", uuid_tag(uuid));
+            }
         }
     }
     // ---- AbstractCubeMob ----
@@ -718,6 +724,11 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             );
         }
         _ => {}
+    }
+    if mob.mob_type == MobType::ArmorStand {
+        // `ArmorStand.addAdditionalSaveData`：六个布尔、`DisabledSlots` 与 `Pose`。
+        // `ArmorStand.addAdditionalSaveData`: the six booleans, `DisabledSlots` and `Pose`.
+        mob.armor_stand.write_nbt(mob, &mut out);
     }
     for (key, value) in &mob.passthrough {
         out.retain(|(existing, _)| existing != key);
@@ -1210,6 +1221,15 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Enderman {
             super::enderman::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::ArmorStand {
+            // `ArmorStand.readAdditionalSaveData`：读专属键，`NoAI` 恒真，并按标志恢复尺寸。
+            // `ArmorStand.readAdditionalSaveData`: the keys, no AI, and the flag-driven size.
+            mob.armor_stand.read_nbt(tag);
+            mob.no_ai = true;
+            let (width, height, eye) = mob.armor_stand.dimensions();
+            me.dimensions = (width, height);
+            mob.eye_height = eye;
         }
         mob.passthrough = match tag {
             Tag::Compound(entries) => entries
