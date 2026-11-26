@@ -16,7 +16,10 @@ use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{blocks, tags::fluid_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
-use crate::{shape::Aabb, state::DRAG};
+use crate::{
+    shape::{Aabb, CollisionContext},
+    state::DRAG,
+};
 
 use super::{
     Entity, EntityPublic, EntityUid, KindPublic,
@@ -432,7 +435,7 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     // 官方 `Entity.baseTick` 的岩浆 / 火：每刻调一次 `hurtServer`
     // （岩浆 4.0、火 1.0），伤害累计到阈值就破坏并掉物品。
     let env_amount = environment_damage(me, view);
-    tick_bubble_column(&mut boat, me);
+    tick_bubble_column(&mut boat, me, ctx);
 
     for index in 0..2 {
         let paddling = if index == 0 {
@@ -582,12 +585,8 @@ fn get_ground_friction(me: &Entity, view: &dyn BlockView) -> f32 {
     let (x0, x1) = (mth::floor(thin.min_x) - 1, mth::ceil(thin.max_x) + 1);
     let (y0, y1) = (mth::floor(thin.min_y) - 1, mth::ceil(thin.max_y) + 1);
     let (z0, z1) = (mth::floor(thin.min_z) - 1, mth::ceil(thin.max_z) + 1);
-    // 碰撞形状真正与薄片相交的格子（`Shapes.joinIsNotEmpty(..., AND)`）。
-    let colliding: Vec<BlockPos> = view
-        .block_collisions(thin, me.collision_context())
-        .into_iter()
-        .map(|(pos, _)| pos)
-        .collect();
+    // `state.getCollisionShape(level, pos)` 走空上下文。
+    let context = CollisionContext::Empty;
     let mut sum = 0.0f32;
     let mut count = 0i32;
     for x in x0..x1 {
@@ -605,11 +604,25 @@ fn get_ground_friction(me: &Entity, view: &dyn BlockView) -> f32 {
                     continue;
                 }
                 let pos = BlockPos::new(x, y, z);
-                if !colliding.contains(&pos) {
-                    continue;
-                }
                 let state = view.block_state(pos);
                 if state.is(blocks::LILY_PAD) {
+                    continue;
+                }
+                // `Shapes.joinIsNotEmpty(state.getCollisionShape(...).move(pos),
+                // shape, AND)`：把这一格的碰撞形状平移到世界坐标后与薄片求交。
+                let boxes = crate::shape::block_collision_boxes(
+                    state,
+                    pos,
+                    context,
+                    view.moving_piston_shape(pos).as_deref(),
+                    view.shulker_box_shape(pos),
+                );
+                let meets = boxes.iter().any(|bounds| {
+                    bounds
+                        .moved(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z))
+                        .intersects(thin)
+                });
+                if !meets {
                     continue;
                 }
                 sum += friction(state);
@@ -716,7 +729,7 @@ fn detect_bubble_column(boat: &mut Boat, me: &Entity, view: &dyn BlockView) {
 }
 
 /// `tickBubbleColumn`：气泡时间到点后施加向上 / 向下的气泡冲量。
-fn tick_bubble_column(boat: &mut Boat, me: &mut Entity) {
+fn tick_bubble_column(boat: &mut Boat, me: &mut Entity, ctx: &mut dyn EntityCtx) {
     if !boat.is_above_bubble_column {
         boat.bubble_time = 0;
     }
@@ -725,11 +738,25 @@ fn tick_bubble_column(boat: &mut Boat, me: &mut Entity) {
         let elapsed = BUBBLE_TIME - boat.bubble_time - 1;
         if elapsed > 0 && boat.bubble_time == 0 {
             boat.bubble_time = 0;
-            // down 分支还要 `ejectPassengers()` 和实体事件 71，否则 72；骑乘层接入。
-            handle_bubble_column_effect(me, boat.bubble_column_direction_is_down);
+            let down = boat.bubble_column_direction_is_down;
+            if down {
+                // `ejectPassengers()`：清乘客名单，把被甩的乘客交给游戏层。
+                let ejected = std::mem::take(&mut boat.passengers);
+                ctx.emit(Command::BoatBubbleEvent { event: 71, ejected }, me);
+            } else {
+                ctx.emit(
+                    Command::BoatBubbleEvent {
+                        event: 72,
+                        ejected: Vec::new(),
+                    },
+                    me,
+                );
+            }
+            handle_bubble_column_effect(me, down);
         }
+        // 字节码只在 `bubbleTime > 0` 这一刻把 `isAboveBubbleColumn` 置回 false。
+        boat.is_above_bubble_column = false;
     }
-    boat.is_above_bubble_column = false;
 }
 
 /// `handleBubbleColumnEffect`。
@@ -837,18 +864,22 @@ pub fn clamp_passenger_rotation(passenger: &mut Entity, vehicle: &EntityPublic) 
         vehicle.yaw
     };
     if passenger.kind.mob().is_some() {
+        // `AbstractBoat.clampRotation` 的 Mob 分支：`setYRot(bodyYRot)` 后
+        // `Mob.clampHeadRotationToBody()`（字节码 1831，limit = getMaxHeadYRot() = 75）。
         passenger.y_rot = body_y_rot;
         if let Some(mob) = passenger.kind.mob_mut() {
             mob.y_body_rot = body_y_rot;
-            // `Mob.clampHeadRotationToBody`。
-            let delta = mth::wrap_degrees(mob.y_body_rot - mob.y_head_rot);
-            let clamped = mth::clamp_f32(delta, -75.0, 75.0);
-            mob.y_head_rot += delta - clamped;
+            let limit = 75.0_f32;
+            let head = mob.y_head_rot;
+            let delta = mth::wrap_degrees(mob.y_body_rot - head);
+            let clamped = mth::clamp_f32(mth::wrap_degrees(mob.y_body_rot - head), -limit, limit);
+            mob.y_head_rot = head + delta - clamped;
         }
     } else {
+        // `AbstractBoat.clampRotation` 非 Mob 分支：`clamp(diff, -105, 105)`。
         let diff = mth::wrap_degrees(passenger.y_rot - body_y_rot);
         let clamped = mth::clamp_f32(diff, -105.0, 105.0);
-        passenger.y_rot += clamped - diff;
+        passenger.y_rot = passenger.y_rot + clamped - diff;
     }
 }
 
@@ -865,6 +896,7 @@ fn first_passenger_is_player(boat: &Boat) -> bool {
 /// ticks deal 1.0.
 fn environment_damage(me: &Entity, view: &dyn BlockView) -> f32 {
     let bb = me.bounding_box();
+    let mut in_lava = false;
     for x in mth::floor(bb.min_x)..mth::ceil(bb.max_x) {
         for y in mth::floor(bb.min_y)..mth::ceil(bb.max_y) {
             for z in mth::floor(bb.min_z)..mth::ceil(bb.max_z) {
@@ -872,16 +904,21 @@ fn environment_damage(me: &Entity, view: &dyn BlockView) -> f32 {
                     .fluid_state(BlockPos::new(x, y, z))
                     .is_tagged(fluid_tags::LAVA)
                 {
-                    return 4.0;
+                    in_lava = true;
                 }
             }
         }
     }
-    if me.remaining_fire_ticks > 0 {
-        1.0
-    } else {
-        0.0
+    // `Entity.lavaHurt()`：`hurtServer(damageSources.lava(), 4.0F)`，每刻都来。
+    if in_lava {
+        return 4.0;
     }
+    // `Entity.baseTick`：`remainingFireTicks % 20 == 0 && !isInLava()` 时
+    // `hurtServer(damageSources.onFire(), 1.0F)`；其余刻只递减火刻数。
+    if me.remaining_fire_ticks > 0 && me.remaining_fire_ticks % 20 == 0 {
+        return 1.0;
+    }
+    0.0
 }
 
 /// `VehicleEntity.hurtServer` 的环境伤害路径：累计伤害、翻转方向，破坏时丢弃实体

@@ -5369,7 +5369,8 @@ mod tests {
                 | Effect::PlayerShoulder { .. }
                 | Effect::Particles { .. }
                 | Effect::VibrationParticle { .. }
-                | Effect::Firework { .. } => None,
+                | Effect::Firework { .. }
+                | Effect::BoatBubbleEvent { .. } => None,
             })
             .collect()
     }

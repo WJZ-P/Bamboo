@@ -477,6 +477,31 @@ pub(crate) fn on_player_action(
 pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Effect]) {
     for effect in effects {
         match *effect {
+            Effect::BoatBubbleEvent {
+                entity,
+                event,
+                ref ejected,
+            } => {
+                // `broadcastEntityEvent(boat, 71/72)`：发给在线玩家（跟踪者过滤
+                // 由链路层处理），再把 down 气泡柱甩下来的乘客卸掉。
+                let packet = mc_bamboo_protocol::packet::play::EntityEvent {
+                    entity_id: entity,
+                    event,
+                };
+                let viewers: Vec<PlayerId> = region.players.keys().copied().collect();
+                for id in viewers {
+                    region.links.send(id, &packet);
+                }
+                for &uid in ejected {
+                    if uid < mc_bamboo_blocks::entity::FIRST_ENTITY_ID {
+                        region.entities.enqueue_ejected_player(uid);
+                    } else {
+                        region.entities.with_mut(uid, |rider| {
+                            rider.vehicle = None;
+                        });
+                    }
+                }
+            }
             Effect::PlayerShoulder { player, ref tag } => {
                 // `ShoulderRidingEntity.setEntityOnShoulder`：把鹦鹉 NBT 存进玩家肩膀。
                 let id = crate::inbound::PlayerId(player);

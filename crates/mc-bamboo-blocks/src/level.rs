@@ -2680,6 +2680,15 @@ pub fn monster_prevents_rest_in<L: Level + ?Sized>(level: &L, pos: BlockPos) -> 
 /// The non-block results of one action, handed to the caller for delivery.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
+    /// `AbstractBoat.tickBubbleColumn`：给跟踪者广播实体事件，并甩下载具的乘客。
+    ///
+    /// `AbstractBoat.tickBubbleColumn`: broadcast an entity event and eject the
+    /// vehicle's passengers.
+    BoatBubbleEvent {
+        entity: i32,
+        event: u8,
+        ejected: Vec<i32>,
+    },
     /// `ShoulderRidingEntity.setEntityOnShoulder`：把整只鹦鹉的 NBT 存进玩家的
     /// 左 / 右肩膀槽，并把这只鹦鹉从世界移除。游戏层负责改玩家状态和实体表。
     ///
