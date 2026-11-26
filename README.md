@@ -1941,20 +1941,31 @@ Not an official Minecraft product. Not approved by or associated with Mojang or 
   `AbstractChestBoat` / `ChestBoat` / `ChestRaft`）按注册表实体类型建模，尺寸
   1.375×0.5625。船不是生物，伤害走 `VehicleEntity` 的同步数据（受伤时间、方向、
   伤害值），另有左右桨和气泡时间；运输船带 27 格物品栏和战利品表。存档按 `id`
-  名认船，运输船的 `Items` / `LootTable` / `LootTableSeed` 往返有单测。
-- **无人控制时的服务端物理**：`AbstractBoat.tick` 的服务端路径，
-  `getStatus` / `checkInWater` / `isUnderwater` / `getWaterLevelAbove` /
-  `getGroundFriction` / `floatBoat` / `tickBubbleColumn` 照官方字节码逐刻实现，
-  含气泡柱冲量、水流推动（复用现有流体 helper）、冰面摩擦和桨动画。控制者是玩家时
-  服务端清速度、位置由 `move_vehicle` 决定；协议里
-  `ServerboundPaddleBoatPacket`（包 id 35，左右桨两个 bool）已解码并有单测。
+  名认船，运输船的 `Items` / `LootTable` / `LootTableSeed` 和 `Passengers` 往返都有单测。
+- **能玩起来**：`BoatItem.use` 用 `ClipContext.Fluid.ANY` 射线放置（含 `noCollision`
+  校验、消耗物品）；右键上船（普通船两名 / 运输船一名）、潜行下船、动物被拉上船、
+  `clampRotation` 乘客朝向限制；`Boat.passengers` 接到骑乘层，玩家控制时
+  `move_vehicle` 照马校验；`ServerboundPaddleBoatPacket` 写进船的左右桨并同步。
+  船的 6 项 EntityData（受伤时间 / 方向 / 伤害 / 左右桨 / 气泡时间）按 index 8–13
+  逐刻 diff 同步。
+- **服务端物理**：`AbstractBoat.tick` 的服务端路径，`getStatus` / `checkInWater` /
+  `isUnderwater` / `getWaterLevelAbove` / `getGroundFriction`（逐格 ±1 扫描、跳外圈
+  角落、碰撞形状相交）/ `floatBoat` / `tickBubbleColumn` 照官方字节码实现，含气泡柱
+  冲量、水流推动（照 `Entity.updateFluidInteraction`）、冰面摩擦和桨动画。控制者是
+  玩家时服务端清速度、位置由 `move_vehicle` 决定。`floatBoat` 四个状态分支有单测，
+  并对 5 处生产常量做过改坏确认。
+- **受伤破坏**：玩家打船累计伤害（`damage > 40` 或创造模式破坏）、掉船物品与运输船
+  箱内物品、岩浆 / 火每刻伤害；官方船 `checkFallDamage` 只记 `fallDistance`（不受摔落
+  伤害），Bamboo 现状等价。
 
 **已知限制**：
 
-- 放置（`BoatItem.use`）、右键上船 / 下船 / 潜行下船、乘客位置与朝向限制、
-  动物被拉上船、`move_vehicle` 校验、玩家打船破坏掉落 / 创造移除 / 摔落与岩浆火伤害、
-  运输船菜单 / 漏斗 / 战利品生成、船的 EntityData 同步项均未接。
-- 逐刻 Java 对拍（静水漂浮下沉、冰面滑、水流、打破掉物、动物上船）与「至少 4 处
-  改坏确认」尚未建立。`getGroundFriction` 用 `block_collisions(薄片)` 近似官方的
-  逐格扫描，气泡柱方向 / `tickBubbleColumn` 的实体事件、`VehicleEntity.tick` 的乘客
-  位置也未按逐刻对拍校准；物理只经过编译、clippy 与单测，未与官方逐刻对拍。
+- 运输船的 27 格物品栏菜单（`interactWithContainerVehicle`）、漏斗抽取、战利品表
+  解包尚未接入；现有菜单系统基于方块位置，实体容器需要单独一套状态。
+- 逐刻 Java 对拍（静水漂浮下沉、冰面滑、水流、打破掉物、动物上船）尚未建立；官方
+  假世界夹具补船场景时要给 `FakeLevel` 补流体支持，船实体随机源从 `entitySeeds` 取。
+  物理目前只有单测与改坏确认，未与官方逐刻比对。
+- `BoatItem.use` 的 5 格 `CAN_BE_PICKED` 实体检查、实体之间 `push` 互推未建模；船
+  下船落点复用马科 `DismountHelper`（官方走 `getCollisionHorizontalEscapeVector`）；
+  `on_interact_entity` / `set_paddle` 未判 `outOfControlTicks < 60` 和控制者；玩家攻击
+  伤害固定按空手满充能 1.0 累计，未按武器 / 充能缩放。
