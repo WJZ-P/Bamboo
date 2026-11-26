@@ -2114,6 +2114,18 @@ pub enum DamageKind {
     /// message_id `mace_smash`, scaling `when_caused_by_living_non_player`
     /// (a player attack does not scale with difficulty).
     Mace,
+    /// 长矛刺击，`minecraft:spear`：带 `damage_type` 组件的长矛走
+    /// `PiercingWeapon.attack` / `KineticWeapon.damageEntities`。数据文件里
+    /// exhaustion 0.1、message_id `spear`、scaling
+    /// `when_caused_by_living_non_player`，且在 `#no_knockback` 里（击退由
+    /// `stabAttack` 的 `causeExtraKnockback` 显式给，不走受伤默认击退）。
+    ///
+    /// A spear stab, `minecraft:spear`, used by the spear's `damage_type`
+    /// component through `PiercingWeapon.attack` / `KineticWeapon.damageEntities`.
+    /// exhaustion 0.1, message_id `spear`, scaling
+    /// `when_caused_by_living_non_player`, and in `#no_knockback` (knockback is
+    /// the explicit `causeExtraKnockback` in `stabAttack`, not the default hurt knockback).
+    Spear,
 }
 
 impl DamageKind {
@@ -2156,6 +2168,7 @@ impl DamageKind {
             Self::BadRespawnPoint => "minecraft:bad_respawn_point",
             Self::SonicBoom => "minecraft:sonic_boom",
             Self::Mace => "minecraft:mace_smash",
+            Self::Spear => "minecraft:spear",
         }
     }
 
@@ -2219,6 +2232,7 @@ impl DamageKind {
             Self::BadRespawnPoint => "badRespawnPoint",
             Self::SonicBoom => "sonic_boom",
             Self::Mace => "mace_smash",
+            Self::Spear => "spear",
         }
     }
 
@@ -2263,6 +2277,7 @@ impl DamageKind {
             Self::BadRespawnPoint,
             Self::SonicBoom,
             Self::Mace,
+            Self::Spear,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -2381,7 +2396,8 @@ impl DamageKind {
             | Self::LightningBolt
             | Self::SulfurCubeHot
             | Self::BadRespawnPoint
-            | Self::Mace => TENTH,
+            | Self::Mace
+            | Self::Spear => TENTH,
             _ => 0.0,
         }
     }
@@ -2418,6 +2434,7 @@ impl DamageKind {
             self,
             Self::PlayerAttack
                 | Self::Mace
+                | Self::Spear
                 | Self::MobAttack
                 | Self::Arrow
                 | Self::Thrown

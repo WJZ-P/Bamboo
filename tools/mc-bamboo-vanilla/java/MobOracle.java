@@ -4704,6 +4704,41 @@ public final class MobOracle {
                             .attackSetup(20, false, 0.0, true).attack(1, 0);
                     scenes.add(s);
                 }
+                // 重锤下砸：2 / 5 / 10 格摔落（下砸加伤 + 摔落清零 + 竖直速度），
+                // 旁边两头牛吃范围击退，以及致密 III 的每格加成。
+                int mace = BuiltInRegistries.ITEM.getId(Items.MACE);
+                for (double fall : new double[] {2.0, 5.0, 10.0}) {
+                    Scene s = new Scene("player_attack_mace_fall" + (int) fall).ticks(6)
+                            .playerPackets().packets();
+                    ground(s, 4);
+                    s.player(0.5, 64.0, 0.5, Items.MACE);
+                    s.cow(2.5, 64.0, 0.5, 0.0F, 230L + (long) fall);
+                    s.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
+                    s.attackSetup(33, false, fall, false).attack(1, 0);
+                    scenes.add(s);
+                }
+                Scene aoe = new Scene("player_attack_mace_aoe").ticks(6)
+                        .playerPackets().packets();
+                ground(aoe, 4);
+                aoe.player(0.5, 64.0, 0.5, Items.MACE);
+                aoe.cow(2.5, 64.0, 0.5, 0.0F, 240L);
+                aoe.cow(3.5, 64.0, 0.5, 0.0F, 241L);
+                aoe.cow(2.5, 64.0, 2.5, 0.0F, 242L);
+                aoe.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
+                aoe.attackSetup(33, false, 5.0, false).attack(1, 0);
+                scenes.add(aoe);
+                // 低充能（ticker 0）压低基础伤害，让致密 III 决定牛死不死：没有
+                // 致密时摔落加伤 8 + 基础 1.2 不到 10 点，牛活着；有致密 III 时
+                // 再加 3 点、牛死掉。这样改坏确认才看得到差异。
+                Scene density = new Scene("player_attack_mace_density").ticks(6)
+                        .playerPackets().packets();
+                ground(density, 4);
+                density.player(0.5, 64.0, 0.5, Items.MACE);
+                density.cow(2.5, 64.0, 0.5, 0.0F, 243L);
+                density.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
+                density.attackEnchant("minecraft:density", 3)
+                        .attackSetup(0, false, 2.0, true).attack(1, 0);
+                scenes.add(density);
             }
             // ---- 1b：死亡、掉落、重生与回血 ----
             // keepInventory × immediateRespawn × 等级经验 × 消失诅咒。

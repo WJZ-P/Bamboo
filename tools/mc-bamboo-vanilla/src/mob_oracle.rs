@@ -4141,6 +4141,13 @@ impl Report {
             Some("sweep_effects") => scene
                 .attack_enchants
                 .retain(|(name, _)| name != "minecraft:fire_aspect"),
+            // 重锤三处改坏：下砸阈值（摔落降到 1.0 不再下砸）、致密（从武器上
+            // 剥掉）和范围击退（候选牛挪出 3.5 格）。
+            Some("mace_smash") => scene.attack_fall = 1.0,
+            Some("mace_density") => scene
+                .attack_enchants
+                .retain(|(name, _)| name != "minecraft:density"),
+            Some("mace_aoe") => scene.extra_cow_positions.clear(),
             _ => {}
         }
         let output = replay_player_hurt(&scene);
@@ -5036,6 +5043,7 @@ fn is_self_packet(bytes: &[u8]) -> bool {
             mc_bamboo_data::packets::play::clientbound::PLAYER_COMBAT_ENTER
                 | mc_bamboo_data::packets::play::clientbound::HURT_ANIMATION
                 | mc_bamboo_data::packets::play::clientbound::SET_HEALTH
+                | mc_bamboo_data::packets::play::clientbound::SET_ENTITY_MOTION
         )
     )
 }

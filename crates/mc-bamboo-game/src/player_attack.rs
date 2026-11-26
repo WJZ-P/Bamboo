@@ -28,7 +28,7 @@ use mc_bamboo_protocol::{
     codec::write_varint,
     components::{ComponentPatch, ComponentValue, defaults},
     item::ItemStack,
-    packet::play::{Animate, GameMode, LevelParticles, Randomization},
+    packet::play::{Animate, GameMode, LevelParticles, Randomization, SetEntityMotion},
 };
 
 use crate::{
@@ -271,8 +271,12 @@ const SMASH_FALL_THRESHOLD: f64 = 1.5;
 const SMASH_HEAVY_THRESHOLD: f64 = 5.0;
 /// `MaceItem.SMASH_ATTACK_KNOCKBACK_RADIUS`。
 const SMASH_KNOCKBACK_RADIUS: f64 = 3.5;
-/// `MaceItem.SMASH_ATTACK_KNOCKBACK_POWER` = 0.7。
-const SMASH_KNOCKBACK_POWER: f64 = 0.7;
+/// `MaceItem.SMASH_ATTACK_KNOCKBACK_POWER` = `0.7F`。字节码里的
+/// `0.699999988079071d` 是 float 0.7 宽化成的 double，不是 double 0.7。
+///
+/// `MaceItem.SMASH_ATTACK_KNOCKBACK_POWER` = `0.7F`. The bytecode's
+/// `0.699999988079071d` is the float 0.7 widened to double, not double 0.7.
+const SMASH_KNOCKBACK_POWER: f64 = 0.699_999_988_079_071;
 /// `MaceItem.hurtEnemy` 里 `setDeltaMovement(delta.with(Y, 0.009999999776482582))` 的
 /// 下砸竖直速度。
 ///
@@ -442,14 +446,15 @@ fn mace_smash_effects(world: &mut World<'_>, plan: &AttackPlan) {
     };
     // `ServerLevel.playSound(null, attacker.x/y/z, sound, attacker.getSoundSource(), 1, 1)`。
     push_sound(world, plan.position, name);
-    // `MaceItem.getKnockbackPower`：`(3.5 − dist) · 0.7 · (fall>5 ? 2 : 1) · (1 − 击退抗性)`。
+    // `MaceItem.getKnockbackPower`：`(3.5 − dist) · 0.7 · (fall>5 ? 2 : 1) · (1 − 击退抗性)`，
+    // 其中 `dist` 是候选到**主目标**的距离（`candidate − target`），乘数是攻击者的摔落。
     let heavy = if fall > SMASH_HEAVY_THRESHOLD {
         2.0
     } else {
         1.0
     };
     for candidate in &plan.mace_targets {
-        let vector = candidate.position.subtract(plan.position);
+        let vector = candidate.position.subtract(plan.target_position);
         let dist = vector.length();
         let power = (SMASH_KNOCKBACK_RADIUS - dist)
             * SMASH_KNOCKBACK_POWER
@@ -1241,12 +1246,19 @@ fn finish_hit(
         player.health_sync = player_hurt::HealthSync::of(player);
     }
     // `MaceItem.hurtEnemy` 的下砸竖直速度和 `postHurtEnemy` 的摔落清零：
-    // 命中之后把攻击者的竖直速度设成下砸冲量、摔落距离归零。
+    // 命中之后把攻击者的竖直速度设成下砸冲量、摔落距离归零，并像官方那样给
+    // 攻击者自己补一个 `set_entity_motion`（`ServerPlayer` 的 `connection.send`）。
     if plan.smash
         && let Some(player) = region.players.get_mut(&id)
     {
         player.motion.delta.y = SMASH_IMPULSE_Y;
         player.motion.fall_distance = 0.0;
+        let movement = player.motion.delta;
+        let packet = encode_frames(&SetEntityMotion {
+            entity_id: id.0,
+            movement,
+        });
+        region.links.send_frames(id, &packet);
     }
     player_exhaustion::add_in(region, id, ATTACK_EXHAUSTION);
     entity_sync::broadcast_swing(region, id, Hand::Main);
