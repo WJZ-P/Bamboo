@@ -27,6 +27,47 @@ use crate::{
     entity::{Entity, EntityRandom},
 };
 
+/// `mob-oracle` 的改坏确认开关，只由 `--break-self-test` 驱动，其它驱动不调用。
+/// 生产代码在对应路径读它，故意和官方分叉以证明对拍能抓到。
+///
+/// Break-test switches driven only by `mob-oracle`'s `--break-self-test`; no other
+/// driver sets them. Production code reads the relevant flag to diverge from vanilla
+/// on purpose, proving the oracle catches the regression.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum OracleTamper {
+    #[default]
+    None,
+    /// `maybeDespawn` 每刻多扣一次倒计时（消失过早）。
+    /// `maybeDespawn` decrements the counter twice per tick (despawns too soon).
+    DespawnTooFast,
+    /// `updateInvisibilityStatus` 不刷新共享隐身标志。
+    /// `updateInvisibilityStatus` never refreshes the shared invisibility flag.
+    NoInvisibilityRefresh,
+    /// `notifyTrade` 不累加交易项使用次数。
+    /// `notifyTrade` does not increment the offer's `uses`.
+    NoTradeUses,
+}
+
+thread_local! {
+    static ORACLE_TAMPER: std::cell::Cell<OracleTamper> =
+        const { std::cell::Cell::new(OracleTamper::None) };
+}
+
+/// 由 `mob-oracle` 按 `--break-self-test` 设置，其它驱动不调用。
+pub fn set_oracle_tamper(name: &str) {
+    let tamper = match name {
+        "wt_despawn" => OracleTamper::DespawnTooFast,
+        "wt_invisibility" => OracleTamper::NoInvisibilityRefresh,
+        "wt_trade" => OracleTamper::NoTradeUses,
+        _ => OracleTamper::None,
+    };
+    ORACLE_TAMPER.with(|cell| cell.set(tamper));
+}
+
+pub(crate) fn oracle_tamper() -> OracleTamper {
+    ORACLE_TAMPER.with(|cell| cell.get())
+}
+
 /// 刷新器生成流浪商人时设的 `despawnDelay`（`WanderingTraderSpawner.spawn`）。
 ///
 /// The `despawnDelay` set by `WanderingTraderSpawner.spawn`.
@@ -208,6 +249,9 @@ pub(in crate::entity::mob) fn goals(navigation: &mut Navigation) -> GoalSelector
 /// flag follows `hasEffect(INVISIBILITY)` in `baseTick`, one tick after the
 /// effect map changed.
 pub fn update_invisibility(mob: &mut Mob) {
+    if oracle_tamper() == OracleTamper::NoInvisibilityRefresh {
+        return;
+    }
     if !mob.wandering_trader.effects_dirty {
         return;
     }
@@ -220,7 +264,12 @@ pub fn update_invisibility(mob: &mut Mob) {
 /// `WanderingTrader.maybeDespawn()`, run once per tick at the end of `aiStep()`.
 pub fn maybe_despawn(me: &mut Entity, mob: &mut Mob) {
     if mob.wandering_trader.despawn_delay > 0 && !mob.villager.is_trading() {
-        mob.wandering_trader.despawn_delay -= 1;
+        let step = if oracle_tamper() == OracleTamper::DespawnTooFast {
+            2
+        } else {
+            1
+        };
+        mob.wandering_trader.despawn_delay -= step;
         if mob.wandering_trader.despawn_delay == 0 {
             me.discard();
         }
@@ -233,11 +282,12 @@ pub fn maybe_despawn(me: &mut Entity, mob: &mut Mob) {
 /// State update of `AbstractVillager.notifyTrade` for a wandering trader: increments
 /// the offer's `uses` and resets `ambientSoundTime` to `-getAmbientSoundInterval()`.
 pub fn notify_trade(mob: &mut Mob, offer_index: usize) {
-    if let Some(offer) = mob
-        .villager
-        .offers
-        .as_mut()
-        .and_then(|offers| offers.get_mut(offer_index))
+    if oracle_tamper() != OracleTamper::NoTradeUses
+        && let Some(offer) = mob
+            .villager
+            .offers
+            .as_mut()
+            .and_then(|offers| offers.get_mut(offer_index))
     {
         offer.uses += 1;
     }

@@ -24,7 +24,7 @@ use mc_bamboo_core::{BlockPos, Vec3};
 use serde::Deserialize;
 
 use super::{MobLevel, Report, ZombieFacts};
-use mc_bamboo_blocks::entity::mob::wandering_trader::Drink;
+use mc_bamboo_blocks::entity::mob::wandering_trader::{self, Drink};
 
 /// Java 一侧的刷新器场景。
 #[derive(Debug, Deserialize)]
@@ -438,6 +438,8 @@ fn add_invisibility(mob: &mut mc_bamboo_blocks::entity::mob::Mob) {
 impl Report {
     pub(super) fn replay_wandering_trader_scene(&mut self, case: &SceneCase) {
         self.cases += 1;
+        // 改坏确认走生产代码的 `set_oracle_tamper`，不是改对拍输出。
+        wandering_trader::set_oracle_tamper(self.break_test.as_deref().unwrap_or(""));
         let mut level = case.level();
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
@@ -539,20 +541,9 @@ impl Report {
                     .filter(|e| !e.removed)
                     .and_then(|e| entity_frame(&e)),
             };
-            // 改坏确认开关（后续接入生产代码改坏确认）。
-            let mut compared = ours;
-            match self.break_test.as_deref() {
-                Some("wt_despawn_delay") => compared.despawn += 1,
-                Some("wt_invisibility") => {
-                    if let Some(t) = compared.trader.as_mut() {
-                        t.effects.clear();
-                    }
-                }
-                _ => {}
-            }
-            if &compared != expected {
+            if &ours != expected {
                 self.mismatch(format!(
-                    "{} tick {tick}: official {expected:?} bamboo {compared:?}",
+                    "{} tick {tick}: official {expected:?} bamboo {ours:?}",
                     case.name
                 ));
             }
