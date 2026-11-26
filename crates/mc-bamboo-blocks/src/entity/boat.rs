@@ -465,17 +465,37 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     }
 
     // `AbstractBoat.tick` 第 9 步：`getBoundingBox().inflate(0.2, -0.01, 0.2)`
-    // 内的实体，没上船的走 `AbstractBoat.push(entity)`。`Entity.push` 两边都推，
-    // 船自己没乘客时（`!isVehicle()`）也被反推。
+    // 内的实体，满足 boarding 条件的 `startRiding(this)`，其余走
+    // `AbstractBoat.push(entity)`。`Entity.push` 两边都推，船自己没乘客时
+    // （`!isVehicle()`）也被反推。
     let my_box = me.bounding_box();
     let push_box = my_box.inflate(0.2, -0.01, 0.2);
     let self_pushable = boat.passengers.is_empty();
+    let max_passengers = if boat.is_chest() { 1 } else { 2 };
+    // 服务端且控制者不是玩家时才拉动物上船（`getControllingPassenger()`）。
+    let can_board = !first_passenger_is_player(&boat);
     let mut push_targets = Vec::new();
+    let mut board_targets = Vec::new();
     ctx.for_each_other_in(push_box, &mut |public| {
         if public.removed || boat.passengers.contains(&public.uid) {
             return;
         }
         let other_box = public.bounding_box();
+        // 官方 boarding 分支：`passengers.size() < max && !entity.isPassenger()
+        // && hasEnoughSpaceFor(entity) && entity instanceof LivingEntity
+        // && !entity.is(CANNOT_BE_PUSHED_ONTO_BOATS)`。
+        if can_board
+            && boat.passengers.len() + board_targets.len() < max_passengers
+            && public.vehicle.is_none()
+            && let KindPublic::Mob(mob) = &public.kind
+            && !mob
+                .mob_type
+                .in_entity_tag("minecraft:cannot_be_pushed_onto_boats")
+            && other_box.max_x - other_box.min_x < 1.375
+        {
+            board_targets.push(public.uid);
+            return;
+        }
         // `AbstractBoat.push` 的高度门控：对方是船时比它的 minY 与本船 maxY，
         // 不是船时比它的 minY 与本船 minY。
         let pushable = if matches!(public.kind, KindPublic::Boat(_)) {
@@ -488,6 +508,17 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         }
     });
     let from = me.position;
+    for uid in board_targets {
+        // `addPassenger`：生物乘客追加到名单末尾，名单随本地状态写回实体。
+        super::riding::add_passenger(&mut boat.passengers, uid, false);
+        ctx.emit(
+            Command::BoardBoat {
+                passenger: uid,
+                vehicle: me.id,
+            },
+            me,
+        );
+    }
     for uid in push_targets {
         ctx.emit(
             Command::PushMob {
@@ -1158,5 +1189,28 @@ mod tests {
         assert_eq!(me.delta.y, expected_y);
         assert_eq!(me.delta.z, -f64::from(0.9_f32));
         assert_eq!(boat.delta_rotation, 2.0 * 0.9_f32);
+    }
+
+    /// `AbstractBoat.tick` 第 9 步：船 AABB 里没骑东西、比船窄的动物被拉上船，
+    /// 船的乘客名单和动物的 `vehicle` 在同一刻一起更新。
+    #[test]
+    fn animals_in_the_boat_board_it() {
+        use crate::{BlockTicks, World, entity::EntityKind, testing::TestLevel};
+
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let boat = world.spawn_entity(Entity::boat(ids::OAK_BOAT, Vec3::new(0.5, 64.0, 0.5)));
+        let cow = world.spawn_entity(Entity::cow(Vec3::new(0.5, 64.0, 0.5)));
+        world.tick_entities_kept();
+        let passengers = world.entity(boat).and_then(|entity| match &entity.kind {
+            EntityKind::Boat(boat) => Some(boat.passengers.clone()),
+            _ => None,
+        });
+        assert_eq!(passengers, Some(vec![cow]));
+        assert_eq!(
+            world.entity(cow).and_then(|entity| entity.vehicle),
+            Some(boat)
+        );
     }
 }

@@ -19,7 +19,7 @@ use mc_bamboo_blocks::entity::{
     EntityKind, EntityUid, FIRST_ENTITY_ID, KindPublic, no_block_collision, sweep_movement,
 };
 use mc_bamboo_blocks::{CollisionContext, EntityContext, world::CollisionBlocks};
-use mc_bamboo_core::{Aabb, BlockPos, Hand, Vec3, mth};
+use mc_bamboo_core::{BlockPos, Hand, Vec3, mth};
 use mc_bamboo_data::registries::attribute;
 use mc_bamboo_protocol::packet::play::MoveVehicle;
 
@@ -821,106 +821,11 @@ fn passenger_offset(
     offset
 }
 
-/// `AbstractBoat.tick` 末尾的「拉动物上船」：船的 AABB `inflate(0.2, -0.01, 0.2)`
-/// 里没骑东西、比船窄、且船还有空位（普通船 2、运输船 1）也没有玩家控制者时，
-/// 让动物 `startRiding(boat)`。实体之间的 `push` 互推 Bamboo 没建模，跳过。
-///
-/// The tail of `AbstractBoat.tick`: animals inside the boat's inflated AABB
-/// board when the boat has room and no player controller.
-fn board_animals(region: &mut Region) {
-    let boats: Vec<(EntityUid, Aabb, usize, usize)> = region
-        .entities
-        .iter_public()
-        .filter_map(|public| {
-            let KindPublic::Boat(boat) = &public.kind else {
-                return None;
-            };
-            // `getControllingPassenger()` 是玩家时不拉动物上船。
-            if boat
-                .passengers
-                .first()
-                .is_some_and(|&uid| uid < FIRST_ENTITY_ID)
-            {
-                return None;
-            }
-            let bb = public.bounding_box();
-            let area = Aabb::new(
-                bb.min_x - 0.200_000_002_980_232_24,
-                bb.min_y + 0.009_999_999_776_482_582,
-                bb.min_z - 0.200_000_002_980_232_24,
-                bb.max_x + 0.200_000_002_980_232_24,
-                bb.max_y - 0.009_999_999_776_482_582,
-                bb.max_z + 0.200_000_002_980_232_24,
-            );
-            let max = if mc_bamboo_blocks::entity::boat::is_chest(boat.entity_type) {
-                1
-            } else {
-                2
-            };
-            Some((public.uid, area, max, boat.passengers.len()))
-        })
-        .collect();
-    let candidates: Vec<(EntityUid, Aabb, f64)> = region
-        .entities
-        .iter_public()
-        .filter_map(|public| {
-            let KindPublic::Mob(mob) = &public.kind else {
-                return None;
-            };
-            // `EntitySelector.pushableBy(this)` + `instanceof LivingEntity`
-            // + `!entity.is(CANNOT_BE_PUSHED_ONTO_BOATS)`；不再用 `is_animal()`。
-            if public.vehicle.is_some()
-                || mob
-                    .mob_type
-                    .in_entity_tag("minecraft:cannot_be_pushed_onto_boats")
-            {
-                return None;
-            }
-            let bb = public.bounding_box();
-            Some((public.uid, bb, bb.max_x - bb.min_x))
-        })
-        .collect();
-    let mut pairs: Vec<(EntityUid, EntityUid)> = Vec::new();
-    for (boat_uid, area, max, count) in &boats {
-        let mut taken = 0;
-        for (uid, bb, width) in &candidates {
-            if *count + taken >= *max {
-                break;
-            }
-            // 1.375 是船的注册宽度；`width < this.width` 才装得下。
-            if *width >= 1.375 || !area.intersects(*bb) {
-                continue;
-            }
-            if pairs.iter().any(|(_, used)| used == uid) {
-                continue;
-            }
-            pairs.push((*boat_uid, *uid));
-            taken += 1;
-        }
-    }
-    for (boat_uid, animal_uid) in pairs {
-        region.entities.with_mut(animal_uid, |entity| {
-            entity.vehicle = Some(boat_uid);
-        });
-        region.entities.with_mut(boat_uid, |entity| {
-            if let EntityKind::Boat(boat) = &mut entity.kind {
-                mc_bamboo_blocks::entity::riding::add_passenger(
-                    &mut boat.passengers,
-                    animal_uid,
-                    false,
-                );
-            }
-        });
-    }
-}
-
 /// 每刻一趟：要下车的下车，其余骑手的位置跟到载具上，最后记下这一刻末的载具位置。
 ///
 /// One pass per tick: riders that want off dismount, the rest follow their
 /// vehicle, and the vehicle position at the end of the tick is recorded.
 pub(crate) fn tick(region: &mut Region) {
-    // `AbstractBoat.tick` 末尾：把附近没骑东西的动物拉上还有空位的船。
-    board_animals(region);
     // 官方 `Entity.baseTick`：下车冷却每刻减一，不管有没有在骑。
     //
     // Vanilla `Entity.baseTick`: the dismount cooldown ticks down every tick,
