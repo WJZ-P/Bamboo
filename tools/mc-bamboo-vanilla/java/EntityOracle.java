@@ -195,6 +195,7 @@ public final class EntityOracle {
             cases += minecartSave(official, out);
             cases += minecartDetector(official, out);
             cases += minecartTnt(official, out);
+            cases += minecartFurnace(official, out);
             cases += boatStillWater(official, out);
             cases += boatIceSlide(official, out);
             cases += boatWaterCurrent(official, out);
@@ -1134,6 +1135,8 @@ public final class EntityOracle {
         int ticks = 16;
         long levelSeed = 1L;
         int saveAt = -1;
+        int fuel;
+        double pushX, pushZ;
         Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
     }
 
@@ -1271,6 +1274,23 @@ public final class EntityOracle {
         return playMinecart(official, out, spec);
     }
 
+    /** 动力矿车：燃料和推力让它沿轨道自己跑，逐刻燃料递减。 */
+    private static int minecartFurnace(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_furnace";
+        spec.type = EntityTypes.FURNACE_MINECART;
+        for (int z = -6; z <= 6; z++) {
+            spec.blocks.put(BlockPos.asLong(0, 64, z), rail(RailShape.NORTH_SOUTH));
+            spec.blocks.put(BlockPos.asLong(0, 63, z), Blocks.STONE.defaultBlockState());
+        }
+        spec.pz = 0.5;
+        spec.vz = 0.05;
+        spec.fuel = 100;
+        spec.pushZ = 0.5;
+        spec.ticks = 20;
+        return playMinecart(official, out, spec);
+    }
+
     /** 造一辆官方矿车、逐刻跑、把每刻的实体状态写成一题 case。 */
     private static int playMinecart(Official official, Writer out, MinecartSpec spec) throws Exception {
         FakeLevel level = FakeLevel.create(official, spec.levelSeed);
@@ -1295,6 +1315,10 @@ public final class EntityOracle {
         cart.setDeltaMovement(spec.vx, spec.vy, spec.vz);
         long seed = level.entitySeed(cart.getId());
         setRandom(cart, seed);
+        if (cart instanceof MinecartFurnace furnace) {
+            set(MinecartFurnace.class, furnace, "fuel", Integer.valueOf(spec.fuel));
+            furnace.push = new Vec3(spec.pushX, 0.0, spec.pushZ);
+        }
         scene.active.add(cart);
         level.fresh.clear();
         level.tracked = scene.active;
@@ -1316,6 +1340,7 @@ public final class EntityOracle {
         out.write(",\"px\":" + spec.px + ",\"py\":" + spec.py + ",\"pz\":" + spec.pz);
         out.write(",\"vx\":" + spec.vx + ",\"vy\":" + spec.vy + ",\"vz\":" + spec.vz);
         out.write(",\"saveAt\":" + spec.saveAt);
+        out.write(",\"fuel\":" + spec.fuel + ",\"pushX\":" + spec.pushX + ",\"pushZ\":" + spec.pushZ);
         out.write(",\"blocks\":");
         writeBlocks(out, spec.blocks);
         out.append(",\"steps\":");

@@ -1814,12 +1814,25 @@ pub(crate) fn on_interact_entity_at(
         target.kind,
         mc_bamboo_blocks::entity::KindPublic::ItemFrame(_)
     );
-    if target.removed
-        || !(matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
-            || is_knot
-            || is_boat
-            || is_item_frame)
-    {
+    let is_minecart = matches!(
+        target.kind,
+        mc_bamboo_blocks::entity::KindPublic::Minecart(_)
+    );
+    let minecart_kind = match &target.kind {
+        mc_bamboo_blocks::entity::KindPublic::Minecart(cart) => {
+            mc_bamboo_blocks::entity::minecart::MinecartKind::from_entity_type(cart.entity_type)
+        }
+        _ => None,
+    };
+    let target_position = target.position;
+    let target_removed = target.removed;
+    let target_is_mob = matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_));
+    let boat_is_chest = matches!(
+        &target.kind,
+        mc_bamboo_blocks::entity::KindPublic::Boat(boat)
+            if mc_bamboo_blocks::entity::boat::is_chest(boat.entity_type)
+    );
+    if target_removed || !(target_is_mob || is_knot || is_boat || is_item_frame || is_minecart) {
         return;
     }
     // 够距：官方 `ServerGamePacketListenerImpl.handleInteract` 用 `ENTITY_INTERACTION_RANGE` + 3.0 缓冲。
@@ -1827,7 +1840,7 @@ pub(crate) fn on_interact_entity_at(
         position,
         eye_height,
         entity_reach,
-        mc_bamboo_core::BlockPos::containing(target.position),
+        mc_bamboo_core::BlockPos::containing(target_position),
         3.0,
     ) {
         return;
@@ -1837,12 +1850,57 @@ pub(crate) fn on_interact_entity_at(
         Hand::Main => Hand::Off,
         Hand::Off => Hand::Main,
     };
+    if let Some(kind) = minecart_kind {
+        use mc_bamboo_blocks::entity::minecart::MinecartKind;
+        match kind {
+            // `MinecartFurnace.interact`：手上那一件是燃料就 `addFuel`，成功扣一个；
+            // 不管成没成，官方都返回 SUCCESS（挥手）。
+            // `MinecartFurnace.interact`: add fuel from the held hand, shrink on
+            // success, and always report SUCCESS (the swing).
+            MinecartKind::Furnace => {
+                let held = match hand {
+                    Hand::Main => main_held.clone(),
+                    Hand::Off => off_held.clone(),
+                };
+                let fuel_item = mc_bamboo_blocks::state::item_is_tagged(
+                    held.item,
+                    mc_bamboo_data::tags::item_tags::FURNACE_MINECART_FUEL,
+                );
+                let cart_position = target_position;
+                let mut added = false;
+                region.entities.with_mut(entity_id, |entity| {
+                    if let mc_bamboo_blocks::entity::EntityKind::Minecart(cart) = &mut entity.kind {
+                        added = cart.add_fuel(position, cart_position, fuel_item);
+                    }
+                });
+                if added {
+                    inventory::apply_item_exchange(
+                        region,
+                        id,
+                        hand,
+                        &mc_bamboo_blocks::ItemExchange::Shrink,
+                    );
+                }
+                swing(region, id, hand, InteractionResult::Success);
+                return;
+            }
+            // `Minecart.interact`：非潜行且车里没人时 `player.startRiding(this)`。
+            MinecartKind::Rideable => {
+                if !using_secondary_action {
+                    crate::riding::mount(region, id, entity_id);
+                    if crate::riding::passengers(region, entity_id).contains(&id.0) {
+                        swing(region, id, hand, InteractionResult::Success);
+                    }
+                }
+                return;
+            }
+            // 运输 / 漏斗矿车的菜单在容器步骤里接。
+            _ => {}
+        }
+        return;
+    }
     if is_boat {
-        let is_chest = matches!(
-            &target.kind,
-            mc_bamboo_blocks::entity::KindPublic::Boat(boat)
-                if mc_bamboo_blocks::entity::boat::is_chest(boat.entity_type)
-        );
+        let is_chest = boat_is_chest;
         // `AbstractBoat.interact`：`super.interact` 放行后，非潜行且
         // `outOfControlTicks < 60` 时 `player.startRiding(this)`。
         if !using_secondary_action {

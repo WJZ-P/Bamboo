@@ -170,6 +170,15 @@ struct Case {
     chest: Vec<[i32; 3]>,
     #[serde(default)]
     animals: Vec<[f64; 3]>,
+    /// 动力矿车场景的燃料与推力。
+    ///
+    /// Furnace-cart fuel and push.
+    #[serde(default)]
+    fuel: i32,
+    #[serde(default)]
+    push_x: f64,
+    #[serde(default)]
+    push_z: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1001,6 +1010,10 @@ impl Report {
         world.with_entity_mut(id, &mut |entity| {
             entity.delta = Vec3::new(case.vx, case.vy, vz);
             entity.random = JavaRandom::new(case.entity_seed);
+            if let EntityKind::Minecart(cart) = &mut entity.kind {
+                cart.fuel = case.fuel;
+                cart.push = Vec3::new(case.push_x, 0.0, case.push_z);
+            }
             if self.break_name.as_deref() == Some("minecart-onground") {
                 entity.on_ground = true;
             }

@@ -207,6 +207,22 @@ impl Minecart {
     pub const fn drop_item(&self) -> i32 {
         self.kind().item()
     }
+
+    /// `MinecartFurnace.addFuel`：燃料物品、未超上限时加 3600 tick，并把推力
+    /// 记成「矿车位置减玩家位置」的水平向量。
+    ///
+    /// `MinecartFurnace.addFuel`: with a valid fuel item and room left, add 3600
+    /// ticks and set the push to the horizontal vector from the player to the cart.
+    pub fn add_fuel(&mut self, from: Vec3, position: Vec3, fuel_item: bool) -> bool {
+        if !fuel_item || self.fuel + 3600 > 32000 {
+            return false;
+        }
+        self.fuel += 3600;
+        if self.fuel > 0 {
+            self.push = position.subtract(from).multiply(1.0, 0.0, 1.0);
+        }
+        true
+    }
 }
 
 /// 矿车公开的那一半，给同步和存档读。
@@ -242,6 +258,19 @@ impl MinecartPublic {
             has_fuel: cart.kind().is_furnace() && cart.fuel > 0,
         }
     }
+}
+
+/// `Entity.getPassengerAttachmentPoint` 的缺省值：矿车没有覆写（村民 / 流浪商人
+/// 走 `LOWERED_PASSENGER_ATTACHMENT` 零向量），玩家乘客落在车体高度上。
+///
+/// The default `Entity.getPassengerAttachmentPoint`: minecarts do not override it
+/// (villagers / wandering traders get the lowered zero vector), so a player
+/// passenger sits at the cart's height.
+pub fn passenger_attachment_point() -> Vec3 {
+    let height = mc_bamboo_data::entity_types::FACTS
+        .get(entity_type::MINECART as usize)
+        .map_or(0.7_f32, |facts| facts.height);
+    Vec3::new(0.0, f64::from(height), 0.0)
 }
 
 /// `OldMinecartBehavior` 的四个斜坡形状每刻加的速度；水里再乘 0.2。
@@ -365,17 +394,54 @@ fn max_speed(me: &Entity, cart: &Minecart) -> f64 {
     }
 }
 
-/// `AbstractMinecart.applyNaturalSlowdown`：y 清零，有乘客 0.997、无 0.96，水中再 0.95。
+/// `MinecartFurnace.calculateNewPushAlong`：把推力按当前速度方向重新投影，长度不变。
 ///
-/// `AbstractMinecart.applyNaturalSlowdown`: zero y, 0.997 with a passenger or
-/// 0.96 without, times 0.95 in water.
-fn apply_natural_slowdown(me: &Entity, cart: &Minecart, v: Vec3) -> Vec3 {
+/// `MinecartFurnace.calculateNewPushAlong`: reproject the push along the current
+/// velocity, keeping its length.
+fn calculate_new_push_along(push: Vec3, v: Vec3) -> Vec3 {
+    let push_horizontal = push.x * push.x + push.z * push.z;
+    let motion_horizontal = v.x * v.x + v.z * v.z;
+    if push_horizontal > 1.0e-4 && motion_horizontal > 0.001 {
+        let len_sqr = v.length_sqr();
+        if len_sqr != 0.0 {
+            let dot = push.x * v.x + push.y * v.y + push.z * v.z;
+            // `Vec3.projectedOn`：参数是速度，返回 `v * (push·v) / |v|²`。
+            // `Vec3.projectedOn`: the argument is the velocity; it returns
+            // `v * (push·v) / |v|²`.
+            let projected = v.scale(dot).scale(1.0 / len_sqr);
+            return projected.normalize().scale(push.length());
+        }
+    }
+    push
+}
+
+/// `AbstractMinecart.applyNaturalSlowdown`：动力矿车先按推力折算，再走通用的
+/// y 清零、有乘客 0.997 / 无 0.96、水中再 0.95。
+///
+/// `AbstractMinecart.applyNaturalSlowdown`: a furnace cart first folds in its
+/// push, then the generic zero-y slowdown (0.997 with a passenger, 0.96 without,
+/// times 0.95 in water).
+fn apply_natural_slowdown(me: &Entity, cart: &mut Minecart, v: Vec3) -> Vec3 {
+    let base = if cart.kind().is_furnace() {
+        if cart.push.length_sqr() > 1.0e-7 {
+            cart.push = calculate_new_push_along(cart.push, v);
+            let mut result = v.multiply(0.8, 0.0, 0.8).add(cart.push);
+            if me.in_water {
+                result = result.scale(0.1);
+            }
+            result
+        } else {
+            v.multiply(0.98, 0.0, 0.98)
+        }
+    } else {
+        v
+    };
     let factor = if cart.passengers.is_empty() {
         0.96
     } else {
         0.997
     };
-    let mut result = v.multiply(factor, 0.0, factor);
+    let mut result = base.multiply(factor, 0.0, factor);
     if me.in_water {
         result = result.scale(0.95);
     }
@@ -675,7 +741,36 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     me.set_requires_precise_position(me.horizontal_collision || me.vertical_collision);
     me.first_tick = false;
     me.kind = EntityKind::Minecart(cart);
+    tick_furnace(me);
     tick_tnt(me, ctx);
+}
+
+/// `MinecartFurnace.tick`：燃料递减，用完清空推力，冒烟粒子消耗一次实体随机数。
+///
+/// `MinecartFurnace.tick`: burn fuel, clear the push when empty, and draw one
+/// entity random value for the smoke particle.
+fn tick_furnace(me: &mut Entity) {
+    let is_furnace = matches!(&me.kind, EntityKind::Minecart(cart) if cart.kind().is_furnace());
+    if !is_furnace {
+        return;
+    }
+    let mut has_fuel = false;
+    if let EntityKind::Minecart(cart) = &mut me.kind {
+        if cart.fuel > 0 {
+            cart.fuel -= 1;
+        }
+        if cart.fuel <= 0 {
+            cart.push = Vec3::default();
+        }
+        has_fuel = cart.fuel > 0;
+    }
+    // 官方 `hasFuel && random.nextInt(4) == 0` 时冒烟；粒子不在范围里，
+    // 但实体随机数的这次取值要照取。
+    // Vanilla draws when `hasFuel && random.nextInt(4) == 0`; the particle is
+    // out of scope but the entity random draw must still happen.
+    if has_fuel {
+        let _ = me.random.next_int_bounded(4);
+    }
 }
 
 /// `MinecartTNT.tick`：引信递减、归零爆炸，以及撞击时的爆炸。
@@ -754,5 +849,41 @@ fn activate_minecart(cart: &mut Minecart, active: bool) {
             cart.enabled = false;
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn furnace_fuel_is_capped_and_sets_a_horizontal_push() {
+        let mut cart = Minecart::new(MinecartKind::Furnace);
+        let at = Vec3::new(0.5, 64.0625, 0.5);
+        let player = Vec3::new(0.5, 64.0, -1.5);
+        assert!(cart.add_fuel(player, at, true));
+        assert_eq!(cart.fuel, 3600);
+        assert_eq!(cart.push, Vec3::new(0.0, 0.0, 2.0));
+        // 非燃料物品不动。
+        assert!(!cart.add_fuel(player, at, false));
+        assert_eq!(cart.fuel, 3600);
+        // 超过 32000 的上限。
+        cart.fuel = 30000;
+        assert!(!cart.add_fuel(player, at, true));
+        assert_eq!(cart.fuel, 30000);
+    }
+
+    #[test]
+    fn push_reprojects_along_the_motion_without_changing_length() {
+        // 推力 (1,0,1) 投影到速度 (1,0,0) 后方向转到 +x，长度仍是 sqrt(2)。
+        let push = Vec3::new(1.0, 0.0, 1.0);
+        let motion = Vec3::new(1.0, 0.0, 0.0);
+        let projected = calculate_new_push_along(push, motion);
+        assert!((projected.x - 2.0_f64.sqrt()).abs() < 1.0e-9);
+        assert!(projected.y.abs() < 1.0e-9);
+        assert!(projected.z.abs() < 1.0e-9);
+        assert!((projected.length() - push.length()).abs() < 1.0e-9);
+        // 速度太短时保留原推力。
+        assert_eq!(calculate_new_push_along(push, Vec3::default()), push);
     }
 }

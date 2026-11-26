@@ -3039,6 +3039,138 @@ fn placing_interacting_and_punching_painting_and_item_frame() {
 #[path = "weapon_tests.rs"]
 mod weapon_tests;
 
+/// 普通矿车：右键（非潜行）上车，乘客名单和玩家载具双向一致。
+///
+/// A plain minecart: right-clicking (not sneaking) mounts the player, and both
+/// the passenger list and the player's vehicle agree.
+#[test]
+fn a_rideable_minecart_boards_the_player() {
+    use mc_bamboo_blocks::entity::minecart::MinecartKind;
+    let (mut server, client) = settled();
+    let uid = server
+        .region()
+        .entities
+        .spawn(mc_bamboo_blocks::entity::Entity::minecart(
+            MinecartKind::Rideable,
+            Vec3::new(11.5, -60.0, 8.5),
+        ));
+    client.take_frames();
+    crate::interaction::on_interact_entity_at(
+        server.region(),
+        client.id,
+        uid,
+        Hand::Main,
+        false,
+        Vec3::new(0.0, 0.5, 0.0),
+    );
+    assert_eq!(
+        server.player(&client).riding.vehicle,
+        Some(uid),
+        "the player is riding the minecart",
+    );
+    assert!(
+        crate::riding::passengers(server.region(), uid).contains(&client.id.0),
+        "the cart lists the player as a passenger",
+    );
+}
+
+/// 潜行右键不上车；已经有人的车也不上第二个玩家。
+///
+/// Sneaking blocks boarding, and a cart with one passenger takes no second.
+#[test]
+fn sneaking_and_an_occupied_cart_refuse_boarding() {
+    use mc_bamboo_blocks::entity::minecart::MinecartKind;
+    let (mut server, client) = settled();
+    let uid = server
+        .region()
+        .entities
+        .spawn(mc_bamboo_blocks::entity::Entity::minecart(
+            MinecartKind::Rideable,
+            Vec3::new(11.5, -60.0, 8.5),
+        ));
+    player_mut(&mut server, &client).sync.shift_key_down = true;
+    client.take_frames();
+    crate::interaction::on_interact_entity_at(
+        server.region(),
+        client.id,
+        uid,
+        Hand::Main,
+        true,
+        Vec3::new(0.0, 0.5, 0.0),
+    );
+    assert_eq!(server.player(&client).riding.vehicle, None);
+    assert!(crate::riding::passengers(server.region(), uid).is_empty());
+}
+
+/// 动力矿车加煤：生存模式扣一个煤，燃料 +3600，推力指向「车减玩家」。
+///
+/// A furnace cart takes coal in survival: one item consumed, 3600 fuel, and a
+/// push pointing from the player to the cart.
+#[test]
+fn a_furnace_minecart_takes_coal_and_sets_the_push() {
+    use mc_bamboo_blocks::entity::{EntityKind, minecart::MinecartKind};
+    let (mut server, client) = settled();
+    player_mut(&mut server, &client).game_mode = GameMode::Survival;
+    let uid = server
+        .region()
+        .entities
+        .spawn(mc_bamboo_blocks::entity::Entity::minecart(
+            MinecartKind::Furnace,
+            Vec3::new(11.5, -60.0, 8.5),
+        ));
+    hold_stack(&mut server, &client, ItemStack::new(items::COAL, 1));
+    client.take_frames();
+    crate::interaction::on_interact_entity_at(
+        server.region(),
+        client.id,
+        uid,
+        Hand::Main,
+        false,
+        Vec3::new(0.0, 0.5, 0.0),
+    );
+    assert_eq!(server.player(&client).inventory.held(Hand::Main).count, 0);
+    let cart = server.region().entities.get(uid).expect("cart alive");
+    let EntityKind::Minecart(cart) = &cart.kind else {
+        panic!("expected a minecart");
+    };
+    assert_eq!(cart.fuel, 3600);
+    assert_eq!(cart.push.y, 0.0);
+    assert!(cart.push.length_sqr() > 0.0, "a horizontal push is set");
+}
+
+/// 非燃料物品不加煤，也不扣物品。
+///
+/// A non-fuel item adds no fuel and is not consumed.
+#[test]
+fn a_furnace_minecart_ignores_a_non_fuel_item() {
+    use mc_bamboo_blocks::entity::{EntityKind, minecart::MinecartKind};
+    let (mut server, client) = settled();
+    player_mut(&mut server, &client).game_mode = GameMode::Survival;
+    let uid = server
+        .region()
+        .entities
+        .spawn(mc_bamboo_blocks::entity::Entity::minecart(
+            MinecartKind::Furnace,
+            Vec3::new(11.5, -60.0, 8.5),
+        ));
+    hold_stack(&mut server, &client, ItemStack::new(items::STONE, 1));
+    client.take_frames();
+    crate::interaction::on_interact_entity_at(
+        server.region(),
+        client.id,
+        uid,
+        Hand::Main,
+        false,
+        Vec3::new(0.0, 0.5, 0.0),
+    );
+    assert_eq!(server.player(&client).inventory.held(Hand::Main).count, 1);
+    let cart = server.region().entities.get(uid).expect("cart alive");
+    let EntityKind::Minecart(cart) = &cart.kind else {
+        panic!("expected a minecart");
+    };
+    assert_eq!(cart.fuel, 0);
+}
+
 #[path = "egg_tests.rs"]
 mod egg_tests;
 
