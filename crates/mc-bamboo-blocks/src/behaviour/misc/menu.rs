@@ -1,14 +1,15 @@
 //! 只有界面的方块：`BeaconBlock`、`CartographyTableBlock`、`CraftingTableBlock`、
 //! `EnchantingTableBlock`、`SmithingTableBlock`、`BrewingStandBlock`。
 //!
-//! 酿造台在这里建方块实体。菜单本身在 `mc-bamboo-game`。
+//! 酿造台和信标在这里建方块实体。菜单本身在 `mc-bamboo-game`。
 //!
-//! Menu-only blocks. The brewing stand creates its block entity here. The menu lives in
-//! `mc-bamboo-game`.
+//! Menu-only blocks. The brewing stand and beacon create their block entities here.
+//! The menus live in `mc-bamboo-game`.
 
 use mc_bamboo_core::{BlockPos, Direction};
 
 use super::super::machines::BrewingStandEntity;
+use super::beacon::BeaconBlockEntity;
 use crate::{
     behaviour::{Behaviour, common::update_neighbours_after_destroy},
     context::UseContext,
@@ -28,6 +29,29 @@ impl Behaviour for Menu {
         _ctx: &UseContext,
     ) -> InteractionResult {
         InteractionResult::Success
+    }
+}
+
+/// `BeaconBlock`。
+pub(super) struct Beacon;
+
+impl Behaviour for Beacon {
+    /// `newBlockEntity`：放下信标时建一个空方块实体。
+    ///
+    /// `newBlockEntity`: placing a beacon creates a fresh block entity.
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
+        if !old.is_same_block(state) && !world.has_block_entity(pos) {
+            world.set_block_entity(Box::new(BeaconBlockEntity::new(pos)));
+        }
+    }
+
+    fn use_without_item(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        ctx: &UseContext,
+    ) -> InteractionResult {
+        Menu.use_without_item(state, world, ctx)
     }
 }
 

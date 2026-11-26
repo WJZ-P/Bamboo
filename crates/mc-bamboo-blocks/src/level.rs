@@ -2802,6 +2802,13 @@ pub enum Effect {
         recipe: &'static str,
         position: mc_bamboo_core::Vec3,
     },
+    /// 信标激活。游戏层给范围内玩家触发 `CONSTRUCT_BEACON`。
+    ///
+    /// A beacon activated. The game layer credits nearby players with `CONSTRUCT_BEACON`.
+    ConstructBeacon {
+        target: crate::entity::EntityUid,
+        levels: i32,
+    },
     /// `ThrownEnderpearl.onHit`：把扔出珍珠的玩家传送到 `position`（珍珠命中前的
     /// `oldPosition()`）。游戏层走正式的 `movement::teleport` 并清下落距离。
     ///

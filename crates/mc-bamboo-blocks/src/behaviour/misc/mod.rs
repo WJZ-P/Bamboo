@@ -5,6 +5,7 @@
 //! 一个文件放一组官方类，文件头写着里面有哪些类。这里只有分派和几个类共用的小函数。
 
 mod amethyst;
+pub mod beacon;
 mod cake;
 mod candle;
 mod cauldron;
@@ -77,7 +78,7 @@ use self::{
     jukebox::Jukebox,
     leaves::Leaves,
     liquid::{BubbleColumn, Liquid},
-    menu::{BrewingStand, Menu},
+    menu::{Beacon, BrewingStand, Menu},
     nylium::{Netherrack, Nylium},
     portal::NetherPortal,
     potent_sulfur::PotentSulfur,
@@ -111,8 +112,8 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
         | C::MangroveRootsBlock
         | C::WaterloggedTransparentBlock
         | C::WeatheringCopperGrateBlock => Some(&Waterlogged),
-        C::BeaconBlock
-        | C::CartographyTableBlock
+        C::BeaconBlock => Some(&Beacon),
+        C::CartographyTableBlock
         | C::CraftingTableBlock
         | C::EnchantingTableBlock
         | C::SmithingTableBlock => Some(&Menu),

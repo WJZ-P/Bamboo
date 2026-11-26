@@ -784,6 +784,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::RaidSetLeader { .. } => 36,
         Effect::Particles { .. } => 37,
         Effect::Firework { .. } => 38,
+        Effect::ConstructBeacon { .. } => 39,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -988,6 +989,10 @@ fn hash_effect(effect: &Effect) -> u64 {
             position.x.to_bits().hash(&mut hasher);
             position.y.to_bits().hash(&mut hasher);
             position.z.to_bits().hash(&mut hasher);
+        }
+        Effect::ConstructBeacon { target, levels } => {
+            target.hash(&mut hasher);
+            levels.hash(&mut hasher);
         }
         Effect::KilledByArrow {
             shooter,
