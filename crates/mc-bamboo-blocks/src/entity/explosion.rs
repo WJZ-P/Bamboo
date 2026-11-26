@@ -173,7 +173,14 @@ impl World<'_> {
         let damage = DamageSource::environment(DamageKind::Explosion);
         (
             block_count,
-            hurt_living_by_explosion_with(self, damage, center, radius, false, knockback_multiplier),
+            hurt_living_by_explosion_with(
+                self,
+                damage,
+                center,
+                radius,
+                false,
+                knockback_multiplier,
+            ),
         )
     }
 
