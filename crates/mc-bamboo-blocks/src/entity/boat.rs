@@ -455,7 +455,26 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         }
     }
 
-    // 推动实体、把动物拉上船由骑乘层接入。
+    // `AbstractBoat.tick` 第 9 步：`getBoundingBox().inflate(0.2, -0.01, 0.2)`
+    // 内的实体，没上船的 `push(entity)`；Bamboo 只推对方，船自己不反推。
+    let push_box = me.bounding_box().inflate(0.2, -0.01, 0.2);
+    let mut push_targets = Vec::new();
+    ctx.for_each_other_in(push_box, &mut |public| {
+        if !public.removed && !boat.passengers.contains(&public.uid) {
+            push_targets.push(public.uid);
+        }
+    });
+    let from = me.position;
+    for uid in push_targets {
+        ctx.emit(
+            Command::PushMob {
+                other: uid,
+                from,
+                self_pushable: false,
+            },
+            me,
+        );
+    }
     if env_amount > 0.0 {
         hurt_from_environment(&mut boat, me, env_amount, ctx);
     }

@@ -1504,6 +1504,40 @@ pub(crate) fn on_use_item(
     // 鱼桶要从这一堆上的组件还原鱼，先抄下来。
     // A fish bucket restores its fish from this stack's components, so copy it first.
     let held = player.inventory.held(hand).clone();
+    // `BoatItem.use`：`getPlayerPOVHitResult` 之前先查 5 格内 `CAN_BE_PICKED`
+    // 实体；玩家眼睛落在某个实体的盒子里就 `PASS`，不放船。
+    if mc_bamboo_blocks::entity::boat::entity_type_for_item(held.item).is_some() {
+        let view = mc_bamboo_core::Vec3::view_vector(yaw, pitch).scale(5.0);
+        let bb = player.bounding_box();
+        let area = mc_bamboo_core::Aabb::new(
+            bb.min_x + view.x.min(0.0),
+            bb.min_y + view.y.min(0.0),
+            bb.min_z + view.z.min(0.0),
+            bb.max_x + view.x.max(0.0),
+            bb.max_y + view.y.max(0.0),
+            bb.max_z + view.z.max(0.0),
+        )
+        .inflate(1.0, 1.0, 1.0);
+        let eye = mc_bamboo_core::Vec3::new(
+            player.position().x,
+            player.position().y + player.eye_height(),
+            player.position().z,
+        );
+        let mut blocked = false;
+        region.entities.for_each_in(area, &mut |public| {
+            if public.removed {
+                return;
+            }
+            // `getPickRadius()` 对船 / 生物 / 矿车都是 0；`CAN_BE_PICKED`
+            // 在 Bamboo 里没有单独字段，用所有活实体近似。
+            if public.bounding_box().contains(eye.x, eye.y, eye.z) {
+                blocked = true;
+            }
+        });
+        if blocked {
+            return;
+        }
+    }
     if crate::player_consume::start(region, id, hand) {
         return;
     }

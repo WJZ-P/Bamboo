@@ -868,8 +868,13 @@ fn board_animals(region: &mut Region) {
             let KindPublic::Mob(mob) = &public.kind else {
                 return None;
             };
-            // `isPassenger()` 为假、是动物；`hasEnoughSpaceFor` 要求比船窄。
-            if public.vehicle.is_some() || !mob.mob_type.is_animal() {
+            // `EntitySelector.pushableBy(this)` + `instanceof LivingEntity`
+            // + `!entity.is(CANNOT_BE_PUSHED_ONTO_BOATS)`；不再用 `is_animal()`。
+            if public.vehicle.is_some()
+                || mob
+                    .mob_type
+                    .in_entity_tag("minecraft:cannot_be_pushed_onto_boats")
+            {
                 return None;
             }
             let bb = public.bounding_box();
