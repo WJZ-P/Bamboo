@@ -436,6 +436,39 @@ pub fn join_is_not_empty(first: &[Aabb], second: &[Aabb], op: BooleanOp) -> bool
     })
 }
 
+/// `Shapes.joinUnoptimized`：按 `op` 合并两个形状，返回结果里全部非空小盒。
+///
+/// `Shapes.joinUnoptimized`: combine two shapes under `op` and return all occupied cells.
+pub fn join_boxes(first: &[Aabb], second: &[Aabb], op: BooleanOp) -> Vec<Aabb> {
+    if first.is_empty() {
+        return match op {
+            BooleanOp::OnlySecond | BooleanOp::NotSame => second.to_vec(),
+            BooleanOp::OnlyFirst | BooleanOp::And => Vec::new(),
+        };
+    }
+    if second.is_empty() {
+        return match op {
+            BooleanOp::OnlyFirst | BooleanOp::NotSame => first.to_vec(),
+            BooleanOp::OnlySecond | BooleanOp::And => Vec::new(),
+        };
+    }
+    let xs = merged_coordinates(first, second, Axis::X);
+    let ys = merged_coordinates(first, second, Axis::Y);
+    let zs = merged_coordinates(first, second, Axis::Z);
+    let mut out = Vec::new();
+    for x in xs.windows(2) {
+        for y in ys.windows(2) {
+            for z in zs.windows(2) {
+                let point = Vec3::new(middle(x), middle(y), middle(z));
+                if op.apply(contains(first, point), contains(second, point)) {
+                    out.push(Aabb::new(x[0], y[0], z[0], x[1], y[1], z[1]));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn middle(pair: &[f64]) -> f64 {
     (pair[0] + pair[1]) / 2.0
 }
