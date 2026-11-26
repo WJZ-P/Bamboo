@@ -82,6 +82,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         // 官方闪电实体不写进存档（`EntityType.canSerialize` 为假），这里不导出它。
         // Vanilla lightning bolts are not serialized; do not write them out.
         crate::entity::KindPublic::LightningBolt(_) => return Ok(Tag::Compound(Vec::new())),
+        crate::entity::KindPublic::EvokerFangs => kinds::EVOKER_FANGS,
         crate::entity::KindPublic::OminousItemSpawner(_) => kinds::OMINOUS_ITEM_SPAWNER,
         crate::entity::KindPublic::WindCharge(charge) => match charge.variant {
             crate::entity::wind_charge::WindChargeVariant::Player => kinds::WIND_CHARGE,
@@ -203,6 +204,15 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 return Err(Error::new("mismatched splash potion entity halves"));
             };
             splash_potion::write(saved, &mut out)?;
+        }
+        crate::entity::KindPublic::EvokerFangs => {
+            let crate::entity::KindState::EvokerFangs(saved) = &state.kind else {
+                return Err(Error::new("mismatched evoker fangs entity halves"));
+            };
+            put(&mut out, "Warmup", Tag::Int(saved.warmup_delay_ticks));
+            if let Some(uuid) = saved.owner_uuid {
+                put(&mut out, "Owner", uuid_tag(&uuid));
+            }
         }
         crate::entity::KindPublic::OminousItemSpawner(stack) => {
             let crate::entity::KindState::OminousItemSpawner(saved) = &state.kind else {
@@ -476,6 +486,18 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                 crate::entity::arrow::ArrowVariant::Trident,
             ))),
             "minecraft:llama_spit" => EntityKind::LlamaSpit(Box::new(spit::read(tag, rotation[1]))),
+            "minecraft:evoker_fangs" => EntityKind::EvokerFangs(Box::new(
+                super::super::entity::evoker_fangs::EvokerFangs::new(
+                    tag::int_or(tag, "Warmup", 0),
+                    None,
+                    match tag::field(tag, "Owner") {
+                        Some(Tag::IntArray(values)) if values.len() == 4 => {
+                            Some(uuid_bytes(values))
+                        }
+                        _ => None,
+                    },
+                ),
+            )),
             "minecraft:egg" => EntityKind::Egg(Box::new(egg::read(
                 tag,
                 rotation[1],

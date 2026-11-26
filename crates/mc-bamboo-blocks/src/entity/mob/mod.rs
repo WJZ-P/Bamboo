@@ -46,6 +46,7 @@ pub(crate) mod enderman;
 pub mod endermite;
 pub mod equine;
 pub mod equipment;
+pub mod evoker;
 pub mod fish;
 pub mod fox;
 pub mod fox_goals;
@@ -55,6 +56,7 @@ pub mod goat;
 mod golem_goals;
 pub mod guardian;
 pub mod happy_ghast;
+pub mod illusioner;
 pub mod infested;
 pub mod interact;
 pub mod iron_golem;
@@ -94,6 +96,7 @@ pub mod smooth_swim;
 pub mod sniffer;
 pub mod snow_golem;
 pub mod spawn;
+pub mod spellcaster;
 pub mod spider;
 pub mod squid;
 pub mod stray;
@@ -105,6 +108,7 @@ pub mod thunder;
 pub(crate) mod timing;
 pub mod trader_llama;
 pub mod turtle;
+pub mod vex;
 pub mod villager;
 pub mod villager_ai;
 pub mod vindicator;
@@ -276,6 +280,18 @@ pub enum MobType {
     ///
     /// Ravager.
     Ravager,
+    /// 唤魔者，`Evoker`（`SpellcasterIllager` 一支）。
+    ///
+    /// Evoker, a `SpellcasterIllager`.
+    Evoker,
+    /// 恼鬼，`Vex`（穿墙飞行的怪物，唤魔者召唤）。
+    ///
+    /// Vex, a wall-phasing flying monster summoned by evokers.
+    Vex,
+    /// 幻术师，`Illusioner`（`SpellcasterIllager` 加弓箭，只能 `/summon`）。
+    ///
+    /// Illusioner, a `SpellcasterIllager` with a bow, only available via `/summon`.
+    Illusioner,
     /// 悦灵，`Allay`：脑驱动的飞行生物，自己是振动监听者。
     ///
     /// The `Allay`: a brain-driven flying mob that listens for vibrations.
@@ -294,7 +310,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 73] = [
+    pub const ALL: [Self; 76] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -365,6 +381,9 @@ impl MobType {
         Self::HappyGhast,
         Self::Vindicator,
         Self::Ravager,
+        Self::Evoker,
+        Self::Vex,
+        Self::Illusioner,
         Self::Allay,
         Self::WanderingTrader,
         Self::TraderLlama,
@@ -445,6 +464,9 @@ impl MobType {
             Self::HappyGhast => ids::HAPPY_GHAST,
             Self::Vindicator => ids::VINDICATOR,
             Self::Ravager => ids::RAVAGER,
+            Self::Evoker => ids::EVOKER,
+            Self::Vex => ids::VEX,
+            Self::Illusioner => ids::ILLUSIONER,
             Self::Allay => ids::ALLAY,
             Self::WanderingTrader => ids::WANDERING_TRADER,
             Self::TraderLlama => ids::TRADER_LLAMA,
@@ -525,6 +547,9 @@ impl MobType {
             Self::HappyGhast => "minecraft:happy_ghast",
             Self::Vindicator => "minecraft:vindicator",
             Self::Ravager => "minecraft:ravager",
+            Self::Evoker => "minecraft:evoker",
+            Self::Vex => "minecraft:vex",
+            Self::Illusioner => "minecraft:illusioner",
             Self::Allay => "minecraft:allay",
             Self::WanderingTrader => "minecraft:wandering_trader",
             Self::TraderLlama => "minecraft:trader_llama",
@@ -563,12 +588,7 @@ impl MobType {
     ///
     /// Whether this entity type is in a `minecraft:entity_type` tag.
     pub fn in_entity_tag(self, name: &str) -> bool {
-        let id = self.entity_type();
-        mc_bamboo_data::tags::TAG_GROUPS
-            .iter()
-            .filter(|group| group.registry == "minecraft:entity_type")
-            .flat_map(|group| group.tags.iter())
-            .any(|tag| tag.name == name && tag.ids.contains(&id))
+        mc_bamboo_data::in_tag("minecraft:entity_type", name, self.entity_type())
     }
 
     pub fn by_name(name: &str) -> Option<Self> {
@@ -709,6 +729,10 @@ impl MobType {
             // `EntityTypes.VINDICATOR` / `RAVAGER`：眼高用官方缺省的 height*0.85。
             (Self::Vindicator, _) => (0.6, 1.95, 1.95 * 0.85),
             (Self::Ravager, _) => (1.95, 2.2, 2.2 * 0.85),
+            // `EntityTypes.EVOKER` / `ILLUSIONER`：`sized(0.6F, 1.95F)`，眼高取缺省的
+            // `height * 0.85F`；`EntityTypes.VEX`：`sized(0.4F, 0.8F).eyeHeight(0.51875F)`。
+            (Self::Evoker | Self::Illusioner, _) => (0.6, 1.95, 1.95 * 0.85),
+            (Self::Vex, _) => (0.4, 0.8, 0.518_75),
             // `EntityTypes.ALLAY`：`sized(0.35, 0.6).eyeHeight(0.36)`。
             (Self::Allay, _) => (0.35, 0.6, 0.36),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
@@ -775,6 +799,9 @@ impl MobType {
                 | Self::Pillager
                 | Self::Vindicator
                 | Self::Ravager
+                | Self::Evoker
+                | Self::Vex
+                | Self::Illusioner
                 | Self::Creeper
                 | Self::Spider
                 | Self::CaveSpider
@@ -798,7 +825,12 @@ impl MobType {
     pub const fn is_raider(self) -> bool {
         matches!(
             self,
-            Self::Witch | Self::Pillager | Self::Vindicator | Self::Ravager
+            Self::Witch
+                | Self::Pillager
+                | Self::Vindicator
+                | Self::Ravager
+                | Self::Evoker
+                | Self::Illusioner
         )
     }
 
@@ -831,13 +863,15 @@ impl MobType {
         self.in_entity_tag("minecraft:inverted_healing_and_harm")
     }
 
-    /// `Entity.canFreeze()` 的类型部分：`#freeze_immune_entity_types`（流浪者）和
-    /// `Skeleton.canFreeze()` 的覆写（恒假）。
+    /// `Entity.canFreeze()` 的类型部分：`Skeleton.canFreeze()` 覆写成恒假，其余看
+    /// `#freeze_immune_entity_types`（流浪者、北极熊、雪傀儡、凋灵）标签。
     ///
-    /// The type part of `Entity.canFreeze()`: `#freeze_immune_entity_types` (strays) and
-    /// the `Skeleton.canFreeze()` override (always false).
-    pub const fn can_freeze(self) -> bool {
-        !matches!(self, Self::Skeleton | Self::Stray)
+    /// The type part of `Entity.canFreeze()`: `Skeleton.canFreeze()` is overridden to
+    /// always be false; every other kind follows the `#freeze_immune_entity_types` tag
+    /// (strays, polar bears, snow golems, withers).
+    pub fn can_freeze(self) -> bool {
+        !matches!(self, Self::Skeleton)
+            && !self.in_entity_tag("minecraft:freeze_immune_entity_types")
     }
 
     /// 目标选择按官方 `TargetGoal` 的完整规则走（`mustSee` 的视线记忆、生物也能当目标、
@@ -866,7 +900,7 @@ impl MobType {
     /// Whether `TargetGoal.canContinueToUse` tracks how long the target has been unseen.
     /// Zombies join the hostile mobs that use the full `mustSee` memory.
     pub const fn uses_target_memory(self) -> bool {
-        self.full_target_rules() || matches!(self, Self::Slime) || self.is_zombie()
+        self.full_target_rules() || matches!(self, Self::Slime | Self::Vex) || self.is_zombie()
     }
 
     /// `Mob.getAmbientSound()` 返回 null 的种类：`makeSound(null)` 不出声，也不取音高的随机数。
@@ -972,28 +1006,13 @@ impl MobType {
             || squid::is_squid(self)
             || matches!(self, Self::Bat | Self::Dolphin | Self::Axolotl)
     }
-    /// `LivingEntity.canBreatheUnderwater()`：`#can_breathe_under_water` 里已建模的水生生物。
-    /// 标签里还有 `#undead`，僵尸和骷髅的溺水行为沿用旧实现，这里不改。
+    /// `LivingEntity.canBreatheUnderwater()`：`#can_breathe_under_water` 标签。标签收进
+    /// 了 `#undead`，所以僵尸、骷髅一支都不溺水。
     ///
-    /// `LivingEntity.canBreatheUnderwater()` for the modelled aquatic members of
-    /// `#can_breathe_under_water`. The tag also holds `#undead`; zombie and skeleton
-    /// drowning keeps its earlier behaviour and is not changed here.
-    pub const fn can_breathe_under_water(self) -> bool {
-        // 守卫者在 `#can_breathe_under_water` 里。
-        // Guardians are in `#can_breathe_under_water`.
-        squid::is_squid(self)
-            || matches!(
-                self,
-                Self::Guardian | Self::ElderGuardian | Self::Nautilus | Self::ZombieNautilus
-            )
-            || fish::is_fish(self)
-            || turtle::is_turtle(self)
-            // 幻翼在 `#undead` 里，`#can_breathe_under_water` 收了整个标签。
-            // Phantoms are `#undead`, which `#can_breathe_under_water` includes.
-            || matches!(
-                self,
-                Self::Axolotl | Self::Frog | Self::Phantom | Self::SkeletonHorse
-            )
+    /// `LivingEntity.canBreatheUnderwater()`: the `#can_breathe_under_water` tag. The
+    /// tag includes `#undead`, so zombies, skeletons and their kin never drown.
+    pub fn can_breathe_under_water(self) -> bool {
+        self.in_entity_tag("minecraft:can_breathe_under_water")
     }
 
     /// 是不是官方 `WaterAnimal`（鱼）：有氧气处理、不吃水流、生成时不查液体，
@@ -1150,14 +1169,16 @@ impl MobType {
     /// returns 0, so a fall deals no damage (the fall distance still accumulates and
     /// resets, and a breeze still plays its `BREEZE_LAND` sound).
     pub fn fall_damage_immune(self) -> bool {
-        // 直接查生成的官方实体标签，新加的生物（悦灵、凋灵……）自动跟上。
-        // Read the generated vanilla entity-type tag so new mobs follow automatically.
-        let id = self.entity_type();
-        mc_bamboo_data::tags::TAG_GROUPS
-            .iter()
-            .filter(|group| group.registry == "minecraft:entity_type")
-            .flat_map(|group| group.tags.iter())
-            .any(|tag| tag.name == "minecraft:fall_damage_immune" && tag.ids.contains(&id))
+        self.in_entity_tag("minecraft:fall_damage_immune")
+    }
+
+    /// `Entity.canControlVehicle()`：不在 `#non_controlling_rider` 里的生物作为载具首位
+    /// 乘客时能接管载具导航并关闭载具自身的移动控制标志。
+    ///
+    /// `Entity.canControlVehicle()`: a mob outside `#non_controlling_rider` takes over
+    /// the vehicle's navigation and suppresses its control flags when riding first.
+    pub fn can_control_vehicle(self) -> bool {
+        !self.in_entity_tag("minecraft:non_controlling_rider")
     }
 
     /// `SpawnPlacements` 里登记成 `IN_WATER` 的类型。
@@ -1182,8 +1203,16 @@ impl MobType {
         }
         // 守卫者构造函数里 `xpReward = 10`，覆盖 `Monster` 的 5。
         // The guardian constructor sets `xpReward = 10`, overriding the monster's 5.
-        if matches!(self, Self::Guardian | Self::ElderGuardian | Self::Breeze) {
+        if matches!(
+            self,
+            Self::Guardian | Self::ElderGuardian | Self::Evoker | Self::Breeze
+        ) {
             return 10;
+        }
+        // `Vex` 构造函数里 `xpReward = 3`，覆盖 `Monster` 的 5。
+        // The `Vex` constructor sets `xpReward = 3`, overriding the monster's 5.
+        if matches!(self, Self::Vex) {
+            return 3;
         }
         // 硫磺方块怪成年是 1 + rand(2)，幼年 0，见 `living::drop_loot`。
         // Adult sulfur cubes give 1 + rand(2); babies give none.
@@ -1276,24 +1305,23 @@ impl MobType {
             Self::HappyGhast => "minecraft:entities/happy_ghast",
             Self::Vindicator => "minecraft:entities/vindicator",
             Self::Ravager => "minecraft:entities/ravager",
+            Self::Evoker => "minecraft:entities/evoker",
+            Self::Vex => "minecraft:entities/vex",
+            Self::Illusioner => "minecraft:entities/illusioner",
             Self::Allay => "minecraft:entities/allay",
             Self::WanderingTrader => "minecraft:entities/wandering_trader",
             Self::TraderLlama => "minecraft:entities/trader_llama",
         }
     }
 
-    /// `EntityTypeTags.BURN_IN_DAYLIGHT` 加 `Zombie.isSunSensitive()`：
-    /// 尸壳不烧，僵尸、溺尸和骷髅一支烧。
-    pub const fn burns_in_daylight(self) -> bool {
-        matches!(
-            self,
-            Self::Zombie | Self::Drowned | Self::ZombieVillager | Self::Phantom
-        ) || self.is_skeleton()
+    /// `EntityTypeTags.BURN_IN_DAYLIGHT`：白天晒到太阳会着火。
+    pub fn burns_in_daylight(self) -> bool {
+        self.in_entity_tag("minecraft:burn_in_daylight")
     }
 
-    /// `EntityTypeTags.DEFLECTS_PROJECTILES`：现在只有旋风人，把射来的投射物弹回。
-    pub const fn deflects_projectiles(self) -> bool {
-        matches!(self, Self::Breeze)
+    /// `EntityTypeTags.DEFLECTS_PROJECTILES`：把射来的投射物弹回（现在只有旋风人）。
+    pub fn deflects_projectiles(self) -> bool {
+        self.in_entity_tag("minecraft:deflects_projectiles")
     }
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
@@ -1463,6 +1491,9 @@ impl MobType {
             // `Allay.getAmbientSound()` 按主手有没有物品分派，见 `allay::ambient_sound`。
             Self::Allay => None,
             Self::Ravager => Some("minecraft:entity.ravager.ambient"),
+            Self::Evoker => Some("minecraft:entity.evoker.ambient"),
+            Self::Vex => Some("minecraft:entity.vex.ambient"),
+            Self::Illusioner => Some("minecraft:entity.illusioner.ambient"),
             // 交易中的叫声由 `living::ambient_voice` 按交易状态换成 `...trade`。
             // Trading ambience is switched by `living::ambient_voice` while trading.
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.ambient"),
@@ -1539,6 +1570,9 @@ impl MobType {
             Self::Vindicator => Some("minecraft:entity.vindicator.hurt"),
             Self::Allay => Some("minecraft:entity.allay.hurt"),
             Self::Ravager => Some("minecraft:entity.ravager.hurt"),
+            Self::Evoker => Some("minecraft:entity.evoker.hurt"),
+            Self::Vex => Some("minecraft:entity.vex.hurt"),
+            Self::Illusioner => Some("minecraft:entity.illusioner.hurt"),
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.hurt"),
             Self::TraderLlama => Some("minecraft:entity.llama.hurt"),
         }
@@ -1612,6 +1646,9 @@ impl MobType {
             Self::Vindicator => Some("minecraft:entity.vindicator.death"),
             Self::Allay => Some("minecraft:entity.allay.death"),
             Self::Ravager => Some("minecraft:entity.ravager.death"),
+            Self::Evoker => Some("minecraft:entity.evoker.death"),
+            Self::Vex => Some("minecraft:entity.vex.death"),
+            Self::Illusioner => Some("minecraft:entity.illusioner.death"),
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.death"),
             Self::TraderLlama => Some("minecraft:entity.llama.death"),
         }
@@ -1638,9 +1675,11 @@ impl MobType {
             Self::Parched => Some("minecraft:entity.parched.step"),
             Self::Drowned => Some("minecraft:entity.drowned.step"),
             // 女巫没覆写 `getStepSound`，走方块自己的脚步声（和史莱姆一样）。
+            // 唤魔者、幻术师和恼鬼也没覆写，同样没有自己的脚步声。
             //
             // A witch does not override `getStepSound`; the block's own step sound plays.
-            Self::Witch | Self::Pillager => None,
+            // Evokers, illusioners and vexes do not override it either.
+            Self::Witch | Self::Pillager | Self::Evoker | Self::Vex | Self::Illusioner => None,
             Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.step"),
             // `MovementEmission.EVENTS`：没有脚步声。
             // `MovementEmission.EVENTS`: no step sound.
@@ -1782,6 +1821,11 @@ impl MobType {
             Self::HappyGhast => items::HAPPY_GHAST_SPAWN_EGG,
             Self::Vindicator => items::VINDICATOR_SPAWN_EGG,
             Self::Ravager => items::RAVAGER_SPAWN_EGG,
+            Self::Evoker => items::EVOKER_SPAWN_EGG,
+            Self::Vex => items::VEX_SPAWN_EGG,
+            // 幻术师没有刷怪蛋（`EntityTypes.ILLUSIONER` 注册时 `noSummon` 之外也没有蛋）。
+            // The illusioner has no spawn egg.
+            Self::Illusioner => 0,
             Self::Allay => items::ALLAY_SPAWN_EGG,
             Self::WanderingTrader => items::WANDERING_TRADER_SPAWN_EGG,
             Self::TraderLlama => items::TRADER_LLAMA_SPAWN_EGG,
@@ -1861,6 +1905,9 @@ impl MobType {
             Self::HappyGhast => "entity.minecraft.happy_ghast",
             Self::Vindicator => "entity.minecraft.vindicator",
             Self::Ravager => "entity.minecraft.ravager",
+            Self::Evoker => "entity.minecraft.evoker",
+            Self::Vex => "entity.minecraft.vex",
+            Self::Illusioner => "entity.minecraft.illusioner",
             Self::Allay => "entity.minecraft.allay",
             Self::WanderingTrader => "entity.minecraft.wandering_trader",
             Self::TraderLlama => "entity.minecraft.trader_llama",
@@ -2282,9 +2329,9 @@ impl DamageKind {
         }
     }
 
-    /// `DamageTypeTags.IS_FALL` / `ALWAYS_MOST_SIGNIFICANT_FALL`。
-    pub const fn is_fall(self) -> bool {
-        matches!(self, Self::Fall | Self::EnderPearl)
+    /// `DamageTypeTags.IS_FALL`：摔落伤害（`minecraft:fall` 和 `minecraft:ender_pearl`）。
+    pub fn is_fall(self) -> bool {
+        self.in_tag("minecraft:is_fall")
     }
 
     /// 官方 `DamageType.msgId()`，数据文件里的 `message_id`：死亡消息
@@ -2385,84 +2432,75 @@ impl DamageKind {
     }
 
     /// `#no_knockback`。
-    pub const fn no_knockback(self) -> bool {
-        !matches!(
-            self,
-            Self::PlayerAttack
-                | Self::MobAttack
-                | Self::MobAttackNoAggro
-                | Self::Arrow
-                | Self::Trident
-                | Self::Spit
-                | Self::Thrown
-                | Self::Thorns
-                | Self::IndirectMagic
-                | Self::WindCharge
-                | Self::SonicBoom
-                | Self::Mace
-                | Self::Fireworks
-        ) || matches!(self, Self::Wither)
+    pub fn no_knockback(self) -> bool {
+        self.in_tag("minecraft:no_knockback")
     }
 
     /// `#bypasses_armor`。
-    pub const fn bypasses_armor(self) -> bool {
-        matches!(
-            self,
-            Self::OnFire
-                | Self::InWall
-                | Self::Cramming
-                | Self::Drown
-                | Self::Generic
-                | Self::Fall
-                | Self::FlyIntoWall
-                | Self::Freeze
-                | Self::OutOfWorld
-                | Self::GenericKill
-                | Self::Magic
-                | Self::IndirectMagic
-                | Self::Wither
-                | Self::EnderPearl
-                | Self::SonicBoom
-        )
+    pub fn bypasses_armor(self) -> bool {
+        self.in_tag("minecraft:bypasses_armor")
     }
 
     /// `#bypasses_effects`：抗性效果和保护附魔都不生效。
-    pub const fn bypasses_effects(self) -> bool {
-        matches!(self, Self::OutOfWorld | Self::GenericKill)
+    pub fn bypasses_effects(self) -> bool {
+        self.in_tag("minecraft:bypasses_effects")
     }
 
     /// `#bypasses_enchantments`：保护附魔不生效。
-    pub const fn bypasses_enchantments(self) -> bool {
-        matches!(self, Self::OutOfWorld | Self::GenericKill | Self::SonicBoom)
+    pub fn bypasses_enchantments(self) -> bool {
+        self.in_tag("minecraft:bypasses_enchantments")
     }
 
     /// `#is_fire`。
-    pub const fn is_fire(self) -> bool {
-        matches!(
-            self,
-            Self::InFire | Self::OnFire | Self::Lava | Self::HotFloor
-        )
+    pub fn is_fire(self) -> bool {
+        self.in_tag("minecraft:is_fire")
     }
 
     /// `#no_impact`。
-    pub const fn no_impact(self) -> bool {
-        matches!(self, Self::Drown)
+    pub fn no_impact(self) -> bool {
+        self.in_tag("minecraft:no_impact")
     }
 
-    /// `#bypasses_resistance`：26.3 里只有 `out_of_world` / `generic_kill`。
-    pub const fn bypasses_resistance(self) -> bool {
-        matches!(self, Self::OutOfWorld | Self::GenericKill)
+    /// `#bypasses_resistance`。
+    pub fn bypasses_resistance(self) -> bool {
+        self.in_tag("minecraft:bypasses_resistance")
     }
 
     /// `#bypasses_invulnerability`。
-    pub const fn bypasses_invulnerability(self) -> bool {
-        matches!(self, Self::OutOfWorld | Self::GenericKill)
+    pub fn bypasses_invulnerability(self) -> bool {
+        self.in_tag("minecraft:bypasses_invulnerability")
+    }
+
+    /// `#is_explosion`。
+    pub fn is_explosion(self) -> bool {
+        self.in_tag("minecraft:is_explosion")
+    }
+
+    /// `#is_projectile`。
+    pub fn is_projectile(self) -> bool {
+        self.in_tag("minecraft:is_projectile")
+    }
+
+    /// `#witch_resistant_to`：女巫对这个标签里的伤害只吃 15%。
+    ///
+    /// `#witch_resistant_to`: witches take only 15% of damage in this tag.
+    pub fn witch_resistant_to(self) -> bool {
+        self.in_tag("minecraft:witch_resistant_to")
     }
 
     /// `#bypasses_cooldown`：26.3 的数据包里这个标签是空的。
-    pub const fn bypasses_cooldown(self) -> bool {
-        let _ = self;
-        false
+    pub fn bypasses_cooldown(self) -> bool {
+        self.in_tag("minecraft:bypasses_cooldown")
+    }
+
+    /// 按名字查 `minecraft:damage_type` 标签，受伤路径上的共有入口。
+    ///
+    /// The shared hot-path entry that reads a `minecraft:damage_type` tag by name.
+    pub fn in_tag(self, tag: &str) -> bool {
+        let Some(id) = mc_bamboo_data::damage_type_id(self.name()) else {
+            return false;
+        };
+        mc_bamboo_data::in_tag("minecraft:damage_type", tag, id)
     }
 
     /// `DamageSource.scalesWithDifficulty()`：只有 `always` 缩放，以及
@@ -2510,52 +2548,22 @@ impl DamageKind {
     /// `#no_anger`：挨打的不记 `lastHurtByMob`。
     ///
     /// `#no_anger`: the victim does not record `lastHurtByMob`.
-    pub const fn no_anger(self) -> bool {
-        matches!(self, Self::MobAttackNoAggro)
+    pub fn no_anger(self) -> bool {
+        self.in_tag("minecraft:no_anger")
     }
 
-    /// `#panic_environmental_causes`（这里有的那几种；`sulfur_cube_hot` 还没有）。
+    /// `#panic_environmental_causes`。
     ///
-    /// `#panic_environmental_causes` (the kinds modelled here; `sulfur_cube_hot`
-    /// does not exist yet).
-    pub const fn panic_environmental_causes(self) -> bool {
-        matches!(
-            self,
-            Self::Cactus
-                | Self::Freeze
-                | Self::HotFloor
-                | Self::InFire
-                | Self::Lava
-                | Self::OnFire
-                | Self::LightningBolt
-        )
+    /// `#panic_environmental_causes`.
+    pub fn panic_environmental_causes(self) -> bool {
+        self.in_tag("minecraft:panic_environmental_causes")
     }
 
-    /// `#panic_causes`。没有 `mob_attack_no_aggro`（山羊冲撞不吓人）和 `thorns`。
+    /// `#panic_causes`。
     ///
-    /// `#panic_causes`, which lists neither `mob_attack_no_aggro` (goat rams) nor `thorns`.
-    pub const fn panic_causes(self) -> bool {
-        matches!(
-            self,
-            Self::PlayerAttack
-                | Self::Mace
-                | Self::Spear
-                | Self::MobAttack
-                | Self::Arrow
-                | Self::Thrown
-                | Self::Magic
-                | Self::IndirectMagic
-                | Self::Wither
-                | Self::Explosion
-                | Self::PlayerExplosion
-                | Self::Fireworks
-                | Self::Cactus
-                | Self::Freeze
-                | Self::HotFloor
-                | Self::InFire
-                | Self::Lava
-                | Self::OnFire
-        )
+    /// `#panic_causes`.
+    pub fn panic_causes(self) -> bool {
+        self.in_tag("minecraft:panic_causes")
     }
 }
 
@@ -2887,6 +2895,11 @@ pub struct Mob {
     pub last_crystal_sound_tick: i32,
     pub silent: bool,
     pub no_gravity: bool,
+    /// `Entity.noPhysics`：穿墙移动（恼鬼）。`move_living` 为真时跳过方块碰撞。
+    ///
+    /// `Entity.noPhysics`: move through blocks (the vex). `move_living` skips block
+    /// collision while set.
+    pub no_physics: bool,
     pub invulnerable: bool,
     /// `CustomName`：文本组件的 NBT 形式（字符串或复合标签），同步时原样转成组件。
     ///
@@ -3108,6 +3121,25 @@ pub struct Mob {
     pub vindicator: vindicator::VindicatorState,
     /// 劫掠兽的三个同步计时字段。
     pub ravager: ravager::RavagerState,
+    /// 唤魔者的施法状态与 wololo 目标，见 [`evoker::EvokerState`]。
+    ///
+    /// The evoker's casting state and wololo target, see [`evoker::EvokerState`].
+    pub evoker: evoker::EvokerState,
+    /// 施法灾厄村民（唤魔者 / 幻术师）的施法计时与当前法术，见
+    /// [`spellcaster::SpellcasterState`]。
+    ///
+    /// The spellcaster's casting timer and current spell, see
+    /// [`spellcaster::SpellcasterState`].
+    pub spellcaster: spellcaster::SpellcasterState,
+    /// 恼鬼的飞行、有限生命与主人，见 [`vex::VexState`]。
+    ///
+    /// The vex's flight, limited life and owner, see [`vex::VexState`].
+    pub vex: vex::VexState,
+    /// 幻术师的施法状态（复用 `spellcaster`），另见 [`illusioner::IllusionerState`]。
+    ///
+    /// The illusioner's casting state (shared with `spellcaster`), see
+    /// [`illusioner::IllusionerState`].
+    pub illusioner: illusioner::IllusionerState,
     /// `PatrollingMonster` / `Raider` 的字段，女巫和掠夺者共用，见 [`raider::Raider`]。
     ///
     /// The `PatrollingMonster` / `Raider` fields shared by witches and pillagers, see
@@ -3502,6 +3534,9 @@ impl Mob {
             MobType::HappyGhast => happy_ghast::attributes(),
             MobType::Vindicator => vindicator::attributes(),
             MobType::Ravager => ravager::attributes(),
+            MobType::Evoker => evoker::attributes(),
+            MobType::Vex => vex::attributes(),
+            MobType::Illusioner => illusioner::attributes(),
             MobType::Allay => allay::attributes(),
             kind => equine::attributes(kind),
         };
@@ -3590,6 +3625,9 @@ impl Mob {
             MobType::Pillager => pillager::goals(&mut navigation),
             MobType::Vindicator => vindicator::goals(&mut navigation),
             MobType::Ravager => ravager::goals(&mut navigation),
+            MobType::Evoker => evoker::goals(&mut navigation),
+            MobType::Vex => vex::goals(&mut navigation),
+            MobType::Illusioner => illusioner::goals(&mut navigation),
             // 蝙蝠和骆驼没有覆写 `registerGoals`：两个选择器都是空的（骆驼不要 `equine::goals`）。
             // Bats and camels do not override `registerGoals`: both selectors stay empty
             // (no `equine::goals` for camels).
@@ -3728,6 +3766,9 @@ impl Mob {
             MobType::Pillager => pillager::targets(),
             MobType::Vindicator => vindicator::targets(),
             MobType::Ravager => ravager::targets(),
+            MobType::Evoker => evoker::targets(),
+            MobType::Vex => vex::targets(),
+            MobType::Illusioner => illusioner::targets(),
             MobType::SkeletonHorse | MobType::ZombieHorse => GoalSelector::default(),
             MobType::IronGolem => iron_golem::target_goals(),
             MobType::SnowGolem => snow_golem::target_goals(),
@@ -3762,6 +3803,7 @@ impl Mob {
             last_crystal_sound_tick: 0,
             silent: false,
             no_gravity: false,
+            no_physics: false,
             invulnerable: false,
             custom_name: None,
             custom_name_visible: false,
@@ -3931,6 +3973,10 @@ impl Mob {
             witch_drinking: false,
             vindicator: vindicator::VindicatorState::default(),
             ravager: ravager::RavagerState::default(),
+            evoker: evoker::EvokerState::default(),
+            spellcaster: spellcaster::SpellcasterState::default(),
+            vex: vex::VexState::default(),
+            illusioner: illusioner::IllusionerState::default(),
             raider: raider::Raider::default(),
             crossbow: crossbow::CrossbowUse::default(),
             pillager: pillager::Pillager::default(),
@@ -4461,6 +4507,10 @@ pub struct MobPublic {
     ///
     /// Whether the raw target is set; read when alerting others.
     pub has_target: bool,
+    /// 原始的 `target` uid；恼鬼的 `VexCopyOwnerTargetGoal` 复制主人目标时读它。
+    ///
+    /// The raw target uid; read by the vex's `VexCopyOwnerTargetGoal`.
+    pub target: Option<EntityUid>,
     /// 狼的元数据：讨食、项圈、仇恨结束时刻、品种、叫声。
     ///
     /// The wolf metadata: interested, collar, anger end, variant, sound variant.
@@ -4744,6 +4794,7 @@ impl MobPublic {
             tame_flags: mob.tame.flags,
             owner: mob.tame.owner,
             has_target: mob.target.is_some(),
+            target: mob.target,
             wolf_interested: mob.wolf.interested,
             wolf_collar: mob.wolf.collar,
             wolf_anger_end_time: mob.wolf.anger_end_time,
@@ -4957,6 +5008,121 @@ mod tests {
     use super::*;
     use crate::entity::Entity;
     use mc_bamboo_data::registries::attribute;
+
+    /// `DamageKind` 的每个 `#xxx` 判断都读生成的官方标签：各挑几个在 / 不在标签里的例子。
+    ///
+    /// Every `#xxx` check on `DamageKind` reads the generated vanilla tag; this
+    /// samples members and non-members of each.
+    #[test]
+    fn damage_kind_tags_follow_the_vanilla_tags() {
+        use DamageKind as D;
+        assert!(D::Explosion.no_knockback());
+        assert!(!D::PlayerAttack.no_knockback());
+        assert!(!D::Sting.no_knockback());
+
+        assert!(D::Generic.bypasses_armor());
+        assert!(D::Starve.bypasses_armor());
+        assert!(!D::MobAttack.bypasses_armor());
+
+        assert!(D::Starve.bypasses_effects());
+        assert!(!D::OutOfWorld.bypasses_effects());
+        assert!(!D::Generic.bypasses_effects());
+
+        assert!(D::SonicBoom.bypasses_enchantments());
+        assert!(!D::OutOfWorld.bypasses_enchantments());
+        assert!(!D::Generic.bypasses_enchantments());
+
+        assert!(D::InFire.is_fire());
+        assert!(D::SulfurCubeHot.is_fire());
+        assert!(!D::Arrow.is_fire());
+
+        assert!(D::Drown.no_impact());
+        assert!(!D::Fall.no_impact());
+
+        assert!(D::OutOfWorld.bypasses_resistance());
+        assert!(D::GenericKill.bypasses_resistance());
+        assert!(!D::MobAttack.bypasses_resistance());
+
+        assert!(D::OutOfWorld.bypasses_invulnerability());
+        assert!(D::GenericKill.bypasses_invulnerability());
+        assert!(!D::MobAttack.bypasses_invulnerability());
+
+        assert!(!D::MobAttack.bypasses_cooldown());
+
+        assert!(D::MobAttackNoAggro.no_anger());
+        assert!(!D::MobAttack.no_anger());
+
+        assert!(D::Cactus.panic_environmental_causes());
+        assert!(D::SulfurCubeHot.panic_environmental_causes());
+        assert!(!D::MobAttack.panic_environmental_causes());
+
+        assert!(D::Trident.panic_causes());
+        assert!(D::MobAttack.panic_causes());
+        assert!(!D::MobAttackNoAggro.panic_causes());
+        assert!(!D::Thorns.panic_causes());
+
+        assert!(D::Fall.is_fall());
+        assert!(D::EnderPearl.is_fall());
+        assert!(!D::MobAttack.is_fall());
+
+        assert!(D::Explosion.is_explosion());
+        assert!(D::PlayerExplosion.is_explosion());
+        assert!(D::BadRespawnPoint.is_explosion());
+        assert!(!D::MobAttack.is_explosion());
+
+        assert!(D::Arrow.is_projectile());
+        assert!(D::Thrown.is_projectile());
+        assert!(D::WindCharge.is_projectile());
+        assert!(!D::MobAttack.is_projectile());
+
+        assert!(D::Magic.witch_resistant_to());
+        assert!(D::IndirectMagic.witch_resistant_to());
+        assert!(D::SonicBoom.witch_resistant_to());
+        assert!(D::Thorns.witch_resistant_to());
+        assert!(!D::MobAttack.witch_resistant_to());
+    }
+
+    /// `MobType` 的实体类型标签判断读官方标签：各挑几个在 / 不在标签里的例子。
+    ///
+    /// The `MobType` entity-type tag checks read the vanilla tags; this samples
+    /// members and non-members of each.
+    #[test]
+    fn mob_type_tags_follow_the_vanilla_tags() {
+        use MobType as M;
+        assert!(!M::Stray.can_freeze());
+        assert!(!M::PolarBear.can_freeze());
+        assert!(!M::SnowGolem.can_freeze());
+        assert!(!M::Skeleton.can_freeze());
+        assert!(M::Bogged.can_freeze());
+        assert!(M::Cow.can_freeze());
+
+        assert!(M::Squid.can_breathe_under_water());
+        assert!(M::Drowned.can_breathe_under_water());
+        assert!(M::Zombie.can_breathe_under_water());
+        assert!(!M::Cow.can_breathe_under_water());
+        assert!(!M::Dolphin.can_breathe_under_water());
+
+        assert!(M::Zombie.burns_in_daylight());
+        assert!(M::Phantom.burns_in_daylight());
+        assert!(M::ZombieHorse.burns_in_daylight());
+        assert!(!M::Husk.burns_in_daylight());
+        assert!(!M::Parched.burns_in_daylight());
+
+        assert!(M::Breeze.deflects_projectiles());
+        assert!(!M::Cow.deflects_projectiles());
+
+        assert!(!M::Slime.can_control_vehicle());
+        assert!(!M::SulfurCube.can_control_vehicle());
+        assert!(M::Zombie.can_control_vehicle());
+        assert!(M::Pillager.can_control_vehicle());
+
+        assert!(M::Pillager.in_entity_tag("minecraft:raiders"));
+        assert!(M::Witch.in_entity_tag("minecraft:raiders"));
+        assert!(!M::Zombie.in_entity_tag("minecraft:raiders"));
+
+        assert!(M::Pufferfish.in_entity_tag("minecraft:nautilus_hostiles"));
+        assert!(!M::Cod.in_entity_tag("minecraft:nautilus_hostiles"));
+    }
 
     /// 官方 `Zombie.createAttributes` 的四个覆盖值和元数据 index 都从字节码导出。
     #[test]

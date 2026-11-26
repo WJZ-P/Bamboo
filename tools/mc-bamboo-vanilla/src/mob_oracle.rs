@@ -267,7 +267,17 @@ enum Line {
     Breeze(Box<breeze::BreezeCase>),
     Allay(Box<allay::AllayCase>),
     AllaySave(allay::AllaySaveCase),
+    SpellcasterSave(SpellcasterSaveCase),
     End(End),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SpellcasterSaveCase {
+    kind: i32,
+    filled: bool,
+    nbt: String,
+    reloaded: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2318,6 +2328,79 @@ fn run_with_options(mut command: Command, options: &[&str]) -> Result<(), String
 }
 
 impl Report {
+    fn replay_spellcaster_save(&mut self, case: &SpellcasterSaveCase) {
+        use mc_bamboo_blocks::entity::mob::{MobType, nbt};
+        self.cases += 1;
+        let (mob_type, name, keys): (MobType, &str, &[&str]) = match case.kind {
+            63 => (
+                MobType::Evoker,
+                "evoker",
+                &[
+                    "Health",
+                    "SpellTicks",
+                    "CanJoinRaid",
+                    "PatrolLeader",
+                    "Patrolling",
+                    "Wave",
+                ],
+            ),
+            64 => (
+                MobType::Vex,
+                "vex",
+                &["Health", "bound_pos", "life_ticks", "owner", "equipment"],
+            ),
+            _ => (
+                MobType::Illusioner,
+                "illusioner",
+                &[
+                    "Health",
+                    "SpellTicks",
+                    "CanJoinRaid",
+                    "PatrolLeader",
+                    "Patrolling",
+                    "Wave",
+                    "equipment",
+                ],
+            ),
+        };
+        let label = format!("{name} save filled {}", case.filled);
+        let official = match mc_bamboo_nbt::parse_snbt(&case.nbt) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!("{label}: SNBT does not parse: {error:?}"));
+                return;
+            }
+        };
+        let reloaded = match mc_bamboo_nbt::parse_snbt(&case.reloaded) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!("{label}: reloaded SNBT does not parse: {error:?}"));
+                return;
+            }
+        };
+        let mut entity = Entity::by_mob_type(mob_type, Vec3::default());
+        if let Err(error) = nbt::load_into(&mut entity, &official) {
+            self.mismatch(format!("{label}: load failed: {error:?}"));
+            return;
+        }
+        let ours = match nbt::write_mob(&entity.split()) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!("{label}: save failed: {error:?}"));
+                return;
+            }
+        };
+        for key in keys {
+            let expected = small_mob::save_field(&reloaded, key).map(small_mob::canonical_tag);
+            let actual = small_mob::save_field(&ours, key).map(small_mob::canonical_tag);
+            if expected != actual {
+                self.mismatch(format!(
+                    "{label} {key}: official {expected:?}, bamboo {actual:?}"
+                ));
+            }
+        }
+    }
+
     fn read(&mut self, source: BufReader<impl Read>) -> Result<(), String> {
         for line in source.lines() {
             let line = line.map_err(|error| format!("cannot read from java: {error}"))?;
@@ -2413,6 +2496,7 @@ impl Report {
                 Line::Breeze(case) => self.replay_breeze(&case),
                 Line::Allay(case) => self.replay_allay(&case),
                 Line::AllaySave(case) => self.replay_allay_save(&case),
+                Line::SpellcasterSave(case) => self.replay_spellcaster_save(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
@@ -2816,6 +2900,7 @@ impl Report {
         }
         // 改坏确认：故意改一处生产参数，对拍必须报不一致。
         let break_test = self.break_test.as_deref();
+        mc_bamboo_blocks::entity::mob::spellcaster::set_oracle_tamper(break_test.unwrap_or(""));
         let mut level = MobLevel {
             blocks: HashMap::new(),
             random: LevelRandom::new(1),
@@ -3037,6 +3122,9 @@ impl Report {
                     54 => mc_bamboo_blocks::entity::mob::MobType::Vindicator,
                     55 => mc_bamboo_blocks::entity::mob::MobType::Ravager,
                     56 => mc_bamboo_blocks::entity::mob::MobType::Villager,
+                    63 => mc_bamboo_blocks::entity::mob::MobType::Evoker,
+                    64 => mc_bamboo_blocks::entity::mob::MobType::Vex,
+                    65 => mc_bamboo_blocks::entity::mob::MobType::Illusioner,
                     60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
                     61 => mc_bamboo_blocks::entity::mob::MobType::Parched,
                     62 => mc_bamboo_blocks::entity::mob::MobType::CamelHusk,
@@ -3123,6 +3211,24 @@ impl Report {
                             }
                         }
                         pillager::setup(&case.name, index, mob);
+                        if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Illusioner {
+                            // `IllusionerScenes.setup`：幻术师主手要一把弓，`RangedBowAttackGoal`
+                            // 才射得出去（`finalizeSpawn` 不跑，两边都手动装备）。
+                            // `IllusionerScenes.setup`: the illusioner needs a bow in hand for
+                            // `RangedBowAttackGoal`; `finalizeSpawn` is skipped, so equip it.
+                            mob.equipment.set(
+                                mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand,
+                                ItemStack::new(mc_bamboo_data::items::BOW, 1),
+                            );
+                        }
+                        if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Vex
+                            && case.name.starts_with("vex_life")
+                        {
+                            // `SpellScenes.setup`：恼鬼有限生命场景给 20 刻的倒计时。
+                            // `SpellScenes.setup`: the limited-life scenes start at 20 ticks.
+                            mob.vex.has_limited_life = true;
+                            mob.vex.limited_life_ticks = 20;
+                        }
                         if case.raid.is_some() && mob.mob_type.is_raider() {
                             // 袭击行为场景：生物已经加入袭击（和 Java 侧 `setCurrentRaid` 对齐）。
                             mob.raider.raid_id = Some(1);
@@ -3373,6 +3479,23 @@ impl Report {
                 let stack = mc_bamboo_blocks::entity::mob::raider::ominous_banner();
                 let item = Entity::ground_item_with_delta(position, stack, Vec3::default());
                 world.spawn_entity(item);
+            }
+        }
+        // 官方一侧每个玩家构造都从实体表取一个号（之后 `setId` 覆盖成 `FIRST_ID + 1024`），
+        // Bamboo 的玩家不进实体表，所以跳过同样数量的号，让后面生成的实体（恼鬼、尖牙、
+        // 箭）ID 对齐。
+        // Vanilla's player constructor draws one id from the entity table (then `setId`
+        // overrides it to `FIRST_ID + 1024`); Bamboo players are not in the table, so skip
+        // the same number of ids to align later spawned entities (vexes, fangs, arrows).
+        // 只有会再生成实体的法术场景需要对齐，其它场景的实体种子和 ID 顺序不动。
+        // Only the spell scenes that spawn entities later need the alignment; every
+        // other scene keeps its entity seeds and id order untouched.
+        if case.name.starts_with("evoker_")
+            || case.name.starts_with("vex_")
+            || case.name.starts_with("illusioner_")
+        {
+            for _ in 0..case.players.len() {
+                level.entities.ids_handle().allocate();
             }
         }
         let Some(first) = case.steps.first() else {
@@ -3733,7 +3856,14 @@ impl Report {
                     .spawns
                     .as_ref()
                     .and_then(|spawns| spawns.get(index))
-                    .and_then(|step| step.iter().find(|spawn| spawn.kind == "cow"));
+                    .and_then(|step| step.iter().find(|spawn| spawn.id == public.uid))
+                    .or_else(|| {
+                        // 旧场景的幼崽只按 `cow` 种类找（单个幼崽）；没有 id 匹配时回退。
+                        case.spawns
+                            .as_ref()
+                            .and_then(|spawns| spawns.get(index))
+                            .and_then(|step| step.iter().find(|spawn| spawn.kind == "cow"))
+                    });
                 let Some(setup) = setup else {
                     continue;
                 };
@@ -5385,6 +5515,10 @@ fn spawn_snapshot(
                 KindPublic::Item { stack, .. } => ("item".to_owned(), stack.item, stack.count, 0),
                 KindPublic::ExperienceOrb { value } => ("orb".to_owned(), 0, 0, *value),
                 KindPublic::Mob(mob) => ("cow".to_owned(), 0, 0, mob.age),
+                // 尖牙只比生成位置；暖机延迟在 `KindPublic` 里没有同步字段。
+                // Fangs compare position only; the warmup delay has no synced field.
+                KindPublic::EvokerFangs => ("fangs".to_owned(), 0, 0, 0),
+                KindPublic::Arrow(_) => ("other".to_owned(), 0, 0, 0),
                 _ => return None,
             };
             Some(Spawn {
@@ -6183,6 +6317,23 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
             )
         }
         MobType::Pillager => pillager::state(mob),
+        MobType::Evoker => format!(
+            "evoker:{}:{}:{}",
+            mob.spellcaster.spell_casting_tick_count,
+            mob.spellcaster.current_spell.id(),
+            mob.evoker
+                .wololo_target
+                .map_or_else(|| "-".to_owned(), |uid| uid.to_string()),
+        ),
+        MobType::Vex => format!(
+            "vex:{}:{}:{}",
+            mob.vex.charging, mob.vex.has_limited_life, mob.vex.limited_life_ticks,
+        ),
+        MobType::Illusioner => format!(
+            "illusioner:{}:{}",
+            mob.spellcaster.spell_casting_tick_count,
+            mob.spellcaster.current_spell.id(),
+        ),
         MobType::Ravager => format!(
             "ravager:{}:{}:{}:{}:{}",
             mob.raider.wave,

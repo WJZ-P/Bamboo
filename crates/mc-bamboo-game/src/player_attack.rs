@@ -23,7 +23,7 @@ use mc_bamboo_data::{
     SOUND_EVENTS, gamerules, items,
     registries::{attribute, data_component_type as kinds, mob_effect, particle_type},
     sounds,
-    tags::{self, item_tags},
+    tags::item_tags,
 };
 use mc_bamboo_protocol::{
     codec::write_varint,
@@ -172,11 +172,7 @@ fn enchantment_level(held: &ItemStack, name: &str) -> i32 {
 ///
 /// `EntityTypePredicate.of(entityTypes, tag)`: whether the target type is in a tag.
 fn entity_in_tag(name: &str, entity_type: i32) -> bool {
-    tags::TAG_GROUPS
-        .iter()
-        .find(|group| group.registry == "minecraft:entity_type")
-        .and_then(|group| group.tags.iter().find(|tag| tag.name == name))
-        .is_some_and(|tag| tag.ids.contains(&entity_type))
+    mc_bamboo_data::in_tag("minecraft:entity_type", name, entity_type)
 }
 
 /// `EnchantmentHelper.modifyDamage`：锋利无条件，亡灵杀手 / 节肢杀手看目标类型。

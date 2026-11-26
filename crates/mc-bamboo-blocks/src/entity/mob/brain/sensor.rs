@@ -653,10 +653,9 @@ fn sense_nearest_adult_any_type(cx: &mut Cx) {
     }
     let adult = find_closest_visible(cx, &mut |view| {
         !view.baby
-            && view.mob_type.is_some_and(|kind| {
-                mc_bamboo_data::entity_type_tag("minecraft:followable_friendly_mobs")
-                    .is_some_and(|ids| ids.contains(&kind.entity_type()))
-            })
+            && view
+                .mob_type
+                .is_some_and(|kind| kind.in_entity_tag("minecraft:followable_friendly_mobs"))
     });
     cx.memories.set_or_erase(
         MemoryType::NearestVisibleAdult,

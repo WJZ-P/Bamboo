@@ -20,6 +20,8 @@ pub(crate) fn bow_slot(mob: &Mob) -> Option<EquipmentSlot> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BowGoal {
     interval: i32,
+    /// `RangedBowAttackGoal` 的速度倍率；骷髅是 1.0，幻术师是 0.5。
+    speed: f64,
     attack_time: i32,
     see_time: i32,
     strafing_time: i32,
@@ -53,6 +55,24 @@ impl BowGoal {
         };
         Self {
             interval: if difficulty == 3 { hard } else { normal },
+            speed: 1.0,
+            attack_time: -1,
+            see_time: 0,
+            strafing_time: -1,
+            strafing_clockwise: false,
+            strafing_backwards: false,
+            draw_start: None,
+        }
+    }
+
+    /// `Illusioner` 的 `RangedBowAttackGoal(0.5, 20, 15.0F)`：速度 0.5、固定 20 刻间隔。
+    ///
+    /// The illusioner's `RangedBowAttackGoal(0.5, 20, 15.0F)`: speed 0.5, fixed 20-tick
+    /// interval.
+    pub(crate) fn illusioner() -> Self {
+        Self {
+            interval: 20,
+            speed: 0.5,
             attack_time: -1,
             see_time: 0,
             strafing_time: -1,
@@ -143,7 +163,7 @@ impl BowGoal {
             let reach = if mob.navigation.wall_climber { 0 } else { 1 };
             let nav = living::nav_mob(me, mob, view);
             mob.navigation
-                .move_to_entity(view, &nav, target.position, 1.0, reach);
+                .move_to_entity(view, &nav, target.position, self.speed, reach);
             self.strafing_time = -1;
         }
         if self.strafing_time >= 20 {

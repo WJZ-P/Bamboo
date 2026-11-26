@@ -8,6 +8,8 @@
 mod generated;
 
 use mc_bamboo_core::Aabb;
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
 /// 配方表的数据结构和官方数据包导出的全部配方。
 pub mod recipe;
@@ -295,6 +297,64 @@ pub struct ItemTag {
 pub struct FluidTag {
     pub name: &'static str,
     pub index: usize,
+}
+
+/// 一个注册表里全部标签的位集索引：标签名 → 按条目 ID 编号的位集。
+///
+/// A bitset index of every tag in one registry: tag name → a bitset over entry ids.
+type TagIndex = HashMap<&'static str, Box<[u64]>>;
+
+/// 全部注册表的标签位集索引，第一次用到时从 [`tags::TAG_GROUPS`] 展开。热路径上的
+/// 标签查询因此不再扫 `TAG_GROUPS`，而是两次散列加一次位测试。
+///
+/// The bitset index of every registry, expanded from [`tags::TAG_GROUPS`] on first
+/// use. Tag lookups on the hot path then cost two hashes and one bit test instead of
+/// a scan over `TAG_GROUPS`.
+static TAG_BITSETS: LazyLock<HashMap<&'static str, TagIndex>> = LazyLock::new(build_tag_index);
+
+/// `id` 是否在 `registry` 注册表的 `tag` 标签里。`registry` 是注册表全名
+/// （如 `minecraft:damage_type`），`tag` 是标签全名（如 `minecraft:no_knockback`）。
+/// 未知的注册表 / 标签 / 条目都返回 `false`。
+///
+/// Whether entry `id` is in `tag` of registry `registry`. `registry` is the full
+/// registry name (e.g. `minecraft:damage_type`) and `tag` the full tag name
+/// (e.g. `minecraft:no_knockback`). Unknown registries, tags and entries are `false`.
+pub fn in_tag(registry: &str, tag: &str, id: i32) -> bool {
+    let Ok(id) = usize::try_from(id) else {
+        return false;
+    };
+    let Some(bits) = TAG_BITSETS.get(registry).and_then(|tags| tags.get(tag)) else {
+        return false;
+    };
+    let word = id / 64;
+    let bit = id % 64;
+    bits.get(word).is_some_and(|word| (word >> bit) & 1 != 0)
+}
+
+/// 把 [`tags::TAG_GROUPS`] 展开成「注册表 → 标签名 → 位集」。标签里的 ID 都是注册表 ID，
+/// 生成器保证非负；这里按 64 位一个字展开。
+///
+/// Expand [`tags::TAG_GROUPS`] into registry → tag name → bitset. Tag ids are registry
+/// ids, guaranteed non-negative by the generator; one `u64` word per 64 ids here.
+fn build_tag_index() -> HashMap<&'static str, TagIndex> {
+    let mut registries: HashMap<&'static str, TagIndex> = HashMap::new();
+    for group in tags::TAG_GROUPS {
+        let index = registries.entry(group.registry).or_default();
+        for tag in group.tags {
+            let words = tag
+                .ids
+                .iter()
+                .map(|&id| (id as usize / 64) + 1)
+                .max()
+                .unwrap_or(0);
+            let mut bits = vec![0u64; words];
+            for &id in tag.ids {
+                bits[id as usize / 64] |= 1 << (id as usize % 64);
+            }
+            index.insert(tag.name, bits.into_boxed_slice());
+        }
+    }
+    registries
 }
 
 /// 方块的一个属性，顺序和官方 `StateDefinition` 相同。
@@ -786,17 +846,29 @@ const CLIENT_SYNCABLE_ATTRIBUTES: &[&str] = &[
     "minecraft:water_movement_efficiency",
 ];
 
+/// `minecraft:damage_type` 注册表名 → ID 索引，首次用到时从 [`registries::SYNCED_REGISTRIES`] 构建。
+///
+/// The `minecraft:damage_type` name → registry id map, built once from [`registries::SYNCED_REGISTRIES`].
+static DAMAGE_TYPE_IDS: LazyLock<HashMap<&'static str, i32>> = LazyLock::new(|| {
+    registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:damage_type")
+        .map(|registry| {
+            registry
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(id, &name)| i32::try_from(id).ok().map(|id| (name, id)))
+                .collect()
+        })
+        .unwrap_or_default()
+});
+
 /// `minecraft:damage_type` 注册表 ID；顺序和配置阶段同步给客户端的表一致。
 ///
 /// The `minecraft:damage_type` registry id, in the order sent to the client.
 pub fn damage_type_id(name: &str) -> Option<i32> {
-    registries::SYNCED_REGISTRIES
-        .iter()
-        .find(|registry| registry.name == "minecraft:damage_type")?
-        .entries
-        .iter()
-        .position(|entry| *entry == name)
-        .and_then(|id| i32::try_from(id).ok())
+    DAMAGE_TYPE_IDS.get(name).copied()
 }
 
 /// 这个属性 ID 要不要同步给客户端（`Attribute.isClientSyncable`）。
@@ -1966,5 +2038,34 @@ mod tests {
         assert_eq!(block_tag("minecraft:no_such_tag"), None);
         // 这是物品标签，方块标签里没有同名的。
         assert_eq!(block_tag("minecraft:swords"), None);
+    }
+
+    /// `in_tag` 的位集索引和 `tags::TAG_GROUPS` 逐项一致，未知注册表 / 标签 / 负 ID 均返回假。
+    ///
+    /// The `in_tag` bitset index matches `tags::TAG_GROUPS` on every entry, and unknown
+    /// registries, tags or negative ids return false.
+    #[test]
+    fn in_tag_matches_generated_tag_groups() {
+        let fall = damage_type_id("minecraft:fall").expect("fall exists");
+        let arrow = damage_type_id("minecraft:arrow").expect("arrow exists");
+        assert!(in_tag("minecraft:damage_type", "minecraft:is_fall", fall));
+        assert!(!in_tag("minecraft:damage_type", "minecraft:is_fall", arrow));
+        assert!(!in_tag(
+            "minecraft:damage_type",
+            "minecraft:no_such_tag",
+            fall
+        ));
+        assert!(!in_tag(
+            "minecraft:no_such_registry",
+            "minecraft:is_fall",
+            fall
+        ));
+        assert!(!in_tag("minecraft:damage_type", "minecraft:is_fall", -1));
+        assert!(!in_tag(
+            "minecraft:damage_type",
+            "minecraft:is_fall",
+            i32::MAX
+        ));
+        assert_eq!(damage_type_id("minecraft:no_such_damage"), None);
     }
 }

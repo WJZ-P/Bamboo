@@ -47,12 +47,7 @@ fn has_controlling_passenger(mob: &Mob, ctx: &dyn EntityCtx) -> bool {
         return true;
     }
     ctx.other(first).is_some_and(|public| match &public.kind {
-        // `#non_controlling_rider` 里建模的是史莱姆和硫磺方块怪（岩浆怪未建模）。
-        // The modelled #non_controlling_rider members are slime and sulfur cube.
-        KindPublic::Mob(rider) => !matches!(
-            rider.mob_type,
-            super::MobType::Slime | super::MobType::SulfurCube
-        ),
+        KindPublic::Mob(rider) => rider.mob_type.can_control_vehicle(),
         _ => false,
     })
 }
@@ -84,6 +79,18 @@ pub enum Goal {
     ///
     /// The raider-branch goals: patrol, hold ground, crossbow and watching other mobs.
     Raider(super::raider::RaiderGoal),
+    /// 唤魔者的施法与三个法术目标。
+    ///
+    /// The evoker's casting and three spell goals.
+    Evoker(super::evoker::EvokerGoal),
+    /// 恼鬼的冲锋、随机飞与复制主人目标。
+    ///
+    /// The vex's charge, random move and owner-target copying.
+    Vex(super::vex::VexGoal),
+    /// 幻术师的施法、分身与致盲目标。
+    ///
+    /// The illusioner's casting, mirror and blindness goals.
+    Illusioner(super::illusioner::IllusionerGoal),
     /// 海豚自己的目标（呼吸、找水、引路、跃水、玩物品、跟船）。
     ///
     /// The dolphin's own goals (breathing, finding water, treasure leading, jumping,
@@ -842,6 +849,9 @@ impl Goal {
             Self::Tame(goal) => goal.flags(),
             Self::Wolf(goal) => goal.flags(),
             Self::Raider(goal) => goal.flags(),
+            Self::Evoker(goal) => goal.flags(),
+            Self::Vex(goal) => goal.flags(),
+            Self::Illusioner(goal) => goal.flags(),
             Self::Dolphin(goal) => goal.flags(),
             Self::Cat(goal) => goal.flags(),
             Self::Parrot(goal) => goal.flags(),
@@ -929,6 +939,15 @@ impl Goal {
             return goal.every_tick();
         }
         if let Self::Raider(goal) = self {
+            return goal.every_tick();
+        }
+        if let Self::Evoker(goal) = self {
+            return goal.every_tick();
+        }
+        if let Self::Vex(goal) = self {
+            return goal.every_tick();
+        }
+        if let Self::Illusioner(goal) = self {
             return goal.every_tick();
         }
         if let Self::Cat(goal) = self {
@@ -1022,6 +1041,9 @@ impl Goal {
             Self::Tame(goal) => goal.name(),
             Self::Wolf(goal) => goal.name(),
             Self::Raider(goal) => goal.name(),
+            Self::Evoker(goal) => goal.name(),
+            Self::Vex(goal) => goal.name(),
+            Self::Illusioner(goal) => goal.name(),
             Self::Dolphin(goal) => goal.name(),
             Self::Cat(goal) => goal.name(),
             Self::Parrot(goal) => goal.name(),
@@ -2060,6 +2082,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::Tame(goal) => goal.can_use(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_use(me, mob, ctx),
         Goal::Raider(goal) => goal.can_use(me, mob, ctx),
+        Goal::Evoker(goal) => goal.can_use(me, mob, ctx),
+        Goal::Vex(goal) => goal.can_use(me, mob, ctx),
+        Goal::Illusioner(goal) => goal.can_use(me, mob, ctx),
         Goal::Dolphin(goal) => goal.can_use(me, mob, ctx),
         Goal::Cat(goal) => goal.can_use(me, mob, ctx),
         Goal::Parrot(goal) => goal.can_use(me, mob, ctx),
@@ -2941,6 +2966,9 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::Tame(goal) => goal.can_continue(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_continue(me, mob, ctx),
         Goal::Raider(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Evoker(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Vex(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Illusioner(goal) => goal.can_continue(me, mob, ctx),
         Goal::Dolphin(goal) => goal.can_continue(me, mob, ctx),
         Goal::Cat(goal) => goal.can_continue(me, mob, ctx),
         Goal::Parrot(goal) => goal.can_continue(me, mob, ctx),
@@ -3231,6 +3259,25 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         }
         Goal::NearestAttackableTarget {
             unseen_ticks,
+            kind: TargetType::Player,
+            must_see: true,
+            ..
+        } if matches!(
+            mob.mob_type,
+            super::MobType::Evoker | super::MobType::Illusioner
+        ) =>
+        {
+            // `NearestAttackableTargetGoal(Player.class, true).setUnseenMemoryTicks(300)`：
+            // 唤魔者 / 幻术师追玩家记 300 刻视线丢失。村民和铁傀儡目标都是
+            // `mustSee=false`，不记视线丢失。
+            //
+            // `NearestAttackableTargetGoal(Player.class, true).setUnseenMemoryTicks(300)`:
+            // evokers and illusioners remember an unseen player for 300 ticks. Their
+            // villager and golem targets are `mustSee=false` and keep no memory.
+            target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 300)
+        }
+        Goal::NearestAttackableTarget {
+            unseen_ticks,
             must_see: true,
             ..
         } if mob.mob_type.uses_target_memory() => {
@@ -3349,6 +3396,9 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::Tame(goal) => goal.start(me, mob, ctx),
         Goal::Wolf(goal) => goal.start(me, mob, ctx),
         Goal::Raider(goal) => goal.start(me, mob, ctx),
+        Goal::Evoker(goal) => goal.start(me, mob, ctx),
+        Goal::Vex(goal) => goal.start(me, mob, ctx),
+        Goal::Illusioner(goal) => goal.start(me, mob, ctx),
         Goal::Dolphin(goal) => goal.start(me, mob, ctx),
         Goal::Cat(goal) => goal.start(me, mob, ctx),
         Goal::Parrot(goal) => goal.start(me, mob, ctx),
@@ -3582,9 +3632,19 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             if mob.mob_type == super::MobType::Panda {
                 super::panda::alert_pandas(me, mob, ctx);
             }
-            // `Pillager` 的 `HurtByTargetGoal(this, Raider.class).setAlertOthers()`。
-            // The pillager's `HurtByTargetGoal(this, Raider.class).setAlertOthers()`.
-            if mob.mob_type == super::MobType::Pillager {
+            // 五个 illager 的 `HurtByTargetGoal(this, Raider.class).setAlertOthers(new Class[0])`：
+            // 女巫没有 `setAlertOthers`，不叫同类。
+            //
+            // The five illagers' `HurtByTargetGoal(this, Raider.class).setAlertOthers(new
+            // Class[0])`; witches do not call `setAlertOthers`, so they stay silent.
+            if matches!(
+                mob.mob_type,
+                super::MobType::Pillager
+                    | super::MobType::Vindicator
+                    | super::MobType::Ravager
+                    | super::MobType::Evoker
+                    | super::MobType::Illusioner
+            ) {
                 super::raider::alert_same_kind(me, mob, ctx);
             }
         }
@@ -3718,6 +3778,9 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Tame(goal) => goal.stop(mob),
         Goal::Wolf(goal) => goal.stop(mob),
         Goal::Raider(goal) => goal.stop(me, mob, ctx),
+        Goal::Evoker(goal) => goal.stop(me, mob, ctx),
+        Goal::Vex(goal) => goal.stop(me, mob, ctx),
+        Goal::Illusioner(goal) => goal.stop(me, mob, ctx),
         Goal::Dolphin(goal) => goal.stop(me, mob, ctx),
         Goal::Cat(goal) => goal.stop(mob),
         Goal::Parrot(goal) => goal.stop(mob),
@@ -4363,6 +4426,9 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Tame(goal) => goal.tick(me, mob, ctx),
         Goal::Wolf(goal) => goal.tick(me, mob, ctx),
         Goal::Raider(goal) => goal.tick(me, mob, ctx),
+        Goal::Evoker(goal) => goal.tick(me, mob, ctx),
+        Goal::Vex(goal) => goal.tick(me, mob, ctx),
+        Goal::Illusioner(goal) => goal.tick(me, mob, ctx),
         Goal::Dolphin(goal) => goal.tick(me, mob, ctx),
         Goal::Cat(goal) => goal.tick(me, mob, ctx),
         Goal::Parrot(goal) => goal.tick(me, mob, ctx),
@@ -4698,14 +4764,7 @@ pub(crate) fn target_still_seen(
 
 /// 一种伤害在不在某个 `minecraft:damage_type` 标签里。
 pub(super) fn damage_type_tagged(tag: &str, kind: super::DamageKind) -> bool {
-    let Some(id) = mc_bamboo_data::damage_type_id(kind.name()) else {
-        return false;
-    };
-    mc_bamboo_data::tags::TAG_GROUPS
-        .iter()
-        .filter(|group| group.registry == "minecraft:damage_type")
-        .flat_map(|group| group.tags.iter())
-        .any(|entry| entry.name == tag && entry.ids.contains(&id))
+    kind.in_tag(tag)
 }
 
 /// `PanicGoal.lookForWater`：脚下没有碰撞时，按曼哈顿距离找最近的水。
