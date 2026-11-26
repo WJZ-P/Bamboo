@@ -153,6 +153,9 @@ pub(crate) struct EntitySync {
     last_sent_movement: Vec3,
     /// 元数据变了：这一 tick 进入周期，把变化发给观察者和玩家自己。
     pub(crate) metadata_dirty: bool,
+    /// 0 号标志字节在 `SynchedEntityData` 里被强制标脏：值没变也要在下一个周期发出。
+    /// 官方 `stopFallFlying` 先设再清这一位，`packDirty` 只看 `DataItem.isDirty()`。
+    pub(crate) force_shared_flags: bool,
     /// 按着潜行键。来自 `player_input`。
     pub(crate) shift_key_down: bool,
     /// 正在飞行。来自 `player_abilities`。
@@ -199,6 +202,7 @@ impl EntitySync {
             shared_flags: 0,
             last_sent_movement: Vec3::default(),
             metadata_dirty: false,
+            force_shared_flags: false,
             shift_key_down: false,
             flying: false,
             base: position,
@@ -465,7 +469,10 @@ fn worn_equipment(player: &Player) -> Vec<(EquipmentSlot, &ItemStack)> {
 /// 每名玩家每 tick 调用一次。`entities.md` 7.2。
 fn send_changes(player: &mut Player, links: &mut Links) {
     player.sync.ticks_since_cycle += 1;
-    if player.sync.tick_count.is_multiple_of(UPDATE_INTERVAL) || player.sync.metadata_dirty {
+    if player.sync.tick_count.is_multiple_of(UPDATE_INTERVAL)
+        || player.sync.metadata_dirty
+        || player.sync.force_shared_flags
+    {
         run_cycle(player, links);
     }
     player.sync.tick_count += 1;
@@ -624,14 +631,20 @@ fn has_moved(base: Vec3, position: Vec3) -> bool {
     dx * dx + dy * dy + dz * dz >= POSITION_TOLERANCE
 }
 
-/// 取走这个周期要发的元数据：只有变了的项。什么都没变时是空的。
+/// 取走这个周期要发的元数据：`changes_since` 的变化项，加上被强制标脏的 0 号。
+/// 官方 `packDirty` 按 `itemsById` 遍历，所以 index 0 排在最前，和值变没变无关。
 fn take_metadata_frames(player: &mut Player) -> Vec<u8> {
-    if !mem::take(&mut player.sync.metadata_dirty) {
+    let changed = mem::take(&mut player.sync.metadata_dirty);
+    let forced = mem::take(&mut player.sync.force_shared_flags);
+    if !changed && !forced {
         return Vec::new();
     }
     let current = Metadata::of(player);
-    let items = current.changes_since(&player.sync.sent_metadata);
+    let mut items = current.changes_since(&player.sync.sent_metadata);
     player.sync.sent_metadata = current;
+    if forced && !items.first().is_some_and(|item| item.index() == 0) {
+        items.insert(0, EntityData::SharedFlags(player.sync.shared_flags));
+    }
     if items.is_empty() {
         return Vec::new();
     }
@@ -827,24 +840,16 @@ pub(crate) fn set_sprinting(region: &mut Region, id: PlayerId, sprinting: bool) 
     }
 }
 
-/// 客户端已经在本地开始滑翔了，而这个状态只有服务端能清，不回应的话玩家落地后走不了路。
-/// The client has already started gliding locally. Send back the cleared flag even if it was unchanged.
+/// `stopFallFlying` 把 0 号标志位先设再清，`SynchedEntityData` 里这一项因此标脏：
+/// 即使值没变，下一个 `sendDirtyEntityData` 也会把它发给观察者和本人。
+/// The set-then-clear in `stopFallFlying` leaves data item 0 dirty, so the next
+/// `sendDirtyEntityData` broadcasts it to trackers and self even when unchanged.
 fn refuse_fall_flying(region: &mut Region, id: PlayerId) {
     let Some(player) = region.players.get_mut(&id) else {
         return;
     };
     player.sync.set_fall_flying(false);
-    if player.sync.sent_metadata.shared_flags & ENTITY_FLAG_FALL_FLYING != 0 {
-        return;
-    }
-    let flags = player.sync.shared_flags;
-    region.links.send(
-        id,
-        &SetEntityData {
-            entity_id: id.0,
-            items: &[EntityData::SharedFlags(flags)],
-        },
-    );
+    player.sync.force_shared_flags = true;
 }
 
 #[cfg(test)]

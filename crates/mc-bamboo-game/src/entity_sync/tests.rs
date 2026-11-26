@@ -943,10 +943,11 @@ fn other_player_commands_change_nothing() {
     assert!(stage.flush_own().is_empty());
 }
 
-/// `entities.md` 第 10 节的 `[跑]`。
+/// `entities.md` 第 10 节的 `[跑]`：拒绝时 0 号被强制标脏，下一个周期发给本人和观察者。
 #[test]
-fn fall_flying_refusal_uses_the_current_flags_and_only_reaches_the_player() {
+fn fall_flying_refusal_broadcasts_the_current_flags_in_the_next_cycle() {
     let mut stage = Stage::at(POSITION);
+    stage.skip_first_cycle();
 
     on_player_command(
         &mut stage.region,
@@ -954,10 +955,19 @@ fn fall_flying_refusal_uses_the_current_flags_and_only_reaches_the_player() {
         PlayerCommandKind::StartFallFlying,
         0,
     );
+    // 包在请求到达的这一刻还没有发。
     stage.region.links.flush();
-    assert_eq!(stage.own.take_bytes(), hex("06 65 07 00 00 00 ff"));
+    assert!(stage.own.take_bytes().is_empty());
+    assert!(stage.watcher.take_bytes().is_empty());
+    assert!(stage.player().sync.force_shared_flags);
 
-    // 冲刺还没进入周期，回应也要写上它。
+    stage.step();
+    let cleared = frame(clientbound::SET_ENTITY_DATA, "07 00 00 00 ff");
+    assert_eq!(stage.take_received(), std::slice::from_ref(&cleared));
+    assert_eq!(stage.flush_own(), [cleared]);
+    assert!(!stage.player().sync.force_shared_flags);
+
+    // 冲刺位还没进过周期，强制脏的 0 号也要带上它。
     on_player_command(
         &mut stage.region,
         STEVE,
@@ -970,11 +980,30 @@ fn fall_flying_refusal_uses_the_current_flags_and_only_reaches_the_player() {
         PlayerCommandKind::StartFallFlying,
         0,
     );
-    assert_eq!(
-        stage.flush_own(),
-        [frame(clientbound::SET_ENTITY_DATA, "07 00 00 08 ff")]
+    stage.step();
+    let sprinting = frame(clientbound::SET_ENTITY_DATA, "07 00 00 08 ff");
+    assert_eq!(stage.take_received(), std::slice::from_ref(&sprinting));
+    assert_eq!(stage.flush_own(), [sprinting]);
+}
+
+/// 0 号和别的项一起脏时，按 `packDirty` 的 index 升序只发一次 0 号。
+#[test]
+fn forced_shared_flags_are_merged_into_the_same_cycle() {
+    let mut stage = Stage::at(POSITION);
+    stage.skip_first_cycle();
+
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StartFallFlying,
+        0,
     );
-    assert!(stage.flush_watcher().is_empty());
+    on_player_input(&mut stage.region, STEVE, SHIFT);
+    stage.step();
+
+    let sneaking = frame(clientbound::SET_ENTITY_DATA, "07 00 00 02 06 14 05 ff");
+    assert_eq!(stage.take_received(), std::slice::from_ref(&sneaking));
+    assert_eq!(stage.flush_own(), [sneaking]);
 }
 
 #[test]
