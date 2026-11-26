@@ -1,8 +1,11 @@
 //! `SkullBlock`、`PlayerHeadBlock`、`WitherSkullBlock`，以及挂墙的 `WallSkullBlock`、
 //! `PlayerWallHeadBlock`、`PiglinWallSkullBlock`、`WitherWallSkullBlock`。
 //!
-//! 官方的凋灵头颅在 `setPlacedBy` 里检查召唤凋灵的图案。这个世界没有实体，
-//! 召唤不了，所以它和别的头颅没有区别。
+//! 官方的凋灵头颅在 `setPlacedBy` 里检查召唤凋灵的图案；`checkSpawn` 复用南瓜图案的
+//! 清方块流程并生成一只带无敌期的凋灵。别的头颅放下时什么都不做。
+//!
+//! Vanilla wither skulls run the summon check in `setPlacedBy`; `checkSpawn` reuses
+//! the pumpkin pattern clearing and spawns a wither in its invulnerability phase.
 
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::Block;
@@ -12,7 +15,7 @@ use crate::{
         Behaviour,
         common::{default_state, rotation_segment},
     },
-    context::PlaceContext,
+    context::{Actor, PlaceContext},
     state::{BlockState, HORIZONTAL_FACING, POWERED, ROTATION_16},
     world::{UPDATE_CLIENTS, World},
 };
@@ -53,6 +56,13 @@ impl Behaviour for Skull {
     ) {
         follow_signal(state, world, pos);
     }
+
+    /// `WitherSkullBlock.setPlacedBy`：只有凋灵头颅才走 `checkSpawn`，别的头颅是空操作。
+    ///
+    /// `WitherSkullBlock.setPlacedBy`: only wither skulls run `checkSpawn`.
+    fn set_placed_by(&self, _state: BlockState, world: &mut World, pos: BlockPos, _placer: &Actor) {
+        crate::behaviour::machines::pumpkin::check_spawn_wither(world, pos);
+    }
 }
 
 /// `WallSkullBlock`。
@@ -87,5 +97,12 @@ impl Behaviour for WallSkull {
         _source: &'static Block,
     ) {
         follow_signal(state, world, pos);
+    }
+
+    /// `WitherWallSkullBlock.setPlacedBy`：墙上头颅走同一条 `checkSpawn`。
+    ///
+    /// `WitherWallSkullBlock.setPlacedBy`: wall skulls use the same `checkSpawn`.
+    fn set_placed_by(&self, _state: BlockState, world: &mut World, pos: BlockPos, _placer: &Actor) {
+        crate::behaviour::machines::pumpkin::check_spawn_wither(world, pos);
     }
 }

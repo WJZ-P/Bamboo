@@ -1,9 +1,14 @@
 //! `CarvedPumpkinBlock`：雕刻南瓜和南瓜灯，还有放下时拼成傀儡的 `BlockPattern`。
 //!
-//! 这个世界看不到实体，傀儡不会出现，但是方块的变化和官方一样：
-//! 图案里的方块被拿走，铜傀儡在铜块的位置留下一个箱子。
+//! 图案里的方块会被拿走，铜傀儡在铜块的位置留下一个箱子。`WitherSkullBlock.checkSpawn`
+//! 复用 `CarvedPumpkinBlock.clearPatternBlocks` / `updatePatternBlocks`，所以凋灵的
+//! 图案检测和清方块也放在这里：它额外生成一只带无敌期的凋灵。
+//!
+//! The wither-summon pattern check also lives here because vanilla `checkSpawn`
+//! reuses `CarvedPumpkinBlock.clearPatternBlocks` / `updatePatternBlocks`; it
+//! additionally spawns a wither in its invulnerability phase.
 
-use mc_bamboo_core::{BlockPos, Direction, Vec3};
+use mc_bamboo_core::{Axis, BlockPos, Direction, Vec3};
 use mc_bamboo_data::{Block, blocks, sounds, sounds::sound_event, tags::block_tags};
 
 use super::chest::chest_from_copper_block;
@@ -30,6 +35,14 @@ enum Cell {
     Iron,
     Copper,
     Air,
+    /// 凋灵图案里的凋灵骷髅头（地面或墙上）。
+    ///
+    /// A wither skeleton skull (floor or wall) in the wither pattern.
+    WitherSkull,
+    /// `#wither_summon_base_blocks`（灵魂沙 / 灵魂土）。
+    ///
+    /// `#wither_summon_base_blocks` (soul sand / soul soil).
+    WitherBase,
 }
 
 impl Cell {
@@ -41,6 +54,11 @@ impl Cell {
             Self::Iron => state.is(blocks::IRON_BLOCK),
             Self::Copper => state.is_tagged(block_tags::COPPER),
             Self::Air => state.is_air(),
+            Self::WitherSkull => {
+                state.is(blocks::WITHER_SKELETON_SKULL)
+                    || state.is(blocks::WITHER_SKELETON_WALL_SKULL)
+            }
+            Self::WitherBase => state.is_tagged(block_tags::WITHER_SUMMON_BASE_BLOCKS),
         }
     }
 }
@@ -67,6 +85,14 @@ const IRON_BASE: &[&[Cell]] = &[
 ];
 /// `getOrCreateCopperGolemBase`。
 const COPPER_BASE: &[&[Cell]] = &[&[Cell::Any], &[Cell::Copper]];
+/// `getOrCreateWitherFull`：`"^^^", "###", "~#~"`。第一行在最上面。
+///
+/// `getOrCreateWitherFull`: `"^^^", "###", "~#~"`. The first row is the top.
+const WITHER_FULL: &[&[Cell]] = &[
+    &[Cell::WitherSkull, Cell::WitherSkull, Cell::WitherSkull],
+    &[Cell::WitherBase, Cell::WitherBase, Cell::WitherBase],
+    &[Cell::Air, Cell::WitherBase, Cell::Air],
+];
 
 /// `CarvedPumpkinBlock.canSpawnGolem`。
 ///
@@ -146,6 +172,39 @@ fn find_at(world: &World, pattern: &[&[Cell]], origin: BlockPos) -> Option<Patte
             let found = match_at(world, pattern, origin, forwards, up);
             if found.is_some() {
                 return found;
+            }
+        }
+    }
+    None
+}
+
+/// `getOrCreateWitherFull().find`，同时记下匹配时的 `forwards`：生成位置和身体朝向
+/// 都取自它（`forwards` 在 X 轴上是 0 度，否则 90 度）。
+///
+/// `getOrCreateWitherFull().find`, also returning the matched `forwards`: the spawn
+/// position and body rotation come from it (0 degrees on the X axis, else 90).
+fn find_wither(world: &World, origin: BlockPos) -> Option<(PatternMatch, Direction)> {
+    let reach = WITHER_FULL.len().max(WITHER_FULL[0].len()) as i32;
+    for z in 0..reach {
+        for y in 0..reach {
+            for x in 0..reach {
+                if let Some(found) = find_wither_at(world, origin.offset(x, y, z)) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_wither_at(world: &World, origin: BlockPos) -> Option<(PatternMatch, Direction)> {
+    for forwards in Direction::ALL {
+        for up in Direction::ALL {
+            if up.axis() == forwards.axis() {
+                continue;
+            }
+            if let Some(cells) = match_at(world, WITHER_FULL, origin, forwards, up) {
+                return Some((cells, forwards));
             }
         }
     }
@@ -252,6 +311,81 @@ fn replace_copper_block_with_chest(world: &mut World, cells: &PatternMatch) {
 /// Oracle hook: run the vanilla `CarvedPumpkinBlock.onPlace` spawn check once.
 pub fn place_for_oracle(world: &mut World, top: BlockPos) {
     try_spawn_golem(world, top);
+}
+
+/// `WitherSkullBlock.checkSpawn(level, pos, skull)`：图案成立时清方块、生成带无敌期的
+/// 凋灵、给半径 50 格内的玩家触发 `SUMMONED_ENTITY`。和平时不召唤。
+///
+/// `WitherSkullBlock.checkSpawn(level, pos, skull)`: clear the pattern, spawn a
+/// wither in its invulnerability phase and credit `SUMMONED_ENTITY` to players
+/// within 50 blocks. Nothing happens on peaceful difficulty.
+pub(crate) fn check_spawn_wither(world: &mut World, pos: BlockPos) {
+    let state = world.block_state(pos);
+    if !state.is(blocks::WITHER_SKELETON_SKULL) && !state.is(blocks::WITHER_SKELETON_WALL_SKULL) {
+        return;
+    }
+    // `pos.getY() >= level.getMinY()` 且难度不是和平。
+    // `pos.getY() >= level.getMinY()` and a non-peaceful difficulty.
+    if !wither_spawn_gate(world.difficulty_id(), pos.y, world.min_y()) {
+        return;
+    }
+    let Some((cells, forwards)) = find_wither(world, pos) else {
+        return;
+    };
+    clear_pattern_blocks(world, &cells);
+    // `BlockPatternMatch.getBlock(1, 2, 0)`：图案底行中间那块灵魂沙。
+    // `BlockPatternMatch.getBlock(1, 2, 0)`: the middle soul block of the bottom row.
+    let foot = cells[5].0;
+    let angle = if forwards.axis() == Axis::X {
+        0.0
+    } else {
+        90.0
+    };
+    let position = Vec3::new(
+        f64::from(foot.x) + 0.5,
+        f64::from(foot.y) + 0.55,
+        f64::from(foot.z) + 0.5,
+    );
+    spawn_wither(world, position, angle);
+    world.push_effect(Effect::SummonedEntity {
+        entity: "minecraft:wither",
+        position,
+        radius: 50.0,
+    });
+    update_pattern_blocks(world, &cells);
+}
+
+/// 难度不是和平、且放置高度不低于世界底部时才能召唤。
+///
+/// Summoning is allowed only on a non-peaceful difficulty and at or above the
+/// world's minimum Y.
+fn wither_spawn_gate(difficulty_id: i32, y: i32, min_y: i32) -> bool {
+    y >= min_y && difficulty_id != 0
+}
+
+/// `EntityType.create` + `snapTo` + `makeInvulnerable` + `addFreshEntity`。
+fn spawn_wither(world: &mut World, position: Vec3, angle: f32) {
+    use crate::entity::{Entity, mob::MobType};
+    let mut entity = world.prepare_entity(Entity::by_mob_type(MobType::Wither, position));
+    entity.with_mob(|me, mob| {
+        me.y_rot = angle;
+        me.old_position = position;
+        mob.x_rot = 0.0;
+        mob.y_rot_o = angle;
+        mob.x_rot_o = 0.0;
+        mob.y_head_rot = angle;
+        mob.y_body_rot = angle;
+        mob.y_head_rot_o = angle;
+        mob.y_body_rot_o = angle;
+        // `makeInvulnerable()`：血量设成最大血量的三分之一（300 / 3）。
+        // `makeInvulnerable()`: health becomes a third of the maximum (300 / 3).
+        mob.health = mob
+            .attributes
+            .value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32
+            / 3.0;
+        mob.wither.make_invulnerable();
+    });
+    world.add_prepared_entity(entity);
 }
 
 /// `trySpawnGolem`。
@@ -493,5 +627,107 @@ mod tests {
             level.get(TOP.below().east()).get(CHEST_TYPE),
             ChestType::Right
         );
+    }
+
+    const WITHER_TOP: BlockPos = BlockPos::new(0, 68, 0);
+
+    /// 摆好凋灵图案，只留下 `WITHER_TOP` 那一格由放置动作补上。
+    fn wither_scaffold(level: &mut TestLevel) {
+        let skull = BlockState(blocks::WITHER_SKELETON_SKULL);
+        let soul = BlockState(blocks::SOUL_SAND);
+        let body = WITHER_TOP.below();
+        level.set(WITHER_TOP.west(), skull);
+        level.set(WITHER_TOP.east(), skull);
+        level.set(body.west(), soul);
+        level.set(body, soul);
+        level.set(body.east(), soul);
+        level.set(body.below(), soul);
+    }
+
+    fn place_wither_skull(level: &mut TestLevel) -> Vec<Effect> {
+        let actor = actor_holding(items::WITHER_SKELETON_SKULL);
+        use_item(level, &actor, top_hit(WITHER_TOP.below())).effects
+    }
+
+    fn count_withers(level: &TestLevel) -> usize {
+        use crate::entity::mob::MobType;
+        level
+            .entities()
+            .iter()
+            .filter(|entity| {
+                entity
+                    .kind
+                    .mob()
+                    .is_some_and(|mob| mob.mob_type == MobType::Wither)
+            })
+            .count()
+    }
+
+    /// 玩家放下最后一个凋灵头：清 9 格、2001 事件、生成带无敌期的凋灵、进度触发。
+    #[test]
+    fn placing_the_last_wither_skull_spawns_an_invulnerable_wither() {
+        use crate::entity::mob::MobType;
+        let mut level = TestLevel::new();
+        wither_scaffold(&mut level);
+        let effects = place_wither_skull(&mut level);
+        assert_eq!(count_withers(&level), 1);
+        let withers: Vec<_> = level
+            .entities()
+            .iter()
+            .filter(|entity| {
+                entity
+                    .kind
+                    .mob()
+                    .is_some_and(|mob| mob.mob_type == MobType::Wither)
+            })
+            .collect();
+        let mob = withers[0].kind.mob().unwrap();
+        assert_eq!(mob.wither.invulnerable_ticks, 220);
+        assert_eq!(mob.health, 100.0);
+        assert_eq!(mob.wither.boss_progress, 0.0);
+        let body = WITHER_TOP.below();
+        for pos in [
+            WITHER_TOP.west(),
+            WITHER_TOP,
+            WITHER_TOP.east(),
+            body.west(),
+            body,
+            body.east(),
+            body.below().west(),
+            body.below(),
+            body.below().east(),
+        ] {
+            assert!(level.get(pos).is_air(), "{pos:?}");
+        }
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SummonedEntity { radius, .. } if *radius == 50.0
+        )));
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(effect, Effect::Destroyed { .. }))
+                .count(),
+            9
+        );
+    }
+
+    /// 图案缺一块灵魂沙时不召唤，方块也不清。
+    #[test]
+    fn an_incomplete_wither_pattern_does_not_spawn() {
+        let mut level = TestLevel::new();
+        wither_scaffold(&mut level);
+        level.set(WITHER_TOP.below().east(), BlockState::AIR);
+        place_wither_skull(&mut level);
+        assert_eq!(count_withers(&level), 0);
+        assert!(level.get(WITHER_TOP.below()).is(blocks::SOUL_SAND));
+    }
+
+    /// 和平难度或低于世界底部时不允许召唤。
+    #[test]
+    fn peaceful_difficulty_and_low_placement_block_the_wither() {
+        assert!(!wither_spawn_gate(0, 66, -64));
+        assert!(wither_spawn_gate(2, 66, -64));
+        assert!(!wither_spawn_gate(2, -65, -64));
     }
 }
