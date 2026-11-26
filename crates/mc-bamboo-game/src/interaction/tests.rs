@@ -5,6 +5,7 @@
 
 use mc_bamboo_blocks::{
     BlockState, InteractionResult, TickPriority,
+    entity::EntityKind,
     state::{AXIS, HAS_BOOK, HORIZONTAL_FACING, LEVEL, SLAB_TYPE, SlabType},
 };
 use mc_bamboo_core::{Axis, BlockPos, ChunkPos, Direction, Hand, Vec3};
@@ -3038,6 +3039,108 @@ fn placing_interacting_and_punching_painting_and_item_frame() {
 
 #[path = "weapon_tests.rs"]
 mod weapon_tests;
+
+/// 生存模式打掉矿车：伤害累计过 40 后掉出矿车物品，实体消失。
+///
+/// A survival punch above 40 damage destroys the cart and drops its item.
+#[test]
+fn a_minecart_breaks_and_drops_its_item() {
+    use mc_bamboo_blocks::entity::minecart::MinecartKind;
+    let (mut server, client) = settled();
+    player_mut(&mut server, &client).game_mode = GameMode::Survival;
+    let uid = server.region().entities.spawn({
+        let mut entity = mc_bamboo_blocks::entity::Entity::minecart(
+            MinecartKind::Rideable,
+            Vec3::new(11.5, -60.0, 8.5),
+        );
+        if let EntityKind::Minecart(cart) = &mut entity.kind {
+            cart.damage = 40.0;
+        }
+        entity
+    });
+    client.take_frames();
+    crate::player_hurt::on_attack(server.region(), client.id, uid);
+    assert!(
+        server
+            .region()
+            .entities
+            .get(uid)
+            .is_some_and(|entity| entity.removed),
+        "cart destroyed",
+    );
+    assert!(
+        server
+            .region()
+            .entities
+            .iter()
+            .any(|e| matches!(&e.kind, EntityKind::Item(i) if i.stack.item == items::MINECART)),
+        "the minecart item drops",
+    );
+}
+
+/// 创造模式打掉矿车只 `discard`，不掉物品。
+///
+/// A creative punch only discards the cart; no item drops.
+#[test]
+fn a_creative_punch_discards_a_minecart_without_a_drop() {
+    use mc_bamboo_blocks::entity::minecart::MinecartKind;
+    let (mut server, client) = settled();
+    player_mut(&mut server, &client).game_mode = GameMode::Creative;
+    let uid = server.region().entities.spawn({
+        let mut entity = mc_bamboo_blocks::entity::Entity::minecart(
+            MinecartKind::Rideable,
+            Vec3::new(11.5, -60.0, 8.5),
+        );
+        if let EntityKind::Minecart(cart) = &mut entity.kind {
+            cart.damage = 40.0;
+        }
+        entity
+    });
+    client.take_frames();
+    crate::player_hurt::on_attack(server.region(), client.id, uid);
+    assert!(
+        server
+            .region()
+            .entities
+            .get(uid)
+            .is_some_and(|entity| entity.removed),
+        "cart discarded",
+    );
+    assert!(
+        !server
+            .region()
+            .entities
+            .iter()
+            .any(|e| matches!(&e.kind, EntityKind::Item(i) if i.stack.item == items::MINECART)),
+        "creative mode drops nothing",
+    );
+}
+
+/// 一拳不够破坏时，累计 `amount*10` 伤害并翻转 `hurtDir`、设 `hurtTime=10`。
+///
+/// One non-lethal punch accumulates damage and flips the hurt state.
+#[test]
+fn a_minecart_accumulates_damage_before_breaking() {
+    use mc_bamboo_blocks::entity::minecart::MinecartKind;
+    let (mut server, client) = settled();
+    player_mut(&mut server, &client).game_mode = GameMode::Survival;
+    let uid = server
+        .region()
+        .entities
+        .spawn(mc_bamboo_blocks::entity::Entity::minecart(
+            MinecartKind::Rideable,
+            Vec3::new(11.5, -60.0, 8.5),
+        ));
+    client.take_frames();
+    crate::player_hurt::on_attack(server.region(), client.id, uid);
+    let cart = server.region().entities.get(uid).expect("cart survives");
+    let EntityKind::Minecart(cart) = &cart.kind else {
+        panic!("expected a minecart");
+    };
+    assert_eq!(cart.hurt_time, 10);
+    assert_eq!(cart.hurt_dir, -1);
+    assert!(cart.damage > 0.0, "damage accumulated");
+}
 
 /// 普通矿车：右键（非潜行）上车，乘客名单和玩家载具双向一致。
 ///
