@@ -1593,10 +1593,13 @@ WebView2 的渲染进程不算在内。
   `cargo fmt --all --check` 全过；`mob-oracle java --show 2000` 267 处已知末位差（`frog_lily_41` 偶尔多约 206 行、
   复跑 `--only frog` 回到 46；无凋灵相关差异），
   `entity-oracle` / `player-data` / `chunk-content` 三个 Java 对拍全过。
+  **Boss 血条**：`ServerBossEvent` 每只凋灵一根栏，game 层每刻跟着 `EntityTracking.seen_by` 给新进入
+  跟踪范围的玩家发 `BossEvent` add（PURPLE / PROGRESS / `setDarkenScreen(true)`）、离开的发 remove、进度变化的发
+  update，凋灵消失时给所有观众发 remove；拆岛 / 合岛时血条跟着实体搬。
   **已知限制**：`AbstractHurtingProjectile.applyInertia` 的水中分支（`getLiquidInertia=0.8` 和气泡粒子）、
   `onHitEntity` 里目标死亡时 `owner.heal(5)` 与 `doPostAttackEffects`、`DATA_DANGEROUS` 的客户端元数据同步包、
-  侧头 `getNearbyEntities` 只收生物（玩家由 `NearestAttackableTargetGoal` 负责）还没接；`ServerBossEvent`
-  只在状态里记进度，没给跟踪范围内玩家发 add / remove / update 网络包；**没有新增逐刻对拍场景，也没有 4 处改坏确认**——
+  侧头 `getNearbyEntities` 只收生物（玩家由 `NearestAttackableTargetGoal` 负责）、Boss 栏 UUID 用实体 UUID
+  （官方另用 `Mth.createInsecureUUID(random)`）还没接；**没有新增逐刻对拍场景，也没有 4 处改坏确认**——
   召唤 / 无敌期 / 爆炸 / 射凋灵之首 / 半血弹箭 / 破坏方块 / 存档往返的官方逐刻对拍留待下一步。
 - 正版验证的限制：`server.properties` 的 `online-mode` 官方默认 true，命令行版和桌面端都读同一份文件、
   设置页里可以改；`ServerConfig::default()`（不读配置文件的嵌入用法）是 false。

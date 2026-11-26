@@ -4755,6 +4755,12 @@ pub struct MobPublic {
     ///
     /// `WitherBoss.DATA_ID_INV`: the remaining invulnerability ticks.
     pub wither_invulnerable_ticks: i32,
+    /// `WitherBoss` 的 `ServerBossEvent` 当前进度（无敌期是 `1 - invul/220`，
+    /// 之后是 `getHealth()/getMaxHealth()`）。
+    ///
+    /// Current `ServerBossEvent` progress of `WitherBoss` (`1 - invul/220` during
+    /// the invulnerability phase, then `getHealth()/getMaxHealth()`).
+    pub wither_boss_progress: f32,
     /// `Mob.getLastHurtByMob()`：行商羊驼的 `TraderLlamaDefendWanderingTraderGoal`
     /// 从牵引者身上读这个值。其它生物也能读，只是没目标会看。
     ///
@@ -4919,6 +4925,7 @@ impl MobPublic {
             trader_despawn_delay: mob.wandering_trader.despawn_delay,
             wither_targets: mob.wither.targets,
             wither_invulnerable_ticks: mob.wither.invulnerable_ticks,
+            wither_boss_progress: mob.wither.boss_progress,
             last_hurt_by_mob: mob.last_hurt_by_mob,
             last_hurt_by_mob_timestamp: mob.last_hurt_by_mob_timestamp,
         }

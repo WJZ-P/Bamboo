@@ -3684,6 +3684,9 @@ fn run_island_simulation(
     // 官方 `ServerLevel.tick` 的 "raid" 阶段：自定义刷怪器之后跑袭击状态机。
     // Vanilla's "raid" phase of `ServerLevel.tick`: after the custom spawners.
     crate::raid::tick(region);
+    // 凋灵的实体 Boss 血条：跟着 `EntityTracking` 每刻刷新观众和进度。
+    // Wither entity boss bars: refresh audience and progress each tick.
+    crate::wither_boss::tick(region);
     region.profiler.lap(Phase::RandomTicks);
     region.profiler.begin_chunk_phase(ChunkPhase::BlockEvents);
     region.profiler.begin_partition_phase();

@@ -166,6 +166,16 @@ impl EntityTracking {
         self.tracked.remove(&entity).is_some()
     }
 
+    /// 当前看得见这个实体的玩家（`ServerBossEvent` 的观众集合）。
+    ///
+    /// Players currently seeing this entity (the `ServerBossEvent` audience).
+    pub(crate) fn seen_by(&self, entity: i32) -> Vec<PlayerId> {
+        self.tracked
+            .get(&entity)
+            .map(|entry| entry.seen_by.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// 测试核对拆合用：每个被跟踪的实体和看得见它的玩家。
     #[cfg(test)]
     pub(crate) fn pairs(&self) -> Vec<(i32, Vec<PlayerId>)> {
