@@ -55,9 +55,27 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
     {
         return InteractionResult::Fail;
     }
-    // `level.getEntities(null, aabb).isEmpty()`：也不能有别的实体占着。
-    // `level.getEntities(null, aabb).isEmpty()`: no other entity may occupy it.
-    let occupied = world.level().entities_table().iter_public().any(|public| {
+    // `level.getEntities(null, aabb).isEmpty()`：方块、玩家和其它实体都不能占着。
+    // 官方的 `getEntities` 把玩家算进去；交互者由 `UseContext.actor` 给出，玩家碰撞盒
+    // 宽 0.6、高 1.8（潜行只改眼高，不改盒子）。
+    //
+    // `level.getEntities(null, aabb).isEmpty()`: no block, player or other entity may
+    // occupy it. Vanilla counts the player; the actor comes from `UseContext.actor`,
+    // with a 0.6 x 1.8 box (crouching changes the eye height, not the box).
+    let actor = ctx.actor;
+    let player_blocks = {
+        let hw = 0.3_f64;
+        let other = Aabb::new(
+            actor.position.x - hw,
+            actor.position.y,
+            actor.position.z - hw,
+            actor.position.x + hw,
+            actor.position.y + 1.8,
+            actor.position.z + hw,
+        );
+        bounds.intersects(other)
+    };
+    let entity_blocks = world.level().entities_table().iter_public().any(|public| {
         if public.removed {
             return false;
         }
@@ -73,7 +91,7 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
         );
         bounds.intersects(other)
     });
-    if occupied {
+    if player_blocks || entity_blocks {
         return InteractionResult::Fail;
     }
 
@@ -83,6 +101,16 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
     // entity_data, then `snapTo` with the 45° yaw (vanilla's snapTo xRot is always 0).
     let mut entity =
         world.prepare_entity(Entity::by_mob_type(MobType::ArmorStand, Vec3::default()));
+    // `EntityType.create(..., SPAWN_ITEM_USE, true, true)`：`shouldOffsetY` 与
+    // `shouldOffsetYMore` 都是 true（刷怪蛋的 useOn 后者看点面，盔甲架恒为真）。
+    // 先摆到 `pos.y + 1`，再按 `getYOffset` 的碰撞扫描算下落量。
+    //
+    // `EntityType.create(..., SPAWN_ITEM_USE, true, true)`: both `shouldOffsetY` and
+    // `shouldOffsetYMore` are true (a spawn egg conditions the latter on the face; the
+    // armour stand always uses true). Place at pos.y + 1, then drop by `getYOffset`.
+    entity.position = Vec3::new(center.x, f64::from(pos.y + 1), center.z);
+    let offset = spawn::spawn_y_offset(&*world, pos, true, entity.bounding_box());
+    let at = Vec3::new(center.x, f64::from(pos.y) + offset, center.z);
     let mut entries = entity_data_entries(ctx);
     entries.retain(|(key, _)| key != "id");
     entries.push((
@@ -93,7 +121,12 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
         return InteractionResult::Fail;
     }
     let yaw = ((mth::wrap_degrees(ctx.rotation() - 180.0) + 22.5) / 45.0).floor() * 45.0;
-    spawn::snap_to(&mut entity, center, yaw, 0.0);
+    // 官方随后 `stand.snapTo(stand.getX/Y/Z(), yaw, 0)` 只改朝向；这里用算出的落点
+    // 覆盖 `loadInto` 在物品没有 `Pos` 组件时清零的坐标。
+    //
+    // Vanilla's following `stand.snapTo(getX/Y/Z(), yaw, 0)` only changes the yaw; put
+    // the computed landing point back since a stack without `Pos` loads a zero here.
+    spawn::snap_to(&mut entity, at, yaw, 0.0);
     entity.with_mob(|me, mob| {
         mob.y_head_rot = me.y_rot;
         mob.y_body_rot = me.y_rot;
@@ -104,11 +137,11 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
     world.finish_jockeys(uid);
     // `playSound(ARMOR_STAND_PLACE, BLOCKS, 0.75, 0.8)`，玩家自己也听得到。
     // `playSound(ARMOR_STAND_PLACE, BLOCKS, 0.75, 0.8)`, audible to the player too.
-    world.play_sound(center, ARMOR_STAND_PLACE, sounds::BLOCKS, 0.75, 0.8, false);
+    world.play_sound(at, ARMOR_STAND_PLACE, sounds::BLOCKS, 0.75, 0.8, false);
     // `armorstand.gameEvent(ENTITY_PLACE, player)`。
     world.game_event(
         GameEvent::EntityPlace,
-        center,
+        at,
         EventContext {
             source_player: Some(ctx.actor.uid),
             ..Default::default()
@@ -153,7 +186,10 @@ mod tests {
         Actor {
             uid: 1,
             uuid: [0; 16],
-            position: Vec3::new(3.5, 64.0, 5.5),
+            // 玩家不能站在放置格里：官方 `getEntities(null, aabb)` 会把玩家算进去。
+            // The player must not stand in the placement cell: vanilla's
+            // `getEntities(null, aabb)` counts the player.
+            position: Vec3::new(1.5, 64.0, 5.5),
             yaw,
             head_yaw: yaw,
             pitch: 0.0,
@@ -179,6 +215,54 @@ mod tests {
             ),
             inside: false,
         }
+    }
+
+    /// `EntityType.create(..., SPAWN_ITEM_USE, true, true)` 的 `getYOffset`：点顶面时
+    /// 放置格下面有支撑，`yOffset = 0`，盔甲架站在方块顶；点侧面时放置格悬空，
+    /// `yOffset = -1`，盔甲架比放置格低一格。两种 x/z 都是放置格中心。
+    #[test]
+    fn top_face_lands_on_the_block_and_side_face_drops_one() {
+        // 顶面：点击 (3, 63, 5) 石头的上面，放置格 (3, 64, 5) 下方有石头。
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        level.set(
+            BlockPos::new(3, 63, 5),
+            BlockState(blocks::STONE).default_state(),
+        );
+        let a = actor(0.0);
+        let mut world = World::new(&mut level, &mut ticks);
+        let ctx = UseContext::new(&a, Hand::Main, hit(BlockPos::new(3, 63, 5), Direction::Up));
+        assert_eq!(use_on(&mut world, &ctx), InteractionResult::Success);
+        let _ = world.into_effects();
+        let ids = level.entities().ids();
+        assert_eq!(ids.len(), 1, "one stand on the top face");
+        assert_eq!(
+            level.entities().public_at(ids[0]).unwrap().position,
+            Vec3::new(3.5, 64.0, 5.5)
+        );
+
+        // 侧面：点击 (3, 64, 5) 石头的东面，放置格 (4, 64, 5) 悬空。
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        level.set(
+            BlockPos::new(3, 64, 5),
+            BlockState(blocks::STONE).default_state(),
+        );
+        let a = actor(0.0);
+        let mut world = World::new(&mut level, &mut ticks);
+        let ctx = UseContext::new(
+            &a,
+            Hand::Main,
+            hit(BlockPos::new(3, 64, 5), Direction::East),
+        );
+        assert_eq!(use_on(&mut world, &ctx), InteractionResult::Success);
+        let _ = world.into_effects();
+        let ids = level.entities().ids();
+        assert_eq!(ids.len(), 1, "one stand on the side face");
+        assert_eq!(
+            level.entities().public_at(ids[0]).unwrap().position,
+            Vec3::new(4.5, 63.0, 5.5)
+        );
     }
 
     #[test]
@@ -210,7 +294,9 @@ mod tests {
             .entities()
             .public_at(ids[0])
             .expect("the stand is placed");
-        assert_eq!(public.position, Vec3::new(3.5, 64.0, 5.5));
+        // 点在空气格上，下方没有支撑，`getYOffset = -1`：落点比放置格低一格。
+        // The clicked cell is air with nothing below, so `getYOffset = -1`.
+        assert_eq!(public.position, Vec3::new(3.5, 63.0, 5.5));
         // floor((wrapDegrees(37 - 180) + 22.5) / 45) * 45 = -135.
         assert_eq!(public.yaw, -135.0);
     }
