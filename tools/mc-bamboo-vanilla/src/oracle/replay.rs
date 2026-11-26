@@ -1261,6 +1261,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::SummonedEntity { .. }
             | Effect::KilledByArrow { .. }
             | Effect::CrafterCrafted { .. }
+            | Effect::ConstructBeacon { .. }
             // 末影珍珠的传送意图不属于方块题，游戏层单独处理。
             | Effect::EnderPearlTeleport { .. }
             | Effect::GuardianElderEffect { .. }
@@ -1399,6 +1400,7 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::SummonedEntity { .. }
             | Effect::KilledByArrow { .. }
             | Effect::CrafterCrafted { .. }
+            | Effect::ConstructBeacon { .. }
             | Effect::EnderPearlTeleport { .. }
             | Effect::GuardianElderEffect { .. }
             | Effect::TrialSpawnerTransformBadOmen { .. }

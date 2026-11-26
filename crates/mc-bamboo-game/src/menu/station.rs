@@ -13,12 +13,20 @@
 
 use mc_bamboo_blocks::{
     BlockState, LegacyRandom, World,
-    behaviour::machines::{BrewingStandEntity, FurnaceEntity},
+    behaviour::{
+        machines::{BrewingStandEntity, FurnaceEntity},
+        misc::beacon::{
+            BeaconBlockEntity, DATA_PRIMARY, DATA_SECONDARY, NUM_DATA_VALUES as BEACON_DATA_LEN,
+            encode_effect, validate_effects,
+        },
+    },
     hopper::set_changed,
     state::TRIGGERED,
 };
 use mc_bamboo_core::{Aabb, BlockPos, Vec3};
-use mc_bamboo_data::{CookingKind, Recipe, RecipeType, blocks, items, registries::menu, sounds};
+use mc_bamboo_data::{
+    CookingKind, Recipe, RecipeType, blocks, items, registries::menu, sounds, tags::item_tags,
+};
 use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::{
@@ -33,7 +41,7 @@ use mc_bamboo_recipes::{
     is_cooking_input, is_equippable_in_slot, is_smithing_addition, is_smithing_base,
     is_smithing_template, remaining_items, stonecutter_recipes,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::{
     ClickPacket, ContainerKind, Menu, RemoteSlot, Target, anvil, cartography, enchantment,
@@ -117,6 +125,7 @@ enum Kind {
     Anvil,
     Cartography,
     Enchantment,
+    Beacon,
     /// 坐骑物品栏，`HorseInventoryMenu`；带箱子的列数。
     ///
     /// A mount inventory, `HorseInventoryMenu`, carrying its chest columns.
@@ -153,6 +162,8 @@ impl Kind {
             Some(Self::Cartography)
         } else if is(blocks::ENCHANTING_TABLE) {
             Some(Self::Enchantment)
+        } else if is(blocks::BEACON) {
+            Some(Self::Beacon)
         } else {
             None
         }
@@ -169,6 +180,7 @@ impl Kind {
             Self::Grindstone => 39,
             Self::Anvil | Self::Cartography => 39,
             Self::Enchantment => 38,
+            Self::Beacon => 37,
             Self::Mount(_) => self.player_start() + 36,
         }
     }
@@ -178,6 +190,7 @@ impl Kind {
             Self::Stonecutter | Self::Smithing | Self::Loom | Self::Anvil => 1,
             Self::Furnace | Self::BlastFurnace | Self::Smoker | Self::Brewing => 4,
             Self::Enchantment => enchantment::DATA_LEN,
+            Self::Beacon => BEACON_DATA_LEN,
             // 九个禁用位加一个 `triggered`，官方 `CrafterBlockEntity.NUM_DATA`。
             Self::Crafter => 10,
             _ => 0,
@@ -198,6 +211,7 @@ impl Kind {
             Self::Grindstone => 3,
             Self::Anvil | Self::Cartography => 3,
             Self::Enchantment => 2,
+            Self::Beacon => 1,
             // 鞍、身体，再加三行箱子。
             // Saddle, body, then three rows of chest.
             Self::Mount(columns) => 2 + 3 * usize::from(columns),
@@ -240,6 +254,7 @@ impl Kind {
             Self::Anvil => menu::ANVIL,
             Self::Cartography => menu::CARTOGRAPHY_TABLE,
             Self::Enchantment => menu::ENCHANTMENT,
+            Self::Beacon => menu::BEACON,
             // 坐骑物品栏不在菜单注册表里，用 `mount_screen_open` 打开，不走这里。
             // Mount inventories are not in the menu registry; `mount_screen_open` opens them.
             Self::Mount(_) => -1,
@@ -261,6 +276,7 @@ impl Kind {
             Self::Anvil => "container.repair",
             Self::Cartography => "container.cartography_table",
             Self::Enchantment => "container.enchant",
+            Self::Beacon => "container.beacon",
             Self::Mount(_) => "",
         }
     }
@@ -313,6 +329,10 @@ enum Role {
     CartoResult,
     EnchantItem,
     EnchantLapis,
+    /// 信标付款槽，官方 `BeaconMenu$PaymentSlot`（上限 1，只收 `#beacon_payment_items`）。
+    ///
+    /// Beacon payment slot (`BeaconMenu$PaymentSlot`, max stack 1, `#beacon_payment_items`).
+    BeaconPayment,
     Machine,
     Armor(i32),
     /// 坐骑的鞍位和身体位（`ArmorSlot`）、箱子格（普通 `Slot`）。
@@ -648,6 +668,10 @@ impl Station {
                 1 => Role::EnchantLapis,
                 _ => Role::Player,
             },
+            Kind::Beacon => match index {
+                0 => Role::BeaconPayment,
+                _ => Role::Player,
+            },
             Kind::Mount(_) => match index {
                 0 => Role::MountSaddle,
                 1 => Role::MountBody,
@@ -707,6 +731,9 @@ impl Station {
             Role::CartoMap => cartography::is_map(stack),
             Role::CartoAdditional => cartography::is_additional(stack),
             Role::EnchantLapis => stack.item == items::LAPIS_LAZULI,
+            Role::BeaconPayment => {
+                mc_bamboo_blocks::state::item_is_tagged(stack.item, item_tags::BEACON_PAYMENT_ITEMS)
+            }
             Role::CrafterGrid => self.data.get(index).copied().unwrap_or(0) != 1,
             Role::LoomBanner => loom::is_banner(stack),
             Role::LoomDye => loom::is_dye(stack),
@@ -746,7 +773,7 @@ impl Station {
     }
 
     fn slot_max(&self, index: usize, stack: &ItemStack) -> i32 {
-        if self.kind == Kind::Enchantment && index == 0 {
+        if (self.kind == Kind::Enchantment || self.kind == Kind::Beacon) && index == 0 {
             return 1;
         }
         let bucket_fuel = self.kind.is_furnace()
@@ -777,6 +804,7 @@ impl Station {
                 | Role::CartoAdditional
                 | Role::EnchantItem
                 | Role::EnchantLapis
+                | Role::BeaconPayment
         )
     }
 
@@ -790,7 +818,12 @@ impl Station {
             return;
         }
         if self.limits_on_set(index) {
-            let limit = CONTAINER_STACK_LIMIT.min(stack.max_stack_size());
+            let cap = if matches!(self.role(index), Role::BeaconPayment) {
+                1
+            } else {
+                CONTAINER_STACK_LIMIT
+            };
+            let limit = cap.min(stack.max_stack_size());
             if stack.count > limit {
                 stack.count = limit;
             }
@@ -1304,6 +1337,7 @@ impl Station {
             Kind::Anvil => self.route_combiner(index, stack),
             Kind::Cartography => self.route_cartography(index, stack),
             Kind::Enchantment => self.route_enchantment(index, stack),
+            Kind::Beacon => self.route_beacon(index, stack),
             Kind::Mount(_) => self.route_mount(index, stack),
         }
     }
@@ -1374,6 +1408,26 @@ impl Station {
             return MoveResult::Moved { crafted: false };
         }
         MoveResult::Stop { write_back: false }
+    }
+
+    /// `BeaconMenu.quickMoveStack`：只有单个合法付款物品才会 Shift 进槽 0，其余在背包和快捷栏之间搬。
+    ///
+    /// `BeaconMenu.quickMoveStack`: only a single valid payment item moves into slot 0;
+    /// everything else shuffles between main inventory and hotbar.
+    fn route_beacon(&mut self, index: usize, stack: &mut ItemStack) -> MoveResult {
+        if index == 0 {
+            return Self::moved_or_stop(self.move_items(stack, 1, 37, true), true);
+        }
+        if self.slots[0].is_empty() && self.may_place(0, stack) && stack.count == 1 {
+            return Self::moved_or_stop(self.move_items(stack, 0, 1, false), false);
+        }
+        if (1..28).contains(&index) {
+            return Self::moved_or_stop(self.move_items(stack, 28, 37, false), false);
+        }
+        if (28..37).contains(&index) {
+            return Self::moved_or_stop(self.move_items(stack, 1, 28, false), false);
+        }
+        Self::moved_or_stop(self.move_items(stack, 1, 37, false), false)
     }
 
     fn route_inventory(
@@ -2836,6 +2890,13 @@ fn pull_machine(region: &mut Region, station: &mut Station) {
             }
             station.data = entity.data_values().to_vec();
         }
+        Kind::Beacon => {
+            let (level, _) = region.block_level();
+            let Some(entity) = level.block_entities.get::<BeaconBlockEntity>(station.pos) else {
+                return;
+            };
+            station.data = entity.data_values().to_vec();
+        }
         _ => {}
     }
 }
@@ -3114,6 +3175,11 @@ pub(crate) fn try_open(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool
     if !region.players.contains_key(&id) {
         return false;
     }
+    if kind == Kind::Beacon && super::locked_message(region, id, &Target::Single(pos), kind.title())
+    {
+        return false;
+    }
+    crate::lectern::close_for_other_menu(region, id);
     if region.menus.contains_key(&id) {
         super::close_menu(region, id);
     }
@@ -3149,7 +3215,11 @@ pub(crate) fn try_open(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool
     }
     pull_machine(region, &mut station);
     station.send_all();
-    let title = Component::translate(kind.title(), []);
+    let title = if kind == Kind::Beacon {
+        super::menu_title(region, &Target::Single(pos), kind.title())
+    } else {
+        Component::translate(kind.title(), [])
+    };
     region.links.send(
         id,
         &OpenScreen {
@@ -3403,6 +3473,82 @@ pub(crate) fn on_rename(region: &mut Region, id: PlayerId, name: &str) {
     region.menus.insert(id, menu);
 }
 
+/// `ServerGamePacketListenerImpl.handleSetBeaconPacket` + `BeaconMenu.updateEffects`。
+///
+/// 校验菜单有效、付款槽有物品且效果对当前塔层数合法。不合法时照官方 26.3 断开连接
+/// （`multiplayer.disconnect.generic`）；合法时写入主/副效果（播 `block.beacon.power_select`）、
+/// 消耗付款槽 1 个物品并标脏区块。
+///
+/// `handleSetBeaconPacket` + `BeaconMenu.updateEffects`. Disconnects with
+/// `multiplayer.disconnect.generic` on invalid effects or missing payment, matching vanilla 26.3.
+pub(crate) fn on_set_beacon(
+    region: &mut Region,
+    id: PlayerId,
+    primary: Option<i32>,
+    secondary: Option<i32>,
+) {
+    let is_beacon = region.menus.get(&id).is_some_and(|menu| {
+        menu.station
+            .as_ref()
+            .is_some_and(|station| station.kind == Kind::Beacon)
+    });
+    if !is_beacon {
+        return;
+    }
+    let valid = region.menus.get(&id).is_some_and(|menu| {
+        menu.station
+            .as_ref()
+            .is_some_and(|station| station.still_valid(region, id))
+    });
+    if !valid {
+        debug!(player = id.0, "player interacted with invalid beacon menu");
+        return;
+    }
+    let Some(mut menu) = region.menus.remove(&id) else {
+        return;
+    };
+    let mut kicked = false;
+    if let Some(station) = menu.station.as_mut() {
+        pull_machine(region, station);
+        let levels = station.data.first().copied().unwrap_or(0);
+        let has_payment = !station.slots[0].is_empty();
+        if !has_payment || !validate_effects(primary, secondary, levels) {
+            warn!(player = id.0, "player tried to set invalid beacon effects");
+            region.links.kick(
+                id,
+                &Component::translate("multiplayer.disconnect.generic", []),
+            );
+            kicked = true;
+        } else {
+            let pos = station.pos;
+            let effects = {
+                let (mut level, ticks) = region.block_level();
+                let mut world = World::new(&mut level, ticks);
+                let _ = world.with_block_entity::<BeaconBlockEntity, _>(pos, |entity, world| {
+                    entity.set_data(DATA_PRIMARY, encode_effect(primary), Some(world));
+                    entity.set_data(DATA_SECONDARY, encode_effect(secondary), None);
+                });
+                world.drain_effects()
+            };
+            crate::interaction::send_effects(region, None, &effects);
+            station.slots[0].count -= 1;
+            if station.slots[0].count <= 0 {
+                station.slots[0] = ItemStack::empty();
+            }
+            region.touch(pos);
+            crate::block_items::refresh_update_tag(region, pos);
+            pull_machine(region, station);
+            station.broadcast();
+            let packets = std::mem::take(&mut station.packets);
+            let container_id = station.container_id;
+            send_outgoing(region, id, container_id, packets);
+        }
+    }
+    if !kicked {
+        region.menus.insert(id, menu);
+    }
+}
+
 pub(crate) fn tick_menu(region: &mut Region, id: PlayerId) {
     let Some(mut menu) = region.menus.remove(&id) else {
         return;
@@ -3428,6 +3574,11 @@ pub(crate) fn finish(region: &mut Region, id: PlayerId, menu: &mut Menu, return_
     };
     if return_items && !station.carried.is_empty() {
         super::place_item_back_in_inventory(region, id, std::mem::take(&mut station.carried));
+    }
+    if station.kind == Kind::Beacon && return_items && !station.slots[0].is_empty() {
+        // 官方 `BeaconMenu.removed`：付款槽里没花掉的物品直接掉在脚下（`player.drop(stack, false)`）。
+        // Official `BeaconMenu.removed` drops any unspent payment item via `player.drop(stack, false)`.
+        crate::drops::spawn_throw(region, id, std::mem::take(&mut station.slots[0]));
     }
     for stack in station.grids_to_return() {
         super::place_item_back_in_inventory(region, id, stack);
@@ -3545,5 +3696,35 @@ mod tests {
         assert!(station.slots[1].is_empty());
         assert!(station.slots[2].is_empty());
         assert!(station.awards.is_empty());
+    }
+
+    #[test]
+    fn beacon_payment_slot_accepts_only_single_payment_item() {
+        let mut station = Station::create(Kind::Beacon, 1, BlockPos::new(0, 0, 0));
+        assert_eq!(station.slots.len(), 37);
+        assert_eq!(station.data.len(), 3);
+        assert!(station.may_place(0, &stack(items::IRON_INGOT, 1)));
+        assert!(station.may_place(0, &stack(items::DIAMOND, 1)));
+        assert!(station.may_place(0, &stack(items::NETHERITE_INGOT, 1)));
+        assert!(!station.may_place(0, &stack(items::STONE, 1)));
+
+        // Shift 点击多于 1 个铁锭不进付款槽，而是移到快捷栏。
+        station.slots[1] = stack(items::IRON_INGOT, 2);
+        station.click(1, 0, ContainerInput::QuickMove);
+        assert!(station.slots[0].is_empty());
+        assert_eq!(station.slots[28].item, items::IRON_INGOT);
+        assert_eq!(station.slots[28].count, 2);
+
+        // Shift 点击单个铁锭进付款槽。
+        station.slots[2] = stack(items::EMERALD, 1);
+        station.click(2, 0, ContainerInput::QuickMove);
+        assert_eq!(station.slots[0].item, items::EMERALD);
+        assert_eq!(station.slots[0].count, 1);
+        assert!(station.slots[2].is_empty());
+
+        // Shift 点击付款槽退回玩家物品栏。
+        station.click(0, 0, ContainerInput::QuickMove);
+        assert!(station.slots[0].is_empty());
+        assert_eq!(station.slots[36].item, items::EMERALD);
     }
 }

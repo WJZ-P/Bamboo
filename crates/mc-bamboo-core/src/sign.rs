@@ -225,6 +225,33 @@ impl DyeColor {
             Self::Black => 0x001E_1B1B,
         }
     }
+
+    /// 官方 `DyeColor.getTextureDiffuseColor()`：带不透明 alpha (`0xFF`) 的 ARGB 常量，
+    /// 信标光柱染色和染色玻璃用它。
+    ///
+    /// Official `DyeColor.getTextureDiffuseColor()`: opaque ARGB (`0xFF_RRGGBB`), used by
+    /// beacon beams and stained glass.
+    pub const fn texture_diffuse_color(self) -> i32 {
+        let rgb: u32 = match self {
+            Self::White => 0x00F9_FFFE,
+            Self::Orange => 0x00F9_801D,
+            Self::Magenta => 0x00C7_4EBD,
+            Self::LightBlue => 0x003A_B3DA,
+            Self::Yellow => 0x00FE_D83D,
+            Self::Lime => 0x0080_C71F,
+            Self::Pink => 0x00F3_8BAA,
+            Self::Gray => 0x0047_4F52,
+            Self::LightGray => 0x009D_9D97,
+            Self::Cyan => 0x0016_9C9C,
+            Self::Purple => 0x0089_32B8,
+            Self::Blue => 0x003C_44AA,
+            Self::Brown => 0x0083_5432,
+            Self::Green => 0x005E_7C16,
+            Self::Red => 0x00B0_2E26,
+            Self::Black => 0x001D_1D21,
+        };
+        (0xFF00_0000_u32 | rgb) as i32
+    }
 }
 
 /// `ChatFormatting.stripFormatting`：去掉 `§` 加一个格式码。
@@ -317,6 +344,18 @@ mod tests {
         // 越界时官方取映射的默认值。
         assert_eq!(DyeColor::from_id(16), DyeColor::White);
         assert_eq!(DyeColor::from_id(-1), DyeColor::White);
+        assert_eq!(
+            DyeColor::White.texture_diffuse_color(),
+            0xFF_F9FFFE_u32 as i32
+        );
+        assert_eq!(
+            DyeColor::Red.texture_diffuse_color(),
+            0xFF_B02E26_u32 as i32
+        );
+        assert_eq!(
+            DyeColor::Black.texture_diffuse_color(),
+            0xFF_1D1D21_u32 as i32
+        );
     }
 
     #[test]

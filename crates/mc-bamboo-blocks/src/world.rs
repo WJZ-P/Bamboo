@@ -5490,6 +5490,7 @@ mod tests {
                 | Effect::BredAnimals { .. }
                 | Effect::SummonedEntity { .. }
                 | Effect::CrafterCrafted { .. }
+                | Effect::ConstructBeacon { .. }
                 | Effect::KilledByArrow { .. }
                 | Effect::EnderPearlTeleport { .. }
                 | Effect::GuardianElderEffect { .. }

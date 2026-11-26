@@ -10,7 +10,10 @@ import java.io.Writer;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
@@ -39,10 +42,17 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.util.RandomSource;
+import net.minecraft.world.SimpleContainer;
+import net.minecraft.world.effect.MobEffect;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.flag.FeatureFlagSet;
 import net.minecraft.world.flag.FeatureFlags;
+import net.minecraft.world.inventory.BeaconMenu;
 import net.minecraft.world.inventory.ContainerData;
+import net.minecraft.world.inventory.ContainerLevelAccess;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -52,10 +62,13 @@ import net.minecraft.world.item.crafting.CampfireCookingRecipe;
 import net.minecraft.world.item.crafting.RecipeManager;
 import net.minecraft.world.item.crafting.RecipeType;
 import net.minecraft.world.item.crafting.SingleRecipeInput;
+import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CampfireBlock;
 import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
+import net.minecraft.world.level.block.entity.BeaconBeamOwner;
+import net.minecraft.world.level.block.entity.BeaconBlockEntity;
 import net.minecraft.world.level.block.entity.BlastFurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.BrewingStandBlockEntity;
 import net.minecraft.world.level.block.entity.CampfireBlockEntity;
@@ -63,9 +76,17 @@ import net.minecraft.world.level.block.entity.FurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.SmokerBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.entity.EntityTypeTest;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
+import net.minecraft.world.level.storage.TagValueInput;
+import net.minecraft.world.level.storage.ValueInput;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.util.ProblemReporter;
+import net.minecraft.core.Holder;
 import org.jspecify.annotations.Nullable;
 import sun.misc.Unsafe;
 
@@ -144,8 +165,17 @@ public final class MachineOracle {
         runs.add(campfire(19L, false, 4, Items.POTATO, 5, 600));
         runs.add(campfire(20L, true, 2, Items.STICK, 0, 1));
 
+        JsonArray beacons = new JsonArray();
+        beacons.add(beaconTier1To4());
+        beacons.add(beaconGlassAndBlock());
+        beacons.add(beaconPaymentTier4Regen());
+        beacons.add(beaconPaymentTier4Level2AndDeactivate());
+        beacons.add(beaconPaymentTier2RangeAndDuration());
+        beacons.add(beaconSaveRoundtrip());
+
         JsonObject root = new JsonObject();
         root.add("runs", runs);
+        root.add("beacons", beacons);
         try (Writer out = new BufferedWriter(new OutputStreamWriter(stdout, StandardCharsets.UTF_8))) {
             out.write(root.toString());
             out.write('\n');
@@ -368,6 +398,290 @@ public final class MachineOracle {
         return run;
     }
 
+    private static final BlockPos BEACON_POS = new BlockPos(0, 64, 0);
+
+    private static void buildPyramid(MachineLevel level, BlockPos pos, int layers, BlockState block) {
+        for (int layer = 1; layer <= layers; layer++) {
+            int cy = pos.getY() - layer;
+            for (int cx = pos.getX() - layer; cx <= pos.getX() + layer; cx++) {
+                for (int cz = pos.getZ() - layer; cz <= pos.getZ() + layer; cz++) {
+                    level.putBlock(new BlockPos(cx, cy, cz), block);
+                }
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<BeaconBeamOwner.Section> rawBeamSectionsOf(BeaconBlockEntity entity) throws Exception {
+        Field field = BeaconBlockEntity.class.getDeclaredField("beamSections");
+        field.setAccessible(true);
+        return (List<BeaconBeamOwner.Section>) field.get(entity);
+    }
+
+    private static JsonArray sectionsJson(List<BeaconBeamOwner.Section> sections) {
+        JsonArray out = new JsonArray();
+        for (BeaconBeamOwner.Section section : sections) {
+            JsonArray pair = new JsonArray();
+            pair.add(section.getColor());
+            pair.add(section.getHeight());
+            out.add(pair);
+        }
+        return out;
+    }
+
+    private static JsonObject beaconFrame(MachineLevel level, BeaconBlockEntity entity) throws Exception {
+        JsonObject frame = new JsonObject();
+        frame.addProperty("gameTime", level.gameTime);
+        frame.add("data", dataOfValues(dataOf(entity)));
+        frame.add("beamSections", sectionsJson(entity.getBeamSections()));
+        frame.add("rawBeamSections", sectionsJson(rawBeamSectionsOf(entity)));
+        JsonArray sounds = new JsonArray();
+        for (String s : level.sounds) {
+            sounds.add(s);
+        }
+        level.sounds.clear();
+        frame.add("sounds", sounds);
+        JsonArray effects = new JsonArray();
+        for (int[] row : level.receivedEffects) {
+            JsonArray item = new JsonArray();
+            for (int v : row) {
+                item.add(v);
+            }
+            effects.add(item);
+        }
+        level.receivedEffects.clear();
+        frame.add("effects", effects);
+        return frame;
+    }
+
+    private static JsonObject paymentCheck(
+            MachineLevel level,
+            BeaconBlockEntity entity,
+            ItemStack payment,
+            Optional<Holder<MobEffect>> primary,
+            Optional<Holder<MobEffect>> secondary) throws Exception {
+        BeaconMenu menu = new BeaconMenu(
+                1,
+                new SimpleContainer(36),
+                dataOf(entity),
+                ContainerLevelAccess.create(level, BEACON_POS));
+        if (!payment.isEmpty()) {
+            menu.getSlot(0).set(payment.copy());
+        }
+        level.sounds.clear();
+        boolean ok = menu.updateEffects(primary, secondary);
+        JsonObject row = new JsonObject();
+        row.addProperty("hasPayment", !payment.isEmpty());
+        row.addProperty("primary", primary.map(h -> BuiltInRegistries.MOB_EFFECT.asHolderIdMap().getId(h)).orElse(-1));
+        row.addProperty("secondary", secondary.map(h -> BuiltInRegistries.MOB_EFFECT.asHolderIdMap().getId(h)).orElse(-1));
+        row.addProperty("ok", ok);
+        row.addProperty("remainingPayment", menu.getSlot(0).getItem().getCount());
+        row.add("data", dataOfValues(dataOf(entity)));
+        JsonArray sounds = new JsonArray();
+        for (String s : level.sounds) {
+            sounds.add(s);
+        }
+        level.sounds.clear();
+        row.add("sounds", sounds);
+        return row;
+    }
+
+    private static JsonObject beaconTier1To4() throws Exception {
+        MachineLevel level = MachineLevel.createMultiBlock(31L);
+        level.putBlock(BEACON_POS, Blocks.BEACON.defaultBlockState());
+        BeaconBlockEntity entity = new BeaconBlockEntity(BEACON_POS, Blocks.BEACON.defaultBlockState());
+        entity.setLevel(level);
+        JsonArray ticks = new JsonArray();
+        for (int t = 0; t <= 325; t++) {
+            if (t == 1) {
+                buildPyramid(level, BEACON_POS, 1, Blocks.IRON_BLOCK.defaultBlockState());
+            } else if (t == 85) {
+                buildPyramid(level, BEACON_POS, 2, Blocks.GOLD_BLOCK.defaultBlockState());
+            } else if (t == 165) {
+                buildPyramid(level, BEACON_POS, 3, Blocks.DIAMOND_BLOCK.defaultBlockState());
+            } else if (t == 245) {
+                buildPyramid(level, BEACON_POS, 4, Blocks.NETHERITE_BLOCK.defaultBlockState());
+            }
+            level.gameTime = t;
+            BeaconBlockEntity.tick(level, BEACON_POS, Blocks.BEACON.defaultBlockState(), entity);
+            ticks.add(beaconFrame(level, entity));
+        }
+        JsonObject out = new JsonObject();
+        out.addProperty("kind", "beacon_tier1_to_4");
+        out.add("ticks", ticks);
+        return out;
+    }
+
+    private static BlockState blockByName(String name) {
+        return BuiltInRegistries.BLOCK
+                .getValue(net.minecraft.resources.Identifier.parse(name))
+                .defaultBlockState();
+    }
+
+    private static JsonObject beaconGlassAndBlock() throws Exception {
+        MachineLevel level = MachineLevel.createMultiBlock(32L);
+        level.putBlock(BEACON_POS, Blocks.BEACON.defaultBlockState());
+        buildPyramid(level, BEACON_POS, 4, Blocks.IRON_BLOCK.defaultBlockState());
+        level.putBlock(new BlockPos(0, 65, 0), blockByName("minecraft:red_stained_glass"));
+        level.putBlock(new BlockPos(0, 66, 0), blockByName("minecraft:red_stained_glass_pane"));
+        level.putBlock(new BlockPos(0, 67, 0), blockByName("minecraft:blue_stained_glass"));
+        level.putBlock(new BlockPos(0, 68, 0), Blocks.BEDROCK.defaultBlockState());
+        level.putBlock(new BlockPos(0, 78, 0), blockByName("minecraft:green_stained_glass"));
+        BeaconBlockEntity entity = new BeaconBlockEntity(BEACON_POS, Blocks.BEACON.defaultBlockState());
+        entity.setLevel(level);
+        JsonArray ticks = new JsonArray();
+        for (int t = 0; t <= 245; t++) {
+            if (t == 86) {
+                level.putBlock(new BlockPos(0, 70, 0), Blocks.STONE.defaultBlockState());
+            } else if (t == 166) {
+                level.putBlock(new BlockPos(0, 70, 0), Blocks.AIR.defaultBlockState());
+            }
+            level.gameTime = t;
+            BeaconBlockEntity.tick(level, BEACON_POS, Blocks.BEACON.defaultBlockState(), entity);
+            ticks.add(beaconFrame(level, entity));
+        }
+        JsonObject out = new JsonObject();
+        out.addProperty("kind", "beacon_glass_and_block");
+        out.add("ticks", ticks);
+        return out;
+    }
+
+    private static JsonObject beaconPaymentTier4Regen() throws Exception {
+        MachineLevel level = MachineLevel.createMultiBlock(33L);
+        level.putBlock(BEACON_POS, Blocks.BEACON.defaultBlockState());
+        buildPyramid(level, BEACON_POS, 4, Blocks.IRON_BLOCK.defaultBlockState());
+        level.fakePlayers.add(FakeBeaconPlayer.create(level, 1, 5.0, 64.0, 0.0, false));
+        level.fakePlayers.add(FakeBeaconPlayer.create(level, 2, 50.0, 200.0, 0.0, false));
+        level.fakePlayers.add(FakeBeaconPlayer.create(level, 3, 52.0, 64.0, 0.0, false));
+        level.fakePlayers.add(FakeBeaconPlayer.create(level, 4, 2.0, 64.0, 0.0, true));
+        BeaconBlockEntity entity = new BeaconBlockEntity(BEACON_POS, Blocks.BEACON.defaultBlockState());
+        entity.setLevel(level);
+        JsonArray ticks = new JsonArray();
+        JsonArray payments = new JsonArray();
+        for (int t = 0; t <= 165; t++) {
+            level.gameTime = t;
+            BeaconBlockEntity.tick(level, BEACON_POS, Blocks.BEACON.defaultBlockState(), entity);
+            ticks.add(beaconFrame(level, entity));
+            if (t == 81) {
+                // 4 层已激活：先测无付款、非法主效果 REGENERATION、非法不同 1-3 层副效果，最后合法付款。
+                payments.add(paymentCheck(level, entity, ItemStack.EMPTY,
+                        Optional.of(MobEffects.SPEED), Optional.empty()));
+                payments.add(paymentCheck(level, entity, new ItemStack(Items.EMERALD, 1),
+                        Optional.of(MobEffects.REGENERATION), Optional.empty()));
+                payments.add(paymentCheck(level, entity, new ItemStack(Items.EMERALD, 1),
+                        Optional.of(MobEffects.SPEED), Optional.of(MobEffects.HASTE)));
+                payments.add(paymentCheck(level, entity, new ItemStack(Items.EMERALD, 1),
+                        Optional.of(MobEffects.SPEED), Optional.of(MobEffects.REGENERATION)));
+            }
+        }
+        JsonObject out = new JsonObject();
+        out.addProperty("kind", "beacon_payment_tier4_regen");
+        out.add("payments", payments);
+        out.add("ticks", ticks);
+        return out;
+    }
+
+    private static JsonObject beaconPaymentTier4Level2AndDeactivate() throws Exception {
+        MachineLevel level = MachineLevel.createMultiBlock(34L);
+        level.putBlock(BEACON_POS, Blocks.BEACON.defaultBlockState());
+        buildPyramid(level, BEACON_POS, 4, Blocks.EMERALD_BLOCK.defaultBlockState());
+        level.fakePlayers.add(FakeBeaconPlayer.create(level, 1, 10.0, 64.0, 0.0, false));
+        BeaconBlockEntity entity = new BeaconBlockEntity(BEACON_POS, Blocks.BEACON.defaultBlockState());
+        entity.setLevel(level);
+        JsonArray ticks = new JsonArray();
+        JsonArray payments = new JsonArray();
+        for (int t = 0; t <= 245; t++) {
+            if (t == 165) {
+                level.putBlock(new BlockPos(0, 63, 0), Blocks.AIR.defaultBlockState());
+            }
+            level.gameTime = t;
+            BeaconBlockEntity.tick(level, BEACON_POS, Blocks.BEACON.defaultBlockState(), entity);
+            ticks.add(beaconFrame(level, entity));
+            if (t == 81) {
+                payments.add(paymentCheck(level, entity, new ItemStack(Items.DIAMOND, 1),
+                        Optional.of(MobEffects.HASTE), Optional.of(MobEffects.HASTE)));
+            }
+        }
+        JsonObject out = new JsonObject();
+        out.addProperty("kind", "beacon_payment_tier4_level2_and_deactivate");
+        out.add("payments", payments);
+        out.add("ticks", ticks);
+        return out;
+    }
+
+    private static JsonObject beaconPaymentTier2RangeAndDuration() throws Exception {
+        MachineLevel level = MachineLevel.createMultiBlock(35L);
+        level.putBlock(BEACON_POS, Blocks.BEACON.defaultBlockState());
+        buildPyramid(level, BEACON_POS, 2, Blocks.IRON_BLOCK.defaultBlockState());
+        level.fakePlayers.add(FakeBeaconPlayer.create(level, 1, 30.0, 64.0, 0.0, false));
+        level.fakePlayers.add(FakeBeaconPlayer.create(level, 2, 32.0, 64.0, 0.0, false));
+        BeaconBlockEntity entity = new BeaconBlockEntity(BEACON_POS, Blocks.BEACON.defaultBlockState());
+        entity.setLevel(level);
+        JsonArray ticks = new JsonArray();
+        JsonArray payments = new JsonArray();
+        for (int t = 0; t <= 165; t++) {
+            level.gameTime = t;
+            BeaconBlockEntity.tick(level, BEACON_POS, Blocks.BEACON.defaultBlockState(), entity);
+            ticks.add(beaconFrame(level, entity));
+            if (t == 81) {
+                payments.add(paymentCheck(level, entity, new ItemStack(Items.IRON_INGOT, 1),
+                        Optional.of(MobEffects.STRENGTH), Optional.empty()));
+                payments.add(paymentCheck(level, entity, new ItemStack(Items.IRON_INGOT, 1),
+                        Optional.of(MobEffects.RESISTANCE), Optional.of(MobEffects.RESISTANCE)));
+                payments.add(paymentCheck(level, entity, new ItemStack(Items.IRON_INGOT, 1),
+                        Optional.of(MobEffects.RESISTANCE), Optional.empty()));
+            }
+        }
+        JsonObject out = new JsonObject();
+        out.addProperty("kind", "beacon_payment_tier2_range_and_duration");
+        out.add("payments", payments);
+        out.add("ticks", ticks);
+        return out;
+    }
+
+    private static JsonObject beaconSaveFields(CompoundTag tag) {
+        JsonObject obj = new JsonObject();
+        tag.getString("primary_effect").ifPresent(v -> obj.addProperty("primary_effect", v));
+        tag.getString("secondary_effect").ifPresent(v -> obj.addProperty("secondary_effect", v));
+        tag.getInt("Levels").ifPresent(v -> obj.addProperty("Levels", v));
+        return obj;
+    }
+
+    private static JsonObject beaconSaveRoundtrip() throws Exception {
+        MachineLevel level = MachineLevel.createMultiBlock(36L);
+        BeaconBlockEntity valid = new BeaconBlockEntity(BEACON_POS, Blocks.BEACON.defaultBlockState());
+        valid.setLevel(level);
+        ContainerData access = dataOf(valid);
+        access.set(0, 4);
+        access.set(1, BeaconMenu.encodeEffect(MobEffects.SPEED));
+        access.set(2, BeaconMenu.encodeEffect(MobEffects.REGENERATION));
+        CompoundTag savedValid = valid.saveCustomOnly(REGISTRIES);
+
+        BeaconBlockEntity reloaded = new BeaconBlockEntity(BEACON_POS, Blocks.BEACON.defaultBlockState());
+        reloaded.setLevel(level);
+        ValueInput inValid = TagValueInput.create(ProblemReporter.DISCARDING, REGISTRIES, savedValid);
+        reloaded.loadCustomOnly(inValid);
+        CompoundTag resavedValid = reloaded.saveCustomOnly(REGISTRIES);
+
+        // 非法效果过滤 + Levels 不读盘验证。
+        CompoundTag invalidRaw = new CompoundTag();
+        invalidRaw.putString("primary_effect", "minecraft:poison");
+        invalidRaw.putString("secondary_effect", "minecraft:haste");
+        invalidRaw.putInt("Levels", 4);
+        BeaconBlockEntity filtered = new BeaconBlockEntity(BEACON_POS, Blocks.BEACON.defaultBlockState());
+        filtered.setLevel(level);
+        filtered.loadCustomOnly(TagValueInput.create(ProblemReporter.DISCARDING, REGISTRIES, invalidRaw));
+        CompoundTag savedFiltered = filtered.saveCustomOnly(REGISTRIES);
+
+        JsonObject out = new JsonObject();
+        out.addProperty("kind", "beacon_save_roundtrip");
+        out.add("savedValid", beaconSaveFields(savedValid));
+        out.add("resavedValid", beaconSaveFields(resavedValid));
+        out.add("savedFiltered", beaconSaveFields(savedFiltered));
+        out.add("ticks", new JsonArray());
+        return out;
+    }
+
     private static int[] ints(CampfireBlockEntity entity, String name) throws Exception {
         Field field = CampfireBlockEntity.class.getDeclaredField(name);
         field.setAccessible(true);
@@ -514,8 +828,64 @@ public final class MachineOracle {
         }
     }
 
+    private static final class FakeBeaconPlayer extends Player {
+        private MachineLevel ownerLevel;
+        private int uid;
+        private boolean spectator;
+
+        private FakeBeaconPlayer() {
+            super(null, null);
+        }
+
+        static FakeBeaconPlayer create(MachineLevel level, int uid, double x, double y, double z, boolean spectator) {
+            FakeBeaconPlayer p = allocate(FakeBeaconPlayer.class);
+            p.ownerLevel = level;
+            p.uid = uid;
+            p.spectator = spectator;
+            try {
+                Field posField = Entity.class.getDeclaredField("position");
+                posField.setAccessible(true);
+                posField.set(p, new Vec3(x, y, z));
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+            p.setBoundingBox(new AABB(x - 0.3, y, z - 0.3, x + 0.3, y + 1.8, z + 0.3));
+            return p;
+        }
+
+        @Override
+        public GameType gameMode() {
+            return this.spectator ? GameType.SPECTATOR : GameType.SURVIVAL;
+        }
+
+        @Override
+        public boolean isSpectator() {
+            return this.spectator;
+        }
+
+        @Override
+        public boolean addEffect(MobEffectInstance instance, @Nullable Entity source) {
+            int id = BuiltInRegistries.MOB_EFFECT.asHolderIdMap().getId(instance.getEffect());
+            this.ownerLevel.receivedEffects.add(new int[] {
+                this.uid,
+                id,
+                instance.getDuration(),
+                instance.getAmplifier(),
+                instance.isAmbient() ? 1 : 0,
+                instance.isVisible() ? 1 : 0,
+                instance.showIcon() ? 1 : 0
+            });
+            return true;
+        }
+    }
+
     private static final class MachineLevel extends ServerLevel {
         private BlockState state = Blocks.AIR.defaultBlockState();
+        private Map<BlockPos, BlockState> blocks;
+        private long gameTime;
+        private List<String> sounds;
+        private List<int[]> receivedEffects;
+        private List<FakeBeaconPlayer> fakePlayers;
         private RandomSource random;
         private int nextId = 1;
         /** `addFreshEntity` 收下的新实体，取出成品后用来对拍经验球。 */
@@ -529,6 +899,11 @@ public final class MachineOracle {
             try {
                 MachineLevel level = (MachineLevel) UNSAFE.allocateInstance(MachineLevel.class);
                 level.state = Blocks.AIR.defaultBlockState();
+                level.blocks = null;
+                level.gameTime = 0L;
+                level.sounds = new ArrayList<>();
+                level.receivedEffects = new ArrayList<>();
+                level.fakePlayers = new ArrayList<>();
                 Field random = MachineLevel.class.getDeclaredField("random");
                 random.setAccessible(true);
                 random.set(level, RandomSource.create(seed));
@@ -537,6 +912,69 @@ public final class MachineOracle {
             } catch (ReflectiveOperationException error) {
                 throw new IllegalStateException(error);
             }
+        }
+
+        static MachineLevel createMultiBlock(long seed) {
+            MachineLevel level = create(seed);
+            level.blocks = new HashMap<>();
+            return level;
+        }
+
+        void putBlock(BlockPos pos, BlockState blockState) {
+            if (blockState.isAir()) {
+                this.blocks.remove(pos);
+            } else {
+                this.blocks.put(pos.immutable(), blockState);
+            }
+        }
+
+        @Override
+        public boolean isClientSide() {
+            return false;
+        }
+
+        @Override
+        public long getGameTime() {
+            return this.gameTime;
+        }
+
+        @Override
+        public int getMinY() {
+            return -64;
+        }
+
+        @Override
+        public int getHeight() {
+            return 384;
+        }
+
+        @Override
+        public int getHeight(Heightmap.Types type, int x, int z) {
+            if (this.blocks == null) {
+                return 0;
+            }
+            int highest = Integer.MIN_VALUE;
+            for (Map.Entry<BlockPos, BlockState> entry : this.blocks.entrySet()) {
+                BlockPos p = entry.getKey();
+                if (p.getX() == x && p.getZ() == z && !entry.getValue().isAir()) {
+                    if (p.getY() > highest) {
+                        highest = p.getY();
+                    }
+                }
+            }
+            return highest == Integer.MIN_VALUE ? getMinY() : highest + 1;
+        }
+
+        @Override
+        public void playSound(@Nullable Entity source, BlockPos pos, SoundEvent sound, SoundSource category,
+                float volume, float pitch) {
+            this.sounds.add(BuiltInRegistries.SOUND_EVENT.getKey(sound).toString());
+        }
+
+        @Override
+        public void playSound(@Nullable Entity source, double x, double y, double z, SoundEvent sound,
+                SoundSource category, float volume, float pitch) {
+            this.sounds.add(BuiltInRegistries.SOUND_EVENT.getKey(sound).toString());
         }
 
         @Override
@@ -566,12 +1004,19 @@ public final class MachineOracle {
 
         @Override
         public BlockState getBlockState(BlockPos pos) {
+            if (this.blocks != null) {
+                return this.blocks.getOrDefault(pos, Blocks.AIR.defaultBlockState());
+            }
             return this.state;
         }
 
         @Override
         public boolean setBlock(BlockPos pos, BlockState blockState, int updateFlags, int updateLimit) {
-            this.state = blockState;
+            if (this.blocks != null) {
+                putBlock(pos, blockState);
+            } else {
+                this.state = blockState;
+            }
             return true;
         }
 
@@ -604,7 +1049,17 @@ public final class MachineOracle {
 
         @Override
         public <T extends Entity> List<T> getEntities(EntityTypeTest<Entity, T> type, AABB box, Predicate<? super T> selector) {
-            return List.of();
+            if (this.fakePlayers == null || this.fakePlayers.isEmpty()) {
+                return List.of();
+            }
+            List<T> found = new ArrayList<>();
+            for (FakeBeaconPlayer p : this.fakePlayers) {
+                T cast = type.tryCast(p);
+                if (cast != null && p.getBoundingBox().intersects(box) && selector.test(cast)) {
+                    found.add(cast);
+                }
+            }
+            return found;
         }
 
         @Override

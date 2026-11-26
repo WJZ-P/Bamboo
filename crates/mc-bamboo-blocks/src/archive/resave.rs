@@ -127,7 +127,14 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
             crate::behaviour::misc::sculk_catalyst::additional_from_tag(raw),
             &[][..],
         ),
-        "minecraft:beacon" => (beacon(), &[][..]),
+        "minecraft:beacon" => (
+            crate::behaviour::misc::beacon::BeaconBlockEntity::read(
+                mc_bamboo_core::BlockPos::new(0, 0, 0),
+                raw,
+            )
+            .additional(),
+            BEACON_OMIT,
+        ),
         "minecraft:potent_sulfur" => (potent_sulfur(raw), &[][..]),
         "minecraft:structure_block" => (structure_block(raw), &[][..]),
         "minecraft:ender_chest" => (Vec::new(), ENDER_CHEST_OMIT),
@@ -148,10 +155,11 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
     Some(Resaved::new(fields, omit))
 }
 
-/// 蜂巢的 `flower_pos`、心的 `creaking` 都只在有值时写。
-/// These two optional keys are written only when the live value is present.
+/// 蜂巢的 `flower_pos`、心的 `creaking`、信标的主/副效果都只在有值时写。
+/// These optional keys are written only when the live value is present.
 const BEEHIVE_OMIT: &[&str] = &["flower_pos"];
 const CREAKING_HEART_OMIT: &[&str] = &["creaking"];
+const BEACON_OMIT: &[&str] = &["primary_effect", "secondary_effect"];
 
 /// 官方认识、可选且当前状态不写的键：编码时从读盘条目里删掉，避免带上旧值。
 /// 不在这张表里的未知键按 D9 原样保留。
@@ -410,14 +418,8 @@ fn end_gateway(raw: &Tag) -> Vec<(String, Tag)> {
 }
 
 // ---------------------------------------------------------------------------
-// BeaconBlockEntity / PotentSulfurBlockEntity
+// PotentSulfurBlockEntity
 // ---------------------------------------------------------------------------
-
-fn beacon() -> Vec<(String, Tag)> {
-    // `Levels` 不读盘：官方 `loadAdditional` 不碰它，值恒为构造器的 0。
-    // `Levels` is never loaded; it stays at the constructor's 0.
-    vec![("Levels".to_owned(), Tag::Int(0))]
-}
 
 fn potent_sulfur(raw: &Tag) -> Vec<(String, Tag)> {
     // `loadAdditional` 用 `getInt("countdown").ifPresent`：缺键时保持构造器 -1。

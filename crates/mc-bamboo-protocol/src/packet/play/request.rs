@@ -6,7 +6,11 @@ use mc_bamboo_core::{
     BlockPos, Direction, Hand, Vec3,
     sign::{LINES, MAX_LINE_CHARS, SignTextSlot},
 };
-use mc_bamboo_data::{items::ITEMS, packets::play::serverbound, registries::data_component_type};
+use mc_bamboo_data::{
+    items::ITEMS,
+    packets::play::serverbound,
+    registries::{data_component_type, mob_effect},
+};
 
 use crate::{
     codec::{DecodeError, Reader},
@@ -305,6 +309,13 @@ pub enum PlayRequest {
     SelectTrade {
         slot: i32,
     },
+    /// `ServerboundSetBeaconPacket`：信标界面确认选择主/副效果。
+    ///
+    /// `ServerboundSetBeaconPacket`: confirm primary and secondary effects in a beacon screen.
+    SetBeacon {
+        primary: Option<i32>,
+        secondary: Option<i32>,
+    },
     /// 服务端不解码的包，内容是包 ID。
     Other(i32),
 }
@@ -448,6 +459,7 @@ impl PlayRequest {
             serverbound::SELECT_TRADE => Self::SelectTrade {
                 slot: reader.varint()?,
             },
+            serverbound::SET_BEACON => read_set_beacon(&mut reader)?,
             serverbound::CONTAINER_CLOSE => Self::ContainerClose {
                 container_id: reader.varint()?,
             },
@@ -587,6 +599,27 @@ fn read_last_seen(
 }
 
 /// 解码 `sign_update`：方块坐标、四行文字、哪一面。官方按这个顺序写。
+fn read_set_beacon(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
+    let primary = read_optional_mob_effect(reader)?;
+    let secondary = read_optional_mob_effect(reader)?;
+    Ok(PlayRequest::SetBeacon { primary, secondary })
+}
+
+/// 官方 `ByteBufCodecs.optional(MobEffect.STREAM_CODEC)`：布尔位后跟 `mob_effect` 注册表 ID。
+///
+/// Official `ByteBufCodecs.optional(MobEffect.STREAM_CODEC)`: presence boolean followed by a
+/// `mob_effect` registry VarInt id.
+fn read_optional_mob_effect(reader: &mut Reader<'_>) -> Result<Option<i32>, DecodeError> {
+    if !reader.bool()? {
+        return Ok(None);
+    }
+    let id = reader.varint()?;
+    if id < 0 || id as u32 >= mob_effect::TOTAL {
+        return Err(DecodeError::InvalidEnum(id));
+    }
+    Ok(Some(id))
+}
+
 fn read_sign_update(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
     let pos = reader.block_pos()?;
     let mut lines: [String; LINES] = std::array::from_fn(|_| String::new());
@@ -2157,6 +2190,36 @@ mod tests {
             decode_body(serverbound::CHAT_ACK, "05"),
             Ok(PlayRequest::ChatAck { offset: 5 })
         );
+    }
+
+    #[test]
+    fn decodes_set_beacon_optional_effects() {
+        // 两个都空：00 00。
+        assert_eq!(
+            decode_body(serverbound::SET_BEACON, "00 00"),
+            Ok(PlayRequest::SetBeacon {
+                primary: None,
+                secondary: None,
+            })
+        );
+        // 主效果 SPEED(0)，副效果 REGENERATION(9)。
+        assert_eq!(
+            decode_body(serverbound::SET_BEACON, "01 00 01 09"),
+            Ok(PlayRequest::SetBeacon {
+                primary: Some(mob_effect::SPEED),
+                secondary: Some(mob_effect::REGENERATION),
+            })
+        );
+        // 越界效果 ID 报解码错误，不 panic。
+        assert!(matches!(
+            decode_body(serverbound::SET_BEACON, "01 7f 00"),
+            Err(DecodeError::InvalidEnum(127))
+        ));
+        // 尾随字节报错。
+        assert!(matches!(
+            decode_body(serverbound::SET_BEACON, "00 00 01"),
+            Err(DecodeError::TrailingBytes(1))
+        ));
     }
 
     #[test]

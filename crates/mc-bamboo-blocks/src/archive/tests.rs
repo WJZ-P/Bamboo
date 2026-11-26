@@ -103,6 +103,17 @@ fn every_block_entity_kind_round_trips() {
             BlockEntityKind::Spawner => {
                 Box::new(crate::behaviour::machines::spawner::SpawnerBlockEntity::new(POS))
             }
+            BlockEntityKind::Beacon => {
+                let mut beacon = crate::behaviour::misc::beacon::BeaconBlockEntity::new(POS);
+                beacon.set_data(
+                    crate::behaviour::misc::beacon::DATA_PRIMARY,
+                    crate::behaviour::misc::beacon::encode_effect(Some(
+                        mc_bamboo_data::registries::mob_effect::SPEED,
+                    )),
+                    None,
+                );
+                Box::new(beacon)
+            }
         };
         let first = write_block_entity_additional(entity.as_ref()).expect("写出成功");
         let second = round_trip(entity, kind.name());
