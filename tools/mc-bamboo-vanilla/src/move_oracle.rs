@@ -84,6 +84,10 @@ struct Case {
     z_bits: i64,
     #[serde(rename = "fallBits")]
     fall_bits: i64,
+    #[serde(rename = "fallFlying")]
+    fall_flying: bool,
+    #[serde(rename = "glideHealthBits")]
+    glide_health_bits: Option<i32>,
     mode: String,
     shift: bool,
     sprint: bool,
@@ -248,21 +252,29 @@ impl Report {
             && report.position.x.to_bits() == case.x_bits as u64
             && report.position.y.to_bits() == case.y_bits as u64
             && report.position.z.to_bits() == case.z_bits as u64
-            && report.fall_distance.to_bits() == case.fall_bits as u64;
+            && report.fall_distance.to_bits() == case.fall_bits as u64
+            && report.fall_flying == case.fall_flying
+            && case
+                .glide_health_bits
+                .is_none_or(|bits| report.health.to_bits() == bits as u32);
         if !same {
             self.mismatches.push(format!(
-                "{}: official {} kick {} tp {} pos {:?} fall {}, bamboo {} kick {} tp {} pos {:?} fall {}",
+                "{}: official {} kick {} tp {} pos {:?} fall {} gliding {} health {:?}, bamboo {} kick {} tp {} pos {:?} fall {} gliding {} health {}",
                 case.name,
                 case.outcome,
                 case.kicked,
                 case.teleports,
                 official_position,
                 official_fall,
+                case.fall_flying,
+                case.glide_health_bits.map(|bits| f32::from_bits(bits as u32)),
                 report.outcome,
                 report.kicked,
                 report.teleports,
                 report.position,
                 report.fall_distance,
+                report.fall_flying,
+                report.health,
             ));
         }
         Ok(())
@@ -317,6 +329,12 @@ fn replay_packet(packet: &Packet) -> Result<MoveReplayPacket, String> {
             on_ground: packet.on_ground,
             horizontal_collision: packet.horizontal,
         }),
+        "velocity" => Ok(MoveReplayPacket::Velocity(Vec3::new(
+            f64::from_bits(packet.x as u64),
+            f64::from_bits(packet.y as u64),
+            f64::from_bits(packet.z as u64),
+        ))),
+        "startGlide" => Ok(MoveReplayPacket::StartGlide),
         "tickEnd" => Ok(MoveReplayPacket::TickEnd),
         "serverTick" => Ok(MoveReplayPacket::ServerTick),
         other => Err(format!("unknown movement packet {other}")),

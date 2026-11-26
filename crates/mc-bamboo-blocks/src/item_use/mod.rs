@@ -24,6 +24,7 @@ mod bone_meal;
 pub(crate) use bone_meal::{grow_crop, grow_water_plant};
 mod debug_stick;
 mod ender_eye;
+pub(crate) mod firework;
 mod honeycomb;
 pub(crate) use honeycomb::waxed;
 mod ignite;
@@ -53,6 +54,7 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         // `BrushItem.useOn` 只开始使用物品，结果总是 `CONSUME`。
         ItemKind::Brush => InteractionResult::Consume,
         ItemKind::BoneMeal => bone_meal::use_on(world, ctx),
+        _ if ctx.item == items::FIREWORK_ROCKET => firework::use_on(world, ctx),
         _ if ctx.item == items::LEAD => lead::use_on(world, ctx),
         // `SpawnEggItem.useOn`：被点格的碰撞形状为空时生成在那一格，否则沿点击面
         // 挪一格；流体方块直接放过。落点和 `shouldOffsetYMore` 见 `spawn_egg::use_egg`。

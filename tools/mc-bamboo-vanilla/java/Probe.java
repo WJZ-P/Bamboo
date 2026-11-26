@@ -381,6 +381,7 @@ public final class Probe {
     private static final int METADATA_SKIN_PARTS = 16;
     private static final byte FLAG_SHIFT = 0x02;
     private static final byte FLAG_SPRINTING = 0x08;
+    private static final byte FLAG_FALL_FLYING = (byte) 0x80;
     private static final int LEVEL_EVENT_BREAK = 2001;
     private static final int HOTBAR_START = 36;
     private static final int OFF_HAND_SLOT = 45;
@@ -1280,6 +1281,23 @@ public final class Probe {
                     Byte.valueOf((byte) 0).equals(dataValue(actor, actor, METADATA_SHARED_FLAGS)));
             pumpFor(SETTLE_MILLIS);
             check("metadata: the refusal stays private", observer.entityDataPackets == observerData);
+
+            Vec3 ground = actor.position;
+            actor.send(new ServerboundSetCreativeModeSlotPacket(6, new ItemStack(Items.ELYTRA)));
+            await("metadata: the elytra is equipped",
+                    () -> holds(observer.remote(actor), EquipmentSlot.CHEST, Items.ELYTRA, 1));
+            actor.moveTo(ground.add(0.0, 3.0, 0.0), false);
+            actor.send(actor.playerCommand(ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+            await("metadata: the observer sees the fall flying flag and pose",
+                    () -> Byte.valueOf(FLAG_FALL_FLYING).equals(dataValue(observer, actor, METADATA_SHARED_FLAGS))
+                            && dataValue(observer, actor, METADATA_POSE) == Pose.FALL_FLYING);
+            actor.moveTo(ground, true);
+            await("metadata: landing clears the fall flying flag and pose",
+                    () -> Byte.valueOf((byte) 0).equals(dataValue(observer, actor, METADATA_SHARED_FLAGS))
+                            && dataValue(observer, actor, METADATA_POSE) == Pose.STANDING);
+            actor.send(new ServerboundSetCreativeModeSlotPacket(6, ItemStack.EMPTY));
+            await("metadata: the elytra comes off",
+                    () -> isEmpty(observer.remote(actor), EquipmentSlot.CHEST));
 
             actor.send(actor.clientInformation(NO_HAT_SKIN_PARTS, actor.arm));
             await("metadata: " + observer.player + " sees the new skin parts",

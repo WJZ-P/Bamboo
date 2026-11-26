@@ -36,6 +36,39 @@ pub enum AvoidClass {
     ///
     /// The creaking evokers and illusioners avoid (`AvoidEntityGoal(Creaking.class, 8.0F, ...)`).
     Creaking,
+    /// 流浪商人躲的僵尸（`AvoidEntityGoal(Zombie.class, 8.0F, ...)`，含尸壳 / 溺尸 /
+    /// 僵尸村民）。
+    ///
+    /// The zombie the wandering trader avoids (`AvoidEntityGoal(Zombie.class, 8.0F, ...)`,
+    /// including husks, drowned and zombie villagers).
+    Zombie,
+    /// 流浪商人躲的卫道士（`AvoidEntityGoal(Vindicator.class, 8.0F, ...)`）。
+    ///
+    /// The vindicator the wandering trader avoids.
+    Vindicator,
+    /// 流浪商人躲的掠夺者（`AvoidEntityGoal(Pillager.class, 15.0F, ...)`）。
+    ///
+    /// The pillager the wandering trader avoids.
+    Pillager,
+    /// 流浪商人躲的唤魔者（`AvoidEntityGoal(Evoker.class, 12.0F, ...)`）。
+    ///
+    /// The evoker the wandering trader avoids.
+    Evoker,
+    /// 流浪商人躲的恼鬼（`AvoidEntityGoal(Vex.class, 8.0F, ...)`）。
+    ///
+    /// The vex the wandering trader avoids.
+    Vex,
+    /// 流浪商人躲的幻术师（`AvoidEntityGoal(Illusioner.class, 12.0F, ...)`）。
+    ///
+    /// The illusioner the wandering trader avoids.
+    Illusioner,
+    /// 官方注册了但 Bamboo 还没建模的僵尸疣猪兽：永远匹配不到，`canUse` 恒假、不取随机数，
+    /// 只占注册顺序。
+    ///
+    /// The zoglin the wandering trader avoids that Bamboo does not model yet: never
+    /// matched, `canUse` is always false and draws nothing; it only keeps the
+    /// registration order.
+    Zoglin,
 }
 
 impl AvoidClass {
@@ -43,13 +76,20 @@ impl AvoidClass {
         match self {
             Self::Player => false,
             Self::Wolf => kind == MobType::Wolf,
-            Self::Llama => kind == MobType::Llama,
+            Self::Llama => kind.is_llama(),
             Self::Monster => kind.is_monster(),
             // 北极熊还没实现。Polar bears are not modelled yet.
             Self::PolarBear => false,
             Self::Armadillo => kind == MobType::Armadillo,
             Self::Guardian => super::guardian::is_guardian(kind),
             Self::Creaking => kind == MobType::Creaking,
+            Self::Zombie => kind.is_zombie(),
+            Self::Vindicator => kind == MobType::Vindicator,
+            Self::Pillager => kind == MobType::Pillager,
+            Self::Evoker => kind == MobType::Evoker,
+            Self::Vex => kind == MobType::Vex,
+            Self::Illusioner => kind == MobType::Illusioner,
+            Self::Zoglin => false,
         }
     }
 }

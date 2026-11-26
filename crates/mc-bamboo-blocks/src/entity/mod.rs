@@ -12,6 +12,7 @@
 pub mod arrow;
 pub mod ctx;
 pub mod evoker_fangs;
+pub mod firework_rocket;
 pub mod leash_knot;
 pub mod lightning;
 pub mod mob;
@@ -264,6 +265,10 @@ pub enum EntityKind {
     ///
     /// A wind charge, vanilla `WindCharge` / `BreezeWindCharge`.
     WindCharge(Box<wind_charge::WindCharge>),
+    /// 烟花火箭，`FireworkRocketEntity`。
+    ///
+    /// A firework rocket, vanilla `FireworkRocketEntity`.
+    FireworkRocket(Box<firework_rocket::FireworkRocket>),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -289,6 +294,7 @@ impl EntityKind {
                 mc_bamboo_data::registries::entity_type::OMINOUS_ITEM_SPAWNER
             }
             Self::WindCharge(charge) => charge.variant.entity_type(),
+            Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -527,6 +533,7 @@ impl Entity {
                 ominous_item_spawner::tick(self, ctx);
             }
             EntityKind::WindCharge(_) => wind_charge::tick(self, ctx),
+            EntityKind::FireworkRocket(_) => firework_rocket::tick(self, ctx),
             EntityKind::LeashKnot(_) => leash_knot::tick(self, ctx),
             EntityKind::Mob(_) => {}
         }

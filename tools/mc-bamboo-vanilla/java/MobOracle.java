@@ -136,6 +136,9 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import net.minecraft.core.Direction;
 import net.minecraft.core.component.DataComponents;import net.minecraft.world.item.BowItem;
+import net.minecraft.world.item.component.FireworkExplosion;
+import net.minecraft.world.item.component.Fireworks;
+import it.unimi.dsi.fastutil.ints.IntList;
 import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -584,6 +587,12 @@ public final class MobOracle {
             }
             if (only == null || only.startsWith("wind_charge")) {
                 cases += playWindCharge(official, out, only);
+            }
+            if (only == null || only.startsWith("firework")) {
+                cases += playFirework(official, out, only);
+                if (only == null || "firework_save".startsWith(only)) {
+                    cases += playFireworkSave(official, out);
+                }
             }
             if (only == null || only.startsWith("arrow_deflect")) {
                 cases += playArrowDeflect(official, out, only);
@@ -12685,6 +12694,205 @@ public final class MobOracle {
     }
 
     /**
+     * 烟花火箭逐刻对拍：三个场景（竖直无星、带星炸牛、弩斜射撞墙）逐刻比位置、
+     * 速度、朝向、是否消失、`life` / `lifetime`、消失那一刻的实体事件 17、牛的血量与
+     * 击退速度、世界随机源和最终方块。烟花实体的随机源照 `OracleSkeleton.getArrow` 从
+     * `level.entitySeeds` 取：先构造官方实体，再换成带种子的随机源、重抽 UUID，并把
+     * 构造函数的初速 / 寿命逻辑在带种子的随机源上重跑一遍。
+     */
+    private static int playFirework(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of("firework_vertical", "firework_star_cow", "firework_crossbow_wall")) {
+            if (only != null && !name.startsWith(only)) continue;
+            boolean star = name.equals("firework_star_cow");
+            boolean crossbow = name.equals("firework_crossbow_wall");
+            boolean hasStar = star || crossbow;
+            FakeLevel level = FakeLevel.create(official);
+            ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+            level.nextId = FIRST_ID;
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            level.spawned = new ArrayList<>();
+            level.tracked = new ArrayList<>();
+            level.levelEvents = new ArrayList<>();
+            level.getRandom().setSeed(1L);
+            level.gameTime = START_TIME;
+            for (int x = -4; x <= 4; x++) {
+                for (int z = -4; z <= 4; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+            // 带星炸牛场景：在 (0, 66, 0) 放一块石顶，让带星烟花在牛旁 2 格左右撞顶爆炸。
+            if (star) {
+                level.blocks.put(BlockPos.asLong(0, 66, 0), Blocks.STONE.defaultBlockState());
+            }
+            // 斜射场景：命中面在 (2, 64, 0) 的一堵石墙，带星烟花撞墙即爆。
+            if (crossbow) {
+                level.blocks.put(BlockPos.asLong(2, 64, 0), Blocks.STONE.defaultBlockState());
+            }
+            // 烟花起点：竖直 / 带星在 (0.5, 64.5, 0.5)，斜射从 (0.5, 64.5, 0.5) 朝 +X 飞。
+            double[] start = new double[] {0.5, 64.5, 0.5};
+            double[] dir = new double[] {1.0, 0.0, 0.0};
+            ItemStack stack = new ItemStack(Items.FIREWORK_ROCKET, 1);
+            if (hasStar) {
+                stack.set(DataComponents.FIREWORKS, new Fireworks(1,
+                        List.of(new FireworkExplosion(FireworkExplosion.Shape.SMALL_BALL,
+                                IntList.of(0xFFFFFF), IntList.of(), false, false))));
+            }
+            net.minecraft.world.entity.projectile.FireworkRocketEntity firework;
+            if (crossbow) {
+                firework = new net.minecraft.world.entity.projectile.FireworkRocketEntity(
+                        level, stack, start[0], start[1], start[2], true);
+            } else {
+                firework = new net.minecraft.world.entity.projectile.FireworkRocketEntity(
+                        level, start[0], start[1], start[2], stack);
+            }
+            // 烟花先取种子（和 Bamboo 的生成顺序一致），牛后取。
+            setRandom(firework, level.entitySeeds.nextLong());
+            firework.setUUID(Mth.createInsecureUUID(firework.getRandom()));
+            // 构造函数的初速和寿命在带种子的随机源上重跑一遍。
+            firework.setDeltaMovement(
+                    firework.getRandom().triangle(0.0, 0.002297), 0.05,
+                    firework.getRandom().triangle(0.0, 0.002297));
+            int flight = 1;
+            Fireworks component = stack.get(DataComponents.FIREWORKS);
+            if (component != null) flight += component.flightDuration();
+            putInt(net.minecraft.world.entity.projectile.FireworkRocketEntity.class, firework,
+                    "lifetime", 10 * flight + firework.getRandom().nextInt(6)
+                            + firework.getRandom().nextInt(7));
+            if (crossbow) {
+                firework.shoot(dir[0], dir[1], dir[2], 1.6F, 1.0F);
+            }
+            firework.setId(FIRST_ID);
+            level.tracked.add(firework);
+            net.minecraft.world.entity.animal.cow.Cow cow = null;
+            if (star) {
+                cow = EntityTypes.COW.create(level, EntitySpawnReason.EVENT);
+                setRandom(cow, level.entitySeeds.nextLong());
+                RandomSource random = cow.getRandom();
+                cow.setUUID(Mth.createInsecureUUID(random));
+                float yaw = random.nextFloat() * 6.2831855F;
+                cow.setYRot(yaw);
+                cow.setYHeadRot(yaw);
+                cow.setId(FIRST_ID + 2);
+                cow.setPos(1.5, 64.0, 0.5);
+                cow.setPersistenceRequired();
+                cow.setNoAi(true);
+                level.tracked.add(cow);
+            }
+            // 记录消失那一刻的实体事件 17。
+            final boolean[] event17 = {false};
+            level.packets = packet -> {
+                if (packet instanceof ClientboundEntityEventPacket ev
+                        && ev.getEventId() == 17
+                        && getInt(ClientboundEntityEventPacket.class, ev, "entityId") == firework.getId()) {
+                    event17[0] = true;
+                }
+            };
+            int ticks = crossbow ? 12 : 30;
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    level.gameTime++;
+                    event17[0] = false;
+                    if (!firework.isRemoved()) {
+                        firework.commonTick();
+                        firework.tick();
+                    }
+                }
+                if (tick > 0) frames.append(',');
+                frames.append('[')
+                        .append(Double.doubleToRawLongBits(firework.getX())).append(',')
+                        .append(Double.doubleToRawLongBits(firework.getY())).append(',')
+                        .append(Double.doubleToRawLongBits(firework.getZ())).append(',')
+                        .append(Double.doubleToRawLongBits(firework.getDeltaMovement().x)).append(',')
+                        .append(Double.doubleToRawLongBits(firework.getDeltaMovement().y)).append(',')
+                        .append(Double.doubleToRawLongBits(firework.getDeltaMovement().z)).append(',')
+                        .append(Float.floatToRawIntBits(firework.getYRot())).append(',')
+                        .append(Float.floatToRawIntBits(firework.getXRot())).append(',')
+                        .append(firework.isRemoved() ? 1 : 0).append(',')
+                        .append(getInt(net.minecraft.world.entity.projectile.FireworkRocketEntity.class,
+                                firework, "life")).append(',')
+                        .append(getInt(net.minecraft.world.entity.projectile.FireworkRocketEntity.class,
+                                firework, "lifetime")).append(',')
+                        .append(event17[0] ? 1 : 0).append(',')
+                        .append(star ? Float.floatToRawIntBits(cow.getHealth()) : 0).append(',')
+                        .append(star ? Double.doubleToRawLongBits(cow.getDeltaMovement().x) : 0L).append(',')
+                        .append(star ? Double.doubleToRawLongBits(cow.getDeltaMovement().y) : 0L).append(',')
+                        .append(star ? Double.doubleToRawLongBits(cow.getDeltaMovement().z) : 0L).append(',')
+                        .append(randomSeed(level.getRandom())).append(']');
+            }
+            frames.append(']');
+            long[] keys = level.blocks.keySet().toLongArray();
+            Arrays.sort(keys);
+            StringBuilder blocks = new StringBuilder("[");
+            for (int i = 0; i < keys.length; i++) {
+                if (i > 0) blocks.append(',');
+                BlockPos pos = BlockPos.of(keys[i]);
+                blocks.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',')
+                        .append(pos.getZ()).append(',')
+                        .append(Block.getId(level.getBlockState(pos))).append(']');
+            }
+            blocks.append(']');
+            out.write("{\"type\":\"firework\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"star\":" + star + ",\"crossbow\":" + crossbow
+                    + ",\"start\":[0.5,64.5,0.5],\"direction\":[1.0,0.0,0.0]"
+                    + ",\"frames\":" + frames
+                    + ",\"finalBlocks\":" + blocks + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    /** 烟花火箭存档往返：官方 `saveWithoutId` 的 SNBT 和读回后再写出的 SNBT。 */
+    private static int playFireworkSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean filled : new boolean[] {false, true}) {
+            FakeLevel world = FakeLevel.create(official);
+            ItemStack stack = new ItemStack(Items.FIREWORK_ROCKET, 1);
+            if (filled) {
+                stack.set(DataComponents.FIREWORKS, new Fireworks(2,
+                        List.of(new FireworkExplosion(FireworkExplosion.Shape.LARGE_BALL,
+                                IntList.of(0xFF0000, 0x00FF00), IntList.of(0x0000FF), true, true))));
+            }
+            var firework = new net.minecraft.world.entity.projectile.FireworkRocketEntity(
+                    world, stack, 1.5, 65.25, 2.5, filled);
+            firework.setUUID(new UUID(0L, filled ? 11L : 10L));
+            firework.setDeltaMovement(0.25, 0.5, -0.125);
+            firework.setYRot(45.0F);
+            firework.setXRot(-15.0F);
+            putInt(net.minecraft.world.entity.projectile.FireworkRocketEntity.class, firework,
+                    "life", filled ? 5 : 0);
+            putInt(net.minecraft.world.entity.projectile.FireworkRocketEntity.class, firework,
+                    "lifetime", filled ? 22 : 14);
+            if (filled) {
+                var owner = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+                owner.setUUID(new UUID(0L, 99L));
+                firework.setOwner(owner);
+                put(net.minecraft.world.entity.projectile.Projectile.class, firework,
+                        "leftOwner", true);
+                put(net.minecraft.world.entity.projectile.Projectile.class, firework,
+                        "hasBeenShot", true);
+            }
+            var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            firework.saveWithoutId(output);
+            var copy = EntityTypes.FIREWORK_ROCKET.create(world, EntitySpawnReason.LOAD);
+            copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries,
+                    output.buildResult()));
+            var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            copy.saveWithoutId(again);
+            out.write("{\"type\":\"fireworkSave\",\"filled\":" + filled
+                    + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                    + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    /**
      * 箭射旋风人被弹回逐刻对拍：一支固定起点 / 速度的箭朝静止的旋风人飞去，
      * 逐刻比位置、速度、朝向、是否消失、旋风人血量（不该受伤）、箭的随机源、
      * 世界随机源和这一刻的 `BREEZE_DEFLECT` 音效（在旋风人身上）。
@@ -14530,10 +14738,9 @@ public final class MobOracle {
      *  交易一笔、despawnDelay 到时三只一起消失。每刻比位置、效果、饮水、
      *  目标、实体随机源、倒计时、存在与否和交易表摘要。 */
     private static int playWanderingTraderScenes(Official official, Writer out, String only) throws Exception {
-        // 夜里饮水场景：官方 goalSelector 跑 UseItemGoal，逐刻比位置、效果、
-        // 饮水、目标名、实体随机源、倒计时和两只拴着的羊驼。其余分支（白天牛奶、
-        // 游走、躲僵尸、消失、交易）由 Rust 单测 / e2e 覆盖，见 README 已知限制。
-        String[] names = {"wt_drink_night"};
+        // 六个场景都开着 AI 跑官方整张目标表，逐刻比位置、效果、饮水、目标名、
+        // 实体随机源、倒计时、存在与否和两只拴着的羊驼。
+        String[] names = {"wt_drink_night", "wt_drink_day", "wt_wander", "wt_avoid_zombie", "wt_despawn", "wt_trade"};
         int cases = 0;
         for (String name : names) {
             if (only != null && !name.startsWith(only)) continue;
@@ -14581,9 +14788,8 @@ public final class MobOracle {
         }
         trader.setDespawnDelay(despawn ? 40 : 48000);
         if (wander) trader.setWanderTarget(new BlockPos(8, 64, 0));
-        // 只有夜里饮水场景开 AI（跑官方 UseItemGoal）；其余场景 NoAI，
-        // 逐刻比位置 / 效果 / 倒计时 / 存在 / 交易表，Bamboo 的目标表占位项不跑。
-        trader.setNoAi(!drinkNight);
+        // 六个场景都开 AI，跑官方整张目标表。
+        trader.setNoAi(false);
         world.tracked.add(trader);
 
         // 两只行商羊驼拴在商人身上；官方 `setLeashedTo(trader, true)`。
@@ -14597,10 +14803,19 @@ public final class MobOracle {
             llama.setYHeadRot(0.0F);
             llama.setYBodyRot(0.0F);
             setRandom(llama, 100L + i);
-            llama.setNoAi(true);
+            llama.setNoAi(false);
             llama.setLeashedTo(trader, true);
             world.tracked.add(llama);
             llamas[i] = llama;
+        }
+
+        // 官方 `ServerEntity.sendChanges` 在每刻 `tick()` 之后调
+        // `updateDataBeforeSync`，把 `isInvisible()` 跟着效果表刷新；这里用假的
+        // 同步器重放这一步，不再额外显式调 `updateDataBeforeSync`。
+        Sync traderSync = new Sync(world, trader, official.registries);
+        Sync[] llamaSyncs = new Sync[2];
+        for (int i = 0; i < 2; i++) {
+            llamaSyncs[i] = new Sync(world, llamas[i], official.registries);
         }
 
         // 躲僵尸场景：第 10 刻放进一只 NoAI 僵尸，开着 AI 的商人会跑开。
@@ -14639,11 +14854,13 @@ public final class MobOracle {
                 }
                 if (trade && tick == 10) {
                     trader.setTradingPlayer(player);
-                    var offer = new net.minecraft.world.item.trading.MerchantOffer(
-                            new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 1),
-                            new ItemStack(Items.APPLE), 12, 2, 0.05F);
+                }
+                if (trade && tick == 20) {
+                    var offer = trader.getOffers().get(0);
                     put(net.minecraft.world.item.trading.MerchantOffer.class, offer, "rewardExp", false);
                     trader.notifyTrade(offer);
+                }
+                if (trade && tick == 30) {
                     trader.setTradingPlayer(null);
                 }
                 java.util.List<Entity> snapshot = new java.util.ArrayList<>(world.tracked);
@@ -14654,31 +14871,32 @@ public final class MobOracle {
                     e.commonTick();
                     e.tick();
                 }
-                // 真实服务端每刻同步实体前调 `updateDataBeforeSync`，其中
-                // `updateDirtyEffects` 把 `isInvisible()` 跟着效果表刷新；假世界
-                // 没有追踪器，这里显式补上，和 Bamboo 的 baseTick 刷新对齐。
-                if (!trader.isRemoved()) trader.updateDataBeforeSync();
-                for (TraderLlama llama : llamas) {
-                    if (!llama.isRemoved()) llama.updateDataBeforeSync();
+                // 同步阶段：`ServerEntity.sendChanges` 先跑 `updateDataBeforeSync`。
+                if (!trader.isRemoved()) traderSync.entity.sendChanges();
+                for (int i = 0; i < 2; i++) {
+                    if (!llamas[i].isRemoved()) llamaSyncs[i].entity.sendChanges();
                 }
                 world.tracked.removeIf(Entity::isRemoved);
             }
             if (tick > 0) frames.append(',');
-            boolean aiScene = drinkNight;
-            frames.append("{\"trader\":").append(wanderingEntityFrame(trader, aiScene))
-                    .append(",\"traderGone\":").append(trader.isRemoved())
-                    .append(",\"despawn\":").append(trader.getDespawnDelay())
-                    .append(",\"drink\":").append(jsonString(aiScene ? wanderingDrink(trader) : "none"))
+            boolean aiScene = true;
+            boolean traderGone = trader.isRemoved();
+            frames.append("{\"trader\":")
+                    .append(traderGone ? "null" : wanderingEntityFrame(trader, aiScene))
+                    .append(",\"traderGone\":").append(traderGone)
+                    .append(",\"despawn\":").append(traderGone ? 0 : trader.getDespawnDelay())
+                    .append(",\"drink\":").append(jsonString(traderGone ? "none" : wanderingDrink(trader)))
                     .append(",\"bright\":").append(world.isBrightOutside())
-                    .append(",\"goals\":").append(jsonString(aiScene ? runningGoals(trader.getGoalSelector()) : ""))
-                    .append(",\"offers\":").append(jsonString(offersDigest(trader.getOffers())));
+                    .append(",\"goals\":").append(jsonString(traderGone ? "" : runningGoals(trader.getGoalSelector())))
+                    .append(",\"offers\":").append(jsonString(traderGone ? "" : offersDigest(trader.getOffers())));
             for (int i = 0; i < 2; i++) {
+                boolean llamaGone = llamas[i].isRemoved();
                 frames.append(",\"llama").append(i).append("\":")
-                        .append(wanderingEntityFrame(llamas[i], false))
+                        .append(llamaGone ? "null" : wanderingEntityFrame(llamas[i], true))
                         .append(",\"llama").append(i).append("Gone\":")
-                        .append(llamas[i].isRemoved())
+                        .append(llamaGone)
                         .append(",\"llama").append(i).append("Delay\":")
-                        .append(getInt(TraderLlama.class, llamas[i], "despawnDelay"));
+                        .append(llamaGone ? 0 : getInt(TraderLlama.class, llamas[i], "despawnDelay"));
             }
             if (avoid) {
                 frames.append(",\"zombie\":").append(zombie == null || !world.tracked.contains(zombie)

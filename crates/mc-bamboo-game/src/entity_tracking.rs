@@ -832,6 +832,8 @@ pub enum KindData {
     OminousItemSpawner(ItemStack),
     /// 风弹：`add_entity` 的 data 用主人 ID。
     WindCharge(mc_bamboo_blocks::entity::wind_charge::WindChargePublic),
+    /// 烟花火箭：`add_entity` 的 data 用主人 ID，元数据带物品堆、附着目标和斜射标志。
+    FireworkRocket(mc_bamboo_blocks::entity::firework_rocket::FireworkRocketPublic),
     /// 羊驼口水：没有自己的元数据。
     ///
     /// Llama spit, with no metadata of its own.
@@ -894,6 +896,7 @@ impl Snapshot {
                 KindPublic::Egg(egg) => egg.needs_sync,
                 KindPublic::SplashPotion(potion) => potion.needs_sync,
                 KindPublic::WindCharge(charge) => charge.needs_sync,
+                KindPublic::FireworkRocket(firework) => firework.needs_sync,
                 _ => false,
             },
             sync_velocity: match &public.kind {
@@ -901,6 +904,7 @@ impl Snapshot {
                 KindPublic::Egg(egg) => egg.sync_velocity,
                 KindPublic::SplashPotion(potion) => potion.sync_velocity,
                 KindPublic::WindCharge(charge) => charge.sync_velocity,
+                KindPublic::FireworkRocket(firework) => firework.sync_velocity,
                 _ => false,
             },
             sync_position: false,
@@ -922,6 +926,7 @@ impl Snapshot {
             KindData::Egg(egg) => egg.owner.unwrap_or(0),
             KindData::SplashPotion(potion) => potion.owner.unwrap_or(0),
             KindData::WindCharge(charge) => charge.owner.unwrap_or(0),
+            KindData::FireworkRocket(firework) => firework.owner.unwrap_or(0),
             KindData::Tnt { .. }
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
@@ -956,6 +961,7 @@ impl KindData {
             KindPublic::LightningBolt(_) => Self::LightningBolt,
             KindPublic::OminousItemSpawner(stack) => Self::OminousItemSpawner(stack.clone()),
             KindPublic::WindCharge(charge) => Self::WindCharge(*charge),
+            KindPublic::FireworkRocket(firework) => Self::FireworkRocket(firework.clone()),
             KindPublic::LeashKnot { .. } => Self::LeashKnot,
             KindPublic::EvokerFangs => Self::EvokerFangs,
         }
@@ -973,6 +979,7 @@ impl KindData {
                 | Self::LlamaSpit(_)
                 | Self::SplashPotion(_)
                 | Self::WindCharge(_)
+                | Self::FireworkRocket(_)
         )
     }
 
@@ -991,7 +998,8 @@ impl KindData {
             | Self::LeashKnot
             | Self::EvokerFangs
             | Self::OminousItemSpawner(_)
-            | Self::WindCharge(_) => None,
+            | Self::WindCharge(_)
+            | Self::FireworkRocket(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -1010,7 +1018,8 @@ impl KindData {
             | Self::LightningBolt
             | Self::LeashKnot
             | Self::EvokerFangs
-            | Self::WindCharge(_) => None,
+            | Self::WindCharge(_)
+            | Self::FireworkRocket(_) => None,
         }
     }
 
@@ -1023,6 +1032,7 @@ impl KindData {
             Self::Egg(egg) => Some(egg.uuid),
             Self::SplashPotion(potion) => Some(potion.uuid),
             Self::WindCharge(charge) => Some(charge.uuid),
+            Self::FireworkRocket(firework) => Some(firework.uuid),
             _ => None,
         }
     }
@@ -1036,6 +1046,7 @@ impl KindData {
             Self::Egg(egg) => Some(egg.x_rot),
             Self::SplashPotion(potion) => Some(potion.x_rot),
             Self::WindCharge(charge) => Some(charge.pitch),
+            Self::FireworkRocket(firework) => Some(firework.pitch),
             _ => None,
         }
     }
@@ -1074,6 +1085,19 @@ impl KindData {
                 vec![EntityData::Item(stack.clone())]
             }
             Self::OminousItemSpawner(_) => Vec::new(),
+            Self::FireworkRocket(firework) => {
+                let mut data = Vec::new();
+                if !firework.item.is_empty() {
+                    data.push(EntityData::Item(firework.item.clone()));
+                }
+                if let Some(attached) = firework.attached_to_target {
+                    data.push(EntityData::FireworksAttached(Some(attached)));
+                }
+                if firework.shot_at_angle {
+                    data.push(EntityData::FireworksShotAtAngle(true));
+                }
+                data
+            }
             Self::Arrow(arrow) => {
                 let mut data = Vec::new();
                 if arrow.on_fire {
