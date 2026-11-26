@@ -297,6 +297,12 @@ pub(crate) struct Region {
     /// raid center on split/merge; the save rolls every island into one
     /// `raids.dat`, and `next_id` is the server-wide counter.
     pub(crate) raids: mc_bamboo_blocks::entity::raid::Raids,
+    /// `MapIndex` 与 `MapItemSavedData`：地图 ID 计数与地图数据表，对应
+    /// `data/minecraft/maps/last_id.dat` 与 `data/minecraft/maps/<id>.dat`。
+    ///
+    /// `MapIndex` and `MapItemSavedData`: map ID counter and map data table
+    /// stored under `data/minecraft/maps/`.
+    pub(crate) maps: crate::map::MapStore,
     /// 战利品表的 `random_sequence`。平坦世界的种子是 0，和 `login` 里的 `hashed_seed` 一样。
     ///
     /// Loot `random_sequence`s. The flat world seed is 0, the same value as `hashed_seed` in `login`.
@@ -539,6 +545,7 @@ impl Region {
             villager_sleep_brain_interval: 0,
             patrol_spawner: mc_bamboo_blocks::entity::mob::patrol::PatrolSpawner::default(),
             raids: mc_bamboo_blocks::entity::raid::Raids::new(),
+            maps: crate::map::MapStore::new(),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             sound_seed_generator: LevelRandom::new(unique_seed()),
             entities: Entities::default(),

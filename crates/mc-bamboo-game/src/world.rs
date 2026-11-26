@@ -477,6 +477,15 @@ impl World {
             .collect()
     }
 
+    /// 存盘时把各停放岛的 `MapStore` 汇总成一份，对应 `data/minecraft/maps/*.dat`。
+    ///
+    /// Merge every parked island's `MapStore` for saving `data/minecraft/maps/*.dat`.
+    pub(super) fn map_store_for_save(&self) -> crate::map::MapStore {
+        crate::map::MapStore::merge_for_save(
+            self.islands.parked().map(|island| &island.region.maps),
+        )
+    }
+
     /// 创建一个空世界。`config` 的视距超出合法范围时取最接近的值。
     pub fn new(config: WorldConfig, inbox: InboundReceiver) -> Self {
         Self::with_service_keys(config, inbox, secure_chat::empty_keys())
@@ -2653,9 +2662,15 @@ impl World {
             .snapshot_all_dirty(&mut self.islands.all_mut(), self.master.director_tick);
         self.save_all_players();
         let raid_tables = self.raid_tables();
+        let map_store = self.map_store_for_save();
         let master = &mut self.master;
         let files = master.save.as_mut().map(|save| {
-            save.encode_saves(&master.global, &raid_tables, crate::admin::now_millis())
+            save.encode_saves(
+                &master.global,
+                &raid_tables,
+                &map_store,
+                crate::admin::now_millis(),
+            )
         });
         let encoded = match files {
             Some(Ok(files)) => {
@@ -3483,9 +3498,15 @@ impl World {
         self.master.host.set_saves_enabled(true);
         self.save_all_players();
         let raid_tables = self.raid_tables();
+        let map_store = self.map_store_for_save();
         let master = &mut self.master;
         let files = master.save.as_mut().map(|save| {
-            save.encode_saves(&master.global, &raid_tables, crate::admin::now_millis())
+            save.encode_saves(
+                &master.global,
+                &raid_tables,
+                &map_store,
+                crate::admin::now_millis(),
+            )
         });
         match files {
             Some(Ok(files)) => self.master.host.submit_file_writes(files),
@@ -3536,9 +3557,15 @@ impl World {
         }
         self.master.host.set_saves_enabled(true);
         let raid_tables = self.raid_tables();
+        let map_store = self.map_store_for_save();
         let master = &mut self.master;
         let files = master.save.as_mut().map(|save| {
-            save.encode_saves(&master.global, &raid_tables, crate::admin::now_millis())
+            save.encode_saves(
+                &master.global,
+                &raid_tables,
+                &map_store,
+                crate::admin::now_millis(),
+            )
         });
         match files {
             Some(Ok(files)) => self.master.host.submit_file_writes(files),

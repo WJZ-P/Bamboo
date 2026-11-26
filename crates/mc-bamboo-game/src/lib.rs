@@ -77,6 +77,7 @@ mod light_updates;
 mod links;
 mod lock;
 mod loot_stacks;
+pub mod map;
 mod menu;
 pub mod merchant;
 mod movement;

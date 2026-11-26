@@ -104,6 +104,42 @@ fn read_command_storage(dir: &WorldDir) -> Vec<(String, Tag)> {
     out
 }
 
+/// 开服时读回 `data/minecraft/maps/last_id.dat` 与全部 `data/minecraft/maps/<id>.dat`。
+/// 坏文件按官方 `SavedDataStorage.readSavedData` 跳过，不影响其余地图。
+///
+/// Read `data/minecraft/maps/last_id.dat` and all `data/minecraft/maps/<id>.dat` at startup.
+fn read_maps(dir: &WorldDir) -> crate::map::MapStore {
+    let mut store = crate::map::MapStore::new();
+    if let Some(tag) = read_saved_data(dir, "minecraft:maps/last_id") {
+        store.index = crate::map::MapIndex::from_tag(&tag);
+    }
+    let maps_dir = dir.root().join("data/minecraft/maps");
+    let Ok(entries) = std::fs::read_dir(maps_dir) else {
+        return store;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".dat") else {
+            continue;
+        };
+        let Ok(id) = stem.parse::<i32>() else {
+            continue;
+        };
+        if let Some(tag) = read_saved_data_at(&path)
+            && let Some(data) = crate::map::MapItemSavedData::from_tag(&tag)
+        {
+            store.maps.insert(id, data);
+        }
+    }
+    store
+}
+
 impl SaveSession {
     /// 建目录、拿独占锁、读关卡数据、写出默认的 `data/` 文件。
     /// 拿不到锁时返回错误，调用方应拒绝启动。
@@ -142,6 +178,7 @@ impl SaveSession {
             raids: read_saved_data(&dir, "minecraft:raids")
                 .map(|tag| mc_bamboo_blocks::entity::raid::Raids::from_tag(&tag))
                 .unwrap_or_default(),
+            maps: read_maps(&dir),
             wandering_trader: read_saved_data(&dir, "minecraft:wandering_trader"),
             command_storage: read_command_storage(&dir),
         };
@@ -231,6 +268,7 @@ impl SaveSession {
         &mut self,
         global: &Global,
         islands: &[(u32, mc_bamboo_blocks::entity::raid::Raids)],
+        maps: &crate::map::MapStore,
         last_played: i64,
     ) -> io::Result<Vec<EncodedFile>> {
         crate::save_data::sync_level_data(
@@ -316,6 +354,26 @@ impl SaveSession {
                 bytes: encode_saved_data(&global.command_storage.namespace_tag(&namespace))?,
             });
         }
+        // 官方 26.3：`MapIndex.TYPE` 写 `data/minecraft/maps/last_id.dat`，
+        // 每张地图按 `MapItemSavedData.type(MapId)` 写 `data/minecraft/maps/<id>.dat`。
+        // 没建过地图的新世界不写空的 `last_id.dat`（补 10）。
+        // Official 26.3: `MapIndex.TYPE` writes `data/minecraft/maps/last_id.dat`
+        // and each map writes `data/minecraft/maps/<id>.dat`. Fresh worlds with
+        // no maps omit `last_id.dat` (Item 10).
+        if maps.index.last_map_id >= 0 || maps.index.dirty {
+            files.push(EncodedFile {
+                path: self.dir.saved_data("minecraft:maps/last_id"),
+                backup: None,
+                bytes: encode_saved_data(&maps.index.to_tag())?,
+            });
+        }
+        for (&id, data) in &maps.maps {
+            files.push(EncodedFile {
+                path: self.dir.saved_data(&format!("minecraft:maps/{id}")),
+                backup: None,
+                bytes: encode_saved_data(&data.to_tag())?,
+            });
+        }
         // 补 10：只写建模过的 `data/` 文件；未建模的 saved data 保持「不存在」，
         // 官方 computeIfAbsent 会自己造默认值。已有的这类文件原样保留，不动。
         // Item 10: only the modelled `data/` files are written; unmodelled saved
@@ -328,7 +386,7 @@ impl SaveSession {
     /// Test-only: write `encode_saves` bytes synchronously, standing in for the IO thread.
     #[cfg(test)]
     pub(crate) fn save_all(&mut self, global: &Global, last_played: i64) -> io::Result<()> {
-        for file in self.encode_saves(global, &[], last_played)? {
+        for file in self.encode_saves(global, &[], &crate::map::MapStore::new(), last_played)? {
             mc_bamboo_storage::world_dir::safe_replace(
                 &file.path,
                 &file.bytes,
@@ -437,7 +495,9 @@ mod tests {
         let (mut session, _) = SaveSession::open(&tmp.0).unwrap();
         assert!(!session.dir().level_dat().exists());
         let global = Global::default();
-        let files = session.encode_saves(&global, &[], 777).unwrap();
+        let files = session
+            .encode_saves(&global, &[], &crate::map::MapStore::new(), 777)
+            .unwrap();
         assert!(
             files
                 .iter()
@@ -693,5 +753,64 @@ mod tests {
             .apply(&mut restored, &mut region, session.level().time);
         assert_eq!(restored.time().0, 90);
         assert_eq!(restored.clocks(), global.clocks());
+    }
+
+    #[test]
+    fn maps_and_last_id_round_trip_through_save_session() {
+        let tmp = TempDir::new("maps-roundtrip");
+        let global = Global::default();
+        let mut store = crate::map::MapStore::new();
+        let id0 = store.next_map_id();
+        let mut data0 = crate::map::MapItemSavedData::create_fresh(
+            10.0,
+            -20.0,
+            1,
+            true,
+            false,
+            "minecraft:overworld",
+        );
+        data0.set_color(
+            7,
+            9,
+            crate::map::packed_color(crate::map::map_color::WATER, crate::map::Brightness::High),
+        );
+        store.insert(id0, data0.clone());
+        let id1 = store.next_map_id();
+        let data1 = data0.locked();
+        store.insert(id1, data1.clone());
+
+        {
+            let (mut session, _) = SaveSession::open(&tmp.0).unwrap();
+            let files = session.encode_saves(&global, &[], &store, 123).unwrap();
+            for file in files {
+                mc_bamboo_storage::world_dir::safe_replace(
+                    &file.path,
+                    &file.bytes,
+                    file.backup.as_deref(),
+                )
+                .unwrap();
+            }
+            assert!(session.dir().saved_data("minecraft:maps/last_id").exists());
+            assert!(session.dir().saved_data("minecraft:maps/0").exists());
+            assert!(session.dir().saved_data("minecraft:maps/1").exists());
+            session.close();
+        }
+
+        let (session, _) = SaveSession::open(&tmp.0).unwrap();
+        let mut restored_global = Global::default();
+        let mut region = crate::region::Region::new(2, 20, false);
+        session
+            .startup()
+            .apply(&mut restored_global, &mut region, session.level().time);
+        assert_eq!(region.maps.index.last_map_id, 1);
+        let r0 = region.maps.get(0).expect("map 0 loaded");
+        assert_eq!(r0.center_x, data0.center_x);
+        assert_eq!(r0.center_z, data0.center_z);
+        assert_eq!(r0.scale, 1);
+        assert!(!r0.locked);
+        assert_eq!(r0.colors, data0.colors);
+        let r1 = region.maps.get(1).expect("map 1 loaded");
+        assert!(r1.locked);
+        assert_eq!(r1.colors, data1.colors);
     }
 }
