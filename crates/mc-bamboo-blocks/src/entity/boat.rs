@@ -912,3 +912,136 @@ fn hurt_from_environment(boat: &mut Boat, me: &mut Entity, amount: f32, ctx: &mu
         ctx.emit(Command::DropItem { stack }, me);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        BlockGameRules, BlockHit,
+        shape::CollisionContext,
+        state::{BlockState, FluidState, SupportType},
+    };
+    use mc_bamboo_core::{Direction, LightLayer};
+    use mc_bamboo_data::registries::entity_type as ids;
+
+    /// 空世界：没有方块、流体、漏斗，全部区块都加载。`floatBoat` 只在
+    /// 「空中→水/陆」分支用方块视图，这里四个场景都把 `old_status` 设成
+    /// 和 `status` 相同，不会走到那个分支。
+    struct EmptyView;
+
+    impl BlockView for EmptyView {
+        fn block_state(&self, _: BlockPos) -> BlockState {
+            BlockState::AIR
+        }
+        fn moving_piston_shape(&self, _: BlockPos) -> Option<Vec<Aabb>> {
+            None
+        }
+        fn shulker_box_shape(&self, _: BlockPos) -> Option<Aabb> {
+            None
+        }
+        fn fluid_state(&self, _: BlockPos) -> FluidState {
+            BlockState::AIR.fluid()
+        }
+        fn block_collisions(&self, _: Aabb, _: CollisionContext) -> Vec<(BlockPos, Vec<Aabb>)> {
+            Vec::new()
+        }
+        fn find_supporting_block(&self, _: Vec3, _: Aabb, _: CollisionContext) -> Option<BlockPos> {
+            None
+        }
+        fn clip_fall_damage_resetting(&self, _: Vec3, _: Vec3) -> bool {
+            false
+        }
+        fn clip_collider_source_water(
+            &self,
+            _: Vec3,
+            _: Vec3,
+            _: CollisionContext,
+        ) -> Option<BlockHit> {
+            None
+        }
+        fn clip_collider(&self, _: Vec3, _: Vec3, _: CollisionContext) -> Option<BlockHit> {
+            None
+        }
+        fn is_face_sturdy(&self, _: BlockPos, _: Direction, _: SupportType) -> bool {
+            false
+        }
+        fn is_loaded(&self, _: BlockPos) -> bool {
+            true
+        }
+        fn is_in_world_bounds(&self, _: BlockPos) -> bool {
+            true
+        }
+        fn min_y(&self) -> i32 {
+            -64
+        }
+        fn max_y(&self) -> i32 {
+            320
+        }
+        fn brightness(&self, _: LightLayer, _: BlockPos) -> i32 {
+            15
+        }
+        fn block_game_rules(&self) -> BlockGameRules {
+            BlockGameRules::vanilla()
+        }
+        fn fluid_height(&self, _: FluidState, _: BlockPos) -> f32 {
+            0.0
+        }
+        fn any_hopper_in(&self, _: BlockPos, _: BlockPos) -> bool {
+            false
+        }
+    }
+
+    fn scenario(status: Status) -> (Entity, Boat) {
+        let mut me = Entity::boat(ids::OAK_BOAT, Vec3::new(0.0, 64.0, 0.0));
+        me.delta = Vec3::new(1.0, 0.5, -1.0);
+        let mut boat = Boat::new(ids::OAK_BOAT);
+        boat.status = status;
+        boat.old_status = status;
+        boat.delta_rotation = 2.0;
+        boat.water_level = 64.5;
+        (me, boat)
+    }
+
+    #[test]
+    fn in_air_uses_0_9_drag_and_gravity() {
+        let (mut me, mut boat) = scenario(Status::InAir);
+        float_boat(&mut boat, &mut me, &EmptyView);
+        assert_eq!(me.delta.x, f64::from(0.9_f32));
+        assert_eq!(me.delta.y, 0.5 - 0.04);
+        assert_eq!(me.delta.z, -f64::from(0.9_f32));
+        assert_eq!(boat.delta_rotation, 2.0 * 0.9_f32);
+    }
+
+    #[test]
+    fn under_water_uses_0_45_drag_and_0_01_lift() {
+        let (mut me, mut boat) = scenario(Status::UnderWater);
+        float_boat(&mut boat, &mut me, &EmptyView);
+        let expected_y = (0.5 - 0.04 + 0.009_999_999_776_482_582_f64 * (0.04 / 0.65)) * 0.75;
+        assert_eq!(me.delta.x, f64::from(0.45_f32));
+        assert_eq!(me.delta.y, expected_y);
+        assert_eq!(me.delta.z, -f64::from(0.45_f32));
+        assert_eq!(boat.delta_rotation, 2.0 * 0.45_f32);
+    }
+
+    #[test]
+    fn under_flowing_water_uses_0_9_drag_and_small_gravity() {
+        let (mut me, mut boat) = scenario(Status::UnderFlowingWater);
+        float_boat(&mut boat, &mut me, &EmptyView);
+        assert_eq!(me.delta.x, f64::from(0.9_f32));
+        assert_eq!(me.delta.y, 0.5 - 0.0007);
+        assert_eq!(me.delta.z, -f64::from(0.9_f32));
+        assert_eq!(boat.delta_rotation, 2.0 * 0.9_f32);
+    }
+
+    #[test]
+    fn in_water_uses_0_9_drag_and_water_level_lift() {
+        let (mut me, mut boat) = scenario(Status::InWater);
+        float_boat(&mut boat, &mut me, &EmptyView);
+        let lift = (boat.water_level - me.position.y) / f64::from(me.dimensions.1);
+        let expected_y = (0.5 - 0.04 + lift * (0.04 / 0.65)) * 0.75;
+        assert_eq!(me.delta.x, f64::from(0.9_f32));
+        assert_eq!(me.delta.y, expected_y);
+        assert_eq!(me.delta.z, -f64::from(0.9_f32));
+        assert_eq!(boat.delta_rotation, 2.0 * 0.9_f32);
+    }
+}
