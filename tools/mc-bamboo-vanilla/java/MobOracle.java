@@ -1297,6 +1297,8 @@ public final class MobOracle {
         /** 僵尸场景：每只生物头上戴的东西（`null` 是空）和它的初始耐久损耗。 */
         Item helmet;
         int helmetDamage;
+        /** 攻击场景：目标牛（0 号）胸口穿的盔甲，0 是空（破甲对拍用）。 */
+        int targetChest;
         /** 苦力怕场景：第 0 位带电，第 1 位已点燃。 */
         int creeperFlags;
         /** 末影人场景：初始搬着的方块，`null` 表示空手。 */
@@ -1317,10 +1319,14 @@ public final class MobOracle {
         boolean attackGround;
         /** 攻击场景：主手武器上的附魔，成对存 (名字, 等级)。 */
         final List<String[]> attackEnchants = new ArrayList<>();
-        /** 攻击场景：这些下标的生物是 0 号玩家驯服的狼（范围击退要排除它）。 */
-        final List<Integer> tamedWolves = new ArrayList<>();
+        /** 攻击场景：这些下标的生物是驯服的狼，值是其主人玩家下标（范围击退要排除它）。 */
+        final java.util.Map<Integer, Integer> tamedWolves = new java.util.HashMap<>();
         /** 长矛场景：在这一刻触发 `PiercingWeapon.attack(player, MAINHAND)`，-1 不触发。 */
         int stabTick = -1;
+        /** 长矛蓄力场景：在这一刻 `startUsingItem` 开始蓄力，-1 不蓄力。 */
+        int kineticStart = -1;
+        /** 长矛蓄力场景：玩家的前向速度（`setKnownMovement` 的 x 分量，方块 / tick）。 */
+        double kineticSpeed;
         /**
          * 攻击场景：跳过每刻的 `cow.tick()`，这样牛的击退速度和 hurtTime 不被
          * 重力 / AI / 计时衰减污染，可以和 Bamboo 的受伤重放逐位比。
@@ -1728,13 +1734,32 @@ public final class MobOracle {
 
         /** 攻击场景：把第 `mobIndex` 头生物标记成 0 号玩家驯服的狼。 */
         Scene tamedWolf(int mobIndex) {
-            tamedWolves.add(mobIndex);
+            tamedWolves.put(mobIndex, 0);
+            return this;
+        }
+
+        /** 攻击场景：把第 `mobIndex` 头生物标记成第 `ownerIndex` 名玩家驯服的狼。 */
+        Scene tamedWolfOwner(int mobIndex, int ownerIndex) {
+            tamedWolves.put(mobIndex, ownerIndex);
             return this;
         }
 
         /** 长矛场景：在第 `tick` 刻触发 `PiercingWeapon.attack(player, MAINHAND)`。 */
         Scene stab(int tick) {
             stabTick = tick;
+            return this;
+        }
+
+        /** 攻击场景：给目标牛（0 号）穿一件胸甲（破甲对拍用）。 */
+        Scene targetChest(int item) {
+            targetChest = item;
+            return this;
+        }
+
+        /** 长矛蓄力场景：在第 `start` 刻开始蓄力，前向速度 `speed`（方块 / tick）。 */
+        Scene kinetic(int start, double speed) {
+            kineticStart = start;
+            kineticSpeed = speed;
             return this;
         }
     }
@@ -4968,6 +4993,23 @@ public final class MobOracle {
                 pet.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
                 pet.attackSetup(33, false, 5.0, false).attack(1, 0);
                 scenes.add(pet);
+                // 破甲：目标牛穿铁甲，带 / 不带破甲各砸一次，比伤害。低充能
+                // （ticker 0）压低基础伤害，2 格摔落下砸加伤 8 + 基础 1.2 不到 10 点，
+                // 牛活着；铁胸甲(6)把无破甲的伤害从 9.2 减到约 8.7，破甲 IV(-0.6)
+                // 把减伤比例压到 0、伤害回到 9.2，两场景的血量差可观察。
+                int ironChest = BuiltInRegistries.ITEM.getId(Items.IRON_CHESTPLATE);
+                for (int breach : new int[] {0, 4}) {
+                    Scene breachScene = new Scene("player_attack_mace_breach" + breach).ticks(6)
+                            .playerPackets().packets();
+                    ground(breachScene, 4);
+                    breachScene.player(0.5, 64.0, 0.5, Items.MACE);
+                    breachScene.cow(2.5, 64.0, 0.5, 0.0F, 249L + breach);
+                    breachScene.targetChest(ironChest);
+                    breachScene.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
+                    if (breach > 0) breachScene.attackEnchant("minecraft:breach", breach);
+                    breachScene.attackSetup(0, false, 2.0, true).attack(1, 0);
+                    scenes.add(breachScene);
+                }
                 // 长矛左键穿刺：一次打到排成一线的两头牛（射线穿过两头的包围盒）。
                 int spear = BuiltInRegistries.ITEM.getId(Items.IRON_SPEAR);
                 Scene stab = new Scene("player_attack_spear_stab").ticks(6)
@@ -4979,6 +5021,28 @@ public final class MobOracle {
                 stab.equipment(new int[] {0, 0, 0, 0, spear}, new int[] {0, 0, 0, 0});
                 stab.attackSetup(33, false, 0.0, true).stab(1);
                 scenes.add(stab);
+                // 风爆：带 wind_burst 的重锤下砸，爆炸把攻击者弹起来。5 格摔落
+                // 满足 `fall_distance >= 1.5`，攻击者竖直速度 +1.2（等级 1 的 lookup）。
+                Scene windBurst = new Scene("player_attack_mace_wind_burst").ticks(6)
+                        .playerPackets().packets();
+                ground(windBurst, 4);
+                windBurst.player(0.5, 64.0, 0.5, Items.MACE);
+                windBurst.cow(2.5, 64.0, 0.5, 0.0F, 253L);
+                windBurst.equipment(new int[] {0, 0, 0, 0, mace}, new int[] {0, 0, 0, 0});
+                windBurst.attackEnchant("minecraft:wind_burst", 1)
+                        .attackSetup(33, false, 5.0, false).attack(1, 0);
+                scenes.add(windBurst);
+                // 长矛蓄力冲刺：玩家前向冲（`setKnownMovement`），第 1 刻开始蓄力，
+                // 延迟 12 刻后逐刻接触伤害打到前（+Z）的牛。
+                Scene charge = new Scene("player_attack_spear_charge").ticks(16)
+                        .playerPackets().packets();
+                ground(charge, 4);
+                charge.player(0.5, 64.0, 0.5, Items.IRON_SPEAR);
+                // 抬到 64.5 让水平射线（眼高 1.62 > 牛高 1.4）穿进牛的身体。
+                charge.cow(0.5, 64.5, 2.5, 0.0F, 254L);
+                charge.equipment(new int[] {0, 0, 0, 0, spear}, new int[] {0, 0, 0, 0});
+                charge.kinetic(1, 0.3).attackSetup(33, false, 0.0, true);
+                scenes.add(charge);
             }
             // ---- 1b：死亡、掉落、重生与回血 ----
             // keepInventory × immediateRespawn × 等级经验 × 消失诅咒。
@@ -5887,6 +5951,13 @@ public final class MobOracle {
             if (scene.playerExhaustion > 0.0F) {
                 player.getFoodData().addExhaustion(scene.playerExhaustion);
             }
+            if (scene.kineticStart >= 0) {
+                // 长矛蓄力：前向速度，`getKnownSpeed` 读 `lastKnownClientMovement`。
+                // 玩家朝向 +Z（yaw 0），前向速度也在 +Z。
+                player.setKnownMovement(new Vec3(0.0, 0.0, scene.kineticSpeed));
+            }
+            // 队伍：宠物继承主人的队伍（`TamableAnimal.getTeam()` 回退），攻击场景也进队。
+            joinTeam(level, player.getScoreboardName(), teamOf(scene.playerTeams, i));
             players.add(player);
         }
         level.playersList().addAll(players);
@@ -5924,8 +5995,8 @@ public final class MobOracle {
             }
         }
         for (int i = 0; i < scene.cows.size(); i++) {
-            // 攻击场景的「驯服狼」用狼代替按名字推出的动物类型，主人是 0 号玩家。
-            boolean tamedWolf = scene.tamedWolves.contains(i);
+            // 攻击场景的「驯服狼」用狼代替按名字推出的动物类型，主人见 `tamedWolves`。
+            boolean tamedWolf = scene.tamedWolves.containsKey(i);
             Animal cow = tamedWolf
                     ? EntityTypes.WOLF.create(level, EntitySpawnReason.COMMAND)
                     : animalType(scene.name).create(level, EntitySpawnReason.COMMAND);
@@ -5939,6 +6010,14 @@ public final class MobOracle {
             cow.snapTo(at[0], at[1], at[2], scene.yaws.get(i)[0], 0.0F);
             cow.setYHeadRot(scene.yaws.get(i)[0]);
             cow.setYBodyRot(scene.yaws.get(i)[0]);
+            if (scene.targetChest != 0 && i == 0) {
+                // 破甲对拍：目标牛穿一件胸甲，`detectEquipmentUpdates` 刷进盔甲属性。
+                cow.setItemSlot(net.minecraft.world.entity.EquipmentSlot.CHEST,
+                        new ItemStack(Item.byId(scene.targetChest)));
+                java.lang.reflect.Method detect = LivingEntity.class.getDeclaredMethod("detectEquipmentUpdates");
+                detect.setAccessible(true);
+                detect.invoke(cow);
+            }
             if (!scene.bootEnchantment.isEmpty() && i == 0) {
                 // 冰霜行者 / 灵魂疾行场景：靴子附魔，站在水面上方。
                 ItemStack boots = new ItemStack(Items.DIAMOND_BOOTS);
@@ -5988,7 +6067,7 @@ public final class MobOracle {
                 // UUID，都不带副作用，和 Bamboo 一侧直接填 `tame.flags` / `tame.owner` 对齐。
                 net.minecraft.world.entity.TamableAnimal tamable = (net.minecraft.world.entity.TamableAnimal) cow;
                 tamable.setTame(true, false);
-                tamable.setOwner(players.get(0));
+                tamable.setOwner(players.get(scene.tamedWolves.get(i)));
             }
             cows.add(cow);
             level.tracked.add(cow);
@@ -6024,9 +6103,10 @@ public final class MobOracle {
             line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
             line.append(",\"seed\":").append(scene.seeds.get(i));
-            line.append(",\"kind\":").append(scene.tamedWolves.contains(i)
+            line.append(",\"kind\":").append(scene.tamedWolves.containsKey(i)
                     ? 8 : animalKind(scene.name));
-            line.append(",\"owner\":").append(scene.tamedWolves.contains(i) ? 0 : -1);
+            line.append(",\"owner\":").append(scene.tamedWolves.getOrDefault(i, -1));
+            line.append(",\"chest\":").append(i == 0 ? scene.targetChest : 0);
             line.append(",\"wool\":").append(cows.get(i) instanceof Sheep sheep
                     ? (sheep.getColor().getId() | (sheep.isSheared() ? 16 : 0))
                     : scene.name.startsWith("mooshroom_") ? scene.wool : 0);
@@ -6049,7 +6129,8 @@ public final class MobOracle {
             line.append(",\"z\":").append(Double.doubleToRawLongBits(player.getZ()));
             line.append(",\"eye\":").append(Float.floatToRawIntBits(player.getEyeHeight()));
             line.append(",\"item\":").append(BuiltInRegistries.ITEM.getId(scene.playerItems.get(i)));
-            line.append(",\"looting\":").append(scene.lootingLevels.get(i)).append('}');
+            line.append(",\"looting\":").append(scene.lootingLevels.get(i));
+            line.append(",\"team\":").append(teamOf(scene.playerTeams, i)).append('}');
         }
         line.append("],\"hurts\":[");
         for (int i = 0; i < scene.hurts.size(); i++) {
@@ -6253,6 +6334,26 @@ public final class MobOracle {
                         }
                     }
                 }
+                if (scene.kineticStart >= 0 && tick >= scene.kineticStart) {
+                    // 长矛蓄力：`Item.use` 的 `startUsingItem` + `makeSound`，之后逐刻
+                    // `onUseTick` → `damageEntities`。
+                    ServerPlayer attacker = players.get(0);
+                    ItemStack weapon = attacker.getMainHandItem();
+                    if (tick == scene.kineticStart) {
+                        attacker.startUsingItem(InteractionHand.MAIN_HAND);
+                        net.minecraft.world.item.component.KineticWeapon kinetic =
+                                weapon.get(net.minecraft.core.component.DataComponents.KINETIC_WEAPON);
+                        if (kinetic != null) {
+                            kinetic.makeSound(attacker);
+                        }
+                    }
+                    if (attacker.isUsingItem()) {
+                        weapon.onUseTick(level, attacker, attacker.getUseItemRemainingTicks());
+                        int remaining = attacker.getUseItemRemainingTicks() - 1;
+                        putInt(net.minecraft.world.entity.LivingEntity.class, attacker,
+                                "useItemRemaining", remaining);
+                    }
+                }
                 // 只推进 1a 建模的三处：`ServerPlayer.tick` 递减 damageCooldownTime，
                 // `LivingEntity.baseTick` 递减 hurtTime，以及 `ServerPlayer.doTick`
                 // 里 `lastSentHealth` 变了就补 `set_health`。不跑 FoodData.tick /
@@ -6430,6 +6531,8 @@ public final class MobOracle {
         line.append(",\"attackFall\":").append(Double.doubleToRawLongBits(scene.attackFall));
         line.append(",\"attackGround\":").append(scene.attackGround);
         line.append(",\"stabTick\":").append(scene.stabTick);
+        line.append(",\"kineticStart\":").append(scene.kineticStart);
+        line.append(",\"kineticSpeed\":").append(Double.doubleToRawLongBits(scene.kineticSpeed));
         line.append(",\"attackEnchants\":[");
         for (int i = 0; i < scene.attackEnchants.size(); i++) {
             if (i > 0) line.append(',');
