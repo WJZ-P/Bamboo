@@ -436,6 +436,7 @@ impl ProjectileCase {
 
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             natural_spawn: None,
             biome: None,
             blocks: self

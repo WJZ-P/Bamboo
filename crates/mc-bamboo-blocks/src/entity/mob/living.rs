@@ -244,20 +244,29 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     // 控制乘客是生物、且不在 `#non_controlling_rider` 里时，MOVE / JUMP / LOOK 都关掉
     // （26.3 标签是史莱姆 / 岩浆怪 / 硫磺方块怪，建模范围内是史莱姆和硫磺方块怪；
     // 岩浆怪不在建模范围）。玩家骑手不算生物，标志保持打开；船不在建模范围，
-    // JUMP 和 MOVE 同值。
+    // JUMP 和 MOVE 同值。`Ravager` 覆写只看 `#raiders` 标签（掠夺者骑手会关掉标志，
+    // 别的生物骑手不会）。
     //
     // Vanilla `Mob.updateControlFlags`: a mob passenger outside
     // `#non_controlling_rider` (slime, magma cube, sulfur cube; slime and sulfur
     // cube are modeled here) disables MOVE / JUMP / LOOK. A player rider is not a
-    // mob, so the flags stay on; boats are out of scope.
+    // mob, so the flags stay on; boats are out of scope. `Ravager` overrides it
+    // to look at `#raiders` (a pillager rider disables the flags, other mob riders
+    // do not).
     if me.tick_count % 5 == 0 {
         let mob_rider = !mob.no_ai
             && mob.first_passenger().is_some_and(|uid| {
                 ctx.other(uid).is_some_and(|public| match &public.kind {
-                    crate::entity::KindPublic::Mob(rider) => !matches!(
-                        rider.mob_type,
-                        super::MobType::Slime | super::MobType::SulfurCube
-                    ),
+                    crate::entity::KindPublic::Mob(rider) => {
+                        if mob.mob_type == super::MobType::Ravager {
+                            rider.mob_type.is_raider()
+                        } else {
+                            !matches!(
+                                rider.mob_type,
+                                super::MobType::Slime | super::MobType::SulfurCube
+                            )
+                        }
+                    }
                     _ => false,
                 })
             });
@@ -1455,6 +1464,13 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
         super::creaking::ai_step(me, mob, ctx);
     }
     animal_ai_step(me, mob, ctx, plan);
+    // `Ravager.aiStep` 在 `super.aiStep()` 之后跑自己的那一段：速度渐进、踩树叶、
+    // 三个计时器。
+    // `Ravager.aiStep` runs its own part after `super.aiStep()`: speed easing,
+    // leaf trampling and the three timers.
+    if mob.mob_type == super::MobType::Ravager {
+        super::ravager::ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Bee {
         let target_close = super::goals::combat_target(mob, ctx)
             .is_some_and(|target| target.position.distance_to_sqr(me.position) < 4.0);
@@ -1541,9 +1557,14 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     // `applyInput`。
     mob.xxa *= 0.98;
     mob.zza *= 0.98;
-    // `isImmobile()`：缺省是濒死，马科另有覆写。
-    // `isImmobile()`: dying by default; equines override it.
-    if super::equine::is_immobile(mob) {
+    // `isImmobile()`：缺省是濒死，马科另有覆写，劫掠兽再加上三个计时器。
+    // `isImmobile()`: dying by default; equines override it, ravagers add the timers.
+    let immobile = if mob.mob_type == super::MobType::Ravager {
+        super::ravager::is_immobile(mob)
+    } else {
+        super::equine::is_immobile(mob)
+    };
+    if immobile {
         mob.jumping = false;
         mob.xxa = 0.0;
         mob.zza = 0.0;
@@ -2451,6 +2472,10 @@ fn max_head_y_rot(mob: &Mob) -> f32 {
         // `Sniffer.getMaxHeadYRot()`。
         // `Sniffer.getMaxHeadYRot()`.
         50.0
+    } else if mob.mob_type == super::MobType::Ravager {
+        // `Ravager.getMaxHeadYRot()`。
+        // `Ravager.getMaxHeadYRot()`.
+        45.0
     } else {
         MAX_HEAD_Y_ROT as f32
     }
@@ -2557,7 +2582,7 @@ pub(super) fn set_sprinting(mob: &mut Mob, sprinting: bool) {
 }
 
 /// `jumpFromGround`。
-fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
+pub(crate) fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     let strength = mob.attributes.value(attribute::JUMP_STRENGTH) as f32;
     let boost = jump_boost_power(mob);
     let is_rabbit = mob.mob_type == super::MobType::Rabbit;
@@ -3468,6 +3493,11 @@ pub(crate) fn do_hurt_target(
     // `Creeper.doHurtTarget` just returns true: melee only chases, the blast does the damage.
     if mob.mob_type == super::MobType::Creeper {
         return;
+    }
+    // `Ravager.doHurtTarget`：先记 `attackTick = 10`、4 号事件和攻击声，再打。
+    // `Ravager.doHurtTarget`: set `attackTick = 10`, event 4 and the attack sound first.
+    if mob.mob_type == super::MobType::Ravager {
+        super::ravager::start_attack(me, mob);
     }
     let raw_damage = mob.attributes.value(attribute::ATTACK_DAMAGE).max(0.0);
     // `Bee.doHurtTarget` 把攻击力先截成整数再转浮点：`(float)(int)getAttributeValue(ATTACK_DAMAGE)`。

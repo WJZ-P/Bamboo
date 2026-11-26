@@ -53,6 +53,7 @@ struct FishState {
 impl FishCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()

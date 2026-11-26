@@ -68,6 +68,7 @@ fn mob_level(case: &WardenCase) -> MobLevel {
         }
     }
     MobLevel {
+        raid: None,
         blocks,
         random: LevelRandom::new(1),
         loot_sequences: mc_bamboo_loot::RandomSequences::new(0),

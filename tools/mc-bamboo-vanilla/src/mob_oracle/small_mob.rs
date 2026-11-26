@@ -57,6 +57,7 @@ struct SmallState {
 impl SmallMobCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()
@@ -414,6 +415,7 @@ impl Report {
             MobType::Endermite
         };
         let mut level = MobLevel {
+            raid: None,
             blocks: std::collections::HashMap::new(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),

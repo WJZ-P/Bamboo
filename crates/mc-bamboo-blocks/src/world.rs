@@ -5306,6 +5306,7 @@ mod tests {
                 | Effect::GuardianElderEffect { .. }
                 | Effect::TrialSpawnerTransformBadOmen { .. }
                 | Effect::RaiderDied { .. }
+                | Effect::RaidSetLeader { .. }
                 | Effect::Explode { .. }
                 | Effect::PlayerShoulder { .. }
                 | Effect::Particles { .. }

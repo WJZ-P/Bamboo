@@ -204,6 +204,7 @@ impl Report {
         });
 
         let mut level = MobLevel {
+            raid: None,
             blocks: case
                 .blocks
                 .iter()

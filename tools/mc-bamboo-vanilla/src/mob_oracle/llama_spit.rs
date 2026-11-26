@@ -55,6 +55,7 @@ struct SpitEntry {
 impl LlamaSpitCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()

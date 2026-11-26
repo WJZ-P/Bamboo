@@ -45,6 +45,7 @@ impl Case {
             }
         }
         MobLevel {
+            raid: None,
             blocks: level_blocks.into_iter().collect(),
             random: LevelRandom::new(self.seed),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),

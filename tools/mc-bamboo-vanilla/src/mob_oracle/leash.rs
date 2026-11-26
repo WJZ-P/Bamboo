@@ -119,6 +119,7 @@ fn player_view(uid: i32, position: Vec3) -> PlayerView {
 impl LeashCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()

@@ -128,6 +128,7 @@ impl CopperGolemCase {
             container_open_counts: Default::default(),
             shoulder: Default::default(),
             explosion_break: 0,
+            raid: None,
         }
     }
 }

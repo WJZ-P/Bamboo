@@ -1236,6 +1236,41 @@ public final class MobOracle {
             return this;
         }
 
+        /** 袭击行为场景：{centerX, centerY, centerZ, status(0 ongoing/1 victory/2 loss/3 stopped), started, active, groupsSpawned, omenLevel}。 */
+        int[] raid;
+        Scene raid(int cx, int cy, int cz, int status, int started, int active, int groupsSpawned, int omen) {
+            this.raid = new int[] {cx, cy, cz, status, started, active, groupsSpawned, omen};
+            return this;
+        }
+
+        /** 开启真 POI 管理器，把 `blocks` 里的 POI 方块（床/钟/工作站）登记进去。 */
+        boolean poi;
+        Scene poi() {
+            this.poi = true;
+            return this;
+        }
+
+        /** 占用的 POI 方块（床/钟/工作站），袭击者穿村判定 `isVillage` 按占用计。 */
+        final List<int[]> poiTake = new ArrayList<>();
+        Scene poiTake(int x, int y, int z) {
+            this.poiTake.add(new int[] {x, y, z});
+            return this;
+        }
+
+        /** 队长捡旗场景：开局放一件灾厄旗帜掉落物。 */
+        double[] banner;
+        Scene banner(double x, double y, double z) {
+            this.banner = new double[] {x, y, z};
+            return this;
+        }
+
+        /** 开局把生物放在地面上（`setOnGround(true)`），躲开首刻寻路的 onGround 门槛。 */
+        boolean onGround;
+        Scene onGround() {
+            this.onGround = true;
+            return this;
+        }
+
         /** 僵尸场景：第 `sleepTick` 刻开头 0 号玩家右键床头 `bed`（`startSleepInBed`）。 */
         int sleepTick = -1;
         int[] bed;
@@ -2147,16 +2182,55 @@ public final class MobOracle {
 
         static void reseed(net.minecraft.world.entity.ai.behavior.BehaviorControl<?> behavior, long base, long[] index)
                 throws Exception {
-            if (!(behavior instanceof net.minecraft.world.entity.ai.behavior.GateBehavior<?> gate)) return;
-            Field listField = net.minecraft.world.entity.ai.behavior.GateBehavior.class.getDeclaredField("behaviors");
-            listField.setAccessible(true);
-            var list = (net.minecraft.world.entity.ai.behavior.ShufflingList<?>) listField.get(gate);
-            put(net.minecraft.world.entity.ai.behavior.ShufflingList.class, list, "random",
-                    RandomSource.create(shuffleSeed(base, index[0])));
-            index[0]++;
-            for (Object child : list) {
-                reseed((net.minecraft.world.entity.ai.behavior.BehaviorControl<?>) child, base, index);
+            if (behavior instanceof net.minecraft.world.entity.ai.behavior.GateBehavior<?> gate) {
+                Field listField = net.minecraft.world.entity.ai.behavior.GateBehavior.class.getDeclaredField("behaviors");
+                listField.setAccessible(true);
+                var list = (net.minecraft.world.entity.ai.behavior.ShufflingList<?>) listField.get(gate);
+                put(net.minecraft.world.entity.ai.behavior.ShufflingList.class, list, "random",
+                        RandomSource.create(shuffleSeed(base, index[0])));
+                index[0]++;
+                for (Object child : list) {
+                    reseed((net.minecraft.world.entity.ai.behavior.BehaviorControl<?>) child, base, index);
+                }
+                return;
             }
+            reseedTriggerShuffle(behavior, base, index);
+        }
+
+        /**
+         * `TriggerGate.triggerOneShuffled` 返回的 `OneShot` 里藏着一个 `ShufflingList`，
+         * 官方用无种子的随机源建它。这里沿匿名类对象图把它揪出来、用同一个
+         * `shuffle_seed(base, k)` 覆写 `random`，序号和 Bamboo 的 `seed_shuffles` 对齐。
+         *
+         * <p>对象图：`BehaviorBuilder$1.val$resolvedBuilder`（`Constant$1` 等
+         * `TriggerWithResult` 实现）→ `val$a`（`TriggerGate` 的 `Trigger` lambda）→
+         * 合成字段里的 `ShufflingList`。`sequence` 拼出来的 `BehaviorBuilder$2` 有两个
+         * `OneShot` 字段，递归就能找到里面的 `triggerOneShuffled`。`triggerIf` 的 lambda
+         * 只捕获 `BiPredicate`、没有 `ShufflingList`，自然跳过（不占序号）。找到第一个
+         * 就停：每个触发闸门只有一个 `ShufflingList`。
+         */
+        static void reseedTriggerShuffle(Object behavior, long base, long[] index) throws Exception {
+            findTriggerShuffle(behavior, new java.util.HashSet<>(), base, index);
+        }
+
+        static boolean findTriggerShuffle(Object obj, java.util.Set<Object> seen, long base, long[] index)
+                throws Exception {
+            if (obj == null || !seen.add(obj)) return false;
+            if (obj instanceof net.minecraft.world.entity.ai.behavior.ShufflingList<?> list) {
+                put(net.minecraft.world.entity.ai.behavior.ShufflingList.class, list, "random",
+                        RandomSource.create(shuffleSeed(base, index[0])));
+                index[0]++;
+                return true;
+            }
+            Class<?> type = obj.getClass();
+            // 只往下钻进官方行为对象图，跳过静态字段和 JDK/依赖库类型。
+            if (!type.getName().startsWith("net.minecraft.")) return false;
+            for (Field field : type.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+                field.setAccessible(true);
+                if (findTriggerShuffle(field.get(obj), seen, base, index)) return true;
+            }
+            return false;
         }
 
         /** 每个传感器构造时取的 `timeToTick`，按登记顺序。 */
@@ -2524,6 +2598,114 @@ public final class MobOracle {
             if (!ok) throw new IllegalStateException("pillager scenario did not exercise " + scene.name);
         }
     }
+    static final class RaidScenes {
+        /** `Raid.RaidStatus` 是包私有嵌套枚举，按序数反射拿常量。 */
+        static Object raidStatus(int code) {
+            try {
+                Class<?> status = Class.forName("net.minecraft.world.entity.raid.Raid$RaidStatus");
+                return status.getEnumConstants()[code & 3];
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        static void createRaid(Scene scene, FakeLevel level) {
+            createRaid(scene.raid, level, scene.difficulty);
+        }
+
+        /** 按 `[cx, cy, cz, status, started, active, groupsSpawned, omen]` 配置建一只真袭击注入假世界。 */
+        static void createRaid(int[] config, FakeLevel level, int difficulty) {
+            net.minecraft.world.entity.raid.Raid raid = new net.minecraft.world.entity.raid.Raid(
+                    new BlockPos(config[0], config[1], config[2]),
+                    net.minecraft.world.Difficulty.byId(difficulty));
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "started", config[4] != 0);
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "active", config[5] != 0);
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "status", raidStatus(config[3]));
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "groupsSpawned", config[6]);
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "raidOmenLevel", config[7]);
+            // 冷却清零：村民 `SetRaidStatus` 看 `isBetweenWaves()`，清零后首波已刷的袭击
+            // （胜利场景）会切 `RAID` 而不是卡在 `PRE_RAID`。
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "raidCooldownTicks", 0);
+            level.setRaid(raid);
+        }
+
+        static void setup(Scene scene, int index, Mob mob, FakeLevel level) {
+            if (scene.raid == null || level.raid == null) return;
+            if (mob instanceof net.minecraft.world.entity.raid.Raider raider) {
+                raider.setCurrentRaid(level.raid);
+                raider.setWave(1);
+            }
+        }
+
+        static String state(Mob mob) throws Exception {
+            if (mob instanceof net.minecraft.world.entity.monster.Ravager ravager) {
+                return "ravager:" + ravager.getWave() + ':' + ravager.isCaptain()
+                        + ':' + ravager.getAttackTick() + ':' + ravager.getStunnedTick()
+                        + ':' + ravager.getRoarTick();
+            }
+            if (mob instanceof net.minecraft.world.entity.raid.Raider raider) {
+                return "raider:" + raider.getWave() + ':' + raider.isCaptain();
+            }
+            return "";
+        }
+
+        static void add(List<Scene> scenes) {
+            // 卫道士劈门：袭击里的一只卫道士，村民在门后，困难难度，卫道士破门进屋。
+            Scene door = new Scene("raid_mob_vindicator_door").ticks(320).difficulty(3);
+            Scenes.ground(door, 24);
+            door.clockStart = 2000;
+            door.raid(8, 64, 0, 0, 1, 1, 1, 3);
+            door.set(0, 64, 0, Blocks.OAK_DOOR.defaultBlockState());
+            door.set(0, 65, 0, Blocks.OAK_DOOR.defaultBlockState().setValue(
+                    net.minecraft.world.level.block.state.properties.BlockStateProperties.DOUBLE_BLOCK_HALF,
+                    net.minecraft.world.level.block.state.properties.DoubleBlockHalf.UPPER));
+            door.mob(54, -3.5, 64.0, 0.5, 0.0F, 8101L, 0);
+            scenes.add(door);
+            // 劫掠兽咆哮踩树叶：袭击里的一只劫掠兽，身前一片树叶，水平碰撞时踩坏。
+            Scene leaves = new Scene("raid_mob_ravager_roar").ticks(120).difficulty(2).poi();
+            Scenes.ground(leaves, 24);
+            leaves.clockStart = 2000;
+            leaves.raid(0, 64, 0, 0, 1, 1, 1, 3);
+            for (int x = 1; x <= 4; x++) {
+                leaves.fill(x, 64, -1, x, 64, 1, Blocks.OAK_LEAVES.defaultBlockState());
+            }
+            leaves.set(12, 64, 0, Blocks.BED.red().defaultBlockState());
+            leaves.set(12, 64, -1, Blocks.BED.red().defaultBlockState().setValue(
+                    net.minecraft.world.level.block.state.properties.BlockStateProperties.BED_PART,
+                    net.minecraft.world.level.block.state.properties.BedPart.HEAD));
+            leaves.mob(55, 0.5, 64.0, 0.5, 0.0F, 8201L, 0);
+            scenes.add(leaves);
+            // 袭击判负庆祝：一只掠夺者在已判负的袭击里，`RaiderCelebration` 开始庆祝。
+            Scene celebrate = new Scene("raid_mob_celebration").ticks(160).difficulty(2);
+            Scenes.ground(celebrate, 24);
+            celebrate.clockStart = 2000;
+            celebrate.raid(0, 64, 0, 2, 1, 1, 1, 3);
+            celebrate.mob(53, 0.5, 64.0, 0.5, 0.0F, 8301L, 0);
+            scenes.add(celebrate);
+            // 袭击者穿过村庄：袭击中心在村庄里、床头（home POI 在床头）已被占用，
+            // 掠夺者从中心旁穿过村庄往床走。
+            Scene village = new Scene("raid_mob_village").ticks(200).difficulty(2).poi()
+                    .poiTake(5, 64, -1);
+            Scenes.ground(village, 24);
+            village.clockStart = 2000;
+            village.raid(0, 64, 0, 0, 1, 1, 1, 3);
+            village.set(5, 64, 0, Blocks.BED.red().defaultBlockState());
+            village.set(5, 64, -1, Blocks.BED.red().defaultBlockState().setValue(
+                    net.minecraft.world.level.block.state.properties.BlockStateProperties.BED_PART,
+                    net.minecraft.world.level.block.state.properties.BedPart.HEAD));
+            village.mob(53, 0.5, 64.0, 0.5, 0.0F, 8401L, 0);
+            scenes.add(village);
+            // 队长捡旗：袭击里一只掠夺者站在地上，脚边一件灾厄旗帜，捡起来当队长。
+            Scene banner = new Scene("raid_mob_banner").ticks(80).difficulty(2).onGround();
+            Scenes.ground(banner, 24);
+            banner.clockStart = 2000;
+            banner.raid(0, 64, 0, 0, 1, 1, 1, 3);
+            banner.mob(53, 0.5, 64.0, 0.5, 0.0F, 8501L, 0);
+            banner.banner(1.5, 64.0, 0.5);
+            scenes.add(banner);
+        }
+    }
+
     static final class FrogScenes {
         static void add(List<Scene> scenes) {
             for (long seed : new long[] {11L, 23L}) {
@@ -5278,6 +5460,7 @@ public final class MobOracle {
             }
             slimeScenes(scenes);
             PillagerScenes.add(scenes);
+            RaidScenes.add(scenes);
             Scene witch = new Scene("witch_drink_fire").ticks(140).difficulty(2).fire(200);
             ground(witch, 16);
             witch.mob(51, 0.5, 64.0, 0.5, 0.0F, 503L, 0);
@@ -5567,7 +5750,8 @@ public final class MobOracle {
                 || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
                 || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")
                 || scene.name.startsWith("tnt_blast_") || scene.name.startsWith("pillager_")
-                || scene.name.startsWith("skeleton_horse_")) {
+                || scene.name.startsWith("skeleton_horse_")
+                || scene.name.startsWith("raid_mob_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -5760,6 +5944,9 @@ public final class MobOracle {
             }
             if (scene.fireTicks > 0) {
                 cow.setRemainingFireTicks(scene.fireTicks);
+            }
+            if (scene.onGround) {
+                cow.setOnGround(true);
             }
             int age = scene.cowAges.get(i);
             if (age != 0) {
@@ -15449,6 +15636,10 @@ public final class MobOracle {
             official.server.levels = levels;
             put(MinecraftServer.class, official.server, "levels", levels);
             world.blockEntities = new Long2ObjectOpenHashMap<>();
+            // 假世界构造器跳过了 `ServerLevel.blockEvents`；敲钟的 `BellBlockEntity.onHit`
+            // 走 `ServerLevel.blockEvent` 写它。
+            put(ServerLevel.class, world, "blockEvents",
+                    new it.unimi.dsi.fastutil.objects.ObjectLinkedOpenHashSet<>());
 
             BlockState stone = Blocks.STONE.defaultBlockState();
             for (int x = -15; x <= 15; x++) {
@@ -15462,11 +15653,15 @@ public final class MobOracle {
                 case "villager_p4_retry" -> 110;
                 case "villager_p4_sleep_wake" -> 95;
                 case "villager_p4_bell" -> 75;
+                case "villager_p4_raid_bell" -> 100;
+                case "villager_p4_raid_victory" -> 90;
                 default -> 90;
             };
             long sensorDelay = 1L;
             List<BlockPos> watchPois = new ArrayList<>();
             List<BlockPos> watchBlocks = new ArrayList<>();
+            // 袭击行为场景的袭击快照：`[cx, cy, cz, status, started, active, groupsSpawned, omen]`。
+            int[] raidConfig = null;
 
             if (name.equals("villager_p4_retry")) {
                 BlockPos blocked = new BlockPos(3, 64, 0);
@@ -15519,6 +15714,13 @@ public final class MobOracle {
                 watchPois.add(ws);
                 watchBlocks.add(new BlockPos(2, 64, 0));
                 watchBlocks.add(new BlockPos(3, 64, 0));
+            } else if (name.equals("villager_p4_raid_bell")) {
+                BlockPos bell = new BlockPos(2, 64, 0);
+                world.placeBell(bell);
+                watchPois.add(bell);
+                raidConfig = new int[] {0, 64, 0, 0, 1, 1, 0, 1};
+            } else if (name.equals("villager_p4_raid_victory")) {
+                raidConfig = new int[] {0, 64, 0, 1, 1, 0, 1, 3};
             }
 
             world.enableRealPoi();
@@ -15543,6 +15745,9 @@ public final class MobOracle {
             put(ServerLevel.class, world, "environmentAttributes", official.attributes);
             world.updateSkyBrightness();
             world.getRandom().setSeed(1L);
+            if (raidConfig != null) {
+                RaidScenes.createRaid(raidConfig, world, 2);
+            }
 
             List<Villager> villagers = new ArrayList<>();
             java.util.function.BiConsumer<double[], Long> addVillager = (pos, seed) -> {
@@ -15682,6 +15887,7 @@ public final class MobOracle {
                     + ",\"clockStart\":" + clockStart
                     + ",\"sensorDelay\":" + sensorDelay
                     + ",\"firstId\":" + FIRST_ID
+                    + ",\"raid\":" + (raidConfig == null ? "null" : java.util.Arrays.toString(raidConfig))
                     + ",\"frames\":" + frames + "}\n");
             out.flush();
         } finally {
@@ -18764,6 +18970,17 @@ public final class MobOracle {
         levels.put(net.minecraft.world.level.Level.OVERWORLD, level);
         put(MinecraftServer.class, official.server, "levels", levels);
         level.blocks.putAll(scene.blocks);
+        if (scene.poi) {
+            level.enableRealPoi();
+            if (!scene.poiTake.isEmpty()) {
+                level.getPoiManager().tick(() -> true);
+                for (int[] at : scene.poiTake) {
+                    BlockPos pos = new BlockPos(at[0], at[1], at[2]);
+                    level.getPoiManager().take(h -> true, (h, p) -> p.equals(pos), pos, 1);
+                }
+                level.getPoiManager().tick(() -> true);
+            }
+        }
         level.injectedSkyDarken = scene.skyDarken;
         level.injectedRaining = scene.raining;
         level.injectedBrightOutside = scene.brightOutside;
@@ -18899,6 +19116,9 @@ public final class MobOracle {
         boolean horseChaseTargeted = false;
         StringBuilder splits = new StringBuilder("[[]");
         java.util.List<Mob> mobs = new java.util.ArrayList<>();
+        if (scene.raid != null) {
+            RaidScenes.createRaid(scene, level);
+        }
         for (int i = 0; i < scene.cows.size(); i++) {
             double[] at = scene.cows.get(i);
             int[] kind = i < scene.mobKinds.size() ? scene.mobKinds.get(i) : new int[] {1};
@@ -18931,6 +19151,9 @@ public final class MobOracle {
                 case 51 -> new net.minecraft.world.entity.monster.Witch(EntityTypes.WITCH, level);
                 case 52 -> new net.minecraft.world.entity.monster.zombie.Drowned(EntityTypes.DROWNED, level);
                 case 53 -> new net.minecraft.world.entity.monster.illager.Pillager(EntityTypes.PILLAGER, level);
+                case 54 -> new net.minecraft.world.entity.monster.illager.Vindicator(EntityTypes.VINDICATOR, level);
+                case 55 -> new net.minecraft.world.entity.monster.Ravager(EntityTypes.RAVAGER, level);
+                case 56 -> new net.minecraft.world.entity.npc.villager.Villager(EntityTypes.VILLAGER, level);
                 case 9 -> EntityTypes.HORSE.create(level, EntitySpawnReason.COMMAND);
                 case 10 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
                 case 11 -> EntityTypes.MULE.create(level, EntitySpawnReason.COMMAND);
@@ -18984,6 +19207,7 @@ public final class MobOracle {
                 BrainOracle.fixSensorDelays(mob, scene.sensorDelay);
             }
             if (scene.fireTicks > 0) mob.setRemainingFireTicks(scene.fireTicks);
+            if (scene.onGround) mob.setOnGround(true);
             if (mob instanceof Zombie zombie) {
                 zombie.setBaby(scene.cowAges.get(i) != 0);
                 zombie.setCanBreakDoors(scene.difficulty == 3);
@@ -19042,10 +19266,22 @@ public final class MobOracle {
                 enderman.setCarriedBlock(scene.carried);
             }
             PillagerScenes.setup(scene, i, mob);
+            RaidScenes.setup(scene, i, mob, level);
             // `Mob.finalizeSpawn` 的取数顺序按官方；场景关掉时和 Bamboo 的
             // 显式构造（不跑 finalize）一致。
             mobs.add(mob);
             level.tracked.add(mob);
+        }
+        if (scene.banner != null) {
+            // 队长捡旗场景：一件灾厄旗帜掉落物，零速度、立刻可捡。
+            var bannerGetter = official.registries.lookupOrThrow(
+                    net.minecraft.core.registries.Registries.BANNER_PATTERN);
+            ItemStack banner = net.minecraft.world.entity.raid.Raid
+                    .getOminousBannerInstance(bannerGetter);
+            var dropped = new net.minecraft.world.entity.item.ItemEntity(
+                    level, scene.banner[0], scene.banner[1], scene.banner[2], banner, 0.0, 0.0, 0.0);
+            dropped.setNoPickUpDelay();
+            level.tracked.add(dropped);
         }
         if (scene.bowRider >= 0 && scene.bowRider < mobs.size()) {
             mobs.get(scene.bowRider).setItemSlot(
@@ -19154,6 +19390,23 @@ public final class MobOracle {
                     .append(',').append(at[3]).append(',').append(at[4]).append(']');
         }
         line.append(']');
+        line.append(",\"raid\":").append(scene.raid == null ? "null"
+                : "[" + scene.raid[0] + "," + scene.raid[1] + "," + scene.raid[2] + ","
+                        + scene.raid[3] + "," + scene.raid[4] + "," + scene.raid[5] + ","
+                        + scene.raid[6] + "," + scene.raid[7] + "]");
+        line.append(",\"poi\":").append(scene.poi);
+        line.append(",\"poiTake\":[");
+        for (int i = 0; i < scene.poiTake.size(); i++) {
+            if (i > 0) line.append(',');
+            int[] at = scene.poiTake.get(i);
+            line.append('[').append(at[0]).append(',').append(at[1]).append(',').append(at[2]).append(']');
+        }
+        line.append(']');
+        line.append(",\"banner\":").append(scene.banner == null ? "null"
+                : "[" + Double.doubleToRawLongBits(scene.banner[0]) + ","
+                        + Double.doubleToRawLongBits(scene.banner[1]) + ","
+                        + Double.doubleToRawLongBits(scene.banner[2]) + "]");
+        line.append(",\"onGround\":").append(scene.onGround);
         line.append(",\"difficulty\":").append(scene.difficulty);
         line.append(",\"skyDarken\":").append(scene.skyDarken);
         line.append(",\"raining\":").append(scene.raining);
@@ -19708,6 +19961,9 @@ public final class MobOracle {
                         .append("\",\"snd\":\"minecraft:classic\"");
             } else if (mob instanceof net.minecraft.world.entity.monster.illager.Pillager pillager) {
                 out.append(",\"var\":\"").append(PillagerScenes.state(pillager)).append("\",\"snd\":\"minecraft:classic\"");
+            } else if (mob instanceof net.minecraft.world.entity.monster.Ravager
+                    || mob instanceof net.minecraft.world.entity.monster.illager.Vindicator) {
+                out.append(",\"var\":\"").append(RaidScenes.state(mob)).append("\",\"snd\":\"minecraft:classic\"");
             } else if (mob instanceof PolarBear bear) {
                 out.append(",\"var\":\"").append(bearState(bear)).append("\",\"snd\":\"\"");
             } else {
@@ -23995,15 +24251,27 @@ public final class MobOracle {
             return realPoi != null ? realPoi : emptyPoi;
         }
 
-        /** 假世界没有袭击系统；`SetRaidStatus` / `Villager.customServerAiStep` 查袭击返回 null。 */
+        /** 注入的袭击：袭击行为场景里 `getRaidAt` / `isRaided` 返回它。 */
+        net.minecraft.world.entity.raid.Raid raid;
+
+        void setRaid(net.minecraft.world.entity.raid.Raid raid) {
+            this.raid = raid;
+        }
+
+        /** 假世界没有袭击系统；场景注入 `raid` 时按官方半径就近返回，否则 null。 */
         @Override
         public net.minecraft.world.entity.raid.Raid getRaidAt(BlockPos pos) {
-            return null;
+            if (raid == null) return null;
+            if (raid.getCenter().distSqr(pos) >= net.minecraft.world.entity.raid.Raid.VALID_RAID_RADIUS_SQR) {
+                return null;
+            }
+            return raid;
         }
 
         @Override
         public boolean isRaided(BlockPos pos) {
-            return false;
+            net.minecraft.world.entity.raid.Raid here = getRaidAt(pos);
+            return here != null && here.isActive();
         }
 
         /** 假世界没有玩家地图；`canSpreadFireAround` 按 Bamboo 的恒真实现短路。 */

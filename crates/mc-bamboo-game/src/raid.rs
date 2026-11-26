@@ -22,10 +22,10 @@ use mc_bamboo_blocks::{
             spawn::{SpawnReason, finalize_spawn},
         },
         raid::{
-            DEFAULT_PRE_RAID_TICKS, DIFFICULTY_PEACEFUL, HERO_OF_THE_VILLAGE_DURATION,
-            MAX_CELEBRATION_TICKS, MAX_RAID_OMEN_LEVEL, POST_RAID_TICK_LIMIT,
-            RAID_REMOVAL_THRESHOLD_SQR, RAID_TIMEOUT_TICKS, Raid, RaidStatus, RaiderType,
-            VALID_RAID_RADIUS_SQR,
+            DEFAULT_PRE_RAID_TICKS, DIFFICULTY_NORMAL, DIFFICULTY_PEACEFUL,
+            HERO_OF_THE_VILLAGE_DURATION, MAX_CELEBRATION_TICKS, MAX_RAID_OMEN_LEVEL,
+            POST_RAID_TICK_LIMIT, RAID_REMOVAL_THRESHOLD_SQR, RAID_TIMEOUT_TICKS, Raid, RaidStatus,
+            RaiderType, VALID_RAID_RADIUS_SQR, num_groups,
         },
     },
 };
@@ -370,8 +370,13 @@ struct SpawnPlan {
     raid_id: i32,
     wave: i32,
     pos: BlockPos,
+    /// `Raid.getEnchantOdds()`：`joinRaid` 里给卫道士 / 掠夺者套附魔的门槛。
+    enchant_odds: f32,
     /// 第一期刷掠夺者、卫道士、劫掠兽、女巫；唤魔者留到第二期。
     members: Vec<MobType>,
+    /// 劫掠兽的骑手：`(劫掠兽在 members 里的下标, 骑手类型)`。第 5 波掠夺者。
+    /// 骑手在 `spawn_group` 里紧跟劫掠兽生成并骑上去。
+    riders: Vec<(usize, MobType)>,
 }
 
 /// 官方 `Raids.tick(ServerLevel)` 的一刻：门控、逐场推进、移除 stopped、
@@ -555,13 +560,15 @@ fn step_one(
                 .or_else(|| find_random_spawn_pos(view, raid));
             if let Some(pos) = pos {
                 raid.started = true;
-                let members = spawn_group_plan(raid, difficulty, pos, alive_now);
-                alive_now = members.len() as i32;
+                let (members, riders) = spawn_group_plan(raid, difficulty, pos, alive_now);
+                alive_now = (members.len() + riders.len()) as i32;
                 plans.push(SpawnPlan {
                     raid_id,
                     wave: raid.groups_spawned,
                     pos,
+                    enchant_odds: raid.enchant_odds(),
                     members,
+                    riders,
                 });
                 if !first_sound {
                     horns.push((pos, raid_id));
@@ -616,12 +623,19 @@ fn step_one(
 }
 
 /// `spawnGroup` 的纯部分：算这一波刷哪些类型（第一期只有掠夺者 / 女巫），
-/// 更新波次数、清空 `waveSpawnPos`。实体在阶段 B 生成。
-fn spawn_group_plan(raid: &mut Raid, difficulty: i32, pos: BlockPos, alive: i32) -> Vec<MobType> {
+/// 更新波次数、清空 `waveSpawnPos`，并给第 5 波的劫掠兽配上掠夺者骑手。
+/// 实体在阶段 B 生成。
+fn spawn_group_plan(
+    raid: &mut Raid,
+    difficulty: i32,
+    pos: BlockPos,
+    alive: i32,
+) -> (Vec<MobType>, Vec<(usize, MobType)>) {
     let wave = raid.groups_spawned + 1;
     raid.total_health = 0.0;
     let bonus = raid.should_spawn_bonus_group(alive);
     let mut members = Vec::new();
+    let mut riders = Vec::new();
     // 官方 `RaiderType.VALUES` 有五个类型，spawnGroup 每个都要走一次
     // `getPotentialBonusSpawns`（后面几期未建模的类型不刷实体，但仍取其随机
     // 数，否则随机源状态会和官方错开）。
@@ -643,6 +657,15 @@ fn spawn_group_plan(raid: &mut Raid, difficulty: i32, pos: BlockPos, alive: i32)
         };
         if let Some(mob) = mob {
             for _ in 0..(def + extra) {
+                // 官方 `spawnGroup`：第 5 波（普通波次表最后一波）每只劫掠兽带一只
+                // 掠夺者骑手。困难第 7 波起的唤魔者 / 卫道士骑手留到第二期。
+                //
+                // Official `spawnGroup`: on wave 5 (the normal wave count) every
+                // ravager gets a pillager rider. The evoker / vindicator riders
+                // from hard wave 7 are deferred.
+                if mob == MobType::Ravager && wave == num_groups(DIFFICULTY_NORMAL) {
+                    riders.push((members.len(), MobType::Pillager));
+                }
                 members.push(mob);
             }
         }
@@ -650,13 +673,14 @@ fn spawn_group_plan(raid: &mut Raid, difficulty: i32, pos: BlockPos, alive: i32)
     raid.wave_spawn_pos = None;
     raid.groups_spawned += 1;
     let _ = pos;
-    members
+    (members, riders)
 }
 
 /// 阶段 B：在世界里生成一波的实体，返回 (uid, 血量) 供回填名册。
+/// 第 5 波的劫掠兽在生成后紧接着生成一只掠夺者骑手并 `startRiding`。
 fn spawn_group(world: &mut World, plan: &SpawnPlan) -> Vec<(i32, f32)> {
     let mut out = Vec::new();
-    for &mob in &plan.members {
+    for (index, &mob) in plan.members.iter().enumerate() {
         let at = Vec3::new(
             f64::from(plan.pos.x) + 0.5,
             f64::from(plan.pos.y) + 1.0,
@@ -666,9 +690,57 @@ fn spawn_group(world: &mut World, plan: &SpawnPlan) -> Vec<(i32, f32)> {
         finalize_spawn(world, mob, &mut entity, SpawnReason::Natural);
         let health = entity.kind.mob().map_or(0.0, |m| m.health);
         let uid = world.add_prepared_entity(entity);
+        join_mob(world, uid, plan.raid_id, plan.wave, plan.enchant_odds);
         out.push((uid, health));
+        for &(vehicle_index, rider) in &plan.riders {
+            if vehicle_index != index {
+                continue;
+            }
+            // 官方 `spawnGroup`：骑手 `joinRaid` 后 `snapTo(pos, 0.0F, 0.0F)` 再
+            // `startRiding(ravager, false, false)`。`snapTo(BlockPos, ...)` 落在
+            // 方块底心 `(x+0.5, y, z+0.5)`。
+            let rider_pos = Vec3::new(
+                f64::from(plan.pos.x) + 0.5,
+                f64::from(plan.pos.y),
+                f64::from(plan.pos.z) + 0.5,
+            );
+            let mut rider_entity = world.prepare_entity(Entity::by_mob_type(rider, rider_pos));
+            finalize_spawn(world, rider, &mut rider_entity, SpawnReason::Natural);
+            let rider_health = rider_entity.kind.mob().map_or(0.0, |m| m.health);
+            let rider_uid = world.add_prepared_entity(rider_entity);
+            join_mob(world, rider_uid, plan.raid_id, plan.wave, plan.enchant_odds);
+            world.with_entity_mut(rider_uid, &mut |rider_entity| {
+                rider_entity.position = rider_pos;
+                rider_entity.old_position = rider_pos;
+                rider_entity.y_rot = 0.0;
+                rider_entity.with_mob(|_, mob| {
+                    mob.x_rot = 0.0;
+                    mob.y_rot_o = 0.0;
+                    mob.x_rot_o = 0.0;
+                });
+            });
+            world.start_riding(rider_uid, uid);
+            out.push((rider_uid, rider_health));
+        }
     }
     out
+}
+
+/// `Raid.joinRaid` 里写回实体的那部分：登记 `RaidId`、波次、能加入袭击、清零离队
+/// 计时，并按波次套袭击附魔（卫道士锋利、掠夺者快速装填）。
+///
+/// The entity-side half of `Raid.joinRaid`: record the `RaidId` and wave, allow
+/// joining, reset the outside-raid timer and apply the wave enchantment.
+fn join_mob(world: &mut World, uid: i32, raid_id: i32, wave: i32, enchant_odds: f32) {
+    world.with_entity_mut(uid, &mut |entity| {
+        entity.with_mob(|me, mob| {
+            mob.raider.raid_id = Some(raid_id);
+            mob.raider.wave = wave;
+            mob.raider.can_join_raid = true;
+            mob.raider.ticks_outside_raid = 0;
+            mc_bamboo_blocks::entity::mob::raider::apply_raid_buffs(me, mob, enchant_odds, wave);
+        });
+    });
 }
 
 /// `updateRaiders`：每 20 刻清掉已移除 / 离中心太远的袭击者（其余离队条件
@@ -762,6 +834,17 @@ fn give_hero_of_the_village(region: &mut Region, uuid: [u8; 16], amplifier: i32)
     );
     effect.show_icon = true;
     crate::player_effects::give(region, id, effect);
+}
+
+/// `Raid.setLeader(wave, raider)` 的镜像：捡起灾厄旗帜的袭击者成为这一波的队长。
+///
+/// Mirror of `Raid.setLeader(wave, raider)`: the raider that picked up the
+/// ominous banner becomes this wave's leader.
+pub(crate) fn set_leader(region: &mut Region, id: i32, wave: i32, leader: i32) {
+    if let Some(raid) = region.raids.raids.get_mut(&id) {
+        raid.leaders.insert(wave, leader);
+        raid.add_wave_mob(wave, leader, 0.0, false);
+    }
 }
 
 /// `Raider.die`：找到死者所在位置的活跃袭击，记英雄、从名册移除、清队长
@@ -1021,6 +1104,28 @@ mod tests {
                 mob.kind,
                 mc_bamboo_blocks::entity::KindPublic::Mob(_)
             ));
+        }
+    }
+
+    /// 第 5 波（普通波次表最后一波）每只劫掠兽带一只掠夺者骑手。
+    #[test]
+    fn wave_5_ravagers_get_pillager_riders() {
+        let mut raid = Raid::new(BlockPos::new(0, 64, 0), DIFFICULTY_NORMAL);
+        // groupsSpawned = 4 → 这一波是第 5 波。
+        raid.groups_spawned = 4;
+        let (members, riders) =
+            spawn_group_plan(&mut raid, DIFFICULTY_NORMAL, BlockPos::new(0, 64, 0), 0);
+        let ravagers: Vec<usize> = members
+            .iter()
+            .enumerate()
+            .filter(|(_, mob)| **mob == MobType::Ravager)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(!ravagers.is_empty(), "第 5 波有劫掠兽");
+        assert_eq!(riders.len(), ravagers.len(), "每只劫掠兽一个骑手");
+        for (vehicle, rider) in riders {
+            assert_eq!(members[vehicle], MobType::Ravager);
+            assert_eq!(rider, MobType::Pillager);
         }
     }
 

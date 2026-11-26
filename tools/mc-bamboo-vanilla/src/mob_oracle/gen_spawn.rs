@@ -385,6 +385,7 @@ fn fixture(case: &Case, biome_id: i32) -> MobLevel {
         .collect();
     let entry = spawning::for_biome_id(biome_id).mobs_to_spawn(MobCategory::Creature);
     MobLevel {
+        raid: None,
         blocks,
         random: LevelRandom::new(0),
         loot_sequences: mc_bamboo_loot::RandomSequences::new(0),

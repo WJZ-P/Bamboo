@@ -59,6 +59,7 @@ struct PhantomSpawnFrame {
 impl PhantomSpawnCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()
@@ -270,6 +271,7 @@ struct PhantomAiState {
 impl PhantomCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()

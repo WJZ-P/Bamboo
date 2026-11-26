@@ -1470,6 +1470,12 @@ pub enum Command {
         pos: mc_bamboo_core::BlockPos,
         data: i32,
     },
+    /// `RingBell` 的 `BellBlock.attemptToRing(entity, level, pos, null)`：村民敲响钟。
+    ///
+    /// `RingBell`'s `BellBlock.attemptToRing(entity, level, pos, null)`.
+    RingBell {
+        pos: mc_bamboo_core::BlockPos,
+    },
     /// `TurtleLayEggGoal` 的 `level.setBlockAndUpdate` 加产蛋音效。
     ///
     /// `TurtleLayEggGoal`'s `level.setBlockAndUpdate` plus the egg-laying sound.
@@ -1721,6 +1727,14 @@ pub enum Command {
         target: EntityUid,
         delta: Vec3,
     },
+    /// `Entity.push(x, y, z)`：把一段速度加到目标现有的 delta 上（劫掠兽的强撞击）。
+    ///
+    /// `Entity.push(x, y, z)`: add a velocity onto the target's current delta
+    /// (the ravager's strong knockback).
+    AddMobDelta {
+        target: EntityUid,
+        delta: Vec3,
+    },
     /// `ShootTongue.eatEntity`：`doHurtTarget`，打死了当场 `remove(KILLED)`。
     ///
     /// `ShootTongue.eatEntity`: `doHurtTarget`, then `remove(KILLED)` at once on a kill.
@@ -1751,6 +1765,22 @@ pub enum Command {
     /// `Panda.pickUpItem`: take the edible stack into the main hand.
     PickUpItem {
         item: EntityUid,
+    },
+    /// `Raider.pickUpItem` 的灾厄旗帜分支：戴上旗帜、吃掉掉落物并登记为本波队长。
+    RaiderPickUpBanner {
+        item: EntityUid,
+    },
+    /// `PathfindToRaidGoal.recruitNearby`：附近没加入袭击的袭击者加入这场袭击。
+    RaiderJoinRaid {
+        id: i32,
+        wave: i32,
+        others: Vec<EntityUid>,
+    },
+    /// `Raid.setLeader(wave, raider)` 的镜像：把袭击的队长登记写回游戏层。
+    RaidSetLeader {
+        id: i32,
+        wave: i32,
+        leader: EntityUid,
     },
     /// `Panda.afterSneeze`：附近的成年熊猫原地跳一下。
     ///
@@ -2141,6 +2171,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 except_initiator: false,
             });
         }
+        Command::RingBell { pos } => crate::behaviour::attached::bell::ring(world, pos),
         Command::RabbitEatCarrots { pos } => super::mob::rabbit::eat_carrots(world, pos),
         Command::FoxPickUpItem {
             item,
@@ -2241,6 +2272,15 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::PickUpItem { item } => {
             super::mob::panda::apply_pick_up(world, item, me);
+        }
+        Command::RaiderPickUpBanner { item } => {
+            super::mob::raider::apply_pick_up_banner(world, item, me);
+        }
+        Command::RaiderJoinRaid { id, wave, others } => {
+            super::mob::raider::apply_join_raid(world, &others, id, wave);
+        }
+        Command::RaidSetLeader { id, wave, leader } => {
+            world.push_effect(crate::Effect::RaidSetLeader { id, wave, leader });
         }
         Command::JumpMobs { others } => {
             for other in others {
@@ -2358,6 +2398,11 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::SetMobDelta { target, delta } => {
             world.with_listed_entity_mut(target, &mut |entity| entity.delta = delta);
+        }
+        Command::AddMobDelta { target, delta } => {
+            world.with_listed_entity_mut(target, &mut |entity| {
+                entity.delta = entity.delta.add(delta);
+            });
         }
         Command::BeeEnterHive {
             hive,

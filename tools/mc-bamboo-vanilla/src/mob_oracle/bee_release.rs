@@ -75,6 +75,7 @@ fn player(index: i32) -> PlayerView {
 impl BeeReleaseCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: {
                 let mut map = HashMap::from([(
                     BlockPos::new(0, 62, 0),

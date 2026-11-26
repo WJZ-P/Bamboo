@@ -102,6 +102,7 @@ struct WaterMobState {
 impl WaterMobCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()

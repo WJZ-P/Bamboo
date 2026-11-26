@@ -40,6 +40,7 @@ struct BeeAiFrame {
 impl BeeAiCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: std::collections::HashMap::new(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),

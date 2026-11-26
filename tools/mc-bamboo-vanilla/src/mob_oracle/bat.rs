@@ -104,6 +104,7 @@ pub(super) fn player_view(uid: i32, [x, y, z]: [f64; 3]) -> PlayerView {
 impl BatCase {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()

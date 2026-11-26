@@ -3046,6 +3046,10 @@ pub struct Mob {
     ///
     /// `Witch.DATA_USING_ITEM`: true while drinking, a separate synced boolean.
     pub witch_drinking: bool,
+    /// 卫道士的 Johnny 彩蛋与劫掠兽的三个计时器（都在这一个袭击者状态里）。
+    pub vindicator: vindicator::VindicatorState,
+    /// 劫掠兽的三个同步计时字段。
+    pub ravager: ravager::RavagerState,
     /// `PatrollingMonster` / `Raider` 的字段，女巫和掠夺者共用，见 [`raider::Raider`]。
     ///
     /// The `PatrollingMonster` / `Raider` fields shared by witches and pillagers, see
@@ -3770,6 +3774,9 @@ impl Mob {
                 MobType::Guardian | MobType::ElderGuardian => guardian::malus(),
                 MobType::Nautilus | MobType::ZombieNautilus => nautilus::malus(),
                 MobType::Warden => warden::malus(),
+                // 劫掠兽必须在 `is_monster` 分支之前单列，否则树叶代价是 -1。
+                // Ravagers must precede the `is_monster` arm or the leaf malus stays -1.
+                MobType::Ravager => ravager::malus(),
                 _ if mob_type.is_monster() => Malus::monster(),
                 MobType::Chicken => chicken::malus(),
                 MobType::Enderman => enderman::malus(),
@@ -3850,6 +3857,8 @@ impl Mob {
             searching_for_land: false,
             witch: witch::WitchState::default(),
             witch_drinking: false,
+            vindicator: vindicator::VindicatorState::default(),
+            ravager: ravager::RavagerState::default(),
             raider: raider::Raider::default(),
             crossbow: crossbow::CrossbowUse::default(),
             pillager: pillager::Pillager::default(),

@@ -95,6 +95,7 @@ fn mob_level(blocks: &[[i32; 4]]) -> MobLevel {
         container_open_counts: Default::default(),
         short_hunger: false,
         ignore_bed_monsters: false,
+        raid: None,
     }
 }
 

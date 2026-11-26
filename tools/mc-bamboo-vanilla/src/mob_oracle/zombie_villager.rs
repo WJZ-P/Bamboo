@@ -81,6 +81,7 @@ const SAVE_KEYS: &[&str] = &[
 impl Case {
     fn level(&self) -> MobLevel {
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()

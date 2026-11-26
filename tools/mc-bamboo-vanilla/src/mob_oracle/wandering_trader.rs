@@ -94,6 +94,7 @@ impl Report {
             containers: Default::default(),
             container_open_counts: Default::default(),
             shoulder: Default::default(),
+            raid: None,
         };
         let mut ticks = BlockTicks::new();
         let mut spawner = spawner::WanderingTraderSpawner::with_random_seed(
@@ -338,6 +339,7 @@ impl SceneCase {
             containers: Default::default(),
             container_open_counts: Default::default(),
             shoulder: Default::default(),
+            raid: None,
         }
     }
 

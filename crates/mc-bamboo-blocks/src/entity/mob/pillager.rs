@@ -63,12 +63,11 @@ pub(super) fn attributes() -> Attributes {
 /// `PatrollingMonster` patrol and the four `Raider` raid goals — then its own seven.
 /// `AvoidEntityGoal<Creaking>` has no creaking to avoid and only keeps its slot.
 pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
-    let goals = vec![
-        (4, Goal::Raider(RaiderGoal::patrol())),
-        (1, Goal::Unavailable("ObtainRaidLeaderBannerGoal")),
-        (3, Goal::Unavailable("PathfindToRaidGoal")),
-        (4, Goal::Unavailable("RaiderMoveThroughVillageGoal")),
-        (5, Goal::Unavailable("RaiderCelebration")),
+    let mut goals = vec![(4, Goal::Raider(RaiderGoal::patrol()))];
+    goals.extend(super::raider::raider_goals(
+        super::raider::RaiderGoal::raid_goals(),
+    ));
+    goals.extend([
         (0, Goal::Float),
         (1, Goal::Unavailable("AvoidEntityGoal")),
         (
@@ -109,7 +108,7 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
                 look_time: 0,
             }),
         ),
-    ];
+    ]);
     navigation.flags.can_float = true;
     GoalSelector::from_ordered_pairs(goals)
 }
@@ -214,6 +213,29 @@ fn enchantment_id(name: &str) -> Option<i32> {
         .iter()
         .position(|entry| *entry == name)
         .map(|index| index as i32)
+}
+
+/// `Pillager.applyRaidBuffs`：抽一次 `nextFloat` 和 `Raid.getEnchantOdds()` 比，
+/// 中了且波次超过简单波次（`wave > 3`）才换弩并套快速装填（`wave > 5` 用 II，
+/// 否则 I）；否则什么都不换。
+///
+/// `Pillager.applyRaidBuffs`: draw `nextFloat` once against `getEnchantOdds()`; a
+/// hit replaces the crossbow with Quick Charge only past the easy waves
+/// (`wave > 5` gives II, otherwise I). Nothing is swapped otherwise.
+pub(crate) fn apply_raid_buffs(me: &mut Entity, mob: &mut Mob, enchant_odds: f32, wave: i32) {
+    if me.random.next_float() > enchant_odds {
+        return;
+    }
+    let level = if wave > 5 {
+        2
+    } else if wave > 3 {
+        1
+    } else {
+        return;
+    };
+    let mut crossbow = ItemStack::new(items::CROSSBOW, 1);
+    super::raider::add_enchantment(&mut crossbow, "minecraft:quick_charge", level);
+    mob.equipment.set(EquipmentSlot::MainHand, crossbow);
 }
 
 /// `PatrollingMonster.checkPatrollingMonsterSpawnRules`：方块光大于 8 不刷，否则只要脚下

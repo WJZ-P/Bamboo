@@ -127,6 +127,7 @@ impl Report {
         rules.mob_drops = case.drops;
         let player = player_view();
         let mut level = MobLevel {
+            raid: None,
             natural_spawn: None,
             biome: None,
             blocks: HashMap::new(),

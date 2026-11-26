@@ -46,6 +46,7 @@ struct GolemFrame {
 impl GolemCase {
     fn level(&self) -> MobLevel {
         let mut level = MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()

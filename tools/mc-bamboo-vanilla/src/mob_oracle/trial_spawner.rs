@@ -118,6 +118,7 @@ impl TrialSpawnerCase {
             player.position = Vec3::new(self.player[0] + 30.0, self.player[1], self.player[2]);
         }
         MobLevel {
+            raid: None,
             blocks: self
                 .blocks
                 .iter()
