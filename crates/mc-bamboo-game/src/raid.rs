@@ -1142,6 +1142,48 @@ mod tests {
         }
     }
 
+    /// 困难第 7 波（`wave >= numGroups(HARD)`）第一只劫掠兽带唤魔者，其余带卫道士。
+    #[test]
+    fn hard_wave_7_ravagers_get_evoker_then_vindicator_riders() {
+        let mut raid = Raid::new(BlockPos::new(0, 64, 0), DIFFICULTY_HARD);
+        // groupsSpawned = 6 → 这一波是第 7 波。
+        raid.groups_spawned = 6;
+        let (members, riders) =
+            spawn_group_plan(&mut raid, DIFFICULTY_HARD, BlockPos::new(0, 64, 0), 0);
+        let ravagers: Vec<usize> = members
+            .iter()
+            .enumerate()
+            .filter(|(_, mob)| **mob == MobType::Ravager)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(!ravagers.is_empty(), "困难第 7 波有劫掠兽");
+        assert_eq!(riders.len(), ravagers.len(), "每只劫掠兽一个骑手");
+        // 官方 `Raid.spawnGroup`：第一只唤魔者，其余卫道士。
+        for (position, (vehicle, rider)) in riders.iter().enumerate() {
+            assert_eq!(members[*vehicle], MobType::Ravager);
+            let expected = if position == 0 {
+                MobType::Evoker
+            } else {
+                MobType::Vindicator
+            };
+            assert_eq!(*rider, expected, "第 {position} 只劫掠兽的骑手");
+        }
+    }
+
+    /// 唤魔者真的出现在波次表里（普通第 5、6 波）。
+    #[test]
+    fn evokers_spawn_from_the_wave_table() {
+        let mut raid = Raid::new(BlockPos::new(0, 64, 0), DIFFICULTY_NORMAL);
+        // groupsSpawned = 4 → 这一波是第 5 波（唤魔者 1 只）。
+        raid.groups_spawned = 4;
+        let (members, _) =
+            spawn_group_plan(&mut raid, DIFFICULTY_NORMAL, BlockPos::new(0, 64, 0), 0);
+        assert!(
+            members.contains(&MobType::Evoker),
+            "第 5 波按官方波次表刷出一只唤魔者"
+        );
+    }
+
     /// 所有波次刷完、名册清空后转胜利，并给英雄加 HERO_OF_THE_VILLAGE。
     #[test]
     fn raid_tick_wins_and_rewards_heroes() {
