@@ -17,6 +17,7 @@ pub mod fishing_hook;
 pub mod hanging;
 pub mod leash_knot;
 pub mod lightning;
+pub mod minecart;
 pub mod mob;
 pub mod ominous_item_spawner;
 pub mod parallel;
@@ -292,6 +293,10 @@ pub enum EntityKind {
     ///
     /// A mob. Its state is large, so it is boxed.
     Mob(Box<mob::Mob>),
+    /// 矿车，`AbstractMinecart` 的各个子类。
+    ///
+    /// A minecart, one of the `AbstractMinecart` subclasses.
+    Minecart(Box<minecart::Minecart>),
 }
 
 impl EntityKind {
@@ -319,6 +324,7 @@ impl EntityKind {
             Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
             Self::FishingHook(_) => mc_bamboo_data::registries::entity_type::FISHING_BOBBER,
             Self::Mob(mob) => mob.mob_type.entity_type(),
+            Self::Minecart(cart) => cart.entity_type,
         }
     }
 
@@ -567,6 +573,7 @@ impl Entity {
             EntityKind::Painting(_) => hanging::tick_painting(self, ctx),
             EntityKind::ItemFrame(_) => hanging::tick_item_frame(self, ctx),
             EntityKind::Mob(_) => {}
+            EntityKind::Minecart(_) => minecart::tick(self, ctx),
         }
     }
 
@@ -596,6 +603,16 @@ impl Entity {
     /// `EntityType.HUSK.create`。
     pub fn husk(position: Vec3) -> Self {
         Self::mob_of(mob::MobType::Husk, position)
+    }
+
+    /// `AbstractMinecart.createMinecart` 生成的一辆矿车。
+    ///
+    /// A minecart as created by `AbstractMinecart.createMinecart`.
+    pub fn minecart(kind: minecart::MinecartKind, position: Vec3) -> Self {
+        Self::new(
+            EntityKind::Minecart(Box::new(minecart::Minecart::new(kind))),
+            position,
+        )
     }
 
     /// 按注册表类型构造生物；未知类型返回 `None`，调用方按命令失败处理。

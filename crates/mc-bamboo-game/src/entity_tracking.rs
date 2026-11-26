@@ -929,6 +929,10 @@ pub enum KindData {
     ///
     /// Evoker fangs, with no metadata of its own.
     EvokerFangs,
+    /// 矿车：乘客名单和同步数据（受伤、展示方块、燃料）。
+    ///
+    /// A minecart: the passenger list and synced data (hurt, display block, fuel).
+    Minecart(Box<mc_bamboo_blocks::entity::minecart::MinecartPublic>),
 }
 
 /// 这一 tick 全表的载具名单。配对乘客时官方发的是载具那一侧的完整名单，而乘客
@@ -996,6 +1000,7 @@ impl Snapshot {
             fall_flying: false,
             passengers: match &public.kind {
                 KindPublic::Mob(mob) => mob.passengers.clone(),
+                KindPublic::Minecart(cart) => cart.passengers.clone(),
                 _ => Vec::new(),
             },
             vehicle: public.vehicle,
@@ -1023,6 +1028,7 @@ impl Snapshot {
             | KindData::LightningBolt
             | KindData::LeashKnot
             | KindData::EvokerFangs
+            | KindData::Minecart(_)
             | KindData::OminousItemSpawner(_) => 0,
         }
     }
@@ -1057,6 +1063,7 @@ impl KindData {
             KindPublic::EvokerFangs => Self::EvokerFangs,
             KindPublic::Painting(painting) => Self::Painting(painting.clone()),
             KindPublic::ItemFrame(frame) => Self::ItemFrame(frame.clone()),
+            KindPublic::Minecart(cart) => Self::Minecart(cart.clone()),
         }
     }
 
@@ -1108,7 +1115,8 @@ impl KindData {
             | Self::FireworkRocket(_)
             | Self::FishingHook(_)
             | Self::Painting(_)
-            | Self::ItemFrame(_) => None,
+            | Self::ItemFrame(_)
+            | Self::Minecart(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -1132,7 +1140,8 @@ impl KindData {
             | Self::FireworkRocket(_)
             | Self::FishingHook(_)
             | Self::Painting(_)
-            | Self::ItemFrame(_) => None,
+            | Self::ItemFrame(_)
+            | Self::Minecart(_) => None,
         }
     }
 
@@ -1342,6 +1351,9 @@ impl KindData {
                 data.push(EntityData::Item(potion.item.clone()));
                 data
             }
+            // 矿车的元数据在同步步骤里补齐；这一步先不额外发。
+            // Minecart metadata is filled in with the sync step; none here yet.
+            Self::Minecart(_) => Vec::new(),
         }
     }
 }

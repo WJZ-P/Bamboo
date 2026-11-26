@@ -967,6 +967,20 @@ fn snap_of(entity: Entity) -> OfficialEntity {
             data.health,
         ),
         EntityKind::FishingHook(_) => ("fishing_bobber".to_owned(), -1, -1, -1, 0, -1, -1, -1),
+        EntityKind::Minecart(cart) => (
+            mc_bamboo_data::registries::entity_type::name_of(cart.entity_type)
+                .unwrap_or("minecraft:minecart")
+                .strip_prefix("minecraft:")
+                .unwrap_or("minecart")
+                .to_owned(),
+            -1,
+            -1,
+            -1,
+            0,
+            -1,
+            -1,
+            -1,
+        ),
     };
     OfficialEntity {
         kind,

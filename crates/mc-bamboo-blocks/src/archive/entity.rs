@@ -97,6 +97,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         },
         crate::entity::KindPublic::WitherSkull(_) => kinds::WITHER_SKULL,
         crate::entity::KindPublic::FireworkRocket(_) => kinds::FIREWORK_ROCKET,
+        crate::entity::KindPublic::Minecart(cart) => cart.entity_type,
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
     put(
@@ -401,6 +402,12 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                     slots::encode_item(stack).map_err(|error| Error::new(error.to_string()))?,
                 );
             }
+        }
+        crate::entity::KindPublic::Minecart(_) => {
+            let crate::entity::KindState::Minecart(saved) = &state.kind else {
+                return Err(Error::new("mismatched minecart entity halves"));
+            };
+            write_minecart_additional(saved, state.first_tick, &mut out);
         }
     }
     Ok(Tag::Compound(out))
@@ -750,7 +757,16 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                 orb.count = tag::int_or(tag, "Count", 1).max(1);
                 EntityKind::ExperienceOrb(orb)
             }
-            _ => return Ok(None),
+            _ => match kinds::by_name(id)
+                .and_then(crate::entity::minecart::MinecartKind::from_entity_type)
+            {
+                Some(kind) => {
+                    let mut cart = crate::entity::minecart::Minecart::new(kind);
+                    read_minecart_additional(tag, &mut cart);
+                    EntityKind::Minecart(Box::new(cart))
+                }
+                None => return Ok(None),
+            },
         },
         position: Vec3::new(position[0], position[1], position[2]),
         delta: Vec3::new(delta[0], delta[1], delta[2]),
@@ -789,6 +805,11 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
         EntityKind::ItemFrame(_) => {
             crate::entity::hanging::recalculate_item_frame(&mut entity);
             entity.old_position = entity.position;
+        }
+        // `HasTicked` 读进 `Entity.firstTick`，和官方 `readAdditionalSaveData` 一致。
+        // `HasTicked` loads into `Entity.firstTick`, as vanilla does.
+        EntityKind::Minecart(_) => {
+            entity.first_tick = tag::bool_or(tag, "HasTicked", false);
         }
         _ => {}
     }
@@ -848,4 +869,77 @@ fn uuid_bytes(words: &[i32]) -> [u8; 16] {
 
 fn clamp_short(value: i32) -> i16 {
     value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+}
+
+/// 官方 `AbstractMinecart.addAdditionalSaveData` 和各子类的字段：`DisplayState` /
+/// `DisplayOffset` / `FlippedRotation` / `HasTicked`，TNT 的 `fuse` 与爆炸参数，
+/// 动力矿车的 `PushX` / `PushZ` / `Fuel`，漏斗矿车的 `Enabled`。
+///
+/// Vanilla `AbstractMinecart.addAdditionalSaveData` and its subclasses: the display
+/// state/offset, flipped and ticked flags, TNT fuse and explosion parameters, furnace
+/// push and fuel, and the hopper's enabled flag.
+fn write_minecart_additional(
+    cart: &crate::entity::minecart::Minecart,
+    first_tick: bool,
+    out: &mut Vec<(String, Tag)>,
+) {
+    use crate::entity::minecart::MinecartKind;
+    let kind = cart.kind();
+    if let Some(state) = cart.custom_display_block {
+        put(out, "DisplayState", tag::encode_block_state(state));
+    }
+    if cart.display_offset != kind.default_display_offset() {
+        put(out, "DisplayOffset", Tag::Int(cart.display_offset));
+    }
+    put(out, "FlippedRotation", Tag::Byte(i8::from(cart.flipped)));
+    put(out, "HasTicked", Tag::Byte(i8::from(first_tick)));
+    if kind == MinecartKind::Tnt {
+        put(out, "fuse", Tag::Int(cart.fuse));
+        if cart.explosion_power != 4.0 {
+            put(out, "explosion_power", Tag::Float(cart.explosion_power));
+        }
+        if cart.explosion_speed_factor != 1.0 {
+            put(
+                out,
+                "explosion_speed_factor",
+                Tag::Float(cart.explosion_speed_factor),
+            );
+        }
+    }
+    if kind == MinecartKind::Furnace {
+        put(out, "PushX", Tag::Double(cart.push.x));
+        put(out, "PushZ", Tag::Double(cart.push.z));
+        put(out, "Fuel", Tag::Short(clamp_short(cart.fuel)));
+    }
+    if kind == MinecartKind::Hopper {
+        put(out, "Enabled", Tag::Byte(i8::from(cart.enabled)));
+    }
+}
+
+/// 读回矿车自己的存档字段，`HasTicked` 由调用方写进 `Entity.first_tick`。
+///
+/// Read back the minecart's own save fields; the caller loads `HasTicked` into
+/// `Entity.first_tick`.
+fn read_minecart_additional(tag: &Tag, cart: &mut crate::entity::minecart::Minecart) {
+    use crate::entity::minecart::MinecartKind;
+    let kind = cart.kind();
+    cart.custom_display_block =
+        tag::field(tag, "DisplayState").and_then(|value| tag::decode_block_state(value).ok());
+    cart.display_offset = tag::int_or(tag, "DisplayOffset", kind.default_display_offset());
+    cart.flipped = tag::bool_or(tag, "FlippedRotation", false);
+    if kind == MinecartKind::Tnt {
+        cart.fuse = tag::int_or(tag, "fuse", -1);
+        cart.explosion_power = tag::float_or(tag, "explosion_power", 4.0).clamp(0.0, 128.0);
+        cart.explosion_speed_factor =
+            tag::float_or(tag, "explosion_speed_factor", 1.0).clamp(0.0, 128.0);
+    }
+    if kind == MinecartKind::Furnace {
+        let x = tag::double_or(tag, "PushX", 0.0);
+        let z = tag::double_or(tag, "PushZ", 0.0);
+        cart.push = Vec3::new(x, 0.0, z);
+        cart.fuel = i32::from(tag::short_or(tag, "Fuel", 0));
+    }
+    if kind == MinecartKind::Hopper {
+        cart.enabled = tag::bool_or(tag, "Enabled", true);
+    }
 }

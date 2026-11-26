@@ -181,6 +181,10 @@ pub enum KindPublic {
     ///
     /// A thrown splash potion.
     SplashPotion(Box<super::splash_potion::SplashPotionPublic>),
+    /// 矿车：种类、乘客名单和同步数据。
+    ///
+    /// A minecart: its kind, passenger list and synced data.
+    Minecart(Box<super::minecart::MinecartPublic>),
 }
 
 impl KindPublic {
@@ -208,6 +212,7 @@ impl KindPublic {
             Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
             Self::FishingHook(_) => mc_bamboo_data::registries::entity_type::FISHING_BOBBER,
             Self::Mob(mob) => mob.mob_type.entity_type(),
+            Self::Minecart(cart) => cart.entity_type,
         }
     }
 
@@ -304,6 +309,10 @@ pub enum KindState {
     LlamaSpit(Box<super::spit::LlamaSpit>),
     Egg(Box<super::thrown_egg::ThrownEgg>),
     SplashPotion(Box<super::splash_potion::SplashPotion>),
+    /// 矿车的全部状态。
+    ///
+    /// The full state of a minecart.
+    Minecart(Box<super::minecart::Minecart>),
 }
 
 /// `FallingBlockEntity` 里别人不读的字段。
@@ -464,6 +473,7 @@ impl EntityRow {
                 EntityKind::FishingHook(hook)
             }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
+            (KindPublic::Minecart(_), KindState::Minecart(cart)) => EntityKind::Minecart(cart),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
         };
@@ -593,6 +603,10 @@ impl Entity {
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
                 KindState::Mob(mob),
+            ),
+            EntityKind::Minecart(cart) => (
+                KindPublic::Minecart(Box::new(super::minecart::MinecartPublic::of(&cart))),
+                KindState::Minecart(cart),
             ),
         };
         EntityRow {
