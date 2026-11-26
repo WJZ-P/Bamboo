@@ -107,6 +107,54 @@ pub(super) fn server_ai_step(mob: &mut Mob) {
     }
 }
 
+/// 对拍改坏确认的篡改开关。只有 `mob-oracle --break-self-test` 会设置，其它驱动恒为
+/// [`Tamper::None`]。唤魔者 / 恼鬼 / 幻术师各自的法术行为在这里各占一档。
+///
+/// Break switches for the oracle's break-self-test. Only `mob-oracle
+/// --break-self-test` sets them; every other driver keeps [`Tamper::None`]. Each
+/// variant corrupts one spell behaviour of the evoker, vex or illusioner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tamper {
+    #[default]
+    None,
+    /// 尖牙伤害从 6 点改错（`evoker_fangs_damage`）。
+    FangsDamage,
+    /// wololo 把蓝羊染成白色而不是红色（`evoker_wololo_color`）。
+    WololoColor,
+    /// 召唤恼鬼数量从 3 只改错（`evoker_summon_count`）。
+    SummonCount,
+    /// 恼鬼有限生命的饥饿伤害从 1 点改错（`vex_life_damage`）。
+    VexLifeDamage,
+    /// 幻术师致盲永不施放（`illusioner_blindness`）。
+    IllusionerBlindness,
+}
+
+thread_local! {
+    static ORACLE_TAMPER: std::cell::Cell<Tamper> = const { std::cell::Cell::new(Tamper::None) };
+}
+
+/// 由 `mob-oracle` 按 `--break-self-test` 设置，其它驱动不调用。
+///
+/// Set by `mob-oracle` from `--break-self-test`; no other driver calls it.
+pub fn set_oracle_tamper(name: &str) {
+    let tamper = match name {
+        "evoker_fangs_damage" => Tamper::FangsDamage,
+        "evoker_wololo_color" => Tamper::WololoColor,
+        "evoker_summon_count" => Tamper::SummonCount,
+        "vex_life_damage" => Tamper::VexLifeDamage,
+        "illusioner_blindness" => Tamper::IllusionerBlindness,
+        _ => Tamper::None,
+    };
+    ORACLE_TAMPER.with(|cell| cell.set(tamper));
+}
+
+/// 当前生效的篡改档。
+///
+/// The active tamper.
+pub(crate) fn oracle_tamper() -> Tamper {
+    ORACLE_TAMPER.with(|cell| cell.get())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

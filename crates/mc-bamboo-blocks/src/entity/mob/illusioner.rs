@@ -100,6 +100,13 @@ impl IllusionerGoal {
                 spell,
                 last_target_id,
             } => {
+                // 改坏确认 `illusioner_blindness`：致盲永不施放，施法状态必须报不一致。
+                // Break check `illusioner_blindness`: never cast, the spell state must diverge.
+                if super::spellcaster::oracle_tamper()
+                    == super::spellcaster::Tamper::IllusionerBlindness
+                {
+                    return false;
+                }
                 if !use_spell_can_use(me, mob, spell) {
                     return false;
                 }

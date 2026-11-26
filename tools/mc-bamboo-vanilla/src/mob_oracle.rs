@@ -2371,8 +2371,7 @@ impl Report {
             }
         };
         for key in keys {
-            let expected =
-                small_mob::save_field(&reloaded, key).map(small_mob::canonical_tag);
+            let expected = small_mob::save_field(&reloaded, key).map(small_mob::canonical_tag);
             let actual = small_mob::save_field(&ours, key).map(small_mob::canonical_tag);
             if expected != actual {
                 self.mismatch(format!(
@@ -2876,6 +2875,7 @@ impl Report {
         }
         // 改坏确认：故意改一处生产参数，对拍必须报不一致。
         let break_test = self.break_test.as_deref();
+        mc_bamboo_blocks::entity::mob::spellcaster::set_oracle_tamper(break_test.unwrap_or(""));
         let mut level = MobLevel {
             blocks: HashMap::new(),
             random: LevelRandom::new(1),

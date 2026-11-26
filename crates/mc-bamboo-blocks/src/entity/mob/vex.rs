@@ -311,12 +311,11 @@ pub(super) fn targets() -> GoalSelector {
 
 /// `Vex.finalizeSpawn`：主手铁剑（掉落率 0）、装备附魔，然后 `Monster.finalizeSpawn`。
 pub(super) fn finalize_spawn(world: &mut World<'_>, entity: &mut Entity) {
-    let special = ((crate::entity::ctx::BlockView::effective_difficulty(
-        world,
-        entity.block_position(),
-    ) - 2.0)
-        / 2.0)
-        .clamp(0.0, 1.0);
+    let special =
+        ((crate::entity::ctx::BlockView::effective_difficulty(world, entity.block_position())
+            - 2.0)
+            / 2.0)
+            .clamp(0.0, 1.0);
     let random = world.random();
     entity.with_mob(|_, mob| {
         mob.equipment.set(
@@ -384,7 +383,16 @@ pub(super) fn tick_after(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx
         if mob.vex.limited_life_ticks <= 0 {
             mob.vex.limited_life_ticks = 20;
             let source = super::DamageSource::environment(super::DamageKind::Starve);
-            living::hurt_server(me, mob, ctx, source, 1.0);
+            // 改坏确认 `vex_life_damage`：每轮扣 2 点而不是 1 点，血量必须报不一致。
+            // Break check `vex_life_damage`: deal 2 instead of 1, health must diverge.
+            let amount = if super::spellcaster::oracle_tamper()
+                == super::spellcaster::Tamper::VexLifeDamage
+            {
+                2.0
+            } else {
+                1.0
+            };
+            living::hurt_server(me, mob, ctx, source, amount);
         }
     }
 }

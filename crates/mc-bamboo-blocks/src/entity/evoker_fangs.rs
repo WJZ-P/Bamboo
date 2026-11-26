@@ -149,12 +149,21 @@ fn damage_nearby(
         }
     });
     let source = fangs_source(me, owner, owner_uuid);
+    // 改坏确认 `evoker_fangs_damage`：伤害从 6 点改成 3 点，血量必须报不一致。
+    // Break check `evoker_fangs_damage`: deal 3 instead of 6, health must diverge.
+    let amount = if super::mob::spellcaster::oracle_tamper()
+        == super::mob::spellcaster::Tamper::FangsDamage
+    {
+        3.0
+    } else {
+        6.0
+    };
     for target in targets {
         ctx.emit(
             Command::HurtMob {
                 target,
                 source,
-                amount: 6.0,
+                amount,
                 on_hit: None,
             },
             me,
@@ -176,7 +185,7 @@ fn damage_nearby(
             Command::HurtPlayer {
                 target: player,
                 source,
-                amount: 6.0,
+                amount,
             },
             me,
         );

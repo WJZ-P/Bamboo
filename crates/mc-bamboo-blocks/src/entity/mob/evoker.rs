@@ -226,10 +226,19 @@ impl EvokerGoal {
                 spell.attack_warmup_delay -= 1;
                 if spell.attack_warmup_delay == 0 {
                     if let Some(sheep) = mob.evoker.wololo_target {
+                        // 改坏确认 `evoker_wololo_color`：把红色（14）改错成白色（0）。
+                        // Break check `evoker_wololo_color`: dye white (0) instead of red (14).
+                        let color = if super::spellcaster::oracle_tamper()
+                            == super::spellcaster::Tamper::WololoColor
+                        {
+                            0
+                        } else {
+                            14
+                        };
                         ctx.emit(
                             Command::SheepSetColor {
                                 target: sheep,
-                                color: 14,
+                                color,
                             },
                             me,
                         );
@@ -421,8 +430,15 @@ fn spawn_fangs(
 /// `EvokerSummonSpellGoal.performSpellCasting`：三只恼鬼，位置和寿命的随机数照官方顺序。
 fn perform_summon(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let base = me.block_position();
-    let mut summons = Vec::with_capacity(3);
-    for _ in 0..3 {
+    // 改坏确认 `evoker_summon_count`：只召唤两只，新生成的恼鬼数量必须报不一致。
+    // Break check `evoker_summon_count`: summon two, the spawned vexes must diverge.
+    let count = if super::spellcaster::oracle_tamper() == super::spellcaster::Tamper::SummonCount {
+        2
+    } else {
+        3
+    };
+    let mut summons = Vec::with_capacity(count);
+    for _ in 0..count {
         let x = base.x - 2 + me.random.next_int_bounded(5);
         let z = base.z - 2 + me.random.next_int_bounded(5);
         let limited_life = 20 * (30 + me.random.next_int_bounded(90));
