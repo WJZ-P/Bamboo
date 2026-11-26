@@ -12,13 +12,13 @@
 //! player and mob ids. This module holds the data and type lookups; the per-tick physics
 //! lives in the tick function.
 
-use mc_bamboo_core::{BlockPos, Vec3, mth};
+use mc_bamboo_core::{BlockPos, Direction, Vec3, mth};
 use mc_bamboo_data::{blocks, tags::fluid_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     shape::{Aabb, CollisionContext},
-    state::DRAG,
+    state::{DRAG, FluidState, SupportType},
 };
 
 use super::{
@@ -788,6 +788,11 @@ fn apply_water_current(me: &mut Entity, view: &dyn BlockView) {
         return;
     }
     let entity_min_y = me.position.y;
+    let block_x = mth::floor(me.position.x);
+    let block_z = mth::floor(me.position.z);
+    // `Entity.getEyeHeight()`：`dimensions.height * 0.85F`。
+    let eye = me.position.y + f64::from(me.dimensions.1 * 0.85_f32);
+    let mut eyes_inside = false;
     let mut current = Vec3::default();
     let mut height = 0.0f64;
     let mut count = 0i32;
@@ -799,9 +804,18 @@ fn apply_water_current(me: &mut Entity, view: &dyn BlockView) {
                 if fluid.is_empty() || !fluid.is_tagged(fluid_tags::WATER) {
                     continue;
                 }
-                let top = (y as f64) + f64::from(view.fluid_height(fluid, pos));
+                let fy = f64::from(y);
+                let top = fy + f64::from(view.fluid_height(fluid, pos));
                 if top < bounds.min_y {
                     continue;
+                }
+                // `Entity.updateFluidInteraction` 的 eye tracker：眼睛落在这一格
+                // 水面下方时记 `eyes_inside`，供 `isEyeInFluid(WATER)` 判定。
+                if x == block_x && z == block_z && eye >= fy {
+                    let camera = fy + f64::from(camera_height(view, fluid, pos));
+                    if eye <= camera {
+                        eyes_inside = true;
+                    }
                 }
                 height = mth::java_max(top - entity_min_y, height);
                 let mut flow = flow_vector(view, pos, fluid);
@@ -813,9 +827,25 @@ fn apply_water_current(me: &mut Entity, view: &dyn BlockView) {
             }
         }
     }
+    // `isEyeInFluid(WATER)` 供 `canAddPassenger` 的 `!isEyeInFluid(WATER)` 门控。
+    me.in_water = eyes_inside;
     // `isPushedByFluid()` 为真且 `in_water`（水面高度 > 0）才施力。
     if height > 0.0 && count > 0 {
         apply_current(me, &current, 0.014);
+    }
+}
+
+/// `FlowingFluid.getFlow` 用的相机高度：水源且上方方块顶面结实时为 1.0，
+/// 否则是流体自身高度。
+fn camera_height(view: &dyn BlockView, fluid: FluidState, pos: BlockPos) -> f32 {
+    if fluid.is_source()
+        && view
+            .block_state(pos.above())
+            .is_face_sturdy(Direction::Down, SupportType::Full)
+    {
+        1.0
+    } else {
+        view.fluid_height(fluid, pos)
     }
 }
 

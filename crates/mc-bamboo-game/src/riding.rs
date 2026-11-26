@@ -541,21 +541,36 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
 /// Vanilla `AbstractBoat.interact`'s `player.startRiding(this)`: up to two
 /// passengers (one for a chest boat), with players inserted first in the list.
 fn mount_boat(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
-    let Some(public) = region.entities.public_at(vehicle) else {
+    // `AbstractBoat.interact` 要 `outOfControlTicks < 60`；`canAddPassenger` 要
+    // `getPassengers().size() < getMaxPassengers()` 且 `!isEyeInFluid(WATER)`。
+    let Some((entity_type, passengers, out_of_control, eye_in_water, yaw, position)) = region
+        .entities
+        .with_mut(vehicle, |entity| {
+            if let EntityKind::Boat(boat) = &entity.kind {
+                Some((
+                    boat.entity_type,
+                    boat.passengers.len(),
+                    boat.out_of_control_ticks,
+                    entity.in_water,
+                    entity.y_rot,
+                    entity.position,
+                ))
+            } else {
+                None
+            }
+        })
+        .flatten()
+    else {
         return;
     };
-    let KindPublic::Boat(boat) = &public.kind else {
-        return;
-    };
-    let max = if mc_bamboo_blocks::entity::boat::is_chest(boat.entity_type) {
+    let max = if mc_bamboo_blocks::entity::boat::is_chest(entity_type) {
         1
     } else {
         2
     };
-    if boat.passengers.len() >= max {
+    if passengers >= max || out_of_control >= 60.0 || eye_in_water {
         return;
     }
-    let (yaw, position) = (public.yaw, public.position);
     let Some(player) = region.players.get(&id) else {
         return;
     };
@@ -1008,6 +1023,13 @@ pub(crate) fn set_paddle(region: &mut Region, id: PlayerId, left: bool, right: b
     else {
         return;
     };
+    // `AbstractBoat.getControllingPassenger()`：第一乘客是这个玩家才收桨状态。
+    let controls = region.entities.public_at(vehicle).is_some_and(|public| {
+        matches!(&public.kind, KindPublic::Boat(boat) if boat.passengers.first() == Some(&id.0))
+    });
+    if !controls {
+        return;
+    }
     region.entities.with_mut(vehicle, |entity| {
         if let EntityKind::Boat(boat) = &mut entity.kind {
             boat.paddle_left = left;
