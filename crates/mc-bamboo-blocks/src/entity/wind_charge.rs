@@ -231,6 +231,13 @@ pub struct WindChargeHit {
 }
 
 /// `ProjectileUtil.getHitResultOnMoveVector`，`canHitEntity` 排除别的风弹和末影水晶。
+///
+/// 命中的实体包围盒按 `computeMargin` 膨胀：`max(0, min(0.3, (tickCount - 2) / 20))`，
+/// 全 float 运算。飞了几刻以后 margin 到 0.3，命中点（也就是爆炸中心）才和官方一致。
+///
+/// The hit entity box is inflated by `computeMargin` (`max(0, min(0.3, (tickCount - 2) /
+/// 20))`, all float). The margin reaches 0.3 after a few ticks, which keeps the hit point
+/// (and therefore the explosion centre) identical to vanilla.
 fn find_hit(me: &Entity, ctx: &dyn EntityCtx, movement: Vec3) -> Option<WindChargeHit> {
     let blocks = ctx.blocks();
     let from = me.position;
@@ -240,9 +247,10 @@ fn find_hit(me: &Entity, ctx: &dyn EntityCtx, movement: Vec3) -> Option<WindChar
         .bounding_box()
         .expanded_towards(movement.x, movement.y, movement.z)
         .inflated(1.0);
+    let margin = f64::from(((me.tick_count - 2) as f32 / 20.0).clamp(0.0, 0.3));
     let mut best: Option<(f64, Vec3, EntityUid, bool)> = None;
     let mut consider = |uid: EntityUid, bb: Aabb, player: bool| {
-        let Some(location) = clip_entity(bb, from, to) else {
+        let Some(location) = clip_entity(bb.inflated(margin), from, to) else {
             return;
         };
         let distance = from.distance_to_sqr(location);
