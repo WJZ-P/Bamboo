@@ -896,8 +896,12 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
         // `Sniffer.getAmbientSound`：挖掘 / 搜寻时不叫。
         // `Sniffer.getAmbientSound`: silent while digging or searching.
         super::MobType::Sniffer => super::sniffer::ambient_voice(mob),
-        // `Breeze.getAmbientSound`：着地 / 空中两种。
-        super::MobType::Breeze => Some(super::breeze::ambient_sound(me.on_ground)),
+        // `Breeze.playAmbientSound` 覆写了 `Mob.playAmbientSound`：着地且有目标时直接返回，
+        // 否则 `level.playLocalSound(...)`（服务端空操作）。所以从不取音高、不发声音包。
+        // `Breeze.playAmbientSound` overrides `Mob.playAmbientSound`: it returns early when
+        // grounded with a target, otherwise calls `level.playLocalSound(...)` (a server-side
+        // no-op). So it never draws a pitch or sends a sound packet.
+        super::MobType::Breeze => None,
         // `Warden.getAmbientSound()`：咆哮 / 钻出 / 钻入时返回 null，`makeSound`
         // 不取音高的两个随机数。
         // `Warden.getAmbientSound()`: null while roaring / emerging / digging, so
@@ -1157,6 +1161,12 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
         && (mob.warden.pose == super::warden::WardenPose::Roaring
             || mob.warden.pose.is_digging_or_emerging())
     {
+        return;
+    }
+    if mob.mob_type == super::MobType::Breeze {
+        // `Breeze.playAmbientSound` 覆写：`playLocalSound` 服务端空操作，不取音高。
+        // `Breeze.playAmbientSound` is overridden to `playLocalSound`, a server-side
+        // no-op that draws no pitch.
         return;
     }
     if mob.mob_type == super::MobType::Wolf {

@@ -1091,6 +1091,29 @@ impl MobType {
         matches!(self, Self::Parrot | Self::Bat | Self::Phantom | Self::Bee)
     }
 
+    /// `EntityTypeTags.FALL_DAMAGE_IMMUNE`：`LivingEntity.calculateFallDamage` 恒 0，
+    /// 摔落不再掉血（但仍会累计、清零摔落距离，旋风人还会放 `BREEZE_LAND` 音）。
+    ///
+    /// `EntityTypeTags.FALL_DAMAGE_IMMUNE`: `LivingEntity.calculateFallDamage` always
+    /// returns 0, so a fall deals no damage (the fall distance still accumulates and
+    /// resets, and a breeze still plays its `BREEZE_LAND` sound).
+    pub const fn fall_damage_immune(self) -> bool {
+        matches!(
+            self,
+            Self::IronGolem
+                | Self::SnowGolem
+                | Self::Bat
+                | Self::Bee
+                | Self::Cat
+                | Self::Chicken
+                | Self::Phantom
+                | Self::SulfurCube
+                | Self::Ocelot
+                | Self::Parrot
+                | Self::Breeze
+        )
+    }
+
     /// `SpawnPlacements` 里登记成 `IN_WATER` 的类型。
     ///
     /// Types registered as `IN_WATER` in `SpawnPlacements`.
@@ -1367,7 +1390,9 @@ impl MobType {
             // `Sniffer.getAmbientSound`: silent while digging or searching; see
             // `sniffer::ambient_voice`.
             Self::Sniffer => Some("minecraft:entity.sniffer.idle"),
-            // 旋风人的环境声有着地 / 空中两种，见 `breeze::ambient_sound`。
+            // `Breeze.playAmbientSound` 覆写走 `playLocalSound`（服务端空操作），不经过这张表。
+            // `Breeze.playAmbientSound` is overridden to `playLocalSound` (a server-side
+            // no-op), so it never reaches this table.
             Self::Breeze => None,
             Self::Vindicator => Some("minecraft:entity.vindicator.ambient"),
             Self::Ravager => Some("minecraft:entity.ravager.ambient"),

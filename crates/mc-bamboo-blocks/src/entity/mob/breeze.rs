@@ -12,7 +12,7 @@
 //! closest attackable player or iron golem.
 
 use mc_bamboo_core::{BlockPos, Direction, Vec3, mth};
-use mc_bamboo_data::{registries::attribute, sounds};
+use mc_bamboo_data::registries::attribute;
 
 use super::{
     Mob, MobType,
@@ -752,17 +752,6 @@ pub(super) fn custom_server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dy
         mob.brain = Some(brain);
     }
     mob.breeze.jump_trail_started_tick = mob.breeze.jump_trail_started_tick.max(0);
-    // `getAmbientSound` 落地 / 空中两种，由 living 层按 on_ground 调这里。
-    let _ = (me, sounds::NEUTRAL);
-}
-
-/// 环境声按 `onGround()` 分派。
-pub fn ambient_sound(on_ground: bool) -> &'static str {
-    if on_ground {
-        "minecraft:entity.breeze.idle_ground"
-    } else {
-        "minecraft:entity.breeze.idle_air"
-    }
 }
 
 /// `BreezeAi.getActivities`：整张结构表，每种旋风人共用一份模板。
@@ -854,5 +843,24 @@ mod tests {
         assert_eq!(MobType::ALL.len(), 70);
         assert!(MobType::by_name("minecraft:breeze") == Some(MobType::Breeze));
         assert_eq!(MobType::Breeze.name(), "minecraft:breeze");
+    }
+
+    /// `Breeze.playAmbientSound` 覆写走 `playLocalSound`（服务端空操作），所以放进世界时
+    /// 不放任何声音、也不取音高。
+    ///
+    /// `Breeze.playAmbientSound` is overridden to `playLocalSound` (a server-side no-op),
+    /// so spawning one emits no sound and draws no pitch.
+    #[test]
+    fn breeze_ambient_sound_is_a_local_no_op() {
+        let mut entity = Entity::by_mob_type(MobType::Breeze, Vec3::new(0.5, 64.0, 0.5));
+        let emitted = entity
+            .with_mob(|me, mob| {
+                living::play_ambient_sound(me, mob);
+                mob.events
+                    .iter()
+                    .any(|event| matches!(event, crate::entity::mob::MobEvent::Sound { .. }))
+            })
+            .unwrap();
+        assert!(!emitted);
     }
 }

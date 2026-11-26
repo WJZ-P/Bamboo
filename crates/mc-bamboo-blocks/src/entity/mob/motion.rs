@@ -196,6 +196,17 @@ fn cause_fall_damage(
         // The equine override plays its landing sound first; damage is unchanged.
         super::equine::land_sound(me, mob, distance);
     }
+    // `Breeze.causeFallDamage`：摔落超过 3 格先放 `BREEZE_LAND`（固定音量 / 音高），
+    // 再走 `super`。`FALL_DAMAGE_IMMUNE` 标签让 `calculateFallDamage` 恒 0。
+    // `Breeze.causeFallDamage`: a fall longer than 3 blocks plays `BREEZE_LAND` at a
+    // fixed volume and pitch before the super call; the `FALL_DAMAGE_IMMUNE` tag makes
+    // `calculateFallDamage` always return 0.
+    if mob.mob_type == super::MobType::Breeze && distance > 3.0 {
+        living::play_sound(me, mob, "minecraft:entity.breeze.land", 1.0, 1.0);
+    }
+    if mob.mob_type.fall_damage_immune() {
+        return;
+    }
     let power = distance + 1.0e-6 - mob.attributes.value(attribute::SAFE_FALL_DISTANCE);
     let mut damage = mth::floor(
         power * f64::from(multiplier) * mob.attributes.value(attribute::FALL_DAMAGE_MULTIPLIER),
