@@ -27,9 +27,12 @@ use mc_bamboo_data::{
 };
 use mc_bamboo_protocol::{
     codec::write_varint,
-    components::{ComponentPatch, ComponentValue, cursor::Holder, defaults},
+    components::{ComponentPatch, ComponentValue, cursor::Holder, defaults, value::KineticCondition},
     item::ItemStack,
-    packet::play::{Animate, GameMode, LevelParticles, Randomization, SetEntityMotion, SwingAnimationType},
+    packet::play::{
+        Animate, EntityEvent, GameMode, LevelParticles, Randomization, SetEntityMotion,
+        SwingAnimationType,
+    },
 };
 
 use crate::{
@@ -2122,6 +2125,281 @@ fn post_piercing_attack(region: &mut Region, id: PlayerId, setup: &StabSetup) {
     interaction::send_effects(region, Some(id), &effects);
 }
 
+// ===== 长矛蓄力冲刺（KineticWeapon） =====
+
+/// `kinetic_weapon` 组件里读出来的几样。
+struct KineticSpec {
+    contact_cooldown_ticks: i32,
+    delay_ticks: i32,
+    dismount: Option<KineticCondition>,
+    knockback: Option<KineticCondition>,
+    damage: Option<KineticCondition>,
+    damage_multiplier: f32,
+    sound: Option<String>,
+}
+
+/// `mainHandItem.has(DataComponents.KINETIC_WEAPON)`：长矛蓄力走使用物品这一条。
+pub(crate) fn is_kinetic_weapon(held: &ItemStack) -> bool {
+    kinetic_spec(held).is_some()
+}
+
+/// `Item.use` 对 kinetic_weapon 的 `makeSound`：开始蓄力时播的 charge 音效。
+pub(crate) fn kinetic_start_sound(held: &ItemStack) -> Option<String> {
+    kinetic_spec(held).and_then(|spec| spec.sound)
+}
+
+/// `ItemStack.get(KINETIC_WEAPON)`。
+fn kinetic_spec(held: &ItemStack) -> Option<KineticSpec> {
+    if held.is_empty() {
+        return None;
+    }
+    let Ok(patch) = ComponentPatch::from_opaque(held) else {
+        return None;
+    };
+    match defaults::resolve(held.item, &patch, kinds::KINETIC_WEAPON) {
+        Some(ComponentValue::KineticWeapon {
+            contact_cooldown_ticks,
+            delay_ticks,
+            dismount_conditions,
+            knockback_conditions,
+            damage_conditions,
+            damage_multiplier,
+            sound,
+            ..
+        }) => Some(KineticSpec {
+            contact_cooldown_ticks: *contact_cooldown_ticks,
+            delay_ticks: *delay_ticks,
+            dismount: *dismount_conditions,
+            knockback: *knockback_conditions,
+            damage: *damage_conditions,
+            damage_multiplier: *damage_multiplier,
+            sound: spear_sound_name(sound),
+        }),
+        _ => None,
+    }
+}
+
+/// `KineticWeapon.Condition.test(dur, speed, rel, mult)`。
+fn kinetic_condition(cond: &KineticCondition, dur: i32, speed: f64, rel: f64, mult: f64) -> bool {
+    dur <= cond.max_duration_ticks
+        && speed >= f64::from(cond.min_speed) * mult
+        && rel >= f64::from(cond.min_relative_speed) * mult
+}
+
+/// `KineticWeapon.damageEntities` 的一次逐刻调用。`time_held` 是已用刻数
+/// （`getUseDuration - useTicks`，kinetic_weapon 的 useDuration 恒 72000）。
+///
+/// One per-tick `KineticWeapon.damageEntities` call. `time_held` is the elapsed
+/// use ticks (`getUseDuration - useTicks`; a kinetic weapon's use duration is
+/// always 72000).
+pub(crate) fn kinetic_tick(region: &mut Region, id: PlayerId, time_held: i32) {
+    let Some(player) = region.players.get(&id) else {
+        return;
+    };
+    if player.game_mode == GameMode::Spectator || player.spawn_pending.is_some() {
+        return;
+    }
+    let held = player.inventory.held(Hand::Main).clone();
+    let Some(spec) = kinetic_spec(&held) else {
+        return;
+    };
+    // `dur = getUseDuration - useTicks - delayTicks`；小于 delayTicks 直接返回。
+    let dur = time_held - spec.delay_ticks;
+    if dur < 0 {
+        return;
+    }
+    // `look = getLookAngle()`；`speed = look · getMotion(attacker)`，其中
+    // `getMotion` 对玩家是 `lastKnownClientMovement × 20`（方块 / 秒）。
+    let position = player.position();
+    let eye = Vec3::new(position.x, position.y + player.eye_height(), position.z);
+    let look = Vec3::view_vector(player.yaw, player.pitch);
+    let movement = player.motion.known_movement;
+    let speed = (look.x * movement.x + look.y * movement.y + look.z * movement.z) * 20.0;
+    let base = player.attributes.value(attribute::ATTACK_DAMAGE);
+    let knockback = attack_knockback_amount(player, &held);
+    let entity_reach = player.attributes.value(attribute::ENTITY_INTERACTION_RANGE) as f32;
+    let range = attack_range(&held, entity_reach);
+    let creative = player.game_mode == GameMode::Creative;
+    let (min_reach, max_reach) = if creative {
+        (range.min_creative_reach, range.max_creative_reach)
+    } else {
+        (range.min_reach, range.max_reach)
+    };
+    // 射线两端和穿刺那一条完全一样（`ProjectileUtil.getHitEntitiesAlong`）。
+    let ray_speed = look.x * movement.x + look.y * movement.y + look.z * movement.z;
+    let min_point = eye.add(look.scale(f64::from(min_reach)));
+    let max_point = eye.add(look.scale(f64::from(max_reach) + ray_speed.max(0.0)));
+    let setup = StabSetup {
+        held: held.clone(),
+        spec: piercing_spec(&held).expect("长矛带穿刺组件"),
+        position,
+        eye,
+        look,
+        min_point,
+        max_point,
+        margin: range.hitbox_margin,
+        creative,
+        yaw: player.yaw,
+        base_damage: base as f32,
+        knockback,
+        s: 1.0,
+        crouching: player.sync.is_crouching(),
+        fall_distance: player.motion.fall_distance,
+    };
+    let hits = spear_hits(region, &setup);
+    // 逐实体：`wasRecentlyStabbed` 跳过、记下、算 `rel`、三组条件，全假跳过。
+    let now = region.players[&id].entity_ticks;
+    let mut to_hit: Vec<(SpearHit, KineticHitPlan)> = Vec::new();
+    for hit in hits {
+        let delta = kinetic_entity_delta(region, &hit);
+        let tspeed = look.x * delta.x + look.y * delta.y + look.z * delta.z;
+        let rel = (speed - tspeed).max(0.0);
+        let dism = spec
+            .dismount
+            .is_some_and(|cond| kinetic_condition(&cond, dur, speed, rel, 1.0));
+        let knock = spec
+            .knockback
+            .is_some_and(|cond| kinetic_condition(&cond, dur, speed, rel, 1.0));
+        let dmg = spec
+            .damage
+            .is_some_and(|cond| kinetic_condition(&cond, dur, speed, rel, 1.0));
+        if !dism && !knock && !dmg {
+            continue;
+        }
+        if region.players[&id]
+            .recent_kinetic_enemies
+            .get(&hit.id)
+            .is_some_and(|stamp| now - *stamp < spec.contact_cooldown_ticks)
+        {
+            continue;
+        }
+        let plan = KineticHitPlan {
+            dmg_amt: base as f32 + mth::floor(rel * f64::from(spec.damage_multiplier)) as f32,
+            damage: dmg,
+            knockback: knock,
+        };
+        to_hit.push((hit, plan));
+    }
+    if to_hit.is_empty() {
+        return;
+    }
+    // `rememberStabbedEntity`。
+    if let Some(player) = region.players.get_mut(&id) {
+        for (hit, _) in &to_hit {
+            player.recent_kinetic_enemies.insert(hit.id, now);
+        }
+    }
+    let mut hit_any = false;
+    let effects = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        for (hit, plan) in &to_hit {
+            if kinetic_stab_hit(&mut world, id, &setup, hit, plan).is_some() {
+                hit_any = true;
+            }
+        }
+        world.drain_effects()
+    };
+    interaction::send_effects(region, Some(id), &effects);
+    if hit_any {
+        // `broadcastEntityEvent(attacker, 2)`：HIT_FEEDBACK_TICKS，客户端据此播
+        // 命中音效（`onKineticHit` → `makeLocalHitSound`）。
+        let frames = encode_frames(&EntityEvent {
+            entity_id: id.0,
+            event: 2,
+        });
+        if let Some(player) = region.players.get(&id) {
+            player.sync.send_to_viewers(&mut region.links, &frames);
+        }
+        // `SPEAR_MOBS_TRIGGER.trigger(player, stabbedEntities(isAlive))`。
+        let stabbed = region.players[&id]
+            .recent_kinetic_enemies
+            .keys()
+            .filter(|&&uid| region.entities.public_at(uid).is_some_and(|public| !public.removed))
+            .count() as i32;
+        if stabbed > 0 {
+            crate::advancement_triggers::record(
+                region,
+                id,
+                "minecraft:spear_mobs",
+                serde_json::json!({ "count": stabbed }),
+            );
+        }
+    }
+}
+
+/// 长矛蓄力冲刺命中一个实体时，它的速度（`getKnownSpeed().scale(20)`）：玩家读
+/// `lastKnownClientMovement`，生物读 `delta`。骑乘的载具回退没建模（对拍里都是静止牛）。
+fn kinetic_entity_delta(region: &Region, hit: &SpearHit) -> Vec3 {
+    if hit.is_player {
+        return region
+            .players
+            .get(&PlayerId(hit.id))
+            .map_or(Vec3::default(), |player| player.motion.delta);
+    }
+    region
+        .entities
+        .public_at(hit.id)
+        .map_or(Vec3::default(), |public| public.delta)
+}
+
+/// 一次蓄力冲刺命中算好的量：`dmgAmt` 和伤害 / 击退两组条件的判定结果。
+/// dismount 条件只参与「全假跳过」的判断，没有可观察的效果（目标不骑乘）。
+struct KineticHitPlan {
+    dmg_amt: f32,
+    damage: bool,
+    knockback: bool,
+}
+
+/// `Player.stabAttack` 的「正在使用」分支：`isUsingItem() && 同手` 时不乘 `s`、
+/// 不乘 `baseDamageScaleFactor`，`dmgAmt` 已经是 `base + floor(rel × multiplier)`。
+/// 命中后 `causeExtraKnockback` 两下（0.4 和 `getKnockback`）、攻击后附魔效果。
+fn kinetic_stab_hit(
+    world: &mut World<'_>,
+    attacker: PlayerId,
+    setup: &StabSetup,
+    target: &SpearHit,
+    plan: &KineticHitPlan,
+) -> Option<f32> {
+    let magic = damage_bonus(&setup.held, target.entity_type);
+    let total = if plan.damage {
+        plan.dmg_amt + magic
+    } else {
+        0.0
+    };
+    let mut source = DamageSource::player(attacker.0, setup.position, setup.creative);
+    source.kind = mc_bamboo_blocks::entity::mob::DamageKind::Spear;
+    if let Ok(weapon) = u16::try_from(setup.held.item) {
+        source = source.with_weapon(weapon);
+    }
+    let breach = enchantment_level(&setup.held, "minecraft:breach").max(0) as f32;
+    if breach > 0.0 {
+        source = source.with_armor_effectiveness(-0.15 * breach);
+    }
+    let hurt = if target.is_player {
+        world.hurt_player_from_mob(target.id, source, total, None)
+    } else {
+        world.hurt_mob(target.id, source, total)
+    };
+    if plan.knockback {
+        apply_extra_knockback(world, target.id, 0.4, setup.yaw, target.is_player);
+        apply_extra_knockback(world, target.id, setup.knockback, setup.yaw, target.is_player);
+    }
+    if hurt || plan.knockback {
+        if hurt {
+            post_attack_effects(
+                world,
+                target.id,
+                &setup.held,
+                target.entity_type,
+                target.is_player,
+            );
+        }
+        return Some(magic);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3090,5 +3368,45 @@ mod tests {
         assert!(range.is_in_range(eye, bounds, 0.0, false));
         let past = Aabb::new(6.500_001, 63.5, 0.0, 7.0, 65.0, 1.0);
         assert!(!range.is_in_range(eye, past, 0.0, false));
+    }
+
+    /// 铁长矛的 `kinetic_weapon` 组件按官方 26.3 的数值解析出来。
+    #[test]
+    fn iron_spear_kinetic_spec_matches_26_3() {
+        let spec = kinetic_spec(&stack(mc_bamboo_data::items::IRON_SPEAR)).expect("iron spear has a kinetic component");
+        assert_eq!(spec.contact_cooldown_ticks, 10);
+        assert_eq!(spec.delay_ticks, 12);
+        assert_eq!(spec.damage_multiplier, 0.95);
+        let damage = spec.damage.expect("damage conditions");
+        assert_eq!(damage.max_duration_ticks, 225);
+        assert_eq!(damage.min_speed, 0.0);
+        assert_eq!(damage.min_relative_speed, 4.6);
+        let knockback = spec.knockback.expect("knockback conditions");
+        assert_eq!(knockback.max_duration_ticks, 135);
+        assert_eq!(knockback.min_speed, 5.1);
+    }
+
+    /// `KineticWeapon.Condition.test`：时长、绝对速度和相对速度三个门槛都过了才真。
+    #[test]
+    fn kinetic_condition_requires_all_three_gates() {
+        let cond = KineticCondition {
+            max_duration_ticks: 225,
+            min_speed: 0.0,
+            min_relative_speed: 4.6,
+        };
+        let mult = 1.0;
+        assert!(kinetic_condition(&cond, 100, 6.0, 5.0, mult));
+        // 时长超了。
+        assert!(!kinetic_condition(&cond, 226, 6.0, 5.0, mult));
+        // 相对速度不够。
+        assert!(!kinetic_condition(&cond, 100, 6.0, 4.5, mult));
+        // 绝对速度不够。
+        let speed_gate = KineticCondition {
+            max_duration_ticks: 50,
+            min_speed: 11.0,
+            min_relative_speed: 0.0,
+        };
+        assert!(!kinetic_condition(&speed_gate, 10, 10.0, 0.0, mult));
+        assert!(kinetic_condition(&speed_gate, 10, 11.0, 0.0, mult));
     }
 }
