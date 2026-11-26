@@ -14,7 +14,9 @@
 use mc_bamboo_core::Vec3;
 use mc_bamboo_data::{items, tags};
 use mc_bamboo_nbt::Tag;
-use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
+use mc_bamboo_protocol::{
+    components::ComponentValue, item::ItemStack, packet::play::EquipmentSlot,
+};
 
 use crate::{
     InteractionResult,
@@ -264,9 +266,22 @@ impl ArmorStand {
 /// the click height, then put on / take off / swap equipment; `DisabledSlots`, the
 /// marker flag and hand slots without arms block it.
 pub fn interact(mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
-    // `isMarker() || stack.is(NAME_TAG)` → `LivingEntity.interact`，不做装备交互。
-    // `isMarker() || stack.is(NAME_TAG)` → `LivingEntity.interact`, no equipment change.
-    if mob.armor_stand.is_marker() || req.held.item == items::NAME_TAG {
+    // `Player.interactOn`：`Entity.interact` 对命名牌 / 标记盔甲架返回 `PASS` 之后，
+    // 才轮到 `ItemStack.interactLivingEntity`（命名牌在这一步命名）。旁观者在该方法
+    // 入口就短路，命名牌对旁观者不生效。
+    //
+    // `Player.interactOn`: once `Entity.interact` returns `PASS` for a name tag or a
+    // marker stand, `ItemStack.interactLivingEntity` runs (the naming happens here).
+    // Spectators short-circuit at that method's entry, so name tags do nothing for them.
+    if req.held.item == items::NAME_TAG {
+        if req.spectator {
+            return MobInteraction::pass();
+        }
+        return name_tag_interact(mob, req);
+    }
+    // `isMarker()` → `LivingEntity.interact`：`PASS`，不做装备交互。
+    // `isMarker()` → `LivingEntity.interact`: `PASS`, no equipment change.
+    if mob.armor_stand.is_marker() {
         return MobInteraction::pass();
     }
     // `player.isSpectator()` → `SUCCESS`（不改装备、不消耗物品）。
@@ -315,6 +330,32 @@ pub fn interact(mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
         return out;
     }
     MobInteraction::pass()
+}
+
+/// `NameTagItem.interactLivingEntity`：手里是带 `CUSTOM_NAME` 组件的命名牌时给盔甲架
+/// 命名，生存模式消耗一个命名牌。盔甲架是 `LivingEntity` 而非 `Mob`，官方的
+/// `setPersistenceRequired` 分支不触发；`EntityType.canSerialize()` 对盔甲架恒真，
+/// Bamboo 不另查。没有该组件时按官方返回 `PASS`。
+///
+/// `NameTagItem.interactLivingEntity`: a name tag carrying a `CUSTOM_NAME` component
+/// names the stand and spends one tag outside creative mode. An armour stand is a
+/// `LivingEntity`, not a `Mob`, so vanilla's `setPersistenceRequired` branch does not
+/// fire; `EntityType.canSerialize()` is always true for it and Bamboo does not re-check.
+/// Without the component the result is `PASS`, as in vanilla.
+fn name_tag_interact(mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
+    let patch = req.held.patch();
+    let Some(ComponentValue::CustomName(name)) =
+        patch.get(mc_bamboo_data::registries::data_component_type::CUSTOM_NAME)
+    else {
+        return MobInteraction::pass();
+    };
+    mob.custom_name = Some(name.tag().clone());
+    mob.needs_sync = true;
+    MobInteraction {
+        result: InteractionResult::Success,
+        shrink_held: !req.creative,
+        ..MobInteraction::pass()
+    }
 }
 
 const fn slot_bit(slot: EquipmentSlot) -> i32 {
@@ -925,14 +966,92 @@ mod tests {
         );
     }
 
+    fn named_name_tag(text: &str) -> ItemStack {
+        let name = Tag::String(text.to_owned());
+        let mut bytes = Vec::new();
+        name.write_network(&mut bytes);
+        let mut stack = ItemStack::new(items::NAME_TAG, 1);
+        stack.added.push((
+            mc_bamboo_data::registries::data_component_type::CUSTOM_NAME,
+            bytes,
+        ));
+        stack
+    }
+
+    /// `NameTagItem` 没有 `CUSTOM_NAME` 组件时返回 `PASS`：不命名、不消耗物品。
+    ///
+    /// `NameTagItem` returns `PASS` without a `CUSTOM_NAME` component: no naming, no spend.
     #[test]
-    fn a_name_tag_does_not_start_an_equipment_interaction() {
+    fn a_name_tag_without_a_custom_name_does_nothing() {
         let mut entity = armour_stand();
         let req = interact_request(ItemStack::new(items::NAME_TAG, 1), false, None);
         let outcome = entity
             .with_mob(|_, mob| interact(mob, &req))
             .expect("a mob");
         assert_eq!(outcome.result, InteractionResult::Pass);
+        assert!(!outcome.shrink_held);
+        assert!(entity.kind.mob().expect("a mob").custom_name.is_none());
+    }
+
+    #[test]
+    fn a_named_name_tag_names_the_stand_and_is_consumed() {
+        let mut entity = armour_stand();
+        let req = interact_request(named_name_tag("Hall Monitor"), false, None);
+        let outcome = entity
+            .with_mob(|_, mob| interact(mob, &req))
+            .expect("a mob");
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert!(outcome.shrink_held);
+        assert_eq!(
+            entity.kind.mob().expect("a mob").custom_name,
+            Some(Tag::String("Hall Monitor".to_owned()))
+        );
+    }
+
+    /// 创造模式用物品的副本走 `interactLivingEntity`，名字照设，手里那份不扣。
+    ///
+    /// Creative mode runs `interactLivingEntity` on a copy: the name is set but the
+    /// held stack is not spent.
+    #[test]
+    fn a_creative_name_tag_names_the_stand_without_consuming() {
+        let mut entity = armour_stand();
+        let req = interact_request(named_name_tag("Hall Monitor"), true, None);
+        let outcome = entity
+            .with_mob(|_, mob| interact(mob, &req))
+            .expect("a mob");
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert!(!outcome.shrink_held);
+        assert!(entity.kind.mob().expect("a mob").custom_name.is_some());
+    }
+
+    /// `Player.interactOn` 对旁观者直接短路，命名牌不生效。
+    ///
+    /// `Player.interactOn` short-circuits for spectators, so a name tag does nothing.
+    #[test]
+    fn a_spectator_cannot_name_a_stand() {
+        let mut entity = armour_stand();
+        let mut req = interact_request(named_name_tag("Hall Monitor"), false, None);
+        req.spectator = true;
+        let outcome = entity
+            .with_mob(|_, mob| interact(mob, &req))
+            .expect("a mob");
+        assert_eq!(outcome.result, InteractionResult::Pass);
+        assert!(entity.kind.mob().expect("a mob").custom_name.is_none());
+    }
+
+    /// 标记盔甲架的 `Entity.interact` 返回 `PASS`，随后物品 hook 仍能命名它。
+    ///
+    /// A marker stand's `Entity.interact` returns `PASS`, so the item hook still names it.
+    #[test]
+    fn a_marker_stand_can_still_be_named() {
+        let mut entity = armour_stand();
+        entity.with_mob(|_, mob| mob.armor_stand.client_flags |= CLIENT_FLAG_MARKER);
+        let req = interact_request(named_name_tag("Hall Monitor"), false, None);
+        let outcome = entity
+            .with_mob(|_, mob| interact(mob, &req))
+            .expect("a mob");
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert!(entity.kind.mob().expect("a mob").custom_name.is_some());
     }
 
     #[test]

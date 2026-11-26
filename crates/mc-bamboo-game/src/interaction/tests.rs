@@ -2872,6 +2872,55 @@ fn interact_at_click_height_reaches_the_armour_stand() {
     );
 }
 
+/// `NameTagItem.interactLivingEntity`：带 `CUSTOM_NAME` 的命名牌给盔甲架命名，
+/// 生存模式消耗手里的命名牌。
+///
+/// `NameTagItem.interactLivingEntity`: a name tag with a `CUSTOM_NAME` component
+/// names the stand and is consumed in survival mode.
+#[test]
+fn a_name_tag_names_an_armour_stand_end_to_end() {
+    let (mut server, client) = settled();
+    player_mut(&mut server, &client).game_mode = GameMode::Survival;
+    let uid = server
+        .region()
+        .entities
+        .spawn(mc_bamboo_blocks::entity::Entity::by_mob_type(
+            mc_bamboo_blocks::entity::mob::MobType::ArmorStand,
+            Vec3::new(11.5, -59.0, 8.5),
+        ));
+    let mut bytes = Vec::new();
+    Component::text("Hall Monitor")
+        .tag()
+        .write_network(&mut bytes);
+    let mut tag = ItemStack::new(items::NAME_TAG, 1);
+    tag.added.push((kinds::CUSTOM_NAME, bytes));
+    hold_stack(&mut server, &client, tag);
+    client.take_frames();
+
+    crate::interaction::on_interact_entity_at(
+        server.region(),
+        client.id,
+        uid,
+        Hand::Main,
+        false,
+        Vec3::new(0.0, 1.0, 0.0),
+    );
+    assert_eq!(
+        server.player(&client).inventory.held(Hand::Main).item,
+        items::AIR,
+        "the name tag is consumed"
+    );
+    assert_eq!(
+        server
+            .region()
+            .entities
+            .get(uid)
+            .and_then(|entity| entity.kind.mob().and_then(|mob| mob.custom_name.clone())),
+        Some(Component::text("Hall Monitor").tag().clone()),
+        "the stand carries the custom name"
+    );
+}
+
 #[path = "weapon_tests.rs"]
 mod weapon_tests;
 
