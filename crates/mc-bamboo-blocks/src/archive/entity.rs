@@ -352,14 +352,16 @@ fn write_tree(
     depth: usize,
 ) -> Result<Tag> {
     let mut tag = write_entity(row)?;
-    let crate::entity::KindPublic::Mob(mob) = &row.public.kind else {
-        return Ok(tag);
+    let passengers: &[EntityUid] = match &row.public.kind {
+        crate::entity::KindPublic::Mob(mob) => &mob.passengers,
+        crate::entity::KindPublic::Boat(boat) => &boat.passengers,
+        _ => return Ok(tag),
     };
     if depth >= MAX_TREE_DEPTH {
         return Ok(tag);
     }
     let mut list = Vec::new();
-    for &uid in &mob.passengers {
+    for &uid in passengers {
         if uid < crate::entity::FIRST_ENTITY_ID || !seen.insert(uid) {
             continue;
         }
@@ -436,9 +438,13 @@ fn read_tree(tag: &Tag, next: &mut EntityUid, depth: usize) -> Result<Option<Vec
             // 两边的关系直接建立，不看冷却和乘客数。
             sub[0].public.vehicle = Some(uid);
             sub[0].state.boarding_cooldown = 0;
-            entity.with_mob(|_, mob| {
-                crate::entity::riding::add_passenger(&mut mob.passengers, child_id, false);
-            });
+            if let crate::entity::EntityKind::Boat(boat) = &mut entity.kind {
+                crate::entity::riding::add_passenger(&mut boat.passengers, child_id, false);
+            } else {
+                entity.with_mob(|_, mob| {
+                    crate::entity::riding::add_passenger(&mut mob.passengers, child_id, false);
+                });
+            }
             out.extend(sub);
         }
     }

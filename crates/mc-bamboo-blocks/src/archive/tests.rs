@@ -1031,3 +1031,46 @@ fn chest_boat_save_round_trip_keeps_loot_table() {
         panic!("boat round trip lost its kind");
     }
 }
+
+/// 船载着动物乘客时 `Passengers` 往返：船的乘客名单和乘客的 `vehicle` 都回来。
+#[test]
+fn boat_passenger_save_round_trip() {
+    use std::collections::BTreeMap;
+
+    let root_id = crate::entity::FIRST_ENTITY_ID;
+    let mut boat = Entity::boat(
+        mc_bamboo_data::registries::entity_type::OAK_BOAT,
+        Vec3::new(4.5, 63.0, -3.5),
+    );
+    boat.id = root_id;
+    let mut cow = Entity::by_mob_type(crate::entity::mob::MobType::Cow, Vec3::new(9.0, 64.0, 9.0));
+    cow.id = root_id + 1;
+    cow.vehicle = Some(root_id);
+    if let EntityKind::Boat(state) = &mut boat.kind {
+        crate::entity::riding::add_passenger(&mut state.passengers, cow.id, false);
+    }
+    let rows: BTreeMap<i32, crate::entity::EntityRow> = [boat.split(), cow.split()]
+        .into_iter()
+        .map(|row| (row.public.uid, row))
+        .collect();
+    let lookup = |uid: i32| rows.get(&uid).cloned();
+    let tag = write_entity_tree(&rows[&root_id], &lookup).unwrap();
+    let passenger = match field(&tag, "Passengers") {
+        Some(Tag::List(list)) => list.clone(),
+        other => panic!("no Passengers list: {other:?}"),
+    };
+    assert_eq!(passenger.len(), 1);
+    assert_eq!(
+        field(&passenger[0], "id"),
+        Some(&Tag::String("minecraft:cow".to_owned()))
+    );
+
+    let mut next = root_id;
+    let tree = read_entity_tree(&tag, &mut next).unwrap().unwrap();
+    assert_eq!(tree.len(), 2);
+    let crate::entity::KindPublic::Boat(state) = &tree[0].public.kind else {
+        panic!("root is a boat");
+    };
+    assert_eq!(state.passengers, vec![tree[1].public.uid]);
+    assert_eq!(tree[1].public.vehicle, Some(tree[0].public.uid));
+}
