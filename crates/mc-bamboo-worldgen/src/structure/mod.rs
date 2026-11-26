@@ -105,6 +105,10 @@ pub struct StructureState {
     /// Precomputed ring positions for `concentric_rings` sets
     /// (`ChunkGeneratorStructureState.ringPositions`), used by `isPlacementChunk`.
     rings: HashMap<String, HashSet<(i32, i32)>>,
+    /// 同上，保留官方 `ChunkGeneratorStructureState.getRingPositionsFor` 的生成顺序。
+    ///
+    /// Same ring positions in vanilla's `getRingPositionsFor` list order.
+    ring_lists: HashMap<String, Vec<(i32, i32)>>,
 }
 
 impl StructureState {
@@ -112,6 +116,7 @@ impl StructureState {
         Self {
             sets,
             rings: HashMap::new(),
+            ring_lists: HashMap::new(),
         }
     }
 
@@ -123,8 +128,17 @@ impl StructureState {
         set_name: &str,
         positions: impl IntoIterator<Item = (i32, i32)>,
     ) {
-        self.rings
-            .insert(set_name.to_owned(), positions.into_iter().collect());
+        let list: Vec<(i32, i32)> = positions.into_iter().collect();
+        let set: HashSet<(i32, i32)> = list.iter().copied().collect();
+        self.rings.insert(set_name.to_owned(), set);
+        self.ring_lists.insert(set_name.to_owned(), list);
+    }
+
+    /// `ChunkGeneratorStructureState.getRingPositionsFor`：按生成顺序返回同心环候选区块。
+    ///
+    /// `ChunkGeneratorStructureState.getRingPositionsFor`: ring chunk positions in generation order.
+    pub fn ring_positions(&self, set_name: &str) -> Option<&[(i32, i32)]> {
+        self.ring_lists.get(set_name).map(Vec::as_slice)
     }
 
     pub fn sets(&self) -> &StructureSets {

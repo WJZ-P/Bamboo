@@ -1531,6 +1531,12 @@ pub(crate) fn on_use_item(
         swing(region, id, hand, InteractionResult::Success);
         return;
     }
+    // `EnderEyeItem.use`：瞄着框架返回 `PASS`，否则找要塞扔出 `EyeOfEnder`（`SUCCESS_SERVER`）或 `CONSUME`。
+    // `EnderEyeItem.use`: `PASS` on a frame, otherwise throw an `EyeOfEnder` (`SUCCESS_SERVER`) or `CONSUME`.
+    if let Some(result) = crate::player_ender_eye::use_eye(region, id, hand, &actor) {
+        swing(region, id, hand, result);
+        return;
+    }
     // `FireworkRocketItem.use`：仅在玩家 `isFallFlying()`（鞘翅滑翔）时生成附着烟花加速。
     // 滑翔时生成附着在玩家身上的烟花、扣物品（创造模式不扣）、记使用统计并返回 `SUCCESS`；
     // 不滑翔官方返回 `PASS`，什么都不做。

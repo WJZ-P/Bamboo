@@ -4976,6 +4976,13 @@ impl<'a> World<'a> {
         })
     }
 
+    /// `Item.getPlayerPOVHitResult(..., ClipContext.Fluid.NONE)`：`OUTLINE` 轮廓射线，忽略流体。
+    ///
+    /// `Item.getPlayerPOVHitResult(..., ClipContext.Fluid.NONE)`: outline raycast ignoring fluids.
+    pub fn clip_outline(&self, from: Vec3, to: Vec3, main_hand: i32) -> Option<BlockHit> {
+        self.clip(from, to, ClipFluid::None, main_hand)
+    }
+
     /// `ClipContext.Block.COLLIDER` 加 `Fluid.NONE`。爆炸的遮挡采样用它。
     ///
     /// `ClipContext.Block.COLLIDER` with `Fluid.NONE`. Explosion exposure samples use it.
