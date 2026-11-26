@@ -154,6 +154,64 @@ pub(crate) fn unpack(state: Unpack<'_>, pos: BlockPos) -> bool {
     true
 }
 
+/// `AbstractChestBoat` 的 `LootTable` / `LootTableSeed`：第一次读内容（破坏时
+/// `Containers.dropContents` 会读）先求值填进 27 格、清表，再返回解包后的物品。
+/// 没有表时返回 `None`，调用方用原本的 `itemStacks`。
+///
+/// Unpack a chest boat's loot table into its 27 slots and return the filled
+/// slots; `None` means there was no table.
+pub(crate) fn unpack_boat(region: &mut Region, entity: i32) -> Option<Vec<ItemStack>> {
+    let position = region
+        .entities
+        .public_at(entity)
+        .map(|public| public.position)?;
+    let (table, seed, mut items) = region
+        .entities
+        .with_mut(entity, |e| {
+            if let mc_bamboo_blocks::entity::EntityKind::Boat(boat) = &mut e.kind {
+                let chest = boat.chest.as_mut()?;
+                let table = chest.loot_table.take()?;
+                let seed = std::mem::replace(&mut chest.loot_table_seed, 0);
+                Some((table, seed, chest.items.clone()))
+            } else {
+                None
+            }
+        })
+        .flatten()?;
+    let view = ChunkLevel {
+        chunks: &region.chunks,
+        weather: region.global.block_weather,
+    };
+    let params = ChestParams {
+        pos: (
+            mc_bamboo_core::mth::floor(position.x),
+            mc_bamboo_core::mth::floor(position.y),
+            mc_bamboo_core::mth::floor(position.z),
+        ),
+        player: None,
+        luck: 0.0,
+        level: &view,
+    };
+    let mut slots = LevelSlots { slots: &mut items };
+    let _ = chest_loot(
+        &table,
+        &mut slots,
+        &params,
+        seed,
+        Some(&region.loot_sequences),
+        region.random.source(),
+    );
+    // 把解包结果写回实体（实体可能已被 discard，这时写不进去也不影响掉落）。
+    region.entities.with_mut(entity, |e| {
+        if let mc_bamboo_blocks::entity::EntityKind::Boat(boat) = &mut e.kind
+            && let Some(chest) = &mut boat.chest
+        {
+            chest.items = items.clone();
+        }
+    });
+    Some(items)
+}
+
 /// `Region` 上的入口：菜单打开、破坏和容器表读写共用。
 pub(crate) fn unpack_at(region: &mut Region, pos: BlockPos) {
     let state = Unpack {
