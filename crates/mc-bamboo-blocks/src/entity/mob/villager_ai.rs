@@ -62,6 +62,41 @@ use crate::{
 /// `Villager.SPEED_MODIFIER`。
 const SPEED_MODIFIER: f32 = 0.5;
 
+#[cfg(feature = "oracle-samples")]
+thread_local! {
+    /// `mob-oracle` 的 `--break-self-test` 改坏确认；0 表示不破坏，1 破坏袭击触发闸门
+    /// 的 `absent(WALK_TARGET)`，2 破坏庆祝烟花颜色。
+    static RAID_TAMPER: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// 由 `mob-oracle` 按 `--break-self-test` 设置，其他驱动不调用；只在 `oracle-samples`
+/// feature 下编译进库里。
+///
+/// Set by `mob-oracle` from `--break-self-test`; no other driver calls this. Compiled
+/// only under the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn set_raid_tamper(name: &str) {
+    let tamper = match name {
+        "villager_raid_gate" => 1,
+        "villager_raid_firework" => 2,
+        _ => 0,
+    };
+    RAID_TAMPER.with(|cell| cell.set(tamper));
+}
+
+#[cfg(feature = "oracle-samples")]
+fn raid_tamper() -> u8 {
+    RAID_TAMPER.with(|cell| cell.get())
+}
+
+#[cfg(not(feature = "oracle-samples"))]
+const fn raid_tamper() -> u8 {
+    0
+}
+
+/// 官方 `FireworkExplosion.Shape.BURST` 的 ID（`SMALL_BALL=0..BURST=4`）。
+const FIREWORK_SHAPE_BURST: i32 = 4;
+
 /// `Villager.BRAIN_PROVIDER` 的 9 个传感器，严格按官方登记顺序。
 ///
 /// The 9 sensors of `Villager.BRAIN_PROVIDER`, in exact vanilla registration order.
@@ -503,6 +538,11 @@ pub struct MeetGateState {
     ///
     /// The trigger gate's shuffle random, seeded by `seed_shuffles` in the official order.
     pub random: JavaRandom,
+    /// `ShufflingList` 当前的表项顺序；官方每次 `shuffle()` 就地排序，顺序跨 tick 保留。
+    ///
+    /// The `ShufflingList`'s current entry order; vanilla's `shuffle()` sorts in place,
+    /// so the order persists across ticks.
+    pub order: [usize; 2],
 }
 
 /// `PRE_RAID` 优先级 0 的 `TriggerGate.triggerOneShuffled([SetWalkTargetFromBlockMemory,
@@ -517,6 +557,11 @@ pub struct PreRaidGateState {
     ///
     /// The trigger gate's shuffle random, seeded by `seed_shuffles` in the official order.
     pub random: JavaRandom,
+    /// `ShufflingList` 当前的表项顺序；官方每次 `shuffle()` 就地排序，顺序跨 tick 保留。
+    ///
+    /// The `ShufflingList`'s current entry order; vanilla's `shuffle()` sorts in place,
+    /// so the order persists across ticks.
+    pub order: [usize; 2],
 }
 
 /// `RAID` 优先级 0 的 `RaidCelebrateTriggerGate`（`sequence(triggerIf, triggerOneShuffled(
@@ -531,6 +576,11 @@ pub struct RaidCelebrateGateState {
     ///
     /// The trigger gate's shuffle random, seeded by `seed_shuffles` in the official order.
     pub random: JavaRandom,
+    /// `ShufflingList` 当前的表项顺序；官方每次 `shuffle()` 就地排序，顺序跨 tick 保留。
+    ///
+    /// The `ShufflingList`'s current entry order; vanilla's `shuffle()` sorts in place,
+    /// so the order persists across ticks.
+    pub order: [usize; 2],
 }
 
 /// `SetClosestHomeAsWalkTarget` 的重试缓存（装箱以保持 `Node` 紧凑）。
@@ -2005,7 +2055,7 @@ fn trigger_inside_brownian_walk(speed: f32, cx: &mut Cx) -> bool {
 fn trigger_meet_gate(state: &mut MeetGateState, cx: &mut Cx) -> bool {
     // `ShufflingList.shuffle` 洗出两个触发（StrollAroundPoi w2、SocializeAtBell w2）的顺序，
     // 先命中的那个停止。
-    let socialize_first = shuffle_first(&mut state.random, [2, 2]) == 1;
+    let socialize_first = shuffle_first(&mut state.order, &mut state.random, [2, 2]) == 1;
     if socialize_first {
         if trigger_socialize_at_bell(cx) {
             return true;
@@ -2120,23 +2170,28 @@ fn trigger_walk_target_from_block_memory(
 }
 
 /// `PreRaidTriggerGate`：`TriggerGate.triggerOneShuffled` 按权重洗牌，先命中（成功设下
-/// 步行目标）的那个停止。
+/// 步行目标）的那个停止。每个触发先查自己的记忆条件（`tryTrigger`）：两个触发
+/// （`VillageBoundRandomStroll` / `SetWalkTargetFromBlockMemory`）都要求 `WALK_TARGET`
+/// 缺席，后者还要求 `MEETING_POINT` 在场；不满足就跳过到下一个。
 ///
 /// `PreRaidTriggerGate`: `TriggerGate.triggerOneShuffled` shuffles by weight and stops at
-/// the first trigger that fires (sets a walk target).
+/// the first trigger that fires (sets a walk target). Each trigger checks its own memory
+/// condition first (`tryTrigger`): both (`VillageBoundRandomStroll` and
+/// `SetWalkTargetFromBlockMemory`) need `WALK_TARGET` absent, and the latter also needs
+/// `MEETING_POINT` present; a failed condition skips to the next trigger.
 fn trigger_pre_raid_gate(state: &mut PreRaidGateState, cx: &mut Cx) -> bool {
     let speed = state.speed * 1.5;
     // SetWalkTargetFromBlockMemory 权重 6，VillageBoundRandomStroll 权重 2。
-    let stroll_first = shuffle_first(&mut state.random, [6, 2]) == 1;
-    if stroll_first {
-        if trigger_village_bound_random_stroll(speed, 10, 7, cx) {
-            return true;
-        }
-        let _ = trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx);
-    } else {
-        if trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx) {
-            return true;
-        }
+    let stroll_first = shuffle_first(&mut state.order, &mut state.random, [6, 2]) == 1;
+    // 两个触发都要求 `WALK_TARGET` 缺席；已有步行目标时两个都不触发，闸门空转。
+    // `--break-self-test villager_raid_gate` 改坏：跳过这个前置，有步行目标也照触发。
+    if cx.memories.has(WalkTarget) && raid_tamper() != 1 {
+        return true;
+    }
+    // 洗牌先出 `VillageBoundRandomStroll`，或 `SetWalkTargetFromBlockMemory` 因记忆条件
+    // 没触发时，落到闲逛。
+    if stroll_first || !trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx)
+    {
         let _ = trigger_village_bound_random_stroll(speed, 10, 7, cx);
     }
     true
@@ -2144,20 +2199,21 @@ fn trigger_pre_raid_gate(state: &mut PreRaidGateState, cx: &mut Cx) -> bool {
 
 /// `ShufflingList.shuffle` 对两个触发的结果：每个触发取一次 `nextFloat`，权重
 /// `-pow(r, 1.0f/weight)`（float 除法，与 `Gate::shuffle` 一致），升序稳定排序后返回
-/// 排在前面的下标。
+/// 排在前面的下标。官方 `shuffle()` 就地排序，下一次取数按上一次排好的顺序进行，
+/// 所以 `order` 要跨 tick 保留。
 ///
 /// The `ShufflingList.shuffle` order of two triggers: one `nextFloat` each, key
 /// `-pow(r, 1.0f/weight)` (float division, like `Gate::shuffle`), stable ascending sort;
-/// returns the index that sorts first.
-fn shuffle_first(random: &mut JavaRandom, weights: [i32; 2]) -> usize {
-    let mut order = [0_usize, 1_usize];
+/// returns the index that sorts first. Vanilla sorts in place, so the next shuffle draws
+/// in the previous sorted order and `order` must persist across ticks.
+fn shuffle_first(order: &mut [usize; 2], random: &mut JavaRandom, weights: [i32; 2]) -> usize {
     let mut keys = [0.0_f64; 2];
-    for (i, &weight) in weights.iter().enumerate() {
+    for &idx in order.iter() {
         let r = f64::from(random.next_float());
-        keys[i] = if weight == 1 {
+        keys[idx] = if weights[idx] == 1 {
             -r
         } else {
-            -r.powf(f64::from(1.0_f32 / weight as f32))
+            -r.powf(f64::from(1.0_f32 / weights[idx] as f32))
         };
     }
     order.sort_by(|&a, &b| keys[a].total_cmp(&keys[b]));
@@ -2181,18 +2237,14 @@ fn trigger_raid_celebrate_gate(state: &mut RaidCelebrateGateState, cx: &mut Cx) 
         return false;
     }
     // MoveToSkySeeingSpot 权重 5，VillageBoundRandomStroll 权重 2。官方前者用 `speed`、
-    // 后者用 `speed * 1.1`。
+    // 后者用 `speed * 1.1`。两个触发都要求 `WALK_TARGET` 缺席。
     let stroll_speed = state.speed * 1.1;
-    let stroll_first = shuffle_first(&mut state.random, [5, 2]) == 1;
-    if stroll_first {
-        if trigger_village_bound_random_stroll(stroll_speed, 10, 7, cx) {
-            return true;
-        }
-        let _ = trigger_move_to_sky_seeing_spot(state.speed, cx);
-    } else {
-        if trigger_move_to_sky_seeing_spot(state.speed, cx) {
-            return true;
-        }
+    let stroll_first = shuffle_first(&mut state.order, &mut state.random, [5, 2]) == 1;
+    if cx.memories.has(WalkTarget) {
+        return true;
+    }
+    // 洗牌先出 `VillageBoundRandomStroll`，或 `MoveToSkySeeingSpot` 没触发时，落到闲逛。
+    if stroll_first || !trigger_move_to_sky_seeing_spot(state.speed, cx) {
         let _ = trigger_village_bound_random_stroll(stroll_speed, 10, 7, cx);
     }
     true
@@ -2444,16 +2496,74 @@ fn celebrate_can_continue(cx: &mut Cx) -> bool {
         .is_some_and(|raid| !raid.is_stopped)
 }
 
+/// `CelebrateVillagersSurvivedRaid.getFirework`：构造一枚带 `FIREWORKS` 组件的
+/// `firework_rocket` 物品（BURST 形状、单色、无淡出、无拖尾无闪烁、指定飞行时长）。
+///
+/// `CelebrateVillagersSurvivedRaid.getFirework`: build a `firework_rocket` stack with
+/// a `FIREWORKS` component (BURST shape, single colour, no fade/trail/twinkle, given
+/// flight duration).
+fn build_celebration_firework(color: i32, flight: i32) -> mc_bamboo_protocol::item::ItemStack {
+    use mc_bamboo_data::{items, registries::data_component_type as kinds};
+    use mc_bamboo_protocol::{
+        components::{ComponentPatch, ComponentValue, PatchEntry, value::FireworkExplosion},
+        item::ItemStack,
+    };
+
+    let mut patch = ComponentPatch::default();
+    patch.put(
+        kinds::FIREWORKS,
+        PatchEntry::Set(ComponentValue::Fireworks {
+            flight_duration: i32::from(flight as i8),
+            explosions: vec![FireworkExplosion {
+                shape: FIREWORK_SHAPE_BURST,
+                colors: vec![color],
+                fade_colors: Vec::new(),
+                has_trail: false,
+                has_twinkle: false,
+            }],
+        }),
+    );
+    let (added, removed) = patch.to_opaque();
+    ItemStack {
+        item: items::FIREWORK_ROCKET,
+        count: 1,
+        added,
+        removed,
+    }
+}
+
 /// `CelebrateVillagersSurvivedRaid.tick`：每刻 `nextInt(100)==0` 播庆祝声，
-/// `nextInt(200)==0` 且头顶无方块时放烟花（随机颜色 + 0..3 飞行时长；烟花实体
-/// 本身没建模，只保持取数次数对齐）。
+/// `nextInt(200)==0` 且头顶无方块时生成一枚烟花火箭（BURST、随机颜色、0..3 飞行时长），
+/// 记录一条 `Firework` 效果并生成真的烟花实体。
 fn celebrate_tick(cx: &mut Cx) {
     if cx.me.random.next_int_bounded(100) == 0 {
         living::make_sound(cx.me, cx.mob, "minecraft:entity.villager.celebrate");
     }
     if cx.me.random.next_int_bounded(200) == 0 && has_no_blocks_above(cx) {
-        let _ = cx.me.random.next_int_bounded(16);
-        let _ = cx.me.random.next_int_bounded(3);
+        // `Util.getRandom(DyeColor.values(), random)`（`nextInt(16)`）+ `nextInt(3)` 飞行时长。
+        let dye = mc_bamboo_core::sign::DyeColor::from_id(cx.me.random.next_int_bounded(16));
+        let flight = cx.me.random.next_int_bounded(3);
+        // `--break-self-test villager_raid_firework` 改坏：颜色固定成黑色。
+        let color = if raid_tamper() == 2 {
+            mc_bamboo_core::sign::DyeColor::Black.firework_color()
+        } else {
+            dye.firework_color()
+        };
+        let item = build_celebration_firework(color, flight);
+        let position = Vec3::new(
+            cx.me.position.x,
+            living::eye_y(cx.me, cx.mob),
+            cx.me.position.z,
+        );
+        let owner = cx.me.id;
+        cx.ctx.emit(
+            Command::SpawnFirework {
+                position,
+                item,
+                owner,
+            },
+            cx.me,
+        );
     }
 }
 
@@ -3253,6 +3363,7 @@ fn meet_package(speed: f32) -> ActivityData {
                 Kind::Villager(Behavior::MeetTriggerGate(Box::new(MeetGateState {
                     stroll_next_ok: 0,
                     random: JavaRandom::new(0),
+                    order: [0, 1],
                 }))),
             ),
             (10, stub(Stub::ShowTradesToPlayer)),
@@ -3391,6 +3502,7 @@ fn pre_raid_package(speed: f32) -> ActivityData {
                 Kind::Villager(Behavior::PreRaidTriggerGate(Box::new(PreRaidGateState {
                     speed,
                     random: JavaRandom::new(0),
+                    order: [0, 1],
                 }))),
             ),
             minimal_look_behavior(),
@@ -3409,6 +3521,7 @@ fn raid_package(speed: f32) -> ActivityData {
                     RaidCelebrateGateState {
                         speed,
                         random: JavaRandom::new(0),
+                        order: [0, 1],
                     },
                 ))),
             ),
@@ -4144,5 +4257,32 @@ mod tests {
         assert!(throttle::exempt(&mob, 1000, true, false, 0));
         assert!(throttle::exempt(&mob, 1299, true, false, 0));
         assert!(!throttle::exempt(&mob, 1300, true, false, 0));
+    }
+
+    /// `CelebrateVillagersSurvivedRaid.getFirework` 构造出的烟花物品组件往返不丢字段。
+    #[test]
+    fn celebration_firework_carries_burst_component() {
+        use mc_bamboo_core::sign::DyeColor;
+        use mc_bamboo_data::{items, registries::data_component_type as kinds};
+        use mc_bamboo_protocol::components::{ComponentValue, value::FireworkExplosion};
+
+        let orange = DyeColor::Orange.firework_color();
+        let stack = build_celebration_firework(orange, 2);
+        assert_eq!(stack.item, items::FIREWORK_ROCKET);
+        assert_eq!(stack.count, 1);
+        let patch = stack.patch();
+        assert_eq!(
+            patch.get(kinds::FIREWORKS),
+            Some(&ComponentValue::Fireworks {
+                flight_duration: 2,
+                explosions: vec![FireworkExplosion {
+                    shape: FIREWORK_SHAPE_BURST,
+                    colors: vec![orange],
+                    fade_colors: Vec::new(),
+                    has_trail: false,
+                    has_twinkle: false,
+                }],
+            })
+        );
     }
 }

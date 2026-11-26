@@ -778,11 +778,11 @@ index 16 的位（`PlayerModelPart`）：`0x01` 披风、`0x02` 夹克、`0x04` 
 | 3 | START_RIDING_JUMP | 忽略 |
 | 4 | STOP_RIDING_JUMP | 忽略 |
 | 5 | OPEN_INVENTORY | 忽略 |
-| 6 | START_FALL_FLYING | **回 `set_entity_data`**，见下 |
+| 6 | START_FALL_FLYING | 检查滑翔条件，同步共享标志，见下 |
 
 `[跑]` 实体 7 开始冲刺：`07 01 00`。开始滑翔：`07 06 00`。
 
-#### START_FALL_FLYING 的最小回应
+#### START_FALL_FLYING
 
 这个 action 不能只忽略。来源：`LocalPlayer.aiStep`，`Player.tryToStartFallFlying`、`startFallFlying`，`LivingEntity.travel`、`travelFallFlying`、`updateFallFlying`、`stopFallFlying`，`ServerGamePacketListenerImpl.handlePlayerCommand`。`[读]`
 
@@ -792,13 +792,13 @@ index 16 的位（`PlayerModelPart`）：`0x01` 披风、`0x02` 夹克、`0x04` 
 
 所以服务端不回应时，玩家落地后仍在滑翔，走不了路，只有爬上梯子或重连才能恢复。创造模式物品栏里拿件鞘翅就能走到这一步。
 
-官方的拒绝路径是 `tryToStartFallFlying` 失败时调 `stopFallFlying`，让 index 0 发回客户端。M2 不做滑翔，所以总是走这条路径：
+服务端接受请求时设置 index 0 的 `0x80`。实体同步阶段将标志和滑翔姿势发给本人及观察者，
+并在滑翔速度变化时向观察者发送 `set_entity_motion`。持续滑翔每 10 刻发出一次游戏事件，
+每 20 刻检查装备耐久。落地、进水、失去可用装备或其它条件结束滑翔后，同步清除标志。
 
-收到 action 6 时，立刻**只给发送者**发 `set_entity_data`，index 0 写服务端当前的标志字节，`0x80` 为 0。不用改服务端状态，也不用发给观察者。
+拒绝请求时清除滑翔位。观察者此前没有收到滑翔状态时，只给发送者回当前的标志字节。
 
 `[跑]` 实体 7，没有潜行和冲刺：`07 00 00 00 ff`，完整帧 `06 65 07 00 00 00 ff`。正在冲刺：`07 00 00 08 ff`。
-
-效果：滑翔只持续一个往返时间，鞘翅在 M2 不可用，但玩家不会卡住。要支持滑翔时，服务端要保存 `0x80`，并在 `canGlide` 不成立时清掉它（`updateFallFlying`）。
 
 官方的冲刺还会加 `movement_speed` 修饰符（`LivingEntity.setSprinting`），再用 `update_attributes` 同步。`RemotePlayer` 的位置来自插值，不跑移动物理（`noPhysics = true`，`aiStep` 不调 `travel`），所以对别人的画面没有影响。
 
@@ -929,7 +929,7 @@ M2 简化：组件按 `blocks-inventory.md` 2.5、8.3 当不透明字节保留�
 | `set_passengers`、`set_entity_link` | `set_passengers` 有了：按 `Entity.passengers` 的名单变化发（`ServerEntity.sendChanges`）。`set_entity_link` 已接上拴绳：配对时按 `Mob.leash_holder` 发，玩家牵引者、栅栏结都发 |
 | `waypoint`（141） | 定位栏。不发时 `ClientWaypointManager.hasWaypoints()` 为 false |
 
-滑翔不做：`START_FALL_FLYING` 按第 10 节拒绝，别人看到的是普通站姿。
+滑翔状态、姿势和速度的同步见第 10 节。
 
 ### set_entity_motion
 

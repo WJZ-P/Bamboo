@@ -14,7 +14,7 @@ use mc_bamboo_protocol::{
         ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING, EntityData,
         EntityPositionSync, EquipmentSlot, GameMode, HumanoidArm, INPUT_FLAG_SHIFT, MoveEntityPos,
         MoveEntityPosRot, MoveEntityRot, PlayerCommandKind, Pose, PositionDelta, PositionPath,
-        RemoveEntities, RotateHead, SetEntityData, SetEquipment, SwingAnimation,
+        RemoveEntities, RotateHead, SetEntityData, SetEntityMotion, SetEquipment, SwingAnimation,
         SwingAnimationType, VecDelta, pack_degrees,
     },
 };
@@ -41,7 +41,7 @@ const BLOCKS_PER_CHUNK: i32 = 16;
 const DEFAULT_HEALTH_ON_PAIRING: f32 = 20.0;
 
 /// 玩家有的装备槽，按 ordinal 排序。
-const EQUIPMENT_SLOTS: [EquipmentSlot; 6] = [
+pub(crate) const EQUIPMENT_SLOTS: [EquipmentSlot; 6] = [
     EquipmentSlot::MainHand,
     EquipmentSlot::OffHand,
     EquipmentSlot::Feet,
@@ -90,7 +90,7 @@ impl Metadata {
     fn of(player: &Player) -> Self {
         Self {
             shared_flags: player.sync.shared_flags,
-            pose: player.sync.pose(),
+            pose: player.sync.pose(player.motion.is_fall_flying_pose()),
             health: player.health.health,
             // `DATA_LIVING_ENTITY_FLAGS`：使用物品位（0/1）加自旋攻击位（4）。
             // `DATA_LIVING_ENTITY_FLAGS`: the using-item bits (0/1) plus the
@@ -148,6 +148,9 @@ pub(crate) struct EntitySync {
     pub(crate) sleeping: bool,
     /// 元数据 index 0 的标志字节。`entities.md` 第 10 节。
     pub(crate) shared_flags: u8,
+    /// 观察者上次收到的滑翔速度。
+    /// The last glide velocity sent to observers.
+    last_sent_movement: Vec3,
     /// 元数据变了：这一 tick 进入周期，把变化发给观察者和玩家自己。
     pub(crate) metadata_dirty: bool,
     /// 按着潜行键。来自 `player_input`。
@@ -194,6 +197,7 @@ impl EntitySync {
         Self {
             sleeping: false,
             shared_flags: 0,
+            last_sent_movement: Vec3::default(),
             metadata_dirty: false,
             shift_key_down: false,
             flying: false,
@@ -220,7 +224,7 @@ impl EntitySync {
     /// 蹲着：按着潜行键并且没在飞。创造模式飞行时按潜行键是下降，姿势不变。
     /// 放置方块时用它决定眼高和碰撞盒。
     pub(crate) fn is_crouching(&self) -> bool {
-        self.shift_key_down && !self.flying
+        self.shift_key_down && !self.flying && !self.is_fall_flying()
     }
 
     /// `isSprinting()`：共享标志里的疾跑位。
@@ -230,10 +234,24 @@ impl EntitySync {
         self.shared_flags & ENTITY_FLAG_SPRINTING != 0
     }
 
+    /// 共享标志里的滑翔位。
+    /// The fall-flying bit in the shared flags.
+    pub(crate) fn is_fall_flying(&self) -> bool {
+        self.shared_flags & ENTITY_FLAG_FALL_FLYING != 0
+    }
+
+    /// 设置滑翔标志。
+    /// Set the fall-flying flag.
+    pub(crate) fn set_fall_flying(&mut self, enabled: bool) {
+        self.set_shared_flag(ENTITY_FLAG_FALL_FLYING, enabled);
+    }
+
     /// 其他玩家的姿势完全由 index 6 决定，客户端不会根据潜行位自己推算。
-    fn pose(&self) -> Pose {
+    fn pose(&self, fall_flying: bool) -> Pose {
         if self.sleeping {
             Pose::Sleeping
+        } else if fall_flying {
+            Pose::FallFlying
         } else if self.is_crouching() {
             Pose::Crouching
         } else {
@@ -264,7 +282,11 @@ const ENTITY_FLAG_INVISIBLE: u8 = 0x04;
 const ENTITY_FLAG_GLOWING: u8 = 0x40;
 
 pub(crate) fn update_derived_state(region: &mut Region) {
+    let blocks = crate::player_move::PlayerBlocks::new(&region.chunks, &region.block_entities);
     for player in region.players.values_mut() {
+        if player.sync.is_fall_flying() || player.motion.is_fall_flying_pose() {
+            crate::player_move::update_body(player, &blocks);
+        }
         player.head_yaw = player.yaw;
         // `Entity.setSharedFlag(0, isOnFire())`。
         if crate::player_environment::is_on_fire(player) {
@@ -404,7 +426,11 @@ fn pairing_frames(player: &Player) -> Vec<u8> {
         uuid: player.uuid,
         entity_type: entity_type::PLAYER,
         position: sync.base,
-        movement: Vec3::default(),
+        movement: if sync.sent_metadata.shared_flags & ENTITY_FLAG_FALL_FLYING != 0 {
+            sync.last_sent_movement
+        } else {
+            Vec3::default()
+        },
         pitch: sync.last_pitch,
         yaw: sync.last_yaw,
         head_yaw: sync.last_head,
@@ -453,9 +479,21 @@ fn run_cycle(player: &mut Player, links: &mut Links) {
     player.sync.teleport_delay += 1;
 
     let movement = choose_movement(player, yaw, pitch);
-    let mut frames = movement
-        .map(|movement| movement.frames(player, ticks, yaw, pitch))
-        .unwrap_or_default();
+    let mut frames = Vec::new();
+    if player.sync.is_fall_flying() {
+        let velocity = player.motion.delta;
+        let difference = velocity.distance_to_sqr(player.sync.last_sent_movement);
+        if difference > 1.0e-7 || difference > 0.0 && velocity.length_sqr() == 0.0 {
+            player.sync.last_sent_movement = velocity;
+            frames.extend(encode_frames(&SetEntityMotion {
+                entity_id: player.id.0,
+                movement: velocity,
+            }));
+        }
+    }
+    if let Some(movement) = movement {
+        frames.extend(movement.frames(player, ticks, yaw, pitch));
+    }
     let metadata = take_metadata_frames(player);
     frames.extend_from_slice(&metadata);
 
@@ -718,9 +756,9 @@ fn may_fly(game_mode: GameMode) -> bool {
     matches!(game_mode, GameMode::Creative | GameMode::Spectator)
 }
 
-/// `player_command`：冲刺、拒绝滑翔、起跳，以及骑乘时开坐骑物品栏。`entities.md` 第 10 节。
+/// `player_command`：冲刺、开始滑翔、起跳，以及骑乘时开坐骑物品栏。`entities.md` 第 10 节。
 ///
-/// `player_command`: sprinting, refusing the elytra, the riding jump and opening
+/// `player_command`: sprinting, starting to glide, the riding jump and opening
 /// the mount inventory. `entities.md` section 10.
 pub(crate) fn on_player_command(
     region: &mut Region,
@@ -731,7 +769,16 @@ pub(crate) fn on_player_command(
     match action {
         PlayerCommandKind::StartSprinting => set_sprinting(region, id, true),
         PlayerCommandKind::StopSprinting => set_sprinting(region, id, false),
-        PlayerCommandKind::StartFallFlying => refuse_fall_flying(region, id),
+        PlayerCommandKind::StartFallFlying => {
+            if region
+                .players
+                .get(&id)
+                .is_some_and(|player| player.motion.client_loaded())
+                && !crate::player_glide::try_start(region, id)
+            {
+                refuse_fall_flying(region, id);
+            }
+        }
         PlayerCommandKind::StopSleeping => crate::sleep::stop_sleeping(region, id),
         PlayerCommandKind::StartRidingJump => start_riding_jump(region, id, data),
         PlayerCommandKind::StopRidingJump => stop_riding_jump(region, id),
@@ -781,12 +828,16 @@ pub(crate) fn set_sprinting(region: &mut Region, id: PlayerId, sprinting: bool) 
 }
 
 /// 客户端已经在本地开始滑翔了，而这个状态只有服务端能清，不回应的话玩家落地后走不了路。
-/// M2 不做滑翔，所以总是发回不带滑翔位的标志字节，只发给这名玩家。
+/// The client has already started gliding locally. Send back the cleared flag even if it was unchanged.
 fn refuse_fall_flying(region: &mut Region, id: PlayerId) {
-    let Some(player) = region.players.get(&id) else {
+    let Some(player) = region.players.get_mut(&id) else {
         return;
     };
-    let flags = player.sync.shared_flags & !ENTITY_FLAG_FALL_FLYING;
+    player.sync.set_fall_flying(false);
+    if player.sync.sent_metadata.shared_flags & ENTITY_FLAG_FALL_FLYING != 0 {
+        return;
+    }
+    let flags = player.sync.shared_flags;
     region.links.send(
         id,
         &SetEntityData {

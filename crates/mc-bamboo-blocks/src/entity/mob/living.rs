@@ -196,11 +196,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
             super::parrot::after_ai_step(me, mob);
         }
         // `WanderingTrader.aiStep()` / `TraderLlama.aiStep()`：在 `super.aiStep()`
-        // 之后每刻跑饮水状态机与 `maybeDespawn()`。
-        // The wandering-trader / trader-llama `aiStep()` tail: drinking and despawn.
+        // 之后每刻跑 `maybeDespawn()`；饮水由目标表里的 `UseItemGoal` 驱动。
+        // The wandering-trader / trader-llama `aiStep()` tail: `maybeDespawn()` each
+        // tick; drinking is driven by the `UseItemGoal` in the goal selector.
         if !me.removed {
             if mob.mob_type == super::MobType::WanderingTrader {
-                super::wandering_trader::custom_ai_step(me, mob, ctx);
                 super::wandering_trader::maybe_despawn(me, mob);
             } else if mob.mob_type == super::MobType::TraderLlama {
                 super::trader_llama::maybe_despawn(me, mob, ctx);
@@ -634,10 +634,6 @@ pub(crate) fn max_up_step(mob: &Mob) -> f32 {
 /// `super.baseTick()`; every other mob only runs the latter.
 fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let pre_tick_air = mob.air_supply;
-    // `LivingEntity.baseTick` 里的 `updateDirtyEffects`（隐身共享标志位）。
-    if mob.mob_type == super::MobType::WanderingTrader {
-        super::wandering_trader::update_invisibility(mob);
-    }
     // 官方 `LivingEntity.baseTick` 开头的 `EnchantmentHelper.tickEffects`（TICK 组件）。
     // `EnchantmentHelper.tickEffects` at the head of vanilla `LivingEntity.baseTick`.
     super::enchantment_wiring::tick(me, mob, ctx);

@@ -64,9 +64,10 @@ impl Default for Inventory {
 }
 
 impl Inventory {
-    /// 这个装备槽现在的物品。主手是快捷栏选中的那格。玩家没有 `Body` 和 `Saddle` 槽。
-    pub(crate) fn equipment(&self, slot: EquipmentSlot) -> Option<&ItemStack> {
-        let index = match slot {
+    /// 装备在玩家菜单里的槽位。玩家没有 `Body` 和 `Saddle` 槽。
+    /// The equipment's player-menu slot. Players have no body or saddle slots.
+    pub(crate) fn equipment_index(&self, slot: EquipmentSlot) -> Option<usize> {
+        Some(match slot {
             EquipmentSlot::MainHand => self.hand_slot(Hand::Main),
             EquipmentSlot::OffHand => self.hand_slot(Hand::Off),
             EquipmentSlot::Feet => 8,
@@ -74,23 +75,19 @@ impl Inventory {
             EquipmentSlot::Chest => 6,
             EquipmentSlot::Head => 5,
             EquipmentSlot::Body | EquipmentSlot::Saddle => return None,
-        };
-        self.slots.get(index)
+        })
     }
 
-    /// 这个装备槽的可变引用，顺序和官方 `EquipmentSlot.VALUES` 一致。
-    ///
-    /// Mutable access to an equipment slot, in `EquipmentSlot.VALUES` order.
+    /// 这个装备槽现在的物品。主手是快捷栏选中的那格。
+    /// The item in the equipment slot. The main hand is the selected hotbar slot.
+    pub(crate) fn equipment(&self, slot: EquipmentSlot) -> Option<&ItemStack> {
+        self.slots.get(self.equipment_index(slot)?)
+    }
+
+    /// 这个装备槽的可变引用。
+    /// Mutable access to the equipment slot.
     pub(crate) fn equipment_mut(&mut self, slot: EquipmentSlot) -> Option<&mut ItemStack> {
-        let index = match slot {
-            EquipmentSlot::MainHand => self.hand_slot(Hand::Main),
-            EquipmentSlot::OffHand => self.hand_slot(Hand::Off),
-            EquipmentSlot::Feet => 8,
-            EquipmentSlot::Legs => 7,
-            EquipmentSlot::Chest => 6,
-            EquipmentSlot::Head => 5,
-            EquipmentSlot::Body | EquipmentSlot::Saddle => return None,
-        };
+        let index = self.equipment_index(slot)?;
         self.slots.get_mut(index)
     }
 

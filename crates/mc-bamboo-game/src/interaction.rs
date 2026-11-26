@@ -1008,6 +1008,10 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     );
                 }
             }
+            // 烟花火箭只记录、不落地实体（烟花火箭实体另开任务），游戏层不处理。
+            // A firework rocket is only recorded, not spawned (the entity is a separate
+            // task), so the game layer ignores it.
+            Effect::Firework { .. } => {}
         }
     }
 }
@@ -1493,6 +1497,13 @@ pub(crate) fn on_use_item(
     // `WindChargeItem.use`：扔出一枚风弹，返回 `SUCCESS`。
     if crate::player_wind_charge::throw(region, id, hand) {
         swing(region, id, hand, InteractionResult::Success);
+        return;
+    }
+    // `FireworkRocketItem.use`：仅在玩家 `isFallFlying()`（鞘翅滑翔）时生成附着烟花加速。
+    // Bamboo 尚未建模鞘翅滑翔，此路径恒为 `PASS`。
+    // `FireworkRocketItem.use`: only spawns an attached boost rocket while fall flying.
+    // Bamboo has no elytra gliding yet, so this always passes.
+    if held.item == items::FIREWORK_ROCKET {
         return;
     }
     // `FoodOnAStickItem.use`：拿着胡萝卜钓竿、骑着由自己控制的猪时，右键

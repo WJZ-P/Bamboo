@@ -1205,6 +1205,25 @@ pub enum Command {
     OminousItemSpawnerTick(super::ominous_item_spawner::SpawnerTick),
     /// 风弹这一刻命中：`AbstractWindCharge.onHitBlock` / `onHitEntity` 的爆炸。
     WindChargeImpact(super::wind_charge::WindChargeHit),
+    /// 烟花火箭这一刻爆炸：`FireworkRocketEntity.explode`（实体事件 17、伤害、消失）。
+    ///
+    /// A firework rocket exploding this tick: `FireworkRocketEntity.explode`
+    /// (entity event 17, damage, discard).
+    FireworkRocketExplode {
+        hit: Option<super::firework_rocket::FireworkHit>,
+    },
+    /// 烟花火箭第一刻的发射音 `entity.firework_rocket.launch`。
+    ///
+    /// The launch sound on the firework's first tick.
+    FireworkRocketLaunch {
+        position: Vec3,
+    },
+    /// 生成一枚烟花火箭。`CelebrateVillagersSurvivedRaid` 的庆祝烟花以后从这里走；
+    /// 现在没有调用方，是给 raid-1c 留的接口。
+    ///
+    /// Spawn a firework rocket. The raid victory celebration will emit this once
+    /// raid-1c lands; there is no caller yet, so it is the interface for that work.
+    SpawnFireworkRocket(Box<super::firework_rocket::FireworkShot>),
     /// `Breeze.Shoot`：朝目标射出一枚旋风人风弹。
     ShootBreezeWindCharge(Box<super::wind_charge::WindChargeShot>),
     /// 骷髅陷阱马被玩家触发：视觉闪电和四名骷髅骑士。
@@ -1484,6 +1503,18 @@ pub enum Command {
     /// `RingBell`'s `BellBlock.attemptToRing(entity, level, pos, null)`.
     RingBell {
         pos: mc_bamboo_core::BlockPos,
+    },
+    /// `CelebrateVillagersSurvivedRaid` 生成烟花火箭：携带构造好的烟花物品（`FIREWORKS`
+    /// 组件含飞行时长与 BURST 爆炸）和放烟花的村民，记录一条效果并生成真的烟花实体
+    /// （`new FireworkRocketEntity(level, villager, x, eyeY, z, stack)`）。
+    ///
+    /// `CelebrateVillagersSurvivedRaid` spawning a firework rocket: carries the built
+    /// firework item (with its `FIREWORKS` component: flight duration and BURST explosion)
+    /// and the villager, records an effect and spawns the real rocket entity.
+    SpawnFirework {
+        position: mc_bamboo_core::Vec3,
+        item: ItemStack,
+        owner: EntityUid,
     },
     /// `TurtleLayEggGoal` 的 `level.setBlockAndUpdate` 加产蛋音效。
     ///
@@ -1991,6 +2022,22 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             super::ominous_item_spawner::apply(me, world, facts);
         }
         Command::WindChargeImpact(hit) => super::wind_charge::impact(me, world, hit),
+        Command::FireworkRocketExplode { hit } => {
+            super::firework_rocket::explode(me, world, hit);
+        }
+        Command::FireworkRocketLaunch { position } => {
+            world.play_sound(
+                position,
+                mc_bamboo_data::sounds::sound_event("minecraft:entity.firework_rocket.launch"),
+                mc_bamboo_data::sounds::AMBIENT,
+                3.0,
+                1.0,
+                false,
+            );
+        }
+        Command::SpawnFireworkRocket(shot) => {
+            let _ = world.spawn_firework(&shot);
+        }
         Command::ShootBreezeWindCharge(shot) => {
             world.spawn_wind_charge_shot(&shot);
         }
@@ -2187,6 +2234,24 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             });
         }
         Command::RingBell { pos } => crate::behaviour::attached::bell::ring(world, pos),
+        Command::SpawnFirework {
+            position,
+            item,
+            owner,
+        } => {
+            world.push_effect(crate::level::Effect::Firework {
+                position,
+                item: item.clone(),
+            });
+            let _ = world.spawn_firework(&super::firework_rocket::FireworkShot {
+                position,
+                owner: Some(owner),
+                owner_uuid: None,
+                item,
+                shot_at_angle: false,
+                shoot: None,
+            });
+        }
         Command::RabbitEatCarrots { pos } => super::mob::rabbit::eat_carrots(world, pos),
         Command::FoxPickUpItem {
             item,

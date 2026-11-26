@@ -173,7 +173,7 @@ fn passenger_attachment(vehicle: &EntityPublic, index: usize) -> Vec3 {
         MobType::Fox => (0.0, 0.6375, -0.25),
         MobType::Frog => (0.0, 0.375, -0.25),
         MobType::Turtle => (0.0, 0.55625, -0.25),
-        MobType::Llama => (0.0, 1.37, -0.3),
+        MobType::Llama | MobType::TraderLlama => (0.0, 1.37, -0.3),
         MobType::Phantom => (0.0, 0.3375000059604645, 0.0),
         MobType::Horse => (0.0, 1.443750023841858, 0.0),
         MobType::Donkey => (0.0, 1.1124999523162842, 0.0),
