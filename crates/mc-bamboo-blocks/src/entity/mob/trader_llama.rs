@@ -4,7 +4,12 @@
 //! Trader llama: a llama spawned leashed to a wandering trader, despawning
 //! together with it when `despawnDelay` runs out.
 
-use super::{Mob, MobType, goals::GoalSelector, leash, navigation::Navigation};
+use super::{
+    Mob, MobType,
+    goals::{Goal, GoalSelector, TargetType, WrappedGoal},
+    leash,
+    navigation::Navigation,
+};
 use crate::entity::{Entity, ctx::EntityCtx};
 
 /// 新建行商羊驼时的 `DespawnDelay` 缺省值（官方 `DEFAULT_DESPAWN_DELAY`）。
@@ -31,19 +36,49 @@ impl Default for TraderLlama {
 }
 
 /// `TraderLlama.registerGoals`：先跑 `Llama.registerGoals()` 的公共表，
-/// 再加自己的 `PanicGoal` / 保护目标（后两者只在商人受攻击时激活，这里
-/// 沿用羊驼表即可覆盖绝大多数刻）。
+/// 再补一条官方 `PanicGoal(this, 2.0)`（priority 1）。
 ///
-/// `TraderLlama.registerGoals` starts from the llama table; its own panic and
-/// defend goals only activate when the trader is attacked.
+/// `TraderLlama.registerGoals` starts from the llama table, then adds the
+/// official `PanicGoal(this, 2.0)` at priority 1.
 pub(in crate::entity::mob) fn goals(navigation: &mut Navigation) -> GoalSelector {
-    super::equine::goals(MobType::Llama, navigation)
+    let mut selector = super::equine::goals(MobType::Llama, navigation);
+    selector.goals.push(WrappedGoal {
+        priority: 1,
+        running: false,
+        goal: Goal::Panic {
+            speed: 2.0,
+            target: mc_bamboo_core::Vec3::default(),
+        },
+    });
+    selector
 }
 
-/// 行商羊驼的目标选择器沿用羊驼的表。
-/// The trader llama keeps the llama target selector.
+/// `TraderLlama.registerGoals` 的 `targetSelector`：羊驼表之后追加保护商人的目标、
+/// 打僵尸和灾厄村民的两条 `NearestAttackableTargetGoal`。
+///
+/// `TraderLlama.registerGoals`'s target selector: the llama table plus the
+/// defend-wandering-trader goal and the zombie / illager `NearestAttackableTargetGoal`s.
 pub(in crate::entity::mob) fn targets() -> GoalSelector {
-    super::equine::targets(MobType::Llama)
+    let mut selector = super::equine::targets(MobType::Llama);
+    selector.goals.push(WrappedGoal {
+        priority: 1,
+        running: false,
+        goal: Goal::TraderLlamaDefendWanderingTrader {
+            owner_last_hurt_by: None,
+            timestamp: 0,
+        },
+    });
+    selector.goals.push(WrappedGoal {
+        priority: 2,
+        running: false,
+        goal: Goal::nearest_target(TargetType::Zombie),
+    });
+    selector.goals.push(WrappedGoal {
+        priority: 2,
+        running: false,
+        goal: Goal::nearest_target(TargetType::Illager),
+    });
+    selector
 }
 
 /// `TraderLlama.canDespawn()`：锁龄、要求持久或有玩家骑乘时不消失。

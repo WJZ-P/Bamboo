@@ -226,7 +226,7 @@ fn do_player_ride(mob: &mut Mob) {
 /// `camel_food` (cactus) for camels per `Camel.isFood`.
 fn is_food(kind: MobType, stack: &ItemStack) -> bool {
     let tag = match kind {
-        MobType::Llama => item_tags::LLAMA_FOOD,
+        MobType::Llama | MobType::TraderLlama => item_tags::LLAMA_FOOD,
         MobType::Camel => item_tags::CAMEL_FOOD,
         MobType::CamelHusk => item_tags::CAMEL_HUSK_FOOD,
         _ => item_tags::HORSE_FOOD,
@@ -272,7 +272,7 @@ const fn food(heal: f32, age_up: i32, temper: i32, love: bool) -> Option<Food> {
 ///
 /// The item tables of `AbstractHorse.handleEating` and `Llama.handleEating`.
 fn food_of(kind: MobType, item: i32) -> Option<Food> {
-    if kind == MobType::Llama {
+    if kind.is_llama() {
         return match item {
             items::WHEAT => food(2.0, 10, 3, false),
             items::HAY_BLOCK => food(10.0, 90, 6, true),
@@ -350,11 +350,7 @@ fn handle_eating(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> bo
 ///
 /// `getMaxTemper`: 100 for horses, donkeys and mules, 30 for llamas.
 pub(super) const fn max_temper(kind: MobType) -> i32 {
-    if matches!(kind, MobType::Llama) {
-        30
-    } else {
-        100
-    }
+    if kind.is_llama() { 30 } else { 100 }
 }
 
 /// `AbstractHorse.eating`（张嘴再出声）或 `Llama.handleEating` 末尾（只出声）。
@@ -363,7 +359,7 @@ pub(super) const fn max_temper(kind: MobType) -> i32 {
 /// `AbstractHorse.eating` (open the mouth, then the sound) or the end of
 /// `Llama.handleEating` (sound only). Silent mobs draw no pitch.
 fn eat_sound(me: &mut Entity, mob: &mut Mob) {
-    if mob.mob_type != MobType::Llama {
+    if !mob.mob_type.is_llama() {
         life::open_mouth(mob);
     }
     if mob.silent {
@@ -434,7 +430,7 @@ pub(super) fn can_use_slot(mob: &Mob, slot: EquipmentSlot) -> bool {
     if crate::entity::mob::nautilus::is_nautilus(mob.mob_type) {
         return crate::entity::mob::nautilus::can_use_slot(mob, slot);
     }
-    if matches!(mob.mob_type, MobType::Horse | MobType::Llama) || slot != EquipmentSlot::Saddle {
+    if mob.mob_type == MobType::Horse || mob.mob_type.is_llama() || slot != EquipmentSlot::Saddle {
         return true;
     }
     !mob.is_dead_or_dying() && !mob.is_baby() && tame(mob)
