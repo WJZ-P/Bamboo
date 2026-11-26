@@ -27,9 +27,14 @@ use mc_bamboo_data::{
 };
 use mc_bamboo_protocol::{
     codec::write_varint,
-    components::{ComponentPatch, ComponentValue, cursor::Holder, defaults},
+    components::{
+        ComponentPatch, ComponentValue, cursor::Holder, defaults, value::KineticCondition,
+    },
     item::ItemStack,
-    packet::play::{Animate, GameMode, LevelParticles, Randomization, SetEntityMotion},
+    packet::play::{
+        Animate, EntityEvent, Explode, GameMode, LevelParticles, Randomization, SetEntityMotion,
+        SwingAnimationType,
+    },
 };
 
 use crate::{
@@ -293,6 +298,49 @@ fn can_smash_attack(player: &Player) -> bool {
     player.motion.fall_distance > SMASH_FALL_THRESHOLD
 }
 
+/// 风爆 `wind_burst` 的击退倍率：`knockback_multiplier` lookup `[1.2, 1.75, 2.2]`，
+/// 超出等级走 linear `base 1.5 / +0.35`。没有风爆时返回 `None`。
+///
+/// The wind burst knockback multiplier: the `[1.2, 1.75, 2.2]` lookup with a
+/// `base 1.5 / +0.35` linear fallback; `None` without the enchantment.
+fn wind_burst_multiplier(held: &ItemStack) -> Option<f32> {
+    match enchantment_level(held, "minecraft:wind_burst").max(0) {
+        0 => None,
+        1 => Some(1.2),
+        2 => Some(1.75),
+        3 => Some(2.2),
+        level => Some(1.5 + 0.35 * (level - 1) as f32),
+    }
+}
+
+/// `ServerLevel.explode` 给攻击者自己发一份 `ClientboundExplodePacket`：风爆的
+/// gust 大粒子和 `wind_burst` 音效，`block_particles` 空（不破坏方块）。
+///
+/// `ServerLevel.explode` sends the attacker its own `ClientboundExplodePacket`
+/// with the gust particle and `wind_burst` sound; no block particles.
+fn send_wind_burst_explode(
+    region: &mut Region,
+    id: PlayerId,
+    center: Vec3,
+    radius: f32,
+    block_count: i32,
+    knock: Option<Vec3>,
+) {
+    let packet = Explode {
+        center,
+        radius,
+        block_count,
+        player_knockback: knock,
+        explosion_particle: particle_type::GUST_EMITTER_LARGE,
+        explosion_sound: i32::from(sounds::sound_event(
+            "minecraft:entity.wind_charge.wind_burst",
+        )),
+        block_particles: &[],
+        play_sound: true,
+    };
+    region.links.send_frames(id, &encode_frames(&packet));
+}
+
 /// `MaceItem.getAttackDamageBonus` 的分段摔落加伤（不含致密）：
 /// `fall<=3 → 4·fall`，`3<fall<=8 → 12 + 2·(fall−3)`，`fall>8 → 22 + fall − 8`。
 ///
@@ -353,6 +401,30 @@ struct MaceTarget {
 /// own pets and pets owned by the main target are excluded (`isAlliedTo` and
 /// `isOwnedBy(target)`); spectators, marker armour stands and creative flying
 /// players are excluded too.
+/// 候选生物的有效队伍下标：先看自己所在的队；`TamableAnimal.getTeam()` 覆写——
+/// 驯服动物自己没队时返回主人的队，这里也回退到主人（玩家）的队伍。
+///
+/// The candidate mob's effective team index: its own team first; `TamableAnimal.getTeam()`
+/// falls back to the root owner's team when a tamed mob has none, mirrored here.
+fn mob_team_index(
+    region: &Region,
+    mob: &mc_bamboo_blocks::entity::mob::MobPublic,
+    tame: bool,
+) -> Option<u32> {
+    if let Some(team) = region.global.scoreboard.entity_team_index(&mob.uuid) {
+        return Some(team);
+    }
+    if !tame {
+        return None;
+    }
+    let owner = mob.owner?;
+    region
+        .players
+        .values()
+        .find(|player| *player.uuid.as_bytes() == owner)
+        .and_then(|player| region.global.scoreboard.team_index_of(&player.name))
+}
+
 fn collect_mace_targets(
     region: &Region,
     attacker: PlayerId,
@@ -403,7 +475,8 @@ fn collect_mace_targets(
             //
             // `attacker.isAlliedTo(candidate)`: same team, or a pet the attacker owns
             // (`TamableAnimal.considersEntityAsAlly` treats its owner as an ally).
-            let candidate_team = region.global.scoreboard.entity_team_index(&mob.uuid);
+            // 队伍继承 `TamableAnimal.getTeam()`：候选自己没队时，驯服动物用主人的队。
+            let candidate_team = mob_team_index(region, mob, tame);
             let allied = (attacker_team.is_some() && candidate_team == attacker_team)
                 || (tame && mob.owner == attacker_uuid);
             // `isOwnedBy(target)`：候选是主目标驯服的宠物。
@@ -745,7 +818,7 @@ fn attack_inner(
     let Some(plan) = plan_attack(region, &target, &request) else {
         return;
     };
-    let (was_hurt, actual_damage) = land_attack(region, id, entity_id, &target, &plan);
+    let (was_hurt, actual_damage, wind_burst) = land_attack(region, id, entity_id, &target, &plan);
     if was_hurt {
         // 官方 `PlayerHurtEntityTrigger` / `KilledTrigger`（玩家攻击实体）。
         let kind = region
@@ -764,7 +837,15 @@ fn attack_inner(
             payload.clone(),
         );
         crate::advancement_triggers::record(region, id, "minecraft:player_killed_entity", payload);
-        finish_hit(region, id, entity_id, &target, &plan, actual_damage);
+        finish_hit(
+            region,
+            id,
+            entity_id,
+            &target,
+            &plan,
+            actual_damage,
+            wind_burst,
+        );
     }
     // `PlayerInteractTrigger`：玩家右键实体在 `interaction::on_interact_entity` 里报，
     // 这里是左键攻击，报 `any_block_use` 之外的交互事件。
@@ -1090,7 +1171,7 @@ fn land_attack(
     entity_id: i32,
     target: &TargetInfo,
     plan: &AttackPlan,
-) -> (bool, f32) {
+) -> (bool, f32, Option<(Vec3, i32)>) {
     let hits_player = player_target(region, entity_id);
     // 官方在 `hurtOrSimulate` 之前记下目标的旧速度，最后用
     // `ServerPlayer.syncVelocity` 那一支把服务端速度改回去，只把新速度发给客户端。
@@ -1102,6 +1183,9 @@ fn land_attack(
         .then(|| region.players.get(&PlayerId(entity_id)))
         .flatten()
         .map(|player| player.motion.delta);
+    // 风爆把攻击者自己弹起来的那一下速度和爆炸方块数，先在这个块里算出来。
+    let mut wind_burst_knock = None;
+    let mut wind_burst_block_count = 0;
     let hit = {
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
@@ -1166,6 +1250,19 @@ fn land_attack(
             if plan.smash {
                 mace_smash_effects(&mut world, plan);
             }
+            // 风爆 `wind_burst`：post_attack 的 explode，对攻击者生效。需求是
+            // `direct_attacker !is_flying && fall_distance >= 1.5`（下砸才有）。
+            if plan.smash
+                && let Some(multiplier) = wind_burst_multiplier(&plan.held)
+            {
+                let (block_count, hit_players) =
+                    world.explode_wind_burst(plan.position, 3.5, multiplier);
+                wind_burst_block_count = block_count;
+                wind_burst_knock = hit_players
+                    .iter()
+                    .find(|(uid, _)| *uid == id.0)
+                    .map(|(_, knock)| *knock);
+            }
             post_attack_effects(
                 &mut world,
                 entity_id,
@@ -1190,7 +1287,13 @@ fn land_attack(
     {
         player.motion.delta = old;
     }
-    (hit, damage_taken(region, entity_id, target.health))
+    // 风爆把攻击者自己弹起来的那一下速度和爆炸包，交给 `finish_hit` 在
+    // 重锤下砸冲量（`set_entity_motion`）之后发。
+    (
+        hit,
+        damage_taken(region, entity_id, target.health),
+        wind_burst_knock.map(|knock| (knock, wind_burst_block_count)),
+    )
 }
 
 /// 命中之后：衰减攻击者速度 / 取消疾跑、暴击 / 附魔暴击动画、横扫 / 伤害指示
@@ -1206,6 +1309,7 @@ fn finish_hit(
     target: &TargetInfo,
     plan: &AttackPlan,
     actual_damage: f32,
+    wind_burst: Option<(Vec3, i32)>,
 ) {
     // `Player.causeExtraKnockback` 在命中之后衰减攻击者速度并取消疾跑，
     // 力道大于 0 才做；它和伤害、横扫、动画的先后顺序不影响后面读到的状态。
@@ -1303,6 +1407,15 @@ fn finish_hit(
             movement,
         });
         region.links.send_frames(id, &packet);
+    }
+    // 风爆 `wind_burst` 的 `pushFromExplosion` 在 `hurtEnemy` 之后：爆炸包
+    // `connection.send` 给自己，然后只改服务端速度（客户端由爆炸包拿击退），
+    // 所以 `set_entity_motion` 里还是下砸冲量。
+    if let Some((knock, block_count)) = wind_burst {
+        send_wind_burst_explode(region, id, plan.position, 3.5, block_count, Some(knock));
+        if let Some(player) = region.players.get_mut(&id) {
+            player.motion.delta = player.motion.delta.add(knock);
+        }
     }
     player_exhaustion::add_in(region, id, ATTACK_EXHAUSTION);
     entity_sync::broadcast_swing(region, id, Hand::Main);
@@ -1760,8 +1873,30 @@ pub(crate) fn on_stab(region: &mut Region, id: PlayerId) {
     finish_stab(region, id, &setup, &hit_targets);
     // `postPiercingAttack()`：突进附魔 `lunge` 的前冲、耐久、饥饿和音效。
     post_piercing_attack(region, id, &setup);
-    // `swingAndResetAttackStrength(MAIN_HAND, swingAnim, false)`。
-    entity_sync::broadcast_swing(region, id, Hand::Main);
+    // `swingAndResetAttackStrength(MAIN_HAND, swingAnim, false)`：`swingAnim` 是
+    // 武器 `attack_animation` 组件给的动画（长矛是 `stab` + 对应时长），不是缺省挥手。
+    let (animation, duration) = attack_swing(&setup.held);
+    entity_sync::broadcast_swing_with(region, id, Hand::Main, animation, duration);
+}
+
+/// `ItemStack.getAttackAnimation()`：`attack_animation` 组件，没有时是
+/// `SwingAnimation.DEFAULT`（`whack`、时长 6）。
+///
+/// `ItemStack.getAttackAnimation()`: the `attack_animation` component, else
+/// `SwingAnimation.DEFAULT` (`whack`, duration 6).
+fn attack_swing(held: &ItemStack) -> (SwingAnimationType, i32) {
+    if !held.is_empty()
+        && let Ok(patch) = ComponentPatch::from_opaque(held)
+        && let Some(ComponentValue::AttackAnimation(swing)) =
+            defaults::resolve(held.item, &patch, kinds::ATTACK_ANIMATION)
+    {
+        let animation = match swing.kind {
+            2 => SwingAnimationType::Stab,
+            _ => SwingAnimationType::Whack,
+        };
+        return (animation, swing.duration);
+    }
+    (SwingAnimationType::Whack, 6)
 }
 
 /// `handlePlayerAction` STAB 分支的读玩家部分，也把 `PiercingWeapon.attack`
@@ -2077,6 +2212,345 @@ fn post_piercing_attack(region: &mut Region, id: PlayerId, setup: &StabSetup) {
         world.drain_effects()
     };
     interaction::send_effects(region, Some(id), &effects);
+}
+
+// ===== 长矛蓄力冲刺（KineticWeapon） =====
+
+/// `kinetic_weapon` 组件里读出来的几样。
+struct KineticSpec {
+    contact_cooldown_ticks: i32,
+    delay_ticks: i32,
+    dismount: Option<KineticCondition>,
+    knockback: Option<KineticCondition>,
+    damage: Option<KineticCondition>,
+    damage_multiplier: f32,
+    sound: Option<String>,
+}
+
+/// `mainHandItem.has(DataComponents.KINETIC_WEAPON)`：长矛蓄力走使用物品这一条。
+pub(crate) fn is_kinetic_weapon(held: &ItemStack) -> bool {
+    kinetic_spec(held).is_some()
+}
+
+/// `Item.use` 对 kinetic_weapon 的 `makeSound`：开始蓄力时播的 charge 音效。
+pub(crate) fn kinetic_start_sound(held: &ItemStack) -> Option<String> {
+    kinetic_spec(held).and_then(|spec| spec.sound)
+}
+
+/// `ItemStack.get(KINETIC_WEAPON)`。
+fn kinetic_spec(held: &ItemStack) -> Option<KineticSpec> {
+    if held.is_empty() {
+        return None;
+    }
+    let Ok(patch) = ComponentPatch::from_opaque(held) else {
+        return None;
+    };
+    match defaults::resolve(held.item, &patch, kinds::KINETIC_WEAPON) {
+        Some(ComponentValue::KineticWeapon {
+            contact_cooldown_ticks,
+            delay_ticks,
+            dismount_conditions,
+            knockback_conditions,
+            damage_conditions,
+            damage_multiplier,
+            sound,
+            ..
+        }) => Some(KineticSpec {
+            contact_cooldown_ticks: *contact_cooldown_ticks,
+            delay_ticks: *delay_ticks,
+            dismount: *dismount_conditions,
+            knockback: *knockback_conditions,
+            damage: *damage_conditions,
+            damage_multiplier: *damage_multiplier,
+            sound: spear_sound_name(sound),
+        }),
+        _ => None,
+    }
+}
+
+/// `KineticWeapon.Condition.test(dur, speed, rel, mult)`。
+fn kinetic_condition(cond: &KineticCondition, dur: i32, speed: f64, rel: f64, mult: f64) -> bool {
+    dur <= cond.max_duration_ticks
+        && speed >= f64::from(cond.min_speed) * mult
+        && rel >= f64::from(cond.min_relative_speed) * mult
+}
+
+/// `KineticWeapon.damageEntities` 的一次逐刻调用。`time_held` 是已用刻数
+/// （`getUseDuration - useTicks`，kinetic_weapon 的 useDuration 恒 72000）。
+///
+/// One per-tick `KineticWeapon.damageEntities` call. `time_held` is the elapsed
+/// use ticks (`getUseDuration - useTicks`; a kinetic weapon's use duration is
+/// always 72000).
+pub(crate) fn kinetic_tick(region: &mut Region, id: PlayerId, time_held: i32) {
+    let Some(player) = region.players.get(&id) else {
+        return;
+    };
+    if player.game_mode == GameMode::Spectator || player.spawn_pending.is_some() {
+        return;
+    }
+    let held = player.inventory.held(Hand::Main).clone();
+    let Some(spec) = kinetic_spec(&held) else {
+        return;
+    };
+    // `dur = getUseDuration - useTicks - delayTicks`；小于 delayTicks 直接返回。
+    let dur = time_held - spec.delay_ticks;
+    if dur < 0 {
+        return;
+    }
+    // `look = getLookAngle()`；`speed = look · getMotion(attacker)`，其中
+    // `getMotion` 对玩家是 `lastKnownClientMovement × 20`（方块 / 秒）。
+    let position = player.position();
+    let eye = Vec3::new(position.x, position.y + player.eye_height(), position.z);
+    let look = Vec3::view_vector(player.yaw, player.pitch);
+    let movement = player.motion.known_movement;
+    let speed = (look.x * movement.x + look.y * movement.y + look.z * movement.z) * 20.0;
+    let base = player.attributes.base(attribute::ATTACK_DAMAGE);
+    let knockback = attack_knockback_amount(player, &held);
+    let entity_reach = player.attributes.value(attribute::ENTITY_INTERACTION_RANGE) as f32;
+    let range = attack_range(&held, entity_reach);
+    let creative = player.game_mode == GameMode::Creative;
+    let (min_reach, max_reach) = if creative {
+        (range.min_creative_reach, range.max_creative_reach)
+    } else {
+        (range.min_reach, range.max_reach)
+    };
+    // 射线两端和穿刺那一条完全一样（`ProjectileUtil.getHitEntitiesAlong`）。
+    let ray_speed = look.x * movement.x + look.y * movement.y + look.z * movement.z;
+    let min_point = eye.add(look.scale(f64::from(min_reach)));
+    let max_point = eye.add(look.scale(f64::from(max_reach) + ray_speed.max(0.0)));
+    let setup = StabSetup {
+        held: held.clone(),
+        spec: piercing_spec(&held).expect("长矛带穿刺组件"),
+        position,
+        eye,
+        look,
+        min_point,
+        max_point,
+        margin: range.hitbox_margin,
+        creative,
+        yaw: player.yaw,
+        base_damage: base as f32,
+        knockback,
+        s: 1.0,
+        crouching: player.sync.is_crouching(),
+        fall_distance: player.motion.fall_distance,
+    };
+    let hits = spear_hits(region, &setup);
+    // 逐实体：`wasRecentlyStabbed` 跳过、记下、算 `rel`、三组条件，全假跳过。
+    let now = region.players[&id].entity_ticks;
+    let mut to_hit: Vec<(SpearHit, KineticHitPlan)> = Vec::new();
+    for hit in hits {
+        let delta = kinetic_entity_delta(region, &hit);
+        let tspeed = look.x * delta.x + look.y * delta.y + look.z * delta.z;
+        let rel = (speed - tspeed).max(0.0);
+        let dism = spec
+            .dismount
+            .is_some_and(|cond| kinetic_condition(&cond, dur, speed, rel, 1.0));
+        let knock = spec
+            .knockback
+            .is_some_and(|cond| kinetic_condition(&cond, dur, speed, rel, 1.0));
+        let dmg = spec
+            .damage
+            .is_some_and(|cond| kinetic_condition(&cond, dur, speed, rel, 1.0));
+        if !dism && !knock && !dmg {
+            continue;
+        }
+        if region.players[&id]
+            .recent_kinetic_enemies
+            .get(&hit.id)
+            .is_some_and(|stamp| now - *stamp < spec.contact_cooldown_ticks)
+        {
+            continue;
+        }
+        let plan = KineticHitPlan {
+            dmg_amt: base as f32 + mth::floor(rel * f64::from(spec.damage_multiplier)) as f32,
+            damage: dmg,
+            knockback: knock,
+        };
+        to_hit.push((hit, plan));
+    }
+    if to_hit.is_empty() {
+        return;
+    }
+    // `rememberStabbedEntity`。
+    if let Some(player) = region.players.get_mut(&id) {
+        for (hit, _) in &to_hit {
+            player.recent_kinetic_enemies.insert(hit.id, now);
+        }
+    }
+    let mut hit_targets: Vec<(SpearHit, f32)> = Vec::new();
+    let effects = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        for (hit, plan) in &to_hit {
+            if let Some(magic) = kinetic_stab_hit(&mut world, id, &setup, hit, plan) {
+                hit_targets.push((*hit, magic));
+            }
+        }
+        world.drain_effects()
+    };
+    interaction::send_effects(region, Some(id), &effects);
+    let hit_any = !hit_targets.is_empty();
+    // `Player.stabAttack` 命中后的收尾：附魔暴击动画、伤害统计、耐久、`lastHurtMob`
+    // 和饥饿（每命中目标一遍）。
+    for (target, magic) in &hit_targets {
+        if *magic > 0.0 {
+            send_animate(region, id, target.id, Animate::MAGIC_CRITICAL_HIT);
+        }
+        let actual_damage = damage_taken(region, target.id, target.health);
+        item_use_stats::award_damage_dealt(region, id, (actual_damage * 10.0).round() as i32);
+        // `damageStatsAndHearts`：`actualDamage > 2` 时发伤害指示粒子。
+        if actual_damage > 2.0
+            && let Some((position, height)) = kinetic_target_center(region, target)
+        {
+            send_particles(
+                region,
+                ParticleSpec {
+                    particle: particle_type::DAMAGE_INDICATOR,
+                    position: Vec3::new(
+                        position.x,
+                        position.y + f64::from(height) * 0.5,
+                        position.z,
+                    ),
+                    spread: (0.1, 0.0, 0.1),
+                    speed: 0.2,
+                    count: (actual_damage * 0.5) as i32,
+                },
+            );
+        }
+        if weapon_component(&setup.held) {
+            item_use_stats::award(region, id, setup.held.item);
+        }
+        durability::run(region, id, Hand::Main, |region| {
+            let (mut level, ticks) = region.block_level();
+            let world = World::new(&mut level, ticks);
+            mc_bamboo_blocks::durability::hurt_hand(&world, Hand::Main, 1);
+        });
+        if let Some(player) = region.players.get_mut(&id) {
+            let now = player.entity_ticks;
+            player.combat_memory.record_attack(target.id, now);
+            player.health_sync = player_hurt::HealthSync::of(player);
+        }
+        player_exhaustion::add_in(region, id, ATTACK_EXHAUSTION);
+    }
+    if hit_any {
+        // `broadcastEntityEvent(attacker, 2)`：HIT_FEEDBACK_TICKS，客户端据此播
+        // 命中音效（`onKineticHit` → `makeLocalHitSound`）。对拍里 `seen_by` 不建模，
+        // 走 `links.broadcast` 和官方 `FakeLevel` 的单流收集一致。
+        let frames = encode_frames(&EntityEvent {
+            entity_id: id.0,
+            event: 2,
+        });
+        region.links.broadcast(&frames);
+        // `SPEAR_MOBS_TRIGGER.trigger(player, stabbedEntities(isAlive))`。
+        let stabbed = region.players[&id]
+            .recent_kinetic_enemies
+            .keys()
+            .filter(|&&uid| {
+                region
+                    .entities
+                    .public_at(uid)
+                    .is_some_and(|public| !public.removed)
+            })
+            .count() as i32;
+        if stabbed > 0 {
+            crate::advancement_triggers::record(
+                region,
+                id,
+                "minecraft:spear_mobs",
+                serde_json::json!({ "count": stabbed }),
+            );
+        }
+    }
+}
+
+/// 命中目标的位置和高度，伤害指示粒子的中心用它。
+fn kinetic_target_center(region: &Region, hit: &SpearHit) -> Option<(Vec3, f32)> {
+    if hit.is_player {
+        let player = region.players.get(&PlayerId(hit.id))?;
+        let bounds = player.bounding_box();
+        return Some((player.position(), (bounds.max_y - bounds.min_y) as f32));
+    }
+    let public = region.entities.public_at(hit.id)?;
+    Some((public.position, public.kind.dimensions().1))
+}
+
+/// 长矛蓄力冲刺命中一个实体时，它的速度（`getKnownSpeed().scale(20)`）：玩家读
+/// `lastKnownClientMovement`，生物读 `delta`。骑乘的载具回退没建模（对拍里都是静止牛）。
+fn kinetic_entity_delta(region: &Region, hit: &SpearHit) -> Vec3 {
+    if hit.is_player {
+        return region
+            .players
+            .get(&PlayerId(hit.id))
+            .map_or(Vec3::default(), |player| player.motion.delta);
+    }
+    region
+        .entities
+        .public_at(hit.id)
+        .map_or(Vec3::default(), |public| public.delta)
+}
+
+/// 一次蓄力冲刺命中算好的量：`dmgAmt` 和伤害 / 击退两组条件的判定结果。
+/// dismount 条件只参与「全假跳过」的判断，没有可观察的效果（目标不骑乘）。
+struct KineticHitPlan {
+    dmg_amt: f32,
+    damage: bool,
+    knockback: bool,
+}
+
+/// `Player.stabAttack` 的「正在使用」分支：`isUsingItem() && 同手` 时不乘 `s`、
+/// 不乘 `baseDamageScaleFactor`，`dmgAmt` 已经是 `base + floor(rel × multiplier)`。
+/// 命中后 `causeExtraKnockback` 两下（0.4 和 `getKnockback`）、攻击后附魔效果。
+fn kinetic_stab_hit(
+    world: &mut World<'_>,
+    attacker: PlayerId,
+    setup: &StabSetup,
+    target: &SpearHit,
+    plan: &KineticHitPlan,
+) -> Option<f32> {
+    let magic = damage_bonus(&setup.held, target.entity_type);
+    let total = if plan.damage {
+        plan.dmg_amt + magic
+    } else {
+        0.0
+    };
+    let mut source = DamageSource::player(attacker.0, setup.position, setup.creative);
+    source.kind = mc_bamboo_blocks::entity::mob::DamageKind::Spear;
+    if let Ok(weapon) = u16::try_from(setup.held.item) {
+        source = source.with_weapon(weapon);
+    }
+    let breach = enchantment_level(&setup.held, "minecraft:breach").max(0) as f32;
+    if breach > 0.0 {
+        source = source.with_armor_effectiveness(-0.15 * breach);
+    }
+    let hurt = if target.is_player {
+        world.hurt_player_from_mob(target.id, source, total, None)
+    } else {
+        world.hurt_mob(target.id, source, total)
+    };
+    if plan.knockback {
+        apply_extra_knockback(world, target.id, 0.4, setup.yaw, target.is_player);
+        apply_extra_knockback(
+            world,
+            target.id,
+            setup.knockback,
+            setup.yaw,
+            target.is_player,
+        );
+    }
+    if hurt || plan.knockback {
+        if hurt {
+            post_attack_effects(
+                world,
+                target.id,
+                &setup.held,
+                target.entity_type,
+                target.is_player,
+            );
+        }
+        return Some(magic);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -3047,5 +3521,100 @@ mod tests {
         assert!(range.is_in_range(eye, bounds, 0.0, false));
         let past = Aabb::new(6.500_001, 63.5, 0.0, 7.0, 65.0, 1.0);
         assert!(!range.is_in_range(eye, past, 0.0, false));
+    }
+
+    /// 长矛的 `attack_animation` 组件是刺击（kind 2、时长 19），别的武器是缺省挥手
+    /// （whack、时长 6）。
+    #[test]
+    fn spear_attack_animation_is_a_stab() {
+        let spear = stack(mc_bamboo_data::items::IRON_SPEAR);
+        assert_eq!(attack_swing(&spear), (SwingAnimationType::Stab, 19));
+        let mace = stack(mc_bamboo_data::items::MACE);
+        assert_eq!(attack_swing(&mace), (SwingAnimationType::Whack, 6));
+        assert_eq!(
+            attack_swing(&ItemStack::empty()),
+            (SwingAnimationType::Whack, 6)
+        );
+    }
+
+    /// 铁长矛的 `kinetic_weapon` 组件按官方 26.3 的数值解析出来。
+    #[test]
+    fn iron_spear_kinetic_spec_matches_26_3() {
+        let spec = kinetic_spec(&stack(mc_bamboo_data::items::IRON_SPEAR))
+            .expect("iron spear has a kinetic component");
+        assert_eq!(spec.contact_cooldown_ticks, 10);
+        assert_eq!(spec.delay_ticks, 12);
+        assert_eq!(spec.damage_multiplier, 0.95);
+        let damage = spec.damage.expect("damage conditions");
+        assert_eq!(damage.max_duration_ticks, 225);
+        assert_eq!(damage.min_speed, 0.0);
+        assert_eq!(damage.min_relative_speed, 4.6);
+        let knockback = spec.knockback.expect("knockback conditions");
+        assert_eq!(knockback.max_duration_ticks, 135);
+        assert_eq!(knockback.min_speed, 5.1);
+    }
+
+    /// `KineticWeapon.Condition.test`：时长、绝对速度和相对速度三个门槛都过了才真。
+    #[test]
+    fn kinetic_condition_requires_all_three_gates() {
+        let cond = KineticCondition {
+            max_duration_ticks: 225,
+            min_speed: 0.0,
+            min_relative_speed: 4.6,
+        };
+        let mult = 1.0;
+        assert!(kinetic_condition(&cond, 100, 6.0, 5.0, mult));
+        // 时长超了。
+        assert!(!kinetic_condition(&cond, 226, 6.0, 5.0, mult));
+        // 相对速度不够。
+        assert!(!kinetic_condition(&cond, 100, 6.0, 4.5, mult));
+        // 绝对速度不够。
+        let speed_gate = KineticCondition {
+            max_duration_ticks: 50,
+            min_speed: 11.0,
+            min_relative_speed: 0.0,
+        };
+        assert!(!kinetic_condition(&speed_gate, 10, 10.0, 0.0, mult));
+        assert!(kinetic_condition(&speed_gate, 10, 11.0, 0.0, mult));
+    }
+
+    /// `TamableAnimal.getTeam()` 覆写：驯服动物自己没队时返回主人的队。这里钉住
+    /// `mob_team_index` 的回退：狼自己没队、主人（玩家）在 0 队时，有效队伍是 0。
+    #[test]
+    fn tamed_mob_inherits_its_owners_team() {
+        use mc_bamboo_blocks::entity::{Entity, mob::MobType};
+        use uuid::Uuid;
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let player = Player::new(
+            id,
+            Uuid::from_u128(1),
+            "Kitten".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        region.insert_player(player);
+        std::sync::Arc::make_mut(&mut region.global.scoreboard).insert_team("Kitten", 0);
+
+        let uid = region.entities.spawn(Entity::by_mob_type(
+            MobType::Wolf,
+            Vec3::new(2.5, 64.0, 2.5),
+        ));
+        region.entities.with_mut(uid, |entity| {
+            if let Some(mob) = entity.kind.mob_mut() {
+                mob.tame.flags |= mc_bamboo_blocks::entity::mob::tame::FLAG_TAME;
+                mob.tame.owner = Some(*Uuid::from_u128(1).as_bytes());
+            }
+        });
+        let public = region.entities.public_at(uid).expect("the wolf exists");
+        let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind else {
+            panic!("expected a mob");
+        };
+        // 自己没队、驯服 → 回退到主人（Kitten）的 0 队。
+        assert_eq!(mob_team_index(&region, mob, true), Some(0));
+        // 没驯服（tame 假）→ 不回退。
+        assert_eq!(mob_team_index(&region, mob, false), None);
     }
 }

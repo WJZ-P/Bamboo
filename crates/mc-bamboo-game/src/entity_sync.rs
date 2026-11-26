@@ -14,8 +14,8 @@ use mc_bamboo_protocol::{
         ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING, EntityData,
         EntityPositionSync, EquipmentSlot, GameMode, HumanoidArm, INPUT_FLAG_SHIFT, MoveEntityPos,
         MoveEntityPosRot, MoveEntityRot, PlayerCommandKind, Pose, PositionDelta, PositionPath,
-        RemoveEntities, RotateHead, SetEntityData, SetEquipment, SwingAnimation, VecDelta,
-        pack_degrees,
+        RemoveEntities, RotateHead, SetEntityData, SetEquipment, SwingAnimation,
+        SwingAnimationType, VecDelta, pack_degrees,
     },
 };
 
@@ -647,10 +647,31 @@ pub(crate) fn on_leave(region: &mut Region, id: PlayerId) {
 /// 给看得见这名玩家的人发一次 `swing_animation`，不发给玩家自己。`entities.md` 第 9 节。
 /// 右键方块成功时 `interaction` 也调用它。
 pub(crate) fn broadcast_swing(region: &mut Region, id: PlayerId, hand: Hand) {
+    broadcast_swing_with(region, id, hand, SwingAnimationType::Whack, 6);
+}
+
+/// `broadcast_swing` 的带自定义动画版本：武器 `attack_animation` 组件给的
+/// 动画类型和时长（长矛是刺击）。`SwingAnimation.DEFAULT` 是 `whack` 时长 6。
+///
+/// `broadcast_swing` with a custom animation, taken from a weapon's
+/// `attack_animation` component (a spear stabs). `SwingAnimation.DEFAULT` is
+/// `whack` with duration 6.
+pub(crate) fn broadcast_swing_with(
+    region: &mut Region,
+    id: PlayerId,
+    hand: Hand,
+    animation: SwingAnimationType,
+    duration: i32,
+) {
     let Some(player) = region.players.get(&id) else {
         return;
     };
-    let frames = encode_frames(&SwingAnimation::default_swing(id.0, hand));
+    let frames = encode_frames(&SwingAnimation {
+        entity_id: id.0,
+        hand,
+        animation,
+        duration,
+    });
     player.sync.send_to_viewers(&mut region.links, &frames);
 }
 

@@ -134,7 +134,23 @@ pub(crate) fn start(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
             }
             true
         }
-        _ => false,
+        _ => {
+            // 长矛蓄力：`Item.use` 对 KINETIC_WEAPON 组件 `startUsingItem` + `makeSound`。
+            if !crate::player_attack::is_kinetic_weapon(&stack) {
+                return false;
+            }
+            if let Some(player) = region.players.get_mut(&id)
+                && player.weapon_use.is_none()
+                && player.use_item.is_none()
+            {
+                player.weapon_use = Some(WeaponUse::new(hand, item));
+                player.sync.metadata_dirty = true;
+            }
+            if let Some(name) = crate::player_attack::kinetic_start_sound(&stack) {
+                play_sound(region, player_position(region, id), &name, 1.0, 1.0);
+            }
+            true
+        }
     }
 }
 
@@ -163,6 +179,12 @@ pub(crate) fn tick(region: &mut Region) {
         }
         if item == items::CROSSBOW {
             charge_tick(region, id, hand, time_held);
+        }
+        // 长矛蓄力：`ItemStack.onUseTick` 对 KINETIC_WEAPON 逐刻 `damageEntities`，
+        // 在 `useItemRemaining` 递减之前调用（官方 `updateUsingItem` 的顺序）。
+        let held = region.players[&id].inventory.held(hand);
+        if crate::player_attack::is_kinetic_weapon(held) {
+            crate::player_attack::kinetic_tick(region, id, time_held);
         }
         let Some(player) = region.players.get(&id) else {
             continue;
