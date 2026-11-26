@@ -1218,6 +1218,12 @@ pub enum Command {
     FireworkRocketLaunch {
         position: Vec3,
     },
+    /// 生成一枚烟花火箭。`CelebrateVillagersSurvivedRaid` 的庆祝烟花以后从这里走；
+    /// 现在没有调用方，是给 raid-1c 留的接口。
+    ///
+    /// Spawn a firework rocket. The raid victory celebration will emit this once
+    /// raid-1c lands; there is no caller yet, so it is the interface for that work.
+    SpawnFireworkRocket(Box<super::firework_rocket::FireworkShot>),
     /// `Breeze.Shoot`：朝目标射出一枚旋风人风弹。
     ShootBreezeWindCharge(Box<super::wind_charge::WindChargeShot>),
     /// 骷髅陷阱马被玩家触发：视觉闪电和四名骷髅骑士。
@@ -2016,6 +2022,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 1.0,
                 false,
             );
+        }
+        Command::SpawnFireworkRocket(shot) => {
+            let _ = world.spawn_firework(&shot);
         }
         Command::ShootBreezeWindCharge(shot) => {
             world.spawn_wind_charge_shot(&shot);

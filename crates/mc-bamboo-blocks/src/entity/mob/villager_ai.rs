@@ -2445,8 +2445,9 @@ fn celebrate_can_continue(cx: &mut Cx) -> bool {
 }
 
 /// `CelebrateVillagersSurvivedRaid.tick`：每刻 `nextInt(100)==0` 播庆祝声，
-/// `nextInt(200)==0` 且头顶无方块时放烟花（随机颜色 + 0..3 飞行时长；烟花实体
-/// 本身没建模，只保持取数次数对齐）。
+/// `nextInt(200)==0` 且头顶无方块时放烟花（随机颜色 + 0..3 飞行时长）。烟花实体
+/// 已经建模：`Command::SpawnFireworkRocket` 就是给这里接生成实体的接口，raid-1c
+/// 合进来后把 `nextInt(16)` / `nextInt(3)` 换成真的生成，当前只保持取数次数对齐。
 fn celebrate_tick(cx: &mut Cx) {
     if cx.me.random.next_int_bounded(100) == 0 {
         living::make_sound(cx.me, cx.mob, "minecraft:entity.villager.celebrate");
