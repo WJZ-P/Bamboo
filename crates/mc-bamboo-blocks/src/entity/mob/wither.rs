@@ -80,6 +80,10 @@ pub struct Wither {
     ///
     /// The current `ServerBossEvent` progress.
     pub boss_progress: f32,
+    /// `WitherBoss.bossEvent` 的 UUID（`Mth.createInsecureUUID(random)`，不存档）。
+    ///
+    /// UUID of `WitherBoss.bossEvent` (`Mth.createInsecureUUID(random)`, not saved).
+    pub boss_uuid: [u8; 16],
 }
 
 impl Wither {

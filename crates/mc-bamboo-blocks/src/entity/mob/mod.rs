@@ -4811,6 +4811,10 @@ pub struct MobPublic {
     /// Current `ServerBossEvent` progress of `WitherBoss` (`1 - invul/220` during
     /// the invulnerability phase, then `getHealth()/getMaxHealth()`).
     pub wither_boss_progress: f32,
+    /// `WitherBoss.bossEvent` 的 UUID（`Mth.createInsecureUUID(random)`）。
+    ///
+    /// UUID of `WitherBoss.bossEvent` (`Mth.createInsecureUUID(random)`).
+    pub wither_boss_uuid: [u8; 16],
     /// `Mob.getLastHurtByMob()`：行商羊驼的 `TraderLlamaDefendWanderingTraderGoal`
     /// 从牵引者身上读这个值。其它生物也能读，只是没目标会看。
     ///
@@ -4977,6 +4981,7 @@ impl MobPublic {
             wither_targets: mob.wither.targets,
             wither_invulnerable_ticks: mob.wither.invulnerable_ticks,
             wither_boss_progress: mob.wither.boss_progress,
+            wither_boss_uuid: mob.wither.boss_uuid,
             last_hurt_by_mob: mob.last_hurt_by_mob,
             last_hurt_by_mob_timestamp: mob.last_hurt_by_mob_timestamp,
         }

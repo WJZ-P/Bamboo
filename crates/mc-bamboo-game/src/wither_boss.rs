@@ -45,6 +45,10 @@ struct WitherBar {
     /// Players that received the add packet (`ServerBossEvent.players`).
     players: BTreeSet<PlayerId>,
     progress: f32,
+    /// 上一次 add / update 的名字（`setCustomName` 会发 `UpdateName`）。
+    ///
+    /// The last name sent (`setCustomName` triggers `UpdateName`).
+    name: Option<Component>,
 }
 
 /// 全服所有凋灵的实体 Boss 血条，按实体网络 ID 索引。
@@ -80,21 +84,39 @@ impl WitherBossBars {
     }
 }
 
-/// `bossEvent` 的 add 包：名字是 `getDisplayName()`（缺省 `entity.minecraft.wither`）。
+/// `getDisplayName()`：有自定义名就用它，否则 `entity.minecraft.wither`。
 ///
-/// The `bossEvent` add packet: the name is `getDisplayName()` (default
-/// `entity.minecraft.wither`).
-fn add_frame(uuid: [u8; 16], progress: f32) -> Vec<u8> {
-    let name = Component::translate("entity.minecraft.wither", []);
+/// `getDisplayName()`: the custom name when present, else `entity.minecraft.wither`.
+fn display_name(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Component {
+    mob.custom_name
+        .clone()
+        .map(Component::trusted)
+        .unwrap_or_else(|| Component::translate("entity.minecraft.wither", []))
+}
+
+/// `bossEvent` 的 add 包：名字跟着 `getDisplayName()`。
+///
+/// The `bossEvent` add packet: the name follows `getDisplayName()`.
+fn add_frame(uuid: [u8; 16], progress: f32, name: &Component) -> Vec<u8> {
     encode_frames(&BossEvent {
         id: Uuid::from_bytes(uuid),
         action: BossAction::Add {
-            name: &name,
+            name,
             progress,
             color: WITHER_BAR_COLOR,
             overlay: WITHER_BAR_OVERLAY,
             flags: DARKEN_SCREEN,
         },
+    })
+}
+
+/// `ServerBossEvent.setName`：名字变了给观众发 update。
+///
+/// `ServerBossEvent.setName`: send an update when the name changes.
+fn update_name_frame(uuid: [u8; 16], name: &Component) -> Vec<u8> {
+    encode_frames(&BossEvent {
+        id: Uuid::from_bytes(uuid),
+        action: BossAction::UpdateName(name),
     })
 }
 
@@ -123,31 +145,40 @@ fn progress_frame(uuid: [u8; 16], progress: f32) -> Vec<u8> {
 /// Refresh every wither bar's audience and progress against `EntityTracking` each tick.
 pub(crate) fn tick(region: &mut Region) {
     let mut bars = std::mem::take(&mut region.wither_boss_bars);
-    // 当前活着的凋灵：`uid -> (栏 UUID, 进度, 正在跟踪的玩家)`。
-    // Living withers: `uid -> (bar UUID, progress, tracking players)`.
-    let mut living: BTreeMap<i32, ([u8; 16], f32, Vec<PlayerId>)> = BTreeMap::new();
+    // 当前活着的凋灵：`uid -> (栏 UUID, 进度, 显示名, 正在跟踪的玩家)`。
+    // Living withers: `uid -> (bar UUID, progress, display name, tracking players)`.
+    let mut living: BTreeMap<i32, ([u8; 16], f32, Component, Vec<PlayerId>)> = BTreeMap::new();
     for public in region.entities.iter_public() {
         if let KindPublic::Mob(mob) = &public.kind
             && mob.mob_type == MobType::Wither
         {
             let seen = region.entity_tracking.seen_by(public.uid);
-            living.insert(public.uid, (mob.uuid, mob.wither_boss_progress, seen));
+            living.insert(
+                public.uid,
+                (
+                    mob.wither_boss_uuid,
+                    mob.wither_boss_progress,
+                    display_name(mob),
+                    seen,
+                ),
+            );
         }
     }
 
-    for (&uid, (uuid, progress, seen)) in &living {
+    for (&uid, (uuid, progress, name, seen)) in &living {
         let bar = bars.bars.entry(uid).or_insert_with(|| WitherBar {
             uuid: *uuid,
             players: BTreeSet::new(),
             progress: f32::NEG_INFINITY,
+            name: None,
         });
         bar.uuid = *uuid;
-        // 新进入跟踪范围的玩家：add（带当前进度）。
-        // Players newly in tracking range: add (with the current progress).
+        // 新进入跟踪范围的玩家：add（带当前进度和名字）。
+        // Players newly in tracking range: add (with the current progress and name).
         let mut pending_add: Option<Vec<u8>> = None;
         for player in seen {
             if !bar.players.contains(player) {
-                let frame = pending_add.get_or_insert_with(|| add_frame(*uuid, *progress));
+                let frame = pending_add.get_or_insert_with(|| add_frame(*uuid, *progress, name));
                 region.links.send_frames(*player, frame);
             }
         }
@@ -156,6 +187,14 @@ pub(crate) fn tick(region: &mut Region) {
         for player in &bar.players {
             if !seen.contains(player) {
                 let frame = remove_frame(bar.uuid);
+                region.links.send_frames(*player, &frame);
+            }
+        }
+        // `setCustomName` / 读档自定义名：名字变了给当前观众发 update。
+        // `setCustomName` / loaded custom name: update viewers when it changes.
+        if bar.name.as_ref().is_some_and(|previous| previous != name) {
+            let frame = update_name_frame(*uuid, name);
+            for player in seen {
                 region.links.send_frames(*player, &frame);
             }
         }
@@ -169,6 +208,7 @@ pub(crate) fn tick(region: &mut Region) {
         }
         bar.players = seen.iter().copied().collect();
         bar.progress = *progress;
+        bar.name = Some(name.clone());
     }
 
     // 凋灵没了（死亡 / 移除）：给所有观众发 remove，删掉这根栏。
@@ -214,7 +254,8 @@ mod tests {
     /// Add packet: action 0, progress 0.5, PURPLE / PROGRESS / darken-screen.
     #[test]
     fn add_packet_uses_purple_progress_and_darken_screen() {
-        let frame = body(&add_frame([7; 16], 0.5));
+        let name = Component::translate("entity.minecraft.wither", []);
+        let frame = body(&add_frame([7; 16], 0.5, &name));
         assert_eq!(frame[16], 0, "ADD action");
         let tail = frame.len() - 4 - 1 - 1 - 1;
         assert_eq!(frame[tail..tail + 4], 0.5_f32.to_be_bytes());
@@ -243,6 +284,32 @@ mod tests {
         assert_eq!(frame[17..21], 0.25_f32.to_be_bytes());
     }
 
+    /// `getDisplayName()`：自定义名优先，否则默认翻译键。
+    ///
+    /// `getDisplayName()`: the custom name wins, else the default translation key.
+    #[test]
+    fn display_name_uses_the_custom_name() {
+        use mc_bamboo_blocks::entity::mob::{Mob, MobPublic, MobType};
+        use mc_bamboo_nbt::Tag;
+        let mut public = MobPublic::of(&Mob::new(MobType::Wither), false);
+        assert_eq!(
+            display_name(&public),
+            Component::translate("entity.minecraft.wither", [])
+        );
+        public.custom_name = Some(Tag::String("Named Wither".to_owned()));
+        assert_eq!(display_name(&public), Component::text("Named Wither"));
+    }
+
+    /// 名字变化的 update 包：动作 3 + 新组件。
+    ///
+    /// The name update packet: action 3 plus the new component.
+    #[test]
+    fn update_name_packet_is_action_three() {
+        let name = Component::text("Named Wither");
+        let frame = body(&update_name_frame([7; 16], &name));
+        assert_eq!(frame[16], 3, "UPDATE_NAME action");
+    }
+
     /// 拆岛带走指定的凋灵血条，合岛并回来。
     ///
     /// Island split takes the requested bars; merge absorbs them back.
@@ -255,6 +322,7 @@ mod tests {
                 uuid: [1; 16],
                 players: BTreeSet::new(),
                 progress: 0.5,
+                name: None,
             },
         );
         bars.bars.insert(
@@ -263,6 +331,7 @@ mod tests {
                 uuid: [2; 16],
                 players: BTreeSet::new(),
                 progress: 0.75,
+                name: None,
             },
         );
         let moved: BTreeSet<i32> = [9].into_iter().collect();
