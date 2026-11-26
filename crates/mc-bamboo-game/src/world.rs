@@ -3835,6 +3835,11 @@ fn run_island_simulation(
     crate::sleep::tick_sleep_counters(&mut island.region);
     let region = &mut island.region;
     region.profiler.lap(Phase::PlayerMisc);
+    // 官方玩家 tick 里的地图同步：手持 / 观察地图的玩家标记、逐列采样与
+    // `ClientboundMapItemDataPacket`，以及物品展示框每 10 刻的广播。
+    // Map sync from the player tick: player markers, column sampling, map data
+    // packets, and the 10-tick item-frame broadcast.
+    crate::map::tick(region);
 
     // `ServerPlayer.handleShoulderEntities`：离肩条件在派生状态之前跑，元数据能看到清空。
     crate::player_shoulder::tick(region);
