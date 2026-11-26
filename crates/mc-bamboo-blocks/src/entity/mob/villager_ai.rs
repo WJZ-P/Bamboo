@@ -2533,8 +2533,8 @@ fn build_celebration_firework(color: i32, flight: i32) -> mc_bamboo_protocol::it
 }
 
 /// `CelebrateVillagersSurvivedRaid.tick`：每刻 `nextInt(100)==0` 播庆祝声，
-/// `nextInt(200)==0` 且头顶无方块时生成一枚烟花火箭（BURST、随机颜色、0..3 飞行时长）。
-/// 烟花只发一个 `SpawnFirework` 事件记录位置与物品组件，不落地实体（烟花火箭实体另开任务）。
+/// `nextInt(200)==0` 且头顶无方块时生成一枚烟花火箭（BURST、随机颜色、0..3 飞行时长），
+/// 记录一条 `Firework` 效果并生成真的烟花实体。
 fn celebrate_tick(cx: &mut Cx) {
     if cx.me.random.next_int_bounded(100) == 0 {
         living::make_sound(cx.me, cx.mob, "minecraft:entity.villager.celebrate");
@@ -2555,8 +2555,15 @@ fn celebrate_tick(cx: &mut Cx) {
             living::eye_y(cx.me, cx.mob),
             cx.me.position.z,
         );
-        cx.ctx
-            .emit(Command::SpawnFirework { position, item }, cx.me);
+        let owner = cx.me.id;
+        cx.ctx.emit(
+            Command::SpawnFirework {
+                position,
+                item,
+                owner,
+            },
+            cx.me,
+        );
     }
 }
 

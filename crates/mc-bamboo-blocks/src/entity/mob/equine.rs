@@ -195,7 +195,7 @@ pub fn passenger_attachment(kind: MobType) -> (f32, f32) {
         MobType::Horse => (1.443_75, 0.0),
         MobType::Donkey => (1.112_5, 0.0),
         MobType::Mule => (1.212_5, 0.0),
-        MobType::Llama => (1.37, -0.3),
+        MobType::Llama | MobType::TraderLlama => (1.37, -0.3),
         // `EntityTypes.NAUTILUS` / `ZOMBIE_NAUTILUS` 的 `passengerAttachments(1.1375F)`。
         // `EntityTypes.NAUTILUS` / `ZOMBIE_NAUTILUS` register
         // `passengerAttachments(1.1375F)`.
@@ -232,7 +232,7 @@ pub fn shear_drop_offset(kind: MobType, baby: bool) -> mc_bamboo_core::Vec3 {
         match kind {
             MobType::Horse => ((height - 0.125) * 0.7, 0.0),
             MobType::Donkey | MobType::Mule => ((height + 0.031_25) * 0.5, -0.312_5 * 0.5),
-            MobType::Llama => ((height - 0.25) * 0.5, -0.3 * 0.5),
+            MobType::Llama | MobType::TraderLlama => ((height - 0.25) * 0.5, -0.3 * 0.5),
             _ => (0.0, 0.0),
         }
     };
@@ -295,7 +295,7 @@ fn set_base(mob: &mut Mob, id: i32, base: f64) {
 /// The item tag `TemptGoal` follows.
 pub(super) fn tempt_tag(kind: MobType) -> ItemTag {
     match kind {
-        MobType::Llama => item_tags::LLAMA_TEMPT_ITEMS,
+        MobType::Llama | MobType::TraderLlama => item_tags::LLAMA_TEMPT_ITEMS,
         _ if kind.is_equine() => item_tags::HORSE_TEMPT_ITEMS,
         _ => item_tags::COW_FOOD,
     }
@@ -370,7 +370,7 @@ pub fn offspring(
             );
             set_base(mob, id, inherited);
         }
-        if kind == MobType::Llama {
+        if kind.is_llama() {
             llama::inherit(
                 mob.equine.as_mut().expect("llama offspring state"),
                 first,
@@ -437,10 +437,10 @@ pub(super) fn save(mob: &Mob, out: &mut Vec<(String, Tag)>) -> tag::Result<()> {
             put(out, "Items", block_entity::items_tag(&state.chest_items)?);
         }
     }
-    if matches!(mob.mob_type, MobType::Horse | MobType::Llama) {
+    if mob.mob_type == MobType::Horse || mob.mob_type.is_llama() {
         put(out, "Variant", Tag::Int(state.variant));
     }
-    if mob.mob_type == MobType::Llama {
+    if mob.mob_type.is_llama() {
         put(out, "Strength", Tag::Int(state.strength));
     }
     Ok(())
@@ -456,7 +456,7 @@ pub(super) fn load(mob: &mut Mob, input: &Tag) {
     state.temper = tag::int_or(input, "Temper", 0);
     state.tame = tag::bool_or(input, "Tame", false);
     state.owner = uuid_field(input, "Owner");
-    if mob.mob_type == MobType::Llama {
+    if mob.mob_type.is_llama() {
         state.strength = tag::int_or(input, "Strength", 0).clamp(1, 5);
     }
     if mob.mob_type != MobType::Horse {
@@ -469,10 +469,10 @@ pub(super) fn load(mob: &mut Mob, input: &Tag) {
             state.chest_items.clear();
         }
     }
-    if matches!(mob.mob_type, MobType::Horse | MobType::Llama) {
+    if mob.mob_type == MobType::Horse || mob.mob_type.is_llama() {
         state.variant = tag::int_or(input, "Variant", 0);
     }
-    if mob.mob_type == MobType::Llama {
+    if mob.mob_type.is_llama() {
         // `Llama.Variant.BY_ID` 用 `OutOfBoundsStrategy.CLAMP`。
         // `Llama.Variant.BY_ID` clamps out-of-range ids.
         state.variant = state.variant.clamp(0, 3);
@@ -483,7 +483,7 @@ pub(super) fn load(mob: &mut Mob, input: &Tag) {
 ///
 /// Three rows; five columns for donkeys and mules, `strength` for llamas.
 pub(super) fn chest_size(kind: MobType, strength: i32) -> usize {
-    3 * if kind == MobType::Llama {
+    3 * if kind.is_llama() {
         strength.clamp(1, 5) as usize
     } else {
         5

@@ -583,6 +583,13 @@ impl MobType {
         matches!(self, Self::Camel | Self::CamelHusk)
     }
 
+    /// 是否属于羊驼系（`Llama` 或继承它的 `TraderLlama`）。
+    ///
+    /// Whether this is on vanilla's `Llama` branch (`Llama` or its subclass `TraderLlama`).
+    pub const fn is_llama(self) -> bool {
+        matches!(self, Self::Llama | Self::TraderLlama)
+    }
+
     pub const fn is_equine(self) -> bool {
         matches!(
             self,
@@ -2114,6 +2121,9 @@ pub enum DamageKind {
     Cactus,
     SweetBerryBush,
     Fall,
+    /// 鞘翅滑翔时撞墙产生的伤害。
+    /// Wall impact damage while gliding.
+    FlyIntoWall,
     Freeze,
     OutOfWorld,
     PlayerAttack,
@@ -2203,6 +2213,12 @@ pub enum DamageKind {
     /// `when_caused_by_living_non_player`, and in `#no_knockback` (knockback is
     /// the explicit `causeExtraKnockback` in `stabAttack`, not the default hurt knockback).
     Spear,
+    /// 烟花火箭爆炸，`minecraft:fireworks`。数据文件里 exhaustion 0.1、
+    /// message_id `fireworks`、scaling `when_caused_by_living_non_player`。
+    ///
+    /// A firework rocket blast, `minecraft:fireworks`. exhaustion 0.1,
+    /// message_id `fireworks`, scaling `when_caused_by_living_non_player`.
+    Fireworks,
 }
 
 impl DamageKind {
@@ -2221,6 +2237,7 @@ impl DamageKind {
             Self::Cactus => "minecraft:cactus",
             Self::SweetBerryBush => "minecraft:sweet_berry_bush",
             Self::Fall => "minecraft:fall",
+            Self::FlyIntoWall => "minecraft:fly_into_wall",
             Self::Freeze => "minecraft:freeze",
             Self::OutOfWorld => "minecraft:out_of_world",
             Self::PlayerAttack => "minecraft:player_attack",
@@ -2247,6 +2264,7 @@ impl DamageKind {
             Self::SonicBoom => "minecraft:sonic_boom",
             Self::Mace => "minecraft:mace_smash",
             Self::Spear => "minecraft:spear",
+            Self::Fireworks => "minecraft:fireworks",
         }
     }
 
@@ -2288,6 +2306,7 @@ impl DamageKind {
             Self::Cactus => "cactus",
             Self::SweetBerryBush => "sweetBerryBush",
             Self::Fall => "fall",
+            Self::FlyIntoWall => "flyIntoWall",
             Self::Freeze => "freeze",
             Self::OutOfWorld => "outOfWorld",
             Self::PlayerAttack => "player",
@@ -2312,6 +2331,7 @@ impl DamageKind {
             Self::SonicBoom => "sonic_boom",
             Self::Mace => "mace_smash",
             Self::Spear => "spear",
+            Self::Fireworks => "fireworks",
         }
     }
 
@@ -2332,6 +2352,7 @@ impl DamageKind {
             Self::Cactus,
             Self::SweetBerryBush,
             Self::Fall,
+            Self::FlyIntoWall,
             Self::Freeze,
             Self::OutOfWorld,
             Self::PlayerAttack,
@@ -2357,6 +2378,7 @@ impl DamageKind {
             Self::SonicBoom,
             Self::Mace,
             Self::Spear,
+            Self::Fireworks,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -2378,6 +2400,7 @@ impl DamageKind {
                 | Self::WindCharge
                 | Self::SonicBoom
                 | Self::Mace
+                | Self::Fireworks
         ) || matches!(self, Self::Wither)
     }
 
@@ -2391,6 +2414,7 @@ impl DamageKind {
                 | Self::Drown
                 | Self::Generic
                 | Self::Fall
+                | Self::FlyIntoWall
                 | Self::Freeze
                 | Self::OutOfWorld
                 | Self::GenericKill
@@ -2477,7 +2501,8 @@ impl DamageKind {
             | Self::SulfurCubeHot
             | Self::BadRespawnPoint
             | Self::Mace
-            | Self::Spear => TENTH,
+            | Self::Spear
+            | Self::Fireworks => TENTH,
             _ => 0.0,
         }
     }
@@ -2523,6 +2548,7 @@ impl DamageKind {
                 | Self::Wither
                 | Self::Explosion
                 | Self::PlayerExplosion
+                | Self::Fireworks
                 | Self::Cactus
                 | Self::Freeze
                 | Self::HotFloor
@@ -3457,9 +3483,12 @@ impl Mob {
             MobType::SnowGolem => snow_golem::attributes(),
             MobType::Silverfish => silverfish::attributes(),
             MobType::Endermite => endermite::attributes(),
-            // `AbstractVillager.createAttributes()`：流浪商人沿用村民的属性表。
-            // `AbstractVillager.createAttributes()`: the trader shares villager attributes.
-            MobType::Villager | MobType::WanderingTrader => Attributes::villager(),
+            MobType::Villager => Attributes::villager(),
+            // `DefaultAttributes` 里 `WANDERING_TRADER` 注册的是 `Mob.createMobAttributes()`
+            // （移动速度 0.7、跟随距离 16），不是 `Villager.createAttributes()`（0.5 / 48）。
+            // `DefaultAttributes` maps `WANDERING_TRADER` to `Mob.createMobAttributes()`
+            // (movement speed 0.7, follow range 16), not `Villager.createAttributes()`.
+            MobType::WanderingTrader => Attributes::mob(),
             MobType::Guardian => guardian::attributes(false),
             MobType::ElderGuardian => guardian::attributes(true),
             MobType::SulfurCube => sulfur_cube::attributes(),
@@ -3834,6 +3863,14 @@ impl Mob {
                     let mut malus = Malus::animal();
                     malus.set(mc_bamboo_data::PathType::FireInNeighbor, 16.0);
                     malus.set(mc_bamboo_data::PathType::DamagingInNeighbor, 16.0);
+                    malus.set(mc_bamboo_data::PathType::Fire, -1.0);
+                    malus
+                }
+                MobType::WanderingTrader => {
+                    // `AbstractVillager` 构造函数：`FIRE_IN_NEIGHBOR = 16.0`，`FIRE = -1.0`。
+                    // `AbstractVillager` constructor: `FIRE_IN_NEIGHBOR = 16.0`, `FIRE = -1.0`.
+                    let mut malus = Malus::animal();
+                    malus.set(mc_bamboo_data::PathType::FireInNeighbor, 16.0);
                     malus.set(mc_bamboo_data::PathType::Fire, -1.0);
                     malus
                 }
@@ -4658,6 +4695,16 @@ pub struct MobPublic {
     /// `WanderingTrader.despawnDelay`: trader llamas read the holder's countdown
     /// in `maybeDespawn()`; zero for other mobs.
     pub trader_despawn_delay: i32,
+    /// `Mob.getLastHurtByMob()`：行商羊驼的 `TraderLlamaDefendWanderingTraderGoal`
+    /// 从牵引者身上读这个值。其它生物也能读，只是没目标会看。
+    ///
+    /// `Mob.getLastHurtByMob()`, read by the trader llama's defend goal from its
+    /// holder. Other mobs may read it too, but no goal consults it.
+    pub last_hurt_by_mob: Option<EntityUid>,
+    /// `Mob.getLastHurtByMobTimestamp()`，同上。
+    ///
+    /// `Mob.getLastHurtByMobTimestamp()`, likewise.
+    pub last_hurt_by_mob_timestamp: i32,
 }
 
 impl MobPublic {
@@ -4810,6 +4857,8 @@ impl MobPublic {
             passengers: mob.passengers.clone(),
             leash_holder: leash::leash_holder(mob),
             trader_despawn_delay: mob.wandering_trader.despawn_delay,
+            last_hurt_by_mob: mob.last_hurt_by_mob,
+            last_hurt_by_mob_timestamp: mob.last_hurt_by_mob_timestamp,
         }
     }
 

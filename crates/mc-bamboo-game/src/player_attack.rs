@@ -289,13 +289,10 @@ const SMASH_KNOCKBACK_POWER: f64 = 0.699_999_988_079_071;
 /// The `0.009999999776482582` vertical velocity `MaceItem.hurtEnemy` sets.
 const SMASH_IMPULSE_Y: f64 = 0.009_999_999_776_482_582;
 
-/// `MaceItem.canSmashAttack`：`fallDistance > 1.5 && !isFallFlying()`。
-/// Bamboo 玩家没有鞘翅滑翔，`isFallFlying` 恒假。
-///
-/// `MaceItem.canSmashAttack`: `fallDistance > 1.5 && !isFallFlying()`. Bamboo
-/// players have no elytra gliding, so `isFallFlying` is always false.
+/// `MaceItem.canSmashAttack`：摔落超过 1.5 格且没有滑翔。
+/// `MaceItem.canSmashAttack`: falling more than 1.5 blocks without gliding.
 fn can_smash_attack(player: &Player) -> bool {
-    player.motion.fall_distance > SMASH_FALL_THRESHOLD
+    player.motion.fall_distance > SMASH_FALL_THRESHOLD && !player.sync.is_fall_flying()
 }
 
 /// 风爆 `wind_burst` 的击退倍率：`knockback_multiplier` lookup `[1.2, 1.75, 2.2]`，
@@ -1097,7 +1094,9 @@ fn plan_attack(
     // 重锤下砸加伤（含致密），在暴击前加。
     let smash = can_smash_attack(player);
     let smash_fall_distance = player.motion.fall_distance;
-    base_damage += mace_attack_damage_bonus(held, smash_fall_distance);
+    if smash {
+        base_damage += mace_attack_damage_bonus(held, smash_fall_distance);
+    }
     let critical = full && can_critical(player, target.is_living);
     if critical {
         base_damage *= CRIT_MULTIPLIER;
@@ -2166,8 +2165,17 @@ fn post_piercing_attack(region: &mut Region, id: PlayerId, setup: &StabSetup) {
         let Some(player) = region.players.get(&id) else {
             return;
         };
-        // 需求：没骑乘（Bamboo 无鞘翅滑翔和水状态），且非创造时饥饿 ≥ 7。
-        if player.riding.vehicle.is_some() {
+        // 突进要求没有骑乘、滑翔或浸水，且生存模式下饥饿至少为 7。
+        // Lunge requires no mount, gliding or water, and at least 7 food in survival.
+        let blocks = crate::player_move::PlayerBlocks::new(&region.chunks, &region.block_entities);
+        if player.riding.vehicle.is_some()
+            || player.sync.is_fall_flying()
+            || crate::player_move::touches_fluid(
+                player,
+                &blocks,
+                mc_bamboo_data::tags::fluid_tags::WATER,
+            )
+        {
             return;
         }
         if player.game_mode != GameMode::Creative && player.health.food.food_level < 7 {
@@ -2609,6 +2617,22 @@ mod tests {
         // 致密 III：3×0.5=1.5，2 格 → 8 + 1.5×2 = 11。
         let density = enchanted(mc_bamboo_data::items::MACE, "minecraft:density", 3);
         assert_eq!(mace_attack_damage_bonus(&density, 2.0), 11.0);
+    }
+
+    #[test]
+    fn fall_flying_disables_a_mace_smash() {
+        let mut player = Player::new(
+            PlayerId(1),
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        player.motion.fall_distance = 8.0;
+        assert!(can_smash_attack(&player));
+        player.sync.set_fall_flying(true);
+        assert!(!can_smash_attack(&player));
     }
 
     /// 破甲偏移：每级 -0.15，夹到 [0,1] 后按比例穿透护甲（改坏确认用）。
