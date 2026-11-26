@@ -229,6 +229,7 @@ pub(crate) fn boat_dismount_location(
 /// Mob-passenger version of `AbstractBoat.getDismountLocationForPassenger`.
 /// `LivingEntity.getDismountPoses()` has only `STANDING`; width, height and yaw
 /// come from the passenger itself.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn boat_dismount_location_for_mob(
     chunks: &ChunkStore,
     border: &WorldBorder,
@@ -268,6 +269,7 @@ pub(crate) fn boat_dismount_location_for_mob(
 /// `DismountHelper.canDismountTo`；脚下是水、或都不行时退回载具 AABB 顶。
 ///
 /// Shared implementation of vanilla `AbstractBoat.getDismountLocationForPassenger`.
+#[allow(clippy::too_many_arguments)]
 fn boat_dismount_location_generic(
     chunks: &ChunkStore,
     border: &WorldBorder,
