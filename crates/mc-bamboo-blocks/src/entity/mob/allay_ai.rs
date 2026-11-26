@@ -280,6 +280,9 @@ fn item_deposit_position(cx: &mut Cx) -> Option<PositionTracker> {
 /// `AllayAi.shouldDepositItemsAtLikedNoteblock`：冷却记忆存在、同维度 1024 格内、
 /// 那一格仍是音符盒。
 fn should_deposit_at_noteblock(cx: &Cx, gp: &GlobalPos) -> bool {
+    if super::allay::oracle_tamper() == super::allay::Tamper::DepositPlayerOnly {
+        return false;
+    }
     if gp.dimension != "minecraft:overworld" {
         return false;
     }

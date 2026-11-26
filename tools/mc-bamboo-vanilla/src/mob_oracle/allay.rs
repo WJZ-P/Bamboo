@@ -5,7 +5,7 @@
 use mc_bamboo_blocks::{
     entity::{
         Entity, EntityUid, JavaRandom,
-        mob::{MobType, interact::MobInteractRequest},
+        mob::{MobType, allay, interact::MobInteractRequest},
     },
     game_event::{GameEvent, dispatch::EventContext},
 };
@@ -252,6 +252,7 @@ impl Report {
         let label = case.name.as_str();
         let script = script(label);
         let broken = self.break_test.clone();
+        allay::set_oracle_tamper(broken.as_deref().unwrap_or(""));
         let mut level = level(case, &script);
         let mut ticks = BlockTicks::default();
         ticks.set_time(case.start_time);

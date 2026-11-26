@@ -50,6 +50,38 @@ pub const ITEM_PICKUP_COOLDOWN: i32 = 60;
 /// `VibrationUser.VIBRATION_EVENT_LISTENER_RANGE`。
 pub const LISTENER_RADIUS: i32 = 16;
 
+/// 对拍改坏确认的三种生产代码篡改。只有 `mob-oracle --break-self-test` 会设置，
+/// 其它驱动恒为 [`Tamper::None`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tamper {
+    None,
+    /// 送物品只看喜欢的玩家、不看音符盒（`shouldDepositItemsAtLikedNoteblock` 恒假）。
+    DepositPlayerOnly,
+    /// 复制冷却不减（`updateDuplicationCooldown` 空转）。
+    NoDuplicationCooldown,
+    /// 停舞判定反转（`shouldStopDancing` 取反）。
+    InvertStopDancing,
+}
+
+thread_local! {
+    static ORACLE_TAMPER: std::cell::Cell<Tamper> = const { std::cell::Cell::new(Tamper::None) };
+}
+
+/// 由 `mob-oracle` 按 `--break-self-test` 设置，其它驱动不调用。
+pub fn set_oracle_tamper(name: &str) {
+    let tamper = match name {
+        "allay_deposit_player" => Tamper::DepositPlayerOnly,
+        "allay_no_dup_cooldown" => Tamper::NoDuplicationCooldown,
+        "allay_dance_inverted" => Tamper::InvertStopDancing,
+        _ => Tamper::None,
+    };
+    ORACLE_TAMPER.with(|cell| cell.set(tamper));
+}
+
+pub(crate) fn oracle_tamper() -> Tamper {
+    ORACLE_TAMPER.with(|cell| cell.get())
+}
+
 /// 悦灵自己的状态：每个 `Mob` 都带一份，字段只在 `Allay` 分支读写。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Allay {
@@ -241,6 +273,9 @@ pub(super) fn ai_step(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) {
 
 /// `Allay.updateDuplicationCooldown()`：服务端每刻减一。
 pub fn tick_duplication_cooldown(mob: &mut Mob) {
+    if oracle_tamper() == Tamper::NoDuplicationCooldown {
+        return;
+    }
     if mob.allay.duplication_cooldown > 0 {
         set_duplication_cooldown(mob, mob.allay.duplication_cooldown - 1);
     }
@@ -260,7 +295,12 @@ fn should_stop_dancing(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> bool {
     if center.distance_to_sqr(me.position) >= radius * radius {
         return true;
     }
-    !ctx.blocks().block_state(pos).is(blocks::JUKEBOX)
+    let stop = !ctx.blocks().block_state(pos).is(blocks::JUKEBOX);
+    if oracle_tamper() == Tamper::InvertStopDancing {
+        !stop
+    } else {
+        stop
+    }
 }
 
 /// `Allay.setDancing`：服务端不开 AI 或正在恐慌时不能开始跳。
