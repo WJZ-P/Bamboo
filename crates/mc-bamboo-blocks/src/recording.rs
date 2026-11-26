@@ -1060,16 +1060,17 @@ fn hash_effect(effect: &Effect) -> u64 {
             speed.to_bits().hash(&mut hasher);
             count.hash(&mut hasher);
         }
-        Effect::Firework {
-            position,
-            flight,
-            color,
-        } => {
+        Effect::Firework { position, ref item } => {
             position.x.to_bits().hash(&mut hasher);
             position.y.to_bits().hash(&mut hasher);
             position.z.to_bits().hash(&mut hasher);
-            flight.hash(&mut hasher);
-            color.hash(&mut hasher);
+            item.item.hash(&mut hasher);
+            item.count.hash(&mut hasher);
+            for (id, bytes) in &item.added {
+                id.hash(&mut hasher);
+                bytes.hash(&mut hasher);
+            }
+            item.removed.hash(&mut hasher);
         }
     }
     hasher.finish()

@@ -2726,16 +2726,15 @@ pub enum Effect {
         position: mc_bamboo_core::Vec3,
         radius: f64,
     },
-    /// `CelebrateVillagersSurvivedRaid` 生成的烟花火箭。只记录、不落地实体
-    /// （烟花火箭实体另开任务）；`flight` 是飞行时长，`color` 是烟花色。
+    /// `CelebrateVillagersSurvivedRaid` 生成的烟花火箭。携带构造好的烟花物品（`FIREWORKS`
+    /// 组件），只记录、不落地实体（烟花火箭实体另开任务）。
     ///
-    /// A firework rocket spawned by `CelebrateVillagersSurvivedRaid`, recorded but not
-    /// spawned (the entity is a separate task); `flight` is the flight duration and
-    /// `color` the firework colour.
+    /// A firework rocket spawned by `CelebrateVillagersSurvivedRaid`, carrying the built
+    /// firework item (`FIREWORKS` component); recorded but not spawned (the entity is a
+    /// separate task).
     Firework {
         position: mc_bamboo_core::Vec3,
-        flight: i32,
-        color: i32,
+        item: ItemStack,
     },
     /// 箭击中并杀死了实体：游戏层给射手触发 `KILLED_BY_ARROW`。
     ///

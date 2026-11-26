@@ -16120,18 +16120,30 @@ public final class MobOracle {
                     if (!(spawned instanceof net.minecraft.world.entity.projectile.FireworkRocketEntity rocket)) {
                         continue;
                     }
-                    var fireworks = rocket.getItem().get(net.minecraft.core.component.DataComponents.FIREWORKS);
+                    ItemStack stack = rocket.getItem();
+                    var fireworks = stack.get(net.minecraft.core.component.DataComponents.FIREWORKS);
                     if (fireworks == null) continue;
-                    var explosion = fireworks.explosions().getFirst();
+                    int itemId = net.minecraft.core.registries.BuiltInRegistries.ITEM.getId(stack.getItem());
                     if (!firstFirework) frames.append(',');
                     firstFirework = false;
-                    frames.append('[')
-                            .append(Double.doubleToLongBits(rocket.getX())).append(',')
-                            .append(Double.doubleToLongBits(rocket.getY())).append(',')
-                            .append(Double.doubleToLongBits(rocket.getZ())).append(',')
-                            .append(fireworks.flightDuration()).append(',')
-                            .append(explosion.colors().getInt(0))
-                            .append(']');
+                    frames.append("{\"x\":").append(Double.doubleToLongBits(rocket.getX()))
+                            .append(",\"y\":").append(Double.doubleToLongBits(rocket.getY()))
+                            .append(",\"z\":").append(Double.doubleToLongBits(rocket.getZ()))
+                            .append(",\"item\":").append(itemId)
+                            .append(",\"count\":").append(stack.getCount())
+                            .append(",\"flight\":").append(fireworks.flightDuration())
+                            .append(",\"explosions\":[");
+                    for (int ei = 0; ei < fireworks.explosions().size(); ei++) {
+                        var ex = fireworks.explosions().get(ei);
+                        if (ei > 0) frames.append(',');
+                        frames.append("{\"shape\":").append(ex.shape().getId())
+                                .append(",\"colors\":").append(ex.colors())
+                                .append(",\"fadeColors\":").append(ex.fadeColors())
+                                .append(",\"hasTrail\":").append(ex.hasTrail())
+                                .append(",\"hasTwinkle\":").append(ex.hasTwinkle())
+                                .append('}');
+                    }
+                    frames.append("]}");
                 }
                 world.spawned.clear();
                 frames.append("]}");
