@@ -291,6 +291,41 @@ pub const fn drop_item(entity_type: i32) -> i32 {
     }
 }
 
+/// 船物品 ID → 注册表实体类型 ID（官方 `BoatItem` 构造时给的 `EntityType`）。
+/// 非船物品返回 `None`。
+///
+/// Boat item id to registry entity type (the `EntityType` a `BoatItem` carries).
+/// `None` for non-boat items.
+pub const fn entity_type_for_item(item: i32) -> Option<i32> {
+    use mc_bamboo_data::items;
+    use mc_bamboo_data::registries::entity_type as ids;
+    Some(match item {
+        items::ACACIA_BOAT => ids::ACACIA_BOAT,
+        items::ACACIA_CHEST_BOAT => ids::ACACIA_CHEST_BOAT,
+        items::BAMBOO_RAFT => ids::BAMBOO_RAFT,
+        items::BAMBOO_CHEST_RAFT => ids::BAMBOO_CHEST_RAFT,
+        items::BIRCH_BOAT => ids::BIRCH_BOAT,
+        items::BIRCH_CHEST_BOAT => ids::BIRCH_CHEST_BOAT,
+        items::CHERRY_BOAT => ids::CHERRY_BOAT,
+        items::CHERRY_CHEST_BOAT => ids::CHERRY_CHEST_BOAT,
+        items::DARK_OAK_BOAT => ids::DARK_OAK_BOAT,
+        items::DARK_OAK_CHEST_BOAT => ids::DARK_OAK_CHEST_BOAT,
+        items::JUNGLE_BOAT => ids::JUNGLE_BOAT,
+        items::JUNGLE_CHEST_BOAT => ids::JUNGLE_CHEST_BOAT,
+        items::MANGROVE_BOAT => ids::MANGROVE_BOAT,
+        items::MANGROVE_CHEST_BOAT => ids::MANGROVE_CHEST_BOAT,
+        items::OAK_BOAT => ids::OAK_BOAT,
+        items::OAK_CHEST_BOAT => ids::OAK_CHEST_BOAT,
+        items::PALE_OAK_BOAT => ids::PALE_OAK_BOAT,
+        items::PALE_OAK_CHEST_BOAT => ids::PALE_OAK_CHEST_BOAT,
+        items::POPLAR_BOAT => ids::POPLAR_BOAT,
+        items::POPLAR_CHEST_BOAT => ids::POPLAR_CHEST_BOAT,
+        items::SPRUCE_BOAT => ids::SPRUCE_BOAT,
+        items::SPRUCE_CHEST_BOAT => ids::SPRUCE_CHEST_BOAT,
+        _ => return None,
+    })
+}
+
 /// 船的一刻，`AbstractBoat.tick` 的服务端路径：状态判定、漂浮物理、移动、气泡柱、
 /// 水流和桨动画。玩家控制时位置由客户端 `move_vehicle` 决定，服务端只清速度。
 ///

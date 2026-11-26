@@ -1562,6 +1562,14 @@ pub(crate) fn on_use_item(
         crate::command_block::on_placed(region, placed);
     }
     send_effects(region, Some(id), &outcome.effects);
+    // 船放置成功时 `ItemStack.consume(1, player)`：生存模式减一个。方块层的
+    // `Item.use` 路径只有船会记 `item_exchange`。
+    //
+    // A successful boat placement consumes one item in survival. The boat is
+    // the only `Item.use` path that records an `item_exchange` in the block layer.
+    if let Some(exchange) = &outcome.item_exchange {
+        crate::inventory::apply_item_exchange(region, id, hand, exchange);
+    }
     let mut result = outcome.result;
     if !result.consumes_action() && book::use_in_hand(region, id, hand) {
         result = InteractionResult::Success;

@@ -20,6 +20,7 @@
 //! Creative mode restores the count in the game layer after the action. When a player is installed, `hurtAndBreak` and `shrink` run where vanilla runs them.
 //! Sounds, drops and game events are still omitted. Bone meal particles are sent to the player.
 
+pub(crate) mod boat;
 mod bone_meal;
 pub(crate) use bone_meal::{grow_crop, grow_water_plant};
 mod debug_stick;
