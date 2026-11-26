@@ -499,8 +499,47 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     if uid < mc_bamboo_blocks::entity::FIRST_ENTITY_ID {
                         region.entities.enqueue_ejected_player(uid);
                     } else if let Some(vehicle) = &vehicle_public {
+                        // 船载具：`AbstractBoat.getDismountLocationForPassenger` 用
+                        // `getCollisionHorizontalEscapeVector` + `DismountHelper`，
+                        // 生物乘客也走这一套，不能用 blocks 层的缺省落位。
+                        //
+                        // A boat uses `AbstractBoat.getDismountLocationForPassenger`
+                        // (escape vector + DismountHelper) for mob passengers too,
+                        // not the default block-layer dismount location.
+                        let location = if matches!(
+                            &vehicle.kind,
+                            mc_bamboo_blocks::entity::KindPublic::Boat(_)
+                        ) {
+                            let mut params = None;
+                            region.entities.with_mut(uid, |rider| {
+                                params = Some((
+                                    rider.dimensions,
+                                    rider.y_rot,
+                                    rider.fall_distance,
+                                    rider.position.y,
+                                ));
+                            });
+                            params.and_then(|(dimensions, yaw, fall_distance, bottom)| {
+                                crate::riding::dismount::boat_dismount_location_for_mob(
+                                    &region.chunks,
+                                    &region.global.world_border,
+                                    f64::from(dimensions.0),
+                                    f64::from(dimensions.1),
+                                    yaw,
+                                    fall_distance,
+                                    bottom,
+                                    vehicle.position,
+                                    1.375,
+                                    vehicle.bounding_box().max_y,
+                                )
+                            })
+                        } else {
+                            None
+                        };
                         region.entities.with_mut(uid, |rider| {
-                            mc_bamboo_blocks::entity::riding::stop_riding(rider, vehicle, None);
+                            mc_bamboo_blocks::entity::riding::stop_riding_at(
+                                rider, vehicle, None, location,
+                            );
                         });
                     }
                 }
@@ -2017,5 +2056,52 @@ pub(crate) fn on_interact_entity_at(
         // 生物事件（爱心、挤奶音效）留在实体表里，同步阶段按官方收件人发出去。
         swing(region, id, try_hand, outcome.result);
         return;
+    }
+}
+
+#[cfg(test)]
+mod boat_dismount_tests {
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::{blocks, registries::entity_type as ids};
+    use mc_bamboo_world::flat;
+
+    use super::*;
+    use mc_bamboo_blocks::entity::{Entity, FIRST_ENTITY_ID, mob::MobType};
+
+    /// 气泡柱甩下来的生物乘客用船专用 `getDismountLocationForPassenger`
+    /// （`getCollisionHorizontalEscapeVector` + `DismountHelper`），不是 blocks 层
+    /// 缺省的 `(x, bb.maxY, z)`。
+    #[test]
+    fn an_ejected_mob_passenger_uses_the_boat_dismount_location() {
+        let mut region = Region::new(2, 20, false);
+        let position = Vec3::new(0.5, f64::from(flat::surface_y()) + 1.0, 0.5);
+        let boat = region.entities.spawn(Entity::boat(ids::OAK_BOAT, position));
+
+        let mut rider = Entity::by_mob_type(MobType::Pig, position);
+        rider.vehicle = Some(boat);
+        let rider_id = region.entities.spawn(rider);
+        assert!(rider_id >= FIRST_ENTITY_ID);
+
+        // 缺省落位：改回 `stop_riding` 时 mob 就会落在这里。
+        let vehicle = region.entities.public_at(boat).unwrap().clone();
+        let default = mc_bamboo_blocks::entity::riding::dismount_location(&vehicle);
+
+        send_effects(
+            &mut region,
+            None,
+            &[Effect::BoatBubbleEvent {
+                entity: boat,
+                event: 71,
+                ejected: vec![rider_id],
+            }],
+        );
+
+        let landed = region.entities.public_at(rider_id).unwrap().position;
+        assert_ne!(landed, default, "生物乘客不该用缺省 (x, bb.maxY, z) 落位");
+        assert!(
+            (landed.x - position.x).abs() > 0.1 || (landed.z - position.z).abs() > 0.1,
+            "船专用落位应沿 escape vector 水平偏移: {landed:?}"
+        );
+        let _ = blocks::STONE;
     }
 }
