@@ -2311,6 +2311,10 @@ fn max_head_y_rot(mob: &Mob) -> f32 {
         // `Sniffer.getMaxHeadYRot()`。
         // `Sniffer.getMaxHeadYRot()`.
         50.0
+    } else if mob.mob_type == super::MobType::Ravager {
+        // `Ravager.getMaxHeadYRot()`。
+        // `Ravager.getMaxHeadYRot()`.
+        45.0
     } else {
         MAX_HEAD_Y_ROT as f32
     }

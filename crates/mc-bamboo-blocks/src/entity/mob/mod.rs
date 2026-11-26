@@ -3616,6 +3616,9 @@ impl Mob {
                 MobType::Guardian | MobType::ElderGuardian => guardian::malus(),
                 MobType::Nautilus | MobType::ZombieNautilus => nautilus::malus(),
                 MobType::Warden => warden::malus(),
+                // 劫掠兽必须在 `is_monster` 分支之前单列，否则树叶代价是 -1。
+                // Ravagers must precede the `is_monster` arm or the leaf malus stays -1.
+                MobType::Ravager => ravager::malus(),
                 _ if mob_type.is_monster() => Malus::monster(),
                 MobType::Chicken => chicken::malus(),
                 MobType::Enderman => enderman::malus(),

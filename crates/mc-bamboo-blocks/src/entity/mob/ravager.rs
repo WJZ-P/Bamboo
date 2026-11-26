@@ -41,6 +41,18 @@ pub struct RavagerState {
     pub roar_tick: i32,
 }
 
+/// `Ravager` 构造函数最后一句 `setPathfindingMalus(PathType.LEAVES, 0.0F)`：
+/// 劫掠兽能直接穿过树叶寻路（它会踩坏树叶）。怪物缺省的树叶代价是 -1（走不通）。
+///
+/// The `Ravager` constructor ends with `setPathfindingMalus(PathType.LEAVES, 0.0F)`:
+/// ravagers path straight through leaves (which they trample). The monster
+/// default leaf malus is -1 (impassable).
+pub(super) fn malus() -> super::path::Malus {
+    let mut malus = super::path::Malus::monster();
+    malus.set(mc_bamboo_data::PathType::Leaves, 0.0);
+    malus
+}
+
 /// `Ravager.createAttributes()`。
 pub(super) fn attributes() -> Attributes {
     let mut table = Attributes::skeleton();
@@ -336,6 +348,17 @@ mod tests {
         assert_eq!(table.value(attribute::ATTACK_KNOCKBACK) as f32, 1.5);
         assert_eq!(table.value(attribute::FOLLOW_RANGE), 32.0);
         assert_eq!(table.value(attribute::STEP_HEIGHT), 1.0);
+    }
+
+    #[test]
+    fn leaves_are_passable() {
+        // 官方 `Ravager.<init>` 把树叶代价设成 0；其它怪物保持缺省的 -1。
+        let ravager = malus();
+        assert_eq!(ravager.get(mc_bamboo_data::PathType::Leaves), 0.0);
+        assert_eq!(
+            crate::entity::mob::path::Malus::monster().get(mc_bamboo_data::PathType::Leaves),
+            -1.0
+        );
     }
 
     #[test]
