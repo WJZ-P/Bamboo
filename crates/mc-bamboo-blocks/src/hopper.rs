@@ -17,9 +17,9 @@ use mc_bamboo_protocol::item::ItemStack;
 use crate::{
     block_entity::{BlockEntity, Watch, block_entity_clock},
     container::{
-        CONTAINER_STACK_LIMIT, Container, item_max, remove_item, same_item_same_components,
+        CONTAINER_STACK_LIMIT, Container, Slots, item_max, remove_item, same_item_same_components,
     },
-    entity::Entity,
+    entity::{Entity, EntityKind},
     shape::Aabb,
     state::{ENABLED, FACING_HOPPER},
     world::World,
@@ -570,15 +570,16 @@ pub(crate) fn suck_touching_item(world: &mut World, item: &mut Entity) {
 /// instead. See [`suck_touching_item`].
 fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> bool {
     let above = pos.above();
-    // 只读探测：上方不是容器时改去吸物品实体。官方的 `getSourceContainer` 只读，
-    // 不该把上面那个漏斗叫醒。
+    // 只读探测：上方没有方块容器时先找实体容器（运输船），最后才吸物品实体。
+    // 官方 `getSourceContainer` 只读，不该把上面那个漏斗叫醒。
     let Some(slots) = world.peek_container(above, |container| {
         container.slots_for_face(Direction::Down).map_or_else(
             || (0..container.size()).collect::<Vec<_>>(),
             <[usize]>::to_vec,
         )
     }) else {
-        return suck_ground_items(world, pos, entity);
+        return suck_from_entity_container(world, pos, entity)
+            .unwrap_or_else(|| suck_ground_items(world, pos, entity));
     };
     // 上面的容器也是漏斗时，`from instanceof HopperBlockEntity` 成立。
     let mut from_ticked_game_time = None;
@@ -651,6 +652,94 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
         world.silent_container(above, &mut |container| container.set(slot, item.clone()));
     }
     false
+}
+
+/// `HopperBlockEntity.getSourceContainer` 的实体容器分支（官方
+/// `getEntityContainer` / `CONTAINER_ENTITY_SELECTOR`）：漏斗上方 1×1×1 内
+/// 活着的运输船。`ContainerEntity.getChestVehicleItem` / `removeChestVehicleItem`
+/// 在读槽位之前先解包战利品表。没有实体容器时返回 `None`，调用方改吸地上的
+/// 物品实体。
+///
+/// The entity-container branch of `getSourceContainer` (`getEntityContainer` /
+/// `CONTAINER_ENTITY_SELECTOR`): a live chest boat in the 1x1x1 cell above the
+/// hopper. Its loot table is unpacked before the slots are read. `None` means
+/// no entity container, so the caller falls back to ground item entities.
+fn suck_from_entity_container(
+    world: &mut World,
+    pos: BlockPos,
+    entity: &mut HopperEntity,
+) -> Option<bool> {
+    let cell = Aabb::new(
+        f64::from(pos.x),
+        f64::from(pos.y) + 1.0,
+        f64::from(pos.z),
+        f64::from(pos.x) + 1.0,
+        f64::from(pos.y) + 2.0,
+        f64::from(pos.z) + 1.0,
+    );
+    let boat = world.entity_ids().into_iter().find(|&id| {
+        world.entity(id).is_some_and(|found| {
+            !found.removed
+                && matches!(&found.kind, EntityKind::Boat(data) if data.chest.is_some())
+                && found.bounding_box().intersects(cell)
+        })
+    })?;
+    // `unpackChestVehicleLootTable(null)`：漏斗读的是容器接口，没有玩家 / 幸运值。
+    world.unpack_boat_loot_table(boat);
+    let mut items = match world.entity(boat).map(|found| found.kind) {
+        Some(EntityKind::Boat(data)) => data.chest.as_ref()?.items.clone(),
+        _ => return Some(false),
+    };
+    let (into_max, into_slots) = query(world, pos, &mut |container| {
+        let slots = (0..container.size())
+            .map(|slot| container.get(slot))
+            .collect::<Vec<_>>();
+        (container.max_stack_size(), slots)
+    })
+    .unwrap_or((CONTAINER_STACK_LIMIT, Vec::new()));
+    for slot in 0..items.len() {
+        let item = items[slot].clone();
+        if item.is_empty() {
+            continue;
+        }
+        // 运输船不是 `WorldlyContainer`，`canTakeItem` 默认真、没有面限制。
+        if !can_take_item_from_container(
+            &Slots::new(&mut items),
+            &item,
+            slot,
+            Direction::Down,
+            &into_slots,
+            into_max,
+        ) {
+            continue;
+        }
+        let taken = remove_item(&mut Slots::new(&mut items), slot, 1);
+        let mut inserted = None;
+        let written = world.silent_container(pos, &mut |container| {
+            inserted = Some(add_item(container, taken.clone(), None));
+        });
+        let Some(inserted) = inserted.filter(|_| written.is_some()) else {
+            items[slot] = item.clone();
+            continue;
+        };
+        if !inserted.remaining.is_empty() {
+            items[slot] = item.clone();
+            continue;
+        }
+        // 成功：把改过的 27 格写回船实体。
+        world.with_listed_entity_mut(boat, &mut |found| {
+            if let EntityKind::Boat(data) = &mut found.kind
+                && let Some(chest) = &mut data.chest
+            {
+                chest.items.clone_from_slice(&items);
+            }
+        });
+        if inserted.was_empty {
+            entity.set_cooldown(MOVE_ITEM_SPEED);
+        }
+        return Some(true);
+    }
+    Some(false)
 }
 
 /// `Hopper.SUCK_AABB`：方块内 x/z 整格，y 从 11/16 到 2。

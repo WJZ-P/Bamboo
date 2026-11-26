@@ -1396,6 +1396,21 @@ impl Level for RegionLevel<'_> {
         );
     }
 
+    fn unpack_boat_loot_table(&mut self, entity: i32) {
+        crate::container_loot::unpack_boat_with(
+            crate::container_loot::BoatUnpack {
+                entities: &mut *self.entities,
+                chunks: &*self.chunks,
+                sequences: self.loot_sequences,
+                random: self.random,
+                weather: self.block_weather,
+            },
+            entity,
+            None,
+            0.0,
+        );
+    }
+
     fn loot_table_pending(&self, pos: BlockPos) -> bool {
         self.containers
             .get(&pos)

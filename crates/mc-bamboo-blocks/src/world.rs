@@ -3092,6 +3092,15 @@ impl<'a> World<'a> {
         self.level.unpack_loot_table(pos);
     }
 
+    /// `ContainerEntity.unpackChestVehicleLootTable(null)`：漏斗读实体容器
+    /// （运输船）之前填好战利品表，见 [`Level::unpack_boat_loot_table`]。
+    ///
+    /// `ContainerEntity.unpackChestVehicleLootTable(null)`: fill a container
+    /// entity's loot table before a hopper reads its slots.
+    pub fn unpack_boat_loot_table(&mut self, entity: i32) {
+        self.level.unpack_boat_loot_table(entity);
+    }
+
     /// 缓存重放：活塞音高照样从世界随机源取一个数，再发 `Effect::Sound`。
     pub fn replay_piston_sound(&mut self, effect: crate::cache::PistonSoundEffect) {
         let pitch = self.level.next_random_float() * f32::from_bits(effect.scale)
