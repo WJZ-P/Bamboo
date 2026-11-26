@@ -32,6 +32,7 @@ pub(crate) use honeycomb::waxed;
 mod ignite;
 mod lead;
 pub(crate) use ignite::can_light;
+mod minecart;
 mod shears;
 mod spawn_egg;
 mod transformer;
@@ -61,6 +62,11 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         // `ArmorStandItem.useOn`：位置取整、朝向取整到 45°，应用物品上的实体数据。
         // `ArmorStandItem.useOn`: snapped position, 45° facing and the item's entity data.
         _ if ctx.item == items::ARMOR_STAND => armor_stand::use_on(world, ctx),
+        // `MinecartItem.useOn`：只能放在铁轨上，斜坡抬高半格。
+        // `MinecartItem.useOn`: rails only, half a block higher on a slope.
+        _ if crate::entity::minecart::MinecartKind::from_item(ctx.item).is_some() => {
+            minecart::use_on(world, ctx)
+        }
         _ if matches!(
             ctx.item,
             items::PAINTING | items::ITEM_FRAME | items::GLOW_ITEM_FRAME

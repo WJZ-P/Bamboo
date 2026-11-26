@@ -1105,6 +1105,17 @@ fn a_boat_and_a_minecart_are_consumed_only_when_they_can_be_placed() {
     assert!(cart.left.is_empty());
     assert!(cart.front.is(blocks::RAIL));
     assert_eq!(cart.seed, seed_after(slot_roll));
+    let carts: Vec<_> = level
+        .entities()
+        .iter()
+        .filter(|entity| matches!(entity.kind, EntityKind::Minecart(_)))
+        .collect();
+    assert_eq!(carts.len(), 1, "the dispenser spawns one minecart");
+    assert_eq!(
+        carts[0].position,
+        Vec3::new(1.625, 64.1, 0.5),
+        "1.125 cells east, 0.1 above the rail",
+    );
 
     let mut level = TestLevel::new();
     level.set(POS.relative(Direction::East), BlockState(blocks::STONE));
@@ -1116,6 +1127,13 @@ fn a_boat_and_a_minecart_are_consumed_only_when_they_can_be_placed() {
             .filter(|event| event.0 == 1000)
             .count(),
         2
+    );
+    assert!(
+        level
+            .entities()
+            .iter()
+            .all(|entity| !matches!(entity.kind, EntityKind::Minecart(_))),
+        "an unplaceable minecart spawns nothing",
     );
 }
 

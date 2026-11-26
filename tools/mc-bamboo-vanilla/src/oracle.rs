@@ -1722,12 +1722,14 @@ mod tests {
     fn an_unported_item_use_on_is_not_compared() {
         let scene = format!("[[0,64,0,{}]]", blocks::STONE);
         let hung = format!("[[0,64,1,{}]]", blocks::STONE);
-        // 画已经建模（会和生成的实体比较），换成还没移植的矿车物品。
-        // Paintings are modelled now (their spawns are compared), so use the
-        // still-unported minecart item.
+        // 用还没移植 `useOn` 的末影水晶：Bamboo 返回 Pass，排除表允许官方的
+        // Success 被跳过。矿车和画等已经建模的物品不适合当这个例子。
+        // Use the still-unported end crystal: Bamboo returns Pass, and the exclusion
+        // lets the official Success pass. Modelled items like minecarts and paintings
+        // no longer fit this test.
         let case = click_top(
-            "minecraft:minecart",
-            "MinecartItem",
+            "minecraft:end_crystal",
+            "EndCrystalItem",
             &scene,
             &answer("success", &hung),
         );
