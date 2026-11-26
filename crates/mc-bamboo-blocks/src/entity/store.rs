@@ -148,6 +148,8 @@ pub enum KindPublic {
     WindCharge(super::wind_charge::WindChargePublic),
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
+    /// 船：木种 / 乘客名单和同步数据。
+    Boat(Box<super::boat::BoatPublic>),
     Arrow(super::arrow::ArrowPublic),
     /// 羊驼的口水：同步要的 UUID、主人和俯仰角。
     ///
@@ -182,6 +184,7 @@ impl KindPublic {
             }
             Self::WindCharge(charge) => charge.variant.entity_type(),
             Self::Mob(mob) => mob.mob_type.entity_type(),
+            Self::Boat(boat) => boat.entity_type,
         }
     }
 
@@ -260,6 +263,8 @@ pub enum KindState {
     WindCharge(Box<super::wind_charge::WindCharge>),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
+    /// 船的全部状态。公开的那一半在 [`KindPublic::Boat`] 里另有一份拷贝。
+    Boat(Box<super::boat::Boat>),
     Arrow(Box<super::arrow::Arrow>),
     LlamaSpit(Box<super::spit::LlamaSpit>),
     Egg(Box<super::thrown_egg::ThrownEgg>),
@@ -402,6 +407,7 @@ impl EntityRow {
                 EntityKind::WindCharge(charge)
             }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
+            (KindPublic::Boat(_), KindState::Boat(boat)) => EntityKind::Boat(boat),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
         };
@@ -508,6 +514,10 @@ impl Entity {
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
                 KindState::Mob(mob),
+            ),
+            EntityKind::Boat(boat) => (
+                KindPublic::Boat(Box::new(super::boat::BoatPublic::of(&boat))),
+                KindState::Boat(boat),
             ),
         };
         EntityRow {

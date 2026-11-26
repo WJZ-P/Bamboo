@@ -10,6 +10,7 @@
 //! block entities; those already ran inside the scheduled-tick step.
 
 pub mod arrow;
+pub mod boat;
 pub mod ctx;
 pub mod leash_knot;
 pub mod lightning;
@@ -263,6 +264,11 @@ pub enum EntityKind {
     ///
     /// A mob. Its state is large, so it is boxed.
     Mob(Box<mob::Mob>),
+    /// 船 / 竹筏 / 运输船，对应 `AbstractBoat`。不是生物，也没有 `Mob` 状态。
+    ///
+    /// A boat / raft / chest boat, vanilla `AbstractBoat`. Not a mob; it has no
+    /// `Mob` state of its own.
+    Boat(Box<boat::Boat>),
 }
 
 impl EntityKind {
@@ -284,6 +290,7 @@ impl EntityKind {
             }
             Self::WindCharge(charge) => charge.variant.entity_type(),
             Self::Mob(mob) => mob.mob_type.entity_type(),
+            Self::Boat(boat) => boat.entity_type,
         }
     }
 
@@ -521,6 +528,7 @@ impl Entity {
             }
             EntityKind::WindCharge(_) => wind_charge::tick(self, ctx),
             EntityKind::LeashKnot(_) => leash_knot::tick(self, ctx),
+            EntityKind::Boat(_) => boat::tick(self, ctx),
             EntityKind::Mob(_) => {}
         }
     }
@@ -551,6 +559,17 @@ impl Entity {
     /// `EntityType.HUSK.create`。
     pub fn husk(position: Vec3) -> Self {
         Self::mob_of(mob::MobType::Husk, position)
+    }
+
+    /// 船 / 竹筏 / 运输船，`EntityType.create`。木种、筏和运输由 `entity_type` 决定。
+    ///
+    /// A boat / raft / chest boat, vanilla `EntityType.create`. The wood, raft
+    /// and chest variants are all chosen by `entity_type`.
+    pub fn boat(entity_type: i32, position: Vec3) -> Self {
+        Self::new(
+            EntityKind::Boat(Box::new(boat::Boat::new(entity_type))),
+            position,
+        )
     }
 
     /// 按注册表类型构造生物；未知类型返回 `None`，调用方按命令失败处理。

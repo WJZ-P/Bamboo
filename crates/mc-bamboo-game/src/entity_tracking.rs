@@ -832,6 +832,11 @@ pub enum KindData {
     OminousItemSpawner(ItemStack),
     /// 风弹：`add_entity` 的 data 用主人 ID。
     WindCharge(mc_bamboo_blocks::entity::wind_charge::WindChargePublic),
+    /// 船：乘客名单和同步数据（受伤、桨、气泡时间）；元数据项在协议步骤补齐。
+    ///
+    /// A boat: the passenger list and synced data (hurt, paddles, bubble time);
+    /// its metadata entries are filled in with the protocol step.
+    Boat(Box<mc_bamboo_blocks::entity::boat::BoatPublic>),
     /// 羊驼口水：没有自己的元数据。
     ///
     /// Llama spit, with no metadata of its own.
@@ -903,6 +908,7 @@ impl Snapshot {
             fall_flying: false,
             passengers: match &public.kind {
                 KindPublic::Mob(mob) => mob.passengers.clone(),
+                KindPublic::Boat(boat) => boat.passengers.clone(),
                 _ => Vec::new(),
             },
             vehicle: public.vehicle,
@@ -924,6 +930,7 @@ impl Snapshot {
             | KindData::Mob(_)
             | KindData::LightningBolt
             | KindData::OminousItemSpawner(_)
+            | KindData::Boat(_)
             | KindData::LeashKnot => 0,
         }
     }
@@ -951,6 +958,7 @@ impl KindData {
             KindPublic::LightningBolt(_) => Self::LightningBolt,
             KindPublic::OminousItemSpawner(stack) => Self::OminousItemSpawner(stack.clone()),
             KindPublic::WindCharge(charge) => Self::WindCharge(*charge),
+            KindPublic::Boat(boat) => Self::Boat(boat.clone()),
             KindPublic::LeashKnot { .. } => Self::LeashKnot,
         }
     }
@@ -984,6 +992,7 @@ impl KindData {
             | Self::LightningBolt
             | Self::OminousItemSpawner(_)
             | Self::WindCharge(_)
+            | Self::Boat(_)
             | Self::LeashKnot => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
@@ -1002,6 +1011,7 @@ impl KindData {
             | Self::SplashPotion(_)
             | Self::LightningBolt
             | Self::WindCharge(_)
+            | Self::Boat(_)
             | Self::LeashKnot => None,
         }
     }
@@ -1060,6 +1070,7 @@ impl KindData {
             | Self::LlamaSpit(_)
             | Self::LightningBolt
             | Self::WindCharge(_)
+            | Self::Boat(_)
             | Self::LeashKnot => Vec::new(),
             Self::OminousItemSpawner(stack) if !stack.is_empty() => {
                 vec![EntityData::Item(stack.clone())]

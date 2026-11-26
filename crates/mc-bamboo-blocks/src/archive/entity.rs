@@ -86,6 +86,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
             crate::entity::wind_charge::WindChargeVariant::Player => kinds::WIND_CHARGE,
             crate::entity::wind_charge::WindChargeVariant::Breeze => kinds::BREEZE_WIND_CHARGE,
         },
+        crate::entity::KindPublic::Boat(boat) => boat.entity_type,
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
     put(
@@ -234,6 +235,12 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 "HasBeenShot",
                 Tag::Byte(i8::from(saved.has_been_shot)),
             );
+        }
+        crate::entity::KindPublic::Boat(_) => {
+            let crate::entity::KindState::Boat(saved) = &state.kind else {
+                return Err(Error::new("mismatched boat entity halves"));
+            };
+            write_boat_additional(saved, &mut out)?;
         }
         crate::entity::KindPublic::ExperienceOrb { value } => {
             let crate::entity::KindState::ExperienceOrb(saved) = &state.kind else {
@@ -415,6 +422,9 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
     if let Some(row) = crate::entity::mob::nbt::read_mob(tag, id, uid)? {
         return Ok(Some(row));
     }
+    // 船按注册表实体类型 ID 认：`id` 名映射成注册表 ID 后判断是不是船。
+    let boat_type =
+        kinds::by_name(id).filter(|&kind| crate::entity::boat::is_boat_entity_type(kind));
     let entity = Entity {
         id: uid,
         // `split` 不读尺寸，拼回来时按 `kind` 重算。
@@ -546,7 +556,14 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                 orb.count = tag::int_or(tag, "Count", 1).max(1);
                 EntityKind::ExperienceOrb(orb)
             }
-            _ => return Ok(None),
+            _ => match boat_type {
+                Some(entity_type) => {
+                    let mut boat = crate::entity::boat::Boat::new(entity_type);
+                    read_boat_additional(tag, &mut boat);
+                    EntityKind::Boat(Box::new(boat))
+                }
+                None => return Ok(None),
+            },
         },
         position: Vec3::new(position[0], position[1], position[2]),
         delta: Vec3::new(delta[0], delta[1], delta[2]),
@@ -613,4 +630,71 @@ fn uuid_bytes(words: &[i32]) -> [u8; 16] {
 
 fn clamp_short(value: i32) -> i16 {
     value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+}
+
+/// 官方 `AbstractChestBoat.addChestVehicleSaveData`：有战利品表只写 `LootTable` /
+/// `LootTableSeed`，否则写 `Items`。普通船没有自己的附加数据（`AbstractBoat` 只写
+/// 拴绳，这里不建模）。
+///
+/// Vanilla `AbstractChestBoat.addChestVehicleSaveData`: write `LootTable` /
+/// `LootTableSeed` when a table is set, otherwise `Items`. A plain boat has no
+/// additional data of its own (leash data is not modelled).
+fn write_boat_additional(
+    boat: &crate::entity::boat::Boat,
+    out: &mut Vec<(String, Tag)>,
+) -> Result<()> {
+    let Some(chest) = &boat.chest else {
+        return Ok(());
+    };
+    if let Some(table) = &chest.loot_table {
+        put(out, "LootTable", Tag::String(table.clone()));
+        if chest.loot_table_seed != 0 {
+            put(out, "LootTableSeed", Tag::Long(chest.loot_table_seed));
+        }
+    } else {
+        let items: Vec<slots::SlottedItem> = chest
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, stack)| !stack.is_empty())
+            .map(|(index, stack)| slots::SlottedItem {
+                slot: index as i32,
+                stack: stack.clone(),
+            })
+            .collect();
+        put(
+            out,
+            "Items",
+            slots::encode_list(&items).map_err(|error| Error::new(error.to_string()))?,
+        );
+    }
+    Ok(())
+}
+
+/// 官方 `AbstractChestBoat.readChestVehicleSaveData`：读回 `LootTable` / `LootTableSeed`，
+/// 没有战利品表时读 `Items`。
+///
+/// Vanilla `AbstractChestBoat.readChestVehicleSaveData`: read `LootTable` /
+/// `LootTableSeed`, or `Items` when no table is set.
+fn read_boat_additional(tag: &Tag, boat: &mut crate::entity::boat::Boat) {
+    let Some(chest) = &mut boat.chest else {
+        return;
+    };
+    chest.loot_table = match tag::field(tag, "LootTable") {
+        Some(Tag::String(value)) => Some(value.clone()),
+        _ => None,
+    };
+    chest.loot_table_seed = tag::long_or(tag, "LootTableSeed", 0);
+    if chest.loot_table.is_none() {
+        let decoded = slots::decode_list(
+            tag::field(tag, "Items").unwrap_or(&Tag::List(Vec::new())),
+            chest.items.len(),
+        );
+        for item in decoded.items {
+            let index = item.slot as usize;
+            if index < chest.items.len() {
+                chest.items[index] = item.stack;
+            }
+        }
+    }
 }
