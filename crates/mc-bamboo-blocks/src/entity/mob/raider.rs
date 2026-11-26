@@ -768,8 +768,8 @@ impl RaiderGoal {
                 if !mob.silent && me.random.next_int_bounded(goals::reduced_tick_delay(100)) == 0 {
                     living::make_sound(me, mob, celebrate_sound(mob.mob_type));
                 }
-                if mob.raider.raid_id.is_none()
-                    && me.random.next_int_bounded(goals::reduced_tick_delay(50)) == 0
+                // `RaiderCelebration.tick` 第二句是 `!isPassenger()`，不是「没有袭击」。
+                if me.vehicle.is_none() && me.random.next_int_bounded(goals::reduced_tick_delay(50)) == 0
                 {
                     mob.jump.jump = true;
                 }
