@@ -1577,12 +1577,36 @@ mod tests;
 ///
 /// Vanilla's `handleInteract`: validate the entity and the reach, then let
 /// `Player.interactOn` try the requested hand and fall back to the other one.
+#[cfg(test)]
 pub(crate) fn on_interact_entity(
     region: &mut Region,
     id: PlayerId,
     entity_id: i32,
     hand: Hand,
     using_secondary_action: bool,
+) {
+    // 菜单 / 测试路径没有点击位置，按官方 `INTERACT`（非 `INTERACT_AT`）给零向量。
+    // Menu / test paths carry no hit point; use the zero vector of a plain `INTERACT`.
+    on_interact_entity_at(
+        region,
+        id,
+        entity_id,
+        hand,
+        using_secondary_action,
+        Vec3::default(),
+    );
+}
+
+/// `ServerGamePacketListenerImpl.handleInteract`：带 `INTERACT_AT` 的点击位置。
+///
+/// `ServerGamePacketListenerImpl.handleInteract`: with the `INTERACT_AT` hit point.
+pub(crate) fn on_interact_entity_at(
+    region: &mut Region,
+    id: PlayerId,
+    entity_id: i32,
+    hand: Hand,
+    using_secondary_action: bool,
+    location: Vec3,
 ) {
     // 官方把 `usingSecondaryAction` 记成潜行键；马科用它判断开物品栏。
     // Vanilla stores `usingSecondaryAction` as the sneak key; equines read it.
@@ -1683,7 +1707,7 @@ pub(crate) fn on_interact_entity(
             player_height,
             sneaking: using_secondary_action,
             difficulty: region.global.difficulty as i32,
-            hit_pos: None,
+            hit_pos: Some(location),
         };
         // 剪刀在交互里扣耐久，所以交互期间把玩家的手交给方块逻辑。
         // Shears lose durability inside the interaction, so lend the hands to block logic.

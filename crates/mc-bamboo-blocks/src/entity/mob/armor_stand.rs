@@ -799,4 +799,39 @@ mod tests {
             "minecraft:always_kills_armor_stands"
         ));
     }
+
+    #[test]
+    fn the_click_height_picks_the_equipped_slot() {
+        let cases = [
+            (0.3_f64, EquipmentSlot::Feet),
+            (0.7, EquipmentSlot::Legs),
+            (1.1, EquipmentSlot::Chest),
+            (1.8, EquipmentSlot::Head),
+        ];
+        for (y, slot) in cases {
+            let mut entity = armour_stand();
+            entity.with_mob(|_, mob| {
+                mob.equipment
+                    .set(slot, ItemStack::new(items::DIAMOND_HELMET, 1));
+            });
+            let req = interact_request(ItemStack::empty(), false, Some(Vec3::new(0.0, y, 0.0)));
+            let outcome = entity
+                .with_mob(|_, mob| interact(mob, &req))
+                .expect("a mob");
+            assert_eq!(
+                outcome.replacement.as_ref().map(|stack| stack.item),
+                Some(items::DIAMOND_HELMET),
+                "slot {slot:?} at y={y}"
+            );
+            assert!(
+                entity
+                    .kind
+                    .mob()
+                    .expect("a mob")
+                    .equipment
+                    .get(slot)
+                    .is_empty()
+            );
+        }
+    }
 }

@@ -2821,6 +2821,57 @@ fn a_cod_bucket_pours_water_and_spawns_a_cod() {
     );
 }
 
+/// `ServerboundInteractPacket` 的 `INTERACT_AT` 点击位置要传到盔甲架：点脚部不动，
+/// 点头部取下头盔。
+#[test]
+fn interact_at_click_height_reaches_the_armour_stand() {
+    let (mut server, client) = settled();
+    let uid = server.region().entities.spawn({
+        let mut entity = mc_bamboo_blocks::entity::Entity::by_mob_type(
+            mc_bamboo_blocks::entity::mob::MobType::ArmorStand,
+            Vec3::new(11.5, -59.0, 8.5),
+        );
+        entity.with_mob(|_, mob| {
+            mob.equipment.set(
+                mc_bamboo_protocol::packet::play::EquipmentSlot::Head,
+                ItemStack::new(items::DIAMOND_HELMET, 1),
+            );
+        });
+        entity
+    });
+    client.take_frames();
+
+    // 点脚部（相对高度 0.3）：没有脚部装备，交互落空，手里还是空的。
+    crate::interaction::on_interact_entity_at(
+        server.region(),
+        client.id,
+        uid,
+        Hand::Main,
+        false,
+        Vec3::new(0.0, 0.3, 0.0),
+    );
+    assert_eq!(
+        server.player(&client).inventory.held(Hand::Main).item,
+        items::AIR,
+        "a low click must not take the helmet off"
+    );
+
+    // 点头部（相对高度 1.8）：取下头盔到手里。
+    crate::interaction::on_interact_entity_at(
+        server.region(),
+        client.id,
+        uid,
+        Hand::Main,
+        false,
+        Vec3::new(0.0, 1.8, 0.0),
+    );
+    assert_eq!(
+        server.player(&client).inventory.held(Hand::Main).item,
+        items::DIAMOND_HELMET,
+        "a high click takes the helmet off"
+    );
+}
+
 #[path = "weapon_tests.rs"]
 mod weapon_tests;
 
