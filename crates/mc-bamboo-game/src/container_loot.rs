@@ -10,7 +10,9 @@
 
 use mc_bamboo_blocks::LevelRandom;
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_loot::{ChestParams, LootContainer, LootStack, RandomSequences, chest_loot};
+use mc_bamboo_loot::{
+    ChestParams, EntityView, LootContainer, LootStack, RandomSequences, chest_loot,
+};
 use mc_bamboo_protocol::item::ItemStack;
 use mc_bamboo_world::store::ChunkStore;
 use tracing::debug;
@@ -154,13 +156,22 @@ pub(crate) fn unpack(state: Unpack<'_>, pos: BlockPos) -> bool {
     true
 }
 
-/// `AbstractChestBoat` 的 `LootTable` / `LootTableSeed`：第一次读内容（破坏时
-/// `Containers.dropContents` 会读）先求值填进 27 格、清表，再返回解包后的物品。
+/// `ContainerEntity.unpackChestVehicleLootTable(player)`：第一次读内容（破坏、
+/// 菜单打开、漏斗读取）先求值填进 27 格、清表，再返回解包后的物品。菜单打开
+/// 带玩家（`THIS_ENTITY` + `getLuck()`），容器读写和破坏传 `None` / 0。
 /// 没有表时返回 `None`，调用方用原本的 `itemStacks`。
 ///
-/// Unpack a chest boat's loot table into its 27 slots and return the filled
-/// slots; `None` means there was no table.
-pub(crate) fn unpack_boat(region: &mut Region, entity: i32) -> Option<Vec<ItemStack>> {
+/// `ContainerEntity.unpackChestVehicleLootTable(player)`: on the first read
+/// (destruction, opening the menu, a hopper pulling) fill the 27 slots, clear
+/// the table and return the filled slots. Opening a menu passes the player
+/// (`THIS_ENTITY` + `getLuck()`); container reads and destruction pass
+/// `None` / 0. `None` means there was no table.
+pub(crate) fn unpack_boat(
+    region: &mut Region,
+    entity: i32,
+    player: Option<EntityView>,
+    luck: f32,
+) -> Option<Vec<ItemStack>> {
     let position = region
         .entities
         .public_at(entity)
@@ -188,8 +199,8 @@ pub(crate) fn unpack_boat(region: &mut Region, entity: i32) -> Option<Vec<ItemSt
             mc_bamboo_core::mth::floor(position.y),
             mc_bamboo_core::mth::floor(position.z),
         ),
-        player: None,
-        luck: 0.0,
+        player,
+        luck,
         level: &view,
     };
     let mut slots = LevelSlots { slots: &mut items };

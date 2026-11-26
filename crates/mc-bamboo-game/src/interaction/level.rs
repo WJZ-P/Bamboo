@@ -531,7 +531,7 @@ impl Level for RegionLevel<'_> {
             self.players
                 .values()
                 .find(|p| p.uuid.as_bytes() == &player)
-                .map(death_loot_player)
+                .map(player_loot_view)
                 .unwrap_or_else(|| mc_bamboo_loot::EntityView::new(entity_type::PLAYER)),
         );
         let Ok(stacks) = table.get_random_items_with_seed(
@@ -1494,7 +1494,7 @@ impl Level for RegionLevel<'_> {
         let source = loot.source;
         let actor = |uid| {
             if let Some(player) = self.players.get(&PlayerId(uid)) {
-                return Some(death_loot_player(player));
+                return Some(player_loot_view(player));
             }
             if let Some(entity) = self.entities.public_at(uid) {
                 let mut view = mc_bamboo_loot::EntityView::new(entity.kind.entity_type());
@@ -1542,7 +1542,7 @@ impl Level for RegionLevel<'_> {
                 .recent_player_id
                 .and_then(|uid| self.players.get(&PlayerId(uid))),
         }
-        .map(death_loot_player);
+        .map(player_loot_view);
         let mut victim = mc_bamboo_loot::EntityView::new(loot.victim.entity_type());
         victim.is_living = true;
         victim.is_on_fire = loot.on_fire;
@@ -1818,7 +1818,8 @@ fn loot_position(pos: Vec3) -> mc_bamboo_loot::Position {
     mc_bamboo_loot::Position::new(pos.x, pos.y, pos.z)
 }
 
-fn death_loot_player(player: &Player) -> mc_bamboo_loot::EntityView {
+/// 战利品条件里的玩家 `THIS_ENTITY` 视角，生物死亡和运输船打开菜单共用。
+pub(crate) fn player_loot_view(player: &Player) -> mc_bamboo_loot::EntityView {
     let mut view = mc_bamboo_loot::EntityView::new(entity_type::PLAYER);
     view.is_living = true;
     view.is_fall_flying = player.sync.is_fall_flying();

@@ -764,7 +764,10 @@ fn hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32) {
     });
     if destroyed {
         // `AbstractChestBoat.destroy` 的 `Containers.dropContents` 会先解包战利品表。
-        let dropped = crate::container_loot::unpack_boat(region, entity_id).unwrap_or(chest_items);
+        // `Containers.dropContents` 读的是容器接口（`unpackChestVehicleLootTable(null)`），
+        // 不带玩家，也没有幸运值加成。
+        let dropped =
+            crate::container_loot::unpack_boat(region, entity_id, None, 0.0).unwrap_or(chest_items);
         drop_boat_contents(region, position, drop_item, &dropped);
     }
 }
