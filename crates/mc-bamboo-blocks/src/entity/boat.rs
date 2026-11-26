@@ -460,11 +460,25 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     }
 
     // `AbstractBoat.tick` 第 9 步：`getBoundingBox().inflate(0.2, -0.01, 0.2)`
-    // 内的实体，没上船的 `push(entity)`；Bamboo 只推对方，船自己不反推。
-    let push_box = me.bounding_box().inflate(0.2, -0.01, 0.2);
+    // 内的实体，没上船的走 `AbstractBoat.push(entity)`。`Entity.push` 两边都推，
+    // 船自己没乘客时（`!isVehicle()`）也被反推。
+    let my_box = me.bounding_box();
+    let push_box = my_box.inflate(0.2, -0.01, 0.2);
+    let self_pushable = boat.passengers.is_empty();
     let mut push_targets = Vec::new();
     ctx.for_each_other_in(push_box, &mut |public| {
-        if !public.removed && !boat.passengers.contains(&public.uid) {
+        if public.removed || boat.passengers.contains(&public.uid) {
+            return;
+        }
+        let other_box = public.bounding_box();
+        // `AbstractBoat.push` 的高度门控：对方是船时比它的 minY 与本船 maxY，
+        // 不是船时比它的 minY 与本船 minY。
+        let pushable = if matches!(public.kind, KindPublic::Boat(_)) {
+            other_box.min_y < my_box.max_y
+        } else {
+            other_box.min_y <= my_box.min_y
+        };
+        if pushable {
             push_targets.push(public.uid);
         }
     });
@@ -474,7 +488,7 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
             Command::PushMob {
                 other: uid,
                 from,
-                self_pushable: false,
+                self_pushable,
             },
             me,
         );

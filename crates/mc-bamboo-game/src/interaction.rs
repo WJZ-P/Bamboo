@@ -1525,11 +1525,11 @@ pub(crate) fn on_use_item(
         );
         let mut blocked = false;
         region.entities.for_each_in(area, &mut |public| {
-            if public.removed {
+            // `EntitySelector.CAN_BE_PICKED` 就是 `Entity.isPickable()`，不是所有活实体。
+            if !public.is_pickable() {
                 return;
             }
-            // `getPickRadius()` 对船 / 生物 / 矿车都是 0；`CAN_BE_PICKED`
-            // 在 Bamboo 里没有单独字段，用所有活实体近似。
+            // `getPickRadius()` 对船 / 生物 / 矿车都是 0，直接用实体盒子判眼睛是否在内。
             if public.bounding_box().contains(eye.x, eye.y, eye.z) {
                 blocked = true;
             }
