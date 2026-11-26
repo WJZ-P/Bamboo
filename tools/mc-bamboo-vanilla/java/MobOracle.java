@@ -1266,8 +1266,8 @@ public final class MobOracle {
         boolean attackGround;
         /** 攻击场景：主手武器上的附魔，成对存 (名字, 等级)。 */
         final List<String[]> attackEnchants = new ArrayList<>();
-        /** 攻击场景：这些下标的生物是 0 号玩家驯服的狼（范围击退要排除它）。 */
-        final List<Integer> tamedWolves = new ArrayList<>();
+        /** 攻击场景：这些下标的生物是驯服的狼，值是其主人玩家下标（范围击退要排除它）。 */
+        final java.util.Map<Integer, Integer> tamedWolves = new java.util.HashMap<>();
         /** 长矛场景：在这一刻触发 `PiercingWeapon.attack(player, MAINHAND)`，-1 不触发。 */
         int stabTick = -1;
         /** 长矛蓄力场景：在这一刻 `startUsingItem` 开始蓄力，-1 不蓄力。 */
@@ -1681,7 +1681,13 @@ public final class MobOracle {
 
         /** 攻击场景：把第 `mobIndex` 头生物标记成 0 号玩家驯服的狼。 */
         Scene tamedWolf(int mobIndex) {
-            tamedWolves.add(mobIndex);
+            tamedWolves.put(mobIndex, 0);
+            return this;
+        }
+
+        /** 攻击场景：把第 `mobIndex` 头生物标记成第 `ownerIndex` 名玩家驯服的狼。 */
+        Scene tamedWolfOwner(int mobIndex, int ownerIndex) {
+            tamedWolves.put(mobIndex, ownerIndex);
             return this;
         }
 
@@ -5748,6 +5754,8 @@ public final class MobOracle {
                 // 玩家朝向 +Z（yaw 0），前向速度也在 +Z。
                 player.setKnownMovement(new Vec3(0.0, 0.0, scene.kineticSpeed));
             }
+            // 队伍：宠物继承主人的队伍（`TamableAnimal.getTeam()` 回退），攻击场景也进队。
+            joinTeam(level, player.getScoreboardName(), teamOf(scene.playerTeams, i));
             players.add(player);
         }
         level.playersList().addAll(players);
@@ -5785,8 +5793,8 @@ public final class MobOracle {
             }
         }
         for (int i = 0; i < scene.cows.size(); i++) {
-            // 攻击场景的「驯服狼」用狼代替按名字推出的动物类型，主人是 0 号玩家。
-            boolean tamedWolf = scene.tamedWolves.contains(i);
+            // 攻击场景的「驯服狼」用狼代替按名字推出的动物类型，主人见 `tamedWolves`。
+            boolean tamedWolf = scene.tamedWolves.containsKey(i);
             Animal cow = tamedWolf
                     ? EntityTypes.WOLF.create(level, EntitySpawnReason.COMMAND)
                     : animalType(scene.name).create(level, EntitySpawnReason.COMMAND);
@@ -5854,7 +5862,7 @@ public final class MobOracle {
                 // UUID，都不带副作用，和 Bamboo 一侧直接填 `tame.flags` / `tame.owner` 对齐。
                 net.minecraft.world.entity.TamableAnimal tamable = (net.minecraft.world.entity.TamableAnimal) cow;
                 tamable.setTame(true, false);
-                tamable.setOwner(players.get(0));
+                tamable.setOwner(players.get(scene.tamedWolves.get(i)));
             }
             cows.add(cow);
             level.tracked.add(cow);
@@ -5890,9 +5898,9 @@ public final class MobOracle {
             line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
             line.append(",\"seed\":").append(scene.seeds.get(i));
-            line.append(",\"kind\":").append(scene.tamedWolves.contains(i)
+            line.append(",\"kind\":").append(scene.tamedWolves.containsKey(i)
                     ? 8 : animalKind(scene.name));
-            line.append(",\"owner\":").append(scene.tamedWolves.contains(i) ? 0 : -1);
+            line.append(",\"owner\":").append(scene.tamedWolves.getOrDefault(i, -1));
             line.append(",\"chest\":").append(i == 0 ? scene.targetChest : 0);
             line.append(",\"wool\":").append(cows.get(i) instanceof Sheep sheep
                     ? (sheep.getColor().getId() | (sheep.isSheared() ? 16 : 0))
@@ -5916,7 +5924,8 @@ public final class MobOracle {
             line.append(",\"z\":").append(Double.doubleToRawLongBits(player.getZ()));
             line.append(",\"eye\":").append(Float.floatToRawIntBits(player.getEyeHeight()));
             line.append(",\"item\":").append(BuiltInRegistries.ITEM.getId(scene.playerItems.get(i)));
-            line.append(",\"looting\":").append(scene.lootingLevels.get(i)).append('}');
+            line.append(",\"looting\":").append(scene.lootingLevels.get(i));
+            line.append(",\"team\":").append(teamOf(scene.playerTeams, i)).append('}');
         }
         line.append("],\"hurts\":[");
         for (int i = 0; i < scene.hurts.size(); i++) {

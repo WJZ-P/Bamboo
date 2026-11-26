@@ -4151,6 +4151,7 @@ impl Report {
             mob_kinds: case.cows.iter().map(|cow| cow.kind).collect(),
             mob_owners: case.cows.iter().map(|cow| cow.owner).collect(),
             cow_chests: case.cows.iter().map(|cow| cow.chest).collect(),
+            player_teams: case.players.iter().map(|player| player.team).collect(),
         };
         // 故意改坏：难度缩放、护甲公式（用空装备）、保护附魔等级、
         // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置）、攻击充能值

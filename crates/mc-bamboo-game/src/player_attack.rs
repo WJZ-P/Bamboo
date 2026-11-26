@@ -810,7 +810,7 @@ fn attack_inner(
     let Some(plan) = plan_attack(region, &target, &request) else {
         return;
     };
-    let (was_hurt, actual_damage, wind_burst_knock, wind_burst_block_count) =
+    let (was_hurt, actual_damage, wind_burst) =
         land_attack(region, id, entity_id, &target, &plan);
     if was_hurt {
         // 官方 `PlayerHurtEntityTrigger` / `KilledTrigger`（玩家攻击实体）。
@@ -830,16 +830,7 @@ fn attack_inner(
             payload.clone(),
         );
         crate::advancement_triggers::record(region, id, "minecraft:player_killed_entity", payload);
-        finish_hit(
-            region,
-            id,
-            entity_id,
-            &target,
-            &plan,
-            actual_damage,
-            wind_burst_knock,
-            wind_burst_block_count,
-        );
+        finish_hit(region, id, entity_id, &target, &plan, actual_damage, wind_burst);
     }
     // `PlayerInteractTrigger`：玩家右键实体在 `interaction::on_interact_entity` 里报，
     // 这里是左键攻击，报 `any_block_use` 之外的交互事件。
@@ -1165,7 +1156,7 @@ fn land_attack(
     entity_id: i32,
     target: &TargetInfo,
     plan: &AttackPlan,
-) -> (bool, f32, Option<Vec3>, i32) {
+) -> (bool, f32, Option<(Vec3, i32)>) {
     let hits_player = player_target(region, entity_id);
     // 官方在 `hurtOrSimulate` 之前记下目标的旧速度，最后用
     // `ServerPlayer.syncVelocity` 那一支把服务端速度改回去，只把新速度发给客户端。
@@ -1286,8 +1277,7 @@ fn land_attack(
     (
         hit,
         damage_taken(region, entity_id, target.health),
-        wind_burst_knock,
-        wind_burst_block_count,
+        wind_burst_knock.map(|knock| (knock, wind_burst_block_count)),
     )
 }
 
@@ -1304,8 +1294,7 @@ fn finish_hit(
     target: &TargetInfo,
     plan: &AttackPlan,
     actual_damage: f32,
-    wind_burst_knock: Option<Vec3>,
-    wind_burst_block_count: i32,
+    wind_burst: Option<(Vec3, i32)>,
 ) {
     // `Player.causeExtraKnockback` 在命中之后衰减攻击者速度并取消疾跑，
     // 力道大于 0 才做；它和伤害、横扫、动画的先后顺序不影响后面读到的状态。
@@ -1407,8 +1396,8 @@ fn finish_hit(
     // 风爆 `wind_burst` 的 `pushFromExplosion` 在 `hurtEnemy` 之后：爆炸包
     // `connection.send` 给自己，然后只改服务端速度（客户端由爆炸包拿击退），
     // 所以 `set_entity_motion` 里还是下砸冲量。
-    if let Some(knock) = wind_burst_knock {
-        send_wind_burst_explode(region, id, plan.position, 3.5, wind_burst_block_count, Some(knock));
+    if let Some((knock, block_count)) = wind_burst {
+        send_wind_burst_explode(region, id, plan.position, 3.5, block_count, Some(knock));
         if let Some(player) = region.players.get_mut(&id) {
             player.motion.delta = player.motion.delta.add(knock);
         }
@@ -2396,19 +2385,19 @@ pub(crate) fn kinetic_tick(region: &mut Region, id: PlayerId, time_held: i32) {
         let actual_damage = damage_taken(region, target.id, target.health);
         item_use_stats::award_damage_dealt(region, id, (actual_damage * 10.0).round() as i32);
         // `damageStatsAndHearts`：`actualDamage > 2` 时发伤害指示粒子。
-        if actual_damage > 2.0 {
-            if let Some((position, height)) = kinetic_target_center(region, target) {
-                send_particles(
-                    region,
-                    ParticleSpec {
-                        particle: particle_type::DAMAGE_INDICATOR,
-                        position: Vec3::new(position.x, position.y + f64::from(height) * 0.5, position.z),
-                        spread: (0.1, 0.0, 0.1),
-                        speed: 0.2,
-                        count: (actual_damage * 0.5) as i32,
-                    },
-                );
-            }
+        if actual_damage > 2.0
+            && let Some((position, height)) = kinetic_target_center(region, target)
+        {
+            send_particles(
+                region,
+                ParticleSpec {
+                    particle: particle_type::DAMAGE_INDICATOR,
+                    position: Vec3::new(position.x, position.y + f64::from(height) * 0.5, position.z),
+                    spread: (0.1, 0.0, 0.1),
+                    speed: 0.2,
+                    count: (actual_damage * 0.5) as i32,
+                },
+            );
         }
         if weapon_component(&setup.held) {
             item_use_stats::award(region, id, setup.held.item);
@@ -3504,6 +3493,17 @@ mod tests {
         assert!(!range.is_in_range(eye, past, 0.0, false));
     }
 
+    /// 长矛的 `attack_animation` 组件是刺击（kind 2、时长 19），别的武器是缺省挥手
+    /// （whack、时长 6）。
+    #[test]
+    fn spear_attack_animation_is_a_stab() {
+        let spear = stack(mc_bamboo_data::items::IRON_SPEAR);
+        assert_eq!(attack_swing(&spear), (SwingAnimationType::Stab, 19));
+        let mace = stack(mc_bamboo_data::items::MACE);
+        assert_eq!(attack_swing(&mace), (SwingAnimationType::Whack, 6));
+        assert_eq!(attack_swing(&ItemStack::empty()), (SwingAnimationType::Whack, 6));
+    }
+
     /// 铁长矛的 `kinetic_weapon` 组件按官方 26.3 的数值解析出来。
     #[test]
     fn iron_spear_kinetic_spec_matches_26_3() {
@@ -3542,5 +3542,44 @@ mod tests {
         };
         assert!(!kinetic_condition(&speed_gate, 10, 10.0, 0.0, mult));
         assert!(kinetic_condition(&speed_gate, 10, 11.0, 0.0, mult));
+    }
+
+    /// `TamableAnimal.getTeam()` 覆写：驯服动物自己没队时返回主人的队。这里钉住
+    /// `mob_team_index` 的回退：狼自己没队、主人（玩家）在 0 队时，有效队伍是 0。
+    #[test]
+    fn tamed_mob_inherits_its_owners_team() {
+        use mc_bamboo_blocks::entity::{Entity, mob::MobType};
+        use uuid::Uuid;
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let player = Player::new(
+            id,
+            Uuid::from_u128(1),
+            "Kitten".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        region.insert_player(player);
+        std::sync::Arc::make_mut(&mut region.global.scoreboard).insert_team("Kitten", 0);
+
+        let uid = region
+            .entities
+            .spawn(Entity::by_mob_type(MobType::Wolf, Vec3::new(2.5, 64.0, 2.5)));
+        region.entities.with_mut(uid, |entity| {
+            if let Some(mob) = entity.kind.mob_mut() {
+                mob.tame.flags |= mc_bamboo_blocks::entity::mob::tame::FLAG_TAME;
+                mob.tame.owner = Some(*Uuid::from_u128(1).as_bytes());
+            }
+        });
+        let public = region.entities.public_at(uid).expect("the wolf exists");
+        let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind else {
+            panic!("expected a mob");
+        };
+        // 自己没队、驯服 → 回退到主人（Kitten）的 0 队。
+        assert_eq!(mob_team_index(&region, mob, true), Some(0));
+        // 没驯服（tame 假）→ 不回退。
+        assert_eq!(mob_team_index(&region, mob, false), None);
     }
 }

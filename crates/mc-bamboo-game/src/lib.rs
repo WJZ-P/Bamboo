@@ -1231,6 +1231,17 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
         .add(observer, Box::new(observer_capture.clone()));
     region.insert_player(watcher);
     region.insert_player(player);
+    // 队伍：宠物继承主人的队伍，攻击场景也把玩家（0 攻击者 / 1 观察者）进队。
+    if scene.player_teams.iter().any(|&team| team >= 0) {
+        let scoreboard = std::sync::Arc::make_mut(&mut region.global.scoreboard);
+        for (index, &team) in scene.player_teams.iter().enumerate() {
+            if team < 0 {
+                continue;
+            }
+            let name = if index == 0 { "Kitten" } else { "Observer" };
+            scoreboard.insert_team(name, team);
+        }
+    }
     if scene.attack_sprint {
         entity_sync::set_sprinting(&mut region, id, true);
     }
@@ -1282,11 +1293,17 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
                         mc_bamboo_blocks::entity::mob::MobType::Wolf,
                         Vec3::new(x, y, z),
                     ));
-                if scene.mob_owners.get(index).copied().unwrap_or(-1) == 0 {
+                if let Some(owner) = scene.mob_owners.get(index).copied().filter(|&owner| owner >= 0) {
                     region.entities.with_mut(uid, |entity| {
                         if let Some(mob) = entity.kind.mob_mut() {
                             mob.tame.flags |= mc_bamboo_blocks::entity::mob::tame::FLAG_TAME;
-                            mob.tame.owner = Some(*Uuid::from_u128(1).as_bytes());
+                            // 玩家下标 0 是攻击者（UUID 1），1 是观察者（UUID 2）。
+                            let uuid = if owner == 0 {
+                                Uuid::from_u128(1)
+                            } else {
+                                Uuid::from_u128(2)
+                            };
+                            mob.tame.owner = Some(*uuid.as_bytes());
                         }
                     });
                 }
@@ -2025,6 +2042,10 @@ pub struct ReplayPlayerHurt {
     /// The chest armor item id of each scene mob (0 for none), aligned with
     /// [`Self::cow_seeds`].
     pub cow_chests: Vec<i32>,
+    /// 每名玩家的队伍编号（-1 不在队伍里），按下标对齐（0 攻击者 / 1 观察者）。
+    ///
+    /// Each player's team (-1 for none), indexed like the players (0 attacker / 1 observer).
+    pub player_teams: Vec<i32>,
 }
 
 /// 攻击场景里每头牛的逐刻状态，全部用原始位比较。
