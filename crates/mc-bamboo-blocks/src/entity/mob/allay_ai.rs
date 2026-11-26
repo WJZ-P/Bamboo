@@ -196,7 +196,7 @@ fn idle_activity() -> ActivityData {
             Kind::Allay(Behavior::GoToWantedItem),
             Kind::Allay(Behavior::GoAndGiveItemsToTarget),
             Kind::Allay(Behavior::StayCloseToTarget),
-            Kind::LookAtPlayerSometimes {
+            Kind::LookAtEntitySometimes {
                 max_dist: 6.0,
                 min_interval: 30,
                 max_interval: 60,

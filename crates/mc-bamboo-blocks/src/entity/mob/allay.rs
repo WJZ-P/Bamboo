@@ -61,6 +61,9 @@ pub enum Tamper {
     NoDuplicationCooldown,
     /// 停舞判定反转（`shouldStopDancing` 取反）。
     InvertStopDancing,
+    /// `SetEntityLookTargetSometimes` 的任意活体变体改回只找玩家（`allay_look_cow`
+    /// 应报出差异）。
+    LookPlayerOnly,
 }
 
 thread_local! {
@@ -73,6 +76,7 @@ pub fn set_oracle_tamper(name: &str) {
         "allay_deposit_player" => Tamper::DepositPlayerOnly,
         "allay_no_dup_cooldown" => Tamper::NoDuplicationCooldown,
         "allay_dance_inverted" => Tamper::InvertStopDancing,
+        "allay_look_player_only" => Tamper::LookPlayerOnly,
         _ => Tamper::None,
     };
     ORACLE_TAMPER.with(|cell| cell.set(tamper));

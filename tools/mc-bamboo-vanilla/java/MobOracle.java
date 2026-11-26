@@ -14371,7 +14371,9 @@ public final class MobOracle {
                 new AScene("allay_dance", 140, null, new int[] {10, 2, 64, 0},
                         new int[] {90, 2, 64, 0}, new int[] {1, 0, 0}, null, true),
                 new AScene("allay_duplicate", 140, null, new int[] {10, 2, 64, 0},
-                        null, new int[] {30, 1, 0}, null, true)
+                        null, new int[] {30, 1, 0}, null, true),
+                // 悦灵旁放一头静止的牛、不放玩家：验证任意活体变体把 LOOK_TARGET 指向牛。
+                new AScene("allay_look_cow", 80, null, null, null, null, null, false)
         );
         int cases = 0;
         for (AScene scene : scenes) {
@@ -14422,6 +14424,18 @@ public final class MobOracle {
             world.tracked.add(allay);
             // 官方把悦灵的两个动态监听者登记到眼睛所在区段（假世界没有 entityManager）。
             allay.updateDynamicGameEventListener((dynamic, level) -> dynamic.add(level));
+            // `allay_look_cow`：旁边放一头静止的牛（NoAI、随机源固定、无玩家），
+            // 悦灵的任意活体 look 变体应把 LOOK_TARGET 指向它。
+            if (scene.name().equals("allay_look_cow")) {
+                net.minecraft.world.entity.animal.cow.Cow cow = EntityTypes.COW.create(
+                        world, EntitySpawnReason.COMMAND);
+                cow.setId(FIRST_ID + 1);
+                cow.setUUID(new UUID(0L, 2L));
+                cow.snapTo(1.5, 64.0, 0.5, 0.0F, 0.0F);
+                setRandom(cow, 7L);
+                cow.setNoAi(true);
+                world.tracked.add(cow);
+            }
 
             long mobSeed = randomSeed(allay);
             long levelSeed = randomSeed(world.getRandom());

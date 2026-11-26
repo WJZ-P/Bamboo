@@ -73,6 +73,9 @@ struct Script {
     jukebox_stop: Option<(i32, BlockPos)>,
     interact: Option<(i32, i32)>,
     drop: Option<(i32, Vec3, i32)>,
+    /// 悦灵旁边的一头静止牛（`allay_look_cow`）：验证 `SetEntityLookTargetSometimes`
+    /// 的「任意活体」变体会把 `LOOK_TARGET` 指向牛而不是只有玩家。
+    cow: Option<Vec3>,
 }
 
 fn script(name: &str) -> Script {
@@ -82,6 +85,7 @@ fn script(name: &str) -> Script {
         jukebox_stop: None,
         interact: None,
         drop: None,
+        cow: None,
     };
     match name {
         "allay_give_player" => {
@@ -101,6 +105,9 @@ fn script(name: &str) -> Script {
         "allay_duplicate" => {
             out.jukebox_start = Some((10, BlockPos::new(2, 64, 0)));
             out.interact = Some((30, 1));
+        }
+        "allay_look_cow" => {
+            out.cow = Some(Vec3::new(1.5, 64.0, 0.5));
         }
         _ => {}
     }
@@ -262,10 +269,32 @@ impl Report {
             let mut world = World::new(&mut level, &mut ticks);
             spawn_allay(&mut world, case)
         };
+        // `allay_look_cow`：悦灵旁边放一头静止的牛（官方 `world.tracked.add`），
+        // 无玩家；悦灵的 `SetEntityLookTargetSometimes`（任意活体）应把 `LOOK_TARGET`
+        // 指向牛。牛 NoAI、随机源固定，和 Java 一侧 `setRandom(cow, 7)` 一致。
+        if let Some(pos) = script.cow {
+            let mut world = World::new(&mut level, &mut ticks);
+            let id = world.spawn_entity(Entity::by_mob_type(MobType::Cow, pos));
+            world.with_entity_mut(id, &mut |entity| {
+                entity.random = JavaRandom::new(7);
+                entity.y_rot = 0.0;
+                entity.old_position = pos;
+                entity.with_mob(|_, mob| {
+                    mob.uuid = 2_u128.to_be_bytes();
+                    mob.x_rot = 0.0;
+                    mob.y_head_rot = 0.0;
+                    mob.y_body_rot = 0.0;
+                    mob.y_rot_o = 0.0;
+                    mob.x_rot_o = 0.0;
+                    mob.no_ai = true;
+                });
+            });
+        }
         // 悦灵自己在官方夹具里是 `world.tracked.add`（不是 `addFreshEntity`），
         // 清掉 `spawn_entity` 留下的生成快照，后面才不会被当成 spawned 排除。
         let _ = level.entities.take_spawn_snapshots();
-        let mut player_held = 0;
+        // 官方 `playerHeld` 无玩家时是 -1（`player == null ? -1 : ...`）。
+        let mut player_held = if case.has_player { 0 } else { -1 };
         let mut level_seed;
         let mut player_main_hand = 0;
         // 官方夹具里 `addFreshEntity`（投出的物品、复制的悦灵）进 `spawned` 而不是
