@@ -2827,5 +2827,8 @@ mod weapon_tests;
 #[path = "egg_tests.rs"]
 mod egg_tests;
 
+#[path = "firework_tests.rs"]
+mod firework_tests;
+
 #[path = "advancement_tests.rs"]
 mod advancement_tests;
