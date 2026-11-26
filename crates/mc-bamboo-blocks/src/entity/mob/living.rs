@@ -227,20 +227,29 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     // 控制乘客是生物、且不在 `#non_controlling_rider` 里时，MOVE / JUMP / LOOK 都关掉
     // （26.3 标签是史莱姆 / 岩浆怪 / 硫磺方块怪，建模范围内是史莱姆和硫磺方块怪；
     // 岩浆怪不在建模范围）。玩家骑手不算生物，标志保持打开；船不在建模范围，
-    // JUMP 和 MOVE 同值。
+    // JUMP 和 MOVE 同值。`Ravager` 覆写只看 `#raiders` 标签（掠夺者骑手会关掉标志，
+    // 别的生物骑手不会）。
     //
     // Vanilla `Mob.updateControlFlags`: a mob passenger outside
     // `#non_controlling_rider` (slime, magma cube, sulfur cube; slime and sulfur
     // cube are modeled here) disables MOVE / JUMP / LOOK. A player rider is not a
-    // mob, so the flags stay on; boats are out of scope.
+    // mob, so the flags stay on; boats are out of scope. `Ravager` overrides it
+    // to look at `#raiders` (a pillager rider disables the flags, other mob riders
+    // do not).
     if me.tick_count % 5 == 0 {
         let mob_rider = !mob.no_ai
             && mob.first_passenger().is_some_and(|uid| {
                 ctx.other(uid).is_some_and(|public| match &public.kind {
-                    crate::entity::KindPublic::Mob(rider) => !matches!(
-                        rider.mob_type,
-                        super::MobType::Slime | super::MobType::SulfurCube
-                    ),
+                    crate::entity::KindPublic::Mob(rider) => {
+                        if mob.mob_type == super::MobType::Ravager {
+                            rider.mob_type.is_raider()
+                        } else {
+                            !matches!(
+                                rider.mob_type,
+                                super::MobType::Slime | super::MobType::SulfurCube
+                            )
+                        }
+                    }
                     _ => false,
                 })
             });
