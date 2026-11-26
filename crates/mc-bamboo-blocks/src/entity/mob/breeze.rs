@@ -465,8 +465,9 @@ pub fn firing_y(cx: &Cx) -> f64 {
     cx.me.position.y + f64::from(cx.me.dimensions.1) * 0.5 + f64::from(0.3_f32)
 }
 
-/// `Entity.lookAt(EYES, target)`：从眼睛出发立刻转向目标，`yHeadRot` 跟上，旧的
-/// 朝向（`xRotO` / `yRotO`）同步成当前值。
+/// `Entity.lookAt(EYES, target)`：从眼睛出发立刻转向目标，旧的朝向
+/// （`xRotO` / `yRotO`）同步成当前值。官方 `lookAt` 只动 `xRot` / `yRot`，
+/// 不动 `yHeadRot`（头由 `BodyRotationControl` 自己跟上）。
 fn look_at_eyes(me: &mut Entity, mob: &mut Mob, target: Vec3) {
     let eye = Vec3::new(
         me.position.x,
@@ -481,7 +482,6 @@ fn look_at_eyes(me: &mut Entity, mob: &mut Mob, target: Vec3) {
     let yaw = mth::wrap_degrees((mth::atan2(dz, dx) * 57.295_776_367_187_5 - 90.0) as f32);
     mob.x_rot = pitch;
     me.y_rot = yaw;
-    mob.y_head_rot = yaw;
     mob.x_rot_o = pitch;
     mob.y_rot_o = yaw;
 }

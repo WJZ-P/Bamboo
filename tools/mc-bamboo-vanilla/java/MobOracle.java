@@ -14729,6 +14729,9 @@ public final class MobOracle {
             mob.setId(FIRST_ID);
             mob.setUUID(new UUID(0L, 1L));
             mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            mob.setYRot(0.0F);
+            mob.setYHeadRot(0.0F);
+            mob.setYBodyRot(0.0F);
             setRandom(mob, 5L);
             BrainOracle.fixSensorDelays(mob, 1L);
             BrainOracle.reseedShuffles(mob, randomSeed(mob));
