@@ -57,6 +57,7 @@ fn can_glide(player: &Player, blocks: &PlayerBlocks<'_>) -> bool {
     let feet = BlockPos::containing(player.position());
     let fluid = blocks.state(feet).fluid();
     !player.dead
+        && player.spawn_pending.is_none()
         && !player.on_ground
         && !player.riding.is_passenger()
         && !player.sync.flying
@@ -122,23 +123,28 @@ pub(crate) fn tick(region: &mut Region) {
         .map(|player| player.id)
         .collect();
     for id in ids {
-        tick_player(region, id);
+        if update_fall_flying(region, id) {
+            crate::player_move::travel_fall_flying(region, id);
+        }
     }
 }
 
-fn tick_player(region: &mut Region, id: PlayerId) {
+fn update_fall_flying(region: &mut Region, id: PlayerId) -> bool {
     let Some(player) = region.players.get_mut(&id) else {
-        return;
+        return false;
     };
+    if player.sync.is_fall_flying() && player.motion.delta.y > -0.5 {
+        player.motion.fall_distance = player.motion.fall_distance.min(1.0);
+    }
     let blocks = PlayerBlocks::new(&region.chunks, &region.block_entities);
     if !player.sync.is_fall_flying() || !can_glide(player, &blocks) {
         player.sync.set_fall_flying(false);
         player.fall_fly_ticks = 0;
-        return;
+        return false;
     }
     player.fall_fly_ticks = player.fall_fly_ticks.wrapping_add(1);
     if player.fall_fly_ticks % 10 != 0 {
-        return;
+        return true;
     }
     let position = player.position();
     let context = EventContext {
@@ -156,6 +162,7 @@ fn tick_player(region: &mut Region, id: PlayerId) {
     world.game_event(GameEvent::ElytraGlide, position, context);
     let effects = world.into_effects();
     crate::interaction::send_effects(region, Some(id), &effects);
+    true
 }
 
 fn damage_glider(region: &mut Region, id: PlayerId) {

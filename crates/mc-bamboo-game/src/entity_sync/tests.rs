@@ -1132,10 +1132,8 @@ fn fall_flying_stops_when_the_player_lands_enters_water_or_unequips() {
         match condition {
             "landed" => stage.player().on_ground = true,
             "water" => {
-                stage
-                    .region
-                    .chunks
-                    .set_block(BlockPos::containing(POSITION), blocks::WATER);
+                let feet = BlockPos::containing(stage.player().position());
+                stage.region.chunks.set_block(feet, blocks::WATER);
             }
             "unequipped" => stage.player().inventory.slots[6] = ItemStack::empty(),
             _ => unreachable!(),
