@@ -2534,6 +2534,7 @@ impl DamageKind {
                 | Self::Wither
                 | Self::Explosion
                 | Self::PlayerExplosion
+                | Self::Fireworks
                 | Self::Cactus
                 | Self::Freeze
                 | Self::HotFloor

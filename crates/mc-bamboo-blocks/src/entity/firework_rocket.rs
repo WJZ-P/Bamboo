@@ -20,6 +20,31 @@ use super::{
 };
 use crate::World;
 
+thread_local! {
+    /// 对拍的改坏确认开关：0 正常，1 寿命、2 竖直加速、3 爆炸伤害。正式构建里
+    /// `set_oracle_break` 不会被调用，恒为 0。
+    static ORACLE_BREAK: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// 由 `mob-oracle` 按 `--break-self-test firework_*` 设置，其他驱动不调用。为真时
+/// 复刻改坏后的行为，确认对拍能抓到。
+///
+/// Set by `mob-oracle` from `--break-self-test firework_*`; no other driver calls
+/// this. When set, the broken behaviour is reproduced so the comparison catches it.
+pub fn set_oracle_break(name: &str) {
+    let value = match name {
+        "firework_lifetime" => 1,
+        "firework_shot" => 2,
+        "firework_damage" => 3,
+        _ => 0,
+    };
+    ORACLE_BREAK.with(|cell| cell.set(value));
+}
+
+fn oracle_break() -> u8 {
+    ORACLE_BREAK.with(|cell| cell.get())
+}
+
 /// `FireworkRocketEntity` 自己的状态，加上 `Projectile` 里的主人和标志。
 ///
 /// The `FireworkRocketEntity` fields plus the owner and flags from `Projectile`.
@@ -80,6 +105,13 @@ impl FireworkRocket {
             needs_sync: self.needs_sync,
             sync_velocity: self.sync_velocity,
         }
+    }
+
+    /// 这一刻 `explode` 广播过实体事件 17（对拍读它）。
+    ///
+    /// Whether `explode` broadcast entity event 17 this tick (read by the oracle).
+    pub const fn exploded(&self) -> bool {
+        self.exploded
     }
 }
 
@@ -144,18 +176,27 @@ impl Entity {
             return;
         };
         // `flight` 从 1 起，有 FIREWORKS 组件时再加 `flightDuration()`。
-        let flight = match defaults::resolve(firework.item.item, &firework.item.patch(), kinds::FIREWORKS)
-        {
-            Some(ComponentValue::Fireworks { flight_duration, .. }) => 1 + *flight_duration,
-            _ => 1,
-        };
+        let flight =
+            match defaults::resolve(firework.item.item, &firework.item.patch(), kinds::FIREWORKS) {
+                Some(ComponentValue::Fireworks {
+                    flight_duration, ..
+                }) => 1 + *flight_duration,
+                _ => 1,
+            };
         let spread = 0.002_297;
         self.delta = Vec3::new(
             self.random.triangle(0.0, spread),
             0.05,
             self.random.triangle(0.0, spread),
         );
-        firework.lifetime = 10 * flight + self.random.next_int_bounded(6) + self.random.next_int_bounded(7);
+        let flight_duration = self.random.next_int_bounded(6);
+        let flight_jitter = self.random.next_int_bounded(7);
+        firework.lifetime = if oracle_break() == 1 {
+            // 改坏确认：丢掉两次 `nextInt` 的随机寿命。
+            10 * flight
+        } else {
+            10 * flight + flight_duration + flight_jitter
+        };
     }
 
     /// `Projectile.shoot`：归一化 → 按 XYZ 抽散布 → 乘力度 → 设朝向。
@@ -241,8 +282,9 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         // 附着跟随（鞘翅滑翔）没建模：`attached_to_target` 恒为空，这段不会走。
         find_hit(me, ctx, owner)
     } else {
-        if !shot_at_angle {
+        if !shot_at_angle && oracle_break() != 2 {
             // 竖直发射：撞墙时 x/z 不再加速，否则每刻乘 1.15；y 每刻加 0.04。
+            // 改坏确认 `firework_shot`：跳过竖直加速。
             let d = if me.horizontal_collision { 1.0 } else { 1.15 };
             me.delta = me.delta.multiply(d, 1.0, d).add(Vec3::new(0.0, 0.04, 0.0));
         }
@@ -255,10 +297,10 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         hit
     };
 
-    // 命中实体就爆；命中方块只有带爆炸成分才爆。`needsSync` 在命中之后置位。
-    let should_explode = hit.is_some_and(|hit| hit.target.is_some() || has_explosion(me));
-    if should_explode {
-        if let Some(hit) = hit {
+    // 命中任何目标（方块或实体）都置 `needsSync`；命中实体就爆，命中方块只有带爆炸成分才爆。
+    // Any hit sets `needsSync`; hitting an entity always explodes, hitting a block only explodes with stars.
+    if let Some(hit) = hit {
+        if hit.target.is_some() || has_explosion(me) {
             ctx.emit(Command::FireworkRocketExplode { hit: Some(hit) }, me);
         }
         if let EntityKind::FireworkRocket(firework) = &mut me.kind {
@@ -286,12 +328,7 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     };
     firework.life += 1;
     if firework.life > firework.lifetime {
-        ctx.emit(
-            Command::FireworkRocketExplode {
-                hit: None,
-            },
-            me,
-        );
+        ctx.emit(Command::FireworkRocketExplode { hit: None }, me);
     }
 }
 
@@ -320,7 +357,8 @@ fn check_left_owner(me: &mut Entity, ctx: &dyn EntityCtx, owner: Option<EntityUi
 /// `Projectile.tick` 的其余部分和 `Entity.baseTick`：流体、着火、掉出世界。
 fn base_tick(me: &mut Entity, blocks: &dyn BlockView) {
     let in_lava = me.update_projectile_fluid(blocks);
-    let sync_velocity = me.remaining_fire_ticks > 0 && me.remaining_fire_ticks % 20 == 0 && !in_lava;
+    let sync_velocity =
+        me.remaining_fire_ticks > 0 && me.remaining_fire_ticks % 20 == 0 && !in_lava;
     if me.remaining_fire_ticks > 0 {
         me.remaining_fire_ticks -= 1;
     }
@@ -416,6 +454,9 @@ fn find_hit(me: &Entity, ctx: &dyn EntityCtx, owner: Option<EntityUid>) -> Optio
 /// The landing of [`Command::FireworkRocketExplode`]: `explode`. Entity event 17 is
 /// taken by `keep_departed_events` once the entity is discarded.
 pub fn explode(me: &mut Entity, world: &mut World<'_>, hit: Option<FireworkHit>) {
+    if me.removed {
+        return;
+    }
     let EntityKind::FireworkRocket(firework) = &mut me.kind else {
         return;
     };
@@ -425,6 +466,16 @@ pub fn explode(me: &mut Entity, world: &mut World<'_>, hit: Option<FireworkHit>)
     firework.exploded = true;
     deal_explosion_damage(me, world);
     me.discard();
+}
+
+/// `Entity.distanceTo`：先按 `f32` 做三轴差再开方。
+///
+/// `Entity.distanceTo`: cast each axis delta to `f32` before taking the square root.
+fn distance_to(a: Vec3, b: Vec3) -> f32 {
+    let dx = (a.x - b.x) as f32;
+    let dy = (a.y - b.y) as f32;
+    let dz = (a.z - b.z) as f32;
+    (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
 /// `dealExplosionDamage`：`f = 5 + explosions.size() * 2`；带星的烟花先伤附着目标，
@@ -445,7 +496,14 @@ fn deal_explosion_damage(me: &mut Entity, world: &mut World<'_>) {
                 _ => 0,
             };
             (
-                if size == 0 { 0.0 } else { 5.0 + size as f32 * 2.0 },
+                if size == 0 {
+                    0.0
+                } else if oracle_break() == 3 {
+                    // 改坏确认：丢掉 `5 +` 的基础伤害。
+                    size as f32 * 2.0
+                } else {
+                    5.0 + size as f32 * 2.0
+                },
                 firework.owner,
                 firework.attached_to_target,
             )
@@ -460,10 +518,18 @@ fn deal_explosion_damage(me: &mut Entity, world: &mut World<'_>) {
         damage.direct = Some(me.id);
         damage.attacker = owner;
         damage.position = Some(me.position);
-        damage.projectile_motion = Some(me.delta);
+        // `FireworkRocketEntity.calculateHorizontalHurtKnockbackDirection` 返回
+        // `(victim - rocket)`，`LivingEntity` 取反后为 `(rocket - victim)`，
+        // 与 `projectile_motion == None` 时走 `damage.position` 的方向一致。
+        // `FireworkRocketEntity.calculateHorizontalHurtKnockbackDirection` returns
+        // `(victim - rocket)`, which `LivingEntity` negates to `(rocket - victim)` —
+        // the exact radial direction `damage.position` produces when `projectile_motion` is `None`.
+        damage.projectile_motion = None;
         damage.attacker_is_player = owner.is_some_and(|uid| {
             let mut found = false;
-            world.level().for_each_player(&mut |player| found |= player.uid == uid);
+            world
+                .level()
+                .for_each_player(&mut |player| found |= player.uid == uid);
             found
         });
         damage.scale_when_non_player = owner
@@ -475,7 +541,7 @@ fn deal_explosion_damage(me: &mut Entity, world: &mut World<'_>) {
     if let Some(target) = attached {
         let _ = world.hurt_player_from_mob(target, source(world, owner), f, None);
     }
-    // 半径 5 内的活体，跳过附着目标，距离平方超过 25 的跳过，视线被挡的跳过。
+    // 半径 5 内的活体（生物与玩家），跳过附着目标，距离平方超过 25 的跳过，视线被挡的跳过。
     let area = me.bounding_box().inflate(5.0, 5.0, 5.0);
     let mut targets = Vec::new();
     for id in world.entity_ids() {
@@ -516,8 +582,44 @@ fn deal_explosion_damage(me: &mut Entity, world: &mut World<'_>) {
         if !visible {
             continue;
         }
-        let distance = me.position.distance_to_sqr(entity.position).sqrt();
-        let amount = f * (f64::from((5.0 - distance) / 5.0)).sqrt() as f32;
+        let distance = distance_to(me.position, entity.position);
+        let amount = f * ((5.0 - f64::from(distance)) / 5.0).sqrt() as f32;
         let _ = world.hurt_mob(target, source(world, owner), amount);
+    }
+    // 范围内的玩家同样属于 `LivingEntity`。
+    // Players in range are also `LivingEntity` targets.
+    let mut player_targets = Vec::new();
+    world.level().for_each_player(&mut |player| {
+        if !player.alive || player.spectator || Some(player.uid) == attached {
+            return;
+        }
+        let bb = player_box(player);
+        if !bb.intersects(area) || me.position.distance_to_sqr(player.position) > 25.0 {
+            return;
+        }
+        player_targets.push((player.uid, player.position, bb.max_y - bb.min_y));
+    });
+    for (uid, position, height) in player_targets {
+        let mut visible = false;
+        for step in 0..2 {
+            let point = Vec3::new(
+                position.x,
+                position.y + height * 0.5 * f64::from(step),
+                position.z,
+            );
+            if world
+                .clip_collider(me.position, point, me.collision_context())
+                .is_none()
+            {
+                visible = true;
+                break;
+            }
+        }
+        if !visible {
+            continue;
+        }
+        let distance = distance_to(me.position, position);
+        let amount = f * ((5.0 - f64::from(distance)) / 5.0).sqrt() as f32;
+        let _ = world.hurt_player_from_mob(uid, source(world, owner), amount, None);
     }
 }

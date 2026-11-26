@@ -102,7 +102,7 @@ pub(crate) fn start(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
         items::BOW => {
             if !creative
                 && let Some(player) = region.players.get(&id)
-                && find_projectile(player).is_none()
+                && find_projectile(player, false).is_none()
             {
                 return false;
             }
@@ -121,7 +121,7 @@ pub(crate) fn start(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
                 return true;
             }
             if let Some(player) = region.players.get(&id)
-                && find_projectile(player).is_none()
+                && find_projectile(player, true).is_none()
             {
                 return false;
             }
@@ -238,7 +238,7 @@ fn load_projectiles(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
         return false;
     };
     let stack = player.inventory.held(hand).clone();
-    let Some(ammo) = find_projectile(player) else {
+    let Some(ammo) = find_projectile(player, true) else {
         return false;
     };
     let (drawn, consumed) = draw_ammo(player, &stack, ammo);
@@ -481,7 +481,7 @@ fn release_bow(region: &mut Region, id: PlayerId, hand: Hand, power: f32) {
         return;
     };
     let weapon = player.inventory.held(hand).clone();
-    let Some(ammo) = find_projectile(player) else {
+    let Some(ammo) = find_projectile(player, false) else {
         return;
     };
     let (drawn, consumed) = draw_ammo(player, &weapon, ammo);
@@ -702,7 +702,10 @@ fn spawn_firework_crossbow(
     power: f32,
     ammo: ItemStack,
 ) {
-    let owner = region.players.get(&shooter).map(|player| *player.uuid.as_bytes());
+    let owner = region
+        .players
+        .get(&shooter)
+        .map(|player| *player.uuid.as_bytes());
     {
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
@@ -721,16 +724,22 @@ fn spawn_firework_crossbow(
     }
 }
 
-/// `Player.getProjectile`：副手、主手（箭或烟花），再按 `Inventory` 下标扫背包（只认箭）。
+/// `Player.getProjectile`：副手、主手（弩允许箭或烟花，弓只认箭），再按 `Inventory`
+/// 下标扫背包（只认箭）。
 ///
-/// `Player.getProjectile`: off hand, main hand (arrows or fireworks), then the inventory
-/// indices (arrows only).
-fn find_projectile(player: &Player) -> Option<(usize, ItemStack)> {
+/// `Player.getProjectile`: off hand, main hand (arrows or fireworks for a crossbow,
+/// arrows only for a bow), then the inventory indices (arrows only).
+fn find_projectile(player: &Player, allow_firework: bool) -> Option<(usize, ItemStack)> {
     let off = player.inventory.hand_slot(Hand::Off);
     let main = player.inventory.hand_slot(Hand::Main);
     for slot in [off, main] {
         let stack = &player.inventory.slots[slot];
-        if held_projectile(stack) {
+        let ok = if allow_firework {
+            held_projectile(stack)
+        } else {
+            supported_projectile(stack)
+        };
+        if ok {
             return Some((slot, stack.clone()));
         }
     }

@@ -216,7 +216,8 @@ fn firework(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStac
 ///
 /// `EggItem.asProjectile` with the default `DispenseConfig`: the arrow's position,
 /// power 1.1, uncertainty 6 and event 1002.
-fn egg(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -> Shot {    let (x, y, z) = facing.normal();
+fn egg(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -> Shot {
+    let (x, y, z) = facing.normal();
     let (x, y, z) = (f64::from(x), f64::from(y), f64::from(z));
     let shot = crate::entity::thrown_egg::EggShot {
         position: Vec3::new(

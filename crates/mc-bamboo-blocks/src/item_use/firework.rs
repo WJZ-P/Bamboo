@@ -6,7 +6,7 @@ use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     context::UseContext,
-    entity::firework_rocket::{FireworkShot, FireworkShoot},
+    entity::firework_rocket::{FireworkShoot, FireworkShot},
     interact::InteractionResult,
     item_exchange::ItemExchange,
     world::World,

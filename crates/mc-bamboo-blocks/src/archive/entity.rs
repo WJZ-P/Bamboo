@@ -243,13 +243,31 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
             let crate::entity::KindState::FireworkRocket(saved) = &state.kind else {
                 return Err(Error::new("mismatched firework rocket entity halves"));
             };
-            // 官方 `addAdditionalSaveData` 的顺序：Life、LifeTime、FireworksItem、ShotAtAngle。
+            // 先写 `Projectile.addAdditionalSaveData`（Owner、LeftOwner、HasBeenShot），
+            // 再写 `FireworkRocketEntity.addAdditionalSaveData`（Life、LifeTime、FireworksItem、ShotAtAngle）。
+            if let Some(uuid) = saved.owner_uuid {
+                put(&mut out, "Owner", uuid_tag(&uuid));
+            }
+            if saved.left_owner {
+                put(&mut out, "LeftOwner", Tag::Byte(1));
+            }
+            put(
+                &mut out,
+                "HasBeenShot",
+                Tag::Byte(i8::from(saved.has_been_shot)),
+            );
             put(&mut out, "Life", Tag::Int(saved.life));
             put(&mut out, "LifeTime", Tag::Int(saved.lifetime));
+            let default_item = ItemStack::new(mc_bamboo_data::items::FIREWORK_ROCKET, 1);
+            let item = if saved.item.is_empty() {
+                &default_item
+            } else {
+                &saved.item
+            };
             put(
                 &mut out,
                 "FireworksItem",
-                slots::encode_item(&saved.item).map_err(|error| Error::new(error.to_string()))?,
+                slots::encode_item(item).map_err(|error| Error::new(error.to_string()))?,
             );
             put(
                 &mut out,
@@ -554,7 +572,8 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
             "minecraft:firework_rocket" => {
                 let item = tag::field(tag, "FireworksItem")
                     .and_then(|value| slots::decode_item(value).ok())
-                    .unwrap_or_else(ItemStack::empty);
+                    .filter(|stack| !stack.is_empty())
+                    .unwrap_or_else(|| ItemStack::new(mc_bamboo_data::items::FIREWORK_ROCKET, 1));
                 EntityKind::FireworkRocket(Box::new(
                     crate::entity::firework_rocket::FireworkRocket {
                         uuid: arrow::uuid_from(tag, "UUID").unwrap_or([0; 16]),

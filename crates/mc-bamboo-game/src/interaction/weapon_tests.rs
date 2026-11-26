@@ -441,3 +441,153 @@ fn a_creative_trident_is_kept_and_marked_creative_only() {
         "创造模式不扣耐久"
     );
 }
+
+fn fireworks(
+    server: &mut Harness,
+) -> Vec<mc_bamboo_blocks::entity::firework_rocket::FireworkRocketPublic> {
+    use mc_bamboo_blocks::entity::KindPublic;
+    let region = server.region();
+    region
+        .entities
+        .ids()
+        .into_iter()
+        .filter_map(|id| match region.entities.public_at(id)?.kind {
+            KindPublic::FireworkRocket(firework) => Some(firework),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn crossbow_loads_and_fires_multishot_fireworks_from_offhand() {
+    let (mut server, client) = settled();
+    put(&mut server, &client, 36, ItemStack::new(items::CROSSBOW, 1));
+    // 副手放烟花火箭（槽位 45）。
+    put(
+        &mut server,
+        &client,
+        crate::inventory::OFF_HAND,
+        ItemStack::new(items::FIREWORK_ROCKET, 4),
+    );
+    let crossbow = enchant(&mut server, &client, 36, "minecraft:multishot", 1);
+    put(&mut server, &client, 36, crossbow);
+    server
+        .region()
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .game_mode = GameMode::Survival;
+
+    use_item(&mut server, &client, 1);
+    server.tick();
+    for _ in 0..25 {
+        server.tick();
+    }
+    release_item(&mut server, &client);
+    server.tick();
+    use_item(&mut server, &client, 2);
+    server.tick();
+
+    let spawned = fireworks(&mut server);
+    assert_eq!(spawned.len(), 3, "多重射击弩一次射出三枚烟花火箭");
+    assert!(
+        spawned.iter().all(|rocket| rocket.shot_at_angle),
+        "弩射出的烟花必须是斜射（shotAtAngle）"
+    );
+    let player = server.region().players.get(&client.id).unwrap();
+    assert_eq!(
+        player.inventory.slots[crate::inventory::OFF_HAND].count,
+        3,
+        "齐射只消耗一枚副手烟花"
+    );
+    let held = &player.inventory.slots[36];
+    assert_eq!(
+        defaults::resolve(held.item, &held.patch(), kinds::DAMAGE),
+        Some(&ComponentValue::Damage(9)),
+        "每发烟花扣 3 点耐久，三发共扣 9 点"
+    );
+}
+
+#[test]
+fn bow_ignores_offhand_firework_rocket() {
+    let (mut server, client) = settled();
+    put(&mut server, &client, 36, ItemStack::new(items::BOW, 1));
+    put(
+        &mut server,
+        &client,
+        crate::inventory::OFF_HAND,
+        ItemStack::new(items::FIREWORK_ROCKET, 4),
+    );
+    server
+        .region()
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .game_mode = GameMode::Survival;
+
+    use_item(&mut server, &client, 1);
+    server.tick();
+    for _ in 0..20 {
+        server.tick();
+    }
+    release_item(&mut server, &client);
+    server.tick();
+
+    assert!(arrows(&mut server).is_empty(), "弓不能把副手烟花当箭射");
+    assert!(fireworks(&mut server).is_empty(), "弓不能射烟花");
+    let player = server.region().players.get(&client.id).unwrap();
+    assert_eq!(
+        player.inventory.slots[crate::inventory::OFF_HAND].count,
+        4,
+        "副手烟花数量不变"
+    );
+}
+
+#[test]
+fn firework_use_on_block_spawns_rocket_and_air_use_passes() {
+    let (mut server, client) = settled();
+    put(
+        &mut server,
+        &client,
+        36,
+        ItemStack::new(items::FIREWORK_ROCKET, 3),
+    );
+    server
+        .region()
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .game_mode = GameMode::Survival;
+
+    // 对空气右键：无鞘翅滑翔时恒为 PASS，不生成烟花也不扣物品。
+    use_item(&mut server, &client, 1);
+    server.tick();
+    assert!(fireworks(&mut server).is_empty());
+    assert_eq!(
+        server.region().players[&client.id].inventory.slots[36].count,
+        3
+    );
+
+    // 对方块顶面右键：生成竖直发射的烟花并扣 1 个物品。
+    server.request(
+        &client,
+        PlayRequest::UseItemOn {
+            hand: Hand::Main,
+            pos: GROUND,
+            face: Direction::Up,
+            cursor: [0.5, 1.0, 0.5],
+            inside: false,
+            world_border_hit: false,
+            sequence: 2,
+        },
+    );
+    server.tick();
+    let spawned = fireworks(&mut server);
+    assert_eq!(spawned.len(), 1);
+    assert!(!spawned[0].shot_at_angle);
+    assert_eq!(spawned[0].owner, Some(client.id.0));
+    assert_eq!(
+        server.region().players[&client.id].inventory.slots[36].count,
+        2
+    );
+}
