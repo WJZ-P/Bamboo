@@ -13,6 +13,7 @@ pub mod arrow;
 pub mod boat;
 pub mod ctx;
 pub mod evoker_fangs;
+pub mod eye_of_ender;
 pub mod firework_rocket;
 pub mod fishing_hook;
 pub mod hanging;
@@ -51,6 +52,7 @@ pub(crate) use item::merge_explosion;
 pub use item::{can_pick_up, set_throw_velocity, take_stack};
 pub use mob::villager::VillagerPublic;
 pub use orb::{award, award_values, experience_value, pick_up};
+pub(crate) use physics::collide_along;
 pub use physics::{
     TravelSegment, collide_border_only, enclosed_in_air, no_block_collision, overlaps_new_blocks,
     stuck_speed, sweep_movement,
@@ -289,6 +291,10 @@ pub enum EntityKind {
     ///
     /// A fishing bobber, vanilla `FishingHook`.
     FishingHook(Box<fishing_hook::FishingHook>),
+    /// 末影之眼，`EyeOfEnder`。
+    ///
+    /// An eye of ender, vanilla `EyeOfEnder`.
+    EyeOfEnder(Box<eye_of_ender::EyeOfEnder>),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -324,6 +330,7 @@ impl EntityKind {
             Self::WitherSkull(_) => mc_bamboo_data::registries::entity_type::WITHER_SKULL,
             Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
             Self::FishingHook(_) => mc_bamboo_data::registries::entity_type::FISHING_BOBBER,
+            Self::EyeOfEnder(_) => mc_bamboo_data::registries::entity_type::EYE_OF_ENDER,
             Self::Mob(mob) => mob.mob_type.entity_type(),
             Self::Boat(boat) => boat.entity_type,
         }
@@ -570,6 +577,7 @@ impl Entity {
             EntityKind::WitherSkull(_) => wither_skull::tick(self, ctx),
             EntityKind::FireworkRocket(_) => firework_rocket::tick(self, ctx),
             EntityKind::FishingHook(_) => fishing_hook::tick(self, ctx),
+            EntityKind::EyeOfEnder(_) => eye_of_ender::tick(self, ctx),
             EntityKind::LeashKnot(_) => leash_knot::tick(self, ctx),
             EntityKind::Boat(_) => boat::tick(self, ctx),
             EntityKind::Painting(_) => hanging::tick_painting(self, ctx),

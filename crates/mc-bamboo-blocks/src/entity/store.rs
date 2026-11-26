@@ -166,6 +166,10 @@ pub enum KindPublic {
     FireworkRocket(super::firework_rocket::FireworkRocketPublic),
     /// 钓鱼浮漂：同步要的 UUID、主人、俯仰角、被钩实体与咬钩标记。
     FishingHook(super::fishing_hook::FishingHookPublic),
+    /// 末影之眼：同步要的 UUID 与 `DATA_ITEM_STACK`。
+    ///
+    /// An eye of ender: synced UUID and `DATA_ITEM_STACK`.
+    EyeOfEnder(super::eye_of_ender::EyeOfEnderPublic),
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
     /// 船：木种 / 乘客名单和同步数据。
@@ -209,6 +213,7 @@ impl KindPublic {
             Self::WitherSkull(_) => mc_bamboo_data::registries::entity_type::WITHER_SKULL,
             Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
             Self::FishingHook(_) => mc_bamboo_data::registries::entity_type::FISHING_BOBBER,
+            Self::EyeOfEnder(_) => mc_bamboo_data::registries::entity_type::EYE_OF_ENDER,
             Self::Mob(mob) => mob.mob_type.entity_type(),
             Self::Boat(boat) => boat.entity_type,
         }
@@ -301,6 +306,8 @@ pub enum KindState {
     FireworkRocket(Box<super::firework_rocket::FireworkRocket>),
     /// 钓鱼浮漂的全部状态。
     FishingHook(Box<super::fishing_hook::FishingHook>),
+    /// 末影之眼的全部状态。
+    EyeOfEnder(Box<super::eye_of_ender::EyeOfEnder>),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
     /// 船的全部状态。公开的那一半在 [`KindPublic::Boat`] 里另有一份拷贝。
@@ -494,6 +501,7 @@ impl EntityRow {
             (KindPublic::FishingHook(_), KindState::FishingHook(hook)) => {
                 EntityKind::FishingHook(hook)
             }
+            (KindPublic::EyeOfEnder(_), KindState::EyeOfEnder(eye)) => EntityKind::EyeOfEnder(eye),
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             (KindPublic::Boat(_), KindState::Boat(boat)) => EntityKind::Boat(boat),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
@@ -621,6 +629,10 @@ impl Entity {
             EntityKind::FishingHook(hook) => (
                 KindPublic::FishingHook(hook.public()),
                 KindState::FishingHook(hook),
+            ),
+            EntityKind::EyeOfEnder(eye) => (
+                KindPublic::EyeOfEnder(eye.public()),
+                KindState::EyeOfEnder(eye),
             ),
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
@@ -1374,6 +1386,9 @@ impl EntityStore {
         }
         if let EntityKind::ItemFrame(frame) = &mut entity.kind {
             frame.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
+        if let EntityKind::EyeOfEnder(eye) = &mut entity.kind {
+            eye.uuid = super::mob::insecure_uuid(&mut entity.random);
         }
         if matches!(entity.kind, super::EntityKind::LightningBolt(_)) {
             super::lightning::finish_spawn(&mut entity);

@@ -767,6 +767,85 @@ impl<'a> World<'a> {
             .knock_back_player_now(target, strength, direction);
     }
 
+    /// `Block.pushEntitiesUp(oldState, newState, level, pos)`：方块碰撞形状增高时，
+    /// 把落在新增碰撞盒里的非旁观者实体与玩家沿 Y 轴向上推到新顶面。
+    ///
+    /// `Block.pushEntitiesUp(oldState, newState, level, pos)`: when a block's
+    /// collision shape grows, lift non-spectator entities and players intersecting
+    /// the newly added shape upward to clear it.
+    pub fn push_entities_up(
+        &mut self,
+        pos: BlockPos,
+        old_state: BlockState,
+        new_state: BlockState,
+    ) {
+        let old_shape = shape::collision_boxes(old_state, pos, CollisionContext::Empty);
+        let new_shape = shape::collision_boxes(new_state, pos, CollisionContext::Empty);
+        let diff = shape::join_boxes(&old_shape, &new_shape, shape::BooleanOp::OnlySecond);
+        if diff.is_empty() {
+            return;
+        }
+        let moved = shape::moved(&diff, f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
+        let mut bounds = moved[0];
+        for &cell in &moved[1..] {
+            bounds = shape::Aabb::new(
+                bounds.min_x.min(cell.min_x),
+                bounds.min_y.min(cell.min_y),
+                bounds.min_z.min(cell.min_z),
+                bounds.max_x.max(cell.max_x),
+                bounds.max_y.max(cell.max_y),
+                bounds.max_z.max(cell.max_z),
+            );
+        }
+        let mut entities: Vec<(crate::entity::EntityUid, shape::Aabb)> = Vec::new();
+        self.level.for_each_entity_in(bounds, &mut |public| {
+            if !public.removed {
+                entities.push((public.uid, public.bounding_box()));
+            }
+        });
+        for (uid, bbox) in entities {
+            let d = crate::entity::collide_along(
+                mc_bamboo_core::Axis::Y,
+                bbox.moved(0.0, 1.0, 0.0),
+                &moved,
+                -1.0,
+            );
+            let dy = 1.0 + d;
+            self.with_entity_mut(uid, &mut |entity| {
+                entity.position.y += dy;
+                entity.old_position = entity.position;
+            });
+        }
+        let mut players: Vec<(crate::entity::EntityUid, Vec3, shape::Aabb)> = Vec::new();
+        self.level.for_each_player(&mut |player| {
+            if player.spectator {
+                return;
+            }
+            let half = f64::from(player.width) * 0.5;
+            let bbox = shape::Aabb::new(
+                player.position.x - half,
+                player.position.y,
+                player.position.z - half,
+                player.position.x + half,
+                player.position.y + f64::from(player.height),
+                player.position.z + half,
+            );
+            if bbox.intersects(bounds) {
+                players.push((player.uid, player.position, bbox));
+            }
+        });
+        for (uid, position, bbox) in players {
+            let d = crate::entity::collide_along(
+                mc_bamboo_core::Axis::Y,
+                bbox.moved(0.0, 1.0, 0.0),
+                &moved,
+                -1.0,
+            );
+            let target = Vec3::new(position.x, position.y + 1.0 + d, position.z);
+            self.teleport_player(uid, target);
+        }
+    }
+
     /// 末影珍珠把主人放到 `position`：能当场做就当场做，否则记成延后的效果。
     ///
     /// An ender pearl putting its owner at `position`: at once when the level can,
@@ -4913,6 +4992,13 @@ impl<'a> World<'a> {
             let outline = outline_seen_holding(state, pos, main_hand);
             self.clip_one_block(pos, from, to, &outline, state, fluid)
         })
+    }
+
+    /// `Item.getPlayerPOVHitResult(..., ClipContext.Fluid.NONE)`：`OUTLINE` 轮廓射线，忽略流体。
+    ///
+    /// `Item.getPlayerPOVHitResult(..., ClipContext.Fluid.NONE)`: outline raycast ignoring fluids.
+    pub fn clip_outline(&self, from: Vec3, to: Vec3, main_hand: i32) -> Option<BlockHit> {
+        self.clip(from, to, ClipFluid::None, main_hand)
     }
 
     /// `ClipContext.Block.COLLIDER` 加 `Fluid.NONE`。爆炸的遮挡采样用它。
