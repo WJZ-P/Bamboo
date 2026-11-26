@@ -2318,9 +2318,16 @@ pub(crate) fn kinetic_tick(region: &mut Region, id: PlayerId, time_held: i32) {
     let ray_speed = look.x * movement.x + look.y * movement.y + look.z * movement.z;
     let min_point = eye.add(look.scale(f64::from(min_reach)));
     let max_point = eye.add(look.scale(f64::from(max_reach) + ray_speed.max(0.0)));
+    // 原版长矛总是同时带穿刺组件；命令给出的自定义物品可能只有 `kinetic_weapon`，
+    // 这时不打，避免让服务器崩溃。
+    // Vanilla spears always carry the piercing component; a custom item from a
+    // command may only have `kinetic_weapon`, so skip it instead of panicking.
+    let Some(piercing) = piercing_spec(&held) else {
+        return;
+    };
     let setup = StabSetup {
         held: held.clone(),
-        spec: piercing_spec(&held).expect("长矛带穿刺组件"),
+        spec: piercing,
         position,
         eye,
         look,
