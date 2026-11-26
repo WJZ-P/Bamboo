@@ -168,6 +168,8 @@ pub enum KindPublic {
     FishingHook(super::fishing_hook::FishingHookPublic),
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
+    /// 船：木种 / 乘客名单和同步数据。
+    Boat(Box<super::boat::BoatPublic>),
     Arrow(super::arrow::ArrowPublic),
     /// 羊驼的口水：同步要的 UUID、主人和俯仰角。
     ///
@@ -208,6 +210,7 @@ impl KindPublic {
             Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
             Self::FishingHook(_) => mc_bamboo_data::registries::entity_type::FISHING_BOBBER,
             Self::Mob(mob) => mob.mob_type.entity_type(),
+            Self::Boat(boat) => boat.entity_type,
         }
     }
 
@@ -300,6 +303,8 @@ pub enum KindState {
     FishingHook(Box<super::fishing_hook::FishingHook>),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
+    /// 船的全部状态。公开的那一半在 [`KindPublic::Boat`] 里另有一份拷贝。
+    Boat(Box<super::boat::Boat>),
     Arrow(Box<super::arrow::Arrow>),
     LlamaSpit(Box<super::spit::LlamaSpit>),
     Egg(Box<super::thrown_egg::ThrownEgg>),
@@ -385,6 +390,32 @@ impl EntityPublic {
     pub fn chunk_position(&self) -> ChunkPos {
         ChunkPos::containing(self.position.x, self.position.z)
     }
+
+    /// 官方 `Entity.isPickable()`：`EntitySelector.CAN_BE_PICKED` 按它过滤实体。
+    /// 基类默认返回假，只有活着的生物、船、矿车、TNT、下落方块和挂在方块上的
+    /// 实体（拴绳结、画、展示框）覆写为真；投掷物、掉落物、经验球、闪电、
+    /// 唤魔者尖牙、烟花、风弹等继承默认，不可被选取。`getEntities` 也不会收进
+    /// 已移除的实体，所以这里一并判假。
+    ///
+    /// Vanilla `Entity.isPickable()`: `EntitySelector.CAN_BE_PICKED` filters on it.
+    /// The base class returns false; living entities, boats, minecarts, TNT,
+    /// falling blocks and block-attached entities (leash knots, paintings, item
+    /// frames) override it to true. Projectiles, items, XP orbs, lightning, evoker
+    /// fangs, rockets and wind charges stay unpickable. A removed entity is never
+    /// returned by vanilla `getEntities`, so it is false here too.
+    pub fn is_pickable(&self) -> bool {
+        if self.removed {
+            return false;
+        }
+        matches!(
+            self.kind,
+            KindPublic::FallingBlock { .. }
+                | KindPublic::Tnt { .. }
+                | KindPublic::LeashKnot { .. }
+                | KindPublic::Mob(_)
+                | KindPublic::Boat(_)
+        )
+    }
 }
 
 impl EntityRow {
@@ -464,6 +495,7 @@ impl EntityRow {
                 EntityKind::FishingHook(hook)
             }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
+            (KindPublic::Boat(_), KindState::Boat(boat)) => EntityKind::Boat(boat),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
         };
@@ -593,6 +625,10 @@ impl Entity {
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
                 KindState::Mob(mob),
+            ),
+            EntityKind::Boat(boat) => (
+                KindPublic::Boat(Box::new(super::boat::BoatPublic::of(&boat))),
+                KindState::Boat(boat),
             ),
         };
         EntityRow {
@@ -2430,6 +2466,31 @@ mod tests {
 
     use super::*;
     use crate::state::BlockState;
+
+    #[test]
+    fn is_pickable_follows_the_vanilla_overrides() {
+        use mc_bamboo_data::registries::entity_type as ids;
+        let mut store = EntityStore::new();
+        let at = Vec3::new(0.5, 64.0, 0.5);
+        // `Entity.isPickable()` 默认假；船、下落方块、TNT 覆写为真。
+        for entity in [
+            Entity::boat(ids::OAK_BOAT, at),
+            Entity::boat(ids::OAK_CHEST_BOAT, at),
+            Entity::falling_block(BlockPos::new(0, 64, 0), BlockState(blocks::STONE)),
+            Entity::primed_tnt(at, 0.0),
+        ] {
+            let uid = store.spawn(entity);
+            assert!(store.public_at(uid).unwrap().is_pickable());
+        }
+        // 掉落物、经验球继承基类默认，不可被选取。
+        for entity in [
+            Entity::ground_item(at, ItemStack::new(1, 1)),
+            Entity::experience_orb(at, 1),
+        ] {
+            let uid = store.spawn(entity);
+            assert!(!store.public_at(uid).unwrap().is_pickable());
+        }
+    }
 
     #[test]
     fn a_row_survives_a_split_and_join_round_trip() {

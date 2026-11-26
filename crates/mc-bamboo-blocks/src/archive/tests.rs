@@ -965,3 +965,112 @@ fn breeze_mob_save_round_trip_keeps_pose_default() {
     };
     assert_eq!(normalize(tag), normalize(again));
 }
+
+/// 运输船的物品栏存档往返：27 格里非零的槽位、物品和数量都回来。
+#[test]
+fn chest_boat_save_round_trip_keeps_items() {
+    let mut entity = Entity::boat(
+        mc_bamboo_data::registries::entity_type::OAK_CHEST_BOAT,
+        Vec3::new(1.5, 63.0, -2.0),
+    );
+    if let EntityKind::Boat(boat) = &mut entity.kind {
+        let chest = boat.chest.as_mut().unwrap();
+        chest.items[0] = ItemStack::new(STONE, 3);
+        chest.items[13] = ItemStack::new(WIND_CHARGE, 7);
+    } else {
+        panic!("boat constructor lost its kind");
+    }
+    let row = entity.split();
+    let tag = write_entity(&row).unwrap();
+    let rebuilt = read_entity(&tag, 99).unwrap().unwrap();
+    let again = write_entity(&rebuilt).unwrap();
+    let normalize = |tag: Tag| match tag {
+        Tag::Compound(mut values) => {
+            values.retain(|(key, _)| key != "UUID");
+            Tag::Compound(values)
+        }
+        other => other,
+    };
+    assert_eq!(normalize(tag), normalize(again));
+    let restored = rebuilt.into_entity();
+    if let EntityKind::Boat(boat) = &restored.kind {
+        let chest = boat.chest.as_ref().unwrap();
+        assert_eq!(chest.items[0], ItemStack::new(STONE, 3));
+        assert_eq!(chest.items[13], ItemStack::new(WIND_CHARGE, 7));
+        assert!(chest.items[1..13].iter().all(ItemStack::is_empty));
+        assert!(chest.loot_table.is_none());
+    } else {
+        panic!("boat round trip lost its kind");
+    }
+}
+
+/// 运输船有战利品表时只写 LootTable / LootTableSeed，不写 Items。
+#[test]
+fn chest_boat_save_round_trip_keeps_loot_table() {
+    let mut entity = Entity::boat(
+        mc_bamboo_data::registries::entity_type::SPRUCE_CHEST_BOAT,
+        Vec3::new(-4.0, 62.5, 8.0),
+    );
+    if let EntityKind::Boat(boat) = &mut entity.kind {
+        let chest = boat.chest.as_mut().unwrap();
+        chest.loot_table = Some("minecraft:chests/shipwreck_supply".to_owned());
+        chest.loot_table_seed = 123_456_789;
+    }
+    let tag = write_entity(&entity.split()).unwrap();
+    assert!(field(&tag, "Items").is_none());
+    let rebuilt = read_entity(&tag, 99).unwrap().unwrap();
+    let restored = rebuilt.into_entity();
+    if let EntityKind::Boat(boat) = &restored.kind {
+        let chest = boat.chest.as_ref().unwrap();
+        assert_eq!(
+            chest.loot_table.as_deref(),
+            Some("minecraft:chests/shipwreck_supply")
+        );
+        assert_eq!(chest.loot_table_seed, 123_456_789);
+    } else {
+        panic!("boat round trip lost its kind");
+    }
+}
+
+/// 船载着动物乘客时 `Passengers` 往返：船的乘客名单和乘客的 `vehicle` 都回来。
+#[test]
+fn boat_passenger_save_round_trip() {
+    use std::collections::BTreeMap;
+
+    let root_id = crate::entity::FIRST_ENTITY_ID;
+    let mut boat = Entity::boat(
+        mc_bamboo_data::registries::entity_type::OAK_BOAT,
+        Vec3::new(4.5, 63.0, -3.5),
+    );
+    boat.id = root_id;
+    let mut cow = Entity::by_mob_type(crate::entity::mob::MobType::Cow, Vec3::new(9.0, 64.0, 9.0));
+    cow.id = root_id + 1;
+    cow.vehicle = Some(root_id);
+    if let EntityKind::Boat(state) = &mut boat.kind {
+        crate::entity::riding::add_passenger(&mut state.passengers, cow.id, false);
+    }
+    let rows: BTreeMap<i32, crate::entity::EntityRow> = [boat.split(), cow.split()]
+        .into_iter()
+        .map(|row| (row.public.uid, row))
+        .collect();
+    let lookup = |uid: i32| rows.get(&uid).cloned();
+    let tag = write_entity_tree(&rows[&root_id], &lookup).unwrap();
+    let passenger = match field(&tag, "Passengers") {
+        Some(Tag::List(list)) => list.clone(),
+        other => panic!("no Passengers list: {other:?}"),
+    };
+    assert_eq!(passenger.len(), 1);
+    assert_eq!(
+        field(&passenger[0], "id"),
+        Some(&Tag::String("minecraft:cow".to_owned()))
+    );
+
+    let mut next = root_id;
+    let tree = read_entity_tree(&tag, &mut next).unwrap().unwrap();
+    assert_eq!(tree.len(), 2);
+    let crate::entity::KindPublic::Boat(state) = &tree[0].public.kind else {
+        panic!("root is a boat");
+    };
+    assert_eq!(state.passengers, vec![tree[1].public.uid]);
+    assert_eq!(tree[1].public.vehicle, Some(tree[0].public.uid));
+}

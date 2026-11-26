@@ -655,6 +655,50 @@ mod tests {
 
     const POS: BlockPos = BlockPos::new(0, 64, 0);
 
+    /// 漏斗上方是运输船时，`getSourceContainer` 走实体容器路径：抽走一件到漏斗，
+    /// 船的 `itemStacks` 同步少一件。
+    #[test]
+    fn hopper_sucks_from_a_chest_boat_entity_container() {
+        use mc_bamboo_core::Vec3;
+        use mc_bamboo_data::registries::entity_type as ids;
+
+        use crate::entity::{Entity, EntityKind, boat};
+
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        level.set(POS, BlockState(blocks::HOPPER));
+        level.set_container(POS, vec![ItemStack::empty(); 5]);
+        level.insert_block_entity(Box::new(HopperEntity::new(POS)));
+        let mut chest = Entity::boat(
+            ids::OAK_CHEST_BOAT,
+            Vec3::new(0.5, f64::from(POS.y) + 1.0, 0.5),
+        );
+        if let EntityKind::Boat(data) = &mut chest.kind {
+            data.chest.as_mut().unwrap().items[0] = ItemStack::new(items::BREAD, 3);
+        }
+        let boat = {
+            let mut world = world_of(&mut level, &mut ticks);
+            world.spawn_entity(chest)
+        };
+
+        let mut world = world_of(&mut level, &mut ticks);
+        world.tick_block_entities();
+        assert_eq!(slot(&mut world, POS, 0), ItemStack::new(items::BREAD, 1));
+        let data = world.entity(boat).expect("运输船还在");
+        match &data.kind {
+            EntityKind::Boat(data) => {
+                assert_eq!(
+                    data.chest.as_ref().unwrap().items[0],
+                    ItemStack::new(items::BREAD, 2)
+                );
+            }
+            _ => panic!("还是船"),
+        }
+        // 普通船不是容器，漏斗不该把它当来源。
+        assert!(boat::is_chest(ids::OAK_CHEST_BOAT));
+        assert!(!boat::is_chest(ids::OAK_BOAT));
+    }
+
     fn world_of<'a>(level: &'a mut TestLevel, ticks: &'a mut BlockTicks) -> World<'a> {
         World::new(level, ticks)
     }

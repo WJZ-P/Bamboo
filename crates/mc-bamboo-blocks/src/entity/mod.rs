@@ -10,6 +10,7 @@
 //! block entities; those already ran inside the scheduled-tick step.
 
 pub mod arrow;
+pub mod boat;
 pub mod ctx;
 pub mod evoker_fangs;
 pub mod firework_rocket;
@@ -292,6 +293,11 @@ pub enum EntityKind {
     ///
     /// A mob. Its state is large, so it is boxed.
     Mob(Box<mob::Mob>),
+    /// 船 / 竹筏 / 运输船，对应 `AbstractBoat`。不是生物，也没有 `Mob` 状态。
+    ///
+    /// A boat / raft / chest boat, vanilla `AbstractBoat`. Not a mob; it has no
+    /// `Mob` state of its own.
+    Boat(Box<boat::Boat>),
 }
 
 impl EntityKind {
@@ -319,6 +325,7 @@ impl EntityKind {
             Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
             Self::FishingHook(_) => mc_bamboo_data::registries::entity_type::FISHING_BOBBER,
             Self::Mob(mob) => mob.mob_type.entity_type(),
+            Self::Boat(boat) => boat.entity_type,
         }
     }
 
@@ -564,6 +571,7 @@ impl Entity {
             EntityKind::FireworkRocket(_) => firework_rocket::tick(self, ctx),
             EntityKind::FishingHook(_) => fishing_hook::tick(self, ctx),
             EntityKind::LeashKnot(_) => leash_knot::tick(self, ctx),
+            EntityKind::Boat(_) => boat::tick(self, ctx),
             EntityKind::Painting(_) => hanging::tick_painting(self, ctx),
             EntityKind::ItemFrame(_) => hanging::tick_item_frame(self, ctx),
             EntityKind::Mob(_) => {}
@@ -596,6 +604,17 @@ impl Entity {
     /// `EntityType.HUSK.create`。
     pub fn husk(position: Vec3) -> Self {
         Self::mob_of(mob::MobType::Husk, position)
+    }
+
+    /// 船 / 竹筏 / 运输船，`EntityType.create`。木种、筏和运输由 `entity_type` 决定。
+    ///
+    /// A boat / raft / chest boat, vanilla `EntityType.create`. The wood, raft
+    /// and chest variants are all chosen by `entity_type`.
+    pub fn boat(entity_type: i32, position: Vec3) -> Self {
+        Self::new(
+            EntityKind::Boat(Box::new(boat::Boat::new(entity_type))),
+            position,
+        )
     }
 
     /// 按注册表类型构造生物；未知类型返回 `None`，调用方按命令失败处理。
@@ -716,6 +735,21 @@ impl Entity {
     /// `isInWater()`。
     pub const fn is_in_water(&self) -> bool {
         self.in_water
+    }
+
+    /// `Entity.getEyeHeight()`：生物按自己的 `eyeHeight`，船按官方 `EntityTypes` 的
+    /// `.sized(1.375f, 0.5625f).eyeHeight(0.5625f)`（眼高等于实体高度，不是默认的
+    /// `height * 0.85`），其余实体用 `EntityDimensions` 的默认 `height * 0.85`。
+    ///
+    /// `Entity.getEyeHeight()`: mobs use their own `eyeHeight`; boats use the
+    /// official `EntityTypes` `.eyeHeight(0.5625f)`, which equals their height
+    /// rather than the default `height * 0.85`; everything else uses the default.
+    pub fn eye_height(&self) -> f32 {
+        match &self.kind {
+            EntityKind::Mob(mob) => mob.eye_height,
+            EntityKind::Boat(_) => self.dimensions.1,
+            _ => self.dimensions.1 * 0.85_f32,
+        }
     }
 
     /// `getRequiresPrecisePosition()`：上一 tick 撞到过东西，同步时必须发精确位置。

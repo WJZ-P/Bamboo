@@ -1840,6 +1840,14 @@ pub trait Level: LevelSideState + LevelEntities {
     /// loot table is filled before its first read or write. Fake worlds leave this empty.
     fn unpack_loot_table(&mut self, _pos: BlockPos) {}
 
+    /// 官方 `ContainerEntity.unpackChestVehicleLootTable(null)`：漏斗读实体容器
+    /// （运输船）的槽位之前先填好战利品表。默认空实现用于没有战利品表的假世界。
+    ///
+    /// The hook for `ContainerEntity.unpackChestVehicleLootTable(null)`: a hopper
+    /// fills the table before reading a container entity's slots. Fake worlds
+    /// leave this empty.
+    fn unpack_boat_loot_table(&mut self, _entity: i32) {}
+
     /// 这一格有没有还没解包的战利品表。缓存守卫用它确认解包动作可以重放，
     /// 默认返回 `false`（假世界没有战利品表）；游戏层按容器条目覆盖。
     fn loot_table_pending(&self, _pos: BlockPos) -> bool {
@@ -2730,6 +2738,15 @@ pub fn monster_prevents_rest_in<L: Level + ?Sized>(level: &L, pos: BlockPos) -> 
 /// The non-block results of one action, handed to the caller for delivery.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
+    /// `AbstractBoat.tickBubbleColumn`：给跟踪者广播实体事件，并甩下载具的乘客。
+    ///
+    /// `AbstractBoat.tickBubbleColumn`: broadcast an entity event and eject the
+    /// vehicle's passengers.
+    BoatBubbleEvent {
+        entity: i32,
+        event: u8,
+        ejected: Vec<i32>,
+    },
     /// `ShoulderRidingEntity.setEntityOnShoulder`：把整只鹦鹉的 NBT 存进玩家的
     /// 左 / 右肩膀槽，并把这只鹦鹉从世界移除。游戏层负责改玩家状态和实体表。
     ///

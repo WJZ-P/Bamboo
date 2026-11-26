@@ -65,6 +65,8 @@ pub(crate) enum Target {
     EnderChest(BlockPos),
     /// 商人菜单指向的村民实体 ID。
     Villager(i32),
+    /// 运输船菜单指向的船实体 ID，27 格物品栏在实体上、不在方块上。
+    Boat(i32),
 }
 
 impl Target {
@@ -72,7 +74,7 @@ impl Target {
     pub(crate) fn positions(&self) -> Vec<BlockPos> {
         match *self {
             Self::Single(pos) | Self::EnderChest(pos) => vec![pos],
-            Self::Villager(_) => Vec::new(),
+            Self::Villager(_) | Self::Boat(_) => Vec::new(),
             Self::Double { first, second } => vec![first, second],
         }
     }
@@ -86,6 +88,14 @@ impl Target {
     pub(crate) fn villager(&self) -> Option<i32> {
         match *self {
             Self::Villager(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// 运输船菜单指向的船实体 ID。
+    pub(crate) fn boat(&self) -> Option<i32> {
+        match *self {
+            Self::Boat(id) => Some(id),
             _ => None,
         }
     }
@@ -194,6 +204,19 @@ impl Menu {
             active: None,
         });
         menu
+    }
+
+    /// 运输船的 27 格菜单：容器格在船实体上，玩家的 36 格另加在后面。
+    ///
+    /// A chest boat's 27-slot menu: the container slots live on the boat entity,
+    /// with the player's 36 slots appended.
+    pub(crate) fn chest_boat(container_id: i32, boat: i32) -> Self {
+        Self::new(
+            container_id,
+            ContainerKind::Chest,
+            Target::Boat(boat),
+            ContainerKind::Chest.slots(),
+        )
     }
 
     /// 菜单一共有多少格。
@@ -974,6 +997,75 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bo
     true
 }
 
+/// `AbstractChestBoat.interactWithContainerVehicle` → `Player.openMenu`：打开
+/// 运输船的 27 格菜单。旁观者不开（`createMenu` 返回 null）；打开前按官方
+/// `unpackChestVehicleLootTable(player)` 带玩家和幸运值解包战利品表。
+///
+/// `AbstractChestBoat.interactWithContainerVehicle` → `Player.openMenu`: open
+/// the chest boat's 27-slot menu. Spectators get no menu. The loot table is
+/// unpacked with the player (`THIS_ENTITY` + `getLuck()`) before opening.
+pub(crate) fn open_boat(region: &mut Region, id: PlayerId, boat: i32) -> bool {
+    let (alive, is_chest) = match region.entities.public_at(boat) {
+        Some(public) => (
+            !public.removed,
+            matches!(
+                &public.kind,
+                mc_bamboo_blocks::entity::KindPublic::Boat(data)
+                    if mc_bamboo_blocks::entity::boat::is_chest(data.entity_type)
+            ),
+        ),
+        None => (false, false),
+    };
+    if !alive || !is_chest || !region.players.contains_key(&id) {
+        return false;
+    }
+    // `AbstractChestBoat.createMenu`：旁观者返回 null，不开菜单。
+    if is_spectator(region, id) {
+        return false;
+    }
+    // `unpackLootTable(player)`：`THIS_ENTITY` 与 `getLuck()` 都来自打开菜单的玩家。
+    let (view, luck) = {
+        let Some(player) = region.players.get(&id) else {
+            return false;
+        };
+        (
+            crate::interaction::level::player_loot_view(player),
+            player
+                .attributes
+                .value(mc_bamboo_data::registries::attribute::LUCK) as f32,
+        )
+    };
+    crate::container_loot::unpack_boat(region, boat, Some(view), luck);
+    if region.menus.contains_key(&id) {
+        close_menu(region, id);
+    }
+    let container_id = {
+        let Some(player) = region.players.get_mut(&id) else {
+            return false;
+        };
+        player.container_counter = player.container_counter % 100 + 1;
+        player.container_counter
+    };
+    region
+        .menus
+        .insert(id, Menu::chest_boat(container_id, boat));
+    let title = Component::translate(ContainerKind::Chest.title(), []);
+    region.links.send(
+        id,
+        &OpenScreen {
+            container_id,
+            menu_type: ContainerKind::Chest.menu_type(),
+            title: &title,
+        },
+    );
+    let Some(mut menu) = region.menus.remove(&id) else {
+        return false;
+    };
+    broadcast_full_state(region, id, &mut menu);
+    region.menus.insert(id, menu);
+    true
+}
+
 /// 锁住了就发 `container.isLocked`，菜单不开。旁观者和末影箱不查锁。
 ///
 /// 官方同时播 `CHEST_LOCKED`。这里没有音效包，只发快捷栏上方的提示。
@@ -1377,6 +1469,23 @@ fn still_valid(region: &Region, id: PlayerId, menu: &Menu) -> bool {
     }
     match menu.target {
         Target::Villager(_) => false,
+        Target::Boat(boat_id) => {
+            let Some(public) = region.entities.public_at(boat_id) else {
+                return false;
+            };
+            if public.removed
+                || !matches!(&public.kind, mc_bamboo_blocks::entity::KindPublic::Boat(_))
+            {
+                return false;
+            }
+            // `isChestVehicleStillValid`: `!isRemoved()` 且
+            // `player.isWithinEntityInteractionRange(getBoundingBox(), 4.0)`。
+            let range = player
+                .attributes
+                .value(mc_bamboo_data::registries::attribute::ENTITY_INTERACTION_RANGE)
+                + CONTAINER_BUFFER;
+            public.bounding_box().distance_to_sqr(eye) < range * range
+        }
         Target::Single(pos) => in_reach(region, pos, menu.kind, eye, reach),
         Target::Double { first, second } => {
             in_reach(region, first, menu.kind, eye, reach)
@@ -1640,6 +1749,19 @@ fn raw_container_slots(region: &Region, id: PlayerId, menu: &Menu) -> Vec<ItemSt
             state.result.clone(),
         ];
     }
+    // 运输船的 27 格在实体上，不是方块容器条目。
+    if let Some(boat_id) = menu.target.boat() {
+        return region
+            .entities
+            .get(boat_id)
+            .and_then(|entity| match &entity.kind {
+                mc_bamboo_blocks::entity::EntityKind::Boat(boat) => {
+                    boat.chest.as_ref().map(|chest| chest.items.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| vec![ItemStack::empty(); menu.container_size]);
+    }
     if matches!(menu.target, Target::EnderChest(_)) {
         return region.players.get(&id).map_or_else(
             || vec![ItemStack::empty(); menu.container_size],
@@ -1664,6 +1786,21 @@ fn raw_container_slots(region: &Region, id: PlayerId, menu: &Menu) -> Vec<ItemSt
 /// 漏斗和发射器原来没有条目，这里按需新建，否则点开的菜单编辑会悄悄丢掉。
 /// 内容变了的格子要 `setChanged`，比较器才会立刻重算。
 fn write_back_containers(region: &mut Region, menu: &Menu, slots: &[ItemStack]) {
+    // 点击后把容器格写回船实体的 `itemStacks`。
+    if let Some(boat_id) = menu.target.boat() {
+        let count = menu.container_size;
+        if slots.len() >= count {
+            region.entities.with_mut(boat_id, |entity| {
+                if let mc_bamboo_blocks::entity::EntityKind::Boat(boat) = &mut entity.kind
+                    && let Some(chest) = &mut boat.chest
+                    && chest.items.len() == count
+                {
+                    chest.items.clone_from_slice(&slots[..count]);
+                }
+            });
+        }
+        return;
+    }
     if slots.len() < 3 {
         return;
     }

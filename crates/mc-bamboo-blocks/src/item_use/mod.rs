@@ -21,6 +21,7 @@
 //! Sounds, drops and game events are still omitted. Bone meal particles are sent to the player.
 
 mod armor_stand;
+pub(crate) mod boat;
 mod bone_meal;
 pub(crate) use bone_meal::{grow_crop, grow_water_plant};
 mod debug_stick;

@@ -3097,6 +3097,9 @@ impl World {
                 pitch,
                 on_ground,
             } => crate::riding::on_move_vehicle(region, player, position, yaw, pitch, on_ground),
+            PlayRequest::PaddleBoat { left, right } => {
+                crate::riding::set_paddle(region, player, left, right);
+            }
             PlayRequest::PlayerAbilities { flags } => {
                 entity_sync::on_player_abilities(region, player, flags);
             }

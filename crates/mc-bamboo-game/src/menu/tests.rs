@@ -1371,3 +1371,74 @@ fn creative_breaks_only_drop_non_empty_shulker_boxes() {
         }
     }
 }
+
+/// 运输船的 27 格菜单：槽位读写落在船实体上，打开时解包战利品表，船没了就失效。
+#[test]
+fn chest_boat_menu_uses_the_entity_inventory() {
+    use mc_bamboo_blocks::entity::{Entity, EntityKind};
+    use mc_bamboo_data::registries::entity_type as ids;
+
+    let mut fixture = Fixture::new();
+    let position = Vec3::new(0.5, f64::from(flat::surface_y()), 0.5);
+    let boat = fixture
+        .region
+        .entities
+        .spawn(Entity::boat(ids::OAK_CHEST_BOAT, position));
+    // 往船里放一件东西，并挂一张未解包的战利品表。
+    fixture.region.entities.with_mut(boat, |entity| {
+        if let EntityKind::Boat(data) = &mut entity.kind {
+            let chest = data.chest.as_mut().unwrap();
+            chest.items[0] = ItemStack::new(7, 3);
+            chest.loot_table = Some("minecraft:chests/simple_dungeon".to_owned());
+            chest.loot_table_seed = 42;
+        }
+    });
+
+    assert!(open_boat(&mut fixture.region, fixture.id, boat));
+    {
+        let menu = fixture.menu();
+        assert_eq!(menu.container_size, 27);
+        assert_eq!(menu.target.boat(), Some(boat));
+        assert_eq!(menu.target.positions(), Vec::<BlockPos>::new());
+        let slots = display(&fixture.region, fixture.id, menu);
+        assert_eq!(slots.len(), 27 + 36);
+        assert_eq!(slots[0], ItemStack::new(7, 3));
+    }
+    // `unpackChestVehicleLootTable(player)`：打开菜单就解包并清表。
+    let data = fixture.region.entities.get(boat).unwrap();
+    if let EntityKind::Boat(data) = &data.kind {
+        let chest = data.chest.as_ref().unwrap();
+        assert!(chest.loot_table.is_none());
+        assert_eq!(chest.loot_table_seed, 0);
+    } else {
+        panic!("船实体还在");
+    }
+
+    // 点击写回船的 `itemStacks`。
+    let mut changed = display(&fixture.region, fixture.id, fixture.menu());
+    changed[0] = ItemStack::new(9, 5);
+    let menu = fixture.region.menus.remove(&fixture.id).unwrap();
+    write_back_containers(&mut fixture.region, &menu, &changed);
+    fixture.region.menus.insert(fixture.id, menu);
+    let data = fixture.region.entities.get(boat).unwrap();
+    if let EntityKind::Boat(data) = &data.kind {
+        assert_eq!(data.chest.as_ref().unwrap().items[0], ItemStack::new(9, 5));
+    } else {
+        panic!("船实体还在");
+    }
+
+    // `isChestVehicleStillValid`：玩家在范围内为真，船被移除后为假。
+    assert!(still_valid(&fixture.region, fixture.id, fixture.menu()));
+    fixture
+        .region
+        .entities
+        .with_mut(boat, |entity| entity.discard());
+    assert!(!still_valid(&fixture.region, fixture.id, fixture.menu()));
+
+    // 普通船没有物品栏菜单。
+    let plain = fixture
+        .region
+        .entities
+        .spawn(Entity::boat(ids::OAK_BOAT, position));
+    assert!(!open_boat(&mut fixture.region, fixture.id, plain));
+}
