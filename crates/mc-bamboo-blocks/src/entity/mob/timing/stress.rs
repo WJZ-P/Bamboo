@@ -193,6 +193,8 @@ impl Terrain {
 
     fn add_player(&mut self, uid: i32, position: Vec3) {
         self.players.lock().expect("player mutex").push(PlayerView {
+            main_arm_right: true,
+            fall_flying: false,
             shoulder_left: None,
             shoulder_right: None,
             uuid: None,

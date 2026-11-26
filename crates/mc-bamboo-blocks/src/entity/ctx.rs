@@ -507,6 +507,17 @@ impl TargetEffects {
 pub struct PlayerView {
     pub uid: EntityUid,
     pub uuid: Option<[u8; 16]>,
+    /// `LivingEntity.isFallFlying()`（共享标志位 7）。附着烟花按它决定要不要加速。
+    ///
+    /// `LivingEntity.isFallFlying()` (shared flag 7): an attached firework boosts
+    /// only while the player is still gliding.
+    pub fall_flying: bool,
+    /// `Player.getMainArm()`：`true` 是右手、`false` 是左手。附着烟花按它和手持
+    /// 物品算 `getHandHoldingItemAngle` 的 `+80°` / `-80°` 偏移。
+    ///
+    /// `Player.getMainArm()`: `true` for a right main arm, `false` for left. An attached
+    /// firework uses it (and the held items) to pick the `+80°` / `-80°` hand offset.
+    pub main_arm_right: bool,
     pub position: Vec3,
     /// `Entity.getDeltaMovement()`，女巫计算投掷提前量时读它。
     ///
@@ -1255,6 +1266,18 @@ pub enum Command {
     ///
     /// Particle and splash-sound side effects from `FishingHook.catchingFish`.
     FishingEffects(Vec<super::fishing_hook::FishingEffect>),
+    /// `FireworkRocketEntity.tick` 附着分支给滑翔玩家算出的新速度：官方
+    /// `attachedToEntity.setDeltaMovement(...)`。玩家由客户端驱动，服务端只把
+    /// 这份速度落到玩家的速度字段，移动校验的 `expected` 会读到它。
+    ///
+    /// The new velocity the attached branch of `FireworkRocketEntity.tick` computes for a
+    /// gliding player: vanilla `attachedToEntity.setDeltaMovement(...)`. The client drives
+    /// movement; the server just lands this velocity on the player's field, which the
+    /// movement check reads as its `expected` term.
+    SetPlayerDelta {
+        target: crate::entity::EntityUid,
+        delta: Vec3,
+    },
     /// 生成一枚烟花火箭。`CelebrateVillagersSurvivedRaid` 的庆祝烟花以后从这里走；
     /// 现在没有调用方，是给 raid-1c 留的接口。
     ///
@@ -2077,6 +2100,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             );
         }
         Command::FishingEffects(effects) => super::fishing_hook::apply_effects(world, effects),
+        Command::SetPlayerDelta { target, delta } => {
+            let _ = world.level_mut().set_player_delta_now(target, delta);
+        }
         Command::SpawnFireworkRocket(shot) => {
             let _ = world.spawn_firework(&shot);
         }
@@ -2325,6 +2351,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 owner_uuid: None,
                 item,
                 shot_at_angle: false,
+                attached_to_target: None,
                 shoot: None,
             });
         }

@@ -138,6 +138,7 @@ impl Report {
             owner_uuid: None,
             item: case.stack(),
             shot_at_angle: case.crossbow,
+            attached_to_target: None,
             shoot: case.crossbow.then_some(FireworkShoot {
                 direction,
                 power: 1.6,
@@ -301,6 +302,212 @@ impl Report {
             }
         }
         println!("{label}: save round trip");
+    }
+}
+
+/// 鞘翅滑翔附着烟花逐刻对拍：官方夹具里一名滑翔玩家右键烟花，逐刻比烟花的位置、
+/// 速度、朝向、是否消失、`life` / `lifetime`、爆炸那一刻的实体事件 17、玩家被加速后的
+/// 速度、世界随机源和最终方块。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct FireworkElytraCase {
+    pub(super) name: String,
+    pub(super) first_id: i32,
+    pub(super) player_id: i32,
+    pub(super) start: [f64; 3],
+    pub(super) delta: [f64; 3],
+    pub(super) yaw: f32,
+    pub(super) pitch: f32,
+    /// 玩家主手是不是左手（`HumanoidArm.LEFT`）；决定 `getHandHoldingItemAngle` 用 -80°。
+    #[serde(default)]
+    pub(super) left_handed: bool,
+    /// 每刻：`[fx,fy,fz, fdx,fdy,fdz, yRot,xRot, removed, life, lifetime, event17,
+    /// pdx,pdy,pdz, levelSeed]`。
+    pub(super) frames: Vec<[i64; 16]>,
+    /// 结束时场景方块 `[x,y,z,state]`，顺序与官方一致。
+    pub(super) final_blocks: Vec<[i32; 4]>,
+}
+
+impl FireworkElytraCase {
+    fn level(&self) -> MobLevel {
+        let mut blocks = Vec::new();
+        for x in -4..=4 {
+            for z in -4..=4 {
+                blocks.push((
+                    BlockPos::new(x, 63, z),
+                    BlockState(mc_bamboo_data::blocks::STONE),
+                ));
+            }
+        }
+        MobLevel {
+            raid: None,
+            blocks: blocks.into_iter().collect(),
+            random: LevelRandom::new(1),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: Vec::new(),
+            rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+            facts: ZombieFacts {
+                difficulty: 2,
+                ..ZombieFacts::default()
+            },
+            natural_spawn: None,
+            biome: None,
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
+            poi: mc_bamboo_world::poi::PoiStore::new(),
+            entities: Entities::with_next_id(self.first_id),
+            players: vec![PlayerView {
+                main_arm_right: !self.left_handed,
+                uid: self.player_id,
+                uuid: Some([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]),
+                fall_flying: true,
+                position: Vec3::new(self.start[0], self.start[1], self.start[2]),
+                delta: Vec3::new(self.delta[0], self.delta[1], self.delta[2]),
+                width: 0.6,
+                height: 1.8,
+                eye_height: 1.62,
+                health: 20.0,
+                look_direction: Vec3::view_vector(self.yaw, self.pitch),
+                gaze_disguise: false,
+                alive: true,
+                spectator: false,
+                creative: false,
+                game_mode: 0,
+                mining_fatigue: None,
+                sneaking: false,
+                sprinting: false,
+                swimming: false,
+                flying: false,
+                invisible: false,
+                explosion_knockback_resistance: 0.0,
+                armor_cover: 0.0,
+                main_hand: 0,
+                off_hand: 0,
+                team: None,
+                yaw: self.yaw,
+                pitch: self.pitch,
+                combat: Default::default(),
+                effects: Default::default(),
+                shoulder_left: None,
+                shoulder_right: None,
+            }],
+            game: None,
+            wrong_was_hurt: false,
+            inhabited: HashMap::new(),
+            mob_teams: HashMap::new(),
+            short_hunger: false,
+            ignore_bed_monsters: false,
+            explosion_break: 0,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
+            shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState::empty(),
+        }
+    }
+}
+
+impl Report {
+    /// 逐刻重放附着烟花：只 tick 烟花，玩家速度由 `SetPlayerDelta` 落地钩子写回
+    /// `MobLevel.players[0].delta`，下一刻 `ctx.player` 读到官方一样的新速度。
+    pub(super) fn replay_firework_elytra(&mut self, case: &FireworkElytraCase) {
+        self.cases += 1;
+        mc_bamboo_blocks::entity::firework_rocket::set_oracle_break(
+            self.break_test.as_deref().unwrap_or(""),
+        );
+        let mut level = case.level();
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(1000);
+        let shot = FireworkShot {
+            position: Vec3::new(case.start[0], case.start[1], case.start[2]),
+            owner: Some(case.player_id),
+            owner_uuid: None,
+            item: ItemStack::new(items::FIREWORK_ROCKET, 1),
+            shot_at_angle: false,
+            attached_to_target: Some(case.player_id),
+            shoot: None,
+        };
+        let firework_id = {
+            let mut world = World::new(&mut level, &mut ticks);
+            world.spawn_firework(&shot)
+        };
+        let _ = level.entities.take_spawn_snapshots();
+        let mut last_firework: Option<Entity> = None;
+        for (tick, expected) in case.frames.iter().enumerate() {
+            let mut event17 = false;
+            if tick > 0 {
+                ticks.set_time(1000 + tick as i64);
+                let mut world = World::new(&mut level, &mut ticks);
+                if let Some(kept) = world.tick_one_entity_kept(firework_id) {
+                    event17 = matches!(&kept.kind, EntityKind::FireworkRocket(fw) if fw.exploded());
+                    last_firework = Some(kept);
+                }
+                let _ = world.drain_effects();
+            }
+            let entity = level.entities.get(firework_id).or(last_firework.clone());
+            let (position, delta, yaw, pitch, removed, life, lifetime) = match &entity {
+                Some(entity) => {
+                    let (pitch, life, lifetime) = match &entity.kind {
+                        EntityKind::FireworkRocket(firework) => {
+                            (firework.pitch, firework.life, firework.lifetime)
+                        }
+                        _ => (0.0, 0, 0),
+                    };
+                    (
+                        entity.position,
+                        entity.delta,
+                        entity.y_rot,
+                        pitch,
+                        i64::from(entity.removed),
+                        i64::from(life),
+                        i64::from(lifetime),
+                    )
+                }
+                None => (Vec3::default(), Vec3::default(), 0.0, 0.0, 1, 0, 0),
+            };
+            let player_delta = level.players.first().map_or(Vec3::default(), |p| p.delta);
+            let ours = [
+                position.x.to_bits() as i64,
+                position.y.to_bits() as i64,
+                position.z.to_bits() as i64,
+                delta.x.to_bits() as i64,
+                delta.y.to_bits() as i64,
+                delta.z.to_bits() as i64,
+                i64::from(yaw.to_bits() as i32),
+                i64::from(pitch.to_bits() as i32),
+                removed,
+                life,
+                lifetime,
+                i64::from(event17),
+                player_delta.x.to_bits() as i64,
+                player_delta.y.to_bits() as i64,
+                player_delta.z.to_bits() as i64,
+                level.random.source().seed(),
+            ];
+            if &ours != expected {
+                self.mismatch(format!(
+                    "{} tick {tick}: official {expected:?}, bamboo {ours:?}",
+                    case.name
+                ));
+            }
+            self.steps += 1;
+        }
+        for [x, y, z, state] in &case.final_blocks {
+            let ours = level
+                .blocks
+                .get(&BlockPos::new(*x, *y, *z))
+                .copied()
+                .unwrap_or(BlockState(mc_bamboo_data::blocks::AIR));
+            if ours.0 as i32 != *state {
+                self.mismatch(format!(
+                    "{} final block ({x},{y},{z}): official {state}, bamboo {}",
+                    case.name, ours.0
+                ));
+            }
+        }
+        println!("{}: {} ticks", case.name, case.frames.len());
     }
 }
 

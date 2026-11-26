@@ -13,13 +13,15 @@ use crate::{
 };
 
 /// `FireworkRocketItem.useOn`：对着方块右键，在点击位置沿点击面外移 0.15 格生成烟花，
-/// 主人是玩家，扣一个物品。`player.isFallFlying()` 时官方返回 `PASS`；Bamboo 还没有
-/// 鞘翅滑翔，这个条件恒为假，所以照官方写清楚后直接往下走。
+/// 主人是玩家，扣一个物品。`player.isFallFlying()` 时官方返回 `PASS`；这个检查由游戏层
+/// 的 `use_item_on` 入口在调用本函数前完成（那里能读到玩家的滑翔标志），本函数只负责
+/// 非滑翔时的生成。
 ///
 /// `FireworkRocketItem.useOn`: spawn a firework 0.15 blocks along the clicked face from
 /// the click location, owned by the player, and shrink the stack. Vanilla returns `PASS`
-/// while the player is fall flying; Bamboo has no elytra gliding yet, so that condition is
-/// always false and this proceeds straight through.
+/// while fall flying; the game layer's `use_item_on` entry enforces that check before
+/// reaching here (it can read the player's glide flag), so this handles only the
+/// non-gliding spawn.
 pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
     let (sx, sy, sz) = ctx.clicked_face().normal();
     let click = ctx.click_location();
@@ -38,6 +40,7 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
         owner_uuid: Some(ctx.actor.uuid),
         item: stack,
         shot_at_angle: false,
+        attached_to_target: None,
         shoot: None,
     });
     world.set_item_exchange(ItemExchange::Shrink);
@@ -61,6 +64,7 @@ pub(crate) fn spawn_dispensed(
         owner_uuid: None,
         item: crate::container::copy_with_count(stack, 1),
         shot_at_angle: true,
+        attached_to_target: None,
         shoot: Some(FireworkShoot {
             direction,
             power: 0.5,

@@ -133,6 +133,8 @@ impl FishingCase {
         }
         let pos = Vec3::new(self.player_pos[0], self.player_pos[1], self.player_pos[2]);
         let player_view = PlayerView {
+            main_arm_right: true,
+            fall_flying: false,
             uid: self.player_id,
             uuid: Some([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 9]),
             position: pos,

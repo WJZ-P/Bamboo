@@ -593,6 +593,7 @@ public final class MobOracle {
                 if (only == null || "firework_save".startsWith(only)) {
                     cases += playFireworkSave(official, out);
                 }
+                cases += playFireworkElytra(official, out, only);
             }
             if (only == null || only.startsWith("arrow_deflect")) {
                 cases += playArrowDeflect(official, out, only);
@@ -12848,6 +12849,144 @@ public final class MobOracle {
             cases++;
         }
         return cases;
+    }
+
+    /** 鞘翅滑翔右键烟花：`FireworkRocketItem.use` 生成附着在玩家身上的烟花，逐刻跟随
+     *  手持偏移、按官方公式给玩家加速，寿命到了爆炸。夹具只 tick 烟花，不 tick 玩家，
+     *  玩家速度完全由烟花那一句 `setDeltaMovement` 改，和 Bamboo 的速度落地钩子一致。
+     *
+     *  Gliding firework boost: `FireworkRocketItem.use` spawns a rocket attached to the
+     *  player; each tick it follows the hand-held offset, boosts the player with the
+     *  vanilla formula and explodes at end of life. Only the rocket ticks; the player's
+     *  velocity changes solely through `setDeltaMovement`, matching Bamboo's velocity hook. */
+    private static int playFireworkElytra(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (boolean leftHanded : new boolean[] {false, true}) {
+            String name = leftHanded ? "firework_elytra_left" : "firework_elytra";
+            if (only != null && !name.startsWith(only)) continue;
+            cases += playFireworkElytraOne(official, out, name, leftHanded);
+        }
+        return cases;
+    }
+
+    private static int playFireworkElytraOne(Official official, Writer out, String name,
+            boolean leftHanded) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.nextId = FIRST_ID;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        level.spawned = new ArrayList<>();
+        level.tracked = new ArrayList<>();
+        level.levelEvents = new ArrayList<>();
+        level.getRandom().setSeed(1L);
+        level.gameTime = START_TIME;
+        for (int x = -4; x <= 4; x++) {
+            for (int z = -4; z <= 4; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        // 玩家在高空水平滑翔（yaw=0 朝南、初速为零），水平射线碰不到下面的地板。
+        double[] start = {0.5, 70.0, 0.5};
+        int playerId = FIRST_ID + 2;
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "GlideOracle"), ClientInformation.createDefault());
+        player.setId(playerId);
+        player.setPos(start[0], start[1], start[2]);
+        player.setDeltaMovement(0.0, 0.0, 0.0);
+        player.setYRot(0.0F);
+        player.setXRot(0.0F);
+        player.setYHeadRot(0.0F);
+        // `Avatar.setMainArm`：左手玩家 `getMainArm()` 返回 LEFT，手持偏移取 -80°。
+        if (leftHanded) {
+            player.setMainArm(net.minecraft.world.entity.HumanoidArm.LEFT);
+        }
+        // `LivingEntity.isFallFlying()` 读共享标志位 7；夹具用反射直接置位。
+        java.lang.reflect.Method setFlag = net.minecraft.world.entity.Entity.class
+                .getDeclaredMethod("setSharedFlag", int.class, boolean.class);
+        setFlag.setAccessible(true);
+        setFlag.invoke(player, 7, true);
+
+        ItemStack stack = new ItemStack(Items.FIREWORK_ROCKET, 1);
+        // 附着构造：`FireworkRocketEntity(Level, ItemStack, LivingEntity)`，主人和附着目标都是玩家。
+        net.minecraft.world.entity.projectile.FireworkRocketEntity firework =
+                new net.minecraft.world.entity.projectile.FireworkRocketEntity(level, stack, player);
+        setRandom(firework, level.entitySeeds.nextLong());
+        firework.setUUID(Mth.createInsecureUUID(firework.getRandom()));
+        // 基础构造函数的初速和寿命在带种子的随机源上重跑一遍（和其余烟花场景一致）。
+        firework.setDeltaMovement(
+                firework.getRandom().triangle(0.0, 0.002297), 0.05,
+                firework.getRandom().triangle(0.0, 0.002297));
+        int flight = 1;
+        Fireworks component = stack.get(DataComponents.FIREWORKS);
+        if (component != null) flight += component.flightDuration();
+        putInt(net.minecraft.world.entity.projectile.FireworkRocketEntity.class, firework,
+                "lifetime", 10 * flight + firework.getRandom().nextInt(6)
+                        + firework.getRandom().nextInt(7));
+        firework.setId(FIRST_ID);
+        level.tracked.add(firework);
+
+        final boolean[] event17 = {false};
+        level.packets = packet -> {
+            if (packet instanceof ClientboundEntityEventPacket ev
+                    && ev.getEventId() == 17
+                    && getInt(ClientboundEntityEventPacket.class, ev, "entityId") == firework.getId()) {
+                event17[0] = true;
+            }
+        };
+        int ticks = 30;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                event17[0] = false;
+                if (!firework.isRemoved()) {
+                    firework.commonTick();
+                    firework.tick();
+                }
+            }
+            Vec3 motion = player.getDeltaMovement();
+            if (tick > 0) frames.append(',');
+            frames.append('[')
+                    .append(Double.doubleToRawLongBits(firework.getX())).append(',')
+                    .append(Double.doubleToRawLongBits(firework.getY())).append(',')
+                    .append(Double.doubleToRawLongBits(firework.getZ())).append(',')
+                    .append(Double.doubleToRawLongBits(firework.getDeltaMovement().x)).append(',')
+                    .append(Double.doubleToRawLongBits(firework.getDeltaMovement().y)).append(',')
+                    .append(Double.doubleToRawLongBits(firework.getDeltaMovement().z)).append(',')
+                    .append(Float.floatToRawIntBits(firework.getYRot())).append(',')
+                    .append(Float.floatToRawIntBits(firework.getXRot())).append(',')
+                    .append(firework.isRemoved() ? 1 : 0).append(',')
+                    .append(getInt(net.minecraft.world.entity.projectile.FireworkRocketEntity.class,
+                            firework, "life")).append(',')
+                    .append(getInt(net.minecraft.world.entity.projectile.FireworkRocketEntity.class,
+                            firework, "lifetime")).append(',')
+                    .append(event17[0] ? 1 : 0).append(',')
+                    .append(Double.doubleToRawLongBits(motion.x)).append(',')
+                    .append(Double.doubleToRawLongBits(motion.y)).append(',')
+                    .append(Double.doubleToRawLongBits(motion.z)).append(',')
+                    .append(randomSeed(level.getRandom())).append(']');
+        }
+        frames.append(']');
+        long[] keys = level.blocks.keySet().toLongArray();
+        Arrays.sort(keys);
+        StringBuilder blocks = new StringBuilder("[");
+        for (int i = 0; i < keys.length; i++) {
+            if (i > 0) blocks.append(',');
+            BlockPos pos = BlockPos.of(keys[i]);
+            blocks.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',')
+                    .append(pos.getZ()).append(',')
+                    .append(Block.getId(level.getBlockState(pos))).append(']');
+        }
+        blocks.append(']');
+        out.write("{\"type\":\"fireworkElytra\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"playerId\":" + playerId
+                + ",\"start\":[0.5,70.0,0.5],\"delta\":[0.0,0.0,0.0]"
+                + ",\"yaw\":0.0,\"pitch\":0.0"
+                + ",\"leftHanded\":" + leftHanded
+                + ",\"frames\":" + frames
+                + ",\"finalBlocks\":" + blocks + "}\n");
+        return 1;
     }
 
     /** 烟花火箭存档往返：官方 `saveWithoutId` 的 SNBT 和读回后再写出的 SNBT。 */

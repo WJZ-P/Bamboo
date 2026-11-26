@@ -4180,10 +4180,16 @@ impl<'a> World<'a> {
         let pos = knot.pos;
         self.level.put_entity(entity);
 
-        // 剪刀分支：`shearOffAllLeashConnections` → `dropAllLeashConnections`。
+        // 剪刀分支：`shearOffAllLeashConnections` → `dropAllLeashConnections(player)`。
         if held.item == mc_bamboo_data::items::SHEARS
             && crate::entity::leash_knot::drop_all_leashed_to(self, id)
         {
+            crate::entity::leash_knot::shear_game_event(
+                self,
+                crate::entity::leash_knot::knot_position(pos),
+                Some(player_uid),
+                sneaking,
+            );
             crate::durability::hurt_hand(self, hand, 1);
             self.play_sound(
                 crate::entity::leash_knot::knot_position(pos),

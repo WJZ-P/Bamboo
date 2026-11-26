@@ -82,6 +82,8 @@ fn state_ordinal(state: TrialSpawnerState) -> i32 {
 impl TrialSpawnerCase {
     fn level(&self, broken: &str) -> MobLevel {
         let mut player = PlayerView {
+            main_arm_right: true,
+            fall_flying: false,
             uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
             uid: (1 << 24) + 1024,
             yaw: 0.0,

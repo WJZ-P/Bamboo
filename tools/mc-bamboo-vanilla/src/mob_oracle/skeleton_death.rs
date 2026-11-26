@@ -42,6 +42,8 @@ pub(super) struct Drop {
 
 pub(super) fn player_view() -> PlayerView {
     PlayerView {
+        main_arm_right: true,
+        fall_flying: false,
         shoulder_left: None,
         shoulder_right: None,
         uid: 1025,

@@ -10,7 +10,7 @@ use mc_bamboo_blocks::entity::{
 use mc_bamboo_core::{Aabb, BlockPos, ChunkPos, Hand, Vec3};
 use mc_bamboo_protocol::{
     item::ItemStack,
-    packet::play::{ClientInformation, EquipmentSlot, GameMode, MODEL_PART_HAT},
+    packet::play::{ClientInformation, EquipmentSlot, GameMode, HumanoidArm, MODEL_PART_HAT},
 };
 use uuid::Uuid;
 
@@ -557,6 +557,8 @@ impl Player {
         PlayerView {
             uid: id.0,
             uuid: Some(*self.uuid.as_bytes()),
+            fall_flying: self.sync.is_fall_flying(),
+            main_arm_right: self.client.main_hand == HumanoidArm::Right,
             position: self.position,
             delta: self.motion.delta,
             width: (HALF_WIDTH * 2.0) as f32,

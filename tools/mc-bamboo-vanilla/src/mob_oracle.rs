@@ -255,6 +255,7 @@ enum Line {
     Firework(Box<firework::FireworkCase>),
     FireworkSave(firework::FireworkSaveCase),
     Fishing(Box<fishing::FishingCase>),
+    FireworkElytra(Box<firework::FireworkElytraCase>),
     ArrowDeflect(Box<arrow_deflect::ArrowDeflectCase>),
     OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawnerCase>),
     Hanging(Box<hanging::HangingCase>),
@@ -1592,6 +1593,22 @@ impl Level for MobLevel {
         true
     }
 
+    /// 附着烟花加速：把速度写回夹具里那名玩家的 `PlayerView.delta`，让下一刻
+    /// `ctx.player` 读到和官方 `setDeltaMovement` 一样的新速度。
+    fn set_player_delta_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        delta: mc_bamboo_core::Vec3,
+    ) -> bool {
+        for player in &mut self.players {
+            if player.uid == target {
+                player.delta = delta;
+                return true;
+            }
+        }
+        false
+    }
+
     fn knock_back_player_now(
         &mut self,
         target: mc_bamboo_blocks::entity::EntityUid,
@@ -2469,6 +2486,7 @@ impl Report {
                 Line::Firework(case) => self.replay_firework(&case),
                 Line::FireworkSave(case) => self.replay_firework_save(&case),
                 Line::Fishing(case) => self.replay_fishing(&case),
+                Line::FireworkElytra(case) => self.replay_firework_elytra(&case),
                 Line::ArrowDeflect(case) => self.replay_arrow_deflect(&case),
                 Line::OminousItemSpawner(case) => self.replay_ominous_item_spawner(&case),
                 Line::Hanging(case) => self.replay_hanging(&case),
@@ -2583,6 +2601,8 @@ impl Report {
             entities: Entities::with_next_id(1),
             // 官方夹具里只有 0 号玩家；肩膀状态挂在 MobLevel 上（选 A）。
             players: vec![PlayerView {
+                main_arm_right: true,
+                fall_flying: false,
                 uid: 1024,
                 uuid: Some(player_uuid.to_be_bytes()),
                 position: player_pos,
@@ -2933,6 +2953,8 @@ impl Report {
                 .iter()
                 .enumerate()
                 .map(|(index, player)| PlayerView {
+                    main_arm_right: true,
+                    fall_flying: false,
                     shoulder_left: None,
                     shoulder_right: None,
                     // 官方一侧的玩家 UUID 是 (1, 2 + 下标)；狼认主人要用它。

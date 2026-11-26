@@ -94,6 +94,8 @@ impl CreakingCase {
 fn gaze_player(name: &str) -> PlayerView {
     let x = if name == "creaking_chase" { 6.5 } else { 4.5 };
     PlayerView {
+        main_arm_right: true,
+        fall_flying: false,
         uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
         uid: 1025,
         yaw: 90.0,

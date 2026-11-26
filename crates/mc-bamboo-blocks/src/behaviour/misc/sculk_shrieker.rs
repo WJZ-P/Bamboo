@@ -369,6 +369,8 @@ mod tests {
         );
         // 玩家在 1 格内，能收到警告；uid 1。
         level.players.push(crate::entity::ctx::PlayerView {
+            main_arm_right: true,
+            fall_flying: false,
             uid: 1,
             position: mc_bamboo_core::Vec3::new(1.5, 64.0, 0.5),
             ..crate::entity::mob::throttle::test_player(

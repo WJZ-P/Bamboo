@@ -199,6 +199,8 @@ impl HappyGhastAiCase {
 
 fn oracle_player(uid: i32, position: Vec3, item: i32, tempt: bool) -> PlayerView {
     PlayerView {
+        main_arm_right: true,
+        fall_flying: false,
         uid,
         uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
         position,

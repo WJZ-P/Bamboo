@@ -1111,6 +1111,25 @@ impl Level for RegionLevel<'_> {
         true
     }
 
+    /// 附着烟花加速：把官方公式算出的速度直接写进玩家 `getDeltaMovement()`。服务端
+    /// 不据此移动玩家（位移由客户端决定），但移动校验的 `expected` 会读到这份速度，
+    /// 客户端那份加速同样靠同步的 `DATA_ATTACHED_TO_TARGET` 在本地施加。
+    ///
+    /// Attached firework boost: land the vanilla-formula velocity straight onto the
+    /// player's `getDeltaMovement()`. The server does not move the player from it (the
+    /// client owns movement), but the movement check reads it as `expected`; the client
+    /// applies the same boost locally thanks to the synced `DATA_ATTACHED_TO_TARGET`.
+    fn set_player_delta_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        delta: mc_bamboo_core::Vec3,
+    ) -> bool {
+        if let Some(player) = self.players.get_mut(&PlayerId(target)) {
+            player.motion.delta = delta;
+        }
+        true
+    }
+
     fn ignite_player_now(
         &mut self,
         target: mc_bamboo_blocks::entity::EntityUid,

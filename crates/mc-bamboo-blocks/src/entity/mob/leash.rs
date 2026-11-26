@@ -319,8 +319,8 @@ fn resolve_holder(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<HolderInfo> {
     out
 }
 
-/// 掉一根拴绳的物品。
-fn lead_item() -> mc_bamboo_protocol::item::ItemStack {
+/// `Items.LEAD` 的一根拴绳物品堆。
+pub fn lead_item() -> mc_bamboo_protocol::item::ItemStack {
     mc_bamboo_protocol::item::ItemStack::new(mc_bamboo_data::items::LEAD, 1)
 }
 
@@ -472,25 +472,14 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let entity_interactable = super::living::is_alive(me, mob);
     let holder = resolve_holder(ctx, holder_uid);
     let Some(holder) = holder else {
-        // 牵引者不在这张表里（跨岛或已消失）：掉拴绳。
-        if let Some(old) = drop_leash(mob) {
-            ctx.emit(crate::entity::ctx::Command::NotifyLeasheeRemoved(old), me);
-        }
-        ctx.emit(
-            crate::entity::ctx::Command::DropItem { stack: lead_item() },
-            me,
-        );
+        // 牵引者不在这张表里（跨岛或已消失）：`dropLeash()` 掉拴绳、断链、通知。
+        drop_leash(me, mob, ctx);
         return;
     };
     if !entity_interactable || !holder.interactable {
         if ctx.blocks().block_game_rules().entity_drops {
-            if let Some(old) = drop_leash(mob) {
-                ctx.emit(crate::entity::ctx::Command::NotifyLeasheeRemoved(old), me);
-            }
-            ctx.emit(
-                crate::entity::ctx::Command::DropItem { stack: lead_item() },
-                me,
-            );
+            // `tickLeash` 的 `dropLeash()`：掉拴绳、断链、通知。
+            drop_leash(me, mob, ctx);
         } else if let Some(old) = remove_leash(mob) {
             ctx.emit(crate::entity::ctx::Command::NotifyLeasheeRemoved(old), me);
         }
@@ -518,13 +507,7 @@ pub fn tick_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         if let Some(data) = mob.leash.as_ref() {
             me.y_rot = (f64::from(me.y_rot) - data.angular_momentum) as f32;
         }
-        if let Some(old) = drop_leash(mob) {
-            ctx.emit(crate::entity::ctx::Command::NotifyLeasheeRemoved(old), me);
-        }
-        ctx.emit(
-            crate::entity::ctx::Command::DropItem { stack: lead_item() },
-            me,
-        );
+        drop_leash(me, mob, ctx);
         mob.goals.set_control_flag(super::goals::Flag::Move, false);
         return;
     }
@@ -783,13 +766,57 @@ pub fn set_leashed_to(
     old.filter(|&old| old != holder)
 }
 
-/// `dropLeash()`：解开并掉一根拴绳，广播 `set_entity_link` 断开。掉落物由调用方 emit。
-/// 返回旧牵引者（要给 `notifyLeasheeRemoved`）。
-pub fn drop_leash(mob: &mut Mob) -> Option<EntityUid> {
-    let old = leash_holder(mob);
+/// `dropLeash()` 落地前的信息：`spawnAtLocation` 用解链时实体的位置，旧牵引者要通知。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LeashDrop {
+    pub position: Vec3,
+    pub old_holder: EntityUid,
+}
+
+/// `Leashable.dropLeash()` 第一段：有牵引者时清牵引数据、排队 `set_entity_link`
+/// 断链包，返回要落地的拴绳掉落信息。`spawnAtLocation` / `notifyLeasheeRemoved`
+/// 由调用方按精确 / 并行 / `World` 三种驱动各自落地。
+pub fn begin_drop_leash(me: &Entity, mob: &mut Mob) -> Option<LeashDrop> {
+    let old = leash_holder(mob)?;
     clear_leash(mob);
     mob.events.push(MobEvent::LeashLink { holder: None });
-    old
+    Some(LeashDrop {
+        position: me.position,
+        old_holder: old,
+    })
+}
+
+/// `Entity.spawnAtLocation(ServerLevel, Items.LEAD)` + `notifyLeasheeRemoved`：
+/// 在实体位置、零偏移、默认拾取延迟掉一根拴绳，再通知旧牵引者（拴绳结可因此消失）。
+pub fn finish_drop_leash(world: &mut crate::world::World<'_>, drop: LeashDrop) {
+    world.spawn_at_location(drop.position, lead_item());
+    crate::entity::leash_knot::notify_leashee_removed(world, drop.old_holder);
+}
+
+/// 官方 `dropLeash()`：解开、掉一根拴绳、发断链包、通知旧牵引者。
+/// tick 路径用 [`crate::entity::ctx::Command`] 落地（并行驱动按 uid 顺序应用）。
+pub fn drop_leash(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> Option<EntityUid> {
+    let drop = begin_drop_leash(me, mob)?;
+    ctx.emit(
+        crate::entity::ctx::Command::DropItem { stack: lead_item() },
+        me,
+    );
+    ctx.emit(
+        crate::entity::ctx::Command::NotifyLeasheeRemoved(drop.old_holder),
+        me,
+    );
+    Some(drop.old_holder)
+}
+
+/// `World` 路径的 `dropLeash()`：交互 / 剪刀不在实体 tick 里，直接落地。
+pub fn drop_leash_world(
+    world: &mut crate::world::World<'_>,
+    me: &Entity,
+    mob: &mut Mob,
+) -> Option<EntityUid> {
+    let drop = begin_drop_leash(me, mob)?;
+    finish_drop_leash(world, drop);
+    Some(drop.old_holder)
 }
 
 /// `removeLeash()`：解开但**不**掉拴绳，广播 `set_entity_link` 断开。返回旧牵引者。
