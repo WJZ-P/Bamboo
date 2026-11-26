@@ -426,3 +426,181 @@ impl Report {
         println!("{}: {} ticks", case.name, case.frames.len());
     }
 }
+
+/// 凋灵之首命中牛的逐刻帧：`[x,y,z,dx,dy,dz,yRot,xRot,removed,cowHealth,
+/// cowDx,cowDy,cowDz,levelSeed,witherDuration,witherAmplifier]`。
+///
+/// Frame of the wither-skull-hits-cow scene (raw float/double bits).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WitherSkullCase {
+    name: String,
+    first_id: i32,
+    start: [f64; 3],
+    direction: [f64; 3],
+    frames: Vec<[i64; 16]>,
+}
+
+impl WitherSkullCase {
+    fn level(&self) -> MobLevel {
+        let mut blocks = Vec::new();
+        for x in -4..=4 {
+            for z in -4..=12 {
+                blocks.push((
+                    BlockPos::new(x, 63, z),
+                    BlockState(mc_bamboo_data::blocks::BEDROCK),
+                ));
+            }
+        }
+        MobLevel {
+            raid: None,
+            blocks: blocks.into_iter().collect(),
+            random: LevelRandom::new(1),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: Vec::new(),
+            rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+            facts: ZombieFacts {
+                difficulty: 2,
+                ..ZombieFacts::default()
+            },
+            natural_spawn: None,
+            biome: None,
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
+            poi: mc_bamboo_world::poi::PoiStore::new(),
+            entities: Entities::with_next_id(self.first_id),
+            players: Vec::new(),
+            game: None,
+            wrong_was_hurt: false,
+            inhabited: HashMap::new(),
+            mob_teams: HashMap::new(),
+            short_hunger: false,
+            ignore_bed_monsters: false,
+            explosion_break: 0,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
+            shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState::empty(),
+        }
+    }
+}
+
+impl Report {
+    /// 逐刻重放一枚凋灵之首命中牛：射弹轨迹、牛血量 / 击退、凋零效果、世界随机源。
+    ///
+    /// Replay a wither skull hitting a cow: projectile track, cow health /
+    /// knockback, wither effect and the world random source.
+    pub(super) fn replay_wither_skull(&mut self, case: &WitherSkullCase) {
+        use mc_bamboo_blocks::{
+            BlockTicks, World,
+            entity::{Entity, EntityKind, mob::MobType, wither_skull::WitherSkullShot},
+        };
+        use mc_bamboo_core::Vec3;
+
+        self.cases += 1;
+        let broken = self.break_test.as_deref() == Some("wither_skull");
+        let mut level = case.level();
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(1000);
+        let start = Vec3::new(case.start[0], case.start[1], case.start[2]);
+        let direction = Vec3::new(case.direction[0], case.direction[1], case.direction[2]);
+        let (skull_id, cow_id) = {
+            let mut world = World::new(&mut level, &mut ticks);
+            let skull_id = world.spawn_wither_skull_shot(&WitherSkullShot {
+                position: start,
+                direction,
+                dangerous: false,
+                owner: Some(case.first_id + 1),
+                owner_uuid: None,
+                // Java 夹具里 owner 凋灵 `snapTo(..., 0, 0)`，初始朝向是 (0, 0)。
+                // The Java fixture's owner wither is spawned facing (0, 0).
+                owner_y_rot: 0.0,
+                owner_x_rot: 0.0,
+            });
+            let cow_id =
+                world.spawn_entity(Entity::by_mob_type(MobType::Cow, Vec3::new(0.5, 64.0, 8.5)));
+            (skull_id, cow_id)
+        };
+        let _ = level.entities.take_spawn_snapshots();
+        let mut last_skull: Option<Entity> = None;
+        for (tick, expected) in case.frames.iter().enumerate() {
+            if tick > 0 {
+                ticks.set_time(1000 + tick as i64);
+                let mut world = World::new(&mut level, &mut ticks);
+                // 只 tick 射弹，牛作为命中目标留在名单里（不跑物理）。
+                // Tick only the skull; the cow stays as a hit target.
+                if let Some(kept) = world.tick_one_entity_kept(skull_id) {
+                    last_skull = Some(kept);
+                }
+                let _ = world.drain_effects();
+            }
+            let entity = level.entities.get(skull_id).or(last_skull.clone());
+            let (position, delta, yaw, pitch, removed) = match &entity {
+                Some(entity) => {
+                    let pitch = match &entity.kind {
+                        EntityKind::WitherSkull(skull) => skull.pitch,
+                        _ => 0.0,
+                    };
+                    (
+                        entity.position,
+                        entity.delta,
+                        entity.y_rot,
+                        pitch,
+                        i64::from(entity.removed),
+                    )
+                }
+                None => (Vec3::default(), Vec3::default(), 0.0, 0.0, 1),
+            };
+            let (cow_health, cow_delta, wither_duration, wither_amplifier) =
+                match level.entities.get(cow_id) {
+                    Some(cow) => {
+                        let mob = cow.kind.mob().expect("cow is a mob");
+                        let effect = mob
+                            .effects
+                            .get(mc_bamboo_data::registries::mob_effect::WITHER);
+                        (
+                            mob.health.to_bits() as i32 as i64,
+                            cow.delta,
+                            effect.map_or(0, |e| i64::from(e.duration)),
+                            effect.map_or(0, |e| i64::from(e.amplifier)),
+                        )
+                    }
+                    None => (0, Vec3::default(), 0, 0),
+                };
+            let mut ours = [
+                position.x.to_bits() as i64,
+                position.y.to_bits() as i64,
+                position.z.to_bits() as i64,
+                delta.x.to_bits() as i64,
+                delta.y.to_bits() as i64,
+                delta.z.to_bits() as i64,
+                i64::from(yaw.to_bits() as i32),
+                i64::from(pitch.to_bits() as i32),
+                removed,
+                cow_health,
+                cow_delta.x.to_bits() as i64,
+                cow_delta.y.to_bits() as i64,
+                cow_delta.z.to_bits() as i64,
+                level.random.source().seed(),
+                wither_duration,
+                wither_amplifier,
+            ];
+            if broken {
+                // 改坏确认：把射弹 x 改一位，逐刻都报错。
+                // Break check: shift the projectile x by one bit.
+                ours[0] += 1;
+            }
+            if &ours != expected {
+                self.mismatch(format!(
+                    "{} tick {tick}: official {expected:?}, bamboo {ours:?}",
+                    case.name
+                ));
+            }
+            self.steps += 1;
+        }
+        println!("{}: {} ticks", case.name, case.frames.len());
+    }
+}

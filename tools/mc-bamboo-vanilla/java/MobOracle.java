@@ -740,6 +740,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("wither_explode")) {
                 cases += playWitherExplode(official, out, only);
             }
+            if (only == null || only.startsWith("wither_skull")) {
+                cases += playWitherSkull(official, out, only);
+            }
             if (only == null || only.startsWith("breeze")) {
                 cases += playBreeze(official, out, only);
             }
@@ -16037,6 +16040,95 @@ public final class MobOracle {
         return cases;
     }
 
+    /** 凋灵之首命中牛：逐刻比射弹轨迹、牛血量 / 击退、凋零效果和世界随机源。 */
+    private static int playWitherSkull(Official official, Writer out, String only) throws Exception {
+        String name = "wither_skull_hit";
+        if (only != null && !name.startsWith(only)) return 0;
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.nextId = FIRST_ID;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        level.spawned = new ArrayList<>();
+        level.tracked = new ArrayList<>();
+        level.levelEvents = new ArrayList<>();
+        level.getRandom().setSeed(1L);
+        level.gameTime = START_TIME;
+        // 基岩地板（#wither_immune），命中后的小爆炸不破坏方块。
+        // Bedrock floor (#wither_immune): the small on-hit blast destroys nothing.
+        for (int x = -4; x <= 4; x++) {
+            for (int z = -4; z <= 12; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.BEDROCK.defaultBlockState());
+            }
+        }
+        // 凋灵只作 owner（供 getOwner 查找），不 tick 它的 AI。
+        var wither = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                EntityTypes.WITHER.create(level, EntitySpawnReason.TRIGGERED);
+        setRandom(wither, 5L);
+        wither.setUUID(new UUID(0L, 1L));
+        wither.setId(FIRST_ID + 1);
+        wither.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        level.tracked.add(wither);
+        // 牛作命中目标，不 tick（照风弹场景）。
+        var cow = EntityTypes.COW.create(level, EntitySpawnReason.EVENT);
+        setRandom(cow, 7L);
+        cow.setUUID(new UUID(0L, 2L));
+        cow.setId(FIRST_ID + 2);
+        cow.snapTo(0.5, 64.0, 8.5, 0.0F, 0.0F);
+        cow.setPersistenceRequired();
+        level.tracked.add(cow);
+        // 头 0 的位置 (0.5, 67, 0.5)，方向按官方瞄准 `cow.getY() + eyeHeight*0.5`。
+        double hx = 0.5, hy = 67.0, hz = 0.5;
+        double ty = cow.getY() + cow.getEyeHeight() * 0.5;
+        double dx = cow.getX() - hx, dy = ty - hy, dz = cow.getZ() - hz;
+        var skull = new net.minecraft.world.entity.projectile.hurtingprojectile.WitherSkull(
+                level, wither, new net.minecraft.world.phys.Vec3(dx, dy, dz));
+        skull.setUUID(new UUID(0L, 3L));
+        skull.setId(FIRST_ID);
+        skull.setPos(hx, hy, hz);
+        level.addFreshEntity(skull);
+        level.tracked.add(skull);
+        int ticks = 20;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                level.levelEvents.clear();
+                if (!skull.isRemoved()) {
+                    skull.commonTick();
+                    skull.tick();
+                }
+            }
+            if (tick > 0) frames.append(',');
+            var d = skull.getDeltaMovement();
+            var eff = cow.getEffect(net.minecraft.world.effect.MobEffects.WITHER);
+            frames.append('[')
+                    .append(Double.doubleToRawLongBits(skull.getX())).append(',')
+                    .append(Double.doubleToRawLongBits(skull.getY())).append(',')
+                    .append(Double.doubleToRawLongBits(skull.getZ())).append(',')
+                    .append(Double.doubleToRawLongBits(d.x)).append(',')
+                    .append(Double.doubleToRawLongBits(d.y)).append(',')
+                    .append(Double.doubleToRawLongBits(d.z)).append(',')
+                    .append(Float.floatToRawIntBits(skull.getYRot())).append(',')
+                    .append(Float.floatToRawIntBits(skull.getXRot())).append(',')
+                    .append(skull.isRemoved() ? 1 : 0).append(',')
+                    .append(Float.floatToRawIntBits(cow.getHealth())).append(',')
+                    .append(Double.doubleToRawLongBits(cow.getDeltaMovement().x)).append(',')
+                    .append(Double.doubleToRawLongBits(cow.getDeltaMovement().y)).append(',')
+                    .append(Double.doubleToRawLongBits(cow.getDeltaMovement().z)).append(',')
+                    .append(randomSeed(level.getRandom())).append(',')
+                    .append(eff == null ? 0 : eff.getDuration()).append(',')
+                    .append(eff == null ? 0 : eff.getAmplifier()).append(']');
+        }
+        frames.append(']');
+        out.write("{\"type\":\"witherSkull\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"start\":[" + hx + "," + hy + "," + hz + "]"
+                + ",\"direction\":[" + dx + "," + dy + "," + dz + "]"
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+        return 1;
+    }
+
     /**
      * 旋风人逐刻对拍：官方 Breeze 在假世界里开着 AI 跑，逐刻比姿态、大脑记忆、坐标 /
      * 速度 / 朝向、两种随机源。三个场景分别把玩家放在射击距离内、长跳距离、贴脸。
@@ -25198,6 +25290,13 @@ public final class MobOracle {
                 RandomSource random = vex.getRandom();
                 vex.setUUID(Mth.createInsecureUUID(random));
                 random.nextFloat();
+            }
+            // 凋灵之首由 `WitherBoss.performRangedAttack` 生成，官方随机源不带种子；
+            // Bamboo 的 `prepare_entity` 从岛种子源换种，这里照做（构造不额外抽 UUID）。
+            // A wither skull is built without a seeded random; Bamboo's `prepare_entity`
+            // reseeds it from the island seed source, so do the same here.
+            if (entity instanceof net.minecraft.world.entity.projectile.hurtingprojectile.WitherSkull) {
+                setRandom(entity, entitySeeds.nextLong());
             }
             if (entity instanceof Animal calf && dropUuids) {
                 newbornCows.add(calf);

@@ -20,7 +20,7 @@ use mc_bamboo_data::registries::{entity_type as types, mob_effect};
 
 use super::{
     Entity, EntityKind, EntityUid, KindPublic,
-    arrow::{clip_entity, clip_including_border, player_box, rotation},
+    arrow::{clip_entity, clip_including_border, player_box},
     ctx::{Command, EntityCtx, PlayerView},
     mob::{DamageKind, DamageSource, effects::EffectInstance, living},
 };
@@ -123,6 +123,15 @@ pub struct WitherSkullShot {
     pub dangerous: bool,
     pub owner: Option<EntityUid>,
     pub owner_uuid: Option<[u8; 16]>,
+    /// `AbstractHurtingProjectile` 构造用 owner 的 `getYRot()` 作初始朝向（不是射弹方向）。
+    ///
+    /// `AbstractHurtingProjectile` sets the initial facing from the owner's
+    /// `getYRot()`, not from the projectile direction.
+    pub owner_y_rot: f32,
+    /// 同上，owner 的 `getXRot()`（pitch）。
+    ///
+    /// Likewise the owner's `getXRot()` (pitch).
+    pub owner_x_rot: f32,
 }
 
 impl Entity {
@@ -134,11 +143,11 @@ impl Entity {
     }
 
     /// `AbstractHurtingProjectile` 构造：`assignDirectionalMovement` 把归一化方向
-    /// 乘 `accelerationPower=0.1` 作初速，再按速度设朝向，不抽任何散布随机数。
+    /// 乘 `accelerationPower=0.1` 作初速；`setRot` 用 owner 的朝向，不抽散布随机数。
     ///
     /// `AbstractHurtingProjectile` construction: `assignDirectionalMovement`
-    /// scales the normalized direction by `accelerationPower=0.1` into the
-    /// initial velocity; set rotation from it, no spread draws.
+    /// scales the normalized direction by `accelerationPower=0.1`; `setRot`
+    /// uses the owner's facing, no spread draws.
     pub fn shoot_wither_skull(&mut self, shot: &WitherSkullShot) {
         let movement = shot.direction.normalize().scale(ACCELERATION_POWER);
         self.delta = movement;
@@ -147,9 +156,8 @@ impl Entity {
         };
         skull.needs_sync = true;
         skull.sync_velocity = true;
-        let (yaw, pitch) = rotation(movement);
-        self.y_rot = yaw;
-        skull.pitch = pitch;
+        self.y_rot = shot.owner_y_rot;
+        skull.pitch = shot.owner_x_rot;
     }
 }
 
@@ -228,17 +236,30 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         .as_ref()
         .map_or_else(|| me.position.add(movement), |hit| hit.location);
     me.position = position;
-    // `ProjectileUtil.rotateTowardsMovement(this, 0.2F)`。
+    // `ProjectileUtil.rotateTowardsMovement(this, 0.2F)`：先把上一刻角度平移到
+    // 目标角度的 [-180, 180) 邻域，再用 0.2 系数 lerp（否则 180° 会往反方向转）。
+    // `ProjectileUtil.rotateTowardsMovement(this, 0.2F)`: shift last tick's angle
+    // into the target's [-180, 180) neighbourhood before lerping.
     if movement.length_sqr() > 0.0 {
         let horizontal = (movement.x * movement.x + movement.z * movement.z).sqrt();
         let deg = |radians: f64| (radians * 57.295_776_367_187_5) as f32;
         let target_yaw = deg(mth::atan2(movement.z, movement.x)) + 90.0;
         let target_pitch = deg(mth::atan2(horizontal, movement.y)) - 90.0;
+        let near = |old: f32, target: f32| {
+            let mut value = old;
+            while target - value < -180.0 {
+                value -= 360.0;
+            }
+            while target - value >= 180.0 {
+                value += 360.0;
+            }
+            value
+        };
         let EntityKind::WitherSkull(skull) = &me.kind else {
             return;
         };
-        let old_yaw = me.y_rot;
-        let old_pitch = skull.pitch;
+        let old_yaw = near(me.y_rot, target_yaw);
+        let old_pitch = near(skull.pitch, target_pitch);
         me.y_rot = mth::lerp_f32(0.2, old_yaw, target_yaw);
         let EntityKind::WitherSkull(skull) = &mut me.kind else {
             return;
@@ -428,6 +449,8 @@ mod tests {
             dangerous,
             owner: Some(7),
             owner_uuid: None,
+            owner_y_rot: 0.0,
+            owner_x_rot: 0.0,
         }
     }
 

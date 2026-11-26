@@ -487,6 +487,8 @@ fn perform_ranged_attack(
             dangerous,
             owner: Some(me.id),
             owner_uuid: Some(mob.uuid),
+            owner_y_rot: me.y_rot,
+            owner_x_rot: mob.x_rot,
         })),
         me,
     );
