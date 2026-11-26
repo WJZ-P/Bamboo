@@ -627,6 +627,24 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 };
                 send_level_event(region, except, pos, &packet);
             }
+            Effect::GlobalLevelEvent { event, pos, data } => {
+                // `ServerLevel.globalLevelEvent`：不看距离、不排除发起者，发给所有在线
+                // 玩家，协议包带 `global=true`。
+                //
+                // `ServerLevel.globalLevelEvent`: no distance check and no initiator
+                // exclusion, sent to every online player with `global=true`.
+                let packet = LevelEvent {
+                    event,
+                    pos,
+                    data,
+                    global: true,
+                };
+                let frames = encode_frames(&packet);
+                let Region { players, links, .. } = region;
+                for id in players.keys() {
+                    links.send_frames(*id, &frames);
+                }
+            }
             Effect::Particles {
                 particle,
                 position,

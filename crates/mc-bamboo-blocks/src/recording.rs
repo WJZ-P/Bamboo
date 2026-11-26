@@ -751,6 +751,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::OpenSignEditor { .. } => 8,
         Effect::Sound { .. } => 9,
         Effect::LevelEvent { .. } => 10,
+        Effect::GlobalLevelEvent { .. } => 39,
         Effect::NoteBlockPlayed { .. } => 11,
         Effect::BlockEvent { .. } => 12,
         Effect::ComposterFill { .. } => 13,
@@ -842,6 +843,11 @@ fn hash_effect(effect: &Effect) -> u64 {
             pos.hash(&mut hasher);
             data.hash(&mut hasher);
             except_initiator.hash(&mut hasher);
+        }
+        Effect::GlobalLevelEvent { event, pos, data } => {
+            event.hash(&mut hasher);
+            pos.hash(&mut hasher);
+            data.hash(&mut hasher);
         }
         Effect::NoteBlockPlayed {
             pos,

@@ -1569,11 +1569,15 @@ WebView2 的渲染进程不算在内。
   更新邻居，按 `forwards` 轴摆位置和身体朝向、调 `makeInvulnerable`（220 刻无敌、血量 100、血条清零），
   给 50 格内玩家触发 `SUMMONED_ENTITY`；和平难度或高度不够不召唤。**实体行为**：`customServerAiStep`
   里无敌期每刻递减 `Invul`、每 10 刻回 10 血、进度按 `1 - invul/220` 推进，归零时以眼高为心发 7 格 `MOB` 爆炸
-  并广播 1023 号事件；之后按 `destroyBlocksTick` 扫包围盒内非 `#wither_immune` 方块逐格 `destroyBlock` 发 1022 事件、
+  并以 `globalLevelEvent` 全服广播 1023 号事件（协议包 `global=true`，不看距离）；之后按 `destroyBlocksTick`
+  扫包围盒内非 `#wither_immune` 方块逐格 `destroyBlock` 发 1022 事件、
   每 20 刻回 1 血、血条进度按血量比更新。`aiStep` 接上追主目标的飞行速度和两个侧头朝 `DATA_TARGET_B/C`
   的折角插值（`rotlerp`）。`hurtServer` 挡下无敌期、溺水（`#wither_immune_to`）、另一个凋灵、
   `#wither_friends`（`#undead`）的伤害，半血（`isPowered`）时箭 / 风弹被弹开，放行前设 `destroyBlocksTick=20`、
-  `idleHeadUpdates` 各加 3。死亡掉下界之星，并实现 `LivingEntity.createWitherRose`（被凋灵杀死的生物种下或掉落凋灵玫瑰）。
+  `idleHeadUpdates` 各加 3。`aiStep` 的烟雾 / 实体效果粒子照字节码消耗实体随机源（每刻 9 次高斯、半血时每头一次
+  `level.random.nextInt(4)`、无敌期再加 6 次高斯 + 3 次浮点）。死亡掉下界之星，`LivingEntity.createWitherRose`
+  照字节码排在所有掉落命令之后：`mobGriefing` 且脚下方块是空气、且 `WitherRoseBlock.canSurvive`（走行为表
+  `mayPlaceOn` 的 `#supports_wither_rose`）时种下玫瑰，否则按 `getX/getY/getZ` 的实体坐标掉玫瑰物品。
   **验证**：`cargo test -p mc-bamboo-blocks -p mc-bamboo-game`、`cargo clippy --workspace --all-targets`、
   `cargo fmt --all --check` 全过；`mob-oracle java --show 2000` 仍是 267 处已知末位差（无凋灵相关差异），
   `entity-oracle` / `player-data` / `chunk-content` 三个 Java 对拍全过。
@@ -1581,8 +1585,7 @@ WebView2 的渲染进程不算在内。
   `WaterAvoidingRandomFlyingGoal`、看玩家、`HurtByTargetGoal`、`NearestAttackableTargetGoal` 都缺），
   凋灵不会主动移动 / 索敌；`WitherSkull` 凋灵之首射弹实体、三个头的 `performRangedAttack`（普通 / 蓝色危险、
   命中加凋零效果、蓝色破方块）和侧头 idle / 索敌射击都未建模，凋灵目前不会攻击；`ServerBossEvent`
-  只在状态里记进度，没给跟踪范围内玩家发 add / remove / update 网络包；`aiStep` 粒子的实体随机源消耗、
-  1023 的 global（而非 local）广播、玫瑰物品掉落坐标是近似；**没有新增逐刻对拍场景，也没有 4 处改坏确认**——
+  只在状态里记进度，没给跟踪范围内玩家发 add / remove / update 网络包；**没有新增逐刻对拍场景，也没有 4 处改坏确认**——
   召唤 / 无敌期 / 爆炸 / 射凋灵之首 / 半血弹箭 / 破坏方块 / 存档往返的官方逐刻对拍留待下一步。
 - 正版验证的限制：`server.properties` 的 `online-mode` 官方默认 true，命令行版和桌面端都读同一份文件、
   设置页里可以改；`ServerConfig::default()`（不读配置文件的嵌入用法）是 false。

@@ -1505,6 +1505,14 @@ pub enum Command {
         pos: mc_bamboo_core::BlockPos,
         data: i32,
     },
+    /// `ServerLevel.globalLevelEvent`：发给全服所有玩家（不是 64 格内）。
+    ///
+    /// `ServerLevel.globalLevelEvent`: broadcast to every player, not just nearby ones.
+    GlobalLevelEvent {
+        event: i32,
+        pos: mc_bamboo_core::BlockPos,
+        data: i32,
+    },
     /// `RingBell` 的 `BellBlock.attemptToRing(entity, level, pos, null)`：村民敲响钟。
     ///
     /// `RingBell`'s `BellBlock.attemptToRing(entity, level, pos, null)`.
@@ -2083,23 +2091,22 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             world.spawn_at_location(me.position, stack);
         }
         Command::CreateWitherRose { pos } => {
-            use mc_bamboo_data::{blocks, items, tags::block_tags};
+            use mc_bamboo_data::{blocks, items};
             let rose = crate::BlockState(blocks::WITHER_ROSE);
-            let below = world.block_state(pos.below());
+            // `WitherRoseBlock.canSurvive` 走行为表的 `mayPlaceOn`（脚下格下方是否
+            // `#supports_wither_rose`），不是直接比标签。
+            //
+            // `WitherRoseBlock.canSurvive` goes through the behaviour table's
+            // `mayPlaceOn`, not a bare tag check.
             let place = world.block_game_rules().mob_griefing
                 && world.block_state(pos).is_air()
-                && below.is_tagged(block_tags::SUPPORTS_WITHER_ROSE);
+                && rose.can_survive(world, pos);
             if place {
                 world.set_block_and_update(pos, rose);
             } else {
-                world.spawn_at_location(
-                    Vec3::new(
-                        f64::from(pos.x) + 0.5,
-                        f64::from(pos.y),
-                        f64::from(pos.z) + 0.5,
-                    ),
-                    ItemStack::new(items::WITHER_ROSE, 1),
-                );
+                // `new ItemEntity(level, getX(), getY(), getZ(), stack)`：实体脚底坐标。
+                // `new ItemEntity(level, getX(), getY(), getZ(), stack)`: exact entity position.
+                world.spawn_at_location(me.position, ItemStack::new(items::WITHER_ROSE, 1));
             }
         }
         Command::DropTridentItem { stack } => {
@@ -2259,6 +2266,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 data,
                 except_initiator: false,
             });
+        }
+        Command::GlobalLevelEvent { event, pos, data } => {
+            world.push_effect(crate::Effect::GlobalLevelEvent { event, pos, data });
         }
         Command::RingBell { pos } => crate::behaviour::attached::bell::ring(world, pos),
         Command::SpawnFirework {

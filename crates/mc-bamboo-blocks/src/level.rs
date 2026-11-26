@@ -2821,6 +2821,16 @@ pub enum Effect {
         data: i32,
         except_initiator: bool,
     },
+    /// `ServerLevel.globalLevelEvent`：发给全服所有玩家，不看距离；协议包的
+    /// `global` 标志为真（客户端无条件播放）。
+    ///
+    /// `ServerLevel.globalLevelEvent`: sent to every player regardless of distance,
+    /// with the `global` flag set so the client plays it unconditionally.
+    GlobalLevelEvent {
+        event: i32,
+        pos: BlockPos,
+        data: i32,
+    },
     /// `ServerLevel.sendParticles`：一个简单粒子包（幽匿催发体的 `sculk_soul`）。
     /// 游戏层发给 32 格内的玩家。
     ///

@@ -1230,6 +1230,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::OpenSignEditor { .. }
             | Effect::Sound { .. }
             | Effect::LevelEvent { .. }
+            | Effect::GlobalLevelEvent { .. }
             | Effect::NoteBlockPlayed { .. }
             // 方块事件只发给客户端播放动画，假世界没有客户端。
             | Effect::BlockEvent { .. }
@@ -1315,6 +1316,9 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
                 pos.z,
                 data,
                 except_initiator,
+            )),
+            Effect::GlobalLevelEvent { event, pos, data } => events.push(LevelPlay(
+                event, pos.x, pos.y, pos.z, data, false,
             )),
             // `ComposterBlock` 的 `levelEvent(1500)`。官方 `except` 是 null。
             Effect::ComposterFill { pos, success } => events.push(LevelPlay(

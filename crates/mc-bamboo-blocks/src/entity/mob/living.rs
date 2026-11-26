@@ -1474,6 +1474,7 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
     // `WitherBoss.aiStep`: the two side heads turn towards their targets after `super.aiStep()`.
     if mob.mob_type == super::MobType::Wither {
         super::wither::ai_step_heads(me, mob, ctx);
+        super::wither::ai_step_particles(me, mob, ctx);
     }
     // `Ravager.aiStep` 在 `super.aiStep()` 之后跑自己的那一段：速度渐进、踩树叶、
     // 三个计时器。
@@ -3860,25 +3861,30 @@ pub(crate) fn apply_eat_block(world: &mut crate::world::World, pos: BlockPos, gr
 }
 
 /// `LivingEntity.die`：掉落交给 [`Command::DropMobLoot`]，经验只在被玩家打过时掉。
+/// `createWitherRose` 在 `dropAllDeathLoot` 之后，等所有掉落命令排完再排它。
+///
+/// `LivingEntity.die`: drops go through [`Command::DropMobLoot`]; `createWitherRose`
+/// runs after `dropAllDeathLoot`, so its command is queued after every drop command.
 fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSource) {
     if me.removed || mob.dead {
         return;
     }
-    mob.dead = true;
-    // `LivingEntity.createWitherRose`：击杀者（`getKillCredit`）是凋灵 Boss 时，
-    // 脚下生成凋灵玫瑰。官方把它放在掉落之后，这里只记一次等价的落地命令。
+    let killed_by_wither =
+        source.attacker_type == Some(mc_bamboo_data::registries::entity_type::WITHER);
+    let rose_pos = me.block_position();
+    die_impl(me, mob, ctx, source);
+    // `LivingEntity.createWitherRose(getKillCredit())`：击杀者是凋灵 Boss 时，
+    // 在掉落之后于脚下生成凋灵玫瑰。
     //
-    // `LivingEntity.createWitherRose`: when the kill credit is the wither boss,
-    // grow a wither rose at the feet. Vanilla does it after the drops; here it is
-    // one equivalent landing command.
-    if source.attacker_type == Some(mc_bamboo_data::registries::entity_type::WITHER) {
-        ctx.emit(
-            Command::CreateWitherRose {
-                pos: me.block_position(),
-            },
-            me,
-        );
+    // `LivingEntity.createWitherRose(getKillCredit())`: when the kill credit is the
+    // wither boss, grow a wither rose at the feet after the drops.
+    if killed_by_wither {
+        ctx.emit(Command::CreateWitherRose { pos: rose_pos }, me);
     }
+}
+
+fn die_impl(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSource) {
+    mob.dead = true;
     // `LivingEntity.die` 在掉落之前发 `ENTITY_DIE`：上下文的 `sourceEntity` 是死者，
     // 附近的幽匿催发体用它换经验充能。命令在伤害命令之后落地，但仍在同刻。
     // `LivingEntity.die` posts `ENTITY_DIE` before drops; catalyst listeners turn

@@ -267,6 +267,43 @@ pub(super) fn ai_step_heads(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) {
     }
 }
 
+/// `WitherBoss.aiStep` 的粒子段：服务端不发包，但参数里的实体随机源照取不误；
+/// 半血时每头还要取一次世界随机源 `level.getRandom().nextInt(4)`。
+///
+/// The particle block of `WitherBoss.aiStep`: the server sends no packets but still
+/// draws the entity's random source; at half health each head also draws the world
+/// random's `level.getRandom().nextInt(4)`.
+pub(super) fn ai_step_particles(me: &mut Entity, mob: &Mob, ctx: &dyn EntityCtx) {
+    let powered = is_powered(mob.health, max_health(mob));
+    for _ in 0..3 {
+        // 每个头的 SMOKE 粒子：三次 `random.nextGaussian()`。
+        // Each head's SMOKE particle: three `random.nextGaussian()` draws.
+        for _ in 0..3 {
+            let _ = me.random.next_gaussian();
+        }
+        // 半血时每头一次 `level.getRandom().nextInt(4)`，为 0 再发 ENTITY_EFFECT
+        // 粒子（又三次高斯）。
+        // At half health each head draws `level.getRandom().nextInt(4)`; a zero adds
+        // an ENTITY_EFFECT particle (three more gaussians).
+        if powered && ctx.blocks().level_random_int(4) == 0 {
+            for _ in 0..3 {
+                let _ = me.random.next_gaussian();
+            }
+        }
+    }
+    // 无敌期：三个 ENTITY_EFFECT 粒子，每个按
+    // `nextGaussian / nextFloat / nextGaussian` 取数。
+    // Invulnerability phase: three ENTITY_EFFECT particles, each drawing
+    // `nextGaussian / nextFloat / nextGaussian`.
+    if mob.wither.invulnerable_ticks > 0 {
+        for _ in 0..3 {
+            let _ = me.random.next_gaussian();
+            let _ = me.random.next_float();
+            let _ = me.random.next_gaussian();
+        }
+    }
+}
+
 /// `WitherBoss.customServerAiStep`：无敌期、爆炸、破坏方块、每刻回血和 Boss 血条进度。
 /// 无敌期直接 `return`，不跑 `super.customServerAiStep` 的那一支。
 ///
@@ -280,8 +317,10 @@ pub(super) fn custom_server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dy
         if next <= 0 {
             spawn_explosion(me, mob, ctx);
             if !mob.silent {
+                // 官方 `globalLevelEvent(1023, blockPosition(), 0)`：全服广播。
+                // Vanilla `globalLevelEvent(1023, blockPosition(), 0)`: server-wide broadcast.
                 ctx.emit(
-                    Command::MobLevelEvent {
+                    Command::GlobalLevelEvent {
                         event: 1023,
                         pos: me.block_position(),
                         data: 0,
