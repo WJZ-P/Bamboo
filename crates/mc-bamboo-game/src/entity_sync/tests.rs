@@ -981,6 +981,7 @@ fn fall_flying_refusal_uses_the_current_flags_and_only_reaches_the_player() {
 fn fall_flying_starts_and_sends_the_shared_flag_to_observers() {
     let mut stage = Stage::at(POSITION);
     stage.skip_first_cycle();
+    let standing_pair = parse_frames(&pairing_frames(stage.player()));
     stage.player().on_ground = false;
     stage.player().inventory.slots[6] = ItemStack::new(mc_bamboo_data::items::ELYTRA, 1);
 
@@ -991,12 +992,26 @@ fn fall_flying_starts_and_sends_the_shared_flag_to_observers() {
         0,
     );
     assert!(stage.player().sync.is_fall_flying());
+    let velocity = Vec3::new(1.0, 0.0, 0.0);
+    stage.player().motion.delta = velocity;
     stage.step();
     assert_eq!(stage.player().height(), 0.6_f32);
     assert_eq!(stage.player().eye_height(), f64::from(0.4_f32));
+    let gliding = stage.take_received();
     assert_eq!(
-        stage
-            .take_received()
+        gliding
+            .iter()
+            .filter(|frame| frame.id == clientbound::SET_ENTITY_MOTION)
+            .collect::<Vec<_>>(),
+        parse_frames(&encode_frames(&SetEntityMotion {
+            entity_id: STEVE.0,
+            movement: velocity
+        }))
+        .iter()
+        .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        gliding
             .into_iter()
             .filter(|frame| frame.id == clientbound::SET_ENTITY_DATA)
             .collect::<Vec<_>>(),
@@ -1025,6 +1040,8 @@ fn fall_flying_starts_and_sends_the_shared_flag_to_observers() {
             "07 00 00 00 06 14 00 ff"
         )],
     );
+    let stopped_pair = parse_frames(&pairing_frames(stage.player()));
+    assert_eq!(standing_pair[1], stopped_pair[1]);
 }
 
 #[test]

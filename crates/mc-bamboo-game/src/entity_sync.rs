@@ -426,7 +426,11 @@ fn pairing_frames(player: &Player) -> Vec<u8> {
         uuid: player.uuid,
         entity_type: entity_type::PLAYER,
         position: sync.base,
-        movement: sync.last_sent_movement,
+        movement: if sync.sent_metadata.shared_flags & ENTITY_FLAG_FALL_FLYING != 0 {
+            sync.last_sent_movement
+        } else {
+            Vec3::default()
+        },
         pitch: sync.last_pitch,
         yaw: sync.last_yaw,
         head_yaw: sync.last_head,

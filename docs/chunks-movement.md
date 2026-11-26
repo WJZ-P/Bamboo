@@ -484,7 +484,7 @@ Bamboo 世界线程的等价顺序：
 | B7 | `moved wrongly`：模拟结果和目标的距离平方 > 0.0625 → `fail = true`。**创造和旁观模式跳过这个判断**。Y 分量恒被置 0（条件 `yDist > -0.5 \|\| yDist < 0.5` 永远成立） | **已做** |
 | B8 | 接受条件：`noPhysics`，或睡眠，或（`!fail` 或原位置已卡在方块里）且 `isEntityCollidingWithAnythingNew` 为 false。否则 `teleport` 回移动前的位置。**后一项对创造模式也生效** | **已做**，只比较方块。睡眠分支没有 |
 | B9 | 接受：`absSnapTo` 写入位置和朝向。`absSnapRotationTo` 还会把 `xRot` clamp 到 ±90，A6 的只更新朝向走的也是它 | **必须** |
-| B10 | 更新 `clientIsFloating`，`tickPlayer` 里连续悬空超过 80 tick（按重力缩放）就踢。`mayfly` 为 true 时恒为 false | **已做**。`allow-flight` 固定为 false。没有漂浮和鞘翅豁免 |
+| B10 | 更新 `clientIsFloating`，`tickPlayer` 里连续悬空超过 80 tick（按重力缩放）就踢。`mayfly` 为 true 时恒为 false | **已做**。漂浮和鞘翅滑翔免悬空检查，`allow-flight` 固定为 false |
 | B11 | `ServerChunkCache.move` → `ChunkMap.move` | **必须**，见第 6 节 |
 | B12 | `setOnGroundWithMovement`、摔落伤害、`knownMovement`、统计、`lastGood` | `on_ground`、水平碰撞标记、摔落距离和 `lastGood` **已做**。伤害、统计和 `knownMovement` 没做 |
 
