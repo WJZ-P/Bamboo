@@ -1621,8 +1621,14 @@ pub(crate) fn on_interact_entity(
         target.kind,
         mc_bamboo_blocks::entity::KindPublic::LeashKnot { .. }
     );
+    let is_item_frame = matches!(
+        target.kind,
+        mc_bamboo_blocks::entity::KindPublic::ItemFrame(_)
+    );
     if target.removed
-        || !(matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) || is_knot)
+        || !(matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
+            || is_knot
+            || is_item_frame)
     {
         return;
     }
@@ -1641,6 +1647,37 @@ pub(crate) fn on_interact_entity(
         Hand::Main => Hand::Off,
         Hand::Off => Hand::Main,
     };
+    if is_item_frame {
+        // 物品展示框：空框放手上物品，已有物品则顺时针旋转 45 度。
+        // Item frame: place held item when empty, otherwise rotate by 45 degrees.
+        for try_hand in [hand, other] {
+            let held = match try_hand {
+                Hand::Main => main_held.clone(),
+                Hand::Off => off_held.clone(),
+            };
+            let (outcome, effects) = {
+                let (mut level, ticks) = region.block_level();
+                let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+                let out = world.interact_item_frame(entity_id, &held, creative);
+                (out, world.into_effects())
+            };
+            send_effects(region, Some(id), &effects);
+            if outcome.consume_held {
+                inventory::apply_item_exchange(
+                    region,
+                    id,
+                    try_hand,
+                    &mc_bamboo_blocks::ItemExchange::Shrink,
+                );
+            }
+            if !outcome.result.consumes_action() {
+                continue;
+            }
+            swing(region, id, try_hand, outcome.result);
+            return;
+        }
+        return;
+    }
     if is_knot {
         // 拴绳结：剪刀剪断绳子，或把玩家 / 结之间的生物转来转去。
         for try_hand in [hand, other] {

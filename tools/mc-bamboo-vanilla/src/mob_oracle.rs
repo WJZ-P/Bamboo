@@ -57,6 +57,7 @@ mod gen_spawn;
 mod golem;
 mod grazing;
 mod guardian_scene;
+mod hanging;
 mod happy_ghast;
 mod happy_ghast_ai;
 mod husk_jockey;
@@ -254,6 +255,7 @@ enum Line {
     FireworkSave(firework::FireworkSaveCase),
     ArrowDeflect(Box<arrow_deflect::ArrowDeflectCase>),
     OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawnerCase>),
+    Hanging(Box<hanging::HangingCase>),
     TrialSpawner(Box<trial_spawner::TrialSpawnerCase>),
     Vault(Box<vault::VaultCase>),
     SculkSensor(sculk_sensor::SculkSensorCase),
@@ -2466,6 +2468,7 @@ impl Report {
                 Line::FireworkSave(case) => self.replay_firework_save(&case),
                 Line::ArrowDeflect(case) => self.replay_arrow_deflect(&case),
                 Line::OminousItemSpawner(case) => self.replay_ominous_item_spawner(&case),
+                Line::Hanging(case) => self.replay_hanging(&case),
                 Line::TrialSpawner(case) => self.replay_trial_spawner(&case),
                 Line::Vault(case) => self.replay_vault(&case),
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),

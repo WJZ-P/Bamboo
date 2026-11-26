@@ -600,6 +600,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("ominous_item_spawner")) {
                 cases += playOminousItemSpawner(official, out, only);
             }
+            if (only == null || only.startsWith("hanging")) {
+                cases += playHanging(official, out, only);
+            }
             if (only == null || only.startsWith("trial_spawner")) {
                 cases += playTrialSpawner(official, out, only);
             }
@@ -13069,6 +13072,333 @@ public final class MobOracle {
     }
 
     /**
+     * 悬挂实体（画、物品展示框、荧光物品展示框）逐刻与事件对拍：
+     * 1. `hanging_painting_4x4`：4x4 墙放画（随机最大面积变体、精确位置/包围盒/配对包），拆背后方块后第 101 刻掉落；
+     * 2. `hanging_painting_2x1`：2x1 窄墙放画（只剩 2x1 最大面积候选），拆墙后第 101 刻掉落；
+     * 3. `hanging_item_frame_comparator`：放展示框、放物品、旋转三下并隔墙驱动真实比较器（输出 1→2→3→4），
+     *    第一下打掉物品（比较器归 0）、第二下打掉框；
+     * 4. `hanging_glow_frame_and_fixed`：顶面荧光展示框五种音效与掉落，以及 `Fixed`/`Invisible` 框免疫拆除/交互/受击。
+     */
+    private static int playHanging(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of(
+                "hanging_painting_4x4",
+                "hanging_painting_2x1",
+                "hanging_item_frame_comparator",
+                "hanging_glow_frame_and_fixed")) {
+            if (only != null && !name.startsWith(only)) continue;
+            playHangingCase(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    private static void playHangingCase(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.nextId = FIRST_ID;
+        level.hangingNextId = FIRST_ID;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        level.hangingScene = true;
+        level.spawned = new ArrayList<>();
+        level.tracked = new ArrayList<>();
+        level.soundLog = new ArrayList<>();
+        level.getRandom().setSeed(1L);
+        level.gameTime = START_TIME;
+
+        ServerPlayer player = new ServerPlayer(
+                official.server,
+                level,
+                new GameProfile(new UUID(1L, 9L), "HangingOracle"),
+                ClientInformation.createDefault());
+        player.setId(FIRST_ID + 100);
+        player.setPos(0.5, 64.0, 3.0);
+        player.getAbilities().instabuild = false;
+        player.getAbilities().mayBuild = true;
+
+        BlockPos comparatorPos = null;
+        if (name.equals("hanging_painting_4x4")) {
+            for (int x = 0; x <= 3; x++) {
+                for (int y = 64; y <= 67; y++) {
+                    level.blocks.put(BlockPos.asLong(x, y, 0), Blocks.STONE.defaultBlockState());
+                }
+            }
+        } else if (name.equals("hanging_painting_2x1")) {
+            for (int x = 0; x <= 1; x++) {
+                level.blocks.put(BlockPos.asLong(x, 64, 0), Blocks.STONE.defaultBlockState());
+            }
+        } else if (name.equals("hanging_item_frame_comparator")) {
+            for (int x = -2; x <= 2; x++) {
+                for (int z = -2; z <= 2; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+            level.blocks.put(BlockPos.asLong(0, 64, 0), Blocks.STONE.defaultBlockState());
+            comparatorPos = new BlockPos(0, 64, -1);
+            BlockState comp = Blocks.COMPARATOR.defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.ComparatorBlock.FACING, Direction.SOUTH)
+                    .setValue(net.minecraft.world.level.block.ComparatorBlock.MODE,
+                            net.minecraft.world.level.block.state.properties.ComparatorMode.COMPARE)
+                    .setValue(net.minecraft.world.level.block.ComparatorBlock.POWERED, false);
+            level.blocks.put(comparatorPos.asLong(), comp);
+            level.blockEntities.put(
+                    comparatorPos.asLong(),
+                    new net.minecraft.world.level.block.entity.ComparatorBlockEntity(
+                            comparatorPos, comp));
+            level.blockTicks.addContainer(
+                    new ChunkPos(comparatorPos.getX() >> 4, comparatorPos.getZ() >> 4),
+                    new net.minecraft.world.ticks.LevelChunkTicks<>());
+        } else if (name.equals("hanging_glow_frame_and_fixed")) {
+            level.blocks.put(BlockPos.asLong(0, 64, 0), Blocks.STONE.defaultBlockState());
+            level.blocks.put(BlockPos.asLong(2, 64, 0), Blocks.STONE.defaultBlockState());
+        }
+
+        net.minecraft.world.entity.decoration.HangingEntity mainEntity = null;
+        net.minecraft.world.entity.decoration.ItemFrame fixedFrame = null;
+        Sync mainSync = null;
+        Sync fixedSync = null;
+        int totalTicks = (name.startsWith("hanging_painting_") || name.equals("hanging_glow_frame_and_fixed"))
+                ? 112
+                : 35;
+
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= totalTicks; tick++) {
+            level.spawned.clear();
+            level.soundLog.clear();
+            List<String> tickPackets = new ArrayList<>();
+            int actionResult = -1;
+
+            if (tick > 0) {
+                level.gameTime++;
+                level.blockTicks.tick(level.gameTime, 65536, (pos, block) -> {
+                    BlockState st = level.getBlockState(pos);
+                    if (st.is(block)) {
+                        st.tick(level, pos, level.getRandom());
+                    }
+                });
+            }
+
+            if (name.equals("hanging_painting_4x4")) {
+                if (tick == 0) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.PAINTING, 2));
+                    var hit = new net.minecraft.world.phys.BlockHitResult(
+                            new Vec3(1.5, 64.5, 1.0), Direction.SOUTH, new BlockPos(1, 64, 0), false);
+                    var ctx = new net.minecraft.world.item.context.UseOnContext(player, InteractionHand.MAIN_HAND, hit);
+                    var res = Items.PAINTING.useOn(ctx);
+                    actionResult = res.consumesAction() ? 1 : 0;
+                    for (Entity e : level.spawned) {
+                        if (e instanceof net.minecraft.world.entity.decoration.painting.Painting p) {
+                            mainEntity = p;
+                            Sync s = new Sync(level, p, official.registries);
+                            s.entity.sendPairingData(null, pkt -> s.bytes.add(pkt));
+                            tickPackets.addAll(s.take());
+                            mainSync = s;
+                        }
+                    }
+                } else if (tick == 10) {
+                    level.removeBlock(new BlockPos(1, 64, 0), false);
+                }
+            } else if (name.equals("hanging_painting_2x1")) {
+                if (tick == 0) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.PAINTING, 2));
+                    var hit = new net.minecraft.world.phys.BlockHitResult(
+                            new Vec3(0.5, 64.5, 1.0), Direction.SOUTH, new BlockPos(0, 64, 0), false);
+                    var ctx = new net.minecraft.world.item.context.UseOnContext(player, InteractionHand.MAIN_HAND, hit);
+                    var res = Items.PAINTING.useOn(ctx);
+                    actionResult = res.consumesAction() ? 1 : 0;
+                    for (Entity e : level.spawned) {
+                        if (e instanceof net.minecraft.world.entity.decoration.painting.Painting p) {
+                            mainEntity = p;
+                            Sync s = new Sync(level, p, official.registries);
+                            s.entity.sendPairingData(null, pkt -> s.bytes.add(pkt));
+                            tickPackets.addAll(s.take());
+                            mainSync = s;
+                        }
+                    }
+                } else if (tick == 5) {
+                    level.removeBlock(new BlockPos(1, 64, 0), false);
+                }
+            } else if (name.equals("hanging_item_frame_comparator")) {
+                if (tick == 1) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.ITEM_FRAME, 2));
+                    var hit = new net.minecraft.world.phys.BlockHitResult(
+                            new Vec3(0.5, 64.5, 1.0), Direction.SOUTH, new BlockPos(0, 64, 0), false);
+                    var ctx = new net.minecraft.world.item.context.UseOnContext(player, InteractionHand.MAIN_HAND, hit);
+                    var res = Items.ITEM_FRAME.useOn(ctx);
+                    actionResult = res.consumesAction() ? 1 : 0;
+                    for (Entity e : level.spawned) {
+                        if (e instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                            mainEntity = f;
+                            Sync s = new Sync(level, f, official.registries);
+                            s.entity.sendPairingData(null, pkt -> s.bytes.add(pkt));
+                            tickPackets.addAll(s.take());
+                            mainSync = s;
+                        }
+                    }
+                } else if (tick == 5 && mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.DIAMOND, 4));
+                    var res = f.interact(player, InteractionHand.MAIN_HAND, Vec3.ZERO);
+                    actionResult = res.consumesAction() ? 1 : 0;
+                } else if ((tick == 10 || tick == 15 || tick == 20)
+                        && mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    var res = f.interact(player, InteractionHand.MAIN_HAND, Vec3.ZERO);
+                    actionResult = res.consumesAction() ? 1 : 0;
+                } else if ((tick == 25 || tick == 30)
+                        && mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    boolean hurt = f.hurtServer(level, level.damageSources().playerAttack(player), 1.0F);
+                    actionResult = hurt ? 1 : 0;
+                }
+            } else if (name.equals("hanging_glow_frame_and_fixed")) {
+                if (tick == 1) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.GLOW_ITEM_FRAME, 2));
+                    var hit = new net.minecraft.world.phys.BlockHitResult(
+                            new Vec3(0.5, 65.0, 0.5), Direction.UP, new BlockPos(0, 64, 0), false);
+                    var ctx = new net.minecraft.world.item.context.UseOnContext(player, InteractionHand.MAIN_HAND, hit);
+                    var res = Items.GLOW_ITEM_FRAME.useOn(ctx);
+                    actionResult = res.consumesAction() ? 1 : 0;
+                    for (Entity e : level.spawned) {
+                        if (e instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                            mainEntity = f;
+                            Sync s = new Sync(level, f, official.registries);
+                            s.entity.sendPairingData(null, pkt -> s.bytes.add(pkt));
+                            tickPackets.addAll(s.take());
+                            mainSync = s;
+                        }
+                    }
+                    // 同时生成一个 Fixed=true, Invisible=true 的普通展示框在 (2, 64, 1) 朝南。
+                    var fx = new net.minecraft.world.entity.decoration.ItemFrame(
+                            level, new BlockPos(2, 64, 1), Direction.SOUTH);
+                    fx.setInvisible(true);
+                    put(net.minecraft.world.entity.decoration.ItemFrame.class, fx, "fixed", Boolean.TRUE);
+                    level.addFreshEntity(fx);
+                    fixedFrame = fx;
+                    Sync fs = new Sync(level, fx, official.registries);
+                    fs.entity.sendPairingData(null, pkt -> fs.bytes.add(pkt));
+                    tickPackets.addAll(fs.take());
+                    fixedSync = fs;
+                } else if (tick == 2) {
+                    level.removeBlock(new BlockPos(2, 64, 0), false);
+                } else if (tick == 3 && mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.GOLD_INGOT, 2));
+                    actionResult = f.interact(player, InteractionHand.MAIN_HAND, Vec3.ZERO).consumesAction() ? 1 : 0;
+                } else if (tick == 4 && fixedFrame != null) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.GOLD_INGOT, 2));
+                    actionResult = fixedFrame.interact(player, InteractionHand.MAIN_HAND, Vec3.ZERO).consumesAction() ? 1 : 0;
+                } else if (tick == 5 && mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    actionResult = f.interact(player, InteractionHand.MAIN_HAND, Vec3.ZERO).consumesAction() ? 1 : 0;
+                } else if (tick == 6 && fixedFrame != null) {
+                    actionResult = fixedFrame.hurtServer(level, level.damageSources().playerAttack(player), 1.0F) ? 1 : 0;
+                } else if ((tick == 7 || tick == 9)
+                        && mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    actionResult = f.hurtServer(level, level.damageSources().playerAttack(player), 1.0F) ? 1 : 0;
+                }
+            }
+
+            if (tick > 0) {
+                if (mainEntity != null && !mainEntity.isRemoved()) {
+                    mainEntity.tick();
+                }
+                if (fixedFrame != null && !fixedFrame.isRemoved()) {
+                    fixedFrame.tick();
+                }
+                if (mainSync != null && mainEntity != null && !mainEntity.isRemoved()) {
+                    mainSync.entity.sendChanges();
+                    tickPackets.addAll(mainSync.take());
+                }
+                if (fixedSync != null && fixedFrame != null && !fixedFrame.isRemoved()) {
+                    fixedSync.entity.sendChanges();
+                    tickPackets.addAll(fixedSync.take());
+                }
+                level.tracked.removeIf(Entity::isRemoved);
+            }
+
+            int alive = (mainEntity != null && !mainEntity.isRemoved()) ? 1 : 0;
+            int fixedAlive = (fixedFrame != null && !fixedFrame.isRemoved()) ? 1 : 0;
+            int variantId = -1;
+            int dirId = -1;
+            int itemId = 0;
+            int rotation = 0;
+            int analogOut = 0;
+            long posX = 0L, posY = 0L, posZ = 0L;
+            long minX = 0L, minY = 0L, minZ = 0L, maxX = 0L, maxY = 0L, maxZ = 0L;
+            int yRotBits = 0, xRotBits = 0;
+            if (mainEntity != null) {
+                dirId = mainEntity.getDirection().get3DDataValue();
+                posX = Double.doubleToRawLongBits(mainEntity.getX());
+                posY = Double.doubleToRawLongBits(mainEntity.getY());
+                posZ = Double.doubleToRawLongBits(mainEntity.getZ());
+                var bb = mainEntity.getBoundingBox();
+                minX = Double.doubleToRawLongBits(bb.minX);
+                minY = Double.doubleToRawLongBits(bb.minY);
+                minZ = Double.doubleToRawLongBits(bb.minZ);
+                maxX = Double.doubleToRawLongBits(bb.maxX);
+                maxY = Double.doubleToRawLongBits(bb.maxY);
+                maxZ = Double.doubleToRawLongBits(bb.maxZ);
+                yRotBits = Float.floatToRawIntBits(mainEntity.getYRot());
+                xRotBits = Float.floatToRawIntBits(mainEntity.getXRot());
+                if (mainEntity instanceof net.minecraft.world.entity.decoration.painting.Painting p) {
+                    var reg = official.registries.lookupOrThrow(Registries.PAINTING_VARIANT);
+                    variantId = reg.getId(p.getVariant().value());
+                } else if (mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    itemId = BuiltInRegistries.ITEM.getId(f.getItem().getItem());
+                    rotation = f.getRotation();
+                    analogOut = f.getAnalogOutput();
+                }
+            }
+            int compOut = 0;
+            int compPowered = 0;
+            if (comparatorPos != null) {
+                var be = (net.minecraft.world.level.block.entity.ComparatorBlockEntity)
+                        level.blockEntities.get(comparatorPos.asLong());
+                compOut = be != null ? be.getOutputSignal() : 0;
+                compPowered = level.getBlockState(comparatorPos)
+                        .getValue(net.minecraft.world.level.block.ComparatorBlock.POWERED) ? 1 : 0;
+            }
+            int handCount = player.getMainHandItem().getCount();
+            int dropCount = 0;
+            int dropItem = 0;
+            long dropX = 0L, dropY = 0L, dropZ = 0L;
+            for (Entity e : level.spawned) {
+                if (e instanceof net.minecraft.world.entity.item.ItemEntity ie) {
+                    dropCount++;
+                    dropItem = BuiltInRegistries.ITEM.getId(ie.getItem().getItem());
+                    dropX = Double.doubleToRawLongBits(ie.getX());
+                    dropY = Double.doubleToRawLongBits(ie.getY());
+                    dropZ = Double.doubleToRawLongBits(ie.getZ());
+                }
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"state\":[")
+                    .append(alive).append(',').append(fixedAlive).append(',')
+                    .append(actionResult).append(',').append(variantId).append(',')
+                    .append(dirId).append(',').append(itemId).append(',')
+                    .append(rotation).append(',').append(analogOut).append(',')
+                    .append(compOut).append(',').append(compPowered).append(',')
+                    .append(handCount).append(',').append(dropCount).append(',')
+                    .append(dropItem).append(',').append(yRotBits).append(',').append(xRotBits)
+                    .append("],\"pos\":[").append(posX).append(',').append(posY).append(',').append(posZ)
+                    .append("],\"aabb\":[").append(minX).append(',').append(minY).append(',').append(minZ)
+                    .append(',').append(maxX).append(',').append(maxY).append(',').append(maxZ)
+                    .append("],\"dropPos\":[").append(dropX).append(',').append(dropY).append(',').append(dropZ)
+                    .append("],\"sounds\":[");
+            for (int i = 0; i < level.soundLog.size(); i++) {
+                if (i > 0) frames.append(',');
+                frames.append(level.soundLog.get(i)[0]);
+            }
+            frames.append("],\"packets\":[");
+            for (int i = 0; i < tickPackets.size(); i++) {
+                if (i > 0) frames.append(',');
+                frames.append('"').append(tickPackets.get(i)).append('"');
+            }
+            frames.append("]}");
+        }
+        frames.append(']');
+        out.write("{\"type\":\"hanging\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"frames\":" + frames + "}\n");
+    }
+
+    /**
      * 试炼刷怪笼完整流程逐刻对拍：等玩家 → 激活刷怪 → 怪被打死 → 等待弹奖励 → 弹出 →
      * 冷却。逐刻比状态机（state/ominous）、`registered_players` / `current_mobs` 数量、
      * 冷却计时、刷出的怪（类型 + 精确位置）、弹出的奖励、世界事件和世界随机源。
@@ -24351,6 +24681,9 @@ public final class MobOracle {
         /// Spawner parity: spawned entities also enter `tracked` so the
         /// `MaxNearbyEntities` count matches the official one.
         boolean spawnerScene;
+        /** 悬挂实体对拍：在 `addFreshEntity` 里用 `entitySeeds` 给画和展示框换种，并进 `tracked`。 */
+        boolean hangingScene;
+        int hangingNextId;
         boolean injectedBrightOutside = true;
         int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
@@ -24985,8 +25318,58 @@ public final class MobOracle {
             if (spawnerScene) {
                 tracked.add(entity);
             }
+            if (hangingScene) {
+                if (entity instanceof net.minecraft.world.entity.decoration.painting.Painting painting) {
+                    painting.setId(hangingNextId++);
+                    reseedPainting(painting);
+                    tracked.add(painting);
+                } else if (entity instanceof net.minecraft.world.entity.decoration.ItemFrame frame) {
+                    frame.setId(hangingNextId++);
+                    setRandom(frame, entitySeeds.nextLong());
+                    frame.setUUID(Mth.createInsecureUUID(frame.getRandom()));
+                    tracked.add(frame);
+                }
+            }
             spawned.add(entity);
             return true;
+        }
+
+        private void reseedPainting(net.minecraft.world.entity.decoration.painting.Painting painting) {
+            try {
+                long seed = entitySeeds.nextLong();
+                setRandom(painting, seed);
+                painting.setUUID(Mth.createInsecureUUID(painting.getRandom()));
+                Method setVariant = net.minecraft.world.entity.decoration.painting.Painting.class
+                        .getDeclaredMethod("setVariant", Holder.class);
+                setVariant.setAccessible(true);
+                Method setDirection = net.minecraft.world.entity.decoration.HangingEntity.class
+                        .getDeclaredMethod("setDirection", Direction.class);
+                setDirection.setAccessible(true);
+                List<Holder<net.minecraft.world.entity.decoration.painting.PaintingVariant>> candidates =
+                        new ArrayList<>();
+                registryAccess()
+                        .lookupOrThrow(Registries.PAINTING_VARIANT)
+                        .getTagOrEmpty(net.minecraft.tags.PaintingVariantTags.PLACEABLE)
+                        .forEach(candidates::add);
+                Direction dir = painting.getDirection();
+                candidates.removeIf(holder -> {
+                    try {
+                        setVariant.invoke(painting, holder);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                    return !painting.survives();
+                });
+                int maxArea = candidates.stream().mapToInt(h -> h.value().area()).max().orElse(0);
+                candidates.removeIf(h -> h.value().area() < maxArea);
+                var chosen = net.minecraft.util.Util.getRandomSafe(candidates, painting.getRandom());
+                if (chosen.isPresent()) {
+                    setVariant.invoke(painting, chosen.get());
+                    setDirection.invoke(painting, dir);
+                }
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
         }
 
         @Override
