@@ -53,10 +53,12 @@ mod ender_pearl;
 mod equine;
 mod firework;
 mod fish;
+mod fishing;
 mod gen_spawn;
 mod golem;
 mod grazing;
 mod guardian_scene;
+mod hanging;
 mod happy_ghast;
 mod happy_ghast_ai;
 mod husk_jockey;
@@ -252,8 +254,10 @@ enum Line {
     WindCharge(Box<wind_charge::WindChargeCase>),
     Firework(Box<firework::FireworkCase>),
     FireworkSave(firework::FireworkSaveCase),
+    Fishing(Box<fishing::FishingCase>),
     ArrowDeflect(Box<arrow_deflect::ArrowDeflectCase>),
     OminousItemSpawner(Box<ominous_item_spawner::OminousItemSpawnerCase>),
+    Hanging(Box<hanging::HangingCase>),
     TrialSpawner(Box<trial_spawner::TrialSpawnerCase>),
     Vault(Box<vault::VaultCase>),
     SculkSensor(sculk_sensor::SculkSensorCase),
@@ -2464,8 +2468,10 @@ impl Report {
                 Line::WindCharge(case) => self.replay_wind_charge(&case),
                 Line::Firework(case) => self.replay_firework(&case),
                 Line::FireworkSave(case) => self.replay_firework_save(&case),
+                Line::Fishing(case) => self.replay_fishing(&case),
                 Line::ArrowDeflect(case) => self.replay_arrow_deflect(&case),
                 Line::OminousItemSpawner(case) => self.replay_ominous_item_spawner(&case),
+                Line::Hanging(case) => self.replay_hanging(&case),
                 Line::TrialSpawner(case) => self.replay_trial_spawner(&case),
                 Line::Vault(case) => self.replay_vault(&case),
                 Line::SculkSensor(case) => self.replay_sculk_sensor(&case),

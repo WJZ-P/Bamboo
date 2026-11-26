@@ -1216,6 +1216,21 @@ fn snap_of(entity: Entity) -> OfficialEntity {
         EntityKind::LeashKnot(_) => ("leash_knot".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::Boat(_) => ("boat".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::EvokerFangs(_) => ("evoker_fangs".to_owned(), -1, -1, -1, 0, -1, -1, -1),
+        EntityKind::Painting(_) => ("painting".to_owned(), -1, -1, -1, 0, -1, -1, -1),
+        EntityKind::ItemFrame(frame) => (
+            if frame.glowing {
+                "glow_item_frame".to_owned()
+            } else {
+                "item_frame".to_owned()
+            },
+            -1,
+            -1,
+            -1,
+            0,
+            -1,
+            -1,
+            -1,
+        ),
         EntityKind::ExperienceOrb(data) => (
             "experience_orb".to_owned(),
             -1,
@@ -1226,6 +1241,7 @@ fn snap_of(entity: Entity) -> OfficialEntity {
             -1,
             data.health,
         ),
+        EntityKind::FishingHook(_) => ("fishing_bobber".to_owned(), -1, -1, -1, 0, -1, -1, -1),
     };
     OfficialEntity {
         kind,

@@ -689,6 +689,10 @@ const K_TICKER: u8 = 32;
 /// The read made when block logic consults the world border (beds, pistons, buckets,
 /// dragon eggs).
 const K_WORLD_BORDER: u8 = 34;
+/// 比较器隔墙读取物品展示框模拟输出的那一次读。
+///
+/// The read made when a comparator queries an item frame behind a solid block.
+const K_ITEM_FRAME_SIGNAL: u8 = 35;
 
 /// 精确键和效果键用的 128 位哈希，算法固定，跨进程可比。
 struct StableHasher {
@@ -1538,6 +1542,17 @@ impl LevelEntities for Recording<'_> {
             (4_u8, area.min_x.to_bits(), area.max_z.to_bits()),
         );
         self.level.for_each_pushable_in(area, limit, visit);
+    }
+
+    fn comparator_item_frame_signal(
+        &self,
+        facing: mc_bamboo_core::Direction,
+        pos: BlockPos,
+    ) -> Option<i32> {
+        let value = self.level.comparator_item_frame_signal(facing, pos);
+        self.read(Some(pos), K_ITEM_FRAME_SIGNAL, (facing as u8, value));
+        self.guarded_read(ReadMethod::ItemFrameSignal(pos, facing), Some(pos), value);
+        value
     }
 
     fn spawn_entity(&mut self, entity: Entity) -> EntityUid {

@@ -600,11 +600,17 @@ public final class MobOracle {
             if (only == null || only.startsWith("ominous_item_spawner")) {
                 cases += playOminousItemSpawner(official, out, only);
             }
+            if (only == null || only.startsWith("hanging")) {
+                cases += playHanging(official, out, only);
+            }
             if (only == null || only.startsWith("trial_spawner")) {
                 cases += playTrialSpawner(official, out, only);
             }
             if (only == null || only.startsWith("vault")) {
                 cases += playVault(official, out, only);
+            }
+            if (only == null || only.startsWith("fishing")) {
+                cases += playFishing(official, out, only);
             }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
@@ -13069,6 +13075,333 @@ public final class MobOracle {
     }
 
     /**
+     * 悬挂实体（画、物品展示框、荧光物品展示框）逐刻与事件对拍：
+     * 1. `hanging_painting_4x4`：4x4 墙放画（随机最大面积变体、精确位置/包围盒/配对包），拆背后方块后第 101 刻掉落；
+     * 2. `hanging_painting_2x1`：2x1 窄墙放画（只剩 2x1 最大面积候选），拆墙后第 101 刻掉落；
+     * 3. `hanging_item_frame_comparator`：放展示框、放物品、旋转三下并隔墙驱动真实比较器（输出 1→2→3→4），
+     *    第一下打掉物品（比较器归 0）、第二下打掉框；
+     * 4. `hanging_glow_frame_and_fixed`：顶面荧光展示框五种音效与掉落，以及 `Fixed`/`Invisible` 框免疫拆除/交互/受击。
+     */
+    private static int playHanging(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of(
+                "hanging_painting_4x4",
+                "hanging_painting_2x1",
+                "hanging_item_frame_comparator",
+                "hanging_glow_frame_and_fixed")) {
+            if (only != null && !name.startsWith(only)) continue;
+            playHangingCase(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    private static void playHangingCase(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.nextId = FIRST_ID;
+        level.hangingNextId = FIRST_ID;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        level.hangingScene = true;
+        level.spawned = new ArrayList<>();
+        level.tracked = new ArrayList<>();
+        level.soundLog = new ArrayList<>();
+        level.getRandom().setSeed(1L);
+        level.gameTime = START_TIME;
+
+        ServerPlayer player = new ServerPlayer(
+                official.server,
+                level,
+                new GameProfile(new UUID(1L, 9L), "HangingOracle"),
+                ClientInformation.createDefault());
+        player.setId(FIRST_ID + 100);
+        player.setPos(0.5, 64.0, 3.0);
+        player.getAbilities().instabuild = false;
+        player.getAbilities().mayBuild = true;
+
+        BlockPos comparatorPos = null;
+        if (name.equals("hanging_painting_4x4")) {
+            for (int x = 0; x <= 3; x++) {
+                for (int y = 64; y <= 67; y++) {
+                    level.blocks.put(BlockPos.asLong(x, y, 0), Blocks.STONE.defaultBlockState());
+                }
+            }
+        } else if (name.equals("hanging_painting_2x1")) {
+            for (int x = 0; x <= 1; x++) {
+                level.blocks.put(BlockPos.asLong(x, 64, 0), Blocks.STONE.defaultBlockState());
+            }
+        } else if (name.equals("hanging_item_frame_comparator")) {
+            for (int x = -2; x <= 2; x++) {
+                for (int z = -2; z <= 2; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+            level.blocks.put(BlockPos.asLong(0, 64, 0), Blocks.STONE.defaultBlockState());
+            comparatorPos = new BlockPos(0, 64, -1);
+            BlockState comp = Blocks.COMPARATOR.defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.ComparatorBlock.FACING, Direction.SOUTH)
+                    .setValue(net.minecraft.world.level.block.ComparatorBlock.MODE,
+                            net.minecraft.world.level.block.state.properties.ComparatorMode.COMPARE)
+                    .setValue(net.minecraft.world.level.block.ComparatorBlock.POWERED, false);
+            level.blocks.put(comparatorPos.asLong(), comp);
+            level.blockEntities.put(
+                    comparatorPos.asLong(),
+                    new net.minecraft.world.level.block.entity.ComparatorBlockEntity(
+                            comparatorPos, comp));
+            level.blockTicks.addContainer(
+                    new ChunkPos(comparatorPos.getX() >> 4, comparatorPos.getZ() >> 4),
+                    new net.minecraft.world.ticks.LevelChunkTicks<>());
+        } else if (name.equals("hanging_glow_frame_and_fixed")) {
+            level.blocks.put(BlockPos.asLong(0, 64, 0), Blocks.STONE.defaultBlockState());
+            level.blocks.put(BlockPos.asLong(2, 64, 0), Blocks.STONE.defaultBlockState());
+        }
+
+        net.minecraft.world.entity.decoration.HangingEntity mainEntity = null;
+        net.minecraft.world.entity.decoration.ItemFrame fixedFrame = null;
+        Sync mainSync = null;
+        Sync fixedSync = null;
+        int totalTicks = (name.startsWith("hanging_painting_") || name.equals("hanging_glow_frame_and_fixed"))
+                ? 112
+                : 35;
+
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= totalTicks; tick++) {
+            level.spawned.clear();
+            level.soundLog.clear();
+            List<String> tickPackets = new ArrayList<>();
+            int actionResult = -1;
+
+            if (tick > 0) {
+                level.gameTime++;
+                level.blockTicks.tick(level.gameTime, 65536, (pos, block) -> {
+                    BlockState st = level.getBlockState(pos);
+                    if (st.is(block)) {
+                        st.tick(level, pos, level.getRandom());
+                    }
+                });
+            }
+
+            if (name.equals("hanging_painting_4x4")) {
+                if (tick == 0) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.PAINTING, 2));
+                    var hit = new net.minecraft.world.phys.BlockHitResult(
+                            new Vec3(1.5, 64.5, 1.0), Direction.SOUTH, new BlockPos(1, 64, 0), false);
+                    var ctx = new net.minecraft.world.item.context.UseOnContext(player, InteractionHand.MAIN_HAND, hit);
+                    var res = Items.PAINTING.useOn(ctx);
+                    actionResult = res.consumesAction() ? 1 : 0;
+                    for (Entity e : level.spawned) {
+                        if (e instanceof net.minecraft.world.entity.decoration.painting.Painting p) {
+                            mainEntity = p;
+                            Sync s = new Sync(level, p, official.registries);
+                            s.entity.sendPairingData(null, pkt -> s.bytes.add(pkt));
+                            tickPackets.addAll(s.take());
+                            mainSync = s;
+                        }
+                    }
+                } else if (tick == 10) {
+                    level.removeBlock(new BlockPos(1, 64, 0), false);
+                }
+            } else if (name.equals("hanging_painting_2x1")) {
+                if (tick == 0) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.PAINTING, 2));
+                    var hit = new net.minecraft.world.phys.BlockHitResult(
+                            new Vec3(0.5, 64.5, 1.0), Direction.SOUTH, new BlockPos(0, 64, 0), false);
+                    var ctx = new net.minecraft.world.item.context.UseOnContext(player, InteractionHand.MAIN_HAND, hit);
+                    var res = Items.PAINTING.useOn(ctx);
+                    actionResult = res.consumesAction() ? 1 : 0;
+                    for (Entity e : level.spawned) {
+                        if (e instanceof net.minecraft.world.entity.decoration.painting.Painting p) {
+                            mainEntity = p;
+                            Sync s = new Sync(level, p, official.registries);
+                            s.entity.sendPairingData(null, pkt -> s.bytes.add(pkt));
+                            tickPackets.addAll(s.take());
+                            mainSync = s;
+                        }
+                    }
+                } else if (tick == 5) {
+                    level.removeBlock(new BlockPos(1, 64, 0), false);
+                }
+            } else if (name.equals("hanging_item_frame_comparator")) {
+                if (tick == 1) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.ITEM_FRAME, 2));
+                    var hit = new net.minecraft.world.phys.BlockHitResult(
+                            new Vec3(0.5, 64.5, 1.0), Direction.SOUTH, new BlockPos(0, 64, 0), false);
+                    var ctx = new net.minecraft.world.item.context.UseOnContext(player, InteractionHand.MAIN_HAND, hit);
+                    var res = Items.ITEM_FRAME.useOn(ctx);
+                    actionResult = res.consumesAction() ? 1 : 0;
+                    for (Entity e : level.spawned) {
+                        if (e instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                            mainEntity = f;
+                            Sync s = new Sync(level, f, official.registries);
+                            s.entity.sendPairingData(null, pkt -> s.bytes.add(pkt));
+                            tickPackets.addAll(s.take());
+                            mainSync = s;
+                        }
+                    }
+                } else if (tick == 5 && mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.DIAMOND, 4));
+                    var res = f.interact(player, InteractionHand.MAIN_HAND, Vec3.ZERO);
+                    actionResult = res.consumesAction() ? 1 : 0;
+                } else if ((tick == 10 || tick == 15 || tick == 20)
+                        && mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    var res = f.interact(player, InteractionHand.MAIN_HAND, Vec3.ZERO);
+                    actionResult = res.consumesAction() ? 1 : 0;
+                } else if ((tick == 25 || tick == 30)
+                        && mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    boolean hurt = f.hurtServer(level, level.damageSources().playerAttack(player), 1.0F);
+                    actionResult = hurt ? 1 : 0;
+                }
+            } else if (name.equals("hanging_glow_frame_and_fixed")) {
+                if (tick == 1) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.GLOW_ITEM_FRAME, 2));
+                    var hit = new net.minecraft.world.phys.BlockHitResult(
+                            new Vec3(0.5, 65.0, 0.5), Direction.UP, new BlockPos(0, 64, 0), false);
+                    var ctx = new net.minecraft.world.item.context.UseOnContext(player, InteractionHand.MAIN_HAND, hit);
+                    var res = Items.GLOW_ITEM_FRAME.useOn(ctx);
+                    actionResult = res.consumesAction() ? 1 : 0;
+                    for (Entity e : level.spawned) {
+                        if (e instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                            mainEntity = f;
+                            Sync s = new Sync(level, f, official.registries);
+                            s.entity.sendPairingData(null, pkt -> s.bytes.add(pkt));
+                            tickPackets.addAll(s.take());
+                            mainSync = s;
+                        }
+                    }
+                    // 同时生成一个 Fixed=true, Invisible=true 的普通展示框在 (2, 64, 1) 朝南。
+                    var fx = new net.minecraft.world.entity.decoration.ItemFrame(
+                            level, new BlockPos(2, 64, 1), Direction.SOUTH);
+                    fx.setInvisible(true);
+                    put(net.minecraft.world.entity.decoration.ItemFrame.class, fx, "fixed", Boolean.TRUE);
+                    level.addFreshEntity(fx);
+                    fixedFrame = fx;
+                    Sync fs = new Sync(level, fx, official.registries);
+                    fs.entity.sendPairingData(null, pkt -> fs.bytes.add(pkt));
+                    tickPackets.addAll(fs.take());
+                    fixedSync = fs;
+                } else if (tick == 2) {
+                    level.removeBlock(new BlockPos(2, 64, 0), false);
+                } else if (tick == 3 && mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.GOLD_INGOT, 2));
+                    actionResult = f.interact(player, InteractionHand.MAIN_HAND, Vec3.ZERO).consumesAction() ? 1 : 0;
+                } else if (tick == 4 && fixedFrame != null) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.GOLD_INGOT, 2));
+                    actionResult = fixedFrame.interact(player, InteractionHand.MAIN_HAND, Vec3.ZERO).consumesAction() ? 1 : 0;
+                } else if (tick == 5 && mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    actionResult = f.interact(player, InteractionHand.MAIN_HAND, Vec3.ZERO).consumesAction() ? 1 : 0;
+                } else if (tick == 6 && fixedFrame != null) {
+                    actionResult = fixedFrame.hurtServer(level, level.damageSources().playerAttack(player), 1.0F) ? 1 : 0;
+                } else if ((tick == 7 || tick == 9)
+                        && mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    actionResult = f.hurtServer(level, level.damageSources().playerAttack(player), 1.0F) ? 1 : 0;
+                }
+            }
+
+            if (tick > 0) {
+                if (mainEntity != null && !mainEntity.isRemoved()) {
+                    mainEntity.tick();
+                }
+                if (fixedFrame != null && !fixedFrame.isRemoved()) {
+                    fixedFrame.tick();
+                }
+                if (mainSync != null && mainEntity != null && !mainEntity.isRemoved()) {
+                    mainSync.entity.sendChanges();
+                    tickPackets.addAll(mainSync.take());
+                }
+                if (fixedSync != null && fixedFrame != null && !fixedFrame.isRemoved()) {
+                    fixedSync.entity.sendChanges();
+                    tickPackets.addAll(fixedSync.take());
+                }
+                level.tracked.removeIf(Entity::isRemoved);
+            }
+
+            int alive = (mainEntity != null && !mainEntity.isRemoved()) ? 1 : 0;
+            int fixedAlive = (fixedFrame != null && !fixedFrame.isRemoved()) ? 1 : 0;
+            int variantId = -1;
+            int dirId = -1;
+            int itemId = 0;
+            int rotation = 0;
+            int analogOut = 0;
+            long posX = 0L, posY = 0L, posZ = 0L;
+            long minX = 0L, minY = 0L, minZ = 0L, maxX = 0L, maxY = 0L, maxZ = 0L;
+            int yRotBits = 0, xRotBits = 0;
+            if (mainEntity != null) {
+                dirId = mainEntity.getDirection().get3DDataValue();
+                posX = Double.doubleToRawLongBits(mainEntity.getX());
+                posY = Double.doubleToRawLongBits(mainEntity.getY());
+                posZ = Double.doubleToRawLongBits(mainEntity.getZ());
+                var bb = mainEntity.getBoundingBox();
+                minX = Double.doubleToRawLongBits(bb.minX);
+                minY = Double.doubleToRawLongBits(bb.minY);
+                minZ = Double.doubleToRawLongBits(bb.minZ);
+                maxX = Double.doubleToRawLongBits(bb.maxX);
+                maxY = Double.doubleToRawLongBits(bb.maxY);
+                maxZ = Double.doubleToRawLongBits(bb.maxZ);
+                yRotBits = Float.floatToRawIntBits(mainEntity.getYRot());
+                xRotBits = Float.floatToRawIntBits(mainEntity.getXRot());
+                if (mainEntity instanceof net.minecraft.world.entity.decoration.painting.Painting p) {
+                    var reg = official.registries.lookupOrThrow(Registries.PAINTING_VARIANT);
+                    variantId = reg.getId(p.getVariant().value());
+                } else if (mainEntity instanceof net.minecraft.world.entity.decoration.ItemFrame f) {
+                    itemId = BuiltInRegistries.ITEM.getId(f.getItem().getItem());
+                    rotation = f.getRotation();
+                    analogOut = f.getAnalogOutput();
+                }
+            }
+            int compOut = 0;
+            int compPowered = 0;
+            if (comparatorPos != null) {
+                var be = (net.minecraft.world.level.block.entity.ComparatorBlockEntity)
+                        level.blockEntities.get(comparatorPos.asLong());
+                compOut = be != null ? be.getOutputSignal() : 0;
+                compPowered = level.getBlockState(comparatorPos)
+                        .getValue(net.minecraft.world.level.block.ComparatorBlock.POWERED) ? 1 : 0;
+            }
+            int handCount = player.getMainHandItem().getCount();
+            int dropCount = 0;
+            int dropItem = 0;
+            long dropX = 0L, dropY = 0L, dropZ = 0L;
+            for (Entity e : level.spawned) {
+                if (e instanceof net.minecraft.world.entity.item.ItemEntity ie) {
+                    dropCount++;
+                    dropItem = BuiltInRegistries.ITEM.getId(ie.getItem().getItem());
+                    dropX = Double.doubleToRawLongBits(ie.getX());
+                    dropY = Double.doubleToRawLongBits(ie.getY());
+                    dropZ = Double.doubleToRawLongBits(ie.getZ());
+                }
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"state\":[")
+                    .append(alive).append(',').append(fixedAlive).append(',')
+                    .append(actionResult).append(',').append(variantId).append(',')
+                    .append(dirId).append(',').append(itemId).append(',')
+                    .append(rotation).append(',').append(analogOut).append(',')
+                    .append(compOut).append(',').append(compPowered).append(',')
+                    .append(handCount).append(',').append(dropCount).append(',')
+                    .append(dropItem).append(',').append(yRotBits).append(',').append(xRotBits)
+                    .append("],\"pos\":[").append(posX).append(',').append(posY).append(',').append(posZ)
+                    .append("],\"aabb\":[").append(minX).append(',').append(minY).append(',').append(minZ)
+                    .append(',').append(maxX).append(',').append(maxY).append(',').append(maxZ)
+                    .append("],\"dropPos\":[").append(dropX).append(',').append(dropY).append(',').append(dropZ)
+                    .append("],\"sounds\":[");
+            for (int i = 0; i < level.soundLog.size(); i++) {
+                if (i > 0) frames.append(',');
+                frames.append(level.soundLog.get(i)[0]);
+            }
+            frames.append("],\"packets\":[");
+            for (int i = 0; i < tickPackets.size(); i++) {
+                if (i > 0) frames.append(',');
+                frames.append('"').append(tickPackets.get(i)).append('"');
+            }
+            frames.append("]}");
+        }
+        frames.append(']');
+        out.write("{\"type\":\"hanging\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"frames\":" + frames + "}\n");
+    }
+
+    /**
      * 试炼刷怪笼完整流程逐刻对拍：等玩家 → 激活刷怪 → 怪被打死 → 等待弹奖励 → 弹出 →
      * 冷却。逐刻比状态机（state/ominous）、`registered_players` / `current_mobs` 数量、
      * 冷却计时、刷出的怪（类型 + 精确位置）、弹出的奖励、世界事件和世界随机源。
@@ -13467,6 +13800,347 @@ public final class MobOracle {
                 + ",\"player\":[0.5,64.0,0.5]"
                 + ",\"insertTick\":" + insertTick
                 + ",\"frames\":" + frames + "}\n");
+        out.flush();
+    }
+
+    /**
+     * 钓鱼逐刻对拍：五个场景覆盖抛竿飞行落水、完整咬钩与收竿结算（物品、经验球、
+     * 耐久、统计）、钩住牛并拉拽（实体事件 31 与 5 点耐久）、以及露天/非露天 5×4×5
+     * 判定与宝藏掉落差异。
+     */
+    private static int playFishing(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of(
+                "fishing_cast_water",
+                "fishing_bite_catch",
+                "fishing_hook_cow",
+                "fishing_open_water_treasure",
+                "fishing_enclosed_no_treasure")) {
+            if (only != null && !name.startsWith(only)) continue;
+            playFishingCase(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void playFishingCase(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.fishingScene = true;
+        level.fishingNextId = FIRST_ID;
+        level.fishingParticles = new ArrayList<>();
+        level.fishingEvent31 = false;
+        level.injectedCanSeeSky = true;
+        level.injectedRaining = false;
+        level.gameTime = START_TIME;
+
+        // 统计表每次独立清零，避免前序场景污染 FISH_CAUGHT。
+        stats = new ServerStatsCounter(official.server, Path.of("mob-oracle-fishing-stats.json"));
+        put(net.minecraft.server.players.PlayerList.class,
+                official.server.getPlayerList(), "stats", new java.util.HashMap<>());
+
+        boolean hookCow = name.equals("fishing_hook_cow");
+        boolean openOrEnclosed = name.equals("fishing_open_water_treasure")
+                || name.equals("fishing_enclosed_no_treasure");
+        boolean enclosed = name.equals("fishing_enclosed_no_treasure");
+        int lureLevel = (name.equals("fishing_bite_catch") || openOrEnclosed) ? 3 : 0;
+        int luckLevel = openOrEnclosed ? 3 : 0;
+
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        BlockState water = Blocks.WATER.defaultBlockState();
+        if (hookCow) {
+            for (int x = -4; x <= 4; x++) {
+                for (int z = -1; z <= 10; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+        } else if (openOrEnclosed) {
+            for (int x = -6; x <= 6; x++) {
+                for (int z = -1; z <= 14; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 60, z), stone);
+                    if (x >= -5 && x <= 5 && z >= 2 && z <= 13) {
+                        level.blocks.put(BlockPos.asLong(x, 61, z), water);
+                        level.blocks.put(BlockPos.asLong(x, 62, z), water);
+                        level.blocks.put(BlockPos.asLong(x, 63, z), water);
+                    } else {
+                        level.blocks.put(BlockPos.asLong(x, 61, z), stone);
+                        level.blocks.put(BlockPos.asLong(x, 62, z), stone);
+                        level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                    }
+                }
+            }
+            if (enclosed) {
+                // 在水面上一格、x=2（离浮漂 x≈0.5 仅 1.5 格）放一排石头，
+                // 不挡浮漂飞行/浮力，但在 5×4×5 露天盒内破坏 openWater。
+                for (int z = 2; z <= 13; z++) {
+                    level.blocks.put(BlockPos.asLong(2, 64, z), stone);
+                }
+            }
+        } else {
+            for (int x = -4; x <= 4; x++) {
+                for (int z = -1; z <= 12; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 61, z), stone);
+                    if (x >= -3 && x <= 3 && z >= 2 && z <= 11) {
+                        level.blocks.put(BlockPos.asLong(x, 62, z), water);
+                        level.blocks.put(BlockPos.asLong(x, 63, z), water);
+                    } else {
+                        level.blocks.put(BlockPos.asLong(x, 62, z), stone);
+                        level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                    }
+                }
+            }
+        }
+
+        double[] playerPos = new double[] {0.5, 64.0, 0.5};
+        float playerYaw = 0.0F;
+        float playerPitch = hookCow ? 10.0F : 20.0F;
+        int playerId = 1025;
+
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 9L), "FishingOracle"), ClientInformation.createDefault());
+        player.setId(playerId);
+        player.setPos(playerPos[0], playerPos[1], playerPos[2]);
+        player.setYRot(playerYaw);
+        player.setXRot(playerPitch);
+        player.setYHeadRot(playerYaw);
+        player.setYBodyRot(playerYaw);
+        player.setGameMode(GameType.SURVIVAL);
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = new Bytes(official.registries);
+        put(ServerPlayer.class, player, "connection", connection);
+
+        ItemStack rod = new ItemStack(Items.FISHING_ROD);
+        if (lureLevel > 0) {
+            var enchants = official.registries.lookupOrThrow(Registries.ENCHANTMENT);
+            rod.enchant(enchants.getOrThrow(Enchantments.LURE), lureLevel);
+        }
+        if (luckLevel > 0) {
+            var enchants = official.registries.lookupOrThrow(Registries.ENCHANTMENT);
+            rod.enchant(enchants.getOrThrow(Enchantments.LUCK_OF_THE_SEA), luckLevel);
+        }
+        player.setItemInHand(InteractionHand.MAIN_HAND, rod);
+        level.playersList().add(player);
+        level.tracked.add(player);
+
+        double[] cowPos = null;
+        Cow cow = null;
+        if (hookCow) {
+            cowPos = new double[] {0.5, 64.0, 4.5};
+            cow = new Cow(EntityTypes.COW, level);
+            cow.setId(level.fishingNextId++);
+            setRandom(cow, level.entitySeeds.nextLong());
+            cow.setPos(cowPos[0], cowPos[1], cowPos[2]);
+            cow.setNoAi(true);
+            level.tracked.add(cow);
+        }
+
+        String initialBlocks = blockArray(level.blocks);
+        level.getRandom().setSeed(1L);
+        official.server.sequences = new RandomSequences();
+
+        Field fState = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("currentState");
+        Field fBiting = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("biting");
+        Field fOpenWater = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("openWater");
+        Field fNibble = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("nibble");
+        Field fLured = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("timeUntilLured");
+        Field fHooked = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("timeUntilHooked");
+        Field fDataHooked = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("DATA_HOOKED_ENTITY");
+        fState.setAccessible(true);
+        fBiting.setAccessible(true);
+        fOpenWater.setAccessible(true);
+        fNibble.setAccessible(true);
+        fLured.setAccessible(true);
+        fHooked.setAccessible(true);
+        fDataHooked.setAccessible(true);
+        var dataHookedAcc = (net.minecraft.network.syncher.EntityDataAccessor<Integer>) fDataHooked.get(null);
+
+        // Tick 0: 抛竿。
+        level.spawned.clear();
+        level.fishingParticles.clear();
+        Items.FISHING_ROD.use(level, player, InteractionHand.MAIN_HAND);
+        net.minecraft.world.entity.projectile.FishingHook hook = player.fishing;
+        if (hook == null) {
+            throw new IllegalStateException(name + ": fishing hook was not spawned on cast");
+        }
+
+        StringBuilder frames = new StringBuilder("[");
+        StringBuilder frameParticles = new StringBuilder("[");
+        Integer retrieveTick = null;
+        int hookedTicks = 0;
+        int maxTicks = name.equals("fishing_cast_water") ? 40 : 800;
+
+        for (int tick = 0; tick <= maxTicks; tick++) {
+            level.fishingParticles.clear();
+            if (tick > 0) {
+                level.gameTime = START_TIME + tick;
+                hook.commonTick();
+                hook.tick();
+            }
+            int state = ((Enum<?>) fState.get(hook)).ordinal();
+            int hookedData = hook.getEntityData().get(dataHookedAcc);
+            int biting = fBiting.getBoolean(hook) ? 1 : 0;
+            int openWater = fOpenWater.getBoolean(hook) ? 1 : 0;
+            int nibble = fNibble.getInt(hook);
+            int lured = fLured.getInt(hook);
+            int hooked = fHooked.getInt(hook);
+
+            if (tick > 0) {
+                frames.append(',');
+                frameParticles.append(',');
+            }
+            frames.append('[')
+                    .append(Double.doubleToRawLongBits(hook.getX())).append(',')
+                    .append(Double.doubleToRawLongBits(hook.getY())).append(',')
+                    .append(Double.doubleToRawLongBits(hook.getZ())).append(',')
+                    .append(Double.doubleToRawLongBits(hook.getDeltaMovement().x)).append(',')
+                    .append(Double.doubleToRawLongBits(hook.getDeltaMovement().y)).append(',')
+                    .append(Double.doubleToRawLongBits(hook.getDeltaMovement().z)).append(',')
+                    .append(Float.floatToRawIntBits(hook.getYRot())).append(',')
+                    .append(Float.floatToRawIntBits(hook.getXRot())).append(',')
+                    .append(state).append(',')
+                    .append(hook.onGround() ? 1 : 0).append(',')
+                    .append(hook.isInWater() ? 1 : 0).append(',')
+                    .append(hook.isRemoved() ? 1 : 0).append(',')
+                    .append(hookedData).append(',')
+                    .append(biting).append(',')
+                    .append(openWater).append(',')
+                    .append(nibble).append(',')
+                    .append(lured).append(',')
+                    .append(hooked).append(',')
+                    .append(seedOf(hook)).append(',')
+                    .append(levelSeed(level)).append(',')
+                    .append(level.fishingParticles.size())
+                    .append(']');
+            frameParticles.append('[');
+            for (int i = 0; i < level.fishingParticles.size(); i++) {
+                if (i > 0) frameParticles.append(',');
+                frameParticles.append(level.fishingParticles.get(i));
+            }
+            frameParticles.append(']');
+
+            if (hookCow) {
+                if (state == 1) {
+                    hookedTicks++;
+                    if (hookedTicks >= 4) {
+                        retrieveTick = tick;
+                        break;
+                    }
+                }
+            } else if (!name.equals("fishing_cast_water")) {
+                if (biting == 1 && nibble > 0) {
+                    retrieveTick = tick;
+                    break;
+                }
+            }
+        }
+        frames.append(']');
+        frameParticles.append(']');
+
+        String retrieveJson = "null";
+        StringBuilder extraLootJson = new StringBuilder("[");
+        if (!name.equals("fishing_cast_water")) {
+            if (retrieveTick == null) {
+                throw new IllegalStateException(name + ": never reached retrieve condition within " + maxTicks + " ticks");
+            }
+            level.spawned.clear();
+            level.fishingEvent31 = false;
+            int beforeDamage = rod.getDamageValue();
+            Items.FISHING_ROD.use(level, player, InteractionHand.MAIN_HAND);
+            int rodDamage = rod.getDamageValue() - beforeDamage;
+            int fishCaught = stats.getValue(net.minecraft.stats.Stats.CUSTOM.get(net.minecraft.stats.Stats.FISH_CAUGHT));
+
+            StringBuilder caughtItems = new StringBuilder("[");
+            StringBuilder xpOrbs = new StringBuilder("[");
+            int itemCount = 0;
+            int orbCount = 0;
+            for (Entity e : level.spawned) {
+                if (e instanceof net.minecraft.world.entity.item.ItemEntity itemEntity) {
+                    if (itemCount++ > 0) caughtItems.append(',');
+                    ItemStack stack = itemEntity.getItem();
+                    int itemId = BuiltInRegistries.ITEM.getId(stack.getItem());
+                    Vec3 v = itemEntity.getDeltaMovement();
+                    caughtItems.append('[')
+                            .append(itemId).append(',')
+                            .append(stack.getCount()).append(',')
+                            .append(Double.doubleToRawLongBits(v.x)).append(',')
+                            .append(Double.doubleToRawLongBits(v.y)).append(',')
+                            .append(Double.doubleToRawLongBits(v.z)).append(']');
+                } else if (e instanceof net.minecraft.world.entity.ExperienceOrb orb) {
+                    if (orbCount++ > 0) xpOrbs.append(',');
+                    xpOrbs.append('[')
+                            .append(orb.getValue()).append(',')
+                            .append(Double.doubleToRawLongBits(orb.getX())).append(',')
+                            .append(Double.doubleToRawLongBits(orb.getY())).append(',')
+                            .append(Double.doubleToRawLongBits(orb.getZ())).append(']');
+                }
+            }
+            caughtItems.append(']');
+            xpOrbs.append(']');
+
+            String cowDeltaJson = "null";
+            if (cow != null) {
+                Vec3 cd = cow.getDeltaMovement();
+                cowDeltaJson = "[" + Double.doubleToRawLongBits(cd.x)
+                        + "," + Double.doubleToRawLongBits(cd.y)
+                        + "," + Double.doubleToRawLongBits(cd.z) + "]";
+            }
+            retrieveJson = "{\"rodDamage\":" + rodDamage
+                    + ",\"entityEvent31\":" + level.fishingEvent31
+                    + ",\"cowDelta\":" + cowDeltaJson
+                    + ",\"caughtItems\":" + caughtItems
+                    + ",\"xpOrbs\":" + xpOrbs
+                    + ",\"fishCaught\":" + fishCaught
+                    + ",\"levelSeed\":" + levelSeed(level) + "}";
+
+            if (openOrEnclosed) {
+                // 连续抽取 30 次官方 `gameplay/fishing` 战利品表，验证露天出宝藏 / 非露天 0 宝藏。
+                LootTable fishingTable = official.server.reloadableRegistries()
+                        .getLootTable(net.minecraft.world.level.storage.loot.BuiltInLootTables.FISHING);
+                for (int roll = 0; roll < 30; roll++) {
+                    if (roll > 0) extraLootJson.append(',');
+                    var params = new net.minecraft.world.level.storage.loot.LootParams.Builder(level)
+                            .withParameter(net.minecraft.world.level.storage.loot.parameters.LootContextParams.ORIGIN, hook.position())
+                            .withParameter(net.minecraft.world.level.storage.loot.parameters.LootContextParams.TOOL, rod)
+                            .withParameter(net.minecraft.world.level.storage.loot.parameters.LootContextParams.THIS_ENTITY, hook)
+                            .withLuck((float) luckLevel + player.getLuck())
+                            .create(net.minecraft.world.level.storage.loot.parameters.LootContextParamSets.FISHING);
+                    List<ItemStack> stacks = fishingTable.getRandomItems(params);
+                    if (stacks.isEmpty()) {
+                        extraLootJson.append("[0,0]");
+                    } else {
+                        ItemStack first = stacks.get(0);
+                        extraLootJson.append('[')
+                                .append(BuiltInRegistries.ITEM.getId(first.getItem())).append(',')
+                                .append(first.getCount()).append(']');
+                    }
+                }
+            }
+        }
+        extraLootJson.append(']');
+
+        String cowPosJson = cowPos == null ? "null"
+                : "[" + cowPos[0] + "," + cowPos[1] + "," + cowPos[2] + "]";
+        out.write("{\"type\":\"fishing\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"playerId\":" + playerId
+                + ",\"playerPos\":[" + playerPos[0] + "," + playerPos[1] + "," + playerPos[2] + "]"
+                + ",\"playerYaw\":" + playerYaw
+                + ",\"playerPitch\":" + playerPitch
+                + ",\"lureLevel\":" + lureLevel
+                + ",\"luckLevel\":" + luckLevel
+                + ",\"cowPos\":" + cowPosJson
+                + ",\"blocks\":" + initialBlocks
+                + ",\"retrieveTick\":" + (retrieveTick == null ? "null" : retrieveTick)
+                + ",\"frames\":" + frames
+                + ",\"frameParticles\":" + frameParticles
+                + ",\"retrieve\":" + retrieveJson
+                + ",\"extraLoot\":" + extraLootJson
+                + "}\n");
         out.flush();
     }
 
@@ -24351,6 +25025,14 @@ public final class MobOracle {
         /// Spawner parity: spawned entities also enter `tracked` so the
         /// `MaxNearbyEntities` count matches the official one.
         boolean spawnerScene;
+        /** 悬挂实体对拍：在 `addFreshEntity` 里用 `entitySeeds` 给画和展示框换种，并进 `tracked`。 */
+        boolean hangingScene;
+        int hangingNextId;
+        /** 钓鱼对拍：在 `addFreshEntity` 里用 `entitySeeds` 给浮漂换种、重放抛竿初速度并进 `tracked`。 */
+        boolean fishingScene;
+        int fishingNextId;
+        List<Integer> fishingParticles;
+        boolean fishingEvent31;
         boolean injectedBrightOutside = true;
         int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
@@ -24985,8 +25667,101 @@ public final class MobOracle {
             if (spawnerScene) {
                 tracked.add(entity);
             }
+            if (hangingScene) {
+                if (entity instanceof net.minecraft.world.entity.decoration.painting.Painting painting) {
+                    painting.setId(hangingNextId++);
+                    reseedPainting(painting);
+                    tracked.add(painting);
+                } else if (entity instanceof net.minecraft.world.entity.decoration.ItemFrame frame) {
+                    frame.setId(hangingNextId++);
+                    setRandom(frame, entitySeeds.nextLong());
+                    frame.setUUID(Mth.createInsecureUUID(frame.getRandom()));
+                    tracked.add(frame);
+                }
+            }
+            if (fishingScene) {
+                if (entity instanceof net.minecraft.world.entity.projectile.FishingHook hook) {
+                    hook.setId(fishingNextId++);
+                    reseedFishingHook(hook);
+                    tracked.add(hook);
+                } else if (entity instanceof net.minecraft.world.entity.item.ItemEntity
+                        || entity instanceof net.minecraft.world.entity.ExperienceOrb) {
+                    entity.setId(fishingNextId++);
+                }
+            }
             spawned.add(entity);
             return true;
+        }
+
+        private void reseedFishingHook(net.minecraft.world.entity.projectile.FishingHook hook) {
+            setRandom(hook, entitySeeds.nextLong());
+            RandomSource random = hook.getRandom();
+            hook.setUUID(Mth.createInsecureUUID(random));
+            Player owner = hook.getPlayerOwner();
+            if (owner != null) {
+                float xRot = owner.getXRot();
+                float yRot = owner.getYRot();
+                float cos = Mth.cos(-yRot * 0.017453292F - (float) Math.PI);
+                float sin = Mth.sin(-yRot * 0.017453292F - (float) Math.PI);
+                float xCos = -Mth.cos(-xRot * 0.017453292F);
+                float xSin = Mth.sin(-xRot * 0.017453292F);
+                double x = owner.getX() - (double) sin * 0.3;
+                double y = owner.getEyeY();
+                double z = owner.getZ() - (double) cos * 0.3;
+                hook.snapTo(x, y, z, yRot, xRot);
+                Vec3 movement = new Vec3(
+                        (double) (-sin),
+                        (double) Mth.clamp(-(xSin / xCos), -5.0F, 5.0F),
+                        (double) (-cos));
+                double dist = movement.length();
+                movement = movement.multiply(
+                        0.6 / dist + random.triangle(0.5, 0.0103365),
+                        0.6 / dist + random.triangle(0.5, 0.0103365),
+                        0.6 / dist + random.triangle(0.5, 0.0103365));
+                hook.setDeltaMovement(movement);
+                hook.setYRot((float) (Mth.atan2(movement.x, movement.z) * 57.2957763671875));
+                hook.setXRot((float) (Mth.atan2(movement.y, movement.horizontalDistance()) * 57.2957763671875));
+                hook.yRotO = hook.getYRot();
+                hook.xRotO = hook.getXRot();
+            }
+        }
+
+        private void reseedPainting(net.minecraft.world.entity.decoration.painting.Painting painting) {
+            try {
+                long seed = entitySeeds.nextLong();
+                setRandom(painting, seed);
+                painting.setUUID(Mth.createInsecureUUID(painting.getRandom()));
+                Method setVariant = net.minecraft.world.entity.decoration.painting.Painting.class
+                        .getDeclaredMethod("setVariant", Holder.class);
+                setVariant.setAccessible(true);
+                Method setDirection = net.minecraft.world.entity.decoration.HangingEntity.class
+                        .getDeclaredMethod("setDirection", Direction.class);
+                setDirection.setAccessible(true);
+                List<Holder<net.minecraft.world.entity.decoration.painting.PaintingVariant>> candidates =
+                        new ArrayList<>();
+                registryAccess()
+                        .lookupOrThrow(Registries.PAINTING_VARIANT)
+                        .getTagOrEmpty(net.minecraft.tags.PaintingVariantTags.PLACEABLE)
+                        .forEach(candidates::add);
+                Direction dir = painting.getDirection();
+                candidates.removeIf(holder -> {
+                    try {
+                        setVariant.invoke(painting, holder);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                    return !painting.survives();
+                });
+                int maxArea = candidates.stream().mapToInt(h -> h.value().area()).max().orElse(0);
+                candidates.removeIf(h -> h.value().area() < maxArea);
+                var chosen = net.minecraft.util.Util.getRandomSafe(candidates, painting.getRandom());
+                if (chosen.isPresent()) {
+                    setVariant.invoke(painting, chosen.get());
+                    setDirection.invoke(painting, dir);
+                }
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
         }
 
         @Override
@@ -25240,6 +26015,9 @@ public final class MobOracle {
         @Override
         public <T extends net.minecraft.core.particles.ParticleOptions> int sendParticles(
                 T particle, double x, double y, double z, int count, double xd, double yd, double zd, double speed) {
+            if (fishingParticles != null) {
+                fishingParticles.add(BuiltInRegistries.PARTICLE_TYPE.getId(particle.getType()));
+            }
             if (particlePackets && packets != null) {
                 packets.accept(new net.minecraft.network.protocol.game.ClientboundLevelParticlesPacket(
                         particle, false, false, x, y, z, (float) xd, (float) yd, (float) zd, (float) speed, count));
@@ -25257,6 +26035,9 @@ public final class MobOracle {
 
         @Override
         public void broadcastEntityEvent(Entity entity, byte event) {
+            if (fishingScene && entity instanceof net.minecraft.world.entity.projectile.FishingHook && event == 31) {
+                fishingEvent31 = true;
+            }
             if (packets != null) {
                 packets.accept(new net.minecraft.network.protocol.game.ClientboundEntityEventPacket(entity, event));
             }

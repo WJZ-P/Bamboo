@@ -1561,6 +1561,12 @@ pub(crate) fn on_use_item(
         swing(region, id, hand, InteractionResult::Success);
         return;
     }
+    // `FishingRodItem.use`：抛竿或收竿，返回 `SUCCESS`。
+    // `FishingRodItem.use`: cast or retrieve the fishing bobber, returning `SUCCESS`.
+    if crate::player_fishing::use_rod(region, id, hand) {
+        swing(region, id, hand, InteractionResult::Success);
+        return;
+    }
     // `FireworkRocketItem.use`：仅在玩家 `isFallFlying()`（鞘翅滑翔）时生成附着烟花加速。
     // Bamboo 尚未建模鞘翅滑翔，此路径恒为 `PASS`。
     // `FireworkRocketItem.use`: only spawns an attached boost rocket while fall flying.
@@ -1692,10 +1698,15 @@ pub(crate) fn on_interact_entity(
         mc_bamboo_blocks::entity::KindPublic::LeashKnot { .. }
     );
     let is_boat = matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Boat(_));
+    let is_item_frame = matches!(
+        target.kind,
+        mc_bamboo_blocks::entity::KindPublic::ItemFrame(_)
+    );
     if target.removed
         || !(matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
             || is_knot
-            || is_boat)
+            || is_boat
+            || is_item_frame)
     {
         return;
     }
@@ -1733,6 +1744,37 @@ pub(crate) fn on_interact_entity(
         // `interactWithContainerVehicle(player)` 打开 27 格菜单。
         if is_chest {
             crate::menu::open_boat(region, id, entity_id);
+        }
+        return;
+    }
+    if is_item_frame {
+        // 物品展示框：空框放手上物品，已有物品则顺时针旋转 45 度。
+        // Item frame: place held item when empty, otherwise rotate by 45 degrees.
+        for try_hand in [hand, other] {
+            let held = match try_hand {
+                Hand::Main => main_held.clone(),
+                Hand::Off => off_held.clone(),
+            };
+            let (outcome, effects) = {
+                let (mut level, ticks) = region.block_level();
+                let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+                let out = world.interact_item_frame(entity_id, &held, creative);
+                (out, world.into_effects())
+            };
+            send_effects(region, Some(id), &effects);
+            if outcome.consume_held {
+                inventory::apply_item_exchange(
+                    region,
+                    id,
+                    try_hand,
+                    &mc_bamboo_blocks::ItemExchange::Shrink,
+                );
+            }
+            if !outcome.result.consumes_action() {
+                continue;
+            }
+            swing(region, id, try_hand, outcome.result);
+            return;
         }
         return;
     }

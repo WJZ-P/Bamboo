@@ -223,6 +223,10 @@ pub(crate) struct Player {
     pub(crate) cooldowns: crate::item_cooldowns::ItemCooldowns,
     /// `ServerPlayer.enderPearls`：这名玩家扔出、还在飞的珍珠实体号。
     pub(crate) ender_pearls: std::collections::BTreeSet<i32>,
+    /// `Player.fishing`：这名玩家当前抛出的浮漂实体号（不存档）。
+    ///
+    /// `Player.fishing`: entity id of the player's currently cast fishing bobber (not saved).
+    pub(crate) fishing: Option<i32>,
     /// `saveEnderPearls` 的 NBT 快照；`runtime_player_data` 是 `&Player` 的纯函数，
     /// 每刻由 `ender_pearl::tick` 从实体表刷新。
     pub(crate) saved_ender_pearls: Vec<mc_bamboo_nbt::Tag>,
@@ -385,6 +389,7 @@ impl Player {
             item_use_stats: Default::default(),
             cooldowns: crate::item_cooldowns::ItemCooldowns::default(),
             ender_pearls: std::collections::BTreeSet::new(),
+            fishing: None,
             saved_ender_pearls: Vec::new(),
             pending_exhaustion: 0.0,
             health_sync: crate::player_hurt::HealthSync::INITIAL,

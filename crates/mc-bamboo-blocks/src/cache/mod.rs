@@ -293,7 +293,7 @@ impl RuntimeRecord {
 pub const fn supported_kind(kind: u8) -> bool {
     matches!(
         kind,
-        1 | 5 | 6 | 7 | 9 | 10 | 19 | 24 | 26 | 29 | 32 | 33 | 34
+        1 | 5 | 6 | 7 | 9 | 10 | 19 | 24 | 26 | 29 | 32 | 33 | 34 | 35
     )
 }
 
@@ -306,6 +306,7 @@ pub const fn supported_read(method: ReadMethod) -> bool {
             | ReadMethod::MinY
             | ReadMethod::MaxY
             | ReadMethod::Comparator(_)
+            | ReadMethod::ItemFrameSignal(_, _)
             | ReadMethod::TickQuery(_, _, _)
             | ReadMethod::Dedup(_, _)
             | ReadMethod::BlockEventDedup(_)

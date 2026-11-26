@@ -19,16 +19,16 @@ use mc_bamboo_blocks::{
     entity::{EntityPublic, KindPublic, PrimedTnt},
     state::BlockState,
 };
-use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Vec3};
 use mc_bamboo_data::{entity_types, is_client_syncable_attribute};
 use mc_bamboo_protocol::{
     frame::packet_body,
     item::ItemStack,
     packet::play::{
         AddEntity, AttributeModifier, AttributeOperation, AttributeSnapshot, BundleDelimiter,
-        EntityData, EntityPositionSync, MoveEntityPos, MoveEntityPosRot, MoveEntityRot,
-        PositionDelta, PositionPath, RemoveEntities, RotateHead, SetEntityData, SetEntityMotion,
-        SetPassengers, TakeItemEntity, UpdateAttributes, VecDelta, pack_degrees,
+        ENTITY_FLAG_INVISIBLE_BIT, EntityData, EntityPositionSync, MoveEntityPos, MoveEntityPosRot,
+        MoveEntityRot, PositionDelta, PositionPath, RemoveEntities, RotateHead, SetEntityData,
+        SetEntityMotion, SetPassengers, TakeItemEntity, UpdateAttributes, VecDelta, pack_degrees,
     },
 };
 use uuid::Uuid;
@@ -331,17 +331,22 @@ impl TrackedEntity {
                 .stable_uuid()
                 .map_or_else(|| entity_uuid(snapshot.id), Uuid::from_bytes),
             entity_type: snapshot.entity_type,
-            position: self.base,
+            position: snapshot.data.add_entity_position().unwrap_or(self.base),
             movement: self.pairing_movement,
             pitch: self.last_pitch,
             yaw: self.last_yaw,
             head_yaw: self.last_head,
             data: snapshot.add_data(),
         })];
-        // 官方箭的 trackedDataValues 为空时不发；其它类型保留现有空表包行为。
-        // Vanilla skips empty arrow metadata; other types retain their existing empty packet.
-        if !matches!(snapshot.data, KindData::Arrow(_) | KindData::LlamaSpit(_))
-            || !self.last_data.is_empty()
+        // 官方 `trackedDataValues` 为空（全默认值）时不发 `set_entity_data`；其它旧类型保留现有空表包行为。
+        // Vanilla skips empty metadata in `sendPairingData`; keep existing empty-packet behaviour for legacy kinds.
+        if !matches!(
+            snapshot.data,
+            KindData::Arrow(_)
+                | KindData::LlamaSpit(_)
+                | KindData::Painting(_)
+                | KindData::ItemFrame(_)
+        ) || !self.last_data.is_empty()
         {
             out.push(packet_body(&SetEntityData {
                 entity_id: snapshot.id,
@@ -451,6 +456,34 @@ impl TrackedEntity {
         sync_velocity: bool,
     ) -> Vec<Vec<u8>> {
         let mut packets = Vec::new();
+        // 官方 `ServerEntity.sendChanges` 开头：`ItemFrame` 每 10 刻（含第 0 刻）先发一次
+        // 脏元数据（`sendDirtyEntityData`），再进入移动/朝向判定分支。
+        // Vanilla `ServerEntity.sendChanges`: for `ItemFrame`, every 10 ticks (including tick 0)
+        // flush dirty entity data before the movement/rotation branch.
+        if matches!(snapshot.data, KindData::ItemFrame(_)) && self.tick_count % 10 == 0 {
+            let data = snapshot.data.pairing_values();
+            let mut items = if data != self.last_data {
+                self.dirty_items(snapshot)
+            } else {
+                Vec::new()
+            };
+            for item in std::mem::take(&mut self.pending_dirty) {
+                if !items
+                    .iter()
+                    .any(|other| EntityData::index(other) == EntityData::index(&item))
+                {
+                    items.push(item);
+                }
+            }
+            items.sort_by_key(EntityData::index);
+            self.last_data = data;
+            if !items.is_empty() {
+                packets.push(packet_body(&SetEntityData {
+                    entity_id: snapshot.id,
+                    items: &items,
+                }));
+            }
+        }
         // `SteppedInterpolationTracker.updateTracking` 每刻都加一，`getPositionPath`
         // 在发位置包时把攒下的刻数记成一步，然后清空。
         if !snapshot.data.is_projectile() {
@@ -467,7 +500,11 @@ impl TrackedEntity {
         }
         let due = interval.is_some_and(|period| self.tick_count % period == 0);
         let data = snapshot.data.pairing_values();
-        let dirty = data != self.last_data;
+        // 官方 `ServerEntity.sendChanges` 只要 `entityData.isDirty()` 为真就会发，
+        // 含构造阶段记进 `pending_dirty` 的初始脏项（例如 `updateInterval = Integer.MAX_VALUE` 的画和展示框）。
+        // Vanilla `ServerEntity.sendChanges` triggers whenever `entityData.isDirty()`,
+        // including constructor-time `pending_dirty` items (e.g. paintings/frames with max interval).
+        let dirty = data != self.last_data || !self.pending_dirty.is_empty();
         let mut head_packet = None;
         if needs_sync || due || dirty {
             let yaw = pack_degrees(snapshot.yaw);
@@ -590,6 +627,25 @@ impl TrackedEntity {
                     entity_types::ARROW_PIERCE => EntityData::ArrowPierce(0),
                     entity_types::ARROW_IN_GROUND => EntityData::ArrowInGround(false),
                     entity_types::ARROW_COLOR => EntityData::ArrowColor(-1),
+                    _ => continue,
+                },
+                None if matches!(snapshot.data, KindData::Painting(_)) => match index {
+                    2 => EntityData::NoCustomName,
+                    8 => EntityData::HangingDirection(Direction::South),
+                    9 => EntityData::PaintingVariant(mc_bamboo_data::painting::DEFAULT_VARIANT),
+                    _ => continue,
+                },
+                None if matches!(snapshot.data, KindData::ItemFrame(_)) => match index {
+                    0 => EntityData::SharedFlags(0),
+                    2 => EntityData::NoCustomName,
+                    8 => EntityData::HangingDirection(Direction::South),
+                    9 => EntityData::ItemFrameItem(ItemStack::empty()),
+                    10 => EntityData::ItemFrameRotation(0),
+                    _ => continue,
+                },
+                None if matches!(snapshot.data, KindData::FishingHook(_)) => match index {
+                    8 => EntityData::FishingHookedEntity(0),
+                    9 => EntityData::FishingBiting(false),
                     _ => continue,
                 },
                 None if before.is_some() => match &snapshot.data {
@@ -849,6 +905,8 @@ pub enum KindData {
     Boat(Box<mc_bamboo_blocks::entity::boat::BoatPublic>),
     /// 烟花火箭：`add_entity` 的 data 用主人 ID，元数据带物品堆、附着目标和斜射标志。
     FireworkRocket(mc_bamboo_blocks::entity::firework_rocket::FireworkRocketPublic),
+    /// 钓鱼浮漂：`add_entity` 的 data 用主人 ID（无主人时用自身 ID），元数据带被钩实体与咬钩标记。
+    FishingHook(mc_bamboo_blocks::entity::fishing_hook::FishingHookPublic),
     /// 羊驼口水：没有自己的元数据。
     ///
     /// Llama spit, with no metadata of its own.
@@ -857,6 +915,14 @@ pub enum KindData {
     ///
     /// A fence leash knot, with no metadata of its own.
     LeashKnot,
+    /// 画：`add_entity` 发 `pos` 与朝向，`DATA_DIRECTION` 与 `DATA_PAINTING_VARIANT_ID`。
+    ///
+    /// A painting: `add_entity` sends `pos` and facing; metadata holds direction and variant.
+    Painting(mc_bamboo_blocks::entity::hanging::PaintingPublic),
+    /// 物品展示框 / 荧光物品展示框：`add_entity` 发 `pos` 与朝向，元数据带隐身、朝向、物品和旋转。
+    ///
+    /// An item frame or glow item frame.
+    ItemFrame(mc_bamboo_blocks::entity::hanging::ItemFramePublic),
     Egg(Box<mc_bamboo_blocks::entity::thrown_egg::EggPublic>),
     SplashPotion(Box<mc_bamboo_blocks::entity::splash_potion::SplashPotionPublic>),
     /// 唤魔者尖牙：没有自己的元数据。
@@ -912,6 +978,9 @@ impl Snapshot {
                 KindPublic::SplashPotion(potion) => potion.needs_sync,
                 KindPublic::WindCharge(charge) => charge.needs_sync,
                 KindPublic::FireworkRocket(firework) => firework.needs_sync,
+                KindPublic::FishingHook(hook) => hook.needs_sync,
+                KindPublic::Painting(painting) => painting.needs_sync,
+                KindPublic::ItemFrame(frame) => frame.needs_sync,
                 _ => false,
             },
             sync_velocity: match &public.kind {
@@ -920,6 +989,7 @@ impl Snapshot {
                 KindPublic::SplashPotion(potion) => potion.sync_velocity,
                 KindPublic::WindCharge(charge) => charge.sync_velocity,
                 KindPublic::FireworkRocket(firework) => firework.sync_velocity,
+                KindPublic::FishingHook(hook) => hook.sync_velocity,
                 _ => false,
             },
             sync_position: false,
@@ -943,6 +1013,9 @@ impl Snapshot {
             KindData::SplashPotion(potion) => potion.owner.unwrap_or(0),
             KindData::WindCharge(charge) => charge.owner.unwrap_or(0),
             KindData::FireworkRocket(firework) => firework.owner.unwrap_or(0),
+            KindData::FishingHook(hook) => hook.owner.unwrap_or(self.id),
+            KindData::Painting(painting) => painting.direction.id(),
+            KindData::ItemFrame(frame) => frame.direction.id(),
             KindData::Tnt { .. }
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
@@ -980,8 +1053,22 @@ impl KindData {
             KindPublic::WindCharge(charge) => Self::WindCharge(*charge),
             KindPublic::Boat(boat) => Self::Boat(boat.clone()),
             KindPublic::FireworkRocket(firework) => Self::FireworkRocket(firework.clone()),
+            KindPublic::FishingHook(hook) => Self::FishingHook(*hook),
             KindPublic::LeashKnot { .. } => Self::LeashKnot,
             KindPublic::EvokerFangs => Self::EvokerFangs,
+            KindPublic::Painting(painting) => Self::Painting(painting.clone()),
+            KindPublic::ItemFrame(frame) => Self::ItemFrame(frame.clone()),
+        }
+    }
+
+    /// 官方 `Painting.getAddEntityPacket` / `ItemFrame.getAddEntityPacket` 传的是贴附方块角点 `pos`。
+    ///
+    /// `Painting` and `ItemFrame` send the attachment `BlockPos` corner in `AddEntity`.
+    fn add_entity_position(&self) -> Option<Vec3> {
+        match self {
+            Self::Painting(painting) => Some(painting.pos.corner()),
+            Self::ItemFrame(frame) => Some(frame.pos.corner()),
+            _ => None,
         }
     }
 
@@ -1018,7 +1105,10 @@ impl KindData {
             | Self::OminousItemSpawner(_)
             | Self::WindCharge(_)
             | Self::Boat(_)
-            | Self::FireworkRocket(_) => None,
+            | Self::FireworkRocket(_)
+            | Self::FishingHook(_)
+            | Self::Painting(_)
+            | Self::ItemFrame(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -1039,7 +1129,10 @@ impl KindData {
             | Self::EvokerFangs
             | Self::WindCharge(_)
             | Self::Boat(_)
-            | Self::FireworkRocket(_) => None,
+            | Self::FireworkRocket(_)
+            | Self::FishingHook(_)
+            | Self::Painting(_)
+            | Self::ItemFrame(_) => None,
         }
     }
 
@@ -1053,6 +1146,9 @@ impl KindData {
             Self::SplashPotion(potion) => Some(potion.uuid),
             Self::WindCharge(charge) => Some(charge.uuid),
             Self::FireworkRocket(firework) => Some(firework.uuid),
+            Self::FishingHook(hook) => Some(hook.uuid),
+            Self::Painting(painting) => Some(painting.uuid),
+            Self::ItemFrame(frame) => Some(frame.uuid),
             _ => None,
         }
     }
@@ -1067,6 +1163,8 @@ impl KindData {
             Self::SplashPotion(potion) => Some(potion.x_rot),
             Self::WindCharge(charge) => Some(charge.pitch),
             Self::FireworkRocket(firework) => Some(firework.pitch),
+            Self::FishingHook(hook) => Some(hook.pitch),
+            Self::ItemFrame(frame) => Some(frame.x_rot),
             _ => None,
         }
     }
@@ -1101,6 +1199,38 @@ impl KindData {
             | Self::LeashKnot
             | Self::EvokerFangs
             | Self::WindCharge(_) => Vec::new(),
+            Self::Painting(painting) => {
+                let mut data = Vec::new();
+                if let Some(name) = &painting.custom_name {
+                    data.push(EntityData::CustomName(name.clone()));
+                }
+                if painting.direction != Direction::South {
+                    data.push(EntityData::HangingDirection(painting.direction));
+                }
+                if painting.variant != mc_bamboo_data::painting::DEFAULT_VARIANT {
+                    data.push(EntityData::PaintingVariant(painting.variant));
+                }
+                data
+            }
+            Self::ItemFrame(frame) => {
+                let mut data = Vec::new();
+                if frame.invisible {
+                    data.push(EntityData::SharedFlags(ENTITY_FLAG_INVISIBLE_BIT));
+                }
+                if let Some(name) = &frame.custom_name {
+                    data.push(EntityData::CustomName(name.clone()));
+                }
+                if frame.direction != Direction::South {
+                    data.push(EntityData::HangingDirection(frame.direction));
+                }
+                if !frame.item.is_empty() {
+                    data.push(EntityData::ItemFrameItem(frame.item.clone()));
+                }
+                if frame.rotation != 0 {
+                    data.push(EntityData::ItemFrameRotation(frame.rotation));
+                }
+                data
+            }
             Self::OminousItemSpawner(stack) if !stack.is_empty() => {
                 vec![EntityData::Item(stack.clone())]
             }
@@ -1139,6 +1269,16 @@ impl KindData {
                 }
                 if firework.shot_at_angle {
                     data.push(EntityData::FireworksShotAtAngle(true));
+                }
+                data
+            }
+            Self::FishingHook(hook) => {
+                let mut data = Vec::new();
+                if hook.hooked_entity_data != 0 {
+                    data.push(EntityData::FishingHookedEntity(hook.hooked_entity_data));
+                }
+                if hook.biting {
+                    data.push(EntityData::FishingBiting(true));
                 }
                 data
             }

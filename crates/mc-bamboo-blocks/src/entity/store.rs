@@ -136,6 +136,14 @@ pub enum KindPublic {
     LeashKnot {
         pos: BlockPos,
     },
+    /// 画：位置、朝向和变体 ID。
+    ///
+    /// A painting: attachment pos, facing direction and variant id.
+    Painting(super::hanging::PaintingPublic),
+    /// 物品展示框 / 荧光物品展示框：位置、朝向、物品、旋转档位、隐身和固定标记。
+    ///
+    /// An item frame or glow item frame.
+    ItemFrame(super::hanging::ItemFramePublic),
     /// 闪电：客户端要 `seed`、`life` 和闪光次数。
     ///
     /// A lightning bolt: the client reads its seed, life and remaining flashes.
@@ -152,6 +160,8 @@ pub enum KindPublic {
     WindCharge(super::wind_charge::WindChargePublic),
     /// 烟花火箭：同步要的 UUID、主人、俯仰角和物品堆。
     FireworkRocket(super::firework_rocket::FireworkRocketPublic),
+    /// 钓鱼浮漂：同步要的 UUID、主人、俯仰角、被钩实体与咬钩标记。
+    FishingHook(super::fishing_hook::FishingHookPublic),
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
     /// 船：木种 / 乘客名单和同步数据。
@@ -180,6 +190,8 @@ impl KindPublic {
             Self::Item { .. } => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb { .. } => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
             Self::LeashKnot { .. } => mc_bamboo_data::registries::entity_type::LEASH_KNOT,
+            Self::Painting(_) => mc_bamboo_data::registries::entity_type::PAINTING,
+            Self::ItemFrame(frame) => frame.entity_type(),
             Self::Arrow(arrow) => arrow.variant.entity_type(),
             Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(egg) => egg.kind.entity_type(),
@@ -191,6 +203,7 @@ impl KindPublic {
             }
             Self::WindCharge(charge) => charge.variant.entity_type(),
             Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
+            Self::FishingHook(_) => mc_bamboo_data::registries::entity_type::FISHING_BOBBER,
             Self::Mob(mob) => mob.mob_type.entity_type(),
             Self::Boat(boat) => boat.entity_type,
         }
@@ -263,6 +276,10 @@ pub enum KindState {
     ExperienceOrb(super::ExperienceOrb),
     /// 拴绳结的全部状态；公开的那一半就是它本身。
     LeashKnot(super::LeashKnot),
+    /// 画的全部状态。
+    Painting(Box<super::hanging::Painting>),
+    /// 物品展示框 / 荧光物品展示框的全部状态。
+    ItemFrame(Box<super::hanging::ItemFrame>),
     /// 闪电的全部状态，公开的那一半就是它本身。
     LightningBolt(super::lightning::LightningBolt),
     /// 唤魔者尖牙的全部状态。
@@ -273,6 +290,8 @@ pub enum KindState {
     WindCharge(Box<super::wind_charge::WindCharge>),
     /// 烟花火箭的全部状态。
     FireworkRocket(Box<super::firework_rocket::FireworkRocket>),
+    /// 钓鱼浮漂的全部状态。
+    FishingHook(Box<super::fishing_hook::FishingHook>),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
     /// 船的全部状态。公开的那一半在 [`KindPublic::Boat`] 里另有一份拷贝。
@@ -334,18 +353,24 @@ pub struct EntityRow {
 }
 
 impl EntityPublic {
-    /// `Entity.getBoundingBox()`。
+    /// `Entity.getBoundingBox()`。悬挂实体走自己的 `calculateBoundingBox`。
     pub fn bounding_box(&self) -> Aabb {
-        let (width, height) = self.kind.dimensions();
-        let half = f64::from(width / 2.0);
-        Aabb::new(
-            self.position.x - half,
-            self.position.y,
-            self.position.z - half,
-            self.position.x + half,
-            self.position.y + f64::from(height),
-            self.position.z + half,
-        )
+        match &self.kind {
+            KindPublic::Painting(p) => p.bounding_box(),
+            KindPublic::ItemFrame(f) => f.bounding_box(),
+            _ => {
+                let (width, height) = self.kind.dimensions();
+                let half = f64::from(width / 2.0);
+                Aabb::new(
+                    self.position.x - half,
+                    self.position.y,
+                    self.position.z - half,
+                    self.position.x + half,
+                    self.position.y + f64::from(height),
+                    self.position.z + half,
+                )
+            }
+        }
     }
 
     /// `blockPosition()`。
@@ -429,6 +454,10 @@ impl EntityRow {
             (KindPublic::LeashKnot { pos: _ }, KindState::LeashKnot(knot)) => {
                 EntityKind::LeashKnot(knot)
             }
+            (KindPublic::Painting(_), KindState::Painting(painting)) => {
+                EntityKind::Painting(painting)
+            }
+            (KindPublic::ItemFrame(_), KindState::ItemFrame(frame)) => EntityKind::ItemFrame(frame),
             (KindPublic::Arrow(_), KindState::Arrow(arrow)) => EntityKind::Arrow(arrow),
             (KindPublic::LlamaSpit(_), KindState::LlamaSpit(spit)) => EntityKind::LlamaSpit(spit),
             (KindPublic::Egg(_), KindState::Egg(egg)) => EntityKind::Egg(egg),
@@ -449,6 +478,9 @@ impl EntityRow {
             }
             (KindPublic::FireworkRocket(_), KindState::FireworkRocket(firework)) => {
                 EntityKind::FireworkRocket(firework)
+            }
+            (KindPublic::FishingHook(_), KindState::FishingHook(hook)) => {
+                EntityKind::FishingHook(hook)
             }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             (KindPublic::Boat(_), KindState::Boat(boat)) => EntityKind::Boat(boat),
@@ -527,6 +559,14 @@ impl Entity {
                 KindPublic::LeashKnot { pos: knot.pos },
                 KindState::LeashKnot(knot),
             ),
+            EntityKind::Painting(painting) => (
+                KindPublic::Painting(painting.public()),
+                KindState::Painting(painting),
+            ),
+            EntityKind::ItemFrame(frame) => (
+                KindPublic::ItemFrame(frame.public()),
+                KindState::ItemFrame(frame),
+            ),
             EntityKind::Arrow(arrow) => (
                 KindPublic::Arrow(arrow.public(self.remaining_fire_ticks)),
                 KindState::Arrow(arrow),
@@ -561,6 +601,10 @@ impl Entity {
             EntityKind::FireworkRocket(firework) => (
                 KindPublic::FireworkRocket(firework.public()),
                 KindState::FireworkRocket(firework),
+            ),
+            EntityKind::FishingHook(hook) => (
+                KindPublic::FishingHook(hook.public()),
+                KindState::FishingHook(hook),
             ),
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
@@ -1299,6 +1343,13 @@ impl EntityStore {
         if let EntityKind::FireworkRocket(firework) = &mut entity.kind {
             firework.uuid = super::mob::insecure_uuid(&mut entity.random);
         }
+        entity.finish_fishing_hook_random();
+        if let EntityKind::Painting(painting) = &mut entity.kind {
+            painting.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
+        if let EntityKind::ItemFrame(frame) = &mut entity.kind {
+            frame.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
         if matches!(entity.kind, super::EntityKind::LightningBolt(_)) {
             super::lightning::finish_spawn(&mut entity);
         }
@@ -1717,6 +1768,17 @@ impl EntityStore {
                         None
                     }
                 }
+                super::KindState::FishingHook(hook) => {
+                    if hook.pending_pull_event {
+                        hook.pending_pull_event = false;
+                        Some((
+                            row.public.uid,
+                            vec![super::mob::MobEvent::EntityEvent { event: 31 }],
+                        ))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         };
@@ -1768,6 +1830,19 @@ impl EntityStore {
                 (
                     ChunkPos::containing(entity.position.x, entity.position.z),
                     vec![super::mob::MobEvent::EntityEvent { event: 17 }],
+                ),
+            );
+        }
+        // 浮漂收竿拉拽实体那一刻立刻消失；`broadcastEntityEvent(this, 31)` 走同一条路。
+        // A fishing hook vanishes when retrieving a hooked entity; event 31 shares this path.
+        if let EntityKind::FishingHook(hook) = &entity.kind
+            && hook.pending_pull_event
+        {
+            self.departed_mob_events.insert(
+                entity.id,
+                (
+                    ChunkPos::containing(entity.position.x, entity.position.z),
+                    vec![super::mob::MobEvent::EntityEvent { event: 31 }],
                 ),
             );
         }

@@ -616,6 +616,42 @@ pub trait LevelEntities {
             }
         });
     }
+    /// `ComparatorBlock.getItemFrame`：在 `pos` 这一格内查找面向 `facing` 的唯一展示框，
+    /// 恰好找到 1 个时返回其 `getAnalogOutput()`。
+    ///
+    /// `ComparatorBlock.getItemFrame`: return `getAnalogOutput()` when exactly one
+    /// item frame facing `facing` intersects cell `pos`.
+    fn comparator_item_frame_signal(
+        &self,
+        facing: mc_bamboo_core::Direction,
+        pos: BlockPos,
+    ) -> Option<i32> {
+        use mc_bamboo_data::registries::entity_type;
+        let cell = Aabb::new(
+            f64::from(pos.x),
+            f64::from(pos.y),
+            f64::from(pos.z),
+            f64::from(pos.x + 1),
+            f64::from(pos.y + 1),
+            f64::from(pos.z + 1),
+        );
+        let mut count = 0usize;
+        let mut signal = 0i32;
+        self.for_each_entity_of_types_in(
+            cell,
+            &[entity_type::ITEM_FRAME, entity_type::GLOW_ITEM_FRAME],
+            &mut |public| {
+                if !public.removed
+                    && let crate::entity::KindPublic::ItemFrame(frame) = &public.kind
+                    && frame.direction == facing
+                {
+                    count += 1;
+                    signal = frame.analog_output();
+                }
+            },
+        );
+        (count == 1).then_some(signal)
+    }
     /// `addFreshEntity`：tick 期间生成的实体下一 tick 才动。
     fn spawn_entity(&mut self, entity: Entity) -> EntityUid;
     /// 构造实体：分配 ID、取种子和构造时的随机数，还不放进世界，见 [`EntityStore::prepare`]。

@@ -143,6 +143,9 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
     if !status.success() {
         return Err(format!("ChunkContentOracle.java failed: {status}\n{logs}"));
     }
+    if !report.failures.is_empty() && !logs.is_empty() {
+        eprintln!("{logs}");
+    }
     report.finish()
 }
 
@@ -573,7 +576,17 @@ fn run_cases(
             );
             if matches!(&tag, Tag::Compound(fields) if fields.iter().any(|(key, value)| {
                 key == "id"
-                    && matches!(value, Tag::String(id) if id == "minecraft:arrow" || id == "minecraft:trident" || id == "minecraft:egg" || id == "minecraft:llama_spit")
+                    && matches!(
+                        value,
+                        Tag::String(id)
+                            if id == "minecraft:arrow"
+                                || id == "minecraft:trident"
+                                || id == "minecraft:egg"
+                                || id == "minecraft:llama_spit"
+                                || id == "minecraft:painting"
+                                || id == "minecraft:item_frame"
+                                || id == "minecraft:glow_item_frame"
+                    )
             })) && let Some(row) = rebuilt
             {
                 let saved = write_entity(&row).map_err(|error| error.to_string())?;
@@ -1802,6 +1815,81 @@ fn entity_cases() -> Vec<Tag> {
     out.extend(nautilus_archive_cases());
     out.extend(zombie_villager_archive_cases());
     out.extend(parched_jockey_archive_cases());
+    out.extend(hanging_archive_cases());
+    out
+}
+
+/// 画、物品展示框和荧光物品展示框的存档往返：`block_pos`、`facing`/`Facing`、
+/// `variant`、`Item`、`ItemRotation`、`ItemDropChance`、`Fixed`、`Invisible` 与 `CustomName`。
+///
+/// Save round-trip for paintings, item frames, and glow item frames.
+fn hanging_archive_cases() -> Vec<Tag> {
+    use mc_bamboo_blocks::entity::hanging::{recalculate_item_frame, recalculate_painting};
+    use mc_bamboo_core::Direction;
+    use mc_bamboo_data::{items, painting as painting_data};
+
+    let mut out = Vec::new();
+    let mut store = mc_bamboo_blocks::EntityStore::new();
+
+    // 1. Painting with non-default facing, variant, and custom name.
+    let mut p1 = Entity::painting(
+        BlockPos::new(2, 65, -3),
+        Direction::West,
+        painting_data::id_of("minecraft:donkey_kong").expect("donkey_kong"),
+    );
+    if let EntityKind::Painting(p) = &mut p1.kind {
+        p.custom_name = Some(
+            mc_bamboo_protocol::text::Component::text("挂画")
+                .tag()
+                .clone(),
+        );
+    }
+    recalculate_painting(&mut p1);
+    let uid = store.spawn(p1);
+    out.push(write_entity(&store.get(uid).expect("p1").split()).expect("write p1"));
+
+    // 2. Painting with default facing (South) and default variant (alban).
+    let p2 = Entity::painting(
+        BlockPos::new(-1, 64, 4),
+        Direction::South,
+        painting_data::DEFAULT_VARIANT,
+    );
+    let uid = store.spawn(p2);
+    out.push(write_entity(&store.get(uid).expect("p2").split()).expect("write p2"));
+
+    // 3. Empty ItemFrame with default flags and facing North.
+    let f1 = Entity::item_frame(BlockPos::new(0, 64, 1), Direction::North, false);
+    let uid = store.spawn(f1);
+    out.push(write_entity(&store.get(uid).expect("f1").split()).expect("write f1"));
+
+    // 4. ItemFrame facing Up with item, rotation, drop chance, Fixed=true, Invisible=true.
+    let mut f2 = Entity::item_frame(BlockPos::new(3, 66, -2), Direction::Up, false);
+    if let EntityKind::ItemFrame(f) = &mut f2.kind {
+        f.item = ItemStack::new(items::DIAMOND, 1);
+        f.rotation = 3;
+        f.drop_chance = 0.5;
+        f.fixed = true;
+        f.invisible = true;
+    }
+    recalculate_item_frame(&mut f2);
+    let uid = store.spawn(f2);
+    out.push(write_entity(&store.get(uid).expect("f2").split()).expect("write f2"));
+
+    // 5. GlowItemFrame facing East with item, rotation=6, and custom name.
+    let mut f3 = Entity::item_frame(BlockPos::new(-2, 67, 5), Direction::East, true);
+    if let EntityKind::ItemFrame(f) = &mut f3.kind {
+        f.item = ItemStack::new(items::GOLD_INGOT, 1);
+        f.rotation = 6;
+        f.custom_name = Some(
+            mc_bamboo_protocol::text::Component::text("荧光框")
+                .tag()
+                .clone(),
+        );
+    }
+    recalculate_item_frame(&mut f3);
+    let uid = store.spawn(f3);
+    out.push(write_entity(&store.get(uid).expect("f3").split()).expect("write f3"));
+
     out
 }
 
