@@ -521,7 +521,9 @@ pub(super) fn targets() -> GoalSelector {
         ),
         (2, Goal::nearest_target(TargetType::Player)),
         (3, Goal::nearest_target_without_sight(TargetType::Villager)),
-        (3, Goal::nearest_target(TargetType::IronGolem)),
+        // `NearestAttackableTargetGoal(IronGolem.class, false)`：铁傀儡不记视线丢失。
+        // `NearestAttackableTargetGoal(IronGolem.class, false)`: golems keep no sight memory.
+        (3, Goal::nearest_target_without_sight(TargetType::IronGolem)),
     ])
 }
 
@@ -576,5 +578,32 @@ mod tests {
         assert_eq!(names[9], "EvokerSummonSpellGoal");
         assert_eq!(names[10], "EvokerAttackSpellGoal");
         assert_eq!(names[11], "EvokerWololoSpellGoal");
+    }
+
+    /// 三个 `NearestAttackableTargetGoal` 的 `mustSee` 照字节码：玩家真（记 300 刻），
+    /// 村民和铁傀儡假。
+    ///
+    /// The three `NearestAttackableTargetGoal` `mustSee` values match the bytecode:
+    /// the player goal is true (300 ticks) while villager and golem are false.
+    #[test]
+    fn target_must_see_matches_vanilla() {
+        let entries: Vec<_> = targets()
+            .goals
+            .iter()
+            .filter_map(|wrapped| match &wrapped.goal {
+                Goal::NearestAttackableTarget { kind, must_see, .. } => {
+                    Some((wrapped.priority, *kind, *must_see))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                (2, TargetType::Player, true),
+                (3, TargetType::Villager, false),
+                (3, TargetType::IronGolem, false),
+            ]
+        );
     }
 }

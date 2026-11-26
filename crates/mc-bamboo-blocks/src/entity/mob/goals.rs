@@ -3058,6 +3058,25 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         }
         Goal::NearestAttackableTarget {
             unseen_ticks,
+            kind: TargetType::Player,
+            must_see: true,
+            ..
+        } if matches!(
+            mob.mob_type,
+            super::MobType::Evoker | super::MobType::Illusioner
+        ) =>
+        {
+            // `NearestAttackableTargetGoal(Player.class, true).setUnseenMemoryTicks(300)`：
+            // 唤魔者 / 幻术师追玩家记 300 刻视线丢失。村民和铁傀儡目标都是
+            // `mustSee=false`，不记视线丢失。
+            //
+            // `NearestAttackableTargetGoal(Player.class, true).setUnseenMemoryTicks(300)`:
+            // evokers and illusioners remember an unseen player for 300 ticks. Their
+            // villager and golem targets are `mustSee=false` and keep no memory.
+            target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 300)
+        }
+        Goal::NearestAttackableTarget {
+            unseen_ticks,
             must_see: true,
             ..
         } if mob.mob_type.uses_target_memory() => {
@@ -3395,9 +3414,19 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             if mob.mob_type == super::MobType::Panda {
                 super::panda::alert_pandas(me, mob, ctx);
             }
-            // `Pillager` 的 `HurtByTargetGoal(this, Raider.class).setAlertOthers()`。
-            // The pillager's `HurtByTargetGoal(this, Raider.class).setAlertOthers()`.
-            if mob.mob_type == super::MobType::Pillager {
+            // 五个 illager 的 `HurtByTargetGoal(this, Raider.class).setAlertOthers(new Class[0])`：
+            // 女巫没有 `setAlertOthers`，不叫同类。
+            //
+            // The five illagers' `HurtByTargetGoal(this, Raider.class).setAlertOthers(new
+            // Class[0])`; witches do not call `setAlertOthers`, so they stay silent.
+            if matches!(
+                mob.mob_type,
+                super::MobType::Pillager
+                    | super::MobType::Vindicator
+                    | super::MobType::Ravager
+                    | super::MobType::Evoker
+                    | super::MobType::Illusioner
+            ) {
                 super::raider::alert_same_kind(me, mob, ctx);
             }
         }
