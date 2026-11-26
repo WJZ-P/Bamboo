@@ -1964,12 +1964,14 @@ Not an official Minecraft product. Not approved by or associated with Mojang or 
 
 **已知限制**：
 
-- 运输船的 27 格物品栏菜单（`interactWithContainerVehicle`）、漏斗抽取、战利品表
-  解包尚未接入；现有菜单系统基于方块位置，实体容器需要单独一套状态。
+- 运输船的 27 格物品栏菜单（`interactWithContainerVehicle`）和漏斗抽取尚未接入；
+  现有菜单系统基于方块位置，实体容器需要单独一套状态（`Target::Villager` 是唯一
+  实体菜单先例）。战利品表在破坏时已解包，但打开菜单 / 漏斗读容器时的解包路径没有
+  对应入口。
 - 逐刻 Java 对拍（静水漂浮下沉、冰面滑、水流、打破掉物、动物上船）尚未建立；官方
   假世界夹具补船场景时要给 `FakeLevel` 补流体支持，船实体随机源从 `entitySeeds` 取。
-  物理目前只有单测与改坏确认，未与官方逐刻比对。
-- `BoatItem.use` 的 5 格 `CAN_BE_PICKED` 实体检查、实体之间 `push` 互推未建模；船
-  下船落点复用马科 `DismountHelper`（官方走 `getCollisionHorizontalEscapeVector`）；
-  `on_interact_entity` / `set_paddle` 未判 `outOfControlTicks < 60` 和控制者；玩家攻击
-  伤害固定按空手满充能 1.0 累计，未按武器 / 充能缩放。
+  物理目前只有 Rust 单测与改坏确认，未与官方逐刻比对。
+- `CAN_BE_PICKED` 用「所有活实体」近似（Bamboo 没有 `isPickable` 字段）；实体互推
+  只推对方、船自己不反推；`getEyeHeight` 用 `height*0.85` 近似；气泡柱 71/72 事件
+  发给所有在线玩家而非只给跟踪者；玩家攻击伤害复用 `plan_attack`（对非生物目标的
+  附魔加成按 0 处理）。
