@@ -1,10 +1,15 @@
-//! 玩家开始滑翔，对应 `Player.tryToStartFallFlying`。
-//! Starting a player glide, matching `Player.tryToStartFallFlying`.
+//! 玩家滑翔的开始条件与每刻更新。
+//! Player glide eligibility and tick updates.
 
-use mc_bamboo_blocks::{durability::next_damage_will_break, state};
+use mc_bamboo_blocks::{
+    World,
+    durability::{damage_of, hurt_and_break, next_damage_will_break},
+    game_event::{GameEvent, dispatch::EventContext},
+    state,
+};
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{
-    BlockAncestor, blocks,
+    BlockAncestor, blocks, items,
     registries::{data_component_type as components, mob_effect},
     tags::{block_tags, fluid_tags},
 };
@@ -51,19 +56,24 @@ fn can_glide_using(stack: &ItemStack, slot: EquipmentSlot) -> bool {
 fn can_glide(player: &Player, blocks: &PlayerBlocks<'_>) -> bool {
     let feet = BlockPos::containing(player.position());
     let fluid = blocks.state(feet).fluid();
-    !player.on_ground
+    !player.dead
+        && !player.on_ground
         && !player.riding.is_passenger()
         && !player.sync.flying
         && !player.effects.has(mob_effect::LEVITATION)
         && !fluid.is_tagged(fluid_tags::WATER)
         && !fluid.is_tagged(fluid_tags::LAVA)
         && !on_climbable(player, blocks)
-        && EQUIPMENT_SLOTS.into_iter().any(|slot| {
-            player
-                .inventory
-                .equipment(slot)
-                .is_some_and(|stack| can_glide_using(stack, slot))
-        })
+        && gliders(player).next().is_some()
+}
+
+fn gliders(player: &Player) -> impl Iterator<Item = EquipmentSlot> + '_ {
+    EQUIPMENT_SLOTS.into_iter().filter(|&slot| {
+        player
+            .inventory
+            .equipment(slot)
+            .is_some_and(|stack| can_glide_using(stack, slot))
+    })
 }
 
 /// 玩家脚下有可攀爬方块，或方向相同的梯子延伸到打开的活板门。
@@ -100,4 +110,97 @@ pub(crate) fn try_start(region: &mut Region, id: PlayerId) -> bool {
     }
     player.sync.set_fall_flying(true);
     true
+}
+
+/// 更新所有玩家的滑翔状态，对应 `LivingEntity.updateFallFlying`。
+/// Update player gliding, matching `LivingEntity.updateFallFlying`.
+pub(crate) fn tick(region: &mut Region) {
+    let ids: Vec<_> = region
+        .players
+        .values()
+        .filter(|player| player.sync.is_fall_flying() || player.fall_fly_ticks != 0)
+        .map(|player| player.id)
+        .collect();
+    for id in ids {
+        tick_player(region, id);
+    }
+}
+
+fn tick_player(region: &mut Region, id: PlayerId) {
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    let blocks = PlayerBlocks::new(&region.chunks, &region.block_entities);
+    if !player.sync.is_fall_flying() || !can_glide(player, &blocks) {
+        player.sync.set_fall_flying(false);
+        player.fall_fly_ticks = 0;
+        return;
+    }
+    player.fall_fly_ticks = player.fall_fly_ticks.wrapping_add(1);
+    if player.fall_fly_ticks % 10 != 0 {
+        return;
+    }
+    let position = player.position();
+    let context = EventContext {
+        sneaking: player.sync.shift_key_down,
+        spectator: player.game_mode == GameMode::Spectator,
+        source_player: Some(id.0),
+        source_entity: Some(id.0),
+        ..Default::default()
+    };
+    if player.fall_fly_ticks % 20 == 0 {
+        damage_glider(region, id);
+    }
+    let (mut level, ticks) = region.block_level();
+    let mut world = World::new(&mut level, ticks);
+    world.game_event(GameEvent::ElytraGlide, position, context);
+    let effects = world.into_effects();
+    crate::interaction::send_effects(region, Some(id), &effects);
+}
+
+fn damage_glider(region: &mut Region, id: PlayerId) {
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    let slots: Vec<_> = gliders(player).collect();
+    if slots.is_empty() {
+        return;
+    }
+    let equipment = slots[player.random.next_int_bounded(slots.len() as i32) as usize];
+    if player.game_mode == GameMode::Creative {
+        return;
+    }
+    let Some(slot) = player.inventory.equipment_index(equipment) else {
+        return;
+    };
+    let stack = &mut player.inventory.slots[slot];
+    let before = damage_of(stack);
+    let damaged = hurt_and_break(stack.clone(), 1, region.random.source());
+    if damaged.matches(stack) {
+        return;
+    }
+    let after = damage_of(&damaged);
+    let item = items::ITEMS.get(stack.item as usize).map(|item| item.name);
+    let broke = damaged.count < stack.count;
+    *stack = if damaged.is_empty() {
+        ItemStack::empty()
+    } else {
+        damaged
+    };
+    crate::player_weapon::sync_slots(region, id, [slot]);
+    if let Some((before, after)) = before.zip(after).filter(|(before, after)| before != after) {
+        crate::advancement_triggers::record(
+            region,
+            id,
+            "minecraft:item_durability_changed",
+            serde_json::json!({
+                "item": item,
+                "durability": after,
+                "delta": after - before,
+            }),
+        );
+    }
+    if broke {
+        crate::durability::broadcast_equipment_break(region, id, equipment);
+    }
 }

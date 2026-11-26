@@ -71,6 +71,9 @@ pub(crate) struct Player {
     pub(crate) teleport: Teleport,
     pub(crate) chunks: ChunkTracker,
     pub(crate) sync: EntitySync,
+    /// 连续滑翔的刻数，对应 `LivingEntity.fallFlyTicks`。
+    /// Consecutive gliding ticks, corresponding to `LivingEntity.fallFlyTicks`.
+    pub(crate) fall_fly_ticks: i32,
     pub(crate) prediction: BlockPrediction,
     /// 正在挖哪个方块、挖了多久，官方 `ServerPlayerGameMode` 的那几个字段。
     pub(crate) mining: Mining,
@@ -342,6 +345,7 @@ impl Player {
             on_ground: false,
             motion: Motion::new(position),
             sync: EntitySync::new(position, &client),
+            fall_fly_ticks: 0,
             client,
             teleport: Teleport::default(),
             chunks: ChunkTracker::default(),

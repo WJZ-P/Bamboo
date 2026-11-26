@@ -153,11 +153,7 @@ pub fn active_hand(hand: Hand) -> Option<ItemStack> {
 ///
 /// `player == null` skips the creative-mode check. Durability enchantments still run through
 /// `EnchantmentHelper.processDurabilityChange`, and the draws come from `level.random`.
-pub(crate) fn hurt_and_break(
-    mut stack: ItemStack,
-    amount: i32,
-    random: &LegacyRandom,
-) -> ItemStack {
+pub fn hurt_and_break(mut stack: ItemStack, amount: i32, random: &LegacyRandom) -> ItemStack {
     let Ok(patch) = ComponentPatch::from_opaque(&stack) else {
         return stack;
     };

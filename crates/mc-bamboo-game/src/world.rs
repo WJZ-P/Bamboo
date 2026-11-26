@@ -3771,6 +3771,7 @@ fn run_island_simulation(
     //
     // The bow and crossbow branch of `LivingEntity.updateUsingItem`.
     crate::player_weapon::tick(region);
+    crate::player_glide::tick(region);
     // 移动 / 跳跃 / 攻击 / 挖掘累计的饥饿消耗在 tick 末尾落到 FoodData。
     crate::player_exhaustion::flush(region);
     // 官方 `ServerPlayer.doTick`：总经验变了就给这名玩家补一包 `set_experience`。

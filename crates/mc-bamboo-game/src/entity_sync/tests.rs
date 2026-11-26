@@ -1075,6 +1075,77 @@ fn fall_flying_start_checks_equipment_and_environment() {
     }
 }
 
+#[test]
+fn fall_flying_spends_durability_every_twenty_ticks_in_survival() {
+    use mc_bamboo_blocks::durability::{damage_of, set_damage_value};
+    use mc_bamboo_data::items;
+
+    for mode in [GameMode::Survival, GameMode::Creative] {
+        let mut stage = Stage::at(POSITION);
+        let player = stage.player();
+        player.game_mode = mode;
+        let mut glider = ItemStack::new(items::ELYTRA, 1);
+        set_damage_value(&mut glider, 430);
+        player.inventory.slots[6] = glider;
+        on_player_command(
+            &mut stage.region,
+            STEVE,
+            PlayerCommandKind::StartFallFlying,
+            0,
+        );
+
+        for _ in 0..19 {
+            crate::player_glide::tick(&mut stage.region);
+        }
+        assert_eq!(damage_of(&stage.player().inventory.slots[6]), Some(430));
+        assert!(stage.player().sync.is_fall_flying());
+        crate::player_glide::tick(&mut stage.region);
+        assert_eq!(
+            damage_of(&stage.player().inventory.slots[6]),
+            Some(if mode == GameMode::Survival { 431 } else { 430 }),
+        );
+        assert!(stage.player().sync.is_fall_flying());
+        crate::player_glide::tick(&mut stage.region);
+        assert_eq!(
+            stage.player().sync.is_fall_flying(),
+            mode == GameMode::Creative
+        );
+    }
+}
+
+#[test]
+fn fall_flying_stops_when_the_player_lands_enters_water_or_unequips() {
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::{blocks, items};
+
+    for condition in ["landed", "water", "unequipped"] {
+        let mut stage = Stage::at(POSITION);
+        stage.player().inventory.slots[6] = ItemStack::new(items::ELYTRA, 1);
+        on_player_command(
+            &mut stage.region,
+            STEVE,
+            PlayerCommandKind::StartFallFlying,
+            0,
+        );
+        crate::player_glide::tick(&mut stage.region);
+        assert_eq!(stage.player().fall_fly_ticks, 1);
+        match condition {
+            "landed" => stage.player().on_ground = true,
+            "water" => {
+                stage
+                    .region
+                    .chunks
+                    .set_block(BlockPos::containing(POSITION), blocks::WATER);
+            }
+            "unequipped" => stage.player().inventory.slots[6] = ItemStack::empty(),
+            _ => unreachable!(),
+        }
+        crate::player_glide::tick(&mut stage.region);
+        assert!(!stage.player().sync.is_fall_flying(), "{condition}");
+        assert_eq!(stage.player().fall_fly_ticks, 0, "{condition}");
+    }
+}
+
 /// `entities.md` 第 9 节的 `[跑]`。
 #[test]
 fn punch_swings_the_main_hand_for_viewers_only() {

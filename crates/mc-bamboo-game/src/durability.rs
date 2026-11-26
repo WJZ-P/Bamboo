@@ -13,7 +13,7 @@ use mc_bamboo_blocks::{
     durability::{ActiveHands, with_player_hands},
 };
 use mc_bamboo_core::Hand;
-use mc_bamboo_protocol::packet::play::{EntityEvent, GameMode};
+use mc_bamboo_protocol::packet::play::{EntityEvent, EquipmentSlot, GameMode};
 
 use crate::{
     inbound::PlayerId,
@@ -184,6 +184,22 @@ fn break_event(hand: Hand) -> u8 {
         Hand::Main => BREAK_MAIN_HAND,
         Hand::Off => BREAK_OFF_HAND,
     }
+}
+
+/// 广播 `LivingEntity.entityEventForEquipmentBreak` 的掉屑事件。
+/// Broadcast the break event for the given equipment slot.
+pub(crate) fn broadcast_equipment_break(region: &mut Region, id: PlayerId, slot: EquipmentSlot) {
+    let event = match slot {
+        EquipmentSlot::MainHand => BREAK_MAIN_HAND,
+        EquipmentSlot::OffHand => BREAK_OFF_HAND,
+        EquipmentSlot::Head => 49,
+        EquipmentSlot::Chest => 50,
+        EquipmentSlot::Legs => 51,
+        EquipmentSlot::Feet => 52,
+        EquipmentSlot::Body => 65,
+        EquipmentSlot::Saddle => 68,
+    };
+    broadcast_break(region, id, id.0, event);
 }
 
 /// `broadcastEntityEvent`：自己和跟踪这个玩家的人都收到。
