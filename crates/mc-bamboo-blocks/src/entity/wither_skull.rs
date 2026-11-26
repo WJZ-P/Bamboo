@@ -43,10 +43,6 @@ pub const LIQUID_INERTIA: f32 = 0.8;
 /// `AbstractHurtingProjectile.accelerationPower`: initial-speed factor and
 /// the per-tick acceleration.
 pub const ACCELERATION_POWER: f64 = 0.1;
-/// `applyInertia` 水中分支每刻发的气泡粒子数。
-///
-/// Number of bubble particles `applyInertia` emits per water tick.
-pub const WATER_BUBBLES: i32 = 4;
 /// `WitherSkull.onHit` 的爆炸强度。
 ///
 /// Blast power of `WitherSkull.onHit`.
@@ -215,20 +211,12 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         skull.dangerous
     };
     let in_water = me.in_water;
-    if in_water {
-        // `applyInertia()` 水中分支：4 个 BUBBLE 粒子（位置 = 当前位置 - 速度*0.25，
-        // 速度 = 本刻速度），惯性改用 `getLiquidInertia()`。
-        // The water branch of `applyInertia()`: four BUBBLE particles at
-        // `position - velocity * 0.25` moving with this tick's velocity, and
-        // `getLiquidInertia()` replaces `getInertia()`.
-        ctx.emit(
-            Command::WitherSkullBubbles {
-                position: me.position,
-                delta: me.delta,
-            },
-            me,
-        );
-    }
+    // `applyInertia()` 水中分支的 4 个 BUBBLE 粒子用的是 `Level.addParticle`，服务端
+    // 是空操作（`ServerLevel` 没有覆写），粒子只在客户端自己画，服务端不发包；
+    // 惯性照常换成 `getLiquidInertia()`。
+    // The water branch's four BUBBLE particles use `Level.addParticle`, a no-op on
+    // the server (`ServerLevel` does not override it), so the client draws them and
+    // nothing is sent; only the inertia switches to `getLiquidInertia()`.
     me.delta = apply_inertia(me.delta, in_water, dangerous);
     let movement = me.delta;
     let hit = find_hit(me, ctx, movement);
@@ -466,7 +454,6 @@ mod tests {
         assert_eq!(DANGEROUS_INERTIA, 0.73);
         assert_eq!(LIQUID_INERTIA, 0.8);
         assert_eq!(ACCELERATION_POWER, 0.1);
-        assert_eq!(WATER_BUBBLES, 4);
         assert_eq!(EXPLOSION_RADIUS, 1.0);
         assert_eq!(DANGEROUS_RESISTANCE_CAP, 0.8);
     }

@@ -1247,14 +1247,6 @@ pub enum Command {
     /// A wither skull hit this tick: damage / wither effect of
     /// `WitherSkull.onHitEntity` and the blast of `onHit`.
     WitherSkullImpact(super::wither_skull::WitherSkullHit),
-    /// `AbstractHurtingProjectile.applyInertia` 的水中分支：4 个 BUBBLE 粒子。
-    ///
-    /// The water branch of `AbstractHurtingProjectile.applyInertia`: four
-    /// BUBBLE particles.
-    WitherSkullBubbles {
-        position: mc_bamboo_core::Vec3,
-        delta: mc_bamboo_core::Vec3,
-    },
     /// 烟花火箭这一刻爆炸：`FireworkRocketEntity.explode`（实体事件 17、伤害、消失）。
     ///
     /// A firework rocket exploding this tick: `FireworkRocketEntity.explode`
@@ -2095,19 +2087,6 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             world.spawn_wither_skull_shot(&shot);
         }
         Command::WitherSkullImpact(hit) => super::wither_skull::impact(me, world, hit),
-        Command::WitherSkullBubbles { position, delta } => {
-            world.push_effect(crate::Effect::Particles {
-                particle: mc_bamboo_data::registries::particle_type::BUBBLE,
-                position: mc_bamboo_core::Vec3::new(
-                    position.x - delta.x * 0.25,
-                    position.y - delta.y * 0.25,
-                    position.z - delta.z * 0.25,
-                ),
-                offset: delta,
-                speed: 0.0,
-                count: super::wither_skull::WATER_BUBBLES,
-            });
-        }
         Command::FireworkRocketExplode { hit } => {
             super::firework_rocket::explode(me, world, hit);
         }

@@ -1619,8 +1619,7 @@ WebView2 的渲染进程不算在内。
   `wither_invul` / `wither_explode` / `wither_skull` / `wither_arrow` / `wither_destroy` 都报不一致。
   **已知限制**：召唤图案（T 形方块检测）的官方逐刻对拍场景还没做（召唤逻辑本身已接，只是没有逐刻夹具）；
   `EnchantmentHelper.doPostAttackEffects` 的通用 `POST_ATTACK` 附魔效果框架 Bamboo 暂无，凋灵之首命中
-  生物 / 无装备目标时恒为空、按字节码的空结果处理；气泡粒子用 `sendParticles` 包近似官方每刻 4 次
-  `addParticle`（水中分支的对拍场景未覆盖）；侧头 `getNearbyEntities` 已按字节码把玩家一并纳入候选，
+  生物 / 无装备目标时恒为空、按字节码的空结果处理；水中分支的气泡粒子官方用的是 `Level.addParticle`，服务端不发包，Bamboo 也不发（水中分支的对拍场景未覆盖）；侧头 `getNearbyEntities` 已按字节码把玩家一并纳入候选，
   但玩家目标的逐刻对拍场景未覆盖。
 - 正版验证的限制：`server.properties` 的 `online-mode` 官方默认 true，命令行版和桌面端都读同一份文件、
   设置页里可以改；`ServerConfig::default()`（不读配置文件的嵌入用法）是 false。
