@@ -844,6 +844,10 @@ pub enum KindData {
     LeashKnot,
     Egg(Box<mc_bamboo_blocks::entity::thrown_egg::EggPublic>),
     SplashPotion(Box<mc_bamboo_blocks::entity::splash_potion::SplashPotionPublic>),
+    /// 唤魔者尖牙：没有自己的元数据。
+    ///
+    /// Evoker fangs, with no metadata of its own.
+    EvokerFangs,
 }
 
 /// 这一 tick 全表的载具名单。配对乘客时官方发的是载具那一侧的完整名单，而乘客
@@ -928,8 +932,9 @@ impl Snapshot {
             | KindData::ExperienceOrb { .. }
             | KindData::Mob(_)
             | KindData::LightningBolt
-            | KindData::OminousItemSpawner(_)
-            | KindData::LeashKnot => 0,
+            | KindData::LeashKnot
+            | KindData::EvokerFangs
+            | KindData::OminousItemSpawner(_) => 0,
         }
     }
 
@@ -958,6 +963,7 @@ impl KindData {
             KindPublic::WindCharge(charge) => Self::WindCharge(*charge),
             KindPublic::FireworkRocket(firework) => Self::FireworkRocket(firework.clone()),
             KindPublic::LeashKnot { .. } => Self::LeashKnot,
+            KindPublic::EvokerFangs => Self::EvokerFangs,
         }
     }
 
@@ -989,10 +995,11 @@ impl KindData {
             | Self::Egg(_)
             | Self::SplashPotion(_)
             | Self::LightningBolt
+            | Self::LeashKnot
+            | Self::EvokerFangs
             | Self::OminousItemSpawner(_)
             | Self::WindCharge(_)
-            | Self::FireworkRocket(_)
-            | Self::LeashKnot => None,
+            | Self::FireworkRocket(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -1009,9 +1016,10 @@ impl KindData {
             | Self::Egg(_)
             | Self::SplashPotion(_)
             | Self::LightningBolt
+            | Self::LeashKnot
+            | Self::EvokerFangs
             | Self::WindCharge(_)
-            | Self::FireworkRocket(_)
-            | Self::LeashKnot => None,
+            | Self::FireworkRocket(_) => None,
         }
     }
 
@@ -1070,8 +1078,9 @@ impl KindData {
             Self::ExperienceOrb { .. }
             | Self::LlamaSpit(_)
             | Self::LightningBolt
-            | Self::WindCharge(_)
-            | Self::LeashKnot => Vec::new(),
+            | Self::LeashKnot
+            | Self::EvokerFangs
+            | Self::WindCharge(_) => Vec::new(),
             Self::OminousItemSpawner(stack) if !stack.is_empty() => {
                 vec![EntityData::Item(stack.clone())]
             }

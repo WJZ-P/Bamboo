@@ -55,7 +55,6 @@ fn mob_level(case: &BreezeCase) -> MobLevel {
         }
     }
     MobLevel {
-        raid: None,
         blocks,
         random: LevelRandom::new(1),
         loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -75,6 +74,7 @@ fn mob_level(case: &BreezeCase) -> MobLevel {
         darkness_ticks: 0,
         poi: mc_bamboo_world::poi::PoiStore::new(),
         shoulder: Default::default(),
+        raid: None,
         entities: Entities::with_next_id(case.first_id),
         players: Vec::new(),
         game: Some(ReplayPlayers::new(

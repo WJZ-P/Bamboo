@@ -32,6 +32,10 @@ pub enum AvoidClass {
     /// The guardians a dolphin avoids (`AvoidEntityGoal(Guardian.class, 8.0F, 1.0D, 1.0D)`;
     /// the `Guardian` class also covers elder guardians).
     Guardian,
+    /// 唤魔者 / 幻术师躲的嘎枝（`AvoidEntityGoal(Creaking.class, 8.0F, ...)`）。
+    ///
+    /// The creaking evokers and illusioners avoid (`AvoidEntityGoal(Creaking.class, 8.0F, ...)`).
+    Creaking,
     /// 流浪商人躲的僵尸（`AvoidEntityGoal(Zombie.class, 8.0F, ...)`，含尸壳 / 溺尸 /
     /// 僵尸村民）。
     ///
@@ -46,15 +50,24 @@ pub enum AvoidClass {
     ///
     /// The pillager the wandering trader avoids.
     Pillager,
-    /// 官方注册了但 Bamboo 还没建模的灾厄村民 / 亡灵（唤魔者、恼鬼、幻术师、僵尸疣猪兽）：
-    /// 永远匹配不到，`canUse` 恒假、不取随机数，只占注册顺序。
+    /// 流浪商人躲的唤魔者（`AvoidEntityGoal(Evoker.class, 12.0F, ...)`）。
     ///
-    /// The illagers / undead the wandering trader avoids that Bamboo does not model
-    /// (evoker, vex, illusioner, zoglin): never matched, `canUse` is always false and
-    /// draws nothing; they only keep the registration order.
+    /// The evoker the wandering trader avoids.
     Evoker,
+    /// 流浪商人躲的恼鬼（`AvoidEntityGoal(Vex.class, 8.0F, ...)`）。
+    ///
+    /// The vex the wandering trader avoids.
     Vex,
+    /// 流浪商人躲的幻术师（`AvoidEntityGoal(Illusioner.class, 12.0F, ...)`）。
+    ///
+    /// The illusioner the wandering trader avoids.
     Illusioner,
+    /// 官方注册了但 Bamboo 还没建模的僵尸疣猪兽：永远匹配不到，`canUse` 恒假、不取随机数，
+    /// 只占注册顺序。
+    ///
+    /// The zoglin the wandering trader avoids that Bamboo does not model yet: never
+    /// matched, `canUse` is always false and draws nothing; it only keeps the
+    /// registration order.
     Zoglin,
 }
 
@@ -69,10 +82,14 @@ impl AvoidClass {
             Self::PolarBear => false,
             Self::Armadillo => kind == MobType::Armadillo,
             Self::Guardian => super::guardian::is_guardian(kind),
+            Self::Creaking => kind == MobType::Creaking,
             Self::Zombie => kind.is_zombie(),
             Self::Vindicator => kind == MobType::Vindicator,
             Self::Pillager => kind == MobType::Pillager,
-            Self::Evoker | Self::Vex | Self::Illusioner | Self::Zoglin => false,
+            Self::Evoker => kind == MobType::Evoker,
+            Self::Vex => kind == MobType::Vex,
+            Self::Illusioner => kind == MobType::Illusioner,
+            Self::Zoglin => false,
         }
     }
 }
