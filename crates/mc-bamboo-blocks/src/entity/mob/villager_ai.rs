@@ -2180,10 +2180,12 @@ fn trigger_raid_celebrate_gate(state: &mut RaidCelebrateGateState, cx: &mut Cx) 
     if !victory {
         return false;
     }
-    // MoveToSkySeeingSpot 权重 5，VillageBoundRandomStroll 权重 2。
+    // MoveToSkySeeingSpot 权重 5，VillageBoundRandomStroll 权重 2。官方前者用 `speed`、
+    // 后者用 `speed * 1.1`。
+    let stroll_speed = state.speed * 1.1;
     let stroll_first = shuffle_first(&mut state.random, [5, 2]) == 1;
     if stroll_first {
-        if trigger_village_bound_random_stroll(state.speed, 10, 7, cx) {
+        if trigger_village_bound_random_stroll(stroll_speed, 10, 7, cx) {
             return true;
         }
         let _ = trigger_move_to_sky_seeing_spot(state.speed, cx);
@@ -2191,7 +2193,7 @@ fn trigger_raid_celebrate_gate(state: &mut RaidCelebrateGateState, cx: &mut Cx) 
         if trigger_move_to_sky_seeing_spot(state.speed, cx) {
             return true;
         }
-        let _ = trigger_village_bound_random_stroll(state.speed, 10, 7, cx);
+        let _ = trigger_village_bound_random_stroll(stroll_speed, 10, 7, cx);
     }
     true
 }
@@ -3405,7 +3407,7 @@ fn raid_package(speed: f32) -> ActivityData {
                 0,
                 Kind::Villager(Behavior::RaidCelebrateTriggerGate(Box::new(
                     RaidCelebrateGateState {
-                        speed: speed * 1.1,
+                        speed,
                         random: JavaRandom::new(0),
                     },
                 ))),
