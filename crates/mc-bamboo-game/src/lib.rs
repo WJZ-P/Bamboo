@@ -1293,7 +1293,12 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
                         mc_bamboo_blocks::entity::mob::MobType::Wolf,
                         Vec3::new(x, y, z),
                     ));
-                if let Some(owner) = scene.mob_owners.get(index).copied().filter(|&owner| owner >= 0) {
+                if let Some(owner) = scene
+                    .mob_owners
+                    .get(index)
+                    .copied()
+                    .filter(|&owner| owner >= 0)
+                {
                     region.entities.with_mut(uid, |entity| {
                         if let Some(mob) = entity.kind.mob_mut() {
                             mob.tame.flags |= mc_bamboo_blocks::entity::mob::tame::FLAG_TAME;
@@ -1409,7 +1414,10 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
         }
         if scene.kinetic_start >= 0
             && tick as i32 >= scene.kinetic_start
-            && region.players.get(&id).is_some_and(|player| player.weapon_use.is_some())
+            && region
+                .players
+                .get(&id)
+                .is_some_and(|player| player.weapon_use.is_some())
         {
             entity_tracking::sync(&mut region);
             player_weapon::tick(&mut region);

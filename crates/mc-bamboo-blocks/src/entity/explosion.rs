@@ -161,7 +161,10 @@ impl World<'_> {
         // 再伤实体。射线消耗世界随机源，必须和官方同一条路径。
         let broken = self.calculate_exploded_positions(center, radius, None);
         let block_count = broken.len() as i32;
-        (block_count, explode_wind_burst(self, center, radius, knockback_multiplier))
+        (
+            block_count,
+            explode_wind_burst(self, center, radius, knockback_multiplier),
+        )
     }
 
     /// `RespawnAnchorBlock.explode` 走到 `ServerLevel.explode(..., BLOCK)`：强度 5、带火，
@@ -451,7 +454,8 @@ fn hurt_living_by_explosion_with(
         floor(center.z + double_radius + 1.0),
     );
     for id in world.entity_ids() {
-        if let Some((amount, knock)) = mob_blast(world, id, center, double_radius, area, multiplier) {
+        if let Some((amount, knock)) = mob_blast(world, id, center, double_radius, area, multiplier)
+        {
             if do_damage {
                 world.hurt_mob(id, damage, amount);
             }
@@ -500,7 +504,15 @@ pub(crate) fn explode_wind_burst(
     knockback_multiplier: f32,
 ) -> Vec<(EntityUid, Vec3)> {
     let damage = DamageSource::environment(DamageKind::Explosion);
-    hurt_living_by_explosion_with(world, None, damage, center, radius, knockback_multiplier, false)
+    hurt_living_by_explosion_with(
+        world,
+        None,
+        damage,
+        center,
+        radius,
+        knockback_multiplier,
+        false,
+    )
 }
 
 /// 一头生物在爆炸里受的伤害和被推开的速度；不在范围里返回 `None`。

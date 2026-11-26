@@ -27,7 +27,9 @@ use mc_bamboo_data::{
 };
 use mc_bamboo_protocol::{
     codec::write_varint,
-    components::{ComponentPatch, ComponentValue, cursor::Holder, defaults, value::KineticCondition},
+    components::{
+        ComponentPatch, ComponentValue, cursor::Holder, defaults, value::KineticCondition,
+    },
     item::ItemStack,
     packet::play::{
         Animate, EntityEvent, Explode, GameMode, LevelParticles, Randomization, SetEntityMotion,
@@ -330,7 +332,9 @@ fn send_wind_burst_explode(
         block_count,
         player_knockback: knock,
         explosion_particle: particle_type::GUST_EMITTER_LARGE,
-        explosion_sound: i32::from(sounds::sound_event("minecraft:entity.wind_charge.wind_burst")),
+        explosion_sound: i32::from(sounds::sound_event(
+            "minecraft:entity.wind_charge.wind_burst",
+        )),
         block_particles: &[],
         play_sound: true,
     };
@@ -402,7 +406,11 @@ struct MaceTarget {
 ///
 /// The candidate mob's effective team index: its own team first; `TamableAnimal.getTeam()`
 /// falls back to the root owner's team when a tamed mob has none, mirrored here.
-fn mob_team_index(region: &Region, mob: &mc_bamboo_blocks::entity::mob::MobPublic, tame: bool) -> Option<u32> {
+fn mob_team_index(
+    region: &Region,
+    mob: &mc_bamboo_blocks::entity::mob::MobPublic,
+    tame: bool,
+) -> Option<u32> {
     if let Some(team) = region.global.scoreboard.entity_team_index(&mob.uuid) {
         return Some(team);
     }
@@ -810,8 +818,7 @@ fn attack_inner(
     let Some(plan) = plan_attack(region, &target, &request) else {
         return;
     };
-    let (was_hurt, actual_damage, wind_burst) =
-        land_attack(region, id, entity_id, &target, &plan);
+    let (was_hurt, actual_damage, wind_burst) = land_attack(region, id, entity_id, &target, &plan);
     if was_hurt {
         // 官方 `PlayerHurtEntityTrigger` / `KilledTrigger`（玩家攻击实体）。
         let kind = region
@@ -830,7 +837,15 @@ fn attack_inner(
             payload.clone(),
         );
         crate::advancement_triggers::record(region, id, "minecraft:player_killed_entity", payload);
-        finish_hit(region, id, entity_id, &target, &plan, actual_damage, wind_burst);
+        finish_hit(
+            region,
+            id,
+            entity_id,
+            &target,
+            &plan,
+            actual_damage,
+            wind_burst,
+        );
     }
     // `PlayerInteractTrigger`：玩家右键实体在 `interaction::on_interact_entity` 里报，
     // 这里是左键攻击，报 `any_block_use` 之外的交互事件。
@@ -2392,7 +2407,11 @@ pub(crate) fn kinetic_tick(region: &mut Region, id: PlayerId, time_held: i32) {
                 region,
                 ParticleSpec {
                     particle: particle_type::DAMAGE_INDICATOR,
-                    position: Vec3::new(position.x, position.y + f64::from(height) * 0.5, position.z),
+                    position: Vec3::new(
+                        position.x,
+                        position.y + f64::from(height) * 0.5,
+                        position.z,
+                    ),
                     spread: (0.1, 0.0, 0.1),
                     speed: 0.2,
                     count: (actual_damage * 0.5) as i32,
@@ -2427,7 +2446,12 @@ pub(crate) fn kinetic_tick(region: &mut Region, id: PlayerId, time_held: i32) {
         let stabbed = region.players[&id]
             .recent_kinetic_enemies
             .keys()
-            .filter(|&&uid| region.entities.public_at(uid).is_some_and(|public| !public.removed))
+            .filter(|&&uid| {
+                region
+                    .entities
+                    .public_at(uid)
+                    .is_some_and(|public| !public.removed)
+            })
             .count() as i32;
         if stabbed > 0 {
             crate::advancement_triggers::record(
@@ -2506,7 +2530,13 @@ fn kinetic_stab_hit(
     };
     if plan.knockback {
         apply_extra_knockback(world, target.id, 0.4, setup.yaw, target.is_player);
-        apply_extra_knockback(world, target.id, setup.knockback, setup.yaw, target.is_player);
+        apply_extra_knockback(
+            world,
+            target.id,
+            setup.knockback,
+            setup.yaw,
+            target.is_player,
+        );
     }
     if hurt || plan.knockback {
         if hurt {
@@ -3501,13 +3531,17 @@ mod tests {
         assert_eq!(attack_swing(&spear), (SwingAnimationType::Stab, 19));
         let mace = stack(mc_bamboo_data::items::MACE);
         assert_eq!(attack_swing(&mace), (SwingAnimationType::Whack, 6));
-        assert_eq!(attack_swing(&ItemStack::empty()), (SwingAnimationType::Whack, 6));
+        assert_eq!(
+            attack_swing(&ItemStack::empty()),
+            (SwingAnimationType::Whack, 6)
+        );
     }
 
     /// 铁长矛的 `kinetic_weapon` 组件按官方 26.3 的数值解析出来。
     #[test]
     fn iron_spear_kinetic_spec_matches_26_3() {
-        let spec = kinetic_spec(&stack(mc_bamboo_data::items::IRON_SPEAR)).expect("iron spear has a kinetic component");
+        let spec = kinetic_spec(&stack(mc_bamboo_data::items::IRON_SPEAR))
+            .expect("iron spear has a kinetic component");
         assert_eq!(spec.contact_cooldown_ticks, 10);
         assert_eq!(spec.delay_ticks, 12);
         assert_eq!(spec.damage_multiplier, 0.95);
@@ -3564,9 +3598,10 @@ mod tests {
         region.insert_player(player);
         std::sync::Arc::make_mut(&mut region.global.scoreboard).insert_team("Kitten", 0);
 
-        let uid = region
-            .entities
-            .spawn(Entity::by_mob_type(MobType::Wolf, Vec3::new(2.5, 64.0, 2.5)));
+        let uid = region.entities.spawn(Entity::by_mob_type(
+            MobType::Wolf,
+            Vec3::new(2.5, 64.0, 2.5),
+        ));
         region.entities.with_mut(uid, |entity| {
             if let Some(mob) = entity.kind.mob_mut() {
                 mob.tame.flags |= mc_bamboo_blocks::entity::mob::tame::FLAG_TAME;
