@@ -12,17 +12,24 @@
 //! [`super::living::hurt_server`].
 
 use mc_bamboo_core::Vec3;
+use mc_bamboo_data::{items, tags};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
 
 use crate::{
     InteractionResult,
     archive::tag::{self, put},
+    entity::{
+        Entity,
+        ctx::{Command, EntityCtx},
+    },
+    game_event::{GameEvent, dispatch::EventContext},
 };
 
 use super::{
-    Mob,
+    DamageKind, DamageSource, Mob, MobEvent,
     interact::{MobInteractRequest, MobInteraction},
+    living,
 };
 
 /// 一个姿势绕三根轴的旋转（度），官方 `net.minecraft.core.Rotations`。
@@ -387,6 +394,187 @@ fn swap_item(
     true
 }
 
+/// 官方 `ArmorStand.hurtServer`：两段式摇晃、创造一下移除、火 / 爆炸 / 箭的特殊处理，
+/// 破坏后掉盔甲架物品和全部装备，发破坏音效与粒子。
+///
+/// `ArmorStand.hurtServer`: the two-hit wobble, one-hit creative removal, the fire /
+/// explosion / arrow cases, and the item and equipment drops on breaking.
+pub fn hurt_server(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    source: DamageSource,
+    _amount: f32,
+) -> bool {
+    if me.removed {
+        return false;
+    }
+    // `mobGriefing` 关着且来源是生物时完全不受伤。
+    if !ctx.blocks().block_game_rules().mob_griefing && source.scale_when_non_player {
+        return false;
+    }
+    if source.kind.bypasses_invulnerability() {
+        kill(me);
+        return false;
+    }
+    if living::is_invulnerable_to(me, mob, &source)
+        || mob.armor_stand.invisible
+        || mob.armor_stand.is_marker()
+    {
+        return false;
+    }
+    if damage_in_tag(source.kind, "minecraft:is_explosion") {
+        broken_by_anything(me, mob, ctx);
+        kill(me);
+        return false;
+    }
+    if damage_in_tag(source.kind, "minecraft:ignites_armor_stands") {
+        if me.remaining_fire_ticks > 0 {
+            cause_damage(me, mob, ctx, &source, 0.15);
+        } else {
+            me.remaining_fire_ticks = 100; // `igniteForSeconds(5)`。
+        }
+        return false;
+    }
+    if damage_in_tag(source.kind, "minecraft:burns_armor_stands") && mob.health > 0.5 {
+        cause_damage(me, mob, ctx, &source, 4.0);
+        return false;
+    }
+    let can_break = damage_in_tag(source.kind, "minecraft:can_break_armor_stand");
+    let always_kill = damage_in_tag(source.kind, "minecraft:always_kills_armor_stands");
+    if !can_break && !always_kill {
+        return false;
+    }
+    if source.creative_player {
+        living::play_sound(me, mob, "minecraft:entity.armor_stand.break", 1.0, 1.0);
+        breaking_particles(me, mob);
+        kill(me);
+        return true;
+    }
+    let now = ctx.blocks().game_time();
+    if now - mob.armor_stand.last_hit <= WOBBLE_TIME || always_kill {
+        broken_by_player(me, mob, ctx);
+        breaking_particles(me, mob);
+        kill(me);
+    } else {
+        // 第一下：摇晃（实体事件 32）、ENTITY_DAMAGE、记下时刻。
+        mob.events.push(MobEvent::EntityEvent { event: 32 });
+        emit_damage_event(me, ctx, &source);
+        mob.armor_stand.last_hit = now;
+    }
+    true
+}
+
+/// `getGameTime() - lastHit <= 5` 里那个阈值。
+const WOBBLE_TIME: i64 = 5;
+
+fn kill(me: &mut Entity) {
+    me.discard();
+}
+
+fn emit_damage_event(me: &mut Entity, ctx: &mut dyn EntityCtx, source: &DamageSource) {
+    ctx.emit(
+        Command::GameEvent {
+            event: GameEvent::EntityDamage,
+            position: me.position,
+            context: EventContext {
+                source_entity: source.attacker,
+                ..Default::default()
+            },
+        },
+        me,
+    );
+}
+
+/// `brokenByPlayer`：掉一个带 `CustomName` 的盔甲架物品，再走 `brokenByAnything`。
+fn broken_by_player(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    // `custom_name` 组件没在这条掉落路径上复刻（见 README 已知限制）。
+    ctx.emit(
+        Command::DropItem {
+            stack: ItemStack::new(items::ARMOR_STAND, 1),
+        },
+        me,
+    );
+    broken_by_anything(me, mob, ctx);
+}
+
+/// `brokenByAnything`：破坏音效、空战利品表（无掉落）、掉全部装备并清空槽位。
+fn broken_by_anything(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    living::play_sound(me, mob, "minecraft:entity.armor_stand.break", 1.0, 1.0);
+    // `dropAllDeathLoot` 走 `minecraft:entities/armor_stand` 空表，没有掉落。
+    let drops: Vec<ItemStack> = mob
+        .equipment
+        .iter()
+        .filter(|(_, stack)| !stack.is_empty())
+        .map(|(_, stack)| stack.clone())
+        .collect();
+    for stack in drops {
+        ctx.emit(Command::DropItem { stack }, me);
+    }
+    for slot in [
+        EquipmentSlot::MainHand,
+        EquipmentSlot::OffHand,
+        EquipmentSlot::Feet,
+        EquipmentSlot::Legs,
+        EquipmentSlot::Chest,
+        EquipmentSlot::Head,
+        EquipmentSlot::Body,
+        EquipmentSlot::Saddle,
+    ] {
+        mob.equipment.set(slot, ItemStack::empty());
+    }
+}
+
+/// `causeDamage`：先扣血，血量降到 0.5 以下就按 `brokenByAnything` 破坏。
+fn cause_damage(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    source: &DamageSource,
+    amount: f32,
+) {
+    let health = mob.health - amount;
+    if health <= 0.5 {
+        broken_by_anything(me, mob, ctx);
+        kill(me);
+    } else {
+        mob.health = health;
+        emit_damage_event(me, ctx, source);
+    }
+}
+
+/// `showBreakingParticles`：橡木木板方块粒子。
+fn breaking_particles(me: &Entity, mob: &mut Mob) {
+    mob.events.push(MobEvent::Particles {
+        particle: mc_bamboo_data::registries::particle_type::BLOCK,
+        item: None,
+        position: Vec3::new(
+            me.position.x,
+            me.position.y + f64::from(me.dimensions.1) * (2.0 / 3.0),
+            me.position.z,
+        ),
+        offset: Vec3::new(
+            f64::from(me.dimensions.0) / 4.0,
+            f64::from(me.dimensions.1) / 4.0,
+            f64::from(me.dimensions.0) / 4.0,
+        ),
+        speed: 0.05,
+        count: 10,
+    });
+}
+
+/// 伤害类型在不在某个 `minecraft:damage_type` 标签里。
+fn damage_in_tag(kind: DamageKind, name: &str) -> bool {
+    let Some(id) = mc_bamboo_data::damage_type_id(kind.name()) else {
+        return false;
+    };
+    tags::TAG_GROUPS
+        .iter()
+        .flat_map(|group| group.tags.iter())
+        .find(|entry| entry.name == name)
+        .is_some_and(|entry| entry.ids.contains(&id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -590,5 +778,25 @@ mod tests {
         assert!(outcome.replacement.is_none());
         let mob = entity.kind.mob().expect("a mob");
         assert_eq!(mob.equipment.get(EquipmentSlot::Head).count, 1);
+    }
+
+    #[test]
+    fn hurt_damage_tags_match_the_official_registry() {
+        assert!(damage_in_tag(
+            DamageKind::PlayerAttack,
+            "minecraft:can_break_armor_stand"
+        ));
+        assert!(damage_in_tag(
+            DamageKind::Arrow,
+            "minecraft:always_kills_armor_stands"
+        ));
+        assert!(damage_in_tag(
+            DamageKind::Explosion,
+            "minecraft:is_explosion"
+        ));
+        assert!(!damage_in_tag(
+            DamageKind::PlayerAttack,
+            "minecraft:always_kills_armor_stands"
+        ));
     }
 }

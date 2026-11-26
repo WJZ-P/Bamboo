@@ -3300,6 +3300,12 @@ pub(crate) fn hurt_server(
         let has_source = source.attacker.is_some() || source.direct.is_some();
         super::axolotl::maybe_play_dead(me, mob, amount, has_source);
     }
+    // `ArmorStand.hurtServer`：两段式摇晃与破坏掉落，不走通用活体受伤。
+    // `ArmorStand.hurtServer`: the two-hit wobble and breaking drops, not the
+    // generic living hurt path.
+    if mob.mob_type == super::MobType::ArmorStand {
+        return super::armor_stand::hurt_server(me, mob, ctx, source, amount);
+    }
     living_hurt_server(me, mob, ctx, source, amount)
 }
 
