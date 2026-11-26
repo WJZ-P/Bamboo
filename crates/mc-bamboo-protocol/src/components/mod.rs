@@ -50,6 +50,7 @@ use cursor::{
 };
 use predicate::BlockPredicate;
 use stack::ItemStackTemplate;
+pub use value::TypedEntityData;
 use value::{
     AXOLOTL_VARIANT, AttributeEntry, BannerLayer, BeeOccupant, ConsumeEffect, CustomModelData,
     DYE_COLOR, DamageReduction, Equippable, FOX_VARIANT, Filterable, FireworkExplosion, GlobalPos,
@@ -57,7 +58,7 @@ use value::{
     KineticCondition, LLAMA_VARIANT, MAP_POST_PROCESSING, MOOSHROOM_VARIANT, MobEffectInstance,
     PARROT_VARIANT, PaintingVariant, RABBIT_VARIANT, RARITY, ResolvableFloat, ResolvableInt,
     ResolvableProfile, SALMON_SIZE, SignText, SoundEvent, StewEffect, SwingAnimation,
-    TROPICAL_FISH_PATTERN, ToolRule, TrimMaterial, TrimPattern, TypedEntityData,
+    TROPICAL_FISH_PATTERN, ToolRule, TrimMaterial, TrimPattern,
 };
 
 /// 一个组件补丁里增加项和移除项的总数上限。
