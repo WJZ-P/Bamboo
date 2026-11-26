@@ -335,11 +335,13 @@ fn set_walk_and_look(cx: &mut Cx, tracker: PositionTracker, speed: f32, close: i
 
 /// `GoToWantedItem` 的一次性触发。
 fn trigger_go_to_wanted_item(cx: &mut Cx) -> bool {
-    // `tryGet(WALK_TARGET).isEmpty()`：已经有要去的地方就不再触发。
-    // `tryGet(WALK_TARGET).isEmpty()`: do not trigger while a walk target is set.
-    if cx.memories.has(WalkTarget) {
-        return false;
-    }
+    // 官方 `GoToWantedItem.create(predicate, 1.75, true, 32)` 的第三个参数是 `true`，
+    // 所以 `WALK_TARGET` 按 `registered` 登记、触发时**不检查**它有没有值：一旦传感器
+    // 报来想捡的掉落物，就覆盖 walk / look target，哪怕 `MoveToTargetSink` 正在跑。
+    // The third argument of `GoToWantedItem.create(predicate, 1.75, true, 32)` is `true`,
+    // so `WALK_TARGET` is registered but the trigger does NOT require it to be absent: it
+    // overwrites the walk/look targets as soon as a wanted item is sensed, even while
+    // `MoveToTargetSink` is running.
     // `entity.canPickUpLoot()`：悦灵的覆写 = 不在捡物冷却里且手里有模板物品。
     // `entity.canPickUpLoot()`: the allay override = not on pickup cooldown and
     // holding a template item.

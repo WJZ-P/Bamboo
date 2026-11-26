@@ -339,6 +339,24 @@ impl Report {
                         player_held = stack.count;
                     }
                     player_main_hand = held;
+                    // 交互里 `addFreshEntity` 出来的（复制的悦灵）照官方只进 `spawned`，
+                    // 不参与本 tick 的推进、传感器也看不到；在 `tick_entities` 之前就
+                    // 从表里整个拿掉，否则它会被当成可见活体、挤进
+                    // `NEAREST_VISIBLE_LIVING_ENTITIES`（而且 uid 会和玩家撞号）。
+                    // Entities `addFreshEntity`-ed during the interaction (the duplicate
+                    // allay) only reach `spawned` in vanilla, are not ticked this tick and
+                    // are invisible to sensors; remove them from the table entirely before
+                    // `tick_entities` so they do not sneak into
+                    // `NEAREST_VISIBLE_LIVING_ENTITIES` (and their uid would collide with
+                    // the player's).
+                    let fresh = world
+                        .entities_mut()
+                        .entities_table_mut()
+                        .take_spawn_snapshots();
+                    for fresh in fresh {
+                        spawned.insert(fresh.uid);
+                        world.entities_mut().remove_entity(fresh.uid);
+                    }
                 }
                 world.tick_entities();
             }
