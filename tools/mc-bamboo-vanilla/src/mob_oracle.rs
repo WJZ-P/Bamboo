@@ -268,6 +268,7 @@ enum Line {
     Allay(Box<allay::AllayCase>),
     AllaySave(allay::AllaySaveCase),
     ArmorStandSave(armor_stand::ArmorStandSaveCase),
+    ArmorStandScene(Box<armor_stand::ArmorStandCase>),
     SpellcasterSave(SpellcasterSaveCase),
     End(End),
 }
@@ -2482,6 +2483,7 @@ impl Report {
                 Line::Allay(case) => self.replay_allay(&case),
                 Line::AllaySave(case) => self.replay_allay_save(&case),
                 Line::ArmorStandSave(case) => self.replay_armor_stand_save(&case),
+                Line::ArmorStandScene(case) => self.replay_armor_stand_scene(&case),
                 Line::SpellcasterSave(case) => self.replay_spellcaster_save(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),

@@ -15651,7 +15651,298 @@ public final class MobOracle {
         if (only == null || "armor_stand_save".startsWith(only)) {
             cases += playArmorStandSaves(official, out);
         }
+        cases += playArmorStandScenes(official, out, only);
         return cases;
+    }
+
+    /** 盔甲架逐刻场景：每刻输出一个紧凑状态数组，Rust 侧重放后逐项比对。 */
+    private static int playArmorStandScenes(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        if (only == null || "armor_stand_fall".startsWith(only)) {
+            playArmorStandFall(official, out);
+            cases++;
+        }
+        if (only == null || "armor_stand_equip".startsWith(only)) {
+            playArmorStandEquip(official, out);
+            cases++;
+        }
+        if (only == null || "armor_stand_break".startsWith(only)) {
+            playArmorStandBreak(official, out);
+            cases++;
+        }
+        if (only == null || "armor_stand_arrow".startsWith(only)) {
+            playArmorStandArrow(official, out);
+            cases++;
+        }
+        return cases;
+    }
+
+    /** 盔甲架场景共用的假玩家：生存模式，够得着 (0.5, 64, 0.5)。 */
+    private static ServerPlayer armorStandPlayer(Official official, FakeLevel level) {
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "StandOracle"), ClientInformation.createDefault());
+        player.setId(FIRST_ID + 1);
+        player.setPos(2.5, 64.0, 0.5);
+        level.playersList().add(player);
+        level.tracked.add(player);
+        return player;
+    }
+
+    /** 盔甲架场景共用的石头地面。 */
+    private static void armorStandFloor(FakeLevel level) {
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        for (int x = -4; x <= 4; x++) {
+            for (int z = -4; z <= 4; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+            }
+        }
+        level.chunkCache.clear();
+        level.chunkSource.getChunkNow(0, 0);
+    }
+
+    /** 两下打碎：比 `lastHit`、移除状态和破坏掉出的物品（含 `CustomName` 组件）。 */
+    private static void playArmorStandBreak(Official official, Writer out) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.gameTime = START_TIME;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        armorStandFloor(level);
+        var stand = (net.minecraft.world.entity.decoration.ArmorStand) EntityTypes.ARMOR_STAND
+                .create(level, EntitySpawnReason.COMMAND);
+        stand.setId(FIRST_ID);
+        setRandom(stand, ENTITY_RANDOM_SEED);
+        stand.setUUID(new UUID(0L, 3L));
+        stand.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        stand.setCustomName(net.minecraft.network.chat.Component.literal("Hall Monitor"));
+        stand.setItemSlot(net.minecraft.world.entity.EquipmentSlot.HEAD,
+                new ItemStack(Items.DIAMOND_HELMET));
+        stand.setItemSlot(net.minecraft.world.entity.EquipmentSlot.CHEST,
+                new ItemStack(Items.IRON_CHESTPLATE));
+        stand.setNoGravity(true);
+        level.tracked.add(stand);
+        ServerPlayer player = armorStandPlayer(official, level);
+        int[] hits = {1, 3};
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= 5; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                for (int hit : hits) {
+                    if (hit == tick) {
+                        stand.hurtServer(level, level.damageSources().playerAttack(player), 1.0F);
+                    }
+                }
+                if (!stand.isRemoved()) {
+                    stand.commonTick();
+                    stand.tick();
+                }
+            }
+            if (tick > 0) frames.append(',');
+            frames.append('[').append(stand.isRemoved() ? 1 : 0)
+                    .append(',').append(stand.lastHit);
+            java.util.List<long[]> drops = new java.util.ArrayList<>();
+            for (Entity born : level.spawned) {
+                if (born instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                    var stack = item.getItem();
+                    drops.add(new long[]{
+                            stack.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(stack.getItem()),
+                            stack.getCount(),
+                            stack.get(net.minecraft.core.component.DataComponents.CUSTOM_NAME) != null ? 1 : 0});
+                }
+            }
+            drops.sort((a, b) -> {
+                for (int i = 0; i < 3; i++) {
+                    int cmp = Long.compare(a[i], b[i]);
+                    if (cmp != 0) return cmp;
+                }
+                return 0;
+            });
+            frames.append(',').append(drops.size());
+            for (long[] d : drops) {
+                frames.append(',').append(d[0]).append(',').append(d[1]).append(',').append(d[2]);
+            }
+            frames.append(']');
+        }
+        out.write("{\"type\":\"armorStandScene\",\"name\":\"armor_stand_break\",\"frames\":"
+                + frames + "]}\n");
+    }
+
+    /** 被箭射到：箭伤害不破坏也不摇晃盔甲架，比移除状态、`lastHit` 和血量。 */
+    private static void playArmorStandArrow(Official official, Writer out) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.gameTime = START_TIME;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        armorStandFloor(level);
+        var stand = (net.minecraft.world.entity.decoration.ArmorStand) EntityTypes.ARMOR_STAND
+                .create(level, EntitySpawnReason.COMMAND);
+        stand.setId(FIRST_ID);
+        setRandom(stand, ENTITY_RANDOM_SEED);
+        stand.setUUID(new UUID(0L, 3L));
+        stand.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        stand.setNoGravity(true);
+        level.tracked.add(stand);
+        ServerPlayer player = armorStandPlayer(official, level);
+        var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, level);
+        arrow.setOwner(player);
+        arrow.setPos(player.position());
+        arrow.setDeltaMovement(1.0, 0.0, 0.0);
+        var source = level.damageSources().arrow(arrow, player);
+        int[] hits = {1, 2};
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= 4; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                for (int hit : hits) {
+                    if (hit == tick) {
+                        stand.hurtServer(level, source, 1.0F);
+                    }
+                }
+                if (!stand.isRemoved()) {
+                    stand.commonTick();
+                    stand.tick();
+                }
+            }
+            if (tick > 0) frames.append(',');
+            frames.append('[').append(stand.isRemoved() ? 1 : 0)
+                    .append(',').append(stand.lastHit)
+                    .append(',').append(Float.floatToRawIntBits(stand.getHealth())).append(']');
+        }
+        out.write("{\"type\":\"armorStandScene\",\"name\":\"armor_stand_arrow\",\"frames\":"
+                + frames + "]}\n");
+    }
+
+    /** 穿戴 / 取下装备：带点击高度，逐刻比 8 个槽位、玩家手持和交互结果。 */
+    private static void playArmorStandEquip(Official official, Writer out) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.gameTime = START_TIME;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        for (int x = -4; x <= 4; x++) {
+            for (int z = -4; z <= 4; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+            }
+        }
+        level.chunkCache.clear();
+        level.chunkSource.getChunkNow(0, 0);
+        var stand = (net.minecraft.world.entity.decoration.ArmorStand) EntityTypes.ARMOR_STAND
+                .create(level, EntitySpawnReason.COMMAND);
+        stand.setId(FIRST_ID);
+        setRandom(stand, ENTITY_RANDOM_SEED);
+        stand.setUUID(new UUID(0L, 3L));
+        stand.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        stand.setShowArms(true);
+        stand.setNoGravity(true);
+        level.tracked.add(stand);
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "StandOracle"), ClientInformation.createDefault());
+        player.setId(FIRST_ID + 1);
+        player.setPos(2.5, 64.0, 0.5);
+        level.playersList().add(player);
+        level.tracked.add(player);
+        // {tick, held item id (0 = empty), click height * 10}
+        int[][] steps = {
+                {1, BuiltInRegistries.ITEM.getId(Items.DIAMOND_HELMET), 18},
+                {2, 0, 18},
+                {3, BuiltInRegistries.ITEM.getId(Items.IRON_CHESTPLATE), 11},
+                {4, BuiltInRegistries.ITEM.getId(Items.DIAMOND_LEGGINGS), 7},
+                {5, 0, 7},
+                {6, 0, 3},
+                {7, 0, 11},
+        };
+        StringBuilder stepsJson = new StringBuilder("[");
+        for (int i = 0; i < steps.length; i++) {
+            if (i > 0) stepsJson.append(',');
+            stepsJson.append('[').append(steps[i][0]).append(',').append(steps[i][1])
+                    .append(',').append(steps[i][2]).append(']');
+        }
+        stepsJson.append(']');
+        net.minecraft.world.entity.EquipmentSlot[] slots = {
+                net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                net.minecraft.world.entity.EquipmentSlot.OFFHAND,
+                net.minecraft.world.entity.EquipmentSlot.FEET,
+                net.minecraft.world.entity.EquipmentSlot.LEGS,
+                net.minecraft.world.entity.EquipmentSlot.CHEST,
+                net.minecraft.world.entity.EquipmentSlot.HEAD,
+                net.minecraft.world.entity.EquipmentSlot.BODY,
+                net.minecraft.world.entity.EquipmentSlot.SADDLE,
+        };
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= 7; tick++) {
+            boolean consumes = false;
+            if (tick > 0) {
+                level.gameTime++;
+                for (int[] step : steps) {
+                    if (step[0] != tick) continue;
+                    player.setItemInHand(InteractionHand.MAIN_HAND,
+                            step[1] == 0 ? ItemStack.EMPTY
+                                    : new ItemStack(net.minecraft.world.item.Item.byId(step[1])));
+                    var result = stand.interact(player, InteractionHand.MAIN_HAND,
+                            new Vec3(0.0, step[2] / 10.0, 0.0));
+                    consumes = result.consumesAction();
+                }
+                stand.commonTick();
+                stand.tick();
+            }
+            if (tick > 0) frames.append(',');
+            var held = player.getItemInHand(InteractionHand.MAIN_HAND);
+            frames.append('[').append(consumes ? 1 : 0)
+                    .append(',').append(held.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(held.getItem()))
+                    .append(',').append(held.getCount());
+            for (var slot : slots) {
+                var stack = stand.getItemBySlot(slot);
+                frames.append(',').append(stack.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(stack.getItem()))
+                        .append(',').append(stack.getCount());
+            }
+            frames.append(']');
+        }
+        out.write("{\"type\":\"armorStandScene\",\"name\":\"armor_stand_equip\",\"steps\":"
+                + stepsJson + ",\"frames\":" + frames + "]}\n");
+    }
+
+    /** 放置后掉落：盔甲架从空中落到石头地面上，逐刻比位置 / 速度 / 着地。 */
+    private static void playArmorStandFall(Official official, Writer out) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.gameTime = START_TIME;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        for (int x = -4; x <= 4; x++) {
+            for (int z = -4; z <= 4; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+            }
+        }
+        level.chunkCache.clear();
+        level.chunkSource.getChunkNow(0, 0);
+        var stand = (net.minecraft.world.entity.decoration.ArmorStand) EntityTypes.ARMOR_STAND
+                .create(level, EntitySpawnReason.COMMAND);
+        stand.setId(FIRST_ID);
+        setRandom(stand, ENTITY_RANDOM_SEED);
+        stand.setUUID(new UUID(0L, 3L));
+        stand.snapTo(0.5, 66.0, 0.5, 0.0F, 0.0F);
+        level.tracked.add(stand);
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= 24; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                if (!stand.isRemoved()) {
+                    stand.commonTick();
+                    stand.tick();
+                }
+            }
+            if (tick > 0) frames.append(',');
+            var delta = stand.getDeltaMovement();
+            frames.append('[').append(stand.isRemoved() ? 1 : 0)
+                    .append(',').append(Double.doubleToRawLongBits(stand.getX()))
+                    .append(',').append(Double.doubleToRawLongBits(stand.getY()))
+                    .append(',').append(Double.doubleToRawLongBits(stand.getZ()))
+                    .append(',').append(Double.doubleToRawLongBits(delta.x))
+                    .append(',').append(Double.doubleToRawLongBits(delta.y))
+                    .append(',').append(Double.doubleToRawLongBits(delta.z))
+                    .append(',').append(stand.onGround() ? 1 : 0).append(']');
+        }
+        out.write("{\"type\":\"armorStandScene\",\"name\":\"armor_stand_fall\",\"frames\":"
+                + frames.toString() + "]}\n");
     }
 
     /** 盔甲架存档往返：官方 `saveWithoutId` 的整份 SNBT 和读回后再写出的 SNBT。 */

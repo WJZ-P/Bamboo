@@ -3585,6 +3585,7 @@ impl Mob {
             MobType::Vex => vex::attributes(),
             MobType::Illusioner => illusioner::attributes(),
             MobType::Allay => allay::attributes(),
+            MobType::ArmorStand => Attributes::armor_stand(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
