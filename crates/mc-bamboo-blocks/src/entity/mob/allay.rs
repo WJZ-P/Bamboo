@@ -15,11 +15,7 @@ use mc_bamboo_data::{
     tags::item_tags,
 };
 use mc_bamboo_nbt::Tag;
-use mc_bamboo_protocol::{
-    components::defaults,
-    item::ItemStack,
-    packet::play::EquipmentSlot,
-};
+use mc_bamboo_protocol::{components::defaults, item::ItemStack, packet::play::EquipmentSlot};
 
 use super::{
     Mob, MobEvent, MobType,
