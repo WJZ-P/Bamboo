@@ -9,7 +9,7 @@
 //! 视线用 `fireworks` 伤害类型伤活体（附带着目标），然后消失。
 
 use mc_bamboo_core::{Aabb, Vec3};
-use mc_bamboo_data::registries::data_component_type as kinds;
+use mc_bamboo_data::{items, registries::data_component_type as kinds};
 use mc_bamboo_protocol::components::{ComponentValue, defaults};
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -23,7 +23,7 @@ use crate::World;
 
 thread_local! {
     /// 对拍的改坏确认开关：0 正常，1 寿命、2 竖直加速、3 爆炸伤害、4 滑翔加速、
-    /// 5 附着偏移。正式构建里 `set_oracle_break` 不会被调用，恒为 0。
+    /// 5 附着偏移、6 主手判断。正式构建里 `set_oracle_break` 不会被调用，恒为 0。
     static ORACLE_BREAK: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
@@ -39,6 +39,7 @@ pub fn set_oracle_break(name: &str) {
         "firework_damage" => 3,
         "firework_boost" => 4,
         "firework_attached" => 5,
+        "firework_hand" => 6,
         _ => 0,
     };
     ORACLE_BREAK.with(|cell| cell.set(value));
@@ -391,19 +392,41 @@ fn attached_motion(player: &PlayerView) -> (Vec3, Vec3, bool) {
             look.z * 0.1 + (look.z * 1.5 - delta.z) * 0.5,
         )
     };
-    // `Entity.getHandHoldingItemAngle(FIREWORK_ROCKET)`：`calculateViewVector(0, yRot ± 80)`
-    // 乘 0.5。`getMainArm()` 默认右手取 +80；Bamboo 没建模左右手，恒按右手。
+    // `Entity.getHandHoldingItemAngle(FIREWORK_ROCKET)`：
+    // `calculateViewVector(0, yRot + (arm == RIGHT ? 80 : -80))` 乘 0.5。
     //
     // `Entity.getHandHoldingItemAngle(FIREWORK_ROCKET)`:
-    // `calculateViewVector(0, yRot ± 80)` scaled by 0.5. The default right main arm
-    // takes +80; Bamboo does not model handedness, so it is always +80.
+    // `calculateViewVector(0, yRot + (arm == RIGHT ? 80 : -80))` scaled by 0.5.
     let offset = if oracle_break() == 5 {
         // 改坏确认：丢掉手持偏移。
         Vec3::default()
     } else {
-        Vec3::view_vector(player.yaw + 80.0, 0.0).scale(0.5)
+        Vec3::view_vector(player.yaw + hand_holding_angle(player), 0.0).scale(0.5)
     };
     (delta.add(boost), offset, true)
+}
+
+/// `Entity.getHandHoldingItemAngle(Item)` 加在 `yRot` 上的角度（度）。
+///
+/// 官方：`offhand = getOffhandItem().is(item) && !getMainHandItem().is(item)`；
+/// `arm = offhand ? getMainArm().getOpposite() : getMainArm()`；
+/// 返回 `arm == RIGHT ? 80 : -80`。`getOpposite()` 只翻转左右手，所以
+/// `arm == RIGHT` 等价于 `main_arm_right != offhand`。
+///
+/// The angle (degrees) `Entity.getHandHoldingItemAngle` adds to `yRot`. Vanilla:
+/// `offhand = getOffhandItem().is(item) && !getMainHandItem().is(item)`;
+/// `arm = offhand ? getMainArm().getOpposite() : getMainArm()`;
+/// returns `arm == RIGHT ? 80 : -80`. `getOpposite()` only flips handedness, so
+/// `arm == RIGHT` is exactly `main_arm_right != offhand`.
+fn hand_holding_angle(player: &PlayerView) -> f32 {
+    let offhand =
+        player.off_hand == items::FIREWORK_ROCKET && player.main_hand != items::FIREWORK_ROCKET;
+    // 改坏确认：忽略主手/副手判断，恒当右手。
+    if oracle_break() == 6 || player.main_arm_right != offhand {
+        80.0
+    } else {
+        -80.0
+    }
 }
 
 /// `Projectile.checkLeftOwner`：主人（含玩家）不再碰到「当前碰撞盒沿速度展开再外扩 1」时离开。
@@ -695,5 +718,58 @@ fn deal_explosion_damage(me: &mut Entity, world: &mut World<'_>) {
         let distance = distance_to(me.position, position);
         let amount = f * ((5.0 - f64::from(distance)) / 5.0).sqrt() as f32;
         let _ = world.hurt_player_from_mob(uid, source(world, owner), amount, None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::mob::throttle::test_player;
+
+    /// `Entity.getHandHoldingItemAngle(FIREWORK_ROCKET)` 的四组合，照官方
+    /// `offhand = 副手是烟花 && 主手不是`、`arm = offhand ? 反手 : 主手`、
+    /// `arm == RIGHT ? +80 : -80`。
+    #[test]
+    fn hand_holding_angle_follows_main_arm_and_offhand() {
+        let rocket = items::FIREWORK_ROCKET;
+        let air = 0;
+        let mut player = test_player(1, Vec3::default());
+
+        // 右手主手、副手空：+80。
+        player.main_arm_right = true;
+        player.main_hand = air;
+        player.off_hand = air;
+        assert_eq!(hand_holding_angle(&player), 80.0);
+        assert_eq!(
+            attached_motion(&{
+                let mut p = player;
+                p.fall_flying = true;
+                p
+            })
+            .1,
+            Vec3::view_vector(80.0, 0.0).scale(0.5)
+        );
+
+        // 左手主手、副手空：-80。
+        player.main_arm_right = false;
+        assert_eq!(hand_holding_angle(&player), -80.0);
+
+        // 右手主手、只有副手拿烟花：反手成左手 → -80。
+        player.main_arm_right = true;
+        player.main_hand = air;
+        player.off_hand = rocket;
+        assert_eq!(hand_holding_angle(&player), -80.0);
+
+        // 左手主手、只有副手拿烟花：反手成右手 → +80。
+        player.main_arm_right = false;
+        assert_eq!(hand_holding_angle(&player), 80.0);
+
+        // 主手也拿着烟花时 `offhand` 不成立，仍看主手：右手 +80、左手 -80。
+        player.main_hand = rocket;
+        player.off_hand = rocket;
+        player.main_arm_right = true;
+        assert_eq!(hand_holding_angle(&player), 80.0);
+        player.main_arm_right = false;
+        assert_eq!(hand_holding_angle(&player), -80.0);
     }
 }

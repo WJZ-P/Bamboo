@@ -581,6 +581,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         })
         .collect();
     let player = PlayerView {
+        main_arm_right: true,
         fall_flying: false,
         shoulder_left: None,
         shoulder_right: None,

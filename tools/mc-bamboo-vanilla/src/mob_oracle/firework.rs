@@ -318,6 +318,9 @@ pub(super) struct FireworkElytraCase {
     pub(super) delta: [f64; 3],
     pub(super) yaw: f32,
     pub(super) pitch: f32,
+    /// 玩家主手是不是左手（`HumanoidArm.LEFT`）；决定 `getHandHoldingItemAngle` 用 -80°。
+    #[serde(default)]
+    pub(super) left_handed: bool,
     /// 每刻：`[fx,fy,fz, fdx,fdy,fdz, yRot,xRot, removed, life, lifetime, event17,
     /// pdx,pdy,pdz, levelSeed]`。
     pub(super) frames: Vec<[i64; 16]>,
@@ -358,6 +361,7 @@ impl FireworkElytraCase {
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(self.first_id),
             players: vec![PlayerView {
+                main_arm_right: !self.left_handed,
                 uid: self.player_id,
                 uuid: Some([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]),
                 fall_flying: true,

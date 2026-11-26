@@ -125,6 +125,7 @@ impl EggCase {
             .collect();
         if self.owner >= 0 {
             level.players.push(PlayerView {
+                main_arm_right: true,
                 fall_flying: false,
                 shoulder_left: None,
                 shoulder_right: None,

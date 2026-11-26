@@ -744,6 +744,7 @@ mod tests {
 
     fn player_view(position: Vec3) -> crate::entity::ctx::PlayerView {
         crate::entity::ctx::PlayerView {
+            main_arm_right: true,
             fall_flying: false,
             uuid: None,
             uid: 1,

@@ -4,11 +4,17 @@
 //! End-to-end tests for `FireworkRocketItem.use`: an attached rocket spawns and one item
 //! is spent while gliding, nothing spawns when not gliding, and creative keeps the rocket.
 
-use mc_bamboo_blocks::entity::KindPublic;
-use mc_bamboo_core::Hand;
-use mc_bamboo_data::{items, registries::stat_type};
+use mc_bamboo_blocks::entity::{
+    Entity, KindPublic,
+    mob::{
+        MobType,
+        leash::{self, LeashDelayed},
+    },
+};
+use mc_bamboo_core::{Hand, Vec3};
+use mc_bamboo_data::{items, registries::stat_type, sounds};
 use mc_bamboo_protocol::{
-    codec::write_varint,
+    codec::{Reader, write_varint},
     item::ItemStack,
     packet::play::{ClientCommandKind, GameMode, PlayRequest},
 };
@@ -133,4 +139,55 @@ fn creative_keeps_the_rocket_but_still_spawns() {
         3,
         "创造模式不扣物品"
     );
+}
+
+/// `FireworkRocketItem.use`：滑翔右键先 `dropAllLeashConnections(null)`，解开的
+/// 拴绳要真的断链，并播 `LEAD_BREAK`。
+#[test]
+fn gliding_firework_drops_leashes_and_sounds_lead_break() {
+    let (mut server, client) = settled();
+    hold(&mut server, &client, GameMode::Survival);
+    start_gliding(&mut server, &client);
+
+    // 一头拴在玩家身上的牛：`leash_holder` 就是玩家实体 id。
+    let cow_id = server.spawn_entity(Entity::by_mob_type(
+        MobType::Cow,
+        Vec3::new(SPAWN_X, SPAWN_Y, SPAWN_Z),
+    ));
+    let player_uuid = *server.player(&client).uuid.as_bytes();
+    server
+        .region()
+        .entities
+        .with_mut(cow_id, |entity: &mut Entity| {
+            if let Some(mob) = entity.kind.mob_mut() {
+                leash::set_leashed_to(mob, client.id.0, LeashDelayed::Entity(player_uuid));
+            }
+        });
+    let holder_before = server
+        .region()
+        .entities
+        .get(cow_id)
+        .and_then(|e| e.kind.mob().and_then(leash::leash_holder));
+    assert_eq!(holder_before, Some(client.id.0), "起步时牛拴在玩家身上");
+    client.take_frames();
+
+    use_firework(&mut server, &client, 1);
+
+    // 拴绳解开了。
+    let holder_after = server
+        .region()
+        .entities
+        .get(cow_id)
+        .and_then(|e| e.kind.mob().and_then(leash::leash_holder));
+    assert_eq!(holder_after, None, "dropAllLeashConnections 解开了拴绳");
+
+    // `LEAD_BREAK` 广播给所有人（`playSound(null, ...)` 不排除发起者）。
+    let lead_break = i32::from(sounds::sound_event("minecraft:item.lead.break"));
+    let frames = client.take_frames();
+    let heard: Vec<i32> = frames_with_id(&frames, clientbound::SOUND)
+        .iter()
+        .filter_map(|frame| Reader::new(&frame.body).varint().ok())
+        .map(|id| id - 1)
+        .collect();
+    assert!(heard.contains(&lead_break), "播了 LEAD_BREAK 音");
 }

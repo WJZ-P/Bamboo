@@ -59,6 +59,7 @@ pub(super) struct SculkShriekerCase {
 fn shrieker_player(pos: BlockPos) -> mc_bamboo_blocks::entity::ctx::PlayerView {
     use mc_bamboo_blocks::entity::ctx::PlayerView;
     PlayerView {
+        main_arm_right: true,
         fall_flying: false,
         shoulder_left: None,
         shoulder_right: None,

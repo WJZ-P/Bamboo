@@ -12691,7 +12691,17 @@ public final class MobOracle {
      *  vanilla formula and explodes at end of life. Only the rocket ticks; the player's
      *  velocity changes solely through `setDeltaMovement`, matching Bamboo's velocity hook. */
     private static int playFireworkElytra(Official official, Writer out, String only) throws Exception {
-        if (only != null && !"firework_elytra".startsWith(only)) return 0;
+        int cases = 0;
+        for (boolean leftHanded : new boolean[] {false, true}) {
+            String name = leftHanded ? "firework_elytra_left" : "firework_elytra";
+            if (only != null && !name.startsWith(only)) continue;
+            cases += playFireworkElytraOne(official, out, name, leftHanded);
+        }
+        return cases;
+    }
+
+    private static int playFireworkElytraOne(Official official, Writer out, String name,
+            boolean leftHanded) throws Exception {
         FakeLevel level = FakeLevel.create(official);
         ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
         level.nextId = FIRST_ID;
@@ -12717,6 +12727,10 @@ public final class MobOracle {
         player.setYRot(0.0F);
         player.setXRot(0.0F);
         player.setYHeadRot(0.0F);
+        // `Avatar.setMainArm`：左手玩家 `getMainArm()` 返回 LEFT，手持偏移取 -80°。
+        if (leftHanded) {
+            player.setMainArm(net.minecraft.world.entity.HumanoidArm.LEFT);
+        }
         // `LivingEntity.isFallFlying()` 读共享标志位 7；夹具用反射直接置位。
         java.lang.reflect.Method setFlag = net.minecraft.world.entity.Entity.class
                 .getDeclaredMethod("setSharedFlag", int.class, boolean.class);
@@ -12795,11 +12809,12 @@ public final class MobOracle {
                     .append(Block.getId(level.getBlockState(pos))).append(']');
         }
         blocks.append(']');
-        out.write("{\"type\":\"fireworkElytra\",\"name\":\"firework_elytra\""
+        out.write("{\"type\":\"fireworkElytra\",\"name\":" + jsonString(name)
                 + ",\"firstId\":" + FIRST_ID
                 + ",\"playerId\":" + playerId
                 + ",\"start\":[0.5,70.0,0.5],\"delta\":[0.0,0.0,0.0]"
                 + ",\"yaw\":0.0,\"pitch\":0.0"
+                + ",\"leftHanded\":" + leftHanded
                 + ",\"frames\":" + frames
                 + ",\"finalBlocks\":" + blocks + "}\n");
         return 1;

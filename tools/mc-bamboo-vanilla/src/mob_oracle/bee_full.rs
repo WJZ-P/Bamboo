@@ -147,6 +147,7 @@ impl Report {
                     f64::from_bits(p.pos[2] as u64),
                 );
                 PlayerView {
+                    main_arm_right: true,
                     fall_flying: false,
                     shoulder_left: None,
                     shoulder_right: None,

@@ -512,6 +512,12 @@ pub struct PlayerView {
     /// `LivingEntity.isFallFlying()` (shared flag 7): an attached firework boosts
     /// only while the player is still gliding.
     pub fall_flying: bool,
+    /// `Player.getMainArm()`：`true` 是右手、`false` 是左手。附着烟花按它和手持
+    /// 物品算 `getHandHoldingItemAngle` 的 `+80°` / `-80°` 偏移。
+    ///
+    /// `Player.getMainArm()`: `true` for a right main arm, `false` for left. An attached
+    /// firework uses it (and the held items) to pick the `+80°` / `-80°` hand offset.
+    pub main_arm_right: bool,
     pub position: Vec3,
     /// `Entity.getDeltaMovement()`，女巫计算投掷提前量时读它。
     ///

@@ -235,6 +235,7 @@ impl GuardianCase {
                         f64::from_bits(setup.position[2] as u64),
                     );
                     PlayerView {
+                        main_arm_right: true,
                         fall_flying: false,
                         shoulder_left: None,
                         shoulder_right: None,

@@ -61,6 +61,7 @@ impl BeeAiCase {
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: EntityStore::new(),
             players: vec![PlayerView {
+                main_arm_right: true,
                 fall_flying: false,
                 shoulder_left: None,
                 shoulder_right: None,

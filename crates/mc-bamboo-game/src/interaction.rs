@@ -1528,9 +1528,25 @@ pub(crate) fn on_use_item(
         if !fall_flying {
             return;
         }
-        {
+        let effects = {
             let (mut level, ticks) = region.block_level();
             let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            // 官方顺序：`dropAllLeashConnections` → 播 `LEAD_BREAK` → 生成烟花
+            // → `consume` → `awardStat`。剪刀剪结那条路径也用 `drop_all_leashed_to`。
+            //
+            // Official order: `dropAllLeashConnections` → `LEAD_BREAK` sound →
+            // spawn the rocket → `consume` → `awardStat`. The shears path reuses
+            // `drop_all_leashed_to` too.
+            if mc_bamboo_blocks::entity::leash_knot::drop_all_leashed_to(&mut world, id.0) {
+                world.play_sound(
+                    position,
+                    mc_bamboo_data::sound_event("minecraft:item.lead.break"),
+                    mc_bamboo_data::sounds::NEUTRAL,
+                    1.0,
+                    1.0,
+                    false,
+                );
+            }
             world.spawn_firework(&mc_bamboo_blocks::entity::firework_rocket::FireworkShot {
                 position,
                 owner: Some(id.0),
@@ -1540,7 +1556,9 @@ pub(crate) fn on_use_item(
                 attached_to_target: Some(id.0),
                 shoot: None,
             });
-        }
+            world.drain_effects()
+        };
+        send_effects(region, Some(id), &effects);
         crate::item_use_stats::award(region, id, held.item);
         crate::inventory::shrink_held(region, id, hand);
         swing(region, id, hand, InteractionResult::Success);

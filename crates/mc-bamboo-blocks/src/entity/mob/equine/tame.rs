@@ -160,6 +160,7 @@ mod tests {
 
     fn rider() -> crate::entity::ctx::PlayerView {
         crate::entity::ctx::PlayerView {
+            main_arm_right: true,
             fall_flying: false,
             shoulder_left: None,
             shoulder_right: None,
