@@ -14754,8 +14754,19 @@ public final class MobOracle {
             for (int tick = 0; tick <= s.ticks(); tick++) {
                 if (tick > 0) {
                     world.gameTime = 1000L + tick;
+                    // 风弹由 `spawnProjectileUsingShoot` 在上一刻加进 `spawned`，这里照
+                    // 官方的 `EntityTickList` 下一刻再 tick，顺序跟在旋风人后面。
+                    // The wind charge is added to `spawned` the previous tick; tick it a
+                    // tick later, after the breeze, matching the vanilla `EntityTickList`.
+                    java.util.List<Entity> projected = new ArrayList<>(world.spawned);
                     mob.commonTick();
                     mob.tick();
+                    for (Entity spawned : projected) {
+                        if (!spawned.isRemoved()) {
+                            spawned.commonTick();
+                            spawned.tick();
+                        }
+                    }
                 }
                 if (tick > 0) frames.append(',');
                 frames.append("{\"pose\":").append(jsonString(mob.getPose().name()))
