@@ -1301,7 +1301,7 @@ impl MobType {
             Self::TraderLlama => "minecraft:entities/trader_llama",
             // 盔甲架破坏时掉固定物品，不走死亡战利品表。
             // A broken armour stand drops fixed items, not a death loot table.
-            Self::ArmorStand => "",
+            Self::ArmorStand => "minecraft:entities/armor_stand",
         }
     }
 

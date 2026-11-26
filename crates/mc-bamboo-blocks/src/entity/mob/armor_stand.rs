@@ -949,4 +949,55 @@ mod tests {
         let source = DamageSource::player(1, Vec3::default(), false);
         assert!(world.hurt_mob(uid, source, 1.0));
     }
+
+    #[test]
+    fn an_armour_stand_save_skips_mob_and_ageable_keys() {
+        let mut entity = Entity::by_mob_type(MobType::ArmorStand, Vec3::default());
+        entity.with_mob(|_, mob| {
+            mob.armor_stand.set_small(true);
+            mob.armor_stand.disabled_slots = 0x00ff_ffff;
+        });
+        let saved = nbt::write_mob(&entity.split()).expect("an armour stand saves");
+        for key in [
+            "CanPickUpLoot",
+            "PersistenceRequired",
+            "LeftHanded",
+            "NoAI",
+            "drop_chances",
+            "leash",
+            "home_radius",
+            "home_pos",
+            "DeathLootTableSeed",
+            "Age",
+            "ForcedAge",
+            "AgeLocked",
+            "InLove",
+            "LoveCause",
+        ] {
+            assert!(tag::field(&saved, key).is_none(), "unexpected {key}");
+        }
+        // 父类链 `LivingEntity` 无条件写 `Brain`；`ArmorStand` 自己写这些键。
+        // `LivingEntity` always writes `Brain`; `ArmorStand` writes its own keys.
+        for key in [
+            "Brain",
+            "Health",
+            "Invisible",
+            "Small",
+            "ShowArms",
+            "DisabledSlots",
+            "NoBasePlate",
+            "Pose",
+        ] {
+            assert!(tag::field(&saved, key).is_some(), "missing {key}");
+        }
+    }
+
+    #[test]
+    fn an_armour_stand_has_no_brain_and_uses_the_empty_loot_table() {
+        assert!(super::super::new_brain(MobType::ArmorStand).is_none());
+        assert_eq!(
+            MobType::ArmorStand.loot_table(),
+            "minecraft:entities/armor_stand"
+        );
+    }
 }
