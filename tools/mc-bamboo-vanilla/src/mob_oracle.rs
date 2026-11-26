@@ -697,6 +697,11 @@ struct CowSetup {
     /// cow when absent.
     #[serde(default)]
     kind: i32,
+    /// 攻击场景里这头狼的主人是第几名玩家，-1 表示不是驯服狼。
+    ///
+    /// For attack scenes, the player index that owns this tamed wolf; -1 otherwise.
+    #[serde(default = "minus_one")]
+    owner: i32,
     /// 僵尸场景的队伍编号，-1 不在队伍里。
     #[serde(default = "minus_one")]
     team: i32,
@@ -4115,6 +4120,8 @@ impl Report {
                 })
                 .collect(),
             cow_seeds: case.cows.iter().map(|cow| cow.seed).collect(),
+            mob_kinds: case.cows.iter().map(|cow| cow.kind).collect(),
+            mob_owners: case.cows.iter().map(|cow| cow.owner).collect(),
         };
         // 故意改坏：难度缩放、护甲公式（用空装备）、保护附魔等级、
         // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置）、攻击充能值
@@ -4148,6 +4155,8 @@ impl Report {
                 .attack_enchants
                 .retain(|(name, _)| name != "minecraft:density"),
             Some("mace_aoe") => scene.extra_cow_positions.clear(),
+            // 重锤宠物改坏：把驯服狼的主人剥掉，让它重新被范围击退（和官方分叉）。
+            Some("mace_pet") => scene.mob_owners.fill(-1),
             _ => {}
         }
         let output = replay_player_hurt(&scene);

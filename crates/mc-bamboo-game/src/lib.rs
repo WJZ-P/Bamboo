@@ -1262,12 +1262,33 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
                         2.5, 64.0, 0.5,
                     ))),
             ];
-        for &(x, y, z) in &scene.extra_cow_positions {
-            real.push(
-                region
+        for (i, &(x, y, z)) in scene.extra_cow_positions.iter().enumerate() {
+            // `mob_kinds` / `mob_owners` 和 `cow_seeds` 一样按下标对齐：0 是主目标，
+            // 1.. 是额外候选。狼（kind 8）按主人的玩家下标填驯服位和 owner UUID。
+            let index = i + 1;
+            if scene.mob_kinds.get(index).copied().unwrap_or(0) == 8 {
+                let uid = region
                     .entities
-                    .spawn(mc_bamboo_blocks::entity::Entity::cow(Vec3::new(x, y, z))),
-            );
+                    .spawn(mc_bamboo_blocks::entity::Entity::by_mob_type(
+                        mc_bamboo_blocks::entity::mob::MobType::Wolf,
+                        Vec3::new(x, y, z),
+                    ));
+                if scene.mob_owners.get(index).copied().unwrap_or(-1) == 0 {
+                    region.entities.with_mut(uid, |entity| {
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            mob.tame.flags |= mc_bamboo_blocks::entity::mob::tame::FLAG_TAME;
+                            mob.tame.owner = Some(*Uuid::from_u128(1).as_bytes());
+                        }
+                    });
+                }
+                real.push(uid);
+            } else {
+                real.push(
+                    region
+                        .entities
+                        .spawn(mc_bamboo_blocks::entity::Entity::cow(Vec3::new(x, y, z))),
+                );
+            }
         }
         // 官方场景给每头牛设了固定种子；Bamboo 生成时用的是自己的随机源，
         // 这里照官方种子重设，逐刻才能比较受害者随机源的状态。
@@ -1929,6 +1950,15 @@ pub struct ReplayPlayerHurt {
     /// Initial random state of each scene cow, in position order; the official
     /// scene seeds every cow.
     pub cow_seeds: Vec<i64>,
+    /// 每头参战生物的种类（0 牛 / 8 狼），和 [`Self::cow_seeds`] 按下标对齐。
+    ///
+    /// The kind of each scene mob (0 cow / 8 wolf), aligned with [`Self::cow_seeds`].
+    pub mob_kinds: Vec<i32>,
+    /// 每头参战生物的主人玩家下标（-1 表示不是驯服狼），和 [`Self::cow_seeds`] 对齐。
+    ///
+    /// The owning player index of each scene mob (-1 unless a tamed wolf), aligned
+    /// with [`Self::cow_seeds`].
+    pub mob_owners: Vec<i32>,
 }
 
 /// 攻击场景里每头牛的逐刻状态，全部用原始位比较。
