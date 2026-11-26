@@ -24,6 +24,14 @@ pub(crate) struct ItemUseStats {
 }
 
 impl ItemUseStats {
+    /// 增加自定义统计。
+    /// Increment a custom statistic.
+    pub(crate) fn award_custom(&mut self, stat: i32, count: i32) {
+        let (value, dirty) = self.custom.entry(stat).or_default();
+        *value = value.saturating_add(count);
+        *dirty = true;
+    }
+
     #[cfg(feature = "oracle-samples")]
     /// 当前累计值（物品 ID 升序），对拍里比较 `ITEM_USED` 用；不清脏标记。
     ///
@@ -95,8 +103,6 @@ pub(crate) fn award_damage_dealt(region: &mut Region, id: PlayerId, count: i32) 
 /// custom stats; `count` is the increment (`incrementStat` adds 1).
 pub(crate) fn award_custom(region: &mut Region, id: PlayerId, stat: i32, count: i32) {
     if let Some(player) = region.players.get_mut(&id) {
-        let (value, dirty) = player.item_use_stats.custom.entry(stat).or_default();
-        *value = value.saturating_add(count);
-        *dirty = true;
+        player.item_use_stats.award_custom(stat, count);
     }
 }

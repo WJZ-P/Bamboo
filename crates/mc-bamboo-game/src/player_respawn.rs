@@ -125,6 +125,8 @@ pub(crate) fn reset_after_respawn(region: &mut Region, id: PlayerId, keep_invent
         ..PlayerHealth::default()
     };
     player.dead = false;
+    player.sync.set_fall_flying(false);
+    player.fall_fly_ticks = 0;
     player.awaiting_respawn = false;
     player.in_combat = false;
     player.combat_entries.clear();

@@ -27,7 +27,7 @@ use crate::{
     movement::Teleport,
     player_grid::PlayerGrid,
     player_health::PlayerHealth,
-    player_move::Motion,
+    player_move::{FALL_FLYING_BODY, Motion},
     secure_chat::PlayerChat,
     world_state::RespawnData,
 };
@@ -71,6 +71,9 @@ pub(crate) struct Player {
     pub(crate) teleport: Teleport,
     pub(crate) chunks: ChunkTracker,
     pub(crate) sync: EntitySync,
+    /// 连续滑翔的刻数，对应 `LivingEntity.fallFlyTicks`。
+    /// Consecutive gliding ticks, corresponding to `LivingEntity.fallFlyTicks`.
+    pub(crate) fall_fly_ticks: i32,
     pub(crate) prediction: BlockPrediction,
     /// 正在挖哪个方块、挖了多久，官方 `ServerPlayerGameMode` 的那几个字段。
     pub(crate) mining: Mining,
@@ -342,6 +345,7 @@ impl Player {
             on_ground: false,
             motion: Motion::new(position),
             sync: EntitySync::new(position, &client),
+            fall_fly_ticks: 0,
             client,
             teleport: Teleport::default(),
             chunks: ChunkTracker::default(),
@@ -515,21 +519,23 @@ impl Player {
 
     /// 眼睛离脚底多高。
     pub(crate) fn eye_height(&self) -> f64 {
-        if self.sync.is_crouching() {
+        if self.motion.is_fall_flying_pose() {
+            f64::from(0.4_f32)
+        } else if self.sync.is_crouching() {
             CROUCHING_EYE_HEIGHT
         } else {
             STANDING_EYE_HEIGHT
         }
     }
 
-    /// 碰撞盒高，`getBbHeight()`。成年玩家恒 1.8：官方 `getDimensions(Pose)` 只有
-    /// `SLEEPING` 缩成 0.2×0.2，潜行 / 游泳只改眼高、不改碰撞盒。
-    ///
-    /// The box height, `getBbHeight()`. An adult player is always 1.8 tall: vanilla
-    /// `getDimensions(Pose)` shrinks only `SLEEPING` to 0.2×0.2; crouching and
-    /// swimming change the eye height, not the box.
+    /// 实体逻辑使用的玩家高度。滑翔时用 `Avatar.POSES` 的 0.6。
+    /// Player height for entity logic. The glide height is 0.6 from `Avatar.POSES`.
     pub(crate) fn height(&self) -> f32 {
-        STANDING_HEIGHT as f32
+        if self.motion.is_fall_flying_pose() {
+            FALL_FLYING_BODY as f32
+        } else {
+            STANDING_HEIGHT as f32
+        }
     }
 
     /// 实体逻辑看到的玩家视图，对应官方 `Level.players()` 里的一个 `Player`。
@@ -549,7 +555,7 @@ impl Player {
             position: self.position,
             delta: self.motion.delta,
             width: (HALF_WIDTH * 2.0) as f32,
-            height: STANDING_HEIGHT as f32,
+            height: self.height(),
             eye_height: self.eye_height() as f32,
             health: self.health.health,
             look_direction: Vec3::view_vector(self.yaw, self.pitch),
@@ -625,19 +631,21 @@ impl Player {
 
     /// 碰撞盒，世界坐标。
     pub(crate) fn bounding_box(&self) -> Aabb {
-        let height = if self.sync.is_crouching() {
-            CROUCHING_HEIGHT
+        let (half_width, height) = if self.motion.is_fall_flying_pose() {
+            (f64::from(0.3_f32), FALL_FLYING_BODY)
+        } else if self.sync.is_crouching() {
+            (HALF_WIDTH, CROUCHING_HEIGHT)
         } else {
-            STANDING_HEIGHT
+            (HALF_WIDTH, STANDING_HEIGHT)
         };
         let Vec3 { x, y, z } = self.position;
         Aabb::new(
-            x - HALF_WIDTH,
+            x - half_width,
             y,
-            z - HALF_WIDTH,
-            x + HALF_WIDTH,
+            z - half_width,
+            x + half_width,
             y + height,
-            z + HALF_WIDTH,
+            z + half_width,
         )
     }
 }

@@ -477,14 +477,14 @@ Bamboo 世界线程的等价顺序：
 | A6 | `updateAwaitingTeleport()` 为 true → **只更新朝向，丢弃位置**，结束 | **已做**。超过 20 tick 用新 id 重发 |
 | B1 | x、z clamp 到 ±3.0E7，y clamp 到 ±2.0E7，yRot、xRot 做 `wrapDegrees` | **必须** |
 | B2 | 乘客、睡眠的分支 | 不需要 |
-| B3 | 速度检查：`d² - v² > 100 × deltaPackets`（滑翔 300）→ WARN `moved too quickly`，`teleport` 回当前位置，结束。`d²` 是到本 tick 开始时位置（`firstGood`）的距离平方，`v²` 是 `deltaMovement` 长度平方，`deltaPackets` 是本 tick 收到的移动包数，超过 5 按 1 算。由 gamerule `player_movement_check` 控制，默认开，**对创造模式也生效** | **已做**，但上限始终是 100：没有鞘翅 300，游戏规则关不掉，也不跑 `travel` |
+| B3 | 速度检查：`d² - v² > 100 × deltaPackets`（滑翔 300）→ WARN `moved too quickly`，`teleport` 回当前位置，结束。`d²` 是到本 tick 开始时位置（`firstGood`）的距离平方，`v²` 是 `deltaMovement` 长度平方，`deltaPackets` 是本 tick 收到的移动包数，超过 5 按 1 算。由 gamerule `player_movement_check` 控制，默认开，**对创造模式也生效** | **已做**。滑翔的速度检查还受 `elytra_movement_check` 控制 |
 | B4 | 根据 `onGround` 变化推断跳跃（`jumpFromGround`） | **已做**。只改下一次速度检查用的 `deltaMovement`，不结算饥饿 |
 | B5 | 客户端说着地但服务端脚下没东西 → 最多每 200 tick 补发一次脚下的方块（`forceSendPlayerSupportBlocks`） | **以后**，依赖服务端物理 |
 | B6 | `player.move(MoverType.PLAYER, delta)`：服务端用自己的碰撞模拟这段位移 | **已做**。方块碰撞和踏步走 `sweep_movement`，没有实体碰撞和世界边界 |
 | B7 | `moved wrongly`：模拟结果和目标的距离平方 > 0.0625 → `fail = true`。**创造和旁观模式跳过这个判断**。Y 分量恒被置 0（条件 `yDist > -0.5 \|\| yDist < 0.5` 永远成立） | **已做** |
 | B8 | 接受条件：`noPhysics`，或睡眠，或（`!fail` 或原位置已卡在方块里）且 `isEntityCollidingWithAnythingNew` 为 false。否则 `teleport` 回移动前的位置。**后一项对创造模式也生效** | **已做**，只比较方块。睡眠分支没有 |
 | B9 | 接受：`absSnapTo` 写入位置和朝向。`absSnapRotationTo` 还会把 `xRot` clamp 到 ±90，A6 的只更新朝向走的也是它 | **必须** |
-| B10 | 更新 `clientIsFloating`，`tickPlayer` 里连续悬空超过 80 tick（按重力缩放）就踢。`mayfly` 为 true 时恒为 false | **已做**。`allow-flight` 固定为 false。没有漂浮和鞘翅豁免 |
+| B10 | 更新 `clientIsFloating`，`tickPlayer` 里连续悬空超过 80 tick（按重力缩放）就踢。`mayfly` 为 true 时恒为 false | **已做**。漂浮和鞘翅滑翔免悬空检查，`allow-flight` 固定为 false |
 | B11 | `ServerChunkCache.move` → `ChunkMap.move` | **必须**，见第 6 节 |
 | B12 | `setOnGroundWithMovement`、摔落伤害、`knownMovement`、统计、`lastGood` | `on_ground`、水平碰撞标记、摔落距离和 `lastGood` **已做**。伤害、统计和 `knownMovement` 没做 |
 
@@ -535,7 +535,12 @@ Bamboo 世界线程的等价顺序：
 
 收到 `accept_teleportation`：按上表处理。相等且合法时，先放到等待中的位置，再以包里的坐标走一遍 5.1，`on_ground` 和水平碰撞都是 false。
 
-还没接上的官方分支：鞘翅、漂浮、激流、睡觉、骑乘、击退宽限、切维度、单人房主、`player_movement_check` 关闭、`LivingEntity.travel`、实体碰撞、世界边界、`Block.fallOn`、压力板和绊线的 `entityInside`、`forceSendPlayerSupportBlocks`、终末之诗。摔落距离只记录，不扣血。`allow-flight` 没有配置项，按官方默认 false。
+滑翔由服务端推进 `travelFallFlying`，服务端按撞墙前后的水平速度差扣血。
+滑翔落地仍由移动包的 `doCheckFallDamage` 分支按摔落距离计算伤害。
+
+还缺激流、击退宽限、切维度、单人房主、非滑翔的 `LivingEntity.travel`、实体碰撞、
+`Block.fallOn`、压力板和绊线的 `entityInside`、`forceSendPlayerSupportBlocks`、终末之诗等分支。
+`allow-flight` 固定使用官方默认值 false。
 
 区块坐标：`chunk_x = (x.floor() as i32) >> 4`，z 相同。来源：`Entity.setPosRaw`（`Mth.floor`）和 `SectionPos.blockToSectionCoord`。`>>` 是算术右移，所以 `x = -0.5` 落在区块 -1。clamp 之后的值都在 `i32` 范围内。
 

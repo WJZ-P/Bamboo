@@ -303,7 +303,7 @@ pub fn goals(kind: MobType) -> GoalSelector {
         wrap(
             8,
             Goal::LookAtMob {
-                kind: MobType::Guardian,
+                kind: Some(MobType::Guardian),
                 look_distance: 12.0,
                 probability: 0.01,
                 look_at: None,
@@ -844,7 +844,7 @@ mod tests {
         assert!(matches!(
             table[4].goal,
             Goal::LookAtMob {
-                kind: MobType::Guardian,
+                kind: Some(MobType::Guardian),
                 look_distance,
                 probability,
                 ..
