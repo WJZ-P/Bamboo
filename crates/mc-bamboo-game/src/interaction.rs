@@ -1629,8 +1629,11 @@ pub(crate) fn on_interact_entity(
         target.kind,
         mc_bamboo_blocks::entity::KindPublic::LeashKnot { .. }
     );
+    let is_boat = matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Boat(_));
     if target.removed
-        || !(matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) || is_knot)
+        || !(matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
+            || is_knot
+            || is_boat)
     {
         return;
     }
@@ -1649,6 +1652,17 @@ pub(crate) fn on_interact_entity(
         Hand::Main => Hand::Off,
         Hand::Off => Hand::Main,
     };
+    if is_boat {
+        // `AbstractBoat.interact`：`super.interact` 放行后，非潜行且
+        // `outOfControlTicks < 60` 时 `player.startRiding(this)`。
+        if !using_secondary_action {
+            crate::riding::mount(region, id, entity_id);
+            if crate::riding::passengers(region, entity_id).contains(&id.0) {
+                swing(region, id, hand, InteractionResult::Success);
+            }
+        }
+        return;
+    }
     if is_knot {
         // 拴绳结：剪刀剪断绳子，或把玩家 / 结之间的生物转来转去。
         for try_hand in [hand, other] {

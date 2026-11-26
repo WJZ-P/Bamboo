@@ -326,6 +326,63 @@ pub const fn entity_type_for_item(item: i32) -> Option<i32> {
     })
 }
 
+/// 这个船实体类型是不是竹筏（`Raft` / `ChestRaft`，骑乘高度不同）。
+///
+/// Whether this boat entity type is a raft (`Raft` / `ChestRaft`), whose ride
+/// height differs.
+pub const fn is_raft(entity_type: i32) -> bool {
+    use mc_bamboo_data::registries::entity_type as ids;
+    matches!(entity_type, ids::BAMBOO_RAFT | ids::BAMBOO_CHEST_RAFT)
+}
+
+/// 官方 `AbstractBoat.getPassengerAttachmentPoint`：单乘客用 `getSinglePassengerXOffset()`
+/// （普通船 0、运输船 0.15），两名乘客时按下标取 0.2 / -0.6，动物乘客再各加 0.2。
+/// 高度是 `rideHeight(dimensions)`（船 `height/3`、筏 `height*0.8888889`），点
+/// `(0, rideHeight, z)` 绕 `-yRot * 0.017453292f` 旋转。玩家不是动物。
+///
+/// Vanilla `AbstractBoat.getPassengerAttachmentPoint`: a single passenger uses
+/// `getSinglePassengerXOffset()` (0, or 0.15 for chest boats); with two
+/// passengers the index picks 0.2 / -0.6, plus 0.2 for an animal passenger.
+/// The height is `rideHeight(dimensions)` (boat `height/3`, raft
+/// `height*0.8888889`); the point `(0, rideHeight, z)` rotates by
+/// `-yRot * 0.017453292f`. A player is not an animal.
+pub fn passenger_attachment_point(
+    entity_type: i32,
+    yaw: f32,
+    index: usize,
+    passenger_count: usize,
+    passenger_is_animal: bool,
+) -> Vec3 {
+    let mut z = if is_chest(entity_type) {
+        0.15_f32
+    } else {
+        0.0_f32
+    };
+    if passenger_count > 1 {
+        z = if index == 0 { 0.2_f32 } else { -0.6_f32 };
+    }
+    if passenger_is_animal {
+        z += 0.2_f32;
+    }
+    let height = mc_bamboo_data::entity_types::FACTS
+        .get(entity_type as usize)
+        .map_or(0.5625_f32, |facts| facts.height);
+    let ride_height = if is_raft(entity_type) {
+        height * 0.888_888_9_f32
+    } else {
+        height / 3.0_f32
+    };
+    let angle = -yaw * 0.017_453_292_f32;
+    let sin = f64::from(mth::sin(f64::from(angle)));
+    let cos = f64::from(mth::cos(f64::from(angle)));
+    // `Vec3(0, rideHeight, z).yRot(angle)`：x' = z*sin，z' = z*cos。
+    Vec3::new(
+        f64::from(z) * sin,
+        f64::from(ride_height),
+        f64::from(z) * cos,
+    )
+}
+
 /// 船的一刻，`AbstractBoat.tick` 的服务端路径：状态判定、漂浮物理、移动、气泡柱、
 /// 水流和桨动画。玩家控制时位置由客户端 `move_vehicle` 决定，服务端只清速度。
 ///
