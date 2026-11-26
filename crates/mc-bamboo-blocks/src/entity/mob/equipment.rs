@@ -642,7 +642,7 @@ const fn equipment_slot_to_registry(slot: EquipmentSlot) -> i32 {
 }
 
 /// `LivingEntity.getEquipmentSlotForItem`：`equippable` 组件给的槽，没有组件就是主手。
-fn equippable_slot(stack: &ItemStack) -> EquipmentSlot {
+pub(crate) fn equippable_slot(stack: &ItemStack) -> EquipmentSlot {
     equipment_slot_from_registry(mc_bamboo_recipes::equipment_slot_for_item(stack))
 }
 

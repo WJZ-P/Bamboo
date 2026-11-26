@@ -3504,6 +3504,7 @@ impl Report {
                         player_height: 1.8,
                         sneaking: false,
                         difficulty: 2,
+                        hit_pos: None,
                     };
                     let outcome = world.interact_mob(ids[cow as usize], &request);
                     let result = if outcome.result.consumes_action() {

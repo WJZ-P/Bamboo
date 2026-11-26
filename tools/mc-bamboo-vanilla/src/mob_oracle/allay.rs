@@ -360,6 +360,7 @@ impl Report {
                         player_height: 1.8,
                         sneaking: false,
                         difficulty: 2,
+                        hit_pos: None,
                     };
                     let outcome = world.interact_mob(allay_id, &request);
                     if outcome.shrink_held {

@@ -11,11 +11,19 @@
 //! The two-hit wobble and breaking logic lives in the armour-stand branch of
 //! [`super::living::hurt_server`].
 
+use mc_bamboo_core::Vec3;
 use mc_bamboo_nbt::Tag;
+use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
 
-use crate::archive::tag::{self, put};
+use crate::{
+    InteractionResult,
+    archive::tag::{self, put},
+};
 
-use super::Mob;
+use super::{
+    Mob,
+    interact::{MobInteractRequest, MobInteraction},
+};
 
 /// 一个姿势绕三根轴的旋转（度），官方 `net.minecraft.core.Rotations`。
 ///
@@ -236,6 +244,149 @@ impl ArmorStand {
     }
 }
 
+/// 官方 `ArmorStand.interact(Player, InteractionHand, Vec3)`：按物品或点击高度选槽位，
+/// 放上 / 取下 / 交换装备；`DisabledSlots`、标记和无手臂的手槽会挡住交互。
+///
+/// `ArmorStand.interact(Player, InteractionHand, Vec3)`: pick a slot from the item or
+/// the click height, then put on / take off / swap equipment; `DisabledSlots`, the
+/// marker flag and hand slots without arms block it.
+pub fn interact(mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
+    if mob.armor_stand.is_marker() {
+        return MobInteraction::pass();
+    }
+    let held = &req.held;
+    let item_slot = super::equipment::equippable_slot(held);
+    let empty_hand = held.is_empty();
+    let target = if empty_hand {
+        let clicked = clicked_slot(mob, req.hit_pos);
+        // `isDisabled(clicked)` 为真时退回物品槽（空手时是主手）。
+        // When `isDisabled(clicked)` is true vanilla falls back to the item slot.
+        if mob
+            .armor_stand
+            .is_disabled(slot_bit(clicked), is_hand(clicked))
+        {
+            item_slot
+        } else {
+            clicked
+        }
+    } else {
+        if mob
+            .armor_stand
+            .is_disabled(slot_bit(item_slot), is_hand(item_slot))
+            || (is_hand(item_slot) && !mob.armor_stand.show_arms())
+        {
+            let mut out = MobInteraction::pass();
+            out.result = InteractionResult::Fail;
+            return out;
+        }
+        item_slot
+    };
+    // 空手时只有槽里有东西才交换（`hasItemInSlot`）。
+    // With an empty hand vanilla only swaps when the slot holds something.
+    if empty_hand && !has_item(mob, target) {
+        return MobInteraction::pass();
+    }
+    let mut out = MobInteraction::pass();
+    if swap_item(mob, target, held, req.creative, &mut out) {
+        out.result = InteractionResult::SuccessServer;
+        mob.needs_sync = true;
+        return out;
+    }
+    MobInteraction::pass()
+}
+
+const fn slot_bit(slot: EquipmentSlot) -> i32 {
+    slot as i32
+}
+
+const fn is_hand(slot: EquipmentSlot) -> bool {
+    matches!(slot, EquipmentSlot::MainHand | EquipmentSlot::OffHand)
+}
+
+fn has_item(mob: &Mob, slot: EquipmentSlot) -> bool {
+    !mob.equipment.get(slot).is_empty()
+}
+
+/// 官方 `getClickedSlot(Vec3)`：按点击高度（除以尺寸缩放）挑一个已装备的槽。
+///
+/// `getClickedSlot(Vec3)`: pick an equipped slot by the scaled click height.
+fn clicked_slot(mob: &Mob, hit_pos: Option<Vec3>) -> EquipmentSlot {
+    let small = mob.armor_stand.is_small();
+    let scale = if small { 0.5_f64 } else { 1.0 };
+    let y = hit_pos.map_or(0.0, |at| at.y) / scale;
+    let span = |base: f64, small_extra: f64, normal_extra: f64| {
+        (base, base + if small { small_extra } else { normal_extra })
+    };
+    let (lo, hi) = span(0.1, 0.8, 0.45);
+    if y >= lo && y < hi && has_item(mob, EquipmentSlot::Feet) {
+        return EquipmentSlot::Feet;
+    }
+    let (lo, hi) = (
+        0.9 + if small { 0.3 } else { 0.0 },
+        0.9 + if small { 1.0 } else { 0.7 },
+    );
+    if y >= lo && y < hi && has_item(mob, EquipmentSlot::Chest) {
+        return EquipmentSlot::Chest;
+    }
+    let (lo, hi) = span(0.4, 1.0, 0.8);
+    if y >= lo && y < hi && has_item(mob, EquipmentSlot::Legs) {
+        return EquipmentSlot::Legs;
+    }
+    if y >= 1.6 && has_item(mob, EquipmentSlot::Head) {
+        return EquipmentSlot::Head;
+    }
+    if !has_item(mob, EquipmentSlot::MainHand) && has_item(mob, EquipmentSlot::OffHand) {
+        EquipmentSlot::OffHand
+    } else {
+        EquipmentSlot::MainHand
+    }
+}
+
+/// 官方 `ArmorStand.swapItem`：取出/放入禁用位、创造复制、多件拆分、整堆交换。
+///
+/// `ArmorStand.swapItem`: taking/putting disable bits, creative copy, splitting a
+/// stack and swapping the whole held stack.
+fn swap_item(
+    mob: &mut Mob,
+    slot: EquipmentSlot,
+    held: &ItemStack,
+    creative: bool,
+    out: &mut MobInteraction,
+) -> bool {
+    let bit = slot_bit(slot);
+    let in_slot = mob.equipment.get(slot).clone();
+    if !in_slot.is_empty()
+        && mob.armor_stand.disabled_slots & (1 << (bit + DISABLE_TAKING_OFFSET)) != 0
+    {
+        return false;
+    }
+    if in_slot.is_empty()
+        && mob.armor_stand.disabled_slots & (1 << (bit + DISABLE_PUTTING_OFFSET)) != 0
+    {
+        return false;
+    }
+    if creative && in_slot.is_empty() && !held.is_empty() {
+        let mut copy = held.clone();
+        copy.count = 1;
+        mob.equipment.set(slot, copy);
+        return true;
+    }
+    if !held.is_empty() && held.count > 1 && in_slot.is_empty() {
+        let mut copy = held.clone();
+        copy.count = 1;
+        mob.equipment.set(slot, copy);
+        out.shrink_held = true;
+        return true;
+    }
+    mob.equipment.set(slot, held.clone());
+    if in_slot.is_empty() {
+        out.shrink_held = true;
+    } else {
+        out.replacement = Some(in_slot);
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,7 +397,8 @@ mod tests {
             mob::{MobType, nbt},
         },
     };
-    use mc_bamboo_core::Vec3;
+    use mc_bamboo_core::{Hand, Vec3};
+    use mc_bamboo_data::items;
 
     #[test]
     fn dimensions_follow_the_client_flags() {
@@ -327,5 +479,116 @@ mod tests {
         );
         // 标记盔甲架的碰撞盒是 (0, 0)。
         assert_eq!(entity.dimensions, (0.0, 0.0));
+    }
+
+    fn interact_request(
+        held: ItemStack,
+        creative: bool,
+        hit_pos: Option<Vec3>,
+    ) -> MobInteractRequest {
+        MobInteractRequest {
+            player_uid: 1,
+            player_uuid: [0; 16],
+            hand: Hand::Main,
+            held,
+            creative,
+            position: Vec3::default(),
+            player_height: 1.8,
+            sneaking: false,
+            difficulty: 2,
+            hit_pos,
+        }
+    }
+
+    fn armour_stand() -> Entity {
+        Entity::by_mob_type(MobType::ArmorStand, Vec3::default())
+    }
+
+    #[test]
+    fn wearing_a_helmet_goes_to_the_head_slot() {
+        let mut entity = armour_stand();
+        let req = interact_request(ItemStack::new(items::DIAMOND_HELMET, 1), false, None);
+        let outcome = entity
+            .with_mob(|_, mob| interact(mob, &req))
+            .expect("a mob");
+        assert_eq!(outcome.result, InteractionResult::SuccessServer);
+        assert!(outcome.shrink_held);
+        let mob = entity.kind.mob().expect("a mob");
+        assert_eq!(
+            mob.equipment.get(EquipmentSlot::Head).item,
+            items::DIAMOND_HELMET
+        );
+        assert!(mob.needs_sync);
+    }
+
+    #[test]
+    fn taking_off_with_an_empty_hand_returns_the_stack() {
+        let mut entity = armour_stand();
+        entity.with_mob(|_, mob| {
+            mob.equipment.set(
+                EquipmentSlot::Head,
+                ItemStack::new(items::DIAMOND_HELMET, 1),
+            );
+        });
+        // 头部高度（相对实体）选中 HEAD 槽。
+        let req = interact_request(ItemStack::empty(), false, Some(Vec3::new(0.0, 1.7, 0.0)));
+        let outcome = entity
+            .with_mob(|_, mob| interact(mob, &req))
+            .expect("a mob");
+        assert_eq!(outcome.result, InteractionResult::SuccessServer);
+        assert_eq!(
+            outcome.replacement.as_ref().map(|stack| stack.item),
+            Some(items::DIAMOND_HELMET)
+        );
+        let mob = entity.kind.mob().expect("a mob");
+        assert!(mob.equipment.get(EquipmentSlot::Head).is_empty());
+    }
+
+    #[test]
+    fn a_marker_cannot_be_interacted_with() {
+        let mut entity = armour_stand();
+        entity.with_mob(|_, mob| mob.armor_stand.set_marker(true));
+        let req = interact_request(ItemStack::new(items::DIAMOND_HELMET, 1), false, None);
+        let outcome = entity
+            .with_mob(|_, mob| interact(mob, &req))
+            .expect("a mob");
+        assert_eq!(outcome.result, InteractionResult::Pass);
+    }
+
+    #[test]
+    fn a_hand_slot_without_arms_fails() {
+        let mut entity = armour_stand();
+        // 木棍没有 `equippable` 组件，落到 MAINHAND（手槽），无手臂时失败。
+        let req = interact_request(ItemStack::new(items::STICK, 1), false, None);
+        let outcome = entity
+            .with_mob(|_, mob| interact(mob, &req))
+            .expect("a mob");
+        assert_eq!(outcome.result, InteractionResult::Fail);
+    }
+
+    #[test]
+    fn disabled_slots_block_wearing() {
+        let mut entity = armour_stand();
+        // HEAD 的 `getFilterBit(0)` = 5。
+        entity.with_mob(|_, mob| mob.armor_stand.disabled_slots |= 1 << 5);
+        let req = interact_request(ItemStack::new(items::DIAMOND_HELMET, 1), false, None);
+        let outcome = entity
+            .with_mob(|_, mob| interact(mob, &req))
+            .expect("a mob");
+        assert_eq!(outcome.result, InteractionResult::Fail);
+    }
+
+    #[test]
+    fn creative_copies_one_without_consuming() {
+        let mut entity = armour_stand();
+        let req = interact_request(ItemStack::new(items::DIAMOND_HELMET, 3), true, None);
+        let outcome = entity
+            .with_mob(|_, mob| interact(mob, &req))
+            .expect("a mob");
+        assert_eq!(outcome.result, InteractionResult::SuccessServer);
+        assert!(!outcome.shrink_held);
+        assert!(outcome.replacement.is_none());
+        let mob = entity.kind.mob().expect("a mob");
+        assert_eq!(mob.equipment.get(EquipmentSlot::Head).count, 1);
     }
 }

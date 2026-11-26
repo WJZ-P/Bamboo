@@ -244,6 +244,7 @@ fn do_interact(world: &mut mc_bamboo_blocks::World<'_>, id: i32, item: i32, play
         player_height: 1.8,
         sneaking: false,
         difficulty: 2,
+        hit_pos: None,
     };
     let _ = world.interact_mob(id, &request);
 }

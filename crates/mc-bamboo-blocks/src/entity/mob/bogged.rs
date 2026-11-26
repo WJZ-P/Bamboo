@@ -96,6 +96,7 @@ mod tests {
             player_height: 1.8,
             sneaking: false,
             difficulty: 2,
+            hit_pos: None,
             position: Vec3::new(1.5, 64.0, 0.5),
         }
     }

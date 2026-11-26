@@ -102,6 +102,7 @@ pub fn replay_pig_mount(setup: i32, item: i32, sneak: bool, seed: i64) -> Replay
         player_height: 1.8,
         sneaking: sneak,
         difficulty: 2,
+        hit_pos: None,
     };
     let outcome = region
         .entities

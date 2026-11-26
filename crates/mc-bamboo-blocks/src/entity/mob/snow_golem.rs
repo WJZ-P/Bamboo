@@ -314,6 +314,7 @@ mod tests {
             player_height: 1.8,
             sneaking: false,
             difficulty: 2,
+            hit_pos: None,
             position: Vec3::new(0.0, 64.0, 0.0),
         };
         let outcome = interact(&mob, &req);

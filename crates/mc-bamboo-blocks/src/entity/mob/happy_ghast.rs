@@ -1375,6 +1375,7 @@ mod tests {
             player_height: 1.8,
             sneaking: false,
             difficulty: 2,
+            hit_pos: None,
         };
         let outcome = entity
             .with_mob(|me, mob| interact(me, mob, &request, &mut || 0.0))

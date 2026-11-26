@@ -1676,6 +1676,7 @@ pub(crate) fn on_interact_entity(
             player_height,
             sneaking: using_secondary_action,
             difficulty: region.global.difficulty as i32,
+            hit_pos: None,
         };
         // 剪刀在交互里扣耐久，所以交互期间把玩家的手交给方块逻辑。
         // Shears lose durability inside the interaction, so lend the hands to block logic.

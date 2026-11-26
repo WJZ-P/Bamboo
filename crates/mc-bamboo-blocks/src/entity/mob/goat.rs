@@ -1653,6 +1653,7 @@ mod tests {
             player_height: 1.8,
             sneaking: false,
             difficulty: 2,
+            hit_pos: None,
         };
         let fed = |creative: bool| MobInteraction {
             duplicate_allay: false,
