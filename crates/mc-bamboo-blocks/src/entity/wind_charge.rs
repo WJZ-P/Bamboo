@@ -15,6 +15,20 @@ use super::{
 };
 use crate::World;
 
+thread_local! {
+    static NO_MARGIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 由 `mob-oracle` 按 `--break-self-test breeze_margin` 设置，其他驱动不调用。
+/// 为真时 `find_hit` 不给实体盒加 `computeMargin` 膨胀（复刻修复前的旧行为）。
+///
+/// Set by `mob-oracle` from `--break-self-test breeze_margin`; no other driver calls
+/// this. When true, `find_hit` does not inflate the entity box by `computeMargin` (the
+/// pre-fix behaviour).
+pub fn set_oracle_no_margin(value: bool) {
+    NO_MARGIN.with(|cell| cell.set(value));
+}
+
 /// `WindCharge.RADIUS` / `BreezeWindCharge.RADIUS`。
 pub const PLAYER_RADIUS: f32 = 1.2;
 pub const BREEZE_RADIUS: f32 = 3.0;
@@ -247,7 +261,11 @@ fn find_hit(me: &Entity, ctx: &dyn EntityCtx, movement: Vec3) -> Option<WindChar
         .bounding_box()
         .expanded_towards(movement.x, movement.y, movement.z)
         .inflated(1.0);
-    let margin = f64::from(((me.tick_count - 2) as f32 / 20.0).clamp(0.0, 0.3));
+    let margin = if NO_MARGIN.with(|cell| cell.get()) {
+        0.0
+    } else {
+        f64::from(((me.tick_count - 2) as f32 / 20.0).clamp(0.0, 0.3))
+    };
     let mut best: Option<(f64, Vec3, EntityUid, bool)> = None;
     let mut consider = |uid: EntityUid, bb: Aabb, player: bool| {
         let Some(location) = clip_entity(bb.inflated(margin), from, to) else {

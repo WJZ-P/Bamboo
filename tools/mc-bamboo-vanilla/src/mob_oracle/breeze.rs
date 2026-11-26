@@ -106,6 +106,7 @@ impl Report {
         let _ = case.level_seed;
         let broken = self.break_test.clone();
         let broken = broken.as_deref();
+        mc_bamboo_blocks::entity::wind_charge::set_oracle_no_margin(broken == Some("breeze_margin"));
         let mut level = mob_level(case);
         let mut ticks = BlockTicks::default();
         ticks.set_time(case.start_time);
