@@ -877,6 +877,9 @@ pub(super) fn check_spawn_rules(
         }
         // 嘎枝不在群系刷怪表里；心用 `SpawnUtil` 的落点规则单独刷出。
         MobType::Creaking => true,
+        // 凋灵只由头颅图案召唤，不在群系刷怪表里。
+        // The wither is only summoned by the skull pattern, not a biome spawn table.
+        MobType::Wither => true,
     }
 }
 
