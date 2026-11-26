@@ -14733,6 +14733,13 @@ public final class MobOracle {
             mob.setYHeadRot(0.0F);
             mob.setYBodyRot(0.0F);
             setRandom(mob, 5L);
+            // Bamboo 的 `prepare_entity` 给旋风人也从实体种子源抽了一次种子（随后被
+            // `mob_seed` 覆盖），所以这里同样消耗一次，让后面风弹拿到的种子和 Bamboo
+            // 一致。
+            // Bamboo's `prepare_entity` draws one seed for the breeze too (later
+            // overwritten by `mob_seed`); consume the same draw here so the wind charge
+            // gets the same seed as Bamboo.
+            world.entitySeeds.nextLong();
             BrainOracle.fixSensorDelays(mob, 1L);
             BrainOracle.reseedShuffles(mob, randomSeed(mob));
             world.tracked.add(mob);
@@ -22688,6 +22695,34 @@ public final class MobOracle {
                 entity.setUUID(Mth.createInsecureUUID(random));
                 random.nextFloat();
                 eggSeed = null;
+            }
+            // 风弹由 `Shoot.tick` 用 `spawnProjectileUsingShoot` 发射：先 `shoot`（散布
+            // 取数）再 `addFreshEntity`，官方实体的随机源不带种子，散布就不可复现。
+            // 这里照 Bamboo `spawn_wind_charge_shot` → `prepare_entity` 换种并重放
+            // `shoot`：Bamboo 对风弹**不抽 UUID**（`prepare` 只对箭/羊驼口水/鸡蛋/
+            // 喷溅药水抽），所以这边也只换种、不重抽 UUID，散布的随机数状态和
+            // Bamboo 一致；`dx/dy/dz` 照 `Shoot.tick` 的原公式从 `ATTACK_TARGET` 重算，
+            // 同一刻里旋风人和目标都没动过，输入一模一样。
+            // `Shoot.tick` fires a wind charge through `spawnProjectileUsingShoot`:
+            // `shoot` (the spread draws) runs before `addFreshEntity`, and vanilla's
+            // unseeded random makes the spread non-reproducible. Re-seed it and replay
+            // `shoot` like Bamboo's `prepare_entity` (which draws no UUID for the wind
+            // charge, only for arrows / llama spit / eggs / splash potions), keeping the
+            // spread's random state aligned; `dx/dy/dz` reuse `Shoot.tick`'s formula from
+            // `ATTACK_TARGET`, whose inputs are unchanged since `lookAt` only rotates.
+            if (entity instanceof net.minecraft.world.entity.projectile.hurtingprojectile.windcharge.BreezeWindCharge charge
+                    && charge.getOwner() instanceof net.minecraft.world.entity.monster.breeze.Breeze breeze) {
+                net.minecraft.world.entity.LivingEntity target = breeze.getBrain()
+                        .getMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.ATTACK_TARGET)
+                        .orElse(null);
+                if (target != null) {
+                    setRandom(charge, entitySeeds.nextLong());
+                    double dx = target.getX() - breeze.getX();
+                    double dy = target.getY(target.isPassenger() ? 0.8 : 0.3)
+                            - breeze.getFiringYPosition();
+                    double dz = target.getZ() - breeze.getZ();
+                    charge.shoot(dx, dy, dz, 0.7F, 5 - getDifficulty().getId() * 4);
+                }
             }
             if (entity instanceof Animal calf && dropUuids) {
                 newbornCows.add(calf);
