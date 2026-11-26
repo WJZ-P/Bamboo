@@ -398,7 +398,7 @@ fn spawn_fangs(
                     crate::shape::collision_boxes(state, pos, crate::CollisionContext::Empty);
                 if let Some(bb) = boxes
                     .iter()
-                    .max_by(|a, b| a.max_y.partial_cmp(&b.max_y).unwrap())
+                    .max_by(|a, b| a.max_y.total_cmp(&b.max_y))
                 {
                     offset = bb.max_y - f64::from(pos.y);
                 }
