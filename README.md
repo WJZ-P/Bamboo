@@ -1562,6 +1562,28 @@ WebView2 的渲染进程不算在内。
   `canTargetEntity` 里盔甲架 / 同队这几项过滤（Bamboo 还没有盔甲架生物、生物不加入队伍）、
   生物碰撞推挤别的实体（`Entity.pushEntities` 那一套物理推挤）还没建模——推挤只改速度、
   不归到击退对拍里；声音事件由同步层发出，音效参数不逐位对拍。
+- **凋灵（本轮接入，部分完成）**：`MobType::Wither` 注册进类型表（`ALL` 74 种），属性照 `WitherBoss.createAttributes`
+  （300 血 / 0.6 移速与飞行速度 / 40 跟随 / 4 护甲）、尺寸 0.9×3.5、50 经验、`Invul` 存档键往返。
+  **召唤**照 `WitherSkullBlock.checkSpawn`：玩家放下凋灵骷髅头时用 `CarvedPumpkinBlock.clearPatternBlocks`
+  那套 `BlockPattern` 检测灵魂沙 / 灵魂土 T 形加三个头的图案（`^^^` / `###` / `~#~`），清 9 格发 2001 事件、
+  更新邻居，按 `forwards` 轴摆位置和身体朝向、调 `makeInvulnerable`（220 刻无敌、血量 100、血条清零），
+  给 50 格内玩家触发 `SUMMONED_ENTITY`；和平难度或高度不够不召唤。**实体行为**：`customServerAiStep`
+  里无敌期每刻递减 `Invul`、每 10 刻回 10 血、进度按 `1 - invul/220` 推进，归零时以眼高为心发 7 格 `MOB` 爆炸
+  并广播 1023 号事件；之后按 `destroyBlocksTick` 扫包围盒内非 `#wither_immune` 方块逐格 `destroyBlock` 发 1022 事件、
+  每 20 刻回 1 血、血条进度按血量比更新。`aiStep` 接上追主目标的飞行速度和两个侧头朝 `DATA_TARGET_B/C`
+  的折角插值（`rotlerp`）。`hurtServer` 挡下无敌期、溺水（`#wither_immune_to`）、另一个凋灵、
+  `#wither_friends`（`#undead`）的伤害，半血（`isPowered`）时箭 / 风弹被弹开，放行前设 `destroyBlocksTick=20`、
+  `idleHeadUpdates` 各加 3。死亡掉下界之星，并实现 `LivingEntity.createWitherRose`（被凋灵杀死的生物种下或掉落凋灵玫瑰）。
+  **验证**：`cargo test -p mc-bamboo-blocks -p mc-bamboo-game`、`cargo clippy --workspace --all-targets`、
+  `cargo fmt --all --check` 全过；`mob-oracle java --show 2000` 仍是 267 处已知末位差（无凋灵相关差异），
+  `entity-oracle` / `player-data` / `chunk-content` 三个 Java 对拍全过。
+  **已知限制（本轮未做）**：`goalSelector` / `targetSelector` 还没注册（`WitherDoNothingGoal`、`RangedAttackGoal`、
+  `WaterAvoidingRandomFlyingGoal`、看玩家、`HurtByTargetGoal`、`NearestAttackableTargetGoal` 都缺），
+  凋灵不会主动移动 / 索敌；`WitherSkull` 凋灵之首射弹实体、三个头的 `performRangedAttack`（普通 / 蓝色危险、
+  命中加凋零效果、蓝色破方块）和侧头 idle / 索敌射击都未建模，凋灵目前不会攻击；`ServerBossEvent`
+  只在状态里记进度，没给跟踪范围内玩家发 add / remove / update 网络包；`aiStep` 粒子的实体随机源消耗、
+  1023 的 global（而非 local）广播、玫瑰物品掉落坐标是近似；**没有新增逐刻对拍场景，也没有 4 处改坏确认**——
+  召唤 / 无敌期 / 爆炸 / 射凋灵之首 / 半血弹箭 / 破坏方块 / 存档往返的官方逐刻对拍留待下一步。
 - 正版验证的限制：`server.properties` 的 `online-mode` 官方默认 true，命令行版和桌面端都读同一份文件、
   设置页里可以改；`ServerConfig::default()`（不读配置文件的嵌入用法）是 false。
   和代理转发互斥：打开转发时正版验证会被关掉，因为代理已经替服务端验过了。
