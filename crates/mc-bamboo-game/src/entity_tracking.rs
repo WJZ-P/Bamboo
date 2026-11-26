@@ -580,13 +580,11 @@ impl TrackedEntity {
                     entity_types::ARROW_COLOR => EntityData::ArrowColor(-1),
                     _ => continue,
                 },
-                None if before.is_some() => default_data_for_type(
-                    index,
-                    match &snapshot.data {
-                        KindData::Mob(mob) => mob.mob_type,
-                        _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
-                    },
-                ),
+                None if before.is_some() => match &snapshot.data {
+                    KindData::Boat(_) => boat_default_data(index),
+                    KindData::Mob(mob) => default_data_for_type(index, mob.mob_type),
+                    _ => default_data_for_type(index, mc_bamboo_blocks::entity::mob::MobType::Cow),
+                },
                 _ => continue,
             };
             out.push(item);
@@ -1081,12 +1079,35 @@ impl KindData {
             | Self::LlamaSpit(_)
             | Self::LightningBolt
             | Self::WindCharge(_)
-            | Self::Boat(_)
             | Self::LeashKnot => Vec::new(),
             Self::OminousItemSpawner(stack) if !stack.is_empty() => {
                 vec![EntityData::Item(stack.clone())]
             }
             Self::OminousItemSpawner(_) => Vec::new(),
+            Self::Boat(boat) => {
+                // `VehicleEntity` / `AbstractBoat.defineSynchedData` 的默认值：
+                // HURT=0、HURTDIR=1、DAMAGE=0、左右桨=false、BUBBLE_TIME=0。
+                let mut data = Vec::new();
+                if boat.hurt_time != 0 {
+                    data.push(EntityData::BoatHurtTime(boat.hurt_time));
+                }
+                if boat.hurt_dir != 1 {
+                    data.push(EntityData::BoatHurtDir(boat.hurt_dir));
+                }
+                if boat.damage != 0.0 {
+                    data.push(EntityData::BoatDamage(boat.damage));
+                }
+                if boat.paddle_left {
+                    data.push(EntityData::BoatPaddleLeft(true));
+                }
+                if boat.paddle_right {
+                    data.push(EntityData::BoatPaddleRight(true));
+                }
+                if boat.bubble_time != 0 {
+                    data.push(EntityData::BoatBubbleTime(boat.bubble_time));
+                }
+                data
+            }
             Self::FireworkRocket(firework) => {
                 let mut data = Vec::new();
                 if !firework.item.is_empty() {
@@ -1172,6 +1193,22 @@ impl KindData {
                 data
             }
         }
+    }
+}
+
+/// 船某一项元数据从非默认变回默认时要发的值（官方 `defineSynchedData` 的默认值）。
+///
+/// The default to send when a boat metadata entry returns to its default.
+fn boat_default_data(index: u8) -> EntityData {
+    match index {
+        8 => EntityData::BoatHurtTime(0),
+        9 => EntityData::BoatHurtDir(1),
+        10 => EntityData::BoatDamage(0.0),
+        11 => EntityData::BoatPaddleLeft(false),
+        12 => EntityData::BoatPaddleRight(false),
+        13 => EntityData::BoatBubbleTime(0),
+        // 船不会产生别的 index；给一个无害的兜底。
+        _ => EntityData::BoatHurtTime(0),
     }
 }
 

@@ -905,6 +905,27 @@ pub(crate) fn tick(region: &mut Region) {
     );
 }
 
+/// `ServerboundPaddleBoatPacket`：把左右桨状态写到玩家骑的船上。同步层按
+/// `pairing_values` 的前后帧 diff 把变化发给观察者。
+///
+/// `ServerboundPaddleBoatPacket`: write the left/right paddle state onto the
+/// player's boat. The sync layer sends the change via its metadata diff.
+pub(crate) fn set_paddle(region: &mut Region, id: PlayerId, left: bool, right: bool) {
+    let Some(vehicle) = region
+        .players
+        .get(&id)
+        .and_then(|player| player.riding.vehicle)
+    else {
+        return;
+    };
+    region.entities.with_mut(vehicle, |entity| {
+        if let EntityKind::Boat(boat) = &mut entity.kind {
+            boat.paddle_left = left;
+            boat.paddle_right = right;
+        }
+    });
+}
+
 /// 官方 `getControllingPassenger() == player`：载具上了鞍，猪还要求这名玩家是第一位乘客、
 /// 任一只手拿着胡萝卜钓竿。
 ///

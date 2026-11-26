@@ -3096,8 +3096,8 @@ impl World {
                 pitch,
                 on_ground,
             } => crate::riding::on_move_vehicle(region, player, position, yaw, pitch, on_ground),
-            PlayRequest::PaddleBoat { .. } => {
-                // 左右桨状态由骑乘层写入对应船实体的同步数据。
+            PlayRequest::PaddleBoat { left, right } => {
+                crate::riding::set_paddle(region, player, left, right);
             }
             PlayRequest::PlayerAbilities { flags } => {
                 entity_sync::on_player_abilities(region, player, flags);

@@ -170,6 +170,18 @@ pub enum EntityData {
     ///
     /// index 10, BOOLEAN. Whether the firework rocket was shot at an angle.
     FireworksShotAtAngle(bool),
+    /// index 8，INT。`VehicleEntity.DATA_ID_HURT`（船的受伤时间）。
+    BoatHurtTime(i32),
+    /// index 9，INT。`VehicleEntity.DATA_ID_HURTDIR`（船的受伤方向，默认 1）。
+    BoatHurtDir(i32),
+    /// index 10，FLOAT。`VehicleEntity.DATA_ID_DAMAGE`（船的累计伤害）。
+    BoatDamage(f32),
+    /// index 11，BOOLEAN。`AbstractBoat.DATA_ID_PADDLE_LEFT`。
+    BoatPaddleLeft(bool),
+    /// index 12，BOOLEAN。`AbstractBoat.DATA_ID_PADDLE_RIGHT`。
+    BoatPaddleRight(bool),
+    /// index 13，INT。`AbstractBoat.DATA_ID_BUBBLE_TIME`。
+    BoatBubbleTime(i32),
     /// index 8，BLOCK_POS。下落的方块从哪一格掉下来。
     FallingBlockStart(BlockPos),
     /// index 8，INT。点燃的 TNT 还剩多少 tick 爆炸。
@@ -579,6 +591,12 @@ impl EntityData {
             Self::NoGravity(_) => 5,
             Self::Pose(_) => 6,
             Self::TicksFrozen(_) => 7,
+            Self::BoatHurtTime(_) => 8,
+            Self::BoatHurtDir(_) => 9,
+            Self::BoatDamage(_) => 10,
+            Self::BoatPaddleLeft(_) => 11,
+            Self::BoatPaddleRight(_) => 12,
+            Self::BoatBubbleTime(_) => 13,
             Self::Item(_)
             | Self::FallingBlockStart(_)
             | Self::TntFuse(_)
@@ -776,6 +794,18 @@ impl EntityData {
                 if let Some(uuid) = uuid {
                     out.extend_from_slice(uuid);
                 }
+            }
+            Self::BoatHurtTime(value) | Self::BoatHurtDir(value) | Self::BoatBubbleTime(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::BoatDamage(value) => {
+                write_data_header(out, self.index(), SERIALIZER_FLOAT);
+                write_f32(out, *value);
+            }
+            Self::BoatPaddleLeft(value) | Self::BoatPaddleRight(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
             }
             Self::ArrowFlags(value) | Self::TridentLoyalty(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
