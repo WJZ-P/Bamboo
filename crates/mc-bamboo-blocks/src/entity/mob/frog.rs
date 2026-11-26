@@ -1007,6 +1007,7 @@ fn follow_temptation() -> Kind {
         speed: Speed::fixed(1.25),
         close_adult: 2.5,
         close_baby: 2.5,
+        look_in_eyes: false,
     }
 }
 
@@ -1067,7 +1068,14 @@ fn idle_activity() -> ActivityData {
                 Kind::Gate(Box::new(Gate::run_one(
                     vec![(WalkTarget, ValueAbsent)],
                     vec![
-                        (Kind::RandomStroll { speed: 1.0 }, 1),
+                        (
+                            Kind::RandomStroll {
+                                speed: 1.0,
+                                horizontal: 10,
+                                vertical: 7,
+                            },
+                            1,
+                        ),
                         (walk_target_from_look(1.0), 1),
                         (Kind::Frog(Behavior::Croak { counter: 0 }), 3),
                         (Kind::TriggerIf(Trigger::OnGround), 2),
@@ -1104,7 +1112,14 @@ fn swim_activity() -> ActivityData {
                     vec![(WalkTarget, ValueAbsent)],
                     vec![
                         (Kind::Frog(Behavior::SwimStroll { speed: 0.75 }), 1),
-                        (Kind::RandomStroll { speed: 1.0 }, 1),
+                        (
+                            Kind::RandomStroll {
+                                speed: 1.0,
+                                horizontal: 10,
+                                vertical: 7,
+                            },
+                            1,
+                        ),
                         (walk_target_from_look(1.0), 1),
                         (Kind::TriggerIf(Trigger::InWater), 5),
                     ],
@@ -1135,7 +1150,14 @@ fn lay_spawn_activity() -> ActivityData {
                 Kind::Gate(Box::new(Gate::run_one(
                     Vec::new(),
                     vec![
-                        (Kind::RandomStroll { speed: 1.0 }, 2),
+                        (
+                            Kind::RandomStroll {
+                                speed: 1.0,
+                                horizontal: 10,
+                                vertical: 7,
+                            },
+                            2,
+                        ),
                         (walk_target_from_look(1.0), 1),
                         (Kind::Frog(Behavior::Croak { counter: 0 }), 2),
                         (Kind::TriggerIf(Trigger::OnGround), 1),

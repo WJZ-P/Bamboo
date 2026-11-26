@@ -159,7 +159,9 @@ fn value_of(kind: MemoryType, raw: &Tag) -> Option<MemoryValue> {
             }
             Some(MemoryValue::Uuid(uuid))
         }
-        MemoryType::SnifferExploredPositions => {
+        MemoryType::SnifferExploredPositions
+        | MemoryType::VisitedBlockPositions
+        | MemoryType::UnreachableTransportBlockPositions => {
             let Tag::List(entries) = raw else {
                 return None;
             };
@@ -356,4 +358,53 @@ mod tests {
         );
         assert!(!loaded.memories.has(MemoryType::SnifferDigging));
     }
+}
+
+/// 铜傀儡的两处搬运位置集合按 `GlobalPos.CODEC.listOf()` 写盘、带 `ttl` 读回。
+#[test]
+fn copper_golem_transport_memories_round_trip() {
+    use crate::entity::mob::copper_golem;
+
+    let mut brain = copper_golem::brain();
+    let pos = GlobalPos {
+        dimension: "minecraft:overworld".to_owned(),
+        pos: BlockPos::new(3, 63, 0),
+    };
+    brain.memories.set_with_ttl(
+        MemoryType::VisitedBlockPositions,
+        MemoryValue::GlobalPosList(vec![pos.clone()]),
+        6000,
+    );
+    brain.memories.set_with_ttl(
+        MemoryType::UnreachableTransportBlockPositions,
+        MemoryValue::GlobalPosList(vec![pos.clone()]),
+        6000,
+    );
+    brain.memories.set(
+        MemoryType::TransportItemsCooldownTicks,
+        MemoryValue::Int(140),
+    );
+    let saved = write(Some(&brain));
+    let mut loaded = copper_golem::brain();
+    read(&mut loaded, &saved);
+    assert_eq!(
+        loaded
+            .memories
+            .global_pos_list(MemoryType::VisitedBlockPositions),
+        Some(&[pos.clone()][..])
+    );
+    assert_eq!(
+        loaded
+            .memories
+            .global_pos_list(MemoryType::UnreachableTransportBlockPositions),
+        Some(&[pos][..])
+    );
+    assert_eq!(
+        loaded
+            .memories
+            .time_until_expiry(MemoryType::VisitedBlockPositions),
+        6000
+    );
+    // 无编解码器的搬运冷却不进存档。
+    assert!(!loaded.memories.has(MemoryType::TransportItemsCooldownTicks));
 }

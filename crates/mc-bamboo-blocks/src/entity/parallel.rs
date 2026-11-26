@@ -606,6 +606,24 @@ impl BlockView for ParallelBlockView<'_> {
         self.inner.beehives_near(center, radius)
     }
 
+    fn container_open_count(&self, pos: BlockPos) -> i32 {
+        self.inner.container_open_count(pos)
+    }
+
+    fn container_slots(&self, pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.inner.container_slots(pos)
+    }
+
+    fn container_positions_in(
+        &self,
+        center: BlockPos,
+        horizontal: i32,
+        vertical: i32,
+    ) -> Vec<BlockPos> {
+        self.inner
+            .container_positions_in(center, horizontal, vertical)
+    }
+
     fn bees_stay_in_hive(&self, pos: BlockPos) -> bool {
         self.inner.bees_stay_in_hive(pos)
     }

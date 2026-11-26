@@ -29,6 +29,7 @@ use crate::{interaction::send_effects, region::Region};
 
 /// 对拍改坏开关：故意做错一处，确认后处理对拍会报出来。
 /// Oracle break switches: corrupt one step on purpose so the oracle must report it.
+#[cfg(feature = "oracle-samples")]
 #[doc(hidden)]
 pub mod oracle_break {
     use std::sync::atomic::{AtomicU8, Ordering};
@@ -85,6 +86,7 @@ pub(crate) fn prepare_ticking_chunks(region: &mut Region) {
     if pending.is_empty() {
         return;
     }
+    #[cfg(feature = "oracle-samples")]
     let broken = oracle_break::current();
     for pos in pending {
         if region.chunks.is_loaded(pos) {
@@ -98,6 +100,7 @@ pub(crate) fn prepare_ticking_chunks(region: &mut Region) {
                     let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
                     for (x, y, z) in marks {
                         let at = BlockPos::new(x, y, z);
+                        #[cfg(feature = "oracle-samples")]
                         if broken == Some(oracle_break::PostProcessBreak::SkipFluid)
                             && !world.block_state(at).fluid().is_empty()
                         {
@@ -108,7 +111,11 @@ pub(crate) fn prepare_ticking_chunks(region: &mut Region) {
                     world.into_effects()
                 };
                 send_effects(region, None, &effects);
-                if broken != Some(oracle_break::PostProcessBreak::KeepTable) {
+                #[cfg(feature = "oracle-samples")]
+                let keep_table = broken == Some(oracle_break::PostProcessBreak::KeepTable);
+                #[cfg(not(feature = "oracle-samples"))]
+                let keep_table = false;
+                if !keep_table {
                     region.chunks.clear_post_processing(pos);
                 }
             }
@@ -120,5 +127,12 @@ pub(crate) fn prepare_ticking_chunks(region: &mut Region) {
 /// 改坏开关「不等处理就可发送」是否打开。
 /// Whether the "send before processing" break is on.
 pub(crate) fn send_early() -> bool {
-    oracle_break::current() == Some(oracle_break::PostProcessBreak::SendEarly)
+    #[cfg(feature = "oracle-samples")]
+    {
+        oracle_break::current() == Some(oracle_break::PostProcessBreak::SendEarly)
+    }
+    #[cfg(not(feature = "oracle-samples"))]
+    {
+        false
+    }
 }

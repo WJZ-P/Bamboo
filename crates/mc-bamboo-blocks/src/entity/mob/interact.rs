@@ -119,6 +119,12 @@ pub struct MobInteraction {
     pub entity_event: Option<u8>,
     /// `Allay.mobInteract` 空手取回物品时把背包里剩下的全部扔出来。
     pub thrown_stacks: Vec<ItemStack>,
+    /// `level.levelEvent(this, event, pos, data)`：调用方发世界事件包让客户端播粒子
+    /// （铜傀儡打蜡 3003 / 去蜡 3004 / 刮锈 3005）。
+    ///
+    /// World events emitted by `levelEvent`: the caller sends the packet so clients
+    /// play particles (copper golem waxing 3003 / unwaxing 3004 / scraping 3005).
+    pub level_events: Vec<(i32, mc_bamboo_core::BlockPos, i32)>,
 }
 
 impl MobInteraction {
@@ -143,6 +149,7 @@ impl MobInteraction {
             duplicate_allay: false,
             entity_event: None,
             thrown_stacks: Vec::new(),
+            level_events: Vec::new(),
         }
     }
 }
@@ -336,6 +343,9 @@ pub fn interact(
     if mob.mob_type == MobType::SnowGolem {
         return super::snow_golem::interact(mob, req);
     }
+    if mob.mob_type == MobType::CopperGolem {
+        return super::copper_golem::interact(me, mob, req);
+    }
     if mob.mob_type == MobType::Sniffer {
         // `Sniffer.mobInteract`：先走 `Animal.mobInteract`，吃的是 `#sniffer_food` 且
         // 真的消费了，就再放一次吃食声。
@@ -347,6 +357,9 @@ pub fn interact(
             sniffer_eat_sound(me, mob, level_next_float);
         }
         return outcome;
+    }
+    if mob.mob_type == MobType::HappyGhast {
+        return super::happy_ghast::interact(me, mob, req, level_next_float);
     }
     animal_interact(me, mob, req, level_next_float)
 }
@@ -420,6 +433,17 @@ pub fn leash_interact(
             damage_held: true,
             ..MobInteraction::pass()
         });
+    }
+    // `Mob.attemptToShearEquipment`：可剪下的 BODY 装备（挽具）。官方在
+    // `Entity.interact` 的拴绳剪断之后、`mobInteract` 之前处理。
+    // `Mob.attemptToShearEquipment`: a shearable BODY item (harness). Vanilla
+    // handles it after the leash shear and before `mobInteract`.
+    if req.held.item == items::SHEARS
+        && !req.sneaking
+        && mob.mob_type == MobType::HappyGhast
+        && let Some(outcome) = super::happy_ghast::shear_harness(me, mob, req)
+    {
+        return Some(outcome);
     }
     if !living::is_alive(me, mob) {
         return None;
@@ -575,9 +599,12 @@ pub(super) fn animal_interact(
         };
     }
     let age = mob.age;
-    // `Turtle.canFallInLove`：身上有蛋时不进求爱。
-    // `Turtle.canFallInLove`: no love while carrying an egg.
-    let can_fall_in_love = mob.mob_type != MobType::Turtle || !mob.turtle.has_egg;
+    // `Turtle.canFallInLove`：身上有蛋时不进求爱；
+    // `HappyGhast.canFallInLove()` 恒假（成年不繁殖也不求爱）。
+    // `Turtle.canFallInLove`: no love while carrying an egg;
+    // `HappyGhast.canFallInLove()` is always false (adults never breed).
+    let can_fall_in_love = mob.mob_type != MobType::HappyGhast
+        && (mob.mob_type != MobType::Turtle || !mob.turtle.has_egg);
     // `Axolotl.usePlayerItem`：热带鱼桶喂完换成水桶（创造模式手里不变）。
     // `Axolotl.usePlayerItem`: the tropical fish bucket turns into a water bucket
     // (creative keeps the bucket).

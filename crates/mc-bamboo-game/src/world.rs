@@ -3664,15 +3664,23 @@ fn run_island_simulation(
     interaction::run_random_ticks(region);
     // 官方 `tickChunks` 在自然刷怪和逐区块随机刻之后调 `tickCustomSpawners`；主世界的
     // 自定义刷怪器按 `MinecraftServer.createLevels` 里的顺序是 `PhantomSpawner`、
-    // `PatrolSpawner`（之后的猫、村庄围攻、流浪商人还没有）。世界随机源因此排在随机刻的
-    // 取数之后，幻翼又在巡逻队之前。
+    // `PatrolSpawner`，再往后的猫、村庄围攻、流浪商人；Bamboo 只建模前后三个，
+    // 刷新器仍按这个相对顺序跑，且都在随机刻之后、方块事件和实体之前。
     // Vanilla `tickChunks` calls `tickCustomSpawners` after natural spawning and the
-    // per-chunk random ticks. The overworld's custom spawners run in the
-    // `MinecraftServer.createLevels` order: `PhantomSpawner`, then `PatrolSpawner` (the
-    // cat, village siege and wandering trader spawners are not modelled yet), so their
-    // level random draws follow the random ticks and phantoms come before patrols.
+    // per-chunk random ticks. The overworld's custom spawners run in
+    // `MinecraftServer.createLevels` order: `PhantomSpawner`, `PatrolSpawner`,
+    // then the cat, village-siege and wandering-trader spawners. Bamboo models
+    // the first two and the last; they keep that relative order, all after the
+    // random ticks and before block events and entities.
     crate::phantom_spawn::tick(region);
     crate::patrol_spawn::tick(region);
+    {
+        let mut port = match (port_mode, global.as_deref_mut()) {
+            (PortMode::Direct, Some(global)) => GlobalPort::Direct(global),
+            _ => GlobalPort::Queued(&mut island.effects),
+        };
+        crate::wandering_trader_spawn::tick(region, &mut port);
+    }
     // 官方 `ServerLevel.tick` 的 "raid" 阶段：自定义刷怪器之后跑袭击状态机。
     // Vanilla's "raid" phase of `ServerLevel.tick`: after the custom spawners.
     crate::raid::tick(region);

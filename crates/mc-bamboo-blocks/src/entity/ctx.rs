@@ -153,6 +153,37 @@ pub trait BlockView {
         Vec::new()
     }
 
+    /// `TransportItemsBetweenContainers` 的只读查询：这一格容器现在的槽位（item、count）。
+    /// 没有容器数据时返回空表。精确驱动读当前世界状态，并行驱动读本刻开始的快照，
+    /// 所以「两只铜傀儡同一刻碰同一个箱子」时两种驱动可能看到不同的内容（见 README）。
+    ///
+    /// Read-only container slots for `TransportItemsBetweenContainers`. Precise reads the
+    /// live state, parallel reads a start-of-tick snapshot, so two golems opening the same
+    /// chest in one tick can diverge (see README).
+    fn container_slots(&self, _pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        Vec::new()
+    }
+
+    /// 只读查询：以 `center` 的方块为中心、`horizontal`（x/z）与 `vertical`（y）为
+    /// 半径的盒子里所有容器方块的位置（保持遍历序）。没有容器数据时返回空表。
+    ///
+    /// Read-only query: all container positions inside the search box. Empty when the
+    /// view has no container data.
+    fn container_positions_in(
+        &self,
+        _center: BlockPos,
+        _horizontal: i32,
+        _vertical: i32,
+    ) -> Vec<BlockPos> {
+        Vec::new()
+    }
+
+    /// `ChestBlockEntity.getEntitiesWithContainerOpen()` 是否有打开者，
+    /// 铜傀儡排队判定用；精确驱动读当前容器表、并行驱动读本刻开始的快照。
+    fn container_open_count(&self, _pos: BlockPos) -> i32 {
+        0
+    }
+
     /// 官方 `EnvironmentAttributeSystem.getValue(BEES_STAY_IN_HIVE, pos)`。
     ///
     /// 主世界按时间线的两条关键帧给值；`RAIN` / `THUNDER` 两张天气覆盖层在雨强
@@ -243,6 +274,34 @@ pub trait BlockView {
     /// `Level.isRainingAt(pos)`。
     fn is_raining_at(&self, _pos: BlockPos) -> bool {
         false
+    }
+
+    /// `ServerLevel.precipitationAt(pos) != Biome.Precipitation.NONE`：
+    /// 快乐恶魂在会降水的群系里回血更快。没有群系表的视图按「不降水」。
+    ///
+    /// `ServerLevel.precipitationAt(pos) != Biome.Precipitation.NONE`: happy ghasts
+    /// heal faster where the biome precipitates. Views without biome data say no.
+    fn biome_precipitates(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
+    /// `EnvironmentAttributes.CLOUD_HEIGHT`：主世界缺省 192。没有环境属性表的
+    /// 视图按主世界算；别的维度可以覆盖。
+    ///
+    /// `EnvironmentAttributes.CLOUD_HEIGHT`: the overworld default is 192. Views
+    /// without the attribute table use the overworld value; other dimensions override.
+    fn cloud_height(&self) -> f32 {
+        192.0
+    }
+
+    /// `Entity.isInClouds()`：云的颜色 alpha 不为 0，且实体从脚底到头顶跨过
+    /// `[cloudHeight, cloudHeight + 4]`。快乐恶魂据此选快 / 慢回血周期。
+    ///
+    /// `Entity.isInClouds()`: non-zero cloud colour alpha and an entity spanning
+    /// `[cloudHeight, cloudHeight + 4]`. Happy ghasts use it to pick the heal period.
+    fn is_in_clouds(&self, y: f64, height: f32) -> bool {
+        let cloud = f64::from(self.cloud_height());
+        y + f64::from(height) >= cloud && y <= cloud + 4.0
     }
 
     /// `Level.isThundering()`：担心基因的熊猫在雷雨天会坐下。
@@ -739,6 +798,25 @@ impl BlockView for World<'_> {
         World::has_block_entity(self, pos)
     }
 
+    fn container_open_count(&self, pos: BlockPos) -> i32 {
+        self.level().container_open_count(pos)
+    }
+
+    fn container_slots(&self, pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        // 精确驱动：`slots_at` 读的是当前世界的容器槽位表（只读、内部可变性记录访问）。
+        self.slots_at(pos)
+    }
+
+    fn container_positions_in(
+        &self,
+        center: BlockPos,
+        horizontal: i32,
+        vertical: i32,
+    ) -> Vec<BlockPos> {
+        self.level()
+            .container_positions_in(center, horizontal, vertical)
+    }
+
     fn bees_stay_in_hive(&self, pos: BlockPos) -> bool {
         World::bees_stay_in_hive(self, pos)
     }
@@ -782,6 +860,10 @@ impl BlockView for World<'_> {
 
     fn is_raining_at(&self, pos: BlockPos) -> bool {
         self.level().is_raining_at(pos)
+    }
+
+    fn biome_precipitates(&self, pos: BlockPos) -> bool {
+        self.level().precipitation_facts(pos).precipitation != crate::weather::Precipitation::None
     }
 
     fn is_thundering(&self) -> bool {
@@ -1154,6 +1236,16 @@ pub enum Command {
     Explode {
         center: Vec3,
         radius: f32,
+        /// 发出者（点燃的 TNT）这一刻的公开数据：它已经被 `discard` 出表，
+        /// 死亡消息要靠它拿 `entity.minecraft.tnt` 的显示名和 `show_entity`。
+        ///
+        /// The emitter (primed TNT) public data: it has been discarded from the table,
+        /// so the death message needs it for the `entity.minecraft.tnt` name and `show_entity`.
+        source: Box<EntityPublic>,
+        /// 点燃它的活体（打火石点着的玩家），没有就是 `None`。
+        ///
+        /// The living entity that lit it (a player with flint and steel), if any.
+        owner: Option<EntityUid>,
     },
     /// 生物引发的爆炸（`Level.ExplosionInteraction.MOB`）：射线、伤害生物和玩家、
     /// 按 `mobGriefing` 破坏方块。发出者就是爆炸的来源实体。
@@ -1316,6 +1408,29 @@ pub enum Command {
         source: super::mob::DamageSource,
         amount: f32,
     },
+    /// `SonicBoom` 打中后 `target.push(dx, dy, dz)`：不走 `knockback`，只加速度。
+    /// 玩家由游戏层把同样的向量加到速度上。
+    ///
+    /// The `target.push(dx, dy, dz)` after a landed sonic boom: a velocity add,
+    /// not the `knockback` formula.
+    SonicBoomPush {
+        target: EntityUid,
+        player: bool,
+        push: mc_bamboo_core::Vec3,
+    },
+    /// `LivingEntity.causeExtraKnockback` 给受害者补的那一次 `knockback`。
+    /// 伤害在 [`Command::HurtPlayer`] / [`Command::HurtMob`] 里落地之后才轮到它，
+    /// 所以单独排一条命令，保持官方的先后顺序。
+    ///
+    /// The extra `knockback` from `LivingEntity.causeExtraKnockback`, queued after
+    /// the damage command so the official order is preserved.
+    ExtraKnockback {
+        target: EntityUid,
+        player: bool,
+        strength: f64,
+        dx: f64,
+        dz: f64,
+    },
     /// `Zombie.doHurtTarget` 的着火传染（打到玩家）。
     IgnitePlayer {
         target: EntityUid,
@@ -1362,6 +1477,37 @@ pub enum Command {
     LayTurtleEgg {
         pos: mc_bamboo_core::BlockPos,
         eggs: i32,
+    },
+    /// `CopperGolem.turnToStatue`：把铜傀儡换成氧化雕像方块（姿态、朝向）。
+    ///
+    /// `CopperGolem.turnToStatue`: replace the golem with an oxidised statue block
+    /// (pose and facing).
+    CopperGolemStatue {
+        pos: mc_bamboo_core::BlockPos,
+        pose: u8,
+        facing: mc_bamboo_core::Direction,
+    },
+    /// `TransportItemsBetweenContainers.pickUpItems`：从箱子取最多 16 个物品进主手。
+    /// 落地阶段才读箱子（两条命令冲突时按 uid 顺序、后到的看前一条的结果）。
+    ///
+    /// Pick up to 16 items from a chest into the main hand. Applied at the landing
+    /// phase so conflicting commands are ordered by uid (first come, first served).
+    CopperGolemPickUp {
+        pos: mc_bamboo_core::BlockPos,
+    },
+    /// `TransportItemsBetweenContainers.putDownItem`：把主手物品放进箱子，剩余留主手。
+    ///
+    /// Place the held stack into a chest, keeping any remainder in the main hand.
+    CopperGolemPutDown {
+        pos: mc_bamboo_core::BlockPos,
+        /// 主手在发出命令那一刻的物品堆（落地时箱子可能已被别的傀儡改过）。
+        held: mc_bamboo_protocol::item::ItemStack,
+    },
+    /// `Container.startOpen/stopOpen`：铜傀儡开箱 / 关箱时改箱子的打开者人数。
+    /// `open` 为真 +1、为假 -1；落地阶段串行应用，别的铜傀儡下一刻就能读到。
+    CopperGolemChestOpen {
+        pos: mc_bamboo_core::BlockPos,
+        open: bool,
     },
     /// `ServerLevel.destroyBlockProgress(breaker, pos, progress)`：`BreakDoorGoal` 的
     /// 门上裂纹，`progress` 为 -1 时清掉。
@@ -1709,7 +1855,12 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             position,
             context,
         } => world.game_event(event, position, context),
-        Command::Explode { center, radius } => world.explode_tnt(center, radius, me.id),
+        Command::Explode {
+            center,
+            radius,
+            source,
+            owner,
+        } => world.explode_tnt(center, radius, source, owner),
         Command::ExplodeMob {
             center,
             radius,
@@ -1930,6 +2081,30 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             amount,
         } => {
             super::mob::living::apply_hurt_player(world, me, target, source, amount);
+        }
+        Command::SonicBoomPush {
+            target,
+            player,
+            push,
+        } => {
+            if player {
+                world.push_player(target, push);
+            } else {
+                world.push_mob(target, push);
+            }
+        }
+        Command::ExtraKnockback {
+            target,
+            player,
+            strength,
+            dx,
+            dz,
+        } => {
+            if player {
+                world.knock_back_player(target, strength, (dx, dz));
+            } else {
+                world.knockback_mob(target, strength, dx, dz);
+            }
         }
         Command::IgnitePlayer { target, ticks } => world.ignite_player_from_mob(target, ticks),
         Command::HurtMob {
@@ -2211,6 +2386,20 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             source,
             amount,
         } => super::mob::frog::apply_eat(world, target, source, amount),
+        Command::CopperGolemStatue { pos, pose, facing } => {
+            super::mob::copper_golem::apply_statue(world, me, pos, pose, facing)
+        }
+        Command::CopperGolemPickUp { pos } => {
+            super::mob::copper_golem::apply_pick_up(world, me, pos);
+        }
+        Command::CopperGolemPutDown { pos, held } => {
+            super::mob::copper_golem::apply_put_down(world, me, pos, &held);
+        }
+        Command::CopperGolemChestOpen { pos, open } => {
+            let _ = me;
+            let delta = if open { 1 } else { -1 };
+            world.change_container_open_count(pos, delta);
+        }
         Command::LayTurtleEgg { pos, eggs } => {
             let pitch = 0.9 + world.random().next_float() * 0.2;
             world.play_block_sound(

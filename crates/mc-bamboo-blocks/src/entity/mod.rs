@@ -129,6 +129,14 @@ pub struct LeashKnot {
 pub struct PrimedTnt {
     /// `fuse`，默认 80 tick。
     pub fuse: i32,
+    /// `owner`：点燃它的活体的实体 ID，官方 `PrimedTnt.owner`。
+    /// 只有玩家用打火石 / 火焰弹点着时才记；红石、发射器、火焰和爆炸点燃的都是 `None`。
+    /// 不存档。
+    ///
+    /// `owner`: the id of the living entity that lit this TNT, vanilla
+    /// `PrimedTnt.owner`. Set only for a player using flint and steel or a fire
+    /// charge; redstone, dispensers, fire and explosions leave it `None`. Not saved.
+    pub owner: Option<EntityUid>,
 }
 
 impl PrimedTnt {
@@ -137,6 +145,7 @@ impl PrimedTnt {
     pub const fn new() -> Self {
         Self {
             fuse: Self::DEFAULT_FUSE,
+            owner: None,
         }
     }
 }
@@ -598,6 +607,23 @@ impl Entity {
             brain.seed_shuffles(self.random.state());
             brain.randomly_delay_start(&mut self.random);
         }
+        if mob.mob_type == mob::MobType::CopperGolem {
+            // `CopperGolem` 构造函数：`brain.setMemory(TRANSPORT_ITEMS_COOLDOWN_TICKS,
+            // random.nextInt(60, 100))`，在传感器延迟之后取一次随机数。
+            //
+            // The `CopperGolem` constructor sets the transport cooldown from one
+            // `nextInt(60, 100)` draw after the sensor delays.
+            use mob::brain::memory::{MemoryType, MemoryValue};
+            let cooldown = self.random.next_int_bounded(
+                mob::copper_golem::SPAWN_COOLDOWN_MAX - mob::copper_golem::SPAWN_COOLDOWN_MIN,
+            ) + mob::copper_golem::SPAWN_COOLDOWN_MIN;
+            if let Some(brain) = mob.brain.as_mut() {
+                brain.memories.set(
+                    MemoryType::TransportItemsCooldownTicks,
+                    MemoryValue::Int(cooldown),
+                );
+            }
+        }
         if mob.mob_type == mob::MobType::Armadillo {
             // `Armadillo` 构造函数最后的 `scuteTime = pickNextScuteDropTime()`。
             // The `Armadillo` constructor's trailing `scuteTime = pickNextScuteDropTime()`.
@@ -652,6 +678,13 @@ impl Entity {
     pub fn set_fuse(&mut self, fuse: i32) {
         if let EntityKind::Tnt(data) = &mut self.kind {
             data.fuse = fuse;
+        }
+    }
+
+    /// `PrimedTnt.setOwner`：记下点燃它的活体（玩家）。
+    pub fn set_tnt_owner(&mut self, owner: EntityUid) {
+        if let EntityKind::Tnt(data) = &mut self.kind {
+            data.owner = Some(owner);
         }
     }
 

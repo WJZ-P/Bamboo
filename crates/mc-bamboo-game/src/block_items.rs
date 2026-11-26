@@ -41,6 +41,8 @@ const SKULL: [i32; 3] = [kinds::PROFILE, kinds::NOTE_BLOCK_SOUND, kinds::CUSTOM_
 const DECORATED_POT: [i32; 1] = [kinds::POT_DECORATIONS];
 /// 容器：官方还读一项 `container`，内容进方块实体的物品栏。
 const CONTAINER: [i32; 2] = [kinds::CUSTOM_NAME, kinds::LOCK];
+/// 铜傀儡雕像只认 `custom_name`，名字进 `components` 组件表。
+const COPPER_GOLEM_STATUE: [i32; 1] = [kinds::CUSTOM_NAME];
 
 /// 官方用 `getOrDefault` 读的那几项：物品上没有时也要留一份空值，`collectImplicitComponents`
 /// 又会把它写回物品，所以中键选取一面空白旗帜拿到的物品带着一项空的 `banner_patterns`。
@@ -84,6 +86,7 @@ fn implicit_components(kind: i32) -> &'static [i32] {
         entities::BANNER => &BANNER,
         entities::SKULL => &SKULL,
         entities::DECORATED_POT => &DECORATED_POT,
+        entities::COPPER_GOLEM_STATUE => &COPPER_GOLEM_STATUE,
         _ if is_container(kind) => &CONTAINER,
         _ => &[],
     }

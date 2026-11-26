@@ -49,6 +49,7 @@ import net.minecraft.world.clock.PackedClockStates;
 import net.minecraft.world.level.border.WorldBorder;
 import net.minecraft.world.level.gamerules.GameRule;
 import net.minecraft.world.level.gamerules.GameRuleMap;
+import net.minecraft.world.level.saveddata.WanderingTraderData;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.WorldGenSettings;
 import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
@@ -100,8 +101,8 @@ public final class SavedDataOracle {
                 new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected())) {
         RegistryAccess.Frozen registries = loadRegistries(resources);
         RegistryOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, registries);
-        if (args.length < 5) {
-            throw new IllegalArgumentException("usage: SavedDataOracle <game_rules.dat> <world_border.dat> <world_clocks.dat> <raids.dat> <flat_world_gen_settings.dat> [noise_world_gen_settings.dat ...]");
+        if (args.length < 6) {
+            throw new IllegalArgumentException("usage: SavedDataOracle <game_rules.dat> <world_border.dat> <world_clocks.dat> <raids.dat> <flat_world_gen_settings.dat> <wandering_trader.dat> [noise_world_gen_settings.dat ...]");
         }
 
         CompoundTag genRoot = NbtIo.readCompressed(Path.of(args[4]), NbtAccounter.unlimitedHeap());
@@ -134,7 +135,7 @@ public final class SavedDataOracle {
         // Every extra world_gen_settings.dat must be a minecraft:noise generator that
         // the official WorldGenSettings.CODEC accepts; report its decoded shape.
         JsonArray noiseGens = new JsonArray();
-        for (int i = 5; i < args.length; i++) {
+        for (int i = 6; i < args.length; i++) {
             CompoundTag noiseRoot = NbtIo.readCompressed(Path.of(args[i]), NbtAccounter.unlimitedHeap());
             Tag noiseData = noiseRoot.get("data");
             if (noiseData == null) {
@@ -158,6 +159,17 @@ public final class SavedDataOracle {
             ng.addProperty("bonus_chest", parsed.options().generateBonusChest());
             noiseGens.add(ng);
         }
+
+        // wandering_trader.dat：官方 `WanderingTraderData.CODEC` 的两个可选字段。
+        CompoundTag traderRoot = NbtIo.readCompressed(Path.of(args[5]), NbtAccounter.unlimitedHeap());
+        Tag traderData = traderRoot.get("data");
+        if (traderData == null) {
+            throw new IllegalStateException("wandering_trader.dat has no data tag");
+        }
+        WanderingTraderData trader = WanderingTraderData.CODEC.parse(ops, traderData).getOrThrow();
+        JsonObject traderJson = new JsonObject();
+        traderJson.addProperty("spawn_delay", trader.spawnDelay());
+        traderJson.addProperty("spawn_chance", trader.spawnChance());
 
         CompoundTag gameRulesRoot = NbtIo.readCompressed(Path.of(args[0]), NbtAccounter.unlimitedHeap());
         Tag gameRulesData = gameRulesRoot.get("data");
@@ -278,6 +290,7 @@ public final class SavedDataOracle {
         result.add("world_clocks", clocksArray);
         result.add("world_gen_settings", result0);
         result.add("noise_generators", noiseGens);
+        result.add("wandering_trader", traderJson);
 
         try (Writer out = new OutputStreamWriter(stdout, StandardCharsets.UTF_8)) {
             out.write(result.toString());

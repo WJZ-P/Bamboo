@@ -113,6 +113,19 @@ pub enum MemoryType {
     /// The nautilus's `charge_cooldown_ticks` and `attack_target_cooldown`.
     ChargeCooldownTicks,
     AttackTargetCooldown,
+    /// 铜傀儡的 `transport_items_cooldown_ticks`（`register(name)` 无编解码器，
+    /// 不进存档）。追加在末尾，不改既有下标。
+    ///
+    /// The copper golem's `transport_items_cooldown_ticks` (registered without a
+    /// codec, so it is not saved). Appended last to keep existing indices.
+    TransportItemsCooldownTicks,
+    /// `TransportItemsBetweenContainers` 的 `VISITED_BLOCK_POSITIONS` /
+    /// `UNREACHABLE_TRANSPORT_BLOCK_POSITIONS`：官方 `Set<GlobalPos>`，
+    /// 都带 `GlobalPos.CODEC.listOf()` 编解码器，进存档。追加在末尾。
+    ///
+    /// The transport behaviour's visited / unreachable position sets, both saved.
+    VisitedBlockPositions,
+    UnreachableTransportBlockPositions,
     /// 监守者的记忆，追加在末尾、按官方 `MemoryModuleType` 注册名。位掩码已升到 `u128`，
     /// 这些种类让总数超过 64。全部不进存档（愤怒在 `anger` 键里单独存）。
     ///
@@ -158,10 +171,12 @@ impl MemoryType {
     /// 记忆种类的个数，槽表的长度。
     ///
     /// The number of memory types: the length of the slot table.
-    /// 70 个既有记忆 + 3 个悦灵记忆。
+    /// 51 个基础 + 15 个监守者 + 4 个嗅探兽（`sniff_cooldown` 两边共用，只算一次）
+    /// + 3 个铜傀儡搬运记忆 + 3 个悦灵记忆。
     ///
-    /// 70 existing memories plus 3 allay memories.
-    pub const COUNT: usize = 73;
+    /// 51 base + 15 warden + 4 sniffer (`sniff_cooldown` is shared, counted once)
+    /// + 3 copper golem transport memories + 3 allay memories.
+    pub const COUNT: usize = 76;
 
     /// 全部种类，按枚举顺序。
     ///
@@ -218,6 +233,9 @@ impl MemoryType {
         Self::ItemPickupCooldownTicks,
         Self::ChargeCooldownTicks,
         Self::AttackTargetCooldown,
+        Self::TransportItemsCooldownTicks,
+        Self::VisitedBlockPositions,
+        Self::UnreachableTransportBlockPositions,
         Self::IsEmerging,
         Self::DigCooldown,
         Self::RoarTarget,
@@ -298,6 +316,9 @@ impl MemoryType {
             Self::ItemPickupCooldownTicks => "item_pickup_cooldown_ticks",
             Self::ChargeCooldownTicks => "charge_cooldown_ticks",
             Self::AttackTargetCooldown => "attack_target_cooldown",
+            Self::TransportItemsCooldownTicks => "transport_items_cooldown_ticks",
+            Self::VisitedBlockPositions => "visited_block_positions",
+            Self::UnreachableTransportBlockPositions => "unreachable_transport_block_positions",
             Self::IsEmerging => "is_emerging",
             Self::DigCooldown => "dig_cooldown",
             Self::RoarTarget => "roar_target",
@@ -361,6 +382,8 @@ impl MemoryType {
                 | Self::LikedNoteblockCooldownTicks
                 | Self::SnifferExploredPositions
                 | Self::SniffCooldown
+                | Self::VisitedBlockPositions
+                | Self::UnreachableTransportBlockPositions
         )
     }
 

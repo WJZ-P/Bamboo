@@ -416,6 +416,7 @@ fn idle_activity() -> ActivityData {
                                 speed: Speed::fixed(2.5),
                                 close_adult: 3.5,
                                 close_baby: 2.5,
+                                look_in_eyes: false,
                             },
                             1,
                         ),
@@ -451,7 +452,11 @@ fn idle_activity() -> ActivityData {
                         (
                             Kind::trigger_if(
                                 super::brain::behavior::BodyPredicate::CamelNotRefuseToMove,
-                                Kind::RandomStroll { speed: 2.0 },
+                                Kind::RandomStroll {
+                                    speed: 2.0,
+                                    horizontal: 10,
+                                    vertical: 7,
+                                },
                             ),
                             1,
                         ),

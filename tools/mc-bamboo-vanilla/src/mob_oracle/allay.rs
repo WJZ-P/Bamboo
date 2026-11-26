@@ -153,6 +153,8 @@ fn level(case: &AllayCase, script: &Script) -> MobLevel {
         wrong_was_hurt: false,
         short_hunger: false,
         ignore_bed_monsters: false,
+        containers: Default::default(),
+        container_open_counts: Default::default(),
         explosion_break: 0,
     }
 }

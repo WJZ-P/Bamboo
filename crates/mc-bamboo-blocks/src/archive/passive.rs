@@ -51,13 +51,14 @@ const DEFAULT_DEACTIVATION_RANGE: f64 = 4.5;
 /// `VaultSharedData` 的 `connectedParticlesRange` 初值取 `VaultConfig.DEFAULT`。
 const DEFAULT_PARTICLES_RANGE: f64 = 4.5;
 
-/// 只保留存档态的四种类型。
+/// 只保留存档态的类型。铜傀儡雕像只有组件表（自定义名），没有自有存档键。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassiveKind {
     Vault,
     SculkSensor,
     CalibratedSculkSensor,
     SculkShrieker,
+    CopperGolemStatue,
 }
 
 impl PassiveKind {
@@ -68,6 +69,7 @@ impl PassiveKind {
             "minecraft:sculk_sensor" => Self::SculkSensor,
             "minecraft:calibrated_sculk_sensor" => Self::CalibratedSculkSensor,
             "minecraft:sculk_shrieker" => Self::SculkShrieker,
+            "minecraft:copper_golem_statue" => Self::CopperGolemStatue,
             _ => return None,
         })
     }
@@ -78,15 +80,17 @@ impl PassiveKind {
             Self::SculkSensor => "minecraft:sculk_sensor",
             Self::CalibratedSculkSensor => "minecraft:calibrated_sculk_sensor",
             Self::SculkShrieker => "minecraft:sculk_shrieker",
+            Self::CopperGolemStatue => "minecraft:copper_golem_statue",
         }
     }
 
     /// 测试用它盯住工厂分支不要漏。
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Vault,
         Self::SculkSensor,
         Self::CalibratedSculkSensor,
         Self::SculkShrieker,
+        Self::CopperGolemStatue,
     ];
 }
 
@@ -141,6 +145,9 @@ impl PassiveBlockEntity {
                 data.warning_level = tag::int_or(tag, "warning_level", 0);
                 data.listener = read_listener(field(tag, "listener"))?;
             }
+            // `CopperGolemStatueBlockEntity` 不覆写 `saveAdditional`/`loadAdditional`：
+            // 自定义名走组件表 `components`，由游戏层建模，这里没有自有存档键。
+            PassiveKind::CopperGolemStatue => {}
         }
         Ok(Self { pos, kind, data })
     }
@@ -166,6 +173,7 @@ impl PassiveBlockEntity {
                 put(&mut out, "warning_level", Tag::Int(self.data.warning_level));
                 put(&mut out, "listener", self.data.listener.clone());
             }
+            PassiveKind::CopperGolemStatue => {}
         }
         out
     }

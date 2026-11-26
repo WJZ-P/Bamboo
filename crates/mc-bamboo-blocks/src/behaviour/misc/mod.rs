@@ -39,6 +39,7 @@ mod redstone_ore;
 mod respawn_anchor;
 mod scaffolding;
 mod sculk;
+pub mod sculk_catalyst;
 pub mod sculk_entity;
 pub mod sculk_shrieker;
 mod sea_pickle;

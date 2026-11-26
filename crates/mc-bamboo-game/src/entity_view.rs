@@ -45,6 +45,13 @@ pub(crate) struct ReadOnlyWorld<'a> {
     pub(crate) shulker_box_shapes: BTreeMap<BlockPos, Aabb>,
     /// 世界里漏斗方块的位置。没有漏斗时物品不发 `SuckIntoHopper` 命令。
     pub(crate) hopper_positions: BTreeSet<BlockPos>,
+    /// 算阶段开始时拷下来的容器槽位快照（位置升序）。铜傀儡的只读查询读这一份；
+    /// 精确驱动读当前容器表，两种驱动在「同一刻两只傀儡碰同一个箱子」时可能不同。
+    ///
+    /// Start-of-tick container snapshot for the copper golem's read-only queries.
+    pub(crate) container_snapshot: Vec<(BlockPos, Vec<mc_bamboo_protocol::item::ItemStack>)>,
+    /// 算阶段开始时拷下来的箱子开盖人数快照（位置升序），和槽位快照同序。
+    pub(crate) container_open_counts: Vec<(BlockPos, i32)>,
     /// 这一维度的世界边界快照，实体的碰撞要读它。
     ///
     /// This dimension's world-border snapshot; entity collisions read it.
@@ -177,6 +184,40 @@ impl BlockSource for ReadOnlyWorld<'_> {
         crate::poi_query::bee_homes_in_range(self.poi, center, radius)
             .into_iter()
             .map(|(_, pos)| pos)
+            .collect()
+    }
+
+    fn container_open_count(&self, pos: BlockPos) -> i32 {
+        self.container_open_counts
+            .binary_search_by_key(&pos, |(at, _)| *at)
+            .ok()
+            .and_then(|index| self.container_open_counts.get(index))
+            .map_or(0, |(_, count)| *count)
+    }
+
+    fn container_slots(&self, pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.container_snapshot
+            .binary_search_by_key(&pos, |(at, _)| *at)
+            .ok()
+            .and_then(|index| self.container_snapshot.get(index))
+            .map(|(_, slots)| slots.clone())
+            .unwrap_or_default()
+    }
+
+    fn container_positions_in(
+        &self,
+        center: BlockPos,
+        horizontal: i32,
+        vertical: i32,
+    ) -> Vec<BlockPos> {
+        self.container_snapshot
+            .iter()
+            .map(|(pos, _)| *pos)
+            .filter(|pos| {
+                (pos.x - center.x).abs() <= horizontal
+                    && (pos.y - center.y).abs() <= vertical
+                    && (pos.z - center.z).abs() <= horizontal
+            })
             .collect()
     }
 

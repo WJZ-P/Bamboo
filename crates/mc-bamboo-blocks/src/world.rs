@@ -1324,6 +1324,18 @@ impl<'a> World<'a> {
         self.level.note_block_sound(pos)
     }
 
+    /// `CopperGolemStatueBlockEntity` 组件表里的自定义名文本标签。
+    pub fn statue_custom_name(&self, pos: BlockPos) -> Option<mc_bamboo_nbt::Tag> {
+        self.note_access(pos, false);
+        self.level.statue_custom_name(pos)
+    }
+
+    /// 把铜傀儡的自定义名写进雕像方块实体的组件表（`createStatue`）。
+    pub fn set_statue_custom_name(&mut self, pos: BlockPos, name: Option<mc_bamboo_nbt::Tag>) {
+        self.note_access(pos, true);
+        self.level.set_statue_custom_name(pos, name);
+    }
+
     /// `getBlockEntity(pos)` 之后按类型取。
     pub fn block_entity<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
         self.note_access(pos, false);
@@ -1589,6 +1601,13 @@ impl<'a> World<'a> {
     /// 这一格容器现在的槽位，见 [`Level::slots_at`]。
     ///
     /// The container slots at this position. See [`Level::slots_at`].
+    /// `ContainerOpenersCounter.incrementOpeners/decrementOpeners` 的落地。
+    pub(crate) fn change_container_open_count(&mut self, pos: BlockPos, delta: i32) {
+        self.note_access(pos, true);
+        self.level.change_container_open_count(pos, delta);
+        self.notify_changed(pos);
+    }
+
     pub(crate) fn slots_at(&self, pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {
         self.note_access(pos, false);
         self.level.slots_at(pos)
@@ -3802,7 +3821,11 @@ impl<'a> World<'a> {
             entity.with_mob(|_, mob| mob.persistence_required = true);
         }
         if let Some(equipment) = equipment {
-            self.level.equip_mob(&mut entity, equipment);
+            let dropped = self.level.equip_mob(&mut entity, equipment);
+            // `equipItemIfPossible` 里被换掉的旧装备按掉落几率掉出来。
+            for stack in dropped {
+                self.spawn_at_location(entity.position, stack);
+            }
         }
         let uuid = entity.kind.mob().map(|mob| mob.uuid).unwrap_or_default();
         let uid = self.add_prepared_entity(entity);
@@ -3888,12 +3911,15 @@ impl<'a> World<'a> {
     }
 
     /// `TntBlock.prime`：在这一格生成一个默认引信的 TNT。方块本身的移除由调用方负责。
+    /// `owner` 是点燃它的活体（打火石点着的玩家），红石 / 发射器 / 火焰传 `None`。
     ///
     /// 朝向取自 `level.getRandom()`，和方块逻辑共用同一个随机源。
     ///
     /// `TntBlock.prime`: spawns a primed TNT with the default fuse. The caller removes the block.
+    /// `owner` is the living entity that lit it (a player with flint and steel);
+    /// redstone, dispensers and fire pass `None`.
     /// The yaw comes from `level.getRandom()`, the same source block logic uses.
-    pub fn spawn_tnt(&mut self, pos: BlockPos) -> i32 {
+    pub fn spawn_tnt(&mut self, pos: BlockPos, owner: Option<EntityUid>) -> i32 {
         // `TntBlock.prime` 在规则为假时直接返回，不取朝向的随机数。
         //
         // `TntBlock.prime` returns before drawing the yaw when the rule is false.
@@ -3902,7 +3928,10 @@ impl<'a> World<'a> {
         }
         let position = block_center_bottom(pos);
         let angle = self.random().next_double();
-        let entity = Entity::primed_tnt(position, angle);
+        let mut entity = Entity::primed_tnt(position, angle);
+        if let Some(owner) = owner {
+            entity.set_tnt_owner(owner);
+        }
         let id = self.spawn_entity(entity);
         // `TntBlock.prime` 在 `addFreshEntity` 之后，于实体脚底播放。被爆炸点燃的短引信不走这里。
         // `TntBlock.prime` plays this at the entity's feet after `addFreshEntity`.
@@ -4080,6 +4109,46 @@ impl<'a> World<'a> {
                 amount,
             );
         }
+        // `level.levelEvent(this, event, blockPosition(), data)`：客户端靠这个包播
+        // 打蜡 / 去蜡 / 刮锈的粒子，世界里没有方块状态变化。
+        for (event, pos, data) in &outcome.level_events {
+            self.level_event(*event, *pos, *data);
+        }
+        outcome
+    }
+
+    /// 只跑 `mobInteract`，跳过 `Entity.interact` 的拴绳分支。快乐恶魂对拍夹具用：
+    /// 官方那一边直接调 `HappyGhast.mobInteract`，不走 `Entity.interact` 的剪装备路径。
+    ///
+    /// Runs only `mobInteract`, skipping the leash branches of `Entity.interact`.
+    /// The happy ghast oracle calls vanilla `HappyGhast.mobInteract` directly, so its
+    /// replay must use the same entry point.
+    pub fn interact_mob_only(
+        &mut self,
+        id: i32,
+        request: &crate::entity::mob::interact::MobInteractRequest,
+    ) -> crate::entity::mob::interact::MobInteraction {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return crate::entity::mob::interact::MobInteraction::pass();
+        };
+        let thundering = self.is_thundering();
+        let now = self.game_time();
+        let outcome = entity
+            .with_mob(|me, mob| {
+                crate::entity::mob::interact::interact(
+                    me,
+                    mob,
+                    request,
+                    now,
+                    thundering,
+                    &mut || self.random().next_float(),
+                )
+            })
+            .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
+        if let Some(stack) = outcome.drop_stack.clone() {
+            self.spawn_at_location(entity.position.add(outcome.drop_offset), stack);
+        }
+        self.level.put_entity(entity);
         outcome
     }
 
@@ -4170,6 +4239,26 @@ impl<'a> World<'a> {
         Some(result)
     }
 
+    /// `Entity.push(dx, dy, dz)`：把一组有限向量加到一只生物的速度上。
+    pub fn push_mob(&mut self, id: i32, push: Vec3) {
+        if !(push.x.is_finite() && push.y.is_finite() && push.z.is_finite()) {
+            return;
+        }
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return;
+        };
+        entity.delta = entity.delta.add(push);
+        self.level.put_entity(entity);
+    }
+
+    /// `Entity.push(dx, dy, dz)` 对玩家：精确驱动当场改速度并发包，否则延后。
+    pub fn push_player(&mut self, target: crate::entity::EntityUid, push: Vec3) {
+        if !(push.x.is_finite() && push.y.is_finite() && push.z.is_finite()) {
+            return;
+        }
+        let _ = self.level.push_player_now(target, push);
+    }
+
     /// `Player.causeExtraKnockback` 对生物目标调的 `LivingEntity.knockback`。
     /// 方向和力道由攻击者给；这是受伤默认击退之外的第二下击退。
     ///
@@ -4231,6 +4320,7 @@ impl<'a> World<'a> {
     ///
     /// Takes an entity out of the table so an oracle or command can run a whole-row
     /// operation such as `finalizeSpawn`; [`Self::put_taken_entity`] puts it back.
+    #[cfg(feature = "oracle-samples")]
     pub fn take_entity_for_oracle(&mut self, id: i32) -> Option<crate::entity::Entity> {
         self.level.take_entity(id)
     }
@@ -4238,6 +4328,7 @@ impl<'a> World<'a> {
     /// [`Self::take_entity_for_oracle`] 的放回。
     ///
     /// Puts an entity taken by [`Self::take_entity_for_oracle`] back.
+    #[cfg(feature = "oracle-samples")]
     pub fn put_entity_for_oracle(&mut self, entity: crate::entity::Entity) {
         self.level.put_entity(entity);
     }
@@ -5219,6 +5310,7 @@ mod tests {
                 | Effect::RaiderDied { .. }
                 | Effect::Explode { .. }
                 | Effect::PlayerShoulder { .. }
+                | Effect::Particles { .. }
                 | Effect::VibrationParticle { .. } => None,
             })
             .collect()

@@ -30,6 +30,15 @@ pub(crate) fn tick_tnt(me: &mut Entity, mut data: PrimedTnt, ctx: &mut dyn Entit
     // 官方接着调 `updateFluidInteraction`，它只影响水流推动和雨天灭火，
     // 两样都不在范围里，所以 `wasTouchingWater` 一直是假。
     if data.fuse <= 0 {
+        // 先把这一刻的公开数据和 owner 抓下来，再 `discard`：爆炸里死掉的玩家
+        // 死亡消息要读 TNT 的显示名（`entity.minecraft.tnt` + `show_entity`），
+        // 而 `discard` 之后它已经不在实体表里。
+        //
+        // Capture the public data and owner before `discard`: a player killed by the blast
+        // needs the TNT's display name (`entity.minecraft.tnt` + `show_entity`) in the death
+        // message, but the entity has left the table by then.
+        let source = Box::new(me.clone().split().public);
+        let owner = data.owner;
         me.discard();
         // 爆炸点是 `getY(0.0625)`，不是实体原点。
         let center = Vec3::new(me.position.x, me.y_at(0.0625), me.position.z);
@@ -37,6 +46,8 @@ pub(crate) fn tick_tnt(me: &mut Entity, mut data: PrimedTnt, ctx: &mut dyn Entit
             Command::Explode {
                 center,
                 radius: 4.0,
+                source,
+                owner,
             },
             me,
         );

@@ -133,6 +133,13 @@ pub enum Kind {
     MoveToTargetSink(MoveToTargetSink),
     /// `CountDownCooldownTicks(memory)`。
     CountDownCooldown(MemoryType),
+    /// `InteractWithDoor.create()`：声明式 `OneShot`（对拍类名 `OneShot`）。
+    /// 铜傀儡 CORE 活动里有这一项；开关门本身由寻路 / 方块行为负责，见 README。
+    ///
+    /// `InteractWithDoor.create()`: a declarative `OneShot` (dumped as `OneShot`).
+    /// The copper golem's CORE activity includes it; opening doors is handled by the
+    /// pathfinding / block behaviour, see README.
+    InteractWithDoor,
     /// `SetEntityLookTargetSometimes.create(PLAYER, maxDist, interval)`。
     LookAtPlayerSometimes {
         max_dist: f32,
@@ -161,6 +168,11 @@ pub enum Kind {
         speed: Speed,
         close_adult: f64,
         close_baby: f64,
+        /// `FollowTemptation(..., lookInTheEyes)`：走路目标取玩家眼睛那一格。
+        ///
+        /// `FollowTemptation(..., lookInTheEyes)`: the walk target uses the
+        /// player's eye block.
+        look_in_eyes: bool,
     },
     /// `BabyFollowAdult.create(UniformInt(min, max), speed)`。
     BabyFollowAdult { min: i32, max: i32, speed: Speed },
@@ -172,8 +184,17 @@ pub enum Kind {
         min_pitch: f32,
         pitch_range: f32,
     },
-    /// `RandomStroll.stroll(speed)`。
-    RandomStroll { speed: f32 },
+    /// `RandomStroll.stroll(speed)`；`horizontal` / `vertical` 是
+    /// `stroll(speed, horizontal, vertical)` 的两个半径（铜傀儡用 2/2）。
+    RandomStroll {
+        speed: f32,
+        horizontal: i32,
+        vertical: i32,
+    },
+    /// `RandomStroll.fly(speed)`：飞行的那一支用 `AirAndWaterRandomPos`。
+    ///
+    /// `RandomStroll.fly(speed)`: the flying variant uses `AirAndWaterRandomPos`.
+    RandomStrollFly { speed: f32 },
     /// `SetWalkTargetFromLookTarget.create(speed, closeEnough)`。
     WalkTargetFromLook { speed: Speed, close_enough: i32 },
     /// `DoNothing(min, max)`。
@@ -220,6 +241,10 @@ pub enum Kind {
     ///
     /// Villager-specific behaviours and Phase 4+ placeholders.
     Villager(super::super::villager_ai::Behavior),
+    /// 铜傀儡专属行为（`TransportItemsBetweenContainers`）。
+    ///
+    /// Copper-golem-specific behaviour (`TransportItemsBetweenContainers`).
+    CopperGolem(super::super::copper_golem::Behavior),
     /// 嘎枝专属行为。
     ///
     /// Creaking-only behaviours.
@@ -313,6 +338,8 @@ const ITEM_PICKUP_COOLDOWN: &[(MemoryType, MemoryStatus)] =
     &[(ItemPickupCooldownTicks, ValuePresent)];
 const NOTEBLOCK_COOLDOWN: &[(MemoryType, MemoryStatus)] =
     &[(LikedNoteblockCooldownTicks, ValuePresent)];
+const TRANSPORT_COOLDOWN: &[(MemoryType, MemoryStatus)] =
+    &[(TransportItemsCooldownTicks, ValuePresent)];
 const LOOK_SOMETIMES_REQUIRED: &[(MemoryType, MemoryStatus)] = &[
     (LookTarget, ValueAbsent),
     (NearestVisibleLivingEntities, ValuePresent),
@@ -364,9 +391,11 @@ impl Kind {
             | Self::LookAtPlayer { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
+            | Self::RandomStrollFly { .. }
             | Self::WalkTargetFromLook { .. }
             | Self::TriggerIf(_)
-            | Self::TriggerIfWrapped { .. } => Class::OneShot,
+            | Self::TriggerIfWrapped { .. }
+            | Self::InteractWithDoor => Class::OneShot,
             Self::DoNothing { min, max } => Class::DoNothing {
                 min: *min,
                 max: *max,
@@ -379,8 +408,10 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.class(),
             Self::Nautilus(behavior) => behavior.class(),
             Self::Villager(behavior) => behavior.class(),
+            Self::CopperGolem(behavior) => behavior.class(),
             Self::Creaking(behavior) => behavior.class(),
             Self::Warden(behavior) => behavior.class(),
+
             Self::Sniffer(behavior) => behavior.class(),
             Self::Allay(behavior) => behavior.class(),
         }
@@ -391,7 +422,10 @@ impl Kind {
     /// `getRequiredMemories()` with each entry status.
     pub(super) fn required(&self) -> &[(MemoryType, MemoryStatus)] {
         match self {
-            Self::Swim { .. } | Self::DoNothing { .. } | Self::TriggerIf(_) => &[],
+            Self::Swim { .. }
+            | Self::DoNothing { .. }
+            | Self::TriggerIf(_)
+            | Self::InteractWithDoor => &[],
             // `sequence` 的必需记忆 = 谓词的（空）+ 被包住那个行为的。
             // `sequence`'s memories = the predicate's (empty) + the wrapped behaviour's.
             Self::TriggerIfWrapped { inner, .. } => inner.required(),
@@ -404,6 +438,7 @@ impl Kind {
                 LongJumpCooldownTicks => LONG_JUMP_COOLDOWN,
                 ItemPickupCooldownTicks => ITEM_PICKUP_COOLDOWN,
                 LikedNoteblockCooldownTicks => NOTEBLOCK_COOLDOWN,
+                TransportItemsCooldownTicks => TRANSPORT_COOLDOWN,
                 _ => RAM_COOLDOWN,
             },
             Self::LookAtPlayerSometimes { .. } | Self::LookAtPlayer { .. } => {
@@ -413,7 +448,7 @@ impl Kind {
             Self::FollowTemptation { .. } => TEMPT_REQUIRED,
             Self::BabyFollowAdult { .. } => FOLLOW_ADULT_REQUIRED,
             Self::RandomLookAround { .. } => LOOK_AROUND_REQUIRED,
-            Self::RandomStroll { .. } => STROLL_REQUIRED,
+            Self::RandomStroll { .. } | Self::RandomStrollFly { .. } => STROLL_REQUIRED,
             Self::WalkTargetFromLook { .. } => WALK_FROM_LOOK_REQUIRED,
             Self::Gate(gate) => &gate.entry,
             Self::Camel(behavior) => behavior.required(),
@@ -423,8 +458,10 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.required(),
             Self::Nautilus(behavior) => behavior.required(),
             Self::Villager(behavior) => behavior.required(),
+            Self::CopperGolem(behavior) => behavior.required(),
             Self::Creaking(behavior) => behavior.required(),
             Self::Warden(behavior) => behavior.required(),
+
             Self::Sniffer(behavior) => behavior.required(),
             Self::Allay(behavior) => behavior.required(),
         }
@@ -454,9 +491,11 @@ impl Kind {
             | Self::LookAtPlayer { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
+            | Self::RandomStrollFly { .. }
             | Self::WalkTargetFromLook { .. }
             | Self::TriggerIf(_)
-            | Self::TriggerIfWrapped { .. } => "OneShot",
+            | Self::TriggerIfWrapped { .. }
+            | Self::InteractWithDoor => "OneShot",
             Self::MakeLove { .. } => "AnimalMakeLove",
             Self::FollowTemptation { .. } => "FollowTemptation",
             Self::RandomLookAround { .. } => "RandomLookAround",
@@ -469,8 +508,10 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.name(),
             Self::Nautilus(behavior) => behavior.name(),
             Self::Villager(behavior) => behavior.name(),
+            Self::CopperGolem(behavior) => behavior.name(),
             Self::Creaking(behavior) => behavior.name(),
             Self::Warden(behavior) => behavior.name(),
+
             Self::Sniffer(behavior) => behavior.name(),
             Self::Allay(behavior) => behavior.name(),
         }
@@ -483,6 +524,7 @@ impl Kind {
         matches!(
             self,
             Self::CountDownCooldown(_)
+                | Self::CopperGolem(super::super::copper_golem::Behavior::Transport(_))
                 | Self::FollowTemptation { .. }
                 | Self::Villager(super::super::villager_ai::Behavior::SleepInBed { .. })
                 | Self::Villager(
@@ -529,8 +571,10 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.extra_start(cx),
             Self::Nautilus(behavior) => behavior.extra_start(cx),
             Self::Villager(behavior) => behavior.extra_start(cx),
+            Self::CopperGolem(behavior) => behavior.extra_start(cx),
             Self::Creaking(behavior) => behavior.extra_start(cx),
             Self::Warden(behavior) => behavior.extra_start(cx),
+
             Self::Sniffer(behavior) => behavior.extra_start(cx),
             Self::Allay(behavior) => behavior.extra_start(cx),
             _ => true,
@@ -616,8 +660,10 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.start(cx),
             Self::Nautilus(behavior) => behavior.start(cx),
             Self::Villager(behavior) => behavior.start(cx),
+            Self::CopperGolem(behavior) => behavior.start(cx),
             Self::Creaking(behavior) => behavior.start(cx),
             Self::Warden(behavior) => behavior.start(cx),
+
             Self::Sniffer(behavior) => behavior.start(cx),
             Self::Allay(behavior) => behavior.start(cx),
             _ => {}
@@ -656,8 +702,10 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.can_still_use(cx),
             Self::Nautilus(behavior) => behavior.can_still_use(cx),
             Self::Villager(behavior) => behavior.can_still_use(cx),
+            Self::CopperGolem(behavior) => behavior.can_still_use(cx),
             Self::Creaking(behavior) => behavior.can_still_use(cx),
             Self::Warden(behavior) => behavior.can_still_use(cx),
+
             Self::Sniffer(behavior) => behavior.can_still_use(cx),
             Self::Allay(behavior) => behavior.can_still_use(cx),
             _ => false,
@@ -735,6 +783,7 @@ impl Kind {
                 speed,
                 close_adult,
                 close_baby,
+                look_in_eyes,
             } => {
                 let Some(player) = cx.memories.entity(TemptingPlayer) else {
                     return;
@@ -763,8 +812,8 @@ impl Kind {
                         MemoryValue::Walk(WalkTarget {
                             target: PositionTracker::Entity {
                                 uid: player,
-                                track_eye: false,
-                                target_eye: false,
+                                track_eye: *look_in_eyes,
+                                target_eye: *look_in_eyes,
                             },
                             speed: speed.value(cx.me.in_water),
                             close_enough: 2,
@@ -779,8 +828,10 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.tick(cx),
             Self::Nautilus(behavior) => behavior.tick(cx),
             Self::Villager(behavior) => behavior.tick(cx),
+            Self::CopperGolem(behavior) => behavior.tick(cx),
             Self::Creaking(behavior) => behavior.tick(cx),
             Self::Warden(behavior) => behavior.tick(cx),
+
             Self::Sniffer(behavior) => behavior.tick(cx),
             Self::Allay(behavior) => behavior.tick(cx),
             _ => {}
@@ -815,8 +866,10 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.stop(cx),
             Self::Nautilus(behavior) => behavior.stop(cx),
             Self::Villager(behavior) => behavior.stop(cx),
+            Self::CopperGolem(behavior) => behavior.stop(cx),
             Self::Creaking(behavior) => behavior.stop(cx),
             Self::Warden(behavior) => behavior.stop(cx, timed_out),
+
             Self::Sniffer(behavior) => behavior.stop(cx, timed_out),
             Self::Allay(behavior) => behavior.stop(cx),
             _ => {}
@@ -918,8 +971,32 @@ impl Kind {
                     false
                 }
             }
-            Self::RandomStroll { speed } => {
-                let pos = goals::land_random_pos(cx.me, cx.mob, cx.ctx.blocks(), 10, 7);
+            Self::RandomStroll {
+                speed,
+                horizontal,
+                vertical,
+            } => {
+                let pos =
+                    goals::land_random_pos(cx.me, cx.mob, cx.ctx.blocks(), *horizontal, *vertical);
+                cx.memories.set_or_erase(
+                    WalkTarget,
+                    pos.map(|pos| MemoryValue::Walk(WalkTarget::to_point(pos, *speed, 0))),
+                );
+                true
+            }
+            Self::RandomStrollFly { speed } => {
+                let facing = Vec3::view_vector(cx.mob.x_rot, cx.me.y_rot);
+                let pos = goals::air_and_water_random_pos(
+                    cx.me,
+                    cx.mob,
+                    cx.ctx.blocks(),
+                    10,
+                    7,
+                    -2,
+                    facing.x,
+                    facing.z,
+                    1.570_796_370_506_286_6,
+                );
                 cx.memories.set_or_erase(
                     WalkTarget,
                     pos.map(|pos| MemoryValue::Walk(WalkTarget::to_point(pos, *speed, 0))),
@@ -956,8 +1033,10 @@ impl Kind {
             Self::Axolotl(behavior) => behavior.trigger(cx),
             Self::Nautilus(behavior) => behavior.trigger(cx),
             Self::Villager(behavior) => behavior.trigger(cx),
+            Self::CopperGolem(behavior) => behavior.trigger(cx),
             Self::Creaking(behavior) => behavior.trigger(cx),
             Self::Warden(behavior) => behavior.trigger(cx),
+
             Self::Sniffer(behavior) => behavior.trigger(cx),
             Self::Allay(behavior) => behavior.trigger(cx),
             _ => false,
@@ -1354,7 +1433,11 @@ mod tests {
     fn wrapped_trigger_if_takes_inner_memories() {
         let kind = Kind::trigger_if(
             BodyPredicate::CamelNotRefuseToMove,
-            Kind::RandomStroll { speed: 2.0 },
+            Kind::RandomStroll {
+                speed: 2.0,
+                horizontal: 10,
+                vertical: 7,
+            },
         );
         assert!(matches!(kind.class(), Class::OneShot));
         assert_eq!(kind.name(), "OneShot");
