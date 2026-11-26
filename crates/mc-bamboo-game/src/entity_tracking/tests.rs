@@ -1147,3 +1147,83 @@ fn villager_sleeping_metadata_syncs_pose_and_bed_pos() {
         EntityData::SleepingPos(None)
     );
 }
+
+/// 画和展示框的 `AddEntity` 位置（方块角点）与朝向 `data`、配对元数据以及回到默认值的脏项更新。
+#[test]
+fn hanging_entities_sync_add_packet_and_metadata_deltas() {
+    use mc_bamboo_blocks::entity::{Entity, EntityKind};
+    use mc_bamboo_core::{BlockPos, Direction};
+    use mc_bamboo_data::{items, painting as painting_data};
+    use mc_bamboo_protocol::packet::play::{AddEntity, ENTITY_FLAG_INVISIBLE_BIT, EntityData};
+
+    let pos = BlockPos::new(3, 65, -2);
+    let variant = painting_data::id_of("minecraft:kebab").unwrap();
+    let mut painting = Entity::painting(pos, Direction::North, variant);
+    painting.id = 77;
+    let p_public = painting.split().public;
+    let p_snap = Snapshot::of(&p_public);
+    let p_tracked = TrackedEntity::new(&p_snap);
+    let p_pairing = p_tracked.pairing_packets(&p_snap);
+    let expected_add = mc_bamboo_protocol::frame::packet_body(&AddEntity {
+        entity_id: 77,
+        uuid: Uuid::from_bytes(p_snap.data.stable_uuid().expect("painting uuid")),
+        entity_type: mc_bamboo_data::registries::entity_type::PAINTING,
+        position: pos.corner(),
+        movement: Vec3::default(),
+        pitch: 0,
+        yaw: pack_degrees(180.0),
+        head_yaw: 0,
+        data: Direction::North.id(),
+    });
+    assert!(
+        p_pairing.contains(&expected_add),
+        "painting AddEntity uses block corner and facing id"
+    );
+    let p_values = p_snap.data.pairing_values();
+    assert!(p_values.contains(&EntityData::HangingDirection(Direction::North)));
+    assert!(p_values.contains(&EntityData::PaintingVariant(variant)));
+
+    // ItemFrame: non-default direction, item, rotation, invisible -> reset back to empty & visible.
+    let mut frame = Entity::item_frame(pos, Direction::Up, true);
+    frame.id = 78;
+    if let EntityKind::ItemFrame(f) = &mut frame.kind {
+        f.item = ItemStack::new(items::GOLD_INGOT, 1);
+        f.rotation = 3;
+        f.invisible = true;
+    }
+    let f_public = frame.clone().split().public;
+    let f_snap = Snapshot::of(&f_public);
+    let f_values = f_snap.data.pairing_values();
+    assert!(f_values.contains(&EntityData::SharedFlags(ENTITY_FLAG_INVISIBLE_BIT)));
+    assert!(f_values.contains(&EntityData::HangingDirection(Direction::Up)));
+    assert!(f_values.contains(&EntityData::ItemFrameItem(ItemStack::new(
+        items::GOLD_INGOT,
+        1
+    ))));
+    assert!(f_values.contains(&EntityData::ItemFrameRotation(3)));
+
+    let mut f_tracked = TrackedEntity::new(&f_snap);
+    // 先消费构造首刻的 `pending_dirty`（含非默认朝向），再测清空物品与隐身时的回退包。
+    let _ = f_tracked.step(&f_snap, false, false);
+    if let EntityKind::ItemFrame(f) = &mut frame.kind {
+        f.item = ItemStack::empty();
+        f.rotation = 0;
+        f.invisible = false;
+    }
+    let f_cleared_public = frame.split().public;
+    let f_cleared_snap = Snapshot::of(&f_cleared_public);
+    let packets = f_tracked.step(&f_cleared_snap, false, false);
+    let expected_meta =
+        mc_bamboo_protocol::frame::packet_body(&mc_bamboo_protocol::packet::play::SetEntityData {
+            entity_id: 78,
+            items: &[
+                EntityData::SharedFlags(0),
+                EntityData::ItemFrameItem(ItemStack::empty()),
+                EntityData::ItemFrameRotation(0),
+            ],
+        });
+    assert!(
+        packets.contains(&expected_meta),
+        "clearing item frame must emit default metadata values"
+    );
+}

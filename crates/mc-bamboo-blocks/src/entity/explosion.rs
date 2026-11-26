@@ -89,6 +89,17 @@ impl World<'_> {
         // `hurtEntities` 在打乱方块之前，而且不取 `level.random`。
         // `hurtEntities` runs before the block list is shuffled and does not draw `level.random`.
         crate::entity::item::hurt_items_by_explosion(self, center, radius);
+        let source_in_water = self
+            .block_state(BlockPos::containing(source.position))
+            .fluid()
+            .is_water();
+        crate::entity::hanging::hurt_hanging_by_explosion(
+            self,
+            center,
+            radius,
+            source_in_water,
+            false,
+        );
         let mut damage = tnt_blast_source(&source, owner);
         damage.position = Some(center);
         // 位 0：跳过 `hurtEntities`，牛不掉血、玩家包里没有击退向量。
@@ -307,6 +318,20 @@ impl World<'_> {
         let mut broken = self.calculate_exploded_positions(center, radius, None, resistance_cap);
         let block_count = broken.len() as i32;
         crate::entity::item::hurt_items_by_explosion(self, center, radius);
+        let source_in_water = match &source.kind {
+            KindPublic::Mob(mob) => mob.in_water,
+            _ => self
+                .block_state(BlockPos::containing(source.position))
+                .fluid()
+                .is_water(),
+        };
+        crate::entity::hanging::hurt_hanging_by_explosion(
+            self,
+            center,
+            radius,
+            source_in_water,
+            true,
+        );
         let damage = blast_source(source);
         let hit_players = hurt_living_by_explosion(self, Some(source), damage, center, radius);
         let interacts = rules.mob_griefing;
@@ -342,6 +367,7 @@ impl World<'_> {
         let mut broken = self.calculate_exploded_positions(center, 5.0, water_resistance, None);
         let block_count = broken.len() as i32;
         crate::entity::item::hurt_items_by_explosion(self, center, 5.0);
+        crate::entity::hanging::hurt_hanging_by_explosion(self, center, 5.0, false, false);
         let mut damage = DamageSource::environment(DamageKind::BadRespawnPoint);
         damage.position = Some(center);
         let hit_players = hurt_living_by_explosion(self, None, damage, center, 5.0);

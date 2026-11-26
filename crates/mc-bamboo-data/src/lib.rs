@@ -14,6 +14,11 @@ use std::sync::LazyLock;
 /// 配方表的数据结构和官方数据包导出的全部配方。
 pub mod recipe;
 
+/// 画的变体尺寸、名字查询和 `#placeable` 标签顺序。
+///
+/// Painting variant dimensions, lookups and `#placeable` tag order.
+pub mod painting;
+
 /// 村民的静态数据和按名字 / ID 的查询。
 ///
 /// Villager static data and name / id lookups.

@@ -405,6 +405,22 @@ public final class ChunkContentOracle {
         public LevelTicks<Fluid> getFluidTicks() {
             return fluidTicks;
         }
+
+        // `ItemFrame.readAdditionalSaveData` 载入非空物品时会调 `setItem(stack, false)` →
+        // `playSound` → `server.getPlayerList().broadcast(...)`；假服务端没有玩家表。
+        // `ItemFrame.readAdditionalSaveData` plays a sound via `setItem(stack, false)` when
+        // loading a non-empty stack; the fake server has no `PlayerList`.
+        @Override
+        public void playSeededSound(
+                Entity except,
+                double x,
+                double y,
+                double z,
+                Holder<net.minecraft.sounds.SoundEvent> sound,
+                net.minecraft.sounds.SoundSource source,
+                float volume,
+                float pitch,
+                long seed) {}
     }
 
     private static final class Oracle {

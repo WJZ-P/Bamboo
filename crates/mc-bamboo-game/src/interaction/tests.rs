@@ -2821,6 +2821,121 @@ fn a_cod_bucket_pours_water_and_spawns_a_cod() {
     );
 }
 
+/// 玩家端到端流程：放画、放荧光物品展示框、生存模式下放物品并旋转、左键先打掉物品再打掉框。
+#[test]
+fn placing_interacting_and_punching_painting_and_item_frame() {
+    use mc_bamboo_blocks::entity::EntityKind;
+
+    let (mut server, client) = settled();
+    // 在 (10, -60, 8) 建一面 2x2 墙，让玩家在西侧 (8.5, -60, 8.5) 点击西面放画和展示框。
+    for y in -60..=-59 {
+        for z in 8..=9 {
+            let pos = BlockPos::new(10, y, z);
+            server.region().chunks.set_block(pos, blocks::STONE);
+        }
+    }
+    // 放一张画在 (10, -60, 8) 西面 -> 贴附格 (9, -60, 8)。
+    hold(&server, &client, items::PAINTING);
+    server.tick();
+    server.request(
+        &client,
+        use_item_on(Hand::Main, BlockPos::new(10, -60, 8), Direction::West, 1),
+    );
+    server.tick();
+    let painting_id = server
+        .region()
+        .entities
+        .iter()
+        .find_map(|e| matches!(e.kind, EntityKind::Painting(_)).then_some(e.id))
+        .expect("painting spawned");
+
+    // 切到生存模式，左键打掉画 -> 掉落画物品实体。
+    server
+        .region()
+        .players
+        .get_mut(&client.id)
+        .expect("player")
+        .game_mode = GameMode::Survival;
+    crate::player_attack::on_attack(server.region(), client.id, painting_id);
+    assert!(
+        server.region().entities.get(painting_id).is_none(),
+        "painting broken by punch"
+    );
+    assert!(
+        server
+            .region()
+            .entities
+            .iter()
+            .any(|e| matches!(&e.kind, EntityKind::Item(i) if i.stack.item == items::PAINTING)),
+        "painting dropped as item"
+    );
+
+    // 放一个荧光物品展示框（生存模式给 2 个，消耗 1 个）。
+    server
+        .region()
+        .players
+        .get_mut(&client.id)
+        .expect("player")
+        .inventory
+        .slots[36] = ItemStack::new(items::GLOW_ITEM_FRAME, 2);
+    server.request(
+        &client,
+        use_item_on(Hand::Main, BlockPos::new(10, -60, 8), Direction::West, 2),
+    );
+    server.tick();
+    assert_eq!(server.player(&client).inventory.held(Hand::Main).count, 1);
+    let frame_id = server
+        .region()
+        .entities
+        .iter()
+        .find_map(|e| matches!(e.kind, EntityKind::ItemFrame(ref f) if f.glowing).then_some(e.id))
+        .expect("glow item frame spawned");
+
+    // 拿 3 个苹果右键放入展示框 -> 消耗 1 个，剩 2 个；再右键旋转一次。
+    server
+        .region()
+        .players
+        .get_mut(&client.id)
+        .expect("player")
+        .inventory
+        .slots[36] = ItemStack::new(items::APPLE, 3);
+    crate::interaction::on_interact_entity(server.region(), client.id, frame_id, Hand::Main, false);
+    assert_eq!(server.player(&client).inventory.held(Hand::Main).count, 2);
+    crate::interaction::on_interact_entity(server.region(), client.id, frame_id, Hand::Main, false);
+    {
+        let frame = server.region().entities.get(frame_id).expect("frame alive");
+        let EntityKind::ItemFrame(f) = &frame.kind else {
+            panic!("frame");
+        };
+        assert_eq!(f.item.item, items::APPLE);
+        assert_eq!(f.rotation, 1);
+    }
+
+    // 第一下左键打掉框内物品，框留在墙上；第二下左键打掉荧光物品展示框。
+    crate::player_attack::on_attack(server.region(), client.id, frame_id);
+    {
+        let frame = server
+            .region()
+            .entities
+            .get(frame_id)
+            .expect("frame stays after first hit");
+        let EntityKind::ItemFrame(f) = &frame.kind else {
+            panic!("frame");
+        };
+        assert!(f.item.is_empty());
+    }
+    crate::player_attack::on_attack(server.region(), client.id, frame_id);
+    assert!(
+        server.region().entities.get(frame_id).is_none(),
+        "frame removed on second hit"
+    );
+    assert!(
+        server.region().entities.iter().any(
+            |e| matches!(&e.kind, EntityKind::Item(i) if i.stack.item == items::GLOW_ITEM_FRAME)
+        )
+    );
+}
+
 #[path = "weapon_tests.rs"]
 mod weapon_tests;
 

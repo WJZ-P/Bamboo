@@ -44,6 +44,9 @@ fn guard_value(
         ReadMethod::MinY => crate::recording::stable_hash(&level.min_y()),
         ReadMethod::MaxY => crate::recording::stable_hash(&level.max_y()),
         ReadMethod::Comparator(pos) => crate::recording::stable_hash(&level.comparator_output(pos)),
+        ReadMethod::ItemFrameSignal(pos, facing) => {
+            crate::recording::stable_hash(&level.comparator_item_frame_signal(facing, pos))
+        }
         ReadMethod::TickQuery(pos, kind, will_tick_this_tick) => {
             let result = if will_tick_this_tick {
                 ticks.will_tick_this_tick(pos, kind)
