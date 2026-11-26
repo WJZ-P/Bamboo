@@ -21,6 +21,10 @@ const SERIALIZER_INT: i32 = 1;
 /// `EntityDataSerializers.LONG`：变长整数。
 const SERIALIZER_LONG: i32 = 2;
 const SERIALIZER_FLOAT: i32 = 3;
+/// `EntityDataSerializers.ROTATIONS`，注册顺序里的第 10 个（ID 9）。
+///
+/// `EntityDataSerializers.ROTATIONS`, the tenth `registerSerializer` call (ID 9).
+const SERIALIZER_ROTATIONS: i32 = 9;
 /// `EntityDataSerializers.OPTIONAL_COMPONENT`，注册顺序里的第 7 个。
 ///
 /// `EntityDataSerializers.OPTIONAL_COMPONENT`, the seventh `registerSerializer` call.
@@ -548,6 +552,19 @@ pub enum EntityData {
     ///
     /// `Guardian.DATA_ID_ATTACK_TARGET` (INT, index 17).
     GuardianAttackTarget(i32),
+    /// `ArmorStand.DATA_CLIENT_FLAGS`（BYTE，索引 15）：小型、手臂、无底座、标记。
+    ///
+    /// `ArmorStand.DATA_CLIENT_FLAGS` (BYTE, index 15): small, arms, no baseplate, marker.
+    ArmorStandFlags(u8),
+    /// 六个 `ArmorStand` 姿势（ROTATIONS，索引 16..21）：`[x, y, z]` 三轴旋转（度）。
+    ///
+    /// The six `ArmorStand` poses (ROTATIONS, index 16..21): `[x, y, z]` degrees.
+    ArmorStandHeadPose([f32; 3]),
+    ArmorStandBodyPose([f32; 3]),
+    ArmorStandLeftArmPose([f32; 3]),
+    ArmorStandRightArmPose([f32; 3]),
+    ArmorStandLeftLegPose([f32; 3]),
+    ArmorStandRightLegPose([f32; 3]),
 }
 
 /// [`EntityData::SharedFlags`] 里表示按住潜行键的位。
@@ -703,6 +720,13 @@ impl EntityData {
             Self::CreakingActive(_) => mc_bamboo_data::entity_types::CREAKING_IS_ACTIVE,
             Self::CreakingTearingDown(_) => mc_bamboo_data::entity_types::CREAKING_IS_TEARING_DOWN,
             Self::CreakingHomePos(_) => mc_bamboo_data::entity_types::CREAKING_HOME_POS,
+            Self::ArmorStandFlags(_) => 15,
+            Self::ArmorStandHeadPose(_) => 16,
+            Self::ArmorStandBodyPose(_) => 17,
+            Self::ArmorStandLeftArmPose(_) => 18,
+            Self::ArmorStandRightArmPose(_) => 19,
+            Self::ArmorStandLeftLegPose(_) => 20,
+            Self::ArmorStandRightLegPose(_) => 21,
         }
     }
 
@@ -833,6 +857,21 @@ impl EntityData {
             Self::Health(health) => {
                 write_data_header(out, 9, SERIALIZER_FLOAT);
                 write_f32(out, *health);
+            }
+            Self::ArmorStandFlags(flags) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*flags);
+            }
+            Self::ArmorStandHeadPose(rot)
+            | Self::ArmorStandBodyPose(rot)
+            | Self::ArmorStandLeftArmPose(rot)
+            | Self::ArmorStandRightArmPose(rot)
+            | Self::ArmorStandLeftLegPose(rot)
+            | Self::ArmorStandRightLegPose(rot) => {
+                write_data_header(out, self.index(), SERIALIZER_ROTATIONS);
+                for value in rot {
+                    write_f32(out, *value);
+                }
             }
             Self::EffectParticles(colors) => {
                 write_data_header(out, 10, SERIALIZER_PARTICLES);
@@ -1539,6 +1578,30 @@ mod tests {
 
     fn set_entity_data(entity_id: i32, items: &[EntityData]) -> Vec<u8> {
         body(&SetEntityData { entity_id, items })
+    }
+
+    #[test]
+    fn armour_stand_metadata_uses_the_official_indices_and_serializers() {
+        assert_eq!(EntityData::ArmorStandFlags(0).index(), 15);
+        assert_eq!(EntityData::ArmorStandHeadPose([0.0; 3]).index(), 16);
+        assert_eq!(EntityData::ArmorStandBodyPose([0.0; 3]).index(), 17);
+        assert_eq!(EntityData::ArmorStandLeftArmPose([0.0; 3]).index(), 18);
+        assert_eq!(EntityData::ArmorStandRightArmPose([0.0; 3]).index(), 19);
+        assert_eq!(EntityData::ArmorStandLeftLegPose([0.0; 3]).index(), 20);
+        assert_eq!(EntityData::ArmorStandRightLegPose([0.0; 3]).index(), 21);
+
+        let mut flags = Vec::new();
+        EntityData::ArmorStandFlags(4).write(&mut flags);
+        assert_eq!(flags, vec![15, 0, 4]);
+
+        let mut pose = Vec::new();
+        EntityData::ArmorStandHeadPose([1.0, 2.0, 3.0]).write(&mut pose);
+        assert_eq!(
+            pose,
+            vec![
+                16, 9, 0x3f, 0x80, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x40, 0x40, 0x00, 0x00,
+            ]
+        );
     }
 
     #[test]
