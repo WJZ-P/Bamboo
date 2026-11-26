@@ -12,9 +12,17 @@
 //! player and mob ids. This module holds the data and type lookups; the per-tick physics
 //! lives in the tick function.
 
+use mc_bamboo_core::{BlockPos, Vec3, mth};
+use mc_bamboo_data::{blocks, tags::fluid_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
-use super::{Entity, EntityUid, ctx::EntityCtx};
+use crate::{shape::Aabb, state::DRAG};
+
+use super::{
+    Entity, EntityUid,
+    ctx::{BlockView, EntityCtx},
+    item::{apply_current, flow_vector, friction},
+};
 
 /// 桨每次前进的角度，官方 `PADDLE_SPEED`（π/8 的 f32，位模式与字面量 `0.3926991f` 相同）。
 ///
@@ -283,20 +291,365 @@ pub const fn drop_item(entity_type: i32) -> i32 {
     }
 }
 
-/// 船的一刻。`Entity::tick` 在 `common_tick` 之后调它。完整物理在后续提交里补。
+/// 船的一刻，`AbstractBoat.tick` 的服务端路径：状态判定、漂浮物理、移动、气泡柱、
+/// 水流和桨动画。玩家控制时位置由客户端 `move_vehicle` 决定，服务端只清速度。
 ///
-/// One boat tick, called after `common_tick`. The full physics lands in a later
-/// commit; for now this advances the timers the bytecode decrements before the
-/// movement step.
-pub fn tick(me: &mut Entity, _ctx: &mut dyn EntityCtx) {
-    let super::EntityKind::Boat(boat) = &mut me.kind else {
+/// One boat tick, the server path of `AbstractBoat.tick`: status, buoyancy,
+/// movement, bubble columns, currents and paddle animation. A player-controlled
+/// boat has its position set by the client `move_vehicle` packet, so the server
+/// only clears its velocity.
+pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
+    let super::EntityKind::Boat(boat_box) = &me.kind else {
         return;
     };
+    // 把状态复制到局部：物理里要同时读方块视图、改位置和这份状态，绕开借用纠缠。
+    let mut boat = (**boat_box).clone();
+    let view = ctx.blocks();
+
     boat.old_status = boat.status;
+    boat.status = get_status(&mut boat, me, view);
+    if matches!(boat.status, Status::UnderWater | Status::UnderFlowingWater) {
+        boat.out_of_control_ticks += 1.0;
+    } else {
+        boat.out_of_control_ticks = 0.0;
+    }
+    // 服务端 `outOfControlTicks >= 60` 时的 `ejectPassengers()` 由骑乘层接入。
     if boat.hurt_time > 0 {
         boat.hurt_time -= 1;
     }
     if boat.damage > 0.0 {
         boat.damage -= 1.0;
     }
+
+    // 服务端 `isLocalInstanceAuthoritative()` = `!isClientAuthoritative()`，后者
+    // 只在控制者是玩家时为真。无人 / 动物控制的船由服务端跑 `floatBoat` + `move`。
+    if !first_passenger_is_player(&boat) {
+        boat.paddle_left = false;
+        boat.paddle_right = false;
+        float_boat(&mut boat, me, view);
+        me.move_entity(view, me.delta);
+    } else {
+        me.delta = Vec3::default();
+        boat.delta_rotation = 0.0;
+    }
+
+    me.apply_effects_from_blocks(view);
+    me.apply_effects_from_blocks(view);
+    detect_bubble_column(&mut boat, me, view);
+    apply_water_current(me, view);
+    tick_bubble_column(&mut boat, me);
+
+    for index in 0..2 {
+        let paddling = if index == 0 {
+            boat.paddle_left
+        } else {
+            boat.paddle_right
+        };
+        if paddling {
+            let before = f64::from(boat.paddle_positions[index] % 6.283_185_5_f32);
+            let after = f64::from((boat.paddle_positions[index] + PADDLE_SPEED) % 6.283_185_5_f32);
+            if before <= PADDLE_SOUND_TIME && after >= PADDLE_SOUND_TIME {
+                let _ = me.random.next_float();
+            }
+            boat.paddle_positions[index] += PADDLE_SPEED;
+        } else {
+            boat.paddle_positions[index] = 0.0;
+        }
+    }
+
+    // 推动实体、把动物拉上船由骑乘层接入。
+
+    if let super::EntityKind::Boat(boat_box) = &mut me.kind {
+        **boat_box = boat;
+    }
+}
+
+/// `getStatus`：`isUnderwater` → `checkInWater` → 地面摩擦 → `IN_AIR`。
+fn get_status(boat: &mut Boat, me: &Entity, view: &dyn BlockView) -> Status {
+    if let Some(status) = is_underwater(me, view) {
+        boat.water_level = me.bounding_box().max_y;
+        return status;
+    }
+    if check_in_water(boat, me, view) {
+        return Status::InWater;
+    }
+    let ground = get_ground_friction(me, view);
+    if ground > 0.0 {
+        boat.land_friction = ground;
+        return Status::OnLand;
+    }
+    Status::InAir
+}
+
+/// `isUnderwater`：AABB 顶面之上还有水源格 → `UNDER_WATER`；有流动水 →
+/// `UNDER_FLOWING_WATER`；否则返回 `None`。
+fn is_underwater(me: &Entity, view: &dyn BlockView) -> Option<Status> {
+    let bb = me.bounding_box();
+    let ceiling = bb.max_y + 0.001;
+    let (x0, x1) = (mth::floor(bb.min_x), mth::ceil(bb.max_x));
+    let (y0, y1) = (mth::floor(bb.max_y), mth::ceil(ceiling));
+    let (z0, z1) = (mth::floor(bb.min_z), mth::ceil(bb.max_z));
+    let mut source = false;
+    for x in x0..x1 {
+        for y in y0..y1 {
+            for z in z0..z1 {
+                let pos = BlockPos::new(x, y, z);
+                let fluid = view.fluid_state(pos);
+                if !fluid.is_tagged(fluid_tags::WATER) {
+                    continue;
+                }
+                let top = (y as f32) + view.fluid_height(fluid, pos);
+                if ceiling < f64::from(top) {
+                    if fluid.is_source() {
+                        source = true;
+                    } else {
+                        return Some(Status::UnderFlowingWater);
+                    }
+                }
+            }
+        }
+    }
+    source.then_some(Status::UnderWater)
+}
+
+/// `checkInWater`：扫 AABB 里的水，把 `waterLevel` 记成最高水面，返回船底是否浸在水里。
+fn check_in_water(boat: &mut Boat, me: &Entity, view: &dyn BlockView) -> bool {
+    let bb = me.bounding_box();
+    let (x0, x1) = (mth::floor(bb.min_x), mth::ceil(bb.max_x));
+    let (y0, y1) = (mth::floor(bb.min_y), mth::ceil(bb.min_y + 0.001));
+    let (z0, z1) = (mth::floor(bb.min_z), mth::ceil(bb.max_z));
+    let mut found = false;
+    boat.water_level = -f64::MAX;
+    for x in x0..x1 {
+        for y in y0..y1 {
+            for z in z0..z1 {
+                let pos = BlockPos::new(x, y, z);
+                let fluid = view.fluid_state(pos);
+                if !fluid.is_tagged(fluid_tags::WATER) {
+                    continue;
+                }
+                let top = (y as f32) + view.fluid_height(fluid, pos);
+                boat.water_level = boat.water_level.max(f64::from(top));
+                if bb.min_y < f64::from(top) {
+                    found = true;
+                }
+            }
+        }
+    }
+    found
+}
+
+/// `getWaterLevelAbove`：从 AABB 顶面逐层向上找第一层水面没到顶的水位。
+fn get_water_level_above(boat: &Boat, me: &Entity, view: &dyn BlockView) -> f32 {
+    let bb = me.bounding_box();
+    let (x0, x1) = (mth::floor(bb.min_x), mth::ceil(bb.max_x));
+    let (z0, z1) = (mth::floor(bb.min_z), mth::ceil(bb.max_z));
+    let y0 = mth::floor(bb.max_y);
+    let y1 = mth::ceil(bb.max_y - boat.last_yd);
+    for y in y0..y1 {
+        let mut max_height = 0.0f32;
+        'columns: for x in x0..x1 {
+            for z in z0..z1 {
+                let pos = BlockPos::new(x, y, z);
+                let fluid = view.fluid_state(pos);
+                if fluid.is_tagged(fluid_tags::WATER) {
+                    max_height = max_height.max(view.fluid_height(fluid, pos));
+                }
+                if max_height >= 1.0 {
+                    break 'columns;
+                }
+            }
+        }
+        if max_height < 1.0 {
+            return (y as f32) + max_height;
+        }
+    }
+    (y1 + 1) as f32
+}
+
+/// `getGroundFriction`：底部薄片碰到的方块摩擦均值；无碰撞块时是 NaN，
+/// `getStatus` 里 `NaN > 0` 为假，与官方一致。
+fn get_ground_friction(me: &Entity, view: &dyn BlockView) -> f32 {
+    let bb = me.bounding_box();
+    let thin = Aabb::new(
+        bb.min_x,
+        bb.min_y - 0.001,
+        bb.min_z,
+        bb.max_x,
+        bb.min_y,
+        bb.max_z,
+    );
+    let mut sum = 0.0f32;
+    let mut count = 0i32;
+    for (pos, _) in view.block_collisions(thin, me.collision_context()) {
+        let state = view.block_state(pos);
+        if state.is(blocks::LILY_PAD) {
+            continue;
+        }
+        sum += friction(state);
+        count += 1;
+    }
+    sum / count as f32
+}
+
+/// `floatBoat`：按状态算这一刻的加速度和阻力，必要时把船直接抬到水面。
+fn float_boat(boat: &mut Boat, me: &mut Entity, view: &dyn BlockView) {
+    let mut gravity = -DEFAULT_GRAVITY;
+    let mut lift = 0.0f64;
+    // 官方初值 `0.05f` 在走完状态分支前从不会被读：每个分支都会覆盖它。
+    // Vanilla's `0.05f` initial value is never read: every status branch overwrites it.
+    let drag: f32;
+    let bb = me.bounding_box();
+    let height = f64::from(me.dimensions.1);
+    if boat.old_status == Status::InAir
+        && boat.status != Status::InAir
+        && boat.status != Status::OnLand
+    {
+        boat.water_level = me.y_at(1.0);
+        let above = get_water_level_above(boat, me, view);
+        let target = f64::from(above - me.dimensions.1) + 0.101;
+        let dy = target - me.position.y;
+        let moved = Aabb::new(
+            bb.min_x,
+            bb.min_y + dy,
+            bb.min_z,
+            bb.max_x,
+            bb.max_y + dy,
+            bb.max_z,
+        );
+        if view
+            .block_collisions(moved, me.collision_context())
+            .is_empty()
+        {
+            me.position = Vec3::new(me.position.x, target, me.position.z);
+            me.delta = me.delta.multiply(1.0, 0.0, 1.0);
+            boat.last_yd = 0.0;
+        }
+        boat.status = Status::InWater;
+        return;
+    }
+    match boat.status {
+        Status::InWater => {
+            lift = (boat.water_level - me.position.y) / height;
+            drag = 0.9;
+        }
+        Status::UnderFlowingWater => {
+            gravity = -0.0007;
+            drag = 0.9;
+        }
+        Status::UnderWater => {
+            lift = 0.009_999_999_776_482_582;
+            drag = 0.45;
+        }
+        Status::InAir => {
+            drag = 0.9;
+        }
+        Status::OnLand => {
+            drag = boat.land_friction;
+            if first_passenger_is_player(boat) {
+                boat.land_friction /= 2.0;
+            }
+        }
+    }
+    me.delta = Vec3::new(
+        me.delta.x * f64::from(drag),
+        me.delta.y + gravity,
+        me.delta.z * f64::from(drag),
+    );
+    boat.delta_rotation *= drag;
+    if lift > 0.0 {
+        let y = (me.delta.y + lift * (DEFAULT_GRAVITY / 0.65)) * 0.75;
+        me.delta = Vec3::new(me.delta.x, y, me.delta.z);
+    }
+}
+
+/// `onAboveBubbleColumn`：船所在格子里有气泡柱时记下方向并起泡。
+fn detect_bubble_column(boat: &mut Boat, me: &Entity, view: &dyn BlockView) {
+    let bb = me.bounding_box();
+    let (x0, x1) = (mth::floor(bb.min_x), mth::ceil(bb.max_x));
+    let (y0, y1) = (mth::floor(bb.min_y), mth::ceil(bb.max_y));
+    let (z0, z1) = (mth::floor(bb.min_z), mth::ceil(bb.max_z));
+    for x in x0..x1 {
+        for y in y0..y1 {
+            for z in z0..z1 {
+                let state = view.block_state(BlockPos::new(x, y, z));
+                if state.is(blocks::BUBBLE_COLUMN) {
+                    boat.is_above_bubble_column = true;
+                    boat.bubble_column_direction_is_down = state.get(DRAG);
+                    if boat.bubble_time == 0 {
+                        boat.bubble_time = BUBBLE_TIME;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `tickBubbleColumn`：气泡时间到点后施加向上 / 向下的气泡冲量。
+fn tick_bubble_column(boat: &mut Boat, me: &mut Entity) {
+    if !boat.is_above_bubble_column {
+        boat.bubble_time = 0;
+    }
+    if boat.bubble_time > 0 {
+        boat.bubble_time -= 1;
+        let elapsed = BUBBLE_TIME - boat.bubble_time - 1;
+        if elapsed > 0 && boat.bubble_time == 0 {
+            boat.bubble_time = 0;
+            // down 分支还要 `ejectPassengers()` 和实体事件 71，否则 72；骑乘层接入。
+            handle_bubble_column_effect(me, boat.bubble_column_direction_is_down);
+        }
+    }
+    boat.is_above_bubble_column = false;
+}
+
+/// `handleBubbleColumnEffect`。
+fn handle_bubble_column_effect(me: &mut Entity, down: bool) {
+    if down {
+        me.delta = me.delta.add(Vec3::new(0.0, -0.7, 0.0));
+    } else {
+        me.delta = Vec3::new(me.delta.x, 0.6, me.delta.z);
+    }
+}
+
+/// `Entity.updateFluidInteraction` 的水流推动部分（船没有流体跟踪器）。
+fn apply_water_current(me: &mut Entity, view: &dyn BlockView) {
+    let bounds = me.bounding_box().deflated(0.001);
+    let (x0, x1) = (mth::floor(bounds.min_x), mth::ceil(bounds.max_x) - 1);
+    let (y0, y1) = (mth::floor(bounds.min_y), mth::ceil(bounds.max_y) - 1);
+    let (z0, z1) = (mth::floor(bounds.min_z), mth::ceil(bounds.max_z) - 1);
+    let mut current = Vec3::default();
+    let mut height = 0.0f64;
+    let mut count = 0i32;
+    for x in x0..=x1 {
+        for y in y0..=y1 {
+            for z in z0..=z1 {
+                let pos = BlockPos::new(x, y, z);
+                let fluid = view.fluid_state(pos);
+                if fluid.is_empty() || !fluid.is_tagged(fluid_tags::WATER) {
+                    continue;
+                }
+                let top = (y as f64) + f64::from(view.fluid_height(fluid, pos));
+                if top < bounds.min_y {
+                    continue;
+                }
+                height = height.max(top - me.position.y);
+                let mut flow = flow_vector(view, pos, fluid);
+                if height < 0.4 {
+                    flow = flow.scale(height);
+                }
+                current = current.add(flow);
+                count += 1;
+            }
+        }
+    }
+    if count > 0 {
+        apply_current(me, &current, 0.014);
+    }
+}
+
+/// 第一乘客是不是玩家：玩家 ID 从 1 起，实体 ID 从 `FIRST_ENTITY_ID` 起。
+fn first_passenger_is_player(boat: &Boat) -> bool {
+    boat.passengers
+        .first()
+        .is_some_and(|&uid| uid < super::FIRST_ENTITY_ID)
 }
