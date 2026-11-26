@@ -9,7 +9,8 @@
 
 use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::{
-    BlockAncestor, FieldValue, blocks, damage_type_id, entity_types, registries::entity_type, tags,
+    BlockAncestor, FieldValue, blocks, damage_type_id, entity_types, in_tag,
+    registries::entity_type,
 };
 use mc_bamboo_protocol::{components::ComponentValue, item::ItemStack};
 
@@ -143,7 +144,7 @@ pub fn damage_always_triggers_silverfish(kind_name: &str) -> bool {
     let Some(id) = damage_type_id(kind_name) else {
         return false;
     };
-    tag_contains(
+    in_tag(
         "minecraft:damage_type",
         "minecraft:always_triggers_silverfish",
         id,
@@ -154,18 +155,9 @@ pub fn damage_always_triggers_silverfish(kind_name: &str) -> bool {
 ///
 /// Whether an enchantment id is in `EnchantmentTags.PREVENTS_INFESTED_SPAWNS`.
 pub fn prevents_infested_spawns(enchantment: i32) -> bool {
-    tag_contains(
+    in_tag(
         "minecraft:enchantment",
         "minecraft:prevents_infested_spawns",
         enchantment,
     )
-}
-
-fn tag_contains(registry: &str, tag: &str, id: i32) -> bool {
-    tags::TAG_GROUPS
-        .iter()
-        .filter(|group| group.registry == registry)
-        .flat_map(|group| group.tags.iter())
-        .find(|entry| entry.name == tag)
-        .is_some_and(|entry| entry.ids.contains(&id))
 }

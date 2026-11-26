@@ -11,6 +11,7 @@
 
 pub mod arrow;
 pub mod ctx;
+pub mod evoker_fangs;
 pub mod firework_rocket;
 pub mod leash_knot;
 pub mod lightning;
@@ -253,6 +254,10 @@ pub enum EntityKind {
     ///
     /// A lightning bolt, vanilla `LightningBolt`.
     LightningBolt(Box<lightning::LightningBolt>),
+    /// 唤魔者尖牙，`EvokerFangs`。
+    ///
+    /// Evoker fangs, vanilla `EvokerFangs`.
+    EvokerFangs(Box<evoker_fangs::EvokerFangs>),
     /// 不祥物品生成器，`OminousItemSpawner`。
     ///
     /// An ominous item spawner, vanilla `OminousItemSpawner`.
@@ -289,6 +294,7 @@ impl EntityKind {
             Self::Egg(egg) => egg.kind.entity_type(),
             Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
             Self::LightningBolt(_) => mc_bamboo_data::registries::entity_type::LIGHTNING_BOLT,
+            Self::EvokerFangs(_) => mc_bamboo_data::registries::entity_type::EVOKER_FANGS,
             Self::OminousItemSpawner(_) => {
                 mc_bamboo_data::registries::entity_type::OMINOUS_ITEM_SPAWNER
             }
@@ -528,6 +534,7 @@ impl Entity {
             EntityKind::Egg(_) => thrown_egg::tick(self, ctx),
             EntityKind::SplashPotion(_) => splash_potion::tick(self, ctx),
             EntityKind::LightningBolt(_) => lightning::tick(self, ctx),
+            EntityKind::EvokerFangs(_) => evoker_fangs::tick(self, ctx),
             EntityKind::OminousItemSpawner(_) => {
                 ominous_item_spawner::tick(self, ctx);
             }

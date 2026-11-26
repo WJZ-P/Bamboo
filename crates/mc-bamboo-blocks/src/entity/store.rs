@@ -140,6 +140,10 @@ pub enum KindPublic {
     ///
     /// A lightning bolt: the client reads its seed, life and remaining flashes.
     LightningBolt(super::lightning::LightningBolt),
+    /// 唤魔者尖牙：没有额外同步数据（位置 / 朝向在 `EntityPublic`）。
+    ///
+    /// Evoker fangs: no extra synced data (position / rotation live on `EntityPublic`).
+    EvokerFangs,
     /// 不祥物品生成器：客户端要同步的 `DATA_ITEM`。
     ///
     /// An ominous item spawner: the synced `DATA_ITEM`.
@@ -183,6 +187,7 @@ impl KindPublic {
             Self::Egg(egg) => egg.kind.entity_type(),
             Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
             Self::LightningBolt(_) => mc_bamboo_data::registries::entity_type::LIGHTNING_BOLT,
+            Self::EvokerFangs => mc_bamboo_data::registries::entity_type::EVOKER_FANGS,
             Self::OminousItemSpawner(_) => {
                 mc_bamboo_data::registries::entity_type::OMINOUS_ITEM_SPAWNER
             }
@@ -262,6 +267,8 @@ pub enum KindState {
     LeashKnot(super::LeashKnot),
     /// 闪电的全部状态，公开的那一半就是它本身。
     LightningBolt(super::lightning::LightningBolt),
+    /// 唤魔者尖牙的全部状态。
+    EvokerFangs(Box<super::evoker_fangs::EvokerFangs>),
     /// 不祥物品生成器的全部状态。
     OminousItemSpawner(Box<super::ominous_item_spawner::OminousItemSpawner>),
     /// 风弹的全部状态。
@@ -409,6 +416,9 @@ impl EntityRow {
             (KindPublic::LightningBolt(_), KindState::LightningBolt(bolt)) => {
                 EntityKind::LightningBolt(Box::new(bolt))
             }
+            (KindPublic::EvokerFangs, KindState::EvokerFangs(fangs)) => {
+                EntityKind::EvokerFangs(fangs)
+            }
             (KindPublic::OminousItemSpawner(_), KindState::OminousItemSpawner(spawner)) => {
                 EntityKind::OminousItemSpawner(spawner)
             }
@@ -517,6 +527,9 @@ impl Entity {
                 KindPublic::LightningBolt((*bolt).clone()),
                 KindState::LightningBolt(*bolt),
             ),
+            EntityKind::EvokerFangs(fangs) => {
+                (KindPublic::EvokerFangs, KindState::EvokerFangs(fangs))
+            }
             EntityKind::OminousItemSpawner(spawner) => (
                 KindPublic::OminousItemSpawner(spawner.item.clone()),
                 KindState::OminousItemSpawner(spawner),
@@ -1671,6 +1684,19 @@ impl EntityStore {
                         vec![super::mob::MobEvent::EntityEvent { event: 3 }],
                     )
                 }),
+                // `EvokerFangs.tick`：第一次生效时广播 4 号实体事件（尖牙动画）。
+                // `EvokerFangs.tick`: broadcast entity event 4 the first time it activates.
+                super::KindState::EvokerFangs(fangs) => {
+                    if fangs.pending_spike_event {
+                        fangs.pending_spike_event = false;
+                        Some((
+                            row.public.uid,
+                            vec![super::mob::MobEvent::EntityEvent { event: 4 }],
+                        ))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         };

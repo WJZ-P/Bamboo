@@ -22,7 +22,7 @@ use mc_bamboo_blocks::{
             spawn::{SpawnReason, finalize_spawn},
         },
         raid::{
-            DEFAULT_PRE_RAID_TICKS, DIFFICULTY_NORMAL, DIFFICULTY_PEACEFUL,
+            DEFAULT_PRE_RAID_TICKS, DIFFICULTY_HARD, DIFFICULTY_NORMAL, DIFFICULTY_PEACEFUL,
             HERO_OF_THE_VILLAGE_DURATION, MAX_CELEBRATION_TICKS, MAX_RAID_OMEN_LEVEL,
             POST_RAID_TICK_LIMIT, RAID_REMOVAL_THRESHOLD_SQR, RAID_TIMEOUT_TICKS, Raid, RaidStatus,
             RaiderType, VALID_RAID_RADIUS_SQR, num_groups,
@@ -643,6 +643,10 @@ fn spawn_group_plan(
     // Official `RaiderType.VALUES` has five entries; `spawnGroup` calls
     // `getPotentialBonusSpawns` for each, so even types not modelled yet draw
     // from the same random source.
+    // 官方 `spawnGroup` 里数劫掠兽的计数器：困难第 7 波起第一只唤魔者骑手，其余卫道士。
+    // The ravager counter in vanilla `spawnGroup`: on hard wave 7 the first ravager
+    // gets an evoker rider, the rest vindicators.
+    let mut ravagers = 0;
     for kind in RaiderType::VALUES {
         let def = raid.default_num_spawns(kind, wave, bonus);
         let extra =
@@ -652,19 +656,28 @@ fn spawn_group_plan(
             RaiderType::Vindicator => Some(MobType::Vindicator),
             RaiderType::Ravager => Some(MobType::Ravager),
             RaiderType::Witch => Some(MobType::Witch),
-            // 唤魔者留到第二期。
-            RaiderType::Evoker => None,
+            RaiderType::Evoker => Some(MobType::Evoker),
         };
         if let Some(mob) = mob {
             for _ in 0..(def + extra) {
                 // 官方 `spawnGroup`：第 5 波（普通波次表最后一波）每只劫掠兽带一只
-                // 掠夺者骑手。困难第 7 波起的唤魔者 / 卫道士骑手留到第二期。
+                // 掠夺者骑手；困难第 7 波起第一只劫掠兽带唤魔者，其余带卫道士。
                 //
                 // Official `spawnGroup`: on wave 5 (the normal wave count) every
-                // ravager gets a pillager rider. The evoker / vindicator riders
-                // from hard wave 7 are deferred.
+                // ravager gets a pillager rider; from hard wave 7 the first ravager
+                // gets an evoker, the rest vindicators.
                 if mob == MobType::Ravager && wave == num_groups(DIFFICULTY_NORMAL) {
                     riders.push((members.len(), MobType::Pillager));
+                } else if mob == MobType::Ravager && wave >= num_groups(DIFFICULTY_HARD) {
+                    let rider = if ravagers == 0 {
+                        MobType::Evoker
+                    } else {
+                        MobType::Vindicator
+                    };
+                    riders.push((members.len(), rider));
+                }
+                if mob == MobType::Ravager {
+                    ravagers += 1;
                 }
                 members.push(mob);
             }
@@ -1127,6 +1140,48 @@ mod tests {
             assert_eq!(members[vehicle], MobType::Ravager);
             assert_eq!(rider, MobType::Pillager);
         }
+    }
+
+    /// 困难第 7 波（`wave >= numGroups(HARD)`）第一只劫掠兽带唤魔者，其余带卫道士。
+    #[test]
+    fn hard_wave_7_ravagers_get_evoker_then_vindicator_riders() {
+        let mut raid = Raid::new(BlockPos::new(0, 64, 0), DIFFICULTY_HARD);
+        // groupsSpawned = 6 → 这一波是第 7 波。
+        raid.groups_spawned = 6;
+        let (members, riders) =
+            spawn_group_plan(&mut raid, DIFFICULTY_HARD, BlockPos::new(0, 64, 0), 0);
+        let ravagers: Vec<usize> = members
+            .iter()
+            .enumerate()
+            .filter(|(_, mob)| **mob == MobType::Ravager)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(!ravagers.is_empty(), "困难第 7 波有劫掠兽");
+        assert_eq!(riders.len(), ravagers.len(), "每只劫掠兽一个骑手");
+        // 官方 `Raid.spawnGroup`：第一只唤魔者，其余卫道士。
+        for (position, (vehicle, rider)) in riders.iter().enumerate() {
+            assert_eq!(members[*vehicle], MobType::Ravager);
+            let expected = if position == 0 {
+                MobType::Evoker
+            } else {
+                MobType::Vindicator
+            };
+            assert_eq!(*rider, expected, "第 {position} 只劫掠兽的骑手");
+        }
+    }
+
+    /// 唤魔者真的出现在波次表里（普通第 5、6 波）。
+    #[test]
+    fn evokers_spawn_from_the_wave_table() {
+        let mut raid = Raid::new(BlockPos::new(0, 64, 0), DIFFICULTY_NORMAL);
+        // groupsSpawned = 4 → 这一波是第 5 波（唤魔者 1 只）。
+        raid.groups_spawned = 4;
+        let (members, _) =
+            spawn_group_plan(&mut raid, DIFFICULTY_NORMAL, BlockPos::new(0, 64, 0), 0);
+        assert!(
+            members.contains(&MobType::Evoker),
+            "第 5 波按官方波次表刷出一只唤魔者"
+        );
     }
 
     /// 所有波次刷完、名册清空后转胜利，并给英雄加 HERO_OF_THE_VILLAGE。

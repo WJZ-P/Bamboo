@@ -113,7 +113,10 @@ pub(super) fn targets() -> GoalSelector {
             },
         ),
         (2, Goal::nearest_target(TargetType::Player)),
-        (3, Goal::nearest_target_without_sight(TargetType::Villager)),
+        // `NearestAttackableTargetGoal(AbstractVillager.class, true)`：村民目标记视线丢失。
+        // `NearestAttackableTargetGoal(AbstractVillager.class, true)`: villagers keep the
+        // sight memory.
+        (3, Goal::nearest_target(TargetType::Villager)),
         (3, Goal::nearest_target(TargetType::IronGolem)),
         (
             4,
@@ -202,6 +205,32 @@ mod tests {
         assert_eq!(names[7], "VindicatorBreakDoorGoal");
         assert_eq!(names[9], "HoldGroundAttackGoal");
         assert_eq!(names[10], "MeleeAttackGoal");
+    }
+
+    /// 三个 `NearestAttackableTargetGoal` 的 `mustSee` 照字节码：玩家、村民、铁傀儡全真。
+    ///
+    /// The three `NearestAttackableTargetGoal` `mustSee` values match the bytecode:
+    /// player, villager and golem are all true.
+    #[test]
+    fn target_must_see_matches_vanilla() {
+        let entries: Vec<_> = targets()
+            .goals
+            .iter()
+            .filter_map(|wrapped| match &wrapped.goal {
+                Goal::NearestAttackableTarget { kind, must_see, .. } => {
+                    Some((wrapped.priority, *kind, *must_see))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                (2, TargetType::Player, true),
+                (3, TargetType::Villager, true),
+                (3, TargetType::IronGolem, true),
+            ]
+        );
     }
 
     /// `applyRaidBuffs`：命中给新铁斧套锋利（`wave > 5` 用 II），没命中主手仍是

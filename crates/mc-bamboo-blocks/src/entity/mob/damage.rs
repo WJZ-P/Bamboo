@@ -117,7 +117,15 @@ impl ArmorValues {
             amount = damage_after_absorb(amount, self.armor, self.toughness, armor_effectiveness);
         }
         if !kind.bypasses_effects() {
-            if !kind.bypasses_enchantments() && amount > 0.0 && self.protection > 0.0 {
+            // 保护附魔在官方 `data/minecraft/enchantment/protection.json` 里自带
+            // `!#minecraft:bypasses_invulnerability` 谓词，所以虚空 / `/kill` 同样绕过保护。
+            // Vanilla's `protection.json` carries a `!#minecraft:bypasses_invulnerability`
+            // requirement, so void and `/kill` damage skip protection too.
+            if !kind.bypasses_enchantments()
+                && !kind.bypasses_invulnerability()
+                && amount > 0.0
+                && self.protection > 0.0
+            {
                 amount = damage_after_magic_absorb(amount, self.protection);
             }
             if let Some(amplifier) = self.resistance
@@ -456,6 +464,21 @@ mod tests {
             resistance(2).reduce(20.0, DamageKind::OutOfWorld, 0.0),
             20.0
         );
+        // 保护附魔对 `#bypasses_invulnerability`（虚空、`/kill`）和 `#bypasses_enchantments`
+        // （音波）都不生效；`#bypasses_effects`（饥饿）同时绕过护甲、抗性与保护；音波仍吃抗性。
+        // Protection ignores `#bypasses_invulnerability` (void, `/kill`) and
+        // `#bypasses_enchantments` (sonic boom); `#bypasses_effects` (starve) skips
+        // armor, resistance and protection; sonic boom is still reduced by resistance.
+        let full = ArmorValues {
+            armor: 15.0,
+            toughness: 0.0,
+            protection: 16.0,
+            resistance: Some(0),
+        };
+        assert_eq!(full.reduce(20.0, DamageKind::OutOfWorld, 0.0), 20.0);
+        assert_eq!(full.reduce(20.0, DamageKind::GenericKill, 0.0), 20.0);
+        assert_eq!(full.reduce(20.0, DamageKind::Starve, 0.0), 20.0);
+        assert_eq!(full.reduce(20.0, DamageKind::SonicBoom, 0.0), 16.0);
     }
 
     #[test]

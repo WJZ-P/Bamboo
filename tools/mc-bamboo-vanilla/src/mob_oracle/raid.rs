@@ -24,6 +24,10 @@ pub(super) struct Case {
     spawn_x: i32,
     spawn_y: i32,
     spawn_z: i32,
+    #[serde(default)]
+    start_wave: i32,
+    #[serde(default)]
+    start_cooldown: Option<i32>,
     steps: Vec<Step>,
 }
 
@@ -32,7 +36,7 @@ pub(super) struct Case {
 struct Step {
     tick: i32,
     raids: State,
-    spawned: Vec<[i32; 4]>,
+    spawned: Vec<[i32; 5]>,
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]
@@ -95,6 +99,8 @@ impl Report {
             spawn_y: case.spawn_y,
             spawn_z: case.spawn_z,
             victory: case.name.starts_with("raid_victory"),
+            start_wave: case.start_wave,
+            start_cooldown: case.start_cooldown,
         };
         let mut ours = mc_bamboo_game::raid::replay_raid(&scene);
         // 改坏确认：故意把冷却的初值改错、把首波刷出的数量改错、把胜利状态改错、
@@ -148,10 +154,18 @@ impl Report {
                     case.name, expected.raids
                 ));
             }
-            let spawned: Vec<[i32; 4]> = actual
+            let spawned: Vec<[i32; 5]> = actual
                 .spawned
                 .iter()
-                .map(|member| [member.entity_type, member.x2, member.y, member.z2])
+                .map(|member| {
+                    [
+                        member.entity_type,
+                        member.x2,
+                        member.y,
+                        member.z2,
+                        member.vehicle_type,
+                    ]
+                })
                 .collect();
             if spawned != expected.spawned {
                 self.mismatch(format!(

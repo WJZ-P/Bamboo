@@ -368,10 +368,10 @@ fn choose_throw_potion(
 }
 
 /// `Witch.getDamageAfterMagicAbsorb`：自己打自己为 0，`#witch_resistant_to`（魔法、
-/// 间接魔法、荆棘）乘 0.15。
+/// 间接魔法、音波、荆棘）乘 0.15。
 ///
 /// `Witch.getDamageAfterMagicAbsorb`: self-inflicted damage is zero and
-/// `#witch_resistant_to` (magic, indirect magic, thorns) is multiplied by 0.15.
+/// `#witch_resistant_to` (magic, indirect magic, sonic boom, thorns) is multiplied by 0.15.
 pub(super) fn damage_after_magic_absorb(
     source: super::DamageSource,
     damage: f32,
@@ -381,10 +381,7 @@ pub(super) fn damage_after_magic_absorb(
     if source.attacker == Some(victim) {
         damage = 0.0;
     }
-    if matches!(
-        source.kind,
-        super::DamageKind::Magic | super::DamageKind::IndirectMagic | super::DamageKind::Thorns
-    ) {
+    if source.kind.witch_resistant_to() {
         damage *= 0.15;
     }
     damage

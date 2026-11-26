@@ -743,6 +743,11 @@ public final class MobOracle {
             if (only == null || only.startsWith("allay_save")) {
                 cases += playAllaySave(official, out);
             }
+            if (only == null || only.startsWith("spellcaster_save")
+                    || only.startsWith("evoker") || only.startsWith("vex")
+                    || only.startsWith("illusioner")) {
+                cases += playSpellcasterSave(official, out);
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -2746,6 +2751,88 @@ public final class MobOracle {
             banner.mob(53, 0.5, 64.0, 0.5, 0.0F, 8501L, 0);
             banner.banner(1.5, 64.0, 0.5);
             scenes.add(banner);
+        }
+    }
+
+    /** 唤魔者 / 恼鬼 / 幻术师的场景：尖牙、召唤恼鬼、wololo、有限生命、致盲射箭。 */
+    static final class SpellScenes {
+        static void add(List<Scene> scenes) {
+            // 近距离圆形尖牙：玩家 2 格外，`distanceToSqr < 9` 走圆形（5 + 8 颗）；
+            // 先施放召唤恼鬼（100 刻），之后召唤进入 340 刻冷却，约第 102 刻放圆形尖牙。
+            Scene circle = new Scene("evoker_fangs_circle").ticks(160).difficulty(2).drops();
+            Scenes.ground(circle, 16);
+            circle.mob(63, 0.5, 64.0, 0.5, 0.0F, 8601L, 0);
+            circle.player(2.5, 64.0, 0.5, Items.AIR);
+            // 圆形内圈的一头牛：尖牙对非袭击者生物造成 6 点伤害，逐刻比血量。
+            // A cow inside the inner ring: fangs deal 6 damage to non-raider mobs; compare health per tick.
+            circle.mob(0, 2.0, 64.0, 0.5, 0.0F, 8609L, 0);
+            scenes.add(circle);
+            // 远距离直线尖牙：玩家 8 格外，走直线（16 颗）；召唤结束后放直线尖牙。
+            Scene line = new Scene("evoker_fangs_line").ticks(160).difficulty(2).drops();
+            Scenes.ground(line, 24);
+            line.mob(63, 0.5, 64.0, 0.5, 0.0F, 8602L, 0);
+            line.player(8.5, 64.0, 0.5, Items.AIR);
+            scenes.add(line);
+            // 召唤恼鬼：三只恼鬼刷出来，随后复制主人目标冲锋玩家。
+            Scene summon = new Scene("evoker_summon").ticks(140).difficulty(2).drops();
+            Scenes.ground(summon, 16);
+            summon.mob(63, 0.5, 64.0, 0.5, 0.0F, 8603L, 0);
+            summon.player(5.5, 64.0, 0.5, Items.AIR);
+            scenes.add(summon);
+            // wololo：没有玩家，唤魔者只把旁边的蓝羊变红。
+            Scene wololo = new Scene("evoker_wololo").ticks(140).difficulty(2);
+            Scenes.ground(wololo, 16);
+            wololo.wool = net.minecraft.world.item.DyeColor.BLUE.getId();
+            wololo.mob(63, 0.5, 64.0, 0.5, 0.0F, 8604L, 0);
+            wololo.mob(4, 3.5, 64.0, 0.5, 0.0F, 8605L, 0);
+            scenes.add(wololo);
+            // 恼鬼冲锋玩家。
+            Scene charge = new Scene("vex_charge").ticks(100).difficulty(2);
+            Scenes.ground(charge, 16);
+            charge.mob(64, 0.5, 64.0, 0.5, 0.0F, 8606L, 0);
+            charge.player(5.5, 64.0, 0.5, Items.AIR);
+            scenes.add(charge);
+            // 恼鬼有限生命掉血：20 刻后每 20 刻扣 1 点，跑满一整个死亡周期。
+            Scene life = new Scene("vex_life").ticks(320).difficulty(2);
+            Scenes.ground(life, 16);
+            life.mob(64, 0.5, 64.0, 0.5, 0.0F, 8607L, 0);
+            scenes.add(life);
+            // 幻术师致盲玩家并射箭：困难难度（`effectiveDifficulty > 2.0`）才会施放致盲。
+            Scene illusioner = new Scene("illusioner_blind_arrow").ticks(140).difficulty(3).drops();
+            Scenes.ground(illusioner, 16);
+            illusioner.mob(65, 0.5, 64.0, 0.5, 0.0F, 8608L, 0);
+            illusioner.player(6.5, 64.0, 0.5, Items.AIR);
+            scenes.add(illusioner);
+        }
+
+        static void setup(Scene scene, int index, Mob mob) {
+            if (mob instanceof net.minecraft.world.entity.monster.Vex vex
+                    && scene.name.startsWith("vex_life")) {
+                vex.setLimitedLife(20);
+            }
+        }
+
+        static void check(Scene scene, List<Mob> mobs, List<ServerPlayer> players,
+                int fangsCount, int arrowsCount, boolean vexCharged) {
+            boolean ok = switch (scene.name) {
+                case "evoker_fangs_circle" -> fangsCount >= 13;
+                case "evoker_fangs_line" -> fangsCount >= 16;
+                case "evoker_summon" -> mobs.size() >= 4 && vexCharged;
+                case "evoker_wololo" -> mobs.size() >= 2
+                        && mobs.get(1) instanceof net.minecraft.world.entity.animal.sheep.Sheep sheep
+                        && sheep.getColor() == net.minecraft.world.item.DyeColor.RED;
+                case "vex_charge" -> vexCharged;
+                case "vex_life" -> mobs.getFirst().isRemoved() || !mobs.getFirst().isAlive();
+                case "illusioner_blind_arrow" -> mobs.getFirst().hasEffect(MobEffects.INVISIBILITY)
+                        && !players.isEmpty() && players.getFirst().hasEffect(MobEffects.BLINDNESS)
+                        && arrowsCount >= 1;
+                default -> true;
+            };
+            if (!ok) {
+                throw new IllegalStateException("spell scenario did not exercise " + scene.name
+                        + " (fangs=" + fangsCount + ", arrows=" + arrowsCount
+                        + ", mobs=" + mobs.size() + ", vexCharged=" + vexCharged + ")");
+            }
         }
     }
 
@@ -5543,6 +5630,7 @@ public final class MobOracle {
             slimeScenes(scenes);
             PillagerScenes.add(scenes);
             RaidScenes.add(scenes);
+            SpellScenes.add(scenes);
             Scene witch = new Scene("witch_drink_fire").ticks(140).difficulty(2).fire(200);
             ground(witch, 16);
             witch.mob(51, 0.5, 64.0, 0.5, 0.0F, 503L, 0);
@@ -5833,6 +5921,8 @@ public final class MobOracle {
                 || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")
                 || scene.name.startsWith("tnt_blast_") || scene.name.startsWith("pillager_")
                 || scene.name.startsWith("skeleton_horse_")
+                || scene.name.startsWith("evoker_") || scene.name.startsWith("vex_")
+                || scene.name.startsWith("illusioner_")
                 || scene.name.startsWith("raid_mob_")) {
             playZombie(official, out, scene);
             return;
@@ -6776,6 +6866,47 @@ public final class MobOracle {
     }
 
     /**
+     * 射箭对拍用的幻术师：`performRangedAttack` 照 `Illusioner` 字节码原样走，只是把
+     * `getMobArrow` 造的箭换成岛种子源重播种（官方实体的随机源不带种子），让散布的
+     * 三次 `triangle` 取数两侧一致。
+     *
+     * The illusioner for ranged-arrow parity: `performRangedAttack` follows the
+     * `Illusioner` bytecode verbatim, only reseeding the `getMobArrow` arrow from the
+     * island seed source (vanilla entity random has no seed) so the three spread
+     * `triangle` draws line up.
+     */
+    private static final class OracleIllusioner extends net.minecraft.world.entity.monster.illager.Illusioner {
+        OracleIllusioner(FakeLevel level) {
+            super(EntityTypes.ILLUSIONER, level);
+        }
+
+        @Override
+        public void performRangedAttack(net.minecraft.world.entity.LivingEntity target, float power) {
+            FakeLevel world = (FakeLevel) level();
+            net.minecraft.world.InteractionHand hand =
+                    net.minecraft.world.entity.projectile.ProjectileUtil.getWeaponHoldingHand(this, net.minecraft.world.item.Items.BOW);
+            net.minecraft.world.item.ItemStack weapon = getItemInHand(hand);
+            net.minecraft.world.item.ItemStack projectile = getProjectile(weapon);
+            var arrow = net.minecraft.world.entity.projectile.ProjectileUtil.getMobArrow(this, projectile, power, weapon);
+            setRandom(arrow, world.entitySeeds.nextLong());
+            arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
+            double dx = target.getX() - getX();
+            double dy = target.getY(0.3333333333333333) - arrow.getY();
+            double dz = target.getZ() - getZ();
+            double dist = Math.sqrt(dx * dx + dz * dz);
+            if (level() instanceof net.minecraft.server.level.ServerLevel serverLevel) {
+                net.minecraft.world.entity.projectile.Projectile.spawnProjectileUsingShoot(
+                        arrow, serverLevel, projectile, dx, dy + dist * 0.20000000298023224, dz,
+                        1.6F, rangedAttackUncertainty(level()));
+            }
+            if (!isSilent()) {
+                playSound(net.minecraft.sounds.SoundEvents.SKELETON_SHOOT, 1.0F,
+                        1.0F / (getRandom().nextFloat() * 0.4F + 0.8F));
+            }
+        }
+    }
+
+    /**
      * 射箭对拍用的掠夺者：`performRangedAttack` 照 `CrossbowAttackMob.performCrossbowAttack`
      * 原样走，只是 `performShooting` 用一把带种子的 `CrossbowItem`（`SeedCrossbow`），让箭的
      * 随机源和 UUID 可重放。装填、射击向量、耐久、音效都是官方代码。
@@ -7446,7 +7577,8 @@ public final class MobOracle {
     private static int playRaidScenes(Official official, Writer out, String only) throws Exception {
         List<String> names = List.of(
                 "raid_trigger_normal", "raid_trigger_easy",
-                "raid_bonus_wave", "raid_victory", "raid_gamerule_off");
+                "raid_bonus_wave", "raid_victory", "raid_gamerule_off",
+                "raid_wave7_hard");
         int count = 0;
         for (String name : names) {
             if (only != null && !name.startsWith(only)) continue;
@@ -7480,7 +7612,7 @@ public final class MobOracle {
         level.getPoiManager().tick(() -> true);
         level.getPoiManager().take(h -> true, (h, p) -> p.equals(bell), bell, 1);
         level.getPoiManager().tick(() -> true);
-        int difficulty = name.contains("easy") ? 1 : 2;
+        int difficulty = name.contains("easy") ? 1 : name.contains("hard") ? 3 : 2;
         ((TickingLevelData) level.levelData).difficulty = Difficulty.byId(difficulty);
         level.spawnDifficulty = new DifficultyInstance(Difficulty.byId(difficulty), 0L, 0L, 0.0F);
         setRule(official, GameRules.RAIDS, !name.endsWith("off"));
@@ -7526,12 +7658,16 @@ public final class MobOracle {
             empty.add("steps", new JsonArray());
             return empty.toString();
         }
+        boolean wave7 = name.equals("raid_wave7_hard");
         put(net.minecraft.world.entity.raid.Raid.class, raid, "random", RandomSource.create(raidSeed));
         put(net.minecraft.world.entity.raid.Raid.class, raid, "raidOmenLevel", omenLevel);
-        put(net.minecraft.world.entity.raid.Raid.class, raid, "started", name.startsWith("raid_victory"));
+        put(net.minecraft.world.entity.raid.Raid.class, raid, "started", name.startsWith("raid_victory") || wave7);
         if (name.startsWith("raid_victory")) {
             put(net.minecraft.world.entity.raid.Raid.class, raid, "groupsSpawned",
                     raid.getNumGroups(Difficulty.byId(difficulty)));
+        } else if (wave7) {
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "groupsSpawned", 6);
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "raidCooldownTicks", 2);
         }
         // 每刻都把 waveSpawnPos 预设成固定点，让 shouldSpawnGroup 的刷怪分支可复现。
         BlockPos spawnAt = new BlockPos(3, -61, 4);
@@ -7539,7 +7675,10 @@ public final class MobOracle {
                 java.util.Optional.of(spawnAt));
 
         JsonArray steps = new JsonArray();
-        int ticks = name.startsWith("raid_victory") ? 60 : 340;
+        int ticks = wave7 ? 10 : name.startsWith("raid_victory") ? 60 : 340;
+        int wave7Ravagers = 0;
+        int wave7EvokerRiders = 0;
+        int wave7VindicatorRiders = 0;
         for (int tick = 0; tick < ticks; tick++) {
             level.gameTime = tick;
             level.spawned.clear();
@@ -7552,14 +7691,34 @@ public final class MobOracle {
             JsonArray spawned = new JsonArray();
             for (Entity entity : level.spawned) {
                 var one = new JsonArray();
-                one.add(BuiltInRegistries.ENTITY_TYPE.getId(entity.getType()));
+                int typeId = BuiltInRegistries.ENTITY_TYPE.getId(entity.getType());
+                int vehicleId = entity.getVehicle() != null
+                        ? BuiltInRegistries.ENTITY_TYPE.getId(entity.getVehicle().getType()) : -1;
+                one.add(typeId);
                 one.add((int) (entity.getX() * 2));
                 one.add((int) entity.getY());
                 one.add((int) (entity.getZ() * 2));
+                one.add(vehicleId);
                 spawned.add(one);
+                if (wave7) {
+                    if (entity.getType() == EntityTypes.RAVAGER) wave7Ravagers++;
+                    if (entity.getType() == EntityTypes.EVOKER && entity.getVehicle() != null
+                            && entity.getVehicle().getType() == EntityTypes.RAVAGER) {
+                        wave7EvokerRiders++;
+                    }
+                    if (entity.getType() == EntityTypes.VINDICATOR && entity.getVehicle() != null
+                            && entity.getVehicle().getType() == EntityTypes.RAVAGER) {
+                        wave7VindicatorRiders++;
+                    }
+                }
             }
             row.add("spawned", spawned);
             steps.add(row);
+        }
+        if (wave7 && (wave7Ravagers < 2 || wave7EvokerRiders < 1 || wave7VindicatorRiders < 1)) {
+            throw new IllegalStateException("raid_wave7_hard did not spawn expected wave 7 riders: ravagers="
+                    + wave7Ravagers + " evokerRiders=" + wave7EvokerRiders
+                    + " vindicatorRiders=" + wave7VindicatorRiders);
         }
         var scene = new JsonObject();
         scene.addProperty("type", "raidScene");
@@ -7572,6 +7731,10 @@ public final class MobOracle {
         scene.addProperty("spawnX", spawnAt.getX());
         scene.addProperty("spawnY", spawnAt.getY());
         scene.addProperty("spawnZ", spawnAt.getZ());
+        if (wave7) {
+            scene.addProperty("startWave", 6);
+            scene.addProperty("startCooldown", 2);
+        }
         scene.add("steps", steps);
         return scene.toString();
     }
@@ -15482,6 +15645,71 @@ public final class MobOracle {
         return cases;
     }
 
+    /** 唤魔者 / 恼鬼 / 幻术师存档：`saveWithoutId` 的 SNBT 和读回后再写出的 SNBT。 */
+    private static int playSpellcasterSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (int kind : new int[] {63, 64, 65}) {
+            for (boolean filled : new boolean[] {false, true}) {
+                FakeLevel world = FakeLevel.create(official);
+                Mob mob = switch (kind) {
+                    case 63 -> (Mob) EntityTypes.EVOKER.create(world, EntitySpawnReason.COMMAND);
+                    case 64 -> (Mob) EntityTypes.VEX.create(world, EntitySpawnReason.COMMAND);
+                    default -> (Mob) EntityTypes.ILLUSIONER.create(world, EntitySpawnReason.COMMAND);
+                };
+                setRandom(mob, world.entitySeeds.nextLong());
+                mob.setPos(1.5, 64.0, 2.5);
+                mob.setYRot(37.0F);
+                mob.setXRot(12.0F);
+                if (filled) {
+                    if (mob instanceof net.minecraft.world.entity.monster.illager.Evoker evoker) {
+                        evoker.setHealth(17.0F);
+                        putInt(net.minecraft.world.entity.monster.illager.SpellcasterIllager.class,
+                                evoker, "spellCastingTickCount", 45);
+                        evoker.setCanJoinRaid(true);
+                        evoker.setPatrolLeader(true);
+                        evoker.setWave(3);
+                    } else if (mob instanceof net.minecraft.world.entity.monster.Vex vex) {
+                        vex.setHealth(9.0F);
+                        vex.setBoundOrigin(new BlockPos(10, 70, -5));
+                        vex.setLimitedLife(240);
+                        var owner = (Mob) EntityTypes.EVOKER.create(world, EntitySpawnReason.COMMAND);
+                        owner.setUUID(new UUID(0x1122334455667788L, 0x99AABBCCDDEEFF00L));
+                        vex.setOwner(owner);
+                        vex.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                                new ItemStack(Items.IRON_SWORD));
+                    } else if (mob instanceof net.minecraft.world.entity.monster.illager.Illusioner illusioner) {
+                        illusioner.setHealth(21.0F);
+                        putInt(net.minecraft.world.entity.monster.illager.SpellcasterIllager.class,
+                                illusioner, "spellCastingTickCount", 18);
+                        illusioner.setCanJoinRaid(true);
+                        illusioner.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                                new ItemStack(Items.BOW));
+                    }
+                }
+                var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                mob.saveWithoutId(output);
+                Mob copy = switch (kind) {
+                    case 63 -> (Mob) EntityTypes.EVOKER.create(world, EntitySpawnReason.LOAD);
+                    case 64 -> (Mob) EntityTypes.VEX.create(world, EntitySpawnReason.LOAD);
+                    default -> (Mob) EntityTypes.ILLUSIONER.create(world, EntitySpawnReason.LOAD);
+                };
+                copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries,
+                        output.buildResult()));
+                var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                copy.saveWithoutId(again);
+                out.write("{\"type\":\"spellcasterSave\",\"kind\":" + kind
+                        + ",\"filled\":" + filled
+                        + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                        + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
     /** 尖啸体四级警告：官方 `SpawnUtil.trySpawnMob` 取点召唤监守者并钻出地面。 */
     private static int playWardenSummon(Official official, Writer out) throws Exception {
         FakeLevel world = FakeLevel.create(official);
@@ -19737,6 +19965,11 @@ public final class MobOracle {
         int horseChaseArrows = 0;
         boolean horseChaseHadPath = false;
         boolean horseChaseTargeted = false;
+        java.util.List<net.minecraft.world.entity.projectile.EvokerFangs> fangsList =
+                new java.util.ArrayList<>();
+        int spellFangsCount = 0;
+        int spellArrowsCount = 0;
+        boolean spellVexCharged = false;
         StringBuilder splits = new StringBuilder("[[]");
         java.util.List<Mob> mobs = new java.util.ArrayList<>();
         if (scene.raid != null) {
@@ -19795,6 +20028,13 @@ public final class MobOracle {
                 // 61 parched, 62 camel husk.
                 case 61 -> new net.minecraft.world.entity.monster.skeleton.Parched(EntityTypes.PARCHED, level);
                 case 62 -> new net.minecraft.world.entity.animal.camel.CamelHusk(EntityTypes.CAMEL_HUSK, level);
+                // 63 唤魔者、64 恼鬼、65 幻术师：唤魔者 / 恼鬼照普通构造，幻术师覆写
+                // `performRangedAttack` 给箭换种（见 `OracleIllusioner`）。
+                // 63 evoker, 64 vex, 65 illusioner: the evoker and vex use plain
+                // construction; the illusioner reseeds its arrow (see `OracleIllusioner`).
+                case 63 -> new net.minecraft.world.entity.monster.illager.Evoker(EntityTypes.EVOKER, level);
+                case 64 -> new net.minecraft.world.entity.monster.Vex(EntityTypes.VEX, level);
+                case 65 -> new OracleIllusioner(level);
                 case 21 -> EntityTypes.OCELOT.create(level, EntitySpawnReason.COMMAND);
                 case 22 -> EntityTypes.CAT.create(level, EntitySpawnReason.COMMAND);
                 case 23 -> EntityTypes.PARROT.create(level, EntitySpawnReason.COMMAND);
@@ -19823,6 +20063,12 @@ public final class MobOracle {
             mob.snapTo(at[0], at[1], at[2], scene.yaws.get(i)[0], 0.0F);
             mob.setYHeadRot(scene.yaws.get(i)[0]);
             mob.setYBodyRot(scene.yaws.get(i)[0]);
+            if (mob instanceof net.minecraft.world.entity.animal.sheep.Sheep sheep) {
+                // 唤魔者 wololo 场景：`wool` 携带羊毛颜色（低 4 位）和剪毛标记。
+                // Evoker wololo scenes: `wool` carries the colour (low four bits) and shear mark.
+                sheep.setColor(net.minecraft.world.item.DyeColor.byId(scene.wool & 15));
+                sheep.setSheared((scene.wool & 16) != 0);
+            }
             // 大脑的洗牌随机源官方不带种子，两边按同一个公式从场景种子重设。
             // Vanilla shuffle randoms are unseeded; both sides reseed them from the scene seed.
             BrainOracle.reseedShuffles(mob, randomSeed(mob));
@@ -19889,6 +20135,14 @@ public final class MobOracle {
                 enderman.setCarriedBlock(scene.carried);
             }
             PillagerScenes.setup(scene, i, mob);
+            SpellScenes.setup(scene, i, mob);
+            if (mob instanceof net.minecraft.world.entity.monster.illager.Illusioner illusioner) {
+                // 幻术师主手一把弓，`RangedBowAttackGoal` 才射得出去（两边都不跑 `finalizeSpawn`）。
+                // The illusioner needs a bow in hand for `RangedBowAttackGoal`; neither
+                // side runs `finalizeSpawn`, so equip it here.
+                illusioner.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                        new ItemStack(Items.BOW));
+            }
             RaidScenes.setup(scene, i, mob, level);
             // `Mob.finalizeSpawn` 的取数顺序按官方；场景关掉时和 Bamboo 的
             // 显式构造（不跑 finalize）一致。
@@ -19960,6 +20214,7 @@ public final class MobOracle {
             line.append(",\"seed\":").append(scene.seeds.get(i));
             line.append(",\"age\":").append(scene.cowAges.get(i));
             line.append(",\"temper\":").append(i == 0 ? scene.temper : -1);
+            line.append(",\"wool\":").append(kind[0] == 4 ? scene.wool : 0);
             line.append(",\"creeper\":").append(kind[0] == 40 ? scene.creeperFlags : 0);
             line.append(",\"carried\":").append(
                     kind[0] == 43 && scene.carried != null ? Block.getId(scene.carried) : 0);
@@ -20192,6 +20447,17 @@ public final class MobOracle {
             if (tntEntity != null && !tntEntity.isRemoved()) {
                 tntEntity.tick();
             }
+            // 唤魔者尖牙：按生成顺序每刻 tick，倒计时到 0 广播 4 号事件、到 -8 伤附近实体、寿命尽移除。
+            for (var fangs : new java.util.ArrayList<>(fangsList)) {
+                if (fangs.isRemoved()) continue;
+                fangs.tick();
+            }
+            fangsList.removeIf(Entity::isRemoved);
+            for (Mob mob : mobs) {
+                if (mob instanceof net.minecraft.world.entity.monster.Vex vex && vex.isCharging()) {
+                    spellVexCharged = true;
+                }
+            }
             if (slimeScene) {
                 // 分裂出来的小史莱姆：记下数量、位置、朝向、大小和血量就丢掉，不让它们继续 tick
                 // （官方构造函数的随机源不带种子）。
@@ -20266,6 +20532,20 @@ public final class MobOracle {
                 for (Entity born : level.spawned) {
                     level.reseedBorn(born);
                     spawns.get(tick).add(spawnJson(born));
+                    // 唤魔者召唤的恼鬼要逐刻比它自己的行为：加进 `mobs` 和 `tracked`，
+                    // 和 Bamboo 一侧把新生生物加进 `ids` 对齐。
+                    // A summoned vex is compared per tick: add it to `mobs` and `tracked`,
+                    // matching Bamboo's push of born mobs into `ids`.
+                    if (born instanceof net.minecraft.world.entity.Mob bornMob) {
+                        mobs.add(bornMob);
+                        level.tracked.add(bornMob);
+                    } else if (born instanceof net.minecraft.world.entity.projectile.EvokerFangs fangs) {
+                        fangsList.add(fangs);
+                        level.tracked.add(fangs);
+                        spellFangsCount++;
+                    } else if (born instanceof net.minecraft.world.entity.projectile.arrow.AbstractArrow) {
+                        spellArrowsCount++;
+                    }
                 }
             }
             if (scene.realPlayers) {
@@ -20297,6 +20577,7 @@ public final class MobOracle {
                 throw new IllegalStateException(scene.name + " did not exercise fox target selection");
             }
         }
+        SpellScenes.check(scene, mobs, players, spellFangsCount, spellArrowsCount, spellVexCharged);
         if ("zombie_equine_llama_wolf_near".equals(scene.name) && !llamaTargetedWolf) {
             throw new IllegalStateException(scene.name + " did not exercise llama targeting: target="
                     + llamaTargetedWolf + " avoid=" + wolfAvoidedLlama);
@@ -20584,6 +20865,25 @@ public final class MobOracle {
                         .append("\",\"snd\":\"minecraft:classic\"");
             } else if (mob instanceof net.minecraft.world.entity.monster.illager.Pillager pillager) {
                 out.append(",\"var\":\"").append(PillagerScenes.state(pillager)).append("\",\"snd\":\"minecraft:classic\"");
+            } else if (mob instanceof net.minecraft.world.entity.monster.illager.Evoker evoker) {
+                Object spell = get(net.minecraft.world.entity.monster.illager.SpellcasterIllager.class, evoker, "currentSpell");
+                Object wololo = get(net.minecraft.world.entity.monster.illager.Evoker.class, evoker, "wololoTarget");
+                out.append(",\"var\":\"evoker:")
+                        .append(getInt(net.minecraft.world.entity.monster.illager.SpellcasterIllager.class, evoker, "spellCastingTickCount"))
+                        .append(':').append(spell == null ? 0 : ((Enum<?>) spell).ordinal())
+                        .append(':').append(wololo == null ? "-" : ((net.minecraft.world.entity.Entity) wololo).getId())
+                        .append("\",\"snd\":\"minecraft:classic\"");
+            } else if (mob instanceof net.minecraft.world.entity.monster.Vex vex) {
+                out.append(",\"var\":\"vex:").append(vex.isCharging())
+                        .append(':').append(getBoolean(net.minecraft.world.entity.monster.Vex.class, vex, "hasLimitedLife"))
+                        .append(':').append(getInt(net.minecraft.world.entity.monster.Vex.class, vex, "limitedLifeTicks"))
+                        .append("\",\"snd\":\"minecraft:classic\"");
+            } else if (mob instanceof net.minecraft.world.entity.monster.illager.Illusioner illusioner) {
+                Object spell = get(net.minecraft.world.entity.monster.illager.SpellcasterIllager.class, illusioner, "currentSpell");
+                out.append(",\"var\":\"illusioner:")
+                        .append(getInt(net.minecraft.world.entity.monster.illager.SpellcasterIllager.class, illusioner, "spellCastingTickCount"))
+                        .append(':').append(spell == null ? 0 : ((Enum<?>) spell).ordinal())
+                        .append("\",\"snd\":\"minecraft:classic\"");
             } else if (mob instanceof net.minecraft.world.entity.monster.Ravager
                     || mob instanceof net.minecraft.world.entity.monster.illager.Vindicator) {
                 out.append(",\"var\":\"").append(RaidScenes.state(mob)).append("\",\"snd\":\"minecraft:classic\"");
@@ -21927,6 +22227,21 @@ public final class MobOracle {
                         .append(',').append(panda.getHiddenGene().getId()).append(']');
             }
             out.append(",\"uuid\":\"").append(calf.getUUID()).append('"');
+        } else if (entity instanceof net.minecraft.world.entity.projectile.EvokerFangs fangs) {
+            // 尖牙只比生成位置；`KindPublic` 没有暖机延迟的同步字段，`value` 恒为 0。
+            // Fangs compare position only; `value` is always 0 since the warmup delay
+            // has no synced field on the Bamboo side.
+            out.append(",\"kind\":\"fangs\",\"value\":0");
+        } else if (entity instanceof net.minecraft.world.entity.Mob mob) {
+            // 唤魔者召唤的恼鬼：像幼崽一样输出构造随机数、朝向和 UUID 作为场景起点，
+            // Bamboo 一侧用它把新生成的恼鬼对成同一起点再逐刻比。
+            // A summoned vex: emit the constructor random, rotation and UUID like a calf,
+            // so Bamboo starts the born mob from the same point and compares it per tick.
+            out.append(",\"kind\":\"cow\",\"value\":0");
+            out.append(",\"seed\":").append(randomSeed(mob));
+            out.append(",\"hr\":").append(Float.floatToRawIntBits(mob.getYHeadRot()));
+            out.append(",\"yr\":").append(Float.floatToRawIntBits(mob.getYRot()));
+            out.append(",\"uuid\":\"").append(mob.getUUID()).append('"');
         } else {
             out.append(",\"kind\":\"other\"");
         }
@@ -24678,6 +24993,22 @@ public final class MobOracle {
                     charge.shoot(dx, dy, dz, 0.7F, 5 - getDifficulty().getId() * 4);
                 }
             }
+            // 唤魔者的尖牙和恼鬼在法术里用 `new EvokerFangs(...)` / `EntityTypes.VEX.create`
+            // 生成，官方实体的随机源不带种子，这里照风弹那样换成岛种子源。尖牙的构造不取
+            // 随机数（只设 delay / owner / 位置），恼鬼重放 UUID 和朝向两个构造取数。
+            // The evoker's fangs and summoned vexes are built without a seeded random;
+            // reseed them like the wind charge. Fangs draw nothing in their constructor,
+            // while a vex replays its UUID and facing draws.
+            if (entity instanceof net.minecraft.world.entity.projectile.EvokerFangs) {
+                setRandom(entity, entitySeeds.nextLong());
+            }
+            if (entity instanceof net.minecraft.world.entity.monster.Vex vex
+                    && vex.getOwner() instanceof net.minecraft.world.entity.monster.illager.Evoker) {
+                setRandom(vex, entitySeeds.nextLong());
+                RandomSource random = vex.getRandom();
+                vex.setUUID(Mth.createInsecureUUID(random));
+                random.nextFloat();
+            }
             if (entity instanceof Animal calf && dropUuids) {
                 newbornCows.add(calf);
             }
@@ -24964,7 +25295,9 @@ public final class MobOracle {
             if (packets != null) {
                 packets.accept(new net.minecraft.network.protocol.game.ClientboundEntityEventPacket(entity, event));
             }
-            if (mobPackets != null && entity instanceof Mob) {
+            if (mobPackets != null
+                    && (entity instanceof Mob
+                        || entity instanceof net.minecraft.world.entity.projectile.EvokerFangs)) {
                 mobPackets.accept(new net.minecraft.network.protocol.game.ClientboundEntityEventPacket(entity, event));
             }
         }
