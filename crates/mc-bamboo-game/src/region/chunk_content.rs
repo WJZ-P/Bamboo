@@ -151,16 +151,6 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
                 entry.omit.push((*key).to_owned());
             }
         }
-        // 告示牌的文字在 `ChunkColumn::signs` 里，是运行时内容；按官方
-        // `SignBlockEntity.saveAdditional` 重新编码，不能用读盘旧值覆盖。
-        if matches!(name, "minecraft:sign" | "minecraft:hanging_sign") {
-            let content = column
-                .chunk()
-                .sign(entity.x, entity.y, entity.z)
-                .cloned()
-                .unwrap_or(mc_bamboo_core::sign::SignContent::BLANK);
-            write_sign_text(&mut entry, &content);
-        }
         // 会动的方块实体自己的键。有活实例时由活实例全权负责，避免读盘旧值盖掉已清空的可选键；
         // 没有活实例时才回落到 `resave_additional` 或官方默认值。
         match parts.live_additional(world_pos) {
@@ -183,6 +173,16 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
                     write_default_block_entity_fields(&mut entry, name);
                 }
             }
+        }
+        // 告示牌的文字在 `ChunkColumn::signs` 里，是运行时内容；按官方
+        // `SignBlockEntity.saveAdditional` 重新编码，覆盖 `resave_additional` 的读盘旧值。
+        if matches!(name, "minecraft:sign" | "minecraft:hanging_sign") {
+            let content = column
+                .chunk()
+                .sign(entity.x, entity.y, entity.z)
+                .cloned()
+                .unwrap_or(mc_bamboo_core::sign::SignContent::BLANK);
+            write_sign_text(&mut entry, &content);
         }
         // 游戏层拥有的键（容器、组件补丁、命令方块、讲台）覆盖 `resave_additional` 的静态值。
         write_game_fields(&mut entry, &mut problems, name, world_pos, parts, pos);
