@@ -150,10 +150,6 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
             for key in &saved.omit {
                 entry.omit.push((*key).to_owned());
             }
-            for (key, value) in &saved.fields {
-                // 有运行时表的类型由后面的 write_game_fields / write_redstone 覆盖。
-                entry.put(key, value.clone());
-            }
         }
         // 告示牌的文字在 `ChunkColumn::signs` 里，是运行时内容；按官方
         // `SignBlockEntity.saveAdditional` 重新编码，不能用读盘旧值覆盖。
@@ -165,8 +161,8 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
                 .unwrap_or(mc_bamboo_core::sign::SignContent::BLANK);
             write_sign_text(&mut entry, &content);
         }
-        write_game_fields(&mut entry, &mut problems, name, world_pos, parts, pos);
-        // 会动的方块实体自己的键。
+        // 会动的方块实体自己的键。有活实例时由活实例全权负责，避免读盘旧值盖掉已清空的可选键；
+        // 没有活实例时才回落到 `resave_additional` 或官方默认值。
         match parts.live_additional(world_pos) {
             Some(Ok(additional)) => {
                 for (key, value) in additional {
@@ -175,21 +171,21 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
             }
             Some(Err(error)) => return Err(Error::Blocks(error)),
             None => {
-                // 官方必写但我们没有实例的键：按官方默认值补齐。世界生成放下的
-                // 宝库 / 幽匿方块实体没有读盘条目，也要补出 `saveAdditional` 的键。
-                // A freshly generated vault or sculk block entity has no disk entry;
-                // its `saveAdditional` keys must still be written.
-                if saved.is_none() {
-                    if let Some(fields) = default_additional(name) {
-                        for (key, value) in fields {
-                            entry.put(&key, value);
-                        }
-                    } else {
-                        write_default_block_entity_fields(&mut entry, name);
+                if let Some(saved) = &saved {
+                    for (key, value) in &saved.fields {
+                        entry.put(key, value.clone());
                     }
+                } else if let Some(fields) = default_additional(name) {
+                    for (key, value) in fields {
+                        entry.put(&key, value);
+                    }
+                } else {
+                    write_default_block_entity_fields(&mut entry, name);
                 }
             }
         }
+        // 游戏层拥有的键（容器、组件补丁、命令方块、讲台）覆盖 `resave_additional` 的静态值。
+        write_game_fields(&mut entry, &mut problems, name, world_pos, parts, pos);
         // 红石记忆里属于这一格的那几项。
         for (key, value) in write_redstone(
             world_pos,
@@ -580,7 +576,8 @@ fn write_component_fields(
                 | "minecraft:shulker_box"
                 | "minecraft:hopper"
                 | "minecraft:dispenser"
-                | "minecraft:dropper",
+                | "minecraft:dropper"
+                | "minecraft:beacon",
                 mc_bamboo_data::registries::data_component_type::CUSTOM_NAME,
                 ComponentValue::CustomName(component),
             ) => text::encode(component, 0)
@@ -590,7 +587,12 @@ fn write_component_fields(
                 _,
                 mc_bamboo_data::registries::data_component_type::LOCK,
                 ComponentValue::Lock(tag),
-            ) => Some(("lock", tag.clone())),
+            ) => {
+                if matches!(tag, Tag::Compound(entries) if entries.is_empty()) {
+                    continue;
+                }
+                Some(("lock", tag.clone()))
+            }
             (_, mc_bamboo_data::registries::data_component_type::BANNER_PATTERNS, _) => {
                 components::encode_value(value, 0)
                     .ok()
@@ -834,6 +836,9 @@ fn read_game_fields(
         ),
     ] {
         if let Some(value) = field(tag, key) {
+            if key == "lock" && matches!(value, Tag::Compound(entries) if entries.is_empty()) {
+                continue;
+            }
             let decoded = if key == "CustomName" {
                 text::decode(value).map(ComponentValue::CustomName)
             } else {

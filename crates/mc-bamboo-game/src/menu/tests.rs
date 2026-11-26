@@ -1545,3 +1545,127 @@ fn beacon_menu_payment_effects_kick_and_advancement() {
     fixture.region.links.flush();
     assert!(fixture.sink.0.lock().unwrap().closed);
 }
+
+/// 带锁与自定义名的信标：无钥匙时拒绝打开并发送 `container.isLocked`，拿钥匙后打开并显示自定义名；
+/// 区块存档往返保留 `primary_effect` / `secondary_effect` / `CustomName` / `lock` 且 `Levels` 读盘归零。
+#[test]
+fn beacon_lock_custom_name_and_chunk_archive_round_trip() {
+    use mc_bamboo_blocks::behaviour::misc::beacon::{
+        BeaconBlockEntity, DATA_LEVELS, DATA_PRIMARY, DATA_SECONDARY, encode_effect,
+    };
+    use mc_bamboo_data::registries::{data_component_type as kinds, mob_effect};
+    use mc_bamboo_nbt::Tag;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::BEACON);
+    let mut beacon = BeaconBlockEntity::new(pos);
+    beacon.set_data(DATA_LEVELS, 4, None);
+    beacon.set_data(DATA_PRIMARY, encode_effect(Some(mob_effect::SPEED)), None);
+    beacon.set_data(
+        DATA_SECONDARY,
+        encode_effect(Some(mob_effect::REGENERATION)),
+        None,
+    );
+    fixture.region.block_entities.insert(Box::new(beacon));
+
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        kinds::CUSTOM_NAME,
+        PatchEntry::Set(ComponentValue::CustomName(Component::text("My Beacon"))),
+    );
+    patch.put(
+        kinds::LOCK,
+        PatchEntry::Set(ComponentValue::Lock(Tag::Compound(vec![(
+            "items".to_owned(),
+            Tag::String("minecraft:tripwire_hook".to_owned()),
+        )]))),
+    );
+    fixture.region.block_items.insert(pos, patch);
+    crate::block_items::refresh_update_tag(&mut fixture.region, pos);
+    assert!(fixture.region.chunks.update_tag(pos).is_some());
+
+    // 生存模式空手打开带锁信标：被拒。
+    if let Some(player) = fixture.region.players.get_mut(&fixture.id) {
+        player.game_mode = GameMode::Survival;
+    }
+    assert!(!open_block(&mut fixture.region, fixture.id, pos));
+    assert!(!fixture.region.menus.contains_key(&fixture.id));
+
+    // 主手拿绊线钩：能打开，且 OpenScreen 带自定义名。
+    if let Some(player) = fixture.region.players.get_mut(&fixture.id) {
+        player.inventory.slots[HOTBAR_START] = ItemStack::new(items::TRIPWIRE_HOOK, 1);
+    }
+    assert!(open_block(&mut fixture.region, fixture.id, pos));
+    assert!(fixture.region.menus.contains_key(&fixture.id));
+    on_close_request(&mut fixture.region, fixture.id);
+
+    // 整块区块存档往返（encode_parts -> decode -> encode）。
+    let chunk_pos = pos.chunk();
+    let parts = crate::region::content_snapshot::BorrowedParts::build(&fixture.region, chunk_pos)
+        .expect("snapshot chunk");
+    let encoded = crate::region::chunk_content::encode_parts(&parts, chunk_pos).expect("encode");
+    let decoded =
+        crate::region::chunk_content::decode(chunk_pos, &encoded.chunk, encoded.entities.as_ref())
+            .expect("decode");
+    let reencoded =
+        crate::region::chunk_content::encode(&decoded.column, chunk_pos).expect("reencode");
+
+    let find_beacon = |root: &Tag| -> Vec<(String, Tag)> {
+        let Tag::Compound(entries) = root else {
+            panic!("root is compound");
+        };
+        let (_, Tag::List(bes)) = entries
+            .iter()
+            .find(|(k, _)| k == "block_entities")
+            .expect("block_entities")
+        else {
+            panic!("block_entities is list");
+        };
+        bes.iter()
+            .find_map(|tag| {
+                let Tag::Compound(fields) = tag else {
+                    return None;
+                };
+                let is_beacon = fields
+                    .iter()
+                    .any(|(k, v)| k == "id" && v == &Tag::String("minecraft:beacon".to_owned()));
+                is_beacon.then(|| fields.clone())
+            })
+            .expect("beacon entry")
+    };
+
+    let first = find_beacon(&encoded.chunk);
+    let get = |fields: &[(String, Tag)], key: &str| -> Option<Tag> {
+        fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(
+        get(&first, "primary_effect"),
+        Some(Tag::String("minecraft:speed".to_owned()))
+    );
+    assert_eq!(
+        get(&first, "secondary_effect"),
+        Some(Tag::String("minecraft:regeneration".to_owned()))
+    );
+    assert_eq!(get(&first, "Levels"), Some(Tag::Int(4)));
+    assert!(get(&first, "CustomName").is_some());
+    assert!(get(&first, "lock").is_some());
+
+    // 读盘后再存盘：效果、自定义名和锁都保留，`Levels` 按官方 `loadAdditional` 重置为 0。
+    let second = find_beacon(&reencoded.chunk);
+    assert_eq!(
+        get(&second, "primary_effect"),
+        Some(Tag::String("minecraft:speed".to_owned()))
+    );
+    assert_eq!(
+        get(&second, "secondary_effect"),
+        Some(Tag::String("minecraft:regeneration".to_owned()))
+    );
+    assert_eq!(get(&second, "Levels"), Some(Tag::Int(0)));
+    assert_eq!(get(&second, "CustomName"), get(&first, "CustomName"));
+    assert_eq!(get(&second, "lock"), get(&first, "lock"));
+}
