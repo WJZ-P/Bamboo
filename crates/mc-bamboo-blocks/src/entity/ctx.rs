@@ -1289,6 +1289,13 @@ pub enum Command {
     DropItem {
         stack: ItemStack,
     },
+    /// `LivingEntity.createWitherRose`：被凋灵 Boss 杀死的生物脚下生成凋灵玫瑰。
+    ///
+    /// `LivingEntity.createWitherRose`: a mob killed by the wither boss grows a
+    /// wither rose at its feet.
+    CreateWitherRose {
+        pos: BlockPos,
+    },
     /// `Leashable.dropLeash` / `setLeashedTo` 的 `notifyLeasheeRemoved`：旧牵引者是
     /// 拴绳结且没有生物还拴着它时，结消失。
     ///
@@ -2037,6 +2044,26 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
+        }
+        Command::CreateWitherRose { pos } => {
+            use mc_bamboo_data::{blocks, items, tags::block_tags};
+            let rose = crate::BlockState(blocks::WITHER_ROSE);
+            let below = world.block_state(pos.below());
+            let place = world.block_game_rules().mob_griefing
+                && world.block_state(pos).is_air()
+                && below.is_tagged(block_tags::SUPPORTS_WITHER_ROSE);
+            if place {
+                world.set_block_and_update(pos, rose);
+            } else {
+                world.spawn_at_location(
+                    Vec3::new(
+                        f64::from(pos.x) + 0.5,
+                        f64::from(pos.y),
+                        f64::from(pos.z) + 0.5,
+                    ),
+                    ItemStack::new(items::WITHER_ROSE, 1),
+                );
+            }
         }
         Command::DropTridentItem { stack } => {
             world.spawn_at_location(

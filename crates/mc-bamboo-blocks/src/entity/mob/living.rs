@@ -1468,7 +1468,17 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
     if mob.mob_type == super::MobType::Creaking {
         super::creaking::ai_step(me, mob, ctx);
     }
+    // `WitherBoss.aiStep`：追主目标的飞行速度在 `super.aiStep()` 之前。
+    // `WitherBoss.aiStep`: the flight speed towards the main target runs before `super.aiStep()`.
+    if mob.mob_type == super::MobType::Wither {
+        super::wither::ai_step_flight(me, mob, ctx);
+    }
     animal_ai_step(me, mob, ctx, plan);
+    // `WitherBoss.aiStep`：两个侧头朝各自目标转，在 `super.aiStep()` 之后。
+    // `WitherBoss.aiStep`: the two side heads turn towards their targets after `super.aiStep()`.
+    if mob.mob_type == super::MobType::Wither {
+        super::wither::ai_step_heads(me, mob, ctx);
+    }
     // `Ravager.aiStep` 在 `super.aiStep()` 之后跑自己的那一段：速度渐进、踩树叶、
     // 三个计时器。
     // `Ravager.aiStep` runs its own part after `super.aiStep()`: speed easing,
@@ -2174,6 +2184,14 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     // `navigation.tick`. Brains are decisions and skip with the goals when throttled.
     if plan.decisions_run {
         tick_brains(me, mob, ctx, plan.decision_gap);
+    }
+    // `WitherBoss.customServerAiStep`：无敌期 / 爆炸 / 破坏方块 / 回血 / Boss 血条，
+    // 每刻都跑，不随目标降频跳过。
+    //
+    // `WitherBoss.customServerAiStep`: invulnerability / explosion / block destruction /
+    // healing / boss bar, every tick (not gated by decision throttling).
+    if mob.mob_type == super::MobType::Wither {
+        super::wither::custom_server_ai_step(me, mob, ctx);
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
@@ -3274,6 +3292,16 @@ pub(crate) fn hurt_server(
     if mob.mob_type == super::MobType::SulfurCube {
         super::sulfur_cube::prime_on_hurt(me, mob, &source);
     }
+    // `WitherBoss.hurtServer`：半血护甲弹箭、无敌期、亡灵攻击者一律无效；
+    // 放行前把破坏方块倒计时和空闲射击计数推进。
+    //
+    // `WitherBoss.hurtServer`: half-health armour deflects arrows, invulnerability
+    // and undead attackers are rejected; an accepted hit advances the block timer.
+    if mob.mob_type == super::MobType::Wither
+        && let Some(result) = super::wither::hurt_server_guard(mob, &source)
+    {
+        return result;
+    }
     if mob.mob_type == super::MobType::IronGolem {
         return super::iron_golem::hurt_server(me, mob, ctx, source, amount);
     }
@@ -3841,6 +3869,20 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         return;
     }
     mob.dead = true;
+    // `LivingEntity.createWitherRose`：击杀者（`getKillCredit`）是凋灵 Boss 时，
+    // 脚下生成凋灵玫瑰。官方把它放在掉落之后，这里只记一次等价的落地命令。
+    //
+    // `LivingEntity.createWitherRose`: when the kill credit is the wither boss,
+    // grow a wither rose at the feet. Vanilla does it after the drops; here it is
+    // one equivalent landing command.
+    if source.attacker_type == Some(mc_bamboo_data::registries::entity_type::WITHER) {
+        ctx.emit(
+            Command::CreateWitherRose {
+                pos: me.block_position(),
+            },
+            me,
+        );
+    }
     // `LivingEntity.die` 在掉落之前发 `ENTITY_DIE`：上下文的 `sourceEntity` 是死者，
     // 附近的幽匿催发体用它换经验充能。命令在伤害命令之后落地，但仍在同刻。
     // `LivingEntity.die` posts `ENTITY_DIE` before drops; catalyst listeners turn
@@ -3987,6 +4029,19 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
             Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
             me,
         );
+        // `WitherBoss.dropCustomDeathLoot`：战利品表是空的，额外掉一颗下界之星。
+        // `WitherBoss.dropCustomDeathLoot`: the loot table is empty; drop a nether star.
+        if mob.mob_type == super::MobType::Wither {
+            ctx.emit(
+                Command::DropItem {
+                    stack: mc_bamboo_protocol::item::ItemStack::new(
+                        mc_bamboo_data::items::NETHER_STAR,
+                        1,
+                    ),
+                },
+                me,
+            );
+        }
     }
     if experience > 0 {
         ctx.emit(Command::AwardDeathExperience { amount: experience }, me);
