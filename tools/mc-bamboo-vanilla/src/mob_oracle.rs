@@ -3460,8 +3460,16 @@ impl Report {
         // Vanilla's player constructor draws one id from the entity table (then `setId`
         // overrides it to `FIRST_ID + 1024`); Bamboo players are not in the table, so skip
         // the same number of ids to align later spawned entities (vexes, fangs, arrows).
-        for _ in 0..case.players.len() {
-            level.entities.ids_handle().allocate();
+        // 只有会再生成实体的法术场景需要对齐，其它场景的实体种子和 ID 顺序不动。
+        // Only the spell scenes that spawn entities later need the alignment; every
+        // other scene keeps its entity seeds and id order untouched.
+        if case.name.starts_with("evoker_")
+            || case.name.starts_with("vex_")
+            || case.name.starts_with("illusioner_")
+        {
+            for _ in 0..case.players.len() {
+                level.entities.ids_handle().allocate();
+            }
         }
         let Some(first) = case.steps.first() else {
             self.mismatch(format!("{}: no steps", case.name));
