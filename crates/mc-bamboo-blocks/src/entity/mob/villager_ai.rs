@@ -2173,8 +2173,7 @@ fn trigger_pre_raid_gate(state: &mut PreRaidGateState, cx: &mut Cx) -> bool {
     }
     // 洗牌先出 `VillageBoundRandomStroll`，或 `SetWalkTargetFromBlockMemory` 因记忆条件
     // 没触发时，落到闲逛。
-    if stroll_first
-        || !trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx)
+    if stroll_first || !trigger_walk_target_from_block_memory(MeetingPoint, speed, 2, 150, 200, cx)
     {
         let _ = trigger_village_bound_random_stroll(speed, 10, 7, cx);
     }
