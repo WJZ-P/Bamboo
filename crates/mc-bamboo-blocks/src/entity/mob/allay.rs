@@ -11,11 +11,15 @@
 use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::{
     blocks, items,
-    registries::{attribute, entity_type as ids},
+    registries::{attribute, data_component_type as kinds, entity_type as ids},
     tags::item_tags,
 };
 use mc_bamboo_nbt::Tag;
-use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
+use mc_bamboo_protocol::{
+    components::defaults,
+    item::ItemStack,
+    packet::play::EquipmentSlot,
+};
 
 use super::{
     Mob, MobEvent, MobType,
@@ -412,7 +416,15 @@ pub(super) fn wants_to_pick_up(mob: &Mob, stack: &ItemStack, rules: &BlockGameRu
 
 /// `Allay.allayConsidersItemEqual`：`ItemStack.isSameItem` 且药水成分相同。
 fn allay_considers_item_equal(a: &ItemStack, b: &ItemStack) -> bool {
-    a.is_same_item(b) && a.is_same_item_same_components(b)
+    a.is_same_item(b) && !has_non_matching_potion(a, b)
+}
+
+/// `Allay.hasNonMatchingPotion`：两边 `potion_contents`（含物品默认值）不一样。
+fn has_non_matching_potion(a: &ItemStack, b: &ItemStack) -> bool {
+    let patch_a = a.patch();
+    let patch_b = b.patch();
+    defaults::resolve(a.item, &patch_a, kinds::POTION_CONTENTS)
+        != defaults::resolve(b.item, &patch_b, kinds::POTION_CONTENTS)
 }
 
 /// `Allay.customServerAiStep`：大脑、每刻活动重选、振动系统。
@@ -602,6 +614,7 @@ pub const NOTE_BLOCK_ITEM: i32 = items::NOTE_BLOCK;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
 
     /// 官方构造事实和元数据缺省值。
     #[test]
@@ -652,5 +665,34 @@ mod tests {
         assert_eq!(rebuilt.allay.inventory[0].count, 3);
         assert_eq!(rebuilt.allay.duplication_cooldown, 123);
         assert!(!rebuilt.allay.can_duplicate);
+    }
+
+    /// `allayConsidersItemEqual` 只比物品和药水成分，不比其它组件：同种物品即便
+    /// 其它组件不同也算相同，药水成分不一样才算不同。
+    #[test]
+    fn item_equality_only_compares_item_and_potion() {
+        let plain = ItemStack::new(items::NOTE_BLOCK, 1);
+        assert!(allay_considers_item_equal(&plain, &plain));
+        assert!(!allay_considers_item_equal(
+            &plain,
+            &ItemStack::new(items::AMETHYST_SHARD, 1)
+        ));
+
+        // 同一个物品、一个显式设了药水成分一个没有 → 药水不同。
+        let mut with_potion = ItemStack::new(items::NOTE_BLOCK, 1);
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            kinds::POTION_CONTENTS,
+            PatchEntry::Set(ComponentValue::PotionContents {
+                potion: Some(1),
+                custom_color: None,
+                custom_effects: Vec::new(),
+                custom_name: None,
+            }),
+        );
+        let (added, removed) = patch.to_opaque();
+        with_potion.added = added;
+        with_potion.removed = removed;
+        assert!(!allay_considers_item_equal(&plain, &with_potion));
     }
 }
