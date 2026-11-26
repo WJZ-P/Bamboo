@@ -939,11 +939,7 @@ impl MobType {
         // `Allay.removeWhenFarAway()` are always false.
         if matches!(
             self,
-            Self::IronGolem
-                | Self::SnowGolem
-                | Self::Warden
-                | Self::WanderingTrader
-                | Self::Allay
+            Self::IronGolem | Self::SnowGolem | Self::Warden | Self::WanderingTrader | Self::Allay
         ) {
             return false;
         }
@@ -1265,9 +1261,11 @@ impl MobType {
         // `Guardian.getAmbientSoundInterval()` = 160.
         if matches!(self, Self::Guardian | Self::ElderGuardian) {
             160
-        } else if matches!(self, Self::Nautilus) {
-            // `Mob.getAmbientSoundInterval()` 的缺省 80：鹦鹉螺没有覆写。
-            // `Mob.getAmbientSoundInterval()`'s default 80: nautiluses do not override.
+        } else if matches!(self, Self::Nautilus | Self::Allay) {
+            // `Mob.getAmbientSoundInterval()` 的缺省 80：鹦鹉螺和悦灵都是
+            // `PathfinderMob`，没有覆写这个方法（悦灵不是 `Animal`，不吃 120）。
+            // `Mob.getAmbientSoundInterval()`'s default 80: nautiluses and allays are
+            // `PathfinderMob`s that do not override it (allays are not `Animal`s, so 120).
             80
         } else if matches!(self, Self::Ocelot) {
             900
