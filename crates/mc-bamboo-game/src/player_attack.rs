@@ -11,22 +11,23 @@
 //! sounds, animations, durability and exhaustion follow vanilla 26.3's order.
 
 use mc_bamboo_blocks::{
-    World,
+    CollisionContext, EntityContext, World,
     entity::{
         JavaRandom,
+        arrow::{clip_entity, clip_including_border},
         mob::{DamageSource, effects::EffectInstance},
     },
 };
 use mc_bamboo_core::{Aabb, BlockPos, Hand, Vec3, mth};
 use mc_bamboo_data::{
-    gamerules, items,
+    SOUND_EVENTS, gamerules, items,
     registries::{attribute, data_component_type as kinds, mob_effect, particle_type},
     sounds,
     tags::{self, item_tags},
 };
 use mc_bamboo_protocol::{
     codec::write_varint,
-    components::{ComponentPatch, ComponentValue, defaults},
+    components::{ComponentPatch, ComponentValue, cursor::Holder, defaults},
     item::ItemStack,
     packet::play::{Animate, GameMode, LevelParticles, Randomization, SetEntityMotion},
 };
@@ -369,8 +370,8 @@ fn collect_mace_targets(
     //
     // The attacker's team and UUID, the two facts behind `attacker.isAlliedTo(candidate)`.
     let attacker_player = region.players.get(&attacker);
-    let attacker_team = attacker_player
-        .and_then(|player| region.global.scoreboard.team_index_of(&player.name));
+    let attacker_team =
+        attacker_player.and_then(|player| region.global.scoreboard.team_index_of(&player.name));
     let attacker_uuid = attacker_player.map(|player| *player.uuid.as_bytes());
     let mut out: Vec<MaceTarget> = region
         .entities
@@ -1643,6 +1644,439 @@ fn bane_slowness(random: &mut JavaRandom, level: i32) -> (i32, i32) {
         (duration * 20.0).round() as i32,
         amplifier.round().max(0.0) as i32,
     )
+}
+
+// ===== 长矛穿刺（PiercingWeapon） =====
+
+/// `piercing_weapon` 组件里读出来的几样。
+struct PiercingSpec {
+    deals_knockback: bool,
+    _dismounts: bool,
+    sound: Option<String>,
+    hit_sound: Option<String>,
+}
+
+/// 一次穿刺命中的目标。
+#[derive(Clone, Copy)]
+struct SpearHit {
+    id: i32,
+    entity_type: i32,
+    is_player: bool,
+    /// 命中前的血量，`damageStatsAndHearts` 用它算 `DAMAGE_DEALT` 统计。
+    health: f32,
+}
+
+/// 把 `sound` / `hit_sound` 的 `Holder` 换成注册表名字。
+fn spear_sound_name(
+    sound: &Option<Holder<mc_bamboo_protocol::components::value::SoundEvent>>,
+) -> Option<String> {
+    match sound {
+        Some(Holder::Id(id)) => Some(SOUND_EVENTS[*id as usize].name.to_string()),
+        Some(Holder::Inline(sound)) => Some(sound.location.clone()),
+        None => None,
+    }
+}
+
+/// `ItemStack.get(PIERCING_WEAPON)`。
+fn piercing_spec(held: &ItemStack) -> Option<PiercingSpec> {
+    if held.is_empty() {
+        return None;
+    }
+    let Ok(patch) = ComponentPatch::from_opaque(held) else {
+        return None;
+    };
+    match defaults::resolve(held.item, &patch, kinds::PIERCING_WEAPON) {
+        Some(ComponentValue::PiercingWeapon {
+            deals_knockback,
+            dismounts,
+            sound,
+            hit_sound,
+        }) => Some(PiercingSpec {
+            deals_knockback: *deals_knockback,
+            _dismounts: *dismounts,
+            sound: spear_sound_name(sound),
+            hit_sound: spear_sound_name(hit_sound),
+        }),
+        _ => None,
+    }
+}
+
+/// 长矛一次刺击的射线参数，`on_stab` 开头读玩家算好。
+struct StabSetup {
+    held: ItemStack,
+    spec: PiercingSpec,
+    position: Vec3,
+    eye: Vec3,
+    look: Vec3,
+    min_point: Vec3,
+    max_point: Vec3,
+    margin: f32,
+    creative: bool,
+    yaw: f32,
+    base_damage: f32,
+    /// `attack_knockback_amount(player, held)`，第二个 `causeExtraKnockback` 的力道。
+    knockback: f32,
+    s: f32,
+    crouching: bool,
+    fall_distance: f64,
+}
+
+/// `PlayerActionKind::Stab` 的分发：`handlePlayerAction` 的 STAB 分支 →
+/// `PiercingWeapon.attack(player, MAINHAND)`。
+///
+/// The `PlayerActionKind::Stab` dispatch: the STAB arm of `handlePlayerAction`
+/// → `PiercingWeapon.attack(player, MAINHAND)`.
+pub(crate) fn on_stab(region: &mut Region, id: PlayerId) {
+    let Some(setup) = stab_setup(region, id) else {
+        return;
+    };
+    let hits = spear_hits(region, &setup);
+    let mut hit_targets = Vec::new();
+    let effects = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        for target in &hits {
+            if stab_hit(&mut world, id, &setup, target).is_some() {
+                hit_targets.push(*target);
+            }
+        }
+        // `makeHitSound` / `makeSound`：命中才发 `hit_sound`，`sound` 恒发。
+        if !hit_targets.is_empty()
+            && let Some(name) = &setup.spec.hit_sound
+        {
+            push_sound(&mut world, setup.position, name);
+        }
+        if let Some(name) = &setup.spec.sound {
+            push_sound(&mut world, setup.position, name);
+        }
+        world.drain_effects()
+    };
+    interaction::send_effects(region, Some(id), &effects);
+    // `onAttack()`：重置攻击冷却。
+    if let Some(player) = region.players.get_mut(&id) {
+        player.attack_strength_ticker = 0;
+    }
+    // `itemAttackInteraction` 的耐久 / 统计 / `lastHurtMob` / 饥饿。
+    finish_stab(region, id, &setup, &hit_targets);
+    // `postPiercingAttack()`：突进附魔 `lunge` 的前冲、耐久、饥饿和音效。
+    post_piercing_attack(region, id, &setup);
+    // `swingAndResetAttackStrength(MAIN_HAND, swingAnim, false)`。
+    entity_sync::broadcast_swing(region, id, Hand::Main);
+}
+
+/// `handlePlayerAction` STAB 分支的读玩家部分，也把 `PiercingWeapon.attack`
+/// 的 `baseDamage`、`range` 和射线参数算好。
+fn stab_setup(region: &Region, id: PlayerId) -> Option<StabSetup> {
+    let player = region.players.get(&id)?;
+    if player.game_mode == GameMode::Spectator || player.spawn_pending.is_some() {
+        return None;
+    }
+    let held = player.inventory.held(Hand::Main).clone();
+    let delay = strength_delay(player);
+    if !has_piercing_weapon(&held)
+        || cannot_attack_with_item(player.attack_strength_ticker, &held, delay)
+    {
+        return None;
+    }
+    let spec = piercing_spec(&held)?;
+    let position = player.position();
+    let eye_height = player.eye_height();
+    let eye = Vec3::new(position.x, position.y + eye_height, position.z);
+    let look = Vec3::view_vector(player.yaw, player.pitch);
+    let entity_reach = player.attributes.value(attribute::ENTITY_INTERACTION_RANGE) as f32;
+    let range = attack_range(&held, entity_reach);
+    let creative = player.game_mode == GameMode::Creative;
+    let (min_reach, max_reach) = if creative {
+        (range.min_creative_reach, range.max_creative_reach)
+    } else {
+        (range.min_reach, range.max_reach)
+    };
+    // `getHitEntitiesAlong` 的两端：`min_point` 是实体射线的终点，`max_point`
+    // 是方块裁剪的终点（`effectiveMaxRange + max(0, look · knownMovement)`）。
+    let movement = player.motion.known_movement;
+    let speed = look.x * movement.x + look.y * movement.y + look.z * movement.z;
+    let min_point = eye.add(look.scale(f64::from(min_reach)));
+    let max_point = eye.add(look.scale(f64::from(max_reach) + speed.max(0.0)));
+    let knockback = attack_knockback_amount(player, &held);
+    Some(StabSetup {
+        held,
+        spec,
+        position,
+        eye,
+        look,
+        min_point,
+        max_point,
+        margin: range.hitbox_margin,
+        creative,
+        yaw: player.yaw,
+        base_damage: player.attributes.value(attribute::ATTACK_DAMAGE) as f32,
+        knockback,
+        s: strength_scale(player.attack_strength_ticker, delay),
+        crouching: player.sync.is_crouching(),
+        fall_distance: player.motion.fall_distance,
+    })
+}
+
+/// 长矛攻击者的 `CollisionContext.of(entity)`。
+fn spear_collision_context(setup: &StabSetup) -> CollisionContext {
+    CollisionContext::Entity(EntityContext {
+        fall_distance: setup.fall_distance,
+        bottom: setup.position.y,
+        falling_block: false,
+        descending: setup.crouching,
+        placement: false,
+        powder_snow_walkable: false,
+    })
+}
+
+/// `ProjectileUtil.getManyEntityHitResult` 对单个候选包围盒的命中判定（含
+/// `b8` 的「眼在盒内」和 `hitbox_margin` 的膨胀盒擦边分支）。
+fn spear_clip_hit(
+    view: &dyn mc_bamboo_blocks::entity::ctx::BlockView,
+    bb: Aabb,
+    from: Vec3,
+    to: Vec3,
+    context: CollisionContext,
+    margin: f64,
+) -> bool {
+    if bb.contains(from.x, from.y, from.z) {
+        return true;
+    }
+    if clip_entity(bb, from, to).is_some() {
+        return true;
+    }
+    if margin <= 0.0 {
+        return false;
+    }
+    let Some(outside) = clip_entity(bb.inflated(margin), from, to) else {
+        return false;
+    };
+    let center = bb.center();
+    let inside =
+        clip_including_border(view, outside, center, context).map_or(center, |hit| hit.location);
+    clip_entity(bb, outside, inside).is_some()
+}
+
+/// `ProjectileUtil.getHitEntitiesAlong`：先方块裁剪，再在 `min_point` 起、
+/// `hitbox_margin` 厚、向 `max_point` 展开的搜索盒里收命中目标。候选在
+/// `block_level` 借期之间收集，逐目标遮挡判定在借期里做。
+fn spear_hits(region: &mut Region, setup: &StabSetup) -> Vec<SpearHit> {
+    let margin = f64::from(setup.margin);
+    // 方块裁剪：`to2` 是最远点，被方块截断时提前。
+    let mut to2 = setup.max_point;
+    {
+        let context = spear_collision_context(setup);
+        let (mut level, ticks) = region.block_level();
+        let world = World::new(&mut level, ticks);
+        if let Some(hit) = clip_including_border(&world, setup.eye, to2, context) {
+            to2 = hit.location;
+            if setup.eye.distance_to_sqr(to2) < setup.eye.distance_to_sqr(setup.min_point) {
+                return Vec::new();
+            }
+        }
+    }
+    // 搜索盒：`AABB.ofSize(min_point, margin).expandTowards(to2 - min_point).inflate(1)`。
+    let half = margin / 2.0;
+    let area = Aabb::new(
+        setup.min_point.x - half,
+        setup.min_point.y - half,
+        setup.min_point.z - half,
+        setup.min_point.x + half,
+        setup.min_point.y + half,
+        setup.min_point.z + half,
+    );
+    let expand = to2.subtract(setup.min_point);
+    let area = area
+        .expanded_towards(expand.x, expand.y, expand.z)
+        .inflated(1.0);
+    // 候选收集（不借 `block_level`）。
+    let mut candidates: Vec<(i32, Aabb, i32, bool, f32)> = Vec::new();
+    for public in region.entities.iter_public() {
+        let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind else {
+            continue;
+        };
+        if public.removed || mob.health <= 0.0 {
+            continue;
+        }
+        let bb = entity_bounds(public.position, public.kind.dimensions());
+        if bb.intersects(area) {
+            candidates.push((public.uid, bb, public.kind.entity_type(), false, mob.health));
+        }
+    }
+    for player in region.players.values() {
+        if player.id.0 == 0
+            || player.game_mode == GameMode::Spectator
+            || player.health.health <= 0.0
+        {
+            continue;
+        }
+        let bb = player.bounding_box();
+        if bb.intersects(area) {
+            candidates.push((
+                player.id.0,
+                bb,
+                mc_bamboo_data::registries::entity_type::PLAYER,
+                true,
+                player.health.health,
+            ));
+        }
+    }
+    // 逐目标命中判定（借 `block_level` 做遮挡）。
+    let context = spear_collision_context(setup);
+    let mut hits = Vec::new();
+    let (mut level, ticks) = region.block_level();
+    let world = World::new(&mut level, ticks);
+    for (uid, bb, entity_type, is_player, health) in candidates {
+        if spear_clip_hit(&world, bb, setup.eye, setup.min_point, context, margin) {
+            hits.push(SpearHit {
+                id: uid,
+                entity_type,
+                is_player,
+                health,
+            });
+        }
+    }
+    hits
+}
+
+/// 单目标 `Player.stabAttack`：伤害、两下击退和攻击后附魔效果。命中后的动画、
+/// 耐久、统计和饥饿在 [`finish_stab`] 里统一收尾。
+fn stab_hit(
+    world: &mut World<'_>,
+    attacker: PlayerId,
+    setup: &StabSetup,
+    target: &SpearHit,
+) -> Option<f32> {
+    let magic = damage_bonus(&setup.held, target.entity_type);
+    // 长矛挥击不是「正在使用」，所以 `magicBoost *= s`、`base *= baseDamageScaleFactor`。
+    let magic_boost = magic * setup.s;
+    let base = setup.base_damage * (BASE_SCALE_MIN + setup.s * setup.s * BASE_SCALE_SPAN);
+    let total = base + magic_boost;
+    let mut source = DamageSource::player(attacker.0, setup.position, setup.creative);
+    source.kind = mc_bamboo_blocks::entity::mob::DamageKind::Spear;
+    if let Ok(weapon) = u16::try_from(setup.held.item) {
+        source = source.with_weapon(weapon);
+    }
+    let breach = enchantment_level(&setup.held, "minecraft:breach").max(0) as f32;
+    if breach > 0.0 {
+        source = source.with_armor_effectiveness(-0.15 * breach);
+    }
+    let hit = if target.is_player {
+        hurt_player_target(world, target.id, source, total)
+    } else {
+        world.hurt_mob(target.id, source, total)
+    };
+    if hit {
+        if setup.spec.deals_knockback {
+            // `causeExtraKnockback(0.4)` 再 `causeExtraKnockback(getKnockback)`。
+            apply_extra_knockback(world, target.id, 0.4, setup.yaw, target.is_player);
+            apply_extra_knockback(
+                world,
+                target.id,
+                setup.knockback,
+                setup.yaw,
+                target.is_player,
+            );
+        }
+        post_attack_effects(
+            world,
+            target.id,
+            &setup.held,
+            target.entity_type,
+            target.is_player,
+        );
+        Some(magic_boost)
+    } else {
+        None
+    }
+}
+
+/// `Player.stabAttack` 命中之后的收尾：附魔暴击动画、伤害统计、耐久、`lastHurtMob`
+/// 和饥饿。每个命中目标各做一遍。
+fn finish_stab(region: &mut Region, id: PlayerId, setup: &StabSetup, hits: &[SpearHit]) {
+    for target in hits {
+        let magic = damage_bonus(&setup.held, target.entity_type) * setup.s;
+        if magic > 0.0 {
+            send_animate(region, id, target.id, Animate::MAGIC_CRITICAL_HIT);
+        }
+        // `damageStatsAndHearts`：`DAMAGE_DEALT` 统计和伤害指示粒子。
+        let actual_damage = damage_taken(region, target.id, target.health);
+        item_use_stats::award_damage_dealt(region, id, (actual_damage * 10.0).round() as i32);
+        // 耐久、`ITEM_USED` 统计、`lastHurtMob` 和饥饿按官方顺序落到主手武器上。
+        if weapon_component(&setup.held) {
+            item_use_stats::award(region, id, setup.held.item);
+        }
+        durability::run(region, id, Hand::Main, |region| {
+            let (mut level, ticks) = region.block_level();
+            let world = World::new(&mut level, ticks);
+            mc_bamboo_blocks::durability::hurt_hand(&world, Hand::Main, 1);
+        });
+        if let Some(player) = region.players.get_mut(&id) {
+            let now = player.entity_ticks;
+            player.combat_memory.record_attack(target.id, now);
+            player.health_sync = player_hurt::HealthSync::of(player);
+        }
+        player_exhaustion::add_in(region, id, ATTACK_EXHAUSTION);
+    }
+}
+
+/// `LivingEntity.postPiercingAttack` → `EnchantmentHelper.doPostPiercingAttackEffects`：
+/// 突进附魔 `lunge` 的 `post_piercing_attack` 效果（前冲、扣耐久、饥饿和音效）。
+fn post_piercing_attack(region: &mut Region, id: PlayerId, setup: &StabSetup) {
+    let lunge = enchantment_level(&setup.held, "minecraft:lunge").max(0);
+    if lunge == 0 {
+        return;
+    }
+    let mut random = {
+        let Some(player) = region.players.get(&id) else {
+            return;
+        };
+        // 需求：没骑乘（Bamboo 无鞘翅滑翔和水状态），且非创造时饥饿 ≥ 7。
+        if player.riding.vehicle.is_some() {
+            return;
+        }
+        if player.game_mode != GameMode::Creative && player.health.food.food_level < 7 {
+            return;
+        }
+        player.random
+    };
+    // `play_sound`：[lunge_1, lunge_2, lunge_3] 三选一，`getRandomElement` 取一次随机。
+    let sound_index = random.next_int_bounded(3);
+    // `apply_impulse`：方向 `[0,0,1]` 经视线四元数旋转后 y 归零（`coordinate_scale`），
+    // 量级 `linear base 0.458 / +0.458`。
+    let magnitude = 0.458_f64 * lunge as f64;
+    let impulse = Vec3::new(setup.look.x * magnitude, 0.0, setup.look.z * magnitude);
+    let movement = {
+        let player = region.players.get_mut(&id).expect("玩家");
+        player.random = random;
+        player.motion.delta = player.motion.delta.add(impulse);
+        player.motion.delta
+    };
+    // `ServerPlayer` 补发 `set_entity_motion`（`ApplyEntityImpulse` 同款）。
+    let packet = encode_frames(&SetEntityMotion {
+        entity_id: id.0,
+        movement,
+    });
+    region.links.send_frames(id, &packet);
+    // `change_item_damage`（1 点）和 `apply_exhaustion`（linear 4.0 / +4.0）。
+    durability::run(region, id, Hand::Main, |region| {
+        let (mut level, ticks) = region.block_level();
+        let world = World::new(&mut level, ticks);
+        mc_bamboo_blocks::durability::hurt_hand(&world, Hand::Main, 1);
+    });
+    player_exhaustion::add_in(region, id, 4.0 * lunge as f32);
+    let name = [
+        "minecraft:item.spear.lunge_1",
+        "minecraft:item.spear.lunge_2",
+        "minecraft:item.spear.lunge_3",
+    ][sound_index as usize];
+    let effects = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        push_sound(&mut world, setup.position, name);
+        world.drain_effects()
+    };
+    interaction::send_effects(region, Some(id), &effects);
 }
 
 #[cfg(test)]
