@@ -1574,17 +1574,20 @@ WebView2 的渲染进程不算在内。
   每 20 刻回 1 血、血条进度按血量比更新。`aiStep` 接上追主目标的飞行速度和两个侧头朝 `DATA_TARGET_B/C`
   的折角插值（`rotlerp`）。`hurtServer` 挡下无敌期、溺水（`#wither_immune_to`）、另一个凋灵、
   `#wither_friends`（`#undead`）的伤害，半血（`isPowered`）时箭 / 风弹被弹开，放行前设 `destroyBlocksTick=20`、
-  `idleHeadUpdates` 各加 3。`aiStep` 的烟雾 / 实体效果粒子照字节码消耗实体随机源（每刻 9 次高斯、半血时每头一次
+  `idleHeadUpdates` 各加 3。`goalSelector` / `targetSelector` 照 `WitherBoss.registerGoals` 注册：无敌期
+  `WitherDoNothingGoal` 占住 MOVE/JUMP/LOOK，之后是 40 刻一次的 `RangedAttackGoal`（追目标、盯住、每 40 刻射主头）、
+  `WaterAvoidingRandomFlyingGoal`（`HoverRandomPos` / `AirAndWaterRandomPos` 挑空中落点）、看玩家、环顾；
+  `HurtByTargetGoal` 和 `NearestAttackableTargetGoal<LivingEntity>` 用 `LIVING_ENTITY_SELECTOR` 排除 `#wither_friends`
+  （亡灵），`randomInterval=0` 每刻索敌，凋灵会飞起来追目标。`aiStep` 的烟雾 / 实体效果粒子照字节码消耗实体随机源（每刻 9 次高斯、半血时每头一次
   `level.random.nextInt(4)`、无敌期再加 6 次高斯 + 3 次浮点）。死亡掉下界之星，`LivingEntity.createWitherRose`
   照字节码排在所有掉落命令之后：`mobGriefing` 且脚下方块是空气、且 `WitherRoseBlock.canSurvive`（走行为表
   `mayPlaceOn` 的 `#supports_wither_rose`）时种下玫瑰，否则按 `getX/getY/getZ` 的实体坐标掉玫瑰物品。
   **验证**：`cargo test -p mc-bamboo-blocks -p mc-bamboo-game`、`cargo clippy --workspace --all-targets`、
   `cargo fmt --all --check` 全过；`mob-oracle java --show 2000` 仍是 267 处已知末位差（无凋灵相关差异），
   `entity-oracle` / `player-data` / `chunk-content` 三个 Java 对拍全过。
-  **已知限制（本轮未做）**：`goalSelector` / `targetSelector` 还没注册（`WitherDoNothingGoal`、`RangedAttackGoal`、
-  `WaterAvoidingRandomFlyingGoal`、看玩家、`HurtByTargetGoal`、`NearestAttackableTargetGoal` 都缺），
-  凋灵不会主动移动 / 索敌；`WitherSkull` 凋灵之首射弹实体、三个头的 `performRangedAttack`（普通 / 蓝色危险、
-  命中加凋零效果、蓝色破方块）和侧头 idle / 索敌射击都未建模，凋灵目前不会攻击；`ServerBossEvent`
+  **已知限制（本轮未做）**：`WitherSkull` 凋灵之首射弹实体、三个头的 `performRangedAttack`（普通 / 蓝色危险、
+  命中加凋零效果、蓝色破方块）和侧头 idle / 索敌射击都未建模，`RangedAttackGoal` 目前只追目标 / 计时、还不发射，
+  凋灵不会攻击；`ServerBossEvent`
   只在状态里记进度，没给跟踪范围内玩家发 add / remove / update 网络包；**没有新增逐刻对拍场景，也没有 4 处改坏确认**——
   召唤 / 无敌期 / 爆炸 / 射凋灵之首 / 半血弹箭 / 破坏方块 / 存档往返的官方逐刻对拍留待下一步。
 - 正版验证的限制：`server.properties` 的 `online-mode` 官方默认 true，命令行版和桌面端都读同一份文件、

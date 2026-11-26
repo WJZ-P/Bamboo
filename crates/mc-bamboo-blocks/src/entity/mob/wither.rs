@@ -22,7 +22,12 @@ use crate::{
     state::BlockState,
 };
 
-use super::{DamageKind, DamageSource, Mob, attributes::Attributes, goals::GoalSelector};
+use super::{
+    DamageKind, DamageSource, Mob, MobType,
+    attributes::Attributes,
+    goals::{CombatTarget, GoalSelector},
+    living,
+};
 
 /// 无敌期长度，`WitherBoss.INVULNERABLE_TICKS`。
 ///
@@ -180,18 +185,96 @@ pub(super) fn attributes() -> Attributes {
     table
 }
 
-/// `WitherBoss.registerGoals` 的 `goalSelector`。
+/// `#wither_friends`（等于 `#undead`）标签里的实体类型 ID。
+///
+/// The entity-type ids in the `minecraft:wither_friends` (equal to `minecraft:undead`) tag.
+const WITHER_FRIENDS: &[i32] = &[
+    118, 131, 150, 119, 16, 98, 155, 20, 154, 157, 158, 153, 39, 68, 156, 149, 100,
+];
+
+/// `LIVING_ENTITY_SELECTOR` / `hurtServer` 的 `#wither_friends` 判定：
+/// 用攻击者 / 候选目标的实体类型 ID 查标签。
+///
+/// The `#wither_friends` test of `LIVING_ENTITY_SELECTOR` / `hurtServer`: look the
+/// entity type up in the tag.
+pub(crate) fn is_wither_friend(kind: MobType) -> bool {
+    WITHER_FRIENDS.contains(&kind.entity_type())
+}
+
+/// `WitherBoss.registerGoals` 的 `goalSelector`：
+/// `0 WitherDoNothingGoal`、`2 RangedAttackGoal`、`5 WaterAvoidingRandomFlyingGoal`、
+/// `6 LookAtPlayerGoal`、`7 RandomLookAroundGoal`。
 ///
 /// The `goalSelector` of `WitherBoss.registerGoals`.
 pub(super) fn goals() -> GoalSelector {
-    GoalSelector::default()
+    use super::goals::Goal;
+    GoalSelector::from_ordered_pairs(vec![
+        (0, Goal::WitherDoNothing),
+        (
+            2,
+            Goal::WitherRangedAttack {
+                target: None,
+                attack_time: -1,
+                see_time: 0,
+            },
+        ),
+        (
+            5,
+            Goal::WitherRandomFlying {
+                speed: 1.0,
+                interval: 120,
+                wanted: Vec3::default(),
+                force_trigger: false,
+            },
+        ),
+        (
+            6,
+            Goal::LookAtPlayer {
+                look_distance: 8.0,
+                probability: 0.02,
+                look_at: None,
+                look_time: 0,
+            },
+        ),
+        (
+            7,
+            Goal::RandomLookAround {
+                rel_x: 0.0,
+                rel_z: 0.0,
+                look_time: 0,
+            },
+        ),
+    ])
 }
 
-/// `WitherBoss.registerGoals` 的 `targetSelector`。
+/// `WitherBoss.registerGoals` 的 `targetSelector`：
+/// `1 HurtByTargetGoal`、`2 NearestAttackableTargetGoal<LivingEntity>`（不打亡灵）。
+/// 官方 `randomInterval` 传 0，所以 `interval` 为 0、每刻都搜目标。
 ///
-/// The `targetSelector` of `WitherBoss.registerGoals`.
+/// The `targetSelector` of `WitherBoss.registerGoals`; vanilla passes 0 for
+/// `randomInterval`, so the interval is 0 and the search runs every tick.
 pub(super) fn target_goals() -> GoalSelector {
-    GoalSelector::default()
+    use super::goals::{Goal, TargetType};
+    GoalSelector::from_ordered_pairs(vec![
+        (
+            1,
+            Goal::HurtByTarget {
+                timestamp: 0,
+                unseen_ticks: 0,
+            },
+        ),
+        (
+            2,
+            Goal::NearestAttackableTarget {
+                kind: TargetType::WitherPrey,
+                interval: 0,
+                unseen_ticks: 0,
+                found: None,
+                must_see: false,
+                light_gate: false,
+            },
+        ),
+    ])
 }
 
 /// `WitherBoss.aiStep` 的前半：追主目标（头 0）时的飞行速度，在 `super.aiStep()` 之前。
@@ -301,6 +384,60 @@ pub(super) fn ai_step_particles(me: &mut Entity, mob: &Mob, ctx: &dyn EntityCtx)
             let _ = me.random.next_float();
             let _ = me.random.next_gaussian();
         }
+    }
+}
+
+/// `RangedAttackGoal(wither, 1.0, 40, 20.0F)` 的参数：`speedModifier=1.0`、
+/// `attackIntervalMin=attackIntervalMax=40`、`attackRadius=20.0`。
+///
+/// Parameters of `RangedAttackGoal(wither, 1.0, 40, 20.0F)`.
+const RANGED_SPEED: f64 = 1.0;
+const RANGED_RADIUS: f32 = 20.0;
+const RANGED_INTERVAL: i32 = 40;
+
+/// `RangedAttackGoal.tick`（凋灵）：算距离和视线，近且看见够 5 刻就停下导航，
+/// 否则以 `speedModifier` 追；盯住目标；`attackTime` 到 0 且看得见时射主头
+/// （第 3 步接 `performRangedAttack`），随后重设为 40。
+///
+/// `RangedAttackGoal.tick` (wither): distance and sight; stop when close and seen
+/// for 5 ticks, otherwise chase; look at the target; fire the main head when the
+/// timer reaches 0 (wired to `performRangedAttack` in step 3), then reset to 40.
+pub(super) fn ranged_attack_tick(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    target: CombatTarget,
+    attack_time: &mut i32,
+    see_time: &mut i32,
+) {
+    let distance_sqr = me.position.distance_to_sqr(target.position);
+    let seen = living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position());
+    *see_time = if seen { *see_time + 1 } else { 0 };
+    let radius_sqr = f64::from(RANGED_RADIUS * RANGED_RADIUS);
+    if distance_sqr <= radius_sqr && *see_time >= 5 {
+        mob.navigation.stop();
+    } else {
+        let nav = living::nav_mob(me, mob, ctx.blocks());
+        mob.navigation
+            .move_to_entity(ctx.blocks(), &nav, target.position, RANGED_SPEED, 1);
+    }
+    mob.look.set_look_at(
+        target.position.x,
+        target.eye_y(),
+        target.position.z,
+        30.0,
+        30.0,
+    );
+    *attack_time -= 1;
+    if *attack_time == 0 {
+        if !seen {
+            return;
+        }
+        // 第 3 步接 `performRangedAttack(0, target, f)`（射凋灵之首）。
+        // Step 3 wires `performRangedAttack(0, target, f)` (fire a wither skull).
+        *attack_time = RANGED_INTERVAL;
+    } else if *attack_time < 0 {
+        *attack_time = RANGED_INTERVAL;
     }
 }
 
@@ -440,7 +577,10 @@ pub(super) fn hurt_server_guard(mob: &mut Mob, source: &DamageSource) -> Option<
     }
     // 亡灵（`#wither_friends`）打不动凋灵。
     // Undead (`#wither_friends`) cannot hurt the wither.
-    if is_undead_attacker(source) {
+    if source
+        .attacker_type
+        .is_some_and(|kind| WITHER_FRIENDS.contains(&kind))
+    {
         return Some(false);
     }
     if mob.wither.destroy_blocks_tick <= 0 {
@@ -450,22 +590,6 @@ pub(super) fn hurt_server_guard(mob: &mut Mob, source: &DamageSource) -> Option<
         *idle += 3;
     }
     None
-}
-
-/// `minecraft:wither_friends`（等于 `minecraft:undead`）标签里的实体类型 ID。
-///
-/// The entity-type ids in the `minecraft:wither_friends` (equal to `minecraft:undead`) tag.
-const WITHER_FRIENDS: &[i32] = &[
-    118, 131, 150, 119, 16, 98, 155, 20, 154, 157, 158, 153, 39, 68, 156, 149, 100,
-];
-
-/// `#wither_friends` 就是 `#undead` 标签，用攻击者实体类型判断。
-///
-/// `#wither_friends` is the `#undead` tag, decided from the attacker entity type.
-fn is_undead_attacker(source: &DamageSource) -> bool {
-    source
-        .attacker_type
-        .is_some_and(|kind| WITHER_FRIENDS.contains(&kind))
 }
 
 #[cfg(test)]
@@ -553,5 +677,58 @@ mod tests {
         let source = DamageSource::environment(DamageKind::MobAttack);
         assert_eq!(hurt_server_guard(&mut mob, &source), Some(false));
         assert_eq!(mob.wither.destroy_blocks_tick, 0);
+    }
+
+    /// `WitherBoss.registerGoals` 的注册顺序、优先级和运行名照官方。
+    ///
+    /// The registration order, priorities and running names of `WitherBoss.registerGoals`.
+    #[test]
+    fn goal_tables_match_the_official_registration() {
+        use crate::entity::mob::goals::{Flag, Goal};
+
+        let selector = goals();
+        let pairs: Vec<_> = selector
+            .goals
+            .iter()
+            .map(|wrapped| (wrapped.priority, wrapped.goal.name()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (0, "WitherDoNothingGoal"),
+                (2, "RangedAttackGoal"),
+                (5, "WaterAvoidingRandomFlyingGoal"),
+                (6, "LookAtPlayerGoal"),
+                (7, "RandomLookAroundGoal"),
+            ]
+        );
+        assert_eq!(
+            Goal::WitherDoNothing.flags(),
+            &[Flag::Move, Flag::Look, Flag::Jump]
+        );
+        assert!(selector.goals[1].goal.every_tick());
+
+        let targets = target_goals();
+        let names: Vec<_> = targets
+            .goals
+            .iter()
+            .map(|wrapped| wrapped.goal.name())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["HurtByTargetGoal", "NearestAttackableTargetGoal"]
+        );
+    }
+
+    /// `LIVING_ENTITY_SELECTOR` 排除 `#wither_friends`（亡灵），牛不是亡灵。
+    ///
+    /// `LIVING_ENTITY_SELECTOR` excludes `#wither_friends` (undead); cows are not undead.
+    #[test]
+    fn wither_friends_are_undead_only() {
+        assert!(!is_wither_friend(MobType::Cow));
+        assert!(is_wither_friend(MobType::Wither)); // 凋灵也在 #undead / #wither_friends 里
+        assert!(is_wither_friend(MobType::Skeleton));
+        assert!(is_wither_friend(MobType::Zombie));
+        assert!(is_wither_friend(MobType::Drowned));
     }
 }
