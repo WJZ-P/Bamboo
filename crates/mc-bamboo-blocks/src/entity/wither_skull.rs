@@ -1,14 +1,17 @@
 //! 凋灵之首，官方 `WitherSkull`（`AbstractHurtingProjectile` 的一支）。
 //!
-//! 飞行照 `AbstractHurtingProjectile.tick`：每刻先按惯性缩放速度（普通 0.95、
-//! 蓝色危险 0.73，加速度 0、无重力），沿本刻速度找方块和实体命中，命中就爆炸
-//! 并消失。命中实体先造成 8 点 `wither_skull` 伤害，再按难度挂凋零效果；蓝色的
-//! 爆炸把非 `#wither_immune` 方块的抗性压到 0.8，能真的炸掉方块。
+//! 飞行照 `AbstractHurtingProjectile.tick`：`applyInertia` 每刻沿速度方向加
+//! `accelerationPower=0.1` 再按惯性缩放（普通 0.95、蓝色危险 0.73，水中 0.8 并发
+//! 4 个气泡粒子），初速是归一化方向乘 0.1；沿本刻速度找方块和实体命中，命中就
+//! 爆炸并消失。命中实体先造成 8 点 `wither_skull` 伤害，再按难度挂凋零效果；
+//! 蓝色的爆炸把非 `#wither_immune` 方块的抗性压到 0.8，能真的炸掉方块。
 //!
 //! The wither skull, vanilla `WitherSkull` (an `AbstractHurtingProjectile`).
-//! Flight follows `AbstractHurtingProjectile.tick`: scale velocity by inertia
-//! each tick (0.95 normal, 0.73 dangerous), no acceleration or gravity, search
-//! for a block/entity hit along this tick's movement and explode on contact. An
+//! Flight follows `AbstractHurtingProjectile.tick`: `applyInertia` adds
+//! `accelerationPower=0.1` along the velocity then scales by inertia (0.95
+//! normal, 0.73 dangerous, 0.8 in water with four bubble particles); the
+//! initial velocity is the normalized direction times 0.1. It searches for a
+//! block/entity hit along this tick's movement and explodes on contact. An
 //! entity hit deals 8 `wither_skull` damage plus a difficulty-scaled wither
 //! effect; a dangerous skull caps destroyable blocks' blast resistance at 0.8.
 
@@ -31,6 +34,19 @@ pub const INERTIA: f32 = 0.95;
 ///
 /// `WitherSkull.getInertia()` (dangerous skull).
 pub const DANGEROUS_INERTIA: f32 = 0.73;
+/// `AbstractHurtingProjectile.getLiquidInertia()`（水中分支，危险头不覆盖）。
+///
+/// `AbstractHurtingProjectile.getLiquidInertia()` (water branch, not overridden).
+pub const LIQUID_INERTIA: f32 = 0.8;
+/// `AbstractHurtingProjectile.accelerationPower`：初速乘数与每刻加速量。
+///
+/// `AbstractHurtingProjectile.accelerationPower`: initial-speed factor and
+/// the per-tick acceleration.
+pub const ACCELERATION_POWER: f64 = 0.1;
+/// `applyInertia` 水中分支每刻发的气泡粒子数。
+///
+/// Number of bubble particles `applyInertia` emits per water tick.
+pub const WATER_BUBBLES: i32 = 4;
 /// `WitherSkull.onHit` 的爆炸强度。
 ///
 /// Blast power of `WitherSkull.onHit`.
@@ -117,13 +133,14 @@ impl Entity {
         Self::new(EntityKind::WitherSkull(Box::new(skull)), shot.position)
     }
 
-    /// `AbstractHurtingProjectile` 构造：方向归一化就是初速度（`accelerationPower=0`），
-    /// 再按速度设朝向，不抽任何散布随机数。
+    /// `AbstractHurtingProjectile` 构造：`assignDirectionalMovement` 把归一化方向
+    /// 乘 `accelerationPower=0.1` 作初速，再按速度设朝向，不抽任何散布随机数。
     ///
-    /// `AbstractHurtingProjectile` construction: the normalized direction is the
-    /// initial velocity (`accelerationPower=0`); set rotation from it, no spread draws.
+    /// `AbstractHurtingProjectile` construction: `assignDirectionalMovement`
+    /// scales the normalized direction by `accelerationPower=0.1` into the
+    /// initial velocity; set rotation from it, no spread draws.
     pub fn shoot_wither_skull(&mut self, shot: &WitherSkullShot) {
-        let movement = shot.direction.normalize();
+        let movement = shot.direction.normalize().scale(ACCELERATION_POWER);
         self.delta = movement;
         let EntityKind::WitherSkull(skull) = &mut self.kind else {
             return;
@@ -157,24 +174,54 @@ pub struct WitherSkullHit {
     pub target: Option<(EntityUid, bool)>,
 }
 
-/// `AbstractHurtingProjectile.tick`：`applyInertia` → 命中搜索 → `setPos` → `onHit`。
+/// `AbstractHurtingProjectile.applyInertia()`：沿速度方向加 `accelerationPower`
+/// 再按惯性缩放；水中用 `getLiquidInertia()`，否则 `getInertia()`（危险头 0.73）。
 ///
-/// `AbstractHurtingProjectile.tick`: `applyInertia` → hit search → `setPos` → `onHit`.
-pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
-    let EntityKind::WitherSkull(skull) = &mut me.kind else {
-        return;
-    };
-    skull.needs_sync = false;
-    skull.sync_velocity = false;
-    skull.has_been_shot = true;
-    let inertia = if skull.dangerous {
+/// `AbstractHurtingProjectile.applyInertia()`: add `accelerationPower` along
+/// the velocity then scale by inertia; water uses `getLiquidInertia()`, otherwise
+/// `getInertia()` (0.73 for a dangerous skull).
+pub fn apply_inertia(delta: Vec3, in_water: bool, dangerous: bool) -> Vec3 {
+    let inertia = if in_water {
+        LIQUID_INERTIA
+    } else if dangerous {
         DANGEROUS_INERTIA
     } else {
         INERTIA
     };
-    // `applyInertia()`：非水分支就是 `delta *= getInertia()`（加速度为 0）。
-    // `applyInertia()`: the non-water branch is just `delta *= getInertia()`.
-    me.delta = me.delta.scale(f64::from(inertia));
+    delta
+        .add(delta.normalize().scale(ACCELERATION_POWER))
+        .scale(f64::from(inertia))
+}
+
+/// `AbstractHurtingProjectile.tick`：`applyInertia` → 命中搜索 → `setPos` → `onHit`。
+///
+/// `AbstractHurtingProjectile.tick`: `applyInertia` → hit search → `setPos` → `onHit`.
+pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
+    let dangerous = {
+        let EntityKind::WitherSkull(skull) = &mut me.kind else {
+            return;
+        };
+        skull.needs_sync = false;
+        skull.sync_velocity = false;
+        skull.has_been_shot = true;
+        skull.dangerous
+    };
+    let in_water = me.in_water;
+    if in_water {
+        // `applyInertia()` 水中分支：4 个 BUBBLE 粒子（位置 = 当前位置 - 速度*0.25，
+        // 速度 = 本刻速度），惯性改用 `getLiquidInertia()`。
+        // The water branch of `applyInertia()`: four BUBBLE particles at
+        // `position - velocity * 0.25` moving with this tick's velocity, and
+        // `getLiquidInertia()` replaces `getInertia()`.
+        ctx.emit(
+            Command::WitherSkullBubbles {
+                position: me.position,
+                delta: me.delta,
+            },
+            me,
+        );
+    }
+    me.delta = apply_inertia(me.delta, in_water, dangerous);
     let movement = me.delta;
     let hit = find_hit(me, ctx, movement);
     let position = hit
@@ -286,17 +333,55 @@ pub fn impact(me: &Entity, world: &mut World<'_>, hit: WitherSkullHit) {
     let dangerous = skull.dangerous;
     let owner = skull.owner;
     if let Some((target, player)) = hit.target {
-        let mut damage = DamageSource::environment(DamageKind::WitherSkull);
+        // `onHitEntity`：owner 是 LivingEntity 时 8 点 `wither_skull`，无 owner 时
+        // 5 点 `magic()`。
+        // `onHitEntity`: 8 `wither_skull` damage when the owner is a
+        // LivingEntity, 5 `magic()` damage otherwise.
+        let (kind, amount) = if owner.is_some() {
+            (DamageKind::WitherSkull, 8.0_f32)
+        } else {
+            (DamageKind::Magic, 5.0_f32)
+        };
+        let mut damage = DamageSource::environment(kind);
         damage.direct = Some(me.id);
         damage.attacker = owner;
         damage.position = Some(me.position);
         damage.projectile_motion = Some(me.delta);
         let hurt = if player {
-            world.hurt_player_from_mob(target, damage, 8.0, None)
+            world.hurt_player_from_mob(target, damage, amount, None)
         } else {
-            world.hurt_mob(target, damage, 8.0)
+            world.hurt_mob(target, damage, amount)
         };
         if hurt {
+            // 目标还活着时官方跑 `EnchantmentHelper.doPostAttackEffects`（遍历目标
+            // 装备的 `POST_ATTACK` 附魔）；凋灵之首命中的生物 / 无装备目标没有这类
+            // 附魔，Bamboo 也无通用 POST_ATTACK 框架，按字节码的空结果处理。被打死
+            // 则 `owner.heal(5.0)`。
+            // While the target is alive vanilla runs
+            // `EnchantmentHelper.doPostAttackEffects` (the target's `POST_ATTACK`
+            // enchantments); wither-skull mob targets have none and Bamboo has no
+            // generic POST_ATTACK framework, so it is a no-op. A killed target
+            // makes `owner.heal(5.0)`.
+            let target_alive = if player {
+                true
+            } else {
+                let mut alive = false;
+                world.with_entity_mut(target, &mut |entity| {
+                    alive = entity.kind.mob().is_some_and(|mob| mob.health > 0.0);
+                });
+                alive
+            };
+            if !target_alive && let Some(owner_id) = owner {
+                world.with_entity_mut(owner_id, &mut |entity| {
+                    entity.with_mob(|_, mob| {
+                        let max = mob
+                            .attributes
+                            .value(mc_bamboo_data::registries::attribute::MAX_HEALTH)
+                            as f32;
+                        mob.health = (mob.health + 5.0).min(max);
+                    });
+                });
+            }
             // `onHitEntity` 结尾：难度 NORMAL 给 200 刻、HARD 给 800 刻的 2 级凋零。
             // `onHitEntity` tail: NORMAL gives 200 ticks, HARD 800 ticks of wither II.
             let ticks = match world.difficulty_id() {
@@ -346,28 +431,56 @@ mod tests {
         }
     }
 
-    /// `AbstractHurtingProjectile.getInertia()` = 0.95；`WitherSkull` 危险头 = 0.73。
+    /// `AbstractHurtingProjectile.getInertia()` = 0.95；`WitherSkull` 危险头 = 0.73；
+    /// 水中 `getLiquidInertia()` = 0.8；`accelerationPower` = 0.1；水里每刻 4 个气泡。
     ///
-    /// `AbstractHurtingProjectile.getInertia()` = 0.95; dangerous `WitherSkull` = 0.73.
+    /// `AbstractHurtingProjectile.getInertia()` = 0.95; dangerous `WitherSkull` =
+    /// 0.73; `getLiquidInertia()` = 0.8 in water; `accelerationPower` = 0.1;
+    /// four bubbles per water tick.
     #[test]
     fn inertia_values_match_bytecode() {
         assert_eq!(INERTIA, 0.95);
         assert_eq!(DANGEROUS_INERTIA, 0.73);
+        assert_eq!(LIQUID_INERTIA, 0.8);
+        assert_eq!(ACCELERATION_POWER, 0.1);
+        assert_eq!(WATER_BUBBLES, 4);
         assert_eq!(EXPLOSION_RADIUS, 1.0);
         assert_eq!(DANGEROUS_RESISTANCE_CAP, 0.8);
     }
 
-    /// `shoot` 把方向归一化成初速度，不抽散布随机数。
+    /// `applyInertia`：先沿速度方向加 0.1，再按三种惯性缩放；水中不看 dangerous。
     ///
-    /// `shoot` normalizes the direction into the initial velocity, with no spread draw.
+    /// `applyInertia`: add 0.1 along the velocity then scale by the inertia;
+    /// the water branch ignores `dangerous`.
+    #[test]
+    fn apply_inertia_uses_acceleration_and_inertia() {
+        let unit = Vec3::new(0.0, 0.0, 1.0);
+        let accel = 1.0 + ACCELERATION_POWER;
+        let normal = apply_inertia(unit, false, false);
+        assert!((normal.z - accel * f64::from(INERTIA)).abs() < 1e-9);
+        let dangerous = apply_inertia(unit, false, true);
+        assert!((dangerous.z - accel * f64::from(DANGEROUS_INERTIA)).abs() < 1e-9);
+        let water_normal = apply_inertia(unit, true, false);
+        let water_dangerous = apply_inertia(unit, true, true);
+        assert!((water_normal.z - accel * f64::from(LIQUID_INERTIA)).abs() < 1e-9);
+        assert_eq!(water_normal, water_dangerous);
+        // 非单位方向：normalize 只取方向，加速量仍是 0.1 而不是长度比例。
+        let diagonal = apply_inertia(Vec3::new(0.0, 0.0, 10.0), false, false);
+        assert!((diagonal.z - (10.0 + ACCELERATION_POWER) * f64::from(INERTIA)).abs() < 1e-9);
+    }
+
+    /// `shoot` 把方向归一化再乘 0.1 作初速，不抽散布随机数。
+    ///
+    /// `shoot` normalizes the direction and scales it by 0.1 into the initial
+    /// velocity, with no spread draw.
     #[test]
     fn shooting_normalizes_the_direction() {
         let shot = sample_shot(true);
         let mut entity = Entity::wither_skull(&shot);
         entity.shoot_wither_skull(&shot);
-        assert!(entity.delta.x.abs() < 1e-6);
-        assert!(entity.delta.y.abs() < 1e-6);
-        assert!((entity.delta.z - 1.0).abs() < 1e-6);
+        assert!(entity.delta.x.abs() < 1e-9);
+        assert!(entity.delta.y.abs() < 1e-9);
+        assert!((entity.delta.z - ACCELERATION_POWER).abs() < 1e-9);
         let EntityKind::WitherSkull(skull) = &entity.kind else {
             panic!("wither skull");
         };
