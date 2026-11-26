@@ -4198,6 +4198,35 @@ impl<'a> World<'a> {
         crate::entity::leash_knot::interact(self, id, pos, player_uid, player_uuid, sneaking)
     }
 
+    /// 供悬挂实体交互 / 伤害逻辑从表里借出和放回一行。
+    pub(crate) fn take_entity_for_hanging(&mut self, id: i32) -> Option<crate::entity::Entity> {
+        self.level.take_entity(id)
+    }
+
+    /// 放回 [`Self::take_entity_for_hanging`] 借出的实体。
+    pub(crate) fn put_entity_for_hanging(&mut self, entity: crate::entity::Entity) {
+        self.level.put_entity(entity);
+    }
+
+    /// `ItemFrame.interact`：往展示框放物品或旋转已有物品。
+    ///
+    /// `ItemFrame.interact`: place an item into an empty frame or rotate an existing item.
+    pub fn interact_item_frame(
+        &mut self,
+        id: i32,
+        held: &ItemStack,
+        creative: bool,
+    ) -> crate::entity::hanging::ItemFrameInteractOutcome {
+        crate::entity::hanging::interact_item_frame(self, id, held, creative)
+    }
+
+    /// 对悬挂实体（画 / 物品展示框）施加一次伤害（玩家左键、爆炸、命令等）。
+    ///
+    /// Apply damage to a hanging entity (painting or item frame).
+    pub fn hurt_hanging(&mut self, id: i32, source: crate::entity::hanging::HangingHurt) -> bool {
+        crate::entity::hanging::hurt(self, id, source)
+    }
+
     /// 剪毛 / 下蛋这类实体战利品表的掉落，见 [`Level::entity_loot_drops`].
     ///
     /// Shearing or egg-laying loot drops; see [`Level::entity_loot_drops`].

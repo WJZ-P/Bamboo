@@ -1722,9 +1722,12 @@ mod tests {
     fn an_unported_item_use_on_is_not_compared() {
         let scene = format!("[[0,64,0,{}]]", blocks::STONE);
         let hung = format!("[[0,64,1,{}]]", blocks::STONE);
+        // 画已经建模（会和生成的实体比较），换成还没移植的矿车物品。
+        // Paintings are modelled now (their spawns are compared), so use the
+        // still-unported minecart item.
         let case = click_top(
-            "minecraft:painting",
-            "HangingEntityItem",
+            "minecraft:minecart",
+            "MinecartItem",
             &scene,
             &answer("success", &hung),
         );

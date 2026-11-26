@@ -186,6 +186,18 @@ impl Vec3 {
         delta.x * delta.x + delta.y * delta.y + delta.z * delta.z
     }
 
+    /// `Vec3.relative(direction, distance)`：沿方向平移指定距离。
+    ///
+    /// `Vec3.relative(direction, distance)`: offset along `direction` by `distance`.
+    pub fn relative(self, direction: Direction, distance: f64) -> Self {
+        let (dx, dy, dz) = direction.normal();
+        Self::new(
+            self.x + f64::from(dx) * distance,
+            self.y + f64::from(dy) * distance,
+            self.z + f64::from(dz) * distance,
+        )
+    }
+
     /// `Entity.calculateViewVector`：`pitch` 和 `yaw` 对应的视线方向，长度是 1。
     pub fn view_vector(yaw: f32, pitch: f32) -> Self {
         let pitch_radians = pitch * DEG_TO_RAD;
@@ -281,6 +293,26 @@ impl Direction {
     /// 网络 ID，官方的 `get3DDataValue`。
     pub const fn id(self) -> i32 {
         self as i32
+    }
+
+    /// 水平方向编号，官方的 `get2DDataValue`（南 0 西 1 北 2 东 3，上下为 -1）。
+    ///
+    /// Horizontal direction id, vanilla `get2DDataValue` (S=0, W=1, N=2, E=3, U/D=-1).
+    pub const fn data_2d(self) -> i32 {
+        match self {
+            Self::South => 0,
+            Self::West => 1,
+            Self::North => 2,
+            Self::East => 3,
+            Self::Down | Self::Up => -1,
+        }
+    }
+
+    /// 官方的 `Direction.from2DDataValue`：按 4 取模回绕到水平四向。
+    ///
+    /// Vanilla `Direction.from2DDataValue`: wraps modulo 4 into the horizontal directions.
+    pub const fn from_2d_data(value: i32) -> Self {
+        Self::BY_2D_DATA[value.rem_euclid(4) as usize]
     }
 
     /// 这个面的法向量。

@@ -13,6 +13,7 @@ pub mod arrow;
 pub mod ctx;
 pub mod evoker_fangs;
 pub mod firework_rocket;
+pub mod hanging;
 pub mod leash_knot;
 pub mod lightning;
 pub mod mob;
@@ -236,6 +237,14 @@ pub enum EntityKind {
     ///
     /// A fence leash knot.
     LeashKnot(LeashKnot),
+    /// 画，`Painting`。
+    ///
+    /// A painting, vanilla `Painting`.
+    Painting(Box<hanging::Painting>),
+    /// 物品展示框 / 荧光物品展示框，`ItemFrame` / `GlowItemFrame`。
+    ///
+    /// An item frame or glow item frame, vanilla `ItemFrame` / `GlowItemFrame`.
+    ItemFrame(Box<hanging::ItemFrame>),
     Arrow(Box<arrow::Arrow>),
     /// 羊驼的口水。
     ///
@@ -284,6 +293,8 @@ impl EntityKind {
             Self::Item(_) => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb(_) => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
             Self::LeashKnot(_) => mc_bamboo_data::registries::entity_type::LEASH_KNOT,
+            Self::Painting(_) => mc_bamboo_data::registries::entity_type::PAINTING,
+            Self::ItemFrame(frame) => frame.entity_type(),
             Self::Arrow(arrow) => arrow.variant.entity_type(),
             Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(egg) => egg.kind.entity_type(),
@@ -467,9 +478,13 @@ impl Entity {
         entity
     }
 
-    /// `getDimensions` 对应的碰撞盒。
+    /// `getDimensions` 对应的碰撞盒；悬挂实体走自己的 `calculateBoundingBox`。
     pub fn bounding_box(&self) -> Aabb {
-        self.make_bounding_box_at(self.position)
+        match &self.kind {
+            EntityKind::Painting(p) => p.bounding_box(),
+            EntityKind::ItemFrame(f) => f.bounding_box(),
+            _ => self.make_bounding_box_at(self.position),
+        }
     }
 
     /// `blockPosition()`。
@@ -535,6 +550,8 @@ impl Entity {
             EntityKind::WindCharge(_) => wind_charge::tick(self, ctx),
             EntityKind::FireworkRocket(_) => firework_rocket::tick(self, ctx),
             EntityKind::LeashKnot(_) => leash_knot::tick(self, ctx),
+            EntityKind::Painting(_) => hanging::tick_painting(self, ctx),
+            EntityKind::ItemFrame(_) => hanging::tick_item_frame(self, ctx),
             EntityKind::Mob(_) => {}
         }
     }

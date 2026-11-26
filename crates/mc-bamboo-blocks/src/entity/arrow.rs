@@ -878,7 +878,13 @@ fn find_targets(me: &Entity, ctx: &dyn EntityCtx, end: Vec3) -> Vec<ArrowEntityH
         }
     };
     ctx.for_each_other_in(area, &mut |other| {
-        if !other.removed && matches!(&other.kind, KindPublic::Mob(mob) if mob.health > 0.0) {
+        if !other.removed
+            && (matches!(&other.kind, KindPublic::Mob(mob) if mob.health > 0.0)
+                || matches!(
+                    &other.kind,
+                    KindPublic::Painting(_) | KindPublic::ItemFrame(_)
+                ))
+        {
             consider(other.uid, other.position, other.bounding_box(), false);
         }
     });
@@ -1189,8 +1195,21 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
             .is_some_and(|p| matches!(p.kind, KindPublic::Mob(_))),
         ..DamageSource::environment(DamageKind::Arrow)
     };
+    let is_hanging = !hit.player
+        && world
+            .entity(hit.uid)
+            .is_some_and(|e| matches!(e.kind, EntityKind::Painting(_) | EntityKind::ItemFrame(_)));
     let accepted = if hit.player {
         world.hurt_player_from_mob(hit.uid, source, damage as f32, owner.as_ref())
+    } else if is_hanging {
+        world.hurt_hanging(
+            hit.uid,
+            super::hanging::HangingHurt::from_damage_kind(
+                DamageKind::Arrow,
+                source.creative_player,
+                source.scale_when_non_player,
+            ),
+        )
     } else {
         hurt_mob(world, hit.uid, source, damage as f32)
     };

@@ -26,6 +26,7 @@ pub(crate) use bone_meal::{grow_crop, grow_water_plant};
 mod debug_stick;
 mod ender_eye;
 pub(crate) mod firework;
+mod hanging;
 mod honeycomb;
 pub(crate) use honeycomb::waxed;
 mod ignite;
@@ -60,6 +61,13 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         // `ArmorStandItem.useOn`：位置取整、朝向取整到 45°，应用物品上的实体数据。
         // `ArmorStandItem.useOn`: snapped position, 45° facing and the item's entity data.
         _ if ctx.item == items::ARMOR_STAND => armor_stand::use_on(world, ctx),
+        _ if matches!(
+            ctx.item,
+            items::PAINTING | items::ITEM_FRAME | items::GLOW_ITEM_FRAME
+        ) =>
+        {
+            hanging::use_on(world, ctx)
+        }
         // `SpawnEggItem.useOn`：被点格的碰撞形状为空时生成在那一格，否则沿点击面
         // 挪一格；流体方块直接放过。落点和 `shouldOffsetYMore` 见 `spawn_egg::use_egg`。
         // `SpawnEggItem.useOn`: spawn in the clicked cell when its collision shape is

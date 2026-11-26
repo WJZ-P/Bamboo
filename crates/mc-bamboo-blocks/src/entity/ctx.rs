@@ -1355,6 +1355,10 @@ pub enum Command {
     LeashKnotUntied {
         position: Vec3,
     },
+    /// 悬挂实体（画 / 物品展示框）因失去支撑自然脱落：播音效、掉物品、更新比较器。
+    ///
+    /// A hanging entity (painting / item frame) detached after failing `survives()`.
+    DropHanging(super::hanging::HangingDrop),
     /// `ThrownTrident` 主人不可接受时的 `spawnAtLocation(stack, 0.1f)`：比通用
     /// `DropItem` 多抬高 0.1 格（`(double) 0.1f`）。
     ///
@@ -2135,6 +2139,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 1.0,
                 false,
             );
+        }
+        Command::DropHanging(drop) => {
+            super::hanging::apply_drop_command(world, me, drop);
         }
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
