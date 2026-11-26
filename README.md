@@ -1934,3 +1934,27 @@ Not an official Minecraft product. Not approved by or associated with Mojang or 
   `natural-spawn java` 的 1727 例仍 0 不一致。方块 oracle 的雷暴夜晚批
   （`--clock-ticks 18000 --weather thunder`）0 失败，雷击引火 / 铜除锈由
   `mob-oracle --only lightning` 的 `finalBlocks` 逐格比对。
+
+### 船、竹筏和运输船（分支 `boats`）
+
+- **实体**：11 种木船 / 竹筏及各自的运输船版本（`AbstractBoat` / `Boat` / `Raft` /
+  `AbstractChestBoat` / `ChestBoat` / `ChestRaft`）按注册表实体类型建模，尺寸
+  1.375×0.5625。船不是生物，伤害走 `VehicleEntity` 的同步数据（受伤时间、方向、
+  伤害值），另有左右桨和气泡时间；运输船带 27 格物品栏和战利品表。存档按 `id`
+  名认船，运输船的 `Items` / `LootTable` / `LootTableSeed` 往返有单测。
+- **无人控制时的服务端物理**：`AbstractBoat.tick` 的服务端路径，
+  `getStatus` / `checkInWater` / `isUnderwater` / `getWaterLevelAbove` /
+  `getGroundFriction` / `floatBoat` / `tickBubbleColumn` 照官方字节码逐刻实现，
+  含气泡柱冲量、水流推动（复用现有流体 helper）、冰面摩擦和桨动画。控制者是玩家时
+  服务端清速度、位置由 `move_vehicle` 决定；协议里
+  `ServerboundPaddleBoatPacket`（包 id 35，左右桨两个 bool）已解码并有单测。
+
+**已知限制**：
+
+- 放置（`BoatItem.use`）、右键上船 / 下船 / 潜行下船、乘客位置与朝向限制、
+  动物被拉上船、`move_vehicle` 校验、玩家打船破坏掉落 / 创造移除 / 摔落与岩浆火伤害、
+  运输船菜单 / 漏斗 / 战利品生成、船的 EntityData 同步项均未接。
+- 逐刻 Java 对拍（静水漂浮下沉、冰面滑、水流、打破掉物、动物上船）与「至少 4 处
+  改坏确认」尚未建立。`getGroundFriction` 用 `block_collisions(薄片)` 近似官方的
+  逐格扫描，气泡柱方向 / `tickBubbleColumn` 的实体事件、`VehicleEntity.tick` 的乘客
+  位置也未按逐刻对拍校准；物理只经过编译、clippy 与单测，未与官方逐刻对拍。
