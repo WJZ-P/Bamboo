@@ -1,6 +1,6 @@
 //! 把实体介绍给客户端，以及移动之外的实体状态。
 
-use mc_bamboo_core::{BlockPos, Hand, Vec3};
+use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
 use mc_bamboo_data::packets::play::clientbound;
 use mc_bamboo_nbt::Tag;
 use uuid::Uuid;
@@ -35,6 +35,10 @@ const SERIALIZER_BLOCK_POS: i32 = 10;
 ///
 /// `EntityDataSerializers.OPTIONAL_BLOCK_POS`, serializer id 11.
 const SERIALIZER_OPTIONAL_BLOCK_POS: i32 = 11;
+/// `EntityDataSerializers.DIRECTION`，注册顺序里的第 13 个（ID 12）。
+///
+/// `EntityDataSerializers.DIRECTION`, serializer id 12.
+const SERIALIZER_DIRECTION: i32 = 12;
 /// `EntityDataSerializers.OPTIONAL_LIVING_ENTITY_REFERENCE`，注册顺序第 13 个。
 const SERIALIZER_OPTIONAL_LIVING_ENTITY_REFERENCE: i32 = 13;
 const SERIALIZER_BLOCK_STATE: i32 = 14;
@@ -56,6 +60,10 @@ const SERIALIZER_COW_VARIANT: i32 = 23;
 const SERIALIZER_COW_SOUND_VARIANT: i32 = 24;
 const SERIALIZER_WOLF_VARIANT: i32 = 25;
 const SERIALIZER_WOLF_SOUND_VARIANT: i32 = 26;
+/// `EntityDataSerializers.PAINTING_VARIANT`，注册顺序里的第 35 个（ID 34）。
+///
+/// `EntityDataSerializers.PAINTING_VARIANT`, serializer id 34.
+const SERIALIZER_PAINTING_VARIANT: i32 = 34;
 const SERIALIZER_HUMANOID_ARM: i32 = 42;
 
 /// `HappyGhast` 在 `Animal` 之后定义的两项布尔元数据：
@@ -556,12 +564,32 @@ pub enum EntityData {
     ///
     /// `Guardian.DATA_ID_ATTACK_TARGET` (INT, index 17).
     GuardianAttackTarget(i32),
+    /// `HangingEntity.DATA_DIRECTION`（DIRECTION，索引 8，缺省 `Direction::South`）。
+    ///
+    /// `HangingEntity.DATA_DIRECTION` (DIRECTION, index 8, default `Direction::South`).
+    HangingDirection(Direction),
+    /// `ItemFrame.DATA_ITEM`（ITEM_STACK，索引 9，缺省空堆）。
+    ///
+    /// `ItemFrame.DATA_ITEM` (ITEM_STACK, index 9, default empty).
+    ItemFrameItem(ItemStack),
+    /// `ItemFrame.DATA_ROTATION`（INT，索引 10，缺省 0）。
+    ///
+    /// `ItemFrame.DATA_ROTATION` (INT, index 10, default 0).
+    ItemFrameRotation(i32),
+    /// `Painting.DATA_PAINTING_VARIANT_ID`（PAINTING_VARIANT，索引 9，注册表 ID，网络写 `id + 1`）。
+    ///
+    /// `Painting.DATA_PAINTING_VARIANT_ID` (PAINTING_VARIANT, index 9, registry id written as `id + 1`).
+    PaintingVariant(i32),
 }
 
 /// [`EntityData::SharedFlags`] 里表示按住潜行键的位。
 pub const ENTITY_FLAG_SHIFT_KEY_DOWN: u8 = 0x02;
 /// [`EntityData::SharedFlags`] 里表示正在冲刺的位。
 pub const ENTITY_FLAG_SPRINTING: u8 = 0x08;
+/// [`EntityData::SharedFlags`] 里表示隐身的位（`Entity.FLAG_INVISIBLE = 5`）。
+///
+/// The invisibility bit in [`EntityData::SharedFlags`] (`Entity.FLAG_INVISIBLE = 5`).
+pub const ENTITY_FLAG_INVISIBLE_BIT: u8 = 0x20;
 /// [`EntityData::SharedFlags`] 里表示正在滑翔的位。
 pub const ENTITY_FLAG_FALL_FLYING: u8 = 0x80;
 
@@ -583,7 +611,8 @@ impl EntityData {
             | Self::FallingBlockStart(_)
             | Self::TntFuse(_)
             | Self::LivingFlags(_)
-            | Self::ExperienceValue(_) => 8,
+            | Self::ExperienceValue(_)
+            | Self::HangingDirection(_) => 8,
             Self::ArrowFlags(_) => mc_bamboo_data::entity_types::ARROW_FLAGS,
             Self::ArrowPierce(_) => mc_bamboo_data::entity_types::ARROW_PIERCE,
             Self::ArrowInGround(_) => mc_bamboo_data::entity_types::ARROW_IN_GROUND,
@@ -595,8 +624,14 @@ impl EntityData {
             Self::ArrowColor(_) => mc_bamboo_data::entity_types::ARROW_COLOR,
             Self::TridentLoyalty(_) => mc_bamboo_data::entity_types::TRIDENT_LOYALTY,
             Self::TridentFoil(_) => mc_bamboo_data::entity_types::TRIDENT_FOIL,
-            Self::TntBlockState(_) | Self::Health(_) | Self::FireworksAttached(_) => 9,
-            Self::EffectParticles(_) | Self::FireworksShotAtAngle(_) => 10,
+            Self::TntBlockState(_)
+            | Self::Health(_)
+            | Self::FireworksAttached(_)
+            | Self::ItemFrameItem(_)
+            | Self::PaintingVariant(_) => 9,
+            Self::EffectParticles(_)
+            | Self::FireworksShotAtAngle(_)
+            | Self::ItemFrameRotation(_) => 10,
             Self::EffectAmbience(_) => 11,
             Self::SleepingPos(_) => 14,
             Self::MobFlags(_) => 15,
@@ -1222,6 +1257,24 @@ impl EntityData {
             Self::HappyGhastLeashHolder(flag) | Self::HappyGhastStaysStill(flag) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 write_bool(out, *flag);
+            }
+            Self::HangingDirection(direction) => {
+                write_data_header(out, self.index(), SERIALIZER_DIRECTION);
+                write_varint(out, direction.id());
+            }
+            Self::ItemFrameItem(stack) => {
+                write_data_header(out, self.index(), SERIALIZER_ITEM_STACK);
+                stack.write(out);
+            }
+            Self::ItemFrameRotation(rotation) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *rotation);
+            }
+            Self::PaintingVariant(variant) => {
+                write_data_header(out, self.index(), SERIALIZER_PAINTING_VARIANT);
+                // `PaintingVariant.STREAM_CODEC` = `ByteBufCodecs.holder(PAINTING_VARIANT, DIRECT_STREAM_CODEC)`：
+                // 注册表项写 `id + 1` 的 VarInt（0 留给内联定义）。
+                write_varint(out, *variant + 1);
             }
         }
     }
@@ -1940,6 +1993,28 @@ mod tests {
         assert_eq!(
             set_entity_data(7, &[loyalty, foil]),
             hex("07 0b 00 03 0c 08 01 ff")
+        );
+    }
+
+    #[test]
+    fn hanging_metadata_matches_official_serializers_and_indices() {
+        // index 8 DIRECTION=12 (0x0c) value North=2; index 9 PAINTING_VARIANT=34 (0x22) value kebab=24 -> 25 (0x19)
+        let dir = EntityData::HangingDirection(Direction::North);
+        let variant = EntityData::PaintingVariant(24);
+        assert_eq!(dir.index(), 8);
+        assert_eq!(variant.index(), 9);
+        assert_eq!(
+            set_entity_data(7, &[dir, variant]),
+            hex("07 08 0c 02 09 22 19 ff")
+        );
+        // index 9 ITEM_STACK=7 (empty -> count 0), index 10 INT=1 value 3
+        let item = EntityData::ItemFrameItem(ItemStack::empty());
+        let rot = EntityData::ItemFrameRotation(3);
+        assert_eq!(item.index(), 9);
+        assert_eq!(rot.index(), 10);
+        assert_eq!(
+            set_entity_data(7, &[item, rot]),
+            hex("07 09 07 00 0a 01 03 ff")
         );
     }
 }

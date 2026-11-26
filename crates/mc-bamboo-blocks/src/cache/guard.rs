@@ -27,6 +27,8 @@ pub enum ReadMethod {
     MaxY,
     /// `LevelSideState::comparator_output`。
     Comparator(BlockPos),
+    /// `LevelEntities::comparator_item_frame_signal`：比较器隔墙读取展示框输出。
+    ItemFrameSignal(BlockPos, mc_bamboo_core::Direction),
     /// `has_scheduled_tick` / `will_tick_this_tick`，队列在 `BlockTicks` 里。
     TickQuery(BlockPos, usize, bool),
     /// 触发本身：这一格现在还是不是记录里的方块类型。

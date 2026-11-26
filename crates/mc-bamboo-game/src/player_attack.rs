@@ -795,6 +795,9 @@ fn attack_inner(
     let game_mode = player.game_mode;
     let entity_reach = player.attributes.value(attribute::ENTITY_INTERACTION_RANGE) as f32;
     let eye = Vec3::new(position.x, position.y + eye_height, position.z);
+    if try_attack_hanging(region, id, entity_id, eye, game_mode, entity_reach, &held) {
+        return;
+    }
     let Some(target) = resolve_target(region, id, entity_id, eye, game_mode, entity_reach, &held)
     else {
         return;
@@ -848,6 +851,58 @@ fn attack_inner(
         "minecraft:player_interacted_with_entity",
         serde_json::json!({"entity": {"type": ""}}),
     );
+}
+
+/// `BlockAttachedEntity.skipAttackInteraction`：玩家左键画 / 物品展示框时直接走
+/// `hurtServer`，不触发武器横扫、暴击、耐久和饥饿消耗。返回 `true` 表示已由悬挂实体接住。
+///
+/// `BlockAttachedEntity.skipAttackInteraction`: left-clicking a painting or item frame
+/// runs `hurtServer` directly without sweep, crits, durability loss or exhaustion.
+fn try_attack_hanging(
+    region: &mut Region,
+    id: PlayerId,
+    entity_id: i32,
+    eye: Vec3,
+    game_mode: GameMode,
+    entity_reach: f32,
+    held: &ItemStack,
+) -> bool {
+    let Some(public) = region.entities.public_at(entity_id) else {
+        return false;
+    };
+    let attach_pos = match &public.kind {
+        mc_bamboo_blocks::entity::KindPublic::Painting(p) => p.pos,
+        mc_bamboo_blocks::entity::KindPublic::ItemFrame(f) => f.pos,
+        _ => return false,
+    };
+    if public.removed {
+        return true;
+    }
+    let creative = game_mode == GameMode::Creative;
+    let range = attack_range(held, entity_reach);
+    if !region
+        .global
+        .world_border
+        .is_within_bounds_pos(BlockPos::containing(public.position))
+        || !region.global.world_border.is_within_bounds_pos(attach_pos)
+        || !range.is_in_range(eye, public.bounding_box(), ATTACK_RANGE_BUFFER, creative)
+    {
+        return true;
+    }
+    let (hurt, effects) = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        let hurt = world.hurt_hanging(
+            entity_id,
+            mc_bamboo_blocks::entity::hanging::HangingHurt::player(creative),
+        );
+        (hurt, world.into_effects())
+    };
+    interaction::send_effects(region, Some(id), &effects);
+    if hurt {
+        entity_sync::broadcast_swing(region, id, Hand::Main);
+    }
+    true
 }
 
 /// `handleAttack` 的目标解析：世界边界、够距、可攻击、PVP 开关和自己不能打自己。

@@ -5,7 +5,7 @@
 //! 构造器的默认值重建。`UUID` 由实体 ID 确定性派生，和网络层用同一个推导。
 //! 不认识的实体 `id` 整条原样保留（第二段区块盒子里做）。
 
-use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::{blocks, registries::entity_type as kinds};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{components::archive::slots, item::ItemStack};
@@ -46,6 +46,8 @@ pub fn entity_uuid_of(row: &crate::entity::EntityRow) -> [u8; 16] {
         crate::entity::KindPublic::Egg(egg) => egg.uuid,
         crate::entity::KindPublic::SplashPotion(potion) => potion.uuid,
         crate::entity::KindPublic::FireworkRocket(firework) => firework.uuid,
+        crate::entity::KindPublic::Painting(painting) => painting.uuid,
+        crate::entity::KindPublic::ItemFrame(frame) => frame.uuid,
         _ => entity_uuid(row.public.uid).to_be_bytes(),
     }
 }
@@ -75,6 +77,8 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::Item { .. } => kinds::ITEM,
         crate::entity::KindPublic::ExperienceOrb { .. } => kinds::EXPERIENCE_ORB,
         crate::entity::KindPublic::LeashKnot { .. } => kinds::LEASH_KNOT,
+        crate::entity::KindPublic::Painting(_) => kinds::PAINTING,
+        crate::entity::KindPublic::ItemFrame(frame) => frame.entity_type(),
         crate::entity::KindPublic::Arrow(arrow) => arrow.variant.entity_type(),
         crate::entity::KindPublic::LlamaSpit(_) => kinds::LLAMA_SPIT,
         crate::entity::KindPublic::Egg(egg) => egg.kind.entity_type(),
@@ -113,6 +117,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 crate::entity::KindPublic::SplashPotion(potion) => potion.x_rot,
                 crate::entity::KindPublic::WindCharge(charge) => charge.pitch,
                 crate::entity::KindPublic::FireworkRocket(firework) => firework.pitch,
+                crate::entity::KindPublic::ItemFrame(frame) => frame.x_rot,
                 _ => 0.0,
             }),
         ]),
@@ -134,6 +139,8 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::Egg(egg) => uuid_tag(&egg.uuid),
         crate::entity::KindPublic::SplashPotion(potion) => uuid_tag(&potion.uuid),
         crate::entity::KindPublic::FireworkRocket(firework) => uuid_tag(&firework.uuid),
+        crate::entity::KindPublic::Painting(painting) => uuid_tag(&painting.uuid),
+        crate::entity::KindPublic::ItemFrame(frame) => uuid_tag(&frame.uuid),
         _ => entity_uuid_tag(public.uid),
     };
     put(&mut out, "UUID", uuid);
@@ -179,6 +186,50 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 "block_pos",
                 Tag::IntArray(vec![pos.x, pos.y, pos.z]),
             );
+        }
+        crate::entity::KindPublic::Painting(painting) => {
+            if let Some(name) = &painting.custom_name {
+                put(&mut out, "CustomName", name.clone());
+            }
+            // 官方 `Painting.addAdditionalSaveData` 顺序：`facing`（2D）、`block_pos`、`variant`。
+            put(
+                &mut out,
+                "facing",
+                Tag::Byte(painting.direction.data_2d() as i8),
+            );
+            put(
+                &mut out,
+                "block_pos",
+                Tag::IntArray(vec![painting.pos.x, painting.pos.y, painting.pos.z]),
+            );
+            let variant_name =
+                mc_bamboo_data::painting::name(painting.variant).unwrap_or("minecraft:alban");
+            put(&mut out, "variant", Tag::String(variant_name.to_owned()));
+        }
+        crate::entity::KindPublic::ItemFrame(frame) => {
+            if let Some(name) = &frame.custom_name {
+                put(&mut out, "CustomName", name.clone());
+            }
+            // 官方 `ItemFrame.addAdditionalSaveData` 顺序：`block_pos`、`Item`（非空才写）、
+            // `ItemRotation`、`ItemDropChance`、`Facing`（3D）、`Invisible`、`Fixed`。
+            put(
+                &mut out,
+                "block_pos",
+                Tag::IntArray(vec![frame.pos.x, frame.pos.y, frame.pos.z]),
+            );
+            if !frame.item.is_empty() {
+                put(
+                    &mut out,
+                    "Item",
+                    slots::encode_item(&frame.item)
+                        .map_err(|error| Error::new(error.to_string()))?,
+                );
+            }
+            put(&mut out, "ItemRotation", Tag::Byte(frame.rotation as i8));
+            put(&mut out, "ItemDropChance", Tag::Float(frame.drop_chance));
+            put(&mut out, "Facing", Tag::Byte(frame.direction.id() as i8));
+            put(&mut out, "Invisible", Tag::Byte(i8::from(frame.invisible)));
+            put(&mut out, "Fixed", Tag::Byte(i8::from(frame.fixed)));
         }
         crate::entity::KindPublic::Arrow(_) => {
             let crate::entity::KindState::Arrow(saved) = &state.kind else {
@@ -455,7 +506,7 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
     if let Some(row) = crate::entity::mob::nbt::read_mob(tag, id, uid)? {
         return Ok(Some(row));
     }
-    let entity = Entity {
+    let mut entity = Entity {
         id: uid,
         // `split` 不读尺寸，拼回来时按 `kind` 重算。
         dimensions: (0.0, 0.0),
@@ -602,6 +653,43 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                 };
                 EntityKind::LeashKnot(LeashKnot { pos })
             }
+            "minecraft:painting" => {
+                let block_pos = read_attached_block_pos(tag, position);
+                let facing = Direction::from_2d_data(i32::from(tag::byte_or(tag, "facing", 0)));
+                let variant = tag::string_or(tag, "variant")
+                    .and_then(mc_bamboo_data::painting::id_of)
+                    .unwrap_or(mc_bamboo_data::painting::DEFAULT_VARIANT);
+                let mut painting =
+                    crate::entity::hanging::Painting::new(block_pos, facing, variant);
+                painting.uuid = arrow::uuid_from(tag, "UUID").unwrap_or([0; 16]);
+                painting.custom_name = tag::field(tag, "CustomName").cloned();
+                EntityKind::Painting(Box::new(painting))
+            }
+            "minecraft:item_frame" | "minecraft:glow_item_frame" => {
+                let glowing = id == "minecraft:glow_item_frame";
+                let block_pos = read_attached_block_pos(tag, position);
+                // 官方 `ItemFrame.readAdditionalSaveData` 缺省 `Direction.DOWN`（3D 值 0）。
+                let facing = Direction::from_id(i32::from(tag::byte_or(tag, "Facing", 0)));
+                let mut frame = crate::entity::hanging::ItemFrame::new(block_pos, facing, glowing);
+                frame.uuid = arrow::uuid_from(tag, "UUID").unwrap_or([0; 16]);
+                frame.custom_name = tag::field(tag, "CustomName").cloned();
+                let mut item = match tag::field(tag, "Item") {
+                    Some(value) => {
+                        slots::decode_item(value).map_err(|error| Error::new(error.to_string()))?
+                    }
+                    None => ItemStack::empty(),
+                };
+                if !item.is_empty() {
+                    item.count = 1;
+                }
+                frame.item = item;
+                frame.rotation = i32::from(tag::byte_or(tag, "ItemRotation", 0))
+                    .rem_euclid(crate::entity::hanging::NUM_ROTATIONS);
+                frame.drop_chance = tag::float_or(tag, "ItemDropChance", 1.0);
+                frame.invisible = tag::bool_or(tag, "Invisible", false);
+                frame.fixed = tag::bool_or(tag, "Fixed", false);
+                EntityKind::ItemFrame(Box::new(frame))
+            }
             "minecraft:experience_orb" => {
                 let value = i32::from(tag::short_or(tag, "Value", 0));
                 let mut orb = ExperienceOrb::new(value);
@@ -640,7 +728,38 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
     };
     // 读盘不是新建实体：朝向按 `Rotation` 还原，不再取构造时的随机数，
     // `bob_offs` 这类官方不存的视觉量保持构造器默认值。
+    // 悬挂实体在 `readAdditionalSaveData` 里按 `facing`/`Facing` 重算位置与朝向。
+    match &entity.kind {
+        EntityKind::Painting(_) => {
+            crate::entity::hanging::recalculate_painting(&mut entity);
+            entity.old_position = entity.position;
+        }
+        EntityKind::ItemFrame(_) => {
+            crate::entity::hanging::recalculate_item_frame(&mut entity);
+            entity.old_position = entity.position;
+        }
+        _ => {}
+    }
     Ok(Some(entity.split()))
+}
+
+/// `BlockAttachedEntity.readAdditionalSaveData`：读 `block_pos`，且必须满足
+/// `blockPos.closerThan(blockPosition(), 16.0)`，否则沿用 `Pos` 所在格。
+fn read_attached_block_pos(tag: &Tag, position: [f64; 3]) -> BlockPos {
+    let fallback = BlockPos::containing(Vec3::new(position[0], position[1], position[2]));
+    let words = tag::int_array(tag, "block_pos");
+    if words.len() != 3 {
+        return fallback;
+    }
+    let parsed = BlockPos::new(words[0], words[1], words[2]);
+    let dx = f64::from(parsed.x - fallback.x);
+    let dy = f64::from(parsed.y - fallback.y);
+    let dz = f64::from(parsed.z - fallback.z);
+    if dx * dx + dy * dy + dz * dz < 16.0 * 16.0 {
+        parsed
+    } else {
+        fallback
+    }
 }
 
 fn vec3_tag(value: Vec3) -> Tag {

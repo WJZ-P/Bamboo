@@ -136,6 +136,14 @@ pub enum KindPublic {
     LeashKnot {
         pos: BlockPos,
     },
+    /// 画：位置、朝向和变体 ID。
+    ///
+    /// A painting: attachment pos, facing direction and variant id.
+    Painting(super::hanging::PaintingPublic),
+    /// 物品展示框 / 荧光物品展示框：位置、朝向、物品、旋转档位、隐身和固定标记。
+    ///
+    /// An item frame or glow item frame.
+    ItemFrame(super::hanging::ItemFramePublic),
     /// 闪电：客户端要 `seed`、`life` 和闪光次数。
     ///
     /// A lightning bolt: the client reads its seed, life and remaining flashes.
@@ -174,6 +182,8 @@ impl KindPublic {
             Self::Item { .. } => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb { .. } => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
             Self::LeashKnot { .. } => mc_bamboo_data::registries::entity_type::LEASH_KNOT,
+            Self::Painting(_) => mc_bamboo_data::registries::entity_type::PAINTING,
+            Self::ItemFrame(frame) => frame.entity_type(),
             Self::Arrow(arrow) => arrow.variant.entity_type(),
             Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(egg) => egg.kind.entity_type(),
@@ -255,6 +265,10 @@ pub enum KindState {
     ExperienceOrb(super::ExperienceOrb),
     /// 拴绳结的全部状态；公开的那一半就是它本身。
     LeashKnot(super::LeashKnot),
+    /// 画的全部状态。
+    Painting(Box<super::hanging::Painting>),
+    /// 物品展示框 / 荧光物品展示框的全部状态。
+    ItemFrame(Box<super::hanging::ItemFrame>),
     /// 闪电的全部状态，公开的那一半就是它本身。
     LightningBolt(super::lightning::LightningBolt),
     /// 不祥物品生成器的全部状态。
@@ -322,18 +336,24 @@ pub struct EntityRow {
 }
 
 impl EntityPublic {
-    /// `Entity.getBoundingBox()`。
+    /// `Entity.getBoundingBox()`。悬挂实体走自己的 `calculateBoundingBox`。
     pub fn bounding_box(&self) -> Aabb {
-        let (width, height) = self.kind.dimensions();
-        let half = f64::from(width / 2.0);
-        Aabb::new(
-            self.position.x - half,
-            self.position.y,
-            self.position.z - half,
-            self.position.x + half,
-            self.position.y + f64::from(height),
-            self.position.z + half,
-        )
+        match &self.kind {
+            KindPublic::Painting(p) => p.bounding_box(),
+            KindPublic::ItemFrame(f) => f.bounding_box(),
+            _ => {
+                let (width, height) = self.kind.dimensions();
+                let half = f64::from(width / 2.0);
+                Aabb::new(
+                    self.position.x - half,
+                    self.position.y,
+                    self.position.z - half,
+                    self.position.x + half,
+                    self.position.y + f64::from(height),
+                    self.position.z + half,
+                )
+            }
+        }
     }
 
     /// `blockPosition()`。
@@ -391,6 +411,10 @@ impl EntityRow {
             (KindPublic::LeashKnot { pos: _ }, KindState::LeashKnot(knot)) => {
                 EntityKind::LeashKnot(knot)
             }
+            (KindPublic::Painting(_), KindState::Painting(painting)) => {
+                EntityKind::Painting(painting)
+            }
+            (KindPublic::ItemFrame(_), KindState::ItemFrame(frame)) => EntityKind::ItemFrame(frame),
             (KindPublic::Arrow(_), KindState::Arrow(arrow)) => EntityKind::Arrow(arrow),
             (KindPublic::LlamaSpit(_), KindState::LlamaSpit(spit)) => EntityKind::LlamaSpit(spit),
             (KindPublic::Egg(_), KindState::Egg(egg)) => EntityKind::Egg(egg),
@@ -484,6 +508,14 @@ impl Entity {
             EntityKind::LeashKnot(knot) => (
                 KindPublic::LeashKnot { pos: knot.pos },
                 KindState::LeashKnot(knot),
+            ),
+            EntityKind::Painting(painting) => (
+                KindPublic::Painting(painting.public()),
+                KindState::Painting(painting),
+            ),
+            EntityKind::ItemFrame(frame) => (
+                KindPublic::ItemFrame(frame.public()),
+                KindState::ItemFrame(frame),
             ),
             EntityKind::Arrow(arrow) => (
                 KindPublic::Arrow(arrow.public(self.remaining_fire_ticks)),
@@ -1249,6 +1281,12 @@ impl EntityStore {
         }
         if let EntityKind::FireworkRocket(firework) = &mut entity.kind {
             firework.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
+        if let EntityKind::Painting(painting) = &mut entity.kind {
+            painting.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
+        if let EntityKind::ItemFrame(frame) = &mut entity.kind {
+            frame.uuid = super::mob::insecure_uuid(&mut entity.random);
         }
         if matches!(entity.kind, super::EntityKind::LightningBolt(_)) {
             super::lightning::finish_spawn(&mut entity);

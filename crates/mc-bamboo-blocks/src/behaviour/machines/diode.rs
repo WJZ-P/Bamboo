@@ -80,8 +80,7 @@ fn diode_input_signal(state: BlockState, world: &World, pos: BlockPos) -> i32 {
     input.max(wire_power)
 }
 
-/// `ComparatorBlock.getInputSignal`：后面是导体时，隔着它读下一格的模拟信号。
-/// 官方还要看那一格的物品展示框，这个世界里没有实体。
+/// `ComparatorBlock.getInputSignal`：后面是导体时，隔着它读下一格的方块模拟信号和物品展示框输出。
 fn comparator_input_signal(state: BlockState, world: &World, pos: BlockPos) -> i32 {
     let signal = diode_input_signal(state, world, pos);
     let facing = state.get(HORIZONTAL_FACING);
@@ -95,10 +94,16 @@ fn comparator_input_signal(state: BlockState, world: &World, pos: BlockPos) -> i
     }
     let behind_pos = target_pos.relative(facing);
     let behind = world.block_state(behind_pos);
-    if behind.has_analog_output_signal() {
-        behind.analog_output_signal(world, behind_pos, facing.opposite())
-    } else {
-        signal
+    let frame_signal =
+        crate::entity::hanging::comparator_item_frame_signal(world, facing, behind_pos);
+    let block_signal = behind
+        .has_analog_output_signal()
+        .then(|| behind.analog_output_signal(world, behind_pos, facing.opposite()));
+    match (frame_signal, block_signal) {
+        (Some(a), Some(b)) => a.max(b),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => signal,
     }
 }
 
