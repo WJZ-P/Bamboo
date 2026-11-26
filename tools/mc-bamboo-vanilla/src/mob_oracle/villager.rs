@@ -1099,6 +1099,11 @@ impl Report {
                 watch_pois.push(bed);
                 watch_pois.push(bell);
             }
+            "villager_p4_raid_bell" => {
+                let bell = BlockPos::new(2, 64, 0);
+                blocks_map.insert(bell, BlockState(blocks::BELL));
+                watch_pois.push(bell);
+            }
             "villager_p4_farmer" => {
                 let ws = BlockPos::new(0, 64, 4);
                 blocks_map.insert(ws, BlockState(blocks::COMPOSTER));
@@ -1119,7 +1124,7 @@ impl Report {
             rules.mob_griefing = false;
         }
         let mut level = MobLevel {
-            raid: None,
+            raid: case.raid.map(super::raid_view_from),
             blocks: blocks_map,
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
@@ -1455,6 +1460,11 @@ pub(super) struct VillagerPhase4Case {
     pub clock_start: i64,
     pub sensor_delay: i64,
     pub first_id: i32,
+    /// 袭击行为场景注入的袭击快照（`raid_mob_*` 的 `[i32; 8]` 同形）。
+    ///
+    /// The injected raid snapshot for raid-behaviour scenes (same `[i32; 8]` shape as
+    /// the `raid_mob_*` scenes).
+    pub raid: Option<[i32; 8]>,
     pub frames: Vec<VillagerPhase4Frame>,
 }
 

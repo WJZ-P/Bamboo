@@ -2543,14 +2543,19 @@ public final class MobOracle {
         }
 
         static void createRaid(Scene scene, FakeLevel level) {
+            createRaid(scene.raid, level, scene.difficulty);
+        }
+
+        /** 按 `[cx, cy, cz, status, started, active, groupsSpawned, omen]` 配置建一只真袭击注入假世界。 */
+        static void createRaid(int[] config, FakeLevel level, int difficulty) {
             net.minecraft.world.entity.raid.Raid raid = new net.minecraft.world.entity.raid.Raid(
-                    new BlockPos(scene.raid[0], scene.raid[1], scene.raid[2]),
-                    net.minecraft.world.Difficulty.byId(scene.difficulty));
-            put(net.minecraft.world.entity.raid.Raid.class, raid, "started", scene.raid[4] != 0);
-            put(net.minecraft.world.entity.raid.Raid.class, raid, "active", scene.raid[5] != 0);
-            put(net.minecraft.world.entity.raid.Raid.class, raid, "status", raidStatus(scene.raid[3]));
-            put(net.minecraft.world.entity.raid.Raid.class, raid, "groupsSpawned", scene.raid[6]);
-            put(net.minecraft.world.entity.raid.Raid.class, raid, "raidOmenLevel", scene.raid[7]);
+                    new BlockPos(config[0], config[1], config[2]),
+                    net.minecraft.world.Difficulty.byId(difficulty));
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "started", config[4] != 0);
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "active", config[5] != 0);
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "status", raidStatus(config[3]));
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "groupsSpawned", config[6]);
+            put(net.minecraft.world.entity.raid.Raid.class, raid, "raidOmenLevel", config[7]);
             level.setRaid(raid);
         }
 
@@ -15097,6 +15102,10 @@ public final class MobOracle {
             official.server.levels = levels;
             put(MinecraftServer.class, official.server, "levels", levels);
             world.blockEntities = new Long2ObjectOpenHashMap<>();
+            // 假世界构造器跳过了 `ServerLevel.blockEvents`；敲钟的 `BellBlockEntity.onHit`
+            // 走 `ServerLevel.blockEvent` 写它。
+            put(ServerLevel.class, world, "blockEvents",
+                    new it.unimi.dsi.fastutil.objects.ObjectLinkedOpenHashSet<>());
 
             BlockState stone = Blocks.STONE.defaultBlockState();
             for (int x = -15; x <= 15; x++) {
@@ -15110,11 +15119,15 @@ public final class MobOracle {
                 case "villager_p4_retry" -> 110;
                 case "villager_p4_sleep_wake" -> 95;
                 case "villager_p4_bell" -> 75;
+                case "villager_p4_raid_bell" -> 100;
+                case "villager_p4_raid_victory" -> 90;
                 default -> 90;
             };
             long sensorDelay = 1L;
             List<BlockPos> watchPois = new ArrayList<>();
             List<BlockPos> watchBlocks = new ArrayList<>();
+            // 袭击行为场景的袭击快照：`[cx, cy, cz, status, started, active, groupsSpawned, omen]`。
+            int[] raidConfig = null;
 
             if (name.equals("villager_p4_retry")) {
                 BlockPos blocked = new BlockPos(3, 64, 0);
@@ -15167,6 +15180,13 @@ public final class MobOracle {
                 watchPois.add(ws);
                 watchBlocks.add(new BlockPos(2, 64, 0));
                 watchBlocks.add(new BlockPos(3, 64, 0));
+            } else if (name.equals("villager_p4_raid_bell")) {
+                BlockPos bell = new BlockPos(2, 64, 0);
+                world.placeBell(bell);
+                watchPois.add(bell);
+                raidConfig = new int[] {0, 64, 0, 0, 1, 1, 0, 1};
+            } else if (name.equals("villager_p4_raid_victory")) {
+                raidConfig = new int[] {0, 64, 0, 1, 1, 0, 1, 3};
             }
 
             world.enableRealPoi();
@@ -15191,6 +15211,9 @@ public final class MobOracle {
             put(ServerLevel.class, world, "environmentAttributes", official.attributes);
             world.updateSkyBrightness();
             world.getRandom().setSeed(1L);
+            if (raidConfig != null) {
+                RaidScenes.createRaid(raidConfig, world, 2);
+            }
 
             List<Villager> villagers = new ArrayList<>();
             java.util.function.BiConsumer<double[], Long> addVillager = (pos, seed) -> {
@@ -15330,6 +15353,7 @@ public final class MobOracle {
                     + ",\"clockStart\":" + clockStart
                     + ",\"sensorDelay\":" + sensorDelay
                     + ",\"firstId\":" + FIRST_ID
+                    + ",\"raid\":" + (raidConfig == null ? "null" : java.util.Arrays.toString(raidConfig))
                     + ",\"frames\":" + frames + "}\n");
             out.flush();
         } finally {
