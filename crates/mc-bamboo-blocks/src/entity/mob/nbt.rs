@@ -1600,9 +1600,11 @@ mod tests {
         let Tag::Compound(entries) = &tag else {
             panic!("mob NBT is a compound");
         };
-        assert!(entries
-            .iter()
-            .any(|(name, value)| name == "Invul" && *value == Tag::Int(137)));
+        assert!(
+            entries
+                .iter()
+                .any(|(name, value)| name == "Invul" && *value == Tag::Int(137))
+        );
         let loaded = read_mob(&tag, "minecraft:wither", 7)
             .expect("read wither")
             .expect("modelled");
