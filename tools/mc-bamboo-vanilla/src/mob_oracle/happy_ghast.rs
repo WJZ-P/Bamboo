@@ -116,6 +116,7 @@ impl HappyGhastCase {
             shoulder: Default::default(),
             containers: Default::default(),
             container_open_counts: Default::default(),
+            raid: None,
         }
     }
 
