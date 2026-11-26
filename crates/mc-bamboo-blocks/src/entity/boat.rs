@@ -569,6 +569,7 @@ fn get_water_level_above(boat: &Boat, me: &Entity, view: &dyn BlockView) -> f32 
 /// `getStatus` 里 `NaN > 0` 为假，与官方一致。
 fn get_ground_friction(me: &Entity, view: &dyn BlockView) -> f32 {
     let bb = me.bounding_box();
+    // 官方底部薄片 `(minX, minY-0.001, minZ, maxX, minY, maxZ)`。
     let thin = Aabb::new(
         bb.min_x,
         bb.min_y - 0.001,
@@ -577,16 +578,47 @@ fn get_ground_friction(me: &Entity, view: &dyn BlockView) -> f32 {
         bb.min_y,
         bb.max_z,
     );
+    // 逐格扫描的范围比薄片大一圈；外圈边界由下面的角落 / 外圈规则排除。
+    let (x0, x1) = (mth::floor(thin.min_x) - 1, mth::ceil(thin.max_x) + 1);
+    let (y0, y1) = (mth::floor(thin.min_y) - 1, mth::ceil(thin.max_y) + 1);
+    let (z0, z1) = (mth::floor(thin.min_z) - 1, mth::ceil(thin.max_z) + 1);
+    // 碰撞形状真正与薄片相交的格子（`Shapes.joinIsNotEmpty(..., AND)`）。
+    let colliding: Vec<BlockPos> = view
+        .block_collisions(thin, me.collision_context())
+        .into_iter()
+        .map(|(pos, _)| pos)
+        .collect();
     let mut sum = 0.0f32;
     let mut count = 0i32;
-    for (pos, _) in view.block_collisions(thin, me.collision_context()) {
-        let state = view.block_state(pos);
-        if state.is(blocks::LILY_PAD) {
-            continue;
+    for x in x0..x1 {
+        let edge_x = x == x0 || x == x1 - 1;
+        for z in z0..z1 {
+            let edge_z = z == z0 || z == z1 - 1;
+            // x / z 都在外圈时整列跳过。
+            let corners = i32::from(edge_x) + i32::from(edge_z);
+            if corners == 2 {
+                continue;
+            }
+            for y in y0..y1 {
+                // 有一个方向在外圈时，y 的外圈两层也跳过。
+                if corners > 0 && (y == y0 || y == y1 - 1) {
+                    continue;
+                }
+                let pos = BlockPos::new(x, y, z);
+                if !colliding.contains(&pos) {
+                    continue;
+                }
+                let state = view.block_state(pos);
+                if state.is(blocks::LILY_PAD) {
+                    continue;
+                }
+                sum += friction(state);
+                count += 1;
+            }
         }
-        sum += friction(state);
-        count += 1;
     }
+    // 官方是 `f10 / (float)i11`：没有碰撞块时 0/0 = NaN，`getStatus` 里
+    // `NaN > 0` 为假，正好等价于 IN_AIR。
     sum / count as f32
 }
 
@@ -709,12 +741,26 @@ fn handle_bubble_column_effect(me: &mut Entity, down: bool) {
     }
 }
 
-/// `Entity.updateFluidInteraction` 的水流推动部分（船没有流体跟踪器）。
+/// `Entity.updateFluidInteraction` 的水流推动部分：扫 AABB 内每个水格，累加
+/// `flow_vector`，用累积的水面高度（Java `Math.max`）缩放不足 0.4 的推力，
+/// 最后 `apply_current`。船没有流体跟踪器，`in_water` 用累积水面高度 > 0 判定。
+///
+/// The water-current half of `Entity.updateFluidInteraction`: scan water cells,
+/// accumulate `flow_vector`, scale by the accumulated (Java max) fluid height
+/// below 0.4, and apply the current.
 fn apply_water_current(me: &mut Entity, view: &dyn BlockView) {
     let bounds = me.bounding_box().deflated(0.001);
-    let (x0, x1) = (mth::floor(bounds.min_x), mth::ceil(bounds.max_x) - 1);
-    let (y0, y1) = (mth::floor(bounds.min_y), mth::ceil(bounds.max_y) - 1);
-    let (z0, z1) = (mth::floor(bounds.min_z), mth::ceil(bounds.max_z) - 1);
+    let x0 = mth::floor(bounds.min_x);
+    let x1 = mth::ceil(bounds.max_x) - 1;
+    let y0 = mth::floor(bounds.min_y);
+    let y1 = mth::ceil(bounds.max_y) - 1;
+    let z0 = mth::floor(bounds.min_z);
+    let z1 = mth::ceil(bounds.max_z) - 1;
+    // `hasFluidAndLoaded`：任何一个相关区块没加载就整段跳过。
+    if !fluid_area_loaded(view, x0 - 1, y0, z0 - 1, x1 + 1, z1 + 1) {
+        return;
+    }
+    let entity_min_y = me.position.y;
     let mut current = Vec3::default();
     let mut height = 0.0f64;
     let mut count = 0i32;
@@ -730,7 +776,7 @@ fn apply_water_current(me: &mut Entity, view: &dyn BlockView) {
                 if top < bounds.min_y {
                     continue;
                 }
-                height = height.max(top - me.position.y);
+                height = mth::java_max(top - entity_min_y, height);
                 let mut flow = flow_vector(view, pos, fluid);
                 if height < 0.4 {
                     flow = flow.scale(height);
@@ -740,9 +786,27 @@ fn apply_water_current(me: &mut Entity, view: &dyn BlockView) {
             }
         }
     }
-    if count > 0 {
+    // `isPushedByFluid()` 为真且 `in_water`（水面高度 > 0）才施力。
+    if height > 0.0 && count > 0 {
         apply_current(me, &current, 0.014);
     }
+}
+
+/// `Entity.updateFluidInteraction` 的加载检查：按区块坐标逐格看。
+fn fluid_area_loaded(view: &dyn BlockView, x0: i32, y0: i32, z0: i32, x1: i32, z1: i32) -> bool {
+    for chunk_z in (z0 >> 4)..=(z1 >> 4) {
+        for chunk_x in (x0 >> 4)..=(x1 >> 4) {
+            let probe = BlockPos::new(
+                chunk_x << 4,
+                y0.max(view.min_y()).min(view.max_y()),
+                chunk_z << 4,
+            );
+            if !view.is_loaded(probe) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// `AbstractBoat.positionRider` 末尾的 `clampRotation` / `calculatePassengerBodyYRot`：
