@@ -68,6 +68,21 @@ fn rockets(server: &mut Harness) -> Vec<(Option<i32>, Option<i32>)> {
         .collect()
 }
 
+/// 掉在地上的 `LEAD` 物品数量。
+fn lead_drops(server: &mut Harness) -> usize {
+    let region = server.region();
+    region
+        .entities
+        .ids()
+        .iter()
+        .filter(|&&id| {
+            region.entities.public_at(id).is_some_and(|public| {
+                matches!(&public.kind, KindPublic::Item { stack, .. } if stack.item == items::LEAD)
+            })
+        })
+        .count()
+}
+
 /// 让客户端请求统计，返回所有 `AWARD_STATS` 包的正文。
 fn request_stats(server: &mut Harness, client: &Client) -> Vec<Vec<u8>> {
     server.request(
@@ -169,10 +184,13 @@ fn gliding_firework_drops_leashes_and_sounds_lead_break() {
         .get(cow_id)
         .and_then(|e| e.kind.mob().and_then(leash::leash_holder));
     assert_eq!(holder_before, Some(client.id.0), "起步时牛拴在玩家身上");
+    assert_eq!(lead_drops(&mut server), 0, "起步没有拴绳掉落物");
     client.take_frames();
 
     use_firework(&mut server, &client, 1);
 
+    // `dropAllLeashConnections` 解开的那根绳子要按 `spawnAtLocation` 掉出来。
+    assert_eq!(lead_drops(&mut server), 1, "解开的牛掉了一根拴绳");
     // 拴绳解开了。
     let holder_after = server
         .region()

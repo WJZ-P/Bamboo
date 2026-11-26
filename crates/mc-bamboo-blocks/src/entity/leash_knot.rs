@@ -6,10 +6,14 @@
 //! A fence leash knot (`LeashFenceKnotEntity`): just the fence position. Each tick it
 //! checks the fence still exists; it vanishes when the fence breaks or no rope remains.
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Vec3};
 
 use super::{Entity, EntityKind, EntityUid, LeashKnot, ctx::EntityCtx, mob::leash};
-use crate::{InteractionResult, world::World};
+use crate::{
+    InteractionResult,
+    game_event::{GameEvent, dispatch::EventContext},
+    world::World,
+};
 
 /// `LeashFenceKnotEntity` 挂着的世界位置（栅栏那一格的上方 0.375 格处）。
 pub fn knot_position(pos: BlockPos) -> mc_bamboo_core::Vec3 {
@@ -235,7 +239,7 @@ fn is_knot(world: &World, uid: EntityUid) -> bool {
 }
 
 /// `Leashable.leashableLeashedTo(holder)` 里的每个生物 `dropLeash()`，返回有没有掉。
-/// 剪刀剪结时用它。
+/// 剪刀剪结和烟花的 `dropAllLeashConnections(null)` 都用它。
 pub fn drop_all_leashed_to(world: &mut World, holder: EntityUid) -> bool {
     let mut mobs = Vec::new();
     for entity in world.live_entities() {
@@ -245,13 +249,161 @@ pub fn drop_all_leashed_to(world: &mut World, holder: EntityUid) -> bool {
             mobs.push(entity.id);
         }
     }
-    let dropped = !mobs.is_empty();
+    // `with_entity_mut` 借着 `world`，掉落物 / 结的移除要等闭包返回后再落地。
+    let mut drops = Vec::new();
     for uid in mobs {
+        let mut drop = None;
         world.with_entity_mut(uid, &mut |entity| {
-            entity.with_mob(|_, mob| {
-                leash::drop_leash(mob);
+            entity.with_mob(|me, mob| {
+                drop = leash::begin_drop_leash(me, mob);
             });
         });
+        if let Some(drop) = drop {
+            drops.push(drop);
+        }
+    }
+    let dropped = !drops.is_empty();
+    for drop in drops {
+        leash::finish_drop_leash(world, drop);
     }
     dropped
+}
+
+/// `Entity.dropAllLeashConnections(player)` 收尾的 `gameEvent(GameEvent.SHEAR, player)`。
+///
+/// 字节码在 `dropped` 后无条件调用，没有 `player != null` 判断；`LevelAccessor` 把
+/// `null` 也包成 `GameEvent.Context(null, null)`，`VibrationSystem.User` 接受空源实体。
+/// 烟花 `use` 传 `None` 表示字节码里的 `null` 源，剪刀路径传 `Some(player)`。
+pub fn shear_game_event(
+    world: &mut World,
+    source: Vec3,
+    player: Option<EntityUid>,
+    sneaking: bool,
+) {
+    let (spectator, sneaking) = match player.and_then(|uid| {
+        world
+            .player_views()
+            .into_iter()
+            .find(|view| view.uid == uid)
+    }) {
+        Some(view) => (view.spectator, view.sneaking),
+        None => (false, sneaking),
+    };
+    world.game_event(
+        GameEvent::Shear,
+        source,
+        EventContext {
+            sneaking,
+            spectator,
+            source_player: player,
+            source_entity: player,
+            ..Default::default()
+        },
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        BlockTicks,
+        entity::mob::{MobType, interact::MobInteractRequest},
+        testing::TestLevel,
+    };
+    use mc_bamboo_core::Hand;
+    use mc_bamboo_data::items;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    fn lead_count(world: &World) -> usize {
+        world
+            .live_entities()
+            .iter()
+            .filter(|entity| {
+                matches!(&entity.kind, EntityKind::Item(item) if item.stack.item == items::LEAD)
+            })
+            .count()
+    }
+
+    fn shear_request() -> MobInteractRequest {
+        MobInteractRequest {
+            player_uid: 7,
+            player_uuid: [7; 16],
+            hand: Hand::Main,
+            held: ItemStack::new(items::SHEARS, 1),
+            creative: false,
+            position: Vec3::new(0.5, 64.0, 0.5),
+            player_height: 1.8,
+            sneaking: false,
+            difficulty: 2,
+        }
+    }
+
+    fn leashed_cow(
+        world: &mut World,
+        holder: EntityUid,
+        attachment: leash::LeashDelayed,
+        position: Vec3,
+    ) -> EntityUid {
+        let uid = world.spawn_entity(Entity::by_mob_type(MobType::Cow, position));
+        world.with_entity_mut(uid, &mut |entity| {
+            entity.with_mob(|_, mob| {
+                leash::set_leashed_to(mob, holder, attachment.clone());
+            });
+        });
+        uid
+    }
+
+    #[test]
+    fn shears_on_a_knot_drop_one_lead_per_leashed_mob() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let pos = BlockPos::new(8, 64, 0);
+        let knot = create(&mut world, pos);
+        for i in 0..2 {
+            leashed_cow(
+                &mut world,
+                knot,
+                leash::LeashDelayed::Knot(pos),
+                Vec3::new(0.5 + f64::from(i), 64.0, 0.5),
+            );
+        }
+        assert_eq!(lead_count(&world), 0, "起步没有拴绳掉落物");
+
+        let shears = ItemStack::new(items::SHEARS, 1);
+        assert_eq!(
+            world.interact_knot(knot, 7, [7; 16], &shears, Hand::Main, false),
+            InteractionResult::Success
+        );
+        assert_eq!(lead_count(&world), 2, "两头牛各掉一根拴绳");
+    }
+
+    #[test]
+    fn shears_on_a_leashed_mob_drop_leads_for_self_and_others() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let pos = BlockPos::new(8, 64, 0);
+        let knot = create(&mut world, pos);
+        let target = leashed_cow(
+            &mut world,
+            knot,
+            leash::LeashDelayed::Knot(pos),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        // 另一头牛拴在目标牛身上：`dropAllLeashConnections` 两端都掉。
+        leashed_cow(
+            &mut world,
+            target,
+            leash::LeashDelayed::Entity([1; 16]),
+            Vec3::new(1.5, 64.0, 0.5),
+        );
+        assert_eq!(lead_count(&world), 0, "起步没有拴绳掉落物");
+
+        assert_eq!(
+            world.interact_mob(target, &shear_request()).result,
+            InteractionResult::Success
+        );
+        assert_eq!(lead_count(&world), 2, "自己 + 拴在自己身上的牛各掉一根");
+    }
 }

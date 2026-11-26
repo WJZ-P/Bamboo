@@ -8,6 +8,7 @@
 //! `leash::tick_leash` bit for bit. One cow, one player, optionally a fence knot.
 //! Covers elastic pull, snap, shear, untie and knot break.
 
+use super::*;
 use mc_bamboo_blocks::entity::{
     KindPublic,
     mob::{
@@ -15,10 +16,6 @@ use mc_bamboo_blocks::entity::{
         leash::{self, LeashData, LeashDelayed},
     },
 };
-use mc_bamboo_data::items;
-use mc_bamboo_protocol::item::ItemStack;
-
-use super::*;
 
 /// 动作发生刻（各场景一致）。
 const ACTION_TICK: usize = 10;
@@ -254,16 +251,16 @@ impl Report {
                     if tick == ACTION_TICK {
                         match case.name.as_str() {
                             "leash_player_shear" => {
+                                // 官方 `cow.dropLeash()`：清数据、断链、掉一根 LEAD。
+                                let mut drop = None;
                                 world.with_entity_mut(case.first_id, &mut |e| {
-                                    if let Some(mob) = e.kind.mob_mut() {
-                                        leash::drop_leash(mob);
-                                    }
+                                    e.with_mob(|me, mob| {
+                                        drop = leash::begin_drop_leash(me, mob);
+                                    });
                                 });
-                                // 掉落物只比数量，不比坐标，用牛的起点即可。
-                                world.spawn_at_location(
-                                    v3(&case.cow),
-                                    ItemStack::new(items::LEAD, 1),
-                                );
+                                if let Some(drop) = drop {
+                                    leash::finish_drop_leash(&mut world, drop);
+                                }
                             }
                             "leash_fence_untie" => {
                                 // 官方 `setLeashedTo(player)` 内部对旧 holder（结）调

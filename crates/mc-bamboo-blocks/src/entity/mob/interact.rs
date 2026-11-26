@@ -450,12 +450,12 @@ pub fn leash_interact(
     if !living::is_alive(me, mob) {
         return None;
     }
-    // 分支 4a：已经拴在自己身上 → 解开。
+    // 分支 4a：已经拴在自己身上 → 解开。创造模式 `removeLeash()`，生存 `dropLeash()`。
     if super::leash::leash_holder(mob) == Some(req.player_uid) {
         if req.creative {
             super::leash::remove_leash(mob);
         } else {
-            super::leash::drop_leash(mob);
+            super::leash::drop_leash_world(world, me, mob);
         }
         mob.events.push(MobEvent::Sound {
             sound: "minecraft:item.lead.untied",
@@ -467,7 +467,6 @@ pub fn leash_interact(
         });
         return Some(MobInteraction {
             result: InteractionResult::Success,
-            drop_stack: (!req.creative).then(|| ItemStack::new(items::LEAD, 1)),
             ..MobInteraction::pass()
         });
     }
@@ -483,10 +482,9 @@ pub fn leash_interact(
         ) {
             return None;
         }
-        if super::leash::is_leashed(mob)
-            && let Some(old) = super::leash::drop_leash(mob)
-        {
-            crate::entity::leash_knot::notify_leashee_removed(world, old);
+        if super::leash::is_leashed(mob) {
+            // 官方 `setLeashedTo` 前对旧绳子调 `dropLeash()`：掉一根拴绳、通知旧 holder。
+            super::leash::drop_leash_world(world, me, mob);
         }
         super::leash::set_leashed_to(
             mob,
@@ -532,22 +530,43 @@ fn leash_holder_is_player(world: &World, mob: &Mob) -> bool {
     world.player_views().iter().any(|view| view.uid == holder)
 }
 
-/// `shearOffAllLeashConnections` → `dropAllLeashConnections`。
-fn shear_off_all(world: &mut World, me: &Entity, mob: &mut Mob, _req: &MobInteractRequest) -> bool {
+/// `shearOffAllLeashConnections` → `dropAllLeashConnections(player)`。
+fn shear_off_all(
+    world: &mut World,
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+) -> bool {
     let others = leashed_to(world, me.id);
-    let mut dropped = !others.is_empty();
+    let mut drops = Vec::new();
     if super::leash::is_leashed(mob)
-        && let Some(old) = super::leash::drop_leash(mob)
+        && let Some(drop) = super::leash::begin_drop_leash(me, mob)
     {
-        crate::entity::leash_knot::notify_leashee_removed(world, old);
-        dropped = true;
+        drops.push(drop);
     }
     for uid in others {
+        let mut drop = None;
         world.with_entity_mut(uid, &mut |other| {
-            other.with_mob(|_, other_mob| super::leash::drop_leash(other_mob));
+            other.with_mob(|other_me, other_mob| {
+                drop = super::leash::begin_drop_leash(other_me, other_mob);
+            });
         });
+        if let Some(drop) = drop {
+            drops.push(drop);
+        }
     }
+    let dropped = !drops.is_empty();
     if dropped {
+        // 官方顺序：每根绳子 `dropLeash()` → `gameEvent(SHEAR, player)` → 剪刀音。
+        for drop in drops {
+            super::leash::finish_drop_leash(world, drop);
+        }
+        crate::entity::leash_knot::shear_game_event(
+            world,
+            me.position,
+            Some(req.player_uid),
+            req.sneaking,
+        );
         // `shearOffAllLeashConnections`：`ServerLevel.playSound(null, blockPosition,
         // SHEARS_SNIP, player.getSoundSource())`。Bamboo 的音源按玩家的处理，这里记实体事件。
         mob.events.push(MobEvent::Sound {

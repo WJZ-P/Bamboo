@@ -1531,13 +1531,19 @@ pub(crate) fn on_use_item(
         let effects = {
             let (mut level, ticks) = region.block_level();
             let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
-            // 官方顺序：`dropAllLeashConnections` → 播 `LEAD_BREAK` → 生成烟花
-            // → `consume` → `awardStat`。剪刀剪结那条路径也用 `drop_all_leashed_to`。
+            // 官方顺序：`dropAllLeashConnections` → SHEAR 游戏事件 → 播 `LEAD_BREAK`
+            // → 生成烟花 → `consume` → `awardStat`。剪刀剪结 / 剪生物复用同一套解绳。
             //
-            // Official order: `dropAllLeashConnections` → `LEAD_BREAK` sound →
-            // spawn the rocket → `consume` → `awardStat`. The shears path reuses
-            // `drop_all_leashed_to` too.
+            // Official order: `dropAllLeashConnections` → SHEAR game event →
+            // `LEAD_BREAK` sound → spawn the rocket → `consume` → `awardStat`.
+            // The shears paths reuse the same leash-drop helper.
+            //
+            // 字节码里 `dropAllLeashConnections(null)` 仍发 SHEAR（`Context(null, null)`），
+            // 和任务书「传 null 就不发」不同；按字节码，这里发一条空源的 SHEAR。
             if mc_bamboo_blocks::entity::leash_knot::drop_all_leashed_to(&mut world, id.0) {
+                mc_bamboo_blocks::entity::leash_knot::shear_game_event(
+                    &mut world, position, None, false,
+                );
                 world.play_sound(
                     position,
                     mc_bamboo_data::sound_event("minecraft:item.lead.break"),
