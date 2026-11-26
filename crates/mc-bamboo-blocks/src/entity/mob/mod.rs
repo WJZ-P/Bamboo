@@ -1128,23 +1128,15 @@ impl MobType {
     /// `EntityTypeTags.FALL_DAMAGE_IMMUNE`: `LivingEntity.calculateFallDamage` always
     /// returns 0, so a fall deals no damage (the fall distance still accumulates and
     /// resets, and a breeze still plays its `BREEZE_LAND` sound).
-    pub const fn fall_damage_immune(self) -> bool {
-        matches!(
-            self,
-            Self::CopperGolem
-                | Self::IronGolem
-                | Self::SnowGolem
-                | Self::Bat
-                | Self::Bee
-                | Self::Cat
-                | Self::Chicken
-                | Self::HappyGhast
-                | Self::Phantom
-                | Self::SulfurCube
-                | Self::Ocelot
-                | Self::Parrot
-                | Self::Breeze
-        )
+    pub fn fall_damage_immune(self) -> bool {
+        // 直接查生成的官方实体标签，新加的生物（悦灵、凋灵……）自动跟上。
+        // Read the generated vanilla entity-type tag so new mobs follow automatically.
+        let id = self.entity_type();
+        mc_bamboo_data::tags::TAG_GROUPS
+            .iter()
+            .filter(|group| group.registry == "minecraft:entity_type")
+            .flat_map(|group| group.tags.iter())
+            .any(|tag| tag.name == "minecraft:fall_damage_immune" && tag.ids.contains(&id))
     }
 
     /// `SpawnPlacements` 里登记成 `IN_WATER` 的类型。

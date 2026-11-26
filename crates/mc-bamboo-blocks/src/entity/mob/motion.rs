@@ -1353,4 +1353,26 @@ mod tests {
         // `ctx` borrows `world`; both leave scope at the end of this block.
         assert_eq!(level.get(EGG_POS).get(EGGS), 1);
     }
+
+    /// 摔落免疫照官方 `minecraft:fall_damage_immune` 实体标签：旋风人、鸡、蜜蜂、铁傀儡
+    /// 在标签里，僵尸、牛不在。
+    ///
+    /// Fall immunity follows the vanilla `minecraft:fall_damage_immune` entity tag.
+    #[test]
+    fn fall_damage_immunity_follows_the_entity_tag() {
+        use crate::entity::mob::MobType;
+        for kind in [
+            MobType::Breeze,
+            MobType::Chicken,
+            MobType::Bee,
+            MobType::IronGolem,
+            MobType::CopperGolem,
+            MobType::HappyGhast,
+        ] {
+            assert!(kind.fall_damage_immune(), "{kind:?}");
+        }
+        for kind in [MobType::Zombie, MobType::Cow, MobType::Villager] {
+            assert!(!kind.fall_damage_immune(), "{kind:?}");
+        }
+    }
 }
