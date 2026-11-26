@@ -48,6 +48,7 @@ pub const CONNECTED_TRIGGERS: &[&str] = &[
     "minecraft:cured_zombie_villager",
     "minecraft:villager_trade",
     "minecraft:fishing_rod_hooked",
+    "minecraft:construct_beacon",
 ];
 
 /// 借用被拆开的地方（实体 tick、`HurtParts`）只压一条事件，玩家 tick 末尾统一 dispatch。
@@ -338,6 +339,11 @@ pub(crate) fn matches(trigger: &str, payload: &Value, conditions: &Value) -> boo
                             });
                     hooked_match || caught_match
                 })
+        }
+        // `ConstructBeaconTrigger`：塔层数满足 `level` 整数区间（精确值或 min/max）。
+        "minecraft:construct_beacon" => {
+            known_conditions(&["level"])
+                && min_max_matches(fields.get("level"), payload.get("level"))
         }
         _ => object.is_some_and(|map| map.is_empty()),
     }
