@@ -14846,6 +14846,8 @@ public final class MobOracle {
             cases++;
         }
         out.flush();
+        return cases;
+    }
 
     /** 幽匿催发体：一只僵尸死在旁边，经验转成电荷，逐刻蔓延生成幽匿块 / 幽匿脉络。 */
     private static int playSculkCatalyst(Official official, Writer out) throws Exception {
