@@ -451,8 +451,8 @@ fn fireworks(
         .entities
         .ids()
         .into_iter()
-        .filter_map(|id| match region.entities.public_at(id)?.kind {
-            KindPublic::FireworkRocket(firework) => Some(firework),
+        .filter_map(|id| match &region.entities.public_at(id)?.kind {
+            KindPublic::FireworkRocket(firework) => Some(firework.clone()),
             _ => None,
         })
         .collect()
@@ -575,7 +575,7 @@ fn firework_use_on_block_spawns_rocket_and_air_use_passes() {
             hand: Hand::Main,
             pos: GROUND,
             face: Direction::Up,
-            cursor: [0.5, 1.0, 0.5],
+            cursor: (0.5, 1.0, 0.5),
             inside: false,
             world_border_hit: false,
             sequence: 2,
