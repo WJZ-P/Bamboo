@@ -55,6 +55,7 @@ impl ArrowDeflectCase {
             }
         }
         MobLevel {
+            raid: None,
             blocks: blocks.into_iter().collect(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),

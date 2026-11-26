@@ -290,6 +290,11 @@ impl GameEvent {
         game_event_tag_contains("minecraft:shrieker_can_listen", self.id())
     }
 
+    /// `#minecraft:allay_can_listen`：悦灵的 `VibrationUser.getListenableEvents()`。
+    pub fn in_allay_can_listen_tag(self) -> bool {
+        game_event_tag_contains("minecraft:allay_can_listen", self.id())
+    }
+
     /// `VibrationSystem.RESONANCE_EVENTS[frequency - 1]`。
     pub fn resonate(frequency: i32) -> Option<Self> {
         if !(1..=15).contains(&frequency) {

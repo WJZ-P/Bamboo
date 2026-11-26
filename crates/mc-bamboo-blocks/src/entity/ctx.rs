@@ -459,6 +459,11 @@ pub trait BlockView {
         false
     }
 
+    /// `level.random.nextDouble()`，并行视图同上给 0。
+    fn level_random_double(&self) -> f64 {
+        0.0
+    }
+
     /// 生物身上装备的 `hurtAndBreak(amount, entity, slot)`：耐久附魔用 `level.random`。
     /// 返回装备是不是坏了。并行的只读视图没有世界随机源，按没有耐久附魔算
     /// （带耐久附魔的装备扣耐久的次数和原版不同，是性能模式差异）。
@@ -902,6 +907,10 @@ impl BlockView for World<'_> {
 
     fn level_random_boolean(&self) -> bool {
         self.random().next_boolean()
+    }
+
+    fn level_random_double(&self) -> f64 {
+        self.random().next_double()
     }
 
     fn hurt_mob_equipment(
@@ -1752,6 +1761,12 @@ pub enum Command {
         stack: ItemStack,
         delta: Vec3,
     },
+    /// `AllayAi.throwItem`：从眼睛下方 0.2 格朝目标上方扔出一个掉落物。
+    AllayThrow {
+        stack: ItemStack,
+        position: Vec3,
+        delta: Vec3,
+    },
     /// `HurtByTargetGoal.alertOthers`：把 `enemy` 设成这些同伴的目标（已有目标的跳过）。
     ///
     /// `HurtByTargetGoal.alertOthers`: make `enemy` the target of these allies, skipping
@@ -2260,6 +2275,13 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         ),
         Command::DropItemWithDelta { stack, delta } => {
             world.spawn_entity(Entity::ground_item_with_delta(me.position, stack, delta));
+        }
+        Command::AllayThrow {
+            stack,
+            position,
+            delta,
+        } => {
+            world.spawn_entity(Entity::ground_item_with_delta(position, stack, delta));
         }
         Command::DropEntityLoot(request) => {
             let origin = request.origin;

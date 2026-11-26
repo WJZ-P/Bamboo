@@ -866,7 +866,7 @@ pub(super) fn check_spawn_rules(
         MobType::Sniffer | MobType::HappyGhast => true,
         // 卫道士 / 劫掠兽只从袭击波次、命令和刷怪蛋生成，不在群系刷怪表里。
         // Vindicators / ravagers only come from raid waves, commands and spawn eggs.
-        MobType::Vindicator | MobType::Ravager => true,
+        MobType::Vindicator | MobType::Ravager | MobType::Allay => true,
         // 流浪商人和行商羊驼不在群系刷怪表里，由刷新器 / 命令 / 刷怪蛋生成。
         // Wandering traders and trader llamas are in no biome spawn table.
         MobType::WanderingTrader | MobType::TraderLlama => true,

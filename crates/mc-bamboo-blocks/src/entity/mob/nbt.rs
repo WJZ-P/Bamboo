@@ -525,6 +525,10 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         );
         put(&mut out, "scute_time", Tag::Int(mob.armadillo.scute_time));
     }
+    if mob.mob_type == MobType::Allay {
+        // `Allay.addAdditionalSaveData`：`Inventory` / `listener` / `DuplicationCooldown`。
+        super::allay::write_nbt(mob, &mut out);
+    }
     if mob.mob_type == MobType::CopperGolem {
         // `CopperGolem.addAdditionalSaveData`：两个键无条件写出。
         // `CopperGolem.addAdditionalSaveData`: both keys are always written.
@@ -1008,6 +1012,10 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             {
                 mob.frog.variant = variant;
             }
+        }
+        if mob.mob_type == MobType::Allay {
+            // `Allay.readAdditionalSaveData`：背包、监听者、复制冷却。
+            super::allay::read_nbt(mob, tag);
         }
         if mob.mob_type == MobType::Warden {
             // `Warden.readAdditionalSaveData`：读不出的键回到缺省值，再同步客户端愤怒等级。

@@ -46,6 +46,12 @@ fn value_tag(value: &MemoryValue) -> Option<Tag> {
         MemoryValue::Int(value) => Some(Tag::Int(*value)),
         MemoryValue::Long(value) => Some(Tag::Long(*value)),
         MemoryValue::Unit => Some(Tag::Compound(Vec::new())),
+        // `UUIDUtil.CODEC`：`IntArray[4]`，Java 的 `UUID` 高 64 位在前。
+        MemoryValue::Uuid(uuid) => Some(Tag::IntArray(
+            uuid.chunks(4)
+                .map(|word| i32::from_be_bytes(word.try_into().unwrap_or_default()))
+                .collect(),
+        )),
         MemoryValue::GlobalPos(pos) => Some(Tag::Compound(vec![
             ("dimension".to_owned(), Tag::String(pos.dimension.clone())),
             (
@@ -123,7 +129,8 @@ fn value_of(kind: MemoryType, raw: &Tag) -> Option<MemoryValue> {
         MemoryType::Home
         | MemoryType::JobSite
         | MemoryType::PotentialJobSite
-        | MemoryType::MeetingPoint => {
+        | MemoryType::MeetingPoint
+        | MemoryType::LikedNoteblockPosition => {
             let dimension = tag::string_or(raw, "dimension")?.to_owned();
             let Some(Tag::IntArray(coords)) = tag::field(raw, "pos") else {
                 return None;
@@ -138,6 +145,19 @@ fn value_of(kind: MemoryType, raw: &Tag) -> Option<MemoryValue> {
         }
         MemoryType::LastWorkedAtPoi | MemoryType::LastSlept | MemoryType::LastWoken => {
             tag::java_i64(raw).ok().map(MemoryValue::Long)
+        }
+        MemoryType::LikedPlayer => {
+            let Tag::IntArray(words) = raw else {
+                return None;
+            };
+            let [a, b, c, d] = words.as_slice() else {
+                return None;
+            };
+            let mut uuid = [0; 16];
+            for (index, word) in [a, b, c, d].into_iter().enumerate() {
+                uuid[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+            }
+            Some(MemoryValue::Uuid(uuid))
         }
         MemoryType::SnifferExploredPositions
         | MemoryType::VisitedBlockPositions

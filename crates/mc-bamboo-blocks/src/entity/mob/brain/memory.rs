@@ -168,6 +168,12 @@ pub enum MemoryType {
     BreezeShootCharging,
     BreezeShootRecovering,
     BreezeShootCooldown,
+    /// 悦灵的三项记忆，按官方 `MemoryModuleType` 注册顺序追加在末尾：
+    /// `liked_player`（`UUIDUtil.CODEC`）、`liked_noteblock`（`GlobalPos.CODEC`）、
+    /// `liked_noteblock_cooldown_ticks`（`Codec.INT`）。
+    LikedPlayer,
+    LikedNoteblockPosition,
+    LikedNoteblockCooldownTicks,
 }
 
 impl MemoryType {
@@ -175,11 +181,11 @@ impl MemoryType {
     ///
     /// The number of memory types: the length of the slot table.
     /// 51 个基础 + 15 个监守者 + 4 个嗅探兽（`sniff_cooldown` 两边共用，只算一次）
-    /// + 3 个铜傀儡搬运记忆 + 8 个旋风人。
+    /// + 3 个铜傀儡搬运记忆 + 8 个旋风人 + 3 个悦灵。
     ///
     /// 51 base + 15 warden + 4 sniffer (`sniff_cooldown` is shared, counted once)
-    /// + 3 copper golem transport + 8 breeze memories.
-    pub const COUNT: usize = 81;
+    /// + 3 copper golem transport + 8 breeze + 3 allay memories.
+    pub const COUNT: usize = 84;
 
     /// 全部种类，按枚举顺序。
     ///
@@ -266,6 +272,9 @@ impl MemoryType {
         Self::BreezeShootCharging,
         Self::BreezeShootRecovering,
         Self::BreezeShootCooldown,
+        Self::LikedPlayer,
+        Self::LikedNoteblockPosition,
+        Self::LikedNoteblockCooldownTicks,
     ];
 
     /// 官方注册名（不带命名空间）。
@@ -354,6 +363,9 @@ impl MemoryType {
             Self::BreezeShootCharging => "breeze_shoot_charging",
             Self::BreezeShootRecovering => "breeze_shoot_recover",
             Self::BreezeShootCooldown => "breeze_shoot_cooldown",
+            Self::LikedPlayer => "liked_player",
+            Self::LikedNoteblockPosition => "liked_noteblock",
+            Self::LikedNoteblockCooldownTicks => "liked_noteblock_cooldown_ticks",
         }
     }
 
@@ -390,6 +402,9 @@ impl MemoryType {
                 | Self::LastSlept
                 | Self::LastWoken
                 | Self::ItemPickupCooldownTicks
+                | Self::LikedPlayer
+                | Self::LikedNoteblockPosition
+                | Self::LikedNoteblockCooldownTicks
                 | Self::SnifferExploredPositions
                 | Self::SniffCooldown
                 | Self::VisitedBlockPositions
@@ -624,6 +639,8 @@ pub enum MemoryValue {
     Walk(WalkTarget),
     Look(PositionTracker),
     Damage(DamageSource),
+    /// `liked_player`：`UUIDUtil.CODEC` 的 16 字节 UUID。
+    Uuid([u8; 16]),
     /// `GlobalPos`（`home` / `job_site` / `potential_job_site` / `meeting_point` / `hiding_place`）。
     GlobalPos(GlobalPos),
     /// `List<GlobalPos>`（`secondary_job_site`）。
@@ -991,6 +1008,14 @@ impl Memories {
     pub fn block_pos(&self, kind: MemoryType) -> Option<BlockPos> {
         match self.get(kind) {
             Some(MemoryValue::BlockPos(pos)) => Some(*pos),
+            _ => None,
+        }
+    }
+
+    /// 悦灵 `liked_player` 记忆里的 UUID。
+    pub fn uuid(&self, kind: MemoryType) -> Option<[u8; 16]> {
+        match self.get(kind) {
+            Some(MemoryValue::Uuid(uuid)) => Some(*uuid),
             _ => None,
         }
     }
