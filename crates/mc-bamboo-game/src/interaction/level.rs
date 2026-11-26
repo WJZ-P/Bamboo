@@ -415,6 +415,41 @@ impl Level for RegionLevel<'_> {
         }
     }
 
+    fn trial_spawner_dispensing(
+        &mut self,
+        pos: BlockPos,
+        loot_table: &str,
+    ) -> Vec<(mc_bamboo_protocol::item::ItemStack, i32)> {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
+            return Vec::new();
+        };
+        // `lowResolutionPosition(level, pos)`：坐标分别除以 30 / 20 / 30 后 floor，
+        // `level.getSeed() + blockPos.asLong()` 就是 `LootTable.getRandomItems(params, seed)`。
+        let low = BlockPos::new(
+            (pos.x as f32 / 30.0).floor() as i32,
+            (pos.y as f32 / 20.0).floor() as i32,
+            (pos.z as f32 / 30.0).floor() as i32,
+        );
+        let seed = self.world_seed.wrapping_add(low.pack());
+        let params = mc_bamboo_loot::LootParams::new(0.0);
+        let Ok(stacks) = table.get_random_items_with_seed(
+            &params,
+            seed,
+            Some(self.loot_sequences),
+            self.random.source(),
+        ) else {
+            return Vec::new();
+        };
+        stacks
+            .into_iter()
+            .map(|mut stack| {
+                let weight = stack.count.max(0);
+                stack.count = 1;
+                (crate::loot_stacks::loot_stack(&stack), weight)
+            })
+            .collect()
+    }
+
     fn trial_spawner_eject_reward(&mut self, pos: BlockPos, loot_table: &str) -> bool {
         let Ok(table) = mc_bamboo_loot::LootTable::from_name(loot_table) else {
             return false;
@@ -1951,6 +1986,37 @@ mod tests {
         assert_eq!(
             level.players.get(&id).unwrap().inventory.slots[hand].count,
             1
+        );
+    }
+
+    /// 不祥物品生成器掉的表用 `level.getSeed() + lowResolutionPosition(pos).asLong()`
+    /// 做种子：同一个世界随机源下，只换世界种子就会换掉掉落表的 uniform 数量权重。
+    #[test]
+    fn ominous_dispensing_seeds_from_the_level_seed() {
+        use mc_bamboo_blocks::Level;
+        use mc_bamboo_core::BlockPos;
+
+        let pos = BlockPos::new(0, 64, 0);
+        let loot_table = "minecraft:spawners/trial_chamber/items_to_drop_when_ominous";
+
+        let mut region = Region::new(2, 20, false);
+        let (mut level, _ticks) = region.block_level();
+
+        level.random.source().set_seed(42);
+        level.world_seed = 0;
+        let first = level.trial_spawner_dispensing(pos, loot_table);
+
+        level.random.source().set_seed(42);
+        level.world_seed = 1;
+        let second = level.trial_spawner_dispensing(pos, loot_table);
+
+        assert!(
+            !first.is_empty() && !second.is_empty(),
+            "the table resolves"
+        );
+        assert_ne!(
+            first, second,
+            "the level seed must feed the dispensing loot table"
         );
     }
 }
