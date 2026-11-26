@@ -769,3 +769,169 @@ impl Report {
         println!("{}: {} ticks", case.name, case.frames.len());
     }
 }
+
+/// 凋灵破坏方块的逐刻帧：扫描区 36 格 `1=还在 / 0=空气` + 两种随机源。
+///
+/// Frame of the block-destruction scene: 36 scan cells (1=present, 0=air)
+/// plus both random sources.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WitherDestroyFrame {
+    b: Vec<i64>,
+    mob_seed: i64,
+    level_seed: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WitherDestroyCase {
+    name: String,
+    first_id: i32,
+    mob_seed: i64,
+    frames: Vec<WitherDestroyFrame>,
+}
+
+impl WitherDestroyCase {
+    fn level(&self) -> MobLevel {
+        let mut blocks = Vec::new();
+        for x in -6..=6 {
+            for z in -6..=6 {
+                blocks.push((
+                    BlockPos::new(x, 63, z),
+                    BlockState(mc_bamboo_data::blocks::BEDROCK),
+                ));
+            }
+        }
+        // 扫描区里远离凋灵身体的格子放 STONE；(0, *, 0) 留空。
+        for x in -1..=1 {
+            for y in 64..=67 {
+                for z in -1..=1 {
+                    if x == 0 && z == 0 {
+                        continue;
+                    }
+                    blocks.push((
+                        BlockPos::new(x, y, z),
+                        BlockState(mc_bamboo_data::blocks::STONE),
+                    ));
+                }
+            }
+        }
+        MobLevel {
+            raid: None,
+            blocks: blocks.into_iter().collect(),
+            random: LevelRandom::new(1),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: Vec::new(),
+            rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+            facts: ZombieFacts {
+                difficulty: 2,
+                ..ZombieFacts::default()
+            },
+            natural_spawn: None,
+            biome: None,
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            game_event_listeners: Default::default(),
+            warden_warnings: Default::default(),
+            darkness_ticks: 0,
+            poi: mc_bamboo_world::poi::PoiStore::new(),
+            entities: Entities::with_next_id(self.first_id),
+            players: Vec::new(),
+            game: None,
+            wrong_was_hurt: false,
+            inhabited: HashMap::new(),
+            mob_teams: HashMap::new(),
+            short_hunger: false,
+            ignore_bed_monsters: false,
+            explosion_break: 0,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
+            shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState::empty(),
+        }
+    }
+}
+
+impl Report {
+    /// 逐刻重放 `destroyBlocksTick` 到点后扫包围盒破坏非 `#wither_immune` 方块。
+    ///
+    /// Replay the `destroyBlocksTick` sweep that breaks every non-`#wither_immune`
+    /// block in the wither's bounding box.
+    pub(super) fn replay_wither_destroy(&mut self, case: &WitherDestroyCase) {
+        use mc_bamboo_blocks::{
+            BlockTicks, World,
+            entity::{Entity, JavaRandom, mob::MobType},
+        };
+        use mc_bamboo_core::Vec3;
+
+        self.cases += 1;
+        let broken = self.break_test.as_deref() == Some("wither_destroy");
+        let mut level = case.level();
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(1000);
+        let id = {
+            let mut world = World::new(&mut level, &mut ticks);
+            let entity = Entity::by_mob_type(MobType::Wither, Vec3::new(0.5, 64.0, 0.5));
+            let id = world.spawn_entity(entity);
+            world.with_entity_mut(id, &mut |entity| {
+                entity.y_rot = 0.0;
+                entity.old_position = Vec3::new(0.5, 64.0, 0.5);
+                entity.random = JavaRandom::from_state(case.mob_seed);
+                entity.with_mob(|_, mob| {
+                    mob.health = 300.0;
+                    mob.wither.destroy_blocks_tick = 20;
+                });
+            });
+            id
+        };
+        let _ = level.entities.take_spawn_snapshots();
+        for (tick, expected) in case.frames.iter().enumerate() {
+            if tick > 0 {
+                ticks.set_time(1000 + tick as i64);
+                let mut world = World::new(&mut level, &mut ticks);
+                world.tick_entities();
+                let _ = world.drain_effects();
+            }
+            let mut blocks = Vec::new();
+            for x in -1..=1 {
+                for y in 64..=67 {
+                    for z in -1..=1 {
+                        blocks.push(
+                            level
+                                .blocks
+                                .get(&BlockPos::new(x, y, z))
+                                .map_or(0, |state| i64::from(!state.is_air())),
+                        );
+                    }
+                }
+            }
+            if broken {
+                // 改坏确认：把第一格方块状态翻一位。
+                // Break check: flip the first scan cell.
+                blocks[0] ^= 1;
+            }
+            let mob_seed = level
+                .entities
+                .get(id)
+                .map_or(0, |entity| entity.random.state());
+            let level_seed = level.random.source().seed();
+            if blocks != expected.b
+                || mob_seed != expected.mob_seed
+                || level_seed != expected.level_seed
+            {
+                self.mismatch(format!(
+                    "{} tick {tick}: official b {:?} mobSeed {} levelSeed {}, bamboo b {:?} mobSeed {} levelSeed {}",
+                    case.name,
+                    expected.b,
+                    expected.mob_seed,
+                    expected.level_seed,
+                    blocks,
+                    mob_seed,
+                    level_seed
+                ));
+            }
+            self.steps += 1;
+        }
+        println!("{}: {} ticks", case.name, case.frames.len());
+    }
+}

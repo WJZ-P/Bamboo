@@ -746,6 +746,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("wither_arrow")) {
                 cases += playWitherArrow(official, out, only);
             }
+            if (only == null || only.startsWith("wither_destroy")) {
+                cases += playWitherDestroy(official, out, only);
+            }
             if (only == null || only.startsWith("breeze")) {
                 cases += playBreeze(official, out, only);
             }
@@ -16200,6 +16203,77 @@ public final class MobOracle {
         frames.append(']');
         out.write("{\"type\":\"witherArrow\",\"name\":" + jsonString(name)
                 + ",\"firstId\":" + FIRST_ID
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+        return 1;
+    }
+
+    /** 凋灵破坏方块：逐刻比扫描区 36 格方块是否还在，以及两种随机源。 */
+    private static int playWitherDestroy(Official official, Writer out, String only) throws Exception {
+        String name = "wither_destroy_blocks";
+        if (only != null && !name.startsWith(only)) return 0;
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.nextId = FIRST_ID;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        level.spawned = new ArrayList<>();
+        level.tracked = new ArrayList<>();
+        level.levelEvents = new ArrayList<>();
+        level.getRandom().setSeed(1L);
+        level.gameTime = START_TIME;
+        // 基岩地板 y=63；扫描区里远离凋灵身体的格子放 STONE（可破坏）。
+        for (int x = -6; x <= 6; x++) {
+            for (int z = -6; z <= 6; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.BEDROCK.defaultBlockState());
+            }
+        }
+        for (int x = -1; x <= 1; x++) {
+            for (int y = 64; y <= 67; y++) {
+                for (int z = -1; z <= 1; z++) {
+                    if (x == 0 && z == 0) continue; // 凋灵身体所在列留空
+                    level.blocks.put(BlockPos.asLong(x, y, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+        }
+        var mob = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                EntityTypes.WITHER.create(level, EntitySpawnReason.TRIGGERED);
+        setRandom(mob, 5L);
+        mob.setUUID(new UUID(0L, 1L));
+        mob.setId(FIRST_ID);
+        mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        // `hurtServer` 之后 `destroyBlocksTick=20`，这里直接设好倒计时。
+        put(net.minecraft.world.entity.boss.wither.WitherBoss.class, mob, "destroyBlocksTick", 20);
+        level.tracked.add(mob);
+        long mobSeed0 = randomSeed(mob);
+        int ticks = 22;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                level.levelEvents.clear();
+                mob.commonTick();
+                mob.tick();
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"b\":[");
+            boolean first = true;
+            for (int x = -1; x <= 1; x++) {
+                for (int y = 64; y <= 67; y++) {
+                    for (int z = -1; z <= 1; z++) {
+                        if (!first) frames.append(',');
+                        first = false;
+                        frames.append(level.getBlockState(new BlockPos(x, y, z)).isAir() ? 0 : 1);
+                    }
+                }
+            }
+            frames.append("],\"mobSeed\":").append(randomSeed(mob))
+                    .append(",\"levelSeed\":").append(randomSeed(level.getRandom()))
+                    .append('}');
+        }
+        frames.append(']');
+        out.write("{\"type\":\"witherDestroy\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"mobSeed\":" + mobSeed0
                 + ",\"frames\":" + frames + "}\n");
         out.flush();
         return 1;
