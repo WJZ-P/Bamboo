@@ -10,7 +10,9 @@
 //! Only staying airborne too long disconnects for flying.
 
 use mc_bamboo_blocks::entity::{
-    self, TravelSegment, enclosed_in_air, no_block_collision, overlaps_new_blocks, sweep_movement,
+    self, TravelSegment, enclosed_in_air,
+    mob::{DamageKind, DamageSource},
+    no_block_collision, overlaps_new_blocks, sweep_movement,
 };
 use mc_bamboo_blocks::{
     Aabb, BlockEntities, BlockState, CollisionContext, EntityContext, PistonMoving,
@@ -18,8 +20,9 @@ use mc_bamboo_blocks::{
 };
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{
-    blocks, items,
-    registries::{attribute, mob_effect},
+    FluidTag, blocks, gamerules, items,
+    registries::{attribute, custom_stat, mob_effect},
+    tags::fluid_tags,
 };
 use mc_bamboo_protocol::{
     codec::Reader,
@@ -27,10 +30,7 @@ use mc_bamboo_protocol::{
     item::ItemStack,
     packet::{
         ClientboundPacket,
-        play::{
-            ClientInformation, ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SPRINTING, EquipmentSlot,
-            GameMode, PlayerPosition,
-        },
+        play::{ClientInformation, ENTITY_FLAG_SPRINTING, EquipmentSlot, GameMode, PlayerPosition},
     },
 };
 use mc_bamboo_world::store::ChunkStore;
@@ -53,6 +53,9 @@ const MAX_VERTICAL: f64 = 2.0e7;
 const STANDING_BODY: f64 = 1.8;
 const CROUCHING_BODY: f64 = 1.5;
 const SWIMMING_BODY: f64 = 0.6;
+/// 滑翔姿势的碰撞盒高度，对应 `Avatar.POSES`。
+/// The glide bounding-box height from `Avatar.POSES`.
+pub(crate) const FALL_FLYING_BODY: f64 = 0.6_f32 as f64;
 const HALF_WIDTH: f64 = 0.3;
 /// 专用服务器 `allow-flight` 的默认值。配置里没有这一项。
 ///
@@ -159,6 +162,12 @@ impl Motion {
         self.client_loaded_timeout <= 0
     }
 
+    /// 当前的碰撞盒使用滑翔姿势。
+    /// Whether the collision box is in the fall-flying pose.
+    pub(crate) fn is_fall_flying_pose(&self) -> bool {
+        self.body_height == FALL_FLYING_BODY
+    }
+
     pub(crate) fn mark_loaded(&mut self) {
         self.client_loaded_timeout = 0;
     }
@@ -249,7 +258,7 @@ pub(crate) fn on_move_player(
     }
 
     let sample = PlayerBlocks::new(chunks, block_entities);
-    apply_change(
+    let landed_gliding = apply_change(
         player,
         player_grid,
         links,
@@ -260,10 +269,14 @@ pub(crate) fn on_move_player(
             pitch,
             on_ground,
             horizontal_collision,
+            check_speed: should_check_speed(player, &region.global.rules),
         },
         &sample,
         &border,
     );
+    if landed_gliding {
+        crate::player_environment::on_land(region, id);
+    }
 }
 
 /// 处理 `accept_teleportation`。
@@ -320,6 +333,7 @@ pub(crate) fn on_accept_teleportation(
             pitch,
             on_ground: false,
             horizontal_collision: false,
+            check_speed: should_check_speed(player, &region.global.rules),
         },
         &sample,
         &border,
@@ -442,6 +456,95 @@ fn finish_player(region: &mut Region, id: PlayerId) {
     }
 }
 
+/// 推进服务端的滑翔运动，并在速度因撞墙损失时结算伤害。
+/// Advance server-side gliding and apply damage for speed lost to a wall collision.
+pub(crate) fn travel_fall_flying(region: &mut Region, id: PlayerId) {
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    let prior = player.motion.delta;
+    let position = player.position();
+    player.motion.delta = glide_velocity(player, prior);
+    let blocks = PlayerBlocks::new(&region.chunks, &region.block_entities);
+    let simulated = simulate_move(
+        player,
+        player.motion.delta,
+        &blocks,
+        &region.global.world_border,
+    );
+    let end = position.add(simulated.movement);
+    player.set_position(&mut region.player_grid, end);
+    player.motion.delta = simulated.velocity;
+    player.motion.stuck_speed = simulated.stuck_speed;
+    if let Some(below) = simulated.vertical_collision_below {
+        player.motion.vertical_collision_below = below;
+        player.on_ground = below;
+    }
+    remember_inside(player, position, end, simulated.attempted, end);
+    let horizontal_collision = (simulated.attempted.x - simulated.movement.x).abs() >= 1.0e-5
+        || (simulated.attempted.z - simulated.movement.z).abs() >= 1.0e-5;
+    if horizontal_collision {
+        let loss = horizontal_speed(prior) - horizontal_speed(simulated.velocity);
+        let damage = (loss * 10.0 - 3.0) as f32;
+        if damage > 0.0 {
+            crate::player_hurt::play_fall_sound(region, id, damage as i32, end);
+            crate::player_hurt::hurt_player(
+                region,
+                id,
+                DamageSource::environment(DamageKind::FlyIntoWall),
+                damage,
+                &mut None,
+            );
+        }
+    }
+}
+
+fn horizontal_speed(velocity: Vec3) -> f64 {
+    (velocity.x * velocity.x + velocity.z * velocity.z).sqrt()
+}
+
+fn glide_velocity(player: &Player, prior: Vec3) -> Vec3 {
+    let look = Vec3::view_vector(player.yaw, player.pitch);
+    let pitch = f64::from(player.pitch * 0.017453292_f32);
+    let look_speed = horizontal_speed(look);
+    let prior_speed = horizontal_speed(prior);
+    let mut gravity = player.attributes.value(attribute::GRAVITY);
+    if prior.y <= 0.0 && player.effects.has(mob_effect::SLOW_FALLING) {
+        gravity = gravity.min(0.01);
+    }
+    let cos_pitch = pitch.cos();
+    let lift = cos_pitch * cos_pitch;
+    let mut velocity = prior.add(Vec3::new(0.0, gravity * (-1.0 + lift * 0.75), 0.0));
+    if look_speed > 0.0 {
+        if velocity.y < 0.0 {
+            let lift = velocity.y * -0.1 * lift;
+            velocity = velocity.add(Vec3::new(
+                look.x * lift / look_speed,
+                lift,
+                look.z * lift / look_speed,
+            ));
+        }
+        if pitch < 0.0 {
+            let climb = prior_speed * f64::from(-mth::sin(pitch)) * 0.04;
+            velocity = velocity.add(Vec3::new(
+                -look.x * climb / look_speed,
+                climb * 3.2,
+                -look.z * climb / look_speed,
+            ));
+        }
+        velocity = velocity.add(Vec3::new(
+            (look.x / look_speed * prior_speed - velocity.x) * 0.1,
+            0.0,
+            (look.z / look_speed * prior_speed - velocity.z) * 0.1,
+        ));
+    }
+    velocity.multiply(
+        f64::from(0.99_f32),
+        f64::from(0.98_f32),
+        f64::from(0.99_f32),
+    )
+}
+
 fn inside_stuck(region: &Region, id: PlayerId, pending: &[TravelSegment]) -> Option<Vec3> {
     if pending.is_empty() {
         return None;
@@ -498,6 +601,7 @@ struct Attempt {
     pitch: f32,
     on_ground: bool,
     horizontal_collision: bool,
+    check_speed: bool,
 }
 
 struct Change<'a> {
@@ -517,7 +621,7 @@ fn apply_change(
     attempt: Attempt,
     blocks: &PlayerBlocks<'_>,
     border: &mc_bamboo_blocks::WorldBorder,
-) {
+) -> bool {
     let change = Change {
         target: clamp_position(attempt.target),
         yaw: attempt.yaw,
@@ -526,9 +630,9 @@ fn apply_change(
         horizontal_collision: attempt.horizontal_collision,
         blocks,
     };
-    if reject_speed(player, &change) {
+    if reject_speed(player, &change, attempt.check_speed) {
         movement::teleport(player, links, grid, now, player.position());
-        return;
+        return false;
     }
     let start = player.position();
     let from_last = change.target.subtract(player.motion.last_good);
@@ -603,7 +707,7 @@ fn apply_change(
         set_rotation(player, change.yaw, change.pitch);
         movement::teleport(player, links, grid, now, start);
         record_fall(&mut player.motion.fall_distance, 0.0, change.on_ground);
-        return;
+        return false;
     }
 
     player.set_position(grid, change.target);
@@ -617,7 +721,7 @@ fn apply_change(
     // `ServerPlayer.checkMovementStatistics`：按客户端报告的位移算消耗的厘米数。
     // 水 / 梯子 / 游泳的判定直接从玩家当前所在格和脚下格读方块状态，
     // 和官方 `isEyeInFluid` / `isInWater` / `onClimbable` 的方块查询一致。
-    let sprinting = player.sync.shared_flags & ENTITY_FLAG_SPRINTING != 0;
+    let sprinting = player.sync.is_sprinting();
     let feet = BlockPos::containing(change.target);
     let eye = BlockPos::containing(Vec3::new(
         change.target.x,
@@ -629,14 +733,22 @@ fn apply_change(
     let eye_in_water = eye_state
         .fluid()
         .is_tagged(mc_bamboo_data::tags::fluid_tags::WATER);
-    let in_water = feet_state
-        .fluid()
-        .is_tagged(mc_bamboo_data::tags::fluid_tags::WATER);
-    let on_climbable = feet_state.is_tagged(mc_bamboo_data::tags::block_tags::CLIMBABLE);
-    let swimming = player.sync.shared_flags & ENTITY_FLAG_FALL_FLYING == 0
-        && player.motion.body_height == SWIMMING_BODY
-        && !player.on_ground;
-    let fall_flying = player.sync.shared_flags & ENTITY_FLAG_FALL_FLYING != 0;
+    let fall_flying = player.sync.is_fall_flying();
+    let in_water = if fall_flying {
+        touches_fluid(player, change.blocks, fluid_tags::WATER)
+    } else {
+        feet_state.fluid().is_water()
+    };
+    let on_climbable = crate::player_glide::on_climbable(player, change.blocks);
+    let swimming = !fall_flying && player.motion.body_height == SWIMMING_BODY && !player.on_ground;
+    if fall_flying && !eye_in_water && !in_water && !on_climbable && !player.on_ground {
+        let centimeters = (client_delta.length_sqr().sqrt() as f32 * 100.0).round() as i32;
+        if centimeters > 0 {
+            player
+                .item_use_stats
+                .award_custom(custom_stat::AVIATE_ONE_CM, centimeters);
+        }
+    }
     if let Some(amount) = crate::player_exhaustion::movement(
         client_delta.x,
         client_delta.y,
@@ -652,12 +764,17 @@ fn apply_change(
         crate::player_exhaustion::add(player, amount);
     }
     let was_airborne = player.motion.fall_distance > 0.0;
-    record_fall(
-        &mut player.motion.fall_distance,
-        client_delta.y,
-        change.on_ground,
-    );
-    if change.on_ground && was_airborne {
+    let landed_gliding = fall_flying && change.on_ground;
+    if fall_flying && in_water {
+        player.motion.fall_distance = 0.0;
+    } else {
+        record_fall(
+            &mut player.motion.fall_distance,
+            client_delta.y,
+            change.on_ground && !landed_gliding,
+        );
+    }
+    if change.on_ground && was_airborne && !landed_gliding {
         player.motion.pending_land = true;
     }
     if moved_up {
@@ -665,9 +782,15 @@ fn apply_change(
     }
     remember_inside(player, start, end, simulated.attempted, change.target);
     player.motion.last_good = player.position();
+    landed_gliding && player.motion.fall_distance > 0.0
 }
 
-fn reject_speed(player: &mut Player, change: &Change<'_>) -> bool {
+fn should_check_speed(player: &Player, rules: &crate::gamerules::GameRuleSet) -> bool {
+    rules.bool(gamerules::PLAYER_MOVEMENT_CHECK)
+        && (!player.sync.is_fall_flying() || rules.bool(gamerules::ELYTRA_MOVEMENT_CHECK))
+}
+
+fn reject_speed(player: &mut Player, change: &Change<'_>, check_speed: bool) -> bool {
     player.motion.received_move_packets = player.motion.received_move_packets.wrapping_add(1);
     let mut packets = player
         .motion
@@ -680,10 +803,18 @@ fn reject_speed(player: &mut Player, change: &Change<'_>) -> bool {
         );
         packets = 1;
     }
+    if !check_speed {
+        return false;
+    }
     let offset = change.target.subtract(player.motion.first_good);
     let moved = offset.length_sqr();
     let expected = player.motion.delta.length_sqr();
-    let limit = f64::from(METRES_PER_TICK) * f64::from(packets);
+    let limit = if player.sync.is_fall_flying() {
+        300.0
+    } else {
+        METRES_PER_TICK
+    };
+    let limit = f64::from(limit * packets as f32);
     if moved - expected > limit {
         warn!(
             "{} moved too quickly! {},{},{}",
@@ -747,6 +878,22 @@ fn simulate_move(
     let moved_vertically = delta.y.abs() > 0.0;
     let end = player.position().add(resolved);
     let factor = f64::from(block_speed_factor(player, end, blocks));
+    if player.sync.is_fall_flying() {
+        let restitution = if player.sync.shift_key_down {
+            0.0
+        } else {
+            player.attributes.value(attribute::BOUNCINESS)
+        };
+        if (delta.x - resolved.x).abs() >= 1.0e-5 {
+            velocity.x = -velocity.x * restitution;
+        }
+        if delta.y != resolved.y {
+            velocity.y = 0.0;
+        }
+        if (delta.z - resolved.z).abs() >= 1.0e-5 {
+            velocity.z = -velocity.z * restitution;
+        }
+    }
     velocity = velocity.multiply(factor, 1.0, factor);
     Simulated {
         movement: resolved,
@@ -794,6 +941,7 @@ fn floating_now(
         // `handleMovePlayer`: levitation exempts the player from the
         // floating check, so the 80-tick flying kick cannot fire.
         && !player.effects.has(mob_effect::LEVITATION)
+        && !player.sync.is_fall_flying()
         && enclosed_in_air(movement_box(player), &mut |pos| blocks.state(pos))
 }
 
@@ -917,10 +1065,9 @@ fn record_fall(fall: &mut f64, ya: f64, on_ground: bool) {
 }
 
 fn block_speed_factor(player: &Player, position: Vec3, blocks: &PlayerBlocks<'_>) -> f32 {
-    // 飞行时 `Player.getBlockSpeedFactor` 直接是 1，不读脚下的方块。
-    //
-    // While flying, `Player.getBlockSpeedFactor` is 1 and ignores the block underfoot.
-    if player.sync.flying {
+    // `Player.getBlockSpeedFactor` 在能力飞行或滑翔中直接返回 1。
+    // `Player.getBlockSpeedFactor` returns 1 during ability flight or gliding.
+    if player.sync.flying || player.sync.is_fall_flying() {
         return 1.0;
     }
     let here_pos = BlockPos::containing(position);
@@ -971,12 +1118,22 @@ fn context_at(player: &Player, bottom: f64, placement: bool) -> CollisionContext
 /// `Player.updatePlayerPose`。游泳姿势塞不进去就保持原样。
 ///
 /// `Player.updatePlayerPose`. The pose stays put when the swimming box does not fit.
-fn update_body(player: &mut Player, blocks: &PlayerBlocks<'_>) {
-    if !body_fits(player, SWIMMING_BODY, blocks) {
+/// 按当前位置和姿势更新移动碰撞盒。
+/// Resolve the movement box for the player's current position and pose.
+pub(crate) fn update_body(player: &mut Player, blocks: &PlayerBlocks<'_>) {
+    let gliding = player.sync.is_fall_flying();
+    let low_body = if gliding {
+        FALL_FLYING_BODY
+    } else {
+        SWIMMING_BODY
+    };
+    if !body_fits(player, low_body, blocks) {
         return;
     }
     let want_crouch = player.sync.shift_key_down && !player.sync.flying;
-    let desired = if want_crouch {
+    let desired = if gliding {
+        FALL_FLYING_BODY
+    } else if want_crouch {
         CROUCHING_BODY
     } else {
         STANDING_BODY
@@ -1036,8 +1193,34 @@ fn fluid_is_water(blocks: &PlayerBlocks<'_>, pos: BlockPos) -> bool {
         .is_tagged(mc_bamboo_data::tags::fluid_tags::WATER)
 }
 
+/// 判断玩家的流体交互盒是否接触该类型的流体。
+/// Whether the player's fluid interaction box touches fluid of this type.
+pub(crate) fn touches_fluid(player: &Player, blocks: &PlayerBlocks<'_>, tag: FluidTag) -> bool {
+    let aabb = movement_box(player).deflated(0.001);
+    for x in mth::floor(aabb.min_x)..(aabb.max_x.ceil() as i32) {
+        for z in mth::floor(aabb.min_z)..(aabb.max_z.ceil() as i32) {
+            for y in mth::floor(aabb.min_y)..(aabb.max_y.ceil() as i32) {
+                let pos = BlockPos::new(x, y, z);
+                let fluid = blocks.state(pos).fluid();
+                if !fluid.is_tagged(tag) {
+                    continue;
+                }
+                let height = if blocks.state(pos.above()).fluid().is_tagged(tag) {
+                    1.0
+                } else {
+                    f64::from(fluid.own_height())
+                };
+                if f64::from(y) + height >= aabb.min_y {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn body_fits(player: &Player, height: f64, blocks: &PlayerBlocks<'_>) -> bool {
-    let box_ = body_box(player.position(), height).deflated(1.0e-7);
+    let box_ = body_box(player, height).deflated(1.0e-7);
     no_block_collision(
         box_,
         move_context(player),
@@ -1050,17 +1233,23 @@ fn body_fits(player: &Player, height: f64, blocks: &PlayerBlocks<'_>) -> bool {
 }
 
 fn movement_box(player: &Player) -> Aabb {
-    body_box(player.position(), player.motion.body_height)
+    body_box(player, player.motion.body_height)
 }
 
-fn body_box(feet: Vec3, height: f64) -> Aabb {
+fn body_box(player: &Player, height: f64) -> Aabb {
+    let feet = player.position();
+    let half_width = if player.sync.is_fall_flying() || player.motion.is_fall_flying_pose() {
+        f64::from(0.3_f32)
+    } else {
+        HALF_WIDTH
+    };
     Aabb::new(
-        feet.x - HALF_WIDTH,
+        feet.x - half_width,
         feet.y,
-        feet.z - HALF_WIDTH,
-        feet.x + HALF_WIDTH,
+        feet.z - half_width,
+        feet.x + half_width,
         feet.y + height,
-        feet.z + HALF_WIDTH,
+        feet.z + half_width,
     )
 }
 
@@ -1162,6 +1351,12 @@ pub enum MoveReplayPacket {
         on_ground: bool,
         horizontal_collision: bool,
     },
+    /// 装备鞘翅，再发送开始滑翔命令。
+    /// Equip elytra and send the start-gliding command.
+    StartGlide,
+    /// 对拍样本预置服务端速度。
+    /// Seed the server's velocity in the replay sample.
+    Velocity(Vec3),
     TickEnd,
     ServerTick,
 }
@@ -1175,6 +1370,12 @@ pub struct MoveReplayReport {
     pub kicked: bool,
     pub teleports: u32,
     pub fall_distance: f64,
+    /// 样本结束时的共享滑翔状态。
+    /// Shared glide state at the end of the sample.
+    pub fall_flying: bool,
+    /// 样本结束时的生命值。
+    /// Health at the end of the sample.
+    pub health: f32,
     /// 这一串包累计的饥饿消耗（`causeFoodExhaustion`，创造模式为 0）。
     pub exhaustion: f32,
 }
@@ -1247,9 +1448,28 @@ pub fn replay_movement(sample: &MoveReplay) -> MoveReplayReport {
                 *on_ground,
                 *horizontal_collision,
             ),
+            MoveReplayPacket::StartGlide => {
+                if let Some(player) = region.players.get_mut(&id)
+                    && let Some(chest) = player.inventory.equipment_mut(EquipmentSlot::Chest)
+                {
+                    *chest = ItemStack::new(items::ELYTRA, 1);
+                }
+                crate::entity_sync::on_player_command(
+                    &mut region,
+                    id,
+                    mc_bamboo_protocol::packet::play::PlayerCommandKind::StartFallFlying,
+                    0,
+                );
+            }
+            MoveReplayPacket::Velocity(velocity) => {
+                if let Some(player) = region.players.get_mut(&id) {
+                    player.motion.delta = *velocity;
+                }
+            }
             MoveReplayPacket::TickEnd => on_client_tick_end(&mut region, id),
             MoveReplayPacket::ServerTick => {
                 region.advance_tick();
+                crate::player_glide::tick(&mut region);
                 finish_tick(&mut region);
             }
         }
@@ -1270,6 +1490,8 @@ pub fn replay_movement(sample: &MoveReplay) -> MoveReplayReport {
         kicked,
         teleports,
         fall_distance: player.motion.fall_distance,
+        fall_flying: player.sync.is_fall_flying(),
+        health: player.health.health,
         exhaustion: player.pending_exhaustion,
     }
 }

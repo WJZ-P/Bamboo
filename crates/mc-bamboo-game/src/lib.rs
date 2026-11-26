@@ -99,6 +99,7 @@ pub mod player_egg;
 pub mod player_enchantments;
 pub mod player_environment;
 pub mod player_exhaustion;
+mod player_glide;
 mod player_grid;
 pub mod player_health;
 pub mod player_hurt;

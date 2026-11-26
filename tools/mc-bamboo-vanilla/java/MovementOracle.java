@@ -31,6 +31,7 @@ import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ServerboundClientTickEndPacket;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.Bootstrap;
@@ -103,13 +104,13 @@ import sun.misc.Unsafe;
 /**
  * 官方 `ServerGamePacketListenerImpl.handleMovePlayer`。每个样本在假世界里跑，打一行 JSON。
  *
- * 样本之间不跑 `LivingEntity.travel`。速度检查用的动量只来自 `Entity.move` 和跳跃。
+ * 滑翔样本在服务端刻推进滑翔运动。其余样本的动量只来自 `Entity.move` 和跳跃。
  *
  * Official `ServerGamePacketListenerImpl.handleMovePlayer`. Each sample runs in a fake world and
  * prints one JSON line.
  *
- * Samples do not run `LivingEntity.travel`. The speed check's momentum comes only from
- * `Entity.move` and jumping.
+ * Server ticks advance glide travel in the gliding cases. Other cases get their momentum
+ * from `Entity.move` and jumping.
  */
 public final class MovementOracle {
     private static final int MIN_Y = -64;
@@ -315,7 +316,27 @@ public final class MovementOracle {
         // 没有效果时的对照：85 刻悬空会被踢。
         play(official, out, "effect_none_kicks", GameType.SURVIVAL, false, false,
                 false, true, air, false, List.of(), new ArrayList<>(hover), false, List.of());
-        return 19;
+        Step startGlide = new Step("startGlide", null, null, false);
+        play(official, out, "elytra_under_limit", GameType.SURVIVAL, false, false,
+                false, true, air, false, List.of(), List.of(startGlide, move(air.add(12.0, 0.0, 0.0), false)));
+        play(official, out, "elytra_over_limit", GameType.SURVIVAL, false, false,
+                false, true, air, false, List.of(), List.of(startGlide, move(air.add(18.0, 0.0, 0.0), false)));
+        play(official, out, "elytra_lands", GameType.SURVIVAL, false, false,
+                false, true, air, false,
+                List.of(new Placed(new BlockPos(0, 78, 0), Blocks.STONE.defaultBlockState())),
+                List.of(startGlide, move(air.add(0.0, -1.0, 0.0), true), serverTick()));
+        play(official, out, "elytra_travel", GameType.SURVIVAL, false, false,
+                false, true, air, false, List.of(), List.of(startGlide, serverTick(), serverTick()));
+        play(official, out, "elytra_hard_landing", GameType.SURVIVAL, false, false,
+                false, true, air.add(0.0, 7.0, 0.0), false,
+                List.of(new Placed(new BlockPos(0, 78, 0), Blocks.STONE.defaultBlockState())),
+                List.of(startGlide, move(air.add(0.0, -1.0, 0.0), true), serverTick()));
+        play(official, out, "elytra_wall_impact", GameType.SURVIVAL, false, false,
+                false, true, air, false,
+                List.of(new Placed(new BlockPos(0, 79, 1), Blocks.STONE.defaultBlockState()),
+                        new Placed(new BlockPos(0, 80, 1), Blocks.STONE.defaultBlockState())),
+                List.of(startGlide, new Step("velocity", null, new Vec3(0.0, 0.0, 1.0), false), serverTick()));
+        return 25;
     }
 
     private static int registryId(Official official, Holder<net.minecraft.world.effect.MobEffect> holder) {
@@ -467,6 +488,12 @@ public final class MovementOracle {
             }
             switch (step.kind) {
                 case "move" -> listener.handleMovePlayer(step.packet);
+                case "velocity" -> player.setDeltaMovement(step.target);
+                case "startGlide" -> {
+                    player.setItemSlot(EquipmentSlot.CHEST, new ItemStack(Items.ELYTRA));
+                    listener.handlePlayerCommand(new ServerboundPlayerCommandPacket(
+                            player, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+                }
                 case "tickEnd" -> listener.handleClientTickEnd(ServerboundClientTickEndPacket.INSTANCE);
                 case "serverTick" -> serverTick(listener, player);
                 default -> throw new IllegalStateException(step.kind);
@@ -482,6 +509,10 @@ public final class MovementOracle {
         line.append(",\"yBits\":").append(Double.doubleToRawLongBits(player.getY()));
         line.append(",\"zBits\":").append(Double.doubleToRawLongBits(player.getZ()));
         line.append(",\"fallBits\":").append(Double.doubleToRawLongBits(player.fallDistance));
+        line.append(",\"fallFlying\":").append(player.isFallFlying());
+        if (packets.stream().anyMatch(step -> "startGlide".equals(step.kind))) {
+            line.append(",\"glideHealthBits\":").append(Float.floatToRawIntBits(player.getHealth()));
+        }
         line.append(",\"mode\":").append(quote(mode.getName()));
         line.append(",\"shift\":").append(shift);
         line.append(",\"sprint\":").append(sprint);
@@ -532,6 +563,14 @@ public final class MovementOracle {
     }
 
     private static void serverTick(RecordingListener listener, ServerPlayer player) throws Exception {
+        if (player.isFallFlying()) {
+            Method updateGlide = LivingEntity.class.getDeclaredMethod("updateFallFlying");
+            updateGlide.setAccessible(true);
+            updateGlide.invoke(player);
+            if (player.isFallFlying()) {
+                player.travel(Vec3.ZERO);
+            }
+        }
         updatePose(player);
         // `LivingEntity.aiStep` 的缓降 / 漂浮分支：每刻清零 `fallDistance`。
         // 本样例不跑完整的 travel，所以单独补这一段，Bamboo 的 finish_tick 同样做。
@@ -585,10 +624,10 @@ public final class MovementOracle {
 
     private record Step(String kind, ServerboundMovePlayerPacket packet, Vec3 target, boolean onGround) {
         String json() {
-            if (!"move".equals(kind)) {
+            if (target == null) {
                 return "{\"kind\":" + quote(kind) + "}";
             }
-            return "{\"kind\":\"move\",\"x\":"
+            return "{\"kind\":" + quote(kind) + ",\"x\":"
                     + Double.doubleToRawLongBits(target.x)
                     + ",\"y\":"
                     + Double.doubleToRawLongBits(target.y)

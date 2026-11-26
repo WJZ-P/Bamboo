@@ -2114,6 +2114,9 @@ pub enum DamageKind {
     Cactus,
     SweetBerryBush,
     Fall,
+    /// 鞘翅滑翔时撞墙产生的伤害。
+    /// Wall impact damage while gliding.
+    FlyIntoWall,
     Freeze,
     OutOfWorld,
     PlayerAttack,
@@ -2227,6 +2230,7 @@ impl DamageKind {
             Self::Cactus => "minecraft:cactus",
             Self::SweetBerryBush => "minecraft:sweet_berry_bush",
             Self::Fall => "minecraft:fall",
+            Self::FlyIntoWall => "minecraft:fly_into_wall",
             Self::Freeze => "minecraft:freeze",
             Self::OutOfWorld => "minecraft:out_of_world",
             Self::PlayerAttack => "minecraft:player_attack",
@@ -2295,6 +2299,7 @@ impl DamageKind {
             Self::Cactus => "cactus",
             Self::SweetBerryBush => "sweetBerryBush",
             Self::Fall => "fall",
+            Self::FlyIntoWall => "flyIntoWall",
             Self::Freeze => "freeze",
             Self::OutOfWorld => "outOfWorld",
             Self::PlayerAttack => "player",
@@ -2340,6 +2345,7 @@ impl DamageKind {
             Self::Cactus,
             Self::SweetBerryBush,
             Self::Fall,
+            Self::FlyIntoWall,
             Self::Freeze,
             Self::OutOfWorld,
             Self::PlayerAttack,
@@ -2401,6 +2407,7 @@ impl DamageKind {
                 | Self::Drown
                 | Self::Generic
                 | Self::Fall
+                | Self::FlyIntoWall
                 | Self::Freeze
                 | Self::OutOfWorld
                 | Self::GenericKill

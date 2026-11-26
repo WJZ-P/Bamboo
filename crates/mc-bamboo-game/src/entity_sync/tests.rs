@@ -138,6 +138,7 @@ impl Stage {
             position,
         );
         player.sync.seen_by.insert(WATCHER);
+        player.motion.mark_loaded();
         region.insert_player(player);
 
         Self {
@@ -974,6 +975,243 @@ fn fall_flying_refusal_uses_the_current_flags_and_only_reaches_the_player() {
         [frame(clientbound::SET_ENTITY_DATA, "07 00 00 08 ff")]
     );
     assert!(stage.flush_watcher().is_empty());
+}
+
+#[test]
+fn fall_flying_starts_and_sends_the_shared_flag_to_observers() {
+    let mut stage = Stage::at(POSITION);
+    stage.skip_first_cycle();
+    let standing_pair = parse_frames(&pairing_frames(stage.player()));
+    stage.player().on_ground = false;
+    stage.player().inventory.slots[6] = ItemStack::new(mc_bamboo_data::items::ELYTRA, 1);
+
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StartFallFlying,
+        0,
+    );
+    assert!(stage.player().sync.is_fall_flying());
+    let velocity = Vec3::new(1.0, 0.0, 0.0);
+    stage.player().motion.delta = velocity;
+    stage.step();
+    assert_eq!(stage.player().height(), 0.6_f32);
+    assert_eq!(stage.player().eye_height(), f64::from(0.4_f32));
+    let gliding = stage.take_received();
+    assert_eq!(
+        gliding
+            .iter()
+            .filter(|frame| frame.id == clientbound::SET_ENTITY_MOTION)
+            .collect::<Vec<_>>(),
+        parse_frames(&encode_frames(&SetEntityMotion {
+            entity_id: STEVE.0,
+            movement: velocity
+        }))
+        .iter()
+        .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        gliding
+            .into_iter()
+            .filter(|frame| frame.id == clientbound::SET_ENTITY_DATA)
+            .collect::<Vec<_>>(),
+        [frame(
+            clientbound::SET_ENTITY_DATA,
+            "07 00 00 80 06 14 01 ff"
+        )],
+    );
+
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StartFallFlying,
+        0,
+    );
+    assert!(!stage.player().sync.is_fall_flying());
+    stage.step();
+    assert_eq!(
+        stage
+            .take_received()
+            .into_iter()
+            .filter(|frame| frame.id == clientbound::SET_ENTITY_DATA)
+            .collect::<Vec<_>>(),
+        [frame(
+            clientbound::SET_ENTITY_DATA,
+            "07 00 00 00 06 14 00 ff"
+        )],
+    );
+    let stopped_pair = parse_frames(&pairing_frames(stage.player()));
+    assert_eq!(standing_pair[1], stopped_pair[1]);
+}
+
+#[test]
+fn fall_flying_start_checks_equipment_and_environment() {
+    use mc_bamboo_blocks::{durability::set_damage_value, entity::mob::effects::EffectInstance};
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::{
+        blocks, items,
+        registries::{data_component_type, mob_effect},
+    };
+    use mc_bamboo_protocol::components::{ComponentValue, PatchEntry};
+
+    for condition in [
+        "grounded",
+        "riding",
+        "flying",
+        "levitating",
+        "water",
+        "lava",
+        "empty",
+        "wrong slot",
+        "worn out",
+        "glider removed",
+        "invalid max damage",
+    ] {
+        let mut stage = Stage::at(POSITION);
+        let feet = BlockPos::containing(POSITION);
+        let player = stage.player();
+        player.on_ground = false;
+        player.inventory.slots[6] = ItemStack::new(items::ELYTRA, 1);
+        match condition {
+            "grounded" => player.on_ground = true,
+            "riding" => player.riding.vehicle = Some(123),
+            "flying" => player.sync.flying = true,
+            "levitating" => {
+                player.effects.add(EffectInstance::with_amplifier(
+                    mob_effect::LEVITATION,
+                    100,
+                    0,
+                ));
+            }
+            "water" | "lava" => {
+                let state = if condition == "water" {
+                    blocks::WATER
+                } else {
+                    blocks::LAVA
+                };
+                stage.region.chunks.set_block(feet, state);
+            }
+            "empty" => player.inventory.slots[6] = ItemStack::empty(),
+            "wrong slot" => player.inventory.slots.swap(6, HEAD_SLOT),
+            "worn out" => set_damage_value(&mut player.inventory.slots[6], 431),
+            "glider removed" | "invalid max damage" => {
+                let glider = &mut player.inventory.slots[6];
+                let mut patch = glider.patch();
+                if condition == "glider removed" {
+                    patch.put(data_component_type::GLIDER, PatchEntry::Removed);
+                } else {
+                    patch.put(
+                        data_component_type::MAX_DAMAGE,
+                        PatchEntry::Set(ComponentValue::MaxDamage(i32::MIN)),
+                    );
+                }
+                (glider.added, glider.removed) = patch.to_opaque();
+            }
+            _ => unreachable!(),
+        }
+        on_player_command(
+            &mut stage.region,
+            STEVE,
+            PlayerCommandKind::StartFallFlying,
+            0,
+        );
+        assert!(!stage.player().sync.is_fall_flying(), "{condition}");
+    }
+}
+
+#[test]
+fn fall_flying_spends_durability_every_twenty_ticks_in_survival() {
+    use mc_bamboo_blocks::durability::{damage_of, set_damage_value};
+    use mc_bamboo_data::items;
+
+    for mode in [GameMode::Survival, GameMode::Creative] {
+        let mut stage = Stage::at(POSITION);
+        let player = stage.player();
+        player.game_mode = mode;
+        let mut glider = ItemStack::new(items::ELYTRA, 1);
+        set_damage_value(&mut glider, 430);
+        player.inventory.slots[6] = glider;
+        on_player_command(
+            &mut stage.region,
+            STEVE,
+            PlayerCommandKind::StartFallFlying,
+            0,
+        );
+
+        for _ in 0..19 {
+            crate::player_glide::tick(&mut stage.region);
+        }
+        assert_eq!(damage_of(&stage.player().inventory.slots[6]), Some(430));
+        assert!(stage.player().sync.is_fall_flying());
+        crate::player_glide::tick(&mut stage.region);
+        assert_eq!(
+            damage_of(&stage.player().inventory.slots[6]),
+            Some(if mode == GameMode::Survival { 431 } else { 430 }),
+        );
+        assert!(stage.player().sync.is_fall_flying());
+        crate::player_glide::tick(&mut stage.region);
+        assert_eq!(
+            stage.player().sync.is_fall_flying(),
+            mode == GameMode::Creative
+        );
+    }
+}
+
+#[test]
+fn fall_flying_stops_when_the_player_lands_or_unequips() {
+    use mc_bamboo_data::items;
+
+    for condition in ["landed", "unequipped"] {
+        let mut stage = Stage::at(POSITION);
+        stage.player().inventory.slots[6] = ItemStack::new(items::ELYTRA, 1);
+        on_player_command(
+            &mut stage.region,
+            STEVE,
+            PlayerCommandKind::StartFallFlying,
+            0,
+        );
+        crate::player_glide::tick(&mut stage.region);
+        assert_eq!(stage.player().fall_fly_ticks, 1);
+        match condition {
+            "landed" => stage.player().on_ground = true,
+            "unequipped" => stage.player().inventory.slots[6] = ItemStack::empty(),
+            _ => unreachable!(),
+        }
+        crate::player_glide::tick(&mut stage.region);
+        assert!(!stage.player().sync.is_fall_flying(), "{condition}");
+        assert_eq!(stage.player().fall_fly_ticks, 0, "{condition}");
+    }
+}
+
+/// 官方 `tryToStartFallFlying` 不看梯子，`updateFallFlying` 服务端只看 `canGlide()`：
+/// 站在梯子格里也能开始滑翔，滑翔中碰到水也不会被服务端停下（液体只拦开始）。
+///
+/// Vanilla's `tryToStartFallFlying` ignores ladders and server-side `updateFallFlying`
+/// only checks `canGlide()`: a ladder does not block the start, and touching water does
+/// not stop an ongoing glide (liquids only block the start).
+#[test]
+fn ladders_do_not_block_gliding_and_water_does_not_stop_it() {
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::{blocks, items};
+
+    let mut stage = Stage::at(POSITION);
+    stage.player().inventory.slots[6] = ItemStack::new(items::ELYTRA, 1);
+    let feet = BlockPos::containing(stage.player().position());
+    stage.region.chunks.set_block(feet, blocks::LADDER);
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StartFallFlying,
+        0,
+    );
+    assert!(stage.player().sync.is_fall_flying(), "ladder");
+
+    stage.region.chunks.set_block(feet, blocks::AIR);
+    stage.shift(0.0, -0.25, 0.0);
+    let feet = BlockPos::containing(stage.player().position());
+    stage.region.chunks.set_block(feet, blocks::WATER);
+    crate::player_glide::tick(&mut stage.region);
+    assert!(stage.player().sync.is_fall_flying(), "water");
 }
 
 /// `entities.md` 第 9 节的 `[跑]`。
