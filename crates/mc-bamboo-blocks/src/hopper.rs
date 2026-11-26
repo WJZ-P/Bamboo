@@ -677,13 +677,27 @@ fn suck_from_entity_container(
         f64::from(pos.y) + 2.0,
         f64::from(pos.z) + 1.0,
     );
-    let boat = world.entity_ids().into_iter().find(|&id| {
-        world.entity(id).is_some_and(|found| {
-            !found.removed
-                && matches!(&found.kind, EntityKind::Boat(data) if data.chest.is_some())
-                && found.bounding_box().intersects(cell)
+    let boats = world
+        .entity_ids()
+        .into_iter()
+        .filter(|&id| {
+            world.entity(id).is_some_and(|found| {
+                !found.removed
+                    && matches!(&found.kind, EntityKind::Boat(data) if data.chest.is_some())
+                    && found.bounding_box().intersects(cell)
+            })
         })
-    })?;
+        .collect::<Vec<_>>();
+    if boats.is_empty() {
+        return None;
+    }
+    // 官方 `getEntityContainer`：列表非空时用 `level.getRandom().nextInt(size)`
+    // 随机挑一个（size 为 1 也要抽一次），不能取最小 uid，否则世界随机源少抽一次。
+    //
+    // Vanilla `getEntityContainer` draws `level.getRandom().nextInt(size)` whenever the
+    // list is non-empty (even for size 1); taking the smallest uid skips that draw.
+    let index = world.random().next_int(boats.len() as i32) as usize;
+    let boat = boats[index];
     // `unpackChestVehicleLootTable(null)`：漏斗读的是容器接口，没有玩家 / 幸运值。
     world.unpack_boat_loot_table(boat);
     let mut items = match world.entity(boat).map(|found| found.kind) {
