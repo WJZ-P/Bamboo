@@ -1601,9 +1601,11 @@ WebView2 的渲染进程不算在内。
   跟踪范围的玩家发 `BossEvent` add（PURPLE / PROGRESS / `setDarkenScreen(true)`）、离开的发 remove、进度变化的发
   update，凋灵消失时给所有观众发 remove；拆岛 / 合岛时血条跟着实体搬。
   **逐刻对拍（已闭环的部分）**：`mob-oracle --only wither` 的存档往返场景把官方 `WitherBoss` 的 NBT
-  （`Invul` 取 0 / 137 / 220）逐键对拍 0 差异；4 处改坏确认 `wither_save_invul` / `wither_save_health` /
-  `wither_save_pos` / `wither_save_rotation` 都会报不一致。
-  **已知限制（本轮未做）**：召唤图案 / 无敌期爆炸 / 射凋灵之首命中牛 / 半血弹箭 / 破坏方块的官方逐刻对拍场景
+  （`Invul` 取 0 / 137 / 220）逐键对拍 0 差异；`--only wither_invul` 的无敌期逐刻场景（2 例 46 刻）逐刻比
+  `Invul` / 血量 / 位置 / 速度 / 朝向 / 两侧头旋转和两种随机源，0 差异。5 处改坏确认
+  `wither_save_invul` / `wither_save_health` / `wither_save_pos` / `wither_save_rotation` / `wither_invul`
+  都报不一致。
+  **已知限制（本轮未做）**：召唤图案 / 无敌期结束的爆炸 / 射凋灵之首命中牛 / 半血弹箭 / 破坏方块的官方逐刻对拍场景
   留待下一步——`MobOracle.FakeLevel` 要补 `explode` / `globalLevelEvent` / `getNearbyEntities` / `destroyBlock`
   和凋灵之首 `addFreshEntity` 的 `entitySeeds` 播种，再写对应的 Rust 重放。另外上述
   `AbstractHurtingProjectile.applyInertia` 水中分支、`onHitEntity` 里目标死亡时 `owner.heal(5)` 与
