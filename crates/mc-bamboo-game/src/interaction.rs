@@ -1715,13 +1715,24 @@ pub(crate) fn on_interact_entity(
         Hand::Off => Hand::Main,
     };
     if is_boat {
+        let is_chest = matches!(
+            &target.kind,
+            mc_bamboo_blocks::entity::KindPublic::Boat(boat)
+                if mc_bamboo_blocks::entity::boat::is_chest(boat.entity_type)
+        );
         // `AbstractBoat.interact`：`super.interact` 放行后，非潜行且
         // `outOfControlTicks < 60` 时 `player.startRiding(this)`。
         if !using_secondary_action {
             crate::riding::mount(region, id, entity_id);
             if crate::riding::passengers(region, entity_id).contains(&id.0) {
                 swing(region, id, hand, InteractionResult::Success);
+                return;
             }
+        }
+        // `AbstractChestBoat.interact`：super 返回 PASS（没上成船或潜行）时
+        // `interactWithContainerVehicle(player)` 打开 27 格菜单。
+        if is_chest {
+            crate::menu::open_boat(region, id, entity_id);
         }
         return;
     }
