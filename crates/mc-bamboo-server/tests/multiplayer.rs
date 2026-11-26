@@ -910,8 +910,13 @@ async fn fall_flying_is_refused_to_the_sender() {
     assert_eq!(data.items, [(0, EntityValue::Byte(0))]);
 }
 
+/// 官方拒绝滑翔是 `stopFallFlying`（标志位 7 先设再清），0 号被标脏，下一个同步周期用
+/// `sendToTrackingPlayersAndSelf` 发出：本人和观察者都收到带当前其它标志位的 0 号。
+///
+/// Vanilla refuses with `stopFallFlying` (bit 7 set then cleared), so item 0 is dirty
+/// and the next sync cycle sends it to the player and every tracker.
 #[tokio::test]
-async fn fall_flying_refusal_keeps_the_other_flags_and_stays_private() {
+async fn fall_flying_refusal_keeps_the_other_flags_and_reaches_observers() {
     let server = TestServer::start(small_world()).await;
     let (mut alice, mut bob) = paired(&server).await;
     let id = alice.entity_id;
@@ -923,7 +928,6 @@ async fn fall_flying_refusal_keeps_the_other_flags_and_stays_private() {
         .await;
     alice.settle().await;
     alice.skip_received();
-    let mark = bob.mark();
 
     alice.send(&player_command(id, START_FALL_FLYING)).await;
 
@@ -931,8 +935,10 @@ async fn fall_flying_refusal_keeps_the_other_flags_and_stays_private() {
         .expect::<SetEntityData>(|packet| packet.entity == id)
         .await;
     assert_eq!(data.items, [(0, EntityValue::Byte(FLAG_SPRINTING))]);
-    bob.expect_none::<SetEntityData>(mark, |packet| packet.entity == id)
+    let seen = bob
+        .expect::<SetEntityData>(|packet| packet.entity == id)
         .await;
+    assert_eq!(seen.items, [(0, EntityValue::Byte(FLAG_SPRINTING))]);
 }
 
 #[tokio::test]
