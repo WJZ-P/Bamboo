@@ -1485,6 +1485,16 @@ pub enum Command {
     RingBell {
         pos: mc_bamboo_core::BlockPos,
     },
+    /// `CelebrateVillagersSurvivedRaid` 生成烟花火箭：携带构造好的烟花物品（`FIREWORKS`
+    /// 组件含飞行时长与 BURST 爆炸），只记录不落地实体（烟花火箭实体另开任务）。
+    ///
+    /// `CelebrateVillagersSurvivedRaid` spawning a firework rocket: carries the built
+    /// firework item (with its `FIREWORKS` component: flight duration and BURST explosion),
+    /// recorded but not spawned (the entity is a separate task).
+    SpawnFirework {
+        position: mc_bamboo_core::Vec3,
+        item: ItemStack,
+    },
     /// `TurtleLayEggGoal` 的 `level.setBlockAndUpdate` 加产蛋音效。
     ///
     /// `TurtleLayEggGoal`'s `level.setBlockAndUpdate` plus the egg-laying sound.
@@ -2187,6 +2197,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             });
         }
         Command::RingBell { pos } => crate::behaviour::attached::bell::ring(world, pos),
+        Command::SpawnFirework { position, item } => {
+            world.push_effect(crate::level::Effect::Firework { position, item });
+        }
         Command::RabbitEatCarrots { pos } => super::mob::rabbit::eat_carrots(world, pos),
         Command::FoxPickUpItem {
             item,

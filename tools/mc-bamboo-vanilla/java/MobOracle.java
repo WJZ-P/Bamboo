@@ -15947,6 +15947,8 @@ public final class MobOracle {
                 "villager_p4_unemploy",
                 "villager_p4_sleep_wake",
                 "villager_p4_bell",
+                "villager_p4_raid_bell",
+                "villager_p4_raid_victory",
                 "villager_p4_farmer"
         };
         int count = 0;
@@ -16134,6 +16136,10 @@ public final class MobOracle {
                 dropped.setId(FIRST_ID + 10);
                 dropped.setNoPickUpDelay();
                 world.tracked.add(dropped);
+            } else if (name.equals("villager_p4_raid_victory")) {
+                // 种子 75 让 `CelebrateVillagersSurvivedRaid` 在场景里真的放一枚烟花，
+                // 好对拍烟花生成事件。
+                addVillager.accept(new double[] {0.5, 64.0, 0.5}, 75L);
             } else {
                 addVillager.accept(new double[] {0.5, 64.0, 0.5}, 71L);
             }
@@ -16211,6 +16217,38 @@ public final class MobOracle {
                     if (i > 0) frames.append(',');
                     frames.append(Block.getId(world.getBlockState(watchBlocks.get(i))));
                 }
+                frames.append("],\"fireworks\":[");
+                boolean firstFirework = true;
+                for (Entity spawned : world.spawned) {
+                    if (!(spawned instanceof net.minecraft.world.entity.projectile.FireworkRocketEntity rocket)) {
+                        continue;
+                    }
+                    ItemStack stack = rocket.getItem();
+                    var fireworks = stack.get(net.minecraft.core.component.DataComponents.FIREWORKS);
+                    if (fireworks == null) continue;
+                    int itemId = net.minecraft.core.registries.BuiltInRegistries.ITEM.getId(stack.getItem());
+                    if (!firstFirework) frames.append(',');
+                    firstFirework = false;
+                    frames.append("{\"x\":").append(Double.doubleToLongBits(rocket.getX()))
+                            .append(",\"y\":").append(Double.doubleToLongBits(rocket.getY()))
+                            .append(",\"z\":").append(Double.doubleToLongBits(rocket.getZ()))
+                            .append(",\"item\":").append(itemId)
+                            .append(",\"count\":").append(stack.getCount())
+                            .append(",\"flight\":").append(fireworks.flightDuration())
+                            .append(",\"explosions\":[");
+                    for (int ei = 0; ei < fireworks.explosions().size(); ei++) {
+                        var ex = fireworks.explosions().get(ei);
+                        if (ei > 0) frames.append(',');
+                        frames.append("{\"shape\":").append(ex.shape().getId())
+                                .append(",\"colors\":").append(ex.colors())
+                                .append(",\"fadeColors\":").append(ex.fadeColors())
+                                .append(",\"hasTrail\":").append(ex.hasTrail())
+                                .append(",\"hasTwinkle\":").append(ex.hasTwinkle())
+                                .append('}');
+                    }
+                    frames.append("]}");
+                }
+                world.spawned.clear();
                 frames.append("]}");
             }
             frames.append(']');
