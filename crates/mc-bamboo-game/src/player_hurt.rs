@@ -702,7 +702,17 @@ fn knockback(
 /// The full logic (cooldown, crit, sweep, knockback, enchantments, particles,
 /// sounds, animations, PVP) lives in [`crate::player_attack`]; this is the seam.
 pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
-    if try_hurt_boat(region, id, entity_id) {
+    let is_boat = region
+        .entities
+        .public_at(entity_id)
+        .is_some_and(|public| matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Boat(_)));
+    if is_boat {
+        // `Player.attack` 对船（非生物目标）算出的 `f`：含充能、武器、附魔、
+        // 暴击。交给 `VehicleEntity.hurtServer` 累计 `damage += f*10`。
+        let damage = crate::player_attack::boat_attack_damage(region, id, entity_id);
+        if let Some(damage) = damage {
+            hurt_boat(region, id, entity_id, damage);
+        }
         return;
     }
     crate::player_attack::on_attack(region, id, entity_id);
@@ -717,12 +727,12 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
 /// The boat half of `VehicleEntity.hurtServer`: each hit adds `amount*10` damage,
 /// flips `hurtDir` and sets `hurtTime=10`; creative mode or `damage > 40` calls
 /// `destroy`, dropping the boat item and the chest boat's contents.
-fn try_hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32) -> bool {
+fn hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32) {
     let Some(public) = region.entities.public_at(entity_id) else {
-        return false;
+        return;
     };
     if !matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Boat(_)) {
-        return false;
+        return;
     }
     let creative = region.players.get(&id).is_some_and(|player| {
         player.game_mode == mc_bamboo_protocol::packet::play::GameMode::Creative
@@ -735,8 +745,8 @@ fn try_hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32) -> bool {
         if let mc_bamboo_blocks::entity::EntityKind::Boat(boat) = &mut entity.kind {
             boat.hurt_dir = -boat.hurt_dir;
             boat.hurt_time = 10;
-            // 空手满充能的 `Player.attack` 伤害是 1.0；`setDamage(damage + f*10)`。
-            boat.damage += 10.0;
+            // `setDamage(getDamage() + amount*10)`。
+            boat.damage += amount * 10.0;
             if creative || boat.damage > 40.0 {
                 destroyed = true;
                 drop_item = boat.drop_item();
@@ -755,7 +765,6 @@ fn try_hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32) -> bool {
     if destroyed {
         drop_boat_contents(region, position, drop_item, &chest_items);
     }
-    true
 }
 
 /// `spawnAtLocation`：船物品和箱内物品都掉在船的位置。

@@ -435,6 +435,10 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     // 官方 `Entity.baseTick` 的岩浆 / 火：每刻调一次 `hurtServer`
     // （岩浆 4.0、火 1.0），伤害累计到阈值就破坏并掉物品。
     let env_amount = environment_damage(me, view);
+    // `Entity.baseTick`：伤害判断用递减前的值，之后每刻 `remainingFireTicks--`。
+    if me.remaining_fire_ticks > 0 {
+        me.remaining_fire_ticks -= 1;
+    }
     tick_bubble_column(&mut boat, me, ctx);
 
     for index in 0..2 {

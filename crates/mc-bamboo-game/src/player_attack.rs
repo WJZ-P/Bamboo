@@ -760,6 +760,29 @@ struct AttackPlan {
 /// 客户端左键攻击实体：官方 `ServerGamePacketListenerImpl.handleAttack`。
 ///
 /// A client left-click attack, vanilla `ServerGamePacketListenerImpl.handleAttack`.
+/// `Player.attack` 对船（非生物目标）算出的 `f`，即 `getEnchantedDamage` 之后的
+/// 真实攻击伤害：复用 `plan_attack` 的充能 / 武器 / 附魔 / 暴击计算，但不落地
+/// Mob 命中。船的 `hurtServer` 用它累计 `damage += f*10`。
+///
+/// The real attack damage `Player.attack` deals to a boat: reuse plan_attack's
+/// charge / weapon / enchantment / crit math without applying a mob hurt.
+pub(crate) fn boat_attack_damage(region: &mut Region, id: PlayerId, entity_id: i32) -> Option<f32> {
+    let player = region.players.get(&id)?;
+    let req = AttackRequest {
+        id,
+        entity_id,
+        held: player.inventory.held(Hand::Main).clone(),
+        ticker: player.attack_strength_ticker,
+        position: player.position(),
+        yaw: player.yaw,
+        base_damage_override: None,
+    };
+    let public = region.entities.public_at(entity_id)?;
+    let target = mob_target(public);
+    let plan = plan_attack(region, &target, &req)?;
+    Some(plan.total_damage)
+}
+
 pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
     attack_inner(region, id, entity_id, None);
 }
