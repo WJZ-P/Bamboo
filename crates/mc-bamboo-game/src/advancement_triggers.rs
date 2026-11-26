@@ -460,8 +460,7 @@ fn bound_sqr_matches(expected: Option<&Value>, actual_sqr: Option<f64>) -> bool 
         return false;
     };
     if let Some(exact) = expected.as_f64() {
-        let sqr = exact * exact;
-        return actual_sqr >= sqr && actual_sqr <= sqr;
+        return actual_sqr == exact * exact;
     }
     let min_ok = expected
         .get("min")
