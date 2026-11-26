@@ -81,7 +81,7 @@ pub struct ThrownEgg {
     pub no_gravity: bool,
     pub left_owner: bool,
     pub has_been_shot: bool,
-    needs_sync: bool,
+    pub(crate) needs_sync: bool,
     sync_velocity: bool,
     /// 这一刻命中后广播了实体事件 3（碎蛋粒子），等同步层取走。
     ///
@@ -451,6 +451,13 @@ fn base_tick(me: &mut Entity, blocks: &dyn BlockView) {
 /// snowballs deal 3 to blaze-like mobs and 0 otherwise without a random draw.
 /// Both broadcast entity event 3 and disappear.
 pub(super) fn impact(me: &mut Entity, world: &mut World<'_>, hit: EggHit) {
+    // `hitTargetOrDeflectSelf`：目标是会弹回投射物的生物（旋风人）时先弹回，不造成
+    // 伤害、继续飞行；`EggImpact` 命令在这刻 tick 末尾处理，随机源状态与官方一致。
+    if let EggTarget::Mob(uid) = hit.target
+        && super::arrow::deflect_off_target(me, world, uid)
+    {
+        return;
+    }
     let kind = match &me.kind {
         EntityKind::Egg(egg) => egg.kind,
         _ => ThrowableKind::Egg,

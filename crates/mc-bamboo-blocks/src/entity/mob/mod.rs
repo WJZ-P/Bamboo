@@ -12,6 +12,8 @@
 //! out of `Entity.kind` so it can be borrowed apart from the entity; sizes
 //! therefore live on [`Entity::dimensions`].
 
+pub mod allay;
+mod allay_ai;
 pub mod armadillo;
 pub mod attributes;
 pub mod avoid;
@@ -21,6 +23,7 @@ pub mod bee;
 pub mod bee_goals;
 pub mod bogged;
 pub mod brain;
+pub mod breeze;
 pub mod bucketable;
 pub mod camel;
 pub mod cat;
@@ -255,9 +258,13 @@ pub enum MobType {
     /// 嗅探兽，`Sniffer`。
     /// The `Sniffer`.
     Sniffer,
+    /// 旋风人，`Breeze`。试炼密室的敌对生物，射风弹、长跳和滑动。
+    ///
+    /// The breeze: a trial-chambers hostile that shoots wind charges, long-jumps
+    /// and slides.
+    Breeze,
     /// 快乐恶魂，`HappyGhast`。可养大的可骑乘飞行生物；幼年用大脑，成年用目标，
     /// 套挽具后最多载四名玩家。
-    ///
     /// The `HappyGhast`: a growable rideable flying mob. Babies use a brain, adults use
     /// goals, and a harnessed adult carries up to four players.
     HappyGhast,
@@ -269,6 +276,10 @@ pub enum MobType {
     ///
     /// Ravager.
     Ravager,
+    /// 悦灵，`Allay`：脑驱动的飞行生物，自己是振动监听者。
+    ///
+    /// The `Allay`: a brain-driven flying mob that listens for vibrations.
+    Allay,
     /// 流浪商人，`WanderingTrader`，与村民共用 `AbstractVillager` 交易层。
     ///
     /// Wandering trader: shares the `AbstractVillager` trading layer with villagers.
@@ -283,7 +294,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 71] = [
+    pub const ALL: [Self; 73] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -350,9 +361,11 @@ impl MobType {
         Self::Creaking,
         Self::Warden,
         Self::Sniffer,
+        Self::Breeze,
         Self::HappyGhast,
         Self::Vindicator,
         Self::Ravager,
+        Self::Allay,
         Self::WanderingTrader,
         Self::TraderLlama,
     ];
@@ -428,9 +441,11 @@ impl MobType {
             Self::Warden => ids::WARDEN,
 
             Self::Sniffer => ids::SNIFFER,
+            Self::Breeze => ids::BREEZE,
             Self::HappyGhast => ids::HAPPY_GHAST,
             Self::Vindicator => ids::VINDICATOR,
             Self::Ravager => ids::RAVAGER,
+            Self::Allay => ids::ALLAY,
             Self::WanderingTrader => ids::WANDERING_TRADER,
             Self::TraderLlama => ids::TRADER_LLAMA,
         }
@@ -506,9 +521,11 @@ impl MobType {
             Self::Warden => "minecraft:warden",
 
             Self::Sniffer => "minecraft:sniffer",
+            Self::Breeze => "minecraft:breeze",
             Self::HappyGhast => "minecraft:happy_ghast",
             Self::Vindicator => "minecraft:vindicator",
             Self::Ravager => "minecraft:ravager",
+            Self::Allay => "minecraft:allay",
             Self::WanderingTrader => "minecraft:wandering_trader",
             Self::TraderLlama => "minecraft:trader_llama",
         }
@@ -680,9 +697,13 @@ impl MobType {
             (Self::Nautilus | Self::ZombieNautilus, baby) => nautilus::dimensions(baby),
             (Self::CopperGolem, baby) => copper_golem::dimensions(baby),
             (Self::Sniffer, baby) => sniffer::dimensions(baby),
+            // `EntityTypes.BREEZE`：`sized(0.6F, 1.77F).eyeHeight(1.385F)`。
+            (Self::Breeze, _) => (0.6, 1.77, 1.385),
             // `EntityTypes.VINDICATOR` / `RAVAGER`：眼高用官方缺省的 height*0.85。
             (Self::Vindicator, _) => (0.6, 1.95, 1.95 * 0.85),
             (Self::Ravager, _) => (1.95, 2.2, 2.2 * 0.85),
+            // `EntityTypes.ALLAY`：`sized(0.35, 0.6).eyeHeight(0.36)`。
+            (Self::Allay, _) => (0.35, 0.6, 0.36),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -756,6 +777,7 @@ impl MobType {
                 | Self::Guardian
                 | Self::ElderGuardian
                 | Self::ZombieNautilus
+                | Self::Breeze
                 | Self::Warden
         ) || self.is_skeleton()
     }
@@ -922,11 +944,13 @@ impl MobType {
     pub const fn removes_when_far_away(self) -> bool {
         // `AbstractGolem.removeWhenFarAway` 恒假。
         // `AbstractGolem.removeWhenFarAway` is always false.
-        // `Warden.removeWhenFarAway()` 和 `WanderingTrader.removeWhenFarAway()` 恒假。
-        // `Warden.removeWhenFarAway()` and `WanderingTrader.removeWhenFarAway()` are always false.
+        // `Warden.removeWhenFarAway()`、`WanderingTrader.removeWhenFarAway()` 和
+        // `Allay.removeWhenFarAway()` 恒假。
+        // `Warden.removeWhenFarAway()`, `WanderingTrader.removeWhenFarAway()` and
+        // `Allay.removeWhenFarAway()` are always false.
         if matches!(
             self,
-            Self::IronGolem | Self::SnowGolem | Self::Warden | Self::WanderingTrader
+            Self::IronGolem | Self::SnowGolem | Self::Warden | Self::WanderingTrader | Self::Allay
         ) {
             return false;
         }
@@ -1042,6 +1066,7 @@ impl MobType {
                 | Self::IronGolem
                 | Self::SnowGolem
                 | Self::Villager
+                | Self::Allay
                 // `AbstractCubeMob` 一支是 `AgeableMob` 但不是 `Animal`：
                 // 没有 `InLove` / `LoveCause` 存档键，也没有求爱目标。
                 // The cube-mob branch is `AgeableMob` but not `Animal`.
@@ -1111,6 +1136,23 @@ impl MobType {
         )
     }
 
+    /// `EntityTypeTags.FALL_DAMAGE_IMMUNE`：`LivingEntity.calculateFallDamage` 恒 0，
+    /// 摔落不再掉血（但仍会累计、清零摔落距离，旋风人还会放 `BREEZE_LAND` 音）。
+    ///
+    /// `EntityTypeTags.FALL_DAMAGE_IMMUNE`: `LivingEntity.calculateFallDamage` always
+    /// returns 0, so a fall deals no damage (the fall distance still accumulates and
+    /// resets, and a breeze still plays its `BREEZE_LAND` sound).
+    pub fn fall_damage_immune(self) -> bool {
+        // 直接查生成的官方实体标签，新加的生物（悦灵、凋灵……）自动跟上。
+        // Read the generated vanilla entity-type tag so new mobs follow automatically.
+        let id = self.entity_type();
+        mc_bamboo_data::tags::TAG_GROUPS
+            .iter()
+            .filter(|group| group.registry == "minecraft:entity_type")
+            .flat_map(|group| group.tags.iter())
+            .any(|tag| tag.name == "minecraft:fall_damage_immune" && tag.ids.contains(&id))
+    }
+
     /// `SpawnPlacements` 里登记成 `IN_WATER` 的类型。
     ///
     /// Types registered as `IN_WATER` in `SpawnPlacements`.
@@ -1133,7 +1175,7 @@ impl MobType {
         }
         // 守卫者构造函数里 `xpReward = 10`，覆盖 `Monster` 的 5。
         // The guardian constructor sets `xpReward = 10`, overriding the monster's 5.
-        if matches!(self, Self::Guardian | Self::ElderGuardian) {
+        if matches!(self, Self::Guardian | Self::ElderGuardian | Self::Breeze) {
             return 10;
         }
         // 硫磺方块怪成年是 1 + rand(2)，幼年 0，见 `living::drop_loot`。
@@ -1223,9 +1265,11 @@ impl MobType {
             Self::Warden => "minecraft:entities/warden",
 
             Self::Sniffer => "minecraft:entities/sniffer",
+            Self::Breeze => "minecraft:entities/breeze",
             Self::HappyGhast => "minecraft:entities/happy_ghast",
             Self::Vindicator => "minecraft:entities/vindicator",
             Self::Ravager => "minecraft:entities/ravager",
+            Self::Allay => "minecraft:entities/allay",
             Self::WanderingTrader => "minecraft:entities/wandering_trader",
             Self::TraderLlama => "minecraft:entities/trader_llama",
         }
@@ -1240,15 +1284,22 @@ impl MobType {
         ) || self.is_skeleton()
     }
 
+    /// `EntityTypeTags.DEFLECTS_PROJECTILES`：现在只有旋风人，把射来的投射物弹回。
+    pub const fn deflects_projectiles(self) -> bool {
+        matches!(self, Self::Breeze)
+    }
+
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
     pub const fn ambient_sound_interval(self) -> i32 {
         // `Guardian.getAmbientSoundInterval()` = 160。
         // `Guardian.getAmbientSoundInterval()` = 160.
         if matches!(self, Self::Guardian | Self::ElderGuardian) {
             160
-        } else if matches!(self, Self::Nautilus) {
-            // `Mob.getAmbientSoundInterval()` 的缺省 80：鹦鹉螺没有覆写。
-            // `Mob.getAmbientSoundInterval()`'s default 80: nautiluses do not override.
+        } else if matches!(self, Self::Nautilus | Self::Allay) {
+            // `Mob.getAmbientSoundInterval()` 的缺省 80：鹦鹉螺和悦灵都是
+            // `PathfinderMob`，没有覆写这个方法（悦灵不是 `Animal`，不吃 120）。
+            // `Mob.getAmbientSoundInterval()`'s default 80: nautiluses and allays are
+            // `PathfinderMob`s that do not override it (allays are not `Animal`s, so 120).
             80
         } else if matches!(self, Self::Ocelot) {
             900
@@ -1281,7 +1332,13 @@ impl MobType {
             0.1
         } else if matches!(
             self,
-            Self::Cow | Self::Mooshroom | Self::Squid | Self::GlowSquid | Self::Wolf | Self::Bee
+            Self::Cow
+                | Self::Mooshroom
+                | Self::Squid
+                | Self::GlowSquid
+                | Self::Wolf
+                | Self::Bee
+                | Self::Allay
         ) {
             0.4
         } else {
@@ -1386,12 +1443,18 @@ impl MobType {
             // `Sniffer.getAmbientSound`: silent while digging or searching; see
             // `sniffer::ambient_voice`.
             Self::Sniffer => Some("minecraft:entity.sniffer.idle"),
+            // `Breeze.playAmbientSound` 覆写走 `playLocalSound`（服务端空操作），不经过这张表。
+            // `Breeze.playAmbientSound` is overridden to `playLocalSound` (a server-side
+            // no-op), so it never reaches this table.
+            Self::Breeze => None,
             // `HappyGhast.getAmbientSound`：幼年 / 成年两套，成年值在此，幼年由
             // `living::voice_of` 换成 `entity.ghastling.ambient`。
             // `HappyGhast.getAmbientSound`: baby/adult variants; adult here, baby is
             // swapped to `entity.ghastling.ambient` in `living::voice_of`.
             Self::HappyGhast => Some("minecraft:entity.happy_ghast.ambient"),
             Self::Vindicator => Some("minecraft:entity.vindicator.ambient"),
+            // `Allay.getAmbientSound()` 按主手有没有物品分派，见 `allay::ambient_sound`。
+            Self::Allay => None,
             Self::Ravager => Some("minecraft:entity.ravager.ambient"),
             // 交易中的叫声由 `living::ambient_voice` 按交易状态换成 `...trade`。
             // Trading ambience is switched by `living::ambient_voice` while trading.
@@ -1464,8 +1527,10 @@ impl MobType {
             Self::Creaking => None,
 
             Self::Sniffer => Some("minecraft:entity.sniffer.hurt"),
+            Self::Breeze => Some("minecraft:entity.breeze.hurt"),
             Self::HappyGhast => Some("minecraft:entity.happy_ghast.hurt"),
             Self::Vindicator => Some("minecraft:entity.vindicator.hurt"),
+            Self::Allay => Some("minecraft:entity.allay.hurt"),
             Self::Ravager => Some("minecraft:entity.ravager.hurt"),
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.hurt"),
             Self::TraderLlama => Some("minecraft:entity.llama.hurt"),
@@ -1535,8 +1600,10 @@ impl MobType {
             | Self::ZombieNautilus
             | Self::CopperGolem => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.death"),
+            Self::Breeze => Some("minecraft:entity.breeze.death"),
             Self::HappyGhast => Some("minecraft:entity.happy_ghast.death"),
             Self::Vindicator => Some("minecraft:entity.vindicator.death"),
+            Self::Allay => Some("minecraft:entity.allay.death"),
             Self::Ravager => Some("minecraft:entity.ravager.death"),
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.death"),
             Self::TraderLlama => Some("minecraft:entity.llama.death"),
@@ -1617,12 +1684,16 @@ impl MobType {
             | Self::ZombieNautilus
             | Self::CopperGolem => None,
             Self::Sniffer => Some("minecraft:entity.sniffer.step"),
+            Self::Breeze => None,
             // `HappyGhast.playStepSound` 空实现，没有脚步声。
             // `HappyGhast.playStepSound` is empty, so there is no step sound.
             Self::HappyGhast => None,
             // `AbstractIllager` / `Vindicator` 没有覆写脚步声；劫掠兽有自己的。
             Self::Vindicator => None,
             Self::Ravager => Some("minecraft:entity.ravager.step"),
+            // `Allay.playStepSound()` 覆写成空方法。
+            // `Allay.playStepSound()` is overridden to a no-op.
+            Self::Allay => None,
             // 流浪商人和村民一样用脚下方块的脚步声。
             // Wandering traders, like villagers, use the block's step sound.
             Self::WanderingTrader => None,
@@ -1700,9 +1771,11 @@ impl MobType {
             Self::ZombieNautilus => items::ZOMBIE_NAUTILUS_SPAWN_EGG,
             Self::CopperGolem => items::COPPER_GOLEM_SPAWN_EGG,
             Self::Sniffer => items::SNIFFER_SPAWN_EGG,
+            Self::Breeze => items::BREEZE_SPAWN_EGG,
             Self::HappyGhast => items::HAPPY_GHAST_SPAWN_EGG,
             Self::Vindicator => items::VINDICATOR_SPAWN_EGG,
             Self::Ravager => items::RAVAGER_SPAWN_EGG,
+            Self::Allay => items::ALLAY_SPAWN_EGG,
             Self::WanderingTrader => items::WANDERING_TRADER_SPAWN_EGG,
             Self::TraderLlama => items::TRADER_LLAMA_SPAWN_EGG,
         }
@@ -1777,9 +1850,11 @@ impl MobType {
             Self::ZombieNautilus => "entity.minecraft.zombie_nautilus",
             Self::CopperGolem => "entity.minecraft.copper_golem",
             Self::Sniffer => "entity.minecraft.sniffer",
+            Self::Breeze => "entity.minecraft.breeze",
             Self::HappyGhast => "entity.minecraft.happy_ghast",
             Self::Vindicator => "entity.minecraft.vindicator",
             Self::Ravager => "entity.minecraft.ravager",
+            Self::Allay => "entity.minecraft.allay",
             Self::WanderingTrader => "entity.minecraft.wandering_trader",
             Self::TraderLlama => "entity.minecraft.trader_llama",
         }
@@ -2101,6 +2176,8 @@ pub enum DamageKind {
     /// the overworld. `INTENTIONAL_GAME_DESIGN`, exhaustion 0.1, `always`
     /// scaling, `message_id` `badRespawnPoint`.
     BadRespawnPoint,
+    /// 风弹命中实体，`minecraft:wind_charge`。
+    WindCharge,
     /// 监守者的音波，`minecraft:sonic_boom`：穿墙、绕过护甲。
     ///
     /// The warden's `minecraft:sonic_boom`: passes through walls and armor.
@@ -2166,6 +2243,7 @@ impl DamageKind {
             Self::LightningBolt => "minecraft:lightning_bolt",
             Self::SulfurCubeHot => "minecraft:sulfur_cube_hot",
             Self::BadRespawnPoint => "minecraft:bad_respawn_point",
+            Self::WindCharge => "minecraft:wind_charge",
             Self::SonicBoom => "minecraft:sonic_boom",
             Self::Mace => "minecraft:mace_smash",
             Self::Spear => "minecraft:spear",
@@ -2230,6 +2308,7 @@ impl DamageKind {
             Self::LightningBolt => "lightningBolt",
             Self::SulfurCubeHot => "sulfurCubeHot",
             Self::BadRespawnPoint => "badRespawnPoint",
+            Self::WindCharge => "windCharge",
             Self::SonicBoom => "sonic_boom",
             Self::Mace => "mace_smash",
             Self::Spear => "spear",
@@ -2296,6 +2375,7 @@ impl DamageKind {
                 | Self::Thrown
                 | Self::Thorns
                 | Self::IndirectMagic
+                | Self::WindCharge
                 | Self::SonicBoom
                 | Self::Mace
         ) || matches!(self, Self::Wither)
@@ -3191,8 +3271,11 @@ pub struct Mob {
     ///
     /// The sniffer's state machine and drop-seed tick; default for other mobs.
     pub sniffer: sniffer::Sniffer,
-    /// 快乐恶魂的悬停超时、牵引者计时和两项同步布尔；别的生物是缺省值。
+    /// 旋风人的姿态；别的生物是缺省值。
     ///
+    /// The breeze's pose; default for other mobs.
+    pub breeze: breeze::Breeze,
+    /// 快乐恶魂的悬停超时、牵引者计时和两项同步布尔；别的生物是缺省值。
     /// The happy ghast's hover timeout, holder timer and two synced booleans;
     /// default for other mobs.
     pub happy_ghast: happy_ghast::HappyGhastState,
@@ -3218,9 +3301,11 @@ pub struct Mob {
     /// The warden's anger management, vibration listener, pose and client anger
     /// level; default for every other mob.
     pub warden: warden::Warden,
-    /// 实体自带的游戏事件监听者（监守者等）；别的生物是 `None`。
+    /// 悦灵自己的状态：背包、跳舞 / 复制冷却、唱片机位置；别的生物是缺省值。
+    pub allay: allay::Allay,
+    /// 实体自带的游戏事件监听者（监守者、悦灵）；别的生物是 `None`。
     ///
-    /// The mob's own game-event listener (the warden and similar); `None` otherwise.
+    /// The mob's own game-event listener (wardens and allays); `None` otherwise.
     pub entity_listener: Option<crate::game_event::dispatch::EntityListener>,
     /// `LivingEntity.discardFriction`：长跳途中 `travelInAir` 不乘摩擦。
     ///
@@ -3384,9 +3469,11 @@ impl Mob {
             MobType::Warden => warden::attributes(),
 
             MobType::Sniffer => sniffer::attributes(),
+            MobType::Breeze => breeze::attributes(),
             MobType::HappyGhast => happy_ghast::attributes(),
             MobType::Vindicator => vindicator::attributes(),
             MobType::Ravager => ravager::attributes(),
+            MobType::Allay => allay::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3488,15 +3575,14 @@ impl Mob {
             | MobType::ZombieNautilus
             | MobType::Creaking
             | MobType::Sniffer
+            | MobType::Breeze => GoalSelector::default(),
             // 成年快乐恶魂的 `registerGoals` 只在 `adultGhastSetup` 里跑；
             // 构造出来后 `setBaby(true)` 会走 `babyGhastSetup` 把目标全清掉，
             // 所以这里（等价构造后尚未跨年龄边界）保持空表。
             // An adult's `registerGoals` only runs from `adultGhastSetup`;
             // `setBaby(true)` runs `babyGhastSetup` and clears them, so the
             // constructor-equivalent table here stays empty.
-            | MobType::HappyGhast
-            | MobType::CopperGolem => GoalSelector::default(),
-
+            MobType::HappyGhast | MobType::CopperGolem => GoalSelector::default(),
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
             // alongside the brain.
@@ -3522,7 +3608,7 @@ impl Mob {
             MobType::Guardian | MobType::ElderGuardian => guardian::goals(mob_type),
             // 监守者是脑驱动，没有 `registerGoals` 覆盖。
             // The warden is brain-driven and has no `registerGoals` override.
-            MobType::Warden => GoalSelector::default(),
+            MobType::Warden | MobType::Allay => GoalSelector::default(),
             MobType::WanderingTrader => wandering_trader::goals(&mut navigation),
             MobType::TraderLlama => trader_llama::goals(&mut navigation),
             kind => equine::goals(kind, &mut navigation),
@@ -3572,8 +3658,8 @@ impl Mob {
             | MobType::Nautilus
             | MobType::ZombieNautilus
             | MobType::Sniffer
-            | MobType::HappyGhast
-            | MobType::CopperGolem => GoalSelector::default(),
+            | MobType::Breeze => GoalSelector::default(),
+            MobType::HappyGhast | MobType::CopperGolem => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Ocelot => ocelot::target_goals(),
@@ -3619,7 +3705,7 @@ impl Mob {
             MobType::Silverfish => silverfish::targets(),
             MobType::Endermite => endermite::targets(),
             MobType::Guardian | MobType::ElderGuardian => guardian::target_goals(),
-            MobType::Warden => GoalSelector::default(),
+            MobType::Warden | MobType::Allay => GoalSelector::default(),
             MobType::WanderingTrader => GoalSelector::default(),
             MobType::TraderLlama => trader_llama::targets(),
             kind => equine::targets(kind),
@@ -3841,6 +3927,7 @@ impl Mob {
             creaking: creaking::CreakingState::new(),
             nautilus: nautilus::NautilusState::default(),
             sniffer: sniffer::Sniffer::default(),
+            breeze: breeze::Breeze::default(),
             happy_ghast: happy_ghast::initial_state(),
             wandering_trader: wandering_trader::WanderingTrader::default(),
             trader_llama: trader_llama::TraderLlama::default(),
@@ -3862,6 +3949,7 @@ impl Mob {
             copper_golem: copper_golem::CopperGolem::default(),
             tadpole_age: 0,
             warden: warden::Warden::default(),
+            allay: allay::Allay::default(),
             entity_listener: None,
             discard_friction: false,
             leash: None,
@@ -3944,6 +4032,9 @@ impl Mob {
         }
         if mob_type == MobType::Bee {
             bee::configure(&mut mob);
+        }
+        if mob_type == MobType::Allay {
+            allay::configure(&mut mob);
         }
         if mob_type == MobType::Wolf {
             wolf::configure(&mut mob);
@@ -4271,6 +4362,9 @@ impl Mob {
 /// 别的实体和追踪同步能读到的生物数据。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MobPublic {
+    /// `Allay.DATA_DANCING` / `DATA_CAN_DUPLICATE`。
+    pub allay_dancing: bool,
+    pub allay_can_duplicate: bool,
     /// `Bee.DATA_FLAGS_ID` 和 `DATA_ANGER_END_TIME`。
     pub bee_flags: u8,
     pub bee_flags_dirty: bool,
@@ -4569,6 +4663,8 @@ pub struct MobPublic {
 impl MobPublic {
     pub fn of(mob: &Mob, in_water: bool) -> Self {
         Self {
+            allay_dancing: mob.allay.dancing,
+            allay_can_duplicate: mob.allay.can_duplicate,
             bee_flags: mob.bee.flags,
             bee_flags_dirty: mob.bee.flags_dirty,
             bee_anger_end_time: mob.bee.anger_end_time,
@@ -4790,7 +4886,9 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Warden => Some(Box::new(warden_ai::brain())),
 
         MobType::Sniffer => Some(Box::new(sniffer::brain())),
+        MobType::Breeze => Some(Box::new(breeze::brain())),
         MobType::HappyGhast => Some(Box::new(happy_ghast::brain())),
+        MobType::Allay => Some(Box::new(allay_ai::brain())),
         _ => None,
     }
 }

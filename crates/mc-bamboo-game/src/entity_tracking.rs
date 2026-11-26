@@ -826,6 +826,12 @@ pub enum KindData {
     ///
     /// A lightning bolt has no synced metadata; the client reads the seed from the entity.
     LightningBolt,
+    /// 不祥物品生成器的 `DATA_ITEM`：index 8 的 ITEM_STACK。
+    ///
+    /// The ominous item spawner's `DATA_ITEM`: an ITEM_STACK at index 8.
+    OminousItemSpawner(ItemStack),
+    /// 风弹：`add_entity` 的 data 用主人 ID。
+    WindCharge(mc_bamboo_blocks::entity::wind_charge::WindChargePublic),
     /// 羊驼口水：没有自己的元数据。
     ///
     /// Llama spit, with no metadata of its own.
@@ -883,12 +889,14 @@ impl Snapshot {
                 KindPublic::LlamaSpit(spit) => spit.needs_sync,
                 KindPublic::Egg(egg) => egg.needs_sync,
                 KindPublic::SplashPotion(potion) => potion.needs_sync,
+                KindPublic::WindCharge(charge) => charge.needs_sync,
                 _ => false,
             },
             sync_velocity: match &public.kind {
                 KindPublic::Arrow(arrow) => arrow.sync_velocity,
                 KindPublic::Egg(egg) => egg.sync_velocity,
                 KindPublic::SplashPotion(potion) => potion.sync_velocity,
+                KindPublic::WindCharge(charge) => charge.sync_velocity,
                 _ => false,
             },
             sync_position: false,
@@ -909,11 +917,13 @@ impl Snapshot {
             KindData::LlamaSpit(spit) => spit.owner.unwrap_or(0),
             KindData::Egg(egg) => egg.owner.unwrap_or(0),
             KindData::SplashPotion(potion) => potion.owner.unwrap_or(0),
+            KindData::WindCharge(charge) => charge.owner.unwrap_or(0),
             KindData::Tnt { .. }
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
             | KindData::Mob(_)
             | KindData::LightningBolt
+            | KindData::OminousItemSpawner(_)
             | KindData::LeashKnot => 0,
         }
     }
@@ -939,6 +949,8 @@ impl KindData {
             KindPublic::Egg(egg) => Self::Egg(egg.clone()),
             KindPublic::SplashPotion(potion) => Self::SplashPotion(potion.clone()),
             KindPublic::LightningBolt(_) => Self::LightningBolt,
+            KindPublic::OminousItemSpawner(stack) => Self::OminousItemSpawner(stack.clone()),
+            KindPublic::WindCharge(charge) => Self::WindCharge(*charge),
             KindPublic::LeashKnot { .. } => Self::LeashKnot,
         }
     }
@@ -950,7 +962,11 @@ impl KindData {
     fn is_projectile(&self) -> bool {
         matches!(
             self,
-            Self::Arrow(_) | Self::Egg(_) | Self::LlamaSpit(_) | Self::SplashPotion(_)
+            Self::Arrow(_)
+                | Self::Egg(_)
+                | Self::LlamaSpit(_)
+                | Self::SplashPotion(_)
+                | Self::WindCharge(_)
         )
     }
 
@@ -966,6 +982,8 @@ impl KindData {
             | Self::Egg(_)
             | Self::SplashPotion(_)
             | Self::LightningBolt
+            | Self::OminousItemSpawner(_)
+            | Self::WindCharge(_)
             | Self::LeashKnot => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
@@ -973,7 +991,7 @@ impl KindData {
 
     fn stack(&self) -> Option<&ItemStack> {
         match self {
-            Self::Item(stack) => Some(stack),
+            Self::Item(stack) | Self::OminousItemSpawner(stack) => Some(stack),
             Self::FallingBlock { .. }
             | Self::Tnt { .. }
             | Self::ExperienceOrb { .. }
@@ -983,6 +1001,7 @@ impl KindData {
             | Self::Egg(_)
             | Self::SplashPotion(_)
             | Self::LightningBolt
+            | Self::WindCharge(_)
             | Self::LeashKnot => None,
         }
     }
@@ -995,6 +1014,7 @@ impl KindData {
             Self::LlamaSpit(spit) => Some(spit.uuid),
             Self::Egg(egg) => Some(egg.uuid),
             Self::SplashPotion(potion) => Some(potion.uuid),
+            Self::WindCharge(charge) => Some(charge.uuid),
             _ => None,
         }
     }
@@ -1007,6 +1027,7 @@ impl KindData {
             Self::LlamaSpit(spit) => Some(spit.pitch),
             Self::Egg(egg) => Some(egg.x_rot),
             Self::SplashPotion(potion) => Some(potion.x_rot),
+            Self::WindCharge(charge) => Some(charge.pitch),
             _ => None,
         }
     }
@@ -1038,7 +1059,12 @@ impl KindData {
             Self::ExperienceOrb { .. }
             | Self::LlamaSpit(_)
             | Self::LightningBolt
+            | Self::WindCharge(_)
             | Self::LeashKnot => Vec::new(),
+            Self::OminousItemSpawner(stack) if !stack.is_empty() => {
+                vec![EntityData::Item(stack.clone())]
+            }
+            Self::OminousItemSpawner(_) => Vec::new(),
             Self::Arrow(arrow) => {
                 let mut data = Vec::new();
                 if arrow.on_fire {
@@ -1156,6 +1182,14 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
     // `Warden.CLIENT_ANGER_LEVEL` is the INT at index 16 (not `AgeableMob.Baby`'s BOOL).
     if kind == mc_bamboo_blocks::entity::mob::MobType::Warden && index == 16 {
         return EntityData::ClientAngerLevel(0);
+    }
+    // `Allay.DATA_DANCING` 缺省假、`DATA_CAN_DUPLICATE` 缺省真。
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Allay {
+        return match index {
+            16 => EntityData::AllayDancing(false),
+            17 => EntityData::AllayCanDuplicate(true),
+            _ => EntityData::MobFlags(0),
+        };
     }
     if kind == mc_bamboo_blocks::entity::mob::MobType::ZombieVillager {
         use mc_bamboo_data::villager;
@@ -1838,6 +1872,16 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     if mob.age_locked {
         out.push(EntityData::AgeLocked(true));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Allay {
+        // `Allay` 的 16 / 17 两项是布尔元数据，缺省假 / 真。
+        if mob.allay_dancing {
+            out.push(EntityData::AllayDancing(true));
+        }
+        if !mob.allay_can_duplicate {
+            out.push(EntityData::AllayCanDuplicate(false));
+        }
+        return out;
     }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Bee {
         if mob.bee_flags != 0 {

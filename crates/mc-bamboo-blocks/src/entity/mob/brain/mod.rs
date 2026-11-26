@@ -363,6 +363,12 @@ impl BrainTemplate {
         }
     }
 
+    /// 显式指定默认活动（旋风人的 `makeBrain` 把默认活动设成 FIGHT）。
+    pub fn with_default_activity(mut self, activity: Activity) -> Self {
+        self.default_activity = activity;
+        self
+    }
+
     /// 复制一份原型行为运行态给实例。官方每只生物各有一份行为对象，这里也一样；排序、
     /// 登记、闸门结构、前置条件掩码这些大结构直接从共享模板拷贝，不再逐只重算。
     ///
@@ -1170,10 +1176,15 @@ mod tests {
     /// 这些数字变了就说明有人又把大对象塞回了实例。
     ///
     /// Pins the key struct sizes. After boxing values and moving the structure table into
+    /// `Arc<BrainTemplate>`: 32 slots had `Brain=664`, `Memories=536`; phase 3 grew to 49
+    /// slots (+272) plus schedule fields (`Memories=808`, `Brain=952`), the two nautilus
+    /// memories add 32 more (`840` / `984`), the five sniffer memories add 80 more
+    /// (`920` / `1064`), and the eight breeze memories add 128 more (`1048` / `1192`).
     /// `Arc<BrainTemplate>`: 32 slots gave `Brain=664` / `Memories=536`, 49 slots plus
     /// schedule fields gave `808` / `952`, and the nautilus memories gave `840` / `984`.
-    /// Widening the masks to `u128` and adding 15 warden plus 4 sniffer memories
-    /// (`sniff_cooldown` shared, 51→73 slots) gives `Memories=1216` / `Brain=1360`.
+    /// Widening the masks to `u128` and adding 15 warden, 4 sniffer, 3 copper golem
+    /// and 3 allay memories (`sniff_cooldown` shared, 51→76 slots) gives
+    /// `Memories=1264` / `Brain=1408`.
     #[test]
     fn brain_and_memory_sizes_stay_small() {
         use crate::entity::mob::brain::behavior::Node;
@@ -1182,8 +1193,8 @@ mod tests {
         // 内联这份伤害源，所以它跟着涨 8 字节（184 → 192）。`Memories` / `Brain` 的值都
         // 装箱，不受影响。
         assert_eq!(std::mem::size_of::<MemoryValue>(), 192);
-        assert_eq!(std::mem::size_of::<Memories>(), 1216);
-        assert_eq!(std::mem::size_of::<Brain>(), 1360);
+        assert_eq!(std::mem::size_of::<Memories>(), 1392);
+        assert_eq!(std::mem::size_of::<Brain>(), 1536);
         assert_eq!(std::mem::size_of::<Node>(), 160);
         assert_eq!(std::mem::size_of::<Sensor>(), 16);
         assert_eq!(std::mem::size_of::<Entry>(), 176);

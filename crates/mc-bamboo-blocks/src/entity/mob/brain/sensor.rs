@@ -81,6 +81,8 @@ pub enum SensorKind {
     ///
     /// `GolemSensor` (200-tick scan; writes `GOLEM_DETECTED_RECENTLY` with TTL 599 if an iron golem is nearby).
     GolemDetected,
+    /// `BreezeAttackEntitySensor`：从附近的活体里挑可攻击的玩家 / 铁傀儡。
+    BreezeAttackEntities,
     /// `SensorType.WARDEN_ENTITY_SENSOR`：`NearestLivingEntitySensor` 的子类，
     /// 从 `NEAREST_LIVING_ENTITIES` 里按玩家 / 非玩家选 `NEAREST_ATTACKABLE`。
     ///
@@ -158,6 +160,7 @@ impl SensorKind {
                 MemoryType::NearestLivingEntities,
                 MemoryType::GolemDetectedRecently,
             ],
+            Self::BreezeAttackEntities => &[MemoryType::NearestAttackable],
             // `WardenEntitySensor.requires()` = 视线表 + `NEAREST_ATTACKABLE`。
             // `WardenEntitySensor.requires()`: the visible-entity table plus
             // `NEAREST_ATTACKABLE`.
@@ -192,6 +195,7 @@ impl SensorKind {
             Self::VillagerBabies => "VillagerBabiesSensor",
             Self::SecondaryPois => "SecondaryPoiSensor",
             Self::GolemDetected => "GolemSensor",
+            Self::BreezeAttackEntities => "BreezeAttackEntitySensor",
             Self::WardenEntitySensor => "WardenEntitySensor",
         }
     }
@@ -256,6 +260,9 @@ impl Sensor {
             SensorKind::VillagerBabies => sense_villager_babies(cx),
             SensorKind::SecondaryPois => sense_secondary_pois(cx),
             SensorKind::GolemDetected => sense_golem_detected(cx),
+            SensorKind::BreezeAttackEntities => {
+                super::super::breeze::sense_attackables(cx);
+            }
             SensorKind::WardenEntitySensor => super::super::warden_ai::warden_entity_sensor(cx),
         }
     }
@@ -271,6 +278,10 @@ pub struct LivingView {
     pub mob_type: Option<MobType>,
     pub position: Vec3,
     pub eye_height: f32,
+    /// `yHeadRot`：旋风人 `randomPointBehindTarget` 读目标朝向算落点。
+    ///
+    /// `yHeadRot`, read by the breeze's `randomPointBehindTarget` to place the jump.
+    pub y_head_rot: f32,
     pub bounding_box: Aabb,
     /// `isAlive()`：没被移除且血量大于 0。
     ///
@@ -313,7 +324,13 @@ pub fn living(cx: &Cx, uid: EntityUid) -> Option<LivingView> {
     let mut mob = None;
     cx.ctx.with_other(uid, &mut |public| {
         if let KindPublic::Mob(m) = &public.kind {
-            mob = Some(mob_view(public.uid, public.position, public.removed, m));
+            mob = Some(mob_view(
+                public.uid,
+                public.position,
+                public.yaw,
+                public.removed,
+                m,
+            ));
         }
     });
     if mob.is_some() {
@@ -345,6 +362,7 @@ fn player_view(player: &crate::entity::ctx::PlayerView) -> LivingView {
         mob_type: None,
         position: player.position,
         eye_height: player.eye_height,
+        y_head_rot: player.yaw,
         bounding_box: Aabb::new(
             player.position.x - 0.3,
             player.position.y,
@@ -365,7 +383,13 @@ fn player_view(player: &crate::entity::ctx::PlayerView) -> LivingView {
     }
 }
 
-fn mob_view(uid: EntityUid, position: Vec3, removed: bool, mob: &KindPublicMob) -> LivingView {
+fn mob_view(
+    uid: EntityUid,
+    position: Vec3,
+    yaw: f32,
+    removed: bool,
+    mob: &KindPublicMob,
+) -> LivingView {
     let (width, height) = mob.dimensions();
     let half = f64::from(width) / 2.0;
     // 骆驼坐下时 `getEyeHeight()` 跟着姿势变（2.275 → 0.845），看它的幼崽的
@@ -384,6 +408,7 @@ fn mob_view(uid: EntityUid, position: Vec3, removed: bool, mob: &KindPublicMob) 
         mob_type: Some(mob.mob_type),
         position,
         eye_height,
+        y_head_rot: yaw,
         bounding_box: Aabb::new(
             position.x - half,
             position.y,
@@ -670,11 +695,15 @@ fn sense_players(cx: &mut Cx) {
         MemoryType::NearestVisiblePlayer,
         players.first().map(|view| MemoryValue::Entity(view.uid)),
     );
-    // `isEntityAttackable`：`forCombat` 多一条 `canAttack`——和平难度不打玩家，创造玩家不算敌人。
-    // `isEntityAttackable`: `forCombat` adds `canAttack` — no players on peaceful, and
-    // creative players are not enemies.
+    // `isEntityAttackable`：`forCombat` 多一条 `canAttack`——和平难度不打玩家，创造玩家
+    // 不算敌人——还有一条 `!isAlliedTo`。悦灵把喜欢的玩家当盟友
+    // （`Allay.considersEntityAsAlly` → `isLikedPlayer`），所以也要排除。
+    // `isEntityAttackable`: `forCombat` adds `canAttack` — no players on peaceful,
+    // creative players are not enemies — and `!isAlliedTo`. The allay treats its
+    // liked player as an ally (`Allay.considersEntityAsAlly` → `isLikedPlayer`), so
+    // that player is excluded too.
     let peaceful = cx.ctx.blocks().difficulty() == 0;
-    players.retain(|view| !peaceful && !view.creative);
+    players.retain(|view| !peaceful && !view.creative && !is_liked_player(cx, view));
     cx.memories.set(
         MemoryType::NearestVisibleAttackablePlayers,
         MemoryValue::Entities(ids(&players)),
@@ -685,20 +714,44 @@ fn sense_players(cx: &mut Cx) {
     );
 }
 
+/// `Allay.considersEntityAsAlly` → `isLikedPlayer`：这个玩家是不是悦灵喜欢的那位。
+///
+/// `Allay.considersEntityAsAlly` → `isLikedPlayer`: whether this player is the
+/// allay's liked player.
+fn is_liked_player(cx: &Cx, view: &LivingView) -> bool {
+    if cx.mob.mob_type != MobType::Allay {
+        return false;
+    }
+    let Some(uuid) = cx.memories.uuid(MemoryType::LikedPlayer) else {
+        return false;
+    };
+    let mut liked = false;
+    cx.ctx.blocks().for_each_player(&mut |player| {
+        if player.uid == view.uid && player.uuid == Some(uuid) {
+            liked = true;
+        }
+    });
+    liked
+}
+
 /// `EntityTypes.ITEM` 的眼高。
 ///
 /// The eye height of `EntityTypes.ITEM`.
 const ITEM_EYE_HEIGHT: f32 = 0.2125;
 
 /// `NearestItemSensor.doTick`：32×16×32 里的掉落物按距离排好，取第一个想捡
-/// （`Mob.wantsToPickUp` 缺省恒真）、32 格内、看得见的。
+/// （`Mob.wantsToPickUp` 缺省恒真）、32 格内、看得见的（官方过滤链是
+/// `wantsToPickUp`、`closerThan(32)`、`LivingEntity.hasLineOfSight`）。
 ///
 /// `NearestItemSensor.doTick`: dropped items within 32×16×32 by distance; the first that
-/// is wanted (`Mob.wantsToPickUp` defaults to true), within 32 blocks and in sight.
+/// is wanted (`Mob.wantsToPickUp` defaults to true), within 32 blocks and in sight (the
+/// vanilla filter chain is `wantsToPickUp`, `closerThan(32)`, `hasLineOfSight`).
 fn sense_items(cx: &mut Cx) {
     let area = cx.me.bounding_box().inflate(32.0, 16.0, 32.0);
     let position = cx.me.position;
     let is_villager = cx.mob.mob_type == MobType::Villager;
+    let is_allay = cx.mob.mob_type == MobType::Allay;
+    let rules = cx.ctx.blocks().block_game_rules();
     let mut items: Vec<(f64, EntityUid, Vec3)> = Vec::new();
     cx.ctx.for_each_other_in(area, &mut |other| {
         if other.removed {
@@ -706,6 +759,10 @@ fn sense_items(cx: &mut Cx) {
         }
         if let KindPublic::Item { stack, .. } = &other.kind {
             if is_villager && !cx.mob.villager.wants_to_pick_up(stack) {
+                return;
+            }
+            // `Allay.wantsToPickUp` 用主手那一份当模板，只捡同种物品。
+            if is_allay && !super::super::allay::wants_to_pick_up(cx.mob, stack, &rules) {
                 return;
             }
             items.push((

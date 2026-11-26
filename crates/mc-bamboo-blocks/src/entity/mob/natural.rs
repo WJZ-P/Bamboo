@@ -846,6 +846,8 @@ pub(super) fn check_spawn_rules(
         // 村民不在任何群系刷怪表里，只由结构 / 命令 / 刷怪蛋生成。
         // Villagers are in no biome spawn table; structures, commands and eggs make them.
         MobType::Villager => true,
+        // 旋风人只在试炼刷怪笼 / 命令 / 刷怪蛋里生成，不在群系刷怪表。
+        MobType::Breeze => true,
         // `Guardian.checkGuardianSpawnRules`：1/20 或者水下看不见天，然后非和平、
         // 上下两格都是水（自然生成不是刷怪笼）。和平难度在函数开头已经挡掉。
         //
@@ -864,7 +866,7 @@ pub(super) fn check_spawn_rules(
         MobType::Sniffer | MobType::HappyGhast => true,
         // 卫道士 / 劫掠兽只从袭击波次、命令和刷怪蛋生成，不在群系刷怪表里。
         // Vindicators / ravagers only come from raid waves, commands and spawn eggs.
-        MobType::Vindicator | MobType::Ravager => true,
+        MobType::Vindicator | MobType::Ravager | MobType::Allay => true,
         // 流浪商人和行商羊驼不在群系刷怪表里，由刷新器 / 命令 / 刷怪蛋生成。
         // Wandering traders and trader llamas are in no biome spawn table.
         MobType::WanderingTrader | MobType::TraderLlama => true,

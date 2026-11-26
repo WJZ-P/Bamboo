@@ -459,6 +459,11 @@ pub trait BlockView {
         false
     }
 
+    /// `level.random.nextDouble()`，并行视图同上给 0。
+    fn level_random_double(&self) -> f64 {
+        0.0
+    }
+
     /// 生物身上装备的 `hurtAndBreak(amount, entity, slot)`：耐久附魔用 `level.random`。
     /// 返回装备是不是坏了。并行的只读视图没有世界随机源，按没有耐久附魔算
     /// （带耐久附魔的装备扣耐久的次数和原版不同，是性能模式差异）。
@@ -904,6 +909,10 @@ impl BlockView for World<'_> {
         self.random().next_boolean()
     }
 
+    fn level_random_double(&self) -> f64 {
+        self.random().next_double()
+    }
+
     fn hurt_mob_equipment(
         &self,
         stack: &mut mc_bamboo_protocol::item::ItemStack,
@@ -1190,6 +1199,14 @@ pub enum Command {
     ///
     /// One lightning tick: fires, copper cleaning and entity hits.
     LightningTick(LightningTick),
+    /// `OminousItemSpawner.tickServer`：预警音、掉物 / 投射物、3021 和游戏事件。
+    ///
+    /// One ominous item spawner tick: warning sound, drop / shot, 3021 and game event.
+    OminousItemSpawnerTick(super::ominous_item_spawner::SpawnerTick),
+    /// 风弹这一刻命中：`AbstractWindCharge.onHitBlock` / `onHitEntity` 的爆炸。
+    WindChargeImpact(super::wind_charge::WindChargeHit),
+    /// `Breeze.Shoot`：朝目标射出一枚旋风人风弹。
+    ShootBreezeWindCharge(Box<super::wind_charge::WindChargeShot>),
     /// 骷髅陷阱马被玩家触发：视觉闪电和四名骷髅骑士。
     ///
     /// A skeleton trap triggered by a player: a visual bolt and four riders.
@@ -1755,6 +1772,12 @@ pub enum Command {
         stack: ItemStack,
         delta: Vec3,
     },
+    /// `AllayAi.throwItem`：从眼睛下方 0.2 格朝目标上方扔出一个掉落物。
+    AllayThrow {
+        stack: ItemStack,
+        position: Vec3,
+        delta: Vec3,
+    },
     /// `HurtByTargetGoal.alertOthers`：把 `enemy` 设成这些同伴的目标（已有目标的跳过）。
     ///
     /// `HurtByTargetGoal.alertOthers`: make `enemy` the target of these allies, skipping
@@ -1975,6 +1998,13 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::SplashPotionImpact { hit } => super::splash_potion::impact(me, world, hit),
         Command::LightningTick(facts) => super::lightning::apply(me, world, facts),
+        Command::OminousItemSpawnerTick(facts) => {
+            super::ominous_item_spawner::apply(me, world, facts);
+        }
+        Command::WindChargeImpact(hit) => super::wind_charge::impact(me, world, hit),
+        Command::ShootBreezeWindCharge(shot) => {
+            world.spawn_wind_charge_shot(&shot);
+        }
         Command::SkeletonTrap(facts) => super::mob::skeleton_horse::spawn_trap(world, me, facts),
         Command::ThrowSplashPotion { shot } => {
             world.spawn_splash_shot(&shot);
@@ -2265,6 +2295,13 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         ),
         Command::DropItemWithDelta { stack, delta } => {
             world.spawn_entity(Entity::ground_item_with_delta(me.position, stack, delta));
+        }
+        Command::AllayThrow {
+            stack,
+            position,
+            delta,
+        } => {
+            world.spawn_entity(Entity::ground_item_with_delta(position, stack, delta));
         }
         Command::DropEntityLoot(request) => {
             let origin = request.origin;

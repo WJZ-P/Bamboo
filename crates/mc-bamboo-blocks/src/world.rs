@@ -3838,9 +3838,13 @@ impl<'a> World<'a> {
         self.level.trial_spawner_eject_reward(pos, loot_table)
     }
 
-    /// 见 [`Level::trial_spawner_spawn_ominous_item`]。
-    pub fn trial_spawner_spawn_ominous_item(&mut self, pos: BlockPos, loot_table: &str) -> bool {
-        self.level.trial_spawner_spawn_ominous_item(pos, loot_table)
+    /// 见 [`Level::trial_spawner_dispensing`]。
+    pub fn trial_spawner_dispensing(
+        &mut self,
+        pos: BlockPos,
+        loot_table: &str,
+    ) -> Vec<(ItemStack, i32)> {
+        self.level.trial_spawner_dispensing(pos, loot_table)
     }
 
     /// 见 [`Level::trial_spawner_discard_mobs`]。
@@ -4051,6 +4055,30 @@ impl<'a> World<'a> {
             // `Entity.spawnAtLocation(stack, offset)`：按偏移生成一件掉落物。
             // `Entity.spawnAtLocation(stack, offset)`: drop at the mob plus offset.
             self.spawn_at_location(entity.position.add(outcome.drop_offset), stack);
+        }
+        // `Allay.mobInteract` 空手取回物品：背包里的东西按 `BehaviorUtils.throwItem` 扔出。
+        for stack in &outcome.thrown_stacks {
+            self.spawn_at_location(entity.position, stack.clone());
+        }
+        if outcome.duplicate_allay {
+            // `Allay.duplicateAllay()`：同一位置、持久、两只都是 6000 刻冷却。
+            let position = entity.position;
+            let mut copy =
+                crate::entity::Entity::by_mob_type(crate::entity::mob::MobType::Allay, position);
+            copy.with_mob(|_, mob| {
+                mob.persistence_required = true;
+                crate::entity::mob::allay::set_duplication_cooldown(
+                    mob,
+                    crate::entity::mob::allay::DUPLICATION_COOLDOWN,
+                );
+            });
+            self.spawn_entity(copy);
+        }
+        if let Some(event) = outcome.entity_event {
+            entity.with_mob(|_, mob| {
+                mob.events
+                    .push(crate::entity::mob::MobEvent::EntityEvent { event });
+            });
         }
         // 山羊的 `playEatingSound` 音高取世界随机源，一次喂食放一到两遍。
         // A goat's `playEatingSound` is pitched with the level random, once or twice per
@@ -4680,6 +4708,24 @@ impl<'a> World<'a> {
             .collect();
         after.extend(spawned);
         after
+    }
+
+    /// 只 tick 一个实体并把它的最后状态交给调用方（连已消失的也一样）。
+    /// oracle 的假世界用它对齐「只 tick 目标实体」的场景；实体消失后不再放回表。
+    ///
+    /// Ticks one entity and hands its final state (including a removed one) back
+    /// to the caller. Oracle fake worlds use it for scenes that tick only the
+    /// subject entity.
+    pub fn tick_one_entity_kept(&mut self, id: i32) -> Option<crate::entity::Entity> {
+        let mut entity = self.level.take_entity(id)?;
+        if !entity.removed {
+            let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
+            entity.tick(&mut ctx);
+        }
+        if !entity.removed {
+            self.level.put_entity(entity.clone());
+        }
+        Some(entity)
     }
 
     /// 还在世界里的实体。已经 `discard` 的不在里面。

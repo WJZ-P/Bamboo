@@ -147,6 +147,17 @@ pub enum Kind {
         max_interval: i32,
         ticks_until_next_start: i32,
     },
+    /// `SetEntityLookTargetSometimes.create(maxDist, interval)`：不限定玩家，看任意活体
+    /// （悦灵、嘎枝用这个两参版本）。
+    ///
+    /// `SetEntityLookTargetSometimes.create(maxDist, interval)`: any living entity, not
+    /// just players (allays and creakings use this two-argument form).
+    LookAtEntitySometimes {
+        max_dist: f32,
+        min_interval: i32,
+        max_interval: i32,
+        ticks_until_next_start: i32,
+    },
     /// `SetEntityLookTarget.create(PLAYER, maxDist)`：没有间隔计时器，每次都直接找最近的玩家。
     ///
     /// `SetEntityLookTarget.create(PLAYER, maxDist)`: no interval ticker; it looks for the
@@ -257,6 +268,12 @@ pub enum Kind {
     ///
     /// Sniffer-specific behaviours.
     Sniffer(super::super::sniffer::Behavior),
+    /// 旋风人专属行为。
+    ///
+    /// Breeze-specific behaviours.
+    Breeze(super::super::breeze::Behavior),
+    /// 悦灵专属行为（`GoToWantedItem` / `GoAndGiveItemsToTarget` / `StayCloseToTarget` / `RandomStroll.fly`）。
+    Allay(super::super::allay_ai::Behavior),
 }
 
 impl Kind {
@@ -287,6 +304,8 @@ pub struct MoveToTargetSink {
     pub min: i32,
     pub max: i32,
     pub armadillo: bool,
+    /// `BreezeAi$SlideToTargetSink`：启动时进滑行姿态、放 `BREEZE_SLIDE`，收尾回站立。
+    pub breeze: bool,
     remaining_cooldown: i32,
     path: Option<super::super::path::Path>,
     path_version: u32,
@@ -310,11 +329,20 @@ impl MoveToTargetSink {
             min,
             max,
             armadillo,
+            breeze: false,
             remaining_cooldown: 0,
             path: None,
             path_version: 0,
             last_target_pos: None,
             speed: 0.0,
+        }
+    }
+
+    /// `BreezeAi$SlideToTargetSink`：`with_duration(min, max)` 加滑行姿态标记。
+    pub fn breeze(min: i32, max: i32) -> Self {
+        Self {
+            breeze: true,
+            ..Self::with_duration(min, max, false)
         }
     }
 }
@@ -332,6 +360,10 @@ const TEMPTATION_COOLDOWN: &[(MemoryType, MemoryStatus)] =
 const GAZE_COOLDOWN: &[(MemoryType, MemoryStatus)] = &[(GazeCooldownTicks, ValuePresent)];
 const LONG_JUMP_COOLDOWN: &[(MemoryType, MemoryStatus)] = &[(LongJumpCooldownTicks, ValuePresent)];
 const RAM_COOLDOWN: &[(MemoryType, MemoryStatus)] = &[(RamCooldownTicks, ValuePresent)];
+const ITEM_PICKUP_COOLDOWN: &[(MemoryType, MemoryStatus)] =
+    &[(ItemPickupCooldownTicks, ValuePresent)];
+const NOTEBLOCK_COOLDOWN: &[(MemoryType, MemoryStatus)] =
+    &[(LikedNoteblockCooldownTicks, ValuePresent)];
 const TRANSPORT_COOLDOWN: &[(MemoryType, MemoryStatus)] =
     &[(TransportItemsCooldownTicks, ValuePresent)];
 const LOOK_SOMETIMES_REQUIRED: &[(MemoryType, MemoryStatus)] = &[
@@ -382,6 +414,7 @@ impl Kind {
             },
             Self::MakeLove { .. } => Class::Timed { min: 110, max: 110 },
             Self::LookAtPlayerSometimes { .. }
+            | Self::LookAtEntitySometimes { .. }
             | Self::LookAtPlayer { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
@@ -407,6 +440,8 @@ impl Kind {
             Self::Warden(behavior) => behavior.class(),
 
             Self::Sniffer(behavior) => behavior.class(),
+            Self::Breeze(behavior) => behavior.class(),
+            Self::Allay(behavior) => behavior.class(),
         }
     }
 
@@ -429,12 +464,14 @@ impl Kind {
                 TemptationCooldownTicks => TEMPTATION_COOLDOWN,
                 GazeCooldownTicks => GAZE_COOLDOWN,
                 LongJumpCooldownTicks => LONG_JUMP_COOLDOWN,
+                ItemPickupCooldownTicks => ITEM_PICKUP_COOLDOWN,
+                LikedNoteblockCooldownTicks => NOTEBLOCK_COOLDOWN,
                 TransportItemsCooldownTicks => TRANSPORT_COOLDOWN,
                 _ => RAM_COOLDOWN,
             },
-            Self::LookAtPlayerSometimes { .. } | Self::LookAtPlayer { .. } => {
-                LOOK_SOMETIMES_REQUIRED
-            }
+            Self::LookAtPlayerSometimes { .. }
+            | Self::LookAtEntitySometimes { .. }
+            | Self::LookAtPlayer { .. } => LOOK_SOMETIMES_REQUIRED,
             Self::MakeLove { .. } => MAKE_LOVE_REQUIRED,
             Self::FollowTemptation { .. } => TEMPT_REQUIRED,
             Self::BabyFollowAdult { .. } => FOLLOW_ADULT_REQUIRED,
@@ -454,6 +491,8 @@ impl Kind {
             Self::Warden(behavior) => behavior.required(),
 
             Self::Sniffer(behavior) => behavior.required(),
+            Self::Breeze(behavior) => behavior.required(),
+            Self::Allay(behavior) => behavior.required(),
         }
     }
 
@@ -475,9 +514,16 @@ impl Kind {
                 }
             }
             Self::LookAtTargetSink { .. } => "LookAtTargetSink",
-            Self::MoveToTargetSink(_) => "MoveToTargetSink",
+            Self::MoveToTargetSink(sink) => {
+                if sink.breeze {
+                    "SlideToTargetSink"
+                } else {
+                    "MoveToTargetSink"
+                }
+            }
             Self::CountDownCooldown(_) => "CountDownCooldownTicks",
             Self::LookAtPlayerSometimes { .. }
+            | Self::LookAtEntitySometimes { .. }
             | Self::LookAtPlayer { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
@@ -503,6 +549,8 @@ impl Kind {
             Self::Warden(behavior) => behavior.name(),
 
             Self::Sniffer(behavior) => behavior.name(),
+            Self::Breeze(behavior) => behavior.name(),
+            Self::Allay(behavior) => behavior.name(),
         }
     }
 
@@ -565,6 +613,8 @@ impl Kind {
             Self::Warden(behavior) => behavior.extra_start(cx),
 
             Self::Sniffer(behavior) => behavior.extra_start(cx),
+            Self::Breeze(behavior) => behavior.extra_start(cx),
+            Self::Allay(behavior) => behavior.extra_start(cx),
             _ => true,
         }
     }
@@ -653,6 +703,8 @@ impl Kind {
             Self::Warden(behavior) => behavior.start(cx),
 
             Self::Sniffer(behavior) => behavior.start(cx),
+            Self::Breeze(behavior) => behavior.start(cx),
+            Self::Allay(behavior) => behavior.start(cx),
             _ => {}
         }
     }
@@ -694,6 +746,8 @@ impl Kind {
             Self::Warden(behavior) => behavior.can_still_use(cx),
 
             Self::Sniffer(behavior) => behavior.can_still_use(cx),
+            Self::Breeze(behavior) => behavior.can_still_use(cx),
+            Self::Allay(behavior) => behavior.can_still_use(cx),
             _ => false,
         }
     }
@@ -819,6 +873,8 @@ impl Kind {
             Self::Warden(behavior) => behavior.tick(cx),
 
             Self::Sniffer(behavior) => behavior.tick(cx),
+            Self::Breeze(behavior) => behavior.tick(cx),
+            Self::Allay(behavior) => behavior.tick(cx),
             _ => {}
         }
     }
@@ -856,6 +912,8 @@ impl Kind {
             Self::Warden(behavior) => behavior.stop(cx, timed_out),
 
             Self::Sniffer(behavior) => behavior.stop(cx, timed_out),
+            Self::Breeze(behavior) => behavior.stop(cx, timed_out),
+            Self::Allay(behavior) => behavior.stop(cx),
             _ => {}
         }
     }
@@ -898,6 +956,48 @@ impl Kind {
                 };
                 // `Ticker.tickDownAndCheck(level.getRandom())`。
                 // `Ticker.tickDownAndCheck(level.getRandom())`.
+                if *ticks_until_next_start == 0 {
+                    let sample =
+                        cx.level_next_int(*max_interval - *min_interval + 1) + *min_interval;
+                    *ticks_until_next_start = sample - 1;
+                    return false;
+                }
+                *ticks_until_next_start -= 1;
+                if *ticks_until_next_start != 0 {
+                    return false;
+                }
+                cx.memories.set(
+                    LookTarget,
+                    MemoryValue::Look(PositionTracker::Entity {
+                        uid: target,
+                        track_eye: true,
+                        target_eye: false,
+                    }),
+                );
+                true
+            }
+            Self::LookAtEntitySometimes {
+                max_dist,
+                min_interval,
+                max_interval,
+                ticks_until_next_start,
+            } => {
+                let max_sqr = f64::from(*max_dist * *max_dist);
+                let position = cx.me.position;
+                // 两参版本谓词是「恒真」：取 `NEAREST_VISIBLE_LIVING_ENTITIES` 里第一个
+                // 满足 `closerThan(maxDist)` 的活体，不限定玩家。改坏确认
+                // `allay_look_player_only` 时退回只找玩家。
+                // The two-argument form's predicate is always true: take the first entity
+                // of `NEAREST_VISIBLE_LIVING_ENTITIES` within `maxDist`, not just players.
+                // The `allay_look_player_only` break test falls back to players only.
+                let player_only = super::super::allay::oracle_tamper()
+                    == super::super::allay::Tamper::LookPlayerOnly;
+                let Some(target) = sensor::find_closest_visible(cx, &mut |view| {
+                    (!player_only || view.player)
+                        && view.position.distance_to_sqr(position) <= max_sqr
+                }) else {
+                    return false;
+                };
                 if *ticks_until_next_start == 0 {
                     let sample =
                         cx.level_next_int(*max_interval - *min_interval + 1) + *min_interval;
@@ -1022,6 +1122,8 @@ impl Kind {
             Self::Warden(behavior) => behavior.trigger(cx),
 
             Self::Sniffer(behavior) => behavior.trigger(cx),
+            Self::Breeze(behavior) => behavior.trigger(cx),
+            Self::Allay(behavior) => behavior.trigger(cx),
             _ => false,
         }
     }
@@ -1199,6 +1301,13 @@ fn move_sink_stop(sink: &mut MoveToTargetSink, cx: &mut Cx) {
     cx.memories.erase(Path);
     sink.path = None;
     sink.path_version = cx.mob.navigation.path_version;
+    if sink.breeze {
+        // `BreezeAi$SlideToTargetSink.stop`：回站立；还在攻击就给 `BREEZE_SHOOT` 60 刻。
+        cx.mob.breeze.pose = super::super::breeze::Pose::Standing;
+        if cx.memories.has(AttackTarget) {
+            cx.memories.set_with_ttl(BreezeShoot, MemoryValue::Unit, 60);
+        }
+    }
 }
 
 fn move_sink_start(sink: &mut MoveToTargetSink, cx: &mut Cx) {
@@ -1210,6 +1319,11 @@ fn move_sink_start(sink: &mut MoveToTargetSink, cx: &mut Cx) {
         .navigation
         .move_to_path(cx.ctx.blocks(), &nav, path, f64::from(sink.speed));
     sink.path_version = cx.mob.navigation.path_version;
+    if sink.breeze {
+        // `BreezeAi$SlideToTargetSink.start`：进滑行姿态、放 `BREEZE_SLIDE`。
+        living::play_sound(cx.me, cx.mob, "minecraft:entity.breeze.slide", 1.0, 1.0);
+        cx.mob.breeze.pose = super::super::breeze::Pose::Sliding;
+    }
 }
 
 fn move_sink_tick(sink: &mut MoveToTargetSink, cx: &mut Cx) {

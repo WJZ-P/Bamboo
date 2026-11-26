@@ -1494,6 +1494,11 @@ pub(crate) fn on_use_item(
         swing(region, id, hand, InteractionResult::Success);
         return;
     }
+    // `WindChargeItem.use`：扔出一枚风弹，返回 `SUCCESS`。
+    if crate::player_wind_charge::throw(region, id, hand) {
+        swing(region, id, hand, InteractionResult::Success);
+        return;
+    }
     // `FoodOnAStickItem.use`：拿着胡萝卜钓竿、骑着由自己控制的猪时，右键
     // 让猪加速并扣 7 点耐久；没加速成则只记一次使用统计。
     //
