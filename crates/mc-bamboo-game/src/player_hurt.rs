@@ -702,7 +702,80 @@ fn knockback(
 /// The full logic (cooldown, crit, sweep, knockback, enchantments, particles,
 /// sounds, animations, PVP) lives in [`crate::player_attack`]; this is the seam.
 pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
+    if try_hurt_boat(region, id, entity_id) {
+        return;
+    }
     crate::player_attack::on_attack(region, id, entity_id);
+}
+
+/// `VehicleEntity.hurtServer` 的船版：玩家打一下累计 `amount*10` 的伤害、翻转
+/// `hurtDir`、`hurtTime=10`；`instabuild`（创造模式）或 `damage > 40` 时
+/// `destroy`，掉出船物品（`AbstractBoat.destroy`）和运输船箱里的东西
+/// （`AbstractChestBoat.destroy` → `chestVehicleDestroyed`）。`entity.discard()`
+/// 之后实体表会按官方 `setRemoved` 甩掉乘客。
+///
+/// The boat half of `VehicleEntity.hurtServer`: each hit adds `amount*10` damage,
+/// flips `hurtDir` and sets `hurtTime=10`; creative mode or `damage > 40` calls
+/// `destroy`, dropping the boat item and the chest boat's contents.
+fn try_hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32) -> bool {
+    let Some(public) = region.entities.public_at(entity_id) else {
+        return false;
+    };
+    if !matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Boat(_)) {
+        return false;
+    }
+    let creative = region.players.get(&id).is_some_and(|player| {
+        player.game_mode == mc_bamboo_protocol::packet::play::GameMode::Creative
+    });
+    let position = public.position;
+    let mut destroyed = false;
+    let mut drop_item = mc_bamboo_data::items::AIR;
+    let mut chest_items: Vec<mc_bamboo_protocol::item::ItemStack> = Vec::new();
+    region.entities.with_mut(entity_id, |entity| {
+        if let mc_bamboo_blocks::entity::EntityKind::Boat(boat) = &mut entity.kind {
+            boat.hurt_dir = -boat.hurt_dir;
+            boat.hurt_time = 10;
+            // 空手满充能的 `Player.attack` 伤害是 1.0；`setDamage(damage + f*10)`。
+            boat.damage += 10.0;
+            if creative || boat.damage > 40.0 {
+                destroyed = true;
+                drop_item = boat.drop_item();
+                if let Some(chest) = &boat.chest {
+                    chest_items = chest
+                        .items
+                        .iter()
+                        .filter(|stack| !stack.is_empty())
+                        .cloned()
+                        .collect();
+                }
+                entity.discard();
+            }
+        }
+    });
+    if destroyed {
+        drop_boat_contents(region, position, drop_item, &chest_items);
+    }
+    true
+}
+
+/// `spawnAtLocation`：船物品和箱内物品都掉在船的位置。
+fn drop_boat_contents(
+    region: &mut Region,
+    position: mc_bamboo_core::Vec3,
+    drop_item: i32,
+    chest_items: &[mc_bamboo_protocol::item::ItemStack],
+) {
+    let (mut level, ticks) = region.block_level();
+    let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+    if drop_item != mc_bamboo_data::items::AIR {
+        world.spawn_at_location(
+            position,
+            mc_bamboo_protocol::item::ItemStack::new(drop_item, 1),
+        );
+    }
+    for stack in chest_items {
+        world.spawn_at_location(position, stack.clone());
+    }
 }
 
 #[cfg(test)]

@@ -20,7 +20,7 @@ use crate::{shape::Aabb, state::DRAG};
 
 use super::{
     Entity, EntityUid,
-    ctx::{BlockView, EntityCtx},
+    ctx::{BlockView, Command, EntityCtx},
     item::{apply_current, flow_vector, friction},
 };
 
@@ -429,6 +429,9 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     me.apply_effects_from_blocks(view);
     detect_bubble_column(&mut boat, me, view);
     apply_water_current(me, view);
+    // 官方 `Entity.baseTick` 的岩浆 / 火：每刻调一次 `hurtServer`
+    // （岩浆 4.0、火 1.0），伤害累计到阈值就破坏并掉物品。
+    let env_amount = environment_damage(me, view);
     tick_bubble_column(&mut boat, me);
 
     for index in 0..2 {
@@ -450,6 +453,9 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     }
 
     // 推动实体、把动物拉上船由骑乘层接入。
+    if env_amount > 0.0 {
+        hurt_from_environment(&mut boat, me, env_amount, ctx);
+    }
 
     if let super::EntityKind::Boat(boat_box) = &mut me.kind {
         **boat_box = boat;
@@ -744,4 +750,58 @@ fn first_passenger_is_player(boat: &Boat) -> bool {
     boat.passengers
         .first()
         .is_some_and(|&uid| uid < super::FIRST_ENTITY_ID)
+}
+
+/// `Entity.baseTick`：船 AABB 里有岩浆 → 岩浆伤害 4.0；还剩着火刻数 → 火伤害 1.0。
+///
+/// `Entity.baseTick`: lava touching the boat's AABB deals 4.0, remaining fire
+/// ticks deal 1.0.
+fn environment_damage(me: &Entity, view: &dyn BlockView) -> f32 {
+    let bb = me.bounding_box();
+    for x in mth::floor(bb.min_x)..mth::ceil(bb.max_x) {
+        for y in mth::floor(bb.min_y)..mth::ceil(bb.max_y) {
+            for z in mth::floor(bb.min_z)..mth::ceil(bb.max_z) {
+                if view
+                    .fluid_state(BlockPos::new(x, y, z))
+                    .is_tagged(fluid_tags::LAVA)
+                {
+                    return 4.0;
+                }
+            }
+        }
+    }
+    if me.remaining_fire_ticks > 0 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// `VehicleEntity.hurtServer` 的环境伤害路径：累计伤害、翻转方向，破坏时丢弃实体
+/// 并掉出船物品和运输船箱内的东西（`Command::DropItem` 在命令落地时生成实体）。
+///
+/// The environmental half of `VehicleEntity.hurtServer`: accumulate damage and
+/// flip the direction; on destruction discard and drop the boat item plus the
+/// chest contents via `Command::DropItem`.
+fn hurt_from_environment(boat: &mut Boat, me: &mut Entity, amount: f32, ctx: &mut dyn EntityCtx) {
+    boat.hurt_dir = -boat.hurt_dir;
+    boat.hurt_time = 10;
+    boat.damage += amount * 10.0;
+    if boat.damage <= 40.0 {
+        return;
+    }
+    let mut stacks = vec![ItemStack::new(boat.drop_item(), 1)];
+    if let Some(chest) = &boat.chest {
+        stacks.extend(
+            chest
+                .items
+                .iter()
+                .filter(|stack| !stack.is_empty())
+                .cloned(),
+        );
+    }
+    me.discard();
+    for stack in stacks {
+        ctx.emit(Command::DropItem { stack }, me);
+    }
 }
