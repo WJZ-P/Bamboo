@@ -121,6 +121,7 @@ pub mod warden_spawn;
 mod water;
 pub mod wild_spawn;
 pub mod witch;
+pub mod wither;
 pub mod wolf;
 pub mod wolf_goals;
 mod zombie_spawn;
@@ -309,13 +310,18 @@ pub enum MobType {
     ///
     /// The armour stand: a `LivingEntity` with no AI, broken by a two-hit hurt.
     ArmorStand,
+    /// 凋灵，`WitherBoss`。三头飞行 Boss：无敌期、Boss 血条、射凋灵之首、半血护甲。
+    ///
+    /// The `WitherBoss`: a three-headed flying boss with an invulnerability phase,
+    /// a boss bar, wither-skull shots and half-health armour.
+    Wither,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 77] = [
+    pub const ALL: [Self; 78] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -393,6 +399,7 @@ impl MobType {
         Self::WanderingTrader,
         Self::TraderLlama,
         Self::ArmorStand,
+        Self::Wither,
     ];
 
     /// 注册表 ID。
@@ -477,6 +484,7 @@ impl MobType {
             Self::WanderingTrader => ids::WANDERING_TRADER,
             Self::TraderLlama => ids::TRADER_LLAMA,
             Self::ArmorStand => ids::ARMOR_STAND,
+            Self::Wither => ids::WITHER,
         }
     }
 
@@ -561,6 +569,7 @@ impl MobType {
             Self::WanderingTrader => "minecraft:wandering_trader",
             Self::TraderLlama => "minecraft:trader_llama",
             Self::ArmorStand => "minecraft:armor_stand",
+            Self::Wither => "minecraft:wither",
         }
     }
 
@@ -795,6 +804,8 @@ impl MobType {
             // `EntityTypes.WARDEN`：`sized(0.9F, 2.9F)`，未显式给眼高，取缺省 `height * 0.85F`。
             // `EntityTypes.WARDEN`: `sized(0.9F, 2.9F)` with the default eye height.
             (Self::Warden, _) => (0.9, 2.9, 2.9 * 0.85),
+            // `EntityTypes.WITHER`：`sized(0.9F, 3.5F)`，未显式给眼高，取缺省 `height * 0.85F`。
+            (Self::Wither, _) => (0.9, 3.5, 3.5 * 0.85),
         }
     }
 
@@ -831,6 +842,7 @@ impl MobType {
                 | Self::ZombieNautilus
                 | Self::Breeze
                 | Self::Warden
+                | Self::Wither
         ) || self.is_skeleton()
     }
 
@@ -1242,6 +1254,11 @@ impl MobType {
         if matches!(self, Self::Creaking) {
             return 0;
         }
+        // `WitherBoss` 构造函数里 `xpReward = 50`。
+        // The `WitherBoss` constructor sets `xpReward = 50`.
+        if matches!(self, Self::Wither) {
+            return 50;
+        }
         // `Phantom` 构造函数里也是 `xpReward = 5`。
         // The `Phantom` constructor sets `xpReward = 5` as well.
         if self.is_monster() || matches!(self, Self::Phantom) {
@@ -1334,6 +1351,7 @@ impl MobType {
             // 盔甲架破坏时掉固定物品，不走死亡战利品表。
             // A broken armour stand drops fixed items, not a death loot table.
             Self::ArmorStand => "minecraft:entities/armor_stand",
+            Self::Wither => "minecraft:entities/wither",
         }
     }
 
@@ -1522,6 +1540,7 @@ impl MobType {
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.ambient"),
             Self::TraderLlama => Some("minecraft:entity.llama.ambient"),
             Self::ArmorStand => None,
+            Self::Wither => Some("minecraft:entity.wither.ambient"),
         }
     }
 
@@ -1600,6 +1619,7 @@ impl MobType {
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.hurt"),
             Self::TraderLlama => Some("minecraft:entity.llama.hurt"),
             Self::ArmorStand => None,
+            Self::Wither => Some("minecraft:entity.wither.hurt"),
         }
     }
 
@@ -1677,6 +1697,7 @@ impl MobType {
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.death"),
             Self::TraderLlama => Some("minecraft:entity.llama.death"),
             Self::ArmorStand => None,
+            Self::Wither => Some("minecraft:entity.wither.death"),
         }
     }
 
@@ -1771,6 +1792,9 @@ impl MobType {
             Self::WanderingTrader => None,
             Self::TraderLlama => Some("minecraft:entity.llama.step"),
             Self::ArmorStand => None,
+            // 凋灵飞行，没有专属脚步声，也不在 `uses_block_step_sound` 列表里。
+            // The wither flies: no dedicated step sound and no block step sound.
+            Self::Wither => None,
         }
     }
 
@@ -1859,6 +1883,7 @@ impl MobType {
             // 盔甲架没有刷怪蛋，占位成空气。
             // The armour stand has no spawn egg; air stands in for it.
             Self::ArmorStand => items::AIR,
+            Self::Wither => items::WITHER_SPAWN_EGG,
         }
     }
 
@@ -1942,6 +1967,7 @@ impl MobType {
             Self::WanderingTrader => "entity.minecraft.wandering_trader",
             Self::TraderLlama => "entity.minecraft.trader_llama",
             Self::ArmorStand => "entity.minecraft.armor_stand",
+            Self::Wither => "entity.minecraft.wither",
         }
     }
 
@@ -2266,6 +2292,12 @@ pub enum DamageKind {
     BadRespawnPoint,
     /// 风弹命中实体，`minecraft:wind_charge`。
     WindCharge,
+    /// 凋灵之首命中实体，`minecraft:wither_skull`。数据文件里 exhaustion 0.1、
+    /// message_id `witherSkull`、scaling `when_caused_by_living_non_player`。
+    ///
+    /// A wither skull hit, `minecraft:wither_skull`: exhaustion 0.1,
+    /// message_id `witherSkull`, scaling `when_caused_by_living_non_player`.
+    WitherSkull,
     /// 监守者的音波，`minecraft:sonic_boom`：穿墙、绕过护甲。
     ///
     /// The warden's `minecraft:sonic_boom`: passes through walls and armor.
@@ -2331,6 +2363,7 @@ impl DamageKind {
             Self::Magic => "minecraft:magic",
             Self::IndirectMagic => "minecraft:indirect_magic",
             Self::Wither => "minecraft:wither",
+            Self::WitherSkull => "minecraft:wither_skull",
             Self::Explosion => "minecraft:explosion",
             Self::DryOut => "minecraft:dry_out",
             Self::PlayerExplosion => "minecraft:player_explosion",
@@ -2398,6 +2431,7 @@ impl DamageKind {
             Self::Magic => "magic",
             Self::IndirectMagic => "indirectMagic",
             Self::Wither => "wither",
+            Self::WitherSkull => "witherSkull",
             Self::Explosion => "explosion",
             Self::DryOut => "dryout",
             Self::PlayerExplosion => "explosion.player",
@@ -2446,6 +2480,7 @@ impl DamageKind {
             Self::Magic,
             Self::IndirectMagic,
             Self::Wither,
+            Self::WitherSkull,
             Self::Explosion,
             Self::DryOut,
             Self::PlayerExplosion,
@@ -2569,6 +2604,7 @@ impl DamageKind {
             | Self::LightningBolt
             | Self::SulfurCubeHot
             | Self::BadRespawnPoint
+            | Self::WitherSkull
             | Self::Mace
             | Self::Spear
             | Self::Fireworks => TENTH,
@@ -3384,6 +3420,10 @@ pub struct Mob {
     /// 行商羊驼的专属状态。
     /// Trader-llama-specific state.
     pub trader_llama: trader_llama::TraderLlama,
+    /// 凋灵的专属状态：三个头的朝向、更新计时和 Boss 血条运行时状态。
+    /// Wither-only state: the three heads' rotations, update timers and the boss-bar
+    /// runtime state.
+    pub wither: wither::Wither,
     /// 骆驼的姿势状态机同步值和冲刺计时。
     ///
     /// The camel's pose state machine synced values and dash timer.
@@ -3586,6 +3626,7 @@ impl Mob {
             MobType::Illusioner => illusioner::attributes(),
             MobType::Allay => allay::attributes(),
             MobType::ArmorStand => Attributes::armor_stand(),
+            MobType::Wither => wither::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3636,6 +3677,14 @@ impl Mob {
             navigation.flags.can_open_doors = true;
             navigation.required_path_length = 48.0;
             navigation.update_max_visited_nodes(follow_range);
+        }
+        if mob_type == MobType::Wither {
+            // `WitherBoss.createNavigation`：`FlyingPathNavigation`，不开门但能浮水。
+            // `WitherBoss.createNavigation`: a `FlyingPathNavigation` that floats
+            // but does not open doors.
+            navigation.flags.can_open_doors = false;
+            navigation.flags.can_float = true;
+            navigation.flags.fly = true;
         }
         let goals = match mob_type {
             MobType::Cow | MobType::Mooshroom => GoalSelector::cow(&mut navigation),
@@ -3726,6 +3775,7 @@ impl Mob {
             MobType::Warden | MobType::Allay => GoalSelector::default(),
             MobType::WanderingTrader => wandering_trader::goals(&mut navigation),
             MobType::TraderLlama => trader_llama::goals(&mut navigation),
+            MobType::Wither => wither::goals(),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
@@ -3826,6 +3876,7 @@ impl Mob {
             MobType::Warden | MobType::Allay => GoalSelector::default(),
             MobType::WanderingTrader => GoalSelector::default(),
             MobType::TraderLlama => trader_llama::targets(),
+            MobType::Wither => wither::target_goals(),
             kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -4064,6 +4115,7 @@ impl Mob {
             happy_ghast: happy_ghast::initial_state(),
             wandering_trader: wandering_trader::WanderingTrader::default(),
             trader_llama: trader_llama::TraderLlama::default(),
+            wither: wither::Wither::default(),
             events: Vec::new(),
             needs_sync: false,
             knockback_sync: false,
@@ -4811,6 +4863,24 @@ pub struct MobPublic {
     ///
     /// The armour stand's synced state (client flags and six poses); default elsewhere.
     pub armor_stand: armor_stand::ArmorStand,
+    /// `WitherBoss.DATA_TARGET_A/B/C`：三个头各自的目标实体 ID（0 表示没有）。
+    ///
+    /// `WitherBoss.DATA_TARGET_A/B/C`: each head's target entity id (0 means none).
+    pub wither_targets: [i32; 3],
+    /// `WitherBoss.DATA_ID_INV`：剩余无敌刻数。
+    ///
+    /// `WitherBoss.DATA_ID_INV`: the remaining invulnerability ticks.
+    pub wither_invulnerable_ticks: i32,
+    /// `WitherBoss` 的 `ServerBossEvent` 当前进度（无敌期是 `1 - invul/220`，
+    /// 之后是 `getHealth()/getMaxHealth()`）。
+    ///
+    /// Current `ServerBossEvent` progress of `WitherBoss` (`1 - invul/220` during
+    /// the invulnerability phase, then `getHealth()/getMaxHealth()`).
+    pub wither_boss_progress: f32,
+    /// `WitherBoss.bossEvent` 的 UUID（`Mth.createInsecureUUID(random)`）。
+    ///
+    /// UUID of `WitherBoss.bossEvent` (`Mth.createInsecureUUID(random)`).
+    pub wither_boss_uuid: [u8; 16],
     /// `Mob.getLastHurtByMob()`：行商羊驼的 `TraderLlamaDefendWanderingTraderGoal`
     /// 从牵引者身上读这个值。其它生物也能读，只是没目标会看。
     ///
@@ -4976,6 +5046,10 @@ impl MobPublic {
             leash_holder: leash::leash_holder(mob),
             trader_despawn_delay: mob.wandering_trader.despawn_delay,
             armor_stand: mob.armor_stand,
+            wither_targets: mob.wither.targets,
+            wither_invulnerable_ticks: mob.wither.invulnerable_ticks,
+            wither_boss_progress: mob.wither.boss_progress,
+            wither_boss_uuid: mob.wither.boss_uuid,
             last_hurt_by_mob: mob.last_hurt_by_mob,
             last_hurt_by_mob_timestamp: mob.last_hurt_by_mob_timestamp,
         }

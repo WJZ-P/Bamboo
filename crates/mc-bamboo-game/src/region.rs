@@ -314,6 +314,12 @@ pub(crate) struct Region {
     ///
     /// Pairing between those entities and players.
     pub(crate) entity_tracking: EntityTracking,
+    /// 凋灵的实体 Boss 血条（`ServerBossEvent`）：每根栏记住收到过 add 包的玩家、
+    /// 上次的进度和栏的 UUID。
+    ///
+    /// Entity boss bars for withers (`ServerBossEvent`): each bar remembers the
+    /// players that got the add packet, the last progress and the bar UUID.
+    pub(crate) wither_boss_bars: crate::wither_boss::WitherBossBars,
     /// 比较器的输出、书架最近动的格子、红石火把最近的开关，还有讲台的页码。
     ///
     /// Comparator output, bookshelf slots, redstone-torch toggles, and lectern pages.
@@ -537,6 +543,7 @@ impl Region {
             sound_seed_generator: LevelRandom::new(unique_seed()),
             entities: Entities::default(),
             entity_tracking: EntityTracking::default(),
+            wither_boss_bars: Default::default(),
             redstone: RedstoneMemory::default(),
             tick: RegionTick::default(),
             view_distance,

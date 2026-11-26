@@ -516,6 +516,9 @@ impl Region {
         } else {
             crate::entity_tracking::EntityTracking::default()
         };
+        // 凋灵的实体 Boss 血条跟着搬走的实体走。
+        // Wither entity boss bars follow the entities that move.
+        let wither_boss_bars = self.wither_boss_bars.split_off(&moved_entities);
         lap("EntityTracking");
         let dirty = if moves(IslandPart::Dirty) {
             self.dirty.split_off(chunks)
@@ -641,6 +644,7 @@ impl Region {
             sound_seed_generator,
             entities,
             entity_tracking,
+            wither_boss_bars,
             redstone,
             tick: self.tick,
             view_distance: self.view_distance,
@@ -822,6 +826,7 @@ impl Region {
             sound_seed_generator,
             entities,
             entity_tracking,
+            wither_boss_bars,
             redstone,
             tick: _,
             view_distance: _,
@@ -888,6 +893,7 @@ impl Region {
         self.entities.absorb(entities);
         lap("merge Entities");
         self.entity_tracking.absorb(entity_tracking);
+        self.wither_boss_bars.absorb(wither_boss_bars);
         lap("merge EntityTracking");
         self.dirty.absorb(dirty);
         self.light_changes.extend(light_changes);

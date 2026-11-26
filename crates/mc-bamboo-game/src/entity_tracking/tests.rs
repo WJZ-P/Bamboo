@@ -27,6 +27,31 @@ use crate::{
 
 use super::*;
 
+/// 蓝色危险头同步 `WitherSkull.DATA_DANGEROUS`，普通头不发元数据。
+///
+/// A dangerous (blue) skull syncs `WitherSkull.DATA_DANGEROUS`; a normal skull sends none.
+#[test]
+fn dangerous_wither_skull_syncs_metadata() {
+    use mc_bamboo_blocks::entity::wither_skull::WitherSkullPublic;
+    let skull = |dangerous| WitherSkullPublic {
+        uuid: [0; 16],
+        owner: None,
+        dangerous,
+        pitch: 0.0,
+        needs_sync: false,
+        sync_velocity: false,
+    };
+    assert_eq!(
+        KindData::WitherSkull(skull(true)).pairing_values(),
+        vec![EntityData::WitherSkullDangerous(true)]
+    );
+    assert!(
+        KindData::WitherSkull(skull(false))
+            .pairing_values()
+            .is_empty()
+    );
+}
+
 /// 带物品参数的粒子包按官方 `ItemStackTemplate.STREAM_CODEC` 追加
 /// 物品 ID、数量 1、空组件补丁（两个 0 varint）。
 #[test]

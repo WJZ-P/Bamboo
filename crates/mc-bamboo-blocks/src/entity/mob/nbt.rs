@@ -570,6 +570,11 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::Compound(mob.warden.listener.write_codec()),
         );
     }
+    if mob.mob_type == MobType::Wither {
+        // `WitherBoss.addAdditionalSaveData`：只多写一个 `Invul`。
+        // `WitherBoss.addAdditionalSaveData`: writes only the `Invul` key.
+        put(&mut out, "Invul", Tag::Int(mob.wither.invulnerable_ticks));
+    }
     if mob.mob_type == MobType::Frog {
         // `Frog.addAdditionalSaveData`：`VariantUtils.writeVariant`。
         // `Frog.addAdditionalSaveData`: `VariantUtils.writeVariant`.
@@ -1058,6 +1063,11 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
                     crate::archive::passive::read_listener_for_vibration(listener);
             }
             mob.warden.client_anger_level = mob.warden.anger.get_active_anger(None);
+        }
+        if mob.mob_type == MobType::Wither {
+            // `WitherBoss.readAdditionalSaveData`：`Invul` 缺省 0。
+            // `WitherBoss.readAdditionalSaveData`: `Invul` defaults to 0.
+            mob.wither.invulnerable_ticks = tag::int_or(tag, "Invul", 0);
         }
         if mob.mob_type == MobType::SkeletonHorse
             && let Some(state) = mob.skeleton_horse.as_mut()
@@ -1611,6 +1621,35 @@ mod tests {
             assert_eq!(mob.mob_type, MobType::Warden);
             assert_eq!(mob.warden.anger.anger_by_uuid, vec![([7; 16], 95)]);
             assert_eq!(mob.warden.client_anger_level, 0);
+        });
+    }
+
+    /// 凋灵存档往返保留 `Invul`（无敌刻数）。
+    ///
+    /// A wither save round-trips `Invul` (the invulnerability ticks).
+    #[test]
+    fn wither_nbt_round_trip_keeps_invul() {
+        let mut entity = Entity::by_mob_type(MobType::Wither, Vec3::new(0.5, 64.0, 0.5));
+        entity.with_mob(|_, mob| {
+            mob.wither.invulnerable_ticks = 137;
+        });
+        let row = entity.split();
+        let tag = write_mob(&row).expect("write wither");
+        let Tag::Compound(entries) = &tag else {
+            panic!("mob NBT is a compound");
+        };
+        assert!(
+            entries
+                .iter()
+                .any(|(name, value)| name == "Invul" && *value == Tag::Int(137))
+        );
+        let loaded = read_mob(&tag, "minecraft:wither", 7)
+            .expect("read wither")
+            .expect("modelled");
+        let mut rebuilt = loaded.into_entity();
+        rebuilt.with_mob(|_, mob| {
+            assert_eq!(mob.mob_type, MobType::Wither);
+            assert_eq!(mob.wither.invulnerable_ticks, 137);
         });
     }
 

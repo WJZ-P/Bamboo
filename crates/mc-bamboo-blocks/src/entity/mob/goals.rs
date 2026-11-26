@@ -618,6 +618,27 @@ pub enum Goal {
         speed: f64,
         stuck: bool,
     },
+    /// `WitherBoss$WitherDoNothingGoal`：无敌期占住 MOVE/JUMP/LOOK 标志位。
+    ///
+    /// `WitherBoss$WitherDoNothingGoal`: locks MOVE/JUMP/LOOK during the invulnerability phase.
+    WitherDoNothing,
+    /// `WitherBoss` 的 `RangedAttackGoal(this, 1.0, 40, 20.0F)`：主头射击。
+    ///
+    /// The wither's `RangedAttackGoal(this, 1.0, 40, 20.0F)`: main-head shots.
+    WitherRangedAttack {
+        target: Option<EntityUid>,
+        attack_time: i32,
+        see_time: i32,
+    },
+    /// `WaterAvoidingRandomFlyingGoal(this, 1.0)`：没有目标时随机挑空中落点飞过去。
+    ///
+    /// `WaterAvoidingRandomFlyingGoal(this, 1.0)`: pick a random flying spot while idle.
+    WitherRandomFlying {
+        speed: f64,
+        interval: i32,
+        wanted: Vec3,
+        force_trigger: bool,
+    },
 }
 
 /// `TemptGoal.canScare` 记录的玩家上次位置与朝向。
@@ -726,6 +747,13 @@ pub enum TargetType {
     /// `Guardian.GuardianAttackSelector`: players, squid (including glow squid) and
     /// axolotls, at squared distance greater than 9 from the guardian.
     GuardianPrey,
+    /// 凋灵的 `NearestAttackableTargetGoal<LivingEntity>`，选择器 `LIVING_ENTITY_SELECTOR`：
+    /// 不打 `#wither_friends`（亡灵），只挑 `attackable()` 的活体（生物和玩家）。
+    ///
+    /// The wither's `NearestAttackableTargetGoal<LivingEntity>` with
+    /// `LIVING_ENTITY_SELECTOR`: excludes `#wither_friends` (undead) and picks
+    /// attackable living entities (mobs and players).
+    WitherPrey,
 }
 
 impl TargetType {
@@ -930,6 +958,13 @@ impl Goal {
             | Self::SquidFlee { .. }
             | Self::PufferfishPuff
             | Self::FollowFlock { .. } => &[],
+            // `WitherDoNothingGoal` 锁 MOVE|JUMP|LOOK；`RangedAttackGoal` 锁 MOVE|LOOK；
+            // `WaterAvoidingRandomFlyingGoal`（继承 RandomStrollGoal）只锁 MOVE。
+            // `WitherDoNothingGoal` locks MOVE|JUMP|LOOK; `RangedAttackGoal` locks
+            // MOVE|LOOK; `WaterAvoidingRandomFlyingGoal` locks MOVE only.
+            Self::WitherDoNothing => &[Flag::Move, Flag::Look, Flag::Jump],
+            Self::WitherRangedAttack { .. } => &[Flag::Move, Flag::Look],
+            Self::WitherRandomFlying { .. } => &[Flag::Move],
         }
     }
 
@@ -987,6 +1022,7 @@ impl Goal {
                 | Self::TurtleLayEgg { .. }
                 | Self::TurtleGoToWater { .. }
                 | Self::BreakDoor
+                | Self::WitherRangedAttack { .. }
         )
     }
 
@@ -1101,6 +1137,9 @@ impl Goal {
             Self::TurtleGoHome { .. } => "TurtleGoHomeGoal",
             Self::TurtleGoToWater { .. } => "TurtleGoToWaterGoal",
             Self::TurtleTravel { .. } => "TurtleTravelGoal",
+            Self::WitherDoNothing => "WitherDoNothingGoal",
+            Self::WitherRangedAttack { .. } => "RangedAttackGoal",
+            Self::WitherRandomFlying { .. } => "WaterAvoidingRandomFlyingGoal",
         }
     }
 
@@ -1919,6 +1958,105 @@ pub(crate) const fn reduced_tick_delay(ticks: i32) -> i32 {
     mth::positive_ceil_div(ticks, 2)
 }
 
+/// `WitherBoss.LIVING_ENTITY_SELECTOR`：`!is(WITHER_FRIENDS) && attackable()`。
+/// 生物和玩家一起按到眼睛位置的距离排名，选最近的。
+///
+/// `WitherBoss.LIVING_ENTITY_SELECTOR`: `!is(WITHER_FRIENDS) && attackable()`.
+/// Mobs and players are ranked together by distance to the eye point.
+fn nearest_wither_prey(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Option<EntityUid> {
+    let mob_uid = nearest_mob_target(me, mob, ctx, |kind| !super::wither::is_wither_friend(kind));
+    let player_uid = nearest_attackable(me, mob, ctx, TargetType::WitherPrey);
+    let eye = Vec3::new(
+        me.position.x,
+        me.position.y + f64::from(mob.eye_height),
+        me.position.z,
+    );
+    let distance = |uid| {
+        target_view(ctx, uid).map_or(f64::INFINITY, |(target, _)| {
+            target.position.distance_to_sqr(eye)
+        })
+    };
+    match (mob_uid, player_uid) {
+        (Some(mob), Some(player)) => {
+            if distance(mob) <= distance(player) {
+                Some(mob)
+            } else {
+                Some(player)
+            }
+        }
+        (Some(mob), None) => Some(mob),
+        (None, player) => player,
+    }
+}
+
+/// `WaterAvoidingRandomFlyingGoal.canUse`：照 `RandomStrollGoal.canUse`，但 `getPosition()`
+/// 走 `HoverRandomPos` / `AirAndWaterRandomPos`（视线方向找空中落点）。
+///
+/// `WaterAvoidingRandomFlyingGoal.canUse`: like `RandomStrollGoal.canUse`, but
+/// `getPosition()` uses `HoverRandomPos` / `AirAndWaterRandomPos` for an air spot
+/// along the view vector.
+fn wither_flying_can_use(
+    me: &mut Entity,
+    mob: &Mob,
+    ctx: &dyn EntityCtx,
+    interval: i32,
+    wanted: &mut Vec3,
+    force_trigger: &mut bool,
+) -> bool {
+    if has_controlling_passenger(mob, ctx) {
+        return false;
+    }
+    if !*force_trigger {
+        if mob.no_action_time >= 100 {
+            return false;
+        }
+        if me.random.next_int_bounded(reduced_tick_delay(interval)) != 0 {
+            return false;
+        }
+    }
+    // `mob.getViewVector(0)` 的 x/z：`xRot` 俯仰、`yRot` 偏航，全部 float 运算。
+    // The x/z of `mob.getViewVector(0)`: `xRot` pitch and `yRot` yaw, all float math.
+    let pitch = mob.x_rot * 0.017_453_292_f32;
+    let yaw = -me.y_rot * 0.017_453_292_f32;
+    let cos_pitch = mth::cos(f64::from(pitch));
+    let x_dir = f64::from(mth::sin(f64::from(yaw)) * cos_pitch);
+    let z_dir = f64::from(mth::cos(f64::from(yaw)) * cos_pitch);
+    let view = ctx.blocks();
+    let found = hover_random_pos(
+        me,
+        mob,
+        view,
+        8,
+        7,
+        x_dir,
+        z_dir,
+        std::f64::consts::FRAC_PI_2,
+        3,
+        1,
+    )
+    .or_else(|| {
+        air_and_water_random_pos(
+            me,
+            mob,
+            view,
+            8,
+            4,
+            -2,
+            x_dir,
+            z_dir,
+            std::f64::consts::FRAC_PI_2,
+        )
+    });
+    match found {
+        Some(pos) => {
+            *wanted = pos;
+            *force_trigger = false;
+            true
+        }
+        None => false,
+    }
+}
+
 /// `Goal.adjustedTickDelay`：`requiresUpdateEveryTick()` 为真时原样返回，
 /// 为假时才折半。
 const fn adjusted_tick_delay(every_tick: bool, ticks: i32) -> i32 {
@@ -2556,6 +2694,25 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             }
             alive.is_some()
         }
+        // `WitherDoNothingGoal.canUse`：只在无敌期启动。
+        // `WitherDoNothingGoal.canUse`: only during the invulnerability phase.
+        Goal::WitherDoNothing => mob.wither.invulnerable_ticks > 0,
+        // 凋灵的 `RangedAttackGoal.canUse`：和通用版一样记下活着的目标。
+        // The wither's `RangedAttackGoal.canUse`: same living-target check.
+        Goal::WitherRangedAttack { target, .. } => {
+            let alive = mob.target.filter(|&uid| alive_target(ctx, uid).is_some());
+            if alive.is_some() {
+                *target = alive;
+            }
+            alive.is_some()
+        }
+        // `WaterAvoidingRandomFlyingGoal.canUse`。
+        Goal::WitherRandomFlying {
+            interval,
+            wanted,
+            force_trigger,
+            ..
+        } => wither_flying_can_use(me, mob, ctx, *interval, wanted, force_trigger),
         // `DrownedTridentAttackGoal.canUse`：先走 `RangedAttackGoal.canUse`，再要求
         // 主手是三叉戟。
         // `DrownedTridentAttackGoal.canUse`: `RangedAttackGoal.canUse` plus a
@@ -2664,6 +2821,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 // `Guardian.GuardianAttackSelector`: players, squid (glow squid included)
                 // and axolotls with `distanceToSqr(guardian) > 9`.
                 TargetType::GuardianPrey => nearest_guardian_target(me, mob, ctx),
+                // `LIVING_ENTITY_SELECTOR`：不打亡灵，生物和玩家一起排名。
+                // `LIVING_ENTITY_SELECTOR`: exclude undead, rank mobs and players together.
+                TargetType::WitherPrey => nearest_wither_prey(me, mob, ctx),
                 TargetType::Player | TargetType::GuardedPlayer | TargetType::AngerPlayer => {
                     nearest_attackable(me, mob, ctx, *kind)
                 }
@@ -3301,6 +3461,19 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                 || (stored.is_some_and(|uid| alive_target(ctx, uid).is_some())
                     && !mob.navigation.is_done())
         }
+        // `WitherDoNothingGoal.canContinueToUse` = `canUse()`.
+        Goal::WitherDoNothing => mob.wither.invulnerable_ticks > 0,
+        // 凋灵 `RangedAttackGoal.canContinueToUse`：和通用版一样。
+        // The wither's `RangedAttackGoal.canContinueToUse`: same as the generic one.
+        Goal::WitherRangedAttack { target, .. } => {
+            let stored = *target;
+            can_use(goal, me, mob, ctx)
+                || (stored.is_some_and(|uid| alive_target(ctx, uid).is_some())
+                    && !mob.navigation.is_done())
+        }
+        // `WaterAvoidingRandomFlyingGoal.canContinueToUse`：路径没走完就继续。
+        // `WaterAvoidingRandomFlyingGoal.canContinueToUse`: while the path is not done.
+        Goal::WitherRandomFlying { .. } => !mob.navigation.is_done(),
         Goal::LlamaHurtByTarget { unseen_ticks, .. } => {
             if super::equine::take_did_spit(mob) {
                 return false;
@@ -3678,6 +3851,13 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             }
         }
         Goal::RangedAttack { .. } => {}
+        Goal::WitherDoNothing | Goal::WitherRangedAttack { .. } => {}
+        // `WaterAvoidingRandomFlyingGoal.start`：把选好的空中落点装进导航。
+        // `WaterAvoidingRandomFlyingGoal.start`: move the navigation to the chosen air spot.
+        Goal::WitherRandomFlying { speed, wanted, .. } => {
+            let nav = living::nav_mob(me, mob, ctx.blocks());
+            mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
+        }
         Goal::NearestAttackableTarget {
             found,
             unseen_ticks,
@@ -3889,11 +4069,17 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             target,
             attack_time,
             see_time,
+        }
+        | Goal::WitherRangedAttack {
+            target,
+            attack_time,
+            see_time,
         } => {
             *target = None;
             *see_time = 0;
             *attack_time = -1;
         }
+        Goal::WitherDoNothing | Goal::WitherRandomFlying { .. } => {}
         // `DrownedTridentAttackGoal.stop`：清目标，`setAggressive(false)` +
         // `stopUsingItem()`。
         // `DrownedTridentAttackGoal.stop`: clear the target, `setAggressive(false)`
@@ -4484,6 +4670,18 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 super::equine::ranged_attack_tick(me, mob, ctx, target, attack_time, see_time);
             }
         }
+        // 凋灵的 `RangedAttackGoal.tick`：追目标、盯住、每 40 刻射主头。
+        // The wither's `RangedAttackGoal.tick`: chase, look, fire the main head every 40 ticks.
+        Goal::WitherRangedAttack {
+            target,
+            attack_time,
+            see_time,
+        } => {
+            if let Some((target, _)) = target.and_then(|uid| target_view(ctx, uid)) {
+                super::wither::ranged_attack_tick(me, mob, ctx, target, attack_time, see_time);
+            }
+        }
+        Goal::WitherDoNothing | Goal::WitherRandomFlying { .. } => {}
         Goal::DrownedTridentAttack {
             target,
             attack_time,

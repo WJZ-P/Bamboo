@@ -190,6 +190,10 @@ pub enum EntityData {
     ///
     /// index 9, BOOLEAN. `FishingHook.DATA_BITING`: a fish is biting the bobber.
     FishingBiting(bool),
+    /// index 8，BOOLEAN。`WitherSkull.DATA_DANGEROUS`（蓝色危险头）。
+    ///
+    /// index 8, BOOLEAN. `WitherSkull.DATA_DANGEROUS` (blue dangerous skull).
+    WitherSkullDangerous(bool),
     /// index 8，BLOCK_POS。下落的方块从哪一格掉下来。
     FallingBlockStart(BlockPos),
     /// index 8，INT。点燃的 TNT 还剩多少 tick 爆炸。
@@ -639,6 +643,7 @@ impl EntityData {
             | Self::TntFuse(_)
             | Self::LivingFlags(_)
             | Self::ExperienceValue(_)
+            | Self::WitherSkullDangerous(_)
             | Self::HangingDirection(_)
             | Self::FishingHookedEntity(_) => 8,
             Self::ArrowFlags(_) => mc_bamboo_data::entity_types::ARROW_FLAGS,
@@ -951,6 +956,10 @@ impl EntityData {
             }
             Self::FireworksShotAtAngle(value) => {
                 write_data_header(out, 10, SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::WitherSkullDangerous(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 write_bool(out, *value);
             }
             Self::SleepingPos(pos) => {
@@ -1720,6 +1729,17 @@ mod tests {
             entity_ids: &[7, 300],
         };
         assert_eq!(body(&packet), hex("02 07 ac 02"));
+    }
+
+    /// `WitherSkull.DATA_DANGEROUS`：index 8、BOOLEAN 序列化器（8）、值 true。
+    ///
+    /// `WitherSkull.DATA_DANGEROUS`: index 8, BOOLEAN serializer (8), value true.
+    #[test]
+    fn wither_skull_dangerous_metadata_bytes() {
+        assert_eq!(EntityData::WitherSkullDangerous(true).index(), 8);
+        let mut out = Vec::new();
+        EntityData::WitherSkullDangerous(true).write(&mut out);
+        assert_eq!(out, vec![8, 8, 1]);
     }
 
     #[test]

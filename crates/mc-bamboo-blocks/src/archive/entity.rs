@@ -95,6 +95,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
             crate::entity::wind_charge::WindChargeVariant::Player => kinds::WIND_CHARGE,
             crate::entity::wind_charge::WindChargeVariant::Breeze => kinds::BREEZE_WIND_CHARGE,
         },
+        crate::entity::KindPublic::WitherSkull(_) => kinds::WITHER_SKULL,
         crate::entity::KindPublic::FireworkRocket(_) => kinds::FIREWORK_ROCKET,
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
@@ -120,6 +121,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 crate::entity::KindPublic::Egg(egg) => egg.x_rot,
                 crate::entity::KindPublic::SplashPotion(potion) => potion.x_rot,
                 crate::entity::KindPublic::WindCharge(charge) => charge.pitch,
+                crate::entity::KindPublic::WitherSkull(skull) => skull.pitch,
                 crate::entity::KindPublic::FireworkRocket(firework) => firework.pitch,
                 crate::entity::KindPublic::ItemFrame(frame) => frame.x_rot,
                 _ => 0.0,
@@ -142,6 +144,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::LlamaSpit(spit) => uuid_tag(&spit.uuid),
         crate::entity::KindPublic::Egg(egg) => uuid_tag(&egg.uuid),
         crate::entity::KindPublic::SplashPotion(potion) => uuid_tag(&potion.uuid),
+        crate::entity::KindPublic::WitherSkull(skull) => uuid_tag(&skull.uuid),
         crate::entity::KindPublic::FireworkRocket(firework) => uuid_tag(&firework.uuid),
         crate::entity::KindPublic::Painting(painting) => uuid_tag(&painting.uuid),
         crate::entity::KindPublic::ItemFrame(frame) => uuid_tag(&frame.uuid),
@@ -292,6 +295,28 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
             let crate::entity::KindState::WindCharge(saved) = &state.kind else {
                 return Err(Error::new("mismatched wind charge entity halves"));
             };
+            put(&mut out, "acceleration_power", Tag::Double(0.0));
+            if let Some(uuid) = saved.owner_uuid {
+                put(&mut out, "Owner", uuid_tag(&uuid));
+            }
+            if saved.left_owner {
+                put(&mut out, "LeftOwner", Tag::Byte(1));
+            }
+            put(
+                &mut out,
+                "HasBeenShot",
+                Tag::Byte(i8::from(saved.has_been_shot)),
+            );
+        }
+        crate::entity::KindPublic::WitherSkull(skull) => {
+            let crate::entity::KindState::WitherSkull(saved) = &state.kind else {
+                return Err(Error::new("mismatched wither skull entity halves"));
+            };
+            // `WitherSkull.addAdditionalSaveData`：`dangerous`，然后父类的
+            // `acceleration_power` / `Owner` / `LeftOwner` / `HasBeenShot`。
+            // `WitherSkull.addAdditionalSaveData`: `dangerous`, then the parent's
+            // `acceleration_power` / `Owner` / `LeftOwner` / `HasBeenShot`.
+            put(&mut out, "dangerous", Tag::Byte(i8::from(skull.dangerous)));
             put(&mut out, "acceleration_power", Tag::Double(0.0));
             if let Some(uuid) = saved.owner_uuid {
                 put(&mut out, "Owner", uuid_tag(&uuid));

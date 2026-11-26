@@ -5356,6 +5356,7 @@ mod tests {
                 | Effect::OpenSignEditor { .. }
                 | Effect::Sound { .. }
                 | Effect::LevelEvent { .. }
+                | Effect::GlobalLevelEvent { .. }
                 | Effect::NoteBlockPlayed { .. }
                 | Effect::BlockEvent { .. }
                 | Effect::ComposterFill { .. }

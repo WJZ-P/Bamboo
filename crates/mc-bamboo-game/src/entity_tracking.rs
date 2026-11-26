@@ -166,6 +166,16 @@ impl EntityTracking {
         self.tracked.remove(&entity).is_some()
     }
 
+    /// 当前看得见这个实体的玩家（`ServerBossEvent` 的观众集合）。
+    ///
+    /// Players currently seeing this entity (the `ServerBossEvent` audience).
+    pub(crate) fn seen_by(&self, entity: i32) -> Vec<PlayerId> {
+        self.tracked
+            .get(&entity)
+            .map(|entry| entry.seen_by.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// 测试核对拆合用：每个被跟踪的实体和看得见它的玩家。
     #[cfg(test)]
     pub(crate) fn pairs(&self) -> Vec<(i32, Vec<PlayerId>)> {
@@ -888,6 +898,11 @@ pub enum KindData {
     OminousItemSpawner(ItemStack),
     /// 风弹：`add_entity` 的 data 用主人 ID。
     WindCharge(mc_bamboo_blocks::entity::wind_charge::WindChargePublic),
+    /// 凋灵之首：`add_entity` 的 data 用主人 ID；`DATA_DANGEROUS` 是布尔元数据。
+    ///
+    /// A wither skull: `add_entity` data uses the owner id; `DATA_DANGEROUS` is a
+    /// boolean synced value.
+    WitherSkull(mc_bamboo_blocks::entity::wither_skull::WitherSkullPublic),
     /// 烟花火箭：`add_entity` 的 data 用主人 ID，元数据带物品堆、附着目标和斜射标志。
     FireworkRocket(mc_bamboo_blocks::entity::firework_rocket::FireworkRocketPublic),
     /// 钓鱼浮漂：`add_entity` 的 data 用主人 ID（无主人时用自身 ID），元数据带被钩实体与咬钩标记。
@@ -996,6 +1011,7 @@ impl Snapshot {
             KindData::Egg(egg) => egg.owner.unwrap_or(0),
             KindData::SplashPotion(potion) => potion.owner.unwrap_or(0),
             KindData::WindCharge(charge) => charge.owner.unwrap_or(0),
+            KindData::WitherSkull(skull) => skull.owner.unwrap_or(0),
             KindData::FireworkRocket(firework) => firework.owner.unwrap_or(0),
             KindData::FishingHook(hook) => hook.owner.unwrap_or(self.id),
             KindData::Painting(painting) => painting.direction.id(),
@@ -1034,6 +1050,7 @@ impl KindData {
             KindPublic::LightningBolt(_) => Self::LightningBolt,
             KindPublic::OminousItemSpawner(stack) => Self::OminousItemSpawner(stack.clone()),
             KindPublic::WindCharge(charge) => Self::WindCharge(*charge),
+            KindPublic::WitherSkull(skull) => Self::WitherSkull(*skull),
             KindPublic::FireworkRocket(firework) => Self::FireworkRocket(firework.clone()),
             KindPublic::FishingHook(hook) => Self::FishingHook(*hook),
             KindPublic::LeashKnot { .. } => Self::LeashKnot,
@@ -1066,6 +1083,7 @@ impl KindData {
                 | Self::LlamaSpit(_)
                 | Self::SplashPotion(_)
                 | Self::WindCharge(_)
+                | Self::WitherSkull(_)
                 | Self::FireworkRocket(_)
         )
     }
@@ -1086,6 +1104,7 @@ impl KindData {
             | Self::EvokerFangs
             | Self::OminousItemSpawner(_)
             | Self::WindCharge(_)
+            | Self::WitherSkull(_)
             | Self::FireworkRocket(_)
             | Self::FishingHook(_)
             | Self::Painting(_)
@@ -1109,6 +1128,7 @@ impl KindData {
             | Self::LeashKnot
             | Self::EvokerFangs
             | Self::WindCharge(_)
+            | Self::WitherSkull(_)
             | Self::FireworkRocket(_)
             | Self::FishingHook(_)
             | Self::Painting(_)
@@ -1125,6 +1145,7 @@ impl KindData {
             Self::Egg(egg) => Some(egg.uuid),
             Self::SplashPotion(potion) => Some(potion.uuid),
             Self::WindCharge(charge) => Some(charge.uuid),
+            Self::WitherSkull(skull) => Some(skull.uuid),
             Self::FireworkRocket(firework) => Some(firework.uuid),
             Self::FishingHook(hook) => Some(hook.uuid),
             Self::Painting(painting) => Some(painting.uuid),
@@ -1142,6 +1163,7 @@ impl KindData {
             Self::Egg(egg) => Some(egg.x_rot),
             Self::SplashPotion(potion) => Some(potion.x_rot),
             Self::WindCharge(charge) => Some(charge.pitch),
+            Self::WitherSkull(skull) => Some(skull.pitch),
             Self::FireworkRocket(firework) => Some(firework.pitch),
             Self::FishingHook(hook) => Some(hook.pitch),
             Self::ItemFrame(frame) => Some(frame.x_rot),
@@ -1179,6 +1201,17 @@ impl KindData {
             | Self::LeashKnot
             | Self::EvokerFangs
             | Self::WindCharge(_) => Vec::new(),
+            // `WitherSkull.DATA_DANGEROUS`：蓝色危险头同步 index 8 的 BOOLEAN true，
+            // 普通头不脏、不发这一项。
+            // `WitherSkull.DATA_DANGEROUS`: a dangerous (blue) skull syncs
+            // BOOLEAN true at index 8; a normal skull stays clean.
+            Self::WitherSkull(skull) => {
+                if skull.dangerous {
+                    vec![EntityData::WitherSkullDangerous(true)]
+                } else {
+                    Vec::new()
+                }
+            }
             Self::Painting(painting) => {
                 let mut data = Vec::new();
                 if let Some(name) = &painting.custom_name {

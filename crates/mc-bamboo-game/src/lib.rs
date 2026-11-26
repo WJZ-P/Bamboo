@@ -142,6 +142,7 @@ pub mod structure_spawn;
 mod tick_levels;
 mod wandering_trader_spawn;
 mod weather;
+mod wither_boss;
 mod world;
 mod world_gen_settings;
 pub mod world_options;

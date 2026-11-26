@@ -887,6 +887,9 @@ pub(super) fn check_spawn_rules(
         // 盔甲架不自然生成，只由物品放置、命令或发射器召唤。
         // Armour stands never spawn naturally: only placement, commands or dispensers.
         MobType::ArmorStand => true,
+        // 凋灵只由头颅图案召唤，不在群系刷怪表里。
+        // The wither is only summoned by the skull pattern, not a biome spawn table.
+        MobType::Wither => true,
     }
 }
 

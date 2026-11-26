@@ -738,6 +738,24 @@ public final class MobOracle {
             if (only == null || only.startsWith("warden")) {
                 cases += playWardenSave(official, out);
             }
+            if (only == null || only.startsWith("wither")) {
+                cases += playWitherSave(official, out);
+            }
+            if (only == null || only.startsWith("wither_invul")) {
+                cases += playWitherInvul(official, out, only);
+            }
+            if (only == null || only.startsWith("wither_explode")) {
+                cases += playWitherExplode(official, out, only);
+            }
+            if (only == null || only.startsWith("wither_skull")) {
+                cases += playWitherSkull(official, out, only);
+            }
+            if (only == null || only.startsWith("wither_arrow")) {
+                cases += playWitherArrow(official, out, only);
+            }
+            if (only == null || only.startsWith("wither_destroy")) {
+                cases += playWitherDestroy(official, out, only);
+            }
             if (only == null || only.startsWith("breeze")) {
                 cases += playBreeze(official, out, only);
             }
@@ -17001,6 +17019,447 @@ public final class MobOracle {
         return cases;
     }
 
+    /** 凋灵存档往返：`Invul`（无敌刻数）以及通用键逐键对拍。 */
+    private static int playWitherSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (int invul : new int[] {0, 137, 220}) {
+            FakeLevel world = FakeLevel.create(official);
+            var mob = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                    EntityTypes.WITHER.create(world, EntitySpawnReason.COMMAND);
+            setRandom(mob, world.entitySeeds.nextLong());
+            mob.setPos(1.5, 64.0, 2.5);
+            mob.setYRot(37.0F);
+            mob.setXRot(12.0F);
+            mob.setHealth(180.0F);
+            mob.setInvulnerableTicks(invul);
+            var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            mob.saveWithoutId(output);
+            var copy = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                    EntityTypes.WITHER.create(world, EntitySpawnReason.LOAD);
+            copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries,
+                    output.buildResult()));
+            var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            copy.saveWithoutId(again);
+            out.write("{\"type\":\"witherSave\",\"invul\":" + invul
+                    + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                    + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    /** 凋灵无敌期逐刻：`Invul` 递减、每 10 刻回血、头朝向和两种随机源。 */
+    private static int playWitherInvul(Official official, Writer out, String only) throws Exception {
+        record WiScene(String name, int ticks, int invul) {}
+        List<WiScene> scenes = List.of(
+                new WiScene("wither_invul_decay", 24, 220),
+                new WiScene("wither_invul_mid", 20, 100));
+        int cases = 0;
+        for (WiScene s : scenes) {
+            if (only != null && !s.name().startsWith(only)) continue;
+            FakeLevel world = FakeLevel.create(official);
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels =
+                    java.util.Map.of(Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+            world.gameTime = 1000L;
+            world.getRandom().setSeed(1L);
+            var mob = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                    EntityTypes.WITHER.create(world, EntitySpawnReason.TRIGGERED);
+            mob.setId(FIRST_ID);
+            mob.setUUID(new UUID(0L, 1L));
+            mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            setRandom(mob, 5L);
+            mob.setHealth(100.0F);
+            mob.setInvulnerableTicks(s.invul());
+            world.tracked.add(mob);
+            // `RandomSource.create(5)` 的内部 state 不是 5；记下 `randomSeed(mob)`
+            // 的实际值，Bamboo 侧 `JavaRandom::from_state` 用它。
+            // `RandomSource.create(5)` has an internal state other than 5; record
+            // the actual `randomSeed(mob)` for Bamboo's `JavaRandom::from_state`.
+            long mobSeed0 = randomSeed(mob);
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= s.ticks(); tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    mob.commonTick();
+                    mob.tick();
+                }
+                if (tick > 0) frames.append(',');
+                Vec3 d = mob.getDeltaMovement();
+                float[] hx = mob.getHeadXRots();
+                float[] hy = mob.getHeadYRots();
+                frames.append('[').append(mob.getInvulnerableTicks()).append(',')
+                        .append(Float.floatToRawIntBits(mob.getHealth())).append(',')
+                        .append(Double.doubleToRawLongBits(mob.getX())).append(',')
+                        .append(Double.doubleToRawLongBits(mob.getY())).append(',')
+                        .append(Double.doubleToRawLongBits(mob.getZ())).append(',')
+                        .append(Double.doubleToRawLongBits(d.x)).append(',')
+                        .append(Double.doubleToRawLongBits(d.y)).append(',')
+                        .append(Double.doubleToRawLongBits(d.z)).append(',')
+                        .append(Float.floatToRawIntBits(mob.getYRot())).append(',')
+                        .append(Float.floatToRawIntBits(mob.getXRot())).append(',')
+                        .append(Float.floatToRawIntBits(hx[0])).append(',')
+                        .append(Float.floatToRawIntBits(hx[1])).append(',')
+                        .append(Float.floatToRawIntBits(hy[0])).append(',')
+                        .append(Float.floatToRawIntBits(hy[1])).append(',')
+                        .append(randomSeed(mob)).append(',')
+                        .append(randomSeed(world.getRandom())).append(']');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"witherInvul\",\"name\":" + jsonString(s.name())
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"startTime\":1000"
+                    + ",\"ticks\":" + s.ticks()
+                    + ",\"invul\":" + s.invul()
+                    + ",\"mobSeed\":" + mobSeed0 + ",\"levelSeed\":1"
+                    + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
+    /** 凋灵无敌期结束爆炸：逐刻比 16 个状态字段，以及爆炸 / 1023 / levelEvent。 */
+    private static int playWitherExplode(Official official, Writer out, String only) throws Exception {
+        record WxScene(String name, int invul) {}
+        List<WxScene> scenes = List.of(
+                new WxScene("wither_explode_short", 2),
+                new WxScene("wither_explode_long", 6));
+        int cases = 0;
+        for (WxScene s : scenes) {
+            if (only != null && !s.name().startsWith(only)) continue;
+            FakeLevel world = FakeLevel.create(official);
+            java.util.Map<ResourceKey<Level>, ServerLevel> levels =
+                    java.util.Map.of(Level.OVERWORLD, world);
+            official.server.levels = levels;
+            put(MinecraftServer.class, official.server, "levels", levels);
+            // 基岩地板（#wither_immune，爆炸不破坏方块），只验证爆炸触发与事件。
+            // Bedrock floor (#wither_immune): the blast destroys nothing, so the
+            // scene only checks that the explosion and events fire.
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.BEDROCK.defaultBlockState());
+                }
+            }
+            world.gameTime = 1000L;
+            world.getRandom().setSeed(1L);
+            world.witherScene = true;
+            world.levelEvents = new ArrayList<>();
+            var mob = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                    EntityTypes.WITHER.create(world, EntitySpawnReason.TRIGGERED);
+            mob.setId(FIRST_ID);
+            mob.setUUID(new UUID(0L, 1L));
+            mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            setRandom(mob, 5L);
+            mob.setHealth(100.0F);
+            mob.setInvulnerableTicks(s.invul());
+            world.tracked.add(mob);
+            long mobSeed0 = randomSeed(mob);
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= s.invul(); tick++) {
+                if (tick > 0) {
+                    world.levelEvents.clear();
+                    world.globalEvents.clear();
+                    world.explosions.clear();
+                    world.gameTime = 1000L + tick;
+                    mob.commonTick();
+                    mob.tick();
+                }
+                if (tick > 0) frames.append(',');
+                Vec3 d = mob.getDeltaMovement();
+                float[] hx = mob.getHeadXRots();
+                float[] hy = mob.getHeadYRots();
+                frames.append("{\"w\":[").append(mob.getInvulnerableTicks()).append(',')
+                        .append(Float.floatToRawIntBits(mob.getHealth())).append(',')
+                        .append(Double.doubleToRawLongBits(mob.getX())).append(',')
+                        .append(Double.doubleToRawLongBits(mob.getY())).append(',')
+                        .append(Double.doubleToRawLongBits(mob.getZ())).append(',')
+                        .append(Double.doubleToRawLongBits(d.x)).append(',')
+                        .append(Double.doubleToRawLongBits(d.y)).append(',')
+                        .append(Double.doubleToRawLongBits(d.z)).append(',')
+                        .append(Float.floatToRawIntBits(mob.getYRot())).append(',')
+                        .append(Float.floatToRawIntBits(mob.getXRot())).append(',')
+                        .append(Float.floatToRawIntBits(hx[0])).append(',')
+                        .append(Float.floatToRawIntBits(hx[1])).append(',')
+                        .append(Float.floatToRawIntBits(hy[0])).append(',')
+                        .append(Float.floatToRawIntBits(hy[1])).append(',')
+                        .append(randomSeed(mob)).append(',')
+                        .append(randomSeed(world.getRandom())).append(']');
+                // 事件编码：1=explode(半径位)，2=globalLevelEvent，3=levelEvent。按字典序排序。
+                // Event codes: 1=explode (radius bits), 2=globalLevelEvent, 3=levelEvent; sorted.
+                List<long[]> ev = new ArrayList<>();
+                for (int[] e : world.levelEvents) {
+                    ev.add(new long[] {3, e[0], e[1], e[2], e[3], e[4]});
+                }
+                ev.addAll(world.globalEvents);
+                ev.addAll(world.explosions);
+                ev.sort((a, b) -> {
+                    for (int i = 0; i < Math.min(a.length, b.length); i++) {
+                        if (a[i] != b[i]) return Long.compare(a[i], b[i]);
+                    }
+                    return Integer.compare(a.length, b.length);
+                });
+                frames.append(",\"ev\":[");
+                for (int i = 0; i < ev.size(); i++) {
+                    if (i > 0) frames.append(',');
+                    frames.append(Arrays.toString(ev.get(i)));
+                }
+                frames.append("]}");
+            }
+            frames.append(']');
+            out.write("{\"type\":\"witherExplode\",\"name\":" + jsonString(s.name())
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"invul\":" + s.invul()
+                    + ",\"mobSeed\":" + mobSeed0 + ",\"levelSeed\":1"
+                    + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
+    /** 凋灵之首命中牛：逐刻比射弹轨迹、牛血量 / 击退、凋零效果和世界随机源。 */
+    private static int playWitherSkull(Official official, Writer out, String only) throws Exception {
+        String name = "wither_skull_hit";
+        if (only != null && !name.startsWith(only)) return 0;
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.nextId = FIRST_ID;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        level.spawned = new ArrayList<>();
+        level.tracked = new ArrayList<>();
+        level.levelEvents = new ArrayList<>();
+        level.getRandom().setSeed(1L);
+        level.gameTime = START_TIME;
+        // 基岩地板（#wither_immune），命中后的小爆炸不破坏方块。
+        // Bedrock floor (#wither_immune): the small on-hit blast destroys nothing.
+        for (int x = -4; x <= 4; x++) {
+            for (int z = -4; z <= 12; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.BEDROCK.defaultBlockState());
+            }
+        }
+        // 凋灵只作 owner（供 getOwner 查找），不 tick 它的 AI。
+        var wither = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                EntityTypes.WITHER.create(level, EntitySpawnReason.TRIGGERED);
+        setRandom(wither, 5L);
+        wither.setUUID(new UUID(0L, 1L));
+        wither.setId(FIRST_ID + 1);
+        wither.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        level.tracked.add(wither);
+        // 牛作命中目标，不 tick（照风弹场景）。
+        var cow = EntityTypes.COW.create(level, EntitySpawnReason.EVENT);
+        setRandom(cow, 7L);
+        cow.setUUID(new UUID(0L, 2L));
+        cow.setId(FIRST_ID + 2);
+        cow.snapTo(0.5, 64.0, 8.5, 0.0F, 0.0F);
+        cow.setPersistenceRequired();
+        level.tracked.add(cow);
+        // 头 0 的位置 (0.5, 67, 0.5)，方向按官方瞄准 `cow.getY() + eyeHeight*0.5`。
+        double hx = 0.5, hy = 67.0, hz = 0.5;
+        double ty = cow.getY() + cow.getEyeHeight() * 0.5;
+        double dx = cow.getX() - hx, dy = ty - hy, dz = cow.getZ() - hz;
+        var skull = new net.minecraft.world.entity.projectile.hurtingprojectile.WitherSkull(
+                level, wither, new net.minecraft.world.phys.Vec3(dx, dy, dz));
+        skull.setUUID(new UUID(0L, 3L));
+        skull.setId(FIRST_ID);
+        skull.setPos(hx, hy, hz);
+        level.addFreshEntity(skull);
+        level.tracked.add(skull);
+        int ticks = 20;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                level.levelEvents.clear();
+                if (!skull.isRemoved()) {
+                    skull.commonTick();
+                    skull.tick();
+                }
+            }
+            if (tick > 0) frames.append(',');
+            var d = skull.getDeltaMovement();
+            var eff = cow.getEffect(net.minecraft.world.effect.MobEffects.WITHER);
+            frames.append('[')
+                    .append(Double.doubleToRawLongBits(skull.getX())).append(',')
+                    .append(Double.doubleToRawLongBits(skull.getY())).append(',')
+                    .append(Double.doubleToRawLongBits(skull.getZ())).append(',')
+                    .append(Double.doubleToRawLongBits(d.x)).append(',')
+                    .append(Double.doubleToRawLongBits(d.y)).append(',')
+                    .append(Double.doubleToRawLongBits(d.z)).append(',')
+                    .append(Float.floatToRawIntBits(skull.getYRot())).append(',')
+                    .append(Float.floatToRawIntBits(skull.getXRot())).append(',')
+                    .append(skull.isRemoved() ? 1 : 0).append(',')
+                    .append(Float.floatToRawIntBits(cow.getHealth())).append(',')
+                    .append(Double.doubleToRawLongBits(cow.getDeltaMovement().x)).append(',')
+                    .append(Double.doubleToRawLongBits(cow.getDeltaMovement().y)).append(',')
+                    .append(Double.doubleToRawLongBits(cow.getDeltaMovement().z)).append(',')
+                    .append(randomSeed(level.getRandom())).append(',')
+                    .append(eff == null ? 0 : eff.getDuration()).append(',')
+                    .append(eff == null ? 0 : eff.getAmplifier()).append(']');
+        }
+        frames.append(']');
+        out.write("{\"type\":\"witherSkull\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"start\":[" + hx + "," + hy + "," + hz + "]"
+                + ",\"direction\":[" + dx + "," + dy + "," + dz + "]"
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+        return 1;
+    }
+
+    /** 半血凋灵弹箭：逐刻比箭的轨迹、凋灵血量（不减）、两种随机源。 */
+    private static int playWitherArrow(Official official, Writer out, String only) throws Exception {
+        String name = "wither_arrow_deflect";
+        if (only != null && !name.startsWith(only)) return 0;
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.nextId = FIRST_ID;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        level.spawned = new ArrayList<>();
+        level.tracked = new ArrayList<>();
+        level.levelEvents = new ArrayList<>();
+        level.getRandom().setSeed(1L);
+        level.gameTime = START_TIME;
+        for (int x = -4; x <= 4; x++) {
+            for (int z = -4; z <= 4; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        // 半血凋灵（150 / 300）在 (3.5, 64, 0.5)，只作目标、不 tick AI。
+        // 半血时 `WitherBoss.hurtServer` 对 `AbstractArrow` 直接返回 false。
+        var wither = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                EntityTypes.WITHER.create(level, EntitySpawnReason.TRIGGERED);
+        setRandom(wither, 7L);
+        wither.setUUID(new UUID(0L, 2L));
+        wither.setId(FIRST_ID + 2);
+        wither.snapTo(3.5, 64.0, 0.5, 0.0F, 0.0F);
+        wither.setHealth(150.0F);
+        wither.setPersistenceRequired();
+        level.tracked.add(wither);
+        var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(
+                level, 0.5, 64.5, 0.5,
+                new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.ARROW), null);
+        setRandom(arrow, 11L);
+        arrow.setUUID(new UUID(0L, 1L));
+        arrow.setId(FIRST_ID);
+        arrow.setDeltaMovement(0.8, 0.0, 0.0);
+        arrow.setYRot(0.0F);
+        arrow.setXRot(0.0F);
+        level.tracked.add(arrow);
+        int ticks = 8;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                level.levelEvents.clear();
+                if (!arrow.isRemoved()) {
+                    arrow.commonTick();
+                    arrow.tick();
+                }
+            }
+            if (tick > 0) frames.append(',');
+            frames.append('[')
+                    .append(Double.doubleToRawLongBits(arrow.getX())).append(',')
+                    .append(Double.doubleToRawLongBits(arrow.getY())).append(',')
+                    .append(Double.doubleToRawLongBits(arrow.getZ())).append(',')
+                    .append(Double.doubleToRawLongBits(arrow.getDeltaMovement().x)).append(',')
+                    .append(Double.doubleToRawLongBits(arrow.getDeltaMovement().y)).append(',')
+                    .append(Double.doubleToRawLongBits(arrow.getDeltaMovement().z)).append(',')
+                    .append(Float.floatToRawIntBits(arrow.getYRot())).append(',')
+                    .append(Float.floatToRawIntBits(arrow.getXRot())).append(',')
+                    .append(arrow.isRemoved() ? 1 : 0).append(',')
+                    .append(Float.floatToRawIntBits(wither.getHealth())).append(',')
+                    .append(randomSeed(arrow)).append(',')
+                    .append(randomSeed(level.getRandom())).append(']');
+        }
+        frames.append(']');
+        out.write("{\"type\":\"witherArrow\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+        return 1;
+    }
+
+    /** 凋灵破坏方块：逐刻比扫描区 36 格方块是否还在，以及两种随机源。 */
+    private static int playWitherDestroy(Official official, Writer out, String only) throws Exception {
+        String name = "wither_destroy_blocks";
+        if (only != null && !name.startsWith(only)) return 0;
+        FakeLevel level = FakeLevel.create(official);
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.nextId = FIRST_ID;
+        level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+        level.spawned = new ArrayList<>();
+        level.tracked = new ArrayList<>();
+        level.levelEvents = new ArrayList<>();
+        level.getRandom().setSeed(1L);
+        level.gameTime = START_TIME;
+        // 基岩地板 y=63；扫描区里远离凋灵身体的格子放 STONE（可破坏）。
+        for (int x = -6; x <= 6; x++) {
+            for (int z = -6; z <= 6; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.BEDROCK.defaultBlockState());
+            }
+        }
+        for (int x = -1; x <= 1; x++) {
+            for (int y = 64; y <= 67; y++) {
+                for (int z = -1; z <= 1; z++) {
+                    if (x == 0 && z == 0) continue; // 凋灵身体所在列留空
+                    level.blocks.put(BlockPos.asLong(x, y, z), Blocks.STONE.defaultBlockState());
+                }
+            }
+        }
+        var mob = (net.minecraft.world.entity.boss.wither.WitherBoss)
+                EntityTypes.WITHER.create(level, EntitySpawnReason.TRIGGERED);
+        setRandom(mob, 5L);
+        mob.setUUID(new UUID(0L, 1L));
+        mob.setId(FIRST_ID);
+        mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        // `hurtServer` 之后 `destroyBlocksTick=20`，这里直接设好倒计时。
+        put(net.minecraft.world.entity.boss.wither.WitherBoss.class, mob, "destroyBlocksTick", 20);
+        level.tracked.add(mob);
+        long mobSeed0 = randomSeed(mob);
+        int ticks = 22;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                level.levelEvents.clear();
+                mob.commonTick();
+                mob.tick();
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"b\":[");
+            boolean first = true;
+            for (int x = -1; x <= 1; x++) {
+                for (int y = 64; y <= 67; y++) {
+                    for (int z = -1; z <= 1; z++) {
+                        if (!first) frames.append(',');
+                        first = false;
+                        frames.append(level.getBlockState(new BlockPos(x, y, z)).isAir() ? 0 : 1);
+                    }
+                }
+            }
+            frames.append("],\"mobSeed\":").append(randomSeed(mob))
+                    .append(",\"levelSeed\":").append(randomSeed(level.getRandom()))
+                    .append('}');
+        }
+        frames.append(']');
+        out.write("{\"type\":\"witherDestroy\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"mobSeed\":" + mobSeed0
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+        return 1;
+    }
+
     /**
      * 旋风人逐刻对拍：官方 Breeze 在假世界里开着 AI 跑，逐刻比姿态、大脑记忆、坐标 /
      * 速度 / 朝向、两种随机源。三个场景分别把玩家放在射击距离内、长跳距离、贴脸。
@@ -25560,6 +26019,12 @@ public final class MobOracle {
         float rainLevel;
         /** `InhabitedTime` 场景：按区块记逐刻累加值，供 `getCurrentDifficultyAt` 读。 */
         java.util.Map<Long, Long> inhabitedTimes;
+        /** 凋灵逐刻场景：这一刻的 `globalLevelEvent`（type / 坐标 / data）。 */
+        List<long[]> globalEvents;
+        /** 凋灵逐刻场景：这一刻的 `explode`（半径原始位）。 */
+        List<long[]> explosions;
+        /** 凋灵逐刻场景开关：拦下 `explode` / `globalLevelEvent`，不跑假世界里的官方爆炸。 */
+        boolean witherScene;
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
@@ -25603,6 +26068,8 @@ public final class MobOracle {
             level.nextId = 1;
             level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
             level.inhabitedTimes = new java.util.HashMap<>();
+            level.globalEvents = new ArrayList<>();
+            level.explosions = new ArrayList<>();
             // `allocate` 不跑字段初始值，显式给超平坦默认海平面 -63。
             // `allocate` skips field initializers; set superflat's default sea level -63 explicitly.
             level.injectedSeaLevel = -63;
@@ -26163,6 +26630,13 @@ public final class MobOracle {
                 vex.setUUID(Mth.createInsecureUUID(random));
                 random.nextFloat();
             }
+            // 凋灵之首由 `WitherBoss.performRangedAttack` 生成，官方随机源不带种子；
+            // Bamboo 的 `prepare_entity` 从岛种子源换种，这里照做（构造不额外抽 UUID）。
+            // A wither skull is built without a seeded random; Bamboo's `prepare_entity`
+            // reseeds it from the island seed source, so do the same here.
+            if (entity instanceof net.minecraft.world.entity.projectile.hurtingprojectile.WitherSkull) {
+                setRandom(entity, entitySeeds.nextLong());
+            }
             if (entity instanceof Animal calf && dropUuids) {
                 newbornCows.add(calf);
             }
@@ -26514,6 +26988,26 @@ public final class MobOracle {
             if (zombieLevelEvents != null) {
                 zombieLevelEvents.accept(new int[] {0, type, pos.getX(), pos.getY(), pos.getZ(), data});
             }
+        }
+
+        /** 凋灵场景：记下 1023 号全服事件，不放官方音效包（假世界没有玩家连接）。 */
+        @Override
+        public void globalLevelEvent(int type, BlockPos pos, int data) {
+            if (witherScene && globalEvents != null) {
+                globalEvents.add(new long[] {2, type, pos.getX(), pos.getY(), pos.getZ(), data});
+            } else {
+                super.globalLevelEvent(type, pos, data);
+            }
+        }
+
+        /** 凋灵场景：记下爆炸半径（位），再跑官方爆炸（射线消耗世界随机源，必须和 Bamboo 对齐）。 */
+        @Override
+        public void explode(Entity source, double x, double y, double z, float radius,
+                boolean fire, net.minecraft.world.level.Level.ExplosionInteraction interaction) {
+            if (witherScene && explosions != null) {
+                explosions.add(new long[] {1, Integer.toUnsignedLong(Float.floatToRawIntBits(radius))});
+            }
+            super.explode(source, x, y, z, radius, fire, interaction);
         }
 
         /** 非空时记下这一刻的 `levelEvent`（转化音效）。 */

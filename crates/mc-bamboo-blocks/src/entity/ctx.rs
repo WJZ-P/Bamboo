@@ -1249,6 +1249,15 @@ pub enum Command {
     OminousItemSpawnerTick(super::ominous_item_spawner::SpawnerTick),
     /// 风弹这一刻命中：`AbstractWindCharge.onHitBlock` / `onHitEntity` 的爆炸。
     WindChargeImpact(super::wind_charge::WindChargeHit),
+    /// `WitherBoss.performRangedAttack`：射出一枚凋灵之首。
+    ///
+    /// `WitherBoss.performRangedAttack`: fire one wither skull.
+    ShootWitherSkull(Box<super::wither_skull::WitherSkullShot>),
+    /// 凋灵之首这一刻命中：`WitherSkull.onHitEntity` 的伤害 / 凋零效果和 `onHit` 的爆炸。
+    ///
+    /// A wither skull hit this tick: damage / wither effect of
+    /// `WitherSkull.onHitEntity` and the blast of `onHit`.
+    WitherSkullImpact(super::wither_skull::WitherSkullHit),
     /// 烟花火箭这一刻爆炸：`FireworkRocketEntity.explode`（实体事件 17、伤害、消失）。
     ///
     /// A firework rocket exploding this tick: `FireworkRocketEntity.explode`
@@ -1367,6 +1376,13 @@ pub enum Command {
     /// `Entity.spawnAtLocation`：生成一件掉落物。
     DropItem {
         stack: ItemStack,
+    },
+    /// `LivingEntity.createWitherRose`：被凋灵 Boss 杀死的生物脚下生成凋灵玫瑰。
+    ///
+    /// `LivingEntity.createWitherRose`: a mob killed by the wither boss grows a
+    /// wither rose at its feet.
+    CreateWitherRose {
+        pos: BlockPos,
     },
     /// `Leashable.dropLeash` / `setLeashedTo` 的 `notifyLeasheeRemoved`：旧牵引者是
     /// 拴绳结且没有生物还拴着它时，结消失。
@@ -1558,6 +1574,14 @@ pub enum Command {
     },
     /// `BreakDoorGoal` / `RemoveBlockGoal` 的 `levelEvent(event, pos, data)`。
     MobLevelEvent {
+        event: i32,
+        pos: mc_bamboo_core::BlockPos,
+        data: i32,
+    },
+    /// `ServerLevel.globalLevelEvent`：发给全服所有玩家（不是 64 格内）。
+    ///
+    /// `ServerLevel.globalLevelEvent`: broadcast to every player, not just nearby ones.
+    GlobalLevelEvent {
         event: i32,
         pos: mc_bamboo_core::BlockPos,
         data: i32,
@@ -1998,7 +2022,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             center,
             radius,
             source,
-        } => world.explode_mob(&source, center, radius),
+        } => world.explode_mob(&source, center, radius, None),
         Command::LandFallingBlock {
             data,
             entity_drops,
@@ -2086,6 +2110,10 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             super::ominous_item_spawner::apply(me, world, facts);
         }
         Command::WindChargeImpact(hit) => super::wind_charge::impact(me, world, hit),
+        Command::ShootWitherSkull(shot) => {
+            world.spawn_wither_skull_shot(&shot);
+        }
+        Command::WitherSkullImpact(hit) => super::wither_skull::impact(me, world, hit),
         Command::FireworkRocketExplode { hit } => {
             super::firework_rocket::explode(me, world, hit);
         }
@@ -2176,6 +2204,25 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
+        }
+        Command::CreateWitherRose { pos } => {
+            use mc_bamboo_data::{blocks, items};
+            let rose = crate::BlockState(blocks::WITHER_ROSE);
+            // `WitherRoseBlock.canSurvive` 走行为表的 `mayPlaceOn`（脚下格下方是否
+            // `#supports_wither_rose`），不是直接比标签。
+            //
+            // `WitherRoseBlock.canSurvive` goes through the behaviour table's
+            // `mayPlaceOn`, not a bare tag check.
+            let place = world.block_game_rules().mob_griefing
+                && world.block_state(pos).is_air()
+                && rose.can_survive(world, pos);
+            if place {
+                world.set_block_and_update(pos, rose);
+            } else {
+                // `new ItemEntity(level, getX(), getY(), getZ(), stack)`：实体脚底坐标。
+                // `new ItemEntity(level, getX(), getY(), getZ(), stack)`: exact entity position.
+                world.spawn_at_location(me.position, ItemStack::new(items::WITHER_ROSE, 1));
+            }
         }
         Command::DropTridentItem { stack } => {
             world.spawn_at_location(
@@ -2334,6 +2381,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 data,
                 except_initiator: false,
             });
+        }
+        Command::GlobalLevelEvent { event, pos, data } => {
+            world.push_effect(crate::Effect::GlobalLevelEvent { event, pos, data });
         }
         Command::RingBell { pos } => crate::behaviour::attached::bell::ring(world, pos),
         Command::SpawnFirework {

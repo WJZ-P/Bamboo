@@ -95,6 +95,7 @@ mod warden;
 mod water_mob;
 mod wind_charge;
 mod witch_throw;
+mod wither;
 mod zombie_villager;
 
 const MIN_Y: i32 = -64;
@@ -269,6 +270,12 @@ enum Line {
     SculkCatalystSave(sculk_catalyst::SculkCatalystSaveCase),
     Warden(Box<warden::WardenCase>),
     WardenSave(warden::WardenSaveCase),
+    WitherSave(wither::WitherSaveCase),
+    WitherInvul(Box<wither::WitherInvulCase>),
+    WitherExplode(Box<wither::WitherExplodeCase>),
+    WitherSkull(Box<wither::WitherSkullCase>),
+    WitherArrow(Box<wither::WitherArrowCase>),
+    WitherDestroy(Box<wither::WitherDestroyCase>),
     Breeze(Box<breeze::BreezeCase>),
     Allay(Box<allay::AllayCase>),
     AllaySave(allay::AllaySaveCase),
@@ -2503,6 +2510,12 @@ impl Report {
                 Line::SculkCatalystSave(case) => self.replay_sculk_catalyst_save(&case),
                 Line::Warden(case) => self.replay_warden(&case),
                 Line::WardenSave(case) => self.replay_warden_save(&case),
+                Line::WitherSave(case) => self.replay_wither_save(&case),
+                Line::WitherInvul(case) => self.replay_wither_invul(&case),
+                Line::WitherExplode(case) => self.replay_wither_explode(&case),
+                Line::WitherSkull(case) => self.replay_wither_skull(&case),
+                Line::WitherArrow(case) => self.replay_wither_arrow(&case),
+                Line::WitherDestroy(case) => self.replay_wither_destroy(&case),
                 Line::Breeze(case) => self.replay_breeze(&case),
                 Line::Allay(case) => self.replay_allay(&case),
                 Line::AllaySave(case) => self.replay_allay_save(&case),

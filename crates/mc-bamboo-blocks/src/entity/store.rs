@@ -158,6 +158,10 @@ pub enum KindPublic {
     OminousItemSpawner(ItemStack),
     /// 风弹：同步要的 UUID、主人、种类和俯仰角。
     WindCharge(super::wind_charge::WindChargePublic),
+    /// 凋灵之首：同步要的 UUID、主人、危险标志和俯仰角。
+    ///
+    /// A wither skull: the synced UUID, owner, dangerous flag and pitch.
+    WitherSkull(super::wither_skull::WitherSkullPublic),
     /// 烟花火箭：同步要的 UUID、主人、俯仰角和物品堆。
     FireworkRocket(super::firework_rocket::FireworkRocketPublic),
     /// 钓鱼浮漂：同步要的 UUID、主人、俯仰角、被钩实体与咬钩标记。
@@ -200,6 +204,7 @@ impl KindPublic {
                 mc_bamboo_data::registries::entity_type::OMINOUS_ITEM_SPAWNER
             }
             Self::WindCharge(charge) => charge.variant.entity_type(),
+            Self::WitherSkull(_) => mc_bamboo_data::registries::entity_type::WITHER_SKULL,
             Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
             Self::FishingHook(_) => mc_bamboo_data::registries::entity_type::FISHING_BOBBER,
             Self::Mob(mob) => mob.mob_type.entity_type(),
@@ -285,6 +290,10 @@ pub enum KindState {
     OminousItemSpawner(Box<super::ominous_item_spawner::OminousItemSpawner>),
     /// 风弹的全部状态。
     WindCharge(Box<super::wind_charge::WindCharge>),
+    /// 凋灵之首的全部状态。
+    ///
+    /// The full wither-skull state.
+    WitherSkull(Box<super::wither_skull::WitherSkull>),
     /// 烟花火箭的全部状态。
     FireworkRocket(Box<super::firework_rocket::FireworkRocket>),
     /// 钓鱼浮漂的全部状态。
@@ -445,6 +454,9 @@ impl EntityRow {
             (KindPublic::WindCharge(_), KindState::WindCharge(charge)) => {
                 EntityKind::WindCharge(charge)
             }
+            (KindPublic::WitherSkull(_), KindState::WitherSkull(skull)) => {
+                EntityKind::WitherSkull(skull)
+            }
             (KindPublic::FireworkRocket(_), KindState::FireworkRocket(firework)) => {
                 EntityKind::FireworkRocket(firework)
             }
@@ -565,6 +577,10 @@ impl Entity {
             EntityKind::WindCharge(charge) => (
                 KindPublic::WindCharge(charge.public(self.remaining_fire_ticks)),
                 KindState::WindCharge(charge),
+            ),
+            EntityKind::WitherSkull(skull) => (
+                KindPublic::WitherSkull(skull.public()),
+                KindState::WitherSkull(skull),
             ),
             EntityKind::FireworkRocket(firework) => (
                 KindPublic::FireworkRocket(firework.public()),
@@ -1292,6 +1308,15 @@ impl EntityStore {
         entity.finish_item_random();
         super::orb::finish_spawn(&mut entity, Vec3::default());
         entity.finish_mob_random();
+        if let super::EntityKind::Mob(mob) = &mut entity.kind
+            && mob.mob_type == super::mob::MobType::Wither
+        {
+            // `WitherBoss.<init>`：`bossEvent` 的 UUID 用
+            // `Mth.createInsecureUUID(random)`，排在 Entity 构造取数之后。
+            // `WitherBoss.<init>`: the `bossEvent` UUID comes from
+            // `Mth.createInsecureUUID(random)`, after the Entity draws.
+            mob.wither.boss_uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
         if let EntityKind::Arrow(arrow) = &mut entity.kind {
             arrow.uuid = super::mob::insecure_uuid(&mut entity.random);
         }

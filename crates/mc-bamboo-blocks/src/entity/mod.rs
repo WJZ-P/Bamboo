@@ -30,6 +30,7 @@ pub mod store;
 pub mod thrown_egg;
 pub mod view;
 pub mod wind_charge;
+pub mod wither_skull;
 
 mod explosion;
 mod falling;
@@ -275,6 +276,10 @@ pub enum EntityKind {
     ///
     /// A wind charge, vanilla `WindCharge` / `BreezeWindCharge`.
     WindCharge(Box<wind_charge::WindCharge>),
+    /// 凋灵之首，`WitherSkull`（普通 / 蓝色危险）。
+    ///
+    /// A wither skull, vanilla `WitherSkull` (normal / dangerous).
+    WitherSkull(Box<wither_skull::WitherSkull>),
     /// 烟花火箭，`FireworkRocketEntity`。
     ///
     /// A firework rocket, vanilla `FireworkRocketEntity`.
@@ -310,6 +315,7 @@ impl EntityKind {
                 mc_bamboo_data::registries::entity_type::OMINOUS_ITEM_SPAWNER
             }
             Self::WindCharge(charge) => charge.variant.entity_type(),
+            Self::WitherSkull(_) => mc_bamboo_data::registries::entity_type::WITHER_SKULL,
             Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
             Self::FishingHook(_) => mc_bamboo_data::registries::entity_type::FISHING_BOBBER,
             Self::Mob(mob) => mob.mob_type.entity_type(),
@@ -554,6 +560,7 @@ impl Entity {
                 ominous_item_spawner::tick(self, ctx);
             }
             EntityKind::WindCharge(_) => wind_charge::tick(self, ctx),
+            EntityKind::WitherSkull(_) => wither_skull::tick(self, ctx),
             EntityKind::FireworkRocket(_) => firework_rocket::tick(self, ctx),
             EntityKind::FishingHook(_) => fishing_hook::tick(self, ctx),
             EntityKind::LeashKnot(_) => leash_knot::tick(self, ctx),

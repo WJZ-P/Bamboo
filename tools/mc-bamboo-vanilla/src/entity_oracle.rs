@@ -937,6 +937,7 @@ fn snap_of(entity: Entity) -> OfficialEntity {
             ("ominous_item_spawner".to_owned(), -1, -1, -1, 0, -1, -1, -1)
         }
         EntityKind::WindCharge(_) => ("wind_charge".to_owned(), -1, -1, -1, 0, -1, -1, -1),
+        EntityKind::WitherSkull(_) => ("wither_skull".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::FireworkRocket(_) => ("firework_rocket".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::LeashKnot(_) => ("leash_knot".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::EvokerFangs(_) => ("evoker_fangs".to_owned(), -1, -1, -1, 0, -1, -1, -1),
