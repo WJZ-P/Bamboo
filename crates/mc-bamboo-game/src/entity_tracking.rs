@@ -1150,18 +1150,28 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             _ => EntityData::SharedFlags(0),
         };
     }
-    if kind == mc_bamboo_blocks::entity::mob::MobType::Villager {
+    // `AbstractVillager.DATA_UNHAPPY_COUNTER` 也定义在流浪商人身上，index 相同。
+    // `AbstractVillager.DATA_UNHAPPY_COUNTER` also belongs to the wandering trader.
+    if matches!(
+        kind,
+        mc_bamboo_blocks::entity::mob::MobType::Villager
+            | mc_bamboo_blocks::entity::mob::MobType::WanderingTrader
+    ) {
         use mc_bamboo_data::villager;
         match index {
             villager::UNHAPPY_COUNTER_INDEX => return EntityData::VillagerUnhappy(0),
-            villager::VILLAGER_DATA_INDEX => {
+            villager::VILLAGER_DATA_INDEX
+                if kind == mc_bamboo_blocks::entity::mob::MobType::Villager =>
+            {
                 return EntityData::VillagerData {
                     kind: villager::type_id(villager::DEFAULT_TYPE).unwrap_or(0),
                     profession: villager::profession_id(villager::NONE_PROFESSION).unwrap_or(0),
                     level: villager::MIN_VILLAGER_LEVEL,
                 };
             }
-            villager::VILLAGER_DATA_FINALIZED_INDEX => {
+            villager::VILLAGER_DATA_FINALIZED_INDEX
+                if kind == mc_bamboo_blocks::entity::mob::MobType::Villager =>
+            {
                 return EntityData::VillagerDataFinalized(false);
             }
             _ => {}
@@ -1186,6 +1196,16 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
         && index == mc_bamboo_data::entity_types::ARMADILLO_STATE
     {
         return EntityData::ArmadilloState(0);
+    }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::CopperGolem {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::COPPER_GOLEM_WEATHER_STATE => {
+                return EntityData::CopperGolemWeatherState(0);
+            }
+            facts::COPPER_GOLEM_STATE => return EntityData::CopperGolemState(0),
+            _ => {}
+        }
     }
     if kind == mc_bamboo_blocks::entity::mob::MobType::Frog {
         use mc_bamboo_data::entity_types as facts;
@@ -1622,7 +1642,7 @@ fn equine_non_default_data(
     if equine.chested {
         out.push(EntityData::HorseChest(true));
     }
-    if kind == MobType::Llama {
+    if matches!(kind, MobType::Llama | MobType::TraderLlama) {
         if equine.strength != 0 {
             out.push(EntityData::LlamaStrength(equine.strength));
         }
@@ -1837,6 +1857,20 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         }
         return out;
     }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::CopperGolem {
+        // 铜傀儡自有两项：氧化等级（缺省 UNAFFECTED=0）和交互动画状态（缺省 IDLE=0）。
+        // A copper golem adds two: the oxidation stage (UNAFFECTED=0) and the interaction
+        // state (IDLE=0).
+        if mob.copper_golem_weather_state != 0 {
+            out.push(EntityData::CopperGolemWeatherState(
+                mob.copper_golem_weather_state,
+            ));
+        }
+        if mob.copper_golem_state != 0 {
+            out.push(EntityData::CopperGolemState(mob.copper_golem_state));
+        }
+        return out;
+    }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Frog {
         // 青蛙多两项：品种（缺省温带）和舌头目标（缺省空）。
         // Frogs add two: the variant (temperate by default) and the tongue target (empty
@@ -1921,12 +1955,19 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         }
         return out;
     }
-    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Villager {
+    if matches!(
+        mob.mob_type,
+        mc_bamboo_blocks::entity::mob::MobType::Villager
+            | mc_bamboo_blocks::entity::mob::MobType::WanderingTrader
+    ) {
         use mc_bamboo_data::villager;
-        // 按 index 升序：18 不高兴计数、19 `VillagerData`、20 finalized。
-        // Ascending indices: 18 unhappy, 19 `VillagerData`, 20 finalized.
+        // 按 index 升序：18 不高兴计数、19 `VillagerData`、20 finalized（仅村民）。
+        // Ascending indices: 18 unhappy, 19 `VillagerData`, 20 finalized (villagers only).
         if mob.villager_unhappy != 0 {
             out.push(EntityData::VillagerUnhappy(mob.villager_unhappy));
+        }
+        if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::WanderingTrader {
+            return out;
         }
         let default_kind = villager::type_id(villager::DEFAULT_TYPE).unwrap_or(0);
         let default_profession = villager::profession_id(villager::NONE_PROFESSION).unwrap_or(0);

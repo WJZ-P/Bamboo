@@ -239,6 +239,8 @@ impl Report {
             players,
             game,
             wrong_was_hurt: false,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             explosion_break: 0,
             shoulder: Default::default(),
             inhabited: HashMap::new(),

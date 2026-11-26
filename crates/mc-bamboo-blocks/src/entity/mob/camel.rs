@@ -451,7 +451,11 @@ fn idle_activity() -> ActivityData {
                         (
                             Kind::trigger_if(
                                 super::brain::behavior::BodyPredicate::CamelNotRefuseToMove,
-                                Kind::RandomStroll { speed: 2.0 },
+                                Kind::RandomStroll {
+                                    speed: 2.0,
+                                    horizontal: 10,
+                                    vertical: 7,
+                                },
                             ),
                             1,
                         ),

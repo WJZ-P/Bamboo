@@ -343,6 +343,11 @@ fn thunder_hit(world: &mut World, public: &EntityPublic, bolt_uuid: [u8; 16]) {
             general_thunder_hit(world, uid, source);
             mob::thunder::set_creeper_powered(world, uid);
         }
+        MobType::CopperGolem => {
+            // `CopperGolem.thunderHit` 先走父类伤害，再按闪电退一级氧化。
+            general_thunder_hit(world, uid, source);
+            mob::thunder::copper_golem_hit(world, uid, bolt_uuid);
+        }
         MobType::Pig => {
             // 猪变僵尸猪灵不在这批的建模范围，按父类处理，README 记已知限制。
             general_thunder_hit(world, uid, source);

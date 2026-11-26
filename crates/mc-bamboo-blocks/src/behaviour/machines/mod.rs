@@ -28,7 +28,7 @@ mod observer;
 mod piston;
 mod piston_entity;
 mod piston_structure;
-mod pumpkin;
+pub mod pumpkin;
 mod rail;
 mod redstone_torch;
 mod redstone_wire;

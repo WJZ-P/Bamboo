@@ -960,6 +960,21 @@ pub trait Level: LevelSideState + LevelEntities {
     /// `None`，官方对应 `null`。
     fn note_block_sound(&self, pos: BlockPos) -> Option<String>;
 
+    /// `CopperGolemStatueBlockEntity.components().get(CUSTOM_NAME)` 对应的文本组件标签。
+    /// 官方把它存进 `components` 组件表；没建模的世界返回 `None`。
+    ///
+    /// The text-component tag behind a statue's `CUSTOM_NAME`. Vanilla stores it in the
+    /// `components` map; unmodelled worlds return `None`.
+    fn statue_custom_name(&self, _pos: BlockPos) -> Option<mc_bamboo_nbt::Tag> {
+        None
+    }
+
+    /// 把铜傀儡的自定义名写进雕像方块实体的组件表。没建模的世界什么都不做。
+    ///
+    /// Write a copper golem's custom name into the statue block entity's components.
+    /// Unmodelled worlds do nothing.
+    fn set_statue_custom_name(&mut self, _pos: BlockPos, _name: Option<mc_bamboo_nbt::Tag>) {}
+
     /// 这个区块现在跑不跑方块逻辑（计划刻、流体刻、方块事件、方块实体）。默认都跑。
     ///
     /// 到期的计划刻在不能跑的区块里留在队列里，等这个区块重新能跑时按原来的排序键执行。
@@ -1200,11 +1215,38 @@ pub trait Level: LevelSideState + LevelEntities {
         0
     }
 
+    /// `ChestBlockEntity.openersCounter.openCount`：这一刻有几个 `ContainerUser`
+    /// 开着这个箱子。铜傀儡排队判定读它；没有容器表时返回 0。
+    ///
+    /// The chest's `ContainerOpenersCounter.openCount`; read by the copper golem's
+    /// queue check. Worlds without a container table report zero.
+    fn container_open_count(&self, _pos: BlockPos) -> i32 {
+        0
+    }
+
+    /// `Container.startOpen/stopOpen`：开箱者人数增减 `delta`。
+    fn change_container_open_count(&mut self, _pos: BlockPos, _delta: i32) {}
+
     /// 这一格容器背后的方块位置：单箱是这一格，双箱是两半，见 `CompoundContainer.setChanged`。
     ///
     /// 和 [`Level::with_container`] 一样按能取到的那条规则算，被压住的箱子也算能取到。
     fn container_positions(&self, pos: BlockPos) -> Vec<BlockPos> {
         vec![pos]
+    }
+
+    /// `TransportItemsBetweenContainers.getTransportTarget` 的只读查询：以 `center`
+    /// 的方块为中心、`horizontal`/`vertical` 为半径的盒子里所有容器方块位置。
+    /// 没有容器表的世界返回空表。
+    ///
+    /// Read-only query for `getTransportTarget`: container positions inside the search
+    /// box. Worlds without a container table return an empty list.
+    fn container_positions_in(
+        &self,
+        _center: BlockPos,
+        _horizontal: i32,
+        _vertical: i32,
+    ) -> Vec<BlockPos> {
+        Vec::new()
     }
 
     /// 带着这一格的漏斗方块实体运行一段代码。这一格没有漏斗实体时不调用 `f`，返回 `false`。
@@ -1650,6 +1692,15 @@ pub trait Level: LevelSideState + LevelEntities {
         _target: crate::entity::EntityUid,
         _strength: f64,
         _direction: (f64, f64),
+    ) -> bool {
+        false
+    }
+
+    /// 精确驱动当场给玩家加一次 `Entity.push(dx, dy, dz)`（音波命中）。
+    fn push_player_now(
+        &mut self,
+        _target: crate::entity::EntityUid,
+        _push: mc_bamboo_core::Vec3,
     ) -> bool {
         false
     }
@@ -2743,6 +2794,17 @@ pub enum Effect {
         pos: BlockPos,
         data: i32,
         except_initiator: bool,
+    },
+    /// `ServerLevel.sendParticles`：一个简单粒子包（幽匿催发体的 `sculk_soul`）。
+    /// 游戏层发给 32 格内的玩家。
+    ///
+    /// A simple `ServerLevel.sendParticles` packet (the catalyst's `sculk_soul`).
+    Particles {
+        particle: i32,
+        position: mc_bamboo_core::Vec3,
+        offset: mc_bamboo_core::Vec3,
+        speed: f32,
+        count: i32,
     },
     /// 音符盒响了，`NoteBlock.triggerEvent`。`pitch` 是官方的 `getPitchFromNote(note)`，
     /// `seed` 是官方传给 `playSeededSound` 的那个随机数。

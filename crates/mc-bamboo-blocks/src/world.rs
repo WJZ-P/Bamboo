@@ -1324,6 +1324,18 @@ impl<'a> World<'a> {
         self.level.note_block_sound(pos)
     }
 
+    /// `CopperGolemStatueBlockEntity` 组件表里的自定义名文本标签。
+    pub fn statue_custom_name(&self, pos: BlockPos) -> Option<mc_bamboo_nbt::Tag> {
+        self.note_access(pos, false);
+        self.level.statue_custom_name(pos)
+    }
+
+    /// 把铜傀儡的自定义名写进雕像方块实体的组件表（`createStatue`）。
+    pub fn set_statue_custom_name(&mut self, pos: BlockPos, name: Option<mc_bamboo_nbt::Tag>) {
+        self.note_access(pos, true);
+        self.level.set_statue_custom_name(pos, name);
+    }
+
     /// `getBlockEntity(pos)` 之后按类型取。
     pub fn block_entity<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
         self.note_access(pos, false);
@@ -1589,6 +1601,13 @@ impl<'a> World<'a> {
     /// 这一格容器现在的槽位，见 [`Level::slots_at`]。
     ///
     /// The container slots at this position. See [`Level::slots_at`].
+    /// `ContainerOpenersCounter.incrementOpeners/decrementOpeners` 的落地。
+    pub(crate) fn change_container_open_count(&mut self, pos: BlockPos, delta: i32) {
+        self.note_access(pos, true);
+        self.level.change_container_open_count(pos, delta);
+        self.notify_changed(pos);
+    }
+
     pub(crate) fn slots_at(&self, pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {
         self.note_access(pos, false);
         self.level.slots_at(pos)
@@ -4056,6 +4075,11 @@ impl<'a> World<'a> {
                 amount,
             );
         }
+        // `level.levelEvent(this, event, blockPosition(), data)`：客户端靠这个包播
+        // 打蜡 / 去蜡 / 刮锈的粒子，世界里没有方块状态变化。
+        for (event, pos, data) in &outcome.level_events {
+            self.level_event(*event, *pos, *data);
+        }
         outcome
     }
 
@@ -4144,6 +4168,26 @@ impl<'a> World<'a> {
         let result = f(&mut entity.random);
         self.level.put_entity(entity);
         Some(result)
+    }
+
+    /// `Entity.push(dx, dy, dz)`：把一组有限向量加到一只生物的速度上。
+    pub fn push_mob(&mut self, id: i32, push: Vec3) {
+        if !(push.x.is_finite() && push.y.is_finite() && push.z.is_finite()) {
+            return;
+        }
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return;
+        };
+        entity.delta = entity.delta.add(push);
+        self.level.put_entity(entity);
+    }
+
+    /// `Entity.push(dx, dy, dz)` 对玩家：精确驱动当场改速度并发包，否则延后。
+    pub fn push_player(&mut self, target: crate::entity::EntityUid, push: Vec3) {
+        if !(push.x.is_finite() && push.y.is_finite() && push.z.is_finite()) {
+            return;
+        }
+        let _ = self.level.push_player_now(target, push);
     }
 
     /// `Player.causeExtraKnockback` 对生物目标调的 `LivingEntity.knockback`。
@@ -5196,6 +5240,7 @@ mod tests {
                 | Effect::RaidSetLeader { .. }
                 | Effect::Explode { .. }
                 | Effect::PlayerShoulder { .. }
+                | Effect::Particles { .. }
                 | Effect::VibrationParticle { .. } => None,
             })
             .collect()

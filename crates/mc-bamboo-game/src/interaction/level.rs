@@ -768,6 +768,38 @@ impl Level for RegionLevel<'_> {
         }
     }
 
+    /// `CopperGolemStatueBlockEntity` 的自定义名在 `components` 组件表里，
+    /// 由 [`Self::block_items`] 的 `CUSTOM_NAME` 补丁建模。
+    fn statue_custom_name(&self, pos: BlockPos) -> Option<mc_bamboo_nbt::Tag> {
+        let statue = block_of_state(self.chunks.block(pos)?)?.block_entity_type
+            == Some(entities::COPPER_GOLEM_STATUE);
+        if !statue {
+            return None;
+        }
+        match self.block_items.get(&pos)?.get(kinds::CUSTOM_NAME)? {
+            ComponentValue::CustomName(component) => Some(component.tag().clone()),
+            _ => None,
+        }
+    }
+
+    /// `createStatue` 把铜傀儡的自定义名搬进雕像方块实体；`None` 时清掉补丁。
+    fn set_statue_custom_name(&mut self, pos: BlockPos, name: Option<mc_bamboo_nbt::Tag>) {
+        let Some(value) = name else {
+            return;
+        };
+        let Ok(component) = mc_bamboo_protocol::components::archive::text::decode(&value) else {
+            return;
+        };
+        self.dirty.mark(pos.chunk());
+        let patch = self
+            .block_items
+            .get_or_insert_with(pos, ComponentPatch::new);
+        patch.put(
+            kinds::CUSTOM_NAME,
+            mc_bamboo_protocol::components::PatchEntry::Set(ComponentValue::CustomName(component)),
+        );
+    }
+
     fn block_game_rules(&self) -> BlockGameRules {
         self.block_rules
     }
@@ -1016,6 +1048,29 @@ impl Level for RegionLevel<'_> {
         true
     }
 
+    fn push_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        push: mc_bamboo_core::Vec3,
+    ) -> bool {
+        let Some(side) = self.player_side.as_mut() else {
+            return false;
+        };
+        let mut parts = crate::player_hurt::HurtParts {
+            players: &mut *self.players,
+            links: &mut *side.links,
+            sound_seeds: side.sound_seeds,
+            entities: &mut *self.entities,
+            difficulty: self.difficulty as i32,
+            rules: side.rules,
+            attacker: None,
+            defer_health: true,
+            pending_triggers: Some(side.pending_triggers),
+        };
+        crate::player_hurt::push_player(&mut parts, PlayerId(target), push);
+        true
+    }
+
     fn ignite_player_now(
         &mut self,
         target: mc_bamboo_blocks::entity::EntityUid,
@@ -1173,6 +1228,39 @@ impl Level for RegionLevel<'_> {
             .get(&pos)
             .map(|entry| entry.slots.clone())
             .unwrap_or_default()
+    }
+
+    /// 精确驱动读当前 `ContainerEntry.open_count`。
+    fn container_open_count(&self, pos: BlockPos) -> i32 {
+        self.containers
+            .get(&pos)
+            .map_or(0, |entry| entry.open_count)
+    }
+
+    fn change_container_open_count(&mut self, pos: BlockPos, delta: i32) {
+        self.dirty.mark(pos.chunk());
+        self.notify_container(pos);
+        if let Some(entry) = self.containers.get_mut(&pos) {
+            entry.open_count = (entry.open_count + delta).max(0);
+        }
+    }
+
+    /// 精确驱动读当前容器表；按方块位置升序（PosMap 遍历序）返回盒内位置。
+    fn container_positions_in(
+        &self,
+        center: BlockPos,
+        horizontal: i32,
+        vertical: i32,
+    ) -> Vec<BlockPos> {
+        self.containers
+            .keys()
+            .copied()
+            .filter(|pos| {
+                (pos.x - center.x).abs() <= horizontal
+                    && (pos.y - center.y).abs() <= vertical
+                    && (pos.z - center.z).abs() <= horizontal
+            })
+            .collect()
     }
 
     fn clear_container(&mut self, pos: BlockPos) {

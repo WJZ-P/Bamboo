@@ -1153,6 +1153,13 @@ pub struct ProjectileFacts {
     pub sniffer_state: u8,
     pub sniffer_state_serializer: i32,
     pub sniffer_drop_seed_at_tick: u8,
+    /// `CopperGolem.DATA_WEATHER_STATE` / `COPPER_GOLEM_STATE` 的下标和序列化器。
+    ///
+    /// The indices and serializers of the copper golem's two synched data fields.
+    pub copper_golem_weather_state: u8,
+    pub copper_golem_state: u8,
+    pub copper_golem_weather_state_serializer: i32,
+    pub copper_golem_state_serializer: i32,
     /// `PolarBear.DATA_STANDING_ID` 的元数据 index。
     ///
     /// The metadata index of `PolarBear.DATA_STANDING_ID`.

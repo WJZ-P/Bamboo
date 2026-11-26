@@ -147,6 +147,10 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Pillager && !me.removed {
         super::crossbow::use_tick(me, mob, ctx);
     }
+    // `WanderingTrader` 的 `UseItemGoal` 走同一条 `updatingUsingItem()`。
+    if mob.mob_type == super::MobType::WanderingTrader && !me.removed {
+        super::wandering_trader::use_tick(me, mob);
+    }
     detect_equipment_updates(me, mob, ctx);
     // `LivingEntity.tick`：睡在床上但床没了时立刻起床。
     // `LivingEntity.tick`: wake up if sleeping and the bed no longer exists.
@@ -173,6 +177,17 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
             // `Parrot.aiStep` 结尾的 `calculateFlapping`。
             // `calculateFlapping` at the end of `Parrot.aiStep`.
             super::parrot::after_ai_step(me, mob);
+        }
+        // `WanderingTrader.aiStep()` / `TraderLlama.aiStep()`：在 `super.aiStep()`
+        // 之后每刻跑饮水状态机与 `maybeDespawn()`。
+        // The wandering-trader / trader-llama `aiStep()` tail: drinking and despawn.
+        if !me.removed {
+            if mob.mob_type == super::MobType::WanderingTrader {
+                super::wandering_trader::custom_ai_step(me, mob, ctx);
+                super::wandering_trader::maybe_despawn(me, mob);
+            } else if mob.mob_type == super::MobType::TraderLlama {
+                super::trader_llama::maybe_despawn(me, mob, ctx);
+            }
         }
     }
     // `Bee.tick` 在 `super.tick()` 之后的花蜜粒子与翻滚动画。
@@ -306,6 +321,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     // Tail of `Axolotl.customServerAiStep`: map the PLAY_DEAD_TICKS memory to metadata.
     if mob.mob_type == super::MobType::Axolotl {
         super::axolotl::sync_playing_dead(mob);
+    }
+    // `CopperGolem.tick` 在 `super.tick()` 之后：氧化计时与变雕像。
+    // `CopperGolem.tick` after `super.tick()`: the weathering clock and statue conversion.
+    if mob.mob_type == super::MobType::CopperGolem && !me.removed {
+        super::copper_golem::tick_after(me, mob, ctx);
     }
 }
 
@@ -574,6 +594,10 @@ pub(crate) fn max_up_step(mob: &Mob) -> f32 {
 /// `super.baseTick()`; every other mob only runs the latter.
 fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let pre_tick_air = mob.air_supply;
+    // `LivingEntity.baseTick` 里的 `updateDirtyEffects`（隐身共享标志位）。
+    if mob.mob_type == super::MobType::WanderingTrader {
+        super::wandering_trader::update_invisibility(mob);
+    }
     // 官方 `LivingEntity.baseTick` 开头的 `EnchantmentHelper.tickEffects`（TICK 组件）。
     // `EnchantmentHelper.tickEffects` at the head of vanilla `LivingEntity.baseTick`.
     super::enchantment_wiring::tick(me, mob, ctx);
@@ -864,6 +888,11 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
         // `Villager.getAmbientSound`：睡觉时返回 null，不出声也不取音高。
         // `Villager.getAmbientSound`: returns null while sleeping, drawing no pitch.
         super::MobType::Villager if mob.villager.sleeping => None,
+        // `WanderingTrader.getAmbientSound`：交易中换成 `...trade`。
+        // `WanderingTrader.getAmbientSound`: the trading variant while trading.
+        super::MobType::WanderingTrader if mob.villager.is_trading() => {
+            Some("minecraft:entity.wandering_trader.trade")
+        }
         // `Sniffer.getAmbientSound`：挖掘 / 搜寻时不叫。
         // `Sniffer.getAmbientSound`: silent while digging or searching.
         super::MobType::Sniffer => super::sniffer::ambient_voice(mob),
@@ -886,6 +915,16 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
 /// Ambient, hurt and death sounds: equines by kind and age, others by type,
 /// cows by their sound variant.
 fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
+    // 铜傀儡的受伤 / 死亡音按氧化等级换，环境音恒无。
+    // A copper golem's hurt / death sounds depend on its oxidation stage; no ambient.
+    if mob.mob_type == super::MobType::CopperGolem {
+        let weather = mob.copper_golem.weather_state;
+        return match voice {
+            Voice::Hurt => super::copper_golem::hurt_sound(weather),
+            Voice::Death => super::copper_golem::death_sound(weather),
+            _ => "",
+        };
+    }
     // 硫磺方块怪按大小和是否吞了方块分派四种声音。
     // Sulfur cubes dispatch their four sounds by size and body item.
     if mob.mob_type == super::MobType::SulfurCube {
@@ -2086,6 +2125,9 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     if super::nautilus::is_nautilus(mob.mob_type) {
         super::nautilus_ai::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::CopperGolem {
+        super::copper_golem::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Creaking {
         super::creaking_ai::custom_server_ai_step(me, mob, ctx);
     }
@@ -3186,6 +3228,9 @@ fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource, ti
     if mob.mob_type == super::MobType::Armadillo {
         super::armadillo::after_actually_hurt(me, mob, source);
     }
+    if mob.mob_type == super::MobType::CopperGolem {
+        super::copper_golem::after_hurt(mob);
+    }
     // `Camel.actuallyHurt` 在 `super` 之前 `standUpInstantly()`；纯状态改动、不取随机数，
     // 放在 `super` 之后对可观察状态等价。
     // `Camel.actuallyHurt` calls `standUpInstantly()` before `super`; a pure state change
@@ -3327,12 +3372,27 @@ pub(crate) fn do_hurt_target(
             whole.split().public
         };
         let hurt = ctx.hurt_player(target, source, amount, me, &attacker);
-        // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`：ATTACK_KNOCKBACK
-        // 大于 0 且这一下打中时，攻击者自己的水平速度被压到 0.6 倍（监守者是 1.5）。
+        // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`：ATTACK_KNOCKBACK / 2
+        // 大于 0 且这一下打中时，先按攻击者朝向给受害者补一次 `knockback`，再把
+        // 攻击者自己的水平速度压到 0.6 倍（监守者 / 劫掠兽是 1.5）。
         // `Mob.doHurtTarget` → `LivingEntity.causeExtraKnockback`: with a positive
-        // ATTACK_KNOCKBACK and a landed hit, the attacker's horizontal velocity is
-        // scaled by 0.6 (the warden has 1.5).
-        if hurt && mob.attributes.value(attribute::ATTACK_KNOCKBACK) > 0.0 {
+        // ATTACK_KNOCKBACK and a landed hit, knock the victim back along the
+        // attacker's facing, then scale the attacker's horizontal velocity by 0.6.
+        let knockback = (mob.attributes.value(attribute::ATTACK_KNOCKBACK) as f32) / 2.0;
+        if hurt && knockback > 0.0 {
+            let angle = f64::from(me.y_rot * 0.017_453_292_f32);
+            let dx = f64::from(mth::sin(angle));
+            let dz = -f64::from(mth::cos(angle));
+            ctx.emit(
+                Command::ExtraKnockback {
+                    target,
+                    player: true,
+                    strength: f64::from(knockback),
+                    dx,
+                    dz,
+                },
+                me,
+            );
             me.delta.x *= 0.6;
             me.delta.z *= 0.6;
         }
@@ -3438,6 +3498,26 @@ pub(crate) fn do_hurt_target(
             },
             me,
         );
+        // `Mob.doHurtTarget` 的 `causeExtraKnockback` 不看 `hurtServer` 的返回值：
+        // 只要 ATTACK_KNOCKBACK 为正就给受害者补一次击退，并压平攻击者自己。
+        // `Mob.doHurtTarget`'s `causeExtraKnockback` does not check the hurt result:
+        // a positive ATTACK_KNOCKBACK always pushes the victim and damps the attacker.
+        let knockback = (mob.attributes.value(attribute::ATTACK_KNOCKBACK) as f32) / 2.0;
+        if knockback > 0.0 {
+            let angle = f64::from(me.y_rot * 0.017_453_292_f32);
+            ctx.emit(
+                Command::ExtraKnockback {
+                    target,
+                    player: false,
+                    strength: f64::from(knockback),
+                    dx: f64::from(mth::sin(angle)),
+                    dz: -f64::from(mth::cos(angle)),
+                },
+                me,
+            );
+            me.delta.x *= 0.6;
+            me.delta.z *= 0.6;
+        }
         if bites {
             play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
         }
@@ -3521,6 +3601,21 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         return;
     }
     mob.dead = true;
+    // `LivingEntity.die` 在掉落之前发 `ENTITY_DIE`：上下文的 `sourceEntity` 是死者，
+    // 附近的幽匿催发体用它换经验充能。命令在伤害命令之后落地，但仍在同刻。
+    // `LivingEntity.die` posts `ENTITY_DIE` before drops; catalyst listeners turn
+    // the dying mob's experience into charge.
+    ctx.emit(
+        Command::GameEvent {
+            event: crate::game_event::GameEvent::EntityDie,
+            position: me.position,
+            context: crate::game_event::dispatch::EventContext {
+                source_entity: Some(me.id),
+                ..Default::default()
+            },
+        },
+        me,
+    );
     // `Raider.die` 在 `super.die` 之前：记英雄、离队、去队长旗帜。
     // `Raider.die` runs before `super.die`: hero credit, roster removal, leader flag.
     if mob.mob_type.is_raider() {

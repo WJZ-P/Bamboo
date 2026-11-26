@@ -552,6 +552,21 @@ fn write_component_fields(
             continue;
         };
         let result: Option<(&str, Tag)> = match (id, *kind, value) {
+            // `CopperGolemStatueBlockEntity` 不覆写 `saveAdditional`：自定义名只写在
+            // `components` 组件表里（官方 `{"minecraft:custom_name":...}`），没有
+            // `CustomName` 旧键。雕像的组件表里只有这一项。
+            // A statue overrides no `saveAdditional`: the custom name goes only into
+            // the `components` map, with no legacy `CustomName` key.
+            (
+                "minecraft:copper_golem_statue",
+                mc_bamboo_data::registries::data_component_type::CUSTOM_NAME,
+                ComponentValue::CustomName(component),
+            ) => text::encode(component, 0).ok().map(|v| {
+                (
+                    "components",
+                    Tag::Compound(vec![("minecraft:custom_name".to_owned(), v.to_tag())]),
+                )
+            }),
             (
                 "minecraft:chest"
                 | "minecraft:trapped_chest"

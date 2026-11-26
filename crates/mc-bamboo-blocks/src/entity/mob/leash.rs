@@ -136,6 +136,9 @@ pub fn can_be_leashed(mob: &Mob, now: i64) -> bool {
         | MobType::Tadpole
         | MobType::Panda
         | MobType::Villager
+        // `AbstractVillager.canBeLeashed()` = false：流浪商人也不能拴。
+        // `AbstractVillager.canBeLeashed()` is false, so the trader cannot be leashed.
+        | MobType::WanderingTrader
         | MobType::Cod
         | MobType::Salmon
         | MobType::TropicalFish
@@ -276,7 +279,11 @@ fn should_stay_close_to_leash_holder(_kind: MobType) -> bool {
 
 /// `PathfinderMob.followLeashSpeed()`：默认 1.0；`Llama`（含继承它的行商羊驼）覆盖成 2.0。
 fn follow_leash_speed(kind: MobType) -> f64 {
-    if kind == MobType::Llama { 2.0 } else { 1.0 }
+    if matches!(kind, MobType::Llama | MobType::TraderLlama) {
+        2.0
+    } else {
+        1.0
+    }
 }
 
 /// 被拴的生物是不是 `PathfinderMob`：只有这一类覆盖 `whenLeashedTo` /

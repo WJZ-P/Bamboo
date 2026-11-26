@@ -679,19 +679,25 @@ impl Villager {
         wanted && self.inventory.can_add_item(stack)
     }
 
-    /// `Villager.addAdditionalSaveData` 的 8 个键，加上 `AbstractVillager` 的 `Offers` /
-    /// `Inventory`。官方只在 `offers != null` 时写 `Offers`，非空背包才写 `Inventory`。
+    /// `AbstractVillager.addAdditionalSaveData`：官方只在 `offers != null` 时写
+    /// `Offers`，背包按 `SimpleContainer` 存成列表。流浪商人和村民共用这一层。
     ///
-    /// The eight `Villager.addAdditionalSaveData` keys plus `AbstractVillager`'s
-    /// `Offers` / `Inventory`. Vanilla writes `Offers` only when non-null and `Inventory`
-    /// only when non-empty.
-    pub fn write_nbt(&self, out: &mut Vec<(String, Tag)>) {
+    /// `AbstractVillager.addAdditionalSaveData`: writes `Offers` only when non-null,
+    /// and the inventory as a `SimpleContainer` list. Villagers and wandering traders
+    /// share this layer.
+    pub fn write_abstract_nbt(&self, out: &mut Vec<(String, Tag)>) {
         if let Some(offers) = &self.offers
             && let Ok(encoded) = merchant::encode_offers(offers)
         {
             put(out, "Offers", encoded.to_tag());
         }
         put(out, "Inventory", self.inventory.to_nbt());
+    }
+
+    /// `Villager.addAdditionalSaveData` 自己的八个键。
+    ///
+    /// The eight keys of `Villager.addAdditionalSaveData` itself.
+    pub fn write_villager_nbt(&self, out: &mut Vec<(String, Tag)>) {
         put(out, "VillagerData", self.data_tag());
         put(
             out,
@@ -710,9 +716,18 @@ impl Villager {
         put(out, "RestocksToday", Tag::Int(self.restocks_today));
     }
 
+    /// `AbstractVillager.readAdditionalSaveData`：`Offers` 与 `Inventory` 两层共用。
+    ///
+    /// `AbstractVillager.readAdditionalSaveData`: the shared `Offers` / `Inventory` layer.
+    pub fn read_abstract_nbt(&mut self, tag: &Tag) {
+        self.offers =
+            tag::field(tag, "Offers").and_then(|offers| merchant::decode_offers(offers).ok());
+        self.inventory.read_nbt(tag::field(tag, "Inventory"));
+    }
+
     /// `Villager.readAdditionalSaveData`：有 `VillagerData`（或已经标记 finalized）时
-    /// finalized 置真。`Offers` 原样保留，`Inventory` 解入 8 格物品栏。
-    pub fn read_nbt(&mut self, tag: &Tag) {
+    /// finalized 置真。
+    pub fn read_villager_nbt(&mut self, tag: &Tag) {
         let data = tag::field(tag, "VillagerData");
         let finalized = tag::bool_or(tag, "VillagerDataFinalized", false);
         if finalized || data.is_some() {
@@ -727,9 +742,6 @@ impl Villager {
         self.last_restock = tag::long_or(tag, "LastRestock", 0);
         self.last_gossip_decay = tag::long_or(tag, "LastGossipDecay", 0);
         self.restocks_today = tag::int_or(tag, "RestocksToday", 0);
-        self.offers =
-            tag::field(tag, "Offers").and_then(|offers| merchant::decode_offers(offers).ok());
-        self.inventory.read_nbt(tag::field(tag, "Inventory"));
     }
 }
 

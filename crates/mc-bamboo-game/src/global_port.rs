@@ -86,6 +86,12 @@ pub(crate) enum GlobalEffect {
     ///
     /// A player left: drop them from boss bars and the tab list.
     Left { player: PlayerId },
+    /// `WanderingTraderSpawner` 改过的存档计时（每 1200 刻一次）。
+    ///
+    /// The saved timer changed by `WanderingTraderSpawner` (once per 1200 ticks).
+    WanderingTraderData(
+        mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData,
+    ),
 }
 
 /// 岛写全局状态的口子。
@@ -215,6 +221,10 @@ fn apply_on_master(global: &mut Global, region: &mut Region, effect: GlobalEffec
                 // Official `PlayerList.broadcastSystemMessage` checks visibility per player.
                 crate::chat::broadcast_system_message(region, &frames, None);
             }
+        }
+        GlobalEffect::WanderingTraderData(data) => {
+            global.set_wandering_trader_data(data);
+            global.publish(region);
         }
         GlobalEffect::Left { player } => {
             // 官方玩家断开时 `entityRemoved` 直接 return，不广播 reset_score；
