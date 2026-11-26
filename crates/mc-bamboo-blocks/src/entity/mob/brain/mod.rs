@@ -1182,8 +1182,9 @@ mod tests {
     /// (`920` / `1064`), and the eight breeze memories add 128 more (`1048` / `1192`).
     /// `Arc<BrainTemplate>`: 32 slots gave `Brain=664` / `Memories=536`, 49 slots plus
     /// schedule fields gave `808` / `952`, and the nautilus memories gave `840` / `984`.
-    /// Widening the masks to `u128` and adding 15 warden plus 4 sniffer memories
-    /// (`sniff_cooldown` shared, 51→73 slots) gives `Memories=1216` / `Brain=1360`.
+    /// Widening the masks to `u128` and adding 15 warden, 4 sniffer, 3 copper golem
+    /// and 3 allay memories (`sniff_cooldown` shared, 51→76 slots) gives
+    /// `Memories=1264` / `Brain=1408`.
     #[test]
     fn brain_and_memory_sizes_stay_small() {
         use crate::entity::mob::brain::behavior::Node;
@@ -1192,8 +1193,8 @@ mod tests {
         // 内联这份伤害源，所以它跟着涨 8 字节（184 → 192）。`Memories` / `Brain` 的值都
         // 装箱，不受影响。
         assert_eq!(std::mem::size_of::<MemoryValue>(), 192);
-        assert_eq!(std::mem::size_of::<Memories>(), 1344);
-        assert_eq!(std::mem::size_of::<Brain>(), 1488);
+        assert_eq!(std::mem::size_of::<Memories>(), 1392);
+        assert_eq!(std::mem::size_of::<Brain>(), 1536);
         assert_eq!(std::mem::size_of::<Node>(), 160);
         assert_eq!(std::mem::size_of::<Sensor>(), 16);
         assert_eq!(std::mem::size_of::<Entry>(), 176);

@@ -66,7 +66,7 @@ fn idle_activity() -> ActivityData {
         10,
         vec![
             Kind::Creaking(Behavior::StartAttacking),
-            Kind::LookAtPlayerSometimes {
+            Kind::LookAtEntitySometimes {
                 max_dist: 8.0,
                 min_interval: 30,
                 max_interval: 60,

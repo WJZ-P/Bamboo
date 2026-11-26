@@ -695,11 +695,15 @@ fn sense_players(cx: &mut Cx) {
         MemoryType::NearestVisiblePlayer,
         players.first().map(|view| MemoryValue::Entity(view.uid)),
     );
-    // `isEntityAttackable`：`forCombat` 多一条 `canAttack`——和平难度不打玩家，创造玩家不算敌人。
-    // `isEntityAttackable`: `forCombat` adds `canAttack` — no players on peaceful, and
-    // creative players are not enemies.
+    // `isEntityAttackable`：`forCombat` 多一条 `canAttack`——和平难度不打玩家，创造玩家
+    // 不算敌人——还有一条 `!isAlliedTo`。悦灵把喜欢的玩家当盟友
+    // （`Allay.considersEntityAsAlly` → `isLikedPlayer`），所以也要排除。
+    // `isEntityAttackable`: `forCombat` adds `canAttack` — no players on peaceful,
+    // creative players are not enemies — and `!isAlliedTo`. The allay treats its
+    // liked player as an ally (`Allay.considersEntityAsAlly` → `isLikedPlayer`), so
+    // that player is excluded too.
     let peaceful = cx.ctx.blocks().difficulty() == 0;
-    players.retain(|view| !peaceful && !view.creative);
+    players.retain(|view| !peaceful && !view.creative && !is_liked_player(cx, view));
     cx.memories.set(
         MemoryType::NearestVisibleAttackablePlayers,
         MemoryValue::Entities(ids(&players)),
@@ -710,20 +714,44 @@ fn sense_players(cx: &mut Cx) {
     );
 }
 
+/// `Allay.considersEntityAsAlly` → `isLikedPlayer`：这个玩家是不是悦灵喜欢的那位。
+///
+/// `Allay.considersEntityAsAlly` → `isLikedPlayer`: whether this player is the
+/// allay's liked player.
+fn is_liked_player(cx: &Cx, view: &LivingView) -> bool {
+    if cx.mob.mob_type != MobType::Allay {
+        return false;
+    }
+    let Some(uuid) = cx.memories.uuid(MemoryType::LikedPlayer) else {
+        return false;
+    };
+    let mut liked = false;
+    cx.ctx.blocks().for_each_player(&mut |player| {
+        if player.uid == view.uid && player.uuid == Some(uuid) {
+            liked = true;
+        }
+    });
+    liked
+}
+
 /// `EntityTypes.ITEM` 的眼高。
 ///
 /// The eye height of `EntityTypes.ITEM`.
 const ITEM_EYE_HEIGHT: f32 = 0.2125;
 
 /// `NearestItemSensor.doTick`：32×16×32 里的掉落物按距离排好，取第一个想捡
-/// （`Mob.wantsToPickUp` 缺省恒真）、32 格内、看得见的。
+/// （`Mob.wantsToPickUp` 缺省恒真）、32 格内、看得见的（官方过滤链是
+/// `wantsToPickUp`、`closerThan(32)`、`LivingEntity.hasLineOfSight`）。
 ///
 /// `NearestItemSensor.doTick`: dropped items within 32×16×32 by distance; the first that
-/// is wanted (`Mob.wantsToPickUp` defaults to true), within 32 blocks and in sight.
+/// is wanted (`Mob.wantsToPickUp` defaults to true), within 32 blocks and in sight (the
+/// vanilla filter chain is `wantsToPickUp`, `closerThan(32)`, `hasLineOfSight`).
 fn sense_items(cx: &mut Cx) {
     let area = cx.me.bounding_box().inflate(32.0, 16.0, 32.0);
     let position = cx.me.position;
     let is_villager = cx.mob.mob_type == MobType::Villager;
+    let is_allay = cx.mob.mob_type == MobType::Allay;
+    let rules = cx.ctx.blocks().block_game_rules();
     let mut items: Vec<(f64, EntityUid, Vec3)> = Vec::new();
     cx.ctx.for_each_other_in(area, &mut |other| {
         if other.removed {
@@ -731,6 +759,10 @@ fn sense_items(cx: &mut Cx) {
         }
         if let KindPublic::Item { stack, .. } = &other.kind {
             if is_villager && !cx.mob.villager.wants_to_pick_up(stack) {
+                return;
+            }
+            // `Allay.wantsToPickUp` 用主手那一份当模板，只捡同种物品。
+            if is_allay && !super::super::allay::wants_to_pick_up(cx.mob, stack, &rules) {
                 return;
             }
             items.push((

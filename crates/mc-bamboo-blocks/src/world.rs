@@ -4056,6 +4056,30 @@ impl<'a> World<'a> {
             // `Entity.spawnAtLocation(stack, offset)`: drop at the mob plus offset.
             self.spawn_at_location(entity.position.add(outcome.drop_offset), stack);
         }
+        // `Allay.mobInteract` 空手取回物品：背包里的东西按 `BehaviorUtils.throwItem` 扔出。
+        for stack in &outcome.thrown_stacks {
+            self.spawn_at_location(entity.position, stack.clone());
+        }
+        if outcome.duplicate_allay {
+            // `Allay.duplicateAllay()`：同一位置、持久、两只都是 6000 刻冷却。
+            let position = entity.position;
+            let mut copy =
+                crate::entity::Entity::by_mob_type(crate::entity::mob::MobType::Allay, position);
+            copy.with_mob(|_, mob| {
+                mob.persistence_required = true;
+                crate::entity::mob::allay::set_duplication_cooldown(
+                    mob,
+                    crate::entity::mob::allay::DUPLICATION_COOLDOWN,
+                );
+            });
+            self.spawn_entity(copy);
+        }
+        if let Some(event) = outcome.entity_event {
+            entity.with_mob(|_, mob| {
+                mob.events
+                    .push(crate::entity::mob::MobEvent::EntityEvent { event });
+            });
+        }
         // 山羊的 `playEatingSound` 音高取世界随机源，一次喂食放一到两遍。
         // A goat's `playEatingSound` is pitched with the level random, once or twice per
         // feeding.

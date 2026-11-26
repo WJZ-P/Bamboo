@@ -1192,6 +1192,14 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
     if kind == mc_bamboo_blocks::entity::mob::MobType::Warden && index == 16 {
         return EntityData::ClientAngerLevel(0);
     }
+    // `Allay.DATA_DANCING` 缺省假、`DATA_CAN_DUPLICATE` 缺省真。
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Allay {
+        return match index {
+            16 => EntityData::AllayDancing(false),
+            17 => EntityData::AllayCanDuplicate(true),
+            _ => EntityData::MobFlags(0),
+        };
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::ZombieVillager {
         use mc_bamboo_data::villager;
         return match index {
@@ -1873,6 +1881,16 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     if mob.age_locked {
         out.push(EntityData::AgeLocked(true));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Allay {
+        // `Allay` 的 16 / 17 两项是布尔元数据，缺省假 / 真。
+        if mob.allay_dancing {
+            out.push(EntityData::AllayDancing(true));
+        }
+        if !mob.allay_can_duplicate {
+            out.push(EntityData::AllayCanDuplicate(false));
+        }
+        return out;
     }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Bee {
         if mob.bee_flags != 0 {

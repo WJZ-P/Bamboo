@@ -105,6 +105,9 @@ fn ids_text(ids: &[i32]) -> String {
 
 fn value_text(level: &MobLevel, value: &MemoryValue) -> String {
     match value {
+        // 官方 `BrainOracle.value` 对 UUID 没有专门分支，落到 `getClass().getSimpleName()`。
+        // Vanilla `BrainOracle.value` has no UUID arm and prints the class simple name.
+        MemoryValue::Uuid(_uuid) => "UUID".to_owned(),
         MemoryValue::Bool(value) => value.to_string(),
         MemoryValue::Int(value) => value.to_string(),
         MemoryValue::Long(value) => value.to_string(),

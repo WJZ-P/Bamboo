@@ -5349,10 +5349,7 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     // `PathfinderMob.getWalkTargetValue` 的缺省值 0。
     // Mobs that are not `Animal`s, plus the axolotl that overrides
     // `getWalkTargetValue` to 0, keep the `PathfinderMob` default of 0.
-    if mob.mob_type.is_ageable_water_creature()
-        || mob.mob_type.is_water_animal()
-        || mob.mob_type == super::MobType::Axolotl
-    {
+    if !mob.mob_type.is_animal() || mob.mob_type == super::MobType::Axolotl {
         return 0.0;
     }
     animal_walk_target_value(view, pos)
