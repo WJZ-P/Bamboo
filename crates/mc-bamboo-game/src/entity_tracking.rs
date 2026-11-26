@@ -117,6 +117,18 @@ impl EntityTracking {
         }
     }
 
+    /// `Level.broadcastEntityEvent` 的接收者：只有看得见这个实体的玩家。
+    /// 还没有跟踪条目时返回空（例如实体刚生成、还没配对）。
+    ///
+    /// Recipients of `Level.broadcastEntityEvent`: only the players tracking
+    /// this entity. Empty when the entity has no tracking entry yet.
+    pub(crate) fn viewers(&self, id: i32) -> Vec<PlayerId> {
+        self.tracked
+            .get(&id)
+            .map(|entry| entry.seen_by.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// 这名玩家还看着哪个实体（跨岛搬玩家之前要等它为假）。
     ///
     /// Whether this player still watches any entity (an island crossing waits

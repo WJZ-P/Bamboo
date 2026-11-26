@@ -482,22 +482,25 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 event,
                 ref ejected,
             } => {
-                // `broadcastEntityEvent(boat, 71/72)`：发给在线玩家（跟踪者过滤
-                // 由链路层处理），再把 down 气泡柱甩下来的乘客卸掉。
+                // `Level.broadcastEntityEvent(boat, 71/72)`：只发给跟踪这艘船的
+                // 玩家，再把 down 气泡柱甩下来的乘客按完整 `stopRiding` 落位。
                 let packet = mc_bamboo_protocol::packet::play::EntityEvent {
                     entity_id: entity,
                     event,
                 };
-                let viewers: Vec<PlayerId> = region.players.keys().copied().collect();
+                let viewers = region.entity_tracking.viewers(entity);
                 for id in viewers {
                     region.links.send(id, &packet);
                 }
+                // `ejectPassengers()` 从后往前对每个乘客调 `stopRiding()`；载具名单
+                // 由方块层清空，这里补乘客一侧的完整落位（摘关系、冷却、下船位置）。
+                let vehicle_public = region.entities.public_at(entity).cloned();
                 for &uid in ejected {
                     if uid < mc_bamboo_blocks::entity::FIRST_ENTITY_ID {
                         region.entities.enqueue_ejected_player(uid);
-                    } else {
+                    } else if let Some(vehicle) = &vehicle_public {
                         region.entities.with_mut(uid, |rider| {
-                            rider.vehicle = None;
+                            mc_bamboo_blocks::entity::riding::stop_riding(rider, vehicle, None);
                         });
                     }
                 }
