@@ -1247,6 +1247,10 @@ pub enum Command {
     ///
     /// One ominous item spawner tick: warning sound, drop / shot, 3021 and game event.
     OminousItemSpawnerTick(super::ominous_item_spawner::SpawnerTick),
+    /// `EyeOfEnder.tick` 到点：死亡音效、掉物品或 2003 碎裂事件。
+    ///
+    /// `EyeOfEnder.tick` expiry: death sound, dropped item or 2003 shatter event.
+    EyeOfEnderFinish(super::eye_of_ender::EyeOfEnderFinish),
     /// 风弹这一刻命中：`AbstractWindCharge.onHitBlock` / `onHitEntity` 的爆炸。
     WindChargeImpact(super::wind_charge::WindChargeHit),
     /// `WitherBoss.performRangedAttack`：射出一枚凋灵之首。
@@ -2108,6 +2112,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::LightningTick(facts) => super::lightning::apply(me, world, facts),
         Command::OminousItemSpawnerTick(facts) => {
             super::ominous_item_spawner::apply(me, world, facts);
+        }
+        Command::EyeOfEnderFinish(facts) => {
+            super::eye_of_ender::apply_finish(me, world, facts);
         }
         Command::WindChargeImpact(hit) => super::wind_charge::impact(me, world, hit),
         Command::ShootWitherSkull(shot) => {

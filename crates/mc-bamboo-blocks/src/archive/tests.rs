@@ -302,6 +302,13 @@ fn three_entity_kinds_round_trip() {
                 spawn_item_after_ticks: 87,
             },
         )),
+        EntityKind::EyeOfEnder(Box::new(crate::entity::eye_of_ender::EyeOfEnder {
+            uuid: [3u8; 16],
+            item: crate::entity::eye_of_ender::default_item(),
+            target: None,
+            life: 12,
+            survive_after_death: true,
+        })),
     ];
     for kind in cases {
         let row = entity_row(kind, Vec3::new(1.5, 64.25, -2.0));

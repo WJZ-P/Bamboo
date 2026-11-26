@@ -12,6 +12,7 @@
 pub mod arrow;
 pub mod ctx;
 pub mod evoker_fangs;
+pub mod eye_of_ender;
 pub mod firework_rocket;
 pub mod fishing_hook;
 pub mod hanging;
@@ -288,6 +289,10 @@ pub enum EntityKind {
     ///
     /// A fishing bobber, vanilla `FishingHook`.
     FishingHook(Box<fishing_hook::FishingHook>),
+    /// 末影之眼，`EyeOfEnder`。
+    ///
+    /// An eye of ender, vanilla `EyeOfEnder`.
+    EyeOfEnder(Box<eye_of_ender::EyeOfEnder>),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -318,6 +323,7 @@ impl EntityKind {
             Self::WitherSkull(_) => mc_bamboo_data::registries::entity_type::WITHER_SKULL,
             Self::FireworkRocket(_) => mc_bamboo_data::registries::entity_type::FIREWORK_ROCKET,
             Self::FishingHook(_) => mc_bamboo_data::registries::entity_type::FISHING_BOBBER,
+            Self::EyeOfEnder(_) => mc_bamboo_data::registries::entity_type::EYE_OF_ENDER,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -563,6 +569,7 @@ impl Entity {
             EntityKind::WitherSkull(_) => wither_skull::tick(self, ctx),
             EntityKind::FireworkRocket(_) => firework_rocket::tick(self, ctx),
             EntityKind::FishingHook(_) => fishing_hook::tick(self, ctx),
+            EntityKind::EyeOfEnder(_) => eye_of_ender::tick(self, ctx),
             EntityKind::LeashKnot(_) => leash_knot::tick(self, ctx),
             EntityKind::Painting(_) => hanging::tick_painting(self, ctx),
             EntityKind::ItemFrame(_) => hanging::tick_item_frame(self, ctx),

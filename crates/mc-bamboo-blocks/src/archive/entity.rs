@@ -49,6 +49,7 @@ pub fn entity_uuid_of(row: &crate::entity::EntityRow) -> [u8; 16] {
         crate::entity::KindPublic::FishingHook(hook) => hook.uuid,
         crate::entity::KindPublic::Painting(painting) => painting.uuid,
         crate::entity::KindPublic::ItemFrame(frame) => frame.uuid,
+        crate::entity::KindPublic::EyeOfEnder(eye) => eye.uuid,
         _ => entity_uuid(row.public.uid).to_be_bytes(),
     }
 }
@@ -97,6 +98,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         },
         crate::entity::KindPublic::WitherSkull(_) => kinds::WITHER_SKULL,
         crate::entity::KindPublic::FireworkRocket(_) => kinds::FIREWORK_ROCKET,
+        crate::entity::KindPublic::EyeOfEnder(_) => kinds::EYE_OF_ENDER,
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
     put(
@@ -148,6 +150,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::FireworkRocket(firework) => uuid_tag(&firework.uuid),
         crate::entity::KindPublic::Painting(painting) => uuid_tag(&painting.uuid),
         crate::entity::KindPublic::ItemFrame(frame) => uuid_tag(&frame.uuid),
+        crate::entity::KindPublic::EyeOfEnder(eye) => uuid_tag(&eye.uuid),
         _ => entity_uuid_tag(public.uid),
     };
     put(&mut out, "UUID", uuid);
@@ -289,6 +292,14 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 &mut out,
                 "spawn_item_after_ticks",
                 Tag::Long(saved.spawn_item_after_ticks),
+            );
+        }
+        crate::entity::KindPublic::EyeOfEnder(eye) => {
+            // `EyeOfEnder.addAdditionalSaveData`：只写 `Item`（`ItemStack.CODEC`）。
+            put(
+                &mut out,
+                "Item",
+                slots::encode_item(&eye.item).map_err(|error| Error::new(error.to_string()))?,
             );
         }
         crate::entity::KindPublic::WindCharge(_) => {
@@ -671,6 +682,14 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                         spawn_item_after_ticks: tag::long_or(tag, "spawn_item_after_ticks", 0),
                     },
                 ))
+            }
+            "minecraft:eye_of_ender" => {
+                let item = tag::field(tag, "Item")
+                    .and_then(|value| slots::decode_item(value).ok())
+                    .unwrap_or_else(crate::entity::eye_of_ender::default_item);
+                let mut eye = crate::entity::eye_of_ender::EyeOfEnder::new(item);
+                eye.uuid = arrow::uuid_from(tag, "UUID").unwrap_or([0; 16]);
+                EntityKind::EyeOfEnder(Box::new(eye))
             }
             "minecraft:firework_rocket" => {
                 let item = tag::field(tag, "FireworksItem")

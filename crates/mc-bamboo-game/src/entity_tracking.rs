@@ -907,6 +907,10 @@ pub enum KindData {
     FireworkRocket(mc_bamboo_blocks::entity::firework_rocket::FireworkRocketPublic),
     /// 钓鱼浮漂：`add_entity` 的 data 用主人 ID（无主人时用自身 ID），元数据带被钩实体与咬钩标记。
     FishingHook(mc_bamboo_blocks::entity::fishing_hook::FishingHookPublic),
+    /// 末影之眼：同步 UUID 与 `DATA_ITEM_STACK`（index 8）。
+    ///
+    /// An eye of ender: synced UUID and `DATA_ITEM_STACK` at index 8.
+    EyeOfEnder(mc_bamboo_blocks::entity::eye_of_ender::EyeOfEnderPublic),
     /// 羊驼口水：没有自己的元数据。
     ///
     /// Llama spit, with no metadata of its own.
@@ -1023,7 +1027,8 @@ impl Snapshot {
             | KindData::LightningBolt
             | KindData::LeashKnot
             | KindData::EvokerFangs
-            | KindData::OminousItemSpawner(_) => 0,
+            | KindData::OminousItemSpawner(_)
+            | KindData::EyeOfEnder(_) => 0,
         }
     }
 
@@ -1053,6 +1058,7 @@ impl KindData {
             KindPublic::WitherSkull(skull) => Self::WitherSkull(*skull),
             KindPublic::FireworkRocket(firework) => Self::FireworkRocket(firework.clone()),
             KindPublic::FishingHook(hook) => Self::FishingHook(*hook),
+            KindPublic::EyeOfEnder(eye) => Self::EyeOfEnder(eye.clone()),
             KindPublic::LeashKnot { .. } => Self::LeashKnot,
             KindPublic::EvokerFangs => Self::EvokerFangs,
             KindPublic::Painting(painting) => Self::Painting(painting.clone()),
@@ -1107,6 +1113,7 @@ impl KindData {
             | Self::WitherSkull(_)
             | Self::FireworkRocket(_)
             | Self::FishingHook(_)
+            | Self::EyeOfEnder(_)
             | Self::Painting(_)
             | Self::ItemFrame(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
@@ -1116,6 +1123,7 @@ impl KindData {
     fn stack(&self) -> Option<&ItemStack> {
         match self {
             Self::Item(stack) | Self::OminousItemSpawner(stack) => Some(stack),
+            Self::EyeOfEnder(eye) => Some(&eye.item),
             Self::FallingBlock { .. }
             | Self::Tnt { .. }
             | Self::ExperienceOrb { .. }
@@ -1148,6 +1156,7 @@ impl KindData {
             Self::WitherSkull(skull) => Some(skull.uuid),
             Self::FireworkRocket(firework) => Some(firework.uuid),
             Self::FishingHook(hook) => Some(hook.uuid),
+            Self::EyeOfEnder(eye) => Some(eye.uuid),
             Self::Painting(painting) => Some(painting.uuid),
             Self::ItemFrame(frame) => Some(frame.uuid),
             _ => None,
@@ -1248,6 +1257,10 @@ impl KindData {
                 vec![EntityData::Item(stack.clone())]
             }
             Self::OminousItemSpawner(_) => Vec::new(),
+            Self::EyeOfEnder(eye) if !eye.item.is_empty() => {
+                vec![EntityData::Item(eye.item.clone())]
+            }
+            Self::EyeOfEnder(_) => Vec::new(),
             Self::FireworkRocket(firework) => {
                 let mut data = Vec::new();
                 if !firework.item.is_empty() {
