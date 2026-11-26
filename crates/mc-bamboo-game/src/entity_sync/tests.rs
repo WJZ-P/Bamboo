@@ -1006,6 +1006,44 @@ fn forced_shared_flags_are_merged_into_the_same_cycle() {
     assert_eq!(stage.flush_own(), [sneaking]);
 }
 
+/// 效果项已经同步过时，强制脏只补 0 号，不把别的 index 重复发一遍。
+#[test]
+fn forced_shared_flags_do_not_repeat_unchanged_items() {
+    use mc_bamboo_blocks::entity::mob::effects::EffectInstance;
+    use mc_bamboo_data::registries::mob_effect;
+
+    let mut stage = Stage::at(POSITION);
+    stage.skip_first_cycle();
+    stage.player().effects.add(EffectInstance::with_flags(
+        mob_effect::SPEED,
+        100,
+        0,
+        true,
+        true,
+    ));
+    stage.step();
+    stage.take_received();
+    stage.flush_own();
+
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StartFallFlying,
+        0,
+    );
+    stage.step();
+
+    let frames = stage.take_received();
+    assert_eq!(frames.len(), 1, "{frames:?}");
+    assert_eq!(frames[0].id, clientbound::SET_ENTITY_DATA);
+    // 0 号强制脏，10、11 号没变：包里只有 0 号，不能重复发效果项。
+    assert_eq!(
+        frames[0],
+        frame(clientbound::SET_ENTITY_DATA, "07 00 00 00 ff")
+    );
+    assert_eq!(stage.flush_own(), frames);
+}
+
 #[test]
 fn fall_flying_starts_and_sends_the_shared_flag_to_observers() {
     let mut stage = Stage::at(POSITION);
