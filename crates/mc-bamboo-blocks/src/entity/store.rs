@@ -140,6 +140,10 @@ pub enum KindPublic {
     ///
     /// A lightning bolt: the client reads its seed, life and remaining flashes.
     LightningBolt(super::lightning::LightningBolt),
+    /// 唤魔者尖牙：没有额外同步数据（位置 / 朝向在 `EntityPublic`）。
+    ///
+    /// Evoker fangs: no extra synced data (position / rotation live on `EntityPublic`).
+    EvokerFangs,
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
     Arrow(super::arrow::ArrowPublic),
@@ -171,6 +175,7 @@ impl KindPublic {
             Self::Egg(egg) => egg.kind.entity_type(),
             Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
             Self::LightningBolt(_) => mc_bamboo_data::registries::entity_type::LIGHTNING_BOLT,
+            Self::EvokerFangs => mc_bamboo_data::registries::entity_type::EVOKER_FANGS,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -244,6 +249,8 @@ pub enum KindState {
     LeashKnot(super::LeashKnot),
     /// 闪电的全部状态，公开的那一半就是它本身。
     LightningBolt(super::lightning::LightningBolt),
+    /// 唤魔者尖牙的全部状态。
+    EvokerFangs(Box<super::evoker_fangs::EvokerFangs>),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
     Arrow(Box<super::arrow::Arrow>),
@@ -381,6 +388,9 @@ impl EntityRow {
             (KindPublic::LightningBolt(_), KindState::LightningBolt(bolt)) => {
                 EntityKind::LightningBolt(Box::new(bolt))
             }
+            (KindPublic::EvokerFangs, KindState::EvokerFangs(fangs)) => {
+                EntityKind::EvokerFangs(fangs)
+            }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
@@ -477,6 +487,9 @@ impl Entity {
                 KindPublic::LightningBolt((*bolt).clone()),
                 KindState::LightningBolt(*bolt),
             ),
+            EntityKind::EvokerFangs(fangs) => {
+                (KindPublic::EvokerFangs, KindState::EvokerFangs(fangs))
+            }
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
                 KindState::Mob(mob),
@@ -1612,6 +1625,19 @@ impl EntityStore {
                         vec![super::mob::MobEvent::EntityEvent { event: 3 }],
                     )
                 }),
+                // `EvokerFangs.tick`：第一次生效时广播 4 号实体事件（尖牙动画）。
+                // `EvokerFangs.tick`: broadcast entity event 4 the first time it activates.
+                super::KindState::EvokerFangs(fangs) => {
+                    if fangs.sent_spike_event {
+                        fangs.sent_spike_event = false;
+                        Some((
+                            row.public.uid,
+                            vec![super::mob::MobEvent::EntityEvent { event: 4 }],
+                        ))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         };

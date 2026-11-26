@@ -33,6 +33,21 @@ fn nearly_equal(first: f64, second: f64) -> bool {
 /// `Entity.move(MoverType.SELF, movement)`。
 pub(crate) fn move_living(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, movement: Vec3) {
     let mut delta = movement;
+    // `Entity.noPhysics`（恼鬼）：直接挪位置、清碰撞标志，不做方块碰撞和摔落伤害。
+    // `Entity.noPhysics` (the vex): move straight through and clear the collision flags.
+    if mob.no_physics {
+        me.position = me.position.add(delta);
+        me.horizontal_collision = false;
+        me.vertical_collision = false;
+        me.vertical_collision_below = false;
+        me.on_ground = false;
+        me.movement_this_tick.push(Movement {
+            from: me.position.subtract(delta),
+            to: me.position,
+            original: Some(delta),
+        });
+        return;
+    }
     if me.stuck_speed_multiplier.length_sqr() > 1.0e-7 {
         delta = delta.multiply(
             me.stuck_speed_multiplier.x,

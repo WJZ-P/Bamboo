@@ -862,9 +862,12 @@ pub(super) fn check_spawn_rules(
         // Happy ghasts likewise never spawn naturally: only the dried ghast block,
         // `/summon` or a spawn egg make one.
         MobType::Sniffer | MobType::HappyGhast => true,
-        // 卫道士 / 劫掠兽只从袭击波次、命令和刷怪蛋生成，不在群系刷怪表里。
-        // Vindicators / ravagers only come from raid waves, commands and spawn eggs.
-        MobType::Vindicator | MobType::Ravager => true,
+        // 卫道士 / 劫掠兽 / 唤魔者 / 幻术师只从袭击波次、命令和刷怪蛋生成，
+        // 不在群系刷怪表里；恼鬼只由唤魔者召唤。
+        // Vindicators / ravagers / evokers / illusioners only come from raid waves,
+        // commands and spawn eggs; vexes only from evoker summons.
+        MobType::Vindicator | MobType::Ravager | MobType::Evoker | MobType::Illusioner => true,
+        MobType::Vex => true,
         // 流浪商人和行商羊驼不在群系刷怪表里，由刷新器 / 命令 / 刷怪蛋生成。
         // Wandering traders and trader llamas are in no biome spawn table.
         MobType::WanderingTrader | MobType::TraderLlama => true,

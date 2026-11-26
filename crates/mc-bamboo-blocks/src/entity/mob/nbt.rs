@@ -409,6 +409,15 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::Ravager {
         super::ravager::save(mob, &mut out);
     }
+    if mob.mob_type == MobType::Evoker {
+        super::evoker::save(mob, &mut out);
+    }
+    if mob.mob_type == MobType::Illusioner {
+        super::illusioner::save(mob, &mut out);
+    }
+    if mob.mob_type == MobType::Vex {
+        super::vex::save(mob, &mut out);
+    }
     if mob.mob_type == MobType::GlowSquid {
         put(
             &mut out,
@@ -916,6 +925,15 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Ravager {
             mob.ravager = super::ravager::load(tag);
+        }
+        if mob.mob_type == MobType::Evoker {
+            super::evoker::load(mob, tag);
+        }
+        if mob.mob_type == MobType::Illusioner {
+            super::illusioner::load(mob, tag);
+        }
+        if mob.mob_type == MobType::Vex {
+            super::vex::load(mob, tag);
         }
         if mob.mob_type == MobType::GlowSquid {
             mob.squid.dark_ticks = tag::int_or(tag, "DarkTicksRemaining", 0);

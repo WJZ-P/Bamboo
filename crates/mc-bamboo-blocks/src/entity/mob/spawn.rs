@@ -554,13 +554,23 @@ fn finalize_spawn_in_group(
         super::pillager::finalize_spawn(world, entity, reason);
         return;
     }
-    if matches!(kind, MobType::Vindicator | MobType::Ravager) {
+    if matches!(
+        kind,
+        MobType::Vindicator | MobType::Ravager | MobType::Evoker | MobType::Illusioner
+    ) {
         let random = world.random();
-        if kind == MobType::Vindicator {
-            super::vindicator::finalize_spawn(entity, random);
-        } else {
-            super::ravager::finalize_spawn(entity, random);
+        match kind {
+            MobType::Vindicator => super::vindicator::finalize_spawn(entity, random),
+            MobType::Ravager => super::ravager::finalize_spawn(entity, random),
+            MobType::Evoker => super::evoker::finalize_spawn(entity, random),
+            MobType::Illusioner => super::illusioner::finalize_spawn(entity, random),
+            _ => unreachable!(),
         }
+        return;
+    }
+    if kind == MobType::Vex {
+        // `Vex.populateDefaultEquipmentSlots`（铁剑、掉落率 0）+ `Mob.finalizeSpawn`。
+        super::vex::finalize_spawn(entity, world.random());
         return;
     }
     // `Guardian` / `ElderGuardian` 没有自己的 `finalizeSpawn`，只走 `Monster` 继承的

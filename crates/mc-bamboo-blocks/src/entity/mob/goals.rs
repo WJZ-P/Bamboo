@@ -84,6 +84,18 @@ pub enum Goal {
     ///
     /// The raider-branch goals: patrol, hold ground, crossbow and watching other mobs.
     Raider(super::raider::RaiderGoal),
+    /// 唤魔者的施法与三个法术目标。
+    ///
+    /// The evoker's casting and three spell goals.
+    Evoker(super::evoker::EvokerGoal),
+    /// 恼鬼的冲锋、随机飞与复制主人目标。
+    ///
+    /// The vex's charge, random move and owner-target copying.
+    Vex(super::vex::VexGoal),
+    /// 幻术师的施法、分身与致盲目标。
+    ///
+    /// The illusioner's casting, mirror and blindness goals.
+    Illusioner(super::illusioner::IllusionerGoal),
     /// 海豚自己的目标（呼吸、找水、引路、跃水、玩物品、跟船）。
     ///
     /// The dolphin's own goals (breathing, finding water, treasure leading, jumping,
@@ -757,6 +769,9 @@ impl Goal {
             Self::Tame(goal) => goal.flags(),
             Self::Wolf(goal) => goal.flags(),
             Self::Raider(goal) => goal.flags(),
+            Self::Evoker(goal) => goal.flags(),
+            Self::Vex(goal) => goal.flags(),
+            Self::Illusioner(goal) => goal.flags(),
             Self::Dolphin(goal) => goal.flags(),
             Self::Cat(goal) => goal.flags(),
             Self::Parrot(goal) => goal.flags(),
@@ -837,6 +852,15 @@ impl Goal {
             return goal.every_tick();
         }
         if let Self::Raider(goal) = self {
+            return goal.every_tick();
+        }
+        if let Self::Evoker(goal) = self {
+            return goal.every_tick();
+        }
+        if let Self::Vex(goal) = self {
+            return goal.every_tick();
+        }
+        if let Self::Illusioner(goal) = self {
             return goal.every_tick();
         }
         if let Self::Cat(goal) = self {
@@ -926,6 +950,9 @@ impl Goal {
             Self::Tame(goal) => goal.name(),
             Self::Wolf(goal) => goal.name(),
             Self::Raider(goal) => goal.name(),
+            Self::Evoker(goal) => goal.name(),
+            Self::Vex(goal) => goal.name(),
+            Self::Illusioner(goal) => goal.name(),
             Self::Dolphin(goal) => goal.name(),
             Self::Cat(goal) => goal.name(),
             Self::Parrot(goal) => goal.name(),
@@ -1962,6 +1989,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::Tame(goal) => goal.can_use(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_use(me, mob, ctx),
         Goal::Raider(goal) => goal.can_use(me, mob, ctx),
+        Goal::Evoker(goal) => goal.can_use(me, mob, ctx),
+        Goal::Vex(goal) => goal.can_use(me, mob, ctx),
+        Goal::Illusioner(goal) => goal.can_use(me, mob, ctx),
         Goal::Dolphin(goal) => goal.can_use(me, mob, ctx),
         Goal::Cat(goal) => goal.can_use(me, mob, ctx),
         Goal::Parrot(goal) => goal.can_use(me, mob, ctx),
@@ -2761,6 +2791,9 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::Tame(goal) => goal.can_continue(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_continue(me, mob, ctx),
         Goal::Raider(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Evoker(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Vex(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Illusioner(goal) => goal.can_continue(me, mob, ctx),
         Goal::Dolphin(goal) => goal.can_continue(me, mob, ctx),
         Goal::Cat(goal) => goal.can_continue(me, mob, ctx),
         Goal::Parrot(goal) => goal.can_continue(me, mob, ctx),
@@ -3143,6 +3176,9 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::Tame(goal) => goal.start(me, mob, ctx),
         Goal::Wolf(goal) => goal.start(me, mob, ctx),
         Goal::Raider(goal) => goal.start(me, mob, ctx),
+        Goal::Evoker(goal) => goal.start(me, mob, ctx),
+        Goal::Vex(goal) => goal.start(me, mob, ctx),
+        Goal::Illusioner(goal) => goal.start(me, mob, ctx),
         Goal::Dolphin(goal) => goal.start(me, mob, ctx),
         Goal::Cat(goal) => goal.start(me, mob, ctx),
         Goal::Parrot(goal) => goal.start(me, mob, ctx),
@@ -3476,6 +3512,9 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Tame(goal) => goal.stop(mob),
         Goal::Wolf(goal) => goal.stop(mob),
         Goal::Raider(goal) => goal.stop(me, mob, ctx),
+        Goal::Evoker(goal) => goal.stop(me, mob, ctx),
+        Goal::Vex(goal) => goal.stop(me, mob, ctx),
+        Goal::Illusioner(goal) => goal.stop(me, mob, ctx),
         Goal::Dolphin(goal) => goal.stop(me, mob, ctx),
         Goal::Cat(goal) => goal.stop(mob),
         Goal::Parrot(goal) => goal.stop(mob),
@@ -4071,6 +4110,9 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Tame(goal) => goal.tick(me, mob, ctx),
         Goal::Wolf(goal) => goal.tick(me, mob, ctx),
         Goal::Raider(goal) => goal.tick(me, mob, ctx),
+        Goal::Evoker(goal) => goal.tick(me, mob, ctx),
+        Goal::Vex(goal) => goal.tick(me, mob, ctx),
+        Goal::Illusioner(goal) => goal.tick(me, mob, ctx),
         Goal::Dolphin(goal) => goal.tick(me, mob, ctx),
         Goal::Cat(goal) => goal.tick(me, mob, ctx),
         Goal::Parrot(goal) => goal.tick(me, mob, ctx),

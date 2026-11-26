@@ -43,6 +43,7 @@ pub(crate) mod enderman;
 pub mod endermite;
 pub mod equine;
 pub mod equipment;
+pub mod evoker;
 pub mod fish;
 pub mod fox;
 pub mod fox_goals;
@@ -52,6 +53,7 @@ pub mod goat;
 mod golem_goals;
 pub mod guardian;
 pub mod happy_ghast;
+pub mod illusioner;
 pub mod infested;
 pub mod interact;
 pub mod iron_golem;
@@ -91,6 +93,7 @@ pub mod smooth_swim;
 pub mod sniffer;
 pub mod snow_golem;
 pub mod spawn;
+pub mod spellcaster;
 pub mod spider;
 pub mod squid;
 pub mod stray;
@@ -102,6 +105,7 @@ pub mod thunder;
 pub(crate) mod timing;
 pub mod trader_llama;
 pub mod turtle;
+pub mod vex;
 pub mod villager;
 pub mod villager_ai;
 pub mod vindicator;
@@ -269,6 +273,18 @@ pub enum MobType {
     ///
     /// Ravager.
     Ravager,
+    /// 唤魔者，`Evoker`（`SpellcasterIllager` 一支）。
+    ///
+    /// Evoker, a `SpellcasterIllager`.
+    Evoker,
+    /// 恼鬼，`Vex`（穿墙飞行的怪物，唤魔者召唤）。
+    ///
+    /// Vex, a wall-phasing flying monster summoned by evokers.
+    Vex,
+    /// 幻术师，`Illusioner`（`SpellcasterIllager` 加弓箭，只能 `/summon`）。
+    ///
+    /// Illusioner, a `SpellcasterIllager` with a bow, only available via `/summon`.
+    Illusioner,
     /// 流浪商人，`WanderingTrader`，与村民共用 `AbstractVillager` 交易层。
     ///
     /// Wandering trader: shares the `AbstractVillager` trading layer with villagers.
@@ -283,7 +299,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 71] = [
+    pub const ALL: [Self; 74] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -353,6 +369,9 @@ impl MobType {
         Self::HappyGhast,
         Self::Vindicator,
         Self::Ravager,
+        Self::Evoker,
+        Self::Vex,
+        Self::Illusioner,
         Self::WanderingTrader,
         Self::TraderLlama,
     ];
@@ -431,6 +450,9 @@ impl MobType {
             Self::HappyGhast => ids::HAPPY_GHAST,
             Self::Vindicator => ids::VINDICATOR,
             Self::Ravager => ids::RAVAGER,
+            Self::Evoker => ids::EVOKER,
+            Self::Vex => ids::VEX,
+            Self::Illusioner => ids::ILLUSIONER,
             Self::WanderingTrader => ids::WANDERING_TRADER,
             Self::TraderLlama => ids::TRADER_LLAMA,
         }
@@ -509,6 +531,9 @@ impl MobType {
             Self::HappyGhast => "minecraft:happy_ghast",
             Self::Vindicator => "minecraft:vindicator",
             Self::Ravager => "minecraft:ravager",
+            Self::Evoker => "minecraft:evoker",
+            Self::Vex => "minecraft:vex",
+            Self::Illusioner => "minecraft:illusioner",
             Self::WanderingTrader => "minecraft:wandering_trader",
             Self::TraderLlama => "minecraft:trader_llama",
         }
@@ -683,6 +708,10 @@ impl MobType {
             // `EntityTypes.VINDICATOR` / `RAVAGER`：眼高用官方缺省的 height*0.85。
             (Self::Vindicator, _) => (0.6, 1.95, 1.95 * 0.85),
             (Self::Ravager, _) => (1.95, 2.2, 2.2 * 0.85),
+            // `EntityTypes.EVOKER` / `ILLUSIONER`：`sized(0.6F, 1.95F)`，眼高取缺省的
+            // `height * 0.85F`；`EntityTypes.VEX`：`sized(0.4F, 0.8F).eyeHeight(0.51875F)`。
+            (Self::Evoker | Self::Illusioner, _) => (0.6, 1.95, 1.95 * 0.85),
+            (Self::Vex, _) => (0.4, 0.8, 0.518_75),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -747,6 +776,9 @@ impl MobType {
                 | Self::Pillager
                 | Self::Vindicator
                 | Self::Ravager
+                | Self::Evoker
+                | Self::Vex
+                | Self::Illusioner
                 | Self::Creeper
                 | Self::Spider
                 | Self::CaveSpider
@@ -769,7 +801,12 @@ impl MobType {
     pub const fn is_raider(self) -> bool {
         matches!(
             self,
-            Self::Witch | Self::Pillager | Self::Vindicator | Self::Ravager
+            Self::Witch
+                | Self::Pillager
+                | Self::Vindicator
+                | Self::Ravager
+                | Self::Evoker
+                | Self::Illusioner
         )
     }
 
@@ -1133,8 +1170,13 @@ impl MobType {
         }
         // 守卫者构造函数里 `xpReward = 10`，覆盖 `Monster` 的 5。
         // The guardian constructor sets `xpReward = 10`, overriding the monster's 5.
-        if matches!(self, Self::Guardian | Self::ElderGuardian) {
+        if matches!(self, Self::Guardian | Self::ElderGuardian | Self::Evoker) {
             return 10;
+        }
+        // `Vex` 构造函数里 `xpReward = 3`，覆盖 `Monster` 的 5。
+        // The `Vex` constructor sets `xpReward = 3`, overriding the monster's 5.
+        if matches!(self, Self::Vex) {
+            return 3;
         }
         // 硫磺方块怪成年是 1 + rand(2)，幼年 0，见 `living::drop_loot`。
         // Adult sulfur cubes give 1 + rand(2); babies give none.
@@ -1226,6 +1268,9 @@ impl MobType {
             Self::HappyGhast => "minecraft:entities/happy_ghast",
             Self::Vindicator => "minecraft:entities/vindicator",
             Self::Ravager => "minecraft:entities/ravager",
+            Self::Evoker => "minecraft:entities/evoker",
+            Self::Vex => "minecraft:entities/vex",
+            Self::Illusioner => "minecraft:entities/illusioner",
             Self::WanderingTrader => "minecraft:entities/wandering_trader",
             Self::TraderLlama => "minecraft:entities/trader_llama",
         }
@@ -1393,6 +1438,9 @@ impl MobType {
             Self::HappyGhast => Some("minecraft:entity.happy_ghast.ambient"),
             Self::Vindicator => Some("minecraft:entity.vindicator.ambient"),
             Self::Ravager => Some("minecraft:entity.ravager.ambient"),
+            Self::Evoker => Some("minecraft:entity.evoker.ambient"),
+            Self::Vex => Some("minecraft:entity.vex.ambient"),
+            Self::Illusioner => Some("minecraft:entity.illusioner.ambient"),
             // 交易中的叫声由 `living::ambient_voice` 按交易状态换成 `...trade`。
             // Trading ambience is switched by `living::ambient_voice` while trading.
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.ambient"),
@@ -1467,6 +1515,9 @@ impl MobType {
             Self::HappyGhast => Some("minecraft:entity.happy_ghast.hurt"),
             Self::Vindicator => Some("minecraft:entity.vindicator.hurt"),
             Self::Ravager => Some("minecraft:entity.ravager.hurt"),
+            Self::Evoker => Some("minecraft:entity.evoker.hurt"),
+            Self::Vex => Some("minecraft:entity.vex.hurt"),
+            Self::Illusioner => Some("minecraft:entity.illusioner.hurt"),
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.hurt"),
             Self::TraderLlama => Some("minecraft:entity.llama.hurt"),
         }
@@ -1538,6 +1589,9 @@ impl MobType {
             Self::HappyGhast => Some("minecraft:entity.happy_ghast.death"),
             Self::Vindicator => Some("minecraft:entity.vindicator.death"),
             Self::Ravager => Some("minecraft:entity.ravager.death"),
+            Self::Evoker => Some("minecraft:entity.evoker.death"),
+            Self::Vex => Some("minecraft:entity.vex.death"),
+            Self::Illusioner => Some("minecraft:entity.illusioner.death"),
             Self::WanderingTrader => Some("minecraft:entity.wandering_trader.death"),
             Self::TraderLlama => Some("minecraft:entity.llama.death"),
         }
@@ -1564,9 +1618,11 @@ impl MobType {
             Self::Parched => Some("minecraft:entity.parched.step"),
             Self::Drowned => Some("minecraft:entity.drowned.step"),
             // 女巫没覆写 `getStepSound`，走方块自己的脚步声（和史莱姆一样）。
+            // 唤魔者、幻术师和恼鬼也没覆写，同样没有自己的脚步声。
             //
             // A witch does not override `getStepSound`; the block's own step sound plays.
-            Self::Witch | Self::Pillager => None,
+            // Evokers, illusioners and vexes do not override it either.
+            Self::Witch | Self::Pillager | Self::Evoker | Self::Vex | Self::Illusioner => None,
             Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.step"),
             // `MovementEmission.EVENTS`：没有脚步声。
             // `MovementEmission.EVENTS`: no step sound.
@@ -1703,6 +1759,11 @@ impl MobType {
             Self::HappyGhast => items::HAPPY_GHAST_SPAWN_EGG,
             Self::Vindicator => items::VINDICATOR_SPAWN_EGG,
             Self::Ravager => items::RAVAGER_SPAWN_EGG,
+            Self::Evoker => items::EVOKER_SPAWN_EGG,
+            Self::Vex => items::VEX_SPAWN_EGG,
+            // 幻术师没有刷怪蛋（`EntityTypes.ILLUSIONER` 注册时 `noSummon` 之外也没有蛋）。
+            // The illusioner has no spawn egg.
+            Self::Illusioner => 0,
             Self::WanderingTrader => items::WANDERING_TRADER_SPAWN_EGG,
             Self::TraderLlama => items::TRADER_LLAMA_SPAWN_EGG,
         }
@@ -1780,6 +1841,9 @@ impl MobType {
             Self::HappyGhast => "entity.minecraft.happy_ghast",
             Self::Vindicator => "entity.minecraft.vindicator",
             Self::Ravager => "entity.minecraft.ravager",
+            Self::Evoker => "entity.minecraft.evoker",
+            Self::Vex => "entity.minecraft.vex",
+            Self::Illusioner => "entity.minecraft.illusioner",
             Self::WanderingTrader => "entity.minecraft.wandering_trader",
             Self::TraderLlama => "entity.minecraft.trader_llama",
         }
@@ -2781,6 +2845,11 @@ pub struct Mob {
     pub last_crystal_sound_tick: i32,
     pub silent: bool,
     pub no_gravity: bool,
+    /// `Entity.noPhysics`：穿墙移动（恼鬼）。`move_living` 为真时跳过方块碰撞。
+    ///
+    /// `Entity.noPhysics`: move through blocks (the vex). `move_living` skips block
+    /// collision while set.
+    pub no_physics: bool,
     pub invulnerable: bool,
     /// `CustomName`：文本组件的 NBT 形式（字符串或复合标签），同步时原样转成组件。
     ///
@@ -3002,6 +3071,25 @@ pub struct Mob {
     pub vindicator: vindicator::VindicatorState,
     /// 劫掠兽的三个同步计时字段。
     pub ravager: ravager::RavagerState,
+    /// 唤魔者的施法状态与 wololo 目标，见 [`evoker::EvokerState`]。
+    ///
+    /// The evoker's casting state and wololo target, see [`evoker::EvokerState`].
+    pub evoker: evoker::EvokerState,
+    /// 施法灾厄村民（唤魔者 / 幻术师）的施法计时与当前法术，见
+    /// [`spellcaster::SpellcasterState`]。
+    ///
+    /// The spellcaster's casting timer and current spell, see
+    /// [`spellcaster::SpellcasterState`].
+    pub spellcaster: spellcaster::SpellcasterState,
+    /// 恼鬼的飞行、有限生命与主人，见 [`vex::VexState`]。
+    ///
+    /// The vex's flight, limited life and owner, see [`vex::VexState`].
+    pub vex: vex::VexState,
+    /// 幻术师的施法状态（复用 `spellcaster`），另见 [`illusioner::IllusionerState`]。
+    ///
+    /// The illusioner's casting state (shared with `spellcaster`), see
+    /// [`illusioner::IllusionerState`].
+    pub illusioner: illusioner::IllusionerState,
     /// `PatrollingMonster` / `Raider` 的字段，女巫和掠夺者共用，见 [`raider::Raider`]。
     ///
     /// The `PatrollingMonster` / `Raider` fields shared by witches and pillagers, see
@@ -3387,6 +3475,9 @@ impl Mob {
             MobType::HappyGhast => happy_ghast::attributes(),
             MobType::Vindicator => vindicator::attributes(),
             MobType::Ravager => ravager::attributes(),
+            MobType::Evoker => evoker::attributes(),
+            MobType::Vex => vex::attributes(),
+            MobType::Illusioner => illusioner::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -3474,6 +3565,9 @@ impl Mob {
             MobType::Pillager => pillager::goals(&mut navigation),
             MobType::Vindicator => vindicator::goals(&mut navigation),
             MobType::Ravager => ravager::goals(&mut navigation),
+            MobType::Evoker => evoker::goals(&mut navigation),
+            MobType::Vex => vex::goals(&mut navigation),
+            MobType::Illusioner => illusioner::goals(&mut navigation),
             // 蝙蝠和骆驼没有覆写 `registerGoals`：两个选择器都是空的（骆驼不要 `equine::goals`）。
             // Bats and camels do not override `registerGoals`: both selectors stay empty
             // (no `equine::goals` for camels).
@@ -3613,6 +3707,9 @@ impl Mob {
             MobType::Pillager => pillager::targets(),
             MobType::Vindicator => vindicator::targets(),
             MobType::Ravager => ravager::targets(),
+            MobType::Evoker => evoker::targets(),
+            MobType::Vex => vex::targets(),
+            MobType::Illusioner => illusioner::targets(),
             MobType::SkeletonHorse | MobType::ZombieHorse => GoalSelector::default(),
             MobType::IronGolem => iron_golem::target_goals(),
             MobType::SnowGolem => snow_golem::target_goals(),
@@ -3647,6 +3744,7 @@ impl Mob {
             last_crystal_sound_tick: 0,
             silent: false,
             no_gravity: false,
+            no_physics: false,
             invulnerable: false,
             custom_name: None,
             custom_name_visible: false,
@@ -3808,6 +3906,10 @@ impl Mob {
             witch_drinking: false,
             vindicator: vindicator::VindicatorState::default(),
             ravager: ravager::RavagerState::default(),
+            evoker: evoker::EvokerState::default(),
+            spellcaster: spellcaster::SpellcasterState::default(),
+            vex: vex::VexState::default(),
+            illusioner: illusioner::IllusionerState::default(),
             raider: raider::Raider::default(),
             crossbow: crossbow::CrossbowUse::default(),
             pillager: pillager::Pillager::default(),
@@ -4330,6 +4432,10 @@ pub struct MobPublic {
     ///
     /// Whether the raw target is set; read when alerting others.
     pub has_target: bool,
+    /// 原始的 `target` uid；恼鬼的 `VexCopyOwnerTargetGoal` 复制主人目标时读它。
+    ///
+    /// The raw target uid; read by the vex's `VexCopyOwnerTargetGoal`.
+    pub target: Option<EntityUid>,
     /// 狼的元数据：讨食、项圈、仇恨结束时刻、品种、叫声。
     ///
     /// The wolf metadata: interested, collar, anger end, variant, sound variant.
@@ -4601,6 +4707,7 @@ impl MobPublic {
             tame_flags: mob.tame.flags,
             owner: mob.tame.owner,
             has_target: mob.target.is_some(),
+            target: mob.target,
             wolf_interested: mob.wolf.interested,
             wolf_collar: mob.wolf.collar,
             wolf_anger_end_time: mob.wolf.anger_end_time,

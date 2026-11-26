@@ -1131,6 +1131,39 @@ pub enum Command {
     ///
     /// `LlamaSpit.onHitEntity`: the spit hit an entity.
     SpitHit(super::spit::SpitHit),
+    /// `EvokerAttackSpellGoal.createSpellEntity`：召唤一颗尖牙。
+    ///
+    /// `EvokerAttackSpellGoal.createSpellEntity`: spawn one fang.
+    SpawnFangs {
+        position: mc_bamboo_core::Vec3,
+        y_rot: f32,
+        delay: i32,
+        owner: EntityUid,
+        owner_uuid: [u8; 16],
+    },
+    /// `EvokerSummonSpellGoal.performSpellCasting`：召唤三只恼鬼。
+    ///
+    /// `EvokerSummonSpellGoal.performSpellCasting`: summon three vexes.
+    SummonVex {
+        summons: Vec<super::mob::vex::VexSummon>,
+        owner: EntityUid,
+        owner_uuid: [u8; 16],
+    },
+    /// `EvokerWololoSpellGoal.performSpellCasting`：把一只羊染红。
+    ///
+    /// `EvokerWololoSpellGoal.performSpellCasting`: dye one sheep red.
+    SheepSetColor {
+        target: EntityUid,
+        color: i32,
+    },
+    /// `IllusionerBlindnessSpellGoal.performSpellCasting`：给目标挂致盲。
+    ///
+    /// `IllusionerBlindnessSpellGoal.performSpellCasting`: blind the target.
+    BlindTarget {
+        target: EntityUid,
+        effect: i32,
+        duration: i32,
+    },
     /// 鸡蛋这一刻撞到东西：`ThrownEgg.onHit`（打目标、孵小鸡、碎掉）。
     ///
     /// The egg hit something this tick: `ThrownEgg.onHit` (hurt, hatch, break).
@@ -1971,6 +2004,37 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::ShootCrossbow { shots } => {
             for shot in shots {
                 world.spawn_arrow_shot(shot);
+            }
+        }
+        Command::SpawnFangs {
+            position,
+            y_rot,
+            delay,
+            owner,
+            owner_uuid,
+        } => {
+            super::evoker_fangs::spawn(world, position, y_rot, delay, owner, owner_uuid);
+        }
+        Command::SummonVex {
+            summons,
+            owner,
+            owner_uuid,
+        } => {
+            super::mob::vex::summon(world, &summons, owner, owner_uuid);
+        }
+        Command::SheepSetColor { target, color } => {
+            super::mob::sheep::set_color_uid(world, target, color);
+        }
+        Command::BlindTarget {
+            target,
+            effect,
+            duration,
+        } => {
+            let instance = super::mob::effects::EffectInstance::new(effect, duration);
+            if world.entity(target).is_some() {
+                world.give_mob_effect(target, instance);
+            } else {
+                world.give_player_effect(target, instance);
             }
         }
         Command::RaiderShout {

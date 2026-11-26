@@ -32,6 +32,10 @@ pub enum AvoidClass {
     /// The guardians a dolphin avoids (`AvoidEntityGoal(Guardian.class, 8.0F, 1.0D, 1.0D)`;
     /// the `Guardian` class also covers elder guardians).
     Guardian,
+    /// 唤魔者 / 幻术师躲的嘎枝（`AvoidEntityGoal(Creaking.class, 8.0F, ...)`）。
+    ///
+    /// The creaking evokers and illusioners avoid (`AvoidEntityGoal(Creaking.class, 8.0F, ...)`).
+    Creaking,
 }
 
 impl AvoidClass {
@@ -45,6 +49,7 @@ impl AvoidClass {
             Self::PolarBear => false,
             Self::Armadillo => kind == MobType::Armadillo,
             Self::Guardian => super::guardian::is_guardian(kind),
+            Self::Creaking => kind == MobType::Creaking,
         }
     }
 }

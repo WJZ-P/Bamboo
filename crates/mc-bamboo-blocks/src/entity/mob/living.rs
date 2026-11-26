@@ -221,6 +221,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if super::nautilus::is_nautilus(mob.mob_type) && !me.removed {
         super::nautilus::tick(me, mob);
     }
+    // `Vex.tick` 在 `super.tick()` 之后：`setNoGravity(true)` 和有限生命扣血。
+    // `Vex.tick` after `super.tick()`: `setNoGravity(true)` and the limited life.
+    if mob.mob_type == super::MobType::Vex && !me.removed {
+        super::vex::tick_after(me, mob, ctx);
+    }
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
     body_rotation_tick(me, mob, ctx.blocks().game_time());
     range_checks(me, mob);
@@ -2165,6 +2170,11 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // `AxolotlMoveControl` / `AxolotlLookControl`: both stop while playing dead.
         super::axolotl::move_control_tick(me, mob);
         super::axolotl::look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Vex {
+        // `Vex` 用 `VexMoveControl`：穿墙飞行、无重力的移动控制。
+        // `Vex` uses `VexMoveControl`: the wall-phasing, gravity-free move control.
+        super::vex::move_control_tick(me, mob, ctx);
+        look_control_tick(me, mob);
     } else if mob.mob_type == super::MobType::Dolphin {
         // 海豚的 `SmoothSwimmingMoveControl(85, 10, 0.02F, 0.1F, true)` 与
         // `SmoothSwimmingLookControl(this, 10)`。
@@ -2273,6 +2283,14 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
         // `Warden.customServerAiStep`：大脑、振动、愤怒衰减、活动重选。
         // `Warden.customServerAiStep`: brain, vibration, anger decay, activity switch.
         super::warden_ai::custom_server_ai_step(me, mob, ctx, decision_gap);
+    }
+    if matches!(
+        mob.mob_type,
+        super::MobType::Evoker | super::MobType::Illusioner
+    ) {
+        // `SpellcasterIllager.customServerAiStep`：施法计时递减。
+        // `SpellcasterIllager.customServerAiStep`: count the casting timer down.
+        super::spellcaster::server_ai_step(mob);
     }
 }
 

@@ -836,6 +836,10 @@ pub enum KindData {
     LeashKnot,
     Egg(Box<mc_bamboo_blocks::entity::thrown_egg::EggPublic>),
     SplashPotion(Box<mc_bamboo_blocks::entity::splash_potion::SplashPotionPublic>),
+    /// 唤魔者尖牙：没有自己的元数据。
+    ///
+    /// Evoker fangs, with no metadata of its own.
+    EvokerFangs,
 }
 
 /// 这一 tick 全表的载具名单。配对乘客时官方发的是载具那一侧的完整名单，而乘客
@@ -914,7 +918,8 @@ impl Snapshot {
             | KindData::ExperienceOrb { .. }
             | KindData::Mob(_)
             | KindData::LightningBolt
-            | KindData::LeashKnot => 0,
+            | KindData::LeashKnot
+            | KindData::EvokerFangs => 0,
         }
     }
 
@@ -940,6 +945,7 @@ impl KindData {
             KindPublic::SplashPotion(potion) => Self::SplashPotion(potion.clone()),
             KindPublic::LightningBolt(_) => Self::LightningBolt,
             KindPublic::LeashKnot { .. } => Self::LeashKnot,
+            KindPublic::EvokerFangs => Self::EvokerFangs,
         }
     }
 
@@ -966,7 +972,8 @@ impl KindData {
             | Self::Egg(_)
             | Self::SplashPotion(_)
             | Self::LightningBolt
-            | Self::LeashKnot => None,
+            | Self::LeashKnot
+            | Self::EvokerFangs => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -983,7 +990,8 @@ impl KindData {
             | Self::Egg(_)
             | Self::SplashPotion(_)
             | Self::LightningBolt
-            | Self::LeashKnot => None,
+            | Self::LeashKnot
+            | Self::EvokerFangs => None,
         }
     }
 
@@ -1038,7 +1046,8 @@ impl KindData {
             Self::ExperienceOrb { .. }
             | Self::LlamaSpit(_)
             | Self::LightningBolt
-            | Self::LeashKnot => Vec::new(),
+            | Self::LeashKnot
+            | Self::EvokerFangs => Vec::new(),
             Self::Arrow(arrow) => {
                 let mut data = Vec::new();
                 if arrow.on_fire {
