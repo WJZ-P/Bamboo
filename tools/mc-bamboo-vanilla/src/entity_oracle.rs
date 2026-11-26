@@ -965,6 +965,7 @@ fn snap_of(entity: Entity) -> OfficialEntity {
             -1,
             data.health,
         ),
+        EntityKind::FishingHook(_) => ("fishing_bobber".to_owned(), -1, -1, -1, 0, -1, -1, -1),
     };
     OfficialEntity {
         kind,

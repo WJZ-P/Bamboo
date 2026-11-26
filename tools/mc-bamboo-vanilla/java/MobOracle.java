@@ -609,6 +609,9 @@ public final class MobOracle {
             if (only == null || only.startsWith("vault")) {
                 cases += playVault(official, out, only);
             }
+            if (only == null || only.startsWith("fishing")) {
+                cases += playFishing(official, out, only);
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -13800,6 +13803,347 @@ public final class MobOracle {
         out.flush();
     }
 
+    /**
+     * 钓鱼逐刻对拍：五个场景覆盖抛竿飞行落水、完整咬钩与收竿结算（物品、经验球、
+     * 耐久、统计）、钩住牛并拉拽（实体事件 31 与 5 点耐久）、以及露天/非露天 5×4×5
+     * 判定与宝藏掉落差异。
+     */
+    private static int playFishing(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        for (String name : List.of(
+                "fishing_cast_water",
+                "fishing_bite_catch",
+                "fishing_hook_cow",
+                "fishing_open_water_treasure",
+                "fishing_enclosed_no_treasure")) {
+            if (only != null && !name.startsWith(only)) continue;
+            playFishingCase(official, out, name);
+            cases++;
+        }
+        return cases;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void playFishingCase(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.fishingScene = true;
+        level.fishingNextId = FIRST_ID;
+        level.fishingParticles = new ArrayList<>();
+        level.fishingEvent31 = false;
+        level.injectedCanSeeSky = true;
+        level.injectedRaining = false;
+        level.gameTime = START_TIME;
+
+        // 统计表每次独立清零，避免前序场景污染 FISH_CAUGHT。
+        stats = new ServerStatsCounter(official.server, Path.of("mob-oracle-fishing-stats.json"));
+        put(net.minecraft.server.players.PlayerList.class,
+                official.server.getPlayerList(), "stats", new java.util.HashMap<>());
+
+        boolean hookCow = name.equals("fishing_hook_cow");
+        boolean openOrEnclosed = name.equals("fishing_open_water_treasure")
+                || name.equals("fishing_enclosed_no_treasure");
+        boolean enclosed = name.equals("fishing_enclosed_no_treasure");
+        int lureLevel = (name.equals("fishing_bite_catch") || openOrEnclosed) ? 3 : 0;
+        int luckLevel = openOrEnclosed ? 3 : 0;
+
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        BlockState water = Blocks.WATER.defaultBlockState();
+        if (hookCow) {
+            for (int x = -4; x <= 4; x++) {
+                for (int z = -1; z <= 10; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+        } else if (openOrEnclosed) {
+            for (int x = -6; x <= 6; x++) {
+                for (int z = -1; z <= 14; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 60, z), stone);
+                    if (x >= -5 && x <= 5 && z >= 2 && z <= 13) {
+                        level.blocks.put(BlockPos.asLong(x, 61, z), water);
+                        level.blocks.put(BlockPos.asLong(x, 62, z), water);
+                        level.blocks.put(BlockPos.asLong(x, 63, z), water);
+                    } else {
+                        level.blocks.put(BlockPos.asLong(x, 61, z), stone);
+                        level.blocks.put(BlockPos.asLong(x, 62, z), stone);
+                        level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                    }
+                }
+            }
+            if (enclosed) {
+                // 在水面上一格、x=2（离浮漂 x≈0.5 仅 1.5 格）放一排石头，
+                // 不挡浮漂飞行/浮力，但在 5×4×5 露天盒内破坏 openWater。
+                for (int z = 2; z <= 13; z++) {
+                    level.blocks.put(BlockPos.asLong(2, 64, z), stone);
+                }
+            }
+        } else {
+            for (int x = -4; x <= 4; x++) {
+                for (int z = -1; z <= 12; z++) {
+                    level.blocks.put(BlockPos.asLong(x, 61, z), stone);
+                    if (x >= -3 && x <= 3 && z >= 2 && z <= 11) {
+                        level.blocks.put(BlockPos.asLong(x, 62, z), water);
+                        level.blocks.put(BlockPos.asLong(x, 63, z), water);
+                    } else {
+                        level.blocks.put(BlockPos.asLong(x, 62, z), stone);
+                        level.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                    }
+                }
+            }
+        }
+
+        double[] playerPos = new double[] {0.5, 64.0, 0.5};
+        float playerYaw = 0.0F;
+        float playerPitch = hookCow ? 10.0F : 20.0F;
+        int playerId = 1025;
+
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 9L), "FishingOracle"), ClientInformation.createDefault());
+        player.setId(playerId);
+        player.setPos(playerPos[0], playerPos[1], playerPos[2]);
+        player.setYRot(playerYaw);
+        player.setXRot(playerPitch);
+        player.setYHeadRot(playerYaw);
+        player.setYBodyRot(playerYaw);
+        player.setGameMode(GameType.SURVIVAL);
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = new Bytes(official.registries);
+        put(ServerPlayer.class, player, "connection", connection);
+
+        ItemStack rod = new ItemStack(Items.FISHING_ROD);
+        if (lureLevel > 0) {
+            var enchants = official.registries.lookupOrThrow(Registries.ENCHANTMENT);
+            rod.enchant(enchants.getOrThrow(Enchantments.LURE), lureLevel);
+        }
+        if (luckLevel > 0) {
+            var enchants = official.registries.lookupOrThrow(Registries.ENCHANTMENT);
+            rod.enchant(enchants.getOrThrow(Enchantments.LUCK_OF_THE_SEA), luckLevel);
+        }
+        player.setItemInHand(InteractionHand.MAIN_HAND, rod);
+        level.playersList().add(player);
+        level.tracked.add(player);
+
+        double[] cowPos = null;
+        Cow cow = null;
+        if (hookCow) {
+            cowPos = new double[] {0.5, 64.0, 4.5};
+            cow = new Cow(EntityTypes.COW, level);
+            cow.setId(level.fishingNextId++);
+            setRandom(cow, level.entitySeeds.nextLong());
+            cow.setPos(cowPos[0], cowPos[1], cowPos[2]);
+            cow.setNoAi(true);
+            level.tracked.add(cow);
+        }
+
+        String initialBlocks = blockArray(level.blocks);
+        level.getRandom().setSeed(1L);
+        official.server.sequences = new RandomSequences();
+
+        Field fState = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("currentState");
+        Field fBiting = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("biting");
+        Field fOpenWater = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("openWater");
+        Field fNibble = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("nibble");
+        Field fLured = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("timeUntilLured");
+        Field fHooked = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("timeUntilHooked");
+        Field fDataHooked = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("DATA_HOOKED_ENTITY");
+        fState.setAccessible(true);
+        fBiting.setAccessible(true);
+        fOpenWater.setAccessible(true);
+        fNibble.setAccessible(true);
+        fLured.setAccessible(true);
+        fHooked.setAccessible(true);
+        fDataHooked.setAccessible(true);
+        var dataHookedAcc = (net.minecraft.network.syncher.EntityDataAccessor<Integer>) fDataHooked.get(null);
+
+        // Tick 0: 抛竿。
+        level.spawned.clear();
+        level.fishingParticles.clear();
+        Items.FISHING_ROD.use(level, player, InteractionHand.MAIN_HAND);
+        net.minecraft.world.entity.projectile.FishingHook hook = player.fishing;
+        if (hook == null) {
+            throw new IllegalStateException(name + ": fishing hook was not spawned on cast");
+        }
+
+        StringBuilder frames = new StringBuilder("[");
+        StringBuilder frameParticles = new StringBuilder("[");
+        Integer retrieveTick = null;
+        int hookedTicks = 0;
+        int maxTicks = name.equals("fishing_cast_water") ? 40 : 800;
+
+        for (int tick = 0; tick <= maxTicks; tick++) {
+            level.fishingParticles.clear();
+            if (tick > 0) {
+                level.gameTime = START_TIME + tick;
+                hook.commonTick();
+                hook.tick();
+            }
+            int state = ((Enum<?>) fState.get(hook)).ordinal();
+            int hookedData = hook.getEntityData().get(dataHookedAcc);
+            int biting = fBiting.getBoolean(hook) ? 1 : 0;
+            int openWater = fOpenWater.getBoolean(hook) ? 1 : 0;
+            int nibble = fNibble.getInt(hook);
+            int lured = fLured.getInt(hook);
+            int hooked = fHooked.getInt(hook);
+
+            if (tick > 0) {
+                frames.append(',');
+                frameParticles.append(',');
+            }
+            frames.append('[')
+                    .append(Double.doubleToRawLongBits(hook.getX())).append(',')
+                    .append(Double.doubleToRawLongBits(hook.getY())).append(',')
+                    .append(Double.doubleToRawLongBits(hook.getZ())).append(',')
+                    .append(Double.doubleToRawLongBits(hook.getDeltaMovement().x)).append(',')
+                    .append(Double.doubleToRawLongBits(hook.getDeltaMovement().y)).append(',')
+                    .append(Double.doubleToRawLongBits(hook.getDeltaMovement().z)).append(',')
+                    .append(Float.floatToRawIntBits(hook.getYRot())).append(',')
+                    .append(Float.floatToRawIntBits(hook.getXRot())).append(',')
+                    .append(state).append(',')
+                    .append(hook.onGround() ? 1 : 0).append(',')
+                    .append(hook.isInWater() ? 1 : 0).append(',')
+                    .append(hook.isRemoved() ? 1 : 0).append(',')
+                    .append(hookedData).append(',')
+                    .append(biting).append(',')
+                    .append(openWater).append(',')
+                    .append(nibble).append(',')
+                    .append(lured).append(',')
+                    .append(hooked).append(',')
+                    .append(seedOf(hook)).append(',')
+                    .append(levelSeed(level)).append(',')
+                    .append(level.fishingParticles.size())
+                    .append(']');
+            frameParticles.append('[');
+            for (int i = 0; i < level.fishingParticles.size(); i++) {
+                if (i > 0) frameParticles.append(',');
+                frameParticles.append(level.fishingParticles.get(i));
+            }
+            frameParticles.append(']');
+
+            if (hookCow) {
+                if (state == 1) {
+                    hookedTicks++;
+                    if (hookedTicks >= 4) {
+                        retrieveTick = tick;
+                        break;
+                    }
+                }
+            } else if (!name.equals("fishing_cast_water")) {
+                if (biting == 1 && nibble > 0) {
+                    retrieveTick = tick;
+                    break;
+                }
+            }
+        }
+        frames.append(']');
+        frameParticles.append(']');
+
+        String retrieveJson = "null";
+        StringBuilder extraLootJson = new StringBuilder("[");
+        if (!name.equals("fishing_cast_water")) {
+            if (retrieveTick == null) {
+                throw new IllegalStateException(name + ": never reached retrieve condition within " + maxTicks + " ticks");
+            }
+            level.spawned.clear();
+            level.fishingEvent31 = false;
+            int beforeDamage = rod.getDamageValue();
+            Items.FISHING_ROD.use(level, player, InteractionHand.MAIN_HAND);
+            int rodDamage = rod.getDamageValue() - beforeDamage;
+            int fishCaught = stats.getValue(net.minecraft.stats.Stats.CUSTOM.get(net.minecraft.stats.Stats.FISH_CAUGHT));
+
+            StringBuilder caughtItems = new StringBuilder("[");
+            StringBuilder xpOrbs = new StringBuilder("[");
+            int itemCount = 0;
+            int orbCount = 0;
+            for (Entity e : level.spawned) {
+                if (e instanceof net.minecraft.world.entity.item.ItemEntity itemEntity) {
+                    if (itemCount++ > 0) caughtItems.append(',');
+                    ItemStack stack = itemEntity.getItem();
+                    int itemId = BuiltInRegistries.ITEM.getId(stack.getItem());
+                    Vec3 v = itemEntity.getDeltaMovement();
+                    caughtItems.append('[')
+                            .append(itemId).append(',')
+                            .append(stack.getCount()).append(',')
+                            .append(Double.doubleToRawLongBits(v.x)).append(',')
+                            .append(Double.doubleToRawLongBits(v.y)).append(',')
+                            .append(Double.doubleToRawLongBits(v.z)).append(']');
+                } else if (e instanceof net.minecraft.world.entity.ExperienceOrb orb) {
+                    if (orbCount++ > 0) xpOrbs.append(',');
+                    xpOrbs.append('[')
+                            .append(orb.getValue()).append(',')
+                            .append(Double.doubleToRawLongBits(orb.getX())).append(',')
+                            .append(Double.doubleToRawLongBits(orb.getY())).append(',')
+                            .append(Double.doubleToRawLongBits(orb.getZ())).append(']');
+                }
+            }
+            caughtItems.append(']');
+            xpOrbs.append(']');
+
+            String cowDeltaJson = "null";
+            if (cow != null) {
+                Vec3 cd = cow.getDeltaMovement();
+                cowDeltaJson = "[" + Double.doubleToRawLongBits(cd.x)
+                        + "," + Double.doubleToRawLongBits(cd.y)
+                        + "," + Double.doubleToRawLongBits(cd.z) + "]";
+            }
+            retrieveJson = "{\"rodDamage\":" + rodDamage
+                    + ",\"entityEvent31\":" + level.fishingEvent31
+                    + ",\"cowDelta\":" + cowDeltaJson
+                    + ",\"caughtItems\":" + caughtItems
+                    + ",\"xpOrbs\":" + xpOrbs
+                    + ",\"fishCaught\":" + fishCaught
+                    + ",\"levelSeed\":" + levelSeed(level) + "}";
+
+            if (openOrEnclosed) {
+                // 连续抽取 30 次官方 `gameplay/fishing` 战利品表，验证露天出宝藏 / 非露天 0 宝藏。
+                LootTable fishingTable = official.server.reloadableRegistries()
+                        .getLootTable(net.minecraft.world.level.storage.loot.BuiltInLootTables.FISHING);
+                for (int roll = 0; roll < 30; roll++) {
+                    if (roll > 0) extraLootJson.append(',');
+                    var params = new net.minecraft.world.level.storage.loot.LootParams.Builder(level)
+                            .withParameter(net.minecraft.world.level.storage.loot.parameters.LootContextParams.ORIGIN, hook.position())
+                            .withParameter(net.minecraft.world.level.storage.loot.parameters.LootContextParams.TOOL, rod)
+                            .withParameter(net.minecraft.world.level.storage.loot.parameters.LootContextParams.THIS_ENTITY, hook)
+                            .withLuck((float) luckLevel + player.getLuck())
+                            .create(net.minecraft.world.level.storage.loot.parameters.LootContextParamSets.FISHING);
+                    List<ItemStack> stacks = fishingTable.getRandomItems(params);
+                    if (stacks.isEmpty()) {
+                        extraLootJson.append("[0,0]");
+                    } else {
+                        ItemStack first = stacks.get(0);
+                        extraLootJson.append('[')
+                                .append(BuiltInRegistries.ITEM.getId(first.getItem())).append(',')
+                                .append(first.getCount()).append(']');
+                    }
+                }
+            }
+        }
+        extraLootJson.append(']');
+
+        String cowPosJson = cowPos == null ? "null"
+                : "[" + cowPos[0] + "," + cowPos[1] + "," + cowPos[2] + "]";
+        out.write("{\"type\":\"fishing\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID
+                + ",\"playerId\":" + playerId
+                + ",\"playerPos\":[" + playerPos[0] + "," + playerPos[1] + "," + playerPos[2] + "]"
+                + ",\"playerYaw\":" + playerYaw
+                + ",\"playerPitch\":" + playerPitch
+                + ",\"lureLevel\":" + lureLevel
+                + ",\"luckLevel\":" + luckLevel
+                + ",\"cowPos\":" + cowPosJson
+                + ",\"blocks\":" + initialBlocks
+                + ",\"retrieveTick\":" + (retrieveTick == null ? "null" : retrieveTick)
+                + ",\"frames\":" + frames
+                + ",\"frameParticles\":" + frameParticles
+                + ",\"retrieve\":" + retrieveJson
+                + ",\"extraLoot\":" + extraLootJson
+                + "}\n");
+        out.flush();
+    }
+
     private static void playBeeLocate(Official official, Writer out, String name) throws Exception {
         FakeLevel level = FakeLevel.create(official);
         int[][] hives = beeLocateHives(name);  // [x, y, z, kind]  kind 0 = beehive, 1 = bee_nest
@@ -24684,6 +25028,11 @@ public final class MobOracle {
         /** 悬挂实体对拍：在 `addFreshEntity` 里用 `entitySeeds` 给画和展示框换种，并进 `tracked`。 */
         boolean hangingScene;
         int hangingNextId;
+        /** 钓鱼对拍：在 `addFreshEntity` 里用 `entitySeeds` 给浮漂换种、重放抛竿初速度并进 `tracked`。 */
+        boolean fishingScene;
+        int fishingNextId;
+        List<Integer> fishingParticles;
+        boolean fishingEvent31;
         boolean injectedBrightOutside = true;
         int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
@@ -25330,8 +25679,51 @@ public final class MobOracle {
                     tracked.add(frame);
                 }
             }
+            if (fishingScene) {
+                if (entity instanceof net.minecraft.world.entity.projectile.FishingHook hook) {
+                    hook.setId(fishingNextId++);
+                    reseedFishingHook(hook);
+                    tracked.add(hook);
+                } else if (entity instanceof net.minecraft.world.entity.item.ItemEntity
+                        || entity instanceof net.minecraft.world.entity.ExperienceOrb) {
+                    entity.setId(fishingNextId++);
+                }
+            }
             spawned.add(entity);
             return true;
+        }
+
+        private void reseedFishingHook(net.minecraft.world.entity.projectile.FishingHook hook) {
+            setRandom(hook, entitySeeds.nextLong());
+            RandomSource random = hook.getRandom();
+            hook.setUUID(Mth.createInsecureUUID(random));
+            Player owner = hook.getPlayerOwner();
+            if (owner != null) {
+                float xRot = owner.getXRot();
+                float yRot = owner.getYRot();
+                float cos = Mth.cos(-yRot * 0.017453292F - (float) Math.PI);
+                float sin = Mth.sin(-yRot * 0.017453292F - (float) Math.PI);
+                float xCos = -Mth.cos(-xRot * 0.017453292F);
+                float xSin = Mth.sin(-xRot * 0.017453292F);
+                double x = owner.getX() - (double) sin * 0.3;
+                double y = owner.getEyeY();
+                double z = owner.getZ() - (double) cos * 0.3;
+                hook.snapTo(x, y, z, yRot, xRot);
+                Vec3 movement = new Vec3(
+                        (double) (-sin),
+                        (double) Mth.clamp(-(xSin / xCos), -5.0F, 5.0F),
+                        (double) (-cos));
+                double dist = movement.length();
+                movement = movement.multiply(
+                        0.6 / dist + random.triangle(0.5, 0.0103365),
+                        0.6 / dist + random.triangle(0.5, 0.0103365),
+                        0.6 / dist + random.triangle(0.5, 0.0103365));
+                hook.setDeltaMovement(movement);
+                hook.setYRot((float) (Mth.atan2(movement.x, movement.z) * 57.2957763671875));
+                hook.setXRot((float) (Mth.atan2(movement.y, movement.horizontalDistance()) * 57.2957763671875));
+                hook.yRotO = hook.getYRot();
+                hook.xRotO = hook.getXRot();
+            }
         }
 
         private void reseedPainting(net.minecraft.world.entity.decoration.painting.Painting painting) {
@@ -25623,6 +26015,9 @@ public final class MobOracle {
         @Override
         public <T extends net.minecraft.core.particles.ParticleOptions> int sendParticles(
                 T particle, double x, double y, double z, int count, double xd, double yd, double zd, double speed) {
+            if (fishingParticles != null) {
+                fishingParticles.add(BuiltInRegistries.PARTICLE_TYPE.getId(particle.getType()));
+            }
             if (particlePackets && packets != null) {
                 packets.accept(new net.minecraft.network.protocol.game.ClientboundLevelParticlesPacket(
                         particle, false, false, x, y, z, (float) xd, (float) yd, (float) zd, (float) speed, count));
@@ -25640,6 +26035,9 @@ public final class MobOracle {
 
         @Override
         public void broadcastEntityEvent(Entity entity, byte event) {
+            if (fishingScene && entity instanceof net.minecraft.world.entity.projectile.FishingHook && event == 31) {
+                fishingEvent31 = true;
+            }
             if (packets != null) {
                 packets.accept(new net.minecraft.network.protocol.game.ClientboundEntityEventPacket(entity, event));
             }
