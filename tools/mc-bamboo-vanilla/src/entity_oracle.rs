@@ -141,6 +141,17 @@ struct Case {
     /// Present when a player picks the item up. The feet stay at (0.5, 64, 0.5).
     #[serde(default)]
     player: Option<PlayerSetup>,
+    /// 矿车场景：注册表实体类型与初速度。
+    ///
+    /// Minecart scenes: the registry entity type and initial velocity.
+    #[serde(default = "unknown_item")]
+    entity_type: i32,
+    #[serde(default)]
+    vx: f64,
+    #[serde(default)]
+    vy: f64,
+    #[serde(default)]
+    vz: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -258,6 +269,10 @@ struct Report {
     steps: usize,
     mismatches: Vec<String>,
     ended: bool,
+    /// 改坏自检要改坏的那一处；`None` 是正常对拍。
+    ///
+    /// The named deliberate break for the self-test; `None` is a normal run.
+    break_name: Option<String>,
 }
 
 struct PhysicsLevel {
@@ -410,8 +425,11 @@ impl Level for PhysicsLevel {
     }
 }
 
-/// 启动官方进程，逐题重放。
-pub fn run(mut command: Command) -> Result<(), String> {
+/// 启动官方进程，逐题重放。`break_name` 是改坏自检要改坏的那一处。
+///
+/// Start the official process and replay each case. `break_name` names the
+/// deliberate break for the self-test.
+pub fn run(mut command: Command, break_name: Option<&str>) -> Result<(), String> {
     // 官方编译器在中文 Windows 上用系统代码页写错误。固定成 UTF-8，失败日志才读得出来。
     // The official compiler writes errors in the system code page on Chinese Windows.
     // Pin UTF-8 so a failure log can be read.
@@ -431,6 +449,7 @@ pub fn run(mut command: Command) -> Result<(), String> {
         steps: 0,
         mismatches: Vec::new(),
         ended: false,
+        break_name: break_name.map(str::to_owned),
     };
     let read = report.read(BufReader::new(stdout));
     if read.is_err() {
@@ -490,6 +509,10 @@ impl Report {
         self.cases += 1;
         if case.kind == "orb_pickup" {
             self.replay_orb(case);
+            return;
+        }
+        if case.kind == "minecart" {
+            self.replay_minecart(case);
             return;
         }
         let mut level = PhysicsLevel::new(case.level_seed);
@@ -819,6 +842,70 @@ impl Report {
         }
     }
 
+    /// 矿车场景：用方块层实体 tick 重放官方 `OldMinecartBehavior`，逐刻比较
+    /// 位置、速度和落地标记。
+    ///
+    /// Minecart scenes: replay official `OldMinecartBehavior` with the block-layer
+    /// entity tick and compare position, velocity and grounding each tick.
+    fn replay_minecart(&mut self, case: &Case) {
+        let Some(kind) =
+            mc_bamboo_blocks::entity::minecart::MinecartKind::from_entity_type(case.entity_type)
+        else {
+            self.mismatch(format!("{}: unknown minecart type", case.name));
+            return;
+        };
+        let mut level = PhysicsLevel::new(case.level_seed);
+        level.entities = Entities::with_next_id(case.first_entity_id);
+        let blocks = &case.blocks[..case.blocks.len().saturating_sub(usize::from(
+            self.break_name.as_deref() == Some("minecart-blocks"),
+        ))];
+        level.place(blocks);
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let broken_kind = if self.break_name.as_deref() == Some("minecart-type") {
+            mc_bamboo_blocks::entity::minecart::MinecartKind::Chest
+        } else {
+            kind
+        };
+        let pos_x = case.px
+            + if self.break_name.as_deref() == Some("minecart-pos") {
+                0.5
+            } else {
+                0.0
+            };
+        let vz = case.vz
+            * if self.break_name.as_deref() == Some("minecart-velocity") {
+                1.5
+            } else {
+                1.0
+            };
+        let id = world.spawn_entity(Entity::minecart(
+            broken_kind,
+            Vec3::new(pos_x, case.py, case.pz),
+        ));
+        world.with_entity_mut(id, &mut |entity| {
+            entity.delta = Vec3::new(case.vx, case.vy, vz);
+            entity.random = JavaRandom::new(case.entity_seed);
+            if self.break_name.as_deref() == Some("minecart-onground") {
+                entity.on_ground = true;
+            }
+        });
+        if case.steps.is_empty() {
+            self.mismatch(format!("{}: no steps", case.name));
+            return;
+        }
+        let hoppers: Vec<BlockPos> = Vec::new();
+        self.compare_step(&case.name, 0, &mut world, None, &case.steps[0], &hoppers);
+        for (index, step) in case.steps.iter().enumerate().skip(1) {
+            let ticked = world.tick_entities_kept();
+            self.steps += 1;
+            self.compare_step(&case.name, index, &mut world, Some(&ticked), step, &hoppers);
+            if self.mismatches.len() >= 12 {
+                return;
+            }
+        }
+    }
+
     /// 官方 `ExperienceOrb.playerTouch` 与游戏层拾取逻辑逐刻逐字段比较。
     ///
     /// Compares official `ExperienceOrb.playerTouch` with the game-layer pickup
@@ -867,6 +954,18 @@ impl Report {
     fn finish(self) -> Result<(), String> {
         if !self.ended {
             return Err("entity oracle stopped before the end line".to_owned());
+        }
+        if let Some(name) = &self.break_name {
+            if self.mismatches.is_empty() {
+                return Err(format!(
+                    "entity oracle self-test ({name}) detected no deliberate break"
+                ));
+            }
+            println!(
+                "entity oracle self-test ({name}): detector works ({} mismatches)",
+                self.mismatches.len()
+            );
+            return Ok(());
         }
         if !self.mismatches.is_empty() {
             return Err(format!(

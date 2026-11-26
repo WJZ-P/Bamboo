@@ -5,12 +5,16 @@
 //! Minecart entities, vanilla `AbstractMinecart` and its subclasses, moved by
 //! `OldMinecartBehavior`. The experimental `NewMinecartBehavior` is out of scope.
 
-use mc_bamboo_core::Vec3;
-use mc_bamboo_data::{items, registries::entity_type};
+use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_data::{BlockAncestor, blocks, items, registries::entity_type, tags::block_tags};
 
 use crate::{
     BlockState,
-    entity::{Entity, EntityKind, EntityUid, ctx::EntityCtx},
+    entity::{
+        Entity, EntityKind, EntityUid, PrimedTnt,
+        ctx::{BlockView, EntityCtx},
+    },
+    state::{POWERED, RAIL_SHAPE, RailShape},
 };
 
 /// 矿车的种类；注册表实体类型 ID 决定它，物品放置时反过来映射。
@@ -237,17 +241,415 @@ impl MinecartPublic {
     }
 }
 
-/// `AbstractMinecart.tick` 的计时部分；铁轨运动在后续步骤里接进来。
+/// `OldMinecartBehavior` 的四个斜坡形状每刻加的速度；水里再乘 0.2。
 ///
-/// The timer part of `AbstractMinecart.tick`; track movement is wired in later.
-pub(crate) fn tick(me: &mut Entity, _ctx: &mut dyn EntityCtx) {
-    if let EntityKind::Minecart(cart) = &mut me.kind {
-        if cart.hurt_time > 0 {
-            cart.hurt_time -= 1;
+/// The per-tick slope push of `OldMinecartBehavior`, times 0.2 in water.
+const SLOPE_FACTOR: f64 = 0.0078125;
+
+/// `AbstractMinecart.exits`：形状两端的出口向量（x, y, z），含斜坡的 y。
+///
+/// `AbstractMinecart.exits`: the two exit vectors (x, y, z), including slope y.
+fn exits(shape: RailShape) -> ([i32; 3], [i32; 3]) {
+    use RailShape::*;
+    match shape {
+        NorthSouth => ([0, 0, -1], [0, 0, 1]),
+        EastWest => ([-1, 0, 0], [1, 0, 0]),
+        AscendingEast => ([-1, -1, 0], [1, 0, 0]),
+        AscendingWest => ([-1, 0, 0], [1, -1, 0]),
+        AscendingNorth => ([0, 0, -1], [0, -1, 1]),
+        AscendingSouth => ([0, -1, -1], [0, 0, 1]),
+        SouthEast => ([0, 0, 1], [1, 0, 0]),
+        SouthWest => ([0, 0, 1], [-1, 0, 0]),
+        NorthWest => ([0, 0, -1], [-1, 0, 0]),
+        NorthEast => ([0, 0, -1], [1, 0, 0]),
+    }
+}
+
+/// `BaseRailBlock.isRail`。
+fn is_rail(state: BlockState) -> bool {
+    state.is_tagged(block_tags::RAILS) && state.is_a(BlockAncestor::BaseRailBlock)
+}
+
+fn horizontal_distance(v: Vec3) -> f64 {
+    (v.x * v.x + v.z * v.z).sqrt()
+}
+
+fn floor_i(value: f64) -> i32 {
+    value.floor() as i32
+}
+
+/// `Mth.wrapDegrees`。
+fn wrap_degrees(value: f32) -> f32 {
+    let mut result = value % 360.0;
+    if result >= 180.0 {
+        result -= 360.0;
+    }
+    if result < -180.0 {
+        result += 360.0;
+    }
+    result
+}
+
+/// `getCurrentBlockPosOrRailBelow`：脚下还有铁轨时用那一格。
+///
+/// `getCurrentBlockPosOrRailBelow`: use the cell below when it is a rail.
+fn current_rail_pos(ctx: &dyn BlockView, position: Vec3) -> BlockPos {
+    let mut pos = BlockPos::containing(position);
+    if ctx.block_state(pos.below()).is_tagged(block_tags::RAILS) {
+        pos = pos.below();
+    }
+    pos
+}
+
+/// `OldMinecartBehavior.getPos`：把坐标吸附到轨道上；没有铁轨时返回 `None`。
+///
+/// `OldMinecartBehavior.getPos`: snap a position onto the rail; `None` off rails.
+fn get_pos(ctx: &dyn BlockView, x: f64, y: f64, z: f64) -> Option<Vec3> {
+    let ix = floor_i(x);
+    let mut iy = floor_i(y);
+    let iz = floor_i(z);
+    if ctx
+        .block_state(BlockPos::new(ix, iy - 1, iz))
+        .is_tagged(block_tags::RAILS)
+    {
+        iy -= 1;
+    }
+    let state = ctx.block_state(BlockPos::new(ix, iy, iz));
+    if !is_rail(state) {
+        return None;
+    }
+    let shape = state.get(RAIL_SHAPE);
+    let (first, second) = exits(shape);
+    let p1 = Vec3::new(
+        f64::from(ix) + 0.5 + f64::from(first[0]) * 0.5,
+        f64::from(iy) + 0.0625 + f64::from(first[1]) * 0.5,
+        f64::from(iz) + 0.5 + f64::from(first[2]) * 0.5,
+    );
+    let p2 = Vec3::new(
+        f64::from(ix) + 0.5 + f64::from(second[0]) * 0.5,
+        f64::from(iy) + 0.0625 + f64::from(second[1]) * 0.5,
+        f64::from(iz) + 0.5 + f64::from(second[2]) * 0.5,
+    );
+    let dx = p2.x - p1.x;
+    let dy = (p2.y - p1.y) * 2.0;
+    let dz = p2.z - p1.z;
+    let t = if dx == 0.0 {
+        z - f64::from(iz)
+    } else if dz == 0.0 {
+        x - f64::from(ix)
+    } else {
+        ((x - p1.x) * dx + (z - p1.z) * dz) * 2.0
+    };
+    let mut ry = p1.y + dy * t;
+    if dy < 0.0 {
+        ry += 1.0;
+    } else if dy > 0.0 {
+        ry += 0.5;
+    }
+    Some(Vec3::new(p1.x + dx * t, ry, p1.z + dz * t))
+}
+
+/// `AbstractMinecart.getMaxSpeed`（转发 behavior）：动力矿车再乘 0.5 / 0.75。
+///
+/// `AbstractMinecart.getMaxSpeed` (delegated to the behavior): a furnace cart
+/// multiplies it by 0.5 on land or 0.75 in water.
+fn max_speed(me: &Entity, cart: &Minecart) -> f64 {
+    let base = if me.in_water { 0.2 } else { 0.4 };
+    if cart.kind().is_furnace() {
+        base * if me.in_water { 0.75 } else { 0.5 }
+    } else {
+        base
+    }
+}
+
+/// `AbstractMinecart.applyNaturalSlowdown`：y 清零，有乘客 0.997、无 0.96，水中再 0.95。
+///
+/// `AbstractMinecart.applyNaturalSlowdown`: zero y, 0.997 with a passenger or
+/// 0.96 without, times 0.95 in water.
+fn apply_natural_slowdown(me: &Entity, cart: &Minecart, v: Vec3) -> Vec3 {
+    let factor = if cart.passengers.is_empty() {
+        0.96
+    } else {
+        0.997
+    };
+    let mut result = v.multiply(factor, 0.0, factor);
+    if me.in_water {
+        result = result.scale(0.95);
+    }
+    result
+}
+
+/// `isRedstoneConductor`。
+fn is_redstone_conductor(ctx: &dyn BlockView, pos: BlockPos) -> bool {
+    ctx.block_state(pos).is_redstone_conductor()
+}
+
+/// `poweredRail` 通电时静止矿车沿红石导体方向启动。
+///
+/// A powered rail starts a still cart toward a neighbouring redstone conductor.
+fn start_from_conductor(ctx: &dyn BlockView, pos: BlockPos, shape: RailShape, v: Vec3) -> Vec3 {
+    let (dx, dz) = if shape == RailShape::EastWest {
+        if is_redstone_conductor(ctx, pos.west()) {
+            (0.02, v.z)
+        } else if is_redstone_conductor(ctx, pos.east()) {
+            (-0.02, v.z)
+        } else {
+            return v;
         }
-        if cart.damage > 0.0 {
-            cart.damage -= 1.0;
+    } else if shape == RailShape::NorthSouth {
+        if is_redstone_conductor(ctx, pos.north()) {
+            (v.x, 0.02)
+        } else if is_redstone_conductor(ctx, pos.south()) {
+            (v.x, -0.02)
+        } else {
+            return v;
+        }
+    } else {
+        return v;
+    };
+    Vec3::new(dx, v.y, dz)
+}
+
+/// `OldMinecartBehavior.moveAlongTrack`。
+fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn BlockView) {
+    let pos = current_rail_pos(ctx, me.position);
+    let state = ctx.block_state(pos);
+    me.fall_distance = 0.0;
+    let x0 = me.position.x;
+    let y0 = me.position.y;
+    let z0 = me.position.z;
+    let start = get_pos(ctx, x0, y0, z0);
+    let mut rail_y = f64::from(pos.y);
+    let is_powered_rail = state.is(blocks::POWERED_RAIL);
+    let powered = is_powered_rail && state.try_get(POWERED).unwrap_or(false);
+    let brake = is_powered_rail && !powered;
+    let shape = state.get(RAIL_SHAPE);
+
+    let mut slope = SLOPE_FACTOR;
+    if me.in_water {
+        slope *= 0.2;
+    }
+    let on_slope = match shape {
+        RailShape::AscendingEast => {
+            me.delta.x -= slope;
+            true
+        }
+        RailShape::AscendingWest => {
+            me.delta.x += slope;
+            true
+        }
+        RailShape::AscendingNorth => {
+            me.delta.z += slope;
+            true
+        }
+        RailShape::AscendingSouth => {
+            me.delta.z -= slope;
+            true
+        }
+        _ => false,
+    };
+    if on_slope {
+        rail_y += 1.0;
+    }
+
+    let (first, second) = exits(shape);
+    let mut dx = f64::from(second[0] - first[0]);
+    let mut dz = f64::from(second[2] - first[2]);
+    let len = (dx * dx + dz * dz).sqrt();
+    if me.delta.x * dx + me.delta.z * dz < 0.0 {
+        dx = -dx;
+        dz = -dz;
+    }
+    let speed = 2.0_f64.min(horizontal_distance(me.delta));
+    me.delta = Vec3::new(speed * dx / len, me.delta.y, speed * dz / len);
+
+    // 未通电的动力铁轨刹车。
+    if brake {
+        let speed = horizontal_distance(me.delta);
+        if speed < 0.03 {
+            me.delta = Vec3::default();
+        } else {
+            me.delta = me.delta.multiply(0.5, 0.0, 0.5);
         }
     }
+
+    let first_x = f64::from(pos.x) + 0.5 + f64::from(first[0]) * 0.5;
+    let first_z = f64::from(pos.z) + 0.5 + f64::from(first[2]) * 0.5;
+    let second_x = f64::from(pos.x) + 0.5 + f64::from(second[0]) * 0.5;
+    let second_z = f64::from(pos.z) + 0.5 + f64::from(second[2]) * 0.5;
+    let track_dx = second_x - first_x;
+    let track_dz = second_z - first_z;
+    let t = if track_dx == 0.0 {
+        z0 - f64::from(pos.z)
+    } else if track_dz == 0.0 {
+        x0 - f64::from(pos.x)
+    } else {
+        ((x0 - first_x) * track_dx + (z0 - first_z) * track_dz) * 2.0
+    };
+    me.position = Vec3::new(first_x + track_dx * t, rail_y, first_z + track_dz * t);
+
+    let factor = if cart.passengers.is_empty() {
+        1.0
+    } else {
+        0.75
+    };
+    let max = max_speed(me, cart);
+    let v = me.delta;
+    let movement = Vec3::new(
+        (factor * v.x).clamp(-max, max),
+        0.0,
+        (factor * v.z).clamp(-max, max),
+    );
+    me.move_entity(ctx, movement);
+
+    if first[1] != 0
+        && floor_i(me.position.x) - pos.x == first[0]
+        && floor_i(me.position.z) - pos.z == first[2]
+    {
+        me.position.y += f64::from(first[1]);
+    } else if second[1] != 0
+        && floor_i(me.position.x) - pos.x == second[0]
+        && floor_i(me.position.z) - pos.z == second[2]
+    {
+        me.position.y += f64::from(second[1]);
+    }
+    me.delta = apply_natural_slowdown(me, cart, me.delta);
+
+    if let (Some(snapped), Some(start)) = (
+        get_pos(ctx, me.position.x, me.position.y, me.position.z),
+        start,
+    ) {
+        let extra = (start.y - snapped.y) * 0.05;
+        let v = me.delta;
+        let speed = horizontal_distance(v);
+        if speed > 0.0 {
+            let ratio = (speed + extra) / speed;
+            me.delta = v.multiply(ratio, 1.0, ratio);
+        }
+        me.position.y = snapped.y;
+    }
+
+    let ix = floor_i(me.position.x);
+    let iz = floor_i(me.position.z);
+    if ix != pos.x || iz != pos.z {
+        let v = me.delta;
+        let speed = horizontal_distance(v);
+        me.delta = Vec3::new(
+            speed * f64::from(ix - pos.x),
+            v.y,
+            speed * f64::from(iz - pos.z),
+        );
+    }
+
+    if powered {
+        let v = me.delta;
+        let speed = horizontal_distance(v);
+        if speed > 0.01 {
+            // 官方是 `Vec3.add(x, 0, z)`：y 上的 `-0.0 + 0.0` 会变成正零。
+            // Vanilla uses `Vec3.add(x, 0, z)`: `-0.0 + 0.0` becomes a positive zero.
+            me.delta = v.add(Vec3::new(v.x / speed * 0.06, 0.0, v.z / speed * 0.06));
+        } else {
+            me.delta = start_from_conductor(ctx, pos, shape, v);
+        }
+    }
+}
+
+/// `AbstractMinecart.comeOffTrack`：出轨后的普通物理。
+///
+/// `AbstractMinecart.comeOffTrack`: ordinary physics off the rails.
+fn come_off_track(me: &mut Entity, cart: &Minecart, ctx: &dyn BlockView) {
+    let max = max_speed(me, cart);
+    let v = me.delta;
+    me.delta = Vec3::new(v.x.clamp(-max, max), v.y, v.z.clamp(-max, max));
+    if me.on_ground {
+        me.delta = me.delta.scale(0.5);
+    }
+    let movement = me.delta;
+    me.move_entity(ctx, movement);
+    if !me.on_ground {
+        me.delta = me.delta.scale(0.95);
+    }
+}
+
+/// `AbstractMinecart.tick`：`OldMinecartBehavior.tick` 的逐刻顺序。
+///
+/// `AbstractMinecart.tick`: the per-tick order of `OldMinecartBehavior.tick`.
+pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
+    let mut cart = match std::mem::replace(&mut me.kind, EntityKind::Tnt(PrimedTnt::new())) {
+        EntityKind::Minecart(cart) => cart,
+        other => {
+            me.kind = other;
+            return;
+        }
+    };
+    if cart.hurt_time > 0 {
+        cart.hurt_time -= 1;
+    }
+    if cart.damage > 0.0 {
+        cart.damage -= 1.0;
+    }
+
+    let prev_y_rot = me.y_rot;
+    let gravity = if me.in_water { 0.005 } else { 0.04 };
+    me.delta = me.delta.add(Vec3::new(0.0, -gravity, 0.0));
+    let blocks = ctx.blocks();
+    let pos = current_rail_pos(blocks, me.position);
+    let state = blocks.block_state(pos);
+    let on_rails = is_rail(state);
+    cart.on_rails = on_rails;
+    if on_rails {
+        move_along_track(me, &mut cart, ctx.blocks());
+        if state.is(blocks::ACTIVATOR_RAIL) {
+            activate_minecart(&mut cart, state.try_get(POWERED).unwrap_or(false));
+        }
+    } else {
+        come_off_track(me, &cart, ctx.blocks());
+    }
+    me.apply_effects_from_blocks(ctx.blocks());
+
+    let dx = me.old_position.x - me.position.x;
+    let dz = me.old_position.z - me.position.z;
+    if dx * dx + dz * dz > 0.001 {
+        me.y_rot = (dz.atan2(dx) * 180.0 / std::f64::consts::PI) as f32;
+        if cart.flipped {
+            me.y_rot += 180.0;
+        }
+    }
+    let turn = wrap_degrees(me.y_rot - prev_y_rot);
+    if turn < -170.0 || turn > 170.0 {
+        me.y_rot += 180.0;
+        cart.flipped = !cart.flipped;
+    }
+    me.y_rot %= 360.0;
+    me.set_requires_precise_position(me.horizontal_collision || me.vertical_collision);
     me.first_tick = false;
+    me.kind = EntityKind::Minecart(cart);
+}
+
+/// `activateMinecart`：激活铁轨通电时各子类的反应。
+///
+/// `activateMinecart`: each subclass's response to a powered activator rail.
+fn activate_minecart(cart: &mut Minecart, active: bool) {
+    if !active {
+        return;
+    }
+    match cart.kind() {
+        MinecartKind::Rideable => {
+            cart.passengers.clear();
+            if cart.hurt_time == 0 {
+                cart.hurt_dir = -cart.hurt_dir;
+                cart.hurt_time = 10;
+                cart.damage = 50.0;
+            }
+        }
+        MinecartKind::Tnt => {
+            if cart.fuse < 0 {
+                cart.fuse = 80;
+            }
+        }
+        MinecartKind::Hopper => {
+            cart.enabled = false;
+        }
+        _ => {}
+    }
 }
