@@ -110,7 +110,13 @@ pub struct ArmorStand {
     pub right_arm_pose: Rotations,
     pub left_leg_pose: Rotations,
     pub right_leg_pose: Rotations,
-    /// `invisible` 字段，和共享标志里的隐身位是两回事。
+    /// 官方 `ArmorStand.invisible` 私有字段：`setInvisible` 同时把它和 `Entity` 的
+    /// 共享标志隐身位（index 0 bit 5）设成同一个值，`Invisible` 存档键读写它。
+    /// Bamboo 以它为唯一状态源，同步时推导共享标志位。
+    ///
+    /// Vanilla `ArmorStand.invisible` field: `setInvisible` sets it and the shared
+    /// invisible flag (index 0 bit 5) together, and the `Invisible` save key reads
+    /// and writes it. Bamboo keeps it as the single source and derives the flag.
     pub invisible: bool,
     /// `disabledSlots`。
     pub disabled_slots: i32,

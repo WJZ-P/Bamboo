@@ -4660,6 +4660,11 @@ pub struct MobPublic {
     pub custom_name: Option<mc_bamboo_nbt::Tag>,
     pub custom_name_visible: bool,
     pub glowing: bool,
+    /// `Entity.FLAG_INVISIBLE`（共享标志 index 0 的 bit 5）；目前只有盔甲架置位。
+    ///
+    /// `Entity.FLAG_INVISIBLE` (bit 5 of the shared flags, index 0); only the
+    /// armour stand sets it today.
+    pub invisible: bool,
     pub left_handed: bool,
     pub dying: bool,
     /// `HappyGhast.IS_LEASH_HOLDER` / `STAYS_STILL`（index 18、19 的布尔）。
@@ -4870,6 +4875,7 @@ impl MobPublic {
             custom_name: mob.custom_name.clone(),
             custom_name_visible: mob.custom_name_visible,
             glowing: mob.glowing,
+            invisible: mob.mob_type == MobType::ArmorStand && mob.armor_stand.invisible,
             left_handed: mob.left_handed,
             dying: mob.is_dead_or_dying(),
             happy_ghast_is_leash_holder: mob.happy_ghast.is_leash_holder,

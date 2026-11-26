@@ -581,6 +581,8 @@ pub const ENTITY_FLAG_SHIFT_KEY_DOWN: u8 = 0x02;
 pub const ENTITY_FLAG_SPRINTING: u8 = 0x08;
 /// [`EntityData::SharedFlags`] 里表示正在滑翔的位。
 pub const ENTITY_FLAG_FALL_FLYING: u8 = 0x80;
+/// `Entity.FLAG_INVISIBLE`：`DATA_SHARED_FLAGS_ID` 的 bit 5。
+pub const ENTITY_FLAG_INVISIBLE: u8 = 0x20;
 
 impl EntityData {
     /// 元数据的 index；比较是不是同一项时用它，配对时按它升序。

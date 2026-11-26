@@ -1577,6 +1577,9 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     if mob.glowing {
         flags |= 1 << 6;
     }
+    if mob.invisible {
+        flags |= mc_bamboo_protocol::packet::play::ENTITY_FLAG_INVISIBLE;
+    }
     // `Entity.FLAG_SWIMMING` = 1<<4。
     // `Entity.FLAG_SWIMMING` is 1<<4.
     if mob.swimming {
@@ -1817,7 +1820,8 @@ fn wolf_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<
 
 fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
     use mc_bamboo_protocol::packet::play::{
-        ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING,
+        ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_INVISIBLE, ENTITY_FLAG_SHIFT_KEY_DOWN,
+        ENTITY_FLAG_SPRINTING,
     };
     let mut flags = 0u8;
     // `FLAG_ONFIRE` = 1<<0，`FLAG_GLOWING` = 1<<6。死亡时官方把 `Pose` 设成
@@ -1832,6 +1836,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     if mob.glowing {
         flags |= 1 << 6;
+    }
+    if mob.invisible {
+        flags |= ENTITY_FLAG_INVISIBLE;
     }
     let _ = (ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN);
     let mut out = Vec::new();
@@ -3289,5 +3296,17 @@ mod armour_stand_tests {
             default_data_for_type(21, MobType::ArmorStand),
             EntityData::ArmorStandRightLegPose([1.0, 0.0, 1.0])
         );
+    }
+
+    #[test]
+    fn an_invisible_stand_syncs_the_shared_invisible_flag() {
+        let mut entity = Entity::by_mob_type(MobType::ArmorStand, Vec3::default());
+        entity.with_mob(|_, mob| mob.armor_stand.invisible = true);
+        let public = MobPublic::of(entity.kind.mob().expect("a mob"), false);
+        assert!(public.invisible);
+        let data = mob_non_default_data(&public);
+        assert!(data.contains(&EntityData::SharedFlags(
+            mc_bamboo_protocol::packet::play::ENTITY_FLAG_INVISIBLE
+        )));
     }
 }
