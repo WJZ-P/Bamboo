@@ -288,7 +288,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 71] = [
+    pub const ALL: [Self; 72] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -3501,8 +3501,7 @@ impl Mob {
             // An adult's `registerGoals` only runs from `adultGhastSetup`;
             // `setBaby(true)` runs `babyGhastSetup` and clears them, so the
             // constructor-equivalent table here stays empty.
-            | MobType::HappyGhast
-            | MobType::CopperGolem => GoalSelector::default(),
+            MobType::HappyGhast | MobType::CopperGolem => GoalSelector::default(),
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
             // alongside the brain.
@@ -3579,8 +3578,7 @@ impl Mob {
             | MobType::ZombieNautilus
             | MobType::Sniffer
             | MobType::Breeze => GoalSelector::default(),
-            | MobType::HappyGhast
-            | MobType::CopperGolem => GoalSelector::default(),
+            MobType::HappyGhast | MobType::CopperGolem => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Ocelot => ocelot::target_goals(),

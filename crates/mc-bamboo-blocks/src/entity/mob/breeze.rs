@@ -775,7 +775,14 @@ pub fn brain() -> Brain {
                 Vec::new(),
                 vec![
                     (Kind::DoNothing { min: 20, max: 100 }, 1),
-                    (Kind::RandomStroll { speed: 0.6 }, 2),
+                    (
+                        Kind::RandomStroll {
+                            speed: 0.6,
+                            horizontal: 10,
+                            vertical: 7,
+                        },
+                        2,
+                    ),
                 ],
             ))),
         ],
@@ -840,7 +847,7 @@ mod tests {
         let mob = entity.kind.mob().expect("breeze is a mob");
         assert!(mob.brain.is_some());
         assert_eq!(mob.breeze.pose, Pose::Standing);
-        assert_eq!(MobType::ALL.len(), 70);
+        assert_eq!(MobType::ALL.len(), 72);
         assert!(MobType::by_name("minecraft:breeze") == Some(MobType::Breeze));
         assert_eq!(MobType::Breeze.name(), "minecraft:breeze");
     }

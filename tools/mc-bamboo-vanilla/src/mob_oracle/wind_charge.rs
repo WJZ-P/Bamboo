@@ -73,6 +73,8 @@ impl WindChargeCase {
             short_hunger: false,
             ignore_bed_monsters: false,
             explosion_break: 0,
+            containers: Default::default(),
+            container_open_counts: Default::default(),
             shoulder: mc_bamboo_blocks::entity::shoulder::ShoulderState::empty(),
         }
     }
