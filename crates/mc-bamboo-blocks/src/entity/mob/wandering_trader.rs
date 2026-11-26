@@ -108,8 +108,11 @@ pub struct WanderingTrader {
 /// `UseItemGoal`s (potion / milk) are real goals that follow the selector's
 /// every-other-tick phase; the seven `AvoidEntityGoal`s keep the vanilla class
 /// names and distances, the unmodelled illager / undead ones never matching.
-pub(in crate::entity::mob) fn goals(_navigation: &mut Navigation) -> GoalSelector {
+pub(in crate::entity::mob) fn goals(navigation: &mut Navigation) -> GoalSelector {
     use super::goals::UseItemKind;
+    // `FloatGoal` 构造函数打开导航浮水。
+    // `FloatGoal`'s constructor enables floating on the navigation.
+    navigation.flags.can_float = true;
     let avoid = |class: super::avoid::AvoidClass, max: f32| {
         super::goals::Goal::Avoid(super::avoid::AvoidEntity::new(class, max, 0.5, 0.5))
     };
@@ -127,7 +130,7 @@ pub(in crate::entity::mob) fn goals(_navigation: &mut Navigation) -> GoalSelecto
                 kind: UseItemKind::Milk,
             },
         ),
-        (1, super::goals::Goal::Unavailable("TradeWithPlayerGoal")),
+        (1, super::goals::Goal::TradeWithPlayer),
         (1, avoid(super::avoid::AvoidClass::Zombie, 8.0)),
         (1, avoid(super::avoid::AvoidClass::Evoker, 12.0)),
         (1, avoid(super::avoid::AvoidClass::Vindicator, 8.0)),
@@ -144,14 +147,19 @@ pub(in crate::entity::mob) fn goals(_navigation: &mut Navigation) -> GoalSelecto
         ),
         (
             1,
-            super::goals::Goal::LookAtPlayer {
+            super::goals::Goal::LookAtTradingPlayer {
                 look_distance: 8.0,
-                probability: 0.0,
                 look_at: None,
                 look_time: 0,
             },
         ),
-        (2, super::goals::Goal::Unavailable("WanderToPositionGoal")),
+        (
+            2,
+            super::goals::Goal::WanderToPosition {
+                stop_distance: 2.0,
+                speed: 0.35,
+            },
+        ),
         (
             4,
             super::goals::Goal::MoveTowardsRestriction {
@@ -169,10 +177,19 @@ pub(in crate::entity::mob) fn goals(_navigation: &mut Navigation) -> GoalSelecto
                 force_trigger: false,
             },
         ),
-        (9, super::goals::Goal::Unavailable("InteractGoal")),
+        (
+            9,
+            super::goals::Goal::Interact {
+                look_distance: 3.0,
+                probability: 1.0,
+                look_at: None,
+                look_time: 0,
+            },
+        ),
         (
             10,
-            super::goals::Goal::LookAtPlayer {
+            super::goals::Goal::LookAtMob {
+                kind: None,
                 look_distance: 8.0,
                 probability: 0.02,
                 look_at: None,
@@ -208,6 +225,23 @@ pub fn maybe_despawn(me: &mut Entity, mob: &mut Mob) {
             me.discard();
         }
     }
+}
+
+/// `AbstractVillager.notifyTrade` 对流浪商人的状态更新：累加对应交易项的使用次数，
+/// 并把 `ambientSoundTime` 压回 `-getAmbientSoundInterval()`。经验球由调用方决定是否生成。
+///
+/// State update of `AbstractVillager.notifyTrade` for a wandering trader: increments
+/// the offer's `uses` and resets `ambientSoundTime` to `-getAmbientSoundInterval()`.
+pub fn notify_trade(mob: &mut Mob, offer_index: usize) {
+    if let Some(offer) = mob
+        .villager
+        .offers
+        .as_mut()
+        .and_then(|offers| offers.get_mut(offer_index))
+    {
+        offer.uses += 1;
+    }
+    mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
 }
 
 /// `ItemStack.onUseTick` 的 `Consumable.shouldEmitParticlesAndSounds`：

@@ -63,7 +63,7 @@ impl AvoidClass {
         match self {
             Self::Player => false,
             Self::Wolf => kind == MobType::Wolf,
-            Self::Llama => kind == MobType::Llama,
+            Self::Llama => kind.is_llama(),
             Self::Monster => kind.is_monster(),
             // 北极熊还没实现。Polar bears are not modelled yet.
             Self::PolarBear => false,

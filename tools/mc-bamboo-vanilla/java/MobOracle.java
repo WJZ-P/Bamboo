@@ -14380,11 +14380,13 @@ public final class MobOracle {
                 }
                 if (trade && tick == 10) {
                     trader.setTradingPlayer(player);
-                    var offer = new net.minecraft.world.item.trading.MerchantOffer(
-                            new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 1),
-                            new ItemStack(Items.APPLE), 12, 2, 0.05F);
+                }
+                if (trade && tick == 20) {
+                    var offer = trader.getOffers().get(0);
                     put(net.minecraft.world.item.trading.MerchantOffer.class, offer, "rewardExp", false);
                     trader.notifyTrade(offer);
+                }
+                if (trade && tick == 30) {
                     trader.setTradingPlayer(null);
                 }
                 java.util.List<Entity> snapshot = new java.util.ArrayList<>(world.tracked);
@@ -14404,20 +14406,23 @@ public final class MobOracle {
             }
             if (tick > 0) frames.append(',');
             boolean aiScene = true;
-            frames.append("{\"trader\":").append(wanderingEntityFrame(trader, aiScene))
-                    .append(",\"traderGone\":").append(trader.isRemoved())
-                    .append(",\"despawn\":").append(trader.getDespawnDelay())
-                    .append(",\"drink\":").append(jsonString(aiScene ? wanderingDrink(trader) : "none"))
+            boolean traderGone = trader.isRemoved();
+            frames.append("{\"trader\":")
+                    .append(traderGone ? "null" : wanderingEntityFrame(trader, aiScene))
+                    .append(",\"traderGone\":").append(traderGone)
+                    .append(",\"despawn\":").append(traderGone ? 0 : trader.getDespawnDelay())
+                    .append(",\"drink\":").append(jsonString(traderGone ? "none" : wanderingDrink(trader)))
                     .append(",\"bright\":").append(world.isBrightOutside())
-                    .append(",\"goals\":").append(jsonString(aiScene ? runningGoals(trader.getGoalSelector()) : ""))
-                    .append(",\"offers\":").append(jsonString(offersDigest(trader.getOffers())));
+                    .append(",\"goals\":").append(jsonString(traderGone ? "" : runningGoals(trader.getGoalSelector())))
+                    .append(",\"offers\":").append(jsonString(traderGone ? "" : offersDigest(trader.getOffers())));
             for (int i = 0; i < 2; i++) {
+                boolean llamaGone = llamas[i].isRemoved();
                 frames.append(",\"llama").append(i).append("\":")
-                        .append(wanderingEntityFrame(llamas[i], true))
+                        .append(llamaGone ? "null" : wanderingEntityFrame(llamas[i], true))
                         .append(",\"llama").append(i).append("Gone\":")
-                        .append(llamas[i].isRemoved())
+                        .append(llamaGone)
                         .append(",\"llama").append(i).append("Delay\":")
-                        .append(getInt(TraderLlama.class, llamas[i], "despawnDelay"));
+                        .append(llamaGone ? 0 : getInt(TraderLlama.class, llamas[i], "despawnDelay"));
             }
             if (avoid) {
                 frames.append(",\"zombie\":").append(zombie == null || !world.tracked.contains(zombie)

@@ -713,7 +713,7 @@ fn passenger_offset(
     }
     let (y, z) = mc_bamboo_blocks::entity::mob::equine::passenger_attachment(mob.mob_type);
     let mut offset = Vec3::new(f64::from(z) * sin, f64::from(y), f64::from(z) * cos);
-    if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::Llama
+    if !mob.mob_type.is_llama()
         && let Some(equine) = mob.equine
         && equine.stand_anim_o != 0.0
     {

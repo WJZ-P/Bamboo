@@ -240,17 +240,17 @@ pub(super) struct SceneCase {
 #[derive(Debug, Deserialize, PartialEq, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SceneFrame {
-    trader: EntityFrame,
+    trader: Option<EntityFrame>,
     trader_gone: bool,
     despawn: i32,
     drink: String,
     bright: bool,
     goals: String,
     offers: String,
-    llama0: EntityFrame,
+    llama0: Option<EntityFrame>,
     llama0_gone: bool,
     llama0_delay: i32,
-    llama1: EntityFrame,
+    llama1: Option<EntityFrame>,
     llama1_gone: bool,
     llama1_delay: i32,
     #[serde(default)]
@@ -305,6 +305,13 @@ impl SceneCase {
                 );
             }
         }
+        let players = if self.name == "wt_trade" {
+            let mut player = super::bat::player_view(self.trader_id + 1024, [1.5, 64.0, 0.5]);
+            player.uuid = Some(((1_u128 << 64) | 2_u128).to_be_bytes());
+            vec![player]
+        } else {
+            Vec::new()
+        };
         MobLevel {
             blocks,
             random: LevelRandom::new(1),
@@ -328,7 +335,7 @@ impl SceneCase {
             darkness_ticks: 0,
             poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(self.trader_id),
-            players: Vec::new(),
+            players,
             game: None,
             inhabited: Default::default(),
             mob_teams: Default::default(),
@@ -366,8 +373,8 @@ impl SceneCase {
                     // `isInvisible()` 刷成真；Bamboo 的 `add_effect` 不碰这个标志。
                     mob.wandering_trader.effects_dirty = true;
                 }
-                // 官方夹具构造时调了 `getOffers()`（三张集共 9 笔）。这里只比数量，
-                // 用 9 个空的 `MerchantOffer` 占位，实际内容由 trade-oracle 逐项对拍。
+                // 交易场景使用受控的 2 笔交易，其余场景沿用官方 `getOffers()` 的 9 笔数量。
+                let offer_count = if self.name == "wt_trade" { 2 } else { 9 };
                 mob.villager.offers = Some(vec![
                     mc_bamboo_protocol::merchant::MerchantOffer {
                         base_cost_a: mc_bamboo_protocol::merchant::ItemCost {
@@ -382,13 +389,13 @@ impl SceneCase {
                         ),
                         uses: 0,
                         max_uses: 12,
-                        reward_exp: true,
+                        reward_exp: false,
                         special_price_diff: 0,
                         demand: 0,
                         price_multiplier: 0.05,
-                        xp: 0,
+                        xp: 1,
                     };
-                    9
+                    offer_count
                 ]);
             }
         });
@@ -466,35 +473,46 @@ impl Report {
                         }
                     });
                 }
+                // 交易场景：第 10 刻打开交易，第 20 刻完成一笔，第 30 刻关闭交易。
+                if case.name == "wt_trade" && tick == 10 {
+                    world.with_entity_mut(case.trader_id, &mut |e| {
+                        if let Some(mob) = e.kind.mob_mut() {
+                            mob.villager.set_trading_player(Some(case.trader_id + 1024));
+                        }
+                    });
+                }
+                if case.name == "wt_trade" && tick == 20 {
+                    world.with_entity_mut(case.trader_id, &mut |e| {
+                        if let Some(mob) = e.kind.mob_mut() {
+                            mc_bamboo_blocks::entity::mob::wandering_trader::notify_trade(mob, 0);
+                        }
+                    });
+                }
+                if case.name == "wt_trade" && tick == 30 {
+                    world.with_entity_mut(case.trader_id, &mut |e| {
+                        if let Some(mob) = e.kind.mob_mut() {
+                            mob.villager.set_trading_player(None);
+                        }
+                    });
+                }
                 world.tick_entities();
                 world.drain_effects();
             }
             let _ = level.entities.take_mob_events();
-            let trader = level.entities.get(case.trader_id);
-            let gone = trader.as_ref().is_none_or(|e| e.removed);
-            let Some(frame) = trader.as_ref().and_then(entity_frame) else {
-                self.mismatch(format!("{} tick {tick}: trader row missing", case.name));
-                continue;
-            };
+            let trader = level.entities.get(case.trader_id).filter(|e| !e.removed);
+            let gone = trader.is_none();
+            let frame = trader.as_ref().and_then(entity_frame);
             let mob = trader.as_ref().and_then(|e| e.kind.mob());
             let drink = drink_label(mob);
             let goals = mob.map_or(String::new(), |m| m.goals.running_names_of(m).join(" "));
             let offers = offers_label(mob);
             let despawn = mob.map_or(0, |m| m.wandering_trader.despawn_delay);
-            let llama_frames: Vec<(EntityFrame, bool, i32)> = llamas
+            let llama_frames: Vec<(Option<EntityFrame>, bool, i32)> = llamas
                 .iter()
                 .map(|&uid| {
-                    let e = level.entities.get(uid);
-                    let removed = e.as_ref().is_none_or(|e| e.removed);
-                    let frame = e
-                        .as_ref()
-                        .and_then(entity_frame)
-                        .unwrap_or_else(|| EntityFrame {
-                            pos: [0; 5],
-                            seed: None,
-                            effects: Vec::new(),
-                            invisible: false,
-                        });
+                    let e = level.entities.get(uid).filter(|e| !e.removed);
+                    let removed = e.is_none();
+                    let frame = e.as_ref().and_then(entity_frame);
                     let delay = e
                         .as_ref()
                         .and_then(|e| e.kind.mob())
@@ -521,11 +539,15 @@ impl Report {
                     .filter(|e| !e.removed)
                     .and_then(|e| entity_frame(&e)),
             };
-            // 两处改坏确认：故意改掉倒计时 / 效果，对拍必须报不一致。
+            // 改坏确认开关（后续接入生产代码改坏确认）。
             let mut compared = ours;
             match self.break_test.as_deref() {
                 Some("wt_despawn_delay") => compared.despawn += 1,
-                Some("wt_invisibility") => compared.trader.effects.clear(),
+                Some("wt_invisibility") => {
+                    if let Some(t) = compared.trader.as_mut() {
+                        t.effects.clear();
+                    }
+                }
                 _ => {}
             }
             if &compared != expected {
@@ -559,8 +581,12 @@ fn drink_label(mob: Option<&mc_bamboo_blocks::entity::mob::Mob>) -> String {
 }
 
 fn offers_label(mob: Option<&mc_bamboo_blocks::entity::mob::Mob>) -> String {
-    let offers = mob
-        .and_then(|m| m.villager.offers.as_ref())
-        .map_or(0, Vec::len);
-    format!("[{offers},0,0,0]")
+    let Some(mob) = mob else {
+        return String::new();
+    };
+    let offers = mob.villager.offers.as_deref().unwrap_or(&[]);
+    let uses: i32 = offers.iter().map(|o| o.uses).sum();
+    let demand: i32 = offers.iter().map(|o| o.demand).sum();
+    let special: i32 = offers.iter().map(|o| o.special_price_diff).sum();
+    format!("[{},{uses},{demand},{special}]", offers.len())
 }

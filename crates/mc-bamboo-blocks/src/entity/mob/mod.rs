@@ -583,6 +583,13 @@ impl MobType {
         matches!(self, Self::Camel | Self::CamelHusk)
     }
 
+    /// 是否属于羊驼系（`Llama` 或继承它的 `TraderLlama`）。
+    ///
+    /// Whether this is on vanilla's `Llama` branch (`Llama` or its subclass `TraderLlama`).
+    pub const fn is_llama(self) -> bool {
+        matches!(self, Self::Llama | Self::TraderLlama)
+    }
+
     pub const fn is_equine(self) -> bool {
         matches!(
             self,
@@ -3457,9 +3464,12 @@ impl Mob {
             MobType::SnowGolem => snow_golem::attributes(),
             MobType::Silverfish => silverfish::attributes(),
             MobType::Endermite => endermite::attributes(),
-            // `AbstractVillager.createAttributes()`：流浪商人沿用村民的属性表。
-            // `AbstractVillager.createAttributes()`: the trader shares villager attributes.
-            MobType::Villager | MobType::WanderingTrader => Attributes::villager(),
+            MobType::Villager => Attributes::villager(),
+            // `DefaultAttributes` 里 `WANDERING_TRADER` 注册的是 `Mob.createMobAttributes()`
+            // （移动速度 0.7、跟随距离 16），不是 `Villager.createAttributes()`（0.5 / 48）。
+            // `DefaultAttributes` maps `WANDERING_TRADER` to `Mob.createMobAttributes()`
+            // (movement speed 0.7, follow range 16), not `Villager.createAttributes()`.
+            MobType::WanderingTrader => Attributes::mob(),
             MobType::Guardian => guardian::attributes(false),
             MobType::ElderGuardian => guardian::attributes(true),
             MobType::SulfurCube => sulfur_cube::attributes(),
@@ -3834,6 +3844,14 @@ impl Mob {
                     let mut malus = Malus::animal();
                     malus.set(mc_bamboo_data::PathType::FireInNeighbor, 16.0);
                     malus.set(mc_bamboo_data::PathType::DamagingInNeighbor, 16.0);
+                    malus.set(mc_bamboo_data::PathType::Fire, -1.0);
+                    malus
+                }
+                MobType::WanderingTrader => {
+                    // `AbstractVillager` 构造函数：`FIRE_IN_NEIGHBOR = 16.0`，`FIRE = -1.0`。
+                    // `AbstractVillager` constructor: `FIRE_IN_NEIGHBOR = 16.0`, `FIRE = -1.0`.
+                    let mut malus = Malus::animal();
+                    malus.set(mc_bamboo_data::PathType::FireInNeighbor, 16.0);
                     malus.set(mc_bamboo_data::PathType::Fire, -1.0);
                     malus
                 }

@@ -33,7 +33,7 @@ pub(in crate::entity::mob) fn is_immobile(mob: &Mob) -> bool {
     let Some(state) = &mob.equine else {
         return mob.is_dead_or_dying();
     };
-    if mob.mob_type == MobType::Llama {
+    if mob.mob_type.is_llama() {
         return mob.is_dead_or_dying() || state.eating;
     }
     (mob.is_dead_or_dying() && mob.is_vehicle() && is_saddled(mob))
@@ -70,7 +70,7 @@ pub(in crate::entity::mob) fn tick_ridden(me: &mut Entity, mob: &mut Mob, yaw: f
 /// llama overrides the whole method and stays quiet. The damage formula is the
 /// same as `LivingEntity`'s and the caller settles it as usual.
 pub(in crate::entity::mob) fn land_sound(me: &Entity, mob: &mut Mob, distance: f64) {
-    if mob.mob_type == MobType::Llama || distance <= 1.0 {
+    if mob.mob_type.is_llama() || distance <= 1.0 {
         return;
     }
     let sound = if mob.is_baby() {
@@ -95,7 +95,7 @@ pub(in crate::entity::mob) fn play_step_sound(
     pos: BlockPos,
     block_state: crate::state::BlockState,
 ) {
-    if mob.mob_type == MobType::Llama {
+    if mob.mob_type.is_llama() {
         living::play_sound(me, mob, "minecraft:entity.llama.step", 0.15, 1.0);
         return;
     }
@@ -193,7 +193,7 @@ pub(in crate::entity::mob) fn ai_step_end(me: &mut Entity, mob: &mut Mob, ctx: &
     if me.random.next_int_bounded(900) == 0 && mob.death_time == 0 {
         heal(mob, 1.0);
     }
-    if mob.mob_type != MobType::Llama {
+    if !mob.mob_type.is_llama() {
         graze(me, mob, ctx);
     }
     follow_mommy(me, mob, ctx);
@@ -345,7 +345,7 @@ fn clear_standing(state: &mut EquineState) {
 ///
 /// `standIfPossible` → `setStanding(20)`; llamas cannot rear.
 pub(in crate::entity::mob) fn stand_if_possible(mob: &mut Mob) {
-    if mob.mob_type == MobType::Llama {
+    if mob.mob_type.is_llama() {
         return;
     }
     let state = state(mob);

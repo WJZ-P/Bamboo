@@ -156,17 +156,54 @@ pub enum Goal {
         look_time: i32,
     },
     /// `LookAtPlayerGoal(mob, <type>.class, distance, probability)`：按种类看最近的生物。
-    /// 守卫者的「看守卫者」用这个变体；运行名仍是 `"LookAtPlayerGoal"`。
+    /// `kind == None` 对应 `Mob.class`（任意生物，流浪商人用）；`Some(k)` 对应具体种类
+    /// （守卫者用）。运行名仍是 `"LookAtPlayerGoal"`。
     ///
     /// `LookAtPlayerGoal(mob, <type>.class, distance, probability)`: watch the nearest
-    /// mob of a given kind. The guardian's "watch guardians" goal uses this variant;
-    /// its running name stays `"LookAtPlayerGoal"`.
+    /// mob of a given kind (`None` matches any `Mob`, used by wandering traders;
+    /// `Some(k)` matches one kind, used by guardians). Its running name stays
+    /// `"LookAtPlayerGoal"`.
     LookAtMob {
-        kind: super::MobType,
+        kind: Option<super::MobType>,
         look_distance: f32,
         probability: f32,
         look_at: Option<EntityUid>,
         look_time: i32,
+    },
+    /// `TradeWithPlayerGoal`：正在交易且在地面、不在水里、没刚受伤且距离平方 <= 16 时
+    /// 停下导航、锁住 `JUMP | MOVE`，停下时清掉 `trading_player`。
+    ///
+    /// `TradeWithPlayerGoal`: stop navigation and lock `JUMP | MOVE` while alive, on
+    /// ground, out of water, not recently hurt and within 4 blocks of the trading
+    /// player; clears `trading_player` on stop.
+    TradeWithPlayer,
+    /// `LookAtTradingPlayerGoal`：继承 `LookAtPlayerGoal(8.0)`，只在交易中启动且不抽
+    /// 概率，盯着当前交易玩家。
+    ///
+    /// `LookAtTradingPlayerGoal`: extends `LookAtPlayerGoal(8.0)`, starts without a
+    /// probability draw whenever trading and watches the trading player.
+    LookAtTradingPlayer {
+        look_distance: f32,
+        look_at: Option<EntityUid>,
+        look_time: i32,
+    },
+    /// `InteractGoal`：继承 `LookAtPlayerGoal`，把标志位扩展成 `LOOK | MOVE`。
+    ///
+    /// `InteractGoal`: extends `LookAtPlayerGoal` with `LOOK | MOVE` flags.
+    Interact {
+        look_distance: f32,
+        probability: f32,
+        look_at: Option<EntityUid>,
+        look_time: i32,
+    },
+    /// `WanderingTrader.WanderToPositionGoal`：朝 `wanderTarget` 分段走（超过 10 格先
+    /// 走 10 格），走到距离中心小于 `stop_distance` 停下并清空 `wanderTarget`。
+    ///
+    /// `WanderingTrader.WanderToPositionGoal`: walk towards `wanderTarget` in 10-block
+    /// legs and clear `wanderTarget` on stop once within `stop_distance`.
+    WanderToPosition {
+        stop_distance: f64,
+        speed: f64,
     },
     /// `Guardian.GuardianAttackGoal`：激光蓄力、元数据写入、实体事件 21 与两次伤害。
     /// `attackTime` 存在 [`super::guardian::GuardianState::attack_time`]。
@@ -814,7 +851,12 @@ impl Goal {
             | Self::OcelotAttack { .. }
             | Self::RandomLookAround { .. } => &[Flag::Move, Flag::Look],
             Self::FollowParent { .. } => &[],
-            Self::LookAtPlayer { .. } | Self::LookAtMob { .. } => &[Flag::Look],
+            Self::LookAtPlayer { .. }
+            | Self::LookAtMob { .. }
+            | Self::LookAtTradingPlayer { .. } => &[Flag::Look],
+            Self::Interact { .. } => &[Flag::Look, Flag::Move],
+            Self::TradeWithPlayer => &[Flag::Jump, Flag::Move],
+            Self::WanderToPosition { .. } => &[Flag::Move],
             Self::GuardianAttack | Self::MoveTowardsRestriction { .. } => &[Flag::Move, Flag::Look],
             Self::Unavailable(_)
             | Self::RandomStand { .. }
@@ -959,6 +1001,10 @@ impl Goal {
             Self::Stroll { probability, .. } if *probability < 0.0 => "RandomStrollGoal",
             Self::Stroll { .. } => "WaterAvoidingRandomStrollGoal",
             Self::LookAtPlayer { .. } | Self::LookAtMob { .. } => "LookAtPlayerGoal",
+            Self::TradeWithPlayer => "TradeWithPlayerGoal",
+            Self::LookAtTradingPlayer { .. } => "LookAtTradingPlayerGoal",
+            Self::Interact { .. } => "InteractGoal",
+            Self::WanderToPosition { .. } => "WanderToPositionGoal",
             Self::GuardianAttack => "GuardianAttackGoal",
             Self::MoveTowardsRestriction { .. } => "MoveTowardsRestrictionGoal",
             Self::RandomLookAround { .. } => "RandomLookAroundGoal",
@@ -2237,6 +2283,40 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             *look_at = nearest_look_mob(me, mob, ctx, f64::from(*look_distance), *kind);
             look_at.is_some()
         }
+        Goal::TradeWithPlayer => {
+            living::is_alive(me, mob)
+                && !me.in_water
+                && me.on_ground
+                && mob.hurt_time <= 0
+                && mob.villager.trading_player.is_some_and(|uid| {
+                    player_by_uid(ctx.blocks(), uid)
+                        .is_some_and(|p| me.position.distance_to_sqr(p.position) <= 16.0)
+                })
+        }
+        Goal::LookAtTradingPlayer { look_at, .. } => {
+            if let Some(uid) = mob.villager.trading_player {
+                *look_at = Some(uid);
+                true
+            } else {
+                false
+            }
+        }
+        Goal::Interact {
+            probability,
+            look_distance,
+            look_at,
+            ..
+        } => {
+            if me.random.next_float() >= *probability {
+                return false;
+            }
+            *look_at = nearest_look_target(me, mob, ctx, f64::from(*look_distance));
+            look_at.is_some()
+        }
+        Goal::WanderToPosition { stop_distance, .. } => mob
+            .wandering_trader
+            .wander_target
+            .is_some_and(|target| !closer_to_center_than(target, me.position, *stop_distance)),
         Goal::GuardianAttack => {
             // `GuardianAttackGoal.canUse`：`getTarget() != null && isAlive()`。
             // `GuardianAttackGoal.canUse`: `getTarget() != null && isAlive()`.
@@ -2972,6 +3052,17 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             look_at,
             look_time,
             ..
+        }
+        | Goal::LookAtTradingPlayer {
+            look_distance,
+            look_at,
+            look_time,
+        }
+        | Goal::Interact {
+            look_distance,
+            look_at,
+            look_time,
+            ..
         } => {
             let Some(player) = look_at.and_then(|uid| player_by_uid(ctx.blocks(), uid)) else {
                 return false;
@@ -3015,6 +3106,8 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::Float
         | Goal::HappyGhastFloat
         | Goal::HappyGhastTempt { .. }
+        | Goal::TradeWithPlayer
+        | Goal::WanderToPosition { .. }
         | Goal::Swell { .. }
         | Goal::CubeFloat
         | Goal::CubeRandomDirection { .. }
@@ -3342,9 +3435,14 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         }
         Goal::PufferfishPuff => super::fish::puff_start(mob),
         Goal::FollowFlock { time_to_recalc, .. } => *time_to_recalc = 0,
-        Goal::LookAtPlayer { look_time, .. } | Goal::LookAtMob { look_time, .. } => {
+        Goal::LookAtPlayer { look_time, .. }
+        | Goal::LookAtMob { look_time, .. }
+        | Goal::LookAtTradingPlayer { look_time, .. }
+        | Goal::Interact { look_time, .. } => {
             *look_time = reduced_tick_delay(40 + me.random.next_int_bounded(40));
         }
+        Goal::TradeWithPlayer => mob.navigation.stop(),
+        Goal::WanderToPosition { .. } => {}
         Goal::GuardianAttack => {
             // `GuardianAttackGoal.start`：`attackTime = -10`、停导航、看向目标、needsSync。
             // `GuardianAttackGoal.start`: `attackTime = -10`, stop navigation, look at the
@@ -3633,7 +3731,15 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::TurtleTravel { .. } => mob.turtle.travel_pos = None,
         Goal::PufferfishPuff => super::fish::puff_stop(mob),
         Goal::FollowFlock { .. } => super::fish::flock_stop(mob, ctx, me),
-        Goal::LookAtPlayer { look_at, .. } | Goal::LookAtMob { look_at, .. } => *look_at = None,
+        Goal::LookAtPlayer { look_at, .. }
+        | Goal::LookAtMob { look_at, .. }
+        | Goal::LookAtTradingPlayer { look_at, .. }
+        | Goal::Interact { look_at, .. } => *look_at = None,
+        Goal::TradeWithPlayer => mob.villager.set_trading_player(None),
+        Goal::WanderToPosition { .. } => {
+            mob.wandering_trader.wander_target = None;
+            mob.navigation.stop();
+        }
         Goal::GuardianAttack => {
             // `GuardianAttackGoal.stop`：清元数据、清目标、`randomStrollGoal.trigger()`。
             // `GuardianAttackGoal.stop`: clear metadata and target, trigger the stroll.
@@ -4102,6 +4208,12 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         }
         Goal::LookAtPlayer {
             look_at, look_time, ..
+        }
+        | Goal::LookAtTradingPlayer {
+            look_at, look_time, ..
+        }
+        | Goal::Interact {
+            look_at, look_time, ..
         } => {
             let Some(player) = look_at.and_then(|uid| player_by_uid(ctx.blocks(), uid)) else {
                 return;
@@ -4117,6 +4229,30 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 max_head_x_rot(mob),
             );
             *look_time -= 1;
+        }
+        Goal::TradeWithPlayer => {}
+        Goal::WanderToPosition { speed, .. } => {
+            if let Some(target) = mob.wandering_trader.wander_target
+                && mob.navigation.is_done()
+            {
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                let dest = if !closer_to_center_than(target, me.position, 10.0) {
+                    let dir = Vec3::new(
+                        f64::from(target.x) - me.position.x,
+                        f64::from(target.y) - me.position.y,
+                        f64::from(target.z) - me.position.z,
+                    )
+                    .normalize();
+                    dir.scale(10.0).add(me.position)
+                } else {
+                    Vec3::new(
+                        f64::from(target.x),
+                        f64::from(target.y),
+                        f64::from(target.z),
+                    )
+                };
+                mob.navigation.move_to(ctx.blocks(), &nav, dest, *speed);
+            }
         }
         Goal::LookAtMob {
             look_at, look_time, ..
@@ -4869,13 +5005,14 @@ fn nearest_look_mob(
     mob: &mut Mob,
     ctx: &dyn EntityCtx,
     range: f64,
-    kind: super::MobType,
+    kind: Option<super::MobType>,
 ) -> Option<EntityUid> {
     let eye = Vec3::new(me.position.x, living::eye_y(me, mob), me.position.z);
     let mut candidates: Vec<(EntityUid, Vec3)> = Vec::new();
     ctx.for_each_other_in(me.bounding_box().inflate(range, 3.0, range), &mut |other| {
         if let KindPublic::Mob(public) = &other.kind
-            && public.mob_type == kind
+            && other.uid != me.id
+            && kind.is_none_or(|want| public.mob_type == want)
             && !other.removed
             && public.is_alive()
         {
@@ -6138,7 +6275,7 @@ pub(super) fn attack_candidate(
     let exact_player_box = mob.mob_type.full_target_rules()
         || matches!(
             mob.mob_type,
-            super::MobType::PolarBear | super::MobType::Llama
+            super::MobType::PolarBear | super::MobType::Llama | super::MobType::TraderLlama
         );
     if let Some(player) = player_by_uid(ctx.blocks(), uid) {
         // `IronGolem.canAttack`：玩家造的不打玩家。
