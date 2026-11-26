@@ -11,7 +11,7 @@ use mc_bamboo_blocks::{
     Combined, Container, Effect, EntityStore, EntityTables, HopperEntity, InteractionResult, Level,
     LevelRandom, LevelTables, Outcome, RedstoneMemory, ShulkerSlots, Slots, TickPriority,
     apply_text, destroy_block,
-    entity::Entities,
+    entity::{Entities, ctx::PlayerView},
     level::EquipTarget,
     random_tick, redstone_signal, run_action_block_ticks, run_scheduled_ticks,
     run_scheduled_ticks_with_cache,
@@ -119,6 +119,13 @@ struct OracleLevel {
     ///
     /// The fake players. The actor comes first, then the bystanders in `others`.
     living: Vec<EquipTarget>,
+    /// 生物可见的玩家视图，和 `living` 同一批人，按官方 `ServerLevel.players()` 顺序。
+    /// 生物 AI、投掷物和叫声用它判断附近有没有玩家。
+    ///
+    /// Player views mobs can see, the same people as `living` in
+    /// `ServerLevel.players()` order. Mob AI, projectiles and calls use it to
+    /// tell whether a player is nearby.
+    players: Vec<PlayerView>,
     /// 这道题的游戏规则。默认值和官方 `new GameRules(DEFAULT_FLAGS)` 一样。
     ///
     /// Game rules for this case. Defaults match `new GameRules(DEFAULT_FLAGS)`.
@@ -323,6 +330,7 @@ impl OracleLevel {
             block_entities,
             block_events: BlockEvents::default(),
             living: equip_targets(&case.action, names)?,
+            players: scene_player_views(&case.action, names)?,
             block_rules: block_rules_of(header)?,
             block_weather: weather_of(header)?,
             sky_darken: sky_darken_of(header)?,
@@ -572,6 +580,14 @@ impl Level for OracleLevel {
 
     fn block_weather(&self) -> mc_bamboo_blocks::BlockWeather {
         self.block_weather
+    }
+
+    /// `ServerLevel.players()`：actor 在前，`others` 里的旁观者随后，顺序和官方一致。
+    /// `ServerLevel.players()`: the actor first, then the bystanders in `others`.
+    fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
+        for player in &self.players {
+            visit(player);
+        }
     }
 
     /// `Level.getSkyDarken()`：题面给定的主世界时钟和天气按官方公式算出。
@@ -885,6 +901,99 @@ fn entity_boxes(action: &Action) -> Vec<Aabb> {
 fn aabb(bits: &[Double; 6]) -> Aabb {
     let [min_x, min_y, min_z, max_x, max_y, max_z] = bits.map(|value| value.0);
     Aabb::new(min_x, min_y, min_z, max_x, max_y, max_z)
+}
+
+/// 场景里的假玩家视图，和官方 `FakePlayer` 一一对应：actor 是 id=1 的创造模式玩家，
+/// `others` 是 id 从 2 起、站直空手的旁观者。生物（狐狸叫声、末影珍珠、爆炸等）用
+/// `Level::for_each_player` 读它；缺了它，方块对拍会把"场景里有玩家"误判成"附近没人"。
+///
+/// Fake-player views for the scene, mirroring the official `FakePlayer`: the actor is the
+/// id=1 creative player; `others` are upright, empty-handed bystanders from id 2. Mobs read
+/// them through `Level::for_each_player`; without this the oracle reports no players nearby
+/// even though the scene has players.
+fn scene_player_views(action: &Action, names: &Names) -> Result<Vec<PlayerView>, String> {
+    let mut views = Vec::with_capacity(1 + action.others.len());
+    let [ax, ay, az] = action.actor.map(|value| value.0);
+    views.push(scene_player_view(
+        1,
+        Vec3::new(ax, ay, az),
+        action.yaw.0,
+        action.pitch.0,
+        action.sneak,
+        names.item(&action.main)?.0,
+        names.item(&action.off)?.0,
+    ));
+    for (index, bounds) in action.others.iter().enumerate() {
+        let box_ = aabb(bounds);
+        let position = Vec3::new(
+            (box_.min_x + box_.max_x) / 2.0,
+            box_.min_y,
+            (box_.min_z + box_.max_z) / 2.0,
+        );
+        let id = i32::try_from(index).unwrap_or(0).saturating_add(2);
+        views.push(scene_player_view(
+            id,
+            position,
+            0.0,
+            0.0,
+            false,
+            items::AIR,
+            items::AIR,
+        ));
+    }
+    Ok(views)
+}
+
+/// 单个假玩家，字段对齐官方 `FakePlayer`（创造模式、满血、站姿、UUID 为 `new UUID(0, id)`）。
+/// A single fake player, with fields matching the official `FakePlayer`.
+fn scene_player_view(
+    uid: i32,
+    position: Vec3,
+    yaw: f32,
+    pitch: f32,
+    sneaking: bool,
+    main_hand: i32,
+    off_hand: i32,
+) -> PlayerView {
+    PlayerView {
+        uid,
+        uuid: Some((uid as u128).to_be_bytes()),
+        fall_flying: false,
+        main_arm_right: true,
+        position,
+        delta: Vec3::default(),
+        width: 0.6,
+        height: 1.8,
+        eye_height: if sneaking {
+            CROUCHING_EYE_HEIGHT
+        } else {
+            STANDING_EYE_HEIGHT
+        },
+        health: 20.0,
+        look_direction: Vec3::view_vector(yaw, pitch),
+        gaze_disguise: false,
+        alive: true,
+        spectator: false,
+        creative: true,
+        flying: false,
+        explosion_knockback_resistance: 0.0,
+        game_mode: 1,
+        mining_fatigue: None,
+        sneaking,
+        sprinting: false,
+        swimming: false,
+        invisible: false,
+        armor_cover: 0.0,
+        main_hand,
+        off_hand,
+        team: None,
+        yaw,
+        pitch,
+        combat: Default::default(),
+        effects: Default::default(),
+        shoulder_left: None,
+        shoulder_right: None,
+    }
 }
 
 fn actor_of(action: &Action, names: &Names) -> Result<Actor, String> {
@@ -1468,6 +1577,7 @@ mod tests {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             living: Vec::new(),
+            players: Vec::new(),
             block_rules: BlockGameRules::vanilla(),
             block_weather: mc_bamboo_blocks::BlockWeather::CLEAR,
             sky_darken: 0,
