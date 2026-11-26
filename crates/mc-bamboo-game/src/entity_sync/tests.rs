@@ -976,6 +976,105 @@ fn fall_flying_refusal_uses_the_current_flags_and_only_reaches_the_player() {
     assert!(stage.flush_watcher().is_empty());
 }
 
+#[test]
+fn fall_flying_starts_and_sends_the_shared_flag_to_observers() {
+    let mut stage = Stage::at(POSITION);
+    stage.skip_first_cycle();
+    stage.player().on_ground = false;
+    stage.player().inventory.slots[6] = ItemStack::new(mc_bamboo_data::items::ELYTRA, 1);
+
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StartFallFlying,
+        0,
+    );
+    assert!(stage.player().sync.is_fall_flying());
+    stage.step();
+    assert_eq!(
+        stage
+            .take_received()
+            .into_iter()
+            .filter(|frame| frame.id == clientbound::SET_ENTITY_DATA)
+            .collect::<Vec<_>>(),
+        [frame(clientbound::SET_ENTITY_DATA, "07 00 00 80 ff")],
+    );
+
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StartFallFlying,
+        0,
+    );
+    assert!(!stage.player().sync.is_fall_flying());
+    stage.step();
+    assert_eq!(
+        stage
+            .take_received()
+            .into_iter()
+            .filter(|frame| frame.id == clientbound::SET_ENTITY_DATA)
+            .collect::<Vec<_>>(),
+        [frame(clientbound::SET_ENTITY_DATA, "07 00 00 00 ff")],
+    );
+}
+
+#[test]
+fn fall_flying_start_checks_equipment_and_environment() {
+    use mc_bamboo_blocks::{durability::set_damage_value, entity::mob::effects::EffectInstance};
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::{blocks, items, registries::mob_effect};
+
+    for condition in [
+        "grounded",
+        "riding",
+        "flying",
+        "levitating",
+        "water",
+        "lava",
+        "ladder",
+        "empty",
+        "wrong slot",
+        "worn out",
+    ] {
+        let mut stage = Stage::at(POSITION);
+        let feet = BlockPos::containing(POSITION);
+        let player = stage.player();
+        player.on_ground = false;
+        player.inventory.slots[6] = ItemStack::new(items::ELYTRA, 1);
+        match condition {
+            "grounded" => player.on_ground = true,
+            "riding" => player.riding.vehicle = Some(123),
+            "flying" => player.sync.flying = true,
+            "levitating" => {
+                player.effects.add(EffectInstance::with_amplifier(
+                    mob_effect::LEVITATION,
+                    100,
+                    0,
+                ));
+            }
+            "water" | "lava" | "ladder" => {
+                let state = match condition {
+                    "water" => blocks::WATER,
+                    "lava" => blocks::LAVA,
+                    _ => blocks::LADDER,
+                };
+                stage.region.chunks.set_block(feet, state);
+            }
+            "empty" => player.inventory.slots[6] = ItemStack::empty(),
+            "wrong slot" => player.inventory.slots.swap(6, HEAD_SLOT),
+            "worn out" => set_damage_value(&mut player.inventory.slots[6], 431),
+            _ => unreachable!(),
+        }
+        on_player_command(
+            &mut stage.region,
+            STEVE,
+            PlayerCommandKind::StartFallFlying,
+            0,
+        );
+        assert!(!stage.player().sync.is_fall_flying(), "{condition}");
+    }
+}
+
 /// `entities.md` 第 9 节的 `[跑]`。
 #[test]
 fn punch_swings_the_main_hand_for_viewers_only() {

@@ -41,7 +41,7 @@ const BLOCKS_PER_CHUNK: i32 = 16;
 const DEFAULT_HEALTH_ON_PAIRING: f32 = 20.0;
 
 /// 玩家有的装备槽，按 ordinal 排序。
-const EQUIPMENT_SLOTS: [EquipmentSlot; 6] = [
+pub(crate) const EQUIPMENT_SLOTS: [EquipmentSlot; 6] = [
     EquipmentSlot::MainHand,
     EquipmentSlot::OffHand,
     EquipmentSlot::Feet,
@@ -228,6 +228,18 @@ impl EntitySync {
     /// `isSprinting()`: the sprinting bit of the shared flags.
     pub(crate) fn is_sprinting(&self) -> bool {
         self.shared_flags & ENTITY_FLAG_SPRINTING != 0
+    }
+
+    /// 共享标志里的滑翔位。
+    /// The fall-flying bit in the shared flags.
+    pub(crate) fn is_fall_flying(&self) -> bool {
+        self.shared_flags & ENTITY_FLAG_FALL_FLYING != 0
+    }
+
+    /// 设置滑翔标志。
+    /// Set the fall-flying flag.
+    pub(crate) fn set_fall_flying(&mut self, enabled: bool) {
+        self.set_shared_flag(ENTITY_FLAG_FALL_FLYING, enabled);
     }
 
     /// 其他玩家的姿势完全由 index 6 决定，客户端不会根据潜行位自己推算。
@@ -718,9 +730,9 @@ fn may_fly(game_mode: GameMode) -> bool {
     matches!(game_mode, GameMode::Creative | GameMode::Spectator)
 }
 
-/// `player_command`：冲刺、拒绝滑翔、起跳，以及骑乘时开坐骑物品栏。`entities.md` 第 10 节。
+/// `player_command`：冲刺、开始滑翔、起跳，以及骑乘时开坐骑物品栏。`entities.md` 第 10 节。
 ///
-/// `player_command`: sprinting, refusing the elytra, the riding jump and opening
+/// `player_command`: sprinting, starting to glide, the riding jump and opening
 /// the mount inventory. `entities.md` section 10.
 pub(crate) fn on_player_command(
     region: &mut Region,
@@ -731,7 +743,11 @@ pub(crate) fn on_player_command(
     match action {
         PlayerCommandKind::StartSprinting => set_sprinting(region, id, true),
         PlayerCommandKind::StopSprinting => set_sprinting(region, id, false),
-        PlayerCommandKind::StartFallFlying => refuse_fall_flying(region, id),
+        PlayerCommandKind::StartFallFlying => {
+            if !crate::player_glide::try_start(region, id) {
+                refuse_fall_flying(region, id);
+            }
+        }
         PlayerCommandKind::StopSleeping => crate::sleep::stop_sleeping(region, id),
         PlayerCommandKind::StartRidingJump => start_riding_jump(region, id, data),
         PlayerCommandKind::StopRidingJump => stop_riding_jump(region, id),
@@ -781,12 +797,13 @@ pub(crate) fn set_sprinting(region: &mut Region, id: PlayerId, sprinting: bool) 
 }
 
 /// 客户端已经在本地开始滑翔了，而这个状态只有服务端能清，不回应的话玩家落地后走不了路。
-/// M2 不做滑翔，所以总是发回不带滑翔位的标志字节，只发给这名玩家。
+/// The client has already started gliding locally. Send back the cleared flag even if it was unchanged.
 fn refuse_fall_flying(region: &mut Region, id: PlayerId) {
-    let Some(player) = region.players.get(&id) else {
+    let Some(player) = region.players.get_mut(&id) else {
         return;
     };
-    let flags = player.sync.shared_flags & !ENTITY_FLAG_FALL_FLYING;
+    player.sync.set_fall_flying(false);
+    let flags = player.sync.shared_flags;
     region.links.send(
         id,
         &SetEntityData {
