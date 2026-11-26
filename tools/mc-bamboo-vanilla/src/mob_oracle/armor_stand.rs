@@ -60,6 +60,9 @@ impl Report {
     /// Official save → `load_into` → `write_mob`, then compare the whole NBT tree
     /// key by key against vanilla's reload-and-save output.
     pub(super) fn replay_armor_stand_save(&mut self, case: &ArmorStandSaveCase) {
+        mc_bamboo_blocks::entity::mob::armor_stand::set_oracle_tamper(
+            self.break_test.as_deref().unwrap_or(""),
+        );
         self.cases += 1;
         self.steps += 1;
         let label = case.name.as_str();
@@ -94,6 +97,9 @@ impl Report {
 
     /// 逐刻场景分派。
     pub(super) fn replay_armor_stand_scene(&mut self, case: &ArmorStandCase) {
+        mc_bamboo_blocks::entity::mob::armor_stand::set_oracle_tamper(
+            self.break_test.as_deref().unwrap_or(""),
+        );
         self.cases += 1;
         match case.name.as_str() {
             "armor_stand_fall" => self.replay_armor_stand_fall(case),

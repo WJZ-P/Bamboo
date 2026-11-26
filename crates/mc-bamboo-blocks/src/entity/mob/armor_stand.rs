@@ -34,6 +34,47 @@ use super::{
     living,
 };
 
+/// 由 `mob-oracle` 的 `--break-self-test` 设置，故意改坏生产行为验证逐刻对拍没放宽。
+///
+/// Set by `mob-oracle`'s `--break-self-test` to corrupt production behaviour on
+/// purpose and prove the parity comparison catches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OracleTamper {
+    None,
+    /// `hasPhysics` 恒假：盔甲架不再掉落。
+    NoPhysics,
+    /// `write_nbt` 无条件写六个姿势，复现缺省姿势不该写全的旧问题。
+    AllPoseFields,
+    /// 两段式破坏的摇晃窗口改成 0：第二下不破坏。
+    NoWobbleBreak,
+    /// 箭伤害错误地按燃烧伤害扣血。
+    ArrowDamage,
+    /// `clicked_slot` 忽略点击高度，恒回主手。
+    WrongClickSlot,
+}
+
+thread_local! {
+    static ORACLE_TAMPER: std::cell::Cell<OracleTamper> =
+        const { std::cell::Cell::new(OracleTamper::None) };
+}
+
+/// 由 `mob-oracle` 按 `--break-self-test` 设置，其它驱动不调用。
+pub fn set_oracle_tamper(name: &str) {
+    let tamper = match name {
+        "armor_stand_no_physics" => OracleTamper::NoPhysics,
+        "armor_stand_all_pose" => OracleTamper::AllPoseFields,
+        "armor_stand_no_break" => OracleTamper::NoWobbleBreak,
+        "armor_stand_arrow_damage" => OracleTamper::ArrowDamage,
+        "armor_stand_wrong_slot" => OracleTamper::WrongClickSlot,
+        _ => OracleTamper::None,
+    };
+    ORACLE_TAMPER.with(|cell| cell.set(tamper));
+}
+
+fn oracle_tamper() -> OracleTamper {
+    ORACLE_TAMPER.with(|cell| cell.get())
+}
+
 /// 一个姿势绕三根轴的旋转（度），官方 `net.minecraft.core.Rotations`。
 ///
 /// A pose's rotation around the three axes in degrees, vanilla `Rotations`.
@@ -161,7 +202,10 @@ impl ArmorStand {
     }
 
     /// `hasPhysics()`：不是标记、没有 `NoGravity`。
-    pub const fn has_physics(&self, no_gravity: bool) -> bool {
+    pub fn has_physics(&self, no_gravity: bool) -> bool {
+        if oracle_tamper() == OracleTamper::NoPhysics {
+            return false;
+        }
         !self.is_marker() && !no_gravity
     }
 
@@ -226,6 +270,7 @@ impl ArmorStand {
         //
         // `ArmorStandPose.CODEC` uses `optionalFieldOf(default)`: a pose field equal
         // to its default is omitted, so an all-default stand saves an empty `Pose`.
+        let all_pose = oracle_tamper() == OracleTamper::AllPoseFields;
         let mut pose = Vec::new();
         for (name, value, default) in [
             ("Head", self.head_pose, DEFAULT_HEAD_POSE),
@@ -235,7 +280,7 @@ impl ArmorStand {
             ("LeftLeg", self.left_leg_pose, DEFAULT_LEFT_LEG_POSE),
             ("RightLeg", self.right_leg_pose, DEFAULT_RIGHT_LEG_POSE),
         ] {
-            if value != default {
+            if all_pose || value != default {
                 pose.push((name.to_owned(), value.to_tag()));
             }
         }
@@ -384,6 +429,9 @@ fn has_item(mob: &Mob, slot: EquipmentSlot) -> bool {
 ///
 /// `getClickedSlot(Vec3)`: pick an equipped slot by the scaled click height.
 fn clicked_slot(mob: &Mob, hit_pos: Option<Vec3>) -> EquipmentSlot {
+    if oracle_tamper() == OracleTamper::WrongClickSlot {
+        return EquipmentSlot::MainHand;
+    }
     let small = mob.armor_stand.is_small();
     let scale = if small { 0.5_f64 } else { 1.0 };
     let y = hit_pos.map_or(0.0, |at| at.y) / scale;
@@ -509,7 +557,10 @@ pub fn hurt_server(
         }
         return false;
     }
-    if damage_in_tag(source.kind, "minecraft:burns_armor_stands") && mob.health > 0.5 {
+    if (damage_in_tag(source.kind, "minecraft:burns_armor_stands")
+        || (oracle_tamper() == OracleTamper::ArrowDamage && source.kind == DamageKind::Arrow))
+        && mob.health > 0.5
+    {
         cause_damage(me, mob, ctx, &source, 4.0);
         return false;
     }
@@ -530,7 +581,12 @@ pub fn hurt_server(
         return true;
     }
     let now = ctx.blocks().game_time();
-    if now - mob.armor_stand.last_hit <= WOBBLE_TIME || always_kill {
+    let wobble_time = if oracle_tamper() == OracleTamper::NoWobbleBreak {
+        -1
+    } else {
+        WOBBLE_TIME
+    };
+    if now - mob.armor_stand.last_hit <= wobble_time || always_kill {
         broken_by_player(me, mob, ctx);
         breaking_particles(me, mob);
         kill(me);
