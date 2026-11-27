@@ -1667,8 +1667,18 @@ impl Report {
         };
         self.steps += 8;
         let at = "dispenser boat";
-        self.field(at, "entity type", scene.entity_type, data.entity_type);
-        self.field(at, "x", scene.x, boat.position.x.to_bits());
+        let saved_x = if self.break_name.as_deref() == Some("dispenser-boat-position") {
+            (boat.position.x + 0.25).to_bits()
+        } else {
+            boat.position.x.to_bits()
+        };
+        let boat_type = if self.break_name.as_deref() == Some("dispenser-boat-type") {
+            mc_bamboo_data::registries::entity_type::OAK_BOAT
+        } else {
+            data.entity_type
+        };
+        self.field(at, "entity type", scene.entity_type, boat_type);
+        self.field(at, "x", scene.x, saved_x);
         self.field(at, "y", scene.y, boat.position.y.to_bits());
         self.field(at, "z", scene.z, boat.position.z.to_bits());
         self.field(at, "yaw", scene.yaw, boat.y_rot.to_bits() as u32);

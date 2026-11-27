@@ -424,6 +424,10 @@ public final class MobOracle {
                 playEggDispense(official, out, name);
                 cases++;
             }
+            if (only == null || "dispenser_spawn_egg".startsWith(only)) {
+                playDispenserSpawnEgg(official, out);
+                cases++;
+            }
             for (String name : List.of("pearl_floor", "pearl_hit_cow", "pearl_endermite", "pearl_peaceful")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playEnderPearl(official, out, name);
@@ -9802,6 +9806,59 @@ public final class MobOracle {
                 + ",\"item\":[" + BuiltInRegistries.ITEM.getId(inside.getItem()) + ',' + inside.getCount() + ']'
                 + ",\"left\":" + stack.getCount()
                 + ",\"levelSeed\":" + randomSeed(level.getRandom()) + "}\n");
+        out.flush();
+    }
+
+    /**
+     * 发射器用猪刷怪蛋：直接跑 `SpawnEggItemBehavior`，比生成的实体类型、精确位置、
+     * 朝向、名字、血量、剩余物品、世界随机源和整棵存档 NBT。
+     *
+     * A dispenser fires a pig spawn egg: run `SpawnEggItemBehavior` and compare the
+     * spawned entity's type, exact position, facing, name, health, remaining stack,
+     * level random and full save NBT.
+     */
+    private static void playDispenserSpawnEgg(Official official, Writer out) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.spawned = new ArrayList<>();
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+        level.getRandom().setSeed(1L);
+        BlockPos pos = new BlockPos(0, 64, 0);
+        Direction facing = Direction.EAST;
+        var state = Blocks.DISPENSER.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.DispenserBlock.FACING, facing);
+        var source = new net.minecraft.core.dispenser.BlockSource(level, pos, state, null);
+        ItemStack stack = new ItemStack(Items.PIG_SPAWN_EGG, 3);
+        stack.set(DataComponents.CUSTOM_NAME, Component.literal("Sir Oinksalot"));
+        ItemStack left = net.minecraft.core.dispenser.SpawnEggItemBehavior.INSTANCE.dispense(source, stack);
+        Pig pig = (Pig) level.spawned.stream()
+                .filter(entity -> entity instanceof Pig)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("no pig was spawned"));
+        // 新实体的随机源从 level.entitySeeds 取，和 Bamboo 的生产生成顺序对齐。
+        // The new entity's random comes from level.entitySeeds, as in Bamboo.
+        long seed = level.entitySeeds.nextLong();
+        setRandom(pig, seed);
+        pig.setUUID(Mth.createInsecureUUID(pig.getRandom()));
+        pig.getRandom().nextFloat();
+        var reporter = net.minecraft.util.ProblemReporter.DISCARDING;
+        var saved = net.minecraft.world.level.storage.TagValueOutput.createWithContext(reporter, official.registries);
+        pig.save(saved);
+        var componentCodec = net.minecraft.network.chat.ComponentSerialization.CODEC;
+        var ops = net.minecraft.nbt.NbtOps.INSTANCE;
+        out.write("{\"type\":\"dispenserSpawnEgg\",\"name\":" + jsonString("dispenser_spawn_egg")
+                + ",\"entityType\":" + BuiltInRegistries.ENTITY_TYPE.getId(pig.getType())
+                + ",\"x\":" + Double.doubleToRawLongBits(pig.getX())
+                + ",\"y\":" + Double.doubleToRawLongBits(pig.getY())
+                + ",\"z\":" + Double.doubleToRawLongBits(pig.getZ())
+                + ",\"yaw\":" + Float.floatToRawIntBits(pig.getYRot())
+                + ",\"health\":" + Float.floatToRawIntBits(pig.getHealth())
+                + ",\"left\":" + left.getCount()
+                + ",\"levelSeed\":" + randomSeed(level.getRandom())
+                + ",\"nameComponent\":" + jsonString(componentCodec.encodeStart(ops,
+                        Component.literal("Sir Oinksalot")).getOrThrow().toString())
+                + ",\"nbt\":" + jsonString(saved.buildResult().toString()) + "}\n");
         out.flush();
     }
 
