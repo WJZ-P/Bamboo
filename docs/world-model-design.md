@@ -618,7 +618,9 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 `getRotationVector()` 建 `CommandSourceStack`，命令当场读写同一个可变的
 `ServerLevel`：`setblock` / `summon` / `tp` 的改动，`EntityTickList` 里排在矿车之后
 tick 的实体、`tickPassenger` 与 `tickBlockEntities` 这一刻就能看到，命令自己读到的
-也是这一刻中途的世界。
+也是这一刻中途的世界。若 `summon` 生成的实体已具备 tick 条件，`EntityTickList.add` 会
+先分离正在遍历的名单，再将新实体加入活动名单；本次外层 `forEach` 不会 tick 新实体，
+但它已进入世界，后续实体仍可能读到它。
 
 Bamboo 把这一步推迟到整个实体阶段之后，细节见 README「命令方块矿车命令的执行时机」。
 `mc-bamboo-blocks` 的 `minecart::tick` 在激活处只按官方冷却生成 `CommandActivation`
@@ -627,9 +629,10 @@ Bamboo 把这一步推迟到整个实体阶段之后，细节见 README「命令
 精确驱动（`run_entity_tick` → `World::tick_entities`）或并行驱动（`compute` → `commit`）
 后把效果收成 `Vec<CommandActivation>` 交回主控，`world.rs` 的 tick 循环才经
 `GlobalPort::submit(GlobalEffect::RunMinecartCommand)` → `minecart_command::perform` →
-`command::run_prefixed` 执行。它在 `riding::tick` / 方块实体之前，所以这两段仍看得到
-改动；差异只在同刻里 `entityTickList` 排在矿车之后 tick 的实体，以及命令读到的世界
-（已是全实体阶段结束之后），多岛 `GlobalPort::Queued` 还会再晚到主控应用那一步。
+`command::run_prefixed` 执行。直接模式下，岛内的 `riding::tick` 和方块实体阶段仍在命令
+之后；同刻排在矿车之后 tick 的实体在命令之前，命令读到的也是整个实体阶段结束后的世界。
+多岛排队模式下，`GlobalPort::Queued` 此处只入队，主控收回岛后才执行，所以岛内的
+`riding::tick` 和方块实体阶段也在命令之前。
 
 把执行挪回官方时机，必须在某只矿车逐刻的中途拿到 `&mut Region` + `&mut Global`
 并当场跑完一条游戏层命令，这与本节已定的约束冲突：命令框架在 `mc-bamboo-game`，
