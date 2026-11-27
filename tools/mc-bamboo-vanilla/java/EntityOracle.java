@@ -52,11 +52,18 @@ import net.minecraft.world.Difficulty;
 import net.minecraft.world.attribute.EnvironmentAttributeSystem;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageSources;
+import net.minecraft.server.ServerScoreboard;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.ExperienceOrb;
+import net.minecraft.world.entity.vehicle.minecart.AbstractMinecart;
+import net.minecraft.world.entity.vehicle.minecart.Minecart;
+import net.minecraft.world.entity.vehicle.minecart.MinecartChest;
+import net.minecraft.world.entity.vehicle.minecart.MinecartFurnace;
+import net.minecraft.world.entity.vehicle.minecart.MinecartHopper;
+import net.minecraft.world.entity.vehicle.minecart.MinecartTNT;
 import net.minecraft.world.entity.vehicle.boat.AbstractBoat;
 import net.minecraft.world.entity.vehicle.boat.AbstractChestBoat;
 import net.minecraft.world.entity.vehicle.boat.Boat;
@@ -92,6 +99,8 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.SpeleothemBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.RailShape;
 import net.minecraft.world.level.block.state.properties.SpeleothemThickness;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
@@ -178,6 +187,18 @@ public final class EntityOracle {
             cases += orbPickup(official, out);
             cases += movingPistonCollision(official, out);
             cases += dynamicShapeCollision(official, out);
+            cases += minecartStraight(official, out);
+            cases += minecartPowered(official, out);
+            cases += minecartBrake(official, out);
+            cases += minecartSlope(official, out);
+            cases += minecartTurn(official, out);
+            cases += minecartSave(official, out);
+            cases += minecartDetector(official, out);
+            cases += minecartTnt(official, out);
+            cases += minecartFurnace(official, out);
+            cases += minecartHopperSuck(official, out);
+            cases += minecartHopperLocked(official, out);
+            cases += minecartChestSave(official, out);
             cases += boatStillWater(official, out);
             cases += boatIceSlide(official, out);
             cases += boatWaterCurrent(official, out);
@@ -1109,6 +1130,331 @@ public final class EntityOracle {
         out.write("]");
     }
 
+    /** 一题矿车场景的参数。 */
+    private static final class MinecartSpec {
+        String name;
+        EntityType<? extends AbstractMinecart> type = EntityTypes.MINECART;
+        double px = 0.5, py = 64.0625, pz = 0.5;
+        double vx, vy, vz;
+        int ticks = 16;
+        long levelSeed = 1L;
+        int saveAt = -1;
+        int fuel;
+        double pushX, pushZ;
+        int[][] chest = new int[0][];
+        /** 地上物品实体：`[x, y, z, itemId, count]`。 */
+        double[][] extras = new double[0][];
+        Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+    }
+
+    private static void rails(MinecartSpec spec, int fromZ, int toZ, BlockState rail) {
+        for (int z = fromZ; z <= toZ; z++) {
+            spec.blocks.put(BlockPos.asLong(0, 64, z), rail);
+            spec.blocks.put(BlockPos.asLong(0, 63, z), Blocks.STONE.defaultBlockState());
+        }
+    }
+
+    /** 平直铁轨上的滑行减速。 */
+    private static int minecartStraight(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_straight";
+        rails(spec, -6, 6, Blocks.RAIL.defaultBlockState()
+                .setValue(BlockStateProperties.RAIL_SHAPE, RailShape.NORTH_SOUTH));
+        spec.pz = 0.5;
+        spec.vz = 0.3;
+        spec.ticks = 16;
+        return playMinecart(official, out, spec);
+    }
+
+    private static BlockState rail(RailShape shape) {
+        return Blocks.RAIL.defaultBlockState().setValue(BlockStateProperties.RAIL_SHAPE, shape);
+    }
+
+    /** 通电的动力铁轨把矿车沿轨道加速。 */
+    private static int minecartPowered(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_powered";
+        rails(spec, -6, 6, Blocks.POWERED_RAIL.defaultBlockState()
+                .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH)
+                .setValue(BlockStateProperties.POWERED, true));
+        spec.pz = 0.5;
+        spec.vz = 0.02;
+        spec.ticks = 16;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 没通电的动力铁轨每刻把矿车刹车。 */
+    private static int minecartBrake(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_brake";
+        rails(spec, -6, 6, Blocks.POWERED_RAIL.defaultBlockState()
+                .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH)
+                .setValue(BlockStateProperties.POWERED, false));
+        spec.pz = 0.5;
+        spec.vz = 0.3;
+        spec.ticks = 12;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 中间一格是斜坡：矿车爬坡时 `getPos` 抬高位置、斜坡加速度改变速度。 */
+    private static int minecartSlope(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_slope";
+        for (int z = -6; z <= 6; z++) {
+            RailShape shape = z == 0 ? RailShape.ASCENDING_SOUTH : RailShape.NORTH_SOUTH;
+            spec.blocks.put(BlockPos.asLong(0, 64, z), rail(shape));
+            spec.blocks.put(BlockPos.asLong(0, 63, z), Blocks.STONE.defaultBlockState());
+        }
+        spec.pz = -3.5;
+        spec.vz = 0.3;
+        spec.ticks = 20;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 从北边进、向东出的东南弯：过弯时速度重新投影到新的一格方向。 */
+    private static int minecartTurn(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_turn";
+        for (int z = -6; z <= -1; z++) {
+            spec.blocks.put(BlockPos.asLong(0, 64, z), rail(RailShape.NORTH_SOUTH));
+            spec.blocks.put(BlockPos.asLong(0, 63, z), Blocks.STONE.defaultBlockState());
+        }
+        spec.blocks.put(BlockPos.asLong(0, 64, 0), rail(RailShape.SOUTH_EAST));
+        spec.blocks.put(BlockPos.asLong(0, 63, 0), Blocks.STONE.defaultBlockState());
+        for (int x = 1; x <= 6; x++) {
+            spec.blocks.put(BlockPos.asLong(x, 64, 0), rail(RailShape.EAST_WEST));
+            spec.blocks.put(BlockPos.asLong(x, 63, 0), Blocks.STONE.defaultBlockState());
+        }
+        spec.pz = -2.5;
+        spec.vz = 0.3;
+        spec.ticks = 20;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 存档往返：第一次 tick 之前写出再读回，之后逐刻状态保持一致。 */
+    private static int minecartSave(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_save";
+        rails(spec, -6, 6, rail(RailShape.NORTH_SOUTH));
+        spec.pz = 0.5;
+        spec.vz = 0.2;
+        spec.saveAt = 0;
+        spec.ticks = 12;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 探测铁轨：矿车压过时 `POWERED` 置真，红石输出 15。 */
+    private static int minecartDetector(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_detector";
+        for (int z = -6; z <= 6; z++) {
+            BlockState cell = z == 0
+                    ? Blocks.DETECTOR_RAIL.defaultBlockState()
+                            .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH)
+                    : rail(RailShape.NORTH_SOUTH);
+            spec.blocks.put(BlockPos.asLong(0, 64, z), cell);
+            spec.blocks.put(BlockPos.asLong(0, 63, z), Blocks.STONE.defaultBlockState());
+        }
+        spec.pz = -3.5;
+        spec.vz = 0.3;
+        spec.ticks = 20;
+        return playMinecart(official, out, spec);
+    }
+
+    /** TNT 矿车经过通电的激活铁轨后点燃，引信归零时爆炸。 */
+    private static int minecartTnt(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_tnt";
+        spec.type = EntityTypes.TNT_MINECART;
+        for (int z = -6; z <= 6; z++) {
+            BlockState cell = z == 0
+                    ? Blocks.ACTIVATOR_RAIL.defaultBlockState()
+                            .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH)
+                            .setValue(BlockStateProperties.POWERED, true)
+                    : rail(RailShape.NORTH_SOUTH);
+            spec.blocks.put(BlockPos.asLong(0, 64, z), cell);
+            spec.blocks.put(BlockPos.asLong(0, 63, z), Blocks.STONE.defaultBlockState());
+        }
+        spec.pz = -3.5;
+        spec.vz = 0.3;
+        spec.ticks = 100;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 动力矿车：燃料和推力让它沿轨道自己跑，逐刻燃料递减。 */
+    private static int minecartFurnace(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_furnace";
+        spec.type = EntityTypes.FURNACE_MINECART;
+        for (int z = -6; z <= 6; z++) {
+            spec.blocks.put(BlockPos.asLong(0, 64, z), rail(RailShape.NORTH_SOUTH));
+            spec.blocks.put(BlockPos.asLong(0, 63, z), Blocks.STONE.defaultBlockState());
+        }
+        spec.pz = 0.5;
+        spec.vz = 0.05;
+        spec.fuel = 100;
+        spec.pushZ = 0.5;
+        spec.ticks = 20;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 漏斗矿车吸上方和轨道上的物品实体（包括隔着完整方块上方一格的物品）。 */
+    private static int minecartHopperSuck(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_hopper_suck";
+        spec.type = EntityTypes.HOPPER_MINECART;
+        rails(spec, -4, 6, rail(RailShape.NORTH_SOUTH));
+        // z=2 处铁轨上方放一块石头，石头上面放一件物品，测漏斗矿车 `isGridAligned()==false` 隔方块吸物品。
+        spec.blocks.put(BlockPos.asLong(0, 65, 2), Blocks.STONE.defaultBlockState());
+        spec.pz = -1.5;
+        spec.vz = 0.25;
+        spec.extras = new double[][] {
+                {0.5, 64.2, 0.5, BuiltInRegistries.ITEM.getId(Items.APPLE), 2},
+                {0.5, 66.0, 2.5, BuiltInRegistries.ITEM.getId(Items.COAL), 3}
+        };
+        spec.ticks = 24;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 漏斗矿车经过通电激活铁轨被锁住，滑过物品不吸；再经过未通电激活铁轨重新解锁并吸起后面的物品。 */
+    private static int minecartHopperLocked(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_hopper_locked";
+        spec.type = EntityTypes.HOPPER_MINECART;
+        for (int z = -4; z <= 8; z++) {
+            BlockState cell;
+            if (z == 0) {
+                cell = Blocks.ACTIVATOR_RAIL.defaultBlockState()
+                        .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH)
+                        .setValue(BlockStateProperties.POWERED, true);
+            } else if (z == 4) {
+                cell = Blocks.ACTIVATOR_RAIL.defaultBlockState()
+                        .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH)
+                        .setValue(BlockStateProperties.POWERED, false);
+            } else {
+                cell = rail(RailShape.NORTH_SOUTH);
+            }
+            spec.blocks.put(BlockPos.asLong(0, 64, z), cell);
+            spec.blocks.put(BlockPos.asLong(0, 63, z), Blocks.STONE.defaultBlockState());
+        }
+        spec.pz = -2.5;
+        spec.vz = 0.35;
+        spec.extras = new double[][] {
+                {0.5, 64.2, 2.5, BuiltInRegistries.ITEM.getId(Items.STICK), 1},
+                {0.5, 64.2, 6.5, BuiltInRegistries.ITEM.getId(Items.APPLE), 4}
+        };
+        spec.ticks = 32;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 运输矿车带物品滑行（填充度减速公式）并做存档往返。 */
+    private static int minecartChestSave(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_chest_save";
+        spec.type = EntityTypes.CHEST_MINECART;
+        rails(spec, -4, 8, rail(RailShape.NORTH_SOUTH));
+        spec.pz = 0.5;
+        spec.vz = 0.3;
+        spec.saveAt = 0;
+        spec.chest = new int[][] {
+                {0, BuiltInRegistries.ITEM.getId(Items.COBBLESTONE), 64},
+                {5, BuiltInRegistries.ITEM.getId(Items.APPLE), 16}
+        };
+        spec.ticks = 16;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 造一辆官方矿车、逐刻跑、把每刻的实体状态写成一题 case。 */
+    private static int playMinecart(Official official, Writer out, MinecartSpec spec) throws Exception {
+        FakeLevel level = FakeLevel.create(official, spec.levelSeed);
+        level.nextId = FIRST_ITEM_ID;
+        level.firstId = FIRST_ITEM_ID;
+        level.blocks.putAll(spec.blocks);
+        Scene scene = new Scene(level);
+        AbstractMinecart cart;
+        if (spec.type == EntityTypes.CHEST_MINECART) {
+            cart = new MinecartChest(EntityTypes.CHEST_MINECART, level);
+        } else if (spec.type == EntityTypes.FURNACE_MINECART) {
+            cart = new MinecartFurnace(EntityTypes.FURNACE_MINECART, level);
+        } else if (spec.type == EntityTypes.TNT_MINECART) {
+            cart = new MinecartTNT(EntityTypes.TNT_MINECART, level);
+        } else if (spec.type == EntityTypes.HOPPER_MINECART) {
+            cart = new MinecartHopper(EntityTypes.HOPPER_MINECART, level);
+        } else {
+            cart = new Minecart(EntityTypes.MINECART, level);
+        }
+        level.addFreshEntity(cart);
+        cart.setPos(spec.px, spec.py, spec.pz);
+        cart.setDeltaMovement(spec.vx, spec.vy, spec.vz);
+        long seed = level.entitySeed(cart.getId());
+        setRandom(cart, seed);
+        if (cart instanceof MinecartFurnace furnace) {
+            set(MinecartFurnace.class, furnace, "fuel", Integer.valueOf(spec.fuel));
+            furnace.push = new Vec3(spec.pushX, 0.0, spec.pushZ);
+        }
+        if (cart instanceof net.minecraft.world.entity.vehicle.minecart.AbstractMinecartContainer container) {
+            for (int[] slot : spec.chest) {
+                container.setItem(slot[0], new ItemStack(BuiltInRegistries.ITEM.byId(slot[1]), slot[2]));
+            }
+        }
+        scene.active.add(cart);
+        for (double[] extra : spec.extras) {
+            scene.spawnItem(
+                    extra[0],
+                    extra[1],
+                    extra[2],
+                    new ItemStack(BuiltInRegistries.ITEM.byId((int) extra[3]), (int) extra[4]),
+                    10);
+        }
+        level.fresh.clear();
+        level.tracked = scene.active;
+
+        StringBuilder steps = new StringBuilder();
+        steps.append('[');
+        scene.writeStep(steps);
+        for (int tick = 0; tick < spec.ticks; tick++) {
+            steps.append(',');
+            scene.tick();
+            scene.writeStep(steps);
+        }
+        steps.append(']');
+        out.write("{\"type\":\"case\",\"name\":\"" + spec.name + "\",\"kind\":\"minecart\",\"state\":0");
+        out.write(",\"x\":0,\"y\":0,\"z\":0");
+        out.write(",\"levelSeed\":" + spec.levelSeed + ",\"entitySeed\":" + seed);
+        out.write(",\"hurts\":null,\"fuse\":null,\"firstEntityId\":" + FIRST_ITEM_ID);
+        out.write(",\"entityType\":" + BuiltInRegistries.ENTITY_TYPE.getId(spec.type));
+        out.write(",\"px\":" + spec.px + ",\"py\":" + spec.py + ",\"pz\":" + spec.pz);
+        out.write(",\"vx\":" + spec.vx + ",\"vy\":" + spec.vy + ",\"vz\":" + spec.vz);
+        out.write(",\"saveAt\":" + spec.saveAt);
+        out.write(",\"fuel\":" + spec.fuel + ",\"pushX\":" + spec.pushX + ",\"pushZ\":" + spec.pushZ);
+        if (spec.chest.length > 0) {
+            out.write(",\"chest\":[");
+            for (int i = 0; i < spec.chest.length; i++) {
+                if (i > 0) out.write(',');
+                out.write("[" + spec.chest[i][0] + "," + spec.chest[i][1] + "," + spec.chest[i][2] + "]");
+            }
+            out.write(']');
+        }
+        if (spec.extras.length > 0) {
+            out.write(",\"extras\":[");
+            for (int i = 0; i < spec.extras.length; i++) {
+                if (i > 0) out.write(',');
+                out.write("{\"item\":" + (int) spec.extras[i][3]
+                        + ",\"count\":" + (int) spec.extras[i][4]
+                        + ",\"x\":" + spec.extras[i][0]
+                        + ",\"y\":" + spec.extras[i][1]
+                        + ",\"z\":" + spec.extras[i][2] + "}");
+            }
+            out.write(']');
+        }
+        out.write(",\"blocks\":");
+        writeBlocks(out, spec.blocks);
+        out.append(",\"steps\":");
+        out.append(steps);
+        out.append("}\n");
+        return 1;
+    }
+
     /** 一题船场景的参数。 */
     private static final class BoatSpec {
         String name;
@@ -1374,7 +1720,6 @@ public final class EntityOracle {
             scene.writeStep(steps);
         }
         steps.append(']');
-
         out.write("{\"type\":\"case\",\"name\":\"" + spec.name + "\",\"kind\":\"boat\",\"state\":0");
         out.write(",\"x\":0,\"y\":0,\"z\":0");
         out.write(",\"levelSeed\":" + spec.levelSeed + ",\"entitySeed\":" + seed);
@@ -1646,6 +1991,8 @@ public final class EntityOracle {
         Vec3 delta = entity.getDeltaMovement();
         String kind = entity instanceof ItemEntity ? "item"
                 : entity instanceof PrimedTnt ? "tnt"
+                : entity instanceof AbstractMinecart
+                        ? BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath()
                 : entity instanceof AbstractBoat ? "boat"
                 : entity instanceof net.minecraft.world.entity.LivingEntity ? "mob"
                 : "falling";
@@ -1725,6 +2072,28 @@ public final class EntityOracle {
                             .append(BuiltInRegistries.ITEM.getId(stack.getItem()))
                             .append(',').append(stack.getCount()).append(']');
                 }
+            }
+            out.append(']');
+        }
+        // 矿车统一输出注册类型；容器矿车再和船共用一个 chest 字段，逐刻比较吸进去的 5 / 27 格。
+        if (entity instanceof AbstractMinecart cart) {
+            out.append(",\"entityType\":").append(BuiltInRegistries.ENTITY_TYPE.getId(cart.getType()));
+        }
+        if (entity instanceof net.minecraft.world.entity.vehicle.minecart.AbstractMinecartContainer cart) {
+            out.append(",\"chest\":[");
+            boolean first = true;
+            for (int slot = 0; slot < cart.getContainerSize(); slot++) {
+                ItemStack stack = cart.getItem(slot);
+                if (stack.isEmpty()) {
+                    continue;
+                }
+                if (!first) {
+                    out.append(',');
+                }
+                first = false;
+                out.append('[').append(slot).append(',')
+                        .append(BuiltInRegistries.ITEM.getId(stack.getItem()))
+                        .append(',').append(stack.getCount()).append(']');
             }
             out.append(']');
         }
@@ -2026,6 +2395,8 @@ public final class EntityOracle {
         private Long2ObjectOpenHashMap<BlockState> blocks;
         private List<Entity> fresh;
         private List<Entity> tracked = new ArrayList<>();
+        /** `EntitySelector.pushableBy` 要一个非空的记分板（无队伍时队伍规则恒 ALWAYS）。 */
+        private ServerScoreboard scoreboard;
         private Long2ObjectOpenHashMap<BlockEntity> blockEntities;
         private LevelTicks<Block> blockTicks;
         private LevelTicks<Fluid> fluidTicks;
@@ -2034,8 +2405,6 @@ public final class EntityOracle {
         /** 这个场景第一个实体的 ID：Bamboo 的种子源从它起按生成先后取数。 */
         private int firstId = 1;
         private FluidChunk fluidChunk;
-        /** `EntitySelector.pushableBy` 要一个非空的记分板（无队伍时队伍规则恒 ALWAYS）。 */
-        private ServerScoreboard scoreboard;
 
         /**
          * Bamboo 的岛实体种子源：种子源从 {@code ENTITY_RANDOM_SEED} 开始，第 k 个生成的实体
@@ -2062,6 +2431,7 @@ public final class EntityOracle {
             level.official = official;
             level.fresh = new ArrayList<>();
             level.tracked = new ArrayList<>();
+            level.scoreboard = new ServerScoreboard(official.server);
             level.blockEntities = new Long2ObjectOpenHashMap<>();
             level.nextId = 1;
             level.blocks = new Long2ObjectOpenHashMap<>();
@@ -2234,7 +2604,7 @@ public final class EntityOracle {
             return scoreboard;
         }
 
-        /** 假世界没有实体分区管理器；`LivingEntity.isPushable` 只需要这里为真。 */
+        /** 假世界没有实体分区管理器；`Entity.isPushable` 只需要这里为真。 */
         @Override
         public boolean isPositionEntityTicking(BlockPos pos) {
             return true;

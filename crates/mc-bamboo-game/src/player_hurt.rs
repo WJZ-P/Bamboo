@@ -702,20 +702,109 @@ fn knockback(
 /// The full logic (cooldown, crit, sweep, knockback, enchantments, particles,
 /// sounds, animations, PVP) lives in [`crate::player_attack`]; this is the seam.
 pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
-    let is_boat = region
+    let is_minecart = region
         .entities
         .public_at(entity_id)
-        .is_some_and(|public| matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Boat(_)));
-    if is_boat {
-        // `Player.attack` 对船（非生物目标）算出的 `f`：含充能、武器、附魔、
-        // 暴击。交给 `VehicleEntity.hurtServer` 累计 `damage += f*10`。
-        let damage = crate::player_attack::boat_attack_damage(region, id, entity_id);
-        if let Some(damage) = damage {
-            hurt_boat(region, id, entity_id, damage);
-        }
+        .and_then(|public| match &public.kind {
+            mc_bamboo_blocks::entity::KindPublic::Boat(_) => Some(false),
+            mc_bamboo_blocks::entity::KindPublic::Minecart(_) => Some(true),
+            _ => None,
+        });
+    let Some(is_minecart) = is_minecart else {
+        crate::player_attack::on_attack(region, id, entity_id);
+        return;
+    };
+    // `Player.attack` 对载具（非生物目标）算出的 `f`：含充能、武器、附魔、
+    // 暴击。交给 `VehicleEntity.hurtServer` 累计 `damage += f*10`。
+    // The charge / weapon / enchantment / crit math for a non-mob vehicle target.
+    let Some(damage) = crate::player_attack::vehicle_attack_damage(region, id, entity_id) else {
+        return;
+    };
+    if is_minecart {
+        hurt_minecart(region, id, entity_id, damage);
+    } else {
+        hurt_boat(region, id, entity_id, damage);
+    }
+}
+
+/// `VehicleEntity.hurtServer` 的矿车版：累计 `amount*10` 伤害、翻转 `hurtDir`、
+/// `hurtTime=10`。创造模式直接 `discard`（不掉物品）；`damage > 40` 时
+/// `destroy`，普通 / 动力 / 容器矿车掉出矿车物品，TNT 矿车在速度够快时点燃短引信。
+///
+/// The minecart half of `VehicleEntity.hurtServer`: accumulate `amount*10`, flip
+/// `hurtDir`, set `hurtTime=10`. Creative mode discards without a drop; above 40
+/// damage the cart item drops, while a fast TNT cart primes a short fuse instead.
+fn hurt_minecart(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32) {
+    let Some(public) = region.entities.public_at(entity_id) else {
+        return;
+    };
+    if !matches!(
+        public.kind,
+        mc_bamboo_blocks::entity::KindPublic::Minecart(_)
+    ) {
         return;
     }
-    crate::player_attack::on_attack(region, id, entity_id);
+    let creative = region.players.get(&id).is_some_and(|player| {
+        player.game_mode == mc_bamboo_protocol::packet::play::GameMode::Creative
+    });
+    let position = public.position;
+    let mut drop_item = mc_bamboo_data::items::AIR;
+    let mut is_container = false;
+    let mut container_items: Vec<mc_bamboo_protocol::item::ItemStack> = Vec::new();
+    region.entities.with_mut(entity_id, |entity| {
+        let mc_bamboo_blocks::entity::EntityKind::Minecart(cart) = &mut entity.kind else {
+            return;
+        };
+        cart.hurt_dir = -cart.hurt_dir;
+        cart.hurt_time = 10;
+        cart.damage += amount * 10.0;
+        let over_limit = cart.damage > 40.0;
+        if creative {
+            // 官方 `hurtServer`：创造模式只 `discard`，不 `destroy`、不掉物品。
+            // Vanilla `hurtServer`: creative mode only discards, without a drop.
+            entity.discard();
+            return;
+        }
+        if !over_limit {
+            return;
+        }
+        if cart.kind() == mc_bamboo_blocks::entity::minecart::MinecartKind::Tnt {
+            let speed_sqr = entity.delta.x * entity.delta.x + entity.delta.z * entity.delta.z;
+            if speed_sqr >= 0.01 && cart.fuse < 0 {
+                // `MinecartTNT.destroy`：短引信由两次 `nextInt(20)` 决定。
+                // `MinecartTNT.destroy`: the short fuse is two `nextInt(20)` draws.
+                let first = entity.random.next_int_bounded(20);
+                let second = entity.random.next_int_bounded(20);
+                cart.fuse = first + second;
+                return;
+            }
+        }
+        is_container = cart.is_container();
+        if is_container {
+            container_items = cart
+                .items
+                .iter()
+                .filter(|stack| !stack.is_empty())
+                .cloned()
+                .collect();
+        }
+        drop_item = cart.drop_item();
+        entity.discard();
+    });
+    if drop_item == mc_bamboo_data::items::AIR {
+        return;
+    }
+    // `AbstractMinecartContainer.destroy` → `chestVehicleDestroyed`：先解包
+    // 战利品表，再把容器里的东西和矿车物品一起掉出来。与运输船共用一段。
+    // `AbstractMinecartContainer.destroy` → `chestVehicleDestroyed`: unpack the
+    // loot table, then drop the contents with the cart item; shared with chest boats.
+    let contents = if is_container {
+        crate::container_loot::unpack_entity_container(region, entity_id, None, 0.0)
+            .unwrap_or(container_items)
+    } else {
+        Vec::new()
+    };
+    drop_vehicle_contents(region, position, drop_item, &contents);
 }
 
 /// `VehicleEntity.hurtServer` 的船版：玩家打一下累计 `amount*10` 的伤害、翻转
@@ -766,14 +855,16 @@ fn hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32) {
         // `AbstractChestBoat.destroy` 的 `Containers.dropContents` 会先解包战利品表。
         // `Containers.dropContents` 读的是容器接口（`unpackChestVehicleLootTable(null)`），
         // 不带玩家，也没有幸运值加成。
-        let dropped =
-            crate::container_loot::unpack_boat(region, entity_id, None, 0.0).unwrap_or(chest_items);
-        drop_boat_contents(region, position, drop_item, &dropped);
+        let dropped = crate::container_loot::unpack_entity_container(region, entity_id, None, 0.0)
+            .unwrap_or(chest_items);
+        drop_vehicle_contents(region, position, drop_item, &dropped);
     }
 }
 
-/// `spawnAtLocation`：船物品和箱内物品都掉在船的位置。
-fn drop_boat_contents(
+/// `spawnAtLocation`：载具物品和箱内物品都掉在载具的位置。
+///
+/// `spawnAtLocation`: the vehicle item and its contents drop at its position.
+fn drop_vehicle_contents(
     region: &mut Region,
     position: mc_bamboo_core::Vec3,
     drop_item: i32,

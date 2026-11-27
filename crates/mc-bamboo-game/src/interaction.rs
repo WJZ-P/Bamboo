@@ -178,12 +178,46 @@ pub(crate) fn run_entity_ticks(
     // Players are not in the entity list. Vanilla players usually tick before later items,
     // so pickup sees the item where it was before this tick's movement.
     crate::drops::pickup_before_entities(region);
+    // 把骑在矿车里的第一玩家乘客的方向按键同步进矿车，供 `OldMinecartBehavior.moveAlongTrack` 读。
+    // Sync each riding player's `getLastClientMoveIntent` onto its minecart before entity ticks.
+    sync_minecart_rider_intents(region);
     if entity_threads == 0 {
         let (mut level, ticks) = region.entity_level();
         let outcome = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
         send_effects(region, None, &outcome.effects);
     } else {
         parallel_entity_ticks(entity_threads, region, pool);
+    }
+}
+
+/// 把在线骑着矿车且是第一位乘客的玩家的 `getLastClientMoveIntent()` 写到矿车的
+/// `rider_intent` 里。矿车自己没有玩家控制者，由服务端 `OldMinecartBehavior` 驱动。
+///
+/// Push each online first-passenger player's `getLastClientMoveIntent()` onto
+/// their minecart so server-side `OldMinecartBehavior` can apply it.
+fn sync_minecart_rider_intents(region: &mut Region) {
+    let riders: Vec<(i32, mc_bamboo_blocks::entity::EntityUid, Vec3)> = region
+        .players
+        .iter()
+        .filter_map(|(&id, player)| {
+            let vehicle = player.riding.vehicle?;
+            let intent = crate::entity_sync::last_client_move_intent(
+                player.sync.last_input_flags,
+                player.yaw,
+            );
+            Some((id.0, vehicle, intent))
+        })
+        .collect();
+    for (player_uid, vehicle, intent) in riders {
+        region.entities.with_mut(vehicle, |entity| {
+            if let mc_bamboo_blocks::entity::EntityKind::Minecart(cart) = &mut entity.kind {
+                cart.rider_intent = if cart.passengers.first() == Some(&player_uid) {
+                    intent
+                } else {
+                    Vec3::default()
+                };
+            }
+        });
     }
 }
 
@@ -1866,12 +1900,25 @@ pub(crate) fn on_interact_entity_at(
         target.kind,
         mc_bamboo_blocks::entity::KindPublic::ItemFrame(_)
     );
-    if target.removed
-        || !(matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
-            || is_knot
-            || is_boat
-            || is_item_frame)
-    {
+    let is_minecart = matches!(
+        target.kind,
+        mc_bamboo_blocks::entity::KindPublic::Minecart(_)
+    );
+    let minecart_kind = match &target.kind {
+        mc_bamboo_blocks::entity::KindPublic::Minecart(cart) => {
+            mc_bamboo_blocks::entity::minecart::MinecartKind::from_entity_type(cart.entity_type)
+        }
+        _ => None,
+    };
+    let target_position = target.position;
+    let target_removed = target.removed;
+    let target_is_mob = matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_));
+    let boat_is_chest = matches!(
+        &target.kind,
+        mc_bamboo_blocks::entity::KindPublic::Boat(boat)
+            if mc_bamboo_blocks::entity::boat::is_chest(boat.entity_type)
+    );
+    if target_removed || !(target_is_mob || is_knot || is_boat || is_item_frame || is_minecart) {
         return;
     }
     // 够距：官方 `ServerGamePacketListenerImpl.handleInteract` 用 `ENTITY_INTERACTION_RANGE` + 3.0 缓冲。
@@ -1879,7 +1926,7 @@ pub(crate) fn on_interact_entity_at(
         position,
         eye_height,
         entity_reach,
-        mc_bamboo_core::BlockPos::containing(target.position),
+        mc_bamboo_core::BlockPos::containing(target_position),
         3.0,
     ) {
         return;
@@ -1889,12 +1936,64 @@ pub(crate) fn on_interact_entity_at(
         Hand::Main => Hand::Off,
         Hand::Off => Hand::Main,
     };
+    if let Some(kind) = minecart_kind {
+        use mc_bamboo_blocks::entity::minecart::MinecartKind;
+        match kind {
+            // `MinecartFurnace.interact`：手上那一件是燃料就 `addFuel`，成功扣一个；
+            // 不管成没成，官方都返回 SUCCESS（挥手）。
+            // `MinecartFurnace.interact`: add fuel from the held hand, shrink on
+            // success, and always report SUCCESS (the swing).
+            MinecartKind::Furnace => {
+                let held = match hand {
+                    Hand::Main => main_held.clone(),
+                    Hand::Off => off_held.clone(),
+                };
+                let fuel_item = mc_bamboo_blocks::state::item_is_tagged(
+                    held.item,
+                    mc_bamboo_data::tags::item_tags::FURNACE_MINECART_FUEL,
+                );
+                let cart_position = target_position;
+                let mut added = false;
+                region.entities.with_mut(entity_id, |entity| {
+                    if let mc_bamboo_blocks::entity::EntityKind::Minecart(cart) = &mut entity.kind {
+                        added = cart.add_fuel(position, cart_position, fuel_item);
+                    }
+                });
+                if added {
+                    inventory::apply_item_exchange(
+                        region,
+                        id,
+                        hand,
+                        &mc_bamboo_blocks::ItemExchange::Shrink,
+                    );
+                }
+                swing(region, id, hand, InteractionResult::Success);
+                return;
+            }
+            // `Minecart.interact`：非潜行且车里没人时 `player.startRiding(this)`。
+            MinecartKind::Rideable => {
+                if !using_secondary_action {
+                    crate::riding::mount(region, id, entity_id);
+                    if crate::riding::passengers(region, entity_id).contains(&id.0) {
+                        swing(region, id, hand, InteractionResult::Success);
+                    }
+                }
+                return;
+            }
+            // `MinecartChest` / `MinecartHopper.interact`：潜行或没上成车时
+            // `interactWithContainerVehicle` 打开实体容器菜单（和船共用一套）。
+            // `MinecartChest` / `MinecartHopper.interact`: opening the entity
+            // container menu shares the chest-boat path.
+            MinecartKind::Chest | MinecartKind::Hopper => {
+                crate::menu::open_entity_container(region, id, entity_id);
+                return;
+            }
+            _ => {}
+        }
+        return;
+    }
     if is_boat {
-        let is_chest = matches!(
-            &target.kind,
-            mc_bamboo_blocks::entity::KindPublic::Boat(boat)
-                if mc_bamboo_blocks::entity::boat::is_chest(boat.entity_type)
-        );
+        let is_chest = boat_is_chest;
         // `AbstractBoat.interact`：`super.interact` 放行后，非潜行且
         // `outOfControlTicks < 60` 时 `player.startRiding(this)`。
         if !using_secondary_action {
@@ -1907,7 +2006,7 @@ pub(crate) fn on_interact_entity_at(
         // `AbstractChestBoat.interact`：super 返回 PASS（没上成船或潜行）时
         // `interactWithContainerVehicle(player)` 打开 27 格菜单。
         if is_chest {
-            crate::menu::open_boat(region, id, entity_id);
+            crate::menu::open_entity_container(region, id, entity_id);
         }
         return;
     }

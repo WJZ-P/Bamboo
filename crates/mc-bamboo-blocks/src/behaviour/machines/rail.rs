@@ -1,7 +1,11 @@
 //! `BaseRailBlock` 和它的子类 `RailBlock`、`PoweredRailBlock`、`DetectorRailBlock`，还有 `RailState`。
 //!
-//! 世界里没有矿车：探测铁轨不会被压下，所以它的 `powered` 只在被指令改时才变。
-//! 动力铁轨和激活铁轨看真实信号，也顺着铁轨往两头找通电的同类铁轨。
+//! 动力铁轨和激活铁轨看真实信号，也顺着铁轨往两头找通电的同类铁轨；
+//! 探测铁轨检测盒内的矿车，亮 20 刻后重检并给比较器提供容器满度信号。
+//!
+//! `BaseRailBlock`, its subclasses (`RailBlock`, `PoweredRailBlock`,
+//! `DetectorRailBlock`) and `RailState`. Detector rails watch minecarts inside
+//! their search box, re-check after 20 ticks, and expose container fill signals.
 
 use mc_bamboo_core::{Axis, BlockPos, Direction};
 use mc_bamboo_data::{Block, BlockAncestor, BlockClass, tags::block_tags};
@@ -15,6 +19,8 @@ use crate::{
         },
     },
     context::PlaceContext,
+    entity::{Entity, EntityKind, KindPublic},
+    shape::Aabb,
     state::{BlockState, POWERED, RAIL_SHAPE, RailShape, WATERLOGGED},
     world::World,
 };
@@ -201,10 +207,82 @@ fn update_powered_rail(state: BlockState, world: &mut World, pos: BlockPos) {
     }
 }
 
-/// `DetectorRailBlock.checkPressed`：没有矿车，刚放下的铁轨也没有被压着，只剩通知比较器。
+/// `DetectorRailBlock.PRESSED_CHECK_PERIOD`。
+const PRESSED_CHECK_PERIOD: i32 = 20;
+
+/// `DetectorRailBlock.getSearchBB`：格内缩 0.2、高 0.8。
+fn detector_search_bb(pos: BlockPos) -> Aabb {
+    Aabb::new(
+        f64::from(pos.x) + 0.2,
+        f64::from(pos.y),
+        f64::from(pos.z) + 0.2,
+        f64::from(pos.x) + 0.8,
+        f64::from(pos.y) + 0.8,
+        f64::from(pos.z) + 0.8,
+    )
+}
+
+/// `DetectorRailBlock.updatePowerToConnected`：把相连铁轨各通知一次 `neighborChanged`。
+fn update_power_to_connected(world: &mut World, pos: BlockPos, state: BlockState) {
+    let rail = RailState::new(pos, state);
+    for connection in rail.connections {
+        let neighbor = world.block_state(connection);
+        world.neighbor_changed_with_state(neighbor, connection, neighbor.block());
+    }
+}
+
+/// `DetectorRailBlock.checkPressed`：检查探测盒里有没有矿车，点亮或熄灭、通知邻居、
+/// 排 20 刻后的重检计划刻，并通知比较器。`ticking` 是正在 tick 中临时移出实体表的矿车。
+///
+/// `DetectorRailBlock.checkPressed`: check for any minecart inside the search box,
+/// toggle `POWERED`, notify neighbours and connected rails, schedule the 20-tick
+/// re-check when pressed, and update comparators.
+pub(crate) fn check_detector_rail(world: &mut World, pos: BlockPos, ticking: Option<&Entity>) {
+    let state = world.block_state(pos);
+    if state.class() != BlockClass::DetectorRailBlock || !state.can_survive(world, pos) {
+        return;
+    }
+    let powered = state.get(POWERED);
+    let area = detector_search_bb(pos);
+    let mut has_cart = ticking.is_some_and(|entity| {
+        !entity.removed
+            && matches!(entity.kind, EntityKind::Minecart(_))
+            && entity.bounding_box().intersects(area)
+    });
+    if !has_cart {
+        world.level().for_each_entity_in(area, &mut |public| {
+            if !public.removed
+                && matches!(public.kind, KindPublic::Minecart(_))
+                && public.bounding_box().intersects(area)
+            {
+                has_cart = true;
+            }
+        });
+    }
+    if has_cart && !powered {
+        let next = state.with(POWERED, true);
+        world.set_block_and_update(pos, next);
+        update_power_to_connected(world, pos, next);
+        world.update_neighbors_at(pos, state.block());
+        world.update_neighbors_at(pos.below(), state.block());
+    }
+    if !has_cart && powered {
+        let next = state.with(POWERED, false);
+        world.set_block_and_update(pos, next);
+        update_power_to_connected(world, pos, next);
+        world.update_neighbors_at(pos, state.block());
+        world.update_neighbors_at(pos.below(), state.block());
+    }
+    if has_cart {
+        world.schedule_tick(pos, state.block(), PRESSED_CHECK_PERIOD);
+    }
+    world.update_neighbour_for_output_signal(pos, state.block());
+}
+
+/// `DetectorRailBlock.checkPressed`（`on_place` 入口）。
 fn check_pressed(state: BlockState, world: &mut World, pos: BlockPos) {
     if state.can_survive(world, pos) && world.block_state(pos).is_same_block(state) {
-        world.update_neighbour_for_output_signal(pos, state.block());
+        check_detector_rail(world, pos, None);
     }
 }
 
@@ -282,6 +360,13 @@ impl Behaviour for Rail {
         }
     }
 
+    /// `DetectorRailBlock.tick`：20 刻到期后重新检查有没有矿车压着。
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if state.class() == BlockClass::DetectorRailBlock && state.get(POWERED) {
+            check_detector_rail(world, pos, None);
+        }
+    }
+
     /// `DetectorRailBlock.ownSignal`。另外两种铁轨不是信号源，连 `POWERED` 都没有。
     fn own_signal(&self, state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
         if state.class() == BlockClass::DetectorRailBlock && state.get(POWERED) {
@@ -301,6 +386,49 @@ impl Behaviour for Rail {
     ) -> i32 {
         if direction == Direction::Up {
             state.own_signal(world, pos)
+        } else {
+            0
+        }
+    }
+
+    /// `DetectorRailBlock.getAnalogOutputSignal`：点亮时读取盒内第一辆容器矿车的满度。
+    ///
+    /// `DetectorRailBlock.getAnalogOutputSignal`: when powered, return the fill
+    /// signal of the first container minecart inside the search box.
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        if state.class() != BlockClass::DetectorRailBlock || !state.get(POWERED) {
+            return 0;
+        }
+        let area = detector_search_bb(pos);
+        let mut container_id = None;
+        world.level().for_each_entity_in(area, &mut |public| {
+            if container_id.is_some() || public.removed {
+                return;
+            }
+            if let KindPublic::Minecart(cart) = &public.kind
+                && crate::entity::minecart::MinecartKind::from_entity_type(cart.entity_type)
+                    .is_some_and(|kind| kind.container_size() > 0)
+                && public.bounding_box().intersects(area)
+            {
+                container_id = Some(public.uid);
+            }
+        });
+        let Some(uid) = container_id else {
+            return 0;
+        };
+        let Some(entity) = world.entity(uid) else {
+            return 0;
+        };
+        if let EntityKind::Minecart(cart) = &entity.kind
+            && cart.is_container()
+        {
+            crate::container::redstone_signal(cart.items.iter(), cart.items.len())
         } else {
             0
         }

@@ -1447,9 +1447,9 @@ impl Level for RegionLevel<'_> {
         );
     }
 
-    fn unpack_boat_loot_table(&mut self, entity: i32) {
-        crate::container_loot::unpack_boat_with(
-            crate::container_loot::BoatUnpack {
+    fn unpack_entity_container_loot_table(&mut self, entity: i32) {
+        crate::container_loot::unpack_entity_container_with(
+            crate::container_loot::EntityContainerUnpack {
                 entities: &mut *self.entities,
                 chunks: &*self.chunks,
                 sequences: self.loot_sequences,

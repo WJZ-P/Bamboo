@@ -1,12 +1,13 @@
 //! `DispenserBlock.dispenseFrom` 和 `DispenseItemBehavior.bootStrap`。
 //!
-//! 船和矿车在放得下的时候只扣物品、放一次 1000 和 2000；放不下时走官方的失败分支，
+//! 船在放得下的时候只扣物品，矿车还会生成实体；两种都放一次 1000 和 2000。放不下时走官方的失败分支，
 //! 再套一层 `DefaultDispenseItemBehavior.dispense`。箭、刷怪蛋走官方在生成失败时的分支；
 //! 盔甲架按 `DispenseItemBehavior$1` 真的生成实体，TNT 在 `tnt_explodes` 为真时生成点燃的实体。
 //!
 //! `DispenserBlock.dispenseFrom` and `DispenseItemBehavior.bootStrap`.
 //!
-//! A boat or minecart that can be placed only consumes the item and plays 1000 then 2000 once.
+//! A boat that can be placed only consumes the item; a minecart also spawns the entity. Both
+//! play 1000 then 2000 once.
 //! When it cannot, the official failure branch runs, which nests another
 //! `DefaultDispenseItemBehavior.dispense`. Arrows and spawn eggs follow the branch official uses
 //! when the spawn fails; an armour stand really spawns the entity (`DispenseItemBehavior$1`),
