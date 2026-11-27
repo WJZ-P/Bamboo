@@ -17,7 +17,8 @@
 //! mc-bamboo-vanilla command-oracle <java 路径> [--show N] [--break-self-test]
 //!     把实体选择器的解析、过滤和排序交给官方 `EntitySelectorParser` 对拍
 //! mc-bamboo-vanilla execute-oracle <java 路径> [--show N] [--break-self-test]
-//!     用官方 `Commands` 跑 148 条整命令（/execute、/data、/effect），比较方块、分数、NBT 和反馈
+//!     用官方 `Commands` 跑整条命令（/execute、/data、/effect），比较方块、分数、NBT 和反馈
+//!     Run complete commands through vanilla `Commands` and compare blocks, scores, NBT and feedback.
 //! mc-bamboo-vanilla scoreboard-oracle <java 路径> [--show N] [--break NAME]
 //!     用官方 `Commands` 跑 /trigger、统计和击杀准则、队伍规则共 52 题，比较反馈和整张计分板
 //! mc-bamboo-vanilla components <java 路径> [--show N]

@@ -129,6 +129,13 @@ pub struct EntityView {
     pub components: BTreeMap<String, Value>,
     /// 按 [`EquipmentSlot`] 顺序排列的装备。
     pub equipment: [Option<LootStack>; 8],
+    /// `SlotProvider.getSlot` 视图：槽位编号到那一格物品（在表里＝这一格存在，
+    /// 物品可能是空的）。`minecraft:slots` 子谓词和 `if items|slots` 用它。
+    ///
+    /// `SlotProvider.getSlot` view: slot id to that slot's stack (present in the
+    /// map means the slot exists, possibly empty). Used by the `minecraft:slots`
+    /// sub-predicate and `if items|slots`.
+    pub slots: BTreeMap<i32, LootStack>,
     /// 实体坐标，`distance` 这类谓词用。没给时报不支持。
     pub position: Option<Position>,
     /// `getKnownMovement()` 的原始速度，谓词里乘 20 才是每秒距离。

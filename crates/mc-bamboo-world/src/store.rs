@@ -379,11 +379,18 @@ impl ChunkStore {
         if !is_inside_world(pos.y) {
             return None;
         }
-        Some(self.loaded_chunk(pos.chunk())?.heightmap_y(
-            HeightmapKind::MotionBlocking,
-            local(pos.x),
-            local(pos.z),
-        ))
+        self.column_height(HeightmapKind::MotionBlocking, pos.x, pos.z)
+    }
+
+    /// 按列读取指定的运行时高度图，不依赖查询者的 Y 坐标。
+    ///
+    /// Read the requested runtime heightmap by column, independently of the caller's Y.
+    pub fn column_height(&self, kind: HeightmapKind, x: i32, z: i32) -> Option<i32> {
+        let pos = BlockPos::new(x, 0, z);
+        Some(
+            self.loaded_chunk(pos.chunk())?
+                .heightmap_y(kind, local(x), local(z)),
+        )
     }
 
     /// `getHeight(WORLD_SURFACE, pos)`：最高的非空气方块上面一格，读世界表面高度图。
@@ -392,11 +399,7 @@ impl ChunkStore {
     /// `getHeight(WORLD_SURFACE, pos)`: one above the highest non-air block, read from
     /// the `WORLD_SURFACE` heightmap. `None` when the chunk is not loaded.
     pub fn world_surface_y(&self, pos: BlockPos) -> Option<i32> {
-        Some(self.loaded_chunk(pos.chunk())?.heightmap_y(
-            HeightmapKind::WorldSurface,
-            local(pos.x),
-            local(pos.z),
-        ))
+        self.column_height(HeightmapKind::WorldSurface, pos.x, pos.z)
     }
 
     /// 这一格所在 quart 位置的群系注册表 ID。高度超出世界时返回 `None`。

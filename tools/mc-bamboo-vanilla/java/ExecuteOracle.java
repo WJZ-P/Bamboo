@@ -50,6 +50,7 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.world.Difficulty;
+import net.minecraft.world.DifficultyInstance;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.EntityTypes;
@@ -63,6 +64,7 @@ import net.minecraft.network.Connection;
 import net.minecraft.network.protocol.PacketFlow;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
@@ -251,6 +253,48 @@ public final class ExecuteOracle {
         "execute if predicate {type:\"location_check\",predicate:{biomes:\"minecraft:plains\"}} run setblock 4 -60 6 stone",
         "execute if predicate {type:\"location_check\",predicate:{biomes:\"#minecraft:is_nether\"}} run setblock 4 -60 6 stone",
         "setblock 2 -60 2 stone ;; execute positioned 2 -59 2 if predicate {type:\"location_check\",offsetY:-1,predicate:{block:{blocks:\"minecraft:stone\"}}} run setblock 4 -60 6 stone",
+        // if|unless items|slots（字面量槽位范围、实体访问器、链尾数值条件）
+        "execute if items entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand minecraft:stone run setblock 4 -60 6 stone",
+        "execute unless items entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand minecraft:stone run setblock 4 -60 6 stone",
+        "execute if slots entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand run setblock 4 -60 6 stone",
+        "execute unless slots entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand run setblock 4 -60 6 stone",
+        "execute if slots entity @e[type=cow,limit=1,sort=nearest] armor.head run setblock 4 -60 6 stone",
+        "execute if items entity @e[type=cow,limit=1,sort=nearest] container.0 minecraft:stone run setblock 4 -60 6 stone",
+        "execute if slots entity @e[type=cow] weapon.mainhand run setblock 4 -60 6 stone",
+        "execute if items entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand minecraft:stone",
+        "execute unless items entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand minecraft:stone",
+        "execute if slots entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand",
+        "execute unless slots entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand",
+        "execute if slots entity @e[type=cow,limit=1,sort=nearest] weapon.* run setblock 4 -60 6 stone",
+        "execute if items entity @e[type=cow,limit=1,sort=nearest] weapon.* minecraft:stone",
+        // execute on（来源实体没有这些关系，全部空分支）
+        "execute as @e[type=cow,limit=1,sort=nearest] on vehicle run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on passengers run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on owner run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on attacker run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on target run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on leasher run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on controller run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on origin run setblock 4 -60 6 stone",
+        // positioned over / summon
+        "execute positioned over world_surface run setblock 4 -60 6 stone",
+        "execute positioned over motion_blocking run setblock 4 -60 6 stone",
+        "execute summon minecraft:cow run setblock 4 -60 6 stone",
+        "execute summon minecraft:pig at @s run setblock 4 -60 6 stone",
+        "setblock 2 -58 2 stone strict ;; setblock 2 -57 2 water strict ;; execute positioned 2 500 2 positioned over ocean_floor if block ~ ~-1 ~ stone run setblock 4 -60 6 stone",
+        "setblock 2 -58 2 stone strict ;; setblock 2 -57 2 water strict ;; execute positioned 2 500 2 positioned over motion_blocking if block ~ ~-1 ~ water run setblock 4 -60 6 stone",
+        "setblock 2 -58 2 stone strict ;; setblock 2 -56 2 oak_leaves strict ;; execute positioned 2 500 2 positioned over motion_blocking_no_leaves if block ~ ~-1 ~ stone run setblock 4 -60 6 stone",
+        "setblock 2 -60 2 chest strict ;; execute if slots block 2 -60 2 container.26 run setblock 4 -60 6 stone",
+        "execute summon minecraft:pig if entity @s[type=pig] run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] positioned 4 -61 6 anchored eyes run setblock ^ ^ ^ stone",
+        "execute if slots entity @e[type=cow,limit=1,sort=nearest] [{type:\"slot_range\",slots:\"weapon.mainhand\"}, {type:\"slot_range\",slots:\"weapon.mainhand\"}]",
+        "execute unless slots entity @e[type=cow,limit=1,sort=nearest] {type:\"empty\"} run setblock 4 -60 6 stone",
+        // location_check 的 structures：超平坦世界没有结构，两边都判 false
+        "execute if predicate {type:\"location_check\",predicate:{structures:\"minecraft:stronghold\"}} run setblock 4 -60 6 stone",
+        "execute unless predicate {type:\"location_check\",predicate:{structures:\"minecraft:stronghold\"}} run setblock 4 -60 6 stone",
+        // 实体子谓词 minecraft:slots（牛的空主手）
+        "execute as @e[type=cow,limit=1,sort=nearest] if predicate {type:\"entity_properties\",entity:\"this\",predicate:{slots:{\"weapon.mainhand\":{}}}} run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] if predicate {type:\"entity_properties\",entity:\"this\",predicate:{slots:{\"weapon.mainhand\":{items:\"minecraft:stone\"}}}} run setblock 4 -60 6 stone",
     };
 
     /** `/advancement` 的整条命令题：官方假世界里执行，比较返回值、反馈和进度状态。 */
@@ -1116,7 +1160,9 @@ public final class ExecuteOracle {
         it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<
                 net.minecraft.world.level.chunk.ChunkAccess> chunkCache;
         int nextId = 1;
-        final LevelData fixedLevelData = new FixedLevelData();
+        // Unsafe 分配的实例不跑字段初始化器，第一次用到时再建。
+        // Unsafe-allocated instances skip field initializers; build on first use.
+        LevelData fixedLevelData;
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
@@ -1125,6 +1171,33 @@ public final class ExecuteOracle {
         @Override
         public BlockState getBlockState(BlockPos pos) {
             return blocks.getOrDefault(pos.asLong(), Blocks.AIR.defaultBlockState());
+        }
+
+        @Override
+        public int getHeight(net.minecraft.world.level.levelgen.Heightmap.Types type, int x, int z) {
+            // 假世界只记录修改；未编辑列按超平坦的地面高度，用原版高度图谓词检查修改。
+            // The fake world records edits only; start at flat ground and use vanilla's
+            // heightmap predicate to test the edits.
+            int height = -60;
+            var entries = blocks.long2ObjectEntrySet().fastIterator();
+            while (entries.hasNext()) {
+                var entry = entries.next();
+                var pos = BlockPos.of(entry.getLongKey());
+                if (pos.getX() == x && pos.getZ() == z && type.isOpaque().test(entry.getValue())) {
+                    height = Math.max(height, pos.getY() + 1);
+                }
+            }
+            return height;
+        }
+
+        @Override
+        public net.minecraft.world.level.block.entity.BlockEntity getBlockEntity(BlockPos pos) {
+            // 槽位场景用空箱子，槽位访问仍由真实的 ChestBlockEntity 实现。
+            // The slot case uses an empty chest with the real ChestBlockEntity slot access.
+            var state = getBlockState(pos);
+            return state.is(Blocks.CHEST)
+                ? new net.minecraft.world.level.block.entity.ChestBlockEntity(pos, state)
+                : null;
         }
 
         @Override
@@ -1178,6 +1251,9 @@ public final class ExecuteOracle {
 
         @Override
         public LevelData getLevelData() {
+            if (fixedLevelData == null) {
+                fixedLevelData = new FixedLevelData();
+            }
             return fixedLevelData;
         }
 
@@ -1197,6 +1273,42 @@ public final class ExecuteOracle {
         @Override
         public boolean areEntitiesLoaded(long chunkKey) {
             return true;
+        }
+
+        // `execute summon` 走 `SummonCommand.createEntity`：假世界没有实体管理器、
+        // 随机源和维度类型，补齐这三处让召唤本身能跑完，从而对拍重定向逻辑。
+        // `execute summon` uses `SummonCommand.createEntity`: the fake world has no
+        // entity manager, random source or dimension type, so stub these three to let
+        // the spawn finish and compare the redirect behaviour.
+        @Override
+        public RandomSource getRandom() {
+            return RandomSource.create();
+        }
+
+        @Override
+        public DifficultyInstance getCurrentDifficultyAt(BlockPos pos) {
+            return new DifficultyInstance(Difficulty.NORMAL, 0L, 0L, 0.0F);
+        }
+
+        @Override
+        public boolean tryAddFreshEntityWithPassengers(Entity entity) {
+            tracked.add(entity);
+            return true;
+        }
+
+        // `location_check` 的 `structures` 要 `level.structureManager()`；Unsafe 分配的
+        // 实例那个 final 字段是 null，补一个只依赖 registryAccess 和 getChunk 的即可。
+        // `location_check` `structures` needs `level.structureManager()`; the final
+        // field is null on the Unsafe-allocated instance, so supply one that only
+        // uses registryAccess and getChunk.
+        private StructureManager structureManager;
+
+        @Override
+        public StructureManager structureManager() {
+            if (structureManager == null) {
+                structureManager = new StructureManager(this, null, null);
+            }
+            return structureManager;
         }
 
         @Override

@@ -102,21 +102,8 @@ fn summon(
         None
     };
     if entity == "minecraft:lightning_bolt" {
-        let (result, effects) = {
-            let (mut level, ticks) = region.block_level();
-            let mut world = World::new(&mut level, ticks);
-            let bolt = mc_bamboo_blocks::entity::lightning::entity(position, false);
-            let result = Ok::<i32, SummonError>(world.spawn_entity(bolt));
-            let effects = world.into_effects();
-            (result, effects)
-        };
-        interaction::send_effects(region, Some(id), &effects);
-        return match result {
-            Ok(_) => Ok(()),
-            Err(SummonError::InvalidPosition) => Err(fail("commands.summon.invalidPosition")),
-            Err(SummonError::Failed(_)) => Err(fail("commands.summon.failed")),
-            Err(SummonError::DuplicateUuid) => Err(fail("commands.summon.failed.uuid")),
-        };
+        spawn_for_execute(region, id, &entity, position)?;
+        return Ok(());
     }
     if matches!(
         entity.as_str(),
@@ -127,39 +114,69 @@ fn summon(
     let Some(kind) = MobType::by_name(&entity) else {
         return Err(fail("commands.summon.failed"));
     };
-    let (result, effects, name) = {
+    let uid = spawn_mob(region, id, kind, position, nbt.as_ref())?;
+    let display = region
+        .entities
+        .public_at(uid)
+        .and_then(|public| match &public.kind {
+            mc_bamboo_blocks::entity::KindPublic::Mob(mob) => mob.custom_name.clone(),
+            _ => None,
+        })
+        .map_or_else(
+            || Component::translate(kind.translation_key(), []),
+            Component::trusted,
+        );
+    feedback::success(
+        region,
+        id,
+        Component::translate("commands.summon.success", [TranslateArg::from(display)]),
+        true,
+    );
+    Ok(())
+}
+
+fn spawn_mob(
+    region: &mut Region,
+    id: PlayerId,
+    kind: MobType,
+    position: Vec3,
+    nbt: Option<&Tag>,
+) -> Result<i32, CommandFail> {
+    let (result, effects) = {
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
-        let result = summon_mob(&mut world, kind, position, nbt.as_ref());
-        let mut name = None;
-        if let Ok(uid) = result {
-            world.with_entity_mut(uid, &mut |entity| {
-                name = entity.kind.mob().and_then(|mob| mob.custom_name.clone());
-            });
-        }
-        let effects = world.into_effects();
-        (result, effects, name)
+        let result = summon_mob(&mut world, kind, position, nbt);
+        (result, world.into_effects())
     };
     interaction::send_effects(region, Some(id), &effects);
     match result {
-        Ok(_) => {
-            // `Entity.getDisplayName()`：有自定义名字时用它，否则是类型名。
-            let display = match name {
-                Some(tag) => Component::trusted(tag),
-                None => Component::translate(kind.translation_key(), []),
-            };
-            feedback::success(
-                region,
-                id,
-                Component::translate("commands.summon.success", [TranslateArg::from(display)]),
-                true,
-            );
-            Ok(())
-        }
+        Ok(uid) => Ok(uid),
         Err(SummonError::InvalidPosition) => Err(fail("commands.summon.invalidPosition")),
         Err(SummonError::Failed(_)) => Err(fail("commands.summon.failed")),
         Err(SummonError::DuplicateUuid) => Err(fail("commands.summon.failed.uuid")),
     }
+}
+
+/// `SummonCommand.createEntity(..., true)`：生成并返回实体，不发命令成功反馈。
+///
+/// `SummonCommand.createEntity(..., true)`: spawn and return the entity without command feedback.
+pub(crate) fn spawn_for_execute(
+    region: &mut Region,
+    source: PlayerId,
+    entity_type: &str,
+    position: Vec3,
+) -> Result<i32, CommandFail> {
+    if let Some(kind) = MobType::by_name(entity_type) {
+        return spawn_mob(region, source, kind, position, None);
+    }
+    check_position(position)?;
+    let entity = if entity_type == "minecraft:lightning_bolt" {
+        mc_bamboo_blocks::entity::lightning::entity(position, false)
+    } else {
+        read_entity(entity_type, position, None)?
+    };
+    let (mut level, ticks) = region.block_level();
+    Ok(World::new(&mut level, ticks).spawn_entity(entity))
 }
 
 fn summon_minecart(
@@ -169,29 +186,8 @@ fn summon_minecart(
     position: Vec3,
     nbt: Option<Tag>,
 ) -> Result<(), CommandFail> {
-    if !mc_bamboo_blocks::entity::mob::spawn::is_in_spawnable_bounds(BlockPos::containing(position))
-    {
-        return Err(fail("commands.summon.invalidPosition"));
-    }
-    let mut fields = match nbt {
-        Some(Tag::Compound(fields)) => fields,
-        _ => Vec::new(),
-    };
-    fields.retain(|(key, _)| key != "id" && key != "Pos");
-    fields.push(("id".to_owned(), Tag::String(entity_type.to_owned())));
-    fields.push((
-        "Pos".to_owned(),
-        Tag::List(vec![
-            Tag::Double(position.x),
-            Tag::Double(position.y),
-            Tag::Double(position.z),
-        ]),
-    ));
-    let entity = mc_bamboo_blocks::archive::read_entity(&Tag::Compound(fields), 0)
-        .ok()
-        .flatten()
-        .ok_or_else(|| fail("commands.summon.failed"))?
-        .into_entity();
+    check_position(position)?;
+    let entity = read_entity(entity_type, position, nbt)?;
     let (mut level, ticks) = region.block_level();
     let uid = World::new(&mut level, ticks).spawn_entity(entity);
     let display = region
@@ -208,4 +204,38 @@ fn summon_minecart(
         true,
     );
     Ok(())
+}
+
+fn check_position(position: Vec3) -> Result<(), CommandFail> {
+    if !mc_bamboo_blocks::entity::mob::spawn::is_in_spawnable_bounds(BlockPos::containing(position))
+    {
+        return Err(fail("commands.summon.invalidPosition"));
+    }
+    Ok(())
+}
+
+fn read_entity(
+    entity_type: &str,
+    position: Vec3,
+    nbt: Option<Tag>,
+) -> Result<mc_bamboo_blocks::entity::Entity, CommandFail> {
+    let mut fields = match nbt {
+        Some(Tag::Compound(fields)) => fields,
+        _ => Vec::new(),
+    };
+    fields.retain(|(key, _)| key != "id" && key != "Pos");
+    fields.push(("id".to_owned(), Tag::String(entity_type.to_owned())));
+    fields.push((
+        "Pos".to_owned(),
+        Tag::List(vec![
+            Tag::Double(position.x),
+            Tag::Double(position.y),
+            Tag::Double(position.z),
+        ]),
+    ));
+    mc_bamboo_blocks::archive::read_entity(&Tag::Compound(fields), 0)
+        .ok()
+        .flatten()
+        .map(|entity| entity.into_entity())
+        .ok_or_else(|| fail("commands.summon.failed"))
 }

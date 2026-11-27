@@ -1505,7 +1505,8 @@ WebView2 的渲染进程不算在内。
   逐节点一致（`tests/command_tree.rs`）；链上每层用 `CommandGraph` 的重定向上下文保存参数，执行来源按 `source::with_override`
   临时替换，`as` 分叉出的每个分支当场顺序执行，`store score` 在所有分支结束后写回。
   设计见 `docs/command-execution-context.md`；`execute-oracle` 用补全了实体 getter 的官方假世界
-  跑 148 条整命令（含 `as @e[type=cow]` 分叉），逐条比较方块、计分板、是否跑到 `run` 和
+  跑 185 条整命令（含 `as @e[type=cow]` 分叉，以及 `if items|slots`、`on`、`summon`、
+  `positioned over`、`location_check.structures` 和实体子谓词 `slots` 的新场景），逐条比较方块、计分板、是否跑到 `run` 和
   翻译键/参数递归展开后的反馈；`--break-self-test` 和按类别的 `--break-group` 确认能抓到改坏。
   `if/unless biome|dimension|loaded|predicate` 已接上：`biome` 按 `getLoadedBlockPos` 查位置再比
   单个群系或 `#标签`；`dimension` 只认主世界（下界和末地判假，别的名字报 `argument.dimension.invalid`）；
@@ -1515,17 +1516,31 @@ WebView2 的渲染进程不算在内。
   `conditional.fail|fail_count`。链上出现过分叉节点（`as`、`at`、`if`/`unless`、`on`、`positioned as`、`rotated as`、
   `facing entity`）以后，照官方 `ChainModifiers.isForked` 不再把后面的错误报给来源，出错的那个来源只是被丢掉；
   `if blocks ... masked` 现在真的跳过空气并按官方数格数，`positioned as` / `rotated as` 不再顺带换掉执行实体。
-  已知差异：只有主世界，`in` 其它维度明确失败；`summon`、`positioned over`、`if items|slots`
-  （槽位来源和物品访问器没实现）执行时明确失败；`on` 在来源没有实体时照官方得到空结果，
-  有实体时八种关系都还没接、明确失败；Bamboo 没有数据包函数和 `/stopwatch`，所以
+  `if|unless items|slots` 照官方 `SlotRanges` / `SlotSource` 接上：槽位范围表由生成器从官方导出进
+  `mc-bamboo-data`（`generated/slot_ranges.rs`，不手写），支持字面量和内联容器范围、空来源、分组。
+  实体访问器按 `SlotProvider.getSlot` 逐格读，方块访问器只读指定方块实体（双箱不合并），
+  链尾的数值条件发 `pass_count` / `fail_count`；实体子谓词 `minecraft:slots`（`SlotsPredicate`）也接上。
+  `on` 从已有实体状态查询八种关系；`summon` 复用 `/summon` 的生物初始化，
+  `positioned over` 读取指定的四种运行时高度图。`anchored eyes` 在解析局部坐标时应用实体眼高。
+  `if biome` 现在走 `BiomeManager.getBiome` 的八角插值模糊取样，
+  `if loaded` 对齐 `FullChunkStatus.ENTITY_TICKING`，`getLoadedBlockPos` 补上水平 ±3000 万边界，
+  非生物实体的 `scoreboard_name` 由实体 UUID 派生（不再让 `entity_scores` 报不支持），
+  `CommandLevel` 接上天空可见、亮度、世界时钟和 `structures`（`StructureManager.getStructureWithPieceAt`，
+  读已交付区块的引用和结构起点，逐个检查结构件包围盒，不重新生成）。
+  已知差异：只有主世界，`in` 其它维度明确失败；关系只读当前命令上下文可见的已建模数据，
+  玩家攻击者、掉落物抛出者、船的拴绳等关系仍未接。非生物实体的召唤类型与初始化仍不齐。
+  具名 `SlotSource`、内联的过滤/变换/嵌套容器/非容器来源、物品参数的组件筛选、熔炉/酿造台等
+  不在通用容器表内的方块实体，以及部分实体专有槽位仍未支持。结构标签（`#minecraft:...`）未导出，
+  引用的起点区块未交付时不会同步加载；群系模糊取样落到未交付的邻列时也不做生成器回退。
+  营火烟雾、会话内已记录的物品使用/自定义统计和已知配方已接；其它统计尚未建模。
+  Bamboo 没有数据包函数和 `/stopwatch`，所以
   `if|unless function` 的分支恒被丢掉（官方对不存在的函数抛 `arguments.function.unknown`，分叉节点上的错误不报给来源），
   `if|unless stopwatch` 写在链尾时报 `commands.stopwatch.does_not_exist`、写在链中间时分支被丢掉；
   `if|unless predicate` 问到还没建模的谓词部分时也按出错处理（链中间分支被丢掉，`unless` 同样不会通过；链尾报 `command.failed`）；`if predicate` 按名字引用恒报
   `argument.resource_or_id.no_such_element`（没有数据包谓词注册表），内联条件解码失败在执行时报
   `argument.resource_or_id.failed_to_parse`（官方在解析期报并带原因）；内联 SNBT 先转成 JSON 再解析，
-  字节 0 / 1 当布尔（`1b` 写在整数字段上会被拒绝）；`if biome` 读区块里的 quart 群系，没有做
-  `BiomeManager` 的模糊取样（群系交界一两格内可能和官方不同）；`if blocks` 不比较方块实体；
-  `facing` / `anchored` 用近似眼高。`if/unless data` 和 `store ... block|entity|storage` 已接上。
+  字节 0 / 1 当布尔（`1b` 写在整数字段上会被拒绝）；`if blocks` 不比较方块实体；
+  部分非生物实体眼高仍沿用实体模型的近似值。`if/unless data` 和 `store ... block|entity|storage` 已接上。
   `/data` 的 `storage` 是世界数据：按官方 `SavedDataStorage.getDataFile` 写成
   `data/<命名空间>/command_storage.dat`，NBT 信封是 `{DataVersion, data:{contents:{<路径>:<复合标签>}}}`，
   开服读回、存盘写出，官方写的文件也能读（往返测试 + `storage` 对拍）。权威副本在主控的 `Global`，
@@ -1599,14 +1614,17 @@ WebView2 的渲染进程不算在内。
   `team`、`type_specific/lightning`（不是闪电判假）和 `type_specific/player`（不是玩家判假；等级、饥饿、
   游戏模式、进度、统计、配方、`looking_at`、`input`），求值顺序按官方 `PREDICATE_TYPE_ORDER`
   （载具 / 乘客 / 目标 / 闪电 / 玩家靠后，NBT 最后）；位置谓词补上了 `fluid`（`FluidPredicate`：流体集合 +
-  `falling` / `level` 属性）和 `structures` 的求值位置。这些谓词要的数据由调用方给：`/execute if predicate`
-  给了效果、NBT（非玩家实体）、队伍、积分板、玩家的等级 / 饥饿 / 游戏模式 / 进度和流体；
-  **还没给、问到仍让整次求值失败的**：结构（`getStructureWithPieceAt`）、玩家的 NBT、统计、配方、
-  `looking_at` 射线和 `input` 按键、天空可见 / 亮度 / 烟雾；生物死亡等其它掉落路径的实体视角没有补这些新字段
-  （问到 NBT、玩家或积分板时仍报不支持）。`slots` 子谓词没做（缺 `SlotRanges` 表和各实体的槽位访问），
-  JSON 对象形式的 `nbt`（只支持 SNBT 字符串）也没做，两者都让求值失败。
-  `execute-oracle` 里 62 条 `if predicate` 整命令（实体类型、效果、NBT、队伍、闪电、玩家、`entity_scores`、
-  流体、群系）和官方逐条一致。
+  `falling` / `level` 属性）和 `structures`（游戏侧 `LevelView::structure_with_piece_at` 按
+  `StructureManager.getStructureWithPieceAt` 复用世界生成的结构起点/结构件数据）。
+  实体子谓词 `minecraft:slots`（`SlotsPredicate`）也接上：范围名查官方导出的 `SlotRanges` 表，
+  按 `SlotProvider.getSlot` 逐格比 `ItemPredicate`。这些谓词要的数据由调用方给：`/execute if predicate`
+  给了效果、NBT（非玩家实体）、队伍、积分板、玩家的等级 / 饥饿 / 游戏模式 / 进度、流体、
+  槽位、天空可见 / 亮度（区块光照表）、世界时钟、营火烟雾、已建模的会话统计和已知配方；
+  **还没给、问到仍让整次求值失败的**：玩家的 NBT、部分统计、`looking_at` 射线和 `input` 按键、
+  `location_check.structures` 的结构标签（没从官方导出）；生物死亡等其它掉落路径的实体视角没有补这些新字段
+  （问到 NBT、玩家或积分板时仍报不支持）。JSON 对象形式的 `nbt`（只支持 SNBT 字符串）没做，会让求值失败。
+  `execute-oracle` 里 66 条 `if predicate` 整命令（实体类型、效果、NBT、队伍、闪电、玩家、`entity_scores`、
+  流体、群系、结构、`slots`）和官方逐条一致。
   随机序列不存档，也没有 `salt`、`includeWorldSeed`、`includeSequenceId` 开关（默认 salt 0，后两项都开）。掉落不查物品的功能开关（`isItemEnabled`）。乘客谓词只看第一个乘客。
 - 工作台（含玩家物品栏里的 2×2）、合成器、切石机、锻造台、熔炉、高炉、烟熏炉、酿造台、织布机、
   砂轮、附魔台、铁砧和制图台已经接上菜单。

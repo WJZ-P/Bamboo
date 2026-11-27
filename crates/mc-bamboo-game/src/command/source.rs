@@ -11,7 +11,7 @@
 
 use std::cell::RefCell;
 
-use mc_bamboo_command::{Coordinates, wrap_degrees};
+use mc_bamboo_command::{Coordinates, EntityAnchor, wrap_degrees};
 use mc_bamboo_core::Vec3;
 
 use crate::{
@@ -31,6 +31,8 @@ pub(crate) struct Source {
     pub position: Vec3,
     pub yaw: f32,
     pub pitch: f32,
+    pub anchor: EntityAnchor,
+    pub eye_height: f64,
     /// `CommandSourceStack.getEntity()`：玩家有，服务器控制台没有。
     pub entity: Option<Entity>,
 }
@@ -100,6 +102,8 @@ pub(crate) fn of(region: &Region, id: PlayerId) -> Source {
             position: Vec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z)),
             yaw: 0.0,
             pitch: 0.0,
+            anchor: EntityAnchor::Feet,
+            eye_height: 0.0,
             entity: None,
         }
     } else {
@@ -112,6 +116,8 @@ pub(crate) fn of(region: &Region, id: PlayerId) -> Source {
             position,
             yaw,
             pitch,
+            anchor: EntityAnchor::Feet,
+            eye_height: 0.0,
             entity: Some(Entity::Player(id)),
         }
     }
@@ -128,9 +134,26 @@ pub(crate) fn entity_or_exception(source: Source) -> Result<Entity, CommandFail>
         .ok_or_else(|| fail("permissions.requires.player"))
 }
 
-/// 把一串世界/局部坐标按来源的位置和朝向解成世界坐标。
+/// 世界坐标从脚底位置起算；只有局部坐标应用 `EntityAnchorArgument.Anchor`。
+///
+/// World coordinates start at the source position; only local coordinates apply the anchor.
 pub(crate) fn position(coords: Coordinates, source: Source) -> Vec3 {
-    coords.position(source.position, source.yaw, source.pitch)
+    let origin = if matches!(coords, Coordinates::Local { .. }) {
+        source.anchor_position()
+    } else {
+        source.position
+    };
+    coords.position(origin, source.yaw, source.pitch)
+}
+
+impl Source {
+    pub(super) fn anchor_position(self) -> Vec3 {
+        let mut position = self.position;
+        if self.anchor == EntityAnchor::Eyes {
+            position.y += self.eye_height;
+        }
+        position
+    }
 }
 
 /// 一串带 `~` 的相对旋转按来源的朝向解成绝对角度。

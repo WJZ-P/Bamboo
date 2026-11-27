@@ -1072,14 +1072,20 @@ pub fn replay_execute(line: &str) -> [i32; 7] {
             .unwrap_or(0),
         feedback_mark(measured, &feedback),
         feedback_oracle_hash(&feedback),
-        replay_effect_state(&region, id, &[cow_a, cow_b]),
+        replay_effect_state(&region, id),
     ]
 }
 
-/// 玩家 + 两头牛的 `activeEffects`，和 Java `ExecuteOracle.effectState` 的
-/// 文本格式逐字节一致（按 tracked 的固定顺序，不用实体 ID）。
+/// 全部活体的 `activeEffects`，和 Java `ExecuteOracle.effectState` 的文本格式逐字节
+/// 一致：玩家（下标 0）在前，之后按生成顺序遍历世界实体；`execute summon` 新生成的
+/// 生物也在其中，所以两边都会把这一份副作用记进哈希。
+///
+/// Every living entity's `activeEffects`, byte-for-byte with Java
+/// `ExecuteOracle.effectState`: the player (index 0) first, then world entities in
+/// spawn order. A mob freshly spawned by `execute summon` is included, so both
+/// sides record that side effect in the hash.
 #[cfg(feature = "oracle-samples")]
-fn replay_effect_state(region: &region::Region, id: inbound::PlayerId, cows: &[i32]) -> i32 {
+fn replay_effect_state(region: &region::Region, id: inbound::PlayerId) -> i32 {
     use mc_bamboo_blocks::entity::mob::effects::EffectMap;
     let mut all = String::new();
     let append = |all: &mut String, index: usize, effects: &EffectMap| {
@@ -1097,14 +1103,15 @@ fn replay_effect_state(region: &region::Region, id: inbound::PlayerId, cows: &[i
         }
         all.push('\n');
     };
+    let mut index = 0;
     if let Some(player) = region.players.get(&id) {
-        append(&mut all, 0, &player.effects);
+        append(&mut all, index, &player.effects);
+        index += 1;
     }
-    for (index, &uid) in cows.iter().enumerate() {
-        if let Some(entity) = region.entities.get(uid)
-            && let Some(mob) = entity.kind.mob()
-        {
-            append(&mut all, index + 1, &mob.effects);
+    for entity in region.entities.iter() {
+        if let Some(mob) = entity.kind.mob() {
+            append(&mut all, index, &mob.effects);
+            index += 1;
         }
     }
     feedback_hash(all.as_bytes())

@@ -1,0 +1,284 @@
+//! `/execute if|unless items|slots` 和实体子谓词 `minecraft:slots` 共用的槽位视图。
+//!
+//! 官方 `ExecuteCommand.countItems` / `countSlots` 把一个 `SlotSource` 交给
+//! `ItemAccessor`，由实体或方块实体的 `SlotProvider.getSlot(int)` 取出非空槽，
+//! 再数个数或把命中物品谓词的物品数量加起来。`SlotsPredicate.matches` 同样按
+//! `SlotProvider.getSlot` 逐格问。这里用「槽位编号 → 物品」的映射表达这个视图：
+//! 在表里＝`getSlot` 返回非 null（物品可以是空的），不在表里＝返回 null、跳过。
+//!
+//! The game's slot view shared by `/execute if|unless items|slots` and the
+//! `minecraft:slots` entity sub-predicate. Official `countItems`/`countSlots` hand a
+//! `SlotSource` to an `ItemAccessor`, whose `SlotProvider.getSlot(int)` yields the
+//! non-null slots; `SlotsPredicate.matches` queries the same provider per slot. Here
+//! a `slot id -> stack` map models it: present means `getSlot` returned non-null
+//! (the stack may be empty), absent means it returned null and is skipped.
+
+use std::collections::BTreeMap;
+
+use mc_bamboo_blocks::entity::{
+    EntityKind, KindPublic,
+    mob::{MobType, villager::VillagerInventory},
+};
+use mc_bamboo_command::ItemPredicateInput;
+use mc_bamboo_core::{BlockPos, Hand};
+use mc_bamboo_loot::LootStack;
+use mc_bamboo_protocol::item::ItemStack;
+use mc_bamboo_protocol::packet::play::EquipmentSlot as WireSlot;
+
+use crate::{
+    command::{
+        feedback::{CommandFail, fail_with},
+        select::Target,
+    },
+    container::{self, ContainerKind},
+    interaction::level::game_stack_to_loot,
+    inventory::menu_slot,
+    region::Region,
+};
+
+/// `LivingEntity.getEquipmentSlot` 认得的八个装备槽编号；生物 / 玩家都有这些槽。
+///
+/// The eight equipment slot ids recognised by `LivingEntity.getEquipmentSlot`;
+/// both mobs and players expose them.
+const EQUIPMENT_IDS: [i32; 8] = [98, 99, 100, 101, 102, 103, 105, 106];
+
+/// `EquipmentSlot` 到 `SlotProvider` 的槽位编号，和 `SlotRanges` 的装备项一致。
+///
+/// Map `EquipmentSlot` to its `SlotProvider` id, as used by `SlotRanges`.
+fn slot_id(slot: WireSlot) -> i32 {
+    match slot {
+        WireSlot::MainHand => 98,
+        WireSlot::OffHand => 99,
+        WireSlot::Feet => 100,
+        WireSlot::Legs => 101,
+        WireSlot::Chest => 102,
+        WireSlot::Head => 103,
+        WireSlot::Body => 105,
+        WireSlot::Saddle => 106,
+    }
+}
+
+/// `countSlots`：`getSlotsFromRange` 之后 `SlotCollection.size()`，即范围内存在的槽数。
+///
+/// `countSlots`: `SlotCollection.size()` after `getSlotsFromRange`, i.e. the number
+/// of existing slots in the range.
+pub fn count_slots(slots: &BTreeMap<i32, LootStack>, ids: &[i32]) -> i32 {
+    ids.iter().filter(|id| slots.contains_key(id)).count() as i32
+}
+
+/// `countItems`：范围内存在的槽里，命中 `ItemPredicateArgument` 的物品数量之和。
+///
+/// `countItems`: sum of `ItemStack.getCount()` over the existing slots in the range
+/// whose stack matches the `ItemPredicateArgument`.
+pub fn count_items(
+    slots: &BTreeMap<i32, LootStack>,
+    ids: &[i32],
+    predicate: &ItemPredicateInput,
+) -> i32 {
+    ids.iter()
+        .filter_map(|id| slots.get(id))
+        .filter(|stack| item_matches(predicate, stack))
+        .map(|stack| stack.count)
+        .fold(0, i32::wrapping_add)
+}
+
+/// `ItemPredicateArgument` 的基本类型检查：通配符、物品或物品标签。
+///
+/// Basic `ItemPredicateArgument` type check: wildcard, item or item tag.
+fn item_matches(predicate: &ItemPredicateInput, stack: &LootStack) -> bool {
+    match predicate {
+        ItemPredicateInput::Any => true,
+        ItemPredicateInput::Item(expected) => mc_bamboo_data::items::ITEMS
+            .iter()
+            .position(|item| item.name == expected.name)
+            .is_some_and(|id| id as i32 == stack.item),
+        ItemPredicateInput::Tag { item_ids, .. } => item_ids.contains(&stack.item),
+    }
+}
+
+/// 一个命令目标的 `SlotProvider` 视图。
+///
+/// The `SlotProvider` view of one command target.
+pub fn entity_slots(region: &Region, target: Target) -> BTreeMap<i32, LootStack> {
+    match target {
+        Target::Player(id) => player_slots(region, id),
+        Target::World(uid) => world_slots(region, uid),
+    }
+}
+
+/// `BlockItemAccessor.getContainer` 只读指定方块实体；双箱不合并。
+///
+/// `BlockItemAccessor.getContainer` reads only the addressed block entity, not a merged chest.
+pub(super) fn block_slots(
+    region: &mut Region,
+    pos: BlockPos,
+    ids: &[i32],
+    read_items: bool,
+) -> Result<BTreeMap<i32, LootStack>, CommandFail> {
+    let kind = container::kind_in(&region.chunks, pos)
+        .filter(|&kind| kind != ContainerKind::EnderChest)
+        .ok_or_else(|| {
+            fail_with(
+                "commands.item.source.not_a_container",
+                [pos.x.into(), pos.y.into(), pos.z.into()],
+            )
+        })?;
+    let slots = ids
+        .iter()
+        .copied()
+        .filter(|&id| (0..kind.slots() as i32).contains(&id));
+    if read_items && slots.clone().next().is_some() {
+        crate::container_loot::unpack_at(region, pos);
+    }
+    let entry = region.containers.get(&pos);
+    Ok(slots
+        .map(|id| {
+            let stack = if read_items {
+                entry
+                    .and_then(|entry| entry.slots.get(id as usize))
+                    .map_or_else(LootStack::empty, game_stack_to_loot)
+            } else {
+                LootStack::empty()
+            };
+            (id, stack)
+        })
+        .collect())
+}
+
+/// `Player.getSlot` 的覆盖：背包、末影箱、合成、光标和装备槽。
+///
+/// The `Player.getSlot` overrides: inventory, ender chest, crafting, cursor and
+/// equipment slots.
+fn player_slots(region: &Region, id: crate::inbound::PlayerId) -> BTreeMap<i32, LootStack> {
+    let Some(player) = region.players.get(&id) else {
+        return BTreeMap::new();
+    };
+    let inv = &player.inventory;
+    let mut out = BTreeMap::new();
+    // `Inventory.items` 的 36 格，`menu_slot` 换算成菜单下标。
+    // The 36 `Inventory.items` slots, mapped through `menu_slot`.
+    for slot in 0..36 {
+        out.insert(slot as i32, game_stack_to_loot(&inv.slots[menu_slot(slot)]));
+    }
+    out.insert(98, game_stack_to_loot(inv.held(Hand::Main)));
+    out.insert(99, game_stack_to_loot(inv.held(Hand::Off)));
+    for (id, wire) in [
+        (100, WireSlot::Feet),
+        (101, WireSlot::Legs),
+        (102, WireSlot::Chest),
+        (103, WireSlot::Head),
+    ] {
+        let stack = inv
+            .equipment(wire)
+            .cloned()
+            .unwrap_or_else(ItemStack::empty);
+        out.insert(id, game_stack_to_loot(&stack));
+    }
+    // 玩家没有 Body / Saddle 装备槽，但 `LivingEntity.getSlot` 仍返回一格空的。
+    // Players have no body/saddle equipment, but `LivingEntity.getSlot` still
+    // returns an empty slot for those ids.
+    out.insert(105, LootStack::empty());
+    out.insert(106, LootStack::empty());
+    for (index, stack) in player.ender_chest.slots.iter().take(27).enumerate() {
+        out.insert(200 + index as i32, game_stack_to_loot(stack));
+    }
+    let carried = region.menus.get(&id).map_or_else(
+        || player.inventory_cursor.carried(),
+        crate::menu::Menu::carried,
+    );
+    out.insert(499, game_stack_to_loot(carried));
+    // `InventoryMenu.getCraftSlots()`：菜单槽 1..4。
+    // `InventoryMenu.getCraftSlots()`: menu slots 1..4.
+    for index in 0..4 {
+        out.insert(
+            500 + index,
+            game_stack_to_loot(&inv.slots[1 + index as usize]),
+        );
+    }
+    out
+}
+
+/// 世界实体的 `SlotProvider`：装备槽以及已建模的实体容器覆盖。
+///
+/// World entity `SlotProvider`: equipment slots and modeled entity container overrides.
+fn world_slots(region: &Region, uid: i32) -> BTreeMap<i32, LootStack> {
+    let Some(public) = region.entities.public_at(uid) else {
+        return BTreeMap::new();
+    };
+    let slots =
+        match &public.kind {
+            KindPublic::Mob(mob) => {
+                let mut out = EQUIPMENT_IDS
+                    .into_iter()
+                    .map(|id| (id, LootStack::empty()))
+                    .collect::<BTreeMap<_, _>>();
+                out.extend(
+                    mob.equipment
+                        .iter()
+                        .map(|(slot, stack)| (slot_id(*slot), game_stack_to_loot(stack))),
+                );
+                if (matches!(mob.mob_type, MobType::Villager | MobType::WanderingTrader)
+                    || mob.equine.is_some())
+                    && let Some(entity) = region.entities.get(uid)
+                    && let Some(mob) = entity.kind.mob()
+                {
+                    if matches!(mob.mob_type, MobType::Villager | MobType::WanderingTrader) {
+                        out.extend((0..VillagerInventory::SIZE).map(|index| {
+                            (
+                                300 + index as i32,
+                                game_stack_to_loot(&mob.villager.inventory.get(index)),
+                            )
+                        }));
+                    }
+                    if let Some(equine) = &mob.equine {
+                        if matches!(
+                            mob.mob_type,
+                            MobType::Donkey | MobType::Mule | MobType::Llama | MobType::TraderLlama
+                        ) {
+                            let chest = if equine.chested {
+                                ItemStack::new(mc_bamboo_data::items::CHEST, 1)
+                            } else {
+                                ItemStack::empty()
+                            };
+                            out.insert(499, game_stack_to_loot(&chest));
+                        }
+                        out.extend(
+                            equine.chest_items.iter().enumerate().map(|(index, stack)| {
+                                (500 + index as i32, game_stack_to_loot(stack))
+                            }),
+                        );
+                    }
+                }
+                return out;
+            }
+            KindPublic::Item { stack, .. } => return single_stack(stack),
+            KindPublic::ItemFrame(frame) => return single_stack(&frame.item),
+            KindPublic::Arrow(_) | KindPublic::Boat(_) | KindPublic::Minecart(_) => {
+                region.entities.get(uid)
+            }
+            _ => None,
+        };
+    let Some(entity) = slots else {
+        return BTreeMap::new();
+    };
+    match entity.kind {
+        EntityKind::Arrow(arrow) => single_stack(&arrow.pickup_item),
+        EntityKind::Boat(boat) => boat
+            .chest
+            .map_or_else(BTreeMap::new, |chest| indexed(&chest.items)),
+        EntityKind::Minecart(cart) => indexed(&cart.items),
+        _ => BTreeMap::new(),
+    }
+}
+
+fn single_stack(stack: &ItemStack) -> BTreeMap<i32, LootStack> {
+    BTreeMap::from([(0, game_stack_to_loot(stack))])
+}
+
+fn indexed(items: &[ItemStack]) -> BTreeMap<i32, LootStack> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(id, stack)| (id as i32, game_stack_to_loot(stack)))
+        .collect()
+}

@@ -358,6 +358,7 @@ pub struct ItemInput {
 /// 官方 `ItemPredicateArgument` 的结果，Bamboo 只支持物品和物品标签。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemPredicateInput {
+    Any,
     Item(&'static Item),
     Tag { tag: String, item_ids: Vec<i32> },
 }
@@ -365,6 +366,7 @@ pub enum ItemPredicateInput {
 impl ItemPredicateInput {
     pub fn test(&self, item: &'static Item) -> bool {
         match self {
+            Self::Any => true,
             // `ITEMS` 是 `const` 切片，每次使用地址都可能不同，不能比指针。
             //
             // `ITEMS` is a `const` slice, so its address can differ on each use. Compare names.
@@ -557,6 +559,7 @@ pub enum Value {
     BlockPredicate(BlockPredicateInput),
     Item(ItemInput),
     ItemPredicate(ItemPredicateInput),
+    SlotSource(Vec<i32>),
     Message(Message),
     /// 官方 `ComponentArgument` 解析出的 SNBT 标签，交给网络层的组件 `Codec` 校验。
     Component(Tag),

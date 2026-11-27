@@ -634,6 +634,8 @@ impl Planner<'_> {
                 position: Vec3::default(),
                 yaw: 0.0,
                 pitch: 0.0,
+                anchor: mc_bamboo_command::EntityAnchor::Feet,
+                eye_height: 0.0,
                 entity: None,
             };
             for step in steps
@@ -658,7 +660,10 @@ impl Planner<'_> {
         // branch. Conditions are planned even when they turn out false.
         let mut branches = vec![base];
         for step in steps {
-            if !known_step(&step.kind) {
+            if !known_step(&step.kind)
+                || base.anchor == mc_bamboo_command::EntityAnchor::Eyes
+                || step.kind == "anchored"
+            {
                 self.fallback = true;
                 return;
             }

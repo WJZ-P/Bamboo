@@ -6,6 +6,8 @@
 use mc_bamboo_command::{ChainStep, EntityAnchor, ParsedCommand, Value, wrap_degrees};
 use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_nbt::{NbtPath, Tag};
+
+mod relations;
 use mc_bamboo_protocol::text::Component;
 
 use crate::{
@@ -135,7 +137,7 @@ fn execute(
         position: base.position,
         yaw: base.yaw,
         pitch: base.pitch,
-        anchor: EntityAnchor::Feet,
+        anchor: base.anchor,
         entity: base.entity,
         permission: source::level(region, source_id),
     }];
@@ -231,7 +233,7 @@ fn execute(
         let inner = commands().graph.parse(line, context.permission);
         match inner {
             Ok(parsed_inner) => {
-                let overridden = context_to_source(region, *context);
+                let overridden = base_source(region, *context);
                 let ran = source::with_override(context.source, overridden, || {
                     run_action(port, region, *context, line, parsed_inner.clone(), forked)
                 });
@@ -290,7 +292,7 @@ fn report_tail(
 ) {
     let outcome =
         evaluate(region, parsed, step, context).and_then(|verdict| verdict.tail(step.kind == "if"));
-    let overridden = context_to_source(region, context);
+    let overridden = base_source(region, context);
     source::with_override(context.source, overridden, || match outcome {
         Ok(message) => feedback::success(region, context.source, message, false),
         Err(failure) if !forked => {
@@ -417,12 +419,42 @@ fn apply_step(
             }
             Ok(Some(out))
         }
+        // 官方 `positioned over`：把 Y 换成该高度图在 (`floor(x)`, `floor(z)`) 的高度，
+        // 区块没加载报 `argument.pos.unloaded`。
+        // Official `positioned over`: replace Y with the heightmap height at
+        // (`floor(x)`, `floor(z)`); an unloaded chunk reports `argument.pos.unloaded`.
+        "positioned" if value("heightmap").is_some() => {
+            let heightmap = value("heightmap")
+                .and_then(Value::as_str)
+                .ok_or_else(|| fail("command.failed"))?;
+            let pos = BlockPos::containing(context.position);
+            if !region.chunks.is_loaded(pos.chunk()) {
+                return Err(fail("argument.pos.unloaded"));
+            }
+            let kind = mc_bamboo_data::heightmaps::TYPES
+                .iter()
+                .find(|kind| kind.name.eq_ignore_ascii_case(heightmap))
+                .and_then(mc_bamboo_world::chunk::HeightmapKind::of_type)
+                .ok_or_else(|| fail("command.failed"))?;
+            let height = if outside_horizontal_bounds(pos) {
+                crate::spawn_landing::search_from(region).level_flags().1 + 1
+            } else {
+                region
+                    .chunks
+                    .column_height(kind, pos.x, pos.z)
+                    .ok_or_else(|| fail("argument.pos.unloaded"))?
+            };
+            let mut changed = context;
+            changed.position.y = f64::from(height);
+            Ok(Some(vec![changed]))
+        }
         "positioned" => {
             let coords = value("pos")
                 .and_then(Value::as_vec3)
                 .ok_or_else(|| fail("command.failed"))?;
             let mut changed = context;
-            changed.position = source::position(coords, base_source(context));
+            changed.position = source::position(coords, base_source(region, context));
+            changed.anchor = EntityAnchor::Feet;
             Ok(Some(vec![changed]))
         }
         "rotated" => {
@@ -438,7 +470,7 @@ fn apply_step(
         }
         "facing" => {
             let to = if let Some(coords) = value("pos").and_then(Value::as_vec3) {
-                source::position(coords, base_source(context))
+                source::position(coords, base_source(region, context))
             } else {
                 let selector = step
                     .arguments
@@ -456,15 +488,13 @@ fn apply_step(
                 let Some(target) = targets.first().copied() else {
                     return Ok(Some(Vec::new()));
                 };
-                let (position, _yaw, pitch) = target_pose(region, target).unwrap_or_default();
+                let (mut position, ..) = target_pose(region, target).unwrap_or_default();
                 if anchor == EntityAnchor::Eyes {
-                    Vec3::new(position.x, position.y + 1.62, position.z)
-                } else {
-                    let _ = pitch;
-                    position
+                    position.y += eye_height(region, target);
                 }
+                position
             };
-            let (yaw, pitch) = look_angles(context.position, to);
+            let (yaw, pitch) = look_angles(base_source(region, context).anchor_position(), to);
             Ok(Some(vec![Context {
                 yaw,
                 pitch,
@@ -502,11 +532,25 @@ fn apply_step(
             Ok(Some(vec![context]))
         }
         "if" | "unless" => conditional(region, parsed, step, context),
-        "on" => relation(context, layer_branch(parsed, step)),
-        // 官方 `spawnEntityAndRedirect` 要走 `SummonCommand.createEntity`；还没接。
-        // Official `spawnEntityAndRedirect` goes through `SummonCommand.createEntity`,
-        // which is not wired in yet.
-        "summon" => Err(fail("command.failed")),
+        "on" => relation(region, context, layer_branch(parsed, step)),
+        // 官方 `spawnEntityAndRedirect`：按实体类型造一个实体，设为来源实体。
+        // Official `spawnEntityAndRedirect`: spawn one entity of the type and make
+        // it the source entity.
+        "summon" => {
+            let entity_type = value("entity")
+                .and_then(Value::as_str)
+                .ok_or_else(|| fail("command.failed"))?;
+            let entity = super::summon::spawn_for_execute(
+                region,
+                context.source,
+                entity_type,
+                context.position,
+            )?;
+            Ok(Some(vec![Context {
+                entity: Some(Target::World(entity)),
+                ..context
+            }]))
+        }
         "data" | "block" | "entity" | "storage" if is_data_or_store_target(parsed, step.level) => {
             Ok(Some(vec![context]))
         }
@@ -515,21 +559,32 @@ fn apply_step(
 }
 
 /// 官方 `expandOneToOneEntityRelation` / `expandOneToManyEntityRelation`：来源没有实体时
-/// 结果是空的，整条链在这里停下。有实体时要查主人、牵引者、目标、攻击者、载具、
-/// 操控者、来源实体和乘客，这些关系还没有统一的查询入口，明确报错。
+/// 结果是空的，整条链在这里停下。有实体时按关系名解出一个或多个实体，各自成为一条分支。
 ///
 /// Official `expandOneToOneEntityRelation` / `expandOneToManyEntityRelation`: with no
-/// source entity the result is empty and the chain stops here. With an entity the owner,
-/// leasher, target, attacker, vehicle, controller, origin and passengers need lookups that
-/// have no shared entry point yet, so it fails loudly.
-fn relation(context: Context, name: Option<&str>) -> Result<Option<Vec<Context>>, CommandFail> {
+/// source entity the result is empty and the chain stops here. Otherwise the relation
+/// resolves to one or more entities, each a branch.
+fn relation(
+    region: &Region,
+    context: Context,
+    name: Option<&str>,
+) -> Result<Option<Vec<Context>>, CommandFail> {
     if name.is_none_or(|name| !RELATIONS.contains(&name)) {
         return Err(fail("command.failed"));
     }
-    if context.entity.is_none() {
+    let Some(entity) = context.entity else {
         return Ok(Some(Vec::new()));
-    }
-    Err(fail("command.failed"))
+    };
+    let targets = relations::targets(region, entity, name.unwrap_or_default());
+    Ok(Some(
+        targets
+            .into_iter()
+            .map(|related| Context {
+                entity: Some(related),
+                ..context
+            })
+            .collect(),
+    ))
 }
 
 fn conditional(
@@ -547,19 +602,25 @@ fn conditional(
     Ok(Some(vec![context]))
 }
 
-/// 官方 `BlockPosArgument.getLoadedBlockPos`：区块没加载报 `argument.pos.unloaded`，
-/// 高度在世界外报 `argument.pos.outofworld`。
+/// 官方 `BlockPosArgument.getLoadedBlockPos`：先查 `level.hasChunkAt`（没加载报
+/// `argument.pos.unloaded`），再查 `level.isInWorldBounds`（水平 ±3000 万或高度出界报
+/// `argument.pos.outofworld`）。
 ///
-/// Official `BlockPosArgument.getLoadedBlockPos`: `argument.pos.unloaded` for an unloaded
-/// chunk, `argument.pos.outofworld` for a height outside the world.
+/// Official `BlockPosArgument.getLoadedBlockPos`: first `level.hasChunkAt`
+/// (`argument.pos.unloaded`), then `level.isInWorldBounds` (horizontal ±30M or build
+/// height → `argument.pos.outofworld`).
 fn loaded_block(region: &Region, pos: BlockPos) -> Result<BlockPos, CommandFail> {
     if !region.chunks.is_loaded(pos.chunk()) {
         return Err(fail("argument.pos.unloaded"));
     }
-    if region.chunks.block(pos).is_none() {
+    if outside_horizontal_bounds(pos) || region.chunks.block(pos).is_none() {
         return Err(fail("argument.pos.outofworld"));
     }
     Ok(pos)
+}
+
+fn outside_horizontal_bounds(pos: BlockPos) -> bool {
+    !(-30_000_000..30_000_000).contains(&pos.x) || !(-30_000_000..30_000_000).contains(&pos.z)
 }
 
 /// `if biome <pos> <biome>`：`ResourceOrTagArgument.Result.test(level.getBiome(pos))`。
@@ -575,13 +636,18 @@ fn biome_matches(region: &Region, pos: BlockPos, wanted: &str) -> Result<bool, C
     })
 }
 
-/// 官方 `ExecuteCommand.isChunkLoaded`：区块在、状态到 `ENTITY_TICKING`、实体也已加载。
+/// 官方 `ExecuteCommand.isChunkLoaded`：`getChunkNow != null`（这里对应区块在表里）、
+/// `getFullStatus() == FullChunkStatus.ENTITY_TICKING`（`ChunkLevel.fullStatus` 里
+/// 等价于加载票等级 ≤ 31）、`areEntitiesLoaded`。Bamboo 交付时已安装实体；
+/// 完整状态取加载档与已交付邻域，不使用模拟距离。
 ///
-/// Official `ExecuteCommand.isChunkLoaded`: the chunk exists, has reached
-/// `ENTITY_TICKING`, and its entities are loaded.
+/// Official `ExecuteCommand.isChunkLoaded`: `getChunkNow != null` (the chunk is in the
+/// store), `getFullStatus() == ENTITY_TICKING` (ticket level ≤ 31 in
+/// `ChunkLevel.fullStatus`), and `areEntitiesLoaded`. Bamboo installs entities on
+/// delivery; full status uses the loading tier and delivered neighbours, not simulation.
 fn chunk_loaded(region: &Region, pos: BlockPos) -> bool {
     let chunk = pos.chunk();
-    region.chunks.is_loaded(chunk) && region.tick_levels.chunk_ticks_entities(chunk)
+    region.chunks.is_loaded(chunk) && region.tick_levels.has_entity_ticking_status(chunk)
 }
 
 /// 官方 `DimensionArgument.getDimension(c, "dimension") == source.getLevel()`。Bamboo 只有
@@ -608,7 +674,7 @@ fn dimension_matches(name: &str) -> Result<bool, CommandFail> {
 /// The `biome`, `loaded`, `dimension`, `predicate`, `function`, `stopwatch`, `items` and
 /// `slots` conditions of official `ExecuteCommand`, or `None` for any other branch.
 fn named_condition(
-    region: &Region,
+    region: &mut Region,
     parsed: &ParsedCommand,
     step: &ChainStep,
     context: Context,
@@ -619,7 +685,7 @@ fn named_condition(
             .and_then(Value::as_str)
             .ok_or_else(|| fail("command.failed"))
     };
-    let position = |name: &str| block(value(name), context);
+    let position = |name: &str| block(region, value(name), context);
     Some(match layer_branch(parsed, step)? {
         "biome" => position("pos")
             .and_then(|pos| biome_matches(region, pos, text("biome")?))
@@ -652,11 +718,70 @@ fn named_condition(
             Ok(id) => fail_with("commands.stopwatch.does_not_exist", [id.to_owned().into()]),
             Err(failure) => failure,
         }),
-        // 槽位来源（`SlotSourceArgument`）和物品访问器还没有实现。
-        // Slot sources (`SlotSourceArgument`) and item accessors are not implemented.
-        "items" | "slots" => Err(fail("command.failed")),
+        // `ExecuteCommand.countItems` / `countSlots`：按槽位来源数个数或物品数量。
+        // `ExecuteCommand.countItems` / `countSlots`: count slots or item counts.
+        "items" | "slots" => slots_condition(region, parsed, step, context),
         _ => return None,
     })
+}
+
+/// `if|unless items|slots <source> <slots> [item_predicate]`。
+/// 官方两种条件都是 `createNumericConditionalHandler`，结果是数值 `Verdict::Count`；
+/// 链中间按「大于零」判真假，链尾按 `pass_count` / `fail_count` 反馈。
+///
+/// `if|unless items|slots <source> <slots> [item_predicate]`. Both official
+/// conditions use `createNumericConditionalHandler`, so the result is a numeric
+/// `Verdict::Count`: mid-chain it is true when greater than zero, at the tail it
+/// reports `pass_count` / `fail_count`.
+fn slots_condition(
+    region: &mut Region,
+    parsed: &ParsedCommand,
+    step: &ChainStep,
+    context: Context,
+) -> Result<Verdict, CommandFail> {
+    let value = |name: &str| parsed.step_value(step, name);
+    let is_items = layer_branch(parsed, step) == Some("items");
+    let Some(Value::SlotSource(ids)) = value("slots") else {
+        return Err(fail("command.failed"));
+    };
+    let predicate = if is_items {
+        Some(
+            value("item_predicate")
+                .and_then(Value::as_item_predicate)
+                .ok_or_else(|| fail("command.failed"))?,
+        )
+    } else {
+        None
+    };
+    let source = value("source").ok_or_else(|| fail("command.failed"))?;
+    let count = |view: &_| match predicate {
+        Some(predicate) => crate::command::slots::count_items(view, ids, predicate),
+        None => crate::command::slots::count_slots(view, ids),
+    };
+    let mut total: i32 = 0;
+    if let Some(selector) = Value::as_entity(source) {
+        // `EntityItemAccessor.getSlots` 把每个实体的 `SlotCollection` 拼起来。
+        // `EntityItemAccessor.getSlots` concatenates each entity's `SlotCollection`.
+        let targets = selection(region, context, selector)?;
+        if targets.is_empty() {
+            return Err(fail("argument.entity.notfound.entity"));
+        }
+        for target in targets {
+            let view = crate::command::slots::entity_slots(region, target);
+            total = total.wrapping_add(count(&view));
+        }
+    } else if Value::as_block_pos(source).is_some() {
+        let pos = loaded_block(region, block(region, Some(source), context)?)?;
+        total = count(&crate::command::slots::block_slots(
+            region,
+            pos,
+            ids,
+            predicate.is_some(),
+        )?);
+    } else {
+        return Err(fail("command.failed"));
+    }
+    Ok(Verdict::Count(total))
 }
 
 /// 算出一个条件的结果，不管它写在链中间还是链尾。
@@ -673,7 +798,7 @@ fn evaluate(
     }
     let value = |name: &str| parsed.step_value(step, name);
     let passed = if let Some(coords) = value("pos").and_then(Value::as_block_pos) {
-        let pos = BlockPos::containing(source::position(coords, base_source(context)));
+        let pos = BlockPos::containing(source::position(coords, base_source(region, context)));
         if let Some(predicate) = value("block").and_then(Value::as_block_predicate) {
             let state = region
                 .chunks
@@ -685,9 +810,9 @@ fn evaluate(
             region.chunks.block(pos).is_some()
         }
     } else if value("start").is_some() {
-        let from = block(value("start"), context)?;
-        let to = block(value("end"), context)?;
-        let destination = block(value("destination"), context)?;
+        let from = block(region, value("start"), context)?;
+        let to = block(region, value("end"), context)?;
+        let destination = block(region, value("destination"), context)?;
         let masked = has_literal(parsed, "masked", step.level);
         let volume = volume(from, to)?;
         // 官方 `BoundingBox.fromCorners(start, end)`：从两角的最小角开始数；目标盒的
@@ -914,12 +1039,12 @@ fn store_nbt_source(
         out.kind = Kind::Block;
         out.block = Some(BlockPos::containing(source::position(
             coords,
-            base_source(context),
+            base_source(region, context),
         )));
     } else if let Some(selector) = Value::as_entity(target) {
         out.kind = Kind::Entity;
         out.entity = Some(
-            select::targets_with(region, base_source(context), 4, selector)?
+            select::targets_with(region, base_source(region, context), 4, selector)?
                 .into_iter()
                 .next()
                 .ok_or_else(|| fail("argument.entity.notfound.entity"))?,
@@ -951,12 +1076,12 @@ fn nbt_source(
         out.kind = Kind::Block;
         out.block = Some(BlockPos::containing(source::position(
             coords,
-            base_source(context),
+            base_source(region, context),
         )));
     } else if let Some(selector) = value("source").and_then(Value::as_entity) {
         out.kind = Kind::Entity;
         out.entity = Some(
-            select::targets_with(region, base_source(context), 4, selector)?
+            select::targets_with(region, base_source(region, context), 4, selector)?
                 .into_iter()
                 .next()
                 .ok_or_else(|| fail("argument.entity.notfound.entity"))?,
@@ -993,25 +1118,24 @@ fn fail_with_text(_text: &str) -> CommandFail {
 }
 
 /// 把执行上下文翻译成动作会读到的 `Source`。
-fn context_to_source(region: &Region, context: Context) -> source::Source {
-    let mut out = source::of(region, context.source);
-    out.position = context.position;
-    out.yaw = context.yaw;
-    out.pitch = context.pitch;
-    out.entity = context.entity;
-    out
-}
-
 /// 当前上下文的 `source::Source` 形状，只给坐标解析用。
 fn context_source(region: &Region, id: PlayerId) -> source::Source {
     source::of(region, id)
 }
 
-fn base_source(context: Context) -> source::Source {
+fn base_source(region: &Region, context: Context) -> source::Source {
     source::Source {
         position: context.position,
         yaw: context.yaw,
         pitch: context.pitch,
+        anchor: context.anchor,
+        eye_height: if context.anchor == EntityAnchor::Eyes {
+            context
+                .entity
+                .map_or(0.0, |target| eye_height(region, target))
+        } else {
+            0.0
+        },
         entity: context.entity,
     }
 }
@@ -1023,12 +1147,7 @@ fn selection(
 ) -> Result<Vec<Target>, CommandFail> {
     // 选择器从当前上下文的位置和执行者出发；`select::targets` 目前按来源 ID 取上下文，
     // 所以这里用一个临时入口逐项过滤，避免把当前上下文写回玩家表。
-    let temporary = source::Source {
-        position: context.position,
-        yaw: context.yaw,
-        pitch: context.pitch,
-        entity: context.entity,
-    };
+    let temporary = base_source(region, context);
     select::targets_with(region, temporary, context.permission, selector)
 }
 
@@ -1049,13 +1168,30 @@ fn target_pose(region: &Region, target: Target) -> Option<(Vec3, f32, f32)> {
     }
 }
 
-fn block(value: Option<&Value>, context: Context) -> Result<BlockPos, CommandFail> {
+fn eye_height(region: &Region, target: Target) -> f64 {
+    match target {
+        Target::Player(id) => region
+            .players
+            .get(&id)
+            .map_or(0.0, crate::player::Player::eye_height),
+        Target::World(uid) => region
+            .entities
+            .get(uid)
+            .map_or(0.0, |entity| f64::from(entity.eye_height())),
+    }
+}
+
+fn block(
+    region: &Region,
+    value: Option<&Value>,
+    context: Context,
+) -> Result<BlockPos, CommandFail> {
     let coords = value
         .and_then(Value::as_block_pos)
         .ok_or_else(|| fail("command.failed"))?;
     Ok(BlockPos::containing(source::position(
         coords,
-        base_source(context),
+        base_source(region, context),
     )))
 }
 
@@ -1088,7 +1224,83 @@ fn look_angles(from: Vec3, to: Vec3) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
+    use super::{BlockPos, Target, Vec3};
     use crate::command::{commands, on_command, tests::world_with};
+
+    #[test]
+    fn positioned_over_reads_the_chosen_map_even_above_build_height() {
+        let (mut global, mut region, id) = world_with("Kitten", 2);
+        use mc_bamboo_data::blocks::{OAK_LEAVES, STONE, WATER};
+        let column = |y| BlockPos::new(4, y, 6);
+        for (y, state) in [(-58, STONE), (-57, WATER), (-55, OAK_LEAVES)] {
+            assert!(region.chunks.set_block(column(y), state));
+        }
+        for (map, y) in [
+            ("ocean_floor", -54),
+            ("motion_blocking_no_leaves", -56),
+            ("motion_blocking", -54),
+            ("world_surface", -54),
+        ] {
+            on_command(
+                &mut global,
+                &mut region,
+                id,
+                &format!(
+                    "execute positioned 4 500 6 positioned over {map} run setblock ~1 ~ ~ stone"
+                ),
+                None,
+            );
+            let placed = column(y).offset(1, 0, 0);
+            assert_eq!(region.chunks.block(placed), Some(STONE), "{map}");
+            region.chunks.set_block(placed, mc_bamboo_data::blocks::AIR);
+        }
+        assert!(
+            commands()
+                .graph
+                .parse("execute positioned over world_surface_wg run say nope", 2)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn item_conditions_read_block_slots_and_ground_items() {
+        use mc_bamboo_data::{blocks, items};
+        use mc_bamboo_protocol::item::ItemStack;
+        let chest = BlockPos::new(2, -60, 2);
+        let (mut global, mut region, id) = world_with("Kitten", 2);
+        assert!(region.chunks.set_block(chest, blocks::CHEST));
+        crate::container::entry_in(
+            &mut region.containers,
+            chest,
+            crate::container::ContainerKind::Chest,
+        )
+        .slots[0] = ItemStack::new(items::DIAMOND, 3);
+        for (condition, x) in [
+            ("if slots block 2 -60 2 container.26", 4),
+            ("if items block 2 -60 2 container.0 diamond", 5),
+            ("unless items block 2 -60 2 container.0 stick", 6),
+        ] {
+            on_command(
+                &mut global,
+                &mut region,
+                id,
+                &format!("execute {condition} run setblock {x} -60 6 stone"),
+                None,
+            );
+            assert_eq!(
+                region.chunks.block(BlockPos::new(x, -60, 6)),
+                Some(blocks::STONE)
+            );
+        }
+        let item = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::ground_item(
+                Vec3::new(4.0, -60.0, 6.0),
+                ItemStack::new(items::DIAMOND, 3),
+            ));
+        let view = crate::command::slots::entity_slots(&region, Target::World(item));
+        assert_eq!(view.get(&0).unwrap().count, 3);
+    }
 
     #[test]
     fn execute_chain_is_parsed_layer_by_layer() {

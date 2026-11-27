@@ -50,6 +50,10 @@ pub struct Extracted {
     pub item_damage_enchantments: Vec<ItemDamageEnchantment>,
     pub recipes: RecipesFile,
     pub heightmaps: Vec<HeightmapType>,
+    /// `SlotRanges.SLOTS`：每个槽位范围名对应的槽位编号，顺序官方一致。
+    /// 旧的提取结果没有这一项。
+    #[serde(default)]
+    pub slot_ranges: Vec<SlotRangeFact>,
     pub sound_tables: SoundTables,
     /// 数据包里的 `timeline` 原文：带命名空间的名字 → JSON。
     ///
@@ -780,6 +784,13 @@ pub struct HeightmapType {
     pub send_to_client: bool,
     /// `keepAfterWorldgen`：区块里一直留着这一种。
     pub keep_after_worldgen: bool,
+}
+
+/// `SlotRanges.SLOTS` 的一项：范围名和它覆盖的全部槽位编号。
+#[derive(Debug, Deserialize)]
+pub struct SlotRangeFact {
+    pub name: String,
+    pub slots: Vec<i32>,
 }
 
 /// 官方写在静态表里的方块对应关系，都是方块注册表 ID。
@@ -1524,6 +1535,8 @@ pub struct VersionData {
     pub recipes: RecipesFile,
     /// 按官方 `Heightmap.Types.values()` 的顺序。
     pub heightmaps: Vec<HeightmapType>,
+    /// `SlotRanges.SLOTS`，顺序官方一致。
+    pub slot_ranges: Vec<SlotRangeFact>,
     pub sound_tables: SoundTables,
     /// 数据包里的 `timeline` 原文：带命名空间的名字 → JSON。
     ///
@@ -1679,6 +1692,7 @@ fn read_version_data(
             ..extracted.recipes
         },
         heightmaps: extracted.heightmaps,
+        slot_ranges: extracted.slot_ranges,
         sound_tables: extracted.sound_tables,
         attribute_defaults: extracted.attribute_defaults,
         builtin_registries,

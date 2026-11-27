@@ -43,7 +43,9 @@ fn parse_item_inner(reader: &mut StringReader) -> Result<ItemInput, ParseError> 
     Ok(ItemInput { item })
 }
 
-/// 官方 `ItemPredicateArgument.itemPredicate()`，Bamboo 只支持物品和物品标签。
+/// 官方 `ItemPredicateArgument.itemPredicate()`：通配符、物品和物品标签。
+///
+/// Vanilla `ItemPredicateArgument.itemPredicate()`: wildcard, item and item tag.
 pub fn parse_item_predicate(reader: &mut StringReader) -> Result<Value, ParseError> {
     let start = reader.cursor();
     match parse_item_predicate_inner(reader) {
@@ -56,6 +58,11 @@ pub fn parse_item_predicate(reader: &mut StringReader) -> Result<Value, ParseErr
 }
 
 fn parse_item_predicate_inner(reader: &mut StringReader) -> Result<ItemPredicateInput, ParseError> {
+    if reader.can_read() && reader.peek() == '*' {
+        reader.skip();
+        reject_components(reader)?;
+        return Ok(ItemPredicateInput::Any);
+    }
     if reader.can_read() && reader.peek() == SYNTAX_START_TAG {
         reader.skip();
         let id = Identifier::read(reader)?;

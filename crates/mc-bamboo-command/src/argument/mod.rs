@@ -152,9 +152,13 @@ pub enum ArgumentType {
     ResourceOrTag {
         registry: &'static str,
     },
-    /// 官方 `HeightmapTypeArgument`：只解析名字。
+    /// 官方 `HeightmapTypeArgument`：只允许世界生成后保留的高度图。
+    ///
+    /// Vanilla `HeightmapTypeArgument`: only heightmaps kept after world generation.
     Heightmap,
-    /// 官方 `SlotSourceArgument`：只解析槽位来源文本。
+    /// 官方 `SlotSourceArgument`：字面量范围或内联槽位来源。
+    ///
+    /// Vanilla `SlotSourceArgument`: literal range or inline slot source.
     SlotSource,
     /// 官方 `LootPredicateArgument`：只解析谓词 ID。
     LootPredicate,
@@ -358,8 +362,17 @@ impl ArgumentType {
             Self::Swizzle => parse_swizzle(reader),
             Self::NbtPath => Ok(Value::String(reader.read_unquoted_string())),
             Self::ResourceOrTag { registry } => parse_resource_or_tag(reader, registry),
-            Self::Heightmap => Ok(Value::String(reader.read_unquoted_string())),
-            Self::SlotSource => Ok(Value::String(reader.read_unquoted_string())),
+            Self::Heightmap => {
+                let name = reader.read_unquoted_string();
+                if !mc_bamboo_data::heightmaps::TYPES
+                    .iter()
+                    .any(|kind| kind.keep_after_worldgen && kind.name.to_ascii_lowercase() == name)
+                {
+                    return Err(ParseError::text("argument.enum.invalid", name));
+                }
+                Ok(Value::String(name))
+            }
+            Self::SlotSource => parse_slot_source(reader),
             Self::LootPredicate => parse_loot_predicate(reader),
             Self::FloatRange => Ok(Value::String(reader.read_unquoted_string())),
             Self::Function => parse_function(reader),
@@ -551,6 +564,86 @@ fn parse_loot_predicate(reader: &mut StringReader) -> Result<Value, ParseError> 
     parse_nbt_tag(reader)
 }
 
+fn parse_slot_source(reader: &mut StringReader) -> Result<Value, ParseError> {
+    let start = reader.cursor();
+    // `SlotRanges.tryRead` 先读到空格，所以 `weapon.*` 也能正常查表。
+    // `SlotRanges.tryRead` reads to the space, so names such as `weapon.*` work.
+    while reader.can_read() && reader.peek() != ' ' {
+        reader.skip();
+    }
+    if let Some(ids) = mc_bamboo_data::slot_ranges::slots_of(&reader.slice(start, reader.cursor()))
+    {
+        return Ok(Value::SlotSource(ids.to_vec()));
+    }
+    reader.set_cursor(start);
+    if let Ok(id) = Identifier::read_non_empty(reader) {
+        return Err(ParseError::with_args(
+            "argument.resource_or_id.no_such_element",
+            [
+                ErrorArg::Text(id.to_registry_name()),
+                ErrorArg::Text("minecraft:slot_source".to_owned()),
+            ],
+        ));
+    }
+    reader.set_cursor(start);
+    let Value::Nbt(tag) = parse_nbt_tag(reader)? else {
+        return Err(ParseError::new("command.failed"));
+    };
+    let mut ids = Vec::new();
+    if collect_slot_ranges(&tag, &mut ids) {
+        Ok(Value::SlotSource(ids))
+    } else {
+        Err(ParseError::text(
+            "argument.resource_or_id.failed_to_parse",
+            "unsupported slot source",
+        ))
+    }
+}
+
+/// 容器范围、空来源和分组可以展开成有序编号；重复项按 `SlotCollection.concat` 保留。
+///
+/// Container ranges, empty sources and groups flatten to ordered ids; preserve duplicates
+/// like `SlotCollection.concat`.
+fn collect_slot_ranges(tag: &mc_bamboo_nbt::Tag, ids: &mut Vec<i32>) -> bool {
+    use mc_bamboo_nbt::Tag;
+    match tag {
+        Tag::List(terms) => terms.iter().all(|term| collect_slot_ranges(term, ids)),
+        Tag::Compound(entries) => {
+            let field = |name| {
+                entries
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, tag)| tag)
+            };
+            match field("type") {
+                Some(Tag::String(kind)) => match kind.strip_prefix("minecraft:").unwrap_or(kind) {
+                    "empty" => true,
+                    "group" => {
+                        matches!(field("terms"), Some(terms @ Tag::List(_)) if collect_slot_ranges(terms, ids))
+                    }
+                    "slot_range"
+                        if field("source").is_none_or(
+                            |source| matches!(source, Tag::String(name) if name == "container"),
+                        ) =>
+                    {
+                        let Some(Tag::String(range)) = field("slots") else {
+                            return false;
+                        };
+                        let Some(range) = mc_bamboo_data::slot_ranges::slots_of(range) else {
+                            return false;
+                        };
+                        ids.extend_from_slice(range);
+                        true
+                    }
+                    _ => false,
+                },
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 /// 官方 `FunctionArgument.parse`：`#` 开头是函数标签，否则是函数名；存不存在留到执行时查。
 ///
 /// Official `FunctionArgument.parse`: a leading `#` names a function tag, otherwise a
@@ -667,6 +760,18 @@ pub fn matches_sub_str(pattern: &str, input: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slot_source_keeps_inline_group_order_and_duplicates() {
+        let mut reader = StringReader::new(
+            r#"[{type:"slot_range", slots:"weapon.offhand"}, {type:"empty"}, {type:"slot_range",slots:"weapon.*"}, {type:"slot_range",slots:"weapon.offhand"}] run"#,
+        );
+        assert_eq!(
+            ArgumentType::SlotSource.parse(&mut reader).unwrap(),
+            Value::SlotSource([&[99], &[98, 99][..], &[99]].concat())
+        );
+        assert_eq!(reader.remaining(), " run");
+    }
 
     /// 官方三个在解析期查注册表的参数：错误键、参数和错误位置（标识符后面）。
     ///

@@ -43,8 +43,8 @@ pub use generated::{
     block_maps, block_transformers, blocks, command_argument_types, component_enums,
     component_registries, crafting_remainders, entity_types, environment, gamerules, heightmaps,
     item_components, item_damage, items, jukebox_songs, light, loot, mob_spawns, packets, poi,
-    potions, recipes, registries, saved_world, shapes, sounds, states, structure_map_tags,
-    structures, tags, version, worldgen,
+    potions, recipes, registries, saved_world, shapes, slot_ranges, sounds, states,
+    structure_map_tags, structures, tags, version, worldgen,
 };
 
 pub use generated::sounds::{

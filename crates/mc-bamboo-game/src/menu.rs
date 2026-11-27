@@ -175,6 +175,15 @@ pub(crate) struct Menu {
 }
 
 impl Menu {
+    /// 当前菜单的光标物品（`AbstractContainerMenu.getCarried`）。
+    ///
+    /// The active menu's cursor stack (`AbstractContainerMenu.getCarried`).
+    pub(crate) fn carried(&self) -> &ItemStack {
+        self.station
+            .as_ref()
+            .map_or(&self.carried, station::Station::carried)
+    }
+
     fn new(container_id: i32, kind: ContainerKind, target: Target, container_size: usize) -> Self {
         let slots_len = container_size + PLAYER_SLOTS;
         Self {
