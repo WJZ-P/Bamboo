@@ -168,6 +168,11 @@ impl ConduitBlockEntity {
         self.target
     }
 
+    /// 下一次 `AMBIENT_SHORT` 的绝对 `gameTime`，对拍夹具读它。
+    pub const fn next_ambient_sound_activation(&self) -> i64 {
+        self.next_ambient_sound_activation
+    }
+
     /// 测试 / 夹具直接注入一次目标引用。
     pub fn set_target(&mut self, target: Option<[u8; 16]>) {
         self.target = target;

@@ -16,15 +16,18 @@ use std::{
     process::{Command, Stdio},
 };
 
-use mc_bamboo_blocks::entity::EntityKind;
+use mc_bamboo_blocks::entity::{Entity, EntityKind, mob::MobType};
 use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, EntityStore, EntityTables, Level,
     LevelRandom, LevelTables, RedstoneMemory, World,
     behaviour::{
         machines::{BrewingStandEntity, CampfireEntity, FurnaceEntity},
-        misc::beacon::{
-            BeaconBlockEntity, DATA_LEVELS, DATA_PRIMARY, DATA_SECONDARY, encode_effect,
-            validate_effects,
+        misc::{
+            beacon::{
+                BeaconBlockEntity, DATA_LEVELS, DATA_PRIMARY, DATA_SECONDARY, encode_effect,
+                validate_effects,
+            },
+            conduit_entity::{ConduitBlockEntity, frame_offsets},
         },
     },
     entity::{Entities, ctx::PlayerView},
@@ -49,6 +52,8 @@ struct Document {
     runs: Vec<Run>,
     #[serde(default)]
     beacons: Vec<BeaconRun>,
+    #[serde(default)]
+    conduits: Vec<ConduitRun>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +103,50 @@ struct BeaconSaveFields {
     secondary_effect: Option<String>,
     #[serde(rename = "Levels")]
     levels: i32,
+}
+
+const CONDUIT_POS: BlockPos = BlockPos::new(0, 64, 0);
+
+#[derive(Debug, Deserialize)]
+struct ConduitRun {
+    kind: String,
+    #[serde(default)]
+    seed: i64,
+    #[serde(default)]
+    ticks: Vec<ConduitFrame>,
+    #[serde(default)]
+    uuid: Option<String>,
+    #[serde(default)]
+    saved: Option<ConduitSaveFields>,
+    #[serde(default, rename = "emptySaved")]
+    empty_saved: Option<ConduitSaveFields>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConduitFrame {
+    #[serde(rename = "gameTime")]
+    game_time: i64,
+    active: bool,
+    hunting: bool,
+    blocks: usize,
+    target: String,
+    #[serde(rename = "tickCount")]
+    tick_count: i32,
+    #[serde(rename = "nextAmbient")]
+    next_ambient: i64,
+    sounds: Vec<String>,
+    effects: Vec<[i32; 7]>,
+    seed: i64,
+    health: Vec<f32>,
+    hurts: Vec<String>,
+    #[serde(rename = "blockUpdates")]
+    block_updates: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct ConduitSaveFields {
+    #[serde(default, rename = "Target")]
+    target: Option<Vec<i32>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +200,8 @@ struct MachineLevel {
     entities: Entities,
     /// 信标对拍用的假玩家列表。
     players: Vec<PlayerView>,
+    /// 潮涌核心对拍里哪些玩家在水里 / 淋雨。
+    conduit_wet: Vec<(i32, bool)>,
 }
 
 impl MachineLevel {
@@ -165,6 +216,7 @@ impl MachineLevel {
             redstone: RedstoneMemory::default(),
             entities: Entities::default(),
             players: Vec::new(),
+            conduit_wet: Vec::new(),
         }
     }
 
@@ -177,6 +229,7 @@ impl MachineLevel {
             redstone: RedstoneMemory::default(),
             entities: Entities::default(),
             players: Vec::new(),
+            conduit_wet: Vec::new(),
         }
     }
 
@@ -276,6 +329,14 @@ impl Level for MachineLevel {
 
     fn note_block_sound(&self, _pos: BlockPos) -> Option<String> {
         None
+    }
+
+    /// 潮涌核心夹具显式注入「玩家在水里 / 淋雨」的状态。
+    fn player_in_water_or_rain(&self, player: &PlayerView) -> bool {
+        self.conduit_wet
+            .iter()
+            .find(|(uid, _)| *uid == player.uid)
+            .is_some_and(|(_, wet)| *wet)
     }
 
     fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
@@ -411,10 +472,15 @@ fn compare(document: &Document) -> Result<(), String> {
     for run in &document.beacons {
         replay_beacon(run, &mut beacon_ticks, &mut mismatches);
     }
+    let mut conduit_ticks = 0usize;
+    for run in &document.conduits {
+        replay_conduit(run, &mut conduit_ticks, &mut mismatches);
+    }
     println!(
-        "machine: {} runs ({ticks} ticks), {} beacon runs ({beacon_ticks} ticks)",
+        "machine: {} runs ({ticks} ticks), {} beacon runs ({beacon_ticks} ticks), {} conduit runs ({conduit_ticks} ticks)",
         document.runs.len(),
-        document.beacons.len()
+        document.beacons.len(),
+        document.conduits.len(),
     );
     if mismatches.is_empty() {
         println!("MACHINE RESULT: 0 mismatches");
@@ -425,6 +491,282 @@ fn compare(document: &Document) -> Result<(), String> {
         }
         Err(format!("MACHINE RESULT: {} mismatches", mismatches.len()))
     }
+}
+
+fn conduit_player(uid: i32, x: f64, y: f64, z: f64, _in_water: bool) -> PlayerView {
+    PlayerView {
+        uid,
+        uuid: None,
+        fall_flying: false,
+        main_arm_right: true,
+        position: Vec3::new(x, y, z),
+        delta: Vec3::new(0.0, 0.0, 0.0),
+        width: 0.6,
+        height: 1.8,
+        eye_height: 1.62,
+        health: 20.0,
+        look_direction: Vec3::new(0.0, 0.0, 1.0),
+        gaze_disguise: false,
+        alive: true,
+        spectator: false,
+        creative: false,
+        flying: false,
+        explosion_knockback_resistance: 0.0,
+        game_mode: 0,
+        mining_fatigue: None,
+        sneaking: false,
+        sprinting: false,
+        swimming: false,
+        invisible: false,
+        armor_cover: 0.0,
+        main_hand: 0,
+        off_hand: 0,
+        team: None,
+        yaw: 0.0,
+        pitch: 0.0,
+        combat: Default::default(),
+        effects: Default::default(),
+        shoulder_left: None,
+        shoulder_right: None,
+    }
+}
+
+fn conduit_water(level: &mut MachineLevel) {
+    for i in -2..=2 {
+        for j in -2..=2 {
+            for k in -2..=2 {
+                level.set_block(CONDUIT_POS.offset(i, j, k), BlockState::WATER);
+            }
+        }
+    }
+    level.set_block(CONDUIT_POS, BlockState(blocks::CONDUIT));
+}
+
+fn conduit_frame_blocks(level: &mut MachineLevel, count: usize) {
+    for (i, j, k) in frame_offsets().into_iter().take(count) {
+        level.set_block(CONDUIT_POS.offset(i, j, k), BlockState(blocks::PRISMARINE));
+    }
+}
+
+fn conduit_drowned(level: &mut MachineLevel, x: f64, y: f64, z: f64) -> i32 {
+    let mut entity = Entity::by_mob_type(MobType::Drowned, Vec3::new(x, y, z));
+    entity.in_water = true;
+    let id = level.entities.spawn(entity);
+    // Java 夹具显式给 UUID，Rust 侧用同一个值，便于逐刻比较 `Target`。
+    level.entities.with_mut(id, &mut |entity: &mut Entity| {
+        if let Some(mob) = entity.kind.mob_mut() {
+            mob.uuid = [
+                0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33, 0x44, 0x44, 0x55, 0x55, 0x55, 0x55,
+                0x55, 0x55,
+            ];
+            mob.health = 20.0;
+        }
+    });
+    id
+}
+
+fn conduit_target_string(entity: &ConduitBlockEntity) -> String {
+    let Some(bytes) = entity.target() else {
+        return String::new();
+    };
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+fn conduit_save_fields(fields: &[(String, Tag)]) -> ConduitSaveFields {
+    let target = fields
+        .iter()
+        .find_map(|(key, value)| match (key.as_str(), value) {
+            ("Target", Tag::IntArray(words)) => Some(words.clone()),
+            _ => None,
+        });
+    ConduitSaveFields { target }
+}
+
+fn conduit_health(level: &MachineLevel, mob_id: Option<i32>) -> Vec<f32> {
+    mob_id
+        .and_then(|id| level.entities.get(id))
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+        .into_iter()
+        .collect()
+}
+
+fn replay_conduit(run: &ConduitRun, ticks: &mut usize, mismatches: &mut Vec<String>) {
+    if run.kind == "conduit_save_roundtrip" {
+        let mut entity = ConduitBlockEntity::new(CONDUIT_POS);
+        entity.set_target(Some([
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10,
+        ]));
+        let saved = conduit_save_fields(&entity.additional());
+        if let Some(expected) = &run.saved
+            && saved != *expected
+        {
+            mismatches.push(format!(
+                "conduit_save_roundtrip saved {saved:?} != {expected:?}"
+            ));
+        }
+        let empty = conduit_save_fields(&ConduitBlockEntity::new(CONDUIT_POS).additional());
+        if let Some(expected_uuid) = &run.uuid
+            && conduit_target_string(&entity) != *expected_uuid
+        {
+            mismatches.push(format!(
+                "conduit_save_roundtrip uuid {} != {expected_uuid}",
+                conduit_target_string(&entity)
+            ));
+        }
+        if let Some(expected) = &run.empty_saved
+            && empty != *expected
+        {
+            mismatches.push(format!(
+                "conduit_save_roundtrip emptySaved {empty:?} != {expected:?}"
+            ));
+        }
+        return;
+    }
+
+    let mut level = MachineLevel::empty(run.seed);
+    conduit_water(&mut level);
+    let frame_count = if run.kind == "conduit_frame_16" {
+        16
+    } else {
+        42
+    };
+    conduit_frame_blocks(&mut level, frame_count);
+    if run.kind == "conduit_player_effects" {
+        level.players.push(conduit_player(1, 3.5, 64.0, 0.0, true));
+        level
+            .players
+            .push(conduit_player(2, 140.0, 64.0, 0.0, false));
+        level.conduit_wet = vec![(1, true), (2, false)];
+    }
+    let mob_id =
+        (run.kind == "conduit_drowned_attack").then(|| conduit_drowned(&mut level, 2.5, 64.0, 0.0));
+    let mut entity = ConduitBlockEntity::new(CONDUIT_POS);
+    let mut scheduled = BlockTicks::new();
+    let mut last_health = conduit_health(&level, mob_id)
+        .first()
+        .copied()
+        .unwrap_or(0.0);
+
+    for frame in &run.ticks {
+        let t = frame.game_time;
+        if run.kind == "conduit_dry_deactivate" && t == 40 {
+            level.set_block(CONDUIT_POS.offset(1, 1, 1), BlockState::AIR);
+        }
+        if run.kind == "conduit_dry_deactivate" && t == 80 {
+            level.set_block(CONDUIT_POS.offset(1, 1, 1), BlockState::WATER);
+        }
+        scheduled.set_time(t);
+        // 官方生物每刻 `baseTick` 把 `damageCooldownTime` 减一；夹具只 tick 方块实体，
+        // 所以要在这里显式推进，否则 40 刻后的第二次攻击会被无敌冷却挡下。
+        if let Some(id) = mob_id {
+            level.entities.with_mut(id, &mut |entity: &mut Entity| {
+                if let Some(mob) = entity.kind.mob_mut() {
+                    mob.hurt_time = (mob.hurt_time - 1).max(0);
+                    mob.damage_cooldown = (mob.damage_cooldown - 1).max(0);
+                }
+            });
+        }
+        let effects = {
+            let mut world = World::new(&mut level, &mut scheduled);
+            entity.server_tick(&mut world);
+            world.drain_effects()
+        };
+        *ticks += 1;
+
+        let label = format!("{} t={t}", run.kind);
+        let got = ConduitFrame {
+            game_time: t,
+            active: entity.is_active(),
+            hunting: entity.is_hunting(),
+            blocks: entity.effect_block_count(),
+            target: conduit_target_string(&entity),
+            tick_count: entity.tick_count,
+            next_ambient: entity.next_ambient_sound_activation(),
+            sounds: sound_names(&effects),
+            effects: player_effect_rows(&effects),
+            seed: level.random.source().seed(),
+            health: conduit_health(&level, mob_id),
+            hurts: Vec::new(),
+            block_updates: conduit_block_updates(&effects),
+        };
+        // 血量 / 伤害记录单独比（Java 侧的 `health` 来自实际受伤后的血量）。
+        let got_health = conduit_health(&level, mob_id);
+        let got_hurts = {
+            let current = got_health.first().copied().unwrap_or(0.0);
+            let out = if last_health - current > 0.0 {
+                vec![format!("magic:{:.1}", last_health - current)]
+            } else {
+                Vec::new()
+            };
+            last_health = current;
+            out
+        };
+        if got_health != frame.health {
+            mismatches.push(format!(
+                "{label} health {got_health:?} != {:?}",
+                frame.health
+            ));
+        }
+        if got_hurts != frame.hurts {
+            mismatches.push(format!("{label} hurts {got_hurts:?} != {:?}", frame.hurts));
+        }
+        if (
+            got.game_time,
+            got.active,
+            got.hunting,
+            got.blocks,
+            &got.target,
+            got.tick_count,
+            got.next_ambient,
+            &got.sounds,
+            &got.effects,
+            got.seed,
+            &got.block_updates,
+        ) != (
+            frame.game_time,
+            frame.active,
+            frame.hunting,
+            frame.blocks,
+            &frame.target,
+            frame.tick_count,
+            frame.next_ambient,
+            &frame.sounds,
+            &frame.effects,
+            frame.seed,
+            &frame.block_updates,
+        ) {
+            mismatches.push(format!(
+                "{label} state ({}, {}, {}, {}, {:?}, {}, {}, {:?}, {:?}, {}, {:?}) != ({}, {}, {}, {}, {:?}, {}, {}, {:?}, {:?}, {}, {:?})",
+                got.game_time, got.active, got.hunting, got.blocks, got.target, got.tick_count,
+                got.next_ambient, got.sounds, got.effects, got.seed, got.block_updates,
+                frame.game_time, frame.active, frame.hunting, frame.blocks, frame.target,
+                frame.tick_count, frame.next_ambient, frame.sounds, frame.effects, frame.seed,
+                frame.block_updates
+            ));
+        }
+        if mismatches.len() > 40 {
+            return;
+        }
+    }
+}
+
+fn conduit_block_updates(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::ConduitChanged { pos } => Some(format!("{},{},{},2", pos.x, pos.y, pos.z)),
+            _ => None,
+        })
+        .collect()
 }
 
 fn beacon_player(uid: i32, x: f64, y: f64, z: f64, spectator: bool) -> PlayerView {
