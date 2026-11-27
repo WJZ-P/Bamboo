@@ -709,7 +709,9 @@ WebView2 的渲染进程不算在内。
   游戏里放置，`gen-world --through features` 目前逐方块对拍的是矿石（8 个中心 / 7077888 方块 0 不一致），
   其余已移植类型由 `chunkgen` 单独对拍；还没移植的类型照对拍的做法标 `unsupported` 跳过。
   `initialize_light` / `light` 两个阶段在流水线里用邻居快照算出生成期光照，交付的区块带 `isLightOn=true`，
-  不再等运行时补算（`gen-light` 对拍）。`structure_starts` / `structure_references` 已接成纯函数重算
+  不再等运行时补算（`gen-light` 对拍）。相邻 LIGHT 任务共享完整 FEATURES 后方块层；保留两格外
+  地物的溢出写，不缩小生成范围（`docs/performance-optimizations.md` §31）。
+  `structure_starts` / `structure_references` 已接成纯函数重算
   （半径 8 邻域 + 线程本地缓存），terrain 注入真实 `Beardifier`，features 每个 decoration step 先放结构件
   再放地物，区块 NBT 写 `structures` 键并能读盘恢复；`structure-pipeline` 对拍把官方 17×17 的
   `createStructures` / `createReferences` 与游戏里的同一条路径逐项比（28 行 / 2482 结构件 0 不一致，

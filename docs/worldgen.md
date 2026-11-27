@@ -4,7 +4,7 @@
 函数和它的区块级对拍：群系（`BIOMES`）、噪声填充（`NOISE`）、地表规则（`SURFACE`）、雕刻器
 （`CARVERS`），以及后续 `features` / 结构 / 生成期光照接进 Director 的 `Staged` 流水线。
 地物、结构、生成期光照（含 `LIGHT` 阶段的 FEATURES 后输入）、`PostProcessing` 位置表和
-`pale_moss` / 苍白橡树都已逐方块 / 逐格对拍；生成期刷怪（`spawn`）仍是空实现，
+`pale_moss` / 苍白橡树都已逐方块 / 逐格对拍；生成期刷怪已读取交付盒子的方块和光照。
 其他剩余缺口见文末「还没做」和
 [`docs/worldgen-remaining.md`](worldgen-remaining.md)。非 `full` 区块续跑由
 `worldgen-resume` 分支单独负责，这一篇不覆盖。
@@ -672,10 +672,12 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
 官方 `ChunkPyramid.GENERATION_PYRAMID` 里 `LIGHT` 的直接依赖是半径 1 的
 `INITIALIZE_LIGHT`，每格的 `INITIALIZE_LIGHT` 又排在 `FEATURES` 之后；光引擎经
 `LightChunkGetter` 读到的是中心 3×3 跑完 FEATURES 后的方块，包括邻居中心溢进来的写。
-`mc_bamboo_game::worldgen_light::generate_light_stage` 照做：把流水线存的不可变 CARVERS
-快照拼成 3×3，对每格用与完工组装同一份 `feature_writes_into` + `merge_feature_writes`
-规则折进 9 个来源中心的地物写，再交给 `generate_light_from_layers`。树冠、萤石、灯笼、
-结构光源因此都参与生成期光照；`isLightOn=true` 交付后运行时不会补算。
+`mc_bamboo_game::worldgen_light::generate_light_stage` 把流水线存的不可变 CARVERS
+快照拼成 3×3，每格仍折进全部 9 个来源中心的地物写。光照只读方块，所以直接借用
+来源增量，按完工组装的优先级逆序覆盖，不复制标记和实体；邻接 LIGHT 任务按地形快照
+身份共享这些完整方块层，再交给 `generate_light_from_layers`。两格外来源溢进邻居的
+方块也参与光照；`isLightOn=true` 交付后不依赖运行时补算。缓存不会缩小 FEATURES
+依赖或改变交付内容，详见 `performance-optimizations.md` §31。
 
 `light-pipeline` 是新增的整块对拍：`ChunkgenOracle.java --light-pipeline` 在 JVM 里让
 5×5 个来源中心各自在干净 3×3 上跑官方 FEATURES，按游戏固定先后反向合并成中心 3×3，
@@ -1103,14 +1105,15 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
   `mc_bamboo_world::light::generate::generate_light_from_layers` 在 `light` 阶段算好
   天空光 / 方块光，完工装进交付盒子并标 `isLightOn=true`，不再等运行时光照引擎补算；
   `gen-light` 对拍逐格 0 不一致。输入也已对齐：`generate_light_stage_with_input`
-  用与完工组装同一份 `feature_writes_into` + `merge_feature_writes` 把 9 个来源
-  中心的 FEATURES 写折进 3×3，再交给光引擎；`light-pipeline` 整块对拍（带结构 /
+  按完工组装的来源优先级，把全部 9 个来源中心的 FEATURES 写折进 3×3，邻接任务
+  共享物化后的层，再交给光引擎；`light-pipeline` 整块对拍（带结构 /
   不带结构）逐格证明流水线挑的方块与官方 LIGHT 一致，`--break-carvers` 改坏确认
   会把输入退回 CARVERS 并报差异。
-* `spawn` 刷怪仍是空实现：官方 `ChunkStatusTasks.generateSpawn` →
+* 生成期刷怪已接入：官方 `ChunkStatusTasks.generateSpawn` →
   `ChunkGenerator.spawnOriginalMobs` → `NaturalSpawner.spawnMobsForChunkGeneration`
-  用群系 `CREATURE` 加权表、环境属性和 `SpawnPlacements` 放动物；Bamboo 的
-  `MobType` 目前只有牛，群系刷怪表 / 环境属性没导出，也没有生成期刷怪 oracle。
+  用群系 `CREATURE` 加权表、环境属性和 `SpawnPlacements` 放动物；Bamboo 在世界线程
+  组装好最终方块和光照后跑同一判定，生成的实体随区块交付。具体对拍和未建模物种的
+  限制见 README「生成期刷怪」。
 * 下界和末地：三套 `noise_settings`、下界多噪声预设、五群系末地源、无 `aquifers` 的
   `Aquifer.createDisabled` 已导出 / 对拍；`chunkgen --settings nether|end --through carvers`
   0 不一致，但 Java 侧末地 `preset` 仍是 `minecraft:overworld`，不是真正的
