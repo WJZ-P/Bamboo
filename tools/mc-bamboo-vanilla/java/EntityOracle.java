@@ -201,6 +201,7 @@ public final class EntityOracle {
             cases += minecartChestSave(official, out);
             cases += minecartAnimal(official, out, false);
             cases += minecartAnimal(official, out, true);
+            cases += hopperEjectsIntoMinecart(official, out);
             cases += boatStillWater(official, out);
             cases += boatIceSlide(official, out);
             cases += boatWaterCurrent(official, out);
@@ -1149,6 +1150,7 @@ public final class EntityOracle {
         EntityType<? extends net.minecraft.world.entity.Mob> animal;
         double animalX;
         double animalZ;
+        int[] hopperSlots;
         Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
     }
 
@@ -1381,6 +1383,17 @@ public final class EntityOracle {
         return playMinecart(official, out, spec);
     }
 
+    private static int hopperEjectsIntoMinecart(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "hopper_ejects_into_chest_minecart";
+        spec.type = EntityTypes.CHEST_MINECART;
+        rails(spec, -1, 1, rail(RailShape.NORTH_SOUTH));
+        spec.blocks.put(BlockPos.asLong(0, 65, 0), Blocks.HOPPER.defaultBlockState());
+        spec.hopperSlots = new int[] {0, 65, 0, BuiltInRegistries.ITEM.getId(Items.APPLE), 3};
+        spec.ticks = 20;
+        return playMinecart(official, out, spec);
+    }
+
     /** 造一辆官方矿车、逐刻跑、把每刻的实体状态写成一题 case。 */
     private static int playMinecart(Official official, Writer out, MinecartSpec spec) throws Exception {
         FakeLevel level = FakeLevel.create(official, spec.levelSeed);
@@ -1415,6 +1428,14 @@ public final class EntityOracle {
             }
         }
         scene.active.add(cart);
+        if (spec.hopperSlots != null) {
+            int[] slots = spec.hopperSlots;
+            BlockPos pos = new BlockPos(slots[0], slots[1], slots[2]);
+            HopperBlockEntity hopper = new HopperBlockEntity(pos, level.getBlockState(pos));
+            hopper.setItem(0, new ItemStack(BuiltInRegistries.ITEM.byId(slots[3]), slots[4]));
+            level.blockEntities.put(pos.asLong(), hopper);
+            scene.hoppers.add(hopper);
+        }
         if (spec.animal != null) {
             var mob = spec.animal.create(level, EntitySpawnReason.COMMAND);
             level.addFreshEntity(mob);
@@ -1453,6 +1474,11 @@ public final class EntityOracle {
         out.write(",\"vx\":" + spec.vx + ",\"vy\":" + spec.vy + ",\"vz\":" + spec.vz);
         out.write(",\"saveAt\":" + spec.saveAt);
         out.write(",\"fuel\":" + spec.fuel + ",\"pushX\":" + spec.pushX + ",\"pushZ\":" + spec.pushZ);
+        if (spec.hopperSlots != null) {
+            int[] slots = spec.hopperSlots;
+            out.write(",\"minecartHopperSource\":[" + slots[0] + "," + slots[1] + "," + slots[2]
+                    + "," + slots[3] + "," + slots[4] + "]");
+        }
         if (spec.animal != null) {
             out.write(",\"minecartAnimal\":{\"type\":" + BuiltInRegistries.ENTITY_TYPE.getId(spec.animal)
                     + ",\"x\":" + spec.animalX + ",\"z\":" + spec.animalZ + "}");

@@ -155,6 +155,7 @@ struct Case {
     #[serde(default)]
     extras: Vec<ExtraItem>,
     minecart_animal: Option<MinecartAnimal>,
+    minecart_hopper_source: Option<[i32; 5]>,
     #[serde(default)]
     hopper: bool,
     /// 这一题里固定的移动活塞方块实体。官方场景不 tick 它们，形状每刻一样。
@@ -1022,6 +1023,12 @@ impl Report {
             self.break_name.as_deref() == Some("minecart-blocks"),
         ))];
         level.place(blocks);
+        if let Some([x, y, z, item, count]) = case.minecart_hopper_source {
+            let pos = BlockPos::new(x, y, z);
+            level.with_container(pos, &mut |container| {
+                container.set(0, ItemStack::new(item, count));
+            });
+        }
         let mut ticks = BlockTicks::new();
         let mut world = World::new(&mut level, &mut ticks);
         let broken_kind = if self.break_name.as_deref() == Some("minecart-type") {
@@ -1102,18 +1109,27 @@ impl Report {
             self.mismatch(format!("{}: no steps", case.name));
             return;
         }
-        let hoppers: Vec<BlockPos> = Vec::new();
+        let mut hoppers = Vec::new();
+        if let Some([x, y, z, _, _]) = case.minecart_hopper_source {
+            let pos = BlockPos::new(x, y, z);
+            world.set_block_entity(Box::new(HopperEntity::new(pos)));
+            hoppers.push(pos);
+        }
         self.compare_step(&case.name, 0, &mut world, None, &case.steps[0], &hoppers);
         for (index, step) in case.steps.iter().enumerate().skip(1) {
             if case.save_at >= 0 && index - 1 == case.save_at as usize {
                 minecart_archive_roundtrip(&mut world, id);
             }
-            let ticked = if case.minecart_animal.is_some() {
+            let mut ticked = if case.minecart_animal.is_some() {
                 world.tick_entities();
                 world.live_entities()
             } else {
                 world.tick_entities_kept()
             };
+            if !hoppers.is_empty() {
+                world.tick_block_entities();
+                refresh_after_hopper(&mut world, &mut ticked);
+            }
             self.steps += 1;
             self.compare_step(&case.name, index, &mut world, Some(&ticked), step, &hoppers);
             if self.mismatches.len() >= 12 {

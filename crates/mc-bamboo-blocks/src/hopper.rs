@@ -406,13 +406,28 @@ fn eject_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> b
     let destination = pos.relative(facing);
     let direction = facing.opposite();
 
-    // `getContainerAt`：目标不是容器时什么也不做。世界里的实体不是容器。
-    let full = query(world, destination, &mut |container| {
+    let destination_entity = match query(world, destination, &mut |container| {
         is_full_container(container, Some(direction))
-    });
-    if full != Some(false) {
-        return false;
-    }
+    }) {
+        Some(true) => return false,
+        Some(false) => None,
+        None => {
+            // `getContainerAt` 先选方块容器，只有缺失时才抽一次实体容器。
+            // `getContainerAt` chooses the block container first and only draws an entity if absent.
+            let Some(uid) = pick_entity_container(world, block_cell(destination), None) else {
+                return false;
+            };
+            world.unpack_entity_container_loot_table(uid);
+            let full = world.entity(uid).is_none_or(|mut entity| {
+                entity_container_slots(&mut entity)
+                    .is_none_or(|slots| is_full_container(&slots, Some(direction)))
+            });
+            if full {
+                return false;
+            }
+            Some(uid)
+        }
+    };
 
     for slot in 0..HOPPER_CONTAINER_SIZE {
         let Some(item) = query(world, pos, &mut |container| container.get(slot)) else {
@@ -431,21 +446,34 @@ fn eject_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> b
         if source.is_none() {
             continue;
         }
-        let destination_written = world.silent_container(destination, &mut |container| {
-            inserted = Some(add_item(container, taken.clone(), Some(direction)));
-        });
-        let Some(inserted) = inserted.filter(|_| destination_written.is_some()) else {
+        if let Some(uid) = destination_entity {
+            let mut taken = Some(taken);
+            world.with_listed_entity_mut(uid, &mut |entity| {
+                if let Some(mut slots) = entity_container_slots(entity)
+                    && let Some(stack) = taken.take()
+                {
+                    inserted = Some(add_item(&mut slots, stack, Some(direction)));
+                }
+            });
+        } else {
+            world.silent_container(destination, &mut |container| {
+                inserted = Some(add_item(container, taken.clone(), Some(direction)));
+            });
+        }
+        let Some(inserted) = inserted else {
             world.silent_container(pos, &mut |container| container.set(slot, item.clone()));
             continue;
         };
 
         if inserted.remaining.is_empty() {
             // `addItem` 成功时两侧的静默写已经各自通知过。冷却和比较器通知照官方。
-            let destination_state = world.block_state(destination);
-            if inserted.was_empty && destination_state.is_a(BlockAncestor::HopperBlock) {
-                apply_hopper_cooldown(world, destination, Some(entity.ticked_game_time()));
+            if destination_entity.is_none() {
+                let destination_state = world.block_state(destination);
+                if inserted.was_empty && destination_state.is_a(BlockAncestor::HopperBlock) {
+                    apply_hopper_cooldown(world, destination, Some(entity.ticked_game_time()));
+                }
+                set_changed(world, destination);
             }
-            set_changed(world, destination);
             return true;
         }
 
@@ -654,6 +682,22 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
     false
 }
 
+fn entity_container_slots(entity: &mut Entity) -> Option<Slots<'_>> {
+    let items = match &mut entity.kind {
+        EntityKind::Boat(boat) => &mut boat.chest.as_mut()?.items,
+        EntityKind::Minecart(cart) if cart.is_container() => &mut cart.items,
+        _ => return None,
+    };
+    Some(Slots::new(items))
+}
+
+fn block_cell(pos: BlockPos) -> Aabb {
+    let x = f64::from(pos.x);
+    let y = f64::from(pos.y);
+    let z = f64::from(pos.z);
+    Aabb::new(x, y, z, x + 1.0, y + 1.0, z + 1.0)
+}
+
 /// 官方 `HopperBlockEntity.getEntityContainer`（`EntitySelector.CONTAINER_ENTITY_SELECTOR`）：
 /// 收集 `cell` 内全部活着的容器实体（运输船、运输矿车、漏斗矿车），非空时用
 /// `level.getRandom().nextInt(size)` 随机挑一个（size 为 1 也要抽一次），
@@ -663,18 +707,17 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
 /// collect every live container entity (chest boat, chest minecart, hopper minecart) overlapping
 /// `cell`, and when non-empty draw `level.getRandom().nextInt(size)` (even for size 1).
 fn pick_entity_container(world: &mut World, cell: Aabb, exclude: Option<i32>) -> Option<i32> {
-    let containers = world
-        .entity_ids()
-        .into_iter()
-        .filter(|&id| {
-            exclude != Some(id) && world.entity(id).is_some_and(|found| {
-                !found.removed
-                    && (matches!(&found.kind, EntityKind::Boat(data) if data.chest.is_some())
-                        || matches!(&found.kind, EntityKind::Minecart(cart) if cart.is_container()))
-                    && found.bounding_box().intersects(cell)
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut containers = Vec::new();
+    world.level().for_each_entity_in_section_order(cell, &mut |found| {
+        if exclude != Some(found.uid) && !found.removed
+            && (matches!(&found.kind, KindPublic::Boat(boat) if crate::entity::boat::is_chest(boat.entity_type))
+                || matches!(&found.kind, KindPublic::Minecart(cart)
+                    if crate::entity::minecart::MinecartKind::from_entity_type(cart.entity_type)
+                        .is_some_and(|kind| kind.container_size() > 0)))
+        {
+            containers.push(found.uid);
+        }
+    });
     if containers.is_empty() {
         return None;
     }
@@ -697,15 +740,7 @@ fn suck_from_entity_container(
     pos: BlockPos,
     entity: &mut HopperEntity,
 ) -> Option<bool> {
-    let cell = Aabb::new(
-        f64::from(pos.x),
-        f64::from(pos.y) + 1.0,
-        f64::from(pos.z),
-        f64::from(pos.x) + 1.0,
-        f64::from(pos.y) + 2.0,
-        f64::from(pos.z) + 1.0,
-    );
-    let container_entity = pick_entity_container(world, cell, None)?;
+    let container_entity = pick_entity_container(world, block_cell(pos.above()), None)?;
     // `unpackChestVehicleLootTable(null)`：漏斗读的是容器接口，没有玩家 / 幸运值。
     world.unpack_entity_container_loot_table(container_entity);
     let mut items = match world.entity(container_entity).map(|found| found.kind) {
