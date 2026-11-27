@@ -12,7 +12,7 @@ mkdir -p -- "$out"
 
 sample_cpu() {
     if command -v powershell.exe >/dev/null; then
-        powershell.exe -NoProfile -NonInteractive -Command +            '(Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor | Where-Object Name -eq "_Total").PercentProcessorTime' +            2>/dev/null | tr -d '\r\n' || true
+        powershell.exe -NoProfile -NonInteractive -Command '(Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor | Where-Object Name -eq "_Total").PercentProcessorTime' 2>/dev/null | tr -d '\r\n' || true
     fi
 }
 
@@ -25,6 +25,7 @@ run() {
     wait "$!"
 }
 
+status=0
 for threads in 1 4 8; do
     if (( round % 2 == 1 )); then
         run main "$main" "$threads"
@@ -33,8 +34,11 @@ for threads in 1 4 8; do
         run exact "$exact" "$threads"
         run main "$main" "$threads"
     fi
-    cmp "$out/r$round-t$threads-main.blocks" "$out/r$round-t$threads-exact.blocks"
-    cmp "$out/r$round-t1-main.blocks" "$out/r$round-t$threads-exact.blocks"
-    printf 'round=%s threads=%s block_bytes_equal=%s\n' "$round" "$threads" \
-        "$(wc -c <"$out/r$round-t$threads-main.blocks")"
+    if cmp "$out/r$round-t$threads-main.blocks" "$out/r$round-t$threads-exact.blocks" &&
+        cmp "$out/r$round-t1-main.blocks" "$out/r$round-t$threads-exact.blocks"; then
+        printf 'round=%s threads=%s block_bytes_equal=%s\n' "$round" "$threads" "$(wc -c <"$out/r$round-t$threads-main.blocks")"
+    else
+        status=1
+    fi
 done
+exit "$status"
