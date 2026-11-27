@@ -193,7 +193,7 @@ pub fn replay_boat_facts(nbt: &str, seed: i64) -> Result<BoatFactsSample, String
             .map(|&(item, _)| item)
             .ok_or("hopper container missing")?;
         let reloaded = archive_round_trip(nbt)?;
-        return Ok(BoatFactsSample {
+        Ok(BoatFactsSample {
             title,
             land_x: landing.x.to_bits() as i64,
             land_y: landing.y.to_bits() as i64,
@@ -202,6 +202,6 @@ pub fn replay_boat_facts(nbt: &str, seed: i64) -> Result<BoatFactsSample, String
             selected_item,
             seed_before,
             seed_after,
-        });
+        })
     }
 }
