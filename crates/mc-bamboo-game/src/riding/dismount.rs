@@ -29,7 +29,14 @@ const PLAYER_POSES: [(f64, f64); 3] = [(0.6, 1.8), (0.6, 1.5), (0.6, 0.6)];
 ///
 /// Vanilla `Entity.getCollisionHorizontalEscapeVector`.
 fn escape_vector(vehicle_width: f64, passenger_width: f64, degrees: f32) -> Vec3 {
-    let distance = (vehicle_width + passenger_width + 1.0e-5) / 2.0;
+    // 官方 `getCollisionHorizontalEscapeVector(double, double, float)` 的三个实参
+    // 都是 f32 实体宽 / 常量提升来的 double：`1.0E-5F` 也是先按 f32 存再提升。
+    // 直接用 f64 字面量会让落点差一个 ulp。
+    //
+    // Vanilla widens the f32 widths and the `1.0E-5F` constant to double before
+    // the arithmetic; plain f64 literals shift the landing by an ulp.
+    let distance =
+        (vehicle_width + f64::from(passenger_width as f32) + f64::from(1.0e-5_f32)) / 2.0;
     let radians = degrees * (std::f32::consts::PI / 180.0);
     let direction_x = -f64::from(mth::sin(f64::from(radians)));
     let direction_z = f64::from(mth::cos(f64::from(radians)));
