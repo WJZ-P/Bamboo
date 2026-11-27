@@ -208,6 +208,7 @@ enum Line {
     Egg(Box<egg::EggCase>),
     EggThrow(egg::EggThrowCase),
     EggDispense(egg::EggDispenseCase),
+    DispenserSpawnEgg(egg::DispenserSpawnEggCase),
     EnderPearl(Box<ender_pearl::PearlCase>),
     PearlThrow(ender_pearl::PearlThrowCase),
     Squid(Box<squid::SquidCase>),
@@ -2451,6 +2452,7 @@ impl Report {
                 Line::Egg(case) => self.replay_egg(&case),
                 Line::EggThrow(case) => self.replay_egg_throw(&case),
                 Line::EggDispense(case) => self.replay_egg_dispense(&case),
+                Line::DispenserSpawnEgg(case) => self.replay_dispenser_spawn_egg(&case),
                 Line::EnderPearl(case) => self.replay_ender_pearl(&case),
                 Line::PearlThrow(case) => self.replay_pearl_throw(&case),
                 Line::Squid(case) => self.replay_squid(&case),
@@ -4404,6 +4406,19 @@ impl Report {
         }
     }
 
+    fn replay_dispenser_spawn_egg(&mut self, case: &egg::DispenserSpawnEggCase) {
+        let break_test = self.break_test.clone();
+        let before = self.mismatches.len();
+        case.replay(self, break_test.as_deref());
+        if let Some(break_test) = break_test.as_deref()
+            && self.mismatches.len() > before
+        {
+            for message in &mut self.mismatches[before..] {
+                *message = format!("{break_test}: {message}");
+            }
+        }
+    }
+
     fn mismatch(&mut self, message: String) {
         if self.mismatches.len() < self.show.max(1) {
             self.mismatches.push(message);
@@ -5119,6 +5134,23 @@ impl Report {
         self.patrol_spawns.print();
         self.structure_spawns.print();
         self.gen_spawns.print();
+        let break_test = self.break_test.clone();
+        if let Some(name) = break_test.as_deref() {
+            let deliberate = self
+                .mismatches
+                .iter()
+                .any(|message| message.starts_with(&format!("{name}:")));
+            if !deliberate {
+                return Err(format!(
+                    "mob oracle self-test ({name}) detected no deliberate break"
+                ));
+            }
+            println!(
+                "mob oracle self-test ({name}): detector works ({} mismatches)",
+                self.mismatches.len()
+            );
+            return Ok(());
+        }
         if self.break_test.as_deref() == Some("gen_spawn") && self.gen_spawns.cases == 0 {
             return Err("gen spawn break-self-test ran no cases".to_owned());
         }

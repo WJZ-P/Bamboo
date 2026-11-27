@@ -1,30 +1,27 @@
-//! 会生成实体的注册表行为。刷怪蛋和弹射物仍不生成实体。
-//! 盔甲架在发射器正前方生成，TNT 物品在规则为真时生成点燃的 TNT。
+//! 会生成实体的注册表行为。船、运输船、刷怪蛋、盔甲架和矿车都生成对应实体。
+//! TNT 物品在规则为真时生成点燃的 TNT。
 //!
-//! 船放得下时只扣物品、不取 `level.random`，外层一次 1000 和 2000；矿车放得下时还要生成实体。
-//! 放不下时套一层默认抛出。
+//! 船放得下时按 `BoatDispenseItemBehavior` 生成船、扣一个，不取 `level.random`，外层一次 1000 和 2000；
+//! 放不下时套一层默认抛出。矿车同理。
 //! 盔甲架照 `DispenseItemBehavior$1` 生成实体、应用 `entity_data`、扣一个，取一次 `level.random`；
-//! 带实体数据的刷怪蛋走 `spawn` 返回 null：物品留着，一次 1000。
-//! 没有实体数据的刷怪蛋是默认抛出。TNT 物品在 `tntExplodes` 为真时生成 `PrimedTnt`。
-//! 箭、蛋、雪球、药水、烟花、火焰弹和风弹走默认抛出。官方那些用的是弹射物事件，不是这套随机数。
+//! 刷怪蛋照 `SpawnEggItemBehavior` 在前方一格生成 `ENTITY_DATA` 指定的生物、扣一个并投递
+//! `ENTITY_PLACE`，带实体数据的物品缺少类型或类型未建模时物品留着；没有实体数据时是默认抛出。
+//! TNT 物品在 `tntExplodes` 为真时生成 `PrimedTnt`。
 //!
-//! Registry behaviours that spawn an entity. Spawn eggs and projectiles still do not create one.
-//! An armour stand spawns in front of the dispenser; a TNT item spawns primed TNT when the
-//! rule is true.
+//! Registry behaviours that spawn an entity. Boats, chest boats, spawn eggs, armour stands
+//! and minecarts all spawn their entity; a TNT item spawns primed TNT when the rule is true.
 //!
-//! A boat that can be placed only consumes the item; a minecart also spawns the entity.
-//! Neither draws from `level.random`, and the outer dispense plays 1000 and 2000 once.
-//! Otherwise it nests a default throw. An armour stand follows `DispenseItemBehavior$1`: spawn the entity, apply
-//! `entity_data`, shrink one item and draw one `level.random` value. A spawn egg that carries
-//! entity data follows `spawn` returning null: the item stays and 1000 plays once. A spawn egg
-//! without entity data is a default throw. A TNT item spawns a `PrimedTnt` when `tntExplodes`
-//! is true. Arrows, eggs, snowballs, potions, fireworks, fire charges and wind charges take
-//! the default throw. Official uses a projectile event for those, not these random draws.
+//! A placeable boat follows `BoatDispenseItemBehavior`: spawn the boat, shrink one item, draw
+//! nothing from `level.random`; the outer dispense plays 1000 and 2000 once. Otherwise it nests
+//! a default throw, as does a minecart. An armour stand follows `DispenseItemBehavior$1` and
+//! draws one `level.random` value. A spawn egg follows `SpawnEggItemBehavior`: spawn the mob
+//! named by `ENTITY_DATA` one cell in front, shrink one item and post `ENTITY_PLACE`. A stack
+//! without entity data is a default throw; one with an unknown or unmodelled type stays put.
 
 use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::{
-    items, registries::data_component_type as kinds, registries::entity_type, tags::block_tags,
-    tags::fluid_tags,
+    entity_types, items, registries::data_component_type as kinds, registries::entity_type,
+    tags::block_tags, tags::fluid_tags,
 };
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{
@@ -41,8 +38,9 @@ use crate::{
         Entity,
         arrow::{ArrowShot, Pickup},
         minecart::MinecartKind,
-        mob::{MobType, nbt},
+        mob::{MobType, nbt, spawn},
     },
+    game_event::{GameEvent, dispatch::EventContext},
     state::{RAIL_SHAPE, RailShape},
     world::World,
 };
@@ -148,26 +146,63 @@ pub(super) fn is_spawn_egg(item: i32) -> bool {
     item_name(item).is_some_and(|name| name.ends_with("_spawn_egg"))
 }
 
-/// 带 `ENTITY_DATA` 时走 `spawn` 返回 null：物品留着，不取 `nextFloat`。
-/// 没有这份数据时是默认抛出。
+/// `SpawnEggItemBehavior.execute`。`SpawnEggItem.getType(stack)` 只读显式的
+/// `ENTITY_DATA`；没有这份组件时 `getDispenseMethod` 走默认抛出。
+/// 类型未建模或 `EntityType.canSpawn` 为假时等价于 `spawn` 返回 null：物品留着。
+/// 成功后 `shrink(1)` 并在发射器自己的格子发 `ENTITY_PLACE`。
 ///
-/// With `ENTITY_DATA`, follow `spawn` returning null: the item stays and `nextFloat` is not drawn.
-/// Without that component this is a default throw.
+/// `SpawnEggItemBehavior.execute`. `SpawnEggItem.getType(stack)` reads the explicit
+/// `ENTITY_DATA` component; without it `getDispenseMethod` takes the default throw.
+/// An unmodelled type or a failed `EntityType.canSpawn` acts like `spawn` returning null:
+/// the item stays. On success one item is consumed and `ENTITY_PLACE` fires at the
+/// dispenser's own cell.
 pub(super) fn spawn_egg(
     world: &mut World,
     pos: BlockPos,
     facing: Direction,
     stack: ItemStack,
 ) -> Shot {
-    let has_data = defaults::resolve(stack.item, &stack.patch(), kinds::ENTITY_DATA).is_some();
-    if !has_data {
+    let patch = stack.patch();
+    let Some(ComponentValue::EntityData(data)) =
+        defaults::resolve(stack.item, &patch, kinds::ENTITY_DATA)
+    else {
         return Shot::plain(throw_one(world, pos, facing, stack));
-    }
-    // `type.spawn` 返回 null，或者 `getType` 是 null：物品原样返回，不取 `nextFloat`。
+    };
+    // `EntityType.create` 的 `canSpawn`：和平难度拦下敌对生物，不取随机数。
+    // `EntityType.create`'s `canSpawn`: hostile mobs are refused on peaceful,
+    // before any random draw.
+    let Some(kind) = MobType::by_entity_type(data.kind)
+        .filter(|kind| kind.allowed_in_peaceful() || world.difficulty_id() != 0)
+    else {
+        return Shot::plain(stack);
+    };
+    let custom_name = match defaults::resolve(stack.item, &patch, kinds::CUSTOM_NAME) {
+        Some(ComponentValue::CustomName(name)) => Some(name.tag().clone()),
+        _ => None,
+    };
+    // `EntityType.spawn(..., DISPENSER, facing != UP, false)`：前方一格，`shouldOffsetY`
+    // 除朝上外都为真，`offsetMore` 恒假。
     //
-    // `type.spawn` returned null, or `getType` is null: the stack is returned unchanged.
-    // The `nextFloat` is not drawn.
-    Shot::plain(stack)
+    // `EntityType.spawn(..., DISPENSER, facing != UP, false)`: one cell in front;
+    // `shouldOffsetY` is true except when facing up, `offsetMore` is always false.
+    spawn::spawn_dispenser_egg(
+        world,
+        kind,
+        pos.relative(facing),
+        facing != Direction::Up,
+        custom_name,
+        &data.tag,
+    );
+    world.game_event(
+        GameEvent::EntityPlace,
+        Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.5,
+            f64::from(pos.z) + 0.5,
+        ),
+        EventContext::default(),
+    );
+    Shot::plain(without_one(&stack))
 }
 
 /// 注册表里的 TNT 物品。规则为假时物品留着，不取随机数。
@@ -194,21 +229,96 @@ fn dispense_tnt(world: &mut World, pos: BlockPos, facing: Direction, stack: Item
 }
 
 /// `BoatDispenseItemBehavior`。前方的流体是水，或者前方是空气且下面是水，才算放得下。
+/// 落点是发射器方块中心沿朝向出去 `0.5625 + 宽度 / 2` 格（船的宽是 1.375），
+/// y 另加 `facing.stepY * 1.125` 和放得下时的一格高度；朝向是 `facing.toYRot()`。
+/// `createDefaultStackConfig` 应用物品的名字和 `ENTITY_DATA`，随后扣一个。
 ///
 /// `BoatDispenseItemBehavior`. It can be placed when the front fluid is water, or the front
-/// block is air and the block below is water.
+/// block is air and the block below is water. The spawn point sits `0.5625 + width / 2`
+/// cells out from the dispenser centre (boats are 1.375 wide), with
+/// `facing.stepY * 1.125` and one extra cell for a front water block. Its facing is
+/// `facing.toYRot()`. `createDefaultStackConfig` applies the stack's name and
+/// `ENTITY_DATA` before one item is consumed.
 fn boat(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -> Shot {
     let front = pos.relative(facing);
-    let on_water = world.fluid_state(front).is_tagged(fluid_tags::WATER)
-        || world.block_state(front).is_air()
-            && world
-                .fluid_state(front.below())
-                .is_tagged(fluid_tags::WATER);
-    if on_water {
-        Shot::plain(without_one(&stack))
+    let water_offset = if world.fluid_state(front).is_tagged(fluid_tags::WATER) {
+        Some(1.0)
+    } else if world.block_state(front).is_air()
+        && world
+            .fluid_state(front.below())
+            .is_tagged(fluid_tags::WATER)
+    {
+        Some(0.0)
     } else {
-        Shot::plain(nested_default(world, pos, facing, stack))
+        None
+    };
+    let Some(water_offset) = water_offset else {
+        return Shot::plain(nested_default(world, pos, facing, stack));
+    };
+    let Some(boat_type) = crate::entity::boat::entity_type_for_item(stack.item) else {
+        return Shot::plain(nested_default(world, pos, facing, stack));
+    };
+    let width = entity_types::FACTS
+        .get(boat_type as usize)
+        .map_or(1.375_f32, |facts| facts.width);
+    let reach = 0.5625 + f64::from(width) / 2.0;
+    let (sx, sy, sz) = facing.normal();
+    let position = Vec3::new(
+        f64::from(pos.x) + 0.5 + f64::from(sx) * reach,
+        f64::from(pos.y) + 0.5 + f64::from(sy) * 1.125 + water_offset,
+        f64::from(pos.z) + 0.5 + f64::from(sz) * reach,
+    );
+    let mut entity = world.prepare_entity(Entity::boat(boat_type, position));
+    // `Entity.applyComponentsFromItemStack` 的 `CUSTOM_NAME`：显式补丁优先，
+    // 被移除时不读物品默认组件，其它情况回退默认值。
+    entity.custom_name_from_stack(&stack);
+    // `TypedEntityData.loadInto`：类型匹配时保存当前状态，合并 `ENTITY_DATA` 再载回。
+    // 这一步在 `setYRot` 之前，所以 `Rotation` 覆盖后仍是发射器朝向。
+    //
+    // `TypedEntityData.loadInto`: when the type matches, save, merge `ENTITY_DATA`,
+    // and load. This runs before `setYRot`, which keeps the dispenser facing.
+    let patch = stack.patch();
+    if let Some(ComponentValue::EntityData(data)) =
+        defaults::resolve(stack.item, &patch, kinds::ENTITY_DATA)
+        && data.kind == boat_type
+    {
+        apply_boat_entity_data(&mut entity, &data.tag);
     }
+    entity.y_rot = facing.to_yaw();
+    world.add_prepared_entity(entity);
+    Shot::plain(without_one(&stack))
+}
+
+/// 船的 `TypedEntityData.loadInto`：`saveWithoutId` → 合并 → `load`。
+/// 保留构造时分配的实体随机源，官方 `Entity.load` 不动它。
+///
+/// A boat's `TypedEntityData.loadInto`: save, merge, then load. The constructor's
+/// entity random is preserved; vanilla `Entity.load` does not touch it.
+fn apply_boat_entity_data(entity: &mut Entity, data: &[(String, Tag)]) {
+    let mut entries = match crate::archive::entity::write_entity(&entity.clone().split()) {
+        Ok(Tag::Compound(entries)) => entries,
+        _ => Vec::new(),
+    };
+    for (key, value) in data {
+        if key == "id" {
+            continue;
+        }
+        if let Some(slot) = entries.iter_mut().find(|(name, _)| name == key) {
+            slot.1 = value.clone();
+        } else {
+            entries.push((key.clone(), value.clone()));
+        }
+    }
+    let Ok(Some(row)) = crate::archive::entity::read_entity(&Tag::Compound(entries), entity.id)
+    else {
+        return;
+    };
+    let random = entity.random;
+    let first_tick = entity.first_tick;
+    let mut loaded = row.into_entity();
+    loaded.random = random;
+    loaded.first_tick = first_tick;
+    *entity = loaded;
 }
 
 /// `MinecartDispenseItemBehavior`。前方是铁轨，或者前方是空气且下面是铁轨时生成矿车，

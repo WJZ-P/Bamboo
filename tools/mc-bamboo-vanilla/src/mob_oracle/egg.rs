@@ -115,6 +115,177 @@ pub(super) struct EggDispenseCase {
     level_seed: i64,
 }
 
+/// 发射器用猪刷怪蛋生成的实体：类型、精确位置、朝向、血量、名字、余量、
+/// 世界随机源和整棵存档。
+///
+/// The entity spawned by a dispenser-fired pig spawn egg: type, exact position,
+/// facing, health, name, remaining stack, level random and full save NBT.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DispenserSpawnEggCase {
+    name: String,
+    entity_type: i32,
+    x: u64,
+    y: u64,
+    z: u64,
+    yaw: i64,
+    health: i64,
+    left: i32,
+    level_seed: i64,
+    /// `name` 是场景名，这里单独记生成实体身上的名字组件。
+    name_component: String,
+    nbt: String,
+}
+
+impl DispenserSpawnEggCase {
+    fn parse(raw: &str) -> Result<mc_bamboo_nbt::Tag, String> {
+        mc_bamboo_nbt::parse_snbt(raw)
+            .map(|tag| small_mob::canonical_tag(&tag))
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    /// 用生产代码的 `dispatch` 重放一次发射器刷怪蛋，逐项比官方生成的猪。
+    ///
+    /// Replay one spawn-egg dispense through the production `dispatch` and
+    /// compare every reported field with the official pig.
+    pub(super) fn replay(&self, report: &mut Report, break_test: Option<&str>) {
+        report.cases += 1;
+        report.steps += 9;
+        let mut level = EggCase::empty_level(FIRST_ID);
+        let mut stack = ItemStack::new(mc_bamboo_data::items::PIG_SPAWN_EGG, 3);
+        let Ok(name_tag) = Self::parse(&self.name_component) else {
+            report.mismatch(format!("{}: official name does not parse", self.name));
+            return;
+        };
+        let Some(name) = mc_bamboo_protocol::components::text::checked_component(&name_tag) else {
+            report.mismatch(format!("{}: official name is not a component", self.name));
+            return;
+        };
+        let mut patch = mc_bamboo_protocol::components::ComponentPatch::new();
+        patch.put(
+            mc_bamboo_data::registries::data_component_type::CUSTOM_NAME,
+            mc_bamboo_protocol::components::PatchEntry::Set(
+                mc_bamboo_protocol::components::ComponentValue::CustomName(name),
+            ),
+        );
+        let (added, removed) = patch.to_opaque();
+        stack.added = added;
+        stack.removed = removed;
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(1000);
+        let left = {
+            let mut world = World::new(&mut level, &mut ticks);
+            mc_bamboo_blocks::dispense::execute_at(
+                &mut world,
+                BlockPos::new(0, 64, 0),
+                mc_bamboo_core::Direction::East,
+                stack,
+            )
+        };
+        let pigs: Vec<_> = level
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity
+                    .kind
+                    .mob()
+                    .is_some_and(|mob| mob.mob_type == MobType::Pig)
+            })
+            .collect();
+        if pigs.len() != 1 {
+            report.mismatch(format!("{}: bamboo spawned {} pigs", self.name, pigs.len()));
+            return;
+        }
+        let pig = &pigs[0];
+        let mob = pig.kind.mob().expect("pig");
+        let pig_type = if break_test == Some("dispenser_spawn_egg_type") {
+            MobType::Cow.entity_type()
+        } else {
+            mob.mob_type.entity_type()
+        };
+        let expected = [
+            (
+                "entity type",
+                self.entity_type.to_string(),
+                pig_type.to_string(),
+            ),
+            (
+                "x",
+                self.x.to_string(),
+                pig.position.x.to_bits().to_string(),
+            ),
+            (
+                "y",
+                self.y.to_string(),
+                pig.position.y.to_bits().to_string(),
+            ),
+            (
+                "z",
+                self.z.to_string(),
+                pig.position.z.to_bits().to_string(),
+            ),
+            (
+                "yaw",
+                self.yaw.to_string(),
+                (pig.y_rot.to_bits() as i32 as i64).to_string(),
+            ),
+            (
+                "health",
+                self.health.to_string(),
+                (mob.health.to_bits() as i32 as i64).to_string(),
+            ),
+            ("left", self.left.to_string(), left.count.to_string()),
+            (
+                "level seed",
+                self.level_seed.to_string(),
+                level.random.source().seed().to_string(),
+            ),
+        ];
+        for (field, official, ours) in expected {
+            if official != ours {
+                report.mismatch(format!(
+                    "{} {field}: official {official}, bamboo {ours}",
+                    self.name
+                ));
+            }
+        }
+        let ours_name = mob
+            .custom_name
+            .as_ref()
+            .map(small_mob::canonical_tag)
+            .unwrap_or(mc_bamboo_nbt::Tag::String(String::new()));
+        if name_tag != ours_name {
+            report.mismatch(format!(
+                "{} name: official {name_tag:?}, bamboo {ours_name:?}",
+                self.name
+            ));
+        }
+        let Ok(saved) = mc_bamboo_blocks::archive::write_entity(&pig.clone().split()) else {
+            report.mismatch(format!("{}: bamboo save failed", self.name));
+            return;
+        };
+        let official = match Self::parse(&self.nbt) {
+            Ok(tag) => tag,
+            Err(error) => {
+                report.mismatch(format!(
+                    "{}: official NBT does not parse: {error}",
+                    self.name
+                ));
+                return;
+            }
+        };
+        let ours = small_mob::canonical_tag(&saved);
+        if official != ours {
+            report.mismatch(format!(
+                "{} save: official {}, bamboo {}",
+                self.name,
+                official.to_snbt(),
+                ours.to_snbt()
+            ));
+        }
+    }
+}
+
 impl EggCase {
     fn level(&self) -> MobLevel {
         let mut level = Self::empty_level(self.first_id);

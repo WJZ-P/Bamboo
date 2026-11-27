@@ -664,12 +664,32 @@ impl Entity {
     ///
     /// Apply the custom name from the placed vehicle stack.
     pub(crate) fn apply_vehicle_stack_name(&mut self, stack: &ItemStack) {
+        self.custom_name_from_stack(stack);
+    }
+
+    /// `Entity.applyComponentsFromItemStack`：读物品解析后的 `CUSTOM_NAME`，
+    /// 显式补丁或移除都盖过物品默认组件。
+    ///
+    /// `Entity.applyComponentsFromItemStack`: read the resolved `CUSTOM_NAME`,
+    /// where an explicit patch or removal overrides the item's defaults.
+    pub(crate) fn custom_name_from_stack(&mut self, stack: &ItemStack) {
+        let patch = stack.patch();
+        let name = match mc_bamboo_protocol::components::defaults::resolve(
+            stack.item,
+            &patch,
+            mc_bamboo_data::registries::data_component_type::CUSTOM_NAME,
+        ) {
+            Some(mc_bamboo_protocol::components::ComponentValue::CustomName(name)) => {
+                Some(name.tag().clone())
+            }
+            _ => None,
+        };
         let destination = match &mut self.kind {
             EntityKind::Boat(boat) => &mut boat.custom_name,
             EntityKind::Minecart(cart) => &mut cart.custom_name,
             _ => return,
         };
-        *destination = hanging::stack_custom_name(stack);
+        *destination = name;
     }
 
     fn mob_of(kind: mob::MobType, position: Vec3) -> Self {

@@ -62,6 +62,10 @@ pub enum SpawnReason {
     /// `EntitySpawnReason.SPAWNER`: an entity spawned by a mob spawner
     /// (`BaseSpawner`).
     Spawner,
+    /// `EntitySpawnReason.DISPENSER`：发射器里的刷怪蛋。
+    ///
+    /// `EntitySpawnReason.DISPENSER`: a spawn egg fired by a dispenser.
+    Dispenser,
     /// `EntitySpawnReason.TRIAL_SPAWNER`：试炼刷怪笼。
     ///
     /// `EntitySpawnReason.TRIAL_SPAWNER`: a trial spawner.
@@ -294,6 +298,61 @@ pub fn spawn_egg(
     offset_more: bool,
     custom_name: Option<Tag>,
 ) -> EntityUid {
+    spawn_egg_with(
+        world,
+        kind,
+        pos,
+        should_offset_y,
+        offset_more,
+        custom_name,
+        SpawnReason::SpawnItemUse,
+        None,
+    )
+}
+
+/// `SpawnEggItemBehavior` 的发射器入口：和 [`spawn_egg`] 共用 `EntityType.spawn` 的
+/// 构造、落点、朝向和 `finalizeSpawn`，再补上 `DISPENSER` 原因与 `ENTITY_DATA`。
+///
+/// `entity_data` 是 `TypedEntityData.loadInto` 的 `saveWithoutId` → 合并 → `load`；
+/// 类型不符时官方整步跳过，这里由调用方保证类型一致。
+///
+/// The dispenser entry of `SpawnEggItemBehavior`: shares `EntityType.spawn`'s
+/// construction, position, facing and `finalizeSpawn` with [`spawn_egg`], then adds the
+/// `DISPENSER` reason and the `ENTITY_DATA` round trip.
+pub fn spawn_dispenser_egg(
+    world: &mut World,
+    kind: MobType,
+    pos: BlockPos,
+    should_offset_y: bool,
+    custom_name: Option<Tag>,
+    entity_data: &[(String, Tag)],
+) -> EntityUid {
+    spawn_egg_with(
+        world,
+        kind,
+        pos,
+        should_offset_y,
+        false,
+        custom_name,
+        SpawnReason::Dispenser,
+        Some(entity_data),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "官方 EntityType.spawn 的参数就是这几个"
+)]
+fn spawn_egg_with(
+    world: &mut World,
+    kind: MobType,
+    pos: BlockPos,
+    should_offset_y: bool,
+    offset_more: bool,
+    custom_name: Option<Tag>,
+    reason: SpawnReason,
+    entity_data: Option<&[(String, Tag)]>,
+) -> EntityUid {
     let mut entity = world.prepare_entity(Entity::by_mob_type(kind, Vec3::default()));
     // `shouldOffsetY`：先摆到上一格，再按碰撞算往下落多少。关掉时实体直接落在
     // `pos.y`（对着水面用的那条路径），没有这一格的下落扫描。
@@ -321,16 +380,42 @@ pub fn spawn_egg(
         mob.y_head_rot = me.y_rot;
         mob.y_body_rot = me.y_rot;
     });
-    finalize_spawn(world, kind, &mut entity, SpawnReason::SpawnItemUse);
-    // 刷怪蛋自带 `entity_data`：官方 `saveWithoutId` → 合并 → `load`，`setHealth`
-    // 把血量夹到 `finalizeSpawn` 之后的最大血量（马科的最大血量是随机的）。
-    // The egg's `entity_data` round-trips the mob through save and load, and
-    // `setHealth` clamps to the post-`finalizeSpawn` maximum (random for equines).
-    entity.with_mob(|_, mob| living::clamp_health(mob));
+    finalize_spawn(world, kind, &mut entity, reason);
     // `appendComponentsConfig`：刷怪蛋的 `custom_name` 套到实体上。
     if let Some(name) = custom_name {
         entity.with_mob(|_, mob| mob.custom_name = Some(name));
     }
+    // `TypedEntityData.loadInto`：`saveWithoutId` → `merge(ENTITY_DATA)` → `load`，
+    // `setHealth` 把血量夹到 `finalizeSpawn` 之后的最大血量（马科的最大血量是随机的）。
+    // 官方在 `load` 之后恢复 UUID，这里读档不会改变 UUID。
+    //
+    // `TypedEntityData.loadInto`: save, merge `ENTITY_DATA`, load. `Health` is
+    // clamped to the post-`finalizeSpawn` maximum (random for equines).
+    if let Some(data) = entity_data {
+        let uuid = entity.kind.mob().map(|mob| mob.uuid);
+        let mut entries = match nbt::write_mob(&entity.clone().split()) {
+            Ok(Tag::Compound(entries)) => entries,
+            _ => Vec::new(),
+        };
+        for (key, value) in data {
+            if let Some(slot) = entries.iter_mut().find(|(name, _)| name == key) {
+                slot.1 = value.clone();
+            } else {
+                entries.push((key.clone(), value.clone()));
+            }
+        }
+        let _ = nbt::load_into(&mut entity, &Tag::Compound(entries));
+        if let Some(uuid) = uuid {
+            entity.with_mob(|_, mob| mob.uuid = uuid);
+        }
+    }
+    // 手里的刷怪蛋也带着缺省的 `entity_data`（只有 `id`），官方同样走一遍 `loadInto`，
+    // `setHealth` 把血量夹到 `finalizeSpawn` 之后的最大血量。两条路径都要夹。
+    //
+    // A hand-held egg also carries the default `entity_data` (just `id`), so vanilla runs
+    // `loadInto` too and `setHealth` clamps to the post-`finalizeSpawn` maximum. Clamp on
+    // both paths.
+    entity.with_mob(|_, mob| living::clamp_health(mob));
     let uid = world.add_prepared_entity(entity);
     world.finish_jockeys(uid);
     // `Mob.playAmbientSound`：放进世界之后叫一声，用生物自己的随机源取音高。

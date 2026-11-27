@@ -494,7 +494,9 @@ WebView2 的渲染进程不算在内。
   速度取官方 `spawnItem` 的一个 `nextDouble` 和三个 `triangle`，这套随机数只取一次。
   TNT 生成点燃的实体并播放 `entity.tnt.primed`。箭、药水箭和光灵箭按 `ProjectileDispenseBehavior` 生成真的箭实体：
   位置是 `getDispensePosition` 再加 0.1 的 y，速度 1.1、散布 6，拾取方式是允许，声音换成 1002（仍发朝向上方的 2000）。
-  船和刷怪蛋的发射器放置仍见已知限制（发射器给盔甲架穿戴装备、以及发射器放置盔甲架实体都已接，见「盔甲架」一节）。
+  发射器也能放船 / 竹筏 / 运输船（按 `BoatDispenseItemBehavior` 算落点、朝向并继承名字与 `entity_data`）、
+  用刷怪蛋生成对应生物（按 `SpawnEggItemBehavior` 应用 `entity_data`、投递 `ENTITY_PLACE` 并扣一个）；
+  放不下或没有实体数据时分别走官方的内层默认抛出与默认抛出分支。
   目标正好是空漏斗时按官方规则给它排 8 刻冷却。
   合成器被信号触发后隔 4 刻走官方 `CrafterBlock.dispenseFrom`：查 3×3 配方，没有配方或产物为空只发 1050；
   成功时把 `crafting` 亮起六刻（方块实体滴答器到时关掉），产物和剩余物按 `HopperBlockEntity.addItem` 放进
