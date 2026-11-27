@@ -3035,6 +3035,11 @@ pub fn replay_player_consume(
     (steps, packets)
 }
 
+#[cfg(feature = "oracle-samples")]
+mod bundle_use_oracle;
+#[cfg(feature = "oracle-samples")]
+pub use bundle_use_oracle::{BundleUsePackets, BundleUseStep, ReplayBundleUse, replay_bundle_use};
+
 /// 一次射箭重放的场景：武器、弹药、拉弓刻数、附魔和视角。
 ///
 /// One shot replay scene: weapon, ammo, draw ticks, enchantments and view angles.
