@@ -878,6 +878,7 @@ mod tests {
             count: 1,
             added,
             removed,
+            bundle_selected: None,
         };
         let paper = ItemStack::new(items::PAPER, 1);
         let slots = [
