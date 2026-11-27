@@ -742,7 +742,10 @@ WebView2 的渲染进程不算在内。
   不占世界线程（`tick_total` p50 0.12–1.18 ms），但默认 4 线程在 6 个飞行玩家下会积压
   区块（backlog 峰值 436、区块延迟数秒）；计算池默认仍取核数一半夹在 1..=4（不盲目调高，
   内存吃紧），部署可显式加大，换上真实地物/结构后要重量，见 `docs/worldgen.md`。
-  下界和末地、非空 `BlendingData` 也没做；`Beardifier` 的非空密度路径已移植并逐位对拍（见下面 Beardifier 一条），但游戏里 `structure_starts` 阶段还是空实现，`terrain` 实际仍走 `EMPTY` 那支。按区块分格插值（官方 `interpolated` 的成批求值）
+  下界和末地、非空 `BlendingData` 也没做；`Beardifier` 的非空密度路径已移植并逐位对拍（见下面 Beardifier 一条），
+  `structure_starts` / `structure_references` 由 `terrain` 和 `feature` 阶段按纯函数重算，
+  `generate_terrain_stage` 把真实 Beardifier 注进 `finalDensity`（见上面「结构生成」一条）。
+  按区块分格插值（官方 `interpolated` 的成批求值）
   在区块网格上已由 `chunkgen` 覆盖，单点 `worldgen` 对拍里跳过这批函数。
 
   （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节、
@@ -950,10 +953,12 @@ WebView2 的渲染进程不算在内。
   360 个高度字段（38 个不同值）、1584 个整列 / 起点群系判定字段、432 个加权序列、
   288 个「起点 + 选中的结构 + 是否有效」组合字段，共 2716 个比较 0 不一致；反转整列判定、
   反转起点群系判定两处故意改坏各被抓到并失败，还原后回 0。
-  已知限制：全是纯函数，没接进 Director 的 `structure_starts` / `structure_references` 阶段；
-  这里的「是否有效」是 `onTopOfChunkCenter` 基线路径的通用群系 / 高度判定，不是
+  已知限制：这里的「是否有效」是 `onTopOfChunkCenter` 基线路径的通用群系 / 高度判定，不是
   `Structure.generate` 的最终有效，组合对拍只覆盖 6 个 `random_spread` 结构集、不含
-  `isStructureChunk` 命中过滤（那是已对拍的 `start_plans` 的职责），`StructureStart` 仍只是数据类型。
+  `isStructureChunk` 命中过滤（那是已对拍的 `start_plans` 的职责）。
+  这批对拍当时是纯函数；后来 `structure_starts` / `structure_references` 已按纯函数重算接进
+  Director 流水线（`structure-pipeline` 用官方 `createStructures` / `createReferences` 对拍
+  游戏里同一条路径），起点也经 `pipeline::WorldStructureStart` 带上完整结构件列表供放置阶段使用。
   本轮新增并完成对拍的里程碑：四个代码生成单件结构（沙漠神殿、丛林神殿、女巫小屋、
   埋藏的宝藏）的结构件布局（`structure-single`，8 种子 × 12 区块 × 4 类 = 384 查询、
   384 结构件、384 行比较 0 不一致）；雪屋 / 沉船 / 海底遗迹三种需要 `.nbt` 模板的单件结构
@@ -969,22 +974,24 @@ WebView2 的渲染进程不算在内。
   `MIRROR_FRONT_BACK` 常量 2 改 1 68 处——确认失败后还原回 0）；存档
   `structures` 键
   （`structure-save`，8 case 的规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、
-  `world-dir` 的 `SerializableChunkData.parse` 都能读带该键的区块）。`structure::post_process` 里有埋藏的宝藏
-  与女巫小屋、沙漠神殿三份 `postProcess` 的方块部分，新对拍 `structure-post-process` 按
-  **写入日志**（比「写前写后的状态差异」严格：结构写在地形上的方块不算状态变化，但官方确实写了）：
-  32 查询里**埋藏的宝藏 16 查询 0 不一致**，**女巫小屋 18 处不一致（未通过）**——Java 的地下
-  柱子比 Rust 低一格，根因还没定位；沙漠神殿没进查询集（`SKIPPED`），最后一次实测 6953 处
-  不一致。三份 `postProcess` **都没有接进 `feature/run.rs`**，游戏里结构件仍然一个方块都不放。
+  `world-dir` 的 `SerializableChunkData.parse` 都能读带该键的区块）。`structure::post_process` 里
+  四个代码生成单件结构（埋藏的宝藏、女巫小屋、沙漠神殿、丛林神殿）的 `postProcess` 方块部分
+  已由 `structure-post-process` 按**写入日志**逐格对拍（比「写前写后的状态差异」严格：结构写在
+  地形上的方块不算状态变化，但官方确实写了），4 种子 × 4 区块 × 4 类共 64 查询 0 不一致；
+  这四类和废弃传送门的 `postProcess` 都在 `feature` 阶段的结构分支里真的写方块，
+  `structure-e2e` 用官方 `ChunkgenOracle --structures` 和游戏里同一条 FEATURES 路径逐方块比
+  3×3 九宫格（含沙漠神殿起点、前哨站、村庄、要塞、矿井、沉船、海底遗迹、古城、古迹废墟等）。
   另有把结构起点真正接进 Director（`Beardifier` 见下面单独一条）；
   `.nbt` 结构模板已由 `cb-wg-jigsaw` 分支从官方 jar 原样导出成
   `mc-bamboo-data::structures`（1511 个、4236847 gzip 字节，重跑无 diff），并用官方
   `NbtIo` 逐节点对拍 0 不一致；Rust 侧 `structure::template` 能读出方块、方块实体和拼图方块。
   jigsaw 结构件生成（`JigsawPlacement.addPieces`、五种 pool element、村庄 5 种 / 前哨站 /
-  古城 / 试炼密室 / 古迹废墟的结构件列表与官方对拍）仍没做；`pillager_outposts` 的排除区只有
-  单元测试、未进官方逐格对拍。整列判定与起点单点判定在这批数据上从未不一致（主世界群系沿 Y
+  古城 / 试炼密室 / 古迹废墟的结构件列表与官方对拍）和 `pillager_outposts` 的排除区
+  都已接进游戏里的结构路径（`structure-e2e` 有前哨站、古城和古迹废墟的定点区块）。
+  整列判定与起点单点判定在这批数据上从未不一致（主世界群系沿 Y
   基本恒定），两条路径各自用故意改坏单独验过。结构刷怪覆盖已照 `ChunkGenerator.getMobsAt`
-  接好（前哨站 / 女巫小屋 / 海底神殿，见生物一节的「结构刷怪覆盖」），前哨站要等 jigsaw
-  结构件生成后才会真的在正式世界里出现并刷出掠夺者。
+  接好（前哨站 / 女巫小屋 / 海底神殿，见生物一节的「结构刷怪覆盖」），前哨站的结构件已在正式
+  世界里放置并刷出掠夺者。
 - 多件式结构的结构件布局与前置判定（分支 `cb-wg-multipiece`）：
   `mc-bamboo-worldgen::structure::pieces` 把四个「用代码生成结构件列表」的结构布局**全部**
   移植成纯函数——废弃矿井（普通 / 恶地）、要塞、海底神殿、林地府邸
@@ -1023,7 +1030,8 @@ WebView2 的渲染进程不算在内。
   **改坏验证发现的真 bug**：`structure-pieces` 原来把子类存档值压平成十进制，字节与整型
   写错也发现不了；现在类型进 token（`B:` / `I:`），矿井 `D` 按官方写成 Byte 之前会报
   3312 处不一致。
-  矿井和要塞的结构件放置（`postProcess`）已移植，`structure-place` 对拍 0 不一致，**但还没有接进游戏**：
+  矿井和要塞的结构件放置（`postProcess`）已移植，`structure-place` 对拍 0 不一致，并已随
+  `PLACEABLE_TYPES` 允许清单接进 `feature` 阶段的结构分支：
   * `structure::piece_place`：官方 `StructurePiece` 的放置辅助（`getWorldPos` /
     `placeBlock` / `generateBox` 含 `BlockSelector` 重载 / `generateMaybeBox` /
     `maybeGenerateBlock` / `generateUpperHalfSphere` / `fillColumnDown` / `isInterior` /
@@ -1039,19 +1047,19 @@ WebView2 的渲染进程不算在内。
     `RoomCrossing` 三种 layout / `StairsDown` / `StraightStairsDown` / `FiveCrossing` /
     `Library` / `PortalRoom`）的 `postProcess`，含 `SmoothStoneSelector` 与四种
     `SmallDoorType`。`structure-place` 对拍 **0 不一致**（32 条查询，十二种结构件都放到）。
-  * 单件结构的 `postProcess`（埋藏的宝藏 / 女巫小屋 / 沙漠神殿）走另一个对拍子命令
-    `structure-post-process`（`StructurePlaceOracle.java`，按写入日志逐格比）：埋藏的宝藏
-    16 查询 0 不一致；女巫小屋 18 处不一致（没过）；沙漠神殿没进查询集（`SKIPPED`）。
+  * 四个代码生成单件结构的 `postProcess`（埋藏的宝藏 / 女巫小屋 / 沙漠神殿 / 丛林神殿）
+    走另一个对拍子命令 `structure-post-process`（`StructurePlaceOracle.java`，按写入日志逐格比）：
+    4 种子 × 4 区块 × 4 类共 64 查询 0 不一致（女巫小屋生成实体那一支按官方 abort，方块部分两边都写完）。
   * 对拍口径说明：`structure-place` 对整个结构碰到的每个区块调一次 `postProcess`，比
     结构件清单、每次调用的写入次数（`STRUCTURE_PLACE_TRACE=1` 时比按顺序的每一次写入）
     和每个写过的位置的最终状态，挖空也比。最终状态里空气家族合并成 `AIR`：
     `ProtoChunk.getBlockState` 对全空气的 section 直接返回 `air`，读不出 `cave_air`。
-  已知限制：以上全是纯函数 + oracle，**放置一律没接进 Director**，游戏里还没有结构；
-  布局函数里恶地的 `surfaceHeight` / 府邸的 `startY` 在对拍中仍作为外部输入喂入
-  （前置判定模块已用 `Generator` 的高度原语算出并喂给布局）；jigsaw 与其余旧式结构的
-  结构件布局仍没做，不假装支持。读回路径已能解析这四个结构的结构件标签，但**没有**接进
-  区块 NBT 解码后的世界状态（`chunk_nbt` 仍把 `structures` 当不透明标签原样保留），
-  所以存档读回后游戏里也还不会出现结构。Beardifier 见下面单独一条。
+  已知限制：布局函数里恶地的 `surfaceHeight` / 府邸的 `startY` 在对拍中仍作为外部输入喂入
+  （前置判定模块已用 `Generator` 的高度原语算出并喂给布局）；jigsaw 与其余旧式结构的结构件
+  布局和放置后来都已接进 Director：`structure_starts` 从盘上 `structures` 标签恢复或按
+  `createStructures` 纯函数重算，`feature` 阶段按引用反查起点、逐个 decoration step 先放
+  结构件再放地物，读盘续生成也把 `structures` 标签装回交付盒子（`resume_replay`）。
+  Beardifier 见下面单独一条。
 - jigsaw 结构件生成（分支 `cb-wg-jigsaw`）：`mc-bamboo-worldgen::structure::jigsaw` 把
   `JigsawStructure.findGenerationPoint` + `JigsawPlacement.addPieces` 整条递归移植成纯函数，
   照官方 26.3 的取数顺序翻译：`HeightProvider.sample`（`constant` / `uniform`）、
@@ -1109,8 +1117,10 @@ WebView2 的渲染进程不算在内。
   （82/980）、`rotation` 写成 `CODEC` 的 `none`（对拍立刻报差异）、`BlockState` 的
   `id` 写成 `Name`（5/40）、把内联 `processors` 的 `{processors: [...]}` 外壳去掉
   （`save` 模式报 789/108）。
-  已知限制：仍是纯函数 + oracle，**没接进 Director 的 `structure_starts` 阶段**（那是流水线的
-  职责）；`Piece` 带结构件列表（元素、位置、旋转、包围盒、`groundLevelDelta`、junctions、
+  这批对拍当时是纯函数 + oracle；现在 `structure_starts` 已由 Director 流水线里的纯函数
+  重算驱动（`structure-pipeline` 逐项比官方 `createStructures` / `createReferences`），
+  jigsaw 结构件随 `feature` 阶段的结构分支写进游戏。已知限制：`Piece` 带结构件列表
+  （元素、位置、旋转、包围盒、`groundLevelDelta`、junctions、
   `liquid_settings`），方块写入（`placeInChunk` / `postProcess` / processors / 拼图替换 /
   方块实体）属放置那一步，`Piece::to_full_save_piece` 给出 `pool_element` / `rotation` /
   `junctions` / `liquid_settings` 全部子类字段的存档标签，`processor_list` 的 40 个条目也已
@@ -1136,11 +1146,12 @@ WebView2 的渲染进程不算在内。
   120 个场景 + 4 个 deflate case 0 不一致。四处故意改坏（别名随机源位置 +1、拼图方块
   orientation 写死 `north_up`、junction 的 `sourceGroundY` +1、`pieces` 的 palette 选择）
   各自被抓到并失败，还原回 0。
-  已知限制：仍是纯函数 + oracle，**没接进 Director 的 `structure_starts` 阶段**（那是流水线的
-  职责）；`Piece` 只带结构件列表（元素、位置、旋转、包围盒、`groundLevelDelta`、junctions），
-  方块写入（`placeInChunk` / `postProcess` / processors / 拼图替换 / 方块实体）属放置那一步，
-  `Piece::to_save_piece` 只给出 `id` / `BB` / `O=-1` / `GD=0` 四个基类字段，
-  `addAdditionalSaveData` 的 `pool_element` / `rotation` / `junctions` 等还没编码。
+  这一条是早期记录：上面那批 324 查询的对拍已经补上 `save` / `load` / `processors` /
+  `apply` / `placepiece` 等子命令，`Piece::to_full_save_piece` 也给出 `pool_element` /
+  `rotation` / `junctions` / `liquid_settings` 全部子类字段；结构件生成和放置都已接进
+  Director 流水线（见上面「结构生成」一条）。`Piece` 只带结构件列表（元素、位置、旋转、
+  包围盒、`groundLevelDelta`、junctions），方块写入（`placeInChunk` / `postProcess` /
+  processors / 拼图替换 / 方块实体）属放置那一步。
   `start_height` 只支持 `constant`（absolute）与 `uniform`——26.3 主世界全部 28 个 jigsaw
   结构只用这两种，其余 provider 标 unsupported；`bastion_remnant` 是下界结构，按分工不做。
   `liquid_settings` 只解析不参与结构件生成（官方也要到放置阶段才用）。`Shapes` 按 0.25
@@ -1219,13 +1230,12 @@ WebView2 的渲染进程不算在内。
   adjustment、junction、跨区块 / 贴顶贴底边界）共 5,912,076 个比较 0 不一致；
   `--break-self-test` 故意改坏一个 `groundLevelDelta` 报 32 处不一致并失败。
   **已知限制**：Java 侧的盒是按真实结构尺度构造的代表性输入，覆盖全部 `TerrainAdjustment`，
-  但**不是** `Structure.generate` 跑出来的真实结构起点——jigsaw 模板导出与结构件生成归
-  jigsaw / 结构 / 多件式结构里程碑，本轮不重复实现。Beardifier 的输入本就只是包围盒 +
-  调整类型 + 连接点，因此对密度计算是完整逐位对拍；等结构件接上后，把
-  `for_structures_in_chunk` 的产物填进同一套输入即可。`forStructuresInChunk` 的收集
-  （`isCloseToChunk`、RIGID projection、junction XZ 过滤）只有 Rust 单元测试覆盖，
-  没有和官方 `StructureManager` 端到端对拍（那需要能产出真实 `PoolElementStructurePiece`
-  的模板环境）。本轮全是纯函数 + 对拍，还没接进 Director 的 `structure_starts` 阶段。
+  但**不是** `Structure.generate` 跑出来的真实结构起点（本轮不重复实现）。Beardifier 的输入
+  本就只是包围盒 + 调整类型 + 连接点，因此对密度计算是完整逐位对拍；`structure_starts`
+  接进流水线后，`generate_terrain_stage` 从半径 8 的定稿起点 / 引用构造真实 Beardifier
+  注进 `finalDensity`，`structure-e2e` 在村庄 / 前哨 / 要塞等定点区块逐方块比过这条路径。
+  `forStructuresInChunk` 的收集（`isCloseToChunk`、RIGID projection、junction XZ 过滤）
+  只有 Rust 单元测试覆盖，没有单独和官方 `StructureManager` 端到端对拍。
 - 地物（非植被，分支 `cb-wg-feat-a`）：`block_blob`（森林岩石）、`disk`、
   `spring_feature`、`underwater_magma`、`iceberg`（含 `blue_ice` 变体）、`geode`
   （紫水晶晶洞）、`lake`（岩浆湖）、`large_dripstone`（大型滴水石柱）、`blue_ice`
@@ -1691,7 +1701,7 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-game` | 世界线程：tick、玩家、区块跟踪、实体同步、方块交互、方块实体的物品数据、聊天，不依赖 tokio |
 | `crates/mc-bamboo-protocol` | 网络协议：VarInt、帧、数据包、物品数据组件，只处理字节 |
 | `crates/mc-bamboo-world` | 游戏世界：区块、调色板、光照、超平坦，不知道网络 |
-| `crates/mc-bamboo-worldgen` | 世界生成的数学和区块级生成：随机源、噪声、密度函数、气候、群系源、官方群系温度、含水层、主世界 `BIOMES` / `terrain`（`doFill`+地表+雕刻器）和 features 第 6 步矿石的纯函数；`terrain` 已接进游戏流水线（在 `mc-bamboo-game::worldgen` 里组装成 `RegionColumn`），地物/结构/光照还没接 |
+| `crates/mc-bamboo-worldgen` | 世界生成的数学和区块级生成：随机源、噪声、密度函数、气候、群系源、官方群系温度、含水层、主世界 `BIOMES` / `terrain`（`doFill`+地表+雕刻器）、features 和结构件的纯函数；`terrain`、features 各 decoration step、结构件放置和生成期光照都已接进 Director 流水线（在 `mc-bamboo-game::worldgen` 里组装成 `RegionColumn`） |
 | `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻、方块事件、会 tick 的方块实体（按事件休眠）和触发级红石缓存，纯逻辑，不知道网络和存储 |
 | `crates/mc-bamboo-command` | 命令分发和参数解析：Brigadier 风格的树、坐标、方块状态、选择器，纯逻辑，不知道网络 |
 | `crates/mc-bamboo-recipes` | 配方查找和匹配：有序、无序、烧炼、切石机、锻造、酿造和特殊配方，纯逻辑，不知道网络和世界线程 |
