@@ -80,6 +80,10 @@ impl LevelView for TestLevel {
             _ => None,
         }
     }
+
+    fn slot_items(&self, source: &str) -> Option<Vec<LootStack>> {
+        (source.contains("contents")).then(|| vec![LootStack::new(items::DIAMOND, 3)])
+    }
 }
 
 fn params() -> LootParams<'static> {
@@ -785,12 +789,43 @@ fn every_function_kind_evaluates() {
             .and_then(Value::as_str),
         Some("Pot")
     );
+    // 实体来源：从 `this_entity` 的组件映射复制（没有实体时原样退回）。
+    // Entity source: copies from `this_entity`'s components (no-op without an entity).
+    let mut entity_source = level_params();
+    let mut holder = EntityView::new(0);
+    holder
+        .components
+        .insert("minecraft:custom_name".to_owned(), json!("Mob"));
+    entity_source.this_entity = Some(holder);
     let entity_copy = apply(
         json!({"type":"minecraft:copy_components","source":"this"}),
         stone.clone(),
-        &stored,
+        &entity_source,
+    )
+    .unwrap();
+    assert_eq!(
+        entity_copy
+            .component("minecraft:custom_name")
+            .and_then(Value::as_str),
+        Some("Mob")
     );
-    assert!(matches!(entity_copy, Err(LootError::Unsupported(_))));
+    // `tool` 来源：工具物品堆上的组件。
+    let mut tool_source = level_params();
+    let mut tool = LootStack::new(items::DIAMOND_PICKAXE, 1);
+    tool.set_component("minecraft:custom_name", json!("Pick"));
+    tool_source.tool = Some(tool);
+    let tool_copy = apply(
+        json!({"type":"minecraft:copy_components","source":"tool"}),
+        stone.clone(),
+        &tool_source,
+    )
+    .unwrap();
+    assert_eq!(
+        tool_copy
+            .component("minecraft:custom_name")
+            .and_then(Value::as_str),
+        Some("Pick")
+    );
 
     let stairs = mc_bamboo_data::blocks::BLOCKS
         .iter()
@@ -1102,8 +1137,11 @@ fn entry_kinds_follow_the_official_composition() {
             .is_empty()
     );
 
+    // `slots`：没有世界视图解析 slot_source 时报不支持；接了视图就产出物品。
+    // `slots`: unsupported without a level view that resolves the slot source; with
+    // one wired in it emits the slot items.
     let slots = LootTable::parse(&json!({
-        "pools": [{"rolls": 1, "entries": [{"type": "minecraft:slots"}]}]
+        "pools": [{"rolls": 1, "entries": [{"type": "minecraft:slots", "slot_source": {"type": "minecraft:contents"}}]}]
     }))
     .unwrap();
     let random = LegacyRandom::new(1);
@@ -1111,6 +1149,21 @@ fn entry_kinds_follow_the_official_composition() {
         slots.get_random_items(&stored, &random),
         Err(LootError::Unsupported(_))
     ));
+    let level = level_params();
+    let from_slots = slots.get_random_items(&level, &random).unwrap();
+    assert_eq!(from_slots.len(), 1);
+    assert_eq!(from_slots[0].item, items::DIAMOND);
+    assert_eq!(from_slots[0].count, 3);
+
+    // `#` 战利品表标签：官方 26.3 数据包没有这类标签，空标签展开成空列表，
+    // 不再报不支持，选中后不产出物品。
+    // `#` loot table tag: vanilla 26.3 has none; an empty tag expands to nothing
+    // instead of reporting unsupported, and produces no items.
+    let tagged = LootTable::parse(&json!({
+        "pools": [{"rolls": 1, "entries": [{"type": "minecraft:loot_table", "value": "#minecraft:custom_pack_tag"}]}]
+    }))
+    .unwrap();
+    assert!(tagged.get_random_items(&level, &random).unwrap().is_empty());
 }
 
 #[test]

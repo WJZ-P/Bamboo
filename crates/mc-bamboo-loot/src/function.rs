@@ -174,8 +174,10 @@ enum BonusFormula {
 enum ComponentSource {
     /// `block_entity`：方块实体收集出来的组件。
     BlockEntity,
-    /// `this`、`attacker` 这些实体或物品堆来源，本实现拿不到组件映射。
-    Entity,
+    /// `this`、`attacker` 这些实体来源，读实体视图上的组件映射。
+    Entity(EntityTarget),
+    /// `tool`：工具物品堆上的组件。
+    Tool,
 }
 
 impl LootFunction {
@@ -836,11 +838,10 @@ fn parse_component_source(value: &Value) -> Result<ComponentSource> {
     let name = string(value, "source")?;
     match name {
         "block_entity" => Ok(ComponentSource::BlockEntity),
-        "this" | "attacker" | "direct_attacker" | "attacking_player" | "target_entity"
-        | "interacting_entity" | "tool" => Ok(ComponentSource::Entity),
-        other => Err(LootError::Invalid(format!(
-            "unknown copy_components source `{other}`"
-        ))),
+        "tool" => Ok(ComponentSource::Tool),
+        other => EntityTarget::from_name(other)
+            .map(ComponentSource::Entity)
+            .ok_or_else(|| LootError::Invalid(format!("unknown copy_components source `{other}`"))),
     }
 }
 
@@ -877,7 +878,11 @@ fn apply_bonus(
     }
 }
 
-/// `CopyComponentsFunction` 的来源是方块实体时，复制它收集出来的组件。
+/// `CopyComponentsFunction`：从方块实体、实体或工具物品堆的组件映射里复制。
+/// 官方 `source.get(context)` 返回 null 时原样退回，这里缺视图时也原样退回。
+///
+/// `CopyComponentsFunction`: copies from a block entity, an entity or the tool stack.
+/// Vanilla returns unchanged when `source.get(context)` is null; a missing view does the same.
 fn copy_components(
     stack: &mut LootStack,
     source: ComponentSource,
@@ -890,11 +895,14 @@ fn copy_components(
             Some(block_entity) => &block_entity.components,
             None => return Ok(()),
         },
-        ComponentSource::Entity => {
-            return Err(LootError::Unsupported(
-                "copy_components from an entity or item stack is not implemented".to_owned(),
-            ));
-        }
+        ComponentSource::Entity(target) => match target.get(context.params) {
+            Some(entity) => &entity.components,
+            None => return Ok(()),
+        },
+        ComponentSource::Tool => match context.params.tool.as_ref() {
+            Some(tool) => &tool.components,
+            None => return Ok(()),
+        },
     };
     for (name, value) in components {
         if exclude.contains(name) {

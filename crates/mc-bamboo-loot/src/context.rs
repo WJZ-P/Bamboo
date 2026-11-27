@@ -422,6 +422,17 @@ pub trait LevelView {
         None
     }
 
+    /// `SlotLoot`：`SlotSource.provide(context).itemCopies()` 的结果。`slot_source` 是
+    /// 条目里 `slot_source` 字段的 JSON 文本，由世界侧按官方 slot 来源解析。返回 `None`
+    /// 表示调用方没接槽位来源，求值时报不支持。
+    ///
+    /// `SlotLoot`: the result of `SlotSource.provide(context).itemCopies()`. `slot_source`
+    /// is the JSON text of the entry's `slot_source` field, resolved by the level view.
+    /// `None` means no slot source is wired in, so evaluation reports unsupported.
+    fn slot_items(&self, _slot_source: &str) -> Option<Vec<LootStack>> {
+        None
+    }
+
     /// `StatsCounter.getValue`。`stat_type` 和 `stat` 都是带命名空间的名字。
     ///
     /// `StatsCounter.getValue`. `stat_type` and `stat` are namespaced names.

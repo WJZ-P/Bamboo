@@ -50,8 +50,10 @@ enum EntryBody {
     Alternatives(Vec<LootEntry>),
     Sequence(Vec<LootEntry>),
     Group(Vec<LootEntry>),
-    /// `slots` 条目要从实体或容器里取现成的物品，本实现没有这种数据来源。
-    Slots,
+    /// `slots`：条目里 `slot_source` 的 JSON 文本，交给世界侧解析。
+    ///
+    /// `slots`: the JSON text of the entry's `slot_source`, resolved by the level view.
+    Slots(String),
 }
 
 /// `loot_table` 条目引用的表：注册表里的名字，或者内联在 JSON 里的表。
@@ -93,7 +95,10 @@ pub(crate) enum CandidateBody<'a> {
     Items(&'a [i32]),
     /// 没有展开的嵌套表：选中后依次求值这些表。
     Tables(&'a [TableValue]),
-    Slots,
+    /// `slots`：`slot_source` 的 JSON 文本。
+    ///
+    /// `slots`: the JSON text of `slot_source`.
+    Slots(&'a str),
 }
 
 impl LootEntry {
@@ -228,9 +233,9 @@ impl LootEntry {
                     });
                 }
             }
-            EntryBody::Slots => output.push(Candidate {
+            EntryBody::Slots(source) => output.push(Candidate {
                 weight,
-                body: CandidateBody::Slots,
+                body: CandidateBody::Slots(source),
                 modifiers: outer,
             }),
             // 组合条目在上面处理。
@@ -295,9 +300,24 @@ impl Candidate<'_> {
                 }
                 Ok(())
             }
-            CandidateBody::Slots => Err(LootError::Unsupported(
-                "slot loot needs an entity or container to read items from".to_owned(),
-            )),
+            CandidateBody::Slots(source) => {
+                // `SlotLoot.createItemStack`：世界侧按官方 slot 来源给出物品。
+                // `SlotLoot.createItemStack`: the level view supplies the slot items.
+                let items = context
+                    .level("slot loot")?
+                    .slot_items(source)
+                    .ok_or_else(|| {
+                        LootError::Unsupported(
+                            "slot loot needs a level view that resolves slot sources".to_owned(),
+                        )
+                    })?;
+                for item in items {
+                    if !item.is_empty() {
+                        emit(item)?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -331,7 +351,9 @@ fn parse_body(map: &Map<String, Value>, kind: &str) -> Result<EntryBody> {
         "minecraft:alternatives" => Ok(EntryBody::Alternatives(parse_children(map, kind)?)),
         "minecraft:sequence" => Ok(EntryBody::Sequence(parse_children(map, kind)?)),
         "minecraft:group" => Ok(EntryBody::Group(parse_children(map, kind)?)),
-        "minecraft:slots" => Ok(EntryBody::Slots),
+        "minecraft:slots" => Ok(EntryBody::Slots(
+            required(map, "slot_source", kind)?.to_string(),
+        )),
         other => Err(LootError::Invalid(format!(
             "unknown loot entry type `{other}`"
         ))),
@@ -352,28 +374,52 @@ fn parse_children(map: &Map<String, Value>, kind: &str) -> Result<Vec<LootEntry>
         })
 }
 
-/// `LootTable.LIST_CODEC`：单个表、`#标签`、或者表数组。本数据包里没有表标签。
+/// 战利品表标签：`#名字` → 成员表名列表。官方 26.3 数据包没有这类标签，生成器也没
+/// 导出，所以这里是空表；自定义数据包的标签解析见 README 已知限制。
+///
+/// Loot table tags: `#name` -> member table names. Vanilla 26.3 ships no such tags and
+/// the generator exports none, so this is empty; custom-pack tags are a known limitation.
+static LOOT_TABLE_TAGS: &[(&str, &[&str])] = &[];
+
+fn loot_table_tag(name: &str) -> Option<&'static [&'static str]> {
+    LOOT_TABLE_TAGS
+        .iter()
+        .find(|(tag, _)| *tag == name)
+        .map(|(_, members)| *members)
+}
+
+/// `LootTable.LIST_CODEC`：单个表、`#标签`、或者表数组。标签展开成多个表。
 fn parse_tables(value: &Value) -> Result<Vec<TableValue>> {
     match value {
-        Value::Array(tables) => tables.iter().map(parse_table).collect(),
-        other => Ok(vec![parse_table(other)?]),
+        Value::Array(tables) => {
+            let mut result = Vec::new();
+            for table in tables {
+                result.extend(parse_table(table)?);
+            }
+            Ok(result)
+        }
+        other => parse_table(other),
     }
 }
 
-fn parse_table(value: &Value) -> Result<TableValue> {
+fn parse_table(value: &Value) -> Result<Vec<TableValue>> {
     match value {
         Value::String(name) => {
-            if name.starts_with('#') {
-                return Err(LootError::Unsupported(
-                    "loot table tags are not exported by the data generator".to_owned(),
-                ));
+            if let Some(tag) = name.strip_prefix('#') {
+                // 未知 / 空标签按官方 `HolderSet` 展开成空列表，选中后不产出物品。
+                // An unknown or empty tag expands to nothing, matching `HolderSet`.
+                return Ok(loot_table_tag(tag)
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|member| TableValue::Named((*member).to_owned()))
+                    .collect());
             }
             if mc_bamboo_data::loot::loot_table(name).is_none() {
                 return Err(LootError::UnknownTable(name.clone()));
             }
-            Ok(TableValue::Named(name.clone()))
+            Ok(vec![TableValue::Named(name.clone())])
         }
-        Value::Object(_) => Ok(TableValue::Inline(Box::new(LootTable::parse(value)?))),
+        Value::Object(_) => Ok(vec![TableValue::Inline(Box::new(LootTable::parse(value)?))]),
         _ => Err(LootError::Invalid(
             "loot_table value must be a name, a table or a list".to_owned(),
         )),
