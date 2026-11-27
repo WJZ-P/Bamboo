@@ -221,6 +221,21 @@ impl TickLevels {
         !self.enabled || self.entities.contains(&pos)
     }
 
+    /// `FullChunkStatus.ENTITY_TICKING` 看加载票，不看独立的模拟距离；
+    /// `ChunkMap.prepareEntityTickingChunk` 要求半径两区块都达到 FULL。
+    ///
+    /// `FullChunkStatus.ENTITY_TICKING` uses loading tickets, not simulation distance;
+    /// `ChunkMap.prepareEntityTickingChunk` requires a radius of two FULL chunks.
+    pub(crate) fn has_entity_ticking_status(&self, pos: ChunkPos) -> bool {
+        !self.enabled
+            || (self
+                .tiers
+                .get(&pos)
+                .is_some_and(|tiers| tiers.loading == TickTier::Entity)
+                && neighborhood(pos, ENTITY_RADIUS)
+                    .all(|neighbor| self.tiers.contains_key(&neighbor)))
+    }
+
     /// 逐区块 tick 的范围，按坐标排序。无限模式返回空集合，调用方走自己的老路径。
     pub(crate) fn random_chunks(&self) -> &BTreeSet<ChunkPos> {
         &self.random
@@ -589,6 +604,18 @@ mod tests {
         assert!(!levels.chunk_ticks_blocks(center));
         assert!(levels.chunk_ticks_blocks(ChunkPos::new(1, 0)));
         levels.assert_invariants();
+    }
+
+    #[test]
+    fn execute_full_status_uses_loading_tier_and_delivered_neighbours() {
+        let mut levels = TickLevels::new(true);
+        levels.deliver(field(2, 31));
+        let center = ChunkPos::new(0, 0);
+        levels.level_changed(&[change(center, 31, 33)]);
+        assert!(levels.has_entity_ticking_status(center));
+        assert!(!levels.chunk_ticks_entities(center));
+        levels.reclaim([&ChunkPos::new(2, 2)]);
+        assert!(!levels.has_entity_ticking_status(center));
     }
 
     #[test]

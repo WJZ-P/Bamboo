@@ -2,7 +2,10 @@
 //!
 //! `ExecuteCommand.createRelationOperations` resolves entities in the current island.
 
-use mc_bamboo_blocks::entity::{EntityKind, FIRST_ENTITY_ID, KindPublic, mob::MobType};
+use mc_bamboo_blocks::entity::{
+    EntityKind, FIRST_ENTITY_ID, KindPublic,
+    mob::{MobType, brain::memory::MemoryType},
+};
 use mc_bamboo_core::Hand;
 
 use crate::{
@@ -38,10 +41,29 @@ fn world_relation(region: &Region, uid: i32, relation: &str) -> Option<Target> {
     }
     let related = match (&public.kind, relation) {
         (_, "vehicle") => public.vehicle?,
-        (KindPublic::Boat(boat), "controller") => *boat.passengers.first()?,
+        (KindPublic::Boat(boat), "controller") => {
+            return by_id(region, *boat.passengers.first()?)
+                .filter(|target| matches!(target, Target::Player(_)));
+        }
         (KindPublic::Mob(_), "controller") => mob_controller(region, uid)?,
         (KindPublic::Mob(mob), "leasher") => mob.leash_holder?,
-        (KindPublic::Mob(mob), "target") => mob.target?,
+        (KindPublic::Mob(mob), "target") => match mob.mob_type {
+            MobType::Axolotl
+            | MobType::Frog
+            | MobType::Breeze
+            | MobType::Creaking
+            | MobType::Warden => {
+                let entity = region.entities.get(uid)?;
+                entity
+                    .kind
+                    .mob()?
+                    .brain
+                    .as_ref()?
+                    .memories
+                    .entity(MemoryType::AttackTarget)?
+            }
+            _ => mob.target?,
+        },
         (KindPublic::Mob(mob), "attacker") => mob.last_hurt_by_mob?,
         (KindPublic::Mob(mob), "owner") if mob.mob_type == MobType::Vex => {
             return origin(region, &region.entities.get(uid)?.kind).filter(|&owner| {
@@ -55,22 +77,28 @@ fn world_relation(region: &Region, uid: i32, relation: &str) -> Option<Target> {
         _ => return None,
     };
     by_id(region, related)
-        .filter(|target| relation != "controller" || matches!(target, Target::Player(_)))
 }
 
 fn mob_controller(region: &Region, uid: i32) -> Option<i32> {
     let entity = region.entities.get(uid)?;
     let mob = entity.kind.mob()?;
-    let passenger = mob.controlling_passenger()?;
-    let player = region.players.get(&PlayerId(passenger))?;
-    if mob.mob_type == MobType::Pig
-        && ![Hand::Main, Hand::Off].into_iter().any(|hand| {
-            player.inventory.held(hand).item == mc_bamboo_data::items::CARROT_ON_A_STICK
-        })
-    {
-        return None;
+    let passenger = mob.first_passenger()?;
+    if let Some(player) = region.players.get(&PlayerId(passenger)) {
+        if mob.controlling_passenger() != Some(passenger) {
+            return None;
+        }
+        return (mob.mob_type != MobType::Pig
+            || [Hand::Main, Hand::Off].into_iter().any(|hand| {
+                player.inventory.held(hand).item == mc_bamboo_data::items::CARROT_ON_A_STICK
+            }))
+        .then_some(passenger);
     }
-    Some(passenger)
+    // `Mob.getControllingPassenger`：未禁用 AI，且首位生物允许接管。
+    // `Mob.getControllingPassenger`: AI is enabled and the first mob can take control.
+    let public = region.entities.public_at(passenger)?;
+    (!mob.no_ai
+        && matches!(&public.kind, KindPublic::Mob(rider) if rider.mob_type.can_control_vehicle()))
+    .then_some(passenger)
 }
 
 /// `TraceableEntity.getOwner`：按实体类型读主人引用，而不是物品的捡取限制。
@@ -105,5 +133,40 @@ fn by_id(region: &Region, uid: i32) -> Option<Target> {
     } else {
         let public = region.entities.public_at(uid)?;
         (!public.removed).then_some(Target::World(uid))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Vec3;
+
+    use super::*;
+
+    #[test]
+    fn player_and_boat_resolve_both_sides_of_riding() {
+        let (_, mut region, id) = crate::command::tests::world_with("Kitten", 2);
+        let mut boat = Entity::boat(
+            mc_bamboo_data::registries::entity_type::OAK_BOAT,
+            Vec3::default(),
+        );
+        let EntityKind::Boat(state) = &mut boat.kind else {
+            unreachable!()
+        };
+        state.passengers.push(id.0);
+        let boat = region.entities.spawn(boat);
+        region.players.get_mut(&id).unwrap().riding.vehicle = Some(boat);
+        assert_eq!(
+            targets(&region, Target::Player(id), "vehicle"),
+            [Target::World(boat)]
+        );
+        assert_eq!(
+            targets(&region, Target::World(boat), "passengers"),
+            [Target::Player(id)]
+        );
+        assert_eq!(
+            targets(&region, Target::World(boat), "controller"),
+            [Target::Player(id)]
+        );
     }
 }

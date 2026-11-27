@@ -15,7 +15,10 @@
 
 use std::collections::BTreeMap;
 
-use mc_bamboo_blocks::entity::{EntityKind, KindPublic};
+use mc_bamboo_blocks::entity::{
+    EntityKind, KindPublic,
+    mob::{MobType, villager::VillagerInventory},
+};
 use mc_bamboo_command::ItemPredicateInput;
 use mc_bamboo_core::{BlockPos, Hand};
 use mc_bamboo_loot::LootStack;
@@ -55,16 +58,6 @@ fn slot_id(slot: WireSlot) -> i32 {
     }
 }
 
-/// `SlotSourceArgument` 的字面量范围名：`SlotRanges.nameToIds` 查表。
-/// 非字面量（data-pack 里的具名 `SlotSource`）本实现没有，返回 `None`。
-///
-/// A literal `SlotSourceArgument` range name, looked up like
-/// `SlotRanges.nameToIds`. Named data-pack `SlotSource`s are not modelled, so
-/// anything else returns `None`.
-pub fn literal_slots(text: &str) -> Option<&'static [i32]> {
-    mc_bamboo_data::slot_ranges::slots_of(text)
-}
-
 /// `countSlots`：`getSlotsFromRange` 之后 `SlotCollection.size()`，即范围内存在的槽数。
 ///
 /// `countSlots`: `SlotCollection.size()` after `getSlotsFromRange`, i.e. the number
@@ -89,12 +82,12 @@ pub fn count_items(
         .fold(0, i32::wrapping_add)
 }
 
-/// `ItemPredicateArgument` 的结果只认物品或物品标签；用物品注册表 ID 直接比。
+/// `ItemPredicateArgument` 的基本类型检查：通配符、物品或物品标签。
 ///
-/// The `ItemPredicateArgument` result only recognises an item or an item tag;
-/// compare by item registry id directly.
+/// Basic `ItemPredicateArgument` type check: wildcard, item or item tag.
 fn item_matches(predicate: &ItemPredicateInput, stack: &LootStack) -> bool {
     match predicate {
+        ItemPredicateInput::Any => true,
         ItemPredicateInput::Item(expected) => mc_bamboo_data::items::ITEMS
             .iter()
             .position(|item| item.name == expected.name)
@@ -212,26 +205,59 @@ fn world_slots(region: &Region, uid: i32) -> BTreeMap<i32, LootStack> {
     let Some(public) = region.entities.public_at(uid) else {
         return BTreeMap::new();
     };
-    let slots = match &public.kind {
-        KindPublic::Mob(mob) => {
-            let mut out = EQUIPMENT_IDS
-                .into_iter()
-                .map(|id| (id, LootStack::empty()))
-                .collect::<BTreeMap<_, _>>();
-            out.extend(
-                mob.equipment
-                    .iter()
-                    .map(|(slot, stack)| (slot_id(*slot), game_stack_to_loot(stack))),
-            );
-            return out;
-        }
-        KindPublic::Item { stack, .. } => return single_stack(stack),
-        KindPublic::ItemFrame(frame) => return single_stack(&frame.item),
-        KindPublic::Arrow(_) | KindPublic::Boat(_) | KindPublic::Minecart(_) => {
-            region.entities.get(uid)
-        }
-        _ => None,
-    };
+    let slots =
+        match &public.kind {
+            KindPublic::Mob(mob) => {
+                let mut out = EQUIPMENT_IDS
+                    .into_iter()
+                    .map(|id| (id, LootStack::empty()))
+                    .collect::<BTreeMap<_, _>>();
+                out.extend(
+                    mob.equipment
+                        .iter()
+                        .map(|(slot, stack)| (slot_id(*slot), game_stack_to_loot(stack))),
+                );
+                if (matches!(mob.mob_type, MobType::Villager | MobType::WanderingTrader)
+                    || mob.equine.is_some())
+                    && let Some(entity) = region.entities.get(uid)
+                    && let Some(mob) = entity.kind.mob()
+                {
+                    if matches!(mob.mob_type, MobType::Villager | MobType::WanderingTrader) {
+                        out.extend((0..VillagerInventory::SIZE).map(|index| {
+                            (
+                                300 + index as i32,
+                                game_stack_to_loot(&mob.villager.inventory.get(index)),
+                            )
+                        }));
+                    }
+                    if let Some(equine) = &mob.equine {
+                        if matches!(
+                            mob.mob_type,
+                            MobType::Donkey | MobType::Mule | MobType::Llama | MobType::TraderLlama
+                        ) {
+                            let chest = if equine.chested {
+                                ItemStack::new(mc_bamboo_data::items::CHEST, 1)
+                            } else {
+                                ItemStack::empty()
+                            };
+                            out.insert(499, game_stack_to_loot(&chest));
+                        }
+                        out.extend(
+                            equine.chest_items.iter().enumerate().map(|(index, stack)| {
+                                (500 + index as i32, game_stack_to_loot(stack))
+                            }),
+                        );
+                    }
+                }
+                return out;
+            }
+            KindPublic::Item { stack, .. } => return single_stack(stack),
+            KindPublic::ItemFrame(frame) => return single_stack(&frame.item),
+            KindPublic::Arrow(_) | KindPublic::Boat(_) | KindPublic::Minecart(_) => {
+                region.entities.get(uid)
+            }
+            _ => None,
+        };
     let Some(entity) = slots else {
         return BTreeMap::new();
     };

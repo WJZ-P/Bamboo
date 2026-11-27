@@ -638,17 +638,16 @@ fn biome_matches(region: &Region, pos: BlockPos, wanted: &str) -> Result<bool, C
 
 /// 官方 `ExecuteCommand.isChunkLoaded`：`getChunkNow != null`（这里对应区块在表里）、
 /// `getFullStatus() == FullChunkStatus.ENTITY_TICKING`（`ChunkLevel.fullStatus` 里
-/// 等价于票等级 ≤ 31）、`areEntitiesLoaded`。`TickLevels::chunk_ticks_entities` 正是
-/// 「加载 / 模拟两档都到 Entity 且 5×5 邻域已交付」，与 `ENTITY_TICKING` 对齐。
+/// 等价于加载票等级 ≤ 31）、`areEntitiesLoaded`。Bamboo 交付时已安装实体；
+/// 完整状态取加载档与已交付邻域，不使用模拟距离。
 ///
 /// Official `ExecuteCommand.isChunkLoaded`: `getChunkNow != null` (the chunk is in the
 /// store), `getFullStatus() == ENTITY_TICKING` (ticket level ≤ 31 in
-/// `ChunkLevel.fullStatus`), and `areEntitiesLoaded`. `chunk_ticks_entities` is exactly
-/// "loading and simulation tiers both Entity with the 5×5 neighbourhood delivered",
-/// which aligns with `ENTITY_TICKING`.
+/// `ChunkLevel.fullStatus`), and `areEntitiesLoaded`. Bamboo installs entities on
+/// delivery; full status uses the loading tier and delivered neighbours, not simulation.
 fn chunk_loaded(region: &Region, pos: BlockPos) -> bool {
     let chunk = pos.chunk();
-    region.chunks.is_loaded(chunk) && region.tick_levels.chunk_ticks_entities(chunk)
+    region.chunks.is_loaded(chunk) && region.tick_levels.has_entity_ticking_status(chunk)
 }
 
 /// 官方 `DimensionArgument.getDimension(c, "dimension") == source.getLevel()`。Bamboo 只有
@@ -742,11 +741,9 @@ fn slots_condition(
 ) -> Result<Verdict, CommandFail> {
     let value = |name: &str| parsed.step_value(step, name);
     let is_items = layer_branch(parsed, step) == Some("items");
-    let slots_text = value("slots")
-        .and_then(Value::as_str)
-        .ok_or_else(|| fail("command.failed"))?;
-    let ids =
-        crate::command::slots::literal_slots(slots_text).ok_or_else(|| fail("command.failed"))?;
+    let Some(Value::SlotSource(ids)) = value("slots") else {
+        return Err(fail("command.failed"));
+    };
     let predicate = if is_items {
         Some(
             value("item_predicate")

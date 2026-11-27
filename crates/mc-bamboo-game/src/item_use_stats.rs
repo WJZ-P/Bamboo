@@ -24,6 +24,24 @@ pub(crate) struct ItemUseStats {
 }
 
 impl ItemUseStats {
+    /// 读累计值，不清除待同步的标记。
+    ///
+    /// Read cumulative values without clearing flags for client updates.
+    pub(crate) fn item_used(&self, item: i32) -> i32 {
+        self.items.get(&item).map_or(0, |&(value, _)| value)
+    }
+
+    /// `Stats.CUSTOM`，未累计的条目默认是零。
+    ///
+    /// `Stats.CUSTOM`: counters that have not been incremented default to zero.
+    pub(crate) fn custom(&self, stat: i32) -> i32 {
+        if stat == mc_bamboo_data::registries::custom_stat::DAMAGE_DEALT {
+            self.damage_dealt
+        } else {
+            self.custom.get(&stat).map_or(0, |&(value, _)| value)
+        }
+    }
+
     /// 增加自定义统计。
     /// Increment a custom statistic.
     pub(crate) fn award_custom(&mut self, stat: i32, count: i32) {

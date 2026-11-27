@@ -11,9 +11,15 @@
 //! the optional source entity, and the random source is the level's.
 
 use mc_bamboo_advancements::AdvancementTree;
-use mc_bamboo_blocks::{BlockState, entity::KindPublic, entity::KindState};
-use mc_bamboo_core::{BlockPos, Hand, LightLayer, Vec3};
+use mc_bamboo_blocks::{
+    BlockState, CollisionContext, PistonMoving, ShulkerBoxEntity,
+    entity::{KindPublic, KindState},
+    shape::block_collision_boxes,
+    state::LIT,
+};
+use mc_bamboo_core::{Aabb, BlockPos, Hand, LightLayer, Vec3};
 use mc_bamboo_data::registries::entity_type;
+use mc_bamboo_data::tags::block_tags;
 use mc_bamboo_loot::{
     AdvancementView, EffectView, EntityView, EquipmentSlot, LevelView, LootCondition, LootContext,
     LootError, LootParams, PlayerView, Position,
@@ -303,6 +309,51 @@ impl LevelView for CommandLevel<'_> {
         )
     }
 
+    fn is_smokey(&self, x: i32, y: i32, z: i32) -> Option<bool> {
+        let pos = BlockPos::new(x, y, z);
+        // `CampfireBlock.isSmokeyPos`：五格内检查中心柱；阻挡时只检查它下方一格。
+        // `CampfireBlock.isSmokeyPos`: check the central post for five blocks; when
+        // blocked, check only the block directly below the obstruction.
+        let post = Aabb::new(6.0 / 16.0, 0.0, 6.0 / 16.0, 10.0 / 16.0, 1.0, 10.0 / 16.0);
+        let lit = |state: BlockState| state.is_tagged(block_tags::CAMPFIRES) && state.get(LIT);
+        let state_at = |pos| {
+            self.region
+                .chunks
+                .block(pos)
+                .map_or(BlockState::AIR, BlockState)
+        };
+        for distance in 1..=5 {
+            let check = pos.offset(0, -distance, 0);
+            let state = state_at(check);
+            if lit(state) {
+                return Some(true);
+            }
+            let piston = self
+                .region
+                .block_entities
+                .get::<PistonMoving>(pos)
+                .map(PistonMoving::collision_shape);
+            let shulker = self
+                .region
+                .block_entities
+                .get::<ShulkerBoxEntity>(pos)
+                .map(|block| block.bounding_box(state));
+            if block_collision_boxes(
+                state,
+                pos,
+                CollisionContext::Empty,
+                piston.as_deref(),
+                shulker,
+            )
+            .iter()
+            .any(|bounds| bounds.intersects(post))
+            {
+                return Some(lit(state_at(check.offset(0, -1, 0))));
+            }
+        }
+        Some(false)
+    }
+
     fn is_raining(&self) -> Option<bool> {
         Some(self.region.global.block_weather.is_raining())
     }
@@ -385,6 +436,42 @@ impl LevelView for CommandLevel<'_> {
         Some(board.score_value(holder, objective))
     }
 
+    fn player_stat(&self, player: &str, stat_type: &str, stat: &str) -> Option<i32> {
+        let player = self
+            .region
+            .players
+            .values()
+            .find(|candidate| candidate.name == player)?;
+        match stat_type {
+            "minecraft:used" => {
+                let id = mc_bamboo_data::items::ITEMS
+                    .iter()
+                    .position(|item| item.name == stat)?;
+                Some(player.item_use_stats.item_used(id as i32))
+            }
+            "minecraft:custom" => {
+                let id = mc_bamboo_data::registries::custom_stat::NAMES
+                    .iter()
+                    .position(|&name| name == stat)? as i32;
+                if id == mc_bamboo_data::registries::custom_stat::TIME_SINCE_REST {
+                    Some(player.time_since_rest)
+                } else {
+                    Some(player.item_use_stats.custom(id))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn player_has_recipe(&self, player: &str, recipe: &str) -> Option<bool> {
+        let player = self
+            .region
+            .players
+            .values()
+            .find(|candidate| candidate.name == player)?;
+        Some(player.advancements.known_recipes.contains(recipe))
+    }
+
     fn player_advancement(&self, player: &str, id: &str) -> Option<Option<AdvancementView>> {
         let player = self
             .region
@@ -446,6 +533,29 @@ pub(crate) fn biome_at(region: &Region, pos: BlockPos) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smoke_checks_below_the_first_blocking_shape() {
+        use mc_bamboo_data::blocks::{CAMPFIRE, STONE};
+        let (_, mut region, _) = crate::command::tests::world_with("Kitten", 2);
+        let probe = BlockPos::new(4, -54, 6);
+        let lit = BlockState(CAMPFIRE).with(LIT, true).0;
+        assert!(region.chunks.set_block(probe.offset(0, -5, 0), lit));
+        assert_eq!(
+            CommandLevel { region: &region }.is_smokey(probe.x, probe.y, probe.z),
+            Some(true)
+        );
+        assert!(region.chunks.set_block(probe.offset(0, -2, 0), STONE));
+        assert_eq!(
+            CommandLevel { region: &region }.is_smokey(probe.x, probe.y, probe.z),
+            Some(false)
+        );
+        assert!(region.chunks.set_block(probe.offset(0, -3, 0), lit));
+        assert_eq!(
+            CommandLevel { region: &region }.is_smokey(probe.x, probe.y, probe.z),
+            Some(true)
+        );
+    }
 
     #[test]
     fn snbt_converts_with_the_three_conventions() {
