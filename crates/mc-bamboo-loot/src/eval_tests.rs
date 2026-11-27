@@ -68,6 +68,18 @@ impl LevelView for TestLevel {
     fn score(&self, holder: &str, objective: &str) -> Option<Option<i32>> {
         Some((holder == "Kitten" && objective == "dummy").then_some(1))
     }
+
+    fn storage_number(&self, storage: &str, path: &str) -> Option<Option<f64>> {
+        Some((storage == "minecraft:test" && path == "Counter").then_some(42.0))
+    }
+
+    fn environment_attribute(&self, name: &str, _origin: Option<(i32, i32, i32)>) -> Option<Value> {
+        match name {
+            "minecraft:test/int" => Some(json!(7)),
+            "minecraft:test/float" => Some(json!(2.5)),
+            _ => None,
+        }
+    }
 }
 
 fn params() -> LootParams<'static> {
@@ -102,6 +114,22 @@ fn float_value(text: &str, level: i32) -> f32 {
     stored.enchantment_level = Some(level);
     let random = LegacyRandom::new(1);
     provider.get(&context(&stored, &random)).unwrap()
+}
+
+fn level_int_value(text: &str) -> Result<i32, LootError> {
+    let value: Value = serde_json::from_str(text).unwrap();
+    let provider = parse_int_provider(&value, "test").unwrap();
+    let params = level_params();
+    let random = LegacyRandom::new(1);
+    provider.get(&context(&params, &random))
+}
+
+fn level_float_value(text: &str) -> Result<f32, LootError> {
+    let value: Value = serde_json::from_str(text).unwrap();
+    let provider = parse_float_provider(&value, "test").unwrap();
+    let params = level_params();
+    let random = LegacyRandom::new(1);
+    provider.get(&context(&params, &random))
 }
 
 #[test]
@@ -194,14 +222,53 @@ fn every_int_provider_kind_evaluates() {
         int_value(r#"{"type":"minecraft:floor_div","left":1,"right":0}"#),
         0
     );
-    for kind in ["score", "storage", "environment_attribute"] {
-        let value = json!({"type": format!("minecraft:{kind}")});
-        let provider = parse_int_provider(&value, "test").unwrap();
-        let stored = LootParams::new(0.0);
-        let random = LegacyRandom::new(1);
-        let error = provider.get(&context(&stored, &random)).unwrap_err();
-        assert!(matches!(error, LootError::Unsupported(_)), "{error}");
-    }
+    // `score`：固定名字查到分数；缺实体或分数时按官方走 fallback。
+    // `score`: a fixed name resolves to the score; a missing holder/score takes fallback.
+    assert_eq!(
+        level_int_value(
+            r#"{"type":"minecraft:score","target":{"type":"minecraft:fixed","name":"Kitten"},"score":"dummy","fallback":9}"#
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        level_int_value(
+            r#"{"type":"minecraft:score","target":"this","score":"dummy","fallback":9}"#
+        )
+        .unwrap(),
+        9
+    );
+    // `storage`：路径有数值取它，没有取 fallback。
+    // `storage`: a numeric path returns its value; a missing one takes fallback.
+    assert_eq!(
+        level_int_value(
+            r#"{"type":"minecraft:storage","storage":"minecraft:test","path":"Counter","fallback":5}"#
+        )
+        .unwrap(),
+        42
+    );
+    assert_eq!(
+        level_int_value(
+            r#"{"type":"minecraft:storage","storage":"minecraft:test","path":"Missing","fallback":5}"#
+        )
+        .unwrap(),
+        5
+    );
+    // `environment_attribute`：世界侧提供值就转整数，否则报不支持。
+    // `environment_attribute`: converts a supplied value to int, else reports unsupported.
+    assert_eq!(
+        level_int_value(
+            r#"{"type":"minecraft:environment_attribute","attribute":"minecraft:test/int"}"#
+        )
+        .unwrap(),
+        7
+    );
+    assert!(matches!(
+        level_int_value(
+            r#"{"type":"minecraft:environment_attribute","attribute":"minecraft:test/unknown"}"#
+        ),
+        Err(LootError::Unsupported(_))
+    ));
 }
 
 #[test]
@@ -329,14 +396,37 @@ fn every_float_provider_kind_evaluates() {
         float_value(r#"{"type":"minecraft:div","left":1.0,"right":0.0}"#, 0),
         0.0
     );
-    for kind in ["storage", "environment_attribute"] {
-        let value = json!({"type": format!("minecraft:{kind}")});
-        let provider = parse_float_provider(&value, "test").unwrap();
-        let stored = LootParams::new(0.0);
-        let random = LegacyRandom::new(1);
-        let error = provider.get(&context(&stored, &random)).unwrap_err();
-        assert!(matches!(error, LootError::Unsupported(_)), "{error}");
-    }
+    // `storage` 浮点提供器：路径有数值取它，没有取 fallback。
+    // Float `storage` provider: a numeric path returns its value, else fallback.
+    assert_eq!(
+        level_float_value(
+            r#"{"type":"minecraft:storage","storage":"minecraft:test","path":"Counter","fallback":0.5}"#
+        )
+        .unwrap(),
+        42.0
+    );
+    assert_eq!(
+        level_float_value(
+            r#"{"type":"minecraft:storage","storage":"minecraft:test","path":"Missing","fallback":0.5}"#
+        )
+        .unwrap(),
+        0.5
+    );
+    // `environment_attribute` 浮点提供器：提供值就转浮点，否则报不支持。
+    // Float `environment_attribute`: converts a supplied value, else unsupported.
+    assert_eq!(
+        level_float_value(
+            r#"{"type":"minecraft:environment_attribute","attribute":"minecraft:test/float"}"#
+        )
+        .unwrap(),
+        2.5
+    );
+    assert!(matches!(
+        level_float_value(
+            r#"{"type":"minecraft:environment_attribute","attribute":"minecraft:test/unknown"}"#
+        ),
+        Err(LootError::Unsupported(_))
+    ));
 }
 
 #[test]
@@ -568,14 +658,33 @@ fn every_condition_kind_evaluates() {
     .unwrap();
     assert!(weather.test(&context(&stored, &random)).unwrap());
 
-    let attribute = LootCondition::parse(&json!({
+    // `environment_attribute_check`：世界侧提供属性值时做 JSON 相等比较。
+    // `environment_attribute_check`: compares the supplied attribute value as JSON.
+    let matched = LootCondition::parse(&json!({
         "type": "minecraft:environment_attribute_check",
-        "environment": "minecraft:overworld",
-        "attribute": "minecraft:game_time"
+        "attribute": "minecraft:test/int",
+        "value": 7
+    }))
+    .unwrap();
+    let level = level_params();
+    assert!(matched.test(&context(&level, &random)).unwrap());
+    let differed = LootCondition::parse(&json!({
+        "type": "minecraft:environment_attribute_check",
+        "attribute": "minecraft:test/int",
+        "value": 8
+    }))
+    .unwrap();
+    assert!(!differed.test(&context(&level, &random)).unwrap());
+    // 世界侧没接这个属性时不能编默认值，报不支持。
+    // No wired-in attribute means unsupported, not a fabricated default.
+    let missing = LootCondition::parse(&json!({
+        "type": "minecraft:environment_attribute_check",
+        "attribute": "minecraft:test/unknown",
+        "value": 0
     }))
     .unwrap();
     assert!(matches!(
-        attribute.test(&context(&stored, &random)),
+        missing.test(&context(&level, &random)),
         Err(LootError::Unsupported(_))
     ));
 }

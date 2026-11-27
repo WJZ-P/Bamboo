@@ -9,12 +9,12 @@
 
 use mc_bamboo_core::mth::{cos as mth_cos, sin as mth_sin};
 use mc_bamboo_data::loot;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::condition::LootCondition;
-use crate::context::LootContext;
+use crate::context::{EntityTarget, LootContext};
 use crate::json::{
-    array, f32_value, field, i32_value, invalid, object, opt_i32, required, type_name,
+    array, f32_value, field, i32_value, invalid, object, opt_i32, required, string, type_name,
 };
 use crate::{LootError, Result};
 
@@ -61,8 +61,44 @@ pub enum IntProvider {
     Binary(BinaryOp, Box<Self>, Box<Self>),
     Power(Box<Self>, Box<Self>),
     FromFloat(Box<FloatProvider>),
-    /// 依赖积分板、命令存储或环境属性，本实现没有这些数据。
-    Unsupported(&'static str),
+    /// `minecraft:score`：积分板分数，读不到用 `fallback`。
+    ///
+    /// `minecraft:score`: a scoreboard score, with `fallback` when the score is missing.
+    Score {
+        target: ScoreboardTarget,
+        score: String,
+        fallback: Box<Self>,
+    },
+    /// `minecraft:storage`：命令存储里的数值，读不到用 `fallback`。
+    ///
+    /// `minecraft:storage`: a number from command storage, with `fallback` when missing.
+    Storage {
+        access: StoredNumberAccess,
+        fallback: Box<Self>,
+    },
+    /// `minecraft:environment_attribute`：环境属性转整数，需要世界侧提供。
+    ///
+    /// `minecraft:environment_attribute`: an environment attribute as an int, supplied by the level view.
+    EnvironmentAttribute(String),
+}
+
+/// `minecraft:score` 的 `target`：固定名字或按实体目标查 `scoreboard_name`。
+///
+/// The `minecraft:score` `target`: a fixed name, or an entity target resolved to its
+/// `scoreboard_name`.
+#[derive(Debug, Clone)]
+pub enum ScoreboardTarget {
+    Fixed(String),
+    Context(EntityTarget),
+}
+
+/// `StoredNumberAccess`：命令存储 ID 和 NBT 路径原样保存，路径由调用方解析。
+///
+/// `StoredNumberAccess`: the command storage id and raw NBT path; the caller resolves it.
+#[derive(Debug, Clone)]
+pub struct StoredNumberAccess {
+    pub storage: String,
+    pub path: String,
 }
 
 /// 浮点提供器。
@@ -87,7 +123,17 @@ pub enum FloatProvider {
     Power(Box<Self>, Box<Self>),
     EnchantmentLevel(LevelBasedValue),
     FromInt(Box<IntProvider>),
-    Unsupported(&'static str),
+    /// `minecraft:storage`：命令存储里的数值，读不到用 `fallback`。
+    ///
+    /// `minecraft:storage`: a number from command storage, with `fallback` when missing.
+    Storage {
+        access: StoredNumberAccess,
+        fallback: Box<Self>,
+    },
+    /// `minecraft:environment_attribute`：环境属性转浮点，需要世界侧提供。
+    ///
+    /// `minecraft:environment_attribute`: an environment attribute as a float, supplied by the level view.
+    EnvironmentAttribute(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,11 +311,81 @@ impl IntProvider {
                 let value = input.get_float_unsafe(context)?;
                 float_to_int(value)
             }
-            Self::Unsupported(what) => Err(NumberError::Loot(LootError::Unsupported(
-                (*what).to_owned(),
-            ))),
+            // `ScoreboardValue.getIntUnsafe`：查不到分数就取 fallback，不取随机数。
+            // `ScoreboardValue.getIntUnsafe`: a missing score takes the fallback; no random draw.
+            Self::Score {
+                target,
+                score,
+                fallback,
+            } => {
+                let value = target.holder(context).and_then(|holder| {
+                    context
+                        .params
+                        .level
+                        .and_then(|level| level.score(&holder, score))
+                        .flatten()
+                });
+                match value {
+                    Some(value) => Ok(value),
+                    None => fallback.get_unsafe(context),
+                }
+            }
+            // `StorageValue.getIntUnsafe`：路径没有数值标签就取 fallback。
+            // `StorageValue.getIntUnsafe`: a path with no numeric tag takes the fallback.
+            Self::Storage { access, fallback } => match storage_number(context, access) {
+                Some(number) => Ok(number as i32),
+                None => fallback.get_unsafe(context),
+            },
+            Self::EnvironmentAttribute(name) => match environment_number(context, name) {
+                Some(number) => Ok(number as i32),
+                None => Err(NumberError::Loot(environment_unsupported(name))),
+            },
         }
     }
+}
+
+impl ScoreboardTarget {
+    /// `ScoreboardNameProvider.getScoreHolder`，返回要查的记分板名字。
+    ///
+    /// `ScoreboardNameProvider.getScoreHolder`: the scoreboard name to look up.
+    fn holder(&self, context: &LootContext<'_, '_, '_>) -> Option<String> {
+        match self {
+            Self::Fixed(name) => Some(name.clone()),
+            Self::Context(target) => target
+                .get(context.params)
+                .and_then(|entity| entity.scoreboard_name.clone()),
+        }
+    }
+}
+
+/// `StoredNumberAccess.getNumericTag`，路径解析交给调用方的 `LevelView`。
+///
+/// `StoredNumberAccess.getNumericTag`; the level view resolves the path.
+fn storage_number(context: &LootContext<'_, '_, '_>, access: &StoredNumberAccess) -> Option<f64> {
+    context
+        .params
+        .level
+        .and_then(|level| level.storage_number(&access.storage, &access.path))
+        .flatten()
+}
+
+/// `EnvironmentAttributeValue` 的数值，按属性值的 codec JSON 读成 f64。
+///
+/// The numeric environment attribute value, read from its codec JSON as f64.
+fn environment_number(context: &LootContext<'_, '_, '_>, name: &str) -> Option<f64> {
+    let origin = context.params.origin.map(|position| position.block_pos());
+    let value = context.params.level?.environment_attribute(name, origin)?;
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::Bool(flag) => Some(if flag { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+fn environment_unsupported(name: &str) -> LootError {
+    LootError::Unsupported(format!(
+        "environment attribute `{name}` is not provided by the level view"
+    ))
 }
 
 impl FloatProvider {
@@ -401,9 +517,16 @@ impl FloatProvider {
             }
             Self::EnchantmentLevel(value) => Ok(value.calculate(context.enchantment_level())),
             Self::FromInt(input) => Ok(input.get_unsafe(context)? as f32),
-            Self::Unsupported(what) => Err(NumberError::Loot(LootError::Unsupported(
-                (*what).to_owned(),
-            ))),
+            // `StorageValue.getFloatUnsafe`：路径没有数值标签就取 fallback。
+            // `StorageValue.getFloatUnsafe`: a path with no numeric tag takes the fallback.
+            Self::Storage { access, fallback } => match storage_number(context, access) {
+                Some(number) => Ok(number as f32),
+                None => fallback.get_float_unsafe(context),
+            },
+            Self::EnvironmentAttribute(name) => match environment_number(context, name) {
+                Some(number) => Ok(number as f32),
+                None => Err(NumberError::Loot(environment_unsupported(name))),
+            },
         }
     }
 }
@@ -593,6 +716,66 @@ fn mth_sqrt(value: f32) -> f32 {
 }
 
 /// 解析整数提供器。字符串是按名字引用的提供器，数字是常量。
+/// `ScoreboardNameProviders.CODEC`：裸字符串的实体目标，或 `fixed` / `context`
+/// 对象。`fixed` 只能是对象形式，裸字符串必须是合法的 `EntityTarget`。
+///
+/// `ScoreboardNameProviders.CODEC`: a bare entity-target string, or a `fixed` /
+/// `context` object. A `fixed` name only exists in object form.
+fn parse_score_target(value: &Value, what: &str) -> Result<ScoreboardTarget> {
+    let context_target = |name: &str| {
+        EntityTarget::from_name(name)
+            .map(ScoreboardTarget::Context)
+            .ok_or_else(|| invalid(format!("unknown score target `{name}` in {what}")))
+    };
+    match value {
+        Value::String(name) => context_target(name),
+        Value::Object(map) => match type_name(map, what)? {
+            "minecraft:fixed" => Ok(ScoreboardTarget::Fixed(
+                string(required(map, "name", what)?, "name")?.to_owned(),
+            )),
+            "minecraft:context" => {
+                context_target(string(required(map, "target", what)?, "target")?)
+            }
+            other => Err(invalid(format!(
+                "unknown score target type `{other}` in {what}"
+            ))),
+        },
+        _ => Err(invalid(format!(
+            "{what} target must be a string or an object"
+        ))),
+    }
+}
+
+/// `StoredNumberAccess.MAP_CODEC`：`storage` 和 `path` 平铺在提供器对象里。
+///
+/// `StoredNumberAccess.MAP_CODEC`: `storage` and `path` are flattened into the provider.
+fn parse_storage_access(object: &Map<String, Value>, what: &str) -> Result<StoredNumberAccess> {
+    Ok(StoredNumberAccess {
+        storage: string(required(object, "storage", what)?, "storage")?.to_owned(),
+        path: string(required(object, "path", what)?, "path")?.to_owned(),
+    })
+}
+
+/// `ScoreboardValue` / `StorageValue` 的 `fallback`，缺省是常量 0。
+///
+/// The `fallback` of `ScoreboardValue` / `StorageValue`, defaulting to constant zero.
+fn parse_fallback_int(object: &Map<String, Value>, depth: usize) -> Result<IntProvider> {
+    match field(object, "fallback") {
+        Some(value) => parse_int_provider_at(value, "fallback", depth + 1),
+        None => Ok(IntProvider::Constant(0)),
+    }
+}
+
+/// 浮点 `StorageValue` 的 `fallback`，缺省是常量 0.0。
+///
+/// The float `StorageValue` `fallback`, defaulting to constant 0.0.
+fn parse_fallback_float(object: &Map<String, Value>, depth: usize) -> Result<FloatProvider> {
+    match field(object, "fallback") {
+        Some(value) => parse_float_provider_at(value, "fallback", depth + 1),
+        None => Ok(FloatProvider::Constant(0.0)),
+    }
+}
+
 pub fn parse_int_provider(value: &Value, what: &str) -> Result<IntProvider> {
     parse_int_provider_at(value, what, 0)
 }
@@ -798,10 +981,17 @@ fn parse_int_provider_at(value: &Value, what: &str, depth: usize) -> Result<IntP
                 depth + 1,
             )?),
         )),
-        "minecraft:score" => Ok(IntProvider::Unsupported("int provider `score`")),
-        "minecraft:storage" => Ok(IntProvider::Unsupported("int provider `storage`")),
-        "minecraft:environment_attribute" => Ok(IntProvider::Unsupported(
-            "int provider `environment_attribute`",
+        "minecraft:score" => Ok(IntProvider::Score {
+            target: parse_score_target(required(object, "target", what)?, what)?,
+            score: string(required(object, "score", what)?, "score")?.to_owned(),
+            fallback: Box::new(parse_fallback_int(object, depth)?),
+        }),
+        "minecraft:storage" => Ok(IntProvider::Storage {
+            access: parse_storage_access(object, what)?,
+            fallback: Box::new(parse_fallback_int(object, depth)?),
+        }),
+        "minecraft:environment_attribute" => Ok(IntProvider::EnvironmentAttribute(
+            string(required(object, "attribute", what)?, "attribute")?.to_owned(),
         )),
         other => Err(LootError::Unsupported(format!(
             "int provider `{other}` in {what}"
@@ -993,9 +1183,12 @@ fn parse_float_provider_at(value: &Value, what: &str, depth: usize) -> Result<Fl
         "minecraft:enchantment_level" => Ok(FloatProvider::EnchantmentLevel(
             parse_level_based_value(required(object, "amount", what)?, "amount", depth + 1)?,
         )),
-        "minecraft:storage" => Ok(FloatProvider::Unsupported("float provider `storage`")),
-        "minecraft:environment_attribute" => Ok(FloatProvider::Unsupported(
-            "float provider `environment_attribute`",
+        "minecraft:storage" => Ok(FloatProvider::Storage {
+            access: parse_storage_access(object, what)?,
+            fallback: Box::new(parse_fallback_float(object, depth)?),
+        }),
+        "minecraft:environment_attribute" => Ok(FloatProvider::EnvironmentAttribute(
+            string(required(object, "attribute", what)?, "attribute")?.to_owned(),
         )),
         other => Err(LootError::Unsupported(format!(
             "float provider `{other}` in {what}"

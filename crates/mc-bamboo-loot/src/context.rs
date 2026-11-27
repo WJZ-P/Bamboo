@@ -394,6 +394,34 @@ pub trait LevelView {
         None
     }
 
+    /// `CommandStorage` + `NbtPathArgument` 读出的数值，对应
+    /// `StoredNumberAccess.getNumericTag`。外层 `None` 是调用方没接命令存储，
+    /// 内层 `None` 是这个路径没有单独的数值标签；两种都走提供器的 fallback。
+    ///
+    /// The numeric value read from `CommandStorage` at an NBT path, matching
+    /// `StoredNumberAccess.getNumericTag`. The outer `None` means command storage is not
+    /// wired in; the inner `None` means the path has no single numeric tag. Both take the
+    /// provider's fallback.
+    fn storage_number(&self, _storage: &str, _path: &str) -> Option<Option<f64>> {
+        None
+    }
+
+    /// `Level.environmentAttributes().getValue(context, attribute)` 的结果，按属性值
+    /// 的 codec JSON 表示。`origin` 是位置属性要用的 ORIGIN 方块坐标。外层 `None`
+    /// 表示调用方没接环境属性系统，求值时报不支持，不能编一个默认值冒充。
+    ///
+    /// The value of `EnvironmentAttributes.getValue(context, attribute)` in its codec
+    /// JSON form. `origin` is the snapped ORIGIN for positional attributes. An outer
+    /// `None` means the environment attribute system is not wired in: evaluation reports
+    /// unsupported instead of inventing a default.
+    fn environment_attribute(
+        &self,
+        _name: &str,
+        _origin: Option<(i32, i32, i32)>,
+    ) -> Option<Value> {
+        None
+    }
+
     /// `StatsCounter.getValue`。`stat_type` 和 `stat` 都是带命名空间的名字。
     ///
     /// `StatsCounter.getValue`. `stat_type` and `stat` are namespaced names.
