@@ -1195,6 +1195,7 @@ fn breaking_a_named_shulker_box_keeps_its_contents_and_name() {
     let view = crate::block_drops::ChunkLevel {
         chunks: &fixture.region.chunks,
         weather: fixture.region.global.block_weather,
+        global: None,
     };
     let stacks = mc_bamboo_loot::block_drops(
         &mc_bamboo_loot::BlockDropParams {
@@ -1284,6 +1285,7 @@ fn banners_and_pots_copy_their_block_entity_components() {
         let view = crate::block_drops::ChunkLevel {
             chunks: &fixture.region.chunks,
             weather: fixture.region.global.block_weather,
+            global: None,
         };
         let block_entity = crate::block_drops::collect_from_region(&fixture.region, pos);
         let stacks = mc_bamboo_loot::block_drops(

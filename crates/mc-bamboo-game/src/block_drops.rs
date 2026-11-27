@@ -38,10 +38,7 @@ pub(crate) fn drop_broken_block(
             Some(LootStack::new(held.item, held.count))
         }
     });
-    let view = ChunkLevel {
-        chunks: &region.chunks,
-        weather: region.global.block_weather,
-    };
+    let view = ChunkLevel::new(&region.chunks, &region.global);
     let params = BlockDropParams {
         state,
         pos: (pos.x, pos.y, pos.z),
@@ -179,7 +176,7 @@ pub(crate) fn explosion_loot(
     chunks: &ChunkStore,
     sequences: &mc_bamboo_loot::RandomSequences,
     fallback: &dyn mc_bamboo_blocks::random::RandomSource,
-    weather: mc_bamboo_blocks::BlockWeather,
+    global: &crate::global::GlobalView,
     block: ExplodedBlock,
 ) -> Vec<ItemStack> {
     let ExplodedBlock {
@@ -188,7 +185,7 @@ pub(crate) fn explosion_loot(
         block_entity,
         explosion_radius,
     } = block;
-    let view = ChunkLevel { chunks, weather };
+    let view = ChunkLevel::new(chunks, global);
     let params = BlockDropParams {
         state,
         pos: (pos.x, pos.y, pos.z),
@@ -221,9 +218,25 @@ fn pop_loot_stack(world: &mut World, pos: BlockPos, stack: LootStack) {
 pub(crate) struct ChunkLevel<'a> {
     pub(crate) chunks: &'a ChunkStore,
     pub(crate) weather: mc_bamboo_blocks::BlockWeather,
+    pub(crate) global: Option<&'a crate::global::GlobalView>,
+}
+
+impl<'a> ChunkLevel<'a> {
+    pub(crate) fn new(chunks: &'a ChunkStore, global: &'a crate::global::GlobalView) -> Self {
+        Self {
+            chunks,
+            weather: global.block_weather,
+            global: Some(global),
+        }
+    }
 }
 
 impl LevelView for ChunkLevel<'_> {
+    fn score(&self, holder: &str, objective: &str) -> Option<Option<i32>> {
+        let board = &self.global?.scoreboard;
+        Some(board.score_value(holder, objective))
+    }
+
     fn is_loaded(&self, x: i32, y: i32, z: i32) -> Option<bool> {
         Some(self.chunks.block(BlockPos::new(x, y, z)).is_some())
     }

@@ -83,10 +83,7 @@ pub(crate) struct Unpack<'a> {
     pub containers: &'a mut crate::pos_map::PosMap<ContainerEntry>,
     pub sequences: &'a RandomSequences,
     pub random: &'a LevelRandom,
-    /// 战利品条件 `weather_check` 读的天气。
-    ///
-    /// The weather the `weather_check` loot condition reads.
-    pub weather: mc_bamboo_blocks::BlockWeather,
+    pub global: &'a crate::global::GlobalView,
 }
 
 /// 方块逻辑通过 `Level::unpack_entity_container_loot_table` 传进来的字段。
@@ -97,7 +94,7 @@ pub(crate) struct EntityContainerUnpack<'a> {
     pub chunks: &'a ChunkStore,
     pub sequences: &'a RandomSequences,
     pub random: &'a LevelRandom,
-    pub weather: mc_bamboo_blocks::BlockWeather,
+    pub global: &'a crate::global::GlobalView,
 }
 
 /// 把一张表的产出写进容器槽位。
@@ -134,10 +131,7 @@ pub(crate) fn unpack(state: Unpack<'_>, pos: BlockPos) -> bool {
         return false;
     };
     let seed = std::mem::replace(&mut entry.loot_table_seed, 0);
-    let view = ChunkLevel {
-        chunks: state.chunks,
-        weather: state.weather,
-    };
+    let view = ChunkLevel::new(state.chunks, state.global);
     let params = ChestParams {
         pos: (pos.x, pos.y, pos.z),
         player: None,
@@ -189,7 +183,7 @@ pub(crate) fn unpack_entity_container(
             chunks: &region.chunks,
             sequences: &region.loot_sequences,
             random: &region.random,
-            weather: region.global.block_weather,
+            global: &region.global,
         },
         entity,
         player,
@@ -234,10 +228,7 @@ pub(crate) fn unpack_entity_container_with(
             _ => None,
         })
         .flatten()?;
-    let view = ChunkLevel {
-        chunks: state.chunks,
-        weather: state.weather,
-    };
+    let view = ChunkLevel::new(state.chunks, state.global);
     let params = ChestParams {
         pos: (
             mc_bamboo_core::mth::floor(position.x),
@@ -281,7 +272,7 @@ pub(crate) fn unpack_at(region: &mut Region, pos: BlockPos) {
         containers: &mut region.containers,
         sequences: &region.loot_sequences,
         random: &region.random,
-        weather: region.global.block_weather,
+        global: &region.global,
     };
     unpack(state, pos);
 }

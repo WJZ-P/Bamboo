@@ -67,10 +67,7 @@ pub(super) fn entity_loot_drops(
         request.wool,
         Some(request.variant),
     );
-    let view = crate::block_drops::ChunkLevel {
-        chunks: level.chunks,
-        weather: level.block_weather,
-    };
+    let view = crate::block_drops::ChunkLevel::new(level.chunks, level.loot_global);
     let params = mc_bamboo_loot::EntityLootParams {
         entity,
         origin: loot_position(request.origin),

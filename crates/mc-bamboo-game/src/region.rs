@@ -788,6 +788,7 @@ impl Region {
             containers: &mut self.containers,
             entities: &mut self.entities,
             loot_sequences: &self.loot_sequences,
+            loot_global: &self.global,
             block_rules: entity_rules,
             block_weather: self.global.block_weather,
             sky_darken: self.global.sky_darken,

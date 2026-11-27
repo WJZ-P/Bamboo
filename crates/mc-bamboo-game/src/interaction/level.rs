@@ -62,6 +62,7 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) containers: &'a mut crate::pos_map::PosMap<ContainerEntry>,
     pub(crate) entities: &'a mut Entities,
     pub(crate) loot_sequences: &'a mc_bamboo_loot::RandomSequences,
+    pub(crate) loot_global: &'a crate::global::GlobalView,
     pub(crate) block_rules: BlockGameRules,
     /// 方块逻辑读到的天气快照。权威副本在 `Global`，改完立刻写过来。
     pub(crate) block_weather: mc_bamboo_blocks::BlockWeather,
@@ -1460,7 +1461,7 @@ impl Level for RegionLevel<'_> {
                 containers: self.containers,
                 sequences: self.loot_sequences,
                 random: self.random,
-                weather: self.block_weather,
+                global: self.loot_global,
             },
             pos,
         );
@@ -1473,7 +1474,7 @@ impl Level for RegionLevel<'_> {
                 chunks: &*self.chunks,
                 sequences: self.loot_sequences,
                 random: self.random,
-                weather: self.block_weather,
+                global: self.loot_global,
             },
             entity,
             None,
@@ -1514,7 +1515,7 @@ impl Level for RegionLevel<'_> {
             self.chunks,
             self.loot_sequences,
             self.random.source(),
-            self.block_weather,
+            self.loot_global,
             crate::block_drops::ExplodedBlock {
                 state,
                 pos,
@@ -1538,7 +1539,7 @@ impl Level for RegionLevel<'_> {
             self.chunks,
             self.loot_sequences,
             self.random.source(),
-            self.block_weather,
+            self.loot_global,
             crate::block_drops::ExplodedBlock {
                 state,
                 pos,
@@ -1555,7 +1556,7 @@ impl Level for RegionLevel<'_> {
             self.chunks,
             self.loot_sequences,
             self.random.source(),
-            self.block_weather,
+            self.loot_global,
             crate::block_drops::ExplodedBlock {
                 state,
                 pos,
@@ -1641,10 +1642,7 @@ impl Level for RegionLevel<'_> {
         // supplies the captain flag.
         victim.is_raider = loot.victim.is_raider();
         victim.is_captain = loot.captain;
-        let view = crate::block_drops::ChunkLevel {
-            chunks: self.chunks,
-            weather: self.block_weather,
-        };
+        let view = crate::block_drops::ChunkLevel::new(self.chunks, self.loot_global);
         let params = mc_bamboo_loot::EntityDeathParams {
             entity: victim,
             origin: loot_position(origin),
@@ -1682,10 +1680,7 @@ impl Level for RegionLevel<'_> {
                 tool.enchant(silk_touch, 1);
             }
             let at = mc_bamboo_core::BlockPos::containing(origin);
-            let view = crate::block_drops::ChunkLevel {
-                chunks: self.chunks,
-                weather: self.block_weather,
-            };
+            let view = crate::block_drops::ChunkLevel::new(self.chunks, self.loot_global);
             let block = mc_bamboo_loot::BlockDropParams {
                 state: carried,
                 pos: (at.x, at.y, at.z),
