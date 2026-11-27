@@ -133,6 +133,7 @@ impl Options {
         );
         #[cfg(feature = "pipeline-bench")]
         if options.s0.is_some() {
+            assert!(options.side > 0, "S0 needs a nonempty square");
             assert!(
                 !options.second && options.idle_secs == 0,
                 "S0 measures only first delivery"
@@ -284,6 +285,18 @@ fn main() {
                 reclaims: 0,
             },
             ..WorldConfig::default()
+        };
+        #[cfg(feature = "pipeline-bench")]
+        let config = if options.s0.is_some() {
+            // 只量唯一的世界线程；不让交付落到岛的 tick 线程。
+            // Measure one world thread, keeping delivery off island tick workers.
+            WorldConfig {
+                island_threads: 0,
+                islands: false,
+                ..config
+            }
+        } else {
+            config
         };
         let mut world = World::new(config, receiver);
         if options.dump_blocks.is_some() {

@@ -541,11 +541,11 @@ impl DirectorHost {
         self.compute_backlog.len()
     }
 
-    /// 测试专用：池子里有在途任务时阻塞等待最多 `timeout` 收一条回执并暂存到
+    /// 测试和基准专用：池子里有在途任务时阻塞等待最多 `timeout` 收一条回执并暂存到
     /// `early_replies`，让下一刻 `collect_compute` 原样接手；避免测试空转 `world.tick()`
     /// 抢占计算线程。返回是否已有回执可收。
     ///
-    /// Test only: while pool jobs are in flight, wait up to `timeout` for one
+    /// Tests and benchmarks only: while jobs are in flight, wait up to `timeout` for one
     /// reply and buffer it in `early_replies` so the next tick's
     /// `collect_compute` consumes it as usual, avoiding busy-spinning
     /// `world.tick()` and starving worker threads. Returns whether a reply is ready.

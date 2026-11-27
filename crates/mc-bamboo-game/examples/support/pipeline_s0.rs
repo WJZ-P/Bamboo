@@ -1,6 +1,7 @@
-use super::{Duration, Instant, World, thread_cpu_ms};
+use super::{Duration, Instant, World, process_cpu_ms, thread_cpu_ms};
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_game::pipeline_bench;
+use mc_bamboo_world::ticket::{FULL_CHUNK_LEVEL, PLAYER_TICKET_LEVEL};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Mode {
@@ -44,9 +45,21 @@ fn settle(world: &mut World, positions: &[ChunkPos], mode: Mode) -> Settle {
     }
 }
 
+fn full_frontier(positions: &[ChunkPos]) -> Vec<ChunkPos> {
+    // 强加载票按八邻传播；也等外围达到 FULL 的区块，不只等请求的中心格。
+    // Forced tickets spread in eight directions; include the surrounding FULL columns.
+    let radius = FULL_CHUNK_LEVEL - PLAYER_TICKET_LEVEL;
+    let low = positions.first().expect("nonempty square");
+    let high = positions.last().expect("nonempty square");
+    (low.x - radius..=high.x + radius)
+        .flat_map(|x| (low.z - radius..=high.z + radius).map(move |z| ChunkPos::new(x, z)))
+        .collect()
+}
+
 pub(super) fn warm(world: &mut World, positions: &[ChunkPos]) {
     world.force_chunks_unpaced(positions);
-    settle(world, positions, Mode::Reply);
+    let full = full_frontier(positions);
+    assert_eq!(settle(world, &full, Mode::Reply).delivered, full.len());
 }
 
 pub(super) fn run(
@@ -56,16 +69,20 @@ pub(super) fn run(
     label: &str,
     mode: Mode,
 ) {
+    let full = full_frontier(positions);
+    let process_before = process_cpu_ms();
     let cpu_before = thread_cpu_ms();
     let (empty_before, job_before) = world.pipeline_bench_pool_stats();
     let started = Instant::now();
     pipeline_bench::start();
     world.force_chunks_unpaced(positions);
-    let stats = settle(world, positions, mode);
+    let stats = settle(world, &full, mode);
+    assert_eq!(stats.delivered, full.len());
     let wall = started.elapsed();
     let (empty, job) = world.pipeline_bench_pool_stats();
     let fields = pipeline_bench::stop().fields();
     let world_cpu_ms = thread_cpu_ms() - cpu_before;
+    let pool_cpu_ms = (process_cpu_ms() - process_before - world_cpu_ms).max(0.0);
     let work = wall - stats.wait;
     let other = work - fields.iter().map(|(_, time)| *time).sum::<Duration>();
     let worker_capacity = wall * u32::try_from(threads).expect("worker count");
@@ -77,7 +94,7 @@ pub(super) fn run(
     print!(
         "{label},mode={mode:?},threads={threads},requested={},delivered={},ticks={},\
          no_reply_waits={},wall_s={:.6},delivered_per_s={:.3},world_work_ms={:.4},\
-         world_other_ms={:.4},world_cpu_ms={:.4},world_wait_ms={:.4}",
+         world_other_ms={:.4},world_cpu_per_delivered_ms={:.4},world_wait_ms={:.4}",
         positions.len(),
         stats.delivered,
         stats.ticks,
@@ -93,8 +110,9 @@ pub(super) fn run(
         print!(",{label}_ms={:.4}", per_chunk(time));
     }
     println!(
-        ",pool_job_ms={:.4},pool_empty_ms={:.4},pool_residual_ms={:.4},\
+        ",pool_cpu_per_delivered_ms={:.4},pool_job_ms={:.4},pool_empty_ms={:.4},pool_residual_ms={:.4},\
          pool_job_pct={:.3},pool_empty_pct={:.3}",
+        pool_cpu_ms / n,
         per_chunk(job),
         per_chunk(empty),
         per_chunk(residual),
