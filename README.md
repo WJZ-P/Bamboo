@@ -1954,7 +1954,12 @@ cargo run -p mc-bamboo-vanilla -- loot-oracle <java 路径> --functions --cases 
 ```
 
 战利品函数专项对拍同样不启动服务器。它比较物品、数量、官方 codec 组件补丁和求值后的 `nextLong`；
-`--break-function-rng` 故意在随机染色比较前多取一次，检查尾值比较能否抓到差异。
+`loot-functions.json` 的 36 个场景覆盖本期全部新函数、`score` / `storage` / `environment_attribute`
+数值提供器、`environment_attribute_check` 条件和 `slots` 条目，另外补了多修饰器属性（两次取数与
+`withModifierAdded` 去重）、`set_fireworks` 的爆炸按官方 `FireworkExplosion.CODEC` 归一化、
+列表操作 `replace_section`、提示框 `show` 分支和 `custom_model_data` 的 `colors` / `flags` 分支；
+`--cases 8 --seed 42` 共 288 题 0 不一致。`--break-function-rng` 故意在随机染色比较前多取一次，
+检查尾值比较能否抓到差异（稳定报 8 题不一致）。
 
 探险地图专项对拍（不启动服务器）：`loot-oracle --explorer --seed 42` 比沉船箱的 27 个槽位、地图组件、物品翻译键及 RNG 尾值；
 `trade-oracle --only cartographer` 包含 21 个注入固定目标的报价用例；`map-oracle --explorer` 用人造海岸比预览像素和首个持图更新包。
