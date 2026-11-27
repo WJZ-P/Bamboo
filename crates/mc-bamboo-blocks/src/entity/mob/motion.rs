@@ -150,10 +150,8 @@ fn check_fall_damage(
     state: BlockState,
     pos: BlockPos,
 ) {
-    // `Parrot.checkFallDamage`、`Bat.checkFallDamage` 和幻翼的都是空实现：不掉血，
-    // 不累计、不清零摔落距离，也不补那次流体更新。
-    // The parrot, bat and phantom `checkFallDamage` overrides are empty: no fall
-    // damage, no fall distance bookkeeping and no fluid update.
+    // 空覆写跳过整个入口，连累计距离与补流体状态也一起跳过。
+    // An empty override skips distance bookkeeping and the extra fluid update.
     if mob.mob_type.ignores_fall_damage_check() {
         return;
     }
