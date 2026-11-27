@@ -1681,7 +1681,7 @@ impl Report {
         self.field(at, "x", scene.x, saved_x);
         self.field(at, "y", scene.y, boat.position.y.to_bits());
         self.field(at, "z", scene.z, boat.position.z.to_bits());
-        self.field(at, "yaw", scene.yaw, boat.y_rot.to_bits() as u32);
+        self.field(at, "yaw", scene.yaw, boat.y_rot.to_bits());
         self.field(at, "left", scene.left, left.count);
         self.field(
             at,
