@@ -11,7 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mc_bamboo_blocks::{
-    BlockState, SupportType, World as BlockWorld, entity::KindPublic,
+    BlockState, SupportType, World as BlockWorld,
+    entity::{KindPublic, hanging::ItemFramePublic},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand};
 use mc_bamboo_data::{
@@ -851,6 +852,7 @@ impl MapItemSavedData {
     ///
     /// Server-side equivalent of `tickCarriedBy(player, stack, null)`: register
     /// the holder and refresh the player marker when position tracking is on.
+    #[allow(clippy::too_many_arguments)]
     pub fn tick_carried_by_player(
         &mut self,
         player: PlayerId,
@@ -875,14 +877,31 @@ impl MapItemSavedData {
         }
     }
 
-    /// 官方 `tickCarriedBy` 的物品展示框分支：登记 / 刷新展示框标记。
+    /// 官方 `tickCarriedBy` 的物品展示框分支：仅在 `tracking_position` 开启时登记 / 刷新展示框标记。
     ///
-    /// Item-frame branch of `tickCarriedBy`: register / refresh the frame marker.
-    pub fn set_frame_marker(&mut self, pos: BlockPos, rotation: i32, entity_id: i32) {
+    /// Item-frame branch of `tickCarriedBy`: register / refresh the frame marker
+    /// when `tracking_position` is enabled.
+    pub fn set_frame_marker(
+        &mut self,
+        pos: BlockPos,
+        rotation: i32,
+        entity_id: i32,
+        game_time: Option<i64>,
+    ) {
+        if !self.tracking_position {
+            return;
+        }
+        let id = MapFrame::frame_id(pos);
+        if let Some(existing) = self.frame_markers.get(&id)
+            && existing.entity_id != entity_id
+        {
+            let old_key = frame_decoration_key(existing.entity_id);
+            self.remove_decoration(&old_key);
+        }
         let key = frame_decoration_key(entity_id);
         self.add_decoration(
             decoration_type::FRAME,
-            None,
+            game_time,
             key,
             f64::from(pos.x),
             f64::from(pos.z),
@@ -894,21 +913,25 @@ impl MapItemSavedData {
             rotation,
             entity_id,
         };
-        let id = frame.id();
         let previous = self.frame_markers.insert(id, frame.clone());
         if previous.as_ref() != Some(&frame) {
             self.dirty = true;
         }
     }
 
-    /// 去掉已经不存在的展示框标记（框被移除，或框内不再是这张地图）。
+    /// 去掉已加载区块内不再存在的展示框标记（框被移除，或框内不再是这张地图）。
+    /// 未加载区块里的展示框标记照官方保留。
     ///
-    /// Drop frame markers whose entity is no longer framing this map.
-    pub fn reconcile_frame_markers(&mut self, live: &BTreeSet<i32>) {
+    /// Drop frame markers in loaded chunks whose entity is no longer framing this
+    /// map, preserving markers in unloaded chunks as vanilla does.
+    pub fn reconcile_frame_markers(&mut self, live: &BTreeSet<i32>, chunks: &ChunkStore) {
         let stale: Vec<(BlockPos, i32)> = self
             .frame_markers
             .values()
-            .filter(|f| !live.contains(&f.entity_id))
+            .filter(|f| {
+                chunks.is_loaded(ChunkPos::new(f.pos.x >> 4, f.pos.z >> 4))
+                    && !live.contains(&f.entity_id)
+            })
             .map(|f| (f.pos, f.entity_id))
             .collect();
         for (pos, entity_id) in stale {
@@ -1418,21 +1441,98 @@ pub fn update_colors(
     }
 }
 
-/// 每刻的地图同步：官方 `Player.tick` → `Inventory.tick` / `EntityEquipment.tick`
-/// 调 `MapItem.inventoryTick`（玩家标记 + 逐列采样），`ServerPlayer.doTick` 调
-/// `synchronizeSpecialItemUpdates`（发包），`ServerEntity.sendChanges` 里 `ItemFrame`
-/// 每 10 刻把框内地图发给维度内玩家。
+/// 玩家物品栏是否持有指定 `map_id` 的已填充地图（对应官方 `MapItemSavedData.mapMatcher`）。
+fn player_holds_map(player: &crate::player::Player, map_id: i32) -> bool {
+    player
+        .inventory
+        .slots
+        .iter()
+        .skip(5)
+        .any(|stack| stack.item == items::FILLED_MAP && stack_map_id(stack) == Some(map_id))
+}
+
+/// 官方 `ServerEntity.sendChanges` 里物品展示框每 10 刻（按实体自身的 `ServerEntity.tickCount`，
+/// 从创建时的 0 开始计数）触发的地图广播：对维度内每名玩家先 `tickCarriedBy(player, stack, frame)`
+/// 再 `getUpdatePacket` 发包。
 ///
-/// Per-tick map sync: vanilla's `inventoryTick` (player markers + column
-/// sampling), `synchronizeSpecialItemUpdates` (packets), and the 10-tick
-/// `ItemFrame` map broadcast.
+/// Official `ServerEntity.sendChanges` 10-tick framed-map broadcast driven by the
+/// entity's own `ServerEntity.tickCount` (starting at 0 on creation): calls
+/// `tickCarriedBy(player, stack, frame)` and sends `getUpdatePacket` for every
+/// player in the dimension.
+pub(crate) fn tick_framed_map(
+    players: &BTreeMap<PlayerId, crate::player::Player>,
+    maps: &mut MapStore,
+    links: &mut crate::links::Links,
+    entity_id: i32,
+    frame: &ItemFramePublic,
+    game_time: i64,
+) {
+    if players.is_empty() || frame.item.item != items::FILLED_MAP {
+        return;
+    }
+    let Some(map_id) = stack_map_id(&frame.item) else {
+        return;
+    };
+    let Some(data) = maps.get_mut(map_id) else {
+        return;
+    };
+    let rotation = frame.direction.data_2d() * 90;
+    let live_players: BTreeSet<PlayerId> = players.keys().copied().collect();
+    for player in players.values() {
+        data.ensure_holding_player(player.id);
+        if !player_holds_map(player, map_id) {
+            data.remove_decoration(&player.name);
+        }
+        // `frame != null` 时官方 `tickCarriedBy` 只清掉已离开世界的持有者，不踢非持有观察者。
+        data.carried_by.retain(|h| live_players.contains(&h.player));
+        data.set_frame_marker(frame.pos, rotation, entity_id, Some(game_time));
+        if let Some(update) = data.get_update_packet(map_id, player.id) {
+            let packet = update.as_packet();
+            links.send(player.id, &packet);
+        }
+    }
+}
+
+/// 每刻的玩家地图同步：对应官方 `Player.tick` → `Inventory.tick` / `EntityEquipment.tick`
+/// 调 `MapItem.inventoryTick`（玩家标记 + 未锁定时逐列采样），以及 `ServerPlayer.doTick`
+/// 调 `synchronizeSpecialItemUpdates`（发包）。物品展示框的 10 刻广播在
+/// [`crate::entity_tracking::sync`] 里按每实体的 `ServerEntity.tickCount` 触发。
+///
+/// Per-tick player map sync matching vanilla's `inventoryTick` (player markers +
+/// unlocked column sampling) and `synchronizeSpecialItemUpdates` (packets). Item
+/// frame 10-tick broadcasts run in [`crate::entity_tracking::sync`] on each
+/// frame's `ServerEntity.tickCount`.
 pub(crate) fn tick(region: &mut Region) {
+    let game_time = region.tick.game_time();
+    let dimension = crate::region::DIMENSION;
+
+    // 1. 收集当前仍装着地图的展示框，立即核销已移除/已取出的展示框标记（等价 `ItemFrame.dropItem` / `onKilled`）。
+    let mut framed_maps: BTreeMap<i32, BTreeSet<i32>> = BTreeMap::new();
+    for public in region.entities.iter_public() {
+        if public.removed {
+            continue;
+        }
+        let KindPublic::ItemFrame(frame) = &public.kind else {
+            continue;
+        };
+        if frame.item.item != items::FILLED_MAP {
+            continue;
+        }
+        if let Some(map_id) = stack_map_id(&frame.item) {
+            framed_maps.entry(map_id).or_default().insert(public.uid);
+        }
+    }
+    {
+        let empty_ids = BTreeSet::new();
+        for (&map_id, data) in region.maps.maps.iter_mut() {
+            let live = framed_maps.get(&map_id).unwrap_or(&empty_ids);
+            data.reconcile_frame_markers(live, &region.chunks);
+        }
+    }
+
     if region.players.is_empty() {
         return;
     }
-    let game_time = region.tick.game_time();
-    let dimension = crate::region::DIMENSION;
-    let ten_tick = game_time.rem_euclid(10) == 0;
 
     struct PlayerMaps {
         id: PlayerId,
@@ -1443,27 +1543,25 @@ pub(crate) fn tick(region: &mut Region) {
         maps: Vec<i32>,
         hand_maps: Vec<i32>,
     }
-    struct FrameMap {
-        map_id: i32,
-        entity_id: i32,
-        pos: BlockPos,
-        rotation: i32,
-    }
 
     let mut players: Vec<PlayerMaps> = Vec::new();
     let mut names: BTreeMap<PlayerId, String> = BTreeMap::new();
-    let mut keep: BTreeMap<i32, BTreeSet<PlayerId>> = BTreeMap::new();
+    let mut carriers: BTreeMap<i32, BTreeSet<PlayerId>> = BTreeMap::new();
+    let mut online: BTreeSet<PlayerId> = BTreeSet::new();
     for player in region.players.values() {
         let id = player.id;
+        online.insert(id);
         let pos = player.position();
         let main_hand = player.inventory.hand_slot(Hand::Main);
         let off_hand = player.inventory.hand_slot(Hand::Off);
         let mut maps = Vec::new();
         let mut hand_maps = Vec::new();
         // 官方 `Inventory.items`（36 格）+ `EntityEquipment`（盔甲 / 副手）对应菜单槽 5..=45，
-        // 不含 2×2 合成格的 0..=4。
+        // 不含 2×2 合成格的 0..=4；`inventoryTick` 只挂在 `MapItem`（`filled_map`）上。
         for (slot, stack) in player.inventory.slots.iter().enumerate().skip(5) {
-            if let Some(map_id) = stack_map_id(stack) {
+            if stack.item == items::FILLED_MAP
+                && let Some(map_id) = stack_map_id(stack)
+            {
                 maps.push(map_id);
                 if slot == main_hand || slot == off_hand {
                     hand_maps.push(map_id);
@@ -1473,7 +1571,7 @@ pub(crate) fn tick(region: &mut Region) {
         maps.sort_unstable();
         maps.dedup();
         for &map_id in &maps {
-            keep.entry(map_id).or_default().insert(id);
+            carriers.entry(map_id).or_default().insert(id);
         }
         names.insert(id, player.name.clone());
         players.push(PlayerMaps {
@@ -1487,98 +1585,47 @@ pub(crate) fn tick(region: &mut Region) {
         });
     }
 
-    // 物品展示框：框内是地图时记录 (map_id, 实体 ID, 位置, 朝向旋转)。
-    let mut frames: Vec<FrameMap> = Vec::new();
-    let mut framed_maps: BTreeMap<i32, BTreeSet<i32>> = BTreeMap::new();
-    let mut viewers: BTreeMap<i32, BTreeSet<PlayerId>> = BTreeMap::new();
-    for public in region.entities.iter_public() {
-        if public.removed {
-            continue;
-        }
-        let KindPublic::ItemFrame(frame) = &public.kind else {
-            continue;
-        };
-        let Some(map_id) = stack_map_id(&frame.item) else {
-            continue;
-        };
-        framed_maps.entry(map_id).or_default().insert(public.uid);
-        if ten_tick {
-            for p in &players {
-                viewers.entry(map_id).or_default().insert(p.id);
-            }
-        }
-        frames.push(FrameMap {
-            map_id,
-            entity_id: public.uid,
-            pos: frame.pos,
-            rotation: frame.direction.data_2d() * 90,
-        });
-    }
-    // 展示框观察者也要留在 `carriedBy` 里，否则会被清掉、收不到框内地图的包。
-    for (&map_id, set) in &viewers {
-        keep.entry(map_id).or_default().extend(set.iter().copied());
-    }
-
     let maps = &mut region.maps;
     let chunks = &region.chunks;
     let links = &mut region.links;
 
-    // 1. 展示框标记（每 10 刻，照官方 `sendChanges`）：先刷标记再取包。
-    if ten_tick {
-        let empty_ids = BTreeSet::new();
-        for (&map_id, data) in maps.maps.iter_mut() {
-            let live = framed_maps.get(&map_id).unwrap_or(&empty_ids);
-            data.reconcile_frame_markers(live);
-        }
-        for f in &frames {
-            if let Some(data) = maps.get_mut(f.map_id) {
-                data.set_frame_marker(f.pos, f.rotation, f.entity_id);
-            }
-        }
-        for (&map_id, set) in &viewers {
-            if let Some(data) = maps.get_mut(map_id) {
-                for &player in set {
-                    data.ensure_holding_player(player);
-                }
-            }
-        }
-    }
-
-    // 2. 玩家标记 + 逐列采样（官方 `inventoryTick`）。采样改脏的颜色要在发包前写回。
+    // 2. 玩家标记 + 逐列采样（官方 `MapItem.inventoryTick`）。锁定的地图不采样。
     for p in &players {
         for &map_id in &p.maps {
             if let Some(data) = maps.get_mut(map_id) {
-                data.tick_carried_by_player(
-                    p.id, &p.name, p.x, p.z, p.yaw, game_time, dimension,
-                );
+                data.tick_carried_by_player(p.id, &p.name, p.x, p.z, p.yaw, game_time, dimension);
             }
         }
         for &map_id in &p.hand_maps {
-            if let Some(data) = maps.get_mut(map_id) {
+            if let Some(data) = maps.get_mut(map_id)
+                && !data.locked
+            {
                 update_colors(data, p.id, p.x, p.z, dimension, chunks);
             }
         }
     }
 
-    // 3. 清掉不再持有 / 观察的玩家及其标记。
-    let no_keepers = BTreeSet::new();
+    // 3. 清掉不再持有这张地图的玩家及其标记。
+    // 若无人手持且地图挂在展示框里，照官方不在玩家刻驱逐展示框观察者（只清离线玩家及残留玩家标记），
+    // 否则观察者会在下个 10 刻周期被当成新观察者重发整张 128×128 补丁。
+    let no_carriers = BTreeSet::new();
     for (&map_id, data) in maps.maps.iter_mut() {
-        let set = keep.get(&map_id).unwrap_or(&no_keepers);
-        data.retain_carried_by(set, &names);
+        let map_carriers = carriers.get(&map_id).unwrap_or(&no_carriers);
+        if map_carriers.is_empty() && framed_maps.contains_key(&map_id) {
+            data.carried_by.retain(|h| online.contains(&h.player));
+            for name in names.values() {
+                data.remove_decoration(name);
+            }
+        } else {
+            data.retain_carried_by(map_carriers, &names);
+        }
     }
 
-    // 4. 给每个「持有或观察某张地图」的玩家取一份脏补丁 / 标记包并发出。
+    // 4. 给每个持有地图的玩家取一份脏补丁 / 标记包并发出（`ServerPlayer.synchronizeSpecialItemUpdates`）。
     let mut targets: BTreeSet<(PlayerId, i32)> = BTreeSet::new();
     for p in &players {
         for &map_id in &p.maps {
             targets.insert((p.id, map_id));
-        }
-    }
-    if ten_tick {
-        for (&map_id, set) in &viewers {
-            for &player in set {
-                targets.insert((player, map_id));
-            }
         }
     }
     let mut outgoing = Vec::new();
@@ -2055,8 +2102,7 @@ mod tests {
         assert!(region.maps.get(0).unwrap().carried_by.is_empty());
 
         // 空地图（无 map_id）不会触发任何同步。
-        region.players.get_mut(&p_id).unwrap().inventory.slots[36] =
-            ItemStack::new(items::MAP, 1);
+        region.players.get_mut(&p_id).unwrap().inventory.slots[36] = ItemStack::new(items::MAP, 1);
         tick(&mut region);
         region.links.flush();
         assert!(decode(&std::mem::take(&mut *sink.0.lock().unwrap())).is_empty());
@@ -2089,8 +2135,9 @@ mod tests {
         }
 
         let mut region = crate::region::Region::new(2, 20, false);
-        // 把刻号设成 10 的倍数，命中官方 `ItemFrame` 的 10 刻广播节奏。
-        region.start_clock(crate::global::GameTime(10));
+        // 故意选一个不是 10 的倍数的 game_time，验证展示框按自身 `ServerEntity.tickCount`
+        // （从 0 开始，每 10 刻一次）而不是 `game_time % 10` 广播。
+        region.start_clock(crate::global::GameTime(7));
         let p_id = PlayerId(1);
         let player = Player::new(
             p_id,
@@ -2115,38 +2162,98 @@ mod tests {
         }
         region.entities.spawn(frame);
 
-        tick(&mut region);
-        region.links.flush();
-
-        // 该玩家（同维度）收到一份带展示框标记的全图补丁。
-        let raw = std::mem::take(&mut *sink.0.lock().unwrap());
-        let mut rest = raw.as_slice();
-        let mut saw_frame_marker = false;
-        while let Some(bounds) = find_frame(rest, MAX_FRAME_LEN).unwrap() {
-            let end = bounds.header_len + bounds.payload_len;
-            let mut r = Reader::new(&rest[bounds.header_len..end]);
-            if r.varint().unwrap() == clientbound::MAP_ITEM_DATA {
-                let _map_id = r.varint().unwrap();
-                let _scale = r.i8().unwrap();
-                let _locked = r.bool().unwrap();
-                if r.bool().unwrap() {
-                    let count = r.varint().unwrap();
-                    for _ in 0..count {
-                        let kind = r.varint().unwrap();
-                        let _x = r.i8().unwrap();
-                        let _y = r.i8().unwrap();
-                        let _rot = r.i8().unwrap();
-                        assert!(!r.bool().unwrap());
-                        if kind == decoration_type::FRAME {
-                            saw_frame_marker = true;
+        let drain_map_packets = |sink: &Sink| -> Vec<(usize, u8)> {
+            let raw = std::mem::take(&mut *sink.0.lock().unwrap());
+            let mut rest = raw.as_slice();
+            let mut out = Vec::new();
+            while let Some(bounds) = find_frame(rest, MAX_FRAME_LEN).unwrap() {
+                let end = bounds.header_len + bounds.payload_len;
+                let mut r = Reader::new(&rest[bounds.header_len..end]);
+                if r.varint().unwrap() == clientbound::MAP_ITEM_DATA {
+                    let _map_id = r.varint().unwrap();
+                    let _scale = r.i8().unwrap();
+                    let _locked = r.bool().unwrap();
+                    let mut frame_markers = 0usize;
+                    if r.bool().unwrap() {
+                        let count = r.varint().unwrap();
+                        for _ in 0..count {
+                            let kind = r.varint().unwrap();
+                            let _x = r.i8().unwrap();
+                            let _y = r.i8().unwrap();
+                            let _rot = r.i8().unwrap();
+                            assert!(!r.bool().unwrap());
+                            if kind == decoration_type::FRAME {
+                                frame_markers += 1;
+                            }
                         }
                     }
+                    let patch_width = r.u8().unwrap();
+                    out.push((frame_markers, patch_width));
                 }
+                rest = &rest[end..];
             }
-            rest = &rest[end..];
-        }
-        assert!(saw_frame_marker, "framed map should carry a FRAME marker");
-        // 展示框标记也登记进了地图数据。
+            out
+        };
+
+        // 第 0 刻（ServerEntity.tickCount == 0，即使 game_time == 7）：立刻广播全图 + 展示框标记。
+        tick(&mut region);
+        crate::entity_tracking::sync(&mut region);
+        region.links.flush();
+        assert_eq!(drain_map_packets(&sink), vec![(1, 128)]);
         assert_eq!(region.maps.get(0).unwrap().frame_markers().len(), 1);
+
+        // 第 1..=9 刻（包括 game_time == 10）：即使地图颜色变脏，展示框也还没到第 10 刻，不发包。
+        region.maps.get_mut(0).unwrap().update_color(1, 1, 44);
+        for _ in 1..10 {
+            region.tick = region.tick.plus(1);
+            tick(&mut region);
+            crate::entity_tracking::sync(&mut region);
+            region.links.flush();
+            assert!(
+                drain_map_packets(&sink).is_empty(),
+                "item frame must wait until its own ServerEntity.tickCount % 10 == 0"
+            );
+        }
+
+        // 第 10 刻（ServerEntity.tickCount == 10，game_time == 17）：发出 1×1 增量补丁，而非重发 128×128。
+        region.tick = region.tick.plus(1);
+        tick(&mut region);
+        crate::entity_tracking::sync(&mut region);
+        region.links.flush();
+        assert_eq!(drain_map_packets(&sink), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn locked_map_skips_color_sampling_during_tick() {
+        use mc_bamboo_core::Vec3;
+        use mc_bamboo_protocol::packet::play::ClientInformation;
+        use uuid::Uuid;
+
+        use crate::player::Player;
+
+        let mut region = crate::region::Region::new(2, 20, false);
+        let p_id = PlayerId(1);
+        let player = Player::new(
+            p_id,
+            Uuid::from_u128(1),
+            "Alex".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        region.insert_player(player);
+        let locked =
+            MapItemSavedData::create_fresh(0.0, 0.0, 0, true, false, "minecraft:overworld")
+                .locked();
+        region.maps.insert(0, locked);
+        region.players.get_mut(&p_id).unwrap().inventory.slots[36] = make_filled_map(0);
+
+        for _ in 0..16 {
+            tick(&mut region);
+        }
+        assert!(
+            region.maps.get(0).unwrap().colors.iter().all(|&b| b == 0),
+            "locked map must not update colors while held"
+        );
     }
 }

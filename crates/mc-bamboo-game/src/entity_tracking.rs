@@ -3216,6 +3216,23 @@ pub(crate) fn sync(region: &mut Region) {
             view_distance,
             &index,
         );
+        // 官方 `ServerEntity.sendChanges` 开头：`ItemFrame` 在自身 `tickCount % 10 == 0`
+        // 时（含刚追踪的第 0 刻）先对维度内玩家广播框内地图，再冲脏元数据并 `tickCount++`。
+        // Vanilla `ServerEntity.sendChanges`: when an `ItemFrame`'s own `tickCount % 10 == 0`
+        // (including tick 0 on creation), broadcast its framed map to dimension players before
+        // flushing dirty entity data and incrementing `tickCount`.
+        if let KindData::ItemFrame(frame) = &snapshot.data
+            && tracked.tick_count % 10 == 0
+        {
+            crate::map::tick_framed_map(
+                &region.players,
+                &mut region.maps,
+                &mut region.links,
+                snapshot.id,
+                frame,
+                region.tick.game_time(),
+            );
+        }
         send_changes(&snapshot, tracked, &mut region.links);
     }
 }
