@@ -18,6 +18,8 @@
 //!     把实体选择器的解析、过滤和排序交给官方 `EntitySelectorParser` 对拍
 //! mc-bamboo-vanilla execute-oracle <java 路径> [--show N] [--break-self-test]
 //!     用官方 `Commands` 跑 148 条整命令（/execute、/data、/effect），比较方块、分数、NBT 和反馈
+//! mc-bamboo-vanilla scoreboard-oracle <java 路径> [--show N] [--break NAME]
+//!     用官方 `Commands` 跑 /trigger、统计和击杀准则、队伍规则共 52 题，比较反馈和整张计分板
 //! mc-bamboo-vanilla components <java 路径> [--show N]
 //!     让官方代码编码一大批物品组件，用 mc-bamboo-protocol 解码再编码，逐字节比较
 //! mc-bamboo-vanilla predicate-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -217,6 +219,8 @@ mod resume_world;
 #[cfg(feature = "oracle")]
 mod saved_data;
 #[cfg(feature = "oracle")]
+mod scoreboard_oracle;
+#[cfg(feature = "oracle")]
 mod seed_world;
 #[cfg(feature = "oracle")]
 mod sleep_oracle;
@@ -410,6 +414,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla components <java 路径> [--show N]
       mc-bamboo-vanilla command-oracle <java 路径> [--show N] [--break-self-test]
       mc-bamboo-vanilla execute-oracle <java 路径> [--show N] [--break-self-test]
+      mc-bamboo-vanilla scoreboard-oracle <java 路径> [--show N] [--break NAME]
       mc-bamboo-vanilla predicate-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla recipe-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla loot-oracle <java 路径> [--entity-table ID] [--cases N] [--seed S] [--show N]
@@ -504,6 +509,7 @@ fn run() -> Result<(), String> {
         ["components", java, ref options @ ..] => components(java, options),
         ["command-oracle", java, ref options @ ..] => command_oracle_cli(java, options),
         ["execute-oracle", java, ref options @ ..] => execute_oracle_cli(java, options),
+        ["scoreboard-oracle", java, ref options @ ..] => scoreboard_oracle_cli(java, options),
         ["predicate-oracle", java, ref options @ ..] => predicate_oracle(java, options),
         ["recipe-oracle", java, ref options @ ..] => recipe_oracle(java, options),
         ["loot-oracle", java, ref options @ ..] => loot_oracle(java, options),
@@ -752,6 +758,16 @@ fn execute_oracle_cli(java: &str, options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn execute_oracle_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(feature = "oracle")]
+fn scoreboard_oracle_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    scoreboard_oracle::run(official_program(java, EXECUTE_ORACLE_SOURCE)?, options)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn scoreboard_oracle_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

@@ -834,9 +834,13 @@ pub(super) fn before_hurt(mob: &mut Mob) {
 /// `Wolf.wantsToAttack`: tamed animals and tamed equines are spared.
 pub(super) fn wants_to_attack(ctx: &dyn EntityCtx, target: EntityUid, owner: &PlayerView) -> bool {
     let Some(other) = ctx.other(target) else {
-        // 玩家：没有 PVP 规则，`canHarmPlayer` 恒真。
-        // Players: no PVP rules, so `canHarmPlayer` holds.
-        return true;
+        // 玩家：`!playerOwner.canHarmPlayer(playerTarget)` 时不打（PVP 关着，或者
+        // 同队且不许友军伤害）。
+        //
+        // Players: spared when `!playerOwner.canHarmPlayer(playerTarget)` (PVP off, or
+        // the same team without friendly fire).
+        return super::goals::player_by_uid(ctx.blocks(), target)
+            .is_none_or(|player| ctx.blocks().players_can_harm(owner.team, player.team));
     };
     let KindPublic::Mob(public) = &other.kind else {
         return true;

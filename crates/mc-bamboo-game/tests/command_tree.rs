@@ -42,6 +42,7 @@ const ROOTS: &[&str] = &[
     "version",
     "worldborder",
     "execute",
+    "trigger",
 ];
 
 /// 从官方报告里取一个根节点。

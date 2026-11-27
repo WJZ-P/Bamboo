@@ -100,6 +100,10 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) sea_level: i32,
     /// 计分板：玩家和生物的队伍（`TargetGoal` 的同队判断）。
     pub(crate) scoreboard: &'a crate::scoreboard::Scoreboard,
+    /// `GameRules.PVP`，`ServerPlayer.canHarmPlayer` 用。
+    ///
+    /// `GameRules.PVP`, read by `ServerPlayer.canHarmPlayer`.
+    pub(crate) pvp: bool,
     /// 这一刻的难度 ID，权威副本在 `GlobalView`。
     pub(crate) difficulty: crate::world_state::Difficulty,
     /// 这一维度的世界边界快照，`Level.getWorldBorder()`。
@@ -956,6 +960,14 @@ impl Level for RegionLevel<'_> {
         self.scoreboard.team_collision_by_index(index)
     }
 
+    fn team_collisions_restricted(&self) -> bool {
+        self.scoreboard.collisions_restricted()
+    }
+
+    fn players_can_harm(&self, attacker: Option<u32>, target: Option<u32>) -> bool {
+        self.pvp && self.scoreboard.teams_allow_damage(attacker, target)
+    }
+
     fn inhabited_time(&self, chunk: mc_bamboo_core::ChunkPos) -> i64 {
         self.chunks.inhabited_time(chunk)
     }
@@ -1087,6 +1099,7 @@ impl Level for RegionLevel<'_> {
             entities: &mut *self.entities,
             difficulty: self.difficulty as i32,
             rules: side.rules,
+            scoreboard: self.scoreboard,
             attacker,
             defer_health: true,
             pending_triggers: Some(side.pending_triggers),
@@ -1116,6 +1129,7 @@ impl Level for RegionLevel<'_> {
             entities: &mut *self.entities,
             difficulty: self.difficulty as i32,
             rules: side.rules,
+            scoreboard: self.scoreboard,
             attacker: None,
             defer_health: true,
             pending_triggers: Some(side.pending_triggers),
@@ -1139,6 +1153,7 @@ impl Level for RegionLevel<'_> {
             entities: &mut *self.entities,
             difficulty: self.difficulty as i32,
             rules: side.rules,
+            scoreboard: self.scoreboard,
             attacker: None,
             defer_health: true,
             pending_triggers: Some(side.pending_triggers),

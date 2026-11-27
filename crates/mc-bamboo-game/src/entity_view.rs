@@ -67,6 +67,10 @@ pub(crate) struct ReadOnlyWorld<'a> {
     pub(crate) block_change_stamp: u64,
     /// 计分板，生物按 UUID 查自己的队伍。
     pub(crate) scoreboard: &'a crate::scoreboard::Scoreboard,
+    /// `GameRules.PVP`，`ServerPlayer.canHarmPlayer` 用。
+    ///
+    /// `GameRules.PVP`, read by `ServerPlayer.canHarmPlayer`.
+    pub(crate) pvp: bool,
 }
 
 impl BlockSource for ReadOnlyWorld<'_> {
@@ -100,6 +104,18 @@ impl BlockSource for ReadOnlyWorld<'_> {
 
     fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
         self.scoreboard.entity_team_index(uuid)
+    }
+
+    fn team_collision_rule(&self, index: u32) -> i32 {
+        self.scoreboard.team_collision_by_index(index)
+    }
+
+    fn team_collisions_restricted(&self) -> bool {
+        self.scoreboard.collisions_restricted()
+    }
+
+    fn players_can_harm(&self, attacker: Option<u32>, target: Option<u32>) -> bool {
+        self.pvp && self.scoreboard.teams_allow_damage(attacker, target)
     }
 
     fn inhabited_time(&self, chunk: ChunkPos) -> i64 {

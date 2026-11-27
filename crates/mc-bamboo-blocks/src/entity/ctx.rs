@@ -215,6 +215,27 @@ pub trait BlockView {
         None
     }
 
+    /// 见 [`Level::team_collision_rule`](crate::Level::team_collision_rule)。
+    ///
+    /// See [`Level::team_collision_rule`](crate::Level::team_collision_rule).
+    fn team_collision_rule(&self, _index: u32) -> i32 {
+        0
+    }
+
+    /// 见 [`Level::team_collisions_restricted`](crate::Level::team_collisions_restricted)。
+    ///
+    /// See [`Level::team_collisions_restricted`](crate::Level::team_collisions_restricted).
+    fn team_collisions_restricted(&self) -> bool {
+        false
+    }
+
+    /// 见 [`Level::players_can_harm`](crate::Level::players_can_harm)。
+    ///
+    /// See [`Level::players_can_harm`](crate::Level::players_can_harm).
+    fn players_can_harm(&self, _attacker: Option<u32>, _target: Option<u32>) -> bool {
+        true
+    }
+
     /// `getSkyDarken()`：昼夜和天气让天空光暗了多少。
     fn sky_darken(&self) -> i32 {
         0
@@ -840,6 +861,18 @@ impl BlockView for World<'_> {
         self.level().entity_team(uuid)
     }
 
+    fn team_collision_rule(&self, index: u32) -> i32 {
+        self.level().team_collision_rule(index)
+    }
+
+    fn team_collisions_restricted(&self) -> bool {
+        self.level().team_collisions_restricted()
+    }
+
+    fn players_can_harm(&self, attacker: Option<u32>, target: Option<u32>) -> bool {
+        self.level().players_can_harm(attacker, target)
+    }
+
     fn sky_darken(&self) -> i32 {
         self.level().sky_darken()
     }
@@ -1463,6 +1496,17 @@ pub enum Command {
     },
     AwardDeathExperience {
         amount: i32,
+    },
+    /// `LivingEntity.die` 开头的 `awardKillScore` 和后面的 `killedEntity`：交给游戏层
+    /// 给玩家记分，见 [`Effect::KillScore`](crate::Effect::KillScore)。
+    ///
+    /// `awardKillScore` and `killedEntity` in `LivingEntity.die`: handed to the game
+    /// layer, see [`Effect::KillScore`](crate::Effect::KillScore).
+    AwardKillScore {
+        credit: Option<[u8; 16]>,
+        blow: Option<EntityUid>,
+        victim: i32,
+        victim_uuid: [u8; 16],
     },
     /// `Raider.die`：把英雄与离队信息交给游戏层。
     ///
@@ -2349,6 +2393,19 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             for stack in world.mob_loot_drops(loot, me.position) {
                 world.spawn_at_location(me.position, stack);
             }
+        }
+        Command::AwardKillScore {
+            credit,
+            blow,
+            victim,
+            victim_uuid,
+        } => {
+            world.push_effect(crate::Effect::KillScore {
+                credit,
+                blow,
+                victim,
+                victim_uuid,
+            });
         }
         Command::RaiderDied {
             uid,

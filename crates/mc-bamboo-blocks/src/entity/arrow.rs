@@ -888,9 +888,21 @@ fn find_targets(me: &Entity, ctx: &dyn EntityCtx, end: Vec3) -> Vec<ArrowEntityH
             consider(other.uid, other.position, other.bounding_box(), false);
         }
     });
+    // `AbstractArrow.canHitEntity`：射手是玩家、目标也是玩家，而且
+    // `owner.canHarmPlayer(target)` 为假（PVP 关着，或者同队且不许友军伤害）时，
+    // 箭直接穿过去。
+    //
+    // `AbstractArrow.canHitEntity`: when both the owner and the target are players and
+    // `owner.canHarmPlayer(target)` is false (PVP off, or same team without friendly
+    // fire), the arrow flies straight through.
+    let shooter = arrow
+        .owner
+        .and_then(|uid| super::mob::goals::player_by_uid(blocks, uid));
     blocks.for_each_player(&mut |player| {
         let bb = player_box(player);
-        if player.alive && !player.spectator && bb.intersects(area) {
+        let spared =
+            shooter.is_some_and(|shooter| !blocks.players_can_harm(shooter.team, player.team));
+        if player.alive && !player.spectator && bb.intersects(area) && !spared {
             consider(player.uid, player.position, bb, true);
         }
     });

@@ -997,10 +997,20 @@ fn resolve_target(
             .then(|| mob_target(public));
     }
     let other = region.players.get(&PlayerId(entity_id))?;
-    // `ServerPlayer.canHarmPlayer`：PVP 规则 + 队伍，Bamboo 没有队伍。
+    // `ServerPlayer.canHarmPlayer`：PVP 规则，加上 `doTeamsAllowDamage`（同队且队伍
+    // 不许友军伤害时打不到）。
     //
-    // `ServerPlayer.canHarmPlayer`: the PVP rule plus teams; Bamboo has no teams.
+    // `ServerPlayer.canHarmPlayer`: the PVP rule plus `doTeamsAllowDamage` (teammates
+    // cannot be hit while the team forbids friendly fire).
     if entity_id == attacker.0 || !region.global.rules.bool(gamerules::PVP) {
+        return None;
+    }
+    let attacker_name = &region.players.get(&attacker)?.name;
+    if !region
+        .global
+        .scoreboard
+        .holders_allow_damage(attacker_name, &other.name)
+    {
         return None;
     }
     if !region

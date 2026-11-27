@@ -3094,6 +3094,151 @@ pub(in crate::entity) fn root_vehicle(
     root
 }
 
+/// 官方 `EntitySelector.pushableBy(entity)` 里和队伍有关的那一半：推的一方自己的队伍
+/// 和碰撞规则。`restricted` 为假时没有任何队伍限制碰撞，谁都放行。
+///
+/// The team half of official `EntitySelector.pushableBy(entity)`: the pusher's own team
+/// and collision rule. With `restricted` false no team restricts collisions and
+/// everything passes.
+struct PushTeams {
+    restricted: bool,
+    team: Option<u32>,
+    /// `Team.CollisionRule` 的 id：0 始终、1 从不、2 `pushOtherTeams`、3 `pushOwnTeam`。
+    ///
+    /// The `Team.CollisionRule` id: 0 always, 1 never, 2 `pushOtherTeams`,
+    /// 3 `pushOwnTeam`.
+    rule: i32,
+}
+
+impl PushTeams {
+    fn of(mob: &Mob, view: &dyn BlockView) -> Self {
+        if !view.team_collisions_restricted() {
+            return Self {
+                restricted: false,
+                team: None,
+                rule: 0,
+            };
+        }
+        let team = mob_team(mob, view);
+        Self {
+            restricted: true,
+            team,
+            rule: team.map_or(0, |index| view.team_collision_rule(index)),
+        }
+    }
+
+    /// 对方在 `their` 队时推不推得动。
+    ///
+    /// Whether an entity in team `their` can be pushed.
+    fn allows(&self, their: Option<u32>, view: &dyn BlockView) -> bool {
+        if !self.restricted {
+            return true;
+        }
+        let their_rule = their.map_or(0, |index| view.team_collision_rule(index));
+        let same_team = self.team.is_some() && self.team == their;
+        collision_allows(self.rule, their_rule, same_team)
+    }
+
+    fn allows_entity(&self, other: &crate::EntityPublic, view: &dyn BlockView) -> bool {
+        !self.restricted || self.allows(public_team(other, view), view)
+    }
+}
+
+/// 官方 `EntitySelector.pushableBy` 的规则表，两边各一条 `Team.CollisionRule`（没有队伍
+/// 算 `always`）。照官方的判断，`pushOwnTeam`（3）是同队不推，`pushOtherTeams`（2）
+/// 是只推同队。
+///
+/// The rule table of official `EntitySelector.pushableBy`, one `Team.CollisionRule` per
+/// side (no team counts as `always`). As official evaluates them, `pushOwnTeam` (3)
+/// spares the own team and `pushOtherTeams` (2) pushes only the own team.
+pub fn collision_allows(own: i32, their: i32, same_team: bool) -> bool {
+    const NEVER: i32 = 1;
+    const PUSH_OTHER_TEAMS: i32 = 2;
+    const PUSH_OWN_TEAM: i32 = 3;
+    if own == NEVER || their == NEVER {
+        return false;
+    }
+    if (own == PUSH_OWN_TEAM || their == PUSH_OWN_TEAM) && same_team {
+        return false;
+    }
+    (own != PUSH_OTHER_TEAMS && their != PUSH_OTHER_TEAMS) || same_team
+}
+
+#[cfg(test)]
+mod collision_rule_tests {
+    use super::collision_allows;
+
+    #[test]
+    fn never_on_either_side_stops_every_push() {
+        for other in 0..4 {
+            for same in [false, true] {
+                assert!(!collision_allows(1, other, same));
+                assert!(!collision_allows(other, 1, same));
+            }
+        }
+    }
+
+    #[test]
+    fn always_pushes_unless_the_other_side_restricts() {
+        assert!(collision_allows(0, 0, false));
+        assert!(collision_allows(0, 0, true));
+        // 对方是 pushOtherTeams：只在同队时推得动。
+        assert!(!collision_allows(0, 2, false));
+        assert!(collision_allows(0, 2, true));
+        // 对方是 pushOwnTeam：同队推不动。
+        assert!(collision_allows(0, 3, false));
+        assert!(!collision_allows(0, 3, true));
+    }
+
+    #[test]
+    fn the_two_team_rules_combine_like_the_official_predicate() {
+        assert!(!collision_allows(2, 3, true));
+        assert!(!collision_allows(2, 3, false));
+        assert!(!collision_allows(3, 2, false));
+        assert!(collision_allows(2, 2, true));
+        assert!(!collision_allows(2, 2, false));
+        assert!(collision_allows(3, 3, false));
+        assert!(!collision_allows(3, 3, true));
+    }
+}
+
+/// `Entity.getTeam()`：按 UUID 查；驯服动物自己没队时用主人的队
+/// （`TamableAnimal.getTeam`）。
+///
+/// `Entity.getTeam()` by UUID; a tamed animal without a team of its own uses its
+/// owner's (`TamableAnimal.getTeam`).
+fn mob_team(mob: &Mob, view: &dyn BlockView) -> Option<u32> {
+    view.entity_team(&mob.uuid).or_else(|| {
+        mob.tame
+            .is_tame()
+            .then(|| super::tame::owner(mob, view))
+            .flatten()
+            .and_then(|owner| owner.team)
+    })
+}
+
+/// 别的实体的队伍。生物用自己的 UUID，其余实体用按实体号导出的 UUID。
+///
+/// Another entity's team: a mob by its own UUID, any other entity by the UUID derived
+/// from its entity id.
+fn public_team(other: &crate::EntityPublic, view: &dyn BlockView) -> Option<u32> {
+    match &other.kind {
+        KindPublic::Mob(public) => view.entity_team(&public.uuid).or_else(|| {
+            let owner = public
+                .owner
+                .filter(|_| public.tame_flags & super::tame::FLAG_TAME != 0)?;
+            let mut team = None;
+            view.for_each_player(&mut |player| {
+                if player.uuid == Some(owner) {
+                    team = player.team;
+                }
+            });
+            team
+        }),
+        _ => view.entity_team(&crate::archive::entity_uuid(other.uid).to_be_bytes()),
+    }
+}
+
 fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Entity.push(Entity)`：`this.noPhysics`（恼鬼在 `Vex.tick` 里为真）不互相推挤。
     // `Entity.push(Entity)`: `this.noPhysics` (true during `Vex.tick`) skips pushing.
@@ -3124,11 +3269,18 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // keep the other mob's public state.
     let iron_golem = mob.mob_type == super::MobType::IronGolem;
     let mut golem_pushed = Vec::new();
+    // 官方 `EntitySelector.pushableBy(this)` 的队伍碰撞规则。绝大多数世界没有队伍限制
+    // 碰撞，这时一个队伍都不查。
+    //
+    // The team collision rules of official `EntitySelector.pushableBy(this)`. Most worlds
+    // have no team restricting collisions, and then no team is looked up at all.
+    let teams = PushTeams::of(mob, ctx.blocks());
     // 上限下推到查询里：够数就停止枚举，塔场景不必把几百个候选全排一遍。
     ctx.pushable_others(bounds, remaining, &mut |other| {
         if matches!(other.kind, KindPublic::Minecart(_))
             && !other.removed
             && root_vehicle(other.uid, other.vehicle, ctx) != my_root
+            && teams.allows_entity(other, ctx.blocks())
         {
             carts.push(other.uid);
             return true;
@@ -3138,6 +3290,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             && public.is_alive()
             && public.mob_type.is_pushable()
             && root_vehicle(other.uid, other.vehicle, ctx) != my_root
+            && teams.allows_entity(other, ctx.blocks())
         {
             others.push((other.uid, other.position));
             if iron_golem {
@@ -3160,6 +3313,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             && !mob.passengers.contains(&player.uid)
             && ejected != Some(player.uid)
             && super::avoid::player_box(player).intersects(bounds)
+            && teams.allows(player.team, ctx.blocks())
         {
             players.push(player.position);
             pushed_players.push((player.uid, player.position));
@@ -3186,6 +3340,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 && (matches!(&other.kind, KindPublic::Mob(public)
                 if public.is_alive() && public.mob_type.is_pushable())
                     || matches!(other.kind, KindPublic::Minecart(_)))
+                && teams.allows_entity(other, ctx.blocks())
             {
                 count += 1;
             }
@@ -3920,6 +4075,7 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     let killed_by_wither =
         source.attacker_type == Some(mc_bamboo_data::registries::entity_type::WITHER);
     let rose_pos = me.block_position();
+    award_kill_score(me, mob, ctx, &source);
     die_impl(me, mob, ctx, source);
     // `LivingEntity.createWitherRose(getKillCredit())`：击杀者是凋灵 Boss 时，
     // 在掉落之后于脚下生成凋灵玫瑰。
@@ -3929,6 +4085,32 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     if killed_by_wither {
         ctx.emit(Command::CreateWitherRose { pos: rose_pos }, me);
     }
+}
+
+/// `LivingEntity.die` 里和玩家有关的记分：`getKillCredit()` 优先取还在记忆时间里的
+/// `lastHurtByPlayer`；`killedEntity` 看致命一击的 `getEntity()` 是不是玩家。两个都
+/// 不是玩家就不用通知游戏层。
+///
+/// The player-related scores of `LivingEntity.die`: `getKillCredit()` prefers a
+/// `lastHurtByPlayer` still inside its memory time, and `killedEntity` looks at whether
+/// the killing blow's `getEntity()` is a player. With neither the game layer is not told.
+fn award_kill_score(me: &mut Entity, mob: &Mob, ctx: &mut dyn EntityCtx, source: &DamageSource) {
+    let credit = mob
+        .last_hurt_by_player_ref
+        .filter(|_| mob.last_hurt_by_player_memory_time > 0);
+    let blow = source.attacker.filter(|_| source.attacker_is_player);
+    if credit.is_none() && blow.is_none() {
+        return;
+    }
+    ctx.emit(
+        Command::AwardKillScore {
+            credit,
+            blow,
+            victim: mob.mob_type.entity_type(),
+            victim_uuid: mob.uuid,
+        },
+        me,
+    );
 }
 
 fn die_impl(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSource) {

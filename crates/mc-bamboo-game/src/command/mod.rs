@@ -65,6 +65,7 @@ pub(crate) use teleport::{place_player, place_player_at_respawn};
 mod text;
 mod time;
 mod title;
+mod trigger;
 mod weather;
 mod world_border;
 mod world_settings;
@@ -476,7 +477,12 @@ pub(crate) fn on_suggestion(region: &mut Region, id: PlayerId, transaction: i32,
             .values()
             .map(|player| player.name.as_str())
             .collect();
-        commands().graph.suggestions(body, cursor, level, &names)
+        // 官方 `TriggerCommand.suggestObjectives` 要读来源玩家的分数。
+        // Official `TriggerCommand.suggestObjectives` reads the source player's scores.
+        let asker = region.players.get(&id).map_or("", |player| &player.name);
+        trigger::while_suggesting(&region.global.scoreboard, asker, || {
+            commands().graph.suggestions(body, cursor, level, &names)
+        })
     };
     let values: Vec<Suggestion<'_>> = list
         .values

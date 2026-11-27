@@ -82,10 +82,26 @@ pub(crate) struct CombatEntry {
 /// `memory` / `age` are relative countdowns, not absolute instants.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum KillCredit {
-    /// `lastHurtByPlayer`，`memory` 每刻减 1，到 0 清空。
-    Player { display: Component, memory: i32 },
-    /// `lastHurtByMob`，`age` 每刻加 1，超过 100 清空。
-    Mob { display: Component, age: i32 },
+    /// `lastHurtByPlayer`，`memory` 每刻减 1，到 0 清空。`id` 是那名玩家，
+    /// 死亡时给他记击杀分。
+    ///
+    /// `lastHurtByPlayer`; `memory` drops by 1 per tick and clears at 0. `id` is that
+    /// player, who gets the kill scores on death.
+    Player {
+        display: Component,
+        memory: i32,
+        id: PlayerId,
+    },
+    /// `lastHurtByMob`，`age` 每刻加 1，超过 100 清空。`entity_type` 是它的实体类型，
+    /// `Stats.ENTITY_KILLED_BY` 用。
+    ///
+    /// `lastHurtByMob`; `age` grows by 1 per tick and clears past 100. `entity_type`
+    /// is its entity type, for `Stats.ENTITY_KILLED_BY`.
+    Mob {
+        display: Component,
+        age: i32,
+        entity_type: i32,
+    },
 }
 
 impl KillCredit {
@@ -422,11 +438,12 @@ pub(crate) fn die_in(
     let spectator = player.game_mode == GameMode::Spectator;
     let level = player.experience.level;
     // `getKillCredit()`：优先 `lastHurtByPlayer`，否则 `lastHurtByMob`。
-    let kill_credit = player
+    let killer = player
         .hurt_by_player
         .as_ref()
         .or(player.hurt_by_mob.as_ref())
-        .map(|credit| credit.display().clone());
+        .cloned();
+    let kill_credit = killer.as_ref().map(|credit| credit.display().clone());
 
     // 死亡消息先用完整的 `CombatTracker.entries` 拼（官方在 `recheckStatus`
     // 清空之前调 `getDeathMessage`）。
@@ -449,7 +466,17 @@ pub(crate) fn die_in(
             content: &death_message,
             overlay: false,
         });
-        crate::chat::broadcast_system_frames(parts.players, parts.links, &frames, None);
+        // 死者所在队伍的 `deathMessageVisibility` 决定发给谁。
+        //
+        // The `deathMessageVisibility` of the victim's team decides who receives it.
+        crate::scoreboard::broadcast_death_message(
+            parts.players,
+            parts.links,
+            parts.scoreboard,
+            &frames,
+            id,
+            &name,
+        );
     }
 
     // `Player.dropEquipment`：!keepInventory 时先清消失诅咒，再 dropAll。
@@ -484,6 +511,7 @@ pub(crate) fn die_in(
     // 官方 `ServerPlayer.die` 不清经验；等级经验在下一刻 `PlayerList.respawn`
     // 的 `restoreFrom` 里丢掉（keepInventory 时原样留下）。Bamboo 原地重置，
     // 所以到重生那一刻才按 `reset_after_respawn` 清。
+    award_death_scores(parts.players, id, killer.as_ref());
     let player = parts.players.get_mut(&id).expect("玩家刚才还在");
     player.dead = true;
     player.weapon_use = None;
@@ -522,6 +550,148 @@ pub(crate) fn die_in(
     Some(drops)
 }
 
+/// 官方 `ServerPlayer.die` 里对计分板和统计的改动，顺序照原样：死者的 `deathCount`；
+/// 有击杀者时死者的 `ENTITY_KILLED_BY`，再是 `killer.awardKillScore`；最后死者的
+/// `DEATHS`，并把 `TIME_SINCE_DEATH`、`TIME_SINCE_REST` 清零。
+///
+/// The scoreboard and stat changes of official `ServerPlayer.die`, in its order: the
+/// victim's `deathCount`; with a killer, the victim's `ENTITY_KILLED_BY` and then
+/// `killer.awardKillScore`; finally the victim's `DEATHS` and the reset of
+/// `TIME_SINCE_DEATH` and `TIME_SINCE_REST`.
+fn award_death_scores(
+    players: &mut BTreeMap<PlayerId, Player>,
+    id: PlayerId,
+    killer: Option<&KillCredit>,
+) {
+    use mc_bamboo_data::registries::{custom_stat, entity_type};
+
+    use crate::item_use_stats::{ScoreChange, ScoreKey};
+
+    let one = ScoreChange::Add(1);
+    // `getKillCredit()` 解析不到（那名玩家已经不在）就当没有击杀者。
+    //
+    // A `getKillCredit()` that no longer resolves (the player is gone) means no killer.
+    let killer = killer.and_then(|credit| match credit {
+        KillCredit::Player { id: killer, .. } => players
+            .get(killer)
+            .map(|player| (entity_type::PLAYER, Some((*killer, player.name.clone())))),
+        KillCredit::Mob { entity_type, .. } => Some((*entity_type, None)),
+    });
+    let Some(victim) = players.get_mut(&id) else {
+        return;
+    };
+    let victim_name = victim.name.clone();
+    victim
+        .item_use_stats
+        .score(ScoreKey::Named("deathCount"), one);
+    if let Some((killer_type, killer_player)) = killer {
+        victim
+            .item_use_stats
+            .score(ScoreKey::KilledBy(killer_type), one);
+        // `ServerPlayer.awardKillScore`：`victim != this` 才记。
+        //
+        // `ServerPlayer.awardKillScore` only counts when `victim != this`.
+        if let Some((killer_id, killer_name)) = killer_player.filter(|(killer, _)| *killer != id) {
+            if let Some(killer) = players.get_mut(&killer_id) {
+                award_player_kill(killer, &victim_name);
+            }
+            // `handleTeamKill(victim, this, KILLED_BY_TEAM)`：分数记在死者名下，
+            // 颜色取击杀者的队伍。
+            //
+            // `handleTeamKill(victim, this, KILLED_BY_TEAM)`: the victim holds the score
+            // and the colour comes from the killer's team.
+            if let Some(victim) = players.get_mut(&id) {
+                victim.item_use_stats.score(
+                    ScoreKey::Team {
+                        prefix: "killedByTeam.",
+                        of: killer_name,
+                    },
+                    one,
+                );
+            }
+        }
+    }
+    let Some(victim) = players.get_mut(&id) else {
+        return;
+    };
+    victim.item_use_stats.award_custom(custom_stat::DEATHS, 1);
+    victim
+        .item_use_stats
+        .reset_custom(custom_stat::TIME_SINCE_DEATH);
+    victim
+        .item_use_stats
+        .reset_custom(custom_stat::TIME_SINCE_REST);
+}
+
+/// 一只生物死了（`LivingEntity.die`）。`credit` 是 `getKillCredit()` 解析到的玩家，
+/// 走 `ServerPlayer.awardKillScore`：`totalKillCount`、`MOB_KILLS`、按死者队伍颜色的
+/// `teamkill.<颜色>`。`blow` 是致命一击的 `DamageSource.getEntity()`，是玩家时走
+/// `Player.killedEntity`：`ENTITY_KILLED`。
+///
+/// A mob died (`LivingEntity.die`). `credit` is the player `getKillCredit()` resolves
+/// to and runs `ServerPlayer.awardKillScore`: `totalKillCount`, `MOB_KILLS` and
+/// `teamkill.<colour>` by the victim's team colour. `blow` is the killing blow's
+/// `DamageSource.getEntity()`; a player there runs `Player.killedEntity`:
+/// `ENTITY_KILLED`.
+pub(crate) fn award_mob_kill(
+    region: &mut Region,
+    credit: Option<[u8; 16]>,
+    blow: Option<i32>,
+    victim: i32,
+    victim_uuid: [u8; 16],
+) {
+    use crate::item_use_stats::{ScoreChange, ScoreKey};
+
+    let one = ScoreChange::Add(1);
+    let killer = credit.and_then(|uuid| {
+        region
+            .players
+            .values_mut()
+            .find(|player| *player.uuid.as_bytes() == uuid)
+    });
+    if let Some(killer) = killer {
+        let stats = &mut killer.item_use_stats;
+        stats.score(ScoreKey::Named("totalKillCount"), one);
+        stats.award_custom(mc_bamboo_data::registries::custom_stat::MOB_KILLS, 1);
+        // 生物的计分板名字是 UUID 字符串（`Entity.getScoreboardName`）。
+        //
+        // A mob's scoreboard name is its UUID string (`Entity.getScoreboardName`).
+        stats.score(
+            ScoreKey::Team {
+                prefix: "teamkill.",
+                of: uuid::Uuid::from_bytes(victim_uuid).to_string(),
+            },
+            one,
+        );
+    }
+    if let Some(player) = blow.and_then(|uid| region.players.get_mut(&PlayerId(uid))) {
+        player.item_use_stats.score(ScoreKey::Killed(victim), one);
+    }
+}
+
+/// 官方 `ServerPlayer.awardKillScore` 在死者是玩家时给击杀者记的分：`totalKillCount`、
+/// `PLAYER_KILLS`、`playerKillCount`，再是按死者队伍颜色的 `teamkill.<颜色>`。
+///
+/// What official `ServerPlayer.awardKillScore` gives the killer of a player:
+/// `totalKillCount`, `PLAYER_KILLS`, `playerKillCount`, then `teamkill.<colour>` by the
+/// victim's team colour.
+fn award_player_kill(killer: &mut Player, victim_name: &str) {
+    use crate::item_use_stats::{ScoreChange, ScoreKey};
+
+    let one = ScoreChange::Add(1);
+    let stats = &mut killer.item_use_stats;
+    stats.score(ScoreKey::Named("totalKillCount"), one);
+    stats.award_custom(mc_bamboo_data::registries::custom_stat::PLAYER_KILLS, 1);
+    stats.score(ScoreKey::Named("playerKillCount"), one);
+    stats.score(
+        ScoreKey::Team {
+            prefix: "teamkill.",
+            of: victim_name.to_owned(),
+        },
+        one,
+    );
+}
+
 /// `CombatTracker.recordDamage`：一次 `amount != 0` 的完整受击写一条记录。
 /// `fallDistance` 取玩家当时的 `Motion.fall_distance`（官方 `LivingEntity.fallDistance`），
 /// `fallLocation` 由 `FallLocation.getCurrentFallLocation` 给，Bamboo 这一期
@@ -543,7 +713,12 @@ pub(crate) fn record_combat(
     let uid = source.attacker.or(source.direct);
     let player_credit = uid
         .and_then(|uid| parts.players.get(&PlayerId(uid)))
-        .map(|other| victim_component(&other.name, *other.uuid.as_bytes()));
+        .map(|other| {
+            (
+                victim_component(&other.name, *other.uuid.as_bytes()),
+                other.id,
+            )
+        });
     let mob_credit = uid
         .and_then(|uid| {
             parts
@@ -555,6 +730,7 @@ pub(crate) fn record_combat(
             matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
                 .then(|| attacker.clone())
                 .flatten()
+                .map(|display| (display, public.kind.entity_type()))
         });
     let Some(player) = parts.players.get_mut(&id) else {
         return;
@@ -572,13 +748,18 @@ pub(crate) fn record_combat(
     player.combat_idle_ticks = 0;
     // `LivingEntity.hurtServer` 的 `resolveMobResponsibleForDamage` /
     // `resolvePlayerResponsibleForDamage`：只在 `getEntity()` 非空时设置归属。
-    if let Some(display) = player_credit {
+    if let Some((display, id)) = player_credit {
         player.hurt_by_player = Some(KillCredit::Player {
             display,
             memory: KILL_CREDIT_TICKS,
+            id,
         });
-    } else if let Some(display) = mob_credit {
-        player.hurt_by_mob = Some(KillCredit::Mob { display, age: 0 });
+    } else if let Some((display, entity_type)) = mob_credit {
+        player.hurt_by_mob = Some(KillCredit::Mob {
+            display,
+            age: 0,
+            entity_type,
+        });
     }
 }
 
@@ -758,12 +939,17 @@ mod tests {
         let mut player = KillCredit::Player {
             display: display.clone(),
             memory: 100,
+            id: PlayerId(1),
         };
         for _ in 0..100 {
             assert!(player.tick());
         }
         assert!(!player.tick(), "第 101 刻清空");
-        let mut mob = KillCredit::Mob { display, age: 0 };
+        let mut mob = KillCredit::Mob {
+            display,
+            age: 0,
+            entity_type: mc_bamboo_data::registries::entity_type::COW,
+        };
         for _ in 0..100 {
             assert!(mob.tick());
         }

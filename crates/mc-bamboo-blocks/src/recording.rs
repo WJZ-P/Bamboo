@@ -790,6 +790,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::RunMinecartCommand(_) => 42,
         Effect::EntityEvent { .. } => 43,
         Effect::PushPlayerUp { .. } => 44,
+        Effect::KillScore { .. } => 45,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -949,6 +950,17 @@ fn hash_effect(effect: &Effect) -> u64 {
             position.y.to_bits().hash(&mut hasher);
             position.z.to_bits().hash(&mut hasher);
             killer.hash(&mut hasher);
+        }
+        Effect::KillScore {
+            credit,
+            blow,
+            victim,
+            victim_uuid,
+        } => {
+            credit.hash(&mut hasher);
+            blow.hash(&mut hasher);
+            victim.hash(&mut hasher);
+            victim_uuid.hash(&mut hasher);
         }
         Effect::RaidSetLeader { id, wave, leader } => {
             id.hash(&mut hasher);

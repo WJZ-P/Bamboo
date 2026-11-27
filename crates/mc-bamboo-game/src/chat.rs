@@ -246,7 +246,7 @@ fn kick_for_illegal_characters(region: &mut Region, id: PlayerId) {
 ///
 /// Official `ServerPlayer.acceptsSystemMessages(boolean overlay)`: a HIDDEN chat accepts
 /// only overlay messages; every other visibility accepts everything.
-fn accepts_system_messages(visibility: ChatVisibility, overlay: bool) -> bool {
+pub(crate) fn accepts_system_messages(visibility: ChatVisibility, overlay: bool) -> bool {
     visibility != ChatVisibility::Hidden || overlay
 }
 

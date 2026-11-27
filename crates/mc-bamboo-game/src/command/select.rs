@@ -132,17 +132,25 @@ pub(crate) fn mention(
         .collect())
 }
 
-/// 带计分板的选择器。`scores=`、`team=` 的判定要查全服状态。
+/// 官方 `ScoreHolderArgument` 的选择器：玩家和非玩家实体都选，`scores=`、`team=` 照常
+/// 过滤，空结果报 `argument.entity.notfound.entity`。
 ///
-/// A selector that sees the scoreboard. `scores=` and `team=` need the server-wide state.
-pub(crate) fn with_scoreboard(
+/// The selector of official `ScoreHolderArgument`: players and non-player entities
+/// alike, with `scores=` / `team=` filtering; an empty result is
+/// `argument.entity.notfound.entity`.
+pub(crate) fn score_holders(
     region: &Region,
     board: &crate::scoreboard::Scoreboard,
     source: PlayerId,
     level: u8,
     selector: &EntitySelector,
-) -> Result<Vec<PlayerId>, CommandFail> {
-    optional_players(region, board, source, level, selector)
+) -> Result<Vec<Target>, CommandFail> {
+    let found = find(region, Some(board), source, level, selector)?;
+    if found.is_empty() {
+        Err(fail("argument.entity.notfound.entity"))
+    } else {
+        Ok(found)
+    }
 }
 
 /// 这个选择器有没有可能选到非玩家实体（计划 4.5.1：只选玩家时一个岛都不用借）。
