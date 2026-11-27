@@ -339,6 +339,10 @@ pub fn spawn_dispenser_egg(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "官方 EntityType.spawn 的参数就是这几个"
+)]
 fn spawn_egg_with(
     world: &mut World,
     kind: MobType,
