@@ -40,6 +40,20 @@ enum Line {
     Case(Box<Case>),
     End(End),
     BoatFacts(Box<BoatFacts>),
+    CommandMinecart(CommandMinecart),
+}
+
+#[derive(Debug, Deserialize)]
+struct CommandMinecart {
+    command: String,
+    steps: Vec<CommandMinecartStep>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommandMinecartStep {
+    nbt: String,
+    signal: i32,
+    chat: Vec<[String; 2]>,
 }
 
 /// 船第二期的静态事实：菜单标题、重叠容器随机抽、生物乘客落位、运输船整棵
@@ -585,6 +599,10 @@ impl Report {
                     self.boat_facts = true;
                     self.cases += 1;
                     self.replay_boat_facts(&facts);
+                }
+                Line::CommandMinecart(scene) => {
+                    self.cases += 1;
+                    self.replay_command_minecart(&scene)?;
                 }
                 Line::End(end) => {
                     self.ended = true;
@@ -1339,6 +1357,45 @@ impl Report {
                 "boat facts NBT keys: official {want_keys:?}, bamboo {got_keys:?}"
             ));
         }
+    }
+
+    fn replay_command_minecart(&mut self, scene: &CommandMinecart) -> Result<(), String> {
+        let steps = mc_bamboo_game::replay_command_minecart(&scene.command)?;
+        self.field("command minecart", "steps", scene.steps.len(), steps.len());
+        for (tick, (want, got)) in scene.steps.iter().zip(steps).enumerate() {
+            self.steps += 1;
+            let at = format!("command minecart step {tick}");
+            let nbt = mc_bamboo_nbt::parse_snbt(&want.nbt).map_err(|error| format!("{error:?}"))?;
+            for key in [
+                "Command",
+                "SuccessCount",
+                "TrackOutput",
+                "LastOutput",
+                "UpdateLastExecution",
+                "LastExecution",
+            ] {
+                self.field(&at, key, save_field(&nbt, key), save_field(&got.nbt, key));
+            }
+            self.field(&at, "detector signal", want.signal, got.signal);
+            let chat = want
+                .chat
+                .iter()
+                .map(|[message, name]| {
+                    let message =
+                        mc_bamboo_nbt::parse_snbt(message).map_err(|error| format!("{error:?}"))?;
+                    let name =
+                        mc_bamboo_nbt::parse_snbt(name).map_err(|error| format!("{error:?}"))?;
+                    Ok::<_, String>((canonical_tag(&message), canonical_tag(&name)))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let got_chat: Vec<_> = got
+                .chat
+                .iter()
+                .map(|(message, name)| (canonical_tag(message), canonical_tag(name)))
+                .collect();
+            self.field(&at, "chat", chat, got_chat);
+        }
+        Ok(())
     }
 
     fn mismatch(&mut self, message: String) {

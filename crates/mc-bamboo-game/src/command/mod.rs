@@ -117,7 +117,7 @@ pub(crate) enum Action {
 
 pub(crate) struct Commands {
     pub(crate) graph: CommandGraph,
-    actions: Vec<Option<Action>>,
+    pub(crate) actions: Vec<Option<Action>>,
     /// 和 `actions` 对齐。`/gamerule` 的节点记下规则下标，别的命令是 `None`。
     ///
     /// Parallel to `actions`. `/gamerule` nodes store the rule index; other commands are `None`.

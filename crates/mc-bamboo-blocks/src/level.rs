@@ -2745,6 +2745,8 @@ pub fn monster_prevents_rest_in<L: Level + ?Sized>(level: &L, pos: BlockPos) -> 
 /// The non-block results of one action, handed to the caller for delivery.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
+    /// 激活铁轨要求游戏层执行矿车命令。 / An activator rail requests a cart command.
+    RunMinecartCommand(crate::entity::minecart::CommandActivation),
     /// `AbstractBoat.tickBubbleColumn`：给跟踪者广播实体事件，并甩下载具的乘客。
     ///
     /// `AbstractBoat.tickBubbleColumn`: broadcast an entity event and eject the

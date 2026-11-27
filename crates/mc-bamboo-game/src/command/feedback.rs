@@ -130,6 +130,9 @@ fn plain_text(content: &Component) -> String {
 }
 
 pub(crate) fn send_system(region: &mut Region, id: PlayerId, content: &Component) {
+    if crate::minecart_command::capture_output(id, content) {
+        return;
+    }
     if console::is_console(id) {
         // 官方控制台来源的 `MinecraftServer.sendSystemMessage`：把反馈打进日志。
         // Official console source `MinecraftServer.sendSystemMessage`: log the feedback.
@@ -169,9 +172,16 @@ pub(crate) fn success(region: &mut Region, source: PlayerId, message: Component,
     if send_own {
         send_system(region, source, &message);
     }
+    let command_cart = crate::minecart_command::tracks_output(source);
     let should_broadcast = broadcast
         && if console {
             region.broadcast_console_to_ops
+        } else if let Some(track_output) = command_cart {
+            track_output
+                && region
+                    .global
+                    .rules
+                    .bool(mc_bamboo_data::gamerules::COMMAND_BLOCK_OUTPUT)
         } else {
             true
         };
@@ -179,10 +189,12 @@ pub(crate) fn success(region: &mut Region, source: PlayerId, message: Component,
         return;
     }
     let name = if console {
-        console::NAME.to_owned()
+        Component::text(console::NAME)
+    } else if command_cart.is_some() {
+        crate::minecart_command::display_name(region, source)
     } else {
         match region.players.get(&source) {
-            Some(player) => player.name.clone(),
+            Some(player) => Component::text(player.name.clone()),
             None => return,
         }
     };
@@ -192,19 +204,16 @@ pub(crate) fn success(region: &mut Region, source: PlayerId, message: Component,
     // Official `broadcastToAdmins`: the extra `log_admin_commands` line is skipped when
     // the source is the server itself (the console case); a player's command is logged.
     if !console && region.global.log_admin_commands {
-        info!(player = %name, "broadcasting command feedback");
+        info!(player = %plain_text(&name), "broadcasting command feedback");
     }
     // `broadcastToAdmins`：其他 OP 的 `chat.type.admin` 也看 `send_command_feedback`。
     // `broadcastToAdmins`: other ops' `chat.type.admin` also checks `send_command_feedback`.
     if !region.global.send_command_feedback {
         return;
     }
-    let admin = Component::translate(
-        "chat.type.admin",
-        [Component::text(name).into(), message.into()],
-    )
-    .color(Color::Gray)
-    .italic();
+    let admin = Component::translate("chat.type.admin", [name.into(), message.into()])
+        .color(Color::Gray)
+        .italic();
     // `broadcastToAdmins` 逐个 OP 调 `ServerPlayer.sendSystemMessage`，隐藏聊天的 OP 不发。
     //
     // `broadcastToAdmins` calls `ServerPlayer.sendSystemMessage` for each op; a hidden-chat op is skipped.

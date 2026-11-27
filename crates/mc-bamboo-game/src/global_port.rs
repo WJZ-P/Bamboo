@@ -36,6 +36,8 @@ use crate::{
 ///
 /// One change to global state the island hands to the master.
 pub(crate) enum GlobalEffect {
+    /// 激活的命令矿车在主控借区执行命令。 / Run the cart command with world access.
+    RunMinecartCommand(mc_bamboo_blocks::entity::minecart::CommandActivation),
     /// 全局类命令（计划 4.4）：主控用权威的 `Global` 执行，失败反馈也在那时发出。
     /// 解析、签名校验和刷屏计数都已经在岛上做完。
     ///
@@ -177,6 +179,9 @@ pub(crate) fn apply(global: &mut Global, region: &mut Region, effect: GlobalEffe
 
 fn apply_on_master(global: &mut Global, region: &mut Region, effect: GlobalEffect) {
     match effect {
+        GlobalEffect::RunMinecartCommand(activation) => {
+            crate::minecart_command::perform(global, region, activation);
+        }
         GlobalEffect::Command {
             source,
             command,

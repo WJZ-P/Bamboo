@@ -1017,6 +1017,9 @@ fn write_minecart_additional(
     if kind == MinecartKind::Hopper {
         put(out, "Enabled", Tag::Byte(i8::from(cart.enabled)));
     }
+    if let Some(command) = &cart.command_block {
+        command.write(out);
+    }
     if cart.is_container() {
         write_entity_container_items(
             out,
@@ -1053,6 +1056,9 @@ fn read_minecart_additional(tag: &Tag, cart: &mut crate::entity::minecart::Minec
     }
     if kind == MinecartKind::Hopper {
         cart.enabled = tag::bool_or(tag, "Enabled", true);
+    }
+    if kind == MinecartKind::CommandBlock {
+        cart.command_block = Some(crate::entity::minecart::CommandBlock::read(tag));
     }
     if cart.is_container() {
         read_entity_container_items(

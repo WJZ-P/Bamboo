@@ -2042,6 +2042,8 @@ pub enum Command {
     MinecartEject {
         passengers: Vec<EntityUid>,
     },
+    /// 激活铁轨触发命令。 / An activator rail triggers a command.
+    ActivateMinecartCommand(super::minecart::CommandActivation),
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -2823,6 +2825,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::MinecartPushAndPickup => super::minecart::push_and_pickup(me, world),
         Command::MinecartEject { passengers } => world.eject_passenger_ids(&passengers),
+        Command::ActivateMinecartCommand(activation) => {
+            world.push_effect(crate::Effect::RunMinecartCommand(activation));
+        }
     }
 }
 

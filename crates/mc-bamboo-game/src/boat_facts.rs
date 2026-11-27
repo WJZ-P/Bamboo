@@ -49,7 +49,18 @@ pub struct BoatFactsSample {
 }
 
 #[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Capture {
+    pub(crate) fn take(&self) -> Vec<u8> {
+        std::mem::take(
+            &mut *self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+}
 
 impl PlayerSink for Capture {
     fn send(&mut self, frames: Outgoing) -> bool {
@@ -121,7 +132,7 @@ pub fn replay_boat_facts(nbt: &str, seed: i64) -> Result<BoatFactsSample, String
         return Err("open_entity_container failed".to_owned());
     }
     region.links.flush();
-    let bytes = std::mem::take(&mut *capture.0.lock().unwrap());
+    let bytes = capture.take();
     let mut rest = bytes.as_slice();
     let mut title = None;
     while let Ok(Some(bounds)) = find_frame(rest, MAX_FRAME_LEN) {

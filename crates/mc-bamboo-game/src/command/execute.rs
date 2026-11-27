@@ -187,6 +187,7 @@ fn run_action(
         feedback::report(region, context.source, line, &failure);
         false
     } else {
+        crate::minecart_command::record_success(context.source, line);
         true
     }
 }

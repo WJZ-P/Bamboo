@@ -1439,6 +1439,12 @@ impl KindData {
                 if cart.has_fuel {
                     data.push(EntityData::MinecartFuel(true));
                 }
+                if !cart.command.is_empty() {
+                    data.push(EntityData::MinecartCommand(cart.command.clone()));
+                }
+                if let Some(output) = &cart.command_output {
+                    data.push(EntityData::MinecartCommandOutput(output.clone()));
+                }
                 data
             }
         }
@@ -1477,7 +1483,9 @@ fn minecart_default_data(
         10 => EntityData::BoatDamage(0.0),
         11 => EntityData::MinecartDisplayBlock(None),
         12 => EntityData::MinecartDisplayOffset(default_offset),
+        13 if cart.success_count.is_some() => EntityData::MinecartCommand(String::new()),
         13 => EntityData::MinecartFuel(false),
+        14 => EntityData::MinecartCommandOutput(mc_bamboo_nbt::Tag::String(String::new())),
         _ => EntityData::BoatHurtTime(0),
     }
 }

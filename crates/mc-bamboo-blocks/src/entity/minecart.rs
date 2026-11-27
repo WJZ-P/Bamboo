@@ -7,10 +7,12 @@
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3, mth};
 use mc_bamboo_data::{BlockAncestor, blocks, items, registries::entity_type, tags::block_tags};
-use mc_bamboo_protocol::item::ItemStack;
+use mc_bamboo_nbt::Tag;
+use mc_bamboo_protocol::{components::text::checked_component, item::ItemStack, text::Component};
 
 use crate::{
     Aabb, BlockState, World,
+    archive::tag,
     entity::{
         Entity, EntityKind, EntityUid, KindPublic, PrimedTnt,
         ctx::{BlockView, Command, EntityCtx},
@@ -184,6 +186,8 @@ pub struct Minecart {
     /// Transient `ServerPlayer.getLastClientMoveIntent()` of the first player
     /// passenger, synced by the game layer each tick and not saved.
     pub rider_intent: Vec3,
+    /// 命令方块矿车独有的状态。 / State held by command block carts.
+    pub command_block: Option<CommandBlock>,
 }
 
 impl Minecart {
@@ -212,6 +216,7 @@ impl Minecart {
             loot_table_seed: 0,
             consumed_item_this_frame: false,
             rider_intent: Vec3::default(),
+            command_block: (kind == MinecartKind::CommandBlock).then(CommandBlock::default),
         }
     }
 
@@ -236,7 +241,11 @@ impl Minecart {
     ///
     /// The item dropped when destroyed.
     pub const fn drop_item(&self) -> i32 {
-        self.kind().item()
+        if matches!(self.kind(), MinecartKind::CommandBlock) {
+            items::MINECART
+        } else {
+            self.kind().item()
+        }
     }
 
     /// `MinecartFurnace.addFuel`：燃料物品、未超上限时加 3600 tick，并把推力
@@ -256,6 +265,123 @@ impl Minecart {
     }
 }
 
+/// 命令方块矿车的 `BaseCommandBlock` 和激活冷却。
+///
+/// A command cart's `BaseCommandBlock` and rail activation cooldown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandBlock {
+    /// 待执行命令。 / The command to run.
+    pub command: String,
+    /// 是否接收命令反馈。 / Whether the command source accepts feedback.
+    pub track_output: bool,
+    /// 成功执行的分支数。 / Number of successful command branches.
+    pub success_count: i32,
+    /// 最后一条命令反馈。 / Most recent command feedback.
+    pub last_output: Option<Component>,
+    /// 上次执行的世界刻号，-1 表示无记录。 / Last execution game time, or -1.
+    pub last_execution: i64,
+    /// 是否记录世界刻号。 / Whether to remember the execution game time.
+    pub update_last_execution: bool,
+    last_activated: i32,
+    synced_command: String,
+    synced_last_output: Option<Tag>,
+}
+
+impl Default for CommandBlock {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            track_output: true,
+            success_count: 0,
+            last_output: None,
+            last_execution: -1,
+            update_last_execution: true,
+            last_activated: 0,
+            synced_command: String::new(),
+            synced_last_output: None,
+        }
+    }
+}
+
+impl CommandBlock {
+    /// 更新命令并重置成功次数。 / Update the command and reset the success count.
+    pub fn set_command(&mut self, command: String) {
+        self.command = command;
+        self.success_count = 0;
+    }
+
+    /// `MinecartCommandBase.onUpdated`，刷新客户端编辑器读到的值。
+    ///
+    /// Refresh the values visible to the client editor.
+    pub fn update_synced_data(&mut self) {
+        self.synced_command.clone_from(&self.command);
+        self.synced_last_output = self.last_output.as_ref().map(|output| output.tag().clone());
+    }
+
+    pub(crate) fn read(raw: &Tag) -> Self {
+        let track_output = tag::bool_or(raw, "TrackOutput", true);
+        let update_last_execution = tag::bool_or(raw, "UpdateLastExecution", true);
+        let mut command = Self {
+            command: tag::field(raw, "Command")
+                .and_then(|value| match value {
+                    Tag::String(command) => Some(command.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            success_count: tag::int_or(raw, "SuccessCount", 0),
+            track_output,
+            last_output: if track_output {
+                tag::field(raw, "LastOutput").and_then(checked_component)
+            } else {
+                None
+            },
+            update_last_execution,
+            last_execution: if update_last_execution {
+                tag::long_or(raw, "LastExecution", -1)
+            } else {
+                -1
+            },
+            ..Self::default()
+        };
+        command.update_synced_data();
+        command
+    }
+
+    pub(crate) fn write(&self, out: &mut Vec<(String, Tag)>) {
+        tag::put(out, "Command", Tag::String(self.command.clone()));
+        tag::put(out, "SuccessCount", Tag::Int(self.success_count));
+        tag::put(out, "TrackOutput", Tag::Byte(i8::from(self.track_output)));
+        tag::put(
+            out,
+            "UpdateLastExecution",
+            Tag::Byte(i8::from(self.update_last_execution)),
+        );
+        if self.track_output
+            && let Some(output) = &self.last_output
+        {
+            tag::put(out, "LastOutput", output.tag().clone());
+        }
+        if self.update_last_execution && self.last_execution != -1 {
+            tag::put(out, "LastExecution", Tag::Long(self.last_execution));
+        }
+    }
+}
+
+/// 矿车经过激活铁轨时交给游戏层的执行来源。
+///
+/// The command source handed to the game layer as the cart crosses the rail.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CommandActivation {
+    /// 发起命令的矿车。 / The cart issuing the command.
+    pub entity: EntityUid,
+    /// 激活时的位置。 / The position at activation.
+    pub position: Vec3,
+    /// 激活时的水平朝向。 / The yaw at activation.
+    pub yaw: f32,
+    /// 激活所在的世界刻。 / Game time of the activation.
+    pub game_time: i64,
+}
+
 /// 矿车公开的那一半，给同步和存档读。
 ///
 /// The public half of a minecart, read by sync and storage.
@@ -273,6 +399,12 @@ pub struct MinecartPublic {
     pub has_fuel: bool,
     /// `AbstractMinecart.flipped`：`OldMinecartBehavior.getMotionDirection` 下车方向用。
     pub flipped: bool,
+    /// 命令编辑器同步的内容。 / Command editor metadata.
+    pub command: String,
+    /// 命令编辑器同步的最后输出。 / Last output synced to the editor.
+    pub command_output: Option<Tag>,
+    /// 比较器读取的成功次数。 / Success count for comparators.
+    pub success_count: Option<i32>,
 }
 
 impl MinecartPublic {
@@ -290,6 +422,18 @@ impl MinecartPublic {
             display_offset: cart.display_offset,
             has_fuel: cart.kind().is_furnace() && cart.fuel > 0,
             flipped: cart.flipped,
+            command: cart
+                .command_block
+                .as_ref()
+                .map_or_else(String::new, |command| command.synced_command.clone()),
+            command_output: cart
+                .command_block
+                .as_ref()
+                .and_then(|command| command.synced_last_output.clone()),
+            success_count: cart
+                .command_block
+                .as_ref()
+                .map(|command| command.success_count),
         }
     }
 }
@@ -842,12 +986,25 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     let on_rails = is_rail(state);
     cart.on_rails = on_rails;
     let mut ejected = Vec::new();
+    let mut command_activation = None;
     if on_rails {
         move_along_track(me, &mut cart, ctx);
         if state.is(blocks::ACTIVATOR_RAIL) {
             let powered = state.try_get(POWERED).unwrap_or(false);
             if powered && cart.kind().is_rideable() {
                 ejected = std::mem::take(&mut cart.passengers);
+            }
+            if powered
+                && let Some(command) = &mut cart.command_block
+                && me.tick_count.wrapping_sub(command.last_activated) >= 4
+            {
+                command.last_activated = me.tick_count;
+                command_activation = Some(CommandActivation {
+                    entity: me.id,
+                    position: me.position,
+                    yaw: me.y_rot,
+                    game_time: ctx.blocks().game_time(),
+                });
             }
             activate_minecart(&mut cart, powered);
         }
@@ -874,6 +1031,9 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     me.set_requires_precise_position(me.horizontal_collision || me.vertical_collision);
     me.first_tick = false;
     me.kind = EntityKind::Minecart(cart);
+    if let Some(activation) = command_activation {
+        ctx.emit(Command::ActivateMinecartCommand(activation), me);
+    }
     // `DetectorRailBlock.checkPressed`：归还 `EntityKind::Minecart` 后再触发，
     // 这样 `check_detector_rail` 能认出正在 tick 的矿车自己。
     // Trigger `DetectorRailBlock.checkPressed` after restoring `EntityKind::Minecart`

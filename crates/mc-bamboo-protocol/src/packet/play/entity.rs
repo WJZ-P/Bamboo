@@ -21,6 +21,8 @@ const SERIALIZER_INT: i32 = 1;
 /// `EntityDataSerializers.LONG`：变长整数。
 const SERIALIZER_LONG: i32 = 2;
 const SERIALIZER_FLOAT: i32 = 3;
+const SERIALIZER_STRING: i32 = 4;
+const SERIALIZER_COMPONENT: i32 = 5;
 /// `EntityDataSerializers.ROTATIONS`，注册顺序里的第 10 个（ID 9）。
 ///
 /// `EntityDataSerializers.ROTATIONS`, the tenth `registerSerializer` call (ID 9).
@@ -200,6 +202,10 @@ pub enum EntityData {
     MinecartDisplayOffset(i32),
     /// index 13，BOOLEAN。`MinecartFurnace.DATA_ID_FUEL`。
     MinecartFuel(bool),
+    /// index 13，STRING。命令矿车编辑器里的命令。 / The command cart's command.
+    MinecartCommand(String),
+    /// index 14，COMPONENT。命令矿车的上次输出。 / The command cart's last output.
+    MinecartCommandOutput(Tag),
     /// index 8，INT。`FishingHook.DATA_HOOKED_ENTITY`：0 表示没钩住，否则是目标实体 ID + 1。
     ///
     /// index 8, INT. `FishingHook.DATA_HOOKED_ENTITY`: 0 when unhooked, else entity id + 1.
@@ -664,7 +670,8 @@ impl EntityData {
             Self::BoatBubbleTime(_) => 13,
             Self::MinecartDisplayBlock(_) => 11,
             Self::MinecartDisplayOffset(_) => 12,
-            Self::MinecartFuel(_) => 13,
+            Self::MinecartFuel(_) | Self::MinecartCommand(_) => 13,
+            Self::MinecartCommandOutput(_) => 14,
             Self::Item(_)
             | Self::FallingBlockStart(_)
             | Self::TntFuse(_)
@@ -903,6 +910,14 @@ impl EntityData {
             Self::MinecartFuel(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 write_bool(out, *value);
+            }
+            Self::MinecartCommand(command) => {
+                write_data_header(out, self.index(), SERIALIZER_STRING);
+                write_string(out, command);
+            }
+            Self::MinecartCommandOutput(output) => {
+                write_data_header(out, self.index(), SERIALIZER_COMPONENT);
+                output.write_network(out);
             }
             Self::ArrowFlags(value) | Self::TridentLoyalty(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);

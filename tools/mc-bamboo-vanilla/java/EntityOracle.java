@@ -28,6 +28,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.RegistryLayer;
 import net.minecraft.server.ReloadableServerRegistries;
@@ -202,6 +203,7 @@ public final class EntityOracle {
             cases += minecartAnimal(official, out, false);
             cases += minecartAnimal(official, out, true);
             cases += hopperEjectsIntoMinecart(official, out);
+            cases += commandMinecartFacts(official, out);
             cases += boatStillWater(official, out);
             cases += boatIceSlide(official, out);
             cases += boatWaterCurrent(official, out);
@@ -1394,6 +1396,76 @@ public final class EntityOracle {
         return playMinecart(official, out, spec);
     }
 
+    private static int commandMinecartFacts(Official official, Writer out) throws Exception {
+        var spec = new MinecartSpec();
+        rails(spec, -1, 4, rail(RailShape.NORTH_SOUTH));
+        spec.blocks.put(BlockPos.asLong(0, 64, 1), Blocks.ACTIVATOR_RAIL.defaultBlockState()
+                .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH)
+                .setValue(BlockStateProperties.POWERED, true));
+        var detector = new BlockPos(0, 64, 2);
+        spec.blocks.put(detector.asLong(), Blocks.DETECTOR_RAIL.defaultBlockState()
+                .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH));
+        var level = FakeLevel.create(official, 1L);
+        level.blocks.putAll(spec.blocks);
+        var cart = new net.minecraft.world.entity.vehicle.minecart.MinecartCommandBlock(
+                EntityTypes.COMMAND_BLOCK_MINECART, level);
+        cart.setUUID(new UUID(0x0000_BAAB_0000_0000L, FIRST_ITEM_ID));
+        String command = "/say carts can speak";
+        cart.getCommandBlock().setCommand(command);
+        cart.getCommandBlock().setLastOutput(Component.literal("previous"));
+        cart.setPos(0.5, 64.0625, 0.5);
+        cart.setDeltaMovement(0.0, 0.0, 0.3);
+        level.tracked = List.of(cart);
+        var listeners = allocate(ChatCapture.class);
+        listeners.messages = new ArrayList<>();
+        official.server.capture = listeners;
+        boolean oldRule = official.gameRules.get(GameRules.COMMAND_BLOCKS_WORK);
+        official.gameRules.set(GameRules.COMMAND_BLOCKS_WORK, true, null);
+        try {
+            out.write("{\"type\":\"commandMinecart\",\"command\":" + jsonString(command) + ",\"steps\":[");
+            for (int t = 0; t <= 8; t++) {
+                level.gameTime = t;
+                listeners.messages.clear();
+                if (t != 0) {
+                    out.write(",");
+                    cart.commonTick();
+                    cart.tick();
+                }
+                var save = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                cart.getCommandBlock().save(save);
+                int signal = level.getBlockState(detector).getAnalogOutputSignal(level, detector, Direction.EAST);
+                out.write("{\"nbt\":" + jsonString(save.buildResult().toString()) + ",\"signal\":" + signal
+                        + ",\"chat\":[" + String.join(",", listeners.messages) + "]}");
+            }
+            out.write("]}\n");
+        } finally {
+            official.gameRules.set(GameRules.COMMAND_BLOCKS_WORK, oldRule, null);
+            official.server.capture = null;
+        }
+        return 1;
+    }
+
+    private static final class ChatCapture extends net.minecraft.server.dedicated.DedicatedPlayerList {
+        List<String> messages;
+
+        private ChatCapture() {
+            super(null, null, null);
+        }
+
+        @Override
+        public void broadcastChatMessage(
+                net.minecraft.network.chat.PlayerChatMessage message,
+                net.minecraft.commands.CommandSourceStack source,
+                net.minecraft.network.chat.ChatType.Bound type) {
+            var codec = net.minecraft.network.chat.ComponentSerialization.CODEC;
+            var ops = net.minecraft.nbt.NbtOps.INSTANCE;
+            var content = codec.encodeStart(ops, message.decoratedContent()).getOrThrow();
+            var name = codec.encodeStart(ops, type.name()).getOrThrow();
+            messages.add("[" + jsonString(content.toString()) + "," + jsonString(name.toString()) + "]");
+        }
+    }
+
     /** 造一辆官方矿车、逐刻跑、把每刻的实体状态写成一题 case。 */
     private static int playMinecart(Official official, Writer out, MinecartSpec spec) throws Exception {
         FakeLevel level = FakeLevel.create(official, spec.levelSeed);
@@ -2387,6 +2459,7 @@ public final class EntityOracle {
         private ReloadableServerResources managers;
         private GameRules rules;
         private ServerDebugSubscribers debugSubscribers;
+        ChatCapture capture;
 
         private FakeServer() {
             super(null, null, null, null, null, null, null, null, null, null);
@@ -2398,6 +2471,21 @@ public final class EntityOracle {
             server.rules = rules;
             server.debugSubscribers = new ServerDebugSubscribers(server);
             return server;
+        }
+
+        @Override
+        public net.minecraft.commands.Commands getCommands() {
+            return managers.getCommands();
+        }
+
+        @Override
+        public RegistryAccess.Frozen registryAccess() {
+            return (RegistryAccess.Frozen) managers.fullRegistries().lookup();
+        }
+
+        @Override
+        public net.minecraft.server.dedicated.DedicatedPlayerList getPlayerList() {
+            return capture;
         }
 
         @Override
@@ -2491,6 +2579,13 @@ public final class EntityOracle {
                 seed = seeds.nextLong();
             }
             return seed;
+        }
+
+        long gameTime;
+
+        @Override
+        public long getGameTime() {
+            return gameTime;
         }
 
         private FakeLevel() {
