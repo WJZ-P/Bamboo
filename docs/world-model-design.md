@@ -654,6 +654,14 @@ B 给 `World` 注入跨层回调在 `apply` 里跑命令，代价是闭包仍与
 `command_minecart` 场景只比矿车自己的命令字段、输出、成功次数和比较器信号，没有同刻
 交错的第二只实体，不受这条差异影响。
 
+复核补充（2026-11-27）：延迟执行还带两条次生差异，都随「移动途中执行」一并消失，
+单独修不动。`minecart_command::perform`（129 行）执行时才按 UID 取命令方块，实体已
+`removed` 或不在表里就整条返回；官方 `activateMinecart` 当场执行，同刻稍后才被移除的
+矿车不会取消已跑完的命令。`CommandActivation`（`minecart.rs:398`）只带 UID、位置、
+朝向和 `game_time`，命令文本、`TrackOutput`、`SuccessCount`、
+`UpdateLastExecution` 都在 `perform` 里读执行时的值；官方 `BaseCommandBlock.performCommand`
+读的是 `activateMinecart` 那一刻矿车携带的值。
+
 ---
 
 ## 9. 红石热点优化（“JIT”）
@@ -1013,7 +1021,7 @@ B 给 `World` 注入跨层回调在 `apply` 里跑命令，代价是闭包仍与
 - 红石触发的命中率实验（9.7）和机器缓存（9.3）：**都做完**（`bec0707`、`docs/redstone-cache-design.md` §12–14）。第一版引擎、第二版确定性工作量门槛、第三版活塞门和方块实体 tick 重放已合入；`bamboo.toml` 的 `redstone_cache` 默认关，正式配置下九台机器只有红石线阵列划算。数字见 `docs/performance-optimizations.md` 7h / 7i。
 - 换全局分配器、换压缩后端，实测后决定：**没做**。
 - 世界生成的噪声阶段（`ae76868`）：纯函数和区块级 `chunkgen` oracle 做完，群系 quart 格和 `doFill` 的方块逐位对拍。地表规则、雕刻器（`docs/worldgen.md`）和接进 Director 流水线（本轮，`docs/worldgen.md`「接进游戏」）都已做完，`gen-world` 对拍 0 不一致；第二轮已把多阶段邻居视图 + `features`（矿石）接进 Director（`docs/worldgen.md`「第二轮」，`gen-world --through features` 0 不一致）；结构、生成时光照、其余地物类型还没接。
-- 命令方块矿车命令的执行时机（8.8）：**没做，按设计约束保留延迟执行**。本轮对照 26.3 复核后确认挪回官方时机要改 tick 顺序、第 8 节写入规则和并行线程模型，交队长与用户决定；细节见 8.8 和本分支汇报，已知差异记在 README。
+- 命令方块矿车命令的执行时机（8.8）：**没做，按设计约束保留延迟执行**。本轮对照 26.3 复核后确认挪回官方时机要改 tick 顺序、第 8 节写入规则和并行线程模型，交队长与用户决定；复核又确认「矿车被移除则整条跳过命令」「执行时重读命令文本」两条次生差异，细节见 8.8 和本分支汇报，已知差异记在 README。
 
 （2026-11-14 按实现更新：第 16 节第 3 步、`docs/m3-storage.md` 第 14 节、`docs/performance-optimizations.md` 7g / 7i / 第 9 节、`docs/redstone-cache-design.md` §12–14、`docs/worldgen.md`「还没做」、`crates/mc-bamboo-game/src/director_host.rs` 的 `save_loaded_dirty` / `snapshot_loaded`、`crates/mc-bamboo-game/src/region/content_snapshot.rs`；合并提交 `1828b8c`、`1a0dee9`、`082a7c9`、`afaf4bb`、`672cb97`、`fa91b84`、`8baec27`、`df82a78`、`e6f8d6e`、`edce3ab`、`ae76868`）
 
