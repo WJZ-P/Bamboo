@@ -48,6 +48,7 @@ pub enum BlockEntityKind {
     CreakingHeart,
     Spawner,
     Beacon,
+    Conduit,
 }
 
 impl BlockEntityKind {
@@ -67,6 +68,7 @@ impl BlockEntityKind {
             "minecraft:creaking_heart" => Self::CreakingHeart,
             "minecraft:mob_spawner" => Self::Spawner,
             "minecraft:beacon" => Self::Beacon,
+            "minecraft:conduit" => Self::Conduit,
             _ => return None,
         })
     }
@@ -90,12 +92,13 @@ impl BlockEntityKind {
             Self::CreakingHeart => "minecraft:creaking_heart",
             Self::Spawner => "minecraft:mob_spawner",
             Self::Beacon => "minecraft:beacon",
+            Self::Conduit => "minecraft:conduit",
         }
     }
 
     /// 每种会动的机器各造一次，测试用它盯住工厂分支不要漏。
     /// 只保留存档态的四种由 [`PassiveKind::ALL`] 单独覆盖。
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Furnace,
         Self::BlastFurnace,
         Self::Smoker,
@@ -108,6 +111,7 @@ impl BlockEntityKind {
         Self::CreakingHeart,
         Self::Spawner,
         Self::Beacon,
+        Self::Conduit,
     ];
 }
 
@@ -220,6 +224,9 @@ pub fn create_block_entity(
             Box::new(SpawnerBlockEntity::read(pos, tag)) as Box<dyn BlockEntity>
         }
         BlockEntityKind::Beacon => Box::new(BeaconBlockEntity::read(pos, tag)),
+        BlockEntityKind::Conduit => {
+            Box::new(crate::behaviour::misc::conduit_entity::ConduitBlockEntity::read(pos, tag))
+        }
         BlockEntityKind::Piston => {
             let moved = match tag::field(tag, "blockState") {
                 Some(value) => tag::decode_block_state(value)?,
@@ -324,6 +331,7 @@ pub fn state_matches(state: BlockState, id: &str) -> bool {
         kinds::CREAKING_HEART => state.is(blocks::CREAKING_HEART),
         kinds::MOB_SPAWNER => state.is(blocks::SPAWNER),
         kinds::BEACON => state.is(blocks::BEACON),
+        kinds::CONDUIT => state.is(blocks::CONDUIT),
         _ => true,
     }
 }

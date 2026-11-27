@@ -786,8 +786,9 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::Firework { .. } => 38,
         Effect::BoatBubbleEvent { .. } => 39,
         Effect::ConstructBeacon { .. } => 40,
-        Effect::RunMinecartCommand(_) => 41,
-        Effect::EntityEvent { .. } => 42,
+        Effect::ConduitChanged { .. } => 41,
+        Effect::RunMinecartCommand(_) => 42,
+        Effect::EntityEvent { .. } => 43,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -810,6 +811,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         | Effect::SignWaxed { pos }
         | Effect::PageTurned { pos }
         | Effect::CampfireChanged { pos }
+        | Effect::ConduitChanged { pos }
         | Effect::OpenCommandBlock { pos } => pos.hash(&mut hasher),
         Effect::FilledBucket { item, hand } => {
             item.hash(&mut hasher);

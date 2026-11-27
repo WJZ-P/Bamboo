@@ -127,6 +127,16 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
             crate::behaviour::misc::sculk_catalyst::additional_from_tag(raw),
             &[][..],
         ),
+        // 潮涌核心只持久化 `Target`（`UUIDUtil.CODEC` 的 `int[4]`），
+        // 读不出来的坏值按 `EntityReference.read` 的 `orElse(null)` 丢掉。
+        "minecraft:conduit" => (
+            crate::behaviour::misc::conduit_entity::ConduitBlockEntity::read(
+                mc_bamboo_core::BlockPos::new(0, 0, 0),
+                raw,
+            )
+            .additional(),
+            &["Target"][..],
+        ),
         "minecraft:beacon" => (
             crate::behaviour::misc::beacon::BeaconBlockEntity::read(
                 mc_bamboo_core::BlockPos::new(0, 0, 0),

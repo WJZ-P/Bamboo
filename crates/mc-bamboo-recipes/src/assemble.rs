@@ -239,12 +239,11 @@ pub fn assemble(recipe: &Recipe, input: &[ItemStack]) -> Option<ItemStack> {
             result,
         } => assemble_firework_star_fade(input, *target, *dye, *result),
         RecipeKind::MapExtending {
-            map,
             result_item,
             result_count,
             result_components,
             ..
-        } => assemble_map_extending(input, *map, *result_item, *result_count, result_components),
+        } => assemble_map_extending(input, *result_item, *result_count, result_components),
         RecipeKind::BannerDuplicate { banner, result } => {
             let source = input.iter().find(|slot| {
                 !slot.is_empty()
@@ -614,14 +613,14 @@ fn assemble_firework_star_fade(
 
 fn assemble_map_extending(
     input: &[ItemStack],
-    map: mc_bamboo_data::Ingredient,
     result_item: Option<i32>,
     result_count: i32,
     result_components: &[u8],
 ) -> Option<ItemStack> {
+    // 官方 `MapExtendingRecipe.findFilledMap`：取第一个带 `MAP_ID` 组件的非空格。
     let source = input
         .iter()
-        .find(|slot| map.test(slot.item) && resolved(slot, kinds::MAP_ID).is_some())?;
+        .find(|slot| !slot.is_empty() && resolved(slot, kinds::MAP_ID).is_some())?;
     let item = result_item.unwrap_or(source.item);
     let mut stack = create_with_original(item, result_count, result_components, source, 0);
     let mut patch = patch_of(&stack);

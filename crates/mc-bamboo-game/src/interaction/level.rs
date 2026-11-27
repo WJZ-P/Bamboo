@@ -257,6 +257,38 @@ impl Level for RegionLevel<'_> {
         }
     }
 
+    /// `Entity.isInWaterOrRain()`：玩家碰撞盒接触 `#water`，或脚下 / 碰撞盒顶上在下雨。
+    /// 水由 `Region` 的区块表读，雨走方块层自己的天气 / 高度图 / 群系判定。
+    ///
+    /// `Entity.isInWaterOrRain()`: the player's box touches `#water` or rain falls
+    /// at the feet / bounding-box top.
+    fn player_in_water_or_rain(&self, view: &mc_bamboo_blocks::entity::ctx::PlayerView) -> bool {
+        let Some(player) = self.players.get(&PlayerId(view.uid)) else {
+            return false;
+        };
+        let position = player.position();
+        let eye_y = position.y + player.eye_height();
+        let in_water = crate::player_environment::EnvironmentView::new(self.chunks)
+            .body_states(position, eye_y)
+            .iter()
+            .any(|(state, _)| {
+                state
+                    .fluid()
+                    .is_tagged(mc_bamboo_data::tags::fluid_tags::WATER)
+            });
+        if in_water {
+            return true;
+        }
+        let feet = BlockPos::containing(position);
+        let top = BlockPos::containing(Vec3::new(
+            position.x,
+            position.y + f64::from(view.height),
+            position.z,
+        ));
+        mc_bamboo_blocks::Level::is_raining_at(self, feet)
+            || mc_bamboo_blocks::Level::is_raining_at(self, top)
+    }
+
     /// `LivingEntity.isSleeping()`：玩家 `sleep` 非空就是在床上。
     fn player_sleeping(&self, uid: mc_bamboo_blocks::entity::EntityUid) -> bool {
         self.players

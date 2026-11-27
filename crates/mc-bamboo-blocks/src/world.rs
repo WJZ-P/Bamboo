@@ -2318,6 +2318,11 @@ impl<'a> World<'a> {
         self.level.player_views()
     }
 
+    /// `Entity.isInWaterOrRain()`，见 [`crate::level::Level::player_in_water_or_rain`]。
+    pub fn player_in_water_or_rain(&self, player: &crate::entity::ctx::PlayerView) -> bool {
+        self.level.player_in_water_or_rain(player)
+    }
+
     /// 这名玩家在不在床上。
     ///
     /// Whether this player is sleeping.
@@ -5486,6 +5491,7 @@ mod tests {
                 | Effect::PageTurned { .. }
                 | Effect::DispenserEquipped { .. }
                 | Effect::CampfireChanged { .. }
+                | Effect::ConduitChanged { .. }
                 | Effect::Overlay { .. }
                 | Effect::OpenCommandBlock { .. }
                 | Effect::HurtPlayer { .. }

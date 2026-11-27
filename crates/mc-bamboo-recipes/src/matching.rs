@@ -7,7 +7,10 @@ use mc_bamboo_data::{
 use mc_bamboo_protocol::components::{ComponentValue, defaults};
 
 use crate::assemble::{applied, patch_of, template_patch};
-use crate::input::{BrewingInput, CraftingInput, ItemStack, RecipeInput, SmithingInput};
+use crate::input::{
+    BrewingInput, CraftingContext, CraftingInput, ItemStack, MapScaleLookup, NoMapLookup,
+    RecipeInput, SmithingInput,
+};
 
 impl RecipeInput for CraftingInput {
     fn is_empty(&self) -> bool {
@@ -15,7 +18,17 @@ impl RecipeInput for CraftingInput {
     }
 
     fn matches(&self, recipe: &Recipe) -> bool {
-        crafting_matches(self, &recipe.kind)
+        crafting_matches(self, &recipe.kind, &NoMapLookup)
+    }
+}
+
+impl<L: MapScaleLookup> RecipeInput for CraftingContext<'_, L> {
+    fn is_empty(&self) -> bool {
+        self.input.is_empty()
+    }
+
+    fn matches(&self, recipe: &Recipe) -> bool {
+        crafting_matches(self.input, &recipe.kind, &self.maps)
     }
 }
 
@@ -81,7 +94,7 @@ impl RecipeInput for BrewingInput {
     }
 }
 
-fn crafting_matches(input: &CraftingInput, kind: &RecipeKind) -> bool {
+fn crafting_matches<L: MapScaleLookup>(input: &CraftingInput, kind: &RecipeKind, maps: &L) -> bool {
     match kind {
         RecipeKind::Shaped {
             width,
@@ -109,7 +122,9 @@ fn crafting_matches(input: &CraftingInput, kind: &RecipeKind) -> bool {
         RecipeKind::FireworkStarFade { target, dye, .. } => {
             firework_star_fade_matches(input, *target, *dye)
         }
-        RecipeKind::MapExtending { .. } => map_extending_matches(input),
+        RecipeKind::MapExtending { map, material, .. } => {
+            map_extending_matches(input, *map, *material, maps)
+        }
         RecipeKind::BannerDuplicate { banner, .. } => banner_duplicate_matches(input, *banner),
         RecipeKind::BookCloning {
             source,
@@ -483,13 +498,50 @@ fn firework_star_fade_matches(input: &CraftingInput, target: Ingredient, dye: In
     has_target && has_dye
 }
 
-/// `MapExtendingRecipe.matches`。
+/// `MapExtendingRecipe.matches`：
+/// 1. 按固定 3×3 模板 `###/#x#/###`（`# = material`，`x = map`）匹配；
+/// 2. 照 `findFilledMap` 找第一个带 `MAP_ID` 组件的格子；
+/// 3. 通过 `maps` 查该 `map_id` 对应的缩放等级，存在且 `scale < 4` 时返回真（26.3 字节码不查 `locked`）。
 ///
-/// 官方摆法是 `###/#x#/###`，`x` 是地图；之后还要找带 `MAP_ID` 的地图，
-/// 再查地图存档的缩放等级。这里能读到 `MAP_ID`，但地图存档（缩放等级）还没有，
-/// 所以匹配结果仍恒为 false，见最终报告的“没做的”。
-fn map_extending_matches(_input: &CraftingInput) -> bool {
-    false
+/// Official `MapExtendingRecipe.matches`: 3×3 surround pattern, locate the
+/// first stack with `MAP_ID`, and check `scale < 4` (26.3 does not check `locked`).
+fn map_extending_matches<L: MapScaleLookup>(
+    input: &CraftingInput,
+    map: Ingredient,
+    material: Ingredient,
+    maps: &L,
+) -> bool {
+    let pattern = [
+        Some(material),
+        Some(material),
+        Some(material),
+        Some(material),
+        Some(map),
+        Some(material),
+        Some(material),
+        Some(material),
+        Some(material),
+    ];
+    if !shaped_matches(input, 3, 3, &pattern) {
+        return false;
+    }
+    let Some(map_id) = find_filled_map_id(input) else {
+        return false;
+    };
+    maps.map_scale(map_id).is_some_and(|scale| scale < 4)
+}
+
+/// 官方 `MapExtendingRecipe.findFilledMap`：返回第一个带 `DataComponents.MAP_ID` 格子的 `map_id`。
+fn find_filled_map_id(input: &CraftingInput) -> Option<i32> {
+    for slot in input.slots() {
+        if slot.is_empty() {
+            continue;
+        }
+        if let Some(ComponentValue::MapId(id)) = resolved(slot, kinds::MAP_ID) {
+            return Some(id);
+        }
+    }
+    None
 }
 
 /// `BannerDuplicateRecipe.matches`。
@@ -803,6 +855,97 @@ mod tests {
             )
             .size(),
             0
+        );
+    }
+
+    #[test]
+    fn map_extending_matches_scales_below_four_and_assembles_scale_post_processing() {
+        use mc_bamboo_data::RecipeType;
+        use mc_bamboo_protocol::{
+            components::{ComponentPatch, PatchEntry},
+            text::Component,
+        };
+
+        let mut patch = ComponentPatch::new();
+        patch.put(kinds::MAP_ID, PatchEntry::Set(ComponentValue::MapId(3)));
+        patch.put(
+            kinds::CUSTOM_NAME,
+            PatchEntry::Set(ComponentValue::CustomName(Component::text("Atlas"))),
+        );
+        let (added, removed) = patch.to_opaque();
+        let map = ItemStack {
+            item: items::FILLED_MAP,
+            count: 1,
+            added,
+            removed,
+        };
+        let paper = ItemStack::new(items::PAPER, 1);
+        let slots = [
+            paper.clone(),
+            paper.clone(),
+            paper.clone(),
+            paper.clone(),
+            map.clone(),
+            paper.clone(),
+            paper.clone(),
+            paper.clone(),
+            paper.clone(),
+        ];
+        let input = CraftingInput::of(3, 3, &slots);
+        let manager = crate::RecipeManager::global();
+
+        // 无地图数据时不匹配。
+        assert!(
+            manager
+                .get_recipe_for(RecipeType::Crafting, &input, None)
+                .is_none()
+        );
+
+        // scale 0..=3 均匹配，assemble 保留自定义名并挂 MAP_POST_PROCESSING = SCALE (1)。
+        for scale in 0..=3 {
+            let ctx = CraftingContext::new(&input, |id| (id == 3).then_some(scale));
+            let recipe = manager
+                .get_recipe_for(RecipeType::Crafting, &ctx, None)
+                .expect("map_extending should match");
+            assert_eq!(recipe.id, "minecraft:map_extending");
+            let out = crate::assemble(recipe, input.slots()).expect("assemble map_extending");
+            assert_eq!(out.item, items::FILLED_MAP);
+            assert_eq!(out.count, 1);
+            assert_eq!(
+                resolved(&out, kinds::MAP_ID),
+                Some(ComponentValue::MapId(3))
+            );
+            assert_eq!(
+                resolved(&out, kinds::CUSTOM_NAME),
+                Some(ComponentValue::CustomName(Component::text("Atlas")))
+            );
+            assert_eq!(
+                resolved(&out, kinds::MAP_POST_PROCESSING),
+                Some(ComponentValue::MapPostProcessing(1))
+            );
+        }
+
+        // scale == 4 拒绝；未知 map_id 拒绝；无 MAP_ID 组件的地图拒绝。
+        let ctx_max = CraftingContext::new(&input, |id| (id == 3).then_some(4));
+        assert!(
+            manager
+                .get_recipe_for(RecipeType::Crafting, &ctx_max, None)
+                .is_none()
+        );
+        let ctx_missing = CraftingContext::new(&input, |_| None);
+        assert!(
+            manager
+                .get_recipe_for(RecipeType::Crafting, &ctx_missing, None)
+                .is_none()
+        );
+        let mut no_id_slots = slots;
+        no_id_slots[4] = ItemStack::new(items::FILLED_MAP, 1);
+        let no_id_input = CraftingInput::of(3, 3, &no_id_slots);
+        let ctx_no_id = CraftingContext::new(&no_id_input, |_| Some(0));
+        assert!(
+            manager
+                .get_recipe_for(RecipeType::Crafting, &ctx_no_id, None)
+                .is_none()
         );
     }
 }

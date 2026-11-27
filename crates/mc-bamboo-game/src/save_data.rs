@@ -393,6 +393,8 @@ pub(crate) struct StartupData {
     pub(crate) world_clocks: Option<Tag>,
     /// `raids.dat` 的 `data` 复合标签。官方覆盖整个维度，Bamboo 在家岛加载。
     pub(crate) raids: Raids,
+    /// `data/minecraft/maps/last_id.dat` 与 `data/minecraft/maps/<id>.dat` 读回的地图表。
+    pub(crate) maps: crate::map::MapStore,
     /// 全局 `data/minecraft/wandering_trader.dat` 的 `data` 复合标签。
     pub(crate) wandering_trader: Option<Tag>,
     /// 每个命名空间一份 `command_storage.dat` 的 `data` 复合标签。
@@ -436,6 +438,9 @@ impl StartupData {
         // `raids.dat` is dimension-wide: only the home island loads it at
         // startup; other islands get their raids from a later split.
         region.raids = self.raids.clone();
+        // 地图索引与地图数据全服一份，权威副本放在 `Global`，随 `GlobalView` 发布给各岛。
+        // Map index and data are server-wide on `Global`, published to every island via `GlobalView`.
+        global.set_maps(self.maps.clone());
         global.publish(region);
     }
 }

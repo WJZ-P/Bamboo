@@ -36,10 +36,10 @@ use mc_bamboo_protocol::{
     text::Component,
 };
 use mc_bamboo_recipes::{
-    CraftingInput, RecipeManager, SmithingInput, assemble, equipment_slot_for_item,
-    is_brewing_fuel, is_brewing_potion_input, is_brewing_reagent, is_cooking_fuel,
-    is_cooking_input, is_equippable_in_slot, is_smithing_addition, is_smithing_base,
-    is_smithing_template, remaining_items, stonecutter_recipes,
+    CraftingContext, CraftingInput, RecipeManager, SmithingInput, assemble,
+    equipment_slot_for_item, is_brewing_fuel, is_brewing_potion_input, is_brewing_reagent,
+    is_cooking_fuel, is_cooking_input, is_equippable_in_slot, is_smithing_addition,
+    is_smithing_base, is_smithing_template, remaining_items, stonecutter_recipes,
 };
 use tracing::{debug, warn};
 
@@ -440,9 +440,17 @@ pub(crate) struct Station {
     ///
     /// The number of valid bookshelves, refreshed by the caller on open, click and tick.
     bookshelves: i32,
-    /// 重放题里假世界的地图比例和锁定状态；真实世界没有地图存档。
+    /// 重放题里假世界的地图比例和锁定状态；真实世界点击时由 `world_maps` 直接查 `Region.maps`。
     map_scale: i32,
     map_locked: bool,
+    /// 真实世界制图台点击期间临时借入的 `Region.maps`，点击结束后立刻归还。
+    ///
+    /// Temporarily swapped-in `Region.maps` during a live cartography click.
+    world_maps: Option<crate::map::MapStore>,
+    /// 官方 `CartographyTableMenu.lastSoundTime`：同一刻内多次取结果只播一次音效。
+    ///
+    /// Official `CartographyTableMenu.lastSoundTime`: play the take sound at most once per tick.
+    last_cartography_sound_time: Option<i64>,
     /// 真实世界里取出铁砧/制图台/附魔台结果时要结算的世界效果。
     ///
     /// World effects to settle when an anvil, cartography, or enchantment result is taken in a real world.
@@ -505,10 +513,16 @@ impl Station {
             bookshelves: 0,
             map_scale: 0,
             map_locked: false,
+            world_maps: None,
+            last_cartography_sound_time: None,
             effects: Vec::new(),
             packets: Vec::new(),
             mount: None,
         }
+    }
+
+    pub(crate) fn is_in_world_map_menu(&self) -> bool {
+        self.in_world && matches!(self.kind, Kind::Cartography | Kind::Crafting)
     }
 
     fn from_player(player: &Player) -> Self {
@@ -934,8 +948,8 @@ impl Station {
 
     fn safe_take(&mut self, index: usize, amount: i32, max_amount: i32) -> ItemStack {
         match self.try_remove(index, amount, max_amount) {
-            Some(taken) => {
-                self.on_take(index, &taken);
+            Some(mut taken) => {
+                self.on_take(index, &mut taken);
                 taken
             }
             None => ItemStack::empty(),
@@ -1051,9 +1065,9 @@ impl Station {
                 } else {
                     (clicked.count + 1) / 2
                 };
-                if let Some(taken) = self.try_remove(index, amount, i32::MAX) {
-                    self.carried = taken.clone();
-                    self.on_take(index, &taken);
+                if let Some(mut taken) = self.try_remove(index, amount, i32::MAX) {
+                    self.on_take(index, &mut taken);
+                    self.carried = taken;
                 }
             } else if self.may_place(index, &carried) {
                 if clicked.is_same_item_same_components(&carried) {
@@ -1065,9 +1079,9 @@ impl Station {
                 }
             } else if clicked.is_same_item_same_components(&carried) {
                 let room = carried.max_stack_size() - carried.count;
-                if let Some(taken) = self.try_remove(index, clicked.count, room) {
+                if let Some(mut taken) = self.try_remove(index, clicked.count, room) {
+                    self.on_take(index, &mut taken);
                     self.carried.count += taken.count;
-                    self.on_take(index, &taken);
                 }
             }
         }
@@ -1086,9 +1100,10 @@ impl Station {
         }
         if source.is_empty() {
             if self.may_pickup(index) {
-                self.official_set(official, target.clone());
+                let mut target = target;
                 self.set_by_player(index, ItemStack::empty());
-                self.on_take(index, &target);
+                self.on_take(index, &mut target);
+                self.official_set(official, target);
             }
         } else if target.is_empty() {
             if self.may_place(index, &source) {
@@ -1108,15 +1123,17 @@ impl Station {
                 let placed = split(&mut source, max);
                 self.official_set(official, source);
                 self.set_by_player(index, placed);
-                self.on_take(index, &target);
+                let mut target = target;
+                self.on_take(index, &mut target);
                 let mut leftover = target;
                 if !self.inventory_add(&mut leftover) {
                     self.discard(leftover);
                 }
             } else {
-                self.official_set(official, target.clone());
+                let mut target = target;
                 self.set_by_player(index, source);
-                self.on_take(index, &target);
+                self.on_take(index, &mut target);
+                self.official_set(official, target);
             }
         }
     }
@@ -1126,7 +1143,11 @@ impl Station {
         if current.is_empty() {
             return;
         }
-        self.carried = copy_count(current, current.max_stack_size());
+        let mut cloned = copy_count(current, current.max_stack_size());
+        if matches!(self.role(index), Role::CartoResult | Role::CraftResult) {
+            self.post_process_map(&mut cloned);
+        }
+        self.carried = cloned;
     }
 
     fn throw_slot(&mut self, index: usize, button: i32) {
@@ -1301,12 +1322,12 @@ impl Station {
         if stack.count == clicked.count {
             return ItemStack::empty();
         }
-        let taken = if self.kind == Kind::Brewing {
+        let mut taken = if self.kind == Kind::Brewing {
             clicked.clone()
         } else {
             stack.clone()
         };
-        self.on_take(index, &taken);
+        self.on_take(index, &mut taken);
         if self.drops_remainder(index) {
             self.discard(stack);
         }
@@ -1367,6 +1388,17 @@ impl Station {
     /// `CartographyTableMenu.quickMoveStack`。
     fn route_cartography(&mut self, index: usize, stack: &mut ItemStack) -> MoveResult {
         if index == 2 {
+            // 官方 `CartographyTableMenu.quickMoveStack` 在 `moveItemStackTo` 之前调
+            // `stack.getItem().onCraftedBy(stack, player)`，让搬进背包的地图已经去掉
+            // `MAP_POST_PROCESSING` 并换上新的 `map_id`（不会错误叠到旧图上）。
+            // 若带后处理且背包已满没有空格，跳过分配避免白耗一个 `map_id`。
+            if self.world_maps.is_some()
+                && cartography::has_post_processing(stack)
+                && !(3..39).any(|slot| self.slots[slot].is_empty())
+            {
+                return MoveResult::Stop { write_back: false };
+            }
+            self.post_process_map(stack);
             return Self::moved_or_stop(self.move_items(stack, 3, 39, true), true);
         }
         if index == 0 || index == 1 {
@@ -1461,6 +1493,15 @@ impl Station {
 
     fn route_crafting(&mut self, index: usize, stack: &mut ItemStack) -> MoveResult {
         if index == 0 {
+            // 官方 `CraftingMenu.quickMoveStack` 在 `moveItemStackTo` 前调 `Item.onCraftedBy`
+            // → `MapItem.onCraftedPostProcess`。若带后处理且背包无空格，跳过分配避免白耗 ID。
+            if self.world_maps.is_some()
+                && cartography::has_post_processing(stack)
+                && !(10..46).any(|slot| self.slots[slot].is_empty())
+            {
+                return MoveResult::Stop { write_back: false };
+            }
+            self.post_process_map(stack);
             return Self::moved_or_stop(self.move_items(stack, 10, 46, true), true);
         }
         if (10..46).contains(&index) {
@@ -1674,15 +1715,15 @@ impl Station {
         }
     }
 
-    fn on_take(&mut self, index: usize, _taken: &ItemStack) {
+    fn on_take(&mut self, index: usize, taken: &mut ItemStack) {
         match self.role(index) {
-            Role::CraftResult => self.take_craft_result(),
+            Role::CraftResult => self.take_craft_result(taken),
             Role::StoneResult => self.take_stone_result(),
             Role::SmithResult => self.take_smith_result(),
             Role::LoomResult => self.take_loom_result(),
             Role::GrindResult => self.take_grindstone_result(),
             Role::AnvilResult => self.take_anvil_result(),
-            Role::CartoResult => self.take_cartography_result(),
+            Role::CartoResult => self.take_cartography_result(taken),
             Role::Machine if self.kind.is_furnace() && index == 2 => self.furnace_awards += 1,
             _ => {}
         }
@@ -1708,13 +1749,22 @@ impl Station {
         self.slots[45] = mc_bamboo_blocks::crafter::potential_result(&self.slots[..9]);
     }
 
+    fn find_craft_recipe(&self, input: &CraftingInput) -> Option<&'static Recipe> {
+        if let Some(maps) = self.world_maps.as_ref() {
+            let ctx = CraftingContext::new(input, |map_id| maps.get(map_id).map(|d| d.scale));
+            RecipeManager::global().get_recipe_for(RecipeType::Crafting, &ctx, None)
+        } else {
+            RecipeManager::global().get_recipe_for(RecipeType::Crafting, input, None)
+        }
+    }
+
     fn refresh_craft(&mut self) {
         let width = self.grid_width();
         let len = width * width;
         let grid = self.slots[1..1 + len].to_vec();
         let input = CraftingInput::of(width, width, &grid);
-        let result = RecipeManager::global()
-            .get_recipe_for(RecipeType::Crafting, &input, None)
+        let result = self
+            .find_craft_recipe(&input)
             .and_then(|recipe| assemble(recipe, input.slots()))
             .map(normalize)
             .unwrap_or_else(ItemStack::empty);
@@ -1728,13 +1778,13 @@ impl Station {
         });
     }
 
-    fn take_craft_result(&mut self) {
+    fn take_craft_result(&mut self, taken: &mut ItemStack) {
         let width = self.grid_width();
         let len = width * width;
         let grid = self.slots[1..1 + len].to_vec();
         let positioned = CraftingInput::of_positioned(width, width, &grid);
-        let recipe =
-            RecipeManager::global().get_recipe_for(RecipeType::Crafting, &positioned.input, None);
+        let recipe = self.find_craft_recipe(&positioned.input);
+        self.post_process_map(taken);
         let remaining = match recipe {
             Some(recipe) => remaining_items(recipe, positioned.input.slots()),
             None => positioned.input.slots().to_vec(),
@@ -2100,26 +2150,47 @@ impl Station {
 
     /// `CartographyTableMenu.slotsChanged`。
     ///
-    /// 官方在 `access.execute` 里查地图存档；没有地图数据时整个 lambda 直接 return。
-    /// Bamboo 真实世界走这个分支，重放则由假世界给出比例和锁定状态。
+    /// 官方在 `access.execute` 里查地图存档；找不到地图数据时整个 lambda 直接 return（不碰结果格）。
+    /// 真实世界直接查 `world_maps`（`Region.maps`），重放则由假世界给出比例和锁定状态。
     fn refresh_cartography(&mut self) {
         let map = self.slots[0].clone();
         let additional = self.slots[1].clone();
         let old = self.slots[2].clone();
         if !old.is_empty() && (map.is_empty() || additional.is_empty()) {
             self.slots[2] = ItemStack::empty();
-        }
-        if !map.is_empty() && !additional.is_empty() && self.replay_world {
-            self.slots[2] =
-                cartography::result(&map, &additional, &old, self.map_scale, self.map_locked);
+        } else if !map.is_empty() && !additional.is_empty() {
+            if let Some(maps) = self.world_maps.as_ref() {
+                if let Some(map_id) = crate::map::stack_map_id(&map)
+                    && let Some(data) = maps.get(map_id)
+                {
+                    self.slots[2] = cartography::result(
+                        &map,
+                        &additional,
+                        &old,
+                        i32::from(data.scale),
+                        data.locked,
+                    );
+                }
+            } else if self.replay_world {
+                self.slots[2] =
+                    cartography::result(&map, &additional, &old, self.map_scale, self.map_locked);
+            }
         }
         self.broadcast();
     }
 
-    /// `CartographyTableMenu$5.onTake`：两个输入各减一，然后放音效。
-    fn take_cartography_result(&mut self) {
+    /// 真实世界里执行官方 `MapItem.onCraftedPostProcess`（放大 / 锁定分配新 `map_id`）。
+    fn post_process_map(&mut self, stack: &mut ItemStack) {
+        if let Some(maps) = self.world_maps.as_mut() {
+            cartography::post_process_map(stack, maps);
+        }
+    }
+
+    /// `CartographyTableMenu$5.onTake`：两个输入各减一、对取出物跑后处理，然后放音效。
+    fn take_cartography_result(&mut self, taken: &mut ItemStack) {
         self.shrink_input(0);
         self.shrink_input(1);
+        self.post_process_map(taken);
         if self.in_world {
             self.effects.push(WorldEffect::Cartography);
         }
@@ -3000,6 +3071,7 @@ fn roll_world_effects(region: &mut Region, id: PlayerId, station: &mut Station) 
         return;
     }
     let pos = station.pos;
+    let game_time = region.tick.game_time();
     let draw = region
         .players
         .get_mut(&id)
@@ -3034,18 +3106,21 @@ fn roll_world_effects(region: &mut Region, id: PlayerId, station: &mut Station) 
                     }
                 }
                 WorldEffect::Cartography => {
-                    world.play_sound(
-                        Vec3::new(
-                            f64::from(pos.x) + 0.5,
-                            f64::from(pos.y) + 0.5,
-                            f64::from(pos.z) + 0.5,
-                        ),
-                        sounds::sound_event("minecraft:ui.cartography_table.take_result"),
-                        sounds::BLOCKS,
-                        1.0,
-                        1.0,
-                        false,
-                    );
+                    if station.last_cartography_sound_time != Some(game_time) {
+                        station.last_cartography_sound_time = Some(game_time);
+                        world.play_sound(
+                            Vec3::new(
+                                f64::from(pos.x) + 0.5,
+                                f64::from(pos.y) + 0.5,
+                                f64::from(pos.z) + 0.5,
+                            ),
+                            sounds::sound_event("minecraft:ui.cartography_table.take_result"),
+                            sounds::BLOCKS,
+                            1.0,
+                            1.0,
+                            false,
+                        );
+                    }
                 }
                 WorldEffect::Enchant => {
                     let pitch = 0.9 + world.random().next_float() * 0.1;
@@ -3112,7 +3187,13 @@ fn roll_grindstone(region: &mut Region, station: &mut Station) {
     crate::interaction::send_effects(region, None, &effects);
 }
 
-fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet: &ClickPacket) {
+fn apply_click(
+    region: &mut Region,
+    maps: Option<&mut crate::map::MapStore>,
+    id: PlayerId,
+    station: &mut Station,
+    packet: &ClickPacket,
+) {
     let (creative, experience_level, selected, inv) = {
         let Some(player) = region.players.get(&id) else {
             return;
@@ -3131,12 +3212,27 @@ fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet:
         station.bookshelves = refresh_bookshelves(region, station.pos);
     }
     pull_machine(region, station);
+    let mut maps = maps;
+    if matches!(station.kind, Kind::Cartography | Kind::Crafting) && station.in_world {
+        let store = match maps.as_deref_mut() {
+            Some(store) => store,
+            None => std::sync::Arc::make_mut(&mut region.global.maps),
+        };
+        station.world_maps = Some(std::mem::take(store));
+    }
     let before = station.state_id;
     station.click(
         i32::from(packet.slot),
         i32::from(packet.button),
         packet.input,
     );
+    if let Some(taken) = station.world_maps.take() {
+        let store = match maps {
+            Some(store) => store,
+            None => std::sync::Arc::make_mut(&mut region.global.maps),
+        };
+        *store = taken;
+    }
     for (slot, hash) in &packet.changed_slots {
         station.receive(*slot, hash.clone());
     }
@@ -3236,7 +3332,17 @@ pub(crate) fn try_open(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool
     true
 }
 
+#[cfg(test)]
 pub(crate) fn click_menu(region: &mut Region, id: PlayerId, packet: ClickPacket) {
+    click_menu_with_maps(region, None, id, packet);
+}
+
+pub(crate) fn click_menu_with_maps(
+    region: &mut Region,
+    maps: Option<&mut crate::map::MapStore>,
+    id: PlayerId,
+    packet: ClickPacket,
+) {
     let matches = region
         .menus
         .get(&id)
@@ -3272,7 +3378,7 @@ pub(crate) fn click_menu(region: &mut Region, id: PlayerId, packet: ClickPacket)
             let container_id = station.container_id;
             send_outgoing(region, id, container_id, packets);
         } else {
-            apply_click(region, id, station, &packet);
+            apply_click(region, maps, id, station, &packet);
             let packets = std::mem::take(&mut station.packets);
             let container_id = station.container_id;
             send_outgoing(region, id, container_id, packets);

@@ -865,6 +865,11 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 }
             }
             Effect::CampfireChanged { pos } => crate::campfire::write_update_tag(region, pos),
+            Effect::ConduitChanged { pos } => {
+                crate::block_items::refresh_update_tag(region, pos);
+                // `sendBlockUpdated`：方块状态没变也要重发这一格和它的方块实体数据。
+                region.block_changes.changed.push(pos);
+            }
             // `ServerPlayer.sendOverlayMessage` → `sendSystemMessage(message, true)`，
             // overlay 恒发（隐藏聊天也收）。只发给发起动作的那名玩家。
             //
@@ -1344,6 +1349,19 @@ fn block_name(region: &Region, pos: mc_bamboo_core::BlockPos) -> String {
 }
 
 pub(crate) fn on_use_item_on(region: &mut Region, id: PlayerId, packet: UseItemOn) {
+    on_use_item_on_with_maps(region, None, id, packet);
+}
+
+/// 同 [`on_use_item_on`]，由主控传入权威 [`MapStore`](crate::map::MapStore) 以支持多岛旗帜标记同步。
+///
+/// Like [`on_use_item_on`], passing the master's authoritative `MapStore` so
+/// banner markers toggle directly on the global map store.
+pub(crate) fn on_use_item_on_with_maps(
+    region: &mut Region,
+    maps: Option<&mut crate::map::MapStore>,
+    id: PlayerId,
+    packet: UseItemOn,
+) {
     if !record_sequence(region, id, packet.sequence) {
         return;
     }
@@ -1389,7 +1407,7 @@ pub(crate) fn on_use_item_on(region: &mut Region, id: PlayerId, packet: UseItemO
 
     // 客户端可能还没收到传送，这时的点击不能信。
     if !player.teleport.is_awaiting() {
-        use_held_item(region, id, &packet);
+        use_held_item(region, maps, id, &packet);
     }
 
     // 无论结果如何都把这两格发回去，放置失败时客户端靠它们和 ack 回滚。
@@ -1431,7 +1449,12 @@ fn send_build_limit(links: &mut Links, id: PlayerId, key: &str, limit: i32) {
 }
 
 /// 把右键交给方块逻辑，再按结果提示和挥手。
-fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
+fn use_held_item(
+    region: &mut Region,
+    maps: Option<&mut crate::map::MapStore>,
+    id: PlayerId,
+    packet: &UseItemOn,
+) {
     let Some(player) = region.players.get(&id) else {
         return;
     };
@@ -1456,7 +1479,7 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     let is_placement_attempt = rules::is_placement_attempt(&held);
     let armed_book = lectern::arm_book(region, id, packet.pos, packet.hand);
 
-    let outcome = durability::run(region, id, packet.hand, |region| {
+    let mut outcome = durability::run(region, id, packet.hand, |region| {
         let (mut level, ticks) = region.block_level();
         let hit = block_hit(packet);
         mc_bamboo_blocks::use_item_on_checked_with_stack(
@@ -1469,6 +1492,43 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
             |state| actor.may_build || adventure::can_place_on(&held, state),
         )
     });
+
+    // 官方 `MapItem.useOn`：在方块交互放行且未冷却、允许交互（`mayBuild || canPlaceOn`）时，
+    // 手持已填充地图右键旗帜切换旗帜标记。
+    //
+    // Official `MapItem.useOn`: when block interaction passes, item is not on
+    // cooldown, and `mayBuild || canPlaceOn` holds, right-clicking a banner with
+    // a `filled_map` toggles the banner marker.
+    if outcome.result == InteractionResult::Pass
+        && held.item == items::FILLED_MAP
+        && let Some(clicked_state) = region.chunks.block(packet.pos)
+        && (actor.may_build || adventure::can_place_on(&held, BlockState(clicked_state)))
+        && !region
+            .players
+            .get(&id)
+            .is_some_and(|p| crate::ender_pearl::on_cooldown(p, &held))
+        && let Some(map_result) = crate::map::use_map_on_banner(region, maps, packet.pos, &held)
+    {
+        outcome.result = map_result;
+        if map_result == InteractionResult::Success {
+            crate::item_use_stats::award(region, id, items::FILLED_MAP);
+            if let Some(player) = region.players.get_mut(&id) {
+                crate::ender_pearl::apply_cooldown(player, &held);
+            }
+            let block = block_name(region, packet.pos);
+            let payload = serde_json::json!({
+                "block": block,
+                "item": item_name(region, id, packet.hand),
+                "x": packet.pos.x, "y": packet.pos.y, "z": packet.pos.z,
+            });
+            crate::advancement_triggers::record(
+                region,
+                id,
+                "minecraft:item_used_on_block",
+                payload,
+            );
+        }
+    }
 
     // `BlockItem.place` 里的 `updateBlockEntityComponents`：放下去的物品把组件留给方块实体。
     if let Some(placed) = outcome.placed_at {
@@ -1616,6 +1676,21 @@ pub(crate) fn on_use_item(
     id: PlayerId,
     hand: Hand,
     sequence: i32,
+    rotation: (f32, f32),
+) {
+    on_use_item_with_maps(region, None, id, hand, sequence, rotation);
+}
+
+/// 同 [`on_use_item`]，由主控传入权威 [`MapStore`](crate::map::MapStore) 以避免多岛地图 ID 撞号。
+///
+/// Like [`on_use_item`], passing the master's authoritative `MapStore` so map
+/// ID allocation is globally unique across islands.
+pub(crate) fn on_use_item_with_maps(
+    region: &mut Region,
+    maps: Option<&mut crate::map::MapStore>,
+    id: PlayerId,
+    hand: Hand,
+    sequence: i32,
     (yaw, pitch): (f32, f32),
 ) {
     if !record_sequence(region, id, sequence) {
@@ -1703,6 +1778,12 @@ pub(crate) fn on_use_item(
     // `EnderEyeItem.use`: `PASS` on a frame, otherwise throw an `EyeOfEnder` (`SUCCESS_SERVER`) or `CONSUME`.
     if let Some(result) = crate::player_ender_eye::use_eye(region, id, hand, &actor) {
         swing(region, id, hand, result);
+        return;
+    }
+    // `EmptyMapItem.use`：空地图右键创建已填充地图，返回 `SUCCESS`。
+    // `EmptyMapItem.use`: create a filled map from an empty map, returning `SUCCESS`.
+    if crate::map::use_empty_map(region, maps, id, hand) {
+        swing(region, id, hand, InteractionResult::Success);
         return;
     }
     // `FireworkRocketItem.use`：仅在玩家 `isFallFlying()`（鞘翅滑翔）时生成附着烟花加速。
@@ -1920,6 +2001,13 @@ pub(crate) fn on_interact_entity_at(
         target.kind,
         mc_bamboo_blocks::entity::KindPublic::ItemFrame(_)
     );
+    // `ItemFrame.interact` 只在空框放物品时查地图追踪上限，先记下框是否为空。
+    // `ItemFrame.interact` checks the tracked-decoration limit only when inserting
+    // into an empty frame; remember whether the frame is empty now.
+    let frame_empty = matches!(
+        &target.kind,
+        mc_bamboo_blocks::entity::KindPublic::ItemFrame(frame) if frame.item.is_empty()
+    );
     let is_minecart = matches!(
         target.kind,
         mc_bamboo_blocks::entity::KindPublic::Minecart(_)
@@ -2046,6 +2134,21 @@ pub(crate) fn on_interact_entity_at(
                 Hand::Main => main_held.clone(),
                 Hand::Off => off_held.clone(),
             };
+            // `ItemFrame.interact`：空框放带 `map_id` 的地图前，若地图数据
+            // `isTrackedCountOverLimit(256)` 则返 `FAIL`，不放入。
+            // `ItemFrame.interact`: inserting a map into an empty frame fails when
+            // the saved data is over the tracked-decoration limit (256).
+            if frame_empty
+                && let Some(map_id) = crate::map::stack_map_id(&held)
+                && region
+                    .global
+                    .maps
+                    .get(map_id)
+                    .is_some_and(|data| data.is_tracked_count_over_limit(256))
+            {
+                swing(region, id, try_hand, InteractionResult::Fail);
+                return;
+            }
             let (outcome, effects) = {
                 let (mut level, ticks) = region.block_level();
                 let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);

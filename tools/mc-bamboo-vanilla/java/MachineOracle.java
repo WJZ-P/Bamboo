@@ -10,6 +10,7 @@ import java.io.Writer;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.UUID;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +48,9 @@ import net.minecraft.world.effect.MobEffect;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityTypes;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.monster.zombie.Drowned;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.flag.FeatureFlagSet;
 import net.minecraft.world.flag.FeatureFlags;
@@ -72,12 +76,16 @@ import net.minecraft.world.level.block.entity.BeaconBlockEntity;
 import net.minecraft.world.level.block.entity.BlastFurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.BrewingStandBlockEntity;
 import net.minecraft.world.level.block.entity.CampfireBlockEntity;
+import net.minecraft.world.level.block.entity.ConduitBlockEntity;
 import net.minecraft.world.level.block.entity.FurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.SmokerBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.entity.EntityTypeTest;
+import net.minecraft.world.level.entity.LevelEntityGetter;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
+import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.damagesource.DamageSources;
 import net.minecraft.world.level.storage.TagValueInput;
 import net.minecraft.world.level.storage.ValueInput;
 import net.minecraft.world.phys.AABB;
@@ -173,9 +181,18 @@ public final class MachineOracle {
         beacons.add(beaconPaymentTier2RangeAndDuration());
         beacons.add(beaconSaveRoundtrip());
 
+        JsonArray conduits = new JsonArray();
+        conduits.add(conduitFrame16());
+        conduits.add(conduitFrame42());
+        conduits.add(conduitDryDeactivate());
+        conduits.add(conduitPlayerEffects());
+        conduits.add(conduitDrownedAttack());
+        conduits.add(conduitSaveRoundtrip());
+
         JsonObject root = new JsonObject();
         root.add("runs", runs);
         root.add("beacons", beacons);
+        root.add("conduits", conduits);
         try (Writer out = new BufferedWriter(new OutputStreamWriter(stdout, StandardCharsets.UTF_8))) {
             out.write(root.toString());
             out.write('\n');
@@ -682,6 +699,369 @@ public final class MachineOracle {
         return out;
     }
 
+    private static final BlockPos CONDUIT_POS = new BlockPos(0, 64, 0);
+    /** `ConduitBlockEntity.updateShape` 的 42 格坐标表，按官方遍历序。 */
+    private static final int[][] CONDUIT_FRAME = conduitFrameOffsets();
+
+    private static int[][] conduitFrameOffsets() {
+        int[][] out = new int[42][];
+        int index = 0;
+        for (int i = -2; i <= 2; i++) {
+            for (int j = -2; j <= 2; j++) {
+                for (int k = -2; k <= 2; k++) {
+                    int ax = Math.abs(i), ay = Math.abs(j), az = Math.abs(k);
+                    if (ax <= 1 && ay <= 1 && az <= 1) {
+                        continue;
+                    }
+                    boolean plane = (i == 0 && (ay == 2 || az == 2))
+                            || (j == 0 && (ax == 2 || az == 2))
+                            || (k == 0 && (ax == 2 || ay == 2));
+                    if (plane) {
+                        out[index++] = new int[] {i, j, k};
+                    }
+                }
+            }
+        }
+        if (index != 42) {
+            throw new IllegalStateException("conduit frame has " + index + " cells");
+        }
+        return out;
+    }
+
+    /** 假世界铺满水，并把潮涌核心所在格换成含水的 conduit。 */
+    private static void conduitWater(MachineLevel level) {
+        for (int i = -2; i <= 2; i++) {
+            for (int j = -2; j <= 2; j++) {
+                for (int k = -2; k <= 2; k++) {
+                    level.putBlock(CONDUIT_POS.offset(i, j, k), Blocks.WATER.defaultBlockState());
+                }
+            }
+        }
+        level.putBlock(CONDUIT_POS, Blocks.CONDUIT.defaultBlockState());
+    }
+
+    private static void conduitFrame(MachineLevel level, int count, BlockState block) {
+        for (int n = 0; n < count; n++) {
+            int[] offset = CONDUIT_FRAME[n];
+            level.putBlock(CONDUIT_POS.offset(offset[0], offset[1], offset[2]), block);
+        }
+    }
+
+    /** 官方 `ConduitBlockEntity.serverTick` 跑一刻，记下反射出来的状态。 */
+    private static JsonObject conduitFrame(MachineLevel level, ConduitBlockEntity entity) throws Exception {
+        JsonObject frame = new JsonObject();
+        frame.addProperty("gameTime", level.gameTime);
+        java.lang.reflect.Field active = ConduitBlockEntity.class.getDeclaredField("isActive");
+        active.setAccessible(true);
+        java.lang.reflect.Field hunting = ConduitBlockEntity.class.getDeclaredField("isHunting");
+        hunting.setAccessible(true);
+        java.lang.reflect.Field effectBlocks = ConduitBlockEntity.class.getDeclaredField("effectBlocks");
+        effectBlocks.setAccessible(true);
+        java.lang.reflect.Field target = ConduitBlockEntity.class.getDeclaredField("destroyTarget");
+        target.setAccessible(true);
+        java.lang.reflect.Field tickCount = ConduitBlockEntity.class.getDeclaredField("tickCount");
+        tickCount.setAccessible(true);
+        java.lang.reflect.Field ambient = ConduitBlockEntity.class.getDeclaredField("nextAmbientSoundActivation");
+        ambient.setAccessible(true);
+        frame.addProperty("active", active.getBoolean(entity));
+        frame.addProperty("hunting", hunting.getBoolean(entity));
+        @SuppressWarnings("unchecked")
+        List<BlockPos> blocks = (List<BlockPos>) effectBlocks.get(entity);
+        frame.addProperty("blocks", blocks.size());
+        Object reference = target.get(entity);
+        frame.addProperty("target", reference == null ? "" : uuidString(reference));
+        frame.addProperty("tickCount", tickCount.getInt(entity));
+        frame.addProperty("nextAmbient", ambient.getLong(entity));
+        JsonArray sounds = new JsonArray();
+        for (String s : level.sounds) {
+            sounds.add(s);
+        }
+        level.sounds.clear();
+        frame.add("sounds", sounds);
+        JsonArray effects = new JsonArray();
+        for (int[] row : level.receivedEffects) {
+            JsonArray item = new JsonArray();
+            for (int v : row) {
+                item.add(v);
+            }
+            effects.add(item);
+        }
+        level.receivedEffects.clear();
+        frame.add("effects", effects);
+        frame.addProperty("seed", seedOf(level.random));
+        // 目标生物受伤后的血量：只统计真正有 `entityData` 的溺尸。
+        JsonArray health = new JsonArray();
+        for (Entity e : level.fakeEntities) {
+            if (e instanceof FakeConduitDrowned drowned) {
+                health.add(drowned.getHealth());
+            }
+        }
+        frame.add("health", health);
+        JsonArray hurts = new JsonArray();
+        for (String hurt : level.hurts) {
+            hurts.add(hurt);
+        }
+        level.hurts.clear();
+        frame.add("hurts", hurts);
+        frame.add("blockUpdates", level.blockUpdates);
+        level.blockUpdates = new JsonArray();
+        return frame;
+    }
+
+    /** `EntityReference` 只有 `getUUID()` 是公开的，用反射读出来。 */
+    private static String uuidString(Object reference) throws Exception {
+        return reference.getClass().getMethod("getUUID").invoke(reference).toString();
+    }
+
+    private static ConduitBlockEntity freshConduit(MachineLevel level) {
+        ConduitBlockEntity entity = new ConduitBlockEntity(CONDUIT_POS, Blocks.CONDUIT.defaultBlockState());
+        entity.setLevel(level);
+        return entity;
+    }
+
+    private static JsonObject conduitRun(String kind, long seed, int ticks, int frameCount,
+            String playerMode, String drownedMode) throws Exception {
+        MachineLevel level = MachineLevel.createMultiBlock(seed);
+        conduitWater(level);
+        conduitFrame(level, frameCount, Blocks.PRISMARINE.defaultBlockState());
+        if (playerMode != null) {
+            // 玩家 1 在半径内且身体在水里；玩家 2 是范围外的对照组。
+            FakeConduitPlayer near = FakeConduitPlayer.create(level, 1, 3.5, 64.0, 0.0, true);
+            // 半径 `42/7*16 = 96`，所以 x=140 才是范围外的对照组。
+            FakeConduitPlayer far = FakeConduitPlayer.create(level, 2, 140.0, 64.0, 0.0, false);
+            level.fakeEntities.add(near);
+            level.fakeEntities.add(far);
+            if ("dry".equals(playerMode)) {
+                near.inWater = false;
+            }
+            if ("dry_far".equals(playerMode)) {
+                near.inWater = false;
+                far.inWater = false;
+            }
+        }
+        if (drownedMode != null) {
+            level.fakeEntities.add(FakeConduitDrowned.create(level, 2.5, 64.0, 0.0));
+            if ("two".equals(drownedMode)) {
+                level.fakeEntities.add(FakeConduitDrowned.create(level, -2.5, 64.0, 1.0));
+            }
+        }
+        ConduitBlockEntity entity = freshConduit(level);
+        JsonArray frames = new JsonArray();
+        for (int t = 0; t <= ticks; t++) {
+            level.gameTime = t;
+            if (t == 40 && "conduit_dry_deactivate".equals(kind)) {
+                // 拆掉 3×3×3 里的一格水，下一次重扫应清空框架并失效。
+                level.putBlock(CONDUIT_POS.offset(1, 1, 1), Blocks.AIR.defaultBlockState());
+            }
+            if (t == 80 && "conduit_dry_deactivate".equals(kind)) {
+                // 补回水，第 80 刻重新激活。
+                level.putBlock(CONDUIT_POS.offset(1, 1, 1), Blocks.WATER.defaultBlockState());
+            }
+            ConduitBlockEntity.serverTick(level, CONDUIT_POS, level.getBlockState(CONDUIT_POS), entity);
+            frames.add(conduitFrame(level, entity));
+        }
+        JsonObject out = new JsonObject();
+        out.addProperty("kind", kind);
+        out.addProperty("seed", seed);
+        out.add("ticks", frames);
+        return out;
+    }
+
+    private static JsonObject conduitFrame16() throws Exception {
+        return conduitRun("conduit_frame_16", 41L, 82, 16, null, null);
+    }
+
+    private static JsonObject conduitFrame42() throws Exception {
+        return conduitRun("conduit_frame_42", 42L, 82, 42, null, null);
+    }
+
+    private static JsonObject conduitDryDeactivate() throws Exception {
+        return conduitRun("conduit_dry_deactivate", 43L, 122, 42, null, null);
+    }
+
+    private static JsonObject conduitPlayerEffects() throws Exception {
+        return conduitRun("conduit_player_effects", 44L, 82, 42, "wet", null);
+    }
+
+    private static JsonObject conduitDrownedAttack() throws Exception {
+        return conduitRun("conduit_drowned_attack", 45L, 82, 42, null, "one");
+    }
+
+    /** 用官方 `EntityReference.store/read` 做 `Target` 的 `saveCustomOnly` → `loadCustomOnly` 往返。 */
+    private static JsonObject conduitSaveRoundtrip() throws Exception {
+        MachineLevel level = MachineLevel.createMultiBlock(46L);
+        ConduitBlockEntity loaded = freshConduit(level);
+        UUID uuid = UUID.fromString("01020304-0506-0708-090a-0b0c0d0e0f10");
+        CompoundTag raw = new CompoundTag();
+        raw.putIntArray("Target", new int[] {0x01020304, 0x05060708, 0x090a0b0c, 0x0d0e0f10});
+        loaded.loadCustomOnly(TagValueInput.create(ProblemReporter.DISCARDING, REGISTRIES, raw));
+        CompoundTag saved = loaded.saveCustomOnly(REGISTRIES);
+        ConduitBlockEntity empty = freshConduit(level);
+        CompoundTag emptySaved = empty.saveCustomOnly(REGISTRIES);
+        JsonObject out = new JsonObject();
+        out.addProperty("kind", "conduit_save_roundtrip");
+        out.addProperty("uuid", uuid.toString());
+        out.add("saved", jsonOf(saved));
+        out.add("emptySaved", jsonOf(emptySaved));
+        out.add("ticks", new JsonArray());
+        return out;
+    }
+
+    private static JsonObject jsonOf(CompoundTag tag) {
+        JsonObject out = new JsonObject();
+        tag.getIntArray("Target").ifPresent(words -> {
+            JsonArray array = new JsonArray();
+            for (int word : words) {
+                array.add(word);
+            }
+            out.add("Target", array);
+        });
+        return out;
+    }
+
+    /** 身体接触水的假玩家；`isInWater()` 由夹具显式给出，不跑 `baseTick`。 */
+    private static final class FakeConduitPlayer extends Player {
+        private MachineLevel ownerLevel;
+        private int uid;
+        private boolean inWater;
+
+        private FakeConduitPlayer() {
+            super(null, null);
+        }
+
+        static FakeConduitPlayer create(MachineLevel level, int uid, double x, double y, double z,
+                boolean inWater) {
+            FakeConduitPlayer p = allocate(FakeConduitPlayer.class);
+            p.ownerLevel = level;
+            p.uid = uid;
+            p.inWater = inWater;
+            try {
+                java.lang.reflect.Field posField = Entity.class.getDeclaredField("position");
+                posField.setAccessible(true);
+                posField.set(p, new Vec3(x, y, z));
+                java.lang.reflect.Field levelField = Entity.class.getDeclaredField("level");
+                levelField.setAccessible(true);
+                levelField.set(p, level);
+                java.lang.reflect.Field bp = Entity.class.getDeclaredField("blockPosition");
+                bp.setAccessible(true);
+                bp.set(p, BlockPos.containing(x, y, z));
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+            p.setUUID(UUID.randomUUID());
+            p.setBoundingBox(new AABB(x - 0.3, y, z - 0.3, x + 0.3, y + 1.8, z + 0.3));
+            return p;
+        }
+
+        @Override
+        public GameType gameMode() {
+            return GameType.SURVIVAL;
+        }
+
+        @Override
+        public boolean isSpectator() {
+            return false;
+        }
+
+        @Override
+        public boolean isInWater() {
+            return this.inWater;
+        }
+
+        @Override
+        public boolean addEffect(MobEffectInstance instance, @Nullable Entity source) {
+            int id = BuiltInRegistries.MOB_EFFECT.asHolderIdMap().getId(instance.getEffect());
+            this.ownerLevel.receivedEffects.add(new int[] {
+                this.uid,
+                id,
+                instance.getDuration(),
+                instance.getAmplifier(),
+                instance.isAmbient() ? 1 : 0,
+                instance.isVisible() ? 1 : 0,
+                instance.showIcon() ? 1 : 0
+            });
+            return true;
+        }
+    }
+
+    /** 水里、无敌（不真跑官方受伤链）的溺尸，记录 4 点魔法伤害。 */
+    private static final class FakeConduitDrowned extends Drowned {
+        private MachineLevel ownerLevel;
+        private float health = 20.0F;
+
+        private FakeConduitDrowned() {
+            super(EntityTypes.DROWNED, null);
+        }
+
+        static FakeConduitDrowned create(MachineLevel level, double x, double y, double z) {
+            FakeConduitDrowned d = allocate(FakeConduitDrowned.class);
+            d.ownerLevel = level;
+            d.health = 20.0F;
+            try {
+                java.lang.reflect.Field levelField = Entity.class.getDeclaredField("level");
+                levelField.setAccessible(true);
+                levelField.set(d, level);
+                java.lang.reflect.Field posField = Entity.class.getDeclaredField("position");
+                posField.setAccessible(true);
+                posField.set(d, new Vec3(x, y, z));
+                java.lang.reflect.Field randomField = Entity.class.getDeclaredField("random");
+                randomField.setAccessible(true);
+                // 新实体的随机源从 `level.entitySeeds` 取，和现有夹具一致。
+                randomField.set(d, RandomSource.create(level.entitySeeds.nextLong()));
+                java.lang.reflect.Field waterField = Entity.class.getDeclaredField("wasTouchingWater");
+                waterField.setAccessible(true);
+                waterField.set(d, true);
+                java.lang.reflect.Field bp = Entity.class.getDeclaredField("blockPosition");
+                bp.setAccessible(true);
+                bp.set(d, BlockPos.containing(x, y, z));
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+            d.setUUID(UUID.fromString("11111111-2222-3333-4444-555555555555"));
+            d.setBoundingBox(new AABB(x - 0.3, y, z - 0.3, x + 0.3, y + 1.95, z + 0.3));
+            return d;
+        }
+
+        @Override
+        public float getHealth() {
+            return this.health;
+        }
+
+        @Override
+        public void setHealth(float value) {
+            this.health = value;
+        }
+
+        @Override
+        public boolean isAlive() {
+            return this.health > 0.0F;
+        }
+
+        @Override
+        public boolean isDeadOrDying() {
+            return this.health <= 0.0F;
+        }
+
+        @Override
+        public boolean hurtServer(ServerLevel level,
+                net.minecraft.world.damagesource.DamageSource source, float amount) {
+            // 只记录伤害量和类型；官方的后续音效 / 战利品表在假世界里没有注册表支持。
+            this.ownerLevel.hurts.add(source.type().msgId() + ":" + Float.toString(amount));
+            this.health -= amount;
+            if (this.health <= 0.0F) {
+                // `Entity.discard()` 只把 `removalReason` 置真，不走假实体没初始化的 `remove` 链。
+                try {
+                    java.lang.reflect.Field removal = Entity.class.getDeclaredField("removalReason");
+                    removal.setAccessible(true);
+                    removal.set(this, Entity.RemovalReason.KILLED);
+                } catch (ReflectiveOperationException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            return true;
+        }
+    }
+
     private static int[] ints(CampfireBlockEntity entity, String name) throws Exception {
         Field field = CampfireBlockEntity.class.getDeclaredField(name);
         field.setAccessible(true);
@@ -886,6 +1266,14 @@ public final class MachineOracle {
         private List<String> sounds;
         private List<int[]> receivedEffects;
         private List<FakeBeaconPlayer> fakePlayers;
+        /** 潮涌核心场景里的全部实体（假玩家 + 溺尸），按世界里的实体遍历序。 */
+        private List<Entity> fakeEntities;
+        /** 新实体的随机源种子，和 `MobOracle` 一样用 `ENTITY_RANDOM_SEED` 起步。 */
+        private RandomSource entitySeeds;
+        /** 受伤记录（伤害类型 + 数值）。 */
+        private List<String> hurts;
+        /** `sendBlockUpdated(pos, state, state, 2)` 的调用次数和位置。 */
+        private JsonArray blockUpdates;
         private RandomSource random;
         private int nextId = 1;
         /** `addFreshEntity` 收下的新实体，取出成品后用来对拍经验球。 */
@@ -904,6 +1292,10 @@ public final class MachineOracle {
                 level.sounds = new ArrayList<>();
                 level.receivedEffects = new ArrayList<>();
                 level.fakePlayers = new ArrayList<>();
+                level.fakeEntities = new ArrayList<>();
+                level.entitySeeds = RandomSource.create(0x0DDB1A5E5BAD5EEDL);
+                level.hurts = new ArrayList<>();
+                level.blockUpdates = new JsonArray();
                 Field random = MachineLevel.class.getDeclaredField("random");
                 random.setAccessible(true);
                 random.set(level, RandomSource.create(seed));
@@ -1003,6 +1395,16 @@ public final class MachineOracle {
         }
 
         @Override
+        public net.minecraft.world.damagesource.DamageSources damageSources() {
+            return new DamageSources(REGISTRIES);
+        }
+
+        @Override
+        public FluidState getFluidState(BlockPos pos) {
+            return this.getBlockState(pos).getFluidState();
+        }
+
+        @Override
         public BlockState getBlockState(BlockPos pos) {
             if (this.blocks != null) {
                 return this.blocks.getOrDefault(pos, Blocks.AIR.defaultBlockState());
@@ -1026,6 +1428,7 @@ public final class MachineOracle {
 
         @Override
         public void sendBlockUpdated(BlockPos pos, BlockState oldState, BlockState newState, int flags) {
+            this.blockUpdates.add(pos.getX() + "," + pos.getY() + "," + pos.getZ() + "," + flags);
         }
 
         @Override
@@ -1049,17 +1452,56 @@ public final class MachineOracle {
 
         @Override
         public <T extends Entity> List<T> getEntities(EntityTypeTest<Entity, T> type, AABB box, Predicate<? super T> selector) {
-            if (this.fakePlayers == null || this.fakePlayers.isEmpty()) {
-                return List.of();
-            }
+            List<Entity> source = this.fakeEntities != null && !this.fakeEntities.isEmpty()
+                    ? this.fakeEntities : new ArrayList<>(this.fakePlayers);
             List<T> found = new ArrayList<>();
-            for (FakeBeaconPlayer p : this.fakePlayers) {
-                T cast = type.tryCast(p);
-                if (cast != null && p.getBoundingBox().intersects(box) && selector.test(cast)) {
+            for (Entity e : source) {
+                T cast = type.tryCast(e);
+                if (cast != null && !e.isRemoved() && e.getBoundingBox().intersects(box)
+                        && selector.test(cast)) {
                     found.add(cast);
                 }
             }
             return found;
+        }
+
+        @Override
+        public Entity getEntity(UUID uuid) {
+            if (this.fakeEntities != null) {
+                for (Entity e : this.fakeEntities) {
+                    if (e.getUUID().equals(uuid) && !e.isRemoved()) {
+                        return e;
+                    }
+                }
+            }
+            return null;
+        }
+
+        @Override
+        public Entity getEntityInAnyDimension(UUID uuid) {
+            Entity found = this.getEntity(uuid);
+            // 只在没有目标时才补一次假的跨维度查找：所有实体都在本维度里。
+            return found != null ? found : null;
+        }
+
+        @Override
+        protected LevelEntityGetter<Entity> getEntities() {
+            final List<Entity> source = this.fakeEntities == null ? List.of() : this.fakeEntities;
+            return new LevelEntityGetter<>() {
+                @Override public Entity get(int id) { return null; }
+                @Override public Entity get(UUID uuid) {
+                    for (Entity e : source) {
+                        if (e.getUUID().equals(uuid) && !e.isRemoved()) return e;
+                    }
+                    return null;
+                }
+                @Override public Iterable<Entity> getAll() { return source; }
+                @Override public <U extends Entity> void get(EntityTypeTest<Entity, U> type,
+                        net.minecraft.util.AbortableIterationConsumer<U> consumer) {}
+                @Override public void get(AABB box, java.util.function.Consumer<Entity> output) {}
+                @Override public <U extends Entity> void get(EntityTypeTest<Entity, U> type, AABB box,
+                        net.minecraft.util.AbortableIterationConsumer<U> consumer) {}
+            };
         }
 
         @Override
