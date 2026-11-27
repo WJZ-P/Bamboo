@@ -19,7 +19,7 @@ use crate::{
     container::{
         CONTAINER_STACK_LIMIT, Container, Slots, item_max, remove_item, same_item_same_components,
     },
-    entity::{Entity, EntityKind},
+    entity::{Entity, EntityKind, KindPublic},
     shape::Aabb,
     state::{ENABLED, FACING_HOPPER},
     world::World,
@@ -656,14 +656,14 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
 
 /// `HopperBlockEntity.getSourceContainer` 的实体容器分支（官方
 /// `getEntityContainer` / `CONTAINER_ENTITY_SELECTOR`）：漏斗上方 1×1×1 内
-/// 活着的运输船。`ContainerEntity.getChestVehicleItem` / `removeChestVehicleItem`
-/// 在读槽位之前先解包战利品表。没有实体容器时返回 `None`，调用方改吸地上的
-/// 物品实体。
+/// 活着的运输船或容器矿车。`ContainerEntity.getChestVehicleItem` /
+/// `removeChestVehicleItem` 在读槽位之前先解包战利品表。没有实体容器时返回
+/// `None`，调用方改吸地上的物品实体。
 ///
 /// The entity-container branch of `getSourceContainer` (`getEntityContainer` /
-/// `CONTAINER_ENTITY_SELECTOR`): a live chest boat in the 1x1x1 cell above the
-/// hopper. Its loot table is unpacked before the slots are read. `None` means
-/// no entity container, so the caller falls back to ground item entities.
+/// `CONTAINER_ENTITY_SELECTOR`): a live chest boat or container minecart in the
+/// 1x1x1 cell above the hopper. Its loot table is unpacked before the slots are
+/// read. `None` means no entity container, so the caller falls back to ground items.
 fn suck_from_entity_container(
     world: &mut World,
     pos: BlockPos,
@@ -677,17 +677,19 @@ fn suck_from_entity_container(
         f64::from(pos.y) + 2.0,
         f64::from(pos.z) + 1.0,
     );
-    let boat = world.entity_ids().into_iter().find(|&id| {
+    let container_entity = world.entity_ids().into_iter().find(|&id| {
         world.entity(id).is_some_and(|found| {
             !found.removed
-                && matches!(&found.kind, EntityKind::Boat(data) if data.chest.is_some())
+                && (matches!(&found.kind, EntityKind::Boat(data) if data.chest.is_some())
+                    || matches!(&found.kind, EntityKind::Minecart(cart) if cart.is_container()))
                 && found.bounding_box().intersects(cell)
         })
     })?;
     // `unpackChestVehicleLootTable(null)`：漏斗读的是容器接口，没有玩家 / 幸运值。
-    world.unpack_boat_loot_table(boat);
-    let mut items = match world.entity(boat).map(|found| found.kind) {
+    world.unpack_entity_container_loot_table(container_entity);
+    let mut items = match world.entity(container_entity).map(|found| found.kind) {
         Some(EntityKind::Boat(data)) => data.chest.as_ref()?.items.clone(),
+        Some(EntityKind::Minecart(cart)) if cart.is_container() => cart.items.clone(),
         _ => return Some(false),
     };
     let (into_max, into_slots) = query(world, pos, &mut |container| {
@@ -726,13 +728,19 @@ fn suck_from_entity_container(
             items[slot] = item.clone();
             continue;
         }
-        // 成功：把改过的 27 格写回船实体。
-        world.with_listed_entity_mut(boat, &mut |found| {
-            if let EntityKind::Boat(data) = &mut found.kind
-                && let Some(chest) = &mut data.chest
-            {
-                chest.items.clone_from_slice(&items);
+        // 成功：把改过的格子写回实体容器。
+        world.with_listed_entity_mut(container_entity, &mut |found| match &mut found.kind {
+            EntityKind::Boat(data) => {
+                if let Some(chest) = &mut data.chest {
+                    chest.items.clone_from_slice(&items);
+                }
             }
+            EntityKind::Minecart(cart)
+                if cart.is_container() && cart.items.len() == items.len() =>
+            {
+                cart.items.clone_from_slice(&items);
+            }
+            _ => {}
         });
         if inserted.was_empty {
             entity.set_cooldown(MOVE_ITEM_SPEED);
@@ -740,6 +748,222 @@ fn suck_from_entity_container(
         return Some(true);
     }
     Some(false)
+}
+
+/// `MinecartHopper.suckInItems`：先走 `HopperBlockEntity.suckInItems(level, this)`
+/// （从上方容器方块 / 上方容器实体抽一件，或从 `SUCK_AABB` 平移 `(x-0.5, y, z-0.5)`
+/// 吸地上物品，因 `isGridAligned() == false` 不被上方完整方块挡住），失败再从
+/// 碰撞盒膨胀 `(0.25, 0, 0.25)` 里吸活着的物品实体。成功一件就置 `consumed_item_this_frame`。
+///
+/// `MinecartHopper.suckInItems`: first runs `HopperBlockEntity.suckInItems(level, this)`
+/// (pull one item from a block or entity container above, or suck ground items in
+/// `SUCK_AABB.move(x - 0.5, y, z - 0.5)` with `isGridAligned() == false`), then falls back
+/// to ground items in `bb.inflate(0.25, 0, 0.25)`. Sets `consumed_item_this_frame` on success.
+pub(crate) fn suck_minecart(world: &mut World, me: &mut Entity) {
+    use crate::entity::minecart::MinecartKind;
+    let me_uid = me.id;
+    let pos = me.position;
+    let inflate_area = me.bounding_box().inflate(0.25, 0.0, 0.25);
+    let EntityKind::Minecart(cart) = &mut me.kind else {
+        return;
+    };
+    if cart.kind() != MinecartKind::Hopper || !cart.enabled || cart.consumed_item_this_frame {
+        return;
+    }
+    if suck_minecart_from_above(world, me_uid, pos, &mut cart.items)
+        || suck_items_in_area_into_cart(world, inflate_area, &mut cart.items)
+    {
+        cart.consumed_item_this_frame = true;
+    }
+}
+
+/// `HopperBlockEntity.suckInItems(level, minecartHopper)`：`getLevelY() = y + 0.5`，
+/// 所以上方坐标是 `(x, y + 1.5, z)`；`isGridAligned() == false` 故不检查上方完整方块。
+///
+/// `HopperBlockEntity.suckInItems(level, minecartHopper)`: `getLevelY() = y + 0.5`,
+/// so the cell above is `(x, y + 1.5, z)`; `isGridAligned() == false` skips full-block blocking.
+fn suck_minecart_from_above(
+    world: &mut World,
+    me_uid: i32,
+    pos: mc_bamboo_core::Vec3,
+    cart_items: &mut [ItemStack],
+) -> bool {
+    let above_y = pos.y + 1.5;
+    let above = BlockPos::containing(mc_bamboo_core::Vec3::new(pos.x, above_y, pos.z));
+    if let Some(slots) = world.peek_container(above, |container| {
+        container.slots_for_face(Direction::Down).map_or_else(
+            || (0..container.size()).collect::<Vec<_>>(),
+            <[usize]>::to_vec,
+        )
+    }) {
+        let into_slots = cart_items.to_vec();
+        for slot in slots {
+            let Some(item) = query(world, above, &mut |container| container.get(slot)) else {
+                continue;
+            };
+            if item.is_empty() {
+                continue;
+            }
+            let can_take = query(world, above, &mut |container| {
+                can_take_item_from_container(
+                    container,
+                    &item,
+                    slot,
+                    Direction::Down,
+                    &into_slots,
+                    CONTAINER_STACK_LIMIT,
+                )
+            })
+            .unwrap_or(false);
+            if !can_take {
+                continue;
+            }
+            let mut taken = ItemStack::empty();
+            if world
+                .silent_container(above, &mut |container| {
+                    taken = remove_item(container, slot, 1);
+                })
+                .is_none()
+            {
+                continue;
+            }
+            let inserted = add_item(&mut Slots::new(cart_items), taken, None);
+            if inserted.remaining.is_empty() {
+                set_changed(world, above);
+                return true;
+            }
+            world.silent_container(above, &mut |container| container.set(slot, item.clone()));
+        }
+        return false;
+    }
+
+    // 上方没有方块容器时，`getEntityContainer` 在以 `(x, y + 1.5, z)` 为中心的 1x1x1 里找容器实体。
+    let entity_cell = Aabb::new(
+        pos.x - 0.5,
+        above_y - 0.5,
+        pos.z - 0.5,
+        pos.x + 0.5,
+        above_y + 0.5,
+        pos.z + 0.5,
+    );
+    let container_entity = world.entity_ids().into_iter().find(|&id| {
+        id != me_uid
+            && world.entity(id).is_some_and(|found| {
+                !found.removed
+                    && (matches!(&found.kind, EntityKind::Boat(data) if data.chest.is_some())
+                        || matches!(&found.kind, EntityKind::Minecart(cart) if cart.is_container()))
+                    && found.bounding_box().intersects(entity_cell)
+            })
+    });
+    if let Some(container_entity) = container_entity {
+        world.unpack_entity_container_loot_table(container_entity);
+        let mut items = match world.entity(container_entity).map(|found| found.kind) {
+            Some(EntityKind::Boat(data)) => match data.chest {
+                Some(chest) => chest.items,
+                None => return false,
+            },
+            Some(EntityKind::Minecart(cart)) if cart.is_container() => cart.items,
+            _ => return false,
+        };
+        let into_slots = cart_items.to_vec();
+        for slot in 0..items.len() {
+            let item = items[slot].clone();
+            if item.is_empty() {
+                continue;
+            }
+            if !can_take_item_from_container(
+                &Slots::new(&mut items),
+                &item,
+                slot,
+                Direction::Down,
+                &into_slots,
+                CONTAINER_STACK_LIMIT,
+            ) {
+                continue;
+            }
+            let taken = remove_item(&mut Slots::new(&mut items), slot, 1);
+            let inserted = add_item(&mut Slots::new(cart_items), taken, None);
+            if inserted.remaining.is_empty() {
+                world.with_listed_entity_mut(
+                    container_entity,
+                    &mut |found| match &mut found.kind {
+                        EntityKind::Boat(data) => {
+                            if let Some(chest) = &mut data.chest {
+                                chest.items.clone_from_slice(&items);
+                            }
+                        }
+                        EntityKind::Minecart(cart)
+                            if cart.is_container() && cart.items.len() == items.len() =>
+                        {
+                            cart.items.clone_from_slice(&items);
+                        }
+                        _ => {}
+                    },
+                );
+                return true;
+            }
+            items[slot] = item;
+        }
+        return false;
+    }
+
+    // `getItemsAtAndAbove`：`Hopper.SUCK_AABB.move(x - 0.5, (y + 0.5) - 0.5, z - 0.5)`。
+    let above_area = Aabb::new(
+        pos.x - 0.5,
+        pos.y + 11.0 / 16.0,
+        pos.z - 0.5,
+        pos.x + 0.5,
+        pos.y + 2.0,
+        pos.z + 0.5,
+    );
+    suck_items_in_area_into_cart(world, above_area, cart_items)
+}
+
+/// 在 `area` 里按 `HopperBlockEntity.addItem(Container, ItemEntity)` 依次吸活着的物品实体。
+/// 只有整堆全部放进容器才返回 `true`；部分放进只改地上物品数量并继续下一件。
+///
+/// Offer live item entities in `area` to `HopperBlockEntity.addItem(Container, ItemEntity)`.
+/// Returns `true` only when the whole stack fits; a partial fit updates the entity and continues.
+fn suck_items_in_area_into_cart(
+    world: &mut World,
+    area: Aabb,
+    cart_items: &mut [ItemStack],
+) -> bool {
+    let mut ids = Vec::new();
+    world.level().for_each_entity_in(area, &mut |public| {
+        if !public.removed && matches!(public.kind, KindPublic::Item { .. }) {
+            ids.push(public.uid);
+        }
+    });
+    ids.sort_unstable();
+    for id in ids {
+        let Some(stack) = world.entity(id).and_then(|entity| {
+            if entity.removed || !entity.bounding_box().intersects(area) {
+                return None;
+            }
+            entity
+                .ground()
+                .and_then(|ground| (!ground.stack.is_empty()).then(|| ground.stack.clone()))
+        }) else {
+            continue;
+        };
+        let added = add_item(&mut Slots::new(cart_items), stack, None);
+        if added.remaining.is_empty() {
+            world.with_listed_entity_mut(id, &mut |entity| {
+                if let Some(ground) = entity.ground_mut() {
+                    ground.stack = ItemStack::empty();
+                }
+                entity.discard();
+            });
+            return true;
+        }
+        world.with_listed_entity_mut(id, &mut |entity| {
+            if let Some(ground) = entity.ground_mut() {
+                ground.stack = added.remaining.clone();
+            }
+        });
+    }
+    false
 }
 
 /// `Hopper.SUCK_AABB`：方块内 x/z 整格，y 从 11/16 到 2。

@@ -1894,7 +1894,14 @@ pub(crate) fn on_interact_entity_at(
                 }
                 return;
             }
-            // 运输 / 漏斗矿车的菜单在容器步骤里接。
+            // `MinecartChest` / `MinecartHopper.interact`：潜行或没上成车时
+            // `interactWithContainerVehicle` 打开实体容器菜单（和船共用一套）。
+            // `MinecartChest` / `MinecartHopper.interact`: opening the entity
+            // container menu shares the chest-boat path.
+            MinecartKind::Chest | MinecartKind::Hopper => {
+                crate::menu::open_entity_container(region, id, entity_id);
+                return;
+            }
             _ => {}
         }
         return;
@@ -1913,7 +1920,7 @@ pub(crate) fn on_interact_entity_at(
         // `AbstractChestBoat.interact`：super 返回 PASS（没上成船或潜行）时
         // `interactWithContainerVehicle(player)` 打开 27 格菜单。
         if is_chest {
-            crate::menu::open_boat(region, id, entity_id);
+            crate::menu::open_entity_container(region, id, entity_id);
         }
         return;
     }

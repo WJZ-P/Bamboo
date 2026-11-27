@@ -1846,7 +1846,7 @@ pub trait Level: LevelSideState + LevelEntities {
     /// The hook for `ContainerEntity.unpackChestVehicleLootTable(null)`: a hopper
     /// fills the table before reading a container entity's slots. Fake worlds
     /// leave this empty.
-    fn unpack_boat_loot_table(&mut self, _entity: i32) {}
+    fn unpack_entity_container_loot_table(&mut self, _entity: i32) {}
 
     /// 这一格有没有还没解包的战利品表。缓存守卫用它确认解包动作可以重放，
     /// 默认返回 `false`（假世界没有战利品表）；游戏层按容器条目覆盖。

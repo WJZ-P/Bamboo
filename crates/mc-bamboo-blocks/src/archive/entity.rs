@@ -425,7 +425,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
             let crate::entity::KindState::Minecart(saved) = &state.kind else {
                 return Err(Error::new("mismatched minecart entity halves"));
             };
-            write_minecart_additional(saved, state.first_tick, &mut out);
+            write_minecart_additional(saved, state.first_tick, &mut out)?;
         }
     }
     Ok(Tag::Compound(out))
@@ -911,6 +911,69 @@ fn clamp_short(value: i32) -> i16 {
     value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
+/// `ContainerEntity.addChestVehicleSaveData`：有战利品表只写 `LootTable` /
+/// `LootTableSeed`，否则写 `Items`。运输船和容器矿车共用这一份。
+///
+/// `ContainerEntity.addChestVehicleSaveData`: write `LootTable` / `LootTableSeed`
+/// when a table is set, otherwise `Items`. Shared by chest boats and container carts.
+fn write_entity_container_items(
+    out: &mut Vec<(String, Tag)>,
+    items: &[ItemStack],
+    loot_table: Option<&str>,
+    loot_table_seed: i64,
+) -> Result<()> {
+    if let Some(table) = loot_table {
+        put(out, "LootTable", Tag::String(table.to_owned()));
+        if loot_table_seed != 0 {
+            put(out, "LootTableSeed", Tag::Long(loot_table_seed));
+        }
+    } else {
+        let listed: Vec<slots::SlottedItem> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, stack)| !stack.is_empty())
+            .map(|(index, stack)| slots::SlottedItem {
+                slot: index as i32,
+                stack: stack.clone(),
+            })
+            .collect();
+        put(
+            out,
+            "Items",
+            slots::encode_list(&listed).map_err(|error| Error::new(error.to_string()))?,
+        );
+    }
+    Ok(())
+}
+
+/// `ContainerEntity.readChestVehicleSaveData`：读回战利品表或 `Items`。
+///
+/// `ContainerEntity.readChestVehicleSaveData`: read back the loot table or `Items`.
+fn read_entity_container_items(
+    tag: &Tag,
+    items: &mut [ItemStack],
+    loot_table: &mut Option<String>,
+    loot_table_seed: &mut i64,
+) {
+    *loot_table = match tag::field(tag, "LootTable") {
+        Some(Tag::String(value)) => Some(value.clone()),
+        _ => None,
+    };
+    *loot_table_seed = tag::long_or(tag, "LootTableSeed", 0);
+    if loot_table.is_none() {
+        let decoded = slots::decode_list(
+            tag::field(tag, "Items").unwrap_or(&Tag::List(Vec::new())),
+            items.len(),
+        );
+        for item in decoded.items {
+            let index = item.slot as usize;
+            if index < items.len() {
+                items[index] = item.stack;
+            }
+        }
+    }
+}
+
 /// 官方 `AbstractMinecart.addAdditionalSaveData` 和各子类的字段：`DisplayState` /
 /// `DisplayOffset` / `FlippedRotation` / `HasTicked`，TNT 的 `fuse` 与爆炸参数，
 /// 动力矿车的 `PushX` / `PushZ` / `Fuel`，漏斗矿车的 `Enabled`。
@@ -922,7 +985,7 @@ fn write_minecart_additional(
     cart: &crate::entity::minecart::Minecart,
     first_tick: bool,
     out: &mut Vec<(String, Tag)>,
-) {
+) -> Result<()> {
     use crate::entity::minecart::MinecartKind;
     let kind = cart.kind();
     if let Some(state) = cart.custom_display_block {
@@ -954,6 +1017,15 @@ fn write_minecart_additional(
     if kind == MinecartKind::Hopper {
         put(out, "Enabled", Tag::Byte(i8::from(cart.enabled)));
     }
+    if cart.is_container() {
+        write_entity_container_items(
+            out,
+            &cart.items,
+            cart.loot_table.as_deref(),
+            cart.loot_table_seed,
+        )?;
+    }
+    Ok(())
 }
 
 /// 读回矿车自己的存档字段，`HasTicked` 由调用方写进 `Entity.first_tick`。
@@ -982,6 +1054,14 @@ fn read_minecart_additional(tag: &Tag, cart: &mut crate::entity::minecart::Minec
     if kind == MinecartKind::Hopper {
         cart.enabled = tag::bool_or(tag, "Enabled", true);
     }
+    if cart.is_container() {
+        read_entity_container_items(
+            tag,
+            &mut cart.items,
+            &mut cart.loot_table,
+            &mut cart.loot_table_seed,
+        );
+    }
 }
 /// 官方 `AbstractChestBoat.addChestVehicleSaveData`：有战利品表只写 `LootTable` /
 /// `LootTableSeed`，否则写 `Items`。普通船没有自己的附加数据（`AbstractBoat` 只写
@@ -997,29 +1077,12 @@ fn write_boat_additional(
     let Some(chest) = &boat.chest else {
         return Ok(());
     };
-    if let Some(table) = &chest.loot_table {
-        put(out, "LootTable", Tag::String(table.clone()));
-        if chest.loot_table_seed != 0 {
-            put(out, "LootTableSeed", Tag::Long(chest.loot_table_seed));
-        }
-    } else {
-        let items: Vec<slots::SlottedItem> = chest
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, stack)| !stack.is_empty())
-            .map(|(index, stack)| slots::SlottedItem {
-                slot: index as i32,
-                stack: stack.clone(),
-            })
-            .collect();
-        put(
-            out,
-            "Items",
-            slots::encode_list(&items).map_err(|error| Error::new(error.to_string()))?,
-        );
-    }
-    Ok(())
+    write_entity_container_items(
+        out,
+        &chest.items,
+        chest.loot_table.as_deref(),
+        chest.loot_table_seed,
+    )
 }
 
 /// 官方 `AbstractChestBoat.readChestVehicleSaveData`：读回 `LootTable` / `LootTableSeed`，
@@ -1031,21 +1094,10 @@ fn read_boat_additional(tag: &Tag, boat: &mut crate::entity::boat::Boat) {
     let Some(chest) = &mut boat.chest else {
         return;
     };
-    chest.loot_table = match tag::field(tag, "LootTable") {
-        Some(Tag::String(value)) => Some(value.clone()),
-        _ => None,
-    };
-    chest.loot_table_seed = tag::long_or(tag, "LootTableSeed", 0);
-    if chest.loot_table.is_none() {
-        let decoded = slots::decode_list(
-            tag::field(tag, "Items").unwrap_or(&Tag::List(Vec::new())),
-            chest.items.len(),
-        );
-        for item in decoded.items {
-            let index = item.slot as usize;
-            if index < chest.items.len() {
-                chest.items[index] = item.stack;
-            }
-        }
-    }
+    read_entity_container_items(
+        tag,
+        &mut chest.items,
+        &mut chest.loot_table,
+        &mut chest.loot_table_seed,
+    );
 }

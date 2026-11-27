@@ -1013,11 +1013,29 @@ impl Report {
             if let EntityKind::Minecart(cart) = &mut entity.kind {
                 cart.fuel = case.fuel;
                 cart.push = Vec3::new(case.push_x, 0.0, case.push_z);
+                if cart.is_container() {
+                    for &[slot, item, count] in &case.chest {
+                        if let Some(stack) = cart.items.get_mut(slot as usize) {
+                            *stack = ItemStack::new(item, count);
+                        }
+                    }
+                }
             }
             if self.break_name.as_deref() == Some("minecart-onground") {
                 entity.on_ground = true;
             }
         });
+        for extra in &case.extras {
+            spawn_ground_item(
+                &mut world,
+                extra.x,
+                extra.y,
+                extra.z,
+                extra.item,
+                extra.count,
+                case.pickup_delay.unwrap_or(10),
+            );
+        }
         if case.steps.is_empty() {
             self.mismatch(format!("{}: no steps", case.name));
             return;
@@ -1239,7 +1257,7 @@ struct BoatSnapshot {
 }
 
 fn boat_snapshot(entity: &Entity) -> BoatSnapshot {
-    let default = BoatSnapshot {
+    let mut result = BoatSnapshot {
         entity_type: -1,
         status: -1,
         hurt_time: -1,
@@ -1256,42 +1274,50 @@ fn boat_snapshot(entity: &Entity) -> BoatSnapshot {
         passengers: Vec::new(),
         chest: Vec::new(),
     };
-    let EntityKind::Boat(boat) = &entity.kind else {
-        return default;
-    };
-    use mc_bamboo_blocks::entity::boat::Status;
-    let status = match boat.status {
-        Status::InWater => 0,
-        Status::UnderWater => 1,
-        Status::UnderFlowingWater => 2,
-        Status::OnLand => 3,
-        Status::InAir => 4,
-    };
-    let mut chest = Vec::new();
-    if let Some(data) = &boat.chest {
-        for (slot, stack) in data.items.iter().enumerate() {
-            if !stack.is_empty() {
-                chest.push([slot as i32, stack.item, stack.count]);
+    match &entity.kind {
+        EntityKind::Boat(boat) => {
+            use mc_bamboo_blocks::entity::boat::Status;
+            result.entity_type = boat.entity_type;
+            result.status = match boat.status {
+                Status::InWater => 0,
+                Status::UnderWater => 1,
+                Status::UnderFlowingWater => 2,
+                Status::OnLand => 3,
+                Status::InAir => 4,
+            };
+            if let Some(data) = &boat.chest {
+                for (slot, stack) in data.items.iter().enumerate() {
+                    if !stack.is_empty() {
+                        result.chest.push([slot as i32, stack.item, stack.count]);
+                    }
+                }
+            }
+            result.hurt_time = boat.hurt_time;
+            result.hurt_dir = boat.hurt_dir;
+            result.damage = boat.damage.to_bits() as i32;
+            result.yaw = entity.y_rot.to_bits() as i32;
+            result.eye_in_water = boat.eye_in_water;
+            result.water_level = boat.water_level.to_bits() as i64;
+            result.last_yd = boat.last_yd.to_bits() as i64;
+            result.land_friction = boat.land_friction.to_bits() as i32;
+            result.out_of_control = boat.out_of_control_ticks.to_bits() as i32;
+            result.paddle0 = boat.paddle_positions[0].to_bits() as i32;
+            result.paddle1 = boat.paddle_positions[1].to_bits() as i32;
+            result.passengers = boat.passengers.clone();
+        }
+        EntityKind::Minecart(cart) => {
+            result.entity_type = cart.entity_type;
+            if cart.is_container() {
+                for (slot, stack) in cart.items.iter().enumerate() {
+                    if !stack.is_empty() {
+                        result.chest.push([slot as i32, stack.item, stack.count]);
+                    }
+                }
             }
         }
+        _ => {}
     }
-    BoatSnapshot {
-        entity_type: boat.entity_type,
-        status,
-        hurt_time: boat.hurt_time,
-        hurt_dir: boat.hurt_dir,
-        damage: boat.damage.to_bits() as i32,
-        yaw: entity.y_rot.to_bits() as i32,
-        eye_in_water: boat.eye_in_water,
-        water_level: boat.water_level.to_bits() as i64,
-        last_yd: boat.last_yd.to_bits() as i64,
-        land_friction: boat.land_friction.to_bits() as i32,
-        out_of_control: boat.out_of_control_ticks.to_bits() as i32,
-        paddle0: boat.paddle_positions[0].to_bits() as i32,
-        paddle1: boat.paddle_positions[1].to_bits() as i32,
-        passengers: boat.passengers.clone(),
-        chest,
-    }
+    result
 }
 
 fn snap_of(entity: Entity) -> OfficialEntity {

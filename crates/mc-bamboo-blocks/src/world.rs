@@ -3172,12 +3172,12 @@ impl<'a> World<'a> {
     }
 
     /// `ContainerEntity.unpackChestVehicleLootTable(null)`：漏斗读实体容器
-    /// （运输船）之前填好战利品表，见 [`Level::unpack_boat_loot_table`]。
+    /// （运输船）之前填好战利品表，见 [`Level::unpack_entity_container_loot_table`]。
     ///
     /// `ContainerEntity.unpackChestVehicleLootTable(null)`: fill a container
     /// entity's loot table before a hopper reads its slots.
-    pub fn unpack_boat_loot_table(&mut self, entity: i32) {
-        self.level.unpack_boat_loot_table(entity);
+    pub fn unpack_entity_container_loot_table(&mut self, entity: i32) {
+        self.level.unpack_entity_container_loot_table(entity);
     }
 
     /// 缓存重放：活塞音高照样从世界随机源取一个数，再发 `Effect::Sound`。

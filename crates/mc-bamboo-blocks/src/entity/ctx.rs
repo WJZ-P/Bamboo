@@ -2028,6 +2028,10 @@ pub enum Command {
         source: Box<EntityPublic>,
         owner: Option<EntityUid>,
     },
+    /// `MinecartHopper.suckInItems`：把碰撞盒附近的物品实体吸进 5 格。
+    ///
+    /// `MinecartHopper.suckInItems`: pull nearby item entities into its 5 slots.
+    MinecartHopperSuck,
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -2808,6 +2812,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             source,
             owner,
         } => world.explode_minecart(center, radius, source, owner),
+        Command::MinecartHopperSuck => crate::hopper::suck_minecart(world, me),
     }
 }
 

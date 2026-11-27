@@ -1394,11 +1394,11 @@ fn chest_boat_menu_uses_the_entity_inventory() {
         }
     });
 
-    assert!(open_boat(&mut fixture.region, fixture.id, boat));
+    assert!(open_entity_container(&mut fixture.region, fixture.id, boat));
     {
         let menu = fixture.menu();
         assert_eq!(menu.container_size, 27);
-        assert_eq!(menu.target.boat(), Some(boat));
+        assert_eq!(menu.target.entity_container(), Some(boat));
         assert_eq!(menu.target.positions(), Vec::<BlockPos>::new());
         let slots = display(&fixture.region, fixture.id, menu);
         assert_eq!(slots.len(), 27 + 36);
@@ -1440,5 +1440,98 @@ fn chest_boat_menu_uses_the_entity_inventory() {
         .region
         .entities
         .spawn(Entity::boat(ids::OAK_BOAT, position));
-    assert!(!open_boat(&mut fixture.region, fixture.id, plain));
+    assert!(!open_entity_container(
+        &mut fixture.region,
+        fixture.id,
+        plain
+    ));
+}
+
+/// 运输矿车（27 格）和漏斗矿车（5 格）共用实体容器菜单，打开时解包战利品表并按各自格数同步。
+#[test]
+fn chest_and_hopper_minecart_menus_use_entity_inventories() {
+    use mc_bamboo_blocks::entity::{Entity, EntityKind, minecart::MinecartKind};
+
+    let mut fixture = Fixture::new();
+    let position = Vec3::new(0.5, f64::from(flat::surface_y()) + 0.0625, 0.5);
+    let chest_cart = fixture
+        .region
+        .entities
+        .spawn(Entity::minecart(MinecartKind::Chest, position));
+    fixture.region.entities.with_mut(chest_cart, |entity| {
+        if let EntityKind::Minecart(cart) = &mut entity.kind {
+            cart.items[2] = ItemStack::new(7, 4);
+            cart.loot_table = Some("minecraft:chests/simple_dungeon".to_owned());
+            cart.loot_table_seed = 99;
+        }
+    });
+
+    assert!(open_entity_container(
+        &mut fixture.region,
+        fixture.id,
+        chest_cart
+    ));
+    {
+        let menu = fixture.menu();
+        assert_eq!(menu.kind, ContainerKind::Chest);
+        assert_eq!(menu.container_size, 27);
+        assert_eq!(menu.target.entity_container(), Some(chest_cart));
+        let slots = display(&fixture.region, fixture.id, menu);
+        assert_eq!(slots.len(), 27 + 36);
+        assert_eq!(slots[2], ItemStack::new(7, 4));
+    }
+    let data = fixture.region.entities.get(chest_cart).unwrap();
+    if let EntityKind::Minecart(cart) = &data.kind {
+        assert!(cart.loot_table.is_none());
+        assert_eq!(cart.loot_table_seed, 0);
+    } else {
+        panic!("运输矿车还在");
+    }
+
+    // 漏斗矿车开 5 格的漏斗菜单。
+    let hopper_cart = fixture
+        .region
+        .entities
+        .spawn(Entity::minecart(MinecartKind::Hopper, position));
+    fixture.region.entities.with_mut(hopper_cart, |entity| {
+        if let EntityKind::Minecart(cart) = &mut entity.kind {
+            cart.items[1] = ItemStack::new(11, 2);
+        }
+    });
+    assert!(open_entity_container(
+        &mut fixture.region,
+        fixture.id,
+        hopper_cart
+    ));
+    {
+        let menu = fixture.menu();
+        assert_eq!(menu.kind, ContainerKind::Hopper);
+        assert_eq!(menu.container_size, 5);
+        assert_eq!(menu.target.entity_container(), Some(hopper_cart));
+        let slots = display(&fixture.region, fixture.id, menu);
+        assert_eq!(slots.len(), 5 + 36);
+        assert_eq!(slots[1], ItemStack::new(11, 2));
+    }
+    let mut changed = display(&fixture.region, fixture.id, fixture.menu());
+    changed[4] = ItemStack::new(12, 6);
+    let menu = fixture.region.menus.remove(&fixture.id).unwrap();
+    write_back_containers(&mut fixture.region, &menu, &changed);
+    fixture.region.menus.insert(fixture.id, menu);
+    let data = fixture.region.entities.get(hopper_cart).unwrap();
+    if let EntityKind::Minecart(cart) = &data.kind {
+        assert_eq!(cart.items[4], ItemStack::new(12, 6));
+    } else {
+        panic!("漏斗矿车还在");
+    }
+
+    // 普通矿车打不开容器菜单。
+    let plain = fixture
+        .region
+        .entities
+        .spawn(Entity::minecart(MinecartKind::Rideable, position));
+    assert!(!open_entity_container(
+        &mut fixture.region,
+        fixture.id,
+        plain
+    ));
 }

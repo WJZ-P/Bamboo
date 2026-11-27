@@ -89,10 +89,10 @@ pub(crate) struct Unpack<'a> {
     pub weather: mc_bamboo_blocks::BlockWeather,
 }
 
-/// 方块逻辑通过 `Level::unpack_boat_loot_table` 传进来的字段。
+/// 方块逻辑通过 `Level::unpack_entity_container_loot_table` 传进来的字段。
 ///
-/// The fields block logic passes through `Level::unpack_boat_loot_table`.
-pub(crate) struct BoatUnpack<'a> {
+/// The fields block logic passes through `Level::unpack_entity_container_loot_table`.
+pub(crate) struct EntityContainerUnpack<'a> {
     pub entities: &'a mut Entities,
     pub chunks: &'a ChunkStore,
     pub sequences: &'a RandomSequences,
@@ -177,14 +177,14 @@ pub(crate) fn unpack(state: Unpack<'_>, pos: BlockPos) -> bool {
 /// the table and return the filled slots. Opening a menu passes the player
 /// (`THIS_ENTITY` + `getLuck()`); container reads and destruction pass
 /// `None` / 0. `None` means there was no table.
-pub(crate) fn unpack_boat(
+pub(crate) fn unpack_entity_container(
     region: &mut Region,
     entity: i32,
     player: Option<EntityView>,
     luck: f32,
 ) -> Option<Vec<ItemStack>> {
-    unpack_boat_with(
-        BoatUnpack {
+    unpack_entity_container_with(
+        EntityContainerUnpack {
             entities: &mut region.entities,
             chunks: &region.chunks,
             sequences: &region.loot_sequences,
@@ -204,8 +204,8 @@ pub(crate) fn unpack_boat(
 /// The split-field entry for block logic (a hopper reading the entity container);
 /// `player` / `luck` are none / zero here, matching
 /// `unpackChestVehicleLootTable(null)`.
-pub(crate) fn unpack_boat_with(
-    state: BoatUnpack<'_>,
+pub(crate) fn unpack_entity_container_with(
+    state: EntityContainerUnpack<'_>,
     entity: i32,
     player: Option<EntityView>,
     luck: f32,
@@ -214,17 +214,24 @@ pub(crate) fn unpack_boat_with(
         .entities
         .public_at(entity)
         .map(|public| public.position)?;
+    // `ContainerEntity.unpackChestVehicleLootTable(null)`：运输船和容器矿车共用。
+    // `ContainerEntity.unpackChestVehicleLootTable(null)`: shared by chest boats
+    // and container carts.
     let (table, seed, mut items) = state
         .entities
-        .with_mut(entity, |e| {
-            if let mc_bamboo_blocks::entity::EntityKind::Boat(boat) = &mut e.kind {
+        .with_mut(entity, |e| match &mut e.kind {
+            mc_bamboo_blocks::entity::EntityKind::Boat(boat) => {
                 let chest = boat.chest.as_mut()?;
                 let table = chest.loot_table.take()?;
                 let seed = std::mem::replace(&mut chest.loot_table_seed, 0);
                 Some((table, seed, chest.items.clone()))
-            } else {
-                None
             }
+            mc_bamboo_blocks::entity::EntityKind::Minecart(cart) if cart.is_container() => {
+                let table = cart.loot_table.take()?;
+                let seed = std::mem::replace(&mut cart.loot_table_seed, 0);
+                Some((table, seed, cart.items.clone()))
+            }
+            _ => None,
         })
         .flatten()?;
     let view = ChunkLevel {
@@ -251,12 +258,18 @@ pub(crate) fn unpack_boat_with(
         state.random.source(),
     );
     // 把解包结果写回实体（实体可能已被 discard，这时写不进去也不影响掉落）。
-    state.entities.with_mut(entity, |e| {
-        if let mc_bamboo_blocks::entity::EntityKind::Boat(boat) = &mut e.kind
-            && let Some(chest) = &mut boat.chest
-        {
-            chest.items = items.clone();
+    state.entities.with_mut(entity, |e| match &mut e.kind {
+        mc_bamboo_blocks::entity::EntityKind::Boat(boat) => {
+            if let Some(chest) = &mut boat.chest {
+                chest.items = items.clone();
+            }
         }
+        mc_bamboo_blocks::entity::EntityKind::Minecart(cart)
+            if cart.is_container() && cart.items.len() == items.len() =>
+        {
+            cart.items.clone_from_slice(&items);
+        }
+        _ => {}
     });
     Some(items)
 }

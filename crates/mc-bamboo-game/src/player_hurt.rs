@@ -749,6 +749,8 @@ fn hurt_minecart(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32)
     });
     let position = public.position;
     let mut drop_item = mc_bamboo_data::items::AIR;
+    let mut is_container = false;
+    let mut container_items: Vec<mc_bamboo_protocol::item::ItemStack> = Vec::new();
     region.entities.with_mut(entity_id, |entity| {
         let mc_bamboo_blocks::entity::EntityKind::Minecart(cart) = &mut entity.kind else {
             return;
@@ -777,12 +779,32 @@ fn hurt_minecart(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32)
                 return;
             }
         }
+        is_container = cart.is_container();
+        if is_container {
+            container_items = cart
+                .items
+                .iter()
+                .filter(|stack| !stack.is_empty())
+                .cloned()
+                .collect();
+        }
         drop_item = cart.drop_item();
         entity.discard();
     });
-    if drop_item != mc_bamboo_data::items::AIR {
-        drop_vehicle_contents(region, position, drop_item, &[]);
+    if drop_item == mc_bamboo_data::items::AIR {
+        return;
     }
+    // `AbstractMinecartContainer.destroy` → `chestVehicleDestroyed`：先解包
+    // 战利品表，再把容器里的东西和矿车物品一起掉出来。与运输船共用一段。
+    // `AbstractMinecartContainer.destroy` → `chestVehicleDestroyed`: unpack the
+    // loot table, then drop the contents with the cart item; shared with chest boats.
+    let contents = if is_container {
+        crate::container_loot::unpack_entity_container(region, entity_id, None, 0.0)
+            .unwrap_or(container_items)
+    } else {
+        Vec::new()
+    };
+    drop_vehicle_contents(region, position, drop_item, &contents);
 }
 
 /// `VehicleEntity.hurtServer` 的船版：玩家打一下累计 `amount*10` 的伤害、翻转
@@ -833,8 +855,8 @@ fn hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32) {
         // `AbstractChestBoat.destroy` 的 `Containers.dropContents` 会先解包战利品表。
         // `Containers.dropContents` 读的是容器接口（`unpackChestVehicleLootTable(null)`），
         // 不带玩家，也没有幸运值加成。
-        let dropped =
-            crate::container_loot::unpack_boat(region, entity_id, None, 0.0).unwrap_or(chest_items);
+        let dropped = crate::container_loot::unpack_entity_container(region, entity_id, None, 0.0)
+            .unwrap_or(chest_items);
         drop_vehicle_contents(region, position, drop_item, &dropped);
     }
 }

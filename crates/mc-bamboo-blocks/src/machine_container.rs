@@ -699,6 +699,74 @@ mod tests {
         assert!(!boat::is_chest(ids::OAK_BOAT));
     }
 
+    #[test]
+    fn hopper_sucks_from_a_chest_minecart_and_hopper_minecart_pulls_from_chest_above() {
+        use mc_bamboo_core::Vec3;
+
+        use crate::entity::{Entity, EntityKind, minecart::MinecartKind};
+
+        // 漏斗方块从上方运输矿车抽一件物品。
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        level.set(POS, BlockState(blocks::HOPPER));
+        level.set_container(POS, vec![ItemStack::empty(); 5]);
+        level.insert_block_entity(Box::new(HopperEntity::new(POS)));
+        let mut chest_cart = Entity::minecart(
+            MinecartKind::Chest,
+            Vec3::new(0.5, f64::from(POS.y) + 1.0625, 0.5),
+        );
+        if let EntityKind::Minecart(cart) = &mut chest_cart.kind {
+            cart.items[0] = ItemStack::new(items::APPLE, 3);
+        }
+        let cart_id = {
+            let mut world = world_of(&mut level, &mut ticks);
+            world.spawn_entity(chest_cart)
+        };
+        {
+            let mut world = world_of(&mut level, &mut ticks);
+            world.tick_block_entities();
+            assert_eq!(slot(&mut world, POS, 0), ItemStack::new(items::APPLE, 1));
+            let found = world.entity(cart_id).expect("运输矿车还在");
+            match &found.kind {
+                EntityKind::Minecart(cart) => {
+                    assert_eq!(cart.items[0], ItemStack::new(items::APPLE, 2));
+                }
+                _ => panic!("还是矿车"),
+            }
+        }
+
+        // 漏斗矿车从上方一格的箱子抽一件物品。
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let chest_pos = POS.above();
+        level.set(POS.below(), BlockState(blocks::STONE));
+        level.set(POS, BlockState(blocks::RAIL));
+        level.set(chest_pos, BlockState(blocks::CHEST));
+        let mut chest_slots = vec![ItemStack::empty(); 27];
+        chest_slots[0] = ItemStack::new(items::COAL, 4);
+        level.set_container(chest_pos, chest_slots);
+        let hopper_id = {
+            let mut world = world_of(&mut level, &mut ticks);
+            world.spawn_entity(Entity::minecart(
+                MinecartKind::Hopper,
+                Vec3::new(0.5, f64::from(POS.y) + 0.0625, 0.5),
+            ))
+        };
+        let mut world = world_of(&mut level, &mut ticks);
+        world.tick_entities();
+        assert_eq!(
+            slot(&mut world, chest_pos, 0),
+            ItemStack::new(items::COAL, 3)
+        );
+        let found = world.entity(hopper_id).expect("漏斗矿车还在");
+        match &found.kind {
+            EntityKind::Minecart(cart) => {
+                assert_eq!(cart.items[0], ItemStack::new(items::COAL, 1));
+            }
+            _ => panic!("还是矿车"),
+        }
+    }
+
     fn world_of<'a>(level: &'a mut TestLevel, ticks: &'a mut BlockTicks) -> World<'a> {
         World::new(level, ticks)
     }

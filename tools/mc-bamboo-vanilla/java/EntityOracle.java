@@ -196,6 +196,9 @@ public final class EntityOracle {
             cases += minecartDetector(official, out);
             cases += minecartTnt(official, out);
             cases += minecartFurnace(official, out);
+            cases += minecartHopperSuck(official, out);
+            cases += minecartHopperLocked(official, out);
+            cases += minecartChestSave(official, out);
             cases += boatStillWater(official, out);
             cases += boatIceSlide(official, out);
             cases += boatWaterCurrent(official, out);
@@ -1137,6 +1140,9 @@ public final class EntityOracle {
         int saveAt = -1;
         int fuel;
         double pushX, pushZ;
+        int[][] chest = new int[0][];
+        /** 地上物品实体：`[x, y, z, itemId, count]`。 */
+        double[][] extras = new double[0][];
         Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
     }
 
@@ -1291,6 +1297,72 @@ public final class EntityOracle {
         return playMinecart(official, out, spec);
     }
 
+    /** 漏斗矿车吸上方和轨道上的物品实体（包括隔着完整方块上方一格的物品）。 */
+    private static int minecartHopperSuck(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_hopper_suck";
+        spec.type = EntityTypes.HOPPER_MINECART;
+        rails(spec, -4, 6, rail(RailShape.NORTH_SOUTH));
+        // z=2 处铁轨上方放一块石头，石头上面放一件物品，测漏斗矿车 `isGridAligned()==false` 隔方块吸物品。
+        spec.blocks.put(BlockPos.asLong(0, 65, 2), Blocks.STONE.defaultBlockState());
+        spec.pz = -1.5;
+        spec.vz = 0.25;
+        spec.extras = new double[][] {
+                {0.5, 64.2, 0.5, BuiltInRegistries.ITEM.getId(Items.APPLE), 2},
+                {0.5, 66.0, 2.5, BuiltInRegistries.ITEM.getId(Items.COAL), 3}
+        };
+        spec.ticks = 24;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 漏斗矿车经过通电激活铁轨被锁住，滑过物品不吸；再经过未通电激活铁轨重新解锁并吸起后面的物品。 */
+    private static int minecartHopperLocked(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_hopper_locked";
+        spec.type = EntityTypes.HOPPER_MINECART;
+        for (int z = -4; z <= 8; z++) {
+            BlockState cell;
+            if (z == 0) {
+                cell = Blocks.ACTIVATOR_RAIL.defaultBlockState()
+                        .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH)
+                        .setValue(BlockStateProperties.POWERED, true);
+            } else if (z == 4) {
+                cell = Blocks.ACTIVATOR_RAIL.defaultBlockState()
+                        .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH)
+                        .setValue(BlockStateProperties.POWERED, false);
+            } else {
+                cell = rail(RailShape.NORTH_SOUTH);
+            }
+            spec.blocks.put(BlockPos.asLong(0, 64, z), cell);
+            spec.blocks.put(BlockPos.asLong(0, 63, z), Blocks.STONE.defaultBlockState());
+        }
+        spec.pz = -2.5;
+        spec.vz = 0.35;
+        spec.extras = new double[][] {
+                {0.5, 64.2, 2.5, BuiltInRegistries.ITEM.getId(Items.STICK), 1},
+                {0.5, 64.2, 6.5, BuiltInRegistries.ITEM.getId(Items.APPLE), 4}
+        };
+        spec.ticks = 32;
+        return playMinecart(official, out, spec);
+    }
+
+    /** 运输矿车带物品滑行（填充度减速公式）并做存档往返。 */
+    private static int minecartChestSave(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "minecart_chest_save";
+        spec.type = EntityTypes.CHEST_MINECART;
+        rails(spec, -4, 8, rail(RailShape.NORTH_SOUTH));
+        spec.pz = 0.5;
+        spec.vz = 0.3;
+        spec.saveAt = 0;
+        spec.chest = new int[][] {
+                {0, BuiltInRegistries.ITEM.getId(Items.COBBLESTONE), 64},
+                {5, BuiltInRegistries.ITEM.getId(Items.APPLE), 16}
+        };
+        spec.ticks = 16;
+        return playMinecart(official, out, spec);
+    }
+
     /** 造一辆官方矿车、逐刻跑、把每刻的实体状态写成一题 case。 */
     private static int playMinecart(Official official, Writer out, MinecartSpec spec) throws Exception {
         FakeLevel level = FakeLevel.create(official, spec.levelSeed);
@@ -1319,7 +1391,20 @@ public final class EntityOracle {
             set(MinecartFurnace.class, furnace, "fuel", Integer.valueOf(spec.fuel));
             furnace.push = new Vec3(spec.pushX, 0.0, spec.pushZ);
         }
+        if (cart instanceof net.minecraft.world.entity.vehicle.minecart.AbstractMinecartContainer container) {
+            for (int[] slot : spec.chest) {
+                container.setItem(slot[0], new ItemStack(BuiltInRegistries.ITEM.byId(slot[1]), slot[2]));
+            }
+        }
         scene.active.add(cart);
+        for (double[] extra : spec.extras) {
+            scene.spawnItem(
+                    extra[0],
+                    extra[1],
+                    extra[2],
+                    new ItemStack(BuiltInRegistries.ITEM.byId((int) extra[3]), (int) extra[4]),
+                    10);
+        }
         level.fresh.clear();
         level.tracked = scene.active;
 
@@ -1341,6 +1426,26 @@ public final class EntityOracle {
         out.write(",\"vx\":" + spec.vx + ",\"vy\":" + spec.vy + ",\"vz\":" + spec.vz);
         out.write(",\"saveAt\":" + spec.saveAt);
         out.write(",\"fuel\":" + spec.fuel + ",\"pushX\":" + spec.pushX + ",\"pushZ\":" + spec.pushZ);
+        if (spec.chest.length > 0) {
+            out.write(",\"chest\":[");
+            for (int i = 0; i < spec.chest.length; i++) {
+                if (i > 0) out.write(',');
+                out.write("[" + spec.chest[i][0] + "," + spec.chest[i][1] + "," + spec.chest[i][2] + "]");
+            }
+            out.write(']');
+        }
+        if (spec.extras.length > 0) {
+            out.write(",\"extras\":[");
+            for (int i = 0; i < spec.extras.length; i++) {
+                if (i > 0) out.write(',');
+                out.write("{\"item\":" + (int) spec.extras[i][3]
+                        + ",\"count\":" + (int) spec.extras[i][4]
+                        + ",\"x\":" + spec.extras[i][0]
+                        + ",\"y\":" + spec.extras[i][1]
+                        + ",\"z\":" + spec.extras[i][2] + "}");
+            }
+            out.write(']');
+        }
         out.write(",\"blocks\":");
         writeBlocks(out, spec.blocks);
         out.append(",\"steps\":");
@@ -1864,6 +1969,28 @@ public final class EntityOracle {
                             .append(BuiltInRegistries.ITEM.getId(stack.getItem()))
                             .append(',').append(stack.getCount()).append(']');
                 }
+            }
+            out.append(']');
+        }
+        // 矿车统一输出注册类型；容器矿车再和船共用一个 chest 字段，逐刻比较吸进去的 5 / 27 格。
+        if (entity instanceof AbstractMinecart cart) {
+            out.append(",\"entityType\":").append(BuiltInRegistries.ENTITY_TYPE.getId(cart.getType()));
+        }
+        if (entity instanceof net.minecraft.world.entity.vehicle.minecart.AbstractMinecartContainer cart) {
+            out.append(",\"chest\":[");
+            boolean first = true;
+            for (int slot = 0; slot < cart.getContainerSize(); slot++) {
+                ItemStack stack = cart.getItem(slot);
+                if (stack.isEmpty()) {
+                    continue;
+                }
+                if (!first) {
+                    out.append(',');
+                }
+                first = false;
+                out.append('[').append(slot).append(',')
+                        .append(BuiltInRegistries.ITEM.getId(stack.getItem()))
+                        .append(',').append(stack.getCount()).append(']');
             }
             out.append(']');
         }

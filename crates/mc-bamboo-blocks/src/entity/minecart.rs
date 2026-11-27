@@ -7,6 +7,7 @@
 
 use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::{BlockAncestor, blocks, items, registries::entity_type, tags::block_tags};
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     BlockState,
@@ -165,6 +166,16 @@ pub struct Minecart {
     pub push: Vec3,
     /// 漏斗矿车的 `enabled`，默认 true。
     pub enabled: bool,
+    /// 容器矿车的格子：运输矿车 27 格、漏斗矿车 5 格，其余为空。
+    ///
+    /// Container slots: 27 for a chest cart, 5 for a hopper cart, none otherwise.
+    pub items: Vec<ItemStack>,
+    /// `ContainerEntity.lootTable`。
+    pub loot_table: Option<String>,
+    /// `ContainerEntity.lootTableSeed`。
+    pub loot_table_seed: i64,
+    /// `MinecartHopper.consumedItemThisFrame`：每刻最多吸一次。
+    pub consumed_item_this_frame: bool,
 }
 
 impl Minecart {
@@ -188,7 +199,18 @@ impl Minecart {
             fuel: 0,
             push: Vec3::default(),
             enabled: true,
+            items: vec![ItemStack::empty(); kind.container_size()],
+            loot_table: None,
+            loot_table_seed: 0,
+            consumed_item_this_frame: false,
         }
+    }
+
+    /// 这辆车有没有容器（运输 / 漏斗矿车）。
+    ///
+    /// Whether this cart has a container (chest / hopper cart).
+    pub const fn is_container(&self) -> bool {
+        matches!(self.kind(), MinecartKind::Chest | MinecartKind::Hopper)
     }
 
     /// 这辆车的种类。
@@ -415,13 +437,32 @@ fn calculate_new_push_along(push: Vec3, v: Vec3) -> Vec3 {
     push
 }
 
-/// `AbstractMinecart.applyNaturalSlowdown`：动力矿车先按推力折算，再走通用的
-/// y 清零、有乘客 0.997 / 无 0.96、水中再 0.95。
+/// `AbstractMinecartContainer.applyNaturalSlowdown`：容器越空减速越小（惯性越大），
+/// `factor = 0.98 + (15 - 红石信号) * 0.001`，有战利品表时不加这一项。
 ///
-/// `AbstractMinecart.applyNaturalSlowdown`: a furnace cart first folds in its
-/// push, then the generic zero-y slowdown (0.997 with a passenger, 0.96 without,
-/// times 0.95 in water).
+/// `AbstractMinecartContainer.applyNaturalSlowdown`: `factor = 0.98 +
+/// (15 - redstone signal) * 0.001`, skipped when a loot table is set.
+fn container_slowdown(me: &Entity, cart: &Minecart, v: Vec3) -> Vec3 {
+    let mut factor = 0.98_f32;
+    if cart.loot_table.is_none() {
+        let signal = crate::container::redstone_signal(cart.items.iter(), cart.items.len());
+        factor += (15 - signal) as f32 * 0.001;
+    }
+    if me.in_water {
+        factor *= 0.95;
+    }
+    v.multiply(f64::from(factor), 0.0, f64::from(factor))
+}
+
+/// `AbstractMinecart.applyNaturalSlowdown`：容器矿车走填充度版，动力矿车先按推力折算，
+/// 其余走通用的 y 清零、有乘客 0.997 / 无 0.96、水中再 0.95。
+///
+/// `AbstractMinecart.applyNaturalSlowdown`: container carts use the fill-based
+/// factor, furnace carts fold in their push, the rest use the generic slowdown.
 fn apply_natural_slowdown(me: &Entity, cart: &mut Minecart, v: Vec3) -> Vec3 {
+    if cart.is_container() {
+        return container_slowdown(me, cart, v);
+    }
     let base = if cart.kind().is_furnace() {
         if cart.push.length_sqr() > 1.0e-7 {
             cart.push = calculate_new_push_along(cart.push, v);
@@ -699,6 +740,9 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     if cart.damage > 0.0 {
         cart.damage -= 1.0;
     }
+    // `MinecartHopper.tick` 每刻开头清掉上一刻的「已吸过」标记。
+    // `MinecartHopper.tick` clears the per-tick "already sucked" flag.
+    cart.consumed_item_this_frame = false;
 
     let prev_y_rot = me.y_rot;
     let gravity = if me.in_water { 0.005 } else { 0.04 };
@@ -743,6 +787,13 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     me.kind = EntityKind::Minecart(cart);
     tick_furnace(me);
     tick_tnt(me, ctx);
+    // `MinecartHopper.tick` → `tryConsumeItems`：活着的、启用的漏斗矿车吸一次。
+    // `MinecartHopper.tick` → `tryConsumeItems`: a live, enabled hopper cart sucks once.
+    let hopper_ready = matches!(&me.kind, EntityKind::Minecart(cart)
+        if cart.kind() == MinecartKind::Hopper && cart.enabled && !me.removed);
+    if hopper_ready {
+        ctx.emit(Command::MinecartHopperSuck, me);
+    }
 }
 
 /// `MinecartFurnace.tick`：燃料递减，用完清空推力，冒烟粒子消耗一次实体随机数。
@@ -824,15 +875,20 @@ fn tick_tnt(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     );
 }
 
-/// `activateMinecart`：激活铁轨通电时各子类的反应。
+/// `activateMinecart`：激活铁轨各子类的反应。漏斗矿车通电关、未通电开，
+/// 其余子类只在通电时生效。
 ///
-/// `activateMinecart`: each subclass's response to a powered activator rail.
+/// `activateMinecart`: each subclass's response to an activator rail. A hopper
+/// cart sets `enabled = !active` on every pass; the others react only when active.
 fn activate_minecart(cart: &mut Minecart, active: bool) {
-    if !active {
-        return;
-    }
     match cart.kind() {
-        MinecartKind::Rideable => {
+        MinecartKind::Hopper => {
+            let next = !active;
+            if cart.enabled != next {
+                cart.enabled = next;
+            }
+        }
+        MinecartKind::Rideable if active => {
             cart.passengers.clear();
             if cart.hurt_time == 0 {
                 cart.hurt_dir = -cart.hurt_dir;
@@ -840,13 +896,8 @@ fn activate_minecart(cart: &mut Minecart, active: bool) {
                 cart.damage = 50.0;
             }
         }
-        MinecartKind::Tnt => {
-            if cart.fuse < 0 {
-                cart.fuse = 80;
-            }
-        }
-        MinecartKind::Hopper => {
-            cart.enabled = false;
+        MinecartKind::Tnt if active && cart.fuse < 0 => {
+            cart.fuse = 80;
         }
         _ => {}
     }

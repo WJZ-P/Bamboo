@@ -3274,6 +3274,51 @@ fn a_furnace_minecart_ignores_a_non_fuel_item() {
     assert_eq!(cart.fuel, 0);
 }
 
+/// 生存模式打掉装有物品的运输矿车：同时掉出运输矿车物品与容器内容。
+///
+/// Breaking a loaded chest minecart in survival drops both the cart item and its contents.
+#[test]
+fn breaking_a_chest_minecart_drops_both_cart_and_contents() {
+    use mc_bamboo_blocks::entity::{EntityKind, minecart::MinecartKind};
+    let (mut server, client) = settled();
+    player_mut(&mut server, &client).game_mode = GameMode::Survival;
+    let uid = server.region().entities.spawn({
+        let mut entity = mc_bamboo_blocks::entity::Entity::minecart(
+            MinecartKind::Chest,
+            Vec3::new(11.5, -60.0, 8.5),
+        );
+        if let EntityKind::Minecart(cart) = &mut entity.kind {
+            cart.damage = 40.0;
+            cart.items[0] = ItemStack::new(items::DIAMOND, 2);
+        }
+        entity
+    });
+    client.take_frames();
+    crate::player_hurt::on_attack(server.region(), client.id, uid);
+    assert!(
+        server
+            .region()
+            .entities
+            .get(uid)
+            .is_some_and(|entity| entity.removed),
+        "chest minecart destroyed",
+    );
+    assert!(
+        server.region().entities.iter().any(
+            |e| matches!(&e.kind, EntityKind::Item(i) if i.stack.item == items::CHEST_MINECART)
+        ),
+        "chest minecart item drops",
+    );
+    assert!(
+        server
+            .region()
+            .entities
+            .iter()
+            .any(|e| matches!(&e.kind, EntityKind::Item(i) if i.stack.item == items::DIAMOND && i.stack.count == 2)),
+        "container contents drop",
+    );
+}
+
 #[path = "egg_tests.rs"]
 mod egg_tests;
 
