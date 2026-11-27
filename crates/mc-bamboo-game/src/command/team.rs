@@ -77,10 +77,8 @@ fn members(
         ScoreHolderSpec::Wildcard => global.scoreboard().tracked_players(),
         ScoreHolderSpec::Text(text) => vec![text.clone()],
         ScoreHolderSpec::Selector(selector) => {
-            let ids = select::with_scoreboard(region, global.scoreboard(), id, level, selector)?;
-            ids.iter()
-                .filter_map(|player| region.players.get(player).map(|entry| entry.name.clone()))
-                .collect()
+            let found = select::score_holders(region, global.scoreboard(), id, level, selector)?;
+            crate::scoreboard::holder_names(region, &found)
         }
     };
     if names.is_empty() {
@@ -89,8 +87,15 @@ fn members(
     Ok(names)
 }
 
-fn display_of(global: &Global, name: &str) -> Component {
-    global.scoreboard().format_player_name(name)
+/// 反馈里的名字。选择器选出来的实体用它的显示名套队伍格式，别的名字按玩家名处理。
+///
+/// The name shown in feedback. An entity picked by a selector uses its display name in
+/// team format; any other name is treated as a player name.
+fn display_of(global: &Global, region: &Region, name: &str) -> Component {
+    match crate::scoreboard::entity_display(region, name) {
+        Some(display) => global.scoreboard().format_holder_name(name, display),
+        None => global.scoreboard().format_player_name(name),
+    }
 }
 
 pub(crate) fn list(
@@ -249,7 +254,7 @@ pub(crate) fn join(
             region,
             id,
             "commands.team.join.success.single",
-            args([display_of(global, &only).into(), shown.into()]),
+            args([display_of(global, region, &only).into(), shown.into()]),
             true,
         );
     } else {
@@ -287,7 +292,7 @@ pub(crate) fn leave(
             region,
             id,
             "commands.team.leave.success.single",
-            args([display_of(global, &only).into()]),
+            args([display_of(global, region, &only).into()]),
             true,
         );
     } else {

@@ -3151,7 +3151,7 @@ impl PushTeams {
 /// The rule table of official `EntitySelector.pushableBy`, one `Team.CollisionRule` per
 /// side (no team counts as `always`). As official evaluates them, `pushOwnTeam` (3)
 /// spares the own team and `pushOtherTeams` (2) pushes only the own team.
-pub(crate) fn collision_allows(own: i32, their: i32, same_team: bool) -> bool {
+pub fn collision_allows(own: i32, their: i32, same_team: bool) -> bool {
     const NEVER: i32 = 1;
     const PUSH_OTHER_TEAMS: i32 = 2;
     const PUSH_OWN_TEAM: i32 = 3;

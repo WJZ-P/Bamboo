@@ -155,10 +155,8 @@ fn holders(
         ScoreHolderSpec::Wildcard => global.scoreboard().tracked_players(),
         ScoreHolderSpec::Text(text) => vec![text.clone()],
         ScoreHolderSpec::Selector(selector) => {
-            let ids = select::with_scoreboard(region, global.scoreboard(), id, level, selector)?;
-            ids.iter()
-                .filter_map(|player| region.players.get(player).map(|entry| entry.name.clone()))
-                .collect()
+            let found = select::score_holders(region, global.scoreboard(), id, level, selector)?;
+            crate::scoreboard::holder_names(region, &found)
         }
     };
     if names.is_empty() {
@@ -176,8 +174,15 @@ fn holder_of(global: &Global, name: &str) -> Holder {
     }
 }
 
-fn display_for(global: &Global, name: &str) -> Component {
-    global.scoreboard().format_player_name(name)
+/// 反馈里的名字。选择器选出来的实体用它的显示名套队伍格式，别的名字按玩家名处理。
+///
+/// The name shown in feedback. An entity picked by a selector uses its display name in
+/// team format; any other name is treated as a player name.
+fn display_for(global: &Global, region: &Region, name: &str) -> Component {
+    match crate::scoreboard::entity_display(region, name) {
+        Some(display) => global.scoreboard().format_holder_name(name, display),
+        None => global.scoreboard().format_player_name(name),
+    }
 }
 
 fn objective_name(global: &Global, name: &str) -> Result<Component, CommandFail> {
@@ -521,7 +526,7 @@ pub(crate) fn players_list_scores(
 ) -> Result<(), CommandFail> {
     let holder = holders(global, region, id, parsed, "target")?;
     let name = holder.first_name().to_owned();
-    let display = display_for(global, &name);
+    let display = display_for(global, region, &name);
     let lines = global.scoreboard().player_score_lines(&name);
     if lines.is_empty() {
         ok(
@@ -565,7 +570,7 @@ pub(crate) fn players_get(
     let Some(value) = global.scoreboard().score_value(&name, &objective) else {
         return Err(fail_with(
             "commands.scoreboard.players.get.null",
-            args([objective.into(), display_for(global, &name).into()]),
+            args([objective.into(), display_for(global, region, &name).into()]),
         ));
     };
     ok(
@@ -573,7 +578,7 @@ pub(crate) fn players_get(
         id,
         "commands.scoreboard.players.get.success",
         args([
-            display_for(global, &name).into(),
+            display_for(global, region, &name).into(),
             value.into(),
             formatted.into(),
         ]),
@@ -699,7 +704,7 @@ fn write_score(
     let one = holders.len() == 1;
     let values = action.feedback(
         formatted,
-        display_for(global, holders.first_name()),
+        display_for(global, region, holders.first_name()),
         total_value,
         count,
         one,
@@ -752,7 +757,7 @@ pub(crate) fn players_reset(
 ) -> Result<(), CommandFail> {
     let holders = holders(global, region, id, parsed, "targets")?;
     let one = holders.len() == 1;
-    let first = display_for(global, holders.first_name());
+    let first = display_for(global, region, holders.first_name());
     if parsed.get("objective").is_some() {
         let objective = goal(global, parsed, "objective")?;
         let formatted = objective_name(global, &objective)?;
@@ -833,7 +838,10 @@ pub(crate) fn players_enable(
             region,
             id,
             "commands.scoreboard.players.enable.success.single",
-            args([formatted.into(), display_for(global, &unlocked[0]).into()]),
+            args([
+                formatted.into(),
+                display_for(global, region, &unlocked[0]).into(),
+            ]),
             true,
         );
     } else {
@@ -902,7 +910,7 @@ pub(crate) fn players_operation(
             "commands.scoreboard.players.operation.success.single",
             args([
                 formatted.into(),
-                display_for(global, targets.first_name()).into(),
+                display_for(global, region, targets.first_name()).into(),
                 response.total.into(),
             ]),
             true,
@@ -949,7 +957,7 @@ pub(crate) fn players_display_name(
                 "commands.scoreboard.players.display.name.set.success.single",
                 args([
                     display.into(),
-                    display_for(global, holders.first_name()).into(),
+                    display_for(global, region, holders.first_name()).into(),
                     formatted.into(),
                 ]),
                 true,
@@ -973,7 +981,7 @@ pub(crate) fn players_display_name(
             id,
             "commands.scoreboard.players.display.name.clear.success.single",
             args([
-                display_for(global, holders.first_name()).into(),
+                display_for(global, region, holders.first_name()).into(),
                 formatted.into(),
             ]),
             true,
@@ -1025,7 +1033,7 @@ pub(crate) fn players_display_numberformat(
     };
     let values = if one {
         vec![
-            display_for(global, holders.first_name()).into(),
+            display_for(global, region, holders.first_name()).into(),
             formatted.into(),
         ]
     } else {

@@ -13,6 +13,9 @@ mod award_tests;
 mod boss;
 mod death_message;
 mod format;
+mod holders;
+#[cfg(feature = "oracle-samples")]
+pub(crate) mod replay;
 #[cfg(test)]
 mod team_rule_tests;
 
@@ -40,6 +43,7 @@ pub(crate) use death_message::broadcast_death_message;
 pub(crate) use format::{
     boss_name, format_green_names, format_list, format_player_names, objective_name, team_name,
 };
+pub(crate) use holders::{entity_display, holder_names};
 
 /// 一条玩家死亡消息发给谁（官方 `Team.Visibility` 在 `ServerPlayer.die` 里的四个分支）。
 ///
@@ -483,6 +487,26 @@ impl Scoreboard {
     pub(crate) fn holders_allow_damage(&self, attacker: &str, target: &str) -> bool {
         self.membership.is_empty()
             || self.teams_allow_damage(self.team_index_of(attacker), self.team_index_of(target))
+    }
+
+    /// 对拍用：官方 `EntitySelector.pushableBy(pusher).test(pushed)` 里和队伍有关的部分，
+    /// 两边用计分板名字。队伍和规则的查法与生物推挤（`living.rs` 的 `PushTeams`）一样，
+    /// 规则表是同一个 `collision_allows`。
+    ///
+    /// For the oracle: the team half of official
+    /// `EntitySelector.pushableBy(pusher).test(pushed)` with both sides by scoreboard
+    /// name. Teams and rules are looked up like mob pushing does (`PushTeams` in
+    /// `living.rs`) and the rule table is the same `collision_allows`.
+    #[cfg(feature = "oracle-samples")]
+    pub(crate) fn holders_can_push(&self, pusher: &str, pushed: &str) -> bool {
+        let own = self.team_index_of(pusher);
+        let their = self.team_index_of(pushed);
+        let rule = |team: Option<u32>| team.map_or(0, |index| self.team_collision_by_index(index));
+        mc_bamboo_blocks::entity::mob::living::collision_allows(
+            rule(own),
+            rule(their),
+            own.is_some() && own == their,
+        )
     }
 
     /// 官方 `ServerPlayer.die` 里谁能在聊天栏看到死亡消息：死者没有队伍，或者队伍的
@@ -1168,6 +1192,32 @@ impl Scoreboard {
         }
     }
 
+    /// 对拍用：整张计分板，和 `ExecuteOracle.java` 的 `scoreDump` 同一种写法。按目标名、
+    /// 再按持有者排序，每项是 `目标/持有者=分数/锁/显示名`；实体的 UUID 名字写成
+    /// `<entity>`。
+    ///
+    /// For the oracle: the whole scoreboard in the format of `scoreDump` in
+    /// `ExecuteOracle.java`. Sorted by objective and then holder, each entry is
+    /// `objective/holder=score/lock/display`; an entity's UUID name becomes `<entity>`.
+    #[cfg(feature = "oracle-samples")]
+    pub(crate) fn dump(&self) -> String {
+        let mut entries = Vec::new();
+        for (holder, scores) in &self.scores {
+            let entity = holder.len() == 36 && holder.as_bytes()[8] == b'-';
+            let owner = if entity { "<entity>" } else { holder.as_str() };
+            for (objective, score) in scores {
+                entries.push(format!(
+                    "{objective}/{owner}={}/{}/{}",
+                    score.value,
+                    if score.locked { "L" } else { "U" },
+                    if score.display.is_some() { "D" } else { "-" },
+                ));
+            }
+        }
+        entries.sort();
+        entries.join(";")
+    }
+
     fn update_team(&mut self, name: &str, region: &mut Region, change: impl FnOnce(&mut Team)) {
         let Some(team) = self.teams.iter_mut().find(|team| team.name == name) else {
             return;
@@ -1401,6 +1451,30 @@ fn award_tick_stats(player: &mut crate::player::Player) {
                 .item_use_stats
                 .score(ScoreKey::Custom(stat), ScoreChange::Add(1));
         }
+    }
+}
+
+/// 对拍用：不等到这一刻末尾，马上把玩家身上记下的计分板变化交给主控。和
+/// [`tick_criteria`] 一样，没有目标用统计类准则时直接丢掉。
+///
+/// For the oracle: hand the recorded scoreboard changes to the master right away
+/// instead of at the end of the tick. Like [`tick_criteria`], they are dropped while no
+/// objective uses a stat criterion.
+#[cfg(feature = "oracle-samples")]
+pub(crate) fn flush_awards(port: &mut GlobalPort<'_>, region: &mut Region) {
+    let awards = region.global.scoreboard.tracks_awards();
+    let mut effects = Vec::new();
+    for player in region.players.values_mut() {
+        let scores = player.item_use_stats.take_scores();
+        if awards && !scores.is_empty() {
+            effects.push(GlobalEffect::ScoreAwards {
+                name: player.name.clone(),
+                changes: scores,
+            });
+        }
+    }
+    for effect in effects {
+        port.submit(region, effect);
     }
 }
 

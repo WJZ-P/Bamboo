@@ -947,6 +947,9 @@ pub fn spawn_landing_sample(scene: &ReplaySpawnLanding) -> SpawnLandingSample {
     }
 }
 
+#[cfg(feature = "oracle-samples")]
+pub use scoreboard::replay::replay_scoreboard;
+
 /// 供 `mc-bamboo-vanilla execute-oracle` 对拍：在固定的小块世界里重放一条
 /// `/execute`，返回 `[stone_at_4_6, stone_at_cow_a, stone_at_cow_b, score, success, feedback]`
 /// 中能和官方逐项比较的数字。`feedback` 是反馈翻译键的 FNV-1a 哈希截断。

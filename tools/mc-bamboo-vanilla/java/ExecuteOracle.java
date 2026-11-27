@@ -167,6 +167,70 @@ public final class ExecuteOracle {
         "advancement grant @s only minecraft:story/root ;; advancement revoke @s only minecraft:story/root",
     };
 
+    /**
+     * 计分板题：`/trigger`、统计类准则和击杀类准则。一行里用 ` ;; ` 隔开多步，每步是一条
+     * 命令，或者一条 `!` 开头的直接调用（见 `scoreboardOp`）。和 Rust 侧
+     * `scoreboard_oracle.rs` 的 `SCENARIOS` 一致。
+     *
+     * Scoreboard cases: `/trigger`, stat criteria and kill criteria. Steps are separated
+     * by ` ;; `; each is a command or a direct call starting with `!` (see
+     * `scoreboardOp`). Must match `SCENARIOS` in `scoreboard_oracle.rs`.
+     */
+    private static final String[] SCOREBOARD_CASES = {
+        "scoreboard objectives add t trigger ;; trigger t",
+        "scoreboard objectives add t trigger ;; scoreboard players enable @s t ;; trigger t",
+        "scoreboard objectives add t trigger ;; scoreboard players enable @s t ;; trigger t add 5",
+        "scoreboard objectives add t trigger ;; scoreboard players enable @s t ;; trigger t set -3",
+        "scoreboard objectives add t trigger ;; scoreboard players enable @s t ;; trigger t ;; trigger t",
+        "scoreboard objectives add t trigger ;; scoreboard players enable @s t ;; trigger t add 4 ;; scoreboard players enable @s t ;; trigger t add 6",
+        "scoreboard objectives add t trigger ;; scoreboard players enable @s t ;; scoreboard players enable @s t",
+        "scoreboard objectives add t trigger ;; scoreboard players set @s t 7 ;; trigger t",
+        "scoreboard objectives add t trigger ;; scoreboard players enable @s t ;; scoreboard players set @s t 7 ;; trigger t add 2",
+        "scoreboard objectives add t trigger ;; scoreboard players enable @s t ;; trigger t set 2147483647 ;; scoreboard players enable @s t ;; trigger t add 1",
+        "trigger result",
+        "trigger nope",
+        "scoreboard objectives add t trigger ;; scoreboard objectives add u trigger ;; scoreboard players enable @s t ;; trigger u",
+        "scoreboard objectives add t trigger ;; scoreboard players enable @s t ;; scoreboard players reset @s t ;; trigger t",
+        "scoreboard objectives add bow minecraft.used:minecraft.bow ;; !used bow 1 ;; !used bow 1 ;; !used egg 1",
+        "scoreboard objectives add a minecraft.used:minecraft.bow ;; scoreboard objectives add b minecraft.used:minecraft.bow ;; scoreboard objectives add c minecraft.used:minecraft.egg ;; !used bow 1",
+        "!used bow 1 ;; scoreboard objectives add bow minecraft.used:minecraft.bow ;; !used bow 1",
+        "scoreboard objectives add dealt minecraft.custom:minecraft.damage_dealt ;; !custom damage_dealt 35 ;; !custom damage_dealt 0 ;; !custom damage_dealt 7",
+        "scoreboard objectives add dealt minecraft.custom:minecraft.damage_dealt ;; !custom damage_dealt 0",
+        "scoreboard objectives add talk minecraft.custom:minecraft.talked_to_villager ;; scoreboard objectives add trade minecraft.custom:minecraft.traded_with_villager ;; !custom talked_to_villager 1 ;; !custom traded_with_villager 1 ;; !custom talked_to_villager 1",
+        "scoreboard objectives add fall minecraft.custom:minecraft.fall_one_cm ;; !custom fall_one_cm 312 ;; !custom aviate_one_cm 40",
+        "scoreboard objectives add rest minecraft.custom:minecraft.time_since_rest ;; !custom time_since_rest 9 ;; !reset time_since_rest",
+        "scoreboard objectives add rest minecraft.custom:minecraft.time_since_rest ;; !reset time_since_rest",
+        "scoreboard objectives add rest minecraft.custom:minecraft.time_since_rest ;; !reset time_since_death",
+        "scoreboard objectives add big minecraft.custom:minecraft.damage_dealt ;; scoreboard players set @s big 2147483647 ;; !custom damage_dealt 1",
+        "scoreboard objectives add all totalKillCount ;; scoreboard objectives add pk playerKillCount ;; scoreboard objectives add mobs minecraft.custom:minecraft.mob_kills ;; !killscore",
+        "scoreboard objectives add all totalKillCount ;; !killscore ;; !killscore",
+        "scoreboard objectives add cows minecraft.killed:minecraft.cow ;; scoreboard objectives add pigs minecraft.killed:minecraft.pig ;; !killed ;; !killed",
+        "scoreboard objectives add cows minecraft.killed:minecraft.cow ;; scoreboard objectives add all totalKillCount ;; !killscore ;; !killed",
+        "scoreboard objectives add red teamkill.red ;; scoreboard objectives add blue teamkill.blue ;; team add herd ;; team modify herd color red ;; team join herd @e[type=cow,limit=1,sort=nearest] ;; !killscore",
+        "scoreboard objectives add red teamkill.red ;; team add herd ;; team join herd @e[type=cow,limit=1,sort=nearest] ;; !killscore",
+        "scoreboard objectives add red teamkill.red ;; team add herd ;; team modify herd color red ;; team join herd @e[type=cow,limit=1,sort=furthest] ;; !killscore",
+        "scoreboard objectives add bow minecraft.used:minecraft.bow ;; scoreboard objectives modify bow displayautoupdate true ;; !used bow 1",
+        "scoreboard objectives add by minecraft.killed_by:minecraft.player ;; scoreboard objectives add by2 minecraft.killed_by:minecraft.zombie ;; scoreboard objectives list",
+        "scoreboard objectives add t trigger ;; scoreboard players enable @e[type=cow] t ;; scoreboard players set @e[type=cow,limit=1,sort=nearest] t 3",
+        "team add red ;; team join red @s ;; team join red Other ;; !teamsallow player other ;; !teamsallow other player",
+        "team add red ;; team join red @s ;; team join red Other ;; team modify red friendlyFire false ;; !teamsallow player other ;; !teamsallow other player ;; !teamsallow player player",
+        "team add red ;; team add blue ;; team join red @s ;; team join blue Other ;; team modify red friendlyFire false ;; team modify blue friendlyFire false ;; !teamsallow player other ;; !teamsallow other player",
+        "team add red ;; team join red @s ;; team modify red friendlyFire false ;; !teamsallow player other ;; !teamsallow other player",
+        "team add red ;; team join red @s ;; team join red @e[type=cow,limit=1,sort=nearest] ;; team modify red friendlyFire false ;; !teamsallow player cow ;; !teamsallow cow player ;; !teamsallow player far",
+        "team add red ;; team join red @s ;; team join red @e[type=cow,limit=1,sort=nearest] ;; !pushable player cow ;; !pushable far cow ;; !pushable cow far",
+        "team add red ;; team join red @s ;; team join red @e[type=cow,limit=1,sort=nearest] ;; team modify red collisionRule never ;; !pushable player cow ;; !pushable far cow ;; !pushable cow far",
+        "team add red ;; team add blue ;; team join red @s ;; team join blue @e[type=cow,limit=1,sort=nearest] ;; team modify red collisionRule never ;; !pushable player cow ;; !pushable far cow",
+        "team add red ;; team add blue ;; team join red @s ;; team join blue @e[type=cow,limit=1,sort=nearest] ;; team modify blue collisionRule never ;; !pushable player cow ;; !pushable far cow ;; !pushable cow far",
+        "team add red ;; team join red @s ;; team join red @e[type=cow,limit=1,sort=nearest] ;; team modify red collisionRule pushOtherTeams ;; !pushable player cow ;; !pushable far cow ;; !pushable cow far",
+        "team add red ;; team add blue ;; team join red @s ;; team join blue @e[type=cow,limit=1,sort=nearest] ;; team modify red collisionRule pushOtherTeams ;; !pushable player cow ;; !pushable far cow",
+        "team add red ;; team add blue ;; team join red @s ;; team join blue @e[type=cow,limit=1,sort=nearest] ;; team modify blue collisionRule pushOtherTeams ;; !pushable player cow ;; !pushable far cow ;; !pushable cow far",
+        "team add red ;; team join red @s ;; team join red @e[type=cow,limit=1,sort=nearest] ;; team modify red collisionRule pushOwnTeam ;; !pushable player cow ;; !pushable far cow ;; !pushable cow far",
+        "team add red ;; team add blue ;; team join red @s ;; team join blue @e[type=cow,limit=1,sort=nearest] ;; team modify red collisionRule pushOwnTeam ;; !pushable player cow ;; !pushable far cow",
+        "team add red ;; team add blue ;; team join red @s ;; team join blue @e[type=cow,limit=1,sort=nearest] ;; team modify blue collisionRule pushOwnTeam ;; !pushable player cow ;; !pushable far cow ;; !pushable cow far",
+        "team add red ;; team add blue ;; team join red @s ;; team join blue @e[type=cow,limit=1,sort=nearest] ;; team modify red collisionRule pushOwnTeam ;; team modify blue collisionRule pushOtherTeams ;; !pushable player cow",
+        "team add red ;; team join red @s ;; team join red @e[type=cow,limit=1,sort=nearest] ;; team modify red collisionRule pushOwnTeam ;; team leave @e[type=cow,limit=1,sort=nearest] ;; !pushable player cow",
+    };
+
     private ExecuteOracle() {
     }
 
@@ -183,7 +247,8 @@ public final class ExecuteOracle {
 
     private static void run(String[] args, PrintStream log) throws Exception {
         boolean advancementMode = args.length == 1 && args[0].equals("advancements");
-        if (args.length != 0 && !advancementMode) {
+        boolean scoreboardMode = args.length == 1 && args[0].equals("scoreboard");
+        if (args.length != 0 && !advancementMode && !scoreboardMode) {
             throw new IllegalArgumentException("unexpected arguments");
         }
         FileOutputStream stdout = new FileOutputStream(FileDescriptor.out);
@@ -204,6 +269,10 @@ public final class ExecuteOracle {
             if (advancementMode) {
                 for (String line : ADVANCEMENT_CASES) {
                     emitAdvancement(out, official, line);
+                }
+            } else if (scoreboardMode) {
+                for (String line : SCOREBOARD_CASES) {
+                    emitScoreboard(out, official, line);
                 }
             } else {
                 for (String line : SCENARIOS) {
@@ -289,6 +358,150 @@ public final class ExecuteOracle {
                 + ",\"result\":" + result
                 + ",\"feedback\":" + quote(String.join("|", feedback))
                 + ",\"done\":" + quote(String.join(",", done)) + "}\n");
+    }
+
+    /**
+     * 一道计分板题：逐步执行，输出每一步的反馈（展开文本）和最后整张计分板。
+     *
+     * One scoreboard case: run the steps, then emit every step's feedback (decomposed
+     * text) and the whole scoreboard at the end.
+     */
+    private static void emitScoreboard(Writer out, Official official, String line)
+            throws Exception {
+        Scene scene = new Scene(official, false);
+        // 队伍命令会 `getPlayerList().broadcastAll`：给一个没有玩家的名单。
+        // Team commands call `getPlayerList().broadcastAll`: give them an empty list.
+        var list = allocate(net.minecraft.server.dedicated.DedicatedPlayerList.class);
+        set(net.minecraft.server.players.PlayerList.class, list, "players",
+                new ArrayList<ServerPlayer>());
+        official.server.setPlayerList(list);
+        // `ServerPlayer.awardStat` 先写统计表再写计分板。
+        // `ServerPlayer.awardStat` writes the stats table before the scoreboard.
+        set(ServerPlayer.class, scene.player, "stats",
+                new net.minecraft.stats.ServerStatsCounter(official.server,
+                        java.nio.file.Path.of("scoreboard-oracle-no-such-stats.json")));
+        // 第二名玩家 `Other`：只用来问队伍规则，够 `getTeam()` 用就行。
+        // A second player `Other`, only asked about team rules; `getTeam()` is all it needs.
+        ServerPlayer other = allocate(ServerPlayer.class);
+        set(Entity.class, other, "level", scene.level);
+        set(Entity.class, other, "type", EntityTypes.PLAYER);
+        set(net.minecraft.world.entity.player.Player.class, other, "gameProfile",
+                new com.mojang.authlib.GameProfile(
+                        java.util.UUID.fromString("00000000-0000-0000-0000-000000000002"),
+                        "Other"));
+        List<String> feedback = new ArrayList<>();
+        CommandSourceStack source = scene.source.withSource(new Recording(feedback));
+        for (String step : line.split(" ;; ")) {
+            try {
+                if (step.startsWith("!")) {
+                    scoreboardOp(scene, other, feedback, step.substring(1).split(" "));
+                } else {
+                    official.commands.performCommand(
+                            official.commands.getDispatcher().parse(step, source), step);
+                }
+            } catch (Throwable error) {
+                feedback.add("L[throw:" + error.getClass().getSimpleName() + "]");
+                if (System.getenv("SCOREBOARD_ORACLE_DEBUG") != null) {
+                    System.err.println("step failed: " + step);
+                    error.printStackTrace(System.err);
+                }
+            }
+        }
+        out.write("{\"type\":\"scoreboard\",\"input\":" + quote(line)
+                + ",\"feedback\":" + quote(String.join("\n", feedback))
+                + ",\"scores\":" + quote(scoreDump(scene)) + "}\n");
+    }
+
+    /**
+     * 不经过命令、直接调官方方法的步骤：
+     * `used <物品> <次数>` 是 `awardStat(Stats.ITEM_USED.get(item), n)`；
+     * `custom <统计> <数量>` 是 `awardStat(Stats.CUSTOM.get(id), n)`；
+     * `reset <统计>` 是 `resetStat(Stats.CUSTOM.get(id))`；
+     * `killscore` 是 `ServerPlayer.awardKillScore(近处那头牛, null)`；
+     * `killed` 是 `Player.killedEntity(level, 近处那头牛, null)`；
+     * `teamsallow <甲> <乙>` 把 `甲.doTeamsAllowDamage(乙)` 的结果记进反馈
+     * （`Player.canHarmPlayer` 的全部内容）；
+     * `pushable <甲> <乙>` 把 `EntitySelector.pushableBy(甲).test(乙)` 的结果记进反馈。
+     * 实体名：`player`、`other`、`cow`（近处的牛）、`far`（远处的牛）。
+     *
+     * Steps that call official methods directly instead of running a command.
+     * `teamsallow a b` records `a.doTeamsAllowDamage(b)` (all of `Player.canHarmPlayer`)
+     * and `pushable a b` records `EntitySelector.pushableBy(a).test(b)`. Entity names:
+     * `player`, `other`, `cow` (the near cow) and `far` (the far cow).
+     */
+    private static void scoreboardOp(Scene scene, ServerPlayer other, List<String> feedback,
+            String[] words) {
+        ServerPlayer player = scene.player;
+        java.util.function.Function<String, Entity> named = name -> switch (name) {
+            case "player" -> scene.player;
+            case "other" -> other;
+            case "cow" -> scene.tracked.get(2);
+            case "far" -> scene.tracked.get(1);
+            default -> throw new IllegalArgumentException("unknown entity " + name);
+        };
+        // 离玩家近的那头牛（6.5, -60, 6.5）。
+        // The cow nearer to the player, at (6.5, -60, 6.5).
+        LivingEntity cow = (LivingEntity) scene.tracked.get(2);
+        switch (words[0]) {
+            case "used" -> player.awardStat(
+                    net.minecraft.stats.Stats.ITEM_USED.get(
+                            net.minecraft.core.registries.BuiltInRegistries.ITEM.getValue(
+                                    net.minecraft.resources.Identifier.withDefaultNamespace(words[1]))),
+                    Integer.parseInt(words[2]));
+            case "custom" -> player.awardStat(
+                    net.minecraft.stats.Stats.CUSTOM.get(customStat(words[1])),
+                    Integer.parseInt(words[2]));
+            case "reset" -> player.resetStat(
+                    net.minecraft.stats.Stats.CUSTOM.get(customStat(words[1])));
+            case "killscore" -> player.awardKillScore(cow, null);
+            case "killed" -> player.killedEntity(scene.level, cow, null);
+            case "teamsallow" -> feedback.add("L[teamsallow:"
+                    + named.apply(words[1]).doTeamsAllowDamage(named.apply(words[2])) + "]");
+            case "pushable" -> feedback.add("L[pushable:"
+                    + net.minecraft.world.entity.EntitySelector.pushableBy(named.apply(words[1]))
+                            .test(named.apply(words[2])) + "]");
+            default -> throw new IllegalArgumentException("unknown step " + words[0]);
+        }
+    }
+
+    /**
+     * `StatType` 按对象身份存统计，要拿注册表里那一个 `Identifier` 实例。
+     *
+     * `StatType` keys stats by identity, so use the registry's own `Identifier` instance.
+     */
+    private static net.minecraft.resources.Identifier customStat(String name) {
+        net.minecraft.resources.Identifier id =
+                net.minecraft.core.registries.BuiltInRegistries.CUSTOM_STAT.getValue(
+                        net.minecraft.resources.Identifier.withDefaultNamespace(name));
+        if (id == null) {
+            throw new IllegalArgumentException("unknown custom stat " + name);
+        }
+        return id;
+    }
+
+    /**
+     * 整张计分板：按目标名、再按持有者排序，每项是 `目标/持有者=分数/锁/显示名`。实体的
+     * 计分板名字是随机 UUID，两边不一样，统一写成 `<entity>`。
+     *
+     * The whole scoreboard sorted by objective and then holder; each entry is
+     * `objective/holder=score/lock/display`. An entity's scoreboard name is a random
+     * UUID that differs between the two sides, so it is written as `<entity>`.
+     */
+    private static String scoreDump(Scene scene) {
+        List<String> entries = new ArrayList<>();
+        for (Objective objective : scene.board.getObjectives()) {
+            for (var entry : scene.board.listPlayerScores(objective)) {
+                var info = scene.board.getPlayerScoreInfo(
+                        ScoreHolder.forNameOnly(entry.owner()), objective);
+                String owner = entry.owner().length() == 36 && entry.owner().charAt(8) == '-'
+                        ? "<entity>" : entry.owner();
+                entries.add(objective.getName() + "/" + owner + "=" + entry.value()
+                        + "/" + (info != null && info.isLocked() ? "L" : "U")
+                        + "/" + (entry.display() != null ? "D" : "-"));
+            }
+        }
+        java.util.Collections.sort(entries);
+        return String.join(";", entries);
     }
 
     private static void emit(Writer out, Official official, String line) throws Exception {
@@ -398,7 +611,8 @@ public final class ExecuteOracle {
                     decomposeInto(nested, out);
                 } else if (arg instanceof net.minecraft.network.chat.contents.PlainTextContents plain) {
                     out.append("L[").append(plain.text()).append(']');
-                } else if (mixed || key.equals("arguments.nbtpath.nothing_found")) {
+                } else if (mixed || key.equals("arguments.nbtpath.nothing_found")
+                        || key.equals("arguments.objective.notFound")) {
                     out.append("L[").append(String.valueOf(arg)).append(']');
                 } else {
                     out.append("S[").append(String.valueOf(arg)).append(']');
