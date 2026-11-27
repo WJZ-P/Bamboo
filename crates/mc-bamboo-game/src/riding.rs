@@ -25,7 +25,7 @@ use mc_bamboo_protocol::packet::play::MoveVehicle;
 
 use crate::{inbound::PlayerId, region::Region};
 
-mod dismount;
+pub(crate) mod dismount;
 
 /// 官方 `ServerGamePacketListenerImpl` 里和载具有关的那几个字段。
 ///

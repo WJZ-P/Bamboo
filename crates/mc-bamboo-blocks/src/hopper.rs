@@ -654,6 +654,34 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
     false
 }
 
+/// 官方 `HopperBlockEntity.getEntityContainer`（`EntitySelector.CONTAINER_ENTITY_SELECTOR`）：
+/// 收集 `cell` 内全部活着的容器实体（运输船、运输矿车、漏斗矿车），非空时用
+/// `level.getRandom().nextInt(size)` 随机挑一个（size 为 1 也要抽一次），
+/// 不能取最小 uid，否则世界随机源少抽一次。
+///
+/// Vanilla `HopperBlockEntity.getEntityContainer` (`EntitySelector.CONTAINER_ENTITY_SELECTOR`):
+/// collect every live container entity (chest boat, chest minecart, hopper minecart) overlapping
+/// `cell`, and when non-empty draw `level.getRandom().nextInt(size)` (even for size 1).
+fn pick_entity_container(world: &mut World, cell: Aabb, exclude: Option<i32>) -> Option<i32> {
+    let containers = world
+        .entity_ids()
+        .into_iter()
+        .filter(|&id| {
+            exclude != Some(id) && world.entity(id).is_some_and(|found| {
+                !found.removed
+                    && (matches!(&found.kind, EntityKind::Boat(data) if data.chest.is_some())
+                        || matches!(&found.kind, EntityKind::Minecart(cart) if cart.is_container()))
+                    && found.bounding_box().intersects(cell)
+            })
+        })
+        .collect::<Vec<_>>();
+    if containers.is_empty() {
+        return None;
+    }
+    let index = world.random().next_int(containers.len() as i32) as usize;
+    Some(containers[index])
+}
+
 /// `HopperBlockEntity.getSourceContainer` 的实体容器分支（官方
 /// `getEntityContainer` / `CONTAINER_ENTITY_SELECTOR`）：漏斗上方 1×1×1 内
 /// 活着的运输船或容器矿车。`ContainerEntity.getChestVehicleItem` /
@@ -677,14 +705,7 @@ fn suck_from_entity_container(
         f64::from(pos.y) + 2.0,
         f64::from(pos.z) + 1.0,
     );
-    let container_entity = world.entity_ids().into_iter().find(|&id| {
-        world.entity(id).is_some_and(|found| {
-            !found.removed
-                && (matches!(&found.kind, EntityKind::Boat(data) if data.chest.is_some())
-                    || matches!(&found.kind, EntityKind::Minecart(cart) if cart.is_container()))
-                && found.bounding_box().intersects(cell)
-        })
-    })?;
+    let container_entity = pick_entity_container(world, cell, None)?;
     // `unpackChestVehicleLootTable(null)`：漏斗读的是容器接口，没有玩家 / 幸运值。
     world.unpack_entity_container_loot_table(container_entity);
     let mut items = match world.entity(container_entity).map(|found| found.kind) {
@@ -846,16 +867,7 @@ fn suck_minecart_from_above(
         above_y + 0.5,
         pos.z + 0.5,
     );
-    let container_entity = world.entity_ids().into_iter().find(|&id| {
-        id != me_uid
-            && world.entity(id).is_some_and(|found| {
-                !found.removed
-                    && (matches!(&found.kind, EntityKind::Boat(data) if data.chest.is_some())
-                        || matches!(&found.kind, EntityKind::Minecart(cart) if cart.is_container()))
-                    && found.bounding_box().intersects(entity_cell)
-            })
-    });
-    if let Some(container_entity) = container_entity {
+    if let Some(container_entity) = pick_entity_container(world, entity_cell, Some(me_uid)) {
         world.unpack_entity_container_loot_table(container_entity);
         let mut items = match world.entity(container_entity).map(|found| found.kind) {
             Some(EntityKind::Boat(data)) => match data.chest {

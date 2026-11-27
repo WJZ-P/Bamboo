@@ -1023,17 +1023,27 @@ pub(crate) fn open_entity_container(region: &mut Region, id: PlayerId, entity: i
             mc_bamboo_blocks::entity::KindPublic::Boat(data)
                 if mc_bamboo_blocks::entity::boat::is_chest(data.entity_type) =>
             {
-                Some((ContainerKind::Chest, ContainerKind::Chest.title()))
+                // 官方菜单标题是船自己的显示名（`Entity.getDisplayName()` →
+                // `EntityType.getDescriptionId()`），不是 `container.chest`。
+                //
+                // The vanilla title is the boat's own display name (`Entity.getDisplayName()` →
+                // `EntityType.getDescriptionId()`), not `container.chest`.
+                Some((
+                    ContainerKind::Chest,
+                    mc_bamboo_blocks::entity::boat::display_name_key(data.entity_type),
+                ))
             }
             mc_bamboo_blocks::entity::KindPublic::Minecart(cart) => {
                 use mc_bamboo_blocks::entity::minecart::MinecartKind;
                 match MinecartKind::from_entity_type(cart.entity_type) {
-                    Some(MinecartKind::Chest) => {
-                        Some((ContainerKind::Chest, "entity.minecraft.chest_minecart"))
-                    }
-                    Some(MinecartKind::Hopper) => {
-                        Some((ContainerKind::Hopper, "entity.minecraft.hopper_minecart"))
-                    }
+                    Some(MinecartKind::Chest) => Some((
+                        ContainerKind::Chest,
+                        "entity.minecraft.chest_minecart".to_owned(),
+                    )),
+                    Some(MinecartKind::Hopper) => Some((
+                        ContainerKind::Hopper,
+                        "entity.minecraft.hopper_minecart".to_owned(),
+                    )),
                     _ => None,
                 }
             }

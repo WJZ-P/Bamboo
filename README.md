@@ -2055,13 +2055,6 @@ Not an official Minecraft product. Not approved by or associated with Mojang or 
 
 **已知限制**：
 
-- 玩家攻击伤害复用 `plan_attack`（对非生物目标的附魔加成按 0 处理）；玩家控制船时
-  位置由客户端 `move_vehicle` 决定，只比了校验（照现有马的做法），没有 Java 逐刻对拍。
-- 运输船菜单标题用 Bamboo 的 `container.chest`，不是官方的 `container.chestBoat`；
-  存档往返只验证 27 格物品 / 战利品表内容，没有逐键比官方 NBT 与 Bamboo 存档格式。
-- `getEntityContainer` 多个容器实体重叠时官方用 `level.random.nextInt` 随机选一个，
-  Bamboo 取最小实体 ID；漏斗实体容器路径没有接缓存录制 / 重放。
-- 甩下来的 mob 乘客落位用 blocks 层缺省的 `dismount_location`（载具 x / bb.maxY / z），
-  不是船专用 `getCollisionHorizontalEscapeVector` + `DismountHelper`；玩家侧走船专用落位。
-- 船之间的四点拴绳（`Leashable.supportQuadLeash`）、`isMobControlled()`（第一名乘客是
-  生物）仍未建模；`noCollision(AABB)` 和刷怪阻挡仍只看方块与硬碰撞实体，不含船。
+- 玩家控制船时位置由客户端 `move_vehicle` 决定，只比了校验（照现有马的做法），
+  没有 Java 逐刻对拍。
+- 漏斗实体容器路径没有接缓存录制 / 重放。

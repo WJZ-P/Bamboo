@@ -39,6 +39,27 @@ enum Line {
     Header(Header),
     Case(Box<Case>),
     End(End),
+    BoatFacts(Box<BoatFacts>),
+}
+
+/// 船第二期的静态事实：菜单标题、重叠容器随机抽、生物乘客落位、运输船整棵
+/// NBT 的官方 `saveWithoutId` → `load` → 再保存。
+///
+/// Boat facts: the menu title, the random overlap pick, a mob passenger's
+/// landing and the chest boat's official save/load/save NBT.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BoatFacts {
+    title: String,
+    entity_type: i32,
+    seed_before: i64,
+    seed_after: i64,
+    selected_item: i32,
+    land_x: i64,
+    land_y: i64,
+    land_z: i64,
+    nbt: String,
+    reloaded: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -341,6 +362,8 @@ struct Report {
     break_name: Option<String>,
     /// 当前这题是不是船场景：只比船和掉出的物品，乘客落位在别处同步。
     boat_only: bool,
+    /// 官方静态船事实行必须恰好出现一次。
+    boat_facts: bool,
 }
 
 struct PhysicsLevel {
@@ -519,6 +542,7 @@ pub fn run(mut command: Command, break_name: Option<&str>) -> Result<(), String>
         ended: false,
         break_name: break_name.map(str::to_owned),
         boat_only: false,
+        boat_facts: false,
     };
     let read = report.read(BufReader::new(stdout));
     if read.is_err() {
@@ -547,6 +571,11 @@ impl Report {
             match parsed {
                 Line::Header(header) => self.check_header(&header)?,
                 Line::Case(case) => self.replay(&case),
+                Line::BoatFacts(facts) => {
+                    self.boat_facts = true;
+                    self.cases += 1;
+                    self.replay_boat_facts(&facts);
+                }
                 Line::End(end) => {
                     self.ended = true;
                     if end.cases != self.cases {
@@ -1155,6 +1184,114 @@ impl Report {
         }
     }
 
+    /// 船第二期的四个静态事实逐项和官方比：标题翻译键、重叠容器的随机抽取、
+    /// 生物落位按原始位、运输船整棵 NBT 的键和值。
+    ///
+    /// Compare all four boat facts: translation key, random overlap pick and
+    /// landing doubles by raw bits, and the full chest-boat NBT tree.
+    fn replay_boat_facts(&mut self, facts: &BoatFacts) {
+        let official = match mc_bamboo_nbt::parse_snbt(&facts.nbt) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!(
+                    "boat facts: official NBT does not parse: {error:?}"
+                ));
+                return;
+            }
+        };
+        let reloaded = match mc_bamboo_nbt::parse_snbt(&facts.reloaded) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!(
+                    "boat facts: reloaded NBT does not parse: {error:?}"
+                ));
+                return;
+            }
+        };
+        if canonical_tag(&official) != canonical_tag(&reloaded) {
+            self.mismatch(format!(
+                "boat facts: official save/load changed the NBT: {} vs {}",
+                official.to_snbt(),
+                reloaded.to_snbt()
+            ));
+        }
+        let ours = match mc_bamboo_game::boat_facts::replay_boat_facts(&facts.nbt, 7) {
+            Ok(sample) => sample,
+            Err(error) => {
+                self.mismatch(format!("boat facts: bamboo replay failed: {error}"));
+                return;
+            }
+        };
+        let ours_reloaded = match mc_bamboo_nbt::parse_snbt(&ours.reloaded) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!("boat facts: bamboo NBT does not parse: {error:?}"));
+                return;
+            }
+        };
+        let checks = [
+            ("title", facts.title.clone(), ours.title.clone()),
+            (
+                "entity type",
+                facts.entity_type.to_string(),
+                mc_bamboo_data::registries::entity_type::OAK_CHEST_BOAT.to_string(),
+            ),
+            (
+                "selected item",
+                facts.selected_item.to_string(),
+                ours.selected_item.to_string(),
+            ),
+            (
+                "random draw",
+                format!("{} -> {}", facts.seed_before, facts.seed_after),
+                format!("{} -> {}", ours.seed_before, ours.seed_after),
+            ),
+            ("land x", facts.land_x.to_string(), ours.land_x.to_string()),
+            ("land y", facts.land_y.to_string(), ours.land_y.to_string()),
+            ("land z", facts.land_z.to_string(), ours.land_z.to_string()),
+        ];
+        for (name, expected, actual) in checks {
+            self.steps += 1;
+            if expected != actual {
+                self.mismatch(format!(
+                    "boat facts {name}: official {expected}, bamboo {actual}"
+                ));
+            }
+        }
+        let expected = canonical_tag(&official);
+        let actual = canonical_tag(&ours_reloaded);
+        for key in [
+            "Air",
+            "Fire",
+            "Invulnerable",
+            "Items",
+            "Motion",
+            "OnGround",
+            "PortalCooldown",
+            "Pos",
+            "Rotation",
+            "UUID",
+            "fall_distance",
+        ] {
+            self.steps += 1;
+            let want = save_field(&expected, key);
+            let got = save_field(&actual, key);
+            if want != got {
+                self.mismatch(format!(
+                    "boat facts NBT {key}: official {want:?}, bamboo {got:?}"
+                ));
+            }
+        }
+        let want_keys = nbt_keys(&expected);
+        let got_keys = nbt_keys(&actual);
+        self.steps += 1;
+        if want_keys != got_keys {
+            self.mismatch(format!(
+                "boat facts NBT keys: official {want_keys:?}, bamboo {got_keys:?}"
+            ));
+        }
+    }
+
     fn mismatch(&mut self, message: String) {
         if self.mismatches.len() < 12 {
             self.mismatches.push(message);
@@ -1164,6 +1301,9 @@ impl Report {
     fn finish(self) -> Result<(), String> {
         if !self.ended {
             return Err("entity oracle stopped before the end line".to_owned());
+        }
+        if !self.boat_facts {
+            return Err("entity oracle did not report the boat facts".to_owned());
         }
         if let Some(name) = &self.break_name {
             if self.mismatches.is_empty() {
@@ -1218,6 +1358,43 @@ fn minecart_archive_roundtrip(world: &mut World, id: i32) {
 /// 运输船存档往返：和运输矿车走同一段读回逻辑。
 fn boat_archive_roundtrip(world: &mut World, boat: i32) {
     minecart_archive_roundtrip(world, boat);
+}
+
+/// 复合标签按键名排序，列表顺序保留；官方 `CompoundTag.toString()` 也按键排序。
+fn canonical_tag(tag: &Tag) -> Tag {
+    match tag {
+        Tag::Compound(entries) => {
+            let mut sorted: Vec<_> = entries
+                .iter()
+                .map(|(name, value)| (name.clone(), canonical_tag(value)))
+                .collect();
+            sorted.sort_by(|left, right| left.0.cmp(&right.0));
+            Tag::Compound(sorted)
+        }
+        Tag::List(items) => Tag::List(items.iter().map(canonical_tag).collect()),
+        other => other.clone(),
+    }
+}
+
+fn save_field<'a>(tag: &'a Tag, key: &str) -> Option<&'a Tag> {
+    match tag {
+        Tag::Compound(entries) => entries
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value),
+        _ => None,
+    }
+}
+
+fn nbt_keys(tag: &Tag) -> Vec<&str> {
+    match tag {
+        Tag::Compound(entries) => {
+            let mut keys: Vec<_> = entries.iter().map(|(name, _)| name.as_str()).collect();
+            keys.sort_unstable();
+            keys
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn entity_key(entity: &OfficialEntity) -> (String, i64, i64, i64, bool) {
