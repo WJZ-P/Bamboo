@@ -22,8 +22,9 @@ use mc_bamboo_blocks::{
 use mc_bamboo_data::{items, registries};
 use mc_bamboo_loot::{
     BlockDropParams, DamageSourceView, EntityDeathParams, EntityView, EquipmentSlot,
-    ExplorationMapRequest, ExplorationMapResult, LevelView, LootContainer, LootParams, LootStack,
-    LootTable, Position, RandomSequences, block_drops, enchantment_id,
+    ExplorationMapRequest, ExplorationMapResult, LevelView, LootContainer, LootContext,
+    LootFunction, LootParams, LootStack, LootTable, Position, RandomSequences, block_drops,
+    enchantment_id, item_id,
 };
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::components::{ComponentValue, defaults};
@@ -32,14 +33,14 @@ use serde_json::Value;
 
 use crate::oracle::collect_log;
 
-const USAGE: &str =
-    "usage: loot-oracle <java> [--explorer | --entity-table ID] [--cases N] [--seed S] [--show N]";
+const USAGE: &str = "usage: loot-oracle <java> [--functions | --explorer | --entity-table ID] [--cases N] [--seed S] [--show N]";
 const DEFAULT_SHOW: usize = 5;
 
 #[derive(Debug, Default)]
 struct Options {
     forwarded: Vec<String>,
     show: Option<usize>,
+    break_function_rng: bool,
 }
 
 impl Options {
@@ -54,6 +55,14 @@ impl Options {
                         .forwarded
                         .extend([arg.to_owned(), (*value).to_owned()]);
                 }
+                "--functions" => options.forwarded.extend([
+                    arg.to_owned(),
+                    crate::workspace_root()
+                        .join("tools/mc-bamboo-vanilla/java/loot-functions.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                ]),
+                "--break-function-rng" => options.break_function_rng = true,
                 "--explorer" => options.forwarded.push(arg.to_owned()),
                 "--show" => {
                     let value = args.next().ok_or(USAGE)?;
@@ -62,6 +71,13 @@ impl Options {
                 _ => return Err(USAGE.to_owned()),
             }
         }
+        if options.forwarded.iter().any(|arg| arg == "--functions")
+            && !options.forwarded.iter().any(|arg| arg == "--cases")
+        {
+            options
+                .forwarded
+                .extend(["--cases".to_owned(), "8".to_owned()]);
+        }
         Ok(options)
     }
 }
@@ -69,6 +85,10 @@ impl Options {
 #[derive(Debug, Deserialize)]
 struct Line {
     kind: String,
+    #[serde(default)]
+    scenario: String,
+    #[serde(default)]
+    patch: BTreeMap<String, Value>,
     #[serde(default)]
     block: Option<String>,
     #[serde(default)]
@@ -208,8 +228,20 @@ struct EntityJson {
     components: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Deserialize)]
+struct FunctionScenario {
+    name: String,
+    item: String,
+    #[serde(default)]
+    player: bool,
+    modifier: Value,
+}
+
 #[derive(Debug, Default)]
 struct Report {
+    functions: Vec<FunctionScenario>,
+    function: usize,
+    break_function_rng: bool,
     block: usize,
     chest: usize,
     entity: usize,
@@ -238,6 +270,9 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
 
     let mut report = Report {
         show: options.show.unwrap_or(DEFAULT_SHOW),
+        functions: serde_json::from_str(include_str!("../java/loot-functions.json"))
+            .map_err(|error| error.to_string())?,
+        break_function_rng: options.break_function_rng,
         ..Report::default()
     };
     let read = report.read_lines(BufReader::new(stdout));
@@ -282,6 +317,12 @@ impl Report {
                         self.chest += 1;
                     }
                 }
+                "function" => {
+                    self.function += 1;
+                    if let Err(error) = self.check_function(&case) {
+                        self.mismatch(format!("{} (seed {:?}): {error}", case.scenario, case.seed));
+                    }
+                }
                 "entity" => {
                     if !self.check_entity(&case) {
                         self.entity += 1;
@@ -289,6 +330,68 @@ impl Report {
                 }
                 other => return Err(format!("unknown loot oracle kind {other}")),
             }
+        }
+        Ok(())
+    }
+
+    fn check_function(&self, case: &Line) -> Result<(), String> {
+        let scenario = self
+            .functions
+            .iter()
+            .find(|scenario| scenario.name == case.scenario)
+            .ok_or_else(|| format!("unknown scenario: {}", case.scenario))?;
+        let item =
+            item_id(&scenario.item).ok_or_else(|| format!("unknown item: {}", scenario.item))?;
+        let modifier =
+            LootFunction::parse(&scenario.modifier).map_err(|error| error.to_string())?;
+        let random = LegacyRandom::new(parse_long(case.seed.as_deref(), "seed")?);
+        let mut entity = EntityView::new(registries::entity_type::PIG);
+        entity.components.insert(
+            "minecraft:custom_name".to_owned(),
+            Value::from("Oracle Pig"),
+        );
+        entity.is_living = true;
+        entity.equipment[EquipmentSlot::Mainhand.index()] = Some(LootStack::new(items::DIAMOND, 3));
+        entity.nbt = Some(Tag::Compound(vec![(
+            "CustomName".to_owned(),
+            Tag::String("Oracle Pig".to_owned()),
+        )]));
+        entity.components.insert(
+            "minecraft:pig/variant".to_owned(),
+            Value::from("minecraft:temperate"),
+        );
+        if scenario.player {
+            entity = EntityView::new(registries::entity_type::PLAYER);
+            entity.components.insert(
+                "minecraft:profile".to_owned(),
+                serde_json::json!({"id":[0,0,0,42],"name":"LootOracle"}),
+            );
+        }
+        let mut params = LootParams::new(0.0).with_origin(Position::new(0.0, 0.0, 0.0));
+        params.this_entity = Some(entity);
+        params.level = Some(&FlatLevel(false));
+        let context = LootContext::new(&params, &random);
+        let output = modifier
+            .apply(LootStack::new(item, 1), &context)
+            .map_err(|error| error.to_string())?;
+        if self.break_function_rng && case.scenario == "set_random_dyes" {
+            let _ = random.next_long();
+        }
+        let next = random.next_long();
+        let expected_next = parse_long(case.next_long.as_deref(), "nextLong")?;
+        if (output.item, output.count) != (case.tool_item, case.tool_count)
+            || output.components != case.patch
+            || next != expected_next
+        {
+            return Err(format!(
+                "item {} x{} / {} x{}; patch {:?} / {:?}; RNG {next} / {expected_next}",
+                output.item,
+                output.count,
+                case.tool_item,
+                case.tool_count,
+                output.components,
+                case.patch
+            ));
         }
         Ok(())
     }
@@ -741,12 +844,13 @@ impl Report {
             .map(String::as_str)
             .collect();
         let hidden = self.mismatches.len().saturating_sub(shown.len());
-        let compared = self.block + self.chest + self.entity;
+        let compared = self.block + self.chest + self.entity + self.function;
         println!(
-            "loot oracle: {compared} compared ({} block, {} chest, {} entity), {} excluded, {} skipped, {} mismatched",
+            "loot oracle: {compared} compared ({} block, {} chest, {} entity, {} function), {} excluded, {} skipped, {} mismatched",
             self.block,
             self.chest,
             self.entity,
+            self.function,
             self.excluded,
             self.skipped,
             self.mismatches.len()
@@ -951,6 +1055,26 @@ fn equipment_slot(name: &str) -> Result<EquipmentSlot, String> {
 struct FlatLevel(bool);
 
 impl LevelView for FlatLevel {
+    fn score(&self, holder: &str, objective: &str) -> Option<Option<i32>> {
+        Some((holder == "LootOracle" && objective == "oracle").then_some(6))
+    }
+
+    fn command_storage(&self, name: &str) -> Option<Tag> {
+        Some(Tag::Compound(if name == "minecraft:oracle" {
+            vec![("Counter".to_owned(), Tag::Long(4_294_967_301))]
+        } else {
+            Vec::new()
+        }))
+    }
+
+    fn environment_attribute(&self, name: &str, _: Option<(i32, i32, i32)>) -> Option<Value> {
+        match name {
+            "minecraft:visual/cloud_height" => Some(Value::from(2.5)),
+            "minecraft:gameplay/water_evaporates" => Some(Value::Bool(true)),
+            _ => None,
+        }
+    }
+
     fn is_loaded(&self, _x: i32, _y: i32, _z: i32) -> Option<bool> {
         Some(true)
     }
