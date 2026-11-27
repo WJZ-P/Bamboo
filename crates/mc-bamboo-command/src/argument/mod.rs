@@ -152,7 +152,9 @@ pub enum ArgumentType {
     ResourceOrTag {
         registry: &'static str,
     },
-    /// 官方 `HeightmapTypeArgument`：只解析名字。
+    /// 官方 `HeightmapTypeArgument`：只允许世界生成后保留的高度图。
+    ///
+    /// Vanilla `HeightmapTypeArgument`: only heightmaps kept after world generation.
     Heightmap,
     /// 官方 `SlotSourceArgument`：只解析槽位来源文本。
     SlotSource,
@@ -358,7 +360,16 @@ impl ArgumentType {
             Self::Swizzle => parse_swizzle(reader),
             Self::NbtPath => Ok(Value::String(reader.read_unquoted_string())),
             Self::ResourceOrTag { registry } => parse_resource_or_tag(reader, registry),
-            Self::Heightmap => Ok(Value::String(reader.read_unquoted_string())),
+            Self::Heightmap => {
+                let name = reader.read_unquoted_string();
+                if !mc_bamboo_data::heightmaps::TYPES
+                    .iter()
+                    .any(|kind| kind.keep_after_worldgen && kind.name.to_ascii_lowercase() == name)
+                {
+                    return Err(ParseError::text("argument.enum.invalid", name));
+                }
+                Ok(Value::String(name))
+            }
             // `ParserUtils.readWhile(reader, c -> c != ' ')`：`weapon.*` 这类名字
             // 带 `*`，不是普通标识符，官方读到空格为止，不用 unquoted 字符串规则。
             // `ParserUtils.readWhile(reader, c -> c != ' ')`: names such as

@@ -355,14 +355,11 @@ impl LevelView for CommandLevel<'_> {
     }
 
     /// `StructureManager.getStructureWithPieceAt(pos, structures).isValid()`：
-    /// 取该区块的 `STRUCTURE_REFERENCES`，逐个引用区块读结构起点，再按结构件包围盒
-    /// 判位置是否落在其中。名字直接比；结构标签没能从官方导出，遇到 `#标签` 返回
-    /// `None` 让上层报不支持。
+    /// 从已交付列读取结构引用和起点，测试各结构件的包围盒，不重新生成结构。
     ///
     /// `StructureManager.getStructureWithPieceAt(pos, structures).isValid()`:
-    /// read the chunk's `STRUCTURE_REFERENCES`, load each referenced chunk's start
-    /// and test the position against its piece boxes. Names match directly; structure
-    /// tags are not exported from vanilla, so a `#tag` returns `None` (unsupported).
+    /// read references and starts from delivered columns and test individual piece boxes
+    /// without regenerating structures.
     fn structure_with_piece_at(
         &self,
         x: i32,
@@ -373,30 +370,11 @@ impl LevelView for CommandLevel<'_> {
         if structures.iter().any(|name| name.starts_with('#')) {
             return None;
         }
-        let config = &self.region.global.world_gen;
-        let chunk = BlockPos::new(x, y, z).chunk();
-        let references =
-            crate::worldgen_structures::structure_references_stage(config, chunk.x, chunk.z)
-                .ok()?;
-        for (structure, keys) in &references {
-            if !structures.iter().any(|name| name == structure) {
-                continue;
-            }
-            for &packed in keys {
-                let (sx, sz) = crate::worldgen_structures::unpack_chunk_pos(packed);
-                let Ok(starts) = crate::worldgen_structures::structure_starts(config, sx, sz)
-                else {
-                    continue;
-                };
-                let Some(start) = starts.get(structure) else {
-                    continue;
-                };
-                if start.is_valid() && start.pieces.has_piece_at(x, y, z) {
-                    return Some(true);
-                }
-            }
-        }
-        Some(false)
+        Some(super::structure_predicate::matches(
+            &self.region.chunks,
+            BlockPos::new(x, y, z),
+            structures,
+        ))
     }
 
     fn score(&self, holder: &str, objective: &str) -> Option<Option<i32>> {
@@ -454,7 +432,11 @@ pub(crate) fn biome_at(region: &Region, pos: BlockPos) -> Option<i32> {
     let zoom_seed = mc_bamboo_worldgen::biome_manager::obfuscate_seed(region.global.seed);
     let (qx, qy, qz) =
         mc_bamboo_worldgen::biome_manager::fiddled_corner(zoom_seed, pos.x, pos.y, pos.z);
-    let cell = BlockPos::new(qx * 4, qy * 4, qz * 4);
+    let y = (qy * 4).clamp(
+        mc_bamboo_world::MIN_Y,
+        mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1,
+    );
+    let cell = BlockPos::new(qx * 4, y, qz * 4);
     region
         .chunks
         .biome_at(cell)

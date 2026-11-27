@@ -370,7 +370,7 @@ fn player_by_name(region: &Region, name: &str) -> Option<Target> {
         .map(|(id, _)| Target::Player(*id))
 }
 
-fn entity_by_uuid(region: &Region, uuid: uuid::Uuid) -> Option<Target> {
+pub(super) fn entity_by_uuid(region: &Region, uuid: uuid::Uuid) -> Option<Target> {
     let bytes = uuid.as_bytes();
     region
         .players

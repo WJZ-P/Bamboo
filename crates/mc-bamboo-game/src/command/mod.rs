@@ -58,6 +58,7 @@ pub(crate) mod select;
 pub(crate) mod slots;
 pub(crate) mod source;
 mod stopsound;
+mod structure_predicate;
 mod summon;
 mod team;
 mod teleport;

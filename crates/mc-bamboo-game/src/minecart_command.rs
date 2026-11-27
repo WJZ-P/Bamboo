@@ -167,6 +167,8 @@ pub(crate) fn perform(global: &mut Global, region: &mut Region, activation: Comm
         position: activation.position,
         yaw: activation.yaw,
         pitch: activation.pitch,
+        anchor: mc_bamboo_command::EntityAnchor::Feet,
+        eye_height: 0.0,
         entity: Some(source::Entity::World(activation.entity)),
     };
     let previous = OUTPUT.replace(Some(Output {

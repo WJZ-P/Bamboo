@@ -80,6 +80,10 @@ pub(crate) struct InventoryCursor {
 }
 
 impl InventoryCursor {
+    pub(crate) fn carried(&self) -> &ItemStack {
+        &self.carried
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             carried: ItemStack::empty(),

@@ -15,15 +15,21 @@
 
 use std::collections::BTreeMap;
 
-use mc_bamboo_blocks::entity::KindPublic;
+use mc_bamboo_blocks::entity::{EntityKind, KindPublic};
 use mc_bamboo_command::ItemPredicateInput;
-use mc_bamboo_core::Hand;
+use mc_bamboo_core::{BlockPos, Hand};
 use mc_bamboo_loot::LootStack;
 use mc_bamboo_protocol::item::ItemStack;
 use mc_bamboo_protocol::packet::play::EquipmentSlot as WireSlot;
 
 use crate::{
-    command::select::Target, interaction::level::game_stack_to_loot, inventory::menu_slot,
+    command::{
+        feedback::{CommandFail, fail_with},
+        select::Target,
+    },
+    container::{self, ContainerKind},
+    interaction::level::game_stack_to_loot,
+    inventory::menu_slot,
     region::Region,
 };
 
@@ -34,6 +40,8 @@ use crate::{
 const EQUIPMENT_IDS: [i32; 8] = [98, 99, 100, 101, 102, 103, 105, 106];
 
 /// `EquipmentSlot` 到 `SlotProvider` 的槽位编号，和 `SlotRanges` 的装备项一致。
+///
+/// Map `EquipmentSlot` to its `SlotProvider` id, as used by `SlotRanges`.
 fn slot_id(slot: WireSlot) -> i32 {
     match slot {
         WireSlot::MainHand => 98,
@@ -78,7 +86,7 @@ pub fn count_items(
         .filter_map(|id| slots.get(id))
         .filter(|stack| item_matches(predicate, stack))
         .map(|stack| stack.count)
-        .sum()
+        .fold(0, i32::wrapping_add)
 }
 
 /// `ItemPredicateArgument` 的结果只认物品或物品标签；用物品注册表 ID 直接比。
@@ -103,6 +111,45 @@ pub fn entity_slots(region: &Region, target: Target) -> BTreeMap<i32, LootStack>
         Target::Player(id) => player_slots(region, id),
         Target::World(uid) => world_slots(region, uid),
     }
+}
+
+/// `BlockItemAccessor.getContainer` 只读指定方块实体；双箱不合并。
+///
+/// `BlockItemAccessor.getContainer` reads only the addressed block entity, not a merged chest.
+pub(super) fn block_slots(
+    region: &mut Region,
+    pos: BlockPos,
+    ids: &[i32],
+    read_items: bool,
+) -> Result<BTreeMap<i32, LootStack>, CommandFail> {
+    let kind = container::kind_in(&region.chunks, pos)
+        .filter(|&kind| kind != ContainerKind::EnderChest)
+        .ok_or_else(|| {
+            fail_with(
+                "commands.item.source.not_a_container",
+                [pos.x.into(), pos.y.into(), pos.z.into()],
+            )
+        })?;
+    let slots = ids
+        .iter()
+        .copied()
+        .filter(|&id| (0..kind.slots() as i32).contains(&id));
+    if read_items && slots.clone().next().is_some() {
+        crate::container_loot::unpack_at(region, pos);
+    }
+    let entry = region.containers.get(&pos);
+    Ok(slots
+        .map(|id| {
+            let stack = if read_items {
+                entry
+                    .and_then(|entry| entry.slots.get(id as usize))
+                    .map_or_else(LootStack::empty, game_stack_to_loot)
+            } else {
+                LootStack::empty()
+            };
+            (id, stack)
+        })
+        .collect())
 }
 
 /// `Player.getSlot` 的覆盖：背包、末影箱、合成、光标和装备槽。
@@ -142,6 +189,11 @@ fn player_slots(region: &Region, id: crate::inbound::PlayerId) -> BTreeMap<i32, 
     for (index, stack) in player.ender_chest.slots.iter().take(27).enumerate() {
         out.insert(200 + index as i32, game_stack_to_loot(stack));
     }
+    let carried = region.menus.get(&id).map_or_else(
+        || player.inventory_cursor.carried(),
+        crate::menu::Menu::carried,
+    );
+    out.insert(499, game_stack_to_loot(carried));
     // `InventoryMenu.getCraftSlots()`：菜单槽 1..4。
     // `InventoryMenu.getCraftSlots()`: menu slots 1..4.
     for index in 0..4 {
@@ -153,25 +205,54 @@ fn player_slots(region: &Region, id: crate::inbound::PlayerId) -> BTreeMap<i32, 
     out
 }
 
-/// 世界实体的 `SlotProvider`：生物按 `LivingEntity.getSlot` 给出八个装备槽，
-/// `mob.equipment` 里非空的那几格覆盖进去；其它实体本实现还没有槽位数据。
+/// 世界实体的 `SlotProvider`：装备槽以及已建模的实体容器覆盖。
 ///
-/// The world entity's `SlotProvider`: mobs expose the eight `LivingEntity.getSlot`
-/// equipment slots, with the non-empty ones from `mob.equipment` filled in; other
-/// entities have no slot data here yet.
+/// World entity `SlotProvider`: equipment slots and modeled entity container overrides.
 fn world_slots(region: &Region, uid: i32) -> BTreeMap<i32, LootStack> {
     let Some(public) = region.entities.public_at(uid) else {
         return BTreeMap::new();
     };
-    let KindPublic::Mob(mob) = &public.kind else {
+    let slots = match &public.kind {
+        KindPublic::Mob(mob) => {
+            let mut out = EQUIPMENT_IDS
+                .into_iter()
+                .map(|id| (id, LootStack::empty()))
+                .collect::<BTreeMap<_, _>>();
+            out.extend(
+                mob.equipment
+                    .iter()
+                    .map(|(slot, stack)| (slot_id(*slot), game_stack_to_loot(stack))),
+            );
+            return out;
+        }
+        KindPublic::Item { stack, .. } => return single_stack(stack),
+        KindPublic::ItemFrame(frame) => return single_stack(&frame.item),
+        KindPublic::Arrow(_) | KindPublic::Boat(_) | KindPublic::Minecart(_) => {
+            region.entities.get(uid)
+        }
+        _ => None,
+    };
+    let Some(entity) = slots else {
         return BTreeMap::new();
     };
-    let mut out = BTreeMap::new();
-    for id in EQUIPMENT_IDS {
-        out.insert(id, LootStack::empty());
+    match entity.kind {
+        EntityKind::Arrow(arrow) => single_stack(&arrow.pickup_item),
+        EntityKind::Boat(boat) => boat
+            .chest
+            .map_or_else(BTreeMap::new, |chest| indexed(&chest.items)),
+        EntityKind::Minecart(cart) => indexed(&cart.items),
+        _ => BTreeMap::new(),
     }
-    for (slot, stack) in &mob.equipment {
-        out.insert(slot_id(*slot), game_stack_to_loot(stack));
-    }
-    out
+}
+
+fn single_stack(stack: &ItemStack) -> BTreeMap<i32, LootStack> {
+    BTreeMap::from([(0, game_stack_to_loot(stack))])
+}
+
+fn indexed(items: &[ItemStack]) -> BTreeMap<i32, LootStack> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(id, stack)| (id as i32, game_stack_to_loot(stack)))
+        .collect()
 }
