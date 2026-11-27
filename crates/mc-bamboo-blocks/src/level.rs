@@ -1523,6 +1523,13 @@ pub trait Level: LevelSideState + LevelEntities {
         None
     }
 
+    /// 计分板队伍的碰撞规则，0 为始终碰撞。
+    ///
+    /// Scoreboard team collision rule, with 0 for always.
+    fn team_collision_rule(&self, _index: u32) -> i32 {
+        0
+    }
+
     /// `getSkyDarken()`。天色由主控的时钟和天气发布，这一层只读快照。
     fn sky_darken(&self) -> i32 {
         0

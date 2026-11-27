@@ -199,6 +199,8 @@ public final class EntityOracle {
             cases += minecartHopperSuck(official, out);
             cases += minecartHopperLocked(official, out);
             cases += minecartChestSave(official, out);
+            cases += minecartAnimal(official, out, false);
+            cases += minecartAnimal(official, out, true);
             cases += boatStillWater(official, out);
             cases += boatIceSlide(official, out);
             cases += boatWaterCurrent(official, out);
@@ -1144,6 +1146,9 @@ public final class EntityOracle {
         int[][] chest = new int[0][];
         /** 地上物品实体：`[x, y, z, itemId, count]`。 */
         double[][] extras = new double[0][];
+        EntityType<? extends net.minecraft.world.entity.Mob> animal;
+        double animalX;
+        double animalZ;
         Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
     }
 
@@ -1364,6 +1369,18 @@ public final class EntityOracle {
         return playMinecart(official, out, spec);
     }
 
+    private static int minecartAnimal(Official official, Writer out, boolean board) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = board ? "minecart_board_pig" : "minecart_push_cow";
+        rails(spec, -4, 8, rail(RailShape.NORTH_SOUTH));
+        spec.animal = board ? EntityTypes.PIG : EntityTypes.COW;
+        spec.animalX = 0.5;
+        spec.animalZ = board ? 1.86 : 1.3;
+        spec.vz = board ? 0.3 : 0.06;
+        spec.ticks = 6;
+        return playMinecart(official, out, spec);
+    }
+
     /** 造一辆官方矿车、逐刻跑、把每刻的实体状态写成一题 case。 */
     private static int playMinecart(Official official, Writer out, MinecartSpec spec) throws Exception {
         FakeLevel level = FakeLevel.create(official, spec.levelSeed);
@@ -1398,6 +1415,15 @@ public final class EntityOracle {
             }
         }
         scene.active.add(cart);
+        if (spec.animal != null) {
+            var mob = spec.animal.create(level, EntitySpawnReason.COMMAND);
+            level.addFreshEntity(mob);
+            mob.setNoAi(true);
+            mob.setPos(spec.animalX, 64.0, spec.animalZ);
+            setRandom(mob, level.entitySeed(mob.getId()));
+            scene.active.add(mob);
+            scene.tickRiders = true;
+        }
         for (double[] extra : spec.extras) {
             scene.spawnItem(
                     extra[0],
@@ -1427,6 +1453,10 @@ public final class EntityOracle {
         out.write(",\"vx\":" + spec.vx + ",\"vy\":" + spec.vy + ",\"vz\":" + spec.vz);
         out.write(",\"saveAt\":" + spec.saveAt);
         out.write(",\"fuel\":" + spec.fuel + ",\"pushX\":" + spec.pushX + ",\"pushZ\":" + spec.pushZ);
+        if (spec.animal != null) {
+            out.write(",\"minecartAnimal\":{\"type\":" + BuiltInRegistries.ENTITY_TYPE.getId(spec.animal)
+                    + ",\"x\":" + spec.animalX + ",\"z\":" + spec.animalZ + "}");
+        }
         if (spec.chest.length > 0) {
             out.write(",\"chest\":[");
             for (int i = 0; i < spec.chest.length; i++) {
@@ -1767,6 +1797,7 @@ public final class EntityOracle {
         TouchPlayer player;
         boolean spectator;
         boolean ticked;
+        boolean tickRiders;
         /** 官方的 `spawnAtLocation` 已经设过拾取延迟；这一拍新生成的物品不用重取速度。 */
         boolean fallingDrops;
         /** 船场景：破坏后掉出的物品实体也要留在快照里（官方 `spawnAtLocation`）。 */
@@ -1884,9 +1915,15 @@ public final class EntityOracle {
             level.fresh.clear();
             snapshot.clear();
             for (Entity entity : ticking) {
-                if (!entity.isRemoved()) {
+                if (!entity.isRemoved() && (!tickRiders || !entity.isPassenger())) {
                     entity.commonTick();
                     entity.tick();
+                    if (tickRiders) {
+                        for (Entity rider : entity.getPassengers()) {
+                            rider.commonTick();
+                            rider.rideTick();
+                        }
+                    }
                 }
                 // 丢掉的实体这一拍还要留下位置，下一拍才从名单里消失。
                 // A discarded entity still reports its position for this tick.
@@ -2078,6 +2115,14 @@ public final class EntityOracle {
         // 矿车统一输出注册类型；容器矿车再和船共用一个 chest 字段，逐刻比较吸进去的 5 / 27 格。
         if (entity instanceof AbstractMinecart cart) {
             out.append(",\"entityType\":").append(BuiltInRegistries.ENTITY_TYPE.getId(cart.getType()));
+            out.append(",\"passengers\":[");
+            for (int i = 0; i < cart.getPassengers().size(); i++) {
+                if (i > 0) {
+                    out.append(',');
+                }
+                out.append(cart.getPassengers().get(i).getId());
+            }
+            out.append(']');
         }
         if (entity instanceof net.minecraft.world.entity.vehicle.minecart.AbstractMinecartContainer cart) {
             out.append(",\"chest\":[");

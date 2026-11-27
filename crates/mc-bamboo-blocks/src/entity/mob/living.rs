@@ -2900,32 +2900,40 @@ pub(crate) fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
 /// `LivingEntity.onClimbable`: a climbable block, or an open trapdoor over a matching
 /// ladder. Spiders override it to read their own climbing flag.
 pub(crate) fn on_climbable(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> bool {
-    if mob.mob_type.climbs_walls() {
-        return super::spider::on_climbable(mob);
+    let pos = me.block_position();
+    let climbing = is_climbing(mob.mob_type, mob.spider.climbing, pos, view);
+    if climbing
+        && !mob.mob_type.climbs_walls()
+        && view.block_state(pos).is_tagged(block_tags::CLIMBABLE)
+    {
+        mob.last_climbable_pos = Some(pos);
     }
-    // `AbstractHorse.onClimbable` 恒假，马科不爬梯子和藤蔓；`Phantom.onClimbable` 也恒假。
-    // `AbstractHorse.onClimbable` is always false; equines never climb ladders or vines.
-    // `Phantom.onClimbable` is always false as well.
-    if mob.mob_type.is_equine() || mob.mob_type == super::MobType::Phantom {
+    climbing
+}
+
+pub(in crate::entity) fn is_climbing(
+    kind: super::MobType,
+    climbing_walls: bool,
+    pos: BlockPos,
+    view: &dyn BlockView,
+) -> bool {
+    if kind.climbs_walls() {
+        return climbing_walls;
+    }
+    if kind.is_equine() || kind == super::MobType::Phantom {
         return false;
     }
-    let pos = me.block_position();
     let state = view.block_state(pos);
     if state.is_tagged(block_tags::CLIMBABLE) {
-        mob.last_climbable_pos = Some(pos);
         return true;
     }
     if state.is_a(mc_bamboo_data::BlockAncestor::TrapDoorBlock)
         && state.try_get(crate::state::OPEN) == Some(true)
     {
         let below = view.block_state(pos.below());
-        if below.is(mc_bamboo_data::blocks::LADDER)
+        return below.is(mc_bamboo_data::blocks::LADDER)
             && below.try_get(crate::state::HORIZONTAL_FACING)
-                == state.try_get(crate::state::HORIZONTAL_FACING)
-        {
-            mob.last_climbable_pos = Some(pos);
-            return true;
-        }
+                == state.try_get(crate::state::HORIZONTAL_FACING);
     }
     false
 }
@@ -3067,7 +3075,11 @@ fn jump_out_of_fluid(me: &mut Entity, mob: &Mob, view: &dyn BlockView, old_y: f6
 ///
 /// `Entity.getRootVehicle()`: walk `vehicle` links up to the topmost uid, stopping
 /// at a cycle. `isPassengerOfSameVehicle` compares these.
-fn root_vehicle(uid: EntityUid, vehicle: Option<EntityUid>, ctx: &dyn EntityCtx) -> EntityUid {
+pub(in crate::entity) fn root_vehicle(
+    uid: EntityUid,
+    vehicle: Option<EntityUid>,
+    ctx: &dyn EntityCtx,
+) -> EntityUid {
     let mut root = uid;
     let mut current = vehicle;
     let mut seen = 0_u32;
@@ -3106,6 +3118,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     };
     let bounds = me.bounding_box();
     let mut others = Vec::new();
+    let mut carts = Vec::new();
     // `IronGolem.doPush` 要看被推的是不是敌对生物，只有铁傀儡才记下对方的公开状态。
     // `IronGolem.doPush` checks whether the pushed mob is an enemy, so only iron golems
     // keep the other mob's public state.
@@ -3113,6 +3126,13 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let mut golem_pushed = Vec::new();
     // 上限下推到查询里：够数就停止枚举，塔场景不必把几百个候选全排一遍。
     ctx.pushable_others(bounds, remaining, &mut |other| {
+        if matches!(other.kind, KindPublic::Minecart(_))
+            && !other.removed
+            && root_vehicle(other.uid, other.vehicle, ctx) != my_root
+        {
+            carts.push(other.uid);
+            return true;
+        }
         if let KindPublic::Mob(public) = &other.kind
             && !other.removed
             && public.is_alive()
@@ -3148,7 +3168,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `maxEntityCramming` 的伤害判定用的是**没截断**的名单：Paper 的
     // `maxEntityCollisions` 不改这条规则。上限打开且名单可能被截断时才补一次
     // 完整计数（只有开着挤压伤害的场景才需要，塔压测把规则设成 0 就跳过）。
-    if others.is_empty() && players.is_empty() {
+    if others.is_empty() && players.is_empty() && carts.is_empty() {
         return;
     }
     let cramming = rules.max_entity_cramming;
@@ -3156,14 +3176,16 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // 绝大多数拥挤场景走这条快路径。
     let crowd = if cap == 0
         || cramming <= 0
-        || others.len() + players.len() > (cramming - 1).max(0) as usize
+        || others.len() + players.len() + carts.len() > (cramming - 1).max(0) as usize
     {
-        (others.len() + players.len()) as i32
+        (others.len() + players.len() + carts.len()) as i32
     } else {
         let mut count = 0;
         ctx.for_each_other_in(bounds, &mut |other| {
-            if matches!(&other.kind, KindPublic::Mob(public)
-                if !other.removed && public.is_alive() && public.mob_type.is_pushable())
+            if !other.removed
+                && (matches!(&other.kind, KindPublic::Mob(public)
+                if public.is_alive() && public.mob_type.is_pushable())
+                    || matches!(other.kind, KindPublic::Minecart(_)))
             {
                 count += 1;
             }
@@ -3232,6 +3254,11 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             me,
         );
         handled += 1;
+    }
+    for other in carts.into_iter().take(remaining.saturating_sub(handled)) {
+        ctx.emit(Command::PushMinecart { other }, me);
+        handled += 1;
+        mob.needs_sync = true;
     }
     mob.push_count = (tick, used.saturating_add(handled));
 }
@@ -4473,6 +4500,11 @@ pub(crate) fn tracker_for(trackers: &mut Vec<FluidTracker>, fluid: i32) -> usize
     trackers.len() - 1
 }
 
+pub(in crate::entity) fn is_sleeping_for_push(mob: &Mob) -> bool {
+    (mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping())
+        || (mob.mob_type == super::MobType::Villager && mob.villager.sleeping)
+}
+
 /// [`Command::PushMob`] 的落地：`other.push(me)`，对方先被推开，自己再被推回来。
 pub(crate) fn apply_push(
     me: &mut Entity,
@@ -4487,12 +4519,17 @@ pub(crate) fn apply_push(
     };
     // `LivingEntity.push(Entity)`：睡着的（狐狸、村民）谁也推不动，也不把人推回去。
     // `LivingEntity.push(Entity)`: a sleeper (fox or villager) is not pushed and pushes nobody back.
-    if matches!(
-        &target.kind,
-        EntityKind::Mob(mob)
-            if (mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping())
-                || (mob.mob_type == super::MobType::Villager && mob.villager.sleeping)
-    ) {
+    if target
+        .kind
+        .mob()
+        .is_some_and(|mob| is_sleeping_for_push(mob))
+    {
+        return;
+    }
+    if matches!(target.kind, EntityKind::Minecart(_)) {
+        world.with_entity_mut(other, &mut |cart| {
+            crate::entity::minecart::push_minecart(cart, me);
+        });
         return;
     }
     let Some((dx, dz)) = push_amount(target.position, me.position) else {

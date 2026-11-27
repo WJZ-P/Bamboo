@@ -5,16 +5,18 @@
 //! Minecart entities, vanilla `AbstractMinecart` and its subclasses, moved by
 //! `OldMinecartBehavior`. The experimental `NewMinecartBehavior` is out of scope.
 
-use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Vec3, mth};
 use mc_bamboo_data::{BlockAncestor, blocks, items, registries::entity_type, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    BlockState,
+    Aabb, BlockState, World,
     entity::{
-        Entity, EntityKind, EntityUid, PrimedTnt,
+        Entity, EntityKind, EntityUid, KindPublic, PrimedTnt,
         ctx::{BlockView, Command, EntityCtx},
+        mob::{MobType, living},
     },
+    game_event::{GameEvent, dispatch::EventContext},
     state::{POWERED, RAIL_SHAPE, RailShape},
 };
 
@@ -292,17 +294,11 @@ impl MinecartPublic {
     }
 }
 
-/// `Entity.getPassengerAttachmentPoint` 的缺省值：矿车没有覆写（村民 / 流浪商人
-/// 走 `LOWERED_PASSENGER_ATTACHMENT` 零向量），玩家乘客落在车体高度上。
+/// 矿车注册时的乘客附着点，村民和流浪商人另走零向量。
 ///
-/// The default `Entity.getPassengerAttachmentPoint`: minecarts do not override it
-/// (villagers / wandering traders get the lowered zero vector), so a player
-/// passenger sits at the cart's height.
+/// The registered passenger anchor; villagers and wandering traders use zero.
 pub fn passenger_attachment_point() -> Vec3 {
-    let height = mc_bamboo_data::entity_types::FACTS
-        .get(entity_type::MINECART as usize)
-        .map_or(0.7_f32, |facts| facts.height);
-    Vec3::new(0.0, f64::from(height), 0.0)
+    Vec3::new(0.0, 0.1875, 0.0)
 }
 
 /// `OldMinecartBehavior` 的四个斜坡形状每刻加的速度；水里再乘 0.2。
@@ -573,14 +569,15 @@ fn start_from_conductor(ctx: &dyn BlockView, pos: BlockPos, shape: RailShape, v:
 }
 
 /// `OldMinecartBehavior.moveAlongTrack`。
-fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn BlockView) {
-    let pos = current_rail_pos(ctx, me.position);
-    let state = ctx.block_state(pos);
+fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn EntityCtx) {
+    let view = ctx.blocks();
+    let pos = current_rail_pos(view, me.position);
+    let state = view.block_state(pos);
     me.fall_distance = 0.0;
     let x0 = me.position.x;
     let y0 = me.position.y;
     let z0 = me.position.z;
-    let start = get_pos(ctx, x0, y0, z0);
+    let start = get_pos(view, x0, y0, z0);
     let mut rail_y = f64::from(pos.y);
     let is_powered_rail = state.is(blocks::POWERED_RAIL);
     let powered = is_powered_rail && state.try_get(POWERED).unwrap_or(false);
@@ -680,7 +677,7 @@ fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn BlockView) {
         0.0,
         (factor * v.z).clamp(-max, max),
     );
-    me.move_entity(ctx, movement);
+    move_minecart(me, cart, ctx, movement);
 
     if first[1] != 0
         && floor_i(me.position.x) - pos.x == first[0]
@@ -696,7 +693,7 @@ fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn BlockView) {
     me.delta = apply_natural_slowdown(me, cart, me.delta);
 
     if let (Some(snapped), Some(start)) = (
-        get_pos(ctx, me.position.x, me.position.y, me.position.z),
+        get_pos(view, me.position.x, me.position.y, me.position.z),
         start,
     ) {
         let extra = (start.y - snapped.y) * 0.05;
@@ -729,7 +726,7 @@ fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn BlockView) {
             // Vanilla uses `Vec3.add(x, 0, z)`: `-0.0 + 0.0` becomes a positive zero.
             me.delta = v.add(Vec3::new(v.x / speed * 0.06, 0.0, v.z / speed * 0.06));
         } else {
-            me.delta = start_from_conductor(ctx, pos, shape, v);
+            me.delta = start_from_conductor(view, pos, shape, v);
         }
     }
 }
@@ -737,7 +734,7 @@ fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn BlockView) {
 /// `AbstractMinecart.comeOffTrack`：出轨后的普通物理。
 ///
 /// `AbstractMinecart.comeOffTrack`: ordinary physics off the rails.
-fn come_off_track(me: &mut Entity, cart: &Minecart, ctx: &dyn BlockView) {
+fn come_off_track(me: &mut Entity, cart: &Minecart, ctx: &dyn EntityCtx) {
     let max = max_speed(me, cart);
     let v = me.delta;
     me.delta = Vec3::new(v.x.clamp(-max, max), v.y, v.z.clamp(-max, max));
@@ -745,10 +742,74 @@ fn come_off_track(me: &mut Entity, cart: &Minecart, ctx: &dyn BlockView) {
         me.delta = me.delta.scale(0.5);
     }
     let movement = me.delta;
-    me.move_entity(ctx, movement);
+    move_minecart(me, cart, ctx, movement);
     if !me.on_ground {
         me.delta = me.delta.scale(0.95);
     }
+}
+
+fn move_minecart(me: &mut Entity, cart: &Minecart, ctx: &dyn EntityCtx, movement: Vec3) {
+    let view = ctx.blocks();
+    let multiplier = me.stuck_speed_multiplier;
+    let swept = if multiplier.length_sqr() > 1.0e-7 {
+        movement.multiply(multiplier.x, multiplier.y, multiplier.z)
+    } else {
+        movement
+    };
+    let bounds = me
+        .bounding_box()
+        .expanded_towards(swept.x, swept.y, swept.z)
+        .inflate(1.0e-7, 1.0e-7, 1.0e-7);
+    let root = living::root_vehicle(me.id, me.vehicle, ctx);
+    let mut colliders = Vec::new();
+    ctx.for_each_other_in(bounds, &mut |other| {
+        let pushable = match &other.kind {
+            KindPublic::Mob(mob) => {
+                mob.is_alive()
+                    && mob.mob_type.is_pushable()
+                    && view.chunk_ticks_entities(ChunkPos::containing(
+                        other.position.x,
+                        other.position.z,
+                    ))
+                    && !living::is_climbing(
+                        mob.mob_type,
+                        mob.spider_flags != 0,
+                        other.block_position(),
+                        view,
+                    )
+            }
+            KindPublic::Boat(_) | KindPublic::Minecart(_) => true,
+            _ => false,
+        };
+        if pushable && !other.removed && living::root_vehicle(other.uid, other.vehicle, ctx) != root
+        {
+            colliders.push(other.bounding_box());
+        }
+    });
+    view.for_each_player(&mut |player| {
+        let bounds_player = player_bounds(player);
+        if player.alive
+            && !player.spectator
+            && bounds.intersects(bounds_player)
+            && !cart.passengers.contains(&player.uid)
+        {
+            colliders.push(bounds_player);
+        }
+    });
+    me.move_entity_with_colliders(view, movement, &colliders);
+}
+
+fn player_bounds(player: &super::ctx::PlayerView) -> Aabb {
+    let half = f64::from(player.width) * 0.5;
+    let p = player.position;
+    Aabb::new(
+        p.x - half,
+        p.y,
+        p.z - half,
+        p.x + half,
+        p.y + f64::from(player.height),
+        p.z + half,
+    )
 }
 
 /// `AbstractMinecart.tick`：`OldMinecartBehavior.tick` 的逐刻顺序。
@@ -780,13 +841,18 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     let state = blocks.block_state(pos);
     let on_rails = is_rail(state);
     cart.on_rails = on_rails;
+    let mut ejected = Vec::new();
     if on_rails {
-        move_along_track(me, &mut cart, ctx.blocks());
+        move_along_track(me, &mut cart, ctx);
         if state.is(blocks::ACTIVATOR_RAIL) {
-            activate_minecart(&mut cart, state.try_get(POWERED).unwrap_or(false));
+            let powered = state.try_get(POWERED).unwrap_or(false);
+            if powered && cart.kind().is_rideable() {
+                ejected = std::mem::take(&mut cart.passengers);
+            }
+            activate_minecart(&mut cart, powered);
         }
     } else {
-        come_off_track(me, &cart, ctx.blocks());
+        come_off_track(me, &cart, ctx);
     }
     let detectors = detector_rails(ctx.blocks(), me);
     me.apply_effects_from_blocks(ctx.blocks());
@@ -815,6 +881,15 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     for at in detectors {
         ctx.emit(Command::MinecartDetectorRail { pos: at }, me);
     }
+    if !ejected.is_empty() {
+        ctx.emit(
+            Command::MinecartEject {
+                passengers: ejected,
+            },
+            me,
+        );
+    }
+    ctx.emit(Command::MinecartPushAndPickup, me);
     tick_furnace(me);
     tick_tnt(me, ctx);
     // `MinecartHopper.tick` → `tryConsumeItems`：活着的、启用的漏斗矿车吸一次。
@@ -823,6 +898,245 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         if cart.kind() == MinecartKind::Hopper && cart.enabled && !me.removed);
     if hopper_ready {
         ctx.emit(Command::MinecartHopperSuck, me);
+    }
+}
+
+pub(super) fn push_and_pickup(me: &mut Entity, world: &mut World) {
+    let EntityKind::Minecart(cart) = &me.kind else {
+        return;
+    };
+    let fast =
+        cart.kind().is_rideable() && me.delta.x * me.delta.x + me.delta.z * me.delta.z >= 0.01;
+    let bounds = me
+        .bounding_box()
+        .inflate(f64::from(0.2_f32), 0.0, f64::from(0.2_f32));
+    let team = world
+        .level()
+        .entity_team(&crate::archive::entity_uuid(me.id).to_be_bytes());
+    let mut candidates = Vec::new();
+    world
+        .level()
+        .for_each_entity_in_section_order(bounds, &mut |other| {
+            if other.uid != me.id
+                && !other.removed
+                && (matches!(other.kind, KindPublic::Minecart(_))
+                    || fast && matches!(other.kind, KindPublic::Mob(_) | KindPublic::Boat(_)))
+            {
+                candidates.push(other.uid);
+            }
+        });
+    let root = root_vehicle(me, world);
+    for uid in candidates {
+        let Some(mut other) = world.level_mut().take_entity(uid) else {
+            continue;
+        };
+        let mounted = collide_with_entity(me, &mut other, fast, team, root, world);
+        world.level_mut().put_entity(other);
+        if mounted {
+            world.game_event(
+                GameEvent::EntityMount,
+                me.position,
+                EventContext {
+                    source_entity: Some(uid),
+                    ..EventContext::default()
+                },
+            );
+        }
+    }
+    if fast {
+        push_players(me, bounds, team, world);
+    }
+}
+
+fn collide_with_entity(
+    me: &mut Entity,
+    other: &mut Entity,
+    fast: bool,
+    team: Option<u32>,
+    root: EntityUid,
+    world: &World,
+) -> bool {
+    let EntityKind::Minecart(cart) = &mut me.kind else {
+        return false;
+    };
+    let other_cart = matches!(other.kind, EntityKind::Minecart(_));
+    if fast {
+        let uuid = other.kind.mob().map_or_else(
+            || crate::archive::entity_uuid(other.id).to_be_bytes(),
+            |mob| mob.uuid,
+        );
+        if !can_push_teams(team, world.level().entity_team(&uuid), world) {
+            return false;
+        }
+        if other.kind.mob().is_some() {
+            let pushable = world
+                .level()
+                .chunk_ticks_entities(ChunkPos::containing(other.position.x, other.position.z))
+                && other.with_mob(|entity, mob| {
+                    mob.health > 0.0
+                        && mob.mob_type.is_pushable()
+                        && !living::on_climbable(entity, mob, world)
+                }) == Some(true);
+            if !pushable {
+                return false;
+            }
+        }
+        if !other_cart
+            && !matches!(other.kind.mob(), Some(mob) if mob.mob_type == MobType::IronGolem)
+            && cart.passengers.is_empty()
+            && other.vehicle.is_none()
+        {
+            if other.boarding_cooldown <= 0 && other.id != root {
+                other.vehicle = Some(me.id);
+                super::riding::add_passenger(&mut cart.passengers, other.id, false);
+                return true;
+            }
+            return false;
+        }
+    }
+    if other_cart {
+        push_minecart(other, me);
+    } else if root_vehicle(other, world) != root {
+        let other_is_vehicle = match &other.kind {
+            EntityKind::Boat(boat) => {
+                if me.position.y > other.position.y {
+                    return false;
+                }
+                !boat.passengers.is_empty()
+            }
+            EntityKind::Mob(mob) => {
+                if mob.no_physics || living::is_sleeping_for_push(mob) {
+                    return false;
+                }
+                mob.is_vehicle()
+            }
+            _ => return false,
+        };
+        if let Some((dx, dz)) = living::push_amount(other.position, me.position) {
+            let push = Vec3::new(dx, 0.0, dz);
+            if !other_is_vehicle {
+                other.delta = other.delta.add(push.scale(-1.0));
+                other.with_mob(|_, mob| mob.needs_sync = true);
+            }
+            if cart.passengers.is_empty() {
+                me.delta = me.delta.add(push);
+            }
+        }
+    }
+    false
+}
+
+fn root_vehicle(entity: &Entity, world: &World) -> EntityUid {
+    let mut root = entity.id;
+    let mut current = entity.vehicle;
+    for _ in 0..64 {
+        let Some(uid) = current else { break };
+        root = uid;
+        current = world
+            .level()
+            .entity_public(uid)
+            .and_then(|vehicle| vehicle.vehicle);
+    }
+    root
+}
+
+fn can_push_teams(team: Option<u32>, other: Option<u32>, world: &World) -> bool {
+    let rule = team.map_or(0, |index| world.level().team_collision_rule(index));
+    let other_rule = other.map_or(0, |index| world.level().team_collision_rule(index));
+    let allied = team.is_some() && team == other;
+    [rule, other_rule].into_iter().all(|rule| match rule {
+        1 => false,
+        2 => allied,
+        3 => !allied,
+        _ => true,
+    })
+}
+
+fn push_players(me: &mut Entity, bounds: Aabb, team: Option<u32>, world: &mut World) {
+    let EntityKind::Minecart(cart) = &me.kind else {
+        return;
+    };
+    let mut players = Vec::new();
+    BlockView::for_each_player(world, &mut |player| {
+        if player.alive
+            && !player.spectator
+            && player_bounds(player).intersects(bounds)
+            && !cart.passengers.contains(&player.uid)
+            && can_push_teams(team, player.team, world)
+        {
+            players.push(*player);
+        }
+    });
+    for player in players {
+        if let Some((dx, dz)) = living::push_amount(player.position, me.position) {
+            let push = Vec3::new(dx, 0.0, dz);
+            if cart.passengers.is_empty() {
+                me.delta = me.delta.add(push);
+            }
+            world.push_player(player.uid, push.scale(-1.0));
+        }
+    }
+}
+
+/// `AbstractMinecart.push` 从碰撞对方发起，按被调用的矿车朝向门控。
+///
+/// `AbstractMinecart.push` runs on the contacted cart and checks that cart's heading.
+pub(super) fn push_minecart(cart: &mut Entity, other: &mut Entity) {
+    let EntityKind::Minecart(state) = &cart.kind else {
+        return;
+    };
+    if state.passengers.contains(&other.id) || other.kind.mob().is_some_and(|mob| mob.no_physics) {
+        return;
+    }
+    let offset = Vec3::new(
+        other.position.x - cart.position.x,
+        0.0,
+        other.position.z - cart.position.z,
+    );
+    let dist_sq = offset.length_sqr();
+    if dist_sq < f64::from(1.0e-4_f32) {
+        return;
+    }
+    let distance = dist_sq.sqrt();
+    let normal = Vec3::new(offset.x / distance, 0.0, offset.z / distance);
+    let scale = (1.0 / distance).min(1.0);
+    let push = normal.scale(scale).scale(f64::from(0.1_f32)).scale(0.5);
+    let EntityKind::Minecart(other_state) = &other.kind else {
+        cart.delta = cart.delta.add(Vec3::new(-push.x, 0.0, -push.z));
+        other.delta = other.delta.add(Vec3::new(push.x / 4.0, 0.0, push.z / 4.0));
+        other.with_mob(|_, mob| mob.needs_sync = true);
+        return;
+    };
+    let yaw = f64::from(cart.y_rot * 0.017_453_292_f32);
+    let facing = Vec3::new(f64::from(mth::cos(yaw)), 0.0, f64::from(mth::sin(yaw))).normalize();
+    if (normal.x * facing.x + normal.z * facing.z).abs() < f64::from(0.8_f32) {
+        return;
+    }
+    let a = cart.delta;
+    let b = other.delta;
+    match (state.kind().is_furnace(), other_state.kind().is_furnace()) {
+        (true, false) => {
+            cart.delta = a.multiply(0.95, 1.0, 0.95);
+            other.delta = b
+                .multiply(0.2, 1.0, 0.2)
+                .add(Vec3::new(a.x + push.x, 0.0, a.z + push.z));
+        }
+        (false, true) => {
+            cart.delta = a
+                .multiply(0.2, 1.0, 0.2)
+                .add(Vec3::new(b.x - push.x, 0.0, b.z - push.z));
+            other.delta = b.multiply(0.95, 1.0, 0.95);
+        }
+        _ => {
+            let x = (a.x + b.x) / 2.0;
+            let z = (a.z + b.z) / 2.0;
+            cart.delta = a
+                .multiply(0.2, 1.0, 0.2)
+                .add(Vec3::new(x - push.x, 0.0, z - push.z));
+            other.delta = b
+                .multiply(0.2, 1.0, 0.2)
+                .add(Vec3::new(x + push.x, 0.0, z + push.z));
+        }
     }
 }
 
@@ -919,7 +1233,6 @@ fn activate_minecart(cart: &mut Minecart, active: bool) {
             }
         }
         MinecartKind::Rideable if active => {
-            cart.passengers.clear();
             if cart.hurt_time == 0 {
                 cart.hurt_dir = -cart.hurt_dir;
                 cart.hurt_time = 10;
@@ -972,6 +1285,7 @@ mod tests {
     fn rider_intent_nudges_a_slow_cart_and_cancels_unpowered_rail_brake() {
         use crate::{
             BlockTicks, World,
+            game_event::{GameEvent, dispatch::EventContext},
             state::{POWERED, RAIL_SHAPE, RailShape},
             testing::TestLevel,
         };
@@ -1009,6 +1323,7 @@ mod tests {
     fn detector_rail_powers_reports_container_signal_and_resets_after_20_ticks() {
         use crate::{
             BlockTicks, World,
+            game_event::{GameEvent, dispatch::EventContext},
             state::{POWERED, RAIL_SHAPE, RailShape},
             testing::TestLevel,
         };

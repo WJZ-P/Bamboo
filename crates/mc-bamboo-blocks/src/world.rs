@@ -4760,9 +4760,14 @@ impl<'a> World<'a> {
     /// Drops a passenger from its vehicle's list; the passenger's own `vehicle`
     /// link is cleared by [`crate::entity::riding::dismount`].
     fn remove_passenger_from(&mut self, vehicle: EntityUid, passenger: EntityUid) {
-        self.level.with_just_spawned(vehicle, &mut |entity| {
-            entity.with_mob(|_, mob| mob.passengers.retain(|&id| id != passenger));
-        });
+        self.level
+            .with_just_spawned(vehicle, &mut |entity| match &mut entity.kind {
+                crate::entity::EntityKind::Mob(mob) => mob.passengers.retain(|&id| id != passenger),
+                crate::entity::EntityKind::Minecart(cart) => {
+                    cart.passengers.retain(|&id| id != passenger)
+                }
+                _ => {}
+            });
     }
 
     /// `setRemoved` / `ejectPassengers`：载具离场时把仍在表里的实体乘客摘掉，
@@ -4778,7 +4783,7 @@ impl<'a> World<'a> {
         self.eject_passenger_ids(&list);
     }
 
-    fn eject_passenger_ids(&mut self, list: &[EntityUid]) {
+    pub(crate) fn eject_passenger_ids(&mut self, list: &[EntityUid]) {
         for &passenger_id in list {
             if passenger_id < crate::entity::FIRST_ENTITY_ID {
                 // 玩家乘客由游戏层按官方 `getDismountLocationForPassenger` 落位；
@@ -5248,6 +5253,7 @@ pub(crate) fn traverse_blocks<T>(
 fn vehicle_passengers(vehicle: &EntityPublic) -> Option<Vec<EntityUid>> {
     match &vehicle.kind {
         KindPublic::Mob(mob) => Some(mob.passengers.clone()),
+        KindPublic::Minecart(cart) => Some(cart.passengers.clone()),
         _ => None,
     }
 }
@@ -5256,11 +5262,12 @@ fn vehicle_passengers(vehicle: &EntityPublic) -> Option<Vec<EntityUid>> {
 ///
 /// The passenger list in a full entity, used when a vehicle leaves.
 fn entity_passengers(vehicle: &Entity) -> Option<Vec<EntityUid>> {
-    vehicle
-        .kind
-        .mob()
-        .map(|mob| mob.passengers.clone())
-        .filter(|list| !list.is_empty())
+    let passengers = match &vehicle.kind {
+        crate::entity::EntityKind::Mob(mob) => &mob.passengers,
+        crate::entity::EntityKind::Minecart(cart) => &cart.passengers,
+        _ => return None,
+    };
+    (!passengers.is_empty()).then(|| passengers.clone())
 }
 
 /// 按 uid 升序的降频计划里取根实体的那一份；乘客跟根实体用同一档。

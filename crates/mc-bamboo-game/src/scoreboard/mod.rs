@@ -376,6 +376,12 @@ impl Scoreboard {
         self.team(name).map(|team| team.collision)
     }
 
+    pub(crate) fn team_collision_by_index(&self, index: u32) -> i32 {
+        self.teams
+            .get(index as usize)
+            .map_or(0, |team| team.collision)
+    }
+
     pub(crate) fn team_members(&self, name: &str) -> Option<&[String]> {
         self.team(name).map(|team| team.members.as_slice())
     }

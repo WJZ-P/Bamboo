@@ -69,6 +69,14 @@ struct Header {
 }
 
 #[derive(Debug, Deserialize)]
+struct MinecartAnimal {
+    #[serde(rename = "type")]
+    entity_type: i32,
+    x: f64,
+    z: f64,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Case {
     name: String,
@@ -146,6 +154,7 @@ struct Case {
     pickup_delay: Option<i32>,
     #[serde(default)]
     extras: Vec<ExtraItem>,
+    minecart_animal: Option<MinecartAnimal>,
     #[serde(default)]
     hopper: bool,
     /// 这一题里固定的移动活塞方块实体。官方场景不 tick 它们，形状每刻一样。
@@ -1070,6 +1079,25 @@ impl Report {
                 case.pickup_delay.unwrap_or(10),
             );
         }
+        if let Some(animal) = &case.minecart_animal {
+            use mc_bamboo_blocks::entity::mob::MobType;
+            use mc_bamboo_data::registries::entity_type::{COW, PIG};
+            let kind = match animal.entity_type {
+                COW => MobType::Cow,
+                PIG => MobType::Pig,
+                _ => {
+                    self.mismatch(format!("{}: unknown minecart animal", case.name));
+                    return;
+                }
+            };
+            let uid = world.spawn_entity(Entity::by_mob_type(
+                kind,
+                Vec3::new(animal.x, 64.0, animal.z),
+            ));
+            world.with_entity_mut(uid, &mut |entity| {
+                entity.with_mob(|_, mob| mob.no_ai = true);
+            });
+        }
         if case.steps.is_empty() {
             self.mismatch(format!("{}: no steps", case.name));
             return;
@@ -1080,7 +1108,12 @@ impl Report {
             if case.save_at >= 0 && index - 1 == case.save_at as usize {
                 minecart_archive_roundtrip(&mut world, id);
             }
-            let ticked = world.tick_entities_kept();
+            let ticked = if case.minecart_animal.is_some() {
+                world.tick_entities();
+                world.live_entities()
+            } else {
+                world.tick_entities_kept()
+            };
             self.steps += 1;
             self.compare_step(&case.name, index, &mut world, Some(&ticked), step, &hoppers);
             if self.mismatches.len() >= 12 {
@@ -1489,6 +1522,7 @@ fn boat_snapshot(entity: &Entity) -> BoatSnapshot {
         }
         EntityKind::Minecart(cart) => {
             result.entity_type = cart.entity_type;
+            result.passengers = cart.passengers.clone();
             if cart.is_container() {
                 for (slot, stack) in cart.items.iter().enumerate() {
                     if !stack.is_empty() {
