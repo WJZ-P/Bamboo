@@ -1020,6 +1020,11 @@ impl Report {
                         }
                     }
                 }
+                if self.break_name.as_deref() == Some("minecart-hopper-suck")
+                    && cart.kind() == mc_bamboo_blocks::entity::minecart::MinecartKind::Hopper
+                {
+                    cart.enabled = false;
+                }
             }
             if self.break_name.as_deref() == Some("minecart-onground") {
                 entity.on_ground = true;
