@@ -238,6 +238,27 @@ pub trait BlockSource: Sync {
         None
     }
 
+    /// 见 [`Level::team_collision_rule`](crate::Level::team_collision_rule)。
+    ///
+    /// See [`Level::team_collision_rule`](crate::Level::team_collision_rule).
+    fn team_collision_rule(&self, _index: u32) -> i32 {
+        0
+    }
+
+    /// 见 [`Level::team_collisions_restricted`](crate::Level::team_collisions_restricted)。
+    ///
+    /// See [`Level::team_collisions_restricted`](crate::Level::team_collisions_restricted).
+    fn team_collisions_restricted(&self) -> bool {
+        false
+    }
+
+    /// 见 [`Level::players_can_harm`](crate::Level::players_can_harm)。
+    ///
+    /// See [`Level::players_can_harm`](crate::Level::players_can_harm).
+    fn players_can_harm(&self, _attacker: Option<u32>, _target: Option<u32>) -> bool {
+        true
+    }
+
     /// 这片格子里有没有漏斗。默认按格读方块表；游戏层用预先拷出的位置集合覆盖它。
     /// 判定和 `World` 完全一致，所以两种视图、两种驱动发出的命令完全相同。
     fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {
@@ -536,6 +557,18 @@ impl<T: BlockSource> BlockView for SourceView<T> {
 
     fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
         self.0.entity_team(uuid)
+    }
+
+    fn team_collision_rule(&self, index: u32) -> i32 {
+        self.0.team_collision_rule(index)
+    }
+
+    fn team_collisions_restricted(&self) -> bool {
+        self.0.team_collisions_restricted()
+    }
+
+    fn players_can_harm(&self, attacker: Option<u32>, target: Option<u32>) -> bool {
+        self.0.players_can_harm(attacker, target)
     }
 
     fn world_border(&self) -> WorldBorder {

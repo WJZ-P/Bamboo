@@ -145,6 +145,10 @@ pub(crate) struct HurtParts<'a> {
     pub entities: &'a mut Entities,
     pub difficulty: i32,
     pub rules: &'a GameRuleSet,
+    /// 队伍规则：友军伤害和死亡消息可见性。
+    ///
+    /// Team rules: friendly fire and death message visibility.
+    pub scoreboard: &'a crate::scoreboard::Scoreboard,
     /// 正在 tick、不在实体表里的攻击者（精确驱动里打人的生物）。
     pub attacker: Option<&'a mc_bamboo_blocks::entity::EntityPublic>,
     /// 活着的玩家这次不当场补 `set_health`，留给同一刻随后的玩家阶段
@@ -168,6 +172,7 @@ impl Region {
             entities: &mut self.entities,
             difficulty: self.global.difficulty as i32,
             rules: &self.global.rules,
+            scoreboard: &self.global.scoreboard,
             attacker: None,
             defer_health: false,
             pending_triggers: Some(&mut self.pending_triggers),
@@ -361,6 +366,31 @@ fn hurt_player_damage(
     {
         return (false, None);
     }
+    // 官方 `ServerPlayer.hurtServer`：伤害来源的实体（箭的话是射手）是玩家，而且
+    // `canHarmPlayer` 为假时不受伤。`canHarmPlayer` 要 PVP 开着，并且
+    // `doTeamsAllowDamage` 放行；来源是自己时也照样判（同队不许友军伤害时，
+    // 自己的箭伤不到自己）。
+    //
+    // Official `ServerPlayer.hurtServer`: no damage when the source entity (the owner
+    // for an arrow) is a player and `canHarmPlayer` is false. `canHarmPlayer` needs PVP
+    // on and `doTeamsAllowDamage` to agree; a player is checked against itself too (in
+    // a team without friendly fire, its own arrow cannot hurt it).
+    let victim_name = player.name.clone();
+    let harmless = source
+        .attacker
+        .and_then(|uid| parts.players.get(&PlayerId(uid)))
+        .is_some_and(|attacker| {
+            !parts.rules.bool(mc_bamboo_data::gamerules::PVP)
+                || !parts
+                    .scoreboard
+                    .holders_allow_damage(&victim_name, &attacker.name)
+        });
+    if harmless {
+        return (false, None);
+    }
+    let Some(player) = parts.players.get_mut(&id) else {
+        return (false, None);
+    };
     // 官方 `Player.hurtServer` 在这两道判据之后、结算伤害之前无条件
     // `removeEntitiesOnShoulder()`：受伤立刻把肩上的鹦鹉放回世界。
     // Vanilla `Player.hurtServer` calls `removeEntitiesOnShoulder()` here,

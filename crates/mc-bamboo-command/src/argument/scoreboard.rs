@@ -330,9 +330,10 @@ fn stat_criteria(name: &str) -> Option<ObjectiveCriteria> {
         | "minecraft:picked_up"
         | "minecraft:dropped" => mc_bamboo_data::item_by_name(&value_id).is_some(),
         "minecraft:killed" | "minecraft:killed_by" => {
-            mc_bamboo_data::registries::entity_type::NAMES
-                .binary_search(&value_id.as_str())
-                .is_ok()
+            // 表按注册表 ID 排，不是按名字排（玩家和浮漂在最后），不能二分。
+            // The table is in registry id order, not name order (the player and the
+            // fishing bobber come last), so it cannot be binary searched.
+            mc_bamboo_data::registries::entity_type::NAMES.contains(&value_id.as_str())
         }
         "minecraft:custom" => value_id
             .strip_prefix("minecraft:")

@@ -1547,6 +1547,24 @@ pub trait Level: LevelSideState + LevelEntities {
         0
     }
 
+    /// 有没有队伍的碰撞规则不是「始终」。没有的话推挤不用查任何队伍。
+    ///
+    /// Whether any team has a collision rule other than "always". Without one,
+    /// pushing need not look up any team.
+    fn team_collisions_restricted(&self) -> bool {
+        false
+    }
+
+    /// 官方 `ServerPlayer.canHarmPlayer`：PVP 开着，并且 `doTeamsAllowDamage` 放行
+    /// （不同队，或者这一队允许友军伤害）。参数是两名玩家的队伍下标。
+    ///
+    /// Official `ServerPlayer.canHarmPlayer`: PVP is on and `doTeamsAllowDamage` agrees
+    /// (different teams, or the team allows friendly fire). The arguments are the two
+    /// players' team indexes.
+    fn players_can_harm(&self, _attacker: Option<u32>, _target: Option<u32>) -> bool {
+        true
+    }
+
     /// `getSkyDarken()`。天色由主控的时钟和天气发布，这一层只读快照。
     fn sky_darken(&self) -> i32 {
         0
@@ -3063,6 +3081,23 @@ pub enum Effect {
         uid: i32,
         position: mc_bamboo_core::Vec3,
         killer: Option<[u8; 16]>,
+    },
+    /// `LivingEntity.die` 里和玩家有关的两处记分：`getKillCredit().awardKillScore`
+    /// （`credit` 是最近打过它的玩家）和 `source.getEntity().killedEntity`（`blow` 是
+    /// 致命一击来自的玩家）。游戏层给这两名玩家记统计和计分板。
+    ///
+    /// The two player-related scores in `LivingEntity.die`:
+    /// `getKillCredit().awardKillScore` (`credit` is the player who last hurt it) and
+    /// `source.getEntity().killedEntity` (`blow` is the player the killing blow came
+    /// from). The game layer records stats and scoreboard scores for both.
+    KillScore {
+        credit: Option<[u8; 16]>,
+        blow: Option<EntityUid>,
+        /// 死者的实体类型注册表 ID。
+        ///
+        /// The victim's entity type registry id.
+        victim: i32,
+        victim_uuid: [u8; 16],
     },
     /// `Raid.setLeader(wave, raider)`：袭击者捡起灾厄旗帜后登记为这一波的队长。
     ///

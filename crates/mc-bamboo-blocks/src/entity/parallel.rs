@@ -640,6 +640,18 @@ impl BlockView for ParallelBlockView<'_> {
         self.inner.entity_team(uuid)
     }
 
+    fn team_collision_rule(&self, index: u32) -> i32 {
+        self.inner.team_collision_rule(index)
+    }
+
+    fn team_collisions_restricted(&self) -> bool {
+        self.inner.team_collisions_restricted()
+    }
+
+    fn players_can_harm(&self, attacker: Option<u32>, target: Option<u32>) -> bool {
+        self.inner.players_can_harm(attacker, target)
+    }
+
     fn sky_darken(&self) -> i32 {
         self.inner.sky_darken()
     }

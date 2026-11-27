@@ -297,6 +297,7 @@ pub(crate) fn parallel_entity_ticks(
             world_border: global.world_border.clone(),
             players: player_views,
             scoreboard: &global.scoreboard,
+            pvp: global.rules.bool(mc_bamboo_data::gamerules::PVP),
         });
         let owned_pool = match pool {
             Some(_) => None,
@@ -1016,6 +1017,14 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
             }
             Effect::RaidSetLeader { id, wave, leader } => {
                 crate::raid::set_leader(region, id, wave, leader);
+            }
+            Effect::KillScore {
+                credit,
+                blow,
+                victim,
+                victim_uuid,
+            } => {
+                crate::player_death::award_mob_kill(region, credit, blow, victim, victim_uuid);
             }
             Effect::BredAnimals {
                 father,

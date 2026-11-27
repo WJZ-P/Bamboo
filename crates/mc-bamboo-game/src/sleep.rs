@@ -12,13 +12,19 @@
 
 use mc_bamboo_blocks::BedProblem;
 use mc_bamboo_core::{BlockPos, Vec3};
-use mc_bamboo_data::gamerules;
+use mc_bamboo_data::{gamerules, registries::custom_stat};
 use mc_bamboo_protocol::{
     packet::play::{EntityData, Pose as EntityPose, SetEntityData},
     text::Component,
 };
 
-use crate::{inbound::PlayerId, links::encode_frames, region::Region, world_state::RespawnData};
+use crate::{
+    inbound::PlayerId,
+    item_use_stats::{ScoreChange, ScoreKey},
+    links::encode_frames,
+    region::Region,
+    world_state::RespawnData,
+};
 
 /// 官方 `Player.sleepCounter` 到 100 才算「睡够」。
 const DEEP_SLEEP_TICKS: i32 = 100;
@@ -196,6 +202,10 @@ pub(crate) fn on_sleep_in_bed(
         // `ServerPlayer.startSleeping`：`resetStat(TIME_SINCE_REST)` 清零。
         // `ServerPlayer.startSleeping`: `resetStat(TIME_SINCE_REST)` clears it.
         player.time_since_rest = 0;
+        player.item_use_stats.score(
+            ScoreKey::Custom(custom_stat::TIME_SINCE_REST),
+            ScoreChange::Reset,
+        );
         let now = region.tick;
         crate::movement::teleport(
             player,

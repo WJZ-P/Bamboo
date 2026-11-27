@@ -796,6 +796,7 @@ impl Region {
             raids: self.raids.clone(),
             clock_ticks: self.global.clock.total_ticks,
             scoreboard: &self.global.scoreboard,
+            pvp: self.global.rules.bool(mc_bamboo_data::gamerules::PVP),
             world_seed: self.global.seed,
             world_gen: &self.global.world_gen,
             block_change_stamp: &self.block_change_stamp,

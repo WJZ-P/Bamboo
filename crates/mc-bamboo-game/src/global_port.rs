@@ -80,6 +80,19 @@ pub(crate) enum GlobalEffect {
         name: String,
         changes: Vec<(usize, i32)>,
     },
+    /// 官方 `ServerPlayer.awardStat` / `resetStat` 和击杀、死亡事件对计分板的改动：
+    /// 岛按发生顺序记下，主控找出用这些准则的目标写进去。
+    ///
+    /// The scoreboard changes of official `ServerPlayer.awardStat` / `resetStat` and of
+    /// kill and death events: the island records them in order, the master writes the
+    /// objectives that use those criteria.
+    ScoreAwards {
+        name: String,
+        changes: Vec<(
+            crate::item_use_stats::ScoreKey,
+            crate::item_use_stats::ScoreChange,
+        )>,
+    },
     /// 玩家离开：广播「离开了游戏」。
     ///
     /// A player left: broadcast "left the game".
@@ -244,6 +257,17 @@ fn apply_on_master(global: &mut Global, region: &mut Region, effect: GlobalEffec
                 global
                     .scoreboard_mut()
                     .write_criteria(&name, &changes, region);
+                global.publish(region);
+            }
+        }
+        GlobalEffect::ScoreAwards { name, changes } => {
+            // 先只读地筛一遍：没有目标用到就不去复制计分板。
+            //
+            // Filter read-only first: without a matching objective the scoreboard is
+            // not copied.
+            let awards = global.scoreboard().used_awards(&changes);
+            if !awards.is_empty() {
+                global.scoreboard_mut().award(&name, &awards, region);
                 global.publish(region);
             }
         }

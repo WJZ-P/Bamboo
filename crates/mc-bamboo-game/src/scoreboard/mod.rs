@@ -8,8 +8,13 @@
 //! Nothing is saved. An objective is tracked only while it is displayed, and packet order
 //! follows `ServerScoreboard`.
 
+#[cfg(test)]
+mod award_tests;
 mod boss;
+mod death_message;
 mod format;
+#[cfg(test)]
+mod team_rule_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,16 +28,40 @@ use mc_bamboo_protocol::{
 
 use crate::{
     global_port::{GlobalEffect, GlobalPort},
+    item_use_stats::{ScoreChange, ScoreKey},
     links::encode_frames,
     region::Region,
 };
 
 #[allow(unused_imports)]
 pub(crate) use boss::{BossBars, BossColor, BossStyle};
+pub(crate) use death_message::broadcast_death_message;
 #[allow(unused_imports)]
 pub(crate) use format::{
     boss_name, format_green_names, format_list, format_player_names, objective_name, team_name,
 };
+
+/// 一条玩家死亡消息发给谁（官方 `Team.Visibility` 在 `ServerPlayer.die` 里的四个分支）。
+///
+/// Who receives one player death message (the four `Team.Visibility` branches of
+/// official `ServerPlayer.die`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeathAudience {
+    /// `PlayerList.broadcastSystemMessage`。
+    Everyone,
+    /// `hideForOtherTeams`，`PlayerList.broadcastSystemToTeam`：这一队里除死者以外的人。
+    ///
+    /// `hideForOtherTeams`, `PlayerList.broadcastSystemToTeam`: the team's members other
+    /// than the victim.
+    Team(String),
+    /// `hideForOwnTeam`，`PlayerList.broadcastSystemToAllExceptTeam`：不在这一队的人。
+    ///
+    /// `hideForOwnTeam`, `PlayerList.broadcastSystemToAllExceptTeam`: everyone outside
+    /// the team.
+    OtherTeams(String),
+    /// `never`。
+    Nobody,
+}
 
 /// 一次改分数时的记分板名字。`display` 只有在线玩家才有。
 ///
@@ -145,13 +174,14 @@ impl Team {
 }
 
 /// 官方 `ServerPlayer.doTick` 的六个只读准则，顺序是 health、food、air、armor、
-/// xp、level。前四项 Bamboo 还没有对应状态，用官方初值；后两项跟着玩家经验走。
-/// 官方对这两项取的是 `Mth.ceil((float) value)`，整数转成 float 再取整还是原值。
+/// xp、level，全都跟着玩家的真实状态走：生命加伤害吸收、饥饿值、氧气、
+/// `getArmorValue()`（盔甲属性向下取整）、总经验和等级。官方写进去的是
+/// `Mth.ceil((float) value)`。
 ///
 /// The six read-only criteria from official `ServerPlayer.doTick`: health, food,
-/// air, armor, xp, level. The first four still use the official defaults; the
-/// last two follow the player's experience. Official applies
-/// `Mth.ceil((float) value)`, which is the same integer for these int fields.
+/// air, armor, xp, level. All follow the player's live state: health plus absorption,
+/// the food level, the air supply, `getArmorValue()` (the floored armor attribute),
+/// total experience and the level. Official writes `Mth.ceil((float) value)`.
 /// 六个准则的名字，顺序和 `ServerPlayer.doTick` 一致。
 ///
 /// The six criteria names in `ServerPlayer.doTick` order.
@@ -163,13 +193,46 @@ pub(crate) fn criteria_values(player: &crate::player::Player) -> [(&'static str,
     // loses precision, so the int cannot be used directly.
     let ceil = |value: i32| (value as f32).ceil() as i32;
     [
-        (CRITERIA_NAMES[0], 20),
-        (CRITERIA_NAMES[1], 20),
-        (CRITERIA_NAMES[2], 300),
-        (CRITERIA_NAMES[3], 0),
+        (
+            CRITERIA_NAMES[0],
+            health_and_absorption(player).ceil() as i32,
+        ),
+        (CRITERIA_NAMES[1], ceil(player.health.food.food_level)),
+        (CRITERIA_NAMES[2], ceil(player.environment.air_supply)),
+        (CRITERIA_NAMES[3], ceil(armor_value(player))),
         (CRITERIA_NAMES[4], ceil(player.experience.total)),
         (CRITERIA_NAMES[5], ceil(player.experience.level)),
     ]
+}
+
+/// 官方 `getHealth() + getAbsorptionAmount()`，两个 float 相加。
+///
+/// Official `getHealth() + getAbsorptionAmount()`, a float sum.
+fn health_and_absorption(player: &crate::player::Player) -> f32 {
+    player.health.health + player.health.absorption
+}
+
+/// 官方 `LivingEntity.getArmorValue`：`Mth.floor(getAttributeValue(ARMOR))`。
+///
+/// Official `LivingEntity.getArmorValue`: `Mth.floor(getAttributeValue(ARMOR))`.
+fn armor_value(player: &crate::player::Player) -> i32 {
+    mc_bamboo_core::mth::floor(
+        player
+            .attributes
+            .value(mc_bamboo_data::registries::attribute::ARMOR),
+    )
+}
+
+/// 官方拿来和 `lastRecorded*` 比的值。生命那一项比的是 float 本身（这里存它的位），
+/// 不是取整以后的分数，所以 19.5 掉到 19.2 也会再写一次 20。
+///
+/// The values official compares with `lastRecorded*`. Health compares the float itself
+/// (its bits are stored here), not the rounded score, so a drop from 19.5 to 19.2 writes
+/// 20 once more.
+fn criteria_keys(player: &crate::player::Player) -> [i32; 6] {
+    let mut keys = criteria_values(player).map(|(_, value)| value);
+    keys[0] = health_and_absorption(player).to_bits() as i32;
+    keys
 }
 
 /// 官方 `ServerPlayer` 六个 `lastRecorded*` 字段的构造函数初值（`Float.MIN_VALUE` 和
@@ -178,7 +241,16 @@ pub(crate) fn criteria_values(player: &crate::player::Player) -> [(&'static str,
 /// The constructor defaults of the six official `ServerPlayer.lastRecorded*`
 /// fields (`Float.MIN_VALUE` / `Integer.MIN_VALUE`), so every criterion is written
 /// once on the first tick after join.
-pub(crate) const UNRECORDED_CRITERIA: [i32; 6] = [i32::MIN; 6];
+pub(crate) const UNRECORDED_CRITERIA: [i32; 6] = [
+    // `Float.MIN_VALUE` 的位。
+    // The bits of `Float.MIN_VALUE`.
+    1,
+    i32::MIN,
+    i32::MIN,
+    i32::MIN,
+    i32::MIN,
+    i32::MIN,
+];
 
 /// 官方 `ServerScoreboard`。重启后是空的。
 ///
@@ -380,6 +452,54 @@ impl Scoreboard {
         self.teams
             .get(index as usize)
             .map_or(0, |team| team.collision)
+    }
+
+    /// 有没有队伍的碰撞规则不是「始终」。
+    ///
+    /// Whether any team has a collision rule other than "always".
+    pub(crate) fn collisions_restricted(&self) -> bool {
+        self.teams.iter().any(|team| team.collision != 0)
+    }
+
+    /// 官方 `Entity.doTeamsAllowDamage`，队伍用下标：攻击方没有队伍，或者两边不同队，
+    /// 或者这一队允许友军伤害。
+    ///
+    /// Official `Entity.doTeamsAllowDamage` with teams by index: the attacker has no
+    /// team, the two are in different teams, or the team allows friendly fire.
+    pub(crate) fn teams_allow_damage(&self, attacker: Option<u32>, target: Option<u32>) -> bool {
+        let Some(team) = attacker else {
+            return true;
+        };
+        Some(team) != target
+            || self
+                .teams
+                .get(team as usize)
+                .is_none_or(|team| team.friendly_fire)
+    }
+
+    /// [`teams_allow_damage`](Self::teams_allow_damage)，两边用计分板名字。
+    ///
+    /// [`teams_allow_damage`](Self::teams_allow_damage) with both sides by scoreboard name.
+    pub(crate) fn holders_allow_damage(&self, attacker: &str, target: &str) -> bool {
+        self.membership.is_empty()
+            || self.teams_allow_damage(self.team_index_of(attacker), self.team_index_of(target))
+    }
+
+    /// 官方 `ServerPlayer.die` 里谁能在聊天栏看到死亡消息：死者没有队伍，或者队伍的
+    /// `deathMessageVisibility` 是 `always` 时是所有人。
+    ///
+    /// Who sees the death message in chat per official `ServerPlayer.die`: everyone when
+    /// the victim has no team or the team's `deathMessageVisibility` is `always`.
+    pub(crate) fn death_audience(&self, victim: &str) -> DeathAudience {
+        let Some(team) = self.team_of(victim).and_then(|name| self.team(name)) else {
+            return DeathAudience::Everyone;
+        };
+        match team.death_messages {
+            0 => DeathAudience::Everyone,
+            2 => DeathAudience::Team(team.name.clone()),
+            3 => DeathAudience::OtherTeams(team.name.clone()),
+            _ => DeathAudience::Nobody,
+        }
     }
 
     pub(crate) fn team_members(&self, name: &str) -> Option<&[String]> {
@@ -975,6 +1095,79 @@ impl Scoreboard {
         }
     }
 
+    /// 有没有目标用的是会被统计或击杀事件改写的准则。没有的话岛不用把变化交上来。
+    ///
+    /// Whether any objective uses a criterion that stat awards or kill events write.
+    /// Without one the island need not hand its changes over.
+    pub(crate) fn tracks_awards(&self) -> bool {
+        self.objectives.iter().any(|objective| {
+            !matches!(objective.criteria.as_str(), "dummy" | "trigger")
+                && !CRITERIA_NAMES.contains(&objective.criteria.as_str())
+        })
+    }
+
+    /// 这个名字所在队伍的颜色。没有队伍或者队伍没设颜色都是 `None`。
+    ///
+    /// The colour of the team this holder belongs to; `None` without a team or a colour.
+    pub(crate) fn team_color_of(&self, holder: &str) -> Option<u8> {
+        self.team(self.team_of(holder)?)?.color
+    }
+
+    /// 这一批变化里真的有目标在用的那些，准则名已经拼好。
+    ///
+    /// The changes of this batch that some objective actually uses, with the criterion
+    /// names built.
+    pub(crate) fn used_awards(
+        &self,
+        changes: &[(ScoreKey, ScoreChange)],
+    ) -> Vec<(String, ScoreChange)> {
+        changes
+            .iter()
+            .filter_map(|(key, change)| {
+                let criterion = key.criterion(|holder| self.team_color_of(holder))?;
+                self.objectives
+                    .iter()
+                    .any(|objective| objective.criteria == criterion)
+                    .then_some((criterion, *change))
+            })
+            .collect()
+    }
+
+    /// 官方 `Scoreboard.forAllObjectives(criteria, holder, operation)`：按目标创建顺序，
+    /// 对每个用这个准则的目标加分（`ScoreAccess.add`）或者清零（`ScoreAccess.reset`，
+    /// 就是 `set(0)`）。
+    ///
+    /// Official `Scoreboard.forAllObjectives(criteria, holder, operation)`: in objective
+    /// creation order, add to (`ScoreAccess.add`) or zero (`ScoreAccess.reset`, which is
+    /// `set(0)`) the score of every objective that uses the criterion.
+    pub(crate) fn award(
+        &mut self,
+        name: &str,
+        awards: &[(String, ScoreChange)],
+        region: &mut Region,
+    ) {
+        let holder = Holder {
+            name: name.to_owned(),
+            display: Some(self.format_player_name(name)),
+        };
+        for (criterion, change) in awards {
+            let objectives: Vec<String> = self
+                .objectives
+                .iter()
+                .filter(|objective| &objective.criteria == criterion)
+                .map(|objective| objective.name.clone())
+                .collect();
+            for objective in objectives {
+                match change {
+                    ScoreChange::Add(count) => {
+                        self.add_score(&holder, &objective, *count, region);
+                    }
+                    ScoreChange::Reset => self.write_forced(&holder, &objective, 0, region),
+                }
+            }
+        }
+    }
+
     fn update_team(&mut self, name: &str, region: &mut Region, change: impl FnOnce(&mut Team)) {
         let Some(team) = self.teams.iter_mut().find(|team| team.name == name) else {
             return;
@@ -1137,19 +1330,35 @@ impl Scoreboard {
 /// the scoreboard. `xp` / `level` follow the live experience.
 pub(crate) fn tick_criteria(port: &mut GlobalPort<'_>, region: &mut Region) {
     let mut effects = Vec::new();
+    let awards = region.global.scoreboard.tracks_awards();
     for player in region.players.values_mut() {
+        // 统计和击杀的加分在官方是当场写的，早于这一刻末尾的六个只读准则。
+        //
+        // Official writes stat and kill scores on the spot, before the six read-only
+        // criteria at the end of the tick.
+        if awards {
+            award_tick_stats(player);
+        }
+        let scores = player.item_use_stats.take_scores();
+        if awards && !scores.is_empty() {
+            effects.push(GlobalEffect::ScoreAwards {
+                name: player.name.clone(),
+                changes: scores,
+            });
+        }
         let values = criteria_values(player);
+        let keys = criteria_keys(player);
         let changes: Vec<(usize, i32)> = values
             .iter()
             .enumerate()
-            .filter(|(index, (_, value))| player.recorded_criteria[*index] != *value)
+            .filter(|(index, _)| player.recorded_criteria[*index] != keys[*index])
             .map(|(index, (_, value))| (index, *value))
             .collect();
         if changes.is_empty() {
             continue;
         }
-        for (index, value) in &changes {
-            player.recorded_criteria[*index] = *value;
+        for (index, _) in &changes {
+            player.recorded_criteria[*index] = keys[*index];
         }
         effects.push(GlobalEffect::Criteria {
             name: player.name.clone(),
@@ -1158,6 +1367,40 @@ pub(crate) fn tick_criteria(port: &mut GlobalPort<'_>, region: &mut Region) {
     }
     for effect in effects {
         port.submit(region, effect);
+    }
+}
+
+/// 官方 `ServerPlayer.doTick` 每刻加的五项时间统计，顺序照原样：`PLAY_TIME`、
+/// `TOTAL_WORLD_TIME`、活着时的 `TIME_SINCE_DEATH`、按着潜行键时的 `CROUCH_TIME`
+/// （注册名 `sneak_time`）、没在睡觉时的 `TIME_SINCE_REST`。Bamboo 不存这几项统计
+/// 本身（`TIME_SINCE_REST` 另有字段给幻翼用），这里只记计分板的加分，并且只在有目标
+/// 用统计类准则时才记。
+///
+/// The five time stats official `ServerPlayer.doTick` awards every tick, in its order:
+/// `PLAY_TIME`, `TOTAL_WORLD_TIME`, `TIME_SINCE_DEATH` while alive, `CROUCH_TIME`
+/// (registered as `sneak_time`) while the sneak key is down, `TIME_SINCE_REST` while not
+/// sleeping. Bamboo does not store these stats themselves (`TIME_SINCE_REST` has its own
+/// field for phantoms); only the score changes are recorded, and only while some
+/// objective uses a stat criterion.
+fn award_tick_stats(player: &mut crate::player::Player) {
+    use mc_bamboo_data::registries::custom_stat;
+
+    let alive = player.health.health > 0.0;
+    let sneaking = player.sync.shift_key_down;
+    let awake = player.sleep.is_none();
+    let stats = [
+        (custom_stat::PLAY_TIME, true),
+        (custom_stat::TOTAL_WORLD_TIME, true),
+        (custom_stat::TIME_SINCE_DEATH, alive),
+        (custom_stat::SNEAK_TIME, sneaking),
+        (custom_stat::TIME_SINCE_REST, awake),
+    ];
+    for (stat, applies) in stats {
+        if applies {
+            player
+                .item_use_stats
+                .score(ScoreKey::Custom(stat), ScoreChange::Add(1));
+        }
     }
 }
 
