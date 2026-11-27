@@ -409,6 +409,13 @@ fn spawn_egg_with(
             entity.with_mob(|_, mob| mob.uuid = uuid);
         }
     }
+    // 手里的刷怪蛋也带着缺省的 `entity_data`（只有 `id`），官方同样走一遍 `loadInto`，
+    // `setHealth` 把血量夹到 `finalizeSpawn` 之后的最大血量。两条路径都要夹。
+    //
+    // A hand-held egg also carries the default `entity_data` (just `id`), so vanilla runs
+    // `loadInto` too and `setHealth` clamps to the post-`finalizeSpawn` maximum. Clamp on
+    // both paths.
+    entity.with_mob(|_, mob| living::clamp_health(mob));
     let uid = world.add_prepared_entity(entity);
     world.finish_jockeys(uid);
     // `Mob.playAmbientSound`：放进世界之后叫一声，用生物自己的随机源取音高。
