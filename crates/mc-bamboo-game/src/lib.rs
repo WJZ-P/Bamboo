@@ -83,6 +83,10 @@ mod loot_stacks;
 pub mod map;
 mod menu;
 pub mod merchant;
+mod minecart_command;
+mod vehicle_display_name;
+#[cfg(feature = "oracle-samples")]
+pub use minecart_command::{CommandMinecartSample, replay_command_minecart};
 mod movement;
 mod natural_spawn;
 mod outgoing;

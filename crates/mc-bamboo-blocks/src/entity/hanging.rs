@@ -836,7 +836,7 @@ pub(crate) fn apply_drop_command(world: &mut World, me: &mut Entity, drop: Hangi
 }
 
 /// 给掉落的画或展示框物品附加上实体的 `CustomName`。
-fn item_with_custom_name(item: i32, custom_name: Option<&Tag>) -> ItemStack {
+pub(crate) fn item_with_custom_name(item: i32, custom_name: Option<&Tag>) -> ItemStack {
     let Some(name) = custom_name else {
         return ItemStack::new(item, 1);
     };

@@ -952,6 +952,10 @@ impl Level for RegionLevel<'_> {
         self.scoreboard.entity_team_index(uuid)
     }
 
+    fn team_collision_rule(&self, index: u32) -> i32 {
+        self.scoreboard.team_collision_by_index(index)
+    }
+
     fn inhabited_time(&self, chunk: mc_bamboo_core::ChunkPos) -> i64 {
         self.chunks.inhabited_time(chunk)
     }

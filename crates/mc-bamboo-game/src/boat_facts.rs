@@ -49,7 +49,18 @@ pub struct BoatFactsSample {
 }
 
 #[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Capture {
+    pub(crate) fn take(&self) -> Vec<u8> {
+        std::mem::take(
+            &mut *self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+}
 
 impl PlayerSink for Capture {
     fn send(&mut self, frames: Outgoing) -> bool {
@@ -121,7 +132,7 @@ pub fn replay_boat_facts(nbt: &str, seed: i64) -> Result<BoatFactsSample, String
         return Err("open_entity_container failed".to_owned());
     }
     region.links.flush();
-    let bytes = std::mem::take(&mut *capture.0.lock().unwrap());
+    let bytes = capture.take();
     let mut rest = bytes.as_slice();
     let mut title = None;
     while let Ok(Some(bounds)) = find_frame(rest, MAX_FRAME_LEN) {
@@ -204,4 +215,195 @@ pub fn replay_boat_facts(nbt: &str, seed: i64) -> Result<BoatFactsSample, String
             seed_after,
         })
     }
+}
+
+/// 命名载具放置、同步、存档和破坏的对拍字段。
+///
+/// Placement, metadata, saves and drops for a named vehicle.
+pub struct NamedVehicleSample {
+    /// 菜单标题。 / Menu title sent to the player.
+    pub title: Tag,
+    /// 放置后的存档。 / Save immediately after placement.
+    pub placed: Tag,
+    /// 设置显示名字后的存档。 / Save after enabling name visibility.
+    pub visible: Tag,
+    /// 读写往返后的存档。 / Save after loading the visible entity.
+    pub reloaded: Tag,
+    /// 同步的自定义名字。 / Synced custom name.
+    pub metadata_name: Tag,
+    /// 同步的名字可见性。 / Synced custom-name visibility.
+    pub metadata_visible: bool,
+    /// 掉出的载具物品 ID 与它的名字。 / Dropped item id and custom name.
+    pub drops: Vec<(i32, Option<Tag>)>,
+}
+
+/// 走实际物品入口放置载具，再打开容器、同步、存档并破坏。
+///
+/// Place a named vehicle through its normal item entry point and sample its behaviour.
+pub fn replay_named_vehicle(item: i32, name: &Tag) -> Result<NamedVehicleSample, String> {
+    use mc_bamboo_blocks::{BlockHit, InteractionResult};
+    use mc_bamboo_core::{Direction, Hand};
+    use mc_bamboo_data::{packets::play::clientbound, registries::data_component_type};
+    use mc_bamboo_protocol::components::{
+        ComponentPatch, ComponentValue, PatchEntry, cursor::Cursor, text::checked_component,
+    };
+
+    let mut region = Region::new(2, 20, false);
+    let id = PlayerId(1);
+    let mut player = Player::new(
+        id,
+        Uuid::from_u128(1),
+        "Witness".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 65.5, 16.5),
+    );
+    player.pitch = 90.0;
+    let mut patch = ComponentPatch::new();
+    let name = checked_component(name).ok_or("invalid custom name for named vehicle scene")?;
+    patch.put(
+        data_component_type::CUSTOM_NAME,
+        PatchEntry::Set(ComponentValue::CustomName(name)),
+    );
+    let (added, removed) = patch.to_opaque();
+    let stack = ItemStack {
+        item,
+        count: 1,
+        added,
+        removed,
+    };
+    let hand_slot = player.inventory.hand_slot(Hand::Main);
+    player.inventory.slots[hand_slot] = stack.clone();
+    let actor = crate::interaction::actor_of(&player, id);
+    region.insert_player(player);
+    let capture = Capture::default();
+    region.links.add(id, Box::new(capture.clone()));
+    let rail = BlockPos::new(0, 64, 16);
+    region.chunks.set_block(rail.below(), blocks::STONE);
+    let is_boat = item == items::OAK_CHEST_BOAT;
+    if !is_boat {
+        region.chunks.set_block(rail, blocks::RAIL);
+    }
+    let (mut level, ticks) = region.block_level();
+    let result = if is_boat {
+        mc_bamboo_blocks::use_item_with_stack(&mut level, ticks, &actor, Hand::Main, &stack)
+    } else {
+        mc_bamboo_blocks::use_item_on_with_stack(
+            &mut level,
+            ticks,
+            &actor,
+            Hand::Main,
+            &BlockHit {
+                pos: rail,
+                face: Direction::Up,
+                location: Vec3::new(0.5, 64.0625, 16.5),
+                inside: false,
+            },
+            &stack,
+        )
+    };
+    if result.result != InteractionResult::Success {
+        return Err("the named vehicle did not place".to_owned());
+    }
+    let uid = region
+        .entities
+        .ids()
+        .first()
+        .copied()
+        .ok_or("named vehicle is missing")?;
+    let saved = |region: &Region| {
+        let entity = region.entities.get(uid).ok_or("named vehicle is missing")?;
+        write_entity(&entity.split()).map_err(|error| error.to_string())
+    };
+    let placed = saved(&region)?;
+    if !crate::menu::open_entity_container(&mut region, id, uid) {
+        return Err("named vehicle menu did not open".to_owned());
+    }
+    region.links.flush();
+    let mut title = None;
+    let bytes = capture.take();
+    let mut rest = bytes.as_slice();
+    while let Ok(Some(bounds)) = find_frame(rest, MAX_FRAME_LEN) {
+        let end = bounds.header_len + bounds.payload_len;
+        let payload = &rest[bounds.header_len..end];
+        let (packet, offset) = decode_varint(payload).map_err(|error| format!("{error:?}"))?;
+        if packet == clientbound::OPEN_SCREEN {
+            let mut body = Cursor::new(&payload[offset..]);
+            body.varint().map_err(|error| format!("{error:?}"))?;
+            body.varint().map_err(|error| format!("{error:?}"))?;
+            title = Some(body.nbt_tag().map_err(|error| format!("{error:?}"))?);
+        }
+        rest = &rest[end..];
+    }
+    let title = title.ok_or("named vehicle menu title is missing")?;
+    region
+        .entities
+        .with_mut(uid, |entity| match &mut entity.kind {
+            EntityKind::Boat(boat) => boat.custom_name_visible = true,
+            EntityKind::Minecart(cart) => cart.custom_name_visible = true,
+            _ => {}
+        });
+    let visible = saved(&region)?;
+    let reloaded = read_entity(&visible, uid)
+        .map_err(|error| error.to_string())?
+        .ok_or("named vehicle did not load")?;
+    let snapshot = crate::entity_tracking::Snapshot::of(&reloaded.public);
+    let packets = region
+        .entity_tracking
+        .tracked_for_oracle(&snapshot)
+        .pairing_packets(&snapshot);
+    let mut metadata_name = None;
+    let mut metadata_visible = false;
+    for payload in packets {
+        let (packet, offset) = decode_varint(&payload).map_err(|error| format!("{error:?}"))?;
+        if packet != clientbound::SET_ENTITY_DATA {
+            continue;
+        }
+        let mut data = Cursor::new(&payload[offset..]);
+        data.varint().map_err(|error| format!("{error:?}"))?;
+        loop {
+            match data.bytes(1).map_err(|error| format!("{error:?}"))? {
+                [2] => {
+                    if data.varint() != Ok(6) || data.bool() != Ok(true) {
+                        return Err("unexpected custom name serializer or presence".to_owned());
+                    }
+                    metadata_name = Some(data.nbt_tag().map_err(|error| format!("{error:?}"))?);
+                }
+                [3] => {
+                    if data.varint() != Ok(8) {
+                        return Err("unexpected name visibility serializer".to_owned());
+                    }
+                    metadata_visible = data.bool().map_err(|error| format!("{error:?}"))?;
+                }
+                [255] => break,
+                index => return Err(format!("unexpected named vehicle metadata index {index:?}")),
+            }
+        }
+    }
+    let reloaded = write_entity(&reloaded).map_err(|error| error.to_string())?;
+    if is_boat {
+        crate::player_hurt::hurt_boat(&mut region, id, uid, 5.0);
+    } else {
+        crate::player_hurt::hurt_minecart(&mut region, id, uid, 5.0);
+    }
+    let drops = region
+        .entities
+        .iter()
+        .filter_map(|entity| {
+            let stack = &entity.ground()?.stack;
+            Some((
+                stack.item,
+                mc_bamboo_blocks::entity::hanging::stack_custom_name(stack),
+            ))
+        })
+        .collect();
+    Ok(NamedVehicleSample {
+        title,
+        placed,
+        visible,
+        reloaded,
+        metadata_name: metadata_name.ok_or("custom name metadata missing")?,
+        metadata_visible,
+        drops,
+    })
 }

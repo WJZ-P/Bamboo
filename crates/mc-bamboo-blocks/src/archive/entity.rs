@@ -127,6 +127,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 crate::entity::KindPublic::WindCharge(charge) => charge.pitch,
                 crate::entity::KindPublic::WitherSkull(skull) => skull.pitch,
                 crate::entity::KindPublic::FireworkRocket(firework) => firework.pitch,
+                crate::entity::KindPublic::Minecart(cart) => cart.pitch,
                 crate::entity::KindPublic::ItemFrame(frame) => frame.x_rot,
                 _ => 0.0,
             }),
@@ -802,6 +803,9 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                 {
                     let mut cart = crate::entity::minecart::Minecart::new(kind);
                     read_minecart_additional(tag, &mut cart);
+                    if rotation[1].is_finite() {
+                        cart.pitch = (rotation[1] % 360.0).clamp(-90.0, 90.0);
+                    }
                     EntityKind::Minecart(Box::new(cart))
                 } else {
                     return Ok(None);
@@ -974,6 +978,22 @@ fn read_entity_container_items(
     }
 }
 
+fn write_vehicle_name(out: &mut Vec<(String, Tag)>, name: Option<&Tag>, visible: bool) {
+    if let Some(name) = name {
+        put(out, "CustomName", name.clone());
+    }
+    if visible {
+        put(out, "CustomNameVisible", Tag::Byte(1));
+    }
+}
+
+fn read_vehicle_name(raw: &Tag) -> (Option<Tag>, bool) {
+    let name = tag::field(raw, "CustomName")
+        .and_then(mc_bamboo_protocol::components::text::checked_component)
+        .map(|name| name.tag().clone());
+    (name, tag::bool_or(raw, "CustomNameVisible", false))
+}
+
 /// 官方 `AbstractMinecart.addAdditionalSaveData` 和各子类的字段：`DisplayState` /
 /// `DisplayOffset` / `FlippedRotation` / `HasTicked`，TNT 的 `fuse` 与爆炸参数，
 /// 动力矿车的 `PushX` / `PushZ` / `Fuel`，漏斗矿车的 `Enabled`。
@@ -988,6 +1008,7 @@ fn write_minecart_additional(
 ) -> Result<()> {
     use crate::entity::minecart::MinecartKind;
     let kind = cart.kind();
+    write_vehicle_name(out, cart.custom_name.as_ref(), cart.custom_name_visible);
     if let Some(state) = cart.custom_display_block {
         put(out, "DisplayState", tag::encode_block_state(state));
     }
@@ -1017,6 +1038,12 @@ fn write_minecart_additional(
     if kind == MinecartKind::Hopper {
         put(out, "Enabled", Tag::Byte(i8::from(cart.enabled)));
     }
+    if let Some(command) = &cart.command_block {
+        command.write(out);
+    }
+    if let Some(spawner) = &cart.spawner {
+        out.extend(spawner.additional());
+    }
     if cart.is_container() {
         write_entity_container_items(
             out,
@@ -1035,6 +1062,7 @@ fn write_minecart_additional(
 fn read_minecart_additional(tag: &Tag, cart: &mut crate::entity::minecart::Minecart) {
     use crate::entity::minecart::MinecartKind;
     let kind = cart.kind();
+    (cart.custom_name, cart.custom_name_visible) = read_vehicle_name(tag);
     cart.custom_display_block =
         tag::field(tag, "DisplayState").and_then(|value| tag::decode_block_state(value).ok());
     cart.display_offset = tag::int_or(tag, "DisplayOffset", kind.default_display_offset());
@@ -1053,6 +1081,14 @@ fn read_minecart_additional(tag: &Tag, cart: &mut crate::entity::minecart::Minec
     }
     if kind == MinecartKind::Hopper {
         cart.enabled = tag::bool_or(tag, "Enabled", true);
+    }
+    if kind == MinecartKind::CommandBlock {
+        cart.command_block = Some(crate::entity::minecart::CommandBlock::read(tag));
+    }
+    if kind == MinecartKind::Spawner {
+        cart.spawner = Some(Box::new(
+            crate::behaviour::machines::spawner::BaseSpawner::read(tag),
+        ));
     }
     if cart.is_container() {
         read_entity_container_items(
@@ -1074,6 +1110,7 @@ fn write_boat_additional(
     boat: &crate::entity::boat::Boat,
     out: &mut Vec<(String, Tag)>,
 ) -> Result<()> {
+    write_vehicle_name(out, boat.custom_name.as_ref(), boat.custom_name_visible);
     let Some(chest) = &boat.chest else {
         return Ok(());
     };
@@ -1091,6 +1128,7 @@ fn write_boat_additional(
 /// Vanilla `AbstractChestBoat.readChestVehicleSaveData`: read `LootTable` /
 /// `LootTableSeed`, or `Items` when no table is set.
 fn read_boat_additional(tag: &Tag, boat: &mut crate::entity::boat::Boat) {
+    (boat.custom_name, boat.custom_name_visible) = read_vehicle_name(tag);
     let Some(chest) = &mut boat.chest else {
         return;
     };

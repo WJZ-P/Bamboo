@@ -278,7 +278,7 @@ fn state_at(region: &Region, pos: BlockPos) -> Option<BlockState> {
     region.chunks.block(pos).map(BlockState)
 }
 
-fn player_can_use(player: &crate::player::Player) -> bool {
+pub(crate) fn player_can_use(player: &crate::player::Player) -> bool {
     player.game_mode == mc_bamboo_protocol::packet::play::GameMode::Creative
         && player.permission_level >= mc_bamboo_command::permission::GAMEMASTERS
 }

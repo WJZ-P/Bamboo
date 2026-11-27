@@ -40,6 +40,48 @@ enum Line {
     Case(Box<Case>),
     End(End),
     BoatFacts(Box<BoatFacts>),
+    CommandMinecart(CommandMinecart),
+    SpawnerMinecart(Box<SpawnerMinecart>),
+    NamedVehicle(Box<NamedVehicle>),
+}
+
+#[derive(Debug, Deserialize)]
+struct CommandMinecart {
+    command: String,
+    steps: Vec<CommandMinecartStep>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommandMinecartStep {
+    nbt: String,
+    signal: i32,
+    chat: Vec<[String; 2]>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SpawnerMinecart {
+    before: String,
+    after: String,
+    mobs: Vec<[i64; 4]>,
+    blocks: Vec<[i32; 4]>,
+    seed: i64,
+    level_events: Vec<[i32; 5]>,
+    cart_events: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NamedVehicle {
+    item: i32,
+    name: String,
+    title: String,
+    placed: String,
+    visible: String,
+    reloaded: String,
+    metadata_name: String,
+    metadata_visible: bool,
+    drops: Vec<(i32, Option<String>)>,
 }
 
 /// 船第二期的静态事实：菜单标题、重叠容器随机抽、生物乘客落位、运输船整棵
@@ -66,6 +108,14 @@ struct BoatFacts {
 struct Header {
     version: String,
     protocol: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct MinecartAnimal {
+    #[serde(rename = "type")]
+    entity_type: i32,
+    x: f64,
+    z: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +196,8 @@ struct Case {
     pickup_delay: Option<i32>,
     #[serde(default)]
     extras: Vec<ExtraItem>,
+    minecart_animal: Option<MinecartAnimal>,
+    minecart_hopper_source: Option<[i32; 5]>,
     #[serde(default)]
     hopper: bool,
     /// 这一题里固定的移动活塞方块实体。官方场景不 tick 它们，形状每刻一样。
@@ -375,6 +427,7 @@ struct PhysicsLevel {
     block_events: BlockEvents,
     entities: Entities,
     containers: HashMap<BlockPos, Vec<ItemStack>>,
+    players: Vec<mc_bamboo_blocks::entity::ctx::PlayerView>,
 }
 
 impl PhysicsLevel {
@@ -388,6 +441,7 @@ impl PhysicsLevel {
             block_events: BlockEvents::default(),
             entities: Entities::new(),
             containers: HashMap::new(),
+            players: Vec::new(),
         }
     }
 
@@ -477,6 +531,10 @@ impl Level for PhysicsLevel {
 
     fn is_randomly_ticking_section(&self, _chunk: ChunkPos, _section_y: i32) -> bool {
         false
+    }
+
+    fn for_each_player(&self, visit: &mut dyn FnMut(&mc_bamboo_blocks::entity::ctx::PlayerView)) {
+        self.players.iter().for_each(visit);
     }
 
     fn any_player_close_enough_to(&self, _pos: BlockPos, _max_distance: i32) -> bool {
@@ -575,6 +633,18 @@ impl Report {
                     self.boat_facts = true;
                     self.cases += 1;
                     self.replay_boat_facts(&facts);
+                }
+                Line::CommandMinecart(scene) => {
+                    self.cases += 1;
+                    self.replay_command_minecart(&scene)?;
+                }
+                Line::SpawnerMinecart(scene) => {
+                    self.cases += 1;
+                    self.replay_spawner_minecart(&scene)?;
+                }
+                Line::NamedVehicle(scene) => {
+                    self.cases += 1;
+                    self.replay_named_vehicle(&scene)?;
                 }
                 Line::End(end) => {
                     self.ended = true;
@@ -1013,6 +1083,12 @@ impl Report {
             self.break_name.as_deref() == Some("minecart-blocks"),
         ))];
         level.place(blocks);
+        if let Some([x, y, z, item, count]) = case.minecart_hopper_source {
+            let pos = BlockPos::new(x, y, z);
+            level.with_container(pos, &mut |container| {
+                container.set(0, ItemStack::new(item, count));
+            });
+        }
         let mut ticks = BlockTicks::new();
         let mut world = World::new(&mut level, &mut ticks);
         let broken_kind = if self.break_name.as_deref() == Some("minecart-type") {
@@ -1070,17 +1146,50 @@ impl Report {
                 case.pickup_delay.unwrap_or(10),
             );
         }
+        if let Some(animal) = &case.minecart_animal {
+            use mc_bamboo_blocks::entity::mob::MobType;
+            use mc_bamboo_data::registries::entity_type::{COW, PIG};
+            let kind = match animal.entity_type {
+                COW => MobType::Cow,
+                PIG => MobType::Pig,
+                _ => {
+                    self.mismatch(format!("{}: unknown minecart animal", case.name));
+                    return;
+                }
+            };
+            let uid = world.spawn_entity(Entity::by_mob_type(
+                kind,
+                Vec3::new(animal.x, 64.0, animal.z),
+            ));
+            world.with_entity_mut(uid, &mut |entity| {
+                entity.with_mob(|_, mob| mob.no_ai = true);
+            });
+        }
         if case.steps.is_empty() {
             self.mismatch(format!("{}: no steps", case.name));
             return;
         }
-        let hoppers: Vec<BlockPos> = Vec::new();
+        let mut hoppers = Vec::new();
+        if let Some([x, y, z, _, _]) = case.minecart_hopper_source {
+            let pos = BlockPos::new(x, y, z);
+            world.set_block_entity(Box::new(HopperEntity::new(pos)));
+            hoppers.push(pos);
+        }
         self.compare_step(&case.name, 0, &mut world, None, &case.steps[0], &hoppers);
         for (index, step) in case.steps.iter().enumerate().skip(1) {
             if case.save_at >= 0 && index - 1 == case.save_at as usize {
                 minecart_archive_roundtrip(&mut world, id);
             }
-            let ticked = world.tick_entities_kept();
+            let mut ticked = if case.minecart_animal.is_some() {
+                world.tick_entities();
+                world.live_entities()
+            } else {
+                world.tick_entities_kept()
+            };
+            if !hoppers.is_empty() {
+                world.tick_block_entities();
+                refresh_after_hopper(&mut world, &mut ticked);
+            }
             self.steps += 1;
             self.compare_step(&case.name, index, &mut world, Some(&ticked), step, &hoppers);
             if self.mismatches.len() >= 12 {
@@ -1292,6 +1401,205 @@ impl Report {
         }
     }
 
+    fn replay_command_minecart(&mut self, scene: &CommandMinecart) -> Result<(), String> {
+        let steps = mc_bamboo_game::replay_command_minecart(&scene.command)?;
+        self.field("command minecart", "steps", scene.steps.len(), steps.len());
+        for (tick, (want, got)) in scene.steps.iter().zip(steps).enumerate() {
+            self.steps += 1;
+            let at = format!("command minecart step {tick}");
+            let nbt = mc_bamboo_nbt::parse_snbt(&want.nbt).map_err(|error| format!("{error:?}"))?;
+            for key in [
+                "Rotation",
+                "Command",
+                "SuccessCount",
+                "TrackOutput",
+                "LastOutput",
+                "UpdateLastExecution",
+                "LastExecution",
+            ] {
+                self.field(&at, key, save_field(&nbt, key), save_field(&got.nbt, key));
+            }
+            self.field(&at, "detector signal", want.signal, got.signal);
+            let chat = want
+                .chat
+                .iter()
+                .map(|[message, name]| {
+                    let message =
+                        mc_bamboo_nbt::parse_snbt(message).map_err(|error| format!("{error:?}"))?;
+                    let name =
+                        mc_bamboo_nbt::parse_snbt(name).map_err(|error| format!("{error:?}"))?;
+                    Ok::<_, String>((canonical_tag(&message), canonical_tag(&name)))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let got_chat: Vec<_> = got
+                .chat
+                .iter()
+                .map(|(message, name)| (canonical_tag(message), canonical_tag(name)))
+                .collect();
+            self.field(&at, "chat", chat, got_chat);
+        }
+        Ok(())
+    }
+
+    fn replay_spawner_minecart(&mut self, scene: &SpawnerMinecart) -> Result<(), String> {
+        use mc_bamboo_blocks::Effect;
+        use mc_bamboo_blocks::archive::{read_entity, write_entity};
+        use mc_bamboo_game::{ReplayPlayerSetup, ReplayPlayers};
+
+        let mut level = PhysicsLevel::new(1);
+        level.place(&scene.blocks);
+        level.players = ReplayPlayers::new(
+            2,
+            &[ReplayPlayerSetup {
+                id: 1,
+                uuid: 1,
+                name: "Witness".to_owned(),
+                position: Vec3::new(8.5, 64.0, 8.5),
+                health: 20.0,
+                seed: 1,
+                creative: false,
+            }],
+        )
+        .views();
+        let before =
+            mc_bamboo_nbt::parse_snbt(&scene.before).map_err(|error| format!("{error:?}"))?;
+        let after =
+            mc_bamboo_nbt::parse_snbt(&scene.after).map_err(|error| format!("{error:?}"))?;
+        let row = read_entity(&before, 0)
+            .map_err(|error| error.to_string())?
+            .ok_or("spawner cart did not load")?;
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let uid = world.spawn_entity(row.into_entity());
+        world.tick_entities();
+        self.steps += 1;
+        let saved = write_entity(&world.entity(uid).ok_or("spawner cart disappeared")?.split())
+            .map_err(|error| error.to_string())?;
+        let key_fields = |tag: &Tag, key| save_field(tag, key).map(canonical_tag);
+        for key in [
+            "Delay",
+            "SpawnCount",
+            "SpawnData",
+            "SpawnPotentials",
+            "MinSpawnDelay",
+            "MaxSpawnDelay",
+            "MaxNearbyEntities",
+            "RequiredPlayerRange",
+            "SpawnRange",
+        ] {
+            self.field(
+                "spawner minecart",
+                key,
+                key_fields(&after, key),
+                key_fields(&saved, key),
+            );
+        }
+        let mobs: Vec<_> = world
+            .live_entities()
+            .into_iter()
+            .filter_map(|entity| {
+                let mob = entity.kind.mob()?;
+                Some([
+                    i64::from(mob.mob_type.entity_type()),
+                    entity.position.x.to_bits() as i64,
+                    entity.position.y.to_bits() as i64,
+                    entity.position.z.to_bits() as i64,
+                ])
+            })
+            .collect();
+        self.field("spawner minecart", "spawned mobs", &scene.mobs, &mobs);
+        self.field(
+            "spawner minecart",
+            "world random",
+            scene.seed,
+            world.random().seed(),
+        );
+        let mut level_events = Vec::new();
+        let mut cart_events = Vec::new();
+        for effect in world.drain_effects() {
+            match effect {
+                Effect::LevelEvent {
+                    event, pos, data, ..
+                } => level_events.push([event, pos.x, pos.y, pos.z, data]),
+                Effect::EntityEvent { entity, event } if entity == uid => cart_events.push(event),
+                _ => {}
+            }
+        }
+        self.field(
+            "spawner minecart",
+            "level events",
+            &scene.level_events,
+            &level_events,
+        );
+        self.field(
+            "spawner minecart",
+            "cart events",
+            &scene.cart_events,
+            &cart_events,
+        );
+        Ok(())
+    }
+
+    fn replay_named_vehicle(&mut self, scene: &NamedVehicle) -> Result<(), String> {
+        fn parse(raw: &str) -> Result<Tag, String> {
+            mc_bamboo_nbt::parse_snbt(raw)
+                .map(|tag| canonical_tag(&tag))
+                .map_err(|error| format!("{error:?}"))
+        }
+        let at = format!("named vehicle item {}", scene.item);
+        let got =
+            mc_bamboo_game::boat_facts::replay_named_vehicle(scene.item, &parse(&scene.name)?)?;
+        self.steps += 1;
+        self.field(
+            &at,
+            "menu title",
+            parse(&scene.title)?,
+            canonical_tag(&got.title),
+        );
+        self.field(
+            &at,
+            "placed save",
+            parse(&scene.placed)?,
+            canonical_tag(&got.placed),
+        );
+        self.field(
+            &at,
+            "visible save",
+            parse(&scene.visible)?,
+            canonical_tag(&got.visible),
+        );
+        self.field(
+            &at,
+            "reloaded save",
+            parse(&scene.reloaded)?,
+            canonical_tag(&got.reloaded),
+        );
+        self.field(
+            &at,
+            "metadata name",
+            parse(&scene.metadata_name)?,
+            canonical_tag(&got.metadata_name),
+        );
+        self.field(
+            &at,
+            "metadata visible",
+            scene.metadata_visible,
+            got.metadata_visible,
+        );
+        let drops = scene
+            .drops
+            .iter()
+            .map(|(item, name)| Ok::<_, String>((*item, name.as_deref().map(parse).transpose()?)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let got_drops: Vec<_> = got
+            .drops
+            .iter()
+            .map(|(item, name)| (*item, name.as_ref().map(canonical_tag)))
+            .collect();
+        self.field(&at, "drops", drops, got_drops);
+        Ok(())
+    }
+
     fn mismatch(&mut self, message: String) {
         if self.mismatches.len() < 12 {
             self.mismatches.push(message);
@@ -1489,6 +1797,7 @@ fn boat_snapshot(entity: &Entity) -> BoatSnapshot {
         }
         EntityKind::Minecart(cart) => {
             result.entity_type = cart.entity_type;
+            result.passengers = cart.passengers.clone();
             if cart.is_container() {
                 for (slot, stack) in cart.items.iter().enumerate() {
                     if !stack.is_empty() {

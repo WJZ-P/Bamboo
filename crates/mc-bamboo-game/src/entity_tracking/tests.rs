@@ -97,17 +97,9 @@ fn minecart_syncs_vehicle_and_own_metadata() {
     );
 
     // 变回默认时发的默认值，运输矿车的展示偏移默认是 8。
-    let chest_public = mc_bamboo_blocks::entity::minecart::MinecartPublic {
-        entity_type: entity_type::CHEST_MINECART,
-        passengers: Vec::new(),
-        hurt_time: 0,
-        hurt_dir: 1,
-        damage: 0.0,
-        custom_display_block: None,
-        display_offset: 8,
-        has_fuel: false,
-        flipped: false,
-    };
+    let chest_public = mc_bamboo_blocks::entity::minecart::MinecartPublic::of(
+        &mc_bamboo_blocks::entity::minecart::Minecart::new(MinecartKind::Chest),
+    );
     assert_eq!(
         minecart_default_data(12, &chest_public),
         EntityData::MinecartDisplayOffset(8)

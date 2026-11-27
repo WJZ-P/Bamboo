@@ -14,6 +14,7 @@
 
 use mc_bamboo_core::{BlockPos, Direction, Vec3, mth};
 use mc_bamboo_data::{blocks, tags::fluid_tags};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -97,6 +98,10 @@ impl Default for ChestBoat {
 pub struct Boat {
     /// 注册表实体类型 ID，决定木种、是不是竹筏、是不是运输船。
     pub entity_type: i32,
+    /// 实体的可选自定义名。 / The entity's optional custom name.
+    pub custom_name: Option<Tag>,
+    /// 是否显示自定义名。 / Whether the name is visible.
+    pub custom_name_visible: bool,
     /// 乘客名单（玩家 ID 和生物 ID 混在一起，按上车顺序）。
     pub passengers: Vec<EntityUid>,
     /// `VehicleEntity.DATA_ID_HURT`。
@@ -154,6 +159,8 @@ impl Boat {
     pub fn new(entity_type: i32) -> Self {
         Self {
             entity_type,
+            custom_name: None,
+            custom_name_visible: false,
             passengers: Vec::new(),
             hurt_time: 0,
             hurt_dir: 1,
@@ -193,6 +200,13 @@ impl Boat {
     pub fn drop_item(&self) -> i32 {
         drop_item(self.entity_type)
     }
+
+    /// `VehicleEntity.destroy` 给掉落的载具物品写上实体名字。
+    ///
+    /// `VehicleEntity.destroy` copies the entity name onto the dropped vehicle item.
+    pub fn drop_stack(&self) -> ItemStack {
+        super::hanging::item_with_custom_name(self.drop_item(), self.custom_name.as_ref())
+    }
 }
 
 /// 别人读得到的那一半（同步和别的实体读），字段和 [`Boat`] 一一对应。
@@ -201,6 +215,10 @@ impl Boat {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoatPublic {
     pub entity_type: i32,
+    /// 实体的可选自定义名。 / The entity's optional custom name.
+    pub custom_name: Option<Tag>,
+    /// 是否显示自定义名。 / Whether the name is visible.
+    pub custom_name_visible: bool,
     pub passengers: Vec<EntityUid>,
     pub hurt_time: i32,
     pub hurt_dir: i32,
@@ -215,6 +233,8 @@ impl BoatPublic {
     pub fn of(boat: &Boat) -> Self {
         Self {
             entity_type: boat.entity_type,
+            custom_name: boat.custom_name.clone(),
+            custom_name_visible: boat.custom_name_visible,
             passengers: boat.passengers.clone(),
             hurt_time: boat.hurt_time,
             hurt_dir: boat.hurt_dir,
@@ -1133,7 +1153,10 @@ fn hurt_from_environment(boat: &mut Boat, me: &mut Entity, amount: f32, ctx: &mu
     if boat.damage <= 40.0 {
         return;
     }
-    let mut stacks = vec![ItemStack::new(boat.drop_item(), 1)];
+    let mut stacks = Vec::new();
+    if ctx.blocks().block_game_rules().entity_drops {
+        stacks.push(boat.drop_stack());
+    }
     if let Some(chest) = &boat.chest {
         stacks.extend(
             chest

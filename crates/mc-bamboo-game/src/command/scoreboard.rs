@@ -3,7 +3,7 @@
 //! 语法和反馈按官方 `ScoreboardCommand`：等级 2，`CommandResponseTracker` 按目标数量
 //! 选 single/multiple 的翻译键，目标只有被显示出来才开始广播包。
 
-use mc_bamboo_command::{ObjectiveCriteria, ParsedCommand, ScoreHolderSpec, Value, permission};
+use mc_bamboo_command::{ObjectiveCriteria, ParsedCommand, ScoreHolderSpec, Value};
 use mc_bamboo_protocol::{
     packet::play::NumberFormat,
     text::{Component, TranslateArg},
@@ -150,11 +150,7 @@ fn holders(
         .get(name)
         .and_then(Value::as_score_holder)
         .ok_or_else(|| fail("command.failed"))?;
-    let level = region
-        .players
-        .get(&id)
-        .map(|player| player.permission_level)
-        .unwrap_or(permission::ALL);
+    let level = super::source::level(region, id);
     let names = match spec {
         ScoreHolderSpec::Wildcard => global.scoreboard().tracked_players(),
         ScoreHolderSpec::Text(text) => vec![text.clone()],

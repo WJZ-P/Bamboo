@@ -3085,6 +3085,11 @@ impl World {
                     automatic,
                 },
             ),
+            PlayRequest::SetCommandMinecart {
+                entity_id,
+                command,
+                track_output,
+            } => crate::minecart_command::on_set(region, player, entity_id, command, track_output),
             PlayRequest::PlayerInput { flags } => {
                 entity_sync::on_player_input(region, player, flags);
             }
@@ -3755,7 +3760,16 @@ fn run_island_simulation(
     // pearl's own `ThrownEnderpearl.tick`.
     let vanish = region.entity_game_rules().ender_pearls_vanish_on_death;
     crate::ender_pearl::remove_dead_owners_pearls(region, vanish);
-    interaction::run_entity_ticks(entity_threads, region, entity_pool);
+    let activations = interaction::run_entity_ticks(entity_threads, region, entity_pool);
+    if !activations.is_empty() {
+        let mut port = match (port_mode, global.as_deref_mut()) {
+            (PortMode::Direct, Some(global)) => GlobalPort::Direct(global),
+            _ => GlobalPort::Queued(&mut island.effects),
+        };
+        for activation in activations {
+            port.submit(region, GlobalEffect::RunMinecartCommand(activation));
+        }
+    }
     // 乘客的 `rideTick`：载具这一刻的位置定了，骑手的位置跟上来，要下车的在这里下车。
     // 官方把乘客紧跟在载具后面 tick，这里放在实体阶段之后、玩家自己的 tick 之前。
     //

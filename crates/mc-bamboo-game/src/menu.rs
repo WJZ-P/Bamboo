@@ -1019,38 +1019,26 @@ pub(crate) fn open_entity_container(region: &mut Region, id: PlayerId, entity: i
         if public.removed {
             return None;
         }
-        match &public.kind {
+        let kind = match &public.kind {
             mc_bamboo_blocks::entity::KindPublic::Boat(data)
                 if mc_bamboo_blocks::entity::boat::is_chest(data.entity_type) =>
             {
-                // 官方菜单标题是船自己的显示名（`Entity.getDisplayName()` →
-                // `EntityType.getDescriptionId()`），不是 `container.chest`。
-                //
-                // The vanilla title is the boat's own display name (`Entity.getDisplayName()` →
-                // `EntityType.getDescriptionId()`), not `container.chest`.
-                Some((
-                    ContainerKind::Chest,
-                    mc_bamboo_blocks::entity::boat::display_name_key(data.entity_type),
-                ))
+                ContainerKind::Chest
             }
             mc_bamboo_blocks::entity::KindPublic::Minecart(cart) => {
                 use mc_bamboo_blocks::entity::minecart::MinecartKind;
                 match MinecartKind::from_entity_type(cart.entity_type) {
-                    Some(MinecartKind::Chest) => Some((
-                        ContainerKind::Chest,
-                        "entity.minecraft.chest_minecart".to_owned(),
-                    )),
-                    Some(MinecartKind::Hopper) => Some((
-                        ContainerKind::Hopper,
-                        "entity.minecraft.hopper_minecart".to_owned(),
-                    )),
-                    _ => None,
+                    Some(MinecartKind::Chest) => ContainerKind::Chest,
+                    Some(MinecartKind::Hopper) => ContainerKind::Hopper,
+                    _ => return None,
                 }
             }
-            _ => None,
-        }
+            _ => return None,
+        };
+        let title = crate::vehicle_display_name::of(&region.global.scoreboard, public)?;
+        Some((kind, title))
     });
-    let Some((kind, title_key)) = container else {
+    let Some((kind, title)) = container else {
         return false;
     };
     if !region.players.contains_key(&id) {
@@ -1086,7 +1074,6 @@ pub(crate) fn open_entity_container(region: &mut Region, id: PlayerId, entity: i
     region
         .menus
         .insert(id, Menu::entity_container_menu(container_id, kind, entity));
-    let title = Component::translate(title_key, []);
     region.links.send(
         id,
         &OpenScreen {

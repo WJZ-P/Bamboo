@@ -1197,6 +1197,7 @@ impl KindData {
     fn mob_x_rot(&self) -> Option<f32> {
         match self {
             Self::Mob(mob) => Some(mob.x_rot),
+            Self::Minecart(cart) => Some(cart.pitch),
             Self::Arrow(arrow) => Some(arrow.pitch),
             Self::LlamaSpit(spit) => Some(spit.pitch),
             Self::Egg(egg) => Some(egg.x_rot),
@@ -1290,7 +1291,8 @@ impl KindData {
             Self::Boat(boat) => {
                 // `VehicleEntity` / `AbstractBoat.defineSynchedData` 的默认值：
                 // HURT=0、HURTDIR=1、DAMAGE=0、左右桨=false、BUBBLE_TIME=0。
-                let mut data = Vec::new();
+                let mut data =
+                    vehicle_name_data(boat.custom_name.as_ref(), boat.custom_name_visible);
                 if boat.hurt_time != 0 {
                     data.push(EntityData::BoatHurtTime(boat.hurt_time));
                 }
@@ -1415,7 +1417,8 @@ impl KindData {
                 // Indices 8/9/10 are the shared `VehicleEntity` fields (same
                 // variants as boats); 11/12/13 belong to `AbstractMinecart`
                 // and `MinecartFurnace`.
-                let mut data = Vec::new();
+                let mut data =
+                    vehicle_name_data(cart.custom_name.as_ref(), cart.custom_name_visible);
                 if cart.hurt_time != 0 {
                     data.push(EntityData::BoatHurtTime(cart.hurt_time));
                 }
@@ -1439,10 +1442,27 @@ impl KindData {
                 if cart.has_fuel {
                     data.push(EntityData::MinecartFuel(true));
                 }
+                if !cart.command.is_empty() {
+                    data.push(EntityData::MinecartCommand(cart.command.clone()));
+                }
+                if let Some(output) = &cart.command_output {
+                    data.push(EntityData::MinecartCommandOutput(output.clone()));
+                }
                 data
             }
         }
     }
+}
+
+fn vehicle_name_data(name: Option<&mc_bamboo_nbt::Tag>, visible: bool) -> Vec<EntityData> {
+    let mut data = Vec::new();
+    if let Some(name) = name {
+        data.push(EntityData::CustomName(name.clone()));
+    }
+    if visible {
+        data.push(EntityData::CustomNameVisible(true));
+    }
+    data
 }
 
 /// 船某一项元数据从非默认变回默认时要发的值（官方 `defineSynchedData` 的默认值）。
@@ -1450,6 +1470,8 @@ impl KindData {
 /// The default to send when a boat metadata entry returns to its default.
 fn boat_default_data(index: u8) -> EntityData {
     match index {
+        2 => EntityData::NoCustomName,
+        3 => EntityData::CustomNameVisible(false),
         8 => EntityData::BoatHurtTime(0),
         9 => EntityData::BoatHurtDir(1),
         10 => EntityData::BoatDamage(0.0),
@@ -1472,12 +1494,16 @@ fn minecart_default_data(
         mc_bamboo_blocks::entity::minecart::MinecartKind::from_entity_type(cart.entity_type)
             .map_or(6, |kind| kind.default_display_offset());
     match index {
+        2 => EntityData::NoCustomName,
+        3 => EntityData::CustomNameVisible(false),
         8 => EntityData::BoatHurtTime(0),
         9 => EntityData::BoatHurtDir(1),
         10 => EntityData::BoatDamage(0.0),
         11 => EntityData::MinecartDisplayBlock(None),
         12 => EntityData::MinecartDisplayOffset(default_offset),
+        13 if cart.success_count.is_some() => EntityData::MinecartCommand(String::new()),
         13 => EntityData::MinecartFuel(false),
+        14 => EntityData::MinecartCommandOutput(mc_bamboo_nbt::Tag::String(String::new())),
         _ => EntityData::BoatHurtTime(0),
     }
 }

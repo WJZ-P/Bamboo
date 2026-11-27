@@ -1864,7 +1864,12 @@ fn chest_boat_menu_uses_the_boat_display_name_as_title() {
         let mut open = open_frame.reader();
         assert_eq!(open.varint(), Ok(container_id));
         assert_eq!(open.varint(), Ok(menu_types::GENERIC_9X3));
-        let expected = Component::translate(key, []);
+        let expected = crate::vehicle_display_name::styled(
+            &fixture.region.global.scoreboard,
+            boat,
+            ids::name_of(entity_type).unwrap(),
+            Component::translate(key, []),
+        );
         let mut title = Vec::new();
         expected.write(&mut title);
         assert_eq!(open.rest(), title, "标题应该是船自己的显示名 {key}");

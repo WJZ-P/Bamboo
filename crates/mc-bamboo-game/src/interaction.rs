@@ -173,7 +173,7 @@ pub(crate) fn run_entity_ticks(
     entity_threads: usize,
     region: &mut Region,
     pool: Option<&mc_bamboo_blocks::entity::parallel::WorkerPool>,
-) {
+) -> Vec<mc_bamboo_blocks::entity::minecart::CommandActivation> {
     // 玩家不在实体列表里。官方玩家通常先于后生成的物品 tick，捡起看到的是移动前的位置。
     // Players are not in the entity list. Vanilla players usually tick before later items,
     // so pickup sees the item where it was before this tick's movement.
@@ -184,9 +184,9 @@ pub(crate) fn run_entity_ticks(
     if entity_threads == 0 {
         let (mut level, ticks) = region.entity_level();
         let outcome = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
-        send_effects(region, None, &outcome.effects);
+        send_entity_effects(region, &outcome.effects)
     } else {
-        parallel_entity_ticks(entity_threads, region, pool);
+        parallel_entity_ticks(entity_threads, region, pool)
     }
 }
 
@@ -229,7 +229,7 @@ pub(crate) fn parallel_entity_ticks(
     threads: usize,
     region: &mut Region,
     pool: Option<&mc_bamboo_blocks::entity::parallel::WorkerPool>,
-) {
+) -> Vec<mc_bamboo_blocks::entity::minecart::CommandActivation> {
     let game_time = region.tick.game_time();
     let entity_rules = region.entity_game_rules();
     use mc_bamboo_blocks::entity::{
@@ -319,8 +319,23 @@ pub(crate) fn parallel_entity_ticks(
         commit(computed, &mut world);
         world.drain_effects()
     };
-    send_effects(region, None, &effects);
+    let activations = send_entity_effects(region, &effects);
     region.profiler.lap(crate::profiler::Phase::EntityCommit);
+    activations
+}
+
+fn send_entity_effects(
+    region: &mut Region,
+    effects: &[Effect],
+) -> Vec<mc_bamboo_blocks::entity::minecart::CommandActivation> {
+    send_effects(region, None, effects);
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::RunMinecartCommand(activation) => Some(*activation),
+            _ => None,
+        })
+        .collect()
 }
 
 /// 计划刻之后：先对全部区块跑官方的 `tickThunder`，再对全部区块跑 `tickChunk`。
@@ -408,7 +423,7 @@ fn record_sequence(region: &mut Region, id: PlayerId, sequence: i32) -> bool {
 }
 
 /// 方块逻辑看到的这名玩家。
-fn actor_of(player: &Player, id: PlayerId) -> Actor {
+pub(crate) fn actor_of(player: &Player, id: PlayerId) -> Actor {
     let held = |hand| {
         let stack = player.inventory.held(hand);
         if stack.is_empty() {
@@ -511,6 +526,16 @@ pub(crate) fn on_player_action(
 pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Effect]) {
     for effect in effects {
         match *effect {
+            Effect::RunMinecartCommand(_) => {}
+            Effect::EntityEvent { entity, event } => {
+                let packet = mc_bamboo_protocol::packet::play::EntityEvent {
+                    entity_id: entity,
+                    event,
+                };
+                for id in region.entity_tracking.viewers(entity) {
+                    region.links.send(id, &packet);
+                }
+            }
             Effect::BoatBubbleEvent {
                 entity,
                 event,
@@ -2070,6 +2095,14 @@ pub(crate) fn on_interact_entity_at(
             MinecartKind::Chest | MinecartKind::Hopper => {
                 crate::menu::open_entity_container(region, id, entity_id);
                 return;
+            }
+            MinecartKind::CommandBlock
+                if region
+                    .players
+                    .get(&id)
+                    .is_some_and(crate::command_block::player_can_use) =>
+            {
+                swing(region, id, hand, InteractionResult::Success);
             }
             _ => {}
         }

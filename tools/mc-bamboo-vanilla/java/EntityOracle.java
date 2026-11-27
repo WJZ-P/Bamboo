@@ -28,6 +28,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.RegistryLayer;
 import net.minecraft.server.ReloadableServerRegistries;
@@ -49,6 +50,7 @@ import net.minecraft.tags.TagLoader;
 import net.minecraft.util.AbortableIterationConsumer;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.Difficulty;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.attribute.EnvironmentAttributeSystem;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageSources;
@@ -199,6 +201,13 @@ public final class EntityOracle {
             cases += minecartHopperSuck(official, out);
             cases += minecartHopperLocked(official, out);
             cases += minecartChestSave(official, out);
+            cases += minecartAnimal(official, out, false);
+            cases += minecartAnimal(official, out, true);
+            cases += hopperEjectsIntoMinecart(official, out);
+            cases += commandMinecartFacts(official, out);
+            cases += spawnerMinecartFacts(official, out);
+            cases += namedVehicle(official, out, true);
+            cases += namedVehicle(official, out, false);
             cases += boatStillWater(official, out);
             cases += boatIceSlide(official, out);
             cases += boatWaterCurrent(official, out);
@@ -1144,6 +1153,10 @@ public final class EntityOracle {
         int[][] chest = new int[0][];
         /** 地上物品实体：`[x, y, z, itemId, count]`。 */
         double[][] extras = new double[0][];
+        EntityType<? extends net.minecraft.world.entity.Mob> animal;
+        double animalX;
+        double animalZ;
+        int[] hopperSlots;
         Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
     }
 
@@ -1364,6 +1377,230 @@ public final class EntityOracle {
         return playMinecart(official, out, spec);
     }
 
+    private static int minecartAnimal(Official official, Writer out, boolean board) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = board ? "minecart_board_pig" : "minecart_push_cow";
+        rails(spec, -4, 8, rail(RailShape.NORTH_SOUTH));
+        spec.animal = board ? EntityTypes.PIG : EntityTypes.COW;
+        spec.animalX = 0.5;
+        spec.animalZ = board ? 1.86 : 1.3;
+        spec.vz = board ? 0.3 : 0.06;
+        spec.ticks = 6;
+        return playMinecart(official, out, spec);
+    }
+
+    private static int hopperEjectsIntoMinecart(Official official, Writer out) throws Exception {
+        MinecartSpec spec = new MinecartSpec();
+        spec.name = "hopper_ejects_into_chest_minecart";
+        spec.type = EntityTypes.CHEST_MINECART;
+        rails(spec, -1, 1, rail(RailShape.NORTH_SOUTH));
+        spec.blocks.put(BlockPos.asLong(0, 65, 0), Blocks.HOPPER.defaultBlockState());
+        spec.hopperSlots = new int[] {0, 65, 0, BuiltInRegistries.ITEM.getId(Items.APPLE), 3};
+        spec.ticks = 20;
+        return playMinecart(official, out, spec);
+    }
+
+    private static int commandMinecartFacts(Official official, Writer out) throws Exception {
+        var spec = new MinecartSpec();
+        rails(spec, -1, 4, rail(RailShape.NORTH_SOUTH));
+        spec.blocks.put(BlockPos.asLong(0, 64, 1), Blocks.ACTIVATOR_RAIL.defaultBlockState()
+                .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH)
+                .setValue(BlockStateProperties.POWERED, true));
+        var detector = new BlockPos(0, 64, 2);
+        spec.blocks.put(detector.asLong(), Blocks.DETECTOR_RAIL.defaultBlockState()
+                .setValue(BlockStateProperties.RAIL_SHAPE_STRAIGHT, RailShape.NORTH_SOUTH));
+        var level = FakeLevel.create(official, 1L);
+        level.blocks.putAll(spec.blocks);
+        var cart = new net.minecraft.world.entity.vehicle.minecart.MinecartCommandBlock(
+                EntityTypes.COMMAND_BLOCK_MINECART, level);
+        cart.setUUID(new UUID(0x0000_BAAB_0000_0000L, FIRST_ITEM_ID));
+        String command = "/say carts can speak";
+        cart.getCommandBlock().setCommand(command);
+        cart.getCommandBlock().setLastOutput(Component.literal("previous"));
+        cart.setPos(0.5, 64.0625, 0.5);
+        cart.setXRot(490.0F);
+        cart.setDeltaMovement(0.0, 0.0, 0.3);
+        level.tracked = List.of(cart);
+        var listeners = allocate(ChatCapture.class);
+        listeners.messages = new ArrayList<>();
+        official.server.capture = listeners;
+        boolean oldRule = official.gameRules.get(GameRules.COMMAND_BLOCKS_WORK);
+        official.gameRules.set(GameRules.COMMAND_BLOCKS_WORK, true, null);
+        try {
+            out.write("{\"type\":\"commandMinecart\",\"command\":" + jsonString(command) + ",\"steps\":[");
+            for (int t = 0; t <= 8; t++) {
+                level.gameTime = t;
+                listeners.messages.clear();
+                if (t != 0) {
+                    out.write(",");
+                    cart.commonTick();
+                    cart.tick();
+                }
+                var save = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                cart.save(save);
+                int signal = level.getBlockState(detector).getAnalogOutputSignal(level, detector, Direction.EAST);
+                out.write("{\"nbt\":" + jsonString(save.buildResult().toString()) + ",\"signal\":" + signal
+                        + ",\"chat\":[" + String.join(",", listeners.messages) + "]}");
+            }
+            out.write("]}\n");
+        } finally {
+            official.gameRules.set(GameRules.COMMAND_BLOCKS_WORK, oldRule, null);
+            official.server.capture = null;
+        }
+        return 1;
+    }
+
+    private static final class ChatCapture extends net.minecraft.server.dedicated.DedicatedPlayerList {
+        List<String> messages;
+
+        private ChatCapture() {
+            super(null, null, null);
+        }
+
+        @Override
+        public void broadcastChatMessage(
+                net.minecraft.network.chat.PlayerChatMessage message,
+                net.minecraft.commands.CommandSourceStack source,
+                net.minecraft.network.chat.ChatType.Bound type) {
+            var codec = net.minecraft.network.chat.ComponentSerialization.CODEC;
+            var ops = net.minecraft.nbt.NbtOps.INSTANCE;
+            var content = codec.encodeStart(ops, message.decoratedContent()).getOrThrow();
+            var name = codec.encodeStart(ops, type.name()).getOrThrow();
+            messages.add("[" + jsonString(content.toString()) + "," + jsonString(name.toString()) + "]");
+        }
+    }
+
+    private static int spawnerMinecartFacts(Official official, Writer out) throws Exception {
+        var spec = new MinecartSpec();
+        rails(spec, -1, 3, rail(RailShape.NORTH_SOUTH));
+        spec.blocks.put(BlockPos.asLong(3, 63, 1), Blocks.GRASS_BLOCK.defaultBlockState());
+        var level = FakeLevel.create(official, 1L);
+        level.blocks.putAll(spec.blocks);
+        level.spawnerScene = true;
+        level.spawnerPlayer = new Vec3(8.5, 64.0, 8.5);
+        var cart = new net.minecraft.world.entity.vehicle.minecart.MinecartSpawner(
+                EntityTypes.SPAWNER_MINECART, level);
+        var initial = new net.minecraft.nbt.CompoundTag();
+        initial.putShort("Delay", (short) 0);
+        initial.putInt("SpawnCount", 1);
+        initial.putInt("MinSpawnDelay", 7);
+        initial.putInt("MaxSpawnDelay", 8);
+        var pig = new net.minecraft.nbt.CompoundTag();
+        pig.putString("id", "minecraft:pig");
+        pig.store("Pos", Vec3.CODEC, new Vec3(3.5, 64.0, 1.5));
+        var spawnData = new net.minecraft.nbt.CompoundTag();
+        spawnData.put("entity", pig);
+        initial.put("SpawnData", spawnData);
+        var reporter = net.minecraft.util.ProblemReporter.DISCARDING;
+        cart.getSpawner().load(level, new BlockPos(0, 64, 0),
+                net.minecraft.world.level.storage.TagValueInput.create(reporter, official.registries, initial));
+        cart.setPos(0.5, 64.0625, 0.9);
+        cart.setDeltaMovement(0.0, 0.0, 0.3);
+        level.tracked = List.of(cart);
+        var saved = net.minecraft.world.level.storage.TagValueOutput.createWithContext(reporter, official.registries);
+        cart.save(saved);
+        cart.commonTick();
+        cart.tick();
+        var after = net.minecraft.world.level.storage.TagValueOutput.createWithContext(reporter, official.registries);
+        cart.getSpawner().save(after);
+        StringBuilder mobs = new StringBuilder();
+        for (Entity entity : level.fresh) {
+            if (!mobs.isEmpty()) {
+                mobs.append(',');
+            }
+            Vec3 p = entity.position();
+            mobs.append('[').append(BuiltInRegistries.ENTITY_TYPE.getId(entity.getType()))
+                    .append(',').append(Double.doubleToRawLongBits(p.x))
+                    .append(',').append(Double.doubleToRawLongBits(p.y))
+                    .append(',').append(Double.doubleToRawLongBits(p.z)).append(']');
+        }
+        out.write("{\"type\":\"spawnerMinecart\",\"before\":" + jsonString(saved.buildResult().toString())
+                + ",\"after\":" + jsonString(after.buildResult().toString())
+                + ",\"mobs\":[" + mobs + "],\"blocks\":" + blockArray(spec.blocks)
+                + ",\"seed\":" + levelSeed(level)
+                + ",\"levelEvents\":" + level.spawnerLevelEvents
+                + ",\"cartEvents\":" + level.spawnerCartEvents + "}\n");
+        return 1;
+    }
+
+    private static int namedVehicle(Official official, Writer out, boolean boat) throws Exception {
+        FakeLevel level = FakeLevel.create(official, 1L);
+        level.blocks.put(BlockPos.asLong(0, 63, 16), Blocks.STONE.defaultBlockState());
+        ItemStack stack = new ItemStack(boat ? Items.OAK_CHEST_BOAT : Items.CHEST_MINECART);
+        int item = BuiltInRegistries.ITEM.getId(stack.getItem());
+        var name = Component.literal(boat ? "Cargo Ferry" : "Parcel Cart").withStyle(net.minecraft.ChatFormatting.GOLD);
+        stack.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, name);
+        Entity entity;
+        if (boat) {
+            var factory = net.minecraft.world.item.BoatItem.class.getDeclaredMethod(
+                    "getBoat", Level.class, net.minecraft.world.phys.HitResult.class, ItemStack.class, Player.class);
+            factory.setAccessible(true);
+            entity = (Entity) factory.invoke(stack.getItem(), level,
+                    new net.minecraft.world.phys.BlockHitResult(new Vec3(0.5, 64.0, 16.5),
+                            Direction.UP, new BlockPos(0, 63, 16), false), stack, null);
+        } else {
+            var pos = new BlockPos(0, 64, 16);
+            level.blocks.put(pos.asLong(), rail(RailShape.NORTH_SOUTH));
+            var hit = new net.minecraft.world.phys.BlockHitResult(
+                    new Vec3(0.5, 64.0625, 16.5), Direction.UP, pos, false);
+            stack.getItem().useOn(new NamedMinecartContext(level, stack, hit));
+            entity = level.fresh.getFirst();
+        }
+        entity.setUUID(new UUID(0x0000_BAAB_0000_0000L, FIRST_ITEM_ID));
+        var menu = (net.minecraft.world.MenuProvider) entity;
+        var componentCodec = net.minecraft.network.chat.ComponentSerialization.CODEC;
+        var ops = net.minecraft.nbt.NbtOps.INSTANCE;
+        var title = componentCodec.encodeStart(ops, menu.getDisplayName()).getOrThrow();
+        var reporter = net.minecraft.util.ProblemReporter.DISCARDING;
+        var placed = net.minecraft.world.level.storage.TagValueOutput.createWithContext(reporter, official.registries);
+        entity.save(placed);
+        entity.setCustomNameVisible(true);
+        var visible = net.minecraft.world.level.storage.TagValueOutput.createWithContext(reporter, official.registries);
+        entity.save(visible);
+        Entity loaded = entity.getType().create(level, EntitySpawnReason.LOAD);
+        loaded.load(net.minecraft.world.level.storage.TagValueInput.create(reporter, official.registries, visible.buildResult()));
+        var reloaded = net.minecraft.world.level.storage.TagValueOutput.createWithContext(reporter, official.registries);
+        loaded.save(reloaded);
+        var metadata = loaded.getEntityData().getNonDefaultValues();
+        var nameValue = metadata.stream().filter(value -> value.id() == 2).findFirst().orElseThrow();
+        var visibleValue = metadata.stream().filter(value -> value.id() == 3).findFirst().orElseThrow();
+        if (net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(nameValue.serializer()) != 6
+                || net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(visibleValue.serializer()) != 8) {
+            throw new IllegalStateException("unexpected vehicle metadata serializers");
+        }
+        Component syncedName = (Component) ((java.util.Optional<?>) nameValue.value()).orElseThrow();
+        var metadataName = componentCodec.encodeStart(ops, syncedName).getOrThrow();
+
+        level.fresh.clear();
+        entity.hurtServer(level, level.damageSources().generic(), 5.0F);
+        List<String> drops = new ArrayList<>();
+        for (Entity fresh : level.fresh) {
+            if (fresh instanceof ItemEntity itemEntity) {
+                var dropped = itemEntity.getItem();
+                var droppedName = dropped.get(net.minecraft.core.component.DataComponents.CUSTOM_NAME);
+                String tag = droppedName == null ? "null" : jsonString(componentCodec.encodeStart(ops, droppedName).getOrThrow().toString());
+                drops.add("[" + BuiltInRegistries.ITEM.getId(dropped.getItem()) + "," + tag + "]");
+            }
+        }
+        out.write("{\"type\":\"namedVehicle\",\"item\":" + item
+                + ",\"name\":" + jsonString(componentCodec.encodeStart(ops, name).getOrThrow().toString())
+                + ",\"title\":" + jsonString(title.toString())
+                + ",\"placed\":" + jsonString(placed.buildResult().toString())
+                + ",\"visible\":" + jsonString(visible.buildResult().toString())
+                + ",\"reloaded\":" + jsonString(reloaded.buildResult().toString())
+                + ",\"metadataName\":" + jsonString(metadataName.toString())
+                + ",\"metadataVisible\":" + visibleValue.value()
+                + ",\"drops\":[" + String.join(",", drops) + "]}\n");
+        return 1;
+    }
+
+    private static final class NamedMinecartContext extends net.minecraft.world.item.context.UseOnContext {
+        NamedMinecartContext(Level level, ItemStack stack, net.minecraft.world.phys.BlockHitResult hit) {
+            super(level, null, InteractionHand.MAIN_HAND, stack, hit);
+        }
+    }
+
     /** 造一辆官方矿车、逐刻跑、把每刻的实体状态写成一题 case。 */
     private static int playMinecart(Official official, Writer out, MinecartSpec spec) throws Exception {
         FakeLevel level = FakeLevel.create(official, spec.levelSeed);
@@ -1398,6 +1635,23 @@ public final class EntityOracle {
             }
         }
         scene.active.add(cart);
+        if (spec.hopperSlots != null) {
+            int[] slots = spec.hopperSlots;
+            BlockPos pos = new BlockPos(slots[0], slots[1], slots[2]);
+            HopperBlockEntity hopper = new HopperBlockEntity(pos, level.getBlockState(pos));
+            hopper.setItem(0, new ItemStack(BuiltInRegistries.ITEM.byId(slots[3]), slots[4]));
+            level.blockEntities.put(pos.asLong(), hopper);
+            scene.hoppers.add(hopper);
+        }
+        if (spec.animal != null) {
+            var mob = spec.animal.create(level, EntitySpawnReason.COMMAND);
+            level.addFreshEntity(mob);
+            mob.setNoAi(true);
+            mob.setPos(spec.animalX, 64.0, spec.animalZ);
+            setRandom(mob, level.entitySeed(mob.getId()));
+            scene.active.add(mob);
+            scene.tickRiders = true;
+        }
         for (double[] extra : spec.extras) {
             scene.spawnItem(
                     extra[0],
@@ -1427,6 +1681,15 @@ public final class EntityOracle {
         out.write(",\"vx\":" + spec.vx + ",\"vy\":" + spec.vy + ",\"vz\":" + spec.vz);
         out.write(",\"saveAt\":" + spec.saveAt);
         out.write(",\"fuel\":" + spec.fuel + ",\"pushX\":" + spec.pushX + ",\"pushZ\":" + spec.pushZ);
+        if (spec.hopperSlots != null) {
+            int[] slots = spec.hopperSlots;
+            out.write(",\"minecartHopperSource\":[" + slots[0] + "," + slots[1] + "," + slots[2]
+                    + "," + slots[3] + "," + slots[4] + "]");
+        }
+        if (spec.animal != null) {
+            out.write(",\"minecartAnimal\":{\"type\":" + BuiltInRegistries.ENTITY_TYPE.getId(spec.animal)
+                    + ",\"x\":" + spec.animalX + ",\"z\":" + spec.animalZ + "}");
+        }
         if (spec.chest.length > 0) {
             out.write(",\"chest\":[");
             for (int i = 0; i < spec.chest.length; i++) {
@@ -1767,6 +2030,7 @@ public final class EntityOracle {
         TouchPlayer player;
         boolean spectator;
         boolean ticked;
+        boolean tickRiders;
         /** 官方的 `spawnAtLocation` 已经设过拾取延迟；这一拍新生成的物品不用重取速度。 */
         boolean fallingDrops;
         /** 船场景：破坏后掉出的物品实体也要留在快照里（官方 `spawnAtLocation`）。 */
@@ -1884,9 +2148,15 @@ public final class EntityOracle {
             level.fresh.clear();
             snapshot.clear();
             for (Entity entity : ticking) {
-                if (!entity.isRemoved()) {
+                if (!entity.isRemoved() && (!tickRiders || !entity.isPassenger())) {
                     entity.commonTick();
                     entity.tick();
+                    if (tickRiders) {
+                        for (Entity rider : entity.getPassengers()) {
+                            rider.commonTick();
+                            rider.rideTick();
+                        }
+                    }
                 }
                 // 丢掉的实体这一拍还要留下位置，下一拍才从名单里消失。
                 // A discarded entity still reports its position for this tick.
@@ -2078,6 +2348,14 @@ public final class EntityOracle {
         // 矿车统一输出注册类型；容器矿车再和船共用一个 chest 字段，逐刻比较吸进去的 5 / 27 格。
         if (entity instanceof AbstractMinecart cart) {
             out.append(",\"entityType\":").append(BuiltInRegistries.ENTITY_TYPE.getId(cart.getType()));
+            out.append(",\"passengers\":[");
+            for (int i = 0; i < cart.getPassengers().size(); i++) {
+                if (i > 0) {
+                    out.append(',');
+                }
+                out.append(cart.getPassengers().get(i).getId());
+            }
+            out.append(']');
         }
         if (entity instanceof net.minecraft.world.entity.vehicle.minecart.AbstractMinecartContainer cart) {
             out.append(",\"chest\":[");
@@ -2316,6 +2594,7 @@ public final class EntityOracle {
         private ReloadableServerResources managers;
         private GameRules rules;
         private ServerDebugSubscribers debugSubscribers;
+        ChatCapture capture;
 
         private FakeServer() {
             super(null, null, null, null, null, null, null, null, null, null);
@@ -2327,6 +2606,21 @@ public final class EntityOracle {
             server.rules = rules;
             server.debugSubscribers = new ServerDebugSubscribers(server);
             return server;
+        }
+
+        @Override
+        public net.minecraft.commands.Commands getCommands() {
+            return managers.getCommands();
+        }
+
+        @Override
+        public RegistryAccess.Frozen registryAccess() {
+            return (RegistryAccess.Frozen) managers.fullRegistries().lookup();
+        }
+
+        @Override
+        public net.minecraft.server.dedicated.DedicatedPlayerList getPlayerList() {
+            return capture;
         }
 
         @Override
@@ -2422,6 +2716,18 @@ public final class EntityOracle {
             return seed;
         }
 
+        long gameTime;
+        boolean spawnerScene;
+        Vec3 spawnerPlayer;
+        List<List<Integer>> spawnerLevelEvents;
+        List<Integer> spawnerCartEvents;
+
+
+        @Override
+        public long getGameTime() {
+            return gameTime;
+        }
+
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
         }
@@ -2432,6 +2738,8 @@ public final class EntityOracle {
             level.fresh = new ArrayList<>();
             level.tracked = new ArrayList<>();
             level.scoreboard = new ServerScoreboard(official.server);
+            level.spawnerLevelEvents = new ArrayList<>();
+            level.spawnerCartEvents = new ArrayList<>();
             level.blockEntities = new Long2ObjectOpenHashMap<>();
             level.nextId = 1;
             level.blocks = new Long2ObjectOpenHashMap<>();
@@ -2657,7 +2965,49 @@ public final class EntityOracle {
         public void sendBlockUpdated(BlockPos pos, BlockState old, BlockState current, int flags) {}
 
         @Override
-        public void levelEvent(Entity source, int type, BlockPos pos, int data) {}
+        public void levelEvent(Entity source, int type, BlockPos pos, int data) {
+            if (spawnerScene) {
+                spawnerLevelEvents.add(List.of(type, pos.getX(), pos.getY(), pos.getZ(), data));
+            }
+        }
+
+        @Override
+        public boolean containsAnyLiquid(AABB bounds) {
+            if (!spawnerScene) {
+                return super.containsAnyLiquid(bounds);
+            }
+            for (BlockPos pos : BlockPos.betweenClosed(BlockPos.containing(bounds.minX, bounds.minY, bounds.minZ),
+                    BlockPos.containing(bounds.maxX, bounds.maxY, bounds.maxZ))) {
+                if (!getFluidState(pos).isEmpty()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        @Override
+        public int getRawBrightness(BlockPos pos, int skyDarken) {
+            return spawnerScene ? 15 - skyDarken : super.getRawBrightness(pos, skyDarken);
+        }
+
+        @Override
+        public boolean hasNearbyAlivePlayer(double x, double y, double z, double distance) {
+            return spawnerPlayer != null && spawnerPlayer.distanceToSqr(x, y, z) < distance * distance;
+        }
+
+        @Override
+        public boolean tryAddFreshEntityWithPassengers(Entity entity) {
+            return addFreshEntity(entity);
+        }
+
+        @Override
+        public void broadcastEntityEvent(Entity entity, byte event) {
+            if (spawnerScene && entity instanceof net.minecraft.world.entity.vehicle.minecart.MinecartSpawner) {
+                spawnerCartEvents.add((int) event);
+            } else if (!spawnerScene) {
+                super.broadcastEntityEvent(entity, event);
+            }
+        }
 
         @Override
         public void playSeededSound(

@@ -407,18 +407,27 @@ impl Behaviour for Rail {
         }
         let area = detector_search_bb(pos);
         let mut container_id = None;
-        world.level().for_each_entity_in(area, &mut |public| {
-            if container_id.is_some() || public.removed {
-                return;
-            }
-            if let KindPublic::Minecart(cart) = &public.kind
-                && crate::entity::minecart::MinecartKind::from_entity_type(cart.entity_type)
-                    .is_some_and(|kind| kind.container_size() > 0)
-                && public.bounding_box().intersects(area)
-            {
-                container_id = Some(public.uid);
-            }
-        });
+        let mut command_success = None;
+        world
+            .level()
+            .for_each_entity_in_section_order(area, &mut |public| {
+                if public.removed || command_success.is_some() {
+                    return;
+                }
+                if let KindPublic::Minecart(cart) = &public.kind {
+                    if let Some(success) = cart.success_count {
+                        command_success = Some(success);
+                    } else if container_id.is_none()
+                        && crate::entity::minecart::MinecartKind::from_entity_type(cart.entity_type)
+                            .is_some_and(|kind| kind.container_size() > 0)
+                    {
+                        container_id = Some(public.uid);
+                    }
+                }
+            });
+        if let Some(success) = command_success {
+            return success;
+        }
         let Some(uid) = container_id else {
             return 0;
         };

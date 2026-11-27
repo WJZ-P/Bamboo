@@ -264,7 +264,18 @@ pub fn rider_position(vehicle: &EntityPublic, passenger: &EntityPublic, index: u
             .add(mount)
             .subtract(vehicle_attachment(passenger));
     }
-    let mount = rotate(passenger_attachment(vehicle, index), vehicle.yaw);
+    let mount = if matches!(&vehicle.kind, KindPublic::Minecart(_)) {
+        if matches!(
+            passenger.kind.mob_type(),
+            Some(MobType::Villager | MobType::WanderingTrader)
+        ) {
+            Vec3::default()
+        } else {
+            super::minecart::passenger_attachment_point()
+        }
+    } else {
+        rotate(passenger_attachment(vehicle, index), vehicle.yaw)
+    };
     let feet = vehicle_attachment(passenger);
     vehicle.position.add(mount).subtract(feet)
 }

@@ -1540,6 +1540,13 @@ pub trait Level: LevelSideState + LevelEntities {
         None
     }
 
+    /// 计分板队伍的碰撞规则，0 为始终碰撞。
+    ///
+    /// Scoreboard team collision rule, with 0 for always.
+    fn team_collision_rule(&self, _index: u32) -> i32 {
+        0
+    }
+
     /// `getSkyDarken()`。天色由主控的时钟和天气发布，这一层只读快照。
     fn sky_darken(&self) -> i32 {
         0
@@ -2755,6 +2762,10 @@ pub fn monster_prevents_rest_in<L: Level + ?Sized>(level: &L, pos: BlockPos) -> 
 /// The non-block results of one action, handed to the caller for delivery.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
+    /// 激活铁轨要求游戏层执行矿车命令。 / An activator rail requests a cart command.
+    RunMinecartCommand(crate::entity::minecart::CommandActivation),
+    /// 向正在跟踪的玩家同步实体事件。 / Send an entity event to its viewers.
+    EntityEvent { entity: EntityUid, event: u8 },
     /// `AbstractBoat.tickBubbleColumn`：给跟踪者广播实体事件，并甩下载具的乘客。
     ///
     /// `AbstractBoat.tickBubbleColumn`: broadcast an entity event and eject the
