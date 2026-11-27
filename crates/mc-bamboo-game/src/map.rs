@@ -1442,12 +1442,14 @@ pub fn on_crafted_post_process(stack: &mut ItemStack, maps: &mut MapStore) {
     if let Some(data) = next_data {
         let new_id = maps.next_map_id();
         maps.insert(new_id, data);
-        if defaults::of_item(stack.item).get(kinds::MAP_ID)
-            == Some(&ComponentValue::MapId(new_id))
+        if defaults::of_item(stack.item).get(kinds::MAP_ID) == Some(&ComponentValue::MapId(new_id))
         {
             patch.remove(kinds::MAP_ID);
         } else {
-            patch.put(kinds::MAP_ID, PatchEntry::Set(ComponentValue::MapId(new_id)));
+            patch.put(
+                kinds::MAP_ID,
+                PatchEntry::Set(ComponentValue::MapId(new_id)),
+            );
         }
         let (added, removed) = patch.to_opaque();
         stack.added = added;

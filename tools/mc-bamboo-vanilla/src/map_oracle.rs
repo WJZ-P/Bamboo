@@ -19,7 +19,9 @@ use mc_bamboo_blocks::{
     state::{SLAB_TYPE, SlabType, WATERLOGGED},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos};
-use mc_bamboo_data::{RecipeType, blocks, items, registries::data_component_type as kinds, version};
+use mc_bamboo_data::{
+    RecipeType, blocks, items, registries::data_component_type as kinds, version,
+};
 use mc_bamboo_game::{
     PlayerId,
     map::{
@@ -258,8 +260,10 @@ pub fn run(java: &str, args: &[&str]) -> Result<(), String> {
         &in_banner_removed_path,
         break_mode == BreakMode::BannerToggle,
     )?;
-    let bamboo_banner_break =
-        run_banner_break_scenario(&mut banner_break_chunks, break_mode == BreakMode::BannerCheck);
+    let bamboo_banner_break = run_banner_break_scenario(
+        &mut banner_break_chunks,
+        break_mode == BreakMode::BannerCheck,
+    );
     let bamboo_map_extending = run_map_extending_scenario(break_mode == BreakMode::MapExtend);
 
     // 4. 启动官方 MapOracle.java 对拍。

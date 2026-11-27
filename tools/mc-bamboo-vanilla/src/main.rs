@@ -453,7 +453,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla poi-oracle <java 路径> [--show N] [--break-self-test NAME]
       mc-bamboo-vanilla storage <java 路径> [--show N]
       mc-bamboo-vanilla saved-data <java 路径>
-      mc-bamboo-vanilla map-oracle <java 路径> [--break color|save|packet|fluid]
+      mc-bamboo-vanilla map-oracle <java 路径> [--break color|save|packet|fluid|banner-toggle|banner-check|map-extend]
       mc-bamboo-vanilla player-attributes <java 路径> [--cases N] [--mining-cases N] [--seed S] [--show N] [--break-self-test]
       mc-bamboo-vanilla player-data <java 路径> [--show N]
       mc-bamboo-vanilla chunk-content <java 路径> [--show N]
