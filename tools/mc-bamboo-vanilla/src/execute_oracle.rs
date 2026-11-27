@@ -260,6 +260,9 @@ const SCENARIOS: &[&str] = &[
     // location_check 的 structures：超平坦世界没有结构，两边都判 false
     "execute if predicate {type:\"location_check\",predicate:{structures:\"minecraft:stronghold\"}} run setblock 4 -60 6 stone",
     "execute unless predicate {type:\"location_check\",predicate:{structures:\"minecraft:stronghold\"}} run setblock 4 -60 6 stone",
+    // 实体子谓词 minecraft:slots（牛的空主手）
+    "execute as @e[type=cow,limit=1,sort=nearest] if predicate {type:\"entity_properties\",entity:\"this\",predicate:{slots:{\"weapon.mainhand\":{}}}} run setblock 4 -60 6 stone",
+    "execute as @e[type=cow,limit=1,sort=nearest] if predicate {type:\"entity_properties\",entity:\"this\",predicate:{slots:{\"weapon.mainhand\":{items:\"minecraft:stone\"}}}} run setblock 4 -60 6 stone",
 ];
 
 #[derive(Debug)]

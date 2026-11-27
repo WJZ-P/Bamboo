@@ -1489,8 +1489,8 @@ WebView2 的渲染进程不算在内。
   逐节点一致（`tests/command_tree.rs`）；链上每层用 `CommandGraph` 的重定向上下文保存参数，执行来源按 `source::with_override`
   临时替换，`as` 分叉出的每个分支当场顺序执行，`store score` 在所有分支结束后写回。
   设计见 `docs/command-execution-context.md`；`execute-oracle` 用补全了实体 getter 的官方假世界
-  跑 175 条整命令（含 `as @e[type=cow]` 分叉，以及 `if items|slots`、`on`、`summon`、
-  `positioned over` 和 `location_check.structures` 的新场景），逐条比较方块、计分板、是否跑到 `run` 和
+  跑 177 条整命令（含 `as @e[type=cow]` 分叉，以及 `if items|slots`、`on`、`summon`、
+  `positioned over`、`location_check.structures` 和实体子谓词 `slots` 的新场景），逐条比较方块、计分板、是否跑到 `run` 和
   翻译键/参数递归展开后的反馈；`--break-self-test` 和按类别的 `--break-group` 确认能抓到改坏。
   `if/unless biome|dimension|loaded|predicate` 已接上：`biome` 按 `getLoadedBlockPos` 查位置再比
   单个群系或 `#标签`；`dimension` 只认主世界（下界和末地判假，别的名字报 `argument.dimension.invalid`）；
@@ -1599,8 +1599,8 @@ WebView2 的渲染进程不算在内。
   **还没给、问到仍让整次求值失败的**：玩家的 NBT、统计、配方、`looking_at` 射线和 `input` 按键、
   营火烟雾、`location_check.structures` 的结构标签（没从官方导出）；生物死亡等其它掉落路径的实体视角没有补这些新字段
   （问到 NBT、玩家或积分板时仍报不支持）。JSON 对象形式的 `nbt`（只支持 SNBT 字符串）没做，会让求值失败。
-  `execute-oracle` 里 64 条 `if predicate` 整命令（实体类型、效果、NBT、队伍、闪电、玩家、`entity_scores`、
-  流体、群系、结构）和官方逐条一致。
+  `execute-oracle` 里 66 条 `if predicate` 整命令（实体类型、效果、NBT、队伍、闪电、玩家、`entity_scores`、
+  流体、群系、结构、`slots`）和官方逐条一致。
   随机序列不存档，也没有 `salt`、`includeWorldSeed`、`includeSequenceId` 开关（默认 salt 0，后两项都开）。掉落不查物品的功能开关（`isItemEnabled`）。乘客谓词只看第一个乘客。
 - 工作台（含玩家物品栏里的 2×2）、合成器、切石机、锻造台、熔炉、高炉、烟熏炉、酿造台、织布机、
   砂轮、附魔台、铁砧和制图台已经接上菜单。

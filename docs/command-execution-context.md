@@ -125,7 +125,7 @@ Context {
 ## 6. 对拍
 
 `tools/mc-bamboo-vanilla execute-oracle` 用官方 `Commands.performCommand`
-在假世界里跑 175 条命令（`/execute`、`/data`、`/effect`）；假世界补全了 `ServerLevel` 的实体 getter、
+在假世界里跑 177 条命令（`/execute`、`/data`、`/effect`）；假世界补全了 `ServerLevel` 的实体 getter、
 `ChunkMap` 和真正的牛实体，所以 `as @e[type=cow]`、`at @e`、`if entity @e[...]`
 真的会选出牛并分叉；`execute summon` / `location_check.structures` 需要的实体管理器和
 `structureManager()` 也在假世界里补了桩。记录：
