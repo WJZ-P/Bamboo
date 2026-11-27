@@ -417,6 +417,27 @@ fn apply_step(
             }
             Ok(Some(out))
         }
+        // 官方 `positioned over`：把 Y 换成该高度图在 (`floor(x)`, `floor(z)`) 的高度，
+        // 区块没加载报 `argument.pos.unloaded`。
+        // Official `positioned over`: replace Y with the heightmap height at
+        // (`floor(x)`, `floor(z)`); an unloaded chunk reports `argument.pos.unloaded`.
+        "positioned" if value("heightmap").is_some() => {
+            let heightmap = value("heightmap")
+                .and_then(Value::as_str)
+                .ok_or_else(|| fail("command.failed"))?;
+            let pos = BlockPos::containing(context.position);
+            if !region.chunks.is_loaded(pos.chunk()) {
+                return Err(fail("argument.pos.unloaded"));
+            }
+            let height = match heightmap {
+                "world_surface" | "world_surface_wg" => region.chunks.world_surface_y(pos),
+                _ => region.chunks.heightmap_y(pos),
+            }
+            .unwrap_or(0);
+            let mut changed = context;
+            changed.position.y = f64::from(height);
+            Ok(Some(vec![changed]))
+        }
         "positioned" => {
             let coords = value("pos")
                 .and_then(Value::as_vec3)
@@ -502,11 +523,20 @@ fn apply_step(
             Ok(Some(vec![context]))
         }
         "if" | "unless" => conditional(region, parsed, step, context),
-        "on" => relation(context, layer_branch(parsed, step)),
-        // 官方 `spawnEntityAndRedirect` 要走 `SummonCommand.createEntity`；还没接。
-        // Official `spawnEntityAndRedirect` goes through `SummonCommand.createEntity`,
-        // which is not wired in yet.
-        "summon" => Err(fail("command.failed")),
+        "on" => relation(region, context, layer_branch(parsed, step)),
+        // 官方 `spawnEntityAndRedirect`：按实体类型造一个实体，设为来源实体。
+        // Official `spawnEntityAndRedirect`: spawn one entity of the type and make
+        // it the source entity.
+        "summon" => {
+            let entity_type = value("entity")
+                .and_then(Value::as_str)
+                .ok_or_else(|| fail("command.failed"))?;
+            let entity = spawn_summoned(region, entity_type, context.position)?;
+            Ok(Some(vec![Context {
+                entity: Some(entity),
+                ..context
+            }]))
+        }
         "data" | "block" | "entity" | "storage" if is_data_or_store_target(parsed, step.level) => {
             Ok(Some(vec![context]))
         }
@@ -515,21 +545,89 @@ fn apply_step(
 }
 
 /// 官方 `expandOneToOneEntityRelation` / `expandOneToManyEntityRelation`：来源没有实体时
-/// 结果是空的，整条链在这里停下。有实体时要查主人、牵引者、目标、攻击者、载具、
-/// 操控者、来源实体和乘客，这些关系还没有统一的查询入口，明确报错。
+/// 结果是空的，整条链在这里停下。有实体时按关系名解出一个或多个实体，各自成为一条分支。
+/// 载具和乘客能从实体表查；主人、牵引者、目标、攻击者、操控者、来源实体这几类关系
+/// 游戏层还没建模，一律当成「没有该关系」返回空分支（和官方 `Optional.empty()` 一致）。
 ///
 /// Official `expandOneToOneEntityRelation` / `expandOneToManyEntityRelation`: with no
-/// source entity the result is empty and the chain stops here. With an entity the owner,
-/// leasher, target, attacker, vehicle, controller, origin and passengers need lookups that
-/// have no shared entry point yet, so it fails loudly.
-fn relation(context: Context, name: Option<&str>) -> Result<Option<Vec<Context>>, CommandFail> {
+/// source entity the result is empty and the chain stops here. Otherwise the relation
+/// resolves to one or more entities, each a branch. Vehicle and passengers come from the
+/// entity store; owner, leasher, target, attacker, controller and origin are not modelled
+/// in the game layer yet and are treated as an absent relation (empty), like vanilla's
+/// `Optional.empty()`.
+fn relation(
+    region: &Region,
+    context: Context,
+    name: Option<&str>,
+) -> Result<Option<Vec<Context>>, CommandFail> {
     if name.is_none_or(|name| !RELATIONS.contains(&name)) {
         return Err(fail("command.failed"));
     }
-    if context.entity.is_none() {
+    let Some(entity) = context.entity else {
         return Ok(Some(Vec::new()));
+    };
+    let targets = relation_targets(region, entity, name.unwrap_or_default());
+    Ok(Some(
+        targets
+            .into_iter()
+            .map(|related| Context {
+                entity: Some(related),
+                ..context
+            })
+            .collect(),
+    ))
+}
+
+fn relation_targets(region: &Region, entity: Target, name: &str) -> Vec<Target> {
+    let Target::World(uid) = entity else {
+        return Vec::new();
+    };
+    match name {
+        "vehicle" => region
+            .entities
+            .public_at(uid)
+            .and_then(|public| public.vehicle)
+            .map(|vehicle| vec![Target::World(vehicle)])
+            .unwrap_or_default(),
+        "passengers" => region
+            .entities
+            .iter_public()
+            .filter(|public| public.vehicle == Some(uid))
+            .map(|public| Target::World(public.uid))
+            .collect(),
+        _ => Vec::new(),
     }
-    Err(fail("command.failed"))
+}
+
+/// `SummonCommand.createEntity` 的等价：从实体类型名 + 位置构造并生成实体。
+/// 不发 `/summon` 的成功反馈（`execute summon` 在官方里只是重定向来源）。
+///
+/// Equivalent of `SummonCommand.createEntity`: build and spawn an entity from its
+/// type name and a position. No `/summon` success feedback (official `execute summon`
+/// only redirects the source).
+fn spawn_summoned(
+    region: &mut Region,
+    entity_type: &str,
+    position: Vec3,
+) -> Result<Target, CommandFail> {
+    let fields = vec![
+        ("id".to_owned(), Tag::String(entity_type.to_owned())),
+        (
+            "Pos".to_owned(),
+            Tag::List(vec![
+                Tag::Double(position.x),
+                Tag::Double(position.y),
+                Tag::Double(position.z),
+            ]),
+        ),
+    ];
+    let entity = mc_bamboo_blocks::archive::read_entity(&Tag::Compound(fields), 0)
+        .ok()
+        .flatten()
+        .ok_or_else(|| fail("commands.summon.failed"))?
+        .into_entity();
+    let uid = region.entities.spawn(entity);
+    Ok(Target::World(uid))
 }
 
 fn conditional(
@@ -652,11 +750,62 @@ fn named_condition(
             Ok(id) => fail_with("commands.stopwatch.does_not_exist", [id.to_owned().into()]),
             Err(failure) => failure,
         }),
-        // 槽位来源（`SlotSourceArgument`）和物品访问器还没有实现。
-        // Slot sources (`SlotSourceArgument`) and item accessors are not implemented.
-        "items" | "slots" => Err(fail("command.failed")),
+        // `ExecuteCommand.countItems` / `countSlots`：按槽位来源数个数或物品数量。
+        // `ExecuteCommand.countItems` / `countSlots`: count slots or item counts.
+        "items" | "slots" => slots_condition(region, parsed, step, context),
         _ => return None,
     })
+}
+
+/// `if|unless items|slots <source> <slots> [item_predicate]`。
+/// 官方两种条件都是 `createNumericConditionalHandler`，结果是数值 `Verdict::Count`；
+/// 链中间按「大于零」判真假，链尾按 `pass_count` / `fail_count` 反馈。
+///
+/// `if|unless items|slots <source> <slots> [item_predicate]`. Both official
+/// conditions use `createNumericConditionalHandler`, so the result is a numeric
+/// `Verdict::Count`: mid-chain it is true when greater than zero, at the tail it
+/// reports `pass_count` / `fail_count`.
+fn slots_condition(
+    region: &Region,
+    parsed: &ParsedCommand,
+    step: &ChainStep,
+    context: Context,
+) -> Result<Verdict, CommandFail> {
+    let value = |name: &str| parsed.step_value(step, name);
+    let is_items = layer_branch(parsed, step) == Some("items");
+    let slots_text = value("slots")
+        .and_then(Value::as_str)
+        .ok_or_else(|| fail("command.failed"))?;
+    let ids =
+        crate::command::slots::literal_slots(slots_text).ok_or_else(|| fail("command.failed"))?;
+    let predicate = if is_items {
+        Some(
+            value("item_predicate")
+                .and_then(Value::as_item_predicate)
+                .ok_or_else(|| fail("command.failed"))?,
+        )
+    } else {
+        None
+    };
+    let source = value("source").ok_or_else(|| fail("command.failed"))?;
+    let mut total: i32 = 0;
+    if let Some(selector) = Value::as_entity(source) {
+        // `EntityItemAccessor.getSlots` 把每个实体的 `SlotCollection` 拼起来。
+        // `EntityItemAccessor.getSlots` concatenates each entity's `SlotCollection`.
+        for target in selection(region, context, selector)? {
+            let view = crate::command::slots::entity_slots(region, target);
+            total += match predicate {
+                Some(predicate) => crate::command::slots::count_items(&view, ids, predicate),
+                None => crate::command::slots::count_slots(&view, ids),
+            };
+        }
+    } else if Value::as_block_pos(source).is_some() {
+        // 方块实体的容器槽位还没接进游戏层，整条条件按 0 算。
+        // Block-entity container slots are not wired in yet; the condition counts 0.
+    } else {
+        return Err(fail("command.failed"));
+    }
+    Ok(Verdict::Count(total))
 }
 
 /// 算出一个条件的结果，不管它写在链中间还是链尾。

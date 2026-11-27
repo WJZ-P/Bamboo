@@ -4,11 +4,11 @@
 //! [`LevelView`]，调用方没提供数据时返回 [`LootError::Unsupported`]，不猜默认值。
 //!
 //! 效果、NBT、队伍、闪电、玩家和流体谓词在 [`crate::entity_parts`]。本实现还没有的
-//! 部分（槽位谓词）在解析时记下名字，求值到那里报不支持。
+//! 子谓词在解析时记下名字，求值到那里报不支持。
 //!
 //! The effects, NBT, team, lightning, player and fluid predicates live in
-//! [`crate::entity_parts`]. The part still missing (the slots predicate) is recorded by
-//! name at parse time and reported as unsupported when evaluated.
+//! [`crate::entity_parts`]. Sub-predicates not modelled yet are recorded by name at
+//! parse time and reported as unsupported when evaluated.
 
 use std::collections::BTreeMap;
 
@@ -967,6 +967,48 @@ impl EntityEquipmentPredicate {
     }
 }
 
+/// `SlotsPredicate`：`Codec.unboundedMap(SlotRanges.CODEC, ItemPredicate.CODEC)`。
+/// 每个范围名解析成一组槽位编号；`matches` 对每个范围要求至少一格命中。
+///
+/// `SlotsPredicate`: `Codec.unboundedMap(SlotRanges.CODEC, ItemPredicate.CODEC)`.
+/// Each range name resolves to a set of slot ids; `matches` requires at least one
+/// matching slot per range.
+#[derive(Debug, Clone, Default)]
+pub struct SlotsPredicate {
+    ranges: Vec<(Vec<i32>, ItemPredicate)>,
+}
+
+impl SlotsPredicate {
+    pub fn parse(value: &Value, what: &str) -> Result<Self> {
+        let map = object(value, what)?;
+        let mut ranges = Vec::new();
+        for (name, predicate) in map {
+            let ids = mc_bamboo_data::slot_ranges::slots_of(name)
+                .ok_or_else(|| invalid(format!("unknown slot range `{name}` in {what}")))?;
+            ranges.push((ids.to_vec(), ItemPredicate::parse(predicate, what)?));
+        }
+        Ok(Self { ranges })
+    }
+
+    pub fn matches(&self, entity: &EntityView) -> Result<bool> {
+        for (ids, predicate) in &self.ranges {
+            let mut found = false;
+            for id in ids {
+                if let Some(stack) = entity.slots.get(id)
+                    && predicate.matches(stack)?
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
 /// `DistancePredicate`。差值先收窄成 `f32`，和官方一样。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DistancePredicate {
@@ -1113,6 +1155,7 @@ pub struct EntityPredicate {
     pub components: ComponentMatchers,
     pub flags: Option<EntityFlagsPredicate>,
     pub equipment: Option<EntityEquipmentPredicate>,
+    pub slots: Option<SlotsPredicate>,
     pub vehicle: Option<Box<EntityPredicate>>,
     pub passenger: Option<Box<EntityPredicate>>,
     pub targeted_entity: Option<Box<EntityPredicate>>,
@@ -1192,6 +1235,9 @@ impl EntityPredicate {
                 }
                 "minecraft:equipment" => {
                     predicate.equipment = Some(EntityEquipmentPredicate::parse(value, what)?);
+                }
+                "minecraft:slots" => {
+                    predicate.slots = Some(SlotsPredicate::parse(value, what)?);
                 }
                 "minecraft:vehicle" => {
                     predicate.vehicle = Some(Box::new(Self::parse(value, what)?));
@@ -1273,6 +1319,11 @@ impl EntityPredicate {
         }
         if let Some(equipment) = &self.equipment
             && !equipment.matches(entity)?
+        {
+            return Ok(false);
+        }
+        if let Some(slots) = &self.slots
+            && !slots.matches(entity)?
         {
             return Ok(false);
         }

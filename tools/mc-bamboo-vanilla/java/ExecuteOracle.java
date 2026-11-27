@@ -50,6 +50,7 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.world.Difficulty;
+import net.minecraft.world.DifficultyInstance;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.EntityTypes;
@@ -251,6 +252,34 @@ public final class ExecuteOracle {
         "execute if predicate {type:\"location_check\",predicate:{biomes:\"minecraft:plains\"}} run setblock 4 -60 6 stone",
         "execute if predicate {type:\"location_check\",predicate:{biomes:\"#minecraft:is_nether\"}} run setblock 4 -60 6 stone",
         "setblock 2 -60 2 stone ;; execute positioned 2 -59 2 if predicate {type:\"location_check\",offsetY:-1,predicate:{block:{blocks:\"minecraft:stone\"}}} run setblock 4 -60 6 stone",
+        // if|unless items|slots（字面量槽位范围、实体访问器、链尾数值条件）
+        "execute if items entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand minecraft:stone run setblock 4 -60 6 stone",
+        "execute unless items entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand minecraft:stone run setblock 4 -60 6 stone",
+        "execute if slots entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand run setblock 4 -60 6 stone",
+        "execute unless slots entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand run setblock 4 -60 6 stone",
+        "execute if slots entity @e[type=cow,limit=1,sort=nearest] armor.head run setblock 4 -60 6 stone",
+        "execute if items entity @e[type=cow,limit=1,sort=nearest] container.0 minecraft:stone run setblock 4 -60 6 stone",
+        "execute if slots entity @e[type=cow] weapon.mainhand run setblock 4 -60 6 stone",
+        "execute if items entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand minecraft:stone",
+        "execute unless items entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand minecraft:stone",
+        "execute if slots entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand",
+        "execute unless slots entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand",
+        "execute if slots entity @e[type=cow,limit=1,sort=nearest] weapon.* run setblock 4 -60 6 stone",
+        "execute if items entity @e[type=cow,limit=1,sort=nearest] weapon.* minecraft:stone",
+        // execute on（来源实体没有这些关系，全部空分支）
+        "execute as @e[type=cow,limit=1,sort=nearest] on vehicle run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on passengers run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on owner run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on attacker run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on target run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on leasher run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on controller run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] on origin run setblock 4 -60 6 stone",
+        // positioned over / summon
+        "execute positioned over world_surface run setblock 4 -60 6 stone",
+        "execute positioned over motion_blocking run setblock 4 -60 6 stone",
+        "execute summon minecraft:cow run setblock 4 -60 6 stone",
+        "execute summon minecraft:pig at @s run setblock 4 -60 6 stone",
     };
 
     /** `/advancement` 的整条命令题：官方假世界里执行，比较返回值、反馈和进度状态。 */
@@ -898,7 +927,9 @@ public final class ExecuteOracle {
         it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<
                 net.minecraft.world.level.chunk.ChunkAccess> chunkCache;
         int nextId = 1;
-        final LevelData fixedLevelData = new FixedLevelData();
+        // Unsafe 分配的实例不跑字段初始化器，第一次用到时再建。
+        // Unsafe-allocated instances skip field initializers; build on first use.
+        LevelData fixedLevelData;
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
@@ -960,6 +991,9 @@ public final class ExecuteOracle {
 
         @Override
         public LevelData getLevelData() {
+            if (fixedLevelData == null) {
+                fixedLevelData = new FixedLevelData();
+            }
             return fixedLevelData;
         }
 
@@ -978,6 +1012,27 @@ public final class ExecuteOracle {
 
         @Override
         public boolean areEntitiesLoaded(long chunkKey) {
+            return true;
+        }
+
+        // `execute summon` 走 `SummonCommand.createEntity`：假世界没有实体管理器、
+        // 随机源和维度类型，补齐这三处让召唤本身能跑完，从而对拍重定向逻辑。
+        // `execute summon` uses `SummonCommand.createEntity`: the fake world has no
+        // entity manager, random source or dimension type, so stub these three to let
+        // the spawn finish and compare the redirect behaviour.
+        @Override
+        public RandomSource getRandom() {
+            return RandomSource.create();
+        }
+
+        @Override
+        public DifficultyInstance getCurrentDifficultyAt(BlockPos pos) {
+            return new DifficultyInstance(Difficulty.NORMAL, 0L, 0L, 0.0F);
+        }
+
+        @Override
+        public boolean tryAddFreshEntityWithPassengers(Entity entity) {
+            tracked.add(entity);
             return true;
         }
 

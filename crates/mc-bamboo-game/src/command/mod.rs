@@ -55,6 +55,7 @@ mod ride;
 mod save;
 mod scoreboard;
 pub(crate) mod select;
+pub(crate) mod slots;
 pub(crate) mod source;
 mod stopsound;
 mod summon;

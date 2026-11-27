@@ -113,13 +113,17 @@ pub(crate) fn tag_to_json(tag: &Tag, key: Option<&str>) -> Json {
 /// What a command target looks like to a predicate, or `None` once it is gone, which is
 /// an absent `THIS_ENTITY` in vanilla.
 pub(crate) fn entity_view(region: &Region, target: Target, depth: usize) -> Option<EntityView> {
-    match target {
+    let mut view = match target {
         Target::Player(id) => region
             .players
             .get(&id)
             .map(|player| player_view(region, player)),
         Target::World(uid) => world_entity_view(region, uid, depth),
-    }
+    }?;
+    // `minecraft:slots` 子谓词按 `SlotProvider.getSlot` 逐格问。
+    // The `minecraft:slots` sub-predicate queries `SlotProvider.getSlot` per id.
+    view.slots = crate::command::slots::entity_slots(region, target);
+    Some(view)
 }
 
 fn game_mode_name(mode: GameMode) -> &'static str {
@@ -239,6 +243,10 @@ fn world_entity_view(region: &Region, uid: i32, depth: usize) -> Option<EntityVi
         },
     )
     .ok();
+    // 载具链里的每一层也带上自己的槽位视图（`vehicle` 里嵌 `slots` 时要用）。
+    // Each vehicle link carries its own slot view too (for a `slots` nested in
+    // a `vehicle` predicate).
+    view.slots = crate::command::slots::entity_slots(region, Target::World(uid));
     if depth < MAX_VEHICLE_DEPTH
         && let Some(vehicle) = public.vehicle
     {

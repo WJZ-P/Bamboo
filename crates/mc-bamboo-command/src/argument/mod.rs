@@ -359,7 +359,18 @@ impl ArgumentType {
             Self::NbtPath => Ok(Value::String(reader.read_unquoted_string())),
             Self::ResourceOrTag { registry } => parse_resource_or_tag(reader, registry),
             Self::Heightmap => Ok(Value::String(reader.read_unquoted_string())),
-            Self::SlotSource => Ok(Value::String(reader.read_unquoted_string())),
+            // `ParserUtils.readWhile(reader, c -> c != ' ')`：`weapon.*` 这类名字
+            // 带 `*`，不是普通标识符，官方读到空格为止，不用 unquoted 字符串规则。
+            // `ParserUtils.readWhile(reader, c -> c != ' ')`: names such as
+            // `weapon.*` contain `*`, so vanilla reads to the next space rather
+            // than applying unquoted-string rules.
+            Self::SlotSource => {
+                let start = reader.cursor();
+                while reader.can_read() && reader.peek() != ' ' {
+                    reader.skip();
+                }
+                Ok(Value::String(reader.slice(start, reader.cursor())))
+            }
             Self::LootPredicate => parse_loot_predicate(reader),
             Self::FloatRange => Ok(Value::String(reader.read_unquoted_string())),
             Self::Function => parse_function(reader),

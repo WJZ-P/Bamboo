@@ -229,6 +229,34 @@ const SCENARIOS: &[&str] = &[
     "execute if predicate {type:\"location_check\",predicate:{biomes:\"minecraft:plains\"}} run setblock 4 -60 6 stone",
     "execute if predicate {type:\"location_check\",predicate:{biomes:\"#minecraft:is_nether\"}} run setblock 4 -60 6 stone",
     "setblock 2 -60 2 stone ;; execute positioned 2 -59 2 if predicate {type:\"location_check\",offsetY:-1,predicate:{block:{blocks:\"minecraft:stone\"}}} run setblock 4 -60 6 stone",
+    // if|unless items|slots（字面量槽位范围、实体访问器、链尾数值条件）
+    "execute if items entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand minecraft:stone run setblock 4 -60 6 stone",
+    "execute unless items entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand minecraft:stone run setblock 4 -60 6 stone",
+    "execute if slots entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand run setblock 4 -60 6 stone",
+    "execute unless slots entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand run setblock 4 -60 6 stone",
+    "execute if slots entity @e[type=cow,limit=1,sort=nearest] armor.head run setblock 4 -60 6 stone",
+    "execute if items entity @e[type=cow,limit=1,sort=nearest] container.0 minecraft:stone run setblock 4 -60 6 stone",
+    "execute if slots entity @e[type=cow] weapon.mainhand run setblock 4 -60 6 stone",
+    "execute if items entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand minecraft:stone",
+    "execute unless items entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand minecraft:stone",
+    "execute if slots entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand",
+    "execute unless slots entity @e[type=cow,limit=1,sort=nearest] weapon.mainhand",
+    "execute if slots entity @e[type=cow,limit=1,sort=nearest] weapon.* run setblock 4 -60 6 stone",
+    "execute if items entity @e[type=cow,limit=1,sort=nearest] weapon.* minecraft:stone",
+    // execute on（来源实体没有这些关系，全部空分支）
+    "execute as @e[type=cow,limit=1,sort=nearest] on vehicle run setblock 4 -60 6 stone",
+    "execute as @e[type=cow,limit=1,sort=nearest] on passengers run setblock 4 -60 6 stone",
+    "execute as @e[type=cow,limit=1,sort=nearest] on owner run setblock 4 -60 6 stone",
+    "execute as @e[type=cow,limit=1,sort=nearest] on attacker run setblock 4 -60 6 stone",
+    "execute as @e[type=cow,limit=1,sort=nearest] on target run setblock 4 -60 6 stone",
+    "execute as @e[type=cow,limit=1,sort=nearest] on leasher run setblock 4 -60 6 stone",
+    "execute as @e[type=cow,limit=1,sort=nearest] on controller run setblock 4 -60 6 stone",
+    "execute as @e[type=cow,limit=1,sort=nearest] on origin run setblock 4 -60 6 stone",
+    // positioned over / summon
+    "execute positioned over world_surface run setblock 4 -60 6 stone",
+    "execute positioned over motion_blocking run setblock 4 -60 6 stone",
+    "execute summon minecraft:cow run setblock 4 -60 6 stone",
+    "execute summon minecraft:pig at @s run setblock 4 -60 6 stone",
 ];
 
 #[derive(Debug)]
