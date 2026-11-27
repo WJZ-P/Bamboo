@@ -43,8 +43,8 @@ pub use generated::{
     block_maps, block_transformers, blocks, command_argument_types, component_enums,
     component_registries, crafting_remainders, entity_types, environment, gamerules, heightmaps,
     item_components, item_damage, items, jukebox_songs, light, loot, mob_spawns, packets, poi,
-    potions, recipes, registries, saved_world, shapes, sounds, states, structures, tags, version,
-    worldgen,
+    potions, recipes, registries, saved_world, shapes, sounds, states, structure_map_tags,
+    structures, tags, version, worldgen,
 };
 
 pub use generated::sounds::{
@@ -55,6 +55,43 @@ pub use generated::sounds::{
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
 const ITEM_TAG_REGISTRY: &str = "minecraft:item";
 const ENTITY_TYPE_TAG_REGISTRY: &str = "minecraft:entity_type";
+
+/// 群系属不属于 `#minecraft:water_on_map_outlines`（`renderBiomePreviewMap` 用）。
+///
+/// Whether a biome is in `#minecraft:water_on_map_outlines`, used by
+/// `renderBiomePreviewMap`.
+pub fn biome_is_water_on_map_outlines(id: i32) -> bool {
+    tags::TAG_GROUPS
+        .iter()
+        .find(|group| group.registry == "minecraft:worldgen/biome")
+        .and_then(|group| {
+            group
+                .tags
+                .iter()
+                .find(|tag| tag.name == "minecraft:water_on_map_outlines")
+        })
+        .is_some_and(|tag| tag.ids.contains(&id))
+}
+
+/// 把 `exploration_map` 的 `destination` 展开成结构名列表。
+///
+/// `#标签` 查官方 `tags/worldgen/structure` 的导出表，单个结构名原样返回。
+/// 标签里若再嵌套标签本实现不递归（26.3 的地图标签都是单层）。
+///
+/// Expand an `exploration_map` destination into structure names. A `#tag`
+/// looks up the exported official `tags/worldgen/structure` table; a single
+/// structure name is returned as-is. Nested tags are not expanded (the 26.3
+/// map tags are all single-level).
+pub fn expand_structure_map_destination(destination: &str) -> Option<Vec<String>> {
+    if let Some(tag) = destination.strip_prefix('#') {
+        generated::structure_map_tags::STRUCTURE_TAGS
+            .iter()
+            .find(|(name, _)| *name == tag)
+            .map(|(_, values)| values.iter().map(|value| (*value).to_owned()).collect())
+    } else {
+        Some(vec![destination.to_owned()])
+    }
+}
 
 /// `states::STATE_FACTS` 里每一位的含义。全部用 `EmptyBlockGetter` 在 `BlockPos.ZERO` 读取。
 ///

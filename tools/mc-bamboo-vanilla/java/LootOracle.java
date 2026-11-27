@@ -88,6 +88,9 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
 import net.minecraft.world.level.dimension.DimensionType;
+import net.minecraft.world.level.saveddata.maps.MapId;
+import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
+import net.minecraft.world.level.storage.loot.BuiltInLootTables;
 import net.minecraft.world.level.storage.loot.LootParams;
 import net.minecraft.world.level.storage.loot.LootTable;
 import net.minecraft.world.level.storage.loot.parameters.LootContextParamSets;
@@ -161,13 +164,15 @@ public final class LootOracle {
         int cases = 4000;
         long seed = 20261108L;
         String entityTable = null;
+        boolean explorer = false;
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--cases" -> cases = Integer.parseInt(args[++i]);
                 case "--seed" -> seed = Long.parseLong(args[++i]);
+                case "--explorer" -> explorer = true;
                 case "--entity-table" -> entityTable = args[++i];
                 default -> throw new IllegalArgumentException(
-                        "usage: LootOracle [--entity-table ID] [--cases N] [--seed S]");
+                        "usage: LootOracle [--explorer | --entity-table ID] [--cases N] [--seed S]");
             }
         }
 
@@ -179,6 +184,10 @@ public final class LootOracle {
         try (CloseableResourceManager resources =
                 new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected())) {
             World world = World.load(resources);
+            if (explorer) {
+                explorerCases(world, seed);
+                return;
+            }
             Random random = new Random(seed);
             int blockCases = entityTable == null ? Math.max(cases, 0) : 0;
             int chestCases = entityTable == null ? Math.max(cases / 5, 1) : 0;
@@ -266,6 +275,34 @@ public final class LootOracle {
             printExcluded("blockEntity", "minecraft:blocks/shulker_box", error);
             return 1;
         }
+    }
+
+    private static void explorerCases(World world, long seed) throws Exception {
+        // 同一张表分别覆盖找到结构和找不到结构，两次用同一个战利品种子。
+        // Run the same table with and without a destination, using the same loot seed.
+        for (boolean found : new boolean[]{true, false}) {
+            world.level.explorer = true;
+            world.level.target = found ? new BlockPos(1234, 0, -567) : null;
+            world.level.map = null;
+            CaseResult result = world.chestFill(BuiltInLootTables.SHIPWRECK_MAP, seed, 27, 1, 64, 2, 0);
+            if ((world.level.map != null) != found) throw new IllegalStateException("unexpected map creation");
+            JsonObject line = new JsonObject();
+            line.addProperty("kind", found ? "explorer_chest" : "chest");
+            line.addProperty("table", "minecraft:chests/shipwreck_map");
+            line.addProperty("seed", Long.toString(seed));
+            line.addProperty("slots", 27);
+            line.addProperty("x", 1);
+            line.addProperty("y", 64);
+            line.addProperty("z", 2);
+            line.add("items", result.items);
+            line.addProperty("nextLong", Long.toString(result.nextLong));
+            OUT.println(line);
+        }
+        JsonObject summary = new JsonObject();
+        summary.addProperty("kind", "summary");
+        summary.addProperty("cases", 2);
+        summary.addProperty("excluded", 0);
+        OUT.println(summary);
     }
 
     private static int chestCases(World world, Random random, int cases) {
@@ -1049,6 +1086,27 @@ public final class LootOracle {
         if (itemName != null) {
             components.addProperty("minecraft:item_name", itemName.getString());
         }
+        MapId mapId = stack.get(DataComponents.MAP_ID);
+        if (mapId != null) {
+            components.addProperty("minecraft:map_id", mapId.id());
+            if (itemName != null &&
+                    itemName.getContents() instanceof net.minecraft.network.chat.contents.TranslatableContents translation) {
+                components.addProperty("minecraft:item_name", translation.getKey());
+            }
+        }
+        var decorations = stack.get(DataComponents.MAP_DECORATIONS);
+        if (decorations != null && !decorations.decorations().isEmpty()) {
+            JsonObject markers = new JsonObject();
+            decorations.decorations().forEach((key, entry) -> {
+                JsonObject marker = new JsonObject();
+                marker.addProperty("type", holderId(entry.type()));
+                marker.addProperty("x", entry.x());
+                marker.addProperty("z", entry.z());
+                marker.addProperty("rotation", (double) entry.rotation());
+                markers.add(key, marker);
+            });
+            components.add("minecraft:map_decorations", markers);
+        }
         ArmorTrim trim = stack.get(DataComponents.TRIM);
         if (trim != null) {
             JsonObject value = new JsonObject();
@@ -1115,6 +1173,25 @@ public final class LootOracle {
         FakeServer server;
         Holder<Biome> plains;
         int nextEntityId = 1;
+
+        boolean explorer;
+        BlockPos target;
+        MapItemSavedData map;
+
+        @Override
+        public BlockPos findNearestMapStructure(
+                net.minecraft.core.HolderSet<net.minecraft.world.level.levelgen.structure.Structure> destination,
+                BlockPos origin, int radius, boolean skipKnown) {
+            if (!explorer) return super.findNearestMapStructure(destination, origin, radius, skipKnown);
+            if (!origin.equals(new BlockPos(1, 64, 2)) || radius != 50 || skipKnown) {
+                throw new IllegalStateException("unexpected shipwreck search arguments");
+            }
+            return target;
+        }
+
+        @Override public MapId getFreeMapId() { return new MapId(0); }
+        @Override public MapItemSavedData getMapData(MapId id) { return map; }
+        @Override public void setMapData(MapId id, MapItemSavedData data) { map = data; }
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);

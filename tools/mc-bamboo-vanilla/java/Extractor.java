@@ -304,6 +304,9 @@ public final class Extractor {
             root.add("tradeSets", dataFiles(resources, "trade_set"));
             root.add("villagerTrades", dataFiles(resources, "villager_trade"));
             root.add("villagerTradeTags", dataFiles(resources, "tags/villager_trade"));
+            // `exploration_map` 的 destination 引用结构标签，内容从官方数据包导出。
+            // `exploration_map` destinations are structure tags; export their contents.
+            root.add("structureMapTags", dataFiles(resources, "tags/worldgen/structure"));
             root.add("villagerFacts", villagerFacts(layers.compositeAccess()));
             root.add("advancements", dataFiles(resources, "advancement"));
             root.add("lootTables", dataFiles(resources, "loot_table"));

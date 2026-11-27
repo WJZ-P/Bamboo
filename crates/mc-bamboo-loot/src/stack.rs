@@ -26,6 +26,8 @@ pub const OMINOUS_BOTTLE_AMPLIFIER: &str = "minecraft:ominous_bottle_amplifier";
 pub const INSTRUMENT: &str = "minecraft:instrument";
 pub const CUSTOM_NAME: &str = "minecraft:custom_name";
 pub const ITEM_NAME: &str = "minecraft:item_name";
+pub const MAP_ID: &str = "minecraft:map_id";
+pub const MAP_DECORATIONS: &str = "minecraft:map_decorations";
 
 /// 附魔等级查询。真实现读物品组件，测试里可以用固定表，不必碰组件编码。
 pub trait EnchantmentLevels {

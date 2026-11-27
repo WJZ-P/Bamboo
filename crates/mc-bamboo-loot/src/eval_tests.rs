@@ -8,8 +8,8 @@ use mc_bamboo_data::items;
 use serde_json::{Value, json};
 
 use crate::context::{
-    DamageSourceView, EntityView, EquipmentSlot, LevelView, LootContext, LootParams, Position,
-    entity_enchantment_level,
+    DamageSourceView, EntityView, EquipmentSlot, ExplorationMapRequest, ExplorationMapResult,
+    LevelView, LootContext, LootParams, Position, entity_enchantment_level,
 };
 use crate::drops::{EntityDeathParams, entity_death_drops};
 use crate::function::LootFunction;
@@ -1076,4 +1076,141 @@ fn pillager_captain_drops_the_ominous_bottle() {
         (items::OMINOUS_BOTTLE, 1)
     );
     assert!(drops_for(false).is_empty());
+}
+
+/// 世界侧返回结构落点时，`exploration_map` 写出的组件和官方一致；返回 `None`
+/// （假世界）时原样退回，后面的 `filtered` 会把没有 `map_id` 的地图丢掉。
+///
+/// When the world side returns a structure, `exploration_map` writes the same
+/// components as vanilla; `None` (fake world) returns the input unchanged and a
+/// following `filtered` discards the map with no `map_id`.
+#[test]
+fn exploration_map_writes_vanilla_components() {
+    struct ExplorerLevel(Option<ExplorationMapResult>);
+
+    impl LevelView for ExplorerLevel {
+        fn is_loaded(&self, _: i32, _: i32, _: i32) -> Option<bool> {
+            Some(true)
+        }
+        fn block_state(&self, _: i32, _: i32, _: i32) -> Option<BlockState> {
+            Some(BlockState::AIR)
+        }
+        fn biome(&self, _: i32, _: i32, _: i32) -> Option<i32> {
+            Some(0)
+        }
+        fn can_see_sky(&self, _: i32, _: i32, _: i32) -> Option<bool> {
+            Some(true)
+        }
+        fn is_raining(&self) -> Option<bool> {
+            Some(false)
+        }
+        fn is_thundering(&self) -> Option<bool> {
+            Some(false)
+        }
+        fn day_time(&self) -> Option<i64> {
+            Some(0)
+        }
+        fn game_time(&self) -> Option<i64> {
+            Some(0)
+        }
+        fn dimension(&self) -> Option<&'static str> {
+            Some("minecraft:overworld")
+        }
+        fn exploration_map(
+            &self,
+            request: &ExplorationMapRequest<'_>,
+        ) -> crate::Result<Option<ExplorationMapResult>> {
+            assert_eq!(request.destination, "#minecraft:on_treasure_maps");
+            assert_eq!(request.decoration, "minecraft:red_x");
+            assert_eq!(request.zoom, 1);
+            assert_eq!(request.search_radius, 50);
+            assert!(!request.skip_existing_chunks);
+            assert_eq!(request.origin, (0, 1, 0));
+            Ok(self.0.clone())
+        }
+    }
+
+    let map = LootStack::new(items::BURIED_TREASURE_MAP, 1);
+    let table = json!([
+        {
+            "type": "minecraft:exploration_map",
+            "destination": "#minecraft:on_treasure_maps",
+            "decoration": "minecraft:red_x",
+            "skip_existing_chunks": false,
+            "zoom": 1
+        },
+        {
+            "type": "minecraft:filtered",
+            "item_filter": {"predicates": {"minecraft:map_id": {}}},
+            "on_fail": {"type": "minecraft:discard"}
+        }
+    ]);
+
+    let found = ExplorerLevel(Some(ExplorationMapResult {
+        map_id: 7,
+        target_x: 123,
+        target_z: -456,
+    }));
+    let params = LootParams {
+        level: Some(&found),
+        origin: Some(Position::new(0.5, 1.5, 0.5)),
+        ..LootParams::new(0.0)
+    };
+    let result = apply(table.clone(), map.clone(), &params).unwrap();
+    assert_eq!(result.item, items::BURIED_TREASURE_MAP);
+    assert_eq!(result.count, 1);
+    assert_eq!(result.component("minecraft:map_id"), Some(&json!(7)));
+    assert_eq!(
+        result.component("minecraft:map_decorations"),
+        Some(&json!({
+            "+": {
+                "type": "minecraft:red_x",
+                "x": 123.0,
+                "z": -456.0,
+                "rotation": 180.0
+            }
+        }))
+    );
+
+    let missing = ExplorerLevel(None);
+    let params = LootParams {
+        level: Some(&missing),
+        origin: Some(Position::new(0.5, 1.5, 0.5)),
+        ..LootParams::new(0.0)
+    };
+    let discarded = apply(table, map, &params).unwrap();
+    assert!(
+        discarded.is_empty(),
+        "filtered discards the map with no map_id"
+    );
+
+    // 缺省值照官方 codec：decoration=mansion、zoom=2、radius=50、skip=true。
+    // Vanilla codec defaults: decoration=mansion, zoom=2, radius=50, skip=true.
+    let defaults = LootFunction::parse(&json!({
+        "type": "minecraft:exploration_map",
+        "destination": "#minecraft:on_woodland_mansion_maps"
+    }))
+    .unwrap();
+    let level = TestLevel;
+    let params = LootParams {
+        level: Some(&level),
+        origin: Some(Position::new(0.5, 1.5, 0.5)),
+        ..LootParams::new(0.0)
+    };
+    let random = LegacyRandom::new(3);
+    let unchanged = defaults
+        .apply(LootStack::new(items::STONE, 1), &context(&params, &random))
+        .unwrap();
+    assert_eq!(unchanged, LootStack::new(items::STONE, 1));
+
+    // 坏 zoom 报 Invalid，不悄悄截断。
+    // A zoom outside a byte is Invalid instead of being silently truncated.
+    assert!(matches!(
+        LootFunction::parse(&json!({
+            "type": "minecraft:exploration_map",
+            "destination": "minecraft:mansion",
+            "zoom": 999
+        })),
+        Err(LootError::Invalid(_))
+    ));
 }

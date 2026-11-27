@@ -9,8 +9,10 @@ use std::process::{Command, Stdio};
 
 use mc_bamboo_data::villager as data;
 use mc_bamboo_loot::{
-    RandomSequences,
-    trade::{TradeParams, TradeSet, add_offers_from_trade_set},
+    ExplorationMapRequest, ExplorationMapResult, LevelView, RandomSequences,
+    trade::{
+        TradeParams, TradeSet, add_offers_from_trade_set, add_offers_from_trade_set_with_level,
+    },
 };
 use mc_bamboo_protocol::{
     components::{
@@ -142,8 +144,25 @@ impl Report {
         let sequences = RandomSequences::new(seed);
         let fallback = mc_bamboo_blocks::random::XoroshiroRandom::new(seed, seed ^ 0x9e37_79b9);
         let mut offers = Vec::new();
-        add_offers_from_trade_set(&set, &params, Some(&sequences), &fallback, &mut offers)
-            .map_err(|error| format!("{profession}/{level}/{variant}/{seed}: {error}"))?;
+        // 探险地图场景：注入一个固定结构落点的假世界视图，和 Java 侧的
+        // `FakeLevel.findNearestMapStructure` 对齐；其余场景仍走无世界的路径。
+        // Explorer-map cases: inject a fake level view reporting the same fixed
+        // structure position as Java's `FakeLevel.findNearestMapStructure`.
+        let explorer = case["kind"] == "explorer_trade";
+        let level_view = ExplorerLevel::default();
+        let generated = if explorer {
+            add_offers_from_trade_set_with_level(
+                &set,
+                &params,
+                Some(&level_view),
+                Some(&sequences),
+                &fallback,
+                &mut offers,
+            )
+        } else {
+            add_offers_from_trade_set(&set, &params, Some(&sequences), &fallback, &mut offers)
+        };
+        generated.map_err(|error| format!("{profession}/{level}/{variant}/{seed}: {error}"))?;
         let encoded = encode_offers(
             &offers
                 .iter()
@@ -372,5 +391,62 @@ fn dyn_to_json(value: &Dyn) -> Value {
         Dyn::ByteArray(values) => Value::Array(values.iter().map(|v| Value::from(*v)).collect()),
         Dyn::IntArray(values) => Value::Array(values.iter().map(|v| Value::from(*v)).collect()),
         Dyn::LongArray(values) => Value::Array(values.iter().map(|v| Value::from(*v)).collect()),
+    }
+}
+
+/// 探险地图场景的假世界：和 `TradeOracle.java` 的 `FakeLevel` 一样，结构搜索固定
+/// 返回 `(1234, 0, -567)`，`getFreeMapId` 从 0 递增。
+///
+/// Fake world for explorer scenarios: like `TradeOracle.java`'s `FakeLevel`, the
+/// structure search returns a fixed `(1234, 0, -567)` and map ids start at 0.
+#[derive(Default)]
+struct ExplorerLevel {
+    next_map_id: std::cell::Cell<i32>,
+}
+
+impl LevelView for ExplorerLevel {
+    fn is_loaded(&self, _x: i32, _y: i32, _z: i32) -> Option<bool> {
+        Some(true)
+    }
+    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> Option<mc_bamboo_blocks::BlockState> {
+        Some(mc_bamboo_blocks::BlockState::AIR)
+    }
+    fn biome(&self, _x: i32, _y: i32, _z: i32) -> Option<i32> {
+        Some(
+            mc_bamboo_data::registries::biome::NAMES
+                .iter()
+                .position(|name| *name == "minecraft:plains")
+                .unwrap_or(0) as i32,
+        )
+    }
+    fn can_see_sky(&self, _x: i32, _y: i32, _z: i32) -> Option<bool> {
+        Some(true)
+    }
+    fn is_raining(&self) -> Option<bool> {
+        Some(false)
+    }
+    fn is_thundering(&self) -> Option<bool> {
+        Some(false)
+    }
+    fn day_time(&self) -> Option<i64> {
+        Some(0)
+    }
+    fn game_time(&self) -> Option<i64> {
+        Some(0)
+    }
+    fn dimension(&self) -> Option<&'static str> {
+        Some("minecraft:overworld")
+    }
+    fn exploration_map(
+        &self,
+        _request: &ExplorationMapRequest<'_>,
+    ) -> mc_bamboo_loot::Result<Option<ExplorationMapResult>> {
+        let id = self.next_map_id.get();
+        self.next_map_id.set(id + 1);
+        Ok(Some(ExplorationMapResult {
+            map_id: id,
+            target_x: 1234,
+            target_z: -567,
+        }))
     }
 }

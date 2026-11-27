@@ -15,16 +15,17 @@ use mc_bamboo_protocol::components::{ComponentValue, defaults};
 use serde_json::{Map, Value, json};
 
 use crate::condition::LootCondition;
-use crate::context::{EntityTarget, LootContext};
+use crate::context::{EntityTarget, ExplorationMapRequest, LootContext};
 use crate::json::{
-    array, f32_value, field, i32_value, object, opt_bool, required, string, type_name,
+    array, f32_value, field, i32_value, object, opt_bool, opt_i32, opt_string, required, string,
+    type_name,
 };
 use crate::names::{self, Registry};
 use crate::number::{FloatProvider, IntProvider, parse_float_provider, parse_int_provider};
 use crate::predicate::ItemPredicate;
 use crate::stack::{
     ADDITIONAL_TRADE_COST, BLOCK_STATE, CUSTOM_NAME, INSTRUMENT, ITEM_NAME, LootStack,
-    OMINOUS_BOTTLE_AMPLIFIER, POTION_CONTENTS, SUSPICIOUS_STEW_EFFECTS,
+    MAP_DECORATIONS, MAP_ID, OMINOUS_BOTTLE_AMPLIFIER, POTION_CONTENTS, SUSPICIOUS_STEW_EFFECTS,
 };
 use crate::{LootError, Result};
 
@@ -130,11 +131,53 @@ enum FunctionBody {
     /// 本实现没有这个函数需要的数据。
     Unsupported(String),
     /// `exploration_map`：找不到结构时原样退回。
-    ExplorationMap,
+    ExplorationMap(ExplorationMapSpec),
     /// `set_random_dyes`：`number_of_dyes` 提供器。
     SetRandomDyes(IntProvider),
     /// `set_random_potion`：药水注册表 ID 的候选列表，空表示整张注册表。
     SetRandomPotion(Option<Vec<i32>>),
+}
+
+/// `ExplorationMapFunction` 的五个字段，缺省值照官方 codec。
+///
+/// The five fields of `ExplorationMapFunction`, with vanilla codec defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExplorationMapSpec {
+    destination: String,
+    decoration: String,
+    zoom: i8,
+    search_radius: i32,
+    skip_existing_chunks: bool,
+}
+
+impl ExplorationMapSpec {
+    /// `DEFAULT_DECORATION = WOODLAND_MANSION`、`DEFAULT_ZOOM = 2`、
+    /// `DEFAULT_SEARCH_RADIUS = 50`、`DEFAULT_SKIP_EXISTING = true`。
+    fn parse(map: &Map<String, Value>, kind: &str) -> Result<Self> {
+        let destination = string(required(map, "destination", kind)?, "destination")?.to_owned();
+        let decoration = opt_string(map, "decoration", "decoration")?
+            .unwrap_or("minecraft:mansion")
+            .to_owned();
+        // `Codec.BYTE` 读 zoom：越界时按官方 codec 报错。
+        // `Codec.BYTE` for zoom: out of range is a parse error like vanilla.
+        let zoom = match field(map, "zoom") {
+            Some(value) => i8::try_from(i32_value(value, "zoom")?)
+                .map_err(|_| LootError::Invalid("zoom must be a byte".to_owned()))?,
+            None => 2,
+        };
+        Ok(Self {
+            destination,
+            decoration,
+            zoom,
+            search_radius: opt_i32(map, "search_radius", "search_radius", 50)?,
+            skip_existing_chunks: opt_bool(
+                map,
+                "skip_existing_chunks",
+                "skip_existing_chunks",
+                true,
+            )?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -377,7 +420,9 @@ impl LootFunction {
             }
             // 假世界和还没生成结构的世界里 `findNearestMapStructure` 返回空，
             // 官方原样退回输入堆；结构查询本身由调用方在世界侧做。
-            "minecraft:exploration_map" => FunctionBody::ExplorationMap,
+            "minecraft:exploration_map" => {
+                FunctionBody::ExplorationMap(ExplorationMapSpec::parse(map, kind)?)
+            }
             "minecraft:set_random_dyes" => FunctionBody::SetRandomDyes(parse_int_provider(
                 required(map, "number_of_dyes", kind)?,
                 "number_of_dyes",
@@ -657,7 +702,7 @@ impl LootFunction {
                 }
                 Ok(stack)
             }
-            FunctionBody::ExplorationMap => Ok(stack),
+            FunctionBody::ExplorationMap(spec) => exploration_map(stack, spec, context),
             FunctionBody::SetRandomDyes(number) => Ok(set_random_dyes(stack, number, context)?),
             FunctionBody::SetRandomPotion(options) => {
                 Ok(set_random_potion(stack, options.as_deref(), context))
@@ -665,6 +710,69 @@ impl LootFunction {
             FunctionBody::Unsupported(message) => Err(LootError::Unsupported(message.clone())),
         }
     }
+}
+
+/// 官方 `ExplorationMapFunction.run`。世界侧已经做完 `findNearestMapStructure`、
+/// `MapItem.applyNewSavedData`、`renderBiomePreviewMap` 和 `addTargetDecoration` 的世界
+/// 部分，这里只把该写到物品堆上的两个组件写进去。
+///
+/// `ExplorationMapFunction.run`. The world side has already located the structure,
+/// created the saved data and rendered the preview; here we only write the two
+/// item-stack components.
+fn exploration_map(
+    mut stack: LootStack,
+    spec: &ExplorationMapSpec,
+    context: &LootContext<'_, '_, '_>,
+) -> Result<LootStack> {
+    // 空堆、没有 ORIGIN、假世界（没有 level 视图）和找不到结构，官方都原样退回。
+    // Empty stack, missing ORIGIN, a fake world (no level view), and "no structure
+    // found" all return the input stack unchanged in vanilla.
+    if stack.is_empty() {
+        return Ok(stack);
+    }
+    let Some(origin) = context.params.origin else {
+        return Ok(stack);
+    };
+    let Some(level) = context.params.level else {
+        return Ok(stack);
+    };
+    let request = ExplorationMapRequest {
+        origin: origin.block_pos(),
+        destination: &spec.destination,
+        decoration: &spec.decoration,
+        zoom: spec.zoom,
+        search_radius: spec.search_radius,
+        skip_existing_chunks: spec.skip_existing_chunks,
+    };
+    let Some(result) = level.exploration_map(&request)? else {
+        return Ok(stack);
+    };
+
+    // `MapItem.applyNewSavedData` → `map.set(DataComponents.MAP_ID, newId)`。
+    // `MapItem.applyNewSavedData` → `map.set(DataComponents.MAP_ID, newId)`.
+    stack.set_component(MAP_ID, Value::from(result.map_id));
+
+    // `MapItemSavedData.addTargetDecoration`：key 固定 `"+"`、rotation 180，
+    // 坐标是结构的绝对方块坐标；`withDecoration` 会覆盖已有的同名条目。
+    // `MapItemSavedData.addTargetDecoration`: fixed key `"+"`, rotation 180,
+    // absolute block coordinates of the structure; `withDecoration` overwrites
+    // an existing entry with the same key.
+    let mut decorations = stack
+        .component(MAP_DECORATIONS)
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    decorations.insert(
+        "+".to_owned(),
+        json!({
+            "type": spec.decoration,
+            "x": f64::from(result.target_x),
+            "z": f64::from(result.target_z),
+            "rotation": 180.0_f32,
+        }),
+    );
+    stack.set_component(MAP_DECORATIONS, Value::Object(decorations));
+    Ok(stack)
 }
 
 fn parse_optional_function(

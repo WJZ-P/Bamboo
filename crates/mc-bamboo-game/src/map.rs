@@ -63,6 +63,8 @@ pub mod map_color {
     pub const DIRT: u8 = 10;
     pub const STONE: u8 = 11;
     pub const WATER: u8 = 12;
+    pub const COLOR_ORANGE: u8 = 15;
+    pub const COLOR_BROWN: u8 = 26;
 }
 
 /// 官方 `MapColor$Brightness`，编码在压缩颜色字节的低 2 位。
@@ -83,6 +85,88 @@ pub enum Brightness {
 #[inline]
 pub const fn packed_color(color_id: u8, brightness: Brightness) -> u8 {
     (color_id << 2) | (brightness as u8 & 3)
+}
+
+/// 官方 `MapItem.renderBiomePreviewMap(ServerLevel, ItemStack)`：按群系的
+/// `#minecraft:water_on_map_outlines` 判定给 128×128 像素上色。
+///
+/// `is_biome_watery` 接到 `(x, y, z)` 的群系查询，返回该群系是否在
+/// `water_on_map_outlines` 里；`sea_level` 是官方 `level.getSeaLevel()`。
+///
+/// `MapItem.renderBiomePreviewMap`: paint the 128×128 pixels from the
+/// `#minecraft:water_on_map_outlines` biome tag. `is_biome_watery` is the
+/// `(x, y, z)` biome lookup returning tag membership; `sea_level` is
+/// `level.getSeaLevel()`.
+pub fn render_biome_preview_map(
+    data: &mut MapItemSavedData,
+    sea_level: i32,
+    is_biome_watery: impl Fn(i32, i32, i32) -> bool,
+) {
+    let scale = 1 << data.scale;
+    let center_x = data.center_x;
+    let center_z = data.center_z;
+    let unscaled_start_x = center_x / scale - 64;
+    let unscaled_start_z = center_z / scale - 64;
+    let mut watery = [false; COLORS_LEN];
+    for row in 0..MAP_SIZE as i32 {
+        for column in 0..MAP_SIZE as i32 {
+            watery[row as usize * MAP_SIZE + column as usize] = is_biome_watery(
+                (unscaled_start_x + column) * scale,
+                sea_level,
+                (unscaled_start_z + row) * scale,
+            );
+        }
+    }
+
+    for mx in 1..127_i32 {
+        for mz in 1..127_i32 {
+            let mut water_count = 0;
+            for dx in -1..=1_i32 {
+                for dz in -1..=1_i32 {
+                    if (dx != 0 || dz != 0)
+                        && watery[(mz + dz) as usize * MAP_SIZE + (mx + dx) as usize]
+                    {
+                        water_count += 1;
+                    }
+                }
+            }
+            let mut brightness = Brightness::Lowest;
+            let mut color = map_color::NONE;
+            if watery[mz as usize * MAP_SIZE + mx as usize] {
+                color = map_color::COLOR_ORANGE;
+                if water_count > 7 && mz % 2 == 0 {
+                    // `(mx + (int)(Mth.sin(mz) * 7)) / 8 % 5`，Java 的除法 / 取模向零截断。
+                    // `(mx + (int)(Mth.sin(mz) * 7)) / 8 % 5`; Java division and
+                    // remainder truncate toward zero, like Rust's integer ops.
+                    let wave = (mc_bamboo_core::mth::sin(f64::from(mz)) * 7.0) as i32;
+                    match (mx + wave) / 8 % 5 {
+                        0 | 4 => brightness = Brightness::Low,
+                        1 | 3 => brightness = Brightness::Normal,
+                        2 => brightness = Brightness::High,
+                        _ => {}
+                    }
+                } else if water_count > 7 {
+                    color = map_color::NONE;
+                } else if water_count > 5 {
+                    brightness = Brightness::Normal;
+                } else if water_count > 1 {
+                    // 官方这里 `>3` 和 `>1` 两支都写 LOW，合并后行为相同。
+                    // Vanilla has two branches (`>3`, `>1`) both writing LOW.
+                    brightness = Brightness::Low;
+                }
+            } else if water_count > 0 {
+                color = map_color::COLOR_BROWN;
+                if water_count > 3 {
+                    brightness = Brightness::Normal;
+                } else {
+                    brightness = Brightness::Lowest;
+                }
+            }
+            if color != map_color::NONE {
+                data.set_color(mx as usize, mz as usize, packed_color(color, brightness));
+            }
+        }
+    }
 }
 
 /// 官方 `BuiltInRegistries.MAP_DECORATION_TYPE` 常用注册表 ID。
