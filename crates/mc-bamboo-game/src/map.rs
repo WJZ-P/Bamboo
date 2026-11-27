@@ -1402,6 +1402,59 @@ pub(crate) fn use_empty_map(
     true
 }
 
+/// 官方 `MapItem.onCraftedPostProcess`：移除 `MAP_POST_PROCESSING` 组件，
+/// 并在服务端地图表里按 `LOCK`（0）/ `SCALE`（1）分配新 `map_id` 与对应的锁定 / 放大数据。
+///
+/// Official `MapItem.onCraftedPostProcess`: strip `MAP_POST_PROCESSING` and,
+/// using the server [`MapStore`], allocate a new `map_id` with `locked()` or
+/// `scaled()` data.
+pub fn on_crafted_post_process(stack: &mut ItemStack, maps: &mut MapStore) {
+    if stack.is_empty() || stack.item != items::FILLED_MAP {
+        return;
+    }
+    let Ok(mut patch) = ComponentPatch::from_opaque(stack) else {
+        return;
+    };
+    let Some(ComponentValue::MapPostProcessing(kind)) =
+        defaults::resolve(stack.item, &patch, kinds::MAP_POST_PROCESSING).cloned()
+    else {
+        return;
+    };
+    if defaults::of_item(stack.item)
+        .get(kinds::MAP_POST_PROCESSING)
+        .is_some()
+    {
+        patch.put(kinds::MAP_POST_PROCESSING, PatchEntry::Removed);
+    } else {
+        patch.remove(kinds::MAP_POST_PROCESSING);
+    }
+    let (added, removed) = patch.to_opaque();
+    stack.added = added;
+    stack.removed = removed;
+    let Some(old_id) = stack_map_id(stack) else {
+        return;
+    };
+    let next_data = match kind {
+        0 => maps.get(old_id).map(MapItemSavedData::locked),
+        1 => maps.get(old_id).map(MapItemSavedData::scaled),
+        _ => None,
+    };
+    if let Some(data) = next_data {
+        let new_id = maps.next_map_id();
+        maps.insert(new_id, data);
+        if defaults::of_item(stack.item).get(kinds::MAP_ID)
+            == Some(&ComponentValue::MapId(new_id))
+        {
+            patch.remove(kinds::MAP_ID);
+        } else {
+            patch.put(kinds::MAP_ID, PatchEntry::Set(ComponentValue::MapId(new_id)));
+        }
+        let (added, removed) = patch.to_opaque();
+        stack.added = added;
+        stack.removed = removed;
+    }
+}
+
 /// 官方 `MapItem.useOn(UseOnContext)`：手持已填充地图右键旗帜时切换旗帜标记。
 ///
 /// 若目标方块不是 `#minecraft:banners` 返回 `None`；是旗帜时照 26.3 字节码：

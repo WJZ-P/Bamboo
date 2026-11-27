@@ -106,27 +106,7 @@ pub(super) fn has_post_processing(stack: &ItemStack) -> bool {
 /// using the server `MapStore`, allocate a new `map_id` with `locked()` or
 /// `scaled()` data.
 pub(super) fn post_process_map(stack: &mut ItemStack, maps: &mut crate::map::MapStore) {
-    if stack.is_empty() || stack.item != items::FILLED_MAP {
-        return;
-    }
-    let Some(ComponentValue::MapPostProcessing(kind)) = resolved(stack, kinds::MAP_POST_PROCESSING)
-    else {
-        return;
-    };
-    assign(stack, kinds::MAP_POST_PROCESSING, None);
-    let Some(old_id) = crate::map::stack_map_id(stack) else {
-        return;
-    };
-    let next_data = match kind {
-        LOCK => maps.get(old_id).map(crate::map::MapItemSavedData::locked),
-        SCALE => maps.get(old_id).map(crate::map::MapItemSavedData::scaled),
-        _ => None,
-    };
-    if let Some(data) = next_data {
-        let new_id = maps.next_map_id();
-        maps.insert(new_id, data);
-        assign(stack, kinds::MAP_ID, Some(ComponentValue::MapId(new_id)));
-    }
+    crate::map::on_crafted_post_process(stack, maps);
 }
 
 #[cfg(test)]
