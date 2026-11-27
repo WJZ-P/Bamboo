@@ -89,14 +89,13 @@ pub fn build_exploration_map(
     });
     // `MapItemSavedData.addTargetDecoration` 写的是物品堆的 `MAP_DECORATIONS` 组件，
     // 玩家持图时 `tickCarriedBy` 才把它补进 saved data。Bamboo 没有把物品组件接进
-    // 地图 tick 的链路，改为在建图时就写进 saved data：玩家持图发出的
-    // `ClientboundMapItemDataPacket` 字节一致，但没被持有过的地图存档会提前带上这个
-    // 标记（见 README 已知限制）。
+    // 地图 tick 的链路，改为在建图时就加入内存标记。地图存档只保存旗帜和展示框，
+    // 因此重载地图后不会从这里恢复目标标记（见 README 已知限制）。
     // `MapItemSavedData.addTargetDecoration` writes the item-stack MAP_DECORATIONS
     // component; `tickCarriedBy` copies it into saved data only when a player
     // carries the map. Bamboo does not wire item components into the map tick, so
-    // it writes the marker into saved data at creation: held-map packet bytes
-    // match, but an un-held map's save carries the marker earlier than vanilla.
+    // it adds an in-memory decoration at creation. The save codec persists only
+    // banners and frames, so this marker is not recovered on load.
     if let Some(kind) = decoration_id_from_name(request.decoration) {
         data.add_decoration(
             kind,

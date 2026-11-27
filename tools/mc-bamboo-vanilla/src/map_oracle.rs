@@ -1,4 +1,4 @@
-//! `mc-bamboo-vanilla map-oracle <java 路径> [--break color|save|packet|fluid]`：
+//! `mc-bamboo-vanilla map-oracle <java 路径> [--explorer | --break color|save|packet|fluid]`：
 //! 用官方 26.3 的 `NoiseBasedChunkGenerator`、`MapItem`、`MapItemSavedData`、
 //! `MapIndex` 与 `ClientboundMapItemDataPacket.STREAM_CODEC` 对拍 Bamboo 地图实现：
 //! 1. 固定种子 8×9 区块的 scale=0 纯地形 128×128 颜色、scale=1 2×2 众数颜色，
@@ -26,8 +26,8 @@ use mc_bamboo_game::{
     PlayerId,
     map::{
         COLORS_LEN, MapBanner, MapFrame, MapIndex, MapItemSavedData, MapStore, banner_from_world,
-        make_filled_map, on_crafted_post_process, stack_map_id, update_colors,
-        update_colors_with_banner_lookup,
+        decoration_id_from_name, make_filled_map, on_crafted_post_process,
+        render_biome_preview_map, stack_map_id, update_colors, update_colors_with_banner_lookup,
     },
     world_options::{LevelType, WorldGenConfig},
     worldgen::{build_region_column, generate_chunk},
@@ -129,6 +129,9 @@ struct SavedSummary {
 }
 
 pub fn run(java: &str, args: &[&str]) -> Result<(), String> {
+    if args == ["--explorer"] {
+        return run_explorer(java);
+    }
     let break_mode = parse_args(args)?;
 
     // 1. Bamboo 侧用真实游戏世界生成函数生成同一片固定种子 8×9 区块（CARVERS）。
@@ -449,6 +452,38 @@ pub fn run(java: &str, args: &[&str]) -> Result<(), String> {
         "MAP-ORACLE RESULT: 0 mismatches across scale0 (16384 px, {non_zero_scale0} painted, {water_scale0} water), special0 (16384 px), scale1 (16384 px), bidirectional maps/0.dat + maps/last_id.dat round-trip, unlocked walk ({sent_walk}/20 packets byte-exact), scale1 incremental walk ({sent_scale1_walk}/10 packets byte-exact), locked walk ({sent_locked}/6 packets byte-exact), banner toggle ({sent_banner_toggle}/11 packets + saved banners exact), banner break (vanished at tick {vanish_tick}, {sent_banner_break}/20 packets byte-exact), and map_extending ({} crafting cases exact)",
         bamboo_map_extending.len()
     );
+    Ok(())
+}
+
+fn run_explorer(java: &str) -> Result<(), String> {
+    let output = crate::official_program(java, SOURCE)?
+        .arg("--explorer")
+        .output()
+        .map_err(|error| format!("cannot run java MapOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let official = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+    let mut data =
+        MapItemSavedData::create_fresh(1234.0, -567.0, 1, true, true, "minecraft:overworld");
+    render_biome_preview_map(&mut data, 63, |x, _, z| {
+        x < 1200 || (-550..-520).contains(&z)
+    });
+    let player = PlayerId(1);
+    data.tick_carried_by_player(
+        player,
+        "Oracle",
+        1234.5,
+        -566.5,
+        0.0,
+        0,
+        "minecraft:overworld",
+    );
+    let marker = decoration_id_from_name("minecraft:red_x").ok_or("red_x not registered")?;
+    data.add_decoration(marker, None, "+".to_owned(), 1234.0, -567.0, 180.0, None);
+    let packet = encode_update_packet(&mut data, player);
+    compare_packets("explorer preview", &[Some(official)], &[packet])?;
+    println!("map-oracle explorer: 16384 preview pixels and 1 marker packet, 0 mismatches");
     Ok(())
 }
 

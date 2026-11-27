@@ -139,6 +139,7 @@ import net.minecraft.world.level.levelgen.blending.Blender;
 import net.minecraft.world.level.levelgen.densityfunction.DensityVolume;
 import net.minecraft.world.level.levelgen.material.rule.MaterialRule;
 import net.minecraft.world.level.saveddata.maps.MapBanner;
+import net.minecraft.world.level.saveddata.maps.MapDecorationTypes;
 import net.minecraft.world.level.saveddata.maps.MapId;
 import net.minecraft.world.level.saveddata.maps.MapIndex;
 import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
@@ -169,17 +170,18 @@ public final class MapOracle {
     private static void run(String[] args, PrintStream log) throws Exception {
         System.setOut(log);
         FileOutputStream stdout = new FileOutputStream(FileDescriptor.out);
-        if (args.length != 7) {
+        boolean explorer = args.length == 1 && args[0].equals("--explorer");
+        if (!explorer && args.length != 7) {
             throw new IllegalArgumentException(
                     "usage: MapOracle <seed> <in_map0.dat> <in_last_id.dat> <out_map0.dat> <out_last_id.dat> <in_banner_added.dat> <in_banner_removed.dat>");
         }
-        long seed = Long.parseLong(args[0]);
-        Path inMapPath = Path.of(args[1]);
-        Path inIndexPath = Path.of(args[2]);
-        Path outMapPath = Path.of(args[3]);
-        Path outIndexPath = Path.of(args[4]);
-        Path inBannerAddedPath = Path.of(args[5]);
-        Path inBannerRemovedPath = Path.of(args[6]);
+        long seed = explorer ? 0 : Long.parseLong(args[0]);
+        Path inMapPath = explorer ? null : Path.of(args[1]);
+        Path inIndexPath = explorer ? null : Path.of(args[2]);
+        Path outMapPath = explorer ? null : Path.of(args[3]);
+        Path outIndexPath = explorer ? null : Path.of(args[4]);
+        Path inBannerAddedPath = explorer ? null : Path.of(args[5]);
+        Path inBannerRemovedPath = explorer ? null : Path.of(args[6]);
 
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
@@ -192,6 +194,10 @@ public final class MapOracle {
             RegistryAccess.Frozen registries = loadRegistries(resources);
             BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(registries)
                     .forEach(DataComponentInitializers.PendingComponents::apply);
+            if (explorer) {
+                out.write(explorerPreviewPacket(registries));
+                return;
+            }
             RegistryOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, registries);
             int expectedDataVersion = SharedConstants.getCurrentVersion().dataVersion().version();
 
@@ -309,6 +315,23 @@ public final class MapOracle {
             out.write('\n');
             out.flush();
         }
+    }
+
+    private static String explorerPreviewPacket(RegistryAccess.Frozen registries) throws Exception {
+        FakeLevel level = FakeLevel.create(registries);
+        level.explorerOcean = registries.lookupOrThrow(Registries.BIOME).getOrThrow(Biomes.OCEAN);
+        BlockPos target = new BlockPos(1234, 0, -567);
+        ItemStack stack = new ItemStack(Items.BURIED_TREASURE_MAP);
+        MapItem.applyNewSavedData(level, stack, target.getX(), target.getZ(), (byte) 1, true, true);
+        MapItem.renderBiomePreviewMap(level, stack);
+        MapItemSavedData.addTargetDecoration(stack, target, "+", MapDecorationTypes.RED_X);
+        MapId id = stack.get(DataComponents.MAP_ID);
+        MapItemSavedData data = level.getMapData(id);
+        FakePlayer player = FakePlayer.create(level, "Oracle");
+        player.moveToPos(1234.5, 64.0, -566.5, 0.0F);
+        player.getInventory().setItem(0, stack);
+        data.tickCarriedBy(player, stack, null);
+        return encodePacket(registries, data.getUpdatePacket(id, player));
     }
 
     private static JsonArray runWalkScenario(
@@ -922,6 +945,19 @@ public final class MapOracle {
         private EmptyLevelChunk emptyChunk;
         long gameTime;
         int nextMapId;
+
+        private Holder<Biome> explorerOcean;
+
+        @Override public int getSeaLevel() { return 63; }
+
+        @Override public Holder<Biome> getBiome(BlockPos pos) {
+            if (explorerOcean == null) return super.getBiome(pos);
+            // 人造海岸穿过地图，确保预览同时覆盖陆地、海岸、浅水和深水。
+            // A synthetic coastline exercises land, shore and shallow/deep water.
+            int z = pos.getZ();
+            boolean water = pos.getX() < 1200 || (z >= -550 && z < -520);
+            return water ? explorerOcean : registries.lookupOrThrow(Registries.BIOME).getOrThrow(Biomes.PLAINS);
+        }
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
