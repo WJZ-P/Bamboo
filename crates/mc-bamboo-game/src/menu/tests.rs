@@ -630,6 +630,7 @@ fn locked_chest() -> ItemStack {
         count: 1,
         added: vec![(mc_bamboo_data::registries::data_component_type::LOCK, lock)],
         removed: Vec::new(),
+        bundle_selected: None,
     }
 }
 

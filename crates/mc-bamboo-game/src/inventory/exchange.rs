@@ -35,6 +35,7 @@ fn stack(item: i32, count: i32, kind: i32, value: ComponentValue) -> ItemStack {
         count,
         added,
         removed,
+        bundle_selected: None,
     }
 }
 

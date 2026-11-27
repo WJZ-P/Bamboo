@@ -92,6 +92,7 @@ impl GroundItem {
             bob_offs: 0.0,
             roll_velocity,
             target: None,
+            item_destroy_pending: false,
         }
     }
 
@@ -176,6 +177,9 @@ impl Entity {
             return;
         }
         let scan = Self::item_base_tick(me, ctx.blocks());
+        if me.ground().is_some_and(|item| item.item_destroy_pending) {
+            me.item_destroyed(ctx);
+        }
         // 这一拍里被岩浆或火丢掉之后，官方仍会把摩擦、年龄和第二次流体扫描做完。
         if let Some(item) = me.ground_mut()
             && item.pickup_delay > 0
@@ -596,10 +600,34 @@ impl Entity {
         if let Some(item) = self.ground_mut() {
             item.health = next;
             if next <= 0 {
+                item.item_destroy_pending = true;
                 self.discard();
             }
         }
         true
+    }
+
+    /// `ItemEntity.hurtServer` 血量归零时的 `ItemStack.onDestroyed`：
+    /// 先把物品上容器组件里的内容物原地掉出来，再清空组件，最后 `discard()`。
+    /// 摔进虚空走 `Entity.onBelowWorld` 的纯 `discard()`，不会经过这里。
+    ///
+    /// `ItemStack.onDestroyed` on the fatal damage path: spawn the carried
+    /// contents in place, clear the component and discard. Falling out of the
+    /// world only discards, so it does not reach this helper.
+    pub(crate) fn item_destroyed(&mut self, ctx: &mut dyn EntityCtx) {
+        let mut cleared = self
+            .ground()
+            .map(|item| item.stack.clone())
+            .unwrap_or_else(mc_bamboo_protocol::item::ItemStack::empty);
+        let (position, dropped) = (self.position, container_destroyed_contents(&mut cleared));
+        if let Some(item) = self.ground_mut() {
+            item.stack = cleared;
+            item.item_destroy_pending = false;
+        }
+        for stack in dropped {
+            ctx.emit(Command::DropItemAtPosition { stack, position }, self);
+        }
+        self.discard();
     }
 
     /// `ItemEntity.fireImmune`：物品扛得住 `inFire`，或者实体类型本身免疫（物品不是）。
@@ -698,6 +726,48 @@ fn holder_contains(set: &HolderSet, id: i32) -> bool {
 
 fn damage_type_id(name: &str) -> i32 {
     mc_bamboo_data::damage_type_id(name).unwrap_or(0)
+}
+
+/// `BundleItem.onDestroyed` / `BlockItem.onDestroyed`：容器物品被伤害打掉时，
+/// 把 `bundle_contents` / `container` 里的内容物一件件原样掉出来。
+///
+/// `BundleItem.onDestroyed` and `BlockItem.onDestroyed`: return the contents
+/// carried by a destroyed container item, one stack per entry.
+fn container_destroyed_contents(
+    stack: &mut mc_bamboo_protocol::item::ItemStack,
+) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+    use mc_bamboo_data::{items, registries::data_component_type as kinds};
+    use mc_bamboo_protocol::components::{
+        ComponentPatch, ComponentValue, bundle, stack::ItemStackTemplate,
+    };
+    let Ok(patch) = ComponentPatch::from_opaque(stack) else {
+        return Vec::new();
+    };
+    let templates: Vec<ItemStackTemplate> = match patch.get(kinds::BUNDLE_CONTENTS) {
+        Some(ComponentValue::BundleContents(items)) => items.clone(),
+        _ => match patch.get(kinds::CONTAINER) {
+            Some(ComponentValue::Container(slots)) => slots.iter().flatten().cloned().collect(),
+            _ => Vec::new(),
+        },
+    };
+    let mut dropped = Vec::new();
+    for template in templates {
+        let (added, removed) = template.components.to_opaque();
+        let item = mc_bamboo_protocol::item::ItemStack {
+            item: template.item,
+            count: template.count,
+            added,
+            removed,
+            bundle_selected: None,
+        };
+        if !item.is_empty() && item.item != items::AIR {
+            dropped.push(item);
+        }
+    }
+    if !dropped.is_empty() || patch.get(kinds::BUNDLE_CONTENTS).is_some() {
+        let _ = bundle::clear_contents_if_container(stack);
+    }
+    dropped
 }
 
 pub(crate) fn friction(state: BlockState) -> f32 {

@@ -195,6 +195,10 @@ pub struct GroundItem {
     ///
     /// `target`. Only this UUID can pick the item up.
     pub target: Option<[u8; 16]>,
+    /// 血量归零：下一处带上下文的驱动要跑 `ItemStack.onDestroyed` 再丢弃。
+    ///
+    /// Fatal damage: the next driver with a context runs `ItemStack.onDestroyed`.
+    pub(crate) item_destroy_pending: bool,
 }
 
 /// 经验球，对应 `ExperienceOrb`。字段在 [`orb`] 里读写。

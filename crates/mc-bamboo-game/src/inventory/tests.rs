@@ -140,6 +140,7 @@ fn with_max_stack_size(item: i32, count: i32) -> ItemStack {
         count,
         added: vec![(data_component_type::MAX_STACK_SIZE, vec![99])],
         removed: Vec::new(),
+        bundle_selected: None,
     }
 }
 
@@ -150,6 +151,7 @@ fn enchanted(item: i32) -> ItemStack {
         count: 1,
         added: vec![(data_component_type::ENCHANTMENTS, vec![1, 5, 1])],
         removed: Vec::new(),
+        bundle_selected: None,
     }
 }
 
@@ -498,6 +500,7 @@ fn swapping_uses_the_selected_slot_and_keeps_components_for_the_owner() {
         count: 2,
         added: vec![(1, vec![0x10])],
         removed: vec![12],
+        bundle_selected: None,
     };
     // `blocks-inventory.md` 2.5 的实测字节：delimited 的 `02 01 01 01 01 01 10 0c`。
     set_slot(&server, &client, 45, potion.clone());
@@ -530,6 +533,7 @@ fn components_we_only_shape_check_come_back_to_the_owner() {
         count: 1,
         added: vec![(data_component_type::LOCK, lock)],
         removed: Vec::new(),
+        bundle_selected: None,
     };
 
     set_slot(&server, &client, 45, locked.clone());

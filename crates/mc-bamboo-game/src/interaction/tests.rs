@@ -2358,6 +2358,7 @@ fn with_component(item: i32, kind: i32, state: u32) -> ItemStack {
         count: 1,
         added: vec![(kind, value)],
         removed: Vec::new(),
+        bundle_selected: None,
     }
 }
 

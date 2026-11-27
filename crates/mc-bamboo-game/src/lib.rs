@@ -554,6 +554,7 @@ pub fn replay_orb_pickup(
     player.inventory.slots[held] = ItemStack {
         item: items::DIAMOND_SWORD,
         count: 1,
+        bundle_selected: None,
         added,
         removed,
     };
@@ -3500,6 +3501,7 @@ pub fn replay_player_attributes(scene: &ReplayAttrScene) -> ReplayAttrResult {
         player.inventory.slots[index] = ItemStack {
             item: slot.item,
             count: 1,
+            bundle_selected: None,
             added,
             removed,
         };
@@ -3664,6 +3666,7 @@ pub fn replay_speed_sync_packets(omit_dirty: bool) -> (Vec<u8>, Vec<u8>, Vec<u8>
     let pickaxe = ItemStack {
         item: items::DIAMOND_PICKAXE,
         count: 1,
+        bundle_selected: None,
         added,
         removed,
     };
@@ -3746,6 +3749,7 @@ pub fn replay_soul_speed_sync_packet(omit_soul_speed: bool) -> Vec<u8> {
     region.players.get_mut(&id).expect("player").inventory.slots[8] = ItemStack {
         item: items::DIAMOND_BOOTS,
         count: 1,
+        bundle_selected: None,
         added,
         removed,
     };

@@ -616,6 +616,7 @@ mod tests {
         ItemStack {
             item,
             count: 1,
+            bundle_selected: None,
             added,
             removed,
         }

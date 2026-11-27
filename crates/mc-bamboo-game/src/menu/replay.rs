@@ -414,6 +414,7 @@ impl Replay {
             return self.snapshot();
         }
         let mut thrown = Vec::new();
+        let mut sounds = Vec::new();
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
@@ -429,6 +430,7 @@ impl Replay {
                 offers: &mut m.offers,
                 selection_hint: &mut m.selection_hint,
             }),
+            sounds: &mut sounds,
         };
         super::do_click(&mut ctx, i32::from(slot), i32::from(button), input);
         // 客户端从不预测，回传的总是空光标。
@@ -466,6 +468,7 @@ impl Replay {
         }
         let before = self.menu_slots();
         let mut thrown = Vec::new();
+        let mut sounds = Vec::new();
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
@@ -481,6 +484,7 @@ impl Replay {
                 offers: &mut m.offers,
                 selection_hint: &mut m.selection_hint,
             }),
+            sounds: &mut sounds,
         };
         super::do_click(&mut ctx, i32::from(slot), i32::from(button), input);
         let after = self.menu_slots();

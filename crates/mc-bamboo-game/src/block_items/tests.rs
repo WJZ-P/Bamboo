@@ -29,6 +29,7 @@ fn with_component(item: i32, component: i32, value: &ComponentValue) -> ItemStac
         count: 1,
         added: vec![(component, bytes)],
         removed: Vec::new(),
+        bundle_selected: None,
     }
 }
 

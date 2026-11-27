@@ -1121,6 +1121,7 @@ pub fn make_filled_map(map_id: i32) -> ItemStack {
     ItemStack {
         item: items::FILLED_MAP,
         count: 1,
+        bundle_selected: None,
         added,
         removed,
     }

@@ -644,6 +644,7 @@ fn stack_with_patch(item: i32, count: i32, hex: &str) -> Result<ItemStack, Strin
         count,
         added,
         removed,
+        bundle_selected: None,
     })
 }
 

@@ -4451,6 +4451,7 @@ fn a_sweep_ignites_swept_targets_with_fire_aspect() {
     let weapon = ItemStack {
         item: mc_bamboo_data::items::DIAMOND_SWORD,
         count: 1,
+        bundle_selected: None,
         added,
         removed,
     };
@@ -4542,6 +4543,7 @@ fn melee_attack_hits_another_player() {
     let weapon = ItemStack {
         item: mc_bamboo_data::items::DIAMOND_SWORD,
         count: 1,
+        bundle_selected: None,
         added,
         removed,
     };
@@ -4805,6 +4807,7 @@ fn an_enchanted_attack_emits_the_magic_critical_animation() {
     let weapon = ItemStack {
         item: items::DIAMOND_SWORD,
         count: 1,
+        bundle_selected: None,
         added,
         removed,
     };

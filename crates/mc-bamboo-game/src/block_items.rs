@@ -223,6 +223,7 @@ pub(crate) fn create_stack(template: &ItemStackTemplate) -> ItemStack {
     let stack = ItemStack {
         item: template.item,
         count: template.count,
+        bundle_selected: None,
         added,
         removed,
     };
@@ -713,6 +714,7 @@ fn record_item(tag: &[(String, Tag)]) -> Option<ItemStack> {
         count,
         added,
         removed,
+        bundle_selected: None,
     };
     (!stack.is_empty()).then_some(stack)
 }

@@ -35,6 +35,16 @@ pub struct ItemStack {
     pub added: Vec<(i32, Vec<u8>)>,
     /// 移除的组件类型。
     pub removed: Vec<i32>,
+    /// 收纳袋里选中的那一格，官方 `BundleContents.selectedItem`。
+    ///
+    /// 存档和网络的 `bundle_contents` 都不带这个值，它是随物品堆走的服务端本地状态：
+    /// 复制物品堆时一起复制，装取内容物之后由 [`crate::components::bundle`] 复位。
+    /// 没有选中格或不是收纳袋时是 `None`。
+    ///
+    /// The selected bundle slot, vanilla `BundleContents.selectedItem`. Neither
+    /// the save codec nor the network codec carries it; it is server-local state
+    /// attached to the stack.
+    pub bundle_selected: Option<u32>,
 }
 
 impl ItemStack {
@@ -50,6 +60,7 @@ impl ItemStack {
             count,
             added: Vec::new(),
             removed: Vec::new(),
+            bundle_selected: None,
         }
     }
 
@@ -103,6 +114,7 @@ impl ItemStack {
             count,
             added,
             removed,
+            bundle_selected: None,
         };
         // 官方 `validatedStreamCodec`：每项组件按 `Codec` 解，再按解出来的值写回去，
         // 最后整堆物品还要过得了 `ItemStack.CODEC`。
@@ -126,6 +138,7 @@ impl ItemStack {
             count,
             added,
             removed,
+            bundle_selected: None,
         })
     }
 
@@ -262,6 +275,7 @@ mod tests {
             count: 2,
             added: vec![(1, vec![0x10])],
             removed: vec![12],
+            bundle_selected: None,
         }
     }
 
@@ -282,6 +296,7 @@ mod tests {
             count: 2,
             added: vec![(kinds::LOCK, lock)],
             removed: Vec::new(),
+            bundle_selected: None,
         }
     }
 
@@ -316,6 +331,7 @@ mod tests {
                 count: 1,
                 added: vec![(1, vec![5])],
                 removed: vec![2],
+                bundle_selected: None,
             }
         );
         assert_eq!(trusted(&stack), hex("01 05 01 01 01 05 02"));

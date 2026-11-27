@@ -307,6 +307,7 @@ fn to_stack(stack: &mc_bamboo_loot::LootStack) -> ItemStack {
     ItemStack {
         item: stack.item,
         count: stack.count,
+        bundle_selected: None,
         added,
         removed,
     }

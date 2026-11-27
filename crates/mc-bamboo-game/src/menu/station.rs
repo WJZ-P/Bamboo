@@ -385,6 +385,8 @@ pub(crate) struct Station {
     /// refreshes it from `Player` before every click.
     experience_level: i32,
     selected: u8,
+    /// 本次点击要播的收纳袋音效，游戏层在点击结束后发出去。
+    pub(crate) bundle_sounds: Vec<super::bundle::Sound>,
     /// 切石机上次看到的输入物品。只比物品种类，不比数量。
     ///
     /// Last stonecutter input item. Compared by item id, not count.
@@ -495,6 +497,7 @@ impl Station {
             creative: false,
             experience_level: 0,
             selected: 0,
+            bundle_sounds: Vec::new(),
             stone_input: ItemStack::empty(),
             stone_recipes: Vec::new(),
             machine_set: [false; 5],
@@ -988,6 +991,9 @@ impl Station {
     }
 
     fn do_click(&mut self, slot_index: i32, button: i32, input: ContainerInput) {
+        if super::bundle::try_station_click(self, slot_index, button, input) {
+            return;
+        }
         if input == ContainerInput::QuickCraft {
             self.quick_craft(slot_index, button);
         } else if self.quickcraft_status != 0 {
@@ -2495,6 +2501,44 @@ impl Station {
         self.replay_view()
     }
 
+    /// 收纳袋点击用的只读槽位。
+    pub(crate) fn has_slot(&self, index: usize) -> bool {
+        index < self.slots.len()
+    }
+
+    pub(crate) fn slot_item(&self, index: usize) -> ItemStack {
+        self.slots[index].clone()
+    }
+
+    pub(crate) fn carried(&self) -> &ItemStack {
+        &self.carried
+    }
+
+    pub(crate) fn set_carried(&mut self, stack: ItemStack) {
+        self.carried = stack;
+    }
+
+    pub(crate) fn set_slot(&mut self, index: usize, stack: ItemStack) {
+        self.set_by_player(index, stack);
+    }
+
+    pub(crate) fn may_place_item(&self, index: usize, stack: &ItemStack) -> bool {
+        self.may_place(index, stack)
+    }
+
+    pub(crate) fn safe_insert_item(
+        &mut self,
+        index: usize,
+        stack: ItemStack,
+        amount: i32,
+    ) -> ItemStack {
+        self.safe_insert(index, stack, amount)
+    }
+
+    pub(crate) fn note_bundle_sound(&mut self, kind: super::bundle::Sound) {
+        self.bundle_sounds.push(kind);
+    }
+
     /// 和菜单 oracle 一样的点击：压住同步、点、光标按空的收回来、再 `broadcastChanges`。
     ///
     /// The menu oracle's click: suppress, click, receive an empty cursor, then `broadcastChanges`.
@@ -3219,6 +3263,8 @@ fn apply_click(
         station.receive(*slot, hash.clone());
     }
     station.remote_carried.receive(packet.carried.clone());
+    let sounds = std::mem::take(&mut station.bundle_sounds);
+    super::bundle::send_sounds(region, id, &sounds);
     let anvil_cost = std::mem::take(&mut station.anvil_cost);
     if anvil_cost > 0
         && let Some(player) = region.players.get_mut(&id)
@@ -3384,7 +3430,7 @@ pub(crate) fn click_inventory(region: &mut Region, id: PlayerId, packet: ClickPa
         send_outgoing(region, id, 0, packets);
         return;
     }
-    let packets = {
+    let (packets, sounds) = {
         let Some(player) = region.players.get_mut(&id) else {
             return;
         };
@@ -3415,9 +3461,15 @@ pub(crate) fn click_inventory(region: &mut Region, id: PlayerId, packet: ClickPa
         station.write_player(&mut player.inventory);
         player.inventory.set_state_id(station.state_id);
         station.store_cursor(&mut player.inventory_cursor);
-        std::mem::take(&mut station.packets)
+        (
+            std::mem::take(&mut station.packets),
+            std::mem::take(&mut station.bundle_sounds),
+        )
     };
     send_outgoing(region, id, 0, packets);
+    super::bundle::send_sounds(region, id, &sounds);
+    // 玩家物品栏菜单的音效在写完玩家状态、发完包之后再发给所有人。
+    // The inventory menu's sounds go out after the player state and packets.
 }
 
 /// `ServerboundContainerSlotStateChangedPacket`：切换合成器菜单里一格的禁用状态。

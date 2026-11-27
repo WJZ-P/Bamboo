@@ -851,6 +851,7 @@ fn item_with_custom_name(item: i32, custom_name: Option<&Tag>) -> ItemStack {
     ItemStack {
         item,
         count: 1,
+        bundle_selected: None,
         added,
         removed,
     }

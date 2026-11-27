@@ -27,6 +27,8 @@ pub(crate) struct UsingItem {
     pub item: i32,
     pub remaining: i32,
     pub total: i32,
+    /// `BundleItem.onUseTick` 的倒出状态；其它物品是 `false`。
+    pub bundle: bool,
 }
 
 /// 一次使用能不能开始：`Consumable.canConsume` 的满饥饿判定，
@@ -83,10 +85,86 @@ pub(crate) fn start(region: &mut Region, id: PlayerId, hand: mc_bamboo_core::Han
         item,
         remaining: total,
         total,
+        bundle: false,
     });
     // `LivingEntity` 的使用标志在实体元数据里，观察者要看得见。
     player.sync.metadata_dirty = true;
     true
+}
+
+/// `BundleItem.use`：只登记「正在使用」状态，返回 `SUCCESS`。
+pub(crate) fn start_bundle(player: &mut Player, hand: mc_bamboo_core::Hand, item: i32) -> bool {
+    if player.use_item.is_some() || player.weapon_use.is_some() {
+        return true;
+    }
+    let total = crate::menu::bundle::USE_DURATION;
+    player.use_item = Some(UsingItem {
+        hand,
+        item,
+        remaining: total,
+        total,
+        bundle: true,
+    });
+    player.sync.metadata_dirty = true;
+    true
+}
+
+/// `BundleItem.onUseTick` 加 `dropContent`：本刻倒出一件时记统计、播倒出音效。
+fn bundle_tick(
+    region: &mut Region,
+    id: PlayerId,
+    hand: mc_bamboo_core::Hand,
+    item: i32,
+    remaining: i32,
+) {
+    if !crate::menu::bundle::should_drop(remaining) {
+        return;
+    }
+    let position = {
+        let Some(player) = region.players.get(&id) else {
+            return;
+        };
+        if player.inventory.held(hand).item != item {
+            return;
+        }
+        player.position()
+    };
+    let taken = {
+        let Some(player) = region.players.get_mut(&id) else {
+            return;
+        };
+        let slot = player.inventory.hand_slot(hand);
+        let stack = &mut player.inventory.slots[slot];
+        crate::menu::bundle::drop_one(stack)
+    };
+    let Some(taken) = taken else {
+        return;
+    };
+    // `set(BUNDLE_CONTENTS, mutable)` 只在服务端本地改，网络补丁和官方一样；
+    // 这里补发一次槽位，让客户端看到收纳袋变空 / 少了一件。
+    if let Some(player) = region.players.get_mut(&id) {
+        let slot = player.inventory.hand_slot(hand);
+        crate::inventory::send_slot(player, &mut region.links, slot);
+    }
+    crate::item_use_stats::award(region, id, item);
+    // `Level.playSound(null, blockPosition(), BUNDLE_DROP_CONTENTS, PLAYERS, 0.8, pitch)`。
+    let block = mc_bamboo_core::BlockPos::containing(position);
+    let roll = region.sound_seed_generator.source().next_float();
+    let seed = region.sound_seed_generator.source().next_long();
+    let packet = mc_bamboo_protocol::packet::play::Sound {
+        sound: crate::menu::bundle::Sound::DropContents.id(),
+        inline: None,
+        source: mc_bamboo_data::sounds::PLAYERS,
+        x: f64::from(block.x) + 0.5,
+        y: f64::from(block.y) + 0.5,
+        z: f64::from(block.z) + 0.5,
+        volume: 0.8,
+        pitch: crate::menu::bundle::pitch(crate::menu::bundle::Sound::DropContents, roll),
+        seed,
+    };
+    crate::interaction::send_sound(region, None, &packet);
+    // `Player.drop(stack, false, PREDICTED)`：位置、速度和拾取延迟都走正式的丢出路径。
+    crate::drops::spawn_throw(region, id, taken);
 }
 
 /// `LivingEntity.updateUsingItem`：每刻 --，到 0 时 `completeUsingItem()`。
@@ -101,6 +179,26 @@ pub(crate) fn tick(region: &mut Region) {
         let Some(using) = player.use_item.as_mut() else {
             continue;
         };
+        if using.bundle {
+            let (hand, item, remaining) = (using.hand, using.item, using.remaining);
+            player.use_item = None;
+            player.sync.metadata_dirty = true;
+            bundle_tick(region, id, hand, item, remaining);
+            if let Some(player) = region.players.get_mut(&id)
+                && player.inventory.held(hand).item == item
+                && remaining > 1
+            {
+                player.use_item = Some(UsingItem {
+                    hand,
+                    item,
+                    remaining: remaining - 1,
+                    total: crate::menu::bundle::USE_DURATION,
+                    bundle: true,
+                });
+                player.sync.metadata_dirty = true;
+            }
+            continue;
+        }
         if using.remaining > 0 {
             using.remaining -= 1;
         }
@@ -195,6 +293,7 @@ pub(crate) fn complete(region: &mut Region, id: PlayerId, hand: mc_bamboo_core::
                 ItemStack {
                     item: template.item,
                     count: template.count.max(1),
+                    bundle_selected: None,
                     added,
                     removed,
                 }

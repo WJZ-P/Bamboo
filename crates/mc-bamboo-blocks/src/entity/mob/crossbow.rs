@@ -502,6 +502,7 @@ fn perform_shooting(
         let mut ammo = ItemStack {
             item: template.item,
             count: template.count,
+            bundle_selected: None,
             added,
             removed,
         };

@@ -2031,6 +2031,7 @@ mod tests {
             count: 2,
             added: vec![(1, vec![0x10])],
             removed: vec![12],
+            bundle_selected: None,
         };
         let slots = [(EquipmentSlot::MainHand, &stack)];
         let packet = SetEquipment::new(ENTITY, &slots).unwrap();

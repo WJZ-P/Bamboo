@@ -1399,6 +1399,12 @@ pub enum Command {
     DropItem {
         stack: ItemStack,
     },
+    /// 容器物品被毁时在原地生成一件掉落物，速度用实体自己的随机源。
+    /// `ItemUtils.onContainerDestroyed`: `new ItemEntity(level, x, y, z, stack)`.
+    DropItemAtPosition {
+        stack: ItemStack,
+        position: Vec3,
+    },
     /// `LivingEntity.createWitherRose`：被凋灵 Boss 杀死的生物脚下生成凋灵玫瑰。
     ///
     /// `LivingEntity.createWitherRose`: a mob killed by the wither boss grows a
@@ -2260,6 +2266,11 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
+        }
+        Command::DropItemAtPosition { stack, position } => {
+            if !stack.is_empty() {
+                world.spawn_entity(Entity::ground_item(position, stack));
+            }
         }
         Command::CreateWitherRose { pos } => {
             use mc_bamboo_data::{blocks, items};

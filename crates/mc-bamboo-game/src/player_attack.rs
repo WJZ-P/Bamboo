@@ -2770,6 +2770,7 @@ mod tests {
         ItemStack {
             item,
             count: 1,
+            bundle_selected: None,
             added,
             removed,
         }
@@ -2984,6 +2985,7 @@ mod tests {
             player.inventory.slots[slot] = ItemStack {
                 item: items::DIAMOND_SWORD,
                 count: 1,
+                bundle_selected: None,
                 added,
                 removed,
             };
@@ -3608,6 +3610,7 @@ mod tests {
         let weapon = ItemStack {
             item: mc_bamboo_data::items::DIAMOND_SWORD,
             count: 1,
+            bundle_selected: None,
             added,
             removed,
         };

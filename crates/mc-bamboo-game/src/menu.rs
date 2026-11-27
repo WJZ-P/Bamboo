@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 mod anvil;
+pub(crate) mod bundle;
 mod cartography;
 mod enchantment;
 mod enchantments;
@@ -19,6 +20,7 @@ use mc_bamboo_blocks::{BlockState, World, hopper::set_changed};
 use mc_bamboo_core::{Aabb, BlockPos, Hand, Vec3};
 use mc_bamboo_data::{BlockAncestor, blocks, registries::menu};
 use mc_bamboo_protocol::{
+    components::bundle as bundle_component,
     item::ItemStack,
     merchant::MerchantOffer,
     packet::play::{
@@ -297,7 +299,7 @@ struct MerchantCtx<'a> {
 }
 
 /// 点击时菜单和物品栏的联合视图，对应官方 `doClick` 里能碰到的东西。
-struct Ctx<'a> {
+pub(crate) struct Ctx<'a> {
     kind: ContainerKind,
     container_size: usize,
     container: &'a mut [ItemStack],
@@ -313,6 +315,8 @@ struct Ctx<'a> {
     thrown: &'a mut Vec<ItemStack>,
     /// 商人菜单。`None` 是普通容器。
     merchant: Option<MerchantCtx<'a>>,
+    /// 这次点击要播的收纳袋音效，点击结束后按官方的位置和音高发出去。
+    sounds: &'a mut Vec<bundle::Sound>,
 }
 
 impl Ctx<'_> {
@@ -594,6 +598,25 @@ fn in_range(dest: i64, start: usize, end: usize, backwards: bool) -> bool {
 
 /// 官方的一次 `doClick`。`slot_index` 和 `button` 是网络上的原值，可以是负数。
 fn do_click(ctx: &mut Ctx, slot_index: i32, button: i32, input: ContainerInput) {
+    // 官方 `tryItemClickBehaviourOverride` 只在 PICKUP 分支调用，QUICK_MOVE
+    // 不经过它；`getClickAction(0/1)` 也只在这两个 button 上有定义。
+    if input == ContainerInput::Pickup
+        && let Some(index) = positive_index(ctx, slot_index)
+        && (matches!(button, 0 | 1))
+    {
+        let mut sounds = Vec::new();
+        let handled = bundle::try_click(ctx, slot_index, button, input, &mut sounds);
+        for kind in sounds {
+            ctx.sounds.push(kind);
+        }
+        if handled {
+            if ctx.merchant.is_some() {
+                ctx.settle_merchant();
+            }
+            return;
+        }
+        let _ = index;
+    }
     if input == ContainerInput::QuickCraft {
         quick_craft(ctx, slot_index, button);
     } else if *ctx.quickcraft_status != 0 {
@@ -1269,6 +1292,63 @@ pub(crate) fn on_select_trade(region: &mut Region, id: PlayerId, slot: i32) {
     crate::merchant::on_select_trade(region, id, slot);
 }
 
+/// `ServerboundSelectBundleItemPacket`：官方
+/// `AbstractContainerMenu.setSelectedBundleItemIndex(slotId, selectedItemIndex)`。
+///
+/// 只认当前菜单里的合法槽位下标；切完和官方一样不改 `state_id`，
+/// 但容器 / 物品栏里那堆收纳袋的本地状态要写回去。
+pub(crate) fn on_select_bundle_item(region: &mut Region, id: PlayerId, slot: i32, index: i32) {
+    let Ok(slot) = usize::try_from(slot) else {
+        return;
+    };
+    let Some(menu) = region.menus.get(&id) else {
+        return;
+    };
+    if slot >= menu.slots_len() {
+        return;
+    }
+    let mut slots = raw_container_slots(region, id, menu);
+    slots.resize(menu.slots_len(), ItemStack::empty());
+    let mut changed = false;
+    if slot < menu.container_size {
+        if let Some(stack) = slots.get_mut(slot) {
+            bundle_component::toggle_selected(stack, index);
+            changed = true;
+        }
+    } else {
+        let inv_slot = slot - menu.container_size + INVENTORY_MENU_START;
+        if let Some(player) = region.players.get_mut(&id)
+            && let Some(stack) = player.inventory.slots.get_mut(inv_slot)
+        {
+            bundle_component::toggle_selected(stack, index);
+            changed = true;
+        }
+        // 玩家物品栏的 36 格要补进容器格后面才能整体写回。
+        if let Some(player) = region.players.get(&id) {
+            slots.extend_from_slice(&player.inventory.slots[INVENTORY_MENU_START..OFF_HAND]);
+        }
+    }
+    if !changed {
+        return;
+    }
+    let size = region.menus.get(&id).map(|menu| menu.container_size);
+    let Some(size) = size else {
+        return;
+    };
+    let ender = region
+        .menus
+        .get(&id)
+        .is_some_and(|menu| matches!(menu.target, Target::EnderChest(_)));
+    if ender {
+        if let Some(player) = region.players.get_mut(&id) {
+            player.ender_chest.slots.clone_from_slice(&slots[..size]);
+        }
+    } else if let Some(menu) = region.menus.remove(&id) {
+        write_back_containers(region, &menu, &slots);
+        region.menus.insert(id, menu);
+    }
+}
+
 /// `ServerboundSetBeaconPacket`：选择信标主/副效果并消耗付款槽。
 pub(crate) fn on_set_beacon(
     region: &mut Region,
@@ -1673,6 +1753,7 @@ fn on_click_default_with_maps(
         .get(&id)
         .is_some_and(|player| player.game_mode == GameMode::Creative);
     let mut thrown = Vec::new();
+    let mut sounds = Vec::new();
     if let Some(player) = region.players.get_mut(&id) {
         let mut ctx = Ctx {
             kind: menu.kind,
@@ -1686,6 +1767,7 @@ fn on_click_default_with_maps(
             creative,
             thrown: &mut thrown,
             merchant: None,
+            sounds: &mut sounds,
         };
         do_click(
             &mut ctx,
@@ -1697,6 +1779,7 @@ fn on_click_default_with_maps(
     for stack in thrown {
         crate::drops::spawn_throw(region, id, stack);
     }
+    bundle::send_sounds(region, id, &sounds);
     if ender {
         if let Some(player) = region.players.get_mut(&id) {
             player

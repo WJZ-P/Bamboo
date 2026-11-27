@@ -1462,6 +1462,7 @@ fn cooldown_events(scene: &mut CooldownScene, now: i64) {
                     bob_offs: 0.0,
                     roll_velocity: false,
                     target: None,
+                    item_destroy_pending: false,
                 }),
                 Vec3::new(0.5, 65.5, 0.5),
             );

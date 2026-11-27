@@ -1623,12 +1623,18 @@ pub(crate) fn on_use_item_with_maps(
     if player.game_mode == GameMode::Spectator {
         return;
     }
-    // `Item.use` → `Consumable.startConsuming`：可消耗物品先进入「正在使用」，
-    // 不往下走放置 / 方块交互链。先把 `actor` 抄出来，`start` 要独占借 `region`。
-    let actor = actor_of(player, id);
     // 鱼桶要从这一堆上的组件还原鱼，先抄下来。
     // A fish bucket restores its fish from this stack's components, so copy it first.
     let held = player.inventory.held(hand).clone();
+    // `Item.use` → `Consumable.startConsuming`：可消耗物品先进入「正在使用」，
+    // 不往下走放置 / 方块交互链。先把 `actor` 抄出来，`start` 要独占借 `region`。
+    let actor = actor_of(player, id);
+    // `BundleItem.use`：只 `startUsingItem`，逐件倒出在 `player_consume::tick`。
+    if mc_bamboo_protocol::components::bundle::is_bundle_item(held.item)
+        && crate::player_consume::start_bundle(player, hand, held.item)
+    {
+        return;
+    }
     // `BoatItem.use`：`getPlayerPOVHitResult` 之前先查 5 格内 `CAN_BE_PICKED`
     // 实体；玩家眼睛落在某个实体的盒子里就 `PASS`，不放船。
     if mc_bamboo_blocks::entity::boat::entity_type_for_item(held.item).is_some() {

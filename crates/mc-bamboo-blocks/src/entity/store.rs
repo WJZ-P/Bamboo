@@ -468,6 +468,7 @@ impl EntityRow {
                 bob_offs: private.bob_offs,
                 roll_velocity: private.roll_velocity,
                 target,
+                item_destroy_pending: false,
             }),
             (KindPublic::ExperienceOrb { value }, KindState::ExperienceOrb(mut orb)) => {
                 orb.value = value;

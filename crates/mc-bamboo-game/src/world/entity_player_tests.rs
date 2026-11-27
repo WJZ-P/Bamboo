@@ -352,6 +352,7 @@ fn a_damaged_mending_item_uses_the_orb_before_experience() {
         player.inventory.slots[slot] = ItemStack {
             item: items::DIAMOND_SWORD,
             count: 1,
+            bundle_selected: None,
             added,
             removed,
         };

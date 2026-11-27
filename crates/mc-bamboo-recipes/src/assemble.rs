@@ -83,6 +83,7 @@ fn stack_with(item: i32, count: i32, patch: ComponentPatch) -> ItemStack {
         count,
         added,
         removed,
+        bundle_selected: None,
     }
 }
 
@@ -1031,5 +1032,6 @@ pub(crate) fn remainder(stack: &ItemStack) -> Option<ItemStack> {
         count,
         added,
         removed,
+        bundle_selected: None,
     })
 }
