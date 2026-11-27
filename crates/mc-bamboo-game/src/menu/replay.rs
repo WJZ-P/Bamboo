@@ -441,6 +441,25 @@ impl Replay {
         self.snapshot()
     }
 
+    /// `ServerboundSelectBundleItemPacket`：`AbstractContainerMenu.setSelectedBundleItemIndex`。
+    pub fn select_bundle(&mut self, slot: i16, selected: i32) {
+        if self.station.is_some() {
+            return;
+        }
+        let Ok(slot) = usize::try_from(slot) else {
+            return;
+        };
+        let stack = if slot < self.container.len() {
+            self.container.get_mut(slot)
+        } else {
+            let inventory_slot = slot - self.container.len() + super::INVENTORY_MENU_START;
+            self.inventory.slots.get_mut(inventory_slot)
+        };
+        if let Some(stack) = stack {
+            mc_bamboo_protocol::components::bundle::toggle_selected(stack, selected);
+        }
+    }
+
     /// 切石机的 `container_button_click`。别的菜单点了等于没点。
     ///
     /// The stonecutter's `container_button_click`. Other menus ignore it.

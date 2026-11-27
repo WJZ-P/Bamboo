@@ -30,7 +30,8 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
-const USAGE: &str = "usage: menu <java> [--cases N] [--seed S] [--case I] [--show N]";
+const USAGE: &str =
+    "usage: menu <java> [--cases N] [--seed S] [--case I] [--show N] [--break-self-test X]";
 /// `--show` 的默认值。
 const DEFAULT_SHOW: usize = 5;
 
@@ -61,7 +62,7 @@ struct Case {
     page_count: i32,
     #[serde(default)]
     may_build: bool,
-    container: Vec<[i32; 2]>,
+    container: Vec<ContainerEntry>,
     inventory: Vec<[i32; 2]>,
     #[serde(default)]
     data: Vec<i32>,
@@ -115,6 +116,29 @@ struct Case {
     offers: Vec<[i32; 7]>,
 }
 
+/// 初始容器里的一格：老题是 `[物品, 数量]`，收纳袋题多一项补丁十六进制。
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ContainerEntry {
+    Plain([i32; 2]),
+    WithPatch(i32, i32, String),
+}
+
+impl ContainerEntry {
+    fn pair(&self) -> (i32, i32) {
+        match self {
+            Self::Plain([item, count]) | Self::WithPatch(item, count, _) => (*item, *count),
+        }
+    }
+
+    fn patch(&self) -> Option<&str> {
+        match self {
+            Self::Plain(_) => None,
+            Self::WithPatch(_, _, patch) => Some(patch),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct StoredPatch {
     index: usize,
@@ -155,6 +179,11 @@ struct Step {
     /// The merchant menu's `ServerboundSelectTradePacket`. Other cases omit it.
     #[serde(default, rename = "selectTrade")]
     select_trade: Option<i32>,
+    /// 收纳袋题：点击前依次报上来的 `ServerboundSelectBundleItemPacket`。
+    ///
+    /// Bundle cases: `ServerboundSelectBundleItemPacket`s sent before the click.
+    #[serde(default, rename = "selectBundle")]
+    select_bundle: Vec<(i32, i32)>,
 }
 
 /// 菜单在某一刻的样子。槽位和光标是 `[物品 ID, 数量, 组件补丁的十六进制]`，空槽是 `[0, 0, ""]`。
@@ -182,6 +211,7 @@ struct End {
 struct Options {
     forwarded: Vec<String>,
     show: Option<usize>,
+    break_test: Option<String>,
 }
 
 impl Options {
@@ -200,6 +230,10 @@ impl Options {
                     let value = args.next().ok_or(USAGE)?;
                     options.show = Some(value.parse().map_err(|_| USAGE)?);
                 }
+                "--break-self-test" => {
+                    let value = args.next().ok_or(USAGE)?;
+                    options.break_test = Some((*value).to_owned());
+                }
                 _ => return Err(USAGE.to_owned()),
             }
         }
@@ -209,6 +243,7 @@ impl Options {
 
 #[derive(Debug, Default)]
 struct Report {
+    break_test: Option<String>,
     cases: u32,
     steps: usize,
     slots: usize,
@@ -232,6 +267,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
 
     let mut report = Report {
         show: options.show.unwrap_or(DEFAULT_SHOW),
+        break_test: options.break_test.clone(),
         ..Report::default()
     };
     let read = report.read_lines(BufReader::new(stdout));
@@ -305,10 +341,10 @@ impl Report {
         // Vanilla `createMenu` unpacks before building the menu. The Rust side receives
         // the filled container; check that the case is marked and is not empty.
         if case.loot_chest
-            && case
-                .container
-                .iter()
-                .all(|&[item, count]| item == 0 || count <= 0)
+            && case.container.iter().all(|entry| {
+                let (item, count) = entry.pair();
+                item == 0 || count <= 0
+            })
         {
             return Err(format!("case {}: loot chest was left empty", case.id));
         }
@@ -316,7 +352,7 @@ impl Report {
             let mut replay = Replay::workstation(
                 shape,
                 &pairs(&case.container),
-                &pairs(&case.inventory),
+                &plain_pairs(&case.inventory),
                 &case.data,
                 case.creative,
                 ReplayWorld {
@@ -334,12 +370,13 @@ impl Report {
             // Ingredients land as item and count first, then the component patch. The index is the
             // grid slot; crafting and the inventory grid sit one slot later.
             for patch in &case.patches {
-                let Some(&[item, count]) = case.container.get(patch.index) else {
+                let Some(entry) = case.container.get(patch.index) else {
                     return Err(format!(
                         "case {}: patch slot {} is outside the grid",
                         case.id, patch.index
                     ));
                 };
+                let (item, count) = entry.pair();
                 let slot = work_slot(shape, patch.index).ok_or_else(|| {
                     format!(
                         "case {}: shape {} has no grid slot {}",
@@ -350,18 +387,27 @@ impl Report {
             }
             replay
         } else {
-            let mut replay = Replay::new(shape, &pairs(&case.container), &pairs(&case.inventory));
+            let mut replay = Replay::new(
+                shape,
+                &pairs(&case.container),
+                &plain_pairs(&case.inventory),
+            );
             replay.set_creative(case.creative);
-            if case.predict {
-                for patch in &case.patches {
-                    let Some(&[item, count]) = case.container.get(patch.index) else {
-                        return Err(format!(
-                            "case {}: patch slot {} is outside the container",
-                            case.id, patch.index
-                        ));
-                    };
-                    replay.set_container(patch.index, stack_with_patch(item, count, &patch.bytes)?);
+            for (index, entry) in case.container.iter().enumerate() {
+                if let Some(bytes) = entry.patch() {
+                    let (item, count) = entry.pair();
+                    replay.set_container(index, stack_with_patch(item, count, bytes)?);
                 }
+            }
+            for patch in &case.patches {
+                let Some(entry) = case.container.get(patch.index) else {
+                    return Err(format!(
+                        "case {}: patch slot {} is outside the container",
+                        case.id, patch.index
+                    ));
+                };
+                let (item, count) = entry.pair();
+                replay.set_container(patch.index, stack_with_patch(item, count, &patch.bytes)?);
             }
             replay
         };
@@ -370,6 +416,9 @@ impl Report {
 
         for (index, step) in case.steps.iter().enumerate() {
             let input = ContainerInput::from_id(i32::from(step.input));
+            for &(slot, selected) in &step.select_bundle {
+                replay.select_bundle(slot as i16, selected);
+            }
             let snapshot = if let Some(name) = &step.rename {
                 replay.rename(name)
             } else if step.menu_button {
@@ -388,6 +437,10 @@ impl Report {
                 replay.click(step.slot, step.button, input)
             };
             self.steps += 1;
+            let mut snapshot = snapshot;
+            if let Some(name) = self.break_test.as_deref() {
+                self.apply_break_test(case, index, name, &mut snapshot);
+            }
             self.compare(
                 &format!("case {} step {index}", case.id),
                 &snapshot,
@@ -397,6 +450,42 @@ impl Report {
         Ok(())
     }
 
+    /// 改坏确认：只改 Bamboo 一侧的重放结果，不动官方题目或比较器。
+    /// 三种改法分别对应容量、选中下标和嵌套份额。
+    fn apply_break_test(&self, case: &Case, index: usize, name: &str, snapshot: &mut Snapshot) {
+        let bundle_case = case.container.iter().any(|entry| entry.patch().is_some());
+        if !bundle_case || index == 0 {
+            return;
+        }
+        match name {
+            "bundle_first" => {
+                // 模拟「取出时总是拿第 0 件」：把光标换成第一种物品。
+                if !snapshot.carried.is_empty() {
+                    snapshot.carried.item = 1;
+                }
+            }
+            "bundle_slots" => {
+                // 模拟「装进去不扣源槽」：把第一格的内容抄到光标上。
+                if let Some(slot) = snapshot.slots.first() {
+                    snapshot.carried = slot.clone();
+                }
+            }
+            "bundle_selected" => {
+                // 模拟「选中下标不生效」：把收纳袋组件补丁的第一个字节改掉，
+                // 选中格场景会立刻在逐字节比较里暴露。
+                for stack in &mut snapshot.slots {
+                    if let Some((_, bytes)) = stack.added.first_mut()
+                        && !bytes.is_empty()
+                    {
+                        bytes[0] ^= 1;
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// `NautilusInventoryMenu`：两格（鞍、身体）和玩家 36 格逐步点击。
     ///
     /// `NautilusInventoryMenu`: saddle, body and the player's 36 slots, click by click.
@@ -404,7 +493,7 @@ impl Report {
         self.cases += 1;
         let mut replay = Replay::nautilus_mount(
             &pairs(&case.container),
-            &pairs(&case.inventory),
+            &plain_pairs(&case.inventory),
             case.creative,
         );
         let snapshot = replay.open();
@@ -457,7 +546,11 @@ impl Report {
                 },
             )
             .collect();
-        let mut replay = Replay::merchant(offers, &pairs(&case.container), &pairs(&case.inventory));
+        let mut replay = Replay::merchant(
+            offers,
+            &pairs(&case.container),
+            &plain_pairs(&case.inventory),
+        );
         let snapshot = replay.open();
         self.compare(&format!("case {} open", case.id), &snapshot, &case.open);
         for (index, step) in case.steps.iter().enumerate() {
@@ -483,7 +576,11 @@ impl Report {
     /// Replays lectern buttons and compares slots, the cursor, `state_id`, and the page.
     fn replay_lectern(&mut self, case: &Case) -> Result<(), String> {
         self.cases += 1;
-        let [item, count] = case.container.first().copied().unwrap_or([0, 0]);
+        let (item, count) = case
+            .container
+            .first()
+            .map(ContainerEntry::pair)
+            .unwrap_or((0, 0));
         let (mut replay, snapshot) =
             LecternReplay::open(item, count, case.page_count, case.may_build);
         self.compare_lectern(&format!("case {} open", case.id), &snapshot, &case.open);
@@ -639,6 +736,8 @@ fn stack_with_patch(item: i32, count: i32, hex: &str) -> Result<ItemStack, Strin
     let patch = ComponentPatch::read(&mut cursor).map_err(|error| error.to_string())?;
     cursor.finish().map_err(|error| error.to_string())?;
     let (added, removed) = patch.to_opaque();
+    // 官方的 `getComponentsPatch()` 是「相对默认组件的补丁」，所以直接把这串字节
+    // 作为物品堆的补丁就是官方那份组件表；`set` 时不会再凭空多出默认项。
     Ok(ItemStack {
         item,
         count,
@@ -682,7 +781,11 @@ fn work_slot(shape: ReplayShape, index: usize) -> Option<usize> {
     }
 }
 
-fn pairs(entries: &[[i32; 2]]) -> Vec<(i32, i32)> {
+fn pairs(entries: &[ContainerEntry]) -> Vec<(i32, i32)> {
+    entries.iter().map(ContainerEntry::pair).collect()
+}
+
+fn plain_pairs(entries: &[[i32; 2]]) -> Vec<(i32, i32)> {
     entries.iter().map(|&[item, count]| (item, count)).collect()
 }
 

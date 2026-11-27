@@ -185,8 +185,10 @@ fn content_weight(items: &[ItemStackTemplate]) -> Option<Fraction> {
 ///
 /// Returns `None` when the component is absent or cannot be decoded.
 pub fn contents(stack: &ItemStack) -> Option<Vec<ItemStackTemplate>> {
-    let patch = ComponentPatch::from_opaque(stack).ok()?;
-    match patch.get(kinds::BUNDLE_CONTENTS) {
+    let Ok(patch) = ComponentPatch::from_opaque(stack) else {
+        return None;
+    };
+    match defaults::resolve(stack.item, &patch, kinds::BUNDLE_CONTENTS) {
         Some(ComponentValue::BundleContents(items)) => Some(items.clone()),
         _ => None,
     }
@@ -197,10 +199,17 @@ fn set_contents(stack: &mut ItemStack, items: Vec<ItemStackTemplate>) {
     let Ok(mut patch) = ComponentPatch::from_opaque(stack) else {
         return;
     };
-    patch.put(
-        kinds::BUNDLE_CONTENTS,
-        PatchEntry::Set(ComponentValue::BundleContents(items)),
-    );
+    // 官方 `PatchedDataComponentMap.set` 在值等于默认组件时删掉这一项。
+    // `PatchedDataComponentMap.set` removes the entry when the value equals the default.
+    let default = defaults::of_item(stack.item).get(kinds::BUNDLE_CONTENTS);
+    if default == Some(&ComponentValue::BundleContents(items.clone())) {
+        patch.remove(kinds::BUNDLE_CONTENTS);
+    } else {
+        patch.put(
+            kinds::BUNDLE_CONTENTS,
+            PatchEntry::Set(ComponentValue::BundleContents(items)),
+        );
+    }
     let (added, removed) = patch.to_opaque();
     patch.release();
     stack.added = added;
@@ -409,8 +418,12 @@ fn template_of(stack: &ItemStack) -> ItemStackTemplate {
 
 /// 官方 `BundleContents.getWeight` 对一堆物品的份额（不含数量）。
 fn stack_weight(stack: &ItemStack) -> Option<Fraction> {
-    let patch = ComponentPatch::from_opaque(stack).ok()?;
-    if let Some(ComponentValue::BundleContents(items)) = patch.get(kinds::BUNDLE_CONTENTS) {
+    let Ok(patch) = ComponentPatch::from_opaque(stack) else {
+        return None;
+    };
+    if let Some(ComponentValue::BundleContents(items)) =
+        defaults::resolve(stack.item, &patch, kinds::BUNDLE_CONTENTS)
+    {
         return content_weight(items)?.plus(Fraction::unit(BUNDLE_IN_BUNDLE_DENOMINATOR)?);
     }
     if matches!(

@@ -129,6 +129,8 @@ import net.minecraft.sounds.SoundEvents;
 import net.minecraft.world.item.enchantment.Enchantment;
 import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.item.enchantment.ItemEnchantments;
+import net.minecraft.world.item.ItemStackTemplate;
+import net.minecraft.world.item.component.BundleContents;
 import net.minecraft.world.item.component.WritableBookContent;
 import net.minecraft.world.item.component.WrittenBookContent;
 import net.minecraft.world.item.crafting.AbstractCookingRecipe;
@@ -357,6 +359,10 @@ public final class MenuOracle {
                 }
                 write(enchantSeedCase(written));
                 written++;
+                for (int index = 0; index < 6; index++) {
+                    write(bundleCase(written, index));
+                    written++;
+                }
             }
 
             JsonObject end = new JsonObject();
@@ -815,6 +821,190 @@ public final class MenuOracle {
             ItemStack map = new ItemStack(Items.FILLED_MAP, 1 + variant % 3);
             map.set(DataComponents.MAP_ID, new MapId(variant + 1));
             return map;
+        }
+
+        /**
+         * 收纳袋的菜单点击。每次点击后比全部 27 + 36 个槽位、光标和 state_id；
+         * 带组件的物品按官方 `DataComponentPatch.STREAM_CODEC` 逐字节写成十六进制。
+         *
+         * Bundle menu clicks. Every step compares all slots, the cursor and the state id;
+         * component patches are the official network bytes in hex.
+         */
+        private JsonObject bundleCase(int id, int variant) {
+            Shape shape = Shape.CHEST_3;
+            FakePlayer player = FakePlayer.create(false);
+            Container container = new SimpleContainer(shape.size);
+            // 0：空收纳袋；1：装了 3 件；2：几乎装满的铁锭；3：选中格；4：嵌套收纳袋；5：满袋再装。
+            ItemStack empty = new ItemStack(Items.BUNDLE);
+            ItemStack filled = bundleWith(Items.STONE, 3, Items.DIRT, 2, Items.APPLE, 1);
+            ItemStack nearlyFull = bundleWith(Items.IRON_INGOT, 62);
+            ItemStack full = bundleWith(Items.IRON_INGOT, 64);
+            // 内层的 bundle_contents 要真的带上内容，否则外层只占 1/16。
+            ItemStack inner = bundleWith(Items.STONE, 16);
+            ItemStack nested = bundleWith(inner);
+            switch (variant) {
+                case 0 -> {
+                    container.setItem(0, empty);
+                    container.setItem(1, new ItemStack(Items.STONE, 16));
+                }
+                case 1 -> {
+                    container.setItem(0, filled);
+                    container.setItem(1, new ItemStack(Items.DIRT, 4));
+                }
+                case 2 -> {
+                    container.setItem(0, nearlyFull);
+                    container.setItem(1, new ItemStack(Items.IRON_INGOT, 8));
+                }
+                case 3 -> {
+                    container.setItem(0, filled);
+                    container.setItem(2, new ItemStack(Items.STONE, 1));
+                }
+                case 4 -> {
+                    container.setItem(0, empty);
+                    container.setItem(1, nested);
+                }
+                default -> {
+                    container.setItem(0, full);
+                    container.setItem(1, new ItemStack(Items.STONE, 1));
+                }
+            }
+            AbstractContainerMenu menu = shape.create(player.getInventory(), container, player);
+            menu.setSynchronizer(new Sync());
+
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "case");
+            line.addProperty("id", id);
+            line.addProperty("shape", shape.id);
+            line.addProperty("creative", false);
+            line.add("container", bundleItems(container));
+            line.add("inventory", inventoryItems(player.getInventory()));
+            JsonArray patches = new JsonArray();
+            for (int slot = 0; slot < shape.size; slot++) {
+                ItemStack stack = container.getItem(slot);
+                if (!stack.isEmpty() && stack.has(DataComponents.BUNDLE_CONTENTS)) {
+                    JsonObject patch = new JsonObject();
+                    patch.addProperty("index", slot);
+                    patch.addProperty("bytes", hex(patchBytes(
+                            RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY),
+                            stack.getComponentsPatch())));
+                    patches.add(patch);
+                }
+            }
+            line.add("patches", patches);
+            line.add("open", outcome(menu));
+
+            JsonArray steps = new JsonArray();
+            switch (variant) {
+                case 0 -> {
+                    // 左键拿起收纳袋，左键点石头装进去，左键放回，空光标右键取出。
+                    steps.add(bundleClick(menu, player, 0, 0, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 1, 0, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 0, 0, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 0, 1, 0, -1, -1));
+                }
+                case 1 -> {
+                    // 光标上有 4 个泥土，左键装进袋；空光标右键取出；再右键点空槽。
+                    steps.add(bundleClick(menu, player, 1, 0, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 0, 0, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 0, 1, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 0, 0, 0, -1, -1));
+                }
+                case 2 -> {
+                    // 62/64 再装 8 个只能装 2 个；左键把剩下的放回槽里。
+                    steps.add(bundleClick(menu, player, 1, 0, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 0, 0, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 1, 0, 0, -1, -1));
+                }
+                case 3 -> {
+                    // 选中第 2 件 → 把收纳袋拿到光标上 → 放到别的格 → 再取出，
+                    // 取出的必须仍是选中的那一件（泥土）。
+                    steps.add(bundleClick(menu, player, 0, 0, 0, 0, 1));
+                    steps.add(bundleClick(menu, player, 0, 0, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 2, 0, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 2, 1, 0, -1, -1));
+                }
+                case 4 -> {
+                    // 嵌套收纳袋：空格拿空袋 → 左键点嵌套袋装进去（+1/16）→ 右键取出。
+                    steps.add(bundleClick(menu, player, 0, 0, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 1, 0, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 0, 1, 0, -1, -1));
+                }
+                default -> {
+                    // 满袋再装：装不进去，播失败音效，袋和槽里的物品都不变。
+                    steps.add(bundleClick(menu, player, 1, 0, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 0, 0, 0, -1, -1));
+                    steps.add(bundleClick(menu, player, 1, 1, 0, -1, -1));
+                }
+            }
+            line.add("steps", steps);
+            return line;
+        }
+
+        /** 造一个 `bundle_contents` 里装了给定物品的收纳袋。参数要么是成对的 (Item, Integer)，
+         * 要么是一件带组件的 ItemStack（嵌套收纳袋）。 */
+        private static ItemStack bundleWith(Object... entries) {
+            java.util.List<ItemStackTemplate> items = new ArrayList<>();
+            if (entries.length == 1 && entries[0] instanceof ItemStack stack) {
+                items.add(ItemStackTemplate.fromNonEmptyStack(stack));
+            } else {
+                for (int index = 0; index < entries.length; index += 2) {
+                    items.add(new ItemStackTemplate((Item) entries[index], (Integer) entries[index + 1]));
+                }
+            }
+            ItemStack stack = new ItemStack(Items.BUNDLE);
+            stack.set(DataComponents.BUNDLE_CONTENTS, new BundleContents(items));
+            return stack;
+        }
+
+        /** 初始容器：带 `bundle_contents` 的格子写组件补丁，其余只写物品和数量。 */
+        private static JsonArray bundleItems(Container container) {
+            JsonArray items = new JsonArray();
+            for (int slot = 0; slot < container.getContainerSize(); slot++) {
+                ItemStack stack = container.getItem(slot);
+                if (!stack.isEmpty() && stack.has(DataComponents.BUNDLE_CONTENTS)) {
+                    JsonArray entry = new JsonArray();
+                    entry.add(BuiltInRegistries.ITEM.getId(stack.getItem()));
+                    entry.add(stack.getCount());
+                    entry.add(patchHex(stack));
+                    items.add(entry);
+                } else {
+                    items.add(idCount(stack));
+                }
+            }
+            return items;
+        }
+
+        /** 可选地在点击前发一次 `ServerboundSelectBundleItemPacket` 的等价入口。 */
+        private static JsonObject bundleClick(
+                AbstractContainerMenu menu,
+                FakePlayer player,
+                int slot,
+                int button,
+                int input,
+                int selectSlot,
+                int selectIndex) {
+            if (selectSlot >= 0) {
+                menu.setSelectedBundleItemIndex(selectSlot, selectIndex);
+            }
+            menu.suppressRemoteUpdates();
+            menu.clicked(slot, button, INPUTS[input], player);
+            menu.setRemoteCarried(HashedStack.EMPTY);
+            menu.resumeRemoteUpdates();
+            menu.broadcastChanges();
+            JsonObject step = new JsonObject();
+            step.addProperty("slot", slot);
+            step.addProperty("button", button);
+            step.addProperty("input", input);
+            if (selectSlot >= 0) {
+                JsonArray select = new JsonArray();
+                select.add(selectSlot);
+                select.add(selectIndex);
+                JsonArray selections = new JsonArray();
+                selections.add(select);
+                step.add("selectBundle", selections);
+            }
+            step.add("outcome", outcome(menu));
+            return step;
         }
 
         /**
@@ -1897,7 +2087,14 @@ public final class MenuOracle {
         }
 
         static FakeLevel create() {
-            return allocate(FakeLevel.class);
+            FakeLevel level = allocate(FakeLevel.class);
+            level.blocks = new HashMap<>();
+            level.maps = new HashMap<>();
+            // `BundleItem.playInsertSound` 等音效要 `level.random.nextFloat()`；
+            // 收纳袋题也是从这一份固定随机源取音高。
+            set(Level.class, level, "random", net.minecraft.util.RandomSource.create(4242L));
+            set(Level.class, level, "soundSeedGenerator", net.minecraft.util.RandomSource.create(4243L));
+            return level;
         }
 
         static FakeLevel create(int seed, int bookshelves, MapId mapId, byte scale, boolean locked) {
@@ -2164,6 +2361,8 @@ public final class MenuOracle {
         static FakePlayer create(boolean creative, boolean mayBuild) {
             FakePlayer player = allocate(FakePlayer.class);
             set(Entity.class, player, "level", FakeLevel.create());
+            // `Entity.playSound` 读自己的位置；收纳袋音效的取数不受坐标影响。
+            set(Entity.class, player, "position", new net.minecraft.world.phys.Vec3(0.5, 64.0, 0.5));
             set(Player.class, player, "inventory", new Inventory(player, new PlayerEquipment(player)));
             set(Player.class, player, "gameProfile",
                     new com.mojang.authlib.GameProfile(java.util.UUID.nameUUIDFromBytes(new byte[]{1}), "Oracle"));
