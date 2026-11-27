@@ -257,6 +257,9 @@ const SCENARIOS: &[&str] = &[
     "execute positioned over motion_blocking run setblock 4 -60 6 stone",
     "execute summon minecraft:cow run setblock 4 -60 6 stone",
     "execute summon minecraft:pig at @s run setblock 4 -60 6 stone",
+    // location_check 的 structures：超平坦世界没有结构，两边都判 false
+    "execute if predicate {type:\"location_check\",predicate:{structures:\"minecraft:stronghold\"}} run setblock 4 -60 6 stone",
+    "execute unless predicate {type:\"location_check\",predicate:{structures:\"minecraft:stronghold\"}} run setblock 4 -60 6 stone",
 ];
 
 #[derive(Debug)]

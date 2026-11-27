@@ -645,16 +645,20 @@ fn conditional(
     Ok(Some(vec![context]))
 }
 
-/// 官方 `BlockPosArgument.getLoadedBlockPos`：区块没加载报 `argument.pos.unloaded`，
-/// 高度在世界外报 `argument.pos.outofworld`。
+/// 官方 `BlockPosArgument.getLoadedBlockPos`：先查 `level.hasChunkAt`（没加载报
+/// `argument.pos.unloaded`），再查 `level.isInWorldBounds`（水平 ±3000 万或高度出界报
+/// `argument.pos.outofworld`）。
 ///
-/// Official `BlockPosArgument.getLoadedBlockPos`: `argument.pos.unloaded` for an unloaded
-/// chunk, `argument.pos.outofworld` for a height outside the world.
+/// Official `BlockPosArgument.getLoadedBlockPos`: first `level.hasChunkAt`
+/// (`argument.pos.unloaded`), then `level.isInWorldBounds` (horizontal ±30M or build
+/// height → `argument.pos.outofworld`).
 fn loaded_block(region: &Region, pos: BlockPos) -> Result<BlockPos, CommandFail> {
     if !region.chunks.is_loaded(pos.chunk()) {
         return Err(fail("argument.pos.unloaded"));
     }
-    if region.chunks.block(pos).is_none() {
+    let outside_horizontal =
+        pos.x < -30_000_000 || pos.x >= 30_000_000 || pos.z < -30_000_000 || pos.z >= 30_000_000;
+    if outside_horizontal || region.chunks.block(pos).is_none() {
         return Err(fail("argument.pos.outofworld"));
     }
     Ok(pos)
@@ -673,10 +677,16 @@ fn biome_matches(region: &Region, pos: BlockPos, wanted: &str) -> Result<bool, C
     })
 }
 
-/// 官方 `ExecuteCommand.isChunkLoaded`：区块在、状态到 `ENTITY_TICKING`、实体也已加载。
+/// 官方 `ExecuteCommand.isChunkLoaded`：`getChunkNow != null`（这里对应区块在表里）、
+/// `getFullStatus() == FullChunkStatus.ENTITY_TICKING`（`ChunkLevel.fullStatus` 里
+/// 等价于票等级 ≤ 31）、`areEntitiesLoaded`。`TickLevels::chunk_ticks_entities` 正是
+/// 「加载 / 模拟两档都到 Entity 且 5×5 邻域已交付」，与 `ENTITY_TICKING` 对齐。
 ///
-/// Official `ExecuteCommand.isChunkLoaded`: the chunk exists, has reached
-/// `ENTITY_TICKING`, and its entities are loaded.
+/// Official `ExecuteCommand.isChunkLoaded`: `getChunkNow != null` (the chunk is in the
+/// store), `getFullStatus() == ENTITY_TICKING` (ticket level ≤ 31 in
+/// `ChunkLevel.fullStatus`), and `areEntitiesLoaded`. `chunk_ticks_entities` is exactly
+/// "loading and simulation tiers both Entity with the 5×5 neighbourhood delivered",
+/// which aligns with `ENTITY_TICKING`.
 fn chunk_loaded(region: &Region, pos: BlockPos) -> bool {
     let chunk = pos.chunk();
     region.chunks.is_loaded(chunk) && region.tick_levels.chunk_ticks_entities(chunk)

@@ -64,6 +64,7 @@ import net.minecraft.network.Connection;
 import net.minecraft.network.protocol.PacketFlow;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
@@ -280,6 +281,9 @@ public final class ExecuteOracle {
         "execute positioned over motion_blocking run setblock 4 -60 6 stone",
         "execute summon minecraft:cow run setblock 4 -60 6 stone",
         "execute summon minecraft:pig at @s run setblock 4 -60 6 stone",
+        // location_check 的 structures：超平坦世界没有结构，两边都判 false
+        "execute if predicate {type:\"location_check\",predicate:{structures:\"minecraft:stronghold\"}} run setblock 4 -60 6 stone",
+        "execute unless predicate {type:\"location_check\",predicate:{structures:\"minecraft:stronghold\"}} run setblock 4 -60 6 stone",
     };
 
     /** `/advancement` 的整条命令题：官方假世界里执行，比较返回值、反馈和进度状态。 */
@@ -1034,6 +1038,21 @@ public final class ExecuteOracle {
         public boolean tryAddFreshEntityWithPassengers(Entity entity) {
             tracked.add(entity);
             return true;
+        }
+
+        // `location_check` 的 `structures` 要 `level.structureManager()`；Unsafe 分配的
+        // 实例那个 final 字段是 null，补一个只依赖 registryAccess 和 getChunk 的即可。
+        // `location_check` `structures` needs `level.structureManager()`; the final
+        // field is null on the Unsafe-allocated instance, so supply one that only
+        // uses registryAccess and getChunk.
+        private StructureManager structureManager;
+
+        @Override
+        public StructureManager structureManager() {
+            if (structureManager == null) {
+                structureManager = new StructureManager(this, null, null);
+            }
+            return structureManager;
         }
 
         @Override

@@ -12,7 +12,7 @@
 
 use mc_bamboo_advancements::AdvancementTree;
 use mc_bamboo_blocks::{BlockState, entity::KindPublic, entity::KindState};
-use mc_bamboo_core::{BlockPos, Hand, Vec3};
+use mc_bamboo_core::{BlockPos, Hand, LightLayer, Vec3};
 use mc_bamboo_data::registries::entity_type;
 use mc_bamboo_loot::{
     AdvancementView, EffectView, EntityView, EquipmentSlot, LevelView, LootCondition, LootContext,
@@ -218,19 +218,26 @@ fn world_entity_view(region: &Region, uid: i32, depth: usize) -> Option<EntityVi
         for (slot, stack) in &mob.equipment {
             view.equipment[loot_slot(*slot).index()] = Some(game_stack_to_loot(stack));
         }
-        // 官方 `Entity.getScoreboardName()`：非玩家实体用带连字符的 UUID 字符串。
-        // Official `Entity.getScoreboardName()`: the hyphenated UUID string for a
-        // non-player entity.
-        let name = uuid::Uuid::from_bytes(mob.uuid).to_string();
-        view.team = region.global.scoreboard.team_of(&name).map(str::to_owned);
-        view.scoreboard_name = Some(name);
     }
     let row = region
         .entities
         .row_of(uid)
         .and_then(|row| region.entities.row_at(row));
-    if let Some(KindState::Mob(mob)) = row.map(|row| &row.state.kind) {
-        view.scoreboard_tags = mob.tags.clone();
+    if let Some(row) = row {
+        // 官方 `Entity.getScoreboardName()`：非玩家实体用带连字符的 UUID 字符串。
+        // 生物从 `KindPublic::Mob.uuid` 取，其余实体由实体 ID 确定性派生；这样
+        // `entity_scores` 对非生物会去查计分板并判假，而不是报「不支持」。
+        // Official `Entity.getScoreboardName()`: the hyphenated UUID string for a
+        // non-player entity. Mobs read `KindPublic::Mob.uuid`, others derive it from
+        // the entity id, so `entity_scores` on a non-living entity queries the
+        // scoreboard and tests false instead of reporting unsupported.
+        let name = uuid::Uuid::from_bytes(mc_bamboo_blocks::archive::entity::entity_uuid_of(row))
+            .to_string();
+        view.team = region.global.scoreboard.team_of(&name).map(str::to_owned);
+        view.scoreboard_name = Some(name);
+        if let KindState::Mob(mob) = &row.state.kind {
+            view.scoreboard_tags = mob.tags.clone();
+        }
     }
     view.nbt = data_source::read_view(
         &region.global,
@@ -255,13 +262,15 @@ fn world_entity_view(region: &Region, uid: i32, depth: usize) -> Option<EntityVi
     Some(view)
 }
 
-/// 命令谓词要问的世界：方块、群系、流体走区块表，天气和积分板走岛上的全局快照，
-/// 进度走玩家表。结构、天空可见、亮度、烟雾和统计 / 配方没接，问到就报不支持。
+/// 命令谓词要问的世界：方块、群系、流体、天空可见、亮度和结构走区块表与世界生成数据，
+/// 天气、时间、积分板走岛上的全局快照，进度走玩家表。烟雾（营火）和统计 / 配方没接，
+/// 结构标签没能从官方导出，问到就报不支持。
 ///
-/// The world a command predicate can ask. Blocks, biomes and fluids come from the chunk
-/// store, weather and the scoreboard from the island's global snapshot, advancements from
-/// the player table. Structures, sky visibility, light, smoke, statistics and recipes are
-/// not wired in and report unsupported.
+/// The world a command predicate can ask. Blocks, biomes, fluids, sky visibility, light
+/// and structures come from the chunk store and world-gen data; weather, time and the
+/// scoreboard from the island's global snapshot; advancements from the player table.
+/// Campfire smoke, statistics and recipes are not wired in, and structure tags are not
+/// exported from vanilla, so those report unsupported.
 pub(crate) struct CommandLevel<'a> {
     pub(crate) region: &'a Region,
 }
@@ -282,8 +291,16 @@ impl LevelView for CommandLevel<'_> {
         biome_at(self.region, BlockPos::new(x, y, z))
     }
 
-    fn can_see_sky(&self, _: i32, _: i32, _: i32) -> Option<bool> {
-        None
+    /// `BlockAndLightGetter.canSeeSky`：天空光亮度是否达到 15。
+    ///
+    /// `BlockAndLightGetter.canSeeSky`: whether the sky light level reaches 15.
+    fn can_see_sky(&self, x: i32, y: i32, z: i32) -> Option<bool> {
+        Some(
+            self.region
+                .chunks
+                .light_value(LightLayer::Sky, BlockPos::new(x, y, z))
+                >= 15,
+        )
     }
 
     fn is_raining(&self) -> Option<bool> {
@@ -294,16 +311,92 @@ impl LevelView for CommandLevel<'_> {
         Some(self.region.global.block_weather.is_thundering())
     }
 
+    /// `Level.getDayTime()`：默认（主世界）时钟的总刻数。
+    ///
+    /// `Level.getDayTime()`: total ticks of the default (overworld) clock.
     fn day_time(&self) -> Option<i64> {
-        None
+        Some(self.region.global.clock.total_ticks)
     }
 
+    /// `Level.getGameTime()`。
     fn game_time(&self) -> Option<i64> {
-        None
+        Some(self.region.global.time.0)
+    }
+
+    /// `clockManager().getInstance(clock).totalTicks()`，`time_check` 用。
+    ///
+    /// `clockManager().getInstance(clock).totalTicks()` for `time_check`.
+    fn clock_time(&self, clock: &str) -> Option<i64> {
+        self.region
+            .global
+            .clocks()
+            .into_iter()
+            .find(|(name, _)| *name == clock)
+            .map(|(_, instance)| instance.total_ticks)
     }
 
     fn dimension(&self) -> Option<&'static str> {
         Some(crate::region::DIMENSION)
+    }
+
+    /// `LevelReader.getMaxLocalRawBrightness(pos)`：水平越界按官方返回 15，
+    /// 否则为 `max(方块光, 天空光 - skyDarken)`。
+    ///
+    /// `LevelReader.getMaxLocalRawBrightness(pos)`: 15 outside the horizontal
+    /// world bounds as in vanilla, otherwise `max(block light, sky light - skyDarken)`.
+    fn light(&self, x: i32, y: i32, z: i32) -> Option<i32> {
+        if x < -30_000_000 || x >= 30_000_000 || z < -30_000_000 || z >= 30_000_000 {
+            return Some(15);
+        }
+        let pos = BlockPos::new(x, y, z);
+        let sky = i32::from(self.region.chunks.light_value(LightLayer::Sky, pos));
+        let block = i32::from(self.region.chunks.light_value(LightLayer::Block, pos));
+        Some(block.max(sky - self.region.global.sky_darken))
+    }
+
+    /// `StructureManager.getStructureWithPieceAt(pos, structures).isValid()`：
+    /// 取该区块的 `STRUCTURE_REFERENCES`，逐个引用区块读结构起点，再按结构件包围盒
+    /// 判位置是否落在其中。名字直接比；结构标签没能从官方导出，遇到 `#标签` 返回
+    /// `None` 让上层报不支持。
+    ///
+    /// `StructureManager.getStructureWithPieceAt(pos, structures).isValid()`:
+    /// read the chunk's `STRUCTURE_REFERENCES`, load each referenced chunk's start
+    /// and test the position against its piece boxes. Names match directly; structure
+    /// tags are not exported from vanilla, so a `#tag` returns `None` (unsupported).
+    fn structure_with_piece_at(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        structures: &[String],
+    ) -> Option<bool> {
+        if structures.iter().any(|name| name.starts_with('#')) {
+            return None;
+        }
+        let config = &self.region.global.world_gen;
+        let chunk = BlockPos::new(x, y, z).chunk();
+        let references =
+            crate::worldgen_structures::structure_references_stage(config, chunk.x, chunk.z)
+                .ok()?;
+        for (structure, keys) in &references {
+            if !structures.iter().any(|name| name == structure) {
+                continue;
+            }
+            for &packed in keys {
+                let (sx, sz) = crate::worldgen_structures::unpack_chunk_pos(packed);
+                let Ok(starts) = crate::worldgen_structures::structure_starts(config, sx, sz)
+                else {
+                    continue;
+                };
+                let Some(start) = starts.get(structure) else {
+                    continue;
+                };
+                if start.is_valid() && start.pieces.has_piece_at(x, y, z) {
+                    return Some(true);
+                }
+            }
+        }
+        Some(false)
     }
 
     fn score(&self, holder: &str, objective: &str) -> Option<Option<i32>> {
@@ -347,14 +440,24 @@ impl LevelView for CommandLevel<'_> {
     }
 }
 
-/// `Level.getBiome(pos)` 的注册表 ID；区块没加载或者高度在世界外时返回 `None`。
+/// `Level.getBiome(pos)` → `BiomeManager.getBiome` 的注册表 ID。
+/// 官方先按世界种子混淆出的 zoom seed 做八角插值选出一个 quart 角，再读那个 quart
+/// 格；这里用同一套 `fiddled_corner`，然后把它换算成 `ChunkStore::biome_at` 的方块坐标。
+/// 区块没加载或者高度在世界外时返回 `None`。
 ///
-/// The registry id of `Level.getBiome(pos)`, or `None` when the chunk is not loaded or
-/// the height is outside the world.
+/// The registry id of `Level.getBiome(pos)` via `BiomeManager.getBiome`. Vanilla
+/// picks a quart corner with the seed-obfuscated octant interpolation, then reads that
+/// cell; we reuse `fiddled_corner` and translate the corner into block coordinates for
+/// `ChunkStore::biome_at`. `None` when the chunk is not loaded or the height is outside
+/// the world.
 pub(crate) fn biome_at(region: &Region, pos: BlockPos) -> Option<i32> {
+    let zoom_seed = mc_bamboo_worldgen::biome_manager::obfuscate_seed(region.global.seed);
+    let (qx, qy, qz) =
+        mc_bamboo_worldgen::biome_manager::fiddled_corner(zoom_seed, pos.x, pos.y, pos.z);
+    let cell = BlockPos::new(qx * 4, qy * 4, qz * 4);
     region
         .chunks
-        .biome_at(pos)
+        .biome_at(cell)
         .and_then(|id| i32::try_from(id).ok())
 }
 
