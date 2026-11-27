@@ -49,6 +49,9 @@ mod chunk_tracking;
 pub mod command;
 mod command_block;
 mod compute_pool;
+#[cfg(feature = "pipeline-bench")]
+#[doc(hidden)]
+pub mod pipeline_bench;
 mod container;
 mod container_loot;
 mod debug_stick;

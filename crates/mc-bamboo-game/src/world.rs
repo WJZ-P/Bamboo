@@ -1088,6 +1088,18 @@ impl World {
             .sum()
     }
 
+    #[cfg(feature = "pipeline-bench")]
+    #[doc(hidden)]
+    pub fn pipeline_bench_wait(&mut self, timeout: Duration) -> bool {
+        self.master.host.wait_for_compute_reply(timeout)
+    }
+
+    #[cfg(feature = "pipeline-bench")]
+    #[doc(hidden)]
+    pub fn pipeline_bench_pool_stats(&self) -> (Duration, Duration) {
+        self.master.host.pipeline_bench_pool_stats()
+    }
+
     /// 测量脚手架用：加一批强加载票，并关掉随机刻（避免比较期间草蔓延改方块）。
     /// Benchmark-only: force-load a set of chunks and disable random ticks.
     #[doc(hidden)]
