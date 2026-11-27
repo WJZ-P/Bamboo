@@ -481,6 +481,9 @@ public final class BlockOracle {
     private static final int MAX_TICKS_PER_TICK = 65_536;
     private static final Direction[] DIRECTIONS = Direction.values();
     private static final Direction[] HORIZONTAL = {Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST};
+    /** Bamboo 实体种子源的初始种子；新实体的随机源从这里取，画变体才对得上。 */
+    /** Initial seed of Bamboo's entity seed source; new entities draw their random from it so painting variants line up. */
+    private static final long ENTITY_RANDOM_SEED = 0x0DDB1A5E5BAD5EEDL;
 
     private static final Unsafe UNSAFE = loadUnsafe();
     private static final Map<String, Field> FIELDS = new HashMap<>();
@@ -1535,6 +1538,9 @@ public final class BlockOracle {
         private LevelEntityGetter<Entity> entityGetter;
         private int lastEntityId = 100;
         private Set<String> unrandom;
+        /** 新实体的种子源，和 Bamboo 的实体种子源同起点（见 reseedPainting）。 */
+        /** Seed source for newly added entities, aligned with Bamboo's (see reseedPainting). */
+        private RandomSource entitySeeds;
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
@@ -1562,6 +1568,7 @@ public final class BlockOracle {
             level.spawned = new ArrayList<>();
             level.ranBlocks = new LinkedHashSet<>();
             level.analogContent = false;
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
             level.data = new FixedLevelData();
             level.entityGetter = new PlayerEntities(level.playersInWorld, level.groundItems);
             level.unrandom = Set.of();
@@ -2219,6 +2226,18 @@ public final class BlockOracle {
         @Override
         public boolean addFreshEntity(Entity entity) {
             spawned.add(EntityType.getKey(entity.getType()).toString());
+            // 画的变体是官方 `Painting.create` 用实体自己的 `RandomSource.create()`（nanoTime 播种）
+            // 从最大面积的候选里抽的，每次跑都不同，放置音效的坐标跟着变。照 mob 对拍的实体种子源
+            // 给这张画换种、重挑一遍变体，再把已经记下的 place 音效坐标挪到新变体的位置。
+            //
+            // A painting's variant is picked by `Painting.create` from the entity's own
+            // `RandomSource.create()` (nanoTime seeded), so the placement sound's position changes
+            // every run. Reseed this entity from the same source the mob oracle uses, re-pick the
+            // variant, and move the already-recorded place sound to the reseeded variant's position.
+            if (entity instanceof net.minecraft.world.entity.decoration.painting.Painting painting) {
+                reseedPainting(painting);
+                fixPaintingPlaceSound(painting);
+            }
             // 物品要留在世界上，settle 里的漏斗才吸得到。下落方块和 TNT 仍然只记账。
             //
             // Items stay in the world so a hopper can suck them during settle.
@@ -2229,6 +2248,56 @@ public final class BlockOracle {
                 xpOrbs.add(orb.getValue());
             }
             return true;
+        }
+
+        /** 用实体种子源重播画的构造取数与变体筛选，和 Bamboo 的 `create_painting` 对齐。 */
+        /** Replay the painting's construction draws and variant selection on the entity seed source, matching Bamboo's `create_painting`. */
+        private void reseedPainting(net.minecraft.world.entity.decoration.painting.Painting painting) {
+            set(Entity.class, painting, "random", RandomSource.create(entitySeeds.nextLong()));
+            painting.setUUID(Mth.createInsecureUUID(painting.getRandom()));
+            Method setVariant = method(net.minecraft.world.entity.decoration.painting.Painting.class,
+                    "setVariant", Holder.class);
+            Method setDirection = method(net.minecraft.world.entity.decoration.HangingEntity.class,
+                    "setDirection", Direction.class);
+            List<Holder<net.minecraft.world.entity.decoration.painting.PaintingVariant>> candidates = new ArrayList<>();
+            registryAccess()
+                    .lookupOrThrow(Registries.PAINTING_VARIANT)
+                    .getTagOrEmpty(net.minecraft.tags.PaintingVariantTags.PLACEABLE)
+                    .forEach(candidates::add);
+            Direction dir = painting.getDirection();
+            candidates.removeIf(holder -> {
+                try {
+                    setVariant.invoke(painting, holder);
+                } catch (ReflectiveOperationException error) {
+                    throw new IllegalStateException(error);
+                }
+                return !painting.survives();
+            });
+            int maxArea = candidates.stream().mapToInt(h -> h.value().area()).max().orElse(0);
+            candidates.removeIf(h -> h.value().area() < maxArea);
+            var chosen = net.minecraft.util.Util.getRandomSafe(candidates, painting.getRandom());
+            if (chosen.isPresent()) {
+                try {
+                    setVariant.invoke(painting, chosen.get());
+                    setDirection.invoke(painting, dir);
+                } catch (ReflectiveOperationException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+        }
+
+        /** place 音效在 `addFreshEntity` 之前按换种前的位置记过，这里把它挪到新变体的位置。 */
+        /** The place sound was recorded before `addFreshEntity` at the pre-reseed position; move it to the reseeded variant's position. */
+        private void fixPaintingPlaceSound(net.minecraft.world.entity.decoration.painting.Painting painting) {
+            int placeId = BuiltInRegistries.SOUND_EVENT.getId(net.minecraft.sounds.SoundEvents.PAINTING_PLACE);
+            for (int i = sounds.size() - 1; i >= 0; i--) {
+                SoundPlay sound = sounds.get(i);
+                if (sound.id() == placeId) {
+                    sounds.set(i, new SoundPlay(sound.id(), painting.getX(), painting.getY(), painting.getZ(),
+                            sound.source(), sound.volume(), sound.pitch(), sound.excluded()));
+                    return;
+                }
+            }
         }
 
         @Override

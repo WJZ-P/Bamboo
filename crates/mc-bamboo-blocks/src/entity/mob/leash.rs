@@ -208,9 +208,13 @@ fn nautilus_is_aggravated(mob: &Mob) -> bool {
     })
 }
 
-/// `Entity.isMobControlled()`：第一名乘客是生物。Bamboo 只有玩家乘客，恒假。
-fn is_mob_controlled(_mob: &Mob) -> bool {
-    false
+/// `Entity.isMobControlled()`：第一名乘客是生物。复用船侧按 uid 判断的实现
+/// （玩家 uid 小于 `FIRST_ENTITY_ID`，生物 uid 不小于它）。
+///
+/// `Entity.isMobControlled()`: the first passenger is a mob, sharing the boat-side
+/// uid test (player uids are below `FIRST_ENTITY_ID`, mob uids are not).
+fn is_mob_controlled(mob: &Mob) -> bool {
+    crate::entity::boat::is_mob_controlled(&mob.passengers)
 }
 
 /// `canHaveALeashAttachedTo(holder)`：距离在断裂距离内且能拴。
@@ -541,12 +545,26 @@ fn angular_friction(me: &Entity, ctx: &dyn EntityCtx) -> f32 {
     }
 }
 
+/// `Leashable.supportQuadLeash()`：船为 true，其余（含快乐恶魂）沿用
+/// `SUPPORTS_QUAD_AS_LEASHED`（false）。快乐恶魂覆写的是 holder 侧，作为被拴方
+/// 仍是单点。
+///
+/// Vanilla `Leashable.supportQuadLeash()`: true for boats; everything else keeps
+/// `SUPPORTS_QUAD_AS_LEASHED`. A happy ghast overrides the holder side instead.
+fn supports_quad_as_leashed(kind: &crate::entity::EntityKind) -> bool {
+    if matches!(kind, crate::entity::EntityKind::Boat(_)) {
+        crate::entity::boat::supports_quad_leash()
+    } else {
+        super::happy_ghast::SUPPORTS_QUAD_AS_LEASHED
+    }
+}
+
 /// `Leashable.checkElasticInteractions`：四方拴绳时按四个角分别算弹簧再累加，
-/// 合力乘 0.25；单点拴绳沿用老路径。
+/// 合力乘 0.25；单点拴绳沿用老路径。四点的偏移与弹簧计算复用快乐恶魂那一套。
 ///
 /// `Leashable.checkElasticInteractions`: with a quad leash each of the four corners
 /// contributes a spring whose accumulated wrench is scaled by 0.25; single-point
-/// leashes keep the old path.
+/// leashes keep the old path. Quad offsets and springs reuse the happy ghast path.
 fn elastic_interactions(me: &mut Entity, mob: &mut Mob, holder: &HolderInfo) -> bool {
     // `getHolderMovement(holder)`：STIFFNESS 项用。NoAI 生物 / 服务端玩家都是 ZERO。
     let holder_movement = if holder.no_ai_mob {
@@ -557,10 +575,9 @@ fn elastic_interactions(me: &mut Entity, mob: &mut Mob, holder: &HolderInfo) -> 
     // `computeDampenedSpringInteraction` 的 dampening 判断用「被拴生物」自己的
     // `getKnownMovement`（NoAI→ZERO），不是 holder 的。
     let leashed_movement = if mob.no_ai { Vec3::default() } else { me.delta };
-    // `Entity.supportQuadLeashAsHolder() && this.supportQuadLeash()`：
-    // 只有「牵引者是快乐恶魂且被拴的一方也支持四点」时走四点。26.3 里
-    // `HappyGhast` 没有覆盖 `supportQuadLeash`，所以被拴的一方恒为单点。
-    let quad = holder.quad_holder && super::happy_ghast::SUPPORTS_QUAD_AS_LEASHED;
+    // `holder.supportQuadLeashAsHolder() && this.supportQuadLeash()`：牵引者
+    // 支持四点（快乐恶魂）且被拴的一方也支持四点（船）时走四点路径。
+    let quad = holder.quad_holder && supports_quad_as_leashed(&me.kind);
     let elastic = elastic_distance_of(mob.mob_type);
     let mut force = Vec3::default();
     let mut torque = 0.0;

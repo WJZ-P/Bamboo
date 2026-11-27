@@ -175,11 +175,17 @@ fn entity_in_tag(name: &str, entity_type: i32) -> bool {
     mc_bamboo_data::in_tag("minecraft:entity_type", name, entity_type)
 }
 
-/// `EnchantmentHelper.modifyDamage`：锋利无条件，亡灵杀手 / 节肢杀手看目标类型。
-/// 返回加在 `baseDamage` 上的总和，即 `getEnchantedDamage − baseDamage`。
+/// `EnchantmentHelper.modifyDamage`：锋利无条件，亡灵杀手 / 节肢杀手 / 穿刺看
+/// 目标类型。返回加在 `baseDamage` 上的总和，即
+/// `getEnchantedDamage − baseDamage`。目标不是 `LivingEntity` 时（例如船）依然
+/// 按目标实体类型过一遍条件，官方 `Player.attack` 不会因为目标不是生物而跳过
+/// `magicBoost`。
 ///
-/// `EnchantmentHelper.modifyDamage`: Sharpness is unconditional, Smite / Bane of
-/// Arthropods depend on the target type. Returns the sum added to `baseDamage`.
+/// `EnchantmentHelper.modifyDamage`: Sharpness is unconditional; Smite, Bane of
+/// Arthropods and Impaling depend on the target type. Returns the sum added to
+/// `baseDamage`. A non-living target such as a boat still goes through the same
+/// target-type conditions: vanilla `Player.attack` does not skip `magicBoost`
+/// for entities that are not `LivingEntity`.
 fn damage_bonus(held: &ItemStack, entity_type: i32) -> f32 {
     let mut bonus = 0.0;
     let sharpness = enchantment_level(held, "minecraft:sharpness");
@@ -197,6 +203,17 @@ fn damage_bonus(held: &ItemStack, entity_type: i32) -> f32 {
         let bane = enchantment_level(held, "minecraft:bane_of_arthropods");
         if bane > 0 {
             bonus += 2.5 * bane as f32;
+        }
+    }
+    // 26.3 `Enchantments.bootstrap` 给穿刺注册了 `DAMAGE` 组件，条件是
+    // `THIS_ENTITY` 在 `sensitive_to_impaling` 里，线性每级 2.5。船不在这个标签里。
+    //
+    // 26.3 `Enchantments.bootstrap` registers Impaling's `DAMAGE` effect with a
+    // `THIS_ENTITY` predicate on `sensitive_to_impaling`, 2.5 per level.
+    if entity_in_tag("minecraft:sensitive_to_impaling", entity_type) {
+        let impaling = enchantment_level(held, "minecraft:impaling");
+        if impaling > 0 {
+            bonus += 2.5 * impaling as f32;
         }
     }
     bonus
@@ -224,9 +241,21 @@ fn sweeping_ratio(player: &Player) -> f32 {
 ///
 /// `Player.canCriticalAttack`: falling, not on ground / climbable / in water /
 /// blinded / riding / sprinting, and the target is living.
-fn can_critical(player: &Player, target_is_living: bool) -> bool {
+fn can_critical(
+    player: &Player,
+    blocks: &crate::player_move::PlayerBlocks<'_>,
+    target_is_living: bool,
+) -> bool {
     player.motion.fall_distance > 0.0
         && !player.on_ground
+        && !crate::player_glide::on_climbable(player, blocks)
+        // `Entity.isInWater()` 就是 `wasTouchingWater`：碰到水的流体高度。
+        // `Entity.isInWater()` is `wasTouchingWater`: touching water fluid.
+        && !crate::player_move::touches_fluid(
+            player,
+            blocks,
+            mc_bamboo_data::tags::fluid_tags::WATER,
+        )
         && !player.effects.has(mob_effect::BLINDNESS)
         && !player.sync.is_sprinting()
         && player.riding.vehicle.is_none()
@@ -1171,7 +1200,10 @@ fn plan_attack(
     if smash {
         base_damage += mace_attack_damage_bonus(held, smash_fall_distance);
     }
-    let critical = full && can_critical(player, target.is_living);
+    let critical = full && {
+        let blocks = crate::player_move::PlayerBlocks::new(&region.chunks, &region.block_entities);
+        can_critical(player, &blocks, target.is_living)
+    };
     if critical {
         base_damage *= CRIT_MULTIPLIER;
     }
@@ -2742,12 +2774,12 @@ mod tests {
     /// 官方 `Player.canCriticalAttack` 的六个已建模前置：下落中、不着地、无失明
     /// （`isMobilityRestricted`）、非疾跑（`isSprinting`）、无载具（`isPassenger`）、
     /// 目标是生物。`onClimbable` / `isInWater` 是 README 已知限制里按缺省值处理的
-    /// 两项，这里单独说明、不写进断言。
+    /// 两项也一起断言。
     ///
     /// Vanilla `Player.canCriticalAttack`'s six modelled preconditions: falling,
     /// off ground, no blindness (`isMobilityRestricted`), not sprinting
     /// (`isSprinting`), no vehicle (`isPassenger`), living target. `onClimbable` /
-    /// `isInWater` are the two README-known-limit defaults, noted but not asserted.
+    /// `isInWater` are asserted too.
     #[test]
     fn can_critical_requires_every_modelled_precondition() {
         use mc_bamboo_blocks::entity::mob::effects::{EffectInstance, EffectMap};
@@ -2765,7 +2797,11 @@ mod tests {
         player.motion.fall_distance = 1.0;
         player.on_ground = false;
         region.insert_player(player);
-        let crit = |region: &Region, living: bool| can_critical(&region.players[&id], living);
+        let crit = |region: &Region, living: bool| {
+            let blocks =
+                crate::player_move::PlayerBlocks::new(&region.chunks, &region.block_entities);
+            can_critical(&region.players[&id], &blocks, living)
+        };
 
         // 全部前置满足才算暴击；目标不是生物则否。
         // All preconditions met means crit; a non-living target cannot be crit.
@@ -2810,6 +2846,21 @@ mod tests {
         region.players.get_mut(&id).unwrap().riding.vehicle = Some(7);
         assert!(!crit(&region, true));
         region.players.get_mut(&id).unwrap().riding.vehicle = None;
+        assert!(crit(&region, true));
+
+        // 攀爬（`onClimbable`）：脚下是梯子。
+        // Climbing (`onClimbable`): a ladder at the feet.
+        let feet = mc_bamboo_core::BlockPos::new(0, 64, 0);
+        region
+            .chunks
+            .set_block(feet, mc_bamboo_data::blocks::LADDER);
+        assert!(!crit(&region, true));
+
+        // 在水里（`isInWater`）。
+        // In water (`isInWater`).
+        region.chunks.set_block(feet, mc_bamboo_data::blocks::WATER);
+        assert!(!crit(&region, true));
+        region.chunks.set_block(feet, mc_bamboo_data::blocks::AIR);
         assert!(crit(&region, true));
     }
 
@@ -3031,6 +3082,7 @@ mod tests {
         let cow = mc_bamboo_data::registries::entity_type::COW;
         let zombie = mc_bamboo_data::registries::entity_type::ZOMBIE;
         let spider = mc_bamboo_data::registries::entity_type::SPIDER;
+        let squid = mc_bamboo_data::registries::entity_type::SQUID;
 
         let sharp = enchanted(
             mc_bamboo_data::items::DIAMOND_SWORD,
@@ -3051,6 +3103,53 @@ mod tests {
         );
         assert_eq!(damage_bonus(&bane, spider), 5.0);
         assert_eq!(damage_bonus(&bane, zombie), 0.0);
+
+        let impaling = enchanted(mc_bamboo_data::items::TRIDENT, "minecraft:impaling", 3);
+        assert_eq!(damage_bonus(&impaling, squid), 7.5);
+        assert_eq!(damage_bonus(&impaling, cow), 0.0);
+    }
+
+    /// `Player.attack` 对船这样的非生物目标照样把 `getEnchantedDamage` 的附魔
+    /// 加成算进 `f`：锋利无条件，亡灵 / 节肢 / 穿刺按船的实体类型标签过滤。
+    ///
+    /// `Player.attack` includes the enchanted damage bonus even when the target
+    /// is a non-living boat: Sharpness is unconditional, and Smite / Bane /
+    /// Impaling are filtered by the boat's entity-type tags.
+    #[test]
+    fn boat_attack_keeps_the_enchanted_damage_bonus() {
+        let boat = mc_bamboo_data::registries::entity_type::OAK_CHEST_BOAT;
+        let sharp = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:sharpness",
+            3,
+        );
+        let smite = enchanted(mc_bamboo_data::items::DIAMOND_SWORD, "minecraft:smite", 5);
+        let bane = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:bane_of_arthropods",
+            5,
+        );
+        let impaling = enchanted(mc_bamboo_data::items::TRIDENT, "minecraft:impaling", 5);
+        assert_eq!(damage_bonus(&sharp, boat), 2.0);
+        assert_eq!(damage_bonus(&smite, boat), 0.0);
+        assert_eq!(damage_bonus(&bane, boat), 0.0);
+        assert_eq!(damage_bonus(&impaling, boat), 0.0);
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let mut player = player_holding(GameMode::Survival, sharp);
+        // 满充能：`s = 1`，`baseDamage = ATTACK_DAMAGE`，`magicBoost = 2.0`。
+        player.attack_strength_ticker = 20;
+        let base = player.attributes.value(attribute::ATTACK_DAMAGE) as f32;
+        region.insert_player(player);
+        let boat_id = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::boat(
+                boat,
+                Vec3::new(1.5, 64.0, 1.5),
+            ));
+        let damage = boat_attack_damage(&mut region, id, boat_id).unwrap();
+        assert_eq!(damage, base + 2.0);
     }
 
     /// 官方 `ApplyMobEffect` 对节肢杀手的三次取数全来自受害者自己的随机源，

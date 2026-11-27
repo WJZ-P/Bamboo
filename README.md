@@ -343,9 +343,9 @@ WebView2 的渲染进程不算在内。
 - **宠物继承主人的队伍**：`TamableAnimal.getTeam()` 覆写——驯服动物自己没队时返回
   `getRootOwner().getTeam()`，Bamboo 的 `goals.rs` 同盟判定和重锤范围击退的候选过滤都补上
   这一层回退（`mob_team_index` 单测钉住，全量 mob-oracle 仍是 46）。
-- **玩家近战攻击的已知限制**：暴击前置判定里
-  `onClimbable` / `isInWater` 按缺省值（Bamboo 没有梯子 / 水中状态），失明用 `EffectMap`、
-  骑乘用 `riding.vehicle` 分别判 `isMobilityRestricted()` / `isPassenger()`（后两条真判了）；
+- **玩家近战攻击的已知限制**：暴击前置判定的
+  `onClimbable`（脚下的可攀爬方块）、`isInWater`（碰到水）、失明（`isMobilityRestricted()`）、
+  骑乘（`isPassenger()`）都照官方判断；
   节肢杀手的缓慢时长按 `ApplyMobEffect` 从**受害者自己的随机源**取三次
   （`nextInt(1)`、时长、等级），落在 `[30, 30 + 10×(L−1)]` 刻、等级恒为 3；`Stats.DAMAGE_DEALT`
   按官方 `awardStat` 在会话内累计、在 `RequestStats` 时作为 `minecraft:custom` 统计发给客户端，
@@ -2054,13 +2054,6 @@ Not an official Minecraft product. Not approved by or associated with Mojang or 
 
 **已知限制**：
 
-- 玩家攻击伤害复用 `plan_attack`（对非生物目标的附魔加成按 0 处理）；玩家控制船时
-  位置由客户端 `move_vehicle` 决定，只比了校验（照现有马的做法），没有 Java 逐刻对拍。
-- 运输船菜单标题用 Bamboo 的 `container.chest`，不是官方的 `container.chestBoat`；
-  存档往返只验证 27 格物品 / 战利品表内容，没有逐键比官方 NBT 与 Bamboo 存档格式。
-- `getEntityContainer` 多个容器实体重叠时官方用 `level.random.nextInt` 随机选一个，
-  Bamboo 取最小实体 ID；漏斗实体容器路径没有接缓存录制 / 重放。
-- 甩下来的 mob 乘客落位用 blocks 层缺省的 `dismount_location`（载具 x / bb.maxY / z），
-  不是船专用 `getCollisionHorizontalEscapeVector` + `DismountHelper`；玩家侧走船专用落位。
-- 船之间的四点拴绳（`Leashable.supportQuadLeash`）、`isMobControlled()`（第一名乘客是
-  生物）仍未建模；`noCollision(AABB)` 和刷怪阻挡仍只看方块与硬碰撞实体，不含船。
+- 玩家控制船时位置由客户端 `move_vehicle` 决定，只比了校验（照现有马的做法），
+  没有 Java 逐刻对拍。
+- 漏斗实体容器路径没有接缓存录制 / 重放。

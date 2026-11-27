@@ -29,7 +29,14 @@ const PLAYER_POSES: [(f64, f64); 3] = [(0.6, 1.8), (0.6, 1.5), (0.6, 0.6)];
 ///
 /// Vanilla `Entity.getCollisionHorizontalEscapeVector`.
 fn escape_vector(vehicle_width: f64, passenger_width: f64, degrees: f32) -> Vec3 {
-    let distance = (vehicle_width + passenger_width + 1.0e-5) / 2.0;
+    // 官方 `getCollisionHorizontalEscapeVector(double, double, float)` 的三个实参
+    // 都是 f32 实体宽 / 常量提升来的 double：`1.0E-5F` 也是先按 f32 存再提升。
+    // 直接用 f64 字面量会让落点差一个 ulp。
+    //
+    // Vanilla widens the f32 widths and the `1.0E-5F` constant to double before
+    // the arithmetic; plain f64 literals shift the landing by an ulp.
+    let distance =
+        (vehicle_width + f64::from(passenger_width as f32) + f64::from(1.0e-5_f32)) / 2.0;
     let radians = degrees * (std::f32::consts::PI / 180.0);
     let direction_x = -f64::from(mth::sin(f64::from(radians)));
     let direction_z = f64::from(mth::cos(f64::from(radians)));
@@ -211,12 +218,81 @@ pub(crate) fn boat_dismount_location(
         placement: false,
         powder_snow_walkable: false,
     });
+    boat_dismount_location_generic(
+        chunks,
+        border,
+        context,
+        &PLAYER_POSES,
+        player.yaw,
+        vehicle_position,
+        vehicle_width,
+        vehicle_box_max_y,
+    )
+}
+
+/// 生物乘客版 `AbstractBoat.getDismountLocationForPassenger`。
+/// `LivingEntity.getDismountPoses()` 只有 `STANDING` 一个姿势，宽高和朝向取乘客自己。
+///
+/// Mob-passenger version of `AbstractBoat.getDismountLocationForPassenger`.
+/// `LivingEntity.getDismountPoses()` has only `STANDING`; width, height and yaw
+/// come from the passenger itself.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn boat_dismount_location_for_mob(
+    chunks: &ChunkStore,
+    border: &WorldBorder,
+    passenger_width: f64,
+    passenger_height: f64,
+    passenger_yaw: f32,
+    fall_distance: f64,
+    bottom: f64,
+    vehicle_position: Vec3,
+    vehicle_width: f64,
+    vehicle_box_max_y: f64,
+) -> Option<Vec3> {
+    let context = CollisionContext::Entity(EntityContext {
+        fall_distance,
+        bottom,
+        falling_block: false,
+        descending: false,
+        placement: false,
+        powder_snow_walkable: false,
+    });
+    let poses = [(passenger_width, passenger_height)];
+    boat_dismount_location_generic(
+        chunks,
+        border,
+        context,
+        &poses,
+        passenger_yaw,
+        vehicle_position,
+        vehicle_width,
+        vehicle_box_max_y,
+    )
+}
+
+/// 官方 `AbstractBoat.getDismountLocationForPassenger` 的公共实现：
+/// `getCollisionHorizontalEscapeVector(bbWidth * SQRT_OF_TWO, passengerWidth,
+/// passengerYRot)` 找一点，检查该格与下一格的地面高度，按给定姿势试
+/// `DismountHelper.canDismountTo`；脚下是水、或都不行时退回载具 AABB 顶。
+///
+/// Shared implementation of vanilla `AbstractBoat.getDismountLocationForPassenger`.
+#[allow(clippy::too_many_arguments)]
+fn boat_dismount_location_generic(
+    chunks: &ChunkStore,
+    border: &WorldBorder,
+    context: CollisionContext,
+    poses: &[(f64, f64)],
+    passenger_yaw: f32,
+    vehicle_position: Vec3,
+    vehicle_width: f64,
+    vehicle_box_max_y: f64,
+) -> Option<Vec3> {
     let mut state_at = |pos: BlockPos| BlockState(chunks.block(pos).unwrap_or(blocks::VOID_AIR));
     // `Mth.SQRT_OF_TWO` 是 f32；`getBbWidth() * SQRT_OF_TWO` 先按 f32 乘再提升。
     let escape = escape_vector(
         f64::from((vehicle_width as f32) * std::f32::consts::SQRT_2),
-        PLAYER_POSES[0].0,
-        player.yaw,
+        poses[0].0,
+        passenger_yaw,
     );
     let target_x = vehicle_position.x + escape.x;
     let target_z = vehicle_position.z + escape.z;
@@ -240,7 +316,7 @@ pub(crate) fn boat_dismount_location(
                 target_z,
             ));
         }
-        for &(width, height) in &PLAYER_POSES {
+        for &(width, height) in poses {
             for location in &candidates {
                 let bounds = pose_bounds(width, height, *location);
                 if !collides(&mut state_at, context, bounds) && border.is_within_bounds_aabb(bounds)

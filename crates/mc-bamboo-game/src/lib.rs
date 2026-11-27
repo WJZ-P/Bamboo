@@ -34,6 +34,9 @@ pub mod advancements;
 pub mod bench;
 mod block_drops;
 mod block_items;
+#[cfg(feature = "oracle-samples")]
+#[doc(hidden)]
+pub mod boat_facts;
 mod book;
 mod campfire;
 mod chat;
