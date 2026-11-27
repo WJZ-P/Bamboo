@@ -402,3 +402,113 @@ pub(crate) fn animal_dismount_location(
         vehicle_position.z,
     )
 }
+
+/// `DismountHelper.nonClimbableShape` 过滤可攀爬方块后的碰撞最高点。
+fn non_climbable_shape_max_y(state: BlockState, pos: BlockPos) -> Option<f64> {
+    if state.is_tagged(mc_bamboo_data::tags::block_tags::CLIMBABLE) {
+        return None;
+    }
+    let boxes = shape::collision_boxes(state, pos, CollisionContext::Empty);
+    if boxes.is_empty() {
+        return None;
+    }
+    Some(boxes.iter().map(|part| part.max_y).fold(0.0, f64::max))
+}
+
+/// `AbstractMinecart` 用的 `level.getBlockFloorHeight(nonClimbableShape(pos), nonClimbableShape(pos.below()))`。
+fn non_climbable_floor_height(
+    state_at: &mut dyn FnMut(BlockPos) -> BlockState,
+    pos: BlockPos,
+) -> f64 {
+    if let Some(top) = non_climbable_shape_max_y(state_at(pos), pos) {
+        return top;
+    }
+    match non_climbable_shape_max_y(state_at(pos.below()), pos.below()) {
+        Some(below) if below >= 1.0 => below - 1.0,
+        _ => f64::NEG_INFINITY,
+    }
+}
+
+/// 官方 `AbstractMinecart.getDismountLocationForPassenger`：按
+/// `OldMinecartBehavior.getMotionDirection`（`flipped ? dir.opposite.clockWise : dir.clockWise`）
+/// 取 `DismountHelper.offsetsForDirection` 八邻格，按三种姿势和 `POSE_DISMOUNT_HEIGHTS`
+/// （站立 / 潜行 `[0, 1, -1]`、游泳 `[0, 1]`）依次找落点；全都不行时落在车顶。
+///
+/// Vanilla `AbstractMinecart.getDismountLocationForPassenger`: scan the eight
+/// `offsetsForDirection(getMotionDirection())` cells across `POSE_DISMOUNT_HEIGHTS`
+/// (`[0, 1, -1]` for standing/crouching, `[0, 1]` for swimming), falling back to
+/// the top of the cart's bounding box.
+pub(crate) fn minecart_dismount_location(
+    chunks: &ChunkStore,
+    border: &WorldBorder,
+    player: &Player,
+    vehicle_position: Vec3,
+    vehicle_box_max_y: f64,
+    vehicle_yaw: f32,
+    flipped: bool,
+) -> Option<Vec3> {
+    const STEPS: [(i32, i32); 4] = [(0, 1), (-1, 0), (0, -1), (1, 0)];
+    let facing = ((f64::from(vehicle_yaw) / 90.0 + 0.5).floor() as i64 & 3) as usize;
+    let motion = if flipped {
+        (facing + 3) & 3
+    } else {
+        (facing + 1) & 3
+    };
+    let direction = STEPS[motion];
+    let clockwise = STEPS[(motion + 1) & 3];
+    let counter = (-clockwise.0, -clockwise.1);
+    let back = (-direction.0, -direction.1);
+    let add = |a: (i32, i32), b: (i32, i32)| (a.0 + b.0, a.1 + b.1);
+    let offsets = [
+        clockwise,
+        counter,
+        add(back, clockwise),
+        add(back, counter),
+        add(direction, clockwise),
+        add(direction, counter),
+        back,
+        direction,
+    ];
+    let context = CollisionContext::Entity(EntityContext {
+        fall_distance: player.motion.fall_distance,
+        bottom: player.position().y,
+        falling_block: false,
+        descending: player.sync.shift_key_down,
+        placement: false,
+        powder_snow_walkable: false,
+    });
+    let mut state_at = |pos: BlockPos| BlockState(chunks.block(pos).unwrap_or(blocks::VOID_AIR));
+    let origin = BlockPos::containing(vehicle_position);
+    let pose_heights: [(f64, f64, &[i32]); 3] = [
+        (PLAYER_POSES[0].0, PLAYER_POSES[0].1, &[0, 1, -1]),
+        (PLAYER_POSES[1].0, PLAYER_POSES[1].1, &[0, 1, -1]),
+        (PLAYER_POSES[2].0, PLAYER_POSES[2].1, &[0, 1]),
+    ];
+    for (width, height, heights) in pose_heights {
+        let clamped_width = width.min(1.0);
+        for &dy in heights {
+            for &(dx, dz) in &offsets {
+                let pos = BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz);
+                let floor = non_climbable_floor_height(&mut state_at, pos);
+                if !floor_valid(floor) {
+                    continue;
+                }
+                let location = Vec3::new(
+                    f64::from(pos.x) + 0.5,
+                    f64::from(pos.y) + floor,
+                    f64::from(pos.z) + 0.5,
+                );
+                let bounds = pose_bounds(clamped_width, height, location);
+                if !collides(&mut state_at, context, bounds) && border.is_within_bounds_aabb(bounds)
+                {
+                    return Some(location);
+                }
+            }
+        }
+    }
+    Some(Vec3::new(
+        vehicle_position.x,
+        vehicle_box_max_y,
+        vehicle_position.z,
+    ))
+}

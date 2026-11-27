@@ -660,6 +660,7 @@ impl TrackedEntity {
                 },
                 None if before.is_some() => match &snapshot.data {
                     KindData::Boat(_) => boat_default_data(index),
+                    KindData::Minecart(cart) => minecart_default_data(index, cart),
                     KindData::Mob(mob) => default_data_for_type(index, mob.mob_type),
                     _ => default_data_for_type(index, mc_bamboo_blocks::entity::mob::MobType::Cow),
                 },
@@ -948,6 +949,10 @@ pub enum KindData {
     ///
     /// Evoker fangs, with no metadata of its own.
     EvokerFangs,
+    /// 矿车：乘客名单和同步数据（受伤、展示方块、燃料）。
+    ///
+    /// A minecart: the passenger list and synced data (hurt, display block, fuel).
+    Minecart(Box<mc_bamboo_blocks::entity::minecart::MinecartPublic>),
 }
 
 /// 这一 tick 全表的载具名单。配对乘客时官方发的是载具那一侧的完整名单，而乘客
@@ -1015,6 +1020,7 @@ impl Snapshot {
             fall_flying: false,
             passengers: match &public.kind {
                 KindPublic::Mob(mob) => mob.passengers.clone(),
+                KindPublic::Minecart(cart) => cart.passengers.clone(),
                 KindPublic::Boat(boat) => boat.passengers.clone(),
                 _ => Vec::new(),
             },
@@ -1045,6 +1051,7 @@ impl Snapshot {
             | KindData::Boat(_)
             | KindData::LeashKnot
             | KindData::EvokerFangs
+            | KindData::Minecart(_)
             | KindData::EyeOfEnder(_) => 0,
         }
     }
@@ -1081,6 +1088,7 @@ impl KindData {
             KindPublic::EvokerFangs => Self::EvokerFangs,
             KindPublic::Painting(painting) => Self::Painting(painting.clone()),
             KindPublic::ItemFrame(frame) => Self::ItemFrame(frame.clone()),
+            KindPublic::Minecart(cart) => Self::Minecart(cart.clone()),
         }
     }
 
@@ -1134,7 +1142,8 @@ impl KindData {
             | Self::FishingHook(_)
             | Self::EyeOfEnder(_)
             | Self::Painting(_)
-            | Self::ItemFrame(_) => None,
+            | Self::ItemFrame(_)
+            | Self::Minecart(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -1160,7 +1169,8 @@ impl KindData {
             | Self::FireworkRocket(_)
             | Self::FishingHook(_)
             | Self::Painting(_)
-            | Self::ItemFrame(_) => None,
+            | Self::ItemFrame(_)
+            | Self::Minecart(_) => None,
         }
     }
 
@@ -1399,6 +1409,38 @@ impl KindData {
                 data.push(EntityData::Item(potion.item.clone()));
                 data
             }
+            Self::Minecart(cart) => {
+                // `VehicleEntity` 的 8/9/10 和船共用同一组变体；11/12/13 是
+                // `AbstractMinecart` 与 `MinecartFurnace` 自己的字段。
+                // Indices 8/9/10 are the shared `VehicleEntity` fields (same
+                // variants as boats); 11/12/13 belong to `AbstractMinecart`
+                // and `MinecartFurnace`.
+                let mut data = Vec::new();
+                if cart.hurt_time != 0 {
+                    data.push(EntityData::BoatHurtTime(cart.hurt_time));
+                }
+                if cart.hurt_dir != 1 {
+                    data.push(EntityData::BoatHurtDir(cart.hurt_dir));
+                }
+                if cart.damage != 0.0 {
+                    data.push(EntityData::BoatDamage(cart.damage));
+                }
+                if let Some(state) = cart.custom_display_block {
+                    data.push(EntityData::MinecartDisplayBlock(Some(state)));
+                }
+                let default_offset =
+                    mc_bamboo_blocks::entity::minecart::MinecartKind::from_entity_type(
+                        cart.entity_type,
+                    )
+                    .map_or(6, |kind| kind.default_display_offset());
+                if cart.display_offset != default_offset {
+                    data.push(EntityData::MinecartDisplayOffset(cart.display_offset));
+                }
+                if cart.has_fuel {
+                    data.push(EntityData::MinecartFuel(true));
+                }
+                data
+            }
         }
     }
 }
@@ -1415,6 +1457,27 @@ fn boat_default_data(index: u8) -> EntityData {
         12 => EntityData::BoatPaddleRight(false),
         13 => EntityData::BoatBubbleTime(0),
         // 船不会产生别的 index；给一个无害的兜底。
+        _ => EntityData::BoatHurtTime(0),
+    }
+}
+
+/// 矿车某一项元数据从非默认变回默认时要发的值（`defineSynchedData` 的默认值）。
+///
+/// The default to send when a minecart metadata entry returns to its default.
+fn minecart_default_data(
+    index: u8,
+    cart: &mc_bamboo_blocks::entity::minecart::MinecartPublic,
+) -> EntityData {
+    let default_offset =
+        mc_bamboo_blocks::entity::minecart::MinecartKind::from_entity_type(cart.entity_type)
+            .map_or(6, |kind| kind.default_display_offset());
+    match index {
+        8 => EntityData::BoatHurtTime(0),
+        9 => EntityData::BoatHurtDir(1),
+        10 => EntityData::BoatDamage(0.0),
+        11 => EntityData::MinecartDisplayBlock(None),
+        12 => EntityData::MinecartDisplayOffset(default_offset),
+        13 => EntityData::MinecartFuel(false),
         _ => EntityData::BoatHurtTime(0),
     }
 }

@@ -5,7 +5,7 @@
 
 use std::{collections::BTreeSet, mem};
 
-use mc_bamboo_core::{Hand, Vec3};
+use mc_bamboo_core::{Hand, Vec3, mth};
 use mc_bamboo_data::registries::entity_type;
 use mc_bamboo_protocol::{
     item::ItemStack,
@@ -158,6 +158,10 @@ pub(crate) struct EntitySync {
     pub(crate) force_shared_flags: bool,
     /// 按着潜行键。来自 `player_input`。
     pub(crate) shift_key_down: bool,
+    /// 最近一次 `player_input` 的完整按键位，供 `ServerPlayer.getLastClientMoveIntent` 用。
+    ///
+    /// Last `player_input` bitmask for `ServerPlayer.getLastClientMoveIntent`.
+    pub(crate) last_input_flags: u8,
     /// 正在飞行。来自 `player_abilities`。
     pub(crate) flying: bool,
     /// 上次发出去的位置，客户端按它解码位移。
@@ -204,6 +208,7 @@ impl EntitySync {
             metadata_dirty: false,
             force_shared_flags: false,
             shift_key_down: false,
+            last_input_flags: 0,
             flying: false,
             base: position,
             last_yaw: 0,
@@ -743,12 +748,57 @@ pub(crate) fn on_punch(region: &mut Region, id: PlayerId) {
     crate::player_attack::on_punch(region, id);
 }
 
-/// `player_input`：潜行。姿势由派生状态算出来，和标志位落在同一个 `set_entity_data` 里。
+/// 官方 `net.minecraft.world.entity.player.Input` 的方向按键位。
+const INPUT_FLAG_FORWARD: u8 = 0x01;
+const INPUT_FLAG_BACKWARD: u8 = 0x02;
+const INPUT_FLAG_LEFT: u8 = 0x04;
+const INPUT_FLAG_RIGHT: u8 = 0x08;
+
+/// 官方 `ServerPlayer.getLastClientMoveIntent()` + `Entity.getInputVector(vec, 1.0f, yRot)`。
+///
+/// Vanilla `ServerPlayer.getLastClientMoveIntent()` + `Entity.getInputVector(vec, 1.0f, yRot)`.
+pub(crate) fn last_client_move_intent(flags: u8, y_rot: f32) -> Vec3 {
+    let left = flags & INPUT_FLAG_LEFT != 0;
+    let right = flags & INPUT_FLAG_RIGHT != 0;
+    let forward = flags & INPUT_FLAG_FORWARD != 0;
+    let backward = flags & INPUT_FLAG_BACKWARD != 0;
+    let xxa: f32 = if left == right {
+        0.0
+    } else if left {
+        1.0
+    } else {
+        -1.0
+    };
+    let zza: f32 = if forward == backward {
+        0.0
+    } else if forward {
+        1.0
+    } else {
+        -1.0
+    };
+    let raw = Vec3::new(f64::from(xxa), 0.0, f64::from(zza));
+    let len_sqr = raw.length_sqr();
+    if len_sqr < 1.0e-7 {
+        return Vec3::default();
+    }
+    let scaled = if len_sqr > 1.0 { raw.normalize() } else { raw };
+    let rad = f64::from(y_rot * (std::f32::consts::PI / 180.0));
+    let sin = f64::from(mth::sin(rad));
+    let cos = f64::from(mth::cos(rad));
+    Vec3::new(
+        scaled.x * cos - scaled.z * sin,
+        scaled.y,
+        scaled.z * cos + scaled.x * sin,
+    )
+}
+
+/// `player_input`：潜行与方向按键。姿势由派生状态算出来，和标志位落在同一个 `set_entity_data` 里。
 /// `entities.md` 第 10 节。
 pub(crate) fn on_player_input(region: &mut Region, id: PlayerId, flags: u8) {
     let Some(player) = region.players.get_mut(&id) else {
         return;
     };
+    player.sync.last_input_flags = flags;
     let shift = flags & INPUT_FLAG_SHIFT != 0;
     player.sync.shift_key_down = shift;
     player

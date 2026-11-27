@@ -550,7 +550,7 @@ fn run() -> Result<(), String> {
             structure_post_process_cli(java, options)
         }
         ["transform", java, ref options @ ..] => transform_cli(java, options),
-        ["entity-oracle", java] => entity_oracle(java),
+        ["entity-oracle", java, ref options @ ..] => entity_oracle(java, options),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["mob-oracle", java, ref options @ ..] => mob_oracle(java, options),
         ["path-type", java, ref options @ ..] => path_type_oracle(java, options),
@@ -1108,8 +1108,25 @@ fn trade_oracle(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
-fn entity_oracle(java: &str) -> Result<(), String> {
-    entity_oracle::run(official_program(java, ENTITY_ORACLE_SOURCE)?)
+fn entity_oracle(java: &str, options: &[&str]) -> Result<(), String> {
+    let mut break_name = None;
+    let mut i = 0;
+    while i < options.len() {
+        match options[i] {
+            "--break-self-test" => {
+                i += 1;
+                break_name = Some(
+                    options
+                        .get(i)
+                        .copied()
+                        .ok_or("--break-self-test needs a name")?,
+                );
+            }
+            other => return Err(format!("unknown entity-oracle option {other}")),
+        }
+        i += 1;
+    }
+    entity_oracle::run(official_program(java, ENTITY_ORACLE_SOURCE)?, break_name)
 }
 
 #[cfg(feature = "oracle")]
@@ -1529,7 +1546,7 @@ fn trade_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "oracle"))]
-fn entity_oracle(_java: &str) -> Result<(), String> {
+fn entity_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

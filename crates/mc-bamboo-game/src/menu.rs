@@ -65,8 +65,10 @@ pub(crate) enum Target {
     EnderChest(BlockPos),
     /// 商人菜单指向的村民实体 ID。
     Villager(i32),
-    /// 运输船菜单指向的船实体 ID，27 格物品栏在实体上、不在方块上。
-    Boat(i32),
+    /// 运输船 / 容器矿车菜单指向的实体 ID，物品栏在实体上、不在方块上。
+    ///
+    /// A chest boat / container cart entity id; its inventory lives on the entity.
+    ContainerEntity(i32),
 }
 
 impl Target {
@@ -74,7 +76,7 @@ impl Target {
     pub(crate) fn positions(&self) -> Vec<BlockPos> {
         match *self {
             Self::Single(pos) | Self::EnderChest(pos) => vec![pos],
-            Self::Villager(_) | Self::Boat(_) => Vec::new(),
+            Self::Villager(_) | Self::ContainerEntity(_) => Vec::new(),
             Self::Double { first, second } => vec![first, second],
         }
     }
@@ -92,10 +94,12 @@ impl Target {
         }
     }
 
-    /// 运输船菜单指向的船实体 ID。
-    pub(crate) fn boat(&self) -> Option<i32> {
+    /// 运输船 / 容器矿车菜单指向的实体 ID。
+    ///
+    /// The chest boat / container cart entity id.
+    pub(crate) fn entity_container(&self) -> Option<i32> {
         match *self {
-            Self::Boat(id) => Some(id),
+            Self::ContainerEntity(id) => Some(id),
             _ => None,
         }
     }
@@ -206,16 +210,20 @@ impl Menu {
         menu
     }
 
-    /// 运输船的 27 格菜单：容器格在船实体上，玩家的 36 格另加在后面。
+    /// 运输船 / 容器矿车的菜单：容器格在实体上，玩家的 36 格另加在后面。
     ///
-    /// A chest boat's 27-slot menu: the container slots live on the boat entity,
+    /// A chest boat / container cart menu: the container slots live on the entity,
     /// with the player's 36 slots appended.
-    pub(crate) fn chest_boat(container_id: i32, boat: i32) -> Self {
+    pub(crate) fn entity_container_menu(
+        container_id: i32,
+        kind: ContainerKind,
+        entity: i32,
+    ) -> Self {
         Self::new(
             container_id,
-            ContainerKind::Chest,
-            Target::Boat(boat),
-            ContainerKind::Chest.slots(),
+            kind,
+            Target::ContainerEntity(entity),
+            kind.slots(),
         )
     }
 
@@ -997,32 +1005,58 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bo
     true
 }
 
-/// `AbstractChestBoat.interactWithContainerVehicle` → `Player.openMenu`：打开
-/// 运输船的 27 格菜单。旁观者不开（`createMenu` 返回 null）；打开前按官方
+/// `AbstractChestBoat` / `MinecartChest` / `MinecartHopper` 的
+/// `interactWithContainerVehicle` → `Player.openMenu`：打开运输船 / 运输矿车的
+/// 27 格菜单（漏斗矿车是 5 格）。旁观者不开（`createMenu` 返回 null）；打开前按官方
 /// `unpackChestVehicleLootTable(player)` 带玩家和幸运值解包战利品表。
 ///
-/// `AbstractChestBoat.interactWithContainerVehicle` → `Player.openMenu`: open
-/// the chest boat's 27-slot menu. Spectators get no menu. The loot table is
-/// unpacked with the player (`THIS_ENTITY` + `getLuck()`) before opening.
-pub(crate) fn open_boat(region: &mut Region, id: PlayerId, boat: i32) -> bool {
-    let (alive, is_chest, entity_type) = match region.entities.public_at(boat) {
-        Some(public) => {
-            let data = match &public.kind {
-                mc_bamboo_blocks::entity::KindPublic::Boat(data) => Some(data),
-                _ => None,
-            };
-            (
-                !public.removed,
-                data.is_some_and(|d| mc_bamboo_blocks::entity::boat::is_chest(d.entity_type)),
-                data.map(|d| d.entity_type),
-            )
+/// `AbstractChestBoat` / `MinecartChest` / `MinecartHopper`'s
+/// `interactWithContainerVehicle` → `Player.openMenu`: open the chest boat /
+/// chest cart 27-slot menu (5 slots for a hopper cart). Spectators get no menu;
+/// the loot table is unpacked with the player before opening.
+pub(crate) fn open_entity_container(region: &mut Region, id: PlayerId, entity: i32) -> bool {
+    let container = region.entities.public_at(entity).and_then(|public| {
+        if public.removed {
+            return None;
         }
-        None => (false, false, None),
+        match &public.kind {
+            mc_bamboo_blocks::entity::KindPublic::Boat(data)
+                if mc_bamboo_blocks::entity::boat::is_chest(data.entity_type) =>
+            {
+                // 官方菜单标题是船自己的显示名（`Entity.getDisplayName()` →
+                // `EntityType.getDescriptionId()`），不是 `container.chest`。
+                //
+                // The vanilla title is the boat's own display name (`Entity.getDisplayName()` →
+                // `EntityType.getDescriptionId()`), not `container.chest`.
+                Some((
+                    ContainerKind::Chest,
+                    mc_bamboo_blocks::entity::boat::display_name_key(data.entity_type),
+                ))
+            }
+            mc_bamboo_blocks::entity::KindPublic::Minecart(cart) => {
+                use mc_bamboo_blocks::entity::minecart::MinecartKind;
+                match MinecartKind::from_entity_type(cart.entity_type) {
+                    Some(MinecartKind::Chest) => Some((
+                        ContainerKind::Chest,
+                        "entity.minecraft.chest_minecart".to_owned(),
+                    )),
+                    Some(MinecartKind::Hopper) => Some((
+                        ContainerKind::Hopper,
+                        "entity.minecraft.hopper_minecart".to_owned(),
+                    )),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    });
+    let Some((kind, title_key)) = container else {
+        return false;
     };
-    if !alive || !is_chest || !region.players.contains_key(&id) {
+    if !region.players.contains_key(&id) {
         return false;
     }
-    // `AbstractChestBoat.createMenu`：旁观者返回 null，不开菜单。
+    // 官方 `createMenu`：旁观者返回 null，不开菜单。
     if is_spectator(region, id) {
         return false;
     }
@@ -1038,7 +1072,7 @@ pub(crate) fn open_boat(region: &mut Region, id: PlayerId, boat: i32) -> bool {
                 .value(mc_bamboo_data::registries::attribute::LUCK) as f32,
         )
     };
-    crate::container_loot::unpack_boat(region, boat, Some(view), luck);
+    crate::container_loot::unpack_entity_container(region, entity, Some(view), luck);
     if region.menus.contains_key(&id) {
         close_menu(region, id);
     }
@@ -1051,23 +1085,13 @@ pub(crate) fn open_boat(region: &mut Region, id: PlayerId, boat: i32) -> bool {
     };
     region
         .menus
-        .insert(id, Menu::chest_boat(container_id, boat));
-    // 官方菜单标题是船自己的显示名（`Entity.getDisplayName()` →
-    // `EntityType.getDescriptionId()`），不是 `container.chest`。
-    //
-    // The vanilla title is the boat's own display name (`Entity.getDisplayName()` →
-    // `EntityType.getDescriptionId()`), not `container.chest`.
-    let title = Component::translate(
-        entity_type
-            .map(mc_bamboo_blocks::entity::boat::display_name_key)
-            .unwrap_or_else(|| "entity.minecraft.oak_chest_boat".to_owned()),
-        [],
-    );
+        .insert(id, Menu::entity_container_menu(container_id, kind, entity));
+    let title = Component::translate(title_key, []);
     region.links.send(
         id,
         &OpenScreen {
             container_id,
-            menu_type: ContainerKind::Chest.menu_type(),
+            menu_type: kind.menu_type(),
             title: &title,
         },
     );
@@ -1497,12 +1521,16 @@ fn still_valid(region: &Region, id: PlayerId, menu: &Menu) -> bool {
     }
     match menu.target {
         Target::Villager(_) => false,
-        Target::Boat(boat_id) => {
-            let Some(public) = region.entities.public_at(boat_id) else {
+        Target::ContainerEntity(entity_id) => {
+            let Some(public) = region.entities.public_at(entity_id) else {
                 return false;
             };
             if public.removed
-                || !matches!(&public.kind, mc_bamboo_blocks::entity::KindPublic::Boat(_))
+                || !matches!(
+                    &public.kind,
+                    mc_bamboo_blocks::entity::KindPublic::Boat(_)
+                        | mc_bamboo_blocks::entity::KindPublic::Minecart(_)
+                )
             {
                 return false;
             }
@@ -1778,13 +1806,16 @@ fn raw_container_slots(region: &Region, id: PlayerId, menu: &Menu) -> Vec<ItemSt
         ];
     }
     // 运输船的 27 格在实体上，不是方块容器条目。
-    if let Some(boat_id) = menu.target.boat() {
+    if let Some(container_id) = menu.target.entity_container() {
         return region
             .entities
-            .get(boat_id)
+            .get(container_id)
             .and_then(|entity| match &entity.kind {
                 mc_bamboo_blocks::entity::EntityKind::Boat(boat) => {
                     boat.chest.as_ref().map(|chest| chest.items.clone())
+                }
+                mc_bamboo_blocks::entity::EntityKind::Minecart(cart) if cart.is_container() => {
+                    Some(cart.items.clone())
                 }
                 _ => None,
             })
@@ -1815,17 +1846,26 @@ fn raw_container_slots(region: &Region, id: PlayerId, menu: &Menu) -> Vec<ItemSt
 /// 内容变了的格子要 `setChanged`，比较器才会立刻重算。
 fn write_back_containers(region: &mut Region, menu: &Menu, slots: &[ItemStack]) {
     // 点击后把容器格写回船实体的 `itemStacks`。
-    if let Some(boat_id) = menu.target.boat() {
+    if let Some(container_id) = menu.target.entity_container() {
         let count = menu.container_size;
         if slots.len() >= count {
-            region.entities.with_mut(boat_id, |entity| {
-                if let mc_bamboo_blocks::entity::EntityKind::Boat(boat) = &mut entity.kind
-                    && let Some(chest) = &mut boat.chest
-                    && chest.items.len() == count
-                {
-                    chest.items.clone_from_slice(&slots[..count]);
-                }
-            });
+            region
+                .entities
+                .with_mut(container_id, |entity| match &mut entity.kind {
+                    mc_bamboo_blocks::entity::EntityKind::Boat(boat) => {
+                        if let Some(chest) = &mut boat.chest
+                            && chest.items.len() == count
+                        {
+                            chest.items.clone_from_slice(&slots[..count]);
+                        }
+                    }
+                    mc_bamboo_blocks::entity::EntityKind::Minecart(cart)
+                        if cart.is_container() && cart.items.len() == count =>
+                    {
+                        cart.items.clone_from_slice(&slots[..count]);
+                    }
+                    _ => {}
+                });
         }
         return;
     }

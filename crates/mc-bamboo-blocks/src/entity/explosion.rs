@@ -76,6 +76,32 @@ impl World<'_> {
         source: Box<EntityPublic>,
         owner: Option<EntityUid>,
     ) {
+        self.explode_tnt_inner(center, radius, source, owner, false);
+    }
+
+    /// `MinecartTNT.explode`：已点燃的 TNT 矿车不破坏铁轨和上方是铁轨的方块
+    /// （`shouldBlockExplode` / `getBlockExplosionResistance`）。
+    ///
+    /// `MinecartTNT.explode`: a primed TNT cart leaves rails and blocks with a
+    /// rail above them intact (`shouldBlockExplode` / `getBlockExplosionResistance`).
+    pub fn explode_minecart(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        source: Box<EntityPublic>,
+        owner: Option<EntityUid>,
+    ) {
+        self.explode_tnt_inner(center, radius, source, owner, true);
+    }
+
+    fn explode_tnt_inner(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        source: Box<EntityPublic>,
+        owner: Option<EntityUid>,
+        preserve_rails: bool,
+    ) {
         // 对拍的改坏确认钩子，正式构建里恒为 0（`Level::explosion_break`）。
         let brk = explosion_break(self);
         // 位 1：丢掉 `PrimedTnt.getY(0.0625)` 的抬升（TNT 高 0.98）。
@@ -85,6 +111,14 @@ impl World<'_> {
             center
         };
         let mut broken = self.calculate_exploded_positions(center, radius, None, None);
+        if preserve_rails {
+            broken.retain(|pos| {
+                let here = self.block_state(*pos);
+                let above = self.block_state(pos.above());
+                !here.is_tagged(mc_bamboo_data::tags::block_tags::RAILS)
+                    && !above.is_tagged(mc_bamboo_data::tags::block_tags::RAILS)
+            });
+        }
         let block_count = broken.len() as i32;
         // `hurtEntities` 在打乱方块之前，而且不取 `level.random`。
         // `hurtEntities` runs before the block list is shuffled and does not draw `level.random`.
