@@ -32,9 +32,11 @@ use mc_bamboo_worldgen::{
     structure::{
         References, SaveStart,
         pipeline::{
-            StartPieces, WorldStructureStart, WorldStructureStarts, WorldStructureState,
-            create_structures,
+            StartContext, StartPieces, WorldStructureStart, WorldStructureStarts,
+            WorldStructureState, create_structures,
         },
+        placement::Placement,
+        rings::BiomeResolver,
         save::{self, load_start},
         start::StructureStarts,
         structure_references, structures_tag,
@@ -594,6 +596,216 @@ pub fn find_nearest_eye_of_ender_structure(
                     (cz << 4) + locate_offset[2],
                 ));
                 best_dist = dist_sqr;
+            }
+        }
+        Ok(best)
+    });
+    result.ok().flatten()
+}
+
+/// `ServerLevel.findNearestMapStructure(HolderSet<Structure>, BlockPos, int, boolean)`：
+/// 26.3 把它转发给 `ChunkGenerator.findNearestMapStructure`。`destination` 是标签展开后的
+/// 结构名（`mc_bamboo_data::expand_structure_map_destination`），`create_reference` 对应
+/// `skip_existing_chunks`。同步搜索，和官方一致；耗时由调用方记录。
+///
+/// `ServerLevel.findNearestMapStructure` forwards to
+/// `ChunkGenerator.findNearestMapStructure`. `destination` holds the expanded
+/// structure names; `create_reference` is `skip_existing_chunks`. This is a
+/// synchronous search like vanilla; the caller records the elapsed time.
+///
+/// 官方还用 `StructureManager.checkStructurePresence` / `addReference` 认领已生成的结构
+/// 起点（并给起点加引用）。Bamboo 没有结构引用表，这里改用 `generate_start` 判断该区块
+/// 能否生成有效起点；两者在「结构还没被生成过」时结果一致，差异记在 README 已知限制。
+///
+/// Vanilla also claims existing starts via `StructureManager.checkStructurePresence` /
+/// `addReference`. Bamboo has no reference table, so it validates with
+/// `generate_start` instead; the two agree when nothing has been generated yet.
+pub fn find_nearest_map_structure(
+    config: &WorldGenConfig,
+    destination: &[String],
+    origin: mc_bamboo_core::BlockPos,
+    max_search_radius: i32,
+    _create_reference: bool,
+) -> Option<mc_bamboo_core::BlockPos> {
+    if !config.generate_structures || destination.is_empty() {
+        return None;
+    }
+    let result = with_thread(config, |thread| {
+        // `placementScans`：挑出含目标结构的结构集。官方按结构逐个查 placement，
+        // 这里反过来按结构集名字（BTreeMap）遍历，结果等价且顺序确定。
+        // `placementScans`: structure sets containing a wanted structure. Vanilla
+        // walks structures and looks up placements; we invert it over the sorted
+        // set registry, which is equivalent and deterministic.
+        let scans: Vec<(String, Vec<String>, Placement)> = thread
+            .state
+            .sets
+            .sets()
+            .iter()
+            .filter_map(|set| {
+                let matched: Vec<String> = set
+                    .structures
+                    .iter()
+                    .filter(|entry| destination.iter().any(|d| d == &entry.structure))
+                    .map(|entry| entry.structure.clone())
+                    .collect();
+                (!matched.is_empty()).then_some((set.name.clone(), matched, set.placement.clone()))
+            })
+            .collect();
+        if scans.is_empty() {
+            return Ok(None);
+        }
+
+        let dims = {
+            let s = thread.settings;
+            if config.level_type.is_flat() {
+                (
+                    mc_bamboo_world::MIN_Y,
+                    mc_bamboo_world::WORLD_HEIGHT,
+                    mc_bamboo_worldgen::feature::flat::SEA_LEVEL,
+                )
+            } else {
+                (s.min_y, s.height, s.sea_level)
+            }
+        };
+        let seed = thread.state.seed;
+        let mut best: Option<mc_bamboo_core::BlockPos> = None;
+        let mut best_dist = f64::MAX;
+
+        // 校验某个候选区块能否生成目标结构里的任意一个有效起点。
+        // Check whether a candidate chunk generates a valid start for any wanted structure.
+        fn valid_start(
+            thread: &mut StructureThread,
+            dims: (i32, i32, i32),
+            structures: &[String],
+            chunk: (i32, i32),
+        ) -> Result<bool, String> {
+            thread.preset.reset();
+            thread.router.reset_context();
+            thread.generator.reset_biome_state();
+            let mut resolver = BiomeResolver {
+                router: &mut thread.router,
+                source: &thread.preset,
+            };
+            let context = StartContext {
+                generator: &thread.generator,
+                state: &thread.state,
+                dims,
+            };
+            for structure in structures {
+                let valid = context
+                    .generate_start(&mut resolver, structure.as_str(), chunk)?
+                    .is_some_and(|start| !start.pieces.is_empty());
+                if valid {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+
+        fn dist_sqr(pos: mc_bamboo_core::BlockPos, origin: mc_bamboo_core::BlockPos) -> f64 {
+            let dx = f64::from(pos.x - origin.x);
+            let dy = f64::from(pos.y - origin.y);
+            let dz = f64::from(pos.z - origin.z);
+            dx * dx + dy * dy + dz * dz
+        }
+
+        fn locate(cx: i32, cz: i32, offset: [i32; 3]) -> mc_bamboo_core::BlockPos {
+            mc_bamboo_core::BlockPos::new((cx << 4) + offset[0], offset[1], (cz << 4) + offset[2])
+        }
+
+        // 1. 同心环放置：`getNearestGeneratedStructure(rings)` 按官方环顺序逐个比较
+        // `(cx*16+8, 32, cz*16+8)` 的距离平方，只对更近的候选校验起点。
+        // 1. Concentric rings: walk the ring list in vanilla order, comparing probe
+        // squared distances and validating starts only for closer candidates.
+        for (name, structures, placement) in &scans {
+            let Placement::ConcentricRings(rings) = placement else {
+                continue;
+            };
+            let Some(positions) = thread.state.sets.ring_positions(name.as_str()) else {
+                continue;
+            };
+            // 拷成自有列表再借用 `thread`，避开和 `thread.state` 的借用冲突。
+            // Copy the ring list out before taking `&mut thread` in `valid_start`.
+            let positions: Vec<(i32, i32)> = positions.to_vec();
+            let offset = rings.common.locate_offset;
+            let mut local: Option<mc_bamboo_core::BlockPos> = None;
+            let mut local_dist = f64::MAX;
+            for &(cx, cz) in &positions {
+                let dx = f64::from((cx << 4) + 8 - origin.x);
+                let dy = f64::from(32 - origin.y);
+                let dz = f64::from((cz << 4) + 8 - origin.z);
+                let dist = dx * dx + dy * dy + dz * dz;
+                if local.is_some() && dist >= local_dist {
+                    continue;
+                }
+                if valid_start(thread, dims, structures, (cx, cz))? {
+                    local = Some(locate(cx, cz, offset));
+                    local_dist = dist;
+                }
+            }
+            if let Some(pos) = local {
+                let dist = dist_sqr(pos, origin);
+                if dist < best_dist {
+                    best_dist = dist;
+                    best = Some(pos);
+                }
+            }
+        }
+
+        // 2. `random_spread` 放置：按半径环从 0 到 max_search_radius 扫描 sector 边缘，
+        // 每个 placement 用 `getPotentialStructureChunk`，找到任意一个就停；这一圈里
+        // 所有 placement 都比完后，只要有人找到就返回当前最近的落点。
+        // 2. Random spread: scan sector edges radius by radius. Each placement uses
+        // `getPotentialStructureChunk` and stops at its first hit; after all
+        // placements at a radius, return the nearest found so far if any hit.
+        let spreads: Vec<(
+            mc_bamboo_worldgen::structure::placement::RandomSpread,
+            Vec<String>,
+        )> = scans
+            .iter()
+            .filter_map(|(_, structures, placement)| match placement {
+                Placement::RandomSpread(spread) => Some((spread.clone(), structures.clone())),
+                _ => None,
+            })
+            .collect();
+        if !spreads.is_empty() {
+            let cx0 = origin.x.div_euclid(16);
+            let cz0 = origin.z.div_euclid(16);
+            for radius in 0..=max_search_radius {
+                let mut found = false;
+                for (spread, structures) in &spreads {
+                    let spacing = spread.spacing;
+                    let mut hit: Option<mc_bamboo_core::BlockPos> = None;
+                    'edges: for x in -radius..=radius {
+                        for z in -radius..=radius {
+                            let x_edge = x == -radius || x == radius;
+                            let z_edge = z == -radius || z == radius;
+                            if !x_edge && !z_edge {
+                                continue;
+                            }
+                            let (tx, tz) = spread.get_potential_structure_chunk(
+                                seed,
+                                cx0 + spacing * x,
+                                cz0 + spacing * z,
+                            );
+                            if valid_start(thread, dims, structures, (tx, tz))? {
+                                hit = Some(locate(tx, tz, spread.common.locate_offset));
+                                break 'edges;
+                            }
+                        }
+                    }
+                    if let Some(pos) = hit {
+                        found = true;
+                        let dist = dist_sqr(pos, origin);
+                        if dist < best_dist {
+                            best_dist = dist;
+                            best = Some(pos);
+                        }
+                    }
+                }
+                if found {
+                    return Ok(best);
+                }
             }
         }
         Ok(best)

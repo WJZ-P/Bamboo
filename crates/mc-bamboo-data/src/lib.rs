@@ -65,6 +65,23 @@ const ENTITY_TYPE_TAG_REGISTRY: &str = "minecraft:entity_type";
 /// looks up the exported official `tags/worldgen/structure` table; a single
 /// structure name is returned as-is. Nested tags are not expanded (the 26.3
 /// map tags are all single-level).
+/// 群系属不属于 `#minecraft:water_on_map_outlines`（`renderBiomePreviewMap` 用）。
+///
+/// Whether a biome is in `#minecraft:water_on_map_outlines`, used by
+/// `renderBiomePreviewMap`.
+pub fn biome_is_water_on_map_outlines(id: i32) -> bool {
+    tags::TAG_GROUPS
+        .iter()
+        .find(|group| group.registry == "minecraft:worldgen/biome")
+        .and_then(|group| {
+            group
+                .tags
+                .iter()
+                .find(|tag| tag.name == "minecraft:water_on_map_outlines")
+        })
+        .is_some_and(|tag| tag.ids.contains(&id))
+}
+
 pub fn expand_structure_map_destination(destination: &str) -> Option<Vec<String>> {
     if let Some(tag) = destination.strip_prefix('#') {
         generated::structure_map_tags::STRUCTURE_TAGS

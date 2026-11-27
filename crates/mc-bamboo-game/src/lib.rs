@@ -87,6 +87,7 @@ mod minecart_command;
 mod vehicle_display_name;
 #[cfg(feature = "oracle-samples")]
 pub use minecart_command::{CommandMinecartSample, replay_command_minecart};
+pub mod exploration_map;
 mod movement;
 mod natural_spawn;
 mod outgoing;
