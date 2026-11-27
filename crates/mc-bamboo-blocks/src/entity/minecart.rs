@@ -145,6 +145,10 @@ pub struct Minecart {
     ///
     /// The registry entity type id; also determines the [`MinecartKind`].
     pub entity_type: i32,
+    /// 实体的可选自定义名。 / The entity's optional custom name.
+    pub custom_name: Option<Tag>,
+    /// 是否显示自定义名。 / Whether the name is visible.
+    pub custom_name_visible: bool,
     /// 乘客列表，骑乘层读它。
     ///
     /// The passenger list, read by the riding layer.
@@ -203,6 +207,8 @@ impl Minecart {
     pub fn new(kind: MinecartKind) -> Self {
         Self {
             entity_type: kind.entity_type(),
+            custom_name: None,
+            custom_name_visible: false,
             passengers: Vec::new(),
             hurt_time: 0,
             hurt_dir: 1,
@@ -253,6 +259,13 @@ impl Minecart {
         } else {
             self.kind().item()
         }
+    }
+
+    /// `VehicleEntity.destroy` 给掉落的载具物品写上实体名字。
+    ///
+    /// `VehicleEntity.destroy` copies the entity name onto the dropped vehicle item.
+    pub fn drop_stack(&self) -> ItemStack {
+        super::hanging::item_with_custom_name(self.drop_item(), self.custom_name.as_ref())
     }
 
     /// `MinecartFurnace.addFuel`：燃料物品、未超上限时加 3600 tick，并把推力
@@ -395,6 +408,10 @@ pub struct CommandActivation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MinecartPublic {
     pub entity_type: i32,
+    /// 实体的可选自定义名。 / The entity's optional custom name.
+    pub custom_name: Option<Tag>,
+    /// 是否显示自定义名。 / Whether the name is visible.
+    pub custom_name_visible: bool,
     pub passengers: Vec<EntityUid>,
     pub hurt_time: i32,
     pub hurt_dir: i32,
@@ -421,6 +438,8 @@ impl MinecartPublic {
     pub fn of(cart: &Minecart) -> Self {
         Self {
             entity_type: cart.entity_type,
+            custom_name: cart.custom_name.clone(),
+            custom_name_visible: cart.custom_name_visible,
             passengers: cart.passengers.clone(),
             hurt_time: cart.hurt_time,
             hurt_dir: cart.hurt_dir,

@@ -50,6 +50,7 @@ import net.minecraft.tags.TagLoader;
 import net.minecraft.util.AbortableIterationConsumer;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.Difficulty;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.attribute.EnvironmentAttributeSystem;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageSources;
@@ -205,6 +206,8 @@ public final class EntityOracle {
             cases += hopperEjectsIntoMinecart(official, out);
             cases += commandMinecartFacts(official, out);
             cases += spawnerMinecartFacts(official, out);
+            cases += namedVehicle(official, out, true);
+            cases += namedVehicle(official, out, false);
             cases += boatStillWater(official, out);
             cases += boatIceSlide(official, out);
             cases += boatWaterCurrent(official, out);
@@ -1518,6 +1521,83 @@ public final class EntityOracle {
                 + ",\"levelEvents\":" + level.spawnerLevelEvents
                 + ",\"cartEvents\":" + level.spawnerCartEvents + "}\n");
         return 1;
+    }
+
+    private static int namedVehicle(Official official, Writer out, boolean boat) throws Exception {
+        FakeLevel level = FakeLevel.create(official, 1L);
+        level.blocks.put(BlockPos.asLong(0, 63, 16), Blocks.STONE.defaultBlockState());
+        ItemStack stack = new ItemStack(boat ? Items.OAK_CHEST_BOAT : Items.CHEST_MINECART);
+        int item = BuiltInRegistries.ITEM.getId(stack.getItem());
+        var name = Component.literal(boat ? "Cargo Ferry" : "Parcel Cart").withStyle(net.minecraft.ChatFormatting.GOLD);
+        stack.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, name);
+        Entity entity;
+        if (boat) {
+            var factory = net.minecraft.world.item.BoatItem.class.getDeclaredMethod(
+                    "getBoat", Level.class, net.minecraft.world.phys.HitResult.class, ItemStack.class, Player.class);
+            factory.setAccessible(true);
+            entity = (Entity) factory.invoke(stack.getItem(), level,
+                    new net.minecraft.world.phys.BlockHitResult(new Vec3(0.5, 64.0, 16.5),
+                            Direction.UP, new BlockPos(0, 63, 16), false), stack, null);
+        } else {
+            var pos = new BlockPos(0, 64, 16);
+            level.blocks.put(pos.asLong(), rail(RailShape.NORTH_SOUTH));
+            var hit = new net.minecraft.world.phys.BlockHitResult(
+                    new Vec3(0.5, 64.0625, 16.5), Direction.UP, pos, false);
+            stack.getItem().useOn(new NamedMinecartContext(level, stack, hit));
+            entity = level.fresh.getFirst();
+        }
+        entity.setUUID(new UUID(0x0000_BAAB_0000_0000L, FIRST_ITEM_ID));
+        var menu = (net.minecraft.world.MenuProvider) entity;
+        var componentCodec = net.minecraft.network.chat.ComponentSerialization.CODEC;
+        var ops = net.minecraft.nbt.NbtOps.INSTANCE;
+        var title = componentCodec.encodeStart(ops, menu.getDisplayName()).getOrThrow();
+        var reporter = net.minecraft.util.ProblemReporter.DISCARDING;
+        var placed = net.minecraft.world.level.storage.TagValueOutput.createWithContext(reporter, official.registries);
+        entity.save(placed);
+        entity.setCustomNameVisible(true);
+        var visible = net.minecraft.world.level.storage.TagValueOutput.createWithContext(reporter, official.registries);
+        entity.save(visible);
+        Entity loaded = entity.getType().create(level, EntitySpawnReason.LOAD);
+        loaded.load(net.minecraft.world.level.storage.TagValueInput.create(reporter, official.registries, visible.buildResult()));
+        var reloaded = net.minecraft.world.level.storage.TagValueOutput.createWithContext(reporter, official.registries);
+        loaded.save(reloaded);
+        var metadata = loaded.getEntityData().getNonDefaultValues();
+        var nameValue = metadata.stream().filter(value -> value.id() == 2).findFirst().orElseThrow();
+        var visibleValue = metadata.stream().filter(value -> value.id() == 3).findFirst().orElseThrow();
+        if (net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(nameValue.serializer()) != 6
+                || net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(visibleValue.serializer()) != 8) {
+            throw new IllegalStateException("unexpected vehicle metadata serializers");
+        }
+        Component syncedName = (Component) ((java.util.Optional<?>) nameValue.value()).orElseThrow();
+        var metadataName = componentCodec.encodeStart(ops, syncedName).getOrThrow();
+
+        level.fresh.clear();
+        entity.hurtServer(level, level.damageSources().generic(), 5.0F);
+        List<String> drops = new ArrayList<>();
+        for (Entity fresh : level.fresh) {
+            if (fresh instanceof ItemEntity itemEntity) {
+                var dropped = itemEntity.getItem();
+                var droppedName = dropped.get(net.minecraft.core.component.DataComponents.CUSTOM_NAME);
+                String tag = droppedName == null ? "null" : jsonString(componentCodec.encodeStart(ops, droppedName).getOrThrow().toString());
+                drops.add("[" + BuiltInRegistries.ITEM.getId(dropped.getItem()) + "," + tag + "]");
+            }
+        }
+        out.write("{\"type\":\"namedVehicle\",\"item\":" + item
+                + ",\"name\":" + jsonString(componentCodec.encodeStart(ops, name).getOrThrow().toString())
+                + ",\"title\":" + jsonString(title.toString())
+                + ",\"placed\":" + jsonString(placed.buildResult().toString())
+                + ",\"visible\":" + jsonString(visible.buildResult().toString())
+                + ",\"reloaded\":" + jsonString(reloaded.buildResult().toString())
+                + ",\"metadataName\":" + jsonString(metadataName.toString())
+                + ",\"metadataVisible\":" + visibleValue.value()
+                + ",\"drops\":[" + String.join(",", drops) + "]}\n");
+        return 1;
+    }
+
+    private static final class NamedMinecartContext extends net.minecraft.world.item.context.UseOnContext {
+        NamedMinecartContext(Level level, ItemStack stack, net.minecraft.world.phys.BlockHitResult hit) {
+            super(level, null, InteractionHand.MAIN_HAND, stack, hit);
+        }
     }
 
     /** 造一辆官方矿车、逐刻跑、把每刻的实体状态写成一题 case。 */

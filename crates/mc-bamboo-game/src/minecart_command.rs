@@ -70,12 +70,11 @@ pub(crate) fn record_success(id: PlayerId, line: &str) {
 
 /// 命令来源按矿车实体显示名字。 / The command source uses the cart's display name.
 pub(crate) fn display_name(region: &Region, id: PlayerId) -> Component {
-    crate::vehicle_display_name::styled(
-        &region.global.scoreboard,
-        id.0,
-        "minecraft:command_block_minecart",
-        Component::translate("entity.minecraft.command_block_minecart", []),
-    )
+    region
+        .entities
+        .public_at(id.0)
+        .and_then(|public| crate::vehicle_display_name::of(&region.global.scoreboard, public))
+        .unwrap_or_else(|| Component::translate("entity.minecraft.command_block_minecart", []))
 }
 
 pub(crate) fn on_set(

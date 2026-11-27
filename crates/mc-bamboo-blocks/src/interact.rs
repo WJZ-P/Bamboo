@@ -194,7 +194,7 @@ pub fn use_item(
     let mut world = World::new(level, ticks);
     let held = actor.item_in(hand);
     let result = if crate::entity::boat::entity_type_for_item(held).is_some() {
-        crate::item_use::boat::use_in_air(&mut world, actor, hand)
+        crate::item_use::boat::use_in_air(&mut world, actor, hand, None)
     } else {
         match Bucket::of(held) {
             Some(bucket) => bucket::use_bucket(&mut world, actor, hand, bucket, None),
@@ -219,7 +219,7 @@ pub fn use_item_with_stack(
     let mut world = World::new(level, ticks);
     let held = actor.item_in(hand);
     let result = if crate::entity::boat::entity_type_for_item(held).is_some() {
-        crate::item_use::boat::use_in_air(&mut world, actor, hand)
+        crate::item_use::boat::use_in_air(&mut world, actor, hand, Some(stack))
     } else {
         match Bucket::of(held) {
             Some(bucket) => bucket::use_bucket(&mut world, actor, hand, bucket, Some(stack)),

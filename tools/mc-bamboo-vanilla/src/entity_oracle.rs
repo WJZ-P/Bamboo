@@ -42,6 +42,7 @@ enum Line {
     BoatFacts(Box<BoatFacts>),
     CommandMinecart(CommandMinecart),
     SpawnerMinecart(Box<SpawnerMinecart>),
+    NamedVehicle(Box<NamedVehicle>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +68,20 @@ struct SpawnerMinecart {
     seed: i64,
     level_events: Vec<[i32; 5]>,
     cart_events: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NamedVehicle {
+    item: i32,
+    name: String,
+    title: String,
+    placed: String,
+    visible: String,
+    reloaded: String,
+    metadata_name: String,
+    metadata_visible: bool,
+    drops: Vec<(i32, Option<String>)>,
 }
 
 /// 船第二期的静态事实：菜单标题、重叠容器随机抽、生物乘客落位、运输船整棵
@@ -626,6 +641,10 @@ impl Report {
                 Line::SpawnerMinecart(scene) => {
                     self.cases += 1;
                     self.replay_spawner_minecart(&scene)?;
+                }
+                Line::NamedVehicle(scene) => {
+                    self.cases += 1;
+                    self.replay_named_vehicle(&scene)?;
                 }
                 Line::End(end) => {
                     self.ended = true;
@@ -1517,6 +1536,66 @@ impl Report {
             &scene.cart_events,
             &cart_events,
         );
+        Ok(())
+    }
+
+    fn replay_named_vehicle(&mut self, scene: &NamedVehicle) -> Result<(), String> {
+        fn parse(raw: &str) -> Result<Tag, String> {
+            mc_bamboo_nbt::parse_snbt(raw)
+                .map(|tag| canonical_tag(&tag))
+                .map_err(|error| format!("{error:?}"))
+        }
+        let at = format!("named vehicle item {}", scene.item);
+        let got =
+            mc_bamboo_game::boat_facts::replay_named_vehicle(scene.item, &parse(&scene.name)?)?;
+        self.steps += 1;
+        self.field(
+            &at,
+            "menu title",
+            parse(&scene.title)?,
+            canonical_tag(&got.title),
+        );
+        self.field(
+            &at,
+            "placed save",
+            parse(&scene.placed)?,
+            canonical_tag(&got.placed),
+        );
+        self.field(
+            &at,
+            "visible save",
+            parse(&scene.visible)?,
+            canonical_tag(&got.visible),
+        );
+        self.field(
+            &at,
+            "reloaded save",
+            parse(&scene.reloaded)?,
+            canonical_tag(&got.reloaded),
+        );
+        self.field(
+            &at,
+            "metadata name",
+            parse(&scene.metadata_name)?,
+            canonical_tag(&got.metadata_name),
+        );
+        self.field(
+            &at,
+            "metadata visible",
+            scene.metadata_visible,
+            got.metadata_visible,
+        );
+        let drops = scene
+            .drops
+            .iter()
+            .map(|(item, name)| Ok::<_, String>((*item, name.as_deref().map(parse).transpose()?)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let got_drops: Vec<_> = got
+            .drops
+            .iter()
+            .map(|(item, name)| (*item, name.as_ref().map(canonical_tag)))
+            .collect();
+        self.field(&at, "drops", drops, got_drops);
         Ok(())
     }
 

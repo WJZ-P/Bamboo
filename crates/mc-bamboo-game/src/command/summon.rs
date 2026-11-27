@@ -193,12 +193,11 @@ fn summon_spawner_cart(
         .into_entity();
     let (mut level, ticks) = region.block_level();
     let uid = World::new(&mut level, ticks).spawn_entity(entity);
-    let display = crate::vehicle_display_name::styled(
-        &region.global.scoreboard,
-        uid,
-        "minecraft:spawner_minecart",
-        Component::translate("entity.minecraft.spawner_minecart", []),
-    );
+    let display = region
+        .entities
+        .public_at(uid)
+        .and_then(|public| crate::vehicle_display_name::of(&region.global.scoreboard, public))
+        .unwrap_or_else(|| Component::translate("entity.minecraft.spawner_minecart", []));
     feedback::success(
         region,
         id,

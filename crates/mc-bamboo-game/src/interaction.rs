@@ -423,7 +423,7 @@ fn record_sequence(region: &mut Region, id: PlayerId, sequence: i32) -> bool {
 }
 
 /// 方块逻辑看到的这名玩家。
-fn actor_of(player: &Player, id: PlayerId) -> Actor {
+pub(crate) fn actor_of(player: &Player, id: PlayerId) -> Actor {
     let held = |hand| {
         let stack = player.inventory.held(hand);
         if stack.is_empty() {
