@@ -41,6 +41,7 @@ const ROOTS: &[&str] = &[
     "transfer",
     "version",
     "worldborder",
+    "execute",
 ];
 
 /// 从官方报告里取一个根节点。
@@ -79,12 +80,16 @@ fn describe(graph: &CommandGraph, id: usize) -> Value {
         object.insert("executable", true.into());
     }
     if let Some(redirect) = node.redirect {
-        let target = graph.node(redirect);
-        let name = match &target.kind {
-            NodeKind::Literal(name) => name.clone(),
-            _ => panic!("redirect to a non-literal"),
-        };
-        object.insert("redirect", name.into());
+        // 官方报告把重定向写成从根到目标的路径；指回根（`execute run`）时不写。
+        // The report writes a redirect as the path from the root; a redirect to the
+        // root itself (`execute run`) is omitted.
+        match &graph.node(redirect).kind {
+            NodeKind::Literal(name) => {
+                object.insert("redirect", serde_json::json!([name]));
+            }
+            NodeKind::Root => {}
+            NodeKind::Argument { .. } => panic!("redirect to an argument node"),
+        }
     }
     if node.requires > 0 {
         object.insert("permissions", permission_object(node.requires));
@@ -171,7 +176,9 @@ fn argument_properties(kind: &ArgumentType) -> Option<Value> {
             "amount": if single { "single" } else { "multiple" },
         }),
         ArgumentType::Time { minimum } => serde_json::json!({"min": minimum}),
-        ArgumentType::Resource { registry } => serde_json::json!({"registry": registry}),
+        ArgumentType::Resource { registry } | ArgumentType::ResourceOrTag { registry } => {
+            serde_json::json!({"registry": registry})
+        }
         ArgumentType::ScoreHolder { multiple } => {
             serde_json::json!({"amount": if multiple { "multiple" } else { "single" }})
         }

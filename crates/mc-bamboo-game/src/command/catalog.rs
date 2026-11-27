@@ -61,6 +61,16 @@ impl Builder {
         node
     }
 
+    /// 只登记动作，不把节点标成可执行：`/execute` 的根在官方树里没有 `executes`，
+    /// 但整条链的入口动作要挂在它上面。
+    ///
+    /// Record an action without marking the node executable. The official
+    /// `/execute` root has no `executes`, yet the chain runner hangs off it.
+    fn attach(&mut self, node: usize, action: CommandFn) {
+        self.ensure(node);
+        self.actions[node] = Some(Action::Global(action));
+    }
+
     fn bind_literal(&mut self, parent: usize, name: &str, action: CommandFn) {
         let node = self.literal(parent, name, 0);
         self.run(node, action);
@@ -1185,7 +1195,6 @@ fn register_execute(builder: &mut Builder, root: usize) {
 
     let run = builder.literal(execute, "run", 0);
     builder.graph.redirect(run, root);
-    builder.run(run, execute::execute_global);
 
     for name in ["as", "at"] {
         let branch = builder.literal(execute, name, 0);
@@ -1228,8 +1237,25 @@ fn register_execute(builder: &mut Builder, root: usize) {
     let dimension = builder.argument(in_branch, "dimension", ArgumentType::Dimension, 0);
     back(builder, dimension);
 
+    let summon = builder.literal(execute, "summon", 0);
+    let entity = builder.argument(
+        summon,
+        "entity",
+        ArgumentType::Resource {
+            registry: "minecraft:entity_type",
+        },
+        0,
+    );
+    back(builder, entity);
+    let on = builder.literal(execute, "on", 0);
+    for relation in execute::RELATIONS {
+        let node = builder.literal(on, relation, 0);
+        back(builder, node);
+    }
+
     for name in ["if", "unless"] {
         let branch = builder.literal(execute, name, 0);
+        register_execute_conditions(builder, execute, branch);
         let block = builder.literal(branch, "block", 0);
         let pos = builder.argument(block, "pos", ArgumentType::BlockPos, 0);
         let predicate = builder.argument(pos, "block", ArgumentType::BlockPredicate, 0);
@@ -1356,7 +1382,68 @@ fn register_execute(builder: &mut Builder, root: usize) {
     }
     // 整棵 `/execute` 的动作都绑在这一个入口：执行器从 `ParsedCommand.chain` 读链。
     // Every `/execute` node binds this one entry; the runner reads `chain`.
-    builder.run(execute, execute::execute_global);
+    builder.attach(execute, execute::execute_global);
+}
+
+/// `ExecuteCommand.addConditionals` 里的 `biome`、`loaded`、`dimension`、`function`、
+/// `stopwatch`、`items`、`slots`。除 `function` 只分叉以外，其余既能接着写链，
+/// 也能当链尾直接执行。
+///
+/// The `biome`, `loaded`, `dimension`, `function`, `stopwatch`, `items` and `slots`
+/// branches of `ExecuteCommand.addConditionals`. All but `function` are both a fork and
+/// an executable tail.
+fn register_execute_conditions(builder: &mut Builder, execute: usize, branch: usize) {
+    let tail = |builder: &mut Builder, node: usize| {
+        builder.run(node, execute::execute_global);
+        builder.graph.redirect(node, execute);
+    };
+    let biome = builder.literal(branch, "biome", 0);
+    let pos = builder.argument(biome, "pos", ArgumentType::BlockPos, 0);
+    let biome = builder.argument(
+        pos,
+        "biome",
+        ArgumentType::ResourceOrTag {
+            registry: "minecraft:worldgen/biome",
+        },
+        0,
+    );
+    tail(builder, biome);
+
+    let loaded = builder.literal(branch, "loaded", 0);
+    let pos = builder.argument(loaded, "pos", ArgumentType::BlockPos, 0);
+    tail(builder, pos);
+
+    let dimension = builder.literal(branch, "dimension", 0);
+    let dimension = builder.argument(dimension, "dimension", ArgumentType::Dimension, 0);
+    tail(builder, dimension);
+
+    let function = builder.literal(branch, "function", 0);
+    let name = builder.argument(function, "name", ArgumentType::Function, 0);
+    builder.graph.redirect(name, execute);
+
+    let stopwatch = builder.literal(branch, "stopwatch", 0);
+    let id = builder.argument(stopwatch, "id", ArgumentType::ResourceLocation, 0);
+    let range = builder.argument(id, "range", ArgumentType::FloatRange, 0);
+    tail(builder, range);
+
+    for (literal, with_predicate) in [("items", true), ("slots", false)] {
+        let node = builder.literal(branch, literal, 0);
+        for (kind, source) in [
+            ("block", ArgumentType::BlockPos),
+            ("entity", entities_argument()),
+        ] {
+            let kind = builder.literal(node, kind, 0);
+            let source = builder.argument(kind, "source", source, 0);
+            let slots = builder.argument(source, "slots", ArgumentType::SlotSource, 0);
+            if with_predicate {
+                let predicate =
+                    builder.argument(slots, "item_predicate", ArgumentType::ItemPredicate, 0);
+                tail(builder, predicate);
+            } else {
+                tail(builder, slots);
+            }
+        }
+    }
 }
 
 fn register_enchant(builder: &mut Builder, root: usize) {

@@ -1976,7 +1976,7 @@ pub(crate) fn player_loot_view(player: &Player) -> mc_bamboo_loot::EntityView {
     view
 }
 
-fn game_stack_to_loot(stack: &ItemStack) -> mc_bamboo_loot::LootStack {
+pub(crate) fn game_stack_to_loot(stack: &ItemStack) -> mc_bamboo_loot::LootStack {
     let mut out = mc_bamboo_loot::LootStack::new(stack.item, stack.count);
     if let Some(mc_bamboo_protocol::components::ComponentValue::Enchantments(levels)) =
         mc_bamboo_protocol::components::defaults::resolve(

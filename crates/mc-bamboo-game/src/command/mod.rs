@@ -49,6 +49,7 @@ mod loot;
 mod particle;
 mod players;
 mod playsound;
+pub(crate) mod predicate_view;
 mod random;
 mod ride;
 mod save;

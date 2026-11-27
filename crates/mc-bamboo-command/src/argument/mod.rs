@@ -360,9 +360,9 @@ impl ArgumentType {
             Self::ResourceOrTag { registry } => parse_resource_or_tag(reader, registry),
             Self::Heightmap => Ok(Value::String(reader.read_unquoted_string())),
             Self::SlotSource => Ok(Value::String(reader.read_unquoted_string())),
-            Self::LootPredicate => parse_resource_location(reader),
+            Self::LootPredicate => parse_loot_predicate(reader),
             Self::FloatRange => Ok(Value::String(reader.read_unquoted_string())),
-            Self::Function => parse_resource_location(reader),
+            Self::Function => parse_function(reader),
             Self::NbtTag => parse_nbt_tag(reader),
             Self::ContextIntProvider | Self::ContextFloatProvider => {
                 Ok(Value::String(reader.read_unquoted_string()))
@@ -484,11 +484,88 @@ fn parse_nbt_tag(reader: &mut StringReader) -> Result<Value, ParseError> {
     Ok(Value::Nbt(tag))
 }
 
-fn parse_resource_or_tag(reader: &mut StringReader, _registry: &str) -> Result<Value, ParseError> {
-    if reader.can_read() && reader.peek() == '#' {
+///
+/// 返回的文本保留 `#`，执行时靠它区分标签和单个条目。条目或标签不存在时在解析期报错；
+/// 官方的异常是读完标识符以后用 `createWithContext(reader)` 建的，所以错误位置在
+/// 标识符后面，游标不退回。
+///
+/// Official `ResourceOrTagArgument.parse`. The `#` stays in the returned text so the
+/// runner can tell a tag from an element. An unknown element or tag fails at parse time.
+/// Vanilla builds the exception with `createWithContext(reader)` after reading the
+/// identifier, so the error position is after it and the cursor is not moved back.
+fn parse_resource_or_tag(reader: &mut StringReader, registry: &str) -> Result<Value, ParseError> {
+    let is_tag = reader.can_read() && reader.peek() == '#';
+    if is_tag {
         reader.skip();
     }
-    parse_resource_location(reader)
+    let name = Identifier::read(reader)?.to_registry_name();
+    let found = if is_tag {
+        mc_bamboo_data::tags::TAG_GROUPS
+            .iter()
+            .find(|group| group.registry == registry)
+            .is_some_and(|group| group.tags.iter().any(|tag| tag.name == name))
+    } else {
+        registry_entries(registry).is_some_and(|entries| entries.contains(&name.as_str()))
+    };
+    if !found {
+        let key = if is_tag {
+            "argument.resource_tag.not_found"
+        } else {
+            "argument.resource.not_found"
+        };
+        return Err(ParseError::with_args(
+            key,
+            [ErrorArg::Text(name), ErrorArg::Text(registry.to_owned())],
+        ));
+    }
+    Ok(Value::String(if is_tag {
+        format!("#{name}")
+    } else {
+        name
+    }))
+}
+
+/// 官方 `ResourceOrIdArgument.lootPredicate`：先试标识符，不行再读一个内联 SNBT 值。
+///
+/// Bamboo 没有数据包谓词注册表，原版数据包里也没有内置谓词，所以引用形式一律报
+/// `argument.resource_or_id.no_such_element`；内联值存成 `Value::Nbt`，执行时再解码。
+///
+/// Official `ResourceOrIdArgument.lootPredicate`: an identifier first, otherwise one inline
+/// SNBT value. Bamboo has no data-pack predicate registry and vanilla ships no built-in
+/// predicates, so a reference always fails with `argument.resource_or_id.no_such_element`.
+/// The inline value is kept as `Value::Nbt` and decoded when the command runs.
+fn parse_loot_predicate(reader: &mut StringReader) -> Result<Value, ParseError> {
+    let start = reader.cursor();
+    if let Ok(id) = Identifier::read_non_empty(reader) {
+        // 错误位置在标识符后面（官方 `createWithContext(reader)`）。
+        // The error position is after the identifier (official `createWithContext(reader)`).
+        return Err(ParseError::with_args(
+            "argument.resource_or_id.no_such_element",
+            [
+                ErrorArg::Text(id.to_registry_name()),
+                ErrorArg::Text("minecraft:predicate".to_owned()),
+            ],
+        ));
+    }
+    reader.set_cursor(start);
+    parse_nbt_tag(reader)
+}
+
+/// 官方 `FunctionArgument.parse`：`#` 开头是函数标签，否则是函数名；存不存在留到执行时查。
+///
+/// Official `FunctionArgument.parse`: a leading `#` names a function tag, otherwise a
+/// function. Whether it exists is checked when the command runs.
+fn parse_function(reader: &mut StringReader) -> Result<Value, ParseError> {
+    let is_tag = reader.can_read() && reader.peek() == '#';
+    if is_tag {
+        reader.skip();
+    }
+    let name = Identifier::read(reader)?.to_registry_name();
+    Ok(Value::String(if is_tag {
+        format!("#{name}")
+    } else {
+        name
+    }))
 }
 
 fn parse_resource(reader: &mut StringReader, registry: &str) -> Result<Value, ParseError> {
@@ -590,6 +667,60 @@ pub fn matches_sub_str(pattern: &str, input: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 官方三个在解析期查注册表的参数：错误键、参数和错误位置（标识符后面）。
+    ///
+    /// The three arguments that look things up at parse time: error key, arguments and
+    /// error position (after the identifier).
+    #[test]
+    fn registry_backed_arguments_fail_after_the_identifier() {
+        let biome = ArgumentType::ResourceOrTag {
+            registry: "minecraft:worldgen/biome",
+        };
+        let mut reader = StringReader::new("minecraft:plains rest");
+        assert_eq!(
+            biome.parse(&mut reader).unwrap(),
+            Value::String("minecraft:plains".to_owned())
+        );
+        let mut reader = StringReader::new("#minecraft:is_overworld rest");
+        assert_eq!(
+            biome.parse(&mut reader).unwrap(),
+            Value::String("#minecraft:is_overworld".to_owned())
+        );
+        for (input, key) in [
+            ("minecraft:nope rest", "argument.resource.not_found"),
+            ("#minecraft:nope rest", "argument.resource_tag.not_found"),
+        ] {
+            let mut reader = StringReader::new(input);
+            let error = biome.parse(&mut reader).unwrap_err();
+            assert_eq!(error.key, key);
+            assert_eq!(
+                error.args,
+                [
+                    ErrorArg::Text("minecraft:nope".to_owned()),
+                    ErrorArg::Text("minecraft:worldgen/biome".to_owned())
+                ]
+            );
+            assert_eq!(reader.cursor(), input.len() - " rest".len(), "{input}");
+        }
+
+        let mut reader = StringReader::new("minecraft:nope rest");
+        let error = ArgumentType::LootPredicate.parse(&mut reader).unwrap_err();
+        assert_eq!(error.key, "argument.resource_or_id.no_such_element");
+        assert_eq!(reader.cursor(), "minecraft:nope".len());
+        let mut reader = StringReader::new("{type:\"x\"} rest");
+        assert!(matches!(
+            ArgumentType::LootPredicate.parse(&mut reader),
+            Ok(Value::Nbt(_))
+        ));
+        assert_eq!(reader.cursor(), "{type:\"x\"}".len());
+
+        let mut reader = StringReader::new("#demo:tag rest");
+        assert_eq!(
+            ArgumentType::Function.parse(&mut reader).unwrap(),
+            Value::String("#demo:tag".to_owned())
+        );
+    }
 
     #[test]
     fn suggestion_matching_happens_at_word_starts() {
