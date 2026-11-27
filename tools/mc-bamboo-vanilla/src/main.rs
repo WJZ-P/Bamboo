@@ -88,8 +88,8 @@
 //!     Compare jigsaw pieces with vanilla StructureTemplateManager / JigsawPlacement
 //!     (`templates` = template sizes and block counts, `jigsaws` = getJigsaws after the
 //!     position-based palette choice and rotation, `pieces` = the full addPieces output)
-//! mc-bamboo-vanilla machine <java 路径>
-//!     让官方熔炉和酿造台在假世界里逐刻跑，比较进度、物品、方块状态和世界随机源
+//! mc-bamboo-vanilla machine <java 路径> [--break-self-test 名字]
+//!     让官方熔炉、酿造台、信标和潮涌核心在假世界里逐刻跑，比较进度、物品、方块状态和世界随机源
 //! mc-bamboo-vanilla entity-oracle <java 路径>
 //!     让官方 `FallingBlockEntity.tick` 和 `PrimedTnt.tick` 在假世界里跑，
 //!     用 Bamboo 重放，逐刻比较位置、速度和落地后的方块
@@ -445,7 +445,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
           structure-post-process 的历史别名，跑同一套单件结构放置对拍
       mc-bamboo-vanilla structure-post-process <java 路径>
       mc-bamboo-vanilla transform <java 路径>
-      mc-bamboo-vanilla machine <java 路径>
+      mc-bamboo-vanilla machine <java 路径> [--break-self-test 名字]
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla path-type <java 路径> [--break-self-test] [--show N]
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -500,7 +500,7 @@ fn run() -> Result<(), String> {
         }
         ["light", java, ref options @ ..] => light(java, options),
         ["menu", java, ref options @ ..] => menu(java, options),
-        ["machine", java] => machine(java),
+        ["machine", java, ref options @ ..] => machine(java, options),
         ["components", java, ref options @ ..] => components(java, options),
         ["command-oracle", java, ref options @ ..] => command_oracle_cli(java, options),
         ["execute-oracle", java, ref options @ ..] => execute_oracle_cli(java, options),
@@ -741,8 +741,8 @@ fn menu(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
-fn machine(java: &str) -> Result<(), String> {
-    machine::run(official_program(java, MACHINE_SOURCE)?)
+fn machine(java: &str, options: &[&str]) -> Result<(), String> {
+    machine::run(official_program(java, MACHINE_SOURCE)?, options)
 }
 
 #[cfg(feature = "oracle")]
@@ -1361,7 +1361,7 @@ fn menu(_java: &str, _options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "oracle"))]
-fn machine(_java: &str) -> Result<(), String> {
+fn machine(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

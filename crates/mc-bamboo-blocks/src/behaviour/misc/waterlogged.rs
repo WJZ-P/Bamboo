@@ -110,6 +110,17 @@ impl Behaviour for Barrier {
 pub(super) struct Conduit;
 
 impl Behaviour for Conduit {
+    /// `ConduitBlock.newBlockEntity`：放下潮涌核心时建一个空方块实体。
+    ///
+    /// `ConduitBlock.newBlockEntity`: placing a conduit creates a fresh block entity.
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
+        if !old.is_same_block(state) && !world.has_block_entity(pos) {
+            world.set_block_entity(Box::new(super::conduit_entity::ConduitBlockEntity::new(
+                pos,
+            )));
+        }
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,

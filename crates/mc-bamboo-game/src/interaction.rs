@@ -840,6 +840,11 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 }
             }
             Effect::CampfireChanged { pos } => crate::campfire::write_update_tag(region, pos),
+            Effect::ConduitChanged { pos } => {
+                crate::block_items::refresh_update_tag(region, pos);
+                // `sendBlockUpdated`：方块状态没变也要重发这一格和它的方块实体数据。
+                region.block_changes.changed.push(pos);
+            }
             // `ServerPlayer.sendOverlayMessage` → `sendSystemMessage(message, true)`，
             // overlay 恒发（隐藏聊天也收）。只发给发起动作的那名玩家。
             //

@@ -333,6 +333,16 @@ fn update_tag(region: &Region, pos: BlockPos) -> Option<Tag> {
     if kind == entities::BEACON {
         return Some(beacon_tag(region, pos));
     }
+    if kind == entities::CONDUIT {
+        // `ConduitBlockEntity.getUpdateTag` = `saveCustomOnly`：只有 `Target`。
+        return Some(
+            region
+                .block_entities
+                .get::<mc_bamboo_blocks::behaviour::misc::conduit_entity::ConduitBlockEntity>(pos)
+                .map(|entity| Tag::Compound(entity.additional()))
+                .unwrap_or_else(|| Tag::Compound(Vec::new())),
+        );
+    }
     let patch = region.block_items.get(&pos)?.clone();
     match kind {
         entities::BANNER => Some(banner_tag(&patch)),
