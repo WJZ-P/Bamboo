@@ -447,16 +447,20 @@ pub(crate) fn is_in_water_or_rain(region: &mut Region, id: PlayerId) -> bool {
     world.is_raining_at(feet) || world.is_raining_at(top)
 }
 
-struct EnvironmentView<'a> {
+pub(crate) struct EnvironmentView<'a> {
     chunks: &'a mc_bamboo_world::store::ChunkStore,
 }
 
-impl EnvironmentView<'_> {
+impl<'a> EnvironmentView<'a> {
+    pub(crate) const fn new(chunks: &'a mc_bamboo_world::store::ChunkStore) -> Self {
+        Self { chunks }
+    }
+
     fn state(&self, pos: BlockPos) -> BlockState {
         BlockState(self.chunks.block(pos).unwrap_or(blocks::VOID_AIR))
     }
 
-    fn body_states(&self, position: Vec3, eye_y: f64) -> Vec<(BlockState, BlockPos)> {
+    pub(crate) fn body_states(&self, position: Vec3, eye_y: f64) -> Vec<(BlockState, BlockPos)> {
         let half = 0.3_f64 - 0.001;
         let bounds = Aabb::new(
             position.x - half,

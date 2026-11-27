@@ -10,6 +10,7 @@ mod cake;
 mod candle;
 mod cauldron;
 mod composter;
+pub mod conduit_entity;
 
 pub(crate) use composter::{
     MAX_LEVEL as COMPOST_MAX_LEVEL, READY as COMPOST_READY, compost_empty, compost_fill,
