@@ -402,8 +402,12 @@ public final class ExecuteOracle {
             } catch (Throwable error) {
                 feedback.add("L[throw:" + error.getClass().getSimpleName() + "]");
                 if (System.getenv("SCOREBOARD_ORACLE_DEBUG") != null) {
-                    System.err.println("step failed: " + step);
-                    error.printStackTrace(System.err);
+                    // `Bootstrap` 把 `System.err` 换成了日志流，这里直接写原来的标准错误。
+                    // `Bootstrap` replaced `System.err` with a logging stream; write to the
+                    // real standard error instead.
+                    PrintStream raw = new PrintStream(new FileOutputStream(FileDescriptor.err), true);
+                    raw.println("step failed: " + step);
+                    error.printStackTrace(raw);
                 }
             }
         }
@@ -1007,6 +1011,12 @@ public final class ExecuteOracle {
         @Override
         public ServerScoreboard getScoreboard() {
             return board;
+        }
+
+        /** `LivingEntity.isPushable` 会问这一格的实体在不在 tick；假世界里都在。 */
+        @Override
+        public boolean isPositionEntityTicking(BlockPos pos) {
+            return true;
         }
     }
 

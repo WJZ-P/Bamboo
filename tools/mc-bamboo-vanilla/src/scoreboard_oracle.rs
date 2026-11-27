@@ -21,10 +21,12 @@ use serde_json::Value as Json;
 
 const USAGE: &str = "usage: scoreboard-oracle <java> [--show N] [--break NAME]";
 
-/// 改坏确认：名字和对 Bamboo 这一侧输入做的改动。
+/// 一项改坏确认：名字和对 Bamboo 这一侧输入做的改动。
 ///
-/// Break checks: a name and the change applied to the input Bamboo replays.
-const BREAKS: &[(&str, fn(&str) -> String)] = &[
+/// One break check: a name and the change applied to the input Bamboo replays.
+type Break = (&'static str, fn(&str) -> String);
+
+const BREAKS: &[Break] = &[
     // 触发以后不重新上锁：第二次 `/trigger` 本该失败。
     // The score is unlocked again before every trigger, so a second use succeeds.
     ("trigger_relock", |line| {
@@ -44,6 +46,16 @@ const BREAKS: &[(&str, fn(&str) -> String)] = &[
     // 击杀不记分。
     // A kill is not scored.
     ("kill_score", |line| line.replacen(" ;; !killscore", "", 1)),
+    // 队伍的 `friendlyFire` 没关掉。
+    // The team's `friendlyFire` stays on.
+    ("friendly_fire", |line| {
+        line.replace(" ;; team modify red friendlyFire false", "")
+    }),
+    // 队伍的碰撞规则没设上。
+    // The team's collision rule is not set.
+    ("collision_rule", |line| {
+        line.replace(" ;; team modify red collisionRule pushOwnTeam", "")
+    }),
 ];
 
 /// 和 `ExecuteOracle.java` 的 `SCOREBOARD_CASES` 一致。

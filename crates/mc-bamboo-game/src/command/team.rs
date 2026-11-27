@@ -67,7 +67,7 @@ fn members(
     id: PlayerId,
     parsed: &ParsedCommand,
     name: &str,
-) -> Result<Vec<String>, CommandFail> {
+) -> Result<(Vec<String>, bool), CommandFail> {
     let spec = parsed
         .get(name)
         .and_then(Value::as_score_holder)
@@ -84,14 +84,19 @@ fn members(
     if names.is_empty() {
         return Err(fail("argument.scoreHolder.empty"));
     }
-    Ok(names)
+    Ok((names, matches!(spec, ScoreHolderSpec::Selector(_))))
 }
 
-/// 反馈里的名字。选择器选出来的实体用它的显示名套队伍格式，别的名字按玩家名处理。
+/// 反馈里的名字（官方 `ScoreHolder.getFeedbackDisplayName`）。`selected` 表示它是选择器
+/// 选出来的实体，用显示名套队伍格式；写名字得到的只显示纯名字。
 ///
-/// The name shown in feedback. An entity picked by a selector uses its display name in
-/// team format; any other name is treated as a player name.
-fn display_of(global: &Global, region: &Region, name: &str) -> Component {
+/// The name shown in feedback (official `ScoreHolder.getFeedbackDisplayName`).
+/// `selected` marks an entity picked by a selector, shown by its display name in team
+/// format; a typed name shows the bare name.
+fn display_of(global: &Global, region: &Region, name: &str, selected: bool) -> Component {
+    if !selected {
+        return Component::text(name);
+    }
     match crate::scoreboard::entity_display(region, name) {
         Some(display) => global.scoreboard().format_holder_name(name, display),
         None => global.scoreboard().format_player_name(name),
@@ -236,7 +241,7 @@ pub(crate) fn join(
 ) -> Result<(), CommandFail> {
     let name = team(global, parsed)?;
     let shown = formatted(global, &name)?;
-    let names = members(global, region, id, parsed, "members")?;
+    let (names, selected) = members(global, region, id, parsed, "members")?;
     let mut changed: i32 = 0;
     let mut only = String::new();
     for member in &names {
@@ -254,7 +259,10 @@ pub(crate) fn join(
             region,
             id,
             "commands.team.join.success.single",
-            args([display_of(global, region, &only).into(), shown.into()]),
+            args([
+                display_of(global, region, &only, selected).into(),
+                shown.into(),
+            ]),
             true,
         );
     } else {
@@ -275,7 +283,7 @@ pub(crate) fn leave(
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let names = members(global, region, id, parsed, "members")?;
+    let (names, selected) = members(global, region, id, parsed, "members")?;
     let mut changed: i32 = 0;
     let mut only = String::new();
     for member in &names {
@@ -292,7 +300,7 @@ pub(crate) fn leave(
             region,
             id,
             "commands.team.leave.success.single",
-            args([display_of(global, region, &only).into()]),
+            args([display_of(global, region, &only, selected).into()]),
             true,
         );
     } else {
