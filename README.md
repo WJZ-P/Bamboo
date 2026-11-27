@@ -566,7 +566,7 @@ WebView2 的渲染进程不算在内。
   **对拍**：`menu java` 六道固定题（左 / 右键装取、62/64 装到满、选中第 2 件后拿到光标再放到别的格取出、
   嵌套收纳袋、满袋再装）在 245 题 2629 次点击里逐步比全部 63 个槽位、光标、组件补丁十六进制、
   `state_id` 与补发槽位，0 不一致；`entity-oracle java` 的 `bundle_destroyed` 用官方 `onDestroyed`
-  生成的两件掉落物逐刻比位置 / 速度 / 数量 / 年龄 / 拾取延迟，60 题 1168 刻 0 不一致。
+  生成的两件掉落物逐刻比位置 / 速度 / 数量 / 年龄 / 拾取延迟，67 题 1212 刻 0 不一致。
   四处改坏确认（`--break-self-test bundle_first|bundle_slots|bundle_selected` 与
   `entity-oracle java --break-self-test bundle-drops`）分别报 5 / 15 / 12 / 2 处差异。
   **已知限制**：选中下标是服务端本地状态，复制物品堆时两份会带上同一个下标；
