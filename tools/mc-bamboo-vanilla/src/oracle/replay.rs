@@ -1384,6 +1384,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::Particles { .. } => None,
             Effect::Firework { .. } => None,
             Effect::BoatBubbleEvent { .. } => None,
+            Effect::ConduitChanged { .. } => None,
         })
         .collect()
 }
@@ -1520,7 +1521,8 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::RaiderDied { .. }
             | Effect::RaidSetLeader { .. }
             | Effect::Firework { .. }
-            | Effect::BoatBubbleEvent { .. } => {}
+            | Effect::BoatBubbleEvent { .. }
+            | Effect::ConduitChanged { .. } => {}
         }
     }
     (events, sounds)

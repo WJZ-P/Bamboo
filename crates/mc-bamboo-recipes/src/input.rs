@@ -193,6 +193,48 @@ impl BrewingInput {
     }
 }
 
+/// 按地图 ID 查当前缩放等级（0..=4），对应官方 `MapItem.getSavedData(stack, level).scale`。
+///
+/// Look up a map's scale (0..=4) by `map_id`, corresponding to vanilla
+/// `MapItem.getSavedData(stack, level).scale`.
+pub trait MapScaleLookup {
+    /// 找到该地图时返回缩放等级（0..=4），不存在返回 `None`。
+    fn map_scale(&self, map_id: i32) -> Option<i8>;
+}
+
+impl<F: Fn(i32) -> Option<i8>> MapScaleLookup for F {
+    fn map_scale(&self, map_id: i32) -> Option<i8> {
+        self(map_id)
+    }
+}
+
+/// 不带地图存档时的默认查询：始终返回 `None`。
+///
+/// Default lookup when no map store is available: always returns `None`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoMapLookup;
+
+impl MapScaleLookup for NoMapLookup {
+    fn map_scale(&self, _map_id: i32) -> Option<i8> {
+        None
+    }
+}
+
+/// 附带地图缩放查询的合成输入包装，供 `MapExtendingRecipe` 等需要查地图数据的配方使用。
+///
+/// [`CraftingInput`] paired with a [`MapScaleLookup`] so recipes such as
+/// `MapExtendingRecipe` can query saved map scale without coupling to world state.
+pub struct CraftingContext<'a, L: MapScaleLookup> {
+    pub input: &'a CraftingInput,
+    pub maps: L,
+}
+
+impl<'a, L: MapScaleLookup> CraftingContext<'a, L> {
+    pub const fn new(input: &'a CraftingInput, maps: L) -> Self {
+        Self { input, maps }
+    }
+}
+
 /// 配方输入，官方的 `RecipeInput`：能判断空不空，也能试一个配方能不能做出来。
 pub trait RecipeInput {
     /// 官方的 `RecipeInput.isEmpty`。空输入在 [`RecipeManager`](crate::RecipeManager) 里直接找不到配方。

@@ -909,6 +909,7 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             "minecraft:sculk_catalyst",
         ),
         ("beacon-bare", "minecraft:beacon", "minecraft:beacon"),
+        ("conduit-bare", "minecraft:conduit", "minecraft:conduit"),
         (
             "potent_sulfur-bare",
             "minecraft:potent_sulfur",
@@ -971,6 +972,12 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             fields.extend(extra);
             out.push((name.to_owned(), state, id, Tag::Compound(fields)));
         };
+    full(
+        "conduit-full",
+        "minecraft:conduit",
+        "minecraft:conduit",
+        vec![("Target".to_owned(), Tag::IntArray(vec![1, 2, 3, 4]))],
+    );
     full(
         "mob_spawner-full",
         "minecraft:spawner",
@@ -1617,6 +1624,13 @@ fn block_entity_load_cases() -> Result<Vec<(String, &'static str, Tag)>, String>
         "beacon-full".to_owned(),
         "minecraft:beacon",
         Tag::Compound(beacon),
+    ));
+    let mut conduit = meta("minecraft:conduit");
+    conduit.push(("Target".to_owned(), Tag::IntArray(vec![1, 2, 3, 4])));
+    out.push((
+        "conduit-full".to_owned(),
+        "minecraft:conduit",
+        Tag::Compound(conduit),
     ));
     // 宝库 / 幽匿方块实体：只有坐标的裸条目、codec 默认值省略、非空列表和监听器。
     // Vault and sculk block entities: bare entries, codec default omission,

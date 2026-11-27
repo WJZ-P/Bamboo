@@ -36,10 +36,10 @@ use mc_bamboo_protocol::{
     text::Component,
 };
 use mc_bamboo_recipes::{
-    CraftingInput, RecipeManager, SmithingInput, assemble, equipment_slot_for_item,
-    is_brewing_fuel, is_brewing_potion_input, is_brewing_reagent, is_cooking_fuel,
-    is_cooking_input, is_equippable_in_slot, is_smithing_addition, is_smithing_base,
-    is_smithing_template, remaining_items, stonecutter_recipes,
+    CraftingContext, CraftingInput, RecipeManager, SmithingInput, assemble,
+    equipment_slot_for_item, is_brewing_fuel, is_brewing_potion_input, is_brewing_reagent,
+    is_cooking_fuel, is_cooking_input, is_equippable_in_slot, is_smithing_addition,
+    is_smithing_base, is_smithing_template, remaining_items, stonecutter_recipes,
 };
 use tracing::{debug, warn};
 
@@ -524,8 +524,8 @@ impl Station {
         }
     }
 
-    pub(crate) fn is_in_world_cartography(&self) -> bool {
-        self.kind == Kind::Cartography && self.in_world
+    pub(crate) fn is_in_world_map_menu(&self) -> bool {
+        self.in_world && matches!(self.kind, Kind::Cartography | Kind::Crafting)
     }
 
     fn from_player(player: &Player) -> Self {
@@ -1150,8 +1150,8 @@ impl Station {
             return;
         }
         let mut cloned = copy_count(current, current.max_stack_size());
-        if self.role(index) == Role::CartoResult {
-            self.post_process_cartography(&mut cloned);
+        if matches!(self.role(index), Role::CartoResult | Role::CraftResult) {
+            self.post_process_map(&mut cloned);
         }
         self.carried = cloned;
     }
@@ -1404,7 +1404,7 @@ impl Station {
             {
                 return MoveResult::Stop { write_back: false };
             }
-            self.post_process_cartography(stack);
+            self.post_process_map(stack);
             return Self::moved_or_stop(self.move_items(stack, 3, 39, true), true);
         }
         if index == 0 || index == 1 {
@@ -1499,6 +1499,15 @@ impl Station {
 
     fn route_crafting(&mut self, index: usize, stack: &mut ItemStack) -> MoveResult {
         if index == 0 {
+            // 官方 `CraftingMenu.quickMoveStack` 在 `moveItemStackTo` 前调 `Item.onCraftedBy`
+            // → `MapItem.onCraftedPostProcess`。若带后处理且背包无空格，跳过分配避免白耗 ID。
+            if self.world_maps.is_some()
+                && cartography::has_post_processing(stack)
+                && !(10..46).any(|slot| self.slots[slot].is_empty())
+            {
+                return MoveResult::Stop { write_back: false };
+            }
+            self.post_process_map(stack);
             return Self::moved_or_stop(self.move_items(stack, 10, 46, true), true);
         }
         if (10..46).contains(&index) {
@@ -1714,7 +1723,7 @@ impl Station {
 
     fn on_take(&mut self, index: usize, taken: &mut ItemStack) {
         match self.role(index) {
-            Role::CraftResult => self.take_craft_result(),
+            Role::CraftResult => self.take_craft_result(taken),
             Role::StoneResult => self.take_stone_result(),
             Role::SmithResult => self.take_smith_result(),
             Role::LoomResult => self.take_loom_result(),
@@ -1746,13 +1755,22 @@ impl Station {
         self.slots[45] = mc_bamboo_blocks::crafter::potential_result(&self.slots[..9]);
     }
 
+    fn find_craft_recipe(&self, input: &CraftingInput) -> Option<&'static Recipe> {
+        if let Some(maps) = self.world_maps.as_ref() {
+            let ctx = CraftingContext::new(input, |map_id| maps.get(map_id).map(|d| d.scale));
+            RecipeManager::global().get_recipe_for(RecipeType::Crafting, &ctx, None)
+        } else {
+            RecipeManager::global().get_recipe_for(RecipeType::Crafting, input, None)
+        }
+    }
+
     fn refresh_craft(&mut self) {
         let width = self.grid_width();
         let len = width * width;
         let grid = self.slots[1..1 + len].to_vec();
         let input = CraftingInput::of(width, width, &grid);
-        let result = RecipeManager::global()
-            .get_recipe_for(RecipeType::Crafting, &input, None)
+        let result = self
+            .find_craft_recipe(&input)
             .and_then(|recipe| assemble(recipe, input.slots()))
             .map(normalize)
             .unwrap_or_else(ItemStack::empty);
@@ -1766,13 +1784,13 @@ impl Station {
         });
     }
 
-    fn take_craft_result(&mut self) {
+    fn take_craft_result(&mut self, taken: &mut ItemStack) {
         let width = self.grid_width();
         let len = width * width;
         let grid = self.slots[1..1 + len].to_vec();
         let positioned = CraftingInput::of_positioned(width, width, &grid);
-        let recipe =
-            RecipeManager::global().get_recipe_for(RecipeType::Crafting, &positioned.input, None);
+        let recipe = self.find_craft_recipe(&positioned.input);
+        self.post_process_map(taken);
         let remaining = match recipe {
             Some(recipe) => remaining_items(recipe, positioned.input.slots()),
             None => positioned.input.slots().to_vec(),
@@ -2168,7 +2186,7 @@ impl Station {
     }
 
     /// 真实世界里执行官方 `MapItem.onCraftedPostProcess`（放大 / 锁定分配新 `map_id`）。
-    fn post_process_cartography(&mut self, stack: &mut ItemStack) {
+    fn post_process_map(&mut self, stack: &mut ItemStack) {
         if let Some(maps) = self.world_maps.as_mut() {
             cartography::post_process_map(stack, maps);
         }
@@ -2178,7 +2196,7 @@ impl Station {
     fn take_cartography_result(&mut self, taken: &mut ItemStack) {
         self.shrink_input(0);
         self.shrink_input(1);
-        self.post_process_cartography(taken);
+        self.post_process_map(taken);
         if self.in_world {
             self.effects.push(WorldEffect::Cartography);
         }
@@ -3239,7 +3257,7 @@ fn apply_click(
     }
     pull_machine(region, station);
     let mut maps = maps;
-    if station.kind == Kind::Cartography && station.in_world {
+    if matches!(station.kind, Kind::Cartography | Kind::Crafting) && station.in_world {
         let store = match maps.as_deref_mut() {
             Some(store) => store,
             None => std::sync::Arc::make_mut(&mut region.global.maps),

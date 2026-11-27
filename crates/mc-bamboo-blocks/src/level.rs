@@ -1410,6 +1410,23 @@ pub trait Level: LevelSideState + LevelEntities {
         out
     }
 
+    /// `Entity.isInWaterOrRain()`：这名玩家的身体碰水，或者脚下 / 碰撞盒顶上在下雨。
+    /// 方块层只有方块状态和天气，默认判定雨；游戏层覆盖它，补上玩家碰撞盒真正
+    /// 接触 `#water` 的那部分。
+    ///
+    /// `Entity.isInWaterOrRain()`: the player touches water or rain is falling at
+    /// the feet / bounding-box top. The block layer only sees block states and
+    /// weather; the game layer overrides this to add body contact with `#water`.
+    fn player_in_water_or_rain(&self, player: &crate::entity::ctx::PlayerView) -> bool {
+        let feet = mc_bamboo_core::BlockPos::containing(player.position);
+        let top = mc_bamboo_core::BlockPos::containing(mc_bamboo_core::Vec3::new(
+            player.position.x,
+            player.position.y + f64::from(player.height),
+            player.position.z,
+        ));
+        self.is_raining_at(feet) || self.is_raining_at(top)
+    }
+
     /// 这名玩家在不在床上（`LivingEntity.isSleeping()`）。末影珍珠决定要不要传送主人时读它。
     ///
     /// Whether this player is sleeping (`LivingEntity.isSleeping()`), read when an
@@ -2969,6 +2986,12 @@ pub enum Effect {
     /// A permitted player used a command block. The client opens the editor; the server sends
     /// the block-entity data.
     OpenCommandBlock { pos: BlockPos },
+    /// `ConduitBlockEntity.updateAndAttackTarget` 的 `sendBlockUpdated(pos, state, state, 2)`：
+    /// 目标引用变了，要把 `getUpdateTag`（`Target`）重新发给追踪这个区块的客户端。
+    ///
+    /// `sendBlockUpdated(..., 2)` after the conduit's target reference changed:
+    /// resend `getUpdateTag` (`Target`) to clients tracking this chunk.
+    ConduitChanged { pos: mc_bamboo_core::BlockPos },
     /// 一次生物对玩家的近战伤害。算阶段记意图，同一刻的实体循环里按实体顺序
     /// 调玩家的 `hurtServer`（游戏层接正式入口）。
     HurtPlayer {

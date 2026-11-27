@@ -114,6 +114,12 @@ fn every_block_entity_kind_round_trips() {
                 );
                 Box::new(beacon)
             }
+            BlockEntityKind::Conduit => {
+                let mut conduit =
+                    crate::behaviour::misc::conduit_entity::ConduitBlockEntity::new(POS);
+                conduit.set_target(Some([7; 16]));
+                Box::new(conduit)
+            }
         };
         let first = write_block_entity_additional(entity.as_ref()).expect("写出成功");
         let second = round_trip(entity, kind.name());

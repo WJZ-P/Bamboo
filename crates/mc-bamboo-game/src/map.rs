@@ -14,14 +14,19 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    BlockState, SupportType, World as BlockWorld,
+    BlockState, InteractionResult, SupportType, World as BlockWorld,
     entity::{KindPublic, hanging::ItemFramePublic},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand};
 use mc_bamboo_data::{
-    blocks, component_registries::registry_names::MAP_DECORATION_TYPE, items,
-    registries::data_component_type as kinds, registries::fluid as fluid_reg, sounds, state_fluid,
-    state_map_color,
+    block_of_state, blocks,
+    component_registries::registry_names::MAP_DECORATION_TYPE,
+    items,
+    registries::{
+        block_entity_type as block_entities, data_component_type as kinds, fluid as fluid_reg,
+    },
+    sounds, state_fluid, state_map_color,
+    tags::block_tags,
 };
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{
@@ -148,6 +153,42 @@ pub fn dye_color_from_name(name: &str) -> Option<u8> {
         .iter()
         .position(|&entry| entry == name)
         .map(|idx| idx as u8)
+}
+
+/// 从方块状态提取旗帜底色（`DyeColor` 序号 0..=15）；不是旗帜方块返回 `None`。
+///
+/// Extract the banner base `DyeColor` ordinal (0..=15) from a block state, or
+/// `None` if the block is not a standing or wall banner.
+pub fn banner_color_from_state(state: u32) -> Option<u8> {
+    let block = block_of_state(state)?;
+    if block.block_entity_type != Some(block_entities::BANNER) {
+        return None;
+    }
+    let name = block.name.strip_prefix("minecraft:").unwrap_or(block.name);
+    let color = name
+        .strip_suffix("_wall_banner")
+        .or_else(|| name.strip_suffix("_banner"))?;
+    dye_color_from_name(color)
+}
+
+/// 官方 `MapBanner.fromWorld(BlockGetter, BlockPos)`：读取世界中的旗帜方块底色与自定义名。
+///
+/// Official `MapBanner.fromWorld`: read the banner block's base color and
+/// optional custom name from world chunks and block-entity item components.
+pub fn banner_from_world(
+    chunks: &ChunkStore,
+    block_items: &BTreeMap<BlockPos, ComponentPatch>,
+    pos: BlockPos,
+) -> Option<MapBanner> {
+    let state = chunks.block(pos)?;
+    let color = banner_color_from_state(state)?;
+    let name = block_items
+        .get(&pos)
+        .and_then(|patch| match patch.get(kinds::CUSTOM_NAME) {
+            Some(ComponentValue::CustomName(name)) => Some(name.clone()),
+            _ => None,
+        });
+    Some(MapBanner { pos, color, name })
 }
 
 /// 地图上的旗帜标记，对应官方 `MapBanner`。
@@ -631,6 +672,90 @@ impl MapItemSavedData {
     /// 当前展示框标记列表。
     pub fn frame_markers(&self) -> &BTreeMap<String, MapFrame> {
         &self.frame_markers
+    }
+
+    /// 当前旗帜标记列表（官方 `MapItemSavedData.getBanners()`）。
+    pub fn banner_markers(&self) -> &BTreeMap<String, MapBanner> {
+        &self.banner_markers
+    }
+
+    /// 官方 `MapItemSavedData.toggleBanner(LevelAccessor, BlockPos)`：
+    /// 在地图范围内对同一位置、颜色、自定义名的旗帜做开关切换。
+    ///
+    /// 注意照 26.3 字节码：此处以 `(pos.x + 0.5, pos.z + 0.5)` 计算标记坐标（与读档构造不同），
+    /// 且不检查 `self.locked`。
+    ///
+    /// Official `MapItemSavedData.toggleBanner`: add or remove a banner marker
+    /// within map bounds. Uses `(pos.x + 0.5, pos.z + 0.5)` and does not check
+    /// `self.locked`, matching 26.3 bytecode.
+    pub fn toggle_banner(
+        &mut self,
+        pos: BlockPos,
+        banner: Option<MapBanner>,
+        game_time: Option<i64>,
+    ) -> bool {
+        let d_x = f64::from(pos.x) + 0.5;
+        let d_z = f64::from(pos.z) + 0.5;
+        let scale_factor = 1 << self.scale;
+        let rel_x = (d_x - f64::from(self.center_x)) / f64::from(scale_factor);
+        let rel_z = (d_z - f64::from(self.center_z)) / f64::from(scale_factor);
+        if !(-63.0..=63.0).contains(&rel_x) || !(-63.0..=63.0).contains(&rel_z) {
+            return false;
+        }
+        let Some(banner) = banner else {
+            return false;
+        };
+        let id = banner.id();
+        if self.banner_markers.get(&id) == Some(&banner) {
+            self.banner_markers.remove(&id);
+            self.remove_decoration(&id);
+            self.dirty = true;
+            return true;
+        }
+        if !self.is_tracked_count_over_limit(TRACKED_DECORATION_LIMIT) {
+            let kind = banner.decoration_kind();
+            let name = banner.name.clone();
+            self.banner_markers.insert(id.clone(), banner);
+            self.add_decoration(kind, game_time, id, d_x, d_z, 180.0, name);
+            self.dirty = true;
+            return true;
+        }
+        false
+    }
+
+    /// 官方 `MapItemSavedData.checkBanners(BlockGetter, int, int)`：
+    /// 核对落在 `(x, z)` 柱上的旗帜标记；若世界里的旗帜已被破坏或颜色/名称改变则移除标记。
+    ///
+    /// Official `MapItemSavedData.checkBanners`: verify banner markers at column
+    /// `(x, z)` and remove any whose block no longer matches.
+    pub fn check_banners(
+        &mut self,
+        x: i32,
+        z: i32,
+        mut from_world: impl FnMut(BlockPos) -> Option<MapBanner>,
+    ) {
+        if self.banner_markers.is_empty() {
+            return;
+        }
+        let stale: Vec<String> = self
+            .banner_markers
+            .iter()
+            .filter_map(|(id, banner)| {
+                if banner.pos.x == x
+                    && banner.pos.z == z
+                    && from_world(banner.pos).as_ref() != Some(banner)
+                {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in stale {
+            self.banner_markers.remove(&id);
+            self.remove_decoration(&id);
+            self.dirty = true;
+        }
     }
 
     /// 官方 `MapItemSavedData.removeDecoration(id)`。
@@ -1278,6 +1403,96 @@ pub(crate) fn use_empty_map(
     true
 }
 
+/// 官方 `MapItem.onCraftedPostProcess`：移除 `MAP_POST_PROCESSING` 组件，
+/// 并在服务端地图表里按 `LOCK`（0）/ `SCALE`（1）分配新 `map_id` 与对应的锁定 / 放大数据。
+///
+/// Official `MapItem.onCraftedPostProcess`: strip `MAP_POST_PROCESSING` and,
+/// using the server [`MapStore`], allocate a new `map_id` with `locked()` or
+/// `scaled()` data.
+pub fn on_crafted_post_process(stack: &mut ItemStack, maps: &mut MapStore) {
+    if stack.is_empty() || stack.item != items::FILLED_MAP {
+        return;
+    }
+    let Ok(mut patch) = ComponentPatch::from_opaque(stack) else {
+        return;
+    };
+    let Some(ComponentValue::MapPostProcessing(kind)) =
+        defaults::resolve(stack.item, &patch, kinds::MAP_POST_PROCESSING).cloned()
+    else {
+        return;
+    };
+    if defaults::of_item(stack.item)
+        .get(kinds::MAP_POST_PROCESSING)
+        .is_some()
+    {
+        patch.put(kinds::MAP_POST_PROCESSING, PatchEntry::Removed);
+    } else {
+        patch.remove(kinds::MAP_POST_PROCESSING);
+    }
+    let (added, removed) = patch.to_opaque();
+    stack.added = added;
+    stack.removed = removed;
+    let Some(old_id) = stack_map_id(stack) else {
+        return;
+    };
+    let next_data = match kind {
+        0 => maps.get(old_id).map(MapItemSavedData::locked),
+        1 => maps.get(old_id).map(MapItemSavedData::scaled),
+        _ => None,
+    };
+    if let Some(data) = next_data {
+        let new_id = maps.next_map_id();
+        maps.insert(new_id, data);
+        if defaults::of_item(stack.item).get(kinds::MAP_ID) == Some(&ComponentValue::MapId(new_id))
+        {
+            patch.remove(kinds::MAP_ID);
+        } else {
+            patch.put(
+                kinds::MAP_ID,
+                PatchEntry::Set(ComponentValue::MapId(new_id)),
+            );
+        }
+        let (added, removed) = patch.to_opaque();
+        stack.added = added;
+        stack.removed = removed;
+    }
+}
+
+/// 官方 `MapItem.useOn(UseOnContext)`：手持已填充地图右键旗帜时切换旗帜标记。
+///
+/// 若目标方块不是 `#minecraft:banners` 返回 `None`；是旗帜时照 26.3 字节码：
+/// 找不到地图数据也返回 `Success`，找到数据时 `toggleBanner` 返回 `false` 才返回 `Fail`。
+///
+/// Official `MapItem.useOn`: toggle a banner marker when right-clicking a block
+/// in `#minecraft:banners` with a `filled_map`. Returns `None` for non-banners.
+pub(crate) fn use_map_on_banner(
+    region: &mut Region,
+    maps: Option<&mut MapStore>,
+    pos: BlockPos,
+    held: &ItemStack,
+) -> Option<InteractionResult> {
+    if held.item != items::FILLED_MAP {
+        return None;
+    }
+    let state = region.chunks.block(pos)?;
+    if !BlockState(state).is_tagged(block_tags::BANNERS) {
+        return None;
+    }
+    let banner = banner_from_world(&region.chunks, &region.block_items, pos);
+    let game_time = region.tick.game_time();
+    let store = match maps {
+        Some(store) => store,
+        None => Arc::make_mut(&mut region.global.maps),
+    };
+    if let Some(map_id) = stack_map_id(held)
+        && let Some(data) = store.get_mut(map_id)
+        && !data.toggle_banner(pos, banner, Some(game_time))
+    {
+        return Some(InteractionResult::Fail);
+    }
+    Some(InteractionResult::Success)
+}
+
 /// 官方 `MapItem.getCorrectStateForFluidBlock`：含流体且顶面不是完整支撑面时改用流体方块本身的颜色。
 ///
 /// Official `MapItem.getCorrectStateForFluidBlock`.
@@ -1308,6 +1523,24 @@ pub fn update_colors(
     dimension: &str,
     chunks: &ChunkStore,
 ) {
+    update_colors_with_banner_lookup(data, player, player_x, player_z, dimension, chunks, |_| {
+        None
+    });
+}
+
+/// 同 [`update_colors`]，并在官方 `MapItem.update` 对应位置调用 `checkBanners`。
+///
+/// Like [`update_colors`], also running `checkBanners` at the exact column-scan
+/// point from vanilla `MapItem.update`.
+pub fn update_colors_with_banner_lookup(
+    data: &mut MapItemSavedData,
+    player: PlayerId,
+    player_x: f64,
+    player_z: f64,
+    dimension: &str,
+    chunks: &ChunkStore,
+    mut banner_at: impl FnMut(BlockPos) -> Option<MapBanner>,
+) {
     if dimension != data.dimension {
         return;
     }
@@ -1327,16 +1560,20 @@ pub fn update_colors(
         player_x,
         player_z,
         chunks,
-        |x, z, color| data.update_color(x, z, color),
+        data,
+        |data, bx, bz| data.check_banners(bx, bz, &mut banner_at),
+        |data, x, z, color| data.update_color(x, z, color),
     );
 }
 
-/// 按给定采样步数 `step` 对一块区域的地图颜色逐列采样，变化像素通过 `write_pixel` 写出。
+/// 按给定采样步数 `step` 对一块区域的地图颜色逐列采样，变化像素通过 `write_pixel` 写出，
+/// 并在每个已采样的 `(bx, bz)` 上调用 `on_column`（对应官方 `MapItem.update` 中的 `checkBanners`）。
 ///
 /// Sample map columns for a given `step`, reporting each pixel to `write_pixel`
-/// (which returns whether the pixel color changed).
+/// (which returns whether the pixel color changed) and invoking `on_column` at
+/// each sampled `(bx, bz)` (matching vanilla `MapItem.update`'s `checkBanners`).
 #[allow(clippy::too_many_arguments)]
-fn sample_colors_with_step(
+fn sample_colors_with_step<S>(
     center_x: i32,
     center_z: i32,
     scale_shift: i8,
@@ -1344,7 +1581,9 @@ fn sample_colors_with_step(
     player_x: f64,
     player_z: f64,
     chunks: &ChunkStore,
-    mut write_pixel: impl FnMut(usize, usize, u8) -> bool,
+    state_ctx: &mut S,
+    mut on_column: impl FnMut(&mut S, i32, i32),
+    mut write_pixel: impl FnMut(&mut S, usize, usize, u8) -> bool,
 ) {
     let scale: i32 = 1 << scale_shift;
     // Java `Mth.floor(x - centerX) / scale + 64`：整数除法向零截断，与 Rust `/` 一致。
@@ -1424,6 +1663,7 @@ fn sample_colors_with_step(
                         state = blocks::BEDROCK;
                     }
 
+                    on_column(state_ctx, bx, bz);
                     avg_height += f64::from(y) / f64::from(scale_sq);
                     let color_id = state_map_color(state) & 63;
                     let idx = usize::from(color_id);
@@ -1471,7 +1711,12 @@ fn sample_colors_with_step(
             if z < 0 || dist_sq >= radius_sq || (dither_edge && ((x + z) & 1) == 0) {
                 continue;
             }
-            changed |= write_pixel(x as usize, z as usize, packed_color(best_color, brightness));
+            changed |= write_pixel(
+                state_ctx,
+                x as usize,
+                z as usize,
+                packed_color(best_color, brightness),
+            );
         }
     }
 }
@@ -1514,6 +1759,7 @@ pub(crate) struct MapTickEffect {
     pub(crate) game_time: i64,
     pub(crate) dimension: &'static str,
     pub(crate) stale_frames: Vec<(i32, BlockPos, i32)>,
+    pub(crate) stale_banners: Vec<(i32, MapBanner)>,
     pub(crate) framed_map_ids: BTreeSet<i32>,
     pub(crate) island_players: BTreeMap<PlayerId, String>,
     pub(crate) player_ticks: Vec<PlayerMapTick>,
@@ -1685,6 +1931,7 @@ pub(crate) fn tick(port: &mut GlobalPort<'_>, region: &mut Region) {
                     game_time,
                     dimension,
                     stale_frames,
+                    stale_banners: Vec::new(),
                     framed_map_ids: framed_maps.into_keys().collect(),
                     island_players: BTreeMap::new(),
                     player_ticks: Vec::new(),
@@ -1755,11 +2002,13 @@ pub(crate) fn tick(port: &mut GlobalPort<'_>, region: &mut Region) {
         }
     }
 
-    // 2. 在本岛区块上跑逐列颜色采样，产出增量像素与步数更新。
+    // 2. 在本岛区块上跑逐列颜色采样与 `checkBanners`，产出增量像素、失效旗帜与步数更新。
     //    同一刻多名玩家或主副手同时拿同一张图时共用本地 colors 缓冲，保证与单岛原地修改逐位一致。
     let mut scratch_colors: BTreeMap<i32, [u8; COLORS_LEN]> = BTreeMap::new();
     let mut steps: BTreeMap<(PlayerId, i32), i32> = BTreeMap::new();
     let mut color_diffs: BTreeMap<i32, Vec<(u8, u8, u8)>> = BTreeMap::new();
+    let mut stale_banners: Vec<(i32, MapBanner)> = Vec::new();
+    let mut seen_stale_banners: BTreeSet<(i32, String)> = BTreeSet::new();
 
     for (pid, x, z, hand_maps) in &hand_samples {
         for &map_id in hand_maps {
@@ -1776,6 +2025,7 @@ pub(crate) fn tick(port: &mut GlobalPort<'_>, region: &mut Region) {
             *step_entry = step_entry.wrapping_add(1);
             let step = *step_entry;
             let diffs = color_diffs.entry(map_id).or_default();
+            let has_banners = !data.banner_markers.is_empty();
             sample_colors_with_step(
                 data.center_x,
                 data.center_z,
@@ -1784,7 +2034,25 @@ pub(crate) fn tick(port: &mut GlobalPort<'_>, region: &mut Region) {
                 *x,
                 *z,
                 &region.chunks,
-                |px, pz, color| {
+                &mut (),
+                |_, bx, bz| {
+                    if !has_banners {
+                        return;
+                    }
+                    for (id, banner) in &data.banner_markers {
+                        if banner.pos.x == bx
+                            && banner.pos.z == bz
+                            && !seen_stale_banners.contains(&(map_id, id.clone()))
+                            && banner_from_world(&region.chunks, &region.block_items, banner.pos)
+                                .as_ref()
+                                != Some(banner)
+                        {
+                            seen_stale_banners.insert((map_id, id.clone()));
+                            stale_banners.push((map_id, banner.clone()));
+                        }
+                    }
+                },
+                |_, px, pz, color| {
                     let idx = px + pz * MAP_SIZE;
                     if colors[idx] != color {
                         colors[idx] = color;
@@ -1814,6 +2082,7 @@ pub(crate) fn tick(port: &mut GlobalPort<'_>, region: &mut Region) {
             game_time,
             dimension,
             stale_frames,
+            stale_banners,
             framed_map_ids: framed_maps.into_keys().collect(),
             island_players,
             player_ticks,
@@ -1872,6 +2141,18 @@ pub(crate) fn apply_map_tick(global: &mut Global, region: &mut Region, effect: M
         {
             for &(x, y, color) in &delta.pixels {
                 data.update_color(usize::from(x), usize::from(y), color);
+            }
+        }
+    }
+    for (map_id, expected) in effect.stale_banners {
+        if let Some(data) = global.maps_mut().get_mut(map_id)
+            && !data.locked
+        {
+            let id = expected.id();
+            if data.banner_markers.get(&id) == Some(&expected) {
+                data.banner_markers.remove(&id);
+                data.remove_decoration(&id);
+                data.dirty = true;
             }
         }
     }
@@ -2603,5 +2884,209 @@ mod tests {
                 .all(|&b| b == 0),
             "locked map must not update colors while held"
         );
+    }
+
+    #[test]
+    fn toggle_banner_use_on_and_check_banners_on_break_or_replace() {
+        use mc_bamboo_core::Vec3;
+        use mc_bamboo_protocol::packet::play::ClientInformation;
+        use uuid::Uuid;
+
+        use crate::{interaction::UseItemOn, player::Player};
+
+        let mut region = crate::region::Region::new(2, 20, false);
+        let p_id = PlayerId(1);
+        let player = Player::new(
+            p_id,
+            Uuid::from_u128(1),
+            "Alex".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        region.insert_player(player);
+        Arc::make_mut(&mut region.global.maps).insert(
+            0,
+            MapItemSavedData::create_fresh(0.0, 0.0, 0, true, false, "minecraft:overworld"),
+        );
+        region.players.get_mut(&p_id).unwrap().inventory.slots[36] = make_filled_map(0);
+
+        // 放一面带自定义名的红色站立旗帜，右键地图加上旗帜标记。
+        let banner_pos = BlockPos::new(2, 64, 1);
+        region.chunks.set_block(banner_pos, blocks::RED_BANNER);
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            kinds::CUSTOM_NAME,
+            PatchEntry::Set(ComponentValue::CustomName(Component::text("Outpost"))),
+        );
+        region.block_items.insert(banner_pos, patch);
+
+        let click_banner = UseItemOn {
+            hand: Hand::Main,
+            pos: banner_pos,
+            face: Direction::Up,
+            cursor: (0.5, 0.5, 0.5),
+            inside: false,
+            sequence: 1,
+        };
+        crate::interaction::on_use_item_on(&mut region, p_id, click_banner);
+        {
+            let data = region.global.maps.get(0).unwrap();
+            assert_eq!(data.banner_markers().len(), 1);
+            let stored = data.banner_markers().values().next().unwrap();
+            assert_eq!(stored.pos, banner_pos);
+            assert_eq!(stored.color, 14); // red
+            assert_eq!(stored.name, Some(Component::text("Outpost")));
+            let dec = data.decorations().next().unwrap();
+            assert_eq!(dec.kind, decoration_type::BANNER_WHITE + 14);
+            // toggleBanner 用 pos + 0.5: (2.5 - 0)*2 + 0.5 = 5.5 -> 5; (1.5 - 0)*2 + 0.5 = 3.5 -> 3
+            assert_eq!((dec.x, dec.y, dec.rot), (5, 3, 8));
+            assert_eq!(dec.name, Some(Component::text("Outpost")));
+        }
+
+        // 再右键同一面旗帜 → 取消标记。
+        crate::interaction::on_use_item_on(
+            &mut region,
+            p_id,
+            UseItemOn {
+                sequence: 2,
+                ..click_banner
+            },
+        );
+        assert!(
+            region
+                .global
+                .maps
+                .get(0)
+                .unwrap()
+                .banner_markers()
+                .is_empty()
+        );
+        assert_eq!(region.global.maps.get(0).unwrap().decorations().count(), 0);
+
+        // 第三次右键重新加上，再换成蓝色墙旗帜 → 跑 16 刻采样后 checkBanners 必须清掉旧红旗标记。
+        crate::interaction::on_use_item_on(
+            &mut region,
+            p_id,
+            UseItemOn {
+                sequence: 3,
+                ..click_banner
+            },
+        );
+        assert_eq!(region.global.maps.get(0).unwrap().banner_markers().len(), 1);
+        region
+            .chunks
+            .set_block(banner_pos, blocks::BLUE_WALL_BANNER);
+        for _ in 0..16 {
+            tick_local(&mut region);
+        }
+        assert!(
+            region
+                .global
+                .maps
+                .get(0)
+                .unwrap()
+                .banner_markers()
+                .is_empty(),
+            "replacing banner color must trigger checkBanners removal"
+        );
+
+        // 对蓝色墙旗帜右键可重新登记（验证墙旗帜颜色提取），打掉后 checkBanners 再次移除。
+        crate::interaction::on_use_item_on(
+            &mut region,
+            p_id,
+            UseItemOn {
+                sequence: 4,
+                ..click_banner
+            },
+        );
+        let stored_blue = region
+            .global
+            .maps
+            .get(0)
+            .unwrap()
+            .banner_markers()
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(stored_blue.color, 11); // blue
+        region.chunks.set_block(banner_pos, blocks::AIR);
+        region.block_items.remove(&banner_pos);
+        for _ in 0..16 {
+            tick_local(&mut region);
+        }
+        assert!(
+            region
+                .global
+                .maps
+                .get(0)
+                .unwrap()
+                .banner_markers()
+                .is_empty(),
+            "breaking banner must trigger checkBanners removal"
+        );
+    }
+
+    #[test]
+    fn toggle_banner_checks_bounds_tracked_limit_and_allows_locked_maps() {
+        let mut data =
+            MapItemSavedData::create_fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
+        // 越界位置（rel_x = 63.5 > 63.0）拒绝。
+        let outside = BlockPos::new(63, 64, 0);
+        assert!(!data.toggle_banner(
+            outside,
+            Some(MapBanner {
+                pos: outside,
+                color: 0,
+                name: None,
+            }),
+            None,
+        ));
+        // 边界内（rel_x = -63.0 和 rel_x = 62.5）接受；空旗帜拒绝。
+        let inside = BlockPos::new(62, 64, 0);
+        assert!(!data.toggle_banner(inside, None, None));
+        assert!(data.toggle_banner(
+            inside,
+            Some(MapBanner {
+                pos: inside,
+                color: 0,
+                name: None,
+            }),
+            None,
+        ));
+        // 锁定地图仍允许切换旗帜（26.3 字节码 toggleBanner 不检查 locked）。
+        let mut locked = data.locked();
+        assert!(locked.toggle_banner(
+            inside,
+            Some(MapBanner {
+                pos: inside,
+                color: 0,
+                name: None,
+            }),
+            None,
+        ));
+        assert!(locked.banner_markers().is_empty());
+
+        // trackedDecorationCount > 256 时拒绝新增，但仍允许取消已有标记。
+        data.tracked_decoration_count = TRACKED_DECORATION_LIMIT + 1;
+        let other = BlockPos::new(1, 64, 1);
+        assert!(!data.toggle_banner(
+            other,
+            Some(MapBanner {
+                pos: other,
+                color: 1,
+                name: None,
+            }),
+            None,
+        ));
+        assert!(data.toggle_banner(
+            inside,
+            Some(MapBanner {
+                pos: inside,
+                color: 0,
+                name: None,
+            }),
+            None,
+        ));
     }
 }

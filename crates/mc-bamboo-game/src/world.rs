@@ -3152,7 +3152,20 @@ impl World {
                     inside,
                     sequence,
                 };
-                interaction::on_use_item_on(region, player, packet);
+                let holding_filled_map = region.players.get(&player).is_some_and(|p| {
+                    p.inventory.held(hand).item == mc_bamboo_data::items::FILLED_MAP
+                });
+                if holding_filled_map {
+                    interaction::on_use_item_on_with_maps(
+                        region,
+                        Some(self.master.global.maps_mut()),
+                        player,
+                        packet,
+                    );
+                    self.publish_global();
+                } else {
+                    interaction::on_use_item_on(region, player, packet);
+                }
             }
             PlayRequest::UseItem {
                 hand,
@@ -3187,7 +3200,7 @@ impl World {
                 changed_slots,
                 carried,
             } => {
-                let is_cartography = menu::is_cartography_open(region, player, container_id);
+                let is_map_menu = menu::is_map_menu_open(region, player, container_id);
                 let packet = menu::ClickPacket {
                     container_id,
                     state_id,
@@ -3197,7 +3210,7 @@ impl World {
                     changed_slots,
                     carried,
                 };
-                if is_cartography {
+                if is_map_menu {
                     menu::on_click_with_maps(
                         region,
                         Some(self.master.global.maps_mut()),
