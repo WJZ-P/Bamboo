@@ -143,8 +143,11 @@ WebView2 的渲染进程不算在内。
   `data/minecraft/world_gen_settings.dat` 写官方 `WorldGenSettings.CODEC`
   形状的种子与维度生成器（见上一条），读档时再读回。游戏规则 / 世界边界 /
   世界时钟 / 导出的超平坦默认值常量用官方 codec 对拍（`saved-data` 子命令）。
-  天气、计划事件、流浪商人、自定义 Boss 栏、末影龙战斗这些没建模的
+  天气、计划事件、自定义 Boss 栏、末影龙战斗这些没建模的
   saved data 不写文件（官方 `computeIfAbsent` 会自己造默认值）；`/weather` 不写存档。
+  流浪商人的 `data/minecraft/wandering_trader.dat`、袭击的 `data/minecraft/raids.dat`、
+  地图的 `data/minecraft/maps/*.dat` 和 `/data` 的 `command_storage.dat` 都已按官方 codec
+  写读（见 `save_data.rs` 与「流浪商人」「袭击」「地图」几节）。
   `chunk_tickets.dat` 写空 `tickets` 列表（无 `/forceload`）。
 - 盘上 `Status` 不是 `minecraft:full` 的区块当成 ProtoChunk 读回：方块层、quart 群系、
   高度图、两层光照、`isLightOn`、结构起点 / 引用、PostProcessing、方块实体、计划刻和
