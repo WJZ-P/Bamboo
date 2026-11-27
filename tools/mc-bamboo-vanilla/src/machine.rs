@@ -431,7 +431,18 @@ impl Machine {
     }
 }
 
-pub fn run(mut command: Command) -> Result<(), String> {
+pub fn run(mut command: Command, options: &[&str]) -> Result<(), String> {
+    let mut break_test = "";
+    let mut index = 0;
+    while index < options.len() {
+        match options[index] {
+            "--break-self-test" if index + 1 < options.len() => {
+                break_test = options[index + 1];
+                index += 2;
+            }
+            _ => return Err("machine: unknown option".to_owned()),
+        }
+    }
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -459,10 +470,10 @@ pub fn run(mut command: Command) -> Result<(), String> {
         .ok_or_else(|| format!("machine oracle wrote no JSON\n{log}"))?;
     let document: Document = serde_json::from_str(json)
         .map_err(|error| format!("bad machine oracle output: {error}\n{log}"))?;
-    compare(&document)
+    compare(&document, break_test)
 }
 
-fn compare(document: &Document) -> Result<(), String> {
+fn compare(document: &Document, break_test: &str) -> Result<(), String> {
     let mut ticks = 0usize;
     let mut mismatches = Vec::new();
     for run in &document.runs {
@@ -474,7 +485,7 @@ fn compare(document: &Document) -> Result<(), String> {
     }
     let mut conduit_ticks = 0usize;
     for run in &document.conduits {
-        replay_conduit(run, &mut conduit_ticks, &mut mismatches);
+        replay_conduit(run, &mut conduit_ticks, &mut mismatches, break_test);
     }
     println!(
         "machine: {} runs ({ticks} ticks), {} beacon runs ({beacon_ticks} ticks), {} conduit runs ({conduit_ticks} ticks)",
@@ -553,7 +564,7 @@ fn conduit_drowned(level: &mut MachineLevel, x: f64, y: f64, z: f64) -> i32 {
     entity.in_water = true;
     let id = level.entities.spawn(entity);
     // Java 夹具显式给 UUID，Rust 侧用同一个值，便于逐刻比较 `Target`。
-    level.entities.with_mut(id, &mut |entity: &mut Entity| {
+    level.entities.with_mut(id, |entity: &mut Entity| {
         if let Some(mob) = entity.kind.mob_mut() {
             mob.uuid = [
                 0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33, 0x44, 0x44, 0x55, 0x55, 0x55, 0x55,
@@ -598,14 +609,23 @@ fn conduit_health(level: &MachineLevel, mob_id: Option<i32>) -> Vec<f32> {
         .collect()
 }
 
-fn replay_conduit(run: &ConduitRun, ticks: &mut usize, mismatches: &mut Vec<String>) {
+fn replay_conduit(
+    run: &ConduitRun,
+    ticks: &mut usize,
+    mismatches: &mut Vec<String>,
+    break_test: &str,
+) {
     if run.kind == "conduit_save_roundtrip" {
         let mut entity = ConduitBlockEntity::new(CONDUIT_POS);
         entity.set_target(Some([
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
             0x0f, 0x10,
         ]));
-        let saved = conduit_save_fields(&entity.additional());
+        let mut saved_fields = entity.additional();
+        if break_test == "conduit_target" {
+            saved_fields = vec![("target".to_owned(), Tag::IntArray(vec![1, 2, 3, 4]))];
+        }
+        let saved = conduit_save_fields(&saved_fields);
         if let Some(expected) = &run.saved
             && saved != *expected
         {
@@ -640,6 +660,11 @@ fn replay_conduit(run: &ConduitRun, ticks: &mut usize, mismatches: &mut Vec<Stri
         42
     };
     conduit_frame_blocks(&mut level, frame_count);
+    // 改坏确认：少一块框架方块会让 16 块题在第 0 刻失效。
+    if break_test == "conduit_min_active" {
+        let (i, j, k) = frame_offsets()[15];
+        level.set_block(CONDUIT_POS.offset(i, j, k), BlockState::WATER);
+    }
     if run.kind == "conduit_player_effects" {
         level.players.push(conduit_player(1, 3.5, 64.0, 0.0, true));
         level
@@ -668,7 +693,7 @@ fn replay_conduit(run: &ConduitRun, ticks: &mut usize, mismatches: &mut Vec<Stri
         // 官方生物每刻 `baseTick` 把 `damageCooldownTime` 减一；夹具只 tick 方块实体，
         // 所以要在这里显式推进，否则 40 刻后的第二次攻击会被无敌冷却挡下。
         if let Some(id) = mob_id {
-            level.entities.with_mut(id, &mut |entity: &mut Entity| {
+            level.entities.with_mut(id, |entity: &mut Entity| {
                 if let Some(mob) = entity.kind.mob_mut() {
                     mob.hurt_time = (mob.hurt_time - 1).max(0);
                     mob.damage_cooldown = (mob.damage_cooldown - 1).max(0);
@@ -683,6 +708,28 @@ fn replay_conduit(run: &ConduitRun, ticks: &mut usize, mismatches: &mut Vec<Stri
         *ticks += 1;
 
         let label = format!("{} t={t}", run.kind);
+        let current_health = conduit_health(&level, mob_id)
+            .first()
+            .copied()
+            .unwrap_or(0.0);
+        let mut got_hurts = if last_health - current_health > 0.0 {
+            vec![format!("magic:{:.1}", last_health - current_health)]
+        } else {
+            Vec::new()
+        };
+        last_health = current_health;
+        // 改坏确认：把效果半径 / 时长 / 攻击量改坏，基线立刻报不一致。
+        let mut got_effects = player_effect_rows(&effects);
+        if break_test == "conduit_duration" {
+            for row in &mut got_effects {
+                row[2] -= 1;
+            }
+        }
+        if break_test == "conduit_attack" {
+            for hurt in &mut got_hurts {
+                *hurt = "magic:3.0".to_owned();
+            }
+        }
         let got = ConduitFrame {
             game_time: t,
             active: entity.is_active(),
@@ -692,7 +739,7 @@ fn replay_conduit(run: &ConduitRun, ticks: &mut usize, mismatches: &mut Vec<Stri
             tick_count: entity.tick_count,
             next_ambient: entity.next_ambient_sound_activation(),
             sounds: sound_names(&effects),
-            effects: player_effect_rows(&effects),
+            effects: got_effects,
             seed: level.random.source().seed(),
             health: conduit_health(&level, mob_id),
             hurts: Vec::new(),
@@ -700,16 +747,6 @@ fn replay_conduit(run: &ConduitRun, ticks: &mut usize, mismatches: &mut Vec<Stri
         };
         // 血量 / 伤害记录单独比（Java 侧的 `health` 来自实际受伤后的血量）。
         let got_health = conduit_health(&level, mob_id);
-        let got_hurts = {
-            let current = got_health.first().copied().unwrap_or(0.0);
-            let out = if last_health - current > 0.0 {
-                vec![format!("magic:{:.1}", last_health - current)]
-            } else {
-                Vec::new()
-            };
-            last_health = current;
-            out
-        };
         if got_health != frame.health {
             mismatches.push(format!(
                 "{label} health {got_health:?} != {:?}",
