@@ -176,6 +176,12 @@ pub struct Minecart {
     pub loot_table_seed: i64,
     /// `MinecartHopper.consumedItemThisFrame`：每刻最多吸一次。
     pub consumed_item_this_frame: bool,
+    /// 游戏层每刻同步进来的第一玩家乘客 `ServerPlayer.getLastClientMoveIntent()`，
+    /// 瞬态字段、不存档。
+    ///
+    /// Transient `ServerPlayer.getLastClientMoveIntent()` of the first player
+    /// passenger, synced by the game layer each tick and not saved.
+    pub rider_intent: Vec3,
 }
 
 impl Minecart {
@@ -203,6 +209,7 @@ impl Minecart {
             loot_table: None,
             loot_table_seed: 0,
             consumed_item_this_frame: false,
+            rider_intent: Vec3::default(),
         }
     }
 
@@ -262,6 +269,8 @@ pub struct MinecartPublic {
     pub display_offset: i32,
     /// `MinecartFurnace.DATA_ID_FUEL`。
     pub has_fuel: bool,
+    /// `AbstractMinecart.flipped`：`OldMinecartBehavior.getMotionDirection` 下车方向用。
+    pub flipped: bool,
 }
 
 impl MinecartPublic {
@@ -278,6 +287,7 @@ impl MinecartPublic {
             custom_display_block: cart.custom_display_block.map(|state| state.0 as i32),
             display_offset: cart.display_offset,
             has_fuel: cart.kind().is_furnace() && cart.fuel > 0,
+            flipped: cart.flipped,
         }
     }
 }
@@ -574,7 +584,7 @@ fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn BlockView) {
     let mut rail_y = f64::from(pos.y);
     let is_powered_rail = state.is(blocks::POWERED_RAIL);
     let powered = is_powered_rail && state.try_get(POWERED).unwrap_or(false);
-    let brake = is_powered_rail && !powered;
+    let mut brake = is_powered_rail && !powered;
     let shape = state.get(RAIL_SHAPE);
 
     let mut slope = SLOPE_FACTOR;
@@ -614,6 +624,24 @@ fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn BlockView) {
     }
     let speed = 2.0_f64.min(horizontal_distance(me.delta));
     me.delta = Vec3::new(speed * dx / len, me.delta.y, speed * dz / len);
+
+    // `OldMinecartBehavior.moveAlongTrack`：第一乘客是玩家且有按键移动意图时，
+    // 水平速度平方小于 0.01 就加 `intent * 0.001` 并取消未通电动力铁轨刹车。
+    //
+    // `OldMinecartBehavior.moveAlongTrack`: when the first passenger is a player
+    // with a non-zero move intent and horizontal speed² < 0.01, nudge the cart by
+    // `intent * 0.001` and suppress the unpowered-rail brake.
+    if !cart.passengers.is_empty() && cart.rider_intent.length_sqr() > 0.0 {
+        let intent = cart.rider_intent;
+        let normalized = intent.normalize();
+        let speed_sqr = me.delta.x * me.delta.x + me.delta.z * me.delta.z;
+        if normalized.length_sqr() > 0.0 && speed_sqr < 0.01 {
+            me.delta = me
+                .delta
+                .add(Vec3::new(intent.x * 0.001, 0.0, intent.z * 0.001));
+            brake = false;
+        }
+    }
 
     // 未通电的动力铁轨刹车。
     if brake {
@@ -760,12 +788,7 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     } else {
         come_off_track(me, &cart, ctx.blocks());
     }
-    // `DetectorRailBlock.checkPressed`：矿车碰撞盒和探测格内部盒相交时点亮它。
-    // `DetectorRailBlock.checkPressed`: power a detector rail while the cart's box
-    // overlaps that cell's search box.
-    for at in detector_rails(blocks, me) {
-        ctx.emit(Command::MinecartDetectorRail { pos: at }, me);
-    }
+    let detectors = detector_rails(ctx.blocks(), me);
     me.apply_effects_from_blocks(ctx.blocks());
 
     let dx = me.old_position.x - me.position.x;
@@ -785,6 +808,13 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     me.set_requires_precise_position(me.horizontal_collision || me.vertical_collision);
     me.first_tick = false;
     me.kind = EntityKind::Minecart(cart);
+    // `DetectorRailBlock.checkPressed`：归还 `EntityKind::Minecart` 后再触发，
+    // 这样 `check_detector_rail` 能认出正在 tick 的矿车自己。
+    // Trigger `DetectorRailBlock.checkPressed` after restoring `EntityKind::Minecart`
+    // so `check_detector_rail` recognizes the ticking cart itself.
+    for at in detectors {
+        ctx.emit(Command::MinecartDetectorRail { pos: at }, me);
+    }
     tick_furnace(me);
     tick_tnt(me, ctx);
     // `MinecartHopper.tick` → `tryConsumeItems`：活着的、启用的漏斗矿车吸一次。
@@ -936,5 +966,90 @@ mod tests {
         assert!((projected.length() - push.length()).abs() < 1.0e-9);
         // 速度太短时保留原推力。
         assert_eq!(calculate_new_push_along(push, Vec3::default()), push);
+    }
+
+    #[test]
+    fn rider_intent_nudges_a_slow_cart_and_cancels_unpowered_rail_brake() {
+        use crate::{
+            BlockTicks, World,
+            state::{POWERED, RAIL_SHAPE, RailShape},
+            testing::TestLevel,
+        };
+
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        for z in -2..=4 {
+            level.set(BlockPos::new(0, 63, z), BlockState(blocks::STONE));
+            level.set(
+                BlockPos::new(0, 64, z),
+                BlockState(blocks::POWERED_RAIL)
+                    .with(RAIL_SHAPE, RailShape::NorthSouth)
+                    .with(POWERED, false),
+            );
+        }
+        let mut entity = Entity::minecart(MinecartKind::Rideable, Vec3::new(0.5, 64.0625, 0.5));
+        if let EntityKind::Minecart(cart) = &mut entity.kind {
+            cart.passengers.push(1);
+            cart.rider_intent = Vec3::new(0.0, 0.0, 1.0);
+        }
+        let id = {
+            let mut world = World::new(&mut level, &mut ticks);
+            world.spawn_entity(entity)
+        };
+        let mut world = World::new(&mut level, &mut ticks);
+        world.tick_entities();
+        let after = world.entity(id).expect("minecart alive");
+        assert!(
+            after.delta.z > 0.0,
+            "rider intent must push a still cart even on an unpowered powered rail"
+        );
+    }
+
+    #[test]
+    fn detector_rail_powers_reports_container_signal_and_resets_after_20_ticks() {
+        use crate::{
+            BlockTicks, World,
+            state::{POWERED, RAIL_SHAPE, RailShape},
+            testing::TestLevel,
+        };
+
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let detector = BlockPos::new(0, 64, 0);
+        level.set(detector.below(), BlockState(blocks::STONE));
+        level.set(
+            detector,
+            BlockState(blocks::DETECTOR_RAIL).with(RAIL_SHAPE, RailShape::NorthSouth),
+        );
+        let mut cart = Entity::minecart(MinecartKind::Chest, Vec3::new(0.5, 64.0625, 0.5));
+        if let EntityKind::Minecart(data) = &mut cart.kind {
+            // 27 格装满一半以上应给出非零比较器信号。
+            data.items[0] = ItemStack::new(items::STONE, 64);
+        }
+        let id = {
+            let mut world = World::new(&mut level, &mut ticks);
+            world.spawn_entity(cart)
+        };
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            world.tick_entities();
+            let state = world.block_state(detector);
+            assert!(state.get(POWERED), "detector rail powers under a cart");
+            assert_eq!(state.own_signal(&world, detector), 15);
+            assert!(
+                state.analog_output_signal(&world, detector, mc_bamboo_core::Direction::North) > 0,
+                "comparator reads container cart fill on a powered detector rail"
+            );
+            // 把矿车移走后，等 20 刻计划刻到期自动熄灭。
+            world.with_entity_mut(id, &mut |entity| entity.discard());
+        }
+        for step in 1..=20 {
+            crate::run_scheduled_ticks(&mut level, &mut ticks, step);
+        }
+        let world = World::new(&mut level, &mut ticks);
+        assert!(
+            !world.block_state(detector).get(POWERED),
+            "detector rail turns off after 20 ticks with no cart"
+        );
     }
 }

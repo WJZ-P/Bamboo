@@ -2799,12 +2799,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             }
         }
         Command::MinecartDetectorRail { pos } => {
-            let state = world.block_state(pos);
-            if state.is(mc_bamboo_data::blocks::DETECTOR_RAIL)
-                && !state.try_get(crate::state::POWERED).unwrap_or(false)
-            {
-                world.set_block_and_update(pos, state.with(crate::state::POWERED, true));
-            }
+            crate::behaviour::machines::check_detector_rail(world, pos, Some(me));
         }
         Command::MinecartExplode {
             center,

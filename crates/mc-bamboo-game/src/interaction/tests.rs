@@ -3319,6 +3319,74 @@ fn breaking_a_chest_minecart_drops_both_cart_and_contents() {
     );
 }
 
+/// 矿车由服务端权威驱动：`controls_vehicle` 为假，玩家方向按键通过 `rider_intent`
+/// 推动静止矿车，潜行下车落到邻格并清空意图。
+///
+/// Minecarts are server-authoritative: `controls_vehicle` is false, directional
+/// input nudges a still cart via `rider_intent`, and sneaking dismounts cleanly.
+#[test]
+fn riding_a_minecart_is_server_authoritative_and_applies_player_input() {
+    use mc_bamboo_blocks::{
+        BlockState,
+        entity::{EntityKind, minecart::MinecartKind},
+        state::{RAIL_SHAPE, RailShape},
+    };
+    let (mut server, client) = settled();
+    let rail_y = -60;
+    for z in 6..=12 {
+        server
+            .region()
+            .chunks
+            .set_block(BlockPos::new(11, rail_y - 1, z), blocks::STONE);
+        server.region().chunks.set_block(
+            BlockPos::new(11, rail_y, z),
+            BlockState(blocks::RAIL)
+                .with(RAIL_SHAPE, RailShape::NorthSouth)
+                .0,
+        );
+    }
+    let uid = server
+        .region()
+        .entities
+        .spawn(mc_bamboo_blocks::entity::Entity::minecart(
+            MinecartKind::Rideable,
+            Vec3::new(11.5, f64::from(rail_y) + 0.0625, 8.5),
+        ));
+    // 玩家朝南（yaw = 0，+z 方向），右键上车。
+    player_mut(&mut server, &client).yaw = 0.0;
+    crate::interaction::on_interact_entity_at(
+        server.region(),
+        client.id,
+        uid,
+        Hand::Main,
+        false,
+        Vec3::new(0.0, 0.5, 0.0),
+    );
+    assert_eq!(server.player(&client).riding.vehicle, Some(uid));
+    assert!(
+        !crate::riding::controls_vehicle(server.region(), client.id, uid),
+        "minecarts are server-authoritative (getControllingPassenger() == null)"
+    );
+    // 发送前进键（FLAG_FORWARD = 0x01），服务端 tick 推动矿车向 +z 移动。
+    crate::entity_sync::on_player_input(server.region(), client.id, 0x01);
+    server.tick();
+    let cart = server.region().entities.get(uid).expect("minecart alive");
+    assert!(
+        cart.position.z > 8.5 && cart.delta.z > 0.0,
+        "forward input should nudge the minecart along +z"
+    );
+    // 发送潜行键（FLAG_SHIFT = 0x20），下一刻下车并落到矿车旁的实心格上。
+    crate::entity_sync::on_player_input(server.region(), client.id, 0x20);
+    server.tick();
+    assert_eq!(server.player(&client).riding.vehicle, None);
+    let cart = server.region().entities.get(uid).expect("minecart alive");
+    let EntityKind::Minecart(data) = &cart.kind else {
+        panic!("expected a minecart");
+    };
+    assert!(data.passengers.is_empty());
+    assert_eq!(data.rider_intent, Vec3::default());
+}
+
 #[path = "egg_tests.rs"]
 mod egg_tests;
 

@@ -106,6 +106,7 @@ fn minecart_syncs_vehicle_and_own_metadata() {
         custom_display_block: None,
         display_offset: 8,
         has_fuel: false,
+        flipped: false,
     };
     assert_eq!(
         minecart_default_data(12, &chest_public),

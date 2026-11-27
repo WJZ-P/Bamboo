@@ -178,12 +178,46 @@ pub(crate) fn run_entity_ticks(
     // Players are not in the entity list. Vanilla players usually tick before later items,
     // so pickup sees the item where it was before this tick's movement.
     crate::drops::pickup_before_entities(region);
+    // 把骑在矿车里的第一玩家乘客的方向按键同步进矿车，供 `OldMinecartBehavior.moveAlongTrack` 读。
+    // Sync each riding player's `getLastClientMoveIntent` onto its minecart before entity ticks.
+    sync_minecart_rider_intents(region);
     if entity_threads == 0 {
         let (mut level, ticks) = region.entity_level();
         let outcome = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
         send_effects(region, None, &outcome.effects);
     } else {
         parallel_entity_ticks(entity_threads, region, pool);
+    }
+}
+
+/// 把在线骑着矿车且是第一位乘客的玩家的 `getLastClientMoveIntent()` 写到矿车的
+/// `rider_intent` 里。矿车自己没有玩家控制者，由服务端 `OldMinecartBehavior` 驱动。
+///
+/// Push each online first-passenger player's `getLastClientMoveIntent()` onto
+/// their minecart so server-side `OldMinecartBehavior` can apply it.
+fn sync_minecart_rider_intents(region: &mut Region) {
+    let riders: Vec<(i32, mc_bamboo_blocks::entity::EntityUid, Vec3)> = region
+        .players
+        .iter()
+        .filter_map(|(&id, player)| {
+            let vehicle = player.riding.vehicle?;
+            let intent = crate::entity_sync::last_client_move_intent(
+                player.sync.last_input_flags,
+                player.yaw,
+            );
+            Some((id.0, vehicle, intent))
+        })
+        .collect();
+    for (player_uid, vehicle, intent) in riders {
+        region.entities.with_mut(vehicle, |entity| {
+            if let mc_bamboo_blocks::entity::EntityKind::Minecart(cart) = &mut entity.kind {
+                cart.rider_intent = if cart.passengers.first() == Some(&player_uid) {
+                    intent
+                } else {
+                    Vec3::default()
+                };
+            }
+        });
     }
 }
 
