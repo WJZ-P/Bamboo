@@ -224,4 +224,62 @@ mod tests {
             "the biome preview must paint pixels"
         );
     }
+
+    /// 官方 `ChunkGenerator.findNearestMapStructure` 是同步搜索，这里量一下它阻塞
+    /// 世界线程多久；用 `--ignored --nocapture` 单独跑，把数字写进汇报。
+    ///
+    /// Vanilla `ChunkGenerator.findNearestMapStructure` is synchronous; measure
+    /// how long it stalls the world thread. Run with `--ignored --nocapture` and
+    /// record the numbers in the report.
+    #[test]
+    #[ignore = "timing probe; run with --ignored --nocapture"]
+    fn measure_map_structure_search_time() {
+        use crate::worldgen_structures::find_nearest_map_structure;
+        let config = normal_config(42);
+        let treasure =
+            mc_bamboo_data::expand_structure_map_destination("#minecraft:on_treasure_maps")
+                .expect("tag exported");
+        let mansion =
+            mc_bamboo_data::expand_structure_map_destination("#minecraft:on_woodland_mansion_maps")
+                .expect("tag exported");
+        // 预热共享的 StructureThread，把首次加载注册表的时间排除掉。
+        // Warm up the shared StructureThread to exclude one-time registry loading.
+        let _ = find_nearest_map_structure(
+            &config,
+            &treasure,
+            mc_bamboo_core::BlockPos::new(0, 64, 0),
+            50,
+            false,
+        );
+        for origin in [0, 512, -1024, 4096] {
+            let started = Instant::now();
+            let found = find_nearest_map_structure(
+                &config,
+                &treasure,
+                mc_bamboo_core::BlockPos::new(origin, 64, origin),
+                50,
+                false,
+            );
+            eprintln!(
+                "treasure origin {origin}: found={} elapsed={:?}",
+                found.is_some(),
+                started.elapsed()
+            );
+        }
+        // 未命中要扫完整个半径，往往比命中慢，单独量一次。
+        // A miss scans the whole radius and is often slower; measure it once.
+        let started = Instant::now();
+        let found = find_nearest_map_structure(
+            &config,
+            &mansion,
+            mc_bamboo_core::BlockPos::new(0, 64, 0),
+            50,
+            false,
+        );
+        eprintln!(
+            "mansion: found={} elapsed={:?}",
+            found.is_some(),
+            started.elapsed()
+        );
+    }
 }
