@@ -41,6 +41,7 @@ enum Line {
     End(End),
     BoatFacts(Box<BoatFacts>),
     CommandMinecart(CommandMinecart),
+    SpawnerMinecart(Box<SpawnerMinecart>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +55,18 @@ struct CommandMinecartStep {
     nbt: String,
     signal: i32,
     chat: Vec<[String; 2]>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SpawnerMinecart {
+    before: String,
+    after: String,
+    mobs: Vec<[i64; 4]>,
+    blocks: Vec<[i32; 4]>,
+    seed: i64,
+    level_events: Vec<[i32; 5]>,
+    cart_events: Vec<u8>,
 }
 
 /// 船第二期的静态事实：菜单标题、重叠容器随机抽、生物乘客落位、运输船整棵
@@ -399,6 +412,7 @@ struct PhysicsLevel {
     block_events: BlockEvents,
     entities: Entities,
     containers: HashMap<BlockPos, Vec<ItemStack>>,
+    players: Vec<mc_bamboo_blocks::entity::ctx::PlayerView>,
 }
 
 impl PhysicsLevel {
@@ -412,6 +426,7 @@ impl PhysicsLevel {
             block_events: BlockEvents::default(),
             entities: Entities::new(),
             containers: HashMap::new(),
+            players: Vec::new(),
         }
     }
 
@@ -501,6 +516,10 @@ impl Level for PhysicsLevel {
 
     fn is_randomly_ticking_section(&self, _chunk: ChunkPos, _section_y: i32) -> bool {
         false
+    }
+
+    fn for_each_player(&self, visit: &mut dyn FnMut(&mc_bamboo_blocks::entity::ctx::PlayerView)) {
+        self.players.iter().for_each(visit);
     }
 
     fn any_player_close_enough_to(&self, _pos: BlockPos, _max_distance: i32) -> bool {
@@ -603,6 +622,10 @@ impl Report {
                 Line::CommandMinecart(scene) => {
                     self.cases += 1;
                     self.replay_command_minecart(&scene)?;
+                }
+                Line::SpawnerMinecart(scene) => {
+                    self.cases += 1;
+                    self.replay_spawner_minecart(&scene)?;
                 }
                 Line::End(end) => {
                     self.ended = true;
@@ -1395,6 +1418,105 @@ impl Report {
                 .collect();
             self.field(&at, "chat", chat, got_chat);
         }
+        Ok(())
+    }
+
+    fn replay_spawner_minecart(&mut self, scene: &SpawnerMinecart) -> Result<(), String> {
+        use mc_bamboo_blocks::Effect;
+        use mc_bamboo_blocks::archive::{read_entity, write_entity};
+        use mc_bamboo_game::{ReplayPlayerSetup, ReplayPlayers};
+
+        let mut level = PhysicsLevel::new(1);
+        level.place(&scene.blocks);
+        level.players = ReplayPlayers::new(
+            2,
+            &[ReplayPlayerSetup {
+                id: 1,
+                uuid: 1,
+                name: "Witness".to_owned(),
+                position: Vec3::new(8.5, 64.0, 8.5),
+                health: 20.0,
+                seed: 1,
+                creative: false,
+            }],
+        )
+        .views();
+        let before =
+            mc_bamboo_nbt::parse_snbt(&scene.before).map_err(|error| format!("{error:?}"))?;
+        let after =
+            mc_bamboo_nbt::parse_snbt(&scene.after).map_err(|error| format!("{error:?}"))?;
+        let row = read_entity(&before, 0)
+            .map_err(|error| error.to_string())?
+            .ok_or("spawner cart did not load")?;
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let uid = world.spawn_entity(row.into_entity());
+        world.tick_entities();
+        self.steps += 1;
+        let saved = write_entity(&world.entity(uid).ok_or("spawner cart disappeared")?.split())
+            .map_err(|error| error.to_string())?;
+        let key_fields = |tag: &Tag, key| save_field(tag, key).map(canonical_tag);
+        for key in [
+            "Delay",
+            "SpawnCount",
+            "SpawnData",
+            "SpawnPotentials",
+            "MinSpawnDelay",
+            "MaxSpawnDelay",
+            "MaxNearbyEntities",
+            "RequiredPlayerRange",
+            "SpawnRange",
+        ] {
+            self.field(
+                "spawner minecart",
+                key,
+                key_fields(&after, key),
+                key_fields(&saved, key),
+            );
+        }
+        let mobs: Vec<_> = world
+            .live_entities()
+            .into_iter()
+            .filter_map(|entity| {
+                let mob = entity.kind.mob()?;
+                Some([
+                    i64::from(mob.mob_type.entity_type()),
+                    entity.position.x.to_bits() as i64,
+                    entity.position.y.to_bits() as i64,
+                    entity.position.z.to_bits() as i64,
+                ])
+            })
+            .collect();
+        self.field("spawner minecart", "spawned mobs", &scene.mobs, &mobs);
+        self.field(
+            "spawner minecart",
+            "world random",
+            scene.seed,
+            world.random().seed(),
+        );
+        let mut level_events = Vec::new();
+        let mut cart_events = Vec::new();
+        for effect in world.drain_effects() {
+            match effect {
+                Effect::LevelEvent {
+                    event, pos, data, ..
+                } => level_events.push([event, pos.x, pos.y, pos.z, data]),
+                Effect::EntityEvent { entity, event } if entity == uid => cart_events.push(event),
+                _ => {}
+            }
+        }
+        self.field(
+            "spawner minecart",
+            "level events",
+            &scene.level_events,
+            &level_events,
+        );
+        self.field(
+            "spawner minecart",
+            "cart events",
+            &scene.cart_events,
+            &cart_events,
+        );
         Ok(())
     }
 

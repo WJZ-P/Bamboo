@@ -1020,6 +1020,9 @@ fn write_minecart_additional(
     if let Some(command) = &cart.command_block {
         command.write(out);
     }
+    if let Some(spawner) = &cart.spawner {
+        out.extend(spawner.additional());
+    }
     if cart.is_container() {
         write_entity_container_items(
             out,
@@ -1059,6 +1062,11 @@ fn read_minecart_additional(tag: &Tag, cart: &mut crate::entity::minecart::Minec
     }
     if kind == MinecartKind::CommandBlock {
         cart.command_block = Some(crate::entity::minecart::CommandBlock::read(tag));
+    }
+    if kind == MinecartKind::Spawner {
+        cart.spawner = Some(Box::new(
+            crate::behaviour::machines::spawner::BaseSpawner::read(tag),
+        ));
     }
     if cart.is_container() {
         read_entity_container_items(

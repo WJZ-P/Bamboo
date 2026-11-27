@@ -1383,7 +1383,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::VibrationParticle { .. }
             | Effect::Particles { .. } => None,
             Effect::Firework { .. } => None,
-            Effect::BoatBubbleEvent { .. } | Effect::RunMinecartCommand(_) => None,
+            Effect::BoatBubbleEvent { .. } | Effect::RunMinecartCommand(_) | Effect::EntityEvent { .. } => None,
         })
         .collect()
 }
@@ -1521,7 +1521,8 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::RaidSetLeader { .. }
             | Effect::Firework { .. }
             | Effect::BoatBubbleEvent { .. }
-            | Effect::RunMinecartCommand(_) => {}
+            | Effect::RunMinecartCommand(_)
+            | Effect::EntityEvent { .. } => {}
         }
     }
     (events, sounds)

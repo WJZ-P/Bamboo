@@ -527,6 +527,15 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
     for effect in effects {
         match *effect {
             Effect::RunMinecartCommand(_) => {}
+            Effect::EntityEvent { entity, event } => {
+                let packet = mc_bamboo_protocol::packet::play::EntityEvent {
+                    entity_id: entity,
+                    event,
+                };
+                for id in region.entity_tracking.viewers(entity) {
+                    region.links.send(id, &packet);
+                }
+            }
             Effect::BoatBubbleEvent {
                 entity,
                 event,

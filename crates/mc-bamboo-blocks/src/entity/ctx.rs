@@ -2044,6 +2044,8 @@ pub enum Command {
     },
     /// 激活铁轨触发命令。 / An activator rail triggers a command.
     ActivateMinecartCommand(super::minecart::CommandActivation),
+    /// 移动后推进刷怪笼矿车。 / Tick the cart's spawner after movement.
+    TickMinecartSpawner,
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -2825,6 +2827,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::MinecartPushAndPickup => super::minecart::push_and_pickup(me, world),
         Command::MinecartEject { passengers } => world.eject_passenger_ids(&passengers),
+        Command::TickMinecartSpawner => super::minecart::tick_spawner(me, world),
         Command::ActivateMinecartCommand(activation) => {
             world.push_effect(crate::Effect::RunMinecartCommand(activation));
         }

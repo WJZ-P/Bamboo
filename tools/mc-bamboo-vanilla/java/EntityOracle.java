@@ -204,6 +204,7 @@ public final class EntityOracle {
             cases += minecartAnimal(official, out, true);
             cases += hopperEjectsIntoMinecart(official, out);
             cases += commandMinecartFacts(official, out);
+            cases += spawnerMinecartFacts(official, out);
             cases += boatStillWater(official, out);
             cases += boatIceSlide(official, out);
             cases += boatWaterCurrent(official, out);
@@ -1466,6 +1467,59 @@ public final class EntityOracle {
         }
     }
 
+    private static int spawnerMinecartFacts(Official official, Writer out) throws Exception {
+        var spec = new MinecartSpec();
+        rails(spec, -1, 3, rail(RailShape.NORTH_SOUTH));
+        spec.blocks.put(BlockPos.asLong(3, 63, 1), Blocks.GRASS_BLOCK.defaultBlockState());
+        var level = FakeLevel.create(official, 1L);
+        level.blocks.putAll(spec.blocks);
+        level.spawnerScene = true;
+        level.spawnerPlayer = new Vec3(8.5, 64.0, 8.5);
+        var cart = new net.minecraft.world.entity.vehicle.minecart.MinecartSpawner(
+                EntityTypes.SPAWNER_MINECART, level);
+        var initial = new net.minecraft.nbt.CompoundTag();
+        initial.putShort("Delay", (short) 0);
+        initial.putInt("SpawnCount", 1);
+        initial.putInt("MinSpawnDelay", 7);
+        initial.putInt("MaxSpawnDelay", 8);
+        var pig = new net.minecraft.nbt.CompoundTag();
+        pig.putString("id", "minecraft:pig");
+        pig.store("Pos", Vec3.CODEC, new Vec3(3.5, 64.0, 1.5));
+        var spawnData = new net.minecraft.nbt.CompoundTag();
+        spawnData.put("entity", pig);
+        initial.put("SpawnData", spawnData);
+        var reporter = net.minecraft.util.ProblemReporter.DISCARDING;
+        cart.getSpawner().load(level, new BlockPos(0, 64, 0),
+                net.minecraft.world.level.storage.TagValueInput.create(reporter, official.registries, initial));
+        cart.setPos(0.5, 64.0625, 0.9);
+        cart.setDeltaMovement(0.0, 0.0, 0.3);
+        level.tracked = List.of(cart);
+        var saved = net.minecraft.world.level.storage.TagValueOutput.createWithContext(reporter, official.registries);
+        cart.save(saved);
+        cart.commonTick();
+        cart.tick();
+        var after = net.minecraft.world.level.storage.TagValueOutput.createWithContext(reporter, official.registries);
+        cart.getSpawner().save(after);
+        StringBuilder mobs = new StringBuilder();
+        for (Entity entity : level.fresh) {
+            if (!mobs.isEmpty()) {
+                mobs.append(',');
+            }
+            Vec3 p = entity.position();
+            mobs.append('[').append(BuiltInRegistries.ENTITY_TYPE.getId(entity.getType()))
+                    .append(',').append(Double.doubleToRawLongBits(p.x))
+                    .append(',').append(Double.doubleToRawLongBits(p.y))
+                    .append(',').append(Double.doubleToRawLongBits(p.z)).append(']');
+        }
+        out.write("{\"type\":\"spawnerMinecart\",\"before\":" + jsonString(saved.buildResult().toString())
+                + ",\"after\":" + jsonString(after.buildResult().toString())
+                + ",\"mobs\":[" + mobs + "],\"blocks\":" + blockArray(spec.blocks)
+                + ",\"seed\":" + levelSeed(level)
+                + ",\"levelEvents\":" + level.spawnerLevelEvents
+                + ",\"cartEvents\":" + level.spawnerCartEvents + "}\n");
+        return 1;
+    }
+
     /** 造一辆官方矿车、逐刻跑、把每刻的实体状态写成一题 case。 */
     private static int playMinecart(Official official, Writer out, MinecartSpec spec) throws Exception {
         FakeLevel level = FakeLevel.create(official, spec.levelSeed);
@@ -2582,6 +2636,11 @@ public final class EntityOracle {
         }
 
         long gameTime;
+        boolean spawnerScene;
+        Vec3 spawnerPlayer;
+        List<List<Integer>> spawnerLevelEvents;
+        List<Integer> spawnerCartEvents;
+
 
         @Override
         public long getGameTime() {
@@ -2598,6 +2657,8 @@ public final class EntityOracle {
             level.fresh = new ArrayList<>();
             level.tracked = new ArrayList<>();
             level.scoreboard = new ServerScoreboard(official.server);
+            level.spawnerLevelEvents = new ArrayList<>();
+            level.spawnerCartEvents = new ArrayList<>();
             level.blockEntities = new Long2ObjectOpenHashMap<>();
             level.nextId = 1;
             level.blocks = new Long2ObjectOpenHashMap<>();
@@ -2823,7 +2884,49 @@ public final class EntityOracle {
         public void sendBlockUpdated(BlockPos pos, BlockState old, BlockState current, int flags) {}
 
         @Override
-        public void levelEvent(Entity source, int type, BlockPos pos, int data) {}
+        public void levelEvent(Entity source, int type, BlockPos pos, int data) {
+            if (spawnerScene) {
+                spawnerLevelEvents.add(List.of(type, pos.getX(), pos.getY(), pos.getZ(), data));
+            }
+        }
+
+        @Override
+        public boolean containsAnyLiquid(AABB bounds) {
+            if (!spawnerScene) {
+                return super.containsAnyLiquid(bounds);
+            }
+            for (BlockPos pos : BlockPos.betweenClosed(BlockPos.containing(bounds.minX, bounds.minY, bounds.minZ),
+                    BlockPos.containing(bounds.maxX, bounds.maxY, bounds.maxZ))) {
+                if (!getFluidState(pos).isEmpty()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        @Override
+        public int getRawBrightness(BlockPos pos, int skyDarken) {
+            return spawnerScene ? 15 - skyDarken : super.getRawBrightness(pos, skyDarken);
+        }
+
+        @Override
+        public boolean hasNearbyAlivePlayer(double x, double y, double z, double distance) {
+            return spawnerPlayer != null && spawnerPlayer.distanceToSqr(x, y, z) < distance * distance;
+        }
+
+        @Override
+        public boolean tryAddFreshEntityWithPassengers(Entity entity) {
+            return addFreshEntity(entity);
+        }
+
+        @Override
+        public void broadcastEntityEvent(Entity entity, byte event) {
+            if (spawnerScene && entity instanceof net.minecraft.world.entity.vehicle.minecart.MinecartSpawner) {
+                spawnerCartEvents.add((int) event);
+            } else if (!spawnerScene) {
+                super.broadcastEntityEvent(entity, event);
+            }
+        }
 
         @Override
         public void playSeededSound(

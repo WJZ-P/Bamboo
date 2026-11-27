@@ -13,6 +13,7 @@ use mc_bamboo_protocol::{components::text::checked_component, item::ItemStack, t
 use crate::{
     Aabb, BlockState, World,
     archive::tag,
+    behaviour::machines::spawner::BaseSpawner,
     entity::{
         Entity, EntityKind, EntityUid, KindPublic, PrimedTnt,
         ctx::{BlockView, Command, EntityCtx},
@@ -34,6 +35,7 @@ pub enum MinecartKind {
     Tnt,
     Hopper,
     CommandBlock,
+    Spawner,
 }
 
 impl MinecartKind {
@@ -48,6 +50,7 @@ impl MinecartKind {
             Self::Tnt => entity_type::TNT_MINECART,
             Self::Hopper => entity_type::HOPPER_MINECART,
             Self::CommandBlock => entity_type::COMMAND_BLOCK_MINECART,
+            Self::Spawner => entity_type::SPAWNER_MINECART,
         }
     }
 
@@ -62,6 +65,7 @@ impl MinecartKind {
             Self::Tnt => items::TNT_MINECART,
             Self::Hopper => items::HOPPER_MINECART,
             Self::CommandBlock => items::COMMAND_BLOCK_MINECART,
+            Self::Spawner => items::MINECART,
         }
     }
 
@@ -76,6 +80,7 @@ impl MinecartKind {
             entity_type::TNT_MINECART => Self::Tnt,
             entity_type::HOPPER_MINECART => Self::Hopper,
             entity_type::COMMAND_BLOCK_MINECART => Self::CommandBlock,
+            entity_type::SPAWNER_MINECART => Self::Spawner,
             _ => return None,
         })
     }
@@ -188,6 +193,7 @@ pub struct Minecart {
     pub rider_intent: Vec3,
     /// 命令方块矿车独有的状态。 / State held by command block carts.
     pub command_block: Option<CommandBlock>,
+    pub(crate) spawner: Option<Box<BaseSpawner>>,
 }
 
 impl Minecart {
@@ -217,6 +223,7 @@ impl Minecart {
             consumed_item_this_frame: false,
             rider_intent: Vec3::default(),
             command_block: (kind == MinecartKind::CommandBlock).then(CommandBlock::default),
+            spawner: (kind == MinecartKind::Spawner).then(Box::default),
         }
     }
 
@@ -1058,6 +1065,18 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         if cart.kind() == MinecartKind::Hopper && cart.enabled && !me.removed);
     if hopper_ready {
         ctx.emit(Command::MinecartHopperSuck, me);
+    }
+    if matches!(&me.kind, EntityKind::Minecart(cart) if cart.spawner.is_some()) {
+        ctx.emit(Command::TickMinecartSpawner, me);
+    }
+}
+
+pub(super) fn tick_spawner(me: &mut Entity, world: &mut World) {
+    let position = me.block_position();
+    if let EntityKind::Minecart(cart) = &mut me.kind
+        && let Some(spawner) = &mut cart.spawner
+    {
+        spawner.server_tick(world, position, Some(me.id));
     }
 }
 

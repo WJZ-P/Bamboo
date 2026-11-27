@@ -787,6 +787,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::BoatBubbleEvent { .. } => 39,
         Effect::ConstructBeacon { .. } => 40,
         Effect::RunMinecartCommand(_) => 41,
+        Effect::EntityEvent { .. } => 42,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -1088,6 +1089,10 @@ fn hash_effect(effect: &Effect) -> u64 {
                 bytes.hash(&mut hasher);
             }
             item.removed.hash(&mut hasher);
+        }
+        Effect::EntityEvent { entity, event } => {
+            entity.hash(&mut hasher);
+            event.hash(&mut hasher);
         }
         Effect::RunMinecartCommand(activation) => {
             activation.entity.hash(&mut hasher);

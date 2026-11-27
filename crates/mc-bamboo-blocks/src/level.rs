@@ -2747,6 +2747,8 @@ pub fn monster_prevents_rest_in<L: Level + ?Sized>(level: &L, pos: BlockPos) -> 
 pub enum Effect {
     /// 激活铁轨要求游戏层执行矿车命令。 / An activator rail requests a cart command.
     RunMinecartCommand(crate::entity::minecart::CommandActivation),
+    /// 向正在跟踪的玩家同步实体事件。 / Send an entity event to its viewers.
+    EntityEvent { entity: EntityUid, event: u8 },
     /// `AbstractBoat.tickBubbleColumn`：给跟踪者广播实体事件，并甩下载具的乘客。
     ///
     /// `AbstractBoat.tickBubbleColumn`: broadcast an entity event and eject the
