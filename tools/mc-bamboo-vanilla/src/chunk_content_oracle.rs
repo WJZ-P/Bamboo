@@ -909,11 +909,7 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             "minecraft:sculk_catalyst",
         ),
         ("beacon-bare", "minecraft:beacon", "minecraft:beacon"),
-        (
-            "conduit-bare",
-            "minecraft:conduit",
-            "minecraft:conduit",
-        ),
+        ("conduit-bare", "minecraft:conduit", "minecraft:conduit"),
         (
             "potent_sulfur-bare",
             "minecraft:potent_sulfur",
