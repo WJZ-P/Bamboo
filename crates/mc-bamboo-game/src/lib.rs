@@ -1032,17 +1032,25 @@ pub fn replay_execute(line: &str) -> [i32; 7] {
     region.links.flush();
     // 场景脚本里的 ` ;; ` 前面是准备命令（效果先给上再测 clear），
     // 它的反馈不计入比较，和 Java 的 `emit` 一致。
-    let (setup, measured) = match line.split_once(" ;; ") {
-        Some((setup, measured)) => (setup, measured),
+    // 最后一段是被比较的命令，前面每一段都是准备命令。
+    // The last part is the measured command; every earlier part is setup.
+    let (setups, measured) = match line.rsplit_once(" ;; ") {
+        Some((setups, measured)) => (setups, measured),
         None => ("", line),
     };
-    if !setup.is_empty() {
+    for setup in setups.split(" ;; ").filter(|setup| !setup.is_empty()) {
         command::on_command_public(&mut global, &mut region, id, setup);
+        global.publish(&mut region);
         region.links.flush();
     }
     let mut feedback = Vec::new();
     command::on_command_public_feedback(&mut global, &mut region, id, measured, &mut feedback);
     region.links.flush();
+    // 设了 `EXECUTE_ORACLE_TRACE` 时打出反馈原文，和 Java 侧的同名开关对着看。
+    // With `EXECUTE_ORACLE_TRACE` set, print the raw feedback to compare with the Java side.
+    if std::env::var_os("EXECUTE_ORACLE_TRACE").is_some() {
+        eprintln!("rust feedback: {line} => {feedback:?}");
+    }
     let stone =
         |pos: BlockPos| i32::from(region.chunks.block(pos) == Some(mc_bamboo_data::blocks::STONE));
     let cow_pos =

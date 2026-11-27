@@ -1,7 +1,7 @@
 //! `execute-oracle`：整条 `/execute` 命令的副作用和反馈对拍。
 //!
 //! Java 侧 `ExecuteOracle.java` 在假世界里用官方 `Commands.performCommand`
-//! 跑 32 条固定脚本，输出每条命令以后的方块、计分板和「翻译键 + 参数 + 子组件」
+//! 跑 148 条固定脚本，输出每条命令以后的方块、计分板和「翻译键 + 参数 + 子组件」
 //! 展开的反馈；Rust 侧用 `mc-bamboo-game::replay_execute` 在同样的小世界里重放并逐项比较。
 //! `--break-self-test` 改坏一项副作用；`--break-group NAME` 按类别改坏一个字段。
 //!
@@ -46,6 +46,30 @@ const BREAK_GROUPS: &[BreakGroup] = &[
         "effect_clear_state",
         |line| line.contains("effect clear"),
         6,
+    ),
+    // 条件写在链尾：反馈哈希（5）。
+    // Conditions at the tail: the feedback hash (5).
+    (
+        "tail",
+        |line| line.starts_with("execute ") && !line.contains(" run "),
+        5,
+    ),
+    // `if predicate` 和 `if biome|dimension|loaded`：链尾方块有没有放下（0）。
+    // `if predicate` and `if biome|dimension|loaded`: whether the tail block landed (0).
+    (
+        "predicate",
+        |line| line.contains(" predicate ") && line.contains(" run "),
+        0,
+    ),
+    (
+        "world_conditions",
+        |line| {
+            [" biome ", " dimension ", " loaded "]
+                .iter()
+                .any(|word| line.contains(word))
+                && line.contains(" run ")
+        },
+        0,
     ),
 ];
 
@@ -107,6 +131,104 @@ const SCENARIOS: &[&str] = &[
     "effect give @s minecraft:speed 30 1 ;; effect clear @s",
     "effect give @s minecraft:speed 30 1 ;; effect clear @s minecraft:speed",
     "effect give @e[type=item] minecraft:speed 10",
+    // 条件写在链尾：官方走条件节点自己的 executes
+    "execute if block 4 -60 6 air",
+    "execute unless block 4 -60 6 air",
+    "execute if entity @e[type=cow]",
+    "execute unless entity @e[type=cow]",
+    "execute unless entity @e[type=slime]",
+    "execute if blocks 2 -60 2 2 -60 2 6 -60 6 all",
+    "execute unless blocks 2 -60 2 2 -60 2 6 -60 6 masked",
+    "execute if score #total result matches 0",
+    "execute unless score #total result matches 0",
+    "execute as @e[type=cow] if entity @s",
+    // biome / dimension / loaded / stopwatch
+    "execute if biome 4 -60 6 minecraft:plains run setblock 4 -60 6 stone",
+    "execute unless biome 4 -60 6 minecraft:plains run setblock 4 -60 6 stone",
+    "execute if biome 4 -60 6 minecraft:desert run setblock 4 -60 6 stone",
+    "execute if biome 4 -60 6 #minecraft:is_overworld run setblock 4 -60 6 stone",
+    "execute if biome 4 -60 6 #minecraft:is_nether run setblock 4 -60 6 stone",
+    "execute unless biome 4 -60 6 #minecraft:is_nether run setblock 4 -60 6 stone",
+    "execute if biome 4 -60 6 minecraft:plains",
+    "execute if biome 4 -60 6 minecraft:desert",
+    "execute if dimension minecraft:overworld run setblock 4 -60 6 stone",
+    "execute unless dimension minecraft:overworld run setblock 4 -60 6 stone",
+    "execute if dimension minecraft:nope run setblock 4 -60 6 stone",
+    "execute if dimension minecraft:overworld",
+    "execute if loaded 4 -60 6 run setblock 4 -60 6 stone",
+    "execute unless loaded 4 -60 6 run setblock 4 -60 6 stone",
+    "execute if loaded 4 -60 6",
+    "execute if stopwatch minecraft:nope 0.. run setblock 4 -60 6 stone",
+    "execute if dimension minecraft:nope",
+    "execute if stopwatch minecraft:nope 0..",
+    "execute as @e[type=cow] run setblock 4 -60 6 stone",
+    "execute as @e[type=cow] if dimension minecraft:nope run setblock 4 -60 6 stone",
+    "execute as @e[type=cow] unless entity @s",
+    // if predicate：引用、实体类型、效果、NBT、队伍、闪电、玩家
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{}} run setblock 4 -60 6 stone",
+    "execute unless predicate {type:\"entity_properties\",entity:\"this\",predicate:{}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{}}",
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/lightning\":{}}}",
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{team:\"red\"}}",
+    "execute unless predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{}}}}",
+    "execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{result:{min:-9}}}",
+    "execute if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"#minecraft:water\"}}}",
+    "execute if predicate {type:\"location_check\",predicate:{biomes:\"#minecraft:is_nether\"}}",
+    "execute unless predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/player\":{gamemode:[\"survival\"]}}}",
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"minecraft:entity_type\":\"minecraft:player\"}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{entity_type:\"cow\"}} run setblock 4 -60 6 stone",
+    "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{entity_type:\"cow\"}} run setblock ~ ~ ~ stone",
+    "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{entity_type:\"#minecraft:undead\"}} run setblock ~ ~ ~ stone",
+    "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{}}}} run setblock ~ ~ ~ stone",
+    "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{amplifier:1}}}} run setblock ~ ~ ~ stone",
+    "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{amplifier:{min:2}}}}} run setblock ~ ~ ~ stone",
+    "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{duration:{min:100},ambient:false,visible:true}}}} run setblock ~ ~ ~ stone",
+    "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{duration:{max:100}}}}} run setblock ~ ~ ~ stone",
+    "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{},\"minecraft:haste\":{}}}} run setblock ~ ~ ~ stone",
+    "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{}}} run setblock ~ ~ ~ stone",
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{}}}} run setblock 4 -60 6 stone",
+    "effect give @s minecraft:speed 30 0 true ;; execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{speed:{visible:false}}}} run setblock 4 -60 6 stone",
+    "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{nbt:\"{Health:10.0f}\"}} run setblock ~ ~ ~ stone",
+    "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{nbt:{Health:10.0f}}} run setblock ~ ~ ~ stone",
+    "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{nbt:\"{Health:10}\"}} run setblock ~ ~ ~ stone",
+    "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{nbt:\"{Health:11.0f}\"}} run setblock ~ ~ ~ stone",
+    "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{nbt:\"{}\"}} run setblock ~ ~ ~ stone",
+    "team add red ;; team join red @s ;; execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{team:\"red\"}} run setblock 4 -60 6 stone",
+    "team add red ;; team join red @s ;; execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{team:\"blue\"}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{team:\"red\"}} run setblock 4 -60 6 stone",
+    "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/lightning\":{}}} run setblock ~ ~ ~ stone",
+    "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"minecraft:type_specific/player\":{}}} run setblock ~ ~ ~ stone",
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/player\":{}}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/player\":{gamemode:[\"creative\"],level:0,food:{level:{min:20},saturation:{max:5.0}}}}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/player\":{gamemode:[\"survival\",\"adventure\"]}}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/player\":{level:{min:1}}}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/player\":{food:{level:{max:19}}}}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/lightning\":{}}} run setblock 4 -60 6 stone",
+    // entity_scores
+    "scoreboard players set @s result 5 ;; execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{result:{min:1,max:9}}} run setblock 4 -60 6 stone",
+    "scoreboard players set @s result 5 ;; execute if predicate {type:\"minecraft:entity_scores\",entity:\"this\",scores:{result:5}} run setblock 4 -60 6 stone",
+    "scoreboard players set @s result 5 ;; execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{result:7}} run setblock 4 -60 6 stone",
+    "scoreboard players set @s result 5 ;; execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{result:{min:6}}} run setblock 4 -60 6 stone",
+    "scoreboard players set @s result 5 ;; execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{missing:5}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{result:{min:-9}}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{}} run setblock 4 -60 6 stone",
+    "execute as @e[type=cow] at @s if predicate {type:\"entity_scores\",entity:\"this\",scores:{result:{min:-9}}} run setblock ~ ~ ~ stone",
+    // location_check：流体和群系
+    "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"#minecraft:water\"}}} run setblock 4 -60 6 stone",
+    "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"minecraft:water\"}}} run setblock 4 -60 6 stone",
+    "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"minecraft:flowing_water\"}}} run setblock 4 -60 6 stone",
+    "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{fluids:[\"minecraft:lava\",\"minecraft:flowing_lava\"]}}} run setblock 4 -60 6 stone",
+    "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{state:{falling:\"false\"}}}} run setblock 4 -60 6 stone",
+    "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{state:{falling:\"true\"}}}} run setblock 4 -60 6 stone",
+    "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{state:{level:\"8\"}}}} run setblock 4 -60 6 stone",
+    "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"minecraft:water\",state:{falling:{min:\"false\",max:\"true\"}}}}} run setblock 4 -60 6 stone",
+    "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{}}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"minecraft:empty\"}}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"#minecraft:water\"}}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"location_check\",predicate:{fluid:{state:{falling:\"false\"}}}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"location_check\",predicate:{biomes:\"minecraft:plains\"}} run setblock 4 -60 6 stone",
+    "execute if predicate {type:\"location_check\",predicate:{biomes:\"#minecraft:is_nether\"}} run setblock 4 -60 6 stone",
+    "setblock 2 -60 2 stone ;; execute positioned 2 -59 2 if predicate {type:\"location_check\",offsetY:-1,predicate:{block:{blocks:\"minecraft:stone\"}}} run setblock 4 -60 6 stone",
 ];
 
 #[derive(Debug)]
@@ -151,6 +273,12 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
             output.status,
             String::from_utf8_lossy(&output.stderr)
         ));
+    }
+    // 设了 `EXECUTE_ORACLE_TRACE` 时把官方侧的反馈原文和异常栈原样转出来。
+    // With `EXECUTE_ORACLE_TRACE` set, pass through the official side's raw feedback
+    // and stack traces.
+    if std::env::var_os("EXECUTE_ORACLE_TRACE").is_some() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
     }
     let text = String::from_utf8(output.stdout)
         .map_err(|error| format!("oracle stdout is not UTF-8: {error}"))?;

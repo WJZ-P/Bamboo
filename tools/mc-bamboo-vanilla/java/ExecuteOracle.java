@@ -81,6 +81,10 @@ import sun.misc.Unsafe;
 public final class ExecuteOracle {
     private static final Unsafe UNSAFE = loadUnsafe();
     private static final BlockPos TEST_POS = new BlockPos(4, -60, 6);
+    /** 设了 `EXECUTE_ORACLE_TRACE` 时把每条命令的反馈原文和异常栈打到 stderr。 */
+    private static final boolean DEBUG = System.getenv("EXECUTE_ORACLE_TRACE") != null;
+    /** `Bootstrap.bootStrap` 会把 System.err 接到日志上，这里先留一份原始的。 */
+    private static final PrintStream RAW_ERR = System.err;
     /** 32 条整命令场景；`store bossbar`、`in`、`if score` 和 NBT 目标需要更完整的
      *  WorldData / 谓词管理器 / NBT 数据源，见 README 的已知差异。 */
     private static final String[] SCENARIOS = {
@@ -149,6 +153,104 @@ public final class ExecuteOracle {
         "effect give @s minecraft:speed 30 1 ;; effect clear @s",
         "effect give @s minecraft:speed 30 1 ;; effect clear @s minecraft:speed",
         "effect give @e[type=item] minecraft:speed 10",
+        // 条件写在链尾：官方走条件节点自己的 executes
+        "execute if block 4 -60 6 air",
+        "execute unless block 4 -60 6 air",
+        "execute if entity @e[type=cow]",
+        "execute unless entity @e[type=cow]",
+        "execute unless entity @e[type=slime]",
+        "execute if blocks 2 -60 2 2 -60 2 6 -60 6 all",
+        "execute unless blocks 2 -60 2 2 -60 2 6 -60 6 masked",
+        "execute if score #total result matches 0",
+        "execute unless score #total result matches 0",
+        "execute as @e[type=cow] if entity @s",
+        // biome / dimension / loaded / stopwatch
+        "execute if biome 4 -60 6 minecraft:plains run setblock 4 -60 6 stone",
+        "execute unless biome 4 -60 6 minecraft:plains run setblock 4 -60 6 stone",
+        "execute if biome 4 -60 6 minecraft:desert run setblock 4 -60 6 stone",
+        "execute if biome 4 -60 6 #minecraft:is_overworld run setblock 4 -60 6 stone",
+        "execute if biome 4 -60 6 #minecraft:is_nether run setblock 4 -60 6 stone",
+        "execute unless biome 4 -60 6 #minecraft:is_nether run setblock 4 -60 6 stone",
+        "execute if biome 4 -60 6 minecraft:plains",
+        "execute if biome 4 -60 6 minecraft:desert",
+        "execute if dimension minecraft:overworld run setblock 4 -60 6 stone",
+        "execute unless dimension minecraft:overworld run setblock 4 -60 6 stone",
+        "execute if dimension minecraft:nope run setblock 4 -60 6 stone",
+        "execute if dimension minecraft:overworld",
+        "execute if loaded 4 -60 6 run setblock 4 -60 6 stone",
+        "execute unless loaded 4 -60 6 run setblock 4 -60 6 stone",
+        "execute if loaded 4 -60 6",
+        "execute if stopwatch minecraft:nope 0.. run setblock 4 -60 6 stone",
+        "execute if dimension minecraft:nope",
+        "execute if stopwatch minecraft:nope 0..",
+        "execute as @e[type=cow] run setblock 4 -60 6 stone",
+        "execute as @e[type=cow] if dimension minecraft:nope run setblock 4 -60 6 stone",
+        "execute as @e[type=cow] unless entity @s",
+        // if predicate：引用、实体类型、效果、NBT、队伍、闪电、玩家
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{}} run setblock 4 -60 6 stone",
+        "execute unless predicate {type:\"entity_properties\",entity:\"this\",predicate:{}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{}}",
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/lightning\":{}}}",
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{team:\"red\"}}",
+        "execute unless predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{}}}}",
+        "execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{result:{min:-9}}}",
+        "execute if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"#minecraft:water\"}}}",
+        "execute if predicate {type:\"location_check\",predicate:{biomes:\"#minecraft:is_nether\"}}",
+        "execute unless predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/player\":{gamemode:[\"survival\"]}}}",
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"minecraft:entity_type\":\"minecraft:player\"}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{entity_type:\"cow\"}} run setblock 4 -60 6 stone",
+        "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{entity_type:\"cow\"}} run setblock ~ ~ ~ stone",
+        "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{entity_type:\"#minecraft:undead\"}} run setblock ~ ~ ~ stone",
+        "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{}}}} run setblock ~ ~ ~ stone",
+        "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{amplifier:1}}}} run setblock ~ ~ ~ stone",
+        "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{amplifier:{min:2}}}}} run setblock ~ ~ ~ stone",
+        "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{duration:{min:100},ambient:false,visible:true}}}} run setblock ~ ~ ~ stone",
+        "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{duration:{max:100}}}}} run setblock ~ ~ ~ stone",
+        "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{},\"minecraft:haste\":{}}}} run setblock ~ ~ ~ stone",
+        "effect give @e[type=cow,sort=nearest,limit=1] minecraft:speed 30 1 ;; execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{}}} run setblock ~ ~ ~ stone",
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{\"minecraft:speed\":{}}}} run setblock 4 -60 6 stone",
+        "effect give @s minecraft:speed 30 0 true ;; execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{effects:{speed:{visible:false}}}} run setblock 4 -60 6 stone",
+        "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{nbt:\"{Health:10.0f}\"}} run setblock ~ ~ ~ stone",
+        "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{nbt:{Health:10.0f}}} run setblock ~ ~ ~ stone",
+        "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{nbt:\"{Health:10}\"}} run setblock ~ ~ ~ stone",
+        "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{nbt:\"{Health:11.0f}\"}} run setblock ~ ~ ~ stone",
+        "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{nbt:\"{}\"}} run setblock ~ ~ ~ stone",
+        "team add red ;; team join red @s ;; execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{team:\"red\"}} run setblock 4 -60 6 stone",
+        "team add red ;; team join red @s ;; execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{team:\"blue\"}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{team:\"red\"}} run setblock 4 -60 6 stone",
+        "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/lightning\":{}}} run setblock ~ ~ ~ stone",
+        "execute as @e[type=cow] at @s if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"minecraft:type_specific/player\":{}}} run setblock ~ ~ ~ stone",
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/player\":{}}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/player\":{gamemode:[\"creative\"],level:0,food:{level:{min:20},saturation:{max:5.0}}}}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/player\":{gamemode:[\"survival\",\"adventure\"]}}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/player\":{level:{min:1}}}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/player\":{food:{level:{max:19}}}}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"entity_properties\",entity:\"this\",predicate:{\"type_specific/lightning\":{}}} run setblock 4 -60 6 stone",
+        // entity_scores
+        "scoreboard players set @s result 5 ;; execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{result:{min:1,max:9}}} run setblock 4 -60 6 stone",
+        "scoreboard players set @s result 5 ;; execute if predicate {type:\"minecraft:entity_scores\",entity:\"this\",scores:{result:5}} run setblock 4 -60 6 stone",
+        "scoreboard players set @s result 5 ;; execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{result:7}} run setblock 4 -60 6 stone",
+        "scoreboard players set @s result 5 ;; execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{result:{min:6}}} run setblock 4 -60 6 stone",
+        "scoreboard players set @s result 5 ;; execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{missing:5}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{result:{min:-9}}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"entity_scores\",entity:\"this\",scores:{}} run setblock 4 -60 6 stone",
+        "execute as @e[type=cow] at @s if predicate {type:\"entity_scores\",entity:\"this\",scores:{result:{min:-9}}} run setblock ~ ~ ~ stone",
+        // location_check：流体和群系
+        "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"#minecraft:water\"}}} run setblock 4 -60 6 stone",
+        "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"minecraft:water\"}}} run setblock 4 -60 6 stone",
+        "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"minecraft:flowing_water\"}}} run setblock 4 -60 6 stone",
+        "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{fluids:[\"minecraft:lava\",\"minecraft:flowing_lava\"]}}} run setblock 4 -60 6 stone",
+        "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{state:{falling:\"false\"}}}} run setblock 4 -60 6 stone",
+        "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{state:{falling:\"true\"}}}} run setblock 4 -60 6 stone",
+        "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{state:{level:\"8\"}}}} run setblock 4 -60 6 stone",
+        "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"minecraft:water\",state:{falling:{min:\"false\",max:\"true\"}}}}} run setblock 4 -60 6 stone",
+        "setblock 2 -60 2 water strict ;; execute positioned 2 -60 2 if predicate {type:\"location_check\",predicate:{fluid:{}}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"minecraft:empty\"}}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"location_check\",predicate:{fluid:{fluids:\"#minecraft:water\"}}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"location_check\",predicate:{fluid:{state:{falling:\"false\"}}}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"location_check\",predicate:{biomes:\"minecraft:plains\"}} run setblock 4 -60 6 stone",
+        "execute if predicate {type:\"location_check\",predicate:{biomes:\"#minecraft:is_nether\"}} run setblock 4 -60 6 stone",
+        "setblock 2 -60 2 stone ;; execute positioned 2 -59 2 if predicate {type:\"location_check\",offsetY:-1,predicate:{block:{blocks:\"minecraft:stone\"}}} run setblock 4 -60 6 stone",
     };
 
     /** `/advancement` 的整条命令题：官方假世界里执行，比较返回值、反馈和进度状态。 */
@@ -293,28 +395,39 @@ public final class ExecuteOracle {
 
     private static void emit(Writer out, Official official, String line) throws Exception {
         Scene scene = new Scene(official, false);
-        String setup = null;
-        String command = line;
-        int split = line.indexOf(" ;; ");
-        if (split >= 0) {
-            setup = line.substring(0, split);
-            command = line.substring(split + 4);
-        }
+        // ` ;; ` 隔开的最后一段是被比较的命令，前面每一段都是准备命令。
+        // The last ` ;; `-separated part is the measured command; every earlier part is setup.
+        String[] parts = line.split(" ;; ");
+        String command = parts[parts.length - 1];
         CommandSourceStack source = scene.source;
-        if (setup != null) {
+        for (int i = 0; i + 1 < parts.length; i++) {
             try {
                 official.commands.performCommand(
-                        official.commands.getDispatcher().parse(setup, source), setup);
+                        official.commands.getDispatcher().parse(parts[i], source), parts[i]);
             } catch (Throwable ignored) {
             }
         }
         List<String> feedback = new ArrayList<>();
         CommandSourceStack measured = source.withSource(new Recording(feedback));
+        if (DEBUG) {
+            // 官方 `Commands.performCommand` 只在这个开关下把异常原因发给来源；只用来查假世界缺什么，
+            // 开着时反馈会多一行，对拍结果不作数。
+            // Official `Commands.performCommand` sends the exception text to the source only
+            // under this switch. It is for finding what the fake world lacks; the extra
+            // feedback line makes the comparison meaningless while it is on.
+            setStatic(SharedConstants.class, "IS_RUNNING_IN_IDE", true);
+        }
         try {
             official.commands.performCommand(
                     official.commands.getDispatcher().parse(command, measured), command);
         } catch (Throwable error) {
             feedback.add("L[throw:" + error.getClass().getSimpleName() + "]");
+            if (DEBUG) {
+                error.printStackTrace(RAW_ERR);
+            }
+        }
+        if (DEBUG) {
+            RAW_ERR.println("java feedback: " + line + " => " + feedback);
         }
         int ran = feedback.stream().anyMatch(text -> text.contains("commands.setblock.success")) ? 1 : 0;
         var info = scene.board.getPlayerScoreInfo(ScoreHolder.forNameOnly("#total"),
@@ -398,7 +511,11 @@ public final class ExecuteOracle {
                     decomposeInto(nested, out);
                 } else if (arg instanceof net.minecraft.network.chat.contents.PlainTextContents plain) {
                     out.append("L[").append(plain.text()).append(']');
-                } else if (mixed || key.equals("arguments.nbtpath.nothing_found")) {
+                } else if (arg instanceof String || mixed
+                        || key.equals("arguments.nbtpath.nothing_found")) {
+                    // Bamboo 的翻译参数里字符串一律是文本组件，数字才是原样的数。
+                    // In Bamboo a string translation argument is always a text component;
+                    // only numbers stay raw.
                     out.append("L[").append(String.valueOf(arg)).append(']');
                 } else {
                     out.append("S[").append(String.valueOf(arg)).append(']');
@@ -486,7 +603,9 @@ public final class ExecuteOracle {
             var chunkMap = allocate(net.minecraft.server.level.ChunkMap.class);
             set(net.minecraft.server.level.ChunkMap.class, chunkMap, "entityMap",
                     new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>());
-            fake.chunkSource = allocate(net.minecraft.server.level.ServerChunkCache.class);
+            FakeChunkCache chunkCache = allocate(FakeChunkCache.class);
+            chunkCache.owner = fake;
+            fake.chunkSource = chunkCache;
             set(net.minecraft.server.level.ServerChunkCache.class, fake.chunkSource, "chunkMap", chunkMap);
             set(ServerLevel.class, level, "chunkSource", fake.chunkSource);
 
@@ -552,6 +671,15 @@ public final class ExecuteOracle {
                     inventoryMenu);
             set(net.minecraft.world.entity.player.Player.class, player, "containerMenu",
                     inventoryMenu);
+            // `PlayerPredicate` 读饥饿值和游戏模式；Rust 侧的玩家是创造模式。
+            // `PlayerPredicate` reads food and game mode; the Rust-side player is in creative.
+            set(net.minecraft.world.entity.player.Player.class, player, "foodData",
+                    new net.minecraft.world.food.FoodData());
+            var gameMode = UNSAFE.allocateInstance(
+                    net.minecraft.server.level.ServerPlayerGameMode.class);
+            set(net.minecraft.server.level.ServerPlayerGameMode.class, gameMode,
+                    "gameModeForPlayer", net.minecraft.world.level.GameType.CREATIVE);
+            set(ServerPlayer.class, player, "gameMode", gameMode);
             set(Entity.class, player, "id", 1);
             set(Entity.class, player, "level", level);
             set(Entity.class, player, "position", new Vec3(8.5, -60.0, 8.5));
@@ -712,6 +840,24 @@ public final class ExecuteOracle {
             return null;
         }
 
+        /** 只有主世界；别的名字官方 `DimensionArgument` 报 `argument.dimension.invalid`。 */
+        @Override
+        public ServerLevel getLevel(net.minecraft.resources.ResourceKey<Level> dimension) {
+            return dimension == Level.OVERWORLD ? currentLevel : null;
+        }
+
+        /** 一张空的秒表表：`if stopwatch` 查不到就报不存在。 */
+        @Override
+        public net.minecraft.world.Stopwatches getStopwatches() {
+            try {
+                var constructor = net.minecraft.world.Stopwatches.class.getDeclaredConstructor();
+                constructor.setAccessible(true);
+                return constructor.newInstance();
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
         @Override
         public void sendSystemMessage(Component message) {
         }
@@ -723,14 +869,34 @@ public final class ExecuteOracle {
         }
     }
 
+    /** `if loaded` 和 `Level.isLoaded` 要问的区块源：区块都在，状态是 ENTITY_TICKING。 */
+    private static final class FakeChunkCache extends net.minecraft.server.level.ServerChunkCache {
+        FakeLevel owner;
+
+        private FakeChunkCache() {
+            super(null, null, null, null, null, null, 0, 0, false, null);
+        }
+
+        @Override
+        public net.minecraft.world.level.chunk.LevelChunk getChunkNow(int x, int z) {
+            return owner.getChunk(x, z);
+        }
+
+        @Override
+        public boolean hasChunk(int x, int z) {
+            return true;
+        }
+    }
+
     private static final class FakeLevel extends ServerLevel {
         Long2ObjectOpenHashMap<BlockState> blocks;
         List<Entity> tracked;
         ServerScoreboard board;
         net.minecraft.server.level.ServerChunkCache chunkSource;
-        final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<
-                net.minecraft.world.level.chunk.ChunkAccess> chunkCache =
-                new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
+        // 这个类是 Unsafe 分配的，字段初始化不会跑，用到时再建。
+        // The class is Unsafe-allocated, so field initializers never run; build it on first use.
+        it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<
+                net.minecraft.world.level.chunk.ChunkAccess> chunkCache;
         int nextId = 1;
         final LevelData fixedLevelData = new FixedLevelData();
 
@@ -745,8 +911,11 @@ public final class ExecuteOracle {
 
         @Override
         public boolean setBlock(BlockPos pos, BlockState state, int flags, int recursion) {
-            blocks.put(pos.asLong(), state);
-            return true;
+            // 官方 `Level.setBlock`：状态没变返回 false（`/setblock` 据此报 `commands.setblock.failed`）。
+            // Official `Level.setBlock` returns false when the state does not change, which is
+            // what makes `/setblock` report `commands.setblock.failed`.
+            BlockState previous = blocks.put(pos.asLong(), state);
+            return state != (previous == null ? Blocks.AIR.defaultBlockState() : previous);
         }
 
         @Override
@@ -773,6 +942,9 @@ public final class ExecuteOracle {
         @Override
         public net.minecraft.world.level.chunk.ChunkAccess getChunk(int x, int z,
                 net.minecraft.world.level.chunk.status.ChunkStatus status, boolean load) {
+            if (chunkCache == null) {
+                chunkCache = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
+            }
             long key = net.minecraft.world.level.ChunkPos.pack(x, z);
             net.minecraft.world.level.chunk.ChunkAccess cached = chunkCache.get(key);
             if (cached != null) {
@@ -781,6 +953,7 @@ public final class ExecuteOracle {
             net.minecraft.world.level.chunk.LevelChunk chunk =
                     new net.minecraft.world.level.chunk.LevelChunk(
                             this, new net.minecraft.world.level.ChunkPos(x, z));
+            chunk.setFullStatus(() -> net.minecraft.server.level.FullChunkStatus.ENTITY_TICKING);
             chunkCache.put(key, chunk);
             return chunk;
         }
@@ -788,6 +961,24 @@ public final class ExecuteOracle {
         @Override
         public LevelData getLevelData() {
             return fixedLevelData;
+        }
+
+        /** 假世界是一整片平原，和 Rust 侧的超平坦世界一样。 */
+        @Override
+        public Holder<net.minecraft.world.level.biome.Biome> getBiome(BlockPos pos) {
+            return registryAccess().lookupOrThrow(Registries.BIOME)
+                    .getOrThrow(net.minecraft.world.level.biome.Biomes.PLAINS);
+        }
+
+        /** 方块存在假世界自己的表里，流体状态从那里的方块状态取。 */
+        @Override
+        public net.minecraft.world.level.material.FluidState getFluidState(BlockPos pos) {
+            return getBlockState(pos).getFluidState();
+        }
+
+        @Override
+        public boolean areEntitiesLoaded(long chunkKey) {
+            return true;
         }
 
         @Override
