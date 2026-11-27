@@ -232,6 +232,10 @@ impl<'a> ChunkLevel<'a> {
 }
 
 impl LevelView for ChunkLevel<'_> {
+    fn command_storage(&self, name: &str) -> Option<mc_bamboo_nbt::Tag> {
+        Some(self.global?.command_storage.get(name))
+    }
+
     fn score(&self, holder: &str, objective: &str) -> Option<Option<i32>> {
         let board = &self.global?.scoreboard;
         Some(board.score_value(holder, objective))

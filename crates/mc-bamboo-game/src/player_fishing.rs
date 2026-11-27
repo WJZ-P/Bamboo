@@ -487,6 +487,10 @@ struct FishingLevelView<'a> {
 }
 
 impl LevelView for FishingLevelView<'_> {
+    fn command_storage(&self, name: &str) -> Option<mc_bamboo_nbt::Tag> {
+        Some(self.global.command_storage.get(name))
+    }
+
     fn score(&self, holder: &str, objective: &str) -> Option<Option<i32>> {
         Some(self.global.scoreboard.score_value(holder, objective))
     }
