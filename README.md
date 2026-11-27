@@ -122,9 +122,11 @@ WebView2 的渲染进程不算在内。
   `minecraft:noise` + `biome_source` / `settings` 注册名；读档时以它为准，空 `level-seed`
   的随机种子重启后固定。`saved-data` 子命令对拍的是导出的**超平坦默认值常量**；运行时
   编码的噪声世界形状只验证了 Bamboo 自己读写一致，没单独用官方 codec 复核。
-- 玩家数据只恢复已建模字段：位置取整到方块（小数部分丢掉、不补发位置包）、朝向、
-  游戏模式、物品栏、末影箱、选中槽。血量、经验、能力、饥饿、食物等运行时没建模，
-  保存用官方默认值。
+- 玩家数据按官方 `PlayerData` 的键恢复：位置取整到方块（小数部分丢掉、不补发位置包）、
+  朝向、游戏模式、物品栏、末影箱、选中槽，以及血量、受伤 / 死亡计时、经验三项、
+  饥饿与食物、属性、状态效果、能力、肩上鹦鹉、`RootVehicle` 和末影珍珠。
+  能力仍按官方默认值恢复（`restore_inventory` 不读 `abilities`），其余字段由
+  `runtime_player_data` / `restore_inventory` 写读往返，`player-data` 子命令与官方 codec 对拍。
 - `level.dat` 写回运行时的出生点、默认游戏模式、难度（和 `time` / `last_played`），
   启动时读回：游戏时间从 `Time` 接着上次存盘的值走，岛的计划刻时钟也从这个值起算，
   所以漏斗、计划刻等和绝对游戏时间比较的逻辑在重启后不用退回 0；
@@ -670,16 +672,18 @@ WebView2 的渲染进程不算在内。
   非滑翔时的预期位移主要来自跳跃和卡在方块里的减速。碰撞算方块和世界边界，
   边界按官方 `Entity.collectCollidersIgnoringWorldBorder` 的条件（离边界够近）才把碰撞形状加进来；
   玩家互相穿身，±3.0E7 的坐标夹取仍在（`Level.isInWorldBoundsHorizontal`，和世界边界是两件事）。
-  没加载的区块仍用超平坦模板，官方那里没有碰撞。滑翔之外的摔落结算仍有差异，方块的 `fallOn` 尚未接入。
+  没加载的区块仍用超平坦模板，官方那里没有碰撞。滑翔之外的摔落结算已按官方
+  `calculateFallDamage` 走完整受伤链路（`player_environment::on_land`），方块的 `fallOn` 尚未接入。
   世界边界的伤害也不结算，见下一条。
   蜘蛛网和细雪会在 tick 结束时套上卡住的速度并清掉摔落距离；压力板、绊线和甜浆果丛被踩到的效果没接。
   终末之诗、每 200 tick 补发脚下方块、载具移动都没做。
-- 世界边界还有几处没接：Bamboo 没有玩家生命值和伤害系统，官方 `LivingEntity.baseTick` 里的
+- 世界边界还有几处没接：玩家生命值和伤害系统已建模，但官方 `LivingEntity.baseTick` 里的
   边界伤害（`damageSources().outOfBorder()`）不结算，`damage amount` / `damage buffer` 只存起来、
   跟着 `initialize_border` 发给客户端；`max-world-size` 没读，绝对最大值固定 29999984。
   重生点和传送不按官方 `getWorldBorderAdjustedRespawnData`、`PortalForcer`、
-  `LivingEntity.randomTeleport` 夹进边界（没有死亡重生、下界传送门和随机传送）；
-  `canSpawnEntitiesInChunk`、刷怪和生物 AI 里的边界判断用不上（没有生物）。
+  `LivingEntity.randomTeleport` 夹进边界（死亡重生走自己的 `PlayerList.respawn` 等价路径，
+  但没有下界传送门和随机传送）；
+  `canSpawnEntitiesInChunk`、刷怪和生物 AI 里的边界判断用不上。
   边界状态写进官方按维度存放的 `dimensions/minecraft/overworld/data/minecraft/world_border.dat`
   （`export_settings` / `restore`，`restore` 传存档里的游戏时间），启动时读回，编码和官方
   `WorldBorder.Settings.CODEC` 对拍。边界伤害的警告遮罩、`BorderStatus.getColor` 由客户端自己算。
@@ -1402,7 +1406,7 @@ WebView2 的渲染进程不算在内。
   `copy_components` 的 `block_entity` 来源把容器内容、自定义名、锁、战利品表、旗帜图案和陶罐纹样带回掉落物。
   掉落上由战利品函数写出的组件
   经统一的 `JSON → NBT → 组件补丁` 转换写进物品堆，解不开的单项丢掉并记警告；`/loot` 和开箱填充也用这一份转换。
-  盔甲受伤、打实体、钓竿和盾牌也不扣耐久；弓和弩射出一发扣一点，滑翔装备每 20 刻扣一点，创造模式免耐久消耗。实体死亡仍不调用战利品表，开箱已经接上（见下一段）。
+  盔甲受伤、打实体、钓竿和盾牌也不扣耐久；弓和弩射出一发扣一点，滑翔装备每 20 刻扣一点，创造模式免耐久消耗。实体死亡已按战利品表掉落，开箱也已经接上（见下一段）。
   矿石、幽匿这类方块破坏时官方 `spawnAfterBreak` 还会按 `xpRange` 生成经验球并取一份随机数，
   这里没有经验球，也不取这份随机数（`Level::spawn_after_break_random` 只留了钩子）。
   冒险模式按官方 `Player.blockActionRestricted` 判定：主手的 `can_break` 能匹配这一格才挖得动；放置按官方
@@ -1444,11 +1448,11 @@ WebView2 的渲染进程不算在内。
   `World`、并行的实体只读视图、随机刻里读亮度的作物 / 草和菌丝蔓延 / 冰雪融化 /
   阳光探测器都读这一份值。还没接的差异：雷击生成的实体、闪电对避雷针/实体/方块的作用和
   苦力怕充能，以及天空、雾和云的颜色变化（客户端自己算颜色）。刷怪、伤害和合成限制这些规则还没接到对应系统。
-  生存和冒险会改模式和能力。挖掘和工具右键会扣耐久；弓和弩射出一发扣一点；滑翔装备每 20 刻扣一点；盔甲、近战武器、钓竿和盾牌不扣。没有饥饿。`/give` 多出来的物品会消失（没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟；进服 / 重生按官方 `sendLevelInfo` 发两份时钟的整表同步，`/time` 和 `/gamerule advance_time` 各发单独 / 整表更新，每 20 刻再发一次只带 `gameTime` 的空表同步；这个周期按官方 `MinecraftServer.tickCount`
+  生存和冒险会改模式和能力。挖掘和工具右键会扣耐久；弓和弩射出一发扣一点；滑翔装备每 20 刻扣一点；盔甲、近战武器、钓竿和盾牌不扣。饥饿值已经建模但挖掘不扣饥饿值。`/give` 多出来的物品会消失（没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟；进服 / 重生按官方 `sendLevelInfo` 发两份时钟的整表同步，`/time` 和 `/gamerule advance_time` 各发单独 / 整表更新，每 20 刻再发一次只带 `gameTime` 的空表同步；这个周期按官方 `MinecraftServer.tickCount`
   （每次开服从 0 数起、不存档）计，不用存档里接着走的 `gameTime`，读档开服时相位才对。
   包里带的 `gameTime` 仍是这一刻 `tickTime` 加一之前的值。发给客户端的流速在时钟暂停或
   `advance_time` 为假时是 0，客户端不会自己把时间往前推。
-  按 Q、在菜单里丢出、以及背包放不下时，会生成物品实体。创造模式把物品拖出界面有官方的丢弃限流。旁观模式不丢也不捡。玩家没有生命值，官方血量不大于 0 时不捡，这里只要不是旁观就捡。捡起会发 `take_item_entity`。攻击其他玩家按 `pvp` 设置结算伤害（见「玩家左键近战攻击」）。物品在地上 5 分钟（6000 刻）后消失，能合并、能被火、岩浆、仙人掌和爆炸毁掉，能被漏斗吸走。玩家不在实体名单里，捡起发生在这一拍所有非玩家实体 tick 之前，看到的是物品移动前的位置。
+  按 Q、在菜单里丢出、以及背包放不下时，会生成物品实体。创造模式把物品拖出界面有官方的丢弃限流。旁观模式不丢也不捡。玩家有血量，血量不大于 0（正在死亡或等重生）时不捡（`drops.rs` 按 `is_dead_or_dying` 判定），其余非旁观玩家都捡。捡起会发 `take_item_entity`。攻击其他玩家按 `pvp` 设置结算伤害（见「玩家左键近战攻击」）。物品在地上 5 分钟（6000 刻）后消失，能合并、能被火、岩浆、仙人掌和爆炸毁掉，能被漏斗吸走。玩家不在实体名单里，捡起发生在这一拍所有非玩家实体 tick 之前，看到的是物品移动前的位置。
   `/tellraw` 和 `/title` 的文本组件按官方 26.3 的 SNBT 语法读（`{text:"hi",color:"red"}`、`["a","b"]`），
   不是 JSON 文本组件。组件过一遍官方 `Codec`；执行时按 `ComponentUtils.resolve` 展开：
   `selector` 变成玩家名列表，`score` 查 `/scoreboard` 的分数并套用数字格式（`*` 指接收者，名字当选择器编译），
@@ -1465,7 +1469,7 @@ WebView2 的渲染进程不算在内。
   `item` 选项只支持 `id` 和 `count`，不支持数据组件；`vibration` 只支持 `block` 位置来源（官方也拒绝 entity 来源）。
   两个命令的世界坐标都取执行来源的位置（玩家脚底、控制台出生点），没有命令方块或 `/execute` 的来源偏移。
   难度默认 `easy`（和官方专用服务器一致；`difficulty` 已能在 `server.properties` 里读到，但 Bamboo 还没实现这个键），`/difficulty` 改完广播给所有人，进服时同步。默认游戏模式是创造模式（官方专用服务器默认是生存；`gamemode` 已能在 `server.properties` 里读到，但 Bamboo 还没实现这个键）；`force-gamemode` 按官方默认关闭，`/defaultgamemode` 不改在线玩家的模式。`level-seed` 还没有实现，世界种子固定为 0，`/seed` 报的就是它，`login` 里的哈希种子按官方 `BiomeManager.obfuscateSeed` 算。
-  `/clone` 复制方块和方块实体数据，上限读 `max_block_modifications`；`/random` 按官方的种子规则共用 `mc-bamboo-loot` 的随机序列；`/enchant` 给主手物品写附魔组件；`/stopsound` 只给选中的玩家发包。`/loot` 的 `give`、`insert`、`replace`、`spawn` 和来源 `loot`、`mine` 可用；`spawn` 按官方 `dropInWorld` 生成带默认拾取延迟的物品实体，`kill`、`fish` 已在命令树里注册但执行时返回失败（还没有实体死亡和钓鱼系统）。
+  `/clone` 复制方块和方块实体数据，上限读 `max_block_modifications`；`/random` 按官方的种子规则共用 `mc-bamboo-loot` 的随机序列；`/enchant` 给主手物品写附魔组件；`/stopsound` 只给选中的玩家发包。`/loot` 的 `give`、`insert`、`replace`、`spawn` 和来源 `loot`、`mine` 可用；`spawn` 按官方 `dropInWorld` 生成带默认拾取延迟的物品实体，`kill`、`fish` 已在命令树里注册但执行时返回失败（这两个来源要实体掉落表和钓鱼参数，`command/loot.rs::need_entity` 明确拒绝；钓鱼系统本身和实体死亡掉落都已在游戏里接上）。
   `/execute` 按官方 `ExecuteCommand` 注册：`as`、`at`、`positioned`、`rotated`、`facing`、
   `align`、`anchored`、`in`、`if/unless block|blocks|entity|score|predicate`、`store result|success`、
   `run`；链上每层用 `CommandGraph` 的重定向上下文保存参数，执行来源按 `source::with_override`
@@ -1488,8 +1492,10 @@ WebView2 的渲染进程不算在内。
   执行时明确报 `command.exception`；`/execute store ... block|entity|storage`、
   `if/unless data` 和 `if score` 都有整条命令对拍（共 42 条）。见 `docs/command-execution-context.md`。
   `/kill` 按官方 `KillCommand`：权限 2、无参杀 `@s`、带选择器杀选中的玩家和非玩家实体；牛走已有的
-  `LivingEntity.kill` → 掉落、经验球、死亡动画，其它非玩家实体直接 `remove(KILLED)`。玩家目标目前
-  明确报 `command.failed`（Bamboo 还没有玩家死亡/重生流程，这是已知限制）。实体选择器 `@e` / `@n` / `@s` 现在同时
+  `LivingEntity.kill` → 掉落、经验球、死亡动画，其它非玩家实体直接 `remove(KILLED)`。玩家目标走
+  `hurt_player` 的 `genericKill` 伤害 → `player_death` 的完整死亡流程（死亡界面包、掉落物、经验球、
+  死亡消息、`last_death_location`），再等客户端 `PERFORM_RESPAWN` 由 `player_respawn` 重生。
+  实体选择器 `@e` / `@n` / `@s` 现在同时
   遍历玩家和非玩家实体，按官方 `EntitySelector` 的 `type`（含 `!` 与 `#` 标签）、`distance`、
   `x/y/z/dx/dy/dz`、`sort`、`limit`、`name`、`tag`、`gamemode`、`team`、`scores` 过滤和排序；
   `nbt`、`advancements`、`predicate` 在解析时明确报错。`tools/mc-bamboo-vanilla command-oracle` 把
@@ -1498,17 +1504,17 @@ WebView2 的渲染进程不算在内。
   `/tp` 到非玩家实体只改实体表并在下一刻同步（官方 `Entity.teleportTo` 还处理跨维度、载具和即时位置包）；
   `sort=random` 按官方字节码用 `Collections.shuffle` 那份进程级、不带种子的 `java.util.Random`，
   Bamboo 用独立的进程级 `JavaRandom`，不会推进 `level.random` 或任何实体随机源。
-- 战利品表（`mc-bamboo-loot`）按官方 `LootTable` 算出方块掉落、实体死亡和箱子填充，随机源的取数次数和顺序跟官方对齐。生存和冒险挖方块、TNT 爆炸和 `/loot` 已经调用；实体死亡还没接。容器上的 `LootTable` / `LootTableSeed`（或物品上的 `container_loot` 组件放下后的方块实体）在官方 `unpackLootTable` 的调用点解包：玩家打开菜单、漏斗和投掷器读写、发射器取槽、饰纹陶罐读写、比较器读信号、破坏掉内容之前。填完就清表，旁观者打开不解包。随机源按 `LootContext.Builder.create` 选：种子非 0 用 `LegacyRandomSource(seed)`，种子为 0 且表有 `random_sequence` 用世界共用的序列缓存，都没有才用 `level.random`；结构生成时 `setBlockEntityLootTable` 的 `nextLong` 还没接。未解包的表会原样写回中键物品的 `container_loot`。`/setblock` 的方块 NBT 后缀和 `/give` 的物品组件后缀目前会明确报不支持，所以暂时不能用命令造出带战利品表的箱子；方块实体数据里的 `LootTable` / `LootTableSeed` 和 `container_loot` 组件能直接由物品或 `/clone` 带进游戏。解包不走 `THIS_ENTITY` 参数，玩家幸运值按默认的 0；依赖 `this_entity` 的自定义表会报不支持并清表。`loot-oracle` 的箱子题逐项比较 `fill`，另加了一道带 `BLOCK_ENTITY` 的潜影盒掉落题逐项比组件；`menu` oracle 加了一道「打开带战利品表的箱子」。序列缓存在世界里，种子是平坦世界的 0，不存档。
+- 战利品表（`mc-bamboo-loot`）按官方 `LootTable` 算出方块掉落、实体死亡和箱子填充，随机源的取数次数和顺序跟官方对齐。生存和冒险挖方块、TNT 爆炸、`/loot` 和实体死亡（生物 `die` 走 `Command::DropMobLoot` → `Level::mob_loot_drops`）都已经调用。容器上的 `LootTable` / `LootTableSeed`（或物品上的 `container_loot` 组件放下后的方块实体）在官方 `unpackLootTable` 的调用点解包：玩家打开菜单、漏斗和投掷器读写、发射器取槽、饰纹陶罐读写、比较器读信号、破坏掉内容之前。填完就清表，旁观者打开不解包。随机源按 `LootContext.Builder.create` 选：种子非 0 用 `LegacyRandomSource(seed)`，种子为 0 且表有 `random_sequence` 用世界共用的序列缓存，都没有才用 `level.random`；结构生成时 `setBlockEntityLootTable` 的 `nextLong` 还没接。未解包的表会原样写回中键物品的 `container_loot`。`/setblock` 的方块 NBT 后缀和 `/give` 的物品组件后缀目前会明确报不支持，所以暂时不能用命令造出带战利品表的箱子；方块实体数据里的 `LootTable` / `LootTableSeed` 和 `container_loot` 组件能直接由物品或 `/clone` 带进游戏。解包不走 `THIS_ENTITY` 参数，玩家幸运值按默认的 0；依赖 `this_entity` 的自定义表会报不支持并清表。`loot-oracle` 的箱子题逐项比较 `fill`，另加了一道带 `BLOCK_ENTITY` 的潜影盒掉落题逐项比组件；`menu` oracle 加了一道「打开带战利品表的箱子」。序列缓存在世界里，种子是平坦世界的 0，不存档。
 - 计分板、队伍和 Boss 栏按官方 26.3 的命令树和权限等级 2 实现，全服一份，放在世界线程的全局状态里，**不写存档**：重启后目标、分数、队伍和 Boss 栏全部回到空。
   `/scoreboard objectives` 支持 `list|add|remove|setdisplay|modify`（`displayname`、`rendertype`、`displayautoupdate`、`numberformat` 的 `blank`/`styled`/`fixed`）；
   `players` 支持 `list|get|set|add|remove|reset|enable|operation|display`（`name` 和 `numberformat`）。
-  准则只实现 `dummy`、`trigger` 以及只读准则的只读语义；`health`、`food`、`air`、`armor`、`xp`、`level` 因为 Bamboo 没有对应的玩家状态，进服后第一刻各按默认值（20、20、300、0、0、0）写一次，之后不再更新，统计类准则能解析和创建但不会自动加分（没有统计系统）。玩家离线时分数保留，别人侧边栏上仍能看到。
+  准则只实现 `dummy`、`trigger` 以及只读准则的只读语义；`health`、`food`、`air`、`armor` 仍按官方初值（20、20、300、0）在进服第一刻写一次后不再更新，`xp`、`level` 跟着玩家经验的真实值走，统计类准则能解析和创建但不会自动加分（没有统计系统）。玩家离线时分数保留，别人侧边栏上仍能看到。
   目标只有被 `setdisplay` 显示出来时才给客户端发 `set_objective` / `set_display_objective` / `set_score`，进服时会补发正在显示的目标、全部分数和全部队伍。
   `/team` 支持 `list|add|remove|empty|join|leave|modify`（`displayName`、`color`、`friendlyFire`、`seeFriendlyInvisibles`、`nametagVisibility`、`deathMessageVisibility`、`collisionRule`、`prefix`、`suffix`），
   队伍颜色、前后缀会用在聊天显示名和命令反馈里；Tab 列表的 `display_name` 仍是空的，客户端按队伍自己画名字。
   `/bossbar` 支持 `add|remove|list|set (name|color|style|value|max|visible|players)|get (value|max|visible|players)`，
   玩家加入、离开和重连按官方 `ServerBossEvent` 发 add/remove 包。命令反馈用官方翻译键，`send_command_feedback` 照旧管自己的系统消息。
-  选择器的 `scores=` 和 `team=` 现在能查计分板；`trigger` 命令、统计加分、死亡消息可见性、友军伤害和碰撞规则还没接到对应的游戏逻辑。
+  选择器的 `scores=` 和 `team=` 现在能查计分板；`trigger` 命令、统计类准则的自动加分、队伍的 `deathMessageVisibility` / `friendlyFire` / `collisionRule` 还没接到对应的游戏逻辑（全局 `show_death_messages` 规则已按官方决定要不要广播死亡消息）。
 - 服务器管理命令：`/op`、`/deop`、`/ban`、`/ban-ip`、`/banlist`、`/pardon`、`/pardon-ip`、`/whitelist`、`/stop`、`/setidletimeout`、`/transfer`、`/version`。
   命令树（节点名、参数解析器和属性、`executable`、权限）和官方数据生成器的 `commands.json` 逐节点一致，`/version` 要等级 2、`/stop` 要等级 4，其余要等级 3。
   四份名单文件在服务器目录（命令行版是当前目录或 `--server-dir` 指定的目录，桌面版是 APP 数据目录的 `server/`）：`ops.json`、`banned-players.json`、`banned-ips.json`、`whitelist.json`。启动时读一次，命令改完按官方 `StoredUserList.save` 的字段顺序写回（pretty-printed JSON 数组）；Bamboo 先写临时文件再改名，比官方直接覆盖安全。世界线程只持有内存里的权威副本，写盘和 `/whitelist reload` 的读盘在连接层的专门线程上，世界线程不做 IO。
@@ -1544,15 +1550,15 @@ WebView2 的渲染进程不算在内。
   旗帜复制、地图放大和装饰罐会写上组件。没有配方书，也没有 `place_recipe`。
   铁砧按 `AnvilMenu.createResult` 算修复、合并附魔、改名和 `cost`，按 `rename_item` 改名字（过滤非法字符、
   最多 50 个 UTF-16 码元、空名字去掉自定义名）；取出结果会按 12% 概率损坏铁砧（anvil → chipped → damaged → 消失）、
-  发 1029 或 1030 事件，并保留朝向。没有经验等级：生存模式固定按 0 级处理，只能取 `cost` 为 0 的结果；
-  创造模式不扣等级也不受 40 级上限限制。没有聊天过滤器，改名不走文字过滤；没有统计和进度。
+  发 1029 或 1030 事件，并保留朝向。经验等级按官方判定：生存模式要 `level >= cost` 才取得出结果、
+  取出后扣 `cost` 级，创造模式不扣等级也不受 40 级上限限制。没有聊天过滤器，改名不走文字过滤；没有统计和进度。
   制图台按 `CartographyTableMenu` 收带 `map_id` 的地图和纸 / 空地图 / 玻璃板，真实世界直接查 `MapStore`（找不到对应地图数据时照官方 `setupResultSlot` 直接返回不碰结果格）：
   复制（`map` → 两份，共享 `map_id`）、放大（`paper` → `MAP_POST_PROCESSING=SCALE`，取出时剥离组件并分配新 `map_id` 与 `scaled()` 数据）
   和锁定（`glass_pane` → `LOCK`，取出时分配新 `map_id` 与 `locked()` 数据），同时保留菜单 oracle 假世界的逐槽对拍。取结果按 `lastSoundTime` 同刻只发一次 `ui.cartography_table.take_result`。
   附魔台按 `EnchantingTableBlock.BOOKSHELF_OFFSETS` 数书架，用 `enchantmentSeed` 和生成的附魔表算三个
   `costs`、`enchantClue`、`levelClue`（共 10 个数据槽）。每名玩家进服时有一个附魔种子，附魔成功后按
   `onEnchantmentPerformed` 换新种子；选第 0/1/2 项会扣青金石、扣等级、写附魔、播
-  `block.enchantment_table.use`（音调从 `level.random` 取一次）。生存模式同样按 0 级处理，
+  `block.enchantment_table.use`（音调从 `level.random` 取一次）。生存模式按真实经验等级判定并扣级，
   创造模式不扣等级；没有经验球、统计和进度。
   织布机按 `LoomMenu` 列图案：空的图案槽用 `minecraft:no_item_required`，图案物品用 `provides_banner_patterns`。
   结果在 `banner_patterns` 上加一层。`slotsChanged` 把层数卡在 6；按钮包本身不检查这个上限，
@@ -1706,7 +1712,7 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-command` | 命令分发和参数解析：Brigadier 风格的树、坐标、方块状态、选择器，纯逻辑，不知道网络 |
 | `crates/mc-bamboo-recipes` | 配方查找和匹配：有序、无序、烧炼、切石机、锻造、酿造和特殊配方，纯逻辑，不知道网络和世界线程 |
 | `crates/mc-bamboo-advancements` | 进度系统的纯数据层：共享只读树、官方显示排版、玩家进度和进度档案 JSON 编解码，不认识世界线程 |
-| `crates/mc-bamboo-loot` | 战利品表：方块掉落已经接进生存和冒险挖掘、爆炸、可替换方块的破坏和 `/loot`，箱子填充接进开箱和容器读写，实体死亡还没接进游戏 |
+| `crates/mc-bamboo-loot` | 战利品表：方块掉落已经接进生存和冒险挖掘、爆炸、可替换方块的破坏和 `/loot`，箱子填充接进开箱和容器读写，实体死亡掉落也已接进生物死亡流程 |
 | `crates/mc-bamboo-core` | 共用的基础类型：方块坐标、区块坐标、方向、玩家档案 |
 | `crates/mc-bamboo-auth` | 正版验证和协议加密：RSA 密钥对、AES/CFB8、serverId 哈希、问 session server |
 | `crates/mc-bamboo-nbt` | NBT 编解码，解码带官方的配额和深度上限 |
