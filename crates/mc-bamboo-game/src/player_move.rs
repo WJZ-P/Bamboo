@@ -786,7 +786,13 @@ fn check_fall(
     if movement.y < 0.0 {
         player.motion.fall_distance -= f64::from(movement.y as f32);
     }
-    (on_ground && player.motion.fall_distance > 0.0).then_some(Landing { movement, before })
+    if on_ground {
+        if player.motion.fall_distance > 0.0 {
+            return Some(Landing { movement, before });
+        }
+        player.motion.fall_distance = 0.0;
+    }
+    None
 }
 
 fn should_check_speed(player: &Player, rules: &crate::gamerules::GameRuleSet) -> bool {
@@ -1391,16 +1397,16 @@ pub struct MoveLandingReport {
 ///
 /// Replays a move sequence in the official order: packets first, then the server tick epilogue.
 pub fn replay_movement(sample: &MoveReplay) -> MoveReplayReport {
-    replay_moves(sample, false)
+    replay_moves(sample, None)
 }
 
 /// 重放落地场景，并记录落地玩家和观察者实际收到的包。
 /// Replays a landing scene and captures packets received by the falling player and observer.
-pub fn replay_landing(sample: &MoveReplay) -> MoveReplayReport {
-    replay_moves(sample, true)
+pub fn replay_landing(sample: &MoveReplay, fall_damage: bool) -> MoveReplayReport {
+    replay_moves(sample, Some(fall_damage))
 }
 
-fn replay_moves(sample: &MoveReplay, capture_landing: bool) -> MoveReplayReport {
+fn replay_moves(sample: &MoveReplay, landing_fall_damage: Option<bool>) -> MoveReplayReport {
     let mut region = Region::new(8, 20, false);
     let sink = ReplaySink::default();
     let id = PlayerId(1);
@@ -1447,7 +1453,11 @@ fn replay_moves(sample: &MoveReplay, capture_landing: bool) -> MoveReplayReport 
     region.advance_tick();
     finish_tick(&mut region);
 
-    let landing_observer = capture_landing.then(|| {
+    let landing_observer = landing_fall_damage.map(|fall_damage| {
+        std::sync::Arc::make_mut(&mut region.global.rules).set_saved(
+            gamerules::FALL_DAMAGE,
+            crate::gamerules::Stored::Bool(fall_damage),
+        );
         let observer_id = PlayerId(2);
         let observer_sink = ReplaySink::default();
         let mut observer = Player::new(
@@ -1523,7 +1533,7 @@ fn replay_moves(sample: &MoveReplay, capture_landing: bool) -> MoveReplayReport 
             }
         }
     }
-    if capture_landing {
+    if landing_observer.is_some() {
         crate::player_hurt::tick(&mut region);
         crate::chunk_broadcast::broadcast_changes(&mut region);
     }

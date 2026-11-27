@@ -111,6 +111,7 @@ struct Case {
 #[serde(rename_all = "camelCase")]
 struct Landing {
     health_bits: i32,
+    fall_damage: bool,
     blocks: Vec<u32>,
     player_packets: Vec<String>,
     observer_packets: Vec<String>,
@@ -249,8 +250,8 @@ impl Report {
                 .map(replay_packet)
                 .collect::<Result<Vec<_>, _>>()?,
         };
-        let report = if case.landing.is_some() {
-            replay_landing(&sample)
+        let report = if let Some(landing) = &case.landing {
+            replay_landing(&sample, landing.fall_damage)
         } else {
             replay_movement(&sample)
         };
@@ -291,7 +292,17 @@ impl Report {
                 report.health,
             ));
         }
-        if let (Some(official), Some(actual)) = (&case.landing, &report.landing) {
+        if case.name.starts_with("landing_") && case.landing.is_none() {
+            return Err(format!(
+                "{} has no official landing observations",
+                case.name
+            ));
+        }
+        if let Some(official) = &case.landing {
+            let actual = report
+                .landing
+                .as_ref()
+                .ok_or_else(|| format!("{} has no replay landing observations", case.name))?;
             let official_health = f32::from_bits(official.health_bits as u32);
             if report.health.to_bits() != official.health_bits as u32 {
                 self.mismatches.push(format!(

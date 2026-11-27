@@ -342,6 +342,11 @@ fn hurt_player_damage(
     amount: f32,
     random: &mut Option<JavaRandom>,
 ) -> (bool, Option<PlayerDeathDrops>) {
+    // `Player.isInvulnerableTo` 按伤害标签检查规则，滴水石也在 `is_fall` 中。
+    // `Player.isInvulnerableTo` checks the rule by damage tag, including stalagmites.
+    if source.kind.is_fall() && !parts.rules.bool(mc_bamboo_data::gamerules::FALL_DAMAGE) {
+        return (false, None);
+    }
     let difficulty = parts.difficulty;
     let Some(player) = parts.players.get_mut(&id) else {
         return (false, None);

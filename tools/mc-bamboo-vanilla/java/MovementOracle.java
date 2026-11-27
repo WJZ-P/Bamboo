@@ -359,11 +359,24 @@ public final class MovementOracle {
         land(official, out, landing, "dripstone", Blocks.POINTED_DRIPSTONE.defaultBlockState()
                 .setValue(net.minecraft.world.level.block.SpeleothemBlock.TIP_DIRECTION,
                         net.minecraft.core.Direction.UP), 8.0, false);
+        var rules = official.gameRules;
+        Field ruleField = find(rules, "rules");
+        Object ruleValues = ruleField.get(rules);
+        Method setRule = ruleValues.getClass().getDeclaredMethod(
+                "set", net.minecraft.world.level.gamerules.GameRule.class, Object.class);
+        setRule.setAccessible(true);
+        setRule.invoke(ruleValues, GameRules.FALL_DAMAGE, false);
+        try {
+            land(official, out, landing, "farmland_no_fall_damage",
+                    Blocks.FARMLAND.defaultBlockState(), 7.0, false);
+        } finally {
+            setRule.invoke(ruleValues, GameRules.FALL_DAMAGE, true);
+        }
         land(official, out, landing, "honey", Blocks.HONEY_BLOCK.defaultBlockState(), 9.0, false);
         land(official, out, landing, "egg", Blocks.TURTLE_EGG.defaultBlockState()
                 .setValue(net.minecraft.world.level.block.TurtleEggBlock.EGGS, 2), 7.0, false);
         land(official, out, landing, "powder_snow", Blocks.POWDER_SNOW.defaultBlockState(), 8.0, false);
-        return 34;
+        return 35;
     }
 
     private static void land(Official official, Writer out, BlockPos pos, String name,
@@ -584,6 +597,7 @@ public final class MovementOracle {
         if (landing) {
             line.append(",\"landing\":{\"healthBits\":")
                     .append(Float.floatToRawIntBits(player.getHealth()));
+            line.append(",\"fallDamage\":").append(official.gameRules.get(GameRules.FALL_DAMAGE));
             line.append(",\"blocks\":[");
             for (int i = 0; i < blocks.size(); i++) {
                 if (i > 0) line.append(',');
