@@ -16,7 +16,7 @@ use mc_bamboo_data::villager as data;
 use serde_json::Value;
 
 use crate::condition::LootCondition;
-use crate::context::{LootContext, LootParams, Position};
+use crate::context::{LevelView, LootContext, LootParams, Position};
 use crate::function::LootFunction;
 use crate::json::{field, i32_value, object, opt_bool, opt_string, required};
 use crate::names::{Registry, item_id, item_name};
@@ -330,7 +330,26 @@ pub fn add_offers_from_trade_set(
     fallback: &dyn mc_bamboo_blocks::random::RandomSource,
     offers: &mut Vec<GeneratedOffer>,
 ) -> Result<()> {
-    let loot_params = trade_loot_params(params);
+    add_offers_from_trade_set_with_level(set, params, None, sequences, fallback, offers)
+}
+
+/// 带 `LevelView` 的版本：`exploration_map` 这类需要世界数据的 `given_item_modifier`
+/// 用得上。真实游戏侧目前传 `None`（结构定位 / 建图要世界线程的可变 `MapStore`），
+/// 对拍夹具传一个假视图注入固定的结构落点。
+///
+/// Variant taking a `LevelView`: needed by world-dependent `given_item_modifier`
+/// functions such as `exploration_map`. In-game callers pass `None` for now
+/// (locating structures and creating maps needs the world thread's mutable
+/// `MapStore`); oracle fixtures inject a fixed structure position.
+pub fn add_offers_from_trade_set_with_level(
+    set: &TradeSet,
+    params: &TradeParams,
+    level: Option<&dyn LevelView>,
+    sequences: Option<&RandomSequences>,
+    fallback: &dyn mc_bamboo_blocks::random::RandomSource,
+    offers: &mut Vec<GeneratedOffer>,
+) -> Result<()> {
+    let loot_params = trade_loot_params(params, level);
     let cached = set
         .random_sequence
         .as_deref()
@@ -372,7 +391,7 @@ pub fn add_offers_from_trade_set(
 }
 
 /// `AbstractVillager.addOffersFromTradeSet` 里 `LootParams` 的四个参数。
-fn trade_loot_params(params: &TradeParams) -> LootParams<'static> {
+fn trade_loot_params<'w>(params: &TradeParams, level: Option<&'w dyn LevelView>) -> LootParams<'w> {
     let mut entity = crate::context::EntityView::new(0);
     entity.is_living = true;
     entity.position = Some(params.origin);
@@ -381,6 +400,7 @@ fn trade_loot_params(params: &TradeParams) -> LootParams<'static> {
         Value::String(params.villager_type.to_owned()),
     );
     LootParams {
+        level,
         origin: Some(params.origin),
         this_entity: Some(entity),
         additional_cost_component_allowed: Some(true),
@@ -404,7 +424,7 @@ pub fn evaluate_trade(
     params: &TradeParams,
     source: &dyn mc_bamboo_blocks::random::RandomSource,
 ) -> Result<Option<GeneratedOffer>> {
-    let loot_params = trade_loot_params(params);
+    let loot_params = trade_loot_params(params, None);
     let context = LootContext::new(&loot_params, source);
     trade(name)?.get_offer(&context)
 }

@@ -8,7 +8,9 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ForkJoinPool;
 import net.minecraft.SharedConstants;
 import net.minecraft.commands.Commands;
@@ -52,6 +54,8 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.trading.MerchantOffer;
 import net.minecraft.world.item.trading.MerchantOffers;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.saveddata.maps.MapId;
+import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Blocks;
@@ -73,6 +77,9 @@ public final class TradeOracle {
         "desert", "jungle", "plains", "savanna", "snow", "swamp", "taiga"
     };
     private static final long[] SEEDS = {0L, 1L, 123456789L, -987654321L};
+    /** 探险地图场景里假世界固定报告的结构落点。 */
+    /** Fixed structure position reported by the fake world in explorer scenarios. */
+    private static final BlockPos EXPLORE_TARGET = new BlockPos(1234, 0, -567);
 
     public static void main(String[] args) {
         PrintStream log = System.err;
@@ -126,6 +133,21 @@ public final class TradeOracle {
                 cases++;
                 OUT.println(line);
             }
+            // 探险地图：假世界固定报告一个结构落点，制图师各等级 / 品种都真的产出
+            // 藏宝图交易，逐项比对 map_id / map_decorations / 名字。
+            // Explorer maps: the fake world reports a fixed structure position so
+            // cartographers really produce explorer-map offers; compare map_id,
+            // map_decorations and names item by item.
+            for (int level : new int[]{2, 3, 5}) {
+                String name = "cartographer/" + level;
+                if (only != null && !name.startsWith(only)) continue;
+                for (String type : TYPES) {
+                    JsonObject line = world.explorerCaseOf(
+                            "cartographer", level, type, 123456789L, EXPLORE_TARGET);
+                    cases++;
+                    OUT.println(line);
+                }
+            }
             JsonObject summary = new JsonObject();
             summary.addProperty("kind", "summary");
             summary.addProperty("cases", cases);
@@ -134,10 +156,10 @@ public final class TradeOracle {
     }
 
     /** 一份交易题：职业、等级、品种、世界种子，和官方 `MerchantOffers.CODEC` 的 JSON。 */
-    private static JsonObject caseLine(String profession, int level, String type, long seed,
-            MerchantOffers offers, RegistryOps<JsonElement> ops) {
+    private static JsonObject caseLine(String kind, String profession, int level, String type,
+            long seed, MerchantOffers offers, RegistryOps<JsonElement> ops) {
         JsonObject line = new JsonObject();
-        line.addProperty("kind", "trade");
+        line.addProperty("kind", kind);
         line.addProperty("profession", profession);
         line.addProperty("level", level);
         line.addProperty("type", type);
@@ -165,6 +187,11 @@ public final class TradeOracle {
             this.ops = registries.createSerializationContext(JsonOps.INSTANCE);
             level.server = server;
             level.plains = plains;
+            // allocateInstance 不跑字段初始化：地图表要显式建好。
+            // allocateInstance skips field initializers: create the map store explicitly.
+            level.maps = new HashMap<>();
+            level.nextMapId = 0;
+            level.exploreTarget = null;
             set(Level.class, level, "dimensionTypeRegistration", overworld);
             set(Level.class, level, "dimension", Level.OVERWORLD);
             set(Level.class, level, "registryAccess", registries);
@@ -220,7 +247,24 @@ public final class TradeOracle {
                     .orElseThrow(() -> new IllegalStateException("profession " + profession + " of " + jobs.keySet()));
             mob.setVillagerData(new VillagerData(variant, job, level));
             MerchantOffers offers = mob.getOffers();
-            return caseLine(profession, level, type, seed, offers, ops);
+            return caseLine("trade", profession, level, type, seed, offers, ops);
+        }
+
+        /** 制图师探险地图场景：临时让假世界报告一个结构落点，重置地图 ID 分配。 */
+        /** Cartographer explorer-map case: temporarily report a fixed structure and reset map ids. */
+        JsonObject explorerCaseOf(String profession, int villagerLevel, String type, long seed,
+                BlockPos target) throws Exception {
+            this.level.exploreTarget = target;
+            this.level.nextMapId = 0;
+            this.level.maps.clear();
+            try {
+                JsonObject result = caseOf(profession, villagerLevel, type, seed);
+                result.addProperty("kind", "explorer_trade");
+                if (this.level.maps.isEmpty()) throw new IllegalStateException("no explorer map created");
+                return result;
+            } finally {
+                this.level.exploreTarget = null;
+            }
         }
 
         JsonObject wanderingCaseOf(long seed) throws Exception {
@@ -282,6 +326,11 @@ public final class TradeOracle {
         FakeServer server;
         Holder<Biome> plains;
         int nextEntityId = 1;
+        /** 探险地图场景报告的结构落点；平时为 null，官方因此不产出藏宝图。 */
+        /** Structure position for explorer scenarios; null normally so vanilla emits no maps. */
+        BlockPos exploreTarget = null;
+        int nextMapId = 0;
+        Map<MapId, MapItemSavedData> maps = new HashMap<>();
 
         private FakeLevel() { super(null, null, null, null, null, null, false, 0L, null, false); }
 
@@ -300,11 +349,22 @@ public final class TradeOracle {
         @Override public net.minecraft.core.BlockPos findNearestMapStructure(
                 net.minecraft.core.HolderSet<net.minecraft.world.level.levelgen.structure.Structure> destination,
                 BlockPos pos, int radius, boolean skipKnown) {
-            // 假世界里没有结构，官方的地图函数因此原样退回输入物品堆。
-            return null;
+            // 平时返回 null（官方原样退回输入堆）；探险地图场景给出一个固定落点。
+            // Null normally (vanilla returns the input stack); explorer cases
+            // report a fixed structure position.
+            return exploreTarget;
         }
         @Override public net.minecraft.world.level.StructureManager structureManager() {
             return new NoStructures(this);
+        }
+        @Override public MapId getFreeMapId() {
+            return new MapId(nextMapId++);
+        }
+        @Override public void setMapData(MapId id, MapItemSavedData data) {
+            maps.put(id, data);
+        }
+        @Override public MapItemSavedData getMapData(MapId id) {
+            return maps.get(id);
         }
     }
 
