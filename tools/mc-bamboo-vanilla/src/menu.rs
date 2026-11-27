@@ -416,8 +416,18 @@ impl Report {
 
         for (index, step) in case.steps.iter().enumerate() {
             let input = ContainerInput::from_id(i32::from(step.input));
+            // 官方 `setSelectedBundleItemIndex` 只改本地选中下标，不补发槽位。
+            // 切选中格之后，Bamboo 的 `broadcastChanges` 也不能多发一个槽。
             for &(slot, selected) in &step.select_bundle {
+                let before = replay.snapshot().state_id;
                 replay.select_bundle(slot as i16, selected);
+                let after = replay.snapshot();
+                if after.state_id != before {
+                    self.mismatch(format!(
+                        "case {} step {index}: selecting a bundle slot changed state id from {before} to {}",
+                        case.id, after.state_id
+                    ));
+                }
             }
             let snapshot = if let Some(name) = &step.rename {
                 replay.rename(name)
@@ -437,6 +447,23 @@ impl Report {
                 replay.click(step.slot, step.button, input)
             };
             self.steps += 1;
+            if !case.container.is_empty()
+                && case.container.iter().any(|entry| entry.patch().is_some())
+            {
+                let (bamboo_resent, bamboo_carried) = replay.take_last_resend();
+                if bamboo_resent != step.resent {
+                    self.mismatch(format!(
+                        "case {} step {index}: resent slots official {:?}, bamboo {bamboo_resent:?}",
+                        case.id, step.resent
+                    ));
+                }
+                if bamboo_carried != step.carried_resent {
+                    self.mismatch(format!(
+                        "case {} step {index}: carried resent official {}, bamboo {bamboo_carried}",
+                        case.id, step.carried_resent
+                    ));
+                }
+            }
             let mut snapshot = snapshot;
             if let Some(name) = self.break_test.as_deref() {
                 self.apply_break_test(case, index, name, &mut snapshot);

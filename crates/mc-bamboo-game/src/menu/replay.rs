@@ -182,6 +182,8 @@ pub struct Replay {
     creative: bool,
     station: Option<super::station::Station>,
     merchant: Option<MerchantReplay>,
+    /// 最近一次点击补发的槽位和光标，菜单对拍用它检查收纳袋选中格。
+    last_resend: (Vec<i16>, bool),
 }
 
 /// 商人菜单的重放状态：交易表和选中提示。付款格和结果格在 `container[0..3]` 里。
@@ -217,6 +219,7 @@ impl Replay {
             creative: true,
             station: None,
             merchant: None,
+            last_resend: (Vec::new(), false),
         }
     }
 
@@ -436,9 +439,23 @@ impl Replay {
         // 客户端从不预测，回传的总是空光标。
         self.menu.remote_carried.receive(HashedStack::Empty);
         let slots = self.menu_slots();
-        self.menu.take_slot_changes(&slots);
-        self.menu.take_carried_change();
+        let resent = self
+            .menu
+            .take_slot_changes(&slots)
+            .iter()
+            .map(|(_, index, _)| *index as i16)
+            .collect();
+        // 菜单 oracle 的客户端从不预测，每次点击都把光标回传成空物品；
+        // 服务端看到的光标因此总是会被补发一次。`Sync` 的 sendCarriedChange
+        // 不推进 stateId，也不算槽位补发，这里同样不把它记进 resent。
+        let _ = self.menu.take_carried_change();
+        self.last_resend = (resent, false);
         self.snapshot()
+    }
+
+    /// 最近一次点击补发了哪些槽位，光标有没有补发。
+    pub fn take_last_resend(&self) -> (Vec<i16>, bool) {
+        self.last_resend.clone()
     }
 
     /// `ServerboundSelectBundleItemPacket`：`AbstractContainerMenu.setSelectedBundleItemIndex`。

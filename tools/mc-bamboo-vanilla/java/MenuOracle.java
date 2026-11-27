@@ -319,6 +319,7 @@ public final class MenuOracle {
     }
 
     private static final class Oracle {
+        private static Sync bundleSync;
         private final Options options;
         private final Writer out;
 
@@ -869,7 +870,8 @@ public final class MenuOracle {
                 }
             }
             AbstractContainerMenu menu = shape.create(player.getInventory(), container, player);
-            menu.setSynchronizer(new Sync());
+            Sync sync = new Sync();
+            menu.setSynchronizer(sync);
 
             JsonObject line = new JsonObject();
             line.addProperty("type", "case");
@@ -894,6 +896,7 @@ public final class MenuOracle {
             line.add("open", outcome(menu));
 
             JsonArray steps = new JsonArray();
+            bundleSync = sync;
             switch (variant) {
                 case 0 -> {
                     // 左键拿起收纳袋，左键点石头装进去，左键放回，空光标右键取出。
@@ -986,12 +989,23 @@ public final class MenuOracle {
             if (selectSlot >= 0) {
                 menu.setSelectedBundleItemIndex(selectSlot, selectIndex);
             }
+            if (bundleSync != null) {
+                bundleSync.reset();
+            }
             menu.suppressRemoteUpdates();
             menu.clicked(slot, button, INPUTS[input], player);
             menu.setRemoteCarried(HashedStack.EMPTY);
             menu.resumeRemoteUpdates();
             menu.broadcastChanges();
             JsonObject step = new JsonObject();
+            if (bundleSync != null) {
+                JsonArray resent = new JsonArray();
+                for (int resentSlot : bundleSync.slots) {
+                    resent.add(resentSlot);
+                }
+                step.add("resent", resent);
+                step.addProperty("carriedResent", bundleSync.carried);
+            }
             step.addProperty("slot", slot);
             step.addProperty("button", button);
             step.addProperty("input", input);
@@ -2046,6 +2060,14 @@ public final class MenuOracle {
      * 发整包和发一个槽各推进一次，光标和 data 槽不变。
      */
     private static final class Sync implements ContainerSynchronizer {
+        final List<Integer> slots = new ArrayList<>();
+        boolean carried;
+
+        void reset() {
+            slots.clear();
+            carried = false;
+        }
+
         @Override
         public void sendInitialData(AbstractContainerMenu container, List<ItemStack> slotItems, ItemStack carriedItem, int[] dataSlots) {
             container.incrementStateId();
@@ -2053,11 +2075,13 @@ public final class MenuOracle {
 
         @Override
         public void sendSlotChange(AbstractContainerMenu container, int slotIndex, ItemStack itemStack) {
+            slots.add(slotIndex);
             container.incrementStateId();
         }
 
         @Override
         public void sendCarriedChange(AbstractContainerMenu container, ItemStack itemStack) {
+            carried = true;
         }
 
         @Override

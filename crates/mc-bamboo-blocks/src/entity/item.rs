@@ -480,6 +480,10 @@ impl Entity {
         if me.removed {
             return;
         }
+        if me.ground().is_some_and(|item| item.item_destroy_pending) {
+            me.item_destroyed(ctx);
+            return;
+        }
         let bounds = me.bounding_box().deflated(1.0e-5);
         let min = BlockPos::new(
             mth::floor(bounds.min_x),
@@ -733,7 +737,7 @@ fn damage_type_id(name: &str) -> i32 {
 ///
 /// `BundleItem.onDestroyed` and `BlockItem.onDestroyed`: return the contents
 /// carried by a destroyed container item, one stack per entry.
-fn container_destroyed_contents(
+pub fn container_destroyed_contents(
     stack: &mut mc_bamboo_protocol::item::ItemStack,
 ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
     use mc_bamboo_data::{items, registries::data_component_type as kinds};

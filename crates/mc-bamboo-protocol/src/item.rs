@@ -26,7 +26,7 @@ const MAX_PATCH_ENTRIES: usize = 256;
 ///
 /// Bytes from a client have already been decoded and written back through the official
 /// codec. [`write`](Self::write) sends that patch to every player.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ItemStack {
     /// `minecraft:item` 注册表 ID。
     pub item: i32,
@@ -46,6 +46,22 @@ pub struct ItemStack {
     /// attached to the stack.
     pub bundle_selected: Option<u32>,
 }
+
+/// 官方 `ItemStack.equals` / `BundleContents.equals`：选中下标不是物品的一部分，
+/// 不参与相等比较。`matches`、远端槽位同步和存档脏标记都只看网络上的物品内容。
+///
+/// Vanilla `ItemStack.equals` / `BundleContents.equals`: the selected index is
+/// not part of the item and does not affect equality.
+impl PartialEq for ItemStack {
+    fn eq(&self, other: &Self) -> bool {
+        self.item == other.item
+            && self.count == other.count
+            && self.added == other.added
+            && self.removed == other.removed
+    }
+}
+
+impl Eq for ItemStack {}
 
 impl ItemStack {
     /// 空物品。
@@ -298,6 +314,19 @@ mod tests {
             removed: Vec::new(),
             bundle_selected: None,
         }
+    }
+
+    #[test]
+    fn selecting_a_bundle_slot_does_not_change_the_item() {
+        let mut stack = ItemStack::new(items::BUNDLE, 1);
+        stack.bundle_selected = Some(1);
+        let mut other = stack.clone();
+        other.bundle_selected = Some(2);
+        assert_eq!(stack, other);
+        other.bundle_selected = None;
+        assert_eq!(stack, other);
+        other.count = 2;
+        assert_ne!(stack, other);
     }
 
     #[test]

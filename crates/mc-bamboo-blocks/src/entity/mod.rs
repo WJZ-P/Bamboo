@@ -37,7 +37,7 @@ pub mod wither_skull;
 
 mod explosion;
 mod falling;
-mod item;
+pub mod item;
 mod orb;
 mod physics;
 mod resize;
