@@ -21,17 +21,19 @@ use mc_bamboo_blocks::{
 };
 use mc_bamboo_data::{items, registries};
 use mc_bamboo_loot::{
-    BlockDropParams, DamageSourceView, EntityDeathParams, EntityView, EquipmentSlot, LevelView,
-    LootContainer, LootParams, LootStack, LootTable, Position, RandomSequences, block_drops,
-    enchantment_id,
+    BlockDropParams, DamageSourceView, EntityDeathParams, EntityView, EquipmentSlot,
+    ExplorationMapRequest, ExplorationMapResult, LevelView, LootContainer, LootParams, LootStack,
+    LootTable, Position, RandomSequences, block_drops, enchantment_id,
 };
+use mc_bamboo_nbt::Tag;
+use mc_bamboo_protocol::components::{ComponentValue, defaults};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::oracle::collect_log;
 
 const USAGE: &str =
-    "usage: loot-oracle <java> [--entity-table ID] [--cases N] [--seed S] [--show N]";
+    "usage: loot-oracle <java> [--explorer | --entity-table ID] [--cases N] [--seed S] [--show N]";
 const DEFAULT_SHOW: usize = 5;
 
 #[derive(Debug, Default)]
@@ -52,6 +54,7 @@ impl Options {
                         .forwarded
                         .extend([arg.to_owned(), (*value).to_owned()]);
                 }
+                "--explorer" => options.forwarded.push(arg.to_owned()),
                 "--show" => {
                     let value = args.next().ok_or(USAGE)?;
                     options.show = Some(value.parse().map_err(|_| USAGE.to_owned())?);
@@ -274,7 +277,7 @@ impl Report {
                         self.block += 1;
                     }
                 }
-                "chest" => {
+                "chest" | "explorer_chest" => {
                     if !self.check_chest(&case) {
                         self.chest += 1;
                     }
@@ -331,7 +334,7 @@ impl Report {
         };
         let sequences = RandomSequences::new(world_seed);
         let fallback = LegacyRandom::new(world_seed);
-        let level = FlatLevel;
+        let level = FlatLevel(false);
         let params = BlockDropParams {
             state: BlockState(case.state),
             pos: (case.x, case.y, case.z),
@@ -419,7 +422,7 @@ impl Report {
                 return false;
             }
         };
-        let level = FlatLevel;
+        let level = FlatLevel(case.kind == "explorer_chest");
         let params = LootParams {
             level: Some(&level),
             origin: Some(Position::new(
@@ -509,7 +512,7 @@ impl Report {
         };
         let sequences = RandomSequences::new(world_seed);
         let fallback = LegacyRandom::new(world_seed);
-        let level = FlatLevel;
+        let level = FlatLevel(false);
         let params = EntityDeathParams {
             entity: victim_view,
             origin: Position::new(victim.x, victim.y, victim.z),
@@ -655,7 +658,11 @@ impl Report {
                 ));
                 continue;
             }
-            let official_components = normalize_components(&official.components);
+            let mut official_components = normalize_components(&official.components);
+            let map_name = official_components
+                .contains_key("minecraft:map_id")
+                .then(|| official_components.remove("minecraft:item_name"))
+                .flatten();
             let bamboo_components = strip_baseline(
                 &bamboo_components,
                 &normalize_components(&official.baseline),
@@ -678,6 +685,37 @@ impl Report {
                 ));
             }
             let patch = converted.patch();
+            if let Some(expected) = official_components.get("minecraft:map_id") {
+                use registries::data_component_type as kinds;
+                if !matches!(patch.get(kinds::MAP_ID),
+                    Some(ComponentValue::MapId(id)) if expected.as_i64() == Some(i64::from(*id)))
+                    || !matches!(
+                        patch.get(kinds::MAP_DECORATIONS),
+                        Some(ComponentValue::MapDecorations(_))
+                    )
+                {
+                    self.mismatch(format!(
+                        "{label} {place}: explorer map components lost in conversion"
+                    ));
+                }
+                let name = match defaults::resolve(converted.item, &patch, kinds::ITEM_NAME) {
+                    Some(ComponentValue::ItemName(name)) => match name.tag() {
+                        Tag::Compound(entries) => {
+                            entries.iter().find_map(|(key, value)| match value {
+                                Tag::String(text) if key == "translate" => Some(text.as_str()),
+                                _ => None,
+                            })
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if name != map_name.as_ref().and_then(Value::as_str) {
+                    self.mismatch(format!(
+                        "{label} {place}: explorer map name differs: {name:?}"
+                    ));
+                }
+            }
             if !official_components.is_empty() && patch.entries().is_empty() {
                 self.mismatch(format!(
                     "{label} {place}: all {} loot components were dropped by the conversion",
@@ -910,7 +948,7 @@ fn equipment_slot(name: &str) -> Result<EquipmentSlot, String> {
 /// 空世界：空气、平原、不下雨、亮度 15。和 `LootOracle.java` 的假世界一致。
 ///
 /// Empty world: air, plains, no weather, light 15. Matches the fake level in `LootOracle.java`.
-struct FlatLevel;
+struct FlatLevel(bool);
 
 impl LevelView for FlatLevel {
     fn is_loaded(&self, _x: i32, _y: i32, _z: i32) -> Option<bool> {
@@ -952,6 +990,25 @@ impl LevelView for FlatLevel {
 
     fn dimension(&self) -> Option<&'static str> {
         Some("minecraft:overworld")
+    }
+
+    fn exploration_map(
+        &self,
+        request: &ExplorationMapRequest<'_>,
+    ) -> mc_bamboo_loot::Result<Option<ExplorationMapResult>> {
+        if !self.0 {
+            return Ok(None);
+        }
+        assert_eq!(request.origin, (1, 64, 2));
+        assert_eq!(request.destination, "#minecraft:on_treasure_maps");
+        assert_eq!(request.zoom, 1);
+        assert_eq!(request.search_radius, 50);
+        assert!(!request.skip_existing_chunks);
+        Ok(Some(ExplorationMapResult {
+            map_id: 0,
+            target_x: 1234,
+            target_z: -567,
+        }))
     }
 
     fn light(&self, _x: i32, _y: i32, _z: i32) -> Option<i32> {
