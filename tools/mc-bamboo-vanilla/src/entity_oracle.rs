@@ -18,7 +18,10 @@ use mc_bamboo_blocks::{
     Aabb, BlockEntities, BlockEvents, BlockState, BlockTicks, Container, EntityStore, EntityTables,
     HopperEntity, Level, LevelRandom, LevelTables, ShulkerBoxEntity, Slots, World,
     archive::create_block_entity,
-    entity::{Entities, Entity, EntityKind, JavaRandom, can_pick_up, take_stack},
+    entity::{
+        Entities, Entity, EntityKind, FIRST_ENTITY_ID as FIRST_ITEM_ID, JavaRandom, can_pick_up,
+        take_stack,
+    },
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::registries::data_component_type as kinds;
@@ -47,6 +50,24 @@ enum Line {
     CommandMinecart(CommandMinecart),
     SpawnerMinecart(Box<SpawnerMinecart>),
     NamedVehicle(Box<NamedVehicle>),
+    DispenserBoat(DispenserBoat),
+}
+
+/// 官方 `BoatDispenseItemBehavior` 生成的一艘船：类型、精确位置、朝向、名字和存档 NBT。
+///
+/// The boat spawned by vanilla `BoatDispenseItemBehavior`: type, exact position,
+/// facing, name and full save NBT.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DispenserBoat {
+    entity_type: i32,
+    x: u64,
+    y: u64,
+    z: u64,
+    yaw: u32,
+    left: i32,
+    name: String,
+    nbt: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -652,6 +673,10 @@ impl Report {
                 Line::NamedVehicle(scene) => {
                     self.cases += 1;
                     self.replay_named_vehicle(&scene)?;
+                }
+                Line::DispenserBoat(scene) => {
+                    self.cases += 1;
+                    self.replay_dispenser_boat(&scene)?;
                 }
                 Line::End(end) => {
                     self.ended = true;
@@ -1586,6 +1611,80 @@ impl Report {
             &scene.cart_events,
             &cart_events,
         );
+        Ok(())
+    }
+
+    /// 用生产代码的 `dispatch` 重放一次发射器放船，逐项比官方生成的实体。
+    ///
+    /// Replay one boat dispense through the production `dispatch` and compare
+    /// every reported field with the official entity.
+    fn replay_dispenser_boat(&mut self, scene: &DispenserBoat) -> Result<(), String> {
+        let parse = |raw: &str| {
+            mc_bamboo_nbt::parse_snbt(raw)
+                .map(|tag| canonical_tag(&tag))
+                .map_err(|error| format!("{error:?}"))
+        };
+        let mut level = PhysicsLevel::new(1);
+        level.entities = Entities::with_next_id(FIRST_ITEM_ID);
+        level.entities.set_entity_seed_source(JavaRandom::new(
+            mc_bamboo_blocks::entity::ENTITY_RANDOM_SEED,
+        ));
+        level.place(&[[1, 64, 0, mc_bamboo_data::blocks::WATER as i32]]);
+        let mut stack = ItemStack::new(mc_bamboo_data::items::OAK_CHEST_BOAT, 2);
+        let mut patch = ComponentPatch::new();
+        let name = mc_bamboo_protocol::components::text::checked_component(&parse(&scene.name)?)
+            .ok_or("官方船名字不是文本组件")?;
+        patch.put(
+            kinds::CUSTOM_NAME,
+            mc_bamboo_protocol::components::PatchEntry::Set(
+                mc_bamboo_protocol::components::ComponentValue::CustomName(name),
+            ),
+        );
+        let (added, removed) = patch.to_opaque();
+        stack.added = added;
+        stack.removed = removed;
+        let mut ticks = BlockTicks::default();
+        let left = {
+            let mut world = World::new(&mut level, &mut ticks);
+            mc_bamboo_blocks::dispense::execute_at(
+                &mut world,
+                BlockPos::new(0, 64, 0),
+                mc_bamboo_core::Direction::East,
+                stack,
+            )
+        };
+        let boats: Vec<_> = level
+            .entities
+            .iter()
+            .filter(|entity| matches!(entity.kind, EntityKind::Boat(_)))
+            .collect();
+        if boats.len() != 1 {
+            return Err(format!("发射器放船生成了 {} 艘", boats.len()));
+        }
+        let boat = boats[0].clone();
+        let EntityKind::Boat(data) = &boat.kind else {
+            unreachable!()
+        };
+        self.steps += 8;
+        let at = "dispenser boat";
+        self.field(at, "entity type", scene.entity_type, data.entity_type);
+        self.field(at, "x", scene.x, boat.position.x.to_bits());
+        self.field(at, "y", scene.y, boat.position.y.to_bits());
+        self.field(at, "z", scene.z, boat.position.z.to_bits());
+        self.field(at, "yaw", scene.yaw, boat.y_rot.to_bits() as u32);
+        self.field(at, "left", scene.left, left.count);
+        self.field(
+            at,
+            "name",
+            parse(&scene.name)?,
+            data.custom_name
+                .as_ref()
+                .map(canonical_tag)
+                .unwrap_or(mc_bamboo_nbt::Tag::String(String::new())),
+        );
+        let saved = mc_bamboo_blocks::archive::write_entity(&boat.clone().split())
+            .map_err(|error| error.to_string())?;
+        self.field(at, "save", parse(&scene.nbt)?, canonical_tag(&saved));
         Ok(())
     }
 

@@ -218,6 +218,7 @@ public final class EntityOracle {
             cases += boatChestSave(official, out);
             cases += boatAnimalBoard(official, out);
             cases += boatFacts(official, out);
+            cases += dispenserBoat(official, out);
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -1994,6 +1995,51 @@ public final class EntityOracle {
                 + ",\"landZ\":" + Double.doubleToRawLongBits(landing.z)
                 + ",\"nbt\":" + jsonString(nbt)
                 + ",\"reloaded\":" + jsonString(reloaded) + "}\n");
+        return 1;
+    }
+
+    /**
+     * 发射器朝水面放一艘带名字的运输船：直接跑官方 `BoatDispenseItemBehavior`，
+     * 比生成实体的类型、精确位置、朝向、名字和整棵存档 NBT。
+     *
+     * A dispenser places a named chest boat into water: run vanilla's
+     * `BoatDispenseItemBehavior` and compare the spawned entity's type, exact
+     * position, facing, name and full save NBT.
+     */
+    private static int dispenserBoat(Official official, Writer out) throws Exception {
+        FakeLevel level = FakeLevel.create(official, 1L);
+        level.nextId = FIRST_ITEM_ID;
+        level.firstId = FIRST_ITEM_ID;
+        BlockPos pos = new BlockPos(0, 64, 0);
+        Direction facing = Direction.EAST;
+        level.blocks.put(BlockPos.asLong(1, 64, 0), Blocks.WATER.defaultBlockState());
+        ItemStack stack = new ItemStack(Items.OAK_CHEST_BOAT, 2);
+        var name = Component.literal("Cargo Ferry");
+        stack.set(DataComponents.CUSTOM_NAME, name);
+        var state = Blocks.DISPENSER.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.DispenserBlock.FACING, facing);
+        var source = new net.minecraft.core.dispenser.BlockSource(level, pos, state, null);
+        ItemStack left = net.minecraft.world.level.block.DispenserBlock.DISPENSER_REGISTRY
+                .get(stack.getItem()).dispense(source, stack);
+        Entity boat = level.fresh.getFirst();
+        // 船的实体种子从 Bamboo 的种子源取；存档里的 UUID 按 Bamboo 的实体 ID 规则固定。
+        // The entity random comes from Bamboo's seed source; the saved UUID follows
+        // Bamboo's entity-id rule.
+        set(Entity.class, boat, "random", RandomSource.create(level.entitySeed(FIRST_ITEM_ID)));
+        boat.setUUID(new UUID(0x0000_BAAB_0000_0000L, FIRST_ITEM_ID));
+        var reporter = net.minecraft.util.ProblemReporter.DISCARDING;
+        var saved = net.minecraft.world.level.storage.TagValueOutput.createWithContext(reporter, official.registries);
+        boat.save(saved);
+        var componentCodec = net.minecraft.network.chat.ComponentSerialization.CODEC;
+        var ops = net.minecraft.nbt.NbtOps.INSTANCE;
+        out.write("{\"type\":\"dispenserBoat\",\"entityType\":" + BuiltInRegistries.ENTITY_TYPE.getId(boat.getType())
+                + ",\"x\":" + Double.doubleToRawLongBits(boat.getX())
+                + ",\"y\":" + Double.doubleToRawLongBits(boat.getY())
+                + ",\"z\":" + Double.doubleToRawLongBits(boat.getZ())
+                + ",\"yaw\":" + Float.floatToRawIntBits(boat.getYRot())
+                + ",\"left\":" + left.getCount()
+                + ",\"name\":" + jsonString(componentCodec.encodeStart(ops, name).getOrThrow().toString())
+                + ",\"nbt\":" + jsonString(saved.buildResult().toString()) + "}\n");
         return 1;
     }
 

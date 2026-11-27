@@ -114,6 +114,21 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
     set_changed(world, pos);
 }
 
+/// 给 oracle 直接调用一次官方的 `getDispenseMethod(stack).execute`，走生产代码
+/// 的 `dispatch`（注册表、装备、硫磺立方、刷怪蛋和默认抛出都照常判断）。
+///
+/// One official `getDispenseMethod(stack).execute` for oracles, through the
+/// production `dispatch` (registry, equipment, sulfur cubes, spawn eggs and
+/// the default throw all keep their normal checks).
+pub fn execute_at(
+    world: &mut World,
+    pos: BlockPos,
+    facing: Direction,
+    stack: ItemStack,
+) -> ItemStack {
+    dispatch(world, pos, facing, stack).stack
+}
+
 /// `ProjectileDispenseBehavior.execute` 的箭分支，给 oracle 直接调用。
 ///
 /// The arrow branch of `ProjectileDispenseBehavior.execute`, callable by oracles.
