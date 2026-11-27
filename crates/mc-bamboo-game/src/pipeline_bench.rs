@@ -75,12 +75,14 @@ pub(crate) fn enter(phase: Phase) -> Scope {
         previous: None,
         enabled: false,
     };
-    MEASUREMENT.update(|measurement| {
-        measurement.map(|mut m| {
+    // 用 get/set 而不是 Cell::update：后者 1.99 才稳定，超过项目 MSRV 1.96。
+    // Use get/set instead of Cell::update, stabilized in 1.99, past the 1.96 MSRV.
+    MEASUREMENT.with(|cell| {
+        if let Some(mut m) = cell.get() {
             scope.previous = m.switch(Some(phase), Instant::now());
             scope.enabled = true;
-            m
-        })
+            cell.set(Some(m));
+        }
     });
     scope
 }
@@ -88,11 +90,11 @@ pub(crate) fn enter(phase: Phase) -> Scope {
 impl Drop for Scope {
     fn drop(&mut self) {
         if self.enabled {
-            MEASUREMENT.update(|measurement| {
-                measurement.map(|mut m| {
+            MEASUREMENT.with(|cell| {
+                if let Some(mut m) = cell.get() {
                     m.switch(self.previous, Instant::now());
-                    m
-                })
+                    cell.set(Some(m));
+                }
             });
         }
     }
