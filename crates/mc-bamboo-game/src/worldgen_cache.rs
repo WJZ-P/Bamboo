@@ -196,6 +196,7 @@ pub fn release_if_idle() -> bool {
     }
     crate::worldgen::release_terrain_cache();
     crate::worldgen_features::release_feature_cache();
+    crate::worldgen_light::clear_final_blocks_cache();
     IDLE_RELEASES.fetch_add(1, Ordering::Relaxed);
     true
 }

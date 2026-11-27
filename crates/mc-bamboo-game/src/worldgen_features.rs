@@ -108,6 +108,10 @@ pub struct FeatureWrites {
     pub entities: Vec<mc_bamboo_worldgen::feature::GeneratedEntity>,
 }
 
+fn feature_source_order(slot: u8) -> (bool, u8) {
+    (slot != CENTER as u8, slot)
+}
+
 /// 按中心的固定先后合并一组写：中心自己（`CENTER`）最先，其余 8 个来源按
 /// `slot` 升序，即 `(dz,dx)` 升序；同一格取最先写下的那条状态。
 ///
@@ -178,7 +182,7 @@ pub fn merge_feature_writes(
             marks.entry(group.slot).or_default().extend(group.marks);
         }
     }
-    let source_order = |slot: &u8| (u8::from(*slot != CENTER as u8), *slot);
+    let source_order = |&slot: &u8| feature_source_order(slot);
     let mut mark_order: Vec<(u8, Vec<MarkPos>)> = marks.into_iter().collect();
     mark_order.sort_by_key(|(slot, _)| source_order(slot));
     for (_, group) in mark_order {
@@ -686,7 +690,7 @@ struct FeatureRun {
     entities: [Vec<mc_bamboo_worldgen::feature::GeneratedEntity>; 9],
 }
 
-type FeatureCacheKey = (
+pub(crate) type FeatureCacheKey = (
     i64,
     Option<&'static str>,
     i32,
@@ -775,7 +779,7 @@ fn feature_run_heap_bytes(run: &FeatureRun) -> usize {
     deltas + marks + block_entities
 }
 
-fn feature_cache_key(config: &WorldGenConfig, cx: i32, cz: i32) -> FeatureCacheKey {
+pub(crate) fn feature_cache_key(config: &WorldGenConfig, cx: i32, cz: i32) -> FeatureCacheKey {
     (
         config.seed,
         config.level_type.settings_id(),
@@ -863,6 +867,7 @@ pub fn clear_feature_cache() {
             *shard = FeatureShard::default();
         }
     }
+    crate::worldgen_light::clear_final_blocks_cache();
 }
 
 /// 以 `(cx, cz)` 为中心造 3×3 的 CARVERS 视图（纯函数，带全进程共享缓存）。
@@ -994,6 +999,46 @@ fn cached_feature_run(
     }
     Ok(run)
 }
+
+/// 光引擎只读最终方块，不需要复制地物标记、实体或构造赢家表。
+///
+/// The light engine only reads final blocks; skip copying feature marks,
+/// entities and constructing winner maps.
+pub(crate) fn feature_block_layers(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+    terrain: &[Vec<u32>],
+) -> Result<Vec<Vec<u32>>, String> {
+    fold_block_layers(cx, cz, terrain, |x, z| cached_feature_run(config, x, z))
+}
+
+fn fold_block_layers(
+    cx: i32,
+    cz: i32,
+    terrain: &[Vec<u32>],
+    mut source: impl FnMut(i32, i32) -> Result<Arc<FeatureRun>, String>,
+) -> Result<Vec<Vec<u32>>, String> {
+    let mut slots: [u8; 9] = std::array::from_fn(|slot| slot as u8);
+    slots.sort_unstable_by_key(|&slot| feature_source_order(slot));
+    let mut sources = Vec::with_capacity(slots.len());
+    for slot in slots {
+        let dx = i32::from(slot % 3) - 1;
+        let dz = i32::from(slot / 3) - 1;
+        sources.push((slot, source(cx + dx, cz + dz)?));
+    }
+    // 来源逆序、来源内正序：最高优先级的来源最后覆盖，组内最后一写仍然赢。
+    // Reverse source priority, not each source's writes: the best source
+    // overwrites last, and its last write to each cell still wins.
+    let mut blocks = terrain.to_vec();
+    for (slot, run) in sources.into_iter().rev() {
+        apply_block_deltas(&mut blocks, &run.deltas[8 - usize::from(slot)]);
+    }
+    Ok(blocks)
+}
+
+#[cfg(test)]
+mod light_fold_tests;
 
 /// 把算好的地物结果放进分片，按这一片的字节上限 `limit`（`bamboo.toml` 的
 /// `worldgen_feature_cache_mb` 均分到各片）淘汰最旧的；返回这次是不是新放进去的。
@@ -1461,12 +1506,16 @@ pub(crate) fn passthrough_stage(center: Option<Box<RegionColumn>>) -> GenerateOu
 ///
 /// Apply world-coordinate deltas into a `GeneratedChunk`'s block arrays.
 pub(crate) fn apply_deltas(chunk: &mut GeneratedChunk, deltas: &[BlockDelta]) {
+    apply_block_deltas(&mut chunk.blocks, deltas);
+}
+
+fn apply_block_deltas(blocks: &mut [Vec<u32>], deltas: &[BlockDelta]) {
     for &(x, y, z, state) in deltas {
         if !(MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
             continue;
         }
         let column = (x & 15) as usize * 16 + (z & 15) as usize;
-        chunk.blocks[(y - MIN_Y) as usize][column] = state;
+        blocks[(y - MIN_Y) as usize][column] = state;
     }
 }
 
