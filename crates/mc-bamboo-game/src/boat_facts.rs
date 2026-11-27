@@ -271,6 +271,7 @@ pub fn replay_named_vehicle(item: i32, name: &Tag) -> Result<NamedVehicleSample,
         count: 1,
         added,
         removed,
+        bundle_selected: None,
     };
     let hand_slot = player.inventory.hand_slot(Hand::Main);
     player.inventory.slots[hand_slot] = stack.clone();
