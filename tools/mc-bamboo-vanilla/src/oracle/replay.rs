@@ -1101,6 +1101,7 @@ pub fn replay(
                 yaw: 0.0,
                 removed: false,
                 precise: false,
+                sync_position: false,
                 vehicle: None,
             });
             world.explode_tnt(centre, 1.0, source, None);

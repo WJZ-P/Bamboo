@@ -188,13 +188,7 @@ fn check_fall_damage(
         if me.fall_distance > 0.0 {
             let distance = me.fall_distance;
             fall_on(me, mob, ctx, pos, state, distance);
-            ctx.emit(
-                Command::HitGround {
-                    supporting: me.main_supporting_block,
-                    fallback: state,
-                },
-                me,
-            );
+            landing::hit_ground(me, ctx, state);
         }
         me.fall_distance = 0.0;
         mob.last_climbable_pos = None;
@@ -212,7 +206,7 @@ fn fall_on(
 ) {
     if state.is(blocks::TURTLE_EGG) {
         if !mob.mob_type.is_zombie() {
-            destroy_turtle_egg(me, ctx, pos, 3);
+            destroy_turtle_egg(me, mob.mob_type, ctx, pos, 3);
         }
     } else if state.is(blocks::FARMLAND) {
         let roll = ctx.blocks().level_random_float();
@@ -237,11 +231,12 @@ fn fall_on(
 }
 
 fn play_fall_sound(me: &Entity, mob: &mut Mob, big: bool) {
-    let sound = match (mob.mob_type.is_monster(), big) {
-        (true, true) => "minecraft:entity.hostile.big_fall",
-        (true, false) => "minecraft:entity.hostile.small_fall",
-        (false, true) => "minecraft:entity.generic.big_fall",
-        (false, false) => "minecraft:entity.generic.small_fall",
+    let sound = match (mob.mob_type, big) {
+        (super::MobType::ArmorStand, _) => "minecraft:entity.armor_stand.fall",
+        (kind, true) if kind.is_monster() => "minecraft:entity.hostile.big_fall",
+        (kind, false) if kind.is_monster() => "minecraft:entity.hostile.small_fall",
+        (_, true) => "minecraft:entity.generic.big_fall",
+        (_, false) => "minecraft:entity.generic.small_fall",
     };
     living::play_sound(me, mob, sound, 1.0, 1.0);
 }
@@ -360,31 +355,7 @@ fn restitute(
         );
     }
     if bounced {
-        if state.is(blocks::SHELF_MUSHROOM) {
-            let pos = me.on_pos(ctx.blocks(), 0.500001);
-            ctx.emit(
-                Command::MobBlockSound {
-                    pos,
-                    sound: "minecraft:block.shelf_mushroom.bounce",
-                    source: mc_bamboo_data::sounds::BLOCKS,
-                    volume: 1.0,
-                    pitch: 1.0,
-                },
-                me,
-            );
-        }
-        ctx.emit(
-            Command::GameEvent {
-                event: crate::game_event::GameEvent::Bounce,
-                position: me.position,
-                context: crate::game_event::dispatch::EventContext {
-                    source_entity: Some(me.id),
-                    ..Default::default()
-                },
-            },
-            me,
-        );
-        mob.needs_sync = true;
+        landing::bounce(me, ctx, state, true);
     }
     me.delta = after;
 }
@@ -750,7 +721,7 @@ fn step_on(
 ) {
     if state.is(blocks::TURTLE_EGG) {
         // 生物不会潜行，`isSteppingCarefully` 恒为假。
-        destroy_turtle_egg(me, ctx, pos, 100);
+        destroy_turtle_egg(me, mob.mob_type, ctx, pos, 100);
     } else if state.is(blocks::MAGMA_BLOCK) {
         living::hurt_server(
             me,
@@ -773,14 +744,14 @@ fn step_on(
 ///
 /// `TurtleEggBlock.destroyEgg`: mobs other than turtles, bats and players need
 /// `mobGriefing`; the world-random draw and the block change land with the command.
-fn destroy_turtle_egg(me: &mut Entity, ctx: &mut dyn EntityCtx, pos: BlockPos, chance: i32) {
-    // `canDestroyEgg`：`instanceof Turtle` 和 `instanceof Bat` 都直接返回假。
-    // `canDestroyEgg`: `instanceof Turtle` and `instanceof Bat` both return false.
-    if me
-        .kind
-        .mob()
-        .is_some_and(|mob| matches!(mob.mob_type, super::MobType::Turtle | super::MobType::Bat))
-    {
+fn destroy_turtle_egg(
+    me: &mut Entity,
+    mob_type: super::MobType,
+    ctx: &mut dyn EntityCtx,
+    pos: BlockPos,
+    chance: i32,
+) {
+    if matches!(mob_type, super::MobType::Turtle | super::MobType::Bat) {
         return;
     }
     if !ctx.blocks().block_game_rules().mob_griefing {

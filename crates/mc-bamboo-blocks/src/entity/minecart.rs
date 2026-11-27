@@ -748,7 +748,7 @@ fn start_from_conductor(ctx: &dyn BlockView, pos: BlockPos, shape: RailShape, v:
 }
 
 /// `OldMinecartBehavior.moveAlongTrack`。
-fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn EntityCtx) {
+fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &mut dyn EntityCtx) {
     let view = ctx.blocks();
     let pos = current_rail_pos(view, me.position);
     let state = view.block_state(pos);
@@ -857,6 +857,7 @@ fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn EntityCtx) {
         (factor * v.z).clamp(-max, max),
     );
     move_minecart(me, cart, ctx, movement);
+    let view = ctx.blocks();
 
     if first[1] != 0
         && floor_i(me.position.x) - pos.x == first[0]
@@ -913,7 +914,7 @@ fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn EntityCtx) {
 /// `AbstractMinecart.comeOffTrack`：出轨后的普通物理。
 ///
 /// `AbstractMinecart.comeOffTrack`: ordinary physics off the rails.
-fn come_off_track(me: &mut Entity, cart: &Minecart, ctx: &dyn EntityCtx) {
+fn come_off_track(me: &mut Entity, cart: &Minecart, ctx: &mut dyn EntityCtx) {
     let max = max_speed(me, cart);
     let v = me.delta;
     me.delta = Vec3::new(v.x.clamp(-max, max), v.y, v.z.clamp(-max, max));
@@ -927,7 +928,7 @@ fn come_off_track(me: &mut Entity, cart: &Minecart, ctx: &dyn EntityCtx) {
     }
 }
 
-fn move_minecart(me: &mut Entity, cart: &Minecart, ctx: &dyn EntityCtx, movement: Vec3) {
+fn move_minecart(me: &mut Entity, cart: &Minecart, ctx: &mut dyn EntityCtx, movement: Vec3) {
     let view = ctx.blocks();
     let multiplier = me.stuck_speed_multiplier;
     let swept = if multiplier.length_sqr() > 1.0e-7 {
@@ -975,7 +976,7 @@ fn move_minecart(me: &mut Entity, cart: &Minecart, ctx: &dyn EntityCtx, movement
             colliders.push(bounds_player);
         }
     });
-    me.move_entity_with_colliders(view, movement, &colliders);
+    me.move_entity_with_colliders(ctx, movement, &colliders);
 }
 
 fn player_bounds(player: &super::ctx::PlayerView) -> Aabb {

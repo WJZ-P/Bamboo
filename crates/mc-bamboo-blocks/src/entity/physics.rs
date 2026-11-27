@@ -23,7 +23,11 @@ use mc_bamboo_data::{
 
 use crate::{
     WorldBorder,
-    entity::{Entity, Movement, axis_component, ctx::BlockView, with_axis},
+    entity::{
+        Entity, EntityKind, Movement, axis_component,
+        ctx::{BlockView, Command, EntityCtx},
+        landing, with_axis,
+    },
     shape::{self, Aabb, BooleanOp, CollisionContext, EntityContext},
     state::BlockState,
     world,
@@ -140,16 +144,17 @@ impl Entity {
     }
 
     /// `Entity.move`：先按轴解算碰撞，再落地判定、摔落伤害、反弹，最后按方块速度系数收尾。
-    pub(crate) fn move_entity(&mut self, world: &dyn BlockView, movement: Vec3) {
-        self.move_entity_with_colliders(world, movement, &[]);
+    pub(crate) fn move_entity(&mut self, ctx: &mut dyn EntityCtx, movement: Vec3) {
+        self.move_entity_with_colliders(ctx, movement, &[]);
     }
 
     pub(super) fn move_entity_with_colliders(
         &mut self,
-        world: &dyn BlockView,
+        ctx: &mut dyn EntityCtx,
         movement: Vec3,
         colliders: &[Aabb],
     ) {
+        let world = ctx.blocks();
         let mut delta = movement;
         if self.stuck_speed_multiplier.length_sqr() > 1.0e-7 {
             delta = delta.multiply(
@@ -195,20 +200,20 @@ impl Entity {
         // `minorHorizontalCollision` 只影响脚步声，不在范围里。
         let effect_pos = self.on_pos(world, 0.2);
         let effect_state = world.block_state(effect_pos);
-        self.check_fall_damage(movement.y);
+        self.check_fall_damage(ctx, movement.y, effect_state);
         if self.removed {
             return;
         }
         if moved_vertically && self.vertical_collision || self.horizontal_collision {
             self.restitute_movement_after_collisions(
+                ctx,
                 effect_state,
                 x_collision,
                 z_collision,
                 movement,
             );
         }
-        // 移动的音效和 `gameEvent` 不在范围里。
-        let factor = f64::from(self.block_speed_factor(world));
+        let factor = f64::from(self.block_speed_factor(ctx.blocks()));
         self.delta = self.delta.multiply(factor, 1.0, factor);
     }
 
@@ -325,19 +330,49 @@ impl Entity {
         }
     }
 
-    /// `checkFallDamage`：往下走了多少就记多少，落地时按脚下的方块算伤害。
-    ///
-    /// 官方把脚下的状态交给 `Block.fallOn`，覆写过的只有滴水石和硫磺刺那几个；
-    /// 它们只影响摔落距离和伤害倍率，这两个实体都不吃倍率，所以这里直接用默认实现。
-    fn check_fall_damage(&mut self, ya: f64) {
+    /// `Entity.checkFallDamage` 和船专用的 `AbstractBoat.checkFallDamage`。
+    fn check_fall_damage(&mut self, ctx: &mut dyn EntityCtx, ya: f64, state: BlockState) {
+        if matches!(self.kind, EntityKind::Boat(_)) {
+            if self.vehicle.is_some() {
+                return;
+            }
+            if self.on_ground {
+                self.reset_fall_distance();
+            } else if ya < 0.0
+                && !ctx
+                    .blocks()
+                    .fluid_state(self.block_position().below())
+                    .is_tagged(fluid_tags::WATER)
+            {
+                self.fall_distance -= f64::from(ya as f32);
+            }
+            return;
+        }
         if !self.is_in_water() && ya < 0.0 {
-            // 官方写的是 `fallDistance -= (float)ya`：先截成 `float` 再减进 `double`。
             self.fall_distance -= f64::from(ya as f32);
         }
-        if self.on_ground && self.fall_distance > 0.0 {
-            self.cause_fall_damage(self.fall_distance);
-            self.reset_fall_distance();
+        if !self.on_ground {
+            return;
         }
+        if self.fall_distance > 0.0 {
+            if state.is(blocks::FARMLAND) {
+                // 随机判定在 `instanceof LivingEntity` 前面。
+                // The random draw precedes the `instanceof LivingEntity` test.
+                ctx.blocks().level_random_float();
+            } else if state.is(blocks::HONEY_BLOCK) {
+                use mc_bamboo_data::sounds;
+                let source = match self.kind {
+                    EntityKind::Item(_) | EntityKind::ExperienceOrb(_) => sounds::AMBIENT,
+                    _ => sounds::NEUTRAL,
+                };
+                ctx.emit(Command::LandOnHoney { source }, self);
+            }
+            if let Some((distance, _, _)) = landing::fall_damage(state, self.fall_distance, false) {
+                self.cause_fall_damage(distance);
+            }
+            landing::hit_ground(self, ctx, state);
+        }
+        self.reset_fall_distance();
     }
 
     /// `resetFallDistance`。
@@ -351,6 +386,7 @@ impl Entity {
     /// 只有脚下方块的 `getBounceRestitution()` 会起作用。
     fn restitute_movement_after_collisions(
         &mut self,
+        ctx: &mut dyn EntityCtx,
         effect_state: BlockState,
         x_collision: bool,
         z_collision: bool,
@@ -389,8 +425,10 @@ impl Entity {
                 (gravity_compensation - current.y) * effective_drag * restitution,
             );
         }
-        // 反弹成功后官方还会放音效、发 `gameEvent` 和同步一次位置；前两样不在范围里，
-        // 位置同步由常规同步兜住。
+        if restitution > 0.0 {
+            let plays_shelf_sound = !matches!(self.kind, EntityKind::Item(_) | EntityKind::Tnt(_));
+            landing::bounce(self, ctx, effect_state, plays_shelf_sound);
+        }
         self.delta = after;
     }
 

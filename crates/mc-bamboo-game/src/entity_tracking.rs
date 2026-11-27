@@ -1016,7 +1016,7 @@ impl Snapshot {
                 KindPublic::FishingHook(hook) => hook.sync_velocity,
                 _ => false,
             },
-            sync_position: false,
+            sync_position: public.sync_position,
             fall_flying: false,
             passengers: match &public.kind {
                 KindPublic::Mob(mob) => mob.passengers.clone(),

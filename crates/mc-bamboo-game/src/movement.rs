@@ -101,7 +101,7 @@ pub(crate) fn push_player_up(region: &mut Region, id: PlayerId, distance: f64) {
             z: 0.0,
             yaw: 0.0,
             pitch: 0.0,
-            relative: 0x1ff,
+            relative: mc_bamboo_protocol::packet::play::relative::ALL,
         },
     );
 }

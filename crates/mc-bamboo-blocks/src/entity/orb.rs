@@ -144,7 +144,8 @@ pub(crate) fn tick_orb(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     follow_nearby_player(me, &players);
     let before_y = me.delta.y;
     let movement = me.delta;
-    me.move_entity(view, movement);
+    me.move_entity(ctx, movement);
+    let view = ctx.blocks();
     me.apply_effects_from_blocks(view);
     let mut drag = AIR_DRAG;
     if me.on_ground {

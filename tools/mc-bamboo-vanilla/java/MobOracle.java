@@ -4548,13 +4548,18 @@ public final class MobOracle {
 
         static List<Scene> all() {
             List<Scene> scenes = new ArrayList<>();
-            for (String name : new String[] {"farmland", "farmland_no_grief", "slime"}) {
+            for (String name : new String[] {"farmland", "farmland_no_grief", "slime", "shelf"}) {
                 Scene fall = new Scene("fall_on_pig_" + name).ticks(50).difficulty(2);
                 ground(fall, 2);
-                BlockState support = name.equals("slime")
-                        ? Blocks.SLIME_BLOCK.defaultBlockState() : Blocks.FARMLAND.defaultBlockState();
+                BlockState support = switch (name) {
+                    case "slime" -> Blocks.SLIME_BLOCK.defaultBlockState();
+                    case "shelf" -> Blocks.SHELF_MUSHROOM.defaultBlockState();
+                    default -> Blocks.FARMLAND.defaultBlockState();
+                };
                 fall.set(0, 64, 0, support);
-                fall.mob(3, 0.5, 71.0, 0.5, 0.0F, 0L, 0);
+                boolean shelf = name.equals("shelf");
+                if (shelf) fall.set(0, 64, 1, Blocks.STONE.defaultBlockState());
+                fall.mob(3, 0.5, shelf ? 74.0 : 71.0, 0.5, 0.0F, 0L, 0);
                 scenes.add(fall);
             }
 
@@ -22453,7 +22458,8 @@ public final class MobOracle {
             BlockState support = level.getBlockState(new BlockPos(0, 64, 0));
             boolean slime = scene.name.endsWith("_slime");
             boolean trampled = scene.name.equals("fall_on_pig_farmland");
-            Block expected = slime ? Blocks.SLIME_BLOCK : trampled ? Blocks.DIRT : Blocks.FARMLAND;
+            Block expected = slime ? Blocks.SLIME_BLOCK : trampled ? Blocks.DIRT
+                    : scene.name.endsWith("_shelf") ? Blocks.SHELF_MUSHROOM : Blocks.FARMLAND;
             if (!support.is(expected) || (pig.getHealth() == pig.getMaxHealth()) != slime) {
                 throw new IllegalStateException("Expected landing never occurred in " + scene.name
                         + ": " + support + ", hp=" + pig.getHealth() + ", y=" + pig.getY());

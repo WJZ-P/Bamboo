@@ -104,6 +104,9 @@ pub struct EntityPublic {
     pub yaw: f32,
     pub removed: bool,
     pub precise: bool,
+    /// `Entity.syncPosition`，用于追踪器的发送时机。
+    /// `Entity.syncPosition` controls the tracking update schedule.
+    pub sync_position: bool,
     /// `Entity.vehicle`：这一刻开始时骑着的载具；别的实体只看得到这份快照。
     ///
     /// `Entity.vehicle` at the start of this tick; other entities only see this
@@ -537,6 +540,7 @@ impl EntityRow {
             movement_this_tick: state.movement_this_tick,
             final_movements: state.final_movements,
             requires_precise_position: public.precise,
+            sync_position: public.sync_position,
             random: state.random,
             y_rot: public.yaw,
             first_tick: state.first_tick,
@@ -665,6 +669,7 @@ impl Entity {
                 yaw: self.y_rot,
                 removed: self.removed,
                 precise: self.requires_precise_position,
+                sync_position: self.sync_position,
                 vehicle: self.vehicle,
             },
             state: EntityState {

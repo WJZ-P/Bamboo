@@ -1748,6 +1748,11 @@ pub enum Command {
     TrampleFarmland {
         pos: BlockPos,
     },
+    /// 蜂蜜块着陆音与实体事件 54。
+    /// Honey-block landing sound and entity event 54.
+    LandOnHoney {
+        source: mc_bamboo_data::sounds::SoundSource,
+    },
     /// 落地后读取最新支撑状态，再投递 `HIT_GROUND`。
     /// Read the new support state after landing and dispatch `HIT_GROUND`.
     HitGround {
@@ -2658,6 +2663,20 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 ..Default::default()
             };
             super::landing::turn_farmland_to_dirt(world, pos, context, Some(me));
+        }
+        Command::LandOnHoney { source } => {
+            world.play_sound(
+                me.position,
+                mc_bamboo_data::sounds::sound_event("minecraft:block.honey_block.slide"),
+                source,
+                1.0,
+                1.0,
+                false,
+            );
+            world.push_effect(crate::Effect::EntityEvent {
+                entity: me.id,
+                event: 54,
+            });
         }
         Command::HitGround {
             supporting,

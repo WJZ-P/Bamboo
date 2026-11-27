@@ -40,7 +40,7 @@ pub(crate) fn tick_falling_block(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     data.time += 1;
     me.apply_gravity();
     let movement = me.delta;
-    me.move_entity(ctx.blocks(), movement);
+    me.move_entity(ctx, movement);
     // `move` 里的摔落伤害可能把铁砧摔裂或设上 `cancelDrop`。只取这两个字段：
     // `data.time` 是这一拍刚加过的，整份拷回来会让 100/600 刻超时永远不触发。
     if let EntityKind::FallingBlock(updated) = &me.kind {
