@@ -324,14 +324,7 @@ fn update_and_attack_target(
             })
             .map(|entity| mob_uuid(entity).unwrap_or(uuid))
     } else {
-        let area = Aabb::new(
-            f64::from(pos.x) - KILL_RANGE,
-            f64::from(pos.y) - KILL_RANGE,
-            f64::from(pos.z) - KILL_RANGE,
-            f64::from(pos.x) + KILL_RANGE,
-            f64::from(pos.y) + KILL_RANGE,
-            f64::from(pos.z) + KILL_RANGE,
-        );
+        let area = destroy_range_aabb(pos);
         let candidates: Vec<(i32, [u8; 16], Vec3)> = world
             .live_entities()
             .iter()
@@ -385,6 +378,18 @@ fn update_and_attack_target(
         // `getUpdateTag`（`Target`）重新发给追踪这个区块的客户端。
         world.push_effect(Effect::ConduitChanged { pos });
     }
+}
+
+/// 官方 `getDestroyRangeAABB`：`new AABB(BlockPos).inflate(KILL_RANGE)`。
+pub fn destroy_range_aabb(pos: BlockPos) -> Aabb {
+    Aabb::new(
+        i64::from(pos.x) as f64 - KILL_RANGE,
+        i64::from(pos.y) as f64 - KILL_RANGE,
+        i64::from(pos.z) as f64 - KILL_RANGE,
+        i64::from(pos.x) as f64 + 1.0 + KILL_RANGE,
+        i64::from(pos.y) as f64 + 1.0 + KILL_RANGE,
+        i64::from(pos.z) as f64 + 1.0 + KILL_RANGE,
+    )
 }
 
 fn mob_uuid(entity: &Entity) -> Option<[u8; 16]> {
@@ -484,6 +489,17 @@ mod tests {
         // 坏数据不 panic，也不带入目标。
         let bad = Tag::Compound(vec![("Target".to_owned(), Tag::IntArray(vec![1, 2, 3]))]);
         assert!(ConduitBlockEntity::read(POS, &bad).target().is_none());
+    }
+
+    #[test]
+    fn destroy_range_is_the_inflated_block_cube() {
+        let box_ = destroy_range_aabb(BlockPos::new(3, 64, -5));
+        assert_eq!(box_.min_x, -5.0);
+        assert_eq!(box_.max_x, 12.0);
+        assert_eq!(box_.min_y, 56.0);
+        assert_eq!(box_.max_y, 73.0);
+        assert_eq!(box_.min_z, -13.0);
+        assert_eq!(box_.max_z, 4.0);
     }
 
     #[test]
