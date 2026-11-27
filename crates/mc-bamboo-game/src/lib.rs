@@ -84,6 +84,9 @@ pub mod map;
 mod menu;
 pub mod merchant;
 mod minecart_command;
+#[cfg(feature = "pipeline-bench")]
+#[doc(hidden)]
+pub mod pipeline_bench;
 mod vehicle_display_name;
 #[cfg(feature = "oracle-samples")]
 pub use minecart_command::{CommandMinecartSample, replay_command_minecart};

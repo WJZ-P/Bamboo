@@ -83,6 +83,8 @@ struct Queue<J> {
     /// 已经取消、但还在堆里的任务编号。
     cancelled: HashSet<u64>,
     stopping: bool,
+    #[cfg(feature = "pipeline-bench")]
+    bench: crate::pipeline_bench::QueueMeter,
 }
 
 struct Shared<J> {
@@ -90,6 +92,8 @@ struct Shared<J> {
     ready: Condvar,
     /// 还活着的工作线程数。只有线程本身出了 `catch_unwind` 接不住的错才会少。
     alive: AtomicUsize,
+    #[cfg(feature = "pipeline-bench")]
+    job_ns: std::sync::atomic::AtomicU64,
 }
 
 impl<J> Shared<J> {
@@ -123,9 +127,13 @@ impl<J: PoolJob> ComputePool<J> {
                 queued_ids: HashSet::new(),
                 cancelled: HashSet::new(),
                 stopping: false,
+                #[cfg(feature = "pipeline-bench")]
+                bench: Default::default(),
             }),
             ready: Condvar::new(),
             alive: AtomicUsize::new(0),
+            #[cfg(feature = "pipeline-bench")]
+            job_ns: Default::default(),
         });
         let (sender, replies) = mpsc::channel();
         let mut pool = Self {
@@ -158,6 +166,8 @@ impl<J: PoolJob> ComputePool<J> {
     /// `id` 由调用方保证不重复。
     pub(crate) fn submit(&mut self, id: u64, priority: u64, job: J) {
         let mut queue = self.shared.lock();
+        #[cfg(feature = "pipeline-bench")]
+        queue.bench.set_empty(false);
         queue.queued_ids.insert(id);
         queue.heap.push(Queued {
             key: Reverse((priority, id)),
@@ -180,6 +190,14 @@ impl<J: PoolJob> ComputePool<J> {
     /// 线程数。
     pub(crate) fn threads(&self) -> usize {
         self.threads
+    }
+
+    #[cfg(feature = "pipeline-bench")]
+    pub(crate) fn bench_stats(&self) -> (Duration, Duration) {
+        (
+            self.shared.lock().bench.empty_wait(),
+            Duration::from_nanos(self.shared.job_ns.load(Ordering::Relaxed)),
+        )
     }
 
     /// 还没收回回执的任务数。
@@ -244,17 +262,27 @@ fn worker<J: PoolJob>(shared: &Shared<J>, replies: &Sender<(u64, J::Reply)>) {
                     return;
                 }
                 if let Some(queued) = queue.heap.pop() {
+                    #[cfg(feature = "pipeline-bench")]
+                    if queue.heap.is_empty() {
+                        queue.bench.set_empty(true);
+                    }
                     let id = queued.key.0.1;
                     queue.queued_ids.remove(&id);
                     let cancelled = queue.cancelled.remove(&id);
                     break (id, queued.job, cancelled);
                 }
+                #[cfg(feature = "pipeline-bench")]
+                queue.bench.begin_wait();
                 queue = shared
                     .ready
                     .wait(queue)
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
+                #[cfg(feature = "pipeline-bench")]
+                queue.bench.end_wait();
             }
         };
+        #[cfg(feature = "pipeline-bench")]
+        let started = std::time::Instant::now();
         let reply = if cancelled {
             job.cancelled()
         } else {
@@ -262,6 +290,10 @@ fn worker<J: PoolJob>(shared: &Shared<J>, replies: &Sender<(u64, J::Reply)>) {
             let output = catch_unwind(AssertUnwindSafe(|| job.run())).map_err(panic_message);
             job.finish(output)
         };
+        #[cfg(feature = "pipeline-bench")]
+        shared
+            .job_ns
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         // 接收端没了说明池子正在 drop，回执没人要了。
         let _ = replies.send((id, reply));
     }

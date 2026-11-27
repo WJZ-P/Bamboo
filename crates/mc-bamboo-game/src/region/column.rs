@@ -727,6 +727,9 @@ impl Region {
             poi,
             poi_version_changed,
         } = *column;
+        #[cfg(feature = "pipeline-bench")]
+        let storage_measure =
+            crate::pipeline_bench::enter(crate::pipeline_bench::Phase::DeliverStorage);
         self.profiler.start_sub(SubPhase::DeliverStorage);
         self.chunks
             .insert_column(pos, world)
@@ -737,6 +740,8 @@ impl Region {
         }
         self.profiler.end_sub();
 
+        #[cfg(feature = "pipeline-bench")]
+        drop(storage_measure);
         self.profiler.start_sub(SubPhase::DeliverTables);
         for (block_pos, mut packed) in containers {
             packed.entry.recheck_at = packed.recheck_in.map(|remaining| self.tick.plus(remaining));
@@ -773,6 +778,8 @@ impl Region {
         pos: ChunkPos,
         column: Box<RegionColumn>,
     ) -> Result<(), (NotReady, Box<RegionColumn>)> {
+        #[cfg(feature = "pipeline-bench")]
+        let _measure = crate::pipeline_bench::enter(crate::pipeline_bench::Phase::Deliver);
         let ready = self.chunks.ready_to_move_columns()
             && self.block_ticks.ready_to_move_chunks()
             && self.block_entities.ready_to_move_chunks();

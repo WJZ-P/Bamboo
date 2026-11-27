@@ -14,6 +14,9 @@ default = []
 # 只给 mc-bamboo-vanilla 的官方 codec 对拍用；正式构建不编进库里。
 # Only for the mc-bamboo-vanilla official-codec comparison; off in production.
 oracle-samples = []
+# 仅用于区块流水线基准；默认构建不含插桩。
+# Chunk pipeline benchmark only; absent from default builds.
+pipeline-bench = []
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

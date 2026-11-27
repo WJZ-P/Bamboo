@@ -528,20 +528,28 @@ impl DirectorHost {
         self.pool.as_ref().map_or(0, ComputePool::in_flight)
     }
 
+    #[cfg(feature = "pipeline-bench")]
+    pub(crate) fn pipeline_bench_pool_stats(&self) -> (Duration, Duration) {
+        self.pool
+            .as_ref()
+            .expect("benchmark requires a pool")
+            .bench_stats()
+    }
+
     /// 宿主手里还没交给池子的待办数。
     pub(crate) fn compute_backlog(&self) -> usize {
         self.compute_backlog.len()
     }
 
-    /// 测试专用：池子里有在途任务时阻塞等待最多 `timeout` 收一条回执并暂存到
+    /// 测试和基准专用：池子里有在途任务时阻塞等待最多 `timeout` 收一条回执并暂存到
     /// `early_replies`，让下一刻 `collect_compute` 原样接手；避免测试空转 `world.tick()`
     /// 抢占计算线程。返回是否已有回执可收。
     ///
-    /// Test only: while pool jobs are in flight, wait up to `timeout` for one
+    /// Tests and benchmarks only: while jobs are in flight, wait up to `timeout` for one
     /// reply and buffer it in `early_replies` so the next tick's
     /// `collect_compute` consumes it as usual, avoiding busy-spinning
     /// `world.tick()` and starving worker threads. Returns whether a reply is ready.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "pipeline-bench"))]
     pub(crate) fn wait_for_compute_reply(&mut self, timeout: Duration) -> bool {
         if !self.early_replies.is_empty() {
             return true;
@@ -1943,6 +1951,8 @@ impl DirectorHost {
     /// convergence check, otherwise (detached) its acks come back at hand-back.
     /// The host never touches the `Region` itself.
     fn pump(&mut self, island: &mut IslandAccess<'_>, mut initial: Vec<Event<Box<RegionColumn>>>) {
+        #[cfg(feature = "pipeline-bench")]
+        let _measure = crate::pipeline_bench::enter(crate::pipeline_bench::Phase::Dispatch);
         // 第 8 步：分区器只在同一个 pump 里消费 Director 的等级变化和 owner
         // 事件，不碰交付 / 收回本身。开关关着时只有一次布尔判断。
         // Step 8: feed level changes and owner transitions to the island
@@ -2223,6 +2233,10 @@ impl DirectorHost {
                 }
             }
             Task::Assemble { column, .. } => {
+                #[cfg(feature = "pipeline-bench")]
+                use crate::pipeline_bench::{Phase, enter};
+                #[cfg(feature = "pipeline-bench")]
+                let _assemble = enter(Phase::Assemble);
                 // 生成到完工后用不可变的 CARVERS 快照 + 累计的地物写组装交付
                 // 盒子（按来源中心固定先后合，和回执顺序无关）；flat / 读盘路径
                 // 没有这份快照，原盒子照旧。组装和生成用的是同一个
@@ -2275,11 +2289,15 @@ impl DirectorHost {
                 // Install the `light` stage's sky + block light into the
                 // delivered column with `isLightOn=true`; flat/disk keep theirs.
                 if let Some(light) = self.generated_light.remove(&pos) {
+                    #[cfg(feature = "pipeline-bench")]
+                    let _measure = enter(Phase::InstallLight);
                     column.set_generated_light(light);
                 }
                 // `ChunkStatus.SPAWN`：方块和光照都装好之后跑生成期刷怪。
                 // `ChunkStatus.SPAWN`: world-generation spawning once blocks and light are in.
                 if runs_spawn {
+                    #[cfg(feature = "pipeline-bench")]
+                    let _measure = enter(Phase::Spawn);
                     crate::worldgen_mobs::spawn_original_mobs(
                         &self.world_gen_config,
                         pos,
@@ -2470,6 +2488,8 @@ impl DirectorHost {
     /// 交付给世界的顺序就和调度无关。哪个结果落在哪一刻仍然取决于调度，
     /// 所以内联执行器和计算池的交付时刻可以不同，区块内容相同。
     fn collect_compute(&mut self, wait: Option<Duration>) -> Vec<Event<Box<RegionColumn>>> {
+        #[cfg(feature = "pipeline-bench")]
+        let _measure = crate::pipeline_bench::enter(crate::pipeline_bench::Phase::Dispatch);
         let mut replies = std::mem::take(&mut self.early_replies);
         if let Some(pool) = &mut self.pool {
             if let Some(timeout) = wait

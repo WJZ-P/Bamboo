@@ -3,7 +3,12 @@
 //! `cargo run --release -p mc-bamboo-game --example director_pipeline_bench -- \
 //!     [--chunks N] [--threads T] [--seed S] [--no-structures] [--cold] [--label NAME]
 //!     [--idle-secs S] [--second] [--terrain-mb M] [--feature-mb M] [--cache-idle-secs S]
-//!     [--no-dependency-release] [--no-cold-tier] [--dump-blocks PATH]`
+//!     [--no-dependency-release] [--no-cold-tier] [--dump-blocks PATH] [--dump-light PATH]
+//!     [--full-only]`
+//!
+//! `--features pipeline-bench --example director_pipeline_bench -- --s0 reply|paced`
+//! 启用独占世界线程计时和计算池空闲积分；每个模式都另起一个世界。
+//! Enable exclusive world-thread timing and compute-pool idle accounting.
 //!
 //! `--terrain-mb 256 --feature-mb 64 --cache-idle-secs 0 --no-dependency-release
 //! --no-cold-tier` 复现本轮改动之前的缓存行为（256 MiB / 64 MiB、不按依赖释放、
@@ -60,6 +65,10 @@ struct Options {
     /// 将测区的方块状态按固定顺序写盘，供缓存策略逐字节比较。
     /// Write measured block states in fixed order for a bytewise policy comparison.
     dump_blocks: Option<PathBuf>,
+    dump_light: Option<PathBuf>,
+    full_only: bool,
+    #[cfg(feature = "pipeline-bench")]
+    s0: Option<pipeline_s0::Mode>,
 }
 
 impl Options {
@@ -75,6 +84,10 @@ impl Options {
             second: false,
             cache: WorldgenCacheSettings::default(),
             dump_blocks: None,
+            dump_light: None,
+            full_only: false,
+            #[cfg(feature = "pipeline-bench")]
+            s0: None,
         };
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -104,17 +117,49 @@ impl Options {
                 "--no-dependency-release" => worldgen_cache::set_dependency_release(false),
                 "--no-cold-tier" => worldgen_cache::set_cold_tier(false),
                 "--dump-blocks" => options.dump_blocks = Some(value().into()),
+                "--dump-light" => options.dump_light = Some(value().into()),
+                "--full-only" => options.full_only = true,
+                #[cfg(feature = "pipeline-bench")]
+                "--s0" => {
+                    options.s0 = Some(match value().as_str() {
+                        "reply" => pipeline_s0::Mode::Reply,
+                        "paced" => pipeline_s0::Mode::Paced,
+                        _ => panic!("--s0 expects reply or paced"),
+                    });
+                }
                 _ => panic!("unknown argument {arg}"),
             }
         }
         assert!(
-            options.dump_blocks.is_none() || options.threads.len() == 1,
-            "--dump-blocks requires exactly one worker count"
+            (options.dump_blocks.is_none() && options.dump_light.is_none())
+                || options.threads.len() == 1,
+            "a dump requires exactly one worker count"
         );
+        if options.full_only {
+            assert!(
+                (options.dump_blocks.is_some() || options.dump_light.is_some()) && !options.second,
+                "--full-only requires a dump and excludes --second"
+            );
+        }
+        #[cfg(feature = "pipeline-bench")]
+        if options.s0.is_some() {
+            assert!(options.side > 0, "S0 needs a nonempty square");
+            assert!(
+                !options.second && options.idle_secs == 0,
+                "S0 measures only first delivery"
+            );
+            assert!(
+                options.threads.iter().all(|&n| n > 0),
+                "S0 needs compute workers"
+            );
+        }
         options
     }
 }
 
+#[cfg(feature = "pipeline-bench")]
+#[path = "support/pipeline_s0.rs"]
+mod pipeline_s0;
 #[path = "support/process_cpu.rs"]
 mod process_cpu;
 use process_cpu::process_cpu_ms;
@@ -169,6 +214,16 @@ fn settle(world: &mut World, positions: &[ChunkPos], threads: usize) -> usize {
     }
 }
 
+fn request_chunks(world: &mut World, positions: &[ChunkPos], full_only: bool) {
+    if full_only {
+        // 对拍只交付，不让不同刻数的驱动跑不同数量的交付后模拟。
+        // For parity, deliver without letting different tick counts run different simulation.
+        world.load_chunks_unpaced(positions, mc_bamboo_world::ticket::FULL_CHUNK_LEVEL);
+    } else {
+        world.force_chunks_unpaced(positions);
+    }
+}
+
 fn dump_blocks(world: &World, positions: &[ChunkPos], path: &Path) -> std::io::Result<()> {
     let mut out = BufWriter::new(File::create(path)?);
     for &pos in positions {
@@ -177,6 +232,45 @@ fn dump_blocks(world: &World, positions: &[ChunkPos], path: &Path) -> std::io::R
         }
     }
     out.flush()
+}
+
+fn dump_light(world: &World, positions: &[ChunkPos], path: &Path) -> std::io::Result<()> {
+    use mc_bamboo_nbt::Tag;
+    let mut out = BufWriter::new(File::create(path)?);
+    for &pos in positions {
+        let Tag::Compound(mut root) = world
+            .chunk_nbt_unpaced(pos)
+            .expect("delivered chunk")
+            .expect("encode delivered chunk")
+        else {
+            panic!("expected a compound chunk");
+        };
+        root.retain(|(key, _)| matches!(key.as_str(), "isLightOn" | "sections"));
+        for (_, tag) in &mut root {
+            if let Tag::List(sections) = tag {
+                for section in sections {
+                    let Tag::Compound(fields) = section else {
+                        panic!("expected a compound section");
+                    };
+                    fields
+                        .retain(|(key, _)| matches!(key.as_str(), "Y" | "BlockLight" | "SkyLight"));
+                }
+            }
+        }
+        let mut bytes = Vec::new();
+        Tag::Compound(root).write_named("", &mut bytes);
+        out.write_all(&bytes)?;
+    }
+    out.flush()
+}
+
+fn dump_requested(world: &World, positions: &[ChunkPos], options: &Options) {
+    if let Some(path) = &options.dump_blocks {
+        dump_blocks(world, positions, path).expect("write chunk block states");
+    }
+    if let Some(path) = &options.dump_light {
+        dump_light(world, positions, path).expect("write chunk light");
+    }
 }
 
 fn main() {
@@ -189,6 +283,10 @@ fn main() {
         clear_terrain_cache();
         clear_feature_cache();
         worldgen_profile::reset();
+        #[cfg(feature = "pipeline-bench")]
+        if options.s0.is_some() {
+            worldgen_profile::disable();
+        }
         let (inbox, receiver) = mc_bamboo_game::inbound_channel();
         let config = WorldConfig {
             view_distance: 4,
@@ -207,6 +305,18 @@ fn main() {
                 reclaims: 0,
             },
             ..WorldConfig::default()
+        };
+        #[cfg(feature = "pipeline-bench")]
+        let config = if options.s0.is_some() {
+            // 只量唯一的世界线程；不让交付落到岛的 tick 线程。
+            // Measure one world thread, keeping delivery off island tick workers.
+            WorldConfig {
+                island_threads: 0,
+                islands: false,
+                ..config
+            }
+        } else {
+            config
         };
         let mut world = World::new(config, receiver);
         if options.dump_blocks.is_some() {
@@ -234,14 +344,35 @@ fn main() {
                 .iter()
                 .map(|pos| ChunkPos::new(pos.x + 4096, pos.z + 4096))
                 .collect();
-            world.force_chunks_unpaced(&far);
+            request_chunks(&mut world, &far, options.full_only);
+            #[cfg(feature = "pipeline-bench")]
+            if options.s0.is_some() {
+                pipeline_s0::warm(&mut world, &far, options.full_only);
+            } else {
+                settle(&mut world, &far, threads);
+            }
+            #[cfg(not(feature = "pipeline-bench"))]
             settle(&mut world, &far, threads);
             clear_terrain_cache();
             clear_feature_cache();
             worldgen_profile::reset();
         }
+        #[cfg(feature = "pipeline-bench")]
+        if let Some(mode) = options.s0 {
+            worldgen_profile::disable();
+            pipeline_s0::run(
+                &mut world,
+                &positions,
+                threads,
+                &options.label,
+                mode,
+                options.full_only,
+            );
+            dump_requested(&world, &positions, &options);
+            continue;
+        }
         let (warm_rss_mb, _) = process_memory_mb();
-        world.force_chunks_unpaced(&positions);
+        request_chunks(&mut world, &positions, options.full_only);
 
         let wall_started = Instant::now();
         let cpu0 = process_cpu_ms();
@@ -363,8 +494,6 @@ fn main() {
             idle_feature_bytes as f64 / (1024.0 * 1024.0),
         );
         black_box(world.is_chunk_loaded(positions[0]));
-        if let Some(path) = &options.dump_blocks {
-            dump_blocks(&world, &positions, path).expect("write chunk block states");
-        }
+        dump_requested(&world, &positions, &options);
     }
 }
