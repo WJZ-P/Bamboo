@@ -72,7 +72,19 @@ Context {
   全局快照），`matches` 和两种目标的比较都按官方字节码。
 - `if/unless data`：按当前上下文解析 `block` / `entity` / `storage` 三种数据源，
   用 `NbtPath::get` 判路径有没有命中；和 `/data` 共用一套数据源。
-- `if/unless predicate`：还没接上，执行时明确报错，不静默判假。
+- `if/unless biome`：位置按官方 `getLoadedBlockPos`（没加载报 `argument.pos.unloaded`，高度出界报
+  `argument.pos.outofworld`），再比单个群系或 `#标签`。参数在解析期查注册表和标签表。
+- `if/unless dimension`：只有主世界为真；下界、末地为假；其它名字报 `argument.dimension.invalid`。
+- `if/unless loaded`：区块已加载并且 `TickLevels::chunk_ticks_entities`（官方 `ENTITY_TICKING` +
+  `areEntitiesLoaded`）。
+- `if/unless predicate`：内联 SNBT 条件由 `command/predicate_view.rs` 转成 JSON 交给
+  `mc-bamboo-loot::LootCondition`，上下文是官方的 `COMMAND` 参数集（`ORIGIN` = 来源位置，
+  `THIS_ENTITY` = 来源实体），随机源是岛的世界随机源。按名字引用在解析期报
+  `argument.resource_or_id.no_such_element`（没有数据包谓词）。
+- `if/unless function`、`stopwatch`：Bamboo 没有函数和秒表，照官方「不存在」的错误报。
+- `if/unless items|slots`、`summon`、有来源实体时的 `on`：命令树已注册，执行时明确报错。
+- 条件写在链尾（没有 `run`）：走官方条件节点自己的 `executes`，对每个来源各报一次
+  `commands.execute.conditional.pass` / `pass_count`，或 `conditional.fail` / `fail_count`。
 - 条件失败时官方发 `command.execute.conditions.not_met*` 反馈；Bamboo 同样按
   分支数发，且不执行链尾命令。
 - `store result|success`：`result` 是链尾命令的返回值，`success` 是
@@ -97,7 +109,7 @@ Context {
 ## 6. 对拍
 
 `tools/mc-bamboo-vanilla execute-oracle` 用官方 `Commands.performCommand`
-在假世界里跑 32 条 `/execute` 命令；假世界补全了 `ServerLevel` 的实体 getter、
+在假世界里跑 148 条命令（`/execute`、`/data`、`/effect`）；假世界补全了 `ServerLevel` 的实体 getter、
 `ChunkMap` 和真正的牛实体，所以 `as @e[type=cow]`、`at @e`、`if entity @e[...]`
 真的会选出牛并分叉。记录：
 
@@ -111,13 +123,13 @@ Rust 侧在同一串命令上重放并逐项比较；`--break-self-test` 改坏�
 
 ## 7. 已知差异
 
-- 只有主世界，`in` 其它维度明确失败；没有 `on`、`summon`、`positioned over`、
-  `if biome|data|items|slots|stopwatch|function|dimension|loaded|predicate` 的
-  完整实现：命令树注册但执行时明确报错。
+- 只有主世界，`in` 其它维度明确失败；`summon`、`positioned over`、`if items|slots` 和有来源实体时的
+  `on` 没有实现：命令树注册但执行时明确报错。
 - `facing` / `anchored` 用脚底或眼高的近似眼高，属性表没有逐实体眼高。
 - `/data` 的 `modify ... string|compute` 和 int/float provider 变体：命令树完整注册，
   执行时明确报 `command.exception`（官方没有「暂不支持」的统一翻译键）。
-- `if predicate` 需要战利品表谓词管理器，`in` 需要多维度；两者解析照常、执行时明确报错。
+- `if predicate` 只支持内联条件；`in` 需要多维度，解析照常、执行时明确报错。
+- `if biome` 读区块里存的 quart 群系，没有做 `BiomeManager` 的模糊取样。
 - 常见的方块实体类型（箱子、木桶、告示牌、讲台、熔炉类、漏斗、发射器、投掷器等）
   已接游戏层运行时表和 `archive::create_block_entity` 工厂；未建模的存档键仍报
   `command.failed`，不静默丢掉。完整清单见 `docs/data-block-entities.md`。

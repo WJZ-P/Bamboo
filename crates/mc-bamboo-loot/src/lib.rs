@@ -10,6 +10,7 @@
 mod condition;
 mod context;
 mod drops;
+mod entity_parts;
 mod entry;
 mod error;
 #[cfg(test)]
@@ -27,12 +28,17 @@ pub mod trade;
 
 pub use condition::{FloatRangePredicate, IntRangePredicate, LootCondition};
 pub use context::{
-    BlockEntityView, DamageSourceView, EntityTarget, EntityView, EquipmentSlot, LevelView,
-    LootContext, LootParams, Position, entity_enchantment_level,
+    AdvancementView, BlockEntityView, DamageSourceView, EffectView, EntityTarget, EntityView,
+    EquipmentSlot, InputView, LevelView, LightningView, LootContext, LootParams, PlayerView,
+    Position, entity_enchantment_level,
 };
 pub use drops::{
     BlockDropParams, ChestParams, EntityDeathParams, EntityLootParams, block_drops, chest_loot,
     entity_death_drops, entity_loot_drops,
+};
+pub use entity_parts::{
+    FluidPredicate, LightningBoltPredicate, MobEffectsPredicate, NbtPredicate, PlayerPredicate,
+    compare_nbt,
 };
 pub use error::{LootError, Result};
 pub use function::{LootFunction, mob_spawn_enchantments};

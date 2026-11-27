@@ -154,6 +154,108 @@ pub struct EntityView {
     pub sheep_sheared: bool,
     pub is_fishing_hook: bool,
     pub in_open_water: bool,
+    /// `LivingEntity.getActiveEffectsMap()`；非生物留空，`effects` 谓词先看 [`Self::is_living`]。
+    ///
+    /// `LivingEntity.getActiveEffectsMap()`. Empty for non-living entities; the `effects`
+    /// predicate checks [`Self::is_living`] first.
+    pub effects: Vec<EffectView>,
+    /// `NbtPredicate.getEntityTagToCompare` 的结果。没给时 `nbt` 谓词报不支持。
+    ///
+    /// The result of `NbtPredicate.getEntityTagToCompare`. The `nbt` predicate is
+    /// unsupported while this is missing.
+    pub nbt: Option<mc_bamboo_nbt::Tag>,
+    /// `Entity.getTeam()` 的队伍名，没有队伍是 `None`。
+    ///
+    /// The name of `Entity.getTeam()`, or `None` without a team.
+    pub team: Option<String>,
+    /// `Entity.getScoreboardName()`：玩家是名字，其它实体是 UUID 字符串。
+    /// `entity_scores` 条件和玩家谓词用它向 [`LevelView`] 查数据。
+    ///
+    /// `Entity.getScoreboardName()`: the player name, or the UUID string for other
+    /// entities. `entity_scores` and the player predicate use it to query [`LevelView`].
+    pub scoreboard_name: Option<String>,
+    /// 只有 `LightningBolt` 才有。
+    ///
+    /// Present only for a `LightningBolt`.
+    pub lightning: Option<LightningView>,
+    /// 只有 `ServerPlayer` 才有。
+    ///
+    /// Present only for a `ServerPlayer`.
+    pub player: Option<Box<PlayerView>>,
+}
+
+/// 一条 `MobEffectInstance`。
+///
+/// One `MobEffectInstance`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectView {
+    /// 药水效果注册表 ID。
+    pub effect: i32,
+    pub amplifier: i32,
+    /// `getDuration()`，无限时长是 -1。
+    pub duration: i32,
+    pub ambient: bool,
+    pub visible: bool,
+}
+
+/// `LightningBolt` 里谓词会读的两项。
+///
+/// The two things the predicate reads from a `LightningBolt`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LightningView {
+    /// `getBlocksSetOnFire()`。
+    pub blocks_set_on_fire: i32,
+    /// `getHitEntities()`。
+    pub hit_entities: Vec<EntityView>,
+}
+
+/// `Input`：玩家最近一次上报的按键。
+///
+/// `Input`: the keys the player last reported.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InputView {
+    pub forward: bool,
+    pub backward: bool,
+    pub left: bool,
+    pub right: bool,
+    pub jump: bool,
+    pub sneak: bool,
+    pub sprint: bool,
+}
+
+/// `PlayerPredicate` 直接从玩家身上读的字段。统计、配方和进度按
+/// [`EntityView::scoreboard_name`] 走 [`LevelView`] 查。
+///
+/// What `PlayerPredicate` reads straight off the player. Statistics, recipes and
+/// advancements are queried through [`LevelView`] by [`EntityView::scoreboard_name`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlayerView {
+    pub experience_level: i32,
+    pub food_level: i32,
+    pub saturation: f32,
+    /// `GameType.getSerializedName()`：`survival`、`creative`、`adventure`、`spectator`。
+    pub game_mode: &'static str,
+    /// `getLastClientInput()`。没给时 `input` 谓词报不支持。
+    pub input: Option<InputView>,
+    /// `looking_at` 的射线结果：外层 `None` 是调用方没算，内层 `None` 是没看着实体
+    /// 或者没有视线。
+    ///
+    /// The `looking_at` ray result. The outer `None` means the caller did not compute it;
+    /// the inner `None` means no entity is hit or there is no line of sight.
+    pub looking_at: Option<Option<Box<EntityView>>>,
+}
+
+/// 一个进度的完成情况，`PlayerPredicate` 的 `advancements` 用。
+///
+/// The progress of one advancement, for `advancements` in `PlayerPredicate`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdvancementView {
+    /// `AdvancementProgress.isDone()`。
+    pub done: bool,
+    /// 每个判据是否完成；不在表里的判据官方当作不存在。
+    ///
+    /// Whether each criterion is done. A criterion missing here does not exist.
+    pub criteria: BTreeMap<String, bool>,
 }
 
 impl EntityView {
@@ -234,6 +336,52 @@ pub trait LevelView {
 
     /// 世界时钟的总刻数，`time_check` 用。参数是时钟名字，比如 `minecraft:overworld`。
     fn clock_time(&self, _clock: &str) -> Option<i64> {
+        None
+    }
+
+    /// `StructureManager.getStructureWithPieceAt(pos, structures).isValid()`。
+    /// `structures` 是谓词里写的结构名字和 `#标签`，命名空间已经补齐。
+    ///
+    /// `StructureManager.getStructureWithPieceAt(pos, structures).isValid()`.
+    /// `structures` holds the structure names and `#tags` as written, namespaces filled in.
+    fn structure_with_piece_at(
+        &self,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _structures: &[String],
+    ) -> Option<bool> {
+        None
+    }
+
+    /// 积分板上的一项分数。外层 `None` 是调用方没接积分板；内层 `None` 是目标不存在
+    /// 或者这个持有者在目标下没有分数（官方两种情况都判 false）。
+    ///
+    /// One scoreboard score. The outer `None` means no scoreboard is wired in; the inner
+    /// `None` means the objective is missing or the holder has no score in it, both of
+    /// which vanilla treats as false.
+    fn score(&self, _holder: &str, _objective: &str) -> Option<Option<i32>> {
+        None
+    }
+
+    /// `StatsCounter.getValue`。`stat_type` 和 `stat` 都是带命名空间的名字。
+    ///
+    /// `StatsCounter.getValue`. `stat_type` and `stat` are namespaced names.
+    fn player_stat(&self, _player: &str, _stat_type: &str, _stat: &str) -> Option<i32> {
+        None
+    }
+
+    /// `ServerRecipeBook.contains`。
+    fn player_has_recipe(&self, _player: &str, _recipe: &str) -> Option<bool> {
+        None
+    }
+
+    /// 玩家在一个进度上的完成情况。外层 `None` 是调用方没接进度；内层 `None` 是服务器
+    /// 没有这个进度。
+    ///
+    /// A player's progress on one advancement. The outer `None` means advancements are
+    /// not wired in; the inner `None` means the server has no such advancement.
+    fn player_advancement(&self, _player: &str, _id: &str) -> Option<Option<AdvancementView>> {
         None
     }
 }

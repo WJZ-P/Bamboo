@@ -25,6 +25,7 @@ pub enum Registry {
     MobEffect,
     Potion,
     Instrument,
+    Fluid,
 }
 
 impl Registry {
@@ -40,6 +41,7 @@ impl Registry {
             Registry::MobEffect => "minecraft:mob_effect",
             Registry::Potion => "minecraft:potion",
             Registry::Instrument => "minecraft:instrument",
+            Registry::Fluid => "minecraft:fluid",
         }
     }
 
@@ -55,6 +57,7 @@ impl Registry {
             Registry::MobEffect => id_in(registries::mob_effect::NAMES, name),
             Registry::Potion => id_in(registries::potion::NAMES, name),
             Registry::Instrument => synced_id("minecraft:instrument", name),
+            Registry::Fluid => id_in(registries::fluid::NAMES, name),
         }
     }
 
@@ -69,6 +72,7 @@ impl Registry {
             Registry::MobEffect => "mob effect",
             Registry::Potion => "potion",
             Registry::Instrument => "instrument",
+            Registry::Fluid => "fluid",
         }
     }
 }
@@ -214,6 +218,10 @@ pub fn holder_set(value: &Value, registry: Registry, what: &str) -> Result<Vec<i
     let mut result = Vec::new();
     for raw in super::json::string_or_list(value, what)? {
         let (name, is_tag) = holder_name(raw);
+        // `Identifier.parse`：没写命名空间等于 `minecraft:`（命令里的内联谓词常这么写）。
+        // `Identifier.parse`: a missing namespace is `minecraft:`, as inline predicates
+        // in commands often write it.
+        let name = &crate::entity_parts::namespaced(name);
         if is_tag {
             let ids = tag_ids(registry.tag_group(), name).ok_or_else(|| {
                 invalid(format!(
@@ -252,7 +260,7 @@ pub fn single_registry_id(value: &Value, registry: Registry, what: &str) -> Resu
         return Err(invalid(format!("{what} must not be a tag")));
     }
     registry
-        .id(raw)
+        .id(&crate::entity_parts::namespaced(raw))
         .ok_or_else(|| invalid(format!("unknown {} `{raw}` in {what}", registry.describe())))
 }
 

@@ -278,9 +278,7 @@ impl LootCondition {
             Self::EnchantmentActive { active } => {
                 Ok(context.params.enchantment_active == Some(*active))
             }
-            Self::EntityScores { .. } => Err(LootError::Unsupported(
-                "condition `entity_scores` needs a scoreboard".to_owned(),
-            )),
+            Self::EntityScores { scores, target } => entity_scores(context, scores, *target),
             Self::EntityProperties { predicate, target } => {
                 let entity = target.get(context.params);
                 match predicate {
@@ -537,6 +535,40 @@ fn parse_chances(value: &Value, what: &str) -> Result<Vec<f32>> {
         )));
     }
     Ok(chances)
+}
+
+/// 官方 `EntityHasScoreCondition.test`：实体为空判 false；每个目标都要存在、这个实体在
+/// 目标下有分数，并且分数落在范围里。
+///
+/// Official `EntityHasScoreCondition.test`: a missing entity is false; every objective
+/// must exist, the entity must have a score in it, and the score must be in range.
+fn entity_scores(
+    context: &LootContext<'_, '_, '_>,
+    scores: &BTreeMap<String, IntRangePredicate>,
+    target: EntityTarget,
+) -> Result<bool> {
+    let Some(entity) = target.get(context.params) else {
+        return Ok(false);
+    };
+    if scores.is_empty() {
+        return Ok(true);
+    }
+    let level = context.level("condition `entity_scores`")?;
+    let holder = entity.scoreboard_name.as_deref().ok_or_else(|| {
+        LootError::Unsupported("entity_scores needs EntityView::scoreboard_name".to_owned())
+    })?;
+    for (objective, range) in scores {
+        let score = level.score(holder, objective).ok_or_else(|| {
+            LootError::Unsupported("entity_scores needs LevelView::score".to_owned())
+        })?;
+        let Some(score) = score else {
+            return Ok(false);
+        };
+        if !range.test(context, score)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn parse_entity_target(map: &serde_json::Map<String, Value>, what: &str) -> Result<EntityTarget> {

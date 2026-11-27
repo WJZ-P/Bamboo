@@ -64,6 +64,10 @@ impl LevelView for TestLevel {
     fn clock_time(&self, clock: &str) -> Option<i64> {
         (clock == "minecraft:overworld").then_some(100)
     }
+
+    fn score(&self, holder: &str, objective: &str) -> Option<Option<i32>> {
+        Some((holder == "Kitten" && objective == "dummy").then_some(1))
+    }
 }
 
 fn params() -> LootParams<'static> {
@@ -450,10 +454,28 @@ fn every_condition_kind_evaluates() {
         "scores": {"dummy": 1}
     }))
     .unwrap();
-    assert!(matches!(
-        scores.test(&context(&stored, &random)),
-        Err(LootError::Unsupported(_))
-    ));
+    // 官方 `EntityHasScoreCondition.test`：没有实体直接 false。
+    // Official `EntityHasScoreCondition.test`: no entity is false.
+    assert!(!scores.test(&context(&stored, &random)).unwrap());
+    let mut scored = level_params();
+    scored.this_entity = Some(EntityView::new(0));
+    assert!(
+        matches!(
+            scores.test(&context(&scored, &random)),
+            Err(LootError::Unsupported(_))
+        ),
+        "没有积分板名字时不能猜"
+    );
+    let mut holder = EntityView::new(0);
+    holder.scoreboard_name = Some("Kitten".to_owned());
+    scored.this_entity = Some(holder.clone());
+    assert!(scores.test(&context(&scored, &random)).unwrap());
+    holder.scoreboard_name = Some("Mochi".to_owned());
+    scored.this_entity = Some(holder);
+    assert!(
+        !scores.test(&context(&scored, &random)).unwrap(),
+        "没有分数判 false"
+    );
 
     let mut victim = EntityView::new(0);
     victim.is_on_fire = true;

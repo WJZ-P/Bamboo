@@ -1483,14 +1483,32 @@ WebView2 的渲染进程不算在内。
   难度默认 `easy`（和官方专用服务器一致；`server.properties` 的 `difficulty` 键还没实现，按官方未实现的键原样保留、写回并列进启动日志），`/difficulty` 改完广播给所有人，进服时同步，运行值写进 `level.dat` 的 `difficulty_settings` 并在启动时读回。默认游戏模式是创造模式（官方专用服务器默认是生存；`gamemode` 已能在 `server.properties` 里读到，但 Bamboo 还没实现这个键）；`force-gamemode` 按官方默认关闭，`/defaultgamemode` 不改在线玩家的模式。`level-seed` 已实现：按官方 `WorldOptions.parseSeed` 解析，空串取进程内固定的随机种子，写进 `world_gen_settings.dat` 供重启沿用，`/seed` 报的是这一局的世界种子，`login` 里的哈希种子按官方 `BiomeManager.obfuscateSeed` 算。
   `/clone` 复制方块和方块实体数据，上限读 `max_block_modifications`；`/random` 按官方的种子规则共用 `mc-bamboo-loot` 的随机序列；`/enchant` 给主手物品写附魔组件；`/stopsound` 只给选中的玩家发包。`/loot` 的 `give`、`insert`、`replace`、`spawn` 和来源 `loot`、`mine` 可用；`spawn` 按官方 `dropInWorld` 生成带默认拾取延迟的物品实体，`kill`、`fish` 已在命令树里注册但执行时返回失败（这两个来源要实体掉落表和钓鱼参数，`command/loot.rs::need_entity` 明确拒绝；钓鱼系统本身和实体死亡掉落都已在游戏里接上）。
   `/execute` 按官方 `ExecuteCommand` 注册：`as`、`at`、`positioned`、`rotated`、`facing`、
-  `align`、`anchored`、`in`、`if/unless block|blocks|entity|score|predicate`、`store result|success`、
-  `run`；链上每层用 `CommandGraph` 的重定向上下文保存参数，执行来源按 `source::with_override`
+  `align`、`anchored`、`in`、`on`、`summon`、
+  `if/unless block|blocks|entity|score|data|biome|dimension|loaded|predicate|function|stopwatch|items|slots`、
+  `store result|success`、`run`，整棵树（节点、解析器、`executable`、重定向）和官方 `commands.json`
+  逐节点一致（`tests/command_tree.rs`）；链上每层用 `CommandGraph` 的重定向上下文保存参数，执行来源按 `source::with_override`
   临时替换，`as` 分叉出的每个分支当场顺序执行，`store score` 在所有分支结束后写回。
   设计见 `docs/command-execution-context.md`；`execute-oracle` 用补全了实体 getter 的官方假世界
-  跑 32 条整命令（含 `as @e[type=cow]` 分叉），逐条比较方块、计分板、是否跑到 `run` 和
+  跑 148 条整命令（含 `as @e[type=cow]` 分叉），逐条比较方块、计分板、是否跑到 `run` 和
   翻译键/参数递归展开后的反馈；`--break-self-test` 和按类别的 `--break-group` 确认能抓到改坏。
-  已知差异：只有主世界，`in` 其它维度明确失败；`on`、`summon`、`positioned over`、
-  `if biome|items|slots|stopwatch|function|dimension|loaded` 和 `if predicate` 还没接上；
+  `if/unless biome|dimension|loaded|predicate` 已接上：`biome` 按 `getLoadedBlockPos` 查位置再比
+  单个群系或 `#标签`；`dimension` 只认主世界（下界和末地判假，别的名字报 `argument.dimension.invalid`）；
+  `loaded` 要求区块已加载并且在实体 tick 档位；`predicate` 接受内联 SNBT 条件，按
+  `LootContextParamSets.COMMAND`（来源位置 + 来源实体）交给 `mc-bamboo-loot` 求值。条件写在链尾
+  （后面没有 `run`）时照官方发 `commands.execute.conditional.pass|pass_count` 或报
+  `conditional.fail|fail_count`。链上出现过分叉节点（`as`、`at`、`if`/`unless`、`on`、`positioned as`、`rotated as`、
+  `facing entity`）以后，照官方 `ChainModifiers.isForked` 不再把后面的错误报给来源，出错的那个来源只是被丢掉；
+  `if blocks ... masked` 现在真的跳过空气并按官方数格数，`positioned as` / `rotated as` 不再顺带换掉执行实体。
+  已知差异：只有主世界，`in` 其它维度明确失败；`summon`、`positioned over`、`if items|slots`
+  （槽位来源和物品访问器没实现）执行时明确失败；`on` 在来源没有实体时照官方得到空结果，
+  有实体时八种关系都还没接、明确失败；Bamboo 没有数据包函数和 `/stopwatch`，所以
+  `if|unless function` 的分支恒被丢掉（官方对不存在的函数抛 `arguments.function.unknown`，分叉节点上的错误不报给来源），
+  `if|unless stopwatch` 写在链尾时报 `commands.stopwatch.does_not_exist`、写在链中间时分支被丢掉；
+  `if|unless predicate` 问到还没建模的谓词部分时也按出错处理（链中间分支被丢掉，`unless` 同样不会通过；链尾报 `command.failed`）；`if predicate` 按名字引用恒报
+  `argument.resource_or_id.no_such_element`（没有数据包谓词注册表），内联条件解码失败在执行时报
+  `argument.resource_or_id.failed_to_parse`（官方在解析期报并带原因）；内联 SNBT 先转成 JSON 再解析，
+  字节 0 / 1 当布尔（`1b` 写在整数字段上会被拒绝）；`if biome` 读区块里的 quart 群系，没有做
+  `BiomeManager` 的模糊取样（群系交界一两格内可能和官方不同）；`if blocks` 不比较方块实体；
   `facing` / `anchored` 用近似眼高。`if/unless data` 和 `store ... block|entity|storage` 已接上。
   `/data` 的 `storage` 是世界数据：按官方 `SavedDataStorage.getDataFile` 写成
   `data/<命名空间>/command_storage.dat`，NBT 信封是 `{DataVersion, data:{contents:{<路径>:<复合标签>}}}`，
@@ -1553,8 +1571,20 @@ WebView2 的渲染进程不算在内。
   会改组件的函数只记下「要设置什么」的 JSON，不写真正的组件字节。
   做完的函数：`set_count`、`set_item`、`set_components`、`apply_bonus`（三种公式）、`copy_state`、`discard`、`explosion_decay`、`filtered`、`limit_count`、`set_damage`、`set_enchantments`、`set_instrument`、`set_ominous_bottle_amplifier`、`set_potion`（只写药水 id）、`set_stew_effect`、`enchant_randomly`、`enchant_with_levels`、`enchanted_count_increase`、`furnace_smelt`、`copy_components`（只做 `block_entity` 来源）、不带实体的 `set_name`。
   没做、求值时直接报不支持的：`exploration_map`、`set_custom_data`、`set_attributes`、`copy_name`、`set_contents`、`modify_contents`、`set_loot_table`、`set_lore`、`fill_player_head`、`copy_custom_data`、`set_banner_pattern`、`set_random_dyes`、`set_random_potion`、`set_fireworks`、`set_firework_explosion`、`set_book_cover`、`set_written_book_pages`、`set_writable_book_pages`、`toggle_tooltips`、`set_custom_model_data`，以及 `copy_components` 的实体或物品来源、带实体的 `set_name`、按名字引用的物品修饰器。
-  数值里的 `score`、`storage`、`environment_attribute`，条件里的 `entity_scores` 和 `environment_attribute_check`，条目里的 `slots` 和战利品表标签（`#`）同样报不支持。
-  位置谓词不查流体和结构。实体谓词里还没做的子谓词（效果、NBT、玩家、装备槽、闪电等）会让整次求值失败，而不是当成不匹配。
+  数值里的 `score`、`storage`、`environment_attribute`，条件里的 `environment_attribute_check`，条目里的 `slots` 和战利品表标签（`#`）同样报不支持。
+  条件 `entity_scores` 照官方 `EntityHasScoreCondition`：没有实体、目标不存在或实体在目标下没有分数都判假。
+  实体谓词补上了 `effects`（`MobEffectsPredicate`，非生物判假）、`nbt`（`NbtUtils.compareNbt` 的部分匹配）、
+  `team`、`type_specific/lightning`（不是闪电判假）和 `type_specific/player`（不是玩家判假；等级、饥饿、
+  游戏模式、进度、统计、配方、`looking_at`、`input`），求值顺序按官方 `PREDICATE_TYPE_ORDER`
+  （载具 / 乘客 / 目标 / 闪电 / 玩家靠后，NBT 最后）；位置谓词补上了 `fluid`（`FluidPredicate`：流体集合 +
+  `falling` / `level` 属性）和 `structures` 的求值位置。这些谓词要的数据由调用方给：`/execute if predicate`
+  给了效果、NBT（非玩家实体）、队伍、积分板、玩家的等级 / 饥饿 / 游戏模式 / 进度和流体；
+  **还没给、问到仍让整次求值失败的**：结构（`getStructureWithPieceAt`）、玩家的 NBT、统计、配方、
+  `looking_at` 射线和 `input` 按键、天空可见 / 亮度 / 烟雾；生物死亡等其它掉落路径的实体视角没有补这些新字段
+  （问到 NBT、玩家或积分板时仍报不支持）。`slots` 子谓词没做（缺 `SlotRanges` 表和各实体的槽位访问），
+  JSON 对象形式的 `nbt`（只支持 SNBT 字符串）也没做，两者都让求值失败。
+  `execute-oracle` 里 62 条 `if predicate` 整命令（实体类型、效果、NBT、队伍、闪电、玩家、`entity_scores`、
+  流体、群系）和官方逐条一致。
   随机序列不存档，也没有 `salt`、`includeWorldSeed`、`includeSequenceId` 开关（默认 salt 0，后两项都开）。掉落不查物品的功能开关（`isItemEnabled`）。乘客谓词只看第一个乘客。
 - 工作台（含玩家物品栏里的 2×2）、合成器、切石机、锻造台、熔炉、高炉、烟熏炉、酿造台、织布机、
   砂轮、附魔台、铁砧和制图台已经接上菜单。
