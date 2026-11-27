@@ -779,6 +779,16 @@ impl<'a> World<'a> {
         old_state: BlockState,
         new_state: BlockState,
     ) {
+        self.push_entities_up_with_detached(pos, old_state, new_state, None);
+    }
+
+    pub(crate) fn push_entities_up_with_detached(
+        &mut self,
+        pos: BlockPos,
+        old_state: BlockState,
+        new_state: BlockState,
+        detached: Option<&mut crate::entity::Entity>,
+    ) {
         let old_shape = shape::collision_boxes(old_state, pos, CollisionContext::Empty);
         let new_shape = shape::collision_boxes(new_state, pos, CollisionContext::Empty);
         let diff = shape::join_boxes(&old_shape, &new_shape, shape::BooleanOp::OnlySecond);
@@ -797,26 +807,35 @@ impl<'a> World<'a> {
                 bounds.max_z.max(cell.max_z),
             );
         }
-        let mut entities: Vec<(crate::entity::EntityUid, shape::Aabb)> = Vec::new();
-        self.level.for_each_entity_in(bounds, &mut |public| {
-            if !public.removed {
-                entities.push((public.uid, public.bounding_box()));
-            }
-        });
-        for (uid, bbox) in entities {
-            let d = crate::entity::collide_along(
+        let lift = |bbox: shape::Aabb| {
+            1.0 + crate::entity::collide_along(
                 mc_bamboo_core::Axis::Y,
                 bbox.moved(0.0, 1.0, 0.0),
                 &moved,
                 -1.0,
-            );
-            let dy = 1.0 + d;
+            )
+        };
+        let detached_id = detached.as_ref().map(|entity| entity.id);
+        if let Some(entity) = detached
+            && entity.bounding_box().intersects(bounds)
+        {
+            entity.position.y += lift(entity.bounding_box());
+            entity.old_position = entity.position;
+        }
+        let mut entities: Vec<(crate::entity::EntityUid, shape::Aabb)> = Vec::new();
+        self.level.for_each_entity_in(bounds, &mut |public| {
+            if !public.removed && Some(public.uid) != detached_id {
+                entities.push((public.uid, public.bounding_box()));
+            }
+        });
+        for (uid, bbox) in entities {
+            let dy = lift(bbox);
             self.with_entity_mut(uid, &mut |entity| {
                 entity.position.y += dy;
                 entity.old_position = entity.position;
             });
         }
-        let mut players: Vec<(crate::entity::EntityUid, Vec3, shape::Aabb)> = Vec::new();
+        let mut players: Vec<(crate::entity::EntityUid, shape::Aabb)> = Vec::new();
         self.level.for_each_player(&mut |player| {
             if player.spectator {
                 return;
@@ -831,18 +850,14 @@ impl<'a> World<'a> {
                 player.position.z + half,
             );
             if bbox.intersects(bounds) {
-                players.push((player.uid, player.position, bbox));
+                players.push((player.uid, bbox));
             }
         });
-        for (uid, position, bbox) in players {
-            let d = crate::entity::collide_along(
-                mc_bamboo_core::Axis::Y,
-                bbox.moved(0.0, 1.0, 0.0),
-                &moved,
-                -1.0,
-            );
-            let target = Vec3::new(position.x, position.y + 1.0 + d, position.z);
-            self.teleport_player(uid, target);
+        for (target, bbox) in players {
+            self.push_effect(Effect::PushPlayerUp {
+                target,
+                distance: lift(bbox),
+            });
         }
     }
 
@@ -4930,7 +4945,7 @@ impl<'a> World<'a> {
     /// `CollisionGetter.findSupportingBlock`：脚下这一片里离实体中心最近的方块。
     ///
     /// 距离一样时取坐标大的那个，`Vec3i.compareTo` 先比 y 再比 z 最后比 x。
-    pub(crate) fn find_supporting_block(
+    pub fn find_supporting_block(
         &self,
         position: Vec3,
         box_: shape::Aabb,
@@ -5506,6 +5521,7 @@ mod tests {
                 | Effect::ConstructBeacon { .. }
                 | Effect::KilledByArrow { .. }
                 | Effect::EnderPearlTeleport { .. }
+                | Effect::PushPlayerUp { .. }
                 | Effect::GuardianElderEffect { .. }
                 | Effect::TrialSpawnerTransformBadOmen { .. }
                 | Effect::RaiderDied { .. }

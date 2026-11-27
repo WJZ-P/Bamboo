@@ -789,6 +789,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::ConduitChanged { .. } => 41,
         Effect::RunMinecartCommand(_) => 42,
         Effect::EntityEvent { .. } => 43,
+        Effect::PushPlayerUp { .. } => 44,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -1013,6 +1014,10 @@ fn hash_effect(effect: &Effect) -> u64 {
             position.x.to_bits().hash(&mut hasher);
             position.y.to_bits().hash(&mut hasher);
             position.z.to_bits().hash(&mut hasher);
+        }
+        Effect::PushPlayerUp { target, distance } => {
+            target.hash(&mut hasher);
+            distance.to_bits().hash(&mut hasher);
         }
         Effect::Overlay { key, first, second } => {
             key.hash(&mut hasher);

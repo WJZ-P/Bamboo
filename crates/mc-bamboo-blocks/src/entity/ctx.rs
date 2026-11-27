@@ -1743,6 +1743,17 @@ pub enum Command {
         pos: mc_bamboo_core::BlockPos,
         chance: i32,
     },
+    /// `FarmlandBlock.fallOn` 批准的踩踏。
+    /// A trample allowed by `FarmlandBlock.fallOn`.
+    TrampleFarmland {
+        pos: BlockPos,
+    },
+    /// 落地后读取最新支撑状态，再投递 `HIT_GROUND`。
+    /// Read the new support state after landing and dispatch `HIT_GROUND`.
+    HitGround {
+        supporting: Option<BlockPos>,
+        fallback: crate::BlockState,
+    },
     /// `ZombieAttackTurtleEggGoal.playBreakSound`：音高取世界随机数。
     TurtleEggBreakSound {
         pos: mc_bamboo_core::BlockPos,
@@ -2639,7 +2650,29 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             children,
         } => super::mob::slime::apply_split(me, &from, half_size, &children, world),
         Command::TrampleTurtleEgg { pos, chance } => {
-            super::mob::living::apply_trample_turtle_egg(world, pos, chance);
+            super::landing::trample_turtle_egg(world, pos, chance);
+        }
+        Command::TrampleFarmland { pos } => {
+            let context = crate::game_event::dispatch::EventContext {
+                source_entity: Some(me.id),
+                ..Default::default()
+            };
+            super::landing::turn_farmland_to_dirt(world, pos, context, Some(me));
+        }
+        Command::HitGround {
+            supporting,
+            fallback,
+        } => {
+            let state = supporting.map_or(fallback, |pos| world.block_state(pos));
+            world.game_event(
+                crate::game_event::GameEvent::HitGround,
+                me.position,
+                crate::game_event::dispatch::EventContext {
+                    source_entity: Some(me.id),
+                    affected_state: Some(state),
+                    ..Default::default()
+                },
+            );
         }
         Command::TurtleEggBreakSound { pos } => {
             let pitch = 0.9 + world.random().next_float() * 0.2;

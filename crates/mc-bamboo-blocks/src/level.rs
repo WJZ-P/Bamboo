@@ -2864,6 +2864,12 @@ pub enum Effect {
         target: crate::entity::EntityUid,
         position: mc_bamboo_core::Vec3,
     },
+    /// 推离变高的碰撞形状，保留玩家速度和朝向。
+    /// Lift a player clear of a growing collision shape, preserving velocity and rotation.
+    PushPlayerUp {
+        target: crate::entity::EntityUid,
+        distance: f64,
+    },
     /// 空桶舀起了东西。游戏层按 `ItemUtils.createFilledResult` 把 `item` 交还到 `hand`。
     ///
     /// An empty bucket picked something up. The game layer runs `ItemUtils.createFilledResult`

@@ -81,6 +81,31 @@ pub(crate) fn teleport(
     links.send(player.id, &packet);
 }
 
+/// `ServerPlayer.teleportRelative` 用全部相对标志保留朝向和速度。
+/// `ServerPlayer.teleportRelative` preserves rotation and velocity with all relative flags.
+pub(crate) fn push_player_up(region: &mut Region, id: PlayerId, distance: f64) {
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    let destination = player.position().add(Vec3::new(0.0, distance, 0.0));
+    let teleport_id = player.teleport.next_id();
+    player.teleport.sent_at = region.tick;
+    player.teleport.awaiting_position = Some(destination);
+    player.set_position(&mut region.player_grid, destination);
+    region.links.send(
+        id,
+        &PlayerPosition {
+            teleport_id,
+            x: 0.0,
+            y: distance,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            relative: 0x1ff,
+        },
+    );
+}
+
 /// 只更新位置和朝向，不发 `player_position`（重生包序列里已经发过一次）。
 ///
 /// Updates position and rotation without sending another `player_position`.

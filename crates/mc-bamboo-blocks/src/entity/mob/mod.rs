@@ -2225,6 +2225,8 @@ pub enum DamageKind {
     Cactus,
     SweetBerryBush,
     Fall,
+    /// 朝上的滴水石尖端造成的摔落伤害。 / Fall damage from an upward dripstone tip.
+    Stalagmite,
     /// 鞘翅滑翔时撞墙产生的伤害。
     /// Wall impact damage while gliding.
     FlyIntoWall,
@@ -2347,6 +2349,7 @@ impl DamageKind {
             Self::Cactus => "minecraft:cactus",
             Self::SweetBerryBush => "minecraft:sweet_berry_bush",
             Self::Fall => "minecraft:fall",
+            Self::Stalagmite => "minecraft:stalagmite",
             Self::FlyIntoWall => "minecraft:fly_into_wall",
             Self::Freeze => "minecraft:freeze",
             Self::OutOfWorld => "minecraft:out_of_world",
@@ -2417,6 +2420,7 @@ impl DamageKind {
             Self::Cactus => "cactus",
             Self::SweetBerryBush => "sweetBerryBush",
             Self::Fall => "fall",
+            Self::Stalagmite => "stalagmite",
             Self::FlyIntoWall => "flyIntoWall",
             Self::Freeze => "freeze",
             Self::OutOfWorld => "outOfWorld",
@@ -2464,6 +2468,7 @@ impl DamageKind {
             Self::Cactus,
             Self::SweetBerryBush,
             Self::Fall,
+            Self::Stalagmite,
             Self::FlyIntoWall,
             Self::Freeze,
             Self::OutOfWorld,

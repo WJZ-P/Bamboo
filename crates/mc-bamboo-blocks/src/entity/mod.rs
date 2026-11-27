@@ -17,6 +17,7 @@ pub mod eye_of_ender;
 pub mod firework_rocket;
 pub mod fishing_hook;
 pub mod hanging;
+pub mod landing;
 pub mod leash_knot;
 pub mod lightning;
 pub mod minecart;

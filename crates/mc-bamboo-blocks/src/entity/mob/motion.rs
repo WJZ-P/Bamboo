@@ -17,6 +17,7 @@ use crate::{
         Entity, Movement, axis_component,
         ctx::{BlockView, Command, EntityCtx},
         item::{apply_current, flow_vector, fluid_box},
+        landing,
         physics::{for_each_block_intersected_between, offset_along, sweep_movement, world_boxes},
         with_axis,
     },
@@ -120,7 +121,15 @@ pub(crate) fn move_living(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCt
         return;
     }
     if moved_vertically && me.vertical_collision || me.horizontal_collision {
-        restitute(me, mob, legacy_state, x_collision, z_collision, collided);
+        restitute(
+            me,
+            mob,
+            ctx,
+            legacy_state,
+            x_collision,
+            z_collision,
+            collided,
+        );
     }
     movement_emission(me, mob, ctx, collided, legacy_pos, legacy_state);
     let factor = mth::lerp_f32(
@@ -151,6 +160,27 @@ fn check_fall_damage(
     if !me.in_water {
         update_fluid_interaction(me, mob, ctx.blocks());
     }
+    if me.on_ground
+        && me.fall_distance > 0.0
+        && let Some((position, count)) = landing::fall_particles(
+            me.position,
+            pos,
+            state,
+            me.fall_distance + 1.0e-6
+                - mob
+                    .attributes
+                    .value(mc_bamboo_data::registries::attribute::SAFE_FALL_DISTANCE),
+        )
+    {
+        mob.events.push(super::MobEvent::Particles {
+            particle: mc_bamboo_data::registries::particle_type::BLOCK,
+            item: Some(state.0 as i32),
+            position,
+            offset: Vec3::default(),
+            speed: 0.15,
+            count,
+        });
+    }
     if !me.in_water && ya < 0.0 {
         me.fall_distance -= f64::from(ya as f32);
     }
@@ -158,6 +188,13 @@ fn check_fall_damage(
         if me.fall_distance > 0.0 {
             let distance = me.fall_distance;
             fall_on(me, mob, ctx, pos, state, distance);
+            ctx.emit(
+                Command::HitGround {
+                    supporting: me.main_supporting_block,
+                    fallback: state,
+                },
+                me,
+            );
         }
         me.fall_distance = 0.0;
         mob.last_climbable_pos = None;
@@ -174,26 +211,46 @@ fn fall_on(
     distance: f64,
 ) {
     if state.is(blocks::TURTLE_EGG) {
-        // `TurtleEggBlock.fallOn`：`instanceof Zombie` 才不踩，其他生物 1/3。
-        // `TurtleEggBlock.fallOn`: only `instanceof Zombie` is exempt, others 1 in 3.
         if !mob.mob_type.is_zombie() {
             destroy_turtle_egg(me, ctx, pos, 3);
         }
-        cause_fall_damage(me, mob, ctx, distance, 1.0);
-    } else if state.is(blocks::HAY_BLOCK) || state.is(blocks::HONEY_BLOCK) {
-        cause_fall_damage(me, mob, ctx, distance, 0.2);
-    } else if state.is(blocks::SLIME_BLOCK) {
-        cause_fall_damage(me, mob, ctx, distance, 0.0);
-    } else if state.is_a(BlockAncestor::PowderSnowBlock) {
-        // 细雪不调 `super.fallOn`，没有伤害。
     } else if state.is(blocks::FARMLAND) {
-        // `FarmlandBlock.fallOn`：先无条件取一次世界随机数；踩坏耕地这一轮不做。
-        let _ = ctx.blocks().level_random_float();
-        cause_fall_damage(me, mob, ctx, distance, 1.0);
-    } else if state.is_a(BlockAncestor::BedBlock) {
-        cause_fall_damage(me, mob, ctx, distance * f64::from(1.0_f32 - 0.5), 1.0);
-    } else {
-        cause_fall_damage(me, mob, ctx, distance, 1.0);
+        let roll = ctx.blocks().level_random_float();
+        if f64::from(roll) < distance - 0.5
+            && ctx.blocks().block_game_rules().mob_griefing
+            && landing::can_trample_farmland(me.dimensions.0, me.dimensions.1)
+        {
+            ctx.emit(Command::TrampleFarmland { pos }, me);
+        }
+    } else if state.is(blocks::HONEY_BLOCK) {
+        living::play_sound(me, mob, "minecraft:block.honey_block.slide", 1.0, 1.0);
+        mob.events.push(super::MobEvent::EntityEvent { event: 54 });
+    } else if state.is_a(BlockAncestor::PowderSnowBlock) && distance >= 4.0 {
+        play_fall_sound(me, mob, distance >= 7.0);
+    }
+    if let Some((distance, multiplier, kind)) = landing::fall_damage(state, distance, false) {
+        let damage = cause_fall_damage(me, mob, ctx, distance, multiplier, kind);
+        if damage && state.is(blocks::HONEY_BLOCK) {
+            play_block_fall_sound(me, mob, state);
+        }
+    }
+}
+
+fn play_fall_sound(me: &Entity, mob: &mut Mob, big: bool) {
+    let sound = match (mob.mob_type.is_monster(), big) {
+        (true, true) => "minecraft:entity.hostile.big_fall",
+        (true, false) => "minecraft:entity.hostile.small_fall",
+        (false, true) => "minecraft:entity.generic.big_fall",
+        (false, false) => "minecraft:entity.generic.small_fall",
+    };
+    living::play_sound(me, mob, sound, 1.0, 1.0);
+}
+
+fn play_block_fall_sound(me: &Entity, mob: &mut Mob, state: BlockState) {
+    if !state.is_air() {
+        let sound = state.sound_type();
+        let name = mc_bamboo_data::sounds::SOUND_EVENTS[usize::from(sound.fall_sound)].name;
+        living::play_sound(me, mob, name, sound.volume * 0.5, sound.pitch * 0.75);
     }
 }
 
@@ -204,7 +261,8 @@ fn cause_fall_damage(
     ctx: &mut dyn EntityCtx,
     distance: f64,
     multiplier: f32,
-) {
+    kind: DamageKind,
+) -> bool {
     use mc_bamboo_data::registries::attribute;
     if mob.mob_type.is_equine() {
         // 马科覆写的 `causeFallDamage` 先播落地声，伤害结算相同。
@@ -220,7 +278,7 @@ fn cause_fall_damage(
         living::play_sound(me, mob, "minecraft:entity.breeze.land", 1.0, 1.0);
     }
     if mob.mob_type.fall_damage_immune() {
-        return;
+        return false;
     }
     let power = distance + 1.0e-6 - mob.attributes.value(attribute::SAFE_FALL_DISTANCE);
     let mut damage = mth::floor(
@@ -237,23 +295,22 @@ fn cause_fall_damage(
         damage -= 5;
     }
     if damage > 0 {
-        living::hurt_server(
-            me,
-            mob,
-            ctx,
-            DamageSource::environment(DamageKind::Fall),
-            damage as f32,
-        );
+        play_fall_sound(me, mob, damage > 4);
+        let pos = landing::on_pos_legacy(me.position, None, |_| BlockState(blocks::AIR));
+        play_block_fall_sound(me, mob, ctx.blocks().block_state(pos));
+        living::hurt_server(me, mob, ctx, DamageSource::environment(kind), damage as f32);
     }
     if mob.mob_type == super::MobType::Creeper {
         super::creeper::after_fall(mob, distance);
     }
+    damage > 0
 }
 
 /// `restituteMovementAfterCollisions`：生物拿方块的整份弹性，弹性属性默认是 0。
 fn restitute(
     me: &mut Entity,
-    mob: &Mob,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
     state: BlockState,
     x_collision: bool,
     z_collision: bool,
@@ -274,6 +331,7 @@ fn restitute(
     } else {
         mob.attributes.value(attribute::GRAVITY)
     };
+    let mut bounced = restitution > 0.0 && (x_collision || z_collision);
     if me.vertical_collision {
         if me.vertical_collision_below {
             restitution = if -current.y <= gravity || state.is_tagged(block_tags::SUPPRESSES_BOUNCE)
@@ -284,6 +342,7 @@ fn restitute(
             };
         }
         let (compensation, drag) = if restitution > 0.0 {
+            bounced = true;
             let portion = movement.y / current.y;
             let air = mth::clamp_f32(
                 1.0 - (1.0 - 0.98) * mob.attributes.value(attribute::AIR_DRAG_MODIFIER) as f32,
@@ -299,6 +358,33 @@ fn restitute(
             Axis::Y,
             (compensation - current.y) * drag * restitution,
         );
+    }
+    if bounced {
+        if state.is(blocks::SHELF_MUSHROOM) {
+            let pos = me.on_pos(ctx.blocks(), 0.500001);
+            ctx.emit(
+                Command::MobBlockSound {
+                    pos,
+                    sound: "minecraft:block.shelf_mushroom.bounce",
+                    source: mc_bamboo_data::sounds::BLOCKS,
+                    volume: 1.0,
+                    pitch: 1.0,
+                },
+                me,
+            );
+        }
+        ctx.emit(
+            Command::GameEvent {
+                event: crate::game_event::GameEvent::Bounce,
+                position: me.position,
+                context: crate::game_event::dispatch::EventContext {
+                    source_entity: Some(me.id),
+                    ..Default::default()
+                },
+            },
+            me,
+        );
+        mob.needs_sync = true;
     }
     me.delta = after;
 }
