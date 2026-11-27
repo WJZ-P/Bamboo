@@ -314,12 +314,28 @@ pub fn stop_riding(
     vehicle: &EntityPublic,
     passengers: Option<&mut Vec<EntityUid>>,
 ) {
+    stop_riding_at(passenger, vehicle, passengers, None);
+}
+
+/// `stopRiding()`：载具还活着时落到 `location`；`None` 用缺省的
+/// `dismount_location`（载具 x / bb.maxY / z）。船的
+/// `AbstractBoat.getDismountLocationForPassenger` 会由游戏层算好后传进来。
+///
+/// `stopRiding()`: land at `location` while the vehicle is alive; `None` uses the
+/// default `dismount_location`. The boat's `getDismountLocationForPassenger` is
+/// computed by the game layer and passed in.
+pub fn stop_riding_at(
+    passenger: &mut crate::entity::Entity,
+    vehicle: &EntityPublic,
+    passengers: Option<&mut Vec<EntityUid>>,
+    location: Option<Vec3>,
+) {
     if passenger.vehicle.is_none() {
         return;
     }
     dismount(passenger, passengers);
     if !vehicle.removed {
-        passenger.position = dismount_location(vehicle);
+        passenger.position = location.unwrap_or_else(|| dismount_location(vehicle));
         passenger.old_position = passenger.position;
         // 官方 `teleportTo/snapTo` 不清速度：乘客这一刻的重力速度留着，下一刻作为根实体
         // 再叠一次重力。Vanilla `snapTo` keeps the velocity, so the root tick adds gravity again.

@@ -1119,14 +1119,19 @@ pub(crate) fn is_unobstructed_by_entities(world: &World, box_: Aabb) -> bool {
     !blocked && world.level().is_unobstructed(&[box_])
 }
 
-/// `Entity.blocksBuilding`：生物（`LivingEntity`）、TNT 和下落方块为真；物品、经验球、箭为假。
+/// `Entity.blocksBuilding`：生物（`LivingEntity`）、TNT、下落方块和船为真
+/// （`AbstractBoat` 构造时置 1）；物品、经验球、箭为假。
 ///
-/// `Entity.blocksBuilding`: true for living entities, primed TNT and falling blocks;
-/// false for items, experience orbs and arrows.
+/// `Entity.blocksBuilding`: true for living entities, primed TNT, falling blocks
+/// and boats (`AbstractBoat` sets it in its constructor); false for items,
+/// experience orbs and arrows.
 fn blocks_building(kind: &KindPublic) -> bool {
     matches!(
         kind,
-        KindPublic::Mob(_) | KindPublic::Tnt { .. } | KindPublic::FallingBlock { .. }
+        KindPublic::Mob(_)
+            | KindPublic::Tnt { .. }
+            | KindPublic::FallingBlock { .. }
+            | KindPublic::Boat(_)
     )
 }
 
@@ -1417,6 +1422,33 @@ mod tests {
             &world,
             Aabb::new(0.1, 64.0, 0.1, 1.0, 65.4, 0.9)
         ));
+    }
+
+    /// `AbstractBoat.canBeCollidedWith()` 和 `blocksBuilding` 都为真：船既挡
+    /// `noCollision(AABB)`，也挡刷怪的 `isUnobstructed`。
+    #[test]
+    fn a_boat_blocks_no_collision_and_spawn_obstruction() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let area = Aabb::new(0.0, 64.0, 0.0, 1.0, 65.0, 1.0);
+        {
+            let world = World::new(&mut level, &mut ticks);
+            assert!(no_collision(&world, area), "空世界应该 noCollision");
+            assert!(
+                is_unobstructed_by_entities(&world, area),
+                "空世界应该没实体阻挡"
+            );
+        }
+        let mut world = World::new(&mut level, &mut ticks);
+        world.spawn_entity(Entity::boat(types::OAK_BOAT, Vec3::new(0.5, 64.0, 0.5)));
+        assert!(
+            !no_collision(&world, area),
+            "船 canBeCollidedWith 为真，noCollision 应判有碰撞"
+        );
+        assert!(
+            !is_unobstructed_by_entities(&world, area),
+            "船 blocksBuilding 为真，刷怪应判被阻挡"
+        );
     }
 
     #[test]

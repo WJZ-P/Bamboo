@@ -184,6 +184,7 @@ public final class EntityOracle {
             cases += boatBreakDrop(official, out);
             cases += boatChestSave(official, out);
             cases += boatAnimalBoard(official, out);
+            cases += boatFacts(official, out);
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -1229,6 +1230,108 @@ public final class EntityOracle {
     }
 
     /** 造一艘官方船、逐刻跑、把每刻的实体状态写成一题 case。 */
+    /**
+     * 船第二期的四个静态事实：菜单标题（船自己的显示名）、重叠容器实体的随机选择、
+     * 生物乘客的船专用落位、运输船整棵 NBT 的 `saveWithoutId` → `load` → 再保存。
+     *
+     * Four boat facts: the menu title, the randomly chosen overlapping entity
+     * container, a mob passenger's boat dismount location and the chest boat's
+     * full save/load/save NBT.
+     */
+    private static int boatFacts(Official official, Writer out) throws Exception {
+        FakeLevel level = FakeLevel.create(official, 1L);
+        level.nextId = FIRST_ITEM_ID;
+        level.firstId = FIRST_ITEM_ID;
+        for (int x = -2; x <= 2; x++) {
+            for (int z = -2; z <= 2; z++) {
+                level.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        // 两艘重叠的运输船，都在漏斗上方 1×1×1 格里；各自的槽 0 放不同物品。
+        AbstractBoat first = new ChestBoat(EntityTypes.OAK_CHEST_BOAT, level, () -> Items.OAK_CHEST_BOAT);
+        AbstractBoat second = new ChestBoat(EntityTypes.SPRUCE_CHEST_BOAT, level, () -> Items.SPRUCE_CHEST_BOAT);
+        level.addFreshEntity(first);
+        level.addFreshEntity(second);
+        for (AbstractBoat boat : new AbstractBoat[] {first, second}) {
+            boat.setPos(0.5, 64.0, 0.5);
+            boat.setUUID(net.minecraft.core.UUIDUtil.uuidFromIntArray(new int[] {47787, 0, 0, boat.getId()}));
+        }
+        ((AbstractChestBoat) first).setItem(0, new ItemStack(Items.DIAMOND, 3));
+        ((AbstractChestBoat) second).setItem(0, new ItemStack(Items.BREAD, 5));
+        level.tracked = List.of(first, second);
+
+        // 1. `ServerPlayer.openMenu` 发的标题是 `MenuProvider.getDisplayName()`。
+        String title = ((net.minecraft.network.chat.contents.TranslatableContents)
+                first.getDisplayName().getContents()).getKey();
+
+        // 2. `getEntityContainer` 用 `level.getRandom().nextInt(size)` 抽一个；记下选中者
+        // 和世界随机源在抽数前后各自的种子。
+        level.getRandom().setSeed(7L);
+        long seedBefore = levelSeed(level);
+        net.minecraft.world.Container selected = HopperBlockEntity.getContainerAt(level, new BlockPos(0, 64, 0));
+        long seedAfter = levelSeed(level);
+        int selectedItem = BuiltInRegistries.ITEM.getId(selected.getItem(0).getItem());
+
+        // 3. `AbstractBoat.getDismountLocationForPassenger`：给牛一个固定的朝向，
+        // 用假世界里的石头地面和空气，记官方落位的三个 double 原始位。
+        net.minecraft.world.entity.animal.pig.Pig pig =
+                (net.minecraft.world.entity.animal.pig.Pig) EntityTypes.PIG.create(level, EntitySpawnReason.COMMAND);
+        pig.setPos(0.5, 64.0, 0.5);
+        pig.setYRot(45.0F);
+        Vec3 landing = first.getDismountLocationForPassenger(pig);
+
+        // 7. 官方 `saveWithoutId` 的完整 NBT，以及 `load` 到一条新船后再保存的 NBT。
+        // 带 `id` 是 `saveAsPassenger` 的键，加载时用它选实体类型。
+        first.setPos(1.5, 64.25, -2.5);
+        first.setYRot(37.0F);
+        first.setDeltaMovement(0.25, -0.125, 0.5);
+        first.setDamage(3.5F);
+        first.setHurtTime(7);
+        first.setHurtDir(-1);
+        first.setRemainingFireTicks(11);
+        var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+        // `Entity.save` 的 `saveAsPassenger` 先写 `id` 再调 `saveWithoutId`，是加载时
+        // 选实体类型的那条完整存档。Bamboo 的 `write_entity` 与它逐键对应。
+        first.save(output);
+        String nbt = output.buildResult().toString();
+        AbstractBoat copy = new ChestBoat(EntityTypes.OAK_CHEST_BOAT, level, () -> Items.OAK_CHEST_BOAT);
+        copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries, output.buildResult()));
+        var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+        // 重存也走 `save`（带 `id`），两边才是同一种存档。
+        // Re-save with `save` too (with `id`) so both sides are the same kind of save.
+        copy.save(again);
+        String reloaded = again.buildResult().toString();
+
+        out.write("{\"type\":\"boatFacts\",\"title\":" + jsonString(title)
+                + ",\"entityType\":" + BuiltInRegistries.ENTITY_TYPE.getId(first.getType())
+                + ",\"seedBefore\":" + seedBefore + ",\"seedAfter\":" + seedAfter
+                + ",\"selectedItem\":" + selectedItem
+                + ",\"landX\":" + Double.doubleToRawLongBits(landing.x)
+                + ",\"landY\":" + Double.doubleToRawLongBits(landing.y)
+                + ",\"landZ\":" + Double.doubleToRawLongBits(landing.z)
+                + ",\"nbt\":" + jsonString(nbt)
+                + ",\"reloaded\":" + jsonString(reloaded) + "}\n");
+        return 1;
+    }
+
+    private static long levelSeed(FakeLevel level) throws Exception {
+        Field field = level.getRandom().getClass().getDeclaredField("seed");
+        field.setAccessible(true);
+        return ((java.util.concurrent.atomic.AtomicLong) field.get(level.getRandom())).get();
+    }
+
+    private static String jsonString(String text) {
+        StringBuilder result = new StringBuilder("\"");
+        for (char c : text.toCharArray()) {
+            if (c == '"' || c == '\\') result.append('\\');
+            result.append(c);
+        }
+        return result.append('"').toString();
+    }
+
     private static int playBoat(Official official, Writer out, BoatSpec spec) throws Exception {
         FakeLevel level = FakeLevel.create(official, spec.levelSeed);
         level.nextId = FIRST_ITEM_ID;

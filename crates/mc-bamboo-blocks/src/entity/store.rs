@@ -262,17 +262,14 @@ impl KindPublic {
     }
 }
 
-/// 官方会互相硬碰撞的实体（船、矿车、潜影贝等）。现在三种实体都不是，
-/// 所以这个索引恒为空：只留接口和「以后怎么登记」的判定，不给还不存在的实体写逻辑。
+/// 官方 `Entity.canBeCollidedWith()` 为真的硬碰撞实体（船、矿车、潜影贝等）。
+/// `AbstractBoat` 覆写为 true，船会挡住 `CollisionGetter.noCollision(AABB)`。
 ///
-/// Entities that have hard collisions in vanilla (boats, minecarts, shulkers).
-/// None of the three current kinds is one, so this index stays empty: only
-/// the interface and the future registration rule exist, with no mob logic.
+/// Entities whose vanilla `Entity.canBeCollidedWith()` is true (boats, minecarts,
+/// shulkers, ...). `AbstractBoat` overrides it to true, so a boat blocks
+/// `CollisionGetter.noCollision(AABB)`.
 pub fn is_hard_colliding(public: &EntityPublic) -> bool {
-    // 三种现有实体都不是硬碰撞体；以后按新种类扩充这个判定。
-    // None of the three current kinds is hard-colliding; extend with new kinds.
-    let _ = public;
-    false
+    matches!(&public.kind, KindPublic::Boat(_))
 }
 
 /// 只有自己读写、种类特有的部分。

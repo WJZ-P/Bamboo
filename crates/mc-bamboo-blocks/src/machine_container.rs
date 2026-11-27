@@ -699,6 +699,78 @@ mod tests {
         assert!(!boat::is_chest(ids::OAK_BOAT));
     }
 
+    /// 官方 `getEntityContainer`：多个容器实体重叠时用 `level.random.nextInt(size)`
+    /// 随机挑一个，列表非空就抽一次（size 为 1 也一样）。Bamboo 原来取最小 uid、
+    /// 不抽数，会让世界随机源少抽一次。
+    #[test]
+    fn hopper_picks_a_random_overlapping_chest_boat_and_draws_world_random() {
+        use mc_bamboo_core::Vec3;
+        use mc_bamboo_data::registries::entity_type as ids;
+
+        use crate::entity::{Entity, EntityKind};
+        use crate::random::LegacyRandom;
+
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        level.set(POS, BlockState(blocks::HOPPER));
+        level.set_container(POS, vec![ItemStack::empty(); 5]);
+        level.insert_block_entity(Box::new(HopperEntity::new(POS)));
+
+        // 找一个让 `nextInt(2) == 1` 的种子，保证选中的是第二只（非最小 uid）船。
+        let mut seed = 0i64;
+        while LegacyRandom::new(seed).next_int(2) != 1 {
+            seed += 1;
+        }
+
+        let position = Vec3::new(0.5, f64::from(POS.y) + 1.0, 0.5);
+        let mut first = Entity::boat(ids::OAK_CHEST_BOAT, position);
+        if let EntityKind::Boat(data) = &mut first.kind {
+            data.chest.as_mut().unwrap().items[0] = ItemStack::new(items::BREAD, 3);
+        }
+        let mut second = Entity::boat(ids::SPRUCE_CHEST_BOAT, position);
+        if let EntityKind::Boat(data) = &mut second.kind {
+            data.chest.as_mut().unwrap().items[0] = ItemStack::new(items::BREAD, 5);
+        }
+        let (first_id, second_id) = {
+            let mut world = world_of(&mut level, &mut ticks);
+            (world.spawn_entity(first), world.spawn_entity(second))
+        };
+
+        let mut world = world_of(&mut level, &mut ticks);
+        world.random().set_seed(seed);
+        let before = world.random().seed();
+        let probe = LegacyRandom::from_raw_seed(before);
+        assert_eq!(probe.next_int(2), 1, "这一抽应落到第二只船");
+        let expected_after = probe.seed();
+        world.tick_block_entities();
+        assert_eq!(
+            world.random().seed(),
+            expected_after,
+            "getEntityContainer 恰好消耗一次 level.random.nextInt(2)"
+        );
+
+        // 第二只船被抽走一件，第一只船没动。
+        assert_eq!(slot(&mut world, POS, 0), ItemStack::new(items::BREAD, 1));
+        let first_data = world.entity(first_id).expect("第一只船还在");
+        if let EntityKind::Boat(data) = &first_data.kind {
+            assert_eq!(
+                data.chest.as_ref().unwrap().items[0],
+                ItemStack::new(items::BREAD, 3)
+            );
+        } else {
+            panic!("还是船");
+        }
+        let second_data = world.entity(second_id).expect("第二只船还在");
+        if let EntityKind::Boat(data) = &second_data.kind {
+            assert_eq!(
+                data.chest.as_ref().unwrap().items[0],
+                ItemStack::new(items::BREAD, 4)
+            );
+        } else {
+            panic!("还是船");
+        }
+    }
+
     fn world_of<'a>(level: &'a mut TestLevel, ticks: &'a mut BlockTicks) -> World<'a> {
         World::new(level, ticks)
     }

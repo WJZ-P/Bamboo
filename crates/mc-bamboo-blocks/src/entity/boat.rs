@@ -245,6 +245,71 @@ pub const fn is_chest(entity_type: i32) -> bool {
     )
 }
 
+/// 官方 `EntityType.getDescriptionId()`：实体默认显示名的翻译键
+/// `entity.minecraft.<type>`。`AbstractChestBoat` 没有覆写 `getDisplayName()`，
+/// 菜单 provider 就是船自己，27 格菜单标题走这个键，不是 `container.chest`。
+///
+/// Vanilla `EntityType.getDescriptionId()`: the default display-name key
+/// `entity.minecraft.<type>`. `AbstractChestBoat` does not override
+/// `getDisplayName()`, so the menu title uses this key, not `container.chest`.
+pub fn display_name_key(entity_type: i32) -> String {
+    let name = mc_bamboo_data::entity_types::FACTS
+        .get(entity_type as usize)
+        .map(|facts| facts.name)
+        .unwrap_or("minecraft:oak_chest_boat");
+    format!("entity.{}", name.replace(':', "."))
+}
+
+/// `AbstractBoat.supportQuadLeash()`：船作为被拴的一方支持四点拴绳。
+///
+/// Vanilla `AbstractBoat.supportQuadLeash()`: a boat supports a quad leash
+/// when it is the leashed entity.
+pub const fn supports_quad_leash() -> bool {
+    true
+}
+
+/// `AbstractBoat.getLeashOffset()`：单点拴绳的附着点
+/// `Vec3(0, 0.88f * bbHeight, 0.64f * bbWidth)`（先按 f32 乘再提升）。
+///
+/// Vanilla `AbstractBoat.getLeashOffset()`.
+pub fn leash_offset(width: f32, height: f32) -> Vec3 {
+    Vec3::new(
+        0.0,
+        f64::from(0.88_f32 * height),
+        f64::from(0.64_f32 * width),
+    )
+}
+
+/// `AbstractBoat.getQuadLeashOffsets()` =
+/// `createQuadLeashOffsets(this, 0.0, 0.64, 0.382, 0.88)`，复用快乐恶魂的
+/// `create_quad_leash_offsets`（就是 `Leashable.createQuadLeashOffsets`）。
+///
+/// Vanilla `AbstractBoat.getQuadLeashOffsets()`, reusing the happy ghast's
+/// `create_quad_leash_offsets`.
+pub fn quad_leash_offsets(width: f32, height: f32) -> [Vec3; 4] {
+    crate::entity::mob::happy_ghast::create_quad_leash_offsets(
+        width, height, 0.0, 0.64, 0.382, 0.88,
+    )
+}
+
+/// `Entity.getQuadLeashHolderOffsets()` 的默认实现（船没有覆写）：
+/// `createQuadLeashOffsets(this, 0.0, 0.5, 0.5, 0.0)`。
+///
+/// Vanilla `Entity.getQuadLeashHolderOffsets()` default, which a boat inherits.
+pub fn quad_leash_holder_offsets(width: f32, height: f32) -> [Vec3; 4] {
+    crate::entity::mob::happy_ghast::create_quad_leash_offsets(width, height, 0.0, 0.5, 0.5, 0.0)
+}
+
+/// `Entity.isMobControlled()`：第一名乘客是生物（实体 uid，非玩家 uid）。
+/// 船的乘客名单里玩家 / 生物混排，第一名是生物时为真。
+///
+/// Vanilla `Entity.isMobControlled()`: the first passenger is a mob.
+pub fn is_mob_controlled(passengers: &[EntityUid]) -> bool {
+    passengers
+        .first()
+        .is_some_and(|&uid| uid >= super::FIRST_ENTITY_ID)
+}
+
 /// 这个注册表实体类型是不是船（含竹筏和运输船）。
 pub const fn is_boat_entity_type(entity_type: i32) -> bool {
     use mc_bamboo_data::registries::entity_type as ids;
@@ -1087,6 +1152,7 @@ fn hurt_from_environment(boat: &mut Boat, me: &mut Entity, amount: f32, ctx: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entity::FIRST_ENTITY_ID;
     use crate::{
         BlockGameRules, BlockHit,
         shape::CollisionContext,
@@ -1094,6 +1160,48 @@ mod tests {
     };
     use mc_bamboo_core::{Direction, LightLayer};
     use mc_bamboo_data::registries::entity_type as ids;
+
+    /// `AbstractBoat` 的 `Leashable` 覆写：`supportQuadLeash`=true、
+    /// `getLeashOffset` / `getQuadLeashOffsets` / `getQuadLeashHolderOffsets`
+    /// 的偏移（复用 `create_quad_leash_offsets`），以及 `isMobControlled`
+    /// （第一名乘客是生物）。
+    #[test]
+    fn boat_leash_offsets_and_quad_support_match_vanilla() {
+        let (wf, hf) = (1.375_f32, 0.5625_f32);
+        assert!(supports_quad_leash());
+
+        // `Vec3(0, 0.88f * bbHeight, 0.64f * bbWidth)`：f32 乘完再提升。
+        let single = leash_offset(wf, hf);
+        assert_eq!(single.x, 0.0);
+        assert_eq!(single.y, f64::from(0.88_f32 * hf));
+        assert_eq!(single.z, f64::from(0.64_f32 * wf));
+
+        // `createQuadLeashOffsets(w,h, 0.0, 0.64, 0.382, 0.88)`：
+        // A=0, B=0.64w, C=0.382w, D=0.88h。
+        let (w, h) = (f64::from(wf), f64::from(hf));
+        let (a, b, c, d) = (0.0, 0.64 * w, 0.382 * w, 0.88 * h);
+        let expected = [
+            (-c, d, b + a),
+            (-c, d, -b + a),
+            (c, d, -b + a),
+            (c, d, b + a),
+        ];
+        for (got, want) in quad_leash_offsets(wf, hf).iter().zip(expected.iter()) {
+            assert_eq!((got.x, got.y, got.z), *want);
+        }
+
+        // holder 侧默认 `createQuadLeashOffsets(w,h, 0.0, 0.5, 0.5, 0.0)`。
+        let holder = quad_leash_holder_offsets(wf, hf);
+        assert_eq!(
+            (holder[0].x, holder[0].y, holder[0].z),
+            (-0.5 * w, 0.0, 0.5 * w)
+        );
+
+        // `isMobControlled`：第一名乘客是生物（uid >= FIRST_ENTITY_ID）。
+        assert!(is_mob_controlled(&[FIRST_ENTITY_ID, 1]));
+        assert!(!is_mob_controlled(&[1, FIRST_ENTITY_ID]));
+        assert!(!is_mob_controlled(&[]));
+    }
 
     /// 空世界：没有方块、流体、漏斗，全部区块都加载。`floatBoat` 只在
     /// 「空中→水/陆」分支用方块视图，这里四个场景都把 `old_status` 设成

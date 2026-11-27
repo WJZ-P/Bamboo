@@ -175,11 +175,17 @@ fn entity_in_tag(name: &str, entity_type: i32) -> bool {
     mc_bamboo_data::in_tag("minecraft:entity_type", name, entity_type)
 }
 
-/// `EnchantmentHelper.modifyDamage`：锋利无条件，亡灵杀手 / 节肢杀手看目标类型。
-/// 返回加在 `baseDamage` 上的总和，即 `getEnchantedDamage − baseDamage`。
+/// `EnchantmentHelper.modifyDamage`：锋利无条件，亡灵杀手 / 节肢杀手 / 穿刺看
+/// 目标类型。返回加在 `baseDamage` 上的总和，即
+/// `getEnchantedDamage − baseDamage`。目标不是 `LivingEntity` 时（例如船）依然
+/// 按目标实体类型过一遍条件，官方 `Player.attack` 不会因为目标不是生物而跳过
+/// `magicBoost`。
 ///
-/// `EnchantmentHelper.modifyDamage`: Sharpness is unconditional, Smite / Bane of
-/// Arthropods depend on the target type. Returns the sum added to `baseDamage`.
+/// `EnchantmentHelper.modifyDamage`: Sharpness is unconditional; Smite, Bane of
+/// Arthropods and Impaling depend on the target type. Returns the sum added to
+/// `baseDamage`. A non-living target such as a boat still goes through the same
+/// target-type conditions: vanilla `Player.attack` does not skip `magicBoost`
+/// for entities that are not `LivingEntity`.
 fn damage_bonus(held: &ItemStack, entity_type: i32) -> f32 {
     let mut bonus = 0.0;
     let sharpness = enchantment_level(held, "minecraft:sharpness");
@@ -197,6 +203,17 @@ fn damage_bonus(held: &ItemStack, entity_type: i32) -> f32 {
         let bane = enchantment_level(held, "minecraft:bane_of_arthropods");
         if bane > 0 {
             bonus += 2.5 * bane as f32;
+        }
+    }
+    // 26.3 `Enchantments.bootstrap` 给穿刺注册了 `DAMAGE` 组件，条件是
+    // `THIS_ENTITY` 在 `sensitive_to_impaling` 里，线性每级 2.5。船不在这个标签里。
+    //
+    // 26.3 `Enchantments.bootstrap` registers Impaling's `DAMAGE` effect with a
+    // `THIS_ENTITY` predicate on `sensitive_to_impaling`, 2.5 per level.
+    if entity_in_tag("minecraft:sensitive_to_impaling", entity_type) {
+        let impaling = enchantment_level(held, "minecraft:impaling");
+        if impaling > 0 {
+            bonus += 2.5 * impaling as f32;
         }
     }
     bonus
@@ -3065,6 +3082,7 @@ mod tests {
         let cow = mc_bamboo_data::registries::entity_type::COW;
         let zombie = mc_bamboo_data::registries::entity_type::ZOMBIE;
         let spider = mc_bamboo_data::registries::entity_type::SPIDER;
+        let squid = mc_bamboo_data::registries::entity_type::SQUID;
 
         let sharp = enchanted(
             mc_bamboo_data::items::DIAMOND_SWORD,
@@ -3085,6 +3103,53 @@ mod tests {
         );
         assert_eq!(damage_bonus(&bane, spider), 5.0);
         assert_eq!(damage_bonus(&bane, zombie), 0.0);
+
+        let impaling = enchanted(mc_bamboo_data::items::TRIDENT, "minecraft:impaling", 3);
+        assert_eq!(damage_bonus(&impaling, squid), 7.5);
+        assert_eq!(damage_bonus(&impaling, cow), 0.0);
+    }
+
+    /// `Player.attack` 对船这样的非生物目标照样把 `getEnchantedDamage` 的附魔
+    /// 加成算进 `f`：锋利无条件，亡灵 / 节肢 / 穿刺按船的实体类型标签过滤。
+    ///
+    /// `Player.attack` includes the enchanted damage bonus even when the target
+    /// is a non-living boat: Sharpness is unconditional, and Smite / Bane /
+    /// Impaling are filtered by the boat's entity-type tags.
+    #[test]
+    fn boat_attack_keeps_the_enchanted_damage_bonus() {
+        let boat = mc_bamboo_data::registries::entity_type::OAK_CHEST_BOAT;
+        let sharp = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:sharpness",
+            3,
+        );
+        let smite = enchanted(mc_bamboo_data::items::DIAMOND_SWORD, "minecraft:smite", 5);
+        let bane = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:bane_of_arthropods",
+            5,
+        );
+        let impaling = enchanted(mc_bamboo_data::items::TRIDENT, "minecraft:impaling", 5);
+        assert_eq!(damage_bonus(&sharp, boat), 2.0);
+        assert_eq!(damage_bonus(&smite, boat), 0.0);
+        assert_eq!(damage_bonus(&bane, boat), 0.0);
+        assert_eq!(damage_bonus(&impaling, boat), 0.0);
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let mut player = player_holding(GameMode::Survival, sharp);
+        // 满充能：`s = 1`，`baseDamage = ATTACK_DAMAGE`，`magicBoost = 2.0`。
+        player.attack_strength_ticker = 20;
+        let base = player.attributes.value(attribute::ATTACK_DAMAGE) as f32;
+        region.insert_player(player);
+        let boat_id = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::boat(
+                boat,
+                Vec3::new(1.5, 64.0, 1.5),
+            ));
+        let damage = boat_attack_damage(&mut region, id, boat_id).unwrap();
+        assert_eq!(damage, base + 2.0);
     }
 
     /// 官方 `ApplyMobEffect` 对节肢杀手的三次取数全来自受害者自己的随机源，
