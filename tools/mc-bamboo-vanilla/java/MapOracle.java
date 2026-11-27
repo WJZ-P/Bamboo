@@ -47,12 +47,14 @@ import java.util.concurrent.ForkJoinPool;
 import java.util.function.Supplier;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderGetter;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.SectionPos;
 import net.minecraft.core.component.DataComponentInitializers;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -63,8 +65,10 @@ import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
 import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientboundMapItemDataPacket;
+import net.minecraft.resources.Identifier;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.RegistryOps;
 import net.minecraft.resources.ResourceKey;
@@ -78,8 +82,11 @@ import net.minecraft.server.packs.repository.PackRepository;
 import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
+import net.minecraft.tags.ItemTags;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.util.StaticCache2D;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.player.Inventory;
@@ -88,6 +95,11 @@ import net.minecraft.world.entity.player.PlayerEquipment;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.MapItem;
+import net.minecraft.world.item.context.UseOnContext;
+import net.minecraft.world.item.crafting.CraftingInput;
+import net.minecraft.world.item.crafting.Ingredient;
+import net.minecraft.world.item.crafting.MapExtendingRecipe;
+import net.minecraft.world.item.crafting.TransmuteResult;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LevelHeightAccessor;
@@ -100,11 +112,14 @@ import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.SlabBlock;
+import net.minecraft.world.level.block.entity.BannerBlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.EmptyLevelChunk;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.chunk.ProtoChunk;
 import net.minecraft.world.level.chunk.UpgradeData;
@@ -123,9 +138,11 @@ import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.levelgen.blending.Blender;
 import net.minecraft.world.level.levelgen.densityfunction.DensityVolume;
 import net.minecraft.world.level.levelgen.material.rule.MaterialRule;
+import net.minecraft.world.level.saveddata.maps.MapBanner;
 import net.minecraft.world.level.saveddata.maps.MapId;
 import net.minecraft.world.level.saveddata.maps.MapIndex;
 import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
+import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import sun.misc.Unsafe;
 
@@ -152,15 +169,17 @@ public final class MapOracle {
     private static void run(String[] args, PrintStream log) throws Exception {
         System.setOut(log);
         FileOutputStream stdout = new FileOutputStream(FileDescriptor.out);
-        if (args.length != 5) {
+        if (args.length != 7) {
             throw new IllegalArgumentException(
-                    "usage: MapOracle <seed> <in_map0.dat> <in_last_id.dat> <out_map0.dat> <out_last_id.dat>");
+                    "usage: MapOracle <seed> <in_map0.dat> <in_last_id.dat> <out_map0.dat> <out_last_id.dat> <in_banner_added.dat> <in_banner_removed.dat>");
         }
         long seed = Long.parseLong(args[0]);
         Path inMapPath = Path.of(args[1]);
         Path inIndexPath = Path.of(args[2]);
         Path outMapPath = Path.of(args[3]);
         Path outIndexPath = Path.of(args[4]);
+        Path inBannerAddedPath = Path.of(args[5]);
+        Path inBannerRemovedPath = Path.of(args[6]);
 
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
@@ -221,6 +240,14 @@ public final class MapOracle {
                 filledMap.update(level, player, scale1);
             }
 
+            // 2b. 第二期场景（放在 scale1 之后，避免修改共享 ProtoChunk 段影响第一期地形对拍）：
+            //     右键带名旗帜添加 / 取消标记、打掉旗帜后 checkBanners 消失时机与包、工作台 map_extending。
+            JsonObject bannerToggleReport = runBannerToggleScenario(
+                    registries, protos, filledMap, ops, expectedDataVersion,
+                    inBannerAddedPath, inBannerRemovedPath);
+            JsonObject bannerBreakReport = runBannerBreakScenario(registries, protos, filledMap);
+            JsonArray mapExtendingReport = runMapExtendingScenario(registries, filledMap);
+
             // 3. 存档往返：官方 codec 解码 Bamboo 写出的 0.dat 和 last_id.dat，再重新编码写回。
             CompoundTag mapRoot = NbtIo.readCompressed(inMapPath, NbtAccounter.unlimitedHeap());
             int mapDataVersion = mapRoot.getIntOr("DataVersion", -1);
@@ -264,6 +291,9 @@ public final class MapOracle {
             report.add("walk_packets", walkPackets);
             report.add("scale1_walk_packets", scale1WalkPackets);
             report.add("locked_walk_packets", lockedWalkPackets);
+            report.add("banner_toggle", bannerToggleReport);
+            report.add("banner_break", bannerBreakReport);
+            report.add("map_extending", mapExtendingReport);
 
             JsonObject savedSummary = new JsonObject();
             savedSummary.addProperty("dimension", decodedMap.dimension.identifier().toString());
@@ -363,6 +393,329 @@ public final class MapOracle {
                 buf.readBytes(bytes);
                 out.add(toHex(bytes));
             }
+        }
+        return out;
+    }
+
+    private static String encodePacket(RegistryAccess registries, Packet<?> packet) {
+        ClientboundMapItemDataPacket mapPkt = (ClientboundMapItemDataPacket) packet;
+        RegistryFriendlyByteBuf buf = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+        ClientboundMapItemDataPacket.STREAM_CODEC.encode(buf, mapPkt);
+        byte[] bytes = new byte[buf.readableBytes()];
+        buf.readBytes(bytes);
+        return toHex(bytes);
+    }
+
+    private static void addPacket(JsonArray arr, RegistryAccess registries, Packet<?> packet) {
+        if (packet == null) {
+            arr.add(JsonNull.INSTANCE);
+        } else {
+            arr.add(encodePacket(registries, packet));
+        }
+    }
+
+    private static BlockState blockByName(String name) {
+        return BuiltInRegistries.BLOCK.getValue(Identifier.withDefaultNamespace(name)).defaultBlockState();
+    }
+
+    private static String encodeItemStack(RegistryAccess registries, ItemStack stack) {
+        RegistryFriendlyByteBuf buf = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+        ItemStack.OPTIONAL_STREAM_CODEC.encode(buf, stack);
+        byte[] bytes = new byte[buf.readableBytes()];
+        buf.readBytes(bytes);
+        return toHex(bytes);
+    }
+
+    private static JsonArray bannersToJson(MapItemSavedData data) {
+        JsonArray arr = new JsonArray();
+        List<MapBanner> sorted = new ArrayList<>(data.getBanners());
+        sorted.sort(java.util.Comparator.comparing(MapBanner::getId));
+        for (MapBanner b : sorted) {
+            JsonObject o = new JsonObject();
+            o.addProperty("x", b.pos().getX());
+            o.addProperty("y", b.pos().getY());
+            o.addProperty("z", b.pos().getZ());
+            o.addProperty("color", b.color().getSerializedName());
+            if (b.name().isPresent()) {
+                o.addProperty("name", b.name().get().getString());
+            } else {
+                o.add("name", JsonNull.INSTANCE);
+            }
+            arr.add(o);
+        }
+        return arr;
+    }
+
+    private static MapItemSavedData decodeSavedMap(
+            Path path, RegistryOps<Tag> ops, int expectedDataVersion) throws Exception {
+        CompoundTag root = NbtIo.readCompressed(path, NbtAccounter.unlimitedHeap());
+        int dv = root.getIntOr("DataVersion", -1);
+        if (dv != expectedDataVersion) {
+            throw new IllegalStateException(
+                    path + " DataVersion=" + dv + ", expected " + expectedDataVersion);
+        }
+        Tag dataTag = root.get("data");
+        if (dataTag == null) {
+            throw new IllegalStateException(path + " missing data compound");
+        }
+        return MapItemSavedData.CODEC.parse(ops, dataTag).getOrThrow();
+    }
+
+    /** 复制一份 ProtoChunk 的方块段与高度图，避免改到与其它场景共用的生成结果。 */
+    private static ProtoChunk copyProto(
+            RegistryAccess.Frozen registries, ProtoChunk source) {
+        PalettedContainerFactory factory = PalettedContainerFactory.create(registries);
+        ProtoChunk copy = new ProtoChunk(
+                source.getPos(), UpgradeData.EMPTY, source.getHeightAccessorForGeneration(),
+                factory, null);
+        LevelChunkSection[] sections = source.getSections();
+        LevelChunkSection[] target = copy.getSections();
+        for (int index = 0; index < sections.length; index++) {
+            LevelChunkSection from = sections[index];
+            LevelChunkSection to = target[index];
+            for (int y = 0; y < 16; y++) {
+                for (int x = 0; x < 16; x++) {
+                    for (int z = 0; z < 16; z++) {
+                        to.setBlockState(x, y, z, from.getBlockState(x, y, z));
+                    }
+                }
+            }
+            to.fillBiomesFromNoise(
+                    (qx, qy, qz) -> from.getNoiseBiome(qx, qy, qz), 0, 0, 0);
+        }
+        copy.setPersistedStatus(source.getPersistedStatus());
+        Heightmap.primeHeightmaps(copy, EnumSet.of(Heightmap.Types.WORLD_SURFACE));
+        return copy;
+    }
+
+    private static FakeLevel buildBannerLevel(
+            RegistryAccess.Frozen registries,
+            Map<Long, ProtoChunk> protos,
+            BlockPos bannerPos,
+            BlockState bannerState,
+            String customName) throws Exception {
+        FakeLevel level = FakeLevel.create(registries);
+        long targetKey = ChunkPos.pack(bannerPos.getX() >> 4, bannerPos.getZ() >> 4);
+        for (var entry : protos.entrySet()) {
+            ProtoChunk source = entry.getValue();
+            ProtoChunk proto = entry.getKey() == targetKey ? copyProto(registries, source) : source;
+            if (entry.getKey() == targetKey) {
+                // 在 ProtoChunk 上放旗帜，避开 `LevelChunk.setBlockState` 对
+                // `Level.getChunkSource().getLightEngine()` 的依赖（FakeLevel 没有 ChunkSource）。
+                proto.setBlockState(bannerPos.below(), Blocks.STONE.defaultBlockState(), 0);
+                proto.setBlockState(bannerPos, bannerState, 0);
+                for (int y = bannerPos.getY() + 1; y < 320; y++) {
+                    proto.setBlockState(
+                            new BlockPos(bannerPos.getX(), y, bannerPos.getZ()),
+                            Blocks.AIR.defaultBlockState(), 0);
+                }
+                Heightmap.primeHeightmaps(proto, EnumSet.of(Heightmap.Types.WORLD_SURFACE));
+                BannerBlockEntity be = new BannerBlockEntity(bannerPos, bannerState);
+                if (customName != null) {
+                    setField(BannerBlockEntity.class, be, "name", Component.literal(customName));
+                }
+                proto.setBlockEntity(be);
+                level.putBlockEntity(bannerPos, be);
+            }
+            level.putChunk(entry.getKey(), new LevelChunk(level, proto, null));
+        }
+        return level;
+    }
+
+    private static JsonObject runBannerToggleScenario(
+            RegistryAccess.Frozen registries,
+            Map<Long, ProtoChunk> protos,
+            MapItem filledMap,
+            RegistryOps<Tag> ops,
+            int expectedDataVersion,
+            Path inBannerAddedPath,
+            Path inBannerRemovedPath) throws Exception {
+        BlockPos bannerPos = new BlockPos(5, 120, -3);
+        FakeLevel level = buildBannerLevel(
+                registries, protos, bannerPos, blockByName("red_banner"), "Camp Alpha");
+        MapId mapId = new MapId(0);
+        MapItemSavedData data = MapItemSavedData.createFresh(
+                0.0, 0.0, (byte) 0, true, false, Level.OVERWORLD);
+        level.setMapData(mapId, data);
+
+        FakePlayer player = FakePlayer.create(level, "Oracle");
+        ItemStack stack = new ItemStack(Items.FILLED_MAP);
+        stack.set(DataComponents.MAP_ID, mapId);
+        player.getInventory().setItem(0, stack);
+        player.moveToPos(0.5, 80.0, 0.5, 0.0f);
+
+        JsonArray packets = new JsonArray();
+        // Tick 0: 初始同步。
+        level.gameTime = 1;
+        filledMap.inventoryTick(stack, level, player, EquipmentSlot.MAINHAND);
+        addPacket(packets, registries, data.getUpdatePacket(mapId, player));
+
+        // 第一次右键旗帜：添加红色带名旗帜标记。
+        BlockHitResult hit = new BlockHitResult(
+                new Vec3(5.5, 120.5, -2.5), Direction.UP, bannerPos, false);
+        InteractionResult r1 = filledMap.useOn(new UseOnContext(player, InteractionHand.MAIN_HAND, hit));
+        JsonArray vanillaAfterAdd = bannersToJson(data);
+        for (int i = 0; i < 5; i++) {
+            level.gameTime = 2 + i;
+            filledMap.inventoryTick(stack, level, player, EquipmentSlot.MAINHAND);
+            addPacket(packets, registries, data.getUpdatePacket(mapId, player));
+        }
+
+        // 第二次右键同一面旗帜：取消标记。
+        InteractionResult r2 = filledMap.useOn(new UseOnContext(player, InteractionHand.MAIN_HAND, hit));
+        JsonArray vanillaAfterRemove = bannersToJson(data);
+        for (int i = 0; i < 5; i++) {
+            level.gameTime = 7 + i;
+            filledMap.inventoryTick(stack, level, player, EquipmentSlot.MAINHAND);
+            addPacket(packets, registries, data.getUpdatePacket(mapId, player));
+        }
+
+        // 用官方 CODEC 解码 Bamboo 写出的添加后 / 取消后存档，核对 banners 列表。
+        MapItemSavedData bambooAdded = decodeSavedMap(inBannerAddedPath, ops, expectedDataVersion);
+        MapItemSavedData bambooRemoved = decodeSavedMap(inBannerRemovedPath, ops, expectedDataVersion);
+
+        JsonObject obj = new JsonObject();
+        obj.addProperty("add_success", r1.consumesAction());
+        obj.addProperty("remove_success", r2.consumesAction());
+        obj.add("packets", packets);
+        obj.add("vanilla_after_add", vanillaAfterAdd);
+        obj.add("vanilla_after_remove", vanillaAfterRemove);
+        obj.add("bamboo_saved_after_add", bannersToJson(bambooAdded));
+        obj.add("bamboo_saved_after_remove", bannersToJson(bambooRemoved));
+        return obj;
+    }
+
+    private static JsonObject runBannerBreakScenario(
+            RegistryAccess.Frozen registries,
+            Map<Long, ProtoChunk> protos,
+            MapItem filledMap) throws Exception {
+        BlockPos bannerPos = new BlockPos(5, 120, -3);
+        FakeLevel level = buildBannerLevel(
+                registries, protos, bannerPos, blockByName("blue_wall_banner"), "Watchtower");
+        MapId mapId = new MapId(0);
+        MapItemSavedData data = MapItemSavedData.createFresh(
+                0.0, 0.0, (byte) 0, true, false, Level.OVERWORLD);
+        level.setMapData(mapId, data);
+
+        FakePlayer player = FakePlayer.create(level, "Oracle");
+        ItemStack stack = new ItemStack(Items.FILLED_MAP);
+        stack.set(DataComponents.MAP_ID, mapId);
+        player.getInventory().setItem(0, stack);
+        player.moveToPos(0.5, 80.0, 0.5, 0.0f);
+
+        long tick = 0;
+        // 先跑 16 刻探索完 128×128，避免后续颜色变化级联干扰 checkBanners 精确列扫时机。
+        for (int i = 0; i < 16; i++) {
+            level.gameTime = ++tick;
+            filledMap.inventoryTick(stack, level, player, EquipmentSlot.MAINHAND);
+            data.getUpdatePacket(mapId, player);
+        }
+
+        // 右键添加蓝色墙旗帜标记，再跑 5 刻把标记包送出并清脏。
+        BlockHitResult hit = new BlockHitResult(
+                new Vec3(5.5, 120.5, -2.5), Direction.UP, bannerPos, false);
+        filledMap.useOn(new UseOnContext(player, InteractionHand.MAIN_HAND, hit));
+        for (int i = 0; i < 5; i++) {
+            level.gameTime = ++tick;
+            filledMap.inventoryTick(stack, level, player, EquipmentSlot.MAINHAND);
+            data.getUpdatePacket(mapId, player);
+        }
+
+        // 打掉旗帜（方块置 AIR，移除方块实体）。直接改 LevelChunk 段，避免
+        // `LevelChunk.setBlockState` 对 `getChunkSource().getLightEngine()` 的依赖。
+        LevelChunk targetChunk = level.getChunk(bannerPos.getX() >> 4, bannerPos.getZ() >> 4);
+        int sectionIndex = targetChunk.getSectionIndex(bannerPos.getY());
+        LevelChunkSection section = targetChunk.getSection(sectionIndex);
+        section.setBlockState(
+                SectionPos.sectionRelative(bannerPos.getX()),
+                SectionPos.sectionRelative(bannerPos.getY()),
+                SectionPos.sectionRelative(bannerPos.getZ()),
+                Blocks.AIR.defaultBlockState());
+        Heightmap.primeHeightmaps(targetChunk, EnumSet.of(Heightmap.Types.WORLD_SURFACE));
+        level.removeBlockEntity(bannerPos);
+
+        // 连续跑 20 刻，记录每刻的旗帜剩余数和发出的地图包精确字节。
+        JsonArray bannerCounts = new JsonArray();
+        JsonArray packets = new JsonArray();
+        for (int i = 0; i < 20; i++) {
+            level.gameTime = ++tick;
+            filledMap.inventoryTick(stack, level, player, EquipmentSlot.MAINHAND);
+            bannerCounts.add(data.getBanners().size());
+            addPacket(packets, registries, data.getUpdatePacket(mapId, player));
+        }
+
+        JsonObject obj = new JsonObject();
+        obj.add("banner_counts", bannerCounts);
+        obj.add("packets", packets);
+        return obj;
+    }
+
+    private static JsonArray runMapExtendingScenario(
+            RegistryAccess.Frozen registries, MapItem filledMap) throws Exception {
+        FakeLevel level = FakeLevel.create(registries);
+        level.setMapData(new MapId(0),
+                MapItemSavedData.createFresh(0.0, 0.0, (byte) 0, true, false, Level.OVERWORLD));
+        level.setMapData(new MapId(1),
+                MapItemSavedData.createFresh(0.0, 0.0, (byte) 3, true, false, Level.OVERWORLD));
+        level.setMapData(new MapId(2),
+                MapItemSavedData.createFresh(0.0, 0.0, (byte) 4, true, false, Level.OVERWORLD));
+        level.setMapData(new MapId(3),
+                MapItemSavedData.createFresh(0.0, 0.0, (byte) 0, true, false, Level.OVERWORLD).locked());
+        level.nextMapId = 4;
+
+        MapExtendingRecipe recipe = new MapExtendingRecipe(
+                Ingredient.of(registries.lookupOrThrow(Registries.ITEM)
+                        .getOrThrow(ItemTags.EXTENDABLE_MAPS)),
+                Ingredient.of(Items.PAPER),
+                TransmuteResult.KEEP_INPUT_ITEM);
+
+        List<ItemStack> centers = new ArrayList<>();
+        ItemStack map0 = new ItemStack(Items.FILLED_MAP);
+        map0.set(DataComponents.MAP_ID, new MapId(0));
+        map0.set(DataComponents.CUSTOM_NAME, Component.literal("Expedition"));
+        centers.add(map0);
+
+        ItemStack map1 = new ItemStack(Items.FILLED_MAP);
+        map1.set(DataComponents.MAP_ID, new MapId(1));
+        centers.add(map1);
+
+        ItemStack map2 = new ItemStack(Items.FILLED_MAP);
+        map2.set(DataComponents.MAP_ID, new MapId(2));
+        centers.add(map2);
+
+        ItemStack map3 = new ItemStack(Items.FILLED_MAP);
+        map3.set(DataComponents.MAP_ID, new MapId(3));
+        centers.add(map3);
+
+        centers.add(new ItemStack(Items.FILLED_MAP)); // 无 MAP_ID
+
+        JsonArray out = new JsonArray();
+        for (ItemStack center : centers) {
+            List<ItemStack> grid = new ArrayList<>(9);
+            for (int i = 0; i < 9; i++) {
+                grid.add(i == 4 ? center.copy() : new ItemStack(Items.PAPER));
+            }
+            CraftingInput input = CraftingInput.of(3, 3, grid);
+            boolean matched = recipe.matches(input, level);
+            JsonObject entry = new JsonObject();
+            entry.addProperty("matched", matched);
+            if (matched) {
+                ItemStack preview = recipe.assemble(input);
+                entry.addProperty("preview_hex", encodeItemStack(registries, preview));
+                ItemStack crafted = preview.copy();
+                filledMap.onCraftedPostProcess(crafted, level);
+                entry.addProperty("crafted_hex", encodeItemStack(registries, crafted));
+                MapId newId = crafted.get(DataComponents.MAP_ID);
+                MapItemSavedData newData = newId == null ? null : level.getMapData(newId);
+                if (newId != null && newData != null) {
+                    entry.addProperty("new_map_id", newId.id());
+                    entry.addProperty("new_scale", newData.scale);
+                    entry.addProperty("new_center_x", newData.centerX);
+                    entry.addProperty("new_center_z", newData.centerZ);
+                    entry.addProperty("new_locked", newData.locked);
+                }
+            }
+            out.add(entry);
         }
         return out;
     }
@@ -565,8 +918,10 @@ public final class MapOracle {
         private RegistryAccess.Frozen registries;
         private Map<Long, LevelChunk> chunks;
         private Map<MapId, MapItemSavedData> maps;
+        private Map<BlockPos, BlockEntity> blockEntities;
         private EmptyLevelChunk emptyChunk;
         long gameTime;
+        int nextMapId;
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
@@ -577,12 +932,14 @@ public final class MapOracle {
             level.registries = registries;
             level.chunks = new HashMap<>();
             level.maps = new HashMap<>();
+            level.blockEntities = new HashMap<>();
             Holder<DimensionType> overworld = registries
                     .lookupOrThrow(Registries.DIMENSION_TYPE)
                     .getOrThrow(BuiltinDimensionTypes.OVERWORLD);
             setField(Level.class, level, "dimension", Level.OVERWORLD);
             setField(Level.class, level, "dimensionTypeRegistration", overworld);
             setField(Level.class, level, "isClientSide", false);
+            setField(Level.class, level, "thread", Thread.currentThread());
             setField(Level.class, level, "palettedContainerFactory",
                     PalettedContainerFactory.create(registries));
             Holder<Biome> plains = registries.lookupOrThrow(Registries.BIOME)
@@ -593,6 +950,25 @@ public final class MapOracle {
 
         void putChunk(long packedPos, LevelChunk chunk) {
             chunks.put(packedPos, chunk);
+        }
+
+        void putBlockEntity(BlockPos pos, BlockEntity be) {
+            blockEntities.put(pos.immutable(), be);
+        }
+
+        @Override
+        public void removeBlockEntity(BlockPos pos) {
+            blockEntities.remove(pos);
+        }
+
+        @Override
+        public BlockEntity getBlockEntity(BlockPos pos) {
+            return blockEntities.get(pos);
+        }
+
+        @Override
+        public MapId getFreeMapId() {
+            return new MapId(nextMapId++);
         }
 
         @Override

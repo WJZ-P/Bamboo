@@ -106,27 +106,7 @@ pub(super) fn has_post_processing(stack: &ItemStack) -> bool {
 /// using the server `MapStore`, allocate a new `map_id` with `locked()` or
 /// `scaled()` data.
 pub(super) fn post_process_map(stack: &mut ItemStack, maps: &mut crate::map::MapStore) {
-    if stack.is_empty() || stack.item != items::FILLED_MAP {
-        return;
-    }
-    let Some(ComponentValue::MapPostProcessing(kind)) = resolved(stack, kinds::MAP_POST_PROCESSING)
-    else {
-        return;
-    };
-    assign(stack, kinds::MAP_POST_PROCESSING, None);
-    let Some(old_id) = crate::map::stack_map_id(stack) else {
-        return;
-    };
-    let next_data = match kind {
-        LOCK => maps.get(old_id).map(crate::map::MapItemSavedData::locked),
-        SCALE => maps.get(old_id).map(crate::map::MapItemSavedData::scaled),
-        _ => None,
-    };
-    if let Some(data) = next_data {
-        let new_id = maps.next_map_id();
-        maps.insert(new_id, data);
-        assign(stack, kinds::MAP_ID, Some(ComponentValue::MapId(new_id)));
-    }
+    crate::map::on_crafted_post_process(stack, maps);
 }
 
 #[cfg(test)]
@@ -486,5 +466,209 @@ mod tests {
         assert_eq!(cloned.count, 64);
         assert!(!has_post_processing(&cloned));
         assert_eq!(region.global.maps.get(7).unwrap().scale, 1);
+    }
+
+    #[test]
+    fn crafting_table_map_extending_scales_via_pickup_quick_move_and_clone() {
+        use std::collections::BTreeMap;
+
+        use mc_bamboo_core::{BlockPos, Vec3};
+        use mc_bamboo_data::blocks;
+        use mc_bamboo_protocol::packet::play::{
+            ClientInformation, ContainerInput, GameMode, HashedStack,
+        };
+        use uuid::Uuid;
+
+        use crate::{
+            inbound::PlayerId,
+            map::{MapItemSavedData, create_map, make_filled_map, stack_map_id},
+            menu::{ClickPacket, station},
+            player::Player,
+            region::Region,
+        };
+
+        fn click(
+            region: &mut Region,
+            player: PlayerId,
+            container_id: i32,
+            slot: i16,
+            button: i8,
+            input: ContainerInput,
+        ) {
+            let state_id = region
+                .menus
+                .get(&player)
+                .and_then(|m| m.station.as_ref())
+                .map_or(0, |s| s.replay_view().state_id);
+            station::click_menu(
+                region,
+                player,
+                ClickPacket {
+                    container_id,
+                    state_id,
+                    slot,
+                    button,
+                    input,
+                    changed_slots: BTreeMap::new(),
+                    carried: HashedStack::Empty,
+                },
+            );
+        }
+
+        let mut region = Region::new(2, 20, false);
+        let table = BlockPos::new(1, 64, 0);
+        region.chunks.set_block(table, blocks::CRAFTING_TABLE);
+        let p_id = PlayerId(1);
+        let player = Player::new(
+            p_id,
+            Uuid::from_u128(1),
+            "Alex".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        region.insert_player(player);
+
+        // 创建 map 0 (scale=0, center=(0,0))、map 1 (scale=4) 与 map 2 (locked, scale=0)。
+        let mut map0 = create_map(
+            std::sync::Arc::make_mut(&mut region.global.maps),
+            0,
+            0,
+            0,
+            true,
+            false,
+            "minecraft:overworld",
+        );
+        map0.count = 3;
+        let max_id = std::sync::Arc::make_mut(&mut region.global.maps).next_map_id(); // 1
+        std::sync::Arc::make_mut(&mut region.global.maps).insert(
+            max_id,
+            MapItemSavedData::create_fresh(0.0, 0.0, 4, true, false, "minecraft:overworld"),
+        );
+        let locked_id = std::sync::Arc::make_mut(&mut region.global.maps).next_map_id(); // 2
+        std::sync::Arc::make_mut(&mut region.global.maps).insert(
+            locked_id,
+            MapItemSavedData::create_fresh(0.0, 0.0, 0, true, false, "minecraft:overworld")
+                .locked(),
+        );
+
+        // 快捷栏（CraftingMenu 槽 37..=45 对应 inv 36..=44）：
+        // 36=paper×64, 37=map0×3, 38=map1(scale=4), 39=map2(locked,scale=0)
+        {
+            let inv = &mut region.players.get_mut(&p_id).unwrap().inventory.slots;
+            inv[36] = stack(items::PAPER, 64);
+            inv[37] = map0;
+            inv[38] = make_filled_map(max_id);
+            inv[39] = make_filled_map(locked_id);
+        }
+
+        assert!(station::try_open(&mut region, p_id, table));
+        let cid = region.menus[&p_id].container_id;
+
+        // 拿起 64 张纸，右键在外圈 8 格（1,2,3,4,6,7,8,9）各放 3 张。
+        click(&mut region, p_id, cid, 37, 0, ContainerInput::Pickup);
+        for slot in [1, 2, 3, 4, 6, 7, 8, 9] {
+            for _ in 0..3 {
+                click(&mut region, p_id, cid, slot, 1, ContainerInput::Pickup);
+            }
+        }
+        click(&mut region, p_id, cid, 37, 0, ContainerInput::Pickup); // 放回多余的纸
+
+        // 放入 map0×3 到中心格（槽 5）。
+        click(&mut region, p_id, cid, 38, 0, ContainerInput::Pickup);
+        click(&mut region, p_id, cid, 5, 0, ContainerInput::Pickup);
+
+        // 预览结果格（槽 0）应带 MAP_POST_PROCESSING = SCALE。
+        let preview = region.menus[&p_id]
+            .station
+            .as_ref()
+            .unwrap()
+            .replay_view()
+            .slots[0]
+            .clone();
+        assert_eq!(preview.item, items::FILLED_MAP);
+        assert_eq!(stack_map_id(&preview), Some(0));
+        assert_eq!(
+            resolved(&preview, kinds::MAP_POST_PROCESSING),
+            Some(ComponentValue::MapPostProcessing(SCALE))
+        );
+
+        // 1. 左键取出：去掉 MAP_POST_PROCESSING，分配 id=3（scale=1, center=(64,64)）。
+        click(&mut region, p_id, cid, 0, 0, ContainerInput::Pickup);
+        let carried = region.menus[&p_id]
+            .station
+            .as_ref()
+            .unwrap()
+            .replay_view()
+            .carried;
+        assert_eq!(stack_map_id(&carried), Some(3));
+        assert!(!has_post_processing(&carried));
+        let d3 = region.global.maps.get(3).expect("scaled map 3");
+        assert_eq!(
+            (d3.scale, d3.center_x, d3.center_z, d3.locked),
+            (1, 64, 64, false)
+        );
+        click(&mut region, p_id, cid, 10, 0, ContainerInput::Pickup); // 放进背包槽 10
+
+        // 2. Shift-click（QuickMove）：连续放大剩余 2 张 map0，分配 id=4 和 id=5。
+        click(&mut region, p_id, cid, 0, 0, ContainerInput::QuickMove);
+        for expected_id in [4, 5] {
+            assert_eq!(region.global.maps.get(expected_id).unwrap().scale, 1);
+            let found = region.players[&p_id]
+                .inventory
+                .slots
+                .iter()
+                .find(|s| s.item == items::FILLED_MAP && stack_map_id(s) == Some(expected_id))
+                .expect("shift-extended map in inventory");
+            assert!(!has_post_processing(found));
+        }
+
+        // 3. scale=4 地图放进中心 + 外圈补 1 张纸：结果格必须为空。
+        click(&mut region, p_id, cid, 37, 0, ContainerInput::Pickup);
+        for slot in [1, 2, 3, 4, 6, 7, 8, 9] {
+            click(&mut region, p_id, cid, slot, 1, ContainerInput::Pickup);
+        }
+        click(&mut region, p_id, cid, 37, 0, ContainerInput::Pickup);
+        click(&mut region, p_id, cid, 39, 0, ContainerInput::Pickup); // map1(scale=4)
+        click(&mut region, p_id, cid, 5, 0, ContainerInput::Pickup);
+        assert!(
+            region.menus[&p_id]
+                .station
+                .as_ref()
+                .unwrap()
+                .replay_view()
+                .slots[0]
+                .is_empty(),
+            "scale=4 map must not match map_extending"
+        );
+
+        // 4. 锁定但 scale=0 的地图放进中心：26.3 MapExtendingRecipe 不查 locked，必须匹配；
+        //    创造模式中键克隆结果格分配 id=6 且剥离 MAP_POST_PROCESSING。
+        click(&mut region, p_id, cid, 5, 0, ContainerInput::Pickup);
+        click(&mut region, p_id, cid, 39, 0, ContainerInput::Pickup);
+        click(&mut region, p_id, cid, 40, 0, ContainerInput::Pickup); // map2(locked,scale=0)
+        click(&mut region, p_id, cid, 5, 0, ContainerInput::Pickup);
+        assert!(
+            !region.menus[&p_id]
+                .station
+                .as_ref()
+                .unwrap()
+                .replay_view()
+                .slots[0]
+                .is_empty(),
+            "26.3 MapExtendingRecipe only checks scale < 4"
+        );
+        region.players.get_mut(&p_id).unwrap().game_mode = GameMode::Creative;
+        click(&mut region, p_id, cid, 0, 2, ContainerInput::Clone);
+        let cloned = region.menus[&p_id]
+            .station
+            .as_ref()
+            .unwrap()
+            .replay_view()
+            .carried;
+        assert_eq!(stack_map_id(&cloned), Some(6));
+        assert!(!has_post_processing(&cloned));
+        assert_eq!(region.global.maps.get(6).unwrap().scale, 1);
+        assert!(!region.global.maps.get(6).unwrap().locked);
     }
 }
