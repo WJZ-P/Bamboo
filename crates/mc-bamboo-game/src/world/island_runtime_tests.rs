@@ -2162,3 +2162,571 @@ fn a_split_never_separates_a_rider_from_the_vehicle() {
     let leaving = BTreeSet::from([id]);
     assert!(split_ready(&region, &leaving, &inside, true));
 }
+
+/// 抽取发给客户端的 `ClientboundMapItemDataPacket` 的 `(map_id, has_decorations, patch_width)`。
+fn decode_map_packets(frames: &[Frame]) -> Vec<(i32, bool, u8)> {
+    use mc_bamboo_protocol::codec::Reader;
+
+    let mut out = Vec::new();
+    for frame in frames_with_id(frames, clientbound::MAP_ITEM_DATA) {
+        let mut r = Reader::new(&frame.body);
+        let map_id = r.varint().expect("map_id");
+        let _scale = r.i8().expect("scale");
+        let _locked = r.bool().expect("locked");
+        let has_decs = r.bool().expect("has_decorations");
+        if has_decs {
+            let count = r.varint().expect("dec_count");
+            for _ in 0..count {
+                let _kind = r.varint().expect("kind");
+                let _x = r.i8().expect("x");
+                let _y = r.i8().expect("y");
+                let _rot = r.i8().expect("rot");
+                assert!(!r.bool().expect("has_name"));
+            }
+        }
+        let patch_width = r.u8().expect("patch_width");
+        out.push((map_id, has_decs, patch_width));
+    }
+    out
+}
+
+/// 多岛（分离驱动）下两个岛各自创建地图：ID 全局唯一不撞号，制图台放大同样走全服计数器，
+/// 关服存盘再重开后 `last_id.dat` 与全部 `<id>.dat` 都完整存活。
+///
+/// Under detached multi-island mode, creating maps on two different islands
+/// produces distinct global IDs, cartography scaling uses the same server-wide
+/// counter, and all maps plus `last_id.dat` survive save/reload.
+#[test]
+fn multi_island_maps_allocate_unique_ids_and_round_trip_save() {
+    use mc_bamboo_core::Hand;
+    use mc_bamboo_data::items;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    with_stack(|| {
+        let root = std::env::temp_dir().join(format!(
+            "bamboo-multi-island-maps-save-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let (id_a, id_b, center_a, center_b, colors_a, colors_b);
+        {
+            let mut scene = set_up(11, Harness::new_islands_with_save(2, &root, 2));
+            let alice = scene
+                .clients
+                .iter()
+                .find(|(g, _)| *g == 0)
+                .map(|(_, c)| c.clone())
+                .expect("第 0 组有玩家");
+            let bob = scene
+                .clients
+                .iter()
+                .find(|(g, _)| *g == 1)
+                .map(|(_, c)| c.clone())
+                .expect("第 1 组有玩家");
+            let island_a = scene
+                .server
+                .world
+                .islands
+                .island_of_player(alice.id)
+                .expect("Alice 在岛上");
+            let island_b = scene
+                .server
+                .world
+                .islands
+                .island_of_player(bob.id)
+                .expect("Bob 在岛上");
+            assert_ne!(island_a, island_b, "两名玩家必须在两个不同的岛上");
+
+            // 两名玩家在各自岛上同时拿到空地图，在同一刻右键创建已填充地图。
+            for client in [&alice, &bob] {
+                let region = scene.server.player_region(client);
+                let player = region.players.get_mut(&client.id).expect("玩家");
+                player.game_mode = GameMode::Survival;
+                player.inventory.selected = 0;
+                player.inventory.slots[36] = ItemStack::new(items::MAP, 1);
+            }
+            scene.server.request(
+                &alice,
+                PlayRequest::UseItem {
+                    hand: Hand::Main,
+                    sequence: 1,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                },
+            );
+            scene.server.request(
+                &bob,
+                PlayRequest::UseItem {
+                    hand: Hand::Main,
+                    sequence: 1,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                },
+            );
+            scene.server.tick();
+
+            let stack_a = scene.server.player(&alice).inventory.slots[36].clone();
+            let stack_b = scene.server.player(&bob).inventory.slots[36].clone();
+            assert_eq!(stack_a.item, items::FILLED_MAP);
+            assert_eq!(stack_b.item, items::FILLED_MAP);
+            id_a = crate::map::stack_map_id(&stack_a).expect("Alice 拿到 map_id");
+            id_b = crate::map::stack_map_id(&stack_b).expect("Bob 拿到 map_id");
+            assert_ne!(id_a, id_b, "两个岛创建的地图 ID 绝不能撞号");
+            assert_eq!(
+                scene.server.world.master.global.maps().index.last_map_id,
+                1,
+                "全服 MapIndex 计到 1"
+            );
+
+            // 跑 16 刻让两张地图各自采样地形颜色。
+            for _ in 0..16 {
+                scene.server.tick();
+            }
+            let maps = scene.server.world.master.global.maps();
+            let data_a = maps.get(id_a).expect("地图 A 在权威表里");
+            let data_b = maps.get(id_b).expect("地图 B 在权威表里");
+            center_a = (data_a.center_x, data_a.center_z);
+            center_b = (data_b.center_x, data_b.center_z);
+            assert_ne!(center_a, center_b, "两张地图各自对齐到所在岛的中心");
+            colors_a = data_a.colors;
+            colors_b = data_b.colors;
+            assert!(
+                colors_a.iter().any(|&c| c != 0),
+                "地图 A 采到了非零地形颜色"
+            );
+            assert!(
+                colors_b.iter().any(|&c| c != 0),
+                "地图 B 采到了非零地形颜色"
+            );
+
+            scene.server.shut_down();
+        }
+
+        // 重开同一个世界目录：last_id.dat 与两张地图的数据都要完整读回。
+        let reopened = Harness::new_islands_with_save(2, &root, 2);
+        let restored = reopened.world.master.global.maps();
+        assert_eq!(restored.index.last_map_id, 1);
+        let ra = restored.get(id_a).expect("存档读回地图 A");
+        let rb = restored.get(id_b).expect("存档读回地图 B");
+        assert_eq!((ra.center_x, ra.center_z), center_a);
+        assert_eq!((rb.center_x, rb.center_z), center_b);
+        assert_eq!(ra.colors, colors_a);
+        assert_eq!(rb.colors, colors_b);
+        assert_eq!(
+            reopened.world.islands.region.global.maps.index.last_map_id, 1,
+            "重开后岛快照同步拿到全服地图表"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    });
+}
+
+/// 多岛（分离驱动）下玩家手持、以及物品展示框挂载「中心在别的岛上」的地图：
+/// 跨岛玩家照样更新颜色、照样收到地图包、且不互相驱逐另一座岛上的持有者；
+/// 跨岛展示框照样登记标记并向本岛玩家发包。
+///
+/// Under detached multi-island mode, a player or item frame on island B using
+/// a map centered on island A still updates colors, preserves both islands'
+/// holders/markers, and emits map packets.
+#[test]
+fn multi_island_player_and_frame_sync_map_centered_on_another_island() {
+    use mc_bamboo_blocks::entity::{Entity, EntityKind};
+    use mc_bamboo_core::Direction;
+    use mc_bamboo_data::state_map_color;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    with_stack(|| {
+        let mut scene = set_up(12, Harness::new_islands(2, 2));
+        let alice = scene
+            .clients
+            .iter()
+            .find(|(g, _)| *g == 0)
+            .map(|(_, c)| c.clone())
+            .expect("第 0 组有玩家");
+        let bob = scene
+            .clients
+            .iter()
+            .find(|(g, _)| *g == 1)
+            .map(|(_, c)| c.clone())
+            .expect("第 1 组有玩家");
+        let island_a = scene
+            .server
+            .world
+            .islands
+            .island_of_player(alice.id)
+            .expect("Alice 在岛上");
+        let island_b = scene
+            .server
+            .world
+            .islands
+            .island_of_player(bob.id)
+            .expect("Bob 在岛上");
+        assert_ne!(island_a, island_b, "两名玩家必须在两个不同的岛上");
+
+        let pos_a = scene.server.player(&alice).position();
+        let pos_b = scene.server.player(&bob).position();
+
+        // 在 Bob 脚下的岛 B 区块放一块金块（颜色醒目），验证 Bob 拿着中心在岛 A 侧的
+        // 比例 4 地图（覆盖 2048×2048，同时涵盖岛 A 和岛 B）时照样采样并更新颜色。
+        let bob_chunk = scene.server.player(&bob).chunk_pos();
+        let gold_pos = at(bob_chunk, 8, Y, 8);
+        {
+            let region_b = scene.server.player_region(&bob);
+            for dx in -16..=16 {
+                for dz in -16..=16 {
+                    let p = BlockPos::new(gold_pos.x + dx, Y, gold_pos.z + dz);
+                    let _ = region_b.chunks.set_block(p, blocks::GOLD_BLOCK);
+                }
+            }
+        }
+
+        // 在全服 MapStore 建两张图：
+        // - map 0: 比例 0，中心在岛 A（Alice 处），Bob 在岛 B 拿副本与挂展示框。
+        // - map 1: 比例 4，中心对齐到 Alice 处（不在岛 B），同时覆盖岛 A 与岛 B 像素。
+        let (id0, id1) = {
+            let maps = scene.server.world.master.global.maps_mut();
+            let id0 = maps.next_map_id();
+            maps.insert(
+                id0,
+                crate::map::MapItemSavedData::create_fresh(
+                    pos_a.x,
+                    pos_a.z,
+                    0,
+                    true,
+                    false,
+                    crate::region::DIMENSION,
+                ),
+            );
+            let id1 = maps.next_map_id();
+            let mut d1 = crate::map::MapItemSavedData::create_fresh(
+                0.0,
+                0.0,
+                4,
+                true,
+                false,
+                crate::region::DIMENSION,
+            );
+            // 中心显式落在岛 A（(0, 0)），scale=4 覆盖 [-1024, 1023]，同时涵盖岛 B 的 Bob。
+            d1.center_x = 0;
+            d1.center_z = 0;
+            maps.insert(id1, d1);
+            (id0, id1)
+        };
+        assert_eq!(
+            scene
+                .server
+                .world
+                .islands
+                .island_of_chunk(ChunkPos::new(0, 0)),
+            Some(island_a),
+            "map 0 与 map 1 的中心区块都在岛 A 上"
+        );
+        scene.server.world.publish_global();
+
+        // Alice 主手拿 map 0；Bob 主手拿 map 1、副手拿 map 0。
+        {
+            let region_a = scene.server.player_region(&alice);
+            let p = region_a.players.get_mut(&alice.id).expect("Alice");
+            p.inventory.selected = 0;
+            p.inventory.slots[36] = crate::map::make_filled_map(id0);
+        }
+        {
+            let region_b = scene.server.player_region(&bob);
+            let p = region_b.players.get_mut(&bob.id).expect("Bob");
+            p.inventory.selected = 0;
+            p.inventory.slots[36] = crate::map::make_filled_map(id1);
+            p.inventory.slots[45] = crate::map::make_filled_map(id0);
+        }
+
+        let _ = alice.take_frames();
+        let _ = bob.take_frames();
+        let mut bob_got_map0 = false;
+        let mut bob_got_map1 = false;
+        for _ in 0..16 {
+            scene.server.tick();
+            for (map_id, _, _) in decode_map_packets(&bob.take_frames()) {
+                if map_id == id0 {
+                    bob_got_map0 = true;
+                }
+                if map_id == id1 {
+                    bob_got_map1 = true;
+                }
+            }
+        }
+        assert!(
+            bob_got_map0,
+            "岛 B 的 Bob 持有中心在岛 A 的 map 0，必须收到地图包"
+        );
+        assert!(
+            bob_got_map1,
+            "岛 B 的 Bob 持有中心不在岛 B 的 map 1，必须收到地图包"
+        );
+
+        let maps = scene.server.world.master.global.maps();
+        let data0 = maps.get(id0).expect("map 0");
+        assert!(
+            data0.colors.iter().any(|&c| c != 0),
+            "岛 A 的 Alice 更新了 map 0 的颜色"
+        );
+        // 两个岛的持有者都必须留在 carried_by 里，互不驱逐。
+        assert!(
+            data0.carried_by.iter().any(|h| h.player == alice.id),
+            "map 0 保留岛 A 的 Alice"
+        );
+        assert!(
+            data0.carried_by.iter().any(|h| h.player == bob.id),
+            "map 0 保留岛 B 的 Bob"
+        );
+
+        let data1 = maps.get(id1).expect("map 1");
+        let scale1 = 1 << data1.scale;
+        let bob_px = ((pos_b.x - f64::from(data1.center_x)).floor() as i32 / scale1 + 64) as usize;
+        let bob_pz = ((pos_b.z - f64::from(data1.center_z)).floor() as i32 / scale1 + 64) as usize;
+        let sampled_color = data1.colors[bob_px + bob_pz * 128] >> 2;
+        assert_eq!(
+            sampled_color,
+            state_map_color(blocks::GOLD_BLOCK),
+            "岛 B 的 Bob 拿着中心不在岛 B 的 map 1，必须把脚下金块采样进权威地图数据"
+        );
+
+        // 展示框测试：一张中心在岛 A（(0, 0)）、Bob 从未拿过的地图（id2，已有颜色），
+        // 挂在岛 B 的物品展示框里；Bob 手上没有任何地图，照样收到展示框地图包并登记标记。
+        let id2 = {
+            let maps = scene.server.world.master.global.maps_mut();
+            let id2 = maps.next_map_id();
+            let mut d2 = crate::map::MapItemSavedData::create_fresh(
+                0.0,
+                0.0,
+                4,
+                true,
+                false,
+                crate::region::DIMENSION,
+            );
+            d2.center_x = 0;
+            d2.center_z = 0;
+            d2.set_color(
+                10,
+                10,
+                crate::map::packed_color(
+                    crate::map::map_color::STONE,
+                    crate::map::Brightness::High,
+                ),
+            );
+            maps.insert(id2, d2);
+            id2
+        };
+        scene.server.world.publish_global();
+        {
+            let region_b = scene.server.player_region(&bob);
+            let p = region_b.players.get_mut(&bob.id).expect("Bob");
+            p.inventory.slots[36] = ItemStack::empty();
+            p.inventory.slots[45] = ItemStack::empty();
+            let mut frame = Entity::item_frame(
+                BlockPos::new(gold_pos.x, Y + 1, gold_pos.z),
+                Direction::South,
+                false,
+            );
+            if let EntityKind::ItemFrame(f) = &mut frame.kind {
+                f.item = crate::map::make_filled_map(id2);
+            }
+            region_b.entities.spawn(frame);
+        }
+        let _ = bob.take_frames();
+        scene.server.tick();
+        let frame_packets = decode_map_packets(&bob.take_frames());
+        assert!(
+            frame_packets
+                .iter()
+                .any(|&(id, has_decs, patch_w)| id == id2 && has_decs && patch_w == 128),
+            "岛 B 的展示框装着中心在岛 A 的 map {id2}，必须向岛 B 玩家发完整地图包和展示框标记：{frame_packets:?}"
+        );
+        assert_eq!(
+            scene
+                .server
+                .world
+                .master
+                .global
+                .maps()
+                .get(id2)
+                .expect("map 2")
+                .frame_markers()
+                .len(),
+            1,
+            "岛 B 展示框标记写入全服权威地图数据"
+        );
+    });
+}
+
+/// 拆岛再合岛后，拆前和分岛期间建立与更新的全部地图数据都完整保留、不丢失不覆盖。
+///
+/// Splitting and re-merging islands preserves every map created and explored
+/// before and during the split without losing or overwriting data.
+#[test]
+fn multi_island_split_and_remerge_preserves_all_maps() {
+    use mc_bamboo_core::Hand;
+    use mc_bamboo_data::items;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    with_stack(|| {
+        let mut scene = set_up(13, Harness::new_islands(2, 2));
+        let alice = scene
+            .clients
+            .iter()
+            .find(|(g, _)| *g == 0)
+            .map(|(_, c)| c.clone())
+            .expect("第 0 组有玩家");
+        let bob = scene
+            .clients
+            .iter()
+            .find(|(g, _)| *g == 1)
+            .map(|(_, c)| c.clone())
+            .expect("第 1 组有玩家");
+
+        // 1. 先全部合并成一个岛，在单岛上由 Alice 创建 map 0 并采样。
+        {
+            let world = &mut scene.server.world;
+            let partition = world.master.host.partition_mut().expect("多岛");
+            let ids = partition.island_ids();
+            for &other in &ids[1..] {
+                assert!(partition.force_merge(ids[0], other));
+            }
+            world.master.host.take_partition_ops();
+            world.settle_islands();
+            assert_eq!(world.islands.len(), 1, "先合为一个岛");
+        }
+        {
+            let region = scene.server.player_region(&alice);
+            let p = region.players.get_mut(&alice.id).expect("Alice");
+            p.game_mode = GameMode::Survival;
+            p.inventory.selected = 0;
+            p.inventory.slots[36] = ItemStack::new(items::MAP, 1);
+        }
+        scene.server.request(
+            &alice,
+            PlayRequest::UseItem {
+                hand: Hand::Main,
+                sequence: 1,
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+        );
+        for _ in 0..16 {
+            scene.server.tick();
+        }
+        let colors0_before_split = scene
+            .server
+            .world
+            .master
+            .global
+            .maps()
+            .get(0)
+            .expect("map 0")
+            .colors;
+        assert!(
+            colors0_before_split.iter().any(|&c| c != 0),
+            "拆岛前 map 0 已采样出颜色"
+        );
+
+        // 2. 拆岛：Alice 和 Bob 分到不同岛上。
+        {
+            let world = &mut scene.server.world;
+            let home = world.islands.ids()[0];
+            let partition = world.master.host.partition_mut().expect("多岛");
+            assert!(!partition.force_split(home).is_empty());
+            world.master.host.take_partition_ops();
+            world.settle_islands();
+        }
+        assert!(scene.server.world.islands.len() >= 2, "已拆成多个岛");
+        assert_ne!(
+            scene.server.world.islands.island_of_player(alice.id),
+            scene.server.world.islands.island_of_player(bob.id),
+            "拆岛后 Alice 与 Bob 在不同岛"
+        );
+
+        // 分岛期间：Bob 在岛 B 创建 map 1（必须拿到 id=1）并采样。
+        {
+            let region = scene.server.player_region(&bob);
+            let p = region.players.get_mut(&bob.id).expect("Bob");
+            p.game_mode = GameMode::Survival;
+            p.inventory.selected = 0;
+            p.inventory.slots[36] = ItemStack::new(items::MAP, 1);
+        }
+        scene.server.request(
+            &bob,
+            PlayRequest::UseItem {
+                hand: Hand::Main,
+                sequence: 1,
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+        );
+        for _ in 0..16 {
+            scene.server.tick();
+        }
+        assert_eq!(
+            crate::map::stack_map_id(&scene.server.player(&bob).inventory.slots[36]),
+            Some(1),
+            "拆岛后 Bob 在另一座岛建图必须拿到 id=1"
+        );
+        let colors1_during_split = scene
+            .server
+            .world
+            .master
+            .global
+            .maps()
+            .get(1)
+            .expect("map 1")
+            .colors;
+        assert!(
+            colors1_during_split.iter().any(|&c| c != 0),
+            "分岛期间 map 1 已采样出颜色"
+        );
+
+        // 3. 合岛：把所有岛再合回一个岛。
+        {
+            let world = &mut scene.server.world;
+            let partition = world.master.host.partition_mut().expect("多岛");
+            let ids = partition.island_ids();
+            for &other in &ids[1..] {
+                assert!(partition.force_merge(ids[0], other));
+            }
+            world.master.host.take_partition_ops();
+            world.settle_islands();
+            assert_eq!(world.islands.len(), 1, "已全部合回一个岛");
+        }
+        scene.server.tick();
+
+        let maps = scene.server.world.master.global.maps();
+        assert_eq!(maps.index.last_map_id, 1);
+        assert_eq!(
+            maps.get(0).expect("合岛后 map 0 仍在").colors,
+            colors0_before_split,
+            "拆岛再合岛后 map 0 颜色无损"
+        );
+        assert_eq!(
+            maps.get(1).expect("合岛后 map 1 仍在").colors,
+            colors1_during_split,
+            "拆岛再合岛后 map 1 颜色无损"
+        );
+        assert!(
+            scene
+                .server
+                .world
+                .islands
+                .region
+                .global
+                .maps
+                .get(0)
+                .is_some()
+                && scene
+                    .server
+                    .world
+                    .islands
+                    .region
+                    .global
+                    .maps
+                    .get(1)
+                    .is_some(),
+            "合岛后的岛快照能同时读到 map 0 与 map 1"
+        );
+    });
+}

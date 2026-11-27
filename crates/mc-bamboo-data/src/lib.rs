@@ -120,6 +120,14 @@ pub mod facts {
     ///
     /// `isPathfindable(PathComputationType.WATER)`, for swim pathfinding and random swim targets.
     pub const PATHFINDABLE_WATER: u64 = 1 << 38;
+    /// `BlockStateBase.getMapColor` 的 6 位颜色 ID 起始位（bit 39..=44，范围 0..=61）。
+    ///
+    /// Starting bit of the 6-bit `MapColor.id` (`BlockStateBase.getMapColor`, bits 39..=44, 0..=61).
+    pub const MAP_COLOR_SHIFT: u32 = 39;
+    /// `MapColor.id` 的 6 位掩码。
+    ///
+    /// 6-bit mask for `MapColor.id` after shifting by [`MAP_COLOR_SHIFT`].
+    pub const MAP_COLOR_MASK: u64 = 0x3F;
 }
 
 /// 官方 `WalkNodeEvaluator` 给寻路格子分的类别，顺序和官方 `PathType` 一致。
@@ -931,6 +939,16 @@ pub fn state_facts(state: u32) -> u64 {
     states::STATE_FACTS[state as usize]
 }
 
+/// 状态的 `BlockStateBase.getMapColor` 颜色 ID（0..=61，0 是 `MapColor.NONE`）。
+/// 状态 ID 不存在时 panic。
+///
+/// The `MapColor.id` (`BlockStateBase.getMapColor`, 0..=61, 0 = `MapColor.NONE`).
+/// Panics on an unknown state.
+#[inline]
+pub fn state_map_color(state: u32) -> u8 {
+    ((states::STATE_FACTS[state as usize] >> facts::MAP_COLOR_SHIFT) & facts::MAP_COLOR_MASK) as u8
+}
+
 /// 状态的流体。状态 ID 不存在时 panic。
 pub fn state_fluid(state: u32) -> &'static FluidFacts {
     &states::FLUID_STATES[usize::from(states::STATE_FLUID[state as usize])]
@@ -1739,6 +1757,16 @@ mod tests {
         assert_ne!(state_facts(blocks::LEVER) & facts::SIGNAL_SOURCE, 0);
         assert_ne!(state_facts(blocks::COMPARATOR) & facts::SIGNAL_SOURCE, 0);
         assert_ne!(state_facts(blocks::COMPOSTER) & facts::ANALOG_OUTPUT, 0);
+
+        // `MapColor.id` 按状态从官方导出（含自定义状态色函数，如橡木原木按轴向切换木色/树皮色）。
+        assert_eq!(state_map_color(blocks::AIR), 0); // NONE
+        assert_eq!(state_map_color(blocks::GRASS_BLOCK), 1); // GRASS
+        assert_eq!(state_map_color(blocks::SAND), 2); // SAND
+        assert_eq!(state_map_color(blocks::STONE), 11); // STONE
+        assert_eq!(state_map_color(blocks::WATER), 12); // WATER
+        assert_eq!(state_map_color(blocks::OAK_LOG), 13); // axis=y -> WOOD
+        assert_eq!(state_map_color(blocks::OAK_LOG - 1), 34); // axis=x -> PODZOL
+        assert_eq!(state_map_color(blocks::DEEPSLATE), 59); // DEEPSLATE
     }
 
     #[test]

@@ -3251,7 +3251,11 @@ fn prepare_sync(region: &mut Region) {
 }
 
 /// tick 第 6 阶段：世界实体的配对、同步和移除。对应 `ChunkMap.tick`。
-pub(crate) fn sync(region: &mut Region) {
+/// 展示框内地图每 10 刻的广播经 [`GlobalPort`](crate::global_port::GlobalPort) 交给主控。
+///
+/// Tick phase 6: entity pairing, sync, and removal (`ChunkMap.tick`). Framed-map
+/// 10-tick broadcasts are submitted through `GlobalPort`.
+pub(crate) fn sync_with_port(port: &mut crate::global_port::GlobalPort<'_>, region: &mut Region) {
     // 外层仍是全表按 uid 升序：每个实体都要发同步包，消失的也要发移除包。
     // 只读公开数据，不克隆整行；配对改走每刻预建的粗网格候选表。
     //
@@ -3264,23 +3268,62 @@ pub(crate) fn sync(region: &mut Region) {
 
     let view_distance = region.view_distance;
     let cells = PlayerCells::build(&region.players, view_distance);
+    let game_time = region.tick.game_time();
     for snapshot in snapshots {
-        let tracked = &mut region.entity_tracking.tracked;
-        tracked
-            .entry(snapshot.id)
-            .or_insert_with(|| TrackedEntity::new(&snapshot));
-        let tracked = tracked.get_mut(&snapshot.id).expect("刚放进去");
-        update_pairings(
-            &region.players,
-            &cells,
-            &mut region.links,
-            &snapshot,
-            tracked,
-            view_distance,
-            &index,
-        );
+        let framed_effect = {
+            let tracked = &mut region.entity_tracking.tracked;
+            tracked
+                .entry(snapshot.id)
+                .or_insert_with(|| TrackedEntity::new(&snapshot));
+            let tracked = tracked.get_mut(&snapshot.id).expect("刚放进去");
+            update_pairings(
+                &region.players,
+                &cells,
+                &mut region.links,
+                &snapshot,
+                tracked,
+                view_distance,
+                &index,
+            );
+            // 官方 `ServerEntity.sendChanges` 开头：`ItemFrame` 在自身 `tickCount % 10 == 0`
+            // 时（含刚追踪的第 0 刻）先对维度内玩家广播框内地图，再冲脏元数据并 `tickCount++`。
+            // Vanilla `ServerEntity.sendChanges`: when an `ItemFrame`'s own `tickCount % 10 == 0`
+            // (including tick 0 on creation), broadcast its framed map to dimension players before
+            // flushing dirty entity data and incrementing `tickCount`.
+            if let KindData::ItemFrame(frame) = &snapshot.data
+                && tracked.tick_count % 10 == 0
+            {
+                crate::map::build_framed_map_tick(&region.players, snapshot.id, frame, game_time)
+            } else {
+                None
+            }
+        };
+        if let Some(effect) = framed_effect {
+            port.submit(
+                region,
+                crate::global_port::GlobalEffect::FramedMapTick(effect),
+            );
+        }
+        let tracked = region
+            .entity_tracking
+            .tracked
+            .get_mut(&snapshot.id)
+            .expect("刚放进去");
         send_changes(&snapshot, tracked, &mut region.links);
     }
+}
+
+/// 单元测试与对拍重放用的无端口入口：用 `region.global.maps` 建临时 `Global` 当场执行。
+///
+/// Port-free entry point for unit tests and oracle replays, running against a
+/// temporary `Global` backed by `region.global.maps`.
+#[cfg(any(test, feature = "oracle-samples"))]
+pub(crate) fn sync(region: &mut Region) {
+    let mut global = crate::global::Global::default();
+    global.set_maps((*region.global.maps).clone());
+    let mut port = crate::global_port::GlobalPort::Direct(&mut global);
+    sync_with_port(&mut port, region);
+    region.global.maps = std::sync::Arc::new(global.maps().clone());
 }
 
 /// 对拍专用：只发这一刻攒下的生物事件，不跑配对和同步包。

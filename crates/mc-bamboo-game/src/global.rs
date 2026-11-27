@@ -222,6 +222,12 @@ pub(crate) struct Global {
     /// The one scoreboard and team set for the whole server. Never saved. Shared
     /// with [`GlobalView`]; copied only when written.
     scoreboard: Arc<Scoreboard>,
+    /// 全服一份的地图索引与地图数据（`data/minecraft/maps/last_id.dat` 与 `<id>.dat`）。
+    /// 和 [`GlobalView`] 共享；每张地图按 `Arc` 独立写时复制，避免改一张图复制整张表。
+    ///
+    /// The one server-wide map index and map data store (`data/minecraft/maps/`).
+    /// Shared with [`GlobalView`]; each map is copy-on-write via `Arc`.
+    maps: Arc<crate::map::MapStore>,
     /// 全服一份的自定义 Boss 栏。不写存档。
     ///
     /// The one set of custom boss bars for the whole server. Never saved.
@@ -296,6 +302,7 @@ impl Default for Global {
             state: WorldState::default(),
             sleep_skip: false,
             scoreboard: Arc::default(),
+            maps: Arc::default(),
             boss_bars: crate::scoreboard::BossBars::default(),
             world_border: WorldBorder::default(),
             admin: crate::admin::AdminState::default(),
@@ -378,6 +385,36 @@ impl Global {
         Arc::make_mut(&mut self.scoreboard)
     }
 
+    /// 全服的地图索引与地图数据表。
+    ///
+    /// The server-wide map index and map data store.
+    pub(crate) fn maps(&self) -> &crate::map::MapStore {
+        &self.maps
+    }
+
+    /// [`maps`](Self::maps) 的可变版本。快照还拿着同一份时只复制外层 `BTreeMap`
+    /// 指针，每张地图的数据按需写时复制。
+    ///
+    /// Mutable [`maps`](Self::maps). Clones only the outer map of `Arc` handles
+    /// while a snapshot shares it; individual maps are copy-on-write on access.
+    pub(crate) fn maps_mut(&mut self) -> &mut crate::map::MapStore {
+        Arc::make_mut(&mut self.maps)
+    }
+
+    /// 开服读档或测试时替换全服地图表。
+    ///
+    /// Replace the server-wide map store (startup load or tests).
+    pub(crate) fn set_maps(&mut self, maps: crate::map::MapStore) {
+        self.maps = Arc::new(maps);
+    }
+
+    /// 这名玩家当前是否在线（全服名单）。
+    ///
+    /// Whether this player is currently online in the server-wide roster.
+    pub(crate) fn is_online(&self, id: PlayerId) -> bool {
+        self.roster.contains_key(&id)
+    }
+
     /// 全服的自定义 Boss 栏。
     ///
     /// The server-wide custom boss bars.
@@ -449,6 +486,7 @@ impl Global {
             world_gen: self.world_gen.clone(),
             idle_timeout_minutes: self.admin.idle_timeout_minutes,
             scoreboard: Arc::clone(&self.scoreboard),
+            maps: Arc::clone(&self.maps),
             wandering_trader_data: self.wandering_trader_data,
         }
     }
@@ -859,6 +897,8 @@ pub(crate) struct GlobalView {
     /// `/setidletimeout` 的分钟数，0 表示不踢。
     pub(crate) idle_timeout_minutes: i32,
     pub(crate) scoreboard: Arc<Scoreboard>,
+    /// 全服地图索引与数据的只读快照；权威副本在 `Global`。
+    pub(crate) maps: Arc<crate::map::MapStore>,
     /// 全服的 `WanderingTraderData`，写盘时用。
     pub(crate) wandering_trader_data:
         mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData,

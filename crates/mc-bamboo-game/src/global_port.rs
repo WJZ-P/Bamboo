@@ -92,6 +92,30 @@ pub(crate) enum GlobalEffect {
     WanderingTraderData(
         mc_bamboo_blocks::entity::mob::wandering_trader_spawner::WanderingTraderData,
     ),
+    /// 岛每刻算出的地图采样增量、失效展示框与玩家持有者同步；由主控合并进权威 [`MapStore`]
+    /// 并给本岛玩家发包。
+    ///
+    /// Per-tick map delta (sampled pixels, stale frames, carrier markers) applied
+    /// to the authoritative [`MapStore`] on the master.
+    MapTick(crate::map::MapTickEffect),
+    /// 物品展示框按自身 `ServerEntity.tickCount % 10 == 0` 触发的地图广播。
+    ///
+    /// Framed-map 10-tick broadcast triggered by an item frame's `ServerEntity.tickCount`.
+    FramedMapTick(crate::map::FramedMapTickEffect),
+}
+
+impl GlobalEffect {
+    /// 这条效果在主控应用时是否需要借来别的岛上的玩家（`Borrow::All`）。
+    /// 地图同步与流浪商人计时只写 `Global` 并向本岛玩家发包，不需要跨岛借人。
+    ///
+    /// Whether applying this effect on the master needs players borrowed from
+    /// other islands (`Borrow::All`).
+    pub(crate) fn needs_other_players(&self) -> bool {
+        !matches!(
+            self,
+            Self::WanderingTraderData(_) | Self::MapTick(_) | Self::FramedMapTick(_)
+        )
+    }
 }
 
 /// 岛写全局状态的口子。
@@ -226,6 +250,12 @@ fn apply_on_master(global: &mut Global, region: &mut Region, effect: GlobalEffec
             global.set_wandering_trader_data(data);
             global.publish(region);
         }
+        GlobalEffect::MapTick(effect) => {
+            crate::map::apply_map_tick(global, region, effect);
+        }
+        GlobalEffect::FramedMapTick(effect) => {
+            crate::map::apply_framed_map_tick(global, region, effect);
+        }
         GlobalEffect::Left { player } => {
             // 官方玩家断开时 `entityRemoved` 直接 return，不广播 reset_score；
             // 分数和 Boss 栏的 UUID 集合都留着，下次进服还会补发 add 包。
@@ -233,6 +263,11 @@ fn apply_on_master(global: &mut Global, region: &mut Region, effect: GlobalEffec
             // Official `entityRemoved` returns for players without broadcasting
             // reset_score; scores and boss-bar UUID sets stay so rejoining gets the
             // add packet again.
+            if !global.maps().is_empty() {
+                let name = global.roster_name(player).map(str::to_owned);
+                global.maps_mut().on_player_leave(player, name.as_deref());
+                global.publish(region);
+            }
             global.boss_bars_mut().on_leave(player);
             if let Some(frames) = global.remove_player(player) {
                 region.links.broadcast(&frames);

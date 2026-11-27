@@ -185,6 +185,8 @@ mod loot_oracle;
 #[cfg(feature = "oracle")]
 mod machine;
 #[cfg(feature = "oracle")]
+mod map_oracle;
+#[cfg(feature = "oracle")]
 mod menu;
 #[cfg(feature = "oracle")]
 mod mob_oracle;
@@ -451,6 +453,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla poi-oracle <java 路径> [--show N] [--break-self-test NAME]
       mc-bamboo-vanilla storage <java 路径> [--show N]
       mc-bamboo-vanilla saved-data <java 路径>
+      mc-bamboo-vanilla map-oracle <java 路径> [--break color|save|packet|fluid]
       mc-bamboo-vanilla player-attributes <java 路径> [--cases N] [--mining-cases N] [--seed S] [--show N] [--break-self-test]
       mc-bamboo-vanilla player-data <java 路径> [--show N]
       mc-bamboo-vanilla chunk-content <java 路径> [--show N]
@@ -554,6 +557,7 @@ fn run() -> Result<(), String> {
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
         ["poi-oracle", java, ref options @ ..] => poi_oracle_cli(java, options),
         ["saved-data", java] => saved_data_cli(java),
+        ["map-oracle", java, ref options @ ..] => map_oracle_cli(java, options),
         ["player-attributes", java, ref options @ ..] => player_attributes_oracle(java, options),
         ["player-data", java, ref options @ ..] => player_data_oracle(java, options),
         ["chunk-content", java, ref options @ ..] => chunk_content_oracle(java, options),
@@ -1260,6 +1264,16 @@ fn official_program(java: &str, source: &str) -> Result<Command, String> {
 #[cfg(feature = "oracle")]
 fn saved_data_cli(java: &str) -> Result<(), String> {
     saved_data::run(java)
+}
+
+#[cfg(feature = "oracle")]
+fn map_oracle_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    map_oracle::run(java, options)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn map_oracle_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
 #[cfg(not(feature = "oracle"))]

@@ -1591,6 +1591,21 @@ pub(crate) fn on_use_item(
     id: PlayerId,
     hand: Hand,
     sequence: i32,
+    rotation: (f32, f32),
+) {
+    on_use_item_with_maps(region, None, id, hand, sequence, rotation);
+}
+
+/// 同 [`on_use_item`]，由主控传入权威 [`MapStore`](crate::map::MapStore) 以避免多岛地图 ID 撞号。
+///
+/// Like [`on_use_item`], passing the master's authoritative `MapStore` so map
+/// ID allocation is globally unique across islands.
+pub(crate) fn on_use_item_with_maps(
+    region: &mut Region,
+    maps: Option<&mut crate::map::MapStore>,
+    id: PlayerId,
+    hand: Hand,
+    sequence: i32,
     (yaw, pitch): (f32, f32),
 ) {
     if !record_sequence(region, id, sequence) {
@@ -1678,6 +1693,12 @@ pub(crate) fn on_use_item(
     // `EnderEyeItem.use`: `PASS` on a frame, otherwise throw an `EyeOfEnder` (`SUCCESS_SERVER`) or `CONSUME`.
     if let Some(result) = crate::player_ender_eye::use_eye(region, id, hand, &actor) {
         swing(region, id, hand, result);
+        return;
+    }
+    // `EmptyMapItem.use`：空地图右键创建已填充地图，返回 `SUCCESS`。
+    // `EmptyMapItem.use`: create a filled map from an empty map, returning `SUCCESS`.
+    if crate::map::use_empty_map(region, maps, id, hand) {
+        swing(region, id, hand, InteractionResult::Success);
         return;
     }
     // `FireworkRocketItem.use`：仅在玩家 `isFallFlying()`（鞘翅滑翔）时生成附着烟花加速。
@@ -1895,6 +1916,13 @@ pub(crate) fn on_interact_entity_at(
         target.kind,
         mc_bamboo_blocks::entity::KindPublic::ItemFrame(_)
     );
+    // `ItemFrame.interact` 只在空框放物品时查地图追踪上限，先记下框是否为空。
+    // `ItemFrame.interact` checks the tracked-decoration limit only when inserting
+    // into an empty frame; remember whether the frame is empty now.
+    let frame_empty = matches!(
+        &target.kind,
+        mc_bamboo_blocks::entity::KindPublic::ItemFrame(frame) if frame.item.is_empty()
+    );
     let is_minecart = matches!(
         target.kind,
         mc_bamboo_blocks::entity::KindPublic::Minecart(_)
@@ -2013,6 +2041,21 @@ pub(crate) fn on_interact_entity_at(
                 Hand::Main => main_held.clone(),
                 Hand::Off => off_held.clone(),
             };
+            // `ItemFrame.interact`：空框放带 `map_id` 的地图前，若地图数据
+            // `isTrackedCountOverLimit(256)` 则返 `FAIL`，不放入。
+            // `ItemFrame.interact`: inserting a map into an empty frame fails when
+            // the saved data is over the tracked-decoration limit (256).
+            if frame_empty
+                && let Some(map_id) = crate::map::stack_map_id(&held)
+                && region
+                    .global
+                    .maps
+                    .get(map_id)
+                    .is_some_and(|data| data.is_tracked_count_over_limit(256))
+            {
+                swing(region, id, try_hand, InteractionResult::Fail);
+                return;
+            }
             let (outcome, effects) = {
                 let (mut level, ticks) = region.block_level();
                 let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);

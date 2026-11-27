@@ -250,6 +250,8 @@ public final class Extractor {
      */
     private static final long FACT_VALID_SPAWN = 1L << 37;
     private static final long FACT_PATHFINDABLE_WATER = 1L << 38;
+    /** `BlockStateBase.getMapColor` 的 6 位颜色 ID（0..=61），放在 bit 39..=44。 */
+    private static final int FACT_MAP_COLOR_SHIFT = 39;
     private static final int LIGHT_BLOCKED = 16;
     private static final int STURDY_MASK = (1 << 18) - 1;
     /** 26.3 主世界多噪声预设 `collectPossibleBiomes().distinct()` 的数量。 */
@@ -2706,6 +2708,7 @@ public final class Extractor {
             facts |= state.isPathfindable(net.minecraft.world.level.pathfinder.PathComputationType.WATER)
                     ? FACT_PATHFINDABLE_WATER : 0;
             facts |= state.isValidSpawn(EMPTY, pos, EntityTypes.COW) ? FACT_VALID_SPAWN : 0;
+            facts |= ((long) (state.getMapColor(EMPTY, pos).id & 0x3F)) << FACT_MAP_COLOR_SHIFT;
             return facts;
         }
 
