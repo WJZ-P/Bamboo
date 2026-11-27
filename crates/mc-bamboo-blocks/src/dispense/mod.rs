@@ -1,17 +1,17 @@
 //! `DispenserBlock.dispenseFrom` 和 `DispenseItemBehavior.bootStrap`。
 //!
-//! 船在放得下的时候只扣物品，矿车还会生成实体；两种都放一次 1000 和 2000。放不下时走官方的失败分支，
-//! 再套一层 `DefaultDispenseItemBehavior.dispense`。箭、刷怪蛋走官方在生成失败时的分支；
-//! 盔甲架按 `DispenseItemBehavior$1` 真的生成实体，TNT 在 `tnt_explodes` 为真时生成点燃的实体。
+//! 船、矿车、刷怪蛋和盔甲架都按各自的行为生成实体；两种放不下的载具走官方的失败分支，
+//! 再套一层 `DefaultDispenseItemBehavior.dispense`。成功的注册表行为放一次 1000 和 2000，
+//! 刷怪蛋还投递 `ENTITY_PLACE`。没有实体数据的刷怪蛋走默认抛出，TNT 在 `tnt_explodes`
+//! 为真时生成点燃的实体。
 //!
 //! `DispenserBlock.dispenseFrom` and `DispenseItemBehavior.bootStrap`.
 //!
-//! A boat that can be placed only consumes the item; a minecart also spawns the entity. Both
-//! play 1000 then 2000 once.
-//! When it cannot, the official failure branch runs, which nests another
-//! `DefaultDispenseItemBehavior.dispense`. Arrows and spawn eggs follow the branch official uses
-//! when the spawn fails; an armour stand really spawns the entity (`DispenseItemBehavior$1`),
-//! and TNT spawns a primed entity when `tnt_explodes` is true.
+//! Boats, minecarts, spawn eggs and armour stands spawn their entity. A vehicle that cannot
+//! be placed runs the official failure branch, nesting another
+//! `DefaultDispenseItemBehavior.dispense`. A successful registered behaviour plays 1000 then
+//! 2000 once; a spawn egg also posts `ENTITY_PLACE`. An egg without entity data takes the
+//! default throw, and TNT spawns a primed entity when `tnt_explodes` is true.
 
 mod bone;
 mod bottle;
