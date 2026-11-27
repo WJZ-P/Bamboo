@@ -1494,7 +1494,6 @@ mod tests {
     fn rider_intent_nudges_a_slow_cart_and_cancels_unpowered_rail_brake() {
         use crate::{
             BlockTicks, World,
-            game_event::{GameEvent, dispatch::EventContext},
             state::{POWERED, RAIL_SHAPE, RailShape},
             testing::TestLevel,
         };
@@ -1532,7 +1531,6 @@ mod tests {
     fn detector_rail_powers_reports_container_signal_and_resets_after_20_ticks() {
         use crate::{
             BlockTicks, World,
-            game_event::{GameEvent, dispatch::EventContext},
             state::{POWERED, RAIL_SHAPE, RailShape},
             testing::TestLevel,
         };

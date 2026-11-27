@@ -4519,11 +4519,7 @@ pub(crate) fn apply_push(
     };
     // `LivingEntity.push(Entity)`：睡着的（狐狸、村民）谁也推不动，也不把人推回去。
     // `LivingEntity.push(Entity)`: a sleeper (fox or villager) is not pushed and pushes nobody back.
-    if target
-        .kind
-        .mob()
-        .is_some_and(|mob| is_sleeping_for_push(mob))
-    {
+    if target.kind.mob().is_some_and(is_sleeping_for_push) {
         return;
     }
     if matches!(target.kind, EntityKind::Minecart(_)) {

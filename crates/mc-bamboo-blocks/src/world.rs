@@ -5509,6 +5509,8 @@ mod tests {
                 | Effect::Particles { .. }
                 | Effect::VibrationParticle { .. }
                 | Effect::Firework { .. }
+                | Effect::RunMinecartCommand(_)
+                | Effect::EntityEvent { .. }
                 | Effect::BoatBubbleEvent { .. } => None,
             })
             .collect()
