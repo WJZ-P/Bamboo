@@ -17,6 +17,7 @@ pub mod eye_of_ender;
 pub mod firework_rocket;
 pub mod fishing_hook;
 pub mod hanging;
+pub mod landing;
 pub mod leash_knot;
 pub mod lightning;
 pub mod minecart;
@@ -425,6 +426,9 @@ pub struct Entity {
     pub(crate) final_movements: Vec<Movement>,
     /// `requiresPrecisePosition`：这个 tick 撞到过东西，同步时不能偷懒。
     pub(crate) requires_precise_position: bool,
+    /// `Entity.syncPosition` 在反弹后让追踪器立即运行同步周期。
+    /// `Entity.syncPosition` schedules a tracking update immediately after a bounce.
+    pub(crate) sync_position: bool,
     /// 这个实体自己的随机源，官方的 `this.random`。
     pub random: JavaRandom,
     /// `yRot`。物品构造时取一次，配对时发给客户端。
@@ -473,6 +477,7 @@ impl Entity {
             movement_this_tick: Vec::new(),
             final_movements: Vec::new(),
             requires_precise_position: false,
+            sync_position: false,
             random: JavaRandom::new(ENTITY_RANDOM_SEED),
             y_rot: 0.0,
             first_tick: true,
@@ -547,6 +552,7 @@ impl Entity {
 
     /// 这个 tick 的 `tick()`。逻辑只看得到上下文接口，见 [`ctx`]。
     pub(crate) fn tick(&mut self, ctx: &mut dyn ctx::EntityCtx) {
+        self.sync_position = false;
         let plan = ctx.throttle_plan();
         // 休眠档每刻只推进计时器，不跑物理、不取随机数。全速 / 降频档和官方
         // 逐刻路径完全相同；降频只收窄 `living::server_ai_step` 里的决策段。

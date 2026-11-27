@@ -554,7 +554,7 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
 
     // 9-10. `move(SELF, delta)` + `applyEffectsFromBlocks()`。
     let movement = me.delta;
-    me.move_entity(ctx.blocks(), movement);
+    me.move_entity(ctx, movement);
     me.apply_effects_from_blocks(ctx.blocks());
 
     // 11. `Projectile.updateRotation()`（用本刻开始时的 `yRotO` / `xRotO` 做 0.2 插值）。

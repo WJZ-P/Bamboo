@@ -532,8 +532,15 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     entity_id: entity,
                     event,
                 };
-                for id in region.entity_tracking.viewers(entity) {
-                    region.links.send(id, &packet);
+                if let Some(player) = region.players.get(&PlayerId(entity)) {
+                    for &id in player.sync.seen_by() {
+                        region.links.send(id, &packet);
+                    }
+                    region.links.send(player.id, &packet);
+                } else {
+                    for id in region.entity_tracking.viewers(entity) {
+                        region.links.send(id, &packet);
+                    }
                 }
             }
             Effect::BoatBubbleEvent {
@@ -893,6 +900,9 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 if let Some(id) = initiator {
                     crate::command_block::open(region, id, pos);
                 }
+            }
+            Effect::PushPlayerUp { target, distance } => {
+                crate::movement::push_player_up(region, PlayerId(target), distance);
             }
             Effect::EnderPearlTeleport { target, position } => {
                 crate::ender_pearl::teleport(region, target, position);

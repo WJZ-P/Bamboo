@@ -799,6 +799,7 @@ mod tests {
             yaw: 0.0,
             removed: false,
             precise: false,
+            sync_position: false,
             vehicle: None,
         };
         let mut source = DamageSource::environment(DamageKind::Explosion);

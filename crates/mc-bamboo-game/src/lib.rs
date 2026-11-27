@@ -188,7 +188,10 @@ pub use loot_stacks::loot_stack;
 pub use menu::replay::{Replay, ReplayShape, ReplayWorld, Snapshot};
 pub use natural_spawn::spawning_chunk_candidates;
 pub use outgoing::{Outgoing, Segment, SharedFrames};
-pub use player_move::{MoveReplay, MoveReplayPacket, MoveReplayReport, replay_movement};
+pub use player_move::{
+    MoveLandingReport, MoveReplay, MoveReplayPacket, MoveReplayReport, replay_landing,
+    replay_movement,
+};
 pub use secure_chat::ServiceProfileKeys;
 pub use world::{
     MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_COLLISIONS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET,
@@ -2713,15 +2716,6 @@ pub fn replay_player_env(scene: &ReplayPlayerEnv) -> (Vec<PlayerEnvStep>, Vec<Ve
     region.insert_player(player);
     player_attributes::rebuild(&mut region);
     region.sound_seed_generator = mc_bamboo_blocks::LevelRandom::new(12345);
-    // 摔落伤害在 `finish_tick` 里由 `pending_land` 触发。
-    if scene.fall > 0 {
-        region
-            .players
-            .get_mut(&id)
-            .expect("player")
-            .motion
-            .pending_land = true;
-    }
     let step_of = |player: &player::Player| -> PlayerEnvStep {
         PlayerEnvStep {
             hp: player.health.health.to_bits() as i32,
@@ -2759,32 +2753,27 @@ pub fn replay_player_env(scene: &ReplayPlayerEnv) -> (Vec<PlayerEnvStep>, Vec<Ve
     for tick in 1..=scene.ticks {
         let sync_before = region.players.get(&id).map(|p| p.health_sync);
         if scene.fall > 0 && tick == 1 {
-            // 第一刻 `on_land` 结算摔落伤害（官方 `causeFallDamage`）。
-            if scene.break_fall {
-                let amount =
-                    player_environment::fall_damage(&region.players[&id], f64::from(scene.fall))
-                        as f32
-                        + 1.0;
+            // 夹具直接调用伤害入口，和对侧的 `causeFallDamage` 一致。
+            let distance = f64::from(scene.fall);
+            let player = &region.players[&id];
+            let position = player.position();
+            let amount = player_environment::fall_damage(player, distance);
+            if amount > 0 || scene.break_fall {
+                if !scene.break_fall {
+                    player_hurt::play_fall_sound(&mut region, id, amount, position);
+                }
                 player_hurt::hurt_player(
                     &mut region,
                     id,
                     mc_bamboo_blocks::entity::mob::DamageSource::environment(
                         mc_bamboo_blocks::entity::mob::DamageKind::Fall,
                     ),
-                    amount,
+                    (amount + i32::from(scene.break_fall)) as f32,
                     &mut None,
                 );
-                region
-                    .players
-                    .get_mut(&id)
-                    .expect("player")
-                    .motion
-                    .fall_distance = 0.0;
-            } else {
-                player_environment::on_land(&mut region, id);
             }
-            if let Some(p) = region.players.get_mut(&id) {
-                p.motion.pending_land = false;
+            if let Some(player) = region.players.get_mut(&id) {
+                player.motion.fall_distance = 0.0;
             }
         }
         if let Some(player) = region.players.get_mut(&id) {

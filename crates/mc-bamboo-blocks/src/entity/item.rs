@@ -223,7 +223,7 @@ impl Entity {
                 me.vertical_collision = false;
                 me.vertical_collision_below = false;
             } else {
-                me.move_entity(ctx.blocks(), movement);
+                me.move_entity(ctx, movement);
             }
             if !no_physics {
                 me.apply_effects_from_blocks(ctx.blocks());

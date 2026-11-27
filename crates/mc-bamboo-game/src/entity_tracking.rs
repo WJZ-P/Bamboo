@@ -1016,7 +1016,7 @@ impl Snapshot {
                 KindPublic::FishingHook(hook) => hook.sync_velocity,
                 _ => false,
             },
-            sync_position: false,
+            sync_position: public.sync_position,
             fall_flying: false,
             passengers: match &public.kind {
                 KindPublic::Mob(mob) => mob.passengers.clone(),
@@ -3227,6 +3227,27 @@ pub(crate) fn send_vibration_particle(
     position: mc_bamboo_core::Vec3,
 ) {
     send_particles(region, body, position);
+}
+
+/// `LivingEntity.checkFallDamage` 产生的方块粒子。
+/// Block particles emitted by `LivingEntity.checkFallDamage`.
+pub(crate) fn send_landing_particles(
+    region: &mut Region,
+    position: mc_bamboo_core::Vec3,
+    state: mc_bamboo_blocks::BlockState,
+    count: i32,
+) {
+    let event = mc_bamboo_blocks::entity::mob::MobEvent::Particles {
+        particle: mc_bamboo_data::registries::particle_type::BLOCK,
+        item: Some(state.0 as i32),
+        position,
+        offset: mc_bamboo_core::Vec3::default(),
+        speed: 0.15,
+        count,
+    };
+    if let EventPacket::Particles { body, position } = event_packet(0, &event, &mut || 0) {
+        send_particles(region, &body, position);
+    }
 }
 
 fn send_particles(region: &mut Region, body: &[u8], position: mc_bamboo_core::Vec3) {

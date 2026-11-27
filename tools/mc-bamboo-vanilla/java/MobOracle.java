@@ -4552,6 +4552,21 @@ public final class MobOracle {
 
         static List<Scene> all() {
             List<Scene> scenes = new ArrayList<>();
+            for (String name : new String[] {"farmland", "farmland_no_grief", "slime", "shelf"}) {
+                Scene fall = new Scene("fall_on_pig_" + name).ticks(50).difficulty(2);
+                ground(fall, 2);
+                BlockState support = switch (name) {
+                    case "slime" -> Blocks.SLIME_BLOCK.defaultBlockState();
+                    case "shelf" -> Blocks.SHELF_MUSHROOM.defaultBlockState();
+                    default -> Blocks.FARMLAND.defaultBlockState();
+                };
+                fall.set(0, 64, 0, support);
+                boolean shelf = name.equals("shelf");
+                if (shelf) fall.set(0, 64, 1, Blocks.STONE.defaultBlockState());
+                fall.mob(3, 0.5, shelf ? 74.0 : 71.0, 0.5, 0.0F, 0L, 0);
+                scenes.add(fall);
+            }
+
             long[] seeds = {1L, 42L, 9001L, -7L};
             frostWalkerScenes(scenes);
             farmScenes(scenes);
@@ -5941,7 +5956,8 @@ public final class MobOracle {
         // 只有名字以 `_no_grief` 结尾的场景关掉 `mobGriefing`，每个场景都重设一次。
         // Only scenes named `*_no_grief` turn `mobGriefing` off; every scene resets it.
         setRule(official, GameRules.MOB_GRIEFING, !scene.name.endsWith("_no_grief"));
-        if (scene.name.startsWith("zombie_") || scene.name.startsWith("polar_bear_fight_")
+        if (scene.name.startsWith("zombie_") || scene.name.startsWith("fall_on_pig_")
+                || scene.name.startsWith("polar_bear_fight_")
                 || scene.name.startsWith("ocelot_hunt_") || scene.name.startsWith("cat_hunt_")
                 || scene.name.startsWith("rabbit_") || scene.name.startsWith("fox_")
                 || scene.name.startsWith("wolf_") || scene.name.startsWith("armadillo_")
@@ -21904,6 +21920,7 @@ public final class MobOracle {
                 // Prey: sheep and chickens, numbered like the Bamboo side.
                 case 5 -> EntityTypes.CHICKEN.create(level, EntitySpawnReason.COMMAND);
                 case 4 -> EntityTypes.SHEEP.create(level, EntitySpawnReason.COMMAND);
+                case 3 -> EntityTypes.PIG.create(level, EntitySpawnReason.COMMAND);
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
                 case 16 -> new PolarBear(EntityTypes.POLAR_BEAR, level);
@@ -21945,7 +21962,10 @@ public final class MobOracle {
                 case 60 -> EntityTypes.TURTLE.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
-            level.entitySeeds.nextLong();
+            long entitySeed = level.entitySeeds.nextLong();
+            if (scene.name.startsWith("fall_on_pig_")) {
+                scene.seeds.set(i, entitySeed);
+            }
             setRandom(mob, scene.seeds.get(i));
             // Bamboo 的实体表从 `firstId` 发号；官方这边显式对齐 ID，
             // `Mob.serverAiStep` 的 `(tickCount + id) % 2` 才能逐刻一致。
@@ -22489,6 +22509,18 @@ public final class MobOracle {
         if ("zombie_equine_llama_wolf_far".equals(scene.name) && (llamaTargetedWolf || !wolfAvoidedLlama)) {
             throw new IllegalStateException(scene.name + " expected wolf avoidance without llama targeting: target="
                     + llamaTargetedWolf + " avoid=" + wolfAvoidedLlama);
+        }
+        if (scene.name.startsWith("fall_on_pig_")) {
+            Mob pig = mobs.getFirst();
+            BlockState support = level.getBlockState(new BlockPos(0, 64, 0));
+            boolean slime = scene.name.endsWith("_slime");
+            boolean trampled = scene.name.equals("fall_on_pig_farmland");
+            Block expected = slime ? Blocks.SLIME_BLOCK : trampled ? Blocks.DIRT
+                    : scene.name.endsWith("_shelf") ? Blocks.SHELF_MUSHROOM : Blocks.FARMLAND;
+            if (!support.is(expected) || (pig.getHealth() == pig.getMaxHealth()) != slime) {
+                throw new IllegalStateException("Expected landing never occurred in " + scene.name
+                        + ": " + support + ", hp=" + pig.getHealth() + ", y=" + pig.getY());
+            }
         }
         if (scene.name.startsWith("zombie_turtle_egg_lay_")) {
             // 防止种子只跑到一半没真的产卵；`bh` 逐刻比方块表，蛋放下那一刻两边都得变。

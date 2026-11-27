@@ -1183,14 +1183,13 @@ impl MobType {
         !matches!(self, Self::Bat | Self::ArmorStand)
     }
 
-    /// 把 `checkFallDamage` 覆写成空方法的类型（鹦鹉、蝙蝠、幻翼、蜜蜂、快乐恶魂）。
+    /// 把 `checkFallDamage` 覆写成空方法的已建模类型。
     ///
-    /// Types that override `checkFallDamage` with an empty body (parrots, bats,
-    /// phantoms, bees and happy ghasts).
+    /// Modelled types that override `checkFallDamage` with an empty body.
     pub const fn ignores_fall_damage_check(self) -> bool {
         matches!(
             self,
-            Self::Parrot | Self::Bat | Self::Phantom | Self::Bee | Self::HappyGhast
+            Self::Parrot | Self::Bat | Self::Phantom | Self::Bee | Self::HappyGhast | Self::Allay
         )
     }
 
@@ -2225,6 +2224,8 @@ pub enum DamageKind {
     Cactus,
     SweetBerryBush,
     Fall,
+    /// 朝上的滴水石尖端造成的摔落伤害。 / Fall damage from an upward dripstone tip.
+    Stalagmite,
     /// 鞘翅滑翔时撞墙产生的伤害。
     /// Wall impact damage while gliding.
     FlyIntoWall,
@@ -2347,6 +2348,7 @@ impl DamageKind {
             Self::Cactus => "minecraft:cactus",
             Self::SweetBerryBush => "minecraft:sweet_berry_bush",
             Self::Fall => "minecraft:fall",
+            Self::Stalagmite => "minecraft:stalagmite",
             Self::FlyIntoWall => "minecraft:fly_into_wall",
             Self::Freeze => "minecraft:freeze",
             Self::OutOfWorld => "minecraft:out_of_world",
@@ -2417,6 +2419,7 @@ impl DamageKind {
             Self::Cactus => "cactus",
             Self::SweetBerryBush => "sweetBerryBush",
             Self::Fall => "fall",
+            Self::Stalagmite => "stalagmite",
             Self::FlyIntoWall => "flyIntoWall",
             Self::Freeze => "freeze",
             Self::OutOfWorld => "outOfWorld",
@@ -2464,6 +2467,7 @@ impl DamageKind {
             Self::Cactus,
             Self::SweetBerryBush,
             Self::Fall,
+            Self::Stalagmite,
             Self::FlyIntoWall,
             Self::Freeze,
             Self::OutOfWorld,

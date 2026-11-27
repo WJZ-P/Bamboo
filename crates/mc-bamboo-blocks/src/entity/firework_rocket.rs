@@ -324,7 +324,7 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         let movement = me.delta;
         let hit = find_hit(me, ctx, owner);
         // `move(MoverType.SELF, movement)` 碰方块、设碰撞标志，然后恢复速度。
-        me.move_entity(ctx.blocks(), movement);
+        me.move_entity(ctx, movement);
         me.apply_effects_from_blocks(ctx.blocks());
         me.delta = movement;
         hit

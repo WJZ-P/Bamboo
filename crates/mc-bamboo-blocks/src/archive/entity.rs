@@ -830,6 +830,7 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
         movement_this_tick: Vec::new(),
         final_movements: Vec::new(),
         requires_precise_position: false,
+        sync_position: false,
         // 占位，放进实体表时换成从岛的种子源取的种子。
         // Placeholder; replaced by a seed from the island's source on insert.
         random: JavaRandom::default(),

@@ -141,10 +141,14 @@ pub(crate) fn decrease_eggs(world: &mut World, pos: BlockPos, state: BlockState)
         world.destroy_block(pos, false, crate::world::UPDATE_LIMIT);
     } else {
         world.set_block(pos, state.with(EGGS, eggs - 1), 2);
-        // `gameEvent(BLOCK_DESTROY)` 在 `levelEvent` 之前；游戏事件还没有监听者，
-        // 这里只把客户端的 2001 事件发出去，参数带减之前的状态。
-        // `gameEvent(BLOCK_DESTROY)` precedes `levelEvent`; game events have no
-        // listeners yet, so only the client 2001 event with the old state is emitted.
+        world.game_event(
+            crate::game_event::GameEvent::BlockDestroy,
+            crate::world::block_center_public(pos),
+            crate::game_event::dispatch::EventContext {
+                affected_state: Some(state),
+                ..Default::default()
+            },
+        );
         world.level_event(2001, pos, data);
     }
 }

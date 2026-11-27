@@ -390,6 +390,11 @@ pub mod relative {
     pub const DELTA_X: i32 = 0x20;
     pub const DELTA_Y: i32 = 0x40;
     pub const DELTA_Z: i32 = 0x80;
+    /// 速度随朝向旋转。 / Rotate velocity with the rotation change.
+    pub const ROTATE_DELTA: i32 = 0x100;
+    /// `Relative.ALL` 用于保留动量与朝向的相对传送。
+    /// `Relative.ALL` for relative teleports preserving momentum and rotation.
+    pub const ALL: i32 = X | Y | Z | Y_ROT | X_ROT | DELTA_X | DELTA_Y | DELTA_Z | ROTATE_DELTA;
 }
 
 /// 把玩家传送到一个位置，客户端要用 [`PlayRequest::AcceptTeleportation`] 确认。

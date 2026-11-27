@@ -17,7 +17,7 @@ pub(crate) fn tick_tnt(me: &mut Entity, mut data: PrimedTnt, ctx: &mut dyn Entit
     // `handlePortal` 不在范围里。
     me.apply_gravity();
     let movement = me.delta;
-    me.move_entity(ctx.blocks(), movement);
+    me.move_entity(ctx, movement);
     me.apply_effects_from_blocks(ctx.blocks());
     me.delta = me.delta.scale(physics::air_drag());
     if me.on_ground {

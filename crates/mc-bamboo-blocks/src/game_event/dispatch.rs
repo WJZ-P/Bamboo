@@ -216,7 +216,12 @@ fn listener_info(
             {
                 return None;
             }
-            let listener = world.level().block_entity_dyn(pos)?;
+            // 只读监听元数据，保留发出事件的阶段所用的休眠时钟。
+            // Listener metadata is read-only. Keep the event emitter's sleep clock.
+            let clock = crate::block_entity::block_entity_clock();
+            let listener = world.level().block_entity_dyn(pos);
+            crate::block_entity::set_block_entity_clock(clock);
+            let listener = listener?;
             let radius = listener.listener_radius()?;
             let mode = listener.delivery_mode()?;
             (block_center(pos), radius, mode)

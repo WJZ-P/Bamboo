@@ -530,12 +530,13 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         float_boat(&mut boat, me, view, had_status);
         // `AbstractBoat.checkFallDamage`：记的是 `move` 碰撞清零之前的速度 y。
         boat.last_yd = me.delta.y;
-        me.move_entity(view, me.delta);
+        me.move_entity(ctx, me.delta);
     } else {
         me.delta = Vec3::default();
         boat.delta_rotation = 0.0;
     }
 
+    let view = ctx.blocks();
     me.apply_effects_from_blocks(view);
     me.apply_effects_from_blocks(view);
     detect_bubble_column(&mut boat, me, view);

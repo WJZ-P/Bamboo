@@ -14,12 +14,16 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HexFormat;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.ForkJoinPool;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
+import io.netty.buffer.Unpooled;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
@@ -27,8 +31,16 @@ import net.minecraft.core.HolderLookup;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.ProtocolInfo;
+import net.minecraft.network.protocol.game.ClientGamePacketListener;
+import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
+import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
+import net.minecraft.network.protocol.game.ClientboundSetHealthPacket;
+import net.minecraft.network.protocol.game.ClientboundSoundPacket;
+import net.minecraft.network.protocol.game.GameProtocols;
 import net.minecraft.network.protocol.game.ServerboundClientTickEndPacket;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
@@ -74,6 +86,7 @@ import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
@@ -336,7 +349,48 @@ public final class MovementOracle {
                 List.of(new Placed(new BlockPos(0, 79, 1), Blocks.STONE.defaultBlockState()),
                         new Placed(new BlockPos(0, 80, 1), Blocks.STONE.defaultBlockState())),
                 List.of(startGlide, new Step("velocity", null, new Vec3(0.0, 0.0, 1.0), false), serverTick()));
-        return 25;
+        BlockPos landing = new BlockPos(0, 79, 0);
+        land(official, out, landing, "hay", Blocks.HAY_BLOCK.defaultBlockState(), 9.0, false);
+        land(official, out, landing, "slime", Blocks.SLIME_BLOCK.defaultBlockState(), 8.0, false);
+        land(official, out, landing, "slime_shift", Blocks.SLIME_BLOCK.defaultBlockState(), 8.0, true);
+        land(official, out, landing, "bed", net.minecraft.core.registries.BuiltInRegistries.BLOCK.getValue(
+                net.minecraft.resources.Identifier.withDefaultNamespace("red_bed")).defaultBlockState(), 9.0, false);
+        land(official, out, landing, "farmland", Blocks.FARMLAND.defaultBlockState(), 7.0, false);
+        land(official, out, landing, "dripstone", Blocks.POINTED_DRIPSTONE.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.SpeleothemBlock.TIP_DIRECTION,
+                        net.minecraft.core.Direction.UP), 8.0, false);
+        var rules = official.gameRules;
+        Field ruleField = find(rules, "rules");
+        Object ruleValues = ruleField.get(rules);
+        Method setRule = ruleValues.getClass().getDeclaredMethod(
+                "set", net.minecraft.world.level.gamerules.GameRule.class, Object.class);
+        setRule.setAccessible(true);
+        setRule.invoke(ruleValues, GameRules.FALL_DAMAGE, false);
+        try {
+            land(official, out, landing, "farmland_no_fall_damage",
+                    Blocks.FARMLAND.defaultBlockState(), 7.0, false);
+        } finally {
+            setRule.invoke(ruleValues, GameRules.FALL_DAMAGE, true);
+        }
+        land(official, out, landing, "honey", Blocks.HONEY_BLOCK.defaultBlockState(), 9.0, false);
+        land(official, out, landing, "egg", Blocks.TURTLE_EGG.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.TurtleEggBlock.EGGS, 2), 7.0, false);
+        land(official, out, landing, "powder_snow", Blocks.POWDER_SNOW.defaultBlockState(), 8.0, false);
+        return 35;
+    }
+
+    private static void land(Official official, Writer out, BlockPos pos, String name,
+            BlockState state, double distance, boolean shift) throws Exception {
+        double top = state.is(Blocks.POWDER_SNOW)
+                ? 0.9F
+                : state.getCollisionShape(EmptyBlockGetter.INSTANCE, pos)
+                        .max(net.minecraft.core.Direction.Axis.Y);
+        Vec3 hit = new Vec3(0.5, pos.getY() + top, 0.5);
+        play(official, out, "landing_" + name, GameType.SURVIVAL, shift, false, false, true,
+                hit.add(0.0, distance, 0.0), false,
+                List.of(new Placed(pos, state),
+                        new Placed(pos.below(), Blocks.STONE.defaultBlockState())),
+                List.of(move(hit.add(0.0, 1.0, 0.0), false), tickEnd(), move(hit, true)));
     }
 
     private static int registryId(Official official, Holder<net.minecraft.world.effect.MobEffect> holder) {
@@ -448,6 +502,7 @@ public final class MovementOracle {
             List<int[]> effects)
             throws Exception {
         session = new Session();
+        boolean landing = name.startsWith("landing_");
         FakeLevel level = FakeLevel.create(official);
         for (Placed placed : blocks) {
             level.blocks.put(placed.pos.asLong(), placed.state);
@@ -475,10 +530,24 @@ public final class MovementOracle {
         player.getAbilities().flying = flying && (mode == GameType.CREATIVE || mode == GameType.SPECTATOR);
         updatePose(player);
         player.noPhysics = player.isSpectator();
-        RecordingListener listener = allocate(RecordingListener.class);
-        put(ServerGamePacketListenerImpl.class, listener, "player", player);
-        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, listener, "server", official.server);
-        player.connection = listener;
+        RecordingListener listener = connect(official, player);
+        if (landing) {
+            player.setId(1);
+            listener.capture = new PacketCapture(official.registries);
+            ServerPlayer observer = new ServerPlayer(official.server, level,
+                    new GameProfile(new UUID(0L, 2L), "Observer"), ClientInformation.createDefault());
+            observer.setId(2);
+            observer.setPos(start.add(2.0, 0.0, 0.0));
+            RecordingListener observerConnection = connect(official, observer);
+            observerConnection.capture = new PacketCapture(official.registries);
+            level.players().add(player);
+            level.players().add(observer);
+            ((StillChunks) level.chunkSource).observer = observerConnection;
+            level.changedBlocks = new LinkedHashSet<>();
+            put(Level.class, level, "random", RandomSource.create(1L));
+            put(Level.class, level, "soundSeedGenerator", RandomSource.create(12345L));
+        }
+        float initialHealth = player.getHealth();
         setInt(listener, "tickCount", 1);
         setInt(listener, "clientLoadedTimeoutTimer", loaded ? 0 : 60);
         listener.resetPosition();
@@ -499,6 +568,18 @@ public final class MovementOracle {
                 default -> throw new IllegalStateException(step.kind);
             }
         }
+        if (landing) {
+            // 正常的玩家刻和区块广播阶段在夹具里只补它们会发送的包。
+            // The harness sends the packets from the usual health and chunk broadcast phases.
+            if (player.getHealth() != initialHealth) {
+                listener.send(new ClientboundSetHealthPacket(player.getHealth(),
+                        player.getFoodData().getFoodLevel(), player.getFoodData().getSaturationLevel()));
+            }
+            for (BlockPos pos : level.changedBlocks) {
+                ClientboundBlockUpdatePacket packet = new ClientboundBlockUpdatePacket(level, pos);
+                for (ServerPlayer recipient : level.players()) recipient.connection.send(packet);
+            }
+        }
         String outcome = session.kicked ? "kick" : session.teleports > 0 ? "rubber" : "accept";
         StringBuilder line = new StringBuilder(512);
         line.append("{\"type\":\"case\",\"name\":").append(quote(name));
@@ -512,6 +593,20 @@ public final class MovementOracle {
         line.append(",\"fallFlying\":").append(player.isFallFlying());
         if (packets.stream().anyMatch(step -> "startGlide".equals(step.kind))) {
             line.append(",\"glideHealthBits\":").append(Float.floatToRawIntBits(player.getHealth()));
+        }
+        if (landing) {
+            line.append(",\"landing\":{\"healthBits\":")
+                    .append(Float.floatToRawIntBits(player.getHealth()));
+            line.append(",\"fallDamage\":").append(official.gameRules.get(GameRules.FALL_DAMAGE));
+            line.append(",\"blocks\":[");
+            for (int i = 0; i < blocks.size(); i++) {
+                if (i > 0) line.append(',');
+                line.append(Block.getId(level.getBlockState(blocks.get(i).pos)));
+            }
+            line.append("],\"playerPackets\":").append(listener.capture.json());
+            line.append(",\"observerPackets\":")
+                    .append(((StillChunks) level.chunkSource).observer.capture.json());
+            line.append('}');
         }
         line.append(",\"mode\":").append(quote(mode.getName()));
         line.append(",\"shift\":").append(shift);
@@ -554,6 +649,14 @@ public final class MovementOracle {
         }
         line.append("]}\n");
         out.write(line.toString());
+    }
+
+    private static RecordingListener connect(Official official, ServerPlayer player) {
+        RecordingListener listener = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, listener, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, listener, "server", official.server);
+        player.connection = listener;
+        return listener;
     }
 
     private static void updatePose(ServerPlayer player) throws Exception {
@@ -644,13 +747,45 @@ public final class MovementOracle {
         boolean kicked;
     }
 
+    private static final class PacketCapture {
+        private final RegistryAccess registries;
+        private final ProtocolInfo<ClientGamePacketListener> protocol;
+        private final List<String> bodies = new ArrayList<>();
+
+        PacketCapture(RegistryAccess registries) {
+            this.registries = registries;
+            protocol = GameProtocols.CLIENTBOUND_TEMPLATE.bind(
+                    RegistryFriendlyByteBuf.decorator(registries));
+        }
+
+        @SuppressWarnings("unchecked")
+        void add(Packet<?> packet) {
+            RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+            try {
+                protocol.codec().encode(buffer, (Packet<? super ClientGamePacketListener>) packet);
+                byte[] body = new byte[buffer.readableBytes()];
+                buffer.readBytes(body);
+                bodies.add(quote(HexFormat.of().formatHex(body)));
+            } finally {
+                buffer.release();
+            }
+        }
+
+        String json() {
+            return "[" + String.join(",", bodies) + "]";
+        }
+    }
+
     private static final class RecordingListener extends ServerGamePacketListenerImpl {
+        private PacketCapture capture;
+
         private RecordingListener() {
             super(null, null, null, null);
         }
 
         @Override
         public void send(Packet<?> packet) {
+            if (capture != null) capture.add(packet);
             if (packet instanceof ClientboundPlayerPositionPacket) {
                 session.teleports++;
             }
@@ -689,12 +824,26 @@ public final class MovementOracle {
     }
 
     private static final class StillChunks extends ServerChunkCache {
+        private RecordingListener observer;
+
         private StillChunks() {
             super(null, null, null, null, null, null, 0, 0, false, null);
         }
 
         @Override
         public void move(ServerPlayer player) {}
+
+        @Override
+        public void sendToTrackingPlayersAndSelf(Entity entity,
+                Packet<? super ClientGamePacketListener> packet) {
+            if (observer != null) observer.send(packet);
+            if (entity instanceof ServerPlayer player) player.connection.send(packet);
+        }
+
+        @Override
+        public void sendToTrackingPlayers(Entity entity, Packet<? super ClientGamePacketListener> packet) {
+            if (observer != null) observer.send(packet);
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -854,6 +1003,11 @@ public final class MovementOracle {
         }
 
         @Override
+        public boolean isUnderSpawnProtection(ServerLevel level, BlockPos pos, Player player) {
+            return false;
+        }
+
+        @Override
         public boolean allowFlight() {
             return false;
         }
@@ -925,6 +1079,7 @@ public final class MovementOracle {
         private ServerChunkCache chunkSource;
         private Long2ObjectOpenHashMap<ChunkAccess> chunkCache;
         private ServerScoreboard scoreboard;
+        private LinkedHashSet<BlockPos> changedBlocks;
         private TickRateManager tickRate;
 
         private FakeLevel() {
@@ -971,6 +1126,29 @@ public final class MovementOracle {
             }
             BlockState state = blocks.get(pos.asLong());
             return state != null ? state : Blocks.AIR.defaultBlockState();
+        }
+
+        @Override
+        public boolean setBlock(BlockPos pos, BlockState state, int flags, int limit) {
+            BlockState before = getBlockState(pos);
+            if (before == state) return false;
+            blocks.put(pos.asLong(), state);
+            chunkCache.clear();
+            if (changedBlocks != null && (flags & Block.UPDATE_CLIENTS) != 0) {
+                changedBlocks.add(pos.immutable());
+            }
+            return true;
+        }
+
+        @Override
+        public List<Entity> getEntities(Entity except, AABB box, Predicate<? super Entity> predicate) {
+            List<Entity> result = new ArrayList<>();
+            for (ServerPlayer player : players()) {
+                if (player != except && player.getBoundingBox().intersects(box) && predicate.test(player)) {
+                    result.add(player);
+                }
+            }
+            return result;
         }
 
         @Override
@@ -1103,7 +1281,13 @@ public final class MovementOracle {
         public void sendBlockUpdated(BlockPos pos, BlockState old, BlockState current, int flags) {}
 
         @Override
-        public void levelEvent(Entity source, int type, BlockPos pos, int data) {}
+        public void levelEvent(Entity source, int type, BlockPos pos, int data) {
+            if (changedBlocks == null) return;
+            ClientboundLevelEventPacket packet = new ClientboundLevelEventPacket(type, pos, data, false);
+            for (ServerPlayer recipient : players()) {
+                if (recipient != source) recipient.connection.send(packet);
+            }
+        }
 
         @Override
         public void playSeededSound(
@@ -1115,7 +1299,14 @@ public final class MovementOracle {
                 net.minecraft.sounds.SoundSource source,
                 float volume,
                 float pitch,
-                long seed) {}
+                long seed) {
+            if (changedBlocks == null) return;
+            ClientboundSoundPacket packet = new ClientboundSoundPacket(sound, source, x, y, z,
+                    volume, pitch, seed);
+            for (ServerPlayer recipient : players()) {
+                if (recipient != except) recipient.connection.send(packet);
+            }
+        }
 
         @Override
         public void playSeededSound(

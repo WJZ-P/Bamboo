@@ -3874,26 +3874,6 @@ pub(crate) fn apply_hurt_player(
     let _ = world.hurt_player_from_mob(target, source, amount, Some(&attacker));
 }
 
-/// 落地 `Command::TrampleTurtleEgg`：`TurtleEggBlock.destroyEgg` 从「还是不是蛋」开始的部分。
-/// `nextInt(chance) == 0` 才 `decreaseEggs`。
-///
-/// Applies `Command::TrampleTurtleEgg`: the part of `TurtleEggBlock.destroyEgg` from the
-/// "is it still an egg" test on; `nextInt(chance) == 0` is required before `decreaseEggs`.
-pub(crate) fn apply_trample_turtle_egg(
-    world: &mut crate::world::World,
-    pos: BlockPos,
-    chance: i32,
-) {
-    let state = world.block_state(pos);
-    if !state.is(mc_bamboo_data::blocks::TURTLE_EGG) {
-        return;
-    }
-    if world.random().next_int(chance) != 0 {
-        return;
-    }
-    crate::behaviour::misc::turtle_egg::decrease_eggs(world, pos, state);
-}
-
 /// 落地 [`Command::EatBlock`]：重查目标方块仍在原位后再 `destroyBlock(pos, false)` 吃草，
 /// 或在下面的草方块上发 2001 事件、以标志 2 换成泥土。
 ///

@@ -174,6 +174,7 @@ public final class EntityOracle {
             cases += anvilCrack(official, out);
             cases += fallingDrops(official, out);
             cases += tntInAir(official, out);
+            cases += tntOnEgg(official, out);
             cases += tntBreaksStone(official, out);
             cases += tntChain(official, out);
             cases += itemFall(official, out);
@@ -410,6 +411,24 @@ public final class EntityOracle {
 
     private static int tntInAir(Official official, Writer out) throws Exception {
         play(official, out, "tnt_in_air", "tnt", Blocks.TNT.defaultBlockState(), 0, 80, 0, new Long2ObjectOpenHashMap<>(), 1L, 1L, null, null, 30);
+        return 1;
+    }
+
+    private static int tntOnEgg(Official official, Writer out) throws Exception {
+        long levelSeed = 3L;
+        BlockPos pos = new BlockPos(0, 64, 0);
+        var blocks = new Long2ObjectOpenHashMap<BlockState>();
+        blocks.put(pos.below().asLong(), Blocks.STONE.defaultBlockState());
+        BlockState eggs = Blocks.TURTLE_EGG.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.TurtleEggBlock.EGGS, 2);
+        blocks.put(pos.asLong(), eggs);
+        long entitySeed = FakeLevel.create(official, levelSeed).entitySeed(1);
+        Scene scene = play(official, out, "tnt_on_egg", "tnt", Blocks.TNT.defaultBlockState(),
+                0, 71, 0, blocks, levelSeed, entitySeed, null, 80, 36);
+        if (scene.level.getBlockState(pos) != eggs || !scene.active.getFirst().onGround()
+                || scene.active.getFirst().getY() != 64.4375) {
+            throw new IllegalStateException("TNT must land on the clutch without trampling it");
+        }
         return 1;
     }
 
@@ -1134,7 +1153,7 @@ public final class EntityOracle {
         out.write("}\n");
     }
 
-    private static void play(
+    private static Scene play(
             Official official,
             Writer out,
             String name,
@@ -1189,6 +1208,7 @@ public final class EntityOracle {
         out.write(",\"steps\":");
         out.write(steps.toString());
         out.write("}\n");
+        return scene;
     }
 
     private static void writeBlocks(Writer out, Long2ObjectMap<BlockState> blocks) throws Exception {

@@ -1022,6 +1022,7 @@ mod tnt_tests {
             yaw: 0.0,
             removed: false,
             precise: false,
+            sync_position: false,
             vehicle: None,
         };
         let plain = tnt_blast_source(&tnt, None);
@@ -1056,6 +1057,7 @@ mod tnt_tests {
                 yaw: 0.0,
                 removed: false,
                 precise: false,
+                sync_position: false,
                 vehicle: None,
             }),
             None,

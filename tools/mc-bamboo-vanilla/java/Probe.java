@@ -76,6 +76,8 @@ import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.UUIDUtil;
 import net.minecraft.advancements.predicates.ItemPredicate;
 import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.particles.BlockParticleOption;
+import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
@@ -148,6 +150,7 @@ import net.minecraft.network.protocol.game.ClientboundGameEventPacket;
 import net.minecraft.network.protocol.game.ClientboundGameRuleValuesPacket;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
 import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
+import net.minecraft.network.protocol.game.ClientboundLevelParticlesPacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
@@ -453,6 +456,7 @@ public final class Probe {
             "handleSetBorderWarningDistance",
             "handleLevelChunkWithLight",
             "handleLevelEvent",
+            "handleParticleEvent",
             "handleLightUpdatePacket",
             "handleLogin",
             "handleMoveEntity",
@@ -1179,6 +1183,8 @@ public final class Probe {
             pumpFor(SETTLE_MILLIS);
             check("movement: stepping onto a slab is not pulled back", actor.pullbacks == beforeStep);
 
+            landingParticles(actor, observer, ontoStep);
+
             Vec3 high = actor.position.add(0.0, 4.0, 0.0);
             int beforeFall = actor.pullbacks;
             actor.moveTo(high, false);
@@ -1203,6 +1209,40 @@ public final class Probe {
             actor.moveTo(home, true);
             pumpFor(SETTLE_MILLIS);
             check("movement: returning home is not pulled back", actor.pullbacks == beforeHome);
+        }
+
+        /** 落在单层台阶上，两名客户端都应收到台阶状态和这些下落距离对应的粒子。 */
+        private void landingParticles(Join actor, Join observer, Vec3 ground) throws IOException {
+            Remote remote = observer.remote(actor);
+            Vec3 high = ground.add(0.0, 8.0, 0.0);
+            actor.moveTo(high, false);
+            await("landing particles: the player is eight blocks above the slab",
+                    () -> near(remote.position, high));
+            Vec3 approach = ground.add(0.0, 1.0, 0.0);
+            actor.moveTo(approach, false);
+            await("landing particles: seven blocks of fall distance were reported",
+                    () -> near(remote.position, approach));
+            int beforeActor = actor.particles.size();
+            int beforeObserver = observer.particles.size();
+            actor.moveTo(ground, true);
+            await("landing particles: the falling player receives the exact slab particles",
+                    () -> sawSlabLanding(actor, beforeActor, ground));
+            await("landing particles: the observer receives the exact slab particles",
+                    () -> sawSlabLanding(observer, beforeObserver, ground));
+        }
+
+        private static boolean sawSlabLanding(Join join, int from, Vec3 ground) {
+            return join.particles.subList(from, join.particles.size()).stream().anyMatch(packet ->
+                    packet.particle() instanceof BlockParticleOption block
+                            && block.getType() == ParticleTypes.BLOCK
+                            && block.getState() == Blocks.STONE_SLAB.defaultBlockState()
+                            && packet.x() == ground.x && packet.y() == ground.y && packet.z() == ground.z
+                            && packet.count() == 70
+                            && !packet.overrideLimiter() && !packet.alwaysShow()
+                            && packet.xDist() == 0.0F && packet.yDist() == 0.0F && packet.zDist() == 0.0F
+                            && packet.xMaxSpeed() == 0.15F && packet.yMaxSpeed() == 0.15F
+                            && packet.zMaxSpeed() == 0.15F
+                            && packet.randomizationType() == ClientboundLevelParticlesPacket.RandomizationType.DEFAULT);
         }
 
         private void clearPlaced(Join actor, BlockPos at) throws IOException {
@@ -3316,6 +3356,7 @@ public final class Probe {
         /** 每个 `section_blocks_update` 里的格子，按包里的顺序。 */
         final List<List<BlockPos>> sectionUpdates = new ArrayList<>();
         final List<ClientboundLevelEventPacket> levelEvents = new ArrayList<>();
+        final List<ClientboundLevelParticlesPacket> particles = new ArrayList<>();
         final List<ClientboundSoundPacket> sounds = new ArrayList<>();
         final List<ClientboundSystemChatPacket> systemMessages = new ArrayList<>();
         final List<String> chats = new ArrayList<>();
@@ -3810,6 +3851,7 @@ public final class Probe {
             handlers.put("handleBlockChangedAck", value -> onAck((ClientboundBlockChangedAckPacket) value));
             handlers.put("handleBlockEvent", value -> onBlockEvent((ClientboundBlockEventPacket) value));
             handlers.put("handleLevelEvent", value -> onLevelEvent((ClientboundLevelEventPacket) value));
+            handlers.put("handleParticleEvent", value -> particles.add((ClientboundLevelParticlesPacket) value));
             handlers.put("handleSoundEvent", value -> onSound((ClientboundSoundPacket) value));
             handlers.put("handleOpenBook", value -> onOpenBook((ClientboundOpenBookPacket) value));
             handlers.put("handleOpenScreen", value -> onOpenScreen((ClientboundOpenScreenPacket) value));

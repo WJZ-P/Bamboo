@@ -18,7 +18,7 @@ use mc_bamboo_blocks::{
     Aabb, BlockEntities, BlockState, CollisionContext, EntityContext, PistonMoving,
     ShulkerBoxEntity, world::CollisionBlocks,
 };
-use mc_bamboo_core::{BlockPos, Vec3, mth};
+use mc_bamboo_core::{BlockPos, ChunkPos, Vec3, mth};
 use mc_bamboo_data::{
     FluidTag, blocks, gamerules, items,
     registries::{attribute, custom_stat, mob_effect},
@@ -42,6 +42,7 @@ use crate::{
     movement::{self, set_rotation},
     outgoing::Outgoing,
     player::Player,
+    player_environment::Landing,
     region::Region,
 };
 
@@ -80,12 +81,9 @@ pub(crate) struct Motion {
     ///
     /// `Entity.deltaMovement`. The speed check uses its squared length.
     pub(crate) delta: Vec3,
-    /// `Entity.fallDistance`。只记录，不结算伤害。
-    ///
-    /// `Entity.fallDistance`. Recorded, and not turned into damage.
+    /// `Entity.fallDistance`，落地结算后清零。
+    /// `Entity.fallDistance`, cleared after settling a landing.
     pub(crate) fall_distance: f64,
-    /// 这一刻有落地，要在 `finish_tick` 里结算摔落伤害。
-    pub(crate) pending_land: bool,
     tick_count: i32,
     received_move_packets: i32,
     known_move_packets: i32,
@@ -135,7 +133,6 @@ impl Motion {
             last_good: position,
             delta: Vec3::default(),
             fall_distance: 0.0,
-            pending_land: false,
             tick_count: 0,
             received_move_packets: 0,
             known_move_packets: 0,
@@ -258,7 +255,7 @@ pub(crate) fn on_move_player(
     }
 
     let sample = PlayerBlocks::new(chunks, block_entities);
-    let landed_gliding = apply_change(
+    let landing = apply_change(
         player,
         player_grid,
         links,
@@ -274,8 +271,8 @@ pub(crate) fn on_move_player(
         &sample,
         &border,
     );
-    if landed_gliding {
-        crate::player_environment::on_land(region, id);
+    if let Some(landing) = landing {
+        crate::player_environment::on_land(region, id, landing);
     }
 }
 
@@ -440,14 +437,8 @@ fn finish_player(region: &mut Region, id: PlayerId) {
     player.motion.sync_goods(here);
     player.motion.tick_count = player.motion.tick_count.wrapping_add(1);
     player.motion.known_move_packets = player.motion.received_move_packets;
-    // `Entity.causeFallDamage`：落地时按 `fall_distance` 算一次摔落伤害。
-    let pending_land = player.motion.pending_land;
-    player.motion.pending_land = false;
     let kick = flying_tick(player);
     let name = player.name.clone();
-    if pending_land && !kick {
-        crate::player_environment::on_land(region, id);
-    }
     if kick {
         warn!("{name} was kicked for floating too long!");
         region
@@ -621,7 +612,7 @@ fn apply_change(
     attempt: Attempt,
     blocks: &PlayerBlocks<'_>,
     border: &mc_bamboo_blocks::WorldBorder,
-) -> bool {
+) -> Option<Landing> {
     let change = Change {
         target: clamp_position(attempt.target),
         yaw: attempt.yaw,
@@ -632,7 +623,7 @@ fn apply_change(
     };
     if reject_speed(player, &change, attempt.check_speed) {
         movement::teleport(player, links, grid, now, player.position());
-        return false;
+        return None;
     }
     let start = player.position();
     let from_last = change.target.subtract(player.motion.last_good);
@@ -706,8 +697,7 @@ fn apply_change(
     if !accept {
         set_rotation(player, change.yaw, change.pitch);
         movement::teleport(player, links, grid, now, start);
-        record_fall(&mut player.motion.fall_distance, 0.0, change.on_ground);
-        return false;
+        return check_fall(player, change.blocks, Vec3::default(), change.on_ground);
     }
 
     player.set_position(grid, change.target);
@@ -763,26 +753,46 @@ fn apply_change(
     ) {
         crate::player_exhaustion::add(player, amount);
     }
-    let was_airborne = player.motion.fall_distance > 0.0;
-    let landed_gliding = fall_flying && change.on_ground;
-    if fall_flying && in_water {
-        player.motion.fall_distance = 0.0;
-    } else {
-        record_fall(
-            &mut player.motion.fall_distance,
-            client_delta.y,
-            change.on_ground && !landed_gliding,
-        );
-    }
-    if change.on_ground && was_airborne && !landed_gliding {
-        player.motion.pending_land = true;
-    }
-    if moved_up {
+    let landing = check_fall(player, change.blocks, client_delta, change.on_ground);
+    if moved_up && landing.is_none() {
         player.motion.fall_distance = 0.0;
     }
     remember_inside(player, start, end, simulated.attempted, change.target);
     player.motion.last_good = player.position();
-    landed_gliding && player.motion.fall_distance > 0.0
+    landing
+}
+
+fn check_fall(
+    player: &mut Player,
+    blocks: &PlayerBlocks<'_>,
+    movement: Vec3,
+    on_ground: bool,
+) -> Option<Landing> {
+    let bounds = movement_box(player).inflated(1.0);
+    let min = ChunkPos::containing(bounds.min_x.floor(), bounds.min_z.floor());
+    let max = ChunkPos::containing(bounds.max_x.ceil(), bounds.max_z.ceil());
+    for x in min.x..=max.x {
+        for z in min.z..=max.z {
+            if !blocks.chunks.is_loaded(ChunkPos::new(x, z)) {
+                return None;
+            }
+        }
+    }
+    if touches_fluid(player, blocks, fluid_tags::WATER) {
+        player.motion.fall_distance = 0.0;
+        return None;
+    }
+    let before = player.motion.fall_distance;
+    if movement.y < 0.0 {
+        player.motion.fall_distance -= f64::from(movement.y as f32);
+    }
+    if on_ground {
+        if player.motion.fall_distance > 0.0 {
+            return Some(Landing { movement, before });
+        }
+        player.motion.fall_distance = 0.0;
+    }
+    None
 }
 
 fn should_check_speed(player: &Player, rules: &crate::gamerules::GameRuleSet) -> bool {
@@ -1055,15 +1065,6 @@ fn can_fall_at_least(
     )
 }
 
-fn record_fall(fall: &mut f64, ya: f64, on_ground: bool) {
-    if ya < 0.0 {
-        *fall -= f64::from(ya as f32);
-    }
-    if on_ground {
-        *fall = 0.0;
-    }
-}
-
 fn block_speed_factor(player: &Player, position: Vec3, blocks: &PlayerBlocks<'_>) -> f32 {
     // `Player.getBlockSpeedFactor` 在能力飞行或滑翔中直接返回 1。
     // `Player.getBlockSpeedFactor` returns 1 during ability flight or gliding.
@@ -1093,7 +1094,8 @@ fn wears_leather_boots(player: &Player) -> bool {
         .is_some_and(|boots| boots.item == items::LEATHER_BOOTS && !boots.is_empty())
 }
 
-fn move_context(player: &Player) -> CollisionContext {
+/// 移动与落地支撑查询共用的实体碰撞上下文。
+pub(crate) fn move_context(player: &Player) -> CollisionContext {
     CollisionContext::Entity(EntityContext {
         fall_distance: player.motion.fall_distance,
         bottom: player.position().y,
@@ -1232,7 +1234,8 @@ fn body_fits(player: &Player, height: f64, blocks: &PlayerBlocks<'_>) -> bool {
     )
 }
 
-fn movement_box(player: &Player) -> Aabb {
+/// 移动校验使用的当前姿势碰撞盒。
+pub(crate) fn movement_box(player: &Player) -> Aabb {
     body_box(player, player.motion.body_height)
 }
 
@@ -1378,12 +1381,32 @@ pub struct MoveReplayReport {
     pub health: f32,
     /// 这一串包累计的饥饿消耗（`causeFoodExhaustion`，创造模式为 0）。
     pub exhaustion: f32,
+    /// 落地场景的方块状态和每个收件人的原始出站包。
+    pub landing: Option<MoveLandingReport>,
+}
+
+/// 落地场景的实测方块与包体。
+/// Observed block states and packet bodies for a landing case.
+pub struct MoveLandingReport {
+    pub blocks: Vec<u32>,
+    pub player_packets: Vec<Vec<u8>>,
+    pub observer_packets: Vec<Vec<u8>>,
 }
 
 /// 按官方的顺序重放一串移动包：先处理包，服务端 tick 再收尾。
 ///
 /// Replays a move sequence in the official order: packets first, then the server tick epilogue.
 pub fn replay_movement(sample: &MoveReplay) -> MoveReplayReport {
+    replay_moves(sample, None)
+}
+
+/// 重放落地场景，并记录落地玩家和观察者实际收到的包。
+/// Replays a landing scene and captures packets received by the falling player and observer.
+pub fn replay_landing(sample: &MoveReplay, fall_damage: bool) -> MoveReplayReport {
+    replay_moves(sample, Some(fall_damage))
+}
+
+fn replay_moves(sample: &MoveReplay, landing_fall_damage: Option<bool>) -> MoveReplayReport {
     let mut region = Region::new(8, 20, false);
     let sink = ReplaySink::default();
     let id = PlayerId(1);
@@ -1430,6 +1453,42 @@ pub fn replay_movement(sample: &MoveReplay) -> MoveReplayReport {
     region.advance_tick();
     finish_tick(&mut region);
 
+    let landing_observer = landing_fall_damage.map(|fall_damage| {
+        std::sync::Arc::make_mut(&mut region.global.rules).set_saved(
+            gamerules::FALL_DAMAGE,
+            crate::gamerules::Stored::Bool(fall_damage),
+        );
+        let observer_id = PlayerId(2);
+        let observer_sink = ReplaySink::default();
+        let mut observer = Player::new(
+            observer_id,
+            Uuid::from_u128(2),
+            "Observer".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            sample.start.add(Vec3::new(2.0, 0.0, 0.0)),
+        );
+        let center = observer.chunk_pos();
+        observer.chunks.set_view_for_test(center, 8);
+        if let Some(player) = region.players.get_mut(&id) {
+            player.chunks.set_view_for_test(player.chunk_pos(), 8);
+        }
+        region
+            .links
+            .add(observer_id, Box::new(observer_sink.clone()));
+        region.insert_player(observer);
+        for player in region.players.values_mut() {
+            player.health_sync = crate::player_hurt::HealthSync::of(player);
+        }
+        crate::entity_sync::sync_entities(&mut region);
+        region.links.flush();
+        sink.clear();
+        observer_sink.clear();
+        region.random = mc_bamboo_blocks::LevelRandom::new(1);
+        region.sound_seed_generator = mc_bamboo_blocks::LevelRandom::new(12345);
+        observer_sink
+    });
+
     for packet in &sample.packets {
         if !region.links.is_open(id) {
             break;
@@ -1474,6 +1533,10 @@ pub fn replay_movement(sample: &MoveReplay) -> MoveReplayReport {
             }
         }
     }
+    if landing_observer.is_some() {
+        crate::player_hurt::tick(&mut region);
+        crate::chunk_broadcast::broadcast_changes(&mut region);
+    }
     region.links.flush();
     let teleports = sink.teleports();
     let kicked = !region.links.is_open(id);
@@ -1493,6 +1556,15 @@ pub fn replay_movement(sample: &MoveReplay) -> MoveReplayReport {
         fall_flying: player.sync.is_fall_flying(),
         health: player.health.health,
         exhaustion: player.pending_exhaustion,
+        landing: landing_observer.map(|observer| MoveLandingReport {
+            blocks: sample
+                .blocks
+                .iter()
+                .map(|(pos, _)| region.chunks.block(*pos).unwrap_or(blocks::VOID_AIR))
+                .collect(),
+            player_packets: sink.packets(),
+            observer_packets: observer.packets(),
+        }),
     }
 }
 
@@ -1518,19 +1590,27 @@ impl PlayerSink for ReplaySink {
 }
 
 impl ReplaySink {
-    fn teleports(&self) -> u32 {
-        let bytes = self.0.lock().expect("replay sink").bytes.clone();
-        let mut rest = bytes.as_slice();
-        let mut count = 0;
+    fn clear(&self) {
+        self.0.lock().expect("replay sink").bytes.clear();
+    }
+
+    fn packets(&self) -> Vec<Vec<u8>> {
+        let locked = self.0.lock().expect("replay sink");
+        let mut rest = locked.bytes.as_slice();
+        let mut packets = Vec::new();
         while let Some(bounds) = find_frame(rest, MAX_FRAME_LEN).expect("replay frame") {
             let end = bounds.header_len + bounds.payload_len;
-            let mut reader = Reader::new(&rest[bounds.header_len..end]);
-            if reader.varint().expect("packet id") == PlayerPosition::ID {
-                count += 1;
-            }
+            packets.push(rest[bounds.header_len..end].to_vec());
             rest = &rest[end..];
         }
-        count
+        packets
+    }
+
+    fn teleports(&self) -> u32 {
+        self.packets()
+            .iter()
+            .filter(|packet| Reader::new(packet).varint().expect("packet id") == PlayerPosition::ID)
+            .count() as u32
     }
 }
 
