@@ -342,31 +342,30 @@ pub fn run(
             for spec in modifiers {
                 // `Util.getRandom(modifier.slots, random)` 先取一次，再算 amount。
                 // `Util.getRandom` draws once, then the amount provider is evaluated.
-                let slot = if spec.slots.is_empty() {
-                    "any".to_owned()
-                } else {
-                    let index = context.random().next_int(spec.slots.len() as i32) as usize;
-                    spec.slots[index.min(spec.slots.len() - 1)].clone()
-                };
+                let index = context.random().next_int(spec.slots.len() as i32) as usize;
+                let slot = &spec.slots[index];
                 let amount =
                     parse_float_provider(&spec.amount, "attribute amount")?.get(context)?;
-                let entry = json!({
+                let mut entry = json!({
                     "id": spec.id,
                     "type": spec.attribute,
                     "amount": f64::from(amount),
                     "operation": spec.operation,
                     "slot": slot,
                 });
-                // `withModifierAdded` 用 id 覆盖已有条目。
-                // `withModifierAdded` replaces an existing entry with the same id.
-                let id = Value::from(spec.id.clone());
-                if let Some(position) = list.iter().position(|value| {
-                    value.get("id") == Some(&id) && value.get("type") == entry.get("type")
-                }) {
-                    list[position] = entry;
-                } else {
-                    list.push(entry);
+                // `withModifierAdded` 移除属性和 ID 都相同的条目，再把新条目加到末尾。
+                // `withModifierAdded` removes matching attribute/ID pairs, then appends.
+                if slot == "any" {
+                    entry
+                        .as_object_mut()
+                        .expect("modifier is an object")
+                        .remove("slot");
                 }
+                let id = Value::from(spec.id.clone());
+                list.retain(|value| {
+                    value.get("id") != Some(&id) || value.get("type") != entry.get("type")
+                });
+                list.push(entry);
             }
             stack.set_component(ATTRIBUTE_MODIFIERS, Value::Array(list));
         }
@@ -638,6 +637,9 @@ fn parse_attribute_modifiers(map: &Map<String, Value>) -> Result<Vec<AttributeMo
                 ));
             }
         };
+        if slots.is_empty() {
+            return Err(invalid("attribute modifier needs at least one slot"));
+        }
         result.push(AttributeModifier {
             id: string(required(entry, "id", "attribute modifier")?, "id")?.to_owned(),
             attribute: string(
@@ -955,12 +957,11 @@ fn resolve_profile(target: &str, context: &LootContext<'_, '_, '_>) -> Option<Va
     entity.components.get(PROFILE).cloned()
 }
 
-/// `NbtProviders` 的来源。`storage` 走命令存储（本实现没有），`context` 走实体视图上
-/// 存的 NBT。拿不到数据时返回 `Ok(None)`，官方 `source.get` 返回 null 时也是 no-op。
+/// `NbtProviders` 的来源：从世界视图取命令存储，或从实体视图读 NBT。
+/// 实体来源缺失时和官方一样不修改物品。
 ///
-/// `NbtProviders` sources. `storage` needs command storage (not wired in here),
-/// `context` reads the NBT stored on entity views. `Ok(None)` means vanilla's
-/// `source.get` returned null, which is also a no-op.
+/// `NbtProviders` sources: command storage from the level view, or NBT from an entity view.
+/// An absent entity source leaves the stack unchanged, as in vanilla.
 fn resolve_nbt_source(source: &Value, context: &LootContext<'_, '_, '_>) -> Result<Option<Tag>> {
     if let Some(target) = source.as_str() {
         return Ok(EntityTarget::from_name(target)

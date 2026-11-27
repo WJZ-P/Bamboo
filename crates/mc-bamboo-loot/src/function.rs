@@ -1159,18 +1159,18 @@ fn set_random_dyes(
     let existing = stack
         .component("minecraft:dyed_color")
         .and_then(Value::as_i64)
-        .unwrap_or_else(|| {
+        .or_else(|| {
             // `ItemStack.get(DYED_COLOR)` 会读到物品的默认组件。
             match defaults::resolve(
                 stack.item,
                 &mc_bamboo_protocol::components::ComponentPatch::new(),
                 kinds::DYED_COLOR,
             ) {
-                Some(ComponentValue::DyedColor(rgb)) => *rgb as i64,
-                _ => 0,
+                Some(ComponentValue::DyedColor(rgb)) => Some(i64::from(*rgb)),
+                _ => None,
             }
         });
-    if existing != 0 {
+    if let Some(existing) = existing {
         let rgb = existing as i32;
         let parts_of = |rgb: i32| [(rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff];
         let channels = parts_of(rgb);
@@ -1204,8 +1204,10 @@ fn set_random_dyes(
         };
     }
     let rgb = (channels[0] << 16) | (channels[1] << 8) | channels[2];
-    stack.set_count(1);
-    stack.set_component("minecraft:dyed_color", Value::from(rgb));
+    if !stack.is_empty() {
+        stack.set_count(1);
+        stack.set_component("minecraft:dyed_color", Value::from(rgb));
+    }
     Ok(stack)
 }
 

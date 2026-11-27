@@ -326,16 +326,9 @@ impl Candidate<'_> {
                 table.get_random_items_raw(context, depth + 1, &mut emit)
             }
             CandidateBody::Slots(source) => {
-                // `SlotLoot.createItemStack`：世界侧按官方 slot 来源给出物品。
-                // `SlotLoot.createItemStack`: the level view supplies the slot items.
-                let items = context
-                    .level("slot loot")?
-                    .slot_items(source)
-                    .ok_or_else(|| {
-                        LootError::Unsupported(
-                            "slot loot needs a level view that resolves slot sources".to_owned(),
-                        )
-                    })?;
+                // `SlotLoot.createItemStack`：按槽位来源取物品，跳过空堆。
+                // `SlotLoot.createItemStack`: read the slot source, skipping empty stacks.
+                let items = crate::slot_source::items(source, context)?;
                 for item in items {
                     if !item.is_empty() {
                         emit(item)?;

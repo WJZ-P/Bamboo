@@ -23,6 +23,7 @@ mod number;
 mod pool;
 mod predicate;
 mod random_sequence;
+mod slot_source;
 mod stack;
 mod table;
 pub mod trade;
