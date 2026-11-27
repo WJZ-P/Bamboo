@@ -15,7 +15,7 @@ use std::{
 
 use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::version;
-use mc_bamboo_game::{MoveReplay, MoveReplayPacket, replay_movement};
+use mc_bamboo_game::{MoveReplay, MoveReplayPacket, replay_landing, replay_movement};
 use mc_bamboo_protocol::packet::play::GameMode;
 use serde::Deserialize;
 
@@ -88,6 +88,7 @@ struct Case {
     fall_flying: bool,
     #[serde(rename = "glideHealthBits")]
     glide_health_bits: Option<i32>,
+    landing: Option<Landing>,
     mode: String,
     shift: bool,
     sprint: bool,
@@ -104,6 +105,15 @@ struct Case {
     sz: i64,
     blocks: Vec<[i32; 4]>,
     packets: Vec<Packet>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Landing {
+    health_bits: i32,
+    blocks: Vec<u32>,
+    player_packets: Vec<String>,
+    observer_packets: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -239,7 +249,11 @@ impl Report {
                 .map(replay_packet)
                 .collect::<Result<Vec<_>, _>>()?,
         };
-        let report = replay_movement(&sample);
+        let report = if case.landing.is_some() {
+            replay_landing(&sample)
+        } else {
+            replay_movement(&sample)
+        };
         let official_position = Vec3::new(
             f64::from_bits(case.x_bits as u64),
             f64::from_bits(case.y_bits as u64),
@@ -276,6 +290,47 @@ impl Report {
                 report.fall_flying,
                 report.health,
             ));
+        }
+        if let (Some(official), Some(actual)) = (&case.landing, &report.landing) {
+            let official_health = f32::from_bits(official.health_bits as u32);
+            if report.health.to_bits() != official.health_bits as u32 {
+                self.mismatches.push(format!(
+                    "{} health: official {official_health}, bamboo {}",
+                    case.name, report.health
+                ));
+            }
+            if official.blocks != actual.blocks {
+                self.mismatches.push(format!(
+                    "{} blocks: official {:?}, bamboo {:?}",
+                    case.name, official.blocks, actual.blocks
+                ));
+            }
+            for (recipient, expected, observed) in [
+                ("player", &official.player_packets, &actual.player_packets),
+                (
+                    "observer",
+                    &official.observer_packets,
+                    &actual.observer_packets,
+                ),
+            ] {
+                let wire: Vec<String> = observed
+                    .iter()
+                    .map(|body| {
+                        use std::fmt::Write;
+                        let mut hex = String::with_capacity(body.len() * 2);
+                        for byte in body {
+                            write!(&mut hex, "{byte:02x}").expect("writing to a string");
+                        }
+                        hex
+                    })
+                    .collect();
+                if *expected != wire {
+                    self.mismatches.push(format!(
+                        "{} {recipient} packets: official {expected:?}, bamboo {wire:?}",
+                        case.name
+                    ));
+                }
+            }
         }
         Ok(())
     }

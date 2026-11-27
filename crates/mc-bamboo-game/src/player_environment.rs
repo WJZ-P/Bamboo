@@ -14,17 +14,24 @@
 //! All new state is a relative countdown, never an island-clock instant.
 
 use mc_bamboo_blocks::{
-    BlockState,
-    entity::mob::{DamageKind, DamageSource},
+    BlockState, Effect, World,
+    entity::{
+        landing,
+        mob::{DamageKind, DamageSource},
+    },
+    game_event::{GameEvent, dispatch::EventContext},
 };
 use mc_bamboo_core::{Aabb, BlockPos, Vec3};
 use mc_bamboo_data::{
     blocks,
-    registries::{attribute, mob_effect},
+    registries::{attribute, custom_stat, mob_effect},
+    sounds,
     tags::fluid_tags,
 };
 
-use crate::{inbound::PlayerId, player::Player, region::Region};
+use mc_bamboo_protocol::packet::play::{GameMode, Sound};
+
+use crate::{inbound::PlayerId, player::Player, player_move, region::Region};
 
 /// 官方 `Entity.MAX_AIR_SUPPLY` / `Player.getMaxAirSupply()`。
 pub const MAX_AIR: i32 = 300;
@@ -135,35 +142,148 @@ pub(crate) fn is_on_fire(player: &Player) -> bool {
     player.environment.remaining_fire_ticks > 0
 }
 
-/// `LivingEntity.calculateFallDamage`：
-/// `floor((fallDistance + 1e-6 - getAttributeValue(SAFE_FALL_DISTANCE)) * getAttributeValue(FALL_DAMAGE_MULTIPLIER))`。
-/// 跳跃提升效果已经通过 `minecraft:effect.jump_boost` 修饰符加在 `SAFE_FALL_DISTANCE` 上。
-///
-/// Vanilla `calculateFallDamage`, reading `SAFE_FALL_DISTANCE` (which already
-/// includes Jump Boost) and `FALL_DAMAGE_MULTIPLIER` from the attribute map.
-pub(crate) fn fall_damage(player: &Player, fall_distance: f64) -> i32 {
-    let safe = player.attributes.value(attribute::SAFE_FALL_DISTANCE);
-    let power = fall_distance + FALL_EPSILON - safe;
-    mc_bamboo_core::mth::floor(power * player.attributes.value(attribute::FALL_DAMAGE_MULTIPLIER))
-        .max(0)
+/// 移动包的落地记录，包含这一包位移和追加这段位移之前的摔落距离。
+/// Landing record for a move packet, with its movement and pre-packet fall distance.
+pub(crate) struct Landing {
+    pub movement: Vec3,
+    pub before: f64,
 }
 
-/// `Entity.causeFallDamage` 的落地分支：伤害 > 0 才走完整受伤链路。
-/// 水 / 缓降 / 漂浮在移动校验里已经把 `fall_distance` 清零。
-///
-/// Landing branch of `Entity.causeFallDamage`; a positive amount goes through
-/// the full hurt path.
-pub(crate) fn on_land(region: &mut Region, id: PlayerId) {
+fn fall_power(player: &Player, distance: f64) -> f64 {
+    distance + FALL_EPSILON - player.attributes.value(attribute::SAFE_FALL_DISTANCE)
+}
+
+fn calculate_fall_damage(player: &Player, distance: f64, multiplier: f32) -> i32 {
+    let power = fall_power(player, distance);
+    mc_bamboo_core::mth::floor(
+        power * f64::from(multiplier) * player.attributes.value(attribute::FALL_DAMAGE_MULTIPLIER),
+    )
+    .max(0)
+}
+
+/// 普通方块的摔落伤害，用于独立的伤害场景。
+/// Fall damage on an ordinary block, for isolated damage cases.
+#[cfg(any(test, feature = "oracle-samples"))]
+pub(crate) fn fall_damage(player: &Player, distance: f64) -> i32 {
+    calculate_fall_damage(player, distance, 1.0)
+}
+
+/// `Entity.doCheckFallDamage` 的落地分支。
+/// The landing branch of `Entity.doCheckFallDamage`.
+pub(crate) fn on_land(region: &mut Region, id: PlayerId, impact: Landing) {
     let Some(player) = region.players.get(&id) else {
         return;
     };
     let distance = player.motion.fall_distance;
     let position = player.position();
-    let amount = fall_damage(player, distance);
+    let body = player_move::movement_box(player);
+    let mut collision = player_move::move_context(player);
+    if let mc_bamboo_blocks::CollisionContext::Entity(context) = &mut collision {
+        context.fall_distance = impact.before;
+    }
+    let context = EventContext {
+        sneaking: player.sync.shift_key_down,
+        spectator: player.game_mode == GameMode::Spectator,
+        source_player: Some(id.0),
+        source_entity: Some(id.0),
+        ..Default::default()
+    };
+    let power = fall_power(player, impact.before);
+    let supports = Aabb::new(
+        body.min_x,
+        body.min_y - 1.0e-6,
+        body.min_z,
+        body.max_x,
+        body.min_y,
+        body.max_z,
+    );
+    let (supporting, pos, state) = {
+        let (mut level, ticks) = region.block_level();
+        let world = World::new(&mut level, ticks);
+        let supporting = world
+            .find_supporting_block(position, supports, collision)
+            .or_else(|| {
+                let previous = supports.moved(-impact.movement.x, 0.0, -impact.movement.z);
+                world.find_supporting_block(position, previous, collision)
+            });
+        let pos = landing::on_pos_legacy(position, supporting, |pos| world.block_state(pos));
+        (supporting, pos, world.block_state(pos))
+    };
+    if impact.before > 0.0
+        && let Some((at, count)) = landing::fall_particles(position, pos, state, power)
+    {
+        crate::entity_tracking::send_landing_particles(region, at, state, count);
+    }
+    match state.block().default_state {
+        blocks::FARMLAND | blocks::TURTLE_EGG => {
+            let width = (body.max_x - body.min_x) as f32;
+            let height = (body.max_y - body.min_y) as f32;
+            let (mut level, ticks) = region.block_level();
+            let mut world = World::new(&mut level, ticks);
+            // Bamboo 没有出生点保护，与玩家破坏入口一致。
+            // Bamboo has no spawn protection, as in the player block-breaking path.
+            if state.is(blocks::FARMLAND) {
+                let roll = world.random().next_float();
+                if f64::from(roll) < distance - 0.5 && landing::can_trample_farmland(width, height)
+                {
+                    landing::turn_farmland_to_dirt(&mut world, pos, context, None);
+                }
+            } else {
+                landing::trample_turtle_egg(&mut world, pos, 3);
+            }
+            let effects = world.into_effects();
+            crate::interaction::send_effects(region, Some(id), &effects);
+        }
+        blocks::HONEY_BLOCK => {
+            play_landing_sound(
+                region,
+                id,
+                sounds::sound_event("minecraft:block.honey_block.slide"),
+                1.0,
+                1.0,
+            );
+            crate::interaction::send_effects(
+                region,
+                Some(id),
+                &[Effect::EntityEvent {
+                    entity: id.0,
+                    event: 54,
+                }],
+            );
+        }
+        blocks::POWDER_SNOW if distance >= 4.0 => {
+            play_player_fall_sound(region, id, distance >= 7.0);
+        }
+        _ => {}
+    }
+    if let Some((adjusted, multiplier, kind)) =
+        landing::fall_damage(state, distance, context.sneaking)
+        && cause_fall_damage(region, id, adjusted, multiplier, kind)
+        && state.is(blocks::HONEY_BLOCK)
+    {
+        play_block_fall_sound(region, id, state);
+    }
+    let Some(player) = region.players.get(&id) else {
+        return;
+    };
+    let position = player.position();
     let alive = player.health.health > 0.0;
-    // `ServerPlayer.resetFallDistance`：还活着且记下了起跳位置时触发距离判据。
-    // Bamboo 没有 `startingToFallPosition`，落点 y 加上下落距离就是起点 y。
+    let (mut level, ticks) = region.block_level();
+    let mut world = World::new(&mut level, ticks);
+    let affected = supporting.map_or(state, |pos| world.block_state(pos));
+    world.game_event(
+        GameEvent::HitGround,
+        position,
+        EventContext {
+            affected_state: Some(affected),
+            ..context
+        },
+    );
+    let effects = world.into_effects();
+    crate::interaction::send_effects(region, Some(id), &effects);
     if alive {
+        // Bamboo 由落点和累计距离估算 `startingToFallPosition`。
+        // Bamboo infers `startingToFallPosition` from landing position and total distance.
         crate::advancement_triggers::record(
             region,
             id,
@@ -175,14 +295,81 @@ pub(crate) fn on_land(region: &mut Region, id: PlayerId) {
             }),
         );
     }
-    if amount > 0 {
-        // `getFallDamageSound` 在 `hurt` 之前播。
-        crate::player_hurt::play_fall_sound(region, id, amount, position);
-        hurt(region, id, DamageKind::Fall, amount as f32);
-    }
     if let Some(player) = region.players.get_mut(&id) {
         player.motion.fall_distance = 0.0;
     }
+}
+
+fn cause_fall_damage(
+    region: &mut Region,
+    id: PlayerId,
+    distance: f64,
+    multiplier: f32,
+    kind: DamageKind,
+) -> bool {
+    let Some(player) = region.players.get_mut(&id) else {
+        return false;
+    };
+    if matches!(player.game_mode, GameMode::Creative | GameMode::Spectator) {
+        return false;
+    }
+    if distance >= 2.0 {
+        let centimeters = (distance * 100.0 + 0.5).floor() as i64 as i32;
+        player
+            .item_use_stats
+            .award_custom(custom_stat::FALL_ONE_CM, centimeters);
+    }
+    let amount = calculate_fall_damage(player, distance, multiplier);
+    if amount == 0 {
+        return false;
+    }
+    let pos = landing::on_pos_legacy(player.position(), None, |_| BlockState(blocks::AIR));
+    let state = BlockState(region.chunks.block(pos).unwrap_or(blocks::VOID_AIR));
+    play_player_fall_sound(region, id, amount > 4);
+    play_block_fall_sound(region, id, state);
+    hurt(region, id, kind, amount as f32);
+    true
+}
+
+fn play_player_fall_sound(region: &mut Region, id: PlayerId, big: bool) {
+    let name = if big {
+        "minecraft:entity.player.big_fall"
+    } else {
+        "minecraft:entity.player.small_fall"
+    };
+    play_landing_sound(region, id, sounds::sound_event(name), 1.0, 1.0);
+}
+
+fn play_block_fall_sound(region: &mut Region, id: PlayerId, state: BlockState) {
+    if !state.is_air() {
+        let sound = state.sound_type();
+        play_landing_sound(
+            region,
+            id,
+            sound.fall_sound,
+            sound.volume * 0.5,
+            sound.pitch * 0.75,
+        );
+    }
+}
+
+fn play_landing_sound(region: &mut Region, id: PlayerId, sound: u16, volume: f32, pitch: f32) {
+    let Some(player) = region.players.get(&id) else {
+        return;
+    };
+    let position = player.position();
+    let packet = Sound {
+        sound: i32::from(sound),
+        inline: None,
+        source: sounds::PLAYERS,
+        x: position.x,
+        y: position.y,
+        z: position.z,
+        volume,
+        pitch,
+        seed: region.sound_seed_generator.source().next_long(),
+    };
+    crate::interaction::send_sound(region, Some(id), &packet);
 }
 
 /// 一刻度环境判定：`Entity.baseTick` / `LivingEntity.baseTick` 的等价拆分。

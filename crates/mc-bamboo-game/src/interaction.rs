@@ -532,12 +532,15 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     entity_id: entity,
                     event,
                 };
-                for id in region.entity_tracking.viewers(entity) {
-                    region.links.send(id, &packet);
-                }
-                let player = PlayerId(entity);
-                if region.players.contains_key(&player) {
-                    region.links.send(player, &packet);
+                if let Some(player) = region.players.get(&PlayerId(entity)) {
+                    for &id in player.sync.seen_by() {
+                        region.links.send(id, &packet);
+                    }
+                    region.links.send(player.id, &packet);
+                } else {
+                    for id in region.entity_tracking.viewers(entity) {
+                        region.links.send(id, &packet);
+                    }
                 }
             }
             Effect::BoatBubbleEvent {

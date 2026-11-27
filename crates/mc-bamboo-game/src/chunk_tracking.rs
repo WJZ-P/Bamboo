@@ -315,7 +315,6 @@ impl ChunkTracker {
     ///
     /// Test only: pin the tracked range to the given centre and view distance
     /// (no packets, for invariant checks).
-    #[cfg(test)]
     pub(crate) fn set_view_for_test(&mut self, center: ChunkPos, view_distance: i32) {
         self.view = Some(ChunkView {
             center,
