@@ -52,24 +52,27 @@ pub fn build_exploration_map(
     // With skipKnownStructures vanilla first calls `claimStructureAt` to add a
     // reference to a start at the loot position. Bamboo has no reference table.
     let started = Instant::now();
-    let target = find_nearest_map_structure(
+    let found = find_nearest_map_structure(
         config,
         &destination,
         origin,
         request.search_radius,
         request.skip_existing_chunks,
-    )?;
+    );
     let elapsed = started.elapsed();
     // 官方是同步搜索，这里照做；把耗时打到日志里，方便评估世界线程的阻塞时间。
+    // 未命中要扫完整个半径，往往比命中更慢，所以两种结果都要记录。
     // Vanilla searches synchronously; log the elapsed time so the world-thread
-    // stall can be measured.
+    // stall can be measured. A miss scans the whole radius and is often slower,
+    // so both outcomes are recorded.
     tracing::debug!(
         destination = request.destination,
         radius = request.search_radius,
         elapsed_ms = elapsed.as_secs_f64() * 1000.0,
-        found = true,
+        found = found.is_some(),
         "exploration map structure search"
     );
+    let target = found?;
 
     // `MapItem.applyNewSavedData(..., zoom, true, true)` → `MapItemSavedData.createFresh`。
     // `MapItem.applyNewSavedData(..., zoom, true, true)` → `MapItemSavedData.createFresh`.
