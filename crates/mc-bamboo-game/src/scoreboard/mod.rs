@@ -609,6 +609,42 @@ impl Scoreboard {
         true
     }
 
+    /// 官方 `TriggerCommand.getScore` 的前提：这名玩家在这个目标上有分数，并且已经被
+    /// `/scoreboard players enable` 解锁。
+    ///
+    /// The precondition of official `TriggerCommand.getScore`: the player has a score on
+    /// the objective and `/scoreboard players enable` has unlocked it.
+    pub(crate) fn is_primed(&self, player: &str, objective: &str) -> bool {
+        self.scores
+            .get(player)
+            .and_then(|scores| scores.get(objective))
+            .is_some_and(|score| !score.locked)
+    }
+
+    /// 官方 `ScoreAccess.lock`。分数已经存在，`requiresSync` 为假，所以不发包。
+    ///
+    /// Official `ScoreAccess.lock`. The score already exists, so `requiresSync` is
+    /// false and no packet is sent.
+    pub(crate) fn lock(&mut self, player: &str, objective: &str) {
+        if let Some(score) = self.score_mut(player, objective) {
+            score.locked = true;
+        }
+    }
+
+    /// 官方 `TriggerCommand.suggestObjectives`：这名玩家已解锁的 `trigger` 目标，
+    /// 按目标创建顺序。
+    ///
+    /// Official `TriggerCommand.suggestObjectives`: the `trigger` objectives this
+    /// player has unlocked, in creation order.
+    pub(crate) fn primed_triggers(&self, player: &str) -> Vec<&str> {
+        self.objectives
+            .iter()
+            .filter(|objective| objective.criteria == "trigger")
+            .filter(|objective| self.is_primed(player, &objective.name))
+            .map(|objective| objective.name.as_str())
+            .collect()
+    }
+
     pub(crate) fn set_score_display(
         &mut self,
         holder: &Holder,

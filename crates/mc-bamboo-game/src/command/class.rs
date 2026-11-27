@@ -78,6 +78,7 @@ pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("help", CommandClass::Global),
     ("list", CommandClass::Global),
     ("scoreboard", CommandClass::Global),
+    ("trigger", CommandClass::Global),
     ("team", CommandClass::Global),
     ("bossbar", CommandClass::Global),
     // 按名随机序列全世界一份、在主控上（计划 3.3「岛的随机源」第 2 条）。
@@ -177,6 +178,7 @@ pub(crate) const SCOPES: &[(&str, CommandScope)] = &[
     ("help", CommandScope::Players),
     ("list", CommandScope::Players),
     ("scoreboard", CommandScope::Players),
+    ("trigger", CommandScope::Players),
     ("team", CommandScope::Players),
     ("bossbar", CommandScope::Players),
     ("random", CommandScope::Players),
@@ -256,8 +258,10 @@ mod tests {
         }
         // 4.4 的 51 个加上 `/summon`、`/kill`、`/ride`、`/damage`、`/effect`、
         // `/execute`、`/data`、`/experience`、`/xp` 和 `/advancement`。
-        assert_eq!(roots.len(), 61);
-        assert_eq!(CLASSES.len(), 61);
+        // 再加上 `/trigger`。
+        // Plus `/trigger`.
+        assert_eq!(roots.len(), 62);
+        assert_eq!(CLASSES.len(), 62);
         // 每个顶层字面量都定了范围（计划 4.5），不多不少。
         // Every root literal has a scope (plan 4.5), no more and no fewer.
         let scoped: BTreeSet<&str> = SCOPES.iter().map(|(name, _)| *name).collect();

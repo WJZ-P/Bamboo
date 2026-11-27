@@ -10,7 +10,7 @@ use crate::command::{
     Action, CommandFn, Commands, IslandFn, admin, advancement, blocks, bossbar, clone, damage,
     data, effect, enchant, execute, experience, gamerule, items, kill, loot, particle, players,
     playsound, random, ride, save, scoreboard, stopsound, summon, team, teleport, text, time,
-    title, weather, world_border, world_settings,
+    title, trigger, weather, world_border, world_settings,
 };
 
 struct Builder {
@@ -123,6 +123,7 @@ pub(crate) fn build() -> Commands {
     register_teleport(&mut builder, root);
     register_title(&mut builder, root);
     register_time(&mut builder, root);
+    register_trigger(&mut builder, root);
     register_difficulty(&mut builder, root);
     register_default_gamemode(&mut builder, root);
     register_seed(&mut builder, root);
@@ -725,6 +726,29 @@ fn add_clock_nodes(builder: &mut Builder, parent: usize, gametime: bool) {
     if gametime {
         builder.bind_literal(query, "gametime", time::query_gametime);
     }
+}
+
+/// 官方 `TriggerCommand.register`：不要权限等级，目标节点带服务端补全。
+///
+/// Official `TriggerCommand.register`: no permission level, and the objective node asks
+/// the server for suggestions.
+fn register_trigger(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "trigger", permission::ALL);
+    let objective = builder.argument(command, "objective", ArgumentType::Objective, 0);
+    builder
+        .graph
+        .suggest_with(objective, trigger::SUGGESTION, trigger::suggest_objectives);
+    builder.run(objective, trigger::simple);
+    let integer = ArgumentType::Integer {
+        min: i32::MIN,
+        max: i32::MAX,
+    };
+    let add = builder.literal(objective, "add", 0);
+    let value = builder.argument(add, "value", integer.clone(), 0);
+    builder.run(value, trigger::add);
+    let set = builder.literal(objective, "set", 0);
+    let value = builder.argument(set, "value", integer, 0);
+    builder.run(value, trigger::set);
 }
 
 fn register_scoreboard(builder: &mut Builder, root: usize) {
