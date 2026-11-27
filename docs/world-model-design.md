@@ -606,6 +606,62 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 
 两层并行是叠加的：玩家分散时靠多个 region；玩家和生物扎堆在一个 region 时，靠这个 region 的实体阶段和收尾阶段吃满线程。Folia 只有前一层。
 
+### 8.8 命令方块矿车命令的执行时机（现状：保留延迟执行）
+
+官方 26.3 在矿车自己这一刻里执行命令。`ServerLevel.tick` 的 `EntityTickList.forEach`
+按加入顺序逐个跑 `tickNonPassenger`；命令方块矿车的 `OldMinecartBehavior.tick()` 先
+`moveAlongTrack(level)` 移动，遇到 `ACTIVATOR_RAIL` 就在同一刻调
+`MinecartCommandBlock.activateMinecart(..., state.getValue(POWERED))`，后者只在通电且
+`tickCount - lastActivated >= 4`（`ACTIVATION_DELAY = 4`）时调
+`BaseCommandBlock.performCommand(ServerLevel)` 走 `Commands.performPrefixedCommand`，
+随后 `lastActivated = tickCount`。`performCommand` 用矿车移动后的 `position()` /
+`getRotationVector()` 建 `CommandSourceStack`，命令当场读写同一个可变的
+`ServerLevel`：`setblock` / `summon` / `tp` 的改动，`EntityTickList` 里排在矿车之后
+tick 的实体、`tickPassenger` 与 `tickBlockEntities` 这一刻就能看到，命令自己读到的
+也是这一刻中途的世界。若 `summon` 生成的实体已具备 tick 条件，`EntityTickList.add` 会
+先分离正在遍历的名单，再将新实体加入活动名单；本次外层 `forEach` 不会 tick 新实体，
+但它已进入世界，后续实体仍可能读到它。
+
+Bamboo 把这一步推迟到整个实体阶段之后，细节见 README「命令方块矿车命令的执行时机」。
+`mc-bamboo-blocks` 的 `minecart::tick` 在激活处只按官方冷却生成 `CommandActivation`
+并 `emit` `Command::ActivateMinecartCommand`；`ctx.rs::apply` 对这条命令只
+`world.push_effect(Effect::RunMinecartCommand)`。`interaction::run_entity_ticks` 跑完
+精确驱动（`run_entity_tick` → `World::tick_entities`）或并行驱动（`compute` → `commit`）
+后把效果收成 `Vec<CommandActivation>` 交回主控，`world.rs` 的 tick 循环才经
+`GlobalPort::submit(GlobalEffect::RunMinecartCommand)` → `minecart_command::perform` →
+`command::run_prefixed` 执行。直接模式下，岛内的 `riding::tick` 和方块实体阶段仍在命令
+之后；同刻排在矿车之后 tick 的实体在命令之前，命令读到的也是整个实体阶段结束后的世界。
+多岛排队模式下，`GlobalPort::Queued` 此处只入队，主控收回岛后才执行，所以岛内的
+`riding::tick` 和方块实体阶段也在命令之前。
+
+把执行挪回官方时机，必须在某只矿车逐刻的中途拿到 `&mut Region` + `&mut Global`
+并当场跑完一条游戏层命令，这与本节已定的约束冲突：命令框架在 `mc-bamboo-game`，
+`mc-bamboo-blocks` 对它是 dev-dependency，正式构建不能反向依赖；`run_entity_ticks`
+用 `region.entity_level()` 把 `&mut Region` 拆成 `RegionLevel`（`World`）借给整个实体
+阶段，`World` 存活期间拿不到 `perform` 要的整份借区；第 8 节规定算阶段只读、对外写
+走缓冲 `Command` 并按 uid 顺序在落地阶段串行应用，精确驱动 `emit → apply` 也只是推
+`Effect`，并行驱动算阶段连 `World` 都没有、更没有逐实体插入点。
+
+可选方案与代价：A 把主线实体阶段改成逐实体驱动、在激活点释放借区
+并用 `GlobalPort::Direct` 当场执行，代价是改 tick 顺序、第 8 节写入规则、引擎主循环，
+并行驱动要禁用或另设分叉，还要核对 uid 升序与官方 `EntityTickList` 加入顺序是否一致；
+B 给 `World` 注入跨层回调在 `apply` 里跑命令，代价是闭包仍与 `RegionLevel` 借区冲突、
+并行算阶段仍无 `World`、跨 crate 边界要新 trait；C 保留延迟执行，代价是 `setblock` /
+`summon` / `tp` 与同刻第二只移动实体交错的 `entity-oracle` 场景无法做到 0 不一致。
+
+现状：按设计约束选 C，不改线程模型、tick 顺序或第 8 节写入规则，也不改行为；差异
+保留在 README 已知限制里。**用户 2026-11-28 决定保留延迟执行（C），不做 A / B。**现有 `entity-oracle` 的
+`command_minecart` 场景只比矿车自己的命令字段、输出、成功次数和比较器信号，没有同刻
+交错的第二只实体，不受这条差异影响。
+
+复核补充（2026-11-27）：延迟执行还带两条次生差异，都随「移动途中执行」一并消失，
+单独修不动。`minecart_command::perform`（129 行）执行时才按 UID 取命令方块，实体已
+`removed` 或不在表里就整条返回；官方 `activateMinecart` 当场执行，同刻稍后才被移除的
+矿车不会取消已跑完的命令。`CommandActivation`（`minecart.rs:398`）只带 UID、位置、
+朝向和 `game_time`，命令文本、`TrackOutput`、`SuccessCount`、
+`UpdateLastExecution` 都在 `perform` 里读执行时的值；官方 `BaseCommandBlock.performCommand`
+读的是 `activateMinecart` 那一刻矿车携带的值。
+
 ---
 
 ## 9. 红石热点优化（“JIT”）
@@ -965,6 +1021,7 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 - 红石触发的命中率实验（9.7）和机器缓存（9.3）：**都做完**（`bec0707`、`docs/redstone-cache-design.md` §12–14）。第一版引擎、第二版确定性工作量门槛、第三版活塞门和方块实体 tick 重放已合入；`bamboo.toml` 的 `redstone_cache` 默认关，正式配置下九台机器只有红石线阵列划算。数字见 `docs/performance-optimizations.md` 7h / 7i。
 - 换全局分配器、换压缩后端，实测后决定：**没做**。
 - 世界生成的噪声阶段（`ae76868`）：纯函数和区块级 `chunkgen` oracle 做完，群系 quart 格和 `doFill` 的方块逐位对拍。地表规则、雕刻器（`docs/worldgen.md`）和接进 Director 流水线（本轮，`docs/worldgen.md`「接进游戏」）都已做完，`gen-world` 对拍 0 不一致；第二轮已把多阶段邻居视图 + `features`（矿石）接进 Director（`docs/worldgen.md`「第二轮」，`gen-world --through features` 0 不一致）；结构、生成时光照、其余地物类型还没接。
+- 命令方块矿车命令的执行时机（8.8）：**没做，按设计约束保留延迟执行**。本轮对照 26.3 复核后确认挪回官方时机要改 tick 顺序、第 8 节写入规则和并行线程模型；**用户 2026-11-28 决定保留延迟执行**；复核又确认「矿车被移除则整条跳过命令」「执行时重读命令文本」两条次生差异，细节见 8.8，已知差异记在 README。
 
 （2026-11-14 按实现更新：第 16 节第 3 步、`docs/m3-storage.md` 第 14 节、`docs/performance-optimizations.md` 7g / 7i / 第 9 节、`docs/redstone-cache-design.md` §12–14、`docs/worldgen.md`「还没做」、`crates/mc-bamboo-game/src/director_host.rs` 的 `save_loaded_dirty` / `snapshot_loaded`、`crates/mc-bamboo-game/src/region/content_snapshot.rs`；合并提交 `1828b8c`、`1a0dee9`、`082a7c9`、`afaf4bb`、`672cb97`、`fa91b84`、`8baec27`、`df82a78`、`e6f8d6e`、`edce3ab`、`ae76868`）
 
