@@ -75,11 +75,11 @@ fn archive_round_trip(nbt: &str) -> Result<String, String> {
 }
 
 /// 取样用的船、乘客和漏斗状态都走生产代码：
-/// `menu::open_boat`、`riding::dismount::boat_dismount_location_for_mob`、
+/// `menu::open_entity_container`、`riding::dismount::boat_dismount_location_for_mob`、
 /// `hopper::suck_from_entity_container`（由 `World::tick_block_entities` 驱动）、
 /// `archive::write_entity` / `read_entity`。
 ///
-/// Every sampled fact goes through production code: `menu::open_boat`, the mob
+/// Every sampled fact goes through production code: `menu::open_entity_container`, the mob
 /// boat dismount helper, hopper container selection and the entity archive
 /// codecs.
 pub fn replay_boat_facts(nbt: &str, seed: i64) -> Result<BoatFactsSample, String> {
@@ -117,8 +117,8 @@ pub fn replay_boat_facts(nbt: &str, seed: i64) -> Result<BoatFactsSample, String
     }
 
     // 1. 打开运输船菜单，从真实的 OpenScreen 包里读出标题翻译键。
-    if !crate::menu::open_boat(&mut region, id, first) {
-        return Err("open_boat failed".to_owned());
+    if !crate::menu::open_entity_container(&mut region, id, first) {
+        return Err("open_entity_container failed".to_owned());
     }
     region.links.flush();
     let bytes = std::mem::take(&mut *capture.0.lock().unwrap());

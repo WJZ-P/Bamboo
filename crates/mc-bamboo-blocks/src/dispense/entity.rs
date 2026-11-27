@@ -1,7 +1,8 @@
 //! 会生成实体的注册表行为。刷怪蛋和弹射物仍不生成实体。
 //! 盔甲架在发射器正前方生成，TNT 物品在规则为真时生成点燃的 TNT。
 //!
-//! 船和矿车放得下时只扣物品，不取 `level.random`，外层一次 1000 和 2000。放不下时套一层默认抛出。
+//! 船放得下时只扣物品、不取 `level.random`，外层一次 1000 和 2000；矿车放得下时还要生成实体。
+//! 放不下时套一层默认抛出。
 //! 盔甲架照 `DispenseItemBehavior$1` 生成实体、应用 `entity_data`、扣一个，取一次 `level.random`；
 //! 带实体数据的刷怪蛋走 `spawn` 返回 null：物品留着，一次 1000。
 //! 没有实体数据的刷怪蛋是默认抛出。TNT 物品在 `tntExplodes` 为真时生成 `PrimedTnt`。
@@ -11,9 +12,9 @@
 //! An armour stand spawns in front of the dispenser; a TNT item spawns primed TNT when the
 //! rule is true.
 //!
-//! A boat or minecart that can be placed only consumes the item. It does not draw from
-//! `level.random`, and the outer dispense plays 1000 and 2000 once. Otherwise it nests a
-//! default throw. An armour stand follows `DispenseItemBehavior$1`: spawn the entity, apply
+//! A boat that can be placed only consumes the item; a minecart also spawns the entity.
+//! Neither draws from `level.random`, and the outer dispense plays 1000 and 2000 once.
+//! Otherwise it nests a default throw. An armour stand follows `DispenseItemBehavior$1`: spawn the entity, apply
 //! `entity_data`, shrink one item and draw one `level.random` value. A spawn egg that carries
 //! entity data follows `spawn` returning null: the item stays and 1000 plays once. A spawn egg
 //! without entity data is a default throw. A TNT item spawns a `PrimedTnt` when `tntExplodes`
@@ -39,8 +40,10 @@ use crate::{
     entity::{
         Entity,
         arrow::{ArrowShot, Pickup},
+        minecart::MinecartKind,
         mob::{MobType, nbt},
     },
+    state::{RAIL_SHAPE, RailShape},
     world::World,
 };
 
@@ -208,23 +211,59 @@ fn boat(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -
     }
 }
 
-/// `MinecartDispenseItemBehavior`。前方是铁轨，或者前方是空气且下面是铁轨。
+/// `MinecartDispenseItemBehavior`。前方是铁轨，或者前方是空气且下面是铁轨时生成矿车，
+/// 否则走默认抛出。落点沿朝向外移 1.125 格，斜坡和放在下层铁轨上的高度偏移照字节码。
 ///
-/// `MinecartDispenseItemBehavior`. The front is a rail, or the front is air and the block
-/// below is a rail.
+/// `MinecartDispenseItemBehavior`. Spawns a cart when the front is a rail, or the front is
+/// air and the block below is a rail; otherwise the default throw runs. The position sits
+/// 1.125 cells along the facing, with the slope / lower-rail height offsets from bytecode.
 fn minecart(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -> Shot {
     let front = pos.relative(facing);
     let state = world.block_state(front);
-    let on_rail = state.is_tagged(block_tags::RAILS)
-        || state.is_air()
-            && world
-                .block_state(front.below())
-                .is_tagged(block_tags::RAILS);
-    if on_rail {
-        Shot::plain(without_one(&stack))
+    let rail = state.is_tagged(block_tags::RAILS);
+    let below_rail = state.is_air()
+        && world
+            .block_state(front.below())
+            .is_tagged(block_tags::RAILS);
+    let height = if rail {
+        Some(if rail_is_slope(state) { 0.6 } else { 0.1 })
+    } else if below_rail {
+        let below = world.block_state(front.below());
+        if facing == Direction::Down || !rail_is_slope(below) {
+            Some(-0.9)
+        } else {
+            Some(-0.4)
+        }
     } else {
-        Shot::plain(nested_default(world, pos, facing, stack))
-    }
+        None
+    };
+    let Some(height) = height else {
+        return Shot::plain(nested_default(world, pos, facing, stack));
+    };
+    let (sx, sy, sz) = facing.normal();
+    let x = f64::from(pos.x) + 0.5 + f64::from(sx) * 1.125;
+    let y = f64::from(pos.y + sy) + height;
+    let z = f64::from(pos.z) + 0.5 + f64::from(sz) * 1.125;
+    let Some(kind) = MinecartKind::from_item(stack.item) else {
+        return Shot::plain(nested_default(world, pos, facing, stack));
+    };
+    let entity = world.prepare_entity(Entity::minecart(kind, Vec3::new(x, y, z)));
+    world.add_prepared_entity(entity);
+    Shot::plain(without_one(&stack))
+}
+
+/// `MinecartDispenseItemBehavior.getRailShape`：有 `shape` 属性就取它，否则南北。
+///
+/// `MinecartDispenseItemBehavior.getRailShape`: read `shape` when present, else north-south.
+fn rail_is_slope(state: crate::BlockState) -> bool {
+    let shape = state.try_get(RAIL_SHAPE).unwrap_or(RailShape::NorthSouth);
+    matches!(
+        shape,
+        RailShape::AscendingNorth
+            | RailShape::AscendingEast
+            | RailShape::AscendingSouth
+            | RailShape::AscendingWest
+    )
 }
 
 /// `ProjectileDispenseBehavior` 里注册成弹射物的箭。`ArrowItem.asProjectile` 生成可拾取的箭。

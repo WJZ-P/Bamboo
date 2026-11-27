@@ -194,6 +194,12 @@ pub enum EntityData {
     BoatPaddleRight(bool),
     /// index 13，INT。`AbstractBoat.DATA_ID_BUBBLE_TIME`。
     BoatBubbleTime(i32),
+    /// index 11，OPTIONAL_BLOCK_STATE。`AbstractMinecart.DATA_ID_CUSTOM_DISPLAY_BLOCK`。
+    MinecartDisplayBlock(Option<i32>),
+    /// index 12，INT。`AbstractMinecart.DATA_ID_DISPLAY_OFFSET`。
+    MinecartDisplayOffset(i32),
+    /// index 13，BOOLEAN。`MinecartFurnace.DATA_ID_FUEL`。
+    MinecartFuel(bool),
     /// index 8，INT。`FishingHook.DATA_HOOKED_ENTITY`：0 表示没钩住，否则是目标实体 ID + 1。
     ///
     /// index 8, INT. `FishingHook.DATA_HOOKED_ENTITY`: 0 when unhooked, else entity id + 1.
@@ -656,6 +662,9 @@ impl EntityData {
             Self::BoatPaddleLeft(_) => 11,
             Self::BoatPaddleRight(_) => 12,
             Self::BoatBubbleTime(_) => 13,
+            Self::MinecartDisplayBlock(_) => 11,
+            Self::MinecartDisplayOffset(_) => 12,
+            Self::MinecartFuel(_) => 13,
             Self::Item(_)
             | Self::FallingBlockStart(_)
             | Self::TntFuse(_)
@@ -880,6 +889,18 @@ impl EntityData {
                 write_f32(out, *value);
             }
             Self::BoatPaddleLeft(value) | Self::BoatPaddleRight(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::MinecartDisplayBlock(state) => {
+                write_data_header(out, self.index(), SERIALIZER_OPTIONAL_BLOCK_STATE);
+                write_varint(out, state.unwrap_or(0));
+            }
+            Self::MinecartDisplayOffset(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::MinecartFuel(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 write_bool(out, *value);
             }

@@ -2013,6 +2013,25 @@ pub enum Command {
         pos: BlockPos,
         occupied: bool,
     },
+    /// `DetectorRailBlock.checkPressed`：矿车压过探测铁轨时把它点亮。
+    ///
+    /// `DetectorRailBlock.checkPressed`: power a detector rail while a minecart is on it.
+    MinecartDetectorRail {
+        pos: BlockPos,
+    },
+    /// `MinecartTNT.explode`：半径随速度变化，且铁轨不参与破坏。
+    ///
+    /// `MinecartTNT.explode`: speed-dependent radius, with rails left intact.
+    MinecartExplode {
+        center: Vec3,
+        radius: f32,
+        source: Box<EntityPublic>,
+        owner: Option<EntityUid>,
+    },
+    /// `MinecartHopper.suckInItems`：把碰撞盒附近的物品实体吸进 5 格。
+    ///
+    /// `MinecartHopper.suckInItems`: pull nearby item entities into its 5 slots.
+    MinecartHopperSuck,
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -2779,6 +2798,16 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 world.set_block_and_update(pos, next);
             }
         }
+        Command::MinecartDetectorRail { pos } => {
+            crate::behaviour::machines::check_detector_rail(world, pos, Some(me));
+        }
+        Command::MinecartExplode {
+            center,
+            radius,
+            source,
+            owner,
+        } => world.explode_minecart(center, radius, source, owner),
+        Command::MinecartHopperSuck => crate::hopper::suck_minecart(world, me),
     }
 }
 

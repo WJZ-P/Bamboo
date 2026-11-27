@@ -19,6 +19,7 @@ pub mod fishing_hook;
 pub mod hanging;
 pub mod leash_knot;
 pub mod lightning;
+pub mod minecart;
 pub mod mob;
 pub mod ominous_item_spawner;
 pub mod parallel;
@@ -299,6 +300,10 @@ pub enum EntityKind {
     ///
     /// A mob. Its state is large, so it is boxed.
     Mob(Box<mob::Mob>),
+    /// 矿车，`AbstractMinecart` 的各个子类。
+    ///
+    /// A minecart, one of the `AbstractMinecart` subclasses.
+    Minecart(Box<minecart::Minecart>),
     /// 船 / 竹筏 / 运输船，对应 `AbstractBoat`。不是生物，也没有 `Mob` 状态。
     ///
     /// A boat / raft / chest boat, vanilla `AbstractBoat`. Not a mob; it has no
@@ -332,6 +337,7 @@ impl EntityKind {
             Self::FishingHook(_) => mc_bamboo_data::registries::entity_type::FISHING_BOBBER,
             Self::EyeOfEnder(_) => mc_bamboo_data::registries::entity_type::EYE_OF_ENDER,
             Self::Mob(mob) => mob.mob_type.entity_type(),
+            Self::Minecart(cart) => cart.entity_type,
             Self::Boat(boat) => boat.entity_type,
         }
     }
@@ -583,6 +589,7 @@ impl Entity {
             EntityKind::Painting(_) => hanging::tick_painting(self, ctx),
             EntityKind::ItemFrame(_) => hanging::tick_item_frame(self, ctx),
             EntityKind::Mob(_) => {}
+            EntityKind::Minecart(_) => minecart::tick(self, ctx),
         }
     }
 
@@ -612,6 +619,16 @@ impl Entity {
     /// `EntityType.HUSK.create`。
     pub fn husk(position: Vec3) -> Self {
         Self::mob_of(mob::MobType::Husk, position)
+    }
+
+    /// `AbstractMinecart.createMinecart` 生成的一辆矿车。
+    ///
+    /// A minecart as created by `AbstractMinecart.createMinecart`.
+    pub fn minecart(kind: minecart::MinecartKind, position: Vec3) -> Self {
+        Self::new(
+            EntityKind::Minecart(Box::new(minecart::Minecart::new(kind))),
+            position,
+        )
     }
 
     /// 船 / 竹筏 / 运输船，`EntityType.create`。木种、筏和运输由 `entity_type` 决定。

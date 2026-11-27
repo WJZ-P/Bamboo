@@ -85,6 +85,7 @@ pub(crate) fn passengers(region: &Region, vehicle: EntityUid) -> Vec<EntityUid> 
         .map(|public| match &public.kind {
             KindPublic::Mob(mob) => mob.passengers.clone(),
             KindPublic::Boat(boat) => boat.passengers.clone(),
+            KindPublic::Minecart(cart) => cart.passengers.clone(),
             _ => Vec::new(),
         })
         .unwrap_or_default()
@@ -101,6 +102,7 @@ pub(crate) fn player_vehicles(region: &Region) -> BTreeMap<PlayerId, EntityUid> 
         let list = match &public.kind {
             KindPublic::Mob(mob) => &mob.passengers,
             KindPublic::Boat(boat) => &boat.passengers,
+            KindPublic::Minecart(cart) => &cart.passengers,
             _ => continue,
         };
         for &passenger in list {
@@ -351,10 +353,22 @@ pub(crate) fn load_root_vehicle(region: &mut Region, id: PlayerId, tag: &mc_bamb
         let vehicle = row.public.vehicle.take();
         let passengers = match &mut row.public.kind {
             mc_bamboo_blocks::entity::KindPublic::Mob(mob) => std::mem::take(&mut mob.passengers),
+            mc_bamboo_blocks::entity::KindPublic::Boat(boat) => {
+                std::mem::take(&mut boat.passengers)
+            }
+            mc_bamboo_blocks::entity::KindPublic::Minecart(cart) => {
+                std::mem::take(&mut cart.passengers)
+            }
             _ => Vec::new(),
         };
         if let mc_bamboo_blocks::entity::KindState::Mob(mob) = &mut row.state.kind {
             mob.passengers.clear();
+        }
+        if let mc_bamboo_blocks::entity::KindState::Boat(boat) = &mut row.state.kind {
+            boat.passengers.clear();
+        }
+        if let mc_bamboo_blocks::entity::KindState::Minecart(cart) = &mut row.state.kind {
+            cart.passengers.clear();
         }
         let uid = region.entities.spawn_row(row);
         links.push((uid, vehicle, passengers));
@@ -375,7 +389,13 @@ pub(crate) fn load_root_vehicle(region: &mut Region, id: PlayerId, tag: &mc_bamb
         }
         region.entities.with_mut(uid, |entity| {
             entity.vehicle = vehicle;
-            entity.with_mob(|_, mob| mob.passengers = passengers);
+            match &mut entity.kind {
+                EntityKind::Boat(boat) => boat.passengers = passengers,
+                EntityKind::Minecart(cart) => cart.passengers = passengers,
+                _ => {
+                    entity.with_mob(|_, mob| mob.passengers = passengers);
+                }
+            }
         });
     }
     let spawned: Vec<(EntityUid, [u8; 16])> = spawned
@@ -390,20 +410,38 @@ pub(crate) fn load_root_vehicle(region: &mut Region, id: PlayerId, tag: &mc_bamb
     };
     // `startRiding(vehicle, true, false)`：强制上车，不看冷却和已有乘客。
     // 玩家侧的 `Riding.vehicle` 和载具名单都从这一份状态建起来。
+    let is_minecart = region
+        .entities
+        .public_at(vehicle)
+        .is_some_and(|public| matches!(public.kind, KindPublic::Minecart(_)));
     if let Some(player) = region.players.get_mut(&id) {
         player.riding.vehicle = Some(vehicle);
-        player.riding.last_vehicle = Some(vehicle);
+        player.riding.last_vehicle = (!is_minecart).then_some(vehicle);
         player.riding.boarding_cooldown = 0;
         if let Some(public) = region.entities.public_at(vehicle) {
             player.riding.first_good = public.position;
             player.riding.last_good = public.position;
         }
     }
-    region.entities.with_mut(vehicle, |entity| {
-        entity.with_mob(|_, mob| {
-            mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, id.0, true);
-        })
-    });
+    region
+        .entities
+        .with_mut(vehicle, |entity| match &mut entity.kind {
+            EntityKind::Boat(boat) => {
+                mc_bamboo_blocks::entity::riding::add_passenger(&mut boat.passengers, id.0, true);
+            }
+            EntityKind::Minecart(cart) => {
+                mc_bamboo_blocks::entity::riding::add_passenger(&mut cart.passengers, id.0, true);
+            }
+            _ => {
+                entity.with_mob(|_, mob| {
+                    mc_bamboo_blocks::entity::riding::add_passenger(
+                        &mut mob.passengers,
+                        id.0,
+                        true,
+                    );
+                });
+            }
+        });
 }
 
 /// 官方 `handleMoveVehicle` 的水平和竖直夹取（`clampHorizontal` / `clampVertical`）。
@@ -436,6 +474,10 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
     };
     if matches!(public.kind, KindPublic::Boat(_)) {
         mount_boat(region, id, vehicle);
+        return;
+    }
+    if matches!(public.kind, KindPublic::Minecart(_)) {
+        mount_minecart(region, id, vehicle);
         return;
     }
     // 官方 `canAddPassenger`：默认只坐一个人；`HappyGhast` 覆写成最多四人。
@@ -526,6 +568,66 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
         });
     }
     // 官方 `StartRidingTrigger.trigger(ServerPlayer)`。
+    crate::advancement_triggers::record(
+        region,
+        id,
+        "minecraft:started_riding",
+        serde_json::json!({}),
+    );
+}
+
+/// `Minecart.interact` 里的 `player.startRiding(this)`：非潜行、车里没人时上车，
+/// 官方最多一名乘客（`canAddPassenger`）。
+///
+/// `Minecart.interact`'s `player.startRiding(this)`: mount when not sneaking and
+/// the cart is empty; vanilla allows a single passenger.
+fn mount_minecart(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
+    let Some((passenger_count, position)) = region
+        .entities
+        .with_mut(vehicle, |entity| {
+            if let EntityKind::Minecart(cart) = &entity.kind {
+                Some((cart.passengers.len(), entity.position))
+            } else {
+                None
+            }
+        })
+        .flatten()
+    else {
+        return;
+    };
+    if passenger_count != 0 {
+        return;
+    }
+    let Some(player) = region.players.get(&id) else {
+        return;
+    };
+    if player.riding.vehicle == Some(vehicle) {
+        return;
+    }
+    // `canRide`：潜行键或下车冷却拦住上车。
+    if player.sync.shift_key_down || player.riding.boarding_cooldown > 0 {
+        return;
+    }
+    if player.riding.is_passenger() {
+        dismount(region, id);
+    }
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    // 官方 `AbstractMinecart.getControllingPassenger()` 始终返回 null：矿车由服务端
+    // `OldMinecartBehavior` 驱动，不设 `last_vehicle`，也不接受客户端 `MoveVehicle`。
+    //
+    // Vanilla `AbstractMinecart.getControllingPassenger()` always returns null: the
+    // server owns cart movement, so `last_vehicle` stays `None`.
+    player.riding.vehicle = Some(vehicle);
+    player.riding.last_vehicle = None;
+    player.riding.first_good = position;
+    player.riding.last_good = position;
+    region.entities.with_mut(vehicle, |entity| {
+        if let EntityKind::Minecart(cart) = &mut entity.kind {
+            mc_bamboo_blocks::entity::riding::add_passenger(&mut cart.passengers, id.0, true);
+        }
+    });
     crate::advancement_triggers::record(
         region,
         id,
@@ -671,6 +773,21 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
                 public.bounding_box().max_y,
             );
         }
+        if let KindPublic::Minecart(cart) = &public.kind {
+            // `AbstractMinecart.getDismountLocationForPassenger`：按 `getMotionDirection`
+            // 与 `POSE_DISMOUNT_HEIGHTS` 扫八邻格，全不行时落在车顶。
+            // `AbstractMinecart.getDismountLocationForPassenger`: scan the 8 offsets
+            // of `getMotionDirection` across `POSE_DISMOUNT_HEIGHTS`, fallback to top.
+            return dismount::minecart_dismount_location(
+                &region.chunks,
+                &region.global.world_border,
+                player,
+                public.position,
+                public.bounding_box().max_y,
+                public.yaw,
+                cart.flipped,
+            );
+        }
         let KindPublic::Mob(mob) = &public.kind else {
             return None;
         };
@@ -728,6 +845,11 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
     region.entities.with_mut(vehicle, |entity| {
         if let EntityKind::Boat(boat) = &mut entity.kind {
             boat.passengers.retain(|passenger| *passenger != id.0);
+            return;
+        }
+        if let EntityKind::Minecart(cart) = &mut entity.kind {
+            cart.passengers.retain(|passenger| *passenger != id.0);
+            cart.rider_intent = Vec3::default();
             return;
         }
         let at = entity.position;
@@ -875,6 +997,9 @@ pub(crate) fn tick(region: &mut Region) {
                         false,
                     )
                 }
+                KindPublic::Minecart(_) => {
+                    mc_bamboo_blocks::entity::minecart::passenger_attachment_point()
+                }
                 _ => {
                     stop_riding(region, id);
                     continue;
@@ -960,13 +1085,18 @@ pub(crate) fn controls_vehicle(region: &mut Region, id: PlayerId, vehicle: Entit
         })
     });
     let first_passenger = passengers(region, vehicle).first() == Some(&id.0);
-    // `AbstractBoat.getControllingPassenger`：第一乘客是玩家时就是他，否则没有控制者。
-    if region
-        .entities
-        .public_at(vehicle)
-        .is_some_and(|public| matches!(public.kind, KindPublic::Boat(_)))
-    {
-        return first_passenger;
+    // `AbstractBoat.getControllingPassenger`：第一乘客是玩家时就是他；
+    // `AbstractMinecart` 没有覆写 `getControllingPassenger()`，始终返回 null（服务端权威）。
+    //
+    // `AbstractBoat.getControllingPassenger`: the first passenger when it is a
+    // player. `AbstractMinecart` does not override it and stays server-authoritative.
+    if let Some(public) = region.entities.public_at(vehicle) {
+        if matches!(public.kind, KindPublic::Boat(_)) {
+            return first_passenger;
+        }
+        if matches!(public.kind, KindPublic::Minecart(_)) {
+            return false;
+        }
     }
     region
         .entities
@@ -1035,7 +1165,7 @@ pub(crate) fn on_move_vehicle(
         let snap = region.entities.public_at(vehicle).map(|public| {
             let pitch = match &public.kind {
                 KindPublic::Mob(mob) => mob.x_rot,
-                KindPublic::Boat(_) => 0.0,
+                KindPublic::Boat(_) | KindPublic::Minecart(_) => 0.0,
                 _ => player.pitch,
             };
             (public.position, public.yaw, pitch)
@@ -1071,8 +1201,8 @@ pub(crate) fn on_move_vehicle(
             mob.attributes.value(attribute::STEP_HEIGHT) as f32,
             mob.x_rot,
         ),
-        // 船没有俯仰角，`maxUpStep` 为 0，不上台阶。
-        KindPublic::Boat(_) => (0.0, 0.0),
+        // 船和矿车没有俯仰角，`maxUpStep` 为 0，不上台阶。
+        KindPublic::Boat(_) | KindPublic::Minecart(_) => (0.0, 0.0),
         _ => return,
     };
     // 「移动太快」：和上一刻末的位置差太多就拉回去，官方阈值是 100 个平方格。

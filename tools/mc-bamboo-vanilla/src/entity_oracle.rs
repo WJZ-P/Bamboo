@@ -162,11 +162,12 @@ struct Case {
     /// Present when a player picks the item up. The feet stay at (0.5, 64, 0.5).
     #[serde(default)]
     player: Option<PlayerSetup>,
-    /// 船场景：注册表实体类型、初速度、初始朝向、初始伤害 / 火刻数、
+    /// 矿车 / 船场景：注册表实体类型、初速度、初始朝向、初始伤害 / 火刻数、
     /// 在第几步做存档往返、箱内物品 `[槽位, 物品, 数量]`、动物 `[x, y, z]`。
     ///
-    /// Boat scenes: registry entity type, initial velocity / yaw / damage / fire,
-    /// the step that performs an archive round trip, chest items and animals.
+    /// Minecart / boat scenes: registry entity type, initial velocity / yaw /
+    /// damage / fire, the step that performs an archive round trip, chest items
+    /// and animals.
     #[serde(default = "unknown_item")]
     entity_type: i32,
     #[serde(default)]
@@ -181,12 +182,24 @@ struct Case {
     initial_damage: f32,
     #[serde(default)]
     initial_fire: i32,
+    /// 存档往返发生在第几步之前；-1 表示不做。
+    ///
+    /// The step before which an archive round trip runs; -1 disables it.
     #[serde(default = "no_save")]
     save_at: i32,
     #[serde(default)]
     chest: Vec<[i32; 3]>,
     #[serde(default)]
     animals: Vec<[f64; 3]>,
+    /// 动力矿车场景的燃料与推力。
+    ///
+    /// Furnace-cart fuel and push.
+    #[serde(default)]
+    fuel: i32,
+    #[serde(default)]
+    push_x: f64,
+    #[serde(default)]
+    push_z: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -343,6 +356,10 @@ struct Report {
     steps: usize,
     mismatches: Vec<String>,
     ended: bool,
+    /// 改坏自检要改坏的那一处；`None` 是正常对拍。
+    ///
+    /// The named deliberate break for the self-test; `None` is a normal run.
+    break_name: Option<String>,
     /// 当前这题是不是船场景：只比船和掉出的物品，乘客落位在别处同步。
     boat_only: bool,
     /// 官方静态船事实行必须恰好出现一次。
@@ -499,8 +516,11 @@ impl Level for PhysicsLevel {
     }
 }
 
-/// 启动官方进程，逐题重放。
-pub fn run(mut command: Command) -> Result<(), String> {
+/// 启动官方进程，逐题重放。`break_name` 是改坏自检要改坏的那一处。
+///
+/// Start the official process and replay each case. `break_name` names the
+/// deliberate break for the self-test.
+pub fn run(mut command: Command, break_name: Option<&str>) -> Result<(), String> {
     // 官方编译器在中文 Windows 上用系统代码页写错误。固定成 UTF-8，失败日志才读得出来。
     // The official compiler writes errors in the system code page on Chinese Windows.
     // Pin UTF-8 so a failure log can be read.
@@ -520,6 +540,7 @@ pub fn run(mut command: Command) -> Result<(), String> {
         steps: 0,
         mismatches: Vec::new(),
         ended: false,
+        break_name: break_name.map(str::to_owned),
         boat_only: false,
         boat_facts: false,
     };
@@ -587,6 +608,10 @@ impl Report {
         self.boat_only = false;
         if case.kind == "orb_pickup" {
             self.replay_orb(case);
+            return;
+        }
+        if case.kind == "minecart" {
+            self.replay_minecart(case);
             return;
         }
         if case.kind == "boat" {
@@ -970,6 +995,100 @@ impl Report {
         }
     }
 
+    /// 矿车场景：用方块层实体 tick 重放官方 `OldMinecartBehavior`，逐刻比较
+    /// 位置、速度和落地标记。
+    ///
+    /// Minecart scenes: replay official `OldMinecartBehavior` with the block-layer
+    /// entity tick and compare position, velocity and grounding each tick.
+    fn replay_minecart(&mut self, case: &Case) {
+        let Some(kind) =
+            mc_bamboo_blocks::entity::minecart::MinecartKind::from_entity_type(case.entity_type)
+        else {
+            self.mismatch(format!("{}: unknown minecart type", case.name));
+            return;
+        };
+        let mut level = PhysicsLevel::new(case.level_seed);
+        level.entities = Entities::with_next_id(case.first_entity_id);
+        let blocks = &case.blocks[..case.blocks.len().saturating_sub(usize::from(
+            self.break_name.as_deref() == Some("minecart-blocks"),
+        ))];
+        level.place(blocks);
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let broken_kind = if self.break_name.as_deref() == Some("minecart-type") {
+            mc_bamboo_blocks::entity::minecart::MinecartKind::Chest
+        } else {
+            kind
+        };
+        let pos_x = case.px
+            + if self.break_name.as_deref() == Some("minecart-pos") {
+                0.5
+            } else {
+                0.0
+            };
+        let vz = case.vz
+            * if self.break_name.as_deref() == Some("minecart-velocity") {
+                1.5
+            } else {
+                1.0
+            };
+        let id = world.spawn_entity(Entity::minecart(
+            broken_kind,
+            Vec3::new(pos_x, case.py, case.pz),
+        ));
+        world.with_entity_mut(id, &mut |entity| {
+            entity.delta = Vec3::new(case.vx, case.vy, vz);
+            entity.random = JavaRandom::new(case.entity_seed);
+            if let EntityKind::Minecart(cart) = &mut entity.kind {
+                cart.fuel = case.fuel;
+                cart.push = Vec3::new(case.push_x, 0.0, case.push_z);
+                if cart.is_container() {
+                    for &[slot, item, count] in &case.chest {
+                        if let Some(stack) = cart.items.get_mut(slot as usize) {
+                            *stack = ItemStack::new(item, count);
+                        }
+                    }
+                }
+                if self.break_name.as_deref() == Some("minecart-hopper-suck")
+                    && cart.kind() == mc_bamboo_blocks::entity::minecart::MinecartKind::Hopper
+                {
+                    cart.enabled = false;
+                }
+            }
+            if self.break_name.as_deref() == Some("minecart-onground") {
+                entity.on_ground = true;
+            }
+        });
+        for extra in &case.extras {
+            spawn_ground_item(
+                &mut world,
+                extra.x,
+                extra.y,
+                extra.z,
+                extra.item,
+                extra.count,
+                case.pickup_delay.unwrap_or(10),
+            );
+        }
+        if case.steps.is_empty() {
+            self.mismatch(format!("{}: no steps", case.name));
+            return;
+        }
+        let hoppers: Vec<BlockPos> = Vec::new();
+        self.compare_step(&case.name, 0, &mut world, None, &case.steps[0], &hoppers);
+        for (index, step) in case.steps.iter().enumerate().skip(1) {
+            if case.save_at >= 0 && index - 1 == case.save_at as usize {
+                minecart_archive_roundtrip(&mut world, id);
+            }
+            let ticked = world.tick_entities_kept();
+            self.steps += 1;
+            self.compare_step(&case.name, index, &mut world, Some(&ticked), step, &hoppers);
+            if self.mismatches.len() >= 12 {
+                return;
+            }
+        }
+    }
+
     /// 船场景：用方块层实体 tick 重放官方 `AbstractBoat.tick`，逐刻比较位置、
     /// 速度、状态、伤害、乘客和箱内物品。`saveAt` 那一步把船走一遍
     /// `archive::write_entity` → `read_entity`，验证存档往返不丢状态。
@@ -1186,6 +1305,18 @@ impl Report {
         if !self.boat_facts {
             return Err("entity oracle did not report the boat facts".to_owned());
         }
+        if let Some(name) = &self.break_name {
+            if self.mismatches.is_empty() {
+                return Err(format!(
+                    "entity oracle self-test ({name}) detected no deliberate break"
+                ));
+            }
+            println!(
+                "entity oracle self-test ({name}): detector works ({} mismatches)",
+                self.mismatches.len()
+            );
+            return Ok(());
+        }
         if !self.mismatches.is_empty() {
             return Err(format!(
                 "entity oracle: {} mismatches\n{}",
@@ -1201,24 +1332,32 @@ impl Report {
     }
 }
 
-/// 运输船存档往返：写出 NBT、读回实体、放回实体表，再继续逐刻比较。
-fn boat_archive_roundtrip(world: &mut World, boat: i32) {
-    let Some(entity) = world.entity(boat) else {
+/// 矿车存档往返：写出 NBT、读回实体、放回实体表，再继续逐刻比较。
+///
+/// Minecart archive round trip: write NBT, read the row back, replace the entity
+/// and keep comparing tick by tick.
+fn minecart_archive_roundtrip(world: &mut World, id: i32) {
+    let Some(entity) = world.entity(id) else {
         return;
     };
     let row = entity.split();
     let Ok(tag) = mc_bamboo_blocks::archive::write_entity(&row) else {
         return;
     };
-    let Ok(Some(restored)) = mc_bamboo_blocks::archive::read_entity(&tag, boat) else {
+    let Ok(Some(restored)) = mc_bamboo_blocks::archive::read_entity(&tag, id) else {
         return;
     };
     let mut restored = Some(restored.into_entity());
-    world.with_listed_entity_mut(boat, &mut |entity| {
+    world.with_listed_entity_mut(id, &mut |entity| {
         if let Some(value) = restored.take() {
             *entity = value;
         }
     });
+}
+
+/// 运输船存档往返：和运输矿车走同一段读回逻辑。
+fn boat_archive_roundtrip(world: &mut World, boat: i32) {
+    minecart_archive_roundtrip(world, boat);
 }
 
 /// 复合标签按键名排序，列表顺序保留；官方 `CompoundTag.toString()` 也按键排序。
@@ -1300,7 +1439,7 @@ struct BoatSnapshot {
 }
 
 fn boat_snapshot(entity: &Entity) -> BoatSnapshot {
-    let default = BoatSnapshot {
+    let mut result = BoatSnapshot {
         entity_type: -1,
         status: -1,
         hurt_time: -1,
@@ -1317,42 +1456,50 @@ fn boat_snapshot(entity: &Entity) -> BoatSnapshot {
         passengers: Vec::new(),
         chest: Vec::new(),
     };
-    let EntityKind::Boat(boat) = &entity.kind else {
-        return default;
-    };
-    use mc_bamboo_blocks::entity::boat::Status;
-    let status = match boat.status {
-        Status::InWater => 0,
-        Status::UnderWater => 1,
-        Status::UnderFlowingWater => 2,
-        Status::OnLand => 3,
-        Status::InAir => 4,
-    };
-    let mut chest = Vec::new();
-    if let Some(data) = &boat.chest {
-        for (slot, stack) in data.items.iter().enumerate() {
-            if !stack.is_empty() {
-                chest.push([slot as i32, stack.item, stack.count]);
+    match &entity.kind {
+        EntityKind::Boat(boat) => {
+            use mc_bamboo_blocks::entity::boat::Status;
+            result.entity_type = boat.entity_type;
+            result.status = match boat.status {
+                Status::InWater => 0,
+                Status::UnderWater => 1,
+                Status::UnderFlowingWater => 2,
+                Status::OnLand => 3,
+                Status::InAir => 4,
+            };
+            if let Some(data) = &boat.chest {
+                for (slot, stack) in data.items.iter().enumerate() {
+                    if !stack.is_empty() {
+                        result.chest.push([slot as i32, stack.item, stack.count]);
+                    }
+                }
+            }
+            result.hurt_time = boat.hurt_time;
+            result.hurt_dir = boat.hurt_dir;
+            result.damage = boat.damage.to_bits() as i32;
+            result.yaw = entity.y_rot.to_bits() as i32;
+            result.eye_in_water = boat.eye_in_water;
+            result.water_level = boat.water_level.to_bits() as i64;
+            result.last_yd = boat.last_yd.to_bits() as i64;
+            result.land_friction = boat.land_friction.to_bits() as i32;
+            result.out_of_control = boat.out_of_control_ticks.to_bits() as i32;
+            result.paddle0 = boat.paddle_positions[0].to_bits() as i32;
+            result.paddle1 = boat.paddle_positions[1].to_bits() as i32;
+            result.passengers = boat.passengers.clone();
+        }
+        EntityKind::Minecart(cart) => {
+            result.entity_type = cart.entity_type;
+            if cart.is_container() {
+                for (slot, stack) in cart.items.iter().enumerate() {
+                    if !stack.is_empty() {
+                        result.chest.push([slot as i32, stack.item, stack.count]);
+                    }
+                }
             }
         }
+        _ => {}
     }
-    BoatSnapshot {
-        entity_type: boat.entity_type,
-        status,
-        hurt_time: boat.hurt_time,
-        hurt_dir: boat.hurt_dir,
-        damage: boat.damage.to_bits() as i32,
-        yaw: entity.y_rot.to_bits() as i32,
-        eye_in_water: boat.eye_in_water,
-        water_level: boat.water_level.to_bits() as i64,
-        last_yd: boat.last_yd.to_bits() as i64,
-        land_friction: boat.land_friction.to_bits() as i32,
-        out_of_control: boat.out_of_control_ticks.to_bits() as i32,
-        paddle0: boat.paddle_positions[0].to_bits() as i32,
-        paddle1: boat.paddle_positions[1].to_bits() as i32,
-        passengers: boat.passengers.clone(),
-        chest,
-    }
+    result
 }
 
 fn snap_of(entity: Entity) -> OfficialEntity {
@@ -1420,6 +1567,20 @@ fn snap_of(entity: Entity) -> OfficialEntity {
             data.health,
         ),
         EntityKind::FishingHook(_) => ("fishing_bobber".to_owned(), -1, -1, -1, 0, -1, -1, -1),
+        EntityKind::Minecart(cart) => (
+            mc_bamboo_data::registries::entity_type::name_of(cart.entity_type)
+                .unwrap_or("minecraft:minecart")
+                .strip_prefix("minecraft:")
+                .unwrap_or("minecart")
+                .to_owned(),
+            -1,
+            -1,
+            -1,
+            0,
+            -1,
+            -1,
+            -1,
+        ),
         EntityKind::EyeOfEnder(_) => ("eye_of_ender".to_owned(), -1, -1, -1, 0, -1, -1, -1),
     };
     OfficialEntity {

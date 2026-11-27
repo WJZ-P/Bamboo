@@ -47,6 +47,7 @@ pub(crate) use self::diode::{
 pub use self::lectern::{reset_lectern, signal_lectern_page};
 pub use self::piston_entity::PistonMoving;
 pub(crate) use self::pumpkin::can_spawn_golem;
+pub(crate) use self::rail::check_detector_rail;
 
 use mc_bamboo_data::{Block, BlockClass};
 
