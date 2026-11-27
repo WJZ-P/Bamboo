@@ -569,8 +569,9 @@ WebView2 的渲染进程不算在内。
   会取选中的那一整堆并清掉选中，物品堆从格子挪到光标再放回别的格时下标跟着走；
   网络 / 存档的 `bundle_contents` 和 `ItemStack.equals` 都不含这个下标，切选中格不会补发槽位包。
   右键使用照 `BundleItem.use` 只进入 200 刻的「正在使用」状态，`onUseTick` 在第一刻和剩余小于
-  190 的偶数刻逐件倒出：每次走官方 `Player.drop(stack, false, PREDICTED)` 的位置与速度，
-  播 `item.bundle.drop_contents` 并记一次 `ITEM_USED`。火烧 / 岩浆等把收纳袋物品实体打到血量
+  190 的偶数刻逐件倒出：每次以 `Player.drop(stack, true, PREDICTED)` 的位置和速度生成掉落物，
+  向旁观者播 `item.bundle.remove_one`，再向附近玩家（含使用者）播 `item.bundle.drop_contents`，
+  同步收纳袋槽位并记一次 `ITEM_USED`。火烧 / 岩浆等把收纳袋物品实体打到血量
   归零时，`ItemEntity.hurtServer` → `ItemStack.onDestroyed` → `ItemUtils.onContainerDestroyed`
   把内容物在原地逐件掉出；摔进虚空只 `discard()`，不掉内容物。
   **对拍**：`menu java` 六道固定题（左 / 右键装取、62/64 装到满、选中第 2 件后拿到光标再放到别的格取出、
@@ -579,9 +580,17 @@ WebView2 的渲染进程不算在内。
   生成的两件掉落物逐刻比位置 / 速度 / 数量 / 年龄 / 拾取延迟，67 题 1212 刻 0 不一致。
   四处改坏确认（`--break-self-test bundle_first|bundle_slots|bundle_selected` 与
   `entity-oracle java --break-self-test bundle-drops`）分别报 5 / 15 / 12 / 2 处差异。
-  **已知限制**：选中下标是服务端本地状态，复制物品堆时两份会带上同一个下标；
-  存档和网络字节不持久化它；收纳袋的 /tooltip 显示格数、`Consumable` 之外的物品使用动画、
-  以及 `BundlePredicate` 的物品判据暂未单独接入。
+  长按倒出用 `mob-oracle <java> --only bundle_use` 验证：3 个场景（长按满 200 刻、
+  选中一整堆、空袋），263 个逐刻快照（含初始状态），0 不一致。比较使用倒计时、袋内物品和选中下标、
+  掉落物生成状态，以及使用者与旁观者各自收到的音效 / 槽位包字节。该对拍隔离物品使用阶段，
+  不覆盖完整服务器刻中的容器广播时点、实体跟踪包或挥手动画。
+  **已知限制**：收纳袋的 /tooltip 显示格数（`BundleItem.getTooltipImage`）、`Consumable`
+  之外的物品使用动画、以及 `BundlePredicate` 的物品判据暂未单独接入；长按倒出的掉落物暂不记录原版 `Thrower`，也不记
+  `ITEM_DROPPED` / `DROP`。选中下标挂在物品堆上、
+  复制时两份带同一个下标、不进存档和网络这几条**和官方一致**，不是限制：官方
+  `BundleContents.selectedItem` 是组件字段，`CODEC` / `STREAM_CODEC` 只编解码 `items`、
+  `equals` / `hashCode` 也只比 `items`，`asMutable` / `Mutable.toImmutable` 把下标带进带出，
+  `ItemStack.copy` 的 `components.copy()` 共享这份不可变组件，复制品因此带同一个下标。
 - 物品的数据组件能完整解码和编码：122 种组件每种一个类型，格式照官方每一种的 `StreamCodec`，
   包括文本组件（线上是 NBT）、`Holder` 和 `HolderSet`、方块谓词、嵌套的物品堆（容器、收纳袋、
   弩的弹药）和带 NBT 的组件。NBT 也补齐了解码，带官方的配额和深度上限。

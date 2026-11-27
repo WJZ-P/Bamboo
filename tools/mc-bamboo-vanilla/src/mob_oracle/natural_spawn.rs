@@ -261,7 +261,12 @@ impl Coverage {
         // 焦骸：夜里看得见天必须刷，白天 / 没天 / 和平必须不刷。
         // Parched: open sky at night must spawn; day, no sky and peaceful must not.
         for name in ["parched_day", "parched_no_sky", "parched_peaceful"] {
-            if self.per_scene.get(name) != Some(&0) {
+            if self
+                .per_scene
+                .keys()
+                .any(|scene| scene.starts_with("parched_"))
+                && self.per_scene.get(name) != Some(&0)
+            {
                 return Err(format!(
                     "natural spawn fixture {name} must not spawn parched"
                 ));
