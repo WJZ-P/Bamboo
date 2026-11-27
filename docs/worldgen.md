@@ -677,7 +677,11 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
 来源增量，按完工组装的优先级逆序覆盖，不复制标记和实体；邻接 LIGHT 任务按地形快照
 身份共享这些完整方块层，再交给 `generate_light_from_layers`。两格外来源溢进邻居的
 方块也参与光照；`isLightOn=true` 交付后不依赖运行时补算。缓存不会缩小 FEATURES
-依赖或改变交付内容，详见 `performance-optimizations.md` §31。
+依赖或改变交付内容，详见 `performance-optimizations.md` §31。该精确路径默认开启、
+没有 `light-local` 放宽开关；几何范围仍是 13×13 地物中心 / 15×15 地形，省的是
+重复物化。三轮交替配对实测（2026-11-28）进程 CPU 1／4／8 线程分别
+−11.95%／−9.49%／−11.56%，池 CPU −12.55%／−9.96%／−10.84%，
+`feature_run_calls` 降约 74%；见 `performance-optimizations.md` §31。
 
 `light-pipeline` 是新增的整块对拍：`ChunkgenOracle.java --light-pipeline` 在 JVM 里让
 5×5 个来源中心各自在干净 3×3 上跑官方 FEATURES，按游戏固定先后反向合并成中心 3×3，
@@ -1106,9 +1110,9 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
   天空光 / 方块光，完工装进交付盒子并标 `isLightOn=true`，不再等运行时光照引擎补算；
   `gen-light` 对拍逐格 0 不一致。输入也已对齐：`generate_light_stage_with_input`
   按完工组装的来源优先级，把全部 9 个来源中心的 FEATURES 写折进 3×3，邻接任务
-  共享物化后的层，再交给光引擎；`light-pipeline` 整块对拍（带结构 /
-  不带结构）逐格证明流水线挑的方块与官方 LIGHT 一致，`--break-carvers` 改坏确认
-  会把输入退回 CARVERS 并报差异。
+  共享物化后的层，再交给光引擎；正式路径默认开启、没有放宽开关，几何范围不变。
+  `light-pipeline` 整块对拍（带结构 / 不带结构）逐格证明流水线挑的方块与官方
+  LIGHT 一致，`--break-carvers` 改坏确认会把输入退回 CARVERS 并报 5147 处差异。
 * 生成期刷怪已接入：官方 `ChunkStatusTasks.generateSpawn` →
   `ChunkGenerator.spawnOriginalMobs` → `NaturalSpawner.spawnMobsForChunkGeneration`
   用群系 `CREATURE` 加权表、环境属性和 `SpawnPlacements` 放动物；Bamboo 在世界线程
