@@ -438,7 +438,9 @@ impl StartupData {
         // `raids.dat` is dimension-wide: only the home island loads it at
         // startup; other islands get their raids from a later split.
         region.raids = self.raids.clone();
-        region.maps = self.maps.clone();
+        // 地图索引与地图数据全服一份，权威副本放在 `Global`，随 `GlobalView` 发布给各岛。
+        // Map index and data are server-wide on `Global`, published to every island via `GlobalView`.
+        global.set_maps(self.maps.clone());
         global.publish(region);
     }
 }

@@ -477,15 +477,6 @@ impl World {
             .collect()
     }
 
-    /// 存盘时把各停放岛的 `MapStore` 汇总成一份，对应 `data/minecraft/maps/*.dat`。
-    ///
-    /// Merge every parked island's `MapStore` for saving `data/minecraft/maps/*.dat`.
-    pub(super) fn map_store_for_save(&self) -> crate::map::MapStore {
-        crate::map::MapStore::merge_for_save(
-            self.islands.parked().map(|island| &island.region.maps),
-        )
-    }
-
     /// 创建一个空世界。`config` 的视距超出合法范围时取最接近的值。
     pub fn new(config: WorldConfig, inbox: InboundReceiver) -> Self {
         Self::with_service_keys(config, inbox, secure_chat::empty_keys())
@@ -2662,15 +2653,9 @@ impl World {
             .snapshot_all_dirty(&mut self.islands.all_mut(), self.master.director_tick);
         self.save_all_players();
         let raid_tables = self.raid_tables();
-        let map_store = self.map_store_for_save();
         let master = &mut self.master;
         let files = master.save.as_mut().map(|save| {
-            save.encode_saves(
-                &master.global,
-                &raid_tables,
-                &map_store,
-                crate::admin::now_millis(),
-            )
+            save.encode_saves(&master.global, &raid_tables, crate::admin::now_millis())
         });
         let encoded = match files {
             Some(Ok(files)) => {
@@ -3174,7 +3159,25 @@ impl World {
                 sequence,
                 yaw,
                 pitch,
-            } => interaction::on_use_item(region, player, hand, sequence, (yaw, pitch)),
+            } => {
+                let holding_empty_map = region
+                    .players
+                    .get(&player)
+                    .is_some_and(|p| p.inventory.held(hand).item == mc_bamboo_data::items::MAP);
+                if holding_empty_map {
+                    interaction::on_use_item_with_maps(
+                        region,
+                        Some(self.master.global.maps_mut()),
+                        player,
+                        hand,
+                        sequence,
+                        (yaw, pitch),
+                    );
+                    self.publish_global();
+                } else {
+                    interaction::on_use_item(region, player, hand, sequence, (yaw, pitch));
+                }
+            }
             PlayRequest::ContainerClick {
                 container_id,
                 state_id,
@@ -3183,10 +3186,9 @@ impl World {
                 input,
                 changed_slots,
                 carried,
-            } => menu::on_click(
-                region,
-                player,
-                menu::ClickPacket {
+            } => {
+                let is_cartography = menu::is_cartography_open(region, player, container_id);
+                let packet = menu::ClickPacket {
                     container_id,
                     state_id,
                     slot,
@@ -3194,8 +3196,19 @@ impl World {
                     input,
                     changed_slots,
                     carried,
-                },
-            ),
+                };
+                if is_cartography {
+                    menu::on_click_with_maps(
+                        region,
+                        Some(self.master.global.maps_mut()),
+                        player,
+                        packet,
+                    );
+                    self.publish_global();
+                } else {
+                    menu::on_click(region, player, packet);
+                }
+            }
             PlayRequest::SelectTrade { slot } => menu::on_select_trade(region, player, slot),
             PlayRequest::SetBeacon { primary, secondary } => {
                 menu::on_set_beacon(region, player, primary, secondary);
@@ -3391,7 +3404,12 @@ impl World {
             return;
         }
         let effects = std::mem::take(&mut island.effects);
-        self.on_master(id, Borrow::All, |global, region| {
+        let borrow = if effects.iter().any(GlobalEffect::needs_other_players) {
+            Borrow::All
+        } else {
+            Borrow::PlayersOf(Vec::new())
+        };
+        self.on_master(id, borrow, |global, region| {
             crate::global_port::apply_all(global, region, effects);
         });
     }
@@ -3498,15 +3516,9 @@ impl World {
         self.master.host.set_saves_enabled(true);
         self.save_all_players();
         let raid_tables = self.raid_tables();
-        let map_store = self.map_store_for_save();
         let master = &mut self.master;
         let files = master.save.as_mut().map(|save| {
-            save.encode_saves(
-                &master.global,
-                &raid_tables,
-                &map_store,
-                crate::admin::now_millis(),
-            )
+            save.encode_saves(&master.global, &raid_tables, crate::admin::now_millis())
         });
         match files {
             Some(Ok(files)) => self.master.host.submit_file_writes(files),
@@ -3557,15 +3569,9 @@ impl World {
         }
         self.master.host.set_saves_enabled(true);
         let raid_tables = self.raid_tables();
-        let map_store = self.map_store_for_save();
         let master = &mut self.master;
         let files = master.save.as_mut().map(|save| {
-            save.encode_saves(
-                &master.global,
-                &raid_tables,
-                &map_store,
-                crate::admin::now_millis(),
-            )
+            save.encode_saves(&master.global, &raid_tables, crate::admin::now_millis())
         });
         match files {
             Some(Ok(files)) => self.master.host.submit_file_writes(files),
@@ -3833,14 +3839,20 @@ fn run_island_simulation(
     }
     // `ServerPlayer.doTick` 每刻推进 `sleepCounter`；主控在交回后读这份计数。
     crate::sleep::tick_sleep_counters(&mut island.region);
-    let region = &mut island.region;
-    region.profiler.lap(Phase::PlayerMisc);
-    // 官方玩家 tick 里的地图同步：手持 / 观察地图的玩家标记、逐列采样与
-    // `ClientboundMapItemDataPacket`，以及物品展示框每 10 刻的广播。
-    // Map sync from the player tick: player markers, column sampling, map data
-    // packets, and the 10-tick item-frame broadcast.
-    crate::map::tick(region);
+    island.region.profiler.lap(Phase::PlayerMisc);
+    // 官方玩家 tick 里的地图同步：岛侧逐列采样与失效展示框检测，结果经 `GlobalPort`
+    // 交给主控写权威 `MapStore` 并发 `ClientboundMapItemDataPacket`。
+    // Map sync from the player tick: island samples unlocked color deltas and
+    // checks stale frames, submitting the delta through `GlobalPort`.
+    {
+        let mut port = match (port_mode, global.as_deref_mut()) {
+            (PortMode::Direct, Some(global)) => GlobalPort::Direct(global),
+            _ => GlobalPort::Queued(&mut island.effects),
+        };
+        crate::map::tick(&mut port, &mut island.region);
+    }
 
+    let region = &mut island.region;
     // `ServerPlayer.handleShoulderEntities`：离肩条件在派生状态之前跑，元数据能看到清空。
     crate::player_shoulder::tick(region);
     entity_sync::update_derived_state(region);
@@ -3856,7 +3868,14 @@ fn run_island_simulation(
     // sent to the player and all observers. After sync_entities so newly
     // paired observers are already in seen_by.
     crate::player_attributes::sync_dirty(region);
-    entity_tracking::sync(region);
+    {
+        let mut port = match (port_mode, global.as_deref_mut()) {
+            (PortMode::Direct, Some(global)) => GlobalPort::Direct(global),
+            _ => GlobalPort::Queued(&mut island.effects),
+        };
+        entity_tracking::sync_with_port(&mut port, &mut island.region);
+    }
+    let region = &mut island.region;
     entity_sync::send_equipment_changes(region);
     interaction::send_block_changed_acks(region);
     if let Some(global) = global

@@ -253,7 +253,7 @@ mod tests {
 
         // 创建 map 0 (scale=0, center=(0,0))，画一个像素并挂一个展示框标记。
         let mut map0 = create_map(
-            &mut region.maps,
+            std::sync::Arc::make_mut(&mut region.global.maps),
             0,
             0,
             0,
@@ -263,7 +263,9 @@ mod tests {
         );
         map0.count = 4;
         {
-            let d0 = region.maps.get_mut(0).unwrap();
+            let d0 = std::sync::Arc::make_mut(&mut region.global.maps)
+                .get_mut(0)
+                .unwrap();
             d0.set_color(3, 4, packed_color(map_color::STONE, Brightness::High));
             d0.set_frame_marker(BlockPos::new(0, 64, 0), 90, 77, Some(100));
         }
@@ -325,7 +327,7 @@ mod tests {
             .carried;
         assert_eq!(stack_map_id(&carried), Some(1));
         assert!(!has_post_processing(&carried));
-        let d1 = region.maps.get(1).expect("scaled map 1 created");
+        let d1 = region.global.maps.get(1).expect("scaled map 1 created");
         assert_eq!(
             (d1.scale, d1.center_x, d1.center_z, d1.locked),
             (1, 64, 64, false)
@@ -342,7 +344,15 @@ mod tests {
         click(&mut region, p_id, cid, 2, 0, ContainerInput::QuickMove);
         region.links.flush();
         for new_id in [2, 3, 4] {
-            assert_eq!(region.maps.get(new_id).expect("shift-scaled map").scale, 1);
+            assert_eq!(
+                region
+                    .global
+                    .maps
+                    .get(new_id)
+                    .expect("shift-scaled map")
+                    .scale,
+                1
+            );
             let found = region.players[&p_id]
                 .inventory
                 .slots
@@ -392,7 +402,7 @@ mod tests {
             .carried;
         assert_eq!(stack_map_id(&locked_stack), Some(5));
         assert!(!has_post_processing(&locked_stack));
-        let d5 = region.maps.get(5).expect("locked map 5 created");
+        let d5 = region.global.maps.get(5).expect("locked map 5 created");
         assert!(d5.locked);
         assert_eq!(
             d5.colors[3 + 4 * 128],
@@ -426,7 +436,7 @@ mod tests {
         assert_eq!(copy_preview.count, 2);
         assert_eq!(stack_map_id(&copy_preview), Some(5));
         assert!(!has_post_processing(&copy_preview));
-        let last_id_before = region.maps.index.last_map_id;
+        let last_id_before = region.global.maps.index.last_map_id;
         click(&mut region, p_id, cid, 2, 0, ContainerInput::Pickup);
         let copied = region.menus[&p_id]
             .station
@@ -436,14 +446,14 @@ mod tests {
             .carried;
         assert_eq!(copied.count, 2);
         assert_eq!(stack_map_id(&copied), Some(5));
-        assert_eq!(region.maps.index.last_map_id, last_id_before);
+        assert_eq!(region.global.maps.index.last_map_id, last_id_before);
         click(&mut region, p_id, cid, 6, 0, ContainerInput::Pickup); // 放下
 
         // 6. scale=4 地图不能再放大；创造模式中键克隆（safeClone）会跑后处理并分配新 ID。
         let max_scale_data =
             MapItemSavedData::create_fresh(0.0, 0.0, 4, true, false, "minecraft:overworld");
-        let max_id = region.maps.next_map_id(); // 6
-        region.maps.insert(max_id, max_scale_data);
+        let max_id = std::sync::Arc::make_mut(&mut region.global.maps).next_map_id(); // 6
+        std::sync::Arc::make_mut(&mut region.global.maps).insert(max_id, max_scale_data);
         region.players.get_mut(&p_id).unwrap().inventory.slots[36] = make_filled_map(max_id);
         region.players.get_mut(&p_id).unwrap().inventory.slots[37] = stack(items::PAPER, 1);
         click(&mut region, p_id, cid, 1, 0, ContainerInput::QuickMove); // 退回空地图
@@ -475,6 +485,6 @@ mod tests {
         assert_eq!(stack_map_id(&cloned), Some(7));
         assert_eq!(cloned.count, 64);
         assert!(!has_post_processing(&cloned));
-        assert_eq!(region.maps.get(7).unwrap().scale, 1);
+        assert_eq!(region.global.maps.get(7).unwrap().scale, 1);
     }
 }

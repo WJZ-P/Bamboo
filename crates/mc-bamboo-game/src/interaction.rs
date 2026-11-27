@@ -1591,6 +1591,21 @@ pub(crate) fn on_use_item(
     id: PlayerId,
     hand: Hand,
     sequence: i32,
+    rotation: (f32, f32),
+) {
+    on_use_item_with_maps(region, None, id, hand, sequence, rotation);
+}
+
+/// 同 [`on_use_item`]，由主控传入权威 [`MapStore`](crate::map::MapStore) 以避免多岛地图 ID 撞号。
+///
+/// Like [`on_use_item`], passing the master's authoritative `MapStore` so map
+/// ID allocation is globally unique across islands.
+pub(crate) fn on_use_item_with_maps(
+    region: &mut Region,
+    maps: Option<&mut crate::map::MapStore>,
+    id: PlayerId,
+    hand: Hand,
+    sequence: i32,
     (yaw, pitch): (f32, f32),
 ) {
     if !record_sequence(region, id, sequence) {
@@ -1682,7 +1697,7 @@ pub(crate) fn on_use_item(
     }
     // `EmptyMapItem.use`：空地图右键创建已填充地图，返回 `SUCCESS`。
     // `EmptyMapItem.use`: create a filled map from an empty map, returning `SUCCESS`.
-    if crate::map::use_empty_map(region, id, hand) {
+    if crate::map::use_empty_map(region, maps, id, hand) {
         swing(region, id, hand, InteractionResult::Success);
         return;
     }
@@ -2033,6 +2048,7 @@ pub(crate) fn on_interact_entity_at(
             if frame_empty
                 && let Some(map_id) = crate::map::stack_map_id(&held)
                 && region
+                    .global
                     .maps
                     .get(map_id)
                     .is_some_and(|data| data.is_tracked_count_over_limit(256))

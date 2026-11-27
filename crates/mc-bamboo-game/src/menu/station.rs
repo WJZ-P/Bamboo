@@ -521,6 +521,10 @@ impl Station {
         }
     }
 
+    pub(crate) fn is_in_world_cartography(&self) -> bool {
+        self.kind == Kind::Cartography && self.in_world
+    }
+
     fn from_player(player: &Player) -> Self {
         let mut station = Self::create(Kind::Inventory, 0, BlockPos::new(0, 0, 0));
         station.creative = player.game_mode == GameMode::Creative;
@@ -3165,7 +3169,13 @@ fn roll_grindstone(region: &mut Region, station: &mut Station) {
     crate::interaction::send_effects(region, None, &effects);
 }
 
-fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet: &ClickPacket) {
+fn apply_click(
+    region: &mut Region,
+    maps: Option<&mut crate::map::MapStore>,
+    id: PlayerId,
+    station: &mut Station,
+    packet: &ClickPacket,
+) {
     let (creative, experience_level, selected, inv) = {
         let Some(player) = region.players.get(&id) else {
             return;
@@ -3184,8 +3194,13 @@ fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet:
         station.bookshelves = refresh_bookshelves(region, station.pos);
     }
     pull_machine(region, station);
+    let mut maps = maps;
     if station.kind == Kind::Cartography && station.in_world {
-        station.world_maps = Some(std::mem::take(&mut region.maps));
+        let store = match maps.as_deref_mut() {
+            Some(store) => store,
+            None => std::sync::Arc::make_mut(&mut region.global.maps),
+        };
+        station.world_maps = Some(std::mem::take(store));
     }
     let before = station.state_id;
     station.click(
@@ -3193,8 +3208,12 @@ fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet:
         i32::from(packet.button),
         packet.input,
     );
-    if let Some(maps) = station.world_maps.take() {
-        region.maps = maps;
+    if let Some(taken) = station.world_maps.take() {
+        let store = match maps {
+            Some(store) => store,
+            None => std::sync::Arc::make_mut(&mut region.global.maps),
+        };
+        *store = taken;
     }
     for (slot, hash) in &packet.changed_slots {
         station.receive(*slot, hash.clone());
@@ -3295,7 +3314,17 @@ pub(crate) fn try_open(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool
     true
 }
 
+#[cfg(test)]
 pub(crate) fn click_menu(region: &mut Region, id: PlayerId, packet: ClickPacket) {
+    click_menu_with_maps(region, None, id, packet);
+}
+
+pub(crate) fn click_menu_with_maps(
+    region: &mut Region,
+    maps: Option<&mut crate::map::MapStore>,
+    id: PlayerId,
+    packet: ClickPacket,
+) {
     let matches = region
         .menus
         .get(&id)
@@ -3331,7 +3360,7 @@ pub(crate) fn click_menu(region: &mut Region, id: PlayerId, packet: ClickPacket)
             let container_id = station.container_id;
             send_outgoing(region, id, container_id, packets);
         } else {
-            apply_click(region, id, station, &packet);
+            apply_click(region, maps, id, station, &packet);
             let packets = std::mem::take(&mut station.packets);
             let container_id = station.container_id;
             send_outgoing(region, id, container_id, packets);

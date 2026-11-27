@@ -1326,13 +1326,6 @@ pub(crate) enum Borrow {
     /// 只要这几名玩家所在的岛。
     ///
     /// Only the islands these players are on.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "现在每个用途都要全部岛 / every use needs all islands today"
-        )
-    )]
     PlayersOf(Vec<crate::inbound::PlayerId>),
 }
 

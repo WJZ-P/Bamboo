@@ -134,7 +134,7 @@ fn read_maps(dir: &WorldDir) -> crate::map::MapStore {
         if let Some(tag) = read_saved_data_at(&path)
             && let Some(data) = crate::map::MapItemSavedData::from_tag(&tag)
         {
-            store.maps.insert(id, data);
+            store.maps.insert(id, std::sync::Arc::new(data));
         }
     }
     store
@@ -268,7 +268,6 @@ impl SaveSession {
         &mut self,
         global: &Global,
         islands: &[(u32, mc_bamboo_blocks::entity::raid::Raids)],
-        maps: &crate::map::MapStore,
         last_played: i64,
     ) -> io::Result<Vec<EncodedFile>> {
         crate::save_data::sync_level_data(
@@ -360,6 +359,7 @@ impl SaveSession {
         // Official 26.3: `MapIndex.TYPE` writes `data/minecraft/maps/last_id.dat`
         // and each map writes `data/minecraft/maps/<id>.dat`. Fresh worlds with
         // no maps omit `last_id.dat` (Item 10).
+        let maps = global.maps();
         if maps.index.last_map_id >= 0 || maps.index.dirty {
             files.push(EncodedFile {
                 path: self.dir.saved_data("minecraft:maps/last_id"),
@@ -386,7 +386,7 @@ impl SaveSession {
     /// Test-only: write `encode_saves` bytes synchronously, standing in for the IO thread.
     #[cfg(test)]
     pub(crate) fn save_all(&mut self, global: &Global, last_played: i64) -> io::Result<()> {
-        for file in self.encode_saves(global, &[], &crate::map::MapStore::new(), last_played)? {
+        for file in self.encode_saves(global, &[], last_played)? {
             mc_bamboo_storage::world_dir::safe_replace(
                 &file.path,
                 &file.bytes,
@@ -495,9 +495,7 @@ mod tests {
         let (mut session, _) = SaveSession::open(&tmp.0).unwrap();
         assert!(!session.dir().level_dat().exists());
         let global = Global::default();
-        let files = session
-            .encode_saves(&global, &[], &crate::map::MapStore::new(), 777)
-            .unwrap();
+        let files = session.encode_saves(&global, &[], 777).unwrap();
         assert!(
             files
                 .iter()
@@ -758,7 +756,7 @@ mod tests {
     #[test]
     fn maps_and_last_id_round_trip_through_save_session() {
         let tmp = TempDir::new("maps-roundtrip");
-        let global = Global::default();
+        let mut global = Global::default();
         let mut store = crate::map::MapStore::new();
         let id0 = store.next_map_id();
         let mut data0 = crate::map::MapItemSavedData::create_fresh(
@@ -778,10 +776,11 @@ mod tests {
         let id1 = store.next_map_id();
         let data1 = data0.locked();
         store.insert(id1, data1.clone());
+        global.set_maps(store);
 
         {
             let (mut session, _) = SaveSession::open(&tmp.0).unwrap();
-            let files = session.encode_saves(&global, &[], &store, 123).unwrap();
+            let files = session.encode_saves(&global, &[], 123).unwrap();
             for file in files {
                 mc_bamboo_storage::world_dir::safe_replace(
                     &file.path,
@@ -802,14 +801,15 @@ mod tests {
         session
             .startup()
             .apply(&mut restored_global, &mut region, session.level().time);
-        assert_eq!(region.maps.index.last_map_id, 1);
-        let r0 = region.maps.get(0).expect("map 0 loaded");
+        assert_eq!(restored_global.maps().index.last_map_id, 1);
+        assert_eq!(region.global.maps.index.last_map_id, 1);
+        let r0 = restored_global.maps().get(0).expect("map 0 loaded");
         assert_eq!(r0.center_x, data0.center_x);
         assert_eq!(r0.center_z, data0.center_z);
         assert_eq!(r0.scale, 1);
         assert!(!r0.locked);
         assert_eq!(r0.colors, data0.colors);
-        let r1 = region.maps.get(1).expect("map 1 loaded");
+        let r1 = restored_global.maps().get(1).expect("map 1 loaded");
         assert!(r1.locked);
         assert_eq!(r1.colors, data1.colors);
     }

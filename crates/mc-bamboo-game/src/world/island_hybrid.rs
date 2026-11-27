@@ -1183,15 +1183,9 @@ impl World {
         // Autosave like official autoSave: enqueue only, never join or block.
         self.save_all_players();
         let raid_tables = self.raid_tables();
-        let map_store = self.map_store_for_save();
         let master = &mut self.master;
         let files = master.save.as_mut().map(|save| {
-            save.encode_saves(
-                &master.global,
-                &raid_tables,
-                &map_store,
-                crate::admin::now_millis(),
-            )
+            save.encode_saves(&master.global, &raid_tables, crate::admin::now_millis())
         });
         match files {
             Some(Ok(files)) => self.master.host.submit_file_writes(files),

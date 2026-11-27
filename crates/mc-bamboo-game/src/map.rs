@@ -8,7 +8,10 @@
 //! Map data, index, and persistence matching vanilla 26.3 (`MapIndex`,
 //! `MapItemSavedData`, `MapBanner`, `MapFrame`, `HoldingPlayer`, `MapPatch`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use mc_bamboo_blocks::{
     BlockState, SupportType, World as BlockWorld,
@@ -29,7 +32,12 @@ use mc_bamboo_protocol::{
 };
 use mc_bamboo_world::{MIN_Y, store::ChunkStore};
 
-use crate::{inbound::PlayerId, region::Region};
+use crate::{
+    global::Global,
+    global_port::{GlobalEffect, GlobalPort},
+    inbound::PlayerId,
+    region::Region,
+};
 
 /// 地图宽 / 高（像素数），官方 `MapItemSavedData.MAP_SIZE`。
 pub const MAP_SIZE: usize = 128;
@@ -563,6 +571,16 @@ impl MapItemSavedData {
         }
     }
 
+    /// 读取玩家当前的采样步数（未登记时为 0）。
+    ///
+    /// Current sampling step for this player (0 if not yet tracked).
+    pub(crate) fn holding_player_step(&self, player: PlayerId) -> i32 {
+        self.carried_by
+            .iter()
+            .find(|h| h.player == player)
+            .map_or(0, |h| h.step)
+    }
+
     /// 官方 `MapItemSavedData.getHoldingPlayer(player)`。
     pub fn holding_player_mut(&mut self, player: PlayerId) -> &mut HoldingPlayer {
         if let Some(pos) = self.carried_by.iter().position(|h| h.player == player) {
@@ -1027,13 +1045,14 @@ impl MapIndex {
     }
 }
 
-/// 地图索引与所有已加载地图的集合。
+/// 地图索引与所有已加载地图的集合（全服一份，存在 [`Global`] 上，每张地图按 `Arc` 独立写时复制）。
 ///
-/// Container holding the [`MapIndex`] and all loaded [`MapItemSavedData`] entries.
+/// Server-wide container holding [`MapIndex`] and all loaded [`MapItemSavedData`]
+/// entries (lives on [`Global`], with per-map copy-on-write via `Arc`).
 #[derive(Debug, Clone, Default)]
 pub struct MapStore {
     pub index: MapIndex,
-    pub maps: BTreeMap<i32, MapItemSavedData>,
+    pub maps: BTreeMap<i32, Arc<MapItemSavedData>>,
 }
 
 impl MapStore {
@@ -1041,12 +1060,16 @@ impl MapStore {
         Self::default()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.maps.is_empty()
+    }
+
     pub fn get(&self, id: i32) -> Option<&MapItemSavedData> {
-        self.maps.get(&id)
+        self.maps.get(&id).map(Arc::as_ref)
     }
 
     pub fn get_mut(&mut self, id: i32) -> Option<&mut MapItemSavedData> {
-        self.maps.get_mut(&id)
+        self.maps.get_mut(&id).map(Arc::make_mut)
     }
 
     /// 分配一个新地图 ID（`ServerLevel.getFreeMapId`）。
@@ -1057,55 +1080,31 @@ impl MapStore {
     /// 写入或替换一份地图数据（`ServerLevel.setMapData`）。
     pub fn insert(&mut self, id: i32, mut data: MapItemSavedData) {
         data.dirty = true;
-        self.maps.insert(id, data);
+        self.maps.insert(id, Arc::new(data));
     }
 
-    /// 拆岛时把中心落在目标岛的地图搬过去，两边各自继承当前 `last_map_id`。
-    pub(crate) fn split_off(&mut self, mut inside: impl FnMut(&BlockPos) -> bool) -> Self {
-        let mut out = Self {
-            index: MapIndex::new(self.index.last_map_id),
-            maps: BTreeMap::new(),
-        };
-        let moved: Vec<i32> = self
+    /// 玩家离线时从所有地图的 `carried_by` 与玩家标记中移除，仅在命中的地图上触发写时复制。
+    ///
+    /// Remove a departing player from `carried_by` and player decorations across
+    /// all maps, touching only maps that reference them.
+    pub(crate) fn on_player_leave(&mut self, player: PlayerId, name: Option<&str>) {
+        let affected: Vec<i32> = self
             .maps
             .iter()
             .filter_map(|(&id, data)| {
-                let center = BlockPos::new(data.center_x, 0, data.center_z);
-                inside(&center).then_some(id)
+                let has_holder = data.carried_by.iter().any(|h| h.player == player);
+                let has_dec = name.is_some_and(|n| data.decorations.iter().any(|(k, _)| k == n));
+                (has_holder || has_dec).then_some(id)
             })
             .collect();
-        for id in moved {
-            if let Some(data) = self.maps.remove(&id) {
-                out.maps.insert(id, data);
+        for id in affected {
+            if let Some(data) = self.get_mut(id) {
+                data.carried_by.retain(|h| h.player != player);
+                if let Some(name) = name {
+                    data.remove_decoration(name);
+                }
             }
         }
-        out
-    }
-
-    /// 合岛时吸收另一座岛的地图表。
-    pub(crate) fn absorb(&mut self, other: Self) {
-        if other.index.last_map_id > self.index.last_map_id {
-            self.index.last_map_id = other.index.last_map_id;
-        }
-        self.index.dirty |= other.index.dirty;
-        for (id, data) in other.maps {
-            self.maps.insert(id, data);
-        }
-    }
-
-    /// 存盘时把各停放岛的 `MapStore` 汇总成一份。
-    pub(crate) fn merge_for_save<'a>(stores: impl IntoIterator<Item = &'a Self>) -> Self {
-        let mut merged = Self::default();
-        for store in stores {
-            if store.index.last_map_id > merged.index.last_map_id {
-                merged.index.last_map_id = store.index.last_map_id;
-            }
-            merged.index.dirty |= store.index.dirty;
-            for (&id, data) in &store.maps {
-                merged.maps.insert(id, data.clone());
-            }
-        }
-        merged
     }
 }
 
@@ -1177,7 +1176,12 @@ pub fn create_map(
 /// Official `EmptyMapItem.use`: consume one empty map (non-creative), award
 /// `ITEM_USED`, play `ui.cartography_table.take_result`, create the filled map,
 /// and replace the empty hand or add/drop into inventory.
-pub(crate) fn use_empty_map(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
+pub(crate) fn use_empty_map(
+    region: &mut Region,
+    maps: Option<&mut MapStore>,
+    id: PlayerId,
+    hand: Hand,
+) -> bool {
     let Some((held, creative, pos)) = region.players.get(&id).map(|player| {
         (
             player.inventory.held(hand).clone(),
@@ -1235,8 +1239,12 @@ pub(crate) fn use_empty_map(region: &mut Region, id: PlayerId, hand: Hand) -> bo
     // 4. `MapItem.create(serverLevel, player.getBlockX(), player.getBlockZ(), 0, true, false)`
     let block_x = pos.x.floor() as i32;
     let block_z = pos.z.floor() as i32;
+    let store = match maps {
+        Some(store) => store,
+        None => Arc::make_mut(&mut region.global.maps),
+    };
     let filled = create_map(
-        &mut region.maps,
+        store,
         block_x,
         block_z,
         0,
@@ -1302,19 +1310,46 @@ pub fn update_colors(
     if dimension != data.dimension {
         return;
     }
-    let scale: i32 = 1 << data.scale;
-    let center_x = data.center_x;
-    let center_z = data.center_z;
-    // Java `Mth.floor(x - centerX) / scale + 64`：整数除法向零截断，与 Rust `/` 一致。
-    let px = (player_x - f64::from(center_x)).floor() as i32 / scale + HALF_MAP_SIZE;
-    let pz = (player_z - f64::from(center_z)).floor() as i32 / scale + HALF_MAP_SIZE;
-    let radius = 128 / scale;
-
     let step = {
         let holder = data.holding_player_mut(player);
         holder.step = holder.step.wrapping_add(1);
         holder.step
     };
+    let center_x = data.center_x;
+    let center_z = data.center_z;
+    let scale_shift = data.scale;
+    sample_colors_with_step(
+        center_x,
+        center_z,
+        scale_shift,
+        step,
+        player_x,
+        player_z,
+        chunks,
+        |x, z, color| data.update_color(x, z, color),
+    );
+}
+
+/// 按给定采样步数 `step` 对一块区域的地图颜色逐列采样，变化像素通过 `write_pixel` 写出。
+///
+/// Sample map columns for a given `step`, reporting each pixel to `write_pixel`
+/// (which returns whether the pixel color changed).
+#[allow(clippy::too_many_arguments)]
+fn sample_colors_with_step(
+    center_x: i32,
+    center_z: i32,
+    scale_shift: i8,
+    step: i32,
+    player_x: f64,
+    player_z: f64,
+    chunks: &ChunkStore,
+    mut write_pixel: impl FnMut(usize, usize, u8) -> bool,
+) {
+    let scale: i32 = 1 << scale_shift;
+    // Java `Mth.floor(x - centerX) / scale + 64`：整数除法向零截断，与 Rust `/` 一致。
+    let px = (player_x - f64::from(center_x)).floor() as i32 / scale + HALF_MAP_SIZE;
+    let pz = (player_z - f64::from(center_z)).floor() as i32 / scale + HALF_MAP_SIZE;
+    let radius = 128 / scale;
 
     let mut changed = false;
     let scale_sq = scale * scale;
@@ -1435,8 +1470,7 @@ pub fn update_colors(
             if z < 0 || dist_sq >= radius_sq || (dither_edge && ((x + z) & 1) == 0) {
                 continue;
             }
-            changed |=
-                data.update_color(x as usize, z as usize, packed_color(best_color, brightness));
+            changed |= write_pixel(x as usize, z as usize, packed_color(best_color, brightness));
         }
     }
 }
@@ -1451,62 +1485,167 @@ fn player_holds_map(player: &crate::player::Player, map_id: i32) -> bool {
         .any(|stack| stack.item == items::FILLED_MAP && stack_map_id(stack) == Some(map_id))
 }
 
-/// 官方 `ServerEntity.sendChanges` 里物品展示框每 10 刻（按实体自身的 `ServerEntity.tickCount`，
-/// 从创建时的 0 开始计数）触发的地图广播：对维度内每名玩家先 `tickCarriedBy(player, stack, frame)`
-/// 再 `getUpdatePacket` 发包。
+/// 一名玩家在本刻持有的地图快照，作为 [`MapTickEffect`] 的一部分交回主控。
 ///
-/// Official `ServerEntity.sendChanges` 10-tick framed-map broadcast driven by the
-/// entity's own `ServerEntity.tickCount` (starting at 0 on creation): calls
-/// `tickCarriedBy(player, stack, frame)` and sends `getUpdatePacket` for every
-/// player in the dimension.
-pub(crate) fn tick_framed_map(
+/// One player's carried-map snapshot handed to the master inside [`MapTickEffect`].
+pub(crate) struct PlayerMapTick {
+    pub(crate) id: PlayerId,
+    pub(crate) name: String,
+    pub(crate) x: f64,
+    pub(crate) z: f64,
+    pub(crate) yaw: f64,
+    pub(crate) maps: Vec<i32>,
+}
+
+/// 一张地图在本刻采样出的像素颜色增量。
+///
+/// Per-map pixel color changes sampled during one island tick.
+pub(crate) struct MapColorDelta {
+    pub(crate) map_id: i32,
+    pub(crate) pixels: Vec<(u8, u8, u8)>,
+}
+
+/// 岛在一刻里算好的地图同步增量，经 [`GlobalPort`] 交给主控写权威 [`MapStore`] 并发包。
+///
+/// Per-tick map sync delta computed on an island and applied to the authoritative
+/// [`MapStore`] on the master through [`GlobalPort`].
+pub(crate) struct MapTickEffect {
+    pub(crate) game_time: i64,
+    pub(crate) dimension: &'static str,
+    pub(crate) stale_frames: Vec<(i32, BlockPos, i32)>,
+    pub(crate) framed_map_ids: BTreeSet<i32>,
+    pub(crate) island_players: BTreeMap<PlayerId, String>,
+    pub(crate) player_ticks: Vec<PlayerMapTick>,
+    pub(crate) step_updates: Vec<(PlayerId, i32, i32)>,
+    pub(crate) color_updates: Vec<MapColorDelta>,
+}
+
+/// 物品展示框在 `ServerEntity.tickCount % 10 == 0` 时产生的广播请求，经 [`GlobalPort`]
+/// 交给主控写展示框标记并给本岛玩家发地图包。
+///
+/// Framed-map 10-tick broadcast request sent through [`GlobalPort`] to update
+/// the frame marker on [`Global`] and emit map packets to this island's players.
+pub(crate) struct FramedMapTickEffect {
+    pub(crate) map_id: i32,
+    pub(crate) entity_id: i32,
+    pub(crate) pos: BlockPos,
+    pub(crate) rotation: i32,
+    pub(crate) game_time: i64,
+    pub(crate) island_players: Vec<PlayerId>,
+}
+
+/// 构造一条展示框地图广播效果；岛上无玩家或框内不是带 `map_id` 的地图时返回 `None`。
+///
+/// Build a [`FramedMapTickEffect`], or `None` when no players are on this island
+/// or the frame does not hold a filled map with a `map_id`.
+pub(crate) fn build_framed_map_tick(
     players: &BTreeMap<PlayerId, crate::player::Player>,
-    maps: &mut MapStore,
-    links: &mut crate::links::Links,
     entity_id: i32,
     frame: &ItemFramePublic,
     game_time: i64,
-) {
+) -> Option<FramedMapTickEffect> {
     if players.is_empty() || frame.item.item != items::FILLED_MAP {
-        return;
+        return None;
     }
-    let Some(map_id) = stack_map_id(&frame.item) else {
-        return;
-    };
-    let Some(data) = maps.get_mut(map_id) else {
-        return;
-    };
-    let rotation = frame.direction.data_2d() * 90;
-    let live_players: BTreeSet<PlayerId> = players.keys().copied().collect();
-    for player in players.values() {
-        data.ensure_holding_player(player.id);
-        if !player_holds_map(player, map_id) {
-            data.remove_decoration(&player.name);
-        }
-        // `frame != null` 时官方 `tickCarriedBy` 只清掉已离开世界的持有者，不踢非持有观察者。
-        data.carried_by.retain(|h| live_players.contains(&h.player));
-        data.set_frame_marker(frame.pos, rotation, entity_id, Some(game_time));
-        if let Some(update) = data.get_update_packet(map_id, player.id) {
-            let packet = update.as_packet();
-            links.send(player.id, &packet);
-        }
-    }
+    let map_id = stack_map_id(&frame.item)?;
+    Some(FramedMapTickEffect {
+        map_id,
+        entity_id,
+        pos: frame.pos,
+        rotation: frame.direction.data_2d() * 90,
+        game_time,
+        island_players: players.keys().copied().collect(),
+    })
 }
 
-/// 每刻的玩家地图同步：对应官方 `Player.tick` → `Inventory.tick` / `EntityEquipment.tick`
-/// 调 `MapItem.inventoryTick`（玩家标记 + 未锁定时逐列采样），以及 `ServerPlayer.doTick`
-/// 调 `synchronizeSpecialItemUpdates`（发包）。物品展示框的 10 刻广播在
-/// [`crate::entity_tracking::sync`] 里按每实体的 `ServerEntity.tickCount` 触发。
+/// 主控侧应用展示框 10 刻广播：登记展示框标记、向发起岛上的每名玩家发出脏补丁 / 标记包。
+/// 不驱逐别的岛上的在线持有者。
 ///
-/// Per-tick player map sync matching vanilla's `inventoryTick` (player markers +
-/// unlocked column sampling) and `synchronizeSpecialItemUpdates` (packets). Item
-/// frame 10-tick broadcasts run in [`crate::entity_tracking::sync`] on each
-/// frame's `ServerEntity.tickCount`.
-pub(crate) fn tick(region: &mut Region) {
+/// Master-side handler for the 10-tick framed-map broadcast: update the frame
+/// marker on the authoritative [`MapStore`] and send updates to the island's
+/// players without evicting online holders on other islands.
+pub(crate) fn apply_framed_map_tick(
+    global: &mut Global,
+    region: &mut Region,
+    effect: FramedMapTickEffect,
+) {
+    if effect.island_players.is_empty() || global.maps().get(effect.map_id).is_none() {
+        return;
+    }
+    let mut outgoing = Vec::new();
+    {
+        let online_ids: BTreeSet<PlayerId> = effect
+            .island_players
+            .iter()
+            .copied()
+            .filter(|id| region.players.contains_key(id))
+            .collect();
+        let retain_online = |player: PlayerId, global_online: &BTreeSet<PlayerId>| {
+            online_ids.contains(&player) || global_online.contains(&player)
+        };
+        let all_online: BTreeSet<PlayerId> = region
+            .players
+            .keys()
+            .copied()
+            .filter(|&id| global.is_online(id))
+            .collect();
+        // 先收集当前仍在线的全服玩家集合（避免借用冲突）：单岛 / 裸 Region 单测里
+        // `roster` 可能为空，所以与 `region.players` 并集判定在线。
+        let mut live_holders: BTreeSet<PlayerId> = all_online;
+        if let Some(existing) = global.maps().get(effect.map_id) {
+            for h in &existing.carried_by {
+                if global.is_online(h.player) {
+                    live_holders.insert(h.player);
+                }
+            }
+        }
+        let Some(data) = global.maps_mut().get_mut(effect.map_id) else {
+            return;
+        };
+        for &pid in &effect.island_players {
+            let Some(player) = region.players.get(&pid) else {
+                continue;
+            };
+            data.ensure_holding_player(player.id);
+            if !player_holds_map(player, effect.map_id) {
+                data.remove_decoration(&player.name);
+            }
+            // `frame != null` 时官方 `tickCarriedBy` 只清掉已离开世界的持有者，不踢非持有观察者。
+            data.carried_by
+                .retain(|h| retain_online(h.player, &live_holders));
+            data.set_frame_marker(
+                effect.pos,
+                effect.rotation,
+                effect.entity_id,
+                Some(effect.game_time),
+            );
+            if let Some(update) = data.get_update_packet(effect.map_id, player.id) {
+                outgoing.push((player.id, update));
+            }
+        }
+    }
+    for (player, update) in &outgoing {
+        let packet = update.as_packet();
+        region.links.send(*player, &packet);
+    }
+    global.publish(region);
+}
+
+/// 每刻的玩家地图同步（岛侧）：在本地区块上核销失效展示框、逐列采样未锁定地图的颜色增量，
+/// 并把结果做成 [`GlobalEffect::MapTick`] 经 [`GlobalPort`] 交给主控写权威 [`MapStore`] 并发包。
+/// 单岛齐步（`PortMode::Direct`）下当场应用并发包，与官方逐位一致；多岛分离下交回主控时合并。
+///
+/// Island-side per-tick map sync: detect stale frame markers in local chunks,
+/// sample unlocked held-map color deltas locally, and submit a
+/// [`GlobalEffect::MapTick`] through [`GlobalPort`].
+pub(crate) fn tick(port: &mut GlobalPort<'_>, region: &mut Region) {
+    if region.global.maps.is_empty() {
+        return;
+    }
     let game_time = region.tick.game_time();
     let dimension = crate::region::DIMENSION;
 
-    // 1. 收集当前仍装着地图的展示框，立即核销已移除/已取出的展示框标记（等价 `ItemFrame.dropItem` / `onKilled`）。
+    // 1. 收集本岛仍装着地图的展示框，找出本岛已加载区块中已移除/已取出的展示框标记。
     let mut framed_maps: BTreeMap<i32, BTreeSet<i32>> = BTreeMap::new();
     for public in region.entities.iter_public() {
         if public.removed {
@@ -1522,35 +1661,47 @@ pub(crate) fn tick(region: &mut Region) {
             framed_maps.entry(map_id).or_default().insert(public.uid);
         }
     }
-    {
-        let empty_ids = BTreeSet::new();
-        for (&map_id, data) in region.maps.maps.iter_mut() {
-            let live = framed_maps.get(&map_id).unwrap_or(&empty_ids);
-            data.reconcile_frame_markers(live, &region.chunks);
+    let mut stale_frames: Vec<(i32, BlockPos, i32)> = Vec::new();
+    let empty_ids = BTreeSet::new();
+    for (&map_id, data) in &region.global.maps.maps {
+        let live = framed_maps.get(&map_id).unwrap_or(&empty_ids);
+        for frame in data.frame_markers.values() {
+            if region
+                .chunks
+                .is_loaded(ChunkPos::new(frame.pos.x >> 4, frame.pos.z >> 4))
+                && !live.contains(&frame.entity_id)
+            {
+                stale_frames.push((map_id, frame.pos, frame.entity_id));
+            }
         }
     }
 
     if region.players.is_empty() {
+        if !stale_frames.is_empty() {
+            port.submit(
+                region,
+                GlobalEffect::MapTick(MapTickEffect {
+                    game_time,
+                    dimension,
+                    stale_frames,
+                    framed_map_ids: framed_maps.into_keys().collect(),
+                    island_players: BTreeMap::new(),
+                    player_ticks: Vec::new(),
+                    step_updates: Vec::new(),
+                    color_updates: Vec::new(),
+                }),
+            );
+        }
         return;
     }
 
-    struct PlayerMaps {
-        id: PlayerId,
-        name: String,
-        x: f64,
-        z: f64,
-        yaw: f64,
-        maps: Vec<i32>,
-        hand_maps: Vec<i32>,
-    }
+    let mut island_players: BTreeMap<PlayerId, String> = BTreeMap::new();
+    let mut player_ticks: Vec<PlayerMapTick> = Vec::new();
+    let mut hand_samples: Vec<(PlayerId, f64, f64, Vec<i32>)> = Vec::new();
+    let mut any_carried = false;
 
-    let mut players: Vec<PlayerMaps> = Vec::new();
-    let mut names: BTreeMap<PlayerId, String> = BTreeMap::new();
-    let mut carriers: BTreeMap<i32, BTreeSet<PlayerId>> = BTreeMap::new();
-    let mut online: BTreeSet<PlayerId> = BTreeSet::new();
     for player in region.players.values() {
         let id = player.id;
-        online.insert(id);
         let pos = player.position();
         let main_hand = player.inventory.hand_slot(Hand::Main);
         let off_hand = player.inventory.hand_slot(Hand::Off);
@@ -1570,67 +1721,244 @@ pub(crate) fn tick(region: &mut Region) {
         }
         maps.sort_unstable();
         maps.dedup();
-        for &map_id in &maps {
-            carriers.entry(map_id).or_default().insert(id);
+        if !maps.is_empty() {
+            any_carried = true;
         }
-        names.insert(id, player.name.clone());
-        players.push(PlayerMaps {
+        island_players.insert(id, player.name.clone());
+        if !hand_maps.is_empty() {
+            hand_samples.push((id, pos.x, pos.z, hand_maps));
+        }
+        player_ticks.push(PlayerMapTick {
             id,
             name: player.name.clone(),
             x: pos.x,
             z: pos.z,
             yaw: f64::from(player.yaw),
             maps,
-            hand_maps,
         });
     }
 
-    let maps = &mut region.maps;
-    let chunks = &region.chunks;
-    let links = &mut region.links;
+    // 快速跳过：没有失效展示框、没人携带地图、且没有地图追踪到本岛玩家时，不产生任何效果。
+    if stale_frames.is_empty() && !any_carried {
+        let any_tracked_here = region.global.maps.maps.values().any(|data| {
+            data.carried_by
+                .iter()
+                .any(|h| island_players.contains_key(&h.player))
+                || data
+                    .decorations
+                    .iter()
+                    .any(|(k, _)| island_players.values().any(|name| name == k))
+        });
+        if !any_tracked_here {
+            return;
+        }
+    }
 
-    // 2. 玩家标记 + 逐列采样（官方 `MapItem.inventoryTick`）。锁定的地图不采样。
-    for p in &players {
+    // 2. 在本岛区块上跑逐列颜色采样，产出增量像素与步数更新。
+    //    同一刻多名玩家或主副手同时拿同一张图时共用本地 colors 缓冲，保证与单岛原地修改逐位一致。
+    let mut scratch_colors: BTreeMap<i32, [u8; COLORS_LEN]> = BTreeMap::new();
+    let mut steps: BTreeMap<(PlayerId, i32), i32> = BTreeMap::new();
+    let mut color_diffs: BTreeMap<i32, Vec<(u8, u8, u8)>> = BTreeMap::new();
+
+    for (pid, x, z, hand_maps) in &hand_samples {
+        for &map_id in hand_maps {
+            let Some(data) = region.global.maps.get(map_id) else {
+                continue;
+            };
+            if data.locked || dimension != data.dimension {
+                continue;
+            }
+            let colors = scratch_colors.entry(map_id).or_insert(data.colors);
+            let step_entry = steps
+                .entry((*pid, map_id))
+                .or_insert_with(|| data.holding_player_step(*pid));
+            *step_entry = step_entry.wrapping_add(1);
+            let step = *step_entry;
+            let diffs = color_diffs.entry(map_id).or_default();
+            sample_colors_with_step(
+                data.center_x,
+                data.center_z,
+                data.scale,
+                step,
+                *x,
+                *z,
+                &region.chunks,
+                |px, pz, color| {
+                    let idx = px + pz * MAP_SIZE;
+                    if colors[idx] != color {
+                        colors[idx] = color;
+                        diffs.push((px as u8, pz as u8, color));
+                        true
+                    } else {
+                        false
+                    }
+                },
+            );
+        }
+    }
+
+    let step_updates: Vec<(PlayerId, i32, i32)> = steps
+        .into_iter()
+        .map(|((player, map_id), step)| (player, map_id, step))
+        .collect();
+    let color_updates: Vec<MapColorDelta> = color_diffs
+        .into_iter()
+        .filter(|(_, pixels)| !pixels.is_empty())
+        .map(|(map_id, pixels)| MapColorDelta { map_id, pixels })
+        .collect();
+
+    port.submit(
+        region,
+        GlobalEffect::MapTick(MapTickEffect {
+            game_time,
+            dimension,
+            stale_frames,
+            framed_map_ids: framed_maps.into_keys().collect(),
+            island_players,
+            player_ticks,
+            step_updates,
+            color_updates,
+        }),
+    );
+}
+
+/// 主控侧应用一张岛交回的 [`MapTickEffect`]：核销失效展示框、刷新玩家标记、合并颜色增量、
+/// 仅在本岛玩家范围内清理不再持有地图的观察者（不动别的岛上的在线玩家），最后向本岛玩家发包。
+///
+/// Master-side handler for [`MapTickEffect`]: remove stale frame markers, update
+/// player markers, merge color deltas, evict non-carriers only among this
+/// island's players (leaving online holders on other islands intact), and emit
+/// map packets to this island's players.
+pub(crate) fn apply_map_tick(global: &mut Global, region: &mut Region, effect: MapTickEffect) {
+    let mut carriers: BTreeMap<i32, BTreeSet<PlayerId>> = BTreeMap::new();
+    for p in &effect.player_ticks {
         for &map_id in &p.maps {
-            if let Some(data) = maps.get_mut(map_id) {
-                data.tick_carried_by_player(p.id, &p.name, p.x, p.z, p.yaw, game_time, dimension);
+            carriers.entry(map_id).or_default().insert(p.id);
+        }
+    }
+
+    // 1. 核销该岛已加载区块里消失的展示框标记。
+    for (map_id, pos, entity_id) in effect.stale_frames {
+        if let Some(data) = global.maps_mut().get_mut(map_id) {
+            data.removed_from_frame(pos, entity_id);
+        }
+    }
+
+    // 2. 刷新本岛玩家标记与手持采样步数 / 颜色增量。
+    for p in &effect.player_ticks {
+        for &map_id in &p.maps {
+            if let Some(data) = global.maps_mut().get_mut(map_id) {
+                data.tick_carried_by_player(
+                    p.id,
+                    &p.name,
+                    p.x,
+                    p.z,
+                    p.yaw,
+                    effect.game_time,
+                    effect.dimension,
+                );
             }
         }
-        for &map_id in &p.hand_maps {
-            if let Some(data) = maps.get_mut(map_id)
-                && !data.locked
-            {
-                update_colors(data, p.id, p.x, p.z, dimension, chunks);
+    }
+    for &(player, map_id, step) in &effect.step_updates {
+        if let Some(data) = global.maps_mut().get_mut(map_id) {
+            data.holding_player_mut(player).step = step;
+        }
+    }
+    for delta in &effect.color_updates {
+        if let Some(data) = global.maps_mut().get_mut(delta.map_id)
+            && !data.locked
+        {
+            for &(x, y, color) in &delta.pixels {
+                data.update_color(usize::from(x), usize::from(y), color);
             }
         }
     }
 
-    // 3. 清掉不再持有这张地图的玩家及其标记。
-    // 若无人手持且地图挂在展示框里，照官方不在玩家刻驱逐展示框观察者（只清离线玩家及残留玩家标记），
-    // 否则观察者会在下个 10 刻周期被当成新观察者重发整张 128×128 补丁。
+    // 3. 清理本岛不再持有地图的玩家（以及已离线玩家），绝不碰其他岛上仍在线的玩家。
+    //    先只读筛出真的需要清理的地图，避免对无关地图做写时复制。
+    let to_clean: Vec<i32> = global
+        .maps()
+        .maps
+        .iter()
+        .filter_map(|(&map_id, data)| {
+            let map_carriers = carriers.get(&map_id);
+            let needs_clean = data.carried_by.iter().any(|h| {
+                let local = effect.island_players.contains_key(&h.player);
+                if local {
+                    !map_carriers.is_some_and(|c| c.contains(&h.player))
+                } else {
+                    !global.is_online(h.player)
+                }
+            }) || data.decorations.iter().any(|(k, _)| {
+                effect
+                    .island_players
+                    .iter()
+                    .any(|(pid, name)| name == k && !map_carriers.is_some_and(|c| c.contains(pid)))
+            });
+            needs_clean.then_some(map_id)
+        })
+        .collect();
+
     let no_carriers = BTreeSet::new();
-    for (&map_id, data) in maps.maps.iter_mut() {
+    for map_id in to_clean {
         let map_carriers = carriers.get(&map_id).unwrap_or(&no_carriers);
-        if map_carriers.is_empty() && framed_maps.contains_key(&map_id) {
-            data.carried_by.retain(|h| online.contains(&h.player));
-            for name in names.values() {
+        let framed_here = effect.framed_map_ids.contains(&map_id);
+        let remote_online: BTreeSet<PlayerId> = global
+            .maps()
+            .get(map_id)
+            .map(|data| {
+                data.carried_by
+                    .iter()
+                    .map(|h| h.player)
+                    .filter(|&pid| {
+                        !effect.island_players.contains_key(&pid) && global.is_online(pid)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some(data) = global.maps_mut().get_mut(map_id) else {
+            continue;
+        };
+        if map_carriers.is_empty() && framed_here {
+            data.carried_by.retain(|h| {
+                effect.island_players.contains_key(&h.player) || remote_online.contains(&h.player)
+            });
+            for name in effect.island_players.values() {
                 data.remove_decoration(name);
             }
         } else {
-            data.retain_carried_by(map_carriers, &names);
+            let mut removed_local = Vec::new();
+            data.carried_by.retain(|h| {
+                if effect.island_players.contains_key(&h.player) {
+                    if map_carriers.contains(&h.player) {
+                        true
+                    } else {
+                        removed_local.push(h.player);
+                        false
+                    }
+                } else {
+                    remote_online.contains(&h.player)
+                }
+            });
+            for pid in removed_local {
+                if let Some(name) = effect.island_players.get(&pid) {
+                    data.remove_decoration(name);
+                }
+            }
         }
     }
 
-    // 4. 给每个持有地图的玩家取一份脏补丁 / 标记包并发出（`ServerPlayer.synchronizeSpecialItemUpdates`）。
+    // 4. 给本岛每名持有地图的玩家取一份脏补丁 / 标记包并发出（`ServerPlayer.synchronizeSpecialItemUpdates`）。
     let mut targets: BTreeSet<(PlayerId, i32)> = BTreeSet::new();
-    for p in &players {
+    for p in &effect.player_ticks {
         for &map_id in &p.maps {
             targets.insert((p.id, map_id));
         }
     }
     let mut outgoing = Vec::new();
     for (player, map_id) in targets {
-        if let Some(data) = maps.get_mut(map_id)
+        if let Some(data) = global.maps_mut().get_mut(map_id)
             && let Some(update) = data.get_update_packet(map_id, player)
         {
             outgoing.push((player, update));
@@ -1638,8 +1966,9 @@ pub(crate) fn tick(region: &mut Region) {
     }
     for (player, update) in &outgoing {
         let packet = update.as_packet();
-        links.send(*player, &packet);
+        region.links.send(*player, &packet);
     }
+    global.publish(region);
 }
 
 fn get<'a>(tag: &'a Tag, key: &str) -> Option<&'a Tag> {
@@ -1837,14 +2166,14 @@ mod tests {
 
         // 1. 生存手里只有 1 张空地图 → 原槽位变成 filled_map(id=0)，记录统计并播放音效。
         region.players.get_mut(&p_id).unwrap().inventory.slots[36] = ItemStack::new(items::MAP, 1);
-        assert!(use_empty_map(&mut region, p_id, Hand::Main));
+        assert!(use_empty_map(&mut region, None, p_id, Hand::Main));
         region.links.flush();
         let held = &region.players[&p_id].inventory.slots[36];
         assert_eq!(held.item, items::FILLED_MAP);
         assert_eq!(held.count, 1);
         assert_eq!(stack_map_id(held), Some(0));
-        assert_eq!(region.maps.index.last_map_id, 0);
-        let data0 = region.maps.get(0).expect("map 0 created");
+        assert_eq!(region.global.maps.index.last_map_id, 0);
+        let data0 = region.global.maps.get(0).expect("map 0 created");
         assert_eq!((data0.center_x, data0.center_z, data0.scale), (0, 0, 0));
         assert!(data0.tracking_position);
         assert!(!data0.unlimited_tracking);
@@ -1871,7 +2200,7 @@ mod tests {
 
         // 2. 生存手里有 3 张空地图 → 扣 1 张剩 2 张，新地图（id=1）放进背包空位。
         region.players.get_mut(&p_id).unwrap().inventory.slots[36] = ItemStack::new(items::MAP, 3);
-        assert!(use_empty_map(&mut region, p_id, Hand::Main));
+        assert!(use_empty_map(&mut region, None, p_id, Hand::Main));
         assert_eq!(region.players[&p_id].inventory.slots[36].item, items::MAP);
         assert_eq!(region.players[&p_id].inventory.slots[36].count, 2);
         let found = region.players[&p_id]
@@ -1887,7 +2216,7 @@ mod tests {
         // 3. 创造模式 → 不扣空地图，仍创建新地图（id=2）并放入背包。
         region.players.get_mut(&p_id).unwrap().game_mode = GameMode::Creative;
         region.players.get_mut(&p_id).unwrap().inventory.slots[36] = ItemStack::new(items::MAP, 1);
-        assert!(use_empty_map(&mut region, p_id, Hand::Main));
+        assert!(use_empty_map(&mut region, None, p_id, Hand::Main));
         assert_eq!(region.players[&p_id].inventory.slots[36].item, items::MAP);
         assert_eq!(region.players[&p_id].inventory.slots[36].count, 1);
         let found2 = region.players[&p_id]
@@ -1976,6 +2305,14 @@ mod tests {
             color_at(3, 1),
             packed_color(map_color::WATER, Brightness::High)
         );
+    }
+
+    fn tick_local(region: &mut Region) {
+        let mut global = Global::default();
+        global.set_maps((*region.global.maps).clone());
+        let mut port = GlobalPort::Direct(&mut global);
+        tick(&mut port, region);
+        region.global.maps = Arc::new(global.maps().clone());
     }
 
     #[test]
@@ -2069,14 +2406,14 @@ mod tests {
         region.insert_player(player);
         let sink = Sink::default();
         region.links.add(p_id, Box::new(sink.clone()));
-        region.maps.insert(
+        Arc::make_mut(&mut region.global.maps).insert(
             0,
             MapItemSavedData::create_fresh(0.0, 0.0, 0, true, false, "minecraft:overworld"),
         );
         // 主手（选中格 36）放一张带 map_id=0 的已填充地图。
         region.players.get_mut(&p_id).unwrap().inventory.slots[36] = make_filled_map(0);
 
-        tick(&mut region);
+        tick_local(&mut region);
         region.links.flush();
         let first = decode(&std::mem::take(&mut *sink.0.lock().unwrap()));
         assert_eq!(
@@ -2091,19 +2428,19 @@ mod tests {
             "first tick sends a full 128-wide patch and the player marker"
         );
         // 玩家标记已加入地图数据。
-        assert_eq!(region.maps.get(0).unwrap().decorations().count(), 1);
+        assert_eq!(region.global.maps.get(0).unwrap().decorations().count(), 1);
 
         // 地图被拿走：不再发包，玩家标记与持有者都被清掉。
         region.players.get_mut(&p_id).unwrap().inventory.slots[36] = ItemStack::empty();
-        tick(&mut region);
+        tick_local(&mut region);
         region.links.flush();
         assert!(decode(&std::mem::take(&mut *sink.0.lock().unwrap())).is_empty());
-        assert_eq!(region.maps.get(0).unwrap().decorations().count(), 0);
-        assert!(region.maps.get(0).unwrap().carried_by.is_empty());
+        assert_eq!(region.global.maps.get(0).unwrap().decorations().count(), 0);
+        assert!(region.global.maps.get(0).unwrap().carried_by.is_empty());
 
         // 空地图（无 map_id）不会触发任何同步。
         region.players.get_mut(&p_id).unwrap().inventory.slots[36] = ItemStack::new(items::MAP, 1);
-        tick(&mut region);
+        tick_local(&mut region);
         region.links.flush();
         assert!(decode(&std::mem::take(&mut *sink.0.lock().unwrap())).is_empty());
     }
@@ -2150,7 +2487,7 @@ mod tests {
         region.insert_player(player);
         let sink = Sink::default();
         region.links.add(p_id, Box::new(sink.clone()));
-        region.maps.insert(
+        Arc::make_mut(&mut region.global.maps).insert(
             0,
             MapItemSavedData::create_fresh(0.0, 0.0, 0, true, false, "minecraft:overworld"),
         );
@@ -2196,17 +2533,20 @@ mod tests {
         };
 
         // 第 0 刻（ServerEntity.tickCount == 0，即使 game_time == 7）：立刻广播全图 + 展示框标记。
-        tick(&mut region);
+        tick_local(&mut region);
         crate::entity_tracking::sync(&mut region);
         region.links.flush();
         assert_eq!(drain_map_packets(&sink), vec![(1, 128)]);
-        assert_eq!(region.maps.get(0).unwrap().frame_markers().len(), 1);
+        assert_eq!(region.global.maps.get(0).unwrap().frame_markers().len(), 1);
 
         // 第 1..=9 刻（包括 game_time == 10）：即使地图颜色变脏，展示框也还没到第 10 刻，不发包。
-        region.maps.get_mut(0).unwrap().update_color(1, 1, 44);
+        Arc::make_mut(&mut region.global.maps)
+            .get_mut(0)
+            .unwrap()
+            .update_color(1, 1, 44);
         for _ in 1..10 {
             region.tick = region.tick.plus(1);
-            tick(&mut region);
+            tick_local(&mut region);
             crate::entity_tracking::sync(&mut region);
             region.links.flush();
             assert!(
@@ -2217,7 +2557,7 @@ mod tests {
 
         // 第 10 刻（ServerEntity.tickCount == 10，game_time == 17）：发出 1×1 增量补丁，而非重发 128×128。
         region.tick = region.tick.plus(1);
-        tick(&mut region);
+        tick_local(&mut region);
         crate::entity_tracking::sync(&mut region);
         region.links.flush();
         assert_eq!(drain_map_packets(&sink), vec![(0, 1)]);
@@ -2245,14 +2585,21 @@ mod tests {
         let locked =
             MapItemSavedData::create_fresh(0.0, 0.0, 0, true, false, "minecraft:overworld")
                 .locked();
-        region.maps.insert(0, locked);
+        Arc::make_mut(&mut region.global.maps).insert(0, locked);
         region.players.get_mut(&p_id).unwrap().inventory.slots[36] = make_filled_map(0);
 
         for _ in 0..16 {
-            tick(&mut region);
+            tick_local(&mut region);
         }
         assert!(
-            region.maps.get(0).unwrap().colors.iter().all(|&b| b == 0),
+            region
+                .global
+                .maps
+                .get(0)
+                .unwrap()
+                .colors
+                .iter()
+                .all(|&b| b == 0),
             "locked map must not update colors while held"
         );
     }

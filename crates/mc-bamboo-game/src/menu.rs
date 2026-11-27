@@ -1567,8 +1567,35 @@ fn in_reach(region: &Region, pos: BlockPos, kind: ContainerKind, eye: Vec3, reac
     Aabb::new(x, y, z, x + 1.0, y + 1.0, z + 1.0).distance_to_sqr(eye) < range * range
 }
 
+/// 玩家当前打开的是不是真实世界里的制图台菜单（容器 ID 匹配）。
+///
+/// Whether the player currently has an open in-world cartography table menu
+/// matching `container_id`.
+pub(crate) fn is_cartography_open(region: &Region, id: PlayerId, container_id: i32) -> bool {
+    region.menus.get(&id).is_some_and(|menu| {
+        menu.container_id == container_id
+            && menu
+                .station
+                .as_ref()
+                .is_some_and(|station| station.is_in_world_cartography())
+    })
+}
+
 /// 商人菜单点击先进专门的路径：结果格完成交易，别的格走通用点击。
 pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
+    on_click_with_maps(region, None, id, packet);
+}
+
+/// 同 [`on_click`]，由主控传入权威 [`MapStore`](crate::map::MapStore) 供制图台读写与分配地图 ID。
+///
+/// Like [`on_click`], passing the master's authoritative `MapStore` for
+/// cartography table reads and globally unique map ID allocation.
+pub(crate) fn on_click_with_maps(
+    region: &mut Region,
+    maps: Option<&mut crate::map::MapStore>,
+    id: PlayerId,
+    packet: ClickPacket,
+) {
     if region
         .menus
         .get(&id)
@@ -1577,11 +1604,20 @@ pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
         let _ = crate::merchant::on_click(region, id, packet);
         return;
     }
-    on_click_default(region, id, packet);
+    on_click_default_with_maps(region, maps, id, packet);
 }
 
 /// 通用点击（箱子 / 工作站 / 商人菜单的付款格和玩家物品栏）。
 pub(crate) fn on_click_default(region: &mut Region, id: PlayerId, packet: ClickPacket) {
+    on_click_default_with_maps(region, None, id, packet);
+}
+
+fn on_click_default_with_maps(
+    region: &mut Region,
+    maps: Option<&mut crate::map::MapStore>,
+    id: PlayerId,
+    packet: ClickPacket,
+) {
     if packet.container_id == 0 {
         // 方块菜单开着时，容器 ID 0 不是当前菜单。
         // Container id 0 is not the open menu while a block menu is up.
@@ -1596,7 +1632,7 @@ pub(crate) fn on_click_default(region: &mut Region, id: PlayerId, packet: ClickP
         .get(&id)
         .is_some_and(|menu| menu.station.is_some())
     {
-        station::click_menu(region, id, packet);
+        station::click_menu_with_maps(region, maps, id, packet);
         return;
     }
     let Some(menu) = region.menus.get(&id) else {
