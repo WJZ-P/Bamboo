@@ -1,7 +1,7 @@
 //! `execute-oracle`：整条 `/execute` 命令的副作用和反馈对拍。
 //!
 //! Java 侧 `ExecuteOracle.java` 在假世界里用官方 `Commands.performCommand`
-//! 跑 148 条固定脚本，输出每条命令以后的方块、计分板和「翻译键 + 参数 + 子组件」
+//! 跑固定脚本，输出每条命令以后的方块、计分板和「翻译键 + 参数 + 子组件」。
 //! 展开的反馈；Rust 侧用 `mc-bamboo-game::replay_execute` 在同样的小世界里重放并逐项比较。
 //! `--break-self-test` 改坏一项副作用；`--break-group NAME` 按类别改坏一个字段。
 //!
@@ -257,6 +257,14 @@ const SCENARIOS: &[&str] = &[
     "execute positioned over motion_blocking run setblock 4 -60 6 stone",
     "execute summon minecraft:cow run setblock 4 -60 6 stone",
     "execute summon minecraft:pig at @s run setblock 4 -60 6 stone",
+    "setblock 2 -58 2 stone strict ;; setblock 2 -57 2 water strict ;; execute positioned 2 500 2 positioned over ocean_floor if block ~ ~-1 ~ stone run setblock 4 -60 6 stone",
+    "setblock 2 -58 2 stone strict ;; setblock 2 -57 2 water strict ;; execute positioned 2 500 2 positioned over motion_blocking if block ~ ~-1 ~ water run setblock 4 -60 6 stone",
+    "setblock 2 -58 2 stone strict ;; setblock 2 -56 2 oak_leaves strict ;; execute positioned 2 500 2 positioned over motion_blocking_no_leaves if block ~ ~-1 ~ stone run setblock 4 -60 6 stone",
+    "setblock 2 -60 2 chest strict ;; execute if slots block 2 -60 2 container.26 run setblock 4 -60 6 stone",
+    "execute summon minecraft:pig if entity @s[type=pig] run setblock 4 -60 6 stone",
+    "execute as @e[type=cow,limit=1,sort=nearest] positioned 4 -61 6 anchored eyes run setblock ^ ^ ^ stone",
+    "execute if slots entity @e[type=cow,limit=1,sort=nearest] [{type:\"slot_range\",slots:\"weapon.mainhand\"}, {type:\"slot_range\",slots:\"weapon.mainhand\"}]",
+    "execute unless slots entity @e[type=cow,limit=1,sort=nearest] {type:\"empty\"} run setblock 4 -60 6 stone",
     // location_check 的 structures：超平坦世界没有结构，两边都判 false
     "execute if predicate {type:\"location_check\",predicate:{structures:\"minecraft:stronghold\"}} run setblock 4 -60 6 stone",
     "execute unless predicate {type:\"location_check\",predicate:{structures:\"minecraft:stronghold\"}} run setblock 4 -60 6 stone",

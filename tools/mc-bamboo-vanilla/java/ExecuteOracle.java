@@ -281,6 +281,14 @@ public final class ExecuteOracle {
         "execute positioned over motion_blocking run setblock 4 -60 6 stone",
         "execute summon minecraft:cow run setblock 4 -60 6 stone",
         "execute summon minecraft:pig at @s run setblock 4 -60 6 stone",
+        "setblock 2 -58 2 stone strict ;; setblock 2 -57 2 water strict ;; execute positioned 2 500 2 positioned over ocean_floor if block ~ ~-1 ~ stone run setblock 4 -60 6 stone",
+        "setblock 2 -58 2 stone strict ;; setblock 2 -57 2 water strict ;; execute positioned 2 500 2 positioned over motion_blocking if block ~ ~-1 ~ water run setblock 4 -60 6 stone",
+        "setblock 2 -58 2 stone strict ;; setblock 2 -56 2 oak_leaves strict ;; execute positioned 2 500 2 positioned over motion_blocking_no_leaves if block ~ ~-1 ~ stone run setblock 4 -60 6 stone",
+        "setblock 2 -60 2 chest strict ;; execute if slots block 2 -60 2 container.26 run setblock 4 -60 6 stone",
+        "execute summon minecraft:pig if entity @s[type=pig] run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,limit=1,sort=nearest] positioned 4 -61 6 anchored eyes run setblock ^ ^ ^ stone",
+        "execute if slots entity @e[type=cow,limit=1,sort=nearest] [{type:\"slot_range\",slots:\"weapon.mainhand\"}, {type:\"slot_range\",slots:\"weapon.mainhand\"}]",
+        "execute unless slots entity @e[type=cow,limit=1,sort=nearest] {type:\"empty\"} run setblock 4 -60 6 stone",
         // location_check 的 structures：超平坦世界没有结构，两边都判 false
         "execute if predicate {type:\"location_check\",predicate:{structures:\"minecraft:stronghold\"}} run setblock 4 -60 6 stone",
         "execute unless predicate {type:\"location_check\",predicate:{structures:\"minecraft:stronghold\"}} run setblock 4 -60 6 stone",
@@ -945,6 +953,33 @@ public final class ExecuteOracle {
         @Override
         public BlockState getBlockState(BlockPos pos) {
             return blocks.getOrDefault(pos.asLong(), Blocks.AIR.defaultBlockState());
+        }
+
+        @Override
+        public int getHeight(net.minecraft.world.level.levelgen.Heightmap.Types type, int x, int z) {
+            // 假世界只记录修改；未编辑列按超平坦的地面高度，用原版高度图谓词检查修改。
+            // The fake world records edits only; start at flat ground and use vanilla's
+            // heightmap predicate to test the edits.
+            int height = -60;
+            var entries = blocks.long2ObjectEntrySet().fastIterator();
+            while (entries.hasNext()) {
+                var entry = entries.next();
+                var pos = BlockPos.of(entry.getLongKey());
+                if (pos.getX() == x && pos.getZ() == z && type.isOpaque().test(entry.getValue())) {
+                    height = Math.max(height, pos.getY() + 1);
+                }
+            }
+            return height;
+        }
+
+        @Override
+        public net.minecraft.world.level.block.entity.BlockEntity getBlockEntity(BlockPos pos) {
+            // 槽位场景用空箱子，槽位访问仍由真实的 ChestBlockEntity 实现。
+            // The slot case uses an empty chest with the real ChestBlockEntity slot access.
+            var state = getBlockState(pos);
+            return state.is(Blocks.CHEST)
+                ? new net.minecraft.world.level.block.entity.ChestBlockEntity(pos, state)
+                : null;
         }
 
         @Override

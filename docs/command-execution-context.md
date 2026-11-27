@@ -86,19 +86,19 @@ Context {
 - `if/unless biome`：`getLoadedBlockPos` 现在还查水平 ±3000 万边界（官方 `isInWorldBounds`），
   群系走 `BiomeManager.getBiome` 的八角插值模糊取样（读选中的 quart 角），不再直接读当前格的 quart。
 - `if/unless items|slots`：照官方 `SlotRanges` / `SlotSource` 实现。范围名查生成器从官方导出的
-  `mc-bamboo-data::slot_ranges::SLOT_RANGES`（不手写）；`entity` 访问器按
-  `SlotProvider.getSlot` 逐格读玩家 / 生物的槽位（`command/slots.rs`），`block` 访问器（方块实体容器）
-  还没接、整条条件按 0 算。两种条件都是 `createNumericConditionalHandler`：`items` 把命中
+  `mc-bamboo-data::slot_ranges::SLOT_RANGES`（不手写），内联容器范围、空来源和分组保留拼接顺序；
+  `entity` 访问器按 `SlotProvider.getSlot` 读玩家、装备及已建模的实体专有槽位，`block` 对指定方块实体
+  取容器槽位，双箱不合并（`command/slots.rs`）。两种条件都是 `createNumericConditionalHandler`：`items` 把命中
   `ItemPredicateArgument` 的物品数量相加，`slots` 数范围里存在的槽数；结果是数值 `Verdict::Count`，
   链中间按「大于零」判真假，链尾发 `pass_count` / `fail_count`。
 - 实体子谓词 `minecraft:slots`（`SlotsPredicate`）：范围名 + `ItemPredicate`，对每个范围要求
   至少一格命中；`EntityView.slots` 是「槽位编号 → 物品」的视图。
-- `on`：来源无实体时空结果，有实体时解析八种关系；`vehicle` / `passengers` 从实体表查，其余
-  六类关系游戏层还没建模，按官方「没有该关系」返回空分支。
-- `summon`：按实体类型名 + 位置构造并生成实体（`SummonCommand.createEntity` 等价），设为来源实体，
-  不发 `/summon` 的成功反馈。
+- `on`：来源无实体时空结果；`vehicle` / `passengers` 从真实骑乘关系查，乘客按名单顺序分叉。
+  `controller` / `leasher` / `target` / `attacker` / `owner` / `origin` 从已有实体状态解析，关系不存在时不产生分支。
+- `summon`：复用 `/summon` 的生物生成路径（包含 `finalizeSpawn`），设为来源实体，不发召唤成功反馈。
 - `positioned over`：区块没加载报 `argument.pos.unloaded`，否则把 Y 换成该高度图在脚下
-  (`floor(x)`, `floor(z)`) 的高度；高度图目前只区分 `world_surface` 与其余三种（共用近似）。
+  (`floor(x)`, `floor(z)`) 的高度；四张高度图分别读取，不受原始 Y 限制。`anchored eyes`
+  使用实体眼高解析 `^` 坐标；`positioned <pos>` 解析完坐标后重置为脚底。
 - 条件写在链尾（没有 `run`）：走官方条件节点自己的 `executes`，对每个来源各报一次
   `commands.execute.conditional.pass` / `pass_count`，或 `conditional.fail` / `fail_count`。
 - 条件失败时官方发 `command.execute.conditions.not_met*` 反馈；Bamboo 同样按
@@ -125,7 +125,7 @@ Context {
 ## 6. 对拍
 
 `tools/mc-bamboo-vanilla execute-oracle` 用官方 `Commands.performCommand`
-在假世界里跑 177 条命令（`/execute`、`/data`、`/effect`）；假世界补全了 `ServerLevel` 的实体 getter、
+在假世界里跑 185 条命令（`/execute`、`/data`、`/effect`）；假世界补全了 `ServerLevel` 的实体 getter、
 `ChunkMap` 和真正的牛实体，所以 `as @e[type=cow]`、`at @e`、`if entity @e[...]`
 真的会选出牛并分叉；`execute summon` / `location_check.structures` 需要的实体管理器和
 `structureManager()` 也在假世界里补了桩。记录：
@@ -141,16 +141,15 @@ Rust 侧在同一串命令上重放并逐项比较；`--break-self-test` 改坏�
 ## 7. 已知差异
 
 - 只有主世界，`in` 其它维度明确失败。
-- `on` 的 `owner` / `leasher` / `target` / `attacker` / `controller` / `origin` 六类关系游戏层还没建模，
-  一律当成「没有该关系」返回空分支；`vehicle` / `passengers` 从实体表查。
-- `positioned over` 只区分 `world_surface` 与其余三种高度图（`ocean_floor` / `motion_blocking` /
-  `motion_blocking_no_leaves` 共用一份近似）；`facing` / `anchored` 用脚底或眼高的近似眼高，
-  属性表没有逐实体眼高。
-- 具名 `SlotSource`（数据包里的槽位来源注册表）和 `if items|slots` 的 `block` 访问器（方块实体
-  容器槽位）还没接：前者执行时报 `command.failed`，后者整条条件按 0 算。
+- 游戏没有玩家最近攻击者、掉落物抛出者、船拴绳等关系数据；`on` 不会加载命令上下文以外的实体。
+  部分非生物眼高仍是实体模型的近似。未建模实体不能召唤，部分非生物仍从存档模型构造。
+- 具名 `SlotSource`、内联过滤/变换/嵌套容器/其他上下文来源未接；物品参数只支持通配符、物品和标签。
+  容器访问仍缺熔炉/酿造台等独立菜单状态，及部分实体专有槽位；容器载具槽位读取暂不触发战利品解包。
 - 结构标签（`#minecraft:...`）没从官方导出，`location_check.structures` 遇到标签报不支持；
   `command/predicate_view.rs::CommandLevel` 的天空可见 / 亮度 / 世界时钟 / 积分板 /
-  `structures`（名字）已接，营火烟雾、统计、配方仍报不支持。
+  `structures`（名字）从已交付区块的结构引用和起点查逐件包围盒，未交付起点不会同步读取；
+  营火烟雾、会话内物品使用/自定义统计和配方解锁已接，其它统计仍不支持。
+  群系取样跨到未交付邻列时暂不回退到生成器。
 - `/data` 的 `modify ... string|compute` 和 int/float provider 变体：命令树完整注册，
   执行时明确报 `command.exception`（官方没有「暂不支持」的统一翻译键）。
 - `if predicate` 只支持内联条件；`in` 需要多维度，解析照常、执行时明确报错。
