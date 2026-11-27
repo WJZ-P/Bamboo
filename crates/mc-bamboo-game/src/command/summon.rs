@@ -118,8 +118,11 @@ fn summon(
             Err(SummonError::DuplicateUuid) => Err(fail("commands.summon.failed.uuid")),
         };
     }
-    if entity == "minecraft:spawner_minecart" {
-        return summon_spawner_cart(region, id, position, nbt);
+    if matches!(
+        entity.as_str(),
+        "minecraft:spawner_minecart" | "minecraft:command_block_minecart"
+    ) {
+        return summon_minecart(region, id, &entity, position, nbt);
     }
     let Some(kind) = MobType::by_name(&entity) else {
         return Err(fail("commands.summon.failed"));
@@ -159,9 +162,10 @@ fn summon(
     }
 }
 
-fn summon_spawner_cart(
+fn summon_minecart(
     region: &mut Region,
     id: PlayerId,
+    entity_type: &str,
     position: Vec3,
     nbt: Option<Tag>,
 ) -> Result<(), CommandFail> {
@@ -174,10 +178,7 @@ fn summon_spawner_cart(
         _ => Vec::new(),
     };
     fields.retain(|(key, _)| key != "id" && key != "Pos");
-    fields.push((
-        "id".to_owned(),
-        Tag::String("minecraft:spawner_minecart".to_owned()),
-    ));
+    fields.push(("id".to_owned(), Tag::String(entity_type.to_owned())));
     fields.push((
         "Pos".to_owned(),
         Tag::List(vec![
@@ -197,7 +198,9 @@ fn summon_spawner_cart(
         .entities
         .public_at(uid)
         .and_then(|public| crate::vehicle_display_name::of(&region.global.scoreboard, public))
-        .unwrap_or_else(|| Component::translate("entity.minecraft.spawner_minecart", []));
+        .unwrap_or_else(|| {
+            Component::translate(format!("entity.{}", entity_type.replace(':', ".")), [])
+        });
     feedback::success(
         region,
         id,

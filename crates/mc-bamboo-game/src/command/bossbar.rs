@@ -392,11 +392,7 @@ fn targets(
         .get("targets")
         .and_then(Value::as_entity)
         .ok_or_else(|| fail("command.failed"))?;
-    let level = region
-        .players
-        .get(&id)
-        .map(|player| player.permission_level)
-        .unwrap_or(mc_bamboo_command::permission::ALL);
+    let level = super::source::level(region, id);
     // 官方 `EntityArgument.getOptionalPlayers`：空结果不报错。
     //
     // Official `EntityArgument.getOptionalPlayers`: an empty result is not an error.

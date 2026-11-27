@@ -4,11 +4,10 @@
 use std::cell::RefCell;
 
 use mc_bamboo_blocks::entity::{EntityKind, EntityUid, minecart::CommandActivation};
-use mc_bamboo_command::permission;
 use mc_bamboo_protocol::text::Component;
 
 use crate::{
-    command::{self, Action, feedback, source},
+    command::{self, source},
     global::Global,
     global_port::GlobalPort,
     inbound::PlayerId,
@@ -53,17 +52,14 @@ pub(crate) fn capture_output(id: PlayerId, message: &Component) -> bool {
 }
 
 /// 统计命令执行成功的分支。 / Count successful command branches.
-pub(crate) fn record_success(id: PlayerId, line: &str) {
-    if line.split_whitespace().next() == Some("execute") {
-        return;
-    }
+pub(crate) fn record_success(id: PlayerId) {
     OUTPUT.with(|output| {
         if let Some(output) = output
             .borrow_mut()
             .as_mut()
             .filter(|output| output.id == id)
         {
-            output.successes = output.successes.saturating_add(1);
+            output.successes = output.successes.wrapping_add(1);
         }
     });
 }
@@ -132,6 +128,9 @@ pub(crate) fn on_set(
 
 pub(crate) fn perform(global: &mut Global, region: &mut Region, activation: CommandActivation) {
     let enabled = region.global.command_blocks_work;
+    if let Some(entity) = region.entities.public_at(activation.entity) {
+        region.dirty.mark(entity.chunk_position());
+    }
     let Some((line, track_output)) = region
         .entities
         .with_mut(activation.entity, |entity| {
@@ -167,17 +166,18 @@ pub(crate) fn perform(global: &mut Global, region: &mut Region, activation: Comm
     let source = source::Source {
         position: activation.position,
         yaw: activation.yaw,
-        pitch: 0.0,
+        pitch: activation.pitch,
         entity: Some(source::Entity::World(activation.entity)),
     };
-    let command = line.strip_prefix('/').unwrap_or(&line);
     let previous = OUTPUT.replace(Some(Output {
         id,
         track_output,
         last: None,
         successes: 0,
     }));
-    source::with_override(id, source, || run(global, region, id, command));
+    source::with_override(id, source, || {
+        command::run_prefixed(&mut GlobalPort::Direct(global), region, id, &line);
+    });
     let Some(output) = OUTPUT.replace(previous) else {
         return;
     };
@@ -185,7 +185,7 @@ pub(crate) fn perform(global: &mut Global, region: &mut Region, activation: Comm
         if let EntityKind::Minecart(cart) = &mut entity.kind
             && let Some(base) = &mut cart.command_block
         {
-            base.success_count = base.success_count.saturating_add(output.successes);
+            base.success_count = base.success_count.wrapping_add(output.successes);
             if let Some(last) = output.last {
                 base.last_output = Some(last);
                 base.update_synced_data();
@@ -197,39 +197,7 @@ pub(crate) fn perform(global: &mut Global, region: &mut Region, activation: Comm
             };
         }
     });
-    if let Some(entity) = region.entities.public_at(activation.entity) {
-        region.dirty.mark(entity.chunk_position());
-    }
     global.publish(region);
-}
-
-fn run(global: &mut Global, region: &mut Region, id: PlayerId, line: &str) {
-    let parsed = match command::commands()
-        .graph
-        .parse(line, permission::GAMEMASTERS)
-    {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            let failure = feedback::fail_parse(line, &error.error, error.cursor);
-            feedback::report(region, id, line, &failure);
-            return;
-        }
-    };
-    let result = match command::commands()
-        .actions
-        .get(parsed.action)
-        .and_then(|action| *action)
-    {
-        Some(Action::Island(action)) => {
-            action(&mut GlobalPort::Direct(global), region, id, &parsed)
-        }
-        Some(Action::Global(action)) => action(global, region, id, &parsed),
-        None => Err(feedback::fail("command.failed")),
-    };
-    match result {
-        Ok(()) => record_success(id, line),
-        Err(failure) => feedback::report(region, id, line, &failure),
-    }
 }
 
 #[cfg(feature = "oracle-samples")]

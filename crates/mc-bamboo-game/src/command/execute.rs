@@ -154,6 +154,7 @@ fn run_action(
     line: &str,
     parsed: ParsedCommand,
 ) -> bool {
+    let leaf = parsed.chain.is_empty();
     let action = commands()
         .actions
         .get(parsed.action)
@@ -187,7 +188,9 @@ fn run_action(
         feedback::report(region, context.source, line, &failure);
         false
     } else {
-        crate::minecart_command::record_success(context.source, line);
+        if leaf {
+            crate::minecart_command::record_success(context.source);
+        }
         true
     }
 }

@@ -1418,6 +1418,7 @@ public final class EntityOracle {
         cart.getCommandBlock().setCommand(command);
         cart.getCommandBlock().setLastOutput(Component.literal("previous"));
         cart.setPos(0.5, 64.0625, 0.5);
+        cart.setXRot(490.0F);
         cart.setDeltaMovement(0.0, 0.0, 0.3);
         level.tracked = List.of(cart);
         var listeners = allocate(ChatCapture.class);
@@ -1437,7 +1438,7 @@ public final class EntityOracle {
                 }
                 var save = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
                         net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
-                cart.getCommandBlock().save(save);
+                cart.save(save);
                 int signal = level.getBlockState(detector).getAnalogOutputSignal(level, detector, Direction.EAST);
                 out.write("{\"nbt\":" + jsonString(save.buildResult().toString()) + ",\"signal\":" + signal
                         + ",\"chat\":[" + String.join(",", listeners.messages) + "]}");

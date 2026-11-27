@@ -1197,6 +1197,7 @@ impl KindData {
     fn mob_x_rot(&self) -> Option<f32> {
         match self {
             Self::Mob(mob) => Some(mob.x_rot),
+            Self::Minecart(cart) => Some(cart.pitch),
             Self::Arrow(arrow) => Some(arrow.pitch),
             Self::LlamaSpit(spit) => Some(spit.pitch),
             Self::Egg(egg) => Some(egg.x_rot),

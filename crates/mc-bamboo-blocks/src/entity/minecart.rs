@@ -149,6 +149,9 @@ pub struct Minecart {
     pub custom_name: Option<Tag>,
     /// 是否显示自定义名。 / Whether the name is visible.
     pub custom_name_visible: bool,
+    /// 最近一次设定的俯仰，旧矿车行为会在一刻结束前归零。
+    /// The current pitch, which the old behavior resets before the tick ends.
+    pub pitch: f32,
     /// 乘客列表，骑乘层读它。
     ///
     /// The passenger list, read by the riding layer.
@@ -209,6 +212,7 @@ impl Minecart {
             entity_type: kind.entity_type(),
             custom_name: None,
             custom_name_visible: false,
+            pitch: 0.0,
             passengers: Vec::new(),
             hurt_time: 0,
             hurt_dir: 1,
@@ -398,6 +402,8 @@ pub struct CommandActivation {
     pub position: Vec3,
     /// 激活时的水平朝向。 / The yaw at activation.
     pub yaw: f32,
+    /// 激活时的俯仰。 / The pitch at activation.
+    pub pitch: f32,
     /// 激活所在的世界刻。 / Game time of the activation.
     pub game_time: i64,
 }
@@ -412,6 +418,8 @@ pub struct MinecartPublic {
     pub custom_name: Option<Tag>,
     /// 是否显示自定义名。 / Whether the name is visible.
     pub custom_name_visible: bool,
+    /// 矿车的俯仰。 / The cart's pitch.
+    pub pitch: f32,
     pub passengers: Vec<EntityUid>,
     pub hurt_time: i32,
     pub hurt_dir: i32,
@@ -440,6 +448,7 @@ impl MinecartPublic {
             entity_type: cart.entity_type,
             custom_name: cart.custom_name.clone(),
             custom_name_visible: cart.custom_name_visible,
+            pitch: cart.pitch,
             passengers: cart.passengers.clone(),
             hurt_time: cart.hurt_time,
             hurt_dir: cart.hurt_dir,
@@ -1029,6 +1038,7 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
                     entity: me.id,
                     position: me.position,
                     yaw: me.y_rot,
+                    pitch: cart.pitch,
                     game_time: ctx.blocks().game_time(),
                 });
             }
@@ -1039,6 +1049,7 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     }
     let detectors = detector_rails(ctx.blocks(), me);
     me.apply_effects_from_blocks(ctx.blocks());
+    cart.pitch = 0.0;
 
     let dx = me.old_position.x - me.position.x;
     let dz = me.old_position.z - me.position.z;

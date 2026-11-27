@@ -188,8 +188,12 @@ fn apply_on_master(global: &mut Global, region: &mut Region, effect: GlobalEffec
             parsed,
             action,
         } => {
-            if let Err(failure) = action(global, region, source, &parsed) {
-                feedback::report(region, source, &command, &failure);
+            match action(global, region, source, &parsed) {
+                Ok(()) if parsed.chain.is_empty() => {
+                    crate::minecart_command::record_success(source)
+                }
+                Ok(()) => {}
+                Err(failure) => feedback::report(region, source, &command, &failure),
             }
             global.publish(region);
         }

@@ -1409,6 +1409,7 @@ impl Report {
             let at = format!("command minecart step {tick}");
             let nbt = mc_bamboo_nbt::parse_snbt(&want.nbt).map_err(|error| format!("{error:?}"))?;
             for key in [
+                "Rotation",
                 "Command",
                 "SuccessCount",
                 "TrackOutput",

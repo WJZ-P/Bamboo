@@ -282,11 +282,11 @@ pub(crate) fn run(
         .get(parsed.action)
         .and_then(|action| *action)
     {
-        Some(Action::Island(action)) => {
-            if let Err(failure) = action(port, region, source, &parsed) {
-                feedback::report(region, source, command, &failure);
-            }
-        }
+        Some(Action::Island(action)) => match action(port, region, source, &parsed) {
+            Ok(()) if parsed.chain.is_empty() => crate::minecart_command::record_success(source),
+            Ok(()) => {}
+            Err(failure) => feedback::report(region, source, command, &failure),
+        },
         Some(Action::Global(action)) => port.submit(
             region,
             GlobalEffect::Command {
@@ -297,6 +297,27 @@ pub(crate) fn run(
             },
         ),
         None => feedback::report(region, source, command, &feedback::fail("command.failed")),
+    }
+}
+
+/// 执行非玩家来源的命令，共用命令树和来源的权限。
+///
+/// Run a non-player command through the shared command tree with the source's permissions.
+pub(crate) fn run_prefixed(
+    port: &mut GlobalPort<'_>,
+    region: &mut Region,
+    id: PlayerId,
+    line: &str,
+) {
+    let command = line.strip_prefix('/').unwrap_or(line);
+    match commands().graph.parse(command, source::level(region, id)) {
+        Ok(parsed) => run(port, region, id, command, parsed),
+        Err(failure) => feedback::report(
+            region,
+            id,
+            command,
+            &feedback::fail_parse(command, &failure.error, failure.cursor),
+        ),
     }
 }
 

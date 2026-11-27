@@ -127,6 +127,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 crate::entity::KindPublic::WindCharge(charge) => charge.pitch,
                 crate::entity::KindPublic::WitherSkull(skull) => skull.pitch,
                 crate::entity::KindPublic::FireworkRocket(firework) => firework.pitch,
+                crate::entity::KindPublic::Minecart(cart) => cart.pitch,
                 crate::entity::KindPublic::ItemFrame(frame) => frame.x_rot,
                 _ => 0.0,
             }),
@@ -802,6 +803,9 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                 {
                     let mut cart = crate::entity::minecart::Minecart::new(kind);
                     read_minecart_additional(tag, &mut cart);
+                    if rotation[1].is_finite() {
+                        cart.pitch = (rotation[1] % 360.0).clamp(-90.0, 90.0);
+                    }
                     EntityKind::Minecart(Box::new(cart))
                 } else {
                     return Ok(None);

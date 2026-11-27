@@ -1,7 +1,7 @@
 use mc_bamboo_blocks::{
     BlockState, World,
     archive::{read_entity, write_entity},
-    entity::{Entity, minecart::MinecartKind},
+    entity::{Entity, EntityKind, minecart::MinecartKind},
     state::{POWERED, RAIL_SHAPE, RailShape},
 };
 use mc_bamboo_core::{BlockPos, Direction, Vec3};
@@ -74,6 +74,9 @@ pub fn replay_command_minecart(command: &str) -> Result<Vec<CommandMinecartSampl
     let position = Vec3::new(0.5, 64.0625, 0.5);
     let mut cart = Entity::minecart(MinecartKind::CommandBlock, position);
     cart.delta.z = 0.3;
+    if let EntityKind::Minecart(minecart) = &mut cart.kind {
+        minecart.pitch = 490.0;
+    }
     let mut initial = write_entity(&cart.split()).map_err(|error| error.to_string())?;
     if let Tag::Compound(fields) = &mut initial {
         fields.push(("LastOutput".to_owned(), Tag::String("previous".to_owned())));
