@@ -148,11 +148,11 @@ impl LootTable {
             ));
         }
         let id = std::ptr::from_ref(self).cast::<()>();
-        if !context.enter_table(id) {
+        if !context.enter_element(id) {
             return Ok(());
         }
         let result = self.run_pools(context, output);
-        context.leave_table(id);
+        context.leave_element(id);
         result
     }
 

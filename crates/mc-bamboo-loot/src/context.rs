@@ -394,18 +394,6 @@ pub trait LevelView {
         None
     }
 
-    /// `CommandStorage` + `NbtPathArgument` 读出的数值，对应
-    /// `StoredNumberAccess.getNumericTag`。外层 `None` 是调用方没接命令存储，
-    /// 内层 `None` 是这个路径没有单独的数值标签；两种都走提供器的 fallback。
-    ///
-    /// The numeric value read from `CommandStorage` at an NBT path, matching
-    /// `StoredNumberAccess.getNumericTag`. The outer `None` means command storage is not
-    /// wired in; the inner `None` means the path has no single numeric tag. Both take the
-    /// provider's fallback.
-    fn storage_number(&self, _storage: &str, _path: &str) -> Option<Option<f64>> {
-        None
-    }
-
     /// `Level.environmentAttributes().getValue(context, attribute)` 的结果，按属性值
     /// 的 codec JSON 表示。`origin` 是位置属性要用的 ORIGIN 方块坐标。外层 `None`
     /// 表示调用方没接环境属性系统，求值时报不支持，不能编一个默认值冒充。
@@ -430,6 +418,27 @@ pub trait LevelView {
     /// is the JSON text of the entry's `slot_source` field, resolved by the level view.
     /// `None` means no slot source is wired in, so evaluation reports unsupported.
     fn slot_items(&self, _slot_source: &str) -> Option<Vec<LootStack>> {
+        None
+    }
+
+    /// 战利品表标签成员，顺序与加载后的注册表一致。空标签应返回 Some(vec![])。
+    ///
+    /// Members of a loot-table tag in registry order. A known empty tag returns Some(vec![]).
+    fn loot_table_tag(&self, _name: &str) -> Option<Vec<String>> {
+        None
+    }
+
+    /// 已加载的物品修饰器；同一个注册项在一次求值中应返回同一个 Arc。
+    ///
+    /// A loaded item modifier; return the same Arc for a registry entry throughout evaluation.
+    fn item_modifier(&self, _name: &str) -> Option<std::sync::Arc<crate::LootFunction>> {
+        None
+    }
+
+    /// 返回命令存储中的 NBT；调用方没有提供存储服务时返回 None。
+    ///
+    /// Returns command storage NBT, or None when the caller does not provide storage.
+    fn command_storage(&self, _name: &str) -> Option<mc_bamboo_nbt::Tag> {
         None
     }
 
@@ -522,7 +531,7 @@ pub struct LootContext<'p, 'w, 'r> {
     pub random: &'r dyn RandomSource,
     /// `LootContext.visitedElements`：正在求值的表，防止嵌套引用绕回去。
     ///
-    /// Tables currently being evaluated. Matches `LootContext.visitedElements`.
+    /// Registry elements currently being evaluated. Matches `LootContext.visitedElements`.
     visited: RefCell<Vec<*const ()>>,
 }
 
@@ -539,19 +548,19 @@ impl<'p, 'w, 'r> LootContext<'p, 'w, 'r> {
     ///
     /// `pushVisitedElement`. Returns false when the table is already on the stack;
     /// the caller skips it, matching the official infinite-loop guard.
-    pub(crate) fn enter_table(&self, table: *const ()) -> bool {
+    pub(crate) fn enter_element(&self, element: *const ()) -> bool {
         let mut visited = self.visited.borrow_mut();
-        if visited.contains(&table) {
+        if visited.contains(&element) {
             return false;
         }
-        visited.push(table);
+        visited.push(element);
         true
     }
 
     /// `popVisitedElement`。
-    pub(crate) fn leave_table(&self, table: *const ()) {
+    pub(crate) fn leave_element(&self, element: *const ()) {
         let mut visited = self.visited.borrow_mut();
-        if let Some(index) = visited.iter().rposition(|entry| *entry == table) {
+        if let Some(index) = visited.iter().rposition(|entry| *entry == element) {
             visited.remove(index);
         }
     }

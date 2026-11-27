@@ -9,6 +9,7 @@
 
 use mc_bamboo_core::mth::{cos as mth_cos, sin as mth_sin};
 use mc_bamboo_data::loot;
+use mc_bamboo_nbt::{Tag, path::NbtPath};
 use serde_json::{Map, Value};
 
 use crate::condition::LootCondition;
@@ -332,8 +333,9 @@ impl IntProvider {
             }
             // `StorageValue.getIntUnsafe`：路径没有数值标签就取 fallback。
             // `StorageValue.getIntUnsafe`: a path with no numeric tag takes the fallback.
-            Self::Storage { access, fallback } => match storage_number(context, access) {
-                Some(number) => Ok(number as i32),
+            Self::Storage { access, fallback } => match storage_value(context, access, storage_int)
+            {
+                Some(number) => Ok(number),
                 None => fallback.get_unsafe(context),
             },
             Self::EnvironmentAttribute(name) => match environment_number(context, name) {
@@ -361,12 +363,41 @@ impl ScoreboardTarget {
 /// `StoredNumberAccess.getNumericTag`，路径解析交给调用方的 `LevelView`。
 ///
 /// `StoredNumberAccess.getNumericTag`; the level view resolves the path.
-fn storage_number(context: &LootContext<'_, '_, '_>, access: &StoredNumberAccess) -> Option<f64> {
-    context
-        .params
-        .level
-        .and_then(|level| level.storage_number(&access.storage, &access.path))
-        .flatten()
+fn storage_value<T>(
+    context: &LootContext<'_, '_, '_>,
+    access: &StoredNumberAccess,
+    convert: impl FnOnce(&Tag) -> Option<T>,
+) -> Option<T> {
+    let data = context.params.level?.command_storage(&access.storage)?;
+    let path = NbtPath::parse(&access.path).ok()?;
+    match path.get(&data).as_slice() {
+        [tag] => convert(tag),
+        _ => None,
+    }
+}
+
+fn storage_int(tag: &Tag) -> Option<i32> {
+    Some(match *tag {
+        Tag::Byte(value) => i32::from(value),
+        Tag::Short(value) => i32::from(value),
+        Tag::Int(value) => value,
+        Tag::Long(value) => value as i32,
+        Tag::Float(value) => value as i32,
+        Tag::Double(value) => value as i32,
+        _ => return None,
+    })
+}
+
+fn storage_float(tag: &Tag) -> Option<f32> {
+    Some(match *tag {
+        Tag::Byte(value) => f32::from(value),
+        Tag::Short(value) => f32::from(value),
+        Tag::Int(value) => value as f32,
+        Tag::Long(value) => value as f32,
+        Tag::Float(value) => value,
+        Tag::Double(value) => value as f32,
+        _ => return None,
+    })
 }
 
 /// `EnvironmentAttributeValue` 的数值，按属性值的 codec JSON 读成 f64。
@@ -519,10 +550,12 @@ impl FloatProvider {
             Self::FromInt(input) => Ok(input.get_unsafe(context)? as f32),
             // `StorageValue.getFloatUnsafe`：路径没有数值标签就取 fallback。
             // `StorageValue.getFloatUnsafe`: a path with no numeric tag takes the fallback.
-            Self::Storage { access, fallback } => match storage_number(context, access) {
-                Some(number) => Ok(number as f32),
-                None => fallback.get_float_unsafe(context),
-            },
+            Self::Storage { access, fallback } => {
+                match storage_value(context, access, storage_float) {
+                    Some(number) => Ok(number),
+                    None => fallback.get_float_unsafe(context),
+                }
+            }
             Self::EnvironmentAttribute(name) => match environment_number(context, name) {
                 Some(number) => Ok(number as f32),
                 None => Err(NumberError::Loot(environment_unsupported(name))),

@@ -232,9 +232,14 @@ impl StandAlone {
 pub fn parse(kind: &str, map: &Map<String, Value>) -> Result<Option<Extended>> {
     let extended = match kind {
         "minecraft:set_custom_data" => {
-            let text = string(required(map, "tag", kind)?, "tag")?;
-            let entries = mc_bamboo_nbt::parse_snbt_compound(text)
-                .map_err(|error| invalid(format!("set_custom_data tag: {error}")))?;
+            let tag = required(map, "tag", kind)?;
+            let entries = if let Some(text) = tag.as_str() {
+                mc_bamboo_nbt::parse_snbt_compound(text)
+                    .map_err(|error| invalid(format!("set_custom_data tag: {error}")))?
+            } else {
+                object(tag, "set_custom_data tag")?;
+                json_to_compound(Some(tag))
+            };
             Extended::SetCustomData(Tag::Compound(entries))
         }
         "minecraft:set_attributes" => Extended::SetAttributes {
@@ -245,7 +250,7 @@ pub fn parse(kind: &str, map: &Map<String, Value>) -> Result<Option<Extended>> {
             Extended::CopyName(string(required(map, "source", kind)?, "source")?.to_owned())
         }
         "minecraft:set_contents" => Extended::SetContents {
-            component: string(required(map, "component", kind)?, "component")?.to_owned(),
+            component: parse_container_component(required(map, "component", kind)?)?,
             entries: parse_entries(required(map, "entries", kind)?)?,
         },
         "minecraft:modify_contents" => Extended::ModifyContents {
@@ -312,11 +317,12 @@ pub fn run(
     mut stack: LootStack,
     context: &LootContext<'_, '_, '_>,
 ) -> Result<LootStack> {
-    if stack.is_empty() {
-        // `set_contents` / `modify_contents` 之类的官方函数对空栈直接返回；其余函数
-        // 会照常写组件，但空栈的组件在输出端不可见，所以统一原样退回。
-        // Vanilla container functions return early on empty stacks; other functions
-        // would write components that an empty stack hides anyway.
+    if stack.is_empty()
+        && matches!(
+            extended,
+            Extended::SetContents { .. } | Extended::ModifyContents { .. }
+        )
+    {
         return Ok(stack);
     }
     match extended {
@@ -331,7 +337,7 @@ pub fn run(
             let mut list = if *replace {
                 Vec::new()
             } else {
-                object_array_field(stack.component(ATTRIBUTE_MODIFIERS), "modifiers")
+                array_field(stack.component(ATTRIBUTE_MODIFIERS))
             };
             for spec in modifiers {
                 // `Util.getRandom(modifier.slots, random)` 先取一次，再算 amount。
@@ -347,20 +353,22 @@ pub fn run(
                 let entry = json!({
                     "id": spec.id,
                     "type": spec.attribute,
-                    "amount": amount,
+                    "amount": f64::from(amount),
                     "operation": spec.operation,
                     "slot": slot,
                 });
                 // `withModifierAdded` 用 id 覆盖已有条目。
                 // `withModifierAdded` replaces an existing entry with the same id.
                 let id = Value::from(spec.id.clone());
-                if let Some(position) = list.iter().position(|value| value.get("id") == Some(&id)) {
+                if let Some(position) = list.iter().position(|value| {
+                    value.get("id") == Some(&id) && value.get("type") == entry.get("type")
+                }) {
                     list[position] = entry;
                 } else {
                     list.push(entry);
                 }
             }
-            stack.set_component(ATTRIBUTE_MODIFIERS, json!({"modifiers": list}));
+            stack.set_component(ATTRIBUTE_MODIFIERS, Value::Array(list));
         }
         Extended::CopyName(source) => {
             if let Some(name) = resolve_custom_name(source, context) {
@@ -383,33 +391,48 @@ pub fn run(
                 }
             }
             let split = crate::table::create_stack_splitter(contents);
-            let name = component_name(component);
-            let items: Vec<Value> = split.iter().map(stack_to_json).collect();
-            stack.set_component(name, json!({"items": items}));
+            stack.set_component(
+                component,
+                encode_contents(component, split.into_iter().enumerate()),
+            );
         }
         Extended::ModifyContents {
             component,
             modifier,
         } => {
-            let name = component_name(component);
-            let mut items = object_array_field(stack.component(name), "items");
-            // 官方对每个非空物品应用 modifier。空槽不动。
-            // Vanilla applies the modifier to each non-empty item, leaving empty slots.
+            let Some(contents) = stack.component(component) else {
+                return Ok(stack);
+            };
             let mut changed = Vec::new();
-            for value in &items {
-                let mut item = stack_from_json(value)?;
-                if item.is_empty() {
-                    changed.push(value.clone());
+            for (index, value) in array(contents, "container contents")?.iter().enumerate() {
+                let (slot, value) = if component == CONTAINER {
+                    let entry = object(value, "container slot")?;
+                    let slot = required(entry, "slot", "container slot")?
+                        .as_u64()
+                        .and_then(|slot| u8::try_from(slot).ok())
+                        .ok_or_else(|| invalid("container slot is out of range"))?;
+                    (
+                        usize::from(slot),
+                        required(entry, "item", "container slot")?,
+                    )
                 } else {
-                    item = modifier.apply(item, context)?;
-                    changed.push(stack_to_json(&item));
-                }
+                    (index, value)
+                };
+                changed.push((slot, stack_from_json(value)?));
             }
-            items = changed;
-            stack.set_component(name, json!({"items": items}));
+            changed.sort_by_key(|(slot, _)| *slot);
+            for (_, item) in &mut changed {
+                *item = modifier.apply(std::mem::replace(item, LootStack::empty()), context)?;
+                item.set_count(item.count.min(item.max_stack_size()));
+            }
+            stack.set_component(component, encode_contents(component, changed));
         }
         Extended::SetLootTable { table, seed } => {
-            stack.set_component(CONTAINER_LOOT, json!({"loot_table": table, "seed": seed}));
+            let mut value = json!({"loot_table": table});
+            if *seed != 0 {
+                value["seed"] = Value::from(*seed);
+            }
+            stack.set_component(CONTAINER_LOOT, value);
         }
         Extended::SetLore { lore, mode, entity } => {
             if entity.is_some() {
@@ -418,11 +441,7 @@ pub fn run(
                 ));
             }
             let existing = array_field(stack.component(LORE));
-            let resolved: Vec<Value> = lore
-                .iter()
-                .map(|line| Value::String(plain_text(line)))
-                .collect();
-            let lines = mode.apply(&existing, &resolved, 256);
+            let lines = mode.apply(&existing, lore, 256);
             stack.set_component(LORE, Value::Array(lines));
         }
         Extended::FillPlayerHead(target) => {
@@ -446,8 +465,8 @@ pub fn run(
             stack.set_component(CUSTOM_DATA, tag_to_json(&Tag::Compound(target)));
         }
         Extended::SetBannerPattern { patterns, append } => {
-            let base = object_array_field(stack.component(BANNER_PATTERNS), "layers");
-            let added = object_array_field(Some(patterns), "layers");
+            let base = array_field(stack.component(BANNER_PATTERNS));
+            let added = array_field(Some(patterns));
             let layers = if *append {
                 let mut combined = base;
                 combined.extend(added);
@@ -455,7 +474,7 @@ pub fn run(
             } else {
                 added
             };
-            stack.set_component(BANNER_PATTERNS, json!({"layers": layers}));
+            stack.set_component(BANNER_PATTERNS, Value::Array(layers));
         }
         Extended::SetFireworks {
             explosions,
@@ -467,21 +486,43 @@ pub fn run(
                 Some(stand) => stand.operation.apply(&existing.1, &stand.values, 256),
                 None => existing.1,
             };
+            let value = json!({"flight_duration": duration, "explosions": list});
             stack.set_component(
                 FIREWORKS,
-                json!({"flight_duration": duration, "explosions": list}),
+                omit_defaults(
+                    value,
+                    &[("flight_duration", json!(0)), ("explosions", json!([]))],
+                ),
             );
         }
         Extended::SetFireworkExplosion(fields) => {
             // `FireworkExplosion` 的缺省值打底，函数里给的可选字段覆盖上去。
             // Start from the `FireworkExplosion` default and overlay the optional fields.
-            let result = merge_optional(firework_explosion_default(), fields);
-            stack.set_component(FIREWORK_EXPLOSION, Value::Object(result));
+            let mut result = firework_explosion_default();
+            result.extend(object_field(stack.component(FIREWORK_EXPLOSION)));
+            result = merge_optional(result, fields);
+            for (input, output) in [("trail", "has_trail"), ("twinkle", "has_twinkle")] {
+                if let Some(value) = result.remove(input) {
+                    result.insert(output.to_owned(), value);
+                }
+            }
+            stack.set_component(
+                FIREWORK_EXPLOSION,
+                omit_defaults(
+                    Value::Object(result),
+                    &[
+                        ("colors", json!([])),
+                        ("fade_colors", json!([])),
+                        ("has_trail", json!(false)),
+                        ("has_twinkle", json!(false)),
+                    ],
+                ),
+            );
         }
         Extended::SetBookCover(fields) => {
             let mut book = book_content(stack.component(WRITTEN_BOOK_CONTENT));
             if let Some(title) = fields.get("title") {
-                book.insert("title".to_owned(), Value::String(filterable_text(title)));
+                book.insert("title".to_owned(), filterable(title));
             }
             if let Some(author) = fields.get("author") {
                 book.insert("author".to_owned(), author.clone());
@@ -489,18 +530,40 @@ pub fn run(
             if let Some(generation) = fields.get("generation") {
                 book.insert("generation".to_owned(), generation.clone());
             }
-            stack.set_component(WRITTEN_BOOK_CONTENT, Value::Object(book));
+            book.entry("resolved").or_insert(Value::Bool(true));
+            stack.set_component(
+                WRITTEN_BOOK_CONTENT,
+                omit_defaults(
+                    Value::Object(book),
+                    &[
+                        ("generation", json!(0)),
+                        ("pages", json!([])),
+                        ("resolved", json!(false)),
+                    ],
+                ),
+            );
         }
         Extended::SetWrittenBookPages { pages, mode } => {
             let mut book = book_content(stack.component(WRITTEN_BOOK_CONTENT));
             let existing = array_field(book.get("pages"));
-            let resolved: Vec<Value> = pages
-                .iter()
-                .map(|page| Value::String(filterable_text(page)))
-                .collect();
-            let list = mode.apply(&existing, &resolved, usize::MAX);
+            let list = mode.apply(
+                &existing,
+                &pages.iter().map(filterable).collect::<Vec<_>>(),
+                usize::MAX,
+            );
             book.insert("pages".to_owned(), Value::Array(list));
-            stack.set_component(WRITTEN_BOOK_CONTENT, Value::Object(book));
+            book.remove("resolved");
+            stack.set_component(
+                WRITTEN_BOOK_CONTENT,
+                omit_defaults(
+                    Value::Object(book),
+                    &[
+                        ("generation", json!(0)),
+                        ("pages", json!([])),
+                        ("resolved", json!(false)),
+                    ],
+                ),
+            );
         }
         Extended::SetWritableBookPages { pages, mode } => {
             let existing = array_field(
@@ -508,11 +571,11 @@ pub fn run(
                     .component(WRITABLE_BOOK_CONTENT)
                     .and_then(|v| v.get("pages")),
             );
-            let resolved: Vec<Value> = pages
-                .iter()
-                .map(|page| Value::String(filterable_text(page)))
-                .collect();
-            let list = mode.apply(&existing, &resolved, 100);
+            let list = mode.apply(
+                &existing,
+                &pages.iter().map(filterable).collect::<Vec<_>>(),
+                100,
+            );
             stack.set_component(WRITABLE_BOOK_CONTENT, json!({"pages": list}));
         }
         Extended::ToggleTooltips(toggles) => {
@@ -550,6 +613,7 @@ pub fn run(
                     data.insert(key.to_owned(), Value::Array(list));
                 }
             }
+            data.retain(|_, value| !value.as_array().is_some_and(Vec::is_empty));
             stack.set_component(CUSTOM_MODEL_DATA, Value::Object(data));
         }
     }
@@ -677,14 +741,6 @@ fn array_field(value: Option<&Value>) -> Vec<Value> {
     value.and_then(Value::as_array).cloned().unwrap_or_default()
 }
 
-fn object_array_field(value: Option<&Value>, key: &str) -> Vec<Value> {
-    value
-        .and_then(|value| value.get(key))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-}
-
 fn string_array(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
@@ -706,9 +762,21 @@ fn fireworks(value: Option<&Value>) -> (i32, Vec<Value>) {
     (duration, array_field(object.get("explosions")))
 }
 
+fn omit_defaults(mut value: Value, defaults: &[(&str, Value)]) -> Value {
+    let fields = value
+        .as_object_mut()
+        .expect("component fields are an object");
+    for (key, default) in defaults {
+        if fields.get(*key) == Some(default) {
+            fields.remove(*key);
+        }
+    }
+    value
+}
+
 fn firework_explosion_default() -> Map<String, Value> {
     let mut map = Map::new();
-    for key in ["shape", "colors", "fade_colors", "trail", "twinkle"] {
+    for key in ["shape", "colors", "fade_colors", "has_trail", "has_twinkle"] {
         map.insert(key.to_owned(), default_value(key));
     }
     map
@@ -716,9 +784,9 @@ fn firework_explosion_default() -> Map<String, Value> {
 
 fn default_value(key: &str) -> Value {
     match key {
-        "shape" => Value::String("minecraft:small_ball".to_owned()),
+        "shape" => Value::String("small_ball".to_owned()),
         "colors" | "fade_colors" => Value::Array(Vec::new()),
-        "trail" | "twinkle" => Value::Bool(false),
+        "has_trail" | "has_twinkle" => Value::Bool(false),
         _ => Value::Null,
     }
 }
@@ -735,7 +803,7 @@ fn merge_optional(mut base: Map<String, Value>, fields: &Value) -> Map<String, V
 fn book_content(value: Option<&Value>) -> Map<String, Value> {
     let mut map = object_field(value);
     for (key, default) in [
-        ("title", Value::String(String::new())),
+        ("title", json!({"raw": ""})),
         ("author", Value::String(String::new())),
         ("generation", Value::from(0)),
         ("pages", Value::Array(Vec::new())),
@@ -754,49 +822,58 @@ fn custom_model_data(value: Option<&Value>) -> Map<String, Value> {
     map
 }
 
-/// 文本组件收成纯文本，和 oracle 的 `normalize_components` 一致。
-///
-/// Reduces a text component to plain text, like the oracle's `normalize_components`.
-fn plain_text(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Object(map) => map
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned(),
-        _ => value.to_string(),
+fn filterable(value: &Value) -> Value {
+    if value.get("raw").is_some() {
+        value.clone()
+    } else {
+        json!({"raw": value})
     }
 }
 
-/// `Filterable` 收成 `raw` 一侧的纯文本。
-///
-/// Reduces a `Filterable` to the plain text of its `raw` side.
-fn filterable_text(value: &Value) -> String {
-    match value {
-        Value::Object(map) if map.contains_key("raw") => plain_text(&map["raw"]),
-        other => plain_text(other),
+fn parse_container_component(value: &Value) -> Result<String> {
+    let name = string(value, "component")?;
+    let name = if name.contains(':') {
+        name.to_owned()
+    } else {
+        format!("minecraft:{name}")
+    };
+    match name.as_str() {
+        CONTAINER | "minecraft:charged_projectiles" => Ok(name),
+        "minecraft:bundle_contents" => Err(LootError::Unsupported(
+            "bundle loot contents need bundle insertion rules".to_owned(),
+        )),
+        _ => Err(invalid(format!("unknown loot container component {name}"))),
     }
 }
 
-fn component_name(component: &str) -> &str {
-    // `ContainerComponentManipulators`：名字带命名空间时直接用，`container` 补前缀。
-    // The manipulator registry name is used as-is when namespaced; `container` gets a prefix.
-    if component.contains(':') {
-        return component;
-    }
-    if component == "container" {
-        return CONTAINER;
-    }
-    component
+fn encode_contents(component: &str, items: impl IntoIterator<Item = (usize, LootStack)>) -> Value {
+    Value::Array(
+        items
+            .into_iter()
+            .filter_map(|(slot, stack)| {
+                if stack.is_empty() || (component == CONTAINER && slot > usize::from(u8::MAX)) {
+                    return None;
+                }
+                let item = stack_to_json(&stack);
+                Some(if component == CONTAINER {
+                    json!({"slot": slot, "item": item})
+                } else {
+                    item
+                })
+            })
+            .collect(),
+    )
 }
-
-// ---- 物品堆 <-> JSON ----
 
 fn stack_to_json(stack: &LootStack) -> Value {
     let mut map = Map::new();
-    map.insert("item".to_owned(), Value::from(stack.item));
-    map.insert("count".to_owned(), Value::from(stack.count));
+    map.insert(
+        "id".to_owned(),
+        Value::from(crate::names::item_name(stack.item).unwrap_or("minecraft:air")),
+    );
+    if stack.count != 1 {
+        map.insert("count".to_owned(), Value::from(stack.count));
+    }
     if !stack.components.is_empty() {
         let components: Map<String, Value> = stack
             .components
@@ -809,11 +886,22 @@ fn stack_to_json(stack: &LootStack) -> Value {
 }
 
 fn stack_from_json(value: &Value) -> Result<LootStack> {
-    let map = object(value, "container item")?;
-    let item = i32_value(map.get("item").unwrap_or(&Value::Null), "container item")?;
-    let count = i32_value(map.get("count").unwrap_or(&Value::Null), "container count")?;
+    let (name, count) = if let Some(name) = value.as_str() {
+        (name, 1)
+    } else {
+        let map = object(value, "container item")?;
+        let name = string(required(map, "id", "container item")?, "container item id")?;
+        let count = map
+            .get("count")
+            .map(|v| i32_value(v, "container count"))
+            .transpose()?
+            .unwrap_or(1);
+        (name, count)
+    };
+    let item = crate::names::item_id(name)
+        .ok_or_else(|| invalid(format!("unknown container item {name}")))?;
     let mut stack = LootStack::new(item, count);
-    if let Some(components) = map.get("components").and_then(Value::as_object) {
+    if let Some(components) = value.get("components").and_then(Value::as_object) {
         for (name, value) in components {
             stack.set_component(name, value.clone());
         }
@@ -861,6 +949,9 @@ fn resolve_custom_name(source: &str, context: &LootContext<'_, '_, '_>) -> Optio
 
 fn resolve_profile(target: &str, context: &LootContext<'_, '_, '_>) -> Option<Value> {
     let entity = EntityTarget::from_name(target)?.get(context.params)?;
+    if entity.entity_type != mc_bamboo_data::registries::entity_type::PLAYER {
+        return None;
+    }
     entity.components.get(PROFILE).cloned()
 }
 
@@ -871,6 +962,11 @@ fn resolve_profile(target: &str, context: &LootContext<'_, '_, '_>) -> Option<Va
 /// `context` reads the NBT stored on entity views. `Ok(None)` means vanilla's
 /// `source.get` returned null, which is also a no-op.
 fn resolve_nbt_source(source: &Value, context: &LootContext<'_, '_, '_>) -> Result<Option<Tag>> {
+    if let Some(target) = source.as_str() {
+        return Ok(EntityTarget::from_name(target)
+            .and_then(|target| target.get(context.params))
+            .and_then(|entity| entity.nbt.clone()));
+    }
     let map = object(source, "nbt provider source")?;
     let kind = string(required(map, "type", "nbt provider source")?, "type")?;
     match kind {
@@ -880,9 +976,17 @@ fn resolve_nbt_source(source: &Value, context: &LootContext<'_, '_, '_>) -> Resu
                 .and_then(|target| target.get(context.params))
                 .and_then(|entity| entity.nbt.clone()))
         }
-        "minecraft:storage" => Err(LootError::Unsupported(
-            "copy_custom_data from command storage needs the server command storage".to_owned(),
-        )),
+        "minecraft:storage" => {
+            let storage = string(required(map, "source", "nbt provider source")?, "source")?;
+            context
+                .params
+                .level
+                .and_then(|level| level.command_storage(storage))
+                .map(Some)
+                .ok_or_else(|| {
+                    LootError::Unsupported("copy_custom_data needs command storage".to_owned())
+                })
+        }
         other => Err(invalid(format!("unknown nbt provider source `{other}`"))),
     }
 }

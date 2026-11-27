@@ -69,8 +69,10 @@ impl LevelView for TestLevel {
         Some((holder == "Kitten" && objective == "dummy").then_some(1))
     }
 
-    fn storage_number(&self, storage: &str, path: &str) -> Option<Option<f64>> {
-        Some((storage == "minecraft:test" && path == "Counter").then_some(42.0))
+    fn command_storage(&self, storage: &str) -> Option<mc_bamboo_nbt::Tag> {
+        use mc_bamboo_nbt::Tag;
+        (storage == "minecraft:test")
+            .then(|| Tag::Compound(vec![("Counter".to_owned(), Tag::Int(42))]))
     }
 
     fn environment_attribute(&self, name: &str, _origin: Option<(i32, i32, i32)>) -> Option<Value> {
@@ -79,6 +81,33 @@ impl LevelView for TestLevel {
             "minecraft:test/float" => Some(json!(2.5)),
             _ => None,
         }
+    }
+
+    fn loot_table_tag(&self, name: &str) -> Option<Vec<String>> {
+        match name {
+            "minecraft:custom_pack_tag" => Some(Vec::new()),
+            "minecraft:desert_archaeology" => Some(vec![
+                "minecraft:archaeology/desert_pyramid".to_owned(),
+                "minecraft:archaeology/desert_well".to_owned(),
+            ]),
+            _ => None,
+        }
+    }
+
+    fn item_modifier(&self, name: &str) -> Option<std::sync::Arc<LootFunction>> {
+        static LOOP: std::sync::OnceLock<std::sync::Arc<LootFunction>> = std::sync::OnceLock::new();
+        (name == "minecraft:recursive_modifier").then(|| {
+            LOOP.get_or_init(|| {
+                std::sync::Arc::new(
+                    LootFunction::parse(&json!([
+                        {"type":"minecraft:set_count","count":2,"add":true},
+                        "minecraft:recursive_modifier"
+                    ]))
+                    .unwrap(),
+                )
+            })
+            .clone()
+        })
     }
 
     fn slot_items(&self, source: &str) -> Option<Vec<LootStack>> {
@@ -1045,7 +1074,7 @@ fn every_function_kind_evaluates() {
     .unwrap();
     assert_eq!(
         lore.component("minecraft:lore").and_then(Value::as_array),
-        Some(&vec![json!("line")])
+        Some(&vec![json!({"text":"line"})])
     );
     let named_ref = apply(json!("minecraft:set_count"), stone, &stored);
     assert!(matches!(named_ref, Err(LootError::Unsupported(_))));
@@ -1164,6 +1193,24 @@ fn entry_kinds_follow_the_official_composition() {
     }))
     .unwrap();
     assert!(tagged.get_random_items(&level, &random).unwrap().is_empty());
+    for expand in [false, true] {
+        let table = LootTable::parse(&json!({
+            "pools": [{"rolls": 1, "entries": [{"type": "minecraft:loot_table",
+                "value": "#minecraft:desert_archaeology", "expand": expand}]}]
+        }))
+        .unwrap();
+        let products = table
+            .get_random_items(&level, &LegacyRandom::new(42))
+            .unwrap();
+        assert_eq!(products.len(), if expand { 1 } else { 2 });
+    }
+    let stack = apply(
+        json!("minecraft:recursive_modifier"),
+        LootStack::new(items::STONE, 1),
+        &level,
+    )
+    .unwrap();
+    assert_eq!(stack.count, 3);
 }
 
 #[test]
@@ -1411,7 +1458,6 @@ fn extended_functions_evaluate() {
     .unwrap();
     let modifiers = attrs
         .component("minecraft:attribute_modifiers")
-        .and_then(|value| value.get("modifiers"))
         .and_then(Value::as_array)
         .unwrap();
     assert_eq!(modifiers.len(), 1);
@@ -1450,7 +1496,7 @@ fn extended_functions_evaluate() {
 
     // `set_banner_pattern`：append=false 直接替换 layers。
     let banner = apply(
-        json!({"type":"minecraft:set_banner_pattern","patterns":{"layers":[{"pattern":"minecraft:stripe","color":"minecraft:red"}]},"append":false}),
+        json!({"type":"minecraft:set_banner_pattern","patterns":[{"pattern":"minecraft:stripe_bottom","color":"red"}],"append":false}),
         stone.clone(),
         &params,
     )
@@ -1458,7 +1504,6 @@ fn extended_functions_evaluate() {
     assert_eq!(
         banner
             .component("minecraft:banner_patterns")
-            .and_then(|value| value.get("layers"))
             .and_then(Value::as_array)
             .map(Vec::len),
         Some(1)
@@ -1466,7 +1511,7 @@ fn extended_functions_evaluate() {
 
     // `set_fireworks`：flight_duration 和 explosions 列表。
     let fireworks = apply(
-        json!({"type":"minecraft:set_fireworks","flight_duration":3,"explosions":{"mode":"append","values":[{"shape":"minecraft:small_ball"}]}}),
+        json!({"type":"minecraft:set_fireworks","flight_duration":3,"explosions":{"mode":"append","values":[{"shape":"small_ball"}]}}),
         stone.clone(),
         &params,
     )
@@ -1486,7 +1531,7 @@ fn extended_functions_evaluate() {
 
     // `set_firework_explosion`：缺省字段补默认。
     let explosion = apply(
-        json!({"type":"minecraft:set_firework_explosion","shape":"minecraft:large_ball","colors":[1,2],"trail":true}),
+        json!({"type":"minecraft:set_firework_explosion","shape":"large_ball","colors":[1,2],"trail":true}),
         stone.clone(),
         &params,
     )
@@ -1494,12 +1539,17 @@ fn extended_functions_evaluate() {
     let explosion = explosion.component("minecraft:firework_explosion").unwrap();
     assert_eq!(
         explosion.get("shape").and_then(Value::as_str),
-        Some("minecraft:large_ball")
+        Some("large_ball")
     );
-    assert_eq!(explosion.get("trail").and_then(Value::as_bool), Some(true));
     assert_eq!(
-        explosion.get("twinkle").and_then(Value::as_bool),
-        Some(false)
+        explosion.get("has_trail").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(
+        !explosion
+            .get("has_twinkle")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     );
 
     // `set_book_cover`：written_book_content 的封面字段。
@@ -1525,7 +1575,7 @@ fn extended_functions_evaluate() {
             .component("minecraft:written_book_content")
             .and_then(|value| value.get("pages"))
             .and_then(Value::as_array),
-        Some(&vec![json!("a"), json!("b")])
+        Some(&vec![json!({"raw":"a"}), json!({"raw":"b"})])
     );
     let writable = apply(
         json!({"type":"minecraft:set_writable_book_pages","pages":["x"],"mode":"replace_all"}),
@@ -1538,7 +1588,7 @@ fn extended_functions_evaluate() {
             .component("minecraft:writable_book_content")
             .and_then(|value| value.get("pages"))
             .and_then(Value::as_array),
-        Some(&vec![json!("x")])
+        Some(&vec![json!({"raw":"x"})])
     );
 
     // `toggle_tooltips`：shown=false 记进 hidden_components，排序去重。
@@ -1582,20 +1632,19 @@ fn extended_functions_evaluate() {
     .unwrap();
     let container_items = contents
         .component("minecraft:container")
-        .and_then(|value| value.get("items"))
         .and_then(Value::as_array)
         .unwrap();
     assert_eq!(container_items.len(), 1);
     assert_eq!(
-        container_items[0].get("item").and_then(Value::as_i64),
-        Some(i64::from(items::DIRT))
+        container_items[0]["item"]["id"].as_str(),
+        Some("minecraft:dirt")
     );
 
     // `modify_contents`：对容器里每个非空物品应用 modifier。
     let mut container = stone.clone();
     container.set_component(
         "minecraft:container",
-        json!({"items":[{"item": items::DIRT, "count": 2}]}),
+        json!([{"slot":0,"item":{"id":"minecraft:dirt","count":2}}]),
     );
     let modified = apply(
         json!({"type":"minecraft:modify_contents","component":"minecraft:container","modifier":{"type":"minecraft:set_count","count":5}}),
@@ -1605,13 +1654,9 @@ fn extended_functions_evaluate() {
     .unwrap();
     let modified_items = modified
         .component("minecraft:container")
-        .and_then(|value| value.get("items"))
         .and_then(Value::as_array)
         .unwrap();
-    assert_eq!(
-        modified_items[0].get("count").and_then(Value::as_i64),
-        Some(5)
-    );
+    assert_eq!(modified_items[0]["item"]["count"].as_i64(), Some(5));
 
     // `copy_name`：方块实体的 custom_name 写到物品。
     params.block_entity = Some(crate::BlockEntityView {
@@ -1634,7 +1679,7 @@ fn extended_functions_evaluate() {
 
     // `fill_player_head`：玩家头 + 实体 profile 写 profile 组件。
     let mut head_params = level_params();
-    let mut donor = EntityView::new(0);
+    let mut donor = EntityView::new(mc_bamboo_data::registries::entity_type::PLAYER);
     donor
         .components
         .insert("minecraft:profile".to_owned(), json!({"name": "Steve"}));

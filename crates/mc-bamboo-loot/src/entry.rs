@@ -60,6 +60,7 @@ enum EntryBody {
 #[derive(Debug)]
 pub(crate) enum TableValue {
     Named(String),
+    Tagged(String),
     Inline(Box<LootTable>),
 }
 
@@ -95,6 +96,7 @@ pub(crate) enum CandidateBody<'a> {
     Items(&'a [i32]),
     /// 没有展开的嵌套表：选中后依次求值这些表。
     Tables(&'a [TableValue]),
+    TaggedTable(std::sync::Arc<LootTable>),
     /// `slots`：`slot_source` 的 JSON 文本。
     ///
     /// `slots`: the JSON text of `slot_source`.
@@ -169,7 +171,7 @@ impl LootEntry {
             }
             EntryBody::Group(children) => expand_group(children, context, depth, modifiers, output),
             _ => {
-                self.expand_leaf(context, modifiers, output);
+                self.expand_leaf(context, modifiers, output)?;
                 Ok(true)
             }
         }
@@ -180,7 +182,7 @@ impl LootEntry {
         context: &LootContext<'_, '_, '_>,
         modifiers: &mut Vec<&'a LootFunction>,
         output: &mut Vec<Candidate<'a>>,
-    ) {
+    ) -> Result<()> {
         let weight = self.get_weight(context.luck());
         let outer: Vec<&'a LootFunction> = modifiers.iter().rev().copied().collect();
         match &self.body {
@@ -219,6 +221,16 @@ impl LootEntry {
             EntryBody::Nested { tables, expand } => {
                 if *expand {
                     for table in tables {
+                        if let TableValue::Tagged(name) = table {
+                            for name in tag_members(context, name)? {
+                                output.push(Candidate {
+                                    weight,
+                                    body: CandidateBody::TaggedTable(LootTable::from_name(&name)?),
+                                    modifiers: outer.clone(),
+                                });
+                            }
+                            continue;
+                        }
                         output.push(Candidate {
                             weight,
                             body: CandidateBody::Tables(std::slice::from_ref(table)),
@@ -241,6 +253,7 @@ impl LootEntry {
             // 组合条目在上面处理。
             EntryBody::Alternatives(_) | EntryBody::Sequence(_) | EntryBody::Group(_) => {}
         }
+        Ok(())
     }
 
     /// `UniformContainerBase.EntryBase.getWeight`。
@@ -293,12 +306,24 @@ impl Candidate<'_> {
                             let table = LootTable::from_name(name)?;
                             table.get_random_items_raw(context, depth + 1, &mut emit)?;
                         }
+                        TableValue::Tagged(name) => {
+                            for member in tag_members(context, name)? {
+                                LootTable::from_name(&member)?.get_random_items_raw(
+                                    context,
+                                    depth + 1,
+                                    &mut emit,
+                                )?;
+                            }
+                        }
                         TableValue::Inline(table) => {
                             table.get_random_items_raw(context, depth + 1, &mut emit)?;
                         }
                     }
                 }
                 Ok(())
+            }
+            CandidateBody::TaggedTable(table) => {
+                table.get_random_items_raw(context, depth + 1, &mut emit)
             }
             CandidateBody::Slots(source) => {
                 // `SlotLoot.createItemStack`：世界侧按官方 slot 来源给出物品。
@@ -374,21 +399,14 @@ fn parse_children(map: &Map<String, Value>, kind: &str) -> Result<Vec<LootEntry>
         })
 }
 
-/// 战利品表标签：`#名字` → 成员表名列表。官方 26.3 数据包没有这类标签，生成器也没
-/// 导出，所以这里是空表；自定义数据包的标签解析见 README 已知限制。
-///
-/// Loot table tags: `#name` -> member table names. Vanilla 26.3 ships no such tags and
-/// the generator exports none, so this is empty; custom-pack tags are a known limitation.
-static LOOT_TABLE_TAGS: &[(&str, &[&str])] = &[];
-
-fn loot_table_tag(name: &str) -> Option<&'static [&'static str]> {
-    LOOT_TABLE_TAGS
-        .iter()
-        .find(|(tag, _)| *tag == name)
-        .map(|(_, members)| *members)
+fn tag_members(context: &LootContext<'_, '_, '_>, name: &str) -> Result<Vec<String>> {
+    context
+        .params
+        .level
+        .and_then(|level| level.loot_table_tag(name))
+        .ok_or_else(|| LootError::Unsupported(format!("unresolved loot table tag #{name}")))
 }
 
-/// `LootTable.LIST_CODEC`：单个表、`#标签`、或者表数组。标签展开成多个表。
 fn parse_tables(value: &Value) -> Result<Vec<TableValue>> {
     match value {
         Value::Array(tables) => {
@@ -406,13 +424,7 @@ fn parse_table(value: &Value) -> Result<Vec<TableValue>> {
     match value {
         Value::String(name) => {
             if let Some(tag) = name.strip_prefix('#') {
-                // 未知 / 空标签按官方 `HolderSet` 展开成空列表，选中后不产出物品。
-                // An unknown or empty tag expands to nothing, matching `HolderSet`.
-                return Ok(loot_table_tag(tag)
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(|member| TableValue::Named((*member).to_owned()))
-                    .collect());
+                return Ok(vec![TableValue::Tagged(tag.to_owned())]);
             }
             if mc_bamboo_data::loot::loot_table(name).is_none() {
                 return Err(LootError::UnknownTable(name.clone()));

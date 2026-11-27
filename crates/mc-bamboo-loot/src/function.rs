@@ -108,7 +108,7 @@ enum FunctionBody {
     SetPotion(i32),
     SetStewEffect(Vec<(i32, IntProvider)>),
     /// 本实现没有这个函数需要的数据。
-    Unsupported(String),
+    Reference(String),
     /// `exploration_map`：找不到结构时原样退回。
     ExplorationMap(ExplorationMapSpec),
     /// `set_random_dyes`：`number_of_dyes` 提供器。
@@ -203,9 +203,7 @@ impl LootFunction {
             }
             Value::String(name) => Ok(Self {
                 condition: None,
-                body: FunctionBody::Unsupported(format!(
-                    "named function `{name}` is not resolved by this crate"
-                )),
+                body: FunctionBody::Reference(name.clone()),
             }),
             Value::Object(map) => Self::parse_object(map, depth),
             _ => Err(LootError::Invalid(
@@ -713,7 +711,22 @@ impl LootFunction {
                 Ok(set_random_potion(stack, options.as_deref(), context))
             }
             FunctionBody::Extended(extended) => crate::function_ext::run(extended, stack, context),
-            FunctionBody::Unsupported(message) => Err(LootError::Unsupported(message.clone())),
+            FunctionBody::Reference(name) => {
+                let modifier = context
+                    .params
+                    .level
+                    .and_then(|level| level.item_modifier(name))
+                    .ok_or_else(|| {
+                        LootError::Unsupported(format!("unresolved item modifier {name}"))
+                    })?;
+                let id = std::sync::Arc::as_ptr(&modifier).cast();
+                if !context.enter_element(id) {
+                    return Ok(stack);
+                }
+                let result = modifier.apply(stack, context);
+                context.leave_element(id);
+                result
+            }
         }
     }
 }
@@ -1191,6 +1204,7 @@ fn set_random_dyes(
         };
     }
     let rgb = (channels[0] << 16) | (channels[1] << 8) | channels[2];
+    stack.set_count(1);
     stack.set_component("minecraft:dyed_color", Value::from(rgb));
     Ok(stack)
 }
