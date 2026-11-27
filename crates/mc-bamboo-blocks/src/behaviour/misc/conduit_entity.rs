@@ -278,9 +278,9 @@ fn apply_effects(world: &mut World, pos: BlockPos, blocks: &[BlockPos]) {
         f64::from(pos.x) - radius,
         f64::from(pos.y) - radius,
         f64::from(pos.z) - radius,
-        f64::from(pos.x + 1) + radius,
-        f64::from(pos.y + 1) + radius + world_height,
-        f64::from(pos.z + 1) + radius,
+        i64::from(pos.x) as f64 + 1.0 + radius,
+        i64::from(pos.y) as f64 + 1.0 + radius + world_height,
+        i64::from(pos.z) as f64 + 1.0 + radius,
     );
     let targets: Vec<i32> = world
         .player_views()
@@ -427,9 +427,9 @@ fn player_bounds(player: &PlayerView) -> Aabb {
 
 /// `Vec3i.closerThan(Vec3i, double)`：整格坐标的距离平方严格小于半径平方。
 fn closer_than(from: BlockPos, to: BlockPos, radius: f64) -> bool {
-    let dx = f64::from(from.x - to.x);
-    let dy = f64::from(from.y - to.y);
-    let dz = f64::from(from.z - to.z);
+    let dx = (i64::from(from.x) - i64::from(to.x)) as f64;
+    let dy = (i64::from(from.y) - i64::from(to.y)) as f64;
+    let dz = (i64::from(from.z) - i64::from(to.z)) as f64;
     dx * dx + dy * dy + dz * dz < radius * radius
 }
 
