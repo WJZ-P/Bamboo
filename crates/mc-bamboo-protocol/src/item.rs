@@ -329,6 +329,24 @@ mod tests {
         assert_ne!(stack, other);
     }
 
+    /// 官方 `ItemStack.copy` 用 `components.copy()` 共享不可变组件，复制品带同一个
+    /// `selectedItem`；两份的选中格互不影响，存档 / 网络字节都不含这个下标。
+    ///
+    /// Vanilla `ItemStack.copy` shares the immutable component map, so the copy
+    /// carries the same `selectedItem`; the two are independent afterwards, and
+    /// neither codec writes the index.
+    #[test]
+    fn copying_a_bundle_keeps_the_selection_but_not_in_wire_bytes() {
+        let mut stack = with_components();
+        stack.bundle_selected = Some(2);
+        let mut copy = stack.clone();
+        assert_eq!(copy.bundle_selected, Some(2));
+        copy.bundle_selected = Some(5);
+        assert_ne!(stack.bundle_selected, copy.bundle_selected);
+        assert_eq!(stack, copy);
+        assert_eq!(trusted(&stack), trusted(&copy));
+    }
+
     #[test]
     fn empty_stack_is_a_single_zero() {
         assert!(ItemStack::empty().is_empty());

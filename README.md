@@ -578,9 +578,12 @@ WebView2 的渲染进程不算在内。
   生成的两件掉落物逐刻比位置 / 速度 / 数量 / 年龄 / 拾取延迟，67 题 1212 刻 0 不一致。
   四处改坏确认（`--break-self-test bundle_first|bundle_slots|bundle_selected` 与
   `entity-oracle java --break-self-test bundle-drops`）分别报 5 / 15 / 12 / 2 处差异。
-  **已知限制**：选中下标是服务端本地状态，复制物品堆时两份会带上同一个下标；
-  存档和网络字节不持久化它；收纳袋的 /tooltip 显示格数、`Consumable` 之外的物品使用动画、
-  以及 `BundlePredicate` 的物品判据暂未单独接入。
+  **已知限制**：收纳袋的 /tooltip 显示格数（`BundleItem.getTooltipImage`）、`Consumable`
+  之外的物品使用动画、以及 `BundlePredicate` 的物品判据暂未单独接入。选中下标挂在物品堆上、
+  复制时两份带同一个下标、不进存档和网络这几条**和官方一致**，不是限制：官方
+  `BundleContents.selectedItem` 是组件字段，`CODEC` / `STREAM_CODEC` 只编解码 `items`、
+  `equals` / `hashCode` 也只比 `items`，`asMutable` / `Mutable.toImmutable` 把下标带进带出，
+  `ItemStack.copy` 的 `components.copy()` 共享这份不可变组件，复制品因此带同一个下标。
 - 物品的数据组件能完整解码和编码：122 种组件每种一个类型，格式照官方每一种的 `StreamCodec`，
   包括文本组件（线上是 NBT）、`Holder` 和 `HolderSet`、方块谓词、嵌套的物品堆（容器、收纳袋、
   弩的弹药）和带 NBT 的组件。NBT 也补齐了解码，带官方的配额和深度上限。
