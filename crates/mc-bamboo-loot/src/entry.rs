@@ -50,14 +50,17 @@ enum EntryBody {
     Alternatives(Vec<LootEntry>),
     Sequence(Vec<LootEntry>),
     Group(Vec<LootEntry>),
-    /// `slots` 条目要从实体或容器里取现成的物品，本实现没有这种数据来源。
-    Slots,
+    /// `slots`：条目里 `slot_source` 的 JSON 文本，交给世界侧解析。
+    ///
+    /// `slots`: the JSON text of the entry's `slot_source`, resolved by the level view.
+    Slots(String),
 }
 
 /// `loot_table` 条目引用的表：注册表里的名字，或者内联在 JSON 里的表。
 #[derive(Debug)]
 pub(crate) enum TableValue {
     Named(String),
+    Tagged(String),
     Inline(Box<LootTable>),
 }
 
@@ -93,7 +96,11 @@ pub(crate) enum CandidateBody<'a> {
     Items(&'a [i32]),
     /// 没有展开的嵌套表：选中后依次求值这些表。
     Tables(&'a [TableValue]),
-    Slots,
+    TaggedTable(std::sync::Arc<LootTable>),
+    /// `slots`：`slot_source` 的 JSON 文本。
+    ///
+    /// `slots`: the JSON text of `slot_source`.
+    Slots(&'a str),
 }
 
 impl LootEntry {
@@ -164,7 +171,7 @@ impl LootEntry {
             }
             EntryBody::Group(children) => expand_group(children, context, depth, modifiers, output),
             _ => {
-                self.expand_leaf(context, modifiers, output);
+                self.expand_leaf(context, modifiers, output)?;
                 Ok(true)
             }
         }
@@ -175,7 +182,7 @@ impl LootEntry {
         context: &LootContext<'_, '_, '_>,
         modifiers: &mut Vec<&'a LootFunction>,
         output: &mut Vec<Candidate<'a>>,
-    ) {
+    ) -> Result<()> {
         let weight = self.get_weight(context.luck());
         let outer: Vec<&'a LootFunction> = modifiers.iter().rev().copied().collect();
         match &self.body {
@@ -214,6 +221,16 @@ impl LootEntry {
             EntryBody::Nested { tables, expand } => {
                 if *expand {
                     for table in tables {
+                        if let TableValue::Tagged(name) = table {
+                            for name in tag_members(context, name)? {
+                                output.push(Candidate {
+                                    weight,
+                                    body: CandidateBody::TaggedTable(LootTable::from_name(&name)?),
+                                    modifiers: outer.clone(),
+                                });
+                            }
+                            continue;
+                        }
                         output.push(Candidate {
                             weight,
                             body: CandidateBody::Tables(std::slice::from_ref(table)),
@@ -228,14 +245,15 @@ impl LootEntry {
                     });
                 }
             }
-            EntryBody::Slots => output.push(Candidate {
+            EntryBody::Slots(source) => output.push(Candidate {
                 weight,
-                body: CandidateBody::Slots,
+                body: CandidateBody::Slots(source),
                 modifiers: outer,
             }),
             // 组合条目在上面处理。
             EntryBody::Alternatives(_) | EntryBody::Sequence(_) | EntryBody::Group(_) => {}
         }
+        Ok(())
     }
 
     /// `UniformContainerBase.EntryBase.getWeight`。
@@ -288,6 +306,15 @@ impl Candidate<'_> {
                             let table = LootTable::from_name(name)?;
                             table.get_random_items_raw(context, depth + 1, &mut emit)?;
                         }
+                        TableValue::Tagged(name) => {
+                            for member in tag_members(context, name)? {
+                                LootTable::from_name(&member)?.get_random_items_raw(
+                                    context,
+                                    depth + 1,
+                                    &mut emit,
+                                )?;
+                            }
+                        }
                         TableValue::Inline(table) => {
                             table.get_random_items_raw(context, depth + 1, &mut emit)?;
                         }
@@ -295,9 +322,20 @@ impl Candidate<'_> {
                 }
                 Ok(())
             }
-            CandidateBody::Slots => Err(LootError::Unsupported(
-                "slot loot needs an entity or container to read items from".to_owned(),
-            )),
+            CandidateBody::TaggedTable(table) => {
+                table.get_random_items_raw(context, depth + 1, &mut emit)
+            }
+            CandidateBody::Slots(source) => {
+                // `SlotLoot.createItemStack`：按槽位来源取物品，跳过空堆。
+                // `SlotLoot.createItemStack`: read the slot source, skipping empty stacks.
+                let items = crate::slot_source::items(source, context)?;
+                for item in items {
+                    if !item.is_empty() {
+                        emit(item)?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -331,7 +369,9 @@ fn parse_body(map: &Map<String, Value>, kind: &str) -> Result<EntryBody> {
         "minecraft:alternatives" => Ok(EntryBody::Alternatives(parse_children(map, kind)?)),
         "minecraft:sequence" => Ok(EntryBody::Sequence(parse_children(map, kind)?)),
         "minecraft:group" => Ok(EntryBody::Group(parse_children(map, kind)?)),
-        "minecraft:slots" => Ok(EntryBody::Slots),
+        "minecraft:slots" => Ok(EntryBody::Slots(
+            required(map, "slot_source", kind)?.to_string(),
+        )),
         other => Err(LootError::Invalid(format!(
             "unknown loot entry type `{other}`"
         ))),
@@ -352,28 +392,39 @@ fn parse_children(map: &Map<String, Value>, kind: &str) -> Result<Vec<LootEntry>
         })
 }
 
-/// `LootTable.LIST_CODEC`：单个表、`#标签`、或者表数组。本数据包里没有表标签。
+fn tag_members(context: &LootContext<'_, '_, '_>, name: &str) -> Result<Vec<String>> {
+    context
+        .params
+        .level
+        .and_then(|level| level.loot_table_tag(name))
+        .ok_or_else(|| LootError::Unsupported(format!("unresolved loot table tag #{name}")))
+}
+
 fn parse_tables(value: &Value) -> Result<Vec<TableValue>> {
     match value {
-        Value::Array(tables) => tables.iter().map(parse_table).collect(),
-        other => Ok(vec![parse_table(other)?]),
+        Value::Array(tables) => {
+            let mut result = Vec::new();
+            for table in tables {
+                result.extend(parse_table(table)?);
+            }
+            Ok(result)
+        }
+        other => parse_table(other),
     }
 }
 
-fn parse_table(value: &Value) -> Result<TableValue> {
+fn parse_table(value: &Value) -> Result<Vec<TableValue>> {
     match value {
         Value::String(name) => {
-            if name.starts_with('#') {
-                return Err(LootError::Unsupported(
-                    "loot table tags are not exported by the data generator".to_owned(),
-                ));
+            if let Some(tag) = name.strip_prefix('#') {
+                return Ok(vec![TableValue::Tagged(tag.to_owned())]);
             }
             if mc_bamboo_data::loot::loot_table(name).is_none() {
                 return Err(LootError::UnknownTable(name.clone()));
             }
-            Ok(TableValue::Named(name.clone()))
+            Ok(vec![TableValue::Named(name.clone())])
         }
-        Value::Object(_) => Ok(TableValue::Inline(Box::new(LootTable::parse(value)?))),
+        Value::Object(_) => Ok(vec![TableValue::Inline(Box::new(LootTable::parse(value)?))]),
         _ => Err(LootError::Invalid(
             "loot_table value must be a name, a table or a list".to_owned(),
         )),

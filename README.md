@@ -1606,9 +1606,10 @@ WebView2 的渲染进程不算在内。
   Windows 后台起的原生进程没有可用 stdin，控制台线程读到 EOF 就退出，`tools/probe.sh`
   因此用客户端 `/stop`，有真实控制台/管道时往 stdin 写 `stop` 一样能关服。
   会改组件的函数只记下「要设置什么」的 JSON，不写真正的组件字节。
-  做完的函数：`exploration_map`（由调用方提供定位及建图服务；未提供时保留输入物品）、`set_count`、`set_item`、`set_components`、`apply_bonus`（三种公式）、`copy_state`、`discard`、`explosion_decay`、`filtered`、`limit_count`、`set_damage`、`set_enchantments`、`set_instrument`、`set_ominous_bottle_amplifier`、`set_potion`（只写药水 id）、`set_stew_effect`、`enchant_randomly`、`enchant_with_levels`、`enchanted_count_increase`、`furnace_smelt`、`copy_components`（只做 `block_entity` 来源）、不带实体的 `set_name`。
-  没做、求值时直接报不支持的：`set_custom_data`、`set_attributes`、`copy_name`、`set_contents`、`modify_contents`、`set_loot_table`、`set_lore`、`fill_player_head`、`copy_custom_data`、`set_banner_pattern`、`set_random_dyes`、`set_random_potion`、`set_fireworks`、`set_firework_explosion`、`set_book_cover`、`set_written_book_pages`、`set_writable_book_pages`、`toggle_tooltips`、`set_custom_model_data`，以及 `copy_components` 的实体或物品来源、带实体的 `set_name`、按名字引用的物品修饰器。
-  数值里的 `score`、`storage`、`environment_attribute`，条件里的 `environment_attribute_check`，条目里的 `slots` 和战利品表标签（`#`）同样报不支持。
+  做完的函数：`exploration_map`（由调用方提供定位及建图服务；未提供时保留输入物品）、`set_count`、`set_item`、`set_components`、`apply_bonus`（三种公式）、`copy_state`、`discard`、`explosion_decay`、`filtered`、`limit_count`、`set_damage`、`set_enchantments`、`set_instrument`、`set_ominous_bottle_amplifier`、`set_potion`（只写药水 id）、`set_stew_effect`、`enchant_randomly`、`enchant_with_levels`、`enchanted_count_increase`、`furnace_smelt`、不带实体的 `set_name`。
+  本期补齐自定义数据、属性、名称与组件复制、容器内容、容器战利品表、描述、玩家头、旗帜、随机染色和随机药水、烟花、书本、提示框及自定义模型数据的求值。包括 `set_custom_data`、`set_attributes`、`copy_name`、`set_contents`、`modify_contents`、`set_loot_table`、`set_lore`、`fill_player_head`、`copy_custom_data`、`set_banner_pattern`、`set_random_dyes`、`set_random_potion`、`set_fireworks`、`set_firework_explosion`、`set_book_cover`、`set_written_book_pages`、`set_writable_book_pages`、`toggle_tooltips` 和 `set_custom_model_data`。`copy_components` 可读调用方提供的方块实体、实体和工具组件。
+  `score`、`storage`、`environment_attribute` 和 `environment_attribute_check` 接受世界视图的数据；`storage` 按 NBT 路径只取唯一的数值标签。`slots` 支持实体装备槽和分组，其余可由世界视图提供；战利品表标签和命名物品修饰器也由世界视图提供。官方导出的 1447 张表不使用这些数据源，71 处 `copy_components` 都读方块实体。
+  **已知限制**：世界侧 `LevelView` 现在从 `Global` 快照读计分板分数和命令存储，但 `environment_attribute`、任意背包/容器槽位和数据包注册表（战利品表标签、命名物品修饰器）仍没有统一接进游戏掉落路径；因此求值器支持不代表自定义数据包在实际游戏里已可用。带实体解析的 `set_name` / `set_lore`、收纳袋的 `set_contents` / `modify_contents` 仍不支持。`copy_custom_data` 的目标只支持复合标签键、尚不支持方块实体 NBT 来源；组件 JSON 不保留全部 SNBT 数值/数组类型。`fill_player_head` 需要调用方提供玩家档案；`copy_components`、追加属性及其它读改写路径未普遍读取输入物品的原型组件。`copy_name` 尚不会清除来自无名对象的旧名字。药水标签可用性取决于已导出的注册表标签。
   条件 `entity_scores` 照官方 `EntityHasScoreCondition`：没有实体、目标不存在或实体在目标下没有分数都判假。
   实体谓词补上了 `effects`（`MobEffectsPredicate`，非生物判假）、`nbt`（`NbtUtils.compareNbt` 的部分匹配）、
   `team`、`type_specific/lightning`（不是闪电判假）和 `type_specific/player`（不是玩家判假；等级、饥饿、
@@ -1967,7 +1968,16 @@ cargo run --release -p mc-bamboo-vanilla -- recipe-oracle <java 路径> [--cases
 
 ```bash
 cargo run -p mc-bamboo-vanilla -- loot-oracle <java 路径> [--cases N] [--seed S] [--show N]
+cargo run -p mc-bamboo-vanilla -- loot-oracle <java 路径> --functions --cases 8 --seed 42
 ```
+
+战利品函数专项对拍同样不启动服务器。它比较物品、数量、官方 codec 组件补丁和求值后的 `nextLong`；
+`loot-functions.json` 的 36 个场景覆盖本期全部新函数、`score` / `storage` / `environment_attribute`
+数值提供器、`environment_attribute_check` 条件和 `slots` 条目，另外补了多修饰器属性（两次取数与
+`withModifierAdded` 去重）、`set_fireworks` 的爆炸按官方 `FireworkExplosion.CODEC` 归一化、
+列表操作 `replace_section`、提示框 `show` 分支和 `custom_model_data` 的 `colors` / `flags` 分支；
+`--cases 8 --seed 42` 共 288 题 0 不一致。`--break-function-rng` 故意在随机染色比较前多取一次，
+检查尾值比较能否抓到差异（稳定报 8 题不一致）。
 
 探险地图专项对拍（不启动服务器）：`loot-oracle --explorer --seed 42` 比沉船箱的 27 个槽位、地图组件、物品翻译键及 RNG 尾值；
 `trade-oracle --only cartographer` 包含 21 个注入固定目标的报价用例；`map-oracle --explorer` 用人造海岸比预览像素和首个持图更新包。

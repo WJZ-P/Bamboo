@@ -322,6 +322,7 @@ fn evaluate(
     pos: BlockPos,
 ) -> Result<Vec<LootStack>, CommandFail> {
     let fallback = region.random.source();
+    let level = crate::block_drops::ChunkLevel::new(&region.chunks, &region.global);
     match request.source {
         Source::Loot => {
             let name = parsed
@@ -329,11 +330,12 @@ fn evaluate(
                 .and_then(Value::as_str)
                 .ok_or_else(|| fail("command.failed"))?;
             let table = LootTable::from_name(name).map_err(|_| fail("command.failed"))?;
-            let params = LootParams::new(0.0).with_origin(Position::new(
+            let mut params = LootParams::new(0.0).with_origin(Position::new(
                 f64::from(pos.x),
                 f64::from(pos.y),
                 f64::from(pos.z),
             ));
+            params.level = Some(&level);
             table
                 .get_random_items_with_seed(&params, 0, Some(sequences), fallback)
                 .map_err(|_| fail("command.failed"))
@@ -361,6 +363,7 @@ fn evaluate(
             ));
             params.block_state = Some(state);
             params.block_entity = crate::block_drops::collect_from_region(region, pos);
+            params.level = Some(&level);
             table
                 .get_random_items_with_seed(&params, 0, Some(sequences), fallback)
                 .map_err(|_| fail("command.failed"))

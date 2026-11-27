@@ -32,27 +32,6 @@ use crate::{LootError, Result};
 /// 嵌套函数（`sequence`、`filtered`）的最大深度，防止坏数据无限展开。
 const MAX_DEPTH: usize = 32;
 
-/// 已注册但本实现没有做的函数。遇到它们报不支持，而不是当成未知类型。
-const UNSUPPORTED_FUNCTIONS: &[&str] = &[
-    "minecraft:set_custom_data",
-    "minecraft:set_attributes",
-    "minecraft:copy_name",
-    "minecraft:set_contents",
-    "minecraft:modify_contents",
-    "minecraft:set_loot_table",
-    "minecraft:set_lore",
-    "minecraft:fill_player_head",
-    "minecraft:copy_custom_data",
-    "minecraft:set_banner_pattern",
-    "minecraft:set_fireworks",
-    "minecraft:set_firework_explosion",
-    "minecraft:set_book_cover",
-    "minecraft:set_written_book_pages",
-    "minecraft:set_writable_book_pages",
-    "minecraft:toggle_tooltips",
-    "minecraft:set_custom_model_data",
-];
-
 /// 一个战利品函数：可选条件和函数体。
 #[derive(Debug)]
 pub struct LootFunction {
@@ -129,13 +108,17 @@ enum FunctionBody {
     SetPotion(i32),
     SetStewEffect(Vec<(i32, IntProvider)>),
     /// 本实现没有这个函数需要的数据。
-    Unsupported(String),
+    Reference(String),
     /// `exploration_map`：找不到结构时原样退回。
     ExplorationMap(ExplorationMapSpec),
     /// `set_random_dyes`：`number_of_dyes` 提供器。
     SetRandomDyes(IntProvider),
     /// `set_random_potion`：药水注册表 ID 的候选列表，空表示整张注册表。
     SetRandomPotion(Option<Vec<i32>>),
+    /// 会改组件的函数，实现在 [`function_ext`]。
+    ///
+    /// Component-writing functions, implemented in [`function_ext`].
+    Extended(crate::function_ext::Extended),
 }
 
 /// `ExplorationMapFunction` 的五个字段，缺省值照官方 codec。
@@ -191,8 +174,10 @@ enum BonusFormula {
 enum ComponentSource {
     /// `block_entity`：方块实体收集出来的组件。
     BlockEntity,
-    /// `this`、`attacker` 这些实体或物品堆来源，本实现拿不到组件映射。
-    Entity,
+    /// `this`、`attacker` 这些实体来源，读实体视图上的组件映射。
+    Entity(EntityTarget),
+    /// `tool`：工具物品堆上的组件。
+    Tool,
 }
 
 impl LootFunction {
@@ -218,9 +203,7 @@ impl LootFunction {
             }
             Value::String(name) => Ok(Self {
                 condition: None,
-                body: FunctionBody::Unsupported(format!(
-                    "named function `{name}` is not resolved by this crate"
-                )),
+                body: FunctionBody::Reference(name.clone()),
             }),
             Value::Object(map) => Self::parse_object(map, depth),
             _ => Err(LootError::Invalid(
@@ -235,210 +218,230 @@ impl LootFunction {
             Some(value) => Some(LootCondition::parse(value)?),
             None => None,
         };
-        let body = match kind {
-            "minecraft:sequence" => FunctionBody::Sequence(
-                array(required(map, "functions", kind)?, "functions")?
-                    .iter()
-                    .map(|value| Self::parse_at(value, depth + 1))
-                    .collect::<Result<Vec<_>>>()?,
-            ),
-            "minecraft:set_count" => FunctionBody::SetCount {
-                count: parse_int_provider(required(map, "count", kind)?, "count")?,
-                add: opt_bool(map, "add", kind, false)?,
-            },
-            "minecraft:set_item" => FunctionBody::SetItem(names::single_registry_id(
-                required(map, "item", kind)?,
-                Registry::Item,
-                "item",
-            )?),
-            "minecraft:set_components" => FunctionBody::SetComponents(parse_component_patch(
-                required(map, "components", kind)?,
-            )?),
-            "minecraft:apply_bonus" => FunctionBody::ApplyBonus {
-                enchantment: names::single_registry_id(
-                    required(map, "enchantment", kind)?,
-                    Registry::Enchantment,
-                    "enchantment",
-                )?,
-                formula: parse_bonus_formula(map, kind)?,
-            },
-            "minecraft:copy_components" => FunctionBody::CopyComponents {
-                source: parse_component_source(required(map, "source", kind)?)?,
-                include: super::json::opt_string_list(map, "include", "include")?,
-                exclude: super::json::opt_string_list(map, "exclude", "exclude")?
-                    .unwrap_or_default(),
-            },
-            "minecraft:copy_state" => {
-                let block = names::single_registry_id(
-                    required(map, "block", kind)?,
-                    Registry::Block,
-                    "block",
-                )?;
-                let declared =
-                    super::json::string_list(required(map, "properties", kind)?, "properties")?;
-                let block = &mc_bamboo_data::blocks::BLOCKS[block as usize];
-                let properties = declared
-                    .into_iter()
-                    .filter(|name| {
-                        block
-                            .properties
-                            .iter()
-                            .any(|property| property.name == *name)
-                    })
-                    .collect();
-                FunctionBody::CopyState { properties }
-            }
-            "minecraft:discard" => FunctionBody::Discard,
-            "minecraft:enchant_randomly" => FunctionBody::EnchantRandomly {
-                options: names::opt_holder_set(map, "options", Registry::Enchantment, "options")?,
-                only_compatible: opt_bool(map, "only_compatible", kind, true)?,
-                include_additional_cost: opt_bool(
-                    map,
-                    "include_additional_cost_component",
-                    kind,
-                    false,
-                )?,
-            },
-            "minecraft:enchant_with_levels" => FunctionBody::EnchantWithLevels {
-                levels: parse_int_provider(required(map, "levels", kind)?, "levels")?,
-                options: names::opt_holder_set(map, "options", Registry::Enchantment, "options")?,
-                include_additional_cost: opt_bool(
-                    map,
-                    "include_additional_cost_component",
-                    kind,
-                    false,
-                )?,
-            },
-            "minecraft:enchanted_count_increase" => FunctionBody::EnchantedCountIncrease {
-                enchantment: names::single_registry_id(
-                    required(map, "enchantment", kind)?,
-                    Registry::Enchantment,
-                    "enchantment",
-                )?,
-                count: parse_float_provider(required(map, "count", kind)?, "count")?,
-                limit: super::json::opt_i32(map, "limit", "limit", 0)?,
-            },
-            "minecraft:explosion_decay" => FunctionBody::ExplosionDecay,
-            "minecraft:filtered" => FunctionBody::Filtered {
-                filter: ItemPredicate::parse(required(map, "item_filter", kind)?, "item_filter")?,
-                on_pass: parse_optional_function(map, "on_pass", depth)?,
-                on_fail: parse_optional_function(map, "on_fail", depth)?,
-            },
-            "minecraft:furnace_smelt" => FunctionBody::Smelt {
-                use_input_count: opt_bool(map, "use_input_count", kind, true)?,
-            },
-            "minecraft:limit_count" => {
-                let limit = object(required(map, "limit", kind)?, "limit")?;
-                FunctionBody::LimitCount {
-                    min: match field(limit, "min") {
-                        Some(value) => Some(parse_int_provider(value, "limit min")?),
-                        None => None,
-                    },
-                    max: match field(limit, "max") {
-                        Some(value) => Some(parse_int_provider(value, "limit max")?),
-                        None => None,
-                    },
+        // 会改组件的函数交给 `function_ext`，其余函数仍在这里解析。
+        // Component-writing functions go to `function_ext`; the rest are parsed here.
+        let body = if let Some(extended) = crate::function_ext::parse(kind, map)? {
+            FunctionBody::Extended(extended)
+        } else {
+            match kind {
+                "minecraft:sequence" => FunctionBody::Sequence(
+                    array(required(map, "functions", kind)?, "functions")?
+                        .iter()
+                        .map(|value| Self::parse_at(value, depth + 1))
+                        .collect::<Result<Vec<_>>>()?,
+                ),
+                "minecraft:set_count" => FunctionBody::SetCount {
+                    count: parse_int_provider(required(map, "count", kind)?, "count")?,
+                    add: opt_bool(map, "add", kind, false)?,
+                },
+                "minecraft:set_item" => FunctionBody::SetItem(names::single_registry_id(
+                    required(map, "item", kind)?,
+                    Registry::Item,
+                    "item",
+                )?),
+                "minecraft:set_components" => FunctionBody::SetComponents(parse_component_patch(
+                    required(map, "components", kind)?,
+                )?),
+                "minecraft:apply_bonus" => FunctionBody::ApplyBonus {
+                    enchantment: names::single_registry_id(
+                        required(map, "enchantment", kind)?,
+                        Registry::Enchantment,
+                        "enchantment",
+                    )?,
+                    formula: parse_bonus_formula(map, kind)?,
+                },
+                "minecraft:copy_components" => FunctionBody::CopyComponents {
+                    source: parse_component_source(required(map, "source", kind)?)?,
+                    include: super::json::opt_string_list(map, "include", "include")?,
+                    exclude: super::json::opt_string_list(map, "exclude", "exclude")?
+                        .unwrap_or_default(),
+                },
+                "minecraft:copy_state" => {
+                    let block = names::single_registry_id(
+                        required(map, "block", kind)?,
+                        Registry::Block,
+                        "block",
+                    )?;
+                    let declared =
+                        super::json::string_list(required(map, "properties", kind)?, "properties")?;
+                    let block = &mc_bamboo_data::blocks::BLOCKS[block as usize];
+                    let properties = declared
+                        .into_iter()
+                        .filter(|name| {
+                            block
+                                .properties
+                                .iter()
+                                .any(|property| property.name == *name)
+                        })
+                        .collect();
+                    FunctionBody::CopyState { properties }
                 }
-            }
-            "minecraft:set_damage" => FunctionBody::SetDamage {
-                damage: parse_float_provider(required(map, "damage", kind)?, "damage")?,
-                add: opt_bool(map, "add", kind, false)?,
-            },
-            "minecraft:set_enchantments" => {
-                let mut enchantments = Vec::new();
-                if let Some(value) = field(map, "enchantments") {
-                    for (name, provider) in object(value, "enchantments")? {
-                        let enchantment = names::enchantment_id(name).ok_or_else(|| {
-                            LootError::Invalid(format!(
-                                "unknown enchantment `{name}` in enchantments"
-                            ))
-                        })?;
-                        enchantments.push((
-                            enchantment,
-                            parse_int_provider(provider, "enchantment level")?,
+                "minecraft:discard" => FunctionBody::Discard,
+                "minecraft:enchant_randomly" => FunctionBody::EnchantRandomly {
+                    options: names::opt_holder_set(
+                        map,
+                        "options",
+                        Registry::Enchantment,
+                        "options",
+                    )?,
+                    only_compatible: opt_bool(map, "only_compatible", kind, true)?,
+                    include_additional_cost: opt_bool(
+                        map,
+                        "include_additional_cost_component",
+                        kind,
+                        false,
+                    )?,
+                },
+                "minecraft:enchant_with_levels" => FunctionBody::EnchantWithLevels {
+                    levels: parse_int_provider(required(map, "levels", kind)?, "levels")?,
+                    options: names::opt_holder_set(
+                        map,
+                        "options",
+                        Registry::Enchantment,
+                        "options",
+                    )?,
+                    include_additional_cost: opt_bool(
+                        map,
+                        "include_additional_cost_component",
+                        kind,
+                        false,
+                    )?,
+                },
+                "minecraft:enchanted_count_increase" => FunctionBody::EnchantedCountIncrease {
+                    enchantment: names::single_registry_id(
+                        required(map, "enchantment", kind)?,
+                        Registry::Enchantment,
+                        "enchantment",
+                    )?,
+                    count: parse_float_provider(required(map, "count", kind)?, "count")?,
+                    limit: super::json::opt_i32(map, "limit", "limit", 0)?,
+                },
+                "minecraft:explosion_decay" => FunctionBody::ExplosionDecay,
+                "minecraft:filtered" => FunctionBody::Filtered {
+                    filter: ItemPredicate::parse(
+                        required(map, "item_filter", kind)?,
+                        "item_filter",
+                    )?,
+                    on_pass: parse_optional_function(map, "on_pass", depth)?,
+                    on_fail: parse_optional_function(map, "on_fail", depth)?,
+                },
+                "minecraft:furnace_smelt" => FunctionBody::Smelt {
+                    use_input_count: opt_bool(map, "use_input_count", kind, true)?,
+                },
+                "minecraft:limit_count" => {
+                    let limit = object(required(map, "limit", kind)?, "limit")?;
+                    FunctionBody::LimitCount {
+                        min: match field(limit, "min") {
+                            Some(value) => Some(parse_int_provider(value, "limit min")?),
+                            None => None,
+                        },
+                        max: match field(limit, "max") {
+                            Some(value) => Some(parse_int_provider(value, "limit max")?),
+                            None => None,
+                        },
+                    }
+                }
+                "minecraft:set_damage" => FunctionBody::SetDamage {
+                    damage: parse_float_provider(required(map, "damage", kind)?, "damage")?,
+                    add: opt_bool(map, "add", kind, false)?,
+                },
+                "minecraft:set_enchantments" => {
+                    let mut enchantments = Vec::new();
+                    if let Some(value) = field(map, "enchantments") {
+                        for (name, provider) in object(value, "enchantments")? {
+                            let enchantment = names::enchantment_id(name).ok_or_else(|| {
+                                LootError::Invalid(format!(
+                                    "unknown enchantment `{name}` in enchantments"
+                                ))
+                            })?;
+                            enchantments.push((
+                                enchantment,
+                                parse_int_provider(provider, "enchantment level")?,
+                            ));
+                        }
+                    }
+                    FunctionBody::SetEnchantments {
+                        enchantments,
+                        add: opt_bool(map, "add", kind, false)?,
+                    }
+                }
+                "minecraft:set_instrument" => FunctionBody::SetInstrument(names::holder_set(
+                    required(map, "options", kind)?,
+                    Registry::Instrument,
+                    "options",
+                )?),
+                "minecraft:set_name" => {
+                    let target = match super::json::opt_string(map, "target", "target")? {
+                        Some("custom_name") | None => CUSTOM_NAME,
+                        Some("item_name") => ITEM_NAME,
+                        Some(other) => {
+                            return Err(LootError::Invalid(format!(
+                                "unknown set_name target `{other}`"
+                            )));
+                        }
+                    };
+                    let entity = match super::json::opt_string(map, "entity", "entity")? {
+                        Some(name) => Some(EntityTarget::from_name(name).ok_or_else(|| {
+                            LootError::Invalid(format!("unknown set_name entity target `{name}`"))
+                        })?),
+                        None => None,
+                    };
+                    FunctionBody::SetName {
+                        name: field(map, "name").cloned(),
+                        target,
+                        entity,
+                    }
+                }
+                "minecraft:set_ominous_bottle_amplifier" => {
+                    FunctionBody::SetOminousBottleAmplifier(parse_int_provider(
+                        required(map, "amplifier", kind)?,
+                        "amplifier",
+                    )?)
+                }
+                "minecraft:set_potion" => FunctionBody::SetPotion(names::single_registry_id(
+                    required(map, "id", kind)?,
+                    Registry::Potion,
+                    "id",
+                )?),
+                "minecraft:set_stew_effect" => {
+                    let mut effects = Vec::new();
+                    for value in
+                        super::json::opt_array(map, "effects", "effects")?.unwrap_or_default()
+                    {
+                        let entry = object(value, "stew effect")?;
+                        effects.push((
+                            names::single_registry_id(
+                                required(entry, "type", "stew effect")?,
+                                Registry::MobEffect,
+                                "type",
+                            )?,
+                            parse_int_provider(
+                                required(entry, "duration", "stew effect")?,
+                                "duration",
+                            )?,
                         ));
                     }
+                    FunctionBody::SetStewEffect(effects)
                 }
-                FunctionBody::SetEnchantments {
-                    enchantments,
-                    add: opt_bool(map, "add", kind, false)?,
+                // 假世界和还没生成结构的世界里 `findNearestMapStructure` 返回空，
+                // 官方原样退回输入堆；结构查询本身由调用方在世界侧做。
+                "minecraft:exploration_map" => {
+                    FunctionBody::ExplorationMap(ExplorationMapSpec::parse(map, kind)?)
                 }
-            }
-            "minecraft:set_instrument" => FunctionBody::SetInstrument(names::holder_set(
-                required(map, "options", kind)?,
-                Registry::Instrument,
-                "options",
-            )?),
-            "minecraft:set_name" => {
-                let target = match super::json::opt_string(map, "target", "target")? {
-                    Some("custom_name") | None => CUSTOM_NAME,
-                    Some("item_name") => ITEM_NAME,
-                    Some(other) => {
-                        return Err(LootError::Invalid(format!(
-                            "unknown set_name target `{other}`"
-                        )));
-                    }
-                };
-                let entity = match super::json::opt_string(map, "entity", "entity")? {
-                    Some(name) => Some(EntityTarget::from_name(name).ok_or_else(|| {
-                        LootError::Invalid(format!("unknown set_name entity target `{name}`"))
-                    })?),
-                    None => None,
-                };
-                FunctionBody::SetName {
-                    name: field(map, "name").cloned(),
-                    target,
-                    entity,
+                "minecraft:set_random_dyes" => FunctionBody::SetRandomDyes(parse_int_provider(
+                    required(map, "number_of_dyes", kind)?,
+                    "number_of_dyes",
+                )?),
+                "minecraft:set_random_potion" => FunctionBody::SetRandomPotion(
+                    field(map, "options")
+                        .map(|value| names::holder_set(value, Registry::Potion, "options"))
+                        .transpose()?,
+                ),
+                other => {
+                    return Err(LootError::Invalid(format!(
+                        "unknown loot function type `{other}`"
+                    )));
                 }
-            }
-            "minecraft:set_ominous_bottle_amplifier" => FunctionBody::SetOminousBottleAmplifier(
-                parse_int_provider(required(map, "amplifier", kind)?, "amplifier")?,
-            ),
-            "minecraft:set_potion" => FunctionBody::SetPotion(names::single_registry_id(
-                required(map, "id", kind)?,
-                Registry::Potion,
-                "id",
-            )?),
-            "minecraft:set_stew_effect" => {
-                let mut effects = Vec::new();
-                for value in super::json::opt_array(map, "effects", "effects")?.unwrap_or_default()
-                {
-                    let entry = object(value, "stew effect")?;
-                    effects.push((
-                        names::single_registry_id(
-                            required(entry, "type", "stew effect")?,
-                            Registry::MobEffect,
-                            "type",
-                        )?,
-                        parse_int_provider(
-                            required(entry, "duration", "stew effect")?,
-                            "duration",
-                        )?,
-                    ));
-                }
-                FunctionBody::SetStewEffect(effects)
-            }
-            // 假世界和还没生成结构的世界里 `findNearestMapStructure` 返回空，
-            // 官方原样退回输入堆；结构查询本身由调用方在世界侧做。
-            "minecraft:exploration_map" => {
-                FunctionBody::ExplorationMap(ExplorationMapSpec::parse(map, kind)?)
-            }
-            "minecraft:set_random_dyes" => FunctionBody::SetRandomDyes(parse_int_provider(
-                required(map, "number_of_dyes", kind)?,
-                "number_of_dyes",
-            )?),
-            "minecraft:set_random_potion" => FunctionBody::SetRandomPotion(
-                field(map, "options")
-                    .map(|value| names::holder_set(value, Registry::Potion, "options"))
-                    .transpose()?,
-            ),
-            other if UNSUPPORTED_FUNCTIONS.contains(&other) => {
-                FunctionBody::Unsupported(format!("function `{other}` is not implemented"))
-            }
-            other => {
-                return Err(LootError::Invalid(format!(
-                    "unknown loot function type `{other}`"
-                )));
             }
         };
         Ok(Self { condition, body })
@@ -707,7 +710,23 @@ impl LootFunction {
             FunctionBody::SetRandomPotion(options) => {
                 Ok(set_random_potion(stack, options.as_deref(), context))
             }
-            FunctionBody::Unsupported(message) => Err(LootError::Unsupported(message.clone())),
+            FunctionBody::Extended(extended) => crate::function_ext::run(extended, stack, context),
+            FunctionBody::Reference(name) => {
+                let modifier = context
+                    .params
+                    .level
+                    .and_then(|level| level.item_modifier(name))
+                    .ok_or_else(|| {
+                        LootError::Unsupported(format!("unresolved item modifier {name}"))
+                    })?;
+                let id = std::sync::Arc::as_ptr(&modifier).cast();
+                if !context.enter_element(id) {
+                    return Ok(stack);
+                }
+                let result = modifier.apply(stack, context);
+                context.leave_element(id);
+                result
+            }
         }
     }
 }
@@ -832,11 +851,10 @@ fn parse_component_source(value: &Value) -> Result<ComponentSource> {
     let name = string(value, "source")?;
     match name {
         "block_entity" => Ok(ComponentSource::BlockEntity),
-        "this" | "attacker" | "direct_attacker" | "attacking_player" | "target_entity"
-        | "interacting_entity" | "tool" => Ok(ComponentSource::Entity),
-        other => Err(LootError::Invalid(format!(
-            "unknown copy_components source `{other}`"
-        ))),
+        "tool" => Ok(ComponentSource::Tool),
+        other => EntityTarget::from_name(other)
+            .map(ComponentSource::Entity)
+            .ok_or_else(|| LootError::Invalid(format!("unknown copy_components source `{other}`"))),
     }
 }
 
@@ -873,7 +891,11 @@ fn apply_bonus(
     }
 }
 
-/// `CopyComponentsFunction` 的来源是方块实体时，复制它收集出来的组件。
+/// `CopyComponentsFunction`：从方块实体、实体或工具物品堆的组件映射里复制。
+/// 官方 `source.get(context)` 返回 null 时原样退回，这里缺视图时也原样退回。
+///
+/// `CopyComponentsFunction`: copies from a block entity, an entity or the tool stack.
+/// Vanilla returns unchanged when `source.get(context)` is null; a missing view does the same.
 fn copy_components(
     stack: &mut LootStack,
     source: ComponentSource,
@@ -886,11 +908,14 @@ fn copy_components(
             Some(block_entity) => &block_entity.components,
             None => return Ok(()),
         },
-        ComponentSource::Entity => {
-            return Err(LootError::Unsupported(
-                "copy_components from an entity or item stack is not implemented".to_owned(),
-            ));
-        }
+        ComponentSource::Entity(target) => match target.get(context.params) {
+            Some(entity) => &entity.components,
+            None => return Ok(()),
+        },
+        ComponentSource::Tool => match context.params.tool.as_ref() {
+            Some(tool) => &tool.components,
+            None => return Ok(()),
+        },
     };
     for (name, value) in components {
         if exclude.contains(name) {
@@ -1134,18 +1159,18 @@ fn set_random_dyes(
     let existing = stack
         .component("minecraft:dyed_color")
         .and_then(Value::as_i64)
-        .unwrap_or_else(|| {
+        .or_else(|| {
             // `ItemStack.get(DYED_COLOR)` 会读到物品的默认组件。
             match defaults::resolve(
                 stack.item,
                 &mc_bamboo_protocol::components::ComponentPatch::new(),
                 kinds::DYED_COLOR,
             ) {
-                Some(ComponentValue::DyedColor(rgb)) => *rgb as i64,
-                _ => 0,
+                Some(ComponentValue::DyedColor(rgb)) => Some(i64::from(*rgb)),
+                _ => None,
             }
         });
-    if existing != 0 {
+    if let Some(existing) = existing {
         let rgb = existing as i32;
         let parts_of = |rgb: i32| [(rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff];
         let channels = parts_of(rgb);
@@ -1179,7 +1204,10 @@ fn set_random_dyes(
         };
     }
     let rgb = (channels[0] << 16) | (channels[1] << 8) | channels[2];
-    stack.set_component("minecraft:dyed_color", Value::from(rgb));
+    if !stack.is_empty() {
+        stack.set_count(1);
+        stack.set_component("minecraft:dyed_color", Value::from(rgb));
+    }
     Ok(stack)
 }
 

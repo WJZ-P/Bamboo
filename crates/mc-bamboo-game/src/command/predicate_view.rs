@@ -282,6 +282,10 @@ pub(crate) struct CommandLevel<'a> {
 }
 
 impl LevelView for CommandLevel<'_> {
+    fn command_storage(&self, name: &str) -> Option<mc_bamboo_nbt::Tag> {
+        Some(self.region.global.command_storage.get(name))
+    }
+
     fn is_loaded(&self, x: i32, y: i32, z: i32) -> Option<bool> {
         Some(self.region.chunks.block(BlockPos::new(x, y, z)).is_some())
     }

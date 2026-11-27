@@ -16,12 +16,14 @@ mod error;
 #[cfg(test)]
 mod eval_tests;
 mod function;
+mod function_ext;
 mod json;
 mod names;
 mod number;
 mod pool;
 mod predicate;
 mod random_sequence;
+mod slot_source;
 mod stack;
 mod table;
 pub mod trade;

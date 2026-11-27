@@ -79,6 +79,14 @@ pub enum LootCondition {
         raining: Option<bool>,
         thundering: Option<bool>,
     },
+    /// `environment_attribute_check`：比较属性值的 codec JSON，需要世界侧提供属性值。
+    ///
+    /// `environment_attribute_check`: compares the attribute's codec JSON value, supplied
+    /// by the level view.
+    EnvironmentAttributeCheck {
+        attribute: String,
+        value: Value,
+    },
     /// 本实现没有这个条件需要的数据，名字留着方便报错。
     Unsupported(String),
 }
@@ -218,10 +226,14 @@ impl LootCondition {
                 raining: optional_bool_field(map, "raining", what)?,
                 thundering: optional_bool_field(map, "thundering", what)?,
             }),
-            // 官方 26.3 的条件类型，本实现没有对应的世界数据。
-            "minecraft:environment_attribute_check" => Ok(Self::Unsupported(
-                "condition `environment_attribute_check`".to_owned(),
-            )),
+            // `EnvironmentAttributeCheck.MAP_CODEC` 按 `attribute` 分派，`value` 用该属性
+            // 的值 codec。这里把值原样留成 JSON，求值时和世界侧给的 codec 值比较。
+            // `EnvironmentAttributeCheck.MAP_CODEC` dispatches on `attribute`; `value` uses
+            // that attribute's value codec. Keep the value as raw JSON and compare it.
+            "minecraft:environment_attribute_check" => Ok(Self::EnvironmentAttributeCheck {
+                attribute: string(required(map, "attribute", what)?, "attribute")?.to_owned(),
+                value: required(map, "value", what)?.clone(),
+            }),
             other => Err(LootError::Unsupported(format!(
                 "loot condition `{other}` in {what}"
             ))),
@@ -398,6 +410,23 @@ impl LootCondition {
                     }
                 }
                 Ok(true)
+            }
+            // `EnvironmentAttributeCheck.test`：官方比较属性值和给定值是否相等。
+            // 属性系统和世界状态由调用方经 `LevelView` 提供。
+            // `EnvironmentAttributeCheck.test`: vanilla compares the attribute value for
+            // equality. The attribute system lives behind `LevelView`.
+            Self::EnvironmentAttributeCheck { attribute, value } => {
+                let origin = context.params.origin.map(|position| position.block_pos());
+                let actual = context
+                    .params
+                    .level
+                    .and_then(|level| level.environment_attribute(attribute, origin))
+                    .ok_or_else(|| {
+                        LootError::Unsupported(format!(
+                            "environment attribute `{attribute}` is not provided by the level view"
+                        ))
+                    })?;
+                Ok(actual == *value)
             }
             Self::Unsupported(what) => Err(LootError::Unsupported(what.clone())),
         }

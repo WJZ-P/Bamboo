@@ -1,16 +1,22 @@
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.mojang.authlib.GameProfile;
 import java.io.FileDescriptor;
 import java.io.FileOutputStream;
 import java.io.PrintStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
+import java.util.UUID;
 import java.util.concurrent.ForkJoinPool;
 import net.minecraft.SharedConstants;
 import net.minecraft.commands.Commands;
@@ -26,12 +32,16 @@ import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.RegistryOps;
 import net.minecraft.server.Bootstrap;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.ServerScoreboard;
 import net.minecraft.server.RegistryLayer;
 import net.minecraft.server.ReloadableServerRegistries;
 import net.minecraft.server.ReloadableServerResources;
 import net.minecraft.server.dedicated.DedicatedServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.packs.PackType;
 import net.minecraft.server.packs.repository.PackRepository;
 import net.minecraft.server.packs.repository.ServerPacksSource;
@@ -49,6 +59,9 @@ import net.minecraft.core.component.DataComponentPatch;
 import net.minecraft.world.item.component.ItemContainerContents;
 import com.mojang.serialization.JsonOps;
 import net.minecraft.network.chat.Component;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.world.attribute.EnvironmentAttributes;
+import net.minecraft.world.attribute.EnvironmentAttributeSystem;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageSources;
 import net.minecraft.world.entity.AgeableMob;
@@ -63,6 +76,7 @@ import net.minecraft.world.entity.animal.cow.MushroomCow;
 import net.minecraft.world.entity.animal.frog.Frog;
 import net.minecraft.world.entity.animal.sheep.Sheep;
 import net.minecraft.world.entity.monster.cubemob.AbstractCubeMob;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.FishingHook;
 import net.minecraft.world.entity.raid.Raider;
 import net.minecraft.world.flag.FeatureFlagSet;
@@ -81,6 +95,9 @@ import net.minecraft.world.item.enchantment.Enchantment;
 import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.item.enchantment.ItemEnchantments;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.storage.CommandStorage;
+import net.minecraft.world.scores.ScoreHolder;
+import net.minecraft.world.scores.criteria.ObjectiveCriteria;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
@@ -91,7 +108,9 @@ import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.saveddata.maps.MapId;
 import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
 import net.minecraft.world.level.storage.loot.BuiltInLootTables;
+import net.minecraft.world.level.storage.loot.LootContext;
 import net.minecraft.world.level.storage.loot.LootParams;
+import net.minecraft.world.level.storage.loot.functions.LootItemFunctions;
 import net.minecraft.world.level.storage.loot.LootTable;
 import net.minecraft.world.level.storage.loot.parameters.LootContextParamSets;
 import net.minecraft.world.level.storage.loot.parameters.LootContextParams;
@@ -165,11 +184,13 @@ public final class LootOracle {
         long seed = 20261108L;
         String entityTable = null;
         boolean explorer = false;
+        Path functions = null;
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--cases" -> cases = Integer.parseInt(args[++i]);
                 case "--seed" -> seed = Long.parseLong(args[++i]);
                 case "--explorer" -> explorer = true;
+                case "--functions" -> functions = Path.of(args[++i]);
                 case "--entity-table" -> entityTable = args[++i];
                 default -> throw new IllegalArgumentException(
                         "usage: LootOracle [--explorer | --entity-table ID] [--cases N] [--seed S]");
@@ -184,6 +205,10 @@ public final class LootOracle {
         try (CloseableResourceManager resources =
                 new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected())) {
             World world = World.load(resources);
+            if (functions != null) {
+                functionCases(world, functions, seed, cases);
+                return;
+            }
             if (explorer) {
                 explorerCases(world, seed);
                 return;
@@ -209,6 +234,72 @@ public final class LootOracle {
             summary.addProperty("excluded", excluded);
             OUT.println(summary);
         }
+    }
+
+    private static void functionCases(World world, Path fixture, long seed, int cases) throws Exception {
+        if (cases < 1) throw new IllegalArgumentException("--functions needs at least one seed");
+        JsonArray scenarios = JsonParser.parseString(Files.readString(fixture)).getAsJsonArray();
+        setField(Level.class, world.level, "random", RandomSource.create(1L));
+        Entity entity = world.entityType("pig").create(world.level, new EntitySpawnRequest(EntitySpawnReason.TRIGGERED, true));
+        if (entity == null) throw new IllegalStateException("cannot create fixture pig");
+        entity.setCustomName(Component.literal("Oracle Pig"));
+        ((LivingEntity) entity).setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.DIAMOND, 3));
+        prepareFunctionServices(world);
+        ServerPlayer player = allocate(ServerPlayer.class);
+        setField(Player.class, player, "gameProfile", new GameProfile(new UUID(0, 42), "LootOracle"));
+        var ops = RegistryOps.create(JsonOps.INSTANCE, world.registries);
+        int count = 0;
+        for (JsonElement element : scenarios) {
+            JsonObject scenario = element.getAsJsonObject();
+            String name = scenario.get("name").getAsString();
+            LootParams params = new LootParams.Builder(world.level)
+                    .withParameter(LootContextParams.ORIGIN, Vec3.ZERO)
+                    .withParameter(LootContextParams.THIS_ENTITY, scenario.has("player") ? player : entity)
+                    .create(LootContextParamSets.CHEST);
+            Item item = BuiltInRegistries.ITEM.getValue(Identifier.parse(scenario.get("item").getAsString()));
+            var modifier = LootItemFunctions.DIRECT_CODEC.parse(ops, scenario.get("modifier"))
+                    .getOrThrow(message -> new IllegalArgumentException(name + ": " + message));
+            for (int i = 0; i < cases; i++) {
+                long caseSeed = seed + i;
+                setField(Level.class, world.level, "random", RandomSource.create(caseSeed));
+                LootContext context = new LootContext.Builder(params).withOptionalRandomSeed(caseSeed).create(Optional.empty());
+                ItemStack output = modifier.apply(new ItemStack(item), context);
+                JsonObject line = new JsonObject();
+                line.addProperty("kind", "function");
+                line.addProperty("scenario", name);
+                line.addProperty("seed", Long.toString(caseSeed));
+                line.addProperty("nextLong", Long.toString(context.getRandom().nextLong()));
+                line.addProperty("toolItem", BuiltInRegistries.ITEM.getId(output.getItem()));
+                line.addProperty("toolCount", output.getCount());
+                line.add("patch", DataComponentPatch.CODEC.encodeStart(ops, output.getComponentsPatch()).getOrThrow());
+                OUT.println(line);
+                count++;
+            }
+        }
+        JsonObject summary = new JsonObject();
+        summary.addProperty("kind", "summary");
+        summary.addProperty("cases", count);
+        OUT.println(summary);
+    }
+
+    private static void prepareFunctionServices(World world) {
+        ServerScoreboard board = new ServerScoreboard(world.server);
+        var objective = board.addObjective("oracle", ObjectiveCriteria.DUMMY, Component.literal("Oracle"),
+                ObjectiveCriteria.RenderType.INTEGER, false, null);
+        board.getOrCreatePlayerScore(ScoreHolder.forNameOnly("LootOracle"), objective).set(6);
+        setField(MinecraftServer.class, world.server, "scoreboard", board);
+        setField(MinecraftServer.class, world.server, "commandStorage", new CommandStorage(null) {
+            @Override
+            public CompoundTag get(Identifier id) {
+                CompoundTag tag = new CompoundTag();
+                if (id.equals(Identifier.withDefaultNamespace("oracle"))) tag.putLong("Counter", 4294967301L);
+                return tag;
+            }
+        });
+        world.level.setEnvironmentAttributes(EnvironmentAttributeSystem.builder()
+                .addConstantLayer(EnvironmentAttributes.CLOUD_HEIGHT, previous -> 2.5F)
+                .addConstantLayer(EnvironmentAttributes.WATER_EVAPORATES, previous -> true)
+                .build());
     }
 
     private static int blockCases(World world, Random random, int cases) {

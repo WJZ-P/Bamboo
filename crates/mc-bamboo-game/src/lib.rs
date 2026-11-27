@@ -80,6 +80,8 @@ mod light_updates;
 mod links;
 mod lock;
 mod loot_stacks;
+#[cfg(any(test, feature = "oracle-samples"))]
+pub mod loot_world_samples;
 pub mod map;
 mod menu;
 pub mod merchant;

@@ -68,6 +68,51 @@ impl LevelView for TestLevel {
     fn score(&self, holder: &str, objective: &str) -> Option<Option<i32>> {
         Some((holder == "Kitten" && objective == "dummy").then_some(1))
     }
+
+    fn command_storage(&self, storage: &str) -> Option<mc_bamboo_nbt::Tag> {
+        use mc_bamboo_nbt::Tag;
+        (storage == "minecraft:test")
+            .then(|| Tag::Compound(vec![("Counter".to_owned(), Tag::Int(42))]))
+    }
+
+    fn environment_attribute(&self, name: &str, _origin: Option<(i32, i32, i32)>) -> Option<Value> {
+        match name {
+            "minecraft:test/int" => Some(json!(7)),
+            "minecraft:test/float" => Some(json!(2.5)),
+            _ => None,
+        }
+    }
+
+    fn loot_table_tag(&self, name: &str) -> Option<Vec<String>> {
+        match name {
+            "minecraft:custom_pack_tag" => Some(Vec::new()),
+            "minecraft:desert_archaeology" => Some(vec![
+                "minecraft:archaeology/desert_pyramid".to_owned(),
+                "minecraft:archaeology/desert_well".to_owned(),
+            ]),
+            _ => None,
+        }
+    }
+
+    fn item_modifier(&self, name: &str) -> Option<std::sync::Arc<LootFunction>> {
+        static LOOP: std::sync::OnceLock<std::sync::Arc<LootFunction>> = std::sync::OnceLock::new();
+        (name == "minecraft:recursive_modifier").then(|| {
+            LOOP.get_or_init(|| {
+                std::sync::Arc::new(
+                    LootFunction::parse(&json!([
+                        {"type":"minecraft:set_count","count":2,"add":true},
+                        "minecraft:recursive_modifier"
+                    ]))
+                    .unwrap(),
+                )
+            })
+            .clone()
+        })
+    }
+
+    fn slot_items(&self, source: &str) -> Option<Vec<LootStack>> {
+        (source.contains("contents")).then(|| vec![LootStack::new(items::DIAMOND, 3)])
+    }
 }
 
 fn params() -> LootParams<'static> {
@@ -102,6 +147,22 @@ fn float_value(text: &str, level: i32) -> f32 {
     stored.enchantment_level = Some(level);
     let random = LegacyRandom::new(1);
     provider.get(&context(&stored, &random)).unwrap()
+}
+
+fn level_int_value(text: &str) -> Result<i32, LootError> {
+    let value: Value = serde_json::from_str(text).unwrap();
+    let provider = parse_int_provider(&value, "test").unwrap();
+    let params = level_params();
+    let random = LegacyRandom::new(1);
+    provider.get(&context(&params, &random))
+}
+
+fn level_float_value(text: &str) -> Result<f32, LootError> {
+    let value: Value = serde_json::from_str(text).unwrap();
+    let provider = parse_float_provider(&value, "test").unwrap();
+    let params = level_params();
+    let random = LegacyRandom::new(1);
+    provider.get(&context(&params, &random))
 }
 
 #[test]
@@ -194,14 +255,53 @@ fn every_int_provider_kind_evaluates() {
         int_value(r#"{"type":"minecraft:floor_div","left":1,"right":0}"#),
         0
     );
-    for kind in ["score", "storage", "environment_attribute"] {
-        let value = json!({"type": format!("minecraft:{kind}")});
-        let provider = parse_int_provider(&value, "test").unwrap();
-        let stored = LootParams::new(0.0);
-        let random = LegacyRandom::new(1);
-        let error = provider.get(&context(&stored, &random)).unwrap_err();
-        assert!(matches!(error, LootError::Unsupported(_)), "{error}");
-    }
+    // `score`：固定名字查到分数；缺实体或分数时按官方走 fallback。
+    // `score`: a fixed name resolves to the score; a missing holder/score takes fallback.
+    assert_eq!(
+        level_int_value(
+            r#"{"type":"minecraft:score","target":{"type":"minecraft:fixed","name":"Kitten"},"score":"dummy","fallback":9}"#
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        level_int_value(
+            r#"{"type":"minecraft:score","target":"this","score":"dummy","fallback":9}"#
+        )
+        .unwrap(),
+        9
+    );
+    // `storage`：路径有数值取它，没有取 fallback。
+    // `storage`: a numeric path returns its value; a missing one takes fallback.
+    assert_eq!(
+        level_int_value(
+            r#"{"type":"minecraft:storage","storage":"minecraft:test","path":"Counter","fallback":5}"#
+        )
+        .unwrap(),
+        42
+    );
+    assert_eq!(
+        level_int_value(
+            r#"{"type":"minecraft:storage","storage":"minecraft:test","path":"Missing","fallback":5}"#
+        )
+        .unwrap(),
+        5
+    );
+    // `environment_attribute`：世界侧提供值就转整数，否则报不支持。
+    // `environment_attribute`: converts a supplied value to int, else reports unsupported.
+    assert_eq!(
+        level_int_value(
+            r#"{"type":"minecraft:environment_attribute","attribute":"minecraft:test/int"}"#
+        )
+        .unwrap(),
+        7
+    );
+    assert!(matches!(
+        level_int_value(
+            r#"{"type":"minecraft:environment_attribute","attribute":"minecraft:test/unknown"}"#
+        ),
+        Err(LootError::Unsupported(_))
+    ));
 }
 
 #[test]
@@ -329,14 +429,37 @@ fn every_float_provider_kind_evaluates() {
         float_value(r#"{"type":"minecraft:div","left":1.0,"right":0.0}"#, 0),
         0.0
     );
-    for kind in ["storage", "environment_attribute"] {
-        let value = json!({"type": format!("minecraft:{kind}")});
-        let provider = parse_float_provider(&value, "test").unwrap();
-        let stored = LootParams::new(0.0);
-        let random = LegacyRandom::new(1);
-        let error = provider.get(&context(&stored, &random)).unwrap_err();
-        assert!(matches!(error, LootError::Unsupported(_)), "{error}");
-    }
+    // `storage` 浮点提供器：路径有数值取它，没有取 fallback。
+    // Float `storage` provider: a numeric path returns its value, else fallback.
+    assert_eq!(
+        level_float_value(
+            r#"{"type":"minecraft:storage","storage":"minecraft:test","path":"Counter","fallback":0.5}"#
+        )
+        .unwrap(),
+        42.0
+    );
+    assert_eq!(
+        level_float_value(
+            r#"{"type":"minecraft:storage","storage":"minecraft:test","path":"Missing","fallback":0.5}"#
+        )
+        .unwrap(),
+        0.5
+    );
+    // `environment_attribute` 浮点提供器：提供值就转浮点，否则报不支持。
+    // Float `environment_attribute`: converts a supplied value, else unsupported.
+    assert_eq!(
+        level_float_value(
+            r#"{"type":"minecraft:environment_attribute","attribute":"minecraft:test/float"}"#
+        )
+        .unwrap(),
+        2.5
+    );
+    assert!(matches!(
+        level_float_value(
+            r#"{"type":"minecraft:environment_attribute","attribute":"minecraft:test/unknown"}"#
+        ),
+        Err(LootError::Unsupported(_))
+    ));
 }
 
 #[test]
@@ -568,14 +691,33 @@ fn every_condition_kind_evaluates() {
     .unwrap();
     assert!(weather.test(&context(&stored, &random)).unwrap());
 
-    let attribute = LootCondition::parse(&json!({
+    // `environment_attribute_check`：世界侧提供属性值时做 JSON 相等比较。
+    // `environment_attribute_check`: compares the supplied attribute value as JSON.
+    let matched = LootCondition::parse(&json!({
         "type": "minecraft:environment_attribute_check",
-        "environment": "minecraft:overworld",
-        "attribute": "minecraft:game_time"
+        "attribute": "minecraft:test/int",
+        "value": 7
+    }))
+    .unwrap();
+    let level = level_params();
+    assert!(matched.test(&context(&level, &random)).unwrap());
+    let differed = LootCondition::parse(&json!({
+        "type": "minecraft:environment_attribute_check",
+        "attribute": "minecraft:test/int",
+        "value": 8
+    }))
+    .unwrap();
+    assert!(!differed.test(&context(&level, &random)).unwrap());
+    // 世界侧没接这个属性时不能编默认值，报不支持。
+    // No wired-in attribute means unsupported, not a fabricated default.
+    let missing = LootCondition::parse(&json!({
+        "type": "minecraft:environment_attribute_check",
+        "attribute": "minecraft:test/unknown",
+        "value": 0
     }))
     .unwrap();
     assert!(matches!(
-        attribute.test(&context(&stored, &random)),
+        missing.test(&context(&level, &random)),
         Err(LootError::Unsupported(_))
     ));
 }
@@ -676,12 +818,43 @@ fn every_function_kind_evaluates() {
             .and_then(Value::as_str),
         Some("Pot")
     );
+    // 实体来源：从 `this_entity` 的组件映射复制（没有实体时原样退回）。
+    // Entity source: copies from `this_entity`'s components (no-op without an entity).
+    let mut entity_source = level_params();
+    let mut holder = EntityView::new(0);
+    holder
+        .components
+        .insert("minecraft:custom_name".to_owned(), json!("Mob"));
+    entity_source.this_entity = Some(holder);
     let entity_copy = apply(
         json!({"type":"minecraft:copy_components","source":"this"}),
         stone.clone(),
-        &stored,
+        &entity_source,
+    )
+    .unwrap();
+    assert_eq!(
+        entity_copy
+            .component("minecraft:custom_name")
+            .and_then(Value::as_str),
+        Some("Mob")
     );
-    assert!(matches!(entity_copy, Err(LootError::Unsupported(_))));
+    // `tool` 来源：工具物品堆上的组件。
+    let mut tool_source = level_params();
+    let mut tool = LootStack::new(items::DIAMOND_PICKAXE, 1);
+    tool.set_component("minecraft:custom_name", json!("Pick"));
+    tool_source.tool = Some(tool);
+    let tool_copy = apply(
+        json!({"type":"minecraft:copy_components","source":"tool"}),
+        stone.clone(),
+        &tool_source,
+    )
+    .unwrap();
+    assert_eq!(
+        tool_copy
+            .component("minecraft:custom_name")
+            .and_then(Value::as_str),
+        Some("Pick")
+    );
 
     let stairs = mc_bamboo_data::blocks::BLOCKS
         .iter()
@@ -894,11 +1067,15 @@ fn every_function_kind_evaluates() {
     // 假世界里找不到结构，官方原样退回输入物品堆。
     assert_eq!(map.unwrap(), stone);
     let lore = apply(
-        json!({"type":"minecraft:set_lore","lore":[{"text":"line"}]}),
+        json!({"type":"minecraft:set_lore","lore":[{"text":"line"}],"mode":"append"}),
         stone.clone(),
         &stored,
+    )
+    .unwrap();
+    assert_eq!(
+        lore.component("minecraft:lore").and_then(Value::as_array),
+        Some(&vec![json!({"text":"line"})])
     );
-    assert!(matches!(lore, Err(LootError::Unsupported(_))));
     let named_ref = apply(json!("minecraft:set_count"), stone, &stored);
     assert!(matches!(named_ref, Err(LootError::Unsupported(_))));
 }
@@ -989,8 +1166,11 @@ fn entry_kinds_follow_the_official_composition() {
             .is_empty()
     );
 
+    // `slots`：没有世界视图解析 slot_source 时报不支持；接了视图就产出物品。
+    // `slots`: unsupported without a level view that resolves the slot source; with
+    // one wired in it emits the slot items.
     let slots = LootTable::parse(&json!({
-        "pools": [{"rolls": 1, "entries": [{"type": "minecraft:slots"}]}]
+        "pools": [{"rolls": 1, "entries": [{"type": "minecraft:slots", "slot_source": {"type": "minecraft:contents"}}]}]
     }))
     .unwrap();
     let random = LegacyRandom::new(1);
@@ -998,6 +1178,39 @@ fn entry_kinds_follow_the_official_composition() {
         slots.get_random_items(&stored, &random),
         Err(LootError::Unsupported(_))
     ));
+    let level = level_params();
+    let from_slots = slots.get_random_items(&level, &random).unwrap();
+    assert_eq!(from_slots.len(), 1);
+    assert_eq!(from_slots[0].item, items::DIAMOND);
+    assert_eq!(from_slots[0].count, 3);
+
+    // `#` 战利品表标签：官方 26.3 数据包没有这类标签，空标签展开成空列表，
+    // 不再报不支持，选中后不产出物品。
+    // `#` loot table tag: vanilla 26.3 has none; an empty tag expands to nothing
+    // instead of reporting unsupported, and produces no items.
+    let tagged = LootTable::parse(&json!({
+        "pools": [{"rolls": 1, "entries": [{"type": "minecraft:loot_table", "value": "#minecraft:custom_pack_tag"}]}]
+    }))
+    .unwrap();
+    assert!(tagged.get_random_items(&level, &random).unwrap().is_empty());
+    for expand in [false, true] {
+        let table = LootTable::parse(&json!({
+            "pools": [{"rolls": 1, "entries": [{"type": "minecraft:loot_table",
+                "value": "#minecraft:desert_archaeology", "expand": expand}]}]
+        }))
+        .unwrap();
+        let products = table
+            .get_random_items(&level, &LegacyRandom::new(42))
+            .unwrap();
+        assert_eq!(products.len(), if expand { 1 } else { 2 });
+    }
+    let stack = apply(
+        json!("minecraft:recursive_modifier"),
+        LootStack::new(items::STONE, 1),
+        &level,
+    )
+    .unwrap();
+    assert_eq!(stack.count, 3);
 }
 
 #[test]
@@ -1213,4 +1426,296 @@ fn exploration_map_writes_vanilla_components() {
         })),
         Err(LootError::Invalid(_))
     ));
+}
+
+/// 每个新做的组件函数都走一遍求值，检查写出的组件值。
+///
+/// Every newly implemented component function is evaluated and its component checked.
+#[test]
+fn extended_functions_evaluate() {
+    let mut params = level_params();
+    let stone = LootStack::new(items::STONE, 1);
+
+    // `set_custom_data`：SNBT 复合标签并进 custom_data。
+    let custom = apply(
+        json!({"type":"minecraft:set_custom_data","tag":"{foo:1b,bar:\"x\"}"}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let data = custom.component("minecraft:custom_data").unwrap();
+    assert_eq!(data.get("foo").and_then(Value::as_i64), Some(1));
+    assert_eq!(data.get("bar").and_then(Value::as_str), Some("x"));
+
+    // `set_attributes`：先取 slot 再算 amount，按 id 覆盖。
+    let attrs = apply(
+        json!({"type":"minecraft:set_attributes","modifiers":[
+            {"id":"minecraft:x","attribute":"minecraft:generic.max_health","operation":"add_value","amount":2.5,"slot":["mainhand"]}
+        ]}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let modifiers = attrs
+        .component("minecraft:attribute_modifiers")
+        .and_then(Value::as_array)
+        .unwrap();
+    assert_eq!(modifiers.len(), 1);
+    assert_eq!(
+        modifiers[0].get("amount").and_then(Value::as_f64),
+        Some(2.5)
+    );
+    assert_eq!(
+        modifiers[0].get("slot").and_then(Value::as_str),
+        Some("mainhand")
+    );
+
+    // `set_loot_table`：container_loot 记表名和种子。
+    let loot = apply(
+        json!({"type":"minecraft:set_loot_table","loot_table_id":"minecraft:chests/simple_dungeon","seed":7}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let container_loot = loot.component("minecraft:container_loot").unwrap();
+    assert_eq!(
+        container_loot.get("loot_table").and_then(Value::as_str),
+        Some("minecraft:chests/simple_dungeon")
+    );
+    assert_eq!(container_loot.get("seed").and_then(Value::as_i64), Some(7));
+
+    // `set_lore`：带实体解析时按官方报不支持。
+    assert!(matches!(
+        apply(
+            json!({"type":"minecraft:set_lore","lore":[],"mode":"append","entity":"this"}),
+            stone.clone(),
+            &params,
+        ),
+        Err(LootError::Unsupported(_))
+    ));
+
+    // `set_banner_pattern`：append=false 直接替换 layers。
+    let banner = apply(
+        json!({"type":"minecraft:set_banner_pattern","patterns":[{"pattern":"minecraft:stripe_bottom","color":"red"}],"append":false}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        banner
+            .component("minecraft:banner_patterns")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
+
+    // `set_fireworks`：flight_duration 和 explosions 列表。
+    let fireworks = apply(
+        json!({"type":"minecraft:set_fireworks","flight_duration":3,"explosions":{"mode":"append","values":[{"shape":"small_ball"}]}}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let fireworks = fireworks.component("minecraft:fireworks").unwrap();
+    assert_eq!(
+        fireworks.get("flight_duration").and_then(Value::as_i64),
+        Some(3)
+    );
+    assert_eq!(
+        fireworks
+            .get("explosions")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
+
+    // `set_firework_explosion`：缺省字段补默认。
+    let explosion = apply(
+        json!({"type":"minecraft:set_firework_explosion","shape":"large_ball","colors":[1,2],"trail":true}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let explosion = explosion.component("minecraft:firework_explosion").unwrap();
+    assert_eq!(
+        explosion.get("shape").and_then(Value::as_str),
+        Some("large_ball")
+    );
+    assert_eq!(
+        explosion.get("has_trail").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(
+        !explosion
+            .get("has_twinkle")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    );
+
+    // `set_book_cover`：written_book_content 的封面字段。
+    let book = apply(
+        json!({"type":"minecraft:set_book_cover","title":"Hi","author":"Me","generation":2}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let book = book.component("minecraft:written_book_content").unwrap();
+    assert_eq!(book.get("author").and_then(Value::as_str), Some("Me"));
+    assert_eq!(book.get("generation").and_then(Value::as_i64), Some(2));
+
+    // `set_written_book_pages` / `set_writable_book_pages`：ListOperation 追加。
+    let written = apply(
+        json!({"type":"minecraft:set_written_book_pages","pages":["a","b"],"mode":"append"}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        written
+            .component("minecraft:written_book_content")
+            .and_then(|value| value.get("pages"))
+            .and_then(Value::as_array),
+        Some(&vec![json!({"raw":"a"}), json!({"raw":"b"})])
+    );
+    let writable = apply(
+        json!({"type":"minecraft:set_writable_book_pages","pages":["x"],"mode":"replace_all"}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        writable
+            .component("minecraft:writable_book_content")
+            .and_then(|value| value.get("pages"))
+            .and_then(Value::as_array),
+        Some(&vec![json!({"raw":"x"})])
+    );
+
+    // `toggle_tooltips`：shown=false 记进 hidden_components，排序去重。
+    let toggled = apply(
+        json!({"type":"minecraft:toggle_tooltips","toggles":{"minecraft:lore":false,"minecraft:damage":true}}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        toggled
+            .component("minecraft:tooltip_display")
+            .and_then(|value| value.get("hidden_components"))
+            .and_then(Value::as_array),
+        Some(&vec![json!("minecraft:lore")])
+    );
+
+    // `set_custom_model_data`：四个列表按 StandAlone 操作写，color/float 过提供器。
+    let model = apply(
+        json!({"type":"minecraft:set_custom_model_data","strings":{"mode":"append","values":["tag"]},"colors":{"mode":"append","values":[123]}}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let model = model.component("minecraft:custom_model_data").unwrap();
+    assert_eq!(
+        model.get("strings").and_then(Value::as_array),
+        Some(&vec![json!("tag")])
+    );
+    assert_eq!(
+        model.get("colors").and_then(Value::as_array),
+        Some(&vec![json!(123)])
+    );
+
+    // `set_contents`：展开条目并把物品写进 container。
+    let contents = apply(
+        json!({"type":"minecraft:set_contents","component":"minecraft:container","entries":[{"type":"minecraft:item","name":"minecraft:dirt"}]}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let container_items = contents
+        .component("minecraft:container")
+        .and_then(Value::as_array)
+        .unwrap();
+    assert_eq!(container_items.len(), 1);
+    assert_eq!(
+        container_items[0]["item"]["id"].as_str(),
+        Some("minecraft:dirt")
+    );
+
+    // `modify_contents`：对容器里每个非空物品应用 modifier。
+    let mut container = stone.clone();
+    container.set_component(
+        "minecraft:container",
+        json!([{"slot":0,"item":{"id":"minecraft:dirt","count":2}}]),
+    );
+    let modified = apply(
+        json!({"type":"minecraft:modify_contents","component":"minecraft:container","modifier":{"type":"minecraft:set_count","count":5}}),
+        container,
+        &params,
+    )
+    .unwrap();
+    let modified_items = modified
+        .component("minecraft:container")
+        .and_then(Value::as_array)
+        .unwrap();
+    assert_eq!(modified_items[0]["item"]["count"].as_i64(), Some(5));
+
+    // `copy_name`：方块实体的 custom_name 写到物品。
+    params.block_entity = Some(crate::BlockEntityView {
+        components: [("minecraft:custom_name".to_owned(), json!("Pot"))]
+            .into_iter()
+            .collect(),
+    });
+    let copied = apply(
+        json!({"type":"minecraft:copy_name","source":"block_entity"}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        copied
+            .component("minecraft:custom_name")
+            .and_then(Value::as_str),
+        Some("Pot")
+    );
+
+    // `fill_player_head`：玩家头 + 实体 profile 写 profile 组件。
+    let mut head_params = level_params();
+    let mut donor = EntityView::new(mc_bamboo_data::registries::entity_type::PLAYER);
+    donor
+        .components
+        .insert("minecraft:profile".to_owned(), json!({"name": "Steve"}));
+    head_params.this_entity = Some(donor);
+    let head = apply(
+        json!({"type":"minecraft:fill_player_head","entity":"this"}),
+        LootStack::new(items::PLAYER_HEAD, 1),
+        &head_params,
+    )
+    .unwrap();
+    assert_eq!(
+        head.component("minecraft:profile")
+            .and_then(|value| value.get("name"))
+            .and_then(Value::as_str),
+        Some("Steve")
+    );
+
+    // `copy_custom_data`：实体 NBT 的 replace op 写进 custom_data。
+    let mut nbt_params = level_params();
+    let mut holder = EntityView::new(0);
+    holder.nbt = Some(mc_bamboo_nbt::Tag::Compound(vec![(
+        "value".to_owned(),
+        mc_bamboo_nbt::Tag::Int(42),
+    )]));
+    nbt_params.this_entity = Some(holder);
+    let copied = apply(
+        json!({"type":"minecraft:copy_custom_data","source":{"type":"minecraft:context","target":"this"},"ops":[{"source":"value","target":"out","op":"replace"}]}),
+        stone.clone(),
+        &nbt_params,
+    )
+    .unwrap();
+    assert_eq!(
+        copied
+            .component("minecraft:custom_data")
+            .and_then(|value| value.get("out"))
+            .and_then(Value::as_i64),
+        Some(42)
+    );
 }

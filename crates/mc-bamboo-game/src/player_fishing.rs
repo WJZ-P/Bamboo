@@ -15,7 +15,7 @@
 //! `FishingHook.retrieve`.
 
 use mc_bamboo_blocks::{
-    BlockState, BlockWeather, World,
+    BlockState, World,
     entity::{
         Entity, EntityKind, KindPublic,
         fishing_hook::{FishingHookCast, caught_item_velocity, should_stop_fishing},
@@ -355,7 +355,7 @@ fn evaluate_fishing_loot(
     let origin = Position::new(hook_pos.x, hook_pos.y, hook_pos.z);
     let view = FishingLevelView {
         chunks: &region.chunks,
-        weather: region.global.block_weather,
+        global: &region.global,
     };
     let mut hook_view = EntityView::new(entity_type::FISHING_BOBBER);
     hook_view.is_fishing_hook = true;
@@ -483,10 +483,18 @@ fn play_neutral_sound(region: &mut Region, position: Vec3, sound: &str, volume: 
 
 struct FishingLevelView<'a> {
     chunks: &'a ChunkStore,
-    weather: BlockWeather,
+    global: &'a crate::global::GlobalView,
 }
 
 impl LevelView for FishingLevelView<'_> {
+    fn command_storage(&self, name: &str) -> Option<mc_bamboo_nbt::Tag> {
+        Some(self.global.command_storage.get(name))
+    }
+
+    fn score(&self, holder: &str, objective: &str) -> Option<Option<i32>> {
+        Some(self.global.scoreboard.score_value(holder, objective))
+    }
+
     fn is_loaded(&self, x: i32, y: i32, z: i32) -> Option<bool> {
         Some(self.chunks.block(BlockPos::new(x, y, z)).is_some())
     }
@@ -506,11 +514,11 @@ impl LevelView for FishingLevelView<'_> {
     }
 
     fn is_raining(&self) -> Option<bool> {
-        Some(self.weather.is_raining())
+        Some(self.global.block_weather.is_raining())
     }
 
     fn is_thundering(&self) -> Option<bool> {
-        Some(self.weather.is_thundering())
+        Some(self.global.block_weather.is_thundering())
     }
 
     fn day_time(&self) -> Option<i64> {
