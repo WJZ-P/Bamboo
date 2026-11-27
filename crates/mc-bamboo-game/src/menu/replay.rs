@@ -182,6 +182,8 @@ pub struct Replay {
     creative: bool,
     station: Option<super::station::Station>,
     merchant: Option<MerchantReplay>,
+    /// 最近一次点击补发的槽位和光标，菜单对拍用它检查收纳袋选中格。
+    last_resend: (Vec<i16>, bool),
 }
 
 /// 商人菜单的重放状态：交易表和选中提示。付款格和结果格在 `container[0..3]` 里。
@@ -217,6 +219,7 @@ impl Replay {
             creative: true,
             station: None,
             merchant: None,
+            last_resend: (Vec::new(), false),
         }
     }
 
@@ -414,6 +417,7 @@ impl Replay {
             return self.snapshot();
         }
         let mut thrown = Vec::new();
+        let mut sounds = Vec::new();
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
@@ -429,14 +433,48 @@ impl Replay {
                 offers: &mut m.offers,
                 selection_hint: &mut m.selection_hint,
             }),
+            sounds: &mut sounds,
         };
         super::do_click(&mut ctx, i32::from(slot), i32::from(button), input);
         // 客户端从不预测，回传的总是空光标。
         self.menu.remote_carried.receive(HashedStack::Empty);
         let slots = self.menu_slots();
-        self.menu.take_slot_changes(&slots);
-        self.menu.take_carried_change();
+        let resent = self
+            .menu
+            .take_slot_changes(&slots)
+            .iter()
+            .map(|(_, index, _)| *index as i16)
+            .collect();
+        // 菜单 oracle 的客户端从不预测，每次点击都把光标回传成空物品；
+        // 服务端看到的光标因此总是会被补发一次。`Sync` 的 sendCarriedChange
+        // 不推进 stateId，也不算槽位补发，这里同样不把它记进 resent。
+        let _ = self.menu.take_carried_change();
+        self.last_resend = (resent, false);
         self.snapshot()
+    }
+
+    /// 最近一次点击补发了哪些槽位，光标有没有补发。
+    pub fn take_last_resend(&self) -> (Vec<i16>, bool) {
+        self.last_resend.clone()
+    }
+
+    /// `ServerboundSelectBundleItemPacket`：`AbstractContainerMenu.setSelectedBundleItemIndex`。
+    pub fn select_bundle(&mut self, slot: i16, selected: i32) {
+        if self.station.is_some() {
+            return;
+        }
+        let Ok(slot) = usize::try_from(slot) else {
+            return;
+        };
+        let stack = if slot < self.container.len() {
+            self.container.get_mut(slot)
+        } else {
+            let inventory_slot = slot - self.container.len() + super::INVENTORY_MENU_START;
+            self.inventory.slots.get_mut(inventory_slot)
+        };
+        if let Some(stack) = stack {
+            mc_bamboo_protocol::components::bundle::toggle_selected(stack, selected);
+        }
     }
 
     /// 切石机的 `container_button_click`。别的菜单点了等于没点。
@@ -466,6 +504,7 @@ impl Replay {
         }
         let before = self.menu_slots();
         let mut thrown = Vec::new();
+        let mut sounds = Vec::new();
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
@@ -481,6 +520,7 @@ impl Replay {
                 offers: &mut m.offers,
                 selection_hint: &mut m.selection_hint,
             }),
+            sounds: &mut sounds,
         };
         super::do_click(&mut ctx, i32::from(slot), i32::from(button), input);
         let after = self.menu_slots();

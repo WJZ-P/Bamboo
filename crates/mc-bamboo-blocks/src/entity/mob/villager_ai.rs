@@ -2527,6 +2527,7 @@ fn build_celebration_firework(color: i32, flight: i32) -> mc_bamboo_protocol::it
     ItemStack {
         item: items::FIREWORK_ROCKET,
         count: 1,
+        bundle_selected: None,
         added,
         removed,
     }

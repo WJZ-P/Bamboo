@@ -90,6 +90,7 @@ pub fn decode_item(tag: &Tag) -> Result<ItemStack> {
         count,
         added,
         removed,
+        bundle_selected: None,
     })
 }
 
@@ -233,6 +234,7 @@ mod tests {
         patch.release();
         ItemStack {
             item: STONE,
+            bundle_selected: None,
             count,
             added,
             removed,

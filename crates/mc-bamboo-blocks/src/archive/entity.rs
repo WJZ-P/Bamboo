@@ -677,6 +677,7 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                         }
                         _ => None,
                     },
+                    item_destroy_pending: false,
                 })
             }
             "minecraft:lightning_bolt" => EntityKind::LightningBolt(Box::default()),

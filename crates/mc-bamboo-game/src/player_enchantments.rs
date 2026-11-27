@@ -427,6 +427,7 @@ mod tests {
         ItemStack {
             item: mc_bamboo_data::items::DIAMOND_BOOTS,
             count: 1,
+            bundle_selected: None,
             added,
             removed,
         }

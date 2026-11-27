@@ -1400,6 +1400,7 @@ fn components_reach_the_viewers_and_count_as_a_change() {
         count: 2,
         added: vec![(1, vec![0x10])],
         removed: vec![12],
+        bundle_selected: None,
     };
     send_equipment_changes(&mut stage.region);
     assert_eq!(

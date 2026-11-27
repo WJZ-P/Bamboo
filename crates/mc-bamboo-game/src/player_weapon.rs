@@ -991,6 +991,7 @@ fn item_stack(template: &ItemStackTemplate) -> Option<ItemStack> {
     Some(ItemStack {
         item: template.item,
         count: template.count,
+        bundle_selected: None,
         added,
         removed,
     })

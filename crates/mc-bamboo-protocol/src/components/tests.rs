@@ -380,6 +380,7 @@ fn opaque_bytes_round_trip_through_the_typed_form() {
         count: 1,
         added: vec![(kinds::MAX_STACK_SIZE, value)],
         removed: vec![kinds::LORE],
+        bundle_selected: None,
     };
 
     let patch = ComponentPatch::from_opaque(&stack).expect("合法的组件");
@@ -396,6 +397,7 @@ fn opaque_bytes_must_be_used_up_exactly() {
         count: 1,
         added: vec![(kinds::MAX_STACK_SIZE, vec![16, 0])],
         removed: Vec::new(),
+        bundle_selected: None,
     };
     assert_eq!(
         ComponentPatch::from_opaque(&stack),
@@ -455,6 +457,7 @@ fn validation_follows_the_official_rules() {
         count: 1,
         added: vec![(kinds::CONTAINER, value)],
         removed: Vec::new(),
+        bundle_selected: None,
     };
     assert_eq!(
         validate_stack(&stack),
@@ -479,6 +482,7 @@ fn a_patched_max_stack_size_lifts_the_limit() {
         count: 99,
         added: vec![(kinds::MAX_STACK_SIZE, value)],
         removed: Vec::new(),
+        bundle_selected: None,
     };
     assert_eq!(validate_stack(&stack), Ok(()));
 }
@@ -500,6 +504,7 @@ fn damageable_and_stackable_at_once_is_rejected() {
             (kinds::MAX_STACK_SIZE, max_stack),
         ],
         removed: Vec::new(),
+        bundle_selected: None,
     };
     assert!(validate_stack(&stack).is_err());
 
@@ -511,6 +516,7 @@ fn damageable_and_stackable_at_once_is_rejected() {
         count: 1,
         added: vec![(kinds::MAX_STACK_SIZE, max_stack)],
         removed: Vec::new(),
+        bundle_selected: None,
     };
     assert_eq!(
         validate_stack(&stack),
@@ -527,6 +533,7 @@ fn damageable_and_stackable_at_once_is_rejected() {
         count: 16,
         added: vec![(kinds::MAX_STACK_SIZE, max_stack)],
         removed: vec![kinds::MAX_DAMAGE],
+        bundle_selected: None,
     };
     assert_eq!(validate_stack(&stack), Ok(()));
 }
@@ -556,6 +563,7 @@ fn validation_does_not_recurse_into_contained_components() {
         count: 1,
         added: vec![(kinds::CONTAINER, value)],
         removed: Vec::new(),
+        bundle_selected: None,
     };
     assert_eq!(validate_stack(&stack), Ok(()));
 }
@@ -594,6 +602,7 @@ fn every_container_like_component_checks_the_counts() {
             count: 1,
             added: vec![(kind, bytes)],
             removed: Vec::new(),
+            bundle_selected: None,
         };
         assert_eq!(
             validate_stack(&stack),

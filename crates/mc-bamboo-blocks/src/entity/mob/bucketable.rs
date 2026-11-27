@@ -209,6 +209,7 @@ pub fn bucket_stack(entity: &Entity, mob: &Mob) -> Option<ItemStack> {
     Some(ItemStack {
         item,
         count: 1,
+        bundle_selected: None,
         added,
         removed,
     })

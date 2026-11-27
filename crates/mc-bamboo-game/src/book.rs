@@ -318,6 +318,7 @@ fn transmute_copy(stack: &ItemStack, new_item: i32) -> ItemStack {
         count: stack.count,
         added: stack.added.clone(),
         removed: stack.removed.clone(),
+        bundle_selected: None,
     };
     sanitize_patch(&mut copy);
     copy

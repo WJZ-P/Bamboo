@@ -312,6 +312,7 @@ fn three_entity_kinds_round_trip() {
             bob_offs: 0.0,
             roll_velocity: false,
             target: Some([7u8; 16]),
+            item_destroy_pending: false,
         }),
         EntityKind::OminousItemSpawner(Box::new(
             crate::entity::ominous_item_spawner::OminousItemSpawner {

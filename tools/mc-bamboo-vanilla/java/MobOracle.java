@@ -23192,7 +23192,7 @@ public final class MobOracle {
             steps.add(new ArrayList<>());
             packets.add(new ArrayList<>());
         }
-        GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+                GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
         LifePlayer player = new LifePlayer(official.server, level, profile,
                 ClientInformation.createDefault(), level);
         double[] at = scene.players.get(0);

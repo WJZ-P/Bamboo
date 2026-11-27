@@ -102,6 +102,7 @@ pub fn loot_stack(stack: &LootStack) -> ItemStack {
     ItemStack {
         item: stack.item,
         count: stack.count,
+        bundle_selected: None,
         added,
         removed,
     }

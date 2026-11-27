@@ -3228,6 +3228,10 @@ impl World {
                 }
             }
             PlayRequest::SelectTrade { slot } => menu::on_select_trade(region, player, slot),
+            PlayRequest::SelectBundleItem {
+                slot_id,
+                selected_item_index,
+            } => menu::on_select_bundle_item(region, player, slot_id, selected_item_index),
             PlayRequest::SetBeacon { primary, secondary } => {
                 menu::on_set_beacon(region, player, primary, secondary);
             }

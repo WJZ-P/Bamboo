@@ -71,6 +71,7 @@ fn with_set(item: i32, kind: i32, value: ComponentValue) -> ItemStack {
     ItemStack {
         item,
         count: 1,
+        bundle_selected: None,
         added,
         removed,
     }

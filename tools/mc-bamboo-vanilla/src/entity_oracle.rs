@@ -21,11 +21,15 @@ use mc_bamboo_blocks::{
     entity::{Entities, Entity, EntityKind, JavaRandom, can_pick_up, take_stack},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_data::registries::data_component_type as kinds;
 use mc_bamboo_data::{BlockAncestor, version};
 use mc_bamboo_game::receive_like_player;
 use mc_bamboo_loot::{BlockDropParams, LevelView, LootStack, RandomSequences, block_drops};
 use mc_bamboo_nbt::Tag;
-use mc_bamboo_protocol::item::ItemStack;
+use mc_bamboo_protocol::{
+    components::{ComponentPatch, cursor::write_list, stack::ItemStackTemplate},
+    item::ItemStack,
+};
 use serde::Deserialize;
 
 use crate::oracle::collect_log;
@@ -179,6 +183,9 @@ struct Case {
     orb_spectator: bool,
     #[serde(default)]
     orb_steps: Vec<[i32; 9]>,
+    /// 收纳袋被毁题里的 `[物品, 数量, ...]`，用来造初始 `bundle_contents`。
+    #[serde(default)]
+    bundle_contents: Vec<i32>,
     /// 物品场景才有。下落方块和 TNT 的题不写这些字段。
     ///
     /// Present on item scenes. Falling-block and TNT cases omit them.
@@ -710,15 +717,47 @@ impl Report {
             ),
             "tnt" => world.spawn_tnt(BlockPos::new(case.x, case.y, case.z), None),
             "item" => {
-                spawn_ground_item(
-                    &mut world,
-                    case.px,
-                    case.py,
-                    case.pz,
-                    case.item,
-                    case.count,
-                    case.pickup_delay.unwrap_or(10),
-                );
+                if !case.bundle_contents.is_empty() {
+                    let templates: Vec<ItemStackTemplate> = case
+                        .bundle_contents
+                        .chunks(2)
+                        .filter(|pair| pair.len() == 2)
+                        .map(|pair| ItemStackTemplate {
+                            item: pair[0],
+                            count: pair[1],
+                            components: ComponentPatch::new(),
+                        })
+                        .collect();
+                    let mut bytes = Vec::new();
+                    write_list(&mut bytes, &templates, ItemStackTemplate::write);
+                    let mut stack = ItemStack {
+                        item: case.item,
+                        count: case.count,
+                        added: vec![(kinds::BUNDLE_CONTENTS, bytes)],
+                        removed: Vec::new(),
+                        bundle_selected: None,
+                    };
+                    // 夹具在生成前先按官方 `ItemStack.onDestroyed` 掉出内容物，
+                    // 这样两边的实体种子源和生成时刻一致。
+                    let dropped =
+                        mc_bamboo_blocks::entity::item::container_destroyed_contents(&mut stack);
+                    for piece in dropped {
+                        world.spawn_entity(Entity::ground_item(
+                            Vec3::new(case.px, case.py, case.pz),
+                            piece,
+                        ));
+                    }
+                } else {
+                    spawn_ground_item(
+                        &mut world,
+                        case.px,
+                        case.py,
+                        case.pz,
+                        case.item,
+                        case.count,
+                        case.pickup_delay.unwrap_or(10),
+                    );
+                }
                 for extra in &case.extras {
                     spawn_ground_item(
                         &mut world,
@@ -778,6 +817,16 @@ impl Report {
                 touch_player(&mut world, slots, player.creative);
             }
             let mut ticked = world.tick_entities_kept();
+            // 改坏确认：只改 Bamboo 一侧的掉落物数量，比较器不变。
+            if self.break_name.as_deref() == Some("bundle-drops")
+                && case.name == "bundle_destroyed"
+                && let Some(entity) = ticked
+                    .iter_mut()
+                    .find(|entity| matches!(entity.kind, EntityKind::Item(_)))
+                && let Some(item) = entity.ground_mut()
+            {
+                item.stack.count = item.stack.count.saturating_add(1);
+            }
             // 旧的下落方块和 TNT 题只比那两种实体；新的掉落物题带 `compareDrops`。
             // Older falling-block and TNT cases compared only those two kinds; the new
             // drop cases opt into comparing the spawned item entities.

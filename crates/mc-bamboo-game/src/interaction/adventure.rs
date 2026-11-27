@@ -82,6 +82,7 @@ mod tests {
             count: 1,
             added: vec![(kinds::CAN_BREAK, value)],
             removed: Vec::new(),
+            bundle_selected: None,
         }
     }
 
@@ -94,6 +95,7 @@ mod tests {
             count: 1,
             added: vec![(kinds::CAN_PLACE_ON, value)],
             removed: Vec::new(),
+            bundle_selected: None,
         }
     }
 

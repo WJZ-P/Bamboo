@@ -548,6 +548,30 @@ WebView2 的渲染进程不算在内。
   两种情况各用官方的翻译键。连接和读取各 5 秒，也和 authlib 的两个常量一样。
   问 session server 在连接任务里做，世界线程不等这段 IO。session server 给的 UUID、皮肤和签名原样进 Tab 列表。
   和代理转发互斥，两个都开时转发赢。
+- **收纳袋（`minecraft:bundle_contents`）**：照 26.3 字节码把 `BundleItem`、`BundleContents` / `Mutable`、
+  `ServerboundSelectBundleItemPacket` 和 `AbstractContainerMenu.tryItemClickBehaviourOverride` 接进菜单点击、
+  选中格、右键使用和物品被毁四条路径。容量按官方的化简分数算：普通物品每件占 `1 / max_stack_size`，
+  嵌套收纳袋占「内层重量 + 1/16」，有 `bees` 的蜂箱占满一袋，潜影盒装不进去；`tryInsert` 把同种物品
+  合并并移到列表最前，`tryTransfer` 只从槽里拿装得下的数量，满袋再装保持两边不变并播
+  `item.bundle.insert_fail`。左键 / 右键的光标方向、空格取出、`Slot.safeInsert` 的剩余物回装，
+  以及 `insert` / `remove_one` / `drop_contents` 的音效音量与随机音高都按字节码实现。
+  客户端报上来的 `SERVERBOUND_BUNDLE_ITEM_SELECTED` 切换服务端本地的选中下标：`Mutable.removeOne`
+  会取选中的那一整堆并清掉选中，物品堆从格子挪到光标再放回别的格时下标跟着走；
+  网络 / 存档的 `bundle_contents` 和 `ItemStack.equals` 都不含这个下标，切选中格不会补发槽位包。
+  右键使用照 `BundleItem.use` 只进入 200 刻的「正在使用」状态，`onUseTick` 在第一刻和剩余小于
+  190 的偶数刻逐件倒出：每次走官方 `Player.drop(stack, false, PREDICTED)` 的位置与速度，
+  播 `item.bundle.drop_contents` 并记一次 `ITEM_USED`。火烧 / 岩浆等把收纳袋物品实体打到血量
+  归零时，`ItemEntity.hurtServer` → `ItemStack.onDestroyed` → `ItemUtils.onContainerDestroyed`
+  把内容物在原地逐件掉出；摔进虚空只 `discard()`，不掉内容物。
+  **对拍**：`menu java` 六道固定题（左 / 右键装取、62/64 装到满、选中第 2 件后拿到光标再放到别的格取出、
+  嵌套收纳袋、满袋再装）在 245 题 2629 次点击里逐步比全部 63 个槽位、光标、组件补丁十六进制、
+  `state_id` 与补发槽位，0 不一致；`entity-oracle java` 的 `bundle_destroyed` 用官方 `onDestroyed`
+  生成的两件掉落物逐刻比位置 / 速度 / 数量 / 年龄 / 拾取延迟，67 题 1212 刻 0 不一致。
+  四处改坏确认（`--break-self-test bundle_first|bundle_slots|bundle_selected` 与
+  `entity-oracle java --break-self-test bundle-drops`）分别报 5 / 15 / 12 / 2 处差异。
+  **已知限制**：选中下标是服务端本地状态，复制物品堆时两份会带上同一个下标；
+  存档和网络字节不持久化它；收纳袋的 /tooltip 显示格数、`Consumable` 之外的物品使用动画、
+  以及 `BundlePredicate` 的物品判据暂未单独接入。
 - 物品的数据组件能完整解码和编码：122 种组件每种一个类型，格式照官方每一种的 `StreamCodec`，
   包括文本组件（线上是 NBT）、`Holder` 和 `HolderSet`、方块谓词、嵌套的物品堆（容器、收纳袋、
   弩的弹药）和带 NBT 的组件。NBT 也补齐了解码，带官方的配额和深度上限。

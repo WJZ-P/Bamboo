@@ -20,6 +20,7 @@
 
 pub mod archive;
 pub mod book;
+pub mod bundle;
 pub mod cursor;
 pub mod defaults;
 mod dialog;

@@ -453,6 +453,7 @@ mod tests {
             count: 2,
             added: vec![(1, vec![0x10])],
             removed: vec![12],
+            bundle_selected: None,
         };
         let packet = ContainerSetSlot {
             container_id: 0,

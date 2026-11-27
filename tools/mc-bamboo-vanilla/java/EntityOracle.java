@@ -24,6 +24,8 @@ import net.minecraft.core.HolderLookup;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.component.DataComponents;
+import net.minecraft.world.item.ItemStackTemplate;
+import net.minecraft.world.item.component.BundleContents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.RegistryDataLoader;
@@ -180,6 +182,7 @@ public final class EntityOracle {
             cases += itemMerge(official, out);
             cases += itemHopper(official, out);
             cases += itemAboveHopper(official, out);
+            cases += bundleDestroyed(official, out);
             cases += itemPickup(official, out);
             cases += itemPickupPartial(official, out);
             cases += itemPickupCreativeFull(official, out);
@@ -993,6 +996,74 @@ public final class EntityOracle {
         Inventory inventory = new Inventory(player, new PlayerEquipment(player));
         put(player, Player.class, "inventory", inventory);
         return player;
+    }
+
+    /** 装着两件东西的收纳袋掉进岩浆：血量归零时 `onDestroyed` 把内容物原地掉出来。 */
+    private static int bundleDestroyed(Official official, Writer out) throws Exception {
+        Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+        blocks.put(BlockPos.asLong(0, 63, 0), Blocks.STONE.defaultBlockState());
+        for (int y = 64; y <= 68; y++) {
+            blocks.put(BlockPos.asLong(0, y, 0), Blocks.LAVA.defaultBlockState());
+        }
+        Scene scene = Scene.items(official, blocks, false);
+        // 官方 `ItemStack.onDestroyed` → `ItemUtils.onContainerDestroyed`：
+        // 内容物以位置构造函数、无拾取延迟地掉在收纳袋实体的位置。
+        // 夹具按 `level.entitySeeds` 给新实体换种并重放构造取数，
+        // 和 Bamboo 的生成顺序一致；题目只比这两件掉落物。
+        ItemStack bundle = new ItemStack(Items.BUNDLE);
+        java.util.List<ItemStackTemplate> contents = new ArrayList<>();
+        contents.add(new ItemStackTemplate(Items.STONE, 7));
+        contents.add(new ItemStackTemplate(Items.DIRT, 3));
+        bundle.set(DataComponents.BUNDLE_CONTENTS, new BundleContents(contents));
+        bundle.onDestroyed(new ItemEntity(scene.level, 0.5, 66.0, 0.5, bundle));
+        java.util.List<ItemStack> pieces = new ArrayList<>();
+        for (Entity fresh : new ArrayList<>(scene.level.fresh)) {
+            if (fresh instanceof ItemEntity ground) {
+                pieces.add(ground.getItem().copy());
+            }
+        }
+        scene.level.fresh.clear();
+        for (int i = 0; i < pieces.size(); i++) {
+            scene.spawnItem(0.5, 66.0, 0.5, pieces.get(i), 0, true);
+        }
+        // 官方 `onDestroyed` 生成的两件物品用了构造时的未播种随机源；
+        // 夹具按 Bamboo 的实体种子源逐个重放朝向和速度，但 ID 要按生成顺序对齐。
+        for (int i = 0; i < scene.active.size(); i++) {
+            Entity entity = scene.active.get(i);
+            long seed = scene.level.entitySeed(scene.level.firstId + i);
+            setRandom(entity, seed);
+            RandomSource random = entity.getRandom();
+            random.nextFloat();
+            entity.setYRot(random.nextFloat() * 360.0F);
+            entity.setDeltaMovement(random.nextDouble() * 0.2 - 0.1, 0.2,
+                    random.nextDouble() * 0.2 - 0.1);
+        }
+        StringBuilder steps = new StringBuilder();
+        steps.append('[');
+        scene.writeStep(steps);
+        for (int tick = 0; tick < 30; tick++) {
+            steps.append(',');
+            scene.tick();
+            scene.writeStep(steps);
+        }
+        steps.append(']');
+        out.write("{\"type\":\"case\",\"name\":\"bundle_destroyed\"");
+        out.write(",\"kind\":\"item\",\"state\":0,\"x\":0,\"y\":0,\"z\":0");
+        out.write(",\"levelSeed\":1,\"entitySeed\":1,\"hurts\":null,\"fuse\":null");
+        out.write(",\"item\":");
+        out.write(Integer.toString(BuiltInRegistries.ITEM.getId(Items.BUNDLE)));
+        out.write(",\"count\":1,\"px\":0.5,\"py\":66.0,\"pz\":0.5,\"pickupDelay\":10");
+        out.write(",\"bundleContents\":[");
+        out.write(Integer.toString(BuiltInRegistries.ITEM.getId(Items.STONE)));
+        out.write(",7,");
+        out.write(Integer.toString(BuiltInRegistries.ITEM.getId(Items.DIRT)));
+        out.write(",3]");
+        out.write(",\"hopper\":false,\"blocks\":");
+        writeBlocks(out, blocks);
+        out.write(",\"steps\":");
+        out.write(steps.toString());
+        out.write("}\n");
+        return 1;
     }
 
     private static void playItem(
@@ -2035,6 +2106,8 @@ public final class EntityOracle {
         boolean fallingDrops;
         /** 船场景：破坏后掉出的物品实体也要留在快照里（官方 `spawnAtLocation`）。 */
         boolean keepFresh;
+        /** 收纳袋被毁题：`ItemUtils.onContainerDestroyed` 生成物品时不设拾取延迟。 */
+        boolean bundleDestroy;
 
         private Scene(FakeLevel level) {
             this.level = level;
@@ -2166,7 +2239,7 @@ public final class EntityOracle {
             // Fresh falling blocks, TNT and items dropped by falling blocks all stay in the snapshot.
             for (Entity spawned : level.fresh) {
                 if (spawned instanceof ItemEntity item) {
-                    if (!fallingDrops && !keepFresh) {
+                    if (!fallingDrops && !keepFresh && !bundleDestroy) {
                         continue;
                     }
                     // `RandomSource.create()` 每次运行都换种子。改成和 Bamboo 一样从种子源
@@ -2182,7 +2255,9 @@ public final class EntityOracle {
                             random.nextDouble() * 0.2 - 0.1,
                             0.2,
                             random.nextDouble() * 0.2 - 0.1);
-                    item.setDefaultPickUpDelay();
+                    if (!bundleDestroy) {
+                        item.setDefaultPickUpDelay();
+                    }
                     snapshot.add(spawned);
                     active.add(spawned);
                 } else if (spawned instanceof FallingBlockEntity || spawned instanceof PrimedTnt) {

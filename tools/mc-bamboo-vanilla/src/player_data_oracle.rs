@@ -1095,6 +1095,7 @@ fn damaged(count: i32) -> ItemStack {
     let (added, removed) = patch.to_opaque();
     ItemStack {
         item: STONE,
+        bundle_selected: None,
         count,
         added,
         removed,

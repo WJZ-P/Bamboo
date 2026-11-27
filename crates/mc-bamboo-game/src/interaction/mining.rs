@@ -747,6 +747,7 @@ mod tests {
             count: 1,
             added: vec![(kinds::DAMAGE, vec![1])],
             removed: Vec::new(),
+            bundle_selected: None,
         }
     }
 
@@ -1042,6 +1043,7 @@ mod tests {
             count: 1,
             added: vec![(kinds::CAN_BREAK, value)],
             removed: Vec::new(),
+            bundle_selected: None,
         }
     }
 

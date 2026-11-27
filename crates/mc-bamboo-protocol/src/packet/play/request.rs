@@ -315,6 +315,13 @@ pub enum PlayRequest {
     SelectTrade {
         slot: i32,
     },
+    /// `ServerboundSelectBundleItemPacket`：客户端选中了收纳袋提示里的第几件。
+    ///
+    /// `selected_item_index` 为 -1 或 >= 0；别的值官方解码时抛异常断开连接。
+    SelectBundleItem {
+        slot_id: i32,
+        selected_item_index: i32,
+    },
     /// `ServerboundSetBeaconPacket`：信标界面确认选择主/副效果。
     ///
     /// `ServerboundSetBeaconPacket`: confirm primary and secondary effects in a beacon screen.
@@ -465,6 +472,18 @@ impl PlayRequest {
             serverbound::SELECT_TRADE => Self::SelectTrade {
                 slot: reader.varint()?,
             },
+            serverbound::BUNDLE_ITEM_SELECTED => {
+                let slot_id = reader.varint()?;
+                let selected_item_index = reader.varint()?;
+                // 官方的私有解码构造方法：`selectedItemIndex < -1` 是非法包。
+                if selected_item_index < -1 {
+                    return Err(DecodeError::InvalidEnum(selected_item_index));
+                }
+                Self::SelectBundleItem {
+                    slot_id,
+                    selected_item_index,
+                }
+            }
             serverbound::SET_BEACON => read_set_beacon(&mut reader)?,
             serverbound::CONTAINER_CLOSE => Self::ContainerClose {
                 container_id: reader.varint()?,
@@ -1570,6 +1589,7 @@ mod tests {
                     count: 2,
                     added: vec![(1, vec![0x10])],
                     removed: vec![12],
+                    bundle_selected: None,
                 },
             })
         );
