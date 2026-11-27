@@ -660,6 +660,18 @@ impl Entity {
         entity
     }
 
+    /// 载具放置时应用 `EntityType.appendComponentsConfig` 的自定义名。
+    ///
+    /// Apply the custom name from the placed vehicle stack.
+    pub(crate) fn apply_vehicle_stack_name(&mut self, stack: &ItemStack) {
+        let destination = match &mut self.kind {
+            EntityKind::Boat(boat) => &mut boat.custom_name,
+            EntityKind::Minecart(cart) => &mut cart.custom_name,
+            _ => return,
+        };
+        *destination = hanging::stack_custom_name(stack);
+    }
+
     fn mob_of(kind: mob::MobType, position: Vec3) -> Self {
         Self::by_mob_type(kind, position)
     }

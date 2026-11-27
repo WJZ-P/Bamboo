@@ -305,6 +305,12 @@ pub enum PlayRequest {
         conditional: bool,
         automatic: bool,
     },
+    /// 命令方块矿车界面的保存。 / A save from the command minecart screen.
+    SetCommandMinecart {
+        entity_id: i32,
+        command: String,
+        track_output: bool,
+    },
     /// `ServerboundSelectTradePacket`：选中交易界面里的第几条。
     SelectTrade {
         slot: i32,
@@ -503,6 +509,11 @@ impl PlayRequest {
                 entries: read_game_rules(&mut reader)?,
             },
             serverbound::SET_COMMAND_BLOCK => read_command_block(&mut reader)?,
+            serverbound::SET_COMMAND_MINECART => Self::SetCommandMinecart {
+                entity_id: reader.varint()?,
+                command: reader.string(MAX_UTF)?.to_owned(),
+                track_output: reader.bool()?,
+            },
             serverbound::SEEN_ADVANCEMENTS => {
                 return super::advancement::decode_seen_advancements(
                     &mut reader,

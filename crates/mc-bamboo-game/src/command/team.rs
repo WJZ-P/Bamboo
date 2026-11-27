@@ -3,7 +3,7 @@
 //! 语法、权限和反馈按官方 `TeamCommand`。队伍包的时机由 `ServerScoreboard` 决定：
 //! 创建、删除、改属性和成员变化都广播 `set_player_team`。
 
-use mc_bamboo_command::{ParsedCommand, ScoreHolderSpec, TeamColorId, Value, permission};
+use mc_bamboo_command::{ParsedCommand, ScoreHolderSpec, TeamColorId, Value};
 use mc_bamboo_protocol::text::{Component, TranslateArg};
 
 use crate::{
@@ -72,11 +72,7 @@ fn members(
         .get(name)
         .and_then(Value::as_score_holder)
         .ok_or_else(|| fail("command.failed"))?;
-    let level = region
-        .players
-        .get(&id)
-        .map(|player| player.permission_level)
-        .unwrap_or(permission::ALL);
+    let level = super::source::level(region, id);
     let names = match spec {
         ScoreHolderSpec::Wildcard => global.scoreboard().tracked_players(),
         ScoreHolderSpec::Text(text) => vec![text.clone()],

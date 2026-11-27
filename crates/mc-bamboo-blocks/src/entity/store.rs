@@ -1945,8 +1945,16 @@ impl EntityStore {
     pub fn rebase(&mut self, delta: i64) {
         let rows = self.slots.iter_mut().flatten().chain(&mut self.pending);
         for row in rows {
-            if let KindState::Mob(mob) = &mut row.state.kind {
-                mob.rebase(delta);
+            match &mut row.state.kind {
+                KindState::Mob(mob) => mob.rebase(delta),
+                KindState::Minecart(cart) => {
+                    if let Some(command) = &mut cart.command_block
+                        && command.last_execution != -1
+                    {
+                        command.last_execution = command.last_execution.saturating_add(delta);
+                    }
+                }
+                _ => {}
             }
         }
         self.wake_tokens.rebase(delta);

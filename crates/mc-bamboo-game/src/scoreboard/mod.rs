@@ -376,6 +376,12 @@ impl Scoreboard {
         self.team(name).map(|team| team.collision)
     }
 
+    pub(crate) fn team_collision_by_index(&self, index: u32) -> i32 {
+        self.teams
+            .get(index as usize)
+            .map_or(0, |team| team.collision)
+    }
+
     pub(crate) fn team_members(&self, name: &str) -> Option<&[String]> {
         self.team(name).map(|team| team.members.as_slice())
     }
@@ -384,7 +390,10 @@ impl Scoreboard {
     ///
     /// Without a team this is plain text, so current chat and join packets stay the same.
     pub(crate) fn format_player_name(&self, name: &str) -> Component {
-        let plain = Component::text(name);
+        self.format_holder_name(name, Component::text(name))
+    }
+
+    pub(crate) fn format_holder_name(&self, name: &str, plain: Component) -> Component {
         let Some(team_name) = self.team_of(name) else {
             return plain;
         };

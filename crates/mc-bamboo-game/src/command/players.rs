@@ -3,9 +3,7 @@
 //! Game mode, chat, the player list, kicking, and help.
 
 use mc_bamboo_blocks::BlockState;
-use mc_bamboo_command::{
-    EntitySelector, GameMode as CommandMode, Message, ParsedCommand, Value, permission,
-};
+use mc_bamboo_command::{EntitySelector, GameMode as CommandMode, Message, ParsedCommand, Value};
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_protocol::{
     packet::play::{ChatVisibility, DisguisedChat, GameEvent, GameMode, PlayerAbilities},
@@ -438,7 +436,11 @@ fn broadcast_chat(
     chat_type: i32,
     target: Option<&Component>,
 ) {
-    let name = Component::text(player_name(region, sender));
+    let name = if crate::minecart_command::tracks_output(sender).is_some() {
+        crate::minecart_command::display_name(region, sender)
+    } else {
+        Component::text(player_name(region, sender))
+    };
     // 官方断开时立刻把玩家移出名单，Bamboo 要等 `Leave`，所以这里跳过链路已关的玩家。
     //
     // Official servers remove a player from the list as soon as it disconnects; Bamboo waits
@@ -562,11 +564,7 @@ fn required_players<'a>(
 }
 
 pub(crate) fn level_of(region: &Region, id: PlayerId) -> u8 {
-    region
-        .players
-        .get(&id)
-        .map(|player| player.permission_level)
-        .unwrap_or(permission::ALL)
+    super::source::level(region, id)
 }
 
 fn player_name(region: &Region, id: PlayerId) -> String {

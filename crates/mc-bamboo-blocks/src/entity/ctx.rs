@@ -2038,6 +2038,20 @@ pub enum Command {
     ///
     /// `MinecartHopper.suckInItems`: pull nearby item entities into its 5 slots.
     MinecartHopperSuck,
+    /// 矿车的碰撞和自动上车。 / Minecart collisions and automatic boarding.
+    MinecartPushAndPickup,
+    /// 矿车回应生物的碰撞。 / A cart responds to a mob's collision.
+    PushMinecart {
+        other: EntityUid,
+    },
+    /// 激活铁轨让矿车上的乘客下车。 / An activator rail ejects the cart's riders.
+    MinecartEject {
+        passengers: Vec<EntityUid>,
+    },
+    /// 激活铁轨触发命令。 / An activator rail triggers a command.
+    ActivateMinecartCommand(super::minecart::CommandActivation),
+    /// 移动后推进刷怪笼矿车。 / Tick the cart's spawner after movement.
+    TickMinecartSpawner,
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -2819,6 +2833,15 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             owner,
         } => world.explode_minecart(center, radius, source, owner),
         Command::MinecartHopperSuck => crate::hopper::suck_minecart(world, me),
+        Command::PushMinecart { other } => {
+            world.with_entity_mut(other, &mut |cart| super::minecart::push_minecart(cart, me));
+        }
+        Command::MinecartPushAndPickup => super::minecart::push_and_pickup(me, world),
+        Command::MinecartEject { passengers } => world.eject_passenger_ids(&passengers),
+        Command::TickMinecartSpawner => super::minecart::tick_spawner(me, world),
+        Command::ActivateMinecartCommand(activation) => {
+            world.push_effect(crate::Effect::RunMinecartCommand(activation));
+        }
     }
 }
 

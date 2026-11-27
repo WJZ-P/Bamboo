@@ -16,10 +16,7 @@
 use mc_bamboo_command::permission;
 
 use crate::{
-    command::{commands, feedback, run},
-    global::Global,
-    global_port::GlobalPort,
-    inbound::PlayerId,
+    command::run_prefixed, global::Global, global_port::GlobalPort, inbound::PlayerId,
     region::Region,
 };
 
@@ -70,22 +67,7 @@ pub(crate) fn on_console_command(global: &mut Global, region: &mut Region, line:
 }
 
 fn run_console_command(global: &mut Global, region: &mut Region, line: &str) {
-    let command = line.strip_prefix('/').unwrap_or(line);
-    match commands().graph.parse(command, PERMISSION) {
-        Ok(parsed) => run(
-            &mut GlobalPort::Direct(global),
-            region,
-            SOURCE,
-            command,
-            parsed,
-        ),
-        Err(failure) => feedback::report(
-            region,
-            SOURCE,
-            command,
-            &feedback::fail_parse(command, &failure.error, failure.cursor),
-        ),
-    }
+    run_prefixed(&mut GlobalPort::Direct(global), region, SOURCE, line);
 }
 
 #[cfg(test)]

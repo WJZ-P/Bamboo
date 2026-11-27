@@ -13,6 +13,7 @@ use mc_bamboo_core::Vec3;
 use mc_bamboo_data::sounds;
 use mc_bamboo_protocol::{
     frame::packet_body,
+    item::ItemStack,
     packet::play::{
         DamageEvent, HurtAnimation, PlayerCombatEnter, SetEntityMotion, SetHealth, Sound,
     },
@@ -734,7 +735,7 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
 /// The minecart half of `VehicleEntity.hurtServer`: accumulate `amount*10`, flip
 /// `hurtDir`, set `hurtTime=10`. Creative mode discards without a drop; above 40
 /// damage the cart item drops, while a fast TNT cart primes a short fuse instead.
-fn hurt_minecart(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32) {
+pub(crate) fn hurt_minecart(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32) {
     let Some(public) = region.entities.public_at(entity_id) else {
         return;
     };
@@ -748,7 +749,8 @@ fn hurt_minecart(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32)
         player.game_mode == mc_bamboo_protocol::packet::play::GameMode::Creative
     });
     let position = public.position;
-    let mut drop_item = mc_bamboo_data::items::AIR;
+    let mut broken = false;
+    let mut drop_stack = ItemStack::empty();
     let mut is_container = false;
     let mut container_items: Vec<mc_bamboo_protocol::item::ItemStack> = Vec::new();
     region.entities.with_mut(entity_id, |entity| {
@@ -758,24 +760,17 @@ fn hurt_minecart(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32)
         cart.hurt_dir = -cart.hurt_dir;
         cart.hurt_time = 10;
         cart.damage += amount * 10.0;
-        let over_limit = cart.damage > 40.0;
-        if creative {
-            // 官方 `hurtServer`：创造模式只 `discard`，不 `destroy`、不掉物品。
-            // Vanilla `hurtServer`: creative mode only discards, without a drop.
-            entity.discard();
+        if !creative && cart.damage <= 40.0 {
             return;
         }
-        if !over_limit {
-            return;
-        }
-        if cart.kind() == mc_bamboo_blocks::entity::minecart::MinecartKind::Tnt {
+        if !creative && cart.kind() == mc_bamboo_blocks::entity::minecart::MinecartKind::Tnt {
             let speed_sqr = entity.delta.x * entity.delta.x + entity.delta.z * entity.delta.z;
-            if speed_sqr >= 0.01 && cart.fuse < 0 {
-                // `MinecartTNT.destroy`：短引信由两次 `nextInt(20)` 决定。
-                // `MinecartTNT.destroy`: the short fuse is two `nextInt(20)` draws.
-                let first = entity.random.next_int_bounded(20);
-                let second = entity.random.next_int_bounded(20);
-                cart.fuse = first + second;
+            if speed_sqr >= f64::from(0.01_f32) {
+                if cart.fuse < 0 {
+                    let first = entity.random.next_int_bounded(20);
+                    let second = entity.random.next_int_bounded(20);
+                    cart.fuse = first + second;
+                }
                 return;
             }
         }
@@ -788,10 +783,13 @@ fn hurt_minecart(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32)
                 .cloned()
                 .collect();
         }
-        drop_item = cart.drop_item();
+        if !creative {
+            drop_stack = cart.drop_stack();
+        }
+        broken = true;
         entity.discard();
     });
-    if drop_item == mc_bamboo_data::items::AIR {
+    if !broken {
         return;
     }
     // `AbstractMinecartContainer.destroy` → `chestVehicleDestroyed`：先解包
@@ -804,19 +802,13 @@ fn hurt_minecart(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32)
     } else {
         Vec::new()
     };
-    drop_vehicle_contents(region, position, drop_item, &contents);
+    drop_vehicle_contents(region, position, drop_stack, &contents);
 }
 
-/// `VehicleEntity.hurtServer` 的船版：玩家打一下累计 `amount*10` 的伤害、翻转
-/// `hurtDir`、`hurtTime=10`；`instabuild`（创造模式）或 `damage > 40` 时
-/// `destroy`，掉出船物品（`AbstractBoat.destroy`）和运输船箱里的东西
-/// （`AbstractChestBoat.destroy` → `chestVehicleDestroyed`）。`entity.discard()`
-/// 之后实体表会按官方 `setRemoved` 甩掉乘客。
+/// 船的 `VehicleEntity.hurtServer`。创造模式移除船，运输船仍掉出库存。
 ///
-/// The boat half of `VehicleEntity.hurtServer`: each hit adds `amount*10` damage,
-/// flips `hurtDir` and sets `hurtTime=10`; creative mode or `damage > 40` calls
-/// `destroy`, dropping the boat item and the chest boat's contents.
-fn hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32) {
+/// The boat's `VehicleEntity.hurtServer`. Creative discards the boat and still empties chest contents.
+pub(crate) fn hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32) {
     let Some(public) = region.entities.public_at(entity_id) else {
         return;
     };
@@ -828,7 +820,7 @@ fn hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32) {
     });
     let position = public.position;
     let mut destroyed = false;
-    let mut drop_item = mc_bamboo_data::items::AIR;
+    let mut drop_stack = ItemStack::empty();
     let mut chest_items: Vec<mc_bamboo_protocol::item::ItemStack> = Vec::new();
     region.entities.with_mut(entity_id, |entity| {
         if let mc_bamboo_blocks::entity::EntityKind::Boat(boat) = &mut entity.kind {
@@ -838,7 +830,9 @@ fn hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32) {
             boat.damage += amount * 10.0;
             if creative || boat.damage > 40.0 {
                 destroyed = true;
-                drop_item = boat.drop_item();
+                if !creative {
+                    drop_stack = boat.drop_stack();
+                }
                 if let Some(chest) = &boat.chest {
                     chest_items = chest
                         .items
@@ -857,7 +851,7 @@ fn hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32) {
         // 不带玩家，也没有幸运值加成。
         let dropped = crate::container_loot::unpack_entity_container(region, entity_id, None, 0.0)
             .unwrap_or(chest_items);
-        drop_vehicle_contents(region, position, drop_item, &dropped);
+        drop_vehicle_contents(region, position, drop_stack, &dropped);
     }
 }
 
@@ -867,16 +861,14 @@ fn hurt_boat(region: &mut Region, id: PlayerId, entity_id: i32, amount: f32) {
 fn drop_vehicle_contents(
     region: &mut Region,
     position: mc_bamboo_core::Vec3,
-    drop_item: i32,
-    chest_items: &[mc_bamboo_protocol::item::ItemStack],
+    drop_stack: ItemStack,
+    chest_items: &[ItemStack],
 ) {
+    let drop_vehicle = region.global.block_rules.entity_drops;
     let (mut level, ticks) = region.block_level();
     let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
-    if drop_item != mc_bamboo_data::items::AIR {
-        world.spawn_at_location(
-            position,
-            mc_bamboo_protocol::item::ItemStack::new(drop_item, 1),
-        );
+    if drop_vehicle && !drop_stack.is_empty() {
+        world.spawn_at_location(position, drop_stack);
     }
     for stack in chest_items {
         world.spawn_at_location(position, stack.clone());

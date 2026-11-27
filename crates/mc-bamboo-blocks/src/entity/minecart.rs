@@ -5,16 +5,21 @@
 //! Minecart entities, vanilla `AbstractMinecart` and its subclasses, moved by
 //! `OldMinecartBehavior`. The experimental `NewMinecartBehavior` is out of scope.
 
-use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Vec3, mth};
 use mc_bamboo_data::{BlockAncestor, blocks, items, registries::entity_type, tags::block_tags};
-use mc_bamboo_protocol::item::ItemStack;
+use mc_bamboo_nbt::Tag;
+use mc_bamboo_protocol::{components::text::checked_component, item::ItemStack, text::Component};
 
 use crate::{
-    BlockState,
+    Aabb, BlockState, World,
+    archive::tag,
+    behaviour::machines::spawner::BaseSpawner,
     entity::{
-        Entity, EntityKind, EntityUid, PrimedTnt,
+        Entity, EntityKind, EntityUid, KindPublic, PrimedTnt,
         ctx::{BlockView, Command, EntityCtx},
+        mob::{MobType, living},
     },
+    game_event::{GameEvent, dispatch::EventContext},
     state::{POWERED, RAIL_SHAPE, RailShape},
 };
 
@@ -30,6 +35,7 @@ pub enum MinecartKind {
     Tnt,
     Hopper,
     CommandBlock,
+    Spawner,
 }
 
 impl MinecartKind {
@@ -44,6 +50,7 @@ impl MinecartKind {
             Self::Tnt => entity_type::TNT_MINECART,
             Self::Hopper => entity_type::HOPPER_MINECART,
             Self::CommandBlock => entity_type::COMMAND_BLOCK_MINECART,
+            Self::Spawner => entity_type::SPAWNER_MINECART,
         }
     }
 
@@ -58,6 +65,7 @@ impl MinecartKind {
             Self::Tnt => items::TNT_MINECART,
             Self::Hopper => items::HOPPER_MINECART,
             Self::CommandBlock => items::COMMAND_BLOCK_MINECART,
+            Self::Spawner => items::MINECART,
         }
     }
 
@@ -72,6 +80,7 @@ impl MinecartKind {
             entity_type::TNT_MINECART => Self::Tnt,
             entity_type::HOPPER_MINECART => Self::Hopper,
             entity_type::COMMAND_BLOCK_MINECART => Self::CommandBlock,
+            entity_type::SPAWNER_MINECART => Self::Spawner,
             _ => return None,
         })
     }
@@ -136,6 +145,13 @@ pub struct Minecart {
     ///
     /// The registry entity type id; also determines the [`MinecartKind`].
     pub entity_type: i32,
+    /// 实体的可选自定义名。 / The entity's optional custom name.
+    pub custom_name: Option<Tag>,
+    /// 是否显示自定义名。 / Whether the name is visible.
+    pub custom_name_visible: bool,
+    /// 最近一次设定的俯仰，旧矿车行为会在一刻结束前归零。
+    /// The current pitch, which the old behavior resets before the tick ends.
+    pub pitch: f32,
     /// 乘客列表，骑乘层读它。
     ///
     /// The passenger list, read by the riding layer.
@@ -182,6 +198,9 @@ pub struct Minecart {
     /// Transient `ServerPlayer.getLastClientMoveIntent()` of the first player
     /// passenger, synced by the game layer each tick and not saved.
     pub rider_intent: Vec3,
+    /// 命令方块矿车独有的状态。 / State held by command block carts.
+    pub command_block: Option<CommandBlock>,
+    pub(crate) spawner: Option<Box<BaseSpawner>>,
 }
 
 impl Minecart {
@@ -191,6 +210,9 @@ impl Minecart {
     pub fn new(kind: MinecartKind) -> Self {
         Self {
             entity_type: kind.entity_type(),
+            custom_name: None,
+            custom_name_visible: false,
+            pitch: 0.0,
             passengers: Vec::new(),
             hurt_time: 0,
             hurt_dir: 1,
@@ -210,6 +232,8 @@ impl Minecart {
             loot_table_seed: 0,
             consumed_item_this_frame: false,
             rider_intent: Vec3::default(),
+            command_block: (kind == MinecartKind::CommandBlock).then(CommandBlock::default),
+            spawner: (kind == MinecartKind::Spawner).then(Box::default),
         }
     }
 
@@ -234,7 +258,18 @@ impl Minecart {
     ///
     /// The item dropped when destroyed.
     pub const fn drop_item(&self) -> i32 {
-        self.kind().item()
+        if matches!(self.kind(), MinecartKind::CommandBlock) {
+            items::MINECART
+        } else {
+            self.kind().item()
+        }
+    }
+
+    /// `VehicleEntity.destroy` 给掉落的载具物品写上实体名字。
+    ///
+    /// `VehicleEntity.destroy` copies the entity name onto the dropped vehicle item.
+    pub fn drop_stack(&self) -> ItemStack {
+        super::hanging::item_with_custom_name(self.drop_item(), self.custom_name.as_ref())
     }
 
     /// `MinecartFurnace.addFuel`：燃料物品、未超上限时加 3600 tick，并把推力
@@ -254,12 +289,137 @@ impl Minecart {
     }
 }
 
+/// 命令方块矿车的 `BaseCommandBlock` 和激活冷却。
+///
+/// A command cart's `BaseCommandBlock` and rail activation cooldown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandBlock {
+    /// 待执行命令。 / The command to run.
+    pub command: String,
+    /// 是否接收命令反馈。 / Whether the command source accepts feedback.
+    pub track_output: bool,
+    /// 成功执行的分支数。 / Number of successful command branches.
+    pub success_count: i32,
+    /// 最后一条命令反馈。 / Most recent command feedback.
+    pub last_output: Option<Component>,
+    /// 上次执行的世界刻号，-1 表示无记录。 / Last execution game time, or -1.
+    pub last_execution: i64,
+    /// 是否记录世界刻号。 / Whether to remember the execution game time.
+    pub update_last_execution: bool,
+    last_activated: i32,
+    synced_command: String,
+    synced_last_output: Option<Tag>,
+}
+
+impl Default for CommandBlock {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            track_output: true,
+            success_count: 0,
+            last_output: None,
+            last_execution: -1,
+            update_last_execution: true,
+            last_activated: 0,
+            synced_command: String::new(),
+            synced_last_output: None,
+        }
+    }
+}
+
+impl CommandBlock {
+    /// 更新命令并重置成功次数。 / Update the command and reset the success count.
+    pub fn set_command(&mut self, command: String) {
+        self.command = command;
+        self.success_count = 0;
+    }
+
+    /// `MinecartCommandBase.onUpdated`，刷新客户端编辑器读到的值。
+    ///
+    /// Refresh the values visible to the client editor.
+    pub fn update_synced_data(&mut self) {
+        self.synced_command.clone_from(&self.command);
+        self.synced_last_output = self.last_output.as_ref().map(|output| output.tag().clone());
+    }
+
+    pub(crate) fn read(raw: &Tag) -> Self {
+        let track_output = tag::bool_or(raw, "TrackOutput", true);
+        let update_last_execution = tag::bool_or(raw, "UpdateLastExecution", true);
+        let mut command = Self {
+            command: tag::field(raw, "Command")
+                .and_then(|value| match value {
+                    Tag::String(command) => Some(command.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            success_count: tag::int_or(raw, "SuccessCount", 0),
+            track_output,
+            last_output: if track_output {
+                tag::field(raw, "LastOutput").and_then(checked_component)
+            } else {
+                None
+            },
+            update_last_execution,
+            last_execution: if update_last_execution {
+                tag::long_or(raw, "LastExecution", -1)
+            } else {
+                -1
+            },
+            ..Self::default()
+        };
+        command.update_synced_data();
+        command
+    }
+
+    pub(crate) fn write(&self, out: &mut Vec<(String, Tag)>) {
+        tag::put(out, "Command", Tag::String(self.command.clone()));
+        tag::put(out, "SuccessCount", Tag::Int(self.success_count));
+        tag::put(out, "TrackOutput", Tag::Byte(i8::from(self.track_output)));
+        tag::put(
+            out,
+            "UpdateLastExecution",
+            Tag::Byte(i8::from(self.update_last_execution)),
+        );
+        if self.track_output
+            && let Some(output) = &self.last_output
+        {
+            tag::put(out, "LastOutput", output.tag().clone());
+        }
+        if self.update_last_execution && self.last_execution != -1 {
+            tag::put(out, "LastExecution", Tag::Long(self.last_execution));
+        }
+    }
+}
+
+/// 矿车经过激活铁轨时交给游戏层的执行来源。
+///
+/// The command source handed to the game layer as the cart crosses the rail.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CommandActivation {
+    /// 发起命令的矿车。 / The cart issuing the command.
+    pub entity: EntityUid,
+    /// 激活时的位置。 / The position at activation.
+    pub position: Vec3,
+    /// 激活时的水平朝向。 / The yaw at activation.
+    pub yaw: f32,
+    /// 激活时的俯仰。 / The pitch at activation.
+    pub pitch: f32,
+    /// 激活所在的世界刻。 / Game time of the activation.
+    pub game_time: i64,
+}
+
 /// 矿车公开的那一半，给同步和存档读。
 ///
 /// The public half of a minecart, read by sync and storage.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MinecartPublic {
     pub entity_type: i32,
+    /// 实体的可选自定义名。 / The entity's optional custom name.
+    pub custom_name: Option<Tag>,
+    /// 是否显示自定义名。 / Whether the name is visible.
+    pub custom_name_visible: bool,
+    /// 矿车的俯仰。 / The cart's pitch.
+    pub pitch: f32,
     pub passengers: Vec<EntityUid>,
     pub hurt_time: i32,
     pub hurt_dir: i32,
@@ -271,6 +431,12 @@ pub struct MinecartPublic {
     pub has_fuel: bool,
     /// `AbstractMinecart.flipped`：`OldMinecartBehavior.getMotionDirection` 下车方向用。
     pub flipped: bool,
+    /// 命令编辑器同步的内容。 / Command editor metadata.
+    pub command: String,
+    /// 命令编辑器同步的最后输出。 / Last output synced to the editor.
+    pub command_output: Option<Tag>,
+    /// 比较器读取的成功次数。 / Success count for comparators.
+    pub success_count: Option<i32>,
 }
 
 impl MinecartPublic {
@@ -280,6 +446,9 @@ impl MinecartPublic {
     pub fn of(cart: &Minecart) -> Self {
         Self {
             entity_type: cart.entity_type,
+            custom_name: cart.custom_name.clone(),
+            custom_name_visible: cart.custom_name_visible,
+            pitch: cart.pitch,
             passengers: cart.passengers.clone(),
             hurt_time: cart.hurt_time,
             hurt_dir: cart.hurt_dir,
@@ -288,21 +457,27 @@ impl MinecartPublic {
             display_offset: cart.display_offset,
             has_fuel: cart.kind().is_furnace() && cart.fuel > 0,
             flipped: cart.flipped,
+            command: cart
+                .command_block
+                .as_ref()
+                .map_or_else(String::new, |command| command.synced_command.clone()),
+            command_output: cart
+                .command_block
+                .as_ref()
+                .and_then(|command| command.synced_last_output.clone()),
+            success_count: cart
+                .command_block
+                .as_ref()
+                .map(|command| command.success_count),
         }
     }
 }
 
-/// `Entity.getPassengerAttachmentPoint` 的缺省值：矿车没有覆写（村民 / 流浪商人
-/// 走 `LOWERED_PASSENGER_ATTACHMENT` 零向量），玩家乘客落在车体高度上。
+/// 矿车注册时的乘客附着点，村民和流浪商人另走零向量。
 ///
-/// The default `Entity.getPassengerAttachmentPoint`: minecarts do not override it
-/// (villagers / wandering traders get the lowered zero vector), so a player
-/// passenger sits at the cart's height.
+/// The registered passenger anchor; villagers and wandering traders use zero.
 pub fn passenger_attachment_point() -> Vec3 {
-    let height = mc_bamboo_data::entity_types::FACTS
-        .get(entity_type::MINECART as usize)
-        .map_or(0.7_f32, |facts| facts.height);
-    Vec3::new(0.0, f64::from(height), 0.0)
+    Vec3::new(0.0, 0.1875, 0.0)
 }
 
 /// `OldMinecartBehavior` 的四个斜坡形状每刻加的速度；水里再乘 0.2。
@@ -573,14 +748,15 @@ fn start_from_conductor(ctx: &dyn BlockView, pos: BlockPos, shape: RailShape, v:
 }
 
 /// `OldMinecartBehavior.moveAlongTrack`。
-fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn BlockView) {
-    let pos = current_rail_pos(ctx, me.position);
-    let state = ctx.block_state(pos);
+fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn EntityCtx) {
+    let view = ctx.blocks();
+    let pos = current_rail_pos(view, me.position);
+    let state = view.block_state(pos);
     me.fall_distance = 0.0;
     let x0 = me.position.x;
     let y0 = me.position.y;
     let z0 = me.position.z;
-    let start = get_pos(ctx, x0, y0, z0);
+    let start = get_pos(view, x0, y0, z0);
     let mut rail_y = f64::from(pos.y);
     let is_powered_rail = state.is(blocks::POWERED_RAIL);
     let powered = is_powered_rail && state.try_get(POWERED).unwrap_or(false);
@@ -680,7 +856,7 @@ fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn BlockView) {
         0.0,
         (factor * v.z).clamp(-max, max),
     );
-    me.move_entity(ctx, movement);
+    move_minecart(me, cart, ctx, movement);
 
     if first[1] != 0
         && floor_i(me.position.x) - pos.x == first[0]
@@ -696,7 +872,7 @@ fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn BlockView) {
     me.delta = apply_natural_slowdown(me, cart, me.delta);
 
     if let (Some(snapped), Some(start)) = (
-        get_pos(ctx, me.position.x, me.position.y, me.position.z),
+        get_pos(view, me.position.x, me.position.y, me.position.z),
         start,
     ) {
         let extra = (start.y - snapped.y) * 0.05;
@@ -729,7 +905,7 @@ fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn BlockView) {
             // Vanilla uses `Vec3.add(x, 0, z)`: `-0.0 + 0.0` becomes a positive zero.
             me.delta = v.add(Vec3::new(v.x / speed * 0.06, 0.0, v.z / speed * 0.06));
         } else {
-            me.delta = start_from_conductor(ctx, pos, shape, v);
+            me.delta = start_from_conductor(view, pos, shape, v);
         }
     }
 }
@@ -737,7 +913,7 @@ fn move_along_track(me: &mut Entity, cart: &mut Minecart, ctx: &dyn BlockView) {
 /// `AbstractMinecart.comeOffTrack`：出轨后的普通物理。
 ///
 /// `AbstractMinecart.comeOffTrack`: ordinary physics off the rails.
-fn come_off_track(me: &mut Entity, cart: &Minecart, ctx: &dyn BlockView) {
+fn come_off_track(me: &mut Entity, cart: &Minecart, ctx: &dyn EntityCtx) {
     let max = max_speed(me, cart);
     let v = me.delta;
     me.delta = Vec3::new(v.x.clamp(-max, max), v.y, v.z.clamp(-max, max));
@@ -745,10 +921,74 @@ fn come_off_track(me: &mut Entity, cart: &Minecart, ctx: &dyn BlockView) {
         me.delta = me.delta.scale(0.5);
     }
     let movement = me.delta;
-    me.move_entity(ctx, movement);
+    move_minecart(me, cart, ctx, movement);
     if !me.on_ground {
         me.delta = me.delta.scale(0.95);
     }
+}
+
+fn move_minecart(me: &mut Entity, cart: &Minecart, ctx: &dyn EntityCtx, movement: Vec3) {
+    let view = ctx.blocks();
+    let multiplier = me.stuck_speed_multiplier;
+    let swept = if multiplier.length_sqr() > 1.0e-7 {
+        movement.multiply(multiplier.x, multiplier.y, multiplier.z)
+    } else {
+        movement
+    };
+    let bounds = me
+        .bounding_box()
+        .expanded_towards(swept.x, swept.y, swept.z)
+        .inflate(1.0e-7, 1.0e-7, 1.0e-7);
+    let root = living::root_vehicle(me.id, me.vehicle, ctx);
+    let mut colliders = Vec::new();
+    ctx.for_each_other_in(bounds, &mut |other| {
+        let pushable = match &other.kind {
+            KindPublic::Mob(mob) => {
+                mob.is_alive()
+                    && mob.mob_type.is_pushable()
+                    && view.chunk_ticks_entities(ChunkPos::containing(
+                        other.position.x,
+                        other.position.z,
+                    ))
+                    && !living::is_climbing(
+                        mob.mob_type,
+                        mob.spider_flags != 0,
+                        other.block_position(),
+                        view,
+                    )
+            }
+            KindPublic::Boat(_) | KindPublic::Minecart(_) => true,
+            _ => false,
+        };
+        if pushable && !other.removed && living::root_vehicle(other.uid, other.vehicle, ctx) != root
+        {
+            colliders.push(other.bounding_box());
+        }
+    });
+    view.for_each_player(&mut |player| {
+        let bounds_player = player_bounds(player);
+        if player.alive
+            && !player.spectator
+            && bounds.intersects(bounds_player)
+            && !cart.passengers.contains(&player.uid)
+        {
+            colliders.push(bounds_player);
+        }
+    });
+    me.move_entity_with_colliders(view, movement, &colliders);
+}
+
+fn player_bounds(player: &super::ctx::PlayerView) -> Aabb {
+    let half = f64::from(player.width) * 0.5;
+    let p = player.position;
+    Aabb::new(
+        p.x - half,
+        p.y,
+        p.z - half,
+        p.x + half,
+        p.y + f64::from(player.height),
+        p.z + half,
+    )
 }
 
 /// `AbstractMinecart.tick`：`OldMinecartBehavior.tick` 的逐刻顺序。
@@ -780,16 +1020,36 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     let state = blocks.block_state(pos);
     let on_rails = is_rail(state);
     cart.on_rails = on_rails;
+    let mut ejected = Vec::new();
+    let mut command_activation = None;
     if on_rails {
-        move_along_track(me, &mut cart, ctx.blocks());
+        move_along_track(me, &mut cart, ctx);
         if state.is(blocks::ACTIVATOR_RAIL) {
-            activate_minecart(&mut cart, state.try_get(POWERED).unwrap_or(false));
+            let powered = state.try_get(POWERED).unwrap_or(false);
+            if powered && cart.kind().is_rideable() {
+                ejected = std::mem::take(&mut cart.passengers);
+            }
+            if powered
+                && let Some(command) = &mut cart.command_block
+                && me.tick_count.wrapping_sub(command.last_activated) >= 4
+            {
+                command.last_activated = me.tick_count;
+                command_activation = Some(CommandActivation {
+                    entity: me.id,
+                    position: me.position,
+                    yaw: me.y_rot,
+                    pitch: cart.pitch,
+                    game_time: ctx.blocks().game_time(),
+                });
+            }
+            activate_minecart(&mut cart, powered);
         }
     } else {
-        come_off_track(me, &cart, ctx.blocks());
+        come_off_track(me, &cart, ctx);
     }
     let detectors = detector_rails(ctx.blocks(), me);
     me.apply_effects_from_blocks(ctx.blocks());
+    cart.pitch = 0.0;
 
     let dx = me.old_position.x - me.position.x;
     let dz = me.old_position.z - me.position.z;
@@ -808,6 +1068,9 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     me.set_requires_precise_position(me.horizontal_collision || me.vertical_collision);
     me.first_tick = false;
     me.kind = EntityKind::Minecart(cart);
+    if let Some(activation) = command_activation {
+        ctx.emit(Command::ActivateMinecartCommand(activation), me);
+    }
     // `DetectorRailBlock.checkPressed`：归还 `EntityKind::Minecart` 后再触发，
     // 这样 `check_detector_rail` 能认出正在 tick 的矿车自己。
     // Trigger `DetectorRailBlock.checkPressed` after restoring `EntityKind::Minecart`
@@ -815,6 +1078,15 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     for at in detectors {
         ctx.emit(Command::MinecartDetectorRail { pos: at }, me);
     }
+    if !ejected.is_empty() {
+        ctx.emit(
+            Command::MinecartEject {
+                passengers: ejected,
+            },
+            me,
+        );
+    }
+    ctx.emit(Command::MinecartPushAndPickup, me);
     tick_furnace(me);
     tick_tnt(me, ctx);
     // `MinecartHopper.tick` → `tryConsumeItems`：活着的、启用的漏斗矿车吸一次。
@@ -823,6 +1095,257 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         if cart.kind() == MinecartKind::Hopper && cart.enabled && !me.removed);
     if hopper_ready {
         ctx.emit(Command::MinecartHopperSuck, me);
+    }
+    if matches!(&me.kind, EntityKind::Minecart(cart) if cart.spawner.is_some()) {
+        ctx.emit(Command::TickMinecartSpawner, me);
+    }
+}
+
+pub(super) fn tick_spawner(me: &mut Entity, world: &mut World) {
+    let position = me.block_position();
+    if let EntityKind::Minecart(cart) = &mut me.kind
+        && let Some(spawner) = &mut cart.spawner
+    {
+        spawner.server_tick(world, position, Some(me.id));
+    }
+}
+
+pub(super) fn push_and_pickup(me: &mut Entity, world: &mut World) {
+    let EntityKind::Minecart(cart) = &me.kind else {
+        return;
+    };
+    let fast =
+        cart.kind().is_rideable() && me.delta.x * me.delta.x + me.delta.z * me.delta.z >= 0.01;
+    let bounds = me
+        .bounding_box()
+        .inflate(f64::from(0.2_f32), 0.0, f64::from(0.2_f32));
+    let team = world
+        .level()
+        .entity_team(&crate::archive::entity_uuid(me.id).to_be_bytes());
+    let mut candidates = Vec::new();
+    world
+        .level()
+        .for_each_entity_in_section_order(bounds, &mut |other| {
+            if other.uid != me.id
+                && !other.removed
+                && (matches!(other.kind, KindPublic::Minecart(_))
+                    || fast && matches!(other.kind, KindPublic::Mob(_) | KindPublic::Boat(_)))
+            {
+                candidates.push(other.uid);
+            }
+        });
+    let root = root_vehicle(me, world);
+    for uid in candidates {
+        let Some(mut other) = world.level_mut().take_entity(uid) else {
+            continue;
+        };
+        let mounted = collide_with_entity(me, &mut other, fast, team, root, world);
+        world.level_mut().put_entity(other);
+        if mounted {
+            world.game_event(
+                GameEvent::EntityMount,
+                me.position,
+                EventContext {
+                    source_entity: Some(uid),
+                    ..EventContext::default()
+                },
+            );
+        }
+    }
+    if fast {
+        push_players(me, bounds, team, world);
+    }
+}
+
+fn collide_with_entity(
+    me: &mut Entity,
+    other: &mut Entity,
+    fast: bool,
+    team: Option<u32>,
+    root: EntityUid,
+    world: &World,
+) -> bool {
+    let EntityKind::Minecart(cart) = &mut me.kind else {
+        return false;
+    };
+    let other_cart = matches!(other.kind, EntityKind::Minecart(_));
+    if fast {
+        let uuid = other.kind.mob().map_or_else(
+            || crate::archive::entity_uuid(other.id).to_be_bytes(),
+            |mob| mob.uuid,
+        );
+        if !can_push_teams(team, world.level().entity_team(&uuid), world) {
+            return false;
+        }
+        if other.kind.mob().is_some() {
+            let pushable = world
+                .level()
+                .chunk_ticks_entities(ChunkPos::containing(other.position.x, other.position.z))
+                && other.with_mob(|entity, mob| {
+                    mob.health > 0.0
+                        && mob.mob_type.is_pushable()
+                        && !living::on_climbable(entity, mob, world)
+                }) == Some(true);
+            if !pushable {
+                return false;
+            }
+        }
+        if !other_cart
+            && !matches!(other.kind.mob(), Some(mob) if mob.mob_type == MobType::IronGolem)
+            && cart.passengers.is_empty()
+            && other.vehicle.is_none()
+        {
+            if other.boarding_cooldown <= 0 && other.id != root {
+                other.vehicle = Some(me.id);
+                super::riding::add_passenger(&mut cart.passengers, other.id, false);
+                return true;
+            }
+            return false;
+        }
+    }
+    if other_cart {
+        push_minecart(other, me);
+    } else if root_vehicle(other, world) != root {
+        let other_is_vehicle = match &other.kind {
+            EntityKind::Boat(boat) => {
+                if me.position.y > other.position.y {
+                    return false;
+                }
+                !boat.passengers.is_empty()
+            }
+            EntityKind::Mob(mob) => {
+                if mob.no_physics || living::is_sleeping_for_push(mob) {
+                    return false;
+                }
+                mob.is_vehicle()
+            }
+            _ => return false,
+        };
+        if let Some((dx, dz)) = living::push_amount(other.position, me.position) {
+            let push = Vec3::new(dx, 0.0, dz);
+            if !other_is_vehicle {
+                other.delta = other.delta.add(push.scale(-1.0));
+                other.with_mob(|_, mob| mob.needs_sync = true);
+            }
+            if cart.passengers.is_empty() {
+                me.delta = me.delta.add(push);
+            }
+        }
+    }
+    false
+}
+
+fn root_vehicle(entity: &Entity, world: &World) -> EntityUid {
+    let mut root = entity.id;
+    let mut current = entity.vehicle;
+    for _ in 0..64 {
+        let Some(uid) = current else { break };
+        root = uid;
+        current = world
+            .level()
+            .entity_public(uid)
+            .and_then(|vehicle| vehicle.vehicle);
+    }
+    root
+}
+
+fn can_push_teams(team: Option<u32>, other: Option<u32>, world: &World) -> bool {
+    let rule = team.map_or(0, |index| world.level().team_collision_rule(index));
+    let other_rule = other.map_or(0, |index| world.level().team_collision_rule(index));
+    let allied = team.is_some() && team == other;
+    [rule, other_rule].into_iter().all(|rule| match rule {
+        1 => false,
+        2 => allied,
+        3 => !allied,
+        _ => true,
+    })
+}
+
+fn push_players(me: &mut Entity, bounds: Aabb, team: Option<u32>, world: &mut World) {
+    let EntityKind::Minecart(cart) = &me.kind else {
+        return;
+    };
+    let mut players = Vec::new();
+    BlockView::for_each_player(world, &mut |player| {
+        if player.alive
+            && !player.spectator
+            && player_bounds(player).intersects(bounds)
+            && !cart.passengers.contains(&player.uid)
+            && can_push_teams(team, player.team, world)
+        {
+            players.push(*player);
+        }
+    });
+    for player in players {
+        if let Some((dx, dz)) = living::push_amount(player.position, me.position) {
+            let push = Vec3::new(dx, 0.0, dz);
+            if cart.passengers.is_empty() {
+                me.delta = me.delta.add(push);
+            }
+            world.push_player(player.uid, push.scale(-1.0));
+        }
+    }
+}
+
+/// `AbstractMinecart.push` 从碰撞对方发起，按被调用的矿车朝向门控。
+///
+/// `AbstractMinecart.push` runs on the contacted cart and checks that cart's heading.
+pub(super) fn push_minecart(cart: &mut Entity, other: &mut Entity) {
+    let EntityKind::Minecart(state) = &cart.kind else {
+        return;
+    };
+    if state.passengers.contains(&other.id) || other.kind.mob().is_some_and(|mob| mob.no_physics) {
+        return;
+    }
+    let offset = Vec3::new(
+        other.position.x - cart.position.x,
+        0.0,
+        other.position.z - cart.position.z,
+    );
+    let dist_sq = offset.length_sqr();
+    if dist_sq < f64::from(1.0e-4_f32) {
+        return;
+    }
+    let distance = dist_sq.sqrt();
+    let normal = Vec3::new(offset.x / distance, 0.0, offset.z / distance);
+    let scale = (1.0 / distance).min(1.0);
+    let push = normal.scale(scale).scale(f64::from(0.1_f32)).scale(0.5);
+    let EntityKind::Minecart(other_state) = &other.kind else {
+        cart.delta = cart.delta.add(Vec3::new(-push.x, 0.0, -push.z));
+        other.delta = other.delta.add(Vec3::new(push.x / 4.0, 0.0, push.z / 4.0));
+        other.with_mob(|_, mob| mob.needs_sync = true);
+        return;
+    };
+    let yaw = f64::from(cart.y_rot * 0.017_453_292_f32);
+    let facing = Vec3::new(f64::from(mth::cos(yaw)), 0.0, f64::from(mth::sin(yaw))).normalize();
+    if (normal.x * facing.x + normal.z * facing.z).abs() < f64::from(0.8_f32) {
+        return;
+    }
+    let a = cart.delta;
+    let b = other.delta;
+    match (state.kind().is_furnace(), other_state.kind().is_furnace()) {
+        (true, false) => {
+            cart.delta = a.multiply(0.95, 1.0, 0.95);
+            other.delta = b
+                .multiply(0.2, 1.0, 0.2)
+                .add(Vec3::new(a.x + push.x, 0.0, a.z + push.z));
+        }
+        (false, true) => {
+            cart.delta = a
+                .multiply(0.2, 1.0, 0.2)
+                .add(Vec3::new(b.x - push.x, 0.0, b.z - push.z));
+            other.delta = b.multiply(0.95, 1.0, 0.95);
+        }
+        _ => {
+            let x = (a.x + b.x) / 2.0;
+            let z = (a.z + b.z) / 2.0;
+            cart.delta = a
+                .multiply(0.2, 1.0, 0.2)
+                .add(Vec3::new(x - push.x, 0.0, z - push.z));
+            other.delta = b
+                .multiply(0.2, 1.0, 0.2)
+                .add(Vec3::new(x + push.x, 0.0, z + push.z));
+        }
     }
 }
 
@@ -919,7 +1442,6 @@ fn activate_minecart(cart: &mut Minecart, active: bool) {
             }
         }
         MinecartKind::Rideable if active => {
-            cart.passengers.clear();
             if cart.hurt_time == 0 {
                 cart.hurt_dir = -cart.hurt_dir;
                 cart.hurt_time = 10;

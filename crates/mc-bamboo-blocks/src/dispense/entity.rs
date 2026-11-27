@@ -247,7 +247,9 @@ fn minecart(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStac
     let Some(kind) = MinecartKind::from_item(stack.item) else {
         return Shot::plain(nested_default(world, pos, facing, stack));
     };
-    let entity = world.prepare_entity(Entity::minecart(kind, Vec3::new(x, y, z)));
+    let mut entity = Entity::minecart(kind, Vec3::new(x, y, z));
+    entity.apply_vehicle_stack_name(&stack);
+    let entity = world.prepare_entity(entity);
     world.add_prepared_entity(entity);
     Shot::plain(without_one(&stack))
 }

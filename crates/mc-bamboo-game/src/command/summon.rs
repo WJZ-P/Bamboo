@@ -1,9 +1,6 @@
-//! `/summon`：官方 `SummonCommand`。能召唤的生物是 `MobType` 里已建模的几种；
-//! 别的实体类型报 `commands.summon.failed`（官方能召唤，Bamboo 还没有这些实体）。
+//! `/summon`：官方 `SummonCommand`，支持已建模的生物和部分非生物实体。
 //!
-//! `/summon`, vanilla `SummonCommand`. The summonable mobs are the modeled
-//! `MobType` variants; other entity types fail with `commands.summon.failed`
-//! because Bamboo does not have them yet.
+//! `/summon`, vanilla `SummonCommand`, for modeled mobs and supported non-mob entities.
 
 use mc_bamboo_blocks::{
     World,
@@ -13,6 +10,8 @@ use mc_bamboo_blocks::{
     },
 };
 use mc_bamboo_command::ParsedCommand;
+use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::text::{Component, TranslateArg};
 
 use crate::{
@@ -119,6 +118,12 @@ fn summon(
             Err(SummonError::DuplicateUuid) => Err(fail("commands.summon.failed.uuid")),
         };
     }
+    if matches!(
+        entity.as_str(),
+        "minecraft:spawner_minecart" | "minecraft:command_block_minecart"
+    ) {
+        return summon_minecart(region, id, &entity, position, nbt);
+    }
     let Some(kind) = MobType::by_name(&entity) else {
         return Err(fail("commands.summon.failed"));
     };
@@ -155,4 +160,52 @@ fn summon(
         Err(SummonError::Failed(_)) => Err(fail("commands.summon.failed")),
         Err(SummonError::DuplicateUuid) => Err(fail("commands.summon.failed.uuid")),
     }
+}
+
+fn summon_minecart(
+    region: &mut Region,
+    id: PlayerId,
+    entity_type: &str,
+    position: Vec3,
+    nbt: Option<Tag>,
+) -> Result<(), CommandFail> {
+    if !mc_bamboo_blocks::entity::mob::spawn::is_in_spawnable_bounds(BlockPos::containing(position))
+    {
+        return Err(fail("commands.summon.invalidPosition"));
+    }
+    let mut fields = match nbt {
+        Some(Tag::Compound(fields)) => fields,
+        _ => Vec::new(),
+    };
+    fields.retain(|(key, _)| key != "id" && key != "Pos");
+    fields.push(("id".to_owned(), Tag::String(entity_type.to_owned())));
+    fields.push((
+        "Pos".to_owned(),
+        Tag::List(vec![
+            Tag::Double(position.x),
+            Tag::Double(position.y),
+            Tag::Double(position.z),
+        ]),
+    ));
+    let entity = mc_bamboo_blocks::archive::read_entity(&Tag::Compound(fields), 0)
+        .ok()
+        .flatten()
+        .ok_or_else(|| fail("commands.summon.failed"))?
+        .into_entity();
+    let (mut level, ticks) = region.block_level();
+    let uid = World::new(&mut level, ticks).spawn_entity(entity);
+    let display = region
+        .entities
+        .public_at(uid)
+        .and_then(|public| crate::vehicle_display_name::of(&region.global.scoreboard, public))
+        .unwrap_or_else(|| {
+            Component::translate(format!("entity.{}", entity_type.replace(':', ".")), [])
+        });
+    feedback::success(
+        region,
+        id,
+        Component::translate("commands.summon.success", [display.into()]),
+        true,
+    );
+    Ok(())
 }

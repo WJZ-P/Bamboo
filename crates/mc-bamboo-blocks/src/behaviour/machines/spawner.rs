@@ -24,7 +24,7 @@ use crate::{
     BlockEntity, BlockState, World,
     archive::tag::{self, Result},
     entity::{
-        Entity, KindPublic,
+        Entity, EntityUid, KindPublic,
         ctx::BlockView,
         mob::{MobEvent, MobType, natural, nbt as mob_nbt, spawn},
     },
@@ -37,7 +37,7 @@ use crate::{
 ///
 /// `SpawnData`: `entity` is required and its `id` is canonicalized like the official
 /// constructor; the two optional fields are carried through verbatim.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct SpawnData {
     entity: Tag,
     custom_spawn_rules: Option<Tag>,
@@ -207,11 +207,11 @@ fn normalize_custom_spawn_rules(tag: &Tag) -> Tag {
     Tag::Compound(out)
 }
 
-/// `SpawnerBlockEntity`：挂在 `minecraft:spawner` 上的活方块实体。
+/// 方块与矿车共同使用的 `BaseSpawner` 状态与刷怪逻辑。
 ///
-/// The block entity of `minecraft:spawner`.
-pub struct SpawnerBlockEntity {
-    pos: BlockPos,
+/// The `BaseSpawner` state and spawning logic shared by blocks and minecarts.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BaseSpawner {
     spawn_delay: i32,
     /// 加权表里的每一项：(数据, 权重)。空表时 `WeightedList.of()` 的 `selector` 为空。
     ///
@@ -226,13 +226,9 @@ pub struct SpawnerBlockEntity {
     spawn_range: i32,
 }
 
-impl SpawnerBlockEntity {
-    /// `new SpawnerBlockEntity(pos, state)`：`BaseSpawner` 的构造器默认值。
-    ///
-    /// `new SpawnerBlockEntity(pos, state)`: the `BaseSpawner` constructor defaults.
-    pub fn new(pos: BlockPos) -> Self {
+impl Default for BaseSpawner {
+    fn default() -> Self {
         Self {
-            pos,
             spawn_delay: 20,
             spawn_potentials: Vec::new(),
             next_spawn_data: None,
@@ -244,16 +240,17 @@ impl SpawnerBlockEntity {
             spawn_range: 4,
         }
     }
+}
 
+impl BaseSpawner {
     /// `BaseSpawner.load` 的宽松解码：坏数据一律回官方缺省值，不 panic。
     ///
     /// A lenient decode of `BaseSpawner.load`; bad data falls back to the defaults.
-    pub fn read(pos: BlockPos, raw: &Tag) -> Self {
+    pub(crate) fn read(raw: &Tag) -> Self {
         let next_spawn_data = tag::field(raw, "SpawnData")
             .filter(|tag| matches!(tag, Tag::Compound(_)))
             .map(SpawnData::read);
         let mut this = Self {
-            pos,
             spawn_delay: i32::from(tag::short_or(raw, "Delay", 20)),
             spawn_potentials: Vec::new(),
             next_spawn_data,
@@ -299,7 +296,7 @@ impl SpawnerBlockEntity {
     ///
     /// The keys of `BaseSpawner.save`: seven shorts, the nullable `SpawnData` and the
     /// `SpawnPotentials` list.
-    pub fn additional(&self) -> Vec<(String, Tag)> {
+    pub(crate) fn additional(&self) -> Vec<(String, Tag)> {
         let mut out = Vec::new();
         for (key, value) in [
             ("Delay", self.spawn_delay),
@@ -340,43 +337,13 @@ impl SpawnerBlockEntity {
     ///
     /// `Spawner.setEntityId`: rewrite the current `SpawnData`'s entity type. A
     /// missing `nextSpawnData` is picked from the weighted list first.
-    pub fn set_entity_id(&mut self, kind: MobType, world: &World) {
+    fn set_entity_id(&mut self, kind: MobType, world: &World) {
         self.ensure_next_spawn_data(world);
         let data = self.next_spawn_data.as_mut().expect("刚填过");
         if let Tag::Compound(entries) = &mut data.entity {
             entries.retain(|(key, _)| key != "id");
             entries.push(("id".to_owned(), Tag::String(kind.name().to_owned())));
         }
-    }
-
-    /// 对拍/测试用：直接把倒计时拨到 `delay`（跳过构造器的 20）。
-    ///
-    /// Test hook: set the countdown to `delay`, skipping the constructor's 20.
-    #[doc(hidden)]
-    pub fn set_delay_for_test(&mut self, delay: i32) {
-        self.spawn_delay = delay;
-    }
-
-    /// 对拍/测试用：读出当前倒计时。
-    ///
-    /// Test hook: the current countdown.
-    #[doc(hidden)]
-    pub fn delay_for_test(&self) -> i32 {
-        self.spawn_delay
-    }
-
-    /// 对拍/测试用：当前 `SpawnData` 的实体类型名（没有时是空串）。
-    ///
-    /// Test hook: the current `SpawnData` entity type name, or empty.
-    #[doc(hidden)]
-    pub fn entity_for_test(&self) -> String {
-        self.next_spawn_data
-            .as_ref()
-            .and_then(|data| match tag::field(&data.entity, "id") {
-                Some(Tag::String(id)) => Some(id.clone()),
-                _ => None,
-            })
-            .unwrap_or_default()
     }
 
     /// `getOrCreateNextSpawnData` 的「缺省才抽」那半：从加权表抽一份，表空时用空数据。
@@ -394,11 +361,11 @@ impl SpawnerBlockEntity {
     /// `BaseSpawner.isNearPlayer`：`RequiredPlayerRange` 内有没有活着的非旁观者玩家。
     ///
     /// `BaseSpawner.isNearPlayer`: a live non-spectator player within `RequiredPlayerRange`.
-    fn is_near_player(&self, world: &World) -> bool {
+    fn is_near_player(&self, world: &World, pos: BlockPos) -> bool {
         let range = f64::from(self.required_player_range);
-        let x = f64::from(self.pos.x) + 0.5;
-        let y = f64::from(self.pos.y) + 0.5;
-        let z = f64::from(self.pos.z) + 0.5;
+        let x = f64::from(pos.x) + 0.5;
+        let y = f64::from(pos.y) + 0.5;
+        let z = f64::from(pos.z) + 0.5;
         let mut found = false;
         BlockView::for_each_player(world, &mut |player| {
             if player.spectator || !player.alive {
@@ -419,14 +386,14 @@ impl SpawnerBlockEntity {
     ///
     /// `BaseSpawner.delay`: re-roll the delay, pick the next `SpawnData` and fire
     /// block event 1.
-    fn delay(&mut self, world: &mut World) {
+    fn delay(&mut self, world: &mut World, pos: BlockPos, minecart: Option<EntityUid>) {
         self.spawn_delay = if self.max_spawn_delay <= self.min_spawn_delay {
             self.min_spawn_delay
         } else {
             self.min_spawn_delay
                 + world
                     .random()
-                    .next_int(self.max_spawn_delay - self.min_spawn_delay)
+                    .next_int(self.max_spawn_delay.saturating_sub(self.min_spawn_delay))
         };
         // `spawnPotentials.getRandom(random).ifPresent(setNextSpawnData)`：只在抽得到时换。
         let picked = weighted(&self.spawn_potentials, world.random()).cloned();
@@ -434,18 +401,27 @@ impl SpawnerBlockEntity {
             self.next_spawn_data = Some(data);
         }
         // `SpawnerBlockEntity.broadcastEvent(level, pos, 1)`。
-        world.block_event(self.pos, BlockState(blocks::SPAWNER).block(), 1, 0);
+        if let Some(entity) = minecart {
+            world.push_effect(crate::Effect::EntityEvent { entity, event: 1 });
+        } else {
+            world.block_event(pos, BlockState(blocks::SPAWNER).block(), 1, 0);
+        }
     }
 
     /// `BaseSpawner.serverTick` 的完整逐刻逻辑。
     ///
     /// The full per-tick logic of `BaseSpawner.serverTick`.
-    fn server_tick(&mut self, world: &mut World) {
-        if !self.is_near_player(world) || !world.block_game_rules().spawner_blocks_work {
+    pub(crate) fn server_tick(
+        &mut self,
+        world: &mut World,
+        pos: BlockPos,
+        minecart: Option<EntityUid>,
+    ) {
+        if !self.is_near_player(world, pos) || !world.block_game_rules().spawner_blocks_work {
             return;
         }
         if self.spawn_delay == -1 {
-            self.delay(world);
+            self.delay(world, pos, minecart);
         }
         if self.spawn_delay > 0 {
             self.spawn_delay -= 1;
@@ -459,13 +435,13 @@ impl SpawnerBlockEntity {
             let Some(kind) = data.kind() else {
                 // 实体类型解不出来（没建模的实体也算）：`delay` 后放弃这一轮。
                 // An unknown or unmodelled entity type: re-roll and give up.
-                self.delay(world);
+                self.delay(world, pos, minecart);
                 return;
             };
             // `Pos`（Vec3.CODEC）或随机取点：`pos.x + (d - d) * range + 0.5`、
             // `pos.y + nextInt(3) - 1`、`pos.z + (d - d) * range + 0.5`。
             let at = read_pos(&data.entity)
-                .unwrap_or_else(|| random_position(world, self.pos, self.spawn_range));
+                .unwrap_or_else(|| random_position(world, pos, self.spawn_range));
             if !natural::no_collision(world, natural::spawn_aabb_at(kind, at.x, at.y, at.z)) {
                 continue;
             }
@@ -486,15 +462,15 @@ impl SpawnerBlockEntity {
             // `EntityType.loadEntityRecursive`：读进 NBT，`snapTo` 到落点。
             let mut entity = world.prepare_entity(Entity::by_mob_type(kind, Vec3::default()));
             if mob_nbt::load_into(&mut entity, &data.entity).is_err() {
-                self.delay(world);
+                self.delay(world, pos, minecart);
                 return;
             }
             let y_rot = entity.y_rot;
             let x_rot = entity.kind.mob().map_or(0.0, |mob| mob.x_rot);
             spawn::snap_to(&mut entity, at, y_rot, x_rot);
             // `MaxNearbyEntities`：精确类的实体数（`AABB(pos).inflate(spawnRange)`）。
-            if count_nearby(world, self.pos, self.spawn_range, kind) >= self.max_nearby_entities {
-                self.delay(world);
+            if count_nearby(world, pos, self.spawn_range, kind) >= self.max_nearby_entities {
+                self.delay(world, pos, minecart);
                 return;
             }
             spawn::snap_to(&mut entity, at, world.random().next_float() * 360.0, 0.0);
@@ -518,7 +494,7 @@ impl SpawnerBlockEntity {
                 false,
                 None,
             );
-            world.level_event(2004, self.pos, 0);
+            world.level_event(2004, pos, 0);
             // `gameEvent(entity, ENTITY_PLACE, BlockPos.containing(落点))`：源头是新刷出的实体，
             // 位置取落点所在格的格心。
             // `gameEvent(entity, ENTITY_PLACE, BlockPos.containing(spawn))`, sourced from the new
@@ -538,8 +514,69 @@ impl SpawnerBlockEntity {
             spawned = true;
         }
         if spawned {
-            self.delay(world);
+            self.delay(world, pos, minecart);
         }
+    }
+}
+
+/// `SpawnerBlockEntity`：挂在 `minecraft:spawner` 上的活方块实体。
+///
+/// The block entity of `minecraft:spawner`.
+pub struct SpawnerBlockEntity {
+    pos: BlockPos,
+    spawner: BaseSpawner,
+}
+
+impl SpawnerBlockEntity {
+    /// 用默认刷怪逻辑创建方块实体。 / Create a block entity with default spawner state.
+    pub fn new(pos: BlockPos) -> Self {
+        Self {
+            pos,
+            spawner: BaseSpawner::default(),
+        }
+    }
+
+    /// 读取官方刷怪笼存档。 / Read the vanilla spawner save fields.
+    pub fn read(pos: BlockPos, raw: &Tag) -> Self {
+        Self {
+            pos,
+            spawner: BaseSpawner::read(raw),
+        }
+    }
+
+    /// 供存档写出的刷怪状态。 / Spawner state written to disk.
+    pub fn additional(&self) -> Vec<(String, Tag)> {
+        self.spawner.additional()
+    }
+
+    /// 刷怪蛋改写下一只实体类型。 / A spawn egg changes the upcoming mob type.
+    pub fn set_entity_id(&mut self, kind: MobType, world: &World) {
+        self.spawner.set_entity_id(kind, world);
+    }
+
+    /// 测试用：设置倒计时。 / Test hook: change the countdown.
+    #[doc(hidden)]
+    pub fn set_delay_for_test(&mut self, delay: i32) {
+        self.spawner.spawn_delay = delay;
+    }
+
+    /// 测试用：读取倒计时。 / Test hook: read the countdown.
+    #[doc(hidden)]
+    pub fn delay_for_test(&self) -> i32 {
+        self.spawner.spawn_delay
+    }
+
+    /// 测试用：下一只实体类型。 / Test hook: read the upcoming entity type.
+    #[doc(hidden)]
+    pub fn entity_for_test(&self) -> String {
+        self.spawner
+            .next_spawn_data
+            .as_ref()
+            .and_then(|data| match tag::field(&data.entity, "id") {
+                Some(Tag::String(id)) => Some(id.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -549,7 +586,7 @@ impl BlockEntity for SpawnerBlockEntity {
     }
 
     fn tick(&mut self, world: &mut World) {
-        self.server_tick(world);
+        self.spawner.server_tick(world, self.pos, None);
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -574,7 +611,9 @@ fn weighted<'a>(
     potentials: &'a [(SpawnData, i32)],
     random: &dyn RandomSource,
 ) -> Option<&'a SpawnData> {
-    let total: i32 = potentials.iter().map(|(_, weight)| weight).sum();
+    let total = potentials.iter().try_fold(0_i32, |total, (_, weight)| {
+        (0 <= *weight).then(|| total.checked_add(*weight)).flatten()
+    })?;
     if total <= 0 {
         return None;
     }

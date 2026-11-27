@@ -47,7 +47,11 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
     let Some(kind) = MinecartKind::from_item(ctx.item) else {
         return InteractionResult::Fail;
     };
-    let entity = world.prepare_entity(Entity::minecart(kind, position));
+    let mut entity = Entity::minecart(kind, position);
+    if let Some(stack) = ctx.stack {
+        entity.apply_vehicle_stack_name(stack);
+    }
+    let entity = world.prepare_entity(entity);
     world.add_prepared_entity(entity);
     world.game_event(
         GameEvent::EntityPlace,

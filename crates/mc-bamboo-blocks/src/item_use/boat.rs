@@ -1,6 +1,7 @@
 //! 船物品的 `Item.use`，对应官方 `BoatItem.use`。
 
 use mc_bamboo_core::Hand;
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     CollisionContext,
@@ -18,7 +19,12 @@ use crate::{
 /// Vanilla `BoatItem.use`: clip with `Fluid.ANY`, spawn the boat at the hit
 /// location with the player's yaw, then check `noCollision`. A miss returns
 /// `PASS`, a blocked spawn `FAIL`; success consumes one item in survival.
-pub(crate) fn use_in_air(world: &mut World, actor: &Actor, hand: Hand) -> InteractionResult {
+pub(crate) fn use_in_air(
+    world: &mut World,
+    actor: &Actor,
+    hand: Hand,
+    stack: Option<&ItemStack>,
+) -> InteractionResult {
     let item = actor.item_in(hand);
     let Some(entity_type) = crate::entity::boat::entity_type_for_item(item) else {
         return InteractionResult::Pass;
@@ -29,6 +35,9 @@ pub(crate) fn use_in_air(world: &mut World, actor: &Actor, hand: Hand) -> Intera
         return InteractionResult::Pass;
     };
     let mut boat = Entity::boat(entity_type, hit.location);
+    if let Some(stack) = stack {
+        boat.apply_vehicle_stack_name(stack);
+    }
     boat.y_rot = actor.yaw;
     // `Level.noCollision(boat, boat.getBoundingBox())`。实体之间的碰撞 Bamboo
     // 不建模；5 格内 `CAN_BE_PICKED` 实体的检查由游戏层负责。

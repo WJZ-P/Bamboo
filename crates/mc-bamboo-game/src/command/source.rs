@@ -50,7 +50,9 @@ pub(crate) enum Entity {
 ///
 /// The source's permission level. The console is fixed at 4; players use their table entry.
 pub(crate) fn level(region: &Region, id: PlayerId) -> u8 {
-    if console::is_console(id) {
+    if crate::minecart_command::tracks_output(id).is_some() {
+        mc_bamboo_command::permission::GAMEMASTERS
+    } else if console::is_console(id) {
         console::PERMISSION
     } else {
         region

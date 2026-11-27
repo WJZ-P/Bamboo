@@ -141,6 +141,15 @@ impl Entity {
 
     /// `Entity.move`：先按轴解算碰撞，再落地判定、摔落伤害、反弹，最后按方块速度系数收尾。
     pub(crate) fn move_entity(&mut self, world: &dyn BlockView, movement: Vec3) {
+        self.move_entity_with_colliders(world, movement, &[]);
+    }
+
+    pub(super) fn move_entity_with_colliders(
+        &mut self,
+        world: &dyn BlockView,
+        movement: Vec3,
+        colliders: &[Aabb],
+    ) {
         let mut delta = movement;
         if self.stuck_speed_multiplier.length_sqr() > 1.0e-7 {
             delta = delta.multiply(
@@ -152,7 +161,7 @@ impl Entity {
             self.delta = Vec3::default();
         }
         // `maybeBackOffFromEdge` 只有生物会改位移，这两个实体原样返回。
-        let movement = self.collide(world, delta);
+        let movement = self.collide(world, delta, colliders);
         let movement_length = movement.length_sqr();
         if movement_length > 1.0e-7 || delta.length_sqr() - movement_length < 1.0e-7 {
             if self.fall_distance != 0.0 && movement_length >= 1.0 {
@@ -209,8 +218,8 @@ impl Entity {
     ///
     /// `Entity.collide`. These entities have `maxUpStep` 0, so they do not step up.
     /// Players use [`sweep_movement`].
-    fn collide(&self, world: &dyn BlockView, movement: Vec3) -> Vec3 {
-        sweep_movement(
+    fn collide(&self, world: &dyn BlockView, movement: Vec3, colliders: &[Aabb]) -> Vec3 {
+        sweep_movement_with_colliders(
             movement,
             self.bounding_box(),
             0.0,
@@ -221,7 +230,7 @@ impl Entity {
                 piston_at: |pos| world.moving_piston_shape(pos),
                 shulker_at: |pos| world.shulker_box_shape(pos),
             },
-            &world.world_border(),
+            (&world.world_border(), colliders),
         )
     }
 
@@ -602,20 +611,45 @@ pub fn sweep_movement(
     max_up_step: f32,
     on_ground: bool,
     context: CollisionContext,
-    mut blocks: world::CollisionBlocks<
+    blocks: world::CollisionBlocks<
         impl FnMut(BlockPos) -> BlockState,
         impl FnMut(BlockPos) -> Option<Vec<Aabb>>,
         impl FnMut(BlockPos) -> Option<Aabb>,
     >,
     border: &WorldBorder,
 ) -> Vec3 {
+    sweep_movement_with_colliders(
+        movement,
+        bounds,
+        max_up_step,
+        on_ground,
+        context,
+        blocks,
+        (border, &[]),
+    )
+}
+
+pub(in crate::entity) fn sweep_movement_with_colliders(
+    movement: Vec3,
+    bounds: Aabb,
+    max_up_step: f32,
+    on_ground: bool,
+    context: CollisionContext,
+    mut blocks: world::CollisionBlocks<
+        impl FnMut(BlockPos) -> BlockState,
+        impl FnMut(BlockPos) -> Option<Vec<Aabb>>,
+        impl FnMut(BlockPos) -> Option<Aabb>,
+    >,
+    obstacles: (&WorldBorder, &[Aabb]),
+) -> Vec3 {
+    let (border, entities) = obstacles;
     let (source_x, source_z) = centre(bounds);
     let movement_step = collide_bounding_box(
         movement,
         bounds,
         context,
         &mut blocks,
-        border,
+        obstacles,
         source_x,
         source_z,
     );
@@ -639,6 +673,7 @@ pub fn sweep_movement(
             context,
             &mut blocks,
         ));
+        colliders.extend_from_slice(entities);
         colliders.extend(border.collision_colliders(source_x, source_z, step_box));
         let skip = movement_step.y as f32;
         for height in step_heights(grounded.min_y, &colliders, max_up_step, skip) {
@@ -874,7 +909,7 @@ fn collide_bounding_box(
         impl FnMut(BlockPos) -> Option<Vec<Aabb>>,
         impl FnMut(BlockPos) -> Option<Aabb>,
     >,
-    border: &WorldBorder,
+    (border, entities): (&WorldBorder, &[Aabb]),
     source_x: f64,
     source_z: f64,
 ) -> Vec3 {
@@ -882,7 +917,10 @@ fn collide_bounding_box(
         return movement;
     }
     let target = bounds.expanded_towards(movement.x, movement.y, movement.z);
-    let mut boxes = flatten(&world::collect_block_collisions(target, context, blocks));
+    let mut boxes = entities.to_vec();
+    boxes.extend(flatten(&world::collect_block_collisions(
+        target, context, blocks,
+    )));
     boxes.extend(border.collision_colliders(source_x, source_z, target));
     collide_with_shapes(movement, bounds, &boxes)
 }
