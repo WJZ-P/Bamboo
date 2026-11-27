@@ -65,6 +65,13 @@ pub struct Extracted {
     /// 内置 `tags/villager_trade` 原文：带命名空间的名字 → JSON。
     #[serde(default)]
     pub villager_trade_tags: BTreeMap<String, String>,
+    /// 内置 `tags/worldgen/structure` 原文：`exploration_map` 的 destination 要展开它。
+    /// 旧提取结果没有这一项。
+    ///
+    /// Raw `tags/worldgen/structure` JSON; `exploration_map` destinations expand
+    /// through these tags. Old reports lack this field.
+    #[serde(default)]
+    pub structure_map_tags: BTreeMap<String, String>,
     /// 村民的注册表事实，见 `Extractor.java::villagerFacts`。旧提取结果没有这一项。
     #[serde(default)]
     pub villager_facts: VillagerFacts,
@@ -1526,6 +1533,10 @@ pub struct VersionData {
     pub trade_sets: BTreeMap<String, String>,
     pub villager_trades: BTreeMap<String, String>,
     pub villager_trade_tags: BTreeMap<String, String>,
+    /// 内置 `tags/worldgen/structure` 原文。
+    ///
+    /// Raw `tags/worldgen/structure` JSON.
+    pub structure_map_tags: BTreeMap<String, String>,
     pub villager_facts: VillagerFacts,
     /// 属性名字 → 默认值。
     pub attribute_defaults: BTreeMap<String, f64>,
@@ -1676,6 +1687,7 @@ fn read_version_data(
         trade_sets: extracted.trade_sets,
         villager_trades: extracted.villager_trades,
         villager_trade_tags: extracted.villager_trade_tags,
+        structure_map_tags: extracted.structure_map_tags,
         villager_facts: extracted.villager_facts,
         advancements: extracted.advancements,
         loot_tables: extracted.loot_tables,

@@ -30,6 +30,7 @@ pub mod shapes;
 pub mod sounds;
 pub mod states;
 pub mod structures;
+pub mod structure_map_tags;
 pub mod tags;
 pub mod version;
 pub mod villager;

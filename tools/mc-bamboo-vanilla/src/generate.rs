@@ -108,6 +108,11 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
         .map_err(|error| format!("无法写入 {}：{error}", path.display()))?;
     write_file(output_dir, "loot.rs", &loot)?;
     write_file(output_dir, "villager.rs", &villager_file(data)?)?;
+    write_file(
+        output_dir,
+        "structure_map_tags.rs",
+        &structure_map_tags_file(data)?,
+    )?;
     if !data.game_rules.is_empty() {
         write_file(output_dir, "gamerules.rs", &gamerules)?;
     }
@@ -1246,6 +1251,7 @@ pub mod shapes;
 pub mod sounds;
 pub mod states;
 pub mod structures;
+pub mod structure_map_tags;
 pub mod tags;
 pub mod version;
 pub mod villager;
@@ -5379,4 +5385,37 @@ mod tests {
         assert!(check_heightmap_types(&[heightmap("A", 1)]).is_err());
         assert!(check_heightmap_types(&[heightmap("A", 0), heightmap("A", 1)]).is_err());
     }
+}
+
+/// 官方 `data/minecraft/tags/worldgen/structure/*.json`。`exploration_map` 的
+/// `destination` 可能是这里的标签名，世界侧按名字把标签展开成结构名。
+///
+/// Official `data/minecraft/tags/worldgen/structure/*.json`. An
+/// `exploration_map` destination may be one of these tags; the world side
+/// expands it into structure names.
+fn structure_map_tags_file(data: &VersionData) -> Result<String, String> {
+    let mut out = String::new();
+    out.push_str(
+        "//! 结构标签：名字 → 标签里的结构名，按名字排序。\n\
+         //!\n\
+         //! Structure tags: name → contained structure names, sorted by name.\n\n\
+         pub static STRUCTURE_TAGS: &[(&str, &[&str])] = &[\n",
+    );
+    for (name, raw) in &data.structure_map_tags {
+        let value: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|error| format!("bad structure tag {name}: {error}"))?;
+        let values = value
+            .get("values")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| format!("structure tag {name} has no values"))?;
+        let mut names: Vec<&str> = values.iter().filter_map(|value| value.as_str()).collect();
+        names.sort_unstable();
+        let _ = writeln!(out, "    ({name:?}, &[");
+        for entry in names {
+            let _ = writeln!(out, "        {entry:?},");
+        }
+        out.push_str("    ]),\n");
+    }
+    out.push_str("];\n");
+    Ok(out)
 }
