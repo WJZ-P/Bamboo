@@ -1003,7 +1003,7 @@ fn a_brush_fails_when_nothing_is_in_front() {
 }
 
 #[test]
-fn arrows_spawn_a_projectile_armour_stands_spawn_an_entity_and_spawn_eggs_take_the_fallback() {
+fn arrows_spawn_a_projectile_and_armour_stands_spawn_an_entity() {
     // `ProjectileDispenseBehavior`：箭真的生成实体，位置比抛出多 0.1 的 y，
     // 事件换成 1002，不取世界随机源。
     //
@@ -1038,20 +1038,6 @@ fn arrows_spawn_a_projectile_armour_stands_spawn_an_entity_and_spawn_eggs_take_t
         })
     );
 
-    let egg = fire_id(
-        &mut TestLevel::new(),
-        Direction::East,
-        items::ZOMBIE_SPAWN_EGG,
-    );
-    let has_data = defaults::resolve(egg.left.item, &egg.left.patch(), kinds::ENTITY_DATA)
-        .is_some()
-        || egg.left.is_empty();
-    if has_data && !egg.left.is_empty() {
-        assert_eq!(egg.left.count, 1);
-        assert_pair(&level_events(&egg.effects), 1000, Direction::East);
-        assert_eq!(egg.seed, seed_after(slot_roll));
-    }
-
     let tnt = fire_id(&mut TestLevel::new(), Direction::East, items::TNT);
     assert!(tnt.left.is_empty());
     assert!(tnt.front.is_air());
@@ -1082,6 +1068,18 @@ fn a_boat_and_a_minecart_are_consumed_only_when_they_can_be_placed() {
         1
     );
     assert_eq!(boat.seed, seed_after(slot_roll));
+    let boats: Vec<_> = level
+        .entities()
+        .iter()
+        .filter(|entity| matches!(entity.kind, EntityKind::Boat(_)))
+        .collect();
+    assert_eq!(boats.len(), 1, "the dispenser spawns one boat");
+    let EntityKind::Boat(plain) = &boats[0].kind else {
+        unreachable!()
+    };
+    assert_eq!(plain.entity_type, entity_type::OAK_BOAT);
+    assert_eq!(boats[0].position, Vec3::new(1.75, 65.5, 0.5));
+    assert_eq!(boats[0].y_rot, 270.0, "Direction.East.toYRot()");
 
     let mut level = TestLevel::new();
     level.set(POS.relative(Direction::East), BlockState(blocks::STONE));
@@ -1093,6 +1091,13 @@ fn a_boat_and_a_minecart_are_consumed_only_when_they_can_be_placed() {
             .filter(|event| event.0 == 1000)
             .count(),
         2
+    );
+    assert!(
+        level
+            .entities()
+            .iter()
+            .all(|entity| !matches!(entity.kind, EntityKind::Boat(_))),
+        "an unplaceable boat spawns nothing",
     );
 
     let mut level = TestLevel::new();
@@ -1414,4 +1419,202 @@ fn a_dispenser_applies_entity_data_and_custom_name_to_the_stand() {
         "CUSTOM_NAME component is applied"
     );
     assert_eq!(stands[0].y_rot, 180.0, "Direction.North.toYRot()");
+}
+
+/// `BoatDispenseItemBehavior`：运输船和竹筏也生成实体，前方空气加下方水时 y 不加 1；
+/// 物品上的 CUSTOM_NAME 和 ENTITY_DATA 都作用到船上，朝向仍是发射器朝向。
+#[test]
+fn a_dispenser_spawns_named_chest_boats_and_rafts_with_entity_data() {
+    use mc_bamboo_nbt::Tag;
+    use mc_bamboo_protocol::{
+        components::{ComponentPatch, ComponentValue, PatchEntry, TypedEntityData},
+        text::Component,
+    };
+
+    let mut stack = ItemStack::new(items::OAK_CHEST_BOAT, 2);
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        kinds::CUSTOM_NAME,
+        PatchEntry::Set(ComponentValue::CustomName(Component::text("Cargo Ferry"))),
+    );
+    patch.put(
+        kinds::ENTITY_DATA,
+        PatchEntry::Set(ComponentValue::EntityData(TypedEntityData {
+            kind: entity_type::OAK_CHEST_BOAT,
+            tag: vec![("CustomNameVisible".to_owned(), Tag::Byte(1))],
+        })),
+    );
+    let (added, removed) = patch.to_opaque();
+    stack.added = added;
+    stack.removed = removed;
+
+    // 前方是空气、下面一格是水：`yOffset` 为 0，船落在发射器中心高度。
+    let mut level = TestLevel::new();
+    level.set(
+        POS.relative(Direction::East).below(),
+        BlockState(blocks::WATER),
+    );
+    let shot = fire_one(&mut level, Direction::East, stack.clone());
+    assert_eq!(shot.left.count, 1);
+    assert_pair(&level_events(&shot.effects), 1000, Direction::East);
+    assert_eq!(shot.seed, seed_after(slot_roll), "船不取世界随机源");
+    let boats: Vec<_> = level
+        .entities()
+        .iter()
+        .filter(|entity| matches!(entity.kind, EntityKind::Boat(_)))
+        .collect();
+    assert_eq!(boats.len(), 1);
+    let EntityKind::Boat(chest) = &boats[0].kind else {
+        unreachable!()
+    };
+    assert_eq!(chest.entity_type, entity_type::OAK_CHEST_BOAT);
+    assert!(chest.is_chest());
+    assert_eq!(boats[0].position, Vec3::new(1.75, 64.5, 0.5));
+    assert_eq!(boats[0].y_rot, 270.0);
+    assert_eq!(
+        chest.custom_name,
+        Some(Tag::String("Cargo Ferry".to_owned()))
+    );
+    assert!(chest.custom_name_visible, "ENTITY_DATA 的键被载入");
+
+    // 没有显式 ENTITY_DATA 的竹筏仍走注册表里的竹筏类型；`Rotation` 覆盖后朝向不变。
+    let mut level = TestLevel::new();
+    level.set(POS.relative(Direction::South), BlockState(blocks::WATER));
+    let raft = fire_id(&mut level, Direction::South, items::BAMBOO_RAFT);
+    assert!(raft.left.is_empty());
+    let rafts: Vec<_> = level
+        .entities()
+        .iter()
+        .filter(|entity| matches!(entity.kind, EntityKind::Boat(_)))
+        .collect();
+    assert_eq!(rafts.len(), 1);
+    let EntityKind::Boat(boat) = &rafts[0].kind else {
+        unreachable!()
+    };
+    assert_eq!(boat.entity_type, entity_type::BAMBOO_RAFT);
+    assert_eq!(rafts[0].position, Vec3::new(0.5, 65.5, 1.75));
+    assert_eq!(rafts[0].y_rot, 0.0, "Direction.South.toYRot()");
+}
+
+/// `SpawnEggItemBehavior`：按物品缺省的 ENTITY_DATA 生成对应生物，应用显式组件，
+/// 扣一个并在发射器自己的格子投递 ENTITY_PLACE；类型不匹配时物品留着。
+#[test]
+fn a_dispenser_spawns_a_mob_from_the_spawn_egg_and_posts_entity_place() {
+    use mc_bamboo_nbt::Tag;
+    use mc_bamboo_protocol::{
+        components::{ComponentPatch, ComponentValue, PatchEntry, TypedEntityData},
+        text::Component,
+    };
+
+    let sensor = BlockPos::new(0, 64, 2);
+    let mut level = TestLevel::new();
+    level.set(sensor, BlockState(blocks::SCULK_SENSOR).default_state());
+    let mut stack = ItemStack::new(items::COW_SPAWN_EGG, 1);
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        kinds::CUSTOM_NAME,
+        PatchEntry::Set(ComponentValue::CustomName(Component::text("Bessie"))),
+    );
+    patch.put(
+        kinds::ENTITY_DATA,
+        PatchEntry::Set(ComponentValue::EntityData(TypedEntityData {
+            kind: entity_type::COW,
+            tag: vec![("Health".to_owned(), Tag::Float(5.0))],
+        })),
+    );
+    let (added, removed) = patch.to_opaque();
+    stack.added = added;
+    stack.removed = removed;
+    let mut slots = empty(9);
+    slots[0] = stack;
+    level.set_container(POS, slots);
+    let mut ticks = BlockTicks::new();
+    {
+        let mut world = World::new(&mut level, &mut ticks);
+        place_dispenser(&mut world, Direction::East);
+        world.set_block_entity(crate::behaviour::misc::sculk_entity::create_block_entity(
+            sensor, false,
+        ));
+        world.tick_block_entities();
+        let state = world.block_state(POS);
+        dispense_from(&mut world, POS, state);
+        assert!(slot(&mut world, POS, 0).is_empty(), "扣一个");
+        let event = world
+            .with_block_entity::<crate::behaviour::misc::sculk_entity::SculkSensorEntity, _>(
+                sensor,
+                |entity, _| entity.candidate(),
+            )
+            .expect("感测体");
+        assert_eq!(
+            event.map(|(kind, position, _)| (kind, position)),
+            Some((
+                crate::game_event::GameEvent::EntityPlace,
+                Vec3::new(0.5, 64.5, 0.5)
+            )),
+            "ENTITY_PLACE 在发射器自己的格子发出",
+        );
+    }
+    let cows: Vec<_> = level
+        .entities()
+        .iter()
+        .filter(|entity| {
+            entity
+                .kind
+                .mob()
+                .is_some_and(|mob| mob.mob_type == crate::entity::mob::MobType::Cow)
+        })
+        .collect();
+    assert_eq!(cows.len(), 1, "生成一头牛");
+    assert_eq!(cows[0].position, Vec3::new(1.5, 64.0, 0.5));
+    let mob = cows[0].kind.mob().expect("牛");
+    assert_eq!(mob.health, 5.0, "ENTITY_DATA 的 Health 被载入");
+    assert_eq!(
+        mob.custom_name,
+        Some(Tag::String("Bessie".to_owned())),
+        "CUSTOM_NAME 被应用",
+    );
+
+    // `getType` 是 null：物品留在发射器里，不生成生物。
+    let mut level = TestLevel::new();
+    let mut stack = ItemStack::new(items::ZOMBIE_SPAWN_EGG, 1);
+    stack.removed.push(kinds::ENTITY_DATA);
+    let none = fire_one(&mut level, Direction::East, stack);
+    assert!(none.left.is_empty(), "没有 ENTITY_DATA 时默认抛出，扣一个");
+    assert_pair(&level_events(&none.effects), 1000, Direction::East);
+    assert_eq!(
+        none.seed,
+        seed_after(|random| {
+            slot_roll(random);
+            throw_draws(random, Direction::East);
+        })
+    );
+    assert!(
+        level
+            .entities()
+            .iter()
+            .all(|entity| entity.kind.mob().is_none())
+    );
+
+    // 组件里的类型在 Bamboo 里没有建模：`spawn` 返回 null，物品留着。
+    let mut level = TestLevel::new();
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        kinds::ENTITY_DATA,
+        PatchEntry::Set(ComponentValue::EntityData(TypedEntityData {
+            kind: entity_type::ENDER_DRAGON,
+            tag: Vec::new(),
+        })),
+    );
+    let (added, removed) = patch.to_opaque();
+    let mut stack = ItemStack::new(items::ZOMBIE_SPAWN_EGG, 1);
+    stack.added = added;
+    stack.removed = removed;
+    let unknown = fire_one(&mut level, Direction::East, stack);
+    assert_eq!(unknown.left.count, 1);
+    assert!(
+        level
+            .entities()
+            .iter()
+            .all(|entity| entity.kind.mob().is_none())
+    );
 }
