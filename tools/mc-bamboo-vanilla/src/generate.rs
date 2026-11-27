@@ -11,8 +11,8 @@ use crate::extract::{
     BiomeClimateFact, Block, BlockField, BlockPredicate, CompostLayers, ExtractedIngredient,
     ExtractedPotionIngredient, ExtractedRecipe, ExtractedRecipeKind, ExtractedShape,
     ExtractedStack, FieldValue, GameRuleFact, HeightmapType, Item, LevelValueJson,
-    LootConditionJson, Property, PropertyKind, StateProvider, TagGroup, TypedLevelJson,
-    ValueEffectJson, VersionData,
+    LootConditionJson, Property, PropertyKind, SlotRangeFact, StateProvider, TagGroup,
+    TypedLevelJson, ValueEffectJson, VersionData,
 };
 
 const HEADER: &str = "// 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。\n\n";
@@ -50,6 +50,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let item_damage = item_damage_file(data)?;
     let recipes = recipes_file(data)?;
     let heightmaps = heightmaps_file(data)?;
+    let slot_ranges = slot_ranges_file(&data.slot_ranges);
     let sounds = sounds_file(data)?;
     let advancements = advancement_data(data)?;
     let loot = loot_file(data)?;
@@ -102,6 +103,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
         &crafting_remainders_file(data)?,
     )?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
+    write_file(output_dir, "slot_ranges.rs", &slot_ranges)?;
     write_file(output_dir, "sounds.rs", &sounds)?;
     let path = output_dir.join("advancements.json");
     fs::write(&path, advancements)
@@ -1243,6 +1245,7 @@ pub mod recipes;
 pub mod registries;
 pub mod saved_world;
 pub mod shapes;
+pub mod slot_ranges;
 pub mod sounds;
 pub mod states;
 pub mod structures;
@@ -1829,6 +1832,38 @@ fn heightmaps_file(data: &VersionData) -> Result<String, String> {
         constants.join(", ")
     );
     Ok(out)
+}
+
+/// `SlotRanges.SLOTS`：范围名到槽位编号，顺序和官方静态表一致。
+fn slot_ranges_file(ranges: &[SlotRangeFact]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 槽位范围名到槽位编号，顺序与官方 `SlotRanges.SLOTS` 一致。"
+    );
+    let _ = writeln!(
+        out,
+        "/// Slot range names to slot ids, in official `SlotRanges.SLOTS` order."
+    );
+    let _ = writeln!(out, "pub static SLOT_RANGES: &[(&str, &[i32])] = &[");
+    for range in ranges {
+        let ids: Vec<String> = range.slots.iter().map(|id| id.to_string()).collect();
+        let _ = writeln!(out, "    ({:?}, &[{}]),", range.name, ids.join(", "));
+    }
+    let _ = writeln!(out, "];");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 按名字查槽位范围，没找到返回 `None`。");
+    let _ = writeln!(out, "/// Look up a slot range by name, or `None`.");
+    let _ = writeln!(
+        out,
+        "pub fn slots_of(name: &str) -> Option<&'static [i32]> {{"
+    );
+    let _ = writeln!(
+        out,
+        "    SLOT_RANGES.iter().find(|(n, _)| *n == name).map(|(_, s)| *s)"
+    );
+    let _ = writeln!(out, "}}");
+    out
 }
 
 /// 生成的文件按下标取类型，所以 `id` 必须是从 0 开始连续的，名字也要唯一。

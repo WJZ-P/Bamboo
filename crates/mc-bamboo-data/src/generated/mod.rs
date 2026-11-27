@@ -27,6 +27,7 @@ pub mod recipes;
 pub mod registries;
 pub mod saved_world;
 pub mod shapes;
+pub mod slot_ranges;
 pub mod sounds;
 pub mod states;
 pub mod structures;

@@ -95,6 +95,8 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+import net.minecraft.world.inventory.SlotRange;
+import net.minecraft.world.inventory.SlotRanges;
 import net.minecraft.world.entity.animal.axolotl.Axolotl;
 import net.minecraft.world.entity.animal.cow.MushroomCow;
 import net.minecraft.world.entity.animal.equine.Llama;
@@ -299,6 +301,7 @@ public final class Extractor {
             root.add("itemDamageEnchantments", itemDamageEnchantments(layers.compositeAccess()));
             root.add("recipes", recipes(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
+            root.add("slotRanges", slotRanges());
             root.add("soundTables", new SoundTables().build());
             root.add("timelines", dataFiles(resources, "timeline"));
             root.add("tradeSets", dataFiles(resources, "trade_set"));
@@ -785,6 +788,24 @@ public final class Extractor {
             types.add(entry);
         }
         return types;
+    }
+
+    /** `SlotRanges.SLOTS`：全部槽位范围名和它们对应的槽位编号，顺序官方一致。 */
+    // `SlotRanges.SLOTS`: every slot range name and its slot ids, in official order.
+    private static JsonArray slotRanges() {
+        JsonArray ranges = new JsonArray();
+        SlotRanges.allNames().forEach(name -> {
+            SlotRange range = SlotRanges.nameToIds(name);
+            JsonObject entry = new JsonObject();
+            entry.addProperty("name", name);
+            JsonArray slots = new JsonArray();
+            for (int slot : range.slots()) {
+                slots.add(slot);
+            }
+            entry.add("slots", slots);
+            ranges.add(entry);
+        });
+        return ranges;
     }
 
     private static JsonObject version() {
