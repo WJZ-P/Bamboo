@@ -452,7 +452,9 @@ WebView2 的渲染进程不算在内。
   草方块和菌丝长草、菌岩蔓延、树叶枯萎、耕地变干变湿、铜氧化、紫水晶芽长大、钟乳石生长、冰和雪融化、
   红石矿熄灭、珊瑚死亡、火蔓延和熄灭、岩浆点燃附近能烧的方块都按官方逻辑。火能不能蔓延读 `fire_spread_radius_around_player`（默认 128，`-1` 表示不看玩家距离）。藤蔓蔓延读 `spread_vines`，关掉时不取那次 `nextInt(4)`。
   天气也接进了随机刻：下雨时 `tickChunk` 掷中的那一格按官方 `tickPrecipitation` 结冰、积雪（读 `max_snow_accumulation_height`）、让炼药锅接雨接雪；
-  打雷时先对所有区块跑官方 `tickThunder` 的 `nextInt(100000)`，命中后照取落点那一格，不生成闪电实体、骷髅陷阱马，也不给苦力怕充能，再跑全部区块的 `tickChunk`。
+  打雷时先对所有区块跑官方 `tickThunder` 的 `nextInt(100000)`，命中后按高度图 / 避雷针 POI /
+  附近活物选落点，生成闪电实体（按 `SPAWN_MOBS` 和区域难度还可能生成骷髅陷阱马），
+  闪电第一刻引火、激活避雷针、除铜锈，之后逐刻对附近实体 `thunderHit`（苦力怕带电），再跑全部区块的 `tickChunk`。
   晴天路径仍与官方逐位相同；方块 oracle 默认跑晴天、下雨、打雷三批题。`isRainingAt` 按真实天空光、MOTION_BLOCKING 高度图和区块里的群系调色板算，群系温度和降水类型由 `mc-bamboo-worldgen` 用官方 `Biome.getTemperature` 的算法算出（含固定种子的噪声），不写死平原。
 - 下落方块和点燃的 TNT：沙子、砂砾、铁砧、混凝土粉末、滴水石这类方块到了计划刻会变成实体往下掉，
   落地再放回方块，铁砧按摔落距离可能裂开。打火石、火焰弹、火和红石信号会把 TNT 点成引信 80 刻的实体。
@@ -1447,8 +1449,11 @@ WebView2 的渲染进程不算在内。
   `SKY_LIGHT_LEVEL` 关键帧和雨 / 雷暴的 `WeatherAttributes` 层合成 `getSkyDarken()`，
   在 `ServerLevel.tick` 的天气阶段之后、方块刻之前的同一刻发布给每个岛；精确模式的
   `World`、并行的实体只读视图、随机刻里读亮度的作物 / 草和菌丝蔓延 / 冰雪融化 /
-  阳光探测器都读这一份值。还没接的差异：雷击生成的实体、闪电对避雷针/实体/方块的作用和
-  苦力怕充能，以及天空、雾和云的颜色变化（客户端自己算颜色）。刷怪、伤害和合成限制这些规则还没接到对应系统。
+  阳光探测器都读这一份值。雷暴时 `tick_thunder` 已经按官方顺序生成闪电实体和陷阱马，
+  `LightningBolt.tick` 会引火、激活避雷针、除铜锈并逐刻对附近实体 `thunderHit`（含苦力怕带电）；
+  还没接的差异是天空、雾和云的颜色变化（客户端自己算颜色）。`spawn_mobs` / `spawn_monsters` 等
+  刷怪规则、难度对伤害的缩放、`pvp` / `natural_health_regeneration` / `keep_inventory` 等规则都已接到
+  对应系统，`limited_crafting` 目前只广播给客户端、还没限制合成。
   生存和冒险会改模式和能力。挖掘和工具右键会扣耐久；弓和弩射出一发扣一点；滑翔装备每 20 刻扣一点；盔甲、近战武器、钓竿和盾牌不扣。饥饿值已经建模但挖掘不扣饥饿值。`/give` 多出来的物品会消失（没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟；进服 / 重生按官方 `sendLevelInfo` 发两份时钟的整表同步，`/time` 和 `/gamerule advance_time` 各发单独 / 整表更新，每 20 刻再发一次只带 `gameTime` 的空表同步；这个周期按官方 `MinecraftServer.tickCount`
   （每次开服从 0 数起、不存档）计，不用存档里接着走的 `gameTime`，读档开服时相位才对。
   包里带的 `gameTime` 仍是这一刻 `tickTime` 加一之前的值。发给客户端的流速在时钟暂停或
