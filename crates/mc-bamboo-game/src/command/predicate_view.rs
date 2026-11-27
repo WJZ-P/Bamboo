@@ -345,7 +345,7 @@ impl LevelView for CommandLevel<'_> {
     /// `LevelReader.getMaxLocalRawBrightness(pos)`: 15 outside the horizontal
     /// world bounds as in vanilla, otherwise `max(block light, sky light - skyDarken)`.
     fn light(&self, x: i32, y: i32, z: i32) -> Option<i32> {
-        if x < -30_000_000 || x >= 30_000_000 || z < -30_000_000 || z >= 30_000_000 {
+        if !(-30_000_000..30_000_000).contains(&x) || !(-30_000_000..30_000_000).contains(&z) {
             return Some(15);
         }
         let pos = BlockPos::new(x, y, z);

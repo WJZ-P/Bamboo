@@ -657,7 +657,7 @@ fn loaded_block(region: &Region, pos: BlockPos) -> Result<BlockPos, CommandFail>
         return Err(fail("argument.pos.unloaded"));
     }
     let outside_horizontal =
-        pos.x < -30_000_000 || pos.x >= 30_000_000 || pos.z < -30_000_000 || pos.z >= 30_000_000;
+        !(-30_000_000..30_000_000).contains(&pos.x) || !(-30_000_000..30_000_000).contains(&pos.z);
     if outside_horizontal || region.chunks.block(pos).is_none() {
         return Err(fail("argument.pos.outofworld"));
     }
