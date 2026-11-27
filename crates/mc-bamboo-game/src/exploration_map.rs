@@ -121,3 +121,107 @@ pub fn build_exploration_map(
         target_z: target.z,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world_options::{LevelType, WorldGenConfig};
+    use mc_bamboo_data::registries::biome;
+
+    fn normal_config(seed: i64) -> WorldGenConfig {
+        WorldGenConfig {
+            seed,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        }
+    }
+
+    /// `generate-structures=false`：官方 `findNearestMapStructure` 立即返回空，
+    /// `run` 原样退回，不分配 `map_id`、不写地图数据。
+    ///
+    /// With `generate-structures=false`, vanilla `findNearestMapStructure` returns
+    /// empty at once; `run` returns the input unchanged, allocating no `map_id`
+    /// and writing no saved data.
+    #[test]
+    fn no_structure_returns_none_and_allocates_no_map() {
+        let mut config = normal_config(42);
+        config.generate_structures = false;
+        let mut maps = MapStore::new();
+        let request = ExplorationMapRequest {
+            origin: (0, 64, 0),
+            destination: "#minecraft:on_treasure_maps",
+            decoration: "minecraft:red_x",
+            zoom: 1,
+            search_radius: 50,
+            skip_existing_chunks: false,
+        };
+        let result = build_exploration_map(
+            &config,
+            &mut maps,
+            "minecraft:overworld",
+            63,
+            |_, _, _| None,
+            &request,
+        );
+        assert!(result.is_none());
+        assert!(maps.is_empty());
+    }
+
+    /// 固定种子 42 的真实结构定位加建图：命中埋藏的宝藏，分配首个
+    /// `map_id=0`，按 `shipwreck_map` 的 `zoom=1` 建图，写 `red_x` 目标标记，
+    /// 群系预览上色。世界侧四个官方步骤第一次端到端走真实种子。
+    ///
+    /// A real structure search plus map build on seed 42: locates a buried
+    /// treasure, allocates the first `map_id=0`, builds the map at the
+    /// `shipwreck_map` `zoom=1`, writes the `red_x` target decoration and paints
+    /// the biome preview. The four vanilla world-side steps run end to end on a
+    /// real seed for the first time.
+    #[test]
+    fn real_seed_builds_explorer_map() {
+        let config = normal_config(42);
+        let mut maps = MapStore::new();
+        // 条带水 / 陆群系，让预览一定出现非默认颜色。
+        // Striped water / land biomes so the preview paints non-default colors.
+        let biome = |x: i32, _y: i32, z: i32| {
+            Some(if ((x >> 4) + z) % 2 == 0 {
+                biome::OCEAN
+            } else {
+                biome::PLAINS
+            })
+        };
+        let request = ExplorationMapRequest {
+            origin: (0, 64, 0),
+            destination: "#minecraft:on_treasure_maps",
+            decoration: "minecraft:red_x",
+            zoom: 1,
+            search_radius: 50,
+            skip_existing_chunks: false,
+        };
+        let result = build_exploration_map(
+            &config,
+            &mut maps,
+            "minecraft:overworld",
+            63,
+            biome,
+            &request,
+        );
+        let Some(result) = result else {
+            panic!("seed 42 must locate a buried treasure near the origin");
+        };
+        assert_eq!(result.map_id, 0);
+        assert_eq!(maps.index.last_map_id, 0);
+        let data = maps.get(0).expect("map 0 created");
+        assert_eq!(data.scale, 1);
+        assert_eq!(data.dimension, "minecraft:overworld");
+        let red_x = decoration_id_from_name("minecraft:red_x").expect("red_x is registered");
+        assert!(
+            data.decorations
+                .iter()
+                .any(|(key, decoration)| key == "+" && decoration.kind == red_x)
+        );
+        assert!(
+            data.colors.iter().any(|&color| color != 0),
+            "the biome preview must paint pixels"
+        );
+    }
+}
