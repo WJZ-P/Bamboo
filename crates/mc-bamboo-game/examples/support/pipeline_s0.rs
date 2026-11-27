@@ -1,4 +1,4 @@
-use super::{Duration, Instant, World, process_cpu_ms, thread_cpu_ms};
+use super::{Duration, Instant, World, process_cpu_ms, request_chunks, thread_cpu_ms};
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_game::pipeline_bench;
 use mc_bamboo_world::ticket::{FULL_CHUNK_LEVEL, PLAYER_TICKET_LEVEL};
@@ -45,10 +45,14 @@ fn settle(world: &mut World, positions: &[ChunkPos], mode: Mode) -> Settle {
     }
 }
 
-fn full_frontier(positions: &[ChunkPos]) -> Vec<ChunkPos> {
+fn full_frontier(positions: &[ChunkPos], full_only: bool) -> Vec<ChunkPos> {
     // 强加载票按八邻传播；也等外围达到 FULL 的区块，不只等请求的中心格。
     // Forced tickets spread in eight directions; include the surrounding FULL columns.
-    let radius = FULL_CHUNK_LEVEL - PLAYER_TICKET_LEVEL;
+    let radius = if full_only {
+        0
+    } else {
+        FULL_CHUNK_LEVEL - PLAYER_TICKET_LEVEL
+    };
     let low = positions.first().expect("nonempty square");
     let high = positions.last().expect("nonempty square");
     (low.x - radius..=high.x + radius)
@@ -56,9 +60,8 @@ fn full_frontier(positions: &[ChunkPos]) -> Vec<ChunkPos> {
         .collect()
 }
 
-pub(super) fn warm(world: &mut World, positions: &[ChunkPos]) {
-    world.force_chunks_unpaced(positions);
-    let full = full_frontier(positions);
+pub(super) fn warm(world: &mut World, positions: &[ChunkPos], full_only: bool) {
+    let full = full_frontier(positions, full_only);
     assert_eq!(settle(world, &full, Mode::Reply).delivered, full.len());
 }
 
@@ -68,14 +71,15 @@ pub(super) fn run(
     threads: usize,
     label: &str,
     mode: Mode,
+    full_only: bool,
 ) {
-    let full = full_frontier(positions);
+    let full = full_frontier(positions, full_only);
     let process_before = process_cpu_ms();
     let cpu_before = thread_cpu_ms();
     let (empty_before, job_before) = world.pipeline_bench_pool_stats();
     let started = Instant::now();
     pipeline_bench::start();
-    world.force_chunks_unpaced(positions);
+    request_chunks(world, positions, full_only);
     let stats = settle(world, &full, mode);
     assert_eq!(stats.delivered, full.len());
     let wall = started.elapsed();

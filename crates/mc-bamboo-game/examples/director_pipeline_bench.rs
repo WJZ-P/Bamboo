@@ -3,7 +3,8 @@
 //! `cargo run --release -p mc-bamboo-game --example director_pipeline_bench -- \
 //!     [--chunks N] [--threads T] [--seed S] [--no-structures] [--cold] [--label NAME]
 //!     [--idle-secs S] [--second] [--terrain-mb M] [--feature-mb M] [--cache-idle-secs S]
-//!     [--no-dependency-release] [--no-cold-tier] [--dump-blocks PATH] [--dump-light PATH]`
+//!     [--no-dependency-release] [--no-cold-tier] [--dump-blocks PATH] [--dump-light PATH]
+//!     [--full-only]`
 //!
 //! `--features pipeline-bench --example director_pipeline_bench -- --s0 reply|paced`
 //! 启用独占世界线程计时和计算池空闲积分；每个模式都另起一个世界。
@@ -65,6 +66,7 @@ struct Options {
     /// Write measured block states in fixed order for a bytewise policy comparison.
     dump_blocks: Option<PathBuf>,
     dump_light: Option<PathBuf>,
+    full_only: bool,
     #[cfg(feature = "pipeline-bench")]
     s0: Option<pipeline_s0::Mode>,
 }
@@ -83,6 +85,7 @@ impl Options {
             cache: WorldgenCacheSettings::default(),
             dump_blocks: None,
             dump_light: None,
+            full_only: false,
             #[cfg(feature = "pipeline-bench")]
             s0: None,
         };
@@ -115,6 +118,7 @@ impl Options {
                 "--no-cold-tier" => worldgen_cache::set_cold_tier(false),
                 "--dump-blocks" => options.dump_blocks = Some(value().into()),
                 "--dump-light" => options.dump_light = Some(value().into()),
+                "--full-only" => options.full_only = true,
                 #[cfg(feature = "pipeline-bench")]
                 "--s0" => {
                     options.s0 = Some(match value().as_str() {
@@ -131,6 +135,12 @@ impl Options {
                 || options.threads.len() == 1,
             "a dump requires exactly one worker count"
         );
+        if options.full_only {
+            assert!(
+                (options.dump_blocks.is_some() || options.dump_light.is_some()) && !options.second,
+                "--full-only requires a dump and excludes --second"
+            );
+        }
         #[cfg(feature = "pipeline-bench")]
         if options.s0.is_some() {
             assert!(options.side > 0, "S0 needs a nonempty square");
@@ -201,6 +211,16 @@ fn settle(world: &mut World, positions: &[ChunkPos], threads: usize) -> usize {
             Instant::now() < deadline,
             "pipeline did not settle in 1800 s (threads={threads})"
         );
+    }
+}
+
+fn request_chunks(world: &mut World, positions: &[ChunkPos], full_only: bool) {
+    if full_only {
+        // 对拍只交付，不让不同刻数的驱动跑不同数量的交付后模拟。
+        // For parity, deliver without letting different tick counts run different simulation.
+        world.load_chunks_unpaced(positions, mc_bamboo_world::ticket::FULL_CHUNK_LEVEL);
+    } else {
+        world.force_chunks_unpaced(positions);
     }
 }
 
@@ -324,18 +344,15 @@ fn main() {
                 .iter()
                 .map(|pos| ChunkPos::new(pos.x + 4096, pos.z + 4096))
                 .collect();
+            request_chunks(&mut world, &far, options.full_only);
             #[cfg(feature = "pipeline-bench")]
             if options.s0.is_some() {
-                pipeline_s0::warm(&mut world, &far);
+                pipeline_s0::warm(&mut world, &far, options.full_only);
             } else {
-                world.force_chunks_unpaced(&far);
                 settle(&mut world, &far, threads);
             }
             #[cfg(not(feature = "pipeline-bench"))]
-            {
-                world.force_chunks_unpaced(&far);
-                settle(&mut world, &far, threads);
-            }
+            settle(&mut world, &far, threads);
             clear_terrain_cache();
             clear_feature_cache();
             worldgen_profile::reset();
@@ -343,12 +360,19 @@ fn main() {
         #[cfg(feature = "pipeline-bench")]
         if let Some(mode) = options.s0 {
             worldgen_profile::disable();
-            pipeline_s0::run(&mut world, &positions, threads, &options.label, mode);
+            pipeline_s0::run(
+                &mut world,
+                &positions,
+                threads,
+                &options.label,
+                mode,
+                options.full_only,
+            );
             dump_requested(&world, &positions, &options);
             continue;
         }
         let (warm_rss_mb, _) = process_memory_mb();
-        world.force_chunks_unpaced(&positions);
+        request_chunks(&mut world, &positions, options.full_only);
 
         let wall_started = Instant::now();
         let cpu0 = process_cpu_ms();
