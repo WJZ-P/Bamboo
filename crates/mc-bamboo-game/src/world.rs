@@ -3200,7 +3200,7 @@ impl World {
                 changed_slots,
                 carried,
             } => {
-                let is_cartography = menu::is_cartography_open(region, player, container_id);
+                let is_map_menu = menu::is_map_menu_open(region, player, container_id);
                 let packet = menu::ClickPacket {
                     container_id,
                     state_id,
@@ -3210,7 +3210,7 @@ impl World {
                     changed_slots,
                     carried,
                 };
-                if is_cartography {
+                if is_map_menu {
                     menu::on_click_with_maps(
                         region,
                         Some(self.master.global.maps_mut()),

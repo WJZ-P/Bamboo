@@ -15,7 +15,8 @@ mod workstations;
 
 pub use assemble::{assemble, potion_id, remaining_items};
 pub use input::{
-    BrewingInput, CraftingInput, ItemStack, PositionedCraftInput, RecipeInput, SmithingInput,
+    BrewingInput, CraftingContext, CraftingInput, ItemStack, MapScaleLookup, NoMapLookup,
+    PositionedCraftInput, RecipeInput, SmithingInput,
 };
 pub use manager::RecipeManager;
 pub use workstations::{

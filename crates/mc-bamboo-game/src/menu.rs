@@ -1567,17 +1567,17 @@ fn in_reach(region: &Region, pos: BlockPos, kind: ContainerKind, eye: Vec3, reac
     Aabb::new(x, y, z, x + 1.0, y + 1.0, z + 1.0).distance_to_sqr(eye) < range * range
 }
 
-/// 玩家当前打开的是不是真实世界里的制图台菜单（容器 ID 匹配）。
+/// 玩家当前打开的是不是真实世界里需要读写地图数据的菜单（制图台或 3×3 工作台，容器 ID 匹配）。
 ///
-/// Whether the player currently has an open in-world cartography table menu
-/// matching `container_id`.
-pub(crate) fn is_cartography_open(region: &Region, id: PlayerId, container_id: i32) -> bool {
+/// Whether the player currently has an open in-world cartography or crafting
+/// table menu matching `container_id`.
+pub(crate) fn is_map_menu_open(region: &Region, id: PlayerId, container_id: i32) -> bool {
     region.menus.get(&id).is_some_and(|menu| {
         menu.container_id == container_id
             && menu
                 .station
                 .as_ref()
-                .is_some_and(|station| station.is_in_world_cartography())
+                .is_some_and(|station| station.is_in_world_map_menu())
     })
 }
 
