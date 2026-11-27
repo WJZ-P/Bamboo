@@ -8,6 +8,10 @@ use crate::{
     reader::StringReader,
 };
 
+// 命令方块可保存长命令，限制递归节点数以保护服务器线程栈。
+// Command blocks can store long commands. Bound recursive nodes to protect server thread stacks.
+const MAX_PARSE_DEPTH: usize = 256;
+
 /// 解析成功的结果。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedCommand {
@@ -333,7 +337,13 @@ impl CommandGraph {
     fn parse_raw(&self, input: &str, permission_level: u8) -> ParseResults {
         let mut reader = StringReader::new(input);
         let context = Context::new(reader.cursor());
-        self.parse_nodes(self.root(), &mut reader, &context, permission_level)
+        self.parse_nodes(
+            self.root(),
+            &mut reader,
+            &context,
+            permission_level,
+            MAX_PARSE_DEPTH,
+        )
     }
 
     /// 官方 `CommandDispatcher.parseNodes`。
@@ -343,8 +353,20 @@ impl CommandGraph {
         reader: &mut StringReader,
         context: &Context,
         permission_level: u8,
+        remaining: usize,
     ) -> ParseResults {
         let start = reader.cursor();
+        let Some(remaining) = remaining.checked_sub(1) else {
+            return ParseResults {
+                context: context.clone(),
+                cursor: start,
+                can_read: true,
+                exceptions: vec![LocatedError {
+                    error: ParseError::new("command.failed"),
+                    cursor: start,
+                }],
+            };
+        };
         let mut exceptions = Vec::new();
         let mut potentials: Vec<ParseResults> = Vec::new();
 
@@ -381,8 +403,13 @@ impl CommandGraph {
                 child_reader.skip();
                 if let Some(target) = redirect {
                     let redirected = Context::new(child_reader.cursor());
-                    let parsed =
-                        self.parse_nodes(target, &mut child_reader, &redirected, permission_level);
+                    let parsed = self.parse_nodes(
+                        target,
+                        &mut child_reader,
+                        &redirected,
+                        permission_level,
+                        remaining,
+                    );
                     child_context.child = Some(Box::new(parsed.context));
                     return ParseResults {
                         context: child_context,
@@ -396,6 +423,7 @@ impl CommandGraph {
                     &mut child_reader,
                     &child_context,
                     permission_level,
+                    remaining,
                 ));
             } else {
                 potentials.push(ParseResults {
@@ -725,6 +753,23 @@ mod tests {
             Some(crate::GameMode::Creative)
         );
         assert_eq!(parsed.cursor, 17);
+    }
+
+    #[test]
+    fn deeply_redirected_command_returns_a_parse_error() {
+        let (mut graph, action) = game_mode_graph();
+        let root = graph.root();
+        let redirect = graph.literal(root, "redirect", 0);
+        graph.redirect(redirect, root);
+
+        let prefix = "redirect ".repeat(MAX_PARSE_DEPTH - 2);
+        let last_supported = format!("{prefix}gamemode creative");
+        assert_eq!(graph.parse(&last_supported, 2).unwrap().action, action);
+
+        let beyond_limit = format!("redirect {last_supported}");
+        let failure = graph.parse(&beyond_limit, 2).unwrap_err();
+        assert_eq!(failure.error.key, "command.failed");
+        assert_eq!(failure.cursor, beyond_limit.len() - "creative".len());
     }
 
     #[test]
