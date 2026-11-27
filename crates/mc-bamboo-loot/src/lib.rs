@@ -16,6 +16,7 @@ mod error;
 #[cfg(test)]
 mod eval_tests;
 mod function;
+mod function_ext;
 mod json;
 mod names;
 mod number;

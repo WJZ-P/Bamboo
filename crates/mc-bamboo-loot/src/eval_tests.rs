@@ -1003,11 +1003,15 @@ fn every_function_kind_evaluates() {
     // 假世界里找不到结构，官方原样退回输入物品堆。
     assert_eq!(map.unwrap(), stone);
     let lore = apply(
-        json!({"type":"minecraft:set_lore","lore":[{"text":"line"}]}),
+        json!({"type":"minecraft:set_lore","lore":[{"text":"line"}],"mode":"append"}),
         stone.clone(),
         &stored,
+    )
+    .unwrap();
+    assert_eq!(
+        lore.component("minecraft:lore").and_then(Value::as_array),
+        Some(&vec![json!("line")])
     );
-    assert!(matches!(lore, Err(LootError::Unsupported(_))));
     let named_ref = apply(json!("minecraft:set_count"), stone, &stored);
     assert!(matches!(named_ref, Err(LootError::Unsupported(_))));
 }
@@ -1322,4 +1326,298 @@ fn exploration_map_writes_vanilla_components() {
         })),
         Err(LootError::Invalid(_))
     ));
+}
+
+/// 每个新做的组件函数都走一遍求值，检查写出的组件值。
+///
+/// Every newly implemented component function is evaluated and its component checked.
+#[test]
+fn extended_functions_evaluate() {
+    let mut params = level_params();
+    let stone = LootStack::new(items::STONE, 1);
+
+    // `set_custom_data`：SNBT 复合标签并进 custom_data。
+    let custom = apply(
+        json!({"type":"minecraft:set_custom_data","tag":"{foo:1b,bar:\"x\"}"}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let data = custom.component("minecraft:custom_data").unwrap();
+    assert_eq!(data.get("foo").and_then(Value::as_i64), Some(1));
+    assert_eq!(data.get("bar").and_then(Value::as_str), Some("x"));
+
+    // `set_attributes`：先取 slot 再算 amount，按 id 覆盖。
+    let attrs = apply(
+        json!({"type":"minecraft:set_attributes","modifiers":[
+            {"id":"minecraft:x","attribute":"minecraft:generic.max_health","operation":"add_value","amount":2.5,"slot":["mainhand"]}
+        ]}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let modifiers = attrs
+        .component("minecraft:attribute_modifiers")
+        .and_then(|value| value.get("modifiers"))
+        .and_then(Value::as_array)
+        .unwrap();
+    assert_eq!(modifiers.len(), 1);
+    assert_eq!(
+        modifiers[0].get("amount").and_then(Value::as_f64),
+        Some(2.5)
+    );
+    assert_eq!(
+        modifiers[0].get("slot").and_then(Value::as_str),
+        Some("mainhand")
+    );
+
+    // `set_loot_table`：container_loot 记表名和种子。
+    let loot = apply(
+        json!({"type":"minecraft:set_loot_table","loot_table_id":"minecraft:chests/simple_dungeon","seed":7}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let container_loot = loot.component("minecraft:container_loot").unwrap();
+    assert_eq!(
+        container_loot.get("loot_table").and_then(Value::as_str),
+        Some("minecraft:chests/simple_dungeon")
+    );
+    assert_eq!(container_loot.get("seed").and_then(Value::as_i64), Some(7));
+
+    // `set_lore`：带实体解析时按官方报不支持。
+    assert!(matches!(
+        apply(
+            json!({"type":"minecraft:set_lore","lore":[],"mode":"append","entity":"this"}),
+            stone.clone(),
+            &params,
+        ),
+        Err(LootError::Unsupported(_))
+    ));
+
+    // `set_banner_pattern`：append=false 直接替换 layers。
+    let banner = apply(
+        json!({"type":"minecraft:set_banner_pattern","patterns":{"layers":[{"pattern":"minecraft:stripe","color":"minecraft:red"}]},"append":false}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        banner
+            .component("minecraft:banner_patterns")
+            .and_then(|value| value.get("layers"))
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
+
+    // `set_fireworks`：flight_duration 和 explosions 列表。
+    let fireworks = apply(
+        json!({"type":"minecraft:set_fireworks","flight_duration":3,"explosions":{"mode":"append","values":[{"shape":"minecraft:small_ball"}]}}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let fireworks = fireworks.component("minecraft:fireworks").unwrap();
+    assert_eq!(
+        fireworks.get("flight_duration").and_then(Value::as_i64),
+        Some(3)
+    );
+    assert_eq!(
+        fireworks
+            .get("explosions")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
+
+    // `set_firework_explosion`：缺省字段补默认。
+    let explosion = apply(
+        json!({"type":"minecraft:set_firework_explosion","shape":"minecraft:large_ball","colors":[1,2],"trail":true}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let explosion = explosion.component("minecraft:firework_explosion").unwrap();
+    assert_eq!(
+        explosion.get("shape").and_then(Value::as_str),
+        Some("minecraft:large_ball")
+    );
+    assert_eq!(explosion.get("trail").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        explosion.get("twinkle").and_then(Value::as_bool),
+        Some(false)
+    );
+
+    // `set_book_cover`：written_book_content 的封面字段。
+    let book = apply(
+        json!({"type":"minecraft:set_book_cover","title":"Hi","author":"Me","generation":2}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let book = book.component("minecraft:written_book_content").unwrap();
+    assert_eq!(book.get("author").and_then(Value::as_str), Some("Me"));
+    assert_eq!(book.get("generation").and_then(Value::as_i64), Some(2));
+
+    // `set_written_book_pages` / `set_writable_book_pages`：ListOperation 追加。
+    let written = apply(
+        json!({"type":"minecraft:set_written_book_pages","pages":["a","b"],"mode":"append"}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        written
+            .component("minecraft:written_book_content")
+            .and_then(|value| value.get("pages"))
+            .and_then(Value::as_array),
+        Some(&vec![json!("a"), json!("b")])
+    );
+    let writable = apply(
+        json!({"type":"minecraft:set_writable_book_pages","pages":["x"],"mode":"replace_all"}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        writable
+            .component("minecraft:writable_book_content")
+            .and_then(|value| value.get("pages"))
+            .and_then(Value::as_array),
+        Some(&vec![json!("x")])
+    );
+
+    // `toggle_tooltips`：shown=false 记进 hidden_components，排序去重。
+    let toggled = apply(
+        json!({"type":"minecraft:toggle_tooltips","toggles":{"minecraft:lore":false,"minecraft:damage":true}}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        toggled
+            .component("minecraft:tooltip_display")
+            .and_then(|value| value.get("hidden_components"))
+            .and_then(Value::as_array),
+        Some(&vec![json!("minecraft:lore")])
+    );
+
+    // `set_custom_model_data`：四个列表按 StandAlone 操作写，color/float 过提供器。
+    let model = apply(
+        json!({"type":"minecraft:set_custom_model_data","strings":{"mode":"append","values":["tag"]},"colors":{"mode":"append","values":[123]}}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let model = model.component("minecraft:custom_model_data").unwrap();
+    assert_eq!(
+        model.get("strings").and_then(Value::as_array),
+        Some(&vec![json!("tag")])
+    );
+    assert_eq!(
+        model.get("colors").and_then(Value::as_array),
+        Some(&vec![json!(123)])
+    );
+
+    // `set_contents`：展开条目并把物品写进 container。
+    let contents = apply(
+        json!({"type":"minecraft:set_contents","component":"minecraft:container","entries":[{"type":"minecraft:item","name":"minecraft:dirt"}]}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    let container_items = contents
+        .component("minecraft:container")
+        .and_then(|value| value.get("items"))
+        .and_then(Value::as_array)
+        .unwrap();
+    assert_eq!(container_items.len(), 1);
+    assert_eq!(
+        container_items[0].get("item").and_then(Value::as_i64),
+        Some(i64::from(items::DIRT))
+    );
+
+    // `modify_contents`：对容器里每个非空物品应用 modifier。
+    let mut container = stone.clone();
+    container.set_component(
+        "minecraft:container",
+        json!({"items":[{"item": items::DIRT, "count": 2}]}),
+    );
+    let modified = apply(
+        json!({"type":"minecraft:modify_contents","component":"minecraft:container","modifier":{"type":"minecraft:set_count","count":5}}),
+        container,
+        &params,
+    )
+    .unwrap();
+    let modified_items = modified
+        .component("minecraft:container")
+        .and_then(|value| value.get("items"))
+        .and_then(Value::as_array)
+        .unwrap();
+    assert_eq!(
+        modified_items[0].get("count").and_then(Value::as_i64),
+        Some(5)
+    );
+
+    // `copy_name`：方块实体的 custom_name 写到物品。
+    params.block_entity = Some(crate::BlockEntityView {
+        components: [("minecraft:custom_name".to_owned(), json!("Pot"))]
+            .into_iter()
+            .collect(),
+    });
+    let copied = apply(
+        json!({"type":"minecraft:copy_name","source":"block_entity"}),
+        stone.clone(),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        copied
+            .component("minecraft:custom_name")
+            .and_then(Value::as_str),
+        Some("Pot")
+    );
+
+    // `fill_player_head`：玩家头 + 实体 profile 写 profile 组件。
+    let mut head_params = level_params();
+    let mut donor = EntityView::new(0);
+    donor
+        .components
+        .insert("minecraft:profile".to_owned(), json!({"name": "Steve"}));
+    head_params.this_entity = Some(donor);
+    let head = apply(
+        json!({"type":"minecraft:fill_player_head","entity":"this"}),
+        LootStack::new(items::PLAYER_HEAD, 1),
+        &head_params,
+    )
+    .unwrap();
+    assert_eq!(
+        head.component("minecraft:profile")
+            .and_then(|value| value.get("name"))
+            .and_then(Value::as_str),
+        Some("Steve")
+    );
+
+    // `copy_custom_data`：实体 NBT 的 replace op 写进 custom_data。
+    let mut nbt_params = level_params();
+    let mut holder = EntityView::new(0);
+    holder.nbt = Some(mc_bamboo_nbt::Tag::Compound(vec![(
+        "value".to_owned(),
+        mc_bamboo_nbt::Tag::Int(42),
+    )]));
+    nbt_params.this_entity = Some(holder);
+    let copied = apply(
+        json!({"type":"minecraft:copy_custom_data","source":{"type":"minecraft:context","target":"this"},"ops":[{"source":"value","target":"out","op":"replace"}]}),
+        stone.clone(),
+        &nbt_params,
+    )
+    .unwrap();
+    assert_eq!(
+        copied
+            .component("minecraft:custom_data")
+            .and_then(|value| value.get("out"))
+            .and_then(Value::as_i64),
+        Some(42)
+    );
 }
