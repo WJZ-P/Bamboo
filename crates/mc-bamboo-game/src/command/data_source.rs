@@ -447,6 +447,9 @@ const LIVE_BLOCK_ENTITY_KEYS: &[&str] = &[
     "extending",
     "source",
     "progress",
+    "primary_effect",
+    "secondary_effect",
+    "Levels",
 ];
 
 fn block_entity_id(region: &Region, pos: BlockPos) -> Result<&str, &'static str> {

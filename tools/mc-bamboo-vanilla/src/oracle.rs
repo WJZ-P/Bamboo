@@ -876,13 +876,16 @@ fn pours_a_mob_bucket(case: &Case) -> bool {
 /// `LivingEntity.makeSound` and `Entity.playSound`, which passes a null `except`:
 /// - `excluded == false`。桶自己的 `playEmptySound` 传入玩家，留下来照比。
 ///   `excluded == false`: the bucket's own `playEmptySound` passes the player and stays.
-/// - 注册表名以 `minecraft:entity.<生物路径>.` 开头。鲑鱼是 `entity.salmon.ambient`，
-///   美西螈是 `idle_water` / `idle_air`，犰狳是 `entity.armadillo.ambient`。方块发出的
-///   `entity.generic.extinguish_fire`、`entity.tnt.primed` 路径对不上，留下来照比。
-///   蝌蚪和硫磺立方的 `getAmbientSound` 是 null，没有这一声。
-///   The name starts with `minecraft:entity.<mob path>.`. Block sounds such as
-///   `entity.generic.extinguish_fire` and `entity.tnt.primed` stay comparable; tadpoles
-///   and sulfur cubes have no ambient sound at all.
+/// - 注册表名以 `minecraft:entity.<生物路径>.` 或该生物某个声音变体族的名字开头。
+///   鲑鱼是 `entity.salmon.ambient`，美西螈是 `idle_water` / `idle_air`，犰狳是
+///   `entity.armadillo.ambient`；26.3 起猫、鸡、牛、猪、狼按变体分声音，见
+///   [`sound_variant_prefixes`]。方块发出的 `entity.generic.extinguish_fire`、
+///   `entity.tnt.primed` 路径对不上，留下来照比。蝌蚪和硫磺立方的 `getAmbientSound`
+///   是 null，没有这一声。
+///   The name starts with `minecraft:entity.<mob path>.` or one of that mob's sound-variant
+///   families. Since 26.3 cats, chickens, cows, pigs and wolves have sound variants, see
+///   [`sound_variant_prefixes`]. Block sounds such as `entity.generic.extinguish_fire` and
+///   `entity.tnt.primed` stay comparable; tadpoles and sulfur cubes have no ambient sound.
 fn spawned_mob_sound(sound: &SoundPlay, entity: &str) -> bool {
     if sound.7 {
         return false;
@@ -902,8 +905,46 @@ fn spawned_mob_sound(sound: &SoundPlay, entity: &str) -> bool {
     let Some(rest) = name.strip_prefix("minecraft:entity.") else {
         return false;
     };
-    rest.strip_prefix(path)
-        .is_some_and(|rest| rest.starts_with('.'))
+    // 音效名第二段（到下一个点号前）属于这个生物：注册名本身，或它的某个声音变体族。
+    // The second segment of the sound name belongs to this mob: its registry name, or one of
+    // its sound-variant families.
+    let belongs = |prefix: &str| {
+        rest.strip_prefix(prefix)
+            .is_some_and(|tail| tail.starts_with('.'))
+    };
+    belongs(path) || sound_variant_prefixes(path).iter().any(|p| belongs(p))
+}
+
+/// 26.3 的"声音变体"让这些生物的叫声音效分成几族：`getAmbientSound` 取自实体上的
+/// 变体，音效名第二段是变体的 `soundEventIdentifier`，而不是实体注册名。比如猫刷怪蛋
+/// 刷出来的猫可能叫 `entity.cat_royal.stray_ambient`，幼猫用 `entity.baby_cat.*`。这些
+/// 都还是刚生成的生物自己叫的那一声（`Mob.playAmbientSound`），音高一样取自不确定的
+/// 实体随机源，所以连同 `<注册名>.` 一起放宽。表里是 26.3 字节码里每个 `*SoundVariants`
+/// 注册的全部变体族，只放宽这些已知族，不放松到任意前缀。
+///
+/// Since 26.3 these mobs have sound variants: `getAmbientSound` reads the entity's variant and
+/// the sound name's second segment is the variant's `soundEventIdentifier`, not the mob's
+/// registry name. A cat from a spawn egg can call `entity.cat_royal.stray_ambient`, and a baby
+/// cat uses `entity.baby_cat.*`. These are still the just-spawned mob's own call
+/// (`Mob.playAmbientSound`) whose pitch comes from the unseeded entity random, so they are
+/// relaxed along with `<registry name>.`. The table lists every variant family each
+/// `*SoundVariants` registers in the 26.3 bytecode; only these known families are relaxed.
+fn sound_variant_prefixes(mob: &str) -> &'static [&'static str] {
+    match mob {
+        "cat" => &["cat_royal", "baby_cat"],
+        "chicken" => &["chicken_picky"],
+        "cow" => &["cow_moody"],
+        "pig" => &["pig_mini", "pig_big"],
+        "wolf" => &[
+            "wolf_puglin",
+            "wolf_sad",
+            "wolf_angry",
+            "wolf_grumpy",
+            "wolf_big",
+            "wolf_cute",
+        ],
+        _ => &[],
+    }
 }
 
 /// 刚生成的生物叫了一声时，音高之外全比。
@@ -1944,6 +1985,74 @@ mod tests {
         assert!(!spawned_mob_sound(&primed, "minecraft:salmon"));
         assert!(!spawned_mob_sound(&extinguish, "minecraft:salmon"));
         assert!(!spawned_mob_sound(&skipped_entity, "minecraft:armadillo"));
+    }
+
+    #[test]
+    fn sound_variant_families_count_as_the_spawned_mobs_own_sound() {
+        let sound = |name: &str| play(name, 0.0, 1.0, 1.0, sounds::NEUTRAL, false);
+        // 26.3 字节码里每种 *SoundVariants 注册的全部变体族。
+        // Every variant family each *SoundVariants registers in the 26.3 bytecode.
+        for (mob, families) in [
+            ("cat", &["cat_royal", "baby_cat"][..]),
+            ("chicken", &["chicken_picky"][..]),
+            ("cow", &["cow_moody"][..]),
+            ("pig", &["pig_mini", "pig_big"][..]),
+            (
+                "wolf",
+                &[
+                    "wolf_puglin",
+                    "wolf_sad",
+                    "wolf_angry",
+                    "wolf_grumpy",
+                    "wolf_big",
+                    "wolf_cute",
+                ][..],
+            ),
+        ] {
+            let entity = format!("minecraft:{mob}");
+            // 注册名本身照旧认。
+            assert!(
+                spawned_mob_sound(&sound(&format!("minecraft:entity.{mob}.ambient")), &entity),
+                "{mob} 自己的 ambient 应该认"
+            );
+            for family in families {
+                assert!(
+                    spawned_mob_sound(
+                        &sound(&format!("minecraft:entity.{family}.ambient")),
+                        &entity
+                    ),
+                    "{family} 应该是 {mob} 的变体族"
+                );
+            }
+        }
+        // 猫的变体音效不能被别的生物认领，也不能把方块音效放宽。
+        let royal = sound("minecraft:entity.cat_royal.stray_ambient");
+        assert!(spawned_mob_sound(&royal, "minecraft:cat"));
+        assert!(!spawned_mob_sound(&royal, "minecraft:wolf"));
+        assert!(!spawned_mob_sound(&royal, "minecraft:chicken"));
+        let skipped = play(
+            "minecraft:entity.cat_royal.stray_ambient",
+            0.0,
+            1.0,
+            1.0,
+            sounds::NEUTRAL,
+            true,
+        );
+        assert!(!spawned_mob_sound(&skipped, "minecraft:cat"));
+        assert!(!spawned_mob_sound(
+            &sound("minecraft:entity.generic.extinguish_fire"),
+            "minecraft:cat"
+        ));
+    }
+
+    #[test]
+    fn a_variant_family_sound_still_ignores_only_the_pitch() {
+        let name = "minecraft:entity.cat_royal.stray_ambient";
+        let first = play(name, -22.5, 1.0, 0.937, sounds::NEUTRAL, false);
+        let other_pitch = play(name, -22.5, 1.0, 1.138, sounds::NEUTRAL, false);
+        assert!(spawned_sound_matches(&first, &other_pitch));
+        let other_position = play(name, -21.5, 1.0, 0.937, sounds::NEUTRAL, false);
+        assert!(!spawned_sound_matches(&first, &other_position));
     }
 
     #[test]

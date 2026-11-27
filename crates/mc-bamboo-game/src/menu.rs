@@ -1100,7 +1100,12 @@ pub(crate) fn open_entity_container(region: &mut Region, id: PlayerId, entity: i
 /// A lock sends `container.isLocked` and does not open the menu. Spectators and
 /// ender chests skip the check. Vanilla also plays `CHEST_LOCKED`; there is no
 /// sound packet, so only the overlay is sent.
-fn locked_message(region: &mut Region, id: PlayerId, target: &Target, title: &str) -> bool {
+pub(super) fn locked_message(
+    region: &mut Region,
+    id: PlayerId,
+    target: &Target,
+    title: &str,
+) -> bool {
     if is_spectator(region, id) || matches!(target, Target::EnderChest(_)) {
         return false;
     }
@@ -1136,7 +1141,7 @@ fn is_spectator(region: &Region, id: PlayerId) -> bool {
 /// 菜单的标题，官方 `Nameable.getDisplayName`：方块实体有自定义名就用它。
 ///
 /// 双箱看官方 `ChestBlock.MENU_PROVIDER_COMBINER`：先看主箱，再看另一半，都没有才用默认标题。
-fn menu_title(region: &Region, target: &Target, default: &str) -> Component {
+pub(super) fn menu_title(region: &Region, target: &Target, default: &str) -> Component {
     for pos in target.positions() {
         if let Some(name) = block_items::custom_name(region, pos) {
             return name.clone();
@@ -1252,6 +1257,16 @@ pub(crate) fn on_rename(region: &mut Region, id: PlayerId, name: &str) {
 /// `ServerboundSelectTradePacket`。
 pub(crate) fn on_select_trade(region: &mut Region, id: PlayerId, slot: i32) {
     crate::merchant::on_select_trade(region, id, slot);
+}
+
+/// `ServerboundSetBeaconPacket`：选择信标主/副效果并消耗付款槽。
+pub(crate) fn on_set_beacon(
+    region: &mut Region,
+    id: PlayerId,
+    primary: Option<i32>,
+    secondary: Option<i32>,
+) {
+    station::on_set_beacon(region, id, primary, secondary);
 }
 
 pub(crate) fn on_slot_state_changed(

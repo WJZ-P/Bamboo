@@ -49,6 +49,7 @@ pub const CONNECTED_TRIGGERS: &[&str] = &[
     "minecraft:villager_trade",
     "minecraft:fishing_rod_hooked",
     "minecraft:used_ender_eye",
+    "minecraft:construct_beacon",
 ];
 
 /// 借用被拆开的地方（实体 tick、`HurtParts`）只压一条事件，玩家 tick 末尾统一 dispatch。
@@ -347,6 +348,11 @@ pub(crate) fn matches(trigger: &str, payload: &Value, conditions: &Value) -> boo
                     fields.get("distance"),
                     payload.get("distance_sqr").and_then(Value::as_f64),
                 )
+        }
+        // `ConstructBeaconTrigger`：塔层数满足 `level` 整数区间（精确值或 min/max）。
+        "minecraft:construct_beacon" => {
+            known_conditions(&["level"])
+                && min_max_matches(fields.get("level"), payload.get("level"))
         }
         _ => object.is_some_and(|map| map.is_empty()),
     }
@@ -744,7 +750,7 @@ mod tests {
         let tree = AdvancementTree::global();
         let set: std::collections::BTreeSet<&str> = CONNECTED_TRIGGERS.iter().copied().collect();
         assert_eq!(set.len(), CONNECTED_TRIGGERS.len());
-        assert_eq!(CONNECTED_TRIGGERS.len(), 35);
+        assert_eq!(CONNECTED_TRIGGERS.len(), 36);
         for trigger in CONNECTED_TRIGGERS {
             assert!(tree.triggers.contains(trigger), "{trigger} 不在注册表里");
         }

@@ -87,6 +87,7 @@ fn implicit_components(kind: i32) -> &'static [i32] {
         entities::SKULL => &SKULL,
         entities::DECORATED_POT => &DECORATED_POT,
         entities::COPPER_GOLEM_STATUE => &COPPER_GOLEM_STATUE,
+        entities::BEACON => &CONTAINER,
         _ if is_container(kind) => &CONTAINER,
         _ => &[],
     }
@@ -329,12 +330,36 @@ fn update_tag(region: &Region, pos: BlockPos) -> Option<Tag> {
         let patch = region.block_items.get(&pos).cloned().unwrap_or_default();
         return pot_tag(region, pos, &patch);
     }
+    if kind == entities::BEACON {
+        return Some(beacon_tag(region, pos));
+    }
     let patch = region.block_items.get(&pos)?.clone();
     match kind {
         entities::BANNER => Some(banner_tag(&patch)),
         entities::SKULL => skull_tag(&patch),
         _ => None,
     }
+}
+
+/// 信标的 `getUpdateTag` 走 `saveCustomOnly`（即 `saveAdditional`）：
+/// `primary_effect`、`secondary_effect`、`Levels`、`CustomName`、`lock`。
+///
+/// Official `BeaconBlockEntity.getUpdateTag()` delegates to `saveCustomOnly` (`saveAdditional`).
+fn beacon_tag(region: &Region, pos: BlockPos) -> Tag {
+    let mut entries = region
+        .block_entities
+        .get::<mc_bamboo_blocks::behaviour::misc::beacon::BeaconBlockEntity>(pos)
+        .map(|entity| entity.additional())
+        .unwrap_or_else(|| vec![("Levels".to_owned(), Tag::Int(0))]);
+    if let Some(patch) = region.block_items.get(&pos)
+        && let Some(name) = custom_name_tag(patch)
+    {
+        entries.push(("CustomName".to_owned(), name));
+    }
+    if let Some(lock) = lock_tag(region, pos) {
+        entries.push(("lock".to_owned(), lock));
+    }
+    Tag::Compound(entries)
 }
 
 /// 旗帜的 `getUpdateTag` 走 `saveWithoutMetadata`，所以末尾还有方块实体自己的组件表。
@@ -580,6 +605,18 @@ fn block_entity_data(region: &Region, pos: BlockPos, kind: i32) -> Option<Compon
     if kind == entities::JUKEBOX {
         return jukebox_record_data(region, pos, kind);
     }
+    if kind == entities::BEACON {
+        // 官方 `BeaconBlockEntity.removeComponentsFromTag` 丢弃 `CustomName` 和 `lock`，
+        // 留下 `primary_effect` / `secondary_effect` / `Levels`。
+        let tag = region
+            .block_entities
+            .get::<mc_bamboo_blocks::behaviour::misc::beacon::BeaconBlockEntity>(pos)
+            .map(|entity| entity.additional())
+            .unwrap_or_else(|| vec![("Levels".to_owned(), Tag::Int(0))]);
+        return Some(ComponentValue::BlockEntityData(
+            mc_bamboo_protocol::components::value::TypedEntityData { kind, tag },
+        ));
+    }
     if kind != entities::SIGN && kind != entities::HANGING_SIGN {
         return None;
     }
@@ -635,6 +672,13 @@ fn merge_block_entity_data(
         && let Some(stack) = record_item(&data.tag)
     {
         set_first_slot(region, pos, stack);
+    }
+    if kind == entities::BEACON {
+        let loaded = mc_bamboo_blocks::behaviour::misc::beacon::BeaconBlockEntity::read(
+            pos,
+            &Tag::Compound(data.tag.clone()),
+        );
+        region.block_entities.insert(Box::new(loaded));
     }
     if implicit.entry(kinds::CUSTOM_NAME).is_none()
         && let Some(name) = field(&data.tag, "CustomName")

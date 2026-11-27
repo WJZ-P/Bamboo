@@ -1372,6 +1372,304 @@ fn creative_breaks_only_drop_non_empty_shulker_boxes() {
     }
 }
 
+/// 信标端到端流程：建 4 层铁块金字塔 → 激活拿到进度 → 打开菜单放铁锭确认效果 →
+/// 80 刻后获得主/副效果；非法选效果触发断开；关闭时未花掉的付款物品掉在地上。
+#[test]
+fn beacon_menu_payment_effects_kick_and_advancement() {
+    use mc_bamboo_blocks::behaviour::misc::beacon::{BeaconBlockEntity, encode_effect};
+    use mc_bamboo_data::registries::mob_effect;
+
+    let mut fixture = Fixture::new();
+    let pos = BlockPos::new(0, flat::surface_y() + 4, 0);
+    // 4 层铁块金字塔。
+    for layer in 1..=4 {
+        let cy = pos.y - layer;
+        for cx in (pos.x - layer)..=(pos.x + layer) {
+            for cz in (pos.z - layer)..=(pos.z + layer) {
+                fixture.place(BlockPos::new(cx, cy, cz), blocks::IRON_BLOCK);
+            }
+        }
+    }
+    fixture.place(pos, blocks::BEACON);
+    fixture
+        .region
+        .block_entities
+        .insert(Box::new(BeaconBlockEntity::new(pos)));
+    if let Some(player) = fixture.region.players.get_mut(&fixture.id) {
+        player.set_position(
+            &mut fixture.region.player_grid,
+            Vec3::new(0.5, f64::from(pos.y) + 1.0, 0.5),
+        );
+        player
+            .advancements
+            .rebuild_listeners(mc_bamboo_advancements::AdvancementTree::global());
+        // 背包第一格（菜单槽 1 = Inventory 槽 9）放 1 个铁锭。
+        player.inventory.slots[9] = ItemStack::new(items::IRON_INGOT, 1);
+    }
+
+    // 第 1 刻（gameTime = 0）扫描光柱；第 80 刻计算底座层数并激活。
+    for t in [0_i64, 80_i64] {
+        fixture.region.block_ticks.set_time(t);
+        let effects = {
+            let (mut level, ticks) = fixture.region.block_level();
+            let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            let _ = world.with_block_entity::<BeaconBlockEntity, _>(pos, |entity, world| {
+                entity.server_tick(world);
+            });
+            world.drain_effects()
+        };
+        crate::interaction::send_effects(&mut fixture.region, None, &effects);
+        crate::advancement_triggers::drain(&mut fixture.region);
+    }
+
+    // 确认底座 4 层，并且触发了 create_beacon 与 create_full_beacon 进度。
+    let levels = fixture
+        .region
+        .block_entities
+        .get::<BeaconBlockEntity>(pos)
+        .unwrap()
+        .levels();
+    assert_eq!(levels, 4);
+    let tree = mc_bamboo_advancements::AdvancementTree::global();
+    let player = fixture.region.players.get(&fixture.id).unwrap();
+    for adv in [
+        "minecraft:nether/create_beacon",
+        "minecraft:nether/create_full_beacon",
+    ] {
+        let idx = tree.index(adv).expect("advancement exists");
+        assert!(
+            player
+                .advancements
+                .progress
+                .get(&idx)
+                .is_some_and(|p| p.is_done()),
+            "{adv} should be granted"
+        );
+    }
+
+    // 打开信标菜单，把铁锭 Shift 进付款槽 0，确认选择 SPEED + REGENERATION。
+    fixture.open(pos);
+    let container_id = fixture.menu().container_id;
+    on_click(
+        &mut fixture.region,
+        fixture.id,
+        ClickPacket {
+            container_id,
+            state_id: 1,
+            slot: 1,
+            button: 0,
+            input: ContainerInput::QuickMove,
+            changed_slots: BTreeMap::new(),
+            carried: HashedStack::Empty,
+        },
+    );
+    on_set_beacon(
+        &mut fixture.region,
+        fixture.id,
+        Some(mob_effect::SPEED),
+        Some(mob_effect::REGENERATION),
+    );
+    let beacon = fixture
+        .region
+        .block_entities
+        .get::<BeaconBlockEntity>(pos)
+        .unwrap();
+    assert_eq!(beacon.primary_power(), Some(mob_effect::SPEED));
+    assert_eq!(beacon.secondary_power(), Some(mob_effect::REGENERATION));
+    assert_eq!(
+        beacon.data_values(),
+        [
+            4,
+            encode_effect(Some(mob_effect::SPEED)),
+            encode_effect(Some(mob_effect::REGENERATION)),
+        ]
+    );
+    assert!(!fixture.sink.0.lock().unwrap().closed);
+
+    // 再推进到第 160 刻，玩家拿到 SPEED I 与 REGENERATION I（340 刻）。
+    fixture.region.block_ticks.set_time(160);
+    let effects = {
+        let (mut level, ticks) = fixture.region.block_level();
+        let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+        let _ = world.with_block_entity::<BeaconBlockEntity, _>(pos, |entity, world| {
+            entity.server_tick(world);
+        });
+        world.drain_effects()
+    };
+    crate::interaction::send_effects(&mut fixture.region, None, &effects);
+    let player = fixture.region.players.get(&fixture.id).unwrap();
+    let speed = player.effects.get(mob_effect::SPEED).expect("speed effect");
+    assert_eq!((speed.amplifier, speed.duration), (0, 340));
+    let regen = player
+        .effects
+        .get(mob_effect::REGENERATION)
+        .expect("regeneration effect");
+    assert_eq!((regen.amplifier, regen.duration), (0, 340));
+
+    // 关闭时未花掉的付款物品掉在地上。
+    if let Some(player) = fixture.region.players.get_mut(&fixture.id) {
+        player.inventory.slots[9] = ItemStack::new(items::DIAMOND, 1);
+    }
+    on_click(
+        &mut fixture.region,
+        fixture.id,
+        ClickPacket {
+            container_id,
+            state_id: 2,
+            slot: 1,
+            button: 0,
+            input: ContainerInput::QuickMove,
+            changed_slots: BTreeMap::new(),
+            carried: HashedStack::Empty,
+        },
+    );
+    on_close_request(&mut fixture.region, fixture.id);
+    assert!(
+        fixture
+            .region
+            .entities
+            .iter()
+            .filter_map(|e| e.ground().cloned())
+            .any(|item| item.stack.item == items::DIAMOND),
+        "closing beacon menu drops unspent payment item"
+    );
+
+    // 没放付款物品直接发 SetBeacon：照官方断开连接。
+    fixture.open(pos);
+    on_set_beacon(
+        &mut fixture.region,
+        fixture.id,
+        Some(mob_effect::HASTE),
+        None,
+    );
+    fixture.region.links.flush();
+    assert!(fixture.sink.0.lock().unwrap().closed);
+}
+
+/// 带锁与自定义名的信标：无钥匙时拒绝打开并发送 `container.isLocked`，拿钥匙后打开并显示自定义名；
+/// 区块存档往返保留 `primary_effect` / `secondary_effect` / `CustomName` / `lock` 且 `Levels` 读盘归零。
+#[test]
+fn beacon_lock_custom_name_and_chunk_archive_round_trip() {
+    use mc_bamboo_blocks::behaviour::misc::beacon::{
+        BeaconBlockEntity, DATA_LEVELS, DATA_PRIMARY, DATA_SECONDARY, encode_effect,
+    };
+    use mc_bamboo_data::registries::{data_component_type as kinds, mob_effect};
+    use mc_bamboo_nbt::Tag;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::BEACON);
+    let mut beacon = BeaconBlockEntity::new(pos);
+    beacon.set_data(DATA_LEVELS, 4, None);
+    beacon.set_data(DATA_PRIMARY, encode_effect(Some(mob_effect::SPEED)), None);
+    beacon.set_data(
+        DATA_SECONDARY,
+        encode_effect(Some(mob_effect::REGENERATION)),
+        None,
+    );
+    fixture.region.block_entities.insert(Box::new(beacon));
+
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        kinds::CUSTOM_NAME,
+        PatchEntry::Set(ComponentValue::CustomName(Component::text("My Beacon"))),
+    );
+    patch.put(
+        kinds::LOCK,
+        PatchEntry::Set(ComponentValue::Lock(Tag::Compound(vec![(
+            "items".to_owned(),
+            Tag::String("minecraft:tripwire_hook".to_owned()),
+        )]))),
+    );
+    fixture.region.block_items.insert(pos, patch);
+    crate::block_items::refresh_update_tag(&mut fixture.region, pos);
+    assert!(fixture.region.chunks.update_tag(pos).is_some());
+
+    // 生存模式空手打开带锁信标：被拒。
+    if let Some(player) = fixture.region.players.get_mut(&fixture.id) {
+        player.game_mode = GameMode::Survival;
+    }
+    assert!(!open_block(&mut fixture.region, fixture.id, pos));
+    assert!(!fixture.region.menus.contains_key(&fixture.id));
+
+    // 主手拿绊线钩：能打开，且 OpenScreen 带自定义名。
+    if let Some(player) = fixture.region.players.get_mut(&fixture.id) {
+        player.inventory.slots[HOTBAR_START] = ItemStack::new(items::TRIPWIRE_HOOK, 1);
+    }
+    assert!(open_block(&mut fixture.region, fixture.id, pos));
+    assert!(fixture.region.menus.contains_key(&fixture.id));
+    on_close_request(&mut fixture.region, fixture.id);
+
+    // 整块区块存档往返（encode_parts -> decode -> encode）。
+    let chunk_pos = pos.chunk();
+    let parts = crate::region::content_snapshot::BorrowedParts::build(&fixture.region, chunk_pos)
+        .expect("snapshot chunk");
+    let encoded = crate::region::chunk_content::encode_parts(&parts, chunk_pos).expect("encode");
+    let decoded =
+        crate::region::chunk_content::decode(chunk_pos, &encoded.chunk, encoded.entities.as_ref())
+            .expect("decode");
+    let reencoded =
+        crate::region::chunk_content::encode(&decoded.column, chunk_pos).expect("reencode");
+
+    let find_beacon = |root: &Tag| -> Vec<(String, Tag)> {
+        let Tag::Compound(entries) = root else {
+            panic!("root is compound");
+        };
+        let (_, Tag::List(bes)) = entries
+            .iter()
+            .find(|(k, _)| k == "block_entities")
+            .expect("block_entities")
+        else {
+            panic!("block_entities is list");
+        };
+        bes.iter()
+            .find_map(|tag| {
+                let Tag::Compound(fields) = tag else {
+                    return None;
+                };
+                let is_beacon = fields
+                    .iter()
+                    .any(|(k, v)| k == "id" && v == &Tag::String("minecraft:beacon".to_owned()));
+                is_beacon.then(|| fields.clone())
+            })
+            .expect("beacon entry")
+    };
+
+    let first = find_beacon(&encoded.chunk);
+    let get = |fields: &[(String, Tag)], key: &str| -> Option<Tag> {
+        fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(
+        get(&first, "primary_effect"),
+        Some(Tag::String("minecraft:speed".to_owned()))
+    );
+    assert_eq!(
+        get(&first, "secondary_effect"),
+        Some(Tag::String("minecraft:regeneration".to_owned()))
+    );
+    assert_eq!(get(&first, "Levels"), Some(Tag::Int(4)));
+    assert!(get(&first, "CustomName").is_some());
+    assert!(get(&first, "lock").is_some());
+
+    // 读盘后再存盘：效果、自定义名和锁都保留，`Levels` 按官方 `loadAdditional` 重置为 0。
+    let second = find_beacon(&reencoded.chunk);
+    assert_eq!(
+        get(&second, "primary_effect"),
+        Some(Tag::String("minecraft:speed".to_owned()))
+    );
+    assert_eq!(
+        get(&second, "secondary_effect"),
+        Some(Tag::String("minecraft:regeneration".to_owned()))
+    );
+    assert_eq!(get(&second, "Levels"), Some(Tag::Int(0)));
+    assert_eq!(get(&second, "CustomName"), get(&first, "CustomName"));
+    assert_eq!(get(&second, "lock"), get(&first, "lock"));
+}
+
 /// 运输船的 27 格菜单：槽位读写落在船实体上，打开时解包战利品表，船没了就失效。
 #[test]
 fn chest_boat_menu_uses_the_entity_inventory() {
