@@ -59,7 +59,7 @@ enum Line {
     #[serde(rename = "header")]
     Header(Header),
     #[serde(rename = "case")]
-    Case(Case),
+    Case(Box<Case>),
     #[serde(rename = "end")]
     End(End),
 }
