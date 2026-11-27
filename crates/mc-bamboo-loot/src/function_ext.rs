@@ -482,7 +482,16 @@ pub fn run(
             let existing = fireworks(stack.component(FIREWORKS));
             let duration = flight_duration.unwrap_or(existing.0);
             let list = match explosions {
-                Some(stand) => stand.operation.apply(&existing.1, &stand.values, 256),
+                Some(stand) => {
+                    // `FireworkExplosion.CODEC` 会给每个值补上缺省字段，编码时再省略缺省值。
+                    // `FireworkExplosion.CODEC` fills every default and omits default fields on encode.
+                    let values: Vec<Value> = stand
+                        .values
+                        .iter()
+                        .map(normalize_firework_explosion)
+                        .collect();
+                    stand.operation.apply(&existing.1, &values, 256)
+                }
                 None => existing.1,
             };
             let value = json!({"flight_duration": duration, "explosions": list});
@@ -782,6 +791,26 @@ fn firework_explosion_default() -> Map<String, Value> {
         map.insert(key.to_owned(), default_value(key));
     }
     map
+}
+
+/// `SetFireworksFunction` 的 `explosions` 值按 `FireworkExplosion.CODEC` 解析：
+/// `shape` 总在场，其余字段是缺省值时编码时省略。
+///
+/// `SetFireworksFunction` parses each `explosions` value through
+/// `FireworkExplosion.CODEC`: `shape` is always present, while the other fields are
+/// omitted on encode when they equal their defaults.
+fn normalize_firework_explosion(value: &Value) -> Value {
+    let mut result = firework_explosion_default();
+    result.extend(object_field(Some(value)));
+    omit_defaults(
+        Value::Object(result),
+        &[
+            ("colors", json!([])),
+            ("fade_colors", json!([])),
+            ("has_trail", json!(false)),
+            ("has_twinkle", json!(false)),
+        ],
+    )
 }
 
 fn default_value(key: &str) -> Value {
