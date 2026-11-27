@@ -140,18 +140,37 @@ fn bundle_tick(
     let Some(taken) = taken else {
         return;
     };
-    // `set(BUNDLE_CONTENTS, mutable)` 只在服务端本地改，网络补丁和官方一样；
-    // 这里补发一次槽位，让客户端看到收纳袋变空 / 少了一件。
-    if let Some(player) = region.players.get_mut(&id) {
-        let slot = player.inventory.hand_slot(hand);
-        crate::inventory::send_slot(player, &mut region.links, slot);
-    }
-    crate::item_use_stats::award(region, id, item);
-    // `Level.playSound(null, blockPosition(), BUNDLE_DROP_CONTENTS, PLAYERS, 0.8, pitch)`。
+    // 官方 `dropContent` 每倒出一件按这个顺序发两个音效：`playRemoveOneSound`
+    // （`Player.playSound`，玩家精确坐标）→ `Player.drop` → `playDropContentsSound`
+    // （`blockPosition()+0.5`）。两次音高各取一次 `level.random.nextFloat()`，
+    // 两个 `Level.playSound` 的 `seed` 各取一次 `soundSeedGenerator.nextLong()`。
+    //
+    // Vanilla `dropContent` emits two sounds per item in this order:
+    // `playRemoveOneSound` (`Player.playSound`, exact player position) →
+    // `Player.drop` → `playDropContentsSound` (`blockPosition()+0.5`). Each pitch
+    // draws one `level.random.nextFloat()`, and each `Level.playSound` seed draws
+    // one `soundSeedGenerator.nextLong()`.
+    let remove_roll = region.random.source().next_float();
+    let remove_seed = region.sound_seed_generator.source().next_long();
+    let remove_one = mc_bamboo_protocol::packet::play::Sound {
+        sound: crate::menu::bundle::Sound::RemoveOne.id(),
+        inline: None,
+        source: mc_bamboo_data::sounds::PLAYERS,
+        x: position.x,
+        y: position.y,
+        z: position.z,
+        volume: 0.8,
+        pitch: crate::menu::bundle::pitch(crate::menu::bundle::Sound::RemoveOne, remove_roll),
+        seed: remove_seed,
+    };
+    crate::interaction::send_sound(region, Some(id), &remove_one);
+    // `Player.drop(stack, true, PREDICTED)`：位置、速度和拾取延迟走正式丢出路径。
+    // Use the regular throw path for position, velocity and pickup delay.
+    crate::drops::spawn_throw(region, id, taken);
     let block = mc_bamboo_core::BlockPos::containing(position);
-    let roll = region.sound_seed_generator.source().next_float();
-    let seed = region.sound_seed_generator.source().next_long();
-    let packet = mc_bamboo_protocol::packet::play::Sound {
+    let drop_roll = region.random.source().next_float();
+    let drop_seed = region.sound_seed_generator.source().next_long();
+    let drop_contents = mc_bamboo_protocol::packet::play::Sound {
         sound: crate::menu::bundle::Sound::DropContents.id(),
         inline: None,
         source: mc_bamboo_data::sounds::PLAYERS,
@@ -159,12 +178,15 @@ fn bundle_tick(
         y: f64::from(block.y) + 0.5,
         z: f64::from(block.z) + 0.5,
         volume: 0.8,
-        pitch: crate::menu::bundle::pitch(crate::menu::bundle::Sound::DropContents, roll),
-        seed,
+        pitch: crate::menu::bundle::pitch(crate::menu::bundle::Sound::DropContents, drop_roll),
+        seed: drop_seed,
     };
-    crate::interaction::send_sound(region, None, &packet);
-    // `Player.drop(stack, false, PREDICTED)`：位置、速度和拾取延迟都走正式的丢出路径。
-    crate::drops::spawn_throw(region, id, taken);
+    crate::interaction::send_sound(region, None, &drop_contents);
+    crate::item_use_stats::award(region, id, item);
+    if let Some(player) = region.players.get_mut(&id) {
+        let slot = player.inventory.hand_slot(hand);
+        crate::inventory::send_slot(player, &mut region.links, slot);
+    }
 }
 
 /// `LivingEntity.updateUsingItem`：每刻 --，到 0 时 `completeUsingItem()`。

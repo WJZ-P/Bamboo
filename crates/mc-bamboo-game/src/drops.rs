@@ -397,11 +397,11 @@ fn changed_slots(before: &[ItemStack], inventory: &Inventory) -> Vec<usize> {
 
 fn throw_position(player: &Player) -> Vec3 {
     let feet = player.position();
-    // `getEyeY() - 0.3F`。0.3 是 float。
-    // `getEyeY() - 0.3F`. The 0.3 is a float.
+    // `getEyeY() - 0.3F`。眼高和 0.3 都由 float 提升。
+    // `getEyeY() - 0.3F`. Eye height and 0.3 are both widened from float.
     Vec3::new(
         feet.x,
-        feet.y + player.eye_height() - f64::from(0.3_f32),
+        feet.y + f64::from(player.eye_height() as f32) - f64::from(0.3_f32),
         feet.z,
     )
 }
