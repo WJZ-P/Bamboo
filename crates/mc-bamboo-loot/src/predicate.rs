@@ -3,8 +3,12 @@
 //! 字段名、默认值和求值顺序都照官方 codec 和 `matches` 写。世界相关的部分走
 //! [`LevelView`]，调用方没提供数据时返回 [`LootError::Unsupported`]，不猜默认值。
 //!
-//! 本实现还没有的部分（结构、流体、NBT、生物效果、玩家和槽位谓词）在解析时记下
-//! 名字，求值到那里报不支持。
+//! 效果、NBT、队伍、闪电、玩家和流体谓词在 [`crate::entity_parts`]。本实现还没有的
+//! 部分（槽位谓词）在解析时记下名字，求值到那里报不支持。
+//!
+//! The effects, NBT, team, lightning, player and fluid predicates live in
+//! [`crate::entity_parts`]. The part still missing (the slots predicate) is recorded by
+//! name at parse time and reported as unsupported when evaluated.
 
 use std::collections::BTreeMap;
 
@@ -12,6 +16,10 @@ use mc_bamboo_blocks::BlockState;
 use serde_json::{Map, Value};
 
 use crate::context::{DamageSourceView, EntityView, LevelView, LootContext, Position};
+use crate::entity_parts::{
+    FluidPredicate, LightningBoltPredicate, MobEffectsPredicate, NbtPredicate, PlayerPredicate,
+    PropertyValue, namespaced,
+};
 use crate::json::{field, i32_value, invalid, object, opt_bool, required, string};
 use crate::names::{self, Registry};
 use crate::stack::LootStack;
@@ -459,6 +467,36 @@ impl StatePropertiesPredicate {
     }
 }
 
+impl StatePropertiesPredicate {
+    /// 官方 `matches(StateHolder)` 用在没有方块状态表的持有者上（流体状态）：属性不存在
+    /// 直接 false；精确值要求文本是合法值且相等；范围的两端同样先要是合法值。
+    ///
+    /// Official `matches(StateHolder)` for a holder without a block-state table (a fluid
+    /// state). A missing property is false; an exact matcher needs a valid, equal value;
+    /// both ends of a range must be valid values too.
+    pub(crate) fn matches_values(&self, values: &[(&'static str, PropertyValue)]) -> bool {
+        use std::cmp::Ordering;
+        self.properties.iter().all(|(name, matcher)| {
+            let Some((_, actual)) = values.iter().find(|(key, _)| key == name) else {
+                return false;
+            };
+            match matcher {
+                ValueMatcher::Exact(expected) => actual.compare(expected) == Some(Ordering::Equal),
+                ValueMatcher::Ranged { min, max } => {
+                    min.as_deref().is_none_or(|min| {
+                        matches!(
+                            actual.compare(min),
+                            Some(Ordering::Equal | Ordering::Greater)
+                        )
+                    }) && max.as_deref().is_none_or(|max| {
+                        matches!(actual.compare(max), Some(Ordering::Equal | Ordering::Less))
+                    })
+                }
+            }
+        })
+    }
+}
+
 /// `ItemPredicate`。
 #[derive(Debug, Clone, Default)]
 pub struct ItemPredicate {
@@ -625,14 +663,15 @@ pub struct LocationPredicate {
     pub y: DoubleBounds,
     pub z: DoubleBounds,
     pub biomes: Option<Vec<i32>>,
-    /// 结构谓词本实现不支持，只记下有这个字段。
-    pub has_structures: bool,
+    /// 结构的 `HolderSet`，原样保存名字和 `#标签`，交给 [`LevelView`] 判定。
+    ///
+    /// The structure `HolderSet` kept as written (names and `#tags`) for [`LevelView`].
+    pub structures: Option<Vec<String>>,
     pub dimension: Option<String>,
     pub smokey: Option<bool>,
     pub light: Option<LightPredicate>,
     pub block: Option<BlockPredicate>,
-    /// 流体谓词本实现不支持。
-    pub has_fluid: bool,
+    pub fluid: Option<FluidPredicate>,
     pub can_see_sky: Option<bool>,
 }
 
@@ -656,7 +695,19 @@ impl LocationPredicate {
             };
         }
         predicate.biomes = names::opt_holder_set(map, "biomes", Registry::Biome, what)?;
-        predicate.has_structures = field(map, "structures").is_some();
+        predicate.structures = field(map, "structures")
+            .map(|value| {
+                crate::json::string_or_list(value, what).map(|names| {
+                    names
+                        .into_iter()
+                        .map(|name| match name.strip_prefix('#') {
+                            Some(tag) => format!("#{}", namespaced(tag)),
+                            None => namespaced(name),
+                        })
+                        .collect()
+                })
+            })
+            .transpose()?;
         predicate.dimension = field(map, "dimension")
             .map(|value| string(value, what).map(str::to_owned))
             .transpose()?;
@@ -673,7 +724,9 @@ impl LocationPredicate {
         predicate.block = field(map, "block")
             .map(|value| BlockPredicate::parse(value, what))
             .transpose()?;
-        predicate.has_fluid = field(map, "fluid").is_some();
+        predicate.fluid = field(map, "fluid")
+            .map(|value| FluidPredicate::parse(value, what))
+            .transpose()?;
         predicate.can_see_sky = field(map, "can_see_sky")
             .map(|value| {
                 value
@@ -722,8 +775,18 @@ impl LocationPredicate {
                 return Ok(false);
             }
         }
-        if self.has_structures {
-            return Err(unsupported("location predicate structures"));
+        if let Some(structures) = &self.structures {
+            if !loaded {
+                return Ok(false);
+            }
+            let inside = level
+                .structure_with_piece_at(bx, by, bz, structures)
+                .ok_or_else(|| {
+                    unsupported("location predicate needs LevelView::structure_with_piece_at")
+                })?;
+            if !inside {
+                return Ok(false);
+            }
         }
         if let Some(smokey) = self.smokey {
             if !loaded {
@@ -746,8 +809,10 @@ impl LocationPredicate {
         {
             return Ok(false);
         }
-        if self.has_fluid {
-            return Err(unsupported("location predicate fluid"));
+        if let Some(fluid) = &self.fluid
+            && !fluid.matches(level, bx, by, bz)?
+        {
+            return Ok(false);
         }
         if let Some(can_see_sky) = self.can_see_sky {
             let actual = level
@@ -1062,6 +1127,11 @@ pub struct EntityPredicate {
     pub raider: Option<RaiderPredicate>,
     pub entity_tags: Option<EntityTagPredicate>,
     pub periodic_tick: Option<i32>,
+    pub effects: Option<MobEffectsPredicate>,
+    pub team: Option<String>,
+    pub lightning: Option<LightningBoltPredicate>,
+    pub player: Option<Box<PlayerPredicate>>,
+    pub nbt: Option<NbtPredicate>,
     /// 本实现还不支持的子谓词名字。
     pub unsupported: Vec<String>,
 }
@@ -1088,7 +1158,25 @@ impl EntityPredicate {
         let map = object(value, what)?;
         let mut predicate = Self::default();
         for (name, value) in map {
-            match name.as_str() {
+            // 官方按注册表名解码子谓词的键，没写命名空间等于 `minecraft:`。
+            // Vanilla decodes sub-predicate keys as registry names, so a missing
+            // namespace means `minecraft:`.
+            match namespaced(name).as_str() {
+                "minecraft:effects" => {
+                    predicate.effects = Some(MobEffectsPredicate::parse(value, what)?);
+                }
+                "minecraft:team" => {
+                    predicate.team = Some(string(value, what)?.to_owned());
+                }
+                "minecraft:type_specific/lightning" => {
+                    predicate.lightning = Some(LightningBoltPredicate::parse(value, what)?);
+                }
+                "minecraft:type_specific/player" => {
+                    predicate.player = Some(Box::new(PlayerPredicate::parse(value, what)?));
+                }
+                "minecraft:nbt" => {
+                    predicate.nbt = Some(NbtPredicate::parse(value, what)?);
+                }
                 "minecraft:entity_type" => {
                     predicate.entity_type =
                         Some(names::holder_set(value, Registry::EntityType, what)?);
@@ -1188,25 +1276,15 @@ impl EntityPredicate {
         {
             return Ok(false);
         }
-        if let Some(vehicle) = &self.vehicle
-            && !vehicle.matches(context, position, entity.vehicle.as_deref())?
+        if let Some(effects) = &self.effects
+            && !effects.matches(entity)
         {
             return Ok(false);
         }
-        if let Some(passenger) = &self.passenger {
-            // 官方遍历所有乘客，任一匹配就通过；本实现只建模第一个乘客。
-            let matches = match entity.passenger.as_deref() {
-                Some(passenger_entity) => {
-                    passenger.matches(context, position, Some(passenger_entity))?
-                }
-                None => false,
-            };
-            if !matches {
-                return Ok(false);
-            }
-        }
-        if let Some(targeted) = &self.targeted_entity
-            && !targeted.matches(context, position, entity.targeted_entity.as_deref())?
+        // 官方 `TeamPredicate`：没有队伍判 false。
+        // Official `TeamPredicate`: no team is false.
+        if let Some(team) = &self.team
+            && entity.team.as_deref() != Some(team.as_str())
         {
             return Ok(false);
         }
@@ -1314,6 +1392,60 @@ impl EntityPredicate {
                 "entity predicate part(s) {}",
                 self.unsupported.join(", ")
             )));
+        }
+        self.matches_late_parts(context, position, entity)
+    }
+
+    /// 官方 `PREDICATE_TYPE_ORDER` 排在后面的部分：载具、乘客、目标、闪电、玩家（第 1 档），
+    /// 最后是要把整个实体序列化的 NBT（第 2 档）。
+    ///
+    /// The parts official `PREDICATE_TYPE_ORDER` sorts last: vehicle, passenger, target,
+    /// lightning and player (rank 1), then NBT, which serializes the whole entity (rank 2).
+    fn matches_late_parts(
+        &self,
+        context: &LootContext<'_, '_, '_>,
+        position: Option<Position>,
+        entity: &EntityView,
+    ) -> Result<bool> {
+        if let Some(vehicle) = &self.vehicle
+            && !vehicle.matches(context, position, entity.vehicle.as_deref())?
+        {
+            return Ok(false);
+        }
+        if let Some(passenger) = &self.passenger {
+            // 官方遍历所有乘客，任一匹配就通过；本实现只建模第一个乘客。
+            let matches = match entity.passenger.as_deref() {
+                Some(passenger_entity) => {
+                    passenger.matches(context, position, Some(passenger_entity))?
+                }
+                None => false,
+            };
+            if !matches {
+                return Ok(false);
+            }
+        }
+        if let Some(targeted) = &self.targeted_entity
+            && !targeted.matches(context, position, entity.targeted_entity.as_deref())?
+        {
+            return Ok(false);
+        }
+        if let Some(lightning) = &self.lightning
+            && !lightning.matches(context, position, entity)?
+        {
+            return Ok(false);
+        }
+        if let Some(player) = &self.player
+            && !player.matches(context, entity)?
+        {
+            return Ok(false);
+        }
+        if let Some(nbt) = &self.nbt {
+            let Some(actual) = &entity.nbt else {
+                return Err(unsupported("nbt needs EntityView::nbt"));
+            };
+            if !nbt.matches(actual) {
+                return Ok(false);
+            }
         }
         Ok(true)
     }
