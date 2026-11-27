@@ -1223,6 +1223,19 @@ public final class MobOracle {
          * `updateUsingItem` / `finishUsingItem`。主手物品 ID。 */
         boolean consumeScene;
         int consumeItem;
+        /**
+         * S5 收纳袋长按：`playBundleUse` 逐刻跑官方 `startUsingItem` /
+         * `updateUsingItem`，由 `BundleItem.onUseTick` / `dropContent` 逐件倒出。
+         * `bundleContents` 是 [物品 ID, 数量, ...]，`bundleSelected` 是初始选中下标（-1 无）。
+         *
+         * S5 bundle long-press: `playBundleUse` drives vanilla `startUsingItem` /
+         * `updateUsingItem` per tick; `BundleItem.onUseTick` / `dropContent` pour one
+         * item at a time. `bundleContents` is [item id, count, ...] and
+         * `bundleSelected` is the initial selected index (-1 for none).
+         */
+        boolean bundleUseScene;
+        int[] bundleContents = new int[0];
+        int bundleSelected = -1;
         /** 效果动作：{刻, 0=add 1=clear-one 2=clear-all, 效果 ID, 时长, 等级}。 */
         final List<int[]> effectActions = new ArrayList<>();
         /** 牛的效果动作：{刻, 牛下标, 0=add 1=clear-all, 效果 ID, 时长, 等级}。
@@ -1710,6 +1723,19 @@ public final class MobOracle {
             return this;
         }
 
+        /**
+         * S5：收纳袋长按场景。
+         *
+         * S5: bundle long-press scene.
+         */
+        Scene bundleUse(int ticks, int[] contents, int selected) {
+            bundleUseScene = true;
+            this.ticks = ticks;
+            bundleContents = contents;
+            bundleSelected = selected;
+            return this;
+        }
+
         /** 虚空场景把玩家放到 `minY - 64` 以下。 */
         Scene envVoid() {
             players.clear();
@@ -1860,6 +1886,7 @@ public final class MobOracle {
         private final List<byte[]> collected = new ArrayList<>();
         /** 1b：把每个包按发生顺序同步记进一份共用流。 */
         Bytes mirror;
+        java.util.function.Predicate<Packet<?>> filter;
 
         Bytes(RegistryAccess registries) {
             this.registries = registries;
@@ -1869,6 +1896,7 @@ public final class MobOracle {
 
         @SuppressWarnings("unchecked")
         private void add(Packet<? super ClientGamePacketListener> packet) {
+            if (filter != null && !filter.test(packet)) return;
             RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
             protocol.codec().encode(buffer, packet);
             byte[] body = new byte[buffer.readableBytes()];
@@ -5761,6 +5789,16 @@ public final class MobOracle {
             scenes.add(consumeBase("consume_enchanted_apple", 40,
                     itemId(Items.ENCHANTED_GOLDEN_APPLE), 20));
             scenes.add(consumeBase("consume_stew", 40, itemId(Items.SUSPICIOUS_STEW), 10));
+            // ---- S5：收纳袋长按逐件倒出 ----
+            // ---- S5: pouring out a held bundle ----
+            scenes.add(bundleUseBase("bundle_use_duration_200", 200,
+                    bundleContents(Items.STONE, Items.DIRT, Items.COBBLESTONE, Items.OAK_PLANKS,
+                            Items.SAND, Items.GRAVEL, Items.OAK_LOG, Items.GLASS,
+                            Items.APPLE, Items.COAL, Items.IRON_INGOT, Items.FLINT,
+                            Items.CLAY_BALL, Items.SUGAR, Items.WHEAT, Items.STICK), -1));
+            scenes.add(bundleUseBase("bundle_use_selected", 40,
+                    new int[] {itemId(Items.STONE), 1, itemId(Items.DIRT), 7, itemId(Items.APPLE), 1}, 1));
+            scenes.add(bundleUseBase("bundle_use_empty", 20, new int[0], -1));
             Scene rabbitHop = new Scene("rabbit_hop").ticks(240);
             rabbitHop.fill(-15, 63, -15, 15, 63, 15, Blocks.GRASS_BLOCK.defaultBlockState());
             rabbitHop.mob(6, 0.5, 64.0, 0.5, 0.0F, 42L, 0);
@@ -5880,6 +5918,26 @@ public final class MobOracle {
             return scene;
         }
 
+        /**
+         * 收纳袋内容物：每件数量都是 1，转成 [物品 ID, 数量, ...]。
+         *
+         * Bundle contents: one of each item, flattened to [item id, count, ...].
+         */
+        private static int[] bundleContents(Item... items) {
+            int[] out = new int[items.length * 2];
+            for (int i = 0; i < items.length; i++) {
+                out[2 * i] = itemId(items[i]);
+                out[2 * i + 1] = 1;
+            }
+            return out;
+        }
+
+        private static Scene bundleUseBase(String name, int ticks, int[] contents, int selected) {
+            Scene scene = new Scene(name).bundleUse(ticks, contents, selected);
+            scene.player(0.5, 64.0, 0.5, Items.AIR);
+            return scene;
+        }
+
         private static Scene envBase(String name, int ticks, int block, int fire, int air,
                 int frozen, int fall, int difficulty) {
             Scene scene = new Scene(name).env(ticks, block, fire, air, frozen, fall, difficulty);
@@ -5993,6 +6051,10 @@ public final class MobOracle {
         }
         if (scene.consumeScene) {
             playConsume(official, out, scene);
+            return;
+        }
+        if (scene.bundleUseScene) {
+            playBundleUse(official, out, scene);
             return;
         }
         // 每个包场景一份共用收集器：实体事件、音效和同步包按发生顺序进同一串字节。
@@ -23396,6 +23458,187 @@ public final class MobOracle {
         return out.append("]}").toString();
     }
 
+    /**
+     * S5 收纳袋长按逐件倒出的逐刻对拍：官方 `BundleItem.use` / `onUseTick` /
+     * `getUseDuration` / `dropContent` 在 200 刻里逐件倒出，逐刻比使用倒计时、
+     * 收纳袋内容、掉落物生成状态和发出的音效 / 槽位包。
+     *
+     * S5 tick-by-tick parity for the bundle long-press pour-out: vanilla
+     * `BundleItem.use` / `onUseTick` / `getUseDuration` / `dropContent` pour one
+     * item at a time over 200 ticks. Each tick compares the use countdown, the
+     * bundle contents, spawned item state, and the emitted sound and slot packets.
+     */
+    private static void playBundleUse(Official official, Writer out, Scene scene) throws Exception {
+        Bytes all = new Bytes(official.registries);
+        all.filter = packet -> packet instanceof net.minecraft.network.protocol.game.ClientboundSoundPacket;
+        StubList list = (StubList) official.server.getPlayerList();
+        official.server.sequences = new RandomSequences();
+        FakeLevel level = FakeLevel.create(official);
+        level.chunkSource.events = all::add;
+        level.packets = all::add;
+        list.sounds = all::add;
+        level.nextId = FIRST_ID;
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        setRule(official, GameRules.NATURAL_HEALTH_REGENERATION, false);
+        List<List<String>> steps = new ArrayList<>();
+        List<List<String>> packets = new ArrayList<>();
+        List<List<String>> playerPackets = new ArrayList<>();
+        for (int tick = 0; tick <= scene.ticks; tick++) {
+            steps.add(new ArrayList<>());
+            packets.add(new ArrayList<>());
+            playerPackets.add(new ArrayList<>());
+        }
+        GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+        LifePlayer player = new LifePlayer(official.server, level, profile,
+                ClientInformation.createDefault(), level);
+        double[] at = scene.players.get(0);
+        player.setPos(at[0], at[1], at[2]);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(0.0F);
+        player.setGameMode(GameType.SURVIVAL);
+        // 构造收纳袋内容物：和 Bamboo 一侧按同样的顺序写入组件，不合并、不排序。
+        // Build the bundle contents in the same order as the Bamboo side, without merging.
+        List<net.minecraft.world.item.ItemStackTemplate> templates = new ArrayList<>();
+        for (int i = 0; i < scene.bundleContents.length; i += 2) {
+            templates.add(new net.minecraft.world.item.ItemStackTemplate(
+                    Item.byId(scene.bundleContents[i]), scene.bundleContents[i + 1]));
+        }
+        ItemStack bundle = new ItemStack(Items.BUNDLE);
+        bundle.set(DataComponents.BUNDLE_CONTENTS,
+                new net.minecraft.world.item.component.BundleContents(templates));
+        if (scene.bundleSelected >= 0) {
+            net.minecraft.world.item.BundleItem.toggleSelectedItem(bundle, scene.bundleSelected);
+        }
+        player.getInventory().setItem(player.getInventory().getSelectedSlot(), bundle);
+        Bytes self = new Bytes(official.registries);
+        self.filter = packet -> packet instanceof net.minecraft.network.protocol.game.ClientboundSoundPacket
+                || packet instanceof net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket;
+        level.bundlePlayer = player;
+        level.bundlePlayerSoundSink = self;
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = self;
+        put(ServerPlayer.class, player, "connection", connection);
+        player.initInventoryMenu();
+        level.lifePlayer = player;
+        level.playersList().add(player);
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+        Method update = ServerPlayer.class.getDeclaredMethod("updateUsingItem", ItemStack.class);
+        update.setAccessible(true);
+        java.lang.reflect.Method detect = LivingEntity.class.getDeclaredMethod("detectEquipmentUpdates");
+        detect.setAccessible(true);
+        detect.invoke(player);
+
+        // 累计掉出的物品实体；假世界不 tick 实体，位置 / 速度 / 拾取延迟保持落点值。
+        // Cumulative dropped item entities; the fake world does not tick entities, so
+        // position / velocity / pickup delay stay at their spawn values.
+        List<net.minecraft.world.entity.item.ItemEntity> dropped = new ArrayList<>();
+        int seenSpawns = 0;
+        steps.get(0).add(bundleUseStepJson(player, dropped));
+        all.take(); self.take();
+        bundle.getItem().use(level, player, InteractionHand.MAIN_HAND);
+        for (int tick = 1; tick <= scene.ticks; tick++) {
+            level.gameTime++;
+            putInt(Entity.class, player, "tickCount", getInt(Entity.class, player, "tickCount") + 1);
+            ItemStack held = player.getItemInHand(InteractionHand.MAIN_HAND);
+            if (player.isUsingItem()) {
+                update.invoke(player, held);
+            }
+            for (int i = seenSpawns; i < level.spawned.size(); i++) {
+                if (level.spawned.get(i) instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                    dropped.add(item);
+                }
+            }
+            seenSpawns = level.spawned.size();
+            steps.get(tick).add(bundleUseStepJson(player, dropped));
+            // 使用阶段结束后调用官方容器同步；不运行整个 ServerPlayer.tick。
+            // Run vanilla container sync after the use phase, not the whole ServerPlayer.tick.
+            player.containerMenu.broadcastChanges();
+            packets.get(tick).addAll(all.take());
+            playerPackets.get(tick).addAll(self.take());
+        }
+        StringBuilder line = new StringBuilder(1 << 18);
+        line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
+        line.append(",\"firstId\":").append(FIRST_ID).append(",\"playerIdBase\":").append(FIRST_ID);
+        line.append(",\"startTime\":").append(START_TIME).append(",\"blocks\":[]");
+        line.append(",\"cows\":[],\"players\":[{\"id\":").append(FIRST_ID);
+        line.append(",\"x\":").append(Double.doubleToRawLongBits(at[0]));
+        line.append(",\"y\":").append(Double.doubleToRawLongBits(at[1]));
+        line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
+        line.append(",\"eye\":0,\"item\":0,\"looting\":0}],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        line.append(",\"steps\":[[]");
+        for (int tick = 1; tick <= scene.ticks; tick++) line.append(",[]");
+        line.append("],\"packets\":");
+        appendPackets(line, packets);
+        line.append(",\"syncFlags\":null,\"spawns\":null,\"deathKind\":0,\"fireTicks\":0");
+        line.append(",\"interactActions\":[],\"interactions\":null,\"difficulty\":2");
+        line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(scene.playerHealth));
+        line.append(",\"playerAbsorption\":0,\"playerExhaustion\":0");
+        line.append(",\"playerEquipment\":[],\"playerProtection\":[],\"playerActions\":[]");
+        line.append(",\"playerSteps\":");
+        appendPackets(line, steps);
+        line.append(",\"playerPackets\":");
+        appendPackets(line, playerPackets);
+        line.append(",\"keyPackets\":null");
+        line.append(",\"bundleUseScene\":{\"contents\":[");
+        for (int i = 0; i < scene.bundleContents.length; i++) {
+            if (i > 0) line.append(',');
+            line.append(scene.bundleContents[i]);
+        }
+        line.append("],\"selected\":").append(scene.bundleSelected).append("}}\n");
+        out.write(line.toString());
+        out.flush();
+    }
+
+    /**
+     * S5 逐刻状态：使用倒计时、收纳袋内容、累计掉出的物品实体（原始位）。
+     *
+     * S5 per-tick state: use countdown, bundle contents, cumulative dropped item
+     * entities (raw bits).
+     */
+    private static String bundleUseStepJson(ServerPlayer player,
+            List<net.minecraft.world.entity.item.ItemEntity> dropped) throws Exception {
+        StringBuilder out = new StringBuilder(1024);
+        out.append("{\"use\":").append(getInt(LivingEntity.class, player, "useItemRemaining"));
+        ItemStack held = player.getItemInHand(InteractionHand.MAIN_HAND);
+        net.minecraft.world.item.component.BundleContents contents = held.get(DataComponents.BUNDLE_CONTENTS);
+        out.append(",\"selected\":").append(net.minecraft.world.item.BundleItem.getSelectedItemIndex(held));
+        out.append(",\"contents\":[");
+        if (contents != null) {
+            boolean first = true;
+            for (net.minecraft.world.item.ItemStackTemplate template : contents.items()) {
+                if (!first) out.append(',');
+                first = false;
+                out.append('[').append(BuiltInRegistries.ITEM.getId(template.item().value()))
+                        .append(',').append(template.count()).append(']');
+            }
+        }
+        out.append("],\"drops\":[");
+        boolean first = true;
+        for (net.minecraft.world.entity.item.ItemEntity item : dropped) {
+            if (!first) out.append(',');
+            first = false;
+            ItemStack stack = item.getItem();
+            Vec3 velocity = item.getDeltaMovement();
+            out.append('[').append(BuiltInRegistries.ITEM.getId(stack.getItem()))
+                    .append(',').append(stack.getCount())
+                    .append(',').append(Double.doubleToRawLongBits(item.getX()))
+                    .append(',').append(Double.doubleToRawLongBits(item.getY()))
+                    .append(',').append(Double.doubleToRawLongBits(item.getZ()))
+                    .append(',').append(Double.doubleToRawLongBits(velocity.x))
+                    .append(',').append(Double.doubleToRawLongBits(velocity.y))
+                    .append(',').append(Double.doubleToRawLongBits(velocity.z))
+                    .append(',').append(getInt(net.minecraft.world.entity.item.ItemEntity.class, item, "pickupDelay"))
+                    .append(',').append(getInt(net.minecraft.world.entity.item.ItemEntity.class, item, "age"))
+                    .append(']');
+        }
+        return out.append("]}").toString();
+    }
+
     private static void playEffects(Official official, Writer out, Scene scene) throws Exception {
         Bytes all = new Bytes(official.registries);
         StubList list = (StubList) official.server.getPlayerList();
@@ -27398,6 +27641,9 @@ public final class MobOracle {
             }
         }
 
+        private ServerPlayer bundlePlayer;
+        private Bytes bundlePlayerSoundSink;
+
         @Override
         public void playSeededSound(
                 Entity except,
@@ -27410,8 +27656,14 @@ public final class MobOracle {
                 float pitch,
                 long seed) {
             if (packets != null) {
-                packets.accept(new net.minecraft.network.protocol.game.ClientboundSoundPacket(
-                        sound, source, x, y, z, volume, pitch, seed));
+                var packet = new net.minecraft.network.protocol.game.ClientboundSoundPacket(
+                        sound, source, x, y, z, volume, pitch, seed);
+                packets.accept(packet);
+                // Player.playSound 排除发声玩家本人。
+                // Player.playSound excludes the player making the sound.
+                if (bundlePlayerSoundSink != null && except != bundlePlayer) {
+                    bundlePlayerSoundSink.add(packet);
+                }
             }
             if (soundLog != null) {
                 String path = sound.value().location().getPath();

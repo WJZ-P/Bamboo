@@ -560,6 +560,11 @@ struct Case {
     /// S4 吃东西场景。
     #[serde(default)]
     consume_scene: Option<ConsumeScene>,
+    /// S5 收纳袋长按逐件倒出场景。
+    ///
+    /// S5 fixture for pouring items out of a held bundle.
+    #[serde(default)]
+    bundle_use_scene: Option<BundleUseScene>,
     /// 大脑场景：玩家 0 疾跑的 [起, 止) 刻。
     ///
     /// Brain scenes: the [start, end) ticks in which player 0 sprints.
@@ -2917,6 +2922,10 @@ impl Report {
             self.replay_player_env(case);
             return;
         }
+        if case.bundle_use_scene.is_some() {
+            self.replay_player_bundle_use(case);
+            return;
+        }
         if case.consume_scene.is_some() {
             self.replay_player_consume(case);
             return;
@@ -4764,6 +4773,85 @@ impl Report {
         }
     }
 
+    /// S5：收纳袋长按场景逐刻比倒计时、内容、掉落物状态、音效和槽位包。
+    ///
+    /// S5: bundle long-press, comparing use countdown, contents, dropped item
+    /// state, and sound and slot packet bytes per tick.
+    fn replay_player_bundle_use(&mut self, case: &Case) {
+        use mc_bamboo_game::{ReplayBundleUse, replay_bundle_use};
+
+        let Some(setup) = &case.bundle_use_scene else {
+            return;
+        };
+        let Some(expected_steps) = &case.player_steps else {
+            return;
+        };
+        let scene = ReplayBundleUse {
+            ticks: expected_steps.len() - 1,
+            contents: setup.contents.clone(),
+            selected: setup.selected,
+        };
+        let (steps, packets) = replay_bundle_use(&scene);
+        for (tick, expected) in expected_steps.iter().enumerate() {
+            self.steps += 1;
+            let Some(ours) = steps.get(tick) else {
+                self.mismatch(format!(
+                    "{} tick {tick}: no Bamboo bundle-use step",
+                    case.name
+                ));
+                continue;
+            };
+            let Some(text) = expected.first() else {
+                self.mismatch(format!(
+                    "{} tick {tick}: no official bundle-use step",
+                    case.name
+                ));
+                continue;
+            };
+            let Ok(official) = serde_json::from_str::<BundleUseStepJson>(text) else {
+                self.mismatch(format!(
+                    "{} tick {tick}: bad official bundle-use JSON: {text}",
+                    case.name
+                ));
+                continue;
+            };
+            if official != *ours {
+                self.mismatch(format!(
+                    "{} tick {tick} bundle-use state: official {official:?}, bamboo {ours:?}",
+                    case.name
+                ));
+            }
+            if tick > 0 {
+                for (index, (recipient, expected_packets)) in [
+                    ("player", &case.player_packets),
+                    ("observer", &case.packets),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let name = format!("{} {recipient}", case.name);
+                    let Some(expected_packets) =
+                        expected_packets.as_ref().and_then(|p| p.get(tick))
+                    else {
+                        self.mismatch(format!("{name} tick {tick}: no official packets"));
+                        continue;
+                    };
+                    compare_packet_list(
+                        &mut self.mismatches,
+                        &self.show,
+                        &name,
+                        tick,
+                        &packets[tick][index],
+                        expected_packets,
+                    );
+                }
+            }
+            if self.mismatches.len() >= self.show {
+                return;
+            }
+        }
+    }
+
     /// 1b 场景：正式 `Region` 重放，逐刻比状态和筛选后的包字节。
     /// S4：吃东西场景逐刻比状态原始位和出站包字节。
     fn replay_player_consume(&mut self, case: &Case) {
@@ -5185,6 +5273,37 @@ impl Report {
 struct ConsumeScene {
     item: i32,
     food: i32,
+}
+
+/// S5 收纳袋长按场景：`bundleUseScene` 的初始内容与选中下标。
+///
+/// Initial bundle contents and selected index for `bundleUseScene`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BundleUseScene {
+    contents: Vec<i32>,
+    selected: i32,
+}
+
+/// Java 一侧 `bundleUseStepJson` 的逐刻状态。
+///
+/// Vanilla per-tick state from `bundleUseStepJson`.
+#[derive(Debug, Deserialize, PartialEq)]
+struct BundleUseStepJson {
+    #[serde(rename = "use")]
+    using: i32,
+    selected: i32,
+    contents: Vec<[i64; 2]>,
+    drops: Vec<[i64; 10]>,
+}
+
+impl PartialEq<mc_bamboo_game::BundleUseStep> for BundleUseStepJson {
+    fn eq(&self, other: &mc_bamboo_game::BundleUseStep) -> bool {
+        self.using == other.using
+            && self.selected == other.selected
+            && self.contents == other.contents
+            && self.drops == other.drops
+    }
 }
 
 /// Java 一侧 `consumeStepJson` 的逐刻状态。
