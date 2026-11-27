@@ -1319,6 +1319,19 @@ fn block_name(region: &Region, pos: mc_bamboo_core::BlockPos) -> String {
 }
 
 pub(crate) fn on_use_item_on(region: &mut Region, id: PlayerId, packet: UseItemOn) {
+    on_use_item_on_with_maps(region, None, id, packet);
+}
+
+/// 同 [`on_use_item_on`]，由主控传入权威 [`MapStore`](crate::map::MapStore) 以支持多岛旗帜标记同步。
+///
+/// Like [`on_use_item_on`], passing the master's authoritative `MapStore` so
+/// banner markers toggle directly on the global map store.
+pub(crate) fn on_use_item_on_with_maps(
+    region: &mut Region,
+    maps: Option<&mut crate::map::MapStore>,
+    id: PlayerId,
+    packet: UseItemOn,
+) {
     if !record_sequence(region, id, packet.sequence) {
         return;
     }
@@ -1364,7 +1377,7 @@ pub(crate) fn on_use_item_on(region: &mut Region, id: PlayerId, packet: UseItemO
 
     // 客户端可能还没收到传送，这时的点击不能信。
     if !player.teleport.is_awaiting() {
-        use_held_item(region, id, &packet);
+        use_held_item(region, maps, id, &packet);
     }
 
     // 无论结果如何都把这两格发回去，放置失败时客户端靠它们和 ack 回滚。
@@ -1406,7 +1419,12 @@ fn send_build_limit(links: &mut Links, id: PlayerId, key: &str, limit: i32) {
 }
 
 /// 把右键交给方块逻辑，再按结果提示和挥手。
-fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
+fn use_held_item(
+    region: &mut Region,
+    maps: Option<&mut crate::map::MapStore>,
+    id: PlayerId,
+    packet: &UseItemOn,
+) {
     let Some(player) = region.players.get(&id) else {
         return;
     };
@@ -1431,7 +1449,7 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     let is_placement_attempt = rules::is_placement_attempt(&held);
     let armed_book = lectern::arm_book(region, id, packet.pos, packet.hand);
 
-    let outcome = durability::run(region, id, packet.hand, |region| {
+    let mut outcome = durability::run(region, id, packet.hand, |region| {
         let (mut level, ticks) = region.block_level();
         let hit = block_hit(packet);
         mc_bamboo_blocks::use_item_on_checked_with_stack(
@@ -1444,6 +1462,43 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
             |state| actor.may_build || adventure::can_place_on(&held, state),
         )
     });
+
+    // 官方 `MapItem.useOn`：在方块交互放行且未冷却、允许交互（`mayBuild || canPlaceOn`）时，
+    // 手持已填充地图右键旗帜切换旗帜标记。
+    //
+    // Official `MapItem.useOn`: when block interaction passes, item is not on
+    // cooldown, and `mayBuild || canPlaceOn` holds, right-clicking a banner with
+    // a `filled_map` toggles the banner marker.
+    if outcome.result == InteractionResult::Pass
+        && held.item == items::FILLED_MAP
+        && let Some(clicked_state) = region.chunks.block(packet.pos)
+        && (actor.may_build || adventure::can_place_on(&held, BlockState(clicked_state)))
+        && !region
+            .players
+            .get(&id)
+            .is_some_and(|p| crate::ender_pearl::on_cooldown(p, &held))
+        && let Some(map_result) = crate::map::use_map_on_banner(region, maps, packet.pos, &held)
+    {
+        outcome.result = map_result;
+        if map_result == InteractionResult::Success {
+            crate::item_use_stats::award(region, id, items::FILLED_MAP);
+            if let Some(player) = region.players.get_mut(&id) {
+                crate::ender_pearl::apply_cooldown(player, &held);
+            }
+            let block = block_name(region, packet.pos);
+            let payload = serde_json::json!({
+                "block": block,
+                "item": item_name(region, id, packet.hand),
+                "x": packet.pos.x, "y": packet.pos.y, "z": packet.pos.z,
+            });
+            crate::advancement_triggers::record(
+                region,
+                id,
+                "minecraft:item_used_on_block",
+                payload,
+            );
+        }
+    }
 
     // `BlockItem.place` 里的 `updateBlockEntityComponents`：放下去的物品把组件留给方块实体。
     if let Some(placed) = outcome.placed_at {
