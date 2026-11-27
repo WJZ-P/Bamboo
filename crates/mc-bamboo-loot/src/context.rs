@@ -193,6 +193,36 @@ pub struct BlockEntityView {
     pub components: BTreeMap<String, Value>,
 }
 
+/// `ExplorationMapFunction` 交给世界侧的参数，对应官方 `run` 里读取的字段。
+///
+/// Parameters `ExplorationMapFunction.run` hands to the world side.
+/// `destination` is the raw `HolderSet` reference: a `#tag` or a single structure name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorationMapRequest<'a> {
+    /// `LootContextParams.ORIGIN` 经 `BlockPos.containing` 取整后的坐标。
+    ///
+    /// `LootContextParams.ORIGIN` snapped by `BlockPos.containing`.
+    pub origin: (i32, i32, i32),
+    pub destination: &'a str,
+    /// `map_decoration_type` 注册表名字，缺省 `minecraft:mansion`。
+    ///
+    /// `map_decoration_type` name, default `minecraft:mansion`.
+    pub decoration: &'a str,
+    pub zoom: i8,
+    pub search_radius: i32,
+    pub skip_existing_chunks: bool,
+}
+
+/// `MapItem.applyNewSavedData` 分配到的 `map_id` 和 `findNearestMapStructure` 的落点。
+///
+/// The `map_id` allocated by `MapItem.applyNewSavedData` and the located structure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorationMapResult {
+    pub map_id: i32,
+    pub target_x: i32,
+    pub target_z: i32,
+}
+
 /// 世界查询。官方条件里所有 `ServerLevel` 的调用都走这里。
 ///
 /// 返回 `None` 表示本实现拿不到这个信息，求值会以 `Unsupported` 结束。
@@ -235,6 +265,29 @@ pub trait LevelView {
     /// 世界时钟的总刻数，`time_check` 用。参数是时钟名字，比如 `minecraft:overworld`。
     fn clock_time(&self, _clock: &str) -> Option<i64> {
         None
+    }
+
+    /// `ExplorationMapFunction.run`：`ServerLevel.findNearestMapStructure`、
+    /// `MapItem.applyNewSavedData`、`MapItem.renderBiomePreviewMap` 和
+    /// `MapItemSavedData.addTargetDecoration` 都在这里落地；世界侧还要建好对应的
+    /// `MapItemSavedData`（分配 `map_id`、写群系预览颜色、登记目标标记）。
+    ///
+    /// 返回 `Ok(None)` 表示找不到结构：官方原样退回输入物品堆，调用方再靠
+    /// `filtered` 把它丢掉。默认实现就返回 `None`，对应假世界和关掉结构生成的世界；
+    /// 真实世界的实现要按官方顺序做上面四步。
+    ///
+    /// `ExplorationMapFunction.run`: `ServerLevel.findNearestMapStructure`,
+    /// `MapItem.applyNewSavedData`, `MapItem.renderBiomePreviewMap` and
+    /// `MapItemSavedData.addTargetDecoration` all land here, along with creating
+    /// the backing `MapItemSavedData`. `Ok(None)` means no structure was found,
+    /// so vanilla returns the input stack unchanged (usually discarded by
+    /// `filtered`). The default returns `None` for fake worlds; a real world
+    /// implementation performs all four steps in vanilla order.
+    fn exploration_map(
+        &self,
+        _request: &ExplorationMapRequest<'_>,
+    ) -> Result<Option<ExplorationMapResult>> {
+        Ok(None)
     }
 }
 

@@ -27,8 +27,9 @@ pub mod trade;
 
 pub use condition::{FloatRangePredicate, IntRangePredicate, LootCondition};
 pub use context::{
-    BlockEntityView, DamageSourceView, EntityTarget, EntityView, EquipmentSlot, LevelView,
-    LootContext, LootParams, Position, entity_enchantment_level,
+    BlockEntityView, DamageSourceView, EntityTarget, EntityView, EquipmentSlot,
+    ExplorationMapRequest, ExplorationMapResult, LevelView, LootContext, LootParams, Position,
+    entity_enchantment_level,
 };
 pub use drops::{
     BlockDropParams, ChestParams, EntityDeathParams, EntityLootParams, block_drops, chest_loot,
