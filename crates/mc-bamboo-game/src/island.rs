@@ -2263,7 +2263,12 @@ impl ChunkMailbox {
                 Err((_, column)) => {
                     // 前提不满足（例如某张表正在 tick 中途）：留在信箱里，
                     // 下一次收信再试，绝不把盒子丢掉。
-                    tracing::warn!(?pos, "chunk delivery was not ready, will retry");
+                    tracing::warn!(
+                        island,
+                        ?pos,
+                        generation,
+                        "chunk delivery was not ready, will retry"
+                    );
                     self.deliveries.insert(pos, (generation, desired, column));
                 }
             }
@@ -2341,7 +2346,11 @@ impl ChunkMailbox {
             Err(_) => {
                 // 失败时整批放回信箱，下次 tick 边界再试：Director 还以为这些
                 // 区块「正在收回」，丢了这条列表它就永远等不到回执。
-                tracing::warn!("chunk reclaim was not ready, will retry");
+                tracing::warn!(
+                    count = batch.len(),
+                    first = ?batch.first().map(|(pos, _)| *pos),
+                    "chunk reclaim was not ready, will retry"
+                );
                 self.reclaims.extend(batch);
             }
         }

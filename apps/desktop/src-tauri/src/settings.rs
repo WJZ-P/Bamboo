@@ -319,12 +319,19 @@ pub struct ServerSettings {
     /// The flat preset JSON, verbatim from `generator-settings`; only used by
     /// [`WorldType::Flat`].
     pub generator_settings: String,
-    /// 全局日志级别（error/warn/info/debug/trace），写进 `bamboo.toml` 的 `log_level`。
+    /// 控制台（终端和界面）的日志级别（error/warn/info/debug/trace），写进 `bamboo.toml`
+    /// 的 `log_level`。
     ///
-    /// The global log level (error/warn/info/debug/trace), written to
-    /// `log_level` in `bamboo.toml`.
+    /// The console (terminal and UI) log level (error/warn/info/debug/trace),
+    /// written to `log_level` in `bamboo.toml`.
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// `logs/latest.log` 的级别，写进 `bamboo.toml` 的 `log_file_level`；空串表示和
+    /// `log_level` 一样。
+    ///
+    /// The level of `logs/latest.log`, written to `log_file_level` in
+    /// `bamboo.toml`; empty means the same as `log_level`.
+    pub log_file_level: String,
     /// 按模块细调的 `EnvFilter` 指令，写进 `bamboo.toml` 的 `log_filter`，缺省空。
     ///
     /// Per-module `EnvFilter` directives, written to `log_filter` in
@@ -401,6 +408,7 @@ impl ServerSettings {
             generate_structures: official.generate_structures,
             generator_settings: official.generator_settings.clone(),
             log_level: bamboo.log_level.clone(),
+            log_file_level: bamboo.log_file_level.clone(),
             log_filter: bamboo.log_filter.clone(),
         }
     }
@@ -513,11 +521,12 @@ impl ServerSettings {
         files.official.level_type = LevelType::from(self.level_type).id().to_owned();
         files.official.generator_settings = self.generator_settings.trim().to_owned();
         files.official.generate_structures = self.generate_structures;
-        // 日志两项不在 ServerConfig 里，from_server_config 会保留文件里的旧值，
+        // 日志三项不在 ServerConfig 里，from_server_config 会保留文件里的旧值，
         // 所以这里用界面草稿的值显式盖一遍。
-        // The two log keys are not in ServerConfig; from_server_config keeps the
-        // file's values, so overwrite them with the UI draft explicitly.
+        // The three log keys are not in ServerConfig; from_server_config keeps
+        // the file's values, so overwrite them with the UI draft explicitly.
         files.bamboo.log_level = self.log_level.clone();
+        files.bamboo.log_file_level = self.log_file_level.clone();
         files.bamboo.log_filter = self.log_filter.clone();
         files
     }
@@ -631,6 +640,14 @@ impl ServerSettings {
             "error" | "warn" | "info" | "debug" | "trace"
         ) {
             return Err("日志级别只能是 error / warn / info / debug / trace".to_owned());
+        }
+        if !matches!(
+            self.log_file_level.as_str(),
+            "" | "error" | "warn" | "info" | "debug" | "trace"
+        ) {
+            return Err(
+                "文件日志级别只能留空或者是 error / warn / info / debug / trace".to_owned(),
+            );
         }
         Ok(())
     }
@@ -965,6 +982,7 @@ mod tests {
         let mut settings =
             ServerSettings::from_files(&ConfigFiles::default(), &directory.display().to_string());
         settings.log_level = "trace".to_owned();
+        settings.log_file_level = "debug".to_owned();
         settings.log_filter = "mc_bamboo_game::world=debug".to_owned();
         assert_eq!(settings.validate(), Ok(()));
         write(&directory, &settings.as_files(&ConfigFiles::default())).unwrap();
@@ -973,6 +991,7 @@ mod tests {
             &directory.display().to_string(),
         );
         assert_eq!(loaded.log_level, "trace");
+        assert_eq!(loaded.log_file_level, "debug");
         assert_eq!(loaded.log_filter, "mc_bamboo_game::world=debug");
         let bamboo = fs::read_to_string(directory.join(BAMBOO_FILE)).unwrap();
         assert!(bamboo.contains("log_level = \"trace\"\n"), "{bamboo}");
@@ -980,6 +999,7 @@ mod tests {
         // An old JSON without logLevel defaults to info.
         let parsed: ServerSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed.log_level, "info");
+        assert!(parsed.log_file_level.is_empty());
         assert!(parsed.log_filter.is_empty());
         // 非法级别在界面就被挡住。
         // An invalid level is rejected by the UI.
@@ -988,6 +1008,11 @@ mod tests {
             ..ServerSettings::default()
         };
         assert!(bad.validate().is_err());
+        let bad_file = ServerSettings {
+            log_file_level: "loud".to_owned(),
+            ..ServerSettings::default()
+        };
+        assert!(bad_file.validate().is_err());
     }
 
     #[test]
@@ -1036,6 +1061,7 @@ mod tests {
             generate_structures: false,
             generator_settings: r#"{"layers":[{"block":"minecraft:stone","height":3}]}"#.to_owned(),
             log_level: "debug".to_owned(),
+            log_file_level: "trace".to_owned(),
             log_filter: "mc_bamboo_game=trace".to_owned(),
         };
         let config = settings.to_server_config();

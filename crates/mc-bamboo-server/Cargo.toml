@@ -11,6 +11,7 @@ categories = ["games", "network-programming"]
 
 [dependencies]
 bytes.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 hmac.workspace = true
 mc-bamboo-auth.workspace = true
 mc-bamboo-core.workspace = true
@@ -28,3 +29,6 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true

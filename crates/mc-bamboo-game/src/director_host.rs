@@ -2174,7 +2174,12 @@ impl DirectorHost {
                         match encode_column(pos, &column) {
                             Ok(packed) => Some(packed.pack()),
                             Err(error) => {
-                                tracing::warn!(%error, "could not re-pack a parked non-full column");
+                                tracing::warn!(
+                                    %error,
+                                    ?pos,
+                                    ?status,
+                                    "could not re-pack a parked non-full column"
+                                );
                                 None
                             }
                         }

@@ -27,6 +27,15 @@ const TICK_STARTED: u8 = u8::MAX;
 pub(crate) struct Beacon {
     phase: AtomicU8,
     at_nanos: AtomicU64,
+    /// 正在跑的岛的编号加一，0 表示这条线程闲着。只给崩溃报告看。
+    ///
+    /// The running island's id plus one; 0 means the thread is idle. Only read
+    /// by crash reports.
+    island_plus_one: AtomicU64,
+    /// 正在跑的派出号。
+    ///
+    /// The dispatch ticket being run.
+    ticket: AtomicU64,
 }
 
 /// 读出来的进度：最后跑完的一段（`None` 表示这一刻还没跑完任何一段）和距离那次记录
@@ -78,6 +87,44 @@ impl Beacon {
         self.store(TICK_STARTED);
     }
 
+    /// 一刻开跑时调用：同 [`Self::start_tick`]，另外记下跑的是哪个岛、哪个派出号。
+    ///
+    /// Called when a tick starts: [`Self::start_tick`] plus which island and
+    /// which dispatch ticket is running.
+    pub(crate) fn start_tick_of(&self, island: u32, ticket: u64) {
+        self.ticket.store(ticket, Ordering::Relaxed);
+        self.island_plus_one
+            .store(u64::from(island) + 1, Ordering::Relaxed);
+        self.start_tick();
+    }
+
+    /// 一刻跑完（或者 panic 被接住）之后调用：这条线程回到闲着。
+    ///
+    /// Called after a tick ends (or its panic was caught): the thread is idle
+    /// again.
+    pub(crate) fn finish_tick(&self) {
+        self.island_plus_one.store(0, Ordering::Relaxed);
+    }
+
+    /// 给崩溃报告用的一行。
+    ///
+    /// One line for a crash report.
+    fn describe(&self) -> String {
+        let progress = self.progress();
+        let phase = progress
+            .last_phase
+            .unwrap_or("none (before the first phase)");
+        let since = progress.since.as_secs_f64();
+        match self.island_plus_one.load(Ordering::Relaxed) {
+            0 => format!("idle (last tick: last finished phase = {phase}, {since:.3}s ago)"),
+            island => format!(
+                "running island {} (dispatch {}): last finished phase = {phase}, {since:.3}s ago",
+                island - 1,
+                self.ticket.load(Ordering::Relaxed)
+            ),
+        }
+    }
+
     /// 读当前进度。
     ///
     /// Read the current progress.
@@ -116,14 +163,7 @@ pub(crate) fn snapshot_lines() -> Vec<String> {
         let Some(beacon) = weak.upgrade() else {
             continue;
         };
-        let progress = beacon.progress();
-        let phase = progress
-            .last_phase
-            .unwrap_or("none (stuck before the first phase)");
-        out.push(format!(
-            "beacon {index}: last finished phase = {phase}, {:.3}s ago",
-            progress.since.as_secs_f64()
-        ));
+        out.push(format!("tick thread {index}: {}", beacon.describe()));
     }
     if out.is_empty() {
         out.push(

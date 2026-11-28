@@ -2084,6 +2084,8 @@ name = "mc-bamboo-server"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "chrono",
+ "flate2",
  "hmac",
  "mc-bamboo-auth",
  "mc-bamboo-core",

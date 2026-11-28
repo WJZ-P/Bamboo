@@ -65,7 +65,7 @@ export const GROUPS = [
     id: "logging",
     section: "bamboo",
     title: "日志",
-    hint: "服务端写 logs/latest.log，启动时把上一份按日期归档成 .log.gz。级别缺省 info；控制台和文件用同一份级别，RUST_LOG 环境变量优先。改完要重启服务端才生效。",
+    hint: "服务端写 logs/latest.log，启动时和每天零点把上一份按日期归档成 .log.gz；panic 和岛判死的报告在 crash-reports 目录。级别缺省 info，文件可以单独设；RUST_LOG 环境变量优先。改完要重启应用才生效。",
   },
 ] as const;
 
@@ -621,7 +621,23 @@ export const FIELDS: readonly SettingField[] = [
       { value: "debug", label: "DEBUG" },
       { value: "trace", label: "TRACE" },
     ],
-    hint: "控制台和 logs/latest.log 都按这个级别记，缺省 INFO。设成 DEBUG / TRACE 才能看到岛 tick 各阶段、区块交付、Director 回执、存档 IO 的细日志；RUST_LOG 环境变量设了就盖过这里。",
+    hint: "控制台（这个界面和终端）按这个级别记，缺省 INFO。设成 DEBUG / TRACE 才能看到岛 tick 各阶段、区块交付、Director 回执、存档 IO 的细日志；RUST_LOG 环境变量设了就盖过这里。",
+  },
+  {
+    key: "logFileLevel",
+    group: "logging",
+    fileKey: "log_file_level",
+    label: "文件日志级别",
+    control: "select",
+    options: [
+      { value: "", label: "同日志级别" },
+      { value: "error", label: "ERROR" },
+      { value: "warn", label: "WARN" },
+      { value: "info", label: "INFO" },
+      { value: "debug", label: "DEBUG" },
+      { value: "trace", label: "TRACE" },
+    ],
+    hint: "logs/latest.log 单独的级别，缺省和日志级别一样。想让控制台保持清爽、出问题时文件里又有细节，就把这里设成 DEBUG；TRACE 每刻每个岛都会写好几行，只在排查时短时间打开。",
   },
   {
     key: "logFilter",

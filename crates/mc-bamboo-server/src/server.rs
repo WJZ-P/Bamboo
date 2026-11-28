@@ -476,10 +476,12 @@ async fn wait_for_world_to_finish_saving(shared: &Arc<Shared>, world_stopped: &C
             () = world_stopped.cancelled() => return,
             () = shared.force_stop.cancelled() => {
                 error!("a second stop request forced quit; unsaved changes will be lost");
+                mc_bamboo_game::diagnostics::flush_log();
                 std::process::exit(1);
             }
             _ = &mut second => {
                 error!("a second Ctrl+C forced quit; unsaved changes will be lost");
+                mc_bamboo_game::diagnostics::flush_log();
                 std::process::exit(1);
             }
             _ = log_interval.tick() => {
