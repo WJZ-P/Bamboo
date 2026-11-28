@@ -12,6 +12,8 @@ use mc_bamboo_protocol::{
 use super::*;
 use crate::world::tests::{Client, Frame, Harness};
 
+mod survival_pick;
+
 /// 够得着的地面，上面一格没有玩家。
 const GROUND: BlockPos = BlockPos::new(11, -61, 8);
 const ABOVE: BlockPos = BlockPos::new(11, -60, 8);
