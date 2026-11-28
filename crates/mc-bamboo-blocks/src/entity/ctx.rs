@@ -1763,7 +1763,6 @@ pub enum Command {
     /// and discard the picked entity.
     FoxPickUpItem {
         item: EntityUid,
-        rest: Option<ItemStack>,
         spit: Option<ItemStack>,
         spit_at: mc_bamboo_core::Vec3,
     },
@@ -2023,13 +2022,15 @@ pub enum Command {
     PoiRelease {
         pos: BlockPos,
     },
-    /// `Villager.pickUpItem`（`InventoryCarrier.pickUpItem`）：消耗或更新地上物品（背包已在 tick 内更新）。
+    /// `Villager.pickUpItem` / `Allay.pickUpItem`（`InventoryCarrier.pickUpItem`）：背包已在
+    /// tick 内加了 `taken`；落地时消耗或更新地上那堆，地上不够的部分从背包退回去。
     ///
-    /// `Villager.pickUpItem` (`InventoryCarrier.pickUpItem`): discards or shrinks the
-    /// ground item after the villager's inventory has been updated.
+    /// `Villager.pickUpItem` / `Allay.pickUpItem` (`InventoryCarrier.pickUpItem`): the
+    /// tick already added `taken` to the inventory; the commit discards or shrinks
+    /// the ground item and takes back whatever the item no longer covers.
     VillagerPickUpItem {
         item: EntityUid,
-        remaining_count: i32,
+        taken: ItemStack,
     },
     /// `WorkAtComposter.compostItems`：先清空已满的堆肥桶产出骨粉。
     ///
@@ -2562,10 +2563,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::RabbitEatCarrots { pos } => super::mob::rabbit::eat_carrots(world, pos),
         Command::FoxPickUpItem {
             item,
-            rest,
             spit,
             spit_at,
-        } => super::mob::fox::apply_pick_up(me, world, item, rest, spit, spit_at),
+        } => super::mob::fox::apply_pick_up(me, world, item, spit, spit_at),
         Command::FoxClearStates { target } => {
             world.with_entity_mut(target, &mut |entity| {
                 entity.with_mob(|_, mob| mob.fox.clear_states());
@@ -2887,11 +2887,8 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::PoiRelease { pos } => {
             let _ = world.poi_release(pos);
         }
-        Command::VillagerPickUpItem {
-            item,
-            remaining_count,
-        } => {
-            super::mob::villager::apply_pick_up(world, item, remaining_count);
+        Command::VillagerPickUpItem { item, taken } => {
+            super::mob::villager::apply_pick_up(world, item, &taken, me);
         }
         Command::VillagerCompostExtract { pos } => {
             super::mob::villager::apply_compost_extract(world, pos);

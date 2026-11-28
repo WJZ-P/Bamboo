@@ -3,6 +3,8 @@
 use mc_bamboo_core::{ChunkPos, Vec3};
 use mc_bamboo_protocol::item::ItemStack;
 
+mod shared_pickup;
+
 use crate::{
     Aabb, BlockState, BlockTicks, BlockWeather, World,
     entity::{

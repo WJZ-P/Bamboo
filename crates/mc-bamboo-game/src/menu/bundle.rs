@@ -89,14 +89,25 @@ fn stacked_on_other(
         return false;
     };
     if primary && !clicked.is_empty() {
-        let mut slot = clicked.clone();
-        let inserted = bundle::try_transfer(&mut bag, &mut slot);
+        // 官方 `tryTransfer` 经 `Slot.safeTake` 从槽里取：结果格只能整堆取，取走要付款。
+        // 直接改槽会绕过这些，白拿结果。
+        // Vanilla `tryTransfer` takes through `Slot.safeTake`: a result slot only gives
+        // whole stacks and charges for them. Writing the slot directly would skip that
+        // and hand the result out for free.
+        let inserted = match bundle::transfer_limit(&bag, clicked) {
+            Some(limit) => {
+                let mut taken = ctx
+                    .try_remove(index, clicked.count, limit)
+                    .unwrap_or_else(ItemStack::empty);
+                bundle::try_insert(&mut bag, &mut taken)
+            }
+            None => 0,
+        };
         sounds.push(if inserted > 0 {
             Sound::Insert
         } else {
             Sound::InsertFail
         });
-        ctx.set(index, slot);
         *ctx.carried = bag;
         return true;
     }
@@ -262,9 +273,18 @@ pub(crate) fn try_station_click(
             return false;
         };
         if primary && !clicked.is_empty() {
-            let mut slot_stack = clicked;
-            let inserted = bundle::try_transfer(&mut bag, &mut slot_stack);
-            station.set_slot(index, slot_stack);
+            // 官方 `tryTransfer` 经 `Slot.safeTake` 从槽里取：合成、锻造、铁砧这些结果格
+            // 只能整堆取，取走时 `onTake` 扣材料和经验。直接改槽会白拿结果、材料原样留着。
+            // Vanilla `tryTransfer` takes through `Slot.safeTake`: crafting, smithing and
+            // anvil results only come out whole, and `onTake` consumes the inputs and
+            // levels. Writing the slot directly would hand the result out for free.
+            let inserted = match bundle::transfer_limit(&bag, &clicked) {
+                Some(limit) => {
+                    let mut taken = station.safe_take_item(index, clicked.count, limit);
+                    bundle::try_insert(&mut bag, &mut taken)
+                }
+                None => 0,
+            };
             station.set_carried(bag);
             station.note_bundle_sound(if inserted > 0 {
                 Sound::Insert

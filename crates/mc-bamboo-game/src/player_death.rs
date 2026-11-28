@@ -482,8 +482,28 @@ pub(crate) fn die_in(
     // `Player.dropEquipment`：!keepInventory 时先清消失诅咒，再 dropAll。
     // `LivingEntity.dropAllDeathLoot` 里 `dropExperience` 紧跟在 dropEquipment 后面。
     let mut drops = Vec::new();
+    {
+        // 光标上的东西属于 `InventoryMenu`：官方在重生时移除旧玩家，
+        // `InventoryMenu.removed` 把它丢在死亡地点，`keepInventory` 也一样。Bamboo 重生时
+        // 原地重置光标，所以在这里就丢出来，不然这堆东西会凭空消失。
+        // The cursor stack belongs to `InventoryMenu`: vanilla removes the old player on
+        // respawn and `InventoryMenu.removed` drops it at the death position, with
+        // `keepInventory` too. Bamboo resets the cursor in place on respawn, so drop it
+        // here or the stack would vanish.
+        let player = parts.players.get_mut(&id).expect("玩家刚才还在");
+        let carried = player.inventory_cursor.take_carried();
+        if !carried.is_empty() {
+            drops.push(carried);
+        }
+    }
     if !keep_inventory {
         let player = parts.players.get_mut(&id).expect("玩家刚才还在");
+        // 第 0 格是 2×2 合成的结果预览，不是玩家的东西：官方 `resultSlots.clearContent()`
+        // 直接清掉。跟着掉出来就等于材料和成品各拿一份。
+        // Slot 0 is the 2×2 crafting result preview, not a real stack: vanilla clears it
+        // with `resultSlots.clearContent()`. Dropping it would hand out both the
+        // ingredients and the product.
+        player.inventory.slots[0] = ItemStack::empty();
         for slot in &mut player.inventory.slots {
             if slot.is_empty() {
                 continue;

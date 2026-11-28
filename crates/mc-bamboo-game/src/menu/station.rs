@@ -84,6 +84,13 @@ impl InventoryCursor {
         &self.carried
     }
 
+    /// 把光标上的那堆拿走，光标变空。死亡时丢出来用。
+    ///
+    /// Take the cursor stack, leaving the cursor empty; used to drop it on death.
+    pub(crate) fn take_carried(&mut self) -> ItemStack {
+        std::mem::take(&mut self.carried)
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             carried: ItemStack::empty(),
@@ -2552,6 +2559,19 @@ impl Station {
 
     pub(crate) fn set_slot(&mut self, index: usize, stack: ItemStack) {
         self.set_by_player(index, stack);
+    }
+
+    /// 收纳袋从槽里取物品用的 `Slot.safeTake`：带 `mayPickup`、整堆限制和 `onTake`。
+    ///
+    /// `Slot.safeTake` for a bundle taking from a slot, with `mayPickup`, the
+    /// whole-stack rule and `onTake`.
+    pub(crate) fn safe_take_item(
+        &mut self,
+        index: usize,
+        amount: i32,
+        max_amount: i32,
+    ) -> ItemStack {
+        self.safe_take(index, amount, max_amount)
     }
 
     pub(crate) fn may_place_item(&self, index: usize, stack: &ItemStack) -> bool {

@@ -432,6 +432,27 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
     Ok(Tag::Compound(out))
 }
 
+/// 一个实体的乘客名单（官方 `Entity.getPassengers()`）：生物、船和矿车各有一份，别的
+/// 实体没有乘客。名单里小于 [`crate::entity::FIRST_ENTITY_ID`] 的是玩家。
+///
+/// 存档决定「谁嵌在谁的 `Passengers` 里」「谁因此不单独成行」都必须用这一份，两边
+/// 看的名单不一样时同一个乘客会被写两次。
+///
+/// An entity's passenger list (vanilla `Entity.getPassengers()`): mobs, boats and
+/// minecarts have one, nothing else carries passengers. Ids below
+/// [`crate::entity::FIRST_ENTITY_ID`] are players.
+///
+/// Saving must use this one list both to nest passengers under `Passengers` and to
+/// skip them as rows of their own; two different views write a passenger twice.
+pub fn passenger_uids(kind: &crate::entity::KindPublic) -> &[EntityUid] {
+    match kind {
+        crate::entity::KindPublic::Mob(mob) => &mob.passengers,
+        crate::entity::KindPublic::Boat(boat) => &boat.passengers,
+        crate::entity::KindPublic::Minecart(cart) => &cart.passengers,
+        _ => &[],
+    }
+}
+
 /// `Passengers` 嵌套的最大深度。官方读档也递归，但盘上的坏数据不能把栈打穿。
 ///
 /// Maximum nesting depth of `Passengers`. Vanilla recurses too, but corrupt
@@ -462,11 +483,10 @@ fn write_tree(
     depth: usize,
 ) -> Result<Tag> {
     let mut tag = write_entity(row)?;
-    let passengers: &[EntityUid] = match &row.public.kind {
-        crate::entity::KindPublic::Mob(mob) => &mob.passengers,
-        crate::entity::KindPublic::Boat(boat) => &boat.passengers,
-        _ => return Ok(tag),
-    };
+    let passengers = passenger_uids(&row.public.kind);
+    if passengers.is_empty() {
+        return Ok(tag);
+    }
     if depth >= MAX_TREE_DEPTH {
         return Ok(tag);
     }
@@ -548,12 +568,18 @@ fn read_tree(tag: &Tag, next: &mut EntityUid, depth: usize) -> Result<Option<Vec
             // 两边的关系直接建立，不看冷却和乘客数。
             sub[0].public.vehicle = Some(uid);
             sub[0].state.boarding_cooldown = 0;
-            if let crate::entity::EntityKind::Boat(boat) = &mut entity.kind {
-                crate::entity::riding::add_passenger(&mut boat.passengers, child_id, false);
-            } else {
-                entity.with_mob(|_, mob| {
-                    crate::entity::riding::add_passenger(&mut mob.passengers, child_id, false);
-                });
+            match &mut entity.kind {
+                crate::entity::EntityKind::Boat(boat) => {
+                    crate::entity::riding::add_passenger(&mut boat.passengers, child_id, false);
+                }
+                crate::entity::EntityKind::Minecart(cart) => {
+                    crate::entity::riding::add_passenger(&mut cart.passengers, child_id, false);
+                }
+                _ => {
+                    entity.with_mob(|_, mob| {
+                        crate::entity::riding::add_passenger(&mut mob.passengers, child_id, false);
+                    });
+                }
             }
             out.extend(sub);
         }

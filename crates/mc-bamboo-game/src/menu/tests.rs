@@ -22,6 +22,9 @@ use uuid::Uuid;
 use super::*;
 use crate::{Outgoing, PlayerSink, container::ContainerEntry, player::Player};
 
+mod death;
+mod property;
+
 #[derive(Default)]
 struct SinkState {
     bytes: Vec<u8>,

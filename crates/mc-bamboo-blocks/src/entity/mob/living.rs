@@ -1862,19 +1862,21 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
                 items.push((other.uid, stack.clone()));
             }
         });
+        // 背包在这里就加（精确驱动当场落地，和官方逐刻一致）；命令带上拿了多少，落地时
+        // 对着物品当前的数量核一遍。并行驱动里两只生物看的是同一份快照，后落地的那只
+        // 拿不到的部分会从背包里退回去，同一堆东西不会各拿一份。
+        // The inventory grows here (the precise driver commits at once, tick for tick
+        // like vanilla); the command carries how much was taken and the commit checks
+        // it against the item's current count. In the parallel driver two mobs see one
+        // snapshot, and whatever the later one cannot have is taken back out of its
+        // inventory, so one stack is never handed out twice.
         for (item, stack) in items {
             if mob.villager.wants_to_pick_up(&stack) {
+                let mut taken = stack.clone();
                 let leftover = mob.villager.inventory.add_item(stack);
-                let remaining_count = if leftover.is_empty() {
-                    0
-                } else {
-                    leftover.count
-                };
+                taken.count -= leftover.count;
                 ctx.emit(
-                    crate::entity::ctx::Command::VillagerPickUpItem {
-                        item,
-                        remaining_count,
-                    },
+                    crate::entity::ctx::Command::VillagerPickUpItem { item, taken },
                     me,
                 );
             }
@@ -1912,19 +1914,15 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
                 items.push((other.uid, stack.clone()));
             }
         });
+        // 同上：这里加进背包，落地时核对。
+        // As above: added here, checked at commit time.
         for (item, stack) in items {
             if super::allay::wants_to_pick_up(mob, &stack, &rules) {
+                let mut taken = stack.clone();
                 let leftover = mob.allay.add_item(stack);
-                let remaining_count = if leftover.is_empty() {
-                    0
-                } else {
-                    leftover.count
-                };
+                taken.count -= leftover.count;
                 ctx.emit(
-                    crate::entity::ctx::Command::VillagerPickUpItem {
-                        item,
-                        remaining_count,
-                    },
+                    crate::entity::ctx::Command::VillagerPickUpItem { item, taken },
                     me,
                 );
             }

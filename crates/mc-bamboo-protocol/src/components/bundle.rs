@@ -296,19 +296,6 @@ impl Mutable {
         amount
     }
 
-    /// 官方 `tryTransfer`：先从槽里安全拿走一部分，再试着装进去。
-    fn try_transfer(&mut self, slot: &mut ItemStack, max_take: i32) -> i32 {
-        let Some(unit) = stack_weight(slot) else {
-            return 0;
-        };
-        let amount = self.max_amount_to_add(unit).min(max_take);
-        if !can_fit_inside(slot) {
-            return 0;
-        }
-        let mut taken = safe_take(slot, amount);
-        self.try_insert(&mut taken)
-    }
-
     fn find_stack_index(&self, stack: &ItemStack) -> Option<usize> {
         if !stack.is_stackable() {
             return None;
@@ -451,10 +438,6 @@ fn split(stack: &mut ItemStack, amount: i32) -> ItemStack {
     piece
 }
 
-fn safe_take(slot: &mut ItemStack, amount: i32) -> ItemStack {
-    split(slot, amount.max(0).min(slot.count))
-}
-
 /// 官方 `BundleItem.toggleSelectedItem`：切换选中格，不改网络上的补丁。
 pub fn toggle_selected(stack: &mut ItemStack, index: i32) {
     let Some(mut mutable) = Mutable::of(stack) else {
@@ -482,15 +465,22 @@ pub fn try_insert(bundle: &mut ItemStack, input: &mut ItemStack) -> i32 {
     inserted
 }
 
-/// 官方 `BundleContents.Mutable.tryTransfer`：从 `slot` 里最多拿它现在的数量。
-pub fn try_transfer(bundle: &mut ItemStack, slot: &mut ItemStack) -> i32 {
-    let Some(mut mutable) = Mutable::of(bundle) else {
-        return 0;
-    };
-    let max_take = slot.count;
-    let inserted = mutable.try_transfer(slot, max_take);
-    mutable.write_back(bundle);
-    inserted
+/// 官方 `BundleContents.Mutable.tryTransfer` 传给 `Slot.safeTake` 的 `maxAmount`：
+/// 袋子还装得下几件 `other`。算不出份额、或者这件物品不能进袋子时返回 `None`，
+/// 这时官方根本不碰那个槽。
+///
+/// 菜单里的槽要自己走 `safeTake`（结果格要 `onTake`、只能整堆取），所以把上限单独给出来。
+///
+/// The `maxAmount` vanilla `BundleContents.Mutable.tryTransfer` hands to
+/// `Slot.safeTake`: how many of `other` still fit. `None` when the weight cannot be
+/// computed or the item may not enter a bundle; vanilla then leaves the slot alone.
+///
+/// Menu slots must run their own `safeTake` (a result slot needs `onTake` and only
+/// gives whole stacks), so the limit is exposed on its own.
+pub fn transfer_limit(bundle: &ItemStack, other: &ItemStack) -> Option<i32> {
+    let mutable = Mutable::of(bundle)?;
+    let unit = stack_weight(other)?;
+    can_fit_inside(other).then(|| mutable.max_amount_to_add(unit))
 }
 
 /// 内容物的副本，官方 `BundleContents.itemCopies`。

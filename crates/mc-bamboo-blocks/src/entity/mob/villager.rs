@@ -874,16 +874,53 @@ pub fn work_sound(profession: i32) -> Option<&'static str> {
 
 /// 落地 [`crate::entity::ctx::Command::VillagerPickUpItem`]（`InventoryCarrier.pickUpItem`）。
 ///
+/// 背包在 tick 里已经加了 `taken`。这里按地上那堆**现在**的数量结算：够就照扣（精确驱动
+/// 当场落地，永远够，结果和以前逐刻相同）；并行驱动里别的生物先落地拿走了一部分或全部
+/// 时，不够的那部分从自己的背包里退回去。
+///
 /// Applies [`crate::entity::ctx::Command::VillagerPickUpItem`] (`InventoryCarrier.pickUpItem`).
-pub(crate) fn apply_pick_up(world: &mut World, item: EntityUid, remaining_count: i32) {
+///
+/// The tick already added `taken` to the inventory. This settles against the ground
+/// stack as it is **now**: when it covers `taken` it is shrunk as before (the precise
+/// driver commits at once, so it always does and the result is unchanged tick for
+/// tick); when another mob committed first in the parallel driver and took some or all
+/// of it, the uncovered part goes back out of this mob's inventory.
+pub(crate) fn apply_pick_up(
+    world: &mut World,
+    item: EntityUid,
+    taken: &ItemStack,
+    me: &mut Entity,
+) {
+    let mut granted = 0;
     world.with_entity_mut(item, &mut |entity| {
         if entity.removed {
             return;
         }
-        if remaining_count <= 0 {
+        let EntityKind::Item(ground) = &mut entity.kind else {
+            return;
+        };
+        granted = taken.count.min(ground.stack.count);
+        let remaining = ground.stack.count - granted;
+        if remaining <= 0 {
             entity.discard();
-        } else if let EntityKind::Item(ground) = &mut entity.kind {
-            ground.stack.count = remaining_count;
+        } else {
+            ground.stack.count = remaining;
+        }
+    });
+    let excess = taken.count - granted;
+    if excess <= 0 {
+        return;
+    }
+    me.with_mob(|_, mob| {
+        if mob.mob_type == super::MobType::Allay {
+            if let Some(slot) = mob.allay.inventory.first_mut() {
+                slot.count -= excess;
+                if slot.count <= 0 {
+                    *slot = ItemStack::empty();
+                }
+            }
+        } else {
+            let _ = mob.villager.inventory.remove_item_type(taken.item, excess);
         }
     });
 }
