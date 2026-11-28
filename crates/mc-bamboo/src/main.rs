@@ -31,13 +31,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // 守卫活到 main 返回：那时把还排着队的日志行刷到磁盘。
     // The guard lives until main returns, when queued log lines are flushed.
     let LogSetup {
+        console_writer,
         file_writer,
         console_directive,
         file_directive,
         guard: _log_guard,
     } = logging::setup(&directory, &peek.bamboo);
     tracing_subscriber::registry()
-        .with(logging::console_layer(&console_directive))
+        .with(logging::console_layer(console_writer, &console_directive))
         .with(logging::file_layer(file_writer, &file_directive))
         .init();
 

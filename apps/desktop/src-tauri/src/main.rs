@@ -71,13 +71,14 @@ fn setup_logging(handle: &AppHandle, hub: &Arc<LogHub>) -> Result<(), Box<dyn st
     let directory = settings::server_directory(handle).map_err(std::io::Error::other)?;
     let files = read(&directory).unwrap_or_default();
     let LogSetup {
+        console_writer,
         file_writer,
         console_directive,
         file_directive,
         guard,
     } = logging::setup(&directory, &files.bamboo);
     tracing_subscriber::registry()
-        .with(logging::console_layer(&console_directive))
+        .with(logging::console_layer(console_writer, &console_directive))
         .with(logging::file_layer(file_writer, &file_directive))
         .with(LogLayer::new(Arc::clone(hub)).with_filter(EnvFilter::new(&console_directive)))
         .init();
