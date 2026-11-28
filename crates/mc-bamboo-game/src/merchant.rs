@@ -977,6 +977,9 @@ fn patch_of(components: &[(i32, ComponentValue)]) -> ComponentPatch {
 }
 
 #[cfg(test)]
+mod click_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use mc_bamboo_data::items;
