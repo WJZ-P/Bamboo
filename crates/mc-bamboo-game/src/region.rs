@@ -52,6 +52,8 @@ pub(crate) mod dirty;
 pub(crate) mod island_split;
 pub(crate) mod parking;
 pub(crate) mod partition;
+#[cfg(test)]
+mod passenger_save_tests;
 pub(crate) mod unit;
 
 // 区块平面和多 region 是后面的步骤，现在还没有调用方。
