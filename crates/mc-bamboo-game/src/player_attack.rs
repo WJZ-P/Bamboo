@@ -816,6 +816,41 @@ pub(crate) fn vehicle_attack_damage(
     Some(plan.total_damage)
 }
 
+/// `handleAttack` 在 `Player.attack` 之前对所有目标做的检查，船和矿车用：攻击者不是
+/// 旁观者，目标还在、在世界边界里，并且 `isWithinAttackRange(mainHandItem, bounds, 3.0)`。
+///
+/// The checks `handleAttack` runs for every target before `Player.attack`, used for
+/// boats and minecarts: the attacker is not a spectator, the target still exists and is
+/// inside the world border, and `isWithinAttackRange(mainHandItem, bounds, 3.0)` holds.
+pub(crate) fn may_attack_vehicle(region: &Region, id: PlayerId, entity_id: i32) -> bool {
+    let Some(player) = region.players.get(&id) else {
+        return false;
+    };
+    if player.game_mode == GameMode::Spectator || player.spawn_pending.is_some() {
+        return false;
+    }
+    let Some(public) = region.entities.public_at(entity_id) else {
+        return false;
+    };
+    if public.removed
+        || !region
+            .global
+            .world_border
+            .is_within_bounds_pos(BlockPos::containing(public.position))
+    {
+        return false;
+    }
+    let position = player.position();
+    let eye = Vec3::new(position.x, position.y + player.eye_height(), position.z);
+    let entity_reach = player.attributes.value(attribute::ENTITY_INTERACTION_RANGE) as f32;
+    attack_range(player.inventory.held(Hand::Main), entity_reach).is_in_range(
+        eye,
+        public.bounding_box(),
+        ATTACK_RANGE_BUFFER,
+        player.game_mode == GameMode::Creative,
+    )
+}
+
 pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
     attack_inner(region, id, entity_id, None);
 }
