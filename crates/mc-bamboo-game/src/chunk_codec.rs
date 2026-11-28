@@ -329,7 +329,11 @@ mod tests {
         ]));
         let cases: [(&str, Option<Vec<u8>>, Option<Vec<u8>>); 3] = [
             ("garbage entity bytes", Some(vec![0xff; 16]), None),
-            ("entity file from another version", Some(wrong_version), None),
+            (
+                "entity file from another version",
+                Some(wrong_version),
+                None,
+            ),
             ("garbage POI bytes", None, Some(vec![0xff; 16])),
         ];
         for (name, entities, poi) in cases {

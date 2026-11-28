@@ -761,10 +761,22 @@ mod tests {
         // Without compression the record is the data plus 5 bytes; cover the whole
         // 256th sector, both ends included.
         let cases = [
-            (ChunkPos::new(1, 1), 255 * SECTOR_BYTES - CHUNK_HEADER, false),
-            (ChunkPos::new(2, 1), 255 * SECTOR_BYTES - CHUNK_HEADER + 1, true),
+            (
+                ChunkPos::new(1, 1),
+                255 * SECTOR_BYTES - CHUNK_HEADER,
+                false,
+            ),
+            (
+                ChunkPos::new(2, 1),
+                255 * SECTOR_BYTES - CHUNK_HEADER + 1,
+                true,
+            ),
             (ChunkPos::new(3, 1), 256 * SECTOR_BYTES - CHUNK_HEADER, true),
-            (ChunkPos::new(4, 1), 256 * SECTOR_BYTES - CHUNK_HEADER + 1, true),
+            (
+                ChunkPos::new(4, 1),
+                256 * SECTOR_BYTES - CHUNK_HEADER + 1,
+                true,
+            ),
         ];
         for (pos, len, external) in cases {
             let data: Vec<u8> = (0..len).map(|index| (index % 251) as u8).collect();
