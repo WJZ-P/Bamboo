@@ -360,8 +360,14 @@ impl RegionFile {
             File::open(self.external_path(pos))
                 .map_err(|_| AnvilError::MissingExternal)?
                 .read_to_end(&mut external)?;
-            // 官方 `.mcc` 里前 5 字节是桩，剩下的是压缩后的 NBT。
-            let body = external.get(CHUNK_HEADER..).ok_or(AnvilError::Truncated)?;
+            // 官方把桩留在 .mca；早期 Bamboo 会在 .mcc 里也写一遍，仍允许读回。
+            // Vanilla keeps the stub in the .mca; older Bamboo duplicated it in the .mcc.
+            let body = external
+                .strip_prefix(&[0, 0, 0, 1, id])
+                .unwrap_or(&external);
+            if body.is_empty() {
+                return Err(AnvilError::Truncated);
+            }
             return compression.decompress(body, limit).map(Some);
         }
         let compression = RegionCompression::from_id(id)?;
@@ -412,10 +418,12 @@ impl RegionFile {
         } else {
             self.compression.id()
         };
-        let mut body = Vec::with_capacity(CHUNK_HEADER + compressed.len());
+        let mut body = Vec::with_capacity(if external { CHUNK_HEADER } else { record_len });
         body.extend_from_slice(&length.to_be_bytes());
         body.push(id);
-        body.extend_from_slice(&compressed);
+        if !external {
+            body.extend_from_slice(&compressed);
+        }
         let count = if external {
             1
         } else {
@@ -438,13 +446,10 @@ impl RegionFile {
             pos.z
         ));
         let commit = if external {
-            let mut stub = vec![0u8; CHUNK_HEADER];
-            stub[..4].copy_from_slice(&1i32.to_be_bytes());
-            stub[4] = id;
-            write_at(&mut self.file, sector as u64 * SECTOR_BYTES as u64, &stub)?;
+            write_at(&mut self.file, sector as u64 * SECTOR_BYTES as u64, &body)?;
             {
                 let mut file = File::create(&tmp_path)?;
-                file.write_all(&body)?;
+                file.write_all(&compressed)?;
                 file.sync_all()?;
             }
             // 先不改名：等头写完再提交，头写到一半断电时旧的 `.mcc` 还在。
@@ -711,6 +716,11 @@ mod tests {
         let external = dir.0.join("c.5.6.mcc");
         assert!(external.exists(), ".mcc 文件存在");
         assert_eq!(sector_count(region.offsets[5 + 6 * 32]), 1, "只留 5 字节桩");
+        assert_eq!(fs::read(&external).unwrap(), data);
+        assert_eq!(region.read(pos, 1 << 24), Ok(Some(data.clone())));
+        let mut legacy = vec![0, 0, 0, 1, RegionCompression::None.id() | EXTERNAL_FLAG];
+        legacy.extend_from_slice(&data);
+        fs::write(&external, legacy).unwrap();
         assert_eq!(region.read(pos, 1 << 24), Ok(Some(data)));
         region.write(pos, None, 8).expect("删除");
         assert!(!external.exists(), "删除时 .mcc 也删掉");

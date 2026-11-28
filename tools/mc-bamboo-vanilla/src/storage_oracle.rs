@@ -388,7 +388,8 @@ fn run_cases(
         }
     }
 
-    // 4. 区域文件两个方向，三种压缩，外加 .mcc、扇区重用、坏表项。
+    // 4. 三种压缩的内置／外置区块，双向对拍。
+    // 4. Cross-read inline and external chunks with all three compression modes.
     for compression in RegionCompression::ALL {
         let id = i32::from(compression.id());
         let case = format!("compression {id}");
@@ -491,8 +492,70 @@ fn run_cases(
                 format!("{case}: Bamboo cannot read the second official chunk"),
             );
         }
+        check_external_region(stdin, lines, report, compression)?;
     }
 
+    Ok(())
+}
+
+fn check_external_region(
+    stdin: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, std::io::Error>>,
+    report: &mut Report,
+    compression: RegionCompression,
+) -> Result<(), String> {
+    let id = compression.id();
+    let pos = ChunkPos::new(-35, 7);
+    let payload = sample_bytes_with_len(42, 1 << 20);
+    let path = format!("c.{}.{}.mcc", pos.x, pos.z);
+    let bamboo = TempDir::new(&format!("bamboo-external-{id}"))?;
+    let official = TempDir::new(&format!("official-external-{id}"))?;
+
+    let open = |dir: &TempDir| {
+        open_region(&dir.0, RegionPos::of(pos), compression).map_err(|error| error.to_string())
+    };
+    {
+        let mut region = open(&bamboo)?;
+        region
+            .write(pos, Some(&payload), 1)
+            .and_then(|()| region.sync())
+            .map_err(|error| error.to_string())?;
+    }
+    report.check(
+        bamboo.0.join(&path).is_file(),
+        format!("{id}: Bamboo .mcc missing"),
+    );
+    let response = ask(
+        stdin,
+        lines,
+        json!({"command": "region-read", "dir": bamboo.0.to_string_lossy(),
+               "x": pos.x, "z": pos.z, "positions": [{"x": pos.x, "z": pos.z}]}),
+    )?;
+    report.check(
+        response
+            .chunks
+            .first()
+            .and_then(|chunk| chunk.data.as_deref())
+            .and_then(|data| decode_b64(data).ok())
+            .as_deref()
+            == Some(payload.as_slice()),
+        format!("{id}: official RegionFile did not read the Bamboo .mcc payload"),
+    );
+    ask(
+        stdin,
+        lines,
+        json!({"command": "region-write", "dir": official.0.to_string_lossy(),
+               "x": pos.x, "z": pos.z, "compression": id,
+               "chunks": [{"x": pos.x, "z": pos.z, "data": encode_b64(&payload)}]}),
+    )?;
+    report.check(
+        official.0.join(path).is_file(),
+        format!("{id}: official .mcc missing"),
+    );
+    report.check(
+        open(&official)?.read(pos, 2 << 20).ok().flatten() == Some(payload),
+        format!("{id}: Bamboo did not read the official .mcc payload"),
+    );
     Ok(())
 }
 
@@ -536,8 +599,12 @@ fn rich_column(seed: u64) -> Box<mc_bamboo_world::column::ChunkColumn> {
 }
 
 fn sample_bytes(seed: u64) -> Vec<u8> {
+    sample_bytes_with_len(seed, 8192)
+}
+
+fn sample_bytes_with_len(seed: u64, len: usize) -> Vec<u8> {
     let mut state = seed | 1;
-    (0..8192)
+    (0..len)
         .map(|_| {
             state ^= state << 13;
             state ^= state >> 7;
