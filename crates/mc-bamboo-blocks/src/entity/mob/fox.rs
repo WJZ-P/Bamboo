@@ -692,12 +692,6 @@ fn pick_up(
     item: crate::entity::EntityUid,
     stack: ItemStack,
 ) {
-    let mut rest = None;
-    if stack.count > 1 {
-        let mut extra = stack.clone();
-        extra.count = stack.count - 1;
-        rest = Some(extra);
-    }
     let old = mob.equipment.get(EquipmentSlot::MainHand).clone();
     if !old.is_empty() {
         living::play_sound(me, mob, "minecraft:entity.fox.spit", 1.0, 1.0);
@@ -711,7 +705,6 @@ fn pick_up(
     ctx.emit(
         Command::FoxPickUpItem {
             item,
-            rest,
             spit: (!old.is_empty()).then_some(old),
             spit_at: Vec3::new(
                 me.position.x + look.x,
@@ -726,16 +719,40 @@ fn pick_up(
 /// [`Command::FoxPickUpItem`] 的落地，顺序照 `Fox.pickUpItem`：
 /// `dropItemStack`（无拾取延迟）→ `spitOutItem`（延迟 40）→ `entity.discard()`。
 ///
+/// 地上那堆按落地这一刻的状态算：多出来的数量从它现在的数量来；已经被别人拿走时
+/// 嘴里那一件是凭快照叼的，要还回去（换回原来叼着的），什么也不生成。并行驱动里两只
+/// 狐狸看的是同一份快照，不这样做同一堆东西会被各拿一次、各吐一堆。
+///
 /// Lands [`Command::FoxPickUpItem`] in `Fox.pickUpItem` order.
+///
+/// The ground stack is read as it is at commit time: the extra comes from its current
+/// count, and when someone else already took it the item in the mouth was taken from a
+/// snapshot, so the old one goes back and nothing spawns. In the parallel driver two
+/// foxes see one snapshot; without this each takes the stack and each spits a copy.
 pub(crate) fn apply_pick_up(
-    me: &Entity,
+    me: &mut Entity,
     world: &mut crate::world::World,
     item: crate::entity::EntityUid,
-    rest: Option<ItemStack>,
     spit: Option<ItemStack>,
     spit_at: Vec3,
 ) {
-    if let Some(rest) = rest {
+    let current = world.entity(item).and_then(|found| match &found.kind {
+        crate::entity::EntityKind::Item(ground) if !found.removed && !ground.stack.is_empty() => {
+            Some(ground.stack.clone())
+        }
+        _ => None,
+    });
+    let Some(mut rest) = current else {
+        me.with_mob(|_, mob| {
+            mob.equipment.set(
+                EquipmentSlot::MainHand,
+                spit.unwrap_or_else(ItemStack::empty),
+            );
+        });
+        return;
+    };
+    rest.count -= 1;
+    if rest.count > 0 {
         world.spawn_item_with_delay(me.position, rest, 0);
     }
     if let Some(spit) = spit {

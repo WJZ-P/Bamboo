@@ -826,7 +826,10 @@ pub(crate) fn apply_pick_up(world: &mut crate::world::World, item: EntityUid, me
     let crate::entity::EntityKind::Item(ground) = &entity.kind else {
         return;
     };
-    if ground.stack.is_empty() {
+    // 已经被别的生物在这一刻拿走的（并行驱动里两边看的是同一份快照）不能再拿一份。
+    // A stack another mob already took this tick (both saw one snapshot in the
+    // parallel driver) must not be taken again.
+    if entity.removed || ground.stack.is_empty() {
         return;
     }
     let stack = ground.stack.clone();

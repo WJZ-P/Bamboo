@@ -874,16 +874,46 @@ pub fn work_sound(profession: i32) -> Option<&'static str> {
 
 /// 落地 [`crate::entity::ctx::Command::VillagerPickUpItem`]（`InventoryCarrier.pickUpItem`）。
 ///
+/// 物品按落地这一刻的状态算：已经被别人拿走的不拿，被拿走一部分的只拿剩下的。
+/// 村民和悦灵各用自己的 `wantsToPickUp` 和背包。
+///
 /// Applies [`crate::entity::ctx::Command::VillagerPickUpItem`] (`InventoryCarrier.pickUpItem`).
-pub(crate) fn apply_pick_up(world: &mut World, item: EntityUid, remaining_count: i32) {
+///
+/// The item is read as it is at commit time: a stack someone else already took is
+/// left alone, and a partly taken one gives only what remains. Villagers and allays
+/// use their own `wantsToPickUp` and inventory.
+pub(crate) fn apply_pick_up(world: &mut World, item: EntityUid, me: &mut Entity) {
+    let Some(found) = world.entity(item) else {
+        return;
+    };
+    let EntityKind::Item(ground) = &found.kind else {
+        return;
+    };
+    if found.removed || ground.stack.is_empty() || ground.pickup_delay > 0 {
+        return;
+    }
+    let stack = ground.stack.clone();
+    let rules = crate::entity::ctx::BlockView::block_game_rules(world);
+    let leftover = me
+        .with_mob(|_, mob| {
+            if mob.mob_type == super::MobType::Allay {
+                super::allay::wants_to_pick_up(mob, &stack, &rules)
+                    .then(|| mob.allay.add_item(stack.clone()))
+            } else {
+                mob.villager
+                    .wants_to_pick_up(&stack)
+                    .then(|| mob.villager.inventory.add_item(stack.clone()))
+            }
+        })
+        .flatten();
+    let Some(leftover) = leftover else {
+        return;
+    };
     world.with_entity_mut(item, &mut |entity| {
-        if entity.removed {
-            return;
-        }
-        if remaining_count <= 0 {
+        if leftover.is_empty() {
             entity.discard();
         } else if let EntityKind::Item(ground) = &mut entity.kind {
-            ground.stack.count = remaining_count;
+            ground.stack.count = leftover.count;
         }
     });
 }

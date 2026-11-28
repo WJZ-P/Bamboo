@@ -1862,21 +1862,14 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
                 items.push((other.uid, stack.clone()));
             }
         });
+        // 这里只挑出想要的；真正放进背包在落地时对着物品当前的状态做。并行驱动里两只
+        // 生物看到的是同一份快照，在这里就加进背包的话同一堆东西会各拿一份。
+        // Only choose here; the stack enters the inventory at commit time, against the
+        // item's current state. In the parallel driver two mobs see the same snapshot,
+        // and adding here would hand each of them a copy of one stack.
         for (item, stack) in items {
             if mob.villager.wants_to_pick_up(&stack) {
-                let leftover = mob.villager.inventory.add_item(stack);
-                let remaining_count = if leftover.is_empty() {
-                    0
-                } else {
-                    leftover.count
-                };
-                ctx.emit(
-                    crate::entity::ctx::Command::VillagerPickUpItem {
-                        item,
-                        remaining_count,
-                    },
-                    me,
-                );
+                ctx.emit(crate::entity::ctx::Command::VillagerPickUpItem { item }, me);
             }
         }
     }
@@ -1912,21 +1905,11 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
                 items.push((other.uid, stack.clone()));
             }
         });
+        // 同上：落地时才放进背包。
+        // As above: the stack enters the inventory at commit time.
         for (item, stack) in items {
             if super::allay::wants_to_pick_up(mob, &stack, &rules) {
-                let leftover = mob.allay.add_item(stack);
-                let remaining_count = if leftover.is_empty() {
-                    0
-                } else {
-                    leftover.count
-                };
-                ctx.emit(
-                    crate::entity::ctx::Command::VillagerPickUpItem {
-                        item,
-                        remaining_count,
-                    },
-                    me,
-                );
+                ctx.emit(crate::entity::ctx::Command::VillagerPickUpItem { item }, me);
             }
         }
     }
