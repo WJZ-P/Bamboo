@@ -22,6 +22,7 @@ use uuid::Uuid;
 use super::*;
 use crate::{Outgoing, PlayerSink, container::ContainerEntry, player::Player};
 
+mod leave;
 mod property;
 
 #[derive(Default)]

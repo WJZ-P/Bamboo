@@ -93,3 +93,17 @@ fn a_bundle_without_room_leaves_the_crafting_result_alone() {
     );
     assert_eq!(station_slot(&fixture, 1), ItemStack::new(items::OAK_LOG, 1));
 }
+
+/// 地上的物品实体里某种物品的总数。
+///
+/// The total count of one item across ground item entities.
+pub(super) fn ground_count(fixture: &Fixture, item: i32) -> i32 {
+    fixture
+        .region
+        .entities
+        .iter()
+        .filter_map(|entity| entity.ground().map(|ground| ground.stack.clone()))
+        .filter(|stack| stack.item == item)
+        .map(|stack| stack.count)
+        .sum()
+}
