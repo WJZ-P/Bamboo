@@ -8,7 +8,7 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use crate::profiler::Phase;
@@ -42,6 +42,18 @@ pub(crate) struct Progress {
 
 thread_local! {
     static CURRENT: RefCell<Option<Arc<Beacon>>> = const { RefCell::new(None) };
+}
+
+/// 全部 tick 线程的信标，供崩溃报告在 panic 钩子里无锁读取。只在装信标时写一次，
+/// 读的时刻用 `try_lock`：拿不到就跳过，绝不为写报告去等锁。
+///
+/// Every tick thread's beacon, for the crash report's panic hook to read without
+/// blocking. Written once per installation; reads use `try_lock` and skip on
+/// contention rather than ever waiting on a lock for a report.
+static REGISTRY: OnceLock<Mutex<Vec<Weak<Beacon>>>> = OnceLock::new();
+
+fn registry() -> &'static Mutex<Vec<Weak<Beacon>>> {
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn epoch() -> Instant {
@@ -80,11 +92,46 @@ impl Beacon {
     }
 }
 
-/// 把 `beacon` 装成当前线程的信标（tick 线程开工时调用一次）。
+/// 把 `beacon` 装成当前线程的信标（tick 线程开工时调用一次），并登记到全局表。
 ///
-/// Install `beacon` as this thread's beacon (once, when a tick thread starts).
+/// Install `beacon` as this thread's beacon (once, when a tick thread starts)
+/// and register it in the global table.
 pub(crate) fn install(beacon: Arc<Beacon>) {
+    if let Ok(mut list) = registry().lock() {
+        list.push(Arc::downgrade(&beacon));
+    }
     CURRENT.with(|current| *current.borrow_mut() = Some(beacon));
+}
+
+/// 全部信标的进度，一行一个，给崩溃报告用。读不到表时返回一行说明，不阻塞。
+///
+/// Every beacon's progress, one line each, for a crash report. Returns a note
+/// line when the table cannot be read; never blocks.
+pub(crate) fn snapshot_lines() -> Vec<String> {
+    let Ok(list) = registry().try_lock() else {
+        return vec!["(beacon registry busy; snapshot unavailable)".to_owned()];
+    };
+    let mut out = Vec::new();
+    for (index, weak) in list.iter().enumerate() {
+        let Some(beacon) = weak.upgrade() else {
+            continue;
+        };
+        let progress = beacon.progress();
+        let phase = progress
+            .last_phase
+            .unwrap_or("none (stuck before the first phase)");
+        out.push(format!(
+            "beacon {index}: last finished phase = {phase}, {:.3}s ago",
+            progress.since.as_secs_f64()
+        ));
+    }
+    if out.is_empty() {
+        out.push(
+            "(no island beacons registered: exact/lockstep mode, or no tick threads yet)"
+                .to_owned(),
+        );
+    }
+    out
 }
 
 /// 当前线程刚跑完 `phase`。没装信标的线程上什么也不做。

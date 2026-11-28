@@ -1969,6 +1969,7 @@ name = "mc-bamboo-game"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "flate2",
  "libc",
  "mc-bamboo-advancements",
  "mc-bamboo-blocks",
@@ -2098,6 +2099,7 @@ dependencies = [
  "tokio-util",
  "toml 1.2.1+spec-1.1.0",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

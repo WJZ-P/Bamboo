@@ -52,6 +52,7 @@ mod compute_pool;
 mod container;
 mod container_loot;
 mod debug_stick;
+pub mod diagnostics;
 mod director_host;
 mod drops;
 mod durability;

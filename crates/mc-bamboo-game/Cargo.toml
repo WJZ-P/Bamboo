@@ -20,6 +20,7 @@ pipeline-bench = []
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+flate2.workspace = true
 mc-bamboo-advancements.workspace = true
 mc-bamboo-blocks.workspace = true
 mc-bamboo-loot.workspace = true

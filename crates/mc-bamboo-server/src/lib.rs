@@ -10,6 +10,7 @@ mod config;
 pub mod config_files;
 mod connection;
 mod console;
+pub mod logging;
 mod event;
 mod lists;
 mod ops;
