@@ -983,8 +983,10 @@ mod tests {
         assert!(parsed.log_filter.is_empty());
         // 非法级别在界面就被挡住。
         // An invalid level is rejected by the UI.
-        let mut bad = ServerSettings::default();
-        bad.log_level = "verbose".to_owned();
+        let bad = ServerSettings {
+            log_level: "verbose".to_owned(),
+            ..ServerSettings::default()
+        };
         assert!(bad.validate().is_err());
     }
 

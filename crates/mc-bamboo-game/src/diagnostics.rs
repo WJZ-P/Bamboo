@@ -48,7 +48,7 @@ pub fn configure(dir: &Path, build_info: &str) {
 /// Install the panic hook: a panic writes a crash report, then unwinds/exits as
 /// usual.
 pub fn install_panic_hook() {
-    std::panic::set_hook(Box::new(|info| write_panic_report(info)));
+    std::panic::set_hook(Box::new(write_panic_report));
 }
 
 /// 把上一份 `logs/latest.log` 按官方 Log4j 的命名归档成 `logs/YYYY-MM-DD-N.log.gz`。
