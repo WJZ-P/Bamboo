@@ -213,7 +213,14 @@ impl Phase {
         Self::TickTail,
     ];
 
-    fn name(self) -> &'static str {
+    /// 按判别值取回阶段（`ALL` 和声明顺序一致）。
+    ///
+    /// The phase with discriminant `index` (`ALL` follows declaration order).
+    pub(crate) fn from_index(index: u8) -> Option<Self> {
+        Self::ALL.get(usize::from(index)).copied()
+    }
+
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Inbox => "inbox",
             Self::Delivery => "delivery",
@@ -1153,6 +1160,7 @@ impl Profiler {
         self.phases[phase as usize].record(nanos);
         self.phase_durations[phase as usize] = nanos;
         self.last_lap = now;
+        crate::island_beacon::mark(phase);
     }
 
     /// 从现在起重新计 `lap`，之前这段不归任何阶段。分离驱动的岛在 tick 线程上开跑、

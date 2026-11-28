@@ -47,6 +47,7 @@ use std::{
 use tracing::error;
 
 use crate::island::Island;
+use crate::island_beacon::{self, Beacon, Progress};
 
 /// tick 线程的栈。调试构建里方块逻辑、实体和命令的调用链很深，测试线程默认的 2 MB
 /// 不够用；这里只是保留虚拟地址，用多少提交多少。
@@ -128,6 +129,10 @@ struct Queues {
     /// What each thread is running: the dispatch ticket and when it started;
     /// `None` while idle.
     running: Vec<Option<Running>>,
+    /// 每条线程的进度信标，下标和线程号一致。
+    ///
+    /// Each thread's progress beacon, indexed by thread number.
+    beacons: Vec<Arc<Beacon>>,
     /// 被放弃的线程（它手里的岛被判死了）：不再派岛给它，它跑完手里的就退出。
     ///
     /// Abandoned threads (their island was declared dead): nothing more is
@@ -206,6 +211,7 @@ impl IslandPool {
                 shared: VecDeque::new(),
                 busy: vec![0; threads],
                 running: vec![None; threads],
+                beacons: (0..threads).map(|_| Arc::default()).collect(),
                 retired: vec![false; threads],
                 alive: threads,
                 closed: false,
@@ -267,6 +273,38 @@ impl IslandPool {
             .filter(|running| running.started.elapsed() >= limit)
             .map(|running| running.ticket)
             .collect()
+    }
+
+    /// 在线程上已经跑了至少 `limit` 的派出号，连同已跑时长和它那条线程信标上的进度。
+    ///
+    /// Tickets running on a thread for at least `limit`, with how long they
+    /// have run and the progress on that thread's beacon.
+    pub(crate) fn slow(&self, limit: Duration) -> Vec<(u64, Duration, Progress)> {
+        let queues = self.dispatch.lock();
+        queues
+            .running
+            .iter()
+            .zip(&queues.beacons)
+            .zip(&queues.retired)
+            .filter(|(_, retired)| !**retired)
+            .filter_map(|((running, beacon), _)| running.map(|running| (running, beacon)))
+            .filter(|(running, _)| running.started.elapsed() >= limit)
+            .map(|(running, beacon)| (running.ticket, running.started.elapsed(), beacon.progress()))
+            .collect()
+    }
+
+    /// 派出号 `ticket` 所在线程信标上的进度；没在跑时是 `None`。
+    ///
+    /// The progress on the beacon of the thread running `ticket`; `None` if it
+    /// is not running.
+    pub(crate) fn progress_of(&self, ticket: u64) -> Option<Progress> {
+        let queues = self.dispatch.lock();
+        queues
+            .running
+            .iter()
+            .zip(&queues.beacons)
+            .find(|(running, _)| running.is_some_and(|running| running.ticket == ticket))
+            .map(|(_, beacon)| beacon.progress())
     }
 
     /// 派出号 `ticket` 这一刻在线程上已经跑了多久；没在跑时是 `None`。
@@ -356,6 +394,7 @@ impl IslandPool {
                 queues.own.push(VecDeque::new());
                 queues.busy.push(0);
                 queues.running.push(None);
+                queues.beacons.push(Arc::default());
                 queues.retired.push(false);
                 queues.alive += 1;
                 queues.own.len() - 1
@@ -537,6 +576,8 @@ impl Drop for Alive<'_> {
 /// the hand-backs.
 fn run_worker(index: usize, dispatch: &Dispatch, replies: &Sender<HandBack>, body: IslandBody) {
     let _alive = Alive(dispatch, index);
+    let beacon = Arc::clone(&dispatch.lock().beacons[index]);
+    island_beacon::install(Arc::clone(&beacon));
     loop {
         let Job {
             mut island,
@@ -570,6 +611,7 @@ fn run_worker(index: usize, dispatch: &Dispatch, replies: &Sender<HandBack>, bod
             job
         };
         let started = Instant::now();
+        beacon.start_tick();
         // 岛的状态在 panic 之后可能不一致，但主控拿回它只是为了照原来的崩溃路径
         // 重新抛出、不再跑它，所以这里断言可以安全地跨过 unwind。
         // The island may be inconsistent after a panic; the master only takes

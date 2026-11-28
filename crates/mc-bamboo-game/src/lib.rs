@@ -70,6 +70,7 @@ mod inbound;
 mod interaction;
 mod inventory;
 mod island;
+mod island_beacon;
 mod island_partition;
 mod island_partition_stats;
 mod island_pool;

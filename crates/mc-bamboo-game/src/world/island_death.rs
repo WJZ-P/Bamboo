@@ -38,6 +38,12 @@ use tracing::{error, warn};
 use super::{SERVER_SHUTDOWN, World, island_access, island_hybrid::Source};
 use crate::{global_port::GlobalEffect, inbound::PlayerId, island::Borrow};
 
+/// 岛的同一刻跑了多久开始报慢，之后每过这么久再报一次。
+///
+/// How long one island tick may run before it is reported as slow, and the
+/// interval between further reports.
+const SLOW_ISLAND_WARNING: Duration = Duration::from_secs(5);
+
 /// 主控给一个不在手里的岛攒的出站投递最多这么多条（岛的实施计划 5.6.5）。
 ///
 /// The most outbound deliveries the master queues for one island that is away
@@ -128,6 +134,11 @@ pub(crate) struct DeathState {
     pub(crate) deaths: Vec<Death>,
     /// 死岛后来回来、被丢弃的次数。
     pub(crate) zombies: u64,
+    /// 跑得慢的派出号已经报到第几个 [`SLOW_ISLAND_WARNING`] 区间，免得每次判定都报。
+    ///
+    /// For each slow ticket, the last [`SLOW_ISLAND_WARNING`] interval already
+    /// reported, so a check does not repeat the warning.
+    pub(crate) slow_warned: std::collections::BTreeMap<u64, u64>,
     /// 测试专用：出站队列的上限（条数，字节）。
     #[cfg(test)]
     pub(crate) fan_out_limit: Option<(usize, usize)>,
@@ -165,6 +176,35 @@ impl World {
         let Some(pool) = self.master.pool.as_ref() else {
             return;
         };
+        // 判死之前先报慢：跑了 5 秒以上的岛每 5 秒报一次卡在哪一段，判死前就能看到线索。
+        // Report slow islands before declaring any dead: every island running
+        // for 5 s or more logs where it is, once per 5 s, so the clue is in the
+        // log before the death.
+        for (ticket, running, progress) in pool.slow(SLOW_ISLAND_WARNING) {
+            let bucket = running.as_secs() / SLOW_ISLAND_WARNING.as_secs();
+            let warned = self
+                .master
+                .hybrid
+                .death
+                .slow_warned
+                .entry(ticket)
+                .or_insert(0);
+            if bucket > *warned {
+                *warned = bucket;
+                warn!(
+                    island = ?self.islands.island_of_ticket(ticket),
+                    running_secs = running.as_secs_f64(),
+                    last_finished_phase = progress.last_phase.unwrap_or("none (stuck before the first phase)"),
+                    secs_since_last_phase = progress.since.as_secs_f64(),
+                    "an island tick is running long"
+                );
+            }
+        }
+        self.master
+            .hybrid
+            .death
+            .slow_warned
+            .retain(|ticket, _| pool.running_for(*ticket).is_some());
         for ticket in pool.overdue(self.master.island_dead_timeout) {
             if let Some(id) = self.islands.island_of_ticket(ticket) {
                 self.bury(id, DeathCause::Timeout);
@@ -209,6 +249,7 @@ impl World {
             return;
         }
         let running_for = pool.running_for(ticket);
+        let progress = pool.progress_of(ticket);
         if !pool.abandon(ticket) {
             // 已经跑完、交回在通道里：下一次收岛时照常落地（出站队列也就发掉了）。
             // Already finished, the hand-back is in the channel: it lands at
@@ -271,6 +312,8 @@ impl World {
             island = id,
             ?cause,
             running_secs = running_for.map(|time| time.as_secs_f64()),
+            last_finished_phase = progress.map(|p| p.last_phase.unwrap_or("none (stuck before the first phase)")),
+            secs_since_last_phase = progress.map(|p| p.since.as_secs_f64()),
             ticks_owed = buried.debt,
             player_count = buried.players.len(),
             players = ?names,
