@@ -332,6 +332,15 @@ fn promoted_corrupt_column_regenerates_like_a_missing_column() {
 
 #[test]
 fn promoted_missing_external_column_regenerates_like_a_missing_column() {
+    compare_failed_external_column(false);
+}
+
+#[test]
+fn promoted_corrupt_external_stream_regenerates_like_a_missing_column() {
+    compare_failed_external_column(true);
+}
+
+fn compare_failed_external_column(corrupt_stream: bool) {
     let seed = 42;
     let threads = 4;
     let first = ChunkPos::new(14, 6);
@@ -341,17 +350,43 @@ fn promoted_missing_external_column_regenerates_like_a_missing_column() {
     let dir = WorldDir::new(&temp.0);
     dir.create_layout().unwrap();
     let region = dir.region_dir();
-    let mut file =
-        RegionFile::open(region.join("r.0.0.mca"), &region, RegionCompression::None).unwrap();
-    file.write(missing, Some(&vec![0; 1 << 20]), 1).unwrap();
+    let compression = if corrupt_stream {
+        RegionCompression::Zlib
+    } else {
+        RegionCompression::None
+    };
+    let mut file = RegionFile::open(region.join("r.0.0.mca"), &region, compression).unwrap();
+    let payload = if corrupt_stream {
+        let mut state = 42_u64;
+        (0..1 << 20)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    } else {
+        vec![0; 1 << 20]
+    };
+    file.write(missing, Some(&payload), 1).unwrap();
     file.sync().unwrap();
     let external = region.join("c.15.6.mcc");
-    std::fs::rename(&external, region.join("fixture.mcc.offline")).unwrap();
+    assert!(external.is_file());
+    if corrupt_stream {
+        std::fs::write(&external, b"not a zlib stream").unwrap();
+        assert!(matches!(
+            file.read(missing, 2 << 20),
+            Err(AnvilError::Io(_))
+        ));
+    } else {
+        std::fs::rename(&external, region.join("fixture.mcc.offline")).unwrap();
+        assert!(matches!(
+            file.read(missing, 2 << 20),
+            Err(AnvilError::MissingExternal)
+        ));
+    }
     assert!(file.has_chunk(missing));
-    assert!(matches!(
-        file.read(missing, 2 << 20),
-        Err(AnvilError::MissingExternal)
-    ));
     drop(file);
 
     let (mut world, _inbox) = staged_world(seed, threads);
@@ -364,7 +399,7 @@ fn promoted_missing_external_column_regenerates_like_a_missing_column() {
     let actual = collect_generated_cells(&mut world, [missing].into_iter());
     assert_same_lit_cells(&expected[&missing], &actual[&missing]);
     println!(
-        "missing external column regenerated, cells_per_layer={}",
+        "external column regenerated, corrupt_stream={corrupt_stream}, cells_per_layer={}",
         WORLD_HEIGHT as usize * 256
     );
 }
