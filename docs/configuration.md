@@ -162,6 +162,8 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 | `island_threads` | 整数 | 逻辑核数的一半，夹在 2 到 8 之间 | 岛的 tick 线程数。0 = 齐步（精确模式，岛在世界线程上内联跑，和官方逐位一致）；≥ 1 = 分离（岛的一刻在 tick 线程上跑，和主控并行，区块交付晚一刻）。缺省值在第一次启动时按这台机器算好写进文件。见下面「岛的 tick 线程」 |
 | `islands` | 布尔 | `true` | 多岛：相距很远的玩家群各自一个岛，各岛并行跑。`false` = 整个世界一个岛。见下面「多岛」 |
 | `island_dead_seconds` | 整数 | `30` | 多岛时一个岛的同一刻在 tick 线程上连续跑超过这么多秒就判为死岛（5 到 3600）。见下面「多岛」 |
+| `log_level` | 字符串 | `info` | 全局日志级别，认 `error` / `warn` / `info` / `debug` / `trace`；别的值回落 `info` 并记警告。控制台和 `logs/latest.log` 共用，见下面「日志和崩溃报告」 |
+| `log_filter` | 字符串 | ``（空） | 追加的 `EnvFilter` 指令，按模块细调级别（例如 `mc_bamboo_game::director=trace`）；拼在 `log_level` 后面，见下面「日志和崩溃报告」 |
 
 ### 精确模式 / 性能模式
 
@@ -343,7 +345,9 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 - 四份管理名单（`ops.json`、`banned-players.json`、`banned-ips.json`、
   `whitelist.json`）固定在服务器目录里，不单独配置。
 - `BAMBOO_PROFILE=<秒>`（剖析器）和 `BAMBOO_TEST_LOADED=1`（测试走已加载模式）
-  是调试用的环境变量，保持环境变量，不进配置文件。`RUST_LOG` 调日志级别。
+  是调试用的环境变量，保持环境变量，不进配置文件。`log_level` / `log_filter` 是
+  `bamboo.toml` 里的项（见上面表格和「日志和崩溃报告」）；`RUST_LOG` 环境变量设了就
+  完全盖过这两项，优先级最高，不写回文件。
 - `BAMBOO_ISLAND_THREADS=<n>`：盖过 `island_threads`，见上面「岛的 tick 线程」。
 - `BAMBOO_ISLANDS=0|1`、`BAMBOO_ISLAND_DEAD_SECONDS=<秒>`：盖过 `islands` /
   `island_dead_seconds`，见上面「多岛」。
@@ -367,6 +371,33 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 - 未知键忽略，另记一条日志，不报错。
 - 所有来自文件的数值都不会触发 panic：实体线程数夹在 0..256、区块计算线程数和岛的 tick 线程数夹在 0..64、信箱预算夹在 0..65536、
   心跳夹在 1..29 秒。
+- `log_level` 不在五个级别里、或者不是字符串：回落 `info` 并记警告；`log_filter` 不是字符串时回落空串。
+  两者拼成的 EnvFilter 指令里若还有非法的模块指令，`EnvFilter::new` 会按 lossy 规则忽略那一条，不会让服务端启动失败。
+
+## 日志和崩溃报告
+
+命令行版和桌面 APP 都在**服务器目录**里建两个目录，和 `server.properties` / `bamboo.toml` 同级：
+
+| 路径 | 内容 |
+|---|---|
+| `logs/latest.log` | 本次运行的日志。专用写线程落盘，发出日志的线程只做内存格式化和一次无界通道发送，不等待磁盘 IO |
+| `logs/YYYY-MM-DD-N.log.gz` | 启动时把上一份 `latest.log` 按官方 Log4j 命名 gzip 归档；日期是启动当天的本地日期，N 从 1 起取当天没用过的最小号 |
+| `crash-reports/crash-YYYY-MM-DD_HH.MM.SS-server.txt` | 进程 panic 时的崩溃报告：消息、位置、线程名、`Backtrace::force_capture()`、Bamboo 版本和提交号、各岛进度信标 |
+| `crash-reports/island-dead-YYYY-MM-DD_HH.MM.SS-server.txt` | 岛判死时写一份，内容是判死日志那一行加上所有岛的信标 |
+
+级别由 `log_level`（缺省 `info`）和 `log_filter`（缺省空）拼成一条 EnvFilter 指令：
+`log_level` 是全局级别，`log_filter` 是按模块细调的追加指令（例如
+`mc_bamboo_game::director=trace`）。`RUST_LOG` 环境变量设了就完全盖过这两项。
+
+评估后选择**控制台和文件共用同一份级别**（不分别设）：单一开关语义最清楚、和现有
+`RUST_LOG` 模型一致，文件就是控制台的持久副本；判死和慢岛的线索本来就在 WARN / ERROR 级，
+缺省就能看到。把 `log_level` 设成 `debug` / `trace` 才额外输出岛 tick 各阶段、区块交付、
+Director 回执、存档 IO 的 `debug!` / `trace!`，缺省不输出。桌面 APP 控制台的筛选加了
+DEBUG、TRACE 两档，只挑出服务端实际输出过的这两种级别。
+
+已知限制见 README「日志和崩溃报告已知限制」：在线玩家位置因世界状态只归世界线程所有而
+不写进报告、时间戳用本地时间和秒级精度、捕获后重新抛出的 panic 会写两份报告、崩溃报告
+只写本地不上传、非阻塞写用无界通道。
 
 ## APP 和命令行怎么共用
 

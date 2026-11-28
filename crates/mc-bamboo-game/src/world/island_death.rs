@@ -327,8 +327,10 @@ impl World {
         // Persist the death log plus every island's beacon to crash-reports/ so
         // the clue survives even after the APP is closed.
         let running_secs = running_for.map(|time| time.as_secs_f64());
-        let last_phase =
-            progress.map(|p| p.last_phase.unwrap_or("none (stuck before the first phase)"));
+        let last_phase = progress.map(|p| {
+            p.last_phase
+                .unwrap_or("none (stuck before the first phase)")
+        });
         let secs_since = progress.map(|p| p.since.as_secs_f64());
         let ticks_owed = buried.debt;
         let player_count = buried.players.len();

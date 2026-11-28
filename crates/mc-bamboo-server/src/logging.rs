@@ -141,9 +141,7 @@ pub fn setup(directory: &Path, log_level: &str, log_filter: &str) -> LogSetup {
     let file = match fs::File::create(logs_dir.join("latest.log")) {
         Ok(file) => Some(file),
         Err(error) => {
-            eprintln!(
-                "bamboo: cannot create logs/latest.log ({error}); file logging is disabled"
-            );
+            eprintln!("bamboo: cannot create logs/latest.log ({error}); file logging is disabled");
             None
         }
     };

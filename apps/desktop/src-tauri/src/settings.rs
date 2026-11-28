@@ -962,10 +962,8 @@ mod tests {
         let temp = Temp::new();
         let directory = temp.0.join("server");
         fs::create_dir_all(&directory).unwrap();
-        let mut settings = ServerSettings::from_files(
-            &ConfigFiles::default(),
-            &directory.display().to_string(),
-        );
+        let mut settings =
+            ServerSettings::from_files(&ConfigFiles::default(), &directory.display().to_string());
         settings.log_level = "trace".to_owned();
         settings.log_filter = "mc_bamboo_game::world=debug".to_owned();
         assert_eq!(settings.validate(), Ok(()));

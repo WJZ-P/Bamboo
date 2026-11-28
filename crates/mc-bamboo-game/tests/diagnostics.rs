@@ -45,7 +45,11 @@ fn archiving_gzips_the_previous_latest_log() {
     let temp = Temp::new();
     let logs = temp.path().join("logs");
     fs::create_dir_all(&logs).unwrap();
-    fs::write(logs.join("latest.log"), b"previous session log\nsecond line\n").unwrap();
+    fs::write(
+        logs.join("latest.log"),
+        b"previous session log\nsecond line\n",
+    )
+    .unwrap();
 
     diagnostics::archive_latest_log(&logs);
 

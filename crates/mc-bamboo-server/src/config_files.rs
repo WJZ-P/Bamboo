@@ -1814,10 +1814,7 @@ mod tests {
         write(dir.path(), &files).unwrap();
         let loaded = read(dir.path()).unwrap();
         assert_eq!(loaded.bamboo.log_level, "debug");
-        assert_eq!(
-            loaded.bamboo.log_filter,
-            "mc_bamboo_game::director=trace"
-        );
+        assert_eq!(loaded.bamboo.log_filter, "mc_bamboo_game::director=trace");
         assert!(
             loaded
                 .non_defaults()

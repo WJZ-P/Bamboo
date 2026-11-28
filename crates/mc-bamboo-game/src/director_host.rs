@@ -1364,7 +1364,10 @@ impl DirectorHost {
             // 存档 IO：这一刻交给 IO 线程的写盘快照数，缺省不输出。
             // Save IO: number of chunk snapshots handed to the IO thread this
             // tick; off by default.
-            tracing::debug!(count = to_write.len(), "submitting chunk writes to the IO thread");
+            tracing::debug!(
+                count = to_write.len(),
+                "submitting chunk writes to the IO thread"
+            );
         }
         if let Some(io) = &self.io {
             for pending in to_write {

@@ -57,7 +57,10 @@ fn setup_creates_the_log_and_crash_dirs_and_archives_the_old_log() {
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .any(|path| path.extension().and_then(|ext| ext.to_str()) == Some("gz"));
     assert!(archived, "the previous latest.log was archived as .log.gz");
-    assert!(!setup.directive.is_empty(), "a filter directive is produced");
+    assert!(
+        !setup.directive.is_empty(),
+        "a filter directive is produced"
+    );
     // 写入器活到测试结束，写线程才有机会把还没发的行落盘。
     // Keep the writer alive until the end so the worker can flush pending lines.
     drop(setup);

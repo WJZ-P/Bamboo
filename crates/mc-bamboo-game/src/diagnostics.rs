@@ -78,9 +78,7 @@ pub fn archive_latest_log(logs_dir: &Path) {
         return;
     };
     let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-    if encoder.write_all(&bytes).is_ok()
-        && encoder.finish().is_ok()
-    {
+    if encoder.write_all(&bytes).is_ok() && encoder.finish().is_ok() {
         let _ = fs::remove_file(&latest);
     } else {
         let _ = fs::remove_file(&destination);
@@ -184,9 +182,7 @@ fn write_report(prefix: &str, body: &str) {
         return;
     };
     let stamp = timestamp();
-    let mut path = state
-        .dir
-        .join(format!("{prefix}-{stamp}-server.txt"));
+    let mut path = state.dir.join(format!("{prefix}-{stamp}-server.txt"));
     let mut index = 2usize;
     while path.exists() {
         path = state
