@@ -742,6 +742,39 @@ mod tests {
         assert!(!external.exists(), "删除时 .mcc 也删掉");
     }
 
+    /// 官方 `RegionFile.write`：`sizeToSectors(记录长度) >= 256` 就外置。记录正好
+    /// 占 256 个扇区时 offset 的低 8 位放不下扇区数，必须走 `.mcc`，不能报错丢掉。
+    ///
+    /// Official `RegionFile.write` goes external when `sizeToSectors(record) >= 256`.
+    /// A record that needs exactly 256 sectors cannot fit the 8-bit sector count,
+    /// so it must use the `.mcc` file instead of failing the save.
+    #[test]
+    fn a_record_needing_exactly_256_sectors_goes_external() {
+        let dir = TempDir::new("external-boundary");
+        let region_pos = RegionPos { x: 0, z: 0 };
+        let mut region = open_region(&dir.0, region_pos, RegionCompression::None).unwrap();
+        // 不压缩时记录长度 = 数据长度 + 5。覆盖 255 个扇区之后的整个第 256 个扇区。
+        // Without compression the record is the data plus 5 bytes; cover the whole
+        // 256th sector, both ends included.
+        let cases = [
+            (ChunkPos::new(1, 1), 255 * SECTOR_BYTES - CHUNK_HEADER, false),
+            (ChunkPos::new(2, 1), 255 * SECTOR_BYTES - CHUNK_HEADER + 1, true),
+            (ChunkPos::new(3, 1), 256 * SECTOR_BYTES - CHUNK_HEADER, true),
+            (ChunkPos::new(4, 1), 256 * SECTOR_BYTES - CHUNK_HEADER + 1, true),
+        ];
+        for (pos, len, external) in cases {
+            let data: Vec<u8> = (0..len).map(|index| (index % 251) as u8).collect();
+            region
+                .write(pos, Some(&data), 9)
+                .unwrap_or_else(|error| panic!("{len} byte chunk must be saved: {error}"));
+            let file = dir.0.join(format!("c.{}.{}.mcc", pos.x, pos.z));
+            assert_eq!(file.exists(), external, "{len} bytes");
+            let count = sector_count(region.offsets[offset_index(pos).unwrap()]);
+            assert_eq!(count, if external { 1 } else { 255 }, "{len} bytes");
+            assert_eq!(region.read(pos, 2 << 20), Ok(Some(data)), "{len} bytes");
+        }
+    }
+
     /// 外置文件的提交动作在头写完之后才跑：旧 `.mcc` 在头写坏时还在。
     #[test]
     fn external_files_keep_the_old_version_until_the_header_is_written() {
