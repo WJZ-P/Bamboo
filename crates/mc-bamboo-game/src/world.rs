@@ -2369,16 +2369,15 @@ impl World {
         };
         if let Some(refusal) = refusal {
             let reason = crate::command::admin::refusal_message(&refusal);
-            if self.islands.is_home() {
-                self.islands.region.links.add(id, request.sink);
-                self.islands.region.links.kick(id, &reason);
-            } else {
-                // 家岛不在主控手里：用一份临时的链路发完拒绝原因就关。
-                // The home island is away: a temporary link sends the reason and closes.
-                let mut links = crate::links::Links::default();
-                links.add(id, request.sink);
-                links.kick(id, &reason);
-            }
+            // 被拒的人不进任何岛：用一份临时的链路发完拒绝原因就关。挂到家岛的链路表上的话，
+            // 他不是岛上的玩家，`Leave` 到了也没人删，这条关掉的链路就一直留着。
+            // A refused player joins no island: a temporary link sends the
+            // reason and closes. On the home island's link table it would stay
+            // forever, since the player is on no island and even the `Leave`
+            // removes nothing.
+            let mut links = crate::links::Links::default();
+            links.add(id, request.sink);
+            links.kick(id, &reason);
             self.master.refused_inboxes.push((id, request.inbox));
             return None;
         }
