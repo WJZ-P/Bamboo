@@ -4,9 +4,8 @@
 //! 官方 `LevelLightEngine` 跑 `initializeLight` + `light`（`ChunkgenOracle.java
 //! --light-pipeline`），输出 FEATURES 后 3×3 的方块状态 ID 和中心柱逐格天空光 /
 //! 方块光。Bamboo 侧拿同一批方块 ID 走和 `gen-light` 一样的光引擎，同时调游戏
-//! 流水线 `LIGHT` 阶段的入口（`generate_light_stage_with_input`）算一遍，两组都要
-//! 逐格等于官方。前者证明「官方这批方块 → 官方光照」在 Bamboo 引擎里一致，后者
-//! 证明「游戏流水线自己挑的方块 → 光照」也一致。
+//! 流水线 `LIGHT` 阶段算一遍。官方输入测试光引擎；局部输入测试实际交付光照，
+//! 并用旧完整输入区分裁剪导致的差异和已有的差异。
 //!
 //! `--break-carvers` 把游戏流水线的光照输入故意退回 CARVERS：树林、萤石、灯笼、
 //! 结构光源附近必须报不一致，否则这批坐标没覆盖到会改光的地物。
@@ -15,8 +14,8 @@
 //! center 3x3 through FEATURES and then through its official `LevelLightEngine`
 //! (`initializeLight` + `light`), emitting the post-FEATURES block state ids and
 //! the center column's per-cell sky/block light. Bamboo runs its engine on those
-//! exact ids and also its own pipeline's `LIGHT` entry on the same world; both
-//! must match vanilla cell by cell. `--break-carvers` deliberately reverts the
+//! exact ids and also its own local `LIGHT` input. The old full view isolates
+//! differences attributable to clipping outer writes. `--break-carvers` reverts the
 //! pipeline input to CARVERS and must report mismatches near canopies, glowstone,
 //! lanterns or structure light sources.
 
@@ -33,7 +32,10 @@ use mc_bamboo_game::{
     region::RegionColumn,
     world_options::{LevelType, WorldGenConfig},
     worldgen::{GeneratedChunk, build_region_column},
-    worldgen_light::{LightInput, generate_light_stage_with_input, post_features_blocks},
+    worldgen_light::{
+        LightInput, full_post_features_blocks, generate_light_stage_with_input,
+        post_features_blocks,
+    },
 };
 use mc_bamboo_world::{
     MIN_Y, SECTION_COUNT, WORLD_HEIGHT,
@@ -108,7 +110,9 @@ struct Stats {
     scenes: u64,
     engine_cells: u64,
     pipeline_cells: u64,
+    pipeline_light_diffs: u64,
     block_cells: u64,
+    clipped_block_cells: u64,
     mismatches: Vec<String>,
 }
 
@@ -310,8 +314,8 @@ impl Report<'_> {
             center_region.ok_or_else(|| format!("seed {seed} ({x},{z}): no center chunk"))?;
         self.scene_keys.insert((seed, x, z), emitters);
 
-        // 0. 游戏 LIGHT 阶段挑的 3×3 方块必须逐格等于官方 FEATURES 后的 3×3。
-        //    这能区分「输入方块不对」和「光引擎算错」。
+        // 0. 完整输入仍逐格对拍；另数实际 LIGHT 视图因裁剪改变的输入格。
+        // 0. Compare the full input cell by cell; count input changes due to clipping separately.
         let config = WorldGenConfig {
             seed,
             level_type: LevelType::Normal,
@@ -320,10 +324,25 @@ impl Report<'_> {
         };
         let game_blocks = post_features_blocks(&config, x, z, None, &[])
             .map_err(|error| format!("seed {seed} ({x},{z}): post-features blocks: {error}"))?;
+        let full_blocks = full_post_features_blocks(&config, x, z).map_err(|error| {
+            format!("seed {seed} ({x},{z}): full post-features blocks: {error}")
+        })?;
+        if game_blocks[4] != full_blocks[4] {
+            return Err(format!(
+                "seed {seed} ({x},{z}): local lighting changed the center's block input"
+            ));
+        }
+        self.stats.clipped_block_cells += full_blocks
+            .iter()
+            .flatten()
+            .flatten()
+            .zip(game_blocks.iter().flatten().flatten())
+            .filter(|(full, local)| full != local)
+            .count() as u64;
         for (grid, (official, game)) in built
             .iter()
             .map(|(_, generated)| generated.blocks.as_slice())
-            .zip(game_blocks.iter())
+            .zip(full_blocks.iter())
             .enumerate()
         {
             let dz = grid as i32 / 3 - 1;
@@ -337,7 +356,7 @@ impl Report<'_> {
                     let lx = cell / 16;
                     let lz = cell % 16;
                     self.stats.mismatches.push(format!(
-                        "seed {seed} ({x},{z}) blocks ({dx},{dz}) at ({lx},{},{lz}): official {want}, game {have}",
+                        "seed {seed} ({x},{z}) full blocks ({dx},{dz}) at ({lx},{},{lz}): official {want}, bamboo {have}",
                         y as i32 + MIN_Y
                     ));
                 }
@@ -358,6 +377,7 @@ impl Report<'_> {
             x,
             z,
             layer: "",
+            exact: None,
         };
         compare_layer(
             &mut self.stats,
@@ -388,6 +408,20 @@ impl Report<'_> {
         let game = generate_light_stage_with_input(&config, x, z, None, &[], input)
             .map_err(|error| format!("seed {seed} ({x},{z}): pipeline: {error}"))?;
         let (game_sky, game_block) = light_cells(&center_region, &game)?;
+        let exact = if !self.options.break_carvers
+            && (game_sky != official_sky || game_block != official_block)
+        {
+            let full_columns: Vec<_> = built
+                .iter()
+                .map(|(pos, _)| *pos)
+                .zip(full_blocks.iter().map(Vec::as_slice))
+                .collect();
+            let exact = generate_light_from_layers(ChunkPos::new(x, z), &full_columns)
+                .map_err(|error| format!("seed {seed} ({x},{z}): full light: {error}"))?;
+            Some(light_cells(&center_region, &exact)?)
+        } else {
+            None
+        };
         let pipeline = Compare {
             pipeline: true,
             ..base
@@ -396,6 +430,7 @@ impl Report<'_> {
             &mut self.stats,
             Compare {
                 layer: "pipeline sky",
+                exact: exact.as_ref().map(|(sky, _)| sky.as_slice()),
                 ..pipeline
             },
             &official_sky,
@@ -405,6 +440,7 @@ impl Report<'_> {
             &mut self.stats,
             Compare {
                 layer: "pipeline block",
+                exact: exact.as_ref().map(|(_, block)| block.as_slice()),
                 ..pipeline
             },
             &official_block,
@@ -419,12 +455,14 @@ impl Report<'_> {
             scenes,
             engine_cells,
             pipeline_cells,
+            pipeline_light_diffs,
             block_cells,
+            clipped_block_cells,
             mismatches,
         } = self.stats;
         println!(
-            "light-pipeline: {scenes} scenes, {block_cells} blocks, {engine_cells} engine cells, \
-             {pipeline_cells} pipeline cells, {} mismatches, {} official checks, emitters {:?}",
+            "light-pipeline: {scenes} scenes, {block_cells} full blocks, {clipped_block_cells} clipped input cells, {engine_cells} engine cells, \
+             {pipeline_cells} pipeline cells ({pipeline_light_diffs} differing), {} mismatches, {} official checks, emitters {:?}",
             mismatches.len(),
             self.official_checks,
             self.scene_keys
@@ -532,6 +570,7 @@ struct Compare<'a> {
     x: i32,
     z: i32,
     layer: &'a str,
+    exact: Option<&'a [u8]>,
 }
 
 /// 逐格比较一层光。 Compare one light layer cell by cell.
@@ -542,16 +581,40 @@ fn compare_layer(stats: &mut Stats, at: Compare<'_>, official: &[u8], bamboo: &[
         } else {
             stats.engine_cells += 1;
         }
-        if expected == ours || stats.mismatches.len() >= 20_000 {
+        if expected == ours {
             continue;
+        }
+        if at.pipeline {
+            stats.pipeline_light_diffs += 1;
         }
         let y = cell as i32 / 256 + MIN_Y;
         let lx = (cell % 256) / 16;
         let lz = cell % 16;
-        stats.mismatches.push(format!(
-            "seed {} ({},{}) {} at ({lx},{y},{lz}): official {expected}, bamboo {ours}",
-            at.seed, at.x, at.z, at.layer
-        ));
+        let detail = || {
+            format!(
+                "seed {} ({},{}) {} at ({},{y},{}): official {expected}, bamboo {ours}",
+                at.seed,
+                at.x,
+                at.z,
+                at.layer,
+                at.x * 16 + lx as i32,
+                at.z * 16 + lz as i32
+            )
+        };
+        if let Some(exact) = at.exact {
+            let full = exact[cell];
+            let cause = if full == expected {
+                "outer feature writes (source or occlusion)"
+            } else if full == ours {
+                "already present with the full input"
+            } else {
+                "full-input mismatch also altered by clipping"
+            };
+            eprintln!("  LIGHT DIFF {}, full {full}: {cause}", detail());
+        }
+        if stats.mismatches.len() < 20_000 {
+            stats.mismatches.push(detail());
+        }
     }
 }
 
@@ -623,6 +686,7 @@ mod tests {
                 x: 0,
                 z: 0,
                 layer: "sky",
+                exact: None,
             },
             &official,
             &official,
@@ -640,11 +704,13 @@ mod tests {
                 x: 0,
                 z: 0,
                 layer: "sky",
+                exact: None,
             },
             &official,
             &broken,
         );
         assert_eq!(stats.mismatches.len(), 1);
         assert_eq!(stats.pipeline_cells, 4);
+        assert_eq!(stats.pipeline_light_diffs, 1);
     }
 }
