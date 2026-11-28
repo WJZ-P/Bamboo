@@ -362,13 +362,86 @@ impl Ctx<'_> {
 
     /// 官方 `Slot.mayPlace`。只有潜影盒的槽拒绝潜影盒；商人菜单的结果格（2）只读。
     fn may_place(&self, index: usize, stack: &ItemStack) -> bool {
-        if self.merchant.is_some() && index == RESULT_SLOT {
+        if self.is_result(index) {
             return false;
         }
         if self.kind != ContainerKind::ShulkerBox || index >= self.container_size {
             return true;
         }
         !is_shulker_box_item(stack)
+    }
+
+    /// 这一格是不是商人菜单的结果格（`MerchantResultSlot`）。
+    ///
+    /// Whether this is the merchant menu's result slot (`MerchantResultSlot`).
+    fn is_result(&self, index: usize) -> bool {
+        self.merchant.is_some() && index == RESULT_SLOT
+    }
+
+    /// 结果格被取走之后：`MerchantResultSlot.onTake` 扣付款、记一次使用，付款格的
+    /// `setItem` 再触发 `updateSellItem` 把结果格按剩下的付款重新填上。
+    ///
+    /// After the result leaves its slot: `MerchantResultSlot.onTake` charges the
+    /// payment and counts one use, then `setItem` on the payment slots runs
+    /// `updateSellItem`, refilling the result from what is left.
+    fn on_result_taken(&mut self) {
+        self.merchant_take();
+        self.settle_merchant();
+    }
+
+    /// `MerchantResultSlot` 的 `tryRemove`：`mayPlace` 为假所以 `allowModification` 为假，
+    /// 拿不下整堆就不给；`MerchantContainer.removeItem(2, n)` 不管 `n` 都给整堆。
+    /// 取走就算成交。
+    ///
+    /// `tryRemove` on a `MerchantResultSlot`: `mayPlace` is false, so
+    /// `allowModification` is false and nothing leaves unless the whole stack fits;
+    /// `MerchantContainer.removeItem(2, n)` gives the whole stack whatever `n` is.
+    /// Taking it completes the trade.
+    fn try_remove_result(&mut self, amount: i32, max_amount: i32) -> Option<ItemStack> {
+        let current = self.get(RESULT_SLOT);
+        if current.is_empty() || max_amount < current.count || amount.min(max_amount) <= 0 {
+            return None;
+        }
+        self.set(RESULT_SLOT, ItemStack::empty());
+        self.on_result_taken();
+        Some(current)
+    }
+
+    /// `MerchantMenu.quickMoveStack`：结果格从后往前搬进玩家的 36 格并成交；付款格从前
+    /// 往后搬进 36 格；背包和快捷栏之间互相搬。物品栏里的东西从不进付款格和结果格。
+    ///
+    /// `MerchantMenu.quickMoveStack`: the result moves into the player's 36 slots back
+    /// to front and completes the trade; a payment moves into them front to back; the
+    /// inventory and the hotbar move into each other. Nothing from the inventory ever
+    /// enters the payment or result slots.
+    fn quick_move_merchant(&mut self, index: usize) -> ItemStack {
+        const INVENTORY_END: usize = 30;
+        let clicked = self.get(index);
+        if clicked.is_empty() {
+            return ItemStack::empty();
+        }
+        let mut stack = clicked.clone();
+        let end = self.slots_len();
+        let start = self.container_size;
+        let moved = match index {
+            RESULT_SLOT => self.move_item_stack_to(&mut stack, start, end, true),
+            0 | 1 => self.move_item_stack_to(&mut stack, start, end, false),
+            _ if index < INVENTORY_END => {
+                self.move_item_stack_to(&mut stack, INVENTORY_END, end, false)
+            }
+            _ => self.move_item_stack_to(&mut stack, start, INVENTORY_END, false),
+        };
+        if !moved {
+            return ItemStack::empty();
+        }
+        self.set(index, stack.clone());
+        if stack.count == clicked.count {
+            return ItemStack::empty();
+        }
+        if index == RESULT_SLOT {
+            self.on_result_taken();
+        }
+        clicked
     }
 
     /// 取出结果格后完成交易（`MerchantResultSlot.onTake` 的扣付款 + 使用次数）。
@@ -411,6 +484,9 @@ impl Ctx<'_> {
 
     /// 官方 `Slot.tryRemove`，`allowModification` 和 `mayPickup` 在我们的槽上恒为真。
     fn try_remove(&mut self, index: usize, amount: i32, max_amount: i32) -> Option<ItemStack> {
+        if self.is_result(index) {
+            return self.try_remove_result(amount, max_amount);
+        }
         let amount = amount.min(max_amount);
         let current = self.get(index);
         if current.is_empty() || amount <= 0 {
@@ -535,6 +611,9 @@ impl Ctx<'_> {
 
     /// 各个菜单的 `quickMoveStack`。容器侧移到物品栏，物品栏侧移到容器。
     fn quick_move(&mut self, index: usize) -> ItemStack {
+        if self.merchant.is_some() {
+            return self.quick_move_merchant(index);
+        }
         let clicked = self.get(index);
         if clicked.is_empty() {
             return ItemStack::empty();
@@ -556,12 +635,6 @@ impl Ctx<'_> {
             && stack.count == clicked.count
         {
             return ItemStack::empty();
-        }
-        // 商人结果格 Shift 取出：搬进背包后完成一次交易并重算结果，官方
-        // `MerchantResultSlot.onTake` 的扣付款 + 使用次数 + `updateSellItem`。
-        if index == RESULT_SLOT && self.merchant.is_some() {
-            self.merchant_take();
-            self.settle_merchant();
         }
         clicked
     }
@@ -694,12 +767,10 @@ fn pickup(ctx: &mut Ctx, index: usize, primary: bool) {
         } else {
             (clicked.count + 1) / 2
         };
+        // 商人的结果格在 `try_remove` 里整堆取出并成交。
+        // A merchant result leaves whole and completes the trade inside `try_remove`.
         if let Some(taken) = ctx.try_remove(index, amount, i32::MAX) {
             *ctx.carried = taken;
-            // 结果格取出即完成交易：扣付款、加使用次数。
-            if index == RESULT_SLOT {
-                ctx.merchant_take();
-            }
         }
     } else if ctx.may_place(index, &carried) {
         if is_same_item_same_components(&clicked, &carried) {
@@ -731,9 +802,15 @@ fn swap_with_inventory(ctx: &mut Ctx, slot_index: i32, button: i32) {
         return;
     }
     if source.is_empty() {
-        // `mayPickup` 在我们的槽上恒为真，`onSwapCraft` 和 `onTake` 什么也不做。
+        // `mayPickup` 在我们的槽上恒为真，`onSwapCraft` 什么也不做；`onTake` 只有商人的
+        // 结果格有事做：成交。
+        // `mayPickup` is always true here and `onSwapCraft` does nothing; `onTake` only
+        // matters for a merchant result, where it completes the trade.
         ctx.inventory.slots[source_slot] = target;
         ctx.set(index, ItemStack::empty());
+        if ctx.is_result(index) {
+            ctx.on_result_taken();
+        }
     } else if target.is_empty() {
         if ctx.may_place(index, &source) {
             let max = stack_limit(&source);
@@ -796,6 +873,13 @@ fn pickup_all(ctx: &mut Ctx, slot_index: i32, button: i32) {
     let target = ctx.get(index);
     // `mayPickup` 恒为真，所以只有点在空格上时才会收集。
     if ctx.carried.is_empty() || !target.is_empty() {
+        return;
+    }
+    // `MerchantMenu.canTakeItemForPickAll` 恒为假：商人菜单里双击什么也收不到，
+    // 结果格的预览尤其不能被收走。
+    // `MerchantMenu.canTakeItemForPickAll` is always false: a double click collects
+    // nothing in a merchant menu, least of all the result preview.
+    if ctx.merchant.is_some() {
         return;
     }
     let start: i64 = if button == 0 {
@@ -1750,7 +1834,22 @@ fn on_click_default_with_maps(
         .is_some_and(|player| player.game_mode == GameMode::Creative);
     let mut thrown = Vec::new();
     let mut sounds = Vec::new();
+    // 商人菜单：点击逻辑拿一份交易表的副本去算（结果格、成交、售罄都看它），
+    // 点完按 `uses` 的增量给村民补上每一笔成交的后果。
+    // A merchant menu: the click works on a copy of the offers (result slot, trades
+    // and stock all read it); afterwards each completed trade is applied to the
+    // villager from the growth in `uses`.
+    let mut offers = menu
+        .merchant
+        .as_ref()
+        .and_then(|state| crate::merchant::villager_offers(region, state.villager))
+        .unwrap_or_default();
+    let uses_before: Vec<i32> = offers.iter().map(|offer| offer.uses).collect();
     if let Some(player) = region.players.get_mut(&id) {
+        let merchant = menu.merchant.as_mut().map(|state| MerchantCtx {
+            offers: &mut offers,
+            selection_hint: &mut state.selection_hint,
+        });
         let mut ctx = Ctx {
             kind: menu.kind,
             container_size: menu.container_size,
@@ -1762,9 +1861,13 @@ fn on_click_default_with_maps(
             quickcraft_slots: &mut menu.quickcraft_slots,
             creative,
             thrown: &mut thrown,
-            merchant: None,
+            merchant,
             sounds: &mut sounds,
         };
+        // 结果格是按当前交易表算出来的预览；交易表可能在两次点击之间变过（补货、升级）。
+        // The result slot is a preview of the current offers, which may have changed
+        // between clicks (restock, level-up).
+        ctx.settle_merchant();
         do_click(
             &mut ctx,
             i32::from(packet.slot),
@@ -1776,6 +1879,15 @@ fn on_click_default_with_maps(
         crate::drops::spawn_throw(region, id, stack);
     }
     bundle::send_sounds(region, id, &sounds);
+    let trades: Vec<(usize, ItemStack)> = offers
+        .iter()
+        .zip(&uses_before)
+        .enumerate()
+        .flat_map(|(index, (offer, before))| {
+            (0..offer.uses - before).map(move |_| (index, offer.result.clone()))
+        })
+        .collect();
+    crate::merchant::complete_trades(region, id, &menu, &trades);
     if ender {
         if let Some(player) = region.players.get_mut(&id) {
             player

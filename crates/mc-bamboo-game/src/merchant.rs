@@ -35,8 +35,6 @@ use crate::{
     region::Region,
 };
 
-/// `MerchantContainer` 的结果格。
-const RESULT_SLOT: usize = 2;
 /// `AbstractVillager.stillValid` 的额外交互距离。
 const INTERACTION_BUFFER: f64 = 4.0;
 
@@ -526,7 +524,14 @@ pub(crate) fn move_from_inventory_to_payment(
     }
 }
 
-/// 玩家点击了商人菜单的槽位。付款格用普通点击逻辑改，结果格只在能交易时取出。
+/// 玩家点击了商人菜单的槽位。每一格、每一种点击都走 `AbstractContainerMenu.doClick`
+/// 那套通用逻辑：结果格在那里按 `MerchantResultSlot` 的规则取出并成交，别的点击方式
+/// （双击、拖动、Shift、数字键、收纳袋）也就绕不过付款。
+///
+/// A click in the merchant menu. Every slot and every click type runs the shared
+/// `AbstractContainerMenu.doClick` logic, where the result slot follows
+/// `MerchantResultSlot` and completes the trade, so no click type (double click, drag,
+/// shift, number key, bundle) gets around paying.
 pub(crate) fn on_click(region: &mut Region, player: PlayerId, packet: ClickPacket) -> bool {
     let Some(menu) = region.menus.get(&player) else {
         return false;
@@ -537,17 +542,6 @@ pub(crate) fn on_click(region: &mut Region, player: PlayerId, packet: ClickPacke
     if menu.container_id != packet.container_id {
         return false;
     }
-    if packet.slot as usize == RESULT_SLOT {
-        let Some(mut menu) = region.menus.remove(&player) else {
-            return false;
-        };
-        let traded = take_result(region, player, &mut menu);
-        crate::menu::broadcast_merchant_state(region, player);
-        region.menus.insert(player, menu);
-        let _ = traded;
-        return true;
-    }
-    // 付款 / 玩家物品栏点击：交给 menu 的通用逻辑，它自己会重算并同步。
     crate::menu::on_click_default(region, player, packet);
     true
 }
@@ -621,7 +615,7 @@ pub(crate) fn get_recipe_for(
 }
 
 /// 只读地取出村民的交易表。
-fn villager_offers(region: &Region, villager_id: i32) -> Option<Vec<MerchantOffer>> {
+pub(crate) fn villager_offers(region: &Region, villager_id: i32) -> Option<Vec<MerchantOffer>> {
     region.entities.public_at(villager_id)?;
     // 实体表的公开行和完整行都在同一个 store；这里走只读快照。
     let mut store: Option<Vec<MerchantOffer>> = None;
@@ -634,40 +628,47 @@ fn villager_offers(region: &Region, villager_id: i32) -> Option<Vec<MerchantOffe
     store
 }
 
-/// 取走结果：扣付款、增加使用次数、给经验、可能升级。
-fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
-    let Some(state) = menu.merchant.as_mut() else {
-        return false;
-    };
-    let Some(index) = state.active else {
-        return false;
-    };
+/// 一次点击里成交的每一笔（交易下标和卖出的物品）在村民这边的后果，最后把新的
+/// 交易表发给客户端。付款和结果物品已经由点击逻辑搬完了。
+///
+/// The villager side of every trade one click completed (offer index and item
+/// sold), followed by one refreshed offer list for the client. The click logic has
+/// already moved the payment and the result.
+pub(crate) fn complete_trades(
+    region: &mut Region,
+    player: PlayerId,
+    menu: &Menu,
+    trades: &[(usize, ItemStack)],
+) {
     let Some(villager_id) = menu.target.villager() else {
-        return false;
+        return;
     };
-    let Some(result) = region.players.get(&player).map(|_| state.result.clone()) else {
-        return false;
-    };
-    if result.is_empty() {
-        return false;
+    if trades.is_empty() {
+        return;
     }
-    let Some(offer) =
-        villager_offers(region, villager_id).and_then(|offers| offers.get(index).cloned())
-    else {
-        return false;
-    };
-    // `MerchantResultSlot.onTake`：先 `take(a, b)`，付款对调时再 `take(b, a)`。
-    let mut a = state.payment[0].clone();
-    let mut b = state.payment[1].clone();
-    if !(offer_take(&offer, &mut a, &mut b) || offer_take(&offer, &mut b, &mut a)) {
-        return false;
+    for (index, result) in trades {
+        complete_trade(region, player, villager_id, *index, result);
     }
-    state.payment[0] = a;
-    state.payment[1] = b;
-    if let Some(player_data) = region.players.get_mut(&player) {
-        let _ = player_data.inventory.receive(result.clone(), false);
-    }
+    // 交易完成后把新的使用次数 / 等级 / 交易表发给客户端，`uses` 变化会改「售罄」状态。
+    // After trading, resend the updated offers: `uses` changes the out-of-stock state
+    // and a level-up appends a new tier.
+    send_offers(region, player, menu);
+}
 
+/// `AbstractVillager.notifyTrade` 加 `MerchantResultSlot.onTake` 里和村民、统计有关的
+/// 部分：增加使用次数、给经验、可能升级、进度和统计。
+///
+/// `AbstractVillager.notifyTrade` plus the villager and stat parts of
+/// `MerchantResultSlot.onTake`: count the use, reward experience, maybe level up, and
+/// record the advancement and the stat.
+fn complete_trade(
+    region: &mut Region,
+    player: PlayerId,
+    villager_id: i32,
+    index: usize,
+    result: &ItemStack,
+) {
+    let mut reward_exp = false;
     let mut orb_amount = 0;
     let mut advancement_villager = "minecraft:villager";
     region.entities.with_mut(villager_id, |entity| {
@@ -691,6 +692,7 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
             };
             // `AbstractVillager.notifyTrade` → `MerchantOffer.increaseUses()`。
             offer.uses += 1;
+            reward_exp = offer.reward_exp;
             offer.xp
         };
         // `rewardTradeXp` 先按村民自己的随机源抽经验球数量。
@@ -734,11 +736,7 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
             "villager": {"type": advancement_villager}
         }),
     );
-    // 交易完成后把新的使用次数 / 等级 / 交易表发给客户端，`uses` 变化会改「售罄」状态。
-    // After a trade, resend the updated offers: `uses` changes the out-of-stock state
-    // and a level-up appends a new tier.
-    spawn_trade_xp(region, villager_id, orb_amount, offer.reward_exp);
-    send_offers(region, player, menu);
+    spawn_trade_xp(region, villager_id, orb_amount, reward_exp);
     // `Stats.TRADED_WITH_VILLAGER`：自定义统计，随 `RequestStats` 一起发。
     crate::item_use_stats::award_custom(
         region,
@@ -746,7 +744,6 @@ fn take_result(region: &mut Region, player: PlayerId, menu: &mut Menu) -> bool {
         registries::custom_stat::TRADED_WITH_VILLAGER,
         1,
     );
-    true
 }
 
 /// `Villager.updateTrades` 里 `addOffersFromTradeSet(..., profession.getTrades(level))`：
@@ -1184,14 +1181,13 @@ mod e2e_tests {
             carried: mc_bamboo_protocol::packet::play::HashedStack::Empty,
         };
         crate::menu::on_click(&mut region, id, packet);
-        // 玩家拿到结果，付款被扣光，村民的使用次数加一。
-        let player = region.players.get(&id).unwrap();
+        // 玩家拿到结果（官方 `doClick` 的 PICKUP 把它放到光标上），付款被扣光，
+        // 村民的使用次数加一。
+        // The player holds the result (vanilla PICKUP puts it on the cursor), the
+        // payment is gone and the offer counts one use.
+        let carried = region.menus[&id].carried();
         assert!(
-            player
-                .inventory
-                .slots
-                .iter()
-                .any(|stack| stack.item == offer.result.item && stack.count >= offer.result.count),
+            carried.item == offer.result.item && carried.count >= offer.result.count,
             "玩家没拿到交易结果"
         );
         let after = region
