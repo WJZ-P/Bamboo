@@ -925,69 +925,71 @@ type ReadResult = (
 
 fn read_one(cache: &mut Cache, dir: &WorldDir, pos: ChunkPos) -> ReadResult {
     let mut error = None;
-    let name = RegionPos::of(pos).file_name();
-    // 只读已经存在的区域文件：官方读盘不会凭空创建空的 .mca。
-    // Only read files that exist: official reads never create empty .mca files.
-    let chunk = if dir.region_dir().join(&name).exists() {
-        match cache.file(dir, 0, pos) {
-            Ok(region) => match region.read(pos, READ_LIMIT) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    error = Some(format!("region chunk {pos:?}: {e}"));
-                    None
-                }
-            },
-            Err(e) => {
-                error = Some(format!("open region {pos:?}: {e}"));
-                None
-            }
+    let chunk = match read_cell(cache, dir, 0, pos) {
+        Ok(bytes) => bytes,
+        Err(message) => {
+            error = Some(format!("region chunk {pos:?}: {message}"));
+            None
         }
-    } else {
-        None
     };
-    let entities = if dir.entities_dir().join(&name).exists() {
-        match cache.file(dir, 1, pos) {
-            Ok(region) => match region.read(pos, READ_LIMIT) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    if error.is_none() {
-                        error = Some(format!("entities {pos:?}: {e}"));
-                    }
-                    None
-                }
-            },
-            Err(e) => {
-                if error.is_none() {
-                    error = Some(format!("open entities {pos:?}: {e}"));
-                }
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let poi = if dir.poi_dir().join(&name).exists() {
-        match cache.file(dir, 2, pos) {
-            Ok(region) => match region.read(pos, READ_LIMIT) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    if error.is_none() {
-                        error = Some(format!("poi {pos:?}: {e}"));
-                    }
-                    None
-                }
-            },
-            Err(e) => {
-                if error.is_none() {
-                    error = Some(format!("open poi {pos:?}: {e}"));
-                }
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // 官方 `EntityStorage.loadEntities` 和 `SectionStorage` 读坏了只报告、当成空，
+    // 区块本体照常加载。回执的 `error` 只表示区块本体读坏：世界线程收到它会把
+    // 整个区块当成缺失、从头生成，实体或 POI 那一格坏了不能连累方块数据。
+    // Official `EntityStorage.loadEntities` and `SectionStorage` report a bad
+    // read and go on with nothing. The reply's `error` only means the chunk
+    // itself is unreadable: the world thread then regenerates the whole chunk,
+    // so a broken entity or POI cell must not take the block data with it.
+    let entities = read_side_cell(cache, dir, 1, "entities", pos);
+    let poi = read_side_cell(cache, dir, 2, "poi", pos);
     (chunk, entities, poi, error)
+}
+
+/// 读某一类区域文件里的一格。只读已经存在的区域文件：官方读盘不会凭空创建空的 .mca。
+/// Read one cell from one kind of region file. Only existing files are read:
+/// official reads never create empty .mca files.
+fn read_cell(
+    cache: &mut Cache,
+    dir: &WorldDir,
+    kind: u8,
+    pos: ChunkPos,
+) -> Result<Option<Vec<u8>>, String> {
+    let directory = match kind {
+        0 => dir.region_dir(),
+        1 => dir.entities_dir(),
+        _ => dir.poi_dir(),
+    };
+    if !directory.join(RegionPos::of(pos).file_name()).exists() {
+        return Ok(None);
+    }
+    let region = cache
+        .file(dir, kind, pos)
+        .map_err(|error| format!("open: {error}"))?;
+    region
+        .read(pos, READ_LIMIT)
+        .map_err(|error| error.to_string())
+}
+
+/// 读实体或 POI 那一格；读坏了记一条 warn，当成这一格不存在。
+/// Read the entity or POI cell; a bad read is logged and treated as absent.
+fn read_side_cell(
+    cache: &mut Cache,
+    dir: &WorldDir,
+    kind: u8,
+    what: &str,
+    pos: ChunkPos,
+) -> Option<Vec<u8>> {
+    match read_cell(cache, dir, kind, pos) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                x = pos.x,
+                z = pos.z,
+                %error,
+                "could not read chunk {what} data; loading the chunk without it"
+            );
+            None
+        }
+    }
 }
 
 /// 写 `region/`、`entities/` 和 `poi/` 三份，返回失败的 `(路径, 原因)`。
