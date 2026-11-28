@@ -1334,7 +1334,7 @@ pub(crate) fn generate_features_stage(
     // 中心盒子先回到 CARVERS 地形，写增量由世界线程按来源分组收集，完工再组装。
     // The center column returns to CARVERS terrain here; the world thread
     // collects the source-grouped writes and assembles them at completion.
-    let column = build_region_column(&terrain)?;
+    let column = build_carvers_column(&terrain)?;
     Ok(GenerateOutput {
         column,
         terrain: None,
@@ -1499,7 +1499,7 @@ pub(crate) fn generate_terrain_stage(
     // The dependency table guarantees the radius-8 starts and center references;
     // the Beardifier is derived only from those and cached by (seed,x,z).
     let chunk = cached_generate_chunk_with_structures(config, cx, cz)?;
-    let column = build_region_column(&chunk)?;
+    let column = build_carvers_column(&chunk)?;
     Ok(GenerateOutput {
         column,
         terrain: Some(chunk),
@@ -1507,6 +1507,30 @@ pub(crate) fn generate_terrain_stage(
         light: None,
         structures: None,
     })
+}
+
+/// `terrain` / `features` 交回的中心盒子：CARVERS 地形，存档阶段如实标成 `Terrain`。
+///
+/// 地物写另外交回、完工组装时才合进去，所以这个盒子里的方块停在 CARVERS。
+/// 任务被取消时它会被停放（关服时写盘、票回来时读回）：标成默认的 `Full` 的话，
+/// 读回时会被当成完工区块直接交付，写盘时写成 `minecraft:full`，区块永远没有
+/// 地物和光照。标成 `Terrain` 后读回时从 `features` 接着跑，和读盘的半成品一样。
+/// 完工组装另造盒子（或把这一个抬到 `Full`），正常路径的结果不变。
+///
+/// The center box returned by `terrain` / `features`: CARVERS terrain whose
+/// persisted stage truthfully says `Terrain`.
+///
+/// Feature writes travel separately and are merged at assembly, so this box's
+/// blocks stop at CARVERS. A cancelled task leaves it parked (written at
+/// shutdown, read back when a ticket returns). With the default `Full` it is
+/// delivered as a finished chunk and saved as `minecraft:full`, so the chunk
+/// never gets features or light. Marked `Terrain` it resumes from `features`
+/// like any half-generated chunk read from disk. Assembly builds its own box
+/// (or raises this one to `Full`), so the normal path is unchanged.
+fn build_carvers_column(terrain: &GeneratedChunk) -> Result<Box<RegionColumn>, String> {
+    let mut column = build_region_column(terrain)?;
+    column.set_persisted_status(mc_bamboo_world::ticket::ChunkStatus::Terrain);
+    Ok(column)
 }
 
 /// 透传阶段（群系、光照、刷怪、完工）：盒子原样交回。

@@ -319,8 +319,22 @@ pub fn decode(pos: ChunkPos, chunk: &Tag, entities: Option<&Tag>) -> Result<Deco
     // 3. 实体文件：认识的三种交给 blocks 解码，不认识的原样保留。
     let mut rows: Vec<EntityRow> = Vec::new();
     let mut preserved_entities = Vec::new();
-    if let Some(root) = entities {
-        let file = EntityFile::decode(root, pos)?;
+    // 官方 `EntityStorage.loadEntities`：实体文件读不出来只报告、按空区块处理，
+    // 不影响区块本体。这里同样只记一条问题，方块、方块实体和计划刻照常交回。
+    // Official `EntityStorage.loadEntities`: an unreadable entity file is
+    // reported and treated as empty without touching the chunk. Likewise only a
+    // problem is recorded here; blocks, block entities and ticks still load.
+    let file = entities.and_then(|root| match EntityFile::decode(root, pos) {
+        Ok(file) => Some(file),
+        Err(error) => {
+            problems.push(Problem {
+                at: "entities".to_owned(),
+                message: format!("{error}; loading the chunk without entities"),
+            });
+            None
+        }
+    });
+    if let Some(file) = file {
         problems.extend(file.problems.into_iter().map(|message| Problem {
             at: "entities".to_owned(),
             message,

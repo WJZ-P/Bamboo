@@ -238,4 +238,42 @@ mod tests {
         assert!(biome < registries::biome::TOTAL);
         assert!(!column.parts().column.untouched());
     }
+
+    /// `terrain` 和 `features` 交回的中心盒子只有 CARVERS 地形（地物写另外交回，
+    /// 完工组装时才合进去）。这个盒子在任务被取消时会被停放、关服时写盘，票回来时
+    /// 从停放表读回：它的存档阶段必须如实是 `Terrain`。标成 `Full` 的话，读回时会
+    /// 被当成完工区块直接交付，写盘时写成 `minecraft:full`，区块永远没有地物和光照。
+    ///
+    /// The center box returned by `terrain` and `features` holds CARVERS terrain
+    /// only (feature writes travel separately and are merged at assembly). When
+    /// its task is cancelled the box is parked, written at shutdown, and read
+    /// back when a ticket returns, so its persisted stage must truthfully be
+    /// `Terrain`. Marked `Full`, it is delivered as a finished chunk and saved
+    /// as `minecraft:full`, leaving the chunk without features or light forever.
+    #[test]
+    fn unfinished_stage_columns_do_not_claim_to_be_full() {
+        let config = WorldGenConfig {
+            seed: 1234,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        };
+        let generator = OverworldGenerator::new(config);
+        let pos = ChunkPos::new(2, -3);
+        let mut column: Option<Box<RegionColumn>> = None;
+        for stage in ChunkStatus::ALL {
+            let output = generator.generate(stage, pos, column, None, &[]);
+            let status = output.column.chunk_column().chunk().archive().status;
+            if stage.is_after_terrain() && stage != ChunkStatus::Full {
+                assert_eq!(
+                    status,
+                    ChunkStatus::Terrain,
+                    "the box handed back by {stage:?} is CARVERS terrain"
+                );
+                let packed = crate::chunk_jobs::encode_column(pos, &output.column).unwrap();
+                let decoded = crate::chunk_jobs::decode_packed(pos, &packed.pack()).unwrap();
+                assert_eq!(decoded.persisted_status, ChunkStatus::Terrain, "{stage:?}");
+            }
+            column = Some(output.column);
+        }
+    }
 }

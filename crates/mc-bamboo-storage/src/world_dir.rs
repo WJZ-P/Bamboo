@@ -292,16 +292,19 @@ fn run_with_retries(mut step: impl FnMut() -> bool) -> bool {
     false
 }
 
-/// 原子替换 `target`：写临时文件并刷盘 → 旧文件挪到 `backup`（若有）→
-/// 删旧 `target` → 临时文件改名成 `target`。每一步都照官方
-/// `Util.safeReplaceOrMoveFile` 最多重试 10 次；`replace` 失败时总是把备份
-/// 挪回 `target` 再返回错误（官方 `safeReplaceFile` 传的 `noRollback=false`）。
-/// `backup` 为 `None` 时也用一份临时备份回滚，绝不留下没有主文件的世界。
+/// 原子替换 `target`：写临时文件并刷盘，再换上去。
 ///
-/// Atomic replace following official `Util.safeReplaceOrMoveFile`: each step
-/// is retried up to 10 times; on a failed replace the backup is restored
-/// (official `safeReplaceFile` passes `noRollback=false`; a `None` backup uses
-/// a temporary one so the world is never left without its main file).
+/// 有 `backup`（`level.dat`、玩家数据）时照官方 `Util.safeReplaceOrMoveFile`：旧文件挪到
+/// `backup` → 删旧 `target` → 临时文件改名成 `target`，每一步最多重试 10 次；`replace`
+/// 失败时把备份挪回 `target` 再返回错误（官方 `safeReplaceFile` 传的 `noRollback=false`）。
+/// 中途被杀时读盘会退回 `backup`。没有 `backup` 时一次改名直接盖上去，主文件不会消失。
+///
+/// Atomic replace: write and sync a temporary file, then swap it in. With a
+/// `backup` (`level.dat`, player data) this follows official
+/// `Util.safeReplaceOrMoveFile`, each step retried up to 10 times, restoring the
+/// backup when the replace fails; a kill in between is covered by the reader
+/// falling back to `backup`. Without one, a single rename goes straight over
+/// the target so it is never missing.
 pub fn safe_replace(target: &Path, bytes: &[u8], backup: Option<&Path>) -> io::Result<()> {
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir)?;
@@ -313,21 +316,40 @@ pub fn safe_replace(target: &Path, bytes: &[u8], backup: Option<&Path>) -> io::R
     }
     drop(file);
 
-    // 1. create backup：官方只在 target 已经存在时做这一步。data/ 文件不写
-    // 长期备份，但失败时要能回滚，所以这里用一份临时备份。
-    let rollback_only = backup.is_none();
-    let temporary_backup = dir.join(format!(
-        "{}.rollback-{}",
-        tmp.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
-    let effective_backup: Option<&Path> = match backup {
-        Some(bk) => Some(bk),
-        None => target.exists().then_some(temporary_backup.as_path()),
+    // 没有 `_old` 备份的文件（`data/` 下的 saved data）直接把临时文件改名盖上去：
+    // 一次改名是原子的，主文件一刻都不会消失。先把主文件挪开再改名的话，进程在
+    // 两步之间被杀，重启后读不到文件，游戏规则、世界时钟、边界、袭击和
+    // `world_gen_settings.dat` 里的种子就全部退回默认值。改名失败时主文件原封不动。
+    // Files without an `_old` backup (saved data under `data/`) are replaced
+    // by renaming the temporary file straight over the target: one rename is
+    // atomic, so the target is never missing. Moving the target away first
+    // leaves a gap where a killed process restarts with game rules, clocks,
+    // the border, raids and the seed in `world_gen_settings.dat` all reset.
+    // A failed rename leaves the target untouched.
+    let Some(bk) = backup else {
+        let mut last_error = None;
+        let replaced = run_with_retries(|| match fs::rename(&tmp, target) {
+            Ok(()) => true,
+            Err(error) => {
+                last_error = Some(error);
+                false
+            }
+        });
+        if replaced {
+            return Ok(());
+        }
+        let _ = fs::remove_file(&tmp);
+        let reason = last_error
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        return Err(io::Error::other(format!(
+            "could not replace {}: {reason}",
+            target.display()
+        )));
     };
-    if target.exists()
-        && let Some(bk) = effective_backup
-    {
+
+    // 1. create backup：官方只在 target 已经存在时做这一步。
+    if target.exists() {
         let ok = run_with_retries(|| {
             let _ = fs::remove_file(bk); // createDeleter(backup)
             let _ = fs::rename(target, bk); // createRenamer(target, backup)
@@ -349,10 +371,7 @@ pub fn safe_replace(target: &Path, bytes: &[u8], backup: Option<&Path>) -> io::R
         !target.exists() // createFileDeletedCheck(target)
     });
     if !removed {
-        if let Some(bk) = effective_backup {
-            let _ = restore_backup(bk, target);
-        }
-        let _ = remove_rollback(&temporary_backup, rollback_only);
+        let _ = restore_backup(bk, target);
         let _ = fs::remove_file(&tmp);
         return Err(io::Error::other(format!(
             "could not remove old {}",
@@ -366,30 +385,17 @@ pub fn safe_replace(target: &Path, bytes: &[u8], backup: Option<&Path>) -> io::R
         target.is_file() // createFileCreatedCheck(target)
     });
     if !replaced {
-        // 回滚照官方 `safeReplaceFile`（noRollback=false）：从备份恢复，
-        // 再报错。data/ 的临时备份恢复完就删掉。
+        // 回滚照官方 `safeReplaceFile`（noRollback=false）：从备份恢复，再报错。
         // Official rollback on a failed replace: restore the backup, then
         // report the failure (noRollback is always false here).
-        if let Some(bk) = effective_backup {
-            let _ = restore_backup(bk, target);
-        }
-        let _ = remove_rollback(&temporary_backup, rollback_only);
+        let _ = restore_backup(bk, target);
         let _ = fs::remove_file(&tmp);
         return Err(io::Error::other(format!(
             "could not replace {}",
             target.display()
         )));
     }
-    let _ = remove_rollback(&temporary_backup, rollback_only);
     Ok(())
-}
-
-fn remove_rollback(path: &Path, temporary: bool) -> io::Result<()> {
-    if temporary && path.exists() {
-        fs::remove_file(path)
-    } else {
-        Ok(())
-    }
 }
 
 /// 官方 rollback 那一步：`rename(backup → target)` 也最多重试 10 次。
@@ -674,6 +680,54 @@ mod tests {
                 .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp")),
             "the temporary file must be cleaned up"
         );
+    }
+
+    /// `data/` 下的文件没有 `_old` 备份（游戏规则、世界时钟、世界边界、袭击、
+    /// `world_gen_settings.dat` 里的种子）。替换过程里主文件一刻都不能消失：
+    /// 进程在那一刻被杀，重启后读不到文件，这些数据就全部退回默认值。
+    ///
+    /// Files under `data/` have no `_old` backup (game rules, world clocks, the
+    /// world border, raids, the seed in `world_gen_settings.dat`). The main file
+    /// must never be missing during a replace: a process killed at that instant
+    /// restarts with every one of them back at its default.
+    #[test]
+    fn a_replace_without_backup_never_leaves_the_target_missing() {
+        use std::sync::atomic::AtomicBool;
+
+        let tmp = TempDir::new("no-gap");
+        fs::create_dir_all(&tmp.0).unwrap();
+        let target = tmp.0.join("game_rules.dat");
+        fs::write(&target, b"0").unwrap();
+        let done = AtomicBool::new(false);
+        let missing = std::thread::scope(|scope| {
+            let watcher = scope.spawn(|| {
+                let mut missing = 0_u32;
+                while !done.load(Ordering::Relaxed) {
+                    // 只数「文件不存在」：别的瞬时错误不是这里要查的窗口。
+                    // Count only "not found"; other transient errors are not this gap.
+                    if let Err(error) = fs::metadata(&target)
+                        && error.kind() == io::ErrorKind::NotFound
+                    {
+                        missing += 1;
+                    }
+                }
+                missing
+            });
+            for round in 0..400_u32 {
+                safe_replace(&target, round.to_string().as_bytes(), None).unwrap();
+            }
+            done.store(true, Ordering::Relaxed);
+            watcher.join().unwrap()
+        });
+        assert_eq!(missing, 0, "the target was missing during a replace");
+        assert_eq!(fs::read(&target).unwrap(), b"399");
+        let leftovers: Vec<_> = fs::read_dir(&tmp.0)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| name != "game_rules.dat")
+            .collect();
+        assert!(leftovers.is_empty(), "leftover files: {leftovers:?}");
     }
 
     #[test]
