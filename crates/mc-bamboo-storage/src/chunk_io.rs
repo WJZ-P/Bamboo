@@ -1152,6 +1152,81 @@ mod tests {
         io.close();
     }
 
+    /// 把某个区域文件里一格的压缩 ID 改成 lz4（4），这一格从此读不出来。
+    /// Rewrite one cell's compression id to lz4 (4) so it can no longer be read.
+    fn break_cell(file: &Path, pos: ChunkPos) {
+        let mut bytes = fs::read(file).unwrap();
+        let index = (pos.x.rem_euclid(32) + pos.z.rem_euclid(32) * 32) as usize;
+        let offset = u32::from_be_bytes(bytes[index * 4..index * 4 + 4].try_into().unwrap());
+        let sector = (offset >> 8) as usize;
+        assert!(sector >= 2, "the cell exists");
+        bytes[sector * 4096 + 4] = 4;
+        fs::write(file, bytes).unwrap();
+    }
+
+    /// 官方 `EntityStorage.loadEntities` / `SectionStorage` 读坏了只报告、当成空，
+    /// 区块本体（`ChunkMap` 那一份）不受影响。实体或 POI 那一格坏了，方块数据
+    /// 必须照常交回，不能把整个区块当成读坏、重新生成盖掉玩家的建筑。
+    ///
+    /// Official `EntityStorage.loadEntities` / `SectionStorage` report a bad read
+    /// and continue with nothing; the chunk itself is unaffected. A broken entity
+    /// or POI cell must still return the block data instead of failing the whole
+    /// read, which would regenerate the chunk over the player's builds.
+    #[test]
+    fn a_broken_entity_or_poi_cell_does_not_hide_the_chunk() {
+        let tmp = TempDir::new("side-file-broken");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let entity_broken = ChunkPos::new(1, 2);
+        let poi_broken = ChunkPos::new(2, 2);
+        {
+            let mut io = ChunkIo::open(&dir).unwrap();
+            for pos in [entity_broken, poi_broken] {
+                io.submit_write_with_poi(
+                    pos,
+                    1,
+                    Some(b"chunk-nbt".to_vec()),
+                    Some(b"entity-nbt".to_vec()),
+                    Some(b"poi-nbt".to_vec()),
+                );
+            }
+            io.flush().unwrap();
+            io.close();
+        }
+        break_cell(&dir.entities_dir().join("r.0.0.mca"), entity_broken);
+        break_cell(&dir.poi_dir().join("r.0.0.mca"), poi_broken);
+
+        let mut io = ChunkIo::open(&dir).unwrap();
+        io.submit_read(entity_broken, 1, 0);
+        io.submit_read(poi_broken, 2, 0);
+        io.flush().unwrap();
+        let replies = collect(&io);
+        assert_eq!(
+            replies,
+            vec![
+                Reply::Read {
+                    pos: entity_broken,
+                    task_id: 1,
+                    generation: 0,
+                    chunk: Some(b"chunk-nbt".to_vec()),
+                    entities: None,
+                    poi: Some(b"poi-nbt".to_vec()),
+                    error: None,
+                },
+                Reply::Read {
+                    pos: poi_broken,
+                    task_id: 2,
+                    generation: 0,
+                    chunk: Some(b"chunk-nbt".to_vec()),
+                    entities: Some(b"entity-nbt".to_vec()),
+                    poi: None,
+                    error: None,
+                },
+            ]
+        );
+        io.close();
+    }
+
     #[test]
     fn chunks_survive_reopening_the_io_thread() {
         let tmp = TempDir::new("reopen");

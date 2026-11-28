@@ -283,6 +283,56 @@ mod tests {
         assert!(back.column.poi().sections[&-4].get(at).is_some());
     }
 
+    /// 官方把实体（`EntityStorage`）和 POI（`SectionStorage`）分开读：读坏了只
+    /// 报告、当成空，区块本体照常加载。实体或 POI 的 NBT 坏了不能让整个区块
+    /// 解码失败——那会从头生成，把盘上的方块盖掉。
+    ///
+    /// Vanilla loads entities (`EntityStorage`) and POI (`SectionStorage`)
+    /// separately: a bad read is reported and treated as empty while the chunk
+    /// still loads. Broken entity or POI NBT must not fail the whole decode,
+    /// which would regenerate the chunk over the blocks on disk.
+    #[test]
+    fn broken_entity_or_poi_nbt_keeps_the_chunk_blocks() {
+        use mc_bamboo_data::blocks;
+
+        let pos = ChunkPos::new(0, 0);
+        let mut column = RegionColumn::from_template();
+        column
+            .column_mut()
+            .chunk_mut()
+            .set_block(4, -60, 7, blocks::DIAMOND_BLOCK);
+        let good = InlineCodec.encode(pos, &column).unwrap();
+        let wrong_version = named_bytes(&Tag::Compound(vec![
+            (
+                "DataVersion".to_owned(),
+                Tag::Int(mc_bamboo_data::version::DATA_VERSION - 1),
+            ),
+            ("Position".to_owned(), Tag::IntArray(vec![0, 0])),
+            ("Entities".to_owned(), Tag::List(Vec::new())),
+        ]));
+        let cases: [(&str, Option<Vec<u8>>, Option<Vec<u8>>); 3] = [
+            ("garbage entity bytes", Some(vec![0xff; 16]), None),
+            ("entity file from another version", Some(wrong_version), None),
+            ("garbage POI bytes", None, Some(vec![0xff; 16])),
+        ];
+        for (name, entities, poi) in cases {
+            let packed = PackedChunk {
+                chunk: good.chunk.clone(),
+                entities,
+                poi,
+            };
+            let decoded = InlineCodec
+                .decode(pos, &packed)
+                .unwrap_or_else(|error| panic!("{name}: the chunk must still load: {error}"));
+            assert_eq!(decoded.persisted_status, ChunkStatus::Full, "{name}");
+            assert_eq!(
+                decoded.column.column().chunk().block(4, -60, 7),
+                blocks::DIAMOND_BLOCK,
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn a_bad_container_is_rejected_without_panicking() {
         assert!(PackedChunk::unpack(&[]).is_err());
